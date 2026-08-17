@@ -36,12 +36,6 @@ class Config:
     audio_bitrate: str = "64k"
     # 저역 제거 — 정규화 **전에** 건다. 사람 목소리 기본 주파수는 85Hz 위라
     # 120Hz 아래에는 말소리 정보가 없다. 차·바람 웅웅거림만 남는다(D16).
-    highpass_hz: float = 120.0
-    lowshelf_hz: float = 200.0
-    lowshelf_gain_db: float = -6.0
-    loudnorm_i: float = -18.0
-    loudnorm_tp: float = -2.0
-    loudnorm_lra: float = 11.0
     silence_threshold_db: float = -35.0
     silence_min_duration: float = 0.5
 

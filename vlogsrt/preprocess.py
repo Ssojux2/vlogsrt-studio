@@ -72,29 +72,13 @@ def probe_duration(path: Path) -> float:
         raise RuntimeError(f"길이를 읽지 못했습니다: {path} (ffprobe 출력 {raw!r})") from exc
 
 
-def audio_filter(cfg: Config) -> str:
-    """저역 제거 → 정규화. 순서가 중요하다.
-
-    브이로그는 구간마다 볼륨 편차가 크다. loudnorm 없이는 무음 검출이 흔들린다.
-    그런데 야외·차 안 구간은 200Hz 아래 웅웅거림이 에너지의 절반을 먹는다. 그
-    상태로 정규화하면 **잡음에 맞춰 이득이 정해져 말소리가 오히려 눌린다.**
-
-    실측(D16, 문제의 앞 9분 구간):
-
-        loudnorm만        음성대역 30.4%  ·  저역<200Hz 51.4%
-        highpass 후       음성대역 58.6%  ·  저역<200Hz 26.8%
-
-    잘 들리던 뒤 구간도 72.0% → 86.1%로 나빠지지 않는다. 사람 목소리의 기본
-    주파수는 남성도 85Hz 위라 120Hz 아래에는 말소리 정보가 없다.
-    """
-    return (
-        f"highpass=f={cfg.highpass_hz:g},"
-        f"equalizer=f={cfg.lowshelf_hz:g}:t=q:w=1:g={cfg.lowshelf_gain_db:g},"
-        f"loudnorm=I={cfg.loudnorm_i:g}:TP={cfg.loudnorm_tp:g}:LRA={cfg.loudnorm_lra:g}"
-    )
-
-
 def extract_audio(src: Path, dst: Path, cfg: Config) -> Path:
+    """오디오를 손대지 않고 뽑는다 — 필터 없음(D20).
+
+    음질 필터(highpass/eq/loudnorm)는 D19 전환에서 제거했다. 타임라인 오차는
+    0.000초로 결백했지만(D13), 전처리 최소화가 우선이다. 무음 검출이 흔들리거나
+    의심률이 뛰면 D20의 복귀 경로를 따라 `-af` 한 줄을 되살린다.
+    """
     ffmpeg = require_ffmpeg()
     dst.parent.mkdir(parents=True, exist_ok=True)
     _run(
@@ -102,7 +86,6 @@ def extract_audio(src: Path, dst: Path, cfg: Config) -> Path:
             ffmpeg, "-hide_banner", "-nostdin", "-y",
             "-i", str(src),
             "-vn",
-            "-af", audio_filter(cfg),
             "-ac", str(cfg.channels),
             "-ar", str(cfg.sample_rate),
             "-c:a", "libmp3lame",

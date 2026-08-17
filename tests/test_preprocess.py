@@ -10,7 +10,6 @@ import pytest
 
 from vlogsrt.config import Config
 from vlogsrt.preprocess import (
-    audio_filter,
     chunk_count,
     detect_silence,
     extract_audio,
@@ -42,24 +41,32 @@ def test_no_silence_lines() -> None:
     assert parse_silence_output("nothing here", 60.0) == []
 
 
-def test_loudnorm_filter_is_present() -> None:
-    assert "loudnorm=I=-18:TP=-2:LRA=11" in audio_filter(Config())
+def test_extraction_applies_no_audio_filter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D20 — 오디오는 손대지 않고 뽑는다. 필터는 전부 제거됐다."""
+    from vlogsrt import preprocess
 
+    commands: list[list[str]] = []
 
-def test_low_end_is_removed_before_normalising() -> None:
-    """순서가 뒤집히면 잡음에 맞춰 이득이 정해져 말소리가 눌린다(D16)."""
-    chain = audio_filter(Config()).split(",")
-    assert chain[0].startswith("highpass=f=120")
-    assert chain[-1].startswith("loudnorm")
-    assert chain.index("equalizer=f=200:t=q:w=1:g=-6") < len(chain) - 1
+    def fake_run(command: list[str]) -> object:
+        commands.append(command)
+        (tmp_path / "out.mp3").write_bytes(b"\x00")
 
+        class Done:
+            stdout = ""
+            stderr = ""
 
-def test_audio_filter_follows_config() -> None:
-    from dataclasses import replace as data_replace
+        return Done()
 
-    quiet = data_replace(Config(), highpass_hz=80.0, lowshelf_gain_db=-3.0)
-    assert "highpass=f=80" in audio_filter(quiet)
-    assert "g=-3" in audio_filter(quiet)
+    monkeypatch.setattr(preprocess, "_run", fake_run)
+    monkeypatch.setattr(preprocess, "require_ffmpeg", lambda tool="ffmpeg": "ffmpeg")
+    extract_audio(tmp_path / "in.mp4", tmp_path / "out.mp3", Config())
+
+    (command,) = commands
+    assert "-af" not in command
+    assert command[command.index("-ar") + 1] == "16000"
+    assert command[command.index("-ac") + 1] == "1"
 
 
 def test_chunking() -> None:
