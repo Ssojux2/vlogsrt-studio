@@ -17,26 +17,23 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from . import env, log
-from .align import allocate
 from .config import Config
-from .models import Chunk, Segment, Span
+from .models import Chunk, Segment
 
-FIXTURE_KIND = "transcribe"
+FIXTURE_KIND = "whisper"
 
 
 @dataclass(frozen=True, slots=True)
 class ChunkResponse:
-    """조각 하나에 대한 API 응답.
+    """조각 하나에 대한 API 응답. `payload`는 조각 좌표 그대로의 원본이다.
 
-    `payload`에는 글자만 있다 — 이 모델은 시각을 주지 않는다(D24). 시각은 `spans`,
-    즉 ffmpeg가 오디오에서 잰 발화 구간에서 온다. **원본 오디오 좌표라 재기준화가
-    필요 없다.**
+    `offset`을 더하면 **원본 오디오 시각**이 된다. 그 덧셈이 시각에 가해지는 유일한
+    계산이며, ffmpeg가 실제로 잘린 자리라고 알려준 값이다(규칙 1).
     """
 
     index: int
     offset: float
     payload: dict[str, Any]
-    spans: tuple[Span, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,18 +81,12 @@ def _load_responses(path: Path, stem: str, source: str = "") -> list[ChunkRespon
                 index=int(item.get("index", i)),
                 offset=float(item.get("offset", 0.0)),
                 payload=item["response"],
-                spans=_read_spans(item.get("spans", ())),
             )
             for i, item in enumerate(raw["chunks"])
         ]
     if isinstance(raw, dict):
         return [ChunkResponse(index=0, offset=0.0, payload=raw)]
     raise RuntimeError(f"픽스처 형식을 알 수 없습니다: {path}")
-
-
-def _read_spans(raw: Any) -> tuple[Span, ...]:
-    """픽스처의 발화 구간. 오프라인 실행의 자막 시각이 전부 여기서 나온다."""
-    return tuple((float(start), float(end)) for start, end in raw)
 
 
 @dataclass(frozen=True, slots=True)
@@ -184,10 +175,6 @@ class LiveTranscriber:
                 dropped = _rejected(str(exc), extras) or sorted(extras)
                 log.warn(f"{what}: API가 {dropped}를 거부했다({exc}). 빼고 다시 부른다.")
                 extras = {name: value for name, value in extras.items() if name not in dropped}
-                if "languages" in dropped and cfg.language:
-                    # 복수형이 거부당했다고 언어 지정 자체를 잃을 이유는 없다.
-                    # 단수형으로 바꿔 본다. 이것도 거부당하면 그때 떨어져 나간다.
-                    extras["language"] = cfg.language
 
     def transcribe(self, job: TranscriptionJob, cfg: Config) -> list[ChunkResponse]:
         """자막의 **글자**를 만드는 유일한 호출. 시각은 여기서 나오지 않는다(규칙 1).
@@ -208,9 +195,7 @@ class LiveTranscriber:
                     pool.map(lambda chunk: self._one_chunk(client, chunk, cfg, extras)[0], tail)
                 )
         return [
-            ChunkResponse(
-                index=chunk.index, offset=chunk.offset, payload=payload, spans=chunk.spans
-            )
+            ChunkResponse(index=chunk.index, offset=chunk.offset, payload=payload)
             for chunk, payload in zip(job.chunks, payloads, strict=True)
         ]
 
@@ -228,18 +213,13 @@ def _is_bad_request(exc: Exception) -> bool:
 def _required(cfg: Config) -> dict[str, Any]:
     """뺄 수 없는 인자. 400이 나도 이건 그대로 둔다.
 
-    `chunking_strategy`가 여기 있는 이유: 어떤 모델은 이 인자 없이는 요청을 아예
-    받지 않는다(400 "chunking_strategy is required for diarization models", D22).
-    부가 인자와 함께 떨어져 나가면 재시도도 같은 이유로 실패한다. 기본값은 빈
-    문자열이라 보내지 않는다 — 자르는 건 우리 몫이다(D24).
+    부가 인자와 달리 400을 맞아도 떨어져 나가지 않는다 — 이게 빠지면 재시도도 같은
+    이유로 실패한다.
     """
-    required: dict[str, Any] = {
+    return {
         "model": cfg.transcribe_model,
         "response_format": cfg.transcribe_format,
     }
-    if cfg.chunking_strategy:
-        required["chunking_strategy"] = cfg.chunking_strategy
-    return required
 
 
 def _blame_required(exc: Exception, cfg: Config) -> None:
@@ -247,10 +227,7 @@ def _blame_required(exc: Exception, cfg: Config) -> None:
     message = str(exc)
     named = [
         (key, value)
-        for key, value in (
-            ("chunking_strategy", cfg.chunking_strategy),
-            ("response_format", cfg.transcribe_format),
-        )
+        for key, value in (("response_format", cfg.transcribe_format),)
         if value and f"'{key}'" in message
     ]
     if not named:
@@ -259,7 +236,7 @@ def _blame_required(exc: Exception, cfg: Config) -> None:
     raise RuntimeError(
         f"API가 {key}={value!r}를 거부했습니다: {exc}\n"
         f"  vlogsrt.toml 의 [transcribe] {key} 를 확인하세요.\n"
-        f"  이 프로젝트는 무음에서 직접 자르므로 기본값은 빈 문자열입니다(D24)."
+        f"  세그먼트 시각을 주는 조합이어야 합니다 — whisper-1 + verbose_json."
     ) from exc
 
 
@@ -269,24 +246,17 @@ def _rejected(message: str, extras: dict[str, Any]) -> list[str]:
 
 
 def _extras(cfg: Config) -> dict[str, Any]:
-    """모델마다 지원 여부가 갈리는 인자들. 거부당하면 하나씩 떼어낸다.
+    """자막을 만드는 호출에 실리는 부가 인자. 거부당하면 하나씩 떼어낸다.
 
-    `language`와 `languages`는 **함께 보낼 수 없다.** 실제 API가 400을 돌려준다:
-    "The 'language' and 'languages' parameters cannot be used together." 여러
-    언어를 알려주는 쪽이 이 프로젝트의 의도라 `languages`를 택하고, 설정이 비어
-    있을 때만 단일 `language`로 떨어진다.
+    **`prompt`와 `keywords`는 여기 없다(불변 규칙 6).** whisper는 `prompt`를 지시가
+    아니라 직전 자막 텍스트로 읽는다 — 한 줄이 `'한국 여행 브이로그'` 138회·564초를
+    낳았다(D13, D16). 힌트는 검증 모델로만 간다.
 
-    `temperature`도 여기 있다. 결정성 설정일 뿐이라 거부당하면 버려도 자막은 나온다.
+    `temperature`는 결정성 설정일 뿐이라 거부당하면 버려도 자막은 나온다.
     """
     extras: dict[str, Any] = {"temperature": 0}
-    if cfg.extra_languages:
-        extras["languages"] = list(cfg.extra_languages)
-    elif cfg.language:
+    if cfg.language:
         extras["language"] = cfg.language
-    if cfg.keywords:
-        extras["keywords"] = list(cfg.keywords)
-    if cfg.prompt:
-        extras["prompt"] = cfg.prompt
     return extras
 
 
@@ -315,35 +285,58 @@ def get_transcriber(
 # ─────────────────────────────────────────────────────────────
 
 
-def parse_text(raw: dict[str, Any]) -> str:
-    """응답에서 글자를 꺼낸다. **이 모델이 주는 것은 이것뿐이다**(D24)."""
-    if "text" not in raw:
+def parse_segments(raw: dict[str, Any], offset: float = 0.0, seg_id_base: int = 0) -> list[Segment]:
+    """전사 응답에서 골격을 만든다. **시각은 조각 좌표에서 원본 좌표로 옮기기만 한다.**
+
+    `+ offset`이 시각에 가해지는 유일한 계산이고, `offset`은 ffmpeg가 실제로 잘렸다고
+    알려준 값이다. 시각을 유도하거나 배분하지 않는다(규칙 1).
+
+    **모델이 보낸 글자는 하나도 버리지 않는다.** 시각이 뒤집혔거나 길이가 0인 세그먼트도
+    글자가 있으면 남긴다 — 시각은 `end = start`로 접어두고 정제의 `min_duration`이
+    한도 안에서 늘려준다. 버리는 것은 글자가 아예 없는 세그먼트뿐이다(규칙 9).
+    """
+    if "segments" not in raw:
         raise RuntimeError(
-            "전사 응답에 text가 없습니다.\n"
+            "전사 응답에 segments가 없습니다. 세그먼트 시각을 주는 모델이어야 합니다.\n"
             "  vlogsrt.toml 의 [transcribe] transcribe_model / transcribe_format 을 확인하세요.\n"
             f"  받은 필드: {sorted(raw)}"
         )
-    return str(raw["text"]).strip()
+    spine: list[Segment] = []
+    for segment in raw["segments"] or []:
+        text = str(segment.get("text", "")).strip()
+        if not text:
+            continue
+        start = float(segment.get("start", 0.0)) + offset
+        end = float(segment.get("end", 0.0)) + offset
+        spine.append(
+            Segment(id=seg_id_base + len(spine), start=start, end=max(end, start), text=text)
+        )
+    return spine
+
+
+def parse_text(raw: dict[str, Any]) -> str:
+    """응답에서 글자만 꺼낸다. 검증 모델(`gpt-4o-transcribe`)이 주는 것은 이것뿐이다."""
+    if "text" in raw:
+        return str(raw["text"]).strip()
+    return " ".join(str(s.get("text", "")).strip() for s in raw.get("segments", ()))
 
 
 def build_spine(responses: Sequence[ChunkResponse]) -> list[Segment]:
-    """조각별 글자를 그 조각의 발화 구간에 배분해 골격을 만든다.
+    """조각별 응답을 시각 순으로 이어 붙여 하나의 골격으로 만든다.
 
-    시각은 `response.spans`에서만 온다 — 이미 원본 오디오 좌표라 옮길 것이 없다.
-    글자가 빈 조각은 그 구간에 자막이 서지 않는다는 뜻이다. **멈추지 않고 경고만
-    한다**(규칙 9) — 76분 실행이 조각 하나로 통째로 죽는 대가가 더 크다.
+    세그먼트가 하나도 없는 조각은 그 구간에 자막이 서지 않는다는 뜻이다. **멈추지 않고
+    경고만 한다**(규칙 9) — 긴 실행이 조각 하나로 통째로 죽는 대가가 더 크다.
     """
     spine: list[Segment] = []
     silent: list[str] = []
     for response in sorted(responses, key=lambda r: r.offset):
-        text = parse_text(response.payload)
-        if not text:
+        parsed = parse_segments(response.payload, response.offset, len(spine))
+        if not parsed:
             silent.append(f"{response.index}번({response.offset:.1f}초)")
-            continue
-        spine.extend(allocate(text, response.spans, len(spine)))
+        spine.extend(parsed)
     if silent:
         log.warn(
-            f"글자가 없이 돌아온 조각 {len(silent)}개: {', '.join(silent)}. "
+            f"세그먼트가 없이 돌아온 조각 {len(silent)}개: {', '.join(silent)}. "
             f"그 구간에는 자막이 서지 않는다."
         )
     return spine
@@ -359,16 +352,9 @@ def save_fixture(
 ) -> Path:
     fixture_dir.mkdir(parents=True, exist_ok=True)
     path = _fixture_path(fixture_dir, stem, kind)
-    # spans도 함께 적는다. 오프라인 실행의 자막 시각이 전부 여기서 나오고,
-    # 그 값은 ffmpeg가 실제 오디오에서 잰 것이라 달리 재현할 방법이 없다(D24).
     body: dict[str, Any] = {
         "chunks": [
-            {
-                "index": r.index,
-                "offset": r.offset,
-                "spans": [list(span) for span in r.spans],
-                "response": r.payload,
-            }
+            {"index": r.index, "offset": r.offset, "response": r.payload}
             for r in sorted(responses, key=lambda r: r.index)
         ]
     }
@@ -385,9 +371,6 @@ def save_meta(fixture_dir: Path, stem: str, cfg: Config, duration: float, chunk_
         "params": {
             "response_format": cfg.transcribe_format,
             "language": cfg.language,
-            "extra_languages": list(cfg.extra_languages),
-            "keywords": list(cfg.keywords),
-            "prompt": cfg.prompt,
         },
         "duration": duration,
         "chunk_count": chunk_count,

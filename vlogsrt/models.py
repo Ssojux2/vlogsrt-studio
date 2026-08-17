@@ -13,7 +13,7 @@ ORIGIN_SPINE = "spine"
 ORIGIN_SPLIT = "split"
 ORIGIN_MERGE = "merge"
 
-# 발화 구간 `(start, end)`. 원본 오디오 기준 초 단위이며, 자막 시각의 뿌리다(규칙 1).
+# 시간 구간 `(start, end)`. 초 단위.
 Span = tuple[float, float]
 
 
@@ -94,17 +94,16 @@ class Cue:
 
 @dataclass(frozen=True, slots=True)
 class Chunk:
-    """전사할 오디오 조각 하나. `offset`은 원본 오디오 기준 시작 시각(초).
+    """전사할 오디오 조각 하나.
 
-    `spans`는 이 조각 안에 든 발화 구간들이며 **원본 좌표**다. 조각이 돌려준 글자가
-    여기에 배분되므로(`align.allocate`), 이 값이 곧 자막 시각이 된다.
+    `offset`은 **ffmpeg가 실제로 잘렸다고 알려준** 원본 오디오 기준 시작 시각이다.
+    세그먼트 시각에 이 값을 더한 것이 자막 시각 전부다(규칙 1).
     """
 
     path: Path
     offset: float
     duration: float
     index: int
-    spans: tuple[Span, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

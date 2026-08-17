@@ -19,18 +19,13 @@ PRESET_DIRS = (Path("presets"), Path(__file__).resolve().parent.parent / "preset
 class Config:
     # ─── 전사 ────────────────────────────────────────────────
     language: str = "ko"
-    # 실측 400(D23): "The 'languages' parameter is not supported for this model."
-    # 이 모델은 단수형 `language`만 받는다. 비워두면 그쪽으로 떨어진다.
-    extra_languages: tuple[str, ...] = ()
+    # 힌트는 **검증 모델에만** 간다(규칙 6). whisper 호출에는 실리지 않는다.
     prompt: str = ""
     keywords: tuple[str, ...] = ()
-    # 이 모델은 **글자만** 준다. 시각은 오디오에서 온다(D24) — 그래서 모델을 고를 때
-    # 타임스탬프 지원 여부를 볼 필요가 없다.
-    transcribe_model: str = "gpt-4o-transcribe"
-    transcribe_format: str = "json"
-    # 우리가 무음에서 직접 자르므로 서버 VAD를 쓰지 않는다. 비워두면 보내지 않는다.
-    # (일부 모델은 이 값이 필수다 — 실측 400, D22.)
-    chunking_strategy: str = ""
+    # 시각과 글자를 모두 만든다. `segments[].{start,end,text}`를 주는 조합이어야 한다.
+    # **whisper에는 prompt를 보내지 않는다** — 힌트는 검증 모델로만 간다(규칙 6, D16).
+    transcribe_model: str = "whisper-1"
+    transcribe_format: str = "verbose_json"
     api_max_retries: int = 4
     api_backoff_base: float = 2.0
     cost_per_minute: float = 0.006
@@ -40,18 +35,15 @@ class Config:
     channels: int = 1
     audio_bitrate: str = "64k"
 
-    # ─── 발화 구간과 묶음 ────────────────────────────────────
-    # 이 넷은 **외부 근거가 없다.** 회차별 조정 대상이다(D24).
-    silence_threshold_db: float = -35.0  # 소음 있는 회차는 올려야 한다
-    silence_min_duration: float = 0.3  # 0.5면 발화 구간이 굵어져 배분 오차가 커진다
-    min_speech_duration: float = 0.15  # 이보다 짧으면 말이 아니라 잡음
-    batch_max_seconds: float = 40.0  # 요청 수와 배분 오차의 절충
-
-    # ─── 업로드 한도 ─────────────────────────────────────────
+    # ─── 분할 ────────────────────────────────────────────────
+    # **자르는 유일한 기준**은 모델의 최대 입력이다. OpenAI 오디오 API는 요청당
+    # 25MB — 안전 여유를 두고 24MB. 64kbps 모노면 조각 하나에 약 50분이 들어간다.
+    # 낮추면 조각이 늘어난다: whisper가 긴 조각에서 반복 루프에 빠질 때의 탈출구다(D13).
     chunk_max_bytes: int = 24_000_000
-    # 만들어진 조각이 계획보다 이만큼 넘게 짧으면 소리를 잃은 것으로 보고 멈춘다.
-    # mp3 인코더 패딩(~26ms)은 조각을 늘리지 줄이지 않으므로 여유가 넉넉하다.
-    chunk_duration_tolerance: float = 0.5
+    # 아래 셋은 외부 근거가 없다. 자를 자리를 고를 뿐이라 틀려도 구간이 사라지지 않는다.
+    cut_search_seconds: float = 5.0  # 목표 경계 앞뒤로 조용한 곳을 찾는 범위
+    cut_probe_rate: int = 4000  # 진폭 디코딩 주파수. 에너지만 보면 되니 낮춰도 된다
+    cut_quiet_window_ms: int = 20  # 진폭을 재는 창
 
     # ─── 정제 ────────────────────────────────────────────────
     max_chars_per_line: int = 16

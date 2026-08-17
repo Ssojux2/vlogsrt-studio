@@ -19,12 +19,11 @@ def test_defaults_carry_documented_thresholds() -> None:
     assert cfg.min_gap == 0.08  # 24fps 기준 2프레임
 
 
-def test_the_model_is_only_asked_for_letters() -> None:
-    """시각은 오디오에서 온다(D24). 모델 응답에는 `text`만 있으면 된다."""
+def test_the_transcription_model_must_return_segment_times() -> None:
+    """시각 없는 응답으로는 SRT를 만들 수 없다(D25). 자를 기준은 모델 입력 한도다."""
     cfg = Config()
-    assert cfg.transcribe_format in {"json", "text"}
-    assert not cfg.chunking_strategy  # 자르는 건 우리 몫이다
-    assert not cfg.extra_languages  # 복수형은 이 모델이 거부한다(D23)
+    assert cfg.transcribe_format in {"verbose_json"}
+    assert cfg.chunk_max_bytes <= 25_000_000  # OpenAI 오디오 API 한도
 
 
 def test_preset_shorts_narrows_line() -> None:
@@ -63,8 +62,8 @@ def test_every_preset_loads() -> None:
 
 
 def test_list_values_become_tuples() -> None:
-    cfg = load_config(overrides={"extra_languages": "ko, en"}, project_toml=NO_PROJECT_TOML)
-    assert cfg.extra_languages == ("ko", "en")
+    cfg = load_config(overrides={"keywords": "ko, en"}, project_toml=NO_PROJECT_TOML)
+    assert cfg.keywords == ("ko", "en")
 
 
 def test_keywords(tmp_path: Path) -> None:

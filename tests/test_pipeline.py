@@ -63,8 +63,9 @@ def test_chunk_offsets_survive_into_the_srt(tmp_path: Path) -> None:
 def test_trace_carries_the_new_version(tmp_path: Path) -> None:
     pipeline.run(VIDEO, Config(), tmp_path, force_offline=True)
     trace = json.loads((tmp_path / "trace.json").read_text(encoding="utf-8"))
-    assert trace["version"] == "5.0"
-    assert all(segment["start"] < segment["end"] for segment in trace["spine"])
+    assert trace["version"] == "6.0"
+    # 길이 0 세그먼트도 글자가 있으면 골격에 남는다(규칙 9). 뒤집히지만 않으면 된다.
+    assert all(segment["start"] <= segment["end"] for segment in trace["spine"])
 
 
 def test_redo_replays_without_fixtures(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -88,14 +89,14 @@ def test_missing_fixture_tells_the_human_what_to_run(tmp_path: Path, monkeypatch
         pipeline.run(Path("golden/absent.mp4"), Config(), tmp_path, force_offline=True)
 
 
-def test_a_response_without_text_stops_the_run(
+def test_a_response_without_segment_times_stops_the_run(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """글자가 이 모델이 주는 전부다. 그게 없으면 만들 자막도 없다(D24)."""
+    """시각을 주지 않는 모델로는 SRT를 만들 수 없다(D25)."""
     from vlogsrt import transcribe as transcribe_module
 
     def wrong_shape(self: object, job: object, cfg: object) -> list[object]:
-        return [transcribe_module.ChunkResponse(0, 0.0, {"segments": []}, ((0.0, 1.0),))]
+        return [transcribe_module.ChunkResponse(0, 0.0, {"text": "시각이 없는 덩어리"})]
 
     monkeypatch.setattr(transcribe_module.FixtureTranscriber, "transcribe", wrong_shape)
     with pytest.raises(RuntimeError, match="transcribe_model"):
@@ -132,7 +133,7 @@ def test_record_reuses_what_was_already_paid_for(
     """이미 받아둔 응답이 있으면 다시 결제하지 않는다. 77분이면 한 번에 약 $0.46이다."""
     fixtures = tmp_path / "api"
     fixtures.mkdir()
-    (fixtures / "demo.transcribe.json").write_text('{"segments": []}', encoding="utf-8")
+    (fixtures / "demo.whisper.json").write_text('{"segments": []}', encoding="utf-8")
     monkeypatch.setenv("VLOGSRT_FIXTURE_DIR", str(fixtures))
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     monkeypatch.setattr(
@@ -152,7 +153,7 @@ def test_record_reuses_what_was_already_paid_for(
     outputs = pipeline.record_fixtures(Path("demo.mp4"), Config())
 
     assert called == []
-    assert outputs["transcribe"].name == "demo.transcribe.json"
+    assert outputs["whisper"].name == "demo.whisper.json"
     assert outputs["meta"].is_file()
 
 
@@ -191,7 +192,9 @@ def test_no_cache_run_reuses_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyP
 
     monkeypatch.setattr(pipeline.preprocess, "extract_audio", fake_extract)
     monkeypatch.setattr(pipeline.preprocess, "probe_duration", lambda path: 30.0)
-    monkeypatch.setattr(pipeline, "plan_batches", lambda audio, duration, cfg, workdir: [])
+    monkeypatch.setattr(
+        pipeline.preprocess, "make_chunks", lambda audio, duration, cfg, workdir: []
+    )
 
     work = tmp_path / "scratch"
     for _ in range(2):

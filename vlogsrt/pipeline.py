@@ -1,21 +1,19 @@
-"""파이프라인 조립 — 오디오 추출 → 무음 → 발화 구간 → 묶음 → 전사 → 배분 → 정제 → SRT.
+"""파이프라인 조립 — 오디오 추출 → 조각 나누기 → 전사 → 정제 → SRT.
 
 각 단계는 순수 함수 모듈에 있고, 여기서는 순서와 입출력만 다룬다.
-자막을 다시 재는 단계는 없다(D21). 시각은 전부 발화 구간에서 온다(D24).
+시각은 전부 whisper 세그먼트에서 오고, 조각 오프셋을 더한 것이 전부다(D25).
 """
 
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from . import env, log, preprocess, refine, spans, transcribe
+from . import env, log, preprocess, refine, transcribe
 from .config import Config
 from .models import Chunk, Cue, Segment, Trace
 from .output import save_srt
-from .spans import Batch
 from .transcribe import LiveTranscriber, Transcriber, TranscriptionJob
 
 
@@ -90,36 +88,9 @@ def prepare(
         preprocess.extract_audio(video, audio, cfg)
     duration = preprocess.probe_duration(audio)
 
-    chunks = tuple(plan_batches(audio, duration, cfg, cache))
+    chunks = tuple(preprocess.make_chunks(audio, duration, cfg, cache))
+    log.info(f"조각 {len(chunks)}개")
     return Prepared(stem=stem, duration=duration, chunks=chunks, source=str(video))
-
-
-def plan_batches(audio: Path, duration: float, cfg: Config, workdir: Path) -> list[Chunk]:
-    """무음 → 발화 구간 → 묶음 → 조각. **자막 시각이 여기서 정해진다**(규칙 1)."""
-    silences = preprocess.detect_silence(audio, cfg, duration)
-    speech = spans.speech_spans(silences, duration, cfg)
-    batches = spans.group_spans(speech, audio.stat().st_size, duration, cfg)
-    log.info(f"발화 구간 {len(speech)}개 → 묶음 {len(batches)}개")
-    warn_about_coarse_spans(batches)
-    return preprocess.cut_batches(audio, batches, workdir, cfg)
-
-
-def warn_about_coarse_spans(batches: Sequence[Batch]) -> list[Batch]:
-    """묶음당 발화 구간이 하나뿐이면 무음이 거의 안 잡힌 것이다.
-
-    그러면 글자가 통짜 구간 하나에 몰려 배분 오차가 묶음 길이만큼 커진다 —
-    타이밍이 사실상 고정 창 방식으로 퇴화한다(D24 위험표). 자막 품질을 판정하는
-    게 아니라 **우리 분할이 먹혔는지**를 알려주는 신호다.
-    """
-    solo = [batch for batch in batches if len(batch.spans) == 1]
-    if batches and len(solo) * 2 > len(batches):
-        longest = max(batch.duration for batch in solo)
-        log.warn(
-            f"묶음 {len(batches)}개 중 {len(solo)}개가 발화 구간 1개뿐이다 "
-            f"(가장 긴 것 {longest:.0f}초). 무음이 거의 안 잡혀 타이밍이 거칠어진다 — "
-            f"silence_threshold_db를 올려보라."
-        )
-    return solo
 
 
 # ─────────────────────────────────────────────────────────────

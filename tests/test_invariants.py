@@ -82,18 +82,16 @@ def test_every_word_the_model_said_reaches_the_srt(tmp_path: Path) -> None:
     assert written == said
 
 
-def test_cue_times_never_leave_the_speech_spans(tmp_path: Path) -> None:
-    """규칙 1 — 자막 시각의 뿌리는 발화 구간이다. 정제의 한도 밖으로 나가지 않는다."""
-    cfg = Config()
-    from vlogsrt import transcribe as transcribe_module
+def test_the_first_and_last_seconds_survive(tmp_path: Path) -> None:
+    """**초반·마지막이 날아간 사고의 회귀 테스트**(D25).
 
-    responses = transcribe_module.FixtureTranscriber(fixture_dir=SYNTHETIC).transcribe(
-        transcribe_module.TranscriptionJob(stem="demo", chunks=()), Config()
-    )
-    spans = [span for response in responses for span in response.spans]
+    0.0초에서 시작하는 세그먼트와 영상 끝에서 끝나는 세그먼트가 둘 다 자막으로 선다.
+    구간을 골라내는 코드가 다시 생기면 여기서 걸린다(규칙 4).
+    """
+    cfg = Config()
     result = pipeline.run(VIDEO, cfg, tmp_path, force_offline=True)
-    assert result.cues[0].start >= min(start for start, _ in spans) - cfg.lead_in - 1e-6
-    assert result.cues[-1].end <= max(end for _, end in spans) + cfg.lead_out + 1e-6
+    assert result.cues[0].start <= cfg.lead_in + 1e-6
+    assert result.cues[-1].end >= result.trace.duration - cfg.lead_out - 1e-6
 
 
 def test_cues_never_overlap_and_never_exceed_capacity(tmp_path: Path) -> None:

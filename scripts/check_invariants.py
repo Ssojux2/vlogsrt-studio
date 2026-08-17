@@ -115,21 +115,26 @@ def check_inspection_stays_dead() -> list[str]:
     return failures
 
 
-PURE_MODULES = ("spans.py", "align.py")
+PURE_MODULES = ("cutpoints.py",)
+
+# D24의 시각 유도 계층. 되살아나면 초반·마지막이 다시 날아간다(D25).
+BURIED_MODULES = {
+    "spans.py": "D25 — 무음으로 발화 구간을 고르던 계층",
+    "align.py": "D25 — 글자를 구간에 배분하던 계층",
+}
 
 
 def check_pure_layer() -> list[str]:
-    """규칙 5 — 시각을 만드는 계층은 순수해야 한다.
+    """규칙 7 — 자를 자리를 고르는 계층은 순수해야 한다.
 
-    `spans.py`가 ffmpeg를 직접 부르기 시작하면 무음 임계값을 바꿔가며 시험할 수
-    없게 되고, `align.py`가 API를 알면 배분을 테스트할 수 없게 된다.
+    `cutpoints.py`가 ffmpeg를 직접 부르기 시작하면 진폭을 지어내며 시험할 수 없게 된다.
     """
     failures = []
     forbidden = re.compile(r"^\s*(?:import|from)\s+(openai|subprocess|shutil)\b")
     for name in PURE_MODULES:
         path = PACKAGE / name
         if not path.exists():
-            failures.append(f"vlogsrt/{name}: 순수 계층이 사라졌다 (D24)")
+            failures.append(f"vlogsrt/{name}: 순수 계층이 사라졌다 (D25)")
             continue
         for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
             match = forbidden.match(line)
@@ -139,8 +144,20 @@ def check_pure_layer() -> list[str]:
     return failures
 
 
+def check_time_deriving_layers_stay_buried() -> list[str]:
+    """규칙 4 — 시각을 유도하던 계층은 되살리지 않는다.
+
+    무음으로 "어느 구간이 말인가"를 판정하다가 초반·마지막 3~6분을 날렸다(D25).
+    """
+    return [
+        f"vlogsrt/{name}: {why}. 되살리지 마라"
+        for name, why in BURIED_MODULES.items()
+        if (PACKAGE / name).exists()
+    ]
+
+
 def check_ffmpeg_boundary() -> list[str]:
-    """규칙 5 — ffmpeg 호출은 preprocess.py에서만."""
+    """규칙 7 — ffmpeg 호출은 preprocess.py에서만."""
     failures = []
     for path in _sources():
         if path.name == "preprocess.py":
@@ -151,14 +168,21 @@ def check_ffmpeg_boundary() -> list[str]:
     return failures
 
 
-def check_times_do_not_come_from_the_model() -> list[str]:
-    """규칙 1 — 시각은 오디오에서 온다. 응답에서 시각을 읽던 코드가 남으면 안 된다(D24)."""
+def check_no_prompt_to_whisper() -> list[str]:
+    """규칙 6 — whisper에 `prompt`를 보내지 마라(D13, D16).
+
+    whisper는 `prompt`를 지시가 아니라 직전 자막 텍스트로 읽는다. 한 줄이
+    `'한국 여행 브이로그'` 138회·564초를 낳았다. 힌트는 검증 모델로만 간다.
+    """
     body = (PACKAGE / "transcribe.py").read_text(encoding="utf-8")
-    failures = []
-    for ghost in ("parse_segments", "seg_id_base", "verbose_json", "diarized_json"):
-        if ghost in body:
-            failures.append(f"transcribe.py: 모델이 시각을 주던 시절의 잔재 {ghost!r}")
-    return failures
+    match = re.search(r"def _extras\(.*?\n(?=\ndef |\n# )", body, re.DOTALL)
+    if not match:
+        return ["transcribe.py: _extras를 찾지 못했다 — 인자 검사가 무력해졌다"]
+    sent = re.findall(r'extras\[["\'](\w+)["\']\]', match.group(0))
+    leaked = sorted({name for name in sent if name in {"prompt", "keywords"}})
+    if leaked:
+        return [f"transcribe.py: 자막을 만드는 호출에 {leaked}가 실린다 (규칙 6, D16)"]
+    return []
 
 
 def check_one_transcription_call() -> list[str]:
@@ -186,7 +210,8 @@ CHECKS = (
     ("openai 경계", check_openai_boundary),
     ("ffmpeg 경계", check_ffmpeg_boundary),
     ("순수 계층", check_pure_layer),
-    ("시각은 오디오에서", check_times_do_not_come_from_the_model),
+    ("시각 유도 계층 부활 금지", check_time_deriving_layers_stay_buried),
+    ("whisper에 prompt 금지", check_no_prompt_to_whisper),
     ("autojunk=False", check_autojunk),
     ("금지 의존성", check_banned_imports),
     ("의존성 3개", check_dependencies),

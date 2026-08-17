@@ -9,7 +9,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from . import __version__, env, evaluate, keywords, log, pipeline, preprocess, spans, transcribe
+from . import __version__, cutpoints, env, evaluate, keywords, log, pipeline, preprocess, transcribe
 from .config import Config, format_config, load_config
 from .evaluate import DASHBOARD_HEADER, build_dashboard_row
 from .output import parse_srt
@@ -47,7 +47,7 @@ def build_parser() -> argparse.ArgumentParser:
     dashboard.add_argument("--out", type=Path, default=Path("docs/DASHBOARD.md"))
     _add_config_options(dashboard)
 
-    probe = sub.add_parser("probe", help="무음·발화 구간·묶음을 본다 (API 없음)")
+    probe = sub.add_parser("probe", help="길이와 조각 수를 본다 (API 없음)")
     probe.add_argument("video", type=Path)
     _add_config_options(probe)
 
@@ -128,8 +128,8 @@ def cmd_run(args: argparse.Namespace) -> int:
     if args.dry_run:
         prepared = pipeline.prepare(args.video, cfg, offline=args.offline or not online)
         cost = transcribe.estimate_cost(prepared.duration, cfg)
-        batches = max(1, len(prepared.chunks))
-        log.out(f"길이 {prepared.duration:.1f}초 · 묶음 {batches}개 · 예상 ${cost:.3f}")
+        pieces = max(1, len(prepared.chunks))
+        log.out(f"길이 {prepared.duration:.1f}초 · 조각 {pieces}개 · 예상 ${cost:.3f}")
         return 0
     if online:
         # 오디오를 뽑기 전에 원본 길이만 보고 확인한다. ffprobe는 즉시 끝난다.
@@ -198,22 +198,17 @@ def _write_dashboard(path: Path, rows: list[str]) -> None:
 
 
 def cmd_probe(args: argparse.Namespace) -> int:
-    """API를 부르지 않고 무음 검출까지만 돌려본다. 타이밍이 잡히는지 미리 본다."""
+    """API를 부르지 않고 길이와 조각 수만 본다."""
     cfg = config_from_args(args)
     duration = preprocess.probe_duration(args.video)
     workdir = env.work_dir() / "probe"
     audio = preprocess.extract_audio(args.video, workdir / f"{args.video.stem}.mp3", cfg)
     size = audio.stat().st_size
-    silences = preprocess.detect_silence(audio, cfg, duration)
-    speech = spans.speech_spans(silences, duration, cfg)
-    batches = spans.group_spans(speech, size, duration, cfg)
-    talk = sum(end - start for start, end in speech)
+    pieces = cutpoints.chunk_count(size, cfg)
     log.out(f"길이       {duration:.2f}초")
     log.out(f"오디오     {audio} ({size / 1_000_000:.2f}MB)")
-    log.out(f"무음       {len(silences)}구간")
-    log.out(f"발화       {len(speech)}구간 · {talk:.1f}초 ({talk / duration * 100:.0f}%)")
-    log.out(f"묶음       {len(batches)}개 = 요청 {len(batches)}회")
-    pipeline.warn_about_coarse_spans(batches)
+    log.out(f"조각       {pieces}개 = 요청 {pieces}회 (한도 {cfg.chunk_max_bytes / 1e6:.0f}MB)")
+    log.out(f"예상 비용   ${transcribe.estimate_cost(duration, cfg):.3f}")
     return 0
 
 

@@ -1,11 +1,9 @@
 {
   "recorded_at": "2026-01-01T00:00:00+00:00",
-  "model": "gpt-4o-transcribe",
+  "model": "whisper-1",
   "params": {
-    "response_format": "json",
+    "response_format": "verbose_json",
     "language": "ko",
-    "extra_languages": [],
-    "keywords": [],
     "prompt": ""
   },
   "duration": 24.0,
