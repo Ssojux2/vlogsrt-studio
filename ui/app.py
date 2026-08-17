@@ -81,6 +81,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-browser", action="store_true", help="브라우저를 열지 않는다")
     args = parser.parse_args(argv)
 
+    stopped = service.stop_stale_ui(args.port)
+    if stopped:
+        log.warn(f"이전에 띄운 UI를 정리했습니다 (pid {', '.join(map(str, stopped))}).")
+        log.warn("브라우저는 한 번 강력 새로고침 하세요 — Cmd+Shift+R")
+
     try:
         port = service.pick_port(args.port)
     except service.UiError as exc:

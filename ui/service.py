@@ -8,7 +8,12 @@ from __future__ import annotations
 
 import contextlib
 import io
+import os
+import signal
 import socket
+import subprocess
+import tempfile
+import time
 from collections.abc import Iterator
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -117,8 +122,8 @@ def make_subtitles(raw_path: str) -> RunReport:
             cfg = build_config()
             if not recorded:
                 pipeline.record_fixtures(path, cfg)
-            outdir = env.project_root() / "out" / path.stem
-            result = pipeline.run(path, cfg, outdir, force_offline=True)
+            workdir = env.project_root() / "out" / path.stem
+            result = pipeline.run(path, cfg, workdir, force_offline=True)
     except UiError as exc:
         return RunReport(ok=False, log=_join(lines, str(exc)))
     except RuntimeError as exc:
@@ -126,13 +131,49 @@ def make_subtitles(raw_path: str) -> RunReport:
 
     lines.extend(_progress_lines(buffer.getvalue()))
     lines.append(_summary(result))
-    lines.append(f"저장   {result.outputs['srt']}")
+    final, note = _place_final_srt(path, result.outputs["srt"])
+    lines.append(f"저장   {final}")
+    if note:
+        lines.append(note)
+    lines.append(f"작업물 {result.outputs['srt'].parent}")
     return RunReport(
         ok=True,
         log=_join(lines),
-        srt_text=result.outputs["srt"].read_text(encoding="utf-8"),
-        files=_downloads(result),
+        srt_text=final.read_text(encoding="utf-8"),
+        files=(str(final), *_downloads(result)[1:]),
     )
+
+
+def is_uploaded_copy(path: Path) -> bool:
+    """파일 선택창으로 올라온 임시 복사본인지.
+
+    브라우저는 보안상 원본 경로를 넘겨주지 않는다. 그래서 gradio 임시 폴더에
+    복사된 것만 손에 들어오고, 원본이 어느 폴더에 있었는지는 알 방법이 없다.
+    """
+    resolved = path.resolve()
+    if "gradio" not in resolved.parts:
+        return False
+    # macOS의 gettempdir()는 /var/folders/..., 실제 경로는 /private/var/folders/... 다.
+    # 양쪽 다 resolve해야 비교가 성립한다.
+    temp_root = Path(tempfile.gettempdir()).resolve()
+    return resolved.is_relative_to(temp_root)
+
+
+def _place_final_srt(source_video: Path, produced: Path) -> tuple[Path, str | None]:
+    """최종 SRT를 원본 영상 옆에 둔다. 나머지 산출물은 작업 폴더에 남긴다."""
+    if is_uploaded_copy(source_video):
+        return produced, (
+            "참고   파일 선택창으로 올린 파일이라 원본 폴더를 알 수 없습니다.\n"
+            "       원본 옆에 저장하려면 경로를 직접 붙여넣으세요."
+        )
+    destination = source_video.parent / produced.name
+    if destination.resolve() == produced.resolve():
+        return produced, None
+    try:
+        destination.write_text(produced.read_text(encoding="utf-8"), encoding="utf-8")
+    except OSError as exc:
+        return produced, f"참고   원본 폴더에 쓰지 못했습니다: {exc}"
+    return destination, None
 
 
 def _check_source(path: Path) -> None:
@@ -173,6 +214,60 @@ def _join(lines: list[str], *extra: str) -> str:
 # ─────────────────────────────────────────────────────────────
 #  실행 환경
 # ─────────────────────────────────────────────────────────────
+
+
+def stale_ui_pids(port: int) -> list[int]:
+    """그 포트를 잡고 있는 **우리 UI** 프로세스만 골라낸다.
+
+    남이 쓰는 포트를 건드리면 안 되므로 명령줄에 `ui.app` 이 있는 것만 센다.
+    lsof가 없는 환경이면 조용히 빈 목록을 준다.
+    """
+    try:
+        listening = subprocess.run(
+            ["lsof", "-t", f"-i:{port}", "-sTCP:LISTEN"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return []
+    mine = os.getpid()
+    found = []
+    for raw in listening.stdout.split():
+        try:
+            pid = int(raw)
+        except ValueError:
+            continue
+        if pid == mine:
+            continue
+        described = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "command="],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if "ui.app" in described.stdout:
+            found.append(pid)
+    return found
+
+
+def stop_stale_ui(port: int, wait_seconds: float = 3.0) -> list[int]:
+    """예전에 띄운 UI를 정리한다.
+
+    남겨두면 사람은 습관대로 원래 주소를 열고, 구버전 화면에 붙어
+    알 수 없는 컴포넌트 오류를 본다. 그 함정을 아예 없앤다.
+    """
+    stopped = []
+    for pid in stale_ui_pids(port):
+        try:
+            os.kill(pid, signal.SIGTERM)
+            stopped.append(pid)
+        except OSError:
+            continue
+    deadline = time.monotonic() + wait_seconds
+    while stopped and stale_ui_pids(port) and time.monotonic() < deadline:
+        time.sleep(0.2)
+    return stopped
 
 
 def busy_port_notice(preferred: int, chosen: int) -> list[str]:

@@ -55,14 +55,60 @@ def test_resolve_path_rejects_empty() -> None:
 # ─────────────────────────────────────────────────────────────
 
 
-def test_recorded_video_runs_without_touching_the_api() -> None:
-    report = service.make_subtitles(VIDEO)
+def test_recorded_video_runs_without_touching_the_api(tmp_path: Path) -> None:
+    video = tmp_path / "demo.mp4"
+    video.write_bytes(b"\x00")
+    report = service.make_subtitles(str(video))
     assert report.ok
     assert "망원동" in report.srt_text
     assert "기록된 응답 재사용" in report.log
     assert "결과" in report.log
     assert len(report.files) == 3
-    assert Path(report.files[0]).is_file()
+
+
+def test_final_srt_lands_next_to_the_video(tmp_path: Path) -> None:
+    """최종 SRT는 원본 영상과 같은 폴더에 둔다."""
+    video = tmp_path / "demo.mp4"
+    video.write_bytes(b"\x00")
+    report = service.make_subtitles(str(video))
+    beside = video.parent / "demo.srt"
+    assert beside.is_file()
+    assert report.files[0] == str(beside)
+    assert f"저장   {beside}" in report.log
+    # 나머지 산출물은 작업 폴더에 남는다
+    assert (tmp_path / "out" / "demo" / "trace.json").is_file()
+
+
+def test_uploaded_copy_cannot_know_the_original_folder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """파일 선택창으로 올린 파일은 원본 폴더를 알 수 없다. 그 사실을 로그로 알린다."""
+    uploaded = tmp_path / "gradio" / "abc123" / "demo.mp4"
+    uploaded.parent.mkdir(parents=True)
+    uploaded.write_bytes(b"\x00")
+    monkeypatch.setattr(service.tempfile, "gettempdir", lambda: str(tmp_path))
+    assert service.is_uploaded_copy(uploaded) is True
+
+    report = service.make_subtitles(str(uploaded))
+    assert report.ok
+    assert "원본 폴더를 알 수 없습니다" in report.log
+    assert not (uploaded.parent / "demo.srt").is_file()
+
+
+def test_a_real_path_is_not_mistaken_for_an_upload(tmp_path: Path) -> None:
+    assert service.is_uploaded_copy(tmp_path / "Movies" / "vlog.mp4") is False
+
+
+def test_upload_detection_survives_the_macos_temp_symlink() -> None:
+    """gettempdir()는 /var/folders/..., 실제 경로는 /private/var/folders/... 다.
+
+    양쪽을 resolve하지 않으면 업로드본을 못 알아보고 임시 폴더에 SRT를 흘린다.
+    """
+    import tempfile
+
+    real_temp = Path(tempfile.gettempdir()).resolve()
+    uploaded = real_temp / "gradio" / "deadbeef" / "vlog.mp4"
+    assert service.is_uploaded_copy(uploaded) is True
 
 
 def test_log_carries_pipeline_progress(monkeypatch: pytest.MonkeyPatch) -> None:
