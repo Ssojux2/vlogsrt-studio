@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import socket
 from pathlib import Path
 
 import pytest
@@ -163,6 +164,36 @@ def test_mode_banner_reflects_offline_state(monkeypatch: pytest.MonkeyPatch) -> 
     assert "오프라인" in service.mode_banner()
     monkeypatch.setenv("VLOGSRT_OFFLINE", "0")
     assert "온라인" in service.mode_banner()
+
+
+# ─────────────────────────────────────────────────────────────
+#  실행 환경 — `make ui`가 조용히 죽던 자리
+# ─────────────────────────────────────────────────────────────
+
+
+def test_pick_port_returns_the_preferred_one_when_free(local_socket: None) -> None:
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        free = probe.getsockname()[1]
+    assert service.pick_port(free) == free
+
+
+def test_pick_port_steps_aside_when_busy(local_socket: None) -> None:
+    """앞서 띄운 UI가 남아 있어도 죽으라고 하지 않는다."""
+    with socket.socket() as taken:
+        taken.bind(("127.0.0.1", 0))
+        taken.listen(1)
+        busy = taken.getsockname()[1]
+        assert service.pick_port(busy) > busy
+
+
+def test_pick_port_gives_up_loudly(local_socket: None) -> None:
+    with socket.socket() as taken:
+        taken.bind(("127.0.0.1", 0))
+        taken.listen(1)
+        busy = taken.getsockname()[1]
+        with pytest.raises(UiError, match="빈 포트가 없습니다"):
+            service.pick_port(busy, attempts=1)
 
 
 def test_service_never_imports_gradio() -> None:

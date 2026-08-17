@@ -15,6 +15,9 @@ from vlogsrt.models import Cue, Segment, Word
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures"
 
+# 차단 전에 진짜 소켓을 붙잡아 둔다. 루프백 바인딩이 필요한 테스트가 되찾아 쓴다.
+_REAL_SOCKET = socket.socket
+
 
 class NetworkBlocked(RuntimeError):
     pass
@@ -35,6 +38,16 @@ def block_network(monkeypatch: pytest.MonkeyPatch) -> None:
 def offline_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("VLOGSRT_OFFLINE", "1")
     monkeypatch.setenv("VLOGSRT_LOG_LEVEL", "ERROR")
+
+
+@pytest.fixture
+def local_socket(monkeypatch: pytest.MonkeyPatch) -> None:
+    """루프백 바인딩만 되살린다.
+
+    빈 포트를 찾는 코드처럼 소켓 객체 자체가 필요한 경우에만 쓴다.
+    `create_connection`은 그대로 막혀 있어 밖으로 나가는 호출은 여전히 불가능하다.
+    """
+    monkeypatch.setattr(socket, "socket", _REAL_SOCKET)
 
 
 @pytest.fixture

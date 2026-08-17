@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import socket
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -331,6 +332,27 @@ def dictionary_rows(cues: list[Cue], cfg: Config) -> list[list[str]]:
         [candidate.canonical, candidate.heard, f"{candidate.count}회"]
         for candidate in dictionary_candidates(cues, cfg)
     ]
+
+
+def pick_port(preferred: int, attempts: int = 20) -> int:
+    """이미 쓰는 포트면 옆으로 비켜간다.
+
+    앞서 띄운 UI가 남아 있는 일이 흔한데, 그때마다 프로세스를 죽이라고 하는 것보다
+    다음 포트로 뜨고 알려주는 편이 낫다.
+    """
+    for offset in range(attempts):
+        candidate = preferred + offset
+        with socket.socket() as probe:
+            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                probe.bind(("127.0.0.1", candidate))
+            except OSError:
+                continue
+        return candidate
+    raise UiError(
+        f"{preferred}부터 {preferred + attempts - 1}까지 빈 포트가 없습니다. "
+        "--port 로 다른 번호를 지정하세요."
+    )
 
 
 def mode_banner() -> str:

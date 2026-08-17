@@ -9,10 +9,16 @@ import argparse
 from pathlib import Path
 from typing import Any
 
-import gradio as gr
+try:
+    import gradio as gr
+except ModuleNotFoundError as exc:  # pragma: no cover - 설치 안내 전용 경로
+    raise SystemExit(
+        'gradio가 설치되어 있지 않습니다. 웹 UI는 선택적 extra입니다.\n  pip install -e ".[ui]"'
+    ) from exc
 
 from ui import service
 from ui.service import UiError
+from vlogsrt import log
 
 PRESETS = ["vlog", "shorts", "lecture"]
 REVIEW_HEADERS = ["#", "시각", "신뢰도", "whisper가 들은 것", "gpt-transcribe (최종)", "표시"]
@@ -265,15 +271,31 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--root", type=Path, default=_default_root(), help="파일 탐색 기준 폴더")
     parser.add_argument("--port", type=int, default=7860)
     parser.add_argument("--share", action="store_true", help="외부 공유 링크 생성")
+    parser.add_argument("--no-browser", action="store_true", help="브라우저를 열지 않는다")
     args = parser.parse_args(argv)
-    build_app(args.root).launch(
-        server_port=args.port,
-        share=args.share,
-        inbrowser=True,
-        theme=gr.themes.Soft(),
-        css=CSS,
-        allowed_paths=[str(Path.home()), "/tmp"],
-    )
+
+    try:
+        port = service.pick_port(args.port)
+    except UiError as exc:
+        log.error(str(exc))
+        return 1
+    if port != args.port:
+        log.warn(f"{args.port} 포트를 이미 쓰고 있어 {port} 으로 띄웁니다.")
+
+    # gradio의 시작 배너는 버퍼에 갇혀 안 보일 때가 있다. 주소는 우리가 직접 찍는다.
+    log.out(f"\nvlogsrt UI  →  http://127.0.0.1:{port}")
+    log.out("멈추려면 Ctrl+C\n")
+    try:
+        build_app(args.root).launch(
+            server_port=port,
+            share=args.share,
+            inbrowser=not args.no_browser,
+            theme=gr.themes.Soft(),
+            css=CSS,
+            allowed_paths=[str(Path.home()), "/tmp"],
+        )
+    except KeyboardInterrupt:
+        log.info("종료")
     return 0
 
 

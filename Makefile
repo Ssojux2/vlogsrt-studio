@@ -21,7 +21,7 @@ invariant:
 
 # 웹 UI. gradio가 필요하다: pip install -e ".[ui]"
 ui:
-	$(PY) -m ui.app
+	$(PY) -u -m ui.app
 
 eval:
 	$(PY) -m vlogsrt.cli evalset --golden $(GOLDEN) --out docs/DASHBOARD.md
