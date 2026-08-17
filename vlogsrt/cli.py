@@ -11,8 +11,8 @@ from typing import Any
 
 from . import __version__, env, evaluate, keywords, log, pipeline, preprocess, transcribe
 from .config import Config, format_config, load_config
+from .evaluate import DASHBOARD_HEADER, build_dashboard_row
 from .output import parse_srt
-from .report import DASHBOARD_HEADER, build_dashboard_row
 
 DASHBOARD_BEGIN = "<!-- vlogsrt:dashboard -->"
 DASHBOARD_END = "<!-- /vlogsrt:dashboard -->"
@@ -28,13 +28,6 @@ def build_parser() -> argparse.ArgumentParser:
     _add_config_options(run)
     _add_mode_options(run)
     run.add_argument("-o", "--out", type=Path, default=Path("out"))
-    run.add_argument(
-        "--stop-after",
-        choices=pipeline.STAGES,
-        default="verify",
-        help="output이면 gpt 검증을 건너뛴다 — whisper 비용만 든다",
-    )
-    run.add_argument("--fast", action="store_true", help="word 타임스탬프 없이 실행")
     run.add_argument("--dry-run", action="store_true", help="비용 추정만 하고 끝낸다")
 
     again = sub.add_parser("redo", help="API 없이 정제·출력만 재실행")
@@ -54,7 +47,7 @@ def build_parser() -> argparse.ArgumentParser:
     dashboard.add_argument("--out", type=Path, default=Path("docs/DASHBOARD.md"))
     _add_config_options(dashboard)
 
-    probe = sub.add_parser("probe", help="길이와 무음 구간을 본다")
+    probe = sub.add_parser("probe", help="길이와 오디오 크기를 본다")
     probe.add_argument("video", type=Path)
     _add_config_options(probe)
 
@@ -141,15 +134,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     if online:
         # 오디오를 뽑기 전에 원본 길이만 보고 확인한다. ffprobe는 즉시 끝난다.
         _confirm_cost(preprocess.probe_duration(args.video), cfg, args.yes)
-    result = pipeline.run(
-        args.video,
-        cfg,
-        args.out,
-        online=online,
-        force_offline=args.offline,
-        stop_after=args.stop_after,
-        fast=args.fast,
-    )
+    result = pipeline.run(args.video, cfg, args.out, online=online, force_offline=args.offline)
     for name, path in result.outputs.items():
         if not name.endswith("_alias"):
             log.out(f"{name}: {path}")
@@ -217,10 +202,10 @@ def cmd_probe(args: argparse.Namespace) -> int:
     duration = preprocess.probe_duration(args.video)
     workdir = env.work_dir() / "probe"
     audio = preprocess.extract_audio(args.video, workdir / f"{args.video.stem}.mp3", cfg)
-    silences = preprocess.detect_silence(audio, cfg, duration)
-    log.out(f"길이       {duration:.2f}초")
-    log.out(f"무음 구간  {len(silences)}개")
-    log.out(f"오디오     {audio} ({audio.stat().st_size / 1_000_000:.2f}MB)")
+    size = audio.stat().st_size
+    log.out(f"길이     {duration:.2f}초")
+    log.out(f"오디오   {audio} ({size / 1_000_000:.2f}MB)")
+    log.out(f"청크     {preprocess.chunk_count(duration, size, cfg)}개")
     return 0
 
 

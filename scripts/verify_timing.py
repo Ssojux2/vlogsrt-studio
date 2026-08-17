@@ -29,15 +29,8 @@ sys.path.insert(0, str(ROOT))
 # 골격 해석 중 나오는 세그먼트별 경고는 여기서 요약으로 대신 센다.
 os.environ.setdefault("VLOGSRT_LOG_LEVEL", "ERROR")
 
-from vlogsrt import loops as loop_module  # noqa: E402
-from vlogsrt.config import Config  # noqa: E402
 from vlogsrt.preprocess import probe_duration, require_ffmpeg  # noqa: E402
-from vlogsrt.transcribe import (  # noqa: E402
-    apply_verdicts,
-    build_spine,
-    canonical_text,
-    load_fixture_responses,
-)
+from vlogsrt.transcribe import FIXTURE_KIND, build_spine, load_fixture_responses  # noqa: E402
 
 # ── 검증 허용오차 ────────────────────────────────────────────
 PROBE_RATE = 4000  # 포락선 계산용 디코딩 주파수. 에너지만 보면 되니 낮춰도 된다.
@@ -166,37 +159,6 @@ def _speech_f1(spine: list, loud: list[bool], shift: int) -> float:
     return hit / (hit + miss / 2) if hit else 0.0
 
 
-def check_loops(spine: list, cfg: Config, duration: float) -> Check:
-    found = loop_module.find_loops(spine, cfg)
-    seconds = loop_module.looped_seconds(found)
-    leaked = loop_module.undetected(found, spine)
-    lines = [
-        f"반복 구간 {len(found)}개 · {seconds:.0f}초 = 전체의 {seconds / duration * 100:.1f}%"
-        f" · 환청 필터를 통과해 골격에 남은 세그먼트 {len(leaked)}개"
-    ]
-    for loop in sorted(found, key=lambda item: -item.duration)[:8]:
-        lines.append(
-            f"  {loop.start:8.1f}-{loop.end:8.1f} ({loop.duration:6.1f}초)"
-            f" {loop.count:4d}회  {loop.text[:44]!r}"
-        )
-    return Check("whisper 반복 환청", not found, "\n" + "\n".join(lines))
-
-
-def check_degenerate_segments(responses: list, spine: list) -> Check:
-    """길이가 0인 세그먼트는 whisper 디코딩이 무너졌다는 신호다.
-
-    정상 전사에서는 거의 나오지 않는다. 수백 개가 나오면 그 구간을 믿을 수 없다.
-    """
-    raw = sum(len(r.payload.get("segments") or []) for r in responses)
-    dropped = raw - len(spine)
-    share = dropped / raw if raw else 0.0
-    return Check(
-        "0길이 세그먼트",
-        share <= 0.05,
-        f"whisper 세그먼트 {raw}개 중 길이 0으로 버려진 것 {dropped}개 ({share * 100:.1f}%)",
-    )
-
-
 def check_srt_coverage(srt: Path, duration: float) -> Check:
     if not srt.is_file():
         return Check("SRT 시간 커버리지", True, f"{srt} 없음. 검사 생략")
@@ -253,10 +215,8 @@ def main(argv: list[str]) -> int:
     meta = json.loads((fixtures / f"{stem}.meta.json").read_text("utf-8"))
     audio, chunk_paths, video = locate(stem)
 
-    cfg = Config()
-    responses = load_fixture_responses(fixtures / f"{stem}.whisper.json")
-    spine, _ = build_spine(responses)
-    spine = apply_verdicts(spine, [tuple(s) for s in meta["silences"]], cfg)
+    responses = load_fixture_responses(fixtures / f"{stem}.{FIXTURE_KIND}.json")
+    spine = build_spine(responses)
     duration = float(meta["duration"])
 
     checks = [
@@ -265,22 +225,8 @@ def main(argv: list[str]) -> int:
             audio, chunk_paths, [r.offset for r in sorted(responses, key=lambda x: x.index)]
         ),
         check_spine_shift(audio, spine),
-        check_degenerate_segments(responses, spine),
-        check_loops(spine, cfg, duration),
         check_srt_coverage(ROOT / "out" / stem / "output.srt", duration),
     ]
-    gpt = fixtures / f"{stem}.gpt.json"
-    if gpt.is_file():
-        canonical = canonical_text(load_fixture_responses(gpt))
-        whisper_chars = sum(len(s.text) for s in spine)
-        checks.append(
-            Check(
-                "정본 분량 ↔ 골격 분량",
-                True,
-                f"whisper {whisper_chars}자 / gpt {len(canonical)}자"
-                f" (비율 {len(canonical) / max(1, whisper_chars):.2f})",
-            )
-        )
 
     print(f"\n=== {stem} · {duration:.0f}초 · 청크 {meta.get('chunk_count')}개 ===\n")
     for check in checks:

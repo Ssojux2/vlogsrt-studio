@@ -13,11 +13,16 @@ NO_PROJECT_TOML = Path("does-not-exist.toml")
 
 
 def test_defaults_carry_documented_thresholds() -> None:
+    """Netflix TTSG 근거값. 바꾸려면 근거부터 가져와라."""
     cfg = Config()
-    assert cfg.compression_ratio_max == 2.4
-    assert cfg.avg_logprob_min == -1.0
-    assert cfg.min_duration == 0.85
-    assert cfg.min_gap == 0.08
+    assert cfg.min_duration == 0.85  # 최소 노출 5/6초
+    assert cfg.min_gap == 0.08  # 24fps 기준 2프레임
+
+
+def test_the_transcription_model_must_return_segment_times() -> None:
+    """시각 없는 응답(gpt-transcribe의 `json`)으로는 SRT를 만들 수 없다(D21)."""
+    cfg = Config()
+    assert cfg.transcribe_format in {"diarized_json", "verbose_json"}
 
 
 def test_preset_shorts_narrows_line() -> None:

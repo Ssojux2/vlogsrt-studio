@@ -1,4 +1,4 @@
-"""오디오 추출·무음 검출·청크 분할.
+"""오디오 추출과 청크 분할.
 
 ffmpeg는 `subprocess`로 직접 부른다(불변 규칙 7). 순수 계산과 외부 호출을 갈라놓아,
 ffmpeg가 없는 환경에서도 분할 로직은 그대로 테스트된다.
@@ -7,7 +7,6 @@ ffmpeg가 없는 환경에서도 분할 로직은 그대로 테스트된다.
 from __future__ import annotations
 
 import math
-import re
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -17,20 +16,14 @@ from . import log
 from .config import Config
 from .models import Chunk
 
-_SILENCE_START_RE = re.compile(r"silence_start:\s*(-?[\d.]+)")
-_SILENCE_END_RE = re.compile(r"silence_end:\s*(-?[\d.]+)")
-
-Span = tuple[float, float]
-
 
 @dataclass(frozen=True, slots=True)
 class ChunkPlan:
-    """분할 계획. `forced`는 적당한 무음을 못 찾아 목표 지점을 밀어붙였다는 뜻이다."""
+    """분할 계획. 순수 계산이라 ffmpeg 없이 테스트된다."""
 
     start: float
     end: float
     index: int
-    forced: bool = False
 
     @property
     def duration(self) -> float:
@@ -75,9 +68,8 @@ def probe_duration(path: Path) -> float:
 def extract_audio(src: Path, dst: Path, cfg: Config) -> Path:
     """오디오를 손대지 않고 뽑는다 — 필터 없음(D20).
 
-    음질 필터(highpass/eq/loudnorm)는 D19 전환에서 제거했다. 타임라인 오차는
-    0.000초로 결백했지만(D13), 전처리 최소화가 우선이다. 무음 검출이 흔들리거나
-    의심률이 뛰면 D20의 복귀 경로를 따라 `-af` 한 줄을 되살린다.
+    음질 필터(highpass/eq/loudnorm)는 제거했다. 타임라인 오차는 0.000초로
+    결백했지만(D13), 전처리 최소화가 우선이다.
     """
     ffmpeg = require_ffmpeg()
     dst.parent.mkdir(parents=True, exist_ok=True)
@@ -97,109 +89,34 @@ def extract_audio(src: Path, dst: Path, cfg: Config) -> Path:
     return dst
 
 
-def parse_silence_output(stderr: str, duration: float) -> list[Span]:
-    """`silencedetect` 결과는 stdout이 아니라 stderr에 나온다."""
-    spans: list[Span] = []
-    pending: float | None = None
-    for line in stderr.splitlines():
-        start_match = _SILENCE_START_RE.search(line)
-        if start_match:
-            pending = max(0.0, float(start_match.group(1)))
-            continue
-        end_match = _SILENCE_END_RE.search(line)
-        if end_match and pending is not None:
-            end = float(end_match.group(1))
-            if end > pending:
-                spans.append((pending, end))
-            pending = None
-    if pending is not None and duration > pending:
-        spans.append((pending, duration))
-    return spans
-
-
-def detect_silence(path: Path, cfg: Config, duration: float | None = None) -> list[Span]:
-    ffmpeg = require_ffmpeg()
-    total = probe_duration(path) if duration is None else duration
-    command = [
-        ffmpeg, "-hide_banner", "-nostdin",
-        "-i", str(path),
-        "-af", f"silencedetect=noise={cfg.silence_threshold_db:g}dB:d={cfg.silence_min_duration:g}",
-        "-f", "null", "-",
-    ]  # fmt: skip
-    completed = subprocess.run(command, capture_output=True, text=True, check=False)
-    if completed.returncode != 0:
-        tail = "\n".join(completed.stderr.strip().splitlines()[-5:])
-        raise RuntimeError(f"silencedetect 실패 (코드 {completed.returncode})\n{tail}")
-    return parse_silence_output(completed.stderr, total)
-
-
 def chunk_count(duration: float, size_bytes: int, cfg: Config) -> int:
-    """몇 조각으로 나눌지. 크기 한도와 길이 한도 **둘 다** 지켜야 한다.
-
-    업로드 한도(25MB)만 보던 시절엔 77분 영상이 38분짜리 두 조각이 됐고,
-    whisper-1이 뒷부분에서 반복 루프에 빠졌다(D13).
-    """
+    """몇 조각으로 나눌지. 업로드 크기 한도와 길이 한도 **둘 다** 지켜야 한다."""
     by_size = math.ceil(size_bytes / cfg.chunk_max_bytes)
     by_time = math.ceil(duration / cfg.chunk_max_seconds)
     return max(1, by_size, by_time)
 
 
-def plan_chunks(
-    duration: float, size_bytes: int, silences: list[Span], cfg: Config
-) -> list[ChunkPlan]:
-    """크기·길이 한도를 넘으면 무음 한가운데를 골라 자른다. 없으면 목표 지점을 강제한다."""
+def plan_chunks(duration: float, size_bytes: int, cfg: Config) -> list[ChunkPlan]:
+    """API 한도를 넘으면 균등하게 자른다.
+
+    무음을 찾아 그 한가운데를 고르던 시절이 있었다(D21에서 제거). 실측에서는
+    경계 대부분이 결국 강제 분할이었고, 그때마다 경고가 로그를 덮었다. 이제는
+    조각 수를 줄여(한도 1500초) 경계 자체를 적게 만든다.
+    """
     if duration <= 0:
         raise RuntimeError(f"오디오 길이가 0 이하입니다: {duration}")
 
     count = chunk_count(duration, size_bytes, cfg)
-    if count <= 1:
-        return [ChunkPlan(start=0.0, end=duration, index=0)]
-
-    target_length = duration / count
-    window = target_length * cfg.chunk_search_ratio
-    centers = sorted((start + end) / 2 for start, end in silences)
-
-    boundaries: list[float] = []
-    forced_flags: list[bool] = []
-    previous = 0.0
-    for step in range(1, count):
-        target = target_length * step
-        floor = max(previous + cfg.chunk_min_duration, target - window)
-        ceiling = min(duration - cfg.chunk_min_duration, target + window)
-        picked = _nearest_center(centers, target, floor, ceiling)
-        forced = picked is None
-        cut = target if picked is None else picked
-        cut = min(max(cut, previous + cfg.chunk_min_duration), duration)
-        boundaries.append(cut)
-        forced_flags.append(forced)
-        previous = cut
-
-    plans: list[ChunkPlan] = []
-    start = 0.0
-    for index, cut in enumerate(boundaries):
-        plans.append(ChunkPlan(start=start, end=cut, index=index, forced=forced_flags[index]))
-        start = cut
-    plans.append(ChunkPlan(start=start, end=duration, index=len(boundaries)))
-    return plans
+    step = duration / count
+    return [
+        ChunkPlan(start=step * index, end=min(step * (index + 1), duration), index=index)
+        for index in range(count)
+    ]
 
 
-def _nearest_center(
-    centers: list[float], target: float, floor: float, ceiling: float
-) -> float | None:
-    if floor > ceiling:
-        return None
-    inside = [c for c in centers if floor <= c <= ceiling]
-    if not inside:
-        return None
-    return min(inside, key=lambda c: abs(c - target))
-
-
-def make_chunks(
-    audio: Path, cfg: Config, workdir: Path, silences: list[Span] | None = None
-) -> list[Chunk]:
+def make_chunks(audio: Path, cfg: Config, workdir: Path) -> list[Chunk]:
     duration = probe_duration(audio)
-    spans = silences if silences is not None else detect_silence(audio, cfg, duration)
-    plans = plan_chunks(duration, audio.stat().st_size, spans, cfg)
+    plans = plan_chunks(duration, audio.stat().st_size, cfg)
     if len(plans) == 1:
         return [Chunk(path=audio, offset=0.0, duration=duration, index=0)]
 
@@ -207,10 +124,7 @@ def make_chunks(
     workdir.mkdir(parents=True, exist_ok=True)
     chunks: list[Chunk] = []
     for plan in plans:
-        if plan.forced:
-            log.warn(f"청크 {plan.index}: {plan.start:.2f}초에 적당한 무음이 없어 강제로 잘랐다.")
-        else:
-            log.debug(f"청크 {plan.index} 경계: {plan.start:.2f}초")
+        log.debug(f"청크 {plan.index} 경계: {plan.start:.2f}초")
         destination = workdir / f"{audio.stem}.chunk{plan.index:02d}.mp3"
         _run(
             [

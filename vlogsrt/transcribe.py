@@ -17,17 +17,9 @@ from typing import Any, Protocol
 
 from . import env, log
 from .config import Config
-from .models import (
-    VERDICT_COMPRESSION_FAIL,
-    VERDICT_LOW_LOGPROB,
-    VERDICT_OK,
-    VERDICT_SILENT,
-    Chunk,
-    Segment,
-    Word,
-)
+from .models import Chunk, Segment
 
-Span = tuple[float, float]
+FIXTURE_KIND = "transcribe"
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,9 +41,7 @@ class TranscriptionJob:
 class Transcriber(Protocol):
     """이 파일에서만 Protocol을 쓴다. 구현체가 둘(실제/픽스처)이라 실제로 필요하다."""
 
-    def whisper(self, job: TranscriptionJob, cfg: Config) -> list[ChunkResponse]: ...
-
-    def gpt(self, job: TranscriptionJob, cfg: Config) -> list[ChunkResponse]: ...
+    def transcribe(self, job: TranscriptionJob, cfg: Config) -> list[ChunkResponse]: ...
 
 
 # ─────────────────────────────────────────────────────────────
@@ -69,7 +59,7 @@ def _missing_fixture(path: Path, stem: str, source: str = "") -> RuntimeError:
         f"픽스처가 없습니다: {path}\n"
         f"사람이 직접 다음을 실행해야 합니다:\n"
         f"  vlogsrt record {video}\n"
-        f"예상 비용: 약 $0.06 (5분 영상 기준)"
+        f"예상 비용: 약 $0.03 (5분 영상 기준)"
     )
 
 
@@ -100,14 +90,9 @@ class FixtureTranscriber:
 
     fixture_dir: Path
 
-    def whisper(self, job: TranscriptionJob, cfg: Config) -> list[ChunkResponse]:
+    def transcribe(self, job: TranscriptionJob, cfg: Config) -> list[ChunkResponse]:
         return _load_responses(
-            _fixture_path(self.fixture_dir, job.stem, "whisper"), job.stem, job.source
-        )
-
-    def gpt(self, job: TranscriptionJob, cfg: Config) -> list[ChunkResponse]:
-        return _load_responses(
-            _fixture_path(self.fixture_dir, job.stem, "gpt"), job.stem, job.source
+            _fixture_path(self.fixture_dir, job.stem, FIXTURE_KIND), job.stem, job.source
         )
 
 
@@ -163,65 +148,23 @@ class LiveTranscriber:
                 time.sleep(delay)
         raise RuntimeError(f"{what} 재시도 실패") from last
 
-    def _parallel(
-        self, job: TranscriptionJob, cfg: Config, one: Callable[[Chunk], dict[str, Any]]
-    ) -> list[ChunkResponse]:
-        with ThreadPoolExecutor(max_workers=env.max_workers()) as pool:
-            payloads = list(pool.map(one, job.chunks))
-        return [
-            ChunkResponse(index=chunk.index, offset=chunk.offset, payload=payload)
-            for chunk, payload in zip(job.chunks, payloads, strict=True)
-        ]
-
-    def whisper(self, job: TranscriptionJob, cfg: Config) -> list[ChunkResponse]:
-        """**`prompt`를 보내지 않는다** (불변 규칙 5).
-
-        whisper는 자막의 시각과 텍스트를 모두 만든다. 그런데 `prompt`는 whisper에게
-        지시가 아니라 **직전 자막 텍스트**로 들어가서, 알아듣기 힘든 구간을 만나면
-        그 문장을 그대로 이어 쓴다. 실측 두 번 모두 그렇게 무너졌다(D13, D16):
-
-            prompt "브이로그 내레이션입니다…"  → 570초 동안 103회 반복
-            prompt "프랑스 여행 브이로그"       → 564초 동안 138회 반복
-
-        얻는 것이 없고 잃는 것은 골격 전체다. 그래서 보내지 않는다. 사람이 준 힌트는
-        검증 기준을 만드는 `gpt()`로 간다.
-        """
+    def transcribe(self, job: TranscriptionJob, cfg: Config) -> list[ChunkResponse]:
+        """자막의 시각과 글자를 모두 만드는 유일한 호출."""
         client = self._client()
-        granularities = ["segment", "word"] if cfg.word_timestamps else ["segment"]
-
-        def one(chunk: Chunk) -> dict[str, Any]:
-            def call() -> Any:
-                with chunk.path.open("rb") as handle:
-                    return client.audio.transcriptions.create(
-                        file=handle,
-                        model=cfg.whisper_model,
-                        language=cfg.language,
-                        temperature=0,
-                        response_format="verbose_json",
-                        timestamp_granularities=granularities,
-                    )
-
-            return _to_dict(self._retry(call, f"whisper 청크 {chunk.index}", cfg))
-
-        return self._parallel(job, cfg, one)
-
-    def gpt(self, job: TranscriptionJob, cfg: Config) -> list[ChunkResponse]:
-        client = self._client()
-        extras = _gpt_extras(cfg)
+        extras = _extras(cfg)
 
         def one(chunk: Chunk) -> dict[str, Any]:
             def call(**overrides: Any) -> Any:
-                # timestamp_granularities / include=logprobs 를 넣지 마라. whisper-1 전용이다.
                 with chunk.path.open("rb") as handle:
                     return client.audio.transcriptions.create(
                         file=handle,
-                        model=cfg.gpt_model,
+                        model=cfg.transcribe_model,
                         temperature=0,
-                        response_format="json",
+                        response_format=cfg.transcribe_format,
                         **overrides,
                     )
 
-            what = f"gpt 청크 {chunk.index}"
+            what = f"전사 청크 {chunk.index}"
             try:
                 return _to_dict(self._retry(lambda: call(**extras), what, cfg))
             except Exception as exc:  # noqa: BLE001 - 400이면 부가 인자만 떼고 한 번 더
@@ -229,12 +172,16 @@ class LiveTranscriber:
                     raise
                 log.warn(
                     f"{what}: API가 부가 인자를 거부했다({exc}). "
-                    f"인자 {sorted(extras)}를 빼고 다시 부른다. "
-                    f"whisper 응답은 이미 받아둔 상태라 여기서 죽으면 그 값이 버려진다."
+                    f"인자 {sorted(extras)}를 빼고 다시 부른다."
                 )
                 return _to_dict(self._retry(lambda: call(), what, cfg))
 
-        return self._parallel(job, cfg, one)
+        with ThreadPoolExecutor(max_workers=env.max_workers()) as pool:
+            payloads = list(pool.map(one, job.chunks))
+        return [
+            ChunkResponse(index=chunk.index, offset=chunk.offset, payload=payload)
+            for chunk, payload in zip(job.chunks, payloads, strict=True)
+        ]
 
 
 def _is_bad_request(exc: Exception) -> bool:
@@ -242,16 +189,15 @@ def _is_bad_request(exc: Exception) -> bool:
     return status == 400
 
 
-def _gpt_extras(cfg: Config) -> dict[str, Any]:
+def _extras(cfg: Config) -> dict[str, Any]:
     """`language`와 `languages`는 **함께 보낼 수 없다.**
 
-    TASKS.md §T3.1은 둘 다 넘기라고 적어두었지만 실제 API는 400을 돌려준다:
-      "The 'language' and 'languages' parameters cannot be used together."
-    여러 언어를 알려주는 쪽이 이 프로젝트의 의도라 `languages`를 택하고,
-    설정이 비어 있을 때만 단일 `language`로 떨어진다.
+    실제 API가 400을 돌려준다: "The 'language' and 'languages' parameters cannot
+    be used together." 여러 언어를 알려주는 쪽이 이 프로젝트의 의도라 `languages`를
+    택하고, 설정이 비어 있을 때만 단일 `language`로 떨어진다.
 
-    `prompt`는 여기로만 간다. gpt-transcribe가 최종 SRT의 글자를 만드는 모델이라
-    힌트가 실제로 쓸모 있는 곳이 여기다. whisper에는 보내지 않는다(D16).
+    여기 실리는 인자는 모델마다 지원 여부가 다르다. 거부당하면 호출부가 전부 떼고
+    한 번 더 부른다 — 힌트 하나 때문에 전사가 통째로 실패하면 안 된다.
     """
     extras: dict[str, Any] = {}
     if cfg.extra_languages:
@@ -290,145 +236,35 @@ def get_transcriber(
 # ─────────────────────────────────────────────────────────────
 
 
-def rebase_timestamps(result: dict[str, Any], offset: float, seg_id_base: int) -> dict[str, Any]:
-    """청크 좌표를 원본 좌표로 옮긴다. 원본 dict는 건드리지 않는다.
+def parse_segments(raw: dict[str, Any], offset: float = 0.0, seg_id_base: int = 0) -> list[Segment]:
+    """전사 응답에서 골격을 만든다. 시각은 청크 좌표에서 원본 좌표로 옮긴다.
 
-    빠뜨리기 쉬운 것: `words[]`의 시각과 `segments[].id`의 전역 재번호.
+    응답의 `id`는 쓰지 않는다. diarize는 `"seg_0"` 같은 문자열을 주고 청크마다
+    0부터 다시 시작하므로, 통번호는 우리가 붙인다.
     """
-    segments = []
-    for local_index, segment in enumerate(result.get("segments") or []):
-        moved = dict(segment)
-        moved["id"] = seg_id_base + local_index
-        moved["start"] = float(segment.get("start", 0.0)) + offset
-        moved["end"] = float(segment.get("end", 0.0)) + offset
-        segments.append(moved)
-
-    words = []
-    for word in result.get("words") or []:
-        moved_word = dict(word)
-        moved_word["start"] = float(word.get("start", 0.0)) + offset
-        moved_word["end"] = float(word.get("end", 0.0)) + offset
-        words.append(moved_word)
-
-    rebased = dict(result)
-    rebased["segments"] = segments
-    rebased["words"] = words
-    return rebased
-
-
-def parse_spine(raw: dict[str, Any], offset: float = 0.0, seg_id_base: int = 0) -> list[Segment]:
-    """whisper 응답에서 골격을 만든다. verdict는 여기서 전부 ok — 판정은 judge_verdict."""
-    rebased = rebase_timestamps(raw, offset, seg_id_base)
-    spine: list[Segment] = []
-    dropped = 0
-    for segment in rebased["segments"]:
-        text = str(segment.get("text", "")).strip()
-        start = float(segment["start"])
-        end = float(segment["end"])
-        if end <= start:
-            # 한 줄씩 찍으면 수백 줄이 되어 정작 볼 경고를 묻는다. 끝에서 한 번 센다.
-            dropped += 1
-            continue
-        spine.append(
-            Segment(
-                id=int(segment["id"]),
-                start=start,
-                end=end,
-                text=text,
-                avg_logprob=float(segment.get("avg_logprob", 0.0)),
-                compression_ratio=float(segment.get("compression_ratio", 1.0)),
-                no_speech_prob=float(segment.get("no_speech_prob", 0.0)),
-            )
+    if "segments" not in raw:
+        raise RuntimeError(
+            "전사 응답에 segments가 없습니다. 세그먼트 시각을 주는 모델이어야 합니다.\n"
+            "  vlogsrt.toml 의 [transcribe] transcribe_model / transcribe_format 을 확인하세요.\n"
+            f"  받은 필드: {sorted(raw)}"
         )
-    _warn_if_many_degenerate(dropped, len(rebased["segments"]))
+    spine: list[Segment] = []
+    for segment in raw["segments"] or []:
+        text = str(segment.get("text", "")).strip()
+        start = float(segment.get("start", 0.0)) + offset
+        end = float(segment.get("end", 0.0)) + offset
+        if end <= start or not text:
+            continue
+        spine.append(Segment(id=seg_id_base + len(spine), start=start, end=end, text=text))
     return spine
 
 
-def _warn_if_many_degenerate(dropped: int, total: int) -> None:
-    """길이 0인 세그먼트가 쏟아지면 whisper 디코딩이 무너졌다는 신호다.
-
-    정상 전사에서는 거의 없다. 실측(D13)에서는 1931개 중 452개가 이랬고,
-    같은 구간이 반복 환청 구간이었다.
-    """
-    if not dropped:
-        return
-    share = dropped / total if total else 0.0
-    message = f"길이 0인 whisper 세그먼트 {dropped}/{total}개를 건너뛰었다."
-    if share > 0.05:
-        log.warn(f"{message} ({share * 100:.0f}%) whisper 전사가 불안정하다.")
-    else:
-        log.debug(message)
-
-
-def parse_words(raw: dict[str, Any], offset: float = 0.0) -> list[Word]:
-    rebased = rebase_timestamps(raw, offset, 0)
-    return [Word.from_dict(word) for word in rebased["words"]]
-
-
-def build_spine(responses: Sequence[ChunkResponse]) -> tuple[list[Segment], list[Word]]:
+def build_spine(responses: Sequence[ChunkResponse]) -> list[Segment]:
     """청크별 응답을 이어 붙여 하나의 골격으로 만든다."""
     spine: list[Segment] = []
-    words: list[Word] = []
     for response in sorted(responses, key=lambda r: r.offset):
-        spine.extend(parse_spine(response.payload, response.offset, len(spine)))
-        words.extend(parse_words(response.payload, response.offset))
-    return spine, words
-
-
-def canonical_text(responses: Sequence[ChunkResponse]) -> str:
-    """gpt-transcribe 정본. 최종 SRT의 모든 글자는 여기서 나온다(불변 규칙 2)."""
-    parts = []
-    for response in sorted(responses, key=lambda r: r.offset):
-        text = str(response.payload.get("text", "")).strip()
-        if text:
-            parts.append(text)
-    return " ".join(parts)
-
-
-def overlap_ratio(segment: Segment, silences: Sequence[Span]) -> float:
-    if segment.duration <= 0:
-        return 0.0
-    covered = 0.0
-    for start, end in silences:
-        covered += max(0.0, min(segment.end, end) - max(segment.start, start))
-    return min(1.0, covered / segment.duration)
-
-
-def judge_verdict(segment: Segment, silences: Sequence[Span], cfg: Config) -> str:
-    """판정 순서가 중요하다. compression_ratio를 가장 먼저 본다."""
-    if segment.compression_ratio > cfg.compression_ratio_max:
-        return VERDICT_COMPRESSION_FAIL
-    if segment.avg_logprob < cfg.avg_logprob_min:
-        if segment.no_speech_prob > cfg.no_speech_prob_max:
-            return VERDICT_SILENT
-        return VERDICT_LOW_LOGPROB
-    if overlap_ratio(segment, silences) >= cfg.silence_overlap_ratio:
-        return VERDICT_SILENT
-    return VERDICT_OK
-
-
-def apply_verdicts(
-    spine: Sequence[Segment], silences: Sequence[Span], cfg: Config
-) -> list[Segment]:
-    """골격을 수정하지 않는다. 판정이 담긴 새 Segment를 만든다(불변 규칙 1)."""
-    judged = []
-    for segment in spine:
-        verdict = judge_verdict(segment, silences, cfg)
-        judged.append(segment if verdict == segment.verdict else _with_verdict(segment, verdict))
-    return judged
-
-
-def _with_verdict(segment: Segment, verdict: str) -> Segment:
-    return Segment(
-        id=segment.id,
-        start=segment.start,
-        end=segment.end,
-        text=segment.text,
-        avg_logprob=segment.avg_logprob,
-        compression_ratio=segment.compression_ratio,
-        no_speech_prob=segment.no_speech_prob,
-        verdict=verdict,
-    )
+        spine.extend(parse_segments(response.payload, response.offset, len(spine)))
+    return spine
 
 
 # ─────────────────────────────────────────────────────────────
@@ -451,28 +287,20 @@ def save_fixture(
     return path
 
 
-def save_meta(
-    fixture_dir: Path,
-    stem: str,
-    cfg: Config,
-    duration: float,
-    silences: Sequence[Span],
-    chunk_count: int,
-) -> Path:
+def save_meta(fixture_dir: Path, stem: str, cfg: Config, duration: float, chunk_count: int) -> Path:
     fixture_dir.mkdir(parents=True, exist_ok=True)
     path = _fixture_path(fixture_dir, stem, "meta")
     body = {
         "recorded_at": datetime.now(UTC).isoformat(timespec="seconds"),
-        "models": [cfg.whisper_model, cfg.gpt_model],
+        "model": cfg.transcribe_model,
         "params": {
+            "response_format": cfg.transcribe_format,
             "language": cfg.language,
             "extra_languages": list(cfg.extra_languages),
             "keywords": list(cfg.keywords),
-            "word_timestamps": cfg.word_timestamps,
             "prompt": cfg.prompt,
         },
         "duration": duration,
-        "silences": [list(span) for span in silences],
         "chunk_count": chunk_count,
         "cost_estimate": estimate_cost(duration, cfg),
     }
@@ -481,5 +309,4 @@ def save_meta(
 
 
 def estimate_cost(duration_seconds: float, cfg: Config) -> float:
-    minutes = duration_seconds / 60.0
-    return minutes * (cfg.whisper_cost_per_minute + cfg.gpt_cost_per_minute)
+    return duration_seconds / 60.0 * cfg.cost_per_minute

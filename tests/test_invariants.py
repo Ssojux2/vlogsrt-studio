@@ -15,7 +15,7 @@ import pytest
 from vlogsrt import pipeline
 from vlogsrt.config import Config
 from vlogsrt.hangul import strip_for_compare
-from vlogsrt.models import VERDICT_OK, Cue, Segment
+from vlogsrt.models import Cue, Segment
 
 SYNTHETIC = Path(__file__).parent / "fixtures" / "synthetic"
 ROOT = Path(__file__).resolve().parent.parent
@@ -28,11 +28,12 @@ def synthetic_fixtures(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_draft_cue_times_come_straight_from_the_spine(tmp_path: Path) -> None:
-    """규칙 1 — 정제 전 큐의 시각은 ok 세그먼트 원본값과 정확히 같다."""
+    """규칙 1 — 정제 전 큐의 시각은 세그먼트 원본값과 정확히 같다."""
     result = pipeline.run(VIDEO, Config(), tmp_path, force_offline=True)
-    ok_segments = [s for s in result.trace.spine if s.verdict == VERDICT_OK]
     draft = pipeline.spine_to_cues(list(result.trace.spine))
-    assert [(cue.start, cue.end) for cue in draft] == [(s.start, s.end) for s in ok_segments]
+    assert [(cue.start, cue.end) for cue in draft] == [
+        (segment.start, segment.end) for segment in result.trace.spine
+    ]
 
 
 def test_refined_cue_times_stay_within_refine_bounds(tmp_path: Path) -> None:
@@ -49,37 +50,27 @@ def test_refined_cue_times_stay_within_refine_bounds(tmp_path: Path) -> None:
         assert cue.end <= last.end + cfg.lead_out + cfg.min_duration + epsilon
 
 
-def test_srt_text_is_exactly_the_ok_spine_text(tmp_path: Path) -> None:
-    """규칙 1 — 출력 글자 전부가 ok 세그먼트에서 오고, 한 글자도 새지 않는다."""
+def test_srt_text_is_exactly_the_spine_text(tmp_path: Path) -> None:
+    """규칙 1 — 출력 글자 전부가 세그먼트에서 오고, 한 글자도 새지 않는다."""
     result = pipeline.run(VIDEO, Config(), tmp_path, force_offline=True)
     body = strip_for_compare(" ".join(cue.text for cue in result.cues))
-    spine_text = strip_for_compare(
-        " ".join(s.text for s in result.trace.spine if s.verdict == VERDICT_OK)
-    )
+    spine_text = strip_for_compare(" ".join(s.text for s in result.trace.spine))
     assert body == spine_text
 
 
-def test_verify_on_off_produces_identical_srt_bytes(tmp_path: Path) -> None:
-    """규칙 4 — 검증을 껐다 켜도 SRT는 바이트 단위로 같다."""
-    with_verify = pipeline.run(VIDEO, Config(), tmp_path / "on", force_offline=True)
-    without = pipeline.run(
-        VIDEO, Config(), tmp_path / "off", force_offline=True, stop_after="output"
-    )
-    assert with_verify.outputs["srt"].read_bytes() == without.outputs["srt"].read_bytes()
-
-
-def test_oversized_cues_are_never_silent(tmp_path: Path) -> None:
-    """0.77초에 900자 같은 큐 부류의 봉쇄 — 용량 초과 큐는 반드시 검사에 걸린다.
-
-    자를 수 없는 큐(NO_SPLIT_POINT)는 존재할 수 있다. 금지되는 것은
-    아무 표시 없이 지나가는 초과 큐다.
-    """
+def test_cues_never_overlap_and_never_exceed_capacity(tmp_path: Path) -> None:
+    """0.77초에 900자 같은 큐 부류의 봉쇄. 이제 이걸 잡는 검사 단계는 없다 —
+    정제가 구조적으로 보장하고, 그 보장을 여기서 못 박는다."""
     cfg = Config()
     result = pipeline.run(VIDEO, cfg, tmp_path, force_offline=True)
-    flagged = {issue.cue_id for issue in result.issues}
     for cue in result.cues:
+        assert cue.end > cue.start
+        assert cue.text.strip()
+        assert len(cue.lines) <= cfg.max_lines
         if len(cue.text) > cfg.max_chars_per_cue:
-            assert cue.index in flagged or cue.flags
+            assert cue.flags, f"큐 {cue.index}가 표시 없이 용량을 넘었다"
+    for previous, following in zip(result.cues, result.cues[1:], strict=False):
+        assert following.start >= previous.end
 
 
 def test_spine_is_immutable() -> None:
@@ -94,6 +85,13 @@ def test_offline_run_makes_no_network_call(tmp_path: Path) -> None:
     """conftest가 소켓을 막아둔다. 여기까지 오면 픽스처만 쓴 것이다."""
     result = pipeline.run(VIDEO, Config(), tmp_path, force_offline=True)
     assert result.cues
+
+
+def test_the_deleted_inspection_layers_stay_deleted() -> None:
+    """규칙 4 — 검사·재검증 계층은 되살리지 않는다(D21)."""
+    package = ROOT / "vlogsrt"
+    for name in ("verify.py", "loops.py", "validate.py", "report.py", "mapping.py", "gapfill.py"):
+        assert not (package / name).exists(), f"{name}이 부활했다"
 
 
 def test_invariant_script_passes() -> None:

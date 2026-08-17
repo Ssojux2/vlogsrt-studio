@@ -11,7 +11,7 @@ import pytest
 
 from ui import service
 from ui.service import UiError, build_config
-from vlogsrt import log, pipeline
+from vlogsrt import log, pipeline, transcribe
 from vlogsrt.config import Config
 from vlogsrt.models import Trace
 
@@ -69,7 +69,6 @@ def fake_result(outdir: Path) -> pipeline.RunResult:
     return pipeline.RunResult(
         trace=Trace(source="x", duration=10.0, spine=(), config_snapshot={}),
         cues=(),
-        issues=(),
         outputs={"srt": srt},
     )
 
@@ -279,7 +278,9 @@ def test_progress_streams_before_the_slow_part(
     before_slow = steps[-2].log
     assert "OpenAI 호출" in before_slow
     assert "몇 분 걸립니다" in before_slow
-    assert "$0.06" in before_slow
+    # 금액을 박지 않는다. 모델이 하나가 되며 값이 반으로 줄었다(D21).
+    # 지켜야 할 계약은 "느린 단계 전에 예상 비용을 보여준다"이지 특정 숫자가 아니다.
+    assert f"${transcribe.estimate_cost(300.0, Config()):.3f}" in before_slow
     assert seen == ["전사 시작"]
 
 

@@ -22,46 +22,27 @@ class Config:
     extra_languages: tuple[str, ...] = ("ko", "en")
     prompt: str = ""
     keywords: tuple[str, ...] = ()
-    whisper_model: str = "whisper-1"
-    gpt_model: str = "gpt-transcribe"
-    word_timestamps: bool = True
+    # 세그먼트 시각을 주는 모델이어야 한다. 시각이 없으면 SRT를 만들 수 없다(D21).
+    # 계정에 이 모델이 없으면 `whisper-1` + `verbose_json`으로 되돌릴 수 있다 —
+    # 두 응답 모두 `segments[].{start,end,text}` 형태라 파서가 같다.
+    transcribe_model: str = "gpt-4o-transcribe-diarize"
+    transcribe_format: str = "diarized_json"
     api_max_retries: int = 4
     api_backoff_base: float = 2.0
-    whisper_cost_per_minute: float = 0.006
-    gpt_cost_per_minute: float = 0.006
+    cost_per_minute: float = 0.006
 
     # ─── 오디오 전처리 ───────────────────────────────────────
     sample_rate: int = 16000
     channels: int = 1
     audio_bitrate: str = "64k"
-    # 저역 제거 — 정규화 **전에** 건다. 사람 목소리 기본 주파수는 85Hz 위라
-    # 120Hz 아래에는 말소리 정보가 없다. 차·바람 웅웅거림만 남는다(D16).
-    silence_threshold_db: float = -35.0
-    silence_min_duration: float = 0.5
 
     # ─── 청크 분할 ───────────────────────────────────────────
     chunk_max_bytes: int = 24_000_000
-    # whisper-1은 청크를 앞에서 뒤로 순차 디코딩하며 직전 출력을 다음 창의 조건으로
-    # 쓴다. 그래서 조각이 길수록 뒤로 갈수록 무너진다. 실측(D13): 38분짜리 조각에서
-    # 같은 문장을 103회 반복해 570초를 통째로 날렸다. 크기 한도만 보면 24MB에
-    # 38분이 들어가므로, 길이 한도를 따로 둔다.
-    chunk_max_seconds: float = 600.0
-    chunk_search_ratio: float = 0.25
-    chunk_min_duration: float = 5.0
-
-    # ─── whisper 세그먼트 판정 ───────────────────────────────
-    # 아래 세 값은 OpenAI API 레퍼런스의 환청 판정 기준이다. 임의로 바꾸지 마라.
-    compression_ratio_max: float = 2.4
-    avg_logprob_min: float = -1.0
-    no_speech_prob_max: float = 0.6
-    silence_overlap_ratio: float = 0.85
-
-    # ─── 반복 환청 검출 (세그먼트 간) ────────────────────────
-    # 압축률은 세그먼트 **안쪽** 반복만 본다. 아래 값은 세그먼트를 가로지르는
-    # 반복 루프를 세는 기준이며, 외부 근거가 아니라 이 프로젝트의 관측값이다.
-    loop_min_repeats: int = 3
-    loop_min_seconds: float = 2.0
-    loop_min_chars: int = 2
+    # 크기 한도(24MB)만 보면 64kbps에서 50분이 한 조각에 들어간다. 그보다 짧게
+    # 끊는 이유는 실패 시 재호출 비용과 경계 손실 사이의 절충이며, 외부 근거가
+    # 있는 값이 아니다. (600초이던 시절의 근거였던 whisper-1 순차 디코딩 병리는
+    # 모델과 함께 사라졌다 — D13, D21.)
+    chunk_max_seconds: float = 1500.0
 
     # ─── 정제 ────────────────────────────────────────────────
     max_chars_per_line: int = 16
@@ -82,17 +63,10 @@ class Config:
         "고", "며", "면", "지만", "는데", "인데", "해서", "하고",
     )  # fmt: skip
 
-    # ─── 검증 ────────────────────────────────────────────────
-    # gpt-transcribe 대조. 플래그만 만들고 출력은 절대 바꾸지 않는다(불변 규칙 4).
-    verify_chunk_sim_floor: float = 0.80
-    verify_cue_match_floor: float = 0.60
-    verify_short_cue_chars: int = 4  # "네", "음" 같은 짧은 큐는 대조 무의미
-
     # ─── 평가 ────────────────────────────────────────────────
     boundary_tol: float = 0.3
     start_tol: float = 0.2
     mae_match_tol: float = 2.0  # MAE 계산 시 같은 큐로 볼 최대 시차
-    review_seconds_per_flag: float = 20.0
 
     @property
     def max_chars_per_cue(self) -> int:

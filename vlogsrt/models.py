@@ -1,4 +1,4 @@
-"""데이터 모델. 전부 frozen이다 — spine은 생성 후 수정되지 않는다(불변 규칙 1)."""
+"""데이터 모델. 전부 frozen이다 — spine은 생성 후 수정되지 않는다(불변 규칙 2)."""
 
 from __future__ import annotations
 
@@ -9,45 +9,23 @@ from typing import Any
 
 from . import TRACE_VERSION
 
-VERDICT_OK = "ok"
-VERDICT_LOW_LOGPROB = "low_logprob"
-VERDICT_COMPRESSION_FAIL = "compression_fail"
-VERDICT_SILENT = "silent"
-
 ORIGIN_SPINE = "spine"
 ORIGIN_SPLIT = "split"
 ORIGIN_MERGE = "merge"
 
 
 @dataclass(frozen=True, slots=True)
-class Word:
-    """whisper `words[]` 항목. 어절 소유 판정에만 쓴다 — 큐 시각을 정하지 않는다."""
-
-    text: str
-    start: float
-    end: float
-
-    @staticmethod
-    def from_dict(raw: dict[str, Any]) -> Word:
-        return Word(
-            text=str(raw.get("word", raw.get("text", ""))),
-            start=float(raw.get("start", 0.0)),
-            end=float(raw.get("end", 0.0)),
-        )
-
-
-@dataclass(frozen=True, slots=True)
 class Segment:
-    """골격 세그먼트. whisper-1 원본에서 유래하며 이후 절대 수정되지 않는다."""
+    """골격 세그먼트. 전사 응답의 `segments[]` 항목 그대로이며 이후 수정되지 않는다.
+
+    `id`는 응답의 값이 아니라 우리가 붙인 통번호다. diarize 응답은 `"seg_0"` 같은
+    문자열 id를 주고, 청크마다 0부터 다시 시작한다.
+    """
 
     id: int
     start: float
     end: float
     text: str
-    avg_logprob: float = 0.0
-    compression_ratio: float = 1.0
-    no_speech_prob: float = 0.0
-    verdict: str = VERDICT_OK
 
     @property
     def duration(self) -> float:
@@ -60,10 +38,6 @@ class Segment:
             start=float(raw["start"]),
             end=float(raw["end"]),
             text=str(raw["text"]),
-            avg_logprob=float(raw.get("avg_logprob", 0.0)),
-            compression_ratio=float(raw.get("compression_ratio", 1.0)),
-            no_speech_prob=float(raw.get("no_speech_prob", 0.0)),
-            verdict=str(raw.get("verdict", VERDICT_OK)),
         )
 
 
@@ -126,16 +100,6 @@ class Chunk:
 
 
 @dataclass(frozen=True, slots=True)
-class Issue:
-    """정제 결과 이상치. level은 ERR / WARN / INFO."""
-
-    level: str
-    code: str
-    cue_id: int
-    message: str
-
-
-@dataclass(frozen=True, slots=True)
 class Trace:
     """파이프라인 전 과정의 스냅샷. `redo`는 이 파일만 읽고 API를 호출하지 않는다."""
 
@@ -143,10 +107,7 @@ class Trace:
     duration: float
     spine: tuple[Segment, ...]
     cues: tuple[Cue, ...] = ()
-    words: tuple[Word, ...] = ()
-    silences: tuple[tuple[float, float], ...] = ()
     config_snapshot: dict[str, Any] = field(default_factory=dict)
-    warnings: tuple[str, ...] = ()
     version: str = TRACE_VERSION
 
     def to_dict(self) -> dict[str, Any]:
@@ -156,10 +117,7 @@ class Trace:
             "duration": self.duration,
             "spine": [asdict(seg) for seg in self.spine],
             "cues": [asdict(cue) for cue in self.cues],
-            "words": [asdict(word) for word in self.words],
-            "silences": [list(span) for span in self.silences],
             "config_snapshot": self.config_snapshot,
-            "warnings": list(self.warnings),
         }
 
     def save(self, path: Path) -> Path:
@@ -190,9 +148,6 @@ class Trace:
             duration=float(raw.get("duration", 0.0)),
             spine=tuple(Segment.from_dict(s) for s in raw.get("spine", ())),
             cues=tuple(Cue.from_dict(c) for c in raw.get("cues", ())),
-            words=tuple(Word.from_dict(w) for w in raw.get("words", ())),
-            silences=tuple((float(a), float(b)) for a, b in raw.get("silences", ())),
             config_snapshot=dict(raw.get("config_snapshot", {})),
-            warnings=tuple(raw.get("warnings", ())),
             version=version,
         )

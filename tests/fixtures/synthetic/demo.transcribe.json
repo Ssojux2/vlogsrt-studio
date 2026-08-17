@@ -1,0 +1,36 @@
+{
+  "chunks": [
+    {
+      "index": 0,
+      "offset": 0.0,
+      "response": {
+        "task": "transcribe",
+        "duration": 12.0,
+        "text": "안녕하세요 오늘은 망원동에 왔습니다 여기 블루펭귄이라는 술집이 있는데요 어 낮술 하기 정말 좋은 곳이에요",
+        "segments": [
+          {"id": "seg_0", "type": "transcript.text.segment", "speaker": "A", "start": 0.0, "end": 2.4, "text": "안녕하세요"},
+          {"id": "seg_1", "type": "transcript.text.segment", "speaker": "A", "start": 2.6, "end": 5.0, "text": "오늘은 망원동에 왔습니다"},
+          {"id": "seg_2", "type": "transcript.text.segment", "speaker": "A", "start": 5.2, "end": 7.4, "text": "여기 블루펭귄이라는 술집이 있는데요"},
+          {"id": "seg_3", "type": "transcript.text.segment", "speaker": "A", "start": 7.6, "end": 8.2, "text": "어"},
+          {"id": "seg_4", "type": "transcript.text.segment", "speaker": "A", "start": 8.4, "end": 11.6, "text": "낮술 하기 정말 좋은 곳이에요"}
+        ]
+      }
+    },
+    {
+      "index": 1,
+      "offset": 12.0,
+      "response": {
+        "task": "transcribe",
+        "duration": 12.0,
+        "text": "일단 생맥주 한 잔 시켰고요 안주는 감자튀김이랑 소시지를 시켰습니다 다음에는 연남동으로 가볼게요 구독 부탁드려요",
+        "segments": [
+          {"id": "seg_0", "type": "transcript.text.segment", "speaker": "A", "start": 0.0, "end": 3.2, "text": "일단 생맥주 한 잔 시켰고요"},
+          {"id": "seg_1", "type": "transcript.text.segment", "speaker": "A", "start": 3.4, "end": 6.8, "text": "안주는 감자튀김이랑 소시지를 시켰습니다"},
+          {"id": "seg_2", "type": "transcript.text.segment", "speaker": "A", "start": 6.85, "end": 6.9, "text": "   "},
+          {"id": "seg_3", "type": "transcript.text.segment", "speaker": "A", "start": 7.0, "end": 9.2, "text": "다음에는 연남동으로 가볼게요"},
+          {"id": "seg_4", "type": "transcript.text.segment", "speaker": "A", "start": 9.4, "end": 12.0, "text": "구독 부탁드려요"}
+        ]
+      }
+    }
+  ]
+}

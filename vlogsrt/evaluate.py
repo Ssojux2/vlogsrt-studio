@@ -8,7 +8,9 @@ from dataclasses import dataclass
 from .config import Config
 from .hangul import strip_for_compare
 from .models import Cue
-from .validate import EPSILON
+
+# 부동소수 잡음이 임계값 비교를 흔들지 않게 하는 여유값. 임계값이 아니다.
+EPSILON = 1e-6
 
 _DEFAULTS = Config()
 
@@ -214,3 +216,21 @@ def format_metrics(metrics: Metrics) -> str:
             f"큐 수            {metrics.hyp_cues} (정답 {metrics.ref_cues})",
         ]
     )
+
+
+def build_dashboard_row(name: str, label: str, metrics: dict[str, float | int]) -> str:
+    mae = metrics["cue_start_mae"]
+    mae_text = "inf" if mae == float("inf") else f"{float(mae) * 1000:.0f}ms"
+    return (
+        f"| {label} | {name} | {float(metrics['cer']) * 100:.1f}% "
+        f"| {float(metrics['proper_noun_accuracy']) * 100:.1f}% "
+        f"| {mae_text} | {float(metrics['cue_start_hit_rate']) * 100:.1f}% "
+        f"| {float(metrics['boundary_f1']):.3f} "
+        f"| {float(metrics['violation_rate']) * 100:.1f}% | {metrics['hyp_cues']} |"
+    )
+
+
+DASHBOARD_HEADER = (
+    "| 버전 | 소스 | CER | 고유명사 | 큐시작 MAE | ±200ms | 큐경계 F1 | 위반율 | 큐 수 |\n"
+    "|---|---|---|---|---|---|---|---|---|"
+)

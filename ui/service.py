@@ -22,7 +22,6 @@ from pathlib import Path
 
 from vlogsrt import env, keywords, pipeline, preprocess, transcribe
 from vlogsrt.config import Config, load_config
-from vlogsrt.validate import ERR, WARN
 
 VIDEO_SUFFIXES = (".mp4", ".mov", ".m4v", ".mkv", ".avi", ".webm", ".m4a", ".mp3", ".wav")
 _QUOTES = "\"'“”‘’"
@@ -107,8 +106,8 @@ def status_line() -> str:
 def build_config(prompt: str = "") -> Config:
     """`vlogsrt.toml`과 기본값에 화면에서 받은 힌트만 얹는다.
 
-    `prompt`는 whisper에게 **지시가 아니라 직전 자막 텍스트로** 전달된다.
-    그래서 화면에서 사람이 매번 정할 수 있어야 한다(D13).
+    힌트는 회차마다 다르다(등장하는 고유명사가 다르다). 그래서 설정 파일이 아니라
+    화면에서 사람이 매번 정한다.
     """
     cfg = load_config()
     entries = keywords.load_keywords(base_file=env.project_root() / keywords.BASE_KEYWORDS)
@@ -238,7 +237,7 @@ def stream_subtitles(raw_path: str, prompt: str = "") -> Iterator[RunReport]:
 
 
 def _transcribe(video: Path, cfg: Config, scratch: Path) -> pipeline.RunResult:
-    """임시 폴더 안에서만 돈다. `artifacts=False`라 trace·리포트를 쓰지 않는다."""
+    """임시 폴더 안에서만 돈다. `artifacts=False`라 trace를 쓰지 않는다."""
     return pipeline.run(
         video,
         cfg,
@@ -329,10 +328,7 @@ _LOG_PREFIX = {"WARN": "경고", "ERR": "오류"}
 
 
 def _progress_lines(captured: str) -> list[str]:
-    """파이프라인 로그에서 사람이 볼 줄만 남긴다.
-
-    경고는 눈에 띄어야 한다. whisper가 반복 루프에 빠졌다는 알림이 여기로 온다.
-    """
+    """파이프라인 로그에서 사람이 볼 줄만 남긴다. 경고는 눈에 띄어야 한다."""
     kept = []
     for raw in captured.splitlines():
         text = raw.strip().removeprefix("›").strip()
@@ -345,12 +341,8 @@ def _progress_lines(captured: str) -> list[str]:
 
 
 def _summary(result: pipeline.RunResult) -> str:
-    errors = sum(1 for issue in result.issues if issue.level == ERR)
-    warnings = sum(1 for issue in result.issues if issue.level == WARN)
-    head = f"결과   큐 {len(result.cues)}개 · 오류 {errors} · 경고 {warnings}"
-    if result.verification is None:
-        return f"{head} · 검증 생략"
-    return f"{head} · 확인할 큐 {len(result.verification.suspects)}개"
+    last = result.cues[-1].end if result.cues else 0.0
+    return f"결과   큐 {len(result.cues)}개 · 마지막 자막 {last:.0f}초"
 
 
 def _join(lines: list[str], *extra: str) -> str:

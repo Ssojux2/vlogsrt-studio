@@ -12,8 +12,7 @@ from dataclasses import replace
 from . import log
 from .config import Config
 from .layout import FORCED_BREAK, break_lines, break_text
-from .models import ORIGIN_MERGE, ORIGIN_SPLIT, Cue, Word
-from .validate import validate
+from .models import ORIGIN_MERGE, ORIGIN_SPLIT, Cue
 
 __all__ = [
     "FORCED_BREAK",
@@ -26,7 +25,6 @@ __all__ = [
     "resolve_overlaps",
     "split_cue",
     "split_pass",
-    "validate",
 ]
 
 NO_SPLIT_POINT = "no_split_point"
@@ -45,25 +43,6 @@ def needs_split(cue: Cue, cfg: Config) -> bool:
     )
 
 
-def _words_inside(cue: Cue, words: Sequence[Word]) -> list[Word]:
-    return [word for word in words if word.start >= cue.start and word.end <= cue.end]
-
-
-def _longest_pause(cue: Cue, words: Sequence[Word], cfg: Config) -> tuple[float, float] | None:
-    """큐 안 단어 사이의 최대 휴지. `pause_split`보다 짧으면 쓸모없다."""
-    inside = _words_inside(cue, words)
-    if len(inside) < 2:
-        return None
-    best: tuple[float, float] | None = None
-    best_length = cfg.pause_split
-    for previous, following in zip(inside, inside[1:], strict=False):
-        gap = following.start - previous.end
-        if gap >= best_length:
-            best_length = gap
-            best = (previous.end, following.start)
-    return best
-
-
 def _char_split_index(text: str, ratio: float) -> int | None:
     """비율에 가장 가까운 어절 경계. 공백이 없으면 None."""
     spaces = [index for index, ch in enumerate(text) if ch == " " and 0 < index < len(text) - 1]
@@ -73,30 +52,25 @@ def _char_split_index(text: str, ratio: float) -> int | None:
     return min(spaces, key=lambda index: abs(index - target))
 
 
-def split_cue(cue: Cue, words: Sequence[Word], cfg: Config, depth: int = 0) -> list[Cue]:
-    """자막으로 너무 길거나 빽빽한 큐를 자른다. 시각은 원본 큐 안에서만 움직인다."""
+def split_cue(cue: Cue, cfg: Config, depth: int = 0) -> list[Cue]:
+    """자막으로 너무 길거나 빽빽한 큐를 자른다. 시각은 원본 큐 안에서만 움직인다.
+
+    자르는 지점은 글자 수 비례다. 단어 타임스탬프로 가장 긴 휴지를 찾던 시절이
+    있었지만, 지금 모델은 `words[]`를 주지 않는다(D21). 말이 고르지 않으면 분할
+    지점이 실제 발화보다 앞뒤로 밀릴 수 있다 — 다만 원본 큐 범위는 벗어나지 않는다.
+    """
     if not needs_split(cue, cfg) or depth >= cfg.max_split_depth:
         return [cue]
     if cue.duration <= cfg.min_duration * 2:
         return [cue]
 
     text = cue.text
-    pause = _longest_pause(cue, words, cfg)
-    if pause is not None:
-        ratio = (pause[0] - cue.start) / cue.duration
-        index = _char_split_index(text, ratio)
-        first_end, second_start = pause
-    else:
-        index = _char_split_index(text, 0.5)
-        if index is None:
-            return [cue.with_flag(NO_SPLIT_POINT)]
-        ratio = index / len(text)
-        boundary = cue.start + cue.duration * ratio
-        first_end = boundary - cfg.min_gap / 2
-        second_start = boundary + cfg.min_gap / 2
-
+    index = _char_split_index(text, 0.5)
     if index is None:
         return [cue.with_flag(NO_SPLIT_POINT)]
+    boundary = cue.start + cue.duration * (index / len(text))
+    first_end = boundary - cfg.min_gap / 2
+    second_start = boundary + cfg.min_gap / 2
 
     first_text = text[:index].strip()
     second_text = text[index:].strip()
@@ -109,15 +83,15 @@ def split_cue(cue: Cue, words: Sequence[Word], cfg: Config, depth: int = 0) -> l
     first = replace(cue, end=first_end, lines=(first_text,), origin=ORIGIN_SPLIT)
     second = replace(cue, start=second_start, lines=(second_text,), origin=ORIGIN_SPLIT)
     return [
-        *split_cue(first, words, cfg, depth + 1),
-        *split_cue(second, words, cfg, depth + 1),
+        *split_cue(first, cfg, depth + 1),
+        *split_cue(second, cfg, depth + 1),
     ]
 
 
-def split_pass(cues: Sequence[Cue], words: Sequence[Word], cfg: Config) -> list[Cue]:
+def split_pass(cues: Sequence[Cue], cfg: Config) -> list[Cue]:
     result: list[Cue] = []
     for cue in cues:
-        result.extend(split_cue(cue, words, cfg))
+        result.extend(split_cue(cue, cfg))
     return result
 
 
@@ -239,11 +213,9 @@ def renumber(cues: Sequence[Cue]) -> list[Cue]:
     return [replace(cue, index=position) for position, cue in enumerate(cues, start=1)]
 
 
-def refine(
-    cues: Sequence[Cue], words: Sequence[Word], cfg: Config, duration: float = 0.0
-) -> list[Cue]:
+def refine(cues: Sequence[Cue], cfg: Config, duration: float = 0.0) -> list[Cue]:
     """정제 전 과정. `redo`가 부르는 것도 이 함수다."""
-    working = split_pass(cues, words, cfg)
+    working = split_pass(cues, cfg)
     working = merge_pass(working, cfg)
     working = adjust_timing(working, cfg, duration)
     working = resolve_overlaps(working, cfg)

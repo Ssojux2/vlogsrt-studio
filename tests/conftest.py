@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from vlogsrt.config import Config
-from vlogsrt.models import Cue, Segment, Word
+from vlogsrt.models import Cue, Segment
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures"
 
@@ -75,28 +75,5 @@ def make_cue(
     )
 
 
-def make_segment(
-    seg_id: int,
-    start: float,
-    end: float,
-    text: str,
-    *,
-    verdict: str = "ok",
-    avg_logprob: float = -0.2,
-    compression_ratio: float = 1.4,
-    no_speech_prob: float = 0.05,
-) -> Segment:
-    return Segment(
-        id=seg_id,
-        start=start,
-        end=end,
-        text=text,
-        avg_logprob=avg_logprob,
-        compression_ratio=compression_ratio,
-        no_speech_prob=no_speech_prob,
-        verdict=verdict,
-    )
-
-
-def make_word(text: str, start: float, end: float) -> Word:
-    return Word(text=text, start=start, end=end)
+def make_segment(seg_id: int, start: float, end: float, text: str) -> Segment:
+    return Segment(id=seg_id, start=start, end=end, text=text)

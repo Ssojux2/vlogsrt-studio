@@ -76,10 +76,10 @@ def check_dependencies() -> list[str]:
 
 
 def check_frozen_models() -> list[str]:
-    """규칙 1 — spine은 수정 불가. 데이터클래스가 frozen이어야 강제된다."""
+    """규칙 2 — spine은 수정 불가. 데이터클래스가 frozen이어야 강제된다."""
     body = (PACKAGE / "models.py").read_text(encoding="utf-8")
     failures = []
-    for name in ("Segment", "Cue", "Word", "Trace"):
+    for name in ("Segment", "Cue", "Trace"):
         pattern = rf"@dataclass\(frozen=True[^)]*\)\s*\nclass {name}\b"
         if not re.search(pattern, body):
             failures.append(f"models.py: {name}이 frozen dataclass가 아니다")
@@ -96,42 +96,44 @@ def check_env_untouched() -> list[str]:
     return failures
 
 
-def check_mapping_stays_dead() -> list[str]:
-    """D19 — 사상 계열은 삭제됐다. 부활은 설계 위반이다."""
+DELETED_MODULES = {
+    "mapping.py": "D19 — 사상(mapping)",
+    "gapfill.py": "D19 — 놓친 구간 되돌리기",
+    "verify.py": "D21 — 교차 검증",
+    "loops.py": "D21 — 되풀이 강등",
+    "validate.py": "D21 — 정제 결과 검사",
+    "report.py": "D21 — 검토 리포트",
+}
+
+
+def check_inspection_stays_dead() -> list[str]:
+    """규칙 4 — 검사·재검증 계층은 의도적으로 삭제했다. 부활은 설계 위반이다."""
     failures = []
-    for name in ("mapping.py", "gapfill.py"):
+    for name, why in DELETED_MODULES.items():
         if (PACKAGE / name).exists():
-            failures.append(f"vlogsrt/{name}: 사상 계열이 부활했다. D19를 다시 읽어라")
+            failures.append(f"vlogsrt/{name}: 삭제된 계층이 부활했다 ({why})")
     return failures
 
 
-def check_verify_is_read_only() -> list[str]:
-    """규칙 4 — verify.py는 큐를 만들지도 고치지도 못한다. 플래그만 낸다."""
-    body = (PACKAGE / "verify.py").read_text(encoding="utf-8")
-    failures = []
-    forbidden = (
-        (r"\bCue\(", "Cue 생성"),
-        (r"\breplace\(", "dataclasses.replace 호출"),
-        (r"\b(save_srt|write_srt)\b", "SRT 쓰기"),
-        (r"from\s+\.(refine|layout|output)\b", "정제·출력 모듈 import"),
-    )
-    for pattern, label in forbidden:
-        match = re.search(pattern, body)
-        if match:
-            line = body[: match.start()].count("\n") + 1
-            failures.append(f"vlogsrt/verify.py:{line} 검증이 출력에 손댄다 — {label}")
-    return failures
-
-
-def check_whisper_gets_no_prompt() -> list[str]:
-    """규칙 5 — whisper 호출에 prompt 금지. 힌트 한 줄이 앞 9분을 날렸다(D16)."""
+def check_one_transcription_call() -> list[str]:
+    """규칙 1 — 모델은 하나다. 호출 지점이 둘이면 출처가 둘이라는 뜻이다."""
     body = (PACKAGE / "transcribe.py").read_text(encoding="utf-8")
-    for match in re.finditer(r"transcriptions\.create\((?P<args>[^)]*)\)", body, re.DOTALL):
-        args = match.group("args")
-        if "whisper_model" in args and "prompt" in args:
-            line = body[: match.start()].count("\n") + 1
-            return [f"transcribe.py:{line} whisper 호출에 prompt가 있다 (D16 재발)"]
+    calls = re.findall(r"transcriptions\.create\(", body)
+    if len(calls) != 1:
+        return [f"transcribe.py: transcriptions.create 호출이 {len(calls)}개다 (1개여야 한다)"]
     return []
+
+
+def check_no_hardcoded_model() -> list[str]:
+    """규칙 6 — 모델 이름도 config에서 온다. 코드에 박으면 되돌리기가 커밋이 된다."""
+    failures = []
+    for path in _sources():
+        if path.name == "config.py":
+            continue
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+            if re.search(r"[\"'](whisper-1|gpt-[\w.-]*transcribe[\w.-]*)[\"']", line):
+                failures.append(f"{path.relative_to(ROOT)}:{number} 모델 이름이 코드에 박혀 있다")
+    return failures
 
 
 CHECKS = (
@@ -141,9 +143,9 @@ CHECKS = (
     ("의존성 3개", check_dependencies),
     ("frozen 모델", check_frozen_models),
     (".env 보호", check_env_untouched),
-    ("사상 부활 금지", check_mapping_stays_dead),
-    ("검증 읽기 전용", check_verify_is_read_only),
-    ("whisper prompt 금지", check_whisper_gets_no_prompt),
+    ("검사 계층 부활 금지", check_inspection_stays_dead),
+    ("전사 호출 1개", check_one_transcription_call),
+    ("모델 이름 비하드코딩", check_no_hardcoded_model),
 )
 
 
