@@ -28,6 +28,7 @@ class Prepared:
     duration: float
     silences: tuple[Span, ...]
     chunks: tuple[Chunk, ...]
+    source: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,7 +63,11 @@ def prepare(video: Path, cfg: Config, *, offline: bool, workdir: Path | None = N
             silences = tuple((float(a), float(b)) for a, b in meta.get("silences", []))
             log.info(f"메타 픽스처 사용: {stem} ({float(meta['duration']):.1f}초)")
             return Prepared(
-                stem=stem, duration=float(meta["duration"]), silences=silences, chunks=()
+                stem=stem,
+                duration=float(meta["duration"]),
+                silences=silences,
+                chunks=(),
+                source=str(video),
             )
         if not video.is_file():
             raise RuntimeError(
@@ -92,7 +97,9 @@ def prepare(video: Path, cfg: Config, *, offline: bool, workdir: Path | None = N
         silence_cache.write_text(json.dumps([list(span) for span in silences]), encoding="utf-8")
 
     chunks = tuple(preprocess.make_chunks(audio, cfg, cache, list(silences)))
-    return Prepared(stem=stem, duration=duration, silences=silences, chunks=chunks)
+    return Prepared(
+        stem=stem, duration=duration, silences=silences, chunks=chunks, source=str(video)
+    )
 
 
 # ─────────────────────────────────────────────────────────────
@@ -101,7 +108,7 @@ def prepare(video: Path, cfg: Config, *, offline: bool, workdir: Path | None = N
 
 
 def build_job(prepared: Prepared) -> TranscriptionJob:
-    return TranscriptionJob(stem=prepared.stem, chunks=prepared.chunks)
+    return TranscriptionJob(stem=prepared.stem, chunks=prepared.chunks, source=prepared.source)
 
 
 def fetch_spine(

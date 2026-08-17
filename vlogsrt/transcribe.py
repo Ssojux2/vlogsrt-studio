@@ -43,6 +43,7 @@ class ChunkResponse:
 class TranscriptionJob:
     stem: str
     chunks: tuple[Chunk, ...]
+    source: str = ""
 
 
 class Transcriber(Protocol):
@@ -62,18 +63,19 @@ def _fixture_path(fixture_dir: Path, stem: str, kind: str) -> Path:
     return fixture_dir / f"{stem}.{kind}.json"
 
 
-def _missing_fixture(path: Path, stem: str) -> RuntimeError:
+def _missing_fixture(path: Path, stem: str, source: str = "") -> RuntimeError:
+    video = source or f"golden/{stem}.mp4"
     return RuntimeError(
         f"픽스처가 없습니다: {path}\n"
         f"사람이 직접 다음을 실행해야 합니다:\n"
-        f"  vlogsrt record golden/{stem}.mp4\n"
+        f"  vlogsrt record {video}\n"
         f"예상 비용: 약 $0.06 (5분 영상 기준)"
     )
 
 
-def _load_responses(path: Path, stem: str) -> list[ChunkResponse]:
+def _load_responses(path: Path, stem: str, source: str = "") -> list[ChunkResponse]:
     if not path.is_file():
-        raise _missing_fixture(path, stem)
+        raise _missing_fixture(path, stem, source)
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
@@ -99,10 +101,14 @@ class FixtureTranscriber:
     fixture_dir: Path
 
     def whisper(self, job: TranscriptionJob, cfg: Config) -> list[ChunkResponse]:
-        return _load_responses(_fixture_path(self.fixture_dir, job.stem, "whisper"), job.stem)
+        return _load_responses(
+            _fixture_path(self.fixture_dir, job.stem, "whisper"), job.stem, job.source
+        )
 
     def gpt(self, job: TranscriptionJob, cfg: Config) -> list[ChunkResponse]:
-        return _load_responses(_fixture_path(self.fixture_dir, job.stem, "gpt"), job.stem)
+        return _load_responses(
+            _fixture_path(self.fixture_dir, job.stem, "gpt"), job.stem, job.source
+        )
 
 
 def load_fixture_responses(path: Path) -> list[ChunkResponse]:
