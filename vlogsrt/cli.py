@@ -9,7 +9,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from . import __version__, env, evaluate, keywords, log, pipeline, preprocess, transcribe
+from . import __version__, env, evaluate, keywords, log, pipeline, preprocess, spans, transcribe
 from .config import Config, format_config, load_config
 from .evaluate import DASHBOARD_HEADER, build_dashboard_row
 from .output import parse_srt
@@ -198,14 +198,22 @@ def _write_dashboard(path: Path, rows: list[str]) -> None:
 
 
 def cmd_probe(args: argparse.Namespace) -> int:
+    """API를 부르지 않고 무음 검출까지만 돌려본다. 타이밍이 잡히는지 미리 본다."""
     cfg = config_from_args(args)
     duration = preprocess.probe_duration(args.video)
     workdir = env.work_dir() / "probe"
     audio = preprocess.extract_audio(args.video, workdir / f"{args.video.stem}.mp3", cfg)
     size = audio.stat().st_size
-    log.out(f"길이     {duration:.2f}초")
-    log.out(f"오디오   {audio} ({size / 1_000_000:.2f}MB)")
-    log.out(f"청크     {preprocess.chunk_count(duration, size, cfg)}개")
+    silences = preprocess.detect_silence(audio, cfg, duration)
+    speech = spans.speech_spans(silences, duration, cfg)
+    batches = spans.group_spans(speech, size, duration, cfg)
+    talk = sum(end - start for start, end in speech)
+    log.out(f"길이       {duration:.2f}초")
+    log.out(f"오디오     {audio} ({size / 1_000_000:.2f}MB)")
+    log.out(f"무음       {len(silences)}구간")
+    log.out(f"발화       {len(speech)}구간 · {talk:.1f}초 ({talk / duration * 100:.0f}%)")
+    log.out(f"묶음       {len(batches)}개 = 요청 {len(batches)}회")
+    pipeline.warn_about_coarse_spans(batches)
     return 0
 
 

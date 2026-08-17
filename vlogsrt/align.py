@@ -13,8 +13,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from .models import Segment
-from .spans import Span
+from .models import Segment, Span
 
 
 def allocate(text: str, spans: Sequence[Span], seg_id_base: int) -> list[Segment]:

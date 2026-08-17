@@ -13,8 +13,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from .config import Config
-
-Span = tuple[float, float]
+from .models import Span
 
 _SILENCE_START_RE = re.compile(r"silence_start:\s*(-?[\d.]+)")
 _SILENCE_END_RE = re.compile(r"silence_end:\s*(-?[\d.]+)")

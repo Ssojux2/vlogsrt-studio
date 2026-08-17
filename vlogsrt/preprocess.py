@@ -1,33 +1,21 @@
-"""오디오 추출과 청크 분할.
+"""오디오 추출·무음 검출·묶음 조각 만들기 — **ffmpeg 경계**(불변 규칙 5).
 
-ffmpeg는 `subprocess`로 직접 부른다(불변 규칙 7). 순수 계산과 외부 호출을 갈라놓아,
-ffmpeg가 없는 환경에서도 분할 로직은 그대로 테스트된다.
+ffmpeg는 `subprocess`로 직접 부른다(규칙 7). 계산은 전부 `spans.py`에 있고
+여기서는 외부 프로세스만 다룬다 — ffmpeg가 없는 환경에서도 로직은 그대로 테스트된다.
 """
 
 from __future__ import annotations
 
-import math
 import shutil
 import subprocess
-from dataclasses import dataclass
+from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from . import log
+from . import env, log
 from .config import Config
-from .models import Chunk
-
-
-@dataclass(frozen=True, slots=True)
-class ChunkPlan:
-    """분할 계획. 순수 계산이라 ffmpeg 없이 테스트된다."""
-
-    start: float
-    end: float
-    index: int
-
-    @property
-    def duration(self) -> float:
-        return self.end - self.start
+from .models import Chunk, Span
+from .spans import Batch, parse_silence_output
 
 
 def require_ffmpeg(tool: str = "ffmpeg") -> str:
@@ -89,51 +77,44 @@ def extract_audio(src: Path, dst: Path, cfg: Config) -> Path:
     return dst
 
 
-def chunk_count(duration: float, size_bytes: int, cfg: Config) -> int:
-    """몇 조각으로 나눌지. 업로드 크기 한도와 길이 한도 **둘 다** 지켜야 한다."""
-    by_size = math.ceil(size_bytes / cfg.chunk_max_bytes)
-    by_time = math.ceil(duration / cfg.chunk_max_seconds)
-    return max(1, by_size, by_time)
+def detect_silence(path: Path, cfg: Config, duration: float | None = None) -> list[Span]:
+    """무음을 찾는다. 여기서 나온 값이 발화 구간이 되고, 발화 구간이 자막 시각이 된다.
 
-
-def plan_chunks(duration: float, size_bytes: int, cfg: Config) -> list[ChunkPlan]:
-    """API 한도를 넘으면 균등하게 자른다.
-
-    무음을 찾아 그 한가운데를 고르던 시절이 있었다(D21에서 제거). 실측에서는
-    경계 대부분이 결국 강제 분할이었고, 그때마다 경고가 로그를 덮었다. 이제는
-    조각 수를 줄여(한도 1500초) 경계 자체를 적게 만든다.
+    실패해도 예외를 삼키지 않는다 — 무음을 못 찾으면 타이밍의 출처가 없다.
     """
-    if duration <= 0:
-        raise RuntimeError(f"오디오 길이가 0 이하입니다: {duration}")
+    ffmpeg = require_ffmpeg()
+    total = probe_duration(path) if duration is None else duration
+    threshold = f"noise={cfg.silence_threshold_db:g}dB:d={cfg.silence_min_duration:g}"
+    command = [
+        ffmpeg, "-hide_banner", "-nostdin",
+        "-i", str(path),
+        "-af", f"silencedetect={threshold}",
+        "-f", "null", "-",
+    ]  # fmt: skip
+    completed = subprocess.run(command, capture_output=True, text=True, check=False)
+    if completed.returncode != 0:
+        tail = "\n".join(completed.stderr.strip().splitlines()[-5:])
+        raise RuntimeError(f"silencedetect 실패 (코드 {completed.returncode})\n{tail}")
+    return parse_silence_output(completed.stderr, total)
 
-    count = chunk_count(duration, size_bytes, cfg)
-    step = duration / count
-    return [
-        ChunkPlan(start=step * index, end=min(step * (index + 1), duration), index=index)
-        for index in range(count)
-    ]
 
-
-def make_chunks(audio: Path, cfg: Config, workdir: Path) -> list[Chunk]:
-    duration = probe_duration(audio)
-    plans = plan_chunks(duration, audio.stat().st_size, cfg)
-    if len(plans) == 1:
-        return [Chunk(path=audio, offset=0.0, duration=duration, index=0)]
-
+def cut_batches(audio: Path, batches: Sequence[Batch], workdir: Path, cfg: Config) -> list[Chunk]:
+    """묶음마다 오디오 조각을 만든다. 자르는 자리는 이미 무음 안이다(`spans.group_spans`)."""
+    if not batches:
+        return []
     ffmpeg = require_ffmpeg()
     workdir.mkdir(parents=True, exist_ok=True)
-    chunks: list[Chunk] = []
-    for plan in plans:
-        log.debug(f"청크 {plan.index} 경계: {plan.start:.2f}초")
-        destination = workdir / f"{audio.stem}.chunk{plan.index:02d}.mp3"
+
+    def cut(batch: Batch) -> Chunk:
+        destination = workdir / f"{audio.stem}.batch{batch.index:04d}.mp3"
         _run(
             [
                 ffmpeg, "-hide_banner", "-nostdin", "-y",
                 "-i", str(audio),
                 # -ss를 -i 뒤에 두는 이유: 정확한 탐색이 필요하다. offset이 틀리면
-                # 재기준화가 통째로 어긋난다.
-                "-ss", f"{plan.start:.3f}",
-                "-to", f"{plan.end:.3f}",
+                # 자막 전체가 밀린다(D13).
+                "-ss", f"{batch.start:.3f}",
+                "-to", f"{batch.end:.3f}",
                 "-ac", str(cfg.channels),
                 "-ar", str(cfg.sample_rate),
                 "-c:a", "libmp3lame",
@@ -141,30 +122,36 @@ def make_chunks(audio: Path, cfg: Config, workdir: Path) -> list[Chunk]:
                 str(destination),
             ]
         )  # fmt: skip
-        chunks.append(
-            Chunk(
-                path=destination,
-                offset=plan.start,
-                duration=plan.duration,
-                index=plan.index,
-            )
+        return Chunk(
+            path=destination,
+            offset=batch.start,
+            duration=batch.duration,
+            index=batch.index,
+            spans=batch.spans,
         )
-    verify_coverage(chunks, plans, cfg)
+
+    with ThreadPoolExecutor(max_workers=env.max_workers()) as pool:
+        chunks = list(pool.map(cut, batches))
+    warn_about_short_cuts(chunks, batches, cfg)
     return chunks
 
 
-def verify_coverage(chunks: list[Chunk], plans: list[ChunkPlan], cfg: Config) -> None:
-    """만들어진 조각이 계획한 구간을 실제로 덮는지 확인한다.
+def warn_about_short_cuts(
+    chunks: Sequence[Chunk], batches: Sequence[Batch], cfg: Config
+) -> list[str]:
+    """조각이 계획보다 짧으면 그만큼의 소리가 전사에 오르지 못한다.
 
-    조각이 계획보다 짧으면 그 길이만큼의 소리가 전사에 아예 오르지 못한다. 자막에는
-    구멍으로 남고, 프로그램은 아무 말도 하지 않는다 — 그러지 않으려고 여기서 멈춘다.
-    자막 품질을 판정하는 게 아니라 **입력이 다 들어갔는지**만 센다(D23, 규칙 4 무관).
+    멈추지는 않는다(규칙 9) — 자막에 구멍이 나도 SRT는 나오되, 어디에 났는지는
+    로그가 말한다. 자막 품질을 판정하는 게 아니라 **입력이 다 들어갔는지**만 센다.
     """
-    for chunk, plan in zip(chunks, plans, strict=True):
+    complaints: list[str] = []
+    for chunk, batch in zip(chunks, batches, strict=True):
         actual = probe_duration(chunk.path)
-        if actual < plan.duration - cfg.chunk_duration_tolerance:
-            raise RuntimeError(
-                f"청크 {plan.index}가 계획보다 짧습니다: {actual:.2f}초 < {plan.duration:.2f}초\n"
-                f"  {plan.start:.1f}~{plan.end:.1f}초 구간의 소리가 자막에서 빠집니다.\n"
-                f"  `make clean` 후 다시 실행하세요. 계속 나면 원본 오디오를 확인하세요."
+        if actual < batch.duration - cfg.chunk_duration_tolerance:
+            complaints.append(
+                f"조각 {batch.index}이 계획보다 짧다: {actual:.2f}초 < {batch.duration:.2f}초 "
+                f"({batch.start:.1f}~{batch.end:.1f}초 구간의 소리가 자막에서 빠진다)"
             )
+    for complaint in complaints:
+        log.warn(complaint)
+    return complaints

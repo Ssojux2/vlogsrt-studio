@@ -184,7 +184,7 @@ def test_no_cache_run_reuses_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyP
 
     monkeypatch.setattr(pipeline.preprocess, "extract_audio", fake_extract)
     monkeypatch.setattr(pipeline.preprocess, "probe_duration", lambda path: 30.0)
-    monkeypatch.setattr(pipeline.preprocess, "make_chunks", lambda audio, cfg, workdir: [])
+    monkeypatch.setattr(pipeline, "plan_batches", lambda audio, duration, cfg, workdir: [])
 
     work = tmp_path / "scratch"
     for _ in range(2):

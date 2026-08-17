@@ -1,8 +1,7 @@
-"""전처리 — 순수 로직은 항상 돌고, 실제 ffmpeg 호출만 건너뛴다."""
+"""전처리 — ffmpeg 경계. 순수 로직은 항상 돌고, 실제 호출만 건너뛴다."""
 
 from __future__ import annotations
 
-import math
 import shutil
 from pathlib import Path
 
@@ -12,46 +11,19 @@ from vlogsrt import preprocess
 from vlogsrt.config import Config
 from vlogsrt.models import Chunk
 from vlogsrt.preprocess import (
-    chunk_count,
+    cut_batches,
+    detect_silence,
     extract_audio,
-    plan_chunks,
     probe_duration,
-    verify_coverage,
+    warn_about_short_cuts,
 )
-
-MB = 1_000_000
-
-
-def _chunks(plans: list[preprocess.ChunkPlan]) -> list[Chunk]:
-    return [
-        Chunk(path=Path(f"chunk{p.index}.mp3"), offset=p.start, duration=p.duration, index=p.index)
-        for p in plans
-    ]
-
-
-def test_a_short_chunk_stops_the_run(monkeypatch: pytest.MonkeyPatch) -> None:
-    """조각이 계획보다 짧으면 그 길이만큼의 소리가 전사에 오르지 못한다(D23)."""
-    plans = plan_chunks(100.0, 50 * MB, Config())
-    monkeypatch.setattr(preprocess, "probe_duration", lambda path: 10.0)
-    with pytest.raises(RuntimeError, match="계획보다 짧습니다"):
-        verify_coverage(_chunks(plans), plans, Config())
-
-
-def test_encoder_padding_is_within_tolerance(monkeypatch: pytest.MonkeyPatch) -> None:
-    """mp3 패딩은 조각을 늘리지 줄이지 않는다. 오차 허용치 안이면 통과한다."""
-    plans = plan_chunks(100.0, 50 * MB, Config())
-    cfg = Config()
-    short_but_ok = plans[0].duration - cfg.chunk_duration_tolerance / 2
-    monkeypatch.setattr(preprocess, "probe_duration", lambda path: short_but_ok)
-    verify_coverage(_chunks(plans), plans, cfg)
+from vlogsrt.spans import Batch
 
 
 def test_extraction_applies_no_audio_filter(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """D20 — 오디오는 손대지 않고 뽑는다. 필터는 전부 제거됐다."""
-    from vlogsrt import preprocess
-
     commands: list[list[str]] = []
 
     def fake_run(command: list[str]) -> object:
@@ -74,61 +46,111 @@ def test_extraction_applies_no_audio_filter(
     assert command[command.index("-ac") + 1] == "1"
 
 
-def test_short_audio_stays_whole() -> None:
+# ─────────────────────────────────────────────────────────────
+#  묶음 조각 만들기
+# ─────────────────────────────────────────────────────────────
+
+
+def _fake_ffmpeg(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> list[list[str]]:
+    commands: list[list[str]] = []
+
+    def fake_run(command: list[str]) -> object:
+        commands.append(command)
+        Path(command[-1]).write_bytes(b"\x00")
+
+        class Done:
+            stdout = ""
+            stderr = ""
+
+        return Done()
+
+    monkeypatch.setattr(preprocess, "_run", fake_run)
+    monkeypatch.setattr(preprocess, "require_ffmpeg", lambda tool="ffmpeg": "ffmpeg")
+    monkeypatch.setattr(preprocess, "probe_duration", lambda path: 20.0)
+    return commands
+
+
+BATCHES = [
+    Batch(start=0.0, end=10.0, index=0, spans=((0.5, 4.0), (5.0, 9.5))),
+    Batch(start=10.0, end=20.0, index=1, spans=((11.0, 14.0),)),
+]
+
+
+def test_each_batch_becomes_its_own_audio_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    commands = _fake_ffmpeg(monkeypatch, tmp_path)
+    chunks = cut_batches(tmp_path / "audio.mp3", BATCHES, tmp_path, Config())
+    assert len(chunks) == 2
+    assert len({chunk.path for chunk in chunks}) == 2
+    assert len(commands) == 2
+
+
+def test_the_cut_carries_the_spans_into_the_chunk(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """규칙 1 — 조각이 자기 발화 구간을 들고 다녀야 배분이 시각을 갖는다."""
+    _fake_ffmpeg(monkeypatch, tmp_path)
+    chunks = cut_batches(tmp_path / "audio.mp3", BATCHES, tmp_path, Config())
+    assert chunks[0].spans == ((0.5, 4.0), (5.0, 9.5))
+    assert chunks[1].spans == ((11.0, 14.0),)
+
+
+def test_the_offset_is_the_batch_start(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """offset이 틀리면 자막 전체가 밀린다(D13)."""
+    _fake_ffmpeg(monkeypatch, tmp_path)
+    chunks = cut_batches(tmp_path / "audio.mp3", BATCHES, tmp_path, Config())
+    assert [chunk.offset for chunk in chunks] == [0.0, 10.0]
+
+
+def test_seeking_happens_after_the_input(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """-ss가 -i 앞에 오면 탐색이 부정확해지고 offset이 어긋난다(D13)."""
+    commands = _fake_ffmpeg(monkeypatch, tmp_path)
+    cut_batches(tmp_path / "audio.mp3", BATCHES, tmp_path, Config())
+    for command in commands:
+        assert command.index("-i") < command.index("-ss")
+        assert command.index("-ss") < command.index("-to")
+
+
+def test_no_batches_means_no_ffmpeg_call(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    commands = _fake_ffmpeg(monkeypatch, tmp_path)
+    assert cut_batches(tmp_path / "audio.mp3", [], tmp_path, Config()) == []
+    assert commands == []
+
+
+# ─────────────────────────────────────────────────────────────
+#  손실은 멈추지 않고 경고한다 (규칙 9)
+# ─────────────────────────────────────────────────────────────
+
+
+def _chunks_of(batches: list[Batch]) -> list[Chunk]:
+    return [
+        Chunk(path=Path(f"b{b.index}.mp3"), offset=b.start, duration=b.duration, index=b.index)
+        for b in batches
+    ]
+
+
+def test_a_short_cut_is_reported_but_does_not_stop_the_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(preprocess, "probe_duration", lambda path: 1.0)
+    complaints = warn_about_short_cuts(_chunks_of(BATCHES), BATCHES, Config())
+    assert len(complaints) == 2
+    assert "0" in complaints[0]
+
+
+def test_encoder_padding_is_within_tolerance(monkeypatch: pytest.MonkeyPatch) -> None:
+    """mp3 패딩은 조각을 늘리지 줄이지 않는다. 오차 허용치 안이면 조용하다."""
     cfg = Config()
-    plans = plan_chunks(300.0, 10 * MB, cfg)
-    assert len(plans) == 1
-    assert (plans[0].start, plans[0].end) == (0.0, 300.0)
+    monkeypatch.setattr(
+        preprocess, "probe_duration", lambda path: 10.0 - cfg.chunk_duration_tolerance / 2
+    )
+    assert warn_about_short_cuts(_chunks_of(BATCHES), BATCHES, cfg) == []
 
 
-def test_size_limit_splits_evenly() -> None:
-    """D21 — 무음을 찾지 않는다. 한도를 넘으면 균등하게 자른다."""
-    cfg = Config()
-    size = 3 * cfg.chunk_max_bytes
-    plans = plan_chunks(300.0, size, cfg)
-    assert len(plans) == math.ceil(size / cfg.chunk_max_bytes)
-    assert [plan.end for plan in plans] == pytest.approx([100.0, 200.0, 300.0])
-
-
-def test_offsets_are_monotonic_and_cover_everything() -> None:
-    cfg = Config()
-    plans = plan_chunks(600.0, 5 * cfg.chunk_max_bytes, cfg)
-    assert plans[0].start == 0.0
-    assert plans[-1].end == pytest.approx(600.0)
-    for previous, following in zip(plans, plans[1:], strict=False):
-        assert previous.end == pytest.approx(following.start)
-
-
-def test_zero_duration_is_loud() -> None:
-    with pytest.raises(RuntimeError):
-        plan_chunks(0.0, 1000, Config())
-
-
-def test_long_audio_is_split_even_when_it_fits_the_size_limit() -> None:
-    """길이 한도는 크기 한도와 독립이다. 77분은 크기로 한 조각이어도 더 나뉜다."""
-    cfg = Config()
-    duration = 4598.0
-    tiny = 1000  # 크기 한도는 전혀 건드리지 않는다
-    expected = math.ceil(duration / cfg.chunk_max_seconds)
-    assert chunk_count(duration, tiny, cfg) == expected
-
-    plans = plan_chunks(duration, tiny, cfg)
-    assert len(plans) == expected
-    assert all(plan.duration <= cfg.chunk_max_seconds for plan in plans)
-    assert plans[0].start == 0.0
-    assert plans[-1].end == pytest.approx(duration)
-
-
-def test_size_limit_still_wins_when_it_demands_more_pieces() -> None:
-    cfg = Config()
-    duration = 300.0  # 길이로는 한 조각
-    size = 5 * cfg.chunk_max_bytes
-    assert chunk_count(duration, size, cfg) == 5
-    assert len(plan_chunks(duration, size, cfg)) == 5
-
-
-def test_chunk_count_never_returns_zero() -> None:
-    assert chunk_count(0.5, 0, Config()) == 1
+# ─────────────────────────────────────────────────────────────
+#  실제 ffmpeg
+# ─────────────────────────────────────────────────────────────
 
 
 needs_ffmpeg = pytest.mark.skipif(
@@ -167,3 +189,20 @@ def test_extract_audio_real(tone: Path, tmp_path: Path) -> None:
     destination = extract_audio(tone, tmp_path / "out.mp3", Config())
     assert destination.is_file()
     assert destination.stat().st_size > 0
+
+
+@needs_ffmpeg
+def test_detect_silence_real(tone: Path) -> None:
+    """톤 2초 + 무음 3초. 뒤쪽 무음이 잡혀야 한다."""
+    silences = detect_silence(tone, Config())
+    assert silences
+    assert silences[-1][0] == pytest.approx(2.0, abs=0.3)
+
+
+@needs_ffmpeg
+def test_cut_batches_real(tone: Path, tmp_path: Path) -> None:
+    audio = extract_audio(tone, tmp_path / "full.mp3", Config())
+    batch = Batch(start=0.0, end=2.0, index=0, spans=((0.0, 2.0),))
+    (chunk,) = cut_batches(audio, [batch], tmp_path / "cuts", Config())
+    assert chunk.path.is_file()
+    assert probe_duration(chunk.path) == pytest.approx(2.0, abs=0.3)
