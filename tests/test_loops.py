@@ -86,3 +86,39 @@ def test_undetected_is_empty_when_the_filter_caught_everything() -> None:
     spine = repeated("여기가 보통은", 5, verdict="compression_fail")
     loops = find_loops(spine, Config())
     assert undetected(loops, spine) == []
+
+
+# ─────────────────────────────────────────────────────────────
+#  파이프라인이 사람에게 알린다
+# ─────────────────────────────────────────────────────────────
+
+
+def test_pipeline_warns_when_whisper_loops() -> None:
+    """조용히 진행하면 사람은 망가진 SRT를 받고 나서야 안다."""
+    from vlogsrt.pipeline import warn_about_loops
+
+    spine = repeated("여기가 보통은", 6)
+    notices = warn_about_loops(spine, Config(), duration=100.0)
+    assert notices
+    assert "6개" not in notices[0]  # 구간 수는 1개다. 반복 횟수와 헷갈리면 안 된다
+    assert "1개" in notices[0] and "12초" in notices[0]
+    assert "12.0%" in notices[0]
+    assert any("여기가 보통은" in line for line in notices)
+
+
+def test_pipeline_points_at_the_prompt_when_the_loop_starts_early() -> None:
+    """영상 시작부터 반복하면 whisper 힌트가 원인일 가능성이 높다(D13)."""
+    from vlogsrt.pipeline import warn_about_loops
+
+    early = warn_about_loops(repeated("구어체 한국어", 5), Config(), duration=4598.0)
+    assert any("prompt" in line for line in early)
+
+    late = [make_segment(i, 3000.0 + i * 2, 3002.0 + i * 2, "여기가 보통은") for i in range(5)]
+    assert not any("prompt" in line for line in warn_about_loops(late, Config(), 4598.0))
+
+
+def test_clean_spine_produces_no_warning() -> None:
+    from vlogsrt.pipeline import warn_about_loops
+
+    spine = [make_segment(i, i * 2.0, i * 2.0 + 2.0, f"문장 {i}") for i in range(10)]
+    assert warn_about_loops(spine, Config(), duration=20.0) == []

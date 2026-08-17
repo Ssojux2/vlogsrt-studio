@@ -40,6 +40,19 @@ def build_app() -> gr.Blocks:
                 autofocus=True,
             )
             browse_button = gr.Button("찾아보기", scale=1)
+
+        with gr.Row():
+            prompt_box = gr.Textbox(
+                label="whisper 힌트 (선택)",
+                info=(
+                    "지시문이 아니라 **영상에 나올 법한 단어**를 적으세요. "
+                    "whisper는 이 값을 직전 자막으로 보고 이어 씁니다 — "
+                    '"구어체로 써줘" 같은 문장을 넣으면 그 문장을 되풀이합니다.'
+                ),
+                placeholder="망원동, 블루펭귄, 아페로, 코나",
+                lines=1,
+                scale=7,
+            )
             run_button = gr.Button("자막 만들기", variant="primary", scale=1)
 
         log_box = gr.Textbox(
@@ -49,12 +62,12 @@ def build_app() -> gr.Blocks:
         files_box = gr.File(label="저장된 파일", file_count="multiple", height=110)
 
         # ── 동작 ──────────────────────────────────────────────
-        def on_run(path_text: str) -> Any:
+        def on_run(path_text: str, prompt_text: str) -> Any:
             """제너레이터로 돌려 진행 상황을 실시간으로 흘린다.
 
             한 번에 반환하면 긴 영상에서 몇 분 동안 화면이 비어 멈춘 것처럼 보인다.
             """
-            for report in service.stream_subtitles(path_text):
+            for report in service.stream_subtitles(path_text, prompt_text):
                 yield report.log, report.srt_text, list(report.files)
 
         def on_browse() -> Any:
@@ -65,9 +78,12 @@ def build_app() -> gr.Blocks:
                 raise gr.Error(str(exc)) from exc
             return chosen or gr.skip()
 
+        inputs = [path_box, prompt_box]
+        outputs = [log_box, srt_box, files_box]
         browse_button.click(on_browse, None, path_box)
-        run_button.click(on_run, path_box, [log_box, srt_box, files_box])
-        path_box.submit(on_run, path_box, [log_box, srt_box, files_box])
+        run_button.click(on_run, inputs, outputs)
+        path_box.submit(on_run, inputs, outputs)
+        prompt_box.submit(on_run, inputs, outputs)
 
     return app
 

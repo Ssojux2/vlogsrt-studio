@@ -287,12 +287,14 @@ def parse_spine(raw: dict[str, Any], offset: float = 0.0, seg_id_base: int = 0) 
     """whisper 응답에서 골격을 만든다. verdict는 여기서 전부 ok — 판정은 judge_verdict."""
     rebased = rebase_timestamps(raw, offset, seg_id_base)
     spine: list[Segment] = []
+    dropped = 0
     for segment in rebased["segments"]:
         text = str(segment.get("text", "")).strip()
         start = float(segment["start"])
         end = float(segment["end"])
         if end <= start:
-            log.warn(f"세그먼트 {segment['id']}의 길이가 0 이하다. 건너뛴다.")
+            # 한 줄씩 찍으면 수백 줄이 되어 정작 볼 경고를 묻는다. 끝에서 한 번 센다.
+            dropped += 1
             continue
         spine.append(
             Segment(
@@ -305,7 +307,24 @@ def parse_spine(raw: dict[str, Any], offset: float = 0.0, seg_id_base: int = 0) 
                 no_speech_prob=float(segment.get("no_speech_prob", 0.0)),
             )
         )
+    _warn_if_many_degenerate(dropped, len(rebased["segments"]))
     return spine
+
+
+def _warn_if_many_degenerate(dropped: int, total: int) -> None:
+    """길이 0인 세그먼트가 쏟아지면 whisper 디코딩이 무너졌다는 신호다.
+
+    정상 전사에서는 거의 없다. 실측(D13)에서는 1931개 중 452개가 이랬고,
+    같은 구간이 반복 환청 구간이었다.
+    """
+    if not dropped:
+        return
+    share = dropped / total if total else 0.0
+    message = f"길이 0인 whisper 세그먼트 {dropped}/{total}개를 건너뛰었다."
+    if share > 0.05:
+        log.warn(f"{message} ({share * 100:.0f}%) whisper 전사가 불안정하다.")
+    else:
+        log.debug(message)
 
 
 def parse_words(raw: dict[str, Any], offset: float = 0.0) -> list[Word]:

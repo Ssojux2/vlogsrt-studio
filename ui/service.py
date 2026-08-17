@@ -104,11 +104,17 @@ def status_line() -> str:
     return f"키 {env.api_key_source()}" if env.has_api_key() else "키 없음"
 
 
-def build_config() -> Config:
-    """`vlogsrt.toml`과 기본값만 쓴다. 세부 조정은 `vlogsrt redo`가 맡는다."""
+def build_config(prompt: str = "") -> Config:
+    """`vlogsrt.toml`과 기본값에 화면에서 받은 힌트만 얹는다.
+
+    `prompt`는 whisper에게 **지시가 아니라 직전 자막 텍스트로** 전달된다.
+    그래서 화면에서 사람이 매번 정할 수 있어야 한다(D13).
+    """
     cfg = load_config()
     entries = keywords.load_keywords(base_file=env.project_root() / keywords.BASE_KEYWORDS)
-    return replace(cfg, keywords=tuple(entries)) if entries else cfg
+    if entries:
+        cfg = replace(cfg, keywords=tuple(entries))
+    return replace(cfg, prompt=prompt.strip())
 
 
 # ─────────────────────────────────────────────────────────────
@@ -169,7 +175,7 @@ def _run_streaming(
     yield outcome.get("value")
 
 
-def stream_subtitles(raw_path: str) -> Iterator[RunReport]:
+def stream_subtitles(raw_path: str, prompt: str = "") -> Iterator[RunReport]:
     """영상 하나를 처음부터 끝까지 새로 전사한다. 진행 상황은 단계마다 흘려보낸다.
 
     지난 실행을 재사용하지 않는다. 녹화된 응답도, 오디오 캐시도 보지 않는다.
@@ -189,9 +195,13 @@ def stream_subtitles(raw_path: str) -> Iterator[RunReport]:
         if not env.has_api_key():
             raise UiError("OPENAI_API_KEY가 없습니다. .env 에 넣고 다시 실행하세요.")
 
+        cfg = build_config(prompt)
+        if cfg.prompt:
+            lines.append(f"힌트   {cfg.prompt}")
+            yield _running(lines)
+
         lines.append("확인   길이를 재는 중…")
         yield _running(lines)
-        cfg = build_config()
         duration = preprocess.probe_duration(path)
         _check_cost_guard(duration, cfg)
         cost = transcribe.estimate_cost(duration, cfg)
@@ -257,10 +267,10 @@ def _describe(exc: BaseException) -> str:
     return f"{exc.__class__.__name__}: {message}" if not isinstance(exc, RuntimeError) else message
 
 
-def make_subtitles(raw_path: str) -> RunReport:
+def make_subtitles(raw_path: str, prompt: str = "") -> RunReport:
     """마지막 상태만 필요할 때. 테스트와 비대화형 호출이 쓴다."""
     last = RunReport(ok=False, log="아무 일도 일어나지 않았습니다.")
-    for report in stream_subtitles(raw_path):
+    for report in stream_subtitles(raw_path, prompt):
         last = report
     return last
 
@@ -315,13 +325,22 @@ def _check_source(path: Path) -> None:
         raise UiError(f"영상 파일이 아닙니다: {path.suffix or '확장자 없음'}")
 
 
+_LOG_PREFIX = {"WARN": "경고", "ERR": "오류"}
+
+
 def _progress_lines(captured: str) -> list[str]:
-    """파이프라인 로그에서 사람이 볼 줄만 남긴다."""
+    """파이프라인 로그에서 사람이 볼 줄만 남긴다.
+
+    경고는 눈에 띄어야 한다. whisper가 반복 루프에 빠졌다는 알림이 여기로 온다.
+    """
     kept = []
     for raw in captured.splitlines():
         text = raw.strip().removeprefix("›").strip()
-        if text:
-            kept.append(f"진행   {text}")
+        if not text:
+            continue
+        head, _, rest = text.partition(" ")
+        label = _LOG_PREFIX.get(head)
+        kept.append(f"{label}   {rest}" if label and rest else f"진행   {text}")
     return kept
 
 

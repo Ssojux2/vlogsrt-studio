@@ -32,7 +32,7 @@ pip install -e ".[ui]"        # (선택) 웹 UI
 make ui        # http://127.0.0.1:7860
 ```
 
-화면은 셋뿐이다: **영상 경로 · 실행 로그 · SRT.**
+화면은 넷뿐이다: **영상 경로 · whisper 힌트 · 실행 로그 · SRT.**
 `찾아보기`를 누르면 macOS 기본 파일 대화상자가 열리고, 고른 파일의 **실제 경로**가
 경로 칸에 들어간다. 경로를 직접 붙여넣어도 된다. **업로드도 복사도 하지 않는다.**
 
@@ -48,6 +48,29 @@ make ui        # http://127.0.0.1:7860
 
 > 대화상자는 서버(=이 컴퓨터)에서 열린다. 브라우저는 보안상 실제 경로를 절대
 > 넘겨주지 않기 때문이다(`C:\fakepath\...`). 그래서 macOS 전용이다.
+
+### whisper 힌트
+
+`힌트` 칸은 whisper의 `prompt`로 그대로 간다. **지시문이 아니다.** whisper는 이 값을
+직전 자막 텍스트로 보고 이어 쓴다. `"구어체로 써줘"` 같은 문장을 넣으면 그 문장을
+자막으로 되풀이한다 — 실제로 570초를 그렇게 날렸다(D13).
+
+넣으려면 **영상에 나올 법한 단어**를 적어라.
+
+```
+망원동, 블루펭귄, 아페로, 코나
+```
+
+비워두는 것이 기본이고, 대부분 그편이 낫다. 실행이 끝나면 로그를 보라.
+whisper가 같은 문장을 되풀이한 구간이 있으면 이렇게 알려준다:
+
+```
+경고   whisper가 같은 문장을 되풀이한 구간 10개 · 1134초 (영상의 24.7%)
+경고     12~582초 · 103회 · '구어체 한국어에서 한국어 자막을 사용합니다.'
+경고     영상 시작부터 반복한다면 whisper 힌트(prompt)를 의심하라.
+```
+
+이 경고가 나오면 그 구간 자막은 믿을 수 없다. 힌트를 비우고 다시 돌려라.
 
 gradio는 **선택적 extra**이고 `ui/`에만 산다 — `vlogsrt/`의 의존성은 여전히 3개다.
 
@@ -84,7 +107,7 @@ make eval                      # 골든셋 전체 → docs/DASHBOARD.md
 ## 파이프라인
 
 ```
-M1 전처리   ffmpeg → 16kHz 모노 + loudnorm → 무음 검출 → 24MB 청크 분할
+M1 전처리   ffmpeg → 16kHz 모노 + loudnorm → 무음 검출 → 24MB / 10분 청크 분할
 M2 전사     whisper-1 (골격 + word 타임스탬프) ∥ gpt-transcribe (정본 텍스트)
 M2c 판정    compression_ratio / avg_logprob / no_speech_prob / 무음 교차검증 → verdict
 M3 매핑     자모 정규화 → SequenceMatcher(autojunk=False) → 절단점 사상 → 어절 스냅 → 고아 복구
@@ -113,7 +136,8 @@ M5 출력     SRT + review.srt + report.md + trace.json
 | `evaluate.py` | 지표 8종 |
 | `pipeline.py` `cli.py` | 조립과 커맨드 |
 | `ui/service.py` | UI 로직. **gradio를 import하지 않는다** |
-| `ui/app.py` | gradio 화면 (경로·로그·SRT). 패키지 밖이라 규칙 7을 건드리지 않는다 |
+| `ui/app.py` | gradio 화면 (경로·힌트·로그·SRT). 패키지 밖이라 규칙 7을 건드리지 않는다 |
+| `loops.py` | 세그먼트를 가로지르는 whisper 반복 환청 검출 |
 
 ---
 

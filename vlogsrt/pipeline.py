@@ -10,7 +10,7 @@ import json
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from . import env, log, mapping, preprocess, refine, transcribe
+from . import env, log, loops, mapping, preprocess, refine, transcribe
 from .config import Config
 from .models import Chunk, Cue, Issue, Segment, Trace, Word
 from .output import save_srt, to_review_cues
@@ -172,6 +172,7 @@ def run(
     if fast:
         words = []
     log.info(f"골격 {len(spine)}개 세그먼트, 단어 {len(words)}개")
+    warn_about_loops(spine, effective, prepared.duration)
 
     trace = Trace(
         source=str(video),
@@ -251,6 +252,31 @@ def _map_stage(
         return _MapStage(cues=base, warnings=warnings)
     rescued = mapping.rescue_orphans(cuts_a, spine, mapped, silences, canonical, cfg)
     return _MapStage(cues=rescued, warnings=warnings)
+
+
+def warn_about_loops(spine: list[Segment], cfg: Config, duration: float) -> list[str]:
+    """whisper가 같은 문장을 되풀이했는지 알린다.
+
+    골격이 곧 타이밍이라, 여기가 무너지면 어떤 후처리도 자막을 살리지 못한다.
+    조용히 진행하면 사람은 망가진 SRT를 받고 나서야 안다(D13). 판정은 바꾸지
+    않고 보고만 한다 — 되풀이가 잦다면 `prompt`부터 의심할 것.
+    """
+    found = loops.find_loops(spine, cfg)
+    if not found:
+        return []
+    seconds = loops.looped_seconds(found)
+    share = seconds / duration * 100 if duration > 0 else 0.0
+    notices = [
+        f"whisper가 같은 문장을 되풀이한 구간 {len(found)}개 · "
+        f"{seconds:.0f}초 (영상의 {share:.1f}%). 그 구간 자막은 믿을 수 없다."
+    ]
+    for loop in sorted(found, key=lambda item: -item.duration)[:3]:
+        notices.append(f"  {loop.start:.0f}~{loop.end:.0f}초 · {loop.count}회 · {loop.text[:40]!r}")
+    if any(loop.start < duration * 0.05 for loop in found):
+        notices.append("  영상 시작부터 반복한다면 whisper 힌트(prompt)를 의심하라.")
+    for notice in notices:
+        log.warn(notice)
+    return notices
 
 
 def _report_issues(issues: list[Issue]) -> None:

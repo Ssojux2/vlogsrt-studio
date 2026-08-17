@@ -10,8 +10,9 @@ from pathlib import Path
 import pytest
 
 from ui import service
-from ui.service import UiError
+from ui.service import UiError, build_config
 from vlogsrt import log, pipeline
+from vlogsrt.config import Config
 from vlogsrt.models import Trace
 
 SYNTHETIC = Path(__file__).parent / "fixtures" / "synthetic"
@@ -79,7 +80,7 @@ def stub_pipeline(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, object]]:
     seen: list[dict[str, object]] = []
 
     def fake_run(video: Path, cfg: object, outdir: Path, **kwargs: object) -> pipeline.RunResult:
-        seen.append({"video": video, "outdir": outdir, **kwargs})
+        seen.append({"video": video, "cfg": cfg, "outdir": outdir, **kwargs})
         return fake_result(outdir)
 
     monkeypatch.setattr(service.pipeline, "run", fake_run)
@@ -151,6 +152,50 @@ def test_work_and_out_live_in_the_same_scratch(
     scratch = Path(str(call["outdir"])).parent
     assert Path(str(call["workdir"])).parent == scratch
     assert scratch.name.startswith("vlogsrt-")
+
+
+# ─────────────────────────────────────────────────────────────
+#  whisper 힌트 — 사람이 실행할 때마다 정한다
+# ─────────────────────────────────────────────────────────────
+
+
+def test_prompt_from_the_screen_reaches_the_config(
+    tmp_path: Path, stub_pipeline: list[dict[str, object]]
+) -> None:
+    service.make_subtitles(str(make_video(tmp_path)), "망원동, 아페로, 코나")
+    cfg = stub_pipeline[0]["cfg"]
+    assert isinstance(cfg, Config)
+    assert cfg.prompt == "망원동, 아페로, 코나"
+
+
+def test_no_prompt_means_no_prompt(tmp_path: Path, stub_pipeline: list[dict[str, object]]) -> None:
+    """비워두면 빈 문자열이 간다. toml에 남은 값이 몰래 따라붙으면 안 된다."""
+    service.make_subtitles(str(make_video(tmp_path)))
+    cfg = stub_pipeline[0]["cfg"]
+    assert isinstance(cfg, Config)
+    assert cfg.prompt == ""
+
+
+def test_prompt_is_trimmed(tmp_path: Path, stub_pipeline: list[dict[str, object]]) -> None:
+    service.make_subtitles(str(make_video(tmp_path)), "  망원동  ")
+    cfg = stub_pipeline[0]["cfg"]
+    assert isinstance(cfg, Config)
+    assert cfg.prompt == "망원동"
+
+
+def test_prompt_is_echoed_in_the_log(
+    tmp_path: Path, stub_pipeline: list[dict[str, object]]
+) -> None:
+    """무엇을 넣고 돌렸는지 로그에 남아야 결과를 해석할 수 있다."""
+    report = service.make_subtitles(str(make_video(tmp_path)), "망원동, 아페로")
+    assert "힌트   망원동, 아페로" in report.log
+    blank = service.make_subtitles(str(make_video(tmp_path)))
+    assert "힌트" not in blank.log
+
+
+def test_project_toml_ships_no_prompt() -> None:
+    """메타 지시문을 넣었다가 570초를 날렸다(D13). 기본값은 비어 있어야 한다."""
+    assert build_config().prompt == ""
 
 
 # ─────────────────────────────────────────────────────────────
