@@ -5,17 +5,18 @@
 그대로 통과한다. 실측: 77분 영상에서 `'구어체 한국어에서 한국어 자막을 사용합니다.'`가
 103개 세그먼트에 걸쳐 570초 동안 반복됐고, 압축률만으로는 그 구조를 볼 수 없었다.
 
-이 모듈은 판정을 바꾸지 않는다. 골격을 읽고 반복 구간을 **보고**만 한다(불변 규칙 1).
+검출(`find_loops`)은 어디서든 불러도 되는 보고용이고, 강등(`demote`)은 골격 생성
+단계(fetch_spine)에서만 부른다. 생성이 끝난 골격은 불변이다(불변 규칙 1).
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from .config import Config
 from .hangul import to_nfc
-from .models import Segment
+from .models import VERDICT_COMPRESSION_FAIL, VERDICT_OK, Segment
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,10 +79,31 @@ def looped_seconds(loops: Sequence[Loop]) -> float:
     return sum(loop.duration for loop in loops)
 
 
+def demote(spine: Sequence[Segment], cfg: Config) -> list[Segment]:
+    """반복 구간의 `ok` 세그먼트를 `compression_fail`로 강등한 새 골격을 돌려준다.
+
+    ok로 남겨두면 두 군데서 무너진다. 실측(D18): '오 오 오' 구간 147초가 (1) 큐가
+    되어 시간축을 차지하고 (2) 정렬 기준 문자열에 들어가 절단점을 무너뜨렸다.
+    그 결과 빈 큐 538개가 쏟아졌고, 3분 이전 자막이 통째로 사라졌다. 강등하면
+    큐도 정렬 재료도 아니게 되고, 공백 채우기의 시각 닻으로만 남는다 — 반복
+    환청이라도 세그먼트 **경계**는 오디오를 따라가기 때문이다.
+
+    `silent`는 건드리지 않는다. "발화가 없었다"는 판정을 닻으로 바꾸면 발화가
+    없던 자리에 자막을 만들게 된다. `low_logprob`도 이미 제외라 그대로 둔다.
+    """
+    looped = {seg_id for loop in find_loops(spine, cfg) for seg_id in loop.seg_ids}
+    return [
+        replace(segment, verdict=VERDICT_COMPRESSION_FAIL)
+        if segment.id in looped and segment.verdict == VERDICT_OK
+        else segment
+        for segment in spine
+    ]
+
+
 def undetected(loops: Sequence[Loop], spine: Sequence[Segment]) -> list[Segment]:
     """반복 구간에 속하면서도 `ok` 판정을 받아 골격에 남은 세그먼트.
 
-    이것이 최종 SRT로 새어 나가는 환청이다. 비면 압축률 필터가 반복을 다 걸렀다는 뜻이다.
+    이것이 최종 SRT로 새어 나가는 환청이다. `demote`를 거친 골격이라면 비어야 한다.
     """
     looped_ids = {seg_id for loop in loops for seg_id in loop.seg_ids}
-    return [s for s in spine if s.id in looped_ids and s.verdict == "ok"]
+    return [s for s in spine if s.id in looped_ids and s.verdict == VERDICT_OK]

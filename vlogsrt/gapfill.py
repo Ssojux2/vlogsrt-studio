@@ -22,6 +22,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
+from math import ceil
 
 from . import log
 from .config import Config
@@ -74,8 +75,14 @@ def fill_gaps(
     `silent` 판정은 닻으로 쓰지 않는다. 그건 "그 시간에 발화가 없었다"는 판정이라
     거기로 글자를 옮기면 없는 말을 만들어내는 셈이 된다. 반면 `compression_fail`과
     `low_logprob`은 **소리는 들었는데 못 알아들었다**는 뜻이라 되돌릴 자리가 맞다.
+
+    빈 큐는 여기서 지운다. 글자가 없으니 잃는 것도 없는데, 자리만 차지해 그
+    시간대를 공백이 아닌 것처럼 보이게 한다. 실측(D18): 정렬이 무너진 자리의
+    빈 큐 538개가 시간축을 덮어 3분 이전에 되돌릴 자리가 없었다.
     """
-    ordered = sorted(cues, key=lambda cue: (cue.start, cue.end))
+    ordered = sorted(
+        (cue for cue in cues if cue.text.strip()), key=lambda cue: (cue.start, cue.end)
+    )
     if not ordered:
         return [], []
     excluded = [
@@ -84,17 +91,16 @@ def fill_gaps(
     result: list[Cue] = []
     filled: list[Filled] = []
 
+    runs = _runs(ordered, cfg)
     floor = 0.0
-    for run in _runs(ordered, cfg):
+    for index, run in enumerate(runs):
         windows = _gap_windows(floor, run[0].start, excluded, run, cfg)
-        _emit(_allocate(run, windows, silences, cfg, tail=True), run, result, filled)
+        pieces = _allocate(run, windows, silences, cfg, tail=True)
+        last_run = index == len(runs) - 1
+        ceiling = float("inf") if last_run else runs[index + 1][0].start
+        pieces = _spill_forward(pieces, excluded, silences, cfg, ceiling, force=last_run)
+        _emit(pieces, run, result, filled)
         floor = run[-1].end
-
-    last = result[-1]
-    trailing = [_clip(s, last.end, float("inf")) for s in excluded if s.start >= last.end]
-    if trailing:
-        result.pop()
-        _emit(_allocate([last], trailing, silences, cfg, tail=False), [last], result, filled)
     return sorted(result, key=lambda cue: (cue.start, cue.end)), filled
 
 
@@ -132,6 +138,40 @@ def _emit(pieces: list[Cue], run: Sequence[Cue], result: list[Cue], filled: list
 
 def _clip(segment: Segment, floor: float, ceiling: float) -> _Window:
     return _Window(max(floor, segment.start), min(ceiling, segment.end), segment.id)
+
+
+def _spill_forward(
+    pieces: list[Cue],
+    excluded: Sequence[Segment],
+    silences: Sequence[Span],
+    cfg: Config,
+    ceiling: float,
+    *,
+    force: bool,
+) -> list[Cue]:
+    """넘친 묶음의 꼬리를 **뒤따르는** 공백으로 흘려보낸다.
+
+    실측(D16): 영상 첫 큐 0.77초가 뒤 9분의 말 900자를 삼켰다. 절단점이 정본의
+    대응 없는 구간 너머에 붙으면 아직 하지 않은 말이 앞 큐에 얹힌다. 이때 큐가
+    갖는 것은 **머리**다 — 제 말을 먼저 하고, 삼킨 것은 뒤에 올 말이다.
+
+    보통 묶음은 넘쳤을 때만 흘린다. 멀쩡한 큐의 말을 미래로 보내면 자막이
+    소리보다 늦어진다. 마지막 묶음(`force`)은 넘치지 않아도 흘린다 — 절단점
+    사상이 남은 정본 전부를 마지막 큐에 얹으므로, 뒤에 걸러낸 세그먼트가
+    있다면 그 시간대의 말이 반드시 섞여 있다.
+    """
+    kept = [piece for piece in pieces if piece.origin != ORIGIN_ORPHAN]
+    if not kept:
+        return pieces
+    if not force and all(len(p.text) <= capacity(p.start, p.end, cfg) for p in kept):
+        return pieces
+    floor = kept[-1].end
+    windows = [_clip(s, floor, ceiling) for s in excluded if s.end > floor and s.start < ceiling]
+    usable = [window for window in windows if window.duration >= cfg.min_duration]
+    if not usable:
+        return pieces
+    moved_before = [piece for piece in pieces if piece.origin == ORIGIN_ORPHAN]
+    return [*moved_before, *_allocate(kept, usable, silences, cfg, tail=False)]
 
 
 def _gap_windows(
@@ -233,8 +273,44 @@ def _slice_into(
         body = text[cursor:stop].strip()
         cursor = stop
         if body:
-            pieces.append(_estimated(window, body, silences, cfg))
+            pieces.extend(_burst(window, body, silences, cfg))
         if cursor >= len(text):
+            break
+    return pieces
+
+
+def _burst(window: _Window, body: str, silences: Sequence[Span], cfg: Config) -> list[Cue]:
+    """창 하나가 담기엔 너무 긴 텍스트를 읽을 수 있는 조각으로 나눈다.
+
+    실측(D18): 29초짜리 '오 오 오' 세그먼트가 창이 되면 300자가 큐 하나로 얹히고,
+    8초 창에도 359자가 통째로 들어갔다. 시간(max_duration)과 글자(max_chars_per_cue)
+    어느 쪽이든 넘치면 나누되, 조각이 min_duration보다 짧아질 만큼 쪼개지는 않는다.
+    """
+    by_time = window.duration / cfg.max_duration
+    by_chars = len(body) / cfg.max_chars_per_cue
+    most = int(window.duration // cfg.min_duration)
+    count = min(most, ceil(max(by_time, by_chars)))
+    if count <= 1:
+        return [_estimated(window, body, silences, cfg)]
+    step = window.duration / count
+    pieces: list[Cue] = []
+    cursor = 0
+    for index in range(count):
+        last = index == count - 1
+        remaining = count - index
+        stop = (
+            len(body)
+            if last
+            else _snap(body, min(len(body), cursor + round((len(body) - cursor) / remaining)))
+        )
+        piece = body[cursor:stop].strip()
+        cursor = stop
+        if piece:
+            sub = _Window(
+                window.start + index * step, window.start + (index + 1) * step, window.seg_id
+            )
+            pieces.append(_estimated(sub, piece, silences, cfg))
+        if cursor >= len(body):
             break
     return pieces
 

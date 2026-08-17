@@ -8,7 +8,8 @@
 from __future__ import annotations
 
 from vlogsrt.config import Config
-from vlogsrt.loops import find_loops, looped_seconds, undetected
+from vlogsrt.loops import demote, find_loops, looped_seconds, undetected
+from vlogsrt.models import VERDICT_COMPRESSION_FAIL, VERDICT_OK, VERDICT_SILENT
 
 from .conftest import make_segment
 
@@ -86,6 +87,77 @@ def test_undetected_is_empty_when_the_filter_caught_everything() -> None:
     spine = repeated("여기가 보통은", 5, verdict="compression_fail")
     loops = find_loops(spine, Config())
     assert undetected(loops, spine) == []
+
+
+# ─────────────────────────────────────────────────────────────
+#  강등 — 되풀이 구간은 큐가 되면 안 된다 (D18)
+# ─────────────────────────────────────────────────────────────
+
+
+def test_demote_excludes_loop_segments_from_the_skeleton() -> None:
+    """실측(D18): '오 오 오' 구간이 ok로 통과해 큐가 되자 정렬이 무너져
+    빈 큐만 남았고, 그 빈 큐들이 시간축을 차지해 3분 이전이 통째로 사라졌다."""
+    cfg = Config()
+    spine = repeated("여기가 보통은", 6, compression_ratio=0.97)
+    judged = demote(spine, cfg)
+    assert all(s.verdict == VERDICT_COMPRESSION_FAIL for s in judged)
+    assert undetected(find_loops(judged, cfg), judged) == []
+
+
+def test_demote_keeps_id_and_timing_and_leaves_the_input_alone() -> None:
+    spine = repeated("여기가 보통은", 6)
+    judged = demote(spine, Config())
+    assert [(s.id, s.start, s.end, s.text) for s in judged] == [
+        (s.id, s.start, s.end, s.text) for s in spine
+    ]
+    assert all(s.verdict == VERDICT_OK for s in spine)  # 원본은 그대로다
+
+
+def test_demote_leaves_normal_speech_alone() -> None:
+    spine = [
+        make_segment(0, 0.0, 2.0, "오늘은 망원동에 왔어"),
+        make_segment(1, 2.0, 4.0, "빵집부터 가자"),
+    ]
+    assert demote(spine, Config()) == spine
+
+
+def test_demote_respects_the_loop_thresholds() -> None:
+    """맞장구 두어 번은 환청이 아니다. find_loops와 같은 기준을 쓴다."""
+    short_run = repeated("그러니까", 2)
+    assert demote(short_run, Config()) == short_run
+
+
+def test_demote_does_not_touch_silent_members() -> None:
+    """silent은 "발화가 없었다"는 판정이다. 강등해 닻으로 만들면
+    발화가 없던 자리에 자막을 만들게 된다."""
+    spine = repeated("음..", 5, verdict=VERDICT_SILENT)
+    judged = demote(spine, Config())
+    assert all(s.verdict == VERDICT_SILENT for s in judged)
+
+
+def test_fetch_spine_returns_a_demoted_skeleton() -> None:
+    """강등은 골격 생성 단계에서 끝난다. 그 뒤로 골격은 불변이다(규칙 1)."""
+    from vlogsrt.pipeline import fetch_spine
+    from vlogsrt.transcribe import ChunkResponse
+
+    class FakeTranscriber:
+        def whisper(self, job: object, cfg: object) -> list[ChunkResponse]:
+            segments = [
+                {
+                    "id": i,
+                    "start": i * 2.0,
+                    "end": i * 2.0 + 2.0,
+                    "text": "여기가 보통은",
+                    "avg_logprob": -0.3,
+                    "compression_ratio": 0.97,
+                    "no_speech_prob": 0.1,
+                }
+                for i in range(6)
+            ]
+            return [ChunkResponse(index=0, offset=0.0, payload={"segments": segments, "words": []})]
+
+    spine, _ = fetch_spine(FakeTranscriber(), job=None, cfg=Config(), silences=())  # type: ignore[arg-type]
+    assert all(s.verdict == VERDICT_COMPRESSION_FAIL for s in spine)
 
 
 # ─────────────────────────────────────────────────────────────

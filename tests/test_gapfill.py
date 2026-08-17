@@ -146,7 +146,11 @@ def test_the_cue_keeps_its_own_tail_not_the_gap_text() -> None:
 
 
 def test_excluded_segments_are_the_timing_anchors() -> None:
-    """환청 구간이라도 세그먼트 경계는 오디오를 따라간다. 균등 분할보다 낫다."""
+    """환청 구간이라도 세그먼트 경계는 오디오를 따라간다. 균등 분할보다 낫다.
+
+    큐가 닻 창보다 잘게 쪼개질 수는 있어도, 닻 **밖**(40~100초의 공백)에는
+    한 글자도 놓이면 안 된다. whisper가 소리를 못 들은 자리이기 때문이다.
+    """
     cfg = Config()
     spine = [
         make_segment(0, 30.0, 40.0, "오", verdict="compression_fail"),
@@ -155,7 +159,121 @@ def test_excluded_segments_are_the_timing_anchors() -> None:
     cues = [make_cue(10.0, 12.0, "시작"), make_cue(178.0, 179.4, "가나다 " * 80)]
     spread, _ = fill_gaps(cues, spine, cfg)
     placed = [cue for cue in spread if cue.origin == ORIGIN_ORPHAN]
-    assert {(cue.start, cue.end) for cue in placed} <= {(30.0, 40.0), (100.0, 110.0)}
+    assert placed
+    assert all(
+        (cue.start >= 30.0 and cue.end <= 40.0) or (cue.start >= 100.0 and cue.end <= 110.0)
+        for cue in placed
+    )
+
+
+def test_a_long_window_is_cut_into_readable_pieces() -> None:
+    """29초짜리 닻 창 하나에 300자를 큐 하나로 얹으면 화면이 벽이 된다."""
+    cfg = Config()
+    spine = [make_segment(0, 20.0, 90.0, "오", verdict="compression_fail")]
+    body = " ".join(f"낱말{i}" for i in range(70))
+    cues = [make_cue(10.0, 12.0, "시작"), make_cue(95.0, 96.4, body + " 마지막 말")]
+
+    spread, _ = fill_gaps(cues, spine, cfg)
+    placed = [cue for cue in spread if cue.origin == ORIGIN_ORPHAN]
+    assert len(placed) > 1
+    assert all(cue.duration <= cfg.max_duration + 1e-6 for cue in placed)
+    assert all(cue.start >= 20.0 and cue.end <= 90.0 for cue in placed)
+
+
+def test_a_short_window_with_too_many_chars_still_splits() -> None:
+    """실측(D18): 8초 창에 359자가 큐 1개로 얹혔다. 조각은 min_duration을 지킨다."""
+    cfg = Config()
+    spine = [make_segment(0, 100.0, 108.0, "오", verdict="compression_fail")]
+    body = " ".join(f"낱말{i}" for i in range(60))
+    cues = [make_cue(90.0, 92.0, "시작"), make_cue(110.0, 111.0, body + " 끝인사")]
+
+    spread, _ = fill_gaps(cues, spine, cfg)
+    placed = [cue for cue in spread if cue.origin == ORIGIN_ORPHAN]
+    assert len(placed) > 1
+    assert all(cue.duration >= cfg.min_duration - 1e-6 for cue in placed)
+    before = {"시작", "끝인사", *body.split()}
+    assert before == set(joined(spread).split())
+
+
+def test_the_first_cue_does_not_swallow_the_future() -> None:
+    """실측(D16): 영상 첫 큐 0.77초가 뒤 9분의 말 900자를 삼켰다. 절단점이
+    엇나가 아직 하지 않은 말이 앞 큐에 얹히면, 넘친 **꼬리**를 뒤따르는
+    걸러낸 세그먼트들의 시간대로 흘려보내야 한다. 큐가 갖는 것은 머리다."""
+    cfg = Config()
+    spine = [
+        make_segment(i, 12.0 + i * 20.0, 30.0 + i * 20.0, "오", verdict="compression_fail")
+        for i in range(5)
+    ]
+    body = " ".join(f"문장{i}" for i in range(120))
+    cues = [make_cue(0.0, 1.0, "첫말 " + body), make_cue(120.0, 122.0, "나중 말")]
+
+    spread, filled = fill_gaps(cues, spine, cfg)
+    placed = [cue for cue in spread if cue.origin == ORIGIN_ORPHAN]
+    assert placed and filled
+    assert all(cue.start >= 12.0 and cue.end <= 110.0 for cue in placed)
+    first = next(cue for cue in spread if cue.start == 0.0)
+    assert first.text.startswith("첫말")  # 삼킨 미래가 아니라 제 말(머리)이 남는다
+    assert {"첫말", "나중", "말", *body.split()} == set(joined(spread).split())
+
+
+def test_a_healthy_cue_never_spills_forward() -> None:
+    """뒤 공백으로 흘리는 것은 넘쳤을 때뿐이다. 멀쩡한 큐의 말을 미래로 보내면
+    자막이 소리보다 늦게 나온다."""
+    cfg = Config()
+    spine = [make_segment(9, 5.0, 15.0, "오", verdict="compression_fail")]
+    cues = [make_cue(0.0, 2.0, "짧은 인사"), make_cue(20.0, 22.0, "다음 말")]
+    spread, _ = fill_gaps(cues, spine, cfg)
+    first = next(cue for cue in spread if cue.start == 0.0)
+    assert first.text == "짧은 인사"
+
+
+def test_empty_cues_do_not_block_the_gap() -> None:
+    """정렬이 무너지면 빈 큐가 쏟아진다(실측 D18: 538개). 글자가 없으니 지워도
+    잃는 것이 없고, 자리를 비켜 줘야 그 시간대가 공백으로 보인다."""
+    cfg = Config()
+    spine = [make_segment(0, 30.0, 40.0, "오", verdict="compression_fail")]
+    empties = [make_cue(20.0 + i, 21.0 + i, "") for i in range(60)]
+    cues = [make_cue(10.0, 12.0, "시작"), *empties, make_cue(85.0, 86.0, "가나다 " * 40)]
+
+    spread, filled = fill_gaps(cues, spine, cfg)
+    assert filled, "빈 큐가 시간축을 차지해도 공백은 공백이다"
+    placed = [cue for cue in spread if cue.origin == ORIGIN_ORPHAN]
+    assert placed
+    assert all(cue.start >= 30.0 and cue.end <= 40.0 for cue in placed)
+    assert all(cue.text.strip() for cue in spread)
+
+
+def test_a_loop_region_gets_its_words_back() -> None:
+    """실측(D18) 그대로 — '오 오 오' 되풀이가 ok로 통과하면 그 구간 큐들이
+    빈 텍스트를 받아 버려지고 3분 이전이 통째로 사라진다. 강등 → 빈 큐 제거 →
+    시간축 되돌림이 이어져야 그 시간대에 자막이 선다.
+    """
+    from vlogsrt.loops import demote
+    from vlogsrt.pipeline import _map_stage
+
+    cfg = Config()
+    spine = demote(
+        [
+            make_segment(0, 0.0, 3.0, "안녕하세요 오늘은 여기부터 걷기로 했어요"),
+            *[
+                make_segment(1 + i, 30.0 + i * 29.0, 59.0 + i * 29.0, "오 오 오 오 오")
+                for i in range(5)
+            ],
+            make_segment(6, 178.0, 181.0, "낮술 하러 갈 건데 근처에 좋은 데가 있어요"),
+        ],
+        cfg,
+    )
+    canonical = (
+        "안녕하세요 오늘은 여기부터 걷기로 했어요 "
+        "강가를 지나 시장 골목을 한참 구경했어요 "
+        "낮술 하러 갈 건데 근처에 좋은 데가 있어요"
+    )
+    stage = _map_stage(spine, canonical, [], (), cfg, trace=None)
+
+    filled_region = [cue for cue in stage.cues if 30.0 <= cue.start < 178.0]
+    assert filled_region, "되풀이 구간에 자막이 서야 한다"
+    ordered = sorted(stage.cues, key=lambda cue: (cue.start, cue.end))
+    assert " ".join(cue.text for cue in ordered).split() == canonical.split()
 
 
 def test_even_slices_when_there_is_no_anchor() -> None:

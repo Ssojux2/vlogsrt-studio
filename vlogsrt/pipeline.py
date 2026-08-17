@@ -128,11 +128,14 @@ def build_job(prepared: Prepared) -> TranscriptionJob:
 def fetch_spine(
     transcriber: Transcriber, job: TranscriptionJob, cfg: Config, silences: tuple[Span, ...]
 ) -> tuple[list[Segment], list[Word]]:
+    """골격 생성의 끝. 판정(개별 지표)과 강등(세그먼트 간 반복)까지 마친 뒤에야
+    골격이 확정되고, 그 뒤로는 불변이다(규칙 1)."""
     responses = transcriber.whisper(job, cfg)
     spine, words = transcribe.build_spine(responses)
     if not spine:
         raise RuntimeError("whisper 응답에서 세그먼트를 얻지 못했습니다.")
-    return transcribe.apply_verdicts(spine, silences, cfg), words
+    judged = transcribe.apply_verdicts(spine, silences, cfg)
+    return loops.demote(judged, cfg), words
 
 
 # ─────────────────────────────────────────────────────────────
@@ -259,9 +262,9 @@ def _map_stage(
 def warn_about_loops(spine: list[Segment], cfg: Config, duration: float) -> list[str]:
     """whisper가 같은 문장을 되풀이했는지 알린다.
 
-    골격이 곧 타이밍이라, 여기가 무너지면 어떤 후처리도 자막을 살리지 못한다.
-    조용히 진행하면 사람은 망가진 SRT를 받고 나서야 안다(D13). 판정은 바꾸지
-    않고 보고만 한다 — 되풀이가 잦다면 `prompt`부터 의심할 것.
+    강등은 골격 생성 때 `loops.demote`가 이미 끝냈다. 여기는 보고만 한다 —
+    조용히 진행하면 사람은 어긋난 SRT를 받고 나서야 안다(D13). 되풀이가
+    영상 시작부터라면 `prompt`부터 의심할 것.
     """
     found = loops.find_loops(spine, cfg)
     if not found:
@@ -270,7 +273,8 @@ def warn_about_loops(spine: list[Segment], cfg: Config, duration: float) -> list
     share = seconds / duration * 100 if duration > 0 else 0.0
     notices = [
         f"whisper가 같은 문장을 되풀이한 구간 {len(found)}개 · "
-        f"{seconds:.0f}초 (영상의 {share:.1f}%). 그 구간 자막은 믿을 수 없다."
+        f"{seconds:.0f}초 (영상의 {share:.1f}%). 골격에서 걸렀고, "
+        "그 시간대 자막은 시각 추정으로 되돌린다."
     ]
     for loop in sorted(found, key=lambda item: -item.duration)[:3]:
         notices.append(f"  {loop.start:.0f}~{loop.end:.0f}초 · {loop.count}회 · {loop.text[:40]!r}")
