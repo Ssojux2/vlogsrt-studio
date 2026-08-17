@@ -347,9 +347,10 @@ def _progress_lines(captured: str) -> list[str]:
 def _summary(result: pipeline.RunResult) -> str:
     errors = sum(1 for issue in result.issues if issue.level == ERR)
     warnings = sum(1 for issue in result.issues if issue.level == WARN)
-    threshold = float(result.trace.config_snapshot.get("conf_threshold", 0.75))
-    check = sum(1 for cue in result.cues if cue.conf < threshold or cue.flags)
-    return f"결과   큐 {len(result.cues)}개 · 오류 {errors} · 경고 {warnings} · 확인할 큐 {check}개"
+    head = f"결과   큐 {len(result.cues)}개 · 오류 {errors} · 경고 {warnings}"
+    if result.verification is None:
+        return f"{head} · 검증 생략"
+    return f"{head} · 확인할 큐 {len(result.verification.suspects)}개"
 
 
 def _join(lines: list[str], *extra: str) -> str:

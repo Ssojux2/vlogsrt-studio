@@ -243,39 +243,6 @@ def test_empty_cues_do_not_block_the_gap() -> None:
     assert all(cue.text.strip() for cue in spread)
 
 
-def test_a_loop_region_gets_its_words_back() -> None:
-    """실측(D18) 그대로 — '오 오 오' 되풀이가 ok로 통과하면 그 구간 큐들이
-    빈 텍스트를 받아 버려지고 3분 이전이 통째로 사라진다. 강등 → 빈 큐 제거 →
-    시간축 되돌림이 이어져야 그 시간대에 자막이 선다.
-    """
-    from vlogsrt.loops import demote
-    from vlogsrt.pipeline import _map_stage
-
-    cfg = Config()
-    spine = demote(
-        [
-            make_segment(0, 0.0, 3.0, "안녕하세요 오늘은 여기부터 걷기로 했어요"),
-            *[
-                make_segment(1 + i, 30.0 + i * 29.0, 59.0 + i * 29.0, "오 오 오 오 오")
-                for i in range(5)
-            ],
-            make_segment(6, 178.0, 181.0, "낮술 하러 갈 건데 근처에 좋은 데가 있어요"),
-        ],
-        cfg,
-    )
-    canonical = (
-        "안녕하세요 오늘은 여기부터 걷기로 했어요 "
-        "강가를 지나 시장 골목을 한참 구경했어요 "
-        "낮술 하러 갈 건데 근처에 좋은 데가 있어요"
-    )
-    stage = _map_stage(spine, canonical, [], (), cfg, trace=None)
-
-    filled_region = [cue for cue in stage.cues if 30.0 <= cue.start < 178.0]
-    assert filled_region, "되풀이 구간에 자막이 서야 한다"
-    ordered = sorted(stage.cues, key=lambda cue: (cue.start, cue.end))
-    assert " ".join(cue.text for cue in ordered).split() == canonical.split()
-
-
 def test_even_slices_when_there_is_no_anchor() -> None:
     """whisper가 세그먼트조차 안 준 구간. 그래도 자막은 나와야 한다."""
     cfg = Config()

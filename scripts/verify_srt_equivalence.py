@@ -21,7 +21,7 @@ from vlogsrt.transcribe import build_spine, load_fixture_responses  # noqa: E402
 
 
 def cues_from_spine(whisper_json: Path) -> list:
-    from vlogsrt.mapping import spine_to_cues
+    from vlogsrt.pipeline import spine_to_cues
 
     responses = load_fixture_responses(whisper_json)
     spine, _ = build_spine(responses)

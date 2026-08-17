@@ -28,15 +28,14 @@ def build_parser() -> argparse.ArgumentParser:
     _add_config_options(run)
     _add_mode_options(run)
     run.add_argument("-o", "--out", type=Path, default=Path("out"))
-    run.add_argument("--stop-after", choices=pipeline.STAGES, default="output")
+    run.add_argument(
+        "--stop-after",
+        choices=pipeline.STAGES,
+        default="verify",
+        help="output이면 gpt 검증을 건너뛴다 — whisper 비용만 든다",
+    )
     run.add_argument("--fast", action="store_true", help="word 타임스탬프 없이 실행")
     run.add_argument("--dry-run", action="store_true", help="비용 추정만 하고 끝낸다")
-
-    base = sub.add_parser("baseline", help="whisper 세그먼트 그대로 SRT (B0)")
-    base.add_argument("video", type=Path)
-    _add_config_options(base)
-    _add_mode_options(base)
-    base.add_argument("-o", "--out", type=Path, default=Path("eval/b0"))
 
     again = sub.add_parser("redo", help="API 없이 정제·출력만 재실행")
     again.add_argument("trace", type=Path)
@@ -157,16 +156,6 @@ def cmd_run(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_baseline(args: argparse.Namespace) -> int:
-    cfg = config_from_args(args)
-    online = _resolve_online(args)
-    if online:
-        _confirm_cost(preprocess.probe_duration(args.video), cfg, args.yes)
-    result = pipeline.baseline(args.video, cfg, args.out, online=online, force_offline=args.offline)
-    log.out(f"srt: {result.outputs['srt']}")
-    return 0
-
-
 def cmd_redo(args: argparse.Namespace) -> int:
     cfg = config_from_args(args)
     outdir = args.out or args.trace.parent
@@ -261,7 +250,6 @@ def cmd_keywords(args: argparse.Namespace) -> int:
 
 _COMMANDS = {
     "run": cmd_run,
-    "baseline": cmd_baseline,
     "redo": cmd_redo,
     "eval": cmd_eval,
     "evalset": cmd_evalset,

@@ -1,6 +1,7 @@
-"""파이프라인 조립 — M1 전처리 → M2 전사 → M3 매핑 → M4 정제 → M5 출력.
+"""파이프라인 조립 — 전처리 → whisper 골격 → 정제 → 출력 → 검증.
 
 각 단계는 순수 함수 모듈에 있고, 여기서는 순서와 입출력만 다룬다.
+SRT는 검증 단계 **전에** 저장된다 — 검증은 실패해도 SRT를 막지 못한다(규칙 4).
 """
 
 from __future__ import annotations
@@ -10,15 +11,16 @@ import json
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from . import env, gapfill, log, loops, mapping, preprocess, refine, transcribe
+from . import env, log, loops, preprocess, refine, transcribe, verify
 from .config import Config
-from .models import Chunk, Cue, Issue, Segment, Trace, Word
+from .models import VERDICT_OK, Chunk, Cue, Issue, Segment, Trace, Word
 from .output import save_srt, to_review_cues
 from .report import build_report
 from .transcribe import LiveTranscriber, Transcriber, TranscriptionJob
 from .validate import ERR, count_by_level, validate
+from .verify import Verification
 
-STAGES = ("spine", "canonical", "map", "refine", "output")
+STAGES = ("spine", "refine", "output", "verify")
 Span = tuple[float, float]
 
 
@@ -37,6 +39,7 @@ class RunResult:
     cues: tuple[Cue, ...]
     issues: tuple[Issue, ...]
     outputs: dict[str, Path]
+    verification: Verification | None = None
 
 
 # ─────────────────────────────────────────────────────────────
@@ -129,13 +132,28 @@ def fetch_spine(
     transcriber: Transcriber, job: TranscriptionJob, cfg: Config, silences: tuple[Span, ...]
 ) -> tuple[list[Segment], list[Word]]:
     """골격 생성의 끝. 판정(개별 지표)과 강등(세그먼트 간 반복)까지 마친 뒤에야
-    골격이 확정되고, 그 뒤로는 불변이다(규칙 1)."""
+    골격이 확정되고, 그 뒤로는 불변이다(규칙 2)."""
     responses = transcriber.whisper(job, cfg)
     spine, words = transcribe.build_spine(responses)
     if not spine:
         raise RuntimeError("whisper 응답에서 세그먼트를 얻지 못했습니다.")
     judged = transcribe.apply_verdicts(spine, silences, cfg)
     return loops.demote(judged, cfg), words
+
+
+def spine_to_cues(spine: list[Segment]) -> list[Cue]:
+    """골격 하나에 큐 하나. 시각도 텍스트도 whisper 세그먼트 그대로다(규칙 1·2)."""
+    return [
+        Cue(
+            start=segment.start,
+            end=segment.end,
+            lines=(segment.text.strip(),),
+            seg_ids=(segment.id,),
+            whisper_text=segment.text.strip(),
+            index=position + 1,
+        )
+        for position, segment in enumerate(s for s in spine if s.verdict == VERDICT_OK)
+    ]
 
 
 # ─────────────────────────────────────────────────────────────
@@ -150,15 +168,17 @@ def run(
     *,
     online: bool = False,
     force_offline: bool = False,
-    stop_after: str = "output",
+    stop_after: str = "verify",
     fast: bool = False,
     workdir: Path | None = None,
     artifacts: bool = True,
 ) -> RunResult:
-    """`artifacts=False`면 SRT 하나만 남기고 trace·리포트·검토본은 쓰지 않는다.
+    """`artifacts=False`면 SRT 하나만 남기고 trace·리포트는 쓰지 않는다.
 
     `workdir`를 임시 폴더로 주면 오디오도 그 안에서 만들고 끝나면 함께 사라진다.
     실행 기록을 남기지 않는 경로가 이 둘을 같이 쓴다.
+
+    `--stop-after output`은 gpt를 아예 부르지 않는다 — whisper 비용만 든다.
     """
     if stop_after not in STAGES:
         raise RuntimeError(
@@ -190,28 +210,18 @@ def run(
             trace, [], [], outdir, prepared.stem, effective, write_srt=False, artifacts=artifacts
         )
 
-    canonical = transcribe.canonical_text(transcriber.gpt(job, effective))
-    if not canonical.strip():
-        raise RuntimeError("gpt-transcribe 응답이 비었습니다. 픽스처를 확인하세요.")
-    trace = replace(trace, canonical=canonical)
-    if stop_after == "canonical":
-        return _finish(
-            trace, [], [], outdir, prepared.stem, effective, write_srt=False, artifacts=artifacts
-        )
-
-    draft = _map_stage(spine, canonical, words, prepared.silences, effective, trace)
-    trace = replace(trace, cues=tuple(draft.cues), warnings=tuple(draft.warnings))
-    if stop_after == "map":
-        return _finish(trace, draft.cues, [], outdir, prepared.stem, effective, artifacts=artifacts)
-
-    cues = refine.refine(draft.cues, words, effective, prepared.duration)
-    cues = mapping.score_cues(cues, spine, effective)
+    draft = spine_to_cues(spine)
+    if not draft:
+        raise RuntimeError("판정을 통과한 세그먼트가 없습니다. 임계값이나 오디오를 확인하세요.")
+    cues = refine.refine(draft, words, effective, prepared.duration)
     issues = validate(cues, spine, effective)
     _report_issues(issues)
+    trace = replace(trace, cues=tuple(cues))
     if stop_after == "refine":
         return _finish(trace, cues, issues, outdir, prepared.stem, effective, artifacts=artifacts)
 
-    return _finish(
+    # SRT는 여기서 저장된다. 검증은 그 다음이다 — 실패해도 SRT를 막지 못한다(규칙 4).
+    finished = _finish(
         trace,
         cues,
         issues,
@@ -221,42 +231,36 @@ def run(
         write_report=True,
         artifacts=artifacts,
     )
+    if stop_after == "output":
+        return finished
+
+    verification = _verify_stage(transcriber, job, effective, cues, prepared.duration)
+    if verification is not None:
+        log.info(verify.summarize(verification))
+    return replace(finished, verification=verification)
 
 
-@dataclass(frozen=True, slots=True)
-class _MapStage:
-    cues: list[Cue]
-    warnings: list[str]
-
-
-def _map_stage(
-    spine: list[Segment],
-    canonical: str,
-    words: list[Word],
-    silences: tuple[Span, ...],
+def _verify_stage(
+    transcriber: Transcriber,
+    job: TranscriptionJob,
     cfg: Config,
-    trace: Trace,
-) -> _MapStage:
-    """골격 큐에 정본 텍스트를 얹는다. 시각은 이 단계에서 절대 변하지 않는다."""
-    del trace
-    base = mapping.spine_to_cues(spine)
-    if not base:
-        raise RuntimeError("판정을 통과한 세그먼트가 없습니다. 임계값이나 오디오를 확인하세요.")
-    mapped, cuts_a, global_sim = mapping.apply_canonical(base, spine, canonical, words, cfg)
-    warnings: list[str] = []
-    if global_sim < cfg.global_sim_floor:
-        # F13 폴백. 두 전사가 서로 다른 말을 하고 있다. gpt 텍스트를 믿을 수 없다.
-        message = (
-            f"전역 유사도 {global_sim:.2f} < {cfg.global_sim_floor}. "
-            "정본 매핑을 포기하고 whisper 골격 텍스트로 출력한다."
-        )
-        log.warn(message)
-        warnings.append(message)
-        return _MapStage(cues=base, warnings=warnings)
-    del cuts_a  # 공백 채우기는 절단점이 아니라 시간축을 본다. 그쪽이 환청에 안 흔들린다.
-    spread, filled = gapfill.fill_gaps(mapped, spine, cfg, silences)
-    warnings.extend(gapfill.report(filled))
-    return _MapStage(cues=spread, warnings=warnings)
+    cues: list[Cue],
+    duration: float,
+) -> Verification | None:
+    """gpt 대조 검증. 어떤 실패도 경고 한 줄로 끝난다 — SRT는 이미 저장돼 있다.
+
+    예외를 넓게 잡는 이유: API 오류든 픽스처 부재든, 검증 불가는 "검증 생략"이라는
+    명시적 결과(None)로 바뀌어 요약과 report에 드러난다. 조용히 삼키는 것이 아니다.
+    """
+    try:
+        responses = transcriber.gpt(job, cfg)
+    except Exception as exc:  # noqa: BLE001 — 규칙 4: 검증 실패는 SRT 산출을 막지 못한다
+        log.warn(f"검증을 건너뛴다 — gpt 응답을 얻지 못했다: {exc}")
+        return None
+    if not responses:
+        log.warn("검증을 건너뛴다 — gpt 응답이 비어 있다.")
+        return None
+    return verify.verify(cues, responses, duration, cfg)
 
 
 def warn_about_loops(spine: list[Segment], cfg: Config, duration: float) -> list[str]:
@@ -273,8 +277,8 @@ def warn_about_loops(spine: list[Segment], cfg: Config, duration: float) -> list
     share = seconds / duration * 100 if duration > 0 else 0.0
     notices = [
         f"whisper가 같은 문장을 되풀이한 구간 {len(found)}개 · "
-        f"{seconds:.0f}초 (영상의 {share:.1f}%). 골격에서 걸렀고, "
-        "그 시간대 자막은 시각 추정으로 되돌린다."
+        f"{seconds:.0f}초 (영상의 {share:.1f}%). 골격에서 걸렀다 — "
+        "그 시간대는 자막 공백으로 남고, 검증이 그 구간을 표시한다."
     ]
     for loop in sorted(found, key=lambda item: -item.duration)[:3]:
         notices.append(f"  {loop.start:.0f}~{loop.end:.0f}초 · {loop.count}회 · {loop.text[:40]!r}")
@@ -328,31 +332,8 @@ def _finish(
 
 
 # ─────────────────────────────────────────────────────────────
-#  B0 베이스라인 / redo
+#  픽스처 녹화 / redo
 # ─────────────────────────────────────────────────────────────
-
-
-def baseline(
-    video: Path, cfg: Config, outdir: Path, *, online: bool = False, force_offline: bool = False
-) -> RunResult:
-    """whisper 세그먼트를 그대로 SRT로 뽑는다. 대시보드 첫 행(B0)이다."""
-    online = online and not force_offline
-    offline = force_offline or not online and env.is_offline()
-    prepared = prepare(video, cfg, offline=offline)
-    transcriber = transcribe.get_transcriber(cfg, online=online, force_offline=offline)
-    job = build_job(prepared)
-    spine, words = fetch_spine(transcriber, job, cfg, prepared.silences)
-    cues = refine.renumber(mapping.spine_to_cues(spine))
-    trace = Trace(
-        source=str(video),
-        duration=prepared.duration,
-        spine=tuple(spine),
-        cues=tuple(cues),
-        words=tuple(words),
-        silences=prepared.silences,
-        config_snapshot=cfg.to_dict(),
-    )
-    return _finish(trace, cues, [], outdir, prepared.stem, cfg)
 
 
 def record_fixtures(video: Path, cfg: Config, *, reuse_existing: bool = True) -> dict[str, Path]:
@@ -398,14 +379,17 @@ def record_fixtures(video: Path, cfg: Config, *, reuse_existing: bool = True) ->
 
 
 def redo(trace_path: Path, cfg: Config, outdir: Path) -> RunResult:
-    """API 없이 M4~M5만 다시 돈다. 임계값을 바꿔가며 재측정하는 용도다."""
+    """API 없이 골격에서 다시 정제한다. 임계값을 바꿔가며 재측정하는 용도다.
+
+    검증은 다시 돌지 않는다 — trace에는 gpt 응답이 없다.
+    """
     trace = Trace.load(trace_path)
-    if not trace.cues:
-        raise RuntimeError(f"{trace_path}에 큐 초안이 없습니다. `vlogsrt run`을 먼저 실행하세요.")
+    if not trace.spine:
+        raise RuntimeError(f"{trace_path}에 골격이 없습니다. `vlogsrt run`을 먼저 실행하세요.")
     stem = Path(trace.source).stem
-    cues = refine.refine(list(trace.cues), list(trace.words), cfg, trace.duration)
-    cues = mapping.score_cues(cues, list(trace.spine), cfg)
+    draft = spine_to_cues(list(trace.spine))
+    cues = refine.refine(draft, list(trace.words), cfg, trace.duration)
     issues = validate(cues, list(trace.spine), cfg)
     _report_issues(issues)
-    updated = replace(trace, config_snapshot=cfg.to_dict())
+    updated = replace(trace, cues=tuple(cues), config_snapshot=cfg.to_dict())
     return _finish(updated, cues, issues, outdir, stem, cfg, write_report=True)

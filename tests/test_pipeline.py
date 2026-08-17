@@ -33,21 +33,65 @@ def test_run_end_to_end(tmp_path: Path) -> None:
     assert [cue.index for cue in srt] == list(range(1, len(srt) + 1))
 
 
-def test_output_text_comes_from_gpt_not_whisper(tmp_path: Path) -> None:
-    """불변 규칙 2 — 최종 SRT에 whisper 텍스트가 들어가면 안 된다."""
+def test_output_text_comes_straight_from_whisper(tmp_path: Path) -> None:
+    """불변 규칙 1 — 모든 글자는 whisper 세그먼트에서 온다. 오타까지 그대로다.
+
+    whisper의 오기("망언동")를 gpt가 바로잡는 일은 없다 — gpt는 검증 플래그만 낸다.
+    """
     result = pipeline.run(VIDEO, Config(), tmp_path, force_offline=True)
     body = " ".join(cue.text for cue in result.cues)
-    assert "망원동" in body and "망언동" not in body
-    assert "블루펭귄" in body and "블루팽귄" not in body
+    assert "망언동" in body and "망원동" not in body
+    assert "블루팽귄" in body and "블루펭귄" not in body
 
 
-def test_hallucinated_segment_is_excluded_but_its_text_survives(tmp_path: Path) -> None:
+def test_hallucinated_segment_is_dropped(tmp_path: Path) -> None:
+    """환청 세그먼트는 큐가 되지 않는다. 그 시간대는 정직한 공백이다."""
     result = pipeline.run(VIDEO, Config(), tmp_path, force_offline=True)
     verdicts = {segment.id: segment.verdict for segment in result.trace.spine}
     assert verdicts[6] == "compression_fail"
     body = " ".join(cue.text for cue in result.cues)
     assert "감사합니다 감사합니다" not in body
-    assert "분위기" in body
+    assert all(6 not in cue.seg_ids for cue in result.cues)
+
+
+def test_full_run_returns_a_verification(tmp_path: Path) -> None:
+    result = pipeline.run(VIDEO, Config(), tmp_path, force_offline=True)
+    assert result.verification is not None
+    assert result.verification.cue_total == len(result.cues)
+
+
+def test_stop_after_output_never_calls_gpt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`--stop-after output` = whisper 비용만. gpt 호출이 한 번이라도 있으면 실패다."""
+    from vlogsrt import transcribe as transcribe_module
+
+    calls: list[str] = []
+    original = transcribe_module.FixtureTranscriber.gpt
+
+    def counting(self: object, job: object, cfg: object) -> list[object]:
+        calls.append("gpt")
+        return original(self, job, cfg)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(transcribe_module.FixtureTranscriber, "gpt", counting)
+    result = pipeline.run(VIDEO, Config(), tmp_path, force_offline=True, stop_after="output")
+    assert calls == []
+    assert result.verification is None
+    assert result.outputs["srt"].is_file()
+
+
+def test_missing_gpt_fixture_still_writes_the_srt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """불변 규칙 4 — 검증 실패는 SRT 산출을 막지 못한다."""
+    from vlogsrt import transcribe as transcribe_module
+
+    def broken(self: object, job: object, cfg: object) -> list[object]:
+        raise RuntimeError("픽스처가 없습니다")
+
+    monkeypatch.setattr(transcribe_module.FixtureTranscriber, "gpt", broken)
+    result = pipeline.run(VIDEO, Config(), tmp_path, force_offline=True)
+    assert result.outputs["srt"].is_file()
+    assert result.cues
+    assert result.verification is None
 
 
 def test_stop_after_spine_writes_trace_only(tmp_path: Path) -> None:
@@ -58,12 +102,6 @@ def test_stop_after_spine_writes_trace_only(tmp_path: Path) -> None:
     assert all(segment["start"] < segment["end"] for segment in trace["spine"])
     assert not (tmp_path / "output.srt").exists()
     assert result.cues == ()
-
-
-def test_baseline_uses_whisper_text(tmp_path: Path) -> None:
-    result = pipeline.baseline(VIDEO, Config(), tmp_path, force_offline=True)
-    body = " ".join(cue.text for cue in result.cues)
-    assert "망언동" in body  # B0는 whisper 그대로다
 
 
 def test_redo_replays_without_fixtures(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
