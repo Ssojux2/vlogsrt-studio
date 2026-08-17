@@ -109,3 +109,54 @@ def test_cli_reports_errors_without_a_traceback(tmp_path: Path) -> None:
 
 def test_cli_rejects_offline_and_online_together(tmp_path: Path) -> None:
     assert main(["run", str(VIDEO), "--offline", "--online", "-o", str(tmp_path)]) == 1
+
+
+def test_record_reuses_what_was_already_paid_for(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """한쪽 모델만 실패했을 때, 재시도가 성공한 쪽까지 다시 결제하면 안 된다."""
+    from vlogsrt import transcribe as transcribe_module
+
+    fixtures = tmp_path / "api"
+    fixtures.mkdir()
+    (fixtures / "demo.whisper.json").write_text('{"segments": [], "words": []}', encoding="utf-8")
+    monkeypatch.setenv("VLOGSRT_FIXTURE_DIR", str(fixtures))
+    monkeypatch.setattr(
+        pipeline,
+        "prepare",
+        lambda video, cfg, **kwargs: pipeline.Prepared("demo", 10.0, (), (), str(video)),
+    )
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+
+    called: list[str] = []
+
+    class OnlyGpt:
+        def whisper(self, job: object, cfg: object) -> list[object]:
+            called.append("whisper")
+            return []
+
+        def gpt(self, job: object, cfg: object) -> list[object]:
+            called.append("gpt")
+            return [transcribe_module.ChunkResponse(0, 0.0, {"text": "가"})]
+
+    monkeypatch.setattr(pipeline, "LiveTranscriber", lambda **kwargs: OnlyGpt())
+    outputs = pipeline.record_fixtures(Path("demo.mp4"), Config())
+
+    assert called == ["gpt"]  # whisper는 다시 부르지 않았다
+    assert outputs["whisper"].name == "demo.whisper.json"
+    assert outputs["gpt"].is_file()
+
+
+def test_partial_fixture_is_not_treated_as_recorded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ui import service
+
+    fixtures = tmp_path / "api"
+    fixtures.mkdir()
+    (fixtures / "demo.whisper.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("VLOGSRT_FIXTURE_DIR", str(fixtures))
+    assert service.has_fixture("demo") is False
+
+    (fixtures / "demo.gpt.json").write_text("{}", encoding="utf-8")
+    assert service.has_fixture("demo") is True

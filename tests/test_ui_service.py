@@ -113,6 +113,44 @@ def test_upload_detection_survives_the_macos_temp_symlink() -> None:
     assert service.is_uploaded_copy(uploaded) is True
 
 
+def test_progress_streams_before_the_slow_part(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """긴 단계에 들어가기 **전에** 무엇을 하는지 먼저 내보내야 한다.
+
+    끝나고 한 번에 주면 사람은 몇 분 동안 빈 화면을 보고 멈췄다고 판단한다.
+    """
+    monkeypatch.setattr(service.preprocess, "probe_duration", lambda path: 300.0)
+    seen: list[str] = []
+
+    def slow_record(*args: object, **kwargs: object) -> None:
+        # 이 시점에 이미 사람에게 안내가 나가 있어야 한다
+        seen.append("녹화 시작")
+        raise RuntimeError("여기서 멈춘다")
+
+    monkeypatch.setattr(service.pipeline, "record_fixtures", slow_record)
+    video = tmp_path / "fresh.mp4"
+    video.write_bytes(b"\x00")
+
+    steps = list(service.stream_subtitles(str(video)))
+    assert len(steps) >= 3  # 영상 → 길이 확인 → 전사 안내 → (실패)
+    before_slow = steps[-2].log
+    assert "OpenAI 호출" in before_slow
+    assert "몇 분 걸립니다" in before_slow
+    assert seen == ["녹화 시작"]
+
+
+def test_stream_reports_each_stage(tmp_path: Path) -> None:
+    video = tmp_path / "demo.mp4"
+    video.write_bytes(b"\x00")
+    steps = list(service.stream_subtitles(str(video)))
+    assert len(steps) >= 3
+    assert all(step.ok is False for step in steps[:-1])  # 중간 상태
+    assert steps[-1].ok is True
+    assert "다듬는 중" in steps[-2].log
+    assert "다듬는 중" not in steps[-1].log  # 끝나면 지운다
+
+
 def test_log_carries_pipeline_progress(monkeypatch: pytest.MonkeyPatch) -> None:
     """파이프라인이 stderr로 찍는 진행 상황이 화면 로그에 들어와야 한다."""
     monkeypatch.setenv("VLOGSRT_LOG_LEVEL", "INFO")  # conftest는 테스트 소음을 줄이려 ERROR로 둔다

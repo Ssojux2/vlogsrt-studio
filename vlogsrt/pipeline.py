@@ -284,31 +284,46 @@ def baseline(
     return _finish(trace, cues, [], outdir, prepared.stem, cfg)
 
 
-def record_fixtures(video: Path, cfg: Config) -> dict[str, Path]:
+def record_fixtures(video: Path, cfg: Config, *, reuse_existing: bool = True) -> dict[str, Path]:
     """실제 API를 호출해 픽스처를 녹화한다. **유료다.**
 
     호출자가 먼저 사람의 동의를 받아야 한다. 이 함수는 확인을 묻지 않는다.
+
+    이미 받아둔 응답은 다시 부르지 않는다. 한쪽 모델만 실패했을 때 재시도하면서
+    성공한 쪽까지 다시 결제하는 일을 막는다 — 77분 영상이면 한 모델에 약 $0.46이다.
     """
     prepared = prepare(video, cfg, offline=False)
-    transcriber = LiveTranscriber(api_key=env.require_api_key(force=True), base_url=env.base_url())
-    job = build_job(prepared)
     fixture_dir = env.fixture_dir()
-    return {
-        "whisper": transcribe.save_fixture(
-            fixture_dir, prepared.stem, "whisper", transcriber.whisper(job, cfg)
-        ),
-        "gpt": transcribe.save_fixture(
-            fixture_dir, prepared.stem, "gpt", transcriber.gpt(job, cfg)
-        ),
-        "meta": transcribe.save_meta(
-            fixture_dir,
-            prepared.stem,
-            cfg,
-            prepared.duration,
-            prepared.silences,
-            len(prepared.chunks),
-        ),
+    existing = {kind: fixture_dir / f"{prepared.stem}.{kind}.json" for kind in ("whisper", "gpt")}
+    pending = [kind for kind, path in existing.items() if not (reuse_existing and path.is_file())]
+    for kind, path in existing.items():
+        if kind not in pending:
+            log.info(f"{kind} 응답이 이미 있어 다시 부르지 않는다: {path}")
+
+    outputs: dict[str, Path] = {
+        kind: path for kind, path in existing.items() if kind not in pending
     }
+    if pending:
+        transcriber = LiveTranscriber(
+            api_key=env.require_api_key(force=True), base_url=env.base_url()
+        )
+        job = build_job(prepared)
+        calls = {"whisper": transcriber.whisper, "gpt": transcriber.gpt}
+        for kind in pending:
+            log.info(f"{kind} 호출 중…")
+            outputs[kind] = transcribe.save_fixture(
+                fixture_dir, prepared.stem, kind, calls[kind](job, cfg)
+            )
+
+    outputs["meta"] = transcribe.save_meta(
+        fixture_dir,
+        prepared.stem,
+        cfg,
+        prepared.duration,
+        prepared.silences,
+        len(prepared.chunks),
+    )
+    return outputs
 
 
 def redo(trace_path: Path, cfg: Config, outdir: Path) -> RunResult:

@@ -204,7 +204,6 @@ class LiveTranscriber:
                     return client.audio.transcriptions.create(
                         file=handle,
                         model=cfg.gpt_model,
-                        language=cfg.language,
                         temperature=0,
                         response_format="json",
                         **_gpt_extras(cfg),
@@ -216,9 +215,18 @@ class LiveTranscriber:
 
 
 def _gpt_extras(cfg: Config) -> dict[str, Any]:
+    """`language`와 `languages`는 **함께 보낼 수 없다.**
+
+    TASKS.md §T3.1은 둘 다 넘기라고 적어두었지만 실제 API는 400을 돌려준다:
+      "The 'language' and 'languages' parameters cannot be used together."
+    여러 언어를 알려주는 쪽이 이 프로젝트의 의도라 `languages`를 택하고,
+    설정이 비어 있을 때만 단일 `language`로 떨어진다.
+    """
     extras: dict[str, Any] = {}
     if cfg.extra_languages:
         extras["languages"] = list(cfg.extra_languages)
+    elif cfg.language:
+        extras["language"] = cfg.language
     if cfg.keywords:
         extras["keywords"] = list(cfg.keywords)
     return extras

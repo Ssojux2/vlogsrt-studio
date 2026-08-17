@@ -187,3 +187,31 @@ def test_save_fixture_writes_chunk_shape(tmp_path: Path) -> None:
 
 def test_live_transcriber_is_never_built_offline() -> None:
     assert not isinstance(get_transcriber(Config()), LiveTranscriber)
+
+
+# ─────────────────────────────────────────────────────────────
+#  실제 API가 거부한 조합 (실측 400)
+# ─────────────────────────────────────────────────────────────
+
+
+def test_gpt_never_sends_language_and_languages_together() -> None:
+    """`language`와 `languages`를 함께 보내면 API가 400을 돌려준다.
+
+    TASKS.md §T3.1은 둘 다 넘기라고 적어두었지만 실측은 이렇게 답했다:
+      "The 'language' and 'languages' parameters cannot be used together."
+    """
+    from vlogsrt.transcribe import _gpt_extras
+
+    extras = _gpt_extras(Config())
+    assert "languages" in extras
+    assert "language" not in extras
+
+
+def test_gpt_falls_back_to_single_language() -> None:
+    from dataclasses import replace as data_replace
+
+    from vlogsrt.transcribe import _gpt_extras
+
+    extras = _gpt_extras(data_replace(Config(), extra_languages=()))
+    assert extras["language"] == "ko"
+    assert "languages" not in extras

@@ -14,8 +14,9 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -95,7 +96,13 @@ def pick_file_dialog(timeout: float = 300.0) -> str | None:
 
 
 def has_fixture(stem: str) -> bool:
-    return (env.fixture_dir() / f"{stem}.whisper.json").is_file()
+    """**두 모델의 응답이 모두** 있어야 녹화된 것으로 친다.
+
+    한쪽만 있는 상태를 "녹화됨"으로 보면 녹화를 건너뛰고, 곧바로 없는 쪽을
+    찾다가 실패한다. 실제로 gpt 호출이 400으로 죽었을 때 그 상태가 됐다.
+    """
+    fixture_dir = env.fixture_dir()
+    return all((fixture_dir / f"{stem}.{kind}.json").is_file() for kind in ("whisper", "gpt"))
 
 
 def status_line() -> str:
@@ -135,19 +142,63 @@ def _captured_log() -> Iterator[io.StringIO]:
         yield buffer
 
 
-def make_subtitles(raw_path: str) -> RunReport:
-    """UI의 유일한 실행 경로.
+def _run_streaming(
+    work: Callable[[], object], lines: list[str], poll: float = 0.4
+) -> Iterator[RunReport | object]:
+    """오래 걸리는 단계를 별도 스레드로 돌리며 로그를 실시간으로 흘린다.
 
-    녹화 기록이 없으면 API를 호출해 받아오고, 있으면 그것을 재사용한다.
-    같은 영상을 다시 눌러도 API를 두 번 부르지 않는다.
+    77분짜리 영상은 오디오 추출만 몇 분이다. 끝나고 한꺼번에 보여주면
+    그 몇 분 동안 화면이 멈춘 것처럼 보인다. 마지막에 결과값을 내보낸다.
+    """
+    outcome: dict[str, object] = {}
+    failure: dict[str, BaseException] = {}
+
+    def target() -> None:
+        try:
+            outcome["value"] = work()
+        except BaseException as exc:  # noqa: BLE001 - 스레드 밖으로 그대로 옮긴다
+            failure["error"] = exc
+
+    with contextlib.redirect_stderr(io.StringIO()) as buffer:
+        worker = threading.Thread(target=target, daemon=True)
+        worker.start()
+        shown = 0
+        while worker.is_alive():
+            worker.join(poll)
+            progress = _progress_lines(buffer.getvalue())
+            if len(progress) > shown:
+                shown = len(progress)
+                yield _running([*lines, *progress])
+        trailing = _progress_lines(buffer.getvalue())
+
+    if failure:
+        raise failure["error"]
+    lines.extend(trailing)
+    yield outcome.get("value")
+
+
+def stream_subtitles(raw_path: str) -> Iterator[RunReport]:
+    """진행 상황을 단계마다 흘려보낸다.
+
+    한 번에 다 돌리고 끝에 결과만 주면, 긴 영상에서는 몇 분 동안 화면이 텅 빈다.
+    사람은 그걸 "안 되는 것"으로 읽는다. 그래서 오래 걸리는 단계 **앞에서**
+    무엇을 하고 있는지 먼저 내보낸다.
     """
     lines: list[str] = []
     try:
         path = resolve_path(raw_path)
         recorded = has_fixture(path.stem)
         lines.append(f"영상   {path}")
+        yield _running(lines)
+
         if not recorded:
             _check_source(path)
+            partial = (env.fixture_dir() / f"{path.stem}.whisper.json").is_file()
+            if partial:
+                lines.append("전사   whisper 응답은 이미 있습니다. 없는 쪽만 부릅니다.")
+                yield _running(lines)
+            lines.append("확인   길이를 재는 중…")
+            yield _running(lines)
             duration = preprocess.probe_duration(path)
             guard = env.cost_guard_seconds()
             if duration > guard:
@@ -158,34 +209,66 @@ def make_subtitles(raw_path: str) -> RunReport:
                     f"예상 비용 약 ${transcribe.estimate_cost(duration, build_config()):.2f}"
                 )
             cost = transcribe.estimate_cost(duration, build_config())
-            lines.append(f"전사   OpenAI 호출 · {duration / 60:.1f}분 · 예상 ${cost:.3f}")
+            lines[-1] = f"전사   OpenAI 호출 · {duration / 60:.1f}분 · 예상 ${cost:.3f}"
+            lines.append("       오디오 추출 → 업로드 → 전사. 길이에 비례해 몇 분 걸립니다…")
+            yield _running(lines)
+            notice = lines.pop()
+            for step in _run_streaming(
+                lambda: pipeline.record_fixtures(path, build_config()), lines
+            ):
+                if isinstance(step, RunReport):
+                    yield step
+            del notice
+            lines.append("전사   완료")
+            yield _running(lines)
         else:
             lines.append("전사   기록된 응답 재사용")
+            yield _running(lines)
 
-        with _captured_log() as buffer:
-            cfg = build_config()
-            if not recorded:
-                pipeline.record_fixtures(path, cfg)
-            workdir = env.project_root() / "out" / path.stem
-            result = pipeline.run(path, cfg, workdir, force_offline=True)
+        lines.append("정제   자막을 다듬는 중…")
+        yield _running(lines)
+        lines.pop()
+        workdir = env.project_root() / "out" / path.stem
+        result = None
+        for step in _run_streaming(
+            lambda: pipeline.run(path, build_config(), workdir, force_offline=True), lines
+        ):
+            if isinstance(step, RunReport):
+                yield step
+            else:
+                result = step
     except UiError as exc:
-        return RunReport(ok=False, log=_join(lines, str(exc)))
+        yield RunReport(ok=False, log=_join(lines, str(exc)))
+        return
     except RuntimeError as exc:
-        return RunReport(ok=False, log=_join(lines, f"실패   {exc}"))
+        yield RunReport(ok=False, log=_join(lines, f"실패   {exc}"))
+        return
 
-    lines.extend(_progress_lines(buffer.getvalue()))
+    assert isinstance(result, pipeline.RunResult)
     lines.append(_summary(result))
     final, note = _place_final_srt(path, result.outputs["srt"])
     lines.append(f"저장   {final}")
     if note:
         lines.append(note)
     lines.append(f"작업물 {result.outputs['srt'].parent}")
-    return RunReport(
+    yield RunReport(
         ok=True,
         log=_join(lines),
         srt_text=final.read_text(encoding="utf-8"),
         files=(str(final), *_downloads(result)[1:]),
     )
+
+
+def make_subtitles(raw_path: str) -> RunReport:
+    """마지막 상태만 필요할 때. 테스트와 비대화형 호출이 쓴다."""
+    last = RunReport(ok=False, log="아무 일도 일어나지 않았습니다.")
+    for report in stream_subtitles(raw_path):
+        last = report
+    return last
+
+
+def _running(lines: list[str]) -> RunReport:
+    return RunReport(ok=False, log=_join(lines))
 
 
 def is_uploaded_copy(path: Path) -> bool:

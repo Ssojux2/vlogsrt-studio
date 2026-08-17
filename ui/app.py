@@ -49,9 +49,13 @@ def build_app() -> gr.Blocks:
         files_box = gr.File(label="저장된 파일", file_count="multiple", height=110)
 
         # ── 동작 ──────────────────────────────────────────────
-        def on_run(path_text: str) -> tuple[str, str, list[str]]:
-            report = service.make_subtitles(path_text)
-            return report.log, report.srt_text, list(report.files)
+        def on_run(path_text: str) -> Any:
+            """제너레이터로 돌려 진행 상황을 실시간으로 흘린다.
+
+            한 번에 반환하면 긴 영상에서 몇 분 동안 화면이 비어 멈춘 것처럼 보인다.
+            """
+            for report in service.stream_subtitles(path_text):
+                yield report.log, report.srt_text, list(report.files)
 
         def on_browse() -> Any:
             """OS 파일 대화상자를 열어 실제 경로를 받아온다. 취소하면 그대로 둔다."""

@@ -99,6 +99,34 @@ PLAN이 나타나면 이 세 항목을 대조해야 한다.
 
 ---
 
+## D12. TASKS.md §T3.1의 gpt 호출 파라미터가 틀렸다 (실측)
+
+TASKS.md는 `gpt-transcribe` 호출에 `language`와 `languages`를 **둘 다** 넘기라고
+적어두었다. 실제 API는 400을 돌려준다.
+
+```
+The 'language' and 'languages' parameters cannot be used together.
+```
+
+여러 언어를 알려주는 쪽이 이 프로젝트의 의도(한국어 브이로그 + 영어 상호명)라
+`languages`를 택했고, `extra_languages`가 비어 있을 때만 단일 `language`로 떨어진다.
+**임계값이 아니라 API 계약이라 고쳤다.** 근거는 실측 응답이고
+`tests/test_transcribe.py`가 조합을 못 박는다.
+
+### 곁들여 드러난 것: 반쪽 녹화
+
+whisper는 성공하고 gpt가 이 400으로 죽었다. `record_fixtures`가 dict 리터럴
+순서대로 whisper를 먼저 저장했기 때문에 `*.whisper.json` 만 남았다. 그런데
+
+- `has_fixture()` 가 whisper만 확인해서 "녹화됨"으로 판정 → 녹화를 건너뛰고
+  곧바로 없는 gpt 픽스처를 찾다가 실패
+- 다시 녹화하면 성공한 whisper까지 재결제 (77분이면 약 $0.46)
+
+둘 다 고쳤다. `has_fixture()` 는 두 모델 응답이 **모두** 있어야 참이고,
+`record_fixtures(reuse_existing=True)` 는 이미 있는 응답을 다시 부르지 않는다.
+
+---
+
 ## D10. 검증하지 못한 것
 
 다음은 **골든셋과 실제 API 픽스처가 있어야** 판정할 수 있다. 현재는 미검증이다.
