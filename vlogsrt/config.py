@@ -52,6 +52,13 @@ class Config:
     no_speech_prob_max: float = 0.6
     silence_overlap_ratio: float = 0.85
 
+    # ─── 반복 환청 검출 (세그먼트 간) ────────────────────────
+    # 압축률은 세그먼트 **안쪽** 반복만 본다. 아래 값은 세그먼트를 가로지르는
+    # 반복 루프를 세는 기준이며, 외부 근거가 아니라 이 프로젝트의 관측값이다.
+    loop_min_repeats: int = 3
+    loop_min_seconds: float = 2.0
+    loop_min_chars: int = 2
+
     # ─── 정제 ────────────────────────────────────────────────
     max_chars_per_line: int = 16
     max_lines: int = 2
