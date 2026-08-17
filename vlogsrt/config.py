@@ -103,6 +103,12 @@ class Config:
     # 텍스트가 1초짜리 큐에 900자로 쏟아져 멀쩡하던 뒤 구간까지 못 쓰게 됐다.
     overflow_factor: float = 3.0
 
+    # ─── 검증 ────────────────────────────────────────────────
+    # gpt-transcribe 대조. 플래그만 만들고 출력은 절대 바꾸지 않는다(불변 규칙 4).
+    verify_chunk_sim_floor: float = 0.80
+    verify_cue_match_floor: float = 0.60
+    verify_short_cue_chars: int = 4  # "네", "음" 같은 짧은 큐는 대조 무의미
+
     # ─── 평가 ────────────────────────────────────────────────
     boundary_tol: float = 0.3
     start_tol: float = 0.2
