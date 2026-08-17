@@ -10,7 +10,7 @@ import json
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from . import env, log, loops, mapping, overflow, preprocess, refine, transcribe
+from . import env, gapfill, log, loops, mapping, preprocess, refine, transcribe
 from .config import Config
 from .models import Chunk, Cue, Issue, Segment, Trace, Word
 from .output import save_srt, to_review_cues
@@ -250,10 +250,10 @@ def _map_stage(
         log.warn(message)
         warnings.append(message)
         return _MapStage(cues=base, warnings=warnings)
-    rescued = mapping.rescue_orphans(cuts_a, spine, mapped, silences, canonical, cfg)
-    capped, spills = overflow.cap(rescued, cfg)
-    warnings.extend(overflow.report(spills, cfg))
-    return _MapStage(cues=capped, warnings=warnings)
+    del cuts_a  # 공백 채우기는 절단점이 아니라 시간축을 본다. 그쪽이 환청에 안 흔들린다.
+    spread, filled = gapfill.fill_gaps(mapped, spine, cfg, silences)
+    warnings.extend(gapfill.report(filled))
+    return _MapStage(cues=spread, warnings=warnings)
 
 
 def warn_about_loops(spine: list[Segment], cfg: Config, duration: float) -> list[str]:

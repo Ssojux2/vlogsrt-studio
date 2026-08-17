@@ -16,7 +16,6 @@ from vlogsrt.mapping import (
     cue_confidence,
     enforce_monotonic,
     map_position,
-    rescue_orphans,
     similarity,
     snap_to_word_boundary,
     spine_to_cues,
@@ -176,70 +175,6 @@ def test_snap_tie_uses_word_ownership() -> None:
     # 경계 시각이 어절의 뒤쪽이면 그 어절은 앞 세그먼트 것이다 → 오른쪽으로 붙인다.
     assert snap_to_word_boundary(4, text, [early], 1.9, cfg)[0] == 5
     assert snap_to_word_boundary(4, text, [early], 1.1, cfg)[0] == 3
-
-
-# ─────────────────────────────────────────────────────────────
-#  T3.6 — 고아 텍스트
-# ─────────────────────────────────────────────────────────────
-
-
-def test_orphan() -> None:
-    cfg = Config()
-    spine = [
-        make_segment(0, 0.0, 2.0, "안녕하세요 오늘은"),
-        make_segment(1, 2.2, 4.0, "감사합니다 감사합니다", verdict="compression_fail"),
-        make_segment(2, 4.2, 6.0, "낮술 하러요"),
-    ]
-    canonical = "안녕하세요 오늘은 여기 분위기 좋네요 낮술 하러요"
-    cues = spine_to_cues(spine)
-    mapped, cuts_a, _ = apply_canonical(cues, spine, canonical, [], cfg)
-    rescued = rescue_orphans(cuts_a, spine, mapped, [], canonical, cfg)
-
-    orphans = [cue for cue in rescued if cue.origin == "orphan"]
-    assert len(orphans) == 1
-    assert orphans[0].conf <= 0.30
-    assert "time_estimated" in orphans[0].flags
-    assert orphans[0].start >= 2.2
-    assert "분위기" in orphans[0].text
-    joined = " ".join(cue.text for cue in rescued)
-    assert joined.count("분위기") == 1
-
-
-def test_orphan_none_when_every_segment_is_ok() -> None:
-    cfg = Config()
-    spine = _spine()
-    cues = spine_to_cues(spine)
-    assert rescue_orphans([], spine, cues, [], "안녕하세요", cfg) == list(cues)
-
-
-def test_orphan_skipped_when_text_too_short() -> None:
-    cfg = Config()
-    spine = [
-        make_segment(0, 0.0, 2.0, "안녕하세요"),
-        make_segment(1, 2.2, 4.0, "어어어어", verdict="silent"),
-        make_segment(2, 4.2, 6.0, "낮술 하러요"),
-    ]
-    canonical = "안녕하세요 낮술 하러요"
-    cues = spine_to_cues(spine)
-    mapped, cuts_a, _ = apply_canonical(cues, spine, canonical, [], cfg)
-    rescued = rescue_orphans(cuts_a, spine, mapped, [], canonical, cfg)
-    assert all(cue.origin != "orphan" for cue in rescued)
-
-
-def test_orphan_at_the_edges() -> None:
-    cfg = Config()
-    spine = [
-        make_segment(0, 0.0, 2.0, "감사합니다 감사합니다", verdict="compression_fail"),
-        make_segment(1, 2.2, 4.0, "낮술 하러요"),
-        make_segment(2, 4.2, 6.0, "고맙습니다 고맙습니다", verdict="compression_fail"),
-    ]
-    canonical = "처음 인사말입니다 낮술 하러요 마지막 인사말입니다"
-    cues = spine_to_cues(spine)
-    mapped, cuts_a, _ = apply_canonical(cues, spine, canonical, [], cfg)
-    rescued = rescue_orphans(cuts_a, spine, mapped, [], canonical, cfg)
-    orphans = [cue for cue in rescued if cue.origin == "orphan"]
-    assert len(orphans) == 2
-    assert rescued == sorted(rescued, key=lambda cue: cue.start)
 
 
 # ─────────────────────────────────────────────────────────────
