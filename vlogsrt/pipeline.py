@@ -15,7 +15,7 @@ from .config import Config
 from .models import Chunk, Cue, Issue, Segment, Trace, Word
 from .output import save_srt, to_review_cues
 from .report import build_report
-from .transcribe import Transcriber, TranscriptionJob
+from .transcribe import LiveTranscriber, Transcriber, TranscriptionJob
 from .validate import ERR, count_by_level, validate
 
 STAGES = ("spine", "canonical", "map", "refine", "output")
@@ -282,6 +282,33 @@ def baseline(
         config_snapshot=cfg.to_dict(),
     )
     return _finish(trace, cues, [], outdir, prepared.stem, cfg)
+
+
+def record_fixtures(video: Path, cfg: Config) -> dict[str, Path]:
+    """실제 API를 호출해 픽스처를 녹화한다. **유료다.**
+
+    호출자가 먼저 사람의 동의를 받아야 한다. 이 함수는 확인을 묻지 않는다.
+    """
+    prepared = prepare(video, cfg, offline=False)
+    transcriber = LiveTranscriber(api_key=env.require_api_key(force=True), base_url=env.base_url())
+    job = build_job(prepared)
+    fixture_dir = env.fixture_dir()
+    return {
+        "whisper": transcribe.save_fixture(
+            fixture_dir, prepared.stem, "whisper", transcriber.whisper(job, cfg)
+        ),
+        "gpt": transcribe.save_fixture(
+            fixture_dir, prepared.stem, "gpt", transcriber.gpt(job, cfg)
+        ),
+        "meta": transcribe.save_meta(
+            fixture_dir,
+            prepared.stem,
+            cfg,
+            prepared.duration,
+            prepared.silences,
+            len(prepared.chunks),
+        ),
+    }
 
 
 def redo(trace_path: Path, cfg: Config, outdir: Path) -> RunResult:

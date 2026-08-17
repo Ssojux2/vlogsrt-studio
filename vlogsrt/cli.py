@@ -238,21 +238,8 @@ def cmd_probe(args: argparse.Namespace) -> int:
 def cmd_record(args: argparse.Namespace) -> int:
     """사람만 실행한다. 실제 API를 부르고 요금이 발생한다."""
     cfg = config_from_args(args)
-    prepared = pipeline.prepare(args.video, cfg, offline=False)
-    _confirm_cost(prepared.duration, cfg, args.yes)
-    transcriber = transcribe.LiveTranscriber(
-        api_key=env.require_api_key(force=True), base_url=env.base_url()
-    )
-    job = pipeline.build_job(prepared)
-    fixture_dir = env.fixture_dir()
-    whisper_path = transcribe.save_fixture(
-        fixture_dir, prepared.stem, "whisper", transcriber.whisper(job, cfg)
-    )
-    gpt_path = transcribe.save_fixture(fixture_dir, prepared.stem, "gpt", transcriber.gpt(job, cfg))
-    meta_path = transcribe.save_meta(
-        fixture_dir, prepared.stem, cfg, prepared.duration, prepared.silences, len(prepared.chunks)
-    )
-    for path in (whisper_path, gpt_path, meta_path):
+    _confirm_cost(preprocess.probe_duration(args.video), cfg, args.yes)
+    for path in pipeline.record_fixtures(args.video, cfg).values():
         log.out(str(path))
     return 0
 

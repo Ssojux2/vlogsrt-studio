@@ -14,6 +14,8 @@ vlogsrt = "vlogsrt.cli:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "ruff>=0.6", "mypy>=1.11"]
+# 웹 UI는 선택 사항이다. 핵심 파이프라인은 여전히 의존성 3개로 돈다(불변 규칙 7).
+ui = ["gradio>=6.0"]
 
 [tool.setuptools.packages.find]
 include = ["vlogsrt*"]
@@ -37,12 +39,17 @@ ignore = ["SIM108"]
 
 [tool.mypy]
 python_version = "3.11"
-files = ["vlogsrt"]
+files = ["vlogsrt", "ui"]
 disallow_untyped_defs = true
 warn_unused_ignores = true
 warn_redundant_casts = true
 no_implicit_optional = true
 
+# 서드파티는 아예 따라가지 않는다. 그래야 `make check` 결과가
+# site-packages에 무엇이 깔려 있는지에 흔들리지 않는다.
+# (ui extra를 깔면 numpy 스텁이 딸려 오는데, 3.12 문법이라 3.11 설정으로는 파싱도 안 된다.)
+no_site_packages = true
+
 [[tool.mypy.overrides]]
-module = "openai.*"
+module = ["openai.*", "rich.*", "tomli_w.*", "gradio.*"]
 ignore_missing_imports = true

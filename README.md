@@ -16,6 +16,8 @@ whisper는 시간을 잘 찍고 gpt-transcribe는 글자를 잘 맞힌다. 둘�
 make venv                     # .venv 생성 + 의존성 설치
 source .venv/bin/activate
 cp .env.example .env          # OPENAI_API_KEY 를 채운다
+
+pip install -e ".[ui]"        # (선택) 웹 UI
 ```
 
 `ffmpeg`와 `ffprobe`가 PATH에 있어야 한다 (`brew install ffmpeg`).
@@ -24,7 +26,16 @@ cp .env.example .env          # OPENAI_API_KEY 를 채운다
 
 ---
 
-## 쓰기
+## 쓰기 — 웹 UI
+
+```bash
+make ui        # http://127.0.0.1:7860
+```
+
+경로를 붙여넣고 버튼 세 개면 끝난다. 유료 버튼은 동의 체크 없이는 눌리지 않는다.
+gradio는 **선택적 extra**이고 `ui/`에만 산다 — `vlogsrt/`의 의존성은 여전히 3개다.
+
+## 쓰기 — CLI
 
 ```bash
 # 픽스처 녹화 — 유료. 회차당 한 번만.
@@ -85,6 +96,8 @@ M5 출력     SRT + review.srt + report.md + trace.json
 | `output.py` `report.py` | SRT 직렬화, 검토 산출물 |
 | `evaluate.py` | 지표 8종 |
 | `pipeline.py` `cli.py` | 조립과 커맨드 |
+| `ui/service.py` | UI 로직. **gradio를 import하지 않는다** |
+| `ui/app.py` | gradio 화면. 패키지 밖이라 규칙 7을 건드리지 않는다 |
 
 ---
 

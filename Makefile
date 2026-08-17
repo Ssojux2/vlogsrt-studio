@@ -1,7 +1,7 @@
 PY := $(shell test -x .venv/bin/python && echo .venv/bin/python || echo python3)
 GOLDEN := golden
 
-.PHONY: check test lint types invariant eval fixtures venv clean
+.PHONY: check test lint types invariant eval fixtures ui venv clean
 
 check: lint types test invariant
 
@@ -9,8 +9,8 @@ test:
 	$(PY) -m pytest
 
 lint:
-	$(PY) -m ruff check vlogsrt tests scripts
-	$(PY) -m ruff format --check vlogsrt tests scripts
+	$(PY) -m ruff check vlogsrt ui tests scripts
+	$(PY) -m ruff format --check vlogsrt ui tests scripts
 
 types:
 	$(PY) -m mypy
@@ -18,6 +18,10 @@ types:
 # 불변 규칙(CLAUDE.md)을 기계적으로 검사한다. 사람 눈보다 싸다.
 invariant:
 	$(PY) scripts/check_invariants.py
+
+# 웹 UI. gradio가 필요하다: pip install -e ".[ui]"
+ui:
+	$(PY) -m ui.app
 
 eval:
 	$(PY) -m vlogsrt.cli evalset --golden $(GOLDEN) --out docs/DASHBOARD.md

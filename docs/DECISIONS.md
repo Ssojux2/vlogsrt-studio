@@ -99,6 +99,38 @@ PLAN이 나타나면 이 세 항목을 대조해야 한다.
 
 ---
 
+## D11. gradio UI는 패키지 **밖**에 둔다
+
+불변 규칙 7은 의존성을 `openai`, `tomli-w`, `rich` 셋으로 못 박는다. 웹 UI 요청이
+들어왔을 때 선택지는 셋이었다.
+
+1. `vlogsrt/`에 gradio를 넣는다 → 규칙 7 위반. 핵심 파이프라인이 무거워지고,
+   `make check`가 UI 설치 여부에 흔들린다
+2. UI를 만들지 않는다 → 사용자의 실제 요구를 거절하는 것
+3. **UI를 `ui/`에 두고 선택적 extra로 만든다** ← 선택
+
+`ui/`는 vlogsrt를 라이브러리로 쓰고, `vlogsrt/`는 gradio를 모른다.
+`[project.dependencies]`는 그대로 3개이며, gradio는 `[project.optional-dependencies] ui`에 있다.
+`scripts/check_invariants.py`가 `vlogsrt/`의 gradio import를 금지 목록으로 막는다.
+
+`ui/service.py`(순수 로직)와 `ui/app.py`(화면)를 가른 이유도 같다.
+service는 gradio를 import하지 않아 UI 없이도 테스트가 돈다
+(`tests/test_ui_service.py`, 23개).
+
+### gradio 6에서 부딪힌 것
+
+- `theme`/`css`가 `Blocks()`에서 `launch()`로 옮겨졌다
+- `launch(show_api=...)`가 사라졌다
+- `gr.Video`의 `postprocess`가 더 이상 `(video, subtitle)` 튜플을 받지 않는다
+  (독스트링에는 남아 있지만 코드에는 없다). `gr.update(subtitles=경로)`도
+  경로 문자열을 그대로 보내 프런트가 못 읽는다. **컴포넌트 인스턴스를 돌려주면**
+  생성자가 SRT를 VTT로 바꿔 FileData로 감싸준다 — 그 경로를 썼다
+- `no_site_packages = true`를 켰다. ui extra가 numpy를 끌어오는데 numpy 스텁이
+  3.12 문법이라 `python_version = "3.11"` 설정으로는 파싱조차 실패했다.
+  이제 mypy 결과가 무엇이 설치돼 있는지에 흔들리지 않는다
+
+---
+
 ## D10. 검증하지 못한 것
 
 다음은 **골든셋과 실제 API 픽스처가 있어야** 판정할 수 있다. 현재는 미검증이다.
@@ -108,3 +140,5 @@ PLAN이 나타나면 이 세 항목을 대조해야 한다.
 - 청크 분할의 실제 동작 — 24MB를 넘는 실제 오디오가 필요하다
   (분할 계획 로직은 `tests/test_preprocess.py`에서 순수 함수로 검증했다)
 - `LiveTranscriber`의 재시도 경로 — 실제 429/5xx 응답이 필요하다
+- UI의 유료 버튼(녹화) — 무료 경로와 차단 로직은 실제 서버를 띄워 확인했지만,
+  실제 API를 부르는 경로는 못 돌려봤다

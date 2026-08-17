@@ -14,7 +14,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 PACKAGE = ROOT / "vlogsrt"
 
-BANNED_IMPORTS = ("jamo", "konlpy", "pysrt", "ffmpeg", "pydantic", "dotenv", "regex", "numpy")
+BANNED_IMPORTS = (
+    "jamo", "konlpy", "pysrt", "ffmpeg", "pydantic", "dotenv", "regex", "numpy",
+    # UI는 ui/ 에만 산다. 핵심 패키지가 gradio를 끌어오면 규칙 7이 무너진다.
+    "gradio",
+)  # fmt: skip
 ALLOWED_DEPENDENCIES = {"openai", "tomli-w", "rich"}
 
 
