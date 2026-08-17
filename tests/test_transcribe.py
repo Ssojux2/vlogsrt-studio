@@ -215,3 +215,112 @@ def test_gpt_falls_back_to_single_language() -> None:
     extras = _gpt_extras(data_replace(Config(), extra_languages=()))
     assert extras["language"] == "ko"
     assert "languages" not in extras
+
+
+# ─────────────────────────────────────────────────────────────
+#  prompt는 whisper에 가지 않는다 (D16)
+# ─────────────────────────────────────────────────────────────
+
+
+class FakeClient:
+    """`audio.transcriptions.create` 호출 인자만 기록한다. 네트워크 없음."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+        self.audio = self
+        self.transcriptions = self
+
+    def create(self, **kwargs: object) -> dict[str, object]:
+        self.calls.append(kwargs)
+        return {"text": "가", "segments": [], "words": []}
+
+
+def real_job(tmp_path: Path) -> TranscriptionJob:
+    """`chunk.path.open("rb")` 때문에 실제 파일이 필요하다. 내용은 상관없다."""
+    audio = tmp_path / "demo.mp3"
+    audio.write_bytes(b"\x00")
+    return TranscriptionJob(stem="demo", chunks=(Chunk(audio, 0.0, 24.0, 0),))
+
+
+def _live(monkeypatch: pytest.MonkeyPatch, client: FakeClient) -> LiveTranscriber:
+    """`LiveTranscriber`는 frozen+slots라 인스턴스에 못 꽂는다. 클래스에 꽂는다."""
+    monkeypatch.setattr(LiveTranscriber, "_client", lambda self: client)
+    return LiveTranscriber(api_key="sk-test")
+
+
+def _capture(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, method: str, cfg: Config
+) -> list[dict[str, object]]:
+    client = FakeClient()
+    getattr(_live(monkeypatch, client), method)(real_job(tmp_path), cfg)
+    return client.calls
+
+
+def test_whisper_is_never_given_a_prompt(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """whisper 텍스트는 최종 SRT에 안 들어간다. prompt는 얻는 것 없이 골격만 무너뜨린다.
+
+    실측 두 번 모두 여기서 무너졌다:
+      "브이로그 내레이션입니다…" → 570초 동안 103회 반복
+      "프랑스 여행 브이로그"      → 564초 동안 138회 반복
+    """
+    from dataclasses import replace as data_replace
+
+    cfg = data_replace(Config(), prompt="프랑스 여행 브이로그")
+    (call,) = _capture(monkeypatch, tmp_path, "whisper", cfg)
+    assert "prompt" not in call
+    assert call["model"] == "whisper-1"
+    assert call["language"] == "ko"
+
+
+def test_the_hint_goes_to_the_model_that_makes_the_letters(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from dataclasses import replace as data_replace
+
+    cfg = data_replace(Config(), prompt="망원동, 아페로, 코나")
+    (call,) = _capture(monkeypatch, tmp_path, "gpt", cfg)
+    assert call["prompt"] == "망원동, 아페로, 코나"
+    assert call["model"] == "gpt-transcribe"
+
+
+def test_empty_hint_sends_no_prompt_at_all() -> None:
+    from vlogsrt.transcribe import _gpt_extras
+
+    assert "prompt" not in _gpt_extras(Config())
+
+
+def test_gpt_retries_without_extras_on_400(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """400 한 번에 whisper 값(약 $0.46)까지 버리지 않는다."""
+    from dataclasses import replace as data_replace
+
+    class Rejecting(FakeClient):
+        status_code = 400
+
+        def create(self, **kwargs: object) -> dict[str, object]:
+            self.calls.append(kwargs)
+            if "prompt" in kwargs:
+                error = RuntimeError("Error code: 400 - unknown parameter 'prompt'")
+                error.status_code = 400  # type: ignore[attr-defined]
+                raise error
+            return {"text": "가"}
+
+    client = Rejecting()
+    live = _live(monkeypatch, client)
+    responses = live.gpt(real_job(tmp_path), data_replace(Config(), prompt="망원동"))
+
+    assert len(client.calls) == 2
+    assert "prompt" in client.calls[0] and "prompt" not in client.calls[1]
+    assert responses[0].payload["text"] == "가"
+
+
+def test_other_errors_are_not_swallowed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    class Broken(FakeClient):
+        def create(self, **kwargs: object) -> dict[str, object]:
+            self.calls.append(kwargs)
+            error = RuntimeError("Error code: 401 - bad key")
+            error.status_code = 401  # type: ignore[attr-defined]
+            raise error
+
+    client = Broken()
+    with pytest.raises(RuntimeError, match="401"):
+        _live(monkeypatch, client).gpt(real_job(tmp_path), Config())

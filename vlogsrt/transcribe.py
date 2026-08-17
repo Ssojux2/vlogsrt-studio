@@ -174,6 +174,19 @@ class LiveTranscriber:
         ]
 
     def whisper(self, job: TranscriptionJob, cfg: Config) -> list[ChunkResponse]:
+        """**`prompt`를 보내지 않는다.**
+
+        whisper 텍스트는 최종 SRT에 한 글자도 들어가지 않는다(불변 규칙 2). 여기서
+        얻는 것은 골격 시각뿐이다. 그런데 `prompt`는 whisper에게 지시가 아니라
+        **직전 자막 텍스트**로 들어가서, 알아듣기 힘든 구간을 만나면 그 문장을
+        그대로 이어 쓴다. 실측 두 번 모두 그렇게 무너졌다(D13, D16):
+
+            prompt "브이로그 내레이션입니다…"  → 570초 동안 103회 반복
+            prompt "프랑스 여행 브이로그"       → 564초 동안 138회 반복
+
+        얻는 것이 없고 잃는 것은 골격 전체다. 그래서 보내지 않는다. 사람이 준 힌트는
+        **글자를 만드는 쪽**인 `gpt()`로 간다.
+        """
         client = self._client()
         granularities = ["segment", "word"] if cfg.word_timestamps else ["segment"]
 
@@ -184,7 +197,6 @@ class LiveTranscriber:
                         file=handle,
                         model=cfg.whisper_model,
                         language=cfg.language,
-                        prompt=cfg.prompt,
                         temperature=0,
                         response_format="verbose_json",
                         timestamp_granularities=granularities,
@@ -196,9 +208,10 @@ class LiveTranscriber:
 
     def gpt(self, job: TranscriptionJob, cfg: Config) -> list[ChunkResponse]:
         client = self._client()
+        extras = _gpt_extras(cfg)
 
         def one(chunk: Chunk) -> dict[str, Any]:
-            def call() -> Any:
+            def call(**overrides: Any) -> Any:
                 # timestamp_granularities / include=logprobs 를 넣지 마라. whisper-1 전용이다.
                 with chunk.path.open("rb") as handle:
                     return client.audio.transcriptions.create(
@@ -206,12 +219,28 @@ class LiveTranscriber:
                         model=cfg.gpt_model,
                         temperature=0,
                         response_format="json",
-                        **_gpt_extras(cfg),
+                        **overrides,
                     )
 
-            return _to_dict(self._retry(call, f"gpt 청크 {chunk.index}", cfg))
+            what = f"gpt 청크 {chunk.index}"
+            try:
+                return _to_dict(self._retry(lambda: call(**extras), what, cfg))
+            except Exception as exc:  # noqa: BLE001 - 400이면 부가 인자만 떼고 한 번 더
+                if not extras or not _is_bad_request(exc):
+                    raise
+                log.warn(
+                    f"{what}: API가 부가 인자를 거부했다({exc}). "
+                    f"인자 {sorted(extras)}를 빼고 다시 부른다. "
+                    f"whisper 응답은 이미 받아둔 상태라 여기서 죽으면 그 값이 버려진다."
+                )
+                return _to_dict(self._retry(lambda: call(), what, cfg))
 
         return self._parallel(job, cfg, one)
+
+
+def _is_bad_request(exc: Exception) -> bool:
+    status = getattr(exc, "status_code", None) or getattr(exc, "status", None)
+    return status == 400
 
 
 def _gpt_extras(cfg: Config) -> dict[str, Any]:
@@ -221,6 +250,9 @@ def _gpt_extras(cfg: Config) -> dict[str, Any]:
       "The 'language' and 'languages' parameters cannot be used together."
     여러 언어를 알려주는 쪽이 이 프로젝트의 의도라 `languages`를 택하고,
     설정이 비어 있을 때만 단일 `language`로 떨어진다.
+
+    `prompt`는 여기로만 간다. gpt-transcribe가 최종 SRT의 글자를 만드는 모델이라
+    힌트가 실제로 쓸모 있는 곳이 여기다. whisper에는 보내지 않는다(D16).
     """
     extras: dict[str, Any] = {}
     if cfg.extra_languages:
@@ -229,6 +261,8 @@ def _gpt_extras(cfg: Config) -> dict[str, Any]:
         extras["language"] = cfg.language
     if cfg.keywords:
         extras["keywords"] = list(cfg.keywords)
+    if cfg.prompt:
+        extras["prompt"] = cfg.prompt
     return extras
 
 

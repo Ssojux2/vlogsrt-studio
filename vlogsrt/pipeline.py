@@ -10,7 +10,7 @@ import json
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from . import env, log, loops, mapping, preprocess, refine, transcribe
+from . import env, log, loops, mapping, overflow, preprocess, refine, transcribe
 from .config import Config
 from .models import Chunk, Cue, Issue, Segment, Trace, Word
 from .output import save_srt, to_review_cues
@@ -251,7 +251,9 @@ def _map_stage(
         warnings.append(message)
         return _MapStage(cues=base, warnings=warnings)
     rescued = mapping.rescue_orphans(cuts_a, spine, mapped, silences, canonical, cfg)
-    return _MapStage(cues=rescued, warnings=warnings)
+    capped, spills = overflow.cap(rescued, cfg)
+    warnings.extend(overflow.report(spills, cfg))
+    return _MapStage(cues=capped, warnings=warnings)
 
 
 def warn_about_loops(spine: list[Segment], cfg: Config, duration: float) -> list[str]:

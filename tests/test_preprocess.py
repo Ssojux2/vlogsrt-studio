@@ -43,7 +43,23 @@ def test_no_silence_lines() -> None:
 
 
 def test_loudnorm_filter_is_present() -> None:
-    assert audio_filter(Config()) == "loudnorm=I=-18:TP=-2:LRA=11"
+    assert "loudnorm=I=-18:TP=-2:LRA=11" in audio_filter(Config())
+
+
+def test_low_end_is_removed_before_normalising() -> None:
+    """순서가 뒤집히면 잡음에 맞춰 이득이 정해져 말소리가 눌린다(D16)."""
+    chain = audio_filter(Config()).split(",")
+    assert chain[0].startswith("highpass=f=120")
+    assert chain[-1].startswith("loudnorm")
+    assert chain.index("equalizer=f=200:t=q:w=1:g=-6") < len(chain) - 1
+
+
+def test_audio_filter_follows_config() -> None:
+    from dataclasses import replace as data_replace
+
+    quiet = data_replace(Config(), highpass_hz=80.0, lowshelf_gain_db=-3.0)
+    assert "highpass=f=80" in audio_filter(quiet)
+    assert "g=-3" in audio_filter(quiet)
 
 
 def test_chunking() -> None:

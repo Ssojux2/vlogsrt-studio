@@ -34,6 +34,11 @@ class Config:
     sample_rate: int = 16000
     channels: int = 1
     audio_bitrate: str = "64k"
+    # 저역 제거 — 정규화 **전에** 건다. 사람 목소리 기본 주파수는 85Hz 위라
+    # 120Hz 아래에는 말소리 정보가 없다. 차·바람 웅웅거림만 남는다(D16).
+    highpass_hz: float = 120.0
+    lowshelf_hz: float = 200.0
+    lowshelf_gain_db: float = -6.0
     loudnorm_i: float = -18.0
     loudnorm_tp: float = -2.0
     loudnorm_lra: float = 11.0
@@ -93,6 +98,10 @@ class Config:
     refine_penalty: float = 0.97
     conf_threshold: float = 0.75
     dict_min_occurrences: int = 2  # 1회 등장은 노이즈다
+    # 큐 하나가 삼킬 수 있는 정본 글자 수 = max_chars_per_cue × 이 배수.
+    # 넘으면 정렬이 무너졌다는 뜻이다. 실측(D16): whisper가 9분을 놓치자 그 구간
+    # 텍스트가 1초짜리 큐에 900자로 쏟아져 멀쩡하던 뒤 구간까지 못 쓰게 됐다.
+    overflow_factor: float = 3.0
 
     # ─── 평가 ────────────────────────────────────────────────
     boundary_tol: float = 0.3

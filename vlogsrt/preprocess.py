@@ -73,8 +73,25 @@ def probe_duration(path: Path) -> float:
 
 
 def audio_filter(cfg: Config) -> str:
-    """브이로그는 구간마다 볼륨 편차가 크다. loudnorm 없이는 무음 검출이 흔들린다."""
-    return f"loudnorm=I={cfg.loudnorm_i:g}:TP={cfg.loudnorm_tp:g}:LRA={cfg.loudnorm_lra:g}"
+    """저역 제거 → 정규화. 순서가 중요하다.
+
+    브이로그는 구간마다 볼륨 편차가 크다. loudnorm 없이는 무음 검출이 흔들린다.
+    그런데 야외·차 안 구간은 200Hz 아래 웅웅거림이 에너지의 절반을 먹는다. 그
+    상태로 정규화하면 **잡음에 맞춰 이득이 정해져 말소리가 오히려 눌린다.**
+
+    실측(D16, 문제의 앞 9분 구간):
+
+        loudnorm만        음성대역 30.4%  ·  저역<200Hz 51.4%
+        highpass 후       음성대역 58.6%  ·  저역<200Hz 26.8%
+
+    잘 들리던 뒤 구간도 72.0% → 86.1%로 나빠지지 않는다. 사람 목소리의 기본
+    주파수는 남성도 85Hz 위라 120Hz 아래에는 말소리 정보가 없다.
+    """
+    return (
+        f"highpass=f={cfg.highpass_hz:g},"
+        f"equalizer=f={cfg.lowshelf_hz:g}:t=q:w=1:g={cfg.lowshelf_gain_db:g},"
+        f"loudnorm=I={cfg.loudnorm_i:g}:TP={cfg.loudnorm_tp:g}:LRA={cfg.loudnorm_lra:g}"
+    )
 
 
 def extract_audio(src: Path, dst: Path, cfg: Config) -> Path:
