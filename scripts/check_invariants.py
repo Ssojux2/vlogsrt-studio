@@ -96,6 +96,44 @@ def check_env_untouched() -> list[str]:
     return failures
 
 
+def check_mapping_stays_dead() -> list[str]:
+    """D19 — 사상 계열은 삭제됐다. 부활은 설계 위반이다."""
+    failures = []
+    for name in ("mapping.py", "gapfill.py"):
+        if (PACKAGE / name).exists():
+            failures.append(f"vlogsrt/{name}: 사상 계열이 부활했다. D19를 다시 읽어라")
+    return failures
+
+
+def check_verify_is_read_only() -> list[str]:
+    """규칙 4 — verify.py는 큐를 만들지도 고치지도 못한다. 플래그만 낸다."""
+    body = (PACKAGE / "verify.py").read_text(encoding="utf-8")
+    failures = []
+    forbidden = (
+        (r"\bCue\(", "Cue 생성"),
+        (r"\breplace\(", "dataclasses.replace 호출"),
+        (r"\b(save_srt|write_srt)\b", "SRT 쓰기"),
+        (r"from\s+\.(refine|layout|output)\b", "정제·출력 모듈 import"),
+    )
+    for pattern, label in forbidden:
+        match = re.search(pattern, body)
+        if match:
+            line = body[: match.start()].count("\n") + 1
+            failures.append(f"vlogsrt/verify.py:{line} 검증이 출력에 손댄다 — {label}")
+    return failures
+
+
+def check_whisper_gets_no_prompt() -> list[str]:
+    """규칙 5 — whisper 호출에 prompt 금지. 힌트 한 줄이 앞 9분을 날렸다(D16)."""
+    body = (PACKAGE / "transcribe.py").read_text(encoding="utf-8")
+    for match in re.finditer(r"transcriptions\.create\((?P<args>[^)]*)\)", body, re.DOTALL):
+        args = match.group("args")
+        if "whisper_model" in args and "prompt" in args:
+            line = body[: match.start()].count("\n") + 1
+            return [f"transcribe.py:{line} whisper 호출에 prompt가 있다 (D16 재발)"]
+    return []
+
+
 CHECKS = (
     ("openai 경계", check_openai_boundary),
     ("autojunk=False", check_autojunk),
@@ -103,6 +141,9 @@ CHECKS = (
     ("의존성 3개", check_dependencies),
     ("frozen 모델", check_frozen_models),
     (".env 보호", check_env_untouched),
+    ("사상 부활 금지", check_mapping_stays_dead),
+    ("검증 읽기 전용", check_verify_is_read_only),
+    ("whisper prompt 금지", check_whisper_gets_no_prompt),
 )
 
 

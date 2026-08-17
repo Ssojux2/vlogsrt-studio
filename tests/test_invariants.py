@@ -68,6 +68,20 @@ def test_verify_on_off_produces_identical_srt_bytes(tmp_path: Path) -> None:
     assert with_verify.outputs["srt"].read_bytes() == without.outputs["srt"].read_bytes()
 
 
+def test_oversized_cues_are_never_silent(tmp_path: Path) -> None:
+    """0.77초에 900자 같은 큐 부류의 봉쇄 — 용량 초과 큐는 반드시 검사에 걸린다.
+
+    자를 수 없는 큐(NO_SPLIT_POINT)는 존재할 수 있다. 금지되는 것은
+    아무 표시 없이 지나가는 초과 큐다.
+    """
+    cfg = Config()
+    result = pipeline.run(VIDEO, cfg, tmp_path, force_offline=True)
+    flagged = {issue.cue_id for issue in result.issues}
+    for cue in result.cues:
+        if len(cue.text) > cfg.max_chars_per_cue:
+            assert cue.index in flagged or cue.flags
+
+
 def test_spine_is_immutable() -> None:
     segment = Segment(id=0, start=0.0, end=1.0, text="가")
     with pytest.raises(FrozenInstanceError):

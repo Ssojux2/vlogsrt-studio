@@ -174,18 +174,17 @@ class LiveTranscriber:
         ]
 
     def whisper(self, job: TranscriptionJob, cfg: Config) -> list[ChunkResponse]:
-        """**`prompt`를 보내지 않는다.**
+        """**`prompt`를 보내지 않는다** (불변 규칙 5).
 
-        whisper 텍스트는 최종 SRT에 한 글자도 들어가지 않는다(불변 규칙 2). 여기서
-        얻는 것은 골격 시각뿐이다. 그런데 `prompt`는 whisper에게 지시가 아니라
-        **직전 자막 텍스트**로 들어가서, 알아듣기 힘든 구간을 만나면 그 문장을
-        그대로 이어 쓴다. 실측 두 번 모두 그렇게 무너졌다(D13, D16):
+        whisper는 자막의 시각과 텍스트를 모두 만든다. 그런데 `prompt`는 whisper에게
+        지시가 아니라 **직전 자막 텍스트**로 들어가서, 알아듣기 힘든 구간을 만나면
+        그 문장을 그대로 이어 쓴다. 실측 두 번 모두 그렇게 무너졌다(D13, D16):
 
             prompt "브이로그 내레이션입니다…"  → 570초 동안 103회 반복
             prompt "프랑스 여행 브이로그"       → 564초 동안 138회 반복
 
         얻는 것이 없고 잃는 것은 골격 전체다. 그래서 보내지 않는다. 사람이 준 힌트는
-        **글자를 만드는 쪽**인 `gpt()`로 간다.
+        검증 기준을 만드는 `gpt()`로 간다.
         """
         client = self._client()
         granularities = ["segment", "word"] if cfg.word_timestamps else ["segment"]
