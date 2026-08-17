@@ -11,6 +11,7 @@ import pytest
 from vlogsrt.config import Config
 from vlogsrt.preprocess import (
     audio_filter,
+    chunk_count,
     detect_silence,
     extract_audio,
     parse_silence_output,
@@ -92,6 +93,43 @@ def test_offsets_are_monotonic_and_cover_everything() -> None:
 def test_zero_duration_is_loud() -> None:
     with pytest.raises(RuntimeError):
         plan_chunks(0.0, 1000, [], Config())
+
+
+# ─────────────────────────────────────────────────────────────
+#  길이 한도 — 25MB에 38분이 들어가서 whisper가 무너졌다 (D13)
+# ─────────────────────────────────────────────────────────────
+
+
+def test_long_audio_is_split_even_when_it_fits_the_size_limit() -> None:
+    """77분은 크기로는 두 조각이지만, 길이 한도가 더 잘게 나눈다."""
+    cfg = Config()
+    duration = 4598.0
+    tiny = 1000  # 크기 한도는 전혀 건드리지 않는다
+    assert chunk_count(duration, tiny, cfg) == math.ceil(duration / cfg.chunk_max_seconds)
+
+    plans = plan_chunks(duration, tiny, [], cfg)
+    assert len(plans) == chunk_count(duration, tiny, cfg)
+    assert all(plan.duration <= cfg.chunk_max_seconds * 1.3 for plan in plans)
+    assert plans[0].start == 0.0
+    assert plans[-1].end == pytest.approx(duration)
+
+
+def test_size_limit_still_wins_when_it_demands_more_pieces() -> None:
+    cfg = Config()
+    duration = 300.0  # 길이로는 한 조각
+    size = 5 * cfg.chunk_max_bytes
+    assert chunk_count(duration, size, cfg) == 5
+    assert len(plan_chunks(duration, size, [], cfg)) == 5
+
+
+def test_short_audio_stays_whole() -> None:
+    cfg = Config()
+    assert chunk_count(cfg.chunk_max_seconds - 1, 1000, cfg) == 1
+    assert len(plan_chunks(cfg.chunk_max_seconds - 1, 1000, [], cfg)) == 1
+
+
+def test_chunk_count_never_returns_zero() -> None:
+    assert chunk_count(0.5, 0, Config()) == 1
 
 
 needs_ffmpeg = pytest.mark.skipif(

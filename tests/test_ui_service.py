@@ -11,9 +11,10 @@ import pytest
 
 from ui import service
 from ui.service import UiError
+from vlogsrt import log, pipeline
+from vlogsrt.models import Trace
 
 SYNTHETIC = Path(__file__).parent / "fixtures" / "synthetic"
-VIDEO = "golden/demo.mp4"
 
 
 @pytest.fixture(autouse=True)
@@ -57,34 +58,128 @@ def test_resolve_path_rejects_empty() -> None:
 # ─────────────────────────────────────────────────────────────
 
 
-def test_recorded_video_runs_without_touching_the_api(tmp_path: Path) -> None:
-    video = tmp_path / "demo.mp4"
+SRT = "1\n00:00:01,000 --> 00:00:02,000\n망원동 빵집\n"
+
+
+def fake_result(outdir: Path) -> pipeline.RunResult:
+    outdir.mkdir(parents=True, exist_ok=True)
+    srt = outdir / "demo.srt"
+    srt.write_text(SRT, encoding="utf-8")
+    return pipeline.RunResult(
+        trace=Trace(source="x", duration=10.0, spine=(), config_snapshot={"conf_threshold": 0.75}),
+        cues=(),
+        issues=(),
+        outputs={"srt": srt},
+    )
+
+
+@pytest.fixture
+def stub_pipeline(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, object]]:
+    """`pipeline.run`을 가로챈다. UI가 무엇을 어떻게 부르는지만 본다."""
+    seen: list[dict[str, object]] = []
+
+    def fake_run(video: Path, cfg: object, outdir: Path, **kwargs: object) -> pipeline.RunResult:
+        seen.append({"video": video, "outdir": outdir, **kwargs})
+        return fake_result(outdir)
+
+    monkeypatch.setattr(service.pipeline, "run", fake_run)
+    monkeypatch.setattr(service.preprocess, "probe_duration", lambda path: 300.0)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    return seen
+
+
+def make_video(folder: Path, name: str = "demo.mp4") -> Path:
+    video = folder / name
     video.write_bytes(b"\x00")
-    report = service.make_subtitles(str(video))
-    assert report.ok
-    assert "망원동" in report.srt_text
-    assert "기록된 응답 재사용" in report.log
-    assert "결과" in report.log
-    assert len(report.files) == 3
+    return video
 
 
-def test_final_srt_lands_next_to_the_video(tmp_path: Path) -> None:
-    """최종 SRT는 원본 영상과 같은 폴더에 둔다."""
-    video = tmp_path / "demo.mp4"
-    video.write_bytes(b"\x00")
-    report = service.make_subtitles(str(video))
-    beside = video.parent / "demo.srt"
-    assert beside.is_file()
-    assert report.files[0] == str(beside)
-    assert f"저장   {beside}" in report.log
-    # 나머지 산출물은 작업 폴더에 남는다
-    assert (tmp_path / "out" / "demo" / "trace.json").is_file()
+# ─────────────────────────────────────────────────────────────
+#  매번 새로 전사한다 — 지난 실행을 재사용하지 않는다
+# ─────────────────────────────────────────────────────────────
 
 
-def test_uploaded_copy_cannot_know_the_original_folder(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_every_run_transcribes_the_video_fresh(
+    tmp_path: Path, stub_pipeline: list[dict[str, object]]
 ) -> None:
-    """파일 선택창으로 올린 파일은 원본 폴더를 알 수 없다. 그 사실을 로그로 알린다."""
+    video = make_video(tmp_path)
+    service.make_subtitles(str(video))
+    service.make_subtitles(str(video))
+
+    assert len(stub_pipeline) == 2  # 두 번 다 전사했다
+    for call in stub_pipeline:
+        assert call["online"] is True
+        assert call["artifacts"] is False
+        assert call["video"] == video
+
+
+def test_recorded_fixtures_are_never_consulted(
+    tmp_path: Path, stub_pipeline: list[dict[str, object]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """녹화된 응답이 있어도 무시한다. 낡은 기록이 섞이는 경로를 없앴다."""
+    fixtures = tmp_path / "api"
+    fixtures.mkdir()
+    for kind in ("whisper", "gpt", "meta"):
+        (fixtures / f"demo.{kind}.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("VLOGSRT_FIXTURE_DIR", str(fixtures))
+
+    report = service.make_subtitles(str(make_video(tmp_path)))
+    assert report.ok
+    assert len(stub_pipeline) == 1
+    assert "재사용" not in report.log
+
+
+def test_nothing_is_left_behind_but_the_srt(
+    tmp_path: Path, stub_pipeline: list[dict[str, object]]
+) -> None:
+    """작업 폴더는 임시 폴더이고, 끝나면 사라진다."""
+    video = make_video(tmp_path)
+    report = service.make_subtitles(str(video))
+
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["demo.mp4", "demo.srt"]
+    assert not (tmp_path / "out").exists()
+    scratch = Path(str(stub_pipeline[0]["outdir"]))
+    assert not scratch.exists()  # 임시 폴더가 지워졌다
+    assert report.files == (str(tmp_path / "demo.srt"),)
+
+
+def test_work_and_out_live_in_the_same_scratch(
+    tmp_path: Path, stub_pipeline: list[dict[str, object]]
+) -> None:
+    service.make_subtitles(str(make_video(tmp_path)))
+    call = stub_pipeline[0]
+    scratch = Path(str(call["outdir"])).parent
+    assert Path(str(call["workdir"])).parent == scratch
+    assert scratch.name.startswith("vlogsrt-")
+
+
+# ─────────────────────────────────────────────────────────────
+#  결과 배치
+# ─────────────────────────────────────────────────────────────
+
+
+def test_final_srt_lands_next_to_the_video(
+    tmp_path: Path, stub_pipeline: list[dict[str, object]]
+) -> None:
+    video = make_video(tmp_path)
+    report = service.make_subtitles(str(video))
+    beside = tmp_path / "demo.srt"
+    assert beside.read_text(encoding="utf-8") == SRT
+    assert report.srt_text == SRT
+    assert f"저장   {beside}" in report.log
+
+
+def test_srt_name_follows_the_video_name(
+    tmp_path: Path, stub_pipeline: list[dict[str, object]]
+) -> None:
+    video = make_video(tmp_path, "fr_day_1_2_fhd.mov")
+    service.make_subtitles(str(video))
+    assert (tmp_path / "fr_day_1_2_fhd.srt").is_file()
+
+
+def test_uploaded_copy_says_where_the_file_went(
+    tmp_path: Path, stub_pipeline: list[dict[str, object]], monkeypatch: pytest.MonkeyPatch
+) -> None:
     uploaded = tmp_path / "gradio" / "abc123" / "demo.mp4"
     uploaded.parent.mkdir(parents=True)
     uploaded.write_bytes(b"\x00")
@@ -94,7 +189,6 @@ def test_uploaded_copy_cannot_know_the_original_folder(
     report = service.make_subtitles(str(uploaded))
     assert report.ok
     assert "원본 폴더를 알 수 없습니다" in report.log
-    assert not (uploaded.parent / "demo.srt").is_file()
 
 
 def test_a_real_path_is_not_mistaken_for_an_upload(tmp_path: Path) -> None:
@@ -104,13 +198,18 @@ def test_a_real_path_is_not_mistaken_for_an_upload(tmp_path: Path) -> None:
 def test_upload_detection_survives_the_macos_temp_symlink() -> None:
     """gettempdir()는 /var/folders/..., 실제 경로는 /private/var/folders/... 다.
 
-    양쪽을 resolve하지 않으면 업로드본을 못 알아보고 임시 폴더에 SRT를 흘린다.
+    양쪽을 resolve하지 않으면 업로드본을 못 알아본다.
     """
     import tempfile
 
     real_temp = Path(tempfile.gettempdir()).resolve()
     uploaded = real_temp / "gradio" / "deadbeef" / "vlog.mp4"
     assert service.is_uploaded_copy(uploaded) is True
+
+
+# ─────────────────────────────────────────────────────────────
+#  진행 상황과 실패
+# ─────────────────────────────────────────────────────────────
 
 
 def test_progress_streams_before_the_slow_part(
@@ -120,43 +219,77 @@ def test_progress_streams_before_the_slow_part(
 
     끝나고 한 번에 주면 사람은 몇 분 동안 빈 화면을 보고 멈췄다고 판단한다.
     """
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     monkeypatch.setattr(service.preprocess, "probe_duration", lambda path: 300.0)
     seen: list[str] = []
 
-    def slow_record(*args: object, **kwargs: object) -> None:
-        # 이 시점에 이미 사람에게 안내가 나가 있어야 한다
-        seen.append("녹화 시작")
+    def slow_run(*args: object, **kwargs: object) -> None:
+        seen.append("전사 시작")
         raise RuntimeError("여기서 멈춘다")
 
-    monkeypatch.setattr(service.pipeline, "record_fixtures", slow_record)
-    video = tmp_path / "fresh.mp4"
-    video.write_bytes(b"\x00")
+    monkeypatch.setattr(service.pipeline, "run", slow_run)
+    steps = list(service.stream_subtitles(str(make_video(tmp_path))))
 
-    steps = list(service.stream_subtitles(str(video)))
     assert len(steps) >= 3  # 영상 → 길이 확인 → 전사 안내 → (실패)
     before_slow = steps[-2].log
     assert "OpenAI 호출" in before_slow
     assert "몇 분 걸립니다" in before_slow
-    assert seen == ["녹화 시작"]
+    assert "$0.06" in before_slow
+    assert seen == ["전사 시작"]
 
 
-def test_stream_reports_each_stage(tmp_path: Path) -> None:
-    video = tmp_path / "demo.mp4"
-    video.write_bytes(b"\x00")
-    steps = list(service.stream_subtitles(str(video)))
+def test_stream_reports_each_stage(tmp_path: Path, stub_pipeline: list[dict[str, object]]) -> None:
+    steps = list(service.stream_subtitles(str(make_video(tmp_path))))
     assert len(steps) >= 3
     assert all(step.ok is False for step in steps[:-1])  # 중간 상태
     assert steps[-1].ok is True
-    assert "다듬는 중" in steps[-2].log
-    assert "다듬는 중" not in steps[-1].log  # 끝나면 지운다
+    assert "영상" in steps[0].log
 
 
-def test_log_carries_pipeline_progress(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_log_carries_pipeline_progress(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stub_pipeline: list[dict[str, object]]
+) -> None:
     """파이프라인이 stderr로 찍는 진행 상황이 화면 로그에 들어와야 한다."""
-    monkeypatch.setenv("VLOGSRT_LOG_LEVEL", "INFO")  # conftest는 테스트 소음을 줄이려 ERROR로 둔다
-    report = service.make_subtitles(VIDEO)
-    assert "진행" in report.log
-    assert "골격" in report.log
+    monkeypatch.setenv("VLOGSRT_LOG_LEVEL", "INFO")
+
+    def noisy_run(video: Path, cfg: object, outdir: Path, **kwargs: object) -> object:
+        log.info("오디오 추출 완료")
+        return fake_result(outdir)
+
+    monkeypatch.setattr(service.pipeline, "run", noisy_run)
+    report = service.make_subtitles(str(make_video(tmp_path)))
+    assert "진행   오디오 추출 완료" in report.log
+
+
+def test_api_errors_are_shown_not_raised(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stub_pipeline: list[dict[str, object]]
+) -> None:
+    """openai 예외는 RuntimeError가 아니다. 화면에 트레이스백을 띄우지 않는다."""
+
+    class BadRequestError(Exception):
+        pass
+
+    def refuse(*args: object, **kwargs: object) -> None:
+        raise BadRequestError("Error code: 400 - 파라미터가 잘못됐습니다")
+
+    monkeypatch.setattr(service.pipeline, "run", refuse)
+    report = service.make_subtitles(str(make_video(tmp_path)))
+    assert report.ok is False
+    assert "BadRequestError" in report.log
+    assert "400" in report.log
+
+
+def test_missing_key_stops_before_any_work(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """키가 없으면 오디오를 뽑기 전에 멈춘다. 몇 분 기다린 뒤 실패하면 안 된다."""
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    called: list[str] = []
+    monkeypatch.setattr(
+        service.preprocess, "probe_duration", lambda path: called.append("probe") or 1.0
+    )
+    report = service.make_subtitles(str(make_video(tmp_path)))
+    assert report.ok is False
+    assert "OPENAI_API_KEY" in report.log
+    assert called == []
 
 
 def test_missing_file_is_reported_in_the_log_not_raised(tmp_path: Path) -> None:
@@ -180,43 +313,26 @@ def test_non_media_file_is_rejected(tmp_path: Path) -> None:
     assert "영상 파일이 아닙니다" in report.log
 
 
-def test_cost_guard_stops_long_unrecorded_videos(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """안전장치를 넘는 새 영상은 API로 넘어가기 전에 멈춘다."""
+def test_cost_guard_stops_long_videos(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """안전장치를 넘는 영상은 API로 넘어가기 전에 멈춘다."""
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     monkeypatch.setenv("VLOGSRT_COST_GUARD_SECONDS", "10")
     monkeypatch.setattr(service.preprocess, "probe_duration", lambda path: 600.0)
-    video = tmp_path / "long.mp4"
-    video.write_bytes(b"\x00")
-    report = service.make_subtitles(str(video))
+    called: list[str] = []
+    monkeypatch.setattr(service.pipeline, "run", lambda *a, **k: called.append("run"))
+
+    report = service.make_subtitles(str(make_video(tmp_path)))
     assert report.ok is False
     assert "안전장치" in report.log
-    # 그대로 붙여넣을 수 있는 값을 알려준다
     assert "VLOGSRT_COST_GUARD_SECONDS=3600" in report.log
+    assert called == []
 
 
-def test_guard_suggestion_covers_the_video(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_guard_suggestion_covers_the_video() -> None:
     """77분짜리를 돌리려면 2시간(7200)을 제안해야 한다."""
     assert service._suggest_guard(77 * 60) == 7200
     assert service._suggest_guard(30 * 60) == 3600
     assert service._suggest_guard(125 * 60) == 10800
-
-
-def test_unrecorded_video_reports_the_estimate_before_calling(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(service.preprocess, "probe_duration", lambda path: 300.0)
-
-    def refuse(*args: object, **kwargs: object) -> None:
-        raise RuntimeError("여기까지 왔으면 예상 비용이 로그에 있어야 한다")
-
-    monkeypatch.setattr(service.pipeline, "record_fixtures", refuse)
-    video = tmp_path / "fresh.mp4"
-    video.write_bytes(b"\x00")
-    report = service.make_subtitles(str(video))
-    assert report.ok is False
-    assert "OpenAI 호출" in report.log
-    assert "$0.06" in report.log
 
 
 # ─────────────────────────────────────────────────────────────

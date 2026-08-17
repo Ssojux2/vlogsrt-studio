@@ -95,21 +95,13 @@ def pick_file_dialog(timeout: float = 300.0) -> str | None:
     return chosen.stdout.strip() or None
 
 
-def has_fixture(stem: str) -> bool:
-    """**두 모델의 응답이 모두** 있어야 녹화된 것으로 친다.
-
-    한쪽만 있는 상태를 "녹화됨"으로 보면 녹화를 건너뛰고, 곧바로 없는 쪽을
-    찾다가 실패한다. 실제로 gpt 호출이 400으로 죽었을 때 그 상태가 됐다.
-    """
-    fixture_dir = env.fixture_dir()
-    return all((fixture_dir / f"{stem}.{kind}.json").is_file() for kind in ("whisper", "gpt"))
-
-
 def status_line() -> str:
-    """모드와 키 상태. **키 값은 절대 화면에 올리지 않는다.**"""
-    mode = "오프라인" if env.is_offline() else "온라인"
-    key = f"키 {env.api_key_source()}" if env.has_api_key() else "키 없음"
-    return f"{mode} · {key}"
+    """키 상태만 보여준다. **키 값은 절대 화면에 올리지 않는다.**
+
+    모드 표시는 뺐다. 이 화면은 언제나 영상을 새로 전사하며, 지난 실행을
+    재사용하는 경로가 없다.
+    """
+    return f"키 {env.api_key_source()}" if env.has_api_key() else "키 없음"
 
 
 def build_config() -> Config:
@@ -178,85 +170,91 @@ def _run_streaming(
 
 
 def stream_subtitles(raw_path: str) -> Iterator[RunReport]:
-    """진행 상황을 단계마다 흘려보낸다.
+    """영상 하나를 처음부터 끝까지 새로 전사한다. 진행 상황은 단계마다 흘려보낸다.
 
-    한 번에 다 돌리고 끝에 결과만 주면, 긴 영상에서는 몇 분 동안 화면이 텅 빈다.
-    사람은 그걸 "안 되는 것"으로 읽는다. 그래서 오래 걸리는 단계 **앞에서**
-    무엇을 하고 있는지 먼저 내보낸다.
+    지난 실행을 재사용하지 않는다. 녹화된 응답도, 오디오 캐시도 보지 않는다.
+    같은 영상을 두 번 돌리면 두 번 다 전사한다 — 낡은 기록이 조용히 섞여
+    엉뚱한 자막이 나오는 편보다 낫다.
+
+    남기는 파일은 영상 옆의 SRT 하나뿐이다. 오디오·조각·trace는 임시 폴더에서
+    만들어지고 함께 사라진다.
     """
     lines: list[str] = []
     try:
         path = resolve_path(raw_path)
-        recorded = has_fixture(path.stem)
+        _check_source(path)
         lines.append(f"영상   {path}")
         yield _running(lines)
 
-        if not recorded:
-            _check_source(path)
-            partial = (env.fixture_dir() / f"{path.stem}.whisper.json").is_file()
-            if partial:
-                lines.append("전사   whisper 응답은 이미 있습니다. 없는 쪽만 부릅니다.")
-                yield _running(lines)
-            lines.append("확인   길이를 재는 중…")
-            yield _running(lines)
-            duration = preprocess.probe_duration(path)
-            guard = env.cost_guard_seconds()
-            if duration > guard:
-                raise UiError(
-                    f"{duration / 60:.0f}분은 안전장치({guard / 60:.0f}분)를 넘습니다.\n"
-                    f"이 영상을 돌리려면 .env 에서 안전장치를 올리세요:\n"
-                    f"  VLOGSRT_COST_GUARD_SECONDS={_suggest_guard(duration)}\n"
-                    f"예상 비용 약 ${transcribe.estimate_cost(duration, build_config()):.2f}"
-                )
-            cost = transcribe.estimate_cost(duration, build_config())
-            lines[-1] = f"전사   OpenAI 호출 · {duration / 60:.1f}분 · 예상 ${cost:.3f}"
-            lines.append("       오디오 추출 → 업로드 → 전사. 길이에 비례해 몇 분 걸립니다…")
-            yield _running(lines)
-            notice = lines.pop()
-            for step in _run_streaming(
-                lambda: pipeline.record_fixtures(path, build_config()), lines
-            ):
-                if isinstance(step, RunReport):
-                    yield step
-            del notice
-            lines.append("전사   완료")
-            yield _running(lines)
-        else:
-            lines.append("전사   기록된 응답 재사용")
-            yield _running(lines)
+        if not env.has_api_key():
+            raise UiError("OPENAI_API_KEY가 없습니다. .env 에 넣고 다시 실행하세요.")
 
-        lines.append("정제   자막을 다듬는 중…")
+        lines.append("확인   길이를 재는 중…")
+        yield _running(lines)
+        cfg = build_config()
+        duration = preprocess.probe_duration(path)
+        _check_cost_guard(duration, cfg)
+        cost = transcribe.estimate_cost(duration, cfg)
+        lines[-1] = f"전사   OpenAI 호출 · {duration / 60:.1f}분 · 예상 ${cost:.3f}"
+        lines.append("       오디오 추출 → 전사 → 정제. 길이에 비례해 몇 분 걸립니다…")
         yield _running(lines)
         lines.pop()
-        workdir = env.project_root() / "out" / path.stem
-        result = None
-        for step in _run_streaming(
-            lambda: pipeline.run(path, build_config(), workdir, force_offline=True), lines
-        ):
-            if isinstance(step, RunReport):
-                yield step
-            else:
-                result = step
+
+        srt_text = ""
+        summary = ""
+        with tempfile.TemporaryDirectory(prefix="vlogsrt-") as scratch:
+            result = None
+            for step in _run_streaming(lambda: _transcribe(path, cfg, Path(scratch)), lines):
+                if isinstance(step, RunReport):
+                    yield step
+                else:
+                    result = step
+            assert isinstance(result, pipeline.RunResult)
+            summary = _summary(result)
+            srt_text = result.outputs["srt"].read_text(encoding="utf-8")
     except UiError as exc:
         yield RunReport(ok=False, log=_join(lines, str(exc)))
         return
-    except RuntimeError as exc:
-        yield RunReport(ok=False, log=_join(lines, f"실패   {exc}"))
+    except Exception as exc:  # noqa: BLE001 - 사람에게 보여주고 끝낸다. 삼키지 않는다.
+        yield RunReport(ok=False, log=_join(lines, f"실패   {_describe(exc)}"))
         return
 
-    assert isinstance(result, pipeline.RunResult)
-    lines.append(_summary(result))
-    final, note = _place_final_srt(path, result.outputs["srt"])
+    lines.append(summary)
+    final, note = _write_beside(path, srt_text)
     lines.append(f"저장   {final}")
     if note:
         lines.append(note)
-    lines.append(f"작업물 {result.outputs['srt'].parent}")
-    yield RunReport(
-        ok=True,
-        log=_join(lines),
-        srt_text=final.read_text(encoding="utf-8"),
-        files=(str(final), *_downloads(result)[1:]),
+    yield RunReport(ok=True, log=_join(lines), srt_text=srt_text, files=(str(final),))
+
+
+def _transcribe(video: Path, cfg: Config, scratch: Path) -> pipeline.RunResult:
+    """임시 폴더 안에서만 돈다. `artifacts=False`라 trace·리포트를 쓰지 않는다."""
+    return pipeline.run(
+        video,
+        cfg,
+        scratch / "out",
+        online=True,
+        workdir=scratch / "work",
+        artifacts=False,
     )
+
+
+def _check_cost_guard(duration: float, cfg: Config) -> None:
+    guard = env.cost_guard_seconds()
+    if duration <= guard:
+        return
+    raise UiError(
+        f"{duration / 60:.0f}분은 안전장치({guard / 60:.0f}분)를 넘습니다.\n"
+        f"이 영상을 돌리려면 .env 에서 안전장치를 올리세요:\n"
+        f"  VLOGSRT_COST_GUARD_SECONDS={_suggest_guard(duration)}\n"
+        f"예상 비용 약 ${transcribe.estimate_cost(duration, cfg):.2f}"
+    )
+
+
+def _describe(exc: BaseException) -> str:
+    """openai의 예외는 RuntimeError가 아니다. 화면에 한 줄로 보여준다."""
+    message = str(exc).strip() or exc.__class__.__name__
+    return f"{exc.__class__.__name__}: {message}" if not isinstance(exc, RuntimeError) else message
 
 
 def make_subtitles(raw_path: str) -> RunReport:
@@ -286,21 +284,22 @@ def is_uploaded_copy(path: Path) -> bool:
     return resolved.is_relative_to(temp_root)
 
 
-def _place_final_srt(source_video: Path, produced: Path) -> tuple[Path, str | None]:
-    """최종 SRT를 원본 영상 옆에 둔다. 나머지 산출물은 작업 폴더에 남긴다."""
+def _write_beside(source_video: Path, srt_text: str) -> tuple[Path, str | None]:
+    """SRT를 원본 영상 옆에 쓴다. 이것이 이 프로그램이 남기는 **유일한** 파일이다."""
+    destination = source_video.with_suffix(".srt")
+    note = None
     if is_uploaded_copy(source_video):
-        return produced, (
+        note = (
             "참고   파일 선택창으로 올린 파일이라 원본 폴더를 알 수 없습니다.\n"
-            "       원본 옆에 저장하려면 경로를 직접 붙여넣으세요."
+            "       원본 옆에 두려면 경로를 직접 붙여넣으세요. 지금은 아래에서 받으세요."
         )
-    destination = source_video.parent / produced.name
-    if destination.resolve() == produced.resolve():
-        return produced, None
     try:
-        destination.write_text(produced.read_text(encoding="utf-8"), encoding="utf-8")
+        destination.write_text(srt_text, encoding="utf-8")
     except OSError as exc:
-        return produced, f"참고   원본 폴더에 쓰지 못했습니다: {exc}"
-    return destination, None
+        fallback = Path(tempfile.gettempdir()) / destination.name
+        fallback.write_text(srt_text, encoding="utf-8")
+        return fallback, f"참고   영상 폴더에 쓰지 못해 임시 폴더에 두었습니다: {exc}"
+    return destination, note
 
 
 def _suggest_guard(duration: float) -> int:
@@ -332,12 +331,6 @@ def _summary(result: pipeline.RunResult) -> str:
     threshold = float(result.trace.config_snapshot.get("conf_threshold", 0.75))
     check = sum(1 for cue in result.cues if cue.conf < threshold or cue.flags)
     return f"결과   큐 {len(result.cues)}개 · 오류 {errors} · 경고 {warnings} · 확인할 큐 {check}개"
-
-
-def _downloads(result: pipeline.RunResult) -> tuple[str, ...]:
-    return tuple(
-        str(result.outputs[name]) for name in ("srt", "review", "report") if name in result.outputs
-    )
 
 
 def _join(lines: list[str], *extra: str) -> str:

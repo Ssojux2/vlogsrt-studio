@@ -133,16 +133,28 @@ def detect_silence(path: Path, cfg: Config, duration: float | None = None) -> li
     return parse_silence_output(completed.stderr, total)
 
 
+def chunk_count(duration: float, size_bytes: int, cfg: Config) -> int:
+    """몇 조각으로 나눌지. 크기 한도와 길이 한도 **둘 다** 지켜야 한다.
+
+    업로드 한도(25MB)만 보던 시절엔 77분 영상이 38분짜리 두 조각이 됐고,
+    whisper-1이 뒷부분에서 반복 루프에 빠졌다(D13).
+    """
+    by_size = math.ceil(size_bytes / cfg.chunk_max_bytes)
+    by_time = math.ceil(duration / cfg.chunk_max_seconds)
+    return max(1, by_size, by_time)
+
+
 def plan_chunks(
     duration: float, size_bytes: int, silences: list[Span], cfg: Config
 ) -> list[ChunkPlan]:
-    """크기 제한을 넘으면 무음 한가운데를 골라 자른다. 없으면 목표 지점을 강제한다."""
+    """크기·길이 한도를 넘으면 무음 한가운데를 골라 자른다. 없으면 목표 지점을 강제한다."""
     if duration <= 0:
         raise RuntimeError(f"오디오 길이가 0 이하입니다: {duration}")
-    if size_bytes <= cfg.chunk_max_bytes:
+
+    count = chunk_count(duration, size_bytes, cfg)
+    if count <= 1:
         return [ChunkPlan(start=0.0, end=duration, index=0)]
 
-    count = math.ceil(size_bytes / cfg.chunk_max_bytes)
     target_length = duration / count
     window = target_length * cfg.chunk_search_ratio
     centers = sorted((start + end) / 2 for start, end in silences)

@@ -54,8 +54,19 @@ def source_fingerprint(path: Path) -> str:
     return digest.hexdigest()[:16]
 
 
-def prepare(video: Path, cfg: Config, *, offline: bool, workdir: Path | None = None) -> Prepared:
-    """오디오·무음·청크를 준비한다. 오프라인이고 메타 픽스처가 있으면 ffmpeg를 건너뛴다."""
+def prepare(
+    video: Path,
+    cfg: Config,
+    *,
+    offline: bool,
+    workdir: Path | None = None,
+    reuse_cache: bool = True,
+) -> Prepared:
+    """오디오·무음·청크를 준비한다. 오프라인이고 메타 픽스처가 있으면 ffmpeg를 건너뛴다.
+
+    `reuse_cache=False`면 지난 실행의 오디오를 절대 재사용하지 않고, 지문 폴더도
+    만들지 않는다. 매번 새 영상만 보고 처리해야 하는 실행 경로가 쓴다.
+    """
     stem = video.stem
     if offline:
         meta = transcribe.load_meta(env.fixture_dir(), stem)
@@ -79,12 +90,12 @@ def prepare(video: Path, cfg: Config, *, offline: bool, workdir: Path | None = N
         raise RuntimeError(f"영상을 찾지 못했습니다: {video}")
 
     base = workdir or env.work_dir()
-    cache = base / f"{stem}-{source_fingerprint(video)}"
+    cache = base / f"{stem}-{source_fingerprint(video)}" if reuse_cache else base
     cache.mkdir(parents=True, exist_ok=True)
     audio = cache / f"{stem}.mp3"
     silence_cache = cache / "silences.json"
 
-    if audio.is_file() and silence_cache.is_file():
+    if reuse_cache and audio.is_file() and silence_cache.is_file():
         log.info(f"캐시 재사용: {cache}")
         duration = preprocess.probe_duration(audio)
         silences = tuple(
@@ -94,7 +105,10 @@ def prepare(video: Path, cfg: Config, *, offline: bool, workdir: Path | None = N
         preprocess.extract_audio(video, audio, cfg)
         duration = preprocess.probe_duration(audio)
         silences = tuple(preprocess.detect_silence(audio, cfg, duration))
-        silence_cache.write_text(json.dumps([list(span) for span in silences]), encoding="utf-8")
+        if reuse_cache:
+            silence_cache.write_text(
+                json.dumps([list(span) for span in silences]), encoding="utf-8"
+            )
 
     chunks = tuple(preprocess.make_chunks(audio, cfg, cache, list(silences)))
     return Prepared(
@@ -135,7 +149,14 @@ def run(
     force_offline: bool = False,
     stop_after: str = "output",
     fast: bool = False,
+    workdir: Path | None = None,
+    artifacts: bool = True,
 ) -> RunResult:
+    """`artifacts=False`면 SRT 하나만 남기고 trace·리포트·검토본은 쓰지 않는다.
+
+    `workdir`를 임시 폴더로 주면 오디오도 그 안에서 만들고 끝나면 함께 사라진다.
+    실행 기록을 남기지 않는 경로가 이 둘을 같이 쓴다.
+    """
     if stop_after not in STAGES:
         raise RuntimeError(
             f"--stop-after 값이 올바르지 않습니다: {stop_after} (가능: {', '.join(STAGES)})"
@@ -143,7 +164,7 @@ def run(
     effective = replace(cfg, word_timestamps=not fast)
     online = online and not force_offline
     offline = force_offline or not online and env.is_offline()
-    prepared = prepare(video, effective, offline=offline)
+    prepared = prepare(video, effective, offline=offline, workdir=workdir, reuse_cache=artifacts)
     transcriber = transcribe.get_transcriber(effective, online=online, force_offline=offline)
     job = build_job(prepared)
 
@@ -161,28 +182,41 @@ def run(
         config_snapshot=effective.to_dict(),
     )
     if stop_after == "spine":
-        return _finish(trace, [], [], outdir, prepared.stem, effective, write_srt=False)
+        return _finish(
+            trace, [], [], outdir, prepared.stem, effective, write_srt=False, artifacts=artifacts
+        )
 
     canonical = transcribe.canonical_text(transcriber.gpt(job, effective))
     if not canonical.strip():
         raise RuntimeError("gpt-transcribe 응답이 비었습니다. 픽스처를 확인하세요.")
     trace = replace(trace, canonical=canonical)
     if stop_after == "canonical":
-        return _finish(trace, [], [], outdir, prepared.stem, effective, write_srt=False)
+        return _finish(
+            trace, [], [], outdir, prepared.stem, effective, write_srt=False, artifacts=artifacts
+        )
 
     draft = _map_stage(spine, canonical, words, prepared.silences, effective, trace)
     trace = replace(trace, cues=tuple(draft.cues), warnings=tuple(draft.warnings))
     if stop_after == "map":
-        return _finish(trace, draft.cues, [], outdir, prepared.stem, effective)
+        return _finish(trace, draft.cues, [], outdir, prepared.stem, effective, artifacts=artifacts)
 
     cues = refine.refine(draft.cues, words, effective, prepared.duration)
     cues = mapping.score_cues(cues, spine, effective)
     issues = validate(cues, spine, effective)
     _report_issues(issues)
     if stop_after == "refine":
-        return _finish(trace, cues, issues, outdir, prepared.stem, effective)
+        return _finish(trace, cues, issues, outdir, prepared.stem, effective, artifacts=artifacts)
 
-    return _finish(trace, cues, issues, outdir, prepared.stem, effective, write_report=True)
+    return _finish(
+        trace,
+        cues,
+        issues,
+        outdir,
+        prepared.stem,
+        effective,
+        write_report=True,
+        artifacts=artifacts,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -238,13 +272,18 @@ def _finish(
     *,
     write_srt: bool = True,
     write_report: bool = False,
+    artifacts: bool = True,
 ) -> RunResult:
+    """`artifacts=False`면 SRT만 쓴다. trace·검토본·리포트는 만들지 않는다."""
     outdir.mkdir(parents=True, exist_ok=True)
-    outputs = {"trace": trace.save(outdir / "trace.json")}
+    outputs: dict[str, Path] = {}
+    if artifacts:
+        outputs["trace"] = trace.save(outdir / "trace.json")
     if write_srt and cues:
         outputs["srt"] = save_srt(cues, outdir / f"{stem}.srt")
-        outputs["srt_alias"] = save_srt(cues, outdir / "output.srt")
-    if write_report and cues:
+        if artifacts:
+            outputs["srt_alias"] = save_srt(cues, outdir / "output.srt")
+    if write_report and cues and artifacts:
         review = to_review_cues(cues)
         outputs["review"] = save_srt(review, outdir / f"{stem}.review.srt")
         outputs["review_alias"] = save_srt(review, outdir / "output.review.srt")

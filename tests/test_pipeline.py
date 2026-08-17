@@ -147,16 +147,51 @@ def test_record_reuses_what_was_already_paid_for(
     assert outputs["gpt"].is_file()
 
 
-def test_partial_fixture_is_not_treated_as_recorded(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from ui import service
+# ─────────────────────────────────────────────────────────────
+#  기록을 남기지 않는 실행
+# ─────────────────────────────────────────────────────────────
 
-    fixtures = tmp_path / "api"
-    fixtures.mkdir()
-    (fixtures / "demo.whisper.json").write_text("{}", encoding="utf-8")
-    monkeypatch.setenv("VLOGSRT_FIXTURE_DIR", str(fixtures))
-    assert service.has_fixture("demo") is False
 
-    (fixtures / "demo.gpt.json").write_text("{}", encoding="utf-8")
-    assert service.has_fixture("demo") is True
+def test_artifacts_off_writes_only_the_srt(tmp_path: Path) -> None:
+    """SRT 하나만 남긴다. trace·리포트·검토본·output.srt 별칭은 만들지 않는다."""
+    result = pipeline.run(VIDEO, Config(), tmp_path, force_offline=True, artifacts=False)
+    assert result.cues
+    assert result.outputs["srt"].is_file()
+    assert set(result.outputs) == {"srt"}
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["demo.srt"]
+
+
+def test_artifacts_on_still_writes_everything(tmp_path: Path) -> None:
+    pipeline.run(VIDEO, Config(), tmp_path, force_offline=True)
+    produced = {path.name for path in tmp_path.iterdir()}
+    assert {"trace.json", "demo.srt", "output.srt", "demo.report.md"} <= produced
+
+
+def test_no_cache_run_reuses_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`reuse_cache=False`면 지문 폴더도 만들지 않고 오디오를 매번 새로 뽑는다."""
+    monkeypatch.setenv("VLOGSRT_FIXTURE_DIR", str(tmp_path / "no-meta"))
+    video = tmp_path / "demo.mp4"
+    video.write_bytes(b"\x00")
+    calls: list[Path] = []
+
+    def fake_extract(src: Path, dst: Path, cfg: Config) -> Path:
+        calls.append(dst)
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_bytes(b"\x00")
+        return dst
+
+    monkeypatch.setattr(pipeline.preprocess, "extract_audio", fake_extract)
+    monkeypatch.setattr(pipeline.preprocess, "probe_duration", lambda path: 30.0)
+    monkeypatch.setattr(pipeline.preprocess, "detect_silence", lambda *a, **k: [])
+    monkeypatch.setattr(
+        pipeline.preprocess,
+        "make_chunks",
+        lambda audio, cfg, workdir, silences=None: [],
+    )
+
+    work = tmp_path / "scratch"
+    for _ in range(2):
+        pipeline.prepare(video, Config(), offline=False, workdir=work, reuse_cache=False)
+    assert len(calls) == 2  # 두 번 다 새로 뽑았다
+    assert not (work / "silences.json").exists()  # 캐시 파일을 남기지 않는다
+    assert [path.name for path in work.iterdir()] == ["demo.mp3"]
