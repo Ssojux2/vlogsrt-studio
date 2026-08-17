@@ -1,9 +1,9 @@
 # TASKS.md — vlogsrt 태스크 보드
 
-> **현재 계획: gpt-transcribe + 오디오 기반 타이밍** (근거: `docs/DECISIONS.md` D24)
+> **현재 계획: whisper가 자막을 만들고, 시각은 원본 오디오 그대로, gpt-transcribe는
+> 표시만 한다** (근거: `docs/DECISIONS.md` D25)
 > 한 세션에 태스크 하나. DoD = `make check` 통과 → 커밋.
-> 옛 보드(T0~T5 2모델 사상, P0~P8 whisper 단독+검증, Q0~Q5 diarize 단일 모델)는
-> git 히스토리에 있다.
+> 옛 보드(T·P·Q·R 시리즈)는 git 히스토리에 있다.
 
 ---
 
@@ -11,79 +11,73 @@
 
 | 태스크 | 내용 | 상태 |
 |---|---|---|
-| R0 | 문서 전환 (CLAUDE.md · D24 · 이 보드) | ✅ |
-| R1 | 순수 계층 — `spans.py` · `align.py` (TDD) | ✅ |
-| R2 | 전처리 경계 — 무음 검출 · 묶음 오디오 추출 | ✅ |
-| R3 | 전사 전환 — text 응답, diarize 잔재 삭제 | ✅ |
-| R4 | 파이프라인 + 픽스처 재작성 | ✅ (R2·R3에 흡수) |
-| R5 | 손실 정책(경고) + 가드 갱신 | ✅ |
-| R6 | 문서 마무리 (README · RUNBOOK · DASHBOARD) | ✅ |
-| R7 | 사람 인수: 짧은 영상 1편 온라인 실행 🧑 | ☐ |
+| S0 | 문서 전환 (CLAUDE.md · D25 · 이 보드) | ☐ |
+| S1 | 분할을 한도 + 진폭 0 탐색으로 — **초반·마지막 사고 해결** | ☐ |
+| S2 | 시각을 whisper로 — 원본 오디오 시각 그대로 | ☐ |
+| S3 | 검증 계층 (옵션 `--verify`) | ☐ |
+| S4 | 인자 분리 · 가드 · 문서 | ☐ |
+| S5 | 사람 인수: 짧은 영상 → 긴 영상 🧑 | ☐ |
 
 ---
 
-## R1 — 순수 계층 (TDD)
+## 무엇이 왜 깨졌나 (S1이 고치는 것)
 
-`tests/test_spans.py` · `tests/test_align.py`를 **먼저** 쓴다. ffmpeg도 네트워크도
-쓰지 않는다.
+D24의 `speech_spans`가 `cursor = 0.0`에서 시작해 **무음의 여집합만** 발화 구간으로
+삼았다. `silencedetect`가 "0~200초는 무음"이라 하면 그 구간은 자막에 아예 안 들어간다.
+끝도 같다. **조용한 인트로·아웃트로가 통째로 버려졌다.**
 
-`vlogsrt/spans.py`
-- `parse_silence_output(stderr, duration)` — `git show ae861ef^:vlogsrt/preprocess.py`에서 이식
-- `speech_spans(silences, duration, cfg)` — 무음의 여집합. `min_speech_duration`보다 짧으면 버린다
-- `group_spans(spans, cfg)` — `batch_max_seconds`/`chunk_max_bytes` 안에서 묶는다. 자르는 자리는 항상 무음 한가운데
+고치는 방법은 그 판단을 없애는 것이다. 새 분할은 **자를 자리만** 고르고, 조각은 언제나
+`[0, duration]`을 빈틈없이 덮는다.
 
-`vlogsrt/align.py`
-- `allocate(text, spans, seg_id_base)` — 누적 목표 글자 수로 어절을 배분. 남으면 마지막 구간에
+## S1 — 분할 (TDD)
 
-검증할 것: 어절 유실 0, 구간 유실 0, 시각이 구간 값과 정확히 일치,
-누적 오차가 뒤로 쌓이지 않음, 구간 0개·텍스트 빈 경우.
+`spans.py`·`align.py` 삭제. `cutpoints.py` 신규 — 테스트를 **먼저** 쓴다.
+`preprocess.amplitudes`(`scripts/verify_timing.py:53`의 `envelope`에서 이주),
+`preprocess.split_at`(ffmpeg `-f segment -segment_times … -c copy`, 오프셋은 CSV
+실제값). `Chunk.spans` 제거.
 
-## R2 — 전처리 경계
+**회귀 테스트 4개:**
+1. 자를 시각이 단조 증가하고 `[0, duration]` 안에 있다
+2. 조각이 `[0, duration]`을 빈틈없이 덮는다 (앞 조각 끝 = 뒤 조각 시작)
+3. 진폭에 조용한 곳이 하나도 없어도 조각 수·커버리지가 그대로다 (강제 분할)
+4. **맨 앞이 전부 무음이어도 첫 조각은 0초에서 시작한다** ← 이번 사고의 직접 회귀
 
-`detect_silence` 이식, `cut_batches`(ffmpeg `-ss`/`-to`, ThreadPool 병렬),
-`models.Chunk`에 `spans` 추가. `plan_chunks`/`chunk_count` 정리.
+## S2 — 시각을 whisper로
 
-## R3 — 전사 전환
+`transcribe.parse_segments`/`build_spine` 복원(`git show 1ab3d61:vlogsrt/transcribe.py`).
+`transcribe_model = "whisper-1"`, `transcribe_format = "verbose_json"`.
+`TRACE_VERSION` 6.0. 합성 픽스처를 whisper 모양으로 되돌리되 **0.0초에서 시작하는
+세그먼트와 duration에서 끝나는 세그먼트를 반드시 포함**시킨다.
 
-`parse_segments` → `parse_text`. `build_spine`이 `align.allocate`를 부른다.
-`transcribe_model = "gpt-4o-transcribe"`, `transcribe_format = "json"`,
-`chunking_strategy = ""`(우리가 직접 자른다).
-**필수/부가 인자 분리와 400 정밀 폴백, 첫 조각으로 인자 확정하는 구조는 그대로 둔다**
-— D22·D23에서 실측으로 얻은 것들이다.
-`TRACE_VERSION` 5.0.
+불변 테스트: 큐 시각이 `세그먼트 시각 + 오프셋`에서 `refine` 한도 이상 벗어나지 않는다.
 
-## R4 — 파이프라인 + 픽스처
+## S3 — 검증 (옵션)
 
-`pipeline.prepare`가 무음→구간→묶음을 거친다. 합성 픽스처를 새 모양으로:
+`verify.py` 복원(`git show ae861ef^:vlogsrt/verify.py`) + `loops.find_loops` 흡수
+(표시 전용, `demote`는 가져오지 않는다). 픽스처 두 종류:
+`<stem>.whisper.json` / `<stem>.gpt.json`.
+`pipeline.run(..., verify=False)`, **SRT 저장 후** `try/except`로 검증.
 
-```json
-{"chunks": [{"index": 0, "offset": 0.0, "end": 12.0,
-             "spans": [[0.4, 2.6], [3.1, 5.9]],
-             "response": {"text": "안녕하세요 오늘은 망원동에 왔습니다"}}]}
-```
+불변 테스트: **검증 on/off SRT 바이트 동일**, 검증이 실패해도 SRT는 나온다.
 
-## R5 — 손실 정책 + 가드
+## S4 — 인자 분리 · 가드 · 문서
 
-멈춤 → 경고: 빈 묶음 텍스트, 짧은 조각, 빈 큐.
-`scripts/check_invariants.py`에 **`spans.py`·`align.py` 순수성** 검사 추가.
-`scripts/verify_timing.py`를 새 픽스처 모양에 맞춘다.
+`_extras` → `whisper_extras`(language만) / `verify_extras`(prompt·keywords·language).
+`check_invariants.py`: whisper 호출 인자에 `prompt` 부재, `spans.py`·`align.py` 부재,
+`cutpoints.py` 순수성, `verify.py`가 `refine`/`output`을 import하지 않음.
+`--verify` CLI·UI 체크박스·비용 표시. README·RUNBOOK·DASHBOARD·`vlogsrt.toml`.
 
-## R6 — 문서 마무리
-
-README 파이프라인 그림·모듈표, RUNBOOK 막히면 표, DASHBOARD, `vlogsrt.toml`.
-
-## R7 — 사람 인수 🧑
+## S5 — 사람 인수 🧑
 
 > **Claude Code에게 시키지 마라.** 유료 호출이다.
 
-1. `make clean` (캐시에 옛 오디오가 남아 있을 수 있다)
-2. 짧은 영상(3~5분) 1편을 UI로 실행
+1. `make clean` — D24 시절 조각(`*.batch*.mp3`)이 캐시에 남아 있다
+2. 짧은 영상(3~5분) 1편
 3. 확인할 것:
-   - 모델이 계정에 있는가 (없으면 404 — 과금 없이 즉시 실패)
-   - **묶음당 발화 구간 수** 로그. 1~2개면 무음이 안 잡힌 것 →
-     `silence_threshold_db`를 올린다
-   - 자막이 소리와 맞는가 (귀 테스트 — 배분 품질은 이걸로만 판단한다)
-   - 로그에 `API가 […]를 거부했다` 경고가 뜨는지, 뜬 인자 이름
-4. 잘 돌면 `vlogsrt record`로 픽스처를 만들어두면 이후 오프라인 회귀가 살아난다.
+   - **초반·마지막에 자막이 있는가** ← 이번 사고의 확인 지점. 제일 먼저 본다
+   - 자막이 소리와 맞는가 (귀 테스트)
+4. 잘 돌면 `vlogsrt record`로 픽스처를 만들어두면 오프라인 회귀가 살아난다
+5. 그다음 긴 영상 1편을 `--verify`로 — 38분 조각에서 반복 환청이 재발하는지 본다.
+   재발하면 `vlogsrt.toml`의 `chunk_max_bytes`를 `4_800_000`(≈10분)으로 낮춰 재실행
 
 문제가 있으면 로그와 함께 새 태스크로.
