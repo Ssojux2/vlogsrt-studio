@@ -18,6 +18,7 @@ except ModuleNotFoundError as exc:  # pragma: no cover - 설치 안내 전용 �
     ) from exc
 
 from ui import service
+from ui.service import UiError
 from vlogsrt import log
 
 CSS = """
@@ -30,22 +31,15 @@ def build_app() -> gr.Blocks:
     with gr.Blocks(title="vlogsrt") as app:  # theme/css는 gradio 6부터 launch()로 옮겨졌다
         gr.Markdown(f"### vlogsrt  ·  {service.status_line()}")
 
-        # OS 기본 파일 선택창. 브라우저가 경로를 넘겨주지 않으므로 파일 자체를 받는다.
-        picker = gr.File(
-            label="영상 고르기",
-            file_count="single",
-            file_types=list(service.VIDEO_SUFFIXES),
-            type="filepath",
-            height=120,
-        )
         with gr.Row():
             path_box = gr.Textbox(
                 label="영상 경로",
-                info="위에서 고르면 자동으로 채워집니다. 경로를 직접 붙여넣어도 됩니다.",
+                info="찾아보기로 고르거나 경로를 직접 붙여넣으세요. 업로드하지 않습니다.",
                 placeholder="/Users/me/Movies/vlog01.mp4",
                 scale=6,
                 autofocus=True,
             )
+            browse_button = gr.Button("찾아보기", scale=1)
             run_button = gr.Button("자막 만들기", variant="primary", scale=1)
 
         log_box = gr.Textbox(
@@ -59,15 +53,15 @@ def build_app() -> gr.Blocks:
             report = service.make_subtitles(path_text)
             return report.log, report.srt_text, list(report.files)
 
-        def on_pick(picked: str | None) -> Any:
-            """고른 파일의 서버 경로를 경로 칸에 넣는다.
+        def on_browse() -> Any:
+            """OS 파일 대화상자를 열어 실제 경로를 받아온다. 취소하면 그대로 둔다."""
+            try:
+                chosen = service.pick_file_dialog()
+            except UiError as exc:
+                raise gr.Error(str(exc)) from exc
+            return chosen or gr.skip()
 
-            선택을 지웠을 때(None) 경로 칸까지 비우지는 않는다. 직접 붙여넣은
-            경로가 사라지면 곤란하다.
-            """
-            return picked or gr.skip()
-
-        picker.change(on_pick, picker, path_box)
+        browse_button.click(on_browse, None, path_box)
         run_button.click(on_run, path_box, [log_box, srt_box, files_box])
         path_box.submit(on_run, path_box, [log_box, srt_box, files_box])
 

@@ -12,6 +12,7 @@ import os
 import signal
 import socket
 import subprocess
+import sys
 import tempfile
 import time
 from collections.abc import Iterator
@@ -50,6 +51,47 @@ def resolve_path(raw: str) -> Path:
         text = unquote(urlparse(text).path)
     text = text.replace("\\ ", " ").replace("\\~", "~")
     return Path(text).expanduser()
+
+
+# 서버가 곧 이 컴퓨터라서 쓸 수 있는 방법이다. 브라우저는 보안상 실제 경로를
+# 절대 넘겨주지 않으므로(C:\fakepath\...), 대화상자를 서버 쪽에서 연다.
+_CHOOSE_FILE = """
+tell application "System Events"
+	activate
+	set chosen to choose file with prompt "영상 파일을 고르세요" of type {__TYPES__}
+end tell
+POSIX path of chosen
+"""
+_CANCEL_CODE = -128
+
+
+def pick_file_dialog(timeout: float = 300.0) -> str | None:
+    """OS 파일 대화상자를 열고 **실제 경로**를 돌려준다. 취소하면 None.
+
+    업로드가 아니라 경로만 받으므로 큰 영상도 복사가 일어나지 않는다.
+    `--share` 로 남에게 열어준 상태라면 이 대화상자는 서버 컴퓨터에 뜬다.
+    """
+    if sys.platform != "darwin":
+        raise UiError("파일 대화상자는 macOS에서만 열립니다. 경로를 직접 붙여넣으세요.")
+    types = ", ".join(f'"{suffix.lstrip(".")}"' for suffix in VIDEO_SUFFIXES)
+    try:
+        chosen = subprocess.run(
+            ["osascript", "-e", _CHOOSE_FILE.replace("__TYPES__", types)],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        raise UiError("파일 대화상자가 응답하지 않아 닫았습니다.") from None
+    except OSError as exc:
+        raise UiError(f"파일 대화상자를 열지 못했습니다: {exc}") from exc
+
+    if chosen.returncode != 0:
+        if f"({_CANCEL_CODE})" in chosen.stderr:
+            return None
+        raise UiError(f"파일 대화상자 오류: {chosen.stderr.strip().splitlines()[-1:] or ''}")
+    return chosen.stdout.strip() or None
 
 
 def has_fixture(stem: str) -> bool:

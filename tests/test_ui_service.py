@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import socket
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -177,6 +179,96 @@ def test_unrecorded_video_reports_the_estimate_before_calling(
     assert report.ok is False
     assert "OpenAI 호출" in report.log
     assert "$0.06" in report.log
+
+
+# ─────────────────────────────────────────────────────────────
+#  파일 대화상자 — 업로드가 아니라 진짜 경로를 받는다
+# ─────────────────────────────────────────────────────────────
+
+
+class _FakeRun:
+    """`osascript` 호출을 흉내낸다. 테스트가 실제 대화상자를 띄우면 안 된다."""
+
+    def __init__(self, returncode: int, stdout: str = "", stderr: str = "") -> None:
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+def test_dialog_returns_the_real_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(service.sys, "platform", "darwin")
+    captured: dict[str, list[str]] = {}
+
+    def fake(command: list[str], **kwargs: object) -> _FakeRun:
+        captured["command"] = command
+        return _FakeRun(0, stdout="/Users/me/Movies/vlog01.mp4\n")
+
+    monkeypatch.setattr(service.subprocess, "run", fake)
+    assert service.pick_file_dialog() == "/Users/me/Movies/vlog01.mp4"
+    assert captured["command"][0] == "osascript"
+    assert "choose file" in captured["command"][2]
+    # 확장자 필터가 설정에서 온다
+    assert '"mp4"' in captured["command"][2]
+
+
+def test_dialog_cancel_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(service.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        service.subprocess,
+        "run",
+        lambda command, **kwargs: _FakeRun(1, stderr="execution error: User canceled. (-128)"),
+    )
+    assert service.pick_file_dialog() is None
+
+
+def test_dialog_reports_other_failures(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(service.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        service.subprocess,
+        "run",
+        lambda command, **kwargs: _FakeRun(1, stderr="execution error: 뭔가 잘못됨 (-1700)"),
+    )
+    with pytest.raises(UiError, match="파일 대화상자 오류"):
+        service.pick_file_dialog()
+
+
+def test_generated_applescript_actually_compiles() -> None:
+    """만들어낸 스크립트가 osascript에 먹히는지 실제로 컴파일해 본다.
+
+    플레이스홀더가 중괄호를 먹어 `of type "mp4", ...` 가 된 적이 있다.
+    문자열만 훑어서는 안 잡히고, 컴파일해야 잡힌다.
+    """
+    if sys.platform != "darwin":
+        pytest.skip("osacompile은 macOS 전용")
+    types = ", ".join(f'"{suffix.lstrip(".")}"' for suffix in service.VIDEO_SUFFIXES)
+    script = service._CHOOSE_FILE.replace("__TYPES__", types)
+    assert "of type {" in script
+    compiled = subprocess.run(
+        ["osacompile", "-o", "/dev/null", "-"],
+        input=script,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert compiled.returncode == 0, compiled.stderr
+
+
+def test_dialog_is_macos_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(service.sys, "platform", "linux")
+    with pytest.raises(UiError, match="macOS에서만"):
+        service.pick_file_dialog()
+
+
+def test_dialog_does_not_hang_forever(monkeypatch: pytest.MonkeyPatch) -> None:
+    """대화상자를 열어둔 채 두면 gradio 워커가 묶인다."""
+    monkeypatch.setattr(service.sys, "platform", "darwin")
+
+    def stall(command: list[str], **kwargs: object) -> _FakeRun:
+        raise service.subprocess.TimeoutExpired(command, 1.0)
+
+    monkeypatch.setattr(service.subprocess, "run", stall)
+    with pytest.raises(UiError, match="응답하지 않아"):
+        service.pick_file_dialog()
 
 
 # ─────────────────────────────────────────────────────────────
