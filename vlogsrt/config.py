@@ -43,6 +43,13 @@ class Config:
     channels: int = 1
     audio_bitrate: str = "64k"
 
+    # ─── 발화 구간과 묶음 ────────────────────────────────────
+    # 이 넷은 **외부 근거가 없다.** 회차별 조정 대상이다(D24).
+    silence_threshold_db: float = -35.0  # 소음 있는 회차는 올려야 한다
+    silence_min_duration: float = 0.3  # 0.5면 발화 구간이 굵어져 배분 오차가 커진다
+    min_speech_duration: float = 0.15  # 이보다 짧으면 말이 아니라 잡음
+    batch_max_seconds: float = 40.0  # 요청 수와 배분 오차의 절충
+
     # ─── 청크 분할 ───────────────────────────────────────────
     chunk_max_bytes: int = 24_000_000
     # 크기 한도(24MB)만 보면 64kbps에서 50분이 한 조각에 들어간다. 그보다 짧게
