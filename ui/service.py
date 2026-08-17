@@ -55,11 +55,18 @@ def resolve_path(raw: str) -> Path:
 
 # 서버가 곧 이 컴퓨터라서 쓸 수 있는 방법이다. 브라우저는 보안상 실제 경로를
 # 절대 넘겨주지 않으므로(C:\fakepath\...), 대화상자를 서버 쪽에서 연다.
+#
+# `choose file`은 System Events 명령이 **아니라** osascript 자신이 가진 Standard
+# Additions 명령이다. `tell application "System Events"`로 감싸면 필요 없는 권한
+# 의존이 생기고, 화면 없는 백그라운드 앱에 `activate`를 걸다 죽는다:
+#   execution error: System Events got an error: Application isn't running. (-600)
+# 그래서 대화상자는 최상위에서 열고, 창을 앞으로 끌어오는 시도만 try로 감싼다 —
+# 실패해도 대화상자는 뜬다(뒤에 가릴 수는 있다).
 _CHOOSE_FILE = """
-tell application "System Events"
-	activate
-	set chosen to choose file with prompt "영상 파일을 고르세요" of type {__TYPES__}
-end tell
+try
+	tell application "System Events" to activate
+end try
+set chosen to choose file with prompt "영상 파일을 고르세요" of type {__TYPES__}
 POSIX path of chosen
 """
 _CANCEL_CODE = -128
@@ -90,7 +97,9 @@ def pick_file_dialog(timeout: float = 300.0) -> str | None:
     if chosen.returncode != 0:
         if f"({_CANCEL_CODE})" in chosen.stderr:
             return None
-        raise UiError(f"파일 대화상자 오류: {chosen.stderr.strip().splitlines()[-1:] or ''}")
+        lines = chosen.stderr.strip().splitlines()
+        detail = lines[-1].strip() if lines else "이유를 알 수 없습니다"
+        raise UiError(f"파일 대화상자 오류: {detail}\n경로 칸에 직접 붙여넣어도 됩니다.")
     return chosen.stdout.strip() or None
 
 

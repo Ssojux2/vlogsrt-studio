@@ -525,3 +525,40 @@ def test_service_never_imports_gradio() -> None:
     """UI 로직은 gradio 없이도 돌아야 한다. 화면단만 gradio를 안다."""
     source = (Path(__file__).parent.parent / "ui" / "service.py").read_text(encoding="utf-8")
     assert "import gradio" not in source
+
+
+def test_the_dialog_does_not_depend_on_system_events(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`choose file`은 Standard Additions 명령이다. System Events에 걸면 -600으로 죽는다.
+
+    실측: `System Events got an error: Application isn't running. (-600)` —
+    화면 없는 백그라운드 앱에 `activate`를 건 자리였다.
+    """
+    types = ", ".join(f'"{suffix.lstrip(".")}"' for suffix in service.VIDEO_SUFFIXES)
+    script = service._CHOOSE_FILE.replace("__TYPES__", types)
+    body = script[script.index("end try") :]
+    assert "choose file" in body  # 대화상자는 tell 블록 **밖**에서 열린다
+    assert "System Events" not in body
+
+
+def test_bringing_the_window_forward_can_never_kill_the_dialog() -> None:
+    """앞으로 끌어오기는 부가 기능이다. 실패해도 대화상자는 떠야 한다."""
+    script = service._CHOOSE_FILE
+    activate = script.index("activate")
+    assert script.index("try") < activate < script.index("end try")
+
+
+def test_the_error_message_is_readable_and_offers_a_way_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """리스트 repr(`['35:43: execution error: …']`)이 화면에 그대로 나가던 자리다."""
+    monkeypatch.setattr(service.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        service.subprocess,
+        "run",
+        lambda command, **kwargs: _FakeRun(1, stderr="35:43: execution error: 뭔가 (-600)"),
+    )
+    with pytest.raises(UiError) as caught:
+        service.pick_file_dialog()
+    message = str(caught.value)
+    assert "[" not in message and "']" not in message
+    assert "붙여넣어도" in message  # 막혔을 때 빠져나갈 길을 알려준다

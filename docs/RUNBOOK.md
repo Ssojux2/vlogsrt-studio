@@ -218,6 +218,8 @@ make eval                                                 # → docs/DASHBOARD.m
 | `글자가 없는 큐 N개를 버렸다` 경고 | 정제 버그다. 로그와 함께 보고 |
 | 자막이 통째로 밀림 | `make verify STEM=<stem>`으로 조각 정렬과 골격 시프트를 확인 |
 | `make ui` 를 눌러도 아무 반응이 없다 | 주소가 안 찍히면 gradio 미설치다. `pip install -e ".[ui]"` |
+| `파일 대화상자 오류: … (-600)` | 창을 앞으로 끌어오는 데 실패한 것이다. 대화상자는 그래도 떠야 하며, 안 뜨면 **경로를 칸에 직접 붙여넣으면 된다** |
+| 대화상자가 브라우저 뒤에 숨는다 | 정상이다. Dock에서 osascript를 클릭하거나 `Cmd+Tab`으로 앞으로 가져와라 |
 | UI 포트를 바꾸고 싶다 | `.venv/bin/python -u -m ui.app --port 7900` |
 | `안전장치를 넘습니다` | 긴 영상이다. `.env` 의 `VLOGSRT_COST_GUARD_SECONDS` 를 올려라 (초 단위). 메시지가 넣을 값을 알려준다 |
 | 다시 처음부터 | `rm -rf .vlogsrt-cache out/` — 픽스처는 지워지지 않으니 무료로 재실행된다 |
