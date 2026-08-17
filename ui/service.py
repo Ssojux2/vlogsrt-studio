@@ -110,8 +110,10 @@ def make_subtitles(raw_path: str) -> RunReport:
             guard = env.cost_guard_seconds()
             if duration > guard:
                 raise UiError(
-                    f"{duration / 60:.0f}분은 안전장치({guard / 60:.0f}분)를 넘습니다. "
-                    "짧게 자르거나 .env 의 VLOGSRT_COST_GUARD_SECONDS 를 올리세요."
+                    f"{duration / 60:.0f}분은 안전장치({guard / 60:.0f}분)를 넘습니다.\n"
+                    f"이 영상을 돌리려면 .env 에서 안전장치를 올리세요:\n"
+                    f"  VLOGSRT_COST_GUARD_SECONDS={_suggest_guard(duration)}\n"
+                    f"예상 비용 약 ${transcribe.estimate_cost(duration, build_config()):.2f}"
                 )
             cost = transcribe.estimate_cost(duration, build_config())
             lines.append(f"전사   OpenAI 호출 · {duration / 60:.1f}분 · 예상 ${cost:.3f}")
@@ -174,6 +176,12 @@ def _place_final_srt(source_video: Path, produced: Path) -> tuple[Path, str | No
     except OSError as exc:
         return produced, f"참고   원본 폴더에 쓰지 못했습니다: {exc}"
     return destination, None
+
+
+def _suggest_guard(duration: float) -> int:
+    """넘어선 길이를 덮는 한 시간 단위 값. 사람이 그대로 붙여넣을 수 있게."""
+    hours = int(duration // 3600) + 1
+    return hours * 3600
 
 
 def _check_source(path: Path) -> None:

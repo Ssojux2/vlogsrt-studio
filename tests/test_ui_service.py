@@ -151,6 +151,15 @@ def test_cost_guard_stops_long_unrecorded_videos(
     report = service.make_subtitles(str(video))
     assert report.ok is False
     assert "안전장치" in report.log
+    # 그대로 붙여넣을 수 있는 값을 알려준다
+    assert "VLOGSRT_COST_GUARD_SECONDS=3600" in report.log
+
+
+def test_guard_suggestion_covers_the_video(monkeypatch: pytest.MonkeyPatch) -> None:
+    """77분짜리를 돌리려면 2시간(7200)을 제안해야 한다."""
+    assert service._suggest_guard(77 * 60) == 7200
+    assert service._suggest_guard(30 * 60) == 3600
+    assert service._suggest_guard(125 * 60) == 10800
 
 
 def test_unrecorded_video_reports_the_estimate_before_calling(

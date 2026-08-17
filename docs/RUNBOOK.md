@@ -86,7 +86,7 @@ tests/fixtures/api/test01.gpt.json
 tests/fixtures/api/test01.meta.json
 ```
 
-- 확인 프롬프트는 **1시간(`VLOGSRT_COST_GUARD_SECONDS`)을 넘을 때만** 뜬다.
+- 확인 프롬프트는 **안전장치(`VLOGSRT_COST_GUARD_SECONDS`, 기본 2시간)를 넘을 때만** 뜬다.
   그 아래는 예상 비용만 찍고 바로 호출한다
 - 파일 이름(`test01`)이 픽스처 키다. 이후 `run`에 넘기는 영상 경로의
   파일 이름이 같아야 픽스처를 찾는다
@@ -200,6 +200,7 @@ make eval                                                # → docs/DASHBOARD.md
 | 자막이 통째로 밀림 | 청크 경계 문제일 수 있다. `trace.json`의 `spine` 시각과 영상을 대조 |
 | `make ui` 를 눌러도 아무 반응이 없다 | 주소가 안 찍히면 gradio 미설치다. `pip install -e ".[ui]"` |
 | UI 포트를 바꾸고 싶다 | `.venv/bin/python -u -m ui.app --port 7900` |
+| `안전장치를 넘습니다` | 긴 영상이다. `.env` 의 `VLOGSRT_COST_GUARD_SECONDS` 를 올려라 (초 단위). 메시지가 넣을 값을 알려준다 |
 | 다시 처음부터 | `rm -rf .vlogsrt-cache out/` — 픽스처는 지워지지 않으니 무료로 재실행된다 |
 
 ## 돈이 나가는 명령 (이것만 외우면 된다)

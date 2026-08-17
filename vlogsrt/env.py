@@ -139,7 +139,12 @@ def max_workers() -> int:
 
 
 def cost_guard_seconds() -> float:
-    return float(get_int("VLOGSRT_COST_GUARD_SECONDS", 3600))
+    """이 길이를 넘는 오디오는 확인 없이 전사하지 않는다.
+
+    비용 임계값이지 품질 임계값이 아니다. 쓰는 사람이 정하는 값이라
+    `.env` 에서 자유롭게 올린다. 기본 7200초 = 2시간 ≈ $1.44.
+    """
+    return float(get_int("VLOGSRT_COST_GUARD_SECONDS", 7200))
 
 
 def has_api_key() -> bool:

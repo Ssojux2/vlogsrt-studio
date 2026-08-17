@@ -134,3 +134,10 @@ def test_key_state_helpers_never_expose_the_value(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setenv("OPENAI_API_KEY", "  ")
     assert has_api_key() is False
     assert api_key_source() == "없음"
+
+
+def test_cost_guard_defaults_to_two_hours(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("VLOGSRT_COST_GUARD_SECONDS", raising=False)
+    from vlogsrt.env import cost_guard_seconds
+
+    assert cost_guard_seconds() == 7200.0
