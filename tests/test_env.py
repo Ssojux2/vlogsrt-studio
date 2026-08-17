@@ -6,7 +6,17 @@ from pathlib import Path
 
 import pytest
 
-from vlogsrt.env import is_offline, load_env, parse_env_text, require_api_key
+from vlogsrt.env import (
+    api_key_source,
+    find_env_file,
+    has_api_key,
+    is_offline,
+    load_env,
+    parse_env_text,
+    require_api_key,
+    reset_cache,
+    resolve_under_root,
+)
 
 
 def test_parses_simple_pairs() -> None:
@@ -80,3 +90,47 @@ def test_api_key_missing_message(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "")
     with pytest.raises(RuntimeError, match="OPENAI_API_KEY"):
         require_api_key()
+
+
+# ─────────────────────────────────────────────────────────────
+#  실행 위치에 흔들리지 않기
+# ─────────────────────────────────────────────────────────────
+
+
+def test_env_is_found_from_a_subdirectory(tmp_path: Path) -> None:
+    """저장소 안 어디서 실행하든 `.env`를 찾아야 한다."""
+    (tmp_path / ".env").write_text("VLOGSRT_TEST_MARK=1\n", encoding="utf-8")
+    deep = tmp_path / "a" / "b" / "c"
+    deep.mkdir(parents=True)
+    assert find_env_file(deep) == tmp_path / ".env"
+
+
+def test_env_lookup_gives_up_outside_any_project(tmp_path: Path) -> None:
+    found = find_env_file(tmp_path)
+    # 저장소 밖이면 None이거나, 설치된 저장소의 .env로 떨어진다.
+    assert found is None or found.name == ".env"
+
+
+def test_relative_config_paths_resolve_under_the_project_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`VLOGSRT_FIXTURE_DIR=tests/fixtures/api` 가 실행 위치를 따라다니면 안 된다."""
+    (tmp_path / ".env").write_text("", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    reset_cache()
+    try:
+        assert resolve_under_root("tests/fixtures/api") == tmp_path / "tests/fixtures/api"
+        assert resolve_under_root("/absolute/stays") == Path("/absolute/stays")
+    finally:
+        reset_cache()
+
+
+def test_key_state_helpers_never_expose_the_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    secret = "sk-proj-SECRET-VALUE"
+    monkeypatch.setenv("OPENAI_API_KEY", secret)
+    assert has_api_key() is True
+    assert secret not in api_key_source()
+
+    monkeypatch.setenv("OPENAI_API_KEY", "  ")
+    assert has_api_key() is False
+    assert api_key_source() == "없음"

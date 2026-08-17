@@ -32,7 +32,15 @@ pip install -e ".[ui]"        # (선택) 웹 UI
 make ui        # http://127.0.0.1:7860
 ```
 
-경로를 붙여넣고 버튼 세 개면 끝난다. 유료 버튼은 동의 체크 없이는 눌리지 않는다.
+화면은 셋뿐이다: **영상 경로 · 실행 로그 · SRT.** 경로를 넣고 `자막 만들기`를 누르면 된다.
+경로를 모르면 `찾아보기` 버튼으로 폴더를 훑어 고르면 경로 칸이 채워진다.
+(브라우저 앱이라 OS 파일 대화상자는 못 연다. 서버 쪽 폴더를 보는 패널이다.)
+
+처음 보는 영상이면 OpenAI를 호출해 전사를 받아오고, 같은 영상을 다시 누르면
+받아둔 응답을 재사용한다. `.env`의 `VLOGSRT_COST_GUARD_SECONDS`보다 긴 영상은 멈춘다.
+
+조판을 바꾸고 싶으면 CLI가 빠르다 — `vlogsrt redo out/<회차>/trace.json --max-chars 14`.
+
 gradio는 **선택적 extra**이고 `ui/`에만 산다 — `vlogsrt/`의 의존성은 여전히 3개다.
 
 ## 쓰기 — CLI
@@ -97,7 +105,7 @@ M5 출력     SRT + review.srt + report.md + trace.json
 | `evaluate.py` | 지표 8종 |
 | `pipeline.py` `cli.py` | 조립과 커맨드 |
 | `ui/service.py` | UI 로직. **gradio를 import하지 않는다** |
-| `ui/app.py` | gradio 화면. 패키지 밖이라 규칙 7을 건드리지 않는다 |
+| `ui/app.py` | gradio 화면 (경로·로그·SRT). 패키지 밖이라 규칙 7을 건드리지 않는다 |
 
 ---
 

@@ -10,8 +10,11 @@ from pathlib import Path
 
 TRUTHY = frozenset({"1", "true", "yes", "on"})
 DEFAULT_ENV_PATH = Path(".env")
+# `vlogsrt/env.py` → `vlogsrt/` → 저장소 루트
+PACKAGE_ROOT = Path(__file__).resolve().parent.parent
 
 _loaded_from: Path | None = None
+_root: Path | None = None
 
 
 def parse_env_text(text: str) -> dict[str, str]:
@@ -50,13 +53,52 @@ def load_env(path: Path = DEFAULT_ENV_PATH) -> dict[str, str]:
     return parsed
 
 
-def ensure_loaded(path: Path = DEFAULT_ENV_PATH) -> None:
+def find_env_file(start: Path | None = None) -> Path | None:
+    """현재 위치에서 위로 올라가며 `.env`를 찾는다.
+
+    `cd ~/Movies && vlogsrt record vlog.mp4` 처럼 저장소 밖에서 실행해도
+    키를 찾을 수 있어야 한다. 못 찾으면 패키지가 설치된 저장소 루트를 본다.
+    """
+    here = (start or Path.cwd()).resolve()
+    for directory in (here, *here.parents):
+        candidate = directory / DEFAULT_ENV_PATH.name
+        if candidate.is_file():
+            return candidate
+    fallback = PACKAGE_ROOT / DEFAULT_ENV_PATH.name
+    return fallback if fallback.is_file() else None
+
+
+def project_root() -> Path:
+    """상대 경로 설정의 기준점. `.env`가 있는 디렉토리다."""
+    ensure_loaded()
+    return _root or Path.cwd()
+
+
+def resolve_under_root(value: str) -> Path:
+    """설정의 상대 경로를 저장소 기준으로 푼다. 실행 위치에 흔들리지 않게."""
+    path = Path(value).expanduser()
+    return path if path.is_absolute() else project_root() / path
+
+
+def ensure_loaded(path: Path | None = None) -> None:
     """프로세스당 한 번만 `.env`를 적용한다."""
-    global _loaded_from
-    if _loaded_from == path:
+    global _loaded_from, _root
+    target = path if path is not None else find_env_file()
+    if _loaded_from is not None and _loaded_from == target:
         return
-    load_env(path)
-    _loaded_from = path
+    if target is not None:
+        load_env(target)
+        _root = target.parent
+    else:
+        _root = PACKAGE_ROOT if (PACKAGE_ROOT / "pyproject.toml").is_file() else Path.cwd()
+    _loaded_from = target
+
+
+def reset_cache() -> None:
+    """테스트에서 `.env` 탐색을 다시 시키고 싶을 때만 쓴다."""
+    global _loaded_from, _root
+    _loaded_from = None
+    _root = None
 
 
 def get(key: str, default: str = "") -> str:
@@ -81,15 +123,15 @@ def is_offline() -> bool:
 
 
 def fixture_dir() -> Path:
-    return Path(get("VLOGSRT_FIXTURE_DIR", "tests/fixtures/api"))
+    return resolve_under_root(get("VLOGSRT_FIXTURE_DIR", "tests/fixtures/api"))
 
 
 def work_dir() -> Path:
-    return Path(get("VLOGSRT_WORK_DIR", ".vlogsrt-cache"))
+    return resolve_under_root(get("VLOGSRT_WORK_DIR", ".vlogsrt-cache"))
 
 
 def golden_dir() -> Path:
-    return Path(get("VLOGSRT_GOLDEN_DIR", "golden"))
+    return resolve_under_root(get("VLOGSRT_GOLDEN_DIR", "golden"))
 
 
 def max_workers() -> int:
@@ -98,6 +140,19 @@ def max_workers() -> int:
 
 def cost_guard_seconds() -> float:
     return float(get_int("VLOGSRT_COST_GUARD_SECONDS", 3600))
+
+
+def has_api_key() -> bool:
+    """키가 있는지만 알려준다. **값은 절대 돌려주지 않는다.**"""
+    return bool(get("OPENAI_API_KEY").strip())
+
+
+def api_key_source() -> str:
+    """키를 어디서 읽었는지. 화면과 로그에 쓰며 값은 담지 않는다."""
+    if not has_api_key():
+        return "없음"
+    env_file = find_env_file()
+    return f"{env_file}" if env_file else "셸 환경변수"
 
 
 def require_api_key(force: bool = False) -> str:

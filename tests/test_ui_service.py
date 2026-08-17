@@ -9,15 +9,16 @@ import pytest
 
 from ui import service
 from ui.service import UiError
-from vlogsrt.config import Config
 
 SYNTHETIC = Path(__file__).parent / "fixtures" / "synthetic"
 VIDEO = "golden/demo.mp4"
 
 
 @pytest.fixture(autouse=True)
-def synthetic_fixtures(monkeypatch: pytest.MonkeyPatch) -> None:
+def synthetic_fixtures(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("VLOGSRT_FIXTURE_DIR", str(SYNTHETIC))
+    # 결과물이 저장소 out/ 을 건드리지 않게 한다.
+    monkeypatch.setattr(service.env, "project_root", lambda: tmp_path)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -49,54 +50,43 @@ def test_resolve_path_rejects_empty() -> None:
         service.resolve_path("   ")
 
 
-def test_recorded_stems_lists_fixtures() -> None:
-    assert "demo" in service.recorded_stems()
-
-
 # ─────────────────────────────────────────────────────────────
-#  확인
+#  찾아보기
 # ─────────────────────────────────────────────────────────────
 
 
-def test_inspect_uses_meta_without_the_video_file() -> None:
-    inspection = service.inspect_source(VIDEO, Config())
-    assert inspection.recorded is True
-    assert inspection.exists is False
-    assert inspection.duration == 24.0
-    assert "무료" in service.describe(inspection)
+def test_resolve_folder_accepts_a_folder(tmp_path: Path) -> None:
+    assert service.resolve_folder(str(tmp_path)) == tmp_path
 
 
-def test_inspect_unknown_file_is_explained() -> None:
-    with pytest.raises(UiError, match="파일이 없습니다"):
-        service.inspect_source("/tmp/definitely-not-here.mp4", Config())
+def test_resolve_folder_takes_the_parent_of_a_file(tmp_path: Path) -> None:
+    """파일 경로를 그대로 붙여넣어도 그 파일이 든 폴더를 연다."""
+    video = tmp_path / "vlog.mp4"
+    video.write_bytes(b"\x00")
+    assert service.resolve_folder(str(video)) == tmp_path
 
 
-def test_inspect_rejects_non_media(tmp_path: Path) -> None:
-    document = tmp_path / "notes.txt"
-    document.write_text("x", encoding="utf-8")
-    with pytest.raises(UiError, match="영상/오디오 파일이 아닌"):
-        service.inspect_source(str(document), Config())
+def test_resolve_folder_strips_quotes(tmp_path: Path) -> None:
+    assert service.resolve_folder(f"  '{tmp_path}'  ") == tmp_path
 
 
-# ─────────────────────────────────────────────────────────────
-#  설정 상자
-# ─────────────────────────────────────────────────────────────
+def test_resolve_folder_falls_back_when_blank() -> None:
+    assert service.resolve_folder("") == service.default_browse_root()
 
 
-def test_keywords_box_takes_commas_or_newlines() -> None:
-    mixed = service.parse_keywords_box("블루펭귄, 망원동\n연남동")
-    assert mixed == ["블루펭귄", "망원동", "연남동"]
-    assert service.parse_keywords_box("가\n가\n  \n# 주석") == ["가"]
-    assert service.parse_keywords_box("") == []
+def test_resolve_folder_rejects_missing(tmp_path: Path) -> None:
+    with pytest.raises(UiError, match="폴더가 없습니다"):
+        service.resolve_folder(str(tmp_path / "nope"))
 
 
-def test_build_config_applies_sliders_over_preset() -> None:
-    cfg = service.build_config(
-        "shorts", max_chars=18, max_lines=2, max_cps=11.0, keywords_text="가"
-    )
-    assert cfg.max_chars_per_line == 18
-    assert cfg.max_cps == 11.0
-    assert cfg.keywords == ("가",)
+def test_browse_shortcuts_only_lists_existing_folders() -> None:
+    shortcuts = service.browse_shortcuts()
+    assert shortcuts
+    assert all(path.is_dir() for _, path in shortcuts)
+
+
+def test_default_browse_root_is_a_real_folder() -> None:
+    assert service.default_browse_root().is_dir()
 
 
 # ─────────────────────────────────────────────────────────────
@@ -104,66 +94,73 @@ def test_build_config_applies_sliders_over_preset() -> None:
 # ─────────────────────────────────────────────────────────────
 
 
-def test_generate_produces_every_output(tmp_path: Path) -> None:
-    outcome = service.generate(VIDEO, Config(), str(tmp_path))
-    assert outcome.srt_path.is_file()
-    assert outcome.review_path.is_file()
-    assert outcome.report_path.is_file()
-    assert outcome.trace_path.is_file()
-    assert "망원동" in outcome.srt_text
-    assert "[?" in outcome.review_text
-    assert "큐 7개" in outcome.summary
-    assert outcome.review_rows  # 고아 큐가 우선 확인에 올라온다
-    assert outcome.srt_path.parent.name == "demo"
+def test_recorded_video_runs_without_touching_the_api() -> None:
+    report = service.make_subtitles(VIDEO)
+    assert report.ok
+    assert "망원동" in report.srt_text
+    assert "기록된 응답 재사용" in report.log
+    assert "결과" in report.log
+    assert len(report.files) == 3
+    assert Path(report.files[0]).is_file()
 
 
-def test_generate_refuses_unrecorded_video(tmp_path: Path) -> None:
-    video = tmp_path / "brandnew.mp4"
-    video.write_bytes(b"\x00")
-    with pytest.raises(UiError, match="아직 녹화되지 않았"):
-        service.generate(str(video), Config(), str(tmp_path))
+def test_log_carries_pipeline_progress(monkeypatch: pytest.MonkeyPatch) -> None:
+    """파이프라인이 stderr로 찍는 진행 상황이 화면 로그에 들어와야 한다."""
+    monkeypatch.setenv("VLOGSRT_LOG_LEVEL", "INFO")  # conftest는 테스트 소음을 줄이려 ERROR로 둔다
+    report = service.make_subtitles(VIDEO)
+    assert "진행" in report.log
+    assert "골격" in report.log
 
 
-def test_paid_path_needs_consent(tmp_path: Path) -> None:
-    """동의 없이는 API 근처에도 가지 않는다. 이게 이 UI의 유일한 안전장치다."""
-    with pytest.raises(UiError, match="동의"):
-        service.record_and_generate(VIDEO, Config(), str(tmp_path), agreed=False)
+def test_missing_file_is_reported_in_the_log_not_raised(tmp_path: Path) -> None:
+    report = service.make_subtitles(str(tmp_path / "nope.mp4"))
+    assert report.ok is False
+    assert "파일이 없습니다" in report.log
+    assert report.srt_text == ""
 
 
-def test_paid_path_needs_the_actual_file(tmp_path: Path) -> None:
-    with pytest.raises(UiError, match="영상 파일이 있어야"):
-        service.record_and_generate(VIDEO, Config(), str(tmp_path), agreed=True)
+def test_blank_path_is_reported_in_the_log() -> None:
+    report = service.make_subtitles("   ")
+    assert report.ok is False
+    assert "경로를 입력" in report.log
 
 
-def test_paid_path_respects_the_cost_guard(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("VLOGSRT_COST_GUARD_SECONDS", "10")
-    video = tmp_path / "demo.mp4"
-    video.write_bytes(b"\x00")
-    with pytest.raises(UiError, match="안전장치"):
-        service.record_and_generate(str(video), Config(), str(tmp_path), agreed=True)
+def test_non_media_file_is_rejected(tmp_path: Path) -> None:
+    document = tmp_path / "notes.txt"
+    document.write_text("x", encoding="utf-8")
+    report = service.make_subtitles(str(document))
+    assert report.ok is False
+    assert "영상 파일이 아닙니다" in report.log
 
 
-def test_retune_reuses_the_trace_without_fixtures(
+def test_cost_guard_stops_long_unrecorded_videos(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    first = service.generate(VIDEO, Config(), str(tmp_path))
-    monkeypatch.setenv("VLOGSRT_FIXTURE_DIR", str(tmp_path / "gone"))
-    narrow = service.build_config("vlog", max_chars=12, max_lines=2, max_cps=12.0, keywords_text="")
-    again = service.retune(str(first.trace_path), narrow, str(tmp_path))
-    assert again.srt_path.is_file()
-    assert max(len(line) for line in again.srt_text.splitlines() if not line[:1].isdigit()) <= 14
+    """안전장치를 넘는 새 영상은 API로 넘어가기 전에 멈춘다."""
+    monkeypatch.setenv("VLOGSRT_COST_GUARD_SECONDS", "10")
+    monkeypatch.setattr(service.preprocess, "probe_duration", lambda path: 600.0)
+    video = tmp_path / "long.mp4"
+    video.write_bytes(b"\x00")
+    report = service.make_subtitles(str(video))
+    assert report.ok is False
+    assert "안전장치" in report.log
 
 
-def test_retune_without_a_run_is_explained(tmp_path: Path) -> None:
-    with pytest.raises(UiError, match="먼저 자막을"):
-        service.retune(str(tmp_path / "nope.json"), Config(), str(tmp_path))
+def test_unrecorded_video_reports_the_estimate_before_calling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(service.preprocess, "probe_duration", lambda path: 300.0)
 
+    def refuse(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("여기까지 왔으면 예상 비용이 로그에 있어야 한다")
 
-def test_mode_banner_reflects_offline_state(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("VLOGSRT_OFFLINE", "1")
-    assert "오프라인" in service.mode_banner()
-    monkeypatch.setenv("VLOGSRT_OFFLINE", "0")
-    assert "온라인" in service.mode_banner()
+    monkeypatch.setattr(service.pipeline, "record_fixtures", refuse)
+    video = tmp_path / "fresh.mp4"
+    video.write_bytes(b"\x00")
+    report = service.make_subtitles(str(video))
+    assert report.ok is False
+    assert "OpenAI 호출" in report.log
+    assert "$0.06" in report.log
 
 
 # ─────────────────────────────────────────────────────────────
@@ -194,6 +191,19 @@ def test_pick_port_gives_up_loudly(local_socket: None) -> None:
         busy = taken.getsockname()[1]
         with pytest.raises(UiError, match="빈 포트가 없습니다"):
             service.pick_port(busy, attempts=1)
+
+
+# ─────────────────────────────────────────────────────────────
+#  상태 표시
+# ─────────────────────────────────────────────────────────────
+
+
+def test_status_line_never_shows_the_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    secret = "sk-proj-THIS-MUST-NEVER-APPEAR"
+    monkeypatch.setenv("OPENAI_API_KEY", secret)
+    assert secret not in service.status_line()
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    assert "키 없음" in service.status_line()
 
 
 def test_service_never_imports_gradio() -> None:

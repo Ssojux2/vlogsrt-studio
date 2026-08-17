@@ -128,8 +128,15 @@ PLAN이 나타나면 이 세 항목을 대조해야 한다.
 `scripts/check_invariants.py`가 `vlogsrt/`의 gradio import를 금지 목록으로 막는다.
 
 `ui/service.py`(순수 로직)와 `ui/app.py`(화면)를 가른 이유도 같다.
-service는 gradio를 import하지 않아 UI 없이도 테스트가 돈다
-(`tests/test_ui_service.py`, 23개).
+service는 gradio를 import하지 않아 UI 없이도 테스트가 돈다.
+
+### 화면은 세 개로 줄였다
+
+처음에는 슬라이더·탭·미리보기·재조판까지 넣었는데, 쓰는 사람이 원한 것은
+**경로 입력 · 실행 로그 · SRT** 셋뿐이었다. 나머지는 걷어냈다.
+조판 조정은 `vlogsrt redo`가 이미 더 잘한다 — 화면에 두 번 만들 이유가 없다.
+`make_subtitles()`는 예외를 던지지 않고 전부 로그 문자열로 돌려준다.
+빨간 토스트보다 로그 한 칸이 읽기 쉽다.
 
 ### gradio 6에서 부딪힌 것
 
