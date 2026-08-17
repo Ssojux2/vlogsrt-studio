@@ -1,0 +1,12 @@
+# 세로 화면. 가로 폭이 좁아 한 줄이 짧고, 발화 속도가 빠르다.
+
+[refine]
+max_chars_per_line = 12
+max_lines = 2
+max_cps = 14.0
+min_duration = 0.85
+max_duration = 4.0
+merge_gap = 0.25
+pause_split = 0.25
+lead_in = 0.05
+lead_out = 0.15

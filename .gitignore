@@ -1,0 +1,40 @@
+# ─── 비밀 ──────────────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+*.key
+
+# ─── 작업 디렉토리 ──────────────────────────────────────────
+.vlogsrt-cache/
+work/
+out/
+eval/*.json
+
+# ─── 미디어 (골든셋 영상은 용량이 큼) ────────────────────────
+# 골든 SRT는 커밋한다. 영상은 커밋하지 않는다.
+golden/*.mp4
+golden/*.mov
+golden/*.m4a
+golden/*.wav
+!golden/*.srt
+
+# ─── Python ────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+dist/
+build/
+
+# ─── OS / 편집기 ───────────────────────────────────────────
+.DS_Store
+.vscode/
+.idea/
+
+# ─── Claude Code ───────────────────────────────────────────
+# 팀 설정은 커밋, 개인 설정은 제외
+.claude/settings.local.json

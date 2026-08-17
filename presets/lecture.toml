@@ -1,0 +1,12 @@
+# 강의·인터뷰. 문장이 길고 끊김이 적다. 큐를 길게 두는 편이 읽기 좋다.
+
+[refine]
+max_chars_per_line = 20
+max_lines = 2
+max_cps = 15.0
+min_duration = 1.0
+max_duration = 8.0
+merge_gap = 0.6
+pause_split = 0.5
+lead_in = 0.1
+lead_out = 0.4

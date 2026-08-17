@@ -1,0 +1,291 @@
+"""파이프라인 조립 — M1 전처리 → M2 전사 → M3 매핑 → M4 정제 → M5 출력.
+
+각 단계는 순수 함수 모듈에 있고, 여기서는 순서와 입출력만 다룬다.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from dataclasses import dataclass, replace
+from pathlib import Path
+
+from . import env, log, mapping, preprocess, refine, transcribe
+from .config import Config
+from .models import Chunk, Cue, Issue, Segment, Trace, Word
+from .output import save_srt, to_review_cues
+from .report import build_report
+from .transcribe import Transcriber, TranscriptionJob
+from .validate import ERR, count_by_level, validate
+
+STAGES = ("spine", "canonical", "map", "refine", "output")
+Span = tuple[float, float]
+
+
+@dataclass(frozen=True, slots=True)
+class Prepared:
+    stem: str
+    duration: float
+    silences: tuple[Span, ...]
+    chunks: tuple[Chunk, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class RunResult:
+    trace: Trace
+    cues: tuple[Cue, ...]
+    issues: tuple[Issue, ...]
+    outputs: dict[str, Path]
+
+
+# ─────────────────────────────────────────────────────────────
+#  M1 — 전처리
+# ─────────────────────────────────────────────────────────────
+
+
+def source_fingerprint(path: Path) -> str:
+    """파일 전체를 읽지 않고 지문을 만든다. 장편 영상에서 해시에 몇 분을 쓸 이유가 없다."""
+    stat = path.stat()
+    digest = hashlib.sha256()
+    digest.update(f"{path.name}:{stat.st_size}:{int(stat.st_mtime)}".encode())
+    with path.open("rb") as handle:
+        digest.update(handle.read(1_000_000))
+    return digest.hexdigest()[:16]
+
+
+def prepare(video: Path, cfg: Config, *, offline: bool, workdir: Path | None = None) -> Prepared:
+    """오디오·무음·청크를 준비한다. 오프라인이고 메타 픽스처가 있으면 ffmpeg를 건너뛴다."""
+    stem = video.stem
+    if offline:
+        meta = transcribe.load_meta(env.fixture_dir(), stem)
+        if meta.get("duration"):
+            silences = tuple((float(a), float(b)) for a, b in meta.get("silences", []))
+            log.info(f"메타 픽스처 사용: {stem} ({float(meta['duration']):.1f}초)")
+            return Prepared(
+                stem=stem, duration=float(meta["duration"]), silences=silences, chunks=()
+            )
+        if not video.is_file():
+            raise RuntimeError(
+                f"영상도 메타 픽스처도 없습니다: {video}\n"
+                f"사람이 `vlogsrt record {video}`를 실행해야 합니다."
+            )
+
+    if not video.is_file():
+        raise RuntimeError(f"영상을 찾지 못했습니다: {video}")
+
+    base = workdir or env.work_dir()
+    cache = base / f"{stem}-{source_fingerprint(video)}"
+    cache.mkdir(parents=True, exist_ok=True)
+    audio = cache / f"{stem}.mp3"
+    silence_cache = cache / "silences.json"
+
+    if audio.is_file() and silence_cache.is_file():
+        log.info(f"캐시 재사용: {cache}")
+        duration = preprocess.probe_duration(audio)
+        silences = tuple(
+            (float(a), float(b)) for a, b in json.loads(silence_cache.read_text(encoding="utf-8"))
+        )
+    else:
+        preprocess.extract_audio(video, audio, cfg)
+        duration = preprocess.probe_duration(audio)
+        silences = tuple(preprocess.detect_silence(audio, cfg, duration))
+        silence_cache.write_text(json.dumps([list(span) for span in silences]), encoding="utf-8")
+
+    chunks = tuple(preprocess.make_chunks(audio, cfg, cache, list(silences)))
+    return Prepared(stem=stem, duration=duration, silences=silences, chunks=chunks)
+
+
+# ─────────────────────────────────────────────────────────────
+#  M2 — 전사
+# ─────────────────────────────────────────────────────────────
+
+
+def build_job(prepared: Prepared) -> TranscriptionJob:
+    return TranscriptionJob(stem=prepared.stem, chunks=prepared.chunks)
+
+
+def fetch_spine(
+    transcriber: Transcriber, job: TranscriptionJob, cfg: Config, silences: tuple[Span, ...]
+) -> tuple[list[Segment], list[Word]]:
+    responses = transcriber.whisper(job, cfg)
+    spine, words = transcribe.build_spine(responses)
+    if not spine:
+        raise RuntimeError("whisper 응답에서 세그먼트를 얻지 못했습니다.")
+    return transcribe.apply_verdicts(spine, silences, cfg), words
+
+
+# ─────────────────────────────────────────────────────────────
+#  전체 실행
+# ─────────────────────────────────────────────────────────────
+
+
+def run(
+    video: Path,
+    cfg: Config,
+    outdir: Path,
+    *,
+    online: bool = False,
+    force_offline: bool = False,
+    stop_after: str = "output",
+    fast: bool = False,
+) -> RunResult:
+    if stop_after not in STAGES:
+        raise RuntimeError(
+            f"--stop-after 값이 올바르지 않습니다: {stop_after} (가능: {', '.join(STAGES)})"
+        )
+    effective = replace(cfg, word_timestamps=not fast)
+    online = online and not force_offline
+    offline = force_offline or not online and env.is_offline()
+    prepared = prepare(video, effective, offline=offline)
+    transcriber = transcribe.get_transcriber(effective, online=online, force_offline=offline)
+    job = build_job(prepared)
+
+    spine, words = fetch_spine(transcriber, job, effective, prepared.silences)
+    if fast:
+        words = []
+    log.info(f"골격 {len(spine)}개 세그먼트, 단어 {len(words)}개")
+
+    trace = Trace(
+        source=str(video),
+        duration=prepared.duration,
+        spine=tuple(spine),
+        words=tuple(words),
+        silences=prepared.silences,
+        config_snapshot=effective.to_dict(),
+    )
+    if stop_after == "spine":
+        return _finish(trace, [], [], outdir, prepared.stem, effective, write_srt=False)
+
+    canonical = transcribe.canonical_text(transcriber.gpt(job, effective))
+    if not canonical.strip():
+        raise RuntimeError("gpt-transcribe 응답이 비었습니다. 픽스처를 확인하세요.")
+    trace = replace(trace, canonical=canonical)
+    if stop_after == "canonical":
+        return _finish(trace, [], [], outdir, prepared.stem, effective, write_srt=False)
+
+    draft = _map_stage(spine, canonical, words, prepared.silences, effective, trace)
+    trace = replace(trace, cues=tuple(draft.cues), warnings=tuple(draft.warnings))
+    if stop_after == "map":
+        return _finish(trace, draft.cues, [], outdir, prepared.stem, effective)
+
+    cues = refine.refine(draft.cues, words, effective, prepared.duration)
+    cues = mapping.score_cues(cues, spine, effective)
+    issues = validate(cues, spine, effective)
+    _report_issues(issues)
+    if stop_after == "refine":
+        return _finish(trace, cues, issues, outdir, prepared.stem, effective)
+
+    return _finish(trace, cues, issues, outdir, prepared.stem, effective, write_report=True)
+
+
+@dataclass(frozen=True, slots=True)
+class _MapStage:
+    cues: list[Cue]
+    warnings: list[str]
+
+
+def _map_stage(
+    spine: list[Segment],
+    canonical: str,
+    words: list[Word],
+    silences: tuple[Span, ...],
+    cfg: Config,
+    trace: Trace,
+) -> _MapStage:
+    """골격 큐에 정본 텍스트를 얹는다. 시각은 이 단계에서 절대 변하지 않는다."""
+    del trace
+    base = mapping.spine_to_cues(spine)
+    if not base:
+        raise RuntimeError("판정을 통과한 세그먼트가 없습니다. 임계값이나 오디오를 확인하세요.")
+    mapped, cuts_a, global_sim = mapping.apply_canonical(base, spine, canonical, words, cfg)
+    warnings: list[str] = []
+    if global_sim < cfg.global_sim_floor:
+        # F13 폴백. 두 전사가 서로 다른 말을 하고 있다. gpt 텍스트를 믿을 수 없다.
+        message = (
+            f"전역 유사도 {global_sim:.2f} < {cfg.global_sim_floor}. "
+            "정본 매핑을 포기하고 whisper 골격 텍스트로 출력한다."
+        )
+        log.warn(message)
+        warnings.append(message)
+        return _MapStage(cues=base, warnings=warnings)
+    rescued = mapping.rescue_orphans(cuts_a, spine, mapped, silences, canonical, cfg)
+    return _MapStage(cues=rescued, warnings=warnings)
+
+
+def _report_issues(issues: list[Issue]) -> None:
+    counts = count_by_level(issues)
+    for issue in issues:
+        if issue.level == ERR:
+            log.error(f"[{issue.code}] 큐 {issue.cue_id}: {issue.message}")
+    # 수준 이름을 그대로 찍지 않는다. DoD가 `grep -c ERR`로 오류 유무를 세기 때문이다.
+    log.info(f"검사 결과 오류 {counts['ERR']} / 경고 {counts['WARN']} / 정보 {counts['INFO']}")
+
+
+def _finish(
+    trace: Trace,
+    cues: list[Cue],
+    issues: list[Issue],
+    outdir: Path,
+    stem: str,
+    cfg: Config,
+    *,
+    write_srt: bool = True,
+    write_report: bool = False,
+) -> RunResult:
+    outdir.mkdir(parents=True, exist_ok=True)
+    outputs = {"trace": trace.save(outdir / "trace.json")}
+    if write_srt and cues:
+        outputs["srt"] = save_srt(cues, outdir / f"{stem}.srt")
+        outputs["srt_alias"] = save_srt(cues, outdir / "output.srt")
+    if write_report and cues:
+        review = to_review_cues(cues)
+        outputs["review"] = save_srt(review, outdir / f"{stem}.review.srt")
+        outputs["review_alias"] = save_srt(review, outdir / "output.review.srt")
+        body = build_report(trace.source, cues, list(trace.spine), issues, trace.duration, cfg)
+        report_path = outdir / f"{stem}.report.md"
+        report_path.write_text(body, encoding="utf-8")
+        (outdir / "output.report.md").write_text(body, encoding="utf-8")
+        outputs["report"] = report_path
+    return RunResult(trace=trace, cues=tuple(cues), issues=tuple(issues), outputs=outputs)
+
+
+# ─────────────────────────────────────────────────────────────
+#  B0 베이스라인 / redo
+# ─────────────────────────────────────────────────────────────
+
+
+def baseline(
+    video: Path, cfg: Config, outdir: Path, *, online: bool = False, force_offline: bool = False
+) -> RunResult:
+    """whisper 세그먼트를 그대로 SRT로 뽑는다. 대시보드 첫 행(B0)이다."""
+    online = online and not force_offline
+    offline = force_offline or not online and env.is_offline()
+    prepared = prepare(video, cfg, offline=offline)
+    transcriber = transcribe.get_transcriber(cfg, online=online, force_offline=offline)
+    job = build_job(prepared)
+    spine, words = fetch_spine(transcriber, job, cfg, prepared.silences)
+    cues = refine.renumber(mapping.spine_to_cues(spine))
+    trace = Trace(
+        source=str(video),
+        duration=prepared.duration,
+        spine=tuple(spine),
+        cues=tuple(cues),
+        words=tuple(words),
+        silences=prepared.silences,
+        config_snapshot=cfg.to_dict(),
+    )
+    return _finish(trace, cues, [], outdir, prepared.stem, cfg)
+
+
+def redo(trace_path: Path, cfg: Config, outdir: Path) -> RunResult:
+    """API 없이 M4~M5만 다시 돈다. 임계값을 바꿔가며 재측정하는 용도다."""
+    trace = Trace.load(trace_path)
+    if not trace.cues:
+        raise RuntimeError(f"{trace_path}에 큐 초안이 없습니다. `vlogsrt run`을 먼저 실행하세요.")
+    stem = Path(trace.source).stem
+    cues = refine.refine(list(trace.cues), list(trace.words), cfg, trace.duration)
+    cues = mapping.score_cues(cues, list(trace.spine), cfg)
+    issues = validate(cues, list(trace.spine), cfg)
+    _report_issues(issues)
+    updated = replace(trace, config_snapshot=cfg.to_dict())
+    return _finish(updated, cues, issues, outdir, stem, cfg, write_report=True)

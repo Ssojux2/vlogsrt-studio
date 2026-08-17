@@ -1,0 +1,266 @@
+"""정제 엔진 — 분할·병합·시간·줄바꿈·검사."""
+
+from __future__ import annotations
+
+import pytest
+
+from vlogsrt.config import Config
+from vlogsrt.layout import break_text
+from vlogsrt.refine import (
+    adjust_timing,
+    merge_pass,
+    refine,
+    resolve_overlaps,
+    split_cue,
+    split_pass,
+    validate,
+)
+
+from .conftest import make_cue, make_segment, make_word
+
+LONG_TEXT = "안녕하세요 오늘은 망원동에 왔습니다 낮술 하러 왔어요"
+
+WORDS_WITH_PAUSE = [
+    make_word("안녕하세요", 0.0, 1.0),
+    make_word("오늘은", 1.1, 1.8),
+    make_word("망원동에", 1.9, 2.8),
+    make_word("왔습니다", 2.9, 4.2),
+    make_word("낮술", 4.9, 5.5),
+    make_word("하러", 5.6, 6.2),
+    make_word("왔어요", 6.3, 8.4),
+]
+
+
+# ─────────────────────────────────────────────────────────────
+#  T2.2 — 분할
+# ─────────────────────────────────────────────────────────────
+
+
+def test_split() -> None:
+    cfg = Config()
+
+    short = make_cue(0.0, 2.0, "짧은 자막")
+    assert split_cue(short, WORDS_WITH_PAUSE, cfg) == [short]
+
+    long_cue = make_cue(0.0, 8.5, LONG_TEXT)
+    pieces = split_cue(long_cue, WORDS_WITH_PAUSE, cfg)
+    assert len(pieces) == 2
+    assert pieces[0].end == pytest.approx(4.2)
+    assert pieces[1].start == pytest.approx(4.9)
+    assert pieces[0].start == long_cue.start
+    assert pieces[-1].end == long_cue.end
+    assert all(piece.origin == "split" for piece in pieces)
+    assert all(piece.seg_ids == long_cue.seg_ids for piece in pieces)
+
+
+def test_split_falls_back_to_word_boundary_without_pauses() -> None:
+    cfg = Config()
+    cue = make_cue(0.0, 8.5, LONG_TEXT)
+    pieces = split_cue(cue, [], cfg)
+    assert len(pieces) == 2
+    assert pieces[0].end < pieces[1].start
+    assert pieces[1].start - pieces[0].end == pytest.approx(cfg.min_gap)
+    assert " ".join(piece.text for piece in pieces) == LONG_TEXT
+
+
+def test_split_gives_up_on_a_single_long_word() -> None:
+    cfg = Config()
+    cue = make_cue(0.0, 8.0, "가" * 40)
+    pieces = split_cue(cue, [], cfg)
+    assert len(pieces) == 1
+    assert "no_split_point" in pieces[0].flags
+
+
+def test_split_respects_recursion_limit() -> None:
+    cfg = Config()
+    cue = make_cue(0.0, 60.0, " ".join(["단어"] * 60))
+    pieces = split_cue(cue, [], cfg)
+    assert len(pieces) <= 2**cfg.max_split_depth
+
+
+def test_split_keeps_pieces_inside_the_original_span() -> None:
+    cfg = Config()
+    cue = make_cue(10.0, 20.0, LONG_TEXT * 2)
+    pieces = split_pass([cue], [], cfg)
+    assert pieces[0].start >= cue.start
+    assert pieces[-1].end <= cue.end
+    for previous, following in zip(pieces, pieces[1:], strict=False):
+        assert previous.end <= following.start
+
+
+# ─────────────────────────────────────────────────────────────
+#  T2.3 — 병합
+# ─────────────────────────────────────────────────────────────
+
+
+def test_merge() -> None:
+    cfg = Config()
+    first = make_cue(0.0, 0.6, "어", seg_ids=(0,))
+    second = make_cue(0.9, 2.5, "일단 생맥주", seg_ids=(1,), index=2)
+    merged = merge_pass([first, second], cfg)
+    assert len(merged) == 1
+    assert merged[0].text == "어 일단 생맥주"
+    assert merged[0].origin == "merge"
+    assert merged[0].seg_ids == (0, 1)
+    assert merged[0].start == 0.0
+    assert merged[0].end == 2.5
+
+
+def test_merge_skipped_when_gap_is_wide() -> None:
+    cfg = Config()
+    first = make_cue(0.0, 0.6, "어")
+    distant = make_cue(1.5, 3.0, "일단 생맥주", index=2)
+    assert len(merge_pass([first, distant], cfg)) == 2
+
+
+def test_merge_skipped_when_cps_would_break() -> None:
+    cfg = Config()
+    first = make_cue(0.0, 0.6, "어")
+    dense = make_cue(0.7, 1.2, "가" * 20, index=2)
+    assert len(merge_pass([first, dense], cfg)) == 2
+
+
+def test_merge_chain_stops_on_recomputed_cps() -> None:
+    cfg = Config()
+    cues = [
+        make_cue(0.0, 0.30, "어"),
+        make_cue(0.35, 0.70, "음", index=2),
+        make_cue(0.75, 1.00, "가" * 20, index=3),
+    ]
+    merged = merge_pass(cues, cfg)
+    assert len(merged) == 2
+    assert merged[0].text == "어 음"
+    assert merged[1].text == "가" * 20
+
+
+def test_merge_inserts_exactly_one_space() -> None:
+    cfg = Config()
+    merged = merge_pass([make_cue(0.0, 0.5, "어"), make_cue(0.6, 2.0, "그래", index=2)], cfg)
+    assert "  " not in merged[0].text
+
+
+# ─────────────────────────────────────────────────────────────
+#  T2.4 — 시간 보정 / 충돌 해소
+# ─────────────────────────────────────────────────────────────
+
+
+def test_timing() -> None:
+    cfg = Config()
+    cues = [make_cue(0.05, 2.0, "첫 큐"), make_cue(7.0, 9.9, "마지막 큐", index=2)]
+    adjusted = adjust_timing(cues, cfg, duration=10.0)
+    assert adjusted[0].start == 0.0
+    assert adjusted[-1].end == 10.0
+    assert all(cue.duration >= cfg.min_duration for cue in adjusted)
+
+
+def test_timing_clamps_long_cues() -> None:
+    cfg = Config()
+    adjusted = adjust_timing([make_cue(0.0, 30.0, "긴 큐")], cfg, duration=60.0)
+    assert adjusted[0].duration == pytest.approx(cfg.max_duration)
+
+
+def test_overlaps_are_split_at_the_midpoint() -> None:
+    cfg = Config()
+    cues = [make_cue(0.0, 3.0, "앞"), make_cue(2.0, 5.0, "뒤", index=2)]
+    resolved = resolve_overlaps(cues, cfg)
+    assert resolved[0].end < resolved[1].start
+    assert resolved[1].start - resolved[0].end == pytest.approx(cfg.min_gap)
+    assert resolved[0].end == pytest.approx(2.5 - cfg.min_gap / 2)
+
+
+def test_tight_gap_pulls_the_earlier_cue_back() -> None:
+    cfg = Config()
+    cues = [make_cue(0.0, 3.0, "앞"), make_cue(3.02, 5.0, "뒤", index=2)]
+    resolved = resolve_overlaps(cues, cfg)
+    assert resolved[1].start - resolved[0].end >= cfg.min_gap - 1e-9
+
+
+def test_timing_is_monotonic_after_repair() -> None:
+    cfg = Config()
+    cues = [
+        make_cue(0.0, 3.0, "가"),
+        make_cue(2.0, 4.0, "나", index=2),
+        make_cue(3.5, 6.0, "다", index=3),
+    ]
+    resolved = resolve_overlaps(adjust_timing(cues, cfg, duration=10.0), cfg)
+    for previous, following in zip(resolved, resolved[1:], strict=False):
+        assert previous.end <= following.start
+        assert previous.start < previous.end
+
+
+# ─────────────────────────────────────────────────────────────
+#  T2.5 — 줄바꿈
+# ─────────────────────────────────────────────────────────────
+
+
+def test_linebreak() -> None:
+    cfg = Config()
+    assert break_text("짧은 자막", cfg)[0] == ["짧은 자막"]
+
+    lines, flags = break_text("오늘은 블루펭귄에서 낮술을 마셨다", cfg)
+    assert len(lines) == 2
+    assert all(len(line) <= cfg.max_chars_per_line for line in lines)
+    assert len(lines[0]) >= len(lines[1])
+    assert flags == []
+
+
+def test_linebreak_forces_a_split_without_spaces() -> None:
+    cfg = Config()
+    lines, flags = break_text("가" * 30, cfg)
+    assert len(lines) == 2
+    assert "forced_break" in flags
+
+
+def test_linebreak_never_starts_a_line_with_a_particle() -> None:
+    cfg = Config()
+    lines, _ = break_text("오늘은 블루펭귄 에서 낮술 마셨다", cfg)
+    assert not lines[1].startswith("에서")
+
+
+def test_linebreak_keeps_normal_words_that_look_like_particles() -> None:
+    cfg = Config()
+    lines, _ = break_text("어제 만난 사람은 고양이를 아주 좋아한다", cfg)
+    assert len(lines) == 2
+    assert "".join(lines).replace(" ", "") == "어제만난사람은고양이를아주좋아한다"
+
+
+# ─────────────────────────────────────────────────────────────
+#  T2.6 — 이상치 검사
+# ─────────────────────────────────────────────────────────────
+
+
+def test_validate() -> None:
+    cfg = Config()
+    spine = [make_segment(0, 0.0, 2.0, "정상")]
+    healthy = [make_cue(0.0, 2.0, "정상 자막")]
+    assert [issue for issue in validate(healthy, spine, cfg) if issue.level == "ERR"] == []
+
+    broken = [make_cue(2.0, 1.0, "거꾸로")]
+    codes = {issue.code for issue in validate(broken, spine, cfg) if issue.level == "ERR"}
+    assert "bad_range" in codes
+
+
+def test_validate_reports_overlap_and_density() -> None:
+    cfg = Config()
+    spine = [make_segment(0, 0.0, 6.0, "x")]
+    cues = [make_cue(0.0, 3.0, "앞 큐"), make_cue(2.0, 3.5, "가" * 30, index=2)]
+    codes = {issue.code for issue in validate(cues, spine, cfg)}
+    assert "overlap" in codes
+    assert "cps" in codes
+
+
+def test_validate_flags_unknown_segment_ids() -> None:
+    cfg = Config()
+    spine = [make_segment(0, 0.0, 2.0, "x")]
+    stray = [make_cue(0.0, 2.0, "가", seg_ids=(99,))]
+    codes = {issue.code for issue in validate(stray, spine, cfg) if issue.level == "ERR"}
+    assert "unknown_seg" in codes
+
+
+def test_full_refine_produces_no_errors() -> None:
+    cfg = Config()
+    spine = [make_segment(0, 0.0, 8.5, LONG_TEXT)]
+    cues = refine([make_cue(0.0, 8.5, LONG_TEXT)], WORDS_WITH_PAUSE, cfg, duration=10.0)
+    issues = validate(cues, spine, cfg)
+    assert [issue for issue in issues if issue.level == "ERR"] == []
+    assert [cue.index for cue in cues] == list(range(1, len(cues) + 1))

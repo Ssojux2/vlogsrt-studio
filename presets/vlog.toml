@@ -1,0 +1,13 @@
+# 브이로그 기본값. 감탄사가 잦고 발화 밀도가 낮다.
+# 격자 탐색(T2.7) 결과를 여기에 기록한다.
+
+[refine]
+max_chars_per_line = 16
+max_lines = 2
+max_cps = 12.0
+min_duration = 0.85
+max_duration = 7.0
+merge_gap = 0.4
+pause_split = 0.35
+lead_in = 0.1
+lead_out = 0.3

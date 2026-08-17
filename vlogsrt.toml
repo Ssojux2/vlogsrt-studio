@@ -1,0 +1,12 @@
+# 프로젝트 기본 설정. 프리셋과 CLI 옵션이 이 값을 덮어쓴다.
+# 여기 없는 키는 vlogsrt/config.py 의 Config 기본값을 그대로 쓴다.
+
+[transcribe]
+language = "ko"
+extra_languages = ["ko", "en"]
+prompt = "브이로그 내레이션입니다. 구어체 한국어이며 상호명과 지명이 자주 나옵니다."
+
+[refine]
+max_chars_per_line = 16
+max_lines = 2
+max_cps = 12.0

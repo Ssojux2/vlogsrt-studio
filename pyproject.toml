@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vlogsrt"
+version = "0.1.0"
+description = "브이로그 자막 SRT 생성기 — whisper 골격 + gpt-transcribe 정본"
+requires-python = ">=3.11"
+dependencies = ["openai>=1.60", "tomli-w>=1.0", "rich>=13.7"]
+
+[project.scripts]
+vlogsrt = "vlogsrt.cli:main"
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.6", "mypy>=1.11"]
+
+[tool.setuptools.packages.find]
+include = ["vlogsrt*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+filterwarnings = ["error::DeprecationWarning:vlogsrt.*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "C4", "SIM", "T20"]
+ignore = ["SIM108"]
+
+[tool.ruff.lint.per-file-ignores]
+"scripts/*" = ["T20"]
+"tests/*" = ["T20"]
+
+[tool.mypy]
+python_version = "3.11"
+files = ["vlogsrt"]
+disallow_untyped_defs = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_optional = true
+
+[[tool.mypy.overrides]]
+module = "openai.*"
+ignore_missing_imports = true
