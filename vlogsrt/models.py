@@ -166,6 +166,9 @@ class Repair:
     # 심판이 답을 하기는 했는가. **`arbiter_clean=False`만으로는 "되풀이가 맞다"와
     # "심판을 못 불렀다"를 구별할 수 없다.** 사람이 무엇을 고쳐야 할지가 달라진다.
     arbiter_answered: bool = False
+    # **갈아끼운 뒤에도 남은 되풀이 초.** 합격이 곧 깨끗함은 아니다 — 예전에는 이 값이
+    # 없어서 8구간 전부 "회복"으로 찍히는 동안 114초가 SRT로 나갔다(D28).
+    residual_seconds: float = 0.0
 
     @property
     def verdict(self) -> str:
@@ -184,6 +187,7 @@ class Repair:
             after=int(raw.get("after", 0)),
             arbiter_answered=bool(raw.get("arbiter_answered", False)),
             span=(float(raw.get("span", (0.0, 0.0))[0]), float(raw.get("span", (0.0, 0.0))[1])),
+            residual_seconds=float(raw.get("residual_seconds", 0.0)),
         )
 
 

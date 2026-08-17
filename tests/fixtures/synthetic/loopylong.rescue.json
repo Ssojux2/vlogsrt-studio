@@ -1,0 +1,488 @@
+{
+  "_comment": "쪼갠 계획마다 하나씩. 첫 조각만 멀쩡한 말이 왔고 나머지 둘은 또 되풀이다 — 조각마다 갈리는 것이 이 픽스처의 요점이다(D28).",
+  "chunks": [
+    {
+      "index": 0,
+      "offset": 20.0,
+      "response": {
+        "task": "transcribe",
+        "language": "korean",
+        "duration": 120.0,
+        "segments": [
+          {
+            "id": 0,
+            "start": 0.0,
+            "end": 5.0,
+            "text": " 0번 골목은 좁지만 볕이 잘 들어옵니다",
+            "compression_ratio": 1.19,
+            "avg_logprob": -0.25,
+            "no_speech_prob": 0.06
+          },
+          {
+            "id": 1,
+            "start": 6.0,
+            "end": 11.0,
+            "text": " 1번 골목은 좁지만 볕이 잘 들어옵니다",
+            "compression_ratio": 1.19,
+            "avg_logprob": -0.25,
+            "no_speech_prob": 0.06
+          },
+          {
+            "id": 2,
+            "start": 12.0,
+            "end": 17.0,
+            "text": " 2번 골목은 좁지만 볕이 잘 들어옵니다",
+            "compression_ratio": 1.19,
+            "avg_logprob": -0.25,
+            "no_speech_prob": 0.06
+          },
+          {
+            "id": 3,
+            "start": 18.0,
+            "end": 23.0,
+            "text": " 3번 골목은 좁지만 볕이 잘 들어옵니다",
+            "compression_ratio": 1.19,
+            "avg_logprob": -0.25,
+            "no_speech_prob": 0.06
+          },
+          {
+            "id": 4,
+            "start": 24.0,
+            "end": 29.0,
+            "text": " 4번 골목은 좁지만 볕이 잘 들어옵니다",
+            "compression_ratio": 1.19,
+            "avg_logprob": -0.25,
+            "no_speech_prob": 0.06
+          },
+          {
+            "id": 5,
+            "start": 30.0,
+            "end": 35.0,
+            "text": " 5번 골목은 좁지만 볕이 잘 들어옵니다",
+            "compression_ratio": 1.19,
+            "avg_logprob": -0.25,
+            "no_speech_prob": 0.06
+          },
+          {
+            "id": 6,
+            "start": 36.0,
+            "end": 41.0,
+            "text": " 6번 골목은 좁지만 볕이 잘 들어옵니다",
+            "compression_ratio": 1.19,
+            "avg_logprob": -0.25,
+            "no_speech_prob": 0.06
+          },
+          {
+            "id": 7,
+            "start": 42.0,
+            "end": 47.0,
+            "text": " 7번 골목은 좁지만 볕이 잘 들어옵니다",
+            "compression_ratio": 1.19,
+            "avg_logprob": -0.25,
+            "no_speech_prob": 0.06
+          },
+          {
+            "id": 8,
+            "start": 48.0,
+            "end": 53.0,
+            "text": " 8번 골목은 좁지만 볕이 잘 들어옵니다",
+            "compression_ratio": 1.19,
+            "avg_logprob": -0.25,
+            "no_speech_prob": 0.06
+          },
+          {
+            "id": 9,
+            "start": 54.0,
+            "end": 59.0,
+            "text": " 9번 골목은 좁지만 볕이 잘 들어옵니다",
+            "compression_ratio": 1.19,
+            "avg_logprob": -0.25,
+            "no_speech_prob": 0.06
+          },
+          {
+            "id": 10,
+            "start": 60.0,
+            "end": 65.0,
+            "text": " 10번 골목은 좁지만 볕이 잘 들어옵니다",
+            "compression_ratio": 1.19,
+            "avg_logprob": -0.25,
+            "no_speech_prob": 0.06
+          },
+          {
+            "id": 11,
+            "start": 66.0,
+            "end": 71.0,
+            "text": " 11번 골목은 좁지만 볕이 잘 들어옵니다",
+            "compression_ratio": 1.19,
+            "avg_logprob": -0.25,
+            "no_speech_prob": 0.06
+          },
+          {
+            "id": 12,
+            "start": 72.0,
+            "end": 77.0,
+            "text": " 12번 골목은 좁지만 볕이 잘 들어옵니다",
+            "compression_ratio": 1.19,
+            "avg_logprob": -0.25,
+            "no_speech_prob": 0.06
+          },
+          {
+            "id": 13,
+            "start": 78.0,
+            "end": 83.0,
+            "text": " 13번 골목은 좁지만 볕이 잘 들어옵니다",
+            "compression_ratio": 1.19,
+            "avg_logprob": -0.25,
+            "no_speech_prob": 0.06
+          },
+          {
+            "id": 14,
+            "start": 84.0,
+            "end": 89.0,
+            "text": " 14번 골목은 좁지만 볕이 잘 들어옵니다",
+            "compression_ratio": 1.19,
+            "avg_logprob": -0.25,
+            "no_speech_prob": 0.06
+          },
+          {
+            "id": 15,
+            "start": 90.0,
+            "end": 95.0,
+            "text": " 15번 골목은 좁지만 볕이 잘 들어옵니다",
+            "compression_ratio": 1.19,
+            "avg_logprob": -0.25,
+            "no_speech_prob": 0.06
+          },
+          {
+            "id": 16,
+            "start": 96.0,
+            "end": 101.0,
+            "text": " 16번 골목은 좁지만 볕이 잘 들어옵니다",
+            "compression_ratio": 1.19,
+            "avg_logprob": -0.25,
+            "no_speech_prob": 0.06
+          },
+          {
+            "id": 17,
+            "start": 102.0,
+            "end": 107.0,
+            "text": " 17번 골목은 좁지만 볕이 잘 들어옵니다",
+            "compression_ratio": 1.19,
+            "avg_logprob": -0.25,
+            "no_speech_prob": 0.06
+          },
+          {
+            "id": 18,
+            "start": 108.0,
+            "end": 113.0,
+            "text": " 18번 골목은 좁지만 볕이 잘 들어옵니다",
+            "compression_ratio": 1.19,
+            "avg_logprob": -0.25,
+            "no_speech_prob": 0.06
+          },
+          {
+            "id": 19,
+            "start": 114.0,
+            "end": 119.0,
+            "text": " 19번 골목은 좁지만 볕이 잘 들어옵니다",
+            "compression_ratio": 1.19,
+            "avg_logprob": -0.25,
+            "no_speech_prob": 0.06
+          }
+        ]
+      }
+    },
+    {
+      "index": 1,
+      "offset": 140.0,
+      "response": {
+        "task": "transcribe",
+        "language": "korean",
+        "duration": 120.0,
+        "segments": [
+          {
+            "id": 0,
+            "start": 0.0,
+            "end": 5.0,
+            "text": " 꼬불꼬불 꼬불하고 여기 안으로 들어갔다가",
+            "compression_ratio": 5.4,
+            "avg_logprob": -0.25,
+            "no_speech_prob": 0.06
+          },
+          {
+            "id": 1,
+            "start": 6.0,
+            "end": 11.0,
+            "text": " 꼬불꼬불 꼬불하고 여기 안으로 들어갔다가",
+            "compression_ratio": 5.4,
+            "avg_logprob": -0.25,
+            "no_speech_prob": 0.06
+          },
+          {
+            "id": 2,
+            "start": 12.0,
+            "end": 17.0,
+            "text": " 꼬불꼬불 꼬불하고 여기 안으로 들어갔다가",
+            "compression_ratio": 5.4,
+            "avg_logprob": -0.25,
+            "no_speech_prob": 0.06
+          },
+          {
+            "id": 3,
+            "start": 18.0,
+            "end": 23.0,
+            "text": " 꼬불꼬불 꼬불하고 여기 안으로 들어갔다가",
+            "compression_ratio": 5.4,
+            "avg_logprob": -0.25,
+            "no_speech_prob": 0.06
+          },
+          {
+            "id": 4,
+            "start": 24.0,
+            "end": 29.0,
+            "text": " 꼬불꼬불 꼬불하고 여기 안으로 들어갔다가",
+            "compression_ratio": 5.4,
+            "avg_logprob": -0.25,
+            "no_speech_prob": 0.06
+          },
+          {
+            "id": 5,
+            "start": 30.0,
+            "end": 35.0,
+            "text": " 꼬불꼬불 꼬불하고 여기 안으로 들어갔다가",
+            "compression_ratio": 5.4,
+            "avg_logprob": -0.25,
+            "no_speech_prob": 0.06
+          },
+          {
+            "id": 6,
+            "start": 36.0,
+            "end": 41.0,
+            "text": " 꼬불꼬불 꼬불하고 여기 안으로 들어갔다가",
+            "compression_ratio": 5.4,
+            "avg_logprob": -0.25,
+            "no_speech_prob": 0.06
+          },
+          {
+            "id": 7,
+            "start": 42.0,
+            "end": 47.0,
+            "text": " 꼬불꼬불 꼬불하고 여기 안으로 들어갔다가",
+            "compression_ratio": 5.4,
+            "avg_logprob": -0.25,
+            "no_speech_prob": 0.06
+          },
+          {
+            "id": 8,
+            "start": 48.0,
+            "end": 53.0,
+            "text": " 꼬불꼬불 꼬불하고 여기 안으로 들어갔다가",
+            "compression_ratio": 5.4,
+            "avg_logprob": -0.25,
+            "no_speech_prob": 0.06
+          },
+          {
+            "id": 9,
+            "start": 54.0,
+            "end": 59.0,
+            "text": " 꼬불꼬불 꼬불하고 여기 안으로 들어갔다가",
+            "compression_ratio": 5.4,
+            "avg_logprob": -0.25,
+            "no_speech_prob": 0.06
+          },
+          {
+            "id": 10,
+            "start": 60.0,
+            "end": 65.0,
+            "text": " 꼬불꼬불 꼬불하고 여기 안으로 들어갔다가",
+            "compression_ratio": 5.4,
+            "avg_logprob": -0.25,
+            "no_speech_prob": 0.06
+          },
+          {
+            "id": 11,
+            "start": 66.0,
+            "end": 71.0,
+            "text": " 꼬불꼬불 꼬불하고 여기 안으로 들어갔다가",
+            "compression_ratio": 5.4,
+            "avg_logprob": -0.25,
+            "no_speech_prob": 0.06
+          },
+          {
+            "id": 12,
+            "start": 72.0,
+            "end": 77.0,
+            "text": " 꼬불꼬불 꼬불하고 여기 안으로 들어갔다가",
+            "compression_ratio": 5.4,
+            "avg_logprob": -0.25,
+            "no_speech_prob": 0.06
+          },
+          {
+            "id": 13,
+            "start": 78.0,
+            "end": 83.0,
+            "text": " 꼬불꼬불 꼬불하고 여기 안으로 들어갔다가",
+            "compression_ratio": 5.4,
+            "avg_logprob": -0.25,
+            "no_speech_prob": 0.06
+          },
+          {
+            "id": 14,
+            "start": 84.0,
+            "end": 89.0,
+            "text": " 꼬불꼬불 꼬불하고 여기 안으로 들어갔다가",
+            "compression_ratio": 5.4,
+            "avg_logprob": -0.25,
+            "no_speech_prob": 0.06
+          },
+          {
+            "id": 15,
+            "start": 90.0,
+            "end": 95.0,
+            "text": " 꼬불꼬불 꼬불하고 여기 안으로 들어갔다가",
+            "compression_ratio": 5.4,
+            "avg_logprob": -0.25,
+            "no_speech_prob": 0.06
+          },
+          {
+            "id": 16,
+            "start": 96.0,
+            "end": 101.0,
+            "text": " 꼬불꼬불 꼬불하고 여기 안으로 들어갔다가",
+            "compression_ratio": 5.4,
+            "avg_logprob": -0.25,
+            "no_speech_prob": 0.06
+          },
+          {
+            "id": 17,
+            "start": 102.0,
+            "end": 107.0,
+            "text": " 꼬불꼬불 꼬불하고 여기 안으로 들어갔다가",
+            "compression_ratio": 5.4,
+            "avg_logprob": -0.25,
+            "no_speech_prob": 0.06
+          },
+          {
+            "id": 18,
+            "start": 108.0,
+            "end": 113.0,
+            "text": " 꼬불꼬불 꼬불하고 여기 안으로 들어갔다가",
+            "compression_ratio": 5.4,
+            "avg_logprob": -0.25,
+            "no_speech_prob": 0.06
+          },
+          {
+            "id": 19,
+            "start": 114.0,
+            "end": 119.0,
+            "text": " 꼬불꼬불 꼬불하고 여기 안으로 들어갔다가",
+            "compression_ratio": 5.4,
+            "avg_logprob": -0.25,
+            "no_speech_prob": 0.06
+          }
+        ]
+      }
+    },
+    {
+      "index": 2,
+      "offset": 260.0,
+      "response": {
+        "task": "transcribe",
+        "language": "korean",
+        "duration": 120.0,
+        "segments": [
+          {
+            "id": 0,
+            "start": 0.0,
+            "end": 5.0,
+            "text": " 꼬불꼬불 꼬불하고 여기 안으로 들어갔다가",
+            "compression_ratio": 5.4,
+            "avg_logprob": -0.25,
+            "no_speech_prob": 0.06
+          },
+          {
+            "id": 1,
+            "start": 6.0,
+            "end": 11.0,
+            "text": " 꼬불꼬불 꼬불하고 여기 안으로 들어갔다가",
+            "compression_ratio": 5.4,
+            "avg_logprob": -0.25,
+            "no_speech_prob": 0.06
+          },
+          {
+            "id": 2,
+            "start": 12.0,
+            "end": 17.0,
+            "text": " 꼬불꼬불 꼬불하고 여기 안으로 들어갔다가",
+            "compression_ratio": 5.4,
+            "avg_logprob": -0.25,
+            "no_speech_prob": 0.06
+          },
+          {
+            "id": 3,
+            "start": 18.0,
+            "end": 23.0,
+            "text": " 꼬불꼬불 꼬불하고 여기 안으로 들어갔다가",
+            "compression_ratio": 5.4,
+            "avg_logprob": -0.25,
+            "no_speech_prob": 0.06
+          },
+          {
+            "id": 4,
+            "start": 24.0,
+            "end": 29.0,
+            "text": " 꼬불꼬불 꼬불하고 여기 안으로 들어갔다가",
+            "compression_ratio": 5.4,
+            "avg_logprob": -0.25,
+            "no_speech_prob": 0.06
+          },
+          {
+            "id": 5,
+            "start": 30.0,
+            "end": 35.0,
+            "text": " 꼬불꼬불 꼬불하고 여기 안으로 들어갔다가",
+            "compression_ratio": 5.4,
+            "avg_logprob": -0.25,
+            "no_speech_prob": 0.06
+          },
+          {
+            "id": 6,
+            "start": 36.0,
+            "end": 41.0,
+            "text": " 꼬불꼬불 꼬불하고 여기 안으로 들어갔다가",
+            "compression_ratio": 5.4,
+            "avg_logprob": -0.25,
+            "no_speech_prob": 0.06
+          },
+          {
+            "id": 7,
+            "start": 42.0,
+            "end": 47.0,
+            "text": " 꼬불꼬불 꼬불하고 여기 안으로 들어갔다가",
+            "compression_ratio": 5.4,
+            "avg_logprob": -0.25,
+            "no_speech_prob": 0.06
+          },
+          {
+            "id": 8,
+            "start": 48.0,
+            "end": 53.0,
+            "text": " 꼬불꼬불 꼬불하고 여기 안으로 들어갔다가",
+            "compression_ratio": 5.4,
+            "avg_logprob": -0.25,
+            "no_speech_prob": 0.06
+          },
+          {
+            "id": 9,
+            "start": 54.0,
+            "end": 59.0,
+            "text": " 꼬불꼬불 꼬불하고 여기 안으로 들어갔다가",
+            "compression_ratio": 5.4,
+            "avg_logprob": -0.25,
+            "no_speech_prob": 0.06
+          }
+        ]
+      }
+    }
+  ]
+}

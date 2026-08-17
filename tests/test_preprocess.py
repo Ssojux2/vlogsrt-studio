@@ -67,7 +67,7 @@ def test_audio_under_the_limit_is_never_split(
     audio = tmp_path / "demo.mp3"
     audio.write_bytes(b"\x00" * 1000)
 
-    chunks = make_chunks(audio, 300.0, Config(), tmp_path / "cuts")
+    chunks = make_chunks(audio, 120.0, Config(), tmp_path / "cuts")
     assert len(chunks) == 1
     assert chunks[0].path == audio
     assert chunks[0].offset == 0.0
@@ -268,3 +268,20 @@ def test_cut_spans_returns_one_chunk_per_span(tone: Path, tmp_path: Path) -> Non
     assert len(chunks) == len(spans)
     for chunk, (low, _high) in zip(chunks, spans, strict=True):
         assert chunk.offset == pytest.approx(low, abs=0.2)
+
+
+@needs_ffmpeg
+def test_touching_spans_stay_separate_chunks(tone: Path, tmp_path: Path) -> None:
+    """**긴 되풀이를 쪼갠 계획들의 회귀 테스트**(D28).
+
+    쪼갠 계획은 경계를 맞대고 있다 — 앞 계획의 끝이 곧 뒤 계획의 시작이다. 그 자리를
+    한 번만 자르고 조각을 둘로 세지 못하면, 계획 수와 조각 수가 어긋나 그 실행의
+    재전사가 통째로 취소된다.
+    """
+    audio = extract_audio(tone, tmp_path / "full.mp3", Config())
+    duration = probe_duration(audio)
+    spans = [(1.0, 3.0), (3.0, 5.0)]
+    chunks = cut_spans(audio, spans, duration, tmp_path / "work")
+    assert len(chunks) == len(spans)
+    assert chunks[0].offset == pytest.approx(1.0, abs=0.2)
+    assert chunks[1].offset == pytest.approx(3.0, abs=0.2)

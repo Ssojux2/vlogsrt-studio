@@ -9,13 +9,23 @@ from dataclasses import dataclass, field
 from dataclasses import replace as data_replace
 from pathlib import Path
 
+import pytest
+
 from vlogsrt import repair
 from vlogsrt.config import Config
-from vlogsrt.models import REPAIR_COLLAPSED, REPAIR_REPLACED, Chunk, Segment
+from vlogsrt.models import (
+    REPAIR_COLLAPSED,
+    REPAIR_KEPT,
+    REPAIR_REPLACED,
+    Chunk,
+    Segment,
+)
 from vlogsrt.transcribe import ARBITER_KIND, RESCUE_KIND, ChunkResponse, TranscriptionJob
 
 LOOP = "꼬불꼬불 꼬불하고 여기 안으로 들어갔다가"
 CLEAN = "성당 앞을 지나서 골목으로 들어가면 작은 광장이 나옵니다"
+# 접기 기준(30초)을 넘는 되풀이. `_echoing`이 1초짜리 세그먼트를 만드므로 장수가 곧 초다.
+LONG = 40
 
 
 def _echoing(count: int, start: float = 10.0, text: str = LOOP, first_id: int = 0) -> list[Segment]:
@@ -61,22 +71,42 @@ class FakeTranscriber:
     # 실제 실행에서는 ffmpeg가 잘라준 조각의 오프셋이 그대로 들어온다.
     offset: float = 10.0
 
+    # 조각별로 다른 답을 주고 싶을 때. 오프셋 → 그 조각이 돌려줄 글자.
+    per_offset: dict[float, list[str]] = field(default_factory=dict)
+
     def transcribe(self, job: TranscriptionJob, cfg: Config) -> list[ChunkResponse]:
         self.calls.append((job.kind, cfg.transcribe_temperature))
         if self.explode and job.kind == RESCUE_KIND:
             raise RuntimeError("API가 죽었다")
         if self.arbiter_explode and job.kind == ARBITER_KIND:
             raise RuntimeError("심판 모델이 죽었다")
-        offset = job.chunks[0].offset if job.chunks else self.offset
-        if job.kind == ARBITER_KIND:
-            return [ChunkResponse(index=0, offset=offset, payload={"text": self.arbiter_text})]
+        if not job.chunks:
+            return self._one(self.offset, job.kind, index=0)
         return [
-            ChunkResponse(index=0, offset=offset, payload=_whisper_payload(offset, self.rescue))
+            response
+            for order, chunk in enumerate(job.chunks)
+            for response in self._one(chunk.offset, job.kind, index=order)
         ]
 
+    def _one(self, offset: float, kind: str, index: int) -> list[ChunkResponse]:
+        if kind == ARBITER_KIND:
+            return [ChunkResponse(index=index, offset=offset, payload={"text": self.arbiter_text})]
+        texts = self.per_offset.get(offset, self.rescue)
+        return [ChunkResponse(index=index, offset=offset, payload=_whisper_payload(offset, texts))]
 
-def _source() -> repair.Source:
-    return repair.Source(stem="demo", duration=60.0)
+
+def _source(duration: float = 60.0) -> repair.Source:
+    return repair.Source(stem="demo", duration=duration)
+
+
+def _cut_spans_verbatim(
+    audio: Path, spans: list[tuple[float, float]], duration: float, workdir: Path
+) -> list[Chunk]:
+    """ffmpeg 없이 계획 구간을 그대로 조각으로 만든다. 오프셋 짝짓기까지 실제와 같게 돈다."""
+    return [
+        Chunk(path=audio, offset=low, duration=high - low, index=index)
+        for index, (low, high) in enumerate(spans)
+    ]
 
 
 def _settle(draft: list[Segment], transcriber: FakeTranscriber, cfg: Config) -> repair.Settled:
@@ -186,18 +216,39 @@ def test_the_settled_spine_is_ordered_and_renumbered() -> None:
 # ─────────────────────────────────────────────────────────────
 
 
-def test_a_span_that_loops_again_is_collapsed() -> None:
+def test_a_long_span_that_loops_again_is_collapsed() -> None:
     """1668장 대신 한 장. 나머지 구간은 자막이 서지 않는다."""
     fake = FakeTranscriber(rescue=[LOOP] * 12, arbiter_text=LOOP * 12)
-    settled = _settle(_echoing(8), fake, Config())
+    settled = _settle(_echoing(LONG), fake, Config())
     assert [repair_.outcome for repair_ in settled.repairs] == [REPAIR_COLLAPSED]
     assert [segment.text for segment in settled.spine] == [LOOP]
+
+
+def test_a_short_loop_that_never_recovers_is_kept_not_emptied() -> None:
+    """**접기는 긴 되풀이에만 쓴다**(D28).
+
+    D27의 접기 결정은 1658초짜리 사고를 겨냥한 것이지 10초짜리가 아니었다. 사진을
+    찍으며 아홉 번 말한 '치즈'까지 지우면, 되풀이가 아닌 이유로 규칙 9를 어기는 셈이다.
+    """
+    fake = FakeTranscriber(rescue=[LOOP] * 12, arbiter_text=LOOP * 12)
+    draft = _echoing(8)
+    settled = _settle(draft, fake, Config())
+    assert [repair_.outcome for repair_ in settled.repairs] == [REPAIR_KEPT]
+    assert [segment.text for segment in settled.spine] == [segment.text for segment in draft]
+
+
+def test_the_kept_loop_is_counted_as_residual() -> None:
+    """유지한 되풀이는 자막에 그대로 남는다. 마지막 줄이 그것을 숨기면 안 된다."""
+    fake = FakeTranscriber(rescue=[LOOP] * 12, arbiter_text=LOOP * 12)
+    settled = _settle(_echoing(8), fake, Config())
+    assert settled.repairs[0].residual_seconds == pytest.approx(8.0)
+    assert "남은 되풀이 8초" in repair.summarize(settled.repairs)
 
 
 def test_a_dead_api_collapses_instead_of_killing_the_run() -> None:
     """재전사가 죽어도 파이프라인은 계속 간다. 다만 조용하지는 않다."""
     fake = FakeTranscriber(explode=True)
-    settled = _settle(_echoing(8), fake, Config())
+    settled = _settle(_echoing(LONG), fake, Config())
     assert [repair_.outcome for repair_ in settled.repairs] == [REPAIR_COLLAPSED]
     assert len(settled.spine) == 1
 
@@ -358,9 +409,10 @@ def test_no_segment_belongs_to_two_plans() -> None:
         *_echoing(4, start=10.0, text=LOOP, first_id=0),
         *_echoing(4, start=16.0, text="소세지 소세지", first_id=4),
     ]
-    settled = _settle(draft, FakeTranscriber(rescue=[CLEAN]), Config())
-    texts = [segment.text for segment in settled.spine]
-    assert len(texts) == len(set(texts)), f"같은 글자가 두 번 들어갔다: {texts}"
+    owned: list[int] = []
+    for plan in repair._plan(draft, _source(), Config()):
+        owned.extend(plan.owned)
+    assert len(owned) == len(set(owned)), f"세그먼트가 두 계획에 속했다: {owned}"
 
 
 def test_the_repair_record_counts_what_changed() -> None:
@@ -369,3 +421,144 @@ def test_the_repair_record_counts_what_changed() -> None:
     assert record.before == 8
     assert record.after == 1
     assert record.repeat.count == 8
+
+
+# ─────────────────────────────────────────────────────────────
+#  긴 되풀이를 쪼갠다 — 계획이 곧 조각이고 곧 판정 단위다 (D28)
+# ─────────────────────────────────────────────────────────────
+
+
+def _long_draft(seconds: int = 400) -> list[Segment]:
+    return _echoing(seconds, start=10.0)
+
+
+def test_a_long_repeat_becomes_several_plans_inside_the_limit() -> None:
+    """**D28 사고의 회귀 테스트.**
+
+    490초짜리 되풀이를 한 조각으로 다시 물었다 — 이미 whisper를 무너뜨린 오디오를,
+    무너뜨린 그 길이 그대로. 재전사도 조각 한도를 지켜야 한다.
+    """
+    cfg = Config()
+    spans = repair.plan_spans(_long_draft(), _source(duration=500.0), cfg)
+    assert len(spans) > 1, "400초를 한 조각으로 다시 물었다"
+    for low, high in spans:
+        assert high - low <= cfg.repair_chunk_seconds, f"{low}~{high}이 한도를 넘었다"
+
+
+def test_split_plans_are_ordered_and_never_overlap() -> None:
+    spans = repair.plan_spans(_long_draft(), _source(duration=500.0), Config())
+    for earlier, later in zip(spans, spans[1:], strict=False):
+        assert earlier[1] <= later[0], f"쪼갠 구간이 겹쳤다: {spans}"
+
+
+def test_split_boundaries_are_always_segment_boundaries() -> None:
+    """**규칙 9.** 세그먼트 한복판에서 자르면, 앞은 갈리고 뒤는 남을 때 꼬리가 사라진다."""
+    draft = _long_draft()
+    edges = {segment.start for segment in draft} | {segment.end for segment in draft}
+    for low, high in repair.plan_spans(draft, _source(duration=500.0), Config()):
+        assert low in edges and high in edges
+        for segment in draft:
+            if segment.start < high and segment.end > low:
+                assert low <= segment.start and segment.end <= high, (
+                    f"세그먼트 {segment.id}가 계획 경계에 걸쳤다"
+                )
+
+
+def test_splitting_loses_no_segment_and_no_repeat_second() -> None:
+    """쪼개도 총합은 그대로다. `duration`의 합이 접기 판정의 근거이므로 어긋나면 안 된다."""
+    draft = _long_draft()
+    plans = repair._plan(draft, _source(duration=500.0), Config())
+    owned = [seg_id for plan in plans for seg_id in plan.owned]
+    assert sorted(owned) == [segment.id for segment in draft]
+    assert sum(plan.repeat.duration for plan in plans) == pytest.approx(len(draft))
+
+
+# ─────────────────────────────────────────────────────────────
+#  합격 기준 — 비율만 보면 긴 구간일수록 느슨해진다 (D28)
+# ─────────────────────────────────────────────────────────────
+
+
+def _mostly_clean_with_a_loop() -> list[str]:
+    """앞 12장이 되풀이(약 24초)이고 나머지는 멀쩡한, 200초짜리 회복본."""
+    return [LOOP] * 12 + [f"{index}번 골목을 지나 광장이 나옵니다" for index in range(88)]
+
+
+def test_a_residual_loop_fails_even_when_the_share_passes() -> None:
+    """**D28 사고의 회귀 테스트.**
+
+    비율은 구간이 길수록 느슨해진다 — 490초 구간이 245초를 되풀이해도 합격선(0.5)
+    안이었고, 그렇게 통과한 되풀이가 경고 없이 SRT로 나갔다.
+    """
+    cfg = Config()
+    fake = FakeTranscriber(rescue=_mostly_clean_with_a_loop(), arbiter_text=LOOP * 12)
+    settled = _settle(_echoing(LONG), fake, cfg)
+    assert [record.outcome for record in settled.repairs] == [REPAIR_COLLAPSED]
+
+
+def test_the_same_result_passes_once_the_absolute_ceiling_is_raised() -> None:
+    """비율이 아니라 **남은 초**가 갈랐다는 것을 못 박는다."""
+    cfg = data_replace(Config(), repair_residual_seconds=60.0)
+    fake = FakeTranscriber(rescue=_mostly_clean_with_a_loop(), arbiter_text=LOOP * 12)
+    settled = _settle(_echoing(LONG), fake, cfg)
+    assert [record.outcome for record in settled.repairs] == [REPAIR_REPLACED]
+    residual = settled.repairs[0].residual_seconds
+    assert Config().repair_residual_seconds < residual <= cfg.repair_residual_seconds
+
+
+# ─────────────────────────────────────────────────────────────
+#  온도 — 되풀이가 번지는 통로를 끊는 손잡이 (D28)
+# ─────────────────────────────────────────────────────────────
+
+
+def test_every_rescue_is_hotter_than_the_first_pass_and_past_the_reset_line() -> None:
+    """0.5 아래로 내려가면 whisper가 창 사이로 직전 글자를 다시 넘긴다 — 통로가 되살아난다."""
+    cfg = Config()
+    fake = FakeTranscriber(rescue=[LOOP] * 12, arbiter_text=CLEAN)
+    _settle(_echoing(LONG), fake, cfg)
+    temperatures = [temperature for kind, temperature in fake.calls if kind == RESCUE_KIND]
+    assert len(temperatures) == cfg.repair_max_attempts
+    assert all(temperature > 0.5 for temperature in temperatures), temperatures
+    assert all(temperature > cfg.transcribe_temperature for temperature in temperatures)
+    assert temperatures == sorted(temperatures) and len(set(temperatures)) == len(temperatures)
+
+
+def test_the_rescue_temperature_never_passes_the_api_ceiling() -> None:
+    cfg = data_replace(Config(), repair_max_attempts=6, repair_temperature=0.8)
+    fake = FakeTranscriber(rescue=[LOOP] * 12, arbiter_text=CLEAN)
+    _settle(_echoing(LONG), fake, cfg)
+    assert max(temperature for kind, temperature in fake.calls if kind == RESCUE_KIND) <= 1.0
+
+
+# ─────────────────────────────────────────────────────────────
+#  섞인 결과 — 한 되풀이 안에서도 조각마다 갈린다
+# ─────────────────────────────────────────────────────────────
+
+
+def test_one_piece_recovers_while_its_neighbours_collapse(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**부분 회복이 이번 변경의 요점이다.**
+
+    예전에는 구간 하나를 통째로 갈거나 통째로 접었다. 그래서 500초 중 앞 120초만
+    되살아나도 전부 접거나, 245초가 되풀이여도 전부 합격했다.
+    """
+    monkeypatch.setattr(repair.preprocess, "cut_spans", _cut_spans_verbatim)
+    draft = _long_draft()
+    source = repair.Source(
+        stem="demo", duration=500.0, audio=tmp_path / "demo.mp3", workdir=tmp_path / "work"
+    )
+    spans = repair.plan_spans(draft, source, Config())
+    assert len(spans) >= 3, "이 테스트는 쪼개진 계획을 전제한다"
+    fake = FakeTranscriber(
+        rescue=[LOOP] * 12,
+        arbiter_text=LOOP * 12,
+        per_offset={spans[0][0]: [CLEAN]},
+    )
+    settled = repair.settle(draft, source, Config(), fake)
+
+    outcomes = [record.outcome for record in settled.repairs]
+    assert outcomes[0] == REPAIR_REPLACED
+    assert set(outcomes[1:]) == {REPAIR_COLLAPSED}
+    texts = [segment.text for segment in settled.spine]
+    assert texts[0] == CLEAN, "되살아난 조각이 자기 자리에 섰다"
+    assert texts.count(LOOP) == len(outcomes) - 1, "접힌 조각마다 첫 장이 하나씩 남는다"

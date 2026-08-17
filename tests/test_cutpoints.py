@@ -21,7 +21,7 @@ MB = 1_000_000
 
 
 def test_small_audio_is_never_cut() -> None:
-    assert chunk_count(5 * MB, 300.0, Config()) == 1
+    assert chunk_count(5 * MB, 120.0, Config()) == 1
 
 
 def test_the_byte_limit_still_binds() -> None:
@@ -38,8 +38,10 @@ def test_the_second_limit_binds_when_it_is_smaller() -> None:
     한 문장이 1668회 반복돼 영상의 41.4%를 먹었다.
     """
     cfg = Config()
-    assert chunk_count(int(4620 * 8000), 4620.0, cfg) == 8
-    assert cfg.chunk_max_seconds == 600.0  # D13에서 근거를 얻은 값
+    assert chunk_count(int(4620 * 8000), 4620.0, cfg) == 26
+    # 180초는 D28에서 온 값이다. **조각 길이가 곧 되풀이가 자랄 수 있는 최대 길이다** —
+    # 600초였을 때 9.7분 조각 안에서 448초짜리 되풀이가 나왔다.
+    assert cfg.chunk_max_seconds == 180.0
 
 
 def test_the_bigger_of_the_two_counts_wins() -> None:
@@ -51,7 +53,7 @@ def test_the_bigger_of_the_two_counts_wins() -> None:
 
 def test_lowering_the_byte_limit_still_makes_more_chunks() -> None:
     """조각을 더 잘게 쪼개야 할 때의 탈출구. 코드가 아니라 설정 한 줄이다."""
-    tight = data_replace(Config(), chunk_max_bytes=2_400_000)
+    tight = data_replace(Config(), chunk_max_bytes=2_400_000, chunk_max_seconds=9999.0)
     assert chunk_count(int(4620 * 8000), 4620.0, tight) == 16
 
 
@@ -116,7 +118,7 @@ def _fake_finder(mapping: dict[float, float]):
 
 
 def test_cuts_are_the_quiet_points_that_were_found() -> None:
-    cfg = Config()
+    cfg = data_replace(Config(), chunk_max_seconds=9999.0)  # 조각 수를 바이트로만 몬다
     size = cfg.chunk_max_bytes * 2
     cuts = plan_cuts(600.0, size, cfg, _fake_finder({300.0: 297.4}))
     assert cuts == pytest.approx([297.4])
@@ -137,7 +139,7 @@ def test_cuts_stay_inside_the_audio() -> None:
 
 
 def test_a_single_chunk_needs_no_cut() -> None:
-    assert plan_cuts(600.0, 5 * MB, Config(), _fake_finder({})) == []
+    assert plan_cuts(120.0, 5 * MB, Config(), _fake_finder({})) == []
 
 
 # ─────────────────────────────────────────────────────────────

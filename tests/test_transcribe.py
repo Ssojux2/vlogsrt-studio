@@ -234,7 +234,8 @@ def test_the_call_asks_for_a_format_that_carries_times(
     (call,) = client.calls
     assert call["response_format"] == Config().transcribe_format
     assert call["model"] == Config().transcribe_model
-    assert call["temperature"] == 0
+    # 값이 아니라 배선을 본다. 온도는 되풀이를 막는 손잡이라 바뀔 수 있다(D28).
+    assert call["temperature"] == Config().transcribe_temperature
 
 
 def test_the_hint_is_not_in_the_actual_call(

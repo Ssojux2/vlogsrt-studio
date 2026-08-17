@@ -5,12 +5,15 @@ from __future__ import annotations
 from dataclasses import replace as data_replace
 from pathlib import Path
 
+import pytest
+
 from vlogsrt.config import Config
 from vlogsrt.models import WHY_COMPRESSION, WHY_ECHO, Segment
 from vlogsrt.repetition import (
     collapse,
     find_repeats,
     looks_repetitive,
+    repetitive_seconds,
     repetitive_share,
     text_compression_ratio,
 )
@@ -186,6 +189,32 @@ def test_a_partly_recovered_rescue_lands_in_between() -> None:
 
 def test_share_of_nothing_is_zero() -> None:
     assert repetitive_share([], Config()) == 0.0
+
+
+# ─────────────────────────────────────────────────────────────
+#  남은 초 — 비율이 놓치는 것을 잡는다 (D28)
+# ─────────────────────────────────────────────────────────────
+
+
+def test_a_clean_rescue_has_no_repetitive_seconds() -> None:
+    assert repetitive_seconds(_speaking(6), Config()) == 0.0
+    assert repetitive_seconds([], Config()) == 0.0
+
+
+def test_the_seconds_are_the_repeat_durations_not_a_ratio() -> None:
+    looped = _echoing(10, start=8.0)
+    span = looped[-1].end - looped[0].start
+    assert repetitive_seconds(looped, Config()) == pytest.approx(span)
+
+
+def test_seconds_stay_the_same_however_long_the_clean_part_is() -> None:
+    """**비율이 놓치는 지점.** 깨끗한 부분이 길어질수록 비율은 0으로 가지만, 되풀이는
+    한 초도 줄지 않는다. 490초 구간이 245초를 되풀이해도 합격하던 이유가 이것이다."""
+    loop = _echoing(6, start=0.0)
+    narrow = [*loop, *_speaking(4, start=10.0)]
+    wide = [*loop, *_speaking(60, start=10.0)]
+    assert repetitive_share(wide, Config()) < repetitive_share(narrow, Config()) / 2
+    assert repetitive_seconds(wide, Config()) == repetitive_seconds(narrow, Config())
 
 
 # ─────────────────────────────────────────────────────────────

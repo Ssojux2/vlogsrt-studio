@@ -6,7 +6,15 @@ from pathlib import Path
 
 import pytest
 
-from vlogsrt.config import Config, find_preset, find_project_toml, flatten_toml, load_config
+from vlogsrt.config import (
+    PACKAGE_ROOT,
+    Config,
+    find_preset,
+    find_project_toml,
+    flatten_toml,
+    load_config,
+    read_toml,
+)
 from vlogsrt.keywords import dedupe, load_keywords, parse_keywords, split_inline
 
 NO_PROJECT_TOML = Path("does-not-exist.toml")
@@ -54,9 +62,25 @@ def test_the_project_toml_is_found_from_any_directory(
     돌아갔다. D26이 조각을 10분으로 낮췄는데도 38분 조각으로 실행된 경로가 이것이다.
     """
     monkeypatch.chdir(tmp_path)
-    assert find_project_toml() is not None
-    # 프로젝트 toml은 코드 기본값보다 조각을 잘게 쪼갠다. 값이 다르면 파일을 읽은 것이다.
-    assert load_config().chunk_max_bytes != Config().chunk_max_bytes
+    found = find_project_toml()
+    assert found is not None and found.is_file()
+    assert found.parent == PACKAGE_ROOT, "패키지 기준으로 찾지 못했다"
+    # 찾기만 하고 안 읽으면 소용없다. 그 파일의 키가 실제로 설정에 실렸는지 본다.
+    settings = read_toml(found)
+    assert settings, "vlogsrt.toml에 키가 하나도 없다 — 이 테스트가 아무것도 못 지킨다"
+    cfg = load_config()
+    for key, value in settings.items():
+        assert getattr(cfg, key) == value, key
+
+
+def test_the_current_directory_wins_over_the_package(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """회차별 설정을 옆에 두고 돌릴 수 있어야 한다. 패키지 기준은 폴백일 뿐이다."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "vlogsrt.toml").write_text("[refine]\nmax_chars_per_line = 30\n", encoding="utf-8")
+    assert find_project_toml() == tmp_path / "vlogsrt.toml"
+    assert load_config().max_chars_per_line == 30
 
 
 def test_a_missing_toml_is_not_invented(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -67,7 +91,7 @@ def test_a_missing_toml_is_not_invented(tmp_path: Path, monkeypatch: pytest.Monk
 def test_chunk_length_has_two_ceilings() -> None:
     """D27 — 바이트만으로는 조각 **길이**를 못 막는다. 비트레이트가 바뀌면 무너진다."""
     cfg = Config()
-    assert cfg.chunk_max_seconds == 600.0
+    assert cfg.chunk_max_seconds == 180.0
     assert cfg.chunk_max_bytes <= 25_000_000
 
 

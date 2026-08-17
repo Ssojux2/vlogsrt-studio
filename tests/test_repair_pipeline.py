@@ -149,3 +149,53 @@ def test_the_leftover_loop_is_still_reported(
     result = pipeline.run(VIDEO, Config(), tmp_path, force_offline=True)
     assert result.verification is not None
     assert result.verification.loops == ()
+
+
+# ─────────────────────────────────────────────────────────────
+#  긴 되풀이 — 조각마다 갈린다 (D28)
+# ─────────────────────────────────────────────────────────────
+
+LONG_VIDEO = Path("golden/loopylong.mp4")
+
+
+def test_a_long_repeat_is_asked_in_pieces_not_in_one_lump(tmp_path: Path) -> None:
+    """**D28 사고의 회귀 테스트.**
+
+    300초짜리 되풀이를 한 조각으로 다시 물으면, 이미 whisper를 무너뜨린 오디오를
+    무너뜨린 그 길이 그대로 다시 주는 셈이다.
+    """
+    cfg = Config()
+    result = pipeline.run(LONG_VIDEO, cfg, tmp_path, force_offline=True)
+    assert len(result.repairs) == 3, [record.span for record in result.repairs]
+    for record in result.repairs:
+        asked = record.span[1] - record.span[0]
+        assert asked <= cfg.repair_chunk_seconds, f"{record.span}가 한도를 넘었다"
+
+
+def test_one_piece_recovers_while_the_others_collapse(tmp_path: Path) -> None:
+    """부분 회복. 예전에는 통째로 갈거나 통째로 접는 것뿐이었다."""
+    result = pipeline.run(LONG_VIDEO, Config(), tmp_path, force_offline=True)
+    assert [record.outcome for record in result.repairs] == [
+        REPAIR_REPLACED,
+        REPAIR_COLLAPSED,
+        REPAIR_COLLAPSED,
+    ]
+    texts = _srt_texts(result.outputs["srt"])
+    assert any("볕이 잘 들어옵니다" in text for text in texts), "되살아난 조각이 자막에 없다"
+    assert len([text for text in texts if LOOP in text]) == 2, "접힌 조각마다 첫 장 하나"
+
+
+def test_the_pieces_cover_the_repeat_without_a_gap(tmp_path: Path) -> None:
+    """규칙 4 — 쪼개도 되풀이 구간 전체가 덮인다. 사이가 비면 그만큼 조용히 사라진다."""
+    result = pipeline.run(LONG_VIDEO, Config(), tmp_path, force_offline=True)
+    spans = sorted(record.span for record in result.repairs)
+    for earlier, later in zip(spans, spans[1:], strict=False):
+        assert earlier[1] == later[0], f"계획 사이가 비었다: {spans}"
+
+
+def test_speech_around_the_long_repeat_survives(tmp_path: Path) -> None:
+    """규칙 9 — 되풀이 밖은 한 글자도 잃지 않는다."""
+    result = pipeline.run(LONG_VIDEO, Config(), tmp_path, force_offline=True)
+    body = " ".join(_srt_texts(result.outputs["srt"]))
+    for said in ("안녕하세요", "노트르담", "카메라가 흔들려도", "사람들이 앉아 있어요"):
+        assert said in body

@@ -62,6 +62,17 @@ def looks_repetitive(text: str, cfg: Config) -> bool:
     return looped / len(windows) > cfg.loop_repetitive_share
 
 
+def repetitive_seconds(segments: Sequence[Segment], cfg: Config) -> float:
+    """되풀이가 덮는 **시간**. 회복본에 얼마가 남았는지를 재는 자다.
+
+    비율(`repetitive_share`)만으로는 못 잡는다. 비율은 구간이 길수록 느슨해져서 490초
+    구간이 245초를 되풀이해도 합격선(0.5) 안이었다(D28). 남은 초는 구간 길이와 무관하다.
+    """
+    if not segments:
+        return 0.0
+    return sum(repeat.duration for repeat in find_repeats(segments, cfg))
+
+
 def repetitive_share(segments: Sequence[Segment], cfg: Config) -> float:
     """세그먼트가 있을 때의 판정 — 되풀이가 덮는 **시간의 비율**.
 
@@ -73,7 +84,7 @@ def repetitive_share(segments: Sequence[Segment], cfg: Config) -> float:
     span = max(segment.end for segment in segments) - min(segment.start for segment in segments)
     if span <= 0:
         return 0.0
-    return min(1.0, sum(repeat.duration for repeat in find_repeats(segments, cfg)) / span)
+    return min(1.0, repetitive_seconds(segments, cfg) / span)
 
 
 def _windows(words: Sequence[str], cfg: Config) -> list[float]:

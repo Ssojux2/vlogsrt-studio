@@ -10,20 +10,28 @@
 
 구간 하나가 겪는 일:
 
-    되풀이 검출 → 앞뒤 여유를 두고 다시 자른다
+    되풀이 검출 → 앞뒤 여유를 두고 **조각 한도 안의 계획 여럿으로 쪼갠다**(D28)
+      → 계획마다 다시 자른다
       → 심판 모델(gpt-transcribe)에게 "여기 말이 있나" 묻는다
-      → whisper에 다른 온도로 다시 묻는다
-          · 멀쩡한 글자가 왔다      → 그 구간을 갈아끼운다      (replaced)
+      → whisper에 1차보다 뜨거운 온도로 다시 묻는다
+          · 멀쩡한 글자가 왔다      → 그 계획을 갈아끼운다      (replaced)
           · 또 되풀이인데 심판은 정상이라 한다 → 온도를 올려 한 번 더
-          · 끝내 회복 못 했다        → 첫 장만 남기고 비운다     (collapsed)
+          · 끝내 회복 못 했다
+              · 되풀이가 길다        → 첫 장만 남기고 비운다     (collapsed)
+              · 되풀이가 짧다        → 1차 전사를 그대로 둔다     (kept)
 
-**마지막 줄이 규칙 9를 되풀이에 한해 연 지점이다.** 1668장이 서느니 한 장이 서고
+**`collapsed`가 규칙 9를 되풀이에 한해 연 지점이다.** 1668장이 서느니 한 장이 서고
 나머지가 비는 편이 낫다는 판단이며, 그 판단은 되풀이 구간 안에서만 유효하다.
-재전사를 다 시도한 뒤에만 여기 온다.
+그리고 **긴 되풀이 안에서만** 유효하다 — 아홉 번 말한 '치즈'까지 지우면 되풀이가
+아닌 이유로 규칙 9를 어기는 셈이다(D28). 재전사를 다 시도한 뒤에만 여기 온다.
+
+**쪼개는 것이 핵심이다.** 계획이 곧 조각이고 곧 판정 단위라, 490초를 한 번에 묻고
+한 번에 판정하던 시절에는 245초가 되풀이여도 합격했다(D28).
 """
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -32,6 +40,7 @@ from . import log, preprocess, repetition, transcribe
 from .config import Config
 from .models import (
     REPAIR_COLLAPSED,
+    REPAIR_KEPT,
     REPAIR_REPLACED,
     Chunk,
     Repair,
@@ -40,6 +49,9 @@ from .models import (
     Span,
 )
 from .transcribe import ARBITER_KIND, RESCUE_KIND, ChunkResponse, Transcriber, TranscriptionJob
+
+# OpenAI 오디오 API가 받는 최대 온도. 조정 대상 임계값이 아니라 바깥이 정한 한도다.
+_TEMPERATURE_CEILING = 1.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,11 +79,24 @@ class _Plan:
     `owned`는 이 계획이 걷어낼 세그먼트다. **구간은 그 세그먼트들의 시작~끝이지,
     그 반대가 아니다.** 구간을 먼저 정하고 걸치는 세그먼트를 지우면, 재전사가 덮지
     않는 꼬리가 조용히 사라진다(규칙 9).
+
+    긴 되풀이 하나는 **계획 여럿**이 된다(D28). 계획이 곧 조각이고 곧 판정 단위라,
+    쪼개는 것만으로 "구간마다 판정"이 "조각마다 판정"이 된다.
     """
 
     repeat: Repeat
     span: Span
     owned: tuple[int, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _Rescued:
+    """재전사가 알아낸 것 전부. 계획 번호로 색인한다."""
+
+    segments: dict[int, list[Segment]]  # 합격한 계획의 대체본
+    attempts: dict[int, int]
+    arbiter: dict[int, bool]
+    residual: dict[int, float]  # 합격했는데도 남은 되풀이 초
 
 
 def settle(
@@ -84,8 +109,8 @@ def settle(
 
     log.info(f"되풀이 {len(plans)}구간 {sum(p.repeat.duration for p in plans):.0f}초 — 다시 묻는다")
     chunks = _cut(source, [plan.span for plan in plans], cfg)
-    rescued, attempts, arbiter = _rescue(plans, chunks, source, cfg, transcriber)
-    return _assemble(draft, plans, rescued, attempts, arbiter)
+    rescued = _rescue(plans, chunks, source, cfg, transcriber)
+    return _assemble(draft, plans, rescued, cfg)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -113,17 +138,75 @@ def _plan(draft: Sequence[Segment], source: Source, cfg: Config) -> list[_Plan]:
         owned = [segment for segment in draft if owner.get(segment.id) == index]
         if not owned:
             continue  # 이웃 계획이 이 되풀이까지 데려갔다. 같은 자리를 두 번 물을 이유가 없다
-        plans.append(
-            _Plan(
-                repeat=repeat,
-                span=(
-                    min(segment.start for segment in owned),
-                    max(segment.end for segment in owned),
-                ),
-                owned=tuple(segment.id for segment in owned),
-            )
-        )
+        plans.extend(_slice(repeat, owned, cfg))
     return _disjoint(sorted(plans, key=lambda plan: plan.span))
+
+
+def _slice(repeat: Repeat, owned: Sequence[Segment], cfg: Config) -> list[_Plan]:
+    """되풀이 하나를 조각 한도 안의 계획 여럿으로 나눈다(D28).
+
+    **경계는 언제나 세그먼트 경계다.** 임의 시각에서 자르면 걸치는 세그먼트가 생기고,
+    앞 계획은 갈리고 뒤 계획은 유지될 때 그 세그먼트의 꼬리가 조용히 사라진다(규칙 9).
+    """
+    core = set(repeat.seg_ids)
+    return [
+        _Plan(
+            repeat=_narrow(repeat, group, core),
+            span=(group[0].start, group[-1].end),
+            owned=tuple(segment.id for segment in group),
+        )
+        for group in _grouped(owned, core, cfg)
+    ]
+
+
+def _grouped(owned: Sequence[Segment], core: set[int], cfg: Config) -> list[list[Segment]]:
+    """한도를 넘기 직전의 세그먼트 경계에서 끊는다."""
+    if cfg.repair_chunk_seconds <= 0:
+        return [list(owned)]
+    groups: list[list[Segment]] = [[]]
+    opened = owned[0].start
+    for segment in owned:
+        if groups[-1] and segment.end - opened > cfg.repair_chunk_seconds:
+            groups.append([])
+            opened = segment.start
+        groups[-1].append(segment)
+    return _absorb_coreless(groups, core)
+
+
+def _absorb_coreless(groups: list[list[Segment]], core: set[int]) -> list[list[Segment]]:
+    """되풀이 세그먼트가 없는 묶음은 혼자 세우지 않는다.
+
+    여유에만 걸린 세그먼트로 이뤄진 묶음은 되풀이가 아니다. 홀로 계획이 되면 회복
+    실패 시 접기 판정을 받는데, 접을 근거가 되는 되풀이가 그 안에 없다(규칙 9).
+    """
+    merged: list[list[Segment]] = []
+    for group in groups:
+        if merged and not core.intersection(segment.id for segment in group):
+            merged[-1].extend(group)
+        else:
+            merged.append(list(group))
+    if len(merged) > 1 and not core.intersection(segment.id for segment in merged[0]):
+        head = merged.pop(0)
+        merged[0][:0] = head
+    return merged
+
+
+def _narrow(repeat: Repeat, group: Sequence[Segment], core: set[int]) -> Repeat:
+    """계획이 실제로 덮는 되풀이만 남긴다.
+
+    쪼갠 뒤에도 `duration`의 합이 원래 되풀이와 같아야 한다 — 접을지 말지를 길이로
+    정하기 때문이다(D28). 넓은 채로 두면 10초짜리 조각이 500초 되풀이 행세를 한다.
+    """
+    inside = [segment for segment in group if segment.id in core]
+    if not inside:
+        return repeat
+    return replace(
+        repeat,
+        start=inside[0].start,
+        end=inside[-1].end,
+        count=len(inside),
+        seg_ids=tuple(segment.id for segment in inside),
+    )
 
 
 def _disjoint(plans: Sequence[_Plan]) -> list[_Plan]:
@@ -230,37 +313,58 @@ def _rescue(
     source: Source,
     cfg: Config,
     transcriber: Transcriber,
-) -> tuple[dict[int, list[Segment]], dict[int, int], dict[int, bool]]:
+) -> _Rescued:
     """회복할 때까지 온도를 올려가며 다시 묻는다. 심판이 허락하는 만큼만."""
-    rescued: dict[int, list[Segment]] = {}
-    attempts: dict[int, int] = dict.fromkeys(range(len(plans)), 0)
-    arbiter: dict[int, bool] = {}
+    found = _Rescued(
+        segments={}, attempts=dict.fromkeys(range(len(plans)), 0), arbiter={}, residual={}
+    )
     pending = list(range(len(plans)))
 
     for attempt in range(cfg.repair_max_attempts):
-        hotter = replace(
-            cfg,
-            transcribe_temperature=cfg.repair_temperature + attempt * cfg.repair_temperature_step,
-        )
+        hotter = replace(cfg, transcribe_temperature=_temperature(cfg, attempt))
         responses = _ask_whisper(chunks, pending, source, hotter, transcriber)
         failed: list[int] = []
         for index in pending:
-            attempts[index] += 1
+            found.attempts[index] += 1
             segments = _segments(responses.get(index))
-            if segments and repetition.repetitive_share(segments, cfg) <= cfg.loop_repetitive_share:
-                rescued[index] = segments
+            left = repetition.repetitive_seconds(segments, cfg)
+            if segments and _recovered(segments, left, cfg):
+                found.segments[index] = segments
+                found.residual[index] = left
             else:
                 failed.append(index)
         if not failed:
             break
         # 실패한 구간만, 그리고 한 번만 심판에게 묻는다. 접힐 구간의 판정 근거도 여기서 남는다.
-        unasked = [index for index in failed if index not in arbiter]
+        unasked = [index for index in failed if index not in found.arbiter]
         if unasked:
-            arbiter.update(_ask_arbiter(chunks, unasked, source, cfg, transcriber))
-        pending = [index for index in failed if arbiter.get(index, False)]
+            found.arbiter.update(_ask_arbiter(chunks, unasked, source, cfg, transcriber))
+        pending = [index for index in failed if found.arbiter.get(index, False)]
         if not pending:
             break
-    return rescued, attempts, arbiter
+    return found
+
+
+def _temperature(cfg: Config, attempt: int) -> float:
+    """재전사 온도. **1차보다 뜨겁고, 언제나 0.5를 넘는다**(D28).
+
+    0.5 아래로 내려가면 whisper가 창 사이로 직전 글자를 다시 넘기기 시작한다 —
+    되풀이가 번지는 통로가 되살아난다. 상한은 API가 정한 값이다.
+    """
+    hotter = cfg.repair_temperature + attempt * cfg.repair_temperature_step
+    return min(_TEMPERATURE_CEILING, hotter)
+
+
+def _recovered(segments: Sequence[Segment], residual: float, cfg: Config) -> bool:
+    """합격은 **둘 다** 만족해야 한다(D28).
+
+    비율만 보면 구간이 길수록 느슨해진다 — 490초 구간이 245초를 되풀이해도 합격선
+    안이었고, 그렇게 통과한 되풀이가 경고 없이 SRT로 나갔다. 남은 초는 구간 길이와
+    무관하게 잰다.
+    """
+    if residual > cfg.repair_residual_seconds:
+        return False
+    return repetition.repetitive_share(segments, cfg) <= cfg.loop_repetitive_share
 
 
 def _subset(chunks: Sequence[Chunk], wanted: Sequence[int]) -> list[Chunk]:
@@ -330,12 +434,62 @@ def _segments(response: ChunkResponse | None) -> list[Segment]:
 # ─────────────────────────────────────────────────────────────
 
 
-def _assemble(
+@dataclass(frozen=True, slots=True)
+class _Applied:
+    """계획 하나에 실제로 가한 일. 걷어낸 것, 넣을 것, 그리고 사람에게 보고할 수."""
+
+    taken: frozenset[int]
+    incoming: tuple[Segment, ...]
+    outcome: str
+    before: int
+    after: int
+    residual: float  # 이 계획을 처리하고도 자막에 남는 되풀이 초
+
+
+def _apply(
     draft: Sequence[Segment],
-    plans: Sequence[_Plan],
-    rescued: dict[int, list[Segment]],
-    attempts: dict[int, int],
-    arbiter: dict[int, bool],
+    plan: _Plan,
+    rescued: list[Segment] | None,
+    residual: float,
+    cfg: Config,
+) -> _Applied:
+    """합격이면 갈아끼우고, 실패면 **길이로 나눈다**(D28)."""
+    if rescued is not None:
+        # 대체본은 계획이 가진 세그먼트의 시작~끝을 그대로 덮는다. 걷어낼 것도 그만큼이다.
+        return _Applied(
+            taken=frozenset(plan.owned),
+            incoming=tuple(rescued),
+            outcome=REPAIR_REPLACED,
+            before=len(plan.owned),
+            after=len(rescued),
+            residual=residual,
+        )
+    looped = [segment for segment in draft if segment.id in set(plan.repeat.seg_ids)]
+    if plan.repeat.duration < cfg.repair_collapse_min_seconds:
+        # **짧은 되풀이는 접지 않는다.** 아홉 번 말한 '치즈'를 지우면 되풀이가 아닌
+        # 이유로 규칙 9를 어기는 셈이다. 손대지 않고 경고만 남긴다.
+        return _Applied(
+            taken=frozenset(),
+            incoming=(),
+            outcome=REPAIR_KEPT,
+            before=len(looped),
+            after=len(looped),
+            residual=plan.repeat.duration,
+        )
+    # 접기는 되풀이 자신만 건드린다. 여유에 딸려온 멀쩡한 세그먼트는 그대로 둔다.
+    collapsed = repetition.collapse(looped)
+    return _Applied(
+        taken=frozenset(plan.repeat.seg_ids),
+        incoming=tuple(collapsed),
+        outcome=REPAIR_COLLAPSED,
+        before=len(looped),
+        after=len(collapsed),
+        residual=0.0,
+    )
+
+
+def _assemble(
+    draft: Sequence[Segment], plans: Sequence[_Plan], rescued: _Rescued, cfg: Config
 ) -> Settled:
     """되풀이 구간을 대체본으로 갈고 나머지는 그대로 둔다. 시간 순으로 다시 번호를 매긴다."""
     replaced_ids: set[int] = set()
@@ -343,28 +497,22 @@ def _assemble(
     records: list[Repair] = []
 
     for index, plan in enumerate(plans):
-        replacement = rescued.get(index)
-        if replacement is not None:
-            # 대체본은 계획이 가진 세그먼트의 시작~끝을 그대로 덮는다. 걷어낼 것도 그만큼이다.
-            taken = set(plan.owned)
-            outcome = REPAIR_REPLACED
-        else:
-            # 접기는 되풀이 자신만 건드린다. 여유에 딸려온 멀쩡한 세그먼트는 그대로 둔다.
-            taken = set(plan.repeat.seg_ids)
-            replacement = repetition.collapse([s for s in draft if s.id in taken])
-            outcome = REPAIR_COLLAPSED
-        replaced_ids.update(taken)
-        incoming.extend(replacement)
+        applied = _apply(
+            draft, plan, rescued.segments.get(index), rescued.residual.get(index, 0.0), cfg
+        )
+        replaced_ids.update(applied.taken)
+        incoming.extend(applied.incoming)
         records.append(
             Repair(
                 repeat=plan.repeat,
-                outcome=outcome,
-                arbiter_clean=arbiter.get(index, False),
-                attempts=attempts.get(index, 0),
-                before=len(taken),
-                after=len(replacement),
-                arbiter_answered=index in arbiter,
+                outcome=applied.outcome,
+                arbiter_clean=rescued.arbiter.get(index, False),
+                attempts=rescued.attempts.get(index, 0),
+                before=applied.before,
+                after=applied.after,
+                arbiter_answered=index in rescued.arbiter,
                 span=plan.span,
+                residual_seconds=applied.residual,
             )
         )
 
@@ -381,23 +529,39 @@ def _report(records: Sequence[Repair]) -> None:
     for record in records:
         span = f"{record.repeat.start:.0f}~{record.repeat.end:.0f}초"
         if record.outcome == REPAIR_REPLACED:
-            asked = f"{record.span[0]:.0f}~{record.span[1]:.0f}초"
-            log.info(
-                f"  {span} 되풀이 → {asked}를 다시 물어 {record.before}장이 {record.after}장이 됐다"
-            )
+            _report_replaced(record, span)
             continue
+        tail = (
+            "짧아서 접지 않는다 — 1차 전사가 그대로 남는다."
+            if record.outcome == REPAIR_KEPT
+            else "첫 장만 남기고 그 구간은 비운다."
+        )
         log.warn(
             f"  {span} 되풀이 {record.before}장을 회복하지 못했다 "
-            f"({record.attempts}회 시도, {record.verdict}). "
-            f"첫 장만 남기고 그 구간은 비운다."
+            f"({record.attempts}회 시도, {record.verdict}). {tail}"
         )
 
 
+def _report_replaced(record: Repair, span: str) -> None:
+    """**합격이 곧 깨끗함은 아니다**(D28). 예전에는 8구간 전부 이 줄로 "회복"이라 찍히는
+    동안 114초의 되풀이가 SRT로 나갔다. 남은 것이 있으면 여기서 뜬다."""
+    asked = f"{record.span[0]:.0f}~{record.span[1]:.0f}초"
+    line = f"  {span} 되풀이 → {asked}를 다시 물어 {record.before}장이 {record.after}장이 됐다"
+    if record.residual_seconds <= 0:
+        log.info(line)
+        return
+    log.warn(f"{line} — 그래도 되풀이 {record.residual_seconds:.0f}초가 남았다")
+
+
 def summarize(repairs: Sequence[Repair]) -> str:
-    replaced = [r for r in repairs if r.outcome == REPAIR_REPLACED]
-    collapsed = [r for r in repairs if r.outcome == REPAIR_COLLAPSED]
-    seconds = sum(r.repeat.duration for r in repairs)
+    """**마지막 줄만 봐도 "전부 회복"이 거짓인지 알 수 있어야 한다**(D28)."""
+    counted = Counter(record.outcome for record in repairs)
+    seconds = sum(record.repeat.duration for record in repairs)
+    residual = sum(record.residual_seconds for record in repairs)
     return (
         f"되풀이 재전사: {len(repairs)}구간 {seconds:.0f}초"
-        f" · 회복 {len(replaced)} · 접음 {len(collapsed)}"
+        f" · 회복 {counted[REPAIR_REPLACED]}"
+        f" · 접음 {counted[REPAIR_COLLAPSED]}"
+        f" · 유지 {counted[REPAIR_KEPT]}"
+        f" · 남은 되풀이 {residual:.0f}초"
     )
