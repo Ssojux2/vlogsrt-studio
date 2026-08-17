@@ -58,6 +58,13 @@ def test_srt_text_is_exactly_the_spine_text(tmp_path: Path) -> None:
     assert body == spine_text
 
 
+def test_every_segment_reaches_the_srt(tmp_path: Path) -> None:
+    """규칙 9 — 골격의 세그먼트는 하나도 빠짐없이 어떤 큐엔가 들어간다(D23)."""
+    result = pipeline.run(VIDEO, Config(), tmp_path, force_offline=True)
+    covered = {seg_id for cue in result.cues for seg_id in cue.seg_ids}
+    assert covered == {segment.id for segment in result.trace.spine}
+
+
 def test_cues_never_overlap_and_never_exceed_capacity(tmp_path: Path) -> None:
     """0.77초에 900자 같은 큐 부류의 봉쇄. 이제 이걸 잡는 검사 단계는 없다 —
     정제가 구조적으로 보장하고, 그 보장을 여기서 못 박는다."""

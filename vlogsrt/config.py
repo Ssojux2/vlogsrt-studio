@@ -19,7 +19,9 @@ PRESET_DIRS = (Path("presets"), Path(__file__).resolve().parent.parent / "preset
 class Config:
     # ─── 전사 ────────────────────────────────────────────────
     language: str = "ko"
-    extra_languages: tuple[str, ...] = ("ko", "en")
+    # 실측 400(D23): "The 'languages' parameter is not supported for this model."
+    # diarize 모델은 단수형 `language`만 받는다. 비워두면 그쪽으로 떨어진다.
+    extra_languages: tuple[str, ...] = ()
     prompt: str = ""
     keywords: tuple[str, ...] = ()
     # 세그먼트 시각을 주는 모델이어야 한다. 시각이 없으면 SRT를 만들 수 없다(D21).
@@ -48,6 +50,9 @@ class Config:
     # 있는 값이 아니다. (600초이던 시절의 근거였던 whisper-1 순차 디코딩 병리는
     # 모델과 함께 사라졌다 — D13, D21.)
     chunk_max_seconds: float = 1500.0
+    # 만들어진 조각이 계획보다 이만큼 넘게 짧으면 소리를 잃은 것으로 보고 멈춘다.
+    # mp3 인코더 패딩(~26ms)은 조각을 늘리지 줄이지 않으므로 여유가 넉넉하다.
+    chunk_duration_tolerance: float = 0.5
 
     # ─── 정제 ────────────────────────────────────────────────
     max_chars_per_line: int = 16

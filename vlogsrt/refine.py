@@ -1,7 +1,9 @@
 """정제 엔진 — 자르고, 합치고, 시간을 다듬는다.
 
-순서가 중요하다: 분할 → 병합 → 시간 보정 → 충돌 해소 → 줄바꿈 → 검사.
+순서가 중요하다: 분할 → 병합 → 시간 보정 → 충돌 해소 → 줄바꿈.
 병합을 분할보다 먼저 돌리면 둘이 서로를 되돌린다.
+
+이 단계는 큐를 **버리지 않는다.** 들어온 글자는 전부 나간다(규칙 9).
 """
 
 from __future__ import annotations
@@ -9,7 +11,6 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import replace
 
-from . import log
 from .config import Config
 from .layout import FORCED_BREAK, break_lines, break_text
 from .models import ORIGIN_MERGE, ORIGIN_SPLIT, Cue
@@ -202,11 +203,20 @@ def _restore_min_duration(cues: list[Cue], cfg: Config) -> list[Cue]:
     return result
 
 
-def drop_empty(cues: Sequence[Cue]) -> list[Cue]:
-    kept = [cue for cue in cues if cue.text.strip()]
-    if len(kept) != len(cues):
-        log.warn(f"빈 큐 {len(cues) - len(kept)}개를 버렸다.")
-    return kept
+def reject_empty(cues: Sequence[Cue]) -> list[Cue]:
+    """빈 큐가 생겼다면 정제 어딘가가 글자를 잃었다는 뜻이다. 조용히 버리지 않는다.
+
+    골격에는 글자 없는 세그먼트가 들어오지 않고(`parse_segments`), 분할도 양쪽이
+    비면 자르지 않는다. 그래도 빈 큐가 나왔다면 버그다 — 지우고 넘어가면 그 구간의
+    말이 자막에서 사라진 채 아무도 모른다(D23).
+    """
+    empty = [cue.seg_ids for cue in cues if not cue.text.strip()]
+    if empty:
+        raise RuntimeError(
+            f"글자가 없는 큐가 {len(empty)}개 생겼습니다 (세그먼트 {empty}).\n"
+            f"  정제 단계가 텍스트를 잃었습니다. 버리지 않고 멈춥니다."
+        )
+    return list(cues)
 
 
 def renumber(cues: Sequence[Cue]) -> list[Cue]:
@@ -220,4 +230,4 @@ def refine(cues: Sequence[Cue], cfg: Config, duration: float = 0.0) -> list[Cue]
     working = adjust_timing(working, cfg, duration)
     working = resolve_overlaps(working, cfg)
     working = break_lines(working, cfg)
-    return renumber(drop_empty(working))
+    return renumber(reject_empty(working))

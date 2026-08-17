@@ -171,6 +171,10 @@ class LiveTranscriber:
                 dropped = _rejected(str(exc), extras) or sorted(extras)
                 log.warn(f"{what}: API가 {dropped}를 거부했다({exc}). 빼고 다시 부른다.")
                 extras = {name: value for name, value in extras.items() if name not in dropped}
+                if "languages" in dropped and cfg.language:
+                    # 복수형이 거부당했다고 언어 지정 자체를 잃을 이유는 없다.
+                    # 단수형으로 바꿔 본다. 이것도 거부당하면 그때 떨어져 나간다.
+                    extras["language"] = cfg.language
 
     def transcribe(self, job: TranscriptionJob, cfg: Config) -> list[ChunkResponse]:
         """자막의 시각과 글자를 모두 만드는 유일한 호출.
@@ -299,6 +303,11 @@ def get_transcriber(
 def parse_segments(raw: dict[str, Any], offset: float = 0.0, seg_id_base: int = 0) -> list[Segment]:
     """전사 응답에서 골격을 만든다. 시각은 청크 좌표에서 원본 좌표로 옮긴다.
 
+    **모델이 보낸 글자는 하나도 버리지 않는다.** 시각이 뒤집혔거나 길이가 0인
+    세그먼트도 글자가 있으면 남긴다 — 시각은 `end = start`로 접어두고, 정제의
+    `min_duration`이 규칙 3의 한도 안에서 늘려준다. 버리는 것은 글자가 아예 없는
+    세그먼트뿐이고, 그건 화면에 띄울 것이 없다는 뜻이다.
+
     응답의 `id`는 쓰지 않는다. diarize는 `"seg_0"` 같은 문자열을 주고 청크마다
     0부터 다시 시작하므로, 통번호는 우리가 붙인다.
     """
@@ -311,19 +320,36 @@ def parse_segments(raw: dict[str, Any], offset: float = 0.0, seg_id_base: int = 
     spine: list[Segment] = []
     for segment in raw["segments"] or []:
         text = str(segment.get("text", "")).strip()
+        if not text:
+            continue
         start = float(segment.get("start", 0.0)) + offset
         end = float(segment.get("end", 0.0)) + offset
-        if end <= start or not text:
-            continue
-        spine.append(Segment(id=seg_id_base + len(spine), start=start, end=end, text=text))
+        spine.append(
+            Segment(id=seg_id_base + len(spine), start=start, end=max(end, start), text=text)
+        )
     return spine
 
 
 def build_spine(responses: Sequence[ChunkResponse]) -> list[Segment]:
-    """청크별 응답을 이어 붙여 하나의 골격으로 만든다."""
+    """청크별 응답을 이어 붙여 하나의 골격으로 만든다.
+
+    **빈 청크는 넘어가지 않고 멈춘다.** 세그먼트가 하나도 없는 응답은 그 조각의
+    구간 전체가 자막 없이 비워진다는 뜻이다. 25분짜리 구멍이 조용히 뚫린 SRT보다
+    실패가 낫다 — 뚫린 자막은 눈으로 보기 전까지 아무도 모른다(D23).
+    """
     spine: list[Segment] = []
+    empty: list[str] = []
     for response in sorted(responses, key=lambda r: r.offset):
-        spine.extend(parse_segments(response.payload, response.offset, len(spine)))
+        parsed = parse_segments(response.payload, response.offset, len(spine))
+        if not parsed:
+            empty.append(f"청크 {response.index}(오프셋 {response.offset:.1f}초)")
+        spine.extend(parsed)
+    if empty:
+        raise RuntimeError(
+            f"전사가 비어 돌아온 조각이 있습니다: {', '.join(empty)}\n"
+            f"  그 구간의 자막이 통째로 비므로 중단합니다.\n"
+            f"  해당 구간에 소리가 있는지 `vlogsrt probe`로 확인하고 다시 실행하세요."
+        )
     return spine
 
 

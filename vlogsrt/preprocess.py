@@ -149,4 +149,22 @@ def make_chunks(audio: Path, cfg: Config, workdir: Path) -> list[Chunk]:
                 index=plan.index,
             )
         )
+    verify_coverage(chunks, plans, cfg)
     return chunks
+
+
+def verify_coverage(chunks: list[Chunk], plans: list[ChunkPlan], cfg: Config) -> None:
+    """만들어진 조각이 계획한 구간을 실제로 덮는지 확인한다.
+
+    조각이 계획보다 짧으면 그 길이만큼의 소리가 전사에 아예 오르지 못한다. 자막에는
+    구멍으로 남고, 프로그램은 아무 말도 하지 않는다 — 그러지 않으려고 여기서 멈춘다.
+    자막 품질을 판정하는 게 아니라 **입력이 다 들어갔는지**만 센다(D23, 규칙 4 무관).
+    """
+    for chunk, plan in zip(chunks, plans, strict=True):
+        actual = probe_duration(chunk.path)
+        if actual < plan.duration - cfg.chunk_duration_tolerance:
+            raise RuntimeError(
+                f"청크 {plan.index}가 계획보다 짧습니다: {actual:.2f}초 < {plan.duration:.2f}초\n"
+                f"  {plan.start:.1f}~{plan.end:.1f}초 구간의 소리가 자막에서 빠집니다.\n"
+                f"  `make clean` 후 다시 실행하세요. 계속 나면 원본 오디오를 확인하세요."
+            )

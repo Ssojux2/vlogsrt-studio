@@ -105,16 +105,26 @@ def test_offset_moves_segments_into_source_coordinates() -> None:
     assert RAW["segments"][0]["start"] == 0.0  # 원본은 그대로다
 
 
-def test_zero_length_and_empty_segments_are_dropped() -> None:
+def test_no_spoken_word_is_ever_thrown_away() -> None:
+    """길이 0이든 시각이 뒤집혔든, 글자가 있으면 남는다. 정제가 시간을 늘려준다(D23)."""
     raw = {
         "segments": [
             {"start": 1.0, "end": 1.0, "text": "길이 0"},
-            {"start": 2.0, "end": 3.0, "text": "   "},
-            {"start": 4.0, "end": 5.0, "text": "남는다"},
+            {"start": 4.0, "end": 3.0, "text": "뒤집힌 시각"},
+            {"start": 5.0, "end": 6.0, "text": "멀쩡한 것"},
         ]
     }
     spine = parse_segments(raw)
-    assert [segment.text for segment in spine] == ["남는다"]
+    assert [segment.text for segment in spine] == ["길이 0", "뒤집힌 시각", "멀쩡한 것"]
+    assert [segment.start for segment in spine] == [1.0, 4.0, 5.0]
+    assert spine[1].end == 4.0  # 뒤집힌 끝은 시작으로 접는다. 글자는 그대로다
+
+
+def test_only_letterless_segments_are_dropped() -> None:
+    """화면에 띄울 글자가 없는 세그먼트뿐이다. 그 외에는 아무것도 버리지 않는다."""
+    raw = {"segments": [{"start": 2.0, "end": 3.0, "text": "   "}, *RAW["segments"]]}
+    spine = parse_segments(raw)
+    assert [segment.text for segment in spine] == ["첫 번째", "두 번째"]
     assert spine[0].id == 0  # 버린 만큼 번호가 비지 않는다
 
 
@@ -132,6 +142,22 @@ def test_multi_chunk_ids_are_global_and_times_are_rebased() -> None:
     spine = build_spine(responses)
     assert [segment.id for segment in spine] == [0, 1, 2, 3]
     assert spine[2].start == 100.0
+
+
+def test_an_empty_chunk_stops_the_run_instead_of_leaving_a_hole(tmp_path: Path) -> None:
+    """조각 하나가 비면 그 구간 전체가 자막 없이 비워진다. 넘어가지 않는다(D23)."""
+    responses = [
+        ChunkResponse(index=0, offset=0.0, payload=RAW),
+        ChunkResponse(index=1, offset=1500.0, payload={"segments": []}),
+        ChunkResponse(index=2, offset=3000.0, payload=RAW),
+    ]
+    with pytest.raises(RuntimeError, match="청크 1"):
+        build_spine(responses)
+
+
+def test_the_empty_chunk_message_names_where_the_hole_would_be() -> None:
+    with pytest.raises(RuntimeError, match="1500.0초"):
+        build_spine([ChunkResponse(index=1, offset=1500.0, payload={"segments": []})])
 
 
 def test_chunks_are_stitched_in_time_order_not_call_order() -> None:
@@ -163,15 +189,16 @@ def test_never_sends_language_and_languages_together() -> None:
     """실측 400: "The 'language' and 'languages' parameters cannot be used together." """
     from vlogsrt.transcribe import _extras
 
-    extras = _extras(Config())
+    extras = _extras(data_replace(Config(), extra_languages=("ko", "en")))
     assert "languages" in extras
     assert "language" not in extras
 
 
-def test_falls_back_to_single_language() -> None:
+def test_the_default_sends_the_singular_language() -> None:
+    """실측 400: "The 'languages' parameter is not supported for this model." (D23)"""
     from vlogsrt.transcribe import _extras
 
-    extras = _extras(data_replace(Config(), extra_languages=()))
+    extras = _extras(Config())
     assert extras["language"] == "ko"
     assert "languages" not in extras
 
@@ -312,7 +339,33 @@ def test_only_the_named_parameter_is_dropped(
     client = Rejecting()
     cfg = data_replace(Config(), prompt="망원동")
     _live(monkeypatch, client).transcribe(real_job(tmp_path), cfg)
-    assert client.calls[1]["languages"] == list(Config().extra_languages)
+    assert client.calls[1]["language"] == "ko"
+
+
+def test_a_rejected_languages_falls_back_to_the_singular_form(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """실측 400. 복수형이 막혔다고 언어 지정 자체를 잃지는 않는다(D23)."""
+
+    class Rejecting(FakeClient):
+        def create(self, **kwargs: object) -> dict[str, object]:
+            self.calls.append(kwargs)
+            if "languages" in kwargs:
+                error = RuntimeError(
+                    "Error code: 400 - {'error': {'message': \"The 'languages' parameter "
+                    "is not supported for this model.\", 'param': 'languages'}}"
+                )
+                error.status_code = 400  # type: ignore[attr-defined]
+                raise error
+            return {"text": "가", "segments": []}
+
+    client = Rejecting()
+    cfg = data_replace(Config(), extra_languages=("ko", "en"))
+    _live(monkeypatch, client).transcribe(real_job(tmp_path), cfg)
+
+    assert len(client.calls) == 2
+    assert client.calls[1]["language"] == "ko"
+    assert "languages" not in client.calls[1]
 
 
 def test_an_unnamed_400_drops_every_optional_parameter(

@@ -8,15 +8,42 @@ from pathlib import Path
 
 import pytest
 
+from vlogsrt import preprocess
 from vlogsrt.config import Config
+from vlogsrt.models import Chunk
 from vlogsrt.preprocess import (
     chunk_count,
     extract_audio,
     plan_chunks,
     probe_duration,
+    verify_coverage,
 )
 
 MB = 1_000_000
+
+
+def _chunks(plans: list[preprocess.ChunkPlan]) -> list[Chunk]:
+    return [
+        Chunk(path=Path(f"chunk{p.index}.mp3"), offset=p.start, duration=p.duration, index=p.index)
+        for p in plans
+    ]
+
+
+def test_a_short_chunk_stops_the_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    """조각이 계획보다 짧으면 그 길이만큼의 소리가 전사에 오르지 못한다(D23)."""
+    plans = plan_chunks(100.0, 50 * MB, Config())
+    monkeypatch.setattr(preprocess, "probe_duration", lambda path: 10.0)
+    with pytest.raises(RuntimeError, match="계획보다 짧습니다"):
+        verify_coverage(_chunks(plans), plans, Config())
+
+
+def test_encoder_padding_is_within_tolerance(monkeypatch: pytest.MonkeyPatch) -> None:
+    """mp3 패딩은 조각을 늘리지 줄이지 않는다. 오차 허용치 안이면 통과한다."""
+    plans = plan_chunks(100.0, 50 * MB, Config())
+    cfg = Config()
+    short_but_ok = plans[0].duration - cfg.chunk_duration_tolerance / 2
+    monkeypatch.setattr(preprocess, "probe_duration", lambda path: short_but_ok)
+    verify_coverage(_chunks(plans), plans, cfg)
 
 
 def test_extraction_applies_no_audio_filter(

@@ -3,7 +3,10 @@
 
 [transcribe]
 language = "ko"
-extra_languages = ["ko", "en"]
+
+# `extra_languages`를 채우면 복수형 `languages`로 나간다. diarize 모델은 이 인자를
+# 거부한다(실측 400, D23) — 비워두면 단수형 `language`가 나간다. 되살리지 마라.
+extra_languages = []
 
 # 힌트는 회차마다 다르다. 화면에서 실행할 때마다 입력할 수 있으니 여기서는 비워둔다.
 # 넣는다면 지시문이 아니라 **나올 법한 단어**를 적어라. 예: "망원동, 아페로, 코나"
