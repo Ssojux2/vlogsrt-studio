@@ -61,6 +61,19 @@ def test_force_offline_beats_env(monkeypatch: pytest.MonkeyPatch) -> None:
     assert isinstance(get_transcriber(Config(), force_offline=True), FixtureTranscriber)
 
 
+def test_online_flag_overrides_offline_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """--online은 사람이 직접 친 경우뿐이라 VLOGSRT_OFFLINE=1도 넘어선다."""
+    monkeypatch.setenv("VLOGSRT_OFFLINE", "1")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    assert isinstance(get_transcriber(Config(), online=True), LiveTranscriber)
+
+
+def test_default_path_stays_offline_even_with_a_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("VLOGSRT_OFFLINE", "1")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    assert isinstance(get_transcriber(Config()), FixtureTranscriber)
+
+
 def test_missing_fixture_says_what_to_run(tmp_path: Path) -> None:
     transcriber = FixtureTranscriber(fixture_dir=tmp_path)
     with pytest.raises(RuntimeError, match="vlogsrt record"):

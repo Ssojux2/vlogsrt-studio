@@ -61,6 +61,20 @@ def test_api_key_refused_while_offline(monkeypatch: pytest.MonkeyPatch) -> None:
         require_api_key()
 
 
+def test_force_lets_the_human_pay_on_purpose(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`record`와 `--online`은 VLOGSRT_OFFLINE 값과 무관하게 동작해야 한다."""
+    monkeypatch.setenv("VLOGSRT_OFFLINE", "1")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    assert require_api_key(force=True) == "sk-test"
+
+
+def test_force_still_requires_a_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("VLOGSRT_OFFLINE", "1")
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    with pytest.raises(RuntimeError, match="OPENAI_API_KEY"):
+        require_api_key(force=True)
+
+
 def test_api_key_missing_message(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("VLOGSRT_OFFLINE", "0")
     monkeypatch.setenv("OPENAI_API_KEY", "")

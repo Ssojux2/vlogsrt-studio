@@ -100,9 +100,14 @@ def cost_guard_seconds() -> float:
     return float(get_int("VLOGSRT_COST_GUARD_SECONDS", 3600))
 
 
-def require_api_key() -> str:
-    """실제 호출 직전에만 부른다. 오프라인이면 거부한다."""
-    if is_offline():
+def require_api_key(force: bool = False) -> str:
+    """실제 호출 직전에만 부른다. 오프라인이면 거부한다.
+
+    `force`는 사람이 `record`나 `--online`으로 **명시적으로** 유료 호출을 요청한
+    경우에만 참이다. 그 둘은 `VLOGSRT_OFFLINE` 값과 무관하게 동작해야 한다
+    (.env.example 참조). 나머지 경로는 전부 오프라인 기본값에 막힌다.
+    """
+    if not force and is_offline():
         raise RuntimeError(
             "오프라인 모드입니다(VLOGSRT_OFFLINE=1). 실제 API 호출은 차단됩니다.\n"
             "픽스처가 없다면 사람이 직접 `vlogsrt record <video>`를 실행해야 합니다."

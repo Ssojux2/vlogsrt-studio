@@ -234,7 +234,8 @@ def get_transcriber(
     """오프라인이면 언제나 픽스처를 돌려준다. 이 함수가 비용 안전장치다."""
     if force_offline or (not online and env.is_offline()):
         return FixtureTranscriber(fixture_dir=env.fixture_dir())
-    return LiveTranscriber(api_key=env.require_api_key(), base_url=env.base_url())
+    # online=True는 사람이 --online을 직접 친 경우뿐이다. 그때만 오프라인 기본값을 넘는다.
+    return LiveTranscriber(api_key=env.require_api_key(force=online), base_url=env.base_url())
 
 
 # ─────────────────────────────────────────────────────────────

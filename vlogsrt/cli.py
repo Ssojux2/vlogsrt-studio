@@ -88,6 +88,7 @@ def _add_config_options(parser: argparse.ArgumentParser) -> None:
 def _add_mode_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--offline", action="store_true", help="픽스처만 사용 (기본값)")
     parser.add_argument("--online", action="store_true", help="실제 API 호출. 유료.")
+    parser.add_argument("--yes", action="store_true", help="비용 확인을 건너뛴다")
 
 
 def config_from_args(args: argparse.Namespace) -> Config:
@@ -138,6 +139,9 @@ def cmd_run(args: argparse.Namespace) -> int:
         chunk_count = max(1, len(prepared.chunks))
         log.out(f"길이 {prepared.duration:.1f}초 · 청크 {chunk_count}개 · 예상 ${cost:.3f}")
         return 0
+    if online:
+        # 오디오를 뽑기 전에 원본 길이만 보고 확인한다. ffprobe는 즉시 끝난다.
+        _confirm_cost(preprocess.probe_duration(args.video), cfg, args.yes)
     result = pipeline.run(
         args.video,
         cfg,
@@ -155,9 +159,10 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 def cmd_baseline(args: argparse.Namespace) -> int:
     cfg = config_from_args(args)
-    result = pipeline.baseline(
-        args.video, cfg, args.out, online=_resolve_online(args), force_offline=args.offline
-    )
+    online = _resolve_online(args)
+    if online:
+        _confirm_cost(preprocess.probe_duration(args.video), cfg, args.yes)
+    result = pipeline.baseline(args.video, cfg, args.out, online=online, force_offline=args.offline)
     log.out(f"srt: {result.outputs['srt']}")
     return 0
 
@@ -235,7 +240,9 @@ def cmd_record(args: argparse.Namespace) -> int:
     cfg = config_from_args(args)
     prepared = pipeline.prepare(args.video, cfg, offline=False)
     _confirm_cost(prepared.duration, cfg, args.yes)
-    transcriber = transcribe.LiveTranscriber(api_key=env.require_api_key(), base_url=env.base_url())
+    transcriber = transcribe.LiveTranscriber(
+        api_key=env.require_api_key(force=True), base_url=env.base_url()
+    )
     job = pipeline.build_job(prepared)
     fixture_dir = env.fixture_dir()
     whisper_path = transcribe.save_fixture(
