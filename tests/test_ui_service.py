@@ -51,45 +51,6 @@ def test_resolve_path_rejects_empty() -> None:
 
 
 # ─────────────────────────────────────────────────────────────
-#  찾아보기
-# ─────────────────────────────────────────────────────────────
-
-
-def test_resolve_folder_accepts_a_folder(tmp_path: Path) -> None:
-    assert service.resolve_folder(str(tmp_path)) == tmp_path
-
-
-def test_resolve_folder_takes_the_parent_of_a_file(tmp_path: Path) -> None:
-    """파일 경로를 그대로 붙여넣어도 그 파일이 든 폴더를 연다."""
-    video = tmp_path / "vlog.mp4"
-    video.write_bytes(b"\x00")
-    assert service.resolve_folder(str(video)) == tmp_path
-
-
-def test_resolve_folder_strips_quotes(tmp_path: Path) -> None:
-    assert service.resolve_folder(f"  '{tmp_path}'  ") == tmp_path
-
-
-def test_resolve_folder_falls_back_when_blank() -> None:
-    assert service.resolve_folder("") == service.default_browse_root()
-
-
-def test_resolve_folder_rejects_missing(tmp_path: Path) -> None:
-    with pytest.raises(UiError, match="폴더가 없습니다"):
-        service.resolve_folder(str(tmp_path / "nope"))
-
-
-def test_browse_shortcuts_only_lists_existing_folders() -> None:
-    shortcuts = service.browse_shortcuts()
-    assert shortcuts
-    assert all(path.is_dir() for _, path in shortcuts)
-
-
-def test_default_browse_root_is_a_real_folder() -> None:
-    assert service.default_browse_root().is_dir()
-
-
-# ─────────────────────────────────────────────────────────────
 #  실행
 # ─────────────────────────────────────────────────────────────
 
@@ -182,6 +143,13 @@ def test_pick_port_steps_aside_when_busy(local_socket: None) -> None:
         taken.listen(1)
         busy = taken.getsockname()[1]
         assert service.pick_port(busy) > busy
+
+
+def test_busy_port_notice_warns_about_the_stale_server() -> None:
+    """포트가 밀리면 예전 화면에 붙는 함정을 반드시 알려야 한다."""
+    notice = "\n".join(service.busy_port_notice(7860, 7861))
+    assert "7860" in notice and "7861" in notice
+    assert "pkill" in notice
 
 
 def test_pick_port_gives_up_loudly(local_socket: None) -> None:

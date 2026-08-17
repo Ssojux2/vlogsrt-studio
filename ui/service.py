@@ -47,39 +47,6 @@ def resolve_path(raw: str) -> Path:
     return Path(text).expanduser()
 
 
-def resolve_folder(raw: str) -> Path:
-    """찾아보기 기준 폴더. 파일을 넣으면 그 파일이 든 폴더로 받아준다."""
-    text = (raw or "").strip().strip(_QUOTES).strip()
-    if not text:
-        return default_browse_root()
-    path = Path(text).expanduser()
-    if path.is_file():
-        return path.parent
-    if not path.is_dir():
-        raise UiError(f"폴더가 없습니다: {path}")
-    return path
-
-
-def default_browse_root() -> Path:
-    """영상이 있을 법한 곳부터 연다. 홈 전체를 훑게 하지 않는다."""
-    for candidate in (Path.home() / "Movies", Path.home() / "Desktop", Path.home()):
-        if candidate.is_dir():
-            return candidate
-    return Path.cwd()
-
-
-def browse_shortcuts() -> list[tuple[str, Path]]:
-    """자주 쓰는 폴더. 없는 것은 버튼으로 만들지 않는다."""
-    named = [
-        ("홈", Path.home()),
-        ("Movies", Path.home() / "Movies"),
-        ("Desktop", Path.home() / "Desktop"),
-        ("Downloads", Path.home() / "Downloads"),
-        ("프로젝트", env.project_root()),
-    ]
-    return [(label, path) for label, path in named if path.is_dir()]
-
-
 def has_fixture(stem: str) -> bool:
     return (env.fixture_dir() / f"{stem}.whisper.json").is_file()
 
@@ -206,6 +173,19 @@ def _join(lines: list[str], *extra: str) -> str:
 # ─────────────────────────────────────────────────────────────
 #  실행 환경
 # ─────────────────────────────────────────────────────────────
+
+
+def busy_port_notice(preferred: int, chosen: int) -> list[str]:
+    """포트를 비켜갈 때 하는 말.
+
+    예전에 띄운 서버가 남아 있으면 사람은 습관대로 원래 주소를 연다. 그러면
+    구버전 화면에 붙어 알 수 없는 컴포넌트 오류가 난다. 그 함정을 미리 말해준다.
+    """
+    return [
+        f"{preferred} 포트를 이미 쓰고 있습니다 — 이전에 띄운 UI가 남아 있을 수 있습니다.",
+        '예전 화면에 붙으면 엉뚱한 오류가 납니다. 정리하려면:  pkill -f "ui.app"',
+        f"이번에는 {chosen} 으로 띄웁니다. 아래 주소를 여세요.",
+    ]
 
 
 def pick_port(preferred: int, attempts: int = 20) -> int:
