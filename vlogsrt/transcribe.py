@@ -20,7 +20,8 @@ from . import env, log
 from .config import Config
 from .models import Chunk, Segment
 
-FIXTURE_KIND = "whisper"
+FIXTURE_KIND = "whisper"  # 자막을 만드는 호출
+VERIFY_KIND = "gpt"  # 대조용 호출. 출력을 바꾸지 못한다(규칙 5)
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,9 +39,12 @@ class ChunkResponse:
 
 @dataclass(frozen=True, slots=True)
 class TranscriptionJob:
+    """`kind`가 어느 모델로 부를지 정한다 — 그리고 힌트가 실릴지도 정한다(규칙 6)."""
+
     stem: str
     chunks: tuple[Chunk, ...]
     source: str = ""
+    kind: str = FIXTURE_KIND
 
 
 class Transcriber(Protocol):
@@ -97,7 +101,7 @@ class FixtureTranscriber:
 
     def transcribe(self, job: TranscriptionJob, cfg: Config) -> list[ChunkResponse]:
         return _load_responses(
-            _fixture_path(self.fixture_dir, job.stem, FIXTURE_KIND), job.stem, job.source
+            _fixture_path(self.fixture_dir, job.stem, job.kind), job.stem, job.source
         )
 
 
@@ -154,16 +158,21 @@ class LiveTranscriber:
         raise RuntimeError(f"{what} 재시도 실패") from last
 
     def _one_chunk(
-        self, client: Any, chunk: Chunk, cfg: Config, extras: dict[str, Any]
+        self,
+        client: Any,
+        chunk: Chunk,
+        cfg: Config,
+        extras: dict[str, Any],
+        kind: str = FIXTURE_KIND,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         """청크 하나를 전사한다. 응답과 **통과한 부가 인자**를 함께 돌려준다.
 
         400이면 오류 메시지가 지목한 인자만 떼고 다시 부른다. 아무 이름도 짚어주지
         않으면 그때만 전부 뗀다 — 힌트 하나 때문에 언어 지정까지 잃을 이유가 없다.
         """
-        what = f"전사 청크 {chunk.index}"
+        what = f"{'검증' if kind == VERIFY_KIND else '전사'} 조각 {chunk.index}"
         while True:
-            attempt = partial(_create, client, chunk, _required(cfg), extras)
+            attempt = partial(_create, client, chunk, _required(cfg, kind), extras)
             try:
                 return _to_dict(self._retry(attempt, what, cfg)), extras
             except Exception as exc:  # noqa: BLE001 - 400만 걸러내고 나머지는 재던진다
@@ -186,13 +195,17 @@ class LiveTranscriber:
             return []
         client = self._client()
         head, *tail = job.chunks
-        first, extras = self._one_chunk(client, head, cfg, _extras(cfg))
+        opening = _verify_extras(cfg) if job.kind == VERIFY_KIND else _extras(cfg)
+        first, extras = self._one_chunk(client, head, cfg, opening, job.kind)
 
         payloads = [first]
         if tail:
             with ThreadPoolExecutor(max_workers=env.max_workers()) as pool:
                 payloads.extend(
-                    pool.map(lambda chunk: self._one_chunk(client, chunk, cfg, extras)[0], tail)
+                    pool.map(
+                        lambda chunk: self._one_chunk(client, chunk, cfg, extras, job.kind)[0],
+                        tail,
+                    )
                 )
         return [
             ChunkResponse(index=chunk.index, offset=chunk.offset, payload=payload)
@@ -210,16 +223,15 @@ def _is_bad_request(exc: Exception) -> bool:
     return status == 400
 
 
-def _required(cfg: Config) -> dict[str, Any]:
+def _required(cfg: Config, kind: str = FIXTURE_KIND) -> dict[str, Any]:
     """뺄 수 없는 인자. 400이 나도 이건 그대로 둔다.
 
     부가 인자와 달리 400을 맞아도 떨어져 나가지 않는다 — 이게 빠지면 재시도도 같은
     이유로 실패한다.
     """
-    return {
-        "model": cfg.transcribe_model,
-        "response_format": cfg.transcribe_format,
-    }
+    if kind == VERIFY_KIND:
+        return {"model": cfg.verify_model, "response_format": cfg.verify_format}
+    return {"model": cfg.transcribe_model, "response_format": cfg.transcribe_format}
 
 
 def _blame_required(exc: Exception, cfg: Config) -> None:
@@ -257,6 +269,20 @@ def _extras(cfg: Config) -> dict[str, Any]:
     extras: dict[str, Any] = {"temperature": 0}
     if cfg.language:
         extras["language"] = cfg.language
+    return extras
+
+
+def _verify_extras(cfg: Config) -> dict[str, Any]:
+    """대조용 호출에만 실리는 인자. **힌트가 갈 수 있는 유일한 곳이다**(규칙 6).
+
+    이 모델은 `prompt`를 지시로 읽으므로 고유명사를 나열해도 되풀이 사고가 나지 않는다.
+    거부당하면 다른 부가 인자처럼 떨어져 나가고, 대조는 힌트 없이 계속된다.
+    """
+    extras = _extras(cfg)
+    if cfg.keywords:
+        extras["keywords"] = list(cfg.keywords)
+    if cfg.prompt:
+        extras["prompt"] = cfg.prompt
     return extras
 
 

@@ -2,8 +2,8 @@
 
 브이로그 자막 SRT 생성기. **`whisper-1`이 자막의 시각과 글자를 모두 만들고, 시각은
 원본 오디오 타임라인 그대로 들어간다.** 프로그램은 그것을 읽기 좋은 SRT로 조판할 뿐이다.
-`gpt-4o-transcribe`는 옵션(`--verify`)으로 붙는 **표시 전용** 계층이며, 출력을 절대
-바꾸지 않는다.
+`gpt-transcribe`가 같은 오디오를 한 번 더 받아 대조하지만 **표시만 한다** — 출력을
+절대 바꾸지 않는다. 그래서 **기본으로 켜져 있다**(끄려면 `--no-verify`).
 
 설계 배경은 `docs/DECISIONS.md`(현재 구조는 D25), 태스크 보드는 `TASKS.md`.
 
@@ -69,7 +69,7 @@
      → segment.start + chunk.offset   ← 원본 오디오 시각 그대로
      → spine_to_cues → refine → SRT 저장
      ─────────────── 여기서 자막은 끝났다 ───────────────
-     → [--verify 일 때만] gpt-4o-transcribe → 유사도 비교 → 로그 표시
+     → gpt-transcribe → 유사도 비교 → 로그 표시 (기본 켜짐, `--no-verify`로 끔)
 ```
 
 **자르는 유일한 기준은 모델의 최대 입력(25MB, 안전 여유 24MB)이다.** 77분 영상이면
@@ -142,7 +142,7 @@ pytest                  # 테스트만
 
 # 파이프라인
 vlogsrt run <video> --offline     # 전체 실행
-vlogsrt run <video> --verify      # 두 번째 모델로 교차 확인 (유료, 비용 2배)
+vlogsrt run <video> --no-verify   # 교차 확인을 끈다 (비용 절반)
 vlogsrt redo out/trace.json       # 조판만 재실행 (API 없음)
 vlogsrt probe <video>             # 길이·조각 수 확인 (API 없음)
 

@@ -20,7 +20,7 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from vlogsrt import env, keywords, pipeline, preprocess, transcribe
+from vlogsrt import env, keywords, pipeline, preprocess, transcribe, verify
 from vlogsrt.config import Config, load_config
 
 VIDEO_SUFFIXES = (".mp4", ".mov", ".m4v", ".mkv", ".avi", ".webm", ".m4a", ".mp3", ".wav")
@@ -203,9 +203,9 @@ def stream_subtitles(raw_path: str, prompt: str = "") -> Iterator[RunReport]:
         yield _running(lines)
         duration = preprocess.probe_duration(path)
         _check_cost_guard(duration, cfg)
-        cost = transcribe.estimate_cost(duration, cfg)
+        cost = transcribe.estimate_cost(duration, cfg) * 2  # 자막 + 교차 확인
         lines[-1] = f"전사   OpenAI 호출 · {duration / 60:.1f}분 · 예상 ${cost:.3f}"
-        lines.append("       오디오 추출 → 전사 → 정제. 길이에 비례해 몇 분 걸립니다…")
+        lines.append("       오디오 추출 → 전사 → 정제 → 교차 확인. 몇 분 걸립니다…")
         yield _running(lines)
         lines.pop()
 
@@ -342,7 +342,11 @@ def _progress_lines(captured: str) -> list[str]:
 
 def _summary(result: pipeline.RunResult) -> str:
     last = result.cues[-1].end if result.cues else 0.0
-    return f"결과   큐 {len(result.cues)}개 · 마지막 자막 {last:.0f}초"
+    line = f"결과   큐 {len(result.cues)}개 · 마지막 자막 {last:.0f}초"
+    if result.verification is None:
+        return line
+    # 교차 확인은 표시만 한다 — 위 SRT는 이 결과와 무관하게 이미 확정됐다(규칙 5).
+    return f"{line}\n확인   {verify.summarize(result.verification)}"
 
 
 def _join(lines: list[str], *extra: str) -> str:

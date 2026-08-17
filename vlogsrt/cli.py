@@ -29,6 +29,11 @@ def build_parser() -> argparse.ArgumentParser:
     _add_mode_options(run)
     run.add_argument("-o", "--out", type=Path, default=Path("out"))
     run.add_argument("--dry-run", action="store_true", help="비용 추정만 하고 끝낸다")
+    run.add_argument(
+        "--no-verify",
+        action="store_true",
+        help="교차 확인을 끈다. 기본은 켜져 있고, 표시만 하므로 자막은 안 바뀐다.",
+    )
 
     again = sub.add_parser("redo", help="API 없이 정제·출력만 재실행")
     again.add_argument("trace", type=Path)
@@ -54,6 +59,7 @@ def build_parser() -> argparse.ArgumentParser:
     record = sub.add_parser("record", help="실제 API를 호출해 픽스처를 녹화한다 (유료)")
     record.add_argument("video", type=Path)
     record.add_argument("--yes", action="store_true", help="비용 확인을 건너뛴다")
+    record.add_argument("--no-verify", action="store_true", help="검증용 응답은 녹화하지 않는다")
     _add_config_options(record)
 
     settings = sub.add_parser("config", help="설정 확인")
@@ -102,8 +108,8 @@ def _resolve_online(args: argparse.Namespace) -> bool:
     return bool(getattr(args, "online", False))
 
 
-def _confirm_cost(duration: float, cfg: Config, assume_yes: bool) -> None:
-    cost = transcribe.estimate_cost(duration, cfg)
+def _confirm_cost(duration: float, cfg: Config, assume_yes: bool, models: int = 1) -> None:
+    cost = transcribe.estimate_cost(duration, cfg) * models
     guard = env.cost_guard_seconds()
     log.info(f"오디오 {duration:.0f}초, 예상 비용 약 ${cost:.3f}")
     if assume_yes or duration <= guard:
@@ -127,14 +133,23 @@ def cmd_run(args: argparse.Namespace) -> int:
     online = _resolve_online(args)
     if args.dry_run:
         prepared = pipeline.prepare(args.video, cfg, offline=args.offline or not online)
-        cost = transcribe.estimate_cost(prepared.duration, cfg)
+        cost = transcribe.estimate_cost(prepared.duration, cfg) * (1 if args.no_verify else 2)
         pieces = max(1, len(prepared.chunks))
         log.out(f"길이 {prepared.duration:.1f}초 · 조각 {pieces}개 · 예상 ${cost:.3f}")
         return 0
     if online:
         # 오디오를 뽑기 전에 원본 길이만 보고 확인한다. ffprobe는 즉시 끝난다.
-        _confirm_cost(preprocess.probe_duration(args.video), cfg, args.yes)
-    result = pipeline.run(args.video, cfg, args.out, online=online, force_offline=args.offline)
+        _confirm_cost(
+            preprocess.probe_duration(args.video), cfg, args.yes, 1 if args.no_verify else 2
+        )
+    result = pipeline.run(
+        args.video,
+        cfg,
+        args.out,
+        online=online,
+        force_offline=args.offline,
+        verify_with_second_model=not args.no_verify,
+    )
     for name, path in result.outputs.items():
         if not name.endswith("_alias"):
             log.out(f"{name}: {path}")
@@ -215,8 +230,8 @@ def cmd_probe(args: argparse.Namespace) -> int:
 def cmd_record(args: argparse.Namespace) -> int:
     """사람만 실행한다. 실제 API를 부르고 요금이 발생한다."""
     cfg = config_from_args(args)
-    _confirm_cost(preprocess.probe_duration(args.video), cfg, args.yes)
-    for path in pipeline.record_fixtures(args.video, cfg).values():
+    _confirm_cost(preprocess.probe_duration(args.video), cfg, args.yes, 1 if args.no_verify else 2)
+    for path in pipeline.record_fixtures(args.video, cfg, verify=not args.no_verify).values():
         log.out(str(path))
     return 0
 

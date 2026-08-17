@@ -26,6 +26,19 @@ class Config:
     # **whisper에는 prompt를 보내지 않는다** — 힌트는 검증 모델로만 간다(규칙 6, D16).
     transcribe_model: str = "whisper-1"
     transcribe_format: str = "verbose_json"
+    # ─── 검증 (기본으로 켜져 있다) ───────────────────────────
+    # 자막을 다시 한 번 다른 모델로 받아 대조한다. **출력을 바꾸지 못하고 표시만 한다**
+    # (규칙 5). 그래서 켜 두는 것이 기본이다 — 비용은 2배지만 자막은 그대로다.
+    # 끄려면 `--no-verify`. 아래 값들은 외부 근거가 없는 조정 대상이다.
+    verify_model: str = "gpt-transcribe"
+    verify_format: str = "json"
+    verify_chunk_sim_floor: float = 0.80
+    verify_cue_match_floor: float = 0.60
+    verify_short_cue_chars: int = 4  # "네", "음" 같은 짧은 큐는 대조가 무의미하다
+    loop_min_repeats: int = 3
+    loop_min_seconds: float = 2.0
+    loop_min_chars: int = 2
+
     api_max_retries: int = 4
     api_backoff_base: float = 2.0
     cost_per_minute: float = 0.006

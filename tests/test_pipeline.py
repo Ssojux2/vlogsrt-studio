@@ -150,11 +150,39 @@ def test_record_reuses_what_was_already_paid_for(
             return []
 
     monkeypatch.setattr(pipeline, "LiveTranscriber", lambda **kwargs: Counting())
-    outputs = pipeline.record_fixtures(Path("demo.mp4"), Config())
+    outputs = pipeline.record_fixtures(Path("demo.mp4"), Config(), verify=False)
 
     assert called == []
     assert outputs["whisper"].name == "demo.whisper.json"
     assert outputs["meta"].is_file()
+
+
+def test_record_pays_for_both_models_by_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """검증이 기본이므로 녹화도 두 종류를 받는다. 없는 쪽만 새로 부른다."""
+    fixtures = tmp_path / "api"
+    fixtures.mkdir()
+    (fixtures / "demo.whisper.json").write_text('{"segments": []}', encoding="utf-8")
+    monkeypatch.setenv("VLOGSRT_FIXTURE_DIR", str(fixtures))
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setattr(
+        pipeline,
+        "prepare",
+        lambda video, cfg, **kwargs: pipeline.Prepared("demo", 10.0, (), str(video)),
+    )
+    asked: list[str] = []
+
+    class Counting:
+        def transcribe(self, job: object, cfg: object) -> list[object]:
+            asked.append(getattr(job, "kind", "?"))
+            return []
+
+    monkeypatch.setattr(pipeline, "LiveTranscriber", lambda **kwargs: Counting())
+    outputs = pipeline.record_fixtures(Path("demo.mp4"), Config())
+
+    assert asked == ["gpt"]  # whisper는 이미 결제된 것이 있다
+    assert set(outputs) == {"whisper", "gpt", "meta"}
 
 
 # ─────────────────────────────────────────────────────────────

@@ -16,6 +16,14 @@ prompt = ""
 #   transcribe_model = "whisper-1"
 #   transcribe_format = "verbose_json"
 
+# ── 검증 ────────────────────────────────────────────────────────────
+# 같은 오디오를 gpt-transcribe로 한 번 더 받아 대조한다. **기본으로 켜져 있다.**
+# 표시만 하므로 자막은 절대 안 바뀐다(규칙 5) — 대신 비용이 2배다.
+# 끄려면 `vlogsrt run <video> --no-verify`.
+#   verify_model = "gpt-transcribe"
+#   verify_chunk_sim_floor = 0.80   # 이 아래면 자막이 발화를 놓쳤을 수 있다
+#   verify_cue_match_floor = 0.60   # 이 아래인 큐를 '의심'으로 표시한다
+
 # ── 분할 ────────────────────────────────────────────────────────────
 # 자르는 유일한 기준은 **모델의 최대 입력**(25MB, 안전 여유 24MB)이다. 64kbps면
 # 조각 하나에 약 50분 — 77분 영상이 2조각이 된다.

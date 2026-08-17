@@ -123,11 +123,40 @@ def test_offline_run_makes_no_network_call(tmp_path: Path) -> None:
     assert result.cues
 
 
-def test_the_deleted_inspection_layers_stay_deleted() -> None:
-    """규칙 4 — 검사·재검증 계층은 되살리지 않는다(D21)."""
+def test_the_layers_that_edited_subtitles_stay_deleted() -> None:
+    """규칙 5 — 판정으로 자막을 고치거나 빼던 계층은 되살리지 않는다.
+
+    `verify.py`는 예외다 — 표시만 하고 출력을 못 건드린다. 그 선은
+    `check_invariants.py`가 따로 지킨다.
+    """
     package = ROOT / "vlogsrt"
-    for name in ("verify.py", "loops.py", "validate.py", "report.py", "mapping.py", "gapfill.py"):
+    for name in ("loops.py", "validate.py", "report.py", "mapping.py", "gapfill.py"):
         assert not (package / name).exists(), f"{name}이 부활했다"
+
+
+def test_verification_cannot_change_the_srt(tmp_path: Path) -> None:
+    """규칙 5 — 검증을 켜든 끄든 SRT 바이트가 같다."""
+    plain = pipeline.run(
+        VIDEO, Config(), tmp_path / "plain", force_offline=True, verify_with_second_model=False
+    )
+    checked = pipeline.run(VIDEO, Config(), tmp_path / "checked", force_offline=True)
+    assert checked.verification is not None  # 기본으로 켜져 있다
+    assert plain.outputs["srt"].read_bytes() == checked.outputs["srt"].read_bytes()
+
+
+def test_a_failed_verification_still_leaves_the_srt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """검증 픽스처가 없어도(= 두 번째 모델이 죽어도) 자막은 나온다."""
+    lonely = tmp_path / "no-gpt"
+    lonely.mkdir()
+    for name in ("demo.whisper.json", "demo.meta.json"):
+        (lonely / name).write_bytes((SYNTHETIC / name).read_bytes())
+    monkeypatch.setenv("VLOGSRT_FIXTURE_DIR", str(lonely))
+
+    result = pipeline.run(VIDEO, Config(), tmp_path / "out", force_offline=True)
+    assert result.outputs["srt"].is_file()
+    assert result.verification is None  # 건너뛰었지만 자막은 나왔다
 
 
 def test_invariant_script_passes() -> None:

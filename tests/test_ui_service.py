@@ -278,9 +278,9 @@ def test_progress_streams_before_the_slow_part(
     before_slow = steps[-2].log
     assert "OpenAI 호출" in before_slow
     assert "몇 분 걸립니다" in before_slow
-    # 금액을 박지 않는다. 모델이 하나가 되며 값이 반으로 줄었다(D21).
+    # 금액을 박지 않는다. 교차 확인이 기본이 되며 두 모델 몫이 됐다(D25).
     # 지켜야 할 계약은 "느린 단계 전에 예상 비용을 보여준다"이지 특정 숫자가 아니다.
-    assert f"${transcribe.estimate_cost(300.0, Config()):.3f}" in before_slow
+    assert f"${transcribe.estimate_cost(300.0, Config()) * 2:.3f}" in before_slow
     assert seen == ["전사 시작"]
 
 

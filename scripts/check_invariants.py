@@ -96,22 +96,44 @@ def check_env_untouched() -> list[str]:
     return failures
 
 
+# 자막을 **고치거나 빼던** 계층. 검증(표시 전용)과 달리 출력을 건드렸다.
 DELETED_MODULES = {
     "mapping.py": "D19 — 사상(mapping)",
     "gapfill.py": "D19 — 놓친 구간 되돌리기",
-    "verify.py": "D21 — 교차 검증",
-    "loops.py": "D21 — 되풀이 강등",
+    "loops.py": "D25 — 되풀이 강등. 검출은 verify.py에 표시 전용으로만 있다",
     "validate.py": "D21 — 정제 결과 검사",
     "report.py": "D21 — 검토 리포트",
 }
 
+# 검증은 표시만 한다. 출력을 만드는 모듈을 알면 그 선이 무너진다(규칙 5).
+VERIFY_MUST_NOT_IMPORT = ("refine", "output", "layout")
+
 
 def check_inspection_stays_dead() -> list[str]:
-    """규칙 4 — 검사·재검증 계층은 의도적으로 삭제했다. 부활은 설계 위반이다."""
+    """규칙 5 — 판정으로 자막을 빼던 계층은 되살리지 않는다."""
     failures = []
     for name, why in DELETED_MODULES.items():
         if (PACKAGE / name).exists():
             failures.append(f"vlogsrt/{name}: 삭제된 계층이 부활했다 ({why})")
+    return failures
+
+
+def check_verify_cannot_touch_output() -> list[str]:
+    """규칙 5 — `verify.py`는 큐를 만들지도 고치지도 못한다.
+
+    검증 on/off에 SRT 바이트가 같아야 한다. 출력 계층을 import하는 순간 그 보장이
+    사람의 주의력에 달리게 된다.
+    """
+    path = PACKAGE / "verify.py"
+    if not path.exists():
+        return []
+    failures = []
+    body = path.read_text(encoding="utf-8")
+    for name in VERIFY_MUST_NOT_IMPORT:
+        if re.search(rf"^\s*(?:from|import)\s+\.?{name}\b", body, re.MULTILINE):
+            failures.append(f"verify.py: {name}을 import한다 — 검증이 출력을 건드릴 수 있다")
+    if re.search(r"^\s*def (save|write)_", body, re.MULTILINE):
+        failures.append("verify.py: 파일을 쓰는 함수가 생겼다 — 검증은 표시만 한다")
     return failures
 
 
@@ -217,7 +239,8 @@ CHECKS = (
     ("의존성 3개", check_dependencies),
     ("frozen 모델", check_frozen_models),
     (".env 보호", check_env_untouched),
-    ("검사 계층 부활 금지", check_inspection_stays_dead),
+    ("판정 계층 부활 금지", check_inspection_stays_dead),
+    ("검증은 출력을 못 건드린다", check_verify_cannot_touch_output),
     ("전사 호출 1개", check_one_transcription_call),
     ("모델 이름 비하드코딩", check_no_hardcoded_model),
 )

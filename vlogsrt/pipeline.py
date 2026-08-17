@@ -10,11 +10,12 @@ import hashlib
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from . import env, log, preprocess, refine, transcribe
+from . import env, log, preprocess, refine, transcribe, verify
 from .config import Config
 from .models import Chunk, Cue, Segment, Trace
 from .output import save_srt
-from .transcribe import LiveTranscriber, Transcriber, TranscriptionJob
+from .transcribe import VERIFY_KIND, LiveTranscriber, Transcriber, TranscriptionJob
+from .verify import Verification
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,6 +31,7 @@ class RunResult:
     trace: Trace
     cues: tuple[Cue, ...]
     outputs: dict[str, Path]
+    verification: Verification | None = None
 
 
 # ─────────────────────────────────────────────────────────────
@@ -98,8 +100,10 @@ def prepare(
 # ─────────────────────────────────────────────────────────────
 
 
-def build_job(prepared: Prepared) -> TranscriptionJob:
-    return TranscriptionJob(stem=prepared.stem, chunks=prepared.chunks, source=prepared.source)
+def build_job(prepared: Prepared, kind: str = transcribe.FIXTURE_KIND) -> TranscriptionJob:
+    return TranscriptionJob(
+        stem=prepared.stem, chunks=prepared.chunks, source=prepared.source, kind=kind
+    )
 
 
 def fetch_spine(transcriber: Transcriber, job: TranscriptionJob, cfg: Config) -> list[Segment]:
@@ -138,6 +142,7 @@ def run(
     force_offline: bool = False,
     workdir: Path | None = None,
     artifacts: bool = True,
+    verify_with_second_model: bool = True,
 ) -> RunResult:
     """`artifacts=False`면 SRT 하나만 남기고 trace는 쓰지 않는다.
 
@@ -164,7 +169,11 @@ def run(
         cues=tuple(cues),
         config_snapshot=cfg.to_dict(),
     )
-    return _finish(trace, cues, outdir, prepared.stem, artifacts=artifacts)
+    result = _finish(trace, cues, outdir, prepared.stem, artifacts=artifacts)
+    if not verify_with_second_model:
+        return result
+    # SRT는 이미 디스크에 있다. 검증은 여기서부터 무슨 일이 나도 그 파일을 못 건드린다(규칙 5).
+    return replace(result, verification=report_verification(result, prepared, cfg, transcriber))
 
 
 def _finish(
@@ -181,40 +190,66 @@ def _finish(
     return RunResult(trace=trace, cues=tuple(cues), outputs=outputs)
 
 
+def report_verification(
+    result: RunResult, prepared: Prepared, cfg: Config, transcriber: Transcriber
+) -> Verification | None:
+    """두 번째 모델로 같은 오디오를 받아 대조하고 **표시만 한다**(규칙 5).
+
+    실패해도 SRT를 막지 않는다 — 픽스처가 없거나 계정에 모델이 없거나 API가 죽어도
+    자막은 이미 나와 있다. 그래서 여기서만은 예외를 삼키되, 조용히는 아니다.
+    """
+    try:
+        responses = transcriber.transcribe(build_job(prepared, VERIFY_KIND), cfg)
+        report = verify.verify(result.cues, result.trace.spine, responses, prepared.duration, cfg)
+    except Exception as exc:  # noqa: BLE001 - 검증 실패가 자막을 막으면 안 된다
+        log.warn(f"검증을 건너뛴다: {exc}")
+        return None
+    log.info(verify.summarize(report))
+    for line in verify.details(report):
+        log.warn(line)
+    return report
+
+
 # ─────────────────────────────────────────────────────────────
 #  픽스처 녹화 / redo
 # ─────────────────────────────────────────────────────────────
 
 
-def record_fixtures(video: Path, cfg: Config, *, reuse_existing: bool = True) -> dict[str, Path]:
+def record_fixtures(
+    video: Path, cfg: Config, *, reuse_existing: bool = True, verify: bool = True
+) -> dict[str, Path]:
     """실제 API를 호출해 픽스처를 녹화한다. **유료다.**
 
     호출자가 먼저 사람의 동의를 받아야 한다. 이 함수는 확인을 묻지 않는다.
     """
     prepared = prepare(video, cfg, offline=False)
-    fixture_dir = env.fixture_dir()
-    response_path = fixture_dir / f"{prepared.stem}.{transcribe.FIXTURE_KIND}.json"
-
-    outputs: dict[str, Path] = {}
-    if reuse_existing and response_path.is_file():
-        log.info(f"전사 응답이 이미 있어 다시 부르지 않는다: {response_path}")
-        outputs[transcribe.FIXTURE_KIND] = response_path
-    else:
-        transcriber = LiveTranscriber(
-            api_key=env.require_api_key(force=True), base_url=env.base_url()
-        )
-        log.info("전사 호출 중…")
-        outputs[transcribe.FIXTURE_KIND] = transcribe.save_fixture(
-            fixture_dir,
-            prepared.stem,
-            transcribe.FIXTURE_KIND,
-            transcriber.transcribe(build_job(prepared), cfg),
-        )
+    outputs: dict[str, Path] = {
+        transcribe.FIXTURE_KIND: _record_one(prepared, cfg, transcribe.FIXTURE_KIND, reuse_existing)
+    }
+    if verify:
+        outputs[VERIFY_KIND] = _record_one(prepared, cfg, VERIFY_KIND, reuse_existing)
 
     outputs["meta"] = transcribe.save_meta(
-        fixture_dir, prepared.stem, cfg, prepared.duration, len(prepared.chunks)
+        env.fixture_dir(), prepared.stem, cfg, prepared.duration, len(prepared.chunks)
     )
     return outputs
+
+
+def _record_one(prepared: Prepared, cfg: Config, kind: str, reuse_existing: bool) -> Path:
+    """이미 받아둔 응답이 있으면 다시 결제하지 않는다."""
+    fixture_dir = env.fixture_dir()
+    path = fixture_dir / f"{prepared.stem}.{kind}.json"
+    if reuse_existing and path.is_file():
+        log.info(f"{kind} 응답이 이미 있어 다시 부르지 않는다: {path}")
+        return path
+    transcriber = LiveTranscriber(api_key=env.require_api_key(force=True), base_url=env.base_url())
+    log.info(f"{kind} 호출 중…")
+    return transcribe.save_fixture(
+        fixture_dir,
+        prepared.stem,
+        kind,
+        transcriber.transcribe(build_job(prepared, kind), cfg),
+    )
 
 
 def redo(trace_path: Path, cfg: Config, outdir: Path) -> RunResult:
