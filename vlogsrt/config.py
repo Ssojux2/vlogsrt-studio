@@ -20,7 +20,7 @@ class Config:
     # ─── 전사 ────────────────────────────────────────────────
     language: str = "ko"
     # 실측 400(D23): "The 'languages' parameter is not supported for this model."
-    # diarize 모델은 단수형 `language`만 받는다. 비워두면 그쪽으로 떨어진다.
+    # 이 모델은 단수형 `language`만 받는다. 비워두면 그쪽으로 떨어진다.
     extra_languages: tuple[str, ...] = ()
     prompt: str = ""
     keywords: tuple[str, ...] = ()
@@ -29,7 +29,7 @@ class Config:
     transcribe_model: str = "gpt-4o-transcribe"
     transcribe_format: str = "json"
     # 우리가 무음에서 직접 자르므로 서버 VAD를 쓰지 않는다. 비워두면 보내지 않는다.
-    # (diarize 계열 모델로 바꾸면 이 값이 필수가 된다 — 실측 400, D22.)
+    # (일부 모델은 이 값이 필수다 — 실측 400, D22.)
     chunking_strategy: str = ""
     api_max_retries: int = 4
     api_backoff_base: float = 2.0
@@ -47,13 +47,8 @@ class Config:
     min_speech_duration: float = 0.15  # 이보다 짧으면 말이 아니라 잡음
     batch_max_seconds: float = 40.0  # 요청 수와 배분 오차의 절충
 
-    # ─── 청크 분할 ───────────────────────────────────────────
+    # ─── 업로드 한도 ─────────────────────────────────────────
     chunk_max_bytes: int = 24_000_000
-    # 크기 한도(24MB)만 보면 64kbps에서 50분이 한 조각에 들어간다. 그보다 짧게
-    # 끊는 이유는 실패 시 재호출 비용과 경계 손실 사이의 절충이며, 외부 근거가
-    # 있는 값이 아니다. (600초이던 시절의 근거였던 whisper-1 순차 디코딩 병리는
-    # 모델과 함께 사라졌다 — D13, D21.)
-    chunk_max_seconds: float = 1500.0
     # 만들어진 조각이 계획보다 이만큼 넘게 짧으면 소리를 잃은 것으로 보고 멈춘다.
     # mp3 인코더 패딩(~26ms)은 조각을 늘리지 줄이지 않으므로 여유가 넉넉하다.
     chunk_duration_tolerance: float = 0.5

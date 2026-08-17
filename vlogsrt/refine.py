@@ -57,8 +57,8 @@ def _char_split_index(text: str, ratio: float) -> int | None:
 def split_cue(cue: Cue, cfg: Config, depth: int = 0) -> list[Cue]:
     """자막으로 너무 길거나 빽빽한 큐를 자른다. 시각은 원본 큐 안에서만 움직인다.
 
-    자르는 지점은 글자 수 비례다. 단어 타임스탬프로 가장 긴 휴지를 찾던 시절이
-    있었지만, 지금 모델은 `words[]`를 주지 않는다(D21). 말이 고르지 않으면 분할
+    자르는 지점은 글자 수 비례다. 큐 하나는 발화 구간 하나이고 그 안에는 더 쪼갤
+    무음이 없으므로(D24), 여기서 기댈 것은 글자 수뿐이다. 말이 고르지 않으면 분할
     지점이 실제 발화보다 앞뒤로 밀릴 수 있다 — 다만 원본 큐 범위는 벗어나지 않는다.
     """
     if not needs_split(cue, cfg) or depth >= cfg.max_split_depth:

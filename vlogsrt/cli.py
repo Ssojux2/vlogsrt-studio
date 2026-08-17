@@ -47,7 +47,7 @@ def build_parser() -> argparse.ArgumentParser:
     dashboard.add_argument("--out", type=Path, default=Path("docs/DASHBOARD.md"))
     _add_config_options(dashboard)
 
-    probe = sub.add_parser("probe", help="길이와 오디오 크기를 본다")
+    probe = sub.add_parser("probe", help="무음·발화 구간·묶음을 본다 (API 없음)")
     probe.add_argument("video", type=Path)
     _add_config_options(probe)
 
@@ -128,8 +128,8 @@ def cmd_run(args: argparse.Namespace) -> int:
     if args.dry_run:
         prepared = pipeline.prepare(args.video, cfg, offline=args.offline or not online)
         cost = transcribe.estimate_cost(prepared.duration, cfg)
-        chunk_count = max(1, len(prepared.chunks))
-        log.out(f"길이 {prepared.duration:.1f}초 · 청크 {chunk_count}개 · 예상 ${cost:.3f}")
+        batches = max(1, len(prepared.chunks))
+        log.out(f"길이 {prepared.duration:.1f}초 · 묶음 {batches}개 · 예상 ${cost:.3f}")
         return 0
     if online:
         # 오디오를 뽑기 전에 원본 길이만 보고 확인한다. ffprobe는 즉시 끝난다.

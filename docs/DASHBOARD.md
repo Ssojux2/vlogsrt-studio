@@ -24,5 +24,8 @@
 
 **싱크 관문이 1순위다.** CER이 아무리 좋아져도 타이밍 지표가 나빠졌으면 통과가 아니다.
 
+싱크 지표는 이제 **무음 검출과 배분**을 재는 것이다(D24). 나빠지면 모델이 아니라
+`silence_threshold_db`·`silence_min_duration`·`batch_max_seconds`를 조정한다.
+
 측정하려면 `golden/ep0{1,2,3}.{mp4,srt}`와 `tests/fixtures/api/ep0*.{transcribe,meta}.json`이
 있어야 한다. 둘 다 사람이 만든다.

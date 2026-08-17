@@ -190,7 +190,7 @@ class LiveTranscriber:
                     extras["language"] = cfg.language
 
     def transcribe(self, job: TranscriptionJob, cfg: Config) -> list[ChunkResponse]:
-        """자막의 시각과 글자를 모두 만드는 유일한 호출.
+        """자막의 **글자**를 만드는 유일한 호출. 시각은 여기서 나오지 않는다(규칙 1).
 
         첫 조각을 혼자 보내 인자 조합을 확정한 뒤 나머지를 병렬로 던진다. 인자가
         틀렸을 때 조각 수만큼 똑같이 실패하며 업로드를 낭비하지 않기 위해서다.
@@ -228,10 +228,10 @@ def _is_bad_request(exc: Exception) -> bool:
 def _required(cfg: Config) -> dict[str, Any]:
     """뺄 수 없는 인자. 400이 나도 이건 그대로 둔다.
 
-    `chunking_strategy`가 여기 있는 이유: diarize 모델은 이 인자 없이는 요청을
-    아예 받지 않는다(400 "chunking_strategy is required for diarization models",
-    D22). 부가 인자와 함께 떨어져 나가면 재시도도 같은 이유로 실패한다.
-    빈 문자열이면 보내지 않는다 — whisper-1은 이 인자를 모른다.
+    `chunking_strategy`가 여기 있는 이유: 어떤 모델은 이 인자 없이는 요청을 아예
+    받지 않는다(400 "chunking_strategy is required for diarization models", D22).
+    부가 인자와 함께 떨어져 나가면 재시도도 같은 이유로 실패한다. 기본값은 빈
+    문자열이라 보내지 않는다 — 자르는 건 우리 몫이다(D24).
     """
     required: dict[str, Any] = {
         "model": cfg.transcribe_model,
@@ -259,7 +259,7 @@ def _blame_required(exc: Exception, cfg: Config) -> None:
     raise RuntimeError(
         f"API가 {key}={value!r}를 거부했습니다: {exc}\n"
         f"  vlogsrt.toml 의 [transcribe] {key} 를 확인하세요.\n"
-        f"  diarize 모델은 chunking_strategy가 필요하고, whisper-1은 이 인자를 모릅니다."
+        f"  이 프로젝트는 무음에서 직접 자르므로 기본값은 빈 문자열입니다(D24)."
     ) from exc
 
 
