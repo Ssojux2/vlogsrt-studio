@@ -21,29 +21,42 @@ MB = 1_000_000
 
 
 def test_small_audio_is_never_cut() -> None:
-    assert chunk_count(5 * MB, Config()) == 1
+    assert chunk_count(5 * MB, 300.0, Config()) == 1
 
 
-def test_the_model_input_limit_is_the_only_criterion() -> None:
+def test_the_byte_limit_still_binds() -> None:
+    cfg = data_replace(Config(), chunk_max_seconds=9999.0)
+    assert chunk_count(cfg.chunk_max_bytes, 600.0, cfg) == 1
+    assert chunk_count(cfg.chunk_max_bytes + 1, 600.0, cfg) == 2
+    assert chunk_count(cfg.chunk_max_bytes * 3, 600.0, cfg) == 3
+
+
+def test_the_second_limit_binds_when_it_is_smaller() -> None:
+    """**D26 사고의 회귀 테스트.** 바이트만 보면 38분 조각이 통과한다(D27).
+
+    64kbps 모노 ≈ 8000 B/s. 77분이면 37MB — 24MB 한도로는 2조각이고, 그 길이에서
+    한 문장이 1668회 반복돼 영상의 41.4%를 먹었다.
+    """
     cfg = Config()
-    assert chunk_count(cfg.chunk_max_bytes, cfg) == 1
-    assert chunk_count(cfg.chunk_max_bytes + 1, cfg) == 2
-    assert chunk_count(cfg.chunk_max_bytes * 3, cfg) == 3
+    assert chunk_count(int(4620 * 8000), 4620.0, cfg) == 8
+    assert cfg.chunk_max_seconds == 600.0  # D13에서 근거를 얻은 값
 
 
-def test_a_77_minute_vlog_becomes_two_chunks() -> None:
-    """64kbps 모노 ≈ 8000 B/s. 77분이면 37MB."""
-    assert chunk_count(int(4620 * 8000), Config()) == 2
+def test_the_bigger_of_the_two_counts_wins() -> None:
+    """어느 쪽이 더 잘게 자르든 그쪽을 따른다. 한도는 둘 다 상한이다."""
+    cfg = data_replace(Config(), chunk_max_bytes=1_000_000, chunk_max_seconds=600.0)
+    assert chunk_count(10 * MB, 60.0, cfg) == 10  # 바이트가 이긴다
+    assert chunk_count(1 * MB, 6000.0, cfg) == 10  # 초가 이긴다
 
 
-def test_lowering_the_limit_makes_more_chunks() -> None:
-    """D13 반복 환청이 재발할 때의 탈출구. 코드가 아니라 설정 한 줄이다."""
-    tight = data_replace(Config(), chunk_max_bytes=4_800_000)
-    assert chunk_count(int(4620 * 8000), tight) == 8
+def test_lowering_the_byte_limit_still_makes_more_chunks() -> None:
+    """조각을 더 잘게 쪼개야 할 때의 탈출구. 코드가 아니라 설정 한 줄이다."""
+    tight = data_replace(Config(), chunk_max_bytes=2_400_000)
+    assert chunk_count(int(4620 * 8000), 4620.0, tight) == 16
 
 
 def test_chunk_count_never_returns_zero() -> None:
-    assert chunk_count(0, Config()) == 1
+    assert chunk_count(0, 0.0, Config()) == 1
 
 
 # ─────────────────────────────────────────────────────────────
@@ -166,7 +179,7 @@ def test_no_cut_means_one_chunk_over_everything() -> None:
 
 
 def test_coverage_holds_for_any_number_of_chunks() -> None:
-    cfg = Config()
+    cfg = data_replace(Config(), chunk_max_seconds=9999.0)  # 조각 수를 바이트로만 몬다
     for pieces in (1, 2, 3, 5, 8):
         size = cfg.chunk_max_bytes * pieces
         cuts = plan_cuts(4620.0, size, cfg, _fake_finder({}))

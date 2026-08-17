@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import ast
 import re
 import sys
 import tomllib
@@ -100,13 +101,23 @@ def check_env_untouched() -> list[str]:
 DELETED_MODULES = {
     "mapping.py": "D19 — 사상(mapping)",
     "gapfill.py": "D19 — 놓친 구간 되돌리기",
-    "loops.py": "D25 — 되풀이 강등. 검출은 verify.py에 표시 전용으로만 있다",
+    "loops.py": "D25 — 되풀이 강등. 검출은 repetition.py, 처리는 repair.py로 갈렸다(D27)",
     "validate.py": "D21 — 정제 결과 검사",
     "report.py": "D21 — 검토 리포트",
 }
 
 # 검증은 표시만 한다. 출력을 만드는 모듈을 알면 그 선이 무너진다(규칙 5).
 VERIFY_MUST_NOT_IMPORT = ("refine", "output", "layout")
+
+# 재전사는 **골격이 조립되기 전**에 끝난다. 조판 계층을 알면 그 선이 무너진다(D27).
+REPAIR_MUST_NOT_IMPORT = ("refine", "output", "layout", "verify")
+
+# 조판 이후 계층이 되풀이 판정을 알면, 판정이 파이프라인 아래로 새어나간다(D27).
+DOWNSTREAM_MUST_NOT_IMPORT = {
+    "refine.py": ("repair", "repetition"),
+    "output.py": ("repair", "repetition"),
+    "layout.py": ("repair", "repetition"),
+}
 
 
 def check_inspection_stays_dead() -> list[str]:
@@ -129,15 +140,83 @@ def check_verify_cannot_touch_output() -> list[str]:
         return []
     failures = []
     body = path.read_text(encoding="utf-8")
-    for name in VERIFY_MUST_NOT_IMPORT:
-        if re.search(rf"^\s*(?:from|import)\s+\.?{name}\b", body, re.MULTILINE):
-            failures.append(f"verify.py: {name}을 import한다 — 검증이 출력을 건드릴 수 있다")
+    failures += [
+        f"verify.py: {name}을 import한다 — 검증이 출력을 건드릴 수 있다"
+        for name in _imports(body, VERIFY_MUST_NOT_IMPORT)
+    ]
     if re.search(r"^\s*def (save|write)_", body, re.MULTILINE):
         failures.append("verify.py: 파일을 쓰는 함수가 생겼다 — 검증은 표시만 한다")
     return failures
 
 
-PURE_MODULES = ("cutpoints.py",)
+def _imported_names(body: str) -> set[str]:
+    """실제로 import된 모듈 이름. **정규식으로 세지 않는다.**
+
+    이 프로젝트가 가장 많이 쓰는 형태가 `from . import log, refine, transcribe`인데,
+    `^(from|import)\\s+\\.?refine` 같은 정규식은 그걸 못 잡는다. 검사가 통과하는데
+    선은 이미 넘어가 있는 상태가 된다 — 그게 기계 검사의 최악이다.
+    """
+    seen: set[str] = set()
+    for node in ast.walk(ast.parse(body)):
+        if isinstance(node, ast.ImportFrom):
+            seen.add((node.module or "").split(".")[-1])
+            seen.update(alias.name.split(".")[-1] for alias in node.names)
+        elif isinstance(node, ast.Import):
+            seen.update(alias.name.split(".")[-1] for alias in node.names)
+    return seen
+
+
+def _imports(body: str, names: tuple[str, ...]) -> list[str]:
+    imported = _imported_names(body)
+    return [name for name in names if name in imported]
+
+
+def check_repair_stays_upstream() -> list[str]:
+    """D27 — 되풀이 재전사는 전사 단계 안에서 끝난다.
+
+    조판(`refine`·`layout`·`output`)을 알면 "판정으로 자막을 고치는" 옛 계층과 같아진다.
+    반대로 조판 쪽이 재전사를 알면 판정이 파이프라인 아래로 샌다.
+    """
+    failures = []
+    path = PACKAGE / "repair.py"
+    if path.exists():
+        body = path.read_text(encoding="utf-8")
+        failures += [
+            f"repair.py: {name}을 import한다 — 재전사가 조판까지 내려왔다"
+            for name in _imports(body, REPAIR_MUST_NOT_IMPORT)
+        ]
+    for name, forbidden in DOWNSTREAM_MUST_NOT_IMPORT.items():
+        target = PACKAGE / name
+        if not target.exists():
+            continue
+        failures += [
+            f"{name}: {leaked}를 import한다 — 되풀이 판정이 조판까지 샜다"
+            for leaked in _imports(target.read_text(encoding="utf-8"), forbidden)
+        ]
+    return failures
+
+
+def check_confidence_meta_survives() -> list[str]:
+    """D27 — whisper가 준 되풀이 신호를 버리지 않는다.
+
+    `compression_ratio`가 되풀이를 짚는 유일한 공짜 신호다. 예전에는 응답에서 읽지도
+    않고 버렸고, 그래서 되풀이를 사람 눈으로만 찾을 수 있었다.
+    """
+    body = (PACKAGE / "transcribe.py").read_text(encoding="utf-8")
+    match = re.search(r"def parse_segments\(.*?\n(?=\ndef |\n# )", body, re.DOTALL)
+    if not match:
+        return ["transcribe.py: parse_segments를 찾지 못했다 — 메타 검사가 무력해졌다"]
+    missing = [
+        field
+        for field in ("compression_ratio", "avg_logprob", "no_speech_prob")
+        if field not in match.group(0)
+    ]
+    if missing:
+        return [f"transcribe.py: parse_segments가 {missing}를 버린다 (D27)"]
+    return []
+
+
+PURE_MODULES = ("cutpoints.py", "repetition.py")
 
 # D24의 시각 유도 계층. 되살아나면 초반·마지막이 다시 날아간다(D25).
 BURIED_MODULES = {
@@ -241,6 +320,8 @@ CHECKS = (
     (".env 보호", check_env_untouched),
     ("판정 계층 부활 금지", check_inspection_stays_dead),
     ("검증은 출력을 못 건드린다", check_verify_cannot_touch_output),
+    ("재전사는 전사 단계에 머문다", check_repair_stays_upstream),
+    ("신뢰도 메타 보존", check_confidence_meta_survives),
     ("전사 호출 1개", check_one_transcription_call),
     ("모델 이름 비하드코딩", check_no_hardcoded_model),
 )

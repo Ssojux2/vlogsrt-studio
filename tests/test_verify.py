@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import replace as data_replace
-
 from vlogsrt.config import Config
 from vlogsrt.models import Segment
 from vlogsrt.transcribe import ChunkResponse
-from vlogsrt.verify import chunk_spans, find_loops, summarize, verify
+from vlogsrt.verify import chunk_spans, summarize, verify
 
 from .conftest import make_cue
 
@@ -74,7 +72,7 @@ def test_chunk_spans_cover_the_whole_timeline() -> None:
 
 
 # ─────────────────────────────────────────────────────────────
-#  반복 환청 — 찾아도 빼지 않는다 (규칙 9)
+#  남은 되풀이 — 검출은 repetition.py, 여기서는 표시만 한다(D27)
 # ─────────────────────────────────────────────────────────────
 
 
@@ -82,27 +80,10 @@ def _looping(count: int, text: str = "맥주") -> list[Segment]:
     return [Segment(id=i, start=float(i), end=float(i) + 1.0, text=text) for i in range(count)]
 
 
-def test_a_repetition_run_is_found() -> None:
-    """실측: 한 문장이 103개 세그먼트에 걸쳐 570초 반복됐다(D13)."""
-    loops = find_loops(_looping(5), Config())
-    assert len(loops) == 1
-    assert loops[0].count == 5
-    assert loops[0].text == "맥주"
-
-
-def test_a_short_echo_is_not_a_loop() -> None:
-    """짧은 맞장구가 두어 번 겹치는 것은 환청이 아니다."""
-    assert find_loops(_looping(2), Config()) == []
-
-
-def test_a_brief_run_is_not_a_loop() -> None:
-    cfg = data_replace(Config(), loop_min_seconds=60.0)
-    assert find_loops(_looping(5), cfg) == []
-
-
-def test_normal_speech_has_no_loops() -> None:
-    spine = [Segment(id=i, start=float(i), end=float(i) + 1.0, text=f"문장 {i}") for i in range(9)]
-    assert find_loops(spine, Config()) == []
+def test_leftover_repeats_are_shown() -> None:
+    """재전사가 회복하지 못한 구간은 검증 로그에 그대로 뜬다."""
+    report = verify([make_cue(0.0, 3.0, "맥주")], _looping(5), [], 10.0, Config())
+    assert [repeat.count for repeat in report.loops] == [5]
 
 
 def test_the_summary_counts_everything() -> None:

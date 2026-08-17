@@ -22,6 +22,8 @@ from .models import Chunk, Segment
 
 FIXTURE_KIND = "whisper"  # 자막을 만드는 호출
 VERIFY_KIND = "gpt"  # 대조용 호출. 출력을 바꾸지 못한다(규칙 5)
+RESCUE_KIND = "rescue"  # 되풀이 구간만 다시 묻는 호출. 같은 모델, 다른 온도(D27)
+ARBITER_KIND = "arbiter"  # 그 구간을 심판하는 두 번째 모델. 시각을 만들지 않는다
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,6 +47,17 @@ class TranscriptionJob:
     chunks: tuple[Chunk, ...]
     source: str = ""
     kind: str = FIXTURE_KIND
+
+
+# 힌트가 실릴 수 있는 호출. **whisper 쪽은 절대 여기 들어오지 않는다**(규칙 6, D16).
+_HINTED_KINDS = frozenset({VERIFY_KIND, ARBITER_KIND})
+
+_KIND_LABELS = {
+    FIXTURE_KIND: "전사",
+    VERIFY_KIND: "검증",
+    RESCUE_KIND: "재전사",
+    ARBITER_KIND: "심판",
+}
 
 
 class Transcriber(Protocol):
@@ -170,7 +183,7 @@ class LiveTranscriber:
         400이면 오류 메시지가 지목한 인자만 떼고 다시 부른다. 아무 이름도 짚어주지
         않으면 그때만 전부 뗀다 — 힌트 하나 때문에 언어 지정까지 잃을 이유가 없다.
         """
-        what = f"{'검증' if kind == VERIFY_KIND else '전사'} 조각 {chunk.index}"
+        what = f"{_KIND_LABELS.get(kind, '전사')} 조각 {chunk.index}"
         while True:
             attempt = partial(_create, client, chunk, _required(cfg, kind), extras)
             try:
@@ -195,7 +208,7 @@ class LiveTranscriber:
             return []
         client = self._client()
         head, *tail = job.chunks
-        opening = _verify_extras(cfg) if job.kind == VERIFY_KIND else _extras(cfg)
+        opening = _verify_extras(cfg) if job.kind in _HINTED_KINDS else _extras(cfg)
         first, extras = self._one_chunk(client, head, cfg, opening, job.kind)
 
         payloads = [first]
@@ -229,7 +242,7 @@ def _required(cfg: Config, kind: str = FIXTURE_KIND) -> dict[str, Any]:
     부가 인자와 달리 400을 맞아도 떨어져 나가지 않는다 — 이게 빠지면 재시도도 같은
     이유로 실패한다.
     """
-    if kind == VERIFY_KIND:
+    if kind in {VERIFY_KIND, ARBITER_KIND}:
         return {"model": cfg.verify_model, "response_format": cfg.verify_format}
     return {"model": cfg.transcribe_model, "response_format": cfg.transcribe_format}
 
@@ -264,9 +277,11 @@ def _extras(cfg: Config) -> dict[str, Any]:
     아니라 직전 자막 텍스트로 읽는다 — 한 줄이 `'한국 여행 브이로그'` 138회·564초를
     낳았다(D13, D16). 힌트는 검증 모델로만 간다.
 
-    `temperature`는 결정성 설정일 뿐이라 거부당하면 버려도 자막은 나온다.
+    `temperature`는 결정성 설정일 뿐이라 거부당하면 버려도 자막은 나온다. 값은
+    config에서 온다(규칙 8) — 되풀이 재전사가 같은 오디오를 **다른 온도로** 다시
+    물으려면 이 값이 바뀔 수 있어야 한다(D27).
     """
-    extras: dict[str, Any] = {"temperature": 0}
+    extras: dict[str, Any] = {"temperature": cfg.transcribe_temperature}
     if cfg.language:
         extras["language"] = cfg.language
     return extras
@@ -320,6 +335,9 @@ def parse_segments(raw: dict[str, Any], offset: float = 0.0, seg_id_base: int = 
     **모델이 보낸 글자는 하나도 버리지 않는다.** 시각이 뒤집혔거나 길이가 0인 세그먼트도
     글자가 있으면 남긴다 — 시각은 `end = start`로 접어두고 정제의 `min_duration`이
     한도 안에서 늘려준다. 버리는 것은 글자가 아예 없는 세그먼트뿐이다(규칙 9).
+
+    신뢰도 메타(`compression_ratio`·`avg_logprob`·`no_speech_prob`)도 함께 옮긴다.
+    되풀이를 짚는 신호가 여기 들어 있는데 예전에는 그냥 버렸다(D27).
     """
     if "segments" not in raw:
         raise RuntimeError(
@@ -335,7 +353,15 @@ def parse_segments(raw: dict[str, Any], offset: float = 0.0, seg_id_base: int = 
         start = float(segment.get("start", 0.0)) + offset
         end = float(segment.get("end", 0.0)) + offset
         spine.append(
-            Segment(id=seg_id_base + len(spine), start=start, end=max(end, start), text=text)
+            Segment(
+                id=seg_id_base + len(spine),
+                start=start,
+                end=max(end, start),
+                text=text,
+                compression_ratio=float(segment.get("compression_ratio", 0.0)),
+                avg_logprob=float(segment.get("avg_logprob", 0.0)),
+                no_speech_prob=float(segment.get("no_speech_prob", 0.0)),
+            )
         )
     return spine
 

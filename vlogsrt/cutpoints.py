@@ -19,12 +19,19 @@ from .config import Config
 from .models import Span
 
 
-def chunk_count(size_bytes: int, cfg: Config) -> int:
-    """조각 수. **유일한 기준은 모델의 최대 입력이다**(D25).
+def chunk_count(size_bytes: int, duration: float, cfg: Config) -> int:
+    """조각 수. **두 한도 중 작은 쪽이 이긴다**(D27).
 
-    낮추면 조각이 늘어난다 — whisper가 긴 조각에서 반복 루프에 빠질 때의 탈출구다(D13).
+    바이트 한도는 모델이 받아주는 최대 입력이고, 초 한도는 whisper가 무너지지 않고
+    버티는 길이다. 둘은 다른 것을 막는다. 바이트만 보던 시절 24MB가 38분이 됐고,
+    그 길이에서 한 문장이 1668회 반복돼 영상의 41.4%를 먹었다(D26).
+
+    비트레이트가 바뀌면 같은 바이트 수가 다른 길이가 되므로, 바이트만으로는 길이를
+    영영 못 막는다. 그래서 한도가 둘이다.
     """
-    return max(1, math.ceil(size_bytes / cfg.chunk_max_bytes))
+    by_bytes = math.ceil(size_bytes / cfg.chunk_max_bytes)
+    by_seconds = math.ceil(duration / cfg.chunk_max_seconds) if cfg.chunk_max_seconds > 0 else 1
+    return max(1, by_bytes, by_seconds)
 
 
 def target_boundaries(duration: float, count: int) -> list[float]:
@@ -64,7 +71,7 @@ def plan_cuts(
     """
     cuts: list[float] = []
     previous = 0.0
-    for target in target_boundaries(duration, chunk_count(size_bytes, cfg)):
+    for target in target_boundaries(duration, chunk_count(size_bytes, duration, cfg)):
         cut = find_quiet(target)
         if not previous < cut < duration:
             cut = target if previous < target < duration else (previous + duration) / 2

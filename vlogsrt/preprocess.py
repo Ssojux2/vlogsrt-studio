@@ -11,11 +11,14 @@ import array
 import shutil
 import subprocess
 from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
 
 from . import cutpoints, log
 from .config import Config
-from .models import Chunk
+from .models import Chunk, Span
+
+REPAIR_DIR = "repair"  # 재전사 조각은 따로 둔다. 1차 조각을 덮어쓰면 안 된다
 
 
 def require_ffmpeg(tool: str = "ffmpeg") -> str:
@@ -166,3 +169,30 @@ def split_at(audio: Path, cuts: Sequence[float], workdir: Path) -> list[Chunk]:
         Chunk(path=workdir / name, offset=start, duration=end - start, index=index)
         for index, (name, start, end) in enumerate(rows)
     ]
+
+
+def cut_spans(audio: Path, spans: Sequence[Span], duration: float, workdir: Path) -> list[Chunk]:
+    """지목된 구간만 다시 잘라낸다. 되풀이를 다시 물어보기 위한 조각이다(D27).
+
+    **1차 분할과 같은 장치를 쓴다** — 구간 경계를 전부 자를 자리로 넘겨 `split_at`을
+    한 번 돌리고, 원하는 구간에 해당하는 조각만 고른다. `-ss`로 따로 탐색하지 않는
+    이유는 D13과 같다: 요청한 시각과 실제로 잘린 시각이 mp3 프레임 경계만큼 다르고,
+    그 차이를 오프셋으로 쓰면 자막이 통째로 밀린다. 여기서도 오프셋은 ffmpeg가
+    CSV로 알려준 실제값이다.
+
+    **버리는 구간이 아니다.** 여기서 고르지 않은 조각은 1차 전사 결과가 그대로 남는다.
+    """
+    if not spans:
+        return []
+    cuts = sorted({edge for span in spans for edge in span if 0.0 < edge < duration})
+    if not cuts:
+        # 구간이 오디오 전체다. 자를 자리가 없으면 원본이 곧 그 조각이다(`make_chunks`와 같다).
+        # 빈 `-segment_times`를 넘기면 ffmpeg가 "Empty time specification"으로 죽는다.
+        return [Chunk(path=audio, offset=0.0, duration=duration, index=0)]
+    pieces = split_at(audio, cuts, workdir / REPAIR_DIR)
+    wanted = [
+        piece
+        for piece in pieces
+        if any(low <= piece.offset + piece.duration / 2 < high for low, high in spans)
+    ]
+    return [replace(piece, index=index) for index, piece in enumerate(wanted)]

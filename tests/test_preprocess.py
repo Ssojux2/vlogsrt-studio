@@ -11,6 +11,7 @@ from vlogsrt import preprocess
 from vlogsrt.config import Config
 from vlogsrt.preprocess import (
     amplitudes,
+    cut_spans,
     extract_audio,
     find_quiet_point,
     make_chunks,
@@ -227,3 +228,43 @@ def test_split_at_real(tone: Path, tmp_path: Path) -> None:
     assert chunks[1].offset == pytest.approx(3.5, abs=0.2)
     total = sum(probe_duration(chunk.path) for chunk in chunks)
     assert total == pytest.approx(probe_duration(audio), abs=0.3)
+
+
+@needs_ffmpeg
+def test_cut_spans_pulls_out_just_the_asked_range(tone: Path, tmp_path: Path) -> None:
+    """되풀이 구간만 다시 잘라낸다. 오프셋은 ffmpeg가 알려준 실제값이다(D27)."""
+    audio = extract_audio(tone, tmp_path / "full.mp3", Config())
+    duration = probe_duration(audio)
+    chunks = cut_spans(audio, [(2.0, 5.0)], duration, tmp_path / "work")
+    assert len(chunks) == 1
+    assert chunks[0].path.is_file()
+    assert chunks[0].offset == pytest.approx(2.0, abs=0.2)
+    assert probe_duration(chunks[0].path) == pytest.approx(3.0, abs=0.3)
+
+
+@needs_ffmpeg
+def test_a_span_covering_everything_does_not_kill_ffmpeg(tone: Path, tmp_path: Path) -> None:
+    """**되풀이가 오디오 전체일 때의 회귀 테스트.**
+
+    자를 자리가 하나도 없으면 빈 `-segment_times`가 넘어가 ffmpeg가
+    "Empty time specification"으로 죽었다. 그러면 그 실행의 되풀이가 전부 접혔다 —
+    한 구간의 경계 조건이 다른 구간의 자막까지 데려가는 셈이다(D27).
+    """
+    audio = extract_audio(tone, tmp_path / "full.mp3", Config())
+    duration = probe_duration(audio)
+    chunks = cut_spans(audio, [(0.0, duration)], duration, tmp_path / "work")
+    assert len(chunks) == 1
+    assert chunks[0].offset == 0.0
+    assert chunks[0].path == audio  # 자를 자리가 없으면 원본이 곧 그 조각이다
+
+
+@needs_ffmpeg
+def test_cut_spans_returns_one_chunk_per_span(tone: Path, tmp_path: Path) -> None:
+    """계획과 조각은 순서로 짝지어진다. 수가 어긋나면 남의 자막이 그 자리에 선다."""
+    audio = extract_audio(tone, tmp_path / "full.mp3", Config())
+    duration = probe_duration(audio)
+    spans = [(0.5, 2.0), (3.0, 4.5), (5.0, 6.5)]
+    chunks = cut_spans(audio, spans, duration, tmp_path / "work")
+    assert len(chunks) == len(spans)
+    for chunk, (low, _high) in zip(chunks, spans, strict=True):
+        assert chunk.offset == pytest.approx(low, abs=0.2)

@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from vlogsrt import pipeline
+from vlogsrt import TRACE_VERSION, pipeline
 from vlogsrt.cli import main
 from vlogsrt.config import Config
 from vlogsrt.output import parse_srt
@@ -63,7 +63,7 @@ def test_chunk_offsets_survive_into_the_srt(tmp_path: Path) -> None:
 def test_trace_carries_the_new_version(tmp_path: Path) -> None:
     pipeline.run(VIDEO, Config(), tmp_path, force_offline=True)
     trace = json.loads((tmp_path / "trace.json").read_text(encoding="utf-8"))
-    assert trace["version"] == "6.0"
+    assert trace["version"] == TRACE_VERSION
     # 길이 0 세그먼트도 글자가 있으면 골격에 남는다(규칙 9). 뒤집히지만 않으면 된다.
     assert all(segment["start"] <= segment["end"] for segment in trace["spine"])
 

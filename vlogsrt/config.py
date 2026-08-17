@@ -11,8 +11,9 @@ from dataclasses import dataclass, fields, replace
 from pathlib import Path
 from typing import Any
 
+PACKAGE_ROOT = Path(__file__).resolve().parent.parent
 PROJECT_TOML = Path("vlogsrt.toml")
-PRESET_DIRS = (Path("presets"), Path(__file__).resolve().parent.parent / "presets")
+PRESET_DIRS = (Path("presets"), PACKAGE_ROOT / "presets")
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,6 +27,21 @@ class Config:
     # **whisper에는 prompt를 보내지 않는다** — 힌트는 검증 모델로만 간다(규칙 6, D16).
     transcribe_model: str = "whisper-1"
     transcribe_format: str = "verbose_json"
+    # 0이면 API가 로그 확률을 보고 온도를 스스로 올린다. 다만 **반복 환청에는 반응하지
+    # 않는다** — 되풀이에 빠진 whisper는 확신에 차 있어 로그 확률이 멀쩡하다(D27 실측:
+    # compression_ratio > 2.4인 248개 세그먼트 중 avg_logprob < -1.0은 0개).
+    # 그래서 되풀이는 재전사가 잡는다.
+    transcribe_temperature: float = 0.0
+    # ─── 되풀이 재전사 (기본으로 켜져 있다) ──────────────────
+    # 되풀이 구간만 다시 잘라 whisper에 다시 묻고, gpt-transcribe가 심판한다(D27).
+    # **출력을 바꾸는 유일한 판정 계층이다** — 끄려면 `--no-repair`.
+    repair_enabled: bool = True
+    # 재호출은 1차와 다른 온도로 나간다. 같은 온도로 다시 물으면 같은 답이 온다.
+    repair_temperature: float = 0.4
+    repair_temperature_step: float = 0.2
+    repair_max_attempts: int = 2
+    repair_margin: float = 2.0  # 재전사 구간 앞뒤 여유. 경계에서 어절이 잘리지 않게 한다
+    repair_min_seconds: float = 3.0  # 이보다 짧은 되풀이는 그냥 둔다
     # ─── 검증 (기본으로 켜져 있다) ───────────────────────────
     # 자막을 다시 한 번 다른 모델로 받아 대조한다. **출력을 바꾸지 못하고 표시만 한다**
     # (규칙 5). 그래서 켜 두는 것이 기본이다 — 비용은 2배지만 자막은 그대로다.
@@ -38,6 +54,16 @@ class Config:
     loop_min_repeats: int = 3
     loop_min_seconds: float = 2.0
     loop_min_chars: int = 2
+    # whisper 레퍼런스 구현의 `compression_ratio_threshold`. 응답이 세그먼트마다
+    # 실어 보내는 값이라 공짜로 얻는 신호다. 실측 분포가 2.4에서 깨끗하게 갈렸다(D27).
+    loop_compression_ratio: float = 2.4
+    # 압축률을 재는 창. **통째로 재면 길이 검사가 된다** — 정상 발화도 길어지기만 하면
+    # 임계값을 넘는다(실측: 정상 세그먼트 529개를 이어붙이면 2.45). 60어절에서 분포가
+    # 갈렸다: 정상 최대 2.01 / 되풀이 최소 3.01.
+    loop_ratio_window_words: int = 60
+    # 재전사 결과에서 되풀이가 이 비율을 넘게 덮으면 회복 실패로 본다. 일부만 되풀이인
+    # 결과는 통째로 버리지 않는다 — 원본보다는 낫다.
+    loop_repetitive_share: float = 0.5
 
     api_max_retries: int = 4
     api_backoff_base: float = 2.0
@@ -53,6 +79,10 @@ class Config:
     # 25MB — 안전 여유를 두고 24MB. 64kbps 모노면 조각 하나에 약 50분이 들어간다.
     # 낮추면 조각이 늘어난다: whisper가 긴 조각에서 반복 루프에 빠질 때의 탈출구다(D13).
     chunk_max_bytes: int = 24_000_000
+    # **두 한도 중 작은 쪽이 이긴다**(D27). 바이트만으로는 못 막는다 — 비트레이트가
+    # 바뀌면 같은 24MB가 38분이 되고, 그 길이에서 whisper가 무너진다(D26: 영상의
+    # 41.4%가 되풀이). 초 한도는 D13에서 근거를 얻은 `chunk_max_seconds = 600`이다.
+    chunk_max_seconds: float = 600.0
     # 아래 셋은 외부 근거가 없다. 자를 자리를 고를 뿐이라 틀려도 구간이 사라지지 않는다.
     cut_search_seconds: float = 5.0  # 목표 경계 앞뒤로 조용한 곳을 찾는 범위
     cut_probe_rate: int = 4000  # 진폭 디코딩 주파수. 에너지만 보면 되니 낮춰도 된다
@@ -144,6 +174,26 @@ def read_toml(path: Path) -> dict[str, Any]:
     return flatten_toml(raw, str(path))
 
 
+def find_project_toml(path: Path = PROJECT_TOML) -> Path | None:
+    """프로젝트 설정 파일. 현재 디렉터리에 없으면 패키지 기준으로도 찾는다.
+
+    상대 경로만 보던 시절, UI나 다른 폴더에서 실행하면 `vlogsrt.toml`을 못 찾고
+    코드 기본값으로 돌아갔다. D26이 `chunk_max_bytes`를 낮췄는데도 38분 조각으로
+    돌아 되풀이가 재발한 것이 이 경로였다(D27). 프리셋은 이미 이렇게 찾고 있었다.
+
+    **최선의 노력일 뿐이다.** 소스 체크아웃에서는 통하지만 wheel로 설치하면
+    `PACKAGE_ROOT`가 `site-packages`라 그 파일이 없다. 그래서 되풀이를 실제로 막는
+    값(`chunk_max_seconds = 600`)은 설정 파일이 아니라 `Config` 기본값에 있다.
+    """
+    if path.is_absolute():
+        return path if path.is_file() else None
+    for base in (Path.cwd(), PACKAGE_ROOT):
+        candidate = base / path
+        if candidate.is_file():
+            return candidate
+    return None
+
+
 def find_preset(name: str) -> Path:
     for directory in PRESET_DIRS:
         candidate = directory / f"{name}.toml"
@@ -160,8 +210,9 @@ def load_config(
 ) -> Config:
     """기본값 → vlogsrt.toml → 프리셋 → CLI 순으로 덮어쓴다."""
     merged: dict[str, Any] = {}
-    if project_toml.is_file():
-        merged.update(read_toml(project_toml))
+    found = find_project_toml(project_toml)
+    if found:
+        merged.update(read_toml(found))
     if preset:
         merged.update(read_toml(find_preset(preset)))
     if overrides:

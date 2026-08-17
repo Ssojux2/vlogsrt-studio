@@ -20,7 +20,7 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from vlogsrt import env, keywords, pipeline, preprocess, transcribe, verify
+from vlogsrt import env, keywords, pipeline, preprocess, repair, transcribe, verify
 from vlogsrt.config import Config, load_config
 
 VIDEO_SUFFIXES = (".mp4", ".mov", ".m4v", ".mkv", ".avi", ".webm", ".m4a", ".mp3", ".wav")
@@ -351,11 +351,14 @@ def _progress_lines(captured: str) -> list[str]:
 
 def _summary(result: pipeline.RunResult) -> str:
     last = result.cues[-1].end if result.cues else 0.0
-    line = f"결과   큐 {len(result.cues)}개 · 마지막 자막 {last:.0f}초"
-    if result.verification is None:
-        return line
-    # 교차 확인은 표시만 한다 — 위 SRT는 이 결과와 무관하게 이미 확정됐다(규칙 5).
-    return f"{line}\n확인   {verify.summarize(result.verification)}"
+    lines = [f"결과   큐 {len(result.cues)}개 · 마지막 자막 {last:.0f}초"]
+    if result.repairs:
+        # 되풀이 재전사는 **자막을 실제로 바꾼 유일한 단계다**(D27). 그래서 반드시 보인다.
+        lines.append(f"수리   {repair.summarize(result.repairs)}")
+    if result.verification is not None:
+        # 교차 확인은 표시만 한다 — 위 SRT는 이 결과와 무관하게 이미 확정됐다(규칙 5).
+        lines.append(f"확인   {verify.summarize(result.verification)}")
+    return "\n".join(lines)
 
 
 def _join(lines: list[str], *extra: str) -> str:

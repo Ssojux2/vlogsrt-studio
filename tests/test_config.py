@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from vlogsrt.config import Config, find_preset, flatten_toml, load_config
+from vlogsrt.config import Config, find_preset, find_project_toml, flatten_toml, load_config
 from vlogsrt.keywords import dedupe, load_keywords, parse_keywords, split_inline
 
 NO_PROJECT_TOML = Path("does-not-exist.toml")
@@ -43,6 +43,32 @@ def test_preset_beats_project_toml(tmp_path: Path) -> None:
     project.write_text("[refine]\nmax_chars_per_line = 30\n", encoding="utf-8")
     assert load_config(project_toml=project).max_chars_per_line == 30
     assert load_config(preset="shorts", project_toml=project).max_chars_per_line == 12
+
+
+def test_the_project_toml_is_found_from_any_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**D27 사고의 회귀 테스트.** 다른 폴더에서 실행해도 설정이 적용돼야 한다.
+
+    현재 디렉터리만 보던 시절, UI에서 돌리면 `vlogsrt.toml`을 못 찾고 코드 기본값으로
+    돌아갔다. D26이 조각을 10분으로 낮췄는데도 38분 조각으로 실행된 경로가 이것이다.
+    """
+    monkeypatch.chdir(tmp_path)
+    assert find_project_toml() is not None
+    # 프로젝트 toml은 코드 기본값보다 조각을 잘게 쪼갠다. 값이 다르면 파일을 읽은 것이다.
+    assert load_config().chunk_max_bytes != Config().chunk_max_bytes
+
+
+def test_a_missing_toml_is_not_invented(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    assert find_project_toml(NO_PROJECT_TOML) is None
+
+
+def test_chunk_length_has_two_ceilings() -> None:
+    """D27 — 바이트만으로는 조각 **길이**를 못 막는다. 비트레이트가 바뀌면 무너진다."""
+    cfg = Config()
+    assert cfg.chunk_max_seconds == 600.0
+    assert cfg.chunk_max_bytes <= 25_000_000
 
 
 def test_none_overrides_are_ignored() -> None:

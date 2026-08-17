@@ -9,10 +9,12 @@
   낮으면 whisper가 잘못 들었을 가능성 — 의심 큐.
 - **조각 유사도(similarity)**: 구간 내 자막 전체 vs 검증 텍스트. 큐들이 멀쩡해도
   유사도가 낮으면 자막이 놓친 발화가 있다는 뜻이다. 조각 수준으로만 표시한다.
-- **반복 환청(loops)**: 연속 세그먼트가 같은 말을 되풀이하는 구간. whisper가 긴
-  조각에서 빠지는 병리다(D13: 38분 조각에서 539초, 11.7%).
+- **되풀이(loops)**: 같은 말이 되풀이되는 구간. 검출은 `repetition.py`가 하고
+  여기서는 **남은 것만 표시한다** — 재전사(`repair.py`)가 먼저 걷어내므로, 여기에
+  뜨는 것은 다시 물어봐도 회복하지 못했거나 다시 물어보지 않은 구간이다(D27).
 
-**찾아도 빼지 않는다**(규칙 9). 자막에 쓰레기가 보이는 편이 공백보다 낫다.
+**여기서는 찾아도 빼지 않는다**(규칙 5). 자막을 바꾸는 것은 재전사뿐이고, 그것도
+골격이 조립되기 전에 끝난다. 이 모듈이 도는 시점에 SRT는 이미 디스크에 있다.
 """
 
 from __future__ import annotations
@@ -21,9 +23,10 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 
+from . import repetition
 from .config import Config
-from .hangul import strip_for_compare, to_nfc
-from .models import Cue, Segment, Span
+from .hangul import strip_for_compare
+from .models import Cue, Repeat, Segment, Span
 from .transcribe import ChunkResponse, parse_text
 
 
@@ -49,24 +52,10 @@ class CueCheck:
 
 
 @dataclass(frozen=True, slots=True)
-class Loop:
-    """같은 텍스트가 연속된 세그먼트에서 되풀이된 구간."""
-
-    start: float
-    end: float
-    count: int
-    text: str
-
-    @property
-    def duration(self) -> float:
-        return self.end - self.start
-
-
-@dataclass(frozen=True, slots=True)
 class Verification:
     chunks: tuple[ChunkCheck, ...]
     suspects: tuple[CueCheck, ...]
-    loops: tuple[Loop, ...]
+    loops: tuple[Repeat, ...]
     cue_total: int
 
 
@@ -86,8 +75,10 @@ def verify(
 ) -> Verification:
     """순수 함수. 입력을 바꾸지 않고 플래그만 만든다(규칙 5)."""
     ordered = sorted(responses, key=lambda response: response.offset)
+    loops = tuple(repetition.find_repeats(spine, cfg))
     if not ordered:
-        return Verification(chunks=(), suspects=(), loops=(), cue_total=len(cues))
+        # 대조할 응답이 없어도 되풀이는 골격만 보면 알 수 있다. 그것까지 잃을 이유는 없다.
+        return Verification(chunks=(), suspects=(), loops=loops, cue_total=len(cues))
 
     chunk_checks: list[ChunkCheck] = []
     suspects: list[CueCheck] = []
@@ -100,29 +91,9 @@ def verify(
     return Verification(
         chunks=tuple(chunk_checks),
         suspects=tuple(suspects),
-        loops=tuple(find_loops(spine, cfg)),
+        loops=loops,
         cue_total=len(cues),
     )
-
-
-def find_loops(spine: Sequence[Segment], cfg: Config) -> list[Loop]:
-    """연속 세그먼트가 같은 말을 되풀이하는 구간.
-
-    세그먼트 하나만 보면 정상이라 whisper의 환청 필터를 그대로 통과한다. 실측: 한
-    문장이 103개 세그먼트에 걸쳐 570초 동안 반복됐다(D13).
-    """
-    loops: list[Loop] = []
-    position = 0
-    while position < len(spine):
-        text = _key(spine[position])
-        last = position
-        while last + 1 < len(spine) and text and _key(spine[last + 1]) == text:
-            last += 1
-        run = spine[position : last + 1]
-        if _qualifies(run, text, cfg):
-            loops.append(Loop(start=run[0].start, end=run[-1].end, count=len(run), text=text))
-        position = last + 1
-    return loops
 
 
 def summarize(verification: Verification) -> str:
@@ -158,17 +129,6 @@ def details(verification: Verification, limit: int = 10) -> list[str]:
     if len(verification.suspects) > limit:
         lines.append(f"  … 의심 큐 {len(verification.suspects) - limit}개 더")
     return lines
-
-
-def _key(segment: Segment) -> str:
-    """비교용 표준형. 공백과 유니코드 정규화 차이로 반복을 놓치지 않게 한다."""
-    return " ".join(to_nfc(segment.text).split())
-
-
-def _qualifies(run: Sequence[Segment], text: str, cfg: Config) -> bool:
-    if not text or len(run) < cfg.loop_min_repeats or len(text) < cfg.loop_min_chars:
-        return False
-    return run[-1].end - run[0].start >= cfg.loop_min_seconds
 
 
 def _check_chunk(

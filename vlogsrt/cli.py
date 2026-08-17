@@ -9,7 +9,18 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from . import __version__, cutpoints, env, evaluate, keywords, log, pipeline, preprocess, transcribe
+from . import (
+    __version__,
+    cutpoints,
+    env,
+    evaluate,
+    keywords,
+    log,
+    pipeline,
+    preprocess,
+    repair,
+    transcribe,
+)
 from .config import Config, format_config, load_config
 from .evaluate import DASHBOARD_HEADER, build_dashboard_row
 from .output import parse_srt
@@ -33,6 +44,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-verify",
         action="store_true",
         help="교차 확인을 끈다. 기본은 켜져 있고, 표시만 하므로 자막은 안 바뀐다.",
+    )
+    run.add_argument(
+        "--no-repair",
+        action="store_true",
+        help="되풀이 재전사를 끈다. 기본은 켜져 있다 — 되풀이 구간만 다시 물어 갈아끼운다.",
     )
 
     again = sub.add_parser("redo", help="API 없이 정제·출력만 재실행")
@@ -135,7 +151,13 @@ def cmd_run(args: argparse.Namespace) -> int:
         prepared = pipeline.prepare(args.video, cfg, offline=args.offline or not online)
         cost = transcribe.estimate_cost(prepared.duration, cfg) * (1 if args.no_verify else 2)
         pieces = max(1, len(prepared.chunks))
-        log.out(f"길이 {prepared.duration:.1f}초 · 조각 {pieces}개 · 예상 ${cost:.3f}")
+        log.out(
+            f"길이 {prepared.duration:.1f}초 · 조각 {pieces}개"
+            f"(각 {prepared.duration / pieces / 60:.1f}분) · 예상 ${cost:.3f}"
+        )
+        if not args.no_repair:
+            # 되풀이가 얼마나 나올지는 전사해봐야 안다. 0원일 수도, 26%일 수도 있다(D27).
+            log.out("되풀이 재전사가 켜져 있다 — 되풀이 구간 길이만큼 비용이 더 붙는다.")
         return 0
     if online:
         # 오디오를 뽑기 전에 원본 길이만 보고 확인한다. ffprobe는 즉시 끝난다.
@@ -149,7 +171,10 @@ def cmd_run(args: argparse.Namespace) -> int:
         online=online,
         force_offline=args.offline,
         verify_with_second_model=not args.no_verify,
+        repair_repeats=not args.no_repair,
     )
+    if result.repairs:
+        log.out(repair.summarize(result.repairs))
     for name, path in result.outputs.items():
         if not name.endswith("_alias"):
             log.out(f"{name}: {path}")
@@ -219,10 +244,13 @@ def cmd_probe(args: argparse.Namespace) -> int:
     workdir = env.work_dir() / "probe"
     audio = preprocess.extract_audio(args.video, workdir / f"{args.video.stem}.mp3", cfg)
     size = audio.stat().st_size
-    pieces = cutpoints.chunk_count(size, cfg)
+    pieces = cutpoints.chunk_count(size, duration, cfg)
     log.out(f"길이       {duration:.2f}초")
     log.out(f"오디오     {audio} ({size / 1_000_000:.2f}MB)")
-    log.out(f"조각       {pieces}개 = 요청 {pieces}회 (한도 {cfg.chunk_max_bytes / 1e6:.0f}MB)")
+    log.out(
+        f"조각       {pieces}개 · 각 {duration / pieces / 60:.1f}분 "
+        f"(한도 {cfg.chunk_max_bytes / 1e6:.1f}MB / {cfg.chunk_max_seconds / 60:.0f}분)"
+    )
     log.out(f"예상 비용   ${transcribe.estimate_cost(duration, cfg):.3f}")
     return 0
 

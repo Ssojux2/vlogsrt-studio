@@ -10,9 +10,9 @@ import hashlib
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from . import env, log, preprocess, refine, transcribe, verify
+from . import env, log, preprocess, refine, repair, transcribe, verify
 from .config import Config
-from .models import Chunk, Cue, Segment, Trace
+from .models import Chunk, Cue, Repair, Segment, Trace
 from .output import save_srt
 from .transcribe import VERIFY_KIND, LiveTranscriber, Transcriber, TranscriptionJob
 from .verify import Verification
@@ -24,6 +24,8 @@ class Prepared:
     duration: float
     chunks: tuple[Chunk, ...]
     source: str = ""
+    audio: Path | None = None  # 되풀이 구간을 다시 자르려면 원본 오디오가 필요하다(D27)
+    workdir: Path | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,6 +34,7 @@ class RunResult:
     cues: tuple[Cue, ...]
     outputs: dict[str, Path]
     verification: Verification | None = None
+    repairs: tuple[Repair, ...] = ()
 
 
 # ─────────────────────────────────────────────────────────────
@@ -64,17 +67,9 @@ def prepare(
     """
     stem = video.stem
     if offline:
-        meta = transcribe.load_meta(env.fixture_dir(), stem)
-        if meta.get("duration"):
-            log.info(f"메타 픽스처 사용: {stem} ({float(meta['duration']):.1f}초)")
-            return Prepared(
-                stem=stem, duration=float(meta["duration"]), chunks=(), source=str(video)
-            )
-        if not video.is_file():
-            raise RuntimeError(
-                f"영상도 메타 픽스처도 없습니다: {video}\n"
-                f"사람이 `vlogsrt record {video}`를 실행해야 합니다."
-            )
+        from_fixture = _prepare_from_fixture(video, stem)
+        if from_fixture:
+            return from_fixture
 
     if not video.is_file():
         raise RuntimeError(f"영상을 찾지 못했습니다: {video}")
@@ -91,8 +86,43 @@ def prepare(
     duration = preprocess.probe_duration(audio)
 
     chunks = tuple(preprocess.make_chunks(audio, duration, cfg, cache))
-    log.info(f"조각 {len(chunks)}개")
-    return Prepared(stem=stem, duration=duration, chunks=chunks, source=str(video))
+    _announce(chunks, duration, cfg)
+    return Prepared(
+        stem=stem,
+        duration=duration,
+        chunks=chunks,
+        source=str(video),
+        audio=audio,
+        workdir=cache,
+    )
+
+
+def _prepare_from_fixture(video: Path, stem: str) -> Prepared | None:
+    """메타 픽스처만으로 준비한다. 오디오가 없으므로 되풀이 구간을 다시 자를 수 없다 —
+    그때 재전사는 `<stem>.rescue.json`을 읽는다."""
+    meta = transcribe.load_meta(env.fixture_dir(), stem)
+    if meta.get("duration"):
+        log.info(f"메타 픽스처 사용: {stem} ({float(meta['duration']):.1f}초)")
+        return Prepared(stem=stem, duration=float(meta["duration"]), chunks=(), source=str(video))
+    if not video.is_file():
+        raise RuntimeError(
+            f"영상도 메타 픽스처도 없습니다: {video}\n"
+            f"사람이 `vlogsrt record {video}`를 실행해야 합니다."
+        )
+    return None
+
+
+def _announce(chunks: tuple[Chunk, ...], duration: float, cfg: Config) -> None:
+    """조각 길이를 반드시 찍는다. **설정이 안 먹은 것을 로그에서 바로 봐야 한다.**
+
+    D26이 조각을 10분으로 낮췄는데도 38분 조각으로 돌아 되풀이가 재발한 적이 있다.
+    설정 파일을 못 찾은 실행이었고, 로그만 봐서는 알 수 없었다(D27).
+    """
+    longest = max((chunk.duration for chunk in chunks), default=duration)
+    log.info(
+        f"조각 {len(chunks)}개 · 가장 긴 조각 {longest / 60:.1f}분 "
+        f"(한도 {cfg.chunk_max_bytes / 1e6:.1f}MB / {cfg.chunk_max_seconds / 60:.0f}분)"
+    )
 
 
 # ─────────────────────────────────────────────────────────────
@@ -106,12 +136,25 @@ def build_job(prepared: Prepared, kind: str = transcribe.FIXTURE_KIND) -> Transc
     )
 
 
-def fetch_spine(transcriber: Transcriber, job: TranscriptionJob, cfg: Config) -> list[Segment]:
-    """골격 생성의 끝. 이 뒤로 골격은 불변이다(규칙 2)."""
-    spine = transcribe.build_spine(transcriber.transcribe(job, cfg))
-    if not spine:
+def fetch_draft(transcriber: Transcriber, job: TranscriptionJob, cfg: Config) -> list[Segment]:
+    """1차 전사. **아직 골격이 아니다** — 되풀이 재전사가 끝나야 골격이 확정된다(D27)."""
+    draft = transcribe.build_spine(transcriber.transcribe(job, cfg))
+    if not draft:
         raise RuntimeError("전사 응답에서 세그먼트를 얻지 못했습니다.")
-    return spine
+    return draft
+
+
+def settle_spine(
+    draft: list[Segment], prepared: Prepared, cfg: Config, transcriber: Transcriber
+) -> repair.Settled:
+    """되풀이 구간을 다시 물어 골격을 확정한다. **이 뒤로 골격은 불변이다**(규칙 2)."""
+    source = repair.Source(
+        stem=prepared.stem,
+        duration=prepared.duration,
+        audio=prepared.audio,
+        workdir=prepared.workdir,
+    )
+    return repair.settle(draft, source, cfg, transcriber)
 
 
 def spine_to_cues(spine: list[Segment]) -> list[Cue]:
@@ -143,6 +186,7 @@ def run(
     workdir: Path | None = None,
     artifacts: bool = True,
     verify_with_second_model: bool = True,
+    repair_repeats: bool = True,
 ) -> RunResult:
     """`artifacts=False`면 SRT 하나만 남기고 trace는 쓰지 않는다.
 
@@ -153,27 +197,44 @@ def run(
     offline = force_offline or not online and env.is_offline()
     prepared = prepare(video, cfg, offline=offline, workdir=workdir, reuse_cache=artifacts)
     transcriber = transcribe.get_transcriber(cfg, online=online, force_offline=offline)
+    if not repair_repeats:
+        cfg = replace(cfg, repair_enabled=False)
 
-    spine = fetch_spine(transcriber, build_job(prepared), cfg)
-    log.info(f"골격 {len(spine)}개 세그먼트")
-
-    cues = refine.refine(spine_to_cues(spine), cfg, prepared.duration)
-    if not cues:
-        raise RuntimeError("자막 큐가 하나도 남지 않았습니다. 오디오를 확인하세요.")
-    log.info(f"큐 {len(cues)}개")
-
+    settled = _make_spine(prepared, cfg, transcriber)
+    cues = _make_cues(settled.spine, cfg, prepared.duration)
     trace = Trace(
         source=str(video),
         duration=prepared.duration,
-        spine=tuple(spine),
+        spine=settled.spine,
         cues=tuple(cues),
         config_snapshot=cfg.to_dict(),
+        repairs=settled.repairs,
     )
-    result = _finish(trace, cues, outdir, prepared.stem, artifacts=artifacts)
+    result = replace(
+        _finish(trace, cues, outdir, prepared.stem, artifacts=artifacts),
+        repairs=settled.repairs,
+    )
     if not verify_with_second_model:
         return result
     # SRT는 이미 디스크에 있다. 검증은 여기서부터 무슨 일이 나도 그 파일을 못 건드린다(규칙 5).
     return replace(result, verification=report_verification(result, prepared, cfg, transcriber))
+
+
+def _make_spine(prepared: Prepared, cfg: Config, transcriber: Transcriber) -> repair.Settled:
+    """1차 전사 → 되풀이 재전사 → 골격 확정. 이 함수가 끝나면 골격은 불변이다(규칙 2)."""
+    draft = fetch_draft(transcriber, build_job(prepared), cfg)
+    log.info(f"1차 전사 {len(draft)}개 세그먼트")
+    settled = settle_spine(draft, prepared, cfg, transcriber)
+    log.info(f"골격 {len(settled.spine)}개 세그먼트")
+    return settled
+
+
+def _make_cues(spine: tuple[Segment, ...], cfg: Config, duration: float) -> list[Cue]:
+    cues = refine.refine(spine_to_cues(list(spine)), cfg, duration)
+    if not cues:
+        raise RuntimeError("자막 큐가 하나도 남지 않았습니다. 오디오를 확인하세요.")
+    log.info(f"큐 {len(cues)}개")
+    return cues
 
 
 def _finish(
@@ -224,10 +285,15 @@ def record_fixtures(
     """
     prepared = prepare(video, cfg, offline=False)
     outputs: dict[str, Path] = {
-        transcribe.FIXTURE_KIND: _record_one(prepared, cfg, transcribe.FIXTURE_KIND, reuse_existing)
+        transcribe.FIXTURE_KIND: _record_one(
+            prepared, prepared.chunks, cfg, transcribe.FIXTURE_KIND, reuse_existing
+        )
     }
     if verify:
-        outputs[VERIFY_KIND] = _record_one(prepared, cfg, VERIFY_KIND, reuse_existing)
+        outputs[VERIFY_KIND] = _record_one(
+            prepared, prepared.chunks, cfg, VERIFY_KIND, reuse_existing
+        )
+    outputs.update(_record_repair(prepared, cfg, reuse_existing))
 
     outputs["meta"] = transcribe.save_meta(
         env.fixture_dir(), prepared.stem, cfg, prepared.duration, len(prepared.chunks)
@@ -235,7 +301,44 @@ def record_fixtures(
     return outputs
 
 
-def _record_one(prepared: Prepared, cfg: Config, kind: str, reuse_existing: bool) -> Path:
+def _record_repair(prepared: Prepared, cfg: Config, reuse_existing: bool) -> dict[str, Path]:
+    """되풀이가 있으면 재전사·심판 응답도 녹화한다. 없으면 한 푼도 안 쓴다.
+
+    녹화된 1차 응답에서 되풀이를 찾아 **실행 때와 같은 자리**를 자른다. 그래야
+    오프라인 재생이 같은 구간을 같은 오프셋으로 되짚는다.
+    """
+    if not cfg.repair_enabled:
+        return {}
+    draft = transcribe.build_spine(
+        transcribe.FixtureTranscriber(fixture_dir=env.fixture_dir()).transcribe(
+            build_job(prepared), cfg
+        )
+    )
+    source = repair.Source(
+        stem=prepared.stem,
+        duration=prepared.duration,
+        audio=prepared.audio,
+        workdir=prepared.workdir,
+    )
+    spans = repair.plan_spans(draft, source, cfg)
+    if not spans or not prepared.audio or not prepared.workdir:
+        log.info("되풀이가 없어 재전사 픽스처는 녹화하지 않는다.")
+        return {}
+    chunks = tuple(preprocess.cut_spans(prepared.audio, spans, prepared.duration, prepared.workdir))
+    hotter = replace(cfg, transcribe_temperature=cfg.repair_temperature)
+    return {
+        transcribe.RESCUE_KIND: _record_one(
+            prepared, chunks, hotter, transcribe.RESCUE_KIND, reuse_existing
+        ),
+        transcribe.ARBITER_KIND: _record_one(
+            prepared, chunks, cfg, transcribe.ARBITER_KIND, reuse_existing
+        ),
+    }
+
+
+def _record_one(
+    prepared: Prepared, chunks: tuple[Chunk, ...], cfg: Config, kind: str, reuse_existing: bool
+) -> Path:
     """이미 받아둔 응답이 있으면 다시 결제하지 않는다."""
     fixture_dir = env.fixture_dir()
     path = fixture_dir / f"{prepared.stem}.{kind}.json"
@@ -244,11 +347,9 @@ def _record_one(prepared: Prepared, cfg: Config, kind: str, reuse_existing: bool
         return path
     transcriber = LiveTranscriber(api_key=env.require_api_key(force=True), base_url=env.base_url())
     log.info(f"{kind} 호출 중…")
+    job = TranscriptionJob(stem=prepared.stem, chunks=chunks, source=prepared.source, kind=kind)
     return transcribe.save_fixture(
-        fixture_dir,
-        prepared.stem,
-        kind,
-        transcriber.transcribe(build_job(prepared, kind), cfg),
+        fixture_dir, prepared.stem, kind, transcriber.transcribe(job, cfg)
     )
 
 
@@ -260,4 +361,5 @@ def redo(trace_path: Path, cfg: Config, outdir: Path) -> RunResult:
     stem = Path(trace.source).stem
     cues = refine.refine(spine_to_cues(list(trace.spine)), cfg, trace.duration)
     updated = replace(trace, cues=tuple(cues), config_snapshot=cfg.to_dict())
-    return _finish(updated, cues, outdir, stem)
+    # 재전사는 API가 필요하다. 골격에 이미 반영돼 있으니 기록만 그대로 들고 간다.
+    return replace(_finish(updated, cues, outdir, stem), repairs=trace.repairs)

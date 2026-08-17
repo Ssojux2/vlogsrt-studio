@@ -6,4 +6,4 @@
 """
 
 __version__ = "0.1.0"
-TRACE_VERSION = "6.0"  # 시각의 출처가 다시 whisper segments[]로 돌아왔다(D25)
+TRACE_VERSION = "7.0"  # 세그먼트가 whisper의 신뢰도 메타를 싣고, 되풀이 재전사가 기록된다(D27)

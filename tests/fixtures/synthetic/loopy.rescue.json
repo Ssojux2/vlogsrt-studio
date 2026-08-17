@@ -1,0 +1,20 @@
+{
+  "_comment": "되풀이 구간(10~40초)만 다시 자른 조각의 응답. 구간은 되풀이 세그먼트들의 시작~끝이다 — 앞뒤 여유(2초)에 걸치는 세그먼트가 있으면 그것까지 통째로 데려가 구간이 넓어진다. offset 10.0이 ffmpeg가 알려준 실제 자리이고, 세그먼트 시각은 조각 좌표다 — 더하면 원본 오디오 시각이 된다(규칙 1).",
+  "chunks": [
+    {
+      "index": 0,
+      "offset": 10.0,
+      "response": {
+        "task": "transcribe",
+        "language": "korean",
+        "duration": 30.0,
+        "segments": [
+          {"id": 0, "start": 0.0, "end": 5.0, "text": " 여기 골목이 꼬불꼬불하고", "compression_ratio": 1.09, "avg_logprob": -0.28, "no_speech_prob": 0.07},
+          {"id": 1, "start": 6.0, "end": 12.0, "text": " 안으로 들어갔다가 다시 나왔어요", "compression_ratio": 1.15, "avg_logprob": -0.26, "no_speech_prob": 0.06},
+          {"id": 2, "start": 13.0, "end": 20.0, "text": " 이쪽으로 가면 작은 광장이 나옵니다", "compression_ratio": 1.21, "avg_logprob": -0.24, "no_speech_prob": 0.05},
+          {"id": 3, "start": 21.0, "end": 28.0, "text": " 돌바닥이 예쁘게 깔려 있네요", "compression_ratio": 1.17, "avg_logprob": -0.27, "no_speech_prob": 0.05}
+        ]
+      }
+    }
+  ]
+}
