@@ -99,6 +99,20 @@ PLAN이 나타나면 이 세 항목을 대조해야 한다.
 
 ---
 
+## D10. 검증하지 못한 것
+
+다음은 **골든셋과 실제 API 픽스처가 있어야** 판정할 수 있다. 현재는 미검증이다.
+
+- 관문 1·2·3, 최종 관문 (전부 `docs/DASHBOARD.md` 참조)
+- T1.6 `srt` vs `segments[]` 동등성 — `response_format="srt"` 픽스처가 필요하다
+- 청크 분할의 실제 동작 — 24MB를 넘는 실제 오디오가 필요하다
+  (분할 계획 로직은 `tests/test_preprocess.py`에서 순수 함수로 검증했다)
+- `LiveTranscriber`의 재시도 경로 — 실제 429/5xx 응답이 필요하다
+- UI의 유료 버튼(녹화) — 무료 경로와 차단 로직은 실제 서버를 띄워 확인했지만,
+  실제 API를 부르는 경로는 못 돌려봤다
+
+---
+
 ## D11. gradio UI는 패키지 **밖**에 둔다
 
 불변 규칙 7은 의존성을 `openai`, `tomli-w`, `rich` 셋으로 못 박는다. 웹 UI 요청이
@@ -128,17 +142,3 @@ service는 gradio를 import하지 않아 UI 없이도 테스트가 돈다
 - `no_site_packages = true`를 켰다. ui extra가 numpy를 끌어오는데 numpy 스텁이
   3.12 문법이라 `python_version = "3.11"` 설정으로는 파싱조차 실패했다.
   이제 mypy 결과가 무엇이 설치돼 있는지에 흔들리지 않는다
-
----
-
-## D10. 검증하지 못한 것
-
-다음은 **골든셋과 실제 API 픽스처가 있어야** 판정할 수 있다. 현재는 미검증이다.
-
-- 관문 1·2·3, 최종 관문 (전부 `docs/DASHBOARD.md` 참조)
-- T1.6 `srt` vs `segments[]` 동등성 — `response_format="srt"` 픽스처가 필요하다
-- 청크 분할의 실제 동작 — 24MB를 넘는 실제 오디오가 필요하다
-  (분할 계획 로직은 `tests/test_preprocess.py`에서 순수 함수로 검증했다)
-- `LiveTranscriber`의 재시도 경로 — 실제 429/5xx 응답이 필요하다
-- UI의 유료 버튼(녹화) — 무료 경로와 차단 로직은 실제 서버를 띄워 확인했지만,
-  실제 API를 부르는 경로는 못 돌려봤다
