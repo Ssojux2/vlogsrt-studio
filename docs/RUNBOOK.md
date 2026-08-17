@@ -103,21 +103,20 @@ vlogsrt run /tmp/test01.mp4 --offline -o out/
 
 ```
 out/test01.srt          ← 최종 자막
-out/test01.review.srt   ← 검토용
 out/test01.report.md    ← 어디를 볼지
 out/trace.json          ← 재실행용 스냅샷
 ```
 
 ### 볼 순서
 
-**① `report.md`의 "우선 확인"** — 신뢰도 낮은 순으로 정렬돼 있다.
-whisper와 gpt 텍스트가 나란히 있으니 어느 쪽이 맞는지 바로 판단된다.
+**① `report.md`의 "검증 — gpt 대조"** — 의심 큐가 일치율 낮은 순으로 정렬돼
+있고, 자막이 발화를 놓쳤을 수 있는 구간도 시각 범위로 나온다.
 
-**② `review.srt`를 영상에 얹어서 본다** — 두 모델이 갈린 글자만 `[?…]`로 싸여 있다.
+**② SRT를 영상에 얹어서 본다** — 의심 큐의 시각으로 바로 건너뛰면 빠르다.
 
 ```bash
 # 미리보기 (자막을 태워서 재생)
-ffplay -vf "subtitles=out/test01.review.srt" /tmp/test01.mp4
+ffplay -vf "subtitles=out/test01.srt" /tmp/test01.mp4
 ```
 
 QuickTime은 SRT를 못 읽는다. IINA나 VLC로 열고 자막 트랙을 얹거나,
@@ -175,9 +174,9 @@ vlogsrt run /tmp/test01.mp4 --offline --keywords-file keywords/ep01.txt -o out/
 3. `vlogsrt record golden/ep0{1,2,3}.mp4` (약 $0.18)
 
 ```bash
-vlogsrt baseline golden/ep01.mp4 --offline -o eval/b0/   # whisper 그대로
-vlogsrt run      golden/ep01.mp4 --offline -o eval/b2/   # 최종
-make eval                                                # → docs/DASHBOARD.md
+vlogsrt run golden/ep01.mp4 --offline --stop-after refine -o eval/b1/  # 정제까지
+vlogsrt run golden/ep01.mp4 --offline -o eval/full/                    # 최종
+make eval                                                              # → docs/DASHBOARD.md
 ```
 
 `vlogsrt eval <내것> <정답>`으로 한 편만 볼 수도 있다.

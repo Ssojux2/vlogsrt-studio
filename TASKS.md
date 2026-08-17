@@ -11,13 +11,13 @@
 | 태스크 | 내용 | 상태 |
 |---|---|---|
 | P0 | 문서 전환 (CLAUDE.md · TASKS.md · D19) | ✅ |
-| P1 | `vlogsrt/verify.py` 신규 (TDD, 오프라인) | ☐ |
-| P2 | 파이프라인 전환 (STAGES 개편, baseline 삭제) | ☐ |
-| P3 | report/review 재작업 (의심 큐 표) | ☐ |
-| P4 | 사상 계열 삭제 (mapping · gapfill) + 모델 슬림 | ☐ |
-| P5 | 가드 재정비 (invariants · 싱크 게이트) | ☐ |
-| P6 | M1-lite: 음질 필터 제거 (D20) | ☐ |
-| P7 | 최종 청소 + 인수 | ☐ |
+| P1 | `vlogsrt/verify.py` 신규 (TDD, 오프라인) | ✅ |
+| P2 | 파이프라인 전환 (STAGES 개편, baseline 삭제) | ✅ |
+| P3 | report/review 재작업 (의심 큐 표) | ✅ |
+| P4 | 사상 계열 삭제 (mapping · gapfill) + 모델 슬림 | ✅ |
+| P5 | 가드 재정비 (invariants · 싱크 게이트) | ✅ |
+| P6 | M1-lite: 음질 필터 제거 (D20) | ✅ |
+| P7 | 최종 청소 + 인수 | ✅ |
 | P8 | 사람 인수: UI로 짧은 영상 1편 온라인 스모크 🧑 | ☐ |
 
 ---

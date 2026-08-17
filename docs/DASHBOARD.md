@@ -6,9 +6,9 @@
 
 | 변형 | 뜻 |
 |---|---|
-| `b0` | whisper 세그먼트를 그대로 뽑은 것 (`vlogsrt baseline`) |
-| `b1` | 정제 엔진까지만 (`--stop-after refine`) |
-| `b2` | 경계 매핑까지 태운 최종 출력 |
+| `b0` | 골격 큐 그대로 (`--stop-after refine` 전 단계와 비교용) |
+| `b1` | 정제 엔진까지 (`--stop-after refine`) |
+| `full` | 최종 출력 (`vlogsrt run`, 검증 포함) |
 | `fast` | `--fast` (word 타임스탬프 없음) |
 
 <!-- vlogsrt:dashboard -->
