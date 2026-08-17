@@ -13,8 +13,11 @@ extra_languages = ["ko", "en"]
 prompt = ""
 
 # 모델과 응답 형식은 여기서 바꾼다. 세그먼트 시각을 주는 조합이어야 한다(D21).
+# diarize 모델은 chunking_strategy가 **필수**이고(기본 "auto"), whisper-1은 이
+# 인자를 모른다 — 되돌릴 때는 세 줄을 함께 바꿔야 한다(D22).
 #   transcribe_model = "whisper-1"
 #   transcribe_format = "verbose_json"
+#   chunking_strategy = ""
 
 [refine]
 max_chars_per_line = 16

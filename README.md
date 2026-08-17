@@ -115,6 +115,7 @@ make eval                      # 골든셋 전체 → docs/DASHBOARD.md
 [transcribe]
 transcribe_model = "whisper-1"
 transcribe_format = "verbose_json"
+chunking_strategy = ""      # diarize 전용 필수 인자. whisper는 이 인자를 모른다 (D22)
 ```
 
 `diarized_json`과 `verbose_json` 둘 다 `segments[].{start,end,text}`를 주므로

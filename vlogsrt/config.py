@@ -27,6 +27,11 @@ class Config:
     # 두 응답 모두 `segments[].{start,end,text}` 형태라 파서가 같다.
     transcribe_model: str = "gpt-4o-transcribe-diarize"
     transcribe_format: str = "diarized_json"
+    # diarize 모델은 이 인자 없이는 400으로 거절한다(실측, D22):
+    #   "chunking_strategy is required for diarization models"
+    # "auto"면 서버가 음성 활동 검출(VAD)로 자를 자리를 정한다 — 우리가 지운 무음
+    # 검출을 서버가 대신하는 셈이다. whisper-1로 되돌릴 때는 빈 문자열로 둬라.
+    chunking_strategy: str = "auto"
     api_max_retries: int = 4
     api_backoff_base: float = 2.0
     cost_per_minute: float = 0.006

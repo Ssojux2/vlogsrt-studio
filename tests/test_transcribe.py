@@ -255,6 +255,132 @@ def test_retries_without_extras_on_400(monkeypatch: pytest.MonkeyPatch, tmp_path
     assert responses[0].payload["text"] == "가"
 
 
+def test_diarize_model_gets_a_chunking_strategy(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """실측 400: "chunking_strategy is required for diarization models" (D22)."""
+    client = FakeClient()
+    _live(monkeypatch, client).transcribe(real_job(tmp_path), Config())
+    (call,) = client.calls
+    assert call["chunking_strategy"] == Config().chunking_strategy
+
+
+def test_empty_chunking_strategy_is_not_sent(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """whisper-1로 되돌릴 때의 경로. whisper는 이 인자를 모른다."""
+    client = FakeClient()
+    cfg = data_replace(Config(), chunking_strategy="")
+    _live(monkeypatch, client).transcribe(real_job(tmp_path), cfg)
+    assert "chunking_strategy" not in client.calls[0]
+
+
+def test_chunking_strategy_survives_the_400_fallback(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """부가 인자와 함께 떨어져 나가면 재시도도 같은 이유로 400이 된다."""
+
+    class Rejecting(FakeClient):
+        def create(self, **kwargs: object) -> dict[str, object]:
+            self.calls.append(kwargs)
+            if "prompt" in kwargs:
+                error = RuntimeError("Error code: 400 - unknown parameter 'prompt'")
+                error.status_code = 400  # type: ignore[attr-defined]
+                raise error
+            return {"text": "가", "segments": []}
+
+    client = Rejecting()
+    cfg = data_replace(Config(), prompt="망원동")
+    _live(monkeypatch, client).transcribe(real_job(tmp_path), cfg)
+    assert all("chunking_strategy" in call for call in client.calls)
+
+
+def test_only_the_named_parameter_is_dropped(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """힌트 하나가 거부당했다고 언어 지정까지 잃을 이유가 없다."""
+
+    class Rejecting(FakeClient):
+        def create(self, **kwargs: object) -> dict[str, object]:
+            self.calls.append(kwargs)
+            if "prompt" in kwargs:
+                error = RuntimeError("Error code: 400 - Unknown parameter: 'prompt'.")
+                error.status_code = 400  # type: ignore[attr-defined]
+                raise error
+            return {"text": "가", "segments": []}
+
+    client = Rejecting()
+    cfg = data_replace(Config(), prompt="망원동")
+    _live(monkeypatch, client).transcribe(real_job(tmp_path), cfg)
+    assert client.calls[1]["languages"] == list(Config().extra_languages)
+
+
+def test_an_unnamed_400_drops_every_optional_parameter(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    class Rejecting(FakeClient):
+        def create(self, **kwargs: object) -> dict[str, object]:
+            self.calls.append(kwargs)
+            if len(self.calls) == 1:
+                error = RuntimeError("Error code: 400 - 뭐가 문제인지 말해주지 않는다")
+                error.status_code = 400  # type: ignore[attr-defined]
+                raise error
+            return {"text": "가", "segments": []}
+
+    client = Rejecting()
+    _live(monkeypatch, client).transcribe(real_job(tmp_path), Config())
+    assert sorted(client.calls[1]) == ["chunking_strategy", "file", "model", "response_format"]
+
+
+def test_a_rejected_chunking_strategy_names_the_setting_to_fix(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """부가 인자를 아무리 떼어도 낫지 않는 400이다. 고칠 곳을 짚어줘야 한다."""
+
+    class Rejecting(FakeClient):
+        def create(self, **kwargs: object) -> dict[str, object]:
+            self.calls.append(kwargs)
+            error = RuntimeError(
+                "Error code: 400 - {'error': {'message': 'chunking_strategy is required "
+                "for diarization models', 'param': 'chunking_strategy'}}"
+            )
+            error.status_code = 400  # type: ignore[attr-defined]
+            raise error
+
+    client = Rejecting()
+    with pytest.raises(RuntimeError, match="chunking_strategy"):
+        _live(monkeypatch, client).transcribe(real_job(tmp_path), Config())
+    assert len(client.calls) == 1  # 떼고 다시 부르며 시간을 낭비하지 않는다
+
+
+def test_the_first_chunk_settles_the_arguments_for_the_rest(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """조각마다 따로 400을 맞아가며 업로드를 낭비하지 않는다."""
+
+    class Rejecting(FakeClient):
+        def create(self, **kwargs: object) -> dict[str, object]:
+            self.calls.append(kwargs)
+            if "prompt" in kwargs:
+                error = RuntimeError("Error code: 400 - Unknown parameter: 'prompt'.")
+                error.status_code = 400  # type: ignore[attr-defined]
+                raise error
+            return {"text": "가", "segments": []}
+
+    audio = tmp_path / "demo.mp3"
+    audio.write_bytes(b"\x00")
+    job_two = TranscriptionJob(
+        stem="demo", chunks=(Chunk(audio, 0.0, 12.0, 0), Chunk(audio, 12.0, 12.0, 1))
+    )
+    client = Rejecting()
+    cfg = data_replace(Config(), prompt="망원동")
+    responses = _live(monkeypatch, client).transcribe(job_two, cfg)
+
+    assert len(responses) == 2
+    assert [r.offset for r in responses] == [0.0, 12.0]
+    assert len(client.calls) == 3  # 첫 조각이 두 번, 둘째 조각은 이미 정리된 인자로 한 번
+
+
 def test_other_errors_are_not_swallowed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     class Broken(FakeClient):
         def create(self, **kwargs: object) -> dict[str, object]:

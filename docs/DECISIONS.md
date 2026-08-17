@@ -629,3 +629,68 @@ config 필드 6개(highpass_hz, lowshelf_hz, lowshelf_gain_db, loudnorm_i/tp/lra
 - 옛 `trace.json`은 읽히지 않는다(`TRACE_VERSION` 4.0).
 - `tests/fixtures/api/`의 whisper·gpt 픽스처는 규칙대로 손대지 않았다. 새 경로가
   읽지 않으므로 고아로 남는다.
+
+---
+
+## D22 — `chunking_strategy`는 diarize 모델의 필수 인자다 (2026-08-17)
+
+### 결정
+
+`chunking_strategy`를 config로 올리고(기본 `"auto"`), **뺄 수 없는 인자**로 분류한다.
+400 폴백은 "부가 인자를 전부 뗀다"에서 "오류가 지목한 인자만 뗀다"로 바꾼다.
+첫 조각을 혼자 보내 인자 조합을 확정한 뒤 나머지를 병렬로 던진다.
+
+### 근거
+
+D21로 바꾼 모델을 처음 실제로 부른 결과(76.6분 영상), 전 조각이 즉시 거절당했다:
+
+```
+BadRequestError: Error code: 400 - {'error': {'message': 'chunking_strategy is
+required for diarization models', 'type': 'invalid_request_error',
+'param': 'chunking_strategy', 'code': 'invalid_value'}}
+```
+
+`gpt-4o-transcribe-diarize`는 30초를 넘는 입력에 `chunking_strategy`를 요구한다.
+`"auto"`면 서버가 음성 활동 검출(VAD)로 자를 자리를 정한다 — **D21에서 우리가 지운
+무음 검출을 서버가 대신하는 셈**이고, 그래서 되살릴 이유도 없다(규칙 4 유지).
+
+400은 요청이 거절된 것이라 **과금되지 않았다.**
+
+### 왜 폴백을 고쳤나
+
+옛 폴백은 400이면 부가 인자를 **전부** 떼고 한 번 더 불렀다. 이번 실패에서 그
+재시도는 무의미했다 — 빠진 것이 부가 인자가 아니라 필수 인자였으므로 두 번째
+호출도 같은 400을 받았다. 두 가지를 고쳤다.
+
+- **필수/부가 분리.** `model`·`response_format`·`chunking_strategy`는 폴백에서
+  떨어지지 않는다. 이 셋이 거부당하면 고쳐야 할 **설정 키 이름**을 담아 멈춘다.
+- **지목된 인자만 제거.** 오류 메시지가 `'prompt'`를 짚으면 `prompt`만 뗀다.
+  아무 이름도 짚지 않을 때만 전부 뗀다. 힌트 하나 때문에 언어 지정까지 잃지 않는다.
+- `temperature`를 부가 인자로 내렸다. 결정성 설정일 뿐이라 거부당해도 자막은 나온다.
+
+### 왜 첫 조각을 먼저 보내나
+
+옛 코드는 모든 조각을 동시에 던졌고, 인자가 틀리자 **조각 수만큼 똑같이 실패**했다.
+첫 조각으로 인자를 확정하면 실패는 업로드 한 번으로 끝나고, 성공하면 남은 조각은
+이미 정리된 인자로 한 번에 통과한다. 첫 조각의 전사 자체는 어차피 필요한 일이라
+버려지는 시간이 아니다. 대가는 병렬도 하락(전체 ≈ 1조각 + 나머지 병렬)이다.
+
+### 타이밍은 여전히 모델이 만든다
+
+"타이밍을 룰베이스로 찾아도 된다"는 허락을 받았지만 쓰지 않았다. `chunking_strategy`
+하나로 `segments[].{start,end,text}`가 정상적으로 돌아오므로 규칙 1을 어길 이유가
+없다. 글자 수 비례로 시각을 지어내면 76분 영상에서 오차가 누적되고, **틀렸다는
+사실이 겉으로 드러나지 않는다** — D13·D19·D21이 전부 그 조용한 오류의 기록이다.
+규칙에 없는 시각이 필요해지면 코드가 아니라 이 문서에 먼저 온다.
+
+### 복귀
+
+whisper-1로 되돌릴 때는 세 줄이다. `chunking_strategy`를 비우지 않으면 whisper가
+모르는 인자를 받아 400이 난다.
+
+```toml
+[transcribe]
+transcribe_model = "whisper-1"
+transcribe_format = "verbose_json"
+chunking_strategy = ""
+```

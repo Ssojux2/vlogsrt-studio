@@ -195,10 +195,11 @@ make eval                                                 # → docs/DASHBOARD.m
 |---|---|
 | `픽스처가 없습니다` | 그 영상은 아직 녹화 전이다. 메시지가 알려주는 `record` 명령을 그대로 실행 |
 | `오프라인 모드입니다` | `record`나 `--online` 없이 실제 호출을 시도했다. 정상 동작이다 |
-| `model_not_found` / 404 | 계정에 `gpt-4o-transcribe-diarize`가 없다. **과금되지 않는다.** `vlogsrt.toml`의 `[transcribe] transcribe_model`을 계정에 있는 모델로 바꿔라 (whisper-1로 되돌리려면 `transcribe_format = "verbose_json"`도 함께) |
+| `model_not_found` / 404 | 계정에 `gpt-4o-transcribe-diarize`가 없다. **과금되지 않는다.** `vlogsrt.toml`의 `[transcribe] transcribe_model`을 계정에 있는 모델로 바꿔라 (whisper-1로 되돌리려면 `transcribe_format = "verbose_json"`과 `chunking_strategy = ""`도 함께) |
+| `API가 chunking_strategy=…를 거부했습니다` | 모델과 `chunking_strategy`가 안 맞는다. diarize 모델은 이 값이 **필요하고**(`"auto"`), whisper-1은 이 인자를 **모른다**(`""`). D22 |
 | `전사 응답에 segments가 없습니다` | 시각을 주지 않는 모델을 불렀다(`gpt-transcribe` 등). 위와 같은 곳을 고쳐라 |
 | `ffmpeg 를 찾지 못했습니다` | `brew install ffmpeg` |
-| `API가 부가 인자를 거부했다` 경고 | 모델이 `prompt`/`keywords`/`languages`를 안 받는다. 그 인자만 빼고 다시 부른 것이라 자막은 정상적으로 나온다 |
+| `API가 […]를 거부했다` 경고 | 모델이 `prompt`/`keywords`/`languages`/`temperature` 중 그 인자를 안 받는다. 그것만 빼고 다시 부른 것이라 자막은 정상적으로 나온다 |
 | `전사 응답에서 세그먼트를 얻지 못했습니다` | 전 구간이 빈 응답이다. 오디오에 소리가 있는지 `probe`로 확인 |
 | 자막이 통째로 밀림 | `make verify STEM=<stem>`으로 청크 정렬과 골격 시프트를 확인 |
 | `make ui` 를 눌러도 아무 반응이 없다 | 주소가 안 찍히면 gradio 미설치다. `pip install -e ".[ui]"` |

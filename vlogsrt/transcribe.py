@@ -12,6 +12,7 @@ from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -148,40 +149,56 @@ class LiveTranscriber:
                 time.sleep(delay)
         raise RuntimeError(f"{what} 재시도 실패") from last
 
-    def transcribe(self, job: TranscriptionJob, cfg: Config) -> list[ChunkResponse]:
-        """자막의 시각과 글자를 모두 만드는 유일한 호출."""
-        client = self._client()
-        extras = _extras(cfg)
+    def _one_chunk(
+        self, client: Any, chunk: Chunk, cfg: Config, extras: dict[str, Any]
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """청크 하나를 전사한다. 응답과 **통과한 부가 인자**를 함께 돌려준다.
 
-        def one(chunk: Chunk) -> dict[str, Any]:
-            def call(**overrides: Any) -> Any:
-                with chunk.path.open("rb") as handle:
-                    return client.audio.transcriptions.create(
-                        file=handle,
-                        model=cfg.transcribe_model,
-                        temperature=0,
-                        response_format=cfg.transcribe_format,
-                        **overrides,
-                    )
-
-            what = f"전사 청크 {chunk.index}"
+        400이면 오류 메시지가 지목한 인자만 떼고 다시 부른다. 아무 이름도 짚어주지
+        않으면 그때만 전부 뗀다 — 힌트 하나 때문에 언어 지정까지 잃을 이유가 없다.
+        """
+        what = f"전사 청크 {chunk.index}"
+        while True:
+            attempt = partial(_create, client, chunk, _required(cfg), extras)
             try:
-                return _to_dict(self._retry(lambda: call(**extras), what, cfg))
-            except Exception as exc:  # noqa: BLE001 - 400이면 부가 인자만 떼고 한 번 더
-                if not extras or not _is_bad_request(exc):
+                return _to_dict(self._retry(attempt, what, cfg)), extras
+            except Exception as exc:  # noqa: BLE001 - 400만 걸러내고 나머지는 재던진다
+                if not _is_bad_request(exc):
                     raise
-                log.warn(
-                    f"{what}: API가 부가 인자를 거부했다({exc}). "
-                    f"인자 {sorted(extras)}를 빼고 다시 부른다."
-                )
-                return _to_dict(self._retry(lambda: call(), what, cfg))
+                _blame_required(exc, cfg)
+                if not extras:
+                    raise
+                dropped = _rejected(str(exc), extras) or sorted(extras)
+                log.warn(f"{what}: API가 {dropped}를 거부했다({exc}). 빼고 다시 부른다.")
+                extras = {name: value for name, value in extras.items() if name not in dropped}
 
-        with ThreadPoolExecutor(max_workers=env.max_workers()) as pool:
-            payloads = list(pool.map(one, job.chunks))
+    def transcribe(self, job: TranscriptionJob, cfg: Config) -> list[ChunkResponse]:
+        """자막의 시각과 글자를 모두 만드는 유일한 호출.
+
+        첫 조각을 혼자 보내 인자 조합을 확정한 뒤 나머지를 병렬로 던진다. 인자가
+        틀렸을 때 조각 수만큼 똑같이 실패하며 업로드를 낭비하지 않기 위해서다.
+        """
+        if not job.chunks:
+            return []
+        client = self._client()
+        head, *tail = job.chunks
+        first, extras = self._one_chunk(client, head, cfg, _extras(cfg))
+
+        payloads = [first]
+        if tail:
+            with ThreadPoolExecutor(max_workers=env.max_workers()) as pool:
+                payloads.extend(
+                    pool.map(lambda chunk: self._one_chunk(client, chunk, cfg, extras)[0], tail)
+                )
         return [
             ChunkResponse(index=chunk.index, offset=chunk.offset, payload=payload)
             for chunk, payload in zip(job.chunks, payloads, strict=True)
         ]
+
+
+def _create(client: Any, chunk: Chunk, required: dict[str, Any], extras: dict[str, Any]) -> Any:
+    with chunk.path.open("rb") as handle:
+        return client.audio.transcriptions.create(file=handle, **required, **extras)
 
 
 def _is_bad_request(exc: Exception) -> bool:
@@ -189,17 +206,60 @@ def _is_bad_request(exc: Exception) -> bool:
     return status == 400
 
 
-def _extras(cfg: Config) -> dict[str, Any]:
-    """`language`와 `languages`는 **함께 보낼 수 없다.**
+def _required(cfg: Config) -> dict[str, Any]:
+    """뺄 수 없는 인자. 400이 나도 이건 그대로 둔다.
 
-    실제 API가 400을 돌려준다: "The 'language' and 'languages' parameters cannot
-    be used together." 여러 언어를 알려주는 쪽이 이 프로젝트의 의도라 `languages`를
-    택하고, 설정이 비어 있을 때만 단일 `language`로 떨어진다.
-
-    여기 실리는 인자는 모델마다 지원 여부가 다르다. 거부당하면 호출부가 전부 떼고
-    한 번 더 부른다 — 힌트 하나 때문에 전사가 통째로 실패하면 안 된다.
+    `chunking_strategy`가 여기 있는 이유: diarize 모델은 이 인자 없이는 요청을
+    아예 받지 않는다(400 "chunking_strategy is required for diarization models",
+    D22). 부가 인자와 함께 떨어져 나가면 재시도도 같은 이유로 실패한다.
+    빈 문자열이면 보내지 않는다 — whisper-1은 이 인자를 모른다.
     """
-    extras: dict[str, Any] = {}
+    required: dict[str, Any] = {
+        "model": cfg.transcribe_model,
+        "response_format": cfg.transcribe_format,
+    }
+    if cfg.chunking_strategy:
+        required["chunking_strategy"] = cfg.chunking_strategy
+    return required
+
+
+def _blame_required(exc: Exception, cfg: Config) -> None:
+    """뺄 수 없는 인자가 거부당했다면 고쳐야 할 설정 키를 이름으로 알려주고 멈춘다."""
+    message = str(exc)
+    named = [
+        (key, value)
+        for key, value in (
+            ("chunking_strategy", cfg.chunking_strategy),
+            ("response_format", cfg.transcribe_format),
+        )
+        if value and f"'{key}'" in message
+    ]
+    if not named:
+        return
+    key, value = named[0]
+    raise RuntimeError(
+        f"API가 {key}={value!r}를 거부했습니다: {exc}\n"
+        f"  vlogsrt.toml 의 [transcribe] {key} 를 확인하세요.\n"
+        f"  diarize 모델은 chunking_strategy가 필요하고, whisper-1은 이 인자를 모릅니다."
+    ) from exc
+
+
+def _rejected(message: str, extras: dict[str, Any]) -> list[str]:
+    """400 메시지가 따옴표로 짚어준 부가 인자만 고른다. 못 고르면 빈 목록."""
+    return sorted(name for name in extras if f"'{name}'" in message or f'"{name}"' in message)
+
+
+def _extras(cfg: Config) -> dict[str, Any]:
+    """모델마다 지원 여부가 갈리는 인자들. 거부당하면 하나씩 떼어낸다.
+
+    `language`와 `languages`는 **함께 보낼 수 없다.** 실제 API가 400을 돌려준다:
+    "The 'language' and 'languages' parameters cannot be used together." 여러
+    언어를 알려주는 쪽이 이 프로젝트의 의도라 `languages`를 택하고, 설정이 비어
+    있을 때만 단일 `language`로 떨어진다.
+
+    `temperature`도 여기 있다. 결정성 설정일 뿐이라 거부당하면 버려도 자막은 나온다.
+    """
+    extras: dict[str, Any] = {"temperature": 0}
     if cfg.extra_languages:
         extras["languages"] = list(cfg.extra_languages)
     elif cfg.language:

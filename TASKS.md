@@ -13,7 +13,9 @@
 | Q0 | 문서 전환 (CLAUDE.md · TASKS.md · D21) | ✅ |
 | Q1 | 코드 전환 (diarize 전사, 검사 계층 삭제) | ✅ |
 | Q2 | 문서 마무리 (README · RUNBOOK · DASHBOARD) | ✅ |
-| Q3 | 사람 인수: 짧은 영상 1편 온라인 실행 🧑 | ☐ |
+| Q3 | 사람 인수: 짧은 영상 1편 온라인 실행 🧑 | ⚠️ 400 — `chunking_strategy` 누락 |
+| Q4 | `chunking_strategy` 필수 인자화 + 400 폴백 정밀화 (D22) | ✅ |
+| Q5 | 사람 인수 재시도 🧑 (Q3 절차 그대로) | ☐ |
 
 ---
 
@@ -52,3 +54,17 @@ DASHBOARD 변형 라벨.
 4. 잘 돌면 `vlogsrt record`로 픽스처를 만들어두면 이후 오프라인 회귀가 살아난다.
 
 문제가 있으면 로그와 함께 새 태스크로.
+
+**Q3 실행 결과(2026-08-17):** 76.6분 영상에서 전 조각이 400으로 거절당했다 —
+`chunking_strategy is required for diarization models`. 과금 없음. → Q4에서 수정.
+
+## Q4 — `chunking_strategy` (D22)
+
+`chunking_strategy`를 config로 올리고(기본 `"auto"`) 필수 인자로 분류. 400 폴백은
+오류가 지목한 인자만 떼도록 정밀화하고, 첫 조각으로 인자를 확정한 뒤 나머지를
+병렬로 던진다. `temperature`는 부가 인자로 내렸다.
+
+## Q5 — 사람 인수 재시도 🧑
+
+Q3의 4단계를 그대로. 이번에 새로 볼 것: 로그에 `API가 […]를 거부했다` 경고가
+뜨는지(뜬 인자 이름을 기록해두면 다음 판단에 쓴다).
