@@ -99,4 +99,5 @@ make invariant  # CLAUDE.md 불변 규칙 8개를 기계적으로 검사
 테스트는 **네트워크를 소켓 수준에서 차단한다**(`tests/conftest.py`).
 합성 픽스처(`tests/fixtures/synthetic/`)만으로 전 과정이 돈다.
 
+실제 영상으로 돌려보는 절차는 [docs/RUNBOOK.md](docs/RUNBOOK.md)에 있다.
 작업 규칙은 `CLAUDE.md`, 태스크 보드는 `TASKS.md`, 설계 판단은 `docs/DECISIONS.md`에 있다.
