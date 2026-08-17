@@ -19,10 +19,12 @@ def test_defaults_carry_documented_thresholds() -> None:
     assert cfg.min_gap == 0.08  # 24fps 기준 2프레임
 
 
-def test_the_transcription_model_must_return_segment_times() -> None:
-    """시각 없는 응답(gpt-transcribe의 `json`)으로는 SRT를 만들 수 없다(D21)."""
+def test_the_model_is_only_asked_for_letters() -> None:
+    """시각은 오디오에서 온다(D24). 모델 응답에는 `text`만 있으면 된다."""
     cfg = Config()
-    assert cfg.transcribe_format in {"diarized_json", "verbose_json"}
+    assert cfg.transcribe_format in {"json", "text"}
+    assert not cfg.chunking_strategy  # 자르는 건 우리 몫이다
+    assert not cfg.extra_languages  # 복수형은 이 모델이 거부한다(D23)
 
 
 def test_preset_shorts_narrows_line() -> None:

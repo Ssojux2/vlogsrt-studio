@@ -18,19 +18,15 @@ from vlogsrt.transcribe import (
     build_spine,
     estimate_cost,
     get_transcriber,
-    parse_segments,
+    parse_text,
     save_fixture,
 )
 
 SYNTHETIC = Path(__file__).parent / "fixtures" / "synthetic"
 
-RAW = {
-    "task": "transcribe",
-    "segments": [
-        {"id": "seg_0", "start": 0.0, "end": 1.0, "text": " 첫 번째", "speaker": "A"},
-        {"id": "seg_1", "start": 1.0, "end": 2.0, "text": " 두 번째", "speaker": "B"},
-    ],
-}
+# 이 모델이 주는 것은 글자뿐이다. 시각은 spans에서 온다(D24).
+RAW = {"text": "첫 번째 두 번째", "usage": {}}
+SPANS = ((0.0, 1.0), (1.5, 2.5))
 
 
 def job() -> TranscriptionJob:
@@ -75,7 +71,14 @@ def test_missing_fixture_says_what_to_run(tmp_path: Path) -> None:
 def test_fixture_round_trip() -> None:
     responses = FixtureTranscriber(fixture_dir=SYNTHETIC).transcribe(job(), Config())
     assert len(responses) == 2
-    assert responses[0].payload["segments"]
+    assert responses[0].payload["text"]
+
+
+def test_the_fixture_carries_the_spans_that_make_the_times() -> None:
+    """오프라인 실행의 자막 시각이 전부 여기서 나온다. 응답만으로는 재현할 수 없다."""
+    responses = FixtureTranscriber(fixture_dir=SYNTHETIC).transcribe(job(), Config())
+    assert all(response.spans for response in responses)
+    assert responses[1].spans[-1] == (19.6, 24.0)
 
 
 def test_live_transcriber_is_never_built_offline() -> None:
@@ -83,101 +86,77 @@ def test_live_transcriber_is_never_built_offline() -> None:
 
 
 # ─────────────────────────────────────────────────────────────
-#  응답 해석 — 시각과 글자가 여기서만 나온다 (규칙 1)
+#  응답 해석 — 글자는 모델에서, 시각은 spans에서 (규칙 1)
 # ─────────────────────────────────────────────────────────────
 
 
-def test_segments_carry_their_own_times_and_text() -> None:
-    spine = parse_segments(RAW)
-    assert [(s.start, s.end) for s in spine] == [(0.0, 1.0), (1.0, 2.0)]
-    assert spine[0].text == "첫 번째"
+def test_the_response_gives_letters_and_nothing_else() -> None:
+    assert parse_text(RAW) == "첫 번째 두 번째"
 
 
-def test_ids_are_ours_not_the_responses() -> None:
-    """diarize는 `"seg_0"` 같은 문자열 id를 청크마다 0부터 다시 준다."""
-    spine = parse_segments(RAW, offset=0.0, seg_id_base=5)
-    assert [segment.id for segment in spine] == [5, 6]
-
-
-def test_offset_moves_segments_into_source_coordinates() -> None:
-    spine = parse_segments(RAW, offset=10.0)
-    assert [segment.start for segment in spine] == [10.0, 11.0]
-    assert RAW["segments"][0]["start"] == 0.0  # 원본은 그대로다
-
-
-def test_no_spoken_word_is_ever_thrown_away() -> None:
-    """길이 0이든 시각이 뒤집혔든, 글자가 있으면 남는다. 정제가 시간을 늘려준다(D23)."""
-    raw = {
-        "segments": [
-            {"start": 1.0, "end": 1.0, "text": "길이 0"},
-            {"start": 4.0, "end": 3.0, "text": "뒤집힌 시각"},
-            {"start": 5.0, "end": 6.0, "text": "멀쩡한 것"},
-        ]
-    }
-    spine = parse_segments(raw)
-    assert [segment.text for segment in spine] == ["길이 0", "뒤집힌 시각", "멀쩡한 것"]
-    assert [segment.start for segment in spine] == [1.0, 4.0, 5.0]
-    assert spine[1].end == 4.0  # 뒤집힌 끝은 시작으로 접는다. 글자는 그대로다
-
-
-def test_only_letterless_segments_are_dropped() -> None:
-    """화면에 띄울 글자가 없는 세그먼트뿐이다. 그 외에는 아무것도 버리지 않는다."""
-    raw = {"segments": [{"start": 2.0, "end": 3.0, "text": "   "}, *RAW["segments"]]}
-    spine = parse_segments(raw)
-    assert [segment.text for segment in spine] == ["첫 번째", "두 번째"]
-    assert spine[0].id == 0  # 버린 만큼 번호가 비지 않는다
-
-
-def test_a_response_without_segments_names_the_setting_to_fix() -> None:
-    """gpt-transcribe(비 diarize)는 text만 준다. 그 응답으로는 SRT를 못 만든다(D21)."""
+def test_a_response_without_text_names_the_setting_to_fix() -> None:
     with pytest.raises(RuntimeError, match="transcribe_model"):
-        parse_segments({"text": "시각이 없는 덩어리", "usage": {}})
+        parse_text({"segments": [], "usage": {}})
 
 
-def test_multi_chunk_ids_are_global_and_times_are_rebased() -> None:
+def test_the_times_come_from_the_spans_not_the_model() -> None:
+    """규칙 1 — 모델은 시각을 주지 않는다. 시각은 오디오가 정한다."""
+    spine = build_spine([ChunkResponse(index=0, offset=0.0, payload=RAW, spans=SPANS)])
+    assert [(s.start, s.end) for s in spine] == [(0.0, 1.0), (1.5, 2.5)]
+
+
+def test_spans_are_already_in_source_coordinates() -> None:
+    """묶음 좌표가 아니라 원본 좌표라 재기준화할 것이 없다."""
+    far = ((100.0, 101.0), (101.5, 102.5))
+    spine = build_spine([ChunkResponse(index=3, offset=100.0, payload=RAW, spans=far)])
+    assert [segment.start for segment in spine] == [100.0, 101.5]
+
+
+def test_ids_are_global_across_chunks() -> None:
     responses = [
-        ChunkResponse(index=0, offset=0.0, payload=RAW),
-        ChunkResponse(index=1, offset=100.0, payload=RAW),
+        ChunkResponse(index=0, offset=0.0, payload=RAW, spans=SPANS),
+        ChunkResponse(index=1, offset=100.0, payload=RAW, spans=((100.0, 101.0), (101.5, 102.5))),
     ]
     spine = build_spine(responses)
     assert [segment.id for segment in spine] == [0, 1, 2, 3]
     assert spine[2].start == 100.0
 
 
-def test_an_empty_chunk_stops_the_run_instead_of_leaving_a_hole(tmp_path: Path) -> None:
-    """조각 하나가 비면 그 구간 전체가 자막 없이 비워진다. 넘어가지 않는다(D23)."""
-    responses = [
-        ChunkResponse(index=0, offset=0.0, payload=RAW),
-        ChunkResponse(index=1, offset=1500.0, payload={"segments": []}),
-        ChunkResponse(index=2, offset=3000.0, payload=RAW),
-    ]
-    with pytest.raises(RuntimeError, match="청크 1"):
-        build_spine(responses)
-
-
-def test_the_empty_chunk_message_names_where_the_hole_would_be() -> None:
-    with pytest.raises(RuntimeError, match="1500.0초"):
-        build_spine([ChunkResponse(index=1, offset=1500.0, payload={"segments": []})])
-
-
 def test_chunks_are_stitched_in_time_order_not_call_order() -> None:
     responses = [
-        ChunkResponse(index=1, offset=100.0, payload=RAW),
-        ChunkResponse(index=0, offset=0.0, payload=RAW),
+        ChunkResponse(index=1, offset=100.0, payload=RAW, spans=((100.0, 101.0), (101.5, 102.5))),
+        ChunkResponse(index=0, offset=0.0, payload=RAW, spans=SPANS),
     ]
     spine = build_spine(responses)
-    assert [segment.start for segment in spine] == [0.0, 1.0, 100.0, 101.0]
+    assert [segment.start for segment in spine] == [0.0, 1.5, 100.0, 101.5]
+
+
+def test_an_empty_chunk_warns_but_does_not_stop_the_run() -> None:
+    """규칙 9 — 그 구간에 자막이 안 서지만 76분 실행을 통째로 죽이지는 않는다."""
+    responses = [
+        ChunkResponse(index=0, offset=0.0, payload=RAW, spans=SPANS),
+        ChunkResponse(index=1, offset=100.0, payload={"text": "  "}, spans=((100.0, 105.0),)),
+        ChunkResponse(index=2, offset=200.0, payload=RAW, spans=((200.0, 201.0), (201.5, 202.5))),
+    ]
+    spine = build_spine(responses)
+    assert [segment.start for segment in spine] == [0.0, 1.5, 200.0, 201.5]
+    assert [segment.id for segment in spine] == [0, 1, 2, 3]  # 번호에 구멍이 없다
+
+
+def test_a_chunk_without_spans_contributes_nothing() -> None:
+    assert build_spine([ChunkResponse(index=0, offset=0.0, payload=RAW, spans=())]) == []
 
 
 def test_cost_estimate_matches_documented_ballpark() -> None:
     assert estimate_cost(300.0, Config()) == pytest.approx(0.03, abs=0.005)
 
 
-def test_save_fixture_writes_chunk_shape(tmp_path: Path) -> None:
-    path = save_fixture(tmp_path, "demo", FIXTURE_KIND, [ChunkResponse(0, 0.0, RAW)])
+def test_save_fixture_keeps_the_spans(tmp_path: Path) -> None:
+    """spans 없이 저장하면 그 픽스처로는 시각을 되살릴 수 없다."""
+    save_fixture(tmp_path, "demo", FIXTURE_KIND, [ChunkResponse(0, 0.0, RAW, SPANS)])
     reloaded = FixtureTranscriber(fixture_dir=tmp_path).transcribe(job(), Config())
-    assert path.is_file()
-    assert reloaded[0].payload["segments"][0]["text"] == " 첫 번째"
+    assert reloaded[0].payload["text"] == "첫 번째 두 번째"
+    assert reloaded[0].spans == SPANS
 
 
 # ─────────────────────────────────────────────────────────────
@@ -282,24 +261,23 @@ def test_retries_without_extras_on_400(monkeypatch: pytest.MonkeyPatch, tmp_path
     assert responses[0].payload["text"] == "가"
 
 
-def test_diarize_model_gets_a_chunking_strategy(
+def test_the_server_is_not_asked_to_chunk_for_us(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """실측 400: "chunking_strategy is required for diarization models" (D22)."""
+    """우리가 무음에서 직접 자른다(D24). 서버 VAD가 끼어들면 구간과 어긋난다."""
     client = FakeClient()
     _live(monkeypatch, client).transcribe(real_job(tmp_path), Config())
-    (call,) = client.calls
-    assert call["chunking_strategy"] == Config().chunking_strategy
+    assert "chunking_strategy" not in client.calls[0]
 
 
-def test_empty_chunking_strategy_is_not_sent(
+def test_a_configured_chunking_strategy_is_sent(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """whisper-1로 되돌릴 때의 경로. whisper는 이 인자를 모른다."""
+    """diarize 계열로 바꾸면 이 인자가 필수가 된다 — 실측 400(D22)."""
     client = FakeClient()
-    cfg = data_replace(Config(), chunking_strategy="")
+    cfg = data_replace(Config(), chunking_strategy="auto")
     _live(monkeypatch, client).transcribe(real_job(tmp_path), cfg)
-    assert "chunking_strategy" not in client.calls[0]
+    assert client.calls[0]["chunking_strategy"] == "auto"
 
 
 def test_chunking_strategy_survives_the_400_fallback(
@@ -317,7 +295,7 @@ def test_chunking_strategy_survives_the_400_fallback(
             return {"text": "가", "segments": []}
 
     client = Rejecting()
-    cfg = data_replace(Config(), prompt="망원동")
+    cfg = data_replace(Config(), prompt="망원동", chunking_strategy="auto")
     _live(monkeypatch, client).transcribe(real_job(tmp_path), cfg)
     assert all("chunking_strategy" in call for call in client.calls)
 
@@ -382,7 +360,7 @@ def test_an_unnamed_400_drops_every_optional_parameter(
 
     client = Rejecting()
     _live(monkeypatch, client).transcribe(real_job(tmp_path), Config())
-    assert sorted(client.calls[1]) == ["chunking_strategy", "file", "model", "response_format"]
+    assert sorted(client.calls[1]) == ["file", "model", "response_format"]
 
 
 def test_a_rejected_chunking_strategy_names_the_setting_to_fix(
@@ -401,8 +379,9 @@ def test_a_rejected_chunking_strategy_names_the_setting_to_fix(
             raise error
 
     client = Rejecting()
+    cfg = data_replace(Config(), chunking_strategy="auto")
     with pytest.raises(RuntimeError, match="chunking_strategy"):
-        _live(monkeypatch, client).transcribe(real_job(tmp_path), Config())
+        _live(monkeypatch, client).transcribe(real_job(tmp_path), cfg)
     assert len(client.calls) == 1  # 떼고 다시 부르며 시간을 낭비하지 않는다
 
 

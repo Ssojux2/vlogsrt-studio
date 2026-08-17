@@ -32,7 +32,7 @@ def test_run_end_to_end(tmp_path: Path) -> None:
 
 
 def test_output_text_comes_straight_from_the_transcription(tmp_path: Path) -> None:
-    """규칙 1 — 모든 글자는 전사 세그먼트에서 온다. 아무도 고쳐 쓰지 않는다."""
+    """규칙 1 — 모든 글자는 모델 응답에서 온다. 아무도 고쳐 쓰지 않는다."""
     result = pipeline.run(VIDEO, Config(), tmp_path, force_offline=True)
     body = " ".join(cue.text for cue in result.cues)
     assert "망원동" in body
@@ -40,23 +40,30 @@ def test_output_text_comes_straight_from_the_transcription(tmp_path: Path) -> No
 
 
 def test_every_segment_becomes_a_cue(tmp_path: Path) -> None:
-    """판정으로 세그먼트를 떨구는 단계는 없다(D21). 빈 텍스트만 애초에 안 들어온다."""
+    """규칙 9 — 배분된 세그먼트는 하나도 빠짐없이 큐가 된다."""
     result = pipeline.run(VIDEO, Config(), tmp_path, force_offline=True)
     covered = {seg_id for cue in result.cues for seg_id in cue.seg_ids}
     assert covered == {segment.id for segment in result.trace.spine}
 
 
 def test_chunk_offsets_survive_into_the_srt(tmp_path: Path) -> None:
-    """둘째 청크(offset 12초)의 말이 12초 뒤에 자막으로 선다."""
+    """둘째 조각의 말은 그 조각이 시작하는 시각 뒤에 자막으로 선다."""
+    from vlogsrt import transcribe as transcribe_module
+
+    responses = transcribe_module.FixtureTranscriber(fixture_dir=SYNTHETIC).transcribe(
+        transcribe_module.TranscriptionJob(stem="demo", chunks=()), Config()
+    )
+    second = next(response.offset for response in responses if response.index == 1)
+
     result = pipeline.run(VIDEO, Config(), tmp_path, force_offline=True)
     late = [cue for cue in result.cues if "구독" in cue.text]
-    assert late and late[0].start > 20.0
+    assert late and late[0].start >= second - Config().lead_in
 
 
 def test_trace_carries_the_new_version(tmp_path: Path) -> None:
     pipeline.run(VIDEO, Config(), tmp_path, force_offline=True)
     trace = json.loads((tmp_path / "trace.json").read_text(encoding="utf-8"))
-    assert trace["version"] == "4.0"
+    assert trace["version"] == "5.0"
     assert all(segment["start"] < segment["end"] for segment in trace["spine"])
 
 
@@ -81,16 +88,16 @@ def test_missing_fixture_tells_the_human_what_to_run(tmp_path: Path, monkeypatch
         pipeline.run(Path("golden/absent.mp4"), Config(), tmp_path, force_offline=True)
 
 
-def test_a_response_without_segments_stops_the_run(
+def test_a_response_without_text_stops_the_run(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """gpt-transcribe(비 diarize) 응답으로는 SRT를 만들 수 없다. 조용히 넘어가면 안 된다."""
+    """글자가 이 모델이 주는 전부다. 그게 없으면 만들 자막도 없다(D24)."""
     from vlogsrt import transcribe as transcribe_module
 
-    def textonly(self: object, job: object, cfg: object) -> list[object]:
-        return [transcribe_module.ChunkResponse(0, 0.0, {"text": "시각이 없는 덩어리"})]
+    def wrong_shape(self: object, job: object, cfg: object) -> list[object]:
+        return [transcribe_module.ChunkResponse(0, 0.0, {"segments": []}, ((0.0, 1.0),))]
 
-    monkeypatch.setattr(transcribe_module.FixtureTranscriber, "transcribe", textonly)
+    monkeypatch.setattr(transcribe_module.FixtureTranscriber, "transcribe", wrong_shape)
     with pytest.raises(RuntimeError, match="transcribe_model"):
         pipeline.run(VIDEO, Config(), tmp_path, force_offline=True)
 

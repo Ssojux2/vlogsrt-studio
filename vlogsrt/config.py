@@ -24,16 +24,13 @@ class Config:
     extra_languages: tuple[str, ...] = ()
     prompt: str = ""
     keywords: tuple[str, ...] = ()
-    # 세그먼트 시각을 주는 모델이어야 한다. 시각이 없으면 SRT를 만들 수 없다(D21).
-    # 계정에 이 모델이 없으면 `whisper-1` + `verbose_json`으로 되돌릴 수 있다 —
-    # 두 응답 모두 `segments[].{start,end,text}` 형태라 파서가 같다.
-    transcribe_model: str = "gpt-4o-transcribe-diarize"
-    transcribe_format: str = "diarized_json"
-    # diarize 모델은 이 인자 없이는 400으로 거절한다(실측, D22):
-    #   "chunking_strategy is required for diarization models"
-    # "auto"면 서버가 음성 활동 검출(VAD)로 자를 자리를 정한다 — 우리가 지운 무음
-    # 검출을 서버가 대신하는 셈이다. whisper-1로 되돌릴 때는 빈 문자열로 둬라.
-    chunking_strategy: str = "auto"
+    # 이 모델은 **글자만** 준다. 시각은 오디오에서 온다(D24) — 그래서 모델을 고를 때
+    # 타임스탬프 지원 여부를 볼 필요가 없다.
+    transcribe_model: str = "gpt-4o-transcribe"
+    transcribe_format: str = "json"
+    # 우리가 무음에서 직접 자르므로 서버 VAD를 쓰지 않는다. 비워두면 보내지 않는다.
+    # (diarize 계열 모델로 바꾸면 이 값이 필수가 된다 — 실측 400, D22.)
+    chunking_strategy: str = ""
     api_max_retries: int = 4
     api_backoff_base: float = 2.0
     cost_per_minute: float = 0.006

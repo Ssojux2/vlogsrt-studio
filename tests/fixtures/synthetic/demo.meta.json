@@ -1,10 +1,10 @@
 {
   "recorded_at": "2026-01-01T00:00:00+00:00",
-  "model": "gpt-4o-transcribe-diarize",
+  "model": "gpt-4o-transcribe",
   "params": {
-    "response_format": "diarized_json",
+    "response_format": "json",
     "language": "ko",
-    "extra_languages": ["ko", "en"],
+    "extra_languages": [],
     "keywords": [],
     "prompt": ""
   },
