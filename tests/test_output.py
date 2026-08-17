@@ -1,22 +1,11 @@
-"""SRT 파싱·직렬화와 검토용 출력."""
+"""SRT 파싱·직렬화."""
 
 from __future__ import annotations
 
 import pytest
 
-from vlogsrt.config import Config
 from vlogsrt.models import Cue
-from vlogsrt.output import (
-    format_timecode,
-    mark_review_text,
-    parse_srt,
-    parse_timecode,
-    to_review_cues,
-    write_srt,
-)
-from vlogsrt.report import dictionary_candidates
-
-from .conftest import make_cue
+from vlogsrt.output import format_timecode, parse_srt, parse_timecode, write_srt
 
 SAMPLE = (
     "1\n00:00:01,000 --> 00:00:02,500\n안녕하세요\n\n2\n00:00:03,000 --> 00:00:04,000\n두 번째\n"
@@ -86,28 +75,3 @@ def test_write_srt_renumbers_from_one() -> None:
 def test_parse_rejects_garbage() -> None:
     with pytest.raises(RuntimeError):
         parse_srt("이건 SRT가 아니다")
-
-
-def test_review_srt_marks_only_changed_characters() -> None:
-    marked = mark_review_text("블루팽귄에서 낮술", "블루펭귄에서 낮술")
-    assert marked == "블루[?펭]귄에서 낮술"
-
-
-def test_review_srt_merges_adjacent_diffs() -> None:
-    assert mark_review_text("가나다", "가XY다").count("[?") == 1
-
-
-def test_review_cues_keep_timing() -> None:
-    cues = [make_cue(1.0, 2.0, "블루펭귄", whisper_text="블루팽귄")]
-    reviewed = to_review_cues(cues)
-    assert (reviewed[0].start, reviewed[0].end) == (1.0, 2.0)
-    assert "[?" in reviewed[0].text
-
-
-def test_dict_candidates_need_two_occurrences() -> None:
-    cfg = Config()
-    once = [make_cue(0.0, 1.0, "블루펭귄", whisper_text="블루팽귄")]
-    twice = [*once, make_cue(2.0, 3.0, "블루펭귄", whisper_text="블루팽귄", index=2)]
-    assert dictionary_candidates(once, cfg) == []
-    candidates = dictionary_candidates(twice, cfg)
-    assert [c.render() for c in candidates] == ["블루펭귄 ← 블루팽귄 2회"]

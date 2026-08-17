@@ -1,69 +1,22 @@
-"""사람이 읽는 산출물 — `report.md`와 사전 갱신 후보.
+"""사람이 읽는 산출물 — `report.md`.
 
 리포트의 목적은 하나다: 사람이 어디를 봐야 하는지 20초 안에 알게 하는 것.
+핵심은 검증 결과다 — 의심 큐(일치율 낮은 순)와 자막이 발화를 놓쳤을 수 있는 구간.
 """
 
 from __future__ import annotations
 
-from collections import Counter
 from collections.abc import Sequence
-from dataclasses import dataclass
-from difflib import SequenceMatcher
 
 from .config import Config
-from .models import ORIGIN_ORPHAN, VERDICT_OK, Cue, Issue, Segment
+from .models import VERDICT_OK, Cue, Issue, Segment
 from .output import format_timecode
 from .validate import ERR, INFO, WARN
-
-
-@dataclass(frozen=True, slots=True)
-class DictCandidate:
-    """다음 회차 `keywords` 후보. whisper가 어떻게 잘못 들었는지 함께 보여준다."""
-
-    canonical: str
-    heard: str
-    count: int
-
-    def render(self) -> str:
-        return f"{self.canonical} ← {self.heard} {self.count}회"
-
-
-def _word_span(text: str, start: int, end: int) -> str:
-    """불일치 구간을 어절 단위로 넓힌다. 조각난 글자만 모으면 사전이 못 쓴다."""
-    left = text.rfind(" ", 0, start) + 1
-    right = text.find(" ", end)
-    if right == -1:
-        right = len(text)
-    return text[left:right].strip()
-
-
-def dictionary_candidates(cues: Sequence[Cue], cfg: Config) -> list[DictCandidate]:
-    pairs: Counter[tuple[str, str]] = Counter()
-    for cue in cues:
-        if not cue.whisper_text or cue.origin == ORIGIN_ORPHAN:
-            continue
-        matcher = SequenceMatcher(None, cue.whisper_text, cue.text, autojunk=False)
-        for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-            if tag != "replace":
-                continue
-            heard = _word_span(cue.whisper_text, i1, i2)
-            canonical = _word_span(cue.text, j1, j2)
-            if not heard or not canonical or heard == canonical:
-                continue
-            if " " in canonical or " " in heard:
-                continue
-            pairs[(canonical, heard)] += 1
-    candidates = [
-        DictCandidate(canonical=canonical, heard=heard, count=count)
-        for (canonical, heard), count in pairs.items()
-        if count >= cfg.dict_min_occurrences
-    ]
-    return sorted(candidates, key=lambda c: (-c.count, c.canonical))
+from .verify import Verification
 
 
 def _summary(cues: Sequence[Cue], spine: Sequence[Segment], duration: float) -> list[str]:
     excluded = sum(1 for segment in spine if segment.verdict != VERDICT_OK)
-    orphans = sum(1 for cue in cues if cue.origin == ORIGIN_ORPHAN)
     total_chars = sum(len(cue.text) for cue in cues)
     return [
         "## 요약",
@@ -71,39 +24,40 @@ def _summary(cues: Sequence[Cue], spine: Sequence[Segment], duration: float) -> 
         f"- 영상 길이: {duration:.1f}초",
         f"- 골격 세그먼트: {len(spine)}개 (환청 판정 제외 {excluded}개)",
         f"- 최종 큐: {len(cues)}개, 총 {total_chars}자",
-        f"- 되살린 고아 큐: {orphans}개",
     ]
 
 
-def _priority(cues: Sequence[Cue], cfg: Config) -> list[str]:
-    flagged = sorted(
-        (cue for cue in cues if cue.conf < cfg.conf_threshold or cue.flags),
-        key=lambda cue: (cue.conf, cue.start),
-    )
-    estimate = len(flagged) * cfg.review_seconds_per_flag
-    lines = [
-        "",
-        "## 우선 확인",
-        "",
-        f"확인 대상 {len(flagged)}개. 예상 검토 시간 약 {estimate / 60:.1f}분.",
-        "",
-    ]
-    if not flagged:
-        lines.append("확인할 큐가 없다.")
+def _verification_section(verification: Verification | None, cfg: Config) -> list[str]:
+    lines = ["", "## 검증 — gpt 대조", ""]
+    if verification is None:
+        lines.append("검증 생략 (gpt 응답 없음). SRT는 whisper 단독 결과다.")
         return lines
-    lines.extend(
-        [
-            "| # | 시각 | 신뢰도 | whisper | gpt-transcribe | 표시 |",
-            "|---|---|---|---|---|---|",
-        ]
+
+    suspects = sorted(verification.suspects, key=lambda item: (item.coverage, item.span[0]))
+    estimate = len(suspects) * cfg.review_seconds_per_flag
+    lines.append(
+        f"의심 큐 {len(suspects)}개 / 전체 {verification.cue_total}개. "
+        f"예상 검토 시간 약 {estimate / 60:.1f}분."
     )
-    for cue in flagged:
-        flags = ", ".join(cue.flags) if cue.flags else "-"
-        heard = cue.whisper_text or "-"
-        lines.append(
-            f"| {cue.index} | {format_timecode(cue.start)} | {cue.conf:.2f} "
-            f"| {_escape(heard)} | {_escape(cue.text)} | {flags} |"
-        )
+    if suspects:
+        lines.extend(["", "| # | 시각 | 자막 | 일치율 |", "|---|---|---|---|"])
+        for suspect in suspects:
+            lines.append(
+                f"| {suspect.cue_index} | {format_timecode(suspect.span[0])} "
+                f"| {_escape(suspect.text)} | {suspect.coverage:.0%} |"
+            )
+
+    flagged = [chunk for chunk in verification.chunks if chunk.flagged]
+    if flagged:
+        lines.extend(["", "자막이 발화를 놓쳤을 수 있는 구간 (gpt에만 있는 말이 많다):", ""])
+        for chunk in flagged:
+            lines.append(
+                f"- {format_timecode(chunk.span[0])} ~ {format_timecode(chunk.span[1])}"
+                f" · 유사도 {chunk.similarity:.0%} · 큐 {chunk.cue_count}개"
+            )
+
+    if not suspects and not flagged:
+        lines.extend(["", "전 구간이 gpt 전사와 일치한다."])
     return lines
 
 
@@ -128,18 +82,6 @@ def _issues_section(issues: Sequence[Issue]) -> list[str]:
     return lines
 
 
-def _dictionary_section(candidates: Sequence[DictCandidate]) -> list[str]:
-    lines = ["", "## 사전 갱신 후보", ""]
-    if not candidates:
-        lines.append("2회 이상 반복된 불일치 없음.")
-        return lines
-    lines.append("다음 회차 `--keywords-file`에 넣을 후보다.")
-    lines.append("")
-    for candidate in candidates:
-        lines.append(f"- {candidate.render()}")
-    return lines
-
-
 def build_report(
     source: str,
     cues: Sequence[Cue],
@@ -147,14 +89,14 @@ def build_report(
     issues: Sequence[Issue],
     duration: float,
     cfg: Config,
+    verification: Verification | None,
 ) -> str:
     sections = [
         f"# 검토 리포트 — {source}",
         "",
         *_summary(cues, spine, duration),
-        *_priority(cues, cfg),
+        *_verification_section(verification, cfg),
         *_issues_section(issues),
-        *_dictionary_section(dictionary_candidates(cues, cfg)),
         "",
     ]
     return "\n".join(sections)

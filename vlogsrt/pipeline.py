@@ -14,7 +14,7 @@ from pathlib import Path
 from . import env, log, loops, preprocess, refine, transcribe, verify
 from .config import Config
 from .models import VERDICT_OK, Chunk, Cue, Issue, Segment, Trace, Word
-from .output import save_srt, to_review_cues
+from .output import save_srt
 from .report import build_report
 from .transcribe import LiveTranscriber, Transcriber, TranscriptionJob
 from .validate import ERR, count_by_level, validate
@@ -206,9 +206,7 @@ def run(
         config_snapshot=effective.to_dict(),
     )
     if stop_after == "spine":
-        return _finish(
-            trace, [], [], outdir, prepared.stem, effective, write_srt=False, artifacts=artifacts
-        )
+        return _finish(trace, [], [], outdir, prepared.stem, write_srt=False, artifacts=artifacts)
 
     draft = spine_to_cues(spine)
     if not draft:
@@ -218,25 +216,22 @@ def run(
     _report_issues(issues)
     trace = replace(trace, cues=tuple(cues))
     if stop_after == "refine":
-        return _finish(trace, cues, issues, outdir, prepared.stem, effective, artifacts=artifacts)
+        return _finish(trace, cues, issues, outdir, prepared.stem, artifacts=artifacts)
 
     # SRT는 여기서 저장된다. 검증은 그 다음이다 — 실패해도 SRT를 막지 못한다(규칙 4).
-    finished = _finish(
-        trace,
-        cues,
-        issues,
-        outdir,
-        prepared.stem,
-        effective,
-        write_report=True,
-        artifacts=artifacts,
-    )
-    if stop_after == "output":
-        return finished
+    finished = _finish(trace, cues, issues, outdir, prepared.stem, artifacts=artifacts)
 
-    verification = _verify_stage(transcriber, job, effective, cues, prepared.duration)
-    if verification is not None:
-        log.info(verify.summarize(verification))
+    verification: Verification | None = None
+    if stop_after == "verify":
+        verification = _verify_stage(transcriber, job, effective, cues, prepared.duration)
+        if verification is not None:
+            log.info(verify.summarize(verification))
+
+    if artifacts and cues:
+        report_path = _write_report(
+            trace, cues, issues, outdir, prepared.stem, effective, verification
+        )
+        finished = replace(finished, outputs={**finished.outputs, "report": report_path})
     return replace(finished, verification=verification)
 
 
@@ -304,13 +299,11 @@ def _finish(
     issues: list[Issue],
     outdir: Path,
     stem: str,
-    cfg: Config,
     *,
     write_srt: bool = True,
-    write_report: bool = False,
     artifacts: bool = True,
 ) -> RunResult:
-    """`artifacts=False`면 SRT만 쓴다. trace·검토본·리포트는 만들지 않는다."""
+    """`artifacts=False`면 SRT만 쓴다. trace·리포트는 만들지 않는다."""
     outdir.mkdir(parents=True, exist_ok=True)
     outputs: dict[str, Path] = {}
     if artifacts:
@@ -319,16 +312,25 @@ def _finish(
         outputs["srt"] = save_srt(cues, outdir / f"{stem}.srt")
         if artifacts:
             outputs["srt_alias"] = save_srt(cues, outdir / "output.srt")
-    if write_report and cues and artifacts:
-        review = to_review_cues(cues)
-        outputs["review"] = save_srt(review, outdir / f"{stem}.review.srt")
-        outputs["review_alias"] = save_srt(review, outdir / "output.review.srt")
-        body = build_report(trace.source, cues, list(trace.spine), issues, trace.duration, cfg)
-        report_path = outdir / f"{stem}.report.md"
-        report_path.write_text(body, encoding="utf-8")
-        (outdir / "output.report.md").write_text(body, encoding="utf-8")
-        outputs["report"] = report_path
     return RunResult(trace=trace, cues=tuple(cues), issues=tuple(issues), outputs=outputs)
+
+
+def _write_report(
+    trace: Trace,
+    cues: list[Cue],
+    issues: list[Issue],
+    outdir: Path,
+    stem: str,
+    cfg: Config,
+    verification: Verification | None,
+) -> Path:
+    body = build_report(
+        trace.source, cues, list(trace.spine), issues, trace.duration, cfg, verification
+    )
+    report_path = outdir / f"{stem}.report.md"
+    report_path.write_text(body, encoding="utf-8")
+    (outdir / "output.report.md").write_text(body, encoding="utf-8")
+    return report_path
 
 
 # ─────────────────────────────────────────────────────────────
@@ -392,4 +394,6 @@ def redo(trace_path: Path, cfg: Config, outdir: Path) -> RunResult:
     issues = validate(cues, list(trace.spine), cfg)
     _report_issues(issues)
     updated = replace(trace, cues=tuple(cues), config_snapshot=cfg.to_dict())
-    return _finish(updated, cues, issues, outdir, stem, cfg, write_report=True)
+    finished = _finish(updated, cues, issues, outdir, stem)
+    report_path = _write_report(updated, cues, issues, outdir, stem, cfg, None)
+    return replace(finished, outputs={**finished.outputs, "report": report_path})

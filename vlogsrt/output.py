@@ -1,4 +1,4 @@
-"""SRT 파싱·직렬화와 검토용 출력.
+"""SRT 파싱·직렬화.
 
 출력 개행은 항상 `\\n`이다. 파싱은 CRLF/LF와 BOM을 모두 받아들인다.
 """
@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import re
-from difflib import SequenceMatcher
 from pathlib import Path
 
 from .models import Cue
@@ -15,8 +14,6 @@ _BOM = "﻿"
 _INDEX_RE = re.compile(r"^\s*\d+\s*$")
 _TIME = r"(\d+):([0-5]\d):([0-5]\d)[,.](\d{1,3})"
 _TIMELINE_RE = re.compile(rf"^\s*{_TIME}\s*-->\s*{_TIME}")
-REVIEW_OPEN = "[?"
-REVIEW_CLOSE = "]"
 
 
 def format_timecode(seconds: float) -> str:
@@ -109,63 +106,3 @@ def save_srt(cues: list[Cue], path: Path) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(write_srt(cues), encoding="utf-8")
     return path
-
-
-def diff_ranges(reference: str, hypothesis: str) -> list[tuple[int, int]]:
-    """`hypothesis` 기준으로 두 문자열이 갈린 구간을 돌려준다. 인접 구간은 합친다."""
-    matcher = SequenceMatcher(None, reference, hypothesis, autojunk=False)
-    ranges: list[tuple[int, int]] = []
-    for tag, _, _, j1, j2 in matcher.get_opcodes():
-        if tag == "equal" or j1 == j2:
-            continue
-        if ranges and ranges[-1][1] == j1:
-            ranges[-1] = (ranges[-1][0], j2)
-        else:
-            ranges.append((j1, j2))
-    return ranges
-
-
-def mark_review_text(whisper_text: str, canonical_text: str) -> str:
-    """갈린 글자만 `[?...]`로 감싼다. 큐 전체를 감싸면 검토 속도가 떨어진다."""
-    if not whisper_text or whisper_text == canonical_text:
-        return canonical_text
-    pieces: list[str] = []
-    cursor = 0
-    for start, end in diff_ranges(whisper_text, canonical_text):
-        pieces.append(canonical_text[cursor:start])
-        pieces.append(f"{REVIEW_OPEN}{canonical_text[start:end]}{REVIEW_CLOSE}")
-        cursor = end
-    pieces.append(canonical_text[cursor:])
-    return "".join(pieces)
-
-
-def to_review_cues(cues: list[Cue]) -> list[Cue]:
-    """줄 구조를 유지한 채 마커만 얹는다. 마커가 줄바꿈을 넘지 않도록 줄별로 처리한다."""
-    reviewed: list[Cue] = []
-    for cue in cues:
-        marked = mark_review_text(cue.whisper_text, cue.text)
-        reviewed.append(
-            Cue(
-                start=cue.start,
-                end=cue.end,
-                lines=tuple(_rewrap(marked, cue.lines)),
-                seg_ids=cue.seg_ids,
-                origin=cue.origin,
-                conf=cue.conf,
-                flags=cue.flags,
-                whisper_text=cue.whisper_text,
-                index=cue.index,
-            )
-        )
-    return reviewed
-
-
-def _rewrap(marked: str, original_lines: tuple[str, ...]) -> list[str]:
-    """마커가 붙은 문자열을 원래 줄 수에 맞춰 다시 나눈다."""
-    if len(original_lines) <= 1:
-        return [marked]
-    words = marked.split(" ")
-    target = len(original_lines[0].split(" "))
-    head = " ".join(words[:target])
-    tail = " ".join(words[target:])
-    return [head, tail] if tail else [head]

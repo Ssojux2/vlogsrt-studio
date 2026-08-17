@@ -26,7 +26,6 @@ def test_run_end_to_end(tmp_path: Path) -> None:
     assert result.cues
     assert result.outputs["srt"].is_file()
     assert result.outputs["report"].is_file()
-    assert (tmp_path / "output.review.srt").is_file()
 
     srt = parse_srt(result.outputs["srt"].read_text(encoding="utf-8"))
     assert len(srt) == len(result.cues)
