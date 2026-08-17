@@ -132,7 +132,13 @@ def check_chunks(audio: Path, chunk_paths: list[Path], offsets: list[float]) -> 
 
 
 def check_spine_shift(audio: Path, spine: list) -> Check:
-    """골격 시각을 앞뒤로 밀어보며 실제 소리와 가장 잘 맞는 지점을 찾는다."""
+    """골격 시각을 앞뒤로 밀어보며 실제 소리와 가장 잘 맞는 지점을 찾는다.
+
+    시각이 같은 오디오의 무음 검출에서 나오므로(D24) 최적 시프트가 0인 것은
+    거의 자명하다. 이 검사가 실제로 잡는 것은 **오프셋이 어긋나는 버그**다 —
+    조각 좌표가 원본 좌표로 잘못 옮겨지면 여기서 0이 아닌 시프트로 드러난다.
+    배분이 잘 됐는지는 여기서 알 수 없다. 그건 사람이 귀로 판단한다.
+    """
     full = envelope(audio)
     loud = [level > SPEECH_LEVEL for level in full]
     span = int(MAX_SHIFT_S * 1000 / HOP_MS)
@@ -198,7 +204,7 @@ def locate(stem: str) -> tuple[Path, list[Path], Path | None]:
     audio = cache / f"{stem}.mp3"
     if not audio.is_file():
         raise SystemExit(f"오디오가 없습니다: {audio}")
-    chunks = sorted(cache.glob(f"{stem}.chunk*.mp3"))
+    chunks = sorted(cache.glob(f"{stem}.batch*.mp3"))
     trace = ROOT / "out" / stem / "trace.json"
     video = None
     if trace.is_file():

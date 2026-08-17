@@ -115,6 +115,52 @@ def check_inspection_stays_dead() -> list[str]:
     return failures
 
 
+PURE_MODULES = ("spans.py", "align.py")
+
+
+def check_pure_layer() -> list[str]:
+    """규칙 5 — 시각을 만드는 계층은 순수해야 한다.
+
+    `spans.py`가 ffmpeg를 직접 부르기 시작하면 무음 임계값을 바꿔가며 시험할 수
+    없게 되고, `align.py`가 API를 알면 배분을 테스트할 수 없게 된다.
+    """
+    failures = []
+    forbidden = re.compile(r"^\s*(?:import|from)\s+(openai|subprocess|shutil)\b")
+    for name in PURE_MODULES:
+        path = PACKAGE / name
+        if not path.exists():
+            failures.append(f"vlogsrt/{name}: 순수 계층이 사라졌다 (D24)")
+            continue
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+            match = forbidden.match(line)
+            if match:
+                where = f"vlogsrt/{name}:{number}"
+                failures.append(f"{where} 순수 계층이 {match.group(1)}을 import한다")
+    return failures
+
+
+def check_ffmpeg_boundary() -> list[str]:
+    """규칙 5 — ffmpeg 호출은 preprocess.py에서만."""
+    failures = []
+    for path in _sources():
+        if path.name == "preprocess.py":
+            continue
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+            if re.match(r"\s*(import subprocess|from subprocess)", line):
+                failures.append(f"{path.relative_to(ROOT)}:{number} subprocess는 preprocess.py에만")
+    return failures
+
+
+def check_times_do_not_come_from_the_model() -> list[str]:
+    """규칙 1 — 시각은 오디오에서 온다. 응답에서 시각을 읽던 코드가 남으면 안 된다(D24)."""
+    body = (PACKAGE / "transcribe.py").read_text(encoding="utf-8")
+    failures = []
+    for ghost in ("parse_segments", "seg_id_base", "verbose_json", "diarized_json"):
+        if ghost in body:
+            failures.append(f"transcribe.py: 모델이 시각을 주던 시절의 잔재 {ghost!r}")
+    return failures
+
+
 def check_one_transcription_call() -> list[str]:
     """규칙 1 — 모델은 하나다. 호출 지점이 둘이면 출처가 둘이라는 뜻이다."""
     body = (PACKAGE / "transcribe.py").read_text(encoding="utf-8")
@@ -138,6 +184,9 @@ def check_no_hardcoded_model() -> list[str]:
 
 CHECKS = (
     ("openai 경계", check_openai_boundary),
+    ("ffmpeg 경계", check_ffmpeg_boundary),
+    ("순수 계층", check_pure_layer),
+    ("시각은 오디오에서", check_times_do_not_come_from_the_model),
     ("autojunk=False", check_autojunk),
     ("금지 의존성", check_banned_imports),
     ("의존성 3개", check_dependencies),

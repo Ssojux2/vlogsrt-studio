@@ -59,10 +59,41 @@ def test_srt_text_is_exactly_the_spine_text(tmp_path: Path) -> None:
 
 
 def test_every_segment_reaches_the_srt(tmp_path: Path) -> None:
-    """규칙 9 — 골격의 세그먼트는 하나도 빠짐없이 어떤 큐엔가 들어간다(D23)."""
+    """규칙 9 — 골격의 세그먼트는 하나도 빠짐없이 어떤 큐엔가 들어간다."""
     result = pipeline.run(VIDEO, Config(), tmp_path, force_offline=True)
     covered = {seg_id for cue in result.cues for seg_id in cue.seg_ids}
     assert covered == {segment.id for segment in result.trace.spine}
+
+
+def test_every_word_the_model_said_reaches_the_srt(tmp_path: Path) -> None:
+    """규칙 9 — 어절은 하나도 버리지 않는다. 배분에서도, 정제에서도(D24)."""
+    from vlogsrt import transcribe as transcribe_module
+
+    responses = transcribe_module.FixtureTranscriber(fixture_dir=SYNTHETIC).transcribe(
+        transcribe_module.TranscriptionJob(stem="demo", chunks=()), Config()
+    )
+    said = [
+        word
+        for response in sorted(responses, key=lambda r: r.offset)
+        for word in transcribe_module.parse_text(response.payload).split()
+    ]
+    result = pipeline.run(VIDEO, Config(), tmp_path, force_offline=True)
+    written = " ".join(cue.text for cue in result.cues).split()
+    assert written == said
+
+
+def test_cue_times_never_leave_the_speech_spans(tmp_path: Path) -> None:
+    """규칙 1 — 자막 시각의 뿌리는 발화 구간이다. 정제의 한도 밖으로 나가지 않는다."""
+    cfg = Config()
+    from vlogsrt import transcribe as transcribe_module
+
+    responses = transcribe_module.FixtureTranscriber(fixture_dir=SYNTHETIC).transcribe(
+        transcribe_module.TranscriptionJob(stem="demo", chunks=()), Config()
+    )
+    spans = [span for response in responses for span in response.spans]
+    result = pipeline.run(VIDEO, cfg, tmp_path, force_offline=True)
+    assert result.cues[0].start >= min(start for start, _ in spans) - cfg.lead_in - 1e-6
+    assert result.cues[-1].end <= max(end for _, end in spans) + cfg.lead_out + 1e-6
 
 
 def test_cues_never_overlap_and_never_exceed_capacity(tmp_path: Path) -> None:

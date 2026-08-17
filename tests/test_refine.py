@@ -8,9 +8,9 @@ from vlogsrt.config import Config
 from vlogsrt.layout import break_text
 from vlogsrt.refine import (
     adjust_timing,
+    drop_empty,
     merge_pass,
     refine,
-    reject_empty,
     resolve_overlaps,
     split_cue,
     split_pass,
@@ -239,19 +239,19 @@ def test_refine_repairs_overlapping_input() -> None:
         assert following.start >= previous.end
 
 
-def test_an_empty_cue_stops_instead_of_vanishing() -> None:
-    """지우고 넘어가면 그 구간의 말이 자막에서 사라진 채 아무도 모른다(D23)."""
-    with pytest.raises(RuntimeError, match="글자가 없는 큐"):
-        reject_empty([make_cue(0.0, 1.0, "말"), make_cue(2.0, 3.0, "  ", index=2)])
+def test_an_empty_cue_is_dropped_but_never_in_silence() -> None:
+    """규칙 9 — 멈추지는 않되, 어느 세그먼트에서 잃었는지는 로그에 남는다."""
+    cues = [make_cue(0.0, 1.0, "말"), make_cue(2.0, 3.0, "  ", index=2)]
+    assert [cue.text for cue in drop_empty(cues)] == ["말"]
 
 
-def test_reject_empty_passes_normal_cues_through() -> None:
+def test_drop_empty_passes_normal_cues_through() -> None:
     cues = [make_cue(0.0, 1.0, "말"), make_cue(2.0, 3.0, "더", index=2)]
-    assert reject_empty(cues) == cues
+    assert drop_empty(cues) == cues
 
 
 def test_a_zero_length_segment_still_becomes_a_visible_cue() -> None:
-    """골격이 길이 0을 줘도 자막은 min_duration만큼 보인다(D23)."""
+    """구간이 길이 0이어도 자막은 min_duration만큼 보인다."""
     cfg = Config()
     cues = refine([make_cue(4.0, 4.0, "길이 0")], cfg, duration=30.0)
     assert len(cues) == 1
