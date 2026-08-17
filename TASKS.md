@@ -1,8 +1,8 @@
 # TASKS.md — vlogsrt 태스크 보드
 
-> **전환 계획: whisper 단독 SRT + gpt 검증** (근거: `docs/DECISIONS.md` D19)
+> **현재 계획: 단일 모델 전사 + 검사 계층 제거** (근거: `docs/DECISIONS.md` D21)
 > 한 세션에 태스크 하나. DoD = `make check` 통과 → 커밋.
-> 옛 보드(T0~T5, 2모델 사상 설계)는 git 히스토리에 있다.
+> 옛 보드(T0~T5 2모델 사상, P0~P8 whisper 단독+검증)는 git 히스토리에 있다.
 
 ---
 
@@ -10,86 +10,45 @@
 
 | 태스크 | 내용 | 상태 |
 |---|---|---|
-| P0 | 문서 전환 (CLAUDE.md · TASKS.md · D19) | ✅ |
-| P1 | `vlogsrt/verify.py` 신규 (TDD, 오프라인) | ✅ |
-| P2 | 파이프라인 전환 (STAGES 개편, baseline 삭제) | ✅ |
-| P3 | report/review 재작업 (의심 큐 표) | ✅ |
-| P4 | 사상 계열 삭제 (mapping · gapfill) + 모델 슬림 | ✅ |
-| P5 | 가드 재정비 (invariants · 싱크 게이트) | ✅ |
-| P6 | M1-lite: 음질 필터 제거 (D20) | ✅ |
-| P7 | 최종 청소 + 인수 | ✅ |
-| P8 | 사람 인수: UI로 짧은 영상 1편 온라인 스모크 🧑 | ☐ |
+| Q0 | 문서 전환 (CLAUDE.md · TASKS.md · D21) | ✅ |
+| Q1 | 코드 전환 (diarize 전사, 검사 계층 삭제) | ✅ |
+| Q2 | 문서 마무리 (README · RUNBOOK · DASHBOARD) | ✅ |
+| Q3 | 사람 인수: 짧은 영상 1편 온라인 실행 🧑 | ☐ |
 
 ---
 
-## P1 — `vlogsrt/verify.py` 신규
+## Q1 — 코드 전환
 
-**테스트 먼저** (`tests/test_verify.py`): 동일 텍스트 coverage 1.0 / 상이 ~0 /
-짧은 감탄사 면제 / `strip_for_compare` 정규화 불변 / 실측 픽스처(whisper+gpt)로
-의심 큐 ⊆ 전체 / 순수성(입력 불변, 플래그만 반환).
+**삭제**: `verify.py`, `loops.py`, `validate.py`, `report.py`(대시보드 함수는
+`evaluate.py`로 이주) + 각 테스트.
 
-공개 API:
+**전사**: `transcribe.py`의 `whisper()`/`gpt()` → `transcribe()` 하나.
+`response_format`은 config(`transcribe_format`, 기본 `diarized_json`).
+`segments[].{start,end,text}`만 읽고 `id`는 우리가 위치로 부여한다
+(diarize는 `"seg_0"` 같은 문자열 id를 줄 수 있다).
+부가 인자(`prompt`/`keywords`/`languages`)가 400을 받으면 떼고 한 번 더 부르는
+폴백은 유지 — 미검증 모델에 대한 방어다.
 
-```python
-def chunk_spans(responses, duration) -> list[Span]
-def verify(cues, responses, duration, cfg) -> Verification   # 순수 함수
-def summarize(verification) -> str   # "검증: 큐 918개 중 41개 의심 (4.5%)"
-```
+**전처리**: 무음 검출 삭제, 균등 분할. `chunk_max_seconds` 600 → 1500.
 
-- 청크 유사도: `SequenceMatcher(autojunk=False).ratio()` — 구간 내 큐 텍스트 join
-  vs gpt 청크 텍스트 (양쪽 `strip_for_compare`)
-- 큐 coverage: matching-block 합 / 큐 길이. `set_seq2` 캐시 재사용
-- config 신규 3개: `verify_chunk_sim_floor=0.80`, `verify_cue_match_floor=0.60`,
-  `verify_short_cue_chars=4`
+**모델**: `Segment`는 `id/start/end/text`만. `Word`·`Issue`·`VERDICT_*` 삭제.
+`Trace`에서 `words`·`silences` 제거, `TRACE_VERSION` 4.0.
 
-DoD: 순수 추가(기존 테스트 무변경), `make check`.
+## Q2 — 문서 마무리
 
-## P2 — 파이프라인 전환 (핵심)
+README 파이프라인·모듈표, RUNBOOK 절차(무음·리포트·검증 언급 제거),
+DASHBOARD 변형 라벨.
 
-- `pipeline.py`: `STAGES = ("spine","refine","output","verify")`, 기본
-  `stop_after="verify"`. run = prepare → fetch_spine → `spine_to_cues`(mapping에서
-  이주) → `refine.refine` → validate → **SRT 저장** → try: gpt → verify → 로그/report.
-  `baseline()`·`_map_stage` 삭제, `RunResult.verification` 추가.
-- `cli.py`: baseline 서브커맨드 제거.
-- `ui/service.py`: `_summary`가 conf 대신 의심 큐 수. **`pipeline.run` 시그니처와
-  `outputs["srt"]` 계약 불변.**
-- 테스트: gpt 텍스트 검증류 삭제, `stop_after=output이면 gpt 무호출`,
-  `gpt 픽스처 없어도 SRT`, `검증 on/off SRT 바이트 동일`.
+## Q3 — 사람 인수 🧑
 
-## P3 — report/review 재작업
+> **Claude Code에게 시키지 마라.** 유료 호출이다.
 
-`output.py` 리뷰 킷(diff_ranges/mark_review_text/to_review_cues) 삭제,
-`report.py` conf 우선순위 표 → 검증 의심 큐 표(`| # | 시각 | 자막 | 일치율 | 사유 |`),
-`*.review.srt` 산출 중단.
+1. `make clean` (캐시에 옛 오디오가 남아 있을 수 있다)
+2. 짧은 영상(3~5분) 1편을 UI로 실행
+3. 확인할 것:
+   - 모델이 계정에 있는가 (없으면 404 — 과금 없이 즉시 실패)
+   - 자막이 소리와 맞는가 (귀 테스트)
+   - 첫 자막이 영상 초반에 서는가
+4. 잘 돌면 `vlogsrt record`로 픽스처를 만들어두면 이후 오프라인 회귀가 살아난다.
 
-## P4 — 사상 계열 삭제
-
-삭제: `vlogsrt/mapping.py`, `vlogsrt/gapfill.py`, `tests/test_mapping.py`,
-`tests/test_gapfill.py`. 슬림: `hangul.py`(→ to_nfc/strip_for_compare),
-`models.py`(Cue의 whisper_text·conf 제거, `seg_ids` 유지, TRACE_VERSION 인상),
-`refine.py` whisper_text 배관, `validate.py` low_conf/orphan,
-`config.py` 사상 블록 10필드, `evaluate.py` 스텁 2개.
-픽스처 디렉터리는 손대지 않는다.
-
-## P5 — 가드 재정비
-
-`scripts/check_invariants.py`: 기존 유지 + mapping/gapfill 부재 + verify.py 순수성
-+ whisper() 본문 `prompt=` 부재. `tests/test_invariants.py`: 큐 시각 refine 한도 내
-(seg_ids 대조), `max_chars_per_cue` 초과 큐 없음. `verify_srt_equivalence.py` 삭제.
-
-## P6 — M1-lite: 필터 제거
-
-`preprocess.py`: `-af` 체인 제거 → `-vn -ac 1 -ar 16000 -c:a libmp3lame -b:a 64k`.
-무음 탐지·분할 규칙 유지. `config.py` 필터 6필드 제거. D20 기록
-(감지 = verify_timing + 의심률 추이, 복귀 = `-af` 한 줄, `.vlogsrt-cache` 정리 안내).
-
-## P7 — 최종 청소 + 인수
-
-잔존 용어 grep(canonical/절단점/orphan/baseline) → README·RUNBOOK·프리셋 정리.
-인수: `make check` / 오프라인 E2E(초과 큐 0, 겹침 0) /
-`make verify STEM=fr_day_1_2_fhd` green / `pytest tests/test_ui_service.py`.
-
-## P8 — 사람 인수 🧑
-
-> **Claude Code에게 시키지 마라.** UI로 짧은 영상 1편 온라인 실행 → 귀 테스트
-> (싱크), 의심 큐 표 확인. 문제 있으면 로그와 함께 새 태스크로.
+문제가 있으면 로그와 함께 새 태스크로.

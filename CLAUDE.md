@@ -1,61 +1,62 @@
 # CLAUDE.md
 
-브이로그 자막 SRT 생성기. **whisper-1 하나가 자막의 시각과 텍스트를 모두 만들고,
-`gpt-transcribe`는 완성된 자막을 검증만 한다** (의심 큐 플래그, 출력 불변).
-설계 배경은 `docs/DECISIONS.md`(전환 결정은 D19), 태스크 보드는 `TASKS.md`.
+브이로그 자막 SRT 생성기. **모델 하나(`gpt-4o-transcribe-diarize`)가 자막의 시각과
+글자를 모두 만들고, 프로그램은 그것을 SRT로 조판할 뿐이다.** 검사도, 판정도,
+재검증도 하지 않는다. 설계 배경은 `docs/DECISIONS.md`(현재 구조는 D21), 태스크
+보드는 `TASKS.md`.
 
 ---
 
 ## 아키텍처 불변 규칙
 
-이 10개를 어기면 설계가 무너진다. 작업 전 반드시 확인하고, 어겨야 할 이유가 생기면
+이 8개를 어기면 설계가 무너진다. 작업 전 반드시 확인하고, 어겨야 할 이유가 생기면
 코드를 고치지 말고 **먼저 보고하라.**
 
-1. **동기화가 1순위다.** 자막의 모든 타임스탬프와 모든 글자는 whisper-1
-   세그먼트(`spine`)에서만 온다. 다른 출처는 없다.
+1. **동기화가 1순위다.** 자막의 모든 타임스탬프와 모든 글자는 전사 응답의
+   `segments[]`(= `spine`)에서만 온다. 다른 출처는 없다.
 
-2. **`spine[]`은 생성(판정·강등 포함) 후 절대 수정하지 않는다.** 모든 큐는
-   `seg_ids`로 원본 세그먼트를 역추적할 수 있어야 한다.
+2. **`spine[]`은 생성 후 절대 수정하지 않는다.** 모든 큐는 `seg_ids`로 원본
+   세그먼트를 역추적할 수 있어야 한다.
 
 3. **시각을 움직일 수 있는 곳은 `refine`뿐이다.** 이동량은 config의
    `lead_in`/`lead_out`/`min_gap`/`min_duration`/`max_duration` 한도 안이다.
    그 밖의 어떤 단계도 큐 시각을 만지지 않는다.
 
-4. **`gpt-transcribe`는 검증 전용이다.** `verify.py`는 큐를 만들지도 고치지도
-   못한다 — 읽고 플래그만 낸다. 검증을 껐다 켜도 SRT는 바이트 단위로 같아야
-   하고, 검증 실패(API 오류 포함)는 SRT 산출을 막지 못한다.
+4. **검사·재검증 계층을 되살리지 마라(D21).** 판정(verdict), 되풀이 강등,
+   교차 검증, 정제 결과 검사, 무음 검출 — 전부 의도적으로 삭제했다. "자막 품질이
+   의심스러우니 경고를 붙이자"는 제안이 떠오르면 **코드를 쓰지 말고 보고하라.**
+   품질 판단은 사람이 눈과 귀로 한다.
 
-5. **whisper에는 `prompt`를 절대 보내지 않는다.** 힌트 한 줄이 앞 9분을 날렸다
-   (D13/D16). `prompt`와 `keywords`는 gpt(검증 기준측)에만 간다.
-
-6. **API 호출은 `vlogsrt/transcribe.py`에서만.** 나머지 모듈은 전부 순수 함수여야
+5. **API 호출은 `vlogsrt/transcribe.py`에서만.** 나머지 모듈은 전부 순수 함수여야
    한다. 테스트 가능성이 여기 걸려 있다.
 
-7. **모든 임계값은 `config`에서 온다.** 코드에 숫자를 하드코딩하지 마라.
-   `0.85`, `2.4`, `18` 같은 값이 함수 안에 리터럴로 나타나면 리뷰 실패다.
+6. **모든 임계값은 `config`에서 온다.** 코드에 숫자를 하드코딩하지 마라.
+   `0.85`, `12.0`, `16` 같은 값이 함수 안에 리터럴로 나타나면 리뷰 실패다.
 
-8. **의존성은 `openai`, `tomli-w`, `rich` 뿐이다.** `jamo`, `konlpy`, `pysrt`,
+7. **의존성은 `openai`, `tomli-w`, `rich` 뿐이다.** `jamo`, `konlpy`, `pysrt`,
    `ffmpeg-python`, `pydantic` 등을 추가하지 마라. 필요한 건 표준 라이브러리로 짠다.
    (`difflib`, `unicodedata`, `bisect`, `subprocess`, `concurrent.futures`)
 
-9. **`difflib.SequenceMatcher`는 항상 `autojunk=False`.** 기본값이면 한국어처럼
-   고빈도 문자가 많은 시퀀스에서 잡음 처리로 비교가 무너진다.
+8. **개발 중 실제 API를 호출하지 마라.** `tests/fixtures/`의 응답을 쓴다. 실제
+   호출은 `vlogsrt record`로만, 사람이 명시적으로 실행한다.
 
-10. **개발 중 실제 API를 호출하지 마라.** `tests/fixtures/api/`의 녹화된 응답을
-    쓴다. 실제 호출은 `vlogsrt record` 커맨드로만, 사람이 명시적으로 실행한다.
+부수 규칙: `difflib.SequenceMatcher`는 항상 `autojunk=False`(기본값이면 한국어처럼
+고빈도 문자가 많은 시퀀스에서 비교가 무너진다).
 
 ---
 
 ## 파이프라인
 
 ```
-영상 → ffmpeg 오디오 추출 → 무음 기준 분할(24MB/600s API 한도)
-     → whisper-1 → 오프셋 리베이스 → spine (판정 + 되풀이 강등)
+영상 → ffmpeg 오디오 추출(필터 없음) → 한도 분할(24MB/1500s)
+     → gpt-4o-transcribe-diarize → 오프셋 리베이스 → spine
      → spine_to_cues → refine → SRT 저장
-     → [검증] gpt-transcribe → 유사도 비교 → 의심 큐 플래그 (report/로그만)
 ```
 
-SRT는 검증 **전에** 저장된다. 검증은 실패해도 경고 한 줄이 전부다.
+끝이다. 이 뒤에 아무 단계도 없다.
+
+전사 응답의 `segments[].{start,end,text}`가 전부다. 세그먼트를 버리는 판정도 없고
+(빈 텍스트와 `end <= start`만 제외), 결과를 다시 재는 단계도 없다.
 
 ---
 
@@ -82,20 +83,21 @@ vlogsrt run <video> --offline             # 픽스처 기반 전체 파이프라
 ```
 픽스처가 필요합니다. 다음을 직접 실행해주세요:
   vlogsrt record golden/ep01.mp4
-예상 비용: 약 $0.06 (5분 영상 기준)
+예상 비용: 약 $0.03 (5분 영상 기준)
 ```
+
+`tests/fixtures/api/`의 `*.whisper.json` / `*.gpt.json`은 옛 2모델 시절의 고아다.
+읽지도 지우지도 마라(픽스처 수정 금지).
 
 ### 임계값을 고치지 마라
 
 **테스트가 실패하면 코드를 고쳐라. 기대값이나 임계값을 고치지 마라.**
 
 임계값 자체가 틀렸다고 판단되면 **수정하지 말고, 근거와 함께 보고하라.**
-특히 다음 값들은 외부 근거가 있다.
+다음 두 값은 외부 근거가 있다.
 
 | 값 | 출처 |
 |---|---|
-| `compression_ratio > 2.4` | OpenAI API 레퍼런스 |
-| `avg_logprob < -1.0` | OpenAI API 레퍼런스 |
 | `min_duration = 0.85` | Netflix TTSG 5/6초 |
 | `min_gap = 0.08` | Netflix TTSG 2프레임 @24fps |
 
@@ -118,14 +120,13 @@ make check              # lint + type + test + invariant 전부
 pytest                  # 테스트만
 
 # 파이프라인
-vlogsrt run <video> --offline                     # 전체 실행 (검증 포함)
-vlogsrt run <video> --offline --stop-after output # whisper만 (검증 생략, 비용 절반)
-vlogsrt redo out/trace.json                       # 정제만 재실행
+vlogsrt run <video> --offline     # 전체 실행
+vlogsrt redo out/trace.json       # 조판만 재실행 (API 없음)
 
 # 평가·싱크 게이트
 vlogsrt eval out/output.srt golden/ep01.srt
 make eval               # 골든셋 전체 → docs/DASHBOARD.md 갱신
-make verify STEM=<stem> # 오디오 포락선 대조 (싱크 게이트)
+make verify STEM=<stem> # 오디오 포락선 대조 (파이프라인 밖의 유일한 자동 게이트)
 
 # 픽스처 (사람만 실행)
 vlogsrt record golden/ep01.mp4          # 실제 API 호출. 유료.
@@ -149,11 +150,10 @@ vlogsrt record golden/ep01.mp4          # 실제 API 호출. 유료.
 
 | 용어 | 의미 |
 |---|---|
-| spine / 골격 | whisper 세그먼트 배열. 생성 후 수정 불가 |
-| verdict | 세그먼트 품질 판정 (ok/low_logprob/compression_fail/silent) |
-| demote / 강등 | 되풀이 구간의 ok 세그먼트를 compression_fail로 바꿔 큐에서 제외 |
-| suspect / 의심 큐 | 검증에서 gpt 텍스트와 일치율이 낮아 사람 확인이 필요한 큐 |
-| coverage / 일치율 | 큐 텍스트가 gpt 청크 텍스트 안에서 매칭되는 비율 |
+| spine / 골격 | 전사 응답의 세그먼트 배열. 생성 후 수정 불가 |
+| cue / 큐 | 자막 한 장. 시각과 줄이 들어 있다 |
+| refine / 정제 | 큐를 자르고 합치고 시간을 다듬는 유일한 단계 |
+| chunk / 청크 | API 한도(24MB/1500s)로 쪼갠 오디오 조각 |
 
 변수명에 이 용어를 쓴다. `data`, `result`, `temp` 같은 이름 금지.
 
@@ -169,8 +169,7 @@ vlogsrt record golden/ep01.mp4          # 실제 API 호출. 유료.
 - `golden/` 수정 (정답을 고쳐 점수를 올리는 것)
 - `tests/fixtures/api/` 수정
 - `spine[]` 변경
-- 검증 코드(`verify.py`)가 큐·SRT에 손대는 것
-- whisper 호출에 `prompt` 추가
+- **검사·판정·재검증 계층 부활** (규칙 4)
 - 테스트 skip / xfail
 - 한 세션에서 두 개 이상 태스크
 - 커밋 없이 세션 종료

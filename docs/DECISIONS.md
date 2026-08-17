@@ -555,3 +555,77 @@ config 필드 6개(highpass_hz, lowshelf_hz, lowshelf_gain_db, loudnorm_i/tp/lra
 - 주의: `.vlogsrt-cache`에 필터 시절 오디오가 남아 있을 수 있다(지문이 원본만
   본다). 이 커밋 이후 첫 실행 전에 `make clean`으로 캐시를 비워라. UI 경로는
   일회용 workdir라 무관하다.
+
+---
+
+## D21 — 자막을 만드는 모델을 gpt-4o-transcribe-diarize 하나로 바꾸고, 검사 계층을 전부 걷어낸다
+
+날짜: 2026-08-17
+
+### 결정
+
+1. 전사 모델은 **`gpt-4o-transcribe-diarize`** 하나다(`response_format=diarized_json`).
+   whisper-1 경로를 삭제한다.
+2. 파이프라인에서 **검사·재검증 계층을 전부 제거**한다 — 검증(`verify.py`),
+   되풀이 강등(`loops.py`), 세그먼트 판정(verdict), 정제 결과 검사(`validate.py`),
+   무음 검출과 무음 기준 청크 분할, 그리고 이들이 채우던 `report.md`.
+3. 파이프라인이 하는 일은 이것뿐이다: 오디오 추출 → 한도 분할 → 전사 → 정제 → SRT.
+
+### 근거
+
+**whisper-1이 이 콘텐츠에서 실제로 무너졌다.** 77분 실행 로그(2026-08-17):
+
+| 증상 | 실측 |
+|---|---|
+| 길이 0 세그먼트 | 청크 2에서 623개 중 414개 (66%) |
+| 반복 환청 | 7구간 · 539초 = 영상의 11.7% (`'맥주'` 124회, `'칵테일'` 21회) |
+| 검증 의심 큐 | 1377개 중 159개 (11.5%), 8청크 중 7청크 저유사도 |
+
+강등이 환청을 걸러내면 그 11.7%는 자막 공백이 된다. 검증은 그 사실을 알려줄 뿐
+고치지 못한다(설계상 출력 불변, D19의 4). 즉 **검사 계층은 whisper의 실패를
+관측하는 장치였고, 모델을 바꾸면 관측 대상 자체가 사라진다.** 판정 지표
+(`avg_logprob`, `compression_ratio`, `no_speech_prob`)는 whisper-1의
+`verbose_json`에만 있어 새 모델에서는 계산조차 불가능하다.
+
+### 왜 `gpt-transcribe`가 아니라 `-diarize`인가
+
+`gpt-transcribe`(gpt-4o-transcribe)는 **타임스탬프를 반환하지 않는다.** 녹화된
+픽스처가 증거다 — 38분 청크 하나가 `{"text": "…9067자…"}` 한 덩어리로 오고
+`segments`가 없다. `timestamp_granularities`도 `verbose_json`도 이 모델에는
+거절당한다. 시각이 없으면 SRT를 만들 수 없다.
+
+세그먼트 시각을 주는 OpenAI 모델은 둘뿐이다: `whisper-1`(`verbose_json`)과
+`gpt-4o-transcribe-diarize`(`diarized_json`). 후자를 택했다.
+
+### 포기하는 것 (정직하게)
+
+- **단어 타임스탬프.** diarize 응답에는 `words[]`가 없다. 긴 세그먼트를 자를 때
+  쓰던 "가장 긴 휴지에서 자르기"가 불가능해져, 글자 수 비례 분할로 떨어진다.
+  분할된 큐 안에서 최대 수백 ms의 오차가 생길 수 있다(큐 경계는 원본 세그먼트
+  범위를 벗어나지 않는다).
+- **무음 기준 청크 경계.** 균등 분할이라 경계가 말 중간에 떨어질 수 있고, 그
+  경계에서 한두 어절이 사라질 수 있다. 대신 `chunk_max_seconds`를 600 → 1500으로
+  올려 경계 수를 줄였다(600초는 whisper-1의 순차 디코딩 병리 때문이었고 — D13 —
+  그 근거는 모델과 함께 사라졌다).
+- **자동 품질 신호 전부.** 자막이 이상해도 프로그램은 아무 말도 하지 않는다.
+  판단은 사람이 눈과 귀로 한다. 남은 자동 게이트는 `make verify`(오디오 포락선
+  대조) 하나뿐이며 파이프라인 밖에 있다.
+
+### 위험과 복귀
+
+- **모델 가용성이 미검증이다.** 픽스처가 없어 오프라인에서 확인할 수 없었다.
+  계정에 모델이 없으면 404가 나고 **과금은 되지 않는다.**
+- 복귀 경로는 코드 수정이 아니라 설정 두 줄이다. `diarized_json`과
+  `verbose_json`은 둘 다 `segments[].{start,end,text}`를 주므로 파서가 같다:
+
+  ```toml
+  [transcribe]
+  transcribe_model = "whisper-1"
+  transcribe_format = "verbose_json"
+  ```
+
+  단, 이렇게 되돌려도 판정·강등·검증은 돌아오지 않는다. 그것들이 필요하면
+  이 커밋을 revert하라.
+- 옛 `trace.json`은 읽히지 않는다(`TRACE_VERSION` 4.0).
+- `tests/fixtures/api/`의 whisper·gpt 픽스처는 규칙대로 손대지 않았다. 새 경로가
+  읽지 않으므로 고아로 남는다.
