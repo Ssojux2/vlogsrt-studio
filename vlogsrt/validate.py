@@ -9,7 +9,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from .config import Config
-from .models import ORIGIN_ORPHAN, VERDICT_OK, Cue, Issue, Segment
+from .models import VERDICT_OK, Cue, Issue, Segment
 
 # 부동소수 잡음이 임계값 비교를 흔들지 않게 하는 여유값. 임계값이 아니다.
 EPSILON = 1e-6
@@ -117,10 +117,6 @@ def _provenance(cues: Sequence[Cue], spine: Sequence[Segment], cfg: Config) -> l
             issues.append(Issue(WARN, "no_origin", cue.index, "골격 세그먼트를 잃었다"))
         elif any(seg_id not in known for seg_id in cue.seg_ids):
             issues.append(Issue(ERR, "unknown_seg", cue.index, f"모르는 seg_id {cue.seg_ids}"))
-        if cue.conf < cfg.conf_threshold:
-            issues.append(Issue(WARN, "low_conf", cue.index, f"신뢰도 {cue.conf:.2f}"))
-        if cue.origin == ORIGIN_ORPHAN:
-            issues.append(Issue(INFO, "orphan", cue.index, "환청 구간에서 되살린 텍스트"))
         for flag in cue.flags:
             issues.append(Issue(INFO, f"flag:{flag}", cue.index, flag))
         if spine and (cue.end < speech_start or cue.start > speech_end):

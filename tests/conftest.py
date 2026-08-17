@@ -61,10 +61,8 @@ def make_cue(
     end: float,
     text: str,
     *,
-    whisper_text: str | None = None,
     seg_ids: tuple[int, ...] = (0,),
     origin: str = "spine",
-    conf: float = 1.0,
     index: int = 1,
 ) -> Cue:
     return Cue(
@@ -73,8 +71,6 @@ def make_cue(
         lines=(text,),
         seg_ids=seg_ids,
         origin=origin,
-        conf=conf,
-        whisper_text=text if whisper_text is None else whisper_text,
         index=index,
     )
 

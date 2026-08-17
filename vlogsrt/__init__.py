@@ -5,4 +5,4 @@
 """
 
 __version__ = "0.1.0"
-TRACE_VERSION = "2.0"
+TRACE_VERSION = "3.0"  # 2.0의 canonical·conf·whisper_text는 whisper 단독 전환(D19)으로 사라졌다

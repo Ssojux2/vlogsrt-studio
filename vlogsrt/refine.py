@@ -73,16 +73,6 @@ def _char_split_index(text: str, ratio: float) -> int | None:
     return min(spaces, key=lambda index: abs(index - target))
 
 
-def _slice_whisper(whisper_text: str, ratio: float) -> tuple[str, str]:
-    """검토용 원문도 같은 비율로 나눈다. 안 나누면 diff 마킹이 큐 전체를 물들인다."""
-    if not whisper_text:
-        return "", ""
-    index = _char_split_index(whisper_text, ratio)
-    if index is None:
-        index = max(1, int(len(whisper_text) * ratio))
-    return whisper_text[:index].strip(), whisper_text[index:].strip()
-
-
 def split_cue(cue: Cue, words: Sequence[Word], cfg: Config, depth: int = 0) -> list[Cue]:
     """자막으로 너무 길거나 빽빽한 큐를 자른다. 시각은 원본 큐 안에서만 움직인다."""
     if not needs_split(cue, cfg) or depth >= cfg.max_split_depth:
@@ -115,22 +105,9 @@ def split_cue(cue: Cue, words: Sequence[Word], cfg: Config, depth: int = 0) -> l
 
     first_end = min(max(first_end, cue.start + cfg.min_gap), cue.end - cfg.min_gap)
     second_start = min(max(second_start, first_end + cfg.min_gap), cue.end)
-    first_whisper, second_whisper = _slice_whisper(cue.whisper_text, index / len(text))
 
-    first = replace(
-        cue,
-        end=first_end,
-        lines=(first_text,),
-        origin=ORIGIN_SPLIT,
-        whisper_text=first_whisper,
-    )
-    second = replace(
-        cue,
-        start=second_start,
-        lines=(second_text,),
-        origin=ORIGIN_SPLIT,
-        whisper_text=second_whisper,
-    )
+    first = replace(cue, end=first_end, lines=(first_text,), origin=ORIGIN_SPLIT)
+    second = replace(cue, start=second_start, lines=(second_text,), origin=ORIGIN_SPLIT)
     return [
         *split_cue(first, words, cfg, depth + 1),
         *split_cue(second, words, cfg, depth + 1),
@@ -151,16 +128,13 @@ def split_pass(cues: Sequence[Cue], words: Sequence[Word], cfg: Config) -> list[
 
 def _merged(first: Cue, second: Cue) -> Cue:
     text = f"{first.text} {second.text}".strip()
-    whisper = f"{first.whisper_text} {second.whisper_text}".strip()
     return replace(
         first,
         end=second.end,
         lines=(text,),
         seg_ids=tuple(dict.fromkeys((*first.seg_ids, *second.seg_ids))),
         origin=ORIGIN_MERGE,
-        whisper_text=whisper,
         flags=tuple(dict.fromkeys((*first.flags, *second.flags))),
-        conf=min(first.conf, second.conf),
     )
 
 

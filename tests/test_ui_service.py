@@ -67,7 +67,7 @@ def fake_result(outdir: Path) -> pipeline.RunResult:
     srt = outdir / "demo.srt"
     srt.write_text(SRT, encoding="utf-8")
     return pipeline.RunResult(
-        trace=Trace(source="x", duration=10.0, spine=(), config_snapshot={"conf_threshold": 0.75}),
+        trace=Trace(source="x", duration=10.0, spine=(), config_snapshot={}),
         cues=(),
         issues=(),
         outputs={"srt": srt},

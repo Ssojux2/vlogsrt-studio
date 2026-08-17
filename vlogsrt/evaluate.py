@@ -162,14 +162,6 @@ def violation_rate(cues: Sequence[Cue], cfg: Config) -> float:
     return offending / len(cues)
 
 
-def flag_precision(hyp: Sequence[Cue], ref: Sequence[Cue]) -> float:
-    raise NotImplementedError("플래그 정밀도는 T5.1에서 플래그가 생긴 뒤에 계산한다.")
-
-
-def flag_recall(hyp: Sequence[Cue], ref: Sequence[Cue]) -> float:
-    raise NotImplementedError("플래그 재현율은 T5.1에서 플래그가 생긴 뒤에 계산한다.")
-
-
 @dataclass(frozen=True, slots=True)
 class Metrics:
     cer: float

@@ -17,7 +17,6 @@ VERDICT_SILENT = "silent"
 ORIGIN_SPINE = "spine"
 ORIGIN_SPLIT = "split"
 ORIGIN_MERGE = "merge"
-ORIGIN_ORPHAN = "orphan"
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,9 +76,7 @@ class Cue:
     lines: tuple[str, ...]
     seg_ids: tuple[int, ...] = ()
     origin: str = ORIGIN_SPINE
-    conf: float = 1.0
     flags: tuple[str, ...] = ()
-    whisper_text: str = ""
     index: int = 0
 
     @property
@@ -113,9 +110,7 @@ class Cue:
             lines=tuple(raw["lines"]),
             seg_ids=tuple(int(i) for i in raw.get("seg_ids", ())),
             origin=str(raw.get("origin", ORIGIN_SPINE)),
-            conf=float(raw.get("conf", 1.0)),
             flags=tuple(raw.get("flags", ())),
-            whisper_text=str(raw.get("whisper_text", "")),
             index=int(raw.get("index", 0)),
         )
 
@@ -150,7 +145,6 @@ class Trace:
     cues: tuple[Cue, ...] = ()
     words: tuple[Word, ...] = ()
     silences: tuple[tuple[float, float], ...] = ()
-    canonical: str = ""
     config_snapshot: dict[str, Any] = field(default_factory=dict)
     warnings: tuple[str, ...] = ()
     version: str = TRACE_VERSION
@@ -164,7 +158,6 @@ class Trace:
             "cues": [asdict(cue) for cue in self.cues],
             "words": [asdict(word) for word in self.words],
             "silences": [list(span) for span in self.silences],
-            "canonical": self.canonical,
             "config_snapshot": self.config_snapshot,
             "warnings": list(self.warnings),
         }
@@ -199,7 +192,6 @@ class Trace:
             cues=tuple(Cue.from_dict(c) for c in raw.get("cues", ())),
             words=tuple(Word.from_dict(w) for w in raw.get("words", ())),
             silences=tuple((float(a), float(b)) for a, b in raw.get("silences", ())),
-            canonical=str(raw.get("canonical", "")),
             config_snapshot=dict(raw.get("config_snapshot", {})),
             warnings=tuple(raw.get("warnings", ())),
             version=version,

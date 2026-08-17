@@ -149,7 +149,6 @@ def spine_to_cues(spine: list[Segment]) -> list[Cue]:
             end=segment.end,
             lines=(segment.text.strip(),),
             seg_ids=(segment.id,),
-            whisper_text=segment.text.strip(),
             index=position + 1,
         )
         for position, segment in enumerate(s for s in spine if s.verdict == VERDICT_OK)

@@ -96,7 +96,7 @@ def test_missing_gpt_fixture_still_writes_the_srt(
 def test_stop_after_spine_writes_trace_only(tmp_path: Path) -> None:
     result = pipeline.run(VIDEO, Config(), tmp_path, force_offline=True, stop_after="spine")
     trace = json.loads((tmp_path / "trace.json").read_text(encoding="utf-8"))
-    assert trace["version"] == "2.0"
+    assert trace["version"] == "3.0"
     assert len(trace["spine"]) > 0
     assert all(segment["start"] < segment["end"] for segment in trace["spine"])
     assert not (tmp_path / "output.srt").exists()

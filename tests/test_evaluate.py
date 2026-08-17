@@ -11,8 +11,6 @@ from vlogsrt.evaluate import (
     cue_start_hit_rate,
     cue_start_mae,
     evaluate_cues,
-    flag_precision,
-    flag_recall,
     levenshtein,
     proper_noun_accuracy,
     violation_rate,
@@ -83,11 +81,3 @@ def test_violation_rate_uses_config_thresholds() -> None:
     too_fast = make_cue(0.0, 1.0, "가" * 40)
     assert violation_rate([clean], cfg) == 0.0
     assert violation_rate([clean, too_fast], cfg) == 0.5
-
-
-def test_flag_metrics_are_not_implemented_yet() -> None:
-    cues = [make_cue(0.0, 1.0, "가")]
-    with pytest.raises(NotImplementedError):
-        flag_precision(cues, cues)
-    with pytest.raises(NotImplementedError):
-        flag_recall(cues, cues)
