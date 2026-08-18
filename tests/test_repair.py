@@ -269,7 +269,7 @@ def test_a_stale_fixture_offset_is_refused_not_forced_into_place() -> None:
 
 
 def test_a_silent_arbiter_is_not_reported_as_a_verdict() -> None:
-    """심판을 못 부른 것과 심판이 '되풀이가 맞다'고 한 것은 다르다.
+    """심판을 못 부른 것과 심판이 '되살릴 말이 없다'고 한 것은 다르다.
 
     사람이 `repair_max_attempts`를 올릴지 API를 고칠지가 갈린다.
     """
@@ -301,6 +301,58 @@ def test_the_arbiter_stops_the_retry_when_it_hears_the_same_loop() -> None:
     settled = _settle(_echoing(8), fake, Config())
     assert len([call for call in fake.calls if call[0] == RESCUE_KIND]) == 1
     assert not settled.repairs[0].arbiter_clean
+
+
+def test_an_empty_arbiter_answer_does_not_buy_another_attempt() -> None:
+    """**심판이 아무 글자도 못 들었으면 되살릴 말이 없다는 뜻이다**(D29).
+
+    빈 글자는 되풀이가 아니므로, 그대로 두면 '되풀이가 아니다 → 말이 있다'로 읽혀
+    노이즈 구간마다 더 뜨거운 whisper 호출을 한 번씩 사게 된다.
+    """
+    fake = FakeTranscriber(rescue=[LOOP] * 12, arbiter_text="   ")
+    settled = _settle(_echoing(8), fake, Config())
+    assert len([call for call in fake.calls if call[0] == RESCUE_KIND]) == 1
+    assert not settled.repairs[0].arbiter_clean
+    assert settled.repairs[0].arbiter_answered, "못 부른 것과 '말이 없다'는 다르다"
+
+
+# ─────────────────────────────────────────────────────────────
+#  낱자 되풀이 — 다른 되풀이와 똑같이 다룬다 (D29)
+# ─────────────────────────────────────────────────────────────
+
+
+def _lettering(letters: str, start: float = 10.0, step: float = 2.0) -> list[Segment]:
+    """세그먼트마다 글자 하나. 실측(84~172초·44장·2초 등간격)을 닮게 만든다."""
+    return [
+        Segment(id=index, start=start + index * step, end=start + (index + 1) * step, text=letter)
+        for index, letter in enumerate(letters)
+    ]
+
+
+def test_a_letter_run_is_planned_like_any_other_repeat() -> None:
+    """실측에서는 여기가 `[]`이라 재전사가 한 번도 안 돌았다."""
+    draft = _lettering("SFSFSF" + "F" * 38)
+    spans = repair.plan_spans(draft, _source(duration=120.0), Config())
+    assert spans == [(draft[0].start, draft[-1].end)]
+
+
+def test_a_letter_run_that_stays_letters_is_not_recovered() -> None:
+    """다시 물어 또 낱자를 받으면 회복이 아니다. 88초 ≥ 30초이므로 접힌다."""
+    fake = FakeTranscriber(rescue=list("F" * 44), arbiter_text=LOOP * 12)
+    settled = repair.settle(
+        _lettering("SFSFSF" + "F" * 38), _source(duration=120.0), Config(), fake
+    )
+    assert [record.outcome for record in settled.repairs] == [REPAIR_COLLAPSED]
+    assert len(settled.spine) == 1
+
+
+def test_a_letter_run_can_be_rescued_like_anything_else() -> None:
+    fake = FakeTranscriber(rescue=[CLEAN])
+    settled = repair.settle(
+        _lettering("SFSFSF" + "F" * 38), _source(duration=120.0), Config(), fake
+    )
+    assert [record.outcome for record in settled.repairs] == [REPAIR_REPLACED]
+    assert [segment.text for segment in settled.spine] == [CLEAN]
 
 
 def _straddling_draft() -> list[Segment]:

@@ -301,10 +301,19 @@ def _ask_arbiter(
         log.warn(f"심판 모델을 부르지 못했다: {exc}. 더 시도하지 않는다.")
         return {}
     return {
-        index: not repetition.looks_repetitive(transcribe.parse_text(response.payload), cfg)
+        index: _heard_speech(transcribe.parse_text(response.payload), cfg)
         for index, response in _by_span(responses, chunks)
         if index in set(wanted)
     }
+
+
+def _heard_speech(text: str, cfg: Config) -> bool:
+    """**아무 글자도 없으면 되살릴 말이 없다**(D29).
+
+    빈 글자는 되풀이가 아니라서, 되풀이 여부만 물으면 '말이 있다'로 읽힌다. 그러면
+    엔진음·바람 같은 구간마다 더 뜨거운 whisper 호출을 한 번씩 사게 된다.
+    """
+    return bool(text.strip()) and not repetition.looks_repetitive(text, cfg)
 
 
 def _rescue(

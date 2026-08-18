@@ -3,18 +3,26 @@
 순수 함수만 둔다. 여기서 나온 구간을 무엇에 쓸지는 부르는 쪽이 정한다:
 `verify`는 표시만 하고(규칙 5), `repair`는 그 구간만 다시 물어본다(D27).
 
-신호가 둘이다.
+신호가 셋이다.
 
 - **메아리(echo)**: 연속 세그먼트가 글자 그대로 같다. 세그먼트 하나만 보면 정상이라
   whisper의 환청 필터를 그대로 통과한다.
 - **압축률(compression)**: whisper가 세그먼트마다 실어 보내는 `compression_ratio`.
   우리가 계산한 값이 아니라 응답에 있던 값이다. 레퍼런스 구현이 되풀이를 판정할 때
   쓰는 바로 그 지표이고, 임계값 2.4도 거기서 왔다.
+- **낱자(letter)**: 세그먼트마다 글자가 하나뿐인 상태가 이어진다. **글자가 달라도
+  한 런이다**(D29).
 
 두 번째 신호가 중요한 이유: OpenAI 전사 API의 자동 온도 상승은 **로그 확률**을 보고
 발동하는데, 되풀이에 빠진 whisper는 확신에 차 있다. 실측에서 `compression_ratio > 2.4`인
 세그먼트 248개 중 `avg_logprob < -1.0`인 것은 **0개**였고 `temperature`는 전부 0.0이었다.
 호스팅 폴백이 원리적으로 반응할 수 없는 병리라, 우리가 직접 잡아야 한다(D27).
+
+세 번째 신호가 필요한 이유: 앞의 둘이 **1글자에 나란히 눈이 멀었다.** 메아리는
+`loop_min_chars`가 런을 통째로 버렸고, 압축률은 그 30초 창의 텍스트가 29바이트뿐이라
+zlib 헤더에 눌려 임계값 2.4에 걸터앉았다(`'F '` 10회=1.58 · 15회=2.42 · 20회=3.00).
+되풀이의 심각도가 아니라 **글자 수**가 판정을 정하고 있었다 — 실측에서 88초·44장이
+경고 하나 없이 SRT로 나갔다(D29).
 """
 
 from __future__ import annotations
@@ -24,12 +32,12 @@ from collections.abc import Callable, Sequence
 
 from .config import Config
 from .hangul import to_nfc
-from .models import WHY_COMPRESSION, WHY_ECHO, Repeat, Segment
+from .models import WHY_COMPRESSION, WHY_ECHO, WHY_LETTER, Repeat, Segment
 
 
 def find_repeats(spine: Sequence[Segment], cfg: Config) -> list[Repeat]:
-    """되풀이 구간. 두 신호가 짚은 곳을 합쳐 시간 순으로 돌려준다."""
-    found = [*_echo_runs(spine, cfg), *_compression_runs(spine, cfg)]
+    """되풀이 구간. 세 신호가 짚은 곳을 합쳐 시간 순으로 돌려준다."""
+    found = [*_echo_runs(spine, cfg), *_letter_runs(spine, cfg), *_compression_runs(spine, cfg)]
     return _merge(sorted(found, key=lambda repeat: (repeat.start, repeat.end)))
 
 
@@ -136,6 +144,32 @@ def _echo_runs(spine: Sequence[Segment], cfg: Config) -> list[Repeat]:
         for run in runs
         if _qualifies(run, cfg) and len(_key(run[0])) >= cfg.loop_min_chars
     ]
+
+
+def _letter_runs(spine: Sequence[Segment], cfg: Config) -> list[Repeat]:
+    """글자 하나뿐인 세그먼트가 이어지는 구간. **글자가 달라도 한 런이다**(D29).
+
+    `loop_min_chars`가 이 신호와 메아리의 **경계선**이다 — 그 위는 메아리가, 그 아래는
+    여기가 받는다. 빈틈도 겹침도 없다. 실측의 앞머리가 `S F S F S F`였는데, 글자가
+    같기를 요구하면 런이 매번 끊겨 그 10초를 놓친다.
+
+    말이 아니라고 판정하는 코드가 아니다(규칙 4). 짚기만 하고, 되살릴 말이 있는지는
+    재전사와 심판이 정한다.
+    """
+
+    def both_letters(earlier: Segment, later: Segment) -> bool:
+        return _is_letter(earlier, cfg) and _is_letter(later, cfg)
+
+    runs = _runs(spine, both_letters)
+    return [
+        _to_repeat(run, WHY_LETTER, _key(run[0]))
+        for run in runs
+        if _is_letter(run[0], cfg) and _qualifies(run, cfg)
+    ]
+
+
+def _is_letter(segment: Segment, cfg: Config) -> bool:
+    return 0 < len(_key(segment)) < cfg.loop_min_chars
 
 
 def _compression_runs(spine: Sequence[Segment], cfg: Config) -> list[Repeat]:

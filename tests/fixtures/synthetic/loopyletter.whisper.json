@@ -1,0 +1,553 @@
+{
+ "_comment": "낱자 되풀이(84~172초·44장)가 든 1차 전사. 압축률은 임계값 아래이고 글자는 한 자뿐이라 앞의 두 신호가 둘 다 놓친다 — 세 번째 신호가 없으면 44장이 그대로 SRT로 나간다(D29).",
+ "chunks": [
+  {
+   "index": 0,
+   "offset": 0.0,
+   "response": {
+    "segments": [
+     {
+      "id": 0,
+      "start": 4.0,
+      "end": 6.5,
+      "text": " 안녕하세요 오늘은 파리 외곽으로 나가는 길이에요",
+      "compression_ratio": 1.18,
+      "avg_logprob": -0.25,
+      "no_speech_prob": 0.06
+     },
+     {
+      "id": 1,
+      "start": 14.0,
+      "end": 16.5,
+      "text": " 노트르담 앞을 지나서 강가 도로를 탔습니다",
+      "compression_ratio": 1.18,
+      "avg_logprob": -0.25,
+      "no_speech_prob": 0.06
+     },
+     {
+      "id": 2,
+      "start": 24.0,
+      "end": 26.5,
+      "text": " 생각보다 사람이 많지 않네요",
+      "compression_ratio": 1.18,
+      "avg_logprob": -0.25,
+      "no_speech_prob": 0.06
+     },
+     {
+      "id": 3,
+      "start": 34.0,
+      "end": 36.5,
+      "text": " 여기서부터는 차로 삼십 분쯤 걸린대요",
+      "compression_ratio": 1.18,
+      "avg_logprob": -0.25,
+      "no_speech_prob": 0.06
+     },
+     {
+      "id": 4,
+      "start": 44.0,
+      "end": 46.5,
+      "text": " 창밖 풍경이 계속 바뀌어서 재밌어요",
+      "compression_ratio": 1.18,
+      "avg_logprob": -0.25,
+      "no_speech_prob": 0.06
+     },
+     {
+      "id": 5,
+      "start": 54.0,
+      "end": 56.5,
+      "text": " 그쵸? 터질 것 같지 않아요?",
+      "compression_ratio": 1.18,
+      "avg_logprob": -0.25,
+      "no_speech_prob": 0.06
+     },
+     {
+      "id": 6,
+      "start": 64.0,
+      "end": 66.5,
+      "text": " 세컨드",
+      "compression_ratio": 1.18,
+      "avg_logprob": -0.25,
+      "no_speech_prob": 0.06
+     },
+     {
+      "id": 7,
+      "start": 74.0,
+      "end": 76.5,
+      "text": " 세컨드가 뭐죠?",
+      "compression_ratio": 1.18,
+      "avg_logprob": -0.25,
+      "no_speech_prob": 0.06
+     },
+     {
+      "id": 8,
+      "start": 84.04,
+      "end": 86.04,
+      "compression_ratio": 2.0,
+      "avg_logprob": -0.31,
+      "no_speech_prob": 0.42,
+      "text": " S"
+     },
+     {
+      "id": 9,
+      "start": 86.04,
+      "end": 88.04,
+      "compression_ratio": 2.0,
+      "avg_logprob": -0.31,
+      "no_speech_prob": 0.42,
+      "text": " F"
+     },
+     {
+      "id": 10,
+      "start": 88.04,
+      "end": 90.04,
+      "compression_ratio": 2.0,
+      "avg_logprob": -0.31,
+      "no_speech_prob": 0.42,
+      "text": " S"
+     },
+     {
+      "id": 11,
+      "start": 90.04,
+      "end": 92.04,
+      "compression_ratio": 2.0,
+      "avg_logprob": -0.31,
+      "no_speech_prob": 0.42,
+      "text": " F"
+     },
+     {
+      "id": 12,
+      "start": 92.04,
+      "end": 94.04,
+      "compression_ratio": 2.0,
+      "avg_logprob": -0.31,
+      "no_speech_prob": 0.42,
+      "text": " S"
+     },
+     {
+      "id": 13,
+      "start": 94.04,
+      "end": 96.04,
+      "compression_ratio": 2.0,
+      "avg_logprob": -0.31,
+      "no_speech_prob": 0.42,
+      "text": " F"
+     },
+     {
+      "id": 14,
+      "start": 96.04,
+      "end": 98.04,
+      "compression_ratio": 2.0,
+      "avg_logprob": -0.31,
+      "no_speech_prob": 0.42,
+      "text": " F"
+     },
+     {
+      "id": 15,
+      "start": 98.04,
+      "end": 100.04,
+      "compression_ratio": 2.0,
+      "avg_logprob": -0.31,
+      "no_speech_prob": 0.42,
+      "text": " F"
+     },
+     {
+      "id": 16,
+      "start": 100.04,
+      "end": 102.04,
+      "compression_ratio": 2.0,
+      "avg_logprob": -0.31,
+      "no_speech_prob": 0.42,
+      "text": " F"
+     },
+     {
+      "id": 17,
+      "start": 102.04,
+      "end": 104.04,
+      "compression_ratio": 2.0,
+      "avg_logprob": -0.31,
+      "no_speech_prob": 0.42,
+      "text": " F"
+     },
+     {
+      "id": 18,
+      "start": 104.04,
+      "end": 106.04,
+      "compression_ratio": 2.0,
+      "avg_logprob": -0.31,
+      "no_speech_prob": 0.42,
+      "text": " F"
+     },
+     {
+      "id": 19,
+      "start": 106.04,
+      "end": 108.04,
+      "compression_ratio": 2.0,
+      "avg_logprob": -0.31,
+      "no_speech_prob": 0.42,
+      "text": " F"
+     },
+     {
+      "id": 20,
+      "start": 108.04,
+      "end": 110.04,
+      "compression_ratio": 2.0,
+      "avg_logprob": -0.31,
+      "no_speech_prob": 0.42,
+      "text": " F"
+     },
+     {
+      "id": 21,
+      "start": 110.04,
+      "end": 112.04,
+      "compression_ratio": 2.0,
+      "avg_logprob": -0.31,
+      "no_speech_prob": 0.42,
+      "text": " F"
+     },
+     {
+      "id": 22,
+      "start": 112.04,
+      "end": 114.04,
+      "compression_ratio": 2.0,
+      "avg_logprob": -0.31,
+      "no_speech_prob": 0.42,
+      "text": " F"
+     },
+     {
+      "id": 23,
+      "start": 114.04,
+      "end": 116.04,
+      "compression_ratio": 2.0,
+      "avg_logprob": -0.31,
+      "no_speech_prob": 0.42,
+      "text": " F"
+     },
+     {
+      "id": 24,
+      "start": 116.04,
+      "end": 118.04,
+      "compression_ratio": 2.0,
+      "avg_logprob": -0.31,
+      "no_speech_prob": 0.42,
+      "text": " F"
+     },
+     {
+      "id": 25,
+      "start": 118.04,
+      "end": 120.04,
+      "compression_ratio": 2.0,
+      "avg_logprob": -0.31,
+      "no_speech_prob": 0.42,
+      "text": " F"
+     },
+     {
+      "id": 26,
+      "start": 120.04,
+      "end": 122.04,
+      "compression_ratio": 2.0,
+      "avg_logprob": -0.31,
+      "no_speech_prob": 0.42,
+      "text": " F"
+     },
+     {
+      "id": 27,
+      "start": 122.04,
+      "end": 124.04,
+      "compression_ratio": 2.0,
+      "avg_logprob": -0.31,
+      "no_speech_prob": 0.42,
+      "text": " F"
+     },
+     {
+      "id": 28,
+      "start": 124.04,
+      "end": 126.04,
+      "compression_ratio": 2.0,
+      "avg_logprob": -0.31,
+      "no_speech_prob": 0.42,
+      "text": " F"
+     },
+     {
+      "id": 29,
+      "start": 126.04,
+      "end": 128.04,
+      "compression_ratio": 2.0,
+      "avg_logprob": -0.31,
+      "no_speech_prob": 0.42,
+      "text": " F"
+     },
+     {
+      "id": 30,
+      "start": 128.04,
+      "end": 130.04,
+      "compression_ratio": 2.0,
+      "avg_logprob": -0.31,
+      "no_speech_prob": 0.42,
+      "text": " F"
+     },
+     {
+      "id": 31,
+      "start": 130.04,
+      "end": 132.04,
+      "compression_ratio": 2.0,
+      "avg_logprob": -0.31,
+      "no_speech_prob": 0.42,
+      "text": " F"
+     },
+     {
+      "id": 32,
+      "start": 132.04,
+      "end": 134.04,
+      "compression_ratio": 2.0,
+      "avg_logprob": -0.31,
+      "no_speech_prob": 0.42,
+      "text": " F"
+     },
+     {
+      "id": 33,
+      "start": 134.04,
+      "end": 136.04,
+      "compression_ratio": 2.0,
+      "avg_logprob": -0.31,
+      "no_speech_prob": 0.42,
+      "text": " F"
+     },
+     {
+      "id": 34,
+      "start": 136.04,
+      "end": 138.04,
+      "compression_ratio": 2.0,
+      "avg_logprob": -0.31,
+      "no_speech_prob": 0.42,
+      "text": " F"
+     },
+     {
+      "id": 35,
+      "start": 138.04,
+      "end": 140.04,
+      "compression_ratio": 2.0,
+      "avg_logprob": -0.31,
+      "no_speech_prob": 0.42,
+      "text": " F"
+     },
+     {
+      "id": 36,
+      "start": 140.04,
+      "end": 142.04,
+      "compression_ratio": 2.0,
+      "avg_logprob": -0.31,
+      "no_speech_prob": 0.42,
+      "text": " F"
+     },
+     {
+      "id": 37,
+      "start": 142.04,
+      "end": 144.04,
+      "compression_ratio": 2.0,
+      "avg_logprob": -0.31,
+      "no_speech_prob": 0.42,
+      "text": " F"
+     },
+     {
+      "id": 38,
+      "start": 144.04,
+      "end": 146.04,
+      "compression_ratio": 2.0,
+      "avg_logprob": -0.31,
+      "no_speech_prob": 0.42,
+      "text": " F"
+     },
+     {
+      "id": 39,
+      "start": 146.04,
+      "end": 148.04,
+      "compression_ratio": 2.0,
+      "avg_logprob": -0.31,
+      "no_speech_prob": 0.42,
+      "text": " F"
+     },
+     {
+      "id": 40,
+      "start": 148.04,
+      "end": 150.04,
+      "compression_ratio": 2.0,
+      "avg_logprob": -0.31,
+      "no_speech_prob": 0.42,
+      "text": " F"
+     },
+     {
+      "id": 41,
+      "start": 150.04,
+      "end": 152.04,
+      "compression_ratio": 2.0,
+      "avg_logprob": -0.31,
+      "no_speech_prob": 0.42,
+      "text": " F"
+     },
+     {
+      "id": 42,
+      "start": 152.04,
+      "end": 154.04,
+      "compression_ratio": 2.0,
+      "avg_logprob": -0.31,
+      "no_speech_prob": 0.42,
+      "text": " F"
+     },
+     {
+      "id": 43,
+      "start": 154.04,
+      "end": 156.04,
+      "compression_ratio": 2.0,
+      "avg_logprob": -0.31,
+      "no_speech_prob": 0.42,
+      "text": " F"
+     },
+     {
+      "id": 44,
+      "start": 156.04,
+      "end": 158.04,
+      "compression_ratio": 2.0,
+      "avg_logprob": -0.31,
+      "no_speech_prob": 0.42,
+      "text": " F"
+     },
+     {
+      "id": 45,
+      "start": 158.04,
+      "end": 160.04,
+      "compression_ratio": 2.0,
+      "avg_logprob": -0.31,
+      "no_speech_prob": 0.42,
+      "text": " F"
+     },
+     {
+      "id": 46,
+      "start": 160.04,
+      "end": 162.04,
+      "compression_ratio": 2.0,
+      "avg_logprob": -0.31,
+      "no_speech_prob": 0.42,
+      "text": " F"
+     },
+     {
+      "id": 47,
+      "start": 162.04,
+      "end": 164.04,
+      "compression_ratio": 2.0,
+      "avg_logprob": -0.31,
+      "no_speech_prob": 0.42,
+      "text": " F"
+     },
+     {
+      "id": 48,
+      "start": 164.04,
+      "end": 166.04,
+      "compression_ratio": 2.0,
+      "avg_logprob": -0.31,
+      "no_speech_prob": 0.42,
+      "text": " F"
+     },
+     {
+      "id": 49,
+      "start": 166.04,
+      "end": 168.04,
+      "compression_ratio": 2.0,
+      "avg_logprob": -0.31,
+      "no_speech_prob": 0.42,
+      "text": " F"
+     },
+     {
+      "id": 50,
+      "start": 168.04,
+      "end": 170.04,
+      "compression_ratio": 2.0,
+      "avg_logprob": -0.31,
+      "no_speech_prob": 0.42,
+      "text": " F"
+     },
+     {
+      "id": 51,
+      "start": 170.04,
+      "end": 172.04,
+      "compression_ratio": 2.0,
+      "avg_logprob": -0.31,
+      "no_speech_prob": 0.42,
+      "text": " F"
+     },
+     {
+      "id": 52,
+      "start": 176.0,
+      "end": 178.5,
+      "text": " 한국과는 다른 점 예쁜 차가 없어요",
+      "compression_ratio": 1.18,
+      "avg_logprob": -0.25,
+      "no_speech_prob": 0.06
+     },
+     {
+      "id": 53,
+      "start": 186.0,
+      "end": 188.5,
+      "text": " 근데 다 약간 히치백이랑 동글동글하게 생긴 거",
+      "compression_ratio": 1.18,
+      "avg_logprob": -0.25,
+      "no_speech_prob": 0.06
+     },
+     {
+      "id": 54,
+      "start": 196.0,
+      "end": 198.5,
+      "text": " 여기는 이런 차가 잘 돼요",
+      "compression_ratio": 1.18,
+      "avg_logprob": -0.25,
+      "no_speech_prob": 0.06
+     },
+     {
+      "id": 55,
+      "start": 206.0,
+      "end": 208.5,
+      "text": " 그래서 현대차 중에서도 걔네가 메인으로 미는 차가 코나에요",
+      "compression_ratio": 1.18,
+      "avg_logprob": -0.25,
+      "no_speech_prob": 0.06
+     },
+     {
+      "id": 56,
+      "start": 216.0,
+      "end": 218.5,
+      "text": " 여기는 코나가 잘 팔려요",
+      "compression_ratio": 1.18,
+      "avg_logprob": -0.25,
+      "no_speech_prob": 0.06
+     },
+     {
+      "id": 57,
+      "start": 226.0,
+      "end": 228.5,
+      "text": " 카메라가 흔들려도 이해해 주세요",
+      "compression_ratio": 1.18,
+      "avg_logprob": -0.25,
+      "no_speech_prob": 0.06
+     },
+     {
+      "id": 58,
+      "start": 236.0,
+      "end": 238.5,
+      "text": " 이제 슬슬 도착합니다",
+      "compression_ratio": 1.18,
+      "avg_logprob": -0.25,
+      "no_speech_prob": 0.06
+     },
+     {
+      "id": 59,
+      "start": 246.0,
+      "end": 248.5,
+      "text": " 구독 부탁드려요",
+      "compression_ratio": 1.18,
+      "avg_logprob": -0.25,
+      "no_speech_prob": 0.06
+     }
+    ]
+   }
+  }
+ ]
+}

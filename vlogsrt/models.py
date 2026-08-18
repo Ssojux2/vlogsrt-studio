@@ -16,6 +16,7 @@ ORIGIN_MERGE = "merge"
 # 되풀이를 무엇이 짚었는가
 WHY_ECHO = "echo"  # 연속 세그먼트가 글자 그대로 같다
 WHY_COMPRESSION = "compression"  # whisper 자신의 compression_ratio가 임계값을 넘었다
+WHY_LETTER = "letter"  # 세그먼트마다 글자 하나뿐인 상태가 이어진다(D29)
 
 # 되풀이 구간을 어떻게 처리했는가
 REPAIR_REPLACED = "replaced"  # 재전사가 성공해 그 구간을 갈아끼웠다
@@ -156,7 +157,7 @@ class Repair:
 
     repeat: Repeat
     outcome: str
-    arbiter_clean: bool  # 심판 모델이 "이 구간은 되풀이가 아니다"라고 했는가
+    arbiter_clean: bool  # 심판 모델이 "이 구간에 되살릴 말이 있다"고 했는가
     attempts: int
     before: int  # 걷어낸 세그먼트 수
     after: int  # 대체 뒤 세그먼트 수
@@ -172,9 +173,14 @@ class Repair:
 
     @property
     def verdict(self) -> str:
+        """심판이 답한 것은 "되살릴 말이 있나" 하나다.
+
+        아니라는 답에는 두 가지가 섞여 있다 — 되풀이만 들렸거나, 아무 글자도 없었거나
+        (D29). 둘 다 "더 살 이유가 없다"로 같으므로 한 문장으로 적는다.
+        """
         if not self.arbiter_answered:
             return "심판 판정 없음"
-        return "심판: 말이 있다" if self.arbiter_clean else "심판: 되풀이가 맞다"
+        return "심판: 말이 있다" if self.arbiter_clean else "심판: 되살릴 말이 없다"
 
     @staticmethod
     def from_dict(raw: dict[str, Any]) -> Repair:

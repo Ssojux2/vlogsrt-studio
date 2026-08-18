@@ -12,7 +12,7 @@ import pytest
 
 from vlogsrt import pipeline
 from vlogsrt.config import Config
-from vlogsrt.models import REPAIR_COLLAPSED, REPAIR_REPLACED
+from vlogsrt.models import REPAIR_COLLAPSED, REPAIR_REPLACED, WHY_LETTER
 from vlogsrt.output import parse_srt
 
 SYNTHETIC = Path(__file__).parent / "fixtures" / "synthetic"
@@ -198,4 +198,50 @@ def test_speech_around_the_long_repeat_survives(tmp_path: Path) -> None:
     result = pipeline.run(LONG_VIDEO, Config(), tmp_path, force_offline=True)
     body = " ".join(_srt_texts(result.outputs["srt"]))
     for said in ("안녕하세요", "노트르담", "카메라가 흔들려도", "사람들이 앉아 있어요"):
+        assert said in body
+
+
+# ─────────────────────────────────────────────────────────────
+#  낱자 되풀이 — 세그먼트마다 글자 하나뿐인 구간 (D29)
+# ─────────────────────────────────────────────────────────────
+
+LETTER_VIDEO = Path("golden/loopyletter.mp4")
+
+
+def test_a_letter_run_no_longer_walks_into_the_srt(tmp_path: Path) -> None:
+    """**D29 사고의 회귀 테스트.**
+
+    실측: 84~172초 44장이 전부 한 글자였는데 검출이 아무것도 못 짚어 재전사가 한 번도
+    돌지 않았고, 44장이 경고 하나 없이 SRT로 나갔다.
+    """
+    result = pipeline.run(LETTER_VIDEO, Config(), tmp_path, force_offline=True)
+    assert [record.outcome for record in result.repairs] == [REPAIR_COLLAPSED]
+    letters = [text for text in _srt_texts(result.outputs["srt"]) if len(text.strip()) == 1]
+    assert len(letters) == 1, f"접힌 구간에 첫 장 하나만 남아야 한다: {letters}"
+
+
+def test_the_letter_run_is_reported_not_swallowed(tmp_path: Path) -> None:
+    """규칙 9 — 접힌 구간은 반드시 기록에 남는다."""
+    result = pipeline.run(LETTER_VIDEO, Config(), tmp_path, force_offline=True)
+    record = result.repairs[0]
+    assert record.repeat.reason == WHY_LETTER
+    assert record.repeat.count == 44
+    saved = json.loads((tmp_path / "trace.json").read_text(encoding="utf-8"))
+    assert saved["repairs"][0]["repeat"]["reason"] == WHY_LETTER
+
+
+def test_the_arbiter_is_only_asked_once_when_it_hears_nothing(tmp_path: Path) -> None:
+    """심판이 빈 글자를 주면 더 뜨거운 whisper를 사지 않는다(D29)."""
+    result = pipeline.run(LETTER_VIDEO, Config(), tmp_path, force_offline=True)
+    record = result.repairs[0]
+    assert record.arbiter_answered
+    assert not record.arbiter_clean
+    assert record.attempts == 1
+
+
+def test_speech_around_the_letter_run_survives(tmp_path: Path) -> None:
+    """규칙 9 — 되풀이 밖은 한 글자도 잃지 않는다."""
+    result = pipeline.run(LETTER_VIDEO, Config(), tmp_path, force_offline=True)
+    body = " ".join(_srt_texts(result.outputs["srt"]))
+    for said in ("안녕하세요", "노트르담", "세컨드", "예쁜 차가 없어요", "구독 부탁드려요"):
         assert said in body
