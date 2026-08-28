@@ -20,6 +20,21 @@ from .models import Chunk, Span
 
 REPAIR_DIR = "repair"  # 재전사 조각은 따로 둔다. 1차 조각을 덮어쓰면 안 된다
 
+# 조각 파일 이름은 **여기 한 줄에서만** 나온다. 검증 도구가 다른 이름(`batch*`)을 찾고
+# 있었고, 그 바람에 청크 정렬 검사가 "파일이 없다 → 단일 청크 → 통과"로 조용히
+# 넘어갔다(D32). 쓰는 쪽과 찾는 쪽이 같은 함수를 부르면 다시는 어긋나지 않는다.
+_CHUNK_NAME = "{stem}.chunk{number}.mp3"
+
+
+def chunk_template(stem: str) -> str:
+    """ffmpeg `-f segment`의 출력 패턴. 번호는 ffmpeg가 채운다."""
+    return _CHUNK_NAME.format(stem=stem, number="%04d")
+
+
+def chunk_glob(stem: str) -> str:
+    """이미 잘려 있는 조각을 찾는 glob. `chunk_template`과 같은 자리에서 온다."""
+    return _CHUNK_NAME.format(stem=stem, number="*")
+
 
 def require_ffmpeg(tool: str = "ffmpeg") -> str:
     path = shutil.which(tool)
@@ -159,7 +174,7 @@ def split_at(audio: Path, cuts: Sequence[float], workdir: Path) -> list[Chunk]:
             "-segment_list", str(listing),
             "-segment_list_type", "csv",
             "-c", "copy",
-            str(workdir / f"{audio.stem}.chunk%04d.mp3"),
+            str(workdir / chunk_template(audio.stem)),
         ]
     )  # fmt: skip
     rows = cutpoints.parse_segment_list(listing.read_text(encoding="utf-8"))

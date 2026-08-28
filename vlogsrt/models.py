@@ -125,6 +125,36 @@ class Chunk:
 
 
 @dataclass(frozen=True, slots=True)
+class ChunkMark:
+    """조각 경계의 기록. **기록일 뿐 시각을 만들지 않는다.**
+
+    `Chunk`에서 경로만 뺀 것이다. 조각 mp3는 캐시를 지우면 사라지지만 "어디서 잘렸나"는
+    남아야 한다 — 조각 **안 위치**로 무언가를 재려면 경계가 있어야 하고, 그게 없어서
+    "조각 끝에서 싱크가 무너진다"는 신고를 되짚을 수 없었다(D32).
+    """
+
+    index: int
+    offset: float
+    duration: float
+
+    @property
+    def end(self) -> float:
+        return self.offset + self.duration
+
+    @staticmethod
+    def of(chunk: Chunk) -> ChunkMark:
+        return ChunkMark(index=chunk.index, offset=chunk.offset, duration=chunk.duration)
+
+    @staticmethod
+    def from_dict(raw: dict[str, Any]) -> ChunkMark:
+        return ChunkMark(
+            index=int(raw["index"]),
+            offset=float(raw["offset"]),
+            duration=float(raw["duration"]),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class Repeat:
     """같은 말이 되풀이된 구간. **자리를 짚을 뿐 아직 아무것도 바꾸지 않았다.**"""
 
@@ -207,6 +237,8 @@ class Trace:
     cues: tuple[Cue, ...] = ()
     config_snapshot: dict[str, Any] = field(default_factory=dict)
     repairs: tuple[Repair, ...] = ()
+    # 조각 경계. 시각을 만들지 않고 **어디서 잘렸는지만** 남긴다(D32).
+    chunks: tuple[ChunkMark, ...] = ()
     version: str = TRACE_VERSION
 
     def to_dict(self) -> dict[str, Any]:
@@ -218,6 +250,7 @@ class Trace:
             "cues": [asdict(cue) for cue in self.cues],
             "config_snapshot": self.config_snapshot,
             "repairs": [asdict(repair) for repair in self.repairs],
+            "chunks": [asdict(mark) for mark in self.chunks],
         }
 
     def save(self, path: Path) -> Path:
@@ -250,5 +283,6 @@ class Trace:
             cues=tuple(Cue.from_dict(c) for c in raw.get("cues", ())),
             config_snapshot=dict(raw.get("config_snapshot", {})),
             repairs=tuple(Repair.from_dict(r) for r in raw.get("repairs", ())),
+            chunks=tuple(ChunkMark.from_dict(c) for c in raw.get("chunks", ())),
             version=version,
         )

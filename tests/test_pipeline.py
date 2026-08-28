@@ -10,6 +10,7 @@ import pytest
 from vlogsrt import TRACE_VERSION, pipeline
 from vlogsrt.cli import main
 from vlogsrt.config import Config
+from vlogsrt.models import Chunk, ChunkMark, Trace
 from vlogsrt.output import parse_srt
 
 SYNTHETIC = Path(__file__).parent / "fixtures" / "synthetic"
@@ -66,6 +67,42 @@ def test_trace_carries_the_new_version(tmp_path: Path) -> None:
     assert trace["version"] == TRACE_VERSION
     # 길이 0 세그먼트도 글자가 있으면 골격에 남는다(규칙 9). 뒤집히지만 않으면 된다.
     assert all(segment["start"] <= segment["end"] for segment in trace["spine"])
+
+
+def test_trace_records_where_the_audio_was_cut(tmp_path: Path) -> None:
+    """조각 경계는 **기록으로 남아야 한다.**
+
+    조각 mp3는 캐시를 지우면 사라지는데, 조각 **안 위치**로 무언가를 재려면 경계가
+    있어야 한다. 그게 없어서 "조각 끝에서 싱크가 무너진다"는 신고를 되짚을 수 없었다(D32).
+    """
+    chunks = (
+        Chunk(path=tmp_path / "a.mp3", offset=0.0, duration=180.0, index=0),
+        Chunk(path=tmp_path / "b.mp3", offset=180.0, duration=120.0, index=1),
+    )
+    trace = Trace(
+        source="x.mp4",
+        duration=300.0,
+        spine=(),
+        chunks=tuple(ChunkMark.of(chunk) for chunk in chunks),
+    )
+    restored = Trace.load(trace.save(tmp_path / "trace.json"))
+
+    assert [mark.offset for mark in restored.chunks] == [0.0, 180.0]
+    assert [mark.duration for mark in restored.chunks] == [180.0, 120.0]
+    assert restored.chunks[-1].end == 300.0
+    # 경로는 넣지 않는다 — 직렬화도 안 되고 되짚는 데 필요도 없다.
+    assert "path" not in json.loads((tmp_path / "trace.json").read_text("utf-8"))["chunks"][0]
+
+
+def test_a_trace_without_chunk_marks_still_loads(tmp_path: Path) -> None:
+    """조각 경계는 기록일 뿐이다. 없다고 `redo`가 막히면 안 된다."""
+    pipeline.run(VIDEO, Config(), tmp_path, force_offline=True)
+    body = json.loads((tmp_path / "trace.json").read_text("utf-8"))
+    assert body["chunks"] == [], "메타 픽스처만 쓴 실행에는 조각이 없다"
+    del body["chunks"]
+    (tmp_path / "old.json").write_text(json.dumps(body), encoding="utf-8")
+
+    assert Trace.load(tmp_path / "old.json").chunks == ()
 
 
 def test_redo_replays_without_fixtures(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

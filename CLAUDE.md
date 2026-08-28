@@ -234,7 +234,10 @@ vlogsrt probe <video>             # 길이·조각 수 확인 (API 없음)
 # 평가·싱크 게이트
 vlogsrt eval out/output.srt golden/ep01.srt
 make eval               # 골든셋 전체 → docs/DASHBOARD.md 갱신
-make verify STEM=<stem> # 오디오 포락선 대조 (파이프라인 밖의 유일한 자동 게이트)
+make verify STEM=<stem> # 시각 대조 (파이프라인 밖의 유일한 자동 게이트)
+                        #   길이 · 청크 정렬(머리·가운데·꼬리) · 전역 시프트 ·
+                        #   시각 붙음(조각 안 위치별) · SRT 커버리지
+                        #   **`SKIP`은 통과가 아니다** — 그 검사는 아무것도 안 봤다(D32)
 
 # 픽스처 (사람만 실행)
 vlogsrt record golden/ep01.mp4          # 실제 API 호출. 유료.

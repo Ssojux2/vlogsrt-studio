@@ -27,9 +27,10 @@ eval:
 	$(PY) -m vlogsrt.cli evalset --golden $(GOLDEN) --out docs/DASHBOARD.md
 
 # "자막이 소리와 안 맞는다"는 신고가 들어왔을 때 원인을 절단/전사로 가른다.
-# 녹화된 픽스처와 전처리 캐시만 읽는다. API를 부르지 않는다.
+# 녹화된 픽스처와 전처리 캐시, 그리고 실행이 남긴 trace.json만 읽는다. API를 부르지 않는다.
+#   make verify STEM=fr_day_1_2_fhd [OUT=out]
 verify:
-	$(PY) scripts/verify_timing.py $(STEM)
+	$(PY) scripts/verify_timing.py $(STEM) --out $(or $(OUT),out)
 
 # 사람만 실행한다. 실제 API 호출이고 유료다.
 fixtures:

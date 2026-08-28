@@ -12,7 +12,7 @@ from pathlib import Path
 
 from . import env, log, preprocess, refine, repair, transcribe, verify
 from .config import Config
-from .models import Chunk, Cue, Repair, Segment, Trace
+from .models import Chunk, ChunkMark, Cue, Repair, Segment, Trace
 from .output import save_srt
 from .transcribe import VERIFY_KIND, LiveTranscriber, Transcriber, TranscriptionJob
 from .verify import Verification
@@ -209,6 +209,7 @@ def run(
         cues=tuple(cues),
         config_snapshot=cfg.to_dict(),
         repairs=settled.repairs,
+        chunks=tuple(ChunkMark.of(chunk) for chunk in prepared.chunks),
     )
     result = replace(
         _finish(trace, cues, outdir, prepared.stem, artifacts=artifacts),
