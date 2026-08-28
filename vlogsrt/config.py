@@ -137,6 +137,18 @@ class Config:
         "고", "며", "면", "지만", "는데", "인데", "해서", "하고",
     )  # fmt: skip
 
+    # ─── 조판 정리 (기본으로 켜져 있다) ──────────────────────
+    # 영화 자막 관행으로 문장부호를 다듬는다(D30). **글자는 한 자도 못 지운다** —
+    # 아래 집합에 든 부호만 지운다. 끄려면 `--no-polish`.
+    # `particles`와 같은 부류다: 임계값이 아니라 어휘이고, 그래서 config에 있다.
+    # TOML로 덮어쓸 때는 **배열 형식을 써라** — 문자열은 쉼표로 쪼개진다.
+    polish_enabled: bool = True
+    polish_drop_marks: tuple[str, ...] = (".", "。")  # 지운다. **숫자 사이는 예외**
+    polish_collapse_marks: tuple[str, ...] = ("!", "?", "…", ",")  # 연속을 하나로
+    polish_trailing_drop: tuple[str, ...] = (",", "、")  # 큐 **끝**에서만 지운다
+    polish_tight_marks: tuple[str, ...] = (",", "!", "?", "…")  # 앞에 공백을 두지 않는다
+    polish_ellipsis: str = "…"
+
     # ─── 평가 ────────────────────────────────────────────────
     boundary_tol: float = 0.3
     start_tol: float = 0.2

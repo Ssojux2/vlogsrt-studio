@@ -50,10 +50,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="되풀이 재전사를 끈다. 기본은 켜져 있다 — 되풀이 구간만 다시 물어 갈아끼운다.",
     )
+    _add_polish_option(run)
 
     again = sub.add_parser("redo", help="API 없이 정제·출력만 재실행")
     again.add_argument("trace", type=Path)
     _add_config_options(again)
+    _add_polish_option(again)
     again.add_argument("-o", "--out", type=Path, default=None)
 
     scored = sub.add_parser("eval", help="SRT 두 개를 비교한다")
@@ -99,6 +101,15 @@ def _add_config_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--keywords", default=None, help="쉼표로 구분")
 
 
+def _add_polish_option(parser: argparse.ArgumentParser) -> None:
+    """자막을 만드는 두 경로(`run`·`redo`)에만 붙인다. 나머지 명령은 조판을 하지 않는다."""
+    parser.add_argument(
+        "--no-polish",
+        action="store_true",
+        help="조판 정리를 끈다. 기본은 켜져 있다 — 온점을 지우고 부호를 다듬는다.",
+    )
+
+
 def _add_mode_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--offline", action="store_true", help="픽스처만 사용 (기본값)")
     parser.add_argument("--online", action="store_true", help="실제 API 호출. 유료.")
@@ -111,6 +122,8 @@ def config_from_args(args: argparse.Namespace) -> Config:
         for key in ("max_chars_per_line", "max_lines", "max_cps", "language")
     }
     cfg = load_config(preset=getattr(args, "preset", None), overrides=overrides)
+    if getattr(args, "no_polish", False):
+        cfg = replace(cfg, polish_enabled=False)
     entries = keywords.load_keywords(
         episode_file=getattr(args, "keywords_file", None),
         inline=keywords.split_inline(getattr(args, "keywords", None)),

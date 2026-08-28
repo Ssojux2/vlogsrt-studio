@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from vlogsrt.config import Config
@@ -237,6 +239,29 @@ def test_refine_repairs_overlapping_input() -> None:
     )
     for previous, following in zip(cues, cues[1:], strict=False):
         assert following.start >= previous.end
+
+
+def test_refine_leaves_no_period_behind() -> None:
+    """D30 — 조판 정리는 `refine` 안에 있다. `run`도 `redo`도 이 함수 하나만 부른다."""
+    cfg = Config()
+    cues = refine([make_cue(0.0, 4.0, "망원동에 왔습니다.")], cfg, duration=10.0)
+    assert [cue.text for cue in cues] == ["망원동에 왔습니다"]
+
+
+def test_polish_runs_before_the_split_decides() -> None:
+    """순서 회귀 — 부호를 지우면 글자 수가 줄어 분할 판정이 바뀐다.
+
+    부호까지 세면 34자라 두 장으로 갈리지만, 온점 둘을 지우면 32자로 한 장에 들어간다.
+    자른 뒤에 지우면 굳이 두 장일 필요가 없던 큐가 두 장으로 남는다.
+    """
+    cfg = Config()
+    text = "오늘은 망원동에 왔습니다. 낮술 한잔 하러 온 김에 들렀어요."
+    assert len(text) > cfg.max_chars_per_cue
+    assert len(text) - text.count(".") == cfg.max_chars_per_cue
+    assert len(refine([make_cue(0.0, 6.0, text)], cfg, duration=10.0)) == 1
+    unpolished = replace(cfg, polish_enabled=False)
+    # 정리를 끄면 부호 두 개 때문에 두 장으로 갈린다 — 그게 정리가 앞에 있어야 하는 이유다.
+    assert len(refine([make_cue(0.0, 6.0, text)], unpolished, duration=10.0)) == 2
 
 
 def test_an_empty_cue_is_dropped_but_never_in_silence() -> None:

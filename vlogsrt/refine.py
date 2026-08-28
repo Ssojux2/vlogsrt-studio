@@ -1,7 +1,8 @@
 """정제 엔진 — 자르고, 합치고, 시간을 다듬는다.
 
-순서가 중요하다: 분할 → 병합 → 시간 보정 → 충돌 해소 → 줄바꿈.
-병합을 분할보다 먼저 돌리면 둘이 서로를 되돌린다.
+순서가 중요하다: 정리 → 분할 → 병합 → 시간 보정 → 충돌 해소 → 줄바꿈.
+병합을 분할보다 먼저 돌리면 둘이 서로를 되돌린다. 정리가 맨 앞인 것도 같은 이유다 —
+부호를 지우면 글자 수가 줄어 분할 판정(`max_chars_per_cue`·`max_cps`)이 바뀐다.
 
 이 단계는 큐를 **버리지 않는다.** 들어온 글자는 전부 나간다(규칙 9).
 """
@@ -15,14 +16,17 @@ from . import log
 from .config import Config
 from .layout import FORCED_BREAK, break_lines, break_text
 from .models import ORIGIN_MERGE, ORIGIN_SPLIT, Cue
+from .polish import POLISHED, polish_pass
 
 __all__ = [
     "FORCED_BREAK",
     "NO_SPLIT_POINT",
+    "POLISHED",
     "adjust_timing",
     "break_lines",
     "break_text",
     "merge_pass",
+    "polish_pass",
     "refine",
     "resolve_overlaps",
     "split_cue",
@@ -224,7 +228,11 @@ def renumber(cues: Sequence[Cue]) -> list[Cue]:
 
 def refine(cues: Sequence[Cue], cfg: Config, duration: float = 0.0) -> list[Cue]:
     """정제 전 과정. `redo`가 부르는 것도 이 함수다."""
-    working = split_pass(cues, cfg)
+    working = polish_pass(cues, cfg)
+    touched = sum(1 for cue in working if POLISHED in cue.flags)
+    if touched:
+        log.info(f"조판 정리 {touched}장")
+    working = split_pass(working, cfg)
     working = merge_pass(working, cfg)
     working = adjust_timing(working, cfg, duration)
     working = resolve_overlaps(working, cfg)

@@ -7,12 +7,12 @@ from __future__ import annotations
 
 import subprocess
 import sys
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
 
 import pytest
 
-from vlogsrt import pipeline
+from vlogsrt import pipeline, refine
 from vlogsrt.config import Config
 from vlogsrt.hangul import strip_for_compare
 from vlogsrt.models import Cue, Segment
@@ -79,7 +79,11 @@ def test_every_word_the_model_said_reaches_the_srt(tmp_path: Path) -> None:
     ]
     result = pipeline.run(VIDEO, Config(), tmp_path, force_offline=True)
     written = " ".join(cue.text for cue in result.cues).split()
-    assert written == said
+    # 부호를 뺀 뒤 비교한다 — 조판 정리가 문장부호를 지우기 때문이다(D30).
+    # **어절을 하나도 잃지 않는다는 보장은 그대로다.** 부호까지 같아야 한다는 계약만 놓았다.
+    assert [strip_for_compare(word) for word in written] == [
+        strip_for_compare(word) for word in said
+    ]
 
 
 def test_the_first_and_last_seconds_survive(tmp_path: Path) -> None:
@@ -107,6 +111,45 @@ def test_cues_never_overlap_and_never_exceed_capacity(tmp_path: Path) -> None:
             assert cue.flags, f"큐 {cue.index}가 표시 없이 용량을 넘었다"
     for previous, following in zip(result.cues, result.cues[1:], strict=False):
         assert following.start >= previous.end
+
+
+def test_the_real_episode_comes_out_without_a_single_period() -> None:
+    """D30 — 영화 자막 관행. 실측 회차(1479 세그먼트)에 온점이 하나도 남지 않는다."""
+    spine, duration = _real_episode()
+    cues = refine.refine(pipeline.spine_to_cues(spine), Config(), duration)
+    assert len(cues) > 1000, "표본이 이만큼은 돼야 의미가 있다"
+    assert [cue.text for cue in cues if "." in cue.text] == []
+
+
+def test_polishing_the_real_episode_deletes_marks_and_nothing_else() -> None:
+    """D30의 안전선 — **글자는 한 자도 못 지운다.**
+
+    실측 회차 전체를 정리한 결과가 정리를 끈 결과와 부호를 뺀 뒤 완전히 같아야 한다.
+    여기가 깨지면 정리 계층이 발화를 먹고 있는 것이다(규칙 9).
+    """
+    spine, duration = _real_episode()
+    polished = refine.refine(pipeline.spine_to_cues(spine), Config(), duration)
+    plain = refine.refine(
+        pipeline.spine_to_cues(spine), replace(Config(), polish_enabled=False), duration
+    )
+    assert strip_for_compare(" ".join(cue.text for cue in polished)) == strip_for_compare(
+        " ".join(cue.text for cue in plain)
+    )
+
+
+def _real_episode() -> tuple[list[Segment], float]:
+    """실제 회차의 1차 전사 골격과 오디오 길이. **읽기만 한다.**
+
+    길이는 반드시 메타 픽스처에서 온다. 응답 안의 `duration`은 **조각 하나의** 길이라
+    (77분 회차의 조각이 38분이다) 그걸 쓰면 뒤쪽 절반이 영상 끝으로 눌려버린다.
+    """
+    from vlogsrt import transcribe
+
+    fixtures = Path(__file__).parent / "fixtures" / "api"
+    spine = transcribe.build_spine(
+        transcribe.load_fixture_responses(fixtures / "fr_day_1_2_fhd.whisper.json")
+    )
+    return spine, float(transcribe.load_meta(fixtures, "fr_day_1_2_fhd")["duration"])
 
 
 def test_spine_is_immutable() -> None:

@@ -107,16 +107,17 @@ DELETED_MODULES = {
 }
 
 # 검증은 표시만 한다. 출력을 만드는 모듈을 알면 그 선이 무너진다(규칙 5).
-VERIFY_MUST_NOT_IMPORT = ("refine", "output", "layout")
+VERIFY_MUST_NOT_IMPORT = ("refine", "output", "layout", "polish")
 
 # 재전사는 **골격이 조립되기 전**에 끝난다. 조판 계층을 알면 그 선이 무너진다(D27).
-REPAIR_MUST_NOT_IMPORT = ("refine", "output", "layout", "verify")
+REPAIR_MUST_NOT_IMPORT = ("refine", "output", "layout", "polish", "verify")
 
 # 조판 이후 계층이 되풀이 판정을 알면, 판정이 파이프라인 아래로 새어나간다(D27).
 DOWNSTREAM_MUST_NOT_IMPORT = {
     "refine.py": ("repair", "repetition"),
     "output.py": ("repair", "repetition"),
     "layout.py": ("repair", "repetition"),
+    "polish.py": ("repair", "repetition"),
 }
 
 
@@ -216,7 +217,7 @@ def check_confidence_meta_survives() -> list[str]:
     return []
 
 
-PURE_MODULES = ("cutpoints.py", "repetition.py")
+PURE_MODULES = ("cutpoints.py", "repetition.py", "polish.py")
 
 # D24의 시각 유도 계층. 되살아나면 초반·마지막이 다시 날아간다(D25).
 BURIED_MODULES = {
