@@ -119,19 +119,29 @@ def _merged(first: Cue, second: Cue) -> Cue:
 
 
 def can_merge(first: Cue, second: Cue, cfg: Config) -> bool:
-    if first.duration >= cfg.min_duration:
-        return False
+    """합칠 이유가 둘이다: 깜빡이는 큐를 없애거나, 한 줄을 채우거나(D31).
+
+    이유가 다르면 허용 폭도 다르다. 깜빡임은 `min_duration`에 못 미치는 큐를 살리는
+    일이라 두 줄(`max_chars_per_cue`)까지 허용하고, 한 줄 채우기는 말 그대로 한 줄
+    (`max_chars_per_line`)에서 멈춘다. 넘어가면 두 장으로 둘 이유가 있다는 뜻이다.
+    """
     if second.start - first.end >= cfg.merge_gap:
         return False
     candidate = _merged(first, second)
-    if len(candidate.text) > cfg.max_chars_per_cue:
+    # **분할을 되돌리면 안 된다.** 길이 때문에 자른 큐를 도로 붙이면 둘이 서로를
+    # 되돌리고, 시간 보정이 끝을 잘라내 뒷말이 화면에서 사라진다.
+    if candidate.duration > cfg.max_duration:
         return False
     # 연쇄 병합에서는 매번 다시 계산해야 한다. 한 번 구한 CPS를 재사용하면 틀린다.
-    return candidate.cps <= cfg.max_cps
+    if candidate.cps > cfg.max_cps:
+        return False
+    limit = cfg.max_chars_per_cue if first.duration < cfg.min_duration else cfg.max_chars_per_line
+    return len(candidate.text) <= limit
 
 
 def merge_pass(cues: Sequence[Cue], cfg: Config) -> list[Cue]:
-    """짧은 큐를 이웃과 합친다. 브이로그는 감탄사가 독립 세그먼트로 나와 자막이 깜빡인다."""
+    """짧은 큐를 이웃과 합쳐 한 줄을 채운다. 브이로그는 감탄사가 독립 세그먼트로 나와
+    자막이 깜빡이고, 그 조각들이 한 줄을 다 못 채운 채 따로 선다(D31)."""
     if not cues:
         return []
     result: list[Cue] = [cues[0]]

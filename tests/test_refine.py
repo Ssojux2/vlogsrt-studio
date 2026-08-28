@@ -124,6 +124,56 @@ def test_merge_chain_stops_on_recomputed_cps() -> None:
     assert merged[1].text == "가" * 20
 
 
+def test_short_cues_fill_one_line() -> None:
+    """D31 — 한 줄이 찰 때까지 이웃과 합친다. 첫 큐가 `min_duration`보다 길어도 합친다.
+
+    예전에는 첫 큐가 0.85초보다 짧을 때만 합쳤다. 그래서 '네', '음' 같은 한두 글자
+    자막이 제 시간을 다 채운 채 따로 서서 화면이 깜빡였다.
+    """
+    cfg = Config()
+    first = make_cue(0.0, 1.4, "벨레", seg_ids=(0,))
+    second = make_cue(1.6, 3.0, "하우스 뮤지션", seg_ids=(1,), index=2)
+    merged = merge_pass([first, second], cfg)
+    assert len(merged) == 1
+    assert merged[0].text == "벨레 하우스 뮤지션"
+    assert merged[0].seg_ids == (0, 1)
+    assert (merged[0].start, merged[0].end) == (0.0, 3.0)
+
+
+def test_filling_a_line_stops_at_the_line_width() -> None:
+    """한 줄을 넘기면서까지 합치지는 않는다 — 그건 두 장으로 둘 이유가 있다는 뜻이다."""
+    cfg = Config()
+    first = make_cue(0.0, 1.4, "가" * 10)
+    second = make_cue(1.6, 3.0, "나" * 10, index=2)
+    assert len(merge_pass([first, second], cfg)) == 2
+
+
+def test_filling_a_line_never_undoes_a_split() -> None:
+    """합친 큐가 `max_duration`을 넘으면 합치지 않는다.
+
+    분할은 길이 때문에 자른 큐를 붙여놓고, 병합이 그걸 도로 붙이면 둘이 서로를
+    되돌린다. 게다가 시간 보정이 끝을 잘라내 뒷말이 화면에서 사라진다.
+    """
+    cfg = Config()
+    first = make_cue(0.0, 4.0, "짧은 말")
+    second = make_cue(4.2, 8.4, "또 짧은 말", index=2)
+    assert merge_pass([first, second], cfg)[0].duration <= cfg.max_duration
+    assert len(merge_pass([first, second], cfg)) == 2
+
+
+def test_filling_a_line_chains_until_it_is_full() -> None:
+    cfg = Config()
+    cues = [
+        make_cue(0.0, 1.0, "벨레", seg_ids=(0,)),
+        make_cue(1.2, 2.2, "벨레", seg_ids=(1,), index=2),
+        make_cue(2.4, 3.4, "벨레", seg_ids=(2,), index=3),
+        make_cue(3.6, 4.6, "하우스 뮤지션이야", seg_ids=(3,), index=4),
+    ]
+    merged = merge_pass(cues, cfg)
+    assert [cue.text for cue in merged] == ["벨레 벨레 벨레", "하우스 뮤지션이야"]
+    assert all(len(cue.text) <= cfg.max_chars_per_line for cue in merged)
+
+
 def test_merge_inserts_exactly_one_space() -> None:
     cfg = Config()
     merged = merge_pass([make_cue(0.0, 0.5, "어"), make_cue(0.6, 2.0, "그래", index=2)], cfg)
