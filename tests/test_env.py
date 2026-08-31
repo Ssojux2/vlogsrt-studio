@@ -118,9 +118,14 @@ def test_relative_config_paths_resolve_under_the_project_root(
     (tmp_path / ".env").write_text("", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
     reset_cache()
+    # 절대 경로는 뿌리가 있어야 한다 — POSIX는 `/`, 윈도우는 `C:\` 처럼 드라이브까지다.
+    absolute = Path(tmp_path.anchor, "absolute", "stays")
     try:
         assert resolve_under_root("tests/fixtures/api") == tmp_path / "tests/fixtures/api"
-        assert resolve_under_root("/absolute/stays") == Path("/absolute/stays")
+        assert resolve_under_root(str(absolute)) == absolute
+        # 드라이브 없는 `/…`는 윈도우에서 현재 드라이브를 타므로 그대로 돌려주면 안 된다.
+        # 무엇이 들어오든 나가는 것은 실행 위치에 흔들리지 않는 경로여야 한다.
+        assert resolve_under_root("/absolute/stays").is_absolute()
     finally:
         reset_cache()
 
