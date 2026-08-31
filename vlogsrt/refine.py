@@ -158,16 +158,50 @@ def merge_pass(cues: Sequence[Cue], cfg: Config) -> list[Cue]:
 # ─────────────────────────────────────────────────────────────
 
 
+def _lead_in_room(cues: Sequence[Cue], index: int, cfg: Config) -> float:
+    """앞 큐와의 실제 무음. 첫 큐 앞은 0초부터가 전부 무음이다."""
+    if index == 0:
+        return cues[0].start
+    return max(0.0, cues[index].start - cues[index - 1].end - cfg.min_gap)
+
+
+def _lead_out_room(cues: Sequence[Cue], index: int, cfg: Config, duration: float) -> float:
+    """뒤 큐가 `lead_in`으로 가져갈 몫과 `min_gap`을 빼고 **남은** 무음.
+
+    말이 시작되는 시각은 사실이고 꼬리 연장은 편의다. 무음이 모자라면 `lead_in`이 먼저
+    가져간다 — 그래야 없는 무음을 만들어 뒤 큐의 시작을 미는 일이 생기지 않는다.
+    """
+    if index + 1 >= len(cues):
+        return max(0.0, duration - cues[index].end) if duration > 0 else cfg.lead_out
+    silence = max(0.0, cues[index + 1].start - cues[index].end)
+    taken = min(cfg.lead_in, max(0.0, silence - cfg.min_gap))
+    return max(0.0, silence - taken - cfg.min_gap)
+
+
+def _stretch_ceiling(cues: Sequence[Cue], index: int, cfg: Config, duration: float) -> float | None:
+    """`min_duration`으로 늘릴 때의 천장. `_restore_min_duration`이 쓰는 것과 같은 선이다."""
+    if index + 1 >= len(cues):
+        return duration if duration > 0 else None
+    return cues[index + 1].start - cfg.min_gap
+
+
 def adjust_timing(cues: Sequence[Cue], cfg: Config, duration: float = 0.0) -> list[Cue]:
-    """lead_in/out → 길이 클램프 순서. 충돌 해소를 먼저 하면 lead_out이 다시 겹친다."""
+    """lead_in/lead_out은 **실제로 있는 무음만** 먹는다. 그다음이 길이 클램프다.
+
+    없는 무음을 만들면 `resolve_overlaps`가 그 가짜 겹침을 중점에서 갈라 뒤 큐의 시작을
+    **뒤로** 민다 — whisper가 세그먼트를 간격 0으로 붙여 내놓는 구간에서 큐 17%가
+    `+0.14초` 늦었다(D33). `min_duration` 확장도 같은 이유로 다음 큐를 넘지 않는다.
+    """
     adjusted: list[Cue] = []
-    for cue in cues:
-        start = max(0.0, cue.start - cfg.lead_in)
-        end = cue.end + cfg.lead_out
+    for index, cue in enumerate(cues):
+        start = max(0.0, cue.start - min(cfg.lead_in, _lead_in_room(cues, index, cfg)))
+        end = cue.end + min(cfg.lead_out, _lead_out_room(cues, index, cfg, duration))
         if duration > 0:
             end = min(end, duration)
         if end - start < cfg.min_duration:
-            end = start + cfg.min_duration
+            ceiling = _stretch_ceiling(cues, index, cfg, duration)
+            wanted = start + cfg.min_duration
+            end = max(cue.end, wanted if ceiling is None else min(wanted, ceiling))
             if duration > 0 and end > duration:
                 end = duration
                 start = max(0.0, end - cfg.min_duration)

@@ -68,6 +68,15 @@ GLUE_EDGE = 0.3  # 머리/꼬리로 볼 조각 안 비율
 GLUE_RISE_TOL = 0.25
 GLUE_MIN_SEGMENTS = 10  # 이보다 적은 조각은 비율이 우연에 흔들린다
 
+# ── 조판 지연(lag) 판정 ──────────────────────────────────────
+# `refine`이 큐 시작을 세그먼트보다 **뒤로** 미는 비율. 위 검사들이 전부 골격만 보는 탓에
+# 조판 계층이 시각을 미는 결함은 이 게이트에 한 번도 잡히지 않았다(D33). `lead_in`만
+# 도는 정상 큐는 음수여야 하고, `lead_out`이 없는 무음을 만들어 이웃을 밀면 양수로 뜬다.
+# 실측 근거: 77분 픽스처에서 고치기 전 27.5%(355/1291) → 고친 뒤 1.1%(14/1291).
+# 0.05가 둘 사이에 깨끗이 앉는다. 남는 1.1%는 whisper 원본이 겹친 구간의 충돌 해소다.
+LAG_LATE_TOL_S = 0.02  # 이보다 늦으면 "늦었다"로 센다. 반올림 잡음 여유
+LAG_LATE_RATE_TOL = 0.05
+
 
 @dataclass(frozen=True, slots=True)
 class Check:
@@ -406,6 +415,35 @@ def check_glue(spine: list[Segment], marks: Sequence[ChunkMark], source: str = "
     return Check("시각 붙음 (조각 안 위치별)", not bad, "\n" + "\n".join(lines))
 
 
+def check_cue_lag(trace: Trace | None) -> Check:
+    """조판이 큐 시작을 세그먼트보다 **뒤로** 미는 비율. 오디오를 안 읽는다.
+
+    한 세그먼트를 여러 큐가 나눠 가질 때는 **첫 큐만** 센다. 분할된 뒤쪽 조각은
+    원래 늦는 게 맞아서, 같이 세면 결함이 정상에 묻힌다.
+    """
+    name = "조판 지연 (큐 시작 − 세그먼트 시작)"
+    if trace is None or not trace.cues:
+        return skip(name, "trace.json에 큐가 없다. `vlogsrt run --out`을 돌려야 한다")
+    starts = {segment.id: segment.start for segment in trace.spine}
+    seen: set[int] = set()
+    lags: list[float] = []
+    for cue in trace.cues:
+        head = cue.seg_ids[0] if cue.seg_ids else None
+        if head is None or head in seen or head not in starts:
+            continue
+        seen.add(head)
+        lags.append(cue.start - starts[head])
+    if not lags:
+        return skip(name, "골격을 역추적할 수 있는 큐가 없다")
+    late = [lag for lag in lags if lag > LAG_LATE_TOL_S]
+    rate = len(late) / len(lags)
+    detail = (
+        f"큐 {len(lags)}개 · 중앙 {statistics.median(lags):+.3f}초 · "
+        f"늦은 큐 {len(late)}개({rate * 100:.1f}%) · 최대 {max(lags):+.3f}초"
+    )
+    return Check(name, rate <= LAG_LATE_RATE_TOL, detail)
+
+
 def check_srt_coverage(srt: Path, duration: float) -> Check:
     if not srt.is_file():
         return skip("SRT 시간 커버리지", f"{srt} 없음")
@@ -500,6 +538,7 @@ def _run_checks(found: Located, stem: str, meta: dict, outdir: Path) -> list[Che
         ),
         check_spine_shift(found.audio, spine),
         check_glue(spine, marks, source),
+        check_cue_lag(found.trace),
         check_srt_coverage(outdir / "output.srt", duration),
     ]
 

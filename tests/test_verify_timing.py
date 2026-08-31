@@ -12,12 +12,13 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+from dataclasses import replace
 from pathlib import Path
 from types import ModuleType
 
 import pytest
 
-from vlogsrt.models import ChunkMark, Segment
+from vlogsrt.models import ChunkMark, Cue, Segment, Trace
 from vlogsrt.preprocess import chunk_glob, chunk_template
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -208,6 +209,118 @@ def test_the_recorded_fixture_still_shows_the_tail_collapse() -> None:
     bands = vt.glue_profile(spine, marks)
     assert bands[0].rate < 0.10
     assert bands[-1].rate > 0.40
+
+
+# ── 조판 지연: 조판 계층이 시각을 뒤로 미는가 (D33) ──────────
+
+
+def lagged_trace(shift: float, count: int = 20) -> Trace:
+    """세그먼트 사슬과, 그것을 `shift`만큼 옮겨 만든 큐."""
+    spine = spaced(0.0, count, step=1.0, gap=1.0)
+    cues = tuple(
+        Cue(
+            start=segment.start + shift,
+            end=segment.end + shift,
+            lines=(segment.text,),
+            seg_ids=(segment.id,),
+            index=position + 1,
+        )
+        for position, segment in enumerate(spine)
+    )
+    return Trace(source="x.mp4", duration=count * 2.0, spine=tuple(spine), cues=cues)
+
+
+def test_check_cue_lag_fails_on_a_late_typeset() -> None:
+    """실측 최빈값이 그대로 재현되면 실패해야 한다 — 이게 D33의 결함이다."""
+    check = vt.check_cue_lag(lagged_trace(+0.14))
+    assert not check.passed and not check.skipped
+
+
+def test_check_cue_lag_passes_a_healthy_typeset() -> None:
+    """lead_in만 도는 정상 조판은 음수라 통과한다."""
+    check = vt.check_cue_lag(lagged_trace(-0.10))
+    assert check.passed and not check.skipped
+
+
+def test_check_cue_lag_tolerates_a_few_late_cues() -> None:
+    """whisper 원본이 겹친 구간의 충돌 해소까지 실패로 세면 자가 너무 뾰족하다."""
+    trace = lagged_trace(-0.10, count=20)
+    late = replace(trace.cues[0], start=trace.cues[0].start + 0.24)
+    check = vt.check_cue_lag(replace(trace, cues=(late, *trace.cues[1:])))
+    assert check.passed and not check.skipped
+
+
+def test_check_cue_lag_counts_only_the_first_cue_of_a_segment() -> None:
+    """분할된 뒤쪽 조각은 늦는 게 맞다. 같이 세면 결함이 정상에 묻힌다."""
+    trace = lagged_trace(-0.10, count=20)
+    tail = replace(trace.cues[0], start=trace.cues[0].start + 5.0, index=99)
+    check = vt.check_cue_lag(replace(trace, cues=(*trace.cues, tail)))
+    assert check.passed, "같은 seg_id를 두 번 세면 안 된다"
+
+
+def test_check_cue_lag_skips_without_cues() -> None:
+    """건너뛴 것은 통과가 아니다(D32)."""
+    assert vt.check_cue_lag(None).skipped
+    spine = tuple(spaced(0.0, 5, step=1.0, gap=1.0))
+    assert vt.check_cue_lag(Trace(source="x.mp4", duration=10.0, spine=spine)).skipped
+
+
+@pytest.mark.skipif(
+    not (API_FIXTURES / "fr_day_1_2_fhd.whisper.json").is_file(),
+    reason="녹화 픽스처가 없는 체크아웃",
+)
+def test_the_recorded_fixture_is_typeset_without_lag() -> None:
+    """D33의 근거를 표본으로 못 박는다.
+
+    같은 응답을 `refine`에 그대로 태운다. 고치기 전에는 큐 1291개 중 355개(27.5%)가
+    늦었고 **그중 223개가 정확히 `+0.14초`** 였다 — `lead_out`이 없는 무음을 만든 지문이다.
+    고친 뒤에는 14개(1.1%)뿐이고 `+0.14` 무리가 사라진다.
+
+    남는 세 장은 다른 기전이다. whisper가 0.02초짜리 세그먼트를 냈고, `min_gap`을
+    양쪽에서 떼낼 수 없어 `resolve_overlaps`가 뒤 큐를 민다. 앞 큐의 시작을 더 당겨야
+    풀리는데 그건 규칙 3의 `lead_in` 한도를 넘는다. 그래서 고치지 않는다.
+    """
+    from vlogsrt.config import Config
+    from vlogsrt.pipeline import spine_to_cues
+    from vlogsrt.refine import adjust_timing, merge_pass, polish_pass, refine, split_pass
+    from vlogsrt.transcribe import build_spine, load_fixture_responses
+
+    responses = load_fixture_responses(API_FIXTURES / "fr_day_1_2_fhd.whisper.json")
+    meta = json.loads((API_FIXTURES / "fr_day_1_2_fhd.meta.json").read_text(encoding="utf-8"))
+    spine = build_spine(responses)
+    cfg = Config()
+    duration = float(meta["duration"])
+    cues = refine(spine_to_cues(spine), cfg, duration)
+
+    check = vt.check_cue_lag(
+        Trace(
+            source="fr_day_1_2_fhd.mp4",
+            duration=duration,
+            spine=tuple(spine),
+            cues=tuple(cues),
+        )
+    )
+    assert check.passed and not check.skipped, check.detail
+
+    # 가장 날카로운 자: **`adjust_timing`은 실측에서 단 한 장도 늦추지 않는다.**
+    before = merge_pass(split_pass(polish_pass(spine_to_cues(spine), cfg), cfg), cfg)
+    after = adjust_timing(before, cfg, duration)
+    assert all(new.start <= old.start + 1e-9 for new, old in zip(after, before, strict=True)), (
+        "lead_out이 다시 없는 무음을 만들고 있다"
+    )
+
+    starts = {segment.id: segment.start for segment in spine}
+    seen: set[int] = set()
+    lags = []
+    for cue in cues:
+        head = cue.seg_ids[0]
+        if head in seen:
+            continue
+        seen.add(head)
+        lags.append(cue.start - starts[head])
+    # 고치기 전의 지문: `+0.14`가 큐의 17%(223장)였다. 무리가 남으면 안 된다.
+    assert len([lag for lag in lags if abs(lag - 0.14) < 5e-3]) <= 5
+    assert sum(1 for lag in lags if lag > vt.LAG_LATE_TOL_S) / len(lags) < 0.02
 
 
 # ── 지연 탐색: 음의 지연도 보인다 ────────────────────────────

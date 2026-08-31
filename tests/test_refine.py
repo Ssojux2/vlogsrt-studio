@@ -229,6 +229,61 @@ def test_timing_is_monotonic_after_repair() -> None:
         assert previous.start < previous.end
 
 
+# ── 조판은 시각을 앞으로만 민다 (D33) ────────────────────────
+
+
+def test_adjust_timing_never_delays_a_cue() -> None:
+    """뒤로 미는 순간 그게 D33의 결함이다. whisper가 붙여 놓은 경계까지 포함해서 본다."""
+    cfg = Config()
+    cues = [
+        make_cue(1.0, 2.0, "가"),
+        make_cue(2.0, 3.0, "나", index=2),  # 간격 0 — whisper가 붙인 경계
+        make_cue(5.0, 6.0, "다", index=3),
+    ]
+    adjusted = adjust_timing(cues, cfg, duration=10.0)
+    assert all(new.start <= old.start + 1e-9 for new, old in zip(adjusted, cues, strict=True))
+
+
+def test_lead_out_does_not_eat_the_next_cue_start() -> None:
+    """간격 0인 경계에서는 lead_out이 0이고, 뒤 큐가 whisper 시각 그대로 선다.
+
+    예전에는 `lead_out 0.3`이 없는 무음을 만들고 `resolve_overlaps`가 그 겹침을
+    중점에서 갈라 뒤 큐를 `+0.14초` 밀었다(D33).
+    """
+    cfg = Config()
+    cues = [make_cue(1.0, 2.0, "가"), make_cue(2.0, 3.0, "나", index=2)]
+    resolved = resolve_overlaps(adjust_timing(cues, cfg, duration=10.0), cfg)
+    assert resolved[1].start == pytest.approx(2.0)
+    assert resolved[0].end == pytest.approx(2.0 - cfg.min_gap)
+
+
+def test_lead_padding_is_full_when_silence_is_wide() -> None:
+    """무음이 넉넉하면 예전 그대로 −lead_in / +lead_out."""
+    cfg = Config()
+    cues = [make_cue(3.0, 4.0, "가"), make_cue(8.0, 9.0, "나", index=2)]
+    adjusted = adjust_timing(cues, cfg, duration=20.0)
+    assert adjusted[0].start == pytest.approx(3.0 - cfg.lead_in)
+    assert adjusted[0].end == pytest.approx(4.0 + cfg.lead_out)
+
+
+def test_narrow_silence_goes_to_lead_in_first() -> None:
+    """무음이 모자라면 lead_in이 먼저 가져간다. 말이 시작되는 시각이 꼬리 연장보다 중요하다."""
+    cfg = Config()
+    cues = [make_cue(1.0, 2.0, "가"), make_cue(2.2, 3.0, "나", index=2)]
+    adjusted = adjust_timing(cues, cfg, duration=10.0)
+    assert adjusted[1].start == pytest.approx(2.2 - cfg.lead_in)
+    assert adjusted[1].start - adjusted[0].end >= cfg.min_gap - 1e-9
+
+
+def test_min_duration_stretch_stops_at_the_next_cue() -> None:
+    """짧은 큐를 늘리는 것도 다음 큐 시작을 넘지 않는다. 넘으면 같은 충돌이 한 번 더 난다."""
+    cfg = Config()
+    cues = [make_cue(1.0, 1.2, "가"), make_cue(1.5, 3.0, "나", index=2)]
+    adjusted = adjust_timing(cues, cfg, duration=10.0)
+    assert adjusted[0].duration < cfg.min_duration  # 여유가 없으면 짧은 채로 둔다
+    assert adjusted[0].end <= 1.5 - cfg.min_gap + 1e-9
+
+
 # ─────────────────────────────────────────────────────────────
 #  T2.5 — 줄바꿈
 # ─────────────────────────────────────────────────────────────
