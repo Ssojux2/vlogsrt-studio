@@ -37,7 +37,7 @@ def resolve_media(document: ProjectDocument, overrides: Sequence[MediaOverride] 
 - Map overrides by exact XML `resource_id`; reject duplicate/unknown keys. A raw ID such as `r2` is only a lookup key within the specific current input document identified by its hash; it is never a durable identity, cross-document rebind key, or exported media identity. Never match by filename/stem.
 - Overrides take precedence over XML media-rep URIs. URI decoding must be explicit and reject non-file/unresolvable schemes.
 - Original is always required and hashed in full. Missing proxy falls back to original for images; missing original fails readiness even when proxy exists.
-- `has_audio` is copied from the exact matched `AssetResource`; never infer it from file extension, bytes, stream probing, or another resource with the same content hash.
+- `has_audio` is copied from the exact matched `AssetResource`; never infer it from file extension, bytes, stream probing, or another resource with the same content hash. P1-02 only constructs that resource after explicit XML `hasAudio="1"`/`"0"`; omission is rejected as valid-but-outside-v1 readiness, so no tri-state is reachable here and explicit `0` alone authorizes declared-no-audio.
 - Repeated clip instances resolve to one `ResolvedMedia`; same filename with different content remains distinct.
 - `asset_content_id = sha256("source-content-v1\0" + original_sha256).hexdigest()`; later audio policy augments analysis keys without changing content identity.
 

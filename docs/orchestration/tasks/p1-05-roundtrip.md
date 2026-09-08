@@ -21,6 +21,7 @@ def validate_roundtrip(source: ProjectDocument, written: Path, *, dtd_path: Path
 - Reparse output and assert input hash-independent semantic equality for version, exact original time strings, resources/UIDs/static attributes, flat item order/gaps/disabled durations and refs.
 - Parameterize all eight supported frame rates, including 30 vs 29.97, repeated assets, nonzero `asset.start`/`clip.start`/`sequence.tcStart`, `enabled=0`, `srcEnable=video`, and gaps.
 - DTD validation is invoked when a real path is supplied; unavailable DTD/tool is separately reported, never synthesized as pass.
+- On this development host, run the roundtrip through `/usr/bin/xmllint` with the exact installed DTD `/Applications/Final Cut Pro.app/Contents/Frameworks/Interchange.framework/Versions/A/Resources/FCPXMLv1_14.dtd` after reverifying SHA-256 `33bb44530790be145d87ed2d5c347166aab945c90f1cfbc03c8be545aaf73cb5`. All claimed supported synthetic inputs must use actual DTD spellings/defaults and validate before and after the byte-identical roundtrip.
 - This task proves only identity-copy correctness. It does not validate any edited FCPXML serialization or authorize reuse of raw resource IDs as external identity; P6 owns generated-writer correctness and strong-identity rebinding.
 
 ## Implementation steps
@@ -31,7 +32,7 @@ def validate_roundtrip(source: ProjectDocument, written: Path, *, dtd_path: Path
 
 ## Acceptance
 
-Every fixture roundtrips byte-identically and reparses semantically. Duration/order/ref checks pass for valid inputs and reject zero-frame identity mismatch. `make check` passes; actual Final Cut import remains `PENDING_HUMAN`.
+Every fixture roundtrips byte-identically, validates against the exact installed DTD before/after, and reparses semantically. Duration/order/ref checks pass for valid inputs and reject zero-frame identity mismatch. `make check` passes; actual Final Cut import remains `PENDING_HUMAN`.
 
 ## Failure route
 

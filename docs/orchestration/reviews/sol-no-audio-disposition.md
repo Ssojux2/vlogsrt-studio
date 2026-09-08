@@ -1,7 +1,7 @@
 # Sol design disposition: assets with no audio
 
 Date: 2026-09-09  
-Status: Astra-approved runtime direction; P1 XML `hasAudio` interpretation remains pending schema review
+Status: Astra-approved runtime direction and explicit-declaration P1 v1 rule
 
 ## Problem
 
@@ -83,8 +83,8 @@ Status: Astra-approved runtime direction; P1 XML `hasAudio` interpretation remai
 - Post-PCM operational failure: one error `SourceTrace` with real reference provenance; no unavailable-record downgrade or fabricated reference; unrelated sources proceed.
 - Persistence/restart: declared-no-audio is reusable completed/non-billable; a pre-PCM error is a retryable failed attempt and never a permanent completed success; unknown union variants and schema revisions fail before calls.
 
-## Pending P1 schema decision
+## P1 schema disposition
 
-The runtime union above does not decide how omitted versus explicit XML `hasAudio` attributes map into `AssetResource.has_audio`. Freeze that parser/resolver rule only after the separate Apple schema/documentation review; do not infer a truthy default from the runtime disposition.
+The Apple 1.14 DTD declares asset `hasAudio` as implied, with no XML default; omission therefore requires media-derived presence rather than a truthy/falsy parser default. This narrow v1 deliberately does not add presence probing: P1-02 requires explicit `hasAudio="1"` or `"0"` and rejects omission as valid FCPXML outside the supported readiness subset, with an actionable `UnsupportedProject` reason. Successfully parsed `AssetResource.has_audio` and `ResolvedMedia.has_audio` remain total booleans, explicit `0` alone authorizes `declared_no_audio`, and future measured-resolution compatibility remains a separate reviewed extension.
 
 This is intentionally conservative for v1: video-only B-roll is not automatically shortened. A later policy may make silent-video editing eligible only through a separately reviewed contract; this disposition grants no such authority.
