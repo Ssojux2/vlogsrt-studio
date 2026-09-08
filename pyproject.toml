@@ -16,6 +16,9 @@ vlogsrt = "vlogsrt.cli:main"
 dev = ["pytest>=8.0", "ruff>=0.6", "mypy>=1.11"]
 # 웹 UI는 선택 사항이다. 핵심 파이프라인은 여전히 의존성 3개로 돈다(불변 규칙 7).
 ui = ["gradio>=6.0"]
+# 파생 계층(vlogsrt/project/) 전용 런타임. 레거시 vlogsrt/*.py·ui/** 에서는
+# import 자체가 금지다 — docs/PROJECT_CONTRACTS.md, scripts/check_invariants.py가 지킨다.
+project = ["numpy>=2.0", "onnxruntime>=1.19"]
 
 [tool.setuptools.packages.find]
 include = ["vlogsrt*"]
@@ -51,5 +54,5 @@ no_implicit_optional = true
 no_site_packages = true
 
 [[tool.mypy.overrides]]
-module = ["openai.*", "rich.*", "tomli_w.*", "gradio.*"]
+module = ["openai.*", "rich.*", "tomli_w.*", "gradio.*", "numpy.*", "onnxruntime.*"]
 ignore_missing_imports = true

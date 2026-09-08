@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import subprocess
 import sys
 from dataclasses import FrozenInstanceError, replace
@@ -219,3 +220,450 @@ def test_only_transcribe_imports_openai() -> None:
         if path.name != "transcribe.py" and "import openai" in path.read_text(encoding="utf-8")
     ]
     assert offenders == []
+
+
+# ── P0-02: 원본/파생 계약 (docs/PROJECT_CONTRACTS.md) ────────────────────────
+#
+# 검사기 자체를 여기서 시험한다. 진짜 소스 트리를 더럽히지 않기 위해 tmp_path에
+# 가짜 트리를 만들고 검사기의 경로 전역을 그쪽으로 돌린다. 예외는 전부 **정확 경로**로
+# 걸어야 한다 — 파일 이름만 보면 `vlogsrt/project/transcribe.py`가 openai를 물려받는다.
+
+_CHECKER_SPEC = importlib.util.spec_from_file_location(
+    "check_invariants", ROOT / "scripts" / "check_invariants.py"
+)
+check_invariants = importlib.util.module_from_spec(_CHECKER_SPEC)
+assert _CHECKER_SPEC.loader is not None
+_CHECKER_SPEC.loader.exec_module(check_invariants)
+
+
+def _fake_source_tree(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, files: dict[str, str]
+) -> None:
+    """검사기가 `tmp_path` 아래 가짜 트리를 보게 한다. 진짜 트리는 건드리지 않는다."""
+    for rel, body in files.items():
+        target = tmp_path / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(body, encoding="utf-8")
+    monkeypatch.setattr(check_invariants, "ROOT", tmp_path)
+    monkeypatch.setattr(check_invariants, "PACKAGE", tmp_path / "vlogsrt")
+    monkeypatch.setattr(check_invariants, "UI_DIR", tmp_path / "ui")
+    monkeypatch.setattr(check_invariants, "PROJECT_PACKAGE", tmp_path / "vlogsrt" / "project")
+    monkeypatch.setattr(
+        check_invariants,
+        "XML_VALIDATION_MODULE",
+        tmp_path / "vlogsrt" / "project" / "xml_validation.py",
+    )
+
+
+def _xml_boundary_source(run: str, extra: str = "") -> str:
+    """xmllint 경계 모듈의 시뮬라. `run`은 subprocess.run(...) 호출 인자 덩어리."""
+    return (
+        "import shutil\n"
+        "import subprocess\n"
+        "\n"
+        "\n"
+        "def validate(path: str) -> bool:\n"
+        '    executable = shutil.which("xmllint")\n'
+        f"{extra}"
+        "    completed = subprocess.run(\n"
+        f"        {run},\n"
+        "        capture_output=True,\n"
+        "        text=True,\n"
+        "        check=False,\n"
+        "    )\n"
+        "    return completed.returncode == 0\n"
+    )
+
+
+APPROVED_XMLLINT_RUN = '[executable, "--noout", path]'
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "import vlogsrt.project",
+        "import vlogsrt.project.vad as vad",
+        "from vlogsrt.project import config",
+        "from vlogsrt import project",
+    ],
+)
+def test_legacy_absolute_project_import_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, statement: str
+) -> None:
+    _fake_source_tree(monkeypatch, tmp_path, {"vlogsrt/engine.py": statement + "\n"})
+    failures = check_invariants.check_source_does_not_import_project()
+    assert len(failures) == 1
+    assert "vlogsrt/engine.py" in failures[0]
+
+
+@pytest.mark.parametrize("statement", ["from .project import config", "from . import project"])
+def test_legacy_relative_project_import_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, statement: str
+) -> None:
+    _fake_source_tree(monkeypatch, tmp_path, {"vlogsrt/engine.py": statement + "\n"})
+    assert check_invariants.check_source_does_not_import_project()
+
+
+def test_the_cli_entrypoint_is_the_sole_legacy_exception(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """조립 진입점 하나만 예외다 — 문서화된 정확 경로 `vlogsrt/cli.py`."""
+    _fake_source_tree(monkeypatch, tmp_path, {"vlogsrt/cli.py": "from vlogsrt import project\n"})
+    assert check_invariants.check_source_does_not_import_project() == []
+
+
+@pytest.mark.parametrize(
+    "module",
+    [
+        "transcribe",
+        "preprocess",
+        "repair",
+        "repetition",
+        "refine",
+        "output",
+        "layout",
+        "polish",
+        "pipeline",
+        "models",
+        "config",
+        "env",
+        "log",
+        "cutpoints",
+        "hangul",
+        "keywords",
+        "evaluate",
+        "verify",
+        "__init__",
+    ],
+)
+def test_no_other_legacy_module_or_ui_may_import_project(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, module: str
+) -> None:
+    _fake_source_tree(
+        monkeypatch,
+        tmp_path,
+        {
+            f"vlogsrt/{module}.py": "from vlogsrt import project\n",
+            "ui/page.py": "import vlogsrt.project\n",
+        },
+    )
+    failures = check_invariants.check_source_does_not_import_project()
+    assert len(failures) == 2
+    assert any(f"vlogsrt/{module}.py" in failure for failure in failures)
+    assert any("ui/page.py" in failure for failure in failures)
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "import numpy",
+        "import numpy as np",
+        "import numpy.typing",
+        "from numpy import ndarray",
+        "import onnxruntime",
+        "import onnxruntime as ort",
+    ],
+)
+def test_optional_dependencies_fail_in_legacy(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, statement: str
+) -> None:
+    _fake_source_tree(
+        monkeypatch,
+        tmp_path,
+        {"vlogsrt/gadget.py": statement + "\n", "ui/board.py": statement + "\n"},
+    )
+    failures = check_invariants.check_project_dependency_scope()
+    assert len(failures) == 2
+    assert any("vlogsrt/gadget.py" in failure for failure in failures)
+    assert any("ui/board.py" in failure for failure in failures)
+
+
+def test_optional_dependencies_pass_under_project(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _fake_source_tree(
+        monkeypatch,
+        tmp_path,
+        {
+            "vlogsrt/project/vad.py": (
+                "import numpy as np\n"
+                "import numpy.typing\n"
+                "from numpy import ndarray\n"
+                "import onnxruntime as ort\n"
+            )
+        },
+    )
+    assert check_invariants.check_project_dependency_scope() == []
+    assert check_invariants.check_banned_imports() == []
+
+
+def test_other_banned_names_still_fail_everywhere_in_the_package(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """numpy 완화가 다른 금지 이름을 느슨하게 만들면 안 된다."""
+    _fake_source_tree(
+        monkeypatch,
+        tmp_path,
+        {
+            "vlogsrt/a.py": "import jamo\n",
+            "vlogsrt/project/b.py": "import konlpy\nfrom pydantic import BaseModel\n",
+        },
+    )
+    assert len(check_invariants.check_banned_imports()) == 3
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "import subprocess\n",
+        "import subprocess as sp\nsp.run(['ls'])\n",
+        "import subprocess as sp\nsp.Popen(['ls'])\n",
+        "import subprocess as sp\nsp.check_call(['ls'])\n",
+        "import subprocess as sp\nsp.check_output(['ls'])\n",
+        "from subprocess import run\nrun(['ls'])\n",
+        "from subprocess import Popen as P\nP(['ls'])\n",
+        "from subprocess import check_output\ncheck_output(['ls'])\n",
+    ],
+)
+def test_subprocess_aliases_fail_outside_the_two_boundaries(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, body: str
+) -> None:
+    _fake_source_tree(monkeypatch, tmp_path, {"vlogsrt/gadget.py": body})
+    assert check_invariants.check_subprocess_boundaries()
+
+
+def test_transcribe_keeps_the_openai_monopoly_by_exact_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`vlogsrt/project/transcribe.py`는 이름만 같다고 openai를 물려받지 못한다."""
+    _fake_source_tree(
+        monkeypatch,
+        tmp_path,
+        {
+            "vlogsrt/transcribe.py": "import openai\n",
+            "vlogsrt/project/transcribe.py": "import openai\n",
+        },
+    )
+    failures = check_invariants.check_openai_boundary()
+    assert len(failures) == 1
+    assert "vlogsrt/project/transcribe.py" in failures[0]
+
+
+def test_preprocess_keeps_the_subprocess_monopoly_by_exact_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`vlogsrt/project/preprocess.py`는 이름만 같다고 subprocess를 물려받지 못한다."""
+    _fake_source_tree(
+        monkeypatch,
+        tmp_path,
+        {
+            "vlogsrt/preprocess.py": "import subprocess\nsubprocess.run(['ffmpeg', '-i'])\n",
+            "vlogsrt/project/preprocess.py": "import subprocess\nsubprocess.run(['ffmpeg'])\n",
+        },
+    )
+    failures = check_invariants.check_subprocess_boundaries()
+    assert len(failures) == 1
+    assert "vlogsrt/project/preprocess.py" in failures[0]
+
+
+def test_model_literals_live_only_in_the_exact_config_paths(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """모델 리터럴은 `vlogsrt/config.py`와 `vlogsrt/project/config.py`에만 있다."""
+    _fake_source_tree(
+        monkeypatch,
+        tmp_path,
+        {
+            "vlogsrt/config.py": 'MODEL = "whisper-1"\n',
+            "vlogsrt/project/config.py": 'MODEL = "whisper-1"\n',
+            "vlogsrt/project/tuning/config.py": 'MODEL = "whisper-1"\n',
+            "vlogsrt/gadget.py": 'name = "gpt-4o-transcribe"\n',
+        },
+    )
+    failures = check_invariants.check_no_hardcoded_model()
+    assert len(failures) == 2
+    assert any("vlogsrt/project/tuning/config.py" in failure for failure in failures)
+    assert any("vlogsrt/gadget.py" in failure for failure in failures)
+
+
+def test_xmllint_boundary_accepts_the_approved_shape(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _fake_source_tree(
+        monkeypatch,
+        tmp_path,
+        {"vlogsrt/project/xml_validation.py": _xml_boundary_source(APPROVED_XMLLINT_RUN)},
+    )
+    assert check_invariants.check_subprocess_boundaries() == []
+
+
+def test_xmllint_boundary_accepts_an_aliased_subprocess_call(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """경계 안에서 별명 자체는 죄가 아니다 — 형태가 맞으면 통과한다."""
+    body = (
+        "import shutil\n"
+        "import subprocess as sp\n"
+        "\n"
+        "\n"
+        "def validate(path: str) -> bool:\n"
+        '    executable = shutil.which("xmllint")\n'
+        "    completed = sp.run(\n"
+        f"        {APPROVED_XMLLINT_RUN},\n"
+        "        capture_output=True,\n"
+        "        text=True,\n"
+        "        check=False,\n"
+        "    )\n"
+        "    return completed.returncode == 0\n"
+    )
+    _fake_source_tree(monkeypatch, tmp_path, {"vlogsrt/project/xml_validation.py": body})
+    assert check_invariants.check_subprocess_boundaries() == []
+
+
+@pytest.mark.parametrize(
+    "run",
+    [
+        '[executable, "--noout", path], shell=True',
+        '["ls", "-l", path]',
+        '["/bin/sh", "-c", "xmllint --noout"]',
+        '["xmllint", "--noout", path]',
+        '[executable, "--noout" + path]',
+        '[executable, "--noout", f"{path}"]',
+        '"xmllint --noout " + path',
+    ],
+)
+def test_xmllint_boundary_rejects_wrong_shapes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, run: str
+) -> None:
+    _fake_source_tree(
+        monkeypatch, tmp_path, {"vlogsrt/project/xml_validation.py": _xml_boundary_source(run)}
+    )
+    failures = check_invariants.check_subprocess_boundaries()
+    assert len(failures) == 1
+    assert "xml_validation.py" in failures[0]
+
+
+@pytest.mark.parametrize(
+    ("extra", "run", "expected"),
+    [
+        # which("curl")은 두 번 잡힌다 — 잘못된 which 대상과 비인가 실행파일 각각.
+        ('    bad = shutil.which("curl")\n', '[bad, "--noout", path]', 2),
+        ('    bad = "ffmpeg"\n', '[bad, "--noout", path]', 1),
+    ],
+)
+def test_xmllint_boundary_rejects_other_executables(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, extra: str, run: str, expected: int
+) -> None:
+    _fake_source_tree(
+        monkeypatch,
+        tmp_path,
+        {"vlogsrt/project/xml_validation.py": _xml_boundary_source(run, extra=extra)},
+    )
+    failures = check_invariants.check_subprocess_boundaries()
+    assert len(failures) == expected
+    assert all("xml_validation.py" in failure for failure in failures)
+
+
+def test_xmllint_boundary_rejects_star_imports(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """별표 import는 호출 추적을 무력화한다 — 경계 안에서도 금지다."""
+    body = (
+        "import shutil\n"
+        "from subprocess import *\n"
+        "\n"
+        "\n"
+        "def validate(path: str) -> bool:\n"
+        '    executable = shutil.which("xmllint")\n'
+        "    completed = run(\n"
+        f"        {APPROVED_XMLLINT_RUN},\n"
+        "        capture_output=True,\n"
+        "        text=True,\n"
+        "        check=False,\n"
+        "    )\n"
+        "    return completed.returncode == 0\n"
+    )
+    _fake_source_tree(monkeypatch, tmp_path, {"vlogsrt/project/xml_validation.py": body})
+    assert check_invariants.check_subprocess_boundaries()
+
+
+def test_missing_xml_boundary_neither_crashes_nor_blinds_the_check(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """경계 파일이 없어도 터지지 않고, 다른 위반은 그대로 잡는다."""
+    _fake_source_tree(monkeypatch, tmp_path, {"vlogsrt/gadget.py": "import subprocess\n"})
+    assert check_invariants.check_subprocess_boundaries()
+
+
+def test_a_clean_fake_tree_passes_every_contract_check(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _fake_source_tree(
+        monkeypatch,
+        tmp_path,
+        {
+            "vlogsrt/cli.py": "from vlogsrt import project\n",
+            "vlogsrt/transcribe.py": "import openai\n",
+            "vlogsrt/preprocess.py": "import subprocess\nsubprocess.run(['ffmpeg'])\n",
+            "vlogsrt/config.py": 'MODEL = "whisper-1"\n',
+            "vlogsrt/project/vad.py": "import numpy as np\n",
+        },
+    )
+    assert check_invariants.check_source_does_not_import_project() == []
+    assert check_invariants.check_project_dependency_scope() == []
+    assert check_invariants.check_subprocess_boundaries() == []
+    assert check_invariants.check_openai_boundary() == []
+    assert check_invariants.check_banned_imports() == []
+
+
+def test_project_may_compose_legacy_public_boundaries(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """방향은 project → 레거시 공개 경계뿐이다. 그 반대는 위의 테스트들이 막는다."""
+    _fake_source_tree(
+        monkeypatch,
+        tmp_path,
+        {
+            "vlogsrt/project/adapter.py": (
+                "from vlogsrt import models, transcribe\nfrom vlogsrt.config import Config\n"
+            )
+        },
+    )
+    assert check_invariants.check_source_does_not_import_project() == []
+    assert check_invariants.check_project_dependency_scope() == []
+
+
+def test_source_partition_separates_legacy_from_project(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _fake_source_tree(
+        monkeypatch,
+        tmp_path,
+        {"vlogsrt/a.py": "", "vlogsrt/project/b.py": "", "vlogsrt/project/deep/c.py": ""},
+    )
+    legacy = {check_invariants._rel(p) for p in check_invariants._legacy_sources()}
+    project = {check_invariants._rel(p) for p in check_invariants._project_sources()}
+    assert legacy == {"vlogsrt/a.py"}
+    assert project == {"vlogsrt/project/b.py", "vlogsrt/project/deep/c.py"}
+
+
+def test_ui_belongs_to_the_legacy_side(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _fake_source_tree(
+        monkeypatch, tmp_path, {"vlogsrt/a.py": "", "ui/app.py": "", "ui/deep/page.py": ""}
+    )
+    legacy = {check_invariants._rel(p) for p in check_invariants._legacy_sources()}
+    assert legacy == {"vlogsrt/a.py", "ui/app.py", "ui/deep/page.py"}
+
+
+def test_the_real_tree_passes_the_new_contract_checks() -> None:
+    """진짜 트리에서 새 검사 셋은 조용히 통과해야 한다 — 검증 on/off와 무관하게."""
+    assert check_invariants.check_source_does_not_import_project() == []
+    assert check_invariants.check_project_dependency_scope() == []
+    assert check_invariants.check_subprocess_boundaries() == []
+
+
+def test_project_sources_stay_below_the_project_package() -> None:
+    assert all(
+        check_invariants._rel(path).startswith("vlogsrt/project/")
+        for path in check_invariants._project_sources()
+    )
