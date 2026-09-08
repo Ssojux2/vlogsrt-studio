@@ -63,6 +63,19 @@ def transcribe_source(media: ResolvedMedia, reference: PcmReference, cfg: Config
 def transcribe_unique_sources(items: Sequence[AudioSourceInput], cfg: Config, transcriber: Transcriber, artifact_dir: Path) -> tuple[SourceAnalysis, ...]: ...
 ```
 
+Additive legacy seam in `vlogsrt/repair.py`, owned by this task:
+
+```python
+@dataclass(frozen=True, slots=True)
+class Source:
+    stem: str
+    duration: float
+    audio: Path | None = None
+    workdir: Path | None = None
+    namespace: Path | None = None
+    cutter: Callable[[Sequence[Span]], list[Chunk]] | None = None
+```
+
 - Full PCM `[0,sample_count)` is covered exactly once by ordered ranges respecting existing `chunk_max_seconds`/`chunk_max_bytes`; target cuts use `quiet_sample`, then exact sample slicing.
 - `transcribe_unique_sources` deduplicates by `analysis_key`, not path/stem/resource ID. Every unique source gets one full analysis; repeated instances consume the same trace.
 - `PcmReference` and `transcribe_source` remain total and audio-only. P2 imports no P3 type and constructs no unavailable record. P7 later owns catching contextual pre-PCM failures and constructing `UnavailableSourceAudio`; direct P3 tests may construct the immutable input variant without simulating P2.
@@ -71,18 +84,22 @@ def transcribe_unique_sources(items: Sequence[AudioSourceInput], cfg: Config, tr
 - `SourceTrace.source_id` is the media `asset_content_id`; XML-local resource IDs never enter the durable source identity.
 - `SourceTrace.original_stem`, `pcm_analysis_key`, and `pcm_sample0_file_time` are copied from the validated matching `PcmReference`, including for empty traces. Require `media.asset_content_id == reference.source_id` and matching original hashes; do not infer linkage from path, list position, or segment data.
 - Per-asset namespace is the directory `artifact_dir/<asset_content_id>/`; the existing media stem remains `TranscriptionJob.stem`, and every initial/repair/arbiter job carries that same explicit namespace. `FixtureTranscriber` therefore addresses `<namespace>/<stem>.<kind>.json`. No process-global env mutation, stem-only cache, or weak `pipeline.source_fingerprint` may choose or validate reuse.
+- Initial and nested repair WAVs live beneath the explicit ephemeral scratch directory `<artifact_dir>/<asset_content_id>/work/<analysis_key>/`. They are real P2 byte slices, never durable completed artifacts. Tests must inspect their exact frames/channels/bytes even though `FixtureTranscriber` does not open `Chunk.path`.
 - Convert legacy float segment boundaries with `Fraction(str(value))`; add the measured `reference.pcm_sample0_file_time` for `file_*`. Segment IDs hash analysis key, chunk index, legacy segment ID, exact source range.
-- Preserve typed success/empty/error. Missing/malformed/call errors are recorded error, never successful silence. No prompt/forced alignment/word/ratio split.
+- Preserve typed success/empty/error. Missing/malformed/call errors are recorded error, never successful silence. No prompt/forced alignment/word/ratio split. `repair.Source.cutter=None` preserves the complete legacy cut/catch/fallback behavior. When injected, the project cutter must return exactly one `Chunk` per nonempty span or raise contextually; it validates each snapped chunk as `offset == float(Fraction(actual_start_sample, rate))` and `duration == float(Fraction(actual_end_sample - actual_start_sample, rate))`, never against unsnapped raw float span endpoints.
+- Capture repair/arbiter operational failures with a private project-owned wrapper around the injected transcriber/cutter, not by adding fields to `Repair`, `Segment`, or `Cue`. The wrapper records before rethrowing call/payload/duplicate/missing/unmatched-coverage failures; after the unchanged legacy catch path returns, any captured failure forces an error trace with real reference provenance and no completed SRT. Valid covered empty/repetitive/arbiter-no-speech responses retain existing kept/collapsed policy. Namespace-present fixture subset selection follows P3-01; arbitrary live/unmatched responses are never silently filtered.
 - A failure after a real PCM reference exists is an error `SourceTrace` retaining the real reference identity, hashes, origin, and analysis key. It is never downgraded to `UnavailableSourceAudio`, and unrelated source analyses still proceed.
 - Successful empty analysis publishes the deterministic empty source-local SRT artifact and its hash; error publishes no SRT path/hash.
 - A successful nonempty analysis must reuse the complete existing source engine in this exact order: transcriber responses -> `transcribe.build_spine` draft -> `repair.settle` -> immutable settled spine -> `pipeline.spine_to_cues` -> `refine.refine` -> source-local SRT. `refine.refine` already invokes polish; never call `polish_pass` separately or twice. The source-local artifact is exactly `<namespace>/<stem>.SOURCE.srt`, uses the existing legacy source serializer, and records a relative path plus SHA-256 in the trace.
-- Repair retranscription still runs under existing defaults. Extend `repair.Source` with the optional explicit namespace and propagate it to every repair/arbiter `TranscriptionJob`. The project adapter injects a cutter backed by the same retained P2 PCM reference, so repair spans do not fall back to legacy MP3 `split_at`; the default `repair.settle` behavior for legacy callers remains byte-identical.
+- `repair.Source.duration` and `refine.refine(..., duration=...)` both receive exactly `float(Fraction(reference.sample_count, reference.sample_rate))`. The project output is not required to be byte-identical to the legacy MP3 path; P0's lock protects unchanged legacy inputs/behavior.
+- Repair retranscription still runs under existing defaults. Propagate the optional namespace to every repair/arbiter `TranscriptionJob`. The project adapter injects a cutter backed by the same retained P2 PCM reference, so repair spans do not fall back to legacy MP3 `split_at`; the default `repair.settle` behavior for legacy callers remains byte-identical.
+- Legacy `Segment`, `Cue`, and `Repair` times in a trace are decoded-audio-local floats and remain immutable provenance. Build each `SourceSegment.audio_*` as `Fraction(str(legacy_value))`, then add `reference.pcm_sample0_file_time` exactly once for its `file_*` fields. Do not rewrite `parse_segments`/`build_spine` float compatibility. P3-03 projects presentation from the already-refined trace cues, not settled-spine boundaries.
 - Do not reject, delete, or normalize finite zero/reversed legacy segment durations in the adapter. P3-01 has already rejected missing/non-numeric/nonfinite values; existing build/repair/refine presentation semantics decide how the retained finite records appear, and every draft/spine/cue/repair record remains traceable.
 - Source Trace, draft, settled spine, repairs, cues, and source-local SRT bytes are immutable once completed. Later project operations consume them but never edit them; a changed/missing source-local hash invalidates readiness rather than triggering silent regeneration from a derived timeline.
 
 ## Implementation steps
 
-1. Write failing tests for repeated/same-name sources, full range coverage, quiet cut bounds, nonzero origin, exact per-asset-directory/stem namespace, successful empty, malformed/error, deterministic IDs, zero/reversed raw segments, repair retention, immutable trace records, both union variants, runtime invariant rejection, zero-call unavailable pass-through, pre-call identity rejection, post-PCM error provenance, and same-content resources with different `has_audio` dispositions.
+1. Write failing tests for repeated/same-name sources, full range coverage, quiet cut bounds and snapped chunk metadata, nonzero origin, exact namespace/scratch paths and real initial+nested WAV bytes, successful empty, malformed/error and repair/arbiter operational capture, requested subset/duplicate/missing response coverage, deterministic IDs, zero/reversed raw segments, repair kept/collapsed retention, immutable trace records, exact refine duration, both union variants, runtime invariant rejection, zero-call unavailable pass-through, pre-call identity rejection, post-PCM error provenance, and same-content resources with different `has_audio` dispositions.
 2. Add a legacy-default-preserving repair-cutter injection seam, then implement orchestration around the injected `Transcriber` and P2 PCM cutter. Assert with spies that `build_spine`, `repair.settle`, `pipeline.spine_to_cues`, and `refine.refine` run in order and polish runs exactly once. No network is created here.
 3. Run focused P3 tests, invariants, full check; commit owned files.
 

@@ -51,13 +51,13 @@ def plan_boundaries(slices: Sequence[LogicalSlice], source: SourceCaptionSet, tr
 - Convert the P3 already repaired/refined `PlacedSourceCue` records to logical-slice `ProjectCue` records while retaining their source segment provenance. If all referenced Whisper dependencies are fully contained by a slice, clamp presentation only; do not request retranscription or rerun refine.
 - Index traces and PCM references by validated durable `source_id`, require exactly one matching reference whose `analysis_key` equals the trace's `pcm_analysis_key`, and copy that key into every request. Reject missing, duplicate, ambiguous, or inconsistent linkage; never `zip` independently ordered sequences or infer from paths/stems.
 - Any true segment truncation at an existing input cut starts a request. Repeatedly include every overlapping cue/segment dependency until no range grows, bounded by the retained logical slice.
-- Convert final request endpoints with P2 ceil-start/floor-end rules. Merge requests only when source, logical slice/instances, audible policy, and ranges are compatible.
+- `BoundaryRequest.source_start/source_end` and closure/slice intervals are source-file-clock times. P2 `retained_sample_range` accepts decoded-audio-local seconds, so subtract the matching `reference.pcm_sample0_file_time` from both file endpoints before its ceil-start/floor-end conversion. Map actual snapped endpoints back as `Fraction(sample_index, sample_rate) + pcm_sample0_file_time` for retained-byte provenance; keep requested closure bounds distinct from measured retained sample bounds and never feed file times directly to `start * rate` or add origin twice. Merge requests only when source, logical slice/instances, audible policy, and ranges are compatible.
 - Continuous authored blades already coalesced by P4-01 cause zero boundary requests. No guessed tolerance and no word timing.
 - Every request locks all participating instance IDs against further automatic shortening for this run.
 
 ## Implementation steps
 
-1. Write failing tests for padding-only clamp, true leading/trailing truncation, transitive overlap closure, retained-slice bounds, compatible/incompatible merge, repeated instances, continuous blade, shuffled trace/reference order, missing/duplicate/mismatched linkage, and zero-sample range failure.
+1. Write failing tests for padding-only clamp, true leading/trailing truncation, transitive overlap closure, retained-slice bounds, compatible/incompatible merge, repeated instances, continuous blade, shuffled trace/reference order, missing/duplicate/mismatched linkage, positive and negative PCM origins with exact snapped roundtrip, requested-versus-measured bounds, and zero-sample range failure.
 2. Implement deterministic interval closure without mutation or model access.
 3. Run focused/all P4/invariant/full checks; commit owned files.
 

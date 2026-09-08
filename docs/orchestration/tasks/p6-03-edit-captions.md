@@ -26,6 +26,7 @@ def project_edit_captions(plan: EditPlan, source: BoundaryProjection, frame_dura
 - Reject plan/source mixed revisions or a cue intersecting a removed interval; guard correctness means no new partial cue should need text synthesis/retranscription here.
 - Map retained input timeline frames to ripple output frames exactly. EDIT SRT is elapsed zero-based and uses one half-up millisecond serialization at the end.
 - Boundary/source text and provenance remain unchanged. Clip-end cue ends at the exact retained slice endpoint; do not invent a one-frame gap.
+- Reuse the authoritative exact `SourceCue`/`ProjectCue` representation produced from the immutable refined cue plus its exact input-timeline transform. EDIT applies only the ripple-output transform; it never recomputes the same cue from raw segments, settled-spine floats, or another serialization path.
 - Adjacent cue end/start may be equal; each cue must have positive exact duration and be ordered/non-overlapping.
 - SOURCE cue objects/text/SRT remain byte-identical before/after this function.
 
