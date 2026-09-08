@@ -403,6 +403,45 @@ def test_probe_fails_loudly_when_the_stream_is_missing(
         probe_audio_stream(Path("demo.mp4"), 7)
 
 
+def test_probe_reports_out_of_range_selection_distinctly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """빈 목록은 '못 찾음'과 다른 말이어야 한다 — 범위를 벗어난 선택이다."""
+    _fake_ffmpeg_ffprobe(monkeypatch, json.dumps({"streams": []}), "", 0)
+    with pytest.raises(RuntimeError, match="벗어난"):
+        probe_audio_stream(Path("demo.mp4"), 7)
+
+
+def test_probe_rejects_json_without_a_streams_list(monkeypatch: pytest.MonkeyPatch) -> None:
+    """streams 키가 없거나 목록이 아니면 고르기 전에 형태가 깨진 것이다."""
+    for broken in ('{"format": {}}', '{"streams": "한 줄"}', "[1, 2]"):
+        _fake_ffmpeg_ffprobe(monkeypatch, broken, "", 0)
+        with pytest.raises(RuntimeError, match="streams"):
+            probe_audio_stream(Path("demo.mp4"), 0)
+
+
+def test_probe_rejects_ambiguous_selection(monkeypatch: pytest.MonkeyPatch) -> None:
+    """a:N은 스트림 하나를 골라야 한다 — 둘이 오면 어느 시계인지 알 수 없다."""
+    entry = {
+        "codec_type": "audio",
+        "start_time": "2.0",
+        "sample_rate": "16000",
+        "channels": 2,
+    }
+    _fake_ffmpeg_ffprobe(
+        monkeypatch, json.dumps({"streams": [dict(entry, index=1), dict(entry, index=2)]}), "", 0
+    )
+    with pytest.raises(RuntimeError, match="모호"):
+        probe_audio_stream(Path("demo.mp4"), 0)
+
+
+def test_probe_rejects_a_malformed_single_entry(monkeypatch: pytest.MonkeyPatch) -> None:
+    """항목이 딕셔너리가 아니면 필드를 읽을 수조차 없다."""
+    _fake_ffmpeg_ffprobe(monkeypatch, json.dumps({"streams": ["audio"]}), "", 0)
+    with pytest.raises(RuntimeError, match="깨졌"):
+        probe_audio_stream(Path("demo.mp4"), 0)
+
+
 def test_probe_fails_loudly_on_broken_json(monkeypatch: pytest.MonkeyPatch) -> None:
     _fake_ffmpeg_ffprobe(monkeypatch, "ffprobe가 반쯤 죽으며 흘린 출력", "", 0)
     with pytest.raises(RuntimeError, match="JSON"):

@@ -171,14 +171,27 @@ def probe_audio_stream(source: Path, stream_index: int) -> AudioStreamInfo:
 
 
 def _selected_stream(stdout: str, source: Path, ordinal: int) -> dict[str, object]:
+    """고르기가 실패하는 네 방식은 전부 다른 말로 죽는다 — 원인을 헷갈리지 않게."""
     try:
         data = json.loads(stdout)
     except json.JSONDecodeError as exc:
         raise RuntimeError(f"ffprobe 출력이 JSON이 아니다: {source} ({exc})") from exc
-    streams = data.get("streams") if isinstance(data, dict) else None
-    entry = streams[0] if isinstance(streams, list) and len(streams) == 1 else None
+    if not isinstance(data, dict):
+        raise RuntimeError(f"ffprobe JSON에 streams 목록이 없습니다: {source}")
+    streams = data.get("streams")
+    if not isinstance(streams, list):
+        raise RuntimeError(f"ffprobe JSON의 streams가 목록이 아닙니다: {source} (값 {streams!r})")
+    if not streams:
+        raise RuntimeError(
+            f"오디오 스트림 a:{ordinal}이 없습니다: {source} — 범위를 벗어난 선택이다"
+        )
+    if len(streams) > 1:
+        raise RuntimeError(
+            f"선택이 모호합니다: a:{ordinal}이 스트림 {len(streams)}개를 골랐습니다: {source}"
+        )
+    entry = streams[0]
     if not isinstance(entry, dict):
-        raise RuntimeError(f"오디오 스트림 a:{ordinal}을 찾지 못했습니다: {source}")
+        raise RuntimeError(f"고른 스트림 항목이 깨졌습니다: {source} (값 {entry!r})")
     if entry.get("codec_type") != "audio":
         raise RuntimeError(
             f"고른 스트림이 오디오가 아닙니다: {source} (codec_type {entry.get('codec_type')!r})"
