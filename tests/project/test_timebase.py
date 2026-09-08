@@ -97,14 +97,14 @@ def test_parse_accepts_integer_and_rational_seconds(text: str, expected: Fractio
     assert parse_fcpx_time(text) == expected
 
 
-def test_parse_negative_duration_requires_opt_in() -> None:
-    """길이는 음수일 수 없다. 음수 에포크를 읽을 때만 명시적으로 연다."""
-    with pytest.raises(ValueError, match="음수"):
-        parse_fcpx_time("-5s")
-    with pytest.raises(ValueError, match="음수"):
-        parse_fcpx_time("-1/30s")
-    assert parse_fcpx_time("-5s", allow_negative=True) == Fraction(-5)
-    assert parse_fcpx_time("-1/30s", allow_negative=True) == Fraction(-1, 30)
+def test_parse_accepts_signed_epochs_directly() -> None:
+    """파서는 부호 붙은 정준 에포크를 그대로 읽는다 — 단일 인수, 별도 깃발 없음.
+
+    음수 길이의 금지는 파서가 아니라 길이를 아는 호출자·검증기의 몫이다.
+    """
+    assert parse_fcpx_time("-5s") == Fraction(-5)
+    assert parse_fcpx_time("-1/30s") == Fraction(-1, 30)
+    assert parse_fcpx_time("-1001/30000s") == Fraction(-1001, 30000)
 
 
 @pytest.mark.parametrize(
@@ -158,10 +158,8 @@ def test_format_uses_fcpxml_canonical_forms(value: Fraction, expected: str) -> N
 
 @pytest.mark.parametrize("value", ROUNDTRIP_FRACTIONS)
 def test_roundtrip_preserves_exact_fraction(value: Fraction) -> None:
-    """포맷→파싱 왕복은 한 톱니도 잃지 않는다."""
-    assert parse_fcpx_time(format_fcpx_time(value), allow_negative=True) == value
-    if value >= 0:
-        assert parse_fcpx_time(format_fcpx_time(value)) == value
+    """포맷→파싱 왕복은 한 톱니도 잃지 않는다 — 음수 에포크도 단일 인수로."""
+    assert parse_fcpx_time(format_fcpx_time(value)) == value
 
 
 # ─── 지원 프레임 길이 ───────────────────────────────────────────────────
@@ -355,11 +353,21 @@ def test_reversed_interval_raises() -> None:
         interval_outward(Fraction(1, 30), Fraction(0), Fraction(1, 30), Fraction(0))
 
 
-def test_point_interval_is_empty_but_well_formed() -> None:
-    """시작==끝은 빈 반개 구간이다 — 뒤집힘과는 다르다."""
-    point = Fraction(1, 2)
-    interval = interval_outward(point, point, Fraction(1, 30), Fraction(0))
-    assert interval.start_frame == interval.end_frame == 15
+def test_point_interval_edge_follows_the_grid() -> None:
+    """점 구간의 결과는 격자 위 여부를 따른다 — 빈 구간이 보장되지는 않는다.
+
+    입력은 반개 `[start, end)`다. 바깥쪽 스냅(바닥+천장) 때문에 격자 밖의 점은
+    한 프레임을 보수적으로 덮고, 격자 위의 점만 빈 구간이 된다.
+    """
+    duration = Fraction(1, 30)
+    on_grid = Fraction(1, 2)  # 정확히 15프레임 자리
+    assert interval_outward(on_grid, on_grid, duration, Fraction(0)) == FrameInterval(
+        start_frame=15, end_frame=15
+    )
+    off_grid = Fraction(1, 60)  # 0.5프레임 자리 — 보수적으로 한 프레임
+    assert interval_outward(off_grid, off_grid, duration, Fraction(0)) == FrameInterval(
+        start_frame=0, end_frame=1
+    )
 
 
 # ─── SRT 직렬화 — 정확 half-up, 딱 한 번 ────────────────────────────────

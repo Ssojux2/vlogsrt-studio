@@ -54,12 +54,12 @@ class FrameInterval:
     end_frame: int
 
 
-def parse_fcpx_time(value: str, *, allow_negative: bool = False) -> Fraction:
+def parse_fcpx_time(value: str) -> Fraction:
     """FCPXML 시간 문자열을 초 단위 `Fraction`으로.
 
-    형식은 정수 `3600s` 또는 분수 `1001/30000s`다. 접미사 누락·0 분모는
-    `ValueError`다. 길이는 음수일 수 없어 기본적으로 거부하며, 음수 에포크를
-    읽을 때만 `allow_negative=True`로 연다.
+    형식은 부호 붙은 정수 `3600s` 또는 분수 `1001/30000s`다. 접미사 누락·0 분모는
+    `ValueError`다. 부호는 에포크의 일부라 그대로 읽는다 — 음수 길이의 금지는
+    파서가 아니라 길이를 아는 호출자·검증기가 한다.
     """
     match = _FCPX_TIME_PATTERN.fullmatch(value)
     if match is None:
@@ -71,10 +71,7 @@ def parse_fcpx_time(value: str, *, allow_negative: bool = False) -> Fraction:
     denominator = int(denominator_text) if denominator_text is not None else 1
     if denominator == 0:
         raise ValueError(f"FCPXML 시간의 분모가 0이다: {value!r}")
-    parsed = Fraction(numerator, denominator)
-    if parsed < 0 and not allow_negative:
-        raise ValueError(f"FCPXML 길이는 음수일 수 없다(에포크면 allow_negative=True): {value!r}")
-    return parsed
+    return Fraction(numerator, denominator)
 
 
 def format_fcpx_time(value: Fraction) -> str:
@@ -116,9 +113,10 @@ def frame_nearest(value: Fraction, frame_duration: Fraction, anchor: Fraction = 
 def interval_outward(
     start: Fraction, end: Fraction, frame_duration: Fraction, anchor: Fraction
 ) -> FrameInterval:
-    """`[start, end]`를 덮는 반개 구간 — 시작은 바닥, 끝은 천장으로 바깥으로 잡는다.
+    """반개 입력 `[start, end)`를 덮는 반개 구간 — 시작은 바닥, 끝은 천장.
 
-    시작==끝은 빈 구간으로 잘 정의되지만, 뒤집힘(`end < start`)은 거부한다.
+    뒤집힘(`end < start`)은 거부한다. 점 구간(시작==끝)의 결과는 격자가 정한다:
+    격자 위의 점은 빈 구간, 격자 밖의 점은 한 프레임을 보수적으로 덮는다.
     """
     if end < start:
         raise ValueError(f"구간이 뒤집혔다: start={start}초 > end={end}초")
