@@ -1379,24 +1379,26 @@ def test_range_paths_stay_inside_the_requested_directory(tmp_path: Path) -> None
 
     stem은 계약상 비지 않은 문자열이면 무엇이든 될 수 있다. 그걸 그대로 경로에
     끼우면 "../escaped" 같은 **정상 참조**가 요청한 디렉터리 밖에 쓰고, 절대경로
-    stem은 디렉터리를 통째로 점령한다. 어떤 stem이어도 조각은 디렉터리 안에만 산다.
+    stem은 디렉터리를 통째로 점령한다. 어떤 stem이어도 조각은 디렉터리 안에만
+    산다 — 평범한 한글·공백 stem도 같은 결정적 잎 이름을 얻을 뿐이다.
     """
     pcm_bytes = _pattern_pcm(32000, channels=1)
     out = tmp_path / "out"
-    hostile_stems = ["../escaped", "../../escaped", str(tmp_path / "elsewhere")]
-    for stem in hostile_stems:
+    leaves = ["range-0000.wav", "range-0001.wav"]
+    ranges = [(Fraction(0), Fraction(1)), (Fraction(1), Fraction(2))]
+    stems = ["../escaped", "../../escaped", str(tmp_path / "elsewhere"), "브이로그 77분 회차"]
+    for stem in stems:
         reference = dataclasses_replace(
             _hand_reference(tmp_path / "ref.pcm", pcm_bytes), original_stem=stem
         )
-        result = split_retained_ranges(
-            reference, [(Fraction(0), Fraction(1)), (Fraction(1), Fraction(2))], out
-        )
+        result = split_retained_ranges(reference, ranges, out)
         assert all(path.resolve().is_relative_to(out.resolve()) for _span, path in result), (
             f"{stem} 참조가 조각을 디렉터리 밖에 쓰려 한다"
         )
+        assert [path.name for _, path in result] == leaves, f"{stem} stem도 같은 잎 이름이다"
 
     written = {path.name for path in tmp_path.rglob("*") if path.is_file()}
-    assert written == {"ref.pcm"} | {f"range-{index:04d}.wav" for index in range(2)}, (
+    assert written == {"ref.pcm"} | set(leaves), (
         "디렉터리 밖에는 아무 파일도 없다 — 탈출도 점령도 일어나지 않았다"
     )
 
