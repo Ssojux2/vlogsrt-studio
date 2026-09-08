@@ -205,14 +205,25 @@ def _serialize(value: object) -> object:
         return f"{value.numerator}/{value.denominator}"
     if isinstance(value, Decimal):
         return _canonical_decimal(value)
+    if isinstance(value, float) and value == 0.0:
+        return 0.0  # 부호 붙은 0은 하나다 — -0.0도 0.0으로 나간다
     return value
 
 
 def _canonical_decimal(value: Decimal) -> str:
-    """정규형 십진 문자열 — 같은 값은 같은 바이트여야 해시도 같다."""
-    if value == 0:
+    """정규형 십진 문자열 — 문맥 정밀도에 무관하게 값 그대로.
+
+    `normalize()`는 현재 문맥 정밀도(기본 28)로 반올림하므로 쓰지 않는다 —
+    유효숫자가 긴 가격이 문맥에 따라 다른 직렬화를 낸다. 정확한 전개
+    (`format(value, "f")`는 반올림 없이 값을 편다) 뒤에 **소수점 아래** 끝자리
+    0만 줄이고, 부호 붙은 0은 하나("0")로 합친다.
+    """
+    text = format(value, "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    if text == "-0":
         return "0"
-    return format(value.normalize(), "f")
+    return text
 
 
 def _parse_schema_version(key: str, value: object, source: str) -> int:

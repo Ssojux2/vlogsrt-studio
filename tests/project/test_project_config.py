@@ -16,7 +16,7 @@ import json
 import re
 import subprocess
 import sys
-from decimal import Decimal
+from decimal import Decimal, localcontext
 from fractions import Fraction
 from pathlib import Path
 from typing import get_args
@@ -717,6 +717,59 @@ def test_price_spellings_canonicalize_to_one_hash(tmp_path: Path) -> None:
     assert first.sha256() == second.sha256()
     assert first.to_dict()["vision_cost_per_image"] == "0.01"
     assert first.vision_cost_per_image == Decimal("0.01")
+
+
+def test_high_precision_price_hash_is_context_independent(tmp_path: Path) -> None:
+    """정규형은 문맥 정밀도에 무관해야 한다 — 반올림은 정규화가 아니라 훼손이다.
+
+    `Decimal.normalize()`는 현재 문맥 정밀도(기본 28)로 반올림한다. 유효숫자가
+    그보다 긴 가격이 문맥에 따라 다르게 직렬화되면 같은 파일이 세 개의 해시를
+    낸다. 정밀도 6·28·50 어디에서도 값 그대로 하나의 해시여야 한다.
+    """
+    long_price = "0.123456789012345678901234567890123456789"  # 유효숫자 39자리
+    body = f'schema_version = 1\npricing_currency = "USD"\nvision_cost_per_image = "{long_price}"\n'
+    path = _write(tmp_path / "prec.project.toml", body)
+    hashes = set()
+    with localcontext() as context:
+        for precision in (6, 28, 50):
+            context.prec = precision
+            config = load_project_config(path)
+            assert config.boundary_audio_cost_per_minute is None
+            assert config.vision_cost_per_image == Decimal(long_price)
+            canonical = config.to_dict()["vision_cost_per_image"]
+            assert canonical == long_price, f"prec={precision}: 반올림이 들어왔다"
+            hashes.add(config.sha256())
+    assert len(hashes) == 1, "문맥 정밀도가 해시를 갈랐다"
+
+
+def test_signed_decimal_zero_and_trailing_zeros_keep_one_hash(tmp_path: Path) -> None:
+    """부호 붙은 0과 끝자리 0 철자는 하나의 값이다 — 해시도 하나여야 한다."""
+    hashes = set()
+    for index, spelling in enumerate(["0", "-0", "0.000", "+0"]):
+        body = (
+            f'schema_version = 1\npricing_currency = "USD"\nvision_cost_per_image = "{spelling}"\n'
+        )
+        config = load_project_config(_write(tmp_path / f"z{index}.project.toml", body))
+        assert config.vision_cost_per_image == Decimal(0)
+        assert config.to_dict()["vision_cost_per_image"] == "0"
+        hashes.add(config.sha256())
+    assert len(hashes) == 1
+
+
+@pytest.mark.parametrize("key", ["vad_positive", "vision_apply_confidence"])
+def test_signed_float_zero_hashes_identically(tmp_path: Path, key: str) -> None:
+    """같은 값의 부호 철자("0.0"·"-0.0")는 해시도 같아야 한다."""
+    path = _write(tmp_path / "z.project.toml", "schema_version = 1\n")
+    positive = load_project_config(path, {key: 0.0})
+    negative = load_project_config(path, {key: -0.0})
+    assert positive == negative  # 값은 원래 같다 — 문제는 직렬화다
+    assert positive.to_dict()[key] == 0.0
+    assert negative.to_dict()[key] == 0.0
+    # 바이트로 증명한다: dict 비교는 -0.0을 못 본다.
+    assert json.dumps(positive.to_dict(), sort_keys=True) == json.dumps(
+        negative.to_dict(), sort_keys=True
+    )
+    assert positive.sha256() == negative.sha256()
 
 
 # ─── P5-00: overrides 명시적 덧층 ─────────────────────────────────────
