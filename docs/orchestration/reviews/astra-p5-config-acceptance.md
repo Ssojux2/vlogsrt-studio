@@ -1,0 +1,11 @@
+# P5-00 project configuration acceptance
+
+Accepted GLM candidate `a3c31c710896666931571417b8127b55d9f4f6f7`, integrated as `e3dccba31719b0b052f3be18061226d32a4ebbc3` on 2026-09-08 UTC. P5-00 configuration is complete; VAD runtime/inference and vision implementation remain subsequent tasks.
+
+The existing project config root now owns the VAD artifact coordinates, analysis thresholds, vision model and credential variable names, roughcut settings, and optional component-specific Decimal pricing assumptions. The loader preserves P0 schema/default/explicit-path semantics, validates types and combinations, and accepts an explicit override layer. Canonical Fraction/Decimal serialization and deterministic hashing identify the interpreted configuration. No credentials or prices are discovered from the environment. Prices default to unknown and are user budgeting assumptions, not asserted provider tariffs.
+
+Root reproduced two canonical-hash defects in the first candidate: Decimal normalization rounded under ambient precision, and equal signed float zeros hashed differently. GLM corrected both. Root independently verified 16 exact Decimal equivalence groups across all four price fields and precision 3/6/28/50, including long significant digits, exponent forms, trailing zeros, and signed zero; both probability fields also hash identically for integer/positive/negative zero. Exact decimal values remain unchanged.
+
+Sol approved the exact corrected SHA in `msg_d8e0338d4791`; Opus approved it in `msg_6d12d73ae82c`. Root candidate `make check` passed **1,401 tests**, Ruff (62 files), mypy (32 modules), and 19 invariant groups. Integrated `make check` passed **1,479 tests** with the same static/invariant gates; the 78 additional tests are the independently integrated P3-01 outcome lane. Product diff scope is the four assigned paths. No blocking findings remain.
+
+Planning checkpoint `5f5a95a1a968f8677ce81d9516ac9b6d1e381367` records the active P3 source-artifact generation contract and explicit handling of positive exact cues that collapse at millisecond precision. P5-01 may now run from this integrated configuration in the independent second GLM slot while P3-02 continues. It must prove pinned installed-wheel resources and actual CPU execution before claiming runtime acceptance.
