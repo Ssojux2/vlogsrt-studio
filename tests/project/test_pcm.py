@@ -20,6 +20,7 @@ import subprocess
 import sys
 import wave
 from dataclasses import dataclass, fields
+from dataclasses import replace as dataclasses_replace
 from fractions import Fraction
 from pathlib import Path
 
@@ -823,6 +824,98 @@ def test_a_successful_changed_source_update_retains_the_old_generation(
     assert (out / "old-slice.wav").read_bytes()[44:] == first_bytes[: 100 * 2 * 2]
     # 포인터 + 옛 세대 둘 + 새 세대 둘 + 슬라이스 — 아무것도 지워지지 않았다.
     assert len(list(out.iterdir())) == 6
+
+
+def test_verification_recomputes_the_analysis_key_from_persisted_facts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """포인터가 세대를 가리키려면 세대 기록만으로 분석 키가 다시 만들어져야 한다.
+
+    기록의 사실이 참조의 키와 어긋나면 출판하던 중에 죽는다 — 기록이 증명하지
+    못하는 세대를 포인터가 이름 붙일 수 없게.
+    """
+    source = tmp_path / "src"
+    out = tmp_path / "out"
+    original, original_sha = _original(source, "in.mov", b"synthetic-original")
+    _fake_extract(monkeypatch, _pattern_pcm(100, channels=2), channels=2)
+    destination = out / "ref.pcm"
+    reference = build_reference(
+        "asset-1", "demo", original, original_sha, AudioPolicy(), destination
+    )
+    generation_pcm, generation_meta = _generation_paths(destination)
+    policy = AudioPolicy()
+
+    pcm._verify_generation(generation_pcm, generation_meta, reference, policy)  # 온전한 짝은 지난다
+
+    forged = dataclasses_replace(reference, analysis_key="0" * 64)
+    with pytest.raises(RuntimeError, match="분석 키"):
+        pcm._verify_generation(generation_pcm, generation_meta, forged, policy)
+
+
+def test_concurrent_writers_get_exclusive_private_generations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """동시에 쓰는 둘은 저마다의 사유 세대를 만든다 — 세대 생성은 독점적이어야 한다.
+
+    내용에서 유도한 이름은 독점 생성이 아니다: 같은 주소로 동시에 쓰는 writer 둘이
+    서로의 세대를 덮으면 안 된다. mkstemp의 배타적 생성이 그 선을 지킨다.
+    """
+    from threading import Thread
+
+    source = tmp_path / "src"
+    out = tmp_path / "out"
+    one, one_sha = _original(source, "one.mov", "첫 원본".encode())
+    two, two_sha = _original(source, "two.mov", "둘째 원본 — 다른 내용".encode())
+    first_bytes = _pattern_pcm(1000, channels=2)
+    second_bytes = _pattern_pcm(999, channels=2)
+    payloads = {one: first_bytes, two: second_bytes}
+    destination = out / "ref.pcm"
+
+    def extract(
+        source_file: Path, destination_file: Path, *, stream_index: int, sample_rate: int = 16000
+    ) -> preprocess.PcmExtraction:
+        pcm_bytes = payloads[source_file]
+        destination_file.write_bytes(pcm_bytes)
+        return preprocess.PcmExtraction(
+            path=destination_file,
+            stream=preprocess.AudioStreamInfo(
+                stream_index=stream_index + 1,
+                start_time=Fraction(0),
+                sample_rate=44100,
+                channels=2,
+            ),
+            sample_count=len(pcm_bytes) // 4,
+            sample_width=2,
+            pcm_sample0_file_time=Fraction(0),
+        )
+
+    monkeypatch.setattr(pcm, "extract_pcm_s16le", extract)
+    outcome: dict[str, object] = {}
+
+    def worker(name: str, original: Path, original_sha: str) -> None:
+        try:
+            outcome[name] = build_reference(
+                "asset-1", "demo", original, original_sha, AudioPolicy(), destination
+            )
+        except BaseException as exc:  # Thread는 예외를 삼키므로 직접 받는다
+            outcome[name] = exc
+
+    threads = [
+        Thread(target=worker, args=("one", one, one_sha)),
+        Thread(target=worker, args=("two", two, two_sha)),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    references = dict(outcome)
+    assert not [name for name, value in references.items() if isinstance(value, BaseException)]
+    generation_pcms = {value.path for value in references.values()}
+    assert len(generation_pcms) == 2, "writer마다 저마다의 세대다 — 겹치지 않는다"
+
+    pointed = _generation_paths(destination)[0]
+    assert pointed in generation_pcms, "포인터는 둘 중 하나의 온전한 세대를 가리킨다"
 
 
 # ─────────────────────────────────────────────────────────────

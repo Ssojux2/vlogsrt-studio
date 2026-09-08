@@ -495,6 +495,20 @@ def _verify_generation(
         or stored.sample_count != reference.sample_count
     ):
         raise RuntimeError(f"세대 기록이 참조와 어긋난다: {generation_meta}")
+    # 포인터가 이름 붙이려면 기록의 사실만으로 키가 다시 만들어져야 한다.
+    recomputed_key = _analysis_key(
+        stored.original_sha256,
+        stored.policy,
+        stored.origin,
+        stored.pcm_sha256,
+        stored.channels,
+        stored.policy.sample_rate,
+    )
+    if recomputed_key != reference.analysis_key:
+        raise RuntimeError(
+            f"세대 기록이 분석 키를 다시 만들지 못한다: {generation_meta} "
+            f"(기록 → {recomputed_key}, 참조 {reference.analysis_key})"
+        )
     expected = reference.sample_count * policy.sample_width * reference.channels
     if not _stored_file_matches(generation_pcm, expected, reference.pcm_sha256):
         raise RuntimeError(f"세대 PCM이 참조와 어긋난다: {generation_pcm}")
