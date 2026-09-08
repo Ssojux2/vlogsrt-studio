@@ -35,6 +35,8 @@
 | GLM P0-02c regression fix | `task_73facc46450a` | `ctx_673955f2284e` | `c7af159` integrated by Astra as `45d1393`; full gate passed |
 | GLM P0-03 source byte lock | `task_c8c82a82db06` | `ctx_4d19cc8b7736` | `2a1034b` integrated by Astra as `9b7d4e2`; full gate passed |
 | GLM P0-04 project skeleton | `task_5cf80c9529fa` + correction `task_a2ba0cb1dbe9` | `ctx_c88e36865f89` + `ctx_9a0e8d667681` | final `0b1743d` integrated by Astra as `cd411c4`; P0 complete |
+| GLM P1-01 timebase | `task_3355d2bef6d9` | `ctx_e963c6fd31a4` | active from exact `cd411c4`, terminal `term_b1b4bc21-fcde-491d-b18c-63e94f017ed2` |
+| GLM P2-01 PCM extraction | `task_071c14e3282d` | `ctx_dcd31a44ebc6` | active from exact `cd411c4`, terminal `term_c76ce4b7-e6e2-4d15-942a-0b3f3bc4ddce` |
 
 Initial gate message IDs: root `msg_d8fc69fe164a`; Opus `msg_0f70e95b09f7`.
 
@@ -100,12 +102,12 @@ By explicit Astra dependency audit, P0-03 may run from `58bb25347319301391064d6b
 | [P0-02](tasks/p0-02-contract-guard.md) / [P0-02b](tasks/p0-02b-contract-reconciliation.md) / [P0-02c](tasks/p0-02c-contract-regressions.md) | source/derived dependency and subprocess contract | P0-01 | contract doc, pyproject, invariant script/tests | complete; integrated `45d1393`, full gate passed |
 | [P0-03](tasks/p0-03-source-byte-lock.md) | exact synthetic legacy SOURCE SRT regression | exact `58bb253` by Astra exception; joins corrected P0-02/P0-04 at phase gate | `tests/test_source_immutability.py` only | complete; integrated `9b7d4e2`, 553-test gate passed |
 | [P0-04](tasks/p0-04-project-skeleton.md) | isolated project package/config/FCPXML-model namespace skeleton | corrected P0-02 merge `45d1393` | project package/config/models + config test only | complete; P0 integrated `cd411c4`, 579-test gate passed |
-| [P1-01](tasks/p1-01-rational-time.md) | exact FCP rational/frame math | P0 merge `cd411c4` | project time module/tests | launch authorized in P1/P2 parallel wave |
+| [P1-01](tasks/p1-01-rational-time.md) | exact FCP rational/frame math | P0 merge `cd411c4` | project time module/tests | active: `task_3355d2bef6d9` / `ctx_e963c6fd31a4` |
 | [P1-02](tasks/p1-02-fcpxml-ingest.md) | FCPXML/bundle parser and rejection surface | P1-01 | project FCPXML models/parser/tests | drafted |
 | [P1-03](tasks/p1-03-media-identity.md) | original/proxy resolution and strong IDs | P1-02 | project media/tests | drafted |
 | [P1-04](tasks/p1-04-xml-validation.md) | xmllint-only boundary plus structural validation | P1-02 | XML validation/tests | drafted |
 | [P1-05](tasks/p1-05-roundtrip.md) | identity-preserving roundtrip | P1-03,P1-04 | project FCPXML writer/tests | drafted |
-| [P2-01](tasks/p2-01-pcm-extraction.md) | measured 16 kHz PCM extraction metadata | P0 merge `cd411c4` | preprocess additions/tests | launch authorized in P1/P2 parallel wave |
+| [P2-01](tasks/p2-01-pcm-extraction.md) | measured 16 kHz PCM extraction metadata | P0 merge `cd411c4` | preprocess additions/tests | active: `task_071c14e3282d` / `ctx_dcd31a44ebc6` |
 | [P2-02](tasks/p2-02-pcm-reference.md) | persistent hashed PCM and exact sample slicing | P2-01 | project PCM/tests | drafted |
 | [P2-03](tasks/p2-03-s17-regression.md) | last/intermediate/repair drift regression | P2-02 | preprocess/project PCM tests and narrow fixes | drafted |
 | [P3-01](tasks/p3-01-transcription-outcome.md) | explicit success/empty/error contract | P1,P2 merges | transcribe additions/tests | drafted |
