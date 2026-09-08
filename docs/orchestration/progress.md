@@ -12,7 +12,7 @@
 
 ## Global constraints
 
-- Integration branch: `feat/final-cut-project`; bootstrap product base: `676460111bad5ef04cbc9d5c776940611fa938a7`; current docs-only integration HEAD observed: `9727b2be887a31e18b81152189cdd6352fce1e50`.
+- Integration branch: `feat/final-cut-project`; bootstrap product base: `676460111bad5ef04cbc9d5c776940611fa938a7`; Astra contract authority is recorded through `9727b2be887a31e18b81152189cdd6352fce1e50`, followed by Sol-owned planning commits beginning at `22490cd`.
 - Every worker branch starts from the exact phase base SHA approved by Astra, never implicit `origin/main`.
 - Maximum two simultaneous implementation workers, only with disjoint owned files/worktrees and satisfied dependencies.
 - Managers write plans, reviews, and this ledger only. GLM writes all product code and tests; Astra alone integrates phase branches.
@@ -36,7 +36,7 @@ Initial gate message IDs: root `msg_d8fc69fe164a`; Opus `msg_0f70e95b09f7`.
 
 ## Current evidence and gate
 
-- Root checkout HEAD observed: `9727b2be887a31e18b81152189cdd6352fce1e50` on `feat/final-cut-project`; Astra approved `676460111bad5ef04cbc9d5c776940611fa938a7` as the initial P0 product-code base.
+- Before the Sol planning series, root checkout HEAD was `9727b2be887a31e18b81152189cdd6352fce1e50` on `feat/final-cut-project`; Astra approved `676460111bad5ef04cbc9d5c776940611fa938a7` as the initial P0 product-code base.
 - Python preflight is complete: `python3.12` and `.venv/bin/python` report `3.12.14`. A uv-created venv need not contain the `pip` module; package health is checked with `uv pip check --python .venv/bin/python`.
 - Baseline `make check` at the initial source baseline passed on 2026-09-08: ruff lint/format, mypy (23 files), pytest (`389 passed`), and all 16 invariant groups.
 - P0-02 completed on branch `Ssojux2/fcp-p0-contract` at `df489bb0a8c077ed6c74c9709dfa929432129d59`, exact base `676460111bad5ef04cbc9d5c776940611fa938a7`. Run `run_b6d40d052690`, Task `task_f7788389960b`, Dispatch `ctx_df9c602e28a2`, terminal `term_ea415fa1-9b4f-402d-922f-4d6dbe039b22`; focused 80 and full 453 tests passed, 18 invariant groups passed, and the worktree was clean.
