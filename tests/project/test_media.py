@@ -677,6 +677,18 @@ def test_relative_map_paths_ignore_the_process_cwd(
     assert override.original == tmp_path / "media" / "original.mp4"
 
 
+def test_map_parent_is_captured_absolute_at_load_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """상대 맵 인자도 절대 부모를 붙여 둔다 — 읽은 뒤 cwd가 바뀌어도 안 흔들린다."""
+    write_map(tmp_path, json.dumps([{"resource_id": "r2", "original": "media/original.mp4"}]))
+    monkeypatch.chdir(tmp_path)
+    override = load_media_map(Path("media-map.json"))[0]
+    monkeypatch.chdir("/")
+    assert override.original.is_absolute()
+    assert override.original == tmp_path / "media" / "original.mp4"
+
+
 def test_tilde_and_env_stay_literal_without_expansion(tmp_path: Path) -> None:
     """`~`·`$HOME`은 펴지 않는다 — 문자 그대로 맵 부모 아래의 상대 경로로 남는다."""
     path = write_map(
@@ -716,6 +728,9 @@ def test_load_media_map_empty_list_is_allowed(tmp_path: Path) -> None:
         ('[{"resource_id": "r2", "proxy": null}]', "null"),
         ('[{"resource_id": "r2", "original": "file:///media/a.mp4"}]', "URI"),
         ('[{"resource_id": "r2", "proxy": "http://cdn/p.mov"}]', "URI"),
+        ('[{"resource_id": "r2", "original": "file:/tmp/a.mov"}]', "URI"),
+        ('[{"resource_id": "r2", "proxy": "file:relative.mov"}]', "URI"),
+        ('[{"resource_id": "r2", "original": "data:video/mp4;base64,eA=="}]', "URI"),
         ('[{"resource_id": "r2"}, {"resource_id": "r2"}]', "r2"),
         ('[{"resource_id": "r2", "original": "/a"}, {"resource_id": "r2"}]', "r2"),
         ("not json at all", "JSON"),

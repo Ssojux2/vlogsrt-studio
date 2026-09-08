@@ -81,9 +81,10 @@ def load_media_map(path: Path) -> tuple[MediaOverride, ...]:
     배열이어야 하는 이유는 중복에 있다: 객체를 키로 묶으면 JSON은 뒤의 키가
     앞을 조용히 덮어쓴다. 배열은 중복이 **표현되고**, 그래서 거부할 수 있다.
     스키마 위반은 `ValueError`로 맵 경로와 항목·키를 댄다. 경로 값은 파일
-    경로다: 절대 경로는 그대로, 상대 경로는 **맵 파일의 부모**가 기준이다(cwd
-    무관). `~`·`$…`는 펴지 않고 글자 그대로 남는다. `file://…` 같은 URI는
-    이 층의 입력이 아니므로 거부한다 — URI 해석은 XML media-rep의 몫이다.
+    경로다: 절대 경로는 그대로, 상대 경로는 **맵 파일의 부모**가 기준이다 —
+    읽는 시점에 절대로 붙여 두므로 cwd와 무관하다. `~`·`$…`는 펴지지 않고
+    글자 그대로 남는다. 스킴이 파싱되는 값(file:·http:·data: …)은 이 층의
+    입력이 아니므로 거부한다 — URI 해석은 XML media-rep의 몫이다.
     """
     where = str(path)
     try:
@@ -96,7 +97,9 @@ def load_media_map(path: Path) -> tuple[MediaOverride, ...]:
         raise ValueError(f"{where}: 미디어 맵이 JSON이 아니다 ({error})") from error
     if not isinstance(payload, list):
         raise ValueError(f"{where}: 미디어 맵은 객체의 배열이어야 한다")
-    base = path.parent
+    # 상대 경로의 기준을 **읽는 지금** 절대로 붙여 둔다 — 그래야 cwd가 바뀐 뒤에도
+    # 오버라이드가 맵 파일을 따라간다.
+    base = path.resolve().parent
     overrides: list[MediaOverride] = []
     seen: set[str] = set()
     for position, entry in enumerate(payload, start=1):
@@ -151,10 +154,12 @@ def _map_path(entry: dict, key: str, position: int, where: str, base: Path) -> P
             f"{where}: 미디어 맵 항목 {position}의 {key}가 무효다: {value!r}"
             " — 비지 않은 경로 문자열이어야 한다"
         )
-    if "://" in value:
+    scheme = urlparse(value).scheme
+    if scheme:
+        # 스킴이 파싱되면 URI다 — file:·http:·data: 그 무엇이든 경로가 아니다.
         raise ValueError(
             f"{where}: 미디어 맵 항목 {position}의 {key}가 URI다: {value!r}"
-            " — 여기는 파일 경로지 URI가 아니다"
+            f" (스킴 {scheme!r}) — 여기는 파일 경로지 URI가 아니다"
         )
     candidate = Path(value)
     return candidate if candidate.is_absolute() else base / candidate
