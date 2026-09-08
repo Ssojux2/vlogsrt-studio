@@ -34,6 +34,7 @@
 | GLM P0-02b reconciliation | `task_eb3e9e09ca7f` | `ctx_6ca746e225d0` | completed `972a814`; two direct regressions found |
 | GLM P0-02c regression fix | `task_73facc46450a` | `ctx_673955f2284e` | `c7af159` integrated by Astra as `45d1393`; full gate passed |
 | GLM P0-03 source byte lock | `task_c8c82a82db06` | `ctx_4d19cc8b7736` | active from exact `58bb253`, terminal `term_74b4ce96-77e7-4065-8ad6-df1c6ea026b1` |
+| GLM P0-04 project skeleton | `task_5cf80c9529fa` | `ctx_c88e36865f89` | active from exact `45d1393`, terminal `term_deb9fdaf-43ff-44c4-8809-e4f53dacc530` |
 
 Initial gate message IDs: root `msg_d8fc69fe164a`; Opus `msg_0f70e95b09f7`.
 
@@ -96,7 +97,7 @@ By explicit Astra dependency audit, P0-03 may run from `58bb25347319301391064d6b
 | [P0-01](tasks/p0-01-environment.md) | reproducible Python 3.12 venv and baseline evidence | bootstrap commit | none (ignored `.venv` only) | complete; evidence-only |
 | [P0-02](tasks/p0-02-contract-guard.md) / [P0-02b](tasks/p0-02b-contract-reconciliation.md) / [P0-02c](tasks/p0-02c-contract-regressions.md) | source/derived dependency and subprocess contract | P0-01 | contract doc, pyproject, invariant script/tests | complete; integrated `45d1393`, full gate passed |
 | [P0-03](tasks/p0-03-source-byte-lock.md) | exact synthetic legacy SOURCE SRT regression | exact `58bb253` by Astra exception; joins corrected P0-02/P0-04 at phase gate | `tests/test_source_immutability.py` only | active: `task_c8c82a82db06` / `ctx_4d19cc8b7736` |
-| [P0-04](tasks/p0-04-project-skeleton.md) | isolated project package/config/FCPXML-model namespace skeleton | corrected P0-02 merge `45d1393` | project package/config/models + config test only | launch authorized; parallel with P0-03 |
+| [P0-04](tasks/p0-04-project-skeleton.md) | isolated project package/config/FCPXML-model namespace skeleton | corrected P0-02 merge `45d1393` | project package/config/models + config test only | active: `task_5cf80c9529fa` / `ctx_c88e36865f89` |
 | [P1-01](tasks/p1-01-rational-time.md) | exact FCP rational/frame math | P0 merge | project time module/tests | drafted |
 | [P1-02](tasks/p1-02-fcpxml-ingest.md) | FCPXML/bundle parser and rejection surface | P1-01 | project FCPXML models/parser/tests | drafted |
 | [P1-03](tasks/p1-03-media-identity.md) | original/proxy resolution and strong IDs | P1-02 | project media/tests | drafted |
