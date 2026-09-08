@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from dataclasses import replace as data_replace
 from pathlib import Path
@@ -19,6 +20,7 @@ from vlogsrt.models import (
     REPAIR_REPLACED,
     Chunk,
     Segment,
+    Span,
 )
 from vlogsrt.transcribe import ARBITER_KIND, RESCUE_KIND, ChunkResponse, TranscriptionJob
 
@@ -614,3 +616,102 @@ def test_one_piece_recovers_while_its_neighbours_collapse(
     texts = [segment.text for segment in settled.spine]
     assert texts[0] == CLEAN, "되살아난 조각이 자기 자리에 섰다"
     assert texts.count(LOOP) == len(outcomes) - 1, "접힌 조각마다 첫 장이 하나씩 남는다"
+
+
+# ─────────────────────────────────────────────────────────────
+#  주입 경계 — retained PCM 커터와 명시적 네임스페이스 (P3-02)
+# ─────────────────────────────────────────────────────────────
+
+
+def _verbatim_cutter(spans: Sequence[Span]) -> list[Chunk]:
+    """계획 구간을 그대로 조각으로 만든다 — 주입 커터의 가장 단순한 형태."""
+    return [
+        Chunk(path=Path("cut.wav"), offset=low, duration=high - low, index=index)
+        for index, (low, high) in enumerate(spans)
+    ]
+
+
+def test_an_injected_cutter_replaces_the_audio_requirement() -> None:
+    """커터가 있으면 audio·workdir 없이도 구간을 자른다 — 레거시 MP3 분할은 건드리지 않는다."""
+    asked: list[list[Span]] = []
+
+    def cutter(spans: Sequence[Span]) -> list[Chunk]:
+        asked.append(list(spans))
+        return _verbatim_cutter(spans)
+
+    source = repair.Source(stem="demo", duration=60.0, cutter=cutter)
+    settled = repair.settle(_echoing(8), source, Config(), FakeTranscriber(rescue=[CLEAN]))
+    assert asked == [[(10.0, 18.0)]], "계획 구간이 그대로 커터에 들어간다"
+    assert [record.outcome for record in settled.repairs] == [REPAIR_REPLACED]
+    assert [segment.text for segment in settled.spine] == [CLEAN]
+
+
+def test_the_namespace_travels_to_every_repair_and_arbiter_job(
+    tmp_path: Path,
+) -> None:
+    recorded: list[tuple[str, Path | None]] = []
+
+    class Recording(FakeTranscriber):
+        def transcribe(self, job: TranscriptionJob, cfg: Config) -> list[ChunkResponse]:
+            recorded.append((job.kind, job.namespace))
+            return super().transcribe(job, cfg)
+
+    namespace = tmp_path / "ns"
+    source = repair.Source(stem="demo", duration=60.0, namespace=namespace, cutter=_verbatim_cutter)
+    repair.settle(
+        _echoing(8),
+        source,
+        Config(),
+        Recording(rescue=[LOOP] * 12, arbiter_text=CLEAN),
+    )
+    assert recorded, "되풀이가 있으면 재전사·심판 잡이 나간다"
+    assert all(job_namespace == namespace for _kind, job_namespace in recorded)
+    assert {kind for kind, _ns in recorded} <= {RESCUE_KIND, ARBITER_KIND}
+
+
+def test_the_legacy_source_still_sends_namespace_less_jobs() -> None:
+    recorded: list[tuple[str, Path | None]] = []
+
+    class Recording(FakeTranscriber):
+        def transcribe(self, job: TranscriptionJob, cfg: Config) -> list[ChunkResponse]:
+            recorded.append((job.kind, job.namespace))
+            return super().transcribe(job, cfg)
+
+    repair.settle(_echoing(8), _source(), Config(), Recording(rescue=[LOOP] * 12))
+    assert recorded
+    assert all(job_namespace is None for _kind, job_namespace in recorded), (
+        "namespace=None 레거시는 픽스처 디렉터리 전체를 읽는 길이다 — 그대로 둔다"
+    )
+
+
+def test_an_injected_cutter_failure_is_never_degraded() -> None:
+    """주입 커터가 죽으면 접히지 않고 그대로 올라온다 — 프로젝트 경로의 성공은 영구 캐시다."""
+
+    def detonating(spans: Sequence[Span]) -> list[Chunk]:
+        raise RuntimeError("커터가 죽었다")
+
+    source = repair.Source(stem="demo", duration=60.0, cutter=detonating)
+    with pytest.raises(RuntimeError, match="커터가 죽었다"):
+        repair.settle(_echoing(8), source, Config(), FakeTranscriber(rescue=[CLEAN]))
+
+
+def test_an_injected_cutter_count_mismatch_raises() -> None:
+    source = repair.Source(stem="demo", duration=60.0, cutter=lambda spans: [])
+    with pytest.raises(RuntimeError, match="커터|짝"):
+        repair.settle(_echoing(8), source, Config(), FakeTranscriber(rescue=[CLEAN]))
+
+
+def test_the_default_cutter_keeps_the_legacy_catch_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """cutter=None이면 지금과 똑같이 실패를 삼키고 자막은 나간다(바이트 그대로)."""
+    monkeypatch.setattr(repair.preprocess, "cut_spans", _cut_spans_verbatim)
+    source = repair.Source(
+        stem="demo",
+        duration=60.0,
+        audio=tmp_path / "demo.mp3",
+        workdir=tmp_path / "work",
+    )
+    fake = FakeTranscriber(rescue=[CLEAN])
+    settled = repair.settle(_echoing(8), source, Config(), fake)
+    assert [record.outcome for record in settled.repairs] == [REPAIR_REPLACED]

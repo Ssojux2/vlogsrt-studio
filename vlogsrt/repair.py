@@ -32,7 +32,7 @@
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -56,12 +56,19 @@ _TEMPERATURE_CEILING = 1.0
 
 @dataclass(frozen=True, slots=True)
 class Source:
-    """재전사가 오디오를 다시 자르려면 필요한 것. `audio`가 없으면 픽스처만 쓴다."""
+    """재전사가 오디오를 다시 자르려면 필요한 것. `audio`가 없으면 픽스처만 쓴다.
+
+    `namespace`는 재전사·심판 픽스처의 명시적 주소다(P3-02). `cutter`가 주입되면
+    구간 자르기를 그것에게 완전히 맡긴다 — 저장 PCM에서 자르는 프로젝트 경로가
+    그 형태로 들어온다. 둘 다 없으면 지금까지의 레거시 길 그대로다.
+    """
 
     stem: str
     duration: float
     audio: Path | None = None
     workdir: Path | None = None
+    namespace: Path | None = None
+    cutter: Callable[[Sequence[Span]], list[Chunk]] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -254,9 +261,21 @@ def _assign(draft: Sequence[Segment], repeats: Sequence[Repeat], cfg: Config) ->
 def _cut(source: Source, spans: Sequence[Span], cfg: Config) -> list[Chunk]:
     """오디오가 있으면 그 구간만 다시 자른다. 픽스처만 있는 실행은 자를 것이 없다.
 
+    `cutter`가 주입돼 있으면 그것이 전부다 — 실패는 잡지 않고 그대로 올리고, 조각 수가
+    구간 수와 다르면 죽인다(P3-02). 프로젝트 경로에서 이 층의 조용한 성공은 완성물로
+    영구 굳어지므로, 되풀이를 고치지 못한 채 넘어가는 길을 여기서 끊는다.
+
     조각 수가 구간 수와 다르면 **아무것도 하지 않는다.** 계획과 조각은 순서로 짝지어지므로,
     하나만 어긋나도 다른 구간의 오디오를 그 자리에 갈아끼우게 된다 — 조용한 손실이다.
     """
+    if source.cutter is not None:
+        chunks = source.cutter(spans)
+        if len(chunks) != len(spans):
+            raise RuntimeError(
+                f"주입된 재전사 커터가 구간 {len(spans)}개에 조각 {len(chunks)}개를 돌려줬다. "
+                f"짝을 믿을 수 없어 그대로 멈춘다."
+            )
+        return chunks
     if not source.audio or not source.workdir:
         return []
     try:
@@ -397,7 +416,9 @@ def _ask_whisper(
 
 
 def _job(source: Source, chunks: Sequence[Chunk], kind: str) -> TranscriptionJob:
-    return TranscriptionJob(stem=source.stem, chunks=tuple(chunks), kind=kind)
+    return TranscriptionJob(
+        stem=source.stem, chunks=tuple(chunks), kind=kind, namespace=source.namespace
+    )
 
 
 def _by_span(
