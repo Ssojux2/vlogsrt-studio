@@ -5,6 +5,12 @@ updates the task briefs; GLM implements. None expands the current P0-02 correcti
 
 ## P0 configuration and source byte lock
 
+- Dependency correction at 2026-09-08 14:58 UTC: P0-03 consumes only the unchanged
+  legacy source engine and owns one independent test file. It may start alongside
+  P0-02c from exact `58bb25347319301391064d6ba9b6aad33a58f51c`; it does not consume
+  the checker or project package, so their completion is not a prerequisite.
+  Sol updates the brief/DAG accordingly. Maximum two coding workers remains.
+  P0-04 still waits for the corrected contract; the P0 join requires all results.
 - P0-03 uses `Config()` defaults, disables env-file discovery, and keeps all four
   independently reviewable inline expected byte strings, including the long one.
   Preserve ordinary verification behavior; verification may not change SRT bytes.
