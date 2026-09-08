@@ -6,7 +6,7 @@ Binding spec `Input and output` plus `Source analysis, clocks, identity`; depend
 
 ## Baseline and ownership
 
-- Fresh `fcp-p1-ingest` child worktree from Astra's approved current P1 base (including P1-01 integration).
+- Fresh `fcp-p1-ingest` child worktree from Astra's exact approved P1-01 integration SHA `07e4dac41888ae115157ed4a68d6dfd5fbd5b233`; abort on mismatch.
 - Modify the P0-created FCPXML-only `vlogsrt/project/models.py`; create `vlogsrt/project/fcpxml.py`, `tests/project/test_fcpxml.py`.
 - No media resolution, subprocess/DTD validation, writing, source transcription, or CLI work.
 
