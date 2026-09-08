@@ -6,7 +6,7 @@ Binding spec `Source analysis, clocks, identity` and P2; depends on Astra's P0 m
 
 ## Baseline and ownership
 
-- Fresh `fcp-p2-pcm-extract` worktree from exact approved P0 merge SHA.
+- Fresh `fcp-p2-pcm-extract` worktree from exact approved P0 merge SHA `cd411c4376ccf548151dbd42a9e11c78bbfb4067`; abort on mismatch.
 - Modify `vlogsrt/preprocess.py`, `tests/test_preprocess.py` only.
 - Do not alter existing MP3 subtitle defaults/limits, `split_at`, fixtures, or project package.
 

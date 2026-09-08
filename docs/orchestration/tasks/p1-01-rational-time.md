@@ -6,7 +6,7 @@ Binding spec `Source analysis, clocks, identity` and P1 acceptance. Depends on A
 
 ## Baseline and ownership
 
-- Fresh branch/worktree `fcp-p1-time`, explicitly based on the approved P0 merge SHA.
+- Fresh branch/worktree `fcp-p1-time`, explicitly based on the approved P0 merge SHA `cd411c4376ccf548151dbd42a9e11c78bbfb4067`; abort on mismatch.
 - Create `vlogsrt/project/timebase.py`, `tests/project/test_timebase.py`; modify the existing project package export only if required.
 - No other product/docs/test files. Do not add dependencies or read protected paths.
 
