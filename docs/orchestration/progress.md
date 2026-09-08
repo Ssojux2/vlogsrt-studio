@@ -27,7 +27,7 @@
 | Role | Task | Dispatch | State |
 |---|---|---|---|
 | Astra coordinator | Run `run_73768f7c4dec` | terminal `term_892e5ca1-805d-4d8d-b27f-fe7c90994848` | active |
-| Sol manager | `task_8f65a57496f6` | `ctx_bfbd07ec7a4c` | supervising P0-02b reconciliation |
+| Sol manager | `task_8f65a57496f6` | `ctx_bfbd07ec7a4c` | supervising parallel P1-01/P2-01 implementation and exact-interface review |
 | Opus co-manager | `task_0c2d6966fb52` | `ctx_c60636ed03f1` | service-limited until 01:00 Asia/Seoul; Astra final-review fallback active |
 | GLM P0-02 writer | `task_f7788389960b` | `ctx_df9c602e28a2` | completed `df489bb`; correction review pending |
 | GLM P0-02 correction | `task_7d03430673e1` | `ctx_51f56ba3df5c` | completed `51319b9`; reconciliation still open |
