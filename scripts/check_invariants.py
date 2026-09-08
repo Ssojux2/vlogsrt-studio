@@ -22,6 +22,16 @@ PROJECT_PACKAGE = PACKAGE / "project"
 PROJECT_OPTIONAL_DEPENDENCIES = {"numpy", "onnxruntime"}
 XML_VALIDATION_MODULE = PROJECT_PACKAGE / "xml_validation.py"
 
+
+def _under_project_vad(path: Path) -> bool:
+    """선택 extra의 유일한 허용 지점 — `vlogsrt/project/vad/` 디렉터리 아래다.
+
+    VAD만 numpy·onnxruntime를 쓴다(계획서 VAD guard). 디렉터리 아래가 아니면
+    같은 이름의 파일(`project/vad.py`)도 예외를 물려받지 못한다.
+    """
+    return path.is_relative_to(PROJECT_PACKAGE / "vad")
+
+
 BANNED_IMPORTS = (
     "jamo", "konlpy", "pysrt", "ffmpeg", "pydantic", "dotenv", "regex", "numpy",
     # UI는 ui/ 에만 산다. 핵심 패키지가 gradio를 끌어오면 규칙 7이 무너진다.
@@ -34,9 +44,16 @@ ALLOWED_DEPENDENCIES = {"openai", "tomli-w", "rich"}
 OPENAI_BOUNDARY_PATH = "vlogsrt/transcribe.py"
 SUBPROCESS_BOUNDARY_PATHS = ("vlogsrt/preprocess.py", "vlogsrt/project/xml_validation.py")
 MODEL_LITERAL_PATHS = ("vlogsrt/config.py", "vlogsrt/project/config.py")
+# glm-*은 파생 계층의 비전 모델이다 — 새 튜너블은 프로젝트 config에만 산다(재검토).
+PROJECT_MODEL_LITERAL_PATHS = ("vlogsrt/project/config.py",)
+ENGINE_MODEL_LITERAL = re.compile(r"[\"'](whisper-1|gpt-[\w.-]*transcribe[\w.-]*)[\"']")
+PROJECT_MODEL_LITERAL = re.compile(r"[\"']glm-[\w.-]+[\"']")
 # 레거시가 project를 import할 수 있는 유일한 진입점 — 문서화된 CLI 조립 지점.
+# 예외도 정확히 `project.commands` 모듈로 좁다: CLI는 명령 묶음만 조립한다(재조정).
 CLI_COMPOSITION_ENTRYPOINT = "vlogsrt/cli.py"
 XMLLINT_EXECUTABLE = "xmllint"
+# XML 검증 경계의 subprocess API는 run 하나로 얼어 있다(재검토). 별명은 정적으로 푼다.
+SUBPROCESS_API_SYMBOLS = ("run", "Popen", "call", "check_call", "check_output")
 
 
 def _rel(path: Path) -> str:
@@ -105,17 +122,17 @@ def check_autojunk() -> list[str]:
 def check_banned_imports() -> list[str]:
     """규칙 7 — 의존성은 openai, tomli-w, rich 뿐.
 
-    numpy·onnxruntime는 선택 extra다 — vlogsrt/project/ 아래에서만 허용하고
-    나머지 금지 이름은 (project 안을 포함해) 어디서도 허용하지 않는다.
+    numpy·onnxruntime는 선택 extra다 — VAD가 쓰므로 `vlogsrt/project/vad/`
+    아래에서만 허용한다(재검토). 나머지 금지 이름은 project 안을 포함해
+    어디서도 허용하지 않는다.
     """
-    project_paths = set(_project_sources())
     failures = []
     for path in _sources():
         rel = _rel(path)
         for lineno, name in _import_roots(path.read_text(encoding="utf-8")):
             if name not in BANNED_IMPORTS:
                 continue
-            if path in project_paths and name in PROJECT_OPTIONAL_DEPENDENCIES:
+            if name in PROJECT_OPTIONAL_DEPENDENCIES and _under_project_vad(path):
                 continue
             failures.append(f"{rel}:{lineno} 금지된 의존성 {name}")
     return failures
@@ -141,6 +158,104 @@ def check_frozen_models() -> list[str]:
     return failures
 
 
+def _dataclass_bindings(tree: ast.Module) -> tuple[set[str], set[str], set[str], set[str]]:
+    """dataclasses 묶음 — (참 모듈 별명들, 참 dataclass 별명들, 묶였던 모듈·심볼 이름 전부).
+
+    `import dataclasses as dc`의 `@dc.dataclass`와 `from dataclasses import
+    dataclass as dc`의 `@dc` 같은 평범한 별명까지 알아본다(재조정). 한 번이라도
+    다시 묶이면(그림자) 자격을 끊는다.
+    """
+    module_kinds: dict[str, set[str]] = {}
+    symbol_kinds: dict[str, set[str]] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name.split(".")[0] == "dataclasses":
+                    module_kinds.setdefault(alias.asname or "dataclasses", set()).add("import")
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module == "dataclasses":
+            for alias in node.names:
+                if alias.name == "dataclass":
+                    symbol_kinds.setdefault(alias.asname or "dataclass", set()).add("import")
+    for node in ast.walk(tree):
+        for name in _rebound_names(node):
+            if name in module_kinds:
+                module_kinds[name].add("shadow")
+            if name in symbol_kinds:
+                symbol_kinds[name].add("shadow")
+    genuine_modules = {name for name, kinds in module_kinds.items() if kinds == {"import"}}
+    genuine_symbols = {name for name, kinds in symbol_kinds.items() if kinds == {"import"}}
+    return genuine_modules, genuine_symbols, set(module_kinds), set(symbol_kinds)
+
+
+def _dataclass_decorators(
+    node: ast.ClassDef,
+    genuine_modules: set[str],
+    genuine_symbols: set[str],
+    ever_modules: set[str],
+    ever_symbols: set[str],
+) -> list[tuple[ast.expr, str | None]]:
+    """클래스의 dataclass 장식자들 — (장식자, 문제) 쌍. 문제 None이면 참 dataclass다.
+
+    dataclass 모양인데 출처를 입증 못 하면(덮어쓰인 별명·수입 증명 없음) 그대로
+    거부한다. 별명이 아닌 다른 이름까지 좇지는 않는다 — 이 정도가 된 AST 검사다.
+    """
+    found: list[tuple[ast.expr, str | None]] = []
+    for decorator in node.decorator_list:
+        target = decorator.func if isinstance(decorator, ast.Call) else decorator
+        if isinstance(target, ast.Attribute) and target.attr == "dataclass":
+            if isinstance(target.value, ast.Name) and (
+                target.value.id == "dataclasses" or target.value.id in ever_modules
+            ):
+                problem = None if target.value.id in genuine_modules else "장식자 출처 불명"
+                found.append((decorator, problem))
+        elif isinstance(target, ast.Name) and (
+            target.id == "dataclass" or target.id in ever_symbols
+        ):
+            problem = None if target.id in genuine_symbols else "장식자 출처 불명"
+            found.append((decorator, problem))
+    return found
+
+
+def _frozen_literal(decorator: ast.expr) -> bool:
+    """장식자가 frozen=True 리터럴을 담았는가 — bare 장식·변수 참조는 가변으로 본다."""
+    if not isinstance(decorator, ast.Call):
+        return False
+    return any(
+        keyword.arg == "frozen"
+        and isinstance(keyword.value, ast.Constant)
+        and keyword.value.value is True
+        for keyword in decorator.keywords
+    )
+
+
+def check_project_models_frozen() -> list[str]:
+    """파생 계층의 데이터클래스도 frozen이다 — 정확 경로 `vlogsrt/project/models.py`.
+
+    파일이 없는 동안은 통과가 맞다 — P0-04가 만들 때 이 선이 먼저 서 있다.
+    frozen은 선언의 얕은 불변이다: 필드가 리스트를 들면 내용까지는 못 지킨다.
+    깊은 불변은 행동 테스트의 몫이지 이 검사가 증명하는 게 아니다.
+    """
+    module = PROJECT_PACKAGE / "models.py"
+    if not module.exists():
+        return []
+    tree = ast.parse(module.read_text(encoding="utf-8"))
+    genuine_modules, genuine_symbols, ever_modules, ever_symbols = _dataclass_bindings(tree)
+    failures = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ClassDef):
+            continue
+        for decorator, problem in _dataclass_decorators(
+            node, genuine_modules, genuine_symbols, ever_modules, ever_symbols
+        ):
+            if problem is not None:
+                failures.append(f"{_rel(module)}:{node.lineno} {node.name} {problem}")
+            elif not _frozen_literal(decorator):
+                failures.append(
+                    f"{_rel(module)}:{node.lineno} {node.name} 데이터클래스가 frozen=True가 아니다"
+                )
+    return failures
+
+
 def check_env_untouched() -> list[str]:
     """`.env`는 읽지도 고치지도 않는다 — 코드가 경로를 하드코딩해 덮어쓰지 않는지 본다."""
     failures = []
@@ -156,38 +271,55 @@ def check_source_does_not_import_project() -> list[str]:
 
     절대(`import vlogsrt.project`, `from vlogsrt import project`)와
     상대(`from .project import x`, `from . import project`) 전부 거부한다.
-    예외는 CLI 조립 진입점 `vlogsrt/cli.py` 하나(정확 경로)다. 방향은
-    project → 레거시 공개 경계로만 열려 있다.
+    예외는 CLI 조립 진입점 `vlogsrt/cli.py` 하나(정확 경로)뿐이고, 그 예외도
+    **정확히 `project.commands` 모듈** 대상으로 좁다 — 하위 모듈(commands.parser)도
+    거부한다(재조정). 방향은 project → 레거시 공개 경계로만 열려 있다.
     """
     failures = []
     for path in _legacy_sources():
         rel = _rel(path)
-        if rel == CLI_COMPOSITION_ENTRYPOINT:
-            continue
-        for lineno, form in _project_imports(path.read_text(encoding="utf-8")):
-            failures.append(f"{rel}:{lineno} 레거시가 vlogsrt.project를 import한다 ({form})")
+        is_cli = rel == CLI_COMPOSITION_ENTRYPOINT
+        for lineno, form, commands_only in _project_imports(path.read_text(encoding="utf-8")):
+            if is_cli and commands_only:
+                continue
+            why = (
+                "CLI 예외는 project.commands로 좁다"
+                if is_cli
+                else "레거시가 vlogsrt.project를 import한다"
+            )
+            failures.append(f"{rel}:{lineno} {why} ({form})")
     return failures
 
 
 def check_project_dependency_scope() -> list[str]:
-    """선택 extra numpy·onnxruntime는 vlogsrt/project/ 아래에서만 쓸 수 있다."""
+    """선택 extra numpy·onnxruntime는 vlogsrt/project/vad/ 아래에서만 쓸 수 있다."""
     failures = []
     for path in _legacy_sources():
         rel = _rel(path)
         for lineno, name in _import_roots(path.read_text(encoding="utf-8")):
             if name in PROJECT_OPTIONAL_DEPENDENCIES:
-                failures.append(f"{rel}:{lineno} 선택 의존성 {name}은 vlogsrt/project/ 아래에서만")
+                failures.append(
+                    f"{rel}:{lineno} 선택 의존성 {name}은 vlogsrt/project/vad/ 아래에서만"
+                )
     return failures
 
 
-def _project_imports(body: str) -> list[tuple[int, str]]:
-    """vlogsrt.project를 참조하는 import문 (줄번호, 형태 서술)."""
-    hits: list[tuple[int, str]] = []
+def _project_imports(body: str) -> list[tuple[int, str, bool]]:
+    """vlogsrt.project를 참조하는 import문 (줄번호, 형태 서술, commands 대상 여부).
+
+    commands 대상은 **정확히 `project.commands` 모듈**이다 — 그 하위
+    (`commands.parser`)가 아니라(재조정). `from …project import commands`와
+    `from …project.commands import 이름`은 그 모듈 자체를 쓰는 형태라 통과한다.
+    project 패키지 전체를 묶는 형태는 CLI에서도 거짓이다.
+    """
+    hits: list[tuple[int, str, bool]] = []
     for node in ast.walk(ast.parse(body)):
         if isinstance(node, ast.Import):
             for alias in node.names:
-                if alias.name.split(".")[:2] == ["vlogsrt", "project"]:
-                    hits.append((node.lineno, f"import {alias.name}"))
+                parts = alias.name.split(".")
+                if parts[:2] == ["vlogsrt", "project"]:
+                    commands_only = parts[2:] == ["commands"]
+                    hits.append((node.lineno, f"import {alias.name}", commands_only))
         elif isinstance(node, ast.ImportFrom):
             hit = _project_importfrom(node)
             if hit is not None:
@@ -195,16 +327,25 @@ def _project_imports(body: str) -> list[tuple[int, str]]:
     return hits
 
 
-def _project_importfrom(node: ast.ImportFrom) -> tuple[int, str] | None:
+def _project_importfrom(node: ast.ImportFrom) -> tuple[int, str, bool] | None:
     module = node.module or ""
     dots = "." * node.level
-    if module == "vlogsrt.project" or module.startswith("vlogsrt.project."):
-        return node.lineno, f"from {dots}{module} import …"
-    if node.level >= 1 and (module == "project" or module.startswith("project.")):
-        return node.lineno, f"from {dots}{module} import …"
+    if _targets_project_package(module, node.level):
+        # project 바로 아래에서 가져올 때는 가져온 이름 전부가 commands여야 한다.
+        tail = module.split(".")[2 if node.level == 0 else 1 :]
+        commands_only = tail == ["commands"] or (
+            not tail and all(alias.name == "commands" for alias in node.names)
+        )
+        return node.lineno, f"from {dots}{module} import …", commands_only
     if module in ("", "vlogsrt") and any(alias.name == "project" for alias in node.names):
-        return node.lineno, f"from {dots}{module or 'vlogsrt'} import project"
+        return node.lineno, f"from {dots}{module or 'vlogsrt'} import project", False
     return None
+
+
+def _targets_project_package(module: str, level: int) -> bool:
+    if level == 0:
+        return module == "vlogsrt.project" or module.startswith("vlogsrt.project.")
+    return module == "project" or module.startswith("project.")
 
 
 # 자막을 **고치거나 빼던** 계층. 검증(표시 전용)과 달리 출력을 건드렸다.
@@ -368,49 +509,87 @@ def check_time_deriving_layers_stay_buried() -> list[str]:
     ]
 
 
-def _subprocess_bindings(tree: ast.Module) -> tuple[set[str], set[str], list[int]]:
-    """subprocess 묶음 — (모듈 별명들, from-import 심볼들, 별표 줄들).
+def _subprocess_run_bindings(tree: ast.Module) -> tuple[set[str], set[str], set[str], list[int]]:
+    """subprocess 묶음 — (참 모듈 별명들, 참 run 별명들, run 외 심볼 이름 전부, 별표 줄들).
 
-    `import subprocess as sp`와 `from subprocess import run`을 모른 척하면
-    경계 검사가 이름 몇 개로 우회된다.
+    `import subprocess as sp`와 `from subprocess import run as launch`을 따라가되,
+    한 번이라도 다시 묶이면(그림자) 자격을 끊는다. run 외 API 심볼(Popen·call·
+    check_call·check_output)은 확보 자체가 위반이다(재검토).
     """
-    module_aliases: set[str] = set()
-    symbols: set[str] = set()
+    module_kinds: dict[str, set[str]] = {}
+    run_kinds: dict[str, set[str]] = {}
+    symbol_kinds: dict[str, set[str]] = {}
     star_lines: list[int] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
                 if alias.name.split(".")[0] == "subprocess":
-                    module_aliases.add(alias.asname or "subprocess")
+                    module_kinds.setdefault(alias.asname or "subprocess", set()).add("import")
         elif isinstance(node, ast.ImportFrom) and (node.module or "").split(".")[0] == (
             "subprocess"
         ):
             for alias in node.names:
                 if alias.name == "*":
                     star_lines.append(node.lineno)
-                else:
-                    symbols.add(alias.asname or alias.name)
-    return module_aliases, symbols, star_lines
+                elif alias.name == "run":
+                    run_kinds.setdefault(alias.asname or "run", set()).add("import")
+                elif alias.name in SUBPROCESS_API_SYMBOLS:
+                    symbol_kinds.setdefault(alias.asname or alias.name, set()).add("import")
+    for node in ast.walk(tree):
+        for name in _rebound_names(node):
+            if name in module_kinds:
+                module_kinds[name].add("shadow")
+            if name in run_kinds:
+                run_kinds[name].add("shadow")
+            if name in symbol_kinds:
+                symbol_kinds[name].add("shadow")
+    genuine_modules = {name for name, kinds in module_kinds.items() if kinds == {"import"}}
+    genuine_run = {name for name, kinds in run_kinds.items() if kinds == {"import"}}
+    return genuine_modules, genuine_run, set(symbol_kinds), star_lines
 
 
-def _subprocess_calls(
-    tree: ast.Module, module_aliases: set[str], symbols: set[str]
-) -> list[ast.Call]:
-    """별명 붙은 형태까지 포함해 subprocess 호출 지점을 모은다."""
-    calls: list[ast.Call] = []
+def _call_target_name(call: ast.Call) -> str:
+    """호출 지점의 이름 — 메시지용. `sp.run`은 run, `Popen`은 Popen."""
+    func = call.func
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    if isinstance(func, ast.Name):
+        return func.id
+    return "<식>"
+
+
+def _subprocess_api_calls(
+    tree: ast.Module, genuine_modules: set[str], genuine_run: set[str], other_symbols: set[str]
+) -> tuple[list[ast.Call], list[ast.Call], list[ast.Call]]:
+    """subprocess API 호출을 (검증할 run 호출, run 외 호출, 출처 불명 호출)로 갈라 돌려준다.
+
+    참 모듈 별명의 `.run`과 참 run 별명의 `run(...)`만 검증 대상이다. 그 밖의
+    메서드는 run 외 호출이고, 다른 객체의 `.run`·출처를 입증 못 한 `run` 이름은
+    출처 불명이다 — 어느 쪽이든 조용히 지나가면 안 된다(재검토).
+    """
+    run_sites: list[ast.Call] = []
+    unsupported: list[ast.Call] = []
+    unknown: list[ast.Call] = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
         func = node.func
-        named = isinstance(func, ast.Name) and func.id in symbols
-        attributed = (
-            isinstance(func, ast.Attribute)
-            and isinstance(func.value, ast.Name)
-            and func.value.id in module_aliases
-        )
-        if named or attributed:
-            calls.append(node)
-    return calls
+        if isinstance(func, ast.Attribute) and func.attr in SUBPROCESS_API_SYMBOLS:
+            on_module = isinstance(func.value, ast.Name) and func.value.id in genuine_modules
+            if not on_module:
+                unknown.append(node)
+            elif func.attr == "run":
+                run_sites.append(node)
+            else:
+                unsupported.append(node)
+        elif isinstance(func, ast.Name) and func.id in SUBPROCESS_API_SYMBOLS:
+            if func.id in genuine_run:
+                run_sites.append(node)
+            elif func.id in other_symbols:
+                unsupported.append(node)
+            else:
+                unknown.append(node)
+    return run_sites, unsupported, unknown
 
 
 def _rebound_names(node: ast.AST) -> list[str]:
@@ -533,10 +712,14 @@ def _keyword_failures(rel: str, site: ast.Call) -> list[str]:
     return problems
 
 
+def _literal_str(node: ast.expr) -> str | None:
+    return node.value if isinstance(node, ast.Constant) and isinstance(node.value, str) else None
+
+
 def _xmllint_argv_failures(
     rel: str, site: ast.Call, sanctioned: set[str], which_calls: list[ast.Call]
 ) -> list[str]:
-    """호출 하나의 argv 형태를 본다 — 고정 실행파일, 고정 argv, 위치 인자는 argv 하나.
+    """호출 하나의 argv 형태를 본다 — 고정 실행파일, 정해진 두 형태, 위치 인자는 argv 하나.
 
     `run`은 남는 위치 인자를 `Popen`에 그대로 넘긴다 — 뒤쪽 슬롯(bufsize·executable)으로
     실행파일이 흘러드는 것을 "위치 인자는 argv 하나" 규칙으로 끊는다.
@@ -550,6 +733,17 @@ def _xmllint_argv_failures(
     argv = site.args[0]
     if not isinstance(argv, (ast.List, ast.Tuple)):
         return problems + [f"{where} argv는 리스트 리터럴이어야 한다 — 문자열·변수 조립 금지"]
+    problems += _xmllint_argv_element_failures(rel, argv, sanctioned, which_calls)
+    problems += _xmllint_flag_failures(rel, argv)
+    return problems
+
+
+def _xmllint_argv_element_failures(
+    rel: str, argv: ast.List | ast.Tuple, sanctioned: set[str], which_calls: list[ast.Call]
+) -> list[str]:
+    """머리 실행파일과 원소 조립 — 원소는 f-string·연결·starred로 만들지 않는다."""
+    where = f"{rel}:{argv.lineno}"
+    problems: list[str] = []
     head = argv.elts[0] if argv.elts else None
     head_ok = isinstance(head, ast.Name) and head.id in sanctioned
     if not head_ok:
@@ -566,18 +760,46 @@ def _xmllint_argv_failures(
     return problems
 
 
-def _xmllint_boundary_failures(rel: str, body: str) -> list[str]:
-    """XML 검증 경계의 계약 — xmllint 하나, 고정 argv, 셸 금지.
+def _xmllint_flag_failures(rel: str, argv: ast.List | ast.Tuple) -> list[str]:
+    """argv의 깃발 형태 — 정해진 둘뿐이다(재검토).
 
-    실행파일은 `shutil.which("xmllint")`로만 얻고 argv는 리스트 리터럴로 쓴다.
-    명령 이름을 상수로 박거나 조립하거나 셸에 넘기는 형태는 전부 거부한다.
+    [exe, "--nonet", "--noout", path]
+    [exe, "--nonet", "--noout", "--dtdvalid", dtd_uri, path]
+    마지막 칸들(path·dtd_uri)만 동적 표현식을 쓴다. DTD URI 변환·경로 이스케이프·
+    오류 처리 같은 행동은 P1-04가 따로 시험한다 — 여기는 형태만 본다.
+    """
+    where = f"{rel}:{argv.lineno}"
+    elts = argv.elts
+    if len(elts) == 4:
+        literal_slots = ((1, "--nonet"), (2, "--noout"))
+    elif len(elts) == 6:
+        literal_slots = ((1, "--nonet"), (2, "--noout"), (3, "--dtdvalid"))
+    else:
+        return [f"{where} argv는 정해진 두 형태의 길이(4·6)가 아니다"]
+    if any(_literal_str(elts[slot]) != want for slot, want in literal_slots):
+        return [
+            f"{where} argv 깃발이 정해진 형태와 다르다 — "
+            '`[exe, "--nonet", "--noout", path]` 또는 '
+            '`[exe, "--nonet", "--noout", "--dtdvalid", dtd_uri, path]`'
+        ]
+    return []
+
+
+def _xmllint_boundary_failures(rel: str, body: str) -> list[str]:
+    """XML 검증 경계의 계약 — xmllint 하나, subprocess.run 하나, 고정 argv, 셸 금지.
+
+    실행파일은 `shutil.which("xmllint")`로만 얻고, 호출은 `subprocess.run`(정적으로
+    풀린 별명 포함)으로만, argv는 정해진 두 형태로 쓴다. run 외 메서드·출처 불명
+    호출·명령 조립·셸 전달은 전부 거부한다(재검토).
     """
     tree = ast.parse(body)
     failures: list[str] = []
     module_names, which_names, ever_names, shutil_stars = _shutil_which_bindings(tree)
-    module_aliases, symbols, star_lines = _subprocess_bindings(tree)
-    star_lines += shutil_stars
-    failures += [f"{rel}:{lineno} 별표 import는 호출 추적을 무력화한다" for lineno in star_lines]
+    genuine_modules, genuine_run, other_symbols, subprocess_stars = _subprocess_run_bindings(tree)
+    failures += [
+        f"{rel}:{lineno} 별표 import는 호출 추적을 무력화한다"
+        for lineno in subprocess_stars + shutil_stars
+    ]
     genuine_which, unknown_which = _which_calls(tree, module_names, which_names, ever_names)
     failures += [
         f"{rel}:{call.lineno} which 출처를 입증 못 했다 — shutil.which만 허용한다"
@@ -589,7 +811,15 @@ def _xmllint_boundary_failures(rel: str, body: str) -> list[str]:
         if _single_const(call) != XMLLINT_EXECUTABLE
     ]
     sanctioned = _xmllint_names(tree, genuine_which)
-    for call in _subprocess_calls(tree, module_aliases, symbols):
+    run_sites, unsupported, unknown = _subprocess_api_calls(
+        tree, genuine_modules, genuine_run, other_symbols
+    )
+    failures += [
+        f"{rel}:{call.lineno} subprocess.run 외의 호출({_call_target_name(call)})이다"
+        for call in unsupported
+    ]
+    failures += [f"{rel}:{call.lineno} subprocess.run 출처를 입증 못 했다" for call in unknown]
+    for call in run_sites:
         failures += _xmllint_argv_failures(rel, call, sanctioned, genuine_which)
     return failures
 
@@ -598,7 +828,8 @@ def check_subprocess_boundaries() -> list[str]:
     """규칙 7 — subprocess는 정확히 두 파일에서만.
 
     `vlogsrt/preprocess.py`(ffmpeg/ffprobe)와 `vlogsrt/project/xml_validation.py`
-    (xmllint 하나, 고정 argv, 셸 금지). 파일 **이름**이 아니라 정확 경로로 판정한다.
+    (xmllint 하나, `subprocess.run` 하나, 정해진 두 argv 형태, 셸 금지).
+    파일 **이름**이 아니라 정확 경로로 판정한다.
     """
     failures: list[str] = []
     for path in _sources():
@@ -654,14 +885,22 @@ def check_one_transcription_call() -> list[str]:
 
 
 def check_no_hardcoded_model() -> list[str]:
-    """규칙 6 — 모델 이름도 config에서 온다. 코드에 박으면 되돌리기가 커밋이 된다."""
+    """규칙 6 — 모델 이름도 config에서 온다. 코드에 박으면 되돌리기가 커밋이 된다.
+
+    glm-*은 파생 계층의 비전 모델이다 — 원본 config(`vlogsrt/config.py`)는 엔진
+    모델(whisper-1·gpt-*transcribe*)만 예외로 받고 glm은 물려받지 않는다(재검토).
+    """
     failures = []
     for path in _sources():
         rel = _rel(path)
-        if rel in MODEL_LITERAL_PATHS:
+        if rel in PROJECT_MODEL_LITERAL_PATHS:
             continue
+        # 원본 config는 엔진 모델을 놓아도 된다 — 금지하는 건 glm뿐이다.
+        patterns = (PROJECT_MODEL_LITERAL,)
+        if rel not in MODEL_LITERAL_PATHS:
+            patterns = (ENGINE_MODEL_LITERAL, PROJECT_MODEL_LITERAL)
         for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
-            if re.search(r"[\"'](whisper-1|gpt-[\w.-]*transcribe[\w.-]*)[\"']", line):
+            if any(pattern.search(line) for pattern in patterns):
                 failures.append(f"{rel}:{number} 모델 이름이 코드에 박혀 있다")
     return failures
 
@@ -676,6 +915,7 @@ CHECKS = (
     ("금지 의존성", check_banned_imports),
     ("의존성 3개", check_dependencies),
     ("frozen 모델", check_frozen_models),
+    ("파생 frozen 모델", check_project_models_frozen),
     (".env 보호", check_env_untouched),
     ("판정 계층 부활 금지", check_inspection_stays_dead),
     ("검증은 출력을 못 건드린다", check_verify_cannot_touch_output),

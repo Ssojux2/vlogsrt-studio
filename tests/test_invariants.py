@@ -275,7 +275,7 @@ def _xml_boundary_source(run: str, extra: str = "") -> str:
     )
 
 
-APPROVED_XMLLINT_RUN = '[executable, "--noout", path]'
+APPROVED_XMLLINT_RUN = '[executable, "--nonet", "--noout", path]'
 
 
 @pytest.mark.parametrize(
@@ -307,8 +307,10 @@ def test_legacy_relative_project_import_fails(
 def test_the_cli_entrypoint_is_the_sole_legacy_exception(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """조립 진입점 하나만 예외다 — 문서화된 정확 경로 `vlogsrt/cli.py`."""
-    _fake_source_tree(monkeypatch, tmp_path, {"vlogsrt/cli.py": "from vlogsrt import project\n"})
+    """조립 진입점 하나만 예외다 — 정확 경로 `vlogsrt/cli.py`, 대상은 project.commands."""
+    _fake_source_tree(
+        monkeypatch, tmp_path, {"vlogsrt/cli.py": "from vlogsrt.project import commands\n"}
+    )
     assert check_invariants.check_source_does_not_import_project() == []
 
 
@@ -378,14 +380,14 @@ def test_optional_dependencies_fail_in_legacy(
     assert any("ui/board.py" in failure for failure in failures)
 
 
-def test_optional_dependencies_pass_under_project(
+def test_optional_dependencies_pass_under_the_vad_package(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     _fake_source_tree(
         monkeypatch,
         tmp_path,
         {
-            "vlogsrt/project/vad.py": (
+            "vlogsrt/project/vad/model.py": (
                 "import numpy as np\n"
                 "import numpy.typing\n"
                 "from numpy import ndarray\n"
@@ -523,13 +525,13 @@ def test_xmllint_boundary_accepts_an_aliased_subprocess_call(
 @pytest.mark.parametrize(
     "run",
     [
-        '[executable, "--noout", path], shell=True',
-        '["ls", "-l", path]',
-        '["/bin/sh", "-c", "xmllint --noout"]',
-        '["xmllint", "--noout", path]',
-        '[executable, "--noout" + path]',
-        '[executable, "--noout", f"{path}"]',
-        '"xmllint --noout " + path',
+        '[executable, "--nonet", "--noout", path], shell=True',
+        '["ls", "--nonet", "--noout", path]',
+        '["/bin/sh", "--nonet", "--noout", path]',
+        '["xmllint", "--nonet", "--noout", path]',
+        '[executable, "--nonet", "--noout", path + ".xml"]',
+        '[executable, "--nonet", "--noout", f"{path}"]',
+        '"xmllint --nonet --noout " + path',
     ],
 )
 def test_xmllint_boundary_rejects_wrong_shapes(
@@ -547,8 +549,8 @@ def test_xmllint_boundary_rejects_wrong_shapes(
     ("extra", "run", "expected"),
     [
         # which("curl")은 두 번 잡힌다 — 잘못된 which 대상과 비인가 실행파일 각각.
-        ('    bad = shutil.which("curl")\n', '[bad, "--noout", path]', 2),
-        ('    bad = "ffmpeg"\n', '[bad, "--noout", path]', 1),
+        ('    bad = shutil.which("curl")\n', '[bad, "--nonet", "--noout", path]', 2),
+        ('    bad = "ffmpeg"\n', '[bad, "--nonet", "--noout", path]', 1),
     ],
 )
 def test_xmllint_boundary_rejects_other_executables(
@@ -623,21 +625,21 @@ def _boundary_case(imports: str, setup: str, call: str) -> str:
         pytest.param(
             "import shutil\n",
             'exe = shutil.which("xmllint")',
-            'completed = subprocess.run([exe, "--noout", path], **{"shell": True})',
+            'completed = subprocess.run([exe, "--nonet", "--noout", path], **{"shell": True})',
             1,
             id="dict-expansion-shell",
         ),
         pytest.param(
             "",
             'exe = unrelated.which("xmllint")',
-            'completed = subprocess.run([exe, "--noout", path], capture_output=True)',
+            'completed = subprocess.run([exe, "--nonet", "--noout", path], capture_output=True)',
             2,
             id="foreign-which",
         ),
         pytest.param(
             "import shutil\n",
             'exe = shutil.which("xmllint")',
-            'process = subprocess.Popen([exe, "--noout", path], -1, "/bin/sh")',
+            'process = subprocess.Popen([exe, "--nonet", "--noout", path], -1, "/bin/sh")',
             1,
             id="popen-positional-executable",
         ),
@@ -658,7 +660,7 @@ def test_xmllint_boundary_accepts_the_aliased_which_import() -> None:
     body = _boundary_case(
         "from shutil import which as find_executable\n",
         'exe = find_executable("xmllint")',
-        'completed = subprocess.run([exe, "--noout", path], capture_output=True)',
+        'completed = subprocess.run([exe, "--nonet", "--noout", path], capture_output=True)',
     )
     assert check_invariants._xmllint_boundary_failures(_XML_BOUNDARY_REL, body) == []
 
@@ -668,7 +670,7 @@ def test_xmllint_boundary_keeps_passing_the_aliased_import_shapes() -> None:
     body = _boundary_case(
         "import shutil as sh\nfrom subprocess import run as launch\n",
         'exe = sh.which("xmllint")',
-        'completed = launch([exe, "--noout", path], shell=False, capture_output=True)',
+        'completed = launch([exe, "--nonet", "--noout", path], shell=False, capture_output=True)',
     )
     assert check_invariants._xmllint_boundary_failures(_XML_BOUNDARY_REL, body) == []
 
@@ -678,7 +680,7 @@ def test_xmllint_boundary_rejects_a_shadowed_which_binding() -> None:
     body = _boundary_case(
         "from shutil import which\n",
         'which = str  # import를 덮어썼다\n    exe = which("xmllint")',
-        'completed = subprocess.run([exe, "--noout", path], capture_output=True)',
+        'completed = subprocess.run([exe, "--nonet", "--noout", path], capture_output=True)',
     )
     failures = check_invariants._xmllint_boundary_failures(_XML_BOUNDARY_REL, body)
     assert len(failures) == 2, failures
@@ -689,7 +691,7 @@ def test_xmllint_boundary_rejects_shutil_star_imports() -> None:
     body = _boundary_case(
         "from shutil import *\n",
         'exe = which("xmllint")',
-        'completed = subprocess.run([exe, "--noout", path], capture_output=True)',
+        'completed = subprocess.run([exe, "--nonet", "--noout", path], capture_output=True)',
     )
     failures = check_invariants._xmllint_boundary_failures(_XML_BOUNDARY_REL, body)
     assert len(failures) == 3, failures
@@ -710,11 +712,12 @@ def test_a_clean_fake_tree_passes_every_contract_check(
         monkeypatch,
         tmp_path,
         {
-            "vlogsrt/cli.py": "from vlogsrt import project\n",
+            "vlogsrt/cli.py": "from vlogsrt.project import commands\n",
             "vlogsrt/transcribe.py": "import openai\n",
             "vlogsrt/preprocess.py": "import subprocess\nsubprocess.run(['ffmpeg'])\n",
             "vlogsrt/config.py": 'MODEL = "whisper-1"\n',
-            "vlogsrt/project/vad.py": "import numpy as np\n",
+            "vlogsrt/project/config.py": 'VISION_MODEL = "glm-5.3-flash"\n',
+            "vlogsrt/project/vad/model.py": "import numpy as np\n",
         },
     )
     assert check_invariants.check_source_does_not_import_project() == []
@@ -722,6 +725,7 @@ def test_a_clean_fake_tree_passes_every_contract_check(
     assert check_invariants.check_subprocess_boundaries() == []
     assert check_invariants.check_openai_boundary() == []
     assert check_invariants.check_banned_imports() == []
+    assert check_invariants.check_no_hardcoded_model() == []
 
 
 def test_project_may_compose_legacy_public_boundaries(
@@ -775,3 +779,394 @@ def test_project_sources_stay_below_the_project_package() -> None:
         check_invariants._rel(path).startswith("vlogsrt/project/")
         for path in check_invariants._project_sources()
     )
+
+
+# ── P0-02b(Astra 재조정): 비준된 원본/파생 계약의 다섯 가지 좁히기 ────────────
+#
+# ① 선택 extra는 `vlogsrt/project/vad/` 아래로, ② CLI 예외는 project.commands로,
+# ③ glm-* 모델 리터럴 가드(정확히 프로젝트 config 예외), ④ project models.py의
+# frozen, ⑤ XML 경계의 subprocess API를 run 하나·argv 두 형태로 얼린다.
+# 전부 파서만 돈다 — 실행하지 않는다.
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "import numpy",
+        "import numpy as np",
+        "import numpy.typing",
+        "from numpy import ndarray",
+        "import onnxruntime",
+        "import onnxruntime as ort",
+    ],
+)
+def test_optional_dependencies_pass_only_under_the_vad_package(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, statement: str
+) -> None:
+    _fake_source_tree(
+        monkeypatch,
+        tmp_path,
+        {
+            "vlogsrt/project/vad/model.py": statement + "\n",
+            "vlogsrt/project/vad/silero/loader.py": statement + "\n",
+        },
+    )
+    assert check_invariants.check_banned_imports() == []
+    assert check_invariants.check_project_dependency_scope() == []
+
+
+@pytest.mark.parametrize(
+    "rel",
+    [
+        "vlogsrt/project/vision.py",
+        "vlogsrt/project/vad.py",
+        "vlogsrt/project/score/frames.py",
+    ],
+)
+def test_optional_dependencies_fail_outside_the_vad_package(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, rel: str
+) -> None:
+    """vad 디렉터리 아래가 유일한 허용 지점이다 — 비전·바깥·이름 사칭은 거부한다."""
+    _fake_source_tree(monkeypatch, tmp_path, {rel: "import numpy as np\n"})
+    failures = check_invariants.check_banned_imports()
+    assert len(failures) == 1, failures
+    assert rel in failures[0]
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "import vlogsrt.project.commands",
+        "import vlogsrt.project.commands as project_commands",
+        "from vlogsrt.project import commands",
+        "from vlogsrt.project import commands as project_commands",
+        "from vlogsrt.project.commands import build_parser",
+        "from .project import commands",
+        "from .project.commands import build_parser",
+    ],
+)
+def test_the_cli_entrypoint_may_compose_only_project_commands(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, statement: str
+) -> None:
+    """절대·상대 형태 전부 정확히 project.commands 모듈로 귀결할 때만 통과한다."""
+    _fake_source_tree(monkeypatch, tmp_path, {"vlogsrt/cli.py": statement + "\n"})
+    assert check_invariants.check_source_does_not_import_project() == []
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "import vlogsrt.project",
+        "import vlogsrt.project.config",
+        "import vlogsrt.project.commands.parser",
+        "from vlogsrt import project",
+        "from vlogsrt import project, config",
+        "from vlogsrt.project import config",
+        "from vlogsrt.project import commands, config",
+        "from vlogsrt.project.config import ProjectConfig",
+        "from vlogsrt.project.commands.parser import build_parser",
+        "from . import project",
+        "from .project import config",
+        "from .project.config import ProjectConfig",
+        "from .project.commands.parser import build_parser",
+    ],
+)
+def test_the_cli_entrypoint_rejects_every_other_project_import(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, statement: str
+) -> None:
+    """CLI 예외는 commands 모듈 하나다 — 하위 모듈(commands.parser)도 거부한다."""
+    _fake_source_tree(monkeypatch, tmp_path, {"vlogsrt/cli.py": statement + "\n"})
+    failures = check_invariants.check_source_does_not_import_project()
+    assert len(failures) == 1, failures
+    assert "vlogsrt/cli.py" in failures[0]
+
+
+def test_the_commands_exception_stays_confined_to_the_cli(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """다른 레거시 모듈은 commands조차 못 가져온다 — 예외가 이동하지 않는다."""
+    _fake_source_tree(
+        monkeypatch,
+        tmp_path,
+        {
+            "vlogsrt/engine.py": "from vlogsrt.project import commands\n",
+            "ui/page.py": "from vlogsrt.project import commands\n",
+        },
+    )
+    failures = check_invariants.check_source_does_not_import_project()
+    assert len(failures) == 2
+    assert any("vlogsrt/engine.py" in failure for failure in failures)
+    assert any("ui/page.py" in failure for failure in failures)
+
+
+def test_glm_literals_pass_inside_the_exact_config_paths(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _fake_source_tree(
+        monkeypatch,
+        tmp_path,
+        {
+            "vlogsrt/config.py": 'MODEL = "whisper-1"\n',
+            "vlogsrt/project/config.py": 'VISION_MODEL = "glm-5.3-flash"\n',
+        },
+    )
+    assert check_invariants.check_no_hardcoded_model() == []
+
+
+@pytest.mark.parametrize(
+    "rel",
+    [
+        "vlogsrt/config.py",
+        "vlogsrt/gadget.py",
+        "vlogsrt/project/vision.py",
+        "vlogsrt/project/tuning/config.py",
+    ],
+)
+def test_glm_literals_fail_outside_the_exact_project_config(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, rel: str
+) -> None:
+    """glm-*은 파생 계층의 비전 모델이다 — 원본 config는 물려받지 않는다."""
+    _fake_source_tree(monkeypatch, tmp_path, {rel: 'MODEL = "glm-5.3-flash"\n'})
+    failures = check_invariants.check_no_hardcoded_model()
+    assert len(failures) == 1, failures
+    assert rel in failures[0]
+
+
+def test_project_models_absence_stays_valid_until_p0_04(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _fake_source_tree(monkeypatch, tmp_path, {"vlogsrt/a.py": ""})
+    assert check_invariants.check_project_models_frozen() == []
+
+
+def test_project_models_all_frozen_passes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """별명 장식자도 알아본다 — `@dc.dataclass`(모듈 별명)와 `@dc`(심볼 별명)."""
+    _fake_source_tree(
+        monkeypatch,
+        tmp_path,
+        {
+            "vlogsrt/project/models.py": (
+                "import dataclasses\n"
+                "import dataclasses as dc\n"
+                "from dataclasses import dataclass as datum\n"
+                "\n"
+                "\n"
+                "@dataclasses.dataclass(frozen=True)\n"
+                "class AssetRef:\n"
+                "    path: str\n"
+                "\n"
+                "\n"
+                "@dc.dataclass(frozen=True)\n"
+                "class InstanceRef:\n"
+                "    asset: AssetRef\n"
+                "\n"
+                "\n"
+                "@datum(frozen=True, slots=True)\n"
+                "class MarkerRef:\n"
+                "    asset: AssetRef\n"
+            )
+        },
+    )
+    assert check_invariants.check_project_models_frozen() == []
+
+
+def test_project_models_mutable_dataclasses_fail(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`@dataclass` bare(인자 없음)도 가변이다 — 별명 형태도 frozen=True를 못 박는다."""
+    _fake_source_tree(
+        monkeypatch,
+        tmp_path,
+        {
+            "vlogsrt/project/models.py": (
+                "from dataclasses import dataclass\n"
+                "import dataclasses as dc\n"
+                "from dataclasses import dataclass as datum\n"
+                "\n"
+                "\n"
+                "@dataclass\n"
+                "class Mutable:\n"
+                "    path: str\n"
+                "\n"
+                "\n"
+                "@dc.dataclass(frozen=False)\n"
+                "class AliasedMutable:\n"
+                "    path: str\n"
+                "\n"
+                "\n"
+                "@datum\n"
+                "class BareAlias:\n"
+                "    path: str\n"
+            )
+        },
+    )
+    failures = check_invariants.check_project_models_frozen()
+    assert len(failures) == 3, failures
+    assert all("vlogsrt/project/models.py" in failure for failure in failures)
+    assert any("Mutable" in failure for failure in failures)
+    assert any("AliasedMutable" in failure for failure in failures)
+    assert any("BareAlias" in failure for failure in failures)
+
+
+def test_project_models_shadowed_dataclass_alias_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """덮어쓰인 dataclass 별명은 출처 불명이다 — frozen 검사를 못 피하게 한다."""
+    _fake_source_tree(
+        monkeypatch,
+        tmp_path,
+        {
+            "vlogsrt/project/models.py": (
+                "from dataclasses import dataclass as datum\n"
+                "\n"
+                "\n"
+                "datum = wrap  # import를 덮어썼다\n"
+                "\n"
+                "\n"
+                "@datum(frozen=True)\n"
+                "class Sneaky:\n"
+                "    path: str\n"
+            )
+        },
+    )
+    failures = check_invariants.check_project_models_frozen()
+    assert len(failures) == 1, failures
+    assert "Sneaky" in failures[0]
+
+
+@pytest.mark.parametrize(
+    ("setup", "run"),
+    [
+        ('exe = shutil.which("xmllint")', '[exe, "--nonet", "--noout", path]'),
+        ('exe = shutil.which("xmllint")', '[exe, "--nonet", "--noout", str(path)]'),
+        (
+            'exe = shutil.which("xmllint")\n    dtd_uri = bundle.dtd_uri',
+            '[exe, "--nonet", "--noout", "--dtdvalid", dtd_uri, str(path)]',
+        ),
+    ],
+)
+def test_xmllint_boundary_accepts_the_two_ratified_argv_forms(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, setup: str, run: str
+) -> None:
+    """재검토가 얼린 형태 둘 — 마지막 칸(path·dtd_uri)만 동적 표현식을 쓴다."""
+    call = f"completed = subprocess.run(\n        {run},\n        capture_output=True,\n    )"
+    body = _boundary_case("import shutil\n", setup, call)
+    _fake_source_tree(monkeypatch, tmp_path, {_XML_BOUNDARY_REL: body})
+    assert check_invariants.check_subprocess_boundaries() == []
+
+
+@pytest.mark.parametrize(
+    "run",
+    [
+        '[exe, "--noout", path]',
+        '[exe, "--nonet", path]',
+        '[exe, "--noout", "--nonet", path]',
+        '[exe, "--nonet", "--noout"]',
+        '[exe, "--nonet", "--noout", "--loaddtds", path]',
+        '[exe, "--nonet", "--noout", "--dtdvalid", path]',
+        '[exe, "--nonet", "--noout", "--dtdvalidfpu", dtd_uri, path]',
+        '[exe, "--nonet", "--noout", "--dtdvalid", dtd_uri, path, "--noout"]',
+    ],
+)
+def test_xmllint_boundary_rejects_wrong_flag_shapes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, run: str
+) -> None:
+    """깃발 집합·순서가 정해진 둘과 다르면 거부한다 — 끼워넣기·빠짐·뒤집힘 전부."""
+    call = f"completed = subprocess.run({run}, capture_output=True)"
+    body = _boundary_case(
+        "import shutil\n", 'exe = shutil.which("xmllint")\n    dtd_uri = str(bundle)', call
+    )
+    _fake_source_tree(monkeypatch, tmp_path, {_XML_BOUNDARY_REL: body})
+    failures = check_invariants.check_subprocess_boundaries()
+    assert len(failures) == 1, failures
+    assert _XML_BOUNDARY_REL in failures[0]
+
+
+@pytest.mark.parametrize(
+    ("imports", "setup", "call"),
+    [
+        pytest.param(
+            "import shutil\n",
+            'exe = shutil.which("xmllint")',
+            'process = subprocess.Popen([exe, "--nonet", "--noout", path], capture_output=True)',
+            id="popen-module-attribute",
+        ),
+        pytest.param(
+            "import shutil\n",
+            'exe = shutil.which("xmllint")',
+            'subprocess.check_call([exe, "--nonet", "--noout", path])',
+            id="check-call",
+        ),
+        pytest.param(
+            "import shutil\n",
+            'exe = shutil.which("xmllint")',
+            'subprocess.check_output([exe, "--nonet", "--noout", path])',
+            id="check-output",
+        ),
+        pytest.param(
+            "import shutil\n",
+            'exe = shutil.which("xmllint")',
+            'subprocess.call([exe, "--nonet", "--noout", path])',
+            id="plain-call",
+        ),
+        pytest.param(
+            "import shutil\nfrom subprocess import Popen\n",
+            'exe = shutil.which("xmllint")',
+            'process = Popen([exe, "--nonet", "--noout", path])',
+            id="popen-from-import",
+        ),
+        pytest.param(
+            "import shutil\nfrom vlogsrt.helpers import run\n",
+            'exe = shutil.which("xmllint")',
+            'completed = run([exe, "--nonet", "--noout", path])',
+            id="run-from-unrelated-module",
+        ),
+        pytest.param(
+            "import shutil\nfrom subprocess import run\n",
+            'run = launch_via  # import를 덮어썼다\n    exe = shutil.which("xmllint")',
+            'completed = run([exe, "--nonet", "--noout", path])',
+            id="shadowed-run-alias",
+        ),
+        pytest.param(
+            "import shutil\nimport subprocess as sp\n",
+            'sp = helpers  # import를 덮어썼다\n    exe = shutil.which("xmllint")',
+            'completed = sp.run([exe, "--nonet", "--noout", path])',
+            id="shadowed-module-alias",
+        ),
+        pytest.param(
+            "import shutil\n",
+            'exe = shutil.which("xmllint")',
+            'completed = helpers.run([exe, "--nonet", "--noout", path])',
+            id="run-on-unrelated-object",
+        ),
+        pytest.param(
+            "import shutil\n",
+            'exe = shutil.which("xmllint")',
+            'completed = subprocess.run([exe, "--nonet", "--noout", path], -1, "/bin/sh")',
+            id="extra-positional-args",
+        ),
+    ],
+)
+def test_xmllint_boundary_freezes_the_api_to_subprocess_run(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, imports: str, setup: str, call: str
+) -> None:
+    """run 외 메서드·출처 불명 run·남는 위치 인자는 전부 거부한다."""
+    body = _boundary_case(imports, setup, call)
+    _fake_source_tree(monkeypatch, tmp_path, {_XML_BOUNDARY_REL: body})
+    failures = check_invariants.check_subprocess_boundaries()
+    assert len(failures) == 1, failures
+    assert _XML_BOUNDARY_REL in failures[0]
+
+
+def test_a_cli_basename_spoof_gets_no_exception(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`ui/cli.py`는 진입점이 아니다 — 예외는 정확 경로 `vlogsrt/cli.py`만 물려준다."""
+    _fake_source_tree(
+        monkeypatch,
+        tmp_path,
+        {"ui/cli.py": "from vlogsrt.project import commands\n"},
+    )
+    failures = check_invariants.check_source_does_not_import_project()
+    assert len(failures) == 1, failures
+    assert "ui/cli.py" in failures[0]

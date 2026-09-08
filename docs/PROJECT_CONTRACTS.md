@@ -24,11 +24,19 @@ subprocess를 물려받는다. import·호출 판정은 AST로 한다. 정규식
 (`import vlogsrt.project`, `from vlogsrt.project import x`, `from vlogsrt import project`)와
 상대(`from .project import x`, `from . import project`).
 
-**유일한 예외**: `vlogsrt/cli.py` (정확 경로). 문서화된 CLI 조립 진입점으로서
-project 패키지를 import할 수 있다. 이 예외는 다른 어떤 레거시 모듈에도 확장되지
-않는다. 소스 엔진(`transcribe`, `preprocess`, `repair`, `repetition`, `refine`,
-`output`, `layout`, `polish`, `pipeline`, `models`, `config`, `env`, `log`,
-`cutpoints`, `hangul`, `keywords`, `evaluate`)과 `verify.py`는 project를 import할 수 없다.
+**유일한 예외**: `vlogsrt/cli.py` (정확 경로). 문서화된 CLI 조립 진입점이며,
+가져올 수 있는 대상은 **정확히 `vlogsrt.project.commands` 모듈 하나**다 — 계획된
+`commands.py`를 가리키는 절대 형태(`import vlogsrt.project.commands`, `from
+vlogsrt.project import commands`, `from vlogsrt.project.commands import …`)와 그
+상대 등가(`from .project import commands`, `from .project.commands import …`)가
+같은 좁은 경계로 귀결한다. **그 하위 모듈은 예외가 아니다** — `import
+vlogsrt.project.commands.parser`와 `from …commands.parser import …`도 거부한다.
+`import vlogsrt.project`(패키지 자체), `from vlogsrt import project`, 그리고
+commands 외 하위 모듈(config 등)도 **CLI에서 거부**한다. 이 예외는 다른 어떤
+레거시 모듈에도 확장되지 않는다 — 소스 엔진(`transcribe`, `preprocess`, `repair`,
+`repetition`, `refine`, `output`, `layout`, `polish`, `pipeline`, `models`,
+`config`, `env`, `log`, `cutpoints`, `hangul`, `keywords`, `evaluate`)과
+`verify.py`, `ui/**`는 project 전체(commands를 포함해)를 import할 수 없다.
 
 ## 2. 원본 기록은 불변이다
 
@@ -43,7 +51,8 @@ project에서 자막을 지우거나·편집하거나·다시 투영해도 원�
 - **원본 시각**: whisper 응답 `segments[]`의 시각 ＋ 조각 오프셋. 원본 오디오
   타임라인 그대로다(규칙 1).
 - **애셋별 캐시 원본 SRT**: **불변의 애셋 로컬 시각**이다. 프로젝트 상태와
-  무관하게 애셋 하나의 시각 그대로 저장되고, 다시 쓰이지 않는다.
+  무관하게 애셋 하나의 시각 그대로 저장되며, 어떤 이후 연산도 이 파일을
+  다시 쓰지 않는다.
 - **패키징되는 SOURCE SRT**: 그 큐들을 입력 프로젝트의 **경과 타임라인**에 투영해
   쓴다 — 자동 컷 이전 기준이고, 같은 애셋이 여러 번 쓰여도 인스턴스마다 투영한다.
 - **EDIT SRT**: 편집된 타임라인에 투영한다.
@@ -68,13 +77,22 @@ openai import의 허용 지점은 **정확 경로 `vlogsrt/transcribe.py` 하나
 
 `vlogsrt/project/xml_validation.py`의 xmllint 계약:
 
+- **subprocess API는 `subprocess.run` 하나로 얼어 있다.** 참 subprocess 모듈
+  별명(`import subprocess as sp`)의 `.run`과 참 함수 별명(`from subprocess import
+  run as launch`)만 인정한다. `Popen`·`check_call`·`check_output`·`call`은
+  모듈 속성이든 from-import든 거부하고, 다른 모듈에서 온 `run`·출처를 정적으로
+  입증 못 한 `run`·한 번이라도 덮어쓰인(shadow) 별명도 보수적으로 거부한다.
+- argv는 **정확히 두 형태**의 리터럴 리스트/튜플이다:
+  `[exe, "--nonet", "--noout", path]` 또는
+  `[exe, "--nonet", "--noout", "--dtdvalid", dtd_uri, path]`.
+  깃발의 집합·순서가 이와 다르면(빠짐·끼워넣기·뒤집힘) 거부한다. 마지막
+  칸들(path·dtd_uri)만 동적 표현식을 쓸 수 있고, 원소를 f-string·문자열
+  연결·starred로 조립하지 않는다.
 - 실행파일은 `shutil.which("xmllint")` 결과로만 얻는다. `which`에 다른 이름을
   묻는 것도, 상수·변수로 실행파일을 박는 것도 금지다.
 - `which`의 **출처까지 본다**. `import shutil [as …]`(모듈 별명)과
   `from shutil import which [as …]`(함수 별명)만 인정하고, 그 밖의 객체에 붙은
   `.which`나 덮어쓰인(shadow) `which`는 출처 불명으로 거부한다.
-- argv는 **리터럴 리스트/튜플**로 쓴다. 첫 항목은 그 실행파일이고, 원소를
-  f-string·문자열 연결·starred로 조립하지 않는다.
 - argv는 **유일한 위치 인자**다. `run`은 남는 위치 인자를 `Popen`에 그대로 넘기므로
   뒤쪽 슬롯(bufsize·`executable`)으로 실행파일이 흘러드는 것을 이 규칙으로 끊는다.
   `executable=` 키워드 오버라이드와 `**` 전개도 금지다.
@@ -82,28 +100,54 @@ openai import의 허용 지점은 **정확 경로 `vlogsrt/transcribe.py` 하나
 - `from subprocess import *`와 `from shutil import *`는 호출·출처 추적을
   무력화하므로 금지다.
 
-별명 우회(`import subprocess as sp; sp.run(...)`, `from subprocess import run, Popen,
-check_output`)도 잡는다. 경계 밖의 그 어떤 파일도 subprocess를 import할 수 없다.
+경계 밖의 그 어떤 파일도 subprocess를 import할 수 없다. DTD URI 변환·경로
+이스케이프·오류 처리·실제 XML 검증은 **P1-04의 행동 테스트**가 소유한다 —
+이 검사는 위의 정적 형태만 본다.
 
 검사가 인정하는 정적 형태는 정해져 있다: 참 shutil 묶음(별명 포함)의
-`which("xmllint")`로 얻은 실행파일, 리터럴 argv, 유일한 위치 인자, 생략되거나
-리터럴 `False`인 `shell`. 이 기계 검사는 **우발적 드리프트를 막는 난간**이지
-일반적인 파이썬 보안 샌드박스가 아니다 — 결심한 우회까지 막지는 못한다.
+`which("xmllint")`로 얻은 실행파일, 정적으로 풀린 `subprocess.run`, 두 argv
+형태, 유일한 위치 인자, 생략되거나 리터럴 `False`인 `shell`. 이 기계 검사는
+**우발적 드리프트를 막는 난간**이지 일반적인 파이썬 보안 샌드박스가 아니다 —
+결심한 우회까지 막지는 못한다.
 
-## 6. 선택 의존성 — project 아래에서만
+## 6. 선택 의존성 — `vlogsrt/project/vad/` 아래에서만
 
 `[project]` dependencies는 정확히 `openai`, `tomli-w`, `rich` 셋이다(불변 규칙 7).
-선택 extra `project = ["numpy>=2.0", "onnxruntime>=1.19"]`는 파생 계층의 런타임
-(VAD 등)이고, **import는 `vlogsrt/project/` 아래에서만** 허용된다. 레거시
-`vlogsrt/*.py`와 `ui/**`에서는 별명 형태(`import numpy as np`,
-`from numpy import ndarray`, `import numpy.typing`)까지 전부 금지다. 그 외 금지
-의존성(`jamo`, `konlpy`, `pysrt`, `ffmpeg`, `pydantic`, …)은 project 안을 포함한
-어디서도 허용되지 않는다.
+선택 extra `project = ["numpy>=2.0", "onnxruntime>=1.19"]`는 로컬 VAD의 런타임
+이고, **import는 `vlogsrt/project/vad/` 디렉터리 아래에서만** 허용된다 — 비전
+(`project/vision*`)을 포함한 project의 다른 자리도 안 된다. 레거시 `vlogsrt/*.py`와
+`ui/**`에서는 별명 형태(`import numpy as np`, `from numpy import ndarray`,
+`import numpy.typing`)까지 전부 금지다. 그 외 금지 의존성(`jamo`, `konlpy`,
+`pysrt`, `ffmpeg`, `pydantic`, …)은 project 안을 포함한 어디서도 허용되지 않는다.
+
+## 7. 모델 이름 — 리터럴은 정확한 config 경로에만
+
+엔진 모델 리터럴(`whisper-1`, `gpt-*transcribe*`)은 **정확 경로
+`vlogsrt/config.py`와 `vlogsrt/project/config.py`**에만 있을 수 있다. 파생 계층의
+비전 모델 `glm-*` 리터럴은 **정확 경로 `vlogsrt/project/config.py` 하나**에만
+있을 수 있다 — 새 튜너블은 전부 프로젝트 config에 살기 때문에 원본
+`vlogsrt/config.py`는 glm 예외를 물려받지 않는다. 중첩 경로의 같은 이름 파일
+(`vlogsrt/project/tuning/config.py` 등)도 예외를 물려받지 못한다.
+
+## 8. 파생 데이터클래스 — frozen, 정확 경로에서
+
+정확 경로 `vlogsrt/project/models.py`의 모든 데이터클래스는 `frozen=True`를
+리터럴로 선언해야 한다. 장식자의 평범한 별명 — `import dataclasses as dc` 뒤의
+`@dc.dataclass`, `from dataclasses import dataclass as dc` 뒤의 `@dc` — 도 같은
+dataclass 선언으로 알아본다. `@dataclass`(인자 없음)와 `frozen=False`는 가변이므로
+거부하고, `frozen=변수` 같은 비(非)리터럴과 한 번이라도 덮어쓰인 장식자 별명도
+보수적으로 거부한다. **파일이 아직 없는 동안은 이 검사가 통과** — P0-04가 파일을
+만들 때 이 선이 먼저 서 있다. frozen은 선언의 **얕은** 불변이다: 필드가 리스트 같은
+가변 컨테이너를 들면 그 내용까지는 못 지킨다. 깊은 불변은 행동 테스트가 증명하는
+몫이다.
 
 ## 집행
 
-`scripts/check_invariants.py`가 이 계약의 **구문 경계** — import 방향(§1), 경로
-예외(§4·§5), 의존성 범위(§6), xmllint 호출 형태(§5) — 를 AST로 기계 검사한다(18군).
-원본 기록 불변(§2)과 시각 투영(§3)은 구문 검사로 증명되지 않는다 — 그 둘은
-행동 테스트가 지킨다. 계약 위반 의심은 코드를 고치지 말고 **보고**한다 —
-예외를 넓히는 수정은 되돌려진다.
+`scripts/check_invariants.py`가 이 계약의 **구문 경계** — import 방향과 CLI 예외의
+폭(§1), openai·subprocess 경로 예외(§4·§5), xmllint의 run 고정·두 argv 형태(§5),
+선택 의존성의 vad 한정(§6), 모델 리터럴 경로(§7), 파생 데이터클래스 frozen(§8) —
+을 AST로 기계 검사한다(19군). 이 검사는 **열거된 구문 경계만** 집행한다. 원본
+기록 불변(§2)과 시각 투영(§3)은 구문 검사로 증명되지 않는다 — 그 둘은 행동
+테스트가 지킨다. 일반적인 정적 분석 엔진이나 파이썬 보안 샌드박스를 주장하는
+것도 아니다. 계약 위반 의심은 코드를 고치지 말고 **보고**한다 — 예외를 넓히는
+수정은 되돌려진다.
