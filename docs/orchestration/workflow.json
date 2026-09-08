@@ -1,0 +1,116 @@
+{
+  "schema_version": 1,
+  "project": "vlogsrt-final-cut",
+  "spec": "docs/plans/2026-09-08-final-cut-project.md",
+  "integration_branch": "feat/final-cut-project",
+  "baseline_commit": "de17d875c2b3061153699ea0998aec698d74db06",
+  "run_id": "run_73768f7c4dec",
+  "coordinator_terminal": "term_892e5ca1-805d-4d8d-b27f-fe7c90994848",
+  "roles": {
+    "architect": {
+      "provider": "codex",
+      "model": "gpt-6-astra",
+      "effort": "high",
+      "duties": [
+        "binding design",
+        "phase integration and merge",
+        "final escalation"
+      ],
+      "code_writer": false
+    },
+    "manager": {
+      "provider": "codex",
+      "model": "gpt-5.6-sol",
+      "effort": "xhigh",
+      "duties": [
+        "granular task briefs",
+        "DAG/file ownership",
+        "GLM dispatch",
+        "tests/review/escalation",
+        "continuous implementation loop"
+      ],
+      "code_writer": false
+    },
+    "co_manager": {
+      "provider": "claude",
+      "model": "claude-opus-5",
+      "effort": "high",
+      "duties": [
+        "preimplementation plan review",
+        "phase/code review",
+        "loop assistance",
+        "Sol escalation"
+      ],
+      "code_writer": false
+    },
+    "implementer": {
+      "launcher": "claude-glm",
+      "model": "glm-5.3[1m]",
+      "cli_effort": "max",
+      "context_window": 1000000,
+      "provider_effort": "max requested; server internal mapping not observable",
+      "code_writer": true
+    },
+    "diagnosis_terra": {
+      "provider": "codex",
+      "model": "gpt-5.6-terra",
+      "effort": "high",
+      "code_writer": false
+    },
+    "diagnosis_luna": {
+      "provider": "codex",
+      "model": "gpt-5.6-luna",
+      "effort": "high",
+      "code_writer": false
+    }
+  },
+  "execution": {
+    "runtime": "Orca",
+    "placement": "managers in integration checkout; independent GLM tasks in explicit branches/worktrees",
+    "max_concurrent_coding_workers": 2,
+    "parallel_requires": [
+      "frozen interface contracts",
+      "disjoint files/worktrees",
+      "ready dependencies"
+    ],
+    "merge_owner": "architect",
+    "push": false,
+    "protected_paths": [
+      ".env",
+      ".env.*",
+      "golden/**",
+      "tests/fixtures/api/**"
+    ],
+    "user_dirty_paths": [
+      ".env.example"
+    ],
+    "single_task_per_glm_dispatch": true,
+    "nested_depth_policy": "never bypass; if depth is denied manager submits exact worker spec to root for dispatch",
+    "role_lifecycle": "all worker outcomes through actual Orca task/dispatch; release/reuse after settlement"
+  },
+  "loop": [
+    "Sol writes bounded brief",
+    "Opus reviews phase/shared contracts and nontrivial briefs",
+    "GLM implements tests+code in owned worktree",
+    "Sol verifies scoped evidence",
+    "Opus reviews phase/risky diff",
+    "GLM repairs findings",
+    "Astra validates integration and merges phase"
+  ],
+  "escalation": [
+    "GLM reports reproducible failure",
+    "Sol decomposes; Terra and Luna perform independent bounded diagnosis",
+    "Sol turns diagnosis into GLM fix brief",
+    "Opus5 assists if Sol remains blocked",
+    "Astra decides final correction; GLM implements code"
+  ],
+  "evidence": {
+    "glm_launch_smoke": {
+      "session": "5a5722f8-ce6e-4eaa-b26b-783cc1b65903",
+      "status": "passed",
+      "response": "GLM_MAX_READY",
+      "reported_context_window": 1000000
+    },
+    "note": "configuration and runtime receipts prove requests; do not claim server-side effort mapping or 1M-input stress test"
+  }
+}
