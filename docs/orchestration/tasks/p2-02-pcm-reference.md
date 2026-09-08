@@ -43,7 +43,8 @@ def write_wav_slice(reference: PcmReference, samples: SampleRange, destination: 
 def quiet_sample(reference: PcmReference, target: int, search_samples: int, window_samples: int) -> int: ...
 ```
 
-- `analysis_key` hashes original full-content hash, exact audio policy, measured `pcm_sample0_file_time`, PCM hash, channel count/rate; paths/names alone are never keys.
+- `AudioPolicy.stream_index` is the zero-based **audio-stream ordinal** consumed by P2-01 (`0` means first audio), validated as a nonnegative integer with `bool` rejected. It is not a global container-stream index. The resulting `PcmReference` need not duplicate that ordinal because its extraction provenance/analysis key binds the policy, while P2-01's `AudioStreamInfo.stream_index` records the selected global ffprobe index.
+- `analysis_key` hashes original full-content hash, exact audio policy (including audio ordinal), measured `pcm_sample0_file_time`, PCM hash, channel count/rate; paths/names alone are never keys.
 - `source_id` is exactly P1's `ResolvedMedia.asset_content_id`; `original_stem` is retained only to address explicit per-source fixture/artifact namespaces. Validate both as nonempty and retain `original_sha256` so later joins never infer identity from `path`, filename, or parallel sequence position.
 - `sample_count`, `SampleRange.start/end`, `target`, `search_samples`, and `window_samples` are frames per channel. Range conversion uses `ceil(start * sample_rate)` and `floor(end * sample_rate)`, clamped to real per-channel frame count; reject `end <= start` after conversion.
 - Slice contains only `[start,end)` retained frames from the same stored PCM, interleaved channel-complete, with byte count `(end-start) * sample_width * channels` plus an ordinary WAV header. No removed-audio padding/context.

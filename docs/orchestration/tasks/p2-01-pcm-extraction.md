@@ -32,7 +32,8 @@ def probe_audio_stream(source: Path, stream_index: int) -> AudioStreamInfo: ...
 def extract_pcm_s16le(source: Path, destination: Path, *, stream_index: int, sample_rate: int = 16000) -> PcmExtraction: ...
 ```
 
-- `probe_audio_stream` uses the existing `_run` ffprobe boundary with JSON and parses times via `Fraction(str(value))`; missing/malformed stream fields fail distinctly.
+- The `stream_index` argument is a zero-based **audio-stream ordinal**: `0` means the first audio stream even when global stream 0 is video. Validate it as a nonnegative integer but reject `bool`; ffprobe selects `a:N`. `AudioStreamInfo.stream_index` is the selected stream's actual nonnegative **global ffprobe index** after validating `codec_type == "audio"`, and extraction maps exactly `0:<global index>`.
+- `probe_audio_stream` uses the existing `_run` ffprobe boundary with JSON and parses times via `Fraction(str(value))`; missing/malformed stream fields, wrong codec type, out-of-range audio ordinal, and ambiguous selection/count fail distinctly. Never map bare `0:0` merely because the audio ordinal is zero.
 - Extraction maps the exact audio stream, preserves its channel count, produces little-endian signed 16-bit raw PCM at 16 kHz, and computes `sample_count` as frames per channel from exact byte length: `bytes == sample_count * sample_width * channels`; partial channel frames fail.
 - ffprobe `stream.start_time` is recorded but is not by itself proof of the decoded PCM origin. `pcm_sample0_file_time` defines the mapping of decoded PCM frame zero into the asset/video presentation epoch after decoder priming/skip-sample and resampling behavior. No 0.2-second constant is allowed.
 - Preserve the measured post-conversion clock using the equivalent of `-copyts`, `aresample=16000`, `aformat=sample_fmts=s16`, `asettb=1/16000`, and `ashowinfo`, without `-start_at_zero` or a timestamp-normalizing `asetpts`. Parse the first post-conversion integer PTS as the candidate sample-zero epoch, and reject missing or discontinuous frame timing instead of silently treating the whole output as one clock.
@@ -40,14 +41,14 @@ def extract_pcm_s16le(source: Path, destination: Path, *, stream_index: int, sam
 
 ## Implementation steps
 
-1. Write failing mocked-command tests for stream selection, nonzero/negative origins, stereo preservation, malformed probe JSON, missing stream, missing/malformed/discontinuous converted-frame PTS, partial PCM frame, and exact argv. Also generate small synthetic media with nonzero and negative audio/video PTS plus known per-channel impulses; decode it and prove which PCM frame corresponds to the asset/video presentation epoch. Mock argv evidence alone is insufficient for the origin contract.
+1. Write failing mocked-command tests for audio-ordinal selection, nonnegative/non-bool validation, returned global index/audio codec validation, nonzero/negative origins, stereo preservation, malformed probe JSON, missing stream, missing/malformed/discontinuous converted-frame PTS, partial PCM frame, and exact argv. Add mocked and synthetic multi-stream media with video global 0 and audio global 1/2, proving ordinal 0 selects/maps global 1 and ordinal 1 selects/maps global 2. Also generate small synthetic media with nonzero and negative audio/video PTS plus known per-channel impulses; decode it and prove which PCM frame corresponds to the asset/video presentation epoch. Mock argv evidence alone is insufficient for the origin contract.
 2. Reproduce a representative subset of the committed origin experiment in tests: include the decisive negative AAC/MKV case where raw stream start is `-0.264` but decoded sample zero is `-1/5`, and a positive case demonstrating retained priming (the recorded AAC/MOV result has sample zero `242/125` and peak frame 5024 mapping to `9/4`). Add 44.1/48 kHz resampling and continuity rejection coverage; do not bake codec delay into a correction.
 3. Implement frozen results and small helpers inside `preprocess.py`; no imports from `vlogsrt.project`.
 4. Run focused preprocess tests, invariants, full check; commit two owned files.
 
 ## Acceptance
 
-Focused tests verify exact origin/channel/sample arithmetic, stereo frame counting, decoder priming/skip-sample handling, 44.1/48 kHz resampling, continuity rejection, and no magic offset. The synthetic impulse cases prove PCM sample-zero mapping for nonzero and negative PTS. The committed five-case table is evidence only: uncommon edit lists, variable layouts, and real camera/S17 media remain unproven or `PENDING_HUMAN`. All existing preprocess and source tests remain unchanged and pass; P0-03 exact source bytes remain locked. `make check` passes offline.
+Focused tests verify audio-ordinal/global-index selection, exact origin/channel/sample arithmetic, stereo frame counting, decoder priming/skip-sample handling, 44.1/48 kHz resampling, continuity rejection, and no magic offset. The synthetic impulse cases prove PCM sample-zero mapping for nonzero and negative PTS. The committed five-case table is evidence only: uncommon edit lists, variable layouts, and real camera/S17 media remain unproven or `PENDING_HUMAN`. All existing preprocess and source tests remain unchanged and pass; P0-03 exact source bytes remain locked. `make check` passes offline.
 
 ## Failure route
 
