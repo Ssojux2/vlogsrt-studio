@@ -27,7 +27,7 @@
 | Role | Task | Dispatch | State |
 |---|---|---|---|
 | Astra coordinator | Run `run_73768f7c4dec` | terminal `term_892e5ca1-805d-4d8d-b27f-fe7c90994848` | active |
-| Sol manager | `task_8f65a57496f6` | `ctx_bfbd07ec7a4c` | supervising parallel P1-02/P2-02 implementation and exact-interface review |
+| Sol manager | `task_8f65a57496f6` | `ctx_bfbd07ec7a4c` | P1-02/P2-02 corrections passed Sol review; awaiting Opus/Astra exact-SHA disposition |
 | Opus co-manager | `task_0c2d6966fb52` | `ctx_c60636ed03f1` | active through Astra for independent contract/diff review |
 | GLM P0-02 writer | `task_f7788389960b` | `ctx_df9c602e28a2` | completed `df489bb`; correction review pending |
 | GLM P0-02 correction | `task_7d03430673e1` | `ctx_51f56ba3df5c` | completed `51319b9`; reconciliation still open |
@@ -36,9 +36,9 @@
 | GLM P0-03 source byte lock | `task_c8c82a82db06` | `ctx_4d19cc8b7736` | `2a1034b` integrated by Astra as `9b7d4e2`; full gate passed |
 | GLM P0-04 project skeleton | `task_5cf80c9529fa` + correction `task_a2ba0cb1dbe9` | `ctx_c88e36865f89` + `ctx_9a0e8d667681` | final `0b1743d` integrated by Astra as `cd411c4`; P0 complete |
 | GLM P1-01 timebase | `task_3355d2bef6d9` | `ctx_e963c6fd31a4` | final `51b138d` integrated by Astra as `07e4dac`; 4,896 independent probes and full gate passed |
-| GLM P1-02 FCPXML ingest | `task_d58951edec1b` | `ctx_614e1594110d` | active from exact `07e4dac`, terminal `term_233ac174-346d-4c89-9edb-3f1ff112afd3` |
+| GLM P1-02 FCPXML ingest | `task_d58951edec1b` | `ctx_614e1594110d` | final `b96684e` passed Sol review; active pending Astra integration |
 | GLM P2-01 PCM extraction | `task_071c14e3282d` | `ctx_dcd31a44ebc6` | final `d301459` integrated by Astra as `5ea9719`; 906-test integration gate passed |
-| GLM P2-02 PCM reference | `task_4428b9adca79` | `ctx_f12626850366` | active from exact `5ea9719`, terminal `term_16b167fe-4bd5-4e05-980b-068da23374f8` |
+| GLM P2-02 PCM reference | `task_4428b9adca79` | `ctx_f12626850366` | final `cc079a8` passed Sol review; active pending Astra integration |
 
 Initial gate message IDs: root `msg_d8fc69fe164a`; Opus `msg_0f70e95b09f7`.
 
@@ -58,8 +58,10 @@ Initial gate message IDs: root `msg_d8fc69fe164a`; Opus `msg_0f70e95b09f7`.
 - P0-04's initial `acb85e4` and bounded correction `c17001a` added the five owned project-config/package paths, then exact one-path portability correction `0b1743d3b75d46946231cd3b0537ce09c7ff0cd1` replaced a private Python-3.12-only `__dataclass_params__.slots` assertion with public `__slots__`/instance behavior. Sol and Astra both passed actual CPython 3.11.16 probes plus direct checks. Astra integrated the final chain as `cd411c4376ccf548151dbd42a9e11c78bbfb4067`; the P0 phase join passed Ruff lint/format, mypy on 26 files, 579 tests, and 19 invariant groups.
 - P1-01's initial `3fd514783497a60c9e862fc023101fb60b7b892f` expanded the frozen parser signature and misstated the point-interval edge. The same GLM Dispatch closed both findings in `51b138deee7bfc6a95704c0fec45b78310a44381`: signed epochs parse through the exact one-argument API, and half-open outward snapping documents/tests grid-aligned versus off-grid point behavior. Sol passed focused 269 tests plus 19 invariants; Astra passed full `make check` with 848 tests and 4,896 independent rate/anchor/order/inverse probes, then integrated it as `07e4dac41888ae115157ed4a68d6dfd5fbd5b233`.
 - P1-02 launched from exact `07e4dac41888ae115157ed4a68d6dfd5fbd5b233` in the fresh `fcp-p1-ingest` worktree using `claude-glm --model 'glm-5.3[1m]' --effort max --permission-mode auto`: Task `task_d58951edec1b`, Dispatch `ctx_614e1594110d`, terminal `term_233ac174-346d-4c89-9edb-3f1ff112afd3`. It owns only the frozen FCPXML models, parser, and focused test file.
+- P1-02's final bounded correction `b96684e041a02825fd0aa0ed43c46fa1363c0308` (parent `05b6e3e`) rejects zero-`media-rep` and metadata-only assets at the asset path while retaining proxy-only and explicit silent-asset support. Sol verified a clean owned-path-only diff, `git diff --check`, and four focused positive/negative cases; the worker reported 139 focused tests and full `make check` with 987 tests plus all 19 invariant groups. Merge-ready message `msg_8b72492af789` requests Opus independent exact-diff review and Astra final integration.
 - P2-01's initial `9ce4e5b` omitted the global ffprobe stream index and accepted ambiguous selection failures; `9b9fb25` fixed the first review, and final `d3014597df5144093bb3a1ca57da54f8c0755b53` split the remaining no-audio, out-of-range, missing-index, and mapped-stream diagnostic paths. Sol passed 74 focused tests, 19 invariants, and full `make check` with 637 tests; Astra's integration gate passed 906 tests and mypy on 27 files, then integrated the branch as `5ea9719cb2fb3ece20ad228fa78481ae60bbdb3b`.
 - P2-02 launched from exact `5ea9719cb2fb3ece20ad228fa78481ae60bbdb3b` in the fresh `fcp-p2-pcm-reference` worktree using `claude-glm --model 'glm-5.3[1m]' --effort max --permission-mode auto`: Task `task_4428b9adca79`, Dispatch `ctx_f12626850366`, terminal `term_16b167fe-4bd5-4e05-980b-068da23374f8`. It owns only `vlogsrt/project/pcm.py` and `tests/project/test_pcm.py`; the brief fixes total audio-only `PcmReference` semantics and forbids fabricated references or P3 construction.
+- P2-02's final preservation correction `cc079a8ed8adfda494306dc01ef64e9c3132f1d8` (parent `28fc8c3`) parks the prior destination until PCM and sidecar publication both commit, restoring it on failure so an already-issued `PcmReference` remains usable. Sol verified a clean two-owned-file diff, `git diff --check`, and three focused publication-failure cases, including different original/hash, old-reference slicing, zero re-extraction, and no temp/backup residue; the worker reported full `make check` with 1,011 tests. Merge-ready message `msg_9b1d51946848` requests Opus independent exact-diff review and Astra final integration.
 - Known user-owned dirty path is intentionally excluded from every inspection/commit operation. Its contents have not been read.
 
 ## Phase DAG and parallel groups
@@ -109,12 +111,12 @@ By explicit Astra dependency audit, P0-03 may run from `58bb25347319301391064d6b
 | [P0-03](tasks/p0-03-source-byte-lock.md) | exact synthetic legacy SOURCE SRT regression | exact `58bb253` by Astra exception; joins corrected P0-02/P0-04 at phase gate | `tests/test_source_immutability.py` only | complete; integrated `9b7d4e2`, 553-test gate passed |
 | [P0-04](tasks/p0-04-project-skeleton.md) | isolated project package/config/FCPXML-model namespace skeleton | corrected P0-02 merge `45d1393` | project package/config/models + config test only | complete; P0 integrated `cd411c4`, 579-test gate passed |
 | [P1-01](tasks/p1-01-rational-time.md) | exact FCP rational/frame math | P0 merge `cd411c4` | project time module/tests | complete; integrated `07e4dac`, full gate plus 4,896 probes passed |
-| [P1-02](tasks/p1-02-fcpxml-ingest.md) | FCPXML/bundle parser and rejection surface | P1-01 merge `07e4dac` | project FCPXML models/parser/tests | active: `task_d58951edec1b` / `ctx_614e1594110d` |
+| [P1-02](tasks/p1-02-fcpxml-ingest.md) | FCPXML/bundle parser and rejection surface | P1-01 merge `07e4dac` | project FCPXML models/parser/tests | Sol-pass `b96684e`; awaiting Opus/Astra integration |
 | [P1-03](tasks/p1-03-media-identity.md) | original/proxy resolution and strong IDs | P1-02 | project media/tests | drafted |
 | [P1-04](tasks/p1-04-xml-validation.md) | xmllint-only boundary plus structural validation | P1-02 | XML validation/tests | drafted |
 | [P1-05](tasks/p1-05-roundtrip.md) | identity-preserving roundtrip | P1-03,P1-04 | project FCPXML writer/tests | drafted |
 | [P2-01](tasks/p2-01-pcm-extraction.md) | measured 16 kHz PCM extraction metadata | P0 merge `cd411c4` | preprocess additions/tests | complete; integrated `5ea9719`, 906-test gate passed |
-| [P2-02](tasks/p2-02-pcm-reference.md) | persistent hashed PCM and exact sample slicing | P2-01 merge `5ea9719` | project PCM/tests | active: `task_4428b9adca79` / `ctx_f12626850366` |
+| [P2-02](tasks/p2-02-pcm-reference.md) | persistent hashed PCM and exact sample slicing | P2-01 merge `5ea9719` | project PCM/tests | Sol-pass `cc079a8`; awaiting Opus/Astra integration |
 | [P2-03](tasks/p2-03-s17-regression.md) | last/intermediate/repair drift regression | P2-02 | preprocess/project PCM tests and narrow fixes | drafted |
 | [P3-01](tasks/p3-01-transcription-outcome.md) | explicit success/empty/error contract | P1,P2 merges | transcribe additions/tests | drafted |
 | [P3-02](tasks/p3-02-source-adapter.md) | full legacy repair/refine engine once per unique source | P3-01 | project speech plus narrow repair-cutter seam/tests | drafted |
