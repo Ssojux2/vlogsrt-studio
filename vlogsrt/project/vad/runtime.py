@@ -9,8 +9,8 @@
 실패는 전부 `VadUnavailable`로 닫힌다 — 런타임 내려받기, 다른 버전·모델·
 공급자로의 대체는 존재하지 않는다. numpy·onnxruntime는 선택 extra
 (`pip install 'vlogsrt[project]'`)이므로 import는 함수 안에서만 일어난다.
-numpy는 세션 만들기에 필요하지 않아 아예 import하지 않는다 — 입력을 만드는
-P5-02가 가져올 것이다.
+numpy는 세션 경계에서 최소 능력(float32 배열)만 시험한다 — 스트림 입력을
+실제로 만드는 것은 P5-02의 몫이다.
 """
 
 from __future__ import annotations
@@ -107,6 +107,7 @@ def create_cpu_session(artifact: VadArtifact) -> object:
     """
     _revalidate_record(artifact)
     onnxruntime = _load_onnxruntime()
+    _assert_numpy_capable()
     options = onnxruntime.SessionOptions()
     options.inter_op_num_threads = _INTER_OP_THREADS
     options.intra_op_num_threads = _INTRA_OP_THREADS
@@ -212,6 +213,27 @@ def _sha256_of(path: Path) -> str:
     except OSError as exc:
         raise VadUnavailable(f"{path}를 해시하지 못했다: {exc}") from exc
     return digest.hexdigest()
+
+
+def _assert_numpy_capable() -> None:
+    """세션 경계에서 numpy의 능력을 본다 — 입력을 못 만들 세션은 열지 않는다.
+
+    버전 문자열을 잴 수는 없다(버전 좌표는 이 계층에 없다). 대신 세션이 곧바로
+    써야 하는 최소 능력 — float32 배열 만들기 — 을 직접 시험한다. 없거나,
+    깨졌거나, float32가 나오지 않으면 전부 VadUnavailable로 닫는다.
+    """
+    try:
+        import numpy
+    except ImportError as exc:
+        raise VadUnavailable(
+            f"numpy가 없다 — 선택 extra를 깔아야 한다: pip install 'vlogsrt[project]' ({exc})"
+        ) from exc
+    try:
+        probe: Any = numpy.zeros((1, 1), dtype=numpy.float32)
+    except Exception as exc:
+        raise VadUnavailable(f"numpy가 계약에 필요한 float32 배열을 만들지 못한다: {exc}") from exc
+    if not isinstance(probe, numpy.ndarray) or str(probe.dtype) != "float32":
+        raise VadUnavailable("numpy가 만든 배열이 계약과 다르다 — float32 ndarray가 나오지 않는다")
 
 
 def _load_onnxruntime() -> Any:

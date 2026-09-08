@@ -112,7 +112,23 @@ def _install_fake_runtime(
     module.SessionOptions = _FakeSessionOptions
     module.InferenceSession = _FakeInferenceSession
     monkeypatch.setitem(sys.modules, "onnxruntime", module)
+    # 세션 경계는 numpy의 최소 능력도 본다 — 못 쓰는 환경에서 검사하므로
+    # "능력 있는" 가짜를 깔아 둔다. 못 쓰게 하려면 시험 안에서 덮어쓴다.
+    monkeypatch.setitem(sys.modules, "numpy", _capable_numpy())
     return created
+
+
+def _capable_numpy() -> types.ModuleType:
+    """계약을 만족하는 최소 numpy — float32 배열이 나오는 것만 흉내낸다."""
+
+    class _Array:
+        dtype = "float32"
+
+    module = types.ModuleType("numpy")
+    module.float32 = "float32"  # type: ignore[attr-defined]
+    module.ndarray = _Array  # type: ignore[attr-defined]
+    module.zeros = lambda shape, dtype=None: _Array()  # type: ignore[attr-defined]
+    return module
 
 
 def _sha256(path: Path) -> str:
@@ -430,6 +446,52 @@ def test_broken_onnxruntime_module_is_contextual(
     monkeypatch.setitem(sys.modules, "onnxruntime", types.ModuleType("onnxruntime"))
     artifact = bundled_artifact(ProjectConfig())
     with pytest.raises(VadUnavailable, match="onnxruntime"):
+        create_cpu_session(artifact)
+
+
+def test_missing_numpy_is_contextual_at_the_session_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """세션이 곧바로 numpy 입력을 만들어야 하므로 numpy 없으면 세션도 못 연다."""
+    from vlogsrt.project.vad.runtime import VadUnavailable, bundled_artifact, create_cpu_session
+
+    _install_fake_runtime(monkeypatch)
+    monkeypatch.setitem(sys.modules, "numpy", None)
+    artifact = bundled_artifact(ProjectConfig())
+    with pytest.raises(VadUnavailable, match="numpy"):
+        create_cpu_session(artifact)
+
+
+def test_broken_numpy_is_contextual_at_the_session_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """모듈은 있지만 배열을 못 만드는 numpy도 진단이 된다 — 능력을 본다."""
+    from vlogsrt.project.vad.runtime import VadUnavailable, bundled_artifact, create_cpu_session
+
+    _install_fake_runtime(monkeypatch)
+    monkeypatch.setitem(sys.modules, "numpy", types.ModuleType("numpy"))
+    artifact = bundled_artifact(ProjectConfig())
+    with pytest.raises(VadUnavailable, match="numpy"):
+        create_cpu_session(artifact)
+
+
+def test_numpy_that_cannot_make_float32_is_contextual(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """float32 배열이 나오지 않는 numpy는 계약과 어긋난다 — 결과로 잡는다."""
+
+    class _WrongDtype:
+        dtype = "float64"
+
+    fake = types.ModuleType("numpy")
+    fake.zeros = lambda *args, **kwargs: _WrongDtype()  # type: ignore[attr-defined]
+    _install_fake_runtime(monkeypatch)
+    monkeypatch.setitem(sys.modules, "numpy", fake)
+
+    from vlogsrt.project.vad.runtime import VadUnavailable, bundled_artifact, create_cpu_session
+
+    artifact = bundled_artifact(ProjectConfig())
+    with pytest.raises(VadUnavailable, match="numpy"):
         create_cpu_session(artifact)
 
 
