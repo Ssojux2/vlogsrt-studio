@@ -251,7 +251,7 @@ def split_retained_ranges(
             )
         spans.append(span)
     return tuple(
-        (span, write_wav_slice(reference, span, _retained_path(reference, directory, index)))
+        (span, write_wav_slice(reference, span, _retained_path(directory, index)))
         for index, span in enumerate(spans)
     )
 
@@ -754,9 +754,15 @@ def _retained_range(reference: PcmReference, pair: object, position: int) -> Sam
     return retained_sample_range(reference, start, end)
 
 
-def _retained_path(reference: PcmReference, directory: Path, index: int) -> Path:
-    """남긴 구간 조각의 이름 — 호출이 결정적이면 이름도 결정적이다(재실행이 같은 이름을 낸다)."""
-    return directory / f"{reference.original_stem}.range{index:04d}.wav"
+def _retained_path(directory: Path, index: int) -> Path:
+    """남긴 구간 조각의 이름 — 순번만으로 짓는다.
+
+    참조의 stem은 계약상 비지 않은 문자열이면 무엇이든 될 수 있다. 그걸 경로
+    문법으로 끼우면 "../escape" 같은 정상 참조가 요청한 디렉터리 밖에 쓰고 절대경로
+    stem은 디렉터리를 통째로 점령한다 — stem은 이름 재료가 아니라 정체성 문자열이다.
+    순번뿐인 이름은 결정적이기도 하다(재실행이 같은 이름을 낸다).
+    """
+    return directory / f"range-{index:04d}.wav"
 
 
 def _bad_count(value: object) -> bool:

@@ -1369,8 +1369,36 @@ def test_range_names_are_deterministic_across_runs(tmp_path: Path) -> None:
     ranges = [(Fraction(0), Fraction(1)), (Fraction(1), Fraction(2))]
     first = split_retained_ranges(reference, ranges, tmp_path / "one")
     second = split_retained_ranges(reference, ranges, tmp_path / "two")
+    assert [path.name for _, path in first] == ["range-0000.wav", "range-0001.wav"]
     assert [path.name for _, path in first] == [path.name for _, path in second]
     assert [span for span, _ in first] == [span for span, _ in second]
+
+
+def test_range_paths_stay_inside_the_requested_directory(tmp_path: Path) -> None:
+    """조각 이름은 순번만으로 짓는다 — 참조의 stem을 경로 문법으로 믿지 않는다.
+
+    stem은 계약상 비지 않은 문자열이면 무엇이든 될 수 있다. 그걸 그대로 경로에
+    끼우면 "../escaped" 같은 **정상 참조**가 요청한 디렉터리 밖에 쓰고, 절대경로
+    stem은 디렉터리를 통째로 점령한다. 어떤 stem이어도 조각은 디렉터리 안에만 산다.
+    """
+    pcm_bytes = _pattern_pcm(32000, channels=1)
+    out = tmp_path / "out"
+    hostile_stems = ["../escaped", "../../escaped", str(tmp_path / "elsewhere")]
+    for stem in hostile_stems:
+        reference = dataclasses_replace(
+            _hand_reference(tmp_path / "ref.pcm", pcm_bytes), original_stem=stem
+        )
+        result = split_retained_ranges(
+            reference, [(Fraction(0), Fraction(1)), (Fraction(1), Fraction(2))], out
+        )
+        assert all(path.resolve().is_relative_to(out.resolve()) for _span, path in result), (
+            f"{stem} 참조가 조각을 디렉터리 밖에 쓰려 한다"
+        )
+
+    written = {path.name for path in tmp_path.rglob("*") if path.is_file()}
+    assert written == {"ref.pcm"} | {f"range-{index:04d}.wav" for index in range(2)}, (
+        "디렉터리 밖에는 아무 파일도 없다 — 탈출도 점령도 일어나지 않았다"
+    )
 
 
 @pytest.mark.parametrize(
