@@ -22,7 +22,7 @@ class MediaOverride:
 @dataclass(frozen=True, slots=True)
 class ResolvedMedia:
     resource_scoped_id: str
-    content_id: str
+    asset_content_id: str
     original: Path
     image_source: Path
     original_sha256: str
@@ -37,7 +37,7 @@ def resolve_media(document: ProjectDocument, overrides: Sequence[MediaOverride] 
 - Overrides take precedence over XML media-rep URIs. URI decoding must be explicit and reject non-file/unresolvable schemes.
 - Original is always required and hashed in full. Missing proxy falls back to original for images; missing original fails readiness even when proxy exists.
 - Repeated clip instances resolve to one `ResolvedMedia`; same filename with different content remains distinct.
-- `content_id = sha256("source-content-v1\0" + original_sha256).hexdigest()`; later audio policy augments analysis keys without changing content identity.
+- `asset_content_id = sha256("source-content-v1\0" + original_sha256).hexdigest()`; later audio policy augments analysis keys without changing content identity.
 
 ## Implementation steps
 
@@ -47,7 +47,7 @@ def resolve_media(document: ProjectDocument, overrides: Sequence[MediaOverride] 
 
 ## Acceptance
 
-All focused cases pass offline; identical bytes at different paths share `content_id`, different bytes with the same basename do not, and unresolved originals block. Full check passes with no protected paths changed.
+All focused cases pass offline; identical bytes at different paths share `asset_content_id`, different bytes with the same basename do not, and unresolved originals block. Full check passes with no protected paths changed.
 
 ## Failure route
 
