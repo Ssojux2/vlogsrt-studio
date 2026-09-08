@@ -3,18 +3,25 @@
 P2-01이 잰 시계(`pcm_sample0_file_time`, 변환 후 첫 프레임의 실측 pts)를 그대로
 믿고, 16 kHz s16le PCM을 **내용으로 주소를 매기는** 불변 참조로 저장한다. 참조의
 키는 원본 해시·오디오 정책·원점·PCM 해시·채널·주파수다 — 경로·이름·source_id는
-키 재료가 아니다. 완성물은 곁 기록(해시·정책·측정값)이 전부 맞고 파일 해시까지
-일치할 때만 다시 쓴다.
+키 재료가 아니다. 원본 파일은 통째로 해시해 주어진 정체성과 같은지 직접 확인한다.
+
+**완성물의 정의가 곧 출판 규칙이다.** 완성물은 곁 기록이 목적지 파일을 해시로
+증명하는 짝이다. 출판은 임시 쓰기 → `os.replace` 두 번(PCM, 곁 기록)이지만,
+어느 순간에 죽어도 짝이 어긋난 상태는 **완성물로 읽히지 못 한다** — 다음 빌드가
+재추출로 수복한다. 그래서 새 PCM + 낡은 곁 기록, 낡은 PCM + 새 곁 기록 둘 다
+검증을 통과하지 못 하고, 출판 실패 직전의 유효한 짝은 그대로 다시 쓸 수 있다.
 
 슬라이스는 저장된 그 PCM에서 `[start, end)` 프레임을 **바이트 그대로** 옮긴다.
 시작은 ceil, 끝은 floor — 제거된 오디오의 덧붙임도 문맥도 없고 남은 오디오가
-줄어들 일도 없다. 자를 자리(`quiet_sample`)는 창의 진폭만 잴 뿐 말/침묵을
-판정하지 않는다. 시각은 전부 정확한 `Fraction`이며 float는 들어오지 못한다.
+줄어들 일도 없다. 저장 PCM을 읽는 소비자(슬라이스·자를 자리)는 크기만이 아니라
+해시까지 참조와 대조한다. 자를 자리(`quiet_sample`)는 창의 진폭만 잴 뿐
+말/침묵을 판정하지 않는다. 시각은 전부 정확한 `Fraction`이며 float는 들어오지
+못한다.
 
-참조는 오디오가 **선언된** 자원에만 존재한다. 프로브·추출이 실패하면 여기서
-경로·해시·프레임 수·원점을 지어내지 않고 그대로 죽는다 — 명시적인 unavailable
-처분은 P3-02 소유다(spre disposition 문서). ffmpeg 경계는 P2-01
-(`vlogsrt.preprocess`)이고 이 모듈은 subprocess를 모른다.
+참조는 오디오가 **선언된** 자원에만 존재한다. 프로브·추출이 실패하면 경로·해시·
+프레임 수·원점을 지어내지 않고 문마 있는 오류로 죽는다 — unavailable 타입은
+P3가 소유하고 P7이 만든다. ffmpeg 경계는 P2-01(`vlogsrt.preprocess`)이고 이
+모듈은 subprocess를 모른다.
 """
 
 from __future__ import annotations
@@ -69,12 +76,27 @@ class AudioPolicy:
 
     `stream_index`는 **오디오 순번**(0이면 첫 오디오)이다 — 전역 스트림 번호가
     아니다. 전역 번호는 P2-01이 ffprobe로 얻어 매핑에 쓰고, 참조에는 남기지
-    않는다: 추출 증명(분석 키)이 정책을 묶어 두기 때문이다.
+    않는다: 추출 증명(분석 키)이 정책을 묶어 두기 때문이다. 정책은 **만드는
+    순간**에 온전함을 검사한다 — 잘못된 정책이 든 참조가 아예 생기지 않게.
     """
 
     stream_index: int = 0
     sample_rate: int = 16000
     sample_width: int = 2
+
+    def __post_init__(self) -> None:
+        if _bad_count(self.stream_index) or self.stream_index < 0:
+            raise ValueError(f"오디오 순번은 0 이상 정수여야 한다: {self.stream_index!r}")
+        if _bad_count(self.sample_rate) or self.sample_rate != _CONTRACT_SAMPLE_RATE:
+            raise ValueError(
+                f"저장 PCM의 주파수는 {_CONTRACT_SAMPLE_RATE}Hz가 아니면 안 된다: "
+                f"{self.sample_rate!r}"
+            )
+        if _bad_count(self.sample_width) or self.sample_width != _CONTRACT_SAMPLE_WIDTH:
+            raise ValueError(
+                f"저장 PCM은 s16le다 — 폭은 {_CONTRACT_SAMPLE_WIDTH}바이트여야 한다: "
+                f"{self.sample_width!r}"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,15 +152,18 @@ def build_reference(
 ) -> PcmReference:
     """원본에서 PCM 참조를 만들어 `destination`에 원자적으로 저장한다.
 
-    `destination`이 이미 있을 때 **재사용하는 조건은 전부**다: 곁 기록의 정체성·
-    정책·측정값이 이번 호출과 같고, 파일 크기가 프레임 수와 맞고, 파일 해시까지
-    곁 기록과 일치한다. 하나라도 어긋나면 다시 뽑아 덮어쓴다.
+    원본은 통째로 해시해 `original_sha256`과 같은지 먼저 확인한다 — 재사용이든
+    추출이든 그 앞에서. `destination`이 이미 있을 때 **재사용하는 조건은
+    전부**다: 곁 기록의 정체성·정책·측정값이 이번 호출과 같고, 파일 크기가
+    프레임 수와 맞고, 파일 해시까지 곁 기록과 일치한다. 하나라도 어긋나면 다시
+    뽑아 덮어쓴다. 원본 미디어를 덮어쓰는 경로는 시작 전에 거부한다.
     """
     _require_text(source_id, "source_id")
     _require_text(original_stem, "original_stem")
     _require_text(original_sha256, "original_sha256")
-    _require_policy(policy)
     sidecar = _sidecar_path(destination)
+    _require_distinct_paths(original, destination, sidecar)
+    _require_original_identity(original, original_sha256)
     reusable = _reusable_reference(
         destination, sidecar, source_id, original_stem, original_sha256, policy
     )
@@ -173,9 +198,12 @@ def write_wav_slice(reference: PcmReference, samples: SampleRange, destination: 
     """저장 PCM의 `[start, end)` 프레임을 보통의 WAV 헤더만 붙여 옮긴다.
 
     데이터는 저장된 바이트 그대로다 — 다시 인코딩하지 않고, 채널 인터리브도
-    그대로다. 제거된 오디오의 덧붙임이나 문맥은 없다.
+    그대로다. 제거된 오디오의 덧붙임이나 문맥은 없다. 저장 PCM 자신의 경로로는
+    못 쓴다 — 불변 원본을 슬라이스로 갈아끼우는 일이 없게.
     """
     _require_slice(reference, samples)
+    if destination.resolve() == reference.path.resolve():
+        raise ValueError(f"슬라이스가 저장 PCM 자리로는 못 간다: {destination} == {reference.path}")
     data = _read_stored_bytes(reference, samples.start, samples.end - samples.start)
     temp = _begin_atomic(destination)
     try:
@@ -232,7 +260,7 @@ def quiet_sample(
     return best[2]
 
 
-def sample_file_time(reference: PcmReference, sample_index: int) -> Fraction:
+def _sample_file_time(reference: PcmReference, sample_index: int) -> Fraction:
     """`file_time = sample_index/sample_rate + 원점` — 정확한 유리수 한 줄."""
     _require_frame("sample_index", sample_index, reference.sample_count)
     return Fraction(sample_index, reference.sample_rate) + reference.pcm_sample0_file_time
@@ -252,7 +280,12 @@ def _extract_reference(
     destination: Path,
     sidecar: Path,
 ) -> PcmReference:
-    """P2-01로 임시 파일에 뽑고, 해시로 검증한 뒤 원자적으로 갈아끼운다."""
+    """P2-01로 임시 파일에 뽑고, 해시로 검증한 뒤 갈아끼운다.
+
+    PCM을 먼저, 곁 기록을 나중에 둔다. 곁 기록이 쓰히기 전에 죽으면 목적지만
+    새로운 미완성 상태다 — 곁 기록이 증명하지 않는 파일은 완성물로 읽히지
+    못 하므로 다음 빌드가 다시 뽑는다.
+    """
     temp = _begin_atomic(destination)
     try:
         extraction = extract_pcm_s16le(
@@ -320,7 +353,11 @@ def _reusable_reference(
     original_sha256: str,
     policy: AudioPolicy,
 ) -> PcmReference | None:
-    """곁 기록·파일 해시가 전부 맞는 완성물만 되살린다."""
+    """곁 기록·파일 해시가 전부 맞는 완성물만 되살린다.
+
+    짝이 어긋난 어떤 상태(새 PCM + 낡은 곁 기록, 그 반대)도 여기를 통과하지
+    못 한다 — 통과하지 못 한 짝은 완성물이 아니므로 재추출이 곧 수복이다.
+    """
     record = _load_sidecar(sidecar)
     if record is None:
         return None
@@ -336,7 +373,9 @@ def _reusable_reference(
         or stored.policy != policy
     ):
         return None
-    if not _verify_stored(destination, stored):
+    expected = stored.sample_count * stored.policy.sample_width * stored.channels
+    if stored.channels < 1 or not _stored_file_matches(destination, expected, stored.pcm_sha256):
+        log.warn(f"저장 PCM이 곁 기록과 어긋난다 — 다시 뽑는다: {destination}")
         return None
     log.debug(f"검증된 PCM 참조를 다시 쓴다: {destination}")
     return _assemble_reference(
@@ -361,7 +400,21 @@ def _analysis_key(
     sample_rate: int,
 ) -> str:
     """내용이 키다 — 원본 해시·정책·원점·PCM 해시·채널·주파수의 해시."""
-    material = "\n".join(
+    return hashlib.sha256(
+        _key_material(original_sha256, policy, origin, pcm_sha256, channels, sample_rate).encode()
+    ).hexdigest()
+
+
+def _key_material(
+    original_sha256: str,
+    policy: AudioPolicy,
+    origin: Fraction,
+    pcm_sha256: str,
+    channels: int,
+    sample_rate: int,
+) -> str:
+    """키 재료 — 이름 붙은 줄마다 하나의 입력이다. 경로·이름·source_id는 없다."""
+    return "\n".join(
         [
             _KEY_DOMAIN,
             f"original_sha256={original_sha256}",
@@ -374,33 +427,20 @@ def _analysis_key(
             f"sample_rate={sample_rate}",
         ]
     )
-    return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
 def _sidecar_path(destination: Path) -> Path:
     return destination.with_name(destination.name + _SIDECAR_SUFFIX)
 
 
-def _verify_stored(destination: Path, stored: _Stored) -> bool:
-    """파일이 곁 기록이 말하는 것과 같은지 — 크기부터, 해시까지."""
-    expected = stored.sample_count * stored.policy.sample_width * stored.channels
-    if stored.channels < 1 or not destination.is_file():
+def _stored_file_matches(path: Path, expected_bytes: int, expected_sha256: str) -> bool:
+    if not path.is_file() or path.stat().st_size != expected_bytes:
         return False
-    actual = destination.stat().st_size
-    if actual != expected:
-        log.warn(
-            f"저장 PCM 크기가 곁 기록과 어긋난다 — 다시 뽑는다: {destination} "
-            f"(기록 {expected} 바이트, 실제 {actual} 바이트)"
-        )
-        return False
-    if _sha256_file(destination) != stored.pcm_sha256:
-        log.warn(f"저장 PCM 해시가 곁 기록과 어긋난다 — 다시 뽑는다: {destination}")
-        return False
-    return True
+    return _sha256_file(path) == expected_sha256
 
 
 def _write_sidecar(sidecar: Path, reference: PcmReference, policy: AudioPolicy) -> None:
-    """완성물의 사실을 곁에 남긴다 — PCM 다음에 쓰므로 남은 쪽이 늘 진실을 말한다."""
+    """완성물의 사실을 곁에 남긴다 — PCM 다음에 쓰므로 증명하는 쪽이 늘 진실이다."""
     record: dict[str, object] = {
         "format": _SIDECAR_FORMAT,
         "source_id": reference.source_id,
@@ -470,24 +510,36 @@ def _parse_fraction(value: object) -> Fraction:
     if not isinstance(value, str):
         raise ValueError(f"원점 기록이 문자열이 아니다: {value!r}")
     numerator, _, denominator = value.partition("/")
-    return Fraction(int(numerator), int(denominator))
+    try:
+        return Fraction(int(numerator), int(denominator))
+    except ZeroDivisionError as exc:
+        raise ValueError(f"원점 기록의 분모가 0이다: {value!r}") from exc
 
 
 # ─────────────────────────────────────────────────────────────
-#  저장 PCM 읽기 — 크기 검증과 묶인 읽기
+#  저장 PCM 읽기 — 크기·해시 검증과 묶인 읽기
 # ─────────────────────────────────────────────────────────────
 
 
 def _read_stored_bytes(reference: PcmReference, start_frame: int, frame_count: int) -> bytes:
+    """저장 PCM에서 프레임 범위를 읽는다 — 읽기 전에 파일 전체를 해시로 대조한다.
+
+    크기만 같고 내용이 바뀐 파일은 참조가 아니다. 같은 길이의 조용한 변조도
+    걸리게 하려면 통째로 해시하는 수밖에 없다.
+    """
     frame_bytes = _CONTRACT_SAMPLE_WIDTH * reference.channels
     expected = reference.sample_count * frame_bytes
-    if not reference.path.is_file() or reference.path.stat().st_size != expected:
-        actual = reference.path.stat().st_size if reference.path.is_file() else None
+    if not reference.path.is_file():
+        raise RuntimeError(f"저장 PCM이 없다: {reference.path}")
+    actual = reference.path.stat().st_size
+    if actual != expected:
         raise RuntimeError(
             f"저장 PCM이 참조와 어긋난다: {reference.path} "
             f"(기록 {reference.sample_count}프레임 × {frame_bytes}바이트 "
             f"= {expected}, 실제 {actual})"
         )
+    if _sha256_file(reference.path) != reference.pcm_sha256:
+        raise RuntimeError(f"저장 PCM 해시가 참조와 어긋난다: {reference.path}")
     with reference.path.open("rb") as handle:
         handle.seek(start_frame * frame_bytes)
         data = handle.read(frame_count * frame_bytes)
@@ -506,7 +558,7 @@ def _window_abs_peak(values: array.array[int], start: int, window: int) -> int:
 
 
 # ─────────────────────────────────────────────────────────────
-#  검증·공용구 — 세는 수와 문자열과 원자적 쓰기
+#  검증·공용구 — 세는 수·문자열·경로·원자적 쓰기
 # ─────────────────────────────────────────────────────────────
 
 
@@ -515,18 +567,25 @@ def _require_text(value: object, name: str) -> None:
         raise ValueError(f"{name}은 비지 않은 문자열이어야 한다: {value!r}")
 
 
-def _require_policy(policy: AudioPolicy) -> None:
-    if _bad_count(policy.stream_index) or policy.stream_index < 0:
-        raise ValueError(f"오디오 순번은 0 이상 정수여야 한다: {policy.stream_index!r}")
-    if _bad_count(policy.sample_rate) or policy.sample_rate != _CONTRACT_SAMPLE_RATE:
+def _require_distinct_paths(original: Path, destination: Path, sidecar: Path) -> None:
+    """원본 미디어는 참조가 사는 곳에 살면 안 된다 — 덮어쓸 수 있기 때문이다."""
+    resolved_original = original.resolve()
+    if resolved_original in {destination.resolve(), sidecar.resolve()}:
         raise ValueError(
-            f"저장 PCM의 주파수는 {_CONTRACT_SAMPLE_RATE}Hz가 아니면 안 된다: "
-            f"{policy.sample_rate!r}"
+            f"경로가 충돌한다 — 원본을 덮어쓸 수 없다: 원본 {original}, "
+            f"목적지 {destination}, 곁 기록 {sidecar}"
         )
-    if _bad_count(policy.sample_width) or policy.sample_width != _CONTRACT_SAMPLE_WIDTH:
+
+
+def _require_original_identity(original: Path, original_sha256: str) -> None:
+    """원본을 통째로 해시해 주어진 정체성과 같은지 — 재사용·추출 전에."""
+    if not original.is_file():
+        raise ValueError(f"원본 파일이 없다: {original}")
+    digest = _sha256_file(original)
+    if digest != original_sha256:
         raise ValueError(
-            f"저장 PCM은 s16le다 — 폭은 {_CONTRACT_SAMPLE_WIDTH}바이트여야 한다: "
-            f"{policy.sample_width!r}"
+            f"원본 해시가 주어진 정체성과 다르다: {original} "
+            f"(주어진 {original_sha256}, 실제 {digest})"
         )
 
 
