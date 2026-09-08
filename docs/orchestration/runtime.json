@@ -139,5 +139,22 @@
     "terminal": "term_0443f96f-45f0-429b-b385-d59e1e7130d7",
     "launch": "reused exact initial Opus5 high session",
     "purpose": "reconcile bootstrap review with Astra disposition"
+  },
+  "opus_p0_support": {
+    "task_id": "task_a70b03288740",
+    "dispatch_id": "ctx_9e309f79053a",
+    "terminal": "term_0443f96f-45f0-429b-b385-d59e1e7130d7"
+  },
+  "p0_glm": {
+    "run_id": "run_b6d40d052690",
+    "task_id": "task_f7788389960b",
+    "dispatch_id": "ctx_df9c602e28a2",
+    "terminal": "term_ea415fa1-9b4f-402d-922f-4d6dbe039b22",
+    "worktree": "/Users/ssojux2/orca/workspaces/vlogsrt/fcp-p0-contract",
+    "branch": "Ssojux2/fcp-p0-contract",
+    "base": "676460111bad5ef04cbc9d5c776940611fa938a7",
+    "command": "claude-glm --model 'glm-5.3[1m]' --effort max",
+    "supervisor": "Opus5 support for Sol-authored P0 brief",
+    "state": "launched"
   }
 }
