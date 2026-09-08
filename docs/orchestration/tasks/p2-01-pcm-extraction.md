@@ -55,4 +55,4 @@ Report probe JSON fragment without personal paths, exact argv/exit/tail, expecte
 
 ## Report
 
-Report Orca/launch IDs, branch/base/commit, files, tests, and `ready-to-integrate`; real source-media extraction remains pending unless a non-protected synthetic file is generated during test.
+After committing, report Orca/launch IDs, branch/base/immutable commit, files, tests, and `ready-to-integrate` as a review-ready checkpoint; real source-media extraction remains pending unless a non-protected synthetic file is generated during test. Ask Sol and wait; a Sol pass routes the SHA to Astra but the same Dispatch remains active for Astra's final acceptance or bounded findings before `worker_done`.

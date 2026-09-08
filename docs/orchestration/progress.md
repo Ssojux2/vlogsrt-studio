@@ -134,7 +134,7 @@ By explicit Astra dependency audit, P0-03 may run from `58bb25347319301391064d6b
 ## Review and integration protocol
 
 1. Opus records shared-contract/phase findings under `docs/orchestration/reviews/`; Sol resolves ambiguity in task briefs before dispatch.
-2. Each GLM commits, then reports an immutable review-ready SHA with launch receipt, exact base, branch, changed files, failing-first evidence, scoped tests, and `make check`; it waits on an Orca ask before `worker_done`.
-3. Sol inspects scope and evidence. Opus reviews nontrivial shared contracts and phase diffs. Corrections are issued to the same still-active GLM Dispatch before review approval, never edited into product code by managers.
+2. Each GLM commits, then reports an immutable review-ready SHA with launch receipt, exact base, branch, changed files, failing-first evidence, scoped tests, and `make check`; it waits on an Orca ask. A Sol pass routes the exact SHA to Astra but does not yet authorize `worker_done`.
+3. Sol inspects scope and evidence. Opus reviews nontrivial shared contracts and phase diffs when available; Astra gives the final exact-SHA disposition. Corrections are issued to the same still-active GLM Dispatch, and only Astra acceptance releases it to `worker_done`; managers never edit product code.
 4. After two repetitions of the same failure, request Terra high (root cause) and Luna high (minimal repro/test evidence), read-only. If synthesis fails, escalate to Opus, then Astra; code still returns to GLM.
 5. Sol sends `merge_ready` with exact branch/commit/base/test/review data. Astra integrates, verifies, records the merge SHA, and only then releases the next phase.

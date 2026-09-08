@@ -62,4 +62,4 @@ Report the exact rational input, rate, anchor, expected/actual numerator/denomin
 
 ## Report
 
-Provide Orca IDs/launch receipt, branch/base/commit, files, failing-first test, focused/full results, and remaining findings; state `ready-to-integrate` only.
+After committing, provide Orca IDs/launch receipt, branch/base/immutable commit, files, failing-first test, focused/full results, and remaining findings as a review-ready checkpoint, then ask Sol and wait. A Sol pass sends the SHA to Astra but is not permission for `worker_done`: remain in the same Dispatch for Astra's final disposition, apply any bounded finding there, and finish only after Astra accepts the exact SHA. State `ready-to-integrate`, never merged.

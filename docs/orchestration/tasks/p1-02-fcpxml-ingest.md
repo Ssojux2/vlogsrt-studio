@@ -2,7 +2,7 @@
 
 ## Authority
 
-Binding spec `Input and output` plus `Source analysis, clocks, identity`; depends on P1-01. Opus must review the frozen model names before dispatch because P1-03/P1-05 consume them.
+Binding spec `Input and output` plus `Source analysis, clocks, identity`; depends on P1-01. Because P1-03/P1-05 consume the frozen model names, their cross-task compatibility required manager review before dispatch. Opus was service-limited on 2026-09-09, so Astra read P1-01/P1-02/P1-03/P1-04/P1-05 together and explicitly approved the exact names/signatures below under the user-authorized final-review fallback; record that disposition and do not wait for a duplicate pre-dispatch review.
 
 ## Baseline and ownership
 
@@ -97,4 +97,4 @@ Report minimal XML, location/reason mismatch, exact base/commit and commands. Do
 
 ## Report
 
-Report Orca IDs/launch receipt, branch/base/commit, files, failing-first and full evidence, unsupported cases, and `ready-to-integrate` status.
+After committing, report Orca IDs/launch receipt, branch/base/immutable commit, files, failing-first and full evidence, unsupported cases, and `ready-to-integrate` as a review-ready checkpoint. Ask Sol and wait; after Sol passes, continue waiting in the same Dispatch for Astra's exact-SHA acceptance or bounded findings before `worker_done`.
