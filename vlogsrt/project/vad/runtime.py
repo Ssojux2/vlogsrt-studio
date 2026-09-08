@@ -228,11 +228,18 @@ def _assert_numpy_capable() -> None:
         raise VadUnavailable(
             f"numpy가 없다 — 선택 extra를 깔아야 한다: pip install 'vlogsrt[project]' ({exc})"
         ) from exc
+    # 능력 판정 전체를 보호한다 — ndarray·dtype 접근이 반쯤 깨진 모듈에서는
+    # AttributeError/TypeError로 터지는데, 그것마저 문맥 없이 새어 나가면
+    # 실패 닫힘이 아니다.
     try:
         probe: Any = numpy.zeros((1, 1), dtype=numpy.float32)
+        is_array = isinstance(probe, numpy.ndarray)
+        dtype_name = str(probe.dtype)
     except Exception as exc:
-        raise VadUnavailable(f"numpy가 계약에 필요한 float32 배열을 만들지 못한다: {exc}") from exc
-    if not isinstance(probe, numpy.ndarray) or str(probe.dtype) != "float32":
+        raise VadUnavailable(
+            f"numpy가 계약에 필요한 float32 배열 능력을 갖추지 못했다: {exc}"
+        ) from exc
+    if not is_array or dtype_name != "float32":
         raise VadUnavailable("numpy가 만든 배열이 계약과 다르다 — float32 ndarray가 나오지 않는다")
 
 

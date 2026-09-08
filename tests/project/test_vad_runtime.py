@@ -495,6 +495,72 @@ def test_numpy_that_cannot_make_float32_is_contextual(
         create_cpu_session(artifact)
 
 
+def test_numpy_without_ndarray_attribute_is_contextual(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """float32·zeros는 있는데 ndarray가 없으면 능력 검사 자체가 터진다 — 닫아야 한다."""
+
+    class _Array:
+        dtype = "float32"
+
+    fake = types.ModuleType("numpy")
+    fake.float32 = "float32"  # type: ignore[attr-defined]
+    fake.zeros = lambda shape, dtype=None: _Array()  # type: ignore[attr-defined]
+    # ndarray 속성은 일부러 없다.
+    _install_fake_runtime(monkeypatch)
+    monkeypatch.setitem(sys.modules, "numpy", fake)
+
+    from vlogsrt.project.vad.runtime import VadUnavailable, bundled_artifact, create_cpu_session
+
+    artifact = bundled_artifact(ProjectConfig())
+    with pytest.raises(VadUnavailable, match="numpy"):
+        create_cpu_session(artifact)
+
+
+def test_numpy_with_nontype_ndarray_is_contextual(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ndarray가 타입이 아니면 isinstance가 TypeError를 낸다 — 새어 나가면 안 된다."""
+
+    class _Array:
+        dtype = "float32"
+
+    fake = types.ModuleType("numpy")
+    fake.float32 = "float32"  # type: ignore[attr-defined]
+    fake.ndarray = "not-a-type"  # type: ignore[attr-defined]
+    fake.zeros = lambda shape, dtype=None: _Array()  # type: ignore[attr-defined]
+    _install_fake_runtime(monkeypatch)
+    monkeypatch.setitem(sys.modules, "numpy", fake)
+
+    from vlogsrt.project.vad.runtime import VadUnavailable, bundled_artifact, create_cpu_session
+
+    artifact = bundled_artifact(ProjectConfig())
+    with pytest.raises(VadUnavailable, match="numpy"):
+        create_cpu_session(artifact)
+
+
+def test_numpy_array_without_dtype_is_contextual(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """배열에 dtype이 없어도 능력 판정은 문맥 있는 실패여야 한다."""
+
+    class _NoDtype:
+        pass
+
+    fake = types.ModuleType("numpy")
+    fake.float32 = "float32"  # type: ignore[attr-defined]
+    fake.ndarray = _NoDtype  # type: ignore[attr-defined]
+    fake.zeros = lambda shape, dtype=None: _NoDtype()  # type: ignore[attr-defined]
+    _install_fake_runtime(monkeypatch)
+    monkeypatch.setitem(sys.modules, "numpy", fake)
+
+    from vlogsrt.project.vad.runtime import VadUnavailable, bundled_artifact, create_cpu_session
+
+    artifact = bundled_artifact(ProjectConfig())
+    with pytest.raises(VadUnavailable, match="numpy"):
+        create_cpu_session(artifact)
+
+
 def test_session_constructor_failure_is_contextual(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
