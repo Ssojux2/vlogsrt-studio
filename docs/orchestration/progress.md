@@ -33,6 +33,7 @@
 | GLM P0-02 correction | `task_7d03430673e1` | `ctx_51f56ba3df5c` | completed `51319b9`; reconciliation still open |
 | GLM P0-02b reconciliation | `task_eb3e9e09ca7f` | `ctx_6ca746e225d0` | completed `972a814`; two direct regressions found |
 | GLM P0-02c regression fix | `task_73facc46450a` | `ctx_673955f2284e` | active in child Run `run_8f41d4a91c5d`, terminal `term_3aaadfca-ba88-4152-a686-747ec12deeb1` |
+| GLM P0-03 source byte lock | launch pending from exact `58bb25347319301391064d6ba9b6aad33a58f51c` | child Run `run_8f41d4a91c5d` | Astra-authorized independent test-only parallel slot |
 
 Initial gate message IDs: root `msg_d8fc69fe164a`; Opus `msg_0f70e95b09f7`.
 
@@ -54,9 +55,9 @@ Initial gate message IDs: root `msg_d8fc69fe164a`; Opus `msg_0f70e95b09f7`.
 Arrows mean hard dependencies. A bracketed pair is the only permitted two-writer parallel wave; all other tasks are serial. Every phase ends at an Astra integration checkpoint, whose merge SHA becomes the next phase base.
 
 ```text
-P0-01 environment evidence -> P0-02 source/derived contract guard
-                           -> [P0-03 legacy SOURCE SRT byte lock,
-                               P0-04 project package/config skeleton] -> Astra P0 merge
+P0-01 environment evidence -> P0-02 source/derived contract guard -> P0-04 project package/config skeleton
+P0-01 environment evidence -> P0-03 legacy SOURCE SRT byte lock (Astra dependency exception)
+                           -> [P0-02/P0-04 lineage + P0-03] -> Astra P0 merge
                               |-> P1-01 rational time -> P1-02 FCPXML ingest
                               |                         -> [P1-03 media identity, P1-04 XML validation]
                               |                         -> P1-05 roundtrip -> Astra P1 merge
@@ -85,7 +86,7 @@ P6 merge -> P7-01 workspace revisions -> P7-02 budget/cancel/resume runner
          -> PENDING_HUMAN live Final Cut/media/model acceptance
 ```
 
-P0-03 and P0-04 may execute concurrently from the same corrected P0-02 merge SHA: P0-03 owns only `tests/test_source_immutability.py`, while P0-04 owns the new project package/config/model skeleton plus `tests/project/test_project_config.py`; neither edits the invariant checker/tests or a fixture/golden file. P1 and P2 may execute concurrently after P0 integration, because they start from the same approved P0 SHA and own disjoint files; Astra must integrate both before P3. In P5, VAD and vision may execute concurrently only at the explicit first wave above; their follow-ups remain serial within each branch. P7-04 and P7-05 may run together only from the same integrated P7-03 SHA; they own disjoint reproject/commands versus UI paths and join before P7-06.
+By explicit Astra dependency audit, P0-03 may run from `58bb25347319301391064d6ba9b6aad33a58f51c` while P0-02c is active: it owns only `tests/test_source_immutability.py` and consumes unchanged legacy source behavior, no checker API or project package. P0-04 still waits for corrected P0-02 integration; Astra joins all three reviewed results at the P0 checkpoint. P1 and P2 may execute concurrently after P0 integration, because they start from the same approved P0 SHA and own disjoint files; Astra must integrate both before P3. In P5, VAD and vision may execute concurrently only at the explicit first wave above; their follow-ups remain serial within each branch. P7-04 and P7-05 may run together only from the same integrated P7-03 SHA; they own disjoint reproject/commands versus UI paths and join before P7-06.
 
 ## Task ledger
 
@@ -93,7 +94,7 @@ P0-03 and P0-04 may execute concurrently from the same corrected P0-02 merge SHA
 |---|---|---|---|---|
 | [P0-01](tasks/p0-01-environment.md) | reproducible Python 3.12 venv and baseline evidence | bootstrap commit | none (ignored `.venv` only) | complete; evidence-only |
 | [P0-02](tasks/p0-02-contract-guard.md) / [P0-02b](tasks/p0-02b-contract-reconciliation.md) / [P0-02c](tasks/p0-02c-contract-regressions.md) | source/derived dependency and subprocess contract | P0-01 | contract doc, pyproject, invariant script/tests | `972a814`; final two regression fixes active |
-| [P0-03](tasks/p0-03-source-byte-lock.md) | exact synthetic legacy SOURCE SRT regression | corrected P0-02 merge | `tests/test_source_immutability.py` only | ready; parallel with P0-04 |
+| [P0-03](tasks/p0-03-source-byte-lock.md) | exact synthetic legacy SOURCE SRT regression | exact `58bb253` by Astra exception; joins corrected P0-02/P0-04 at phase gate | `tests/test_source_immutability.py` only | launching in independent slot |
 | [P0-04](tasks/p0-04-project-skeleton.md) | isolated project package/config/FCPXML-model namespace skeleton | corrected P0-02 merge | project package/config/models + config test only | ready; parallel with P0-03 |
 | [P1-01](tasks/p1-01-rational-time.md) | exact FCP rational/frame math | P0 merge | project time module/tests | drafted |
 | [P1-02](tasks/p1-02-fcpxml-ingest.md) | FCPXML/bundle parser and rejection surface | P1-01 | project FCPXML models/parser/tests | drafted |
@@ -130,7 +131,7 @@ P0-03 and P0-04 may execute concurrently from the same corrected P0-02 merge SHA
 ## Review and integration protocol
 
 1. Opus records shared-contract/phase findings under `docs/orchestration/reviews/`; Sol resolves ambiguity in task briefs before dispatch.
-2. Each GLM reports launch receipt, exact base SHA, branch, commit(s), changed files, failing-first test evidence, scoped tests, and `make check`.
-3. Sol inspects scope and evidence. Opus reviews nontrivial shared contracts and phase diffs. Corrections are issued to GLM, never edited into product code by managers.
+2. Each GLM commits, then reports an immutable review-ready SHA with launch receipt, exact base, branch, changed files, failing-first evidence, scoped tests, and `make check`; it waits on an Orca ask before `worker_done`.
+3. Sol inspects scope and evidence. Opus reviews nontrivial shared contracts and phase diffs. Corrections are issued to the same still-active GLM Dispatch before review approval, never edited into product code by managers.
 4. After two repetitions of the same failure, request Terra high (root cause) and Luna high (minimal repro/test evidence), read-only. If synthesis fails, escalate to Opus, then Astra; code still returns to GLM.
 5. Sol sends `merge_ready` with exact branch/commit/base/test/review data. Astra integrates, verifies, records the merge SHA, and only then releases the next phase.

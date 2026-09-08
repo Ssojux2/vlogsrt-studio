@@ -2,11 +2,11 @@
 
 ## Authority
 
-Binding source-immutability contract and Astra bootstrap disposition. This task runs only after P0-02 is integrated. It proves the existing source engine remains byte-identical before any legacy source module is modified in later phases.
+Binding source-immutability contract and Astra bootstrap disposition. Astra's 2026-09-08 dependency audit explicitly authorizes this test-only task to run independently from exact root commit `58bb25347319301391064d6ba9b6aad33a58f51c` while the disjoint P0-02c checker correction is active. It proves the existing source engine remains byte-identical before any legacy source module is modified in later phases; phase integration still waits for every P0 task.
 
 ## Baseline and ownership
 
-- Baseline: exact corrected P0-02 integration SHA supplied by Astra; abort on mismatch. May run parallel with P0-04 from that same SHA.
+- Baseline: exactly `58bb25347319301391064d6ba9b6aad33a58f51c`; abort on mismatch. This is a one-task dependency exception authorized by Astra because the owned test exercises only unchanged legacy source behavior and consumes no P0-02 checker API or project-package code.
 - Fresh branch/worktree: `fcp-p0-source-bytes`, explicitly based on that SHA.
 - Create only `tests/test_source_immutability.py`, using inline data, existing read-only offline fixture inputs where needed, and pytest `tmp_path` for generated output.
 - Product runtime files are read-only. Existing `golden/**`, `tests/fixtures/api/**`, and `.env*` are forbidden.
@@ -40,4 +40,4 @@ Report the named synthetic shape, first byte offset and expected/actual escaped 
 
 ## Report
 
-Report launch receipt/model/effort, exact base/branch/worktree, commit SHA, owned paths, mutation-failure evidence, focused tests, and `make check`. State is `ready-to-integrate`, not merged.
+After committing, report launch receipt/model/effort, exact base/branch/worktree, immutable commit SHA, owned paths, mutation-failure evidence, focused tests, and `make check` as a review-ready checkpoint. Ask the Sol manager for review disposition and wait before `worker_done`; apply any bounded findings in this same Dispatch. Final state is `ready-to-integrate`, not merged.
