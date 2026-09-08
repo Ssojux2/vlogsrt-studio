@@ -26,6 +26,7 @@ class ResolvedMedia:
     original: Path
     image_source: Path
     original_sha256: str
+    has_audio: bool
     used_proxy: bool
 
 def load_media_map(path: Path) -> tuple[MediaOverride, ...]: ...
@@ -36,18 +37,19 @@ def resolve_media(document: ProjectDocument, overrides: Sequence[MediaOverride] 
 - Map overrides by exact XML `resource_id`; reject duplicate/unknown keys. A raw ID such as `r2` is only a lookup key within the specific current input document identified by its hash; it is never a durable identity, cross-document rebind key, or exported media identity. Never match by filename/stem.
 - Overrides take precedence over XML media-rep URIs. URI decoding must be explicit and reject non-file/unresolvable schemes.
 - Original is always required and hashed in full. Missing proxy falls back to original for images; missing original fails readiness even when proxy exists.
+- `has_audio` is copied from the exact matched `AssetResource`; never infer it from file extension, bytes, stream probing, or another resource with the same content hash.
 - Repeated clip instances resolve to one `ResolvedMedia`; same filename with different content remains distinct.
 - `asset_content_id = sha256("source-content-v1\0" + original_sha256).hexdigest()`; later audio policy augments analysis keys without changing content identity.
 
 ## Implementation steps
 
-1. Write failing tests for override precedence, percent-encoded file URIs, same-name/different-content, repeated instances, missing proxy fallback, missing original failure, unknown/duplicate map entries, and reuse of the same raw `r2` ID in two different documents without cross-document binding.
+1. Write failing tests for override precedence, percent-encoded file URIs, same-name/different-content, repeated instances, missing proxy fallback, missing original failure, unknown/duplicate map entries, reuse of the same raw `r2` ID in two different documents without cross-document binding, and equal content bytes referenced by resources with different `has_audio` declarations.
 2. Implement deterministic full hashing and resolution without opening any FCP database.
 3. Run focused tests/invariants/`make check`; commit owned files only.
 
 ## Acceptance
 
-All focused cases pass offline; identical bytes at different paths share `asset_content_id`, different bytes with the same basename do not, and unresolved originals block. Full check passes with no protected paths changed.
+All focused cases pass offline; identical bytes at different paths share `asset_content_id` without coalescing resource-level `has_audio`, different bytes with the same basename do not, and unresolved originals block. Full check passes with no protected paths changed.
 
 ## Failure route
 

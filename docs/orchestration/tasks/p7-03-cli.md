@@ -42,6 +42,7 @@ def run_project_action(
 - The bridge imports only public `vlogsrt.project.commands` and delegates every action to that layer. It exists so `ui.service` can import `vlogsrt.cli` without importing `vlogsrt.project` and without duplicating logic or spawning a subprocess; emitted mappings contain only sanitized progress/status/result paths.
 
 - `inspect` parses/resolves/estimates only and prints readiness/cost; no network.
+- `inspect` reports every resource-scoped audio disposition: `no_audio: keep/review` for declared absence, retryable failed state for pre-PCM error, and the normal typed trace status after a real reference. It never labels pre-PCM error completed or billable, and unknown persisted variants/schema revisions exit before calls.
 - `analyze` and `run` require both explicit `--online` and existing cost confirmation/`--yes`; absence refuses before any call. Tests inject fakes only.
 - Only after both authorizations may the CLI composition resolve the separately configured vision credential names and pass explicit values into the vision client factory. It must not reuse `OPENAI_API_KEY`/`OPENAI_BASE_URL`, print/log secret values, or read any key for offline commands; tests use a sentinel mapping/loader rather than real `.env` or process secrets.
 - `plan`, `export`, and `captions` force runner `allow_network=False` regardless of environment.

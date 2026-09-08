@@ -32,7 +32,7 @@ def partition_blocks(document: ProjectDocument, media: Sequence[ResolvedMedia], 
 ```
 
 - Eligible runs are complements of the instance guard inside each original audible clip, only when all required analysis succeeded and run length is at least frame-ceiled 6 seconds. Never cross a clip/gap/instance boundary.
-- Locked/broken/uncertain/muted/disabled instances yield no edit blocks.
+- Locked/broken/uncertain/muted/disabled/declared-no-audio/pre-PCM-unavailable instances yield no edit blocks. A video-only slice is conservative keep-all, not analysis success or removable silence.
 - For run length `L`, try `n=ceil(L/max_frames)` balanced integer-frame blocks whose sizes differ by <=1 frame. Use them only if every block >= min frames; otherwise take greedy max-frame blocks and keep the short remainder unchanged.
 - `min_frames=ceil(6s/frame)`, `max_frames=floor(10s/frame)`, `keep_frames=nearest(3s/frame)`, all from config/timebase.
 - Each block has beginning/middle/end keep candidates of exactly `keep_frames` when possible, deduplicated by exact frame interval; never a full-delete candidate.

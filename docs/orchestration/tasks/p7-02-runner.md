@@ -32,19 +32,23 @@ class RunCheckpoint:
     completed_request_ids: tuple[str, ...]
     pending_request_ids: tuple[str, ...]
 
-def estimate_cost(inputs: ProjectDocument, traces: Sequence[SourceTrace], boundaries: Sequence[BoundaryRequest], vision_requests: Sequence[VisionRequest], cfg: ProjectConfig) -> CostEstimate: ...
+def estimate_cost(inputs: ProjectDocument, traces: Sequence[SourceAnalysis], boundaries: Sequence[BoundaryRequest], vision_requests: Sequence[VisionRequest], cfg: ProjectConfig) -> CostEstimate: ...
 def run_stage(stage: str, workspace: Path, *, allow_network: bool, cancellation: CancellationToken, clients: Mapping[str, object]) -> RunCheckpoint: ...
 ```
 
 - Estimate unique full-source audio plus repair/verify/boundary audio and images before any call; deduplicate by strong request key.
+- Before P3 aggregation, the runner maps each resolved resource exactly once. It constructs `UnavailableSourceAudio(status="no_audio", reason_code="declared_no_audio")` for a declared-no-audio resource, or catches a contextual P2 probe/extraction/reference failure and constructs the matching resource-scoped `status="error"` variant. P2 never imports P3 or constructs these records; no STT/VAD is scheduled until a real reference exists.
+- Declared-no-audio is completed and non-billable. A pre-PCM error is a retryable failed attempt: explicit resume may rerun preprocessing under policy and must not reuse it as completed success forever. Operational failure after a real reference remains an error `SourceTrace` with real provenance.
+- Cost estimation accepts the full `Sequence[SourceAnalysis]`; unavailable variants add zero audio/repair/VAD cost. Resource-scoped unavailable records cannot suppress a valid shared content/analysis-key trace for another resource with equal bytes.
 - Only `analyze` (and full `run` while executing its analyze stage) may use clients/network, and only with `allow_network=True`. `inspect`, `plan`, `export`, `captions` hard-fail any attempted client use.
 - Cancellation stops scheduling new requests, lets in-flight result checkpoint if it returns, then records pending IDs. Resume reuses completed exact-key artifacts and schedules only pending/missing.
 - 429/timeout/malformed/model-missing errors persist per request and preserve affected content; lost response has no exactly-once billing claim.
 - Stale/mixed revisions fail before scheduling.
+- Unknown analysis variants/schema revisions and malformed resource/content identity reject before scheduling or client construction.
 
 ## Implementation steps
 
-1. Write failing fake-client tests for cost dedup, every stage network gate, cancellation before/between/in-flight requests, resume, 429/timeout/malformed/missing model, stale plan, and duplicate billing disclaimer state.
+1. Write failing fake-client tests for cost dedup over `Sequence[SourceAnalysis]`, every stage network gate, cancellation before/between/in-flight requests, resume, declared-no-audio zero-call completed reuse, retryable pre-PCM failures, equal-content/differing-`has_audio` resources, post-PCM error provenance, unknown variant/schema pre-call rejection, 429/timeout/malformed/missing model, stale plan, and duplicate billing disclaimer state.
 2. Implement deterministic stage/checkpoint scheduling over workspace interfaces.
 3. Run focused P7/P6/invariant/full checks; commit owned files.
 

@@ -38,10 +38,11 @@ def project_guard(source_guard: SourceGuard, slices: Sequence[LogicalSlice], fra
 - Empty STT alone is not silence. If VAD/dependency/runtime/coverage is error or missing, protect the entire audible retained source and return `keep_all` with review.
 - VAD-positive audio with no usable STT is protected and listed in `vad_without_text`/review.
 - Map into each audible instance and snap outward to the asset-start-anchored frame grid. Disabled/video-only instances are retained but create no audible guard removal authority.
+- Declared-no-audio and pre-PCM-unavailable resources have no `PcmReference`, VAD call, or `SourceGuard`. Their P4 slices are already inaudible; retain the instances with explicit review/keep-all disposition and never fabricate a full-range PCM guard.
 
 ## Implementation steps
 
-1. Write failing tests for every union source, 0.5 s padding, no short-run drop, tail, empty/error, VAD-only speech, repeated instances, mute/disabled, and outward frame anchoring.
+1. Write failing tests for every union source, 0.5 s padding, no short-run drop, tail, empty/error, VAD-only speech, repeated instances, mute/disabled/no-audio/pre-PCM-unavailable cases, zero-call no-reference behavior, and outward frame anchoring.
 2. Implement pure interval union/projection and protected proportion metrics.
 3. Run focused P5/P4/P1 tests, invariants, full check; commit owned files.
 

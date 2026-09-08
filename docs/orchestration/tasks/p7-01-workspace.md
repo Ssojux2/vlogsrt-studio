@@ -44,10 +44,11 @@ def require_revision(refs: Sequence[ArtifactRef], revision: str) -> tuple[Artifa
 - Reject stale plan/config/input and mixed revisions with `StaleRevision`; never choose newest implicitly.
 - Paths are workspace-relative in JSON; reject traversal/symlink escape. No SQLite.
 - Reuse requires verified content/request hashes and completed metadata. Size, mtime, basename, or `pipeline.source_fingerprint` may be recorded as diagnostics but can never prove cache validity or hide changed content.
+- Workspace decode validates the persisted `SourceAnalysis` discriminator and schema revision and rejects unknown variants/revisions before media, PCM, STT, VAD, or vision calls. Only `UnavailableSourceAudio(status="no_audio", reason_code="declared_no_audio")` is reusable completed/non-billable absence; a pre-PCM `status="error"` is a failed attempt and must not be loaded as completed success forever.
 
 ## Implementation steps
 
-1. Write failing tests for create/reopen, content reuse, same-stat changed-content rejection, interrupted write, hash mismatch, stale/mixed revisions, path traversal/symlink escape, concurrent atomic replacement, error/usage persistence.
+1. Write failing tests for create/reopen, content reuse, same-stat changed-content rejection, interrupted write, hash mismatch, stale/mixed/unknown schema revisions, unknown source-analysis variant, path traversal/symlink escape, concurrent atomic replacement, declared-no-audio completed reuse, and retryable pre-PCM error/usage persistence.
 2. Implement immutable manifest and bounded atomic JSON helpers.
 3. Run focused P7/P6/invariant/full checks; commit owned files.
 
