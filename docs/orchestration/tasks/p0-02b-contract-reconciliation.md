@@ -36,6 +36,8 @@ This is the bounded correction to P0-02 ordered by Astra after independent revie
 - Resolve `shutil` module imports and `which`-function imports, including aliases, rather than accepting any attribute named `which`. Reject unsupported or shadowed executable provenance conservatively.
 - Preserve approved ordinary and aliased `subprocess`/`shutil` patterns, `shell` omitted or literal `False`, and dynamic path arguments in the literal argv list.
 - Only `subprocess.run` or a statically resolved alias of that function is valid. `Popen`, `check_call`, `check_output`, `call`, `run` obtained from an unrelated module, and unresolvable/shadowed aliases fail.
+- The CLI exception is the exact module `vlogsrt.project.commands`, not an arbitrary `commands` subtree. Exact module imports and symbols imported from that module pass (including equivalent relative forms); an import such as `vlogsrt.project.commands.parser` fails.
+- Frozen-dataclass declaration detection recognizes ordinary aliases such as `import dataclasses as dc; @dc.dataclass(...)` and `from dataclasses import dataclass as dc; @dc(...)`, without becoming a general name-resolution engine.
 - Per-asset cached source SRT is immutable asset-local time. Packaged SOURCE SRT projects those cues onto the input project's elapsed timeline before automatic cuts, including repeated instances. EDIT SRT projects onto the edited timeline. No source artifact is rewritten.
 - Describe the checker as enforcement of listed syntactic boundaries only. Source immutability and projection require behavioral tests; do not claim a general static or Python security sandbox.
 
