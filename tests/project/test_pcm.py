@@ -1,4 +1,4 @@
-"""원본 PCM 참조 — 저장·키·세대 출판·슬라이스·자를 자리 (P2-02).
+"""원본 PCM 참조 — 저장·키·세대 출판·슬라이스·자를 자리 (P2-02·P2-03).
 
 참조는 P2-01이 잰 원점을 그대로 믿고 저장 PCM을 내용으로 주소를 매긴다. 슬라이스는
 `[start, end)` 프레임을 **바이트 그대로** 옮긴다 — 제거된 오디오의 덧붙임도 문맥도
@@ -7,6 +7,13 @@
 그대로 읽히고 슬라이스가 재추출 없이 됨을 실패 주입과 실제 자식 프로세스 종료로
 증명한다. ffmpeg 경계는 전부 P2-01 흉내로 대신하고, 실측 증거는 합성 미디어를
 만들어 잰다(미디어는 tmp_path 안에서만 만든다).
+
+P2-03은 남긴 구간 한 덩어리(`split_retained_ranges`)를 같은 시계로 자르는 계약을
+더한다: 전체·중간·마지막·재전사 구간의 원점이 오직 `Fraction(프레임, 주파수)`임을
+증명하고, 파생 계층이 레거시 MP3 세그먼트 분할을 결코 부르지 않음을 독으로 증명한다.
+마지막에 Astra의 합성 MP3 진단을 그대로 다시 돌아 **증거의 경계**를 지킨다 — 합성
+좌표 어긋남은 재현되지만 역사적 77분 회차의 원인·규모·중간/마지막 차이는 재현되지
+않았다(`not reproduced / PENDING_HUMAN`). 진단의 숫자는 보정 상수가 아니다.
 """
 
 from __future__ import annotations
@@ -22,6 +29,7 @@ import wave
 from dataclasses import dataclass, fields
 from dataclasses import replace as dataclasses_replace
 from fractions import Fraction
+from itertools import pairwise
 from pathlib import Path
 
 import pytest
@@ -35,6 +43,7 @@ from vlogsrt.project.pcm import (
     build_reference,
     quiet_sample,
     retained_sample_range,
+    split_retained_ranges,
     write_wav_slice,
 )
 
@@ -1221,6 +1230,246 @@ def test_slice_publication_is_atomic(
 
 
 # ─────────────────────────────────────────────────────────────
+#  남긴 구간 한 덩어리 잘라 내기 — split_retained_ranges (P2-03)
+# ─────────────────────────────────────────────────────────────
+
+
+def test_six_ranges_tile_the_reference_byte_exact_to_the_real_tail(tmp_path: Path) -> None:
+    """여섯 구간이 한 저장 PCM에서 순서대로 빈틈없이 이어지고 꼬리는 진짜 끝까지.
+
+    12초+137프레임짜리 스테레오에서 [0,2)…[10,13초)를 자르면 마지막 구간은 요청한
+    13초가 아니라 실제 마지막 프레임에서 묶인다. 조각마다 데이터는 전체 PCM의 해당
+    바이트 그 자체고(채널 프레임이 온전하다) 원점은 오직 `Fraction(프레임, 주파수)`다
+    — 인코더·CSV가 알려주던 반쪽짜리 좌표는 이 길에 없다(S17).
+    """
+    frames = 192137  # 12초 + 137프레임 — 초 단위로 떨어지지 않는 진짜 길이
+    pcm_bytes = _pattern_pcm(frames, channels=2)
+    reference = _hand_reference(tmp_path / "ref.pcm", pcm_bytes, channels=2, origin=Fraction(-1, 5))
+    out = tmp_path / "ranges"
+
+    result = split_retained_ranges(
+        reference,
+        [
+            (Fraction(0), Fraction(2)),
+            (Fraction(2), Fraction(4)),
+            (Fraction(4), Fraction(6)),
+            (Fraction(6), Fraction(8)),
+            (Fraction(8), Fraction(10)),
+            (Fraction(10), Fraction(13)),  # 실제 끝보다 멀리 — 꼬리가 진짜 끝에서 묶인다
+        ],
+        out,
+    )
+
+    edges = [
+        (0, 32000),
+        (32000, 64000),
+        (64000, 96000),
+        (96000, 128000),
+        (128000, 160000),
+        (160000, frames),
+    ]
+    assert isinstance(result, tuple)
+    assert all(isinstance(piece, tuple) for piece in result)
+    spans = [span for span, _path in result]
+    assert spans == [SampleRange(start, end) for start, end in edges]
+
+    # 순서·비겹침 — 앞 구간 끝이 뒤 구간 시작을 넘지 않고, 여섯이 [0, 끝)을 덮는다
+    assert spans[0].start == 0 and spans[-1].end == frames
+    assert all(later.start >= earlier.end for earlier, later in pairwise(spans))
+
+    # 원점은 샘플에서 나는 분수뿐이다 — 요청한 초가 그대로 돌아오고, 원점도 정확히 더해진다
+    assert [Fraction(span.start, reference.sample_rate) for span in spans] == [
+        Fraction(seconds) for seconds in (0, 2, 4, 6, 8, 10)
+    ]
+    assert [pcm._sample_file_time(reference, span.start) for span in spans] == [
+        Fraction(-1, 5) + Fraction(seconds) for seconds in (0, 2, 4, 6, 8, 10)
+    ]
+
+    paths = [path for _span, path in result]
+    assert len(set(paths)) == len(paths), "조각마다 제 갈 길이 있다"
+    assert all(path.parent == out and path.is_file() for path in paths)
+    assert [path.name for path in paths] == sorted(path.name for path in paths)
+
+    for (start, end), path in zip(edges, paths, strict=True):
+        params, _samples = _decoded(path)
+        assert params == (2, 2, 16000, end - start), "채널·폭·주파수·프레임 수가 온전하다"
+        assert path.read_bytes()[44:] == pcm_bytes[start * 4 : end * 4]
+
+    # 꼬리 조각의 마지막 프레임이 저장 PCM의 마지막 프레임 그 자체다
+    assert paths[-1].read_bytes()[44:] == pcm_bytes[160000 * 4 :]
+
+
+def test_one_boundary_has_one_origin_intermediate_or_final(tmp_path: Path) -> None:
+    """같은 4초 경계는 중간이든 마지막이든 같은 프레임·같은 원점·같은 바이트다.
+
+    역사적 신고(S17)는 마지막 조각이 따로 밀린다는 것이었다. 샘플로 주소를 매기면
+    자리는 아무것도 바꾸지 못한다 — 합성 진단에서도 중간/마지막 차이는 재현되지
+    않았다(경계는 그대로 `not reproduced / PENDING_HUMAN`, 아래 실측 절 참조).
+    """
+    frames = 128123  # 8초 + 123프레임
+    pcm_bytes = _pattern_pcm(frames, channels=1)
+    reference = _hand_reference(tmp_path / "ref.pcm", pcm_bytes)
+    far_end = Fraction(13)  # 실제 끝보다 멀리 — 마지막 구간이 진짜 끝에서 묶이게
+
+    mid = split_retained_ranges(
+        reference,
+        [
+            (Fraction(0), Fraction(4)),
+            (Fraction(4), Fraction(9, 2)),  # 4초 경계가 중간에 한 번
+            (Fraction(9, 2), far_end),
+        ],
+        tmp_path / "mid",
+    )
+    final = split_retained_ranges(
+        reference,
+        [(Fraction(0), Fraction(4)), (Fraction(4), far_end)],  # 같은 경계가 마지막에 한 번
+        tmp_path / "final",
+    )
+
+    mid_at_4, final_at_4 = mid[1][0], final[1][0]
+    assert mid_at_4.start == final_at_4.start == 64000
+    assert Fraction(mid_at_4.start, 16000) == Fraction(final_at_4.start, 16000) == Fraction(4)
+    assert mid_at_4.end == 72000, "중간 조각은 뒤가 더 있다"
+    assert final_at_4.end == frames, "마지막 조각은 실제 마지막 프레임에서 끝난다"
+
+    # 같은 경계에서 나온 바이트는 앞부분이 정확히 같고, 마지막 조각은 끝까지 온전하다
+    assert final[1][1].read_bytes()[44:][: 8000 * 2] == mid[1][1].read_bytes()[44:]
+    assert final[1][1].read_bytes()[44:] == pcm_bytes[64000 * 2 :]
+
+
+def test_repair_subranges_recut_inside_a_range_from_the_same_clock(tmp_path: Path) -> None:
+    """재전사 조각도 같은 저장 PCM의 부분구간일 뿐이다 — 디렉터리만 따로, 좌표는 같다.
+
+    되풀이 재전사는 한 차례 조각의 안쪽을 다시 묻는다(1차 조각을 덮지 않는다).
+    시작이 격자 위에 앉지 않아도(14/3초) 원점은 그 프레임에서 나는 분수 그대로다.
+    """
+    pcm_bytes = _pattern_pcm(96000, channels=1)  # 6초 모노
+    reference = _hand_reference(tmp_path / "ref.pcm", pcm_bytes)
+
+    whole = split_retained_ranges(reference, [(Fraction(0), Fraction(6))], tmp_path / "primary")
+    pieces = split_retained_ranges(
+        reference,
+        [(Fraction(14, 3), Fraction(5)), (Fraction(5), Fraction(11, 2))],
+        tmp_path / "repair",
+    )
+
+    edges = [(74667, 80000), (80000, 88000)]  # ceil(14/3·16000)=74667 — 안쪽 환산
+    assert [span for span, _path in pieces] == [SampleRange(start, end) for start, end in edges]
+    assert Fraction(pieces[0][0].start, 16000) == Fraction(74667, 16000)
+    assert Fraction(pieces[1][0].start, 16000) == Fraction(5)
+    for (start, end), (_span, path) in zip(edges, pieces, strict=True):
+        assert path.parent == tmp_path / "repair", "재전사 조각은 1차 조각과 갈라 산다"
+        assert path.read_bytes()[44:] == pcm_bytes[start * 2 : end * 2]
+    assert whole[0][1].is_file(), "1차 조각은 재전사가 끝나도 그대로 있다"
+
+
+def test_range_names_are_deterministic_across_runs(tmp_path: Path) -> None:
+    """같은 호출은 같은 이름을 낸다 — 재실행이 조각을 헷갈리게 하지 않는다."""
+    reference = _hand_reference(tmp_path / "ref.pcm", _pattern_pcm(32000, channels=1))
+    ranges = [(Fraction(0), Fraction(1)), (Fraction(1), Fraction(2))]
+    first = split_retained_ranges(reference, ranges, tmp_path / "one")
+    second = split_retained_ranges(reference, ranges, tmp_path / "two")
+    assert [path.name for _, path in first] == ["range-0000.wav", "range-0001.wav"]
+    assert [path.name for _, path in first] == [path.name for _, path in second]
+    assert [span for span, _ in first] == [span for span, _ in second]
+
+
+def test_range_paths_stay_inside_the_requested_directory(tmp_path: Path) -> None:
+    """조각 이름은 순번만으로 짓는다 — 참조의 stem을 경로 문법으로 믿지 않는다.
+
+    stem은 계약상 비지 않은 문자열이면 무엇이든 될 수 있다. 그걸 그대로 경로에
+    끼우면 "../escaped" 같은 **정상 참조**가 요청한 디렉터리 밖에 쓰고, 절대경로
+    stem은 디렉터리를 통째로 점령한다. 어떤 stem이어도 조각은 디렉터리 안에만
+    산다 — 평범한 한글·공백 stem도 같은 결정적 잎 이름을 얻을 뿐이다.
+    """
+    pcm_bytes = _pattern_pcm(32000, channels=1)
+    out = tmp_path / "out"
+    leaves = ["range-0000.wav", "range-0001.wav"]
+    ranges = [(Fraction(0), Fraction(1)), (Fraction(1), Fraction(2))]
+    stems = ["../escaped", "../../escaped", str(tmp_path / "elsewhere"), "브이로그 77분 회차"]
+    for stem in stems:
+        reference = dataclasses_replace(
+            _hand_reference(tmp_path / "ref.pcm", pcm_bytes), original_stem=stem
+        )
+        result = split_retained_ranges(reference, ranges, out)
+        assert all(path.resolve().is_relative_to(out.resolve()) for _span, path in result), (
+            f"{stem} 참조가 조각을 디렉터리 밖에 쓰려 한다"
+        )
+        assert [path.name for _, path in result] == leaves, f"{stem} stem도 같은 잎 이름이다"
+
+    written = {path.name for path in tmp_path.rglob("*") if path.is_file()}
+    assert written == {"ref.pcm"} | set(leaves), (
+        "디렉터리 밖에는 아무 파일도 없다 — 탈출도 점령도 일어나지 않았다"
+    )
+
+
+@pytest.mark.parametrize(
+    ("ranges", "match"),
+    [
+        ([(Fraction(4), Fraction(6)), (Fraction(0), Fraction(2))], "순서|겹치"),
+        ([(Fraction(0), Fraction(4)), (Fraction(2), Fraction(6))], "순서|겹치"),
+        ([(Fraction(0), Fraction(2)), (Fraction(3, 2), Fraction(2))], "순서|겹치"),
+        ([(Fraction(1), Fraction(1))], "비었"),
+        ([(0.5, Fraction(2))], "Fraction|정수"),
+        ([(Fraction(0), Fraction(2), Fraction(4))], "쌍"),
+        ([Fraction(1)], "쌍"),
+    ],
+)
+def test_bad_ranges_die_before_anything_is_written(
+    tmp_path: Path, ranges: list[object], match: str
+) -> None:
+    """겹침·역순·빈 구간·float·짝이 아닌 항은 무엇을 쓰기도 전에 죽는다."""
+    reference = _hand_reference(tmp_path / "ref.pcm", _pattern_pcm(192000, channels=1))
+    out = tmp_path / "out"
+    with pytest.raises(ValueError, match=match):
+        split_retained_ranges(reference, ranges, out)  # type: ignore[arg-type]
+    assert not out.exists(), "하나라도 어긋나면 조각은 아예 못 나간다"
+
+
+def test_no_ranges_write_nothing(tmp_path: Path) -> None:
+    """빈 목록은 빈 결과다 — 재전사가 없으면 아무 파일도 만들지 않는다."""
+    reference = _hand_reference(tmp_path / "ref.pcm", _pattern_pcm(160, channels=1))
+    out = tmp_path / "out"
+    assert split_retained_ranges(reference, [], out) == ()
+    assert not out.exists()
+
+
+def test_project_extraction_never_invokes_the_legacy_mp3_split(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """파생 계층의 구간 추출은 레거시 MP3 세그먼트 분할을 부르지도 이름대지도 않는다.
+
+    독을 단 `split_at`을 달아두고 프로젝트 경로 전체(참조 만들기 → 구간 잘라 내기)를
+    돌려도 발동하지 않는다. 모듈 원문에 그 이름이 없다는 정적 확인이 동적 확인과
+    겹친다 — CSV 좌표가 흔들리는 길과는 완전히 갈라선 것이다(S17).
+    """
+
+    def poisoned(*args: object, **kwargs: object) -> object:
+        raise AssertionError("프로젝트 구간 추출이 레거시 MP3 분할을 불렀다")
+
+    monkeypatch.setattr(preprocess, "split_at", poisoned)
+    assert not hasattr(pcm, "split_at")
+    assert "split_at" not in Path(pcm.__file__).read_text(encoding="utf-8")
+
+    source = tmp_path / "src"
+    original, original_sha = _original(source, "in.mov", b"synthetic-original")
+    pcm_bytes = _pattern_pcm(32000, channels=1)
+    _fake_extract(monkeypatch, pcm_bytes, channels=1)
+    reference = build_reference(
+        "asset-1", "demo", original, original_sha, AudioPolicy(), tmp_path / "out" / "ref.pcm"
+    )
+
+    result = split_retained_ranges(
+        reference,
+        [(Fraction(0), Fraction(1)), (Fraction(1), Fraction(2))],
+        tmp_path / "out" / "ranges",
+    )
+
+    assert [span for span, _path in result] == [SampleRange(0, 16000), SampleRange(16000, 32000)]
+    assert result[1][1].read_bytes()[44:] == pcm_bytes[32000:]
+
+
+# ─────────────────────────────────────────────────────────────
 #  자를 자리 — 조용한 창만 고르고 말/침묵을 판정하지 않는다
 # ─────────────────────────────────────────────────────────────
 
@@ -1448,3 +1697,120 @@ def test_real_rebuild_reuses_the_verified_reference(
 
     assert len(calls) == 1
     assert second == first
+
+
+# ─────────────────────────────────────────────────────────────
+#  합성 MP3 진단 — 레거시 좌표 어긋남의 재현과 증거의 경계 (P2-03)
+# ─────────────────────────────────────────────────────────────
+
+
+def _impulse_track_12s() -> bytes:
+    """12초 모노 s16 — 매초 0.5초 지점(프레임 second·16000+8000)에 임펄스 하나."""
+    samples = array.array("h", [0] * 192000)
+    for second in range(12):
+        samples[second * 16000 + 8000] = 24000
+    return samples.tobytes()
+
+
+def _decode_pcm(path: Path) -> list[int]:
+    """미디어를 16 kHz 모노 s16로 디코드한 샘플 목록 — 좌표 비교의 재료."""
+    completed = subprocess.run(
+        ["ffmpeg", "-v", "error", "-i", str(path), "-f", "s16le", "-ar", "16000", "-ac", "1", "-"],
+        capture_output=True,
+        check=True,
+    )
+    samples = array.array("h")
+    samples.frombytes(completed.stdout)
+    return list(samples)
+
+
+def _strongest_sample(samples: list[int], lo: int, hi: int) -> int:
+    """`[lo, hi)` 창에서 절대 진폭이 가장 큰 샘플의 자리 — 끝은 실제 길이에 묶는다.
+
+    MP3 조각은 세그먼트 분할 뒤 길이가 제각각이라 창 끝이 목록을 넘을 수 있다.
+    """
+    hi = min(hi, len(samples))
+    return lo + max(range(hi - lo), key=lambda index: abs(samples[lo + index]))
+
+
+@needs_ffmpeg
+def test_legacy_mp3_drift_reproduces_only_the_synthetic_mismatch(tmp_path: Path) -> None:
+    """Astra의 합성 진단을 같은 환경에서 다시 돈다 — 재현과 **경계**를 함께 지킨다.
+
+    임펄스 트랙을 레거시 추출 기본값(libmp3lame 64k, 16 kHz 모노)으로 인코딩해
+    레거시 `split_at`으로 자르면 CSV 오프셋이 0이 아닌 조각이 전부 **같은 양만**
+    늦게 밀린다. 같은 CSV 오프셋을 중간·마지막으로 바꿔도 밀림은 그대로다. 같은
+    미디어를 디코드해 저장 PCM 참조로 자르는 대조는 정확하다 — 그래서 프로젝트
+    길은 샘플로 주소를 매긴다. 여기서 잰 숫자는 회귀 증거일 뿐, 어떤 보정 상수도
+    아니다(36 ms·576 샘플·0.2초를 코드에 새기지 않는다).
+
+    이 재현은 **합성 미디어의 좌표 어긋남만** 보인다. 역사적 77분 회차의 원인·규모,
+    그리고 중간/마지막 차이는 재현되지 않았다 — `not reproduced / PENDING_HUMAN`.
+    """
+    raw = tmp_path / "impulse.s16"
+    raw.write_bytes(_impulse_track_12s())
+    media = tmp_path / "impulse.mp3"
+    subprocess.run(
+        [
+            "ffmpeg", "-v", "error", "-y",
+            "-f", "s16le", "-ar", "16000", "-ac", "1", "-i", str(raw),
+            "-c:a", "libmp3lame", "-b:a", "64k",  # 레거시 추출 기본값 그대로
+            str(media),
+        ],
+        capture_output=True,
+        check=True,
+    )  # fmt: skip
+
+    full = _decode_pcm(media)
+    expected_peaks = [second * 16000 + 8000 for second in range(12)]
+    assert len(full) == 192000, "전체 디코드는 입력 그대로다"
+    assert [
+        _strongest_sample(full, second * 16000, (second + 1) * 16000) for second in range(12)
+    ] == expected_peaks
+
+    six = preprocess.split_at(media, [2.0, 4.0, 6.0, 8.0, 10.0], tmp_path / "work-six")
+    two = preprocess.split_at(media, [2.0, 4.0], tmp_path / "work-two")
+
+    def mapped_drifts(chunk: object, windows: list[tuple[int, int]]) -> list[Fraction]:
+        """조각을 디코드해 안의 임펄스를 CSV 오프셋으로 전체 좌표에 옮겨 잰 어긋남."""
+        samples = _decode_pcm(chunk.path)  # type: ignore[attr-defined]
+        offset = Fraction(str(chunk.offset))  # type: ignore[attr-defined]
+        return [
+            offset * 16000 + _strongest_sample(samples, lo, lo + 16000) - Fraction(true)
+            for lo, true in windows
+        ]
+
+    # 여섯 조각은 각각 [2k, 2k+2)초 — 임펄스는 조각 안 8000·24000 자리에 하나씩
+    six_drifts = [
+        mapped_drifts(chunk, [(0, 32000 * index + 8000), (16000, 32000 * index + 24000)])
+        for index, chunk in enumerate(six)
+    ]
+    assert six_drifts[0] == [Fraction(0), Fraction(0)], "오프셋 0인 첫 조각은 정확하다"
+    nonzero = [drift for drifts in six_drifts[1:] for drift in drifts]
+    assert nonzero and all(drift > 0 for drift in nonzero), "나머지는 전부 늦게 밀린다"
+    assert len(set(nonzero)) == 1, "밀림은 조각마다 같은 양이다 — 좌표가 통째로 어긋난 것이다"
+
+    # 같은 CSV 오프셋을 중간(여섯 조각의 3번째)과 마지막(두 조각의 끝)으로 놓아도 같다
+    assert six[2].offset == two[-1].offset
+    final_drifts = mapped_drifts(two[-1], [(16000 * j, 64000 + 16000 * j + 8000) for j in range(8)])
+    assert set(final_drifts) == {nonzero[0]}, "마지막이어서 밀림이 달라지지 않는다"
+
+    # 대조 — 같은 미디어를 디코드해 저장 PCM 참조로 자르면 어긋남이 없다(프로젝트 길)
+    reference = _hand_reference(tmp_path / "ref.pcm", array.array("h", full).tobytes())
+    pieces = split_retained_ranges(
+        reference,
+        [(Fraction(edge), Fraction(edge + 2)) for edge in (0, 2, 4, 6, 8, 10)],
+        tmp_path / "retained",
+    )
+    for index, (span, path) in enumerate(pieces):
+        assert span == SampleRange(32000 * index, 32000 * (index + 1))
+        # 레거시 잰 법과 같은 식: 원점·주파수·조각 안 임펄스 자리를 더해 참 자리와 비교
+        assert Fraction(span.start, 16000) * 16000 + 8000 == 32000 * index + 8000
+        piece = _decoded(path)[1]
+        # MP3는 손실 압축이라 임펄스마다 진폭이 조금씩 다르다 — 레거시 잰 법과 같은
+        # 1초 창으로 첫 임펄스 자리를 잰다.
+        assert _strongest_sample(piece, 0, 16000) == 8000, "임펄스가 조각 안 제자리에 있다"
+        assert (
+            path.read_bytes()[44:]
+            == array.array("h", full[32000 * index : 32000 * (index + 1)]).tobytes()
+        )

@@ -20,6 +20,13 @@ P2-01이 잰 시계(`pcm_sample0_file_time`, 변환 후 첫 프레임의 실측 
 말/침묵을 판정하지 않는다. 시각은 전부 정확한 `Fraction`이며 float는 들어오지
 못한다.
 
+남긴 구간 한 덩어리(`split_retained_ranges`)도 같은 시계로 자른다(P2-03). 전체·
+중간·마지막·재전사 구간을 가리지 않고 조각의 원점은 언제나
+`Fraction(시작 프레임, 주파수)`다 — 인코더가 세그먼트 목록으로 알려주던 좌표는
+이 길에 없다. 합성 재현에서 그 레거시 좌표의 어긋남은 확인했지만, 역사적
+77분 회차의 원인·규모와 중간/마지막 차이는 재현되지 않았다(PENDING_HUMAN) —
+이 모듈이 말하는 건 남긴 PCM 구간 좌표의 정확함뿐이다.
+
 참조는 오디오가 **선언된** 자원에만 존재한다. 프로브·추출이 실패하면 경로·해시·
 프레임 수·원점을 지어내지 않고 문마 있는 오류로 죽는다 — unavailable 타입은
 P3가 소유하고 P7이 만든다. ffmpeg 경계는 P2-01(`vlogsrt.preprocess`)이고 이
@@ -35,6 +42,7 @@ import math
 import os
 import tempfile
 import wave
+from collections.abc import Sequence
 from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
@@ -219,6 +227,38 @@ def write_wav_slice(reference: PcmReference, samples: SampleRange, destination: 
     finally:
         temp.unlink(missing_ok=True)
     return destination
+
+
+def split_retained_ranges(
+    reference: PcmReference,
+    ranges: Sequence[tuple[Fraction, Fraction]],
+    directory: Path,
+) -> tuple[tuple[SampleRange, Path], ...]:
+    """남긴 구간들을 같은 저장 PCM에서 잘라 WAV로 낸다 — 좌표는 샘플 번호뿐이다.
+
+    1차 전체 구간이든 중간·마지막 구간이든 재전사 부분구간이든, 조각의 시각 원점은
+    언제나 `Fraction(시작 프레임, 주파수)`(+ 참조의 원점)이다 — 인코더가 세그먼트
+    목록으로 알려주던 좌표는 이 길에 없다. 그 좌표를 믿으면 경계마다 프레임 단위로
+    밀리는 조각이 나온다는 것은 합성 재현으로 확인했다(역사적 77분 회차의 원인·
+    규모와 중간/마지막 차이는 재현되지 않았다 — PENDING_HUMAN). 구간은 안쪽 환산
+    (시작 ceil·끝 floor) 뒤 순서와 비겹침을 무엇을 쓰기도 전에 확인한다 —
+    **잘못된 범위 입력으로는** 아무 조각도 못 나간다. 조각 하나하나는 따로 원자적으로
+    나간다: 뒤쪽 조각의 쓰기가 죽으면 앞쪽 조각은 이미 디스크에 있다(묶음 거래가
+    아니다). 마지막 구간은 저장 PCM의 실제 마지막 프레임에서 끝날 수 있다.
+    """
+    spans: list[SampleRange] = []
+    for position, pair in enumerate(ranges):
+        span = _retained_range(reference, pair, position)
+        if spans and span.start < spans[-1].end:
+            raise ValueError(
+                f"남긴 구간이 겹치거나 순서가 어긋난다: {position}번째 구간이 "
+                f"[{span.start}, {span.end})인데 앞 구간이 {spans[-1].end}까지 간다"
+            )
+        spans.append(span)
+    return tuple(
+        (span, write_wav_slice(reference, span, _retained_path(directory, index)))
+        for index, span in enumerate(spans)
+    )
 
 
 def quiet_sample(
@@ -709,6 +749,25 @@ def _require_slice(reference: PcmReference, samples: SampleRange) -> None:
             f"참조가 줄 수 없는 범위다: [{samples.start}, {samples.end}) "
             f"(저장 {reference.sample_count}프레임)"
         )
+
+
+def _retained_range(reference: PcmReference, pair: object, position: int) -> SampleRange:
+    """남긴 구간 목록의 한 항목을 환산한다 — (start, end) 초 쌍이 아니면 그 자리에서 죽인다."""
+    if not isinstance(pair, tuple) or len(pair) != 2:
+        raise ValueError(f"{position}번째 구간은 (start, end) 초 쌍이어야 한다: {pair!r}")
+    start, end = pair
+    return retained_sample_range(reference, start, end)
+
+
+def _retained_path(directory: Path, index: int) -> Path:
+    """남긴 구간 조각의 이름 — 순번만으로 짓는다.
+
+    참조의 stem은 계약상 비지 않은 문자열이면 무엇이든 될 수 있다. 그걸 경로
+    문법으로 끼우면 "../escape" 같은 정상 참조가 요청한 디렉터리 밖에 쓰고 절대경로
+    stem은 디렉터리를 통째로 점령한다 — stem은 이름 재료가 아니라 정체성 문자열이다.
+    순번뿐인 이름은 결정적이기도 하다(재실행이 같은 이름을 낸다).
+    """
+    return directory / f"range-{index:04d}.wav"
 
 
 def _bad_count(value: object) -> bool:
