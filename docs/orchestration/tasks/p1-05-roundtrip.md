@@ -17,8 +17,10 @@ def write_identity(document: ProjectDocument, destination: Path) -> Path: ...
 def validate_roundtrip(source: ProjectDocument, written: Path, *, dtd_path: Path | None = None) -> XmlValidation: ...
 ```
 
-- Identity output writes `ProjectDocument.raw_xml` byte-for-byte using atomic same-directory replacement; no parse/serialize normalization.
-- Reparse output and assert input hash-independent semantic equality for version, exact original time strings, resources/UIDs/static attributes, flat item order/gaps/disabled durations and refs.
+- Identity output writes `ProjectDocument.raw_xml` byte-for-byte using atomic same-directory replacement; no parse/serialize normalization. The call must not mutate the source document or its `raw_xml`, and a write/replace failure must leave any preexisting destination byte-for-byte unchanged.
+- `validate_roundtrip` first uses the existing P1-04 validation boundary, then the existing P1-02 parser/read interfaces. A tool or requested-DTD absence remains `XmlValidationUnavailable`; an invalid written document returns the validator's `XmlValidation(valid=False, ...)` result rather than being promoted to success or a new public exception.
+- Reparse output and compare input hash-independent semantic equality for version, exact original time values, resources/UIDs/static attributes, flat item order/gaps/disabled durations and refs. Byte inequality, parse/semantic mismatch, or an otherwise invalid written document returns `XmlValidation(valid=False, bounded actionable diagnostics, accurate dtd_checked)`; runtime correctness must not depend on bare `assert` statements.
+- Mismatch diagnostics are deterministic and bounded, name the failed byte/parse/semantic check, and do not dump unbounded XML. Reuse `XmlValidation` and `XmlValidationUnavailable`; do not add a general validation/result hierarchy.
 - Parameterize all eight supported frame rates, including 30 vs 29.97, repeated assets, nonzero `asset.start`/`clip.start`/`sequence.tcStart`, `enabled=0`, `srcEnable=video`, and gaps.
 - DTD validation is invoked when a real path is supplied; unavailable DTD/tool is separately reported, never synthesized as pass.
 - On this development host, run the roundtrip through `/usr/bin/xmllint` with the exact installed DTD `/Applications/Final Cut Pro.app/Contents/Frameworks/Interchange.framework/Versions/A/Resources/FCPXMLv1_14.dtd` after reverifying SHA-256 `33bb44530790be145d87ed2d5c347166aab945c90f1cfbc03c8be545aaf73cb5`. All claimed supported synthetic inputs must use actual DTD spellings/defaults and validate before and after the byte-identical roundtrip.
@@ -26,13 +28,13 @@ def validate_roundtrip(source: ProjectDocument, written: Path, *, dtd_path: Path
 
 ## Implementation steps
 
-1. Add failing byte-identity and semantic parameterized tests, plus atomic-write failure preserving the previous destination.
+1. Add failing byte-identity and semantic parameterized tests, mismatch-result tests (bytes, parse/structure, and validator-invalid), source-content non-mutation, plus atomic-write/replace failure preserving the previous destination.
 2. Implement the two functions using existing P1 interfaces; do not introduce a general XML writer yet.
 3. Run focused tests, all P1 tests, invariants, and `make check`; commit only owned paths.
 
 ## Acceptance
 
-Every fixture roundtrips byte-identically, validates against the exact installed DTD before/after, and reparses semantically. Duration/order/ref checks pass for valid inputs and reject zero-frame identity mismatch. `make check` passes; actual Final Cut import remains `PENDING_HUMAN`.
+Every synthetic document roundtrips byte-identically, leaves its input content untouched, validates against the exact installed DTD before/after, and reparses semantically. Duration/order/ref checks pass for valid inputs; byte/semantic/invalid-written mismatches return bounded `valid=False` evidence with accurate `dtd_checked`, and atomic failure preserves an existing destination. `make check` passes; actual Final Cut import remains `PENDING_HUMAN`.
 
 ## Failure route
 
