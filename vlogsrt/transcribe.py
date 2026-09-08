@@ -118,10 +118,24 @@ class FixtureTranscriber:
 
     def transcribe(self, job: TranscriptionJob, cfg: Config) -> list[ChunkResponse]:
         if job.namespace is not None:
-            return _load_namespaced(_fixture_path(job.namespace, job.stem, job.kind), job)
+            return _load_namespaced(_namespace_path(job.namespace, job), job)
         return _load_responses(
             _fixture_path(self.fixture_dir, job.stem, job.kind), job.stem, job.source
         )
+
+
+def _namespace_path(namespace: Path, job: TranscriptionJob) -> Path:
+    """namespace 안에 머무는 경로만 만든다. 이름 조각 하나로 서지 않으면 만들지도 않는다.
+
+    파일명 조각 검사일 뿐 샌드박스가 아니다 — 한글·공백·점은 그대로 통과하고,
+    구분자·`.`·`..`·빈칸만 거부한다. 레거시(namespace 없음) 경로에는 이 선이 없다.
+    """
+    for what, value in (("stem", job.stem), ("kind", job.kind)):
+        if not value or value in {".", ".."} or "/" in value or "\\" in value:
+            raise MalformedTranscript(
+                f"namespace 픽스처의 {what}이(가) 안전한 파일명 조각이 아닙니다: {value!r}"
+            )
+    return _fixture_path(namespace, job.stem, job.kind)
 
 
 def _load_namespaced(path: Path, job: TranscriptionJob) -> list[ChunkResponse]:
@@ -542,8 +556,9 @@ def _payload_defect(payload: Any, where: str) -> str | None:
     """응답 꼴의 계약 위반을 하나만 골라 돌려준다. 맞으면 None.
 
     `build_spine`가 기본값으로 덮던 `start`·`end`도 여기서는 **있어야** 한다 — 0.0으로
-    몰래 대체된 시각은 그대로 SRT로 나가기 때문이다. 길이 0·뒤집힌 시각은 위반이
-    아니므로 건드리지 않는다(규칙 9).
+    몰래 대체된 시각은 그대로 SRT로 나가기 때문이다. `text`도 명시적인 문자열이어야
+    한다 — `str()` 강제는 객체를 글자모양으로 바꿔 내보낸다. 빈 문자열·공백은 위반이
+    아니므로 그대로 둔다(걸러져 빈 성공, 규칙 9). 길이 0·뒤집힌 시각도 건드리지 않는다.
     """
     if not isinstance(payload, dict):
         return f"{where}: 응답이 JSON 객체가 아닙니다: {type(payload).__name__}"
@@ -555,6 +570,10 @@ def _payload_defect(payload: Any, where: str) -> str | None:
     for position, segment in enumerate(segments):
         if not isinstance(segment, dict):
             return f"{where}: 세그먼트 {position}이 JSON 객체가 아닙니다"
+        if "text" not in segment:
+            return f"{where}: 세그먼트 {position}에 text가 없습니다"
+        if not isinstance(segment["text"], str):
+            return f"{where}: 세그먼트 {position}의 text가 문자열이 아닙니다: {segment['text']!r}"
         for key in ("start", "end"):
             if key not in segment:
                 return f"{where}: 세그먼트 {position}에 {key}가 없습니다"
@@ -588,16 +607,42 @@ def _coverage(chunks: tuple[Chunk, ...], matched: list[ChunkResponse]) -> tuple[
     return tuple(records)
 
 
+def _request_defect(chunks: tuple[Chunk, ...]) -> str | None:
+    """요청 자체의 계약 위반. 위반이면 위임조차 하지 않는다.
+
+    깨진 요청(빈 조각·겹치는 번호·그르른 오프셋·길이)을 그대로 보내면 같은 응답이
+    두 번 조립되는 길이 생긴다 — 유료 호출은 깨진 요청에 값을 쓰지 않는다.
+    """
+    if not chunks:
+        return "요청한 조각이 하나도 없습니다"
+    seen: set[int] = set()
+    for chunk in chunks:
+        if not _exact_int(chunk.index):
+            return f"조각 번호가 정수가 아닙니다: {chunk.index!r}"
+        if chunk.index in seen:
+            return f"요청 안에서 조각 번호가 겹친다: {chunk.index}"
+        seen.add(chunk.index)
+        if not _finite_number(chunk.offset):
+            return f"조각 {chunk.index} 오프셋이 유한 숫자가 아닙니다: {chunk.offset!r}"
+        if not _finite_number(chunk.duration) or chunk.duration <= 0:
+            return f"조각 {chunk.index} 길이가 양수가 아닙니다: {chunk.duration!r}"
+    return None
+
+
 def transcribe_outcome(
     transcriber: Transcriber, job: TranscriptionJob, cfg: Config
 ) -> TranscriptionOutcome:
     """전사를 호출하고 결과를 상태로 돌려준다. 예외를 밖으로 새지 않는다.
 
     'empty'는 **모든 조각이 빈 리스트를 명시적으로** 돌려준 경우뿐이다. 꼴이 틀어진
-    경우는 전부 'error'다 — 빈 목록과 못 얻은 목록을 섞으면 안 되기 때문이다. 낱낱의
-    세그먼트 해석·조립은 기존 `build_spine` 그대로다 — 여기는 결과형을 만드는 곳일 뿐.
+    경우는 전부 'error'다 — 빈 목록과 못 얻은 목록을 섞으면 안 되기 때문이다. 요청
+    가드를 통과해야 위임한다. 낱낱의 세그먼트 해석·조립은 기존 `build_spine` 그대로다
+    — 여기는 결과형을 만드는 곳일 뿐.
     """
     try:
+        defect = _request_defect(job.chunks)
+        if defect is not None:
+            raise MalformedTranscript(defect)
         responses = transcriber.transcribe(job, cfg)
         matched = _match_responses(job.chunks, responses)
         coverage = _coverage(job.chunks, matched)
