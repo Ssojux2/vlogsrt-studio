@@ -33,7 +33,7 @@ def _under_project_vad(path: Path) -> bool:
 
 
 BANNED_IMPORTS = (
-    "jamo", "konlpy", "pysrt", "ffmpeg", "pydantic", "dotenv", "regex", "numpy",
+    "jamo", "konlpy", "pysrt", "ffmpeg", "pydantic", "dotenv", "regex", "numpy", "onnxruntime",
     # UI는 ui/ 에만 산다. 핵심 패키지가 gradio를 끌어오면 규칙 7이 무너진다.
     "gradio",
 )  # fmt: skip
@@ -292,12 +292,17 @@ def check_source_does_not_import_project() -> list[str]:
 
 
 def check_project_dependency_scope() -> list[str]:
-    """선택 extra numpy·onnxruntime는 vlogsrt/project/vad/ 아래에서만 쓸 수 있다."""
+    """선택 extra numpy·onnxruntime는 vlogsrt/project/vad/ 아래에서만 쓸 수 있다.
+
+    legacy(vlogsrt 최상위·ui)뿐 아니라 파생(vlogsrt/project/) 소스도 훑는다 —
+    extra는 project 어디에나 스며들 수 있고, 허용 지점은 vad/ 디렉터리 아래뿐이다.
+    legacy만 보면 `project/vision/policy.py`의 onnxruntime가 조용히 지나간다(P0-02c).
+    """
     failures = []
-    for path in _legacy_sources():
+    for path in _legacy_sources() + _project_sources():
         rel = _rel(path)
         for lineno, name in _import_roots(path.read_text(encoding="utf-8")):
-            if name in PROJECT_OPTIONAL_DEPENDENCIES:
+            if name in PROJECT_OPTIONAL_DEPENDENCIES and not _under_project_vad(path):
                 failures.append(
                     f"{rel}:{lineno} 선택 의존성 {name}은 vlogsrt/project/vad/ 아래에서만"
                 )
@@ -509,12 +514,16 @@ def check_time_deriving_layers_stay_buried() -> list[str]:
     ]
 
 
-def _subprocess_run_bindings(tree: ast.Module) -> tuple[set[str], set[str], set[str], list[int]]:
-    """subprocess 묶음 — (참 모듈 별명들, 참 run 별명들, run 외 심볼 이름 전부, 별표 줄들).
+def _subprocess_run_bindings(
+    tree: ast.Module,
+) -> tuple[set[str], set[str], set[str], set[str], list[int]]:
+    """subprocess 묶음 — (참 모듈 별명들, 참 run 별명들, run 외 심볼 이름 전부,
+    run 별명이었던 이름 전부, 별표 줄들).
 
     `import subprocess as sp`와 `from subprocess import run as launch`을 따라가되,
     한 번이라도 다시 묶이면(그림자) 자격을 끊는다. run 외 API 심볼(Popen·call·
-    check_call·check_output)은 확보 자체가 위반이다(재검토).
+    check_call·check_output)은 확보 자체가 위반이다(재검토). 이름 호출 판정은
+    별명을 문자 그대로 못 박을 수 없으므로 `ever_run`까지 내준다(P0-02c).
     """
     module_kinds: dict[str, set[str]] = {}
     run_kinds: dict[str, set[str]] = {}
@@ -544,8 +553,13 @@ def _subprocess_run_bindings(tree: ast.Module) -> tuple[set[str], set[str], set[
             if name in symbol_kinds:
                 symbol_kinds[name].add("shadow")
     genuine_modules = {name for name, kinds in module_kinds.items() if kinds == {"import"}}
-    genuine_run = {name for name, kinds in run_kinds.items() if kinds == {"import"}}
-    return genuine_modules, genuine_run, set(symbol_kinds), star_lines
+    # 이름 하나에 run과 run 외 심볼이 함께 묶이면 어느 쪽인지 입증 못 한다 — 참 run에서 뺀다.
+    genuine_run = {
+        name
+        for name, kinds in run_kinds.items()
+        if kinds == {"import"} and name not in symbol_kinds
+    }
+    return genuine_modules, genuine_run, set(symbol_kinds), set(run_kinds), star_lines
 
 
 def _call_target_name(call: ast.Call) -> str:
@@ -559,13 +573,19 @@ def _call_target_name(call: ast.Call) -> str:
 
 
 def _subprocess_api_calls(
-    tree: ast.Module, genuine_modules: set[str], genuine_run: set[str], other_symbols: set[str]
+    tree: ast.Module,
+    genuine_modules: set[str],
+    genuine_run: set[str],
+    other_symbols: set[str],
+    ever_run: set[str],
 ) -> tuple[list[ast.Call], list[ast.Call], list[ast.Call]]:
     """subprocess API 호출을 (검증할 run 호출, run 외 호출, 출처 불명 호출)로 갈라 돌려준다.
 
-    참 모듈 별명의 `.run`과 참 run 별명의 `run(...)`만 검증 대상이다. 그 밖의
-    메서드는 run 외 호출이고, 다른 객체의 `.run`·출처를 입증 못 한 `run` 이름은
-    출처 불명이다 — 어느 쪽이든 조용히 지나가면 안 된다(재검토).
+    참 모듈 별명의 `.run`과 참 run 별명의 `run(...)`만 검증 대상이다. 이름 호출은
+    별명까지 따라간다 — `from subprocess import run as launch`의 `launch(...)`가
+    문 형태 검사를 몰래 건너뛰는 구멍이었다(P0-02c). run 외 심볼 별명
+    (`Popen as pop`)은 run 외 호출이고, 그림자가 지거나 수입 증명이 없는 이름은
+    출처 불명이다 — 어느 쪽이든 조용히 지나가면 안 된다.
     """
     run_sites: list[ast.Call] = []
     unsupported: list[ast.Call] = []
@@ -582,7 +602,9 @@ def _subprocess_api_calls(
                 run_sites.append(node)
             else:
                 unsupported.append(node)
-        elif isinstance(func, ast.Name) and func.id in SUBPROCESS_API_SYMBOLS:
+        elif isinstance(func, ast.Name) and (
+            func.id in SUBPROCESS_API_SYMBOLS or func.id in ever_run or func.id in other_symbols
+        ):
             if func.id in genuine_run:
                 run_sites.append(node)
             elif func.id in other_symbols:
@@ -795,7 +817,9 @@ def _xmllint_boundary_failures(rel: str, body: str) -> list[str]:
     tree = ast.parse(body)
     failures: list[str] = []
     module_names, which_names, ever_names, shutil_stars = _shutil_which_bindings(tree)
-    genuine_modules, genuine_run, other_symbols, subprocess_stars = _subprocess_run_bindings(tree)
+    genuine_modules, genuine_run, other_symbols, ever_run, subprocess_stars = (
+        _subprocess_run_bindings(tree)
+    )
     failures += [
         f"{rel}:{lineno} 별표 import는 호출 추적을 무력화한다"
         for lineno in subprocess_stars + shutil_stars
@@ -812,7 +836,7 @@ def _xmllint_boundary_failures(rel: str, body: str) -> list[str]:
     ]
     sanctioned = _xmllint_names(tree, genuine_which)
     run_sites, unsupported, unknown = _subprocess_api_calls(
-        tree, genuine_modules, genuine_run, other_symbols
+        tree, genuine_modules, genuine_run, other_symbols, ever_run
     )
     failures += [
         f"{rel}:{call.lineno} subprocess.run 외의 호출({_call_target_name(call)})이다"

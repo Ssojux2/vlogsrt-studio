@@ -816,21 +816,36 @@ def test_optional_dependencies_pass_only_under_the_vad_package(
 
 
 @pytest.mark.parametrize(
+    "statement", ["import numpy as np", "import onnxruntime", "import onnxruntime as ort"]
+)
+@pytest.mark.parametrize(
     "rel",
     [
         "vlogsrt/project/vision.py",
+        "vlogsrt/project/vision/policy.py",
         "vlogsrt/project/vad.py",
         "vlogsrt/project/score/frames.py",
+        "vlogsrt/gadget.py",
     ],
 )
 def test_optional_dependencies_fail_outside_the_vad_package(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, rel: str
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, rel: str, statement: str
 ) -> None:
-    """vad 디렉터리 아래가 유일한 허용 지점이다 — 비전·바깥·이름 사칭은 거부한다."""
-    _fake_source_tree(monkeypatch, tmp_path, {rel: "import numpy as np\n"})
-    failures = check_invariants.check_banned_imports()
-    assert len(failures) == 1, failures
-    assert rel in failures[0]
+    """vad 디렉터리 아래가 유일한 허용 지점이다 — 비전·바깥·이름 사칭은 거부한다.
+
+    두 검사가 함께 본다(P0-02c): `check_banned_imports`는 extra를 금지 목록으로
+    다루고 `check_project_dependency_scope`은 허용 지점을 vad/ 아래로 못 박는다.
+    어느 한쪽이라도 project 쪽 파일을 못 보면 `project/vision/policy.py`의
+    onnxruntime가 조용히 지나간다 — 그게 이번 회귀다. ui/**는 legacy 목록에만
+    있으므로 scope 검사가 맡는다(위 `test_optional_dependencies_fail_in_legacy`).
+    """
+    _fake_source_tree(monkeypatch, tmp_path, {rel: statement + "\n"})
+    banned = check_invariants.check_banned_imports()
+    assert len(banned) == 1, banned
+    assert rel in banned[0]
+    scope = check_invariants.check_project_dependency_scope()
+    assert len(scope) == 1, scope
+    assert rel in scope[0]
 
 
 @pytest.mark.parametrize(
@@ -1145,6 +1160,78 @@ def test_xmllint_boundary_rejects_wrong_flag_shapes(
             'completed = subprocess.run([exe, "--nonet", "--noout", path], -1, "/bin/sh")',
             id="extra-positional-args",
         ),
+        pytest.param(
+            "import shutil\nfrom subprocess import run as launch\n",
+            'exe = shutil.which("xmllint")',
+            'completed = launch([exe, "--nonet", "--noout", path], shell=True)',
+            id="aliased-run-shell-true",
+        ),
+        pytest.param(
+            "import shutil\nfrom subprocess import run as launch\n",
+            'exe = shutil.which("xmllint")',
+            'completed = launch([exe, "--nonet", "--noout", path], **{"shell": True})',
+            id="aliased-run-dict-expansion",
+        ),
+        pytest.param(
+            "import shutil\nfrom subprocess import run as launch\n",
+            'exe = shutil.which("xmllint")',
+            'completed = launch([exe, "--nonet", "--noout", path], executable="/bin/sh")',
+            id="aliased-run-executable-override",
+        ),
+        pytest.param(
+            "import shutil\nfrom subprocess import run as launch\n",
+            'exe = shutil.which("xmllint")',
+            'completed = launch([exe, "--noout", path])',
+            id="aliased-run-wrong-flags",
+        ),
+        pytest.param(
+            "import shutil\nfrom subprocess import run as launch\n",
+            'exe = shutil.which("xmllint")',
+            'completed = launch([exe, "--nonet", path])',
+            id="aliased-run-missing-flag",
+        ),
+        pytest.param(
+            "import shutil\nfrom subprocess import run as launch\n",
+            'exe = shutil.which("xmllint")',
+            'completed = launch([exe, "--noout", "--nonet", path])',
+            id="aliased-run-reordered-flags",
+        ),
+        pytest.param(
+            "import shutil\nfrom subprocess import run as launch\n",
+            'exe = shutil.which("xmllint")',
+            'completed = launch([exe, "--nonet", "--noout", path], -1, "/bin/sh")',
+            id="aliased-run-extra-positional-args",
+        ),
+        pytest.param(
+            "import shutil\nfrom subprocess import Popen as pop\n",
+            'exe = shutil.which("xmllint")',
+            'process = pop([exe, "--nonet", "--noout", path])',
+            id="aliased-popen-from-import",
+        ),
+        pytest.param(
+            "import shutil\nfrom subprocess import call as invoke\n",
+            'exe = shutil.which("xmllint")',
+            'invoke([exe, "--nonet", "--noout", path])',
+            id="aliased-plain-call",
+        ),
+        pytest.param(
+            "import shutil\nfrom subprocess import check_call as checked\n",
+            'exe = shutil.which("xmllint")',
+            'checked([exe, "--nonet", "--noout", path])',
+            id="aliased-check-call",
+        ),
+        pytest.param(
+            "import shutil\nfrom subprocess import check_output as capture\n",
+            'exe = shutil.which("xmllint")',
+            'out = capture([exe, "--nonet", "--noout", path])',
+            id="aliased-check-output",
+        ),
+        pytest.param(
+            "import shutil\nfrom subprocess import run as launch\n",
+            'launch = invoke  # import를 덮어썼다\n    exe = shutil.which("xmllint")',
+            'completed = launch([exe, "--nonet", "--noout", path])',
+            id="shadowed-aliased-run",
+        ),
     ],
 )
 def test_xmllint_boundary_freezes_the_api_to_subprocess_run(
@@ -1156,6 +1243,40 @@ def test_xmllint_boundary_freezes_the_api_to_subprocess_run(
     failures = check_invariants.check_subprocess_boundaries()
     assert len(failures) == 1, failures
     assert _XML_BOUNDARY_REL in failures[0]
+
+
+@pytest.mark.parametrize(
+    ("setup", "run"),
+    [
+        pytest.param(
+            'exe = shutil.which("xmllint")',
+            '[exe, "--nonet", "--noout", path]',
+            id="four-slot-shell-omitted",
+        ),
+        pytest.param(
+            'exe = shutil.which("xmllint")',
+            '[exe, "--nonet", "--noout", str(path)]',
+            id="four-slot-dynamic-path",
+        ),
+        pytest.param(
+            'exe = shutil.which("xmllint")\n    dtd_uri = bundle.dtd_uri',
+            '[exe, "--nonet", "--noout", "--dtdvalid", dtd_uri, str(path)]',
+            id="six-slot-dynamic-dtd-and-path",
+        ),
+    ],
+)
+def test_xmllint_boundary_validates_the_aliased_run_like_subprocess_run(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, setup: str, run: str
+) -> None:
+    """P0-02c의 양면 — 별명 run은 몰래 건너뛰는 것도, 통째로 거부하는 것도 아니다.
+
+    `subprocess.run`과 같은 검사를 통과해야 한다: 두 argv 형태, 동적 마지막 칸,
+    생략된 shell. 형태가 틀리면 위의 `freezes_the_api` 매개변수들이 잡는다.
+    """
+    call = f"completed = launch(\n        {run},\n        capture_output=True,\n    )"
+    body = _boundary_case("import shutil\nfrom subprocess import run as launch\n", setup, call)
+    _fake_source_tree(monkeypatch, tmp_path, {_XML_BOUNDARY_REL: body})
+    assert check_invariants.check_subprocess_boundaries() == []
 
 
 def test_a_cli_basename_spoof_gets_no_exception(
