@@ -286,46 +286,39 @@ def _extract_reference(
 
     세대 PCM과 세대 기록은 남이 쓰지 않는 새 이름에 만든다 — 기존 세대와
     포인터는 손대지 않는다. 검증이 끝나야 포인터가 새 세대를 가리키므로, 출판이
-    실패하거나 프로세스가 그 앞에서 죽어도 포인터는 옛 세대를 가리킨 채다.
-    `finally` 정리는 실패한 시도의 새 파일을 치우는 위생일 뿐 — 안전은 세대
-    불변이 지킨다.
+    실패하거나 프로세스가 그 앞에서 죽어도 포인터는 완전한 짝을 가리킨 채다.
+    실패한 시도의 사유 세대는 **그대로 남는다** — 출판이 애매한 순간에 무언가를
+    파괴적으로 지우는 일은 없다. 남는 잔여물은 참조되지 않는 사유 자료일 뿐이다.
     """
     generation_pcm = _begin_atomic(destination, suffix=".pcm")
     generation_meta = _begin_atomic(destination, suffix=".json")
-    published = False
-    try:
-        extraction = extract_pcm_s16le(
-            original,
-            generation_pcm,
-            stream_index=policy.stream_index,
-            sample_rate=policy.sample_rate,
+    extraction = extract_pcm_s16le(
+        original,
+        generation_pcm,
+        stream_index=policy.stream_index,
+        sample_rate=policy.sample_rate,
+    )
+    if extraction.sample_width != policy.sample_width:
+        raise RuntimeError(
+            f"P2-01 추출의 폭이 정책과 다르다: 요청 {policy.sample_width}바이트, "
+            f"추출 {extraction.sample_width}바이트 — 참조로 삼지 않는다"
         )
-        if extraction.sample_width != policy.sample_width:
-            raise RuntimeError(
-                f"P2-01 추출의 폭이 정책과 다르다: 요청 {policy.sample_width}바이트, "
-                f"추출 {extraction.sample_width}바이트 — 참조로 삼지 않는다"
-            )
-        pcm_sha256 = _sha256_file(generation_pcm)
-        reference = _assemble_reference(
-            source_id,
-            original_stem,
-            original_sha256,
-            generation_pcm,
-            policy,
-            extraction.pcm_sample0_file_time,
-            pcm_sha256,
-            extraction.stream.channels,
-            extraction.sample_count,
-        )
-        _write_generation(generation_meta, reference, policy)
-        _verify_generation(generation_pcm, generation_meta, reference, policy)
-        _publish_pointer(destination, generation_pcm, generation_meta)
-        published = True
-        return reference
-    finally:
-        if not published:
-            generation_pcm.unlink(missing_ok=True)
-            generation_meta.unlink(missing_ok=True)
+    pcm_sha256 = _sha256_file(generation_pcm)
+    reference = _assemble_reference(
+        source_id,
+        original_stem,
+        original_sha256,
+        generation_pcm,
+        policy,
+        extraction.pcm_sample0_file_time,
+        pcm_sha256,
+        extraction.stream.channels,
+        extraction.sample_count,
+    )
+    _write_generation(generation_meta, reference, policy)
+    _verify_generation(generation_pcm, generation_meta, reference, policy)
+    _publish_pointer(destination, generation_pcm, generation_meta)
+    return reference
 
 
 def _assemble_reference(
@@ -432,18 +425,30 @@ def _private_generation_path(destination: Path, name: object) -> Path | None:
 
 
 def _publish_pointer(destination: Path, generation_pcm: Path, generation_meta: Path) -> None:
-    """유일한 출판 — 논리 주소의 포인터를 같은 디렉터리에서 원자적으로 갈아끼운다."""
+    """유일한 출판 — 논리 주소의 포인터를 같은 디렉터리에서 원자적으로 갈아끼운다.
+
+    포인터가 갈아끼워진 뒤의 임시파일 치우기는 **최선책**이다 — 치우다 죽어서
+    이미 커밋된 출판을 실패로 되돌리는 일이 없어야 한다. 갈아끼우기 전의 실패는
+    그대로 들어난다(그때 포인터는 아직 옛 세대를 가리킨다).
+    """
     record: dict[str, object] = {
         "format": _POINTER_FORMAT,
         "generation_pcm": generation_pcm.name,
         "generation_metadata": generation_meta.name,
     }
     temp = _begin_atomic(destination)
+    replaced = False
     try:
         temp.write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         os.replace(temp, destination)
+        replaced = True
     finally:
-        temp.unlink(missing_ok=True)
+        try:
+            temp.unlink(missing_ok=True)
+        except OSError:
+            if not replaced:
+                raise
+            log.warn(f"포인터는 출판됐지만 임시파일을 못 치웠다: {temp}")
 
 
 def _write_generation(path: Path, reference: PcmReference, policy: AudioPolicy) -> None:
