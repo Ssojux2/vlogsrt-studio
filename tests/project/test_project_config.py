@@ -1,19 +1,29 @@
 """파생 계층 설정 뿌리의 계약 — 원본 `vlogsrt.config`와는 완전히 별개다.
 
-P0의 유일한 프로젝트 설정 키는 `schema_version`이다. 이 파일은 그 최소 뿌리가
-원본 설정과 섞이지 않는지, 같은 파일 안에서 조용히 잘못 읽히지 않는지를 지킨다.
+P0의 유일한 프로젝트 설정 키는 `schema_version`이다. P5-00부터 이 뿌리가 VAD·
+비전 튜너블과 가격 가정까지 전부 소유한다 — 모델 이름과 임계값은 이 계층의
+config 한 곳에만 산다. 이 파일은 그 값들이 계약 그대로인지, 같은 문서를 두 번
+읽어도 같은 해시가 나오는지, 잘못된 조합이 전부 명확히 거부되는지를 지킨다.
+공유 분석 어휘(`analysis_models`)의 불변 계약도 여기서 지킨다.
 """
 
 from __future__ import annotations
 
 import ast
 import dataclasses
+import hashlib
+import json
+import re
 import subprocess
 import sys
+from decimal import Decimal, localcontext
+from fractions import Fraction
 from pathlib import Path
+from typing import get_args
 
 import pytest
 
+from vlogsrt.project.analysis_models import AnalysisFailure, AnalysisStatus
 from vlogsrt.project.config import (
     DEFAULT_PROJECT_CONFIG_PATH,
     ProjectConfig,
@@ -110,7 +120,9 @@ def test_malformed_toml_names_the_path(tmp_path: Path) -> None:
     [
         ("schema_version = 1\nmax_chars_per_line = 16\n", "max_chars_per_line"),
         ("[project]\nschema_version = 1\n", "project"),  # 부모 테이블은 없다
-        ("[vad]\nthreshold = 0.35\n", "vad"),  # P5 키를 미리 넣지 않는다
+        # 키는 전부 최상위 평면 키다 — [vad] 같은 부모 테이블은 여전히 없다.
+        ("[vad]\nthreshold = 0.35\n", "vad"),
+        ("schema_version = 1\nvision_temperature = 0.7\n", "vision_temperature"),
     ],
 )
 def test_unknown_key_names_key_and_path(tmp_path: Path, body: str, rejected_key: str) -> None:
@@ -236,6 +248,7 @@ for name in ("run", "Popen", "call", "check_call", "check_output"):
 
 before = sorted(os.listdir("."))
 import vlogsrt.project
+import vlogsrt.project.analysis_models
 import vlogsrt.project.config
 import vlogsrt.project.models
 after = sorted(os.listdir("."))
@@ -281,3 +294,621 @@ def test_models_namespace_is_fcpxml_only() -> None:
 def test_project_config_error_is_a_value_error() -> None:
     """계약 서명. 설정 오류는 ValueError 계열이다."""
     assert issubclass(ProjectConfigError, ValueError)
+
+
+# ─── P5-00: 기본값 계약 ────────────────────────────────────────────────
+#
+# VAD 좌표는 공식 태그 v6.2.1에서, 비전 튜너블은 검토된 계획에서 왔다.
+# URL 리터럴이 소스에서 줄바꿈으로 쪼개져 있어도 바이트가 정확함을 증명하기 위해
+# 다이제스트로 고정한다.
+
+_ONNX_URL = (
+    "https://raw.githubusercontent.com/snakers4/silero-vad/"
+    "v6.2.1/src/silero_vad/data/silero_vad.onnx"
+)
+_LICENSE_URL = "https://raw.githubusercontent.com/snakers4/silero-vad/v6.2.1/LICENSE"
+_ONNX_URL_SHA256 = "d6f852c813b4556a34d7ab2cf164bc0705691e17a8021f4304e7b17fc25d56ce"
+_LICENSE_URL_SHA256 = "dd359bb5530bcd7950751f9e77d142e11a6e8c2edd4144bbf89d4c321b04e6fe"
+
+_PRICE_KEYS = (
+    "source_audio_cost_per_minute",
+    "repair_verify_audio_cost_per_minute",
+    "boundary_audio_cost_per_minute",
+    "vision_cost_per_image",
+)
+_FRACTION_KEYS = (
+    "guard_padding_seconds",
+    "vision_sample_fps",
+    "block_min_seconds",
+    "block_max_seconds",
+    "keep_seconds",
+)
+
+
+def test_defaults_are_the_binding_values() -> None:
+    """P5-00 계약의 전 필드가 글자 그대로 기본값으로 산다 — 가격 가정은 없다."""
+    config = ProjectConfig()
+    assert config.schema_version == 1
+    assert config.vad_model_version == "v6.2.1"
+    assert config.vad_model_sha256 == (
+        "1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3"
+    )
+    assert config.vad_license_sha256 == (
+        "2e63e9a38b6e8fc0c7bc37ce174caca1862870856c6daf5697cfb785e925520b"
+    )
+    assert config.vad_sample_rate == 16000
+    assert config.vad_window_samples == 512
+    assert config.vad_context_samples == 64
+    assert config.vad_positive == 0.35
+    assert config.guard_padding_seconds == Fraction(1, 2)
+    assert config.vision_model == "glm-5.3-flash"
+    assert config.vision_api_key_env == "ZAI_API_KEY"
+    assert config.vision_base_url_env == "ZAI_BASE_URL"
+    assert config.vision_long_edge == 768
+    assert config.vision_sample_fps == Fraction(1)
+    assert config.vision_max_images == 16
+    assert config.block_min_seconds == Fraction(6)
+    assert config.block_max_seconds == Fraction(10)
+    assert config.keep_seconds == Fraction(3)
+    assert config.vision_apply_confidence == 0.8
+    assert config.pricing_currency is None
+    for key in _PRICE_KEYS:
+        assert getattr(config, key) is None, key
+
+
+def test_artifact_urls_are_pinned_by_byte_digest() -> None:
+    """URL 기본값의 바이트를 다이제스트로 고정한다 — 쪼개 놓아도 값은 하나다."""
+    config = ProjectConfig()
+    assert hashlib.sha256(config.vad_model_url.encode("utf-8")).hexdigest() == _ONNX_URL_SHA256
+    assert hashlib.sha256(config.vad_license_url.encode("utf-8")).hexdigest() == _LICENSE_URL_SHA256
+
+
+def test_project_config_field_set_is_the_p5_00_contract() -> None:
+    """필드 집합 자체가 계약이다 — 슬롯으로 관찰한다(전부 slots 여야 한다)."""
+    assert set(ProjectConfig.__slots__) == {
+        "schema_version",
+        "vad_model_version",
+        "vad_model_url",
+        "vad_model_sha256",
+        "vad_license_url",
+        "vad_license_sha256",
+        "vad_sample_rate",
+        "vad_window_samples",
+        "vad_context_samples",
+        "vad_positive",
+        "guard_padding_seconds",
+        "vision_model",
+        "vision_api_key_env",
+        "vision_base_url_env",
+        "vision_long_edge",
+        "vision_sample_fps",
+        "vision_max_images",
+        "block_min_seconds",
+        "block_max_seconds",
+        "keep_seconds",
+        "vision_apply_confidence",
+        "pricing_currency",
+        "source_audio_cost_per_minute",
+        "repair_verify_audio_cost_per_minute",
+        "boundary_audio_cost_per_minute",
+        "vision_cost_per_image",
+    }
+
+
+# ─── P5-00: 정규형 직렬화와 결정적 해시 ───────────────────────────────
+
+
+def _fully_spelled_defaults_toml() -> str:
+    """생략 없이 기본값을 전부 푼 문서 — 생략형(`schema_version`만)과 동치여야 한다."""
+    lines = [
+        "schema_version = 1",
+        'vad_model_version = "v6.2.1"',
+        f'vad_model_url = "{_ONNX_URL}"',
+        'vad_model_sha256 = "1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3"',
+        f'vad_license_url = "{_LICENSE_URL}"',
+        'vad_license_sha256 = "2e63e9a38b6e8fc0c7bc37ce174caca1862870856c6daf5697cfb785e925520b"',
+        "vad_sample_rate = 16000",
+        "vad_window_samples = 512",
+        "vad_context_samples = 64",
+        "vad_positive = 0.35",
+        'guard_padding_seconds = "1/2"',
+        'vision_model = "glm-5.3-flash"',
+        'vision_api_key_env = "ZAI_API_KEY"',
+        'vision_base_url_env = "ZAI_BASE_URL"',
+        "vision_long_edge = 768",
+        'vision_sample_fps = "1/1"',
+        "vision_max_images = 16",
+        'block_min_seconds = "6/1"',
+        'block_max_seconds = "10/1"',
+        'keep_seconds = "3/1"',
+        "vision_apply_confidence = 0.8",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def test_fully_spelled_defaults_hash_identically_to_omitted_form(tmp_path: Path) -> None:
+    """동치 문서는 같은 해시를 낸다 — 해시는 해석된 값에만 붙는다."""
+    bare = _write(tmp_path / "bare.project.toml", "schema_version = 1\n")
+    full = _write(tmp_path / "full.project.toml", _fully_spelled_defaults_toml())
+    bare_config = load_project_config(bare)
+    full_config = load_project_config(full)
+    assert full_config == ProjectConfig()
+    assert bare_config.sha256() == full_config.sha256()
+    assert full_config.sha256() == ProjectConfig().sha256()
+
+
+def test_repo_root_config_file_is_pure_defaults() -> None:
+    """저장소 뿌리의 `vlogsrt.project.toml`은 선언뿐이다 — 코드 기본값과 동치."""
+    repo_root = Path(__file__).resolve().parents[2]
+    loaded = load_project_config(repo_root / "vlogsrt.project.toml")
+    assert loaded == ProjectConfig()
+    assert loaded.sha256() == ProjectConfig().sha256()
+
+
+@pytest.mark.parametrize("key", _FRACTION_KEYS)
+def test_equivalent_fraction_spellings_hash_identically(tmp_path: Path, key: str) -> None:
+    """값이 같으면 철자가 달라도 해시는 같다 — "6/1"·"12/2"·정수 6은 하나다."""
+    hashes = set()
+    for index, value in enumerate(['"6/1"', '"12/2"', "6"]):
+        body = f"schema_version = 1\n{key} = {value}\n"
+        config = load_project_config(_write(tmp_path / f"eq{index}.project.toml", body))
+        assert getattr(config, key) == Fraction(6)
+        hashes.add(config.sha256())
+    assert len(hashes) == 1
+
+
+def test_to_dict_serializes_canonically() -> None:
+    """분수는 '분자/분모', 가격은 정규형 십진 문자열, 없음은 None 그대로."""
+    as_dict = ProjectConfig().to_dict()
+    assert set(as_dict) == set(ProjectConfig.__slots__)
+    assert as_dict["schema_version"] == 1
+    assert as_dict["vad_sample_rate"] == 16000
+    assert as_dict["vad_positive"] == 0.35
+    assert as_dict["vision_apply_confidence"] == 0.8
+    assert as_dict["guard_padding_seconds"] == "1/2"
+    assert as_dict["vision_sample_fps"] == "1/1"
+    assert as_dict["block_min_seconds"] == "6/1"
+    assert as_dict["block_max_seconds"] == "10/1"
+    assert as_dict["keep_seconds"] == "3/1"
+    assert as_dict["pricing_currency"] is None
+    for key in _PRICE_KEYS:
+        assert as_dict[key] is None, key
+    # 같은 값을 두 번 직렬화하면 같은 바이트다.
+    assert json.dumps(as_dict, sort_keys=True) == json.dumps(
+        ProjectConfig().to_dict(), sort_keys=True
+    )
+
+
+def test_sha256_is_a_stable_lowercase_hex_digest() -> None:
+    digest = ProjectConfig().sha256()
+    assert digest == ProjectConfig().sha256()
+    assert re.fullmatch(r"[0-9a-f]{64}", digest)
+
+
+def test_hash_distinguishes_different_values(tmp_path: Path) -> None:
+    base = load_project_config(_write(tmp_path / "a.project.toml", "schema_version = 1\n"))
+    bumped = load_project_config(
+        _write(tmp_path / "b.project.toml", "schema_version = 1\nvision_max_images = 15\n")
+    )
+    assert base.sha256() != bumped.sha256()
+
+
+# ─── P5-00: 타입·범위 거부 ─────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        # bool은 int의 서브클래스다 — 어느 숫자 필드로도 새면 안 된다.
+        "vision_long_edge = true",
+        "vad_sample_rate = true",
+        "vision_max_images = false",
+        "guard_padding_seconds = true",
+        "vad_positive = true",
+        # 정수 필드에 실수·문자열
+        "vision_long_edge = 768.0",
+        'vision_long_edge = "768"',
+        # 치수는 양수
+        "vision_long_edge = 0",
+        "vision_long_edge = -1",
+        "vision_max_images = 0",
+        # VAD 좌표는 아티팩트에 고정이다
+        "vad_sample_rate = 8000",
+        "vad_sample_rate = 44100",
+        "vad_window_samples = 256",
+        "vad_context_samples = 32",
+        # nan/inf·범위 밖 신뢰도
+        "vad_positive = nan",
+        "vad_positive = inf",
+        "vad_positive = -inf",
+        "vad_positive = -0.01",
+        "vad_positive = 1.5",
+        "vision_apply_confidence = -0.2",
+        "vision_apply_confidence = 1.0001",
+        # 분수 필드: 실수·bool·까다로운 문자열·양수 아닌 값
+        "guard_padding_seconds = 0.5",
+        'guard_padding_seconds = "0/1"',
+        'guard_padding_seconds = "-1/2"',
+        'guard_padding_seconds = "1/0"',
+        'guard_padding_seconds = "1/-2"',
+        'guard_padding_seconds = "half"',
+        'guard_padding_seconds = "1"',
+        "vision_sample_fps = 0",
+        'block_min_seconds = "0/3"',
+        # 문자열 필드: 빈 값·문자열 아님
+        'vision_model = ""',
+        "vision_model = 5",
+        'vad_model_version = ""',
+        # 체크섬은 소문자 16진수 64자
+        'vad_model_sha256 = "not-hex"',
+        ('vad_model_sha256 = "1A153A22F4509E292A94E67D6F9B85E8DEB25B4988682B7E174C65279D8788E3"'),
+        'vad_license_sha256 = "abc"',
+        # 가격: 실수·bool·음수·비유한·해독 불가
+        "vision_cost_per_image = 0.01",
+        "vision_cost_per_image = true",
+        'vision_cost_per_image = "-0.01"',
+        'vision_cost_per_image = "nan"',
+        'vision_cost_per_image = "inf"',
+        'vision_cost_per_image = "abc"',
+        'vision_cost_per_image = ""',
+    ],
+)
+def test_invalid_values_are_rejected_naming_key_and_path(tmp_path: Path, line: str) -> None:
+    path = _write(tmp_path / "bad.project.toml", f"schema_version = 1\n{line}\n")
+    with pytest.raises(ProjectConfigError) as excinfo:
+        load_project_config(path)
+    message = str(excinfo.value)
+    key = line.split(" =")[0]
+    assert key in message, line
+    assert str(path) in message, line
+
+
+@pytest.mark.parametrize(
+    ("line", "key", "value"),
+    [
+        ("vad_positive = 0", "vad_positive", 0.0),
+        ("vad_positive = 1", "vad_positive", 1.0),
+        ("vad_positive = 0.5", "vad_positive", 0.5),
+        ("vision_apply_confidence = 0.0", "vision_apply_confidence", 0.0),
+        ("vision_apply_confidence = 1.0", "vision_apply_confidence", 1.0),
+    ],
+)
+def test_unit_bounds_are_inclusive(tmp_path: Path, line: str, key: str, value: float) -> None:
+    config = load_project_config(
+        _write(tmp_path / "bound.project.toml", f"schema_version = 1\n{line}\n")
+    )
+    assert getattr(config, key) == value
+    assert isinstance(getattr(config, key), float)
+
+
+@pytest.mark.parametrize(
+    ("body", "keys"),
+    [
+        (
+            'schema_version = 1\nblock_min_seconds = "11/1"\n',
+            ("block_min_seconds", "block_max_seconds"),
+        ),
+        (
+            'schema_version = 1\nblock_max_seconds = "5/1"\n',
+            ("block_min_seconds", "block_max_seconds"),
+        ),
+        (
+            'schema_version = 1\nblock_min_seconds = "12/1"\nblock_max_seconds = "11/1"\n',
+            ("block_min_seconds", "block_max_seconds"),
+        ),
+        (
+            'schema_version = 1\nkeep_seconds = "7/1"\n',
+            ("keep_seconds", "block_min_seconds"),
+        ),
+        (
+            'schema_version = 1\nblock_min_seconds = "4/1"\nkeep_seconds = "5/1"\n',
+            ("keep_seconds", "block_min_seconds"),
+        ),
+    ],
+)
+def test_block_ordering_violations_are_rejected(
+    tmp_path: Path, body: str, keys: tuple[str, ...]
+) -> None:
+    path = _write(tmp_path / "order.project.toml", body)
+    with pytest.raises(ProjectConfigError) as excinfo:
+        load_project_config(path)
+    message = str(excinfo.value)
+    for key in keys:
+        assert key in message
+
+
+def test_block_ordering_allows_equality(tmp_path: Path) -> None:
+    """계약이 거부하는 건 min > max와 keep > min뿐이다 — 등호는 허용한다."""
+    body = (
+        'schema_version = 1\nblock_min_seconds = "10/1"\n'
+        'block_max_seconds = "10/1"\nkeep_seconds = "10/1"\n'
+    )
+    config = load_project_config(_write(tmp_path / "equal.project.toml", body))
+    assert config.block_min_seconds == config.block_max_seconds == config.keep_seconds
+
+
+# ─── P5-00: 자격증명 분리 ──────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("line", "name"),
+    [
+        ('vision_api_key_env = "OPENAI_API_KEY"', "OPENAI_API_KEY"),
+        ('vision_base_url_env = "OPENAI_BASE_URL"', "OPENAI_BASE_URL"),
+    ],
+)
+def test_reusing_stt_credential_names_is_rejected(tmp_path: Path, line: str, name: str) -> None:
+    """비전 자격증명은 원본 전사(STT) 자격증명과 다른 이름이어야 한다."""
+    path = _write(tmp_path / "cred.project.toml", f"schema_version = 1\n{line}\n")
+    with pytest.raises(ProjectConfigError) as excinfo:
+        load_project_config(path)
+    assert name in str(excinfo.value)
+    assert "vision" in str(excinfo.value)
+
+
+def test_loading_reads_nothing_from_the_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """설정 적재는 환경을 보지 않는다 — 자격증명·가격 값은 오직 명시적 계층에서."""
+    monkeypatch.chdir(tmp_path)  # 기본 파일도 없다 → 코드 기본값
+    for name in ("OPENAI_API_KEY", "OPENAI_BASE_URL", "ZAI_API_KEY", "ZAI_BASE_URL"):
+        monkeypatch.setenv(name, "set-by-test")
+    monkeypatch.setenv("VLOGSRT_PRICING_CURRENCY", "USD")
+    config = load_project_config(None)
+    assert config == ProjectConfig()
+    assert config.sha256() == ProjectConfig().sha256()
+
+
+# ─── P5-00: 선택적 가격 ───────────────────────────────────────────────
+
+
+def test_price_without_currency_is_rejected(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path / "p.project.toml", 'schema_version = 1\nvision_cost_per_image = "0.01"\n'
+    )
+    with pytest.raises(ProjectConfigError, match="pricing_currency"):
+        load_project_config(path)
+
+
+def test_blank_currency_with_price_is_rejected(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path / "p.project.toml",
+        'schema_version = 1\npricing_currency = ""\nvision_cost_per_image = "0.01"\n',
+    )
+    with pytest.raises(ProjectConfigError) as excinfo:
+        load_project_config(path)
+    assert "pricing_currency" in str(excinfo.value)
+
+
+def test_currency_alone_without_prices_is_allowed(tmp_path: Path) -> None:
+    path = _write(tmp_path / "p.project.toml", 'schema_version = 1\npricing_currency = "USD"\n')
+    config = load_project_config(path)
+    assert config.pricing_currency == "USD"
+    for key in _PRICE_KEYS:
+        assert getattr(config, key) is None, key
+
+
+@pytest.mark.parametrize("key", _PRICE_KEYS)
+def test_each_price_component_is_separately_priced(tmp_path: Path, key: str) -> None:
+    """구성 요소는 따로 값이 매겨진다 — 한 모델 요금이 다른 요금을 덮지 못한다."""
+    body = f'schema_version = 1\npricing_currency = "USD"\n{key} = "0.02"\n'
+    config = load_project_config(_write(tmp_path / "p.project.toml", body))
+    assert getattr(config, key) == Decimal("0.02")
+    for other in _PRICE_KEYS:
+        if other != key:
+            assert getattr(config, other) is None, other
+
+
+def test_price_spellings_canonicalize_to_one_hash(tmp_path: Path) -> None:
+    """같은 값의 다른 철자("0.010"·"0.01")는 하나의 정규형 십진 문자열로 해시에 든다."""
+    first = load_project_config(
+        _write(
+            tmp_path / "a.project.toml",
+            'schema_version = 1\npricing_currency = "USD"\nvision_cost_per_image = "0.010"\n',
+        )
+    )
+    second = load_project_config(
+        _write(
+            tmp_path / "b.project.toml",
+            'schema_version = 1\npricing_currency = "USD"\nvision_cost_per_image = "0.01"\n',
+        )
+    )
+    assert first == second
+    assert first.sha256() == second.sha256()
+    assert first.to_dict()["vision_cost_per_image"] == "0.01"
+    assert first.vision_cost_per_image == Decimal("0.01")
+
+
+def test_high_precision_price_hash_is_context_independent(tmp_path: Path) -> None:
+    """정규형은 문맥 정밀도에 무관해야 한다 — 반올림은 정규화가 아니라 훼손이다.
+
+    `Decimal.normalize()`는 현재 문맥 정밀도(기본 28)로 반올림한다. 유효숫자가
+    그보다 긴 가격이 문맥에 따라 다르게 직렬화되면 같은 파일이 세 개의 해시를
+    낸다. 정밀도 6·28·50 어디에서도 값 그대로 하나의 해시여야 한다.
+    """
+    long_price = "0.123456789012345678901234567890123456789"  # 유효숫자 39자리
+    body = f'schema_version = 1\npricing_currency = "USD"\nvision_cost_per_image = "{long_price}"\n'
+    path = _write(tmp_path / "prec.project.toml", body)
+    hashes = set()
+    with localcontext() as context:
+        for precision in (6, 28, 50):
+            context.prec = precision
+            config = load_project_config(path)
+            assert config.boundary_audio_cost_per_minute is None
+            assert config.vision_cost_per_image == Decimal(long_price)
+            canonical = config.to_dict()["vision_cost_per_image"]
+            assert canonical == long_price, f"prec={precision}: 반올림이 들어왔다"
+            hashes.add(config.sha256())
+    assert len(hashes) == 1, "문맥 정밀도가 해시를 갈랐다"
+
+
+def test_signed_decimal_zero_and_trailing_zeros_keep_one_hash(tmp_path: Path) -> None:
+    """부호 붙은 0과 끝자리 0 철자는 하나의 값이다 — 해시도 하나여야 한다."""
+    hashes = set()
+    for index, spelling in enumerate(["0", "-0", "0.000", "+0"]):
+        body = (
+            f'schema_version = 1\npricing_currency = "USD"\nvision_cost_per_image = "{spelling}"\n'
+        )
+        config = load_project_config(_write(tmp_path / f"z{index}.project.toml", body))
+        assert config.vision_cost_per_image == Decimal(0)
+        assert config.to_dict()["vision_cost_per_image"] == "0"
+        hashes.add(config.sha256())
+    assert len(hashes) == 1
+
+
+@pytest.mark.parametrize("key", ["vad_positive", "vision_apply_confidence"])
+def test_signed_float_zero_hashes_identically(tmp_path: Path, key: str) -> None:
+    """같은 값의 부호 철자("0.0"·"-0.0")는 해시도 같아야 한다."""
+    path = _write(tmp_path / "z.project.toml", "schema_version = 1\n")
+    positive = load_project_config(path, {key: 0.0})
+    negative = load_project_config(path, {key: -0.0})
+    assert positive == negative  # 값은 원래 같다 — 문제는 직렬화다
+    assert positive.to_dict()[key] == 0.0
+    assert negative.to_dict()[key] == 0.0
+    # 바이트로 증명한다: dict 비교는 -0.0을 못 본다.
+    assert json.dumps(positive.to_dict(), sort_keys=True) == json.dumps(
+        negative.to_dict(), sort_keys=True
+    )
+    assert positive.sha256() == negative.sha256()
+
+
+# ─── P5-00: overrides 명시적 덧층 ─────────────────────────────────────
+
+
+def test_overrides_layer_explicitly_over_the_file(tmp_path: Path) -> None:
+    path = _write(tmp_path / "base.project.toml", "schema_version = 1\nvision_long_edge = 1024\n")
+    config = load_project_config(path, {"vision_long_edge": 512, "vision_max_images": 8})
+    assert config.vision_long_edge == 512
+    assert config.vision_max_images == 8
+    assert config.guard_padding_seconds == Fraction(1, 2)  # 건드리지 않은 값은 그대로
+
+
+def test_overrides_work_over_absent_default_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """overrides는 파일 없이도 쓸 수 있다 — 두 번째 뿌리가 아니라 덧층이다."""
+    monkeypatch.chdir(tmp_path)
+    config = load_project_config(None, {"vision_model": "glm-5.3"})
+    assert config.vision_model == "glm-5.3"
+    assert config == ProjectConfig(vision_model="glm-5.3")
+
+
+def test_empty_overrides_behave_like_none(tmp_path: Path) -> None:
+    path = _write(tmp_path / "b.project.toml", "schema_version = 1\nvision_long_edge = 1024\n")
+    assert load_project_config(path, {}) == load_project_config(path)
+
+
+def test_overrides_reject_unknown_keys(tmp_path: Path) -> None:
+    path = _write(tmp_path / "b.project.toml", "schema_version = 1\n")
+    with pytest.raises(ProjectConfigError) as excinfo:
+        load_project_config(path, {"vision_temperature": 0.7})
+    assert "vision_temperature" in str(excinfo.value)
+
+
+def test_overrides_cannot_smuggle_unsupported_schema(tmp_path: Path) -> None:
+    path = _write(tmp_path / "b.project.toml", "schema_version = 1\n")
+    with pytest.raises(ProjectConfigError) as excinfo:
+        load_project_config(path, {"schema_version": 2})
+    assert "schema_version" in str(excinfo.value)
+
+
+def test_overrides_accept_native_fraction_and_decimal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    config = load_project_config(
+        None,
+        {
+            "keep_seconds": Fraction(2),
+            "vision_cost_per_image": Decimal("0.0125"),
+            "pricing_currency": "KRW",
+        },
+    )
+    assert config.keep_seconds == Fraction(2)
+    assert config.vision_cost_per_image == Decimal("0.0125")
+    assert config.to_dict()["vision_cost_per_image"] == "0.0125"
+
+
+def test_bad_override_values_name_the_overrides_layer(tmp_path: Path) -> None:
+    path = _write(tmp_path / "b.project.toml", "schema_version = 1\n")
+    with pytest.raises(ProjectConfigError) as excinfo:
+        load_project_config(path, {"vad_positive": 5})
+    message = str(excinfo.value)
+    assert "vad_positive" in message
+    assert "overrides" in message
+
+
+def test_invalid_file_value_is_not_rescued_by_overrides(tmp_path: Path) -> None:
+    """파일은 혼자서 성립해야 한다 — overrides가 나쁜 값을 덮어 구할 수 없다."""
+    path = _write(tmp_path / "bad.project.toml", "schema_version = 1\nvad_sample_rate = 8000\n")
+    with pytest.raises(ProjectConfigError, match="vad_sample_rate"):
+        load_project_config(path, {"vad_sample_rate": 16000})
+
+
+def test_overrides_cannot_repair_a_file_missing_schema_version(tmp_path: Path) -> None:
+    path = _write(tmp_path / "broken.project.toml", "vision_long_edge = 512\n")
+    with pytest.raises(ProjectConfigError, match="schema_version"):
+        load_project_config(path, {"schema_version": 1})
+
+
+# ─── P5-00: 공유 분석 어휘(analysis_models) ────────────────────────────
+
+
+def test_analysis_status_is_the_frozen_vocabulary() -> None:
+    """상태는 셋뿐이다 — 성공·빈 결과·오류. 갈래가 늘어도 이 집합은 못 늘어난다."""
+    assert get_args(AnalysisStatus) == ("success", "empty", "error")
+
+
+def test_analysis_failure_is_frozen_and_slotted() -> None:
+    failure = AnalysisFailure(
+        kind="vad_runtime", message="ONNX 세션을 만들지 못했다", retryable=True
+    )
+    assert failure.kind == "vad_runtime"
+    assert failure.message == "ONNX 세션을 만들지 못했다"
+    assert failure.retryable is True
+    # 값 객체다 — 같은 내용은 같고, 내용은 못 바꾼다.
+    assert failure == AnalysisFailure("vad_runtime", "ONNX 세션을 만들지 못했다", True)
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        failure.retryable = False  # type: ignore[misc]
+    assert AnalysisFailure.__dataclass_params__.frozen
+    assert AnalysisFailure.__slots__ == ("kind", "message", "retryable")
+    assert not hasattr(failure, "__dict__")
+
+
+def test_analysis_models_stays_the_shared_vocabulary_only() -> None:
+    """VAD·비전 고유 레코드는 이 파일에 없다 — 갈래별 하위 패키지의 소유다."""
+    import vlogsrt.project.analysis_models as analysis_models
+
+    dataclass_names = [
+        name
+        for name, cls in vars(analysis_models).items()
+        if isinstance(cls, type) and dataclasses.is_dataclass(cls)
+    ]
+    assert dataclass_names == ["AnalysisFailure"]
+
+
+def test_analysis_models_declares_the_branch_boundary() -> None:
+    """문서로 선언된 선이다 — 두 갈래 어느 쪽도 이 공유 파일을 고치지 않는다."""
+    import vlogsrt.project.analysis_models as analysis_models
+
+    doc = analysis_models.__doc__ or ""
+    assert "VAD" in doc and "비전" in doc
+
+
+def test_analysis_models_imports_no_project_module() -> None:
+    """공유 어휘는 project 안 그 무엇도 끌어들이지 않는다 — 의존 방향이 없다."""
+    source = Path(sys.modules["vlogsrt.project.analysis_models"].__file__ or "").read_text(
+        encoding="utf-8"
+    )
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import):
+            offenders = [alias.name for alias in node.names if alias.name.startswith("vlogsrt")]
+        elif isinstance(node, ast.ImportFrom):
+            offenders = (
+                [node.module or ""]
+                if (node.module or "").startswith("vlogsrt") or node.level > 0
+                else []
+            )
+        else:
+            continue
+        assert not offenders, f"공유 어휘가 project를 import한다: {node.lineno}번 줄 {offenders}"
