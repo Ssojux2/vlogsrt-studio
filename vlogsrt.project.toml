@@ -1,4 +1,6 @@
 # Final Cut 파생 계층(vlogsrt/project/)의 설정 뿌리. 원본 vlogsrt.toml과는 별개다.
-# P0의 유일한 키는 최상위 schema_version이다 — 부모 테이블도 env 탐색도 없다.
-# 이후 키는 같은 스키마/API를 확장한다(P5-00, 별도 검토).
+# 키는 전부 최상위 평면 키다 — 부모 테이블도 env 탐색도 없다.
+# P5-00부터 이 파일이 VAD·비전 튜너블과 가격 가정(문자열 십진수)까지 소유하지만,
+# 생략된 키는 코드 기본값(vlogsrt/project/config.py의 ProjectConfig)으로 돈다.
+# 이 파일 자체는 뿌리 선언만 남긴다 — 모든 값을 기본값과 같게 둔다.
 schema_version = 1
