@@ -180,15 +180,17 @@ def test_a_malicious_looking_path_stays_one_plain_argv_element(
 
 
 def test_a_relative_option_looking_path_becomes_an_absolute_operand(
-    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """xmllint는 '-'로 시작하는 글자를 깃발로 읽는다 — 절대 경로만이 피연산자다.
 
     실측 블로커: `Path('--version')`을 그대로 넘기면 xmllint가 깃발로 받아들여
-    버전 출력과 함께 종료 0 — 없는 파일이 valid=True로 둔갑한다.
+    버전 출력과 함께 종료 0 — 없는 파일이 valid=True로 둔갑한다. 임시 cwd로
+    격리해 주변 파일이 결론을 못 바꾸게 한다.
     """
     seen = _stub_run(monkeypatch)
     _stub_tool(monkeypatch)
+    monkeypatch.chdir(tmp_path)
 
     validate_xml(Path("--version"))
 
@@ -196,6 +198,21 @@ def test_a_relative_option_looking_path_becomes_an_absolute_operand(
     assert argv[-1] == str(Path("--version").resolve())
     assert argv[-1].startswith("/")
     assert "--version" not in argv
+
+
+def test_an_ordinary_relative_input_is_normalized_to_its_absolute_spot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """정규화는 '--version' 특이사항이 아니다 — 평범한 상대 이름도 절대 자리로 간다."""
+    seen = _stub_run(monkeypatch)
+    _stub_tool(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+
+    validate_xml(Path("plain/ordinary.fcpxml"))
+
+    argv, _kwargs = seen[0]
+    assert argv[-1] == str((tmp_path / "plain" / "ordinary.fcpxml").resolve())
+    assert argv[-1].startswith("/")
 
 
 # ─── 없음은 판정이 아니다 — unavailable ─────────────────────────────────
@@ -396,13 +413,34 @@ def test_real_malicious_name_is_validated_never_executed(tmp_path: Path) -> None
 
 
 @needs_xmllint
-def test_real_nonexistent_option_looking_input_is_not_version_output() -> None:
-    """없는 '--version' 입력이 libxml 출력과 valid=True를 내는 일은 없다 — 정규화가 막는다."""
+def test_real_nonexistent_option_looking_input_is_not_version_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """없는 '--version' 입력이 libxml 출력과 valid=True를 내는 일은 없다 — 정규화가 막는다.
+
+    임시 cwd로 격리한다 — 작업 폴러에 같은 이름 파일이 있어도 결론이 못 바뀌게.
+    """
+    monkeypatch.chdir(tmp_path)
+
     result = validate_xml(Path("--version"))
 
     assert result.valid is False
     assert result.diagnostics
     assert not any("libxml" in line for line in result.diagnostics)
+
+
+@needs_xmllint
+def test_real_ordinary_relative_input_is_validated_at_its_resolved_spot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """평범한 상대 입력도 부르는 그대로 받는다 — 판정은 절대 자리에서 일어난다."""
+    (tmp_path / "ordinary.fcpxml").write_text(build_fcpxml(), encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    result = validate_xml(Path("ordinary.fcpxml"))
+
+    assert result.valid is True
+    assert result.diagnostics == ()
 
 
 @needs_xmllint
