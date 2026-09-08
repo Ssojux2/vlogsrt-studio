@@ -224,6 +224,43 @@ def test_unavailable_is_a_runtime_error() -> None:
     assert issubclass(VadUnavailable, RuntimeError)
 
 
+def test_unexpected_resource_lookup_failure_is_contextual(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """importlib.resources.files가 일반 예외를 내면 새어 나가면 안 된다."""
+    from vlogsrt.project.vad import runtime
+    from vlogsrt.project.vad.runtime import VadUnavailable, bundled_artifact
+
+    def _boom(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("importer exploded")
+
+    monkeypatch.setattr(runtime.importlib.resources, "files", _boom)
+    with pytest.raises(VadUnavailable, match="importer exploded"):
+        bundled_artifact(ProjectConfig())
+
+
+def test_resource_probe_oserror_is_contextual(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """is_file()이 OSError를 내는 자원도 문맥 있는 실패여야 한다."""
+
+    class _UnreadablePath:
+        def is_file(self) -> bool:
+            raise OSError("permission denied")
+
+    from vlogsrt.project.vad import runtime
+    from vlogsrt.project.vad.runtime import VadUnavailable, bundled_artifact
+
+    real_license = bundled_artifact(ProjectConfig()).license_path
+
+    def _packaged(basename: str) -> object:
+        return _UnreadablePath() if basename.endswith(".onnx") else real_license
+
+    monkeypatch.setattr(runtime, "_packaged_file", _packaged)
+    with pytest.raises(VadUnavailable, match="permission denied"):
+        bundled_artifact(ProjectConfig())
+
+
 def test_artifact_discovery_needs_no_optional_runtime(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

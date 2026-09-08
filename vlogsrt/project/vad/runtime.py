@@ -83,7 +83,23 @@ def bundled_artifact(cfg: ProjectConfig) -> VadArtifact:
     존재하지 않는 파일을 찾게 되고 그 자체가 좌표 불일치 거절이다. 발견은
     설치된 꾸러미 자원(importlib.resources)으로만 한다: cwd 기웃거리기, 저장소
     루트 추측, 절대 경로 하드코딩은 없다.
+
+    공개 경계는 create_cpu_session과 같은 보호막 안에 있다 — 자원 열람·
+    파일 조사에서 예상 밖의 Exception이 새어 나가면 실패 닫힘이 깔때기로
+    뚫린다. 문맥을 가진 VadUnavailable은 그대로 통과시키고 BaseException은
+    잡지 않는다.
     """
+    try:
+        return _bundled_artifact(cfg)
+    except VadUnavailable:
+        raise
+    except Exception as exc:
+        raise VadUnavailable(
+            f"꾸러미 VAD 아티팩트 발견이 예상 밖의 오류로 실패했다 — {type(exc).__name__}: {exc}"
+        ) from exc
+
+
+def _bundled_artifact(cfg: ProjectConfig) -> VadArtifact:
     model_path = _packaged_file(f"silero_vad_{cfg.vad_model_version}.onnx")
     license_path = _packaged_file(_LICENSE_BASENAME)
     _verify_resource(model_path, cfg.vad_model_sha256, "vad_model_sha256", _MODEL_BYTES)
