@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import math
 import time
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
@@ -14,7 +15,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from . import env, log
 from .config import Config
@@ -47,6 +48,9 @@ class TranscriptionJob:
     chunks: tuple[Chunk, ...]
     source: str = ""
     kind: str = FIXTURE_KIND
+    # 픽스처 네임스페이스. None이면 지금처럼 설정된 픽스처 디렉터리에서 **전부** 읽는다.
+    # 있으면 `<namespace>/<stem>.<kind>.json` 하나만 보고 요청한 조각만 엄격히 고른다.
+    namespace: Path | None = None
 
 
 # 힌트가 실릴 수 있는 호출. **whisper 쪽은 절대 여기 들어오지 않는다**(규칙 6, D16).
@@ -113,9 +117,86 @@ class FixtureTranscriber:
     fixture_dir: Path
 
     def transcribe(self, job: TranscriptionJob, cfg: Config) -> list[ChunkResponse]:
+        if job.namespace is not None:
+            return _load_namespaced(_namespace_path(job.namespace, job), job)
         return _load_responses(
             _fixture_path(self.fixture_dir, job.stem, job.kind), job.stem, job.source
         )
+
+
+def _namespace_path(namespace: Path, job: TranscriptionJob) -> Path:
+    """namespace 안에 머무는 경로만 만든다. 이름 조각 하나로 서지 않으면 만들지도 않는다.
+
+    파일명 조각 검사일 뿐 샌드박스가 아니다 — 한글·공백·점은 그대로 통과하고,
+    구분자·`.`·`..`·빈칸만 거부한다. 레거시(namespace 없음) 경로에는 이 선이 없다.
+    """
+    for what, value in (("stem", job.stem), ("kind", job.kind)):
+        if not value or value in {".", ".."} or "/" in value or "\\" in value:
+            raise MalformedTranscript(
+                f"namespace 픽스처의 {what}이(가) 안전한 파일명 조각이 아닙니다: {value!r}"
+            )
+    return _fixture_path(namespace, job.stem, job.kind)
+
+
+def _load_namespaced(path: Path, job: TranscriptionJob) -> list[ChunkResponse]:
+    """namespace 픽스처에서 **요청한 조각만** 엄격히 골라 낸다.
+
+    저장된 전체 집합에서 재시도 부분집합을 고르는 길이다. 원본 JSON을 int()/float()
+    강제나 `item.get` 기본값이 붙기 **전에** 본다 — 강제가 숨기는 잘못된 값은 그 다음
+    단계에서는 이미 늦는다.
+    """
+    if not path.is_file():
+        raise _missing_fixture(path, job.stem, job.source)
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"픽스처가 올바른 JSON이 아닙니다: {path} ({exc})") from exc
+    if not isinstance(raw, dict) or not isinstance(raw.get("chunks"), list):
+        raise RuntimeError(f"픽스처 형식을 알 수 없습니다: {path}")
+    saved = _raw_records(raw["chunks"], path)
+    return _pick_requested(saved, job.chunks, path)
+
+
+def _raw_records(items: list[Any], path: Path) -> list[tuple[int, float, dict[str, Any]]]:
+    """강제 이전의 원본 기록을 검사한다. 없는 칸은 기본값으로 몰래 메워지지 않는다."""
+    records: list[tuple[int, float, dict[str, Any]]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            raise RuntimeError(f"픽스처 조각 기록이 JSON 객체가 아닙니다: {path}")
+        missing = [key for key in ("index", "offset", "response") if key not in item]
+        if missing:
+            raise RuntimeError(f"픽스처 조각 기록에 없는 칸: {missing} ({path})")
+        if not _exact_int(item["index"]):
+            raise RuntimeError(f"픽스처 조각 번호가 정수가 아닙니다: {item['index']!r} ({path})")
+        if not _finite_number(item["offset"]):
+            raise RuntimeError(
+                f"픽스처 조각 오프셋이 유한 숫자가 아닙니다: {item['offset']!r} ({path})"
+            )
+        records.append((item["index"], item["offset"], item["response"]))
+    return records
+
+
+def _pick_requested(
+    saved: list[tuple[int, float, dict[str, Any]]], chunks: tuple[Chunk, ...], path: Path
+) -> list[ChunkResponse]:
+    """요청한 조각 번호마다 저장된 응답이 **정확히 하나**여야 한다."""
+    requested = {chunk.index: chunk for chunk in chunks}
+    picked: dict[int, ChunkResponse] = {}
+    for index, offset, payload in saved:
+        if index not in requested:
+            continue  # 저장된 전체 집합에서 요청한 부분집합만 고른다
+        if index in picked:
+            raise RuntimeError(f"픽스처에 조각 {index} 응답이 둘 이상 있다: {path}")
+        chunk = requested[index]
+        if offset != chunk.offset:
+            raise RuntimeError(
+                f"픽스처 조각 {index} 오프셋이 요청({chunk.offset})과 다릅니다: {offset!r} ({path})"
+            )
+        picked[index] = ChunkResponse(index=index, offset=float(offset), payload=payload)
+    absent = sorted(set(requested) - set(picked))
+    if absent:
+        raise RuntimeError(f"픽스처에 없는 조각: {absent} ({path})")
+    return [picked[chunk.index] for chunk in sorted(chunks, key=lambda chunk: chunk.index)]
 
 
 def load_fixture_responses(path: Path) -> list[ChunkResponse]:
@@ -392,6 +473,200 @@ def build_spine(responses: Sequence[ChunkResponse]) -> list[Segment]:
             f"그 구간에는 자막이 서지 않는다."
         )
     return spine
+
+
+# ─────────────────────────────────────────────────────────────
+#  전사 결과형 (P3-01)
+# ─────────────────────────────────────────────────────────────
+
+
+class EmptyTranscript(RuntimeError):
+    """조립 가능한 초안이 하나도 없다. **무음·무성음의 증거가 아니다.**
+
+    응답이 전부 빈 리스트였을 수도 있고, 글이 전부 공백이라 걸러졌을 수도 있다 —
+    어느 쪽인지는 이 예외만으로는 알 수 없다.
+    """
+
+
+class MalformedTranscript(RuntimeError):
+    """응답 꼴이 계약을 어겨 초안을 만들 수 없다. 호출은 이웃하지 계산은 못 한다."""
+
+
+@dataclass(frozen=True, slots=True)
+class ChunkCoverage:
+    """조각 하나의 응답 덮개. 시각을 만들지 않고 **무엇이 돌아왔는지만** 남긴다."""
+
+    index: int
+    offset: float
+    duration: float
+    segment_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class TranscriptionOutcome:
+    """전사 호출 하나의 결과. 예외를 밖으로 새지 않고 상태로 남긴다."""
+
+    status: Literal["success", "empty", "error"]
+    segments: tuple[Segment, ...]
+    coverage: tuple[ChunkCoverage, ...]
+    error: str | None
+
+
+def _exact_int(value: Any) -> bool:
+    """bool은 int의 서브클래스지만 조각 번호로 쓸 수 없다 — 1과 True를 갈라낸다."""
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _finite_number(value: Any) -> bool:
+    """숫자이면서 유한한 값만 받는다. bool과 NaN·무한대는 시각이 될 수 없다."""
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def _match_responses(
+    chunks: tuple[Chunk, ...], responses: Sequence[ChunkResponse]
+) -> list[ChunkResponse]:
+    """돌아온 응답을 요청한 조각과 하나씩 짝짓는다. 남는 것·겹치는 것 전부 계약 위반.
+
+    덮개 검사가 느슨하면 조각 하나가 몰래 빠져도 조립은 그대로 돌아간다 — 요청한
+    조각 수와 응답 수가 같은지, 번호와 오프셋이 정확히 맞는지를 여기서 못 박는다.
+    """
+    requested = {chunk.index: chunk for chunk in chunks}
+    matched: dict[int, ChunkResponse] = {}
+    for response in responses:
+        index = response.index
+        if not _exact_int(index):
+            raise MalformedTranscript(f"응답 조각 번호가 정수가 아닙니다: {index!r}")
+        if index not in requested:
+            raise MalformedTranscript(f"요청하지 않은 조각 응답이 돌아왔다: {index}")
+        if index in matched:
+            raise MalformedTranscript(f"조각 {index} 응답이 둘 이상 돌아왔다")
+        chunk = requested[index]
+        if not _finite_number(response.offset) or response.offset != chunk.offset:
+            raise MalformedTranscript(
+                f"조각 {index} 응답 오프셋이 요청({chunk.offset})과 다릅니다: {response.offset!r}"
+            )
+        matched[index] = response
+    absent = sorted(set(requested) - set(matched))
+    if absent:
+        raise MalformedTranscript(f"응답이 돌아오지 않은 조각: {absent}")
+    return [matched[chunk.index] for chunk in sorted(chunks, key=lambda chunk: chunk.index)]
+
+
+def _payload_defect(payload: Any, where: str) -> str | None:
+    """응답 꼴의 계약 위반을 하나만 골라 돌려준다. 맞으면 None.
+
+    `build_spine`가 기본값으로 덮던 `start`·`end`도 여기서는 **있어야** 한다 — 0.0으로
+    몰래 대체된 시각은 그대로 SRT로 나가기 때문이다. `text`도 명시적인 문자열이어야
+    한다 — `str()` 강제는 객체를 글자모양으로 바꿔 내보낸다. 빈 문자열·공백은 위반이
+    아니므로 그대로 둔다(걸러져 빈 성공, 규칙 9). 길이 0·뒤집힌 시각도 건드리지 않는다.
+    """
+    if not isinstance(payload, dict):
+        return f"{where}: 응답이 JSON 객체가 아닙니다: {type(payload).__name__}"
+    if "segments" not in payload:
+        return f"{where}: 응답에 segments가 없습니다"
+    segments = payload["segments"]
+    if not isinstance(segments, list):
+        return f"{where}: segments가 리스트가 아닙니다: {type(segments).__name__}"
+    for position, segment in enumerate(segments):
+        if not isinstance(segment, dict):
+            return f"{where}: 세그먼트 {position}이 JSON 객체가 아닙니다"
+        if "text" not in segment:
+            return f"{where}: 세그먼트 {position}에 text가 없습니다"
+        if not isinstance(segment["text"], str):
+            return f"{where}: 세그먼트 {position}의 text가 문자열이 아닙니다: {segment['text']!r}"
+        for key in ("start", "end"):
+            if key not in segment:
+                return f"{where}: 세그먼트 {position}에 {key}가 없습니다"
+            if not _finite_number(segment[key]):
+                return (
+                    f"{where}: 세그먼트 {position}의 {key}가 유한 숫자가 아닙니다: {segment[key]!r}"
+                )
+        for key in ("compression_ratio", "avg_logprob", "no_speech_prob"):
+            if key in segment and not _finite_number(segment[key]):
+                return (
+                    f"{where}: 세그먼트 {position}의 {key}가 유한 숫자가 아닙니다: {segment[key]!r}"
+                )
+    return None
+
+
+def _coverage(chunks: tuple[Chunk, ...], matched: list[ChunkResponse]) -> tuple[ChunkCoverage, ...]:
+    """요청한 조각마다 덮개를 하나씩 남긴다. 순서는 조각 번호 순서다."""
+    records: list[ChunkCoverage] = []
+    for chunk, response in zip(sorted(chunks, key=lambda chunk: chunk.index), matched, strict=True):
+        defect = _payload_defect(response.payload, f"조각 {chunk.index}")
+        if defect is not None:
+            raise MalformedTranscript(defect)
+        records.append(
+            ChunkCoverage(
+                index=chunk.index,
+                offset=chunk.offset,
+                duration=chunk.duration,
+                segment_count=len(response.payload["segments"]),
+            )
+        )
+    return tuple(records)
+
+
+def _request_defect(chunks: tuple[Chunk, ...]) -> str | None:
+    """요청 자체의 계약 위반. 위반이면 위임조차 하지 않는다.
+
+    깨진 요청(빈 조각·겹치는 번호·그르른 오프셋·길이)을 그대로 보내면 같은 응답이
+    두 번 조립되는 길이 생긴다 — 유료 호출은 깨진 요청에 값을 쓰지 않는다.
+    """
+    if not chunks:
+        return "요청한 조각이 하나도 없습니다"
+    seen: set[int] = set()
+    for chunk in chunks:
+        if not _exact_int(chunk.index):
+            return f"조각 번호가 정수가 아닙니다: {chunk.index!r}"
+        if chunk.index in seen:
+            return f"요청 안에서 조각 번호가 겹친다: {chunk.index}"
+        seen.add(chunk.index)
+        if not _finite_number(chunk.offset):
+            return f"조각 {chunk.index} 오프셋이 유한 숫자가 아닙니다: {chunk.offset!r}"
+        if not _finite_number(chunk.duration) or chunk.duration <= 0:
+            return f"조각 {chunk.index} 길이가 양수가 아닙니다: {chunk.duration!r}"
+    return None
+
+
+def transcribe_outcome(
+    transcriber: Transcriber, job: TranscriptionJob, cfg: Config
+) -> TranscriptionOutcome:
+    """전사를 호출하고 결과를 상태로 돌려준다. 예외를 밖으로 새지 않는다.
+
+    'empty'는 **모든 조각이 빈 리스트를 명시적으로** 돌려준 경우뿐이다. 꼴이 틀어진
+    경우는 전부 'error'다 — 빈 목록과 못 얻은 목록을 섞으면 안 되기 때문이다. 요청
+    가드를 통과해야 위임한다. 낱낱의 세그먼트 해석·조립은 기존 `build_spine` 그대로다
+    — 여기는 결과형을 만드는 곳일 뿐.
+    """
+    try:
+        defect = _request_defect(job.chunks)
+        if defect is not None:
+            raise MalformedTranscript(defect)
+        responses = transcriber.transcribe(job, cfg)
+        matched = _match_responses(job.chunks, responses)
+        coverage = _coverage(job.chunks, matched)
+        if all(cover.segment_count == 0 for cover in coverage):
+            return TranscriptionOutcome(status="empty", segments=(), coverage=coverage, error=None)
+        segments = tuple(build_spine(matched))
+    except Exception as exc:  # noqa: BLE001 - 상태로 바꿔 남긴다. 조용히 두지는 않는다
+        return TranscriptionOutcome(
+            status="error", segments=(), coverage=(), error=f"{exc.__class__.__name__}: {exc}"
+        )
+    return TranscriptionOutcome(status="success", segments=segments, coverage=coverage, error=None)
+
+
+def require_nonempty(outcome: TranscriptionOutcome) -> tuple[Segment, ...]:
+    """쓸 수 있는 초안이 있는 결과만 통과시킨다.
+
+    실패는 둘로 갈린다: 꼴이 틀어졌으면 `MalformedTranscript`에 기록된 맥락을 실어
+    던지고, 꼴은 맞는데 초안이 비었으면 `EmptyTranscript`를 던진다.
+    """
+    if outcome.status == "error":
+        raise MalformedTranscript(f"전사가 실패로 돌아왔다: {outcome.error}")
+    if not outcome.segments:
+        raise EmptyTranscript("조립 가능한 초안이 하나도 없습니다. 무음의 증거는 아니다.")
+    return outcome.segments
 
 
 # ─────────────────────────────────────────────────────────────

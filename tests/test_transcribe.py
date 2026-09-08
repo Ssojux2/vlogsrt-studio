@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import json
+import os
+from collections.abc import Sequence
 from dataclasses import replace as data_replace
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -11,15 +15,20 @@ from vlogsrt.config import Config
 from vlogsrt.models import Chunk
 from vlogsrt.transcribe import (
     FIXTURE_KIND,
+    ChunkCoverage,
     ChunkResponse,
+    EmptyTranscript,
     FixtureTranscriber,
     LiveTranscriber,
+    MalformedTranscript,
     TranscriptionJob,
     build_spine,
     estimate_cost,
     get_transcriber,
     parse_segments,
+    require_nonempty,
     save_fixture,
+    transcribe_outcome,
 )
 
 SYNTHETIC = Path(__file__).parent / "fixtures" / "synthetic"
@@ -393,3 +402,485 @@ def test_other_errors_are_not_swallowed(monkeypatch: pytest.MonkeyPatch, tmp_pat
     client = Broken()
     with pytest.raises(RuntimeError, match="401"):
         _live(monkeypatch, client).transcribe(real_job(tmp_path), Config())
+
+
+# ─────────────────────────────────────────────────────────────
+#  전사 결과형 — 상태는 셋, 조립은 기존 build_spine 그대로 (P3-01)
+# ─────────────────────────────────────────────────────────────
+
+EMPTY = {"segments": []}
+BLANK = {"segments": [{"start": 0.0, "end": 1.0, "text": "   "}]}
+LEGACY_RANGE = {
+    "segments": [
+        {"start": 1.0, "end": 1.0, "text": "길이 0"},
+        {"start": 4.0, "end": 3.0, "text": "뒤집힌 시각"},
+    ]
+}
+
+
+class Scripted:
+    """정해둔 응답을 그대로 돌려주는 가짜 전사자. 예외도 낼 수 있다."""
+
+    def __init__(
+        self, responses: Sequence[ChunkResponse] = (), failure: Exception | None = None
+    ) -> None:
+        self.responses = list(responses)
+        self.failure = failure
+        self.calls = 0
+
+    def transcribe(self, job: TranscriptionJob, cfg: Config) -> list[ChunkResponse]:
+        self.calls += 1
+        if self.failure is not None:
+            raise self.failure
+        return self.responses
+
+
+def chunk_job(offsets: Sequence[float] = (0.0, 12.0)) -> TranscriptionJob:
+    audio = Path("demo.mp3")
+    return TranscriptionJob(
+        stem="demo",
+        chunks=tuple(Chunk(audio, offset, 12.0, index) for index, offset in enumerate(offsets)),
+    )
+
+
+def responses_for(job: TranscriptionJob, payloads: Sequence[dict[str, Any]]) -> list[ChunkResponse]:
+    """작업의 조각마다 순서대로 응답 하나씩."""
+    return [
+        ChunkResponse(chunk.index, chunk.offset, payload)
+        for chunk, payload in zip(job.chunks, payloads, strict=True)
+    ]
+
+
+def test_all_lists_literally_empty_is_the_explicit_empty_outcome() -> None:
+    job = chunk_job()
+    outcome = transcribe_outcome(Scripted(responses_for(job, [EMPTY, EMPTY])), job, Config())
+    assert outcome.status == "empty"
+    assert outcome.segments == ()
+    assert outcome.error is None
+    assert outcome.coverage == (
+        ChunkCoverage(index=0, offset=0.0, duration=12.0, segment_count=0),
+        ChunkCoverage(index=1, offset=12.0, duration=12.0, segment_count=0),
+    )
+
+
+def test_a_missing_segments_key_is_an_error_never_empty() -> None:
+    job = chunk_job((0.0,))
+    outcome = transcribe_outcome(
+        Scripted([ChunkResponse(0, 0.0, {"text": "시각이 없는 덩어리"})]), job, Config()
+    )
+    assert outcome.status == "error"
+    assert outcome.segments == ()
+    assert outcome.coverage == ()
+    assert "segments" in (outcome.error or "")
+
+
+def test_segments_that_is_not_a_list_is_an_error() -> None:
+    job = chunk_job((0.0,))
+    outcome = transcribe_outcome(
+        Scripted([ChunkResponse(0, 0.0, {"segments": {"0": []}})]), job, Config()
+    )
+    assert outcome.status == "error"
+
+
+def test_a_payload_that_is_not_an_object_is_an_error() -> None:
+    job = chunk_job((0.0,))
+    outcome = transcribe_outcome(Scripted([ChunkResponse(0, 0.0, ["segments"])]), job, Config())
+    assert outcome.status == "error"
+
+
+def test_a_segment_that_is_not_an_object_is_an_error() -> None:
+    job = chunk_job((0.0,))
+    outcome = transcribe_outcome(
+        Scripted([ChunkResponse(0, 0.0, {"segments": ["첫 번째"]})]), job, Config()
+    )
+    assert outcome.status == "error"
+
+
+@pytest.mark.parametrize(
+    "segment",
+    [
+        pytest.param({"end": 1.0, "text": "가"}, id="start-missing"),
+        pytest.param({"start": 0.0, "text": "가"}, id="end-missing"),
+        pytest.param({"start": "0.0", "end": 1.0, "text": "가"}, id="start-string"),
+        pytest.param({"start": 0.0, "end": None, "text": "가"}, id="end-null"),
+        pytest.param({"start": float("inf"), "end": 1.0, "text": "가"}, id="start-inf"),
+        pytest.param({"start": 0.0, "end": float("nan"), "text": "가"}, id="end-nan"),
+        pytest.param({"start": True, "end": 1.0, "text": "가"}, id="start-bool"),
+        pytest.param(
+            {"start": 0.0, "end": 1.0, "text": "가", "compression_ratio": True}, id="meta-bool"
+        ),
+    ],
+)
+def test_a_broken_segment_number_is_an_error_never_empty(segment: dict[str, Any]) -> None:
+    """build_spine가 기본값으로 덮던 값들도 결과형에서는 있어야 한다."""
+    job = chunk_job((0.0,))
+    outcome = transcribe_outcome(
+        Scripted([ChunkResponse(0, 0.0, {"segments": [segment]})]), job, Config()
+    )
+    assert outcome.status == "error"
+
+
+def test_integer_segment_numbers_are_valid() -> None:
+    job = chunk_job((0.0,))
+    outcome = transcribe_outcome(
+        Scripted([ChunkResponse(0, 0.0, {"segments": [{"start": 0, "end": 2, "text": " 가"}]})]),
+        job,
+        Config(),
+    )
+    assert outcome.status == "success"
+    assert [segment.text for segment in outcome.segments] == ["가"]
+
+
+def test_raw_nonempty_but_blank_text_is_a_success_with_no_segments() -> None:
+    """조립 결과가 비는 것과 응답이 비는 것은 다르다 — 전자는 성공이다."""
+    job = chunk_job()
+    outcome = transcribe_outcome(Scripted(responses_for(job, [BLANK, BLANK])), job, Config())
+    assert outcome.status == "success"
+    assert outcome.segments == ()
+    assert [cover.segment_count for cover in outcome.coverage] == [1, 1]
+
+
+def test_mixed_empty_and_nonempty_lists_are_a_success() -> None:
+    job = chunk_job()
+    outcome = transcribe_outcome(Scripted(responses_for(job, [EMPTY, RAW])), job, Config())
+    assert outcome.status == "success"
+    assert [segment.start for segment in outcome.segments] == [12.0, 13.5]  # RAW + 조각 오프셋
+    assert outcome.coverage[0].segment_count == 0
+
+
+def test_zero_and_reversed_ranges_survive_through_unchanged_build_spine() -> None:
+    """길이 0·뒤집힌 시각은 계약 위반이 아니다 — 기존 접힘 그대로 흘러간다(규칙 9)."""
+    job = chunk_job((0.0,))
+    outcome = transcribe_outcome(Scripted([ChunkResponse(0, 0.0, LEGACY_RANGE)]), job, Config())
+    assert outcome.status == "success"
+    assert [segment.text for segment in outcome.segments] == ["길이 0", "뒤집힌 시각"]
+    assert outcome.segments[1].end == 4.0  # 뒤집힌 끝은 시작으로 접는다 — 기존과 같다
+
+
+@pytest.mark.parametrize(
+    "responses",
+    [
+        pytest.param([ChunkResponse(0, 0.0, RAW)], id="count-short"),
+        pytest.param([ChunkResponse(2, 24.0, RAW), ChunkResponse(0, 0.0, RAW)], id="unrequested"),
+        pytest.param([ChunkResponse(True, 0.0, RAW), ChunkResponse(1, 12.0, RAW)], id="bool-index"),
+        pytest.param([ChunkResponse(1.0, 12.0, RAW), ChunkResponse(0, 0.0, RAW)], id="float-index"),
+        pytest.param(
+            [ChunkResponse(0, 5.0, RAW), ChunkResponse(1, 12.0, RAW)], id="offset-mismatch"
+        ),
+        pytest.param([ChunkResponse(0, True, RAW), ChunkResponse(1, 12.0, RAW)], id="bool-offset"),
+        pytest.param(
+            [ChunkResponse(0, float("nan"), RAW), ChunkResponse(1, 12.0, RAW)], id="nan-offset"
+        ),
+        pytest.param([ChunkResponse(0, 0.0, RAW), ChunkResponse(0, 0.0, RAW)], id="duplicate"),
+        pytest.param(
+            [ChunkResponse(0, 0.0, RAW), ChunkResponse(1, 12.0, RAW), ChunkResponse(2, 24.0, RAW)],
+            id="count-long",
+        ),
+    ],
+)
+def test_a_broken_response_identity_is_an_error(responses: list[ChunkResponse]) -> None:
+    """덮개 검사가 느슨하면 조각이 몰래 빠져도 조립은 그대로 돌아간다."""
+    job = chunk_job()
+    outcome = transcribe_outcome(Scripted(responses), job, Config())
+    assert outcome.status == "error"
+    assert outcome.segments == ()
+
+
+def test_a_call_failure_is_an_error_outcome_not_a_raise() -> None:
+    job = chunk_job((0.0,))
+    failure = RuntimeError("Error code: 401 - bad key")
+    outcome = transcribe_outcome(Scripted(failure=failure), job, Config())
+    assert outcome.status == "error"
+    assert "401" in (outcome.error or "")
+    assert outcome.coverage == ()
+
+
+# ── 수정(Sol 1): 요청 가드 — 깨진 요청은 위임조차 하지 않는다 ────────────────
+
+
+@pytest.mark.parametrize(
+    "chunks",
+    [
+        pytest.param((), id="no-chunks"),
+        pytest.param(
+            (
+                Chunk(Path("demo.mp3"), 0.0, 12.0, 0),
+                Chunk(Path("demo.mp3"), 0.0, 12.0, 0),
+            ),
+            id="duplicate-index",
+        ),
+        pytest.param((Chunk(Path("demo.mp3"), 0.0, 12.0, True),), id="bool-index"),
+        pytest.param((Chunk(Path("demo.mp3"), 0.0, 12.0, 1.0),), id="float-index"),
+        pytest.param((Chunk(Path("demo.mp3"), float("nan"), 12.0, 0),), id="nan-offset"),
+        pytest.param((Chunk(Path("demo.mp3"), True, 12.0, 0),), id="bool-offset"),
+        pytest.param((Chunk(Path("demo.mp3"), 0.0, 0.0, 0),), id="zero-duration"),
+        pytest.param((Chunk(Path("demo.mp3"), 0.0, -5.0, 0),), id="negative-duration"),
+        pytest.param((Chunk(Path("demo.mp3"), 0.0, float("nan"), 0),), id="nan-duration"),
+    ],
+)
+def test_a_broken_request_is_rejected_without_a_single_call(
+    chunks: tuple[Chunk, ...],
+) -> None:
+    """유료 호출은 깨진 요청에 값을 쓰지 않는다 — 검사는 위임 앞에서 끝난다."""
+    transcriber = Scripted()
+    outcome = transcribe_outcome(
+        transcriber, TranscriptionJob(stem="demo", chunks=chunks), Config()
+    )
+    assert outcome.status == "error"
+    assert outcome.segments == ()
+    assert outcome.coverage == ()
+    assert transcriber.calls == 0
+
+
+def test_a_duplicated_chunk_index_never_duplicates_captions() -> None:
+    """같은 조각 번호 둘에 응답 하나가 오면 같은 자막이 두 번 서던 길이다."""
+    audio = Path("demo.mp3")
+    job = TranscriptionJob(
+        stem="demo",
+        chunks=(Chunk(audio, 0.0, 12.0, 0), Chunk(audio, 0.0, 12.0, 0)),
+    )
+    transcriber = Scripted([ChunkResponse(0, 0.0, RAW)])
+    outcome = transcribe_outcome(transcriber, job, Config())
+    assert outcome.status == "error"
+    assert transcriber.calls == 0
+
+
+# ── 수정(Sol 2): 세그먼트 글자는 명시적인 문자열이어야 한다 ──────────────────
+
+
+@pytest.mark.parametrize(
+    "segment",
+    [
+        pytest.param({"start": 0.0, "end": 1.0}, id="text-missing"),
+        pytest.param({"start": 0.0, "end": 1.0, "text": {"unexpected": 1}}, id="text-object"),
+        pytest.param({"start": 0.0, "end": 1.0, "text": 3}, id="text-number"),
+        pytest.param({"start": 0.0, "end": 1.0, "text": True}, id="text-bool"),
+    ],
+)
+def test_missing_or_non_string_text_is_malformed(segment: dict[str, Any]) -> None:
+    """str() 강제로 글자모양을 만들어 내는 길을 막는다 — 글자는 문자열로 와야 한다."""
+    job = chunk_job((0.0,))
+    outcome = transcribe_outcome(
+        Scripted([ChunkResponse(0, 0.0, {"segments": [segment]})]), job, Config()
+    )
+    assert outcome.status == "error"
+
+
+@pytest.mark.parametrize("text", ["", "   "])
+def test_explicit_blank_text_stays_a_filter_empty_success(text: str) -> None:
+    """빈 문자열·공백 문자열은 말이 없는 것이다 — 걸러져 빈 성공이지 위반이 아니다."""
+    job = chunk_job()
+    blank = {"segments": [{"start": 0.0, "end": 1.0, "text": text}]}
+    outcome = transcribe_outcome(Scripted(responses_for(job, [blank, blank])), job, Config())
+    assert outcome.status == "success"
+    assert outcome.segments == ()
+    assert [cover.segment_count for cover in outcome.coverage] == [1, 1]
+
+
+def test_require_nonempty_returns_segments_only_for_nonempty_success() -> None:
+    job = chunk_job()
+    outcome = transcribe_outcome(Scripted(responses_for(job, [RAW, RAW])), job, Config())
+    segments = require_nonempty(outcome)
+    assert len(segments) == 4
+    assert segments is outcome.segments
+
+
+def test_require_nonempty_raises_malformed_with_the_recorded_context() -> None:
+    job = chunk_job((0.0,))
+    outcome = transcribe_outcome(
+        Scripted(failure=RuntimeError("Error code: 401 - bad key")), job, Config()
+    )
+    with pytest.raises(MalformedTranscript, match="401"):
+        require_nonempty(outcome)
+
+
+def test_require_nonempty_raises_empty_for_every_nonerror_without_segments() -> None:
+    """명시적 빈이든 걸러져 빈이든 — 초안이 없으면 같은 예외로 갈린다."""
+    job = chunk_job()
+    literal = transcribe_outcome(Scripted(responses_for(job, [EMPTY, EMPTY])), job, Config())
+    filtered = transcribe_outcome(Scripted(responses_for(job, [BLANK, BLANK])), job, Config())
+    for outcome in (literal, filtered):
+        with pytest.raises(EmptyTranscript):
+            require_nonempty(outcome)
+
+
+def test_the_new_errors_remain_runtime_errors() -> None:
+    """기존 호출자는 RuntimeError로 잡는다 — 호환을 끊지 않는다."""
+    assert issubclass(EmptyTranscript, RuntimeError)
+    assert issubclass(MalformedTranscript, RuntimeError)
+
+
+# ─────────────────────────────────────────────────────────────
+#  픽스처 네임스페이스 — 같은 stem, 다른 디렉터리, 엄격한 원본 검사 (P3-01)
+# ─────────────────────────────────────────────────────────────
+
+
+def _voiced(text: str) -> dict[str, Any]:
+    return {"segments": [{"start": 0.0, "end": 1.0, "text": f" {text}"}]}
+
+
+def write_whole_fixture(root: Path, records: list[dict[str, Any]], stem: str = "demo") -> Path:
+    body = {"chunks": records}
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / f"{stem}.whisper.json"
+    path.write_text(json.dumps(body, ensure_ascii=False), encoding="utf-8")
+    return path
+
+
+def namespaced(namespace: Path, offsets: Sequence[float]) -> TranscriptionJob:
+    return TranscriptionJob(stem="demo", chunks=chunk_job(offsets).chunks, namespace=namespace)
+
+
+def test_two_namespaces_with_one_stem_resolve_independently(tmp_path: Path) -> None:
+    """같은 stem이라도 namespace가 다르면 다른 픽스처를 읽는다. 환경은 그대로다."""
+    write_whole_fixture(
+        tmp_path / "ns-a", [{"index": 0, "offset": 0.0, "response": _voiced("망원동")}]
+    )
+    write_whole_fixture(
+        tmp_path / "ns-b", [{"index": 0, "offset": 0.0, "response": _voiced("연남동")}]
+    )
+    transcriber = FixtureTranscriber(fixture_dir=SYNTHETIC)  # namespace가 디렉터리를 이긴다
+    before = dict(os.environ)
+
+    first = transcriber.transcribe(namespaced(tmp_path / "ns-a", (0.0,)), Config())
+    second = transcriber.transcribe(namespaced(tmp_path / "ns-b", (0.0,)), Config())
+
+    assert first[0].payload["segments"][0]["text"] == " 망원동"
+    assert second[0].payload["segments"][0]["text"] == " 연남동"
+    assert dict(os.environ) == before  # 전역 환경은 건드리지 않는다
+
+
+def test_a_missing_namespace_fixture_names_the_exact_path(tmp_path: Path) -> None:
+    with pytest.raises(RuntimeError) as excinfo:
+        FixtureTranscriber(fixture_dir=SYNTHETIC).transcribe(
+            namespaced(tmp_path / "ns", (0.0,)), Config()
+        )
+    message = str(excinfo.value)
+    assert str(tmp_path / "ns" / "demo.whisper.json") in message
+    assert "vlogsrt record" in message
+
+
+def test_namespace_selects_only_the_requested_subset_in_chunk_order(tmp_path: Path) -> None:
+    write_whole_fixture(
+        tmp_path,
+        [
+            {"index": 0, "offset": 0.0, "response": _voiced("첫")},
+            {"index": 1, "offset": 12.0, "response": _voiced("둘")},
+            {"index": 2, "offset": 24, "response": _voiced("셋")},  # 정수 오프셋도 받는다
+        ],
+    )
+    audio = Path("demo.mp3")
+    job = TranscriptionJob(
+        stem="demo",
+        chunks=(Chunk(audio, 24.0, 12.0, 2), Chunk(audio, 0.0, 12.0, 0)),  # 순서는 섞여 있다
+        namespace=tmp_path,
+    )
+    responses = FixtureTranscriber(fixture_dir=SYNTHETIC).transcribe(job, Config())
+    assert [r.index for r in responses] == [0, 2]  # 조각 번호 순서로 결정적이다
+    assert [r.offset for r in responses] == [0.0, 24.0]
+    assert [r.payload["segments"][0]["text"] for r in responses] == [" 첫", " 셋"]
+
+
+@pytest.mark.parametrize(
+    "record",
+    [
+        pytest.param({"offset": 0.0, "response": RAW}, id="index-missing"),
+        pytest.param({"index": True, "offset": 0.0, "response": RAW}, id="index-bool"),
+        pytest.param({"index": "0", "offset": 0.0, "response": RAW}, id="index-string"),
+        pytest.param({"index": 1.5, "offset": 0.0, "response": RAW}, id="index-float"),
+        pytest.param({"index": 0, "response": RAW}, id="offset-missing"),
+        pytest.param({"index": 0, "offset": True, "response": RAW}, id="offset-bool"),
+        pytest.param({"index": 0, "offset": float("nan"), "response": RAW}, id="offset-nan"),
+        pytest.param({"index": 0, "offset": "0.0", "response": RAW}, id="offset-string"),
+        pytest.param({"index": 0, "offset": 0.0}, id="response-missing"),
+    ],
+)
+def test_namespace_rejects_a_broken_raw_record_before_coercion(
+    tmp_path: Path, record: dict[str, Any]
+) -> None:
+    """int()/float() 강제가 잘못된 원본을 숨기기 전에 걸러야 한다."""
+    write_whole_fixture(tmp_path, [record])
+    with pytest.raises(RuntimeError):
+        FixtureTranscriber(fixture_dir=SYNTHETIC).transcribe(namespaced(tmp_path, (0.0,)), Config())
+
+
+def test_namespace_rejects_a_duplicate_requested_identity(tmp_path: Path) -> None:
+    write_whole_fixture(
+        tmp_path,
+        [
+            {"index": 0, "offset": 0.0, "response": RAW},
+            {"index": 0, "offset": 0.0, "response": RAW},
+        ],
+    )
+    with pytest.raises(RuntimeError, match="둘 이상"):
+        FixtureTranscriber(fixture_dir=SYNTHETIC).transcribe(namespaced(tmp_path, (0.0,)), Config())
+
+
+def test_namespace_rejects_a_missing_requested_identity(tmp_path: Path) -> None:
+    write_whole_fixture(tmp_path, [{"index": 0, "offset": 0.0, "response": RAW}])
+    job = namespaced(tmp_path, (0.0, 12.0))
+    with pytest.raises(RuntimeError, match="없는 조각"):
+        FixtureTranscriber(fixture_dir=SYNTHETIC).transcribe(job, Config())
+
+
+def test_namespace_rejects_an_offset_mismatch_before_coercion(tmp_path: Path) -> None:
+    write_whole_fixture(tmp_path, [{"index": 1, "offset": 12.5, "response": RAW}])
+    job = namespaced(tmp_path, (0.0, 12.0))
+    with pytest.raises(RuntimeError, match="오프셋"):
+        FixtureTranscriber(fixture_dir=SYNTHETIC).transcribe(job, Config())
+
+
+def test_namespace_none_keeps_the_legacy_return_all() -> None:
+    """namespace가 없으면 지금처럼 설정된 디렉터리에서 전부를 읽는다."""
+    single = TranscriptionJob(stem="demo", chunks=chunk_job((0.0,)).chunks)
+    every = FixtureTranscriber(fixture_dir=SYNTHETIC).transcribe(single, Config())
+    assert [r.index for r in every] == [0, 1]  # 요청과 무관하게 전부
+    whole = FixtureTranscriber(fixture_dir=SYNTHETIC).transcribe(
+        TranscriptionJob(stem="demo", chunks=()), Config()
+    )
+    assert [r.index for r in whole] == [0, 1]
+
+
+# ── 수정(Sol 3): namespace 안에 머무는 이름 조각만 받는다 ────────────────────
+
+
+@pytest.mark.parametrize(
+    "stem",
+    ["../outside", "..", ".", "/etc/passwd", "a/b", "", "a\\b"],
+)
+def test_namespace_rejects_unsafe_stem_components(tmp_path: Path, stem: str) -> None:
+    """경로를 만들기 전에 거부한다. 디렉터리 밖에 함정 파일을 두고 못 나가는지 본다."""
+    (tmp_path / "outside.whisper.json").write_text(
+        json.dumps({"chunks": [{"index": 0, "offset": 0.0, "response": RAW}]}), encoding="utf-8"
+    )
+    job = TranscriptionJob(
+        stem=stem, chunks=chunk_job((0.0,)).chunks, namespace=tmp_path / "namespace"
+    )
+    with pytest.raises(MalformedTranscript):
+        FixtureTranscriber(fixture_dir=SYNTHETIC).transcribe(job, Config())
+
+
+@pytest.mark.parametrize("kind", ["../outside", "", "a/b"])
+def test_namespace_rejects_unsafe_kind_components(tmp_path: Path, kind: str) -> None:
+    job = TranscriptionJob(
+        stem="demo", chunks=chunk_job((0.0,)).chunks, namespace=tmp_path / "namespace", kind=kind
+    )
+    with pytest.raises(MalformedTranscript):
+        FixtureTranscriber(fixture_dir=SYNTHETIC).transcribe(job, Config())
+
+
+def test_namespace_keeps_normal_unicode_space_dot_stems(tmp_path: Path) -> None:
+    """정상 이름은 그대로 통과한다 — 한글·공백·점이 흔하게 쓰인다."""
+    write_whole_fixture(
+        tmp_path, [{"index": 0, "offset": 0.0, "response": _voiced("망원동")}], stem="망원 동.vlog"
+    )
+    job = TranscriptionJob(stem="망원 동.vlog", chunks=chunk_job((0.0,)).chunks, namespace=tmp_path)
+    responses = FixtureTranscriber(fixture_dir=SYNTHETIC).transcribe(job, Config())
+    assert responses[0].payload["segments"][0]["text"] == " 망원동"
+
+
+def test_the_name_guard_is_namespace_present_only() -> None:
+    """namespace=None 레거시는 같은 stem을 전혀 다르게 다룬다 — 그대로 둔다."""
+    job = TranscriptionJob(stem="../demo", chunks=())
+    with pytest.raises(RuntimeError, match="vlogsrt record"):
+        FixtureTranscriber(fixture_dir=SYNTHETIC).transcribe(job, Config())

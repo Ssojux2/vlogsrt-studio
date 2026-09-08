@@ -140,7 +140,7 @@ def fetch_draft(transcriber: Transcriber, job: TranscriptionJob, cfg: Config) ->
     """1차 전사. **아직 골격이 아니다** — 되풀이 재전사가 끝나야 골격이 확정된다(D27)."""
     draft = transcribe.build_spine(transcriber.transcribe(job, cfg))
     if not draft:
-        raise RuntimeError("전사 응답에서 세그먼트를 얻지 못했습니다.")
+        raise transcribe.EmptyTranscript("전사 응답에서 세그먼트를 얻지 못했습니다.")
     return draft
 
 
