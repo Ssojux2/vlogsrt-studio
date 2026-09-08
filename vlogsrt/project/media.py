@@ -215,6 +215,11 @@ def _resolve_resource(
     where = f"/fcpxml[1]/resources[1]/asset[{position}]"
     original = _select_original(resource, override, where)
     proxy = _select_proxy(resource, override, where)
+    # 일반 파일 선검사 — FIFO·장치를 열면 읽기가 막힐 수 있으므로 열기 전에 거부한다.
+    if not original.is_file():
+        raise UnsupportedProject(
+            where, f"원본 미디어가 일반 파일이 아니다: {original} — FIFO·장치는 받지 않는다"
+        )
     try:
         original_sha256 = sha256_file(original)
     except OSError as error:
@@ -223,8 +228,8 @@ def _resolve_resource(
         ) from error
     image_source = original
     used_proxy = False
-    if proxy is not None and proxy.is_file():
-        # 프록시는 실제로 쓸 수 있을 때만 이미지 원본이 된다 — 없으면 원본에서 뽑는다.
+    if proxy is not None and proxy.is_file() and _read_probe(proxy):
+        # 프록시는 실제로 읽을 수 있을 때만 이미지 원본이 된다 — 아니면 원본에서 뽑는다.
         image_source = proxy
         used_proxy = True
     return ResolvedMedia(
@@ -236,6 +241,16 @@ def _resolve_resource(
         has_audio=resource.has_audio,
         used_proxy=used_proxy,
     )
+
+
+def _read_probe(path: Path) -> bool:
+    """1바이트 읽기 탐침 — 프록시가 열려도 읽지 못하면 못 쓰는 프록시다."""
+    try:
+        with path.open("rb") as handle:
+            handle.read(1)
+    except OSError:
+        return False
+    return True
 
 
 def _select_original(resource: AssetResource, override: MediaOverride | None, where: str) -> Path:
@@ -298,7 +313,11 @@ def _file_uri_to_path(src: str, where: str) -> Path:
         ) from error
     if not decoded:
         raise UnsupportedProject(where, f"file URI에 경로가 없다: {src}")
-    return Path(decoded)
+    path = Path(decoded)
+    if not path.is_absolute():
+        # XML의 자리는 문서 자신뿐이다 — 상대 경로를 cwd로 풀면 문서 밖 상태가 새어 든다.
+        raise UnsupportedProject(where, f"file URI가 상대 경로다: {src} — 절대 경로여야 한다")
+    return path
 
 
 def _asset_content_id(original_sha256: str) -> str:

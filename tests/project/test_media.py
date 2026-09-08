@@ -16,7 +16,9 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+import os
 import sys
+import threading
 from dataclasses import fields
 from pathlib import Path
 from urllib.parse import quote
@@ -191,6 +193,7 @@ def test_localhost_file_uri_resolves_like_empty_host(tmp_path: Path) -> None:
         ("file:///media/a.mp4?part=1", "query"),
         ("file:///media/a.mp4#장면", "fragment"),
         ("file://localhost", "경로"),
+        ("file:relative.mov", "상대"),
     ],
 )
 def test_non_file_or_unresolvable_uris_are_rejected(tmp_path: Path, src: str, token: str) -> None:
@@ -288,6 +291,55 @@ def test_missing_proxy_rep_falls_back_to_original_for_images(tmp_path: Path) -> 
     document = parse_media_project(
         tmp_path, [asset("r2", rep(ORIGINAL, file_uri(original)))], clips("r2")
     )
+    resolved = resolve_media(document)
+    assert resolved[0].image_source == original
+    assert resolved[0].used_proxy is False
+
+
+def test_device_as_original_is_rejected_before_opening(tmp_path: Path) -> None:
+    """/dev/null은 일반 파일이 아니다 — 열어 보기 전에 거부한다(블록 없음)."""
+    proxy = write_media(tmp_path, "proxy.mov", b"proxy-bytes")
+    document = parse_media_project(
+        tmp_path,
+        [asset("r2", rep(ORIGINAL, "file:///dev/null") + rep(PROXY, file_uri(proxy)))],
+        clips("r2"),
+    )
+    with pytest.raises(UnsupportedProject) as excinfo:
+        resolve_media(document)
+    assert excinfo.value.location == ASSET_1
+    assert "/dev/null" in excinfo.value.reason
+
+
+def test_fifo_as_original_is_rejected_without_blocking(tmp_path: Path) -> None:
+    """FIFO 원본은 열면 막힌다 — is_file 선검사로 열기 전에 거부한다."""
+    fifo = tmp_path / "pipe.mp4"
+    os.mkfifo(str(fifo))
+    # 선검사가 없는 빨간 상태에서 해시 열기가 막히지 않도록, 곧 닫는 쓴이를 둔다.
+    writer = threading.Thread(target=lambda: os.close(os.open(str(fifo), os.O_WRONLY)), daemon=True)
+    writer.start()
+    document = parse_media_project(
+        tmp_path, [asset("r2", rep(ORIGINAL, file_uri(fifo)))], clips("r2")
+    )
+    with pytest.raises(UnsupportedProject) as excinfo:
+        resolve_media(document)
+    assert excinfo.value.location == ASSET_1
+    assert "파일" in excinfo.value.reason
+
+
+def test_unreadable_proxy_probes_once_and_falls_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """프록시가 일반 파일이어도 열어 읽지 못하면 못 쓰는 프록시다 — 원본으로 물러난다."""
+    import vlogsrt.project.media as media_module
+
+    original = write_media(tmp_path, "original.mp4", b"original-bytes")
+    proxy = write_media(tmp_path, "proxy.mov", b"proxy-bytes")
+    document = parse_media_project(
+        tmp_path,
+        [asset("r2", rep(ORIGINAL, file_uri(original)) + rep(PROXY, file_uri(proxy)))],
+        clips("r2"),
+    )
+    monkeypatch.setattr(media_module, "_read_probe", lambda path: False)
     resolved = resolve_media(document)
     assert resolved[0].image_source == original
     assert resolved[0].used_proxy is False
