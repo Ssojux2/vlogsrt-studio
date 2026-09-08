@@ -21,8 +21,6 @@ from vlogsrt.project.config import (
     load_project_config,
 )
 
-PROJECT_PACKAGE_DIR = Path(__file__).resolve().parents[2] / "vlogsrt" / "project"
-
 
 def _write(path: Path, body: str) -> Path:
     path.write_text(body, encoding="utf-8")
@@ -59,6 +57,26 @@ def test_absent_default_returns_code_defaults(
     monkeypatch.chdir(tmp_path)
     assert load_project_config(None) == ProjectConfig()
     assert load_project_config().schema_version == 1
+
+
+def test_default_path_that_is_a_directory_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """기본 경로 **자리에 디렉터리가 있으면** 없는 것과 다르다 — 조용히 넘기면 안 된다."""
+    monkeypatch.chdir(tmp_path)
+    directory = tmp_path / "vlogsrt.project.toml"
+    directory.mkdir()
+    with pytest.raises(ProjectConfigError) as excinfo:
+        load_project_config(None)
+    assert str(directory) in str(excinfo.value)
+
+
+def test_explicit_path_that_is_a_directory_raises(tmp_path: Path) -> None:
+    directory = tmp_path / "settings.d"
+    directory.mkdir()
+    with pytest.raises(ProjectConfigError) as excinfo:
+        load_project_config(directory)
+    assert str(directory) in str(excinfo.value)
 
 
 def test_explicitly_missing_path_raises_naming_it(tmp_path: Path) -> None:
@@ -135,6 +153,32 @@ def test_bool_version_is_not_an_integer(tmp_path: Path) -> None:
     assert "schema_version" in message
 
 
+@pytest.mark.parametrize("body", ["", "# 주석만 있는 파일이다\n", "\n\n"])
+def test_present_file_without_schema_version_raises(tmp_path: Path, body: str) -> None:
+    """파일이 **있는데** `schema_version`가 없으면 기본값으로 둔갑하면 안 된다.
+
+    빈 파일·주석뿐인 파일이 코드 기본값과 같은 결과를 내면, 실수로 비운 설정이
+    아무 일도 없던 것처럼 지나간다. `KeyError`가 새어 나가는 것도 곤란하다 —
+    계약의 예외는 `ProjectConfigError`뿐이다.
+    """
+    path = _write(tmp_path / "vlogsrt.project.toml", body)
+    with pytest.raises(ProjectConfigError) as excinfo:
+        load_project_config(path)
+    message = str(excinfo.value)
+    assert str(path) in message
+    assert "schema_version" in message
+
+
+def test_empty_default_file_also_requires_schema_version(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """기본 경로로 읽을 때도 같다 — 파일이 있으면 키가 있어야 한다."""
+    monkeypatch.chdir(tmp_path)
+    _write(tmp_path / "vlogsrt.project.toml", "# 주석뿐이다\n")
+    with pytest.raises(ProjectConfigError, match="schema_version"):
+        load_project_config(None)
+
+
 # ─── 원본 설정과의 분리 ────────────────────────────────────────────────
 
 
@@ -144,8 +188,10 @@ def test_project_config_is_not_the_legacy_config_type() -> None:
     assert ProjectConfig is not Config
     assert not issubclass(ProjectConfig, Config)
     assert not issubclass(Config, ProjectConfig)
-    # P0의 필드는 schema_version 하나다 — 투기적 키가 섞여 들어오면 바로 드러난다.
-    assert {f.name for f in dataclasses.fields(ProjectConfig)} == {"schema_version"}
+    # 계약 서명 그대로다 — frozen·slots인 불변 설정 객체.
+    params = ProjectConfig.__dataclass_params__
+    assert params.frozen
+    assert params.slots
 
 
 def test_project_config_source_does_not_import_legacy() -> None:
@@ -207,25 +253,27 @@ assert "vlogsrt.config" not in sys.modules, "파생 계층이 레거시 설정�
 # ─── FCPXML 전용 모델 네임스페이스 ─────────────────────────────────────
 
 
-def test_models_namespace_is_fcpxml_only_and_p0_empty() -> None:
-    """P0의 모델 네임스페이스는 **자리 선언**이다 — 투기적 필드를 만들지 않는다.
+def test_models_namespace_is_fcpxml_only() -> None:
+    """모델 네임스페이스는 FCPXML 전송 모델 전용이다 — 문서로 선언된 선이다.
 
     P1의 검토된 파서 모델이 이 자리를 채우고, P5 분석 모델은 별도
-    `analysis_models.py`로 간다. 지금 여기에 장식된 클래스가 있으면 그 전부가 투기다.
+    `analysis_models.py`로 간다(모듈 문서 참조).
     """
     import vlogsrt.project.models as project_models
 
     assert "FCPXML" in (project_models.__doc__ or ""), "FCPXML 전용임을 문서로 선언해야 한다"
 
-    source = Path(project_models.__file__ or "").read_text(encoding="utf-8")
-    decorated = [
-        node.name
-        for node in ast.walk(ast.parse(source))
-        if isinstance(node, ast.ClassDef) and node.decorator_list
+    # P0에는 데이터클래스가 없다. 이 선언은 P1이 파서 모델을 채운 뒤에도 산다 —
+    # 여기 들어오는 데이터클래스는 전부 frozen이어야 한다(계약 §8). 검사기가
+    # 정적 선언을 보면 이 테스트는 행동을 본다.
+    mutable = [
+        name
+        for name, cls in vars(project_models).items()
+        if isinstance(cls, type)
+        and dataclasses.is_dataclass(cls)
+        and not cls.__dataclass_params__.frozen  # type: ignore[attr-defined]
     ]
-    assert decorated == [], f"P0에 투기적 모델이 들어왔다: {decorated}"
-    # P5의 분석 모델은 별도 파일이다 — 아직 없어야 한다.
-    assert not (PROJECT_PACKAGE_DIR / "analysis_models.py").exists()
+    assert mutable == [], f"가변 데이터클래스가 파생 모델에 있다: {mutable}"
 
 
 def test_project_config_error_is_a_value_error() -> None:

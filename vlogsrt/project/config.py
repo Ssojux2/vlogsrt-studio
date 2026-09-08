@@ -38,16 +38,21 @@ class ProjectConfig:
 def load_project_config(path: Path | None = None) -> ProjectConfig:
     """`vlogsrt.project.toml`을 읽는다. `path=None`이면 cwd의 기본 경로를 본다.
 
-    기본 경로가 없으면 코드 기본값을 돌려준다. **명시적으로 준 경로**가 없으면
-    에러다 — 조용한 성공이 더 위험하기 때문이다. 읽기·파싱·검증 전 과정에서
+    기본 경로가 **정말 없을 때만** 코드 기본값을 돌려준다 — 그 자리에 디렉터리가
+    있거나 파일이 있는데 `schema_version`가 없으면 에러다. **명시적으로 준 경로**가
+    없어도 에러다 — 조용한 성공이 더 위험하기 때문이다. 읽기·파싱·검증 전 과정에서
     파일 외의 어떤 상태도 건드리지 않는다.
     """
     if path is None:
         path = Path.cwd() / DEFAULT_PROJECT_CONFIG_PATH
-        if not path.is_file():
+        if not path.exists():
             return ProjectConfig()
-    elif not path.is_file():
+        if not path.is_file():
+            raise ProjectConfigError(f"프로젝트 설정 기본 경로가 파일이 아닙니다: {path}")
+    elif not path.exists():
         raise ProjectConfigError(f"프로젝트 설정 파일이 없습니다: {path}")
+    elif not path.is_file():
+        raise ProjectConfigError(f"프로젝트 설정 경로가 파일이 아닙니다: {path}")
     return _parse(path, _read_table(path))
 
 
@@ -68,6 +73,11 @@ def _parse(path: Path, table: dict[str, Any]) -> ProjectConfig:
                 f"{path}: 알 수 없는 프로젝트 설정 키 {key!r} — "
                 f"이 계층의 키는 {sorted(_KNOWN_KEYS)}뿐이다"
             )
+    if "schema_version" not in table:
+        # 파일이 있는데 이 키가 없으면 기본값으로 둔갑한다 — 없는 파일과는 다르다.
+        raise ProjectConfigError(
+            f"{path}: 프로젝트 설정에 schema_version가 없다 — 이 키는 생략할 수 없다"
+        )
     value = table["schema_version"]
     # bool은 int의 서브클래스다 — `true`가 1로 새어 들어가면 스키마 검사가 무력해진다.
     if isinstance(value, bool) or not isinstance(value, int):
