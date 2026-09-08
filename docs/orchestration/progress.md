@@ -27,7 +27,7 @@
 | Role | Task | Dispatch | State |
 |---|---|---|---|
 | Astra coordinator | Run `run_73768f7c4dec` | terminal `term_892e5ca1-805d-4d8d-b27f-fe7c90994848` | active |
-| Sol manager | `task_8f65a57496f6` | `ctx_bfbd07ec7a4c` | supervising parallel P1-04 XML validation and P2-03 retained-range regression |
+| Sol manager | `task_8f65a57496f6` | `ctx_bfbd07ec7a4c` | supervising corrected P1-04 XML validation; P2 is complete |
 | Opus co-manager | `task_b15d7dad7f7b` | `ctx_f925bd9d4a52` | active through Astra for independent contract/diff review |
 | GLM P0-02 writer | `task_f7788389960b` | `ctx_df9c602e28a2` | completed `df489bb`; correction review pending |
 | GLM P0-02 correction | `task_7d03430673e1` | `ctx_51f56ba3df5c` | completed `51319b9`; reconciliation still open |
@@ -41,7 +41,7 @@
 | GLM P1-04 XML validation | `task_de39de51bd0a` | `ctx_78e4226f911c` | active from exact `7a107da`, terminal `term_5201b3a0-fc66-44f7-8623-ea2d78e4c9aa` |
 | GLM P2-01 PCM extraction | `task_071c14e3282d` | `ctx_dcd31a44ebc6` | final `d301459` integrated by Astra as `5ea9719`; 906-test integration gate passed |
 | GLM P2-02 PCM reference | `task_4428b9adca79` | `ctx_f12626850366` | final `b56c640` integrated by Astra as `35af34b`; 1,156-test integration gate passed |
-| GLM P2-03 S17 regression | `task_7614fbbdde23` | `ctx_444387418221` | active from exact `35af34b`, terminal `term_fbd93677-fe9f-4bd1-b858-cdcc9e3d213c` |
+| GLM P2-03 S17 regression | `task_7614fbbdde23` | `ctx_444387418221` | final `7ac575b` integrated by Astra as `3760cf9`; 1,250-test integration gate passed; settling |
 
 Initial gate message IDs: root `msg_d8fc69fe164a`; Opus `msg_0f70e95b09f7`.
 
@@ -68,6 +68,7 @@ Initial gate message IDs: root `msg_d8fc69fe164a`; Opus `msg_0f70e95b09f7`.
 - P2-02 launched from exact `5ea9719cb2fb3ece20ad228fa78481ae60bbdb3b` in the fresh `fcp-p2-pcm-reference` worktree using `claude-glm --model 'glm-5.3[1m]' --effort max --permission-mode auto`: Task `task_4428b9adca79`, Dispatch `ctx_f12626850366`, terminal `term_16b167fe-4bd5-4e05-980b-068da23374f8`. It owns only `vlogsrt/project/pcm.py` and `tests/project/test_pcm.py`; the brief fixes total audio-only `PcmReference` semantics and forbids fabricated references or P3 construction.
 - P2-02's immutable-generation sequence culminated at `b56c64069058b550ffbbb643589b4c2efbeddff2`: exclusive generation PCM+metadata, one atomic logical pointer, recomputed content-key verification, no generation deletion, and best-effort post-commit temp cleanup preserve every issued reference across metadata/pointer failure, abrupt exit, and successful replacement. Sol and Opus (`msg_3939175c24ae`) passed the exact SHA; Astra integrated it as `35af34b4cdab2e0d96af2b8f6a5530c764e78d12` with 1,156 tests, Ruff on 56 files, mypy on 29 files, and all 19 invariant groups passing.
 - P2-03 launched from exact `35af34b4cdab2e0d96af2b8f6a5530c764e78d12` in fresh branch `Ssojux2/fcp-p2-s17` using custom `claude-glm --model 'glm-5.3[1m]' --effort max --permission-mode auto`: Task `task_7614fbbdde23`, Dispatch `ctx_444387418221`, terminal `term_fbd93677-fe9f-4bd1-b858-cdcc9e3d213c`. Ownership is only `vlogsrt/project/pcm.py` and `tests/project/test_pcm.py`; publication and legacy preprocess are explicitly closed, while actual 77-minute media evidence stays `PENDING_HUMAN`.
+- P2-03's final `7ac575b3da0518c3ebd1b795acc63261f9c52541` retains exact snapped PCM coordinates with deterministic `range-NNNN.wav` leaves that stay inside the requested directory for traversal, absolute, and ordinary Korean/space-containing stems. Its evidence explicitly limits the regression to a reproduced synthetic legacy mismatch: the historical 77-minute cause, magnitude, and final-versus-intermediate behavior remain unverified and `PENDING_HUMAN`; range prevalidation prevents writes for invalid input but does not claim whole-batch atomicity. Sol passed all 126 PCM tests and a fresh full gate, root and Opus independently accepted the exact SHA, and Astra integrated it as `3760cf9148abfb03db2166f3665c904403ce702b` with Ruff on 58 files, mypy on 30 files, 1,250 tests, and all 19 invariant groups passing.
 - Known user-owned dirty path is intentionally excluded from every inspection/commit operation. Its contents have not been read.
 
 ## Phase DAG and parallel groups
@@ -123,7 +124,7 @@ By explicit Astra dependency audit, P0-03 may run from `58bb25347319301391064d6b
 | [P1-05](tasks/p1-05-roundtrip.md) | identity-preserving roundtrip | P1-03,P1-04 | project FCPXML writer/tests | drafted |
 | [P2-01](tasks/p2-01-pcm-extraction.md) | measured 16 kHz PCM extraction metadata | P0 merge `cd411c4` | preprocess additions/tests | complete; integrated `5ea9719`, 906-test gate passed |
 | [P2-02](tasks/p2-02-pcm-reference.md) | persistent hashed PCM and exact sample slicing | P2-01 merge `5ea9719` | project PCM/tests | complete; integrated `35af34b`, 1,156-test gate passed |
-| [P2-03](tasks/p2-03-s17-regression.md) | last/intermediate/repair drift regression | P2-02 integration `35af34b` | project PCM helper/tests only | active: `task_7614fbbdde23` / `ctx_444387418221` |
+| [P2-03](tasks/p2-03-s17-regression.md) | last/intermediate/repair drift regression | P2-02 integration `35af34b` | project PCM helper/tests only | complete; integrated `3760cf9`, 1,250-test gate passed; historical 77-minute acceptance remains `PENDING_HUMAN` |
 | [P3-01](tasks/p3-01-transcription-outcome.md) | explicit success/empty/error contract | P1,P2 merges | transcribe additions/tests | drafted |
 | [P3-02](tasks/p3-02-source-adapter.md) | full legacy repair/refine engine once per unique source | P3-01 | project speech plus narrow repair-cutter seam/tests | drafted |
 | [P3-03](tasks/p3-03-source-srt.md) | immutable source-local artifacts and pre-roughcut input-timeline SOURCE SRT | P3-02 | project captions/tests | drafted |

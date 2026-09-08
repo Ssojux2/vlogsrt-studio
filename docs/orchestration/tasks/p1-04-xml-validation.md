@@ -24,7 +24,8 @@ class XmlValidationUnavailable(RuntimeError): ...
 def validate_xml(path: Path, *, dtd_path: Path | None = None) -> XmlValidation: ...
 ```
 
-- Resolve executable only with `shutil.which("xmllint")`; the only subprocess invocation is `subprocess.run` with an exact tuple/list argv, `shell=False`, and no executable indirection. Well-formedness argv is exactly `[resolved_xmllint, "--nonet", "--noout", str(path)]`.
+- Resolve executable only with `shutil.which("xmllint")`; normalize the XML input with `path.resolve()` before constructing argv so a relative name beginning with `-` cannot be consumed as an xmllint option. In both frozen forms below, `str(path)` means this normalized absolute input path.
+- The only subprocess invocation is `subprocess.run` with an exact tuple/list argv, `shell=False`, and no executable indirection. Well-formedness argv is exactly `[resolved_xmllint, "--nonet", "--noout", str(path)]`.
 - With `dtd_path`, resolve the DTD and convert it with `Path.resolve().as_uri()` so spaces remain one argv element; argv is exactly `[resolved_xmllint, "--nonet", "--noout", "--dtdvalid", dtd_uri, str(path)]` and `dtd_checked=True`. Without it, `dtd_checked=False`.
 - Missing tool or requested missing DTD raises `XmlValidationUnavailable`; nonzero xmllint returns `valid=False` with bounded sanitized stderr, not an exception that loses diagnostics.
 - Never use shell mode, arbitrary flags, environment/key reads, network schemas, or any executable other than xmllint.
@@ -32,7 +33,7 @@ def validate_xml(path: Path, *, dtd_path: Path | None = None) -> XmlValidation: 
 
 ## Implementation steps
 
-1. Write failing subprocess-mocked tests that compare the complete argv, DTD/no-DTD, `--nonet`, a DTD path containing spaces, missing tool, missing DTD, malformed XML, `shell=False`, and malicious-looking paths treated as one plain argv element. Also validate a P1-02 supported synthetic document against the exact installed DTD and prove a schema-invalid spelling fails.
+1. Write failing subprocess-mocked tests that compare the complete argv, DTD/no-DTD, `--nonet`, a DTD path containing spaces, missing tool, missing DTD, malformed XML, `shell=False`, and malicious-looking paths treated as one plain argv element. Add isolated temp-tree regressions for nonexistent relative `--version`, a real XML filename beginning with `-`, and an ordinary relative XML input; each argv operand must be its resolved absolute path. Also validate a P1-02 supported synthetic document against the exact installed DTD and prove a schema-invalid spelling fails.
 2. Implement the one narrow boundary and immutable result; run P0 invariant tests to prove the exception is still scoped.
 3. Run focused/invariant/full checks and commit owned paths only.
 
