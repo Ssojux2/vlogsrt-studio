@@ -15,6 +15,7 @@ Binding spec `VAD guard`, `Visual scoring and deterministic roughcut`, and `All 
 ```python
 @dataclass(frozen=True, slots=True)
 class ProjectConfig:
+    schema_version: int = 1
     vad_model_version: str = "v6.2.1"
     vad_model_url: str = "https://raw.githubusercontent.com/snakers4/silero-vad/v6.2.1/src/silero_vad/data/silero_vad.onnx"
     vad_model_sha256: str = "1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3"
@@ -51,6 +52,7 @@ class AnalysisFailure:
 ```
 
 - Model names and every new threshold live only here; consumers may not duplicate numeric literals.
+- Extend P0's same `ProjectConfig`, `ProjectConfigError`, `DEFAULT_PROJECT_CONFIG_PATH`, top-level `schema_version`, and cwd-relative/default-versus-explicit-path loading semantics. Keep `schema_version = 1`; the optional `overrides` argument is an additive explicit layer, not a second root or environment search.
 - Serialize Fractions canonically as `numerator/denominator`; reject unknown keys, NaN/inf, wrong sample rate/window/context, nonpositive dimensions, min > max, keep > min, confidence outside `[0,1]`.
 - Extend the P0 loader without adding a second config root. No implicit `.env`/working-directory search and no mutation of legacy `Config`.
 - Vision provider credentials are distinct from source STT credentials: never reuse `OPENAI_API_KEY` or `OPENAI_BASE_URL`. Configuration stores only the separate environment-variable names, never their values; credential lookup belongs to the explicit online runner.

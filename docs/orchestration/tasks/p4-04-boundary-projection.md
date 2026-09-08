@@ -25,6 +25,7 @@ def project_boundaries(plan: BoundaryPlan, transcripts: Sequence[BoundaryTranscr
 ```
 
 - Successful boundary trace's already repaired/refined cues are used instead of overlapping source cues for exactly `(slice_id, instance_ids, source interval)`; never append both and never refine/polish either cue set again.
+- Join plan requests, boundary transcripts, and source traces by validated request/source/PCM keys, independent of input sequence order. Reject missing, duplicate, ambiguous, or inconsistent linkage and test shuffled transcript/trace order; never pair records with `zip` or infer identity from paths/stems.
 - Repeated source instances outside that tuple are unchanged. Every source/boundary segment remains in its immutable trace.
 - Empty/error boundary keeps clamped original text, adds `boundary_unresolved` and request ID to review, and remains draft-only until human resolution. Successful replacement regenerates the single pre-roughcut input-timeline SOURCE SRT; per-asset source-local artifacts and both source/boundary traces remain immutable.
 - Timeline mapping uses exact P4 formula/Fractions. Output cues are ordered, non-overlapping within the flat storyline, and have `end > start`.
@@ -32,7 +33,7 @@ def project_boundaries(plan: BoundaryPlan, transcripts: Sequence[BoundaryTranscr
 
 ## Implementation steps
 
-1. Write failing tests for one of two repeated instances, exact replace-not-append, leading/trailing cuts, empty/error fallback, lock propagation, no recursive request, and interval/order validation.
+1. Write failing tests for one of two repeated instances, exact replace-not-append, shuffled transcript/trace order, missing/duplicate/mismatched linkage, leading/trailing cuts, empty/error fallback, lock propagation, no recursive request, and interval/order validation.
 2. Implement pure projection without modifying trace objects.
 3. Run all P4/P3 tests, invariants, full check; commit owned files.
 

@@ -14,6 +14,7 @@ Binding source-immutability contract and Astra bootstrap disposition. This task 
 ## Contract
 
 - Exercise the complete existing offline source presentation path for four deterministic synthetic transcript shapes: `demo`, `loopy`, `loopyletter`, and `loopylong`.
+- Instantiate the ordinary legacy `Config()` defaults for every shape. Do not introduce test-only presentation settings or alter ordinary verification behavior; verification may observe output but may not change the SRT bytes being locked.
 - The test must prevent environment-file discovery before invoking the pipeline (for example, monkeypatch `env.find_env_file` to return `None`, reset its cache, and set only non-secret fixture/offline variables). It must neither inspect `.env*` nor resolve/read any API key.
 - Assert exact UTF-8 SRT bytes, including cue numbering, timestamps, line breaks, punctuation, and final newline. Do not normalize or regenerate expected bytes during the assertion.
 - The lock covers the legacy serializer and source repair/refine presentation behavior. It does not bless a future project serializer or claim media/live-model coverage.

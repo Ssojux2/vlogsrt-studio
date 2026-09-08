@@ -30,18 +30,19 @@ def publish_package(destination: Path, document: ProjectDocument, media: Sequenc
 - Create new project/event identity, `tcStart=0`, original-linked media refs, source order, supported static attributes/resources/UID, existing gaps, and disabled durations. XML-local resource IDs may be preserved or deterministically regenerated only as references inside the new document; never treat input `r2`-style IDs as durable media identity or cross-document rebind keys. Never link output to proxy as original.
 - Split/ripple clips only at exact plan frame boundaries; preserve asset-start anchored source coordinates and valid refs/order/non-overlap/durations.
 - Add `<marker>` children only for generated review items, at exact source-relative positions, value prefixed `VLOG_AI_REVIEW:`; keep marker duration one source frame and within its clip. Validate against local DTD when supplied and structural validator always.
-- Stage all five files in a sibling temporary directory, fsync/close, validate hashes/revisions, then atomically replace the destination package. Failure publishes none and preserves prior complete package.
+- Write all five files into a new immutable revision directory, fsync/close, and validate its hashes/revisions before publication. Publish by one atomic replacement of a `current` symlink/pointer to that complete revision; returned `ExportPackage` paths resolve inside the selected immutable revision so one consumer cannot observe a mixed set while the pointer changes.
+- First publish creates the managed revision root and pointer. If `destination` is an existing unmanaged file/directory or has an invalid pointer/layout, fail without renaming, deleting, or overwriting user content. Concurrent writers use exclusive revision creation plus compare-before-pointer-switch (or another measured equivalent), with a deterministic conflict result; never claim that replacing one nonempty directory with another is atomic.
 - Draft unresolved boundary/analysis warnings stay explicit and prevent a `final_accepted=true` field.
 
 ## Implementation steps
 
-1. Write failing tests for original/proxy refs, new document identity/tcStart, reuse of raw IDs across unrelated inputs without cross-binding, repeated/disabled/gap/order, exact cuts, markers, mixed revision, atomic failure, stale previous package, and all five names.
+1. Write failing tests for original/proxy refs, new document identity/tcStart, reuse of raw IDs across unrelated inputs without cross-binding, repeated/disabled/gap/order, exact cuts, markers, mixed revision, first publish, unmanaged destination refusal, failure before pointer switch, stale prior revision, concurrent-writer conflict, reader consistency across a switch, and all five names.
 2. Implement tree-copy plan writer preserving untouched attributes/time strings and atomic package publication.
 3. Reparse/validate generated XML, run all P6/P1 tests, invariants, full check; commit owned paths.
 
 ## Acceptance
 
-Synthetic package reparses with zero dangling refs/overlap/zero-frame identity mismatch, uses originals, shares one revision, and actually shortens the safe fixture. Atomic failure test leaves the prior package intact. `make check` passes. Actual FCP import/relink/playback remains `PENDING_HUMAN`.
+Synthetic package reparses with zero dangling refs/overlap/zero-frame identity mismatch, uses originals, shares one revision, and actually shortens the safe fixture. Failure before switch leaves the prior pointer and complete revision intact; readers resolve all five returned paths from one revision, and an unmanaged destination is untouched. `make check` passes. Actual FCP import/relink/playback remains `PENDING_HUMAN`.
 
 ## Failure route
 

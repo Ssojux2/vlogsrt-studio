@@ -19,6 +19,8 @@ class BoundaryTranscript:
     cache_key: str
     request_id: str
     source_id: str
+    pcm_analysis_key: str
+    original_stem: str
     source_start: Fraction
     source_end: Fraction
     sample_range: SampleRange
@@ -34,8 +36,9 @@ def transcribe_boundaries(requests: Sequence[BoundaryRequest], references: Seque
 ```
 
 - Cache key hashes original/PCM identity, exact retained sample range, channel policy, source Trace analysis key, model/config. No path/stem-only key.
+- Resolve each request, `PcmReference`, and `SourceTrace` by validated `source_id` plus `pcm_analysis_key`; require one unambiguous match and test shuffled input orders. Copy the reference's `original_stem` into the transcript and use it as the job stem; paths and list positions never establish linkage.
 - Write input from the same stored PCM and exact request range; assert bytes outside the range are absent.
-- Boundary jobs retain the original media stem and use an explicit namespace below that asset's content directory, for example `<artifact_dir>/<asset_content_id>/boundary/<cache_key>/`; initial, repair, and arbiter jobs propagate it without environment mutation.
+- Boundary jobs retain `PcmReference.original_stem` and use an explicit namespace below that asset's content directory, for example `<artifact_dir>/<asset_content_id>/boundary/<cache_key>/`; initial, repair, and arbiter jobs propagate it without environment mutation.
 - Use the same complete engine order as P3 source analysis: transcriber -> `build_spine` -> `repair.settle` -> immutable settled spine -> `pipeline.spine_to_cues` -> `refine.refine` (and therefore exactly one internal polish). Repetition repair remains active under existing defaults and every nested repair cut is clamped to the retained boundary PCM; add no removed context, forced alignment, or word timing.
 - The engine operates in boundary-local decoded time with duration exactly `(sample_range.end-sample_range.start)/sample_rate`. After it settles/refines, convert each local boundary once to exact source-file time by adding `Fraction(sample_range.start, sample_rate) + reference.pcm_sample0_file_time`; retain both local engine records and projected exact cue provenance. Do not round to milliseconds until SRT serialization.
 - Empty/error remains explicit. `cut_truncated=True` is terminal boundary-planning metadata: this trace may never schedule another boundary request because of its own endpoints, but it still receives ordinary repetition repair and refine processing.
@@ -43,7 +46,7 @@ def transcribe_boundaries(requests: Sequence[BoundaryRequest], references: Seque
 
 ## Implementation steps
 
-1. Write failing fake-transcriber tests for exact audio bytes/range/key, full engine call order, repair/refine retention, exactly one polish, deterministic response conversion, empty/error, malformed response, cache identity changes, and terminal-boundary non-recursion.
+1. Write failing fake-transcriber tests for exact audio bytes/range/key, shuffled request/reference/trace order, missing/duplicate/mismatched linkage, original-stem fixture namespace, full engine call order, repair/refine retention, exactly one polish, deterministic response conversion, empty/error, malformed response, cache identity changes, and terminal-boundary non-recursion.
 2. Implement retained-slice runner with explicit namespace and atomic completed artifacts; never invoke live client.
 3. Run focused/all P4/invariant/full checks; commit owned paths.
 

@@ -21,6 +21,9 @@ class AudioPolicy:
 
 @dataclass(frozen=True, slots=True)
 class PcmReference:
+    source_id: str
+    original_stem: str
+    original_sha256: str
     path: Path
     pcm_sha256: str
     analysis_key: str
@@ -34,13 +37,14 @@ class SampleRange:
     start: int
     end: int
 
-def build_reference(original: Path, original_sha256: str, policy: AudioPolicy, destination: Path) -> PcmReference: ...
+def build_reference(source_id: str, original_stem: str, original: Path, original_sha256: str, policy: AudioPolicy, destination: Path) -> PcmReference: ...
 def retained_sample_range(reference: PcmReference, start: Fraction, end: Fraction) -> SampleRange: ...
 def write_wav_slice(reference: PcmReference, samples: SampleRange, destination: Path) -> Path: ...
 def quiet_sample(reference: PcmReference, target: int, search_samples: int, window_samples: int) -> int: ...
 ```
 
 - `analysis_key` hashes original full-content hash, exact audio policy, measured `pcm_sample0_file_time`, PCM hash, channel count/rate; paths/names alone are never keys.
+- `source_id` is exactly P1's `ResolvedMedia.asset_content_id`; `original_stem` is retained only to address explicit per-source fixture/artifact namespaces. Validate both as nonempty and retain `original_sha256` so later joins never infer identity from `path`, filename, or parallel sequence position.
 - `sample_count`, `SampleRange.start/end`, `target`, `search_samples`, and `window_samples` are frames per channel. Range conversion uses `ceil(start * sample_rate)` and `floor(end * sample_rate)`, clamped to real per-channel frame count; reject `end <= start` after conversion.
 - Slice contains only `[start,end)` retained frames from the same stored PCM, interleaved channel-complete, with byte count `(end-start) * sample_width * channels` plus an ordinary WAV header. No removed-audio padding/context.
 - `quiet_sample` searches only the bounded target window in per-channel frame units, measures channels separately and ranks a frame window by their maximum absolute amplitude; ties choose the candidate nearest target, then the earlier candidate. It chooses a cut location only and never labels speech/silence.

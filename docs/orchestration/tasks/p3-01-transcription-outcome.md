@@ -47,7 +47,8 @@ class TranscriptionJob:
 ```
 
 - A response counts as successful empty only when every requested response was received, each payload explicitly contains `segments` as a list, and all lists are empty. For nonempty success, `segments` is the draft returned by the existing `transcribe.build_spine` assembly; do not create a parallel segment parser/assembler.
-- Missing `segments`, wrong response count/index, malformed segment fields/ranges, or a call exception yields `error`, never `empty`.
+- Missing `segments`, wrong response count/index, a missing/non-numeric/nonfinite segment value, a response-coverage mismatch, or a call exception yields `error`, never `empty`. Numeric `bool` values are invalid.
+- Finite zero-duration or reversed legacy segment ranges remain valid input records for P3-02's existing build/repair/refine engine; this boundary must not silently normalize, discard, or relabel them as malformed.
 - Coverage is one record per requested chunk in index order; a successful/empty outcome proves full request coverage.
 - `require_nonempty(empty)` raises `EmptyTranscript`, a `RuntimeError` subclass. The legacy `pipeline.fetch_draft` keeps its established fixture path and raises `EmptyTranscript` when its existing `build_spine` result is empty; it does not route legacy fixture jobs with `chunks=()` through project coverage validation. Project code records the empty outcome without raising.
 - Existing single `transcriptions.create` boundary, prompt ban, defaults, and fixture behavior remain unchanged.
@@ -55,7 +56,7 @@ class TranscriptionJob:
 
 ## Implementation steps
 
-1. Add failing unit tests for explicit empty, missing segments, wrong type, response count/index mismatch, malformed segment, call failure, mixed empty/nonempty, legacy `RuntimeError` behavior, and two same-stem jobs resolving independently through two explicit namespaces without global env mutation.
+1. Add failing unit tests for explicit empty, missing segments, wrong type, response count/index mismatch, missing/non-numeric/nonfinite/bool segment values, finite zero/reversed ranges retained, malformed segment, call failure, mixed empty/nonempty, legacy `RuntimeError` behavior, and two same-stem jobs resolving independently through two explicit namespaces without global env mutation.
 2. Implement immutable outcome/coverage for explicit project jobs by retaining the received response coverage and routing valid responses through existing `build_spine`. Change only the legacy empty exception type in `fetch_draft`, leaving its valid fixture call flow unchanged.
 3. Run focused source tests, invariants, `make check`; commit only owned files.
 
