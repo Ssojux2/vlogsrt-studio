@@ -20,6 +20,11 @@ P2-01이 잰 시계(`pcm_sample0_file_time`, 변환 후 첫 프레임의 실측 
 말/침묵을 판정하지 않는다. 시각은 전부 정확한 `Fraction`이며 float는 들어오지
 못한다.
 
+남긴 구간 한 덩어리(`split_retained_ranges`)도 같은 시계로 자른다(P2-03). 전체·
+중간·마지막·재전사 구간을 가리지 않고 조각의 원점은 언제나
+`Fraction(시작 프레임, 주파수)`다 — 인코더가 세그먼트 목록으로 알려주던 좌표는
+이 길에 없다. 마지막 조각이 따로 밀리던 회귀(S17)는 이렇게 닫는다.
+
 참조는 오디오가 **선언된** 자원에만 존재한다. 프로브·추출이 실패하면 경로·해시·
 프레임 수·원점을 지어내지 않고 문마 있는 오류로 죽는다 — unavailable 타입은
 P3가 소유하고 P7이 만든다. ffmpeg 경계는 P2-01(`vlogsrt.preprocess`)이고 이
@@ -35,6 +40,7 @@ import math
 import os
 import tempfile
 import wave
+from collections.abc import Sequence
 from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
@@ -219,6 +225,35 @@ def write_wav_slice(reference: PcmReference, samples: SampleRange, destination: 
     finally:
         temp.unlink(missing_ok=True)
     return destination
+
+
+def split_retained_ranges(
+    reference: PcmReference,
+    ranges: Sequence[tuple[Fraction, Fraction]],
+    directory: Path,
+) -> tuple[tuple[SampleRange, Path], ...]:
+    """남긴 구간들을 같은 저장 PCM에서 잘라 WAV로 낸다 — 좌표는 샘플 번호뿐이다.
+
+    1차 전체 구간이든 중간·마지막 구간이든 재전사 부분구간이든, 조각의 시각 원점은
+    언제나 `Fraction(시작 프레임, 주파수)`(+ 참조의 원점)이다 — 인코더가 세그먼트
+    목록으로 알려주던 좌표는 이 길에 없다. 그 좌표를 믿으면 경계마다 프레임 단위로
+    밀리는 조각이 나와 자막 전체에 실린다(S17). 구간은 안쪽 환산(시작 ceil·끝
+    floor) 뒤 순서와 비겹침을 **무엇을 쓰기도 전에** 확인한다 — 반쯤 나간 조각
+    다발은 없다. 마지막 구간은 저장 PCM의 실제 마지막 프레임에서 끝날 수 있다.
+    """
+    spans: list[SampleRange] = []
+    for position, pair in enumerate(ranges):
+        span = _retained_range(reference, pair, position)
+        if spans and span.start < spans[-1].end:
+            raise ValueError(
+                f"남긴 구간이 겹치거나 순서가 어긋난다: {position}번째 구간이 "
+                f"[{span.start}, {span.end})인데 앞 구간이 {spans[-1].end}까지 간다"
+            )
+        spans.append(span)
+    return tuple(
+        (span, write_wav_slice(reference, span, _retained_path(reference, directory, index)))
+        for index, span in enumerate(spans)
+    )
 
 
 def quiet_sample(
@@ -709,6 +744,19 @@ def _require_slice(reference: PcmReference, samples: SampleRange) -> None:
             f"참조가 줄 수 없는 범위다: [{samples.start}, {samples.end}) "
             f"(저장 {reference.sample_count}프레임)"
         )
+
+
+def _retained_range(reference: PcmReference, pair: object, position: int) -> SampleRange:
+    """남긴 구간 목록의 한 항목을 환산한다 — (start, end) 초 쌍이 아니면 그 자리에서 죽인다."""
+    if not isinstance(pair, tuple) or len(pair) != 2:
+        raise ValueError(f"{position}번째 구간은 (start, end) 초 쌍이어야 한다: {pair!r}")
+    start, end = pair
+    return retained_sample_range(reference, start, end)
+
+
+def _retained_path(reference: PcmReference, directory: Path, index: int) -> Path:
+    """남긴 구간 조각의 이름 — 호출이 결정적이면 이름도 결정적이다(재실행이 같은 이름을 낸다)."""
+    return directory / f"{reference.original_stem}.range{index:04d}.wav"
 
 
 def _bad_count(value: object) -> bool:
