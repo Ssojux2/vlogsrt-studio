@@ -62,12 +62,14 @@ class AnalysisFailure:
 - Extend the P0 loader without adding a second config root. No implicit `.env`/working-directory search and no mutation of legacy `Config`.
 - Vision provider credentials are distinct from source STT credentials: never reuse `OPENAI_API_KEY` or `OPENAI_BASE_URL`. Configuration stores only the separate environment-variable names, never their values; credential lookup belongs to the explicit online runner.
 - Pricing fields are optional user-supplied budgeting assumptions, all defaulting to `None`; they are not asserted current provider tariffs and never come from environment discovery or a legacy-config fallback. Source-full, repair/verify, boundary, and vision components remain separately priced so one model's rate cannot silently price another. TOML supplies Decimal prices as strings and `to_dict` emits their canonical decimal strings; reject `bool`, negative, NaN/Infinity, or malformed values. If any price is configured, require an explicit nonblank `pricing_currency` label.
+- Decimal canonicalization and hashing are independent of the ambient `decimal` context: never use a context-rounding `Decimal.normalize()`, quantize, float conversion, or global-context mutation. Preserve every significant digit from the exact Decimal tuple/exponent (or exact fixed formatting), remove only redundant fractional trailing zeroes, and canonicalize positive/negative Decimal zero identically. Equivalent Decimal spellings therefore produce one value/hash even above 28 significant digits under low/default/high local contexts.
+- Canonical JSON also emits both accepted unit-float fields, `vad_positive` and `vision_apply_confidence`, with positive and negative zero normalized to the same representation and hash. This is serialization canonicalization only; do not broaden the accepted config types or threshold policy.
 - `analysis_models.py` is the frozen shared P5 result/error vocabulary reviewed before the two branches start. VAD- and vision-specific records remain within their disjoint subpackages; neither branch edits this shared file.
 - Artifact coordinates verified from official tag v6.2.1: ONNX URL `https://raw.githubusercontent.com/snakers4/silero-vad/v6.2.1/src/silero_vad/data/silero_vad.onnx`, 2,327,524 bytes, checksum above; official MIT LICENSE checksum above.
 
 ## Implementation steps
 
-1. Write failing default/roundtrip/unknown-key/type/range/hash tests, separate-credential-name tests, optional Decimal pricing/currency/canonical-hash tests, and frozen shared-model tests.
+1. Write failing default/roundtrip/unknown-key/type/range/hash tests, separate-credential-name tests, optional Decimal pricing/currency/canonical-hash tests, and frozen shared-model tests. Include a price with more than 28 significant digits under low/default/high `localcontext` precision, equivalent trailing-zero Decimal spellings and signed Decimal zero, plus signed float-zero hash pairs for both accepted probability fields.
 2. Implement immutable parsing/validation with stdlib TOML and deterministic JSON hashing.
 3. Scan future-facing constants only through tests of this module; run invariants/full check; commit owned files.
 
