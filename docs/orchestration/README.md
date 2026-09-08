@@ -25,7 +25,8 @@
 1. Sol이 docs/orchestration/tasks/에 태스크 brief를 작성한다. task-template.md의 필드를 빠짐없이 채운다.
 2. Opus는 페이즈 공통계약/위험 태스크를 사전 검토한다. 판단은 기록하고 해결 없이 GLM에 모호함을 넘기지 않는다.
 3. Orca Run/Task/Dispatch 실제 상태로 GLM을 할당한다. 각 fresh GLM은 한 태스크만 구현한다.
-4. GLM은 실패 테스트→최소 구현→관련 검사→make check→태스크 커밋→실제 worker_done 순으로 보고한다.
+4. GLM은 실패 테스트→최소 구현→관련 검사→make check→태스크 커밋 후, 정확한 SHA와 검사 결과를 review-ready 상태로 보고하고 Orca ask로 Sol의 검토 결과를 기다린다. Sol/Opus의 범위 내 수정 사항은 같은 Dispatch에서 닫고 검사를 다시 통과한 뒤 실제 worker_done을 보낸다.
+   이미 worker_done이 전송된 같은 태스크의 후속 수정은 기존 GLM 터미널을 즉시 새 Dispatch에 재사용할 수 있다. 이는 같은 문제의 수정 연속 작업이며, 독립 태스크는 fresh 세션 원칙을 유지한다. 완료 터미널은 Orca의 reuse/release 규칙으로 처리하고 retained 판정을 수동 종료로 우회하지 않는다.
 5. Sol은 범위/회귀 증거를 확인하고 Opus는 복잡한 diff와 페이즈 전체를 검토한다.
 6. 모든 수정 요청은 GLM에 전달한다. 중요 결함이 열려 있으면 완료로 표시하지 않는다.
 7. 페이즈가 준비되면 Astra에 통합 요청. 승인된 태스크를 이어서 실행하며 매 태스크 사용자 재확인을 요구하지 않는다.
