@@ -41,8 +41,8 @@ FORMAT_30 = (
 ASSET_DEFAULT = (
     '<asset id="r2" name="source.mp4" uid="AAAA1111" start="0s" duration="600s"'
     ' hasAudio="1" hasVideo="1" format="r1">\n'
-    '    <media-rep kind="original" src="file:///media/source.mp4"/>\n'
-    '    <media-rep kind="proxy" src="file:///media/source_proxy.mov"/>\n'
+    '    <media-rep kind="original-media" src="file:///media/source.mp4"/>\n'
+    '    <media-rep kind="proxy-media" src="file:///media/source_proxy.mov"/>\n'
     "  </asset>"
 )
 
@@ -61,6 +61,7 @@ def build_fcpxml(
     resources: str = f"{FORMAT_30}\n  {ASSET_DEFAULT}",
     sequence_attrs: str = 'format="r1" tcStart="0s" duration="600s"',
     spine_items: str = SPINE_DEFAULT,
+    spine_attrs: str = "",
     library_body: str | None = None,
 ) -> str:
     """지정 부분집합의 기본형 — 실험마다 한 조각씩 갈아끼운다."""
@@ -69,7 +70,7 @@ def build_fcpxml(
             '<event name="이벤트">\n'
             '      <project name="프로젝트">\n'
             f"        <sequence {sequence_attrs}>\n"
-            "          <spine>\n"
+            f"          <spine{spine_attrs}>\n"
             f"            {spine_items}\n"
             "          </spine>\n"
             "        </sequence>\n"
@@ -193,8 +194,8 @@ def test_parsing_is_deterministic(tmp_path: Path) -> None:
 def test_resources_keep_document_order(tmp_path: Path) -> None:
     resources = (
         f"{FORMAT_30}\n"
-        '  <asset id="r9" name="a.mp4" start="0s" duration="60s" format="r1">\n'
-        '    <media-rep kind="original" src="file:///media/a.mp4"/>\n'
+        '  <asset id="r9" name="a.mp4" start="0s" duration="60s" hasAudio="1" format="r1">\n'
+        '    <media-rep kind="original-media" src="file:///media/a.mp4"/>\n'
         "  </asset>\n"
         "  " + ASSET_DEFAULT
     )
@@ -328,8 +329,8 @@ def test_nonzero_epochs_parse_exactly(tmp_path: Path) -> None:
     resources = (
         f"{FORMAT_30}\n"
         '  <asset id="r2" name="source.mp4" uid="AAAA1111" start="3600s" duration="600s"'
-        ' format="r1">\n'
-        '    <media-rep kind="original" src="file:///media/source.mp4"/>\n'
+        ' hasAudio="1" format="r1">\n'
+        '    <media-rep kind="original-media" src="file:///media/source.mp4"/>\n'
         "  </asset>"
     )
     sequence_attrs = 'format="r1" tcStart="3600s" duration="600s"'
@@ -394,8 +395,8 @@ def test_every_supported_rate_parses(
     )
     asset = (
         f'<asset id="r2" name="source.mp4" uid="AAAA1111" start="0s" duration="{span}"'
-        ' format="r1">\n'
-        '    <media-rep kind="original" src="file:///media/source.mp4"/>\n'
+        ' hasAudio="1" format="r1">\n'
+        '    <media-rep kind="original-media" src="file:///media/source.mp4"/>\n'
         "  </asset>"
     )
     items = (
@@ -627,8 +628,8 @@ def ntsc_document(spine_items: str) -> str:
     )
     asset = (
         '<asset id="r2" name="source.mp4" uid="AAAA1111" start="0s" duration="4004s"'
-        ' format="r1">\n'
-        '    <media-rep kind="original" src="file:///media/source.mp4"/>\n'
+        ' hasAudio="1" format="r1">\n'
+        '    <media-rep kind="original-media" src="file:///media/source.mp4"/>\n'
         "  </asset>"
     )
     return build_fcpxml(
@@ -734,8 +735,8 @@ def test_source_bounds_before_asset_start_are_rejected(tmp_path: Path) -> None:
     resources = (
         f"{FORMAT_30}\n"
         '  <asset id="r2" name="source.mp4" uid="AAAA1111" start="3600s" duration="600s"'
-        ' format="r1">\n'
-        '    <media-rep kind="original" src="file:///media/source.mp4"/>\n'
+        ' hasAudio="1" format="r1">\n'
+        '    <media-rep kind="original-media" src="file:///media/source.mp4"/>\n'
         "  </asset>"
     )
     items = '<asset-clip ref="r2" name="클립" offset="0s" start="3599s" duration="5s"/>'
@@ -881,13 +882,34 @@ def test_unsupported_clip_children_are_rejected(
 
 @pytest.mark.parametrize(
     "child",
-    ["<note>메모</note>", '<keyword name="여행"/>', '<marker name="M" start="0s" duration="1s"/>'],
+    [
+        "<note>메모</note>",
+        '<keyword value="여행"/>',
+        '<marker start="1s" value="장면"/>',
+        '<chapter-marker start="2s" value="1장"/>',
+        '<rating value="favorite"/>',
+        '<metadata><md key="com.apple.fcpxml" value="v"/></metadata>',
+    ],
 )
 def test_benign_clip_metadata_children_are_tolerated(tmp_path: Path, child: str) -> None:
-    """정적 메타데이터(note·keyword·marker)는 시각도 신원도 바꾸지 않는다."""
+    """정적 메타데이터(note·marker류·metadata)는 시각도 신원도 바꾸지 않는다.
+
+    DTD의 marker_item은 marker·chapter-marker·rating·keyword·analysis-marker·
+    hidden-clip-marker고 뒤에 metadata?가 온다 — 그 철자 그대로만 받는다.
+    """
     items = (
         f'<asset-clip ref="r2" name="클립" offset="0s" start="10s" duration="5s">{child}'
         "</asset-clip>"
+    )
+    document = parse(build_fcpxml(spine_items=items), tmp_path)
+    assert len(document.storyline) == 1
+
+
+def test_gap_metadata_children_are_tolerated(tmp_path: Path) -> None:
+    """gap도 같은 정적 메타데이터 규칙을 따른다 — DTD가 허락하는 자식이다."""
+    items = (
+        '<gap name="갭" offset="0s" duration="5s"><note>메모</note>'
+        '<metadata><md key="k"/></metadata></gap>'
     )
     document = parse(build_fcpxml(spine_items=items), tmp_path)
     assert len(document.storyline) == 1
@@ -901,6 +923,22 @@ def test_connected_clip_lane_is_rejected(tmp_path: Path) -> None:
     )
     expect_reject(
         build_fcpxml(spine_items=items), tmp_path, location=f"{SPINE}/asset-clip[2]", reason="lane"
+    )
+
+
+def test_lane_zero_on_asset_clip_is_primary_and_valid(tmp_path: Path) -> None:
+    """`lane="0"`은 '부모 안'이라는 뜻이다 — 주요 스토리라인 항목으로 유효하다."""
+    items = '<asset-clip ref="r2" name="주요" lane="0" offset="0s" start="10s" duration="5s"/>'
+    document = parse(build_fcpxml(spine_items=items), tmp_path)
+    assert len(document.storyline) == 1
+
+
+@pytest.mark.parametrize("lane", ["0", "1"])
+def test_gap_lane_attribute_is_always_invalid(tmp_path: Path, lane: str) -> None:
+    """gap은 앵커될 수 없다 — lane 0조차 gap의 DTD에 없는 속성이다."""
+    items = f'<gap name="갭" lane="{lane}" offset="0s" duration="5s"/>'
+    expect_reject(
+        build_fcpxml(spine_items=items), tmp_path, location=f"{SPINE}/gap[1]", reason="lane"
     )
 
 
@@ -976,26 +1014,26 @@ def test_has_audio_invalid_value_is_rejected(tmp_path: Path) -> None:
     )
 
 
-def test_media_rep_unknown_kind_is_rejected(tmp_path: Path) -> None:
+@pytest.mark.parametrize("kind", ["cloud", "original", "proxy"])
+def test_media_rep_non_dtd_kinds_are_rejected(tmp_path: Path, kind: str) -> None:
+    """DTD의 kind는 original-media/proxy-media뿐이다 — 낡은 철자도 무효다."""
     resources = (
         f"{FORMAT_30}\n"
-        '  <asset id="r2" name="source.mp4" start="0s" duration="600s" format="r1">\n'
-        '    <media-rep kind="cloud" src="file:///media/x"/>\n'
+        '  <asset id="r2" name="source.mp4" start="0s" duration="600s" hasAudio="1" format="r1">\n'
+        f'    <media-rep kind="{kind}" src="file:///media/x"/>\n'
         "  </asset>"
     )
     expect_reject(
         build_fcpxml(resources=resources),
         tmp_path,
         location="/fcpxml[1]/resources[1]/asset[1]/media-rep[1]",
-        reason="cloud",
+        reason=kind,
     )
 
 
 @pytest.mark.parametrize(
     ("items", "missing"),
     [
-        ('<asset-clip ref="r2" name="클립" start="10s" duration="5s"/>', "offset"),
-        ('<asset-clip ref="r2" name="클립" offset="0s" duration="5s"/>', "start"),
         ('<asset-clip ref="r2" name="클립" offset="0s" start="10s"/>', "duration"),
         ('<asset-clip name="고아" offset="0s" start="10s" duration="5s"/>', "ref"),
     ],
@@ -1027,7 +1065,6 @@ def test_gap_missing_required_attributes_are_rejected(
     ("asset", "missing"),
     [
         ('<asset name="a.mp4" start="0s" duration="60s" format="r1"/>', "id"),
-        ('<asset id="r9" start="0s" duration="60s" format="r1"/>', "name"),
         ('<asset id="r9" name="a.mp4" duration="60s" format="r1"/>', "start"),
         ('<asset id="r9" name="a.mp4" start="0s" format="r1"/>', "duration"),
         ('<asset id="r9" name="a.mp4" start="0s" duration="60s"/>', "format"),
@@ -1072,8 +1109,8 @@ def test_format_missing_frame_duration_is_rejected(tmp_path: Path) -> None:
 def test_media_rep_missing_src_is_rejected(tmp_path: Path) -> None:
     resources = (
         f"{FORMAT_30}\n"
-        '  <asset id="r2" name="source.mp4" start="0s" duration="600s" format="r1">\n'
-        '    <media-rep kind="original"/>\n'
+        '  <asset id="r2" name="source.mp4" start="0s" duration="600s" hasAudio="1" format="r1">\n'
+        '    <media-rep kind="original-media"/>\n'
         "  </asset>"
     )
     expect_reject(
@@ -1081,6 +1118,231 @@ def test_media_rep_missing_src_is_rejected(tmp_path: Path) -> None:
         tmp_path,
         location="/fcpxml[1]/resources[1]/asset[1]/media-rep[1]",
         reason="src",
+    )
+
+
+# ─── 교정 — 설치된 1.14 DTD에 맞춘 어휘와 좌표 ──────────────────────────
+
+
+def test_media_rep_kinds_translate_from_dtd_spellings(tmp_path: Path) -> None:
+    """XML의 original-media/proxy-media가 내부 kind original/proxy로 온다."""
+    resources = (
+        f"{FORMAT_30}\n"
+        '  <asset id="r2" name="source.mp4" uid="AAAA1111" start="0s" duration="600s"'
+        ' hasAudio="1" format="r1">\n'
+        '    <media-rep kind="original-media" src="file:///media/source.mp4"/>\n'
+        '    <media-rep kind="proxy-media" src="file:///media/source_proxy.mov"/>\n'
+        "  </asset>"
+    )
+    document = parse(build_fcpxml(resources=resources), tmp_path)
+    assert [rep.kind for rep in document.resources[0].media_reps] == ["original", "proxy"]
+
+
+def test_media_rep_kind_defaults_to_original_media(tmp_path: Path) -> None:
+    """DTD 기본값은 original-media다 — kind를 빼면 원본으로 읽는다."""
+    resources = (
+        f"{FORMAT_30}\n"
+        '  <asset id="r2" name="source.mp4" start="0s" duration="600s" hasAudio="1"'
+        ' format="r1">\n'
+        '    <media-rep src="file:///media/source.mp4"/>\n'
+        "  </asset>"
+    )
+    document = parse(build_fcpxml(resources=resources), tmp_path)
+    assert document.resources[0].media_reps == (
+        MediaRep(kind="original", src="file:///media/source.mp4"),
+    )
+
+
+@pytest.mark.parametrize(
+    ("attribute", "token"),
+    [
+        ("audioStart", "audioStart"),
+        ("audioDuration", "audioDuration"),
+    ],
+)
+def test_split_edit_overrides_are_rejected(tmp_path: Path, attribute: str, token: str) -> None:
+    """분할 편집(audioStart·audioDuration)은 오디오 시각을 따로 미는 오버라이드다."""
+    items = (
+        f'<asset-clip ref="r2" name="클립" offset="0s" start="10s" duration="5s"'
+        f' {attribute}="1/30s"/>'
+    )
+    expect_reject(
+        build_fcpxml(spine_items=items),
+        tmp_path,
+        location=f"{SPINE}/asset-clip[1]",
+        reason=token,
+    )
+
+
+FORMAT_NTSC = (
+    '<format id="rNTSC" name="FFVideoFormat1080p2997" frameDuration="1001/30000s"'
+    ' width="1920" height="1080"/>'
+)
+
+
+def test_clip_format_override_matching_rate_is_accepted(tmp_path: Path) -> None:
+    """asset-clip의 format은 선택 오버라이이다 — 같은 격자면 그대로 통과한다."""
+    items = '<asset-clip ref="r2" name="클립" format="r1" offset="0s" start="10s" duration="5s"/>'
+    document = parse(build_fcpxml(spine_items=items), tmp_path)
+    assert len(document.storyline) == 1
+
+
+def test_clip_format_override_unresolved_is_rejected(tmp_path: Path) -> None:
+    items = '<asset-clip ref="r2" name="클립" format="rX" offset="0s" start="10s" duration="5s"/>'
+    expect_reject(
+        build_fcpxml(spine_items=items), tmp_path, location=f"{SPINE}/asset-clip[1]", reason="rX"
+    )
+
+
+def test_clip_format_override_rate_mismatch_is_rejected(tmp_path: Path) -> None:
+    """오버라이가 시퀀스 격자와 다른 레이트를 가리키면 거부한다 — 리샘플링하지 않는다."""
+    items = (
+        '<asset-clip ref="r2" name="클립" format="rNTSC" offset="0s" start="10s" duration="5s"/>'
+    )
+    expect_reject(
+        build_fcpxml(
+            resources=f"{FORMAT_30}\n  {FORMAT_NTSC}\n  {ASSET_DEFAULT}", spine_items=items
+        ),
+        tmp_path,
+        location=f"{SPINE}/asset-clip[1]",
+        reason="1001/30000",
+    )
+
+
+def test_spine_format_override_matching_rate_is_accepted(tmp_path: Path) -> None:
+    document = parse(build_fcpxml(spine_attrs=' format="r1"'), tmp_path)
+    assert document.frame_duration == Fraction(1, 30)
+
+
+def test_spine_format_override_unresolved_is_rejected(tmp_path: Path) -> None:
+    expect_reject(
+        build_fcpxml(spine_attrs=' format="rX"'),
+        tmp_path,
+        location=SPINE,
+        reason="rX",
+    )
+
+
+def test_spine_format_override_rate_mismatch_is_rejected(tmp_path: Path) -> None:
+    expect_reject(
+        build_fcpxml(
+            resources=f"{FORMAT_30}\n  {FORMAT_NTSC}\n  {ASSET_DEFAULT}",
+            spine_attrs=' format="rNTSC"',
+        ),
+        tmp_path,
+        location=SPINE,
+        reason="1001/30000",
+    )
+
+
+def test_spine_offset_zero_or_absent_is_accepted(tmp_path: Path) -> None:
+    """주요 스토리라인의 offset은 없거나 정확히 0s여야 한다 — 없어도 뜻은 같다."""
+    assert len(parse(build_fcpxml(spine_attrs=' offset="0s"'), tmp_path).storyline) == 3
+
+
+def test_spine_offset_nonzero_is_rejected(tmp_path: Path) -> None:
+    expect_reject(
+        build_fcpxml(spine_attrs=' offset="1s"'),
+        tmp_path,
+        location=SPINE,
+        reason="offset",
+    )
+
+
+def test_spine_lane_zero_or_absent_is_accepted(tmp_path: Path) -> None:
+    assert len(parse(build_fcpxml(spine_attrs=' lane="0"'), tmp_path).storyline) == 3
+
+
+def test_spine_lane_nonzero_is_rejected(tmp_path: Path) -> None:
+    expect_reject(
+        build_fcpxml(spine_attrs=' lane="1"'),
+        tmp_path,
+        location=SPINE,
+        reason="lane",
+    )
+
+
+def test_asset_metadata_child_is_ordinary_content(tmp_path: Path) -> None:
+    """애셋의 metadata는 평범한 내용이다 — raw_xml이 그대로 들고 간다."""
+    resources = (
+        f"{FORMAT_30}\n"
+        '  <asset id="r2" name="source.mp4" start="0s" duration="600s" hasAudio="1"'
+        ' format="r1">\n'
+        '    <media-rep kind="original-media" src="file:///media/source.mp4"/>\n'
+        '    <metadata><md key="com.apple.fcpxml.mediarep" value="v"/></metadata>\n'
+        "  </asset>"
+    )
+    document = parse(build_fcpxml(resources=resources), tmp_path)
+    assert document.resources[0].media_reps[0].kind == "original"
+    assert b"<md key=" in document.raw_xml
+
+
+def test_asset_name_absent_maps_to_empty_string(tmp_path: Path) -> None:
+    """애셋 name은 DTD에서 선택이다 — 없으면 빈 문자열로 정한다."""
+    resources = (
+        f"{FORMAT_30}\n"
+        '  <asset id="r2" start="0s" duration="600s" hasAudio="1" format="r1">\n'
+        '    <media-rep kind="original-media" src="file:///media/source.mp4"/>\n'
+        "  </asset>"
+    )
+    document = parse(build_fcpxml(resources=resources), tmp_path)
+    assert document.resources[0].name == ""
+
+
+def test_clip_offset_and_start_default_to_zero(tmp_path: Path) -> None:
+    """asset-clip의 offset·start는 각각 정확히 0s가 기본이다."""
+    items = '<asset-clip ref="r2" name="클립" duration="5s"/>'
+    document = parse(build_fcpxml(spine_items=items), tmp_path)
+    clip = document.storyline[0]
+    assert isinstance(clip, ClipInstance)
+    assert clip.offset == Fraction(0)
+    assert clip.start == Fraction(0)
+
+
+def test_has_audio_omission_is_outside_the_readiness_subset(tmp_path: Path) -> None:
+    """hasAudio 빠짐은 문법상 유효하지만 이 준비 부분집합 밖이다 — 추측하지 않는다.
+
+    기본값을 true/false로 두지 않는다: '오디오 없음'은 오직 명시적인 0만 선언한다.
+    """
+    resources = (
+        f"{FORMAT_30}\n"
+        '  <asset id="r2" name="source.mp4" start="0s" duration="600s" format="r1">\n'
+        '    <media-rep kind="original-media" src="file:///media/source.mp4"/>\n'
+        "  </asset>"
+    )
+    expect_reject(
+        build_fcpxml(resources=resources),
+        tmp_path,
+        location="/fcpxml[1]/resources[1]/asset[1]",
+        reason="hasAudio",
+    )
+
+
+def test_has_video_omission_is_uninterpreted(tmp_path: Path) -> None:
+    """hasVideo는 모델에 필드가 없다 — 없으면 아무 결론도 내리지 않는다."""
+    resources = (
+        f"{FORMAT_30}\n"
+        '  <asset id="r2" name="source.mp4" start="0s" duration="600s" hasAudio="1"'
+        ' format="r1">\n'
+        '    <media-rep kind="original-media" src="file:///media/source.mp4"/>\n'
+        "  </asset>"
+    )
+    document = parse(build_fcpxml(resources=resources), tmp_path)
+    assert not hasattr(document.resources[0], "has_video")
+
+
+def test_has_video_invalid_value_is_rejected(tmp_path: Path) -> None:
+    resources = (
+        f"{FORMAT_30}\n"
+        '  <asset id="r2" name="source.mp4" start="0s" duration="600s" hasAudio="1"'
+        ' hasVideo="maybe" format="r1"/>\n'
+        "  " + ASSET_DEFAULT
+    )
+    expect_reject(
+        build_fcpxml(resources=resources),
+        tmp_path,
+        location="/fcpxml[1]/resources[1]/asset[1]",
+        reason="hasVideo",
     )
 
 

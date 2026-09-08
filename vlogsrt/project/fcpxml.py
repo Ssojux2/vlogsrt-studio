@@ -9,7 +9,16 @@
 시각은 전부 P1-01 timebase의 `Fraction`이고, 격자 검사도 그 정의를 쓴다:
 타임라인 격자는 `sequence.tcStart`에, 소스 격자는 `asset.start`에 묶는다.
 프레임 레이트는 소스와 프로젝트가 **같은** 지원 레이트여야 한다 — 30 대 29.97
-같은 어긋남은 리샘플링하지 않고 거부한다.
+같은 어긋남은 리샘플링하지 않고 거부한다. spine·asset-clip의 선택 `format`
+오버라이도 같은 격자여야만 한다.
+
+어휘는 설치된 1.14 DTD를 따른다: media-rep kind는 `original-media`/
+`proxy-media`(생략하면 original-media)이고 내부 `MediaRep.kind`로 옮겨 읽는다.
+`hasAudio`는 명시적 0/1만 받는다 — 생략은 문법상 유효해도 이 준비 부분집합
+밖이라 추측하지 않는다. 애셋 `name`은 선택(빈 문자열), asset-clip의
+`offset`·`start`는 생략하면 정확히 0s다. `lane="0"`은 '부모 안'이라 주요
+스토리라인으로 유효하고, 0 외의 lane은 연결 클립이라 거부한다. gap에는
+lane이 아예 없다.
 
 원본은 절대 다시 쓰지 않는다. `raw_xml` 바이트를 그대로 들고, 파싱 트리는
 읽기만 한다 — 원본 시각 문자열의 정규화는 일어나지 않는다(P1-05 왕복의 기반).
@@ -41,8 +50,31 @@ SUPPORTED_VERSION = "1.14"
 
 _BUNDLE_INFO_NAME = "Info.fcpxml"
 
-_BENIGN_CLIP_METADATA = frozenset({"note", "keyword", "marker", "rating"})
-"""시각도 신원도 바꾸지 않는 정적 메타데이터 — 이것만 클립 안에 머물 수 있다."""
+_BENIGN_CLIP_METADATA = frozenset(
+    {
+        "note",
+        "keyword",
+        "marker",
+        "chapter-marker",
+        "rating",
+        "analysis-marker",
+        "hidden-clip-marker",
+        "metadata",
+    }
+)
+"""시각도 신원도 바꾸지 않는 정적 메타데이터 — DTD의 marker_item ∪ note ∪ metadata.
+
+`%marker_item;`은 marker·chapter-marker·rating·keyword·analysis-marker·
+hidden-clip-marker고 asset-clip/gap 뒤에 `metadata?`가 온다. 그 철자
+그대로만 머물 수 있다.
+"""
+
+# XML의 kind 철자(원본 DTD) → 내부 MediaRep.kind. kind를 빼면 DTD 기본값
+# original-media다.
+_MEDIA_REP_XML_KINDS: dict[str, Literal["original", "proxy"]] = {
+    "original-media": "original",
+    "proxy-media": "proxy",
+}
 
 _SPINE_CHILD_REASONS = {
     "transition": "전환(transition)은 지원하지 않는다",
@@ -69,7 +101,12 @@ _CLIP_CHILD_REASONS = {
     "effect": "시간 가변 효과(effect)는 지원하지 않는다",
 }
 
-_MEDIA_REP_KINDS = ("original", "proxy")
+# 분할 편집·오디오 시각 오버라이드 — 오디오 시각을 따로 미는 속성은 전부 거부한다.
+_AUDIO_TIMING_OVERRIDE_REASONS = {
+    "audioOffset": "오디오 타이밍 오버라이드(audioOffset)는 지원하지 않는다",
+    "audioStart": "분할 편집 오버라이드(audioStart)는 지원하지 않는다",
+    "audioDuration": "분할 편집 오버라이드(audioDuration)는 지원하지 않는다",
+}
 
 
 def resolve_info_path(path: Path) -> Path:
@@ -111,7 +148,14 @@ def parse_project(path: Path) -> ProjectDocument:
     )
     assets_by_id = {asset.xml_id: asset for asset in assets}
     storyline = _parse_storyline(
-        spine, paths, assets_by_id, frame_duration, tc_start, sequence_duration, input_sha256
+        spine,
+        paths,
+        assets_by_id,
+        frame_durations,
+        frame_duration,
+        tc_start,
+        sequence_duration,
+        input_sha256,
     )
     return ProjectDocument(
         input_path=path,
@@ -217,6 +261,45 @@ def _bool_attribute(element: ET.Element, name: str, where: str, *, default: bool
     raise UnsupportedProject(where, f"{name} 값이 무효다: {value!r} — 0 또는 1이어야 한다")
 
 
+def _required_bool_attribute(element: ET.Element, name: str, where: str) -> bool:
+    """명시적 0/1만 받는다 — 생략은 문법상 유효해도 이 준비 부분집합 밖이다.
+
+    `hasAudio`의 생략을 true/false로 추측하지 않는다: '오디오 없음'은 오직
+    명시적인 0만 선언한다.
+    """
+    value = element.get(name)
+    if value is None:
+        raise UnsupportedProject(
+            where,
+            f"{name} 선언이 없다 — 이 준비 부분집합에서는 명시적인 0 또는 1이 필요하다",
+        )
+    if value == "1":
+        return True
+    if value == "0":
+        return False
+    raise UnsupportedProject(where, f"{name} 값이 무효다: {value!r} — 0 또는 1이어야 한다")
+
+
+def _validate_01_attribute(element: ET.Element, name: str, where: str) -> None:
+    """값을 모델에 들이지 않더라도 0/1 철자는 지킨다 — 해석은 하지 않는다."""
+    value = element.get(name)
+    if value is not None and value not in ("0", "1"):
+        raise UnsupportedProject(where, f"{name} 값이 무효다: {value!r} — 0 또는 1이어야 한다")
+
+
+def _optional_time_attribute(
+    element: ET.Element, name: str, where: str, *, default: Fraction
+) -> Fraction:
+    """선택 시각 속성 — 없으면 호출자가 정한 정확한 기본값을 쓴다."""
+    text = element.get(name)
+    if text is None:
+        return default
+    try:
+        return timebase.parse_fcpx_time(text)
+    except ValueError as error:
+        raise UnsupportedProject(where, f"{name} 값이 무효다: {text!r} ({error})") from error
+
+
 def _reject_forbidden_attribute(element: ET.Element, name: str, where: str, reason: str) -> None:
     if name in element.attrib:
         raise UnsupportedProject(where, reason)
@@ -297,11 +380,11 @@ def _parse_asset(
     where = paths[id(element)]
     xml_id = _required_attribute(element, "id", where)
     _reject_duplicate_id(xml_id, seen_ids, where)
-    name = _required_attribute(element, "name", where)
     format_id = _required_attribute(element, "format", where)
     start = _parse_time_attribute(element, "start", where)
     duration = _parse_time_attribute(element, "duration", where)
-    has_audio = _bool_attribute(element, "hasAudio", where, default=True)
+    has_audio = _required_bool_attribute(element, "hasAudio", where)
+    _validate_01_attribute(element, "hasVideo", where)
     frame_duration = frame_durations.get(format_id)
     if frame_duration is None:
         raise UnsupportedProject(where, f"참조를 해석할 수 없다: format {format_id!r}")
@@ -315,7 +398,7 @@ def _parse_asset(
         xml_id=xml_id,
         scoped_id=_scoped_resource_id(input_sha256, xml_id),
         uid=element.get("uid", ""),
-        name=name,
+        name=element.get("name", ""),
         format_id=format_id,
         frame_duration=frame_duration,
         start=start,
@@ -329,15 +412,19 @@ def _parse_media_reps(element: ET.Element, paths: dict[int, str]) -> tuple[Media
     reps: list[MediaRep] = []
     for child in element:
         where = paths[id(child)]
-        if child.tag != "media-rep":
+        if child.tag not in ("media-rep", "metadata"):
             raise UnsupportedProject(where, f"지원하지 않는 asset 자식 요소다: {child.tag}")
-        kind = _required_attribute(child, "kind", where)
-        if kind not in _MEDIA_REP_KINDS:
+        if child.tag == "metadata":
+            continue
+        xml_kind = child.get("kind", "original-media")
+        kind = _MEDIA_REP_XML_KINDS.get(xml_kind)
+        if kind is None:
             raise UnsupportedProject(
-                where, f"media-rep kind가 무효다: {kind!r} — original 또는 proxy여야 한다"
+                where,
+                f"media-rep kind가 무효다: {xml_kind!r} — original-media 또는 proxy-media여야 한다",
             )
         src = _required_attribute(child, "src", where)
-        reps.append(MediaRep(kind=cast(Literal["original", "proxy"], kind), src=src))
+        reps.append(MediaRep(kind=kind, src=src))
     return tuple(reps)
 
 
@@ -361,15 +448,71 @@ def _parse_sequence_header(
     return frame_duration, tc_start, duration
 
 
+def _require_format_override(
+    element: ET.Element,
+    frame_durations: dict[str, Fraction],
+    sequence_frame_duration: Fraction,
+    where: str,
+) -> None:
+    """선택 format 오버라이(spine·asset-clip)는 시퀀스 격자와 같아야 한다.
+
+    DTD 주석 그대로 'default is same as parent'다 — 같지 않으면 리샘플링하지
+    않고 거부한다.
+    """
+    override = element.get("format")
+    if override is None:
+        return
+    override_duration = frame_durations.get(override)
+    if override_duration is None:
+        raise UnsupportedProject(where, f"참조를 해석할 수 없다: format {override!r}")
+    if override_duration != sequence_frame_duration:
+        raise UnsupportedProject(
+            where,
+            f"프레임 레이트 오버라이드가 시퀀스 격자와 다르다: format {override!r}"
+            f" {override_duration}초 ≠ 시퀀스 {sequence_frame_duration}초 —"
+            " 리샘플링하지 않고 거부한다",
+        )
+
+
+def _require_primary_spine(
+    spine: ET.Element,
+    frame_durations: dict[str, Fraction],
+    frame_duration: Fraction,
+    paths: dict[int, str],
+) -> None:
+    """주요 스토리라인의 좌표 — offset·lane은 없거나 정확히 0이어야 한다.
+
+    spine에 붙는 offset·lane은 '연결된 스토리라인'의 좌표다. 이 부분집합은
+    평평한 주요 스토리라인만 받으므로 0 외의 값은 좌표 오버라이로 거부한다.
+    """
+    where = paths[id(spine)]
+    offset = _optional_time_attribute(spine, "offset", where, default=Fraction(0))
+    if offset != 0:
+        raise UnsupportedProject(
+            where,
+            f"spine offset 오버라이드는 지원하지 않는다 — 주요 스토리라인은 0s여야 한다:"
+            f" {offset}초",
+        )
+    lane = spine.get("lane")
+    if lane is not None and lane != "0":
+        raise UnsupportedProject(
+            where,
+            f"spine lane 오버라이드는 지원하지 않는다 — 주요 스토리라인은 lane 0이다: {lane!r}",
+        )
+    _require_format_override(spine, frame_durations, frame_duration, where)
+
+
 def _parse_storyline(
     spine: ET.Element,
     paths: dict[int, str],
     assets_by_id: dict[str, AssetResource],
+    frame_durations: dict[str, Fraction],
     frame_duration: Fraction,
     tc_start: Fraction,
     sequence_duration: Fraction,
     input_sha256: str,
 ) -> tuple[TimelineItem, ...]:
+    _require_primary_spine(spine, frame_durations, frame_duration, paths)
     sequence_end = tc_start + sequence_duration
     items: list[TimelineItem] = []
     previous_end: Fraction | None = None
@@ -377,7 +520,7 @@ def _parse_storyline(
         where = paths[id(child)]
         if child.tag == "asset-clip":
             item: TimelineItem = _parse_asset_clip(
-                child, paths, assets_by_id, frame_duration, tc_start, input_sha256
+                child, paths, assets_by_id, frame_durations, frame_duration, tc_start, input_sha256
             )
         elif child.tag == "gap":
             item = _parse_gap(child, paths, frame_duration, tc_start, input_sha256)
@@ -396,22 +539,23 @@ def _parse_asset_clip(
     element: ET.Element,
     paths: dict[int, str],
     assets_by_id: dict[str, AssetResource],
+    frame_durations: dict[str, Fraction],
     frame_duration: Fraction,
     tc_start: Fraction,
     input_sha256: str,
 ) -> ClipInstance:
     where = paths[id(element)]
-    _reject_forbidden_attribute(element, "lane", where, "연결 클립(lane)은 지원하지 않는다")
-    _reject_forbidden_attribute(
-        element, "audioOffset", where, "오디오 타이밍 오버라이드(audioOffset)는 지원하지 않는다"
-    )
+    _require_primary_clip_lane(element, where)
+    for attribute, reason in _AUDIO_TIMING_OVERRIDE_REASONS.items():
+        _reject_forbidden_attribute(element, attribute, where, reason)
     _reject_clip_children(element, paths)
     ref = _required_attribute(element, "ref", where)
     asset = assets_by_id.get(ref)
     if asset is None:
         raise UnsupportedProject(where, f"참조를 해석할 수 없다: asset {ref!r}")
-    offset = _parse_time_attribute(element, "offset", where)
-    start = _parse_time_attribute(element, "start", where)
+    _require_format_override(element, frame_durations, frame_duration, where)
+    offset = _optional_time_attribute(element, "offset", where, default=Fraction(0))
+    start = _optional_time_attribute(element, "start", where, default=Fraction(0))
     duration = _parse_time_attribute(element, "duration", where)
     _require_on_grid(offset, tc_start, frame_duration, "offset", where)
     _require_positive_frames(duration, frame_duration, where)
@@ -429,6 +573,13 @@ def _parse_asset_clip(
     )
 
 
+def _require_primary_clip_lane(element: ET.Element, where: str) -> None:
+    """`lane="0"`은 '부모 안'이라는 뜻이다 — 0 외의 lane은 연결 클립이다."""
+    lane = element.get("lane")
+    if lane is not None and lane != "0":
+        raise UnsupportedProject(where, f"연결 클립(lane≠0)은 지원하지 않는다: lane={lane!r}")
+
+
 def _parse_gap(
     element: ET.Element,
     paths: dict[int, str],
@@ -437,7 +588,9 @@ def _parse_gap(
     input_sha256: str,
 ) -> GapInstance:
     where = paths[id(element)]
-    _reject_forbidden_attribute(element, "lane", where, "연결 클립(lane)은 지원하지 않는다")
+    _reject_forbidden_attribute(
+        element, "lane", where, "gap에는 lane 속성이 없다 — gap은 앵커될 수 없다"
+    )
     _reject_clip_children(element, paths)
     offset = _parse_time_attribute(element, "offset", where)
     duration = _parse_time_attribute(element, "duration", where)
