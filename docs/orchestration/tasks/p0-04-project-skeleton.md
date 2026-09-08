@@ -6,7 +6,7 @@ Binding source/derived separation contract and Astra bootstrap disposition. This
 
 ## Baseline and ownership
 
-- Baseline: exact corrected P0-02 integration SHA supplied by Astra; abort on mismatch. May run parallel with P0-03 from that same SHA.
+- Baseline: exactly `45d1393f7e2c2e200868f9c5972ceb20d3409d95`, the corrected P0-02 integration SHA supplied by Astra; abort on mismatch. May run parallel with the disjoint P0-03 worker.
 - Fresh branch/worktree: `fcp-p0-project-skeleton`, explicitly based on that SHA.
 - Create `vlogsrt/project/__init__.py`, `vlogsrt/project/config.py`, `vlogsrt/project/models.py`, top-level `vlogsrt.project.toml`, and `tests/project/test_project_config.py`.
 - Do not modify legacy source modules, CLI composition, FCPXML models, VAD/vision modules, or any protected path.
@@ -53,4 +53,4 @@ Report config path/key/version, expected/actual diagnostic, project/legacy impor
 
 ## Report
 
-Report launch receipt/model/effort, exact base/branch/worktree, commit SHA, owned paths, failing-first evidence, focused/full checks, and remaining findings. State is `ready-to-integrate`, not merged.
+After committing, report launch receipt/model/effort, exact base/branch/worktree, immutable commit SHA, owned paths, failing-first evidence, focused/full checks, and remaining findings as a review-ready checkpoint. Ask the Sol manager for review disposition and wait before `worker_done`; apply bounded review findings in this same Dispatch. Final state is `ready-to-integrate`, not merged.
