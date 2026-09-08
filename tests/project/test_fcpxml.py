@@ -209,11 +209,52 @@ def test_has_audio_zero_is_preserved(tmp_path: Path) -> None:
     resources = (
         f"{FORMAT_30}\n"
         '  <asset id="r2" name="silent.mp4" start="0s" duration="600s" hasAudio="0"'
-        ' format="r1"/>\n'
+        ' format="r1">\n'
+        '    <media-rep kind="original-media" src="file:///media/silent.mp4"/>\n'
+        "  </asset>\n"
         "  " + ASSET_DEFAULT.replace('id="r2"', 'id="r3"')
     )
     document = parse(build_fcpxml(resources=resources), tmp_path)
     assert [asset.has_audio for asset in document.resources] == [False, True]
+
+
+# ─── 교정 — media-rep은 최소 하나 (DTD `media-rep+`) ─────────────────────
+
+
+def test_asset_without_media_rep_is_rejected(tmp_path: Path) -> None:
+    """DTD의 애셋 내용 모델은 `media-rep+, metadata?`다 — 표현 없는 애셋은 받지 않는다.
+
+    미디어 표현이 아예 없는 애셋은 스키마 밖이다. '가리키는 파일이 없다'는
+    P1-03의 준비 게이트에 남아 있다 — 여기는 문서 형태의 선이다.
+    """
+    resources = (
+        f"{FORMAT_30}\n"
+        '  <asset id="r2" name="source.mp4" start="0s" duration="600s" hasAudio="1"'
+        ' format="r1"/>'
+    )
+    expect_reject(
+        build_fcpxml(resources=resources),
+        tmp_path,
+        location="/fcpxml[1]/resources[1]/asset[1]",
+        reason="media-rep",
+    )
+
+
+def test_asset_metadata_does_not_satisfy_media_rep(tmp_path: Path) -> None:
+    """metadata는 media-rep을 대신하지 못한다 — 내용 모델은 둘 다 각각 요구한다."""
+    resources = (
+        f"{FORMAT_30}\n"
+        '  <asset id="r2" name="source.mp4" start="0s" duration="600s" hasAudio="1"'
+        ' format="r1">\n'
+        '    <metadata><md key="k"/></metadata>\n'
+        "  </asset>"
+    )
+    expect_reject(
+        build_fcpxml(resources=resources),
+        tmp_path,
+        location="/fcpxml[1]/resources[1]/asset[1]",
+        reason="media-rep",
+    )
 
 
 # ─── 번들과 경로 해석 ─────────────────────────────────────────────────────

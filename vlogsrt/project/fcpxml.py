@@ -14,6 +14,7 @@
 
 어휘는 설치된 1.14 DTD를 따른다: media-rep kind는 `original-media`/
 `proxy-media`(생략하면 original-media)이고 내부 `MediaRep.kind`로 옮겨 읽는다.
+애셋에는 media-rep이 최소 하나 있어야 한다(내용 모델 `media-rep+`).
 `hasAudio`는 명시적 0/1만 받는다 — 생략은 문법상 유효해도 이 준비 부분집합
 밖이라 추측하지 않는다. 애셋 `name`은 선택(빈 문자열), asset-clip의
 `offset`·`start`는 생략하면 정확히 0s다. `lane="0"`은 '부모 안'이라 주요
@@ -394,6 +395,13 @@ def _parse_asset(
             f"소스/프로젝트 프레임 레이트가 다르다: 애셋 {frame_duration}초 ≠"
             f" 시퀀스 {sequence_frame_duration}초 — 리샘플링하지 않고 거부한다",
         )
+    media_reps = _parse_media_reps(element, paths)
+    if not media_reps:
+        raise UnsupportedProject(
+            where,
+            "애셋에 media-rep이 없다 — DTD 내용 모델(media-rep+)대로 최소 하나의"
+            " 미디어 표현이 있어야 한다. 가리키는 파일의 준비는 P1-03의 게이트다",
+        )
     return AssetResource(
         xml_id=xml_id,
         scoped_id=_scoped_resource_id(input_sha256, xml_id),
@@ -404,7 +412,7 @@ def _parse_asset(
         start=start,
         duration=duration,
         has_audio=has_audio,
-        media_reps=_parse_media_reps(element, paths),
+        media_reps=media_reps,
     )
 
 
