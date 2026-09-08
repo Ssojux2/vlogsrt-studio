@@ -27,7 +27,7 @@
 | Role | Task | Dispatch | State |
 |---|---|---|---|
 | Astra coordinator | Run `run_73768f7c4dec` | terminal `term_892e5ca1-805d-4d8d-b27f-fe7c90994848` | active |
-| Sol manager | `task_8f65a57496f6` | `ctx_bfbd07ec7a4c` | supervising corrected P1-04 XML validation; P2 is complete |
+| Sol manager | `task_8f65a57496f6` | `ctx_bfbd07ec7a4c` | supervising P1-05 identity roundtrip; P2 is complete |
 | Opus co-manager | `task_b15d7dad7f7b` | `ctx_f925bd9d4a52` | active through Astra for independent contract/diff review |
 | GLM P0-02 writer | `task_f7788389960b` | `ctx_df9c602e28a2` | completed `df489bb`; correction review pending |
 | GLM P0-02 correction | `task_7d03430673e1` | `ctx_51f56ba3df5c` | completed `51319b9`; reconciliation still open |
@@ -38,10 +38,11 @@
 | GLM P1-01 timebase | `task_3355d2bef6d9` | `ctx_e963c6fd31a4` | final `51b138d` integrated by Astra as `07e4dac`; 4,896 independent probes and full gate passed |
 | GLM P1-02 FCPXML ingest | `task_d58951edec1b` | `ctx_614e1594110d` | final `b96684e` integrated by Astra as `ef12f32`; 1,045-test gate passed |
 | GLM P1-03 media identity | `task_673b6cda51a8` | `ctx_6fa094276bb7` | final `287b46f` integrated by Astra as `7a107da`; 1,235-test integration gate passed |
-| GLM P1-04 XML validation | `task_de39de51bd0a` | `ctx_78e4226f911c` | active from exact `7a107da`, terminal `term_5201b3a0-fc66-44f7-8623-ea2d78e4c9aa` |
+| GLM P1-04 XML validation | `task_de39de51bd0a` | `ctx_78e4226f911c` | final `182b786` integrated by Astra as `1fe07e5`; 1,274-test gate passed; worker settled |
+| GLM P1-05 identity roundtrip | `task_0a4361c516ef` | `ctx_a29134bebdcf` | active from exact `1fe07e5`, terminal `term_5b760884-61a5-4e6c-84c9-763e9a2f416b` |
 | GLM P2-01 PCM extraction | `task_071c14e3282d` | `ctx_dcd31a44ebc6` | final `d301459` integrated by Astra as `5ea9719`; 906-test integration gate passed |
 | GLM P2-02 PCM reference | `task_4428b9adca79` | `ctx_f12626850366` | final `b56c640` integrated by Astra as `35af34b`; 1,156-test integration gate passed |
-| GLM P2-03 S17 regression | `task_7614fbbdde23` | `ctx_444387418221` | final `7ac575b` integrated by Astra as `3760cf9`; 1,250-test integration gate passed; settling |
+| GLM P2-03 S17 regression | `task_7614fbbdde23` | `ctx_444387418221` | final `7ac575b` integrated by Astra as `3760cf9`; 1,250-test integration gate passed; worker settled |
 
 Initial gate message IDs: root `msg_d8fc69fe164a`; Opus `msg_0f70e95b09f7`.
 
@@ -64,6 +65,8 @@ Initial gate message IDs: root `msg_d8fc69fe164a`; Opus `msg_0f70e95b09f7`.
 - P1-02's final bounded correction `b96684e041a02825fd0aa0ed43c46fa1363c0308` (parent `05b6e3e`) rejects zero-`media-rep` and metadata-only assets at the asset path while retaining proxy-only and explicit silent-asset support. Sol verified a clean owned-path-only diff, `git diff --check`, and four focused positive/negative cases; Opus accepted the exact diff in `msg_db927ccc5acb`. Astra integrated it as `ef12f32b997819ac532de0c42af872ca45c59cf4` and passed Ruff, mypy on 28 files, 1,045 tests, and all 19 invariant groups.
 - P1-03's final `287b46f2674cc1c18618ac89db57dd3414c8e44f` closes the strict media-map schema/path rules, absolute local XML file-URI rule, original regular-file precheck, bounded proxy readability fallback, resource-scoped `has_audio`, and content-hash identity in exactly `vlogsrt/project/media.py` and `tests/project/test_media.py`. Sol passed a fresh 1,124-test gate, Opus passed in `msg_7588c992877a`, and Astra integrated it as `7a107da516ce2665b883a618221a43e9b873bcba`; the integrated gate passed 1,235 tests, Ruff on 58 files, mypy on 30 files, and all 19 invariant groups.
 - P1-04 launched from exact `7a107da516ce2665b883a618221a43e9b873bcba` in fresh branch `Ssojux2/fcp-p1-xml-validation` using custom `claude-glm --model 'glm-5.3[1m]' --effort max --permission-mode auto`: Task `task_de39de51bd0a`, Dispatch `ctx_78e4226f911c`, terminal `term_5201b3a0-fc66-44f7-8623-ea2d78e4c9aa`. It owns only new `vlogsrt/project/xml_validation.py` and `tests/project/test_xml_validation.py` and uses the exact installed read-only FCPXML 1.14 DTD.
+- P1-04's final `182b786fb5ee7e6219dbdcdea28566ae1e1b8eae` normalizes XML operands to absolute paths before either frozen xmllint argv, preserves scoped missing-tool/spawn failures, and includes isolated regressions for nonexistent `--version`, a real dash-prefixed file, and ordinary relative input. Sol passed 200 focused tests, Opus passed in `msg_817975b45994`, and Astra integrated it as `1fe07e563c89958d2c771594d01645222d9df4aa`; the integrated gate passed 1,274 tests, Ruff on 60 files, mypy on 31 files, and all 19 invariant groups.
+- P1-05 launched from exact `1fe07e563c89958d2c771594d01645222d9df4aa` in fresh branch `Ssojux2/fcp-p1-roundtrip` using custom `claude-glm --model 'glm-5.3[1m]' --effort max --permission-mode auto`: Task `task_0a4361c516ef`, Dispatch `ctx_a29134bebdcf`, terminal `term_5b760884-61a5-4e6c-84c9-763e9a2f416b`. Ownership is only `vlogsrt/project/fcpxml.py` and new `tests/project/test_roundtrip.py`; the embedded brief pins bounded `XmlValidation` mismatch results, byte/source preservation, and atomic failure semantics.
 - P2-01's initial `9ce4e5b` omitted the global ffprobe stream index and accepted ambiguous selection failures; `9b9fb25` fixed the first review, and final `d3014597df5144093bb3a1ca57da54f8c0755b53` split the remaining no-audio, out-of-range, missing-index, and mapped-stream diagnostic paths. Sol passed 74 focused tests, 19 invariants, and full `make check` with 637 tests; Astra's integration gate passed 906 tests and mypy on 27 files, then integrated the branch as `5ea9719cb2fb3ece20ad228fa78481ae60bbdb3b`.
 - P2-02 launched from exact `5ea9719cb2fb3ece20ad228fa78481ae60bbdb3b` in the fresh `fcp-p2-pcm-reference` worktree using `claude-glm --model 'glm-5.3[1m]' --effort max --permission-mode auto`: Task `task_4428b9adca79`, Dispatch `ctx_f12626850366`, terminal `term_16b167fe-4bd5-4e05-980b-068da23374f8`. It owns only `vlogsrt/project/pcm.py` and `tests/project/test_pcm.py`; the brief fixes total audio-only `PcmReference` semantics and forbids fabricated references or P3 construction.
 - P2-02's immutable-generation sequence culminated at `b56c64069058b550ffbbb643589b4c2efbeddff2`: exclusive generation PCM+metadata, one atomic logical pointer, recomputed content-key verification, no generation deletion, and best-effort post-commit temp cleanup preserve every issued reference across metadata/pointer failure, abrupt exit, and successful replacement. Sol and Opus (`msg_3939175c24ae`) passed the exact SHA; Astra integrated it as `35af34b4cdab2e0d96af2b8f6a5530c764e78d12` with 1,156 tests, Ruff on 56 files, mypy on 29 files, and all 19 invariant groups passing.
@@ -88,12 +91,13 @@ P0-01 environment evidence -> P0-03 legacy SOURCE SRT byte lock (Astra dependenc
 P1 merge + P2 merge -> P3-01 typed transcription outcome -> P3-02 per-asset adapter
                     -> P3-03 source trace/SOURCE SRT -> Astra P3 merge
 
-P3 merge -> P4-01 logical retained slices -> P4-02 boundary request closure
-         -> P4-03 retained-audio transcription -> P4-04 instance projection/locks
-         -> Astra P4 merge
+P3 merge -> [P4-01 logical retained slices, P5-00 project config]
+P4-01 -> P4-02 boundary request closure -> P4-03 retained-audio transcription
+      -> P4-04 instance projection/locks -> Astra P4 merge
 
-P3 merge -> P5-00 project config -> [P5-01 VAD artifact/runtime, P5-04 vision sampling]
-P5-01 -> P5-02 VAD inference -> P5-03 guard union
+P5-00 -> [P5-01 VAD artifact/runtime, P5-04 vision sampling]
+P5-01 -> P5-02 VAD inference
+P5-02 + P4 merge -> P5-03 guard union
 P5-04 -> P5-05 saved-response vision policy
 P5-03 + P5-05 -> Astra P5 merge
 
@@ -107,7 +111,7 @@ P6 merge -> P7-01 workspace revisions -> P7-02 budget/cancel/resume runner
          -> PENDING_HUMAN live Final Cut/media/model acceptance
 ```
 
-By explicit Astra dependency audit, P0-03 may run from `58bb25347319301391064d6ba9b6aad33a58f51c` while P0-02c is active: it owns only `tests/test_source_immutability.py` and consumes unchanged legacy source behavior, no checker API or project package. P0-04 still waits for corrected P0-02 integration; Astra joins all three reviewed results at the P0 checkpoint. P1 and P2 may execute concurrently after P0 integration, because they start from the same approved P0 SHA and own disjoint files; Astra must integrate both before P3. In P5, VAD and vision may execute concurrently only at the explicit first wave above; their follow-ups remain serial within each branch. P7-04 and P7-05 may run together only from the same integrated P7-03 SHA; they own disjoint reproject/commands versus UI paths and join before P7-06.
+By explicit Astra dependency audit, P0-03 may run from `58bb25347319301391064d6ba9b6aad33a58f51c` while P0-02c is active: it owns only `tests/test_source_immutability.py` and consumes unchanged legacy source behavior, no checker API or project package. P0-04 still waits for corrected P0-02 integration; Astra joins all three reviewed results at the P0 checkpoint. P1 and P2 may execute concurrently after P0 integration, because they start from the same approved P0 SHA and own disjoint files; Astra must integrate both before P3. After the P3 join, P4-01 and P5-00 may start together from the same exact SHA. While the serial P4 chain advances, at most one ready disjoint P5 task may occupy the other writer slot; P5-03 additionally depends on the integrated P4-04 projection and cannot start earlier. After P4 completes, both writer slots may be used by ready disjoint VAD/vision tasks, still respecting each branch's hard dependencies. P7-04 and P7-05 may run together only from the same integrated P7-03 SHA; they own disjoint reproject/commands versus UI paths and join before P7-06.
 
 ## Task ledger
 
@@ -120,8 +124,8 @@ By explicit Astra dependency audit, P0-03 may run from `58bb25347319301391064d6b
 | [P1-01](tasks/p1-01-rational-time.md) | exact FCP rational/frame math | P0 merge `cd411c4` | project time module/tests | complete; integrated `07e4dac`, full gate plus 4,896 probes passed |
 | [P1-02](tasks/p1-02-fcpxml-ingest.md) | FCPXML/bundle parser and rejection surface | P1-01 merge `07e4dac` | project FCPXML models/parser/tests | complete; integrated `ef12f32`, 1,045-test gate passed |
 | [P1-03](tasks/p1-03-media-identity.md) | original/proxy resolution and strong IDs | P1-02 merge `ef12f32` | project media/tests | complete; integrated `7a107da`, 1,235-test gate passed |
-| [P1-04](tasks/p1-04-xml-validation.md) | xmllint-only boundary plus structural validation | P1-03 integration `7a107da` | XML validation/tests | active: `task_de39de51bd0a` / `ctx_78e4226f911c` |
-| [P1-05](tasks/p1-05-roundtrip.md) | identity-preserving roundtrip | P1-03,P1-04 | project FCPXML writer/tests | drafted |
+| [P1-04](tasks/p1-04-xml-validation.md) | xmllint-only boundary plus structural validation | P1-03 integration `7a107da` | XML validation/tests | complete; integrated `1fe07e5`, 1,274-test gate passed |
+| [P1-05](tasks/p1-05-roundtrip.md) | identity-preserving roundtrip | P1-03,P1-04 | project FCPXML writer/tests | active: `task_0a4361c516ef` / `ctx_a29134bebdcf` from `1fe07e5` |
 | [P2-01](tasks/p2-01-pcm-extraction.md) | measured 16 kHz PCM extraction metadata | P0 merge `cd411c4` | preprocess additions/tests | complete; integrated `5ea9719`, 906-test gate passed |
 | [P2-02](tasks/p2-02-pcm-reference.md) | persistent hashed PCM and exact sample slicing | P2-01 merge `5ea9719` | project PCM/tests | complete; integrated `35af34b`, 1,156-test gate passed |
 | [P2-03](tasks/p2-03-s17-regression.md) | last/intermediate/repair drift regression | P2-02 integration `35af34b` | project PCM helper/tests only | complete; integrated `3760cf9`, 1,250-test gate passed; historical 77-minute acceptance remains `PENDING_HUMAN` |
@@ -135,7 +139,7 @@ By explicit Astra dependency audit, P0-03 may run from `58bb25347319301391064d6b
 | [P5-00](tasks/p5-00-project-config.md) | frozen project-only tunables/shared analysis vocabulary | P3 merge | project config/analysis models/tests | drafted |
 | [P5-01](tasks/p5-01-vad-runtime.md) | pinned Silero model/license/runtime | P5-00 | `project/vad/` runtime/artifact/tests | drafted |
 | [P5-02](tasks/p5-02-vad-inference.md) | channel-wise continuous-state inference | P5-01 | `project/vad/inference.py`/tests | drafted |
-| [P5-03](tasks/p5-03-guard-union.md) | conservative source/instance speech guard | P5-02 | `project/vad/guard.py`/tests | drafted |
+| [P5-03](tasks/p5-03-guard-union.md) | conservative source/instance speech guard | P5-02 and integrated P4-04 projection | `project/vad/guard.py`/tests | drafted |
 | [P5-04](tasks/p5-04-vision-sampling.md) | deterministic proxy/original frame samples | P5-00 | `project/vision/sampling.py`, preprocess seam/tests | drafted |
 | [P5-05](tasks/p5-05-vision-policy.md) | strict saved-response decision parser | P5-04 | transcribe boundary + `project/vision/policy.py`/tests | drafted |
 | [P6-01](tasks/p6-01-block-partition.md) | eligible 6–10 s blocks and candidates | P4,P5 merges | project edit partition/tests | drafted |

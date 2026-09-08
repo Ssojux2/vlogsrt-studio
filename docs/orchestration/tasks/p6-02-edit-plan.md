@@ -29,6 +29,13 @@ class RemovedInterval:
     restore_before_instance_id: str
 
 @dataclass(frozen=True, slots=True)
+class ReviewIssue:
+    code: str
+    message: str
+    instance_id: str | None
+    source_frame: int | None
+
+@dataclass(frozen=True, slots=True)
 class EditPlan:
     revision: str
     input_sha256: str
@@ -36,7 +43,7 @@ class EditPlan:
     retained: tuple[RetainedInterval, ...]
     removed: tuple[RemovedInterval, ...]
     decisions: tuple[VisionDecision, ...]
-    review: tuple[str, ...]
+    review: tuple[ReviewIssue, ...]
 
 def build_edit_plan(document: ProjectDocument, partition: BlockPartition, guards: Sequence[InstanceGuard], decisions: Sequence[VisionDecision], cfg: ProjectConfig) -> EditPlan: ...
 def validate_edit_plan(plan: EditPlan, document: ProjectDocument, guards: Sequence[InstanceGuard]) -> tuple[str, ...]: ...
@@ -45,13 +52,14 @@ def validate_edit_plan(plan: EditPlan, document: ProjectDocument, guards: Sequen
 - Apply at most one known accepted candidate per block; keep all for missing/error/uncertain/low-confidence/unique-event decisions.
 - Retain the chosen 3-second candidate and ripple-remove the rest of that block. Preserve source audio/order/existing gaps, never remove a whole clip, never shorten dialogue/locked instances.
 - Revalidate snapped cuts against guards; any overlap rejects that decision to keep-all plus review, never removes protected frames.
+- Review evidence is structured, not timestamp prose. A location-bearing `ReviewIssue` carries both `instance_id` and an exact source-frame coordinate; an unlocated issue carries both as `None`. Reject half-populated coordinates. `message` is for humans and is never parsed to recover marker timing; `code` is deterministic machine-readable evidence. P6-04 may turn only located generated issues into XML markers and keeps all issues in `review.json`.
 - Output frames are contiguous after ripple within original storyline semantics; existing gaps remain with their durations/order. Restoration mapping identifies exact removed source/input range and insertion location.
 - `revision` hashes the input/config/partition/full saved decisions and resulting intervals. Same saved inputs produce byte-identical plan; no temperature/dict-order promise.
 - Safe synthetic fixture must produce at least one nonempty removed interval; a no-op plan is not adequate acceptance.
 
 ## Implementation steps
 
-1. Write failing tests for accepted/low/error/unique decisions, unknown IDs, one-per-block, guard collision fallback, lock, full-clip prevention, ripple/gaps/order, deterministic revision, and actual shortening.
+1. Write failing tests for accepted/low/error/unique decisions, unknown IDs, one-per-block, guard collision fallback, lock, full-clip prevention, ripple/gaps/order, deterministic revision, structured located/unlocated review issues, rejection of half-populated marker provenance, and actual shortening.
 2. Implement pure plan/validator; feed only saved decisions and config.
 3. Run focused/all P6 tests, invariants, full check; commit owned paths.
 

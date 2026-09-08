@@ -18,7 +18,7 @@ class EditCaptionSet:
     plan_revision: str
     cues: tuple[ProjectCue, ...]
     srt_text: str
-    review: tuple[str, ...]
+    review: tuple[ReviewIssue, ...]
 
 def project_edit_captions(plan: EditPlan, source: BoundaryProjection, frame_duration: Fraction) -> EditCaptionSet: ...
 ```
@@ -29,10 +29,11 @@ def project_edit_captions(plan: EditPlan, source: BoundaryProjection, frame_dura
 - Reuse the authoritative exact `SourceCue`/`ProjectCue` representation produced from the immutable refined cue plus its exact input-timeline transform. EDIT applies only the ripple-output transform; it never recomputes the same cue from raw segments, settled-spine floats, or another serialization path.
 - Adjacent cue end/start may be equal; each cue must have positive exact duration and be ordered/non-overlapping.
 - SOURCE cue objects/text/SRT remain byte-identical before/after this function.
+- Preserve the plan's structured `ReviewIssue` values byte-for-byte and in order; never parse `message` prose for an instance or timestamp. Caption-specific review evidence uses the same paired location rule (`instance_id` plus exact source frame, or both `None`) so P6-04 receives explicit marker provenance.
 
 ## Implementation steps
 
-1. Write failing tests for ripple across multiple blocks/gaps, exact clip end, adjacent boundaries, removed-cue rejection, repeated instances, boundary provenance, mixed revision, and source immutability.
+1. Write failing tests for ripple across multiple blocks/gaps, exact clip end, adjacent boundaries, removed-cue rejection, repeated instances, boundary provenance, mixed revision, structured review preservation, and source immutability.
 2. Implement pure mapping/serialization via existing timebase/caption functions.
 3. Run focused P6/P4/P3 tests, invariants, full check; commit owned files.
 
