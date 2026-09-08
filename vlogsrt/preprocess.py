@@ -8,10 +8,13 @@ ffmpeg는 `subprocess`로 직접 부른다(규칙 10). 자를 자리를 고르�
 from __future__ import annotations
 
 import array
+import json
+import re
 import shutil
 import subprocess
 from collections.abc import Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
+from fractions import Fraction
 from pathlib import Path
 
 from . import cutpoints, log
@@ -93,6 +96,221 @@ def extract_audio(src: Path, dst: Path, cfg: Config) -> Path:
     )  # fmt: skip
     log.debug(f"오디오 추출 완료: {dst} ({dst.stat().st_size / 1_000_000:.1f}MB)")
     return dst
+
+
+# ─────────────────────────────────────────────────────────────
+#  원본 PCM — 잰 시계의 원점 (P2-01)
+# ─────────────────────────────────────────────────────────────
+
+_S16LE_SAMPLE_WIDTH = 2  # s16le 한 샘플의 바이트 폭. 포맷의 사실이지 임계값이 아니다
+
+
+@dataclass(frozen=True, slots=True)
+class AudioStreamInfo:
+    """ffprobe가 본 오디오 스트림. `stream_index`는 오디오 순번(0부터)이다.
+
+    `start_time`은 컨테이너가 적어둔 값일 뿐 **디코드 원점의 증거가 아니다** —
+    실측에서 AAC/MKV는 이 값이 −0.264초인데 디코드 원점은 −0.2초다.
+    """
+
+    stream_index: int
+    start_time: Fraction
+    sample_rate: int
+    channels: int
+
+
+@dataclass(frozen=True, slots=True)
+class PcmExtraction:
+    """16 kHz s16le PCM과 그 시계의 실측 원점.
+
+    `pcm_sample0_file_time`이 PCM 0번 프레임의 파일 시각이다 — 프라이밍이 남든
+    (AAC/MOV), 잘리든(AAC/MKV), 리샘플되든 겪은 뒤의 값이지 보정 상수가 아니다.
+    """
+
+    path: Path
+    stream: AudioStreamInfo
+    sample_count: int
+    sample_width: int
+    pcm_sample0_file_time: Fraction
+
+
+def probe_audio_stream(source: Path, stream_index: int) -> AudioStreamInfo:
+    """ffprobe JSON에서 오디오 스트림의 시계를 **정확한 분수로** 읽는다.
+
+    시각을 부동소수로 읽으면 1.936이 흔들린다 — `Fraction(str(value))`로 파싱한다.
+    없는 필드·깨진 값은 어떤 필드인지 말하며 죽는다.
+    """
+    ffprobe = require_ffmpeg("ffprobe")
+    completed = _run(
+        [
+            ffprobe, "-v", "error",
+            "-select_streams", f"a:{stream_index}",
+            "-show_entries", "stream=start_time,sample_rate,channels",
+            "-of", "json",
+            str(source),
+        ]
+    )  # fmt: skip
+    entry = _selected_stream(completed.stdout, source, stream_index)
+    return AudioStreamInfo(
+        stream_index=stream_index,
+        start_time=_stream_fraction(entry, "start_time", source),
+        sample_rate=_stream_int(entry, "sample_rate", source),
+        channels=_stream_int(entry, "channels", source),
+    )
+
+
+def _selected_stream(stdout: str, source: Path, stream_index: int) -> dict[str, object]:
+    try:
+        data = json.loads(stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"ffprobe 출력이 JSON이 아니다: {source} ({exc})") from exc
+    streams = data.get("streams") if isinstance(data, dict) else None
+    entry = streams[0] if isinstance(streams, list) and len(streams) == 1 else None
+    if not isinstance(entry, dict):
+        raise RuntimeError(f"오디오 스트림 a:{stream_index}을 찾지 못했습니다: {source}")
+    return entry
+
+
+def _stream_fraction(entry: dict[str, object], field: str, source: Path) -> Fraction:
+    value = entry.get(field)
+    try:
+        return Fraction(str(value))
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"스트림 {field}를 읽지 못했습니다: {source} (값 {value!r})") from exc
+
+
+def _stream_int(entry: dict[str, object], field: str, source: Path) -> int:
+    value = entry.get(field)
+    try:
+        return int(str(value))
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"스트림 {field}를 읽지 못했습니다: {source} (값 {value!r})") from exc
+
+
+# 변환(aresample·aformat·asettb)이 끝난 뒤 ashowinfo가 남기는 프레임 기록.
+# pts는 asettb가 정한 1/rate 단위의 정수라 곧 샘플 번호다.
+_ASHOWINFO_HEADER = re.compile(r"\[Parsed_ashowinfo_\d+ [^\]]*\]")
+_ASHOWINFO_PTS = re.compile(r"\bpts:(-?\d+)\b")
+_ASHOWINFO_CHANNELS = re.compile(r"\bchannels:(\d+)\b")
+_ASHOWINFO_RATE = re.compile(r"\brate:(\d+)\b")
+_ASHOWINFO_SAMPLES = re.compile(r"\bnb_samples:(\d+)\b")
+
+
+@dataclass(frozen=True, slots=True)
+class _ConvertedFrame:
+    pts: int
+    channels: int
+    rate: int
+    samples: int
+
+
+def extract_pcm_s16le(
+    source: Path, destination: Path, *, stream_index: int, sample_rate: int = 16000
+) -> PcmExtraction:
+    """원본 오디오를 s16le PCM으로 **잰 시계 그대로** 뽑는다(P2-01).
+
+    `-copyts`로 컨테이너 시계를 유지하고, 변환 후 첫 프레임의 정수 pts를 PCM 0번
+    프레임의 파일 시각으로 쓴다. 프라이밍이 남든 잘리든 그 실측값 그대로다 —
+    `-start_at_zero`도, 시각을 다시 쓰는 `asetpts`도, 보정 상수도 없다.
+    """
+    stream = probe_audio_stream(source, stream_index)
+    ffmpeg = require_ffmpeg()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    filters = f"aresample={sample_rate},aformat=sample_fmts=s16,asettb=1/{sample_rate},ashowinfo"
+    completed = _run(
+        [
+            ffmpeg, "-hide_banner", "-loglevel", "info", "-nostdin", "-y",
+            "-copyts",
+            "-i", str(source),
+            "-map", f"0:a:{stream_index}",
+            "-vn",
+            "-af", filters,
+            "-c:a", "pcm_s16le",
+            "-f", "s16le",
+            str(destination),
+        ]
+    )  # fmt: skip
+    frames = _converted_frames(completed.stderr, source)
+    origin = _sample0_file_time(frames, sample_rate, stream.channels, source)
+    sample_count = _pcm_frame_count(destination, stream.channels)
+    if sample_count != sum(frame.samples for frame in frames):
+        raise RuntimeError(
+            f"ashowinfo 기록이 파일 전체를 설명하지 못합니다: {destination} "
+            f"(기록 {sum(frame.samples for frame in frames)}프레임, 파일 {sample_count}프레임)"
+        )
+    log.debug(f"PCM 추출 완료: {destination} ({sample_count}프레임, 원점 {origin}초)")
+    return PcmExtraction(
+        path=destination,
+        stream=stream,
+        sample_count=sample_count,
+        sample_width=_S16LE_SAMPLE_WIDTH,
+        pcm_sample0_file_time=origin,
+    )
+
+
+def _converted_frames(stderr: str, source: Path) -> list[_ConvertedFrame]:
+    frames: list[_ConvertedFrame] = []
+    for line in stderr.splitlines():
+        if not _ASHOWINFO_HEADER.search(line):
+            continue
+        frames.append(
+            _ConvertedFrame(
+                pts=_frame_field(_ASHOWINFO_PTS, "pts", line, source),
+                channels=_frame_field(_ASHOWINFO_CHANNELS, "channels", line, source),
+                rate=_frame_field(_ASHOWINFO_RATE, "rate", line, source),
+                samples=_frame_field(_ASHOWINFO_SAMPLES, "nb_samples", line, source),
+            )
+        )
+    if not frames:
+        raise RuntimeError(
+            f"변환된 프레임 기록(ashowinfo)이 없습니다: {source} — 원점을 잴 수 없다"
+        )
+    return frames
+
+
+def _frame_field(pattern: re.Pattern[str], field: str, line: str, source: Path) -> int:
+    match = pattern.search(line)
+    if match is None:
+        raise RuntimeError(f"ashowinfo 줄에서 {field}를 읽지 못했습니다: {source} ({line.strip()})")
+    return int(match.group(1))
+
+
+def _sample0_file_time(
+    frames: Sequence[_ConvertedFrame], sample_rate: int, channels: int, source: Path
+) -> Fraction:
+    """변환 후 첫 프레임의 pts가 PCM 0번 프레임의 파일 시각이다.
+
+    프레임 시계에 구멍이 있으면 파일 전체를 하나의 원점으로 믿지 않는다.
+    """
+    for frame in frames:
+        if frame.channels != channels:
+            raise RuntimeError(
+                f"변환 뒤 채널이 프로브와 다릅니다: {source} "
+                f"(프로브 {channels}, 출력 {frame.channels})"
+            )
+        if frame.rate != sample_rate:
+            raise RuntimeError(
+                f"변환 뒤 주파수가 요청과 다릅니다: {source} "
+                f"(요청 {sample_rate}, 출력 {frame.rate})"
+            )
+    for index in range(1, len(frames)):
+        earlier, later = frames[index - 1], frames[index]
+        if later.pts != earlier.pts + earlier.samples:
+            raise RuntimeError(
+                f"프레임 시계가 불연속입니다: {source} (pts {earlier.pts} 뒤에 {later.pts})"
+            )
+    return Fraction(frames[0].pts, sample_rate)
+
+
+def _pcm_frame_count(destination: Path, channels: int) -> int:
+    total = destination.stat().st_size
+    frame_bytes = _S16LE_SAMPLE_WIDTH * channels
+    if total % frame_bytes:
+        raise RuntimeError(
+            f"PCM이 채널 프레임을 반쯤 남겼습니다: {destination} ({total} 바이트, "
+            f"프레임 {frame_bytes} 바이트)"
+        )
+    return total // frame_bytes
 
 
 # ─────────────────────────────────────────────────────────────
