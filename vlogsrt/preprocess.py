@@ -103,12 +103,15 @@ def extract_audio(src: Path, dst: Path, cfg: Config) -> Path:
 # ─────────────────────────────────────────────────────────────
 
 _S16LE_SAMPLE_WIDTH = 2  # s16le 한 샘플의 바이트 폭. 포맷의 사실이지 임계값이 아니다
+_PCM_SAMPLE_RATE = 16000  # 이 단계의 계약 주파수. 원본은 무엇이든 여기로 리샘플된다
 
 
 @dataclass(frozen=True, slots=True)
 class AudioStreamInfo:
-    """ffprobe가 본 오디오 스트림. `stream_index`는 오디오 순번(0부터)이다.
+    """ffprobe가 본 오디오 스트림. `stream_index`는 ffprobe가 알려준 **전역 번호**다.
 
+    `probe_audio_stream`에는 오디오 순번(0부터)을 넣고, 이 값으로 다시
+    `-map 0:<번호>`가 정해진다 — 순번과 전역 번호는 영상이 앞서면 어긋난다.
     `start_time`은 컨테이너가 적어둔 값일 뿐 **디코드 원점의 증거가 아니다** —
     실측에서 AAC/MKV는 이 값이 −0.264초인데 디코드 원점은 −0.2초다.
     """
@@ -134,32 +137,40 @@ class PcmExtraction:
     pcm_sample0_file_time: Fraction
 
 
+def _validate_ordinal(stream_index: int) -> None:
+    """오디오 순번은 0 이상 정수다 — bool은 int인 척하지 못 한다."""
+    if isinstance(stream_index, bool) or not isinstance(stream_index, int) or stream_index < 0:
+        raise RuntimeError(f"오디오 순번은 0 이상 정수여야 합니다: {stream_index!r}")
+
+
 def probe_audio_stream(source: Path, stream_index: int) -> AudioStreamInfo:
     """ffprobe JSON에서 오디오 스트림의 시계를 **정확한 분수로** 읽는다.
 
     시각을 부동소수로 읽으면 1.936이 흔들린다 — `Fraction(str(value))`로 파싱한다.
-    없는 필드·깨진 값은 어떤 필드인지 말하며 죽는다.
+    없는 필드·깨진 값은 어떤 필드인지 말하며 죽는다. 돌려주는 `stream_index`는
+    ffprobe가 알려준 전역 번호다 — 순번이 아니다.
     """
+    _validate_ordinal(stream_index)
     ffprobe = require_ffmpeg("ffprobe")
     completed = _run(
         [
             ffprobe, "-v", "error",
             "-select_streams", f"a:{stream_index}",
-            "-show_entries", "stream=start_time,sample_rate,channels",
+            "-show_entries", "stream=index,codec_type,start_time,sample_rate,channels",
             "-of", "json",
             str(source),
         ]
     )  # fmt: skip
     entry = _selected_stream(completed.stdout, source, stream_index)
     return AudioStreamInfo(
-        stream_index=stream_index,
+        stream_index=_stream_global_index(entry, source),
         start_time=_stream_fraction(entry, "start_time", source),
-        sample_rate=_stream_int(entry, "sample_rate", source),
-        channels=_stream_int(entry, "channels", source),
+        sample_rate=_stream_positive_int(entry, "sample_rate", source),
+        channels=_stream_positive_int(entry, "channels", source),
     )
 
 
-def _selected_stream(stdout: str, source: Path, stream_index: int) -> dict[str, object]:
+def _selected_stream(stdout: str, source: Path, ordinal: int) -> dict[str, object]:
     try:
         data = json.loads(stdout)
     except json.JSONDecodeError as exc:
@@ -167,15 +178,27 @@ def _selected_stream(stdout: str, source: Path, stream_index: int) -> dict[str, 
     streams = data.get("streams") if isinstance(data, dict) else None
     entry = streams[0] if isinstance(streams, list) and len(streams) == 1 else None
     if not isinstance(entry, dict):
-        raise RuntimeError(f"오디오 스트림 a:{stream_index}을 찾지 못했습니다: {source}")
+        raise RuntimeError(f"오디오 스트림 a:{ordinal}을 찾지 못했습니다: {source}")
+    if entry.get("codec_type") != "audio":
+        raise RuntimeError(
+            f"고른 스트림이 오디오가 아닙니다: {source} (codec_type {entry.get('codec_type')!r})"
+        )
     return entry
+
+
+def _stream_global_index(entry: dict[str, object], source: Path) -> int:
+    """전역 스트림 번호 — ffprobe가 JSON 숫자로만 준다. 0 이상이어야 매핑된다."""
+    value = entry.get("index")
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise RuntimeError(f"스트림 index를 읽지 못했습니다: {source} (값 {value!r})")
+    return value
 
 
 def _stream_fraction(entry: dict[str, object], field: str, source: Path) -> Fraction:
     value = entry.get(field)
     try:
         return Fraction(str(value))
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, ZeroDivisionError) as exc:
         raise RuntimeError(f"스트림 {field}를 읽지 못했습니다: {source} (값 {value!r})") from exc
 
 
@@ -187,13 +210,21 @@ def _stream_int(entry: dict[str, object], field: str, source: Path) -> int:
         raise RuntimeError(f"스트림 {field}를 읽지 못했습니다: {source} (값 {value!r})") from exc
 
 
+def _stream_positive_int(entry: dict[str, object], field: str, source: Path) -> int:
+    value = _stream_int(entry, field, source)
+    if value <= 0:
+        raise RuntimeError(f"스트림 {field}가 양수가 아닙니다: {source} (값 {value})")
+    return value
+
+
 # 변환(aresample·aformat·asettb)이 끝난 뒤 ashowinfo가 남기는 프레임 기록.
-# pts는 asettb가 정한 1/rate 단위의 정수라 곧 샘플 번호다.
+# pts는 asettb가 정한 1/rate 단위의 정수라 곧 샘플 번호다. 토큰 경계를 못 박는다 —
+# `pts:1.5`·`pts:1/2`를 `1`로 슬쩍 읽으면 원점이 소리 없이 틀어진다.
 _ASHOWINFO_HEADER = re.compile(r"\[Parsed_ashowinfo_\d+ [^\]]*\]")
-_ASHOWINFO_PTS = re.compile(r"\bpts:(-?\d+)\b")
-_ASHOWINFO_CHANNELS = re.compile(r"\bchannels:(\d+)\b")
-_ASHOWINFO_RATE = re.compile(r"\brate:(\d+)\b")
-_ASHOWINFO_SAMPLES = re.compile(r"\bnb_samples:(\d+)\b")
+_ASHOWINFO_PTS = re.compile(r"(?<!\S)pts:(-?\d+)(?!\S)")
+_ASHOWINFO_CHANNELS = re.compile(r"(?<!\S)channels:(\d+)(?!\S)")
+_ASHOWINFO_RATE = re.compile(r"(?<!\S)rate:(\d+)(?!\S)")
+_ASHOWINFO_SAMPLES = re.compile(r"(?<!\S)nb_samples:(\d+)(?!\S)")
 
 
 @dataclass(frozen=True, slots=True)
@@ -212,7 +243,15 @@ def extract_pcm_s16le(
     `-copyts`로 컨테이너 시계를 유지하고, 변환 후 첫 프레임의 정수 pts를 PCM 0번
     프레임의 파일 시각으로 쓴다. 프라이밍이 남든 잘리든 그 실측값 그대로다 —
     `-start_at_zero`도, 시각을 다시 쓰는 `asetpts`도, 보정 상수도 없다.
+    주파수는 이 단계의 계약인 16 kHz 하나다 — 원본이 44.1/48 kHz면 **리샘플되어**
+    들어온다. 매핑은 ffprobe가 알려준 전역 번호로 정확히 한 스트림만 짚는다.
     """
+    if (
+        isinstance(sample_rate, bool)
+        or not isinstance(sample_rate, int)
+        or sample_rate != _PCM_SAMPLE_RATE
+    ):
+        raise RuntimeError(f"이 단계의 PCM 주파수는 {_PCM_SAMPLE_RATE}Hz다: {sample_rate!r}")
     stream = probe_audio_stream(source, stream_index)
     ffmpeg = require_ffmpeg()
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -222,7 +261,7 @@ def extract_pcm_s16le(
             ffmpeg, "-hide_banner", "-loglevel", "info", "-nostdin", "-y",
             "-copyts",
             "-i", str(source),
-            "-map", f"0:a:{stream_index}",
+            "-map", f"0:{stream.stream_index}",
             "-vn",
             "-af", filters,
             "-c:a", "pcm_s16le",
@@ -253,14 +292,19 @@ def _converted_frames(stderr: str, source: Path) -> list[_ConvertedFrame]:
     for line in stderr.splitlines():
         if not _ASHOWINFO_HEADER.search(line):
             continue
-        frames.append(
-            _ConvertedFrame(
-                pts=_frame_field(_ASHOWINFO_PTS, "pts", line, source),
-                channels=_frame_field(_ASHOWINFO_CHANNELS, "channels", line, source),
-                rate=_frame_field(_ASHOWINFO_RATE, "rate", line, source),
-                samples=_frame_field(_ASHOWINFO_SAMPLES, "nb_samples", line, source),
-            )
+        frame = _ConvertedFrame(
+            pts=_frame_field(_ASHOWINFO_PTS, "pts", line, source),
+            channels=_frame_field(_ASHOWINFO_CHANNELS, "channels", line, source),
+            rate=_frame_field(_ASHOWINFO_RATE, "rate", line, source),
+            samples=_frame_field(_ASHOWINFO_SAMPLES, "nb_samples", line, source),
         )
+        # pts는 음수여도 된다(원점이 0보다 앞선다). 나머지는 양수여야 시계다.
+        if frame.channels <= 0 or frame.rate <= 0 or frame.samples <= 0:
+            raise RuntimeError(
+                f"ashowinfo 값이 양수가 아닙니다: {source} "
+                f"(channels {frame.channels}, rate {frame.rate}, nb_samples {frame.samples})"
+            )
+        frames.append(frame)
     if not frames:
         raise RuntimeError(
             f"변환된 프레임 기록(ashowinfo)이 없습니다: {source} — 원점을 잴 수 없다"

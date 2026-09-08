@@ -325,17 +325,28 @@ def _fake_ffmpeg_ffprobe(
 
 
 def _probe_json(
-    start_time: str | float = "2.000000", sample_rate: str = "16000", channels: int = 2
+    start_time: str | float = "2.000000",
+    sample_rate: str = "16000",
+    channels: int = 2,
+    index: int | bool | None = 1,
+    codec_type: str = "audio",
 ) -> str:
-    return json.dumps(
-        {"streams": [{"start_time": start_time, "sample_rate": sample_rate, "channels": channels}]}
-    )
+    entry: dict[str, object] = {
+        "start_time": start_time,
+        "sample_rate": sample_rate,
+        "channels": channels,
+    }
+    if index is not None:
+        entry["index"] = index
+    if codec_type is not None:
+        entry["codec_type"] = codec_type
+    return json.dumps({"streams": [entry]})
 
 
 def _ashowinfo(n: int, pts: int, *, channels: int = 2, rate: int = 16000, nb: int = 16000) -> str:
     """ashowinfo가 남기는 변환 후 프레임 한 줄. pts는 1/rate 단위 정수다."""
     return (
-        f"[Parsed_ashowinfo_3 @ 0x1] n:{n} pts:{pts} pts_time:{pts / rate} fmt:s16 "
+        f"[Parsed_ashowinfo_3 @ 0x1] n:{n} pts:{pts} pts_time:{pts / rate if rate else 0} fmt:s16 "
         f"channels:{channels} chlayout:stereo rate:{rate} nb_samples:{nb} "
         f"checksum:00000000 plane_checksums: [ 00000000 ]"
     )
@@ -353,18 +364,35 @@ def test_probe_reads_stream_times_as_exact_fractions(
         commands = _fake_ffmpeg_ffprobe(monkeypatch, _probe_json(start_time=raw), "", 0)
         stream = probe_audio_stream(Path("demo.mp4"), 0)
         assert stream == preprocess.AudioStreamInfo(
-            stream_index=0, start_time=expected, sample_rate=16000, channels=2
+            stream_index=1, start_time=expected, sample_rate=16000, channels=2
         )
         assert commands[0][commands[0].index("-of") + 1] == "json"
 
 
-def test_probe_selects_the_requested_audio_stream(monkeypatch: pytest.MonkeyPatch) -> None:
-    """`stream_index`는 오디오 순번이다 — probe와 추출이 같은 표기를 쓴다."""
-    commands = _fake_ffmpeg_ffprobe(monkeypatch, _probe_json(), "", 0)
-    stream = probe_audio_stream(Path("demo.mp4"), 3)
-    assert stream.stream_index == 3
+@pytest.mark.parametrize("bad", [-1, True, False, 1.0, "0"])
+def test_probe_rejects_an_ordinal_that_is_not_a_count(
+    monkeypatch: pytest.MonkeyPatch, bad: object
+) -> None:
+    """순번은 0 이상 정수다 — bool·float·문자열은 세는 수가 아니다."""
+    _fake_ffmpeg_ffprobe(monkeypatch, _probe_json(), "", 0)
+    with pytest.raises(RuntimeError, match="순번"):
+        probe_audio_stream(Path("demo.mp4"), bad)  # type: ignore[arg-type]
+
+
+def test_probe_selects_by_ordinal_and_returns_the_global_index(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """물어보는 것은 오디오 순번, 돌려주는 것은 전역 번호 — 영상이 앞서면 어긋난다."""
+    # 영상 0번 + 오디오 둘(1, 2): a:1을 물으면 ffprobe는 전역 2번만 알려준다
+    commands = _fake_ffmpeg_ffprobe(monkeypatch, _probe_json(index=2), "", 0)
+    stream = probe_audio_stream(Path("demo.mp4"), 1)
+    assert stream.stream_index == 2
     (command,) = commands
-    assert command[command.index("-select_streams") + 1] == "a:3"
+    assert command[command.index("-select_streams") + 1] == "a:1"
+    assert (
+        "index,codec_type,start_time,sample_rate,channels"
+        in command[command.index("-show_entries") + 1]
+    )
 
 
 def test_probe_fails_loudly_when_the_stream_is_missing(
@@ -384,11 +412,66 @@ def test_probe_fails_loudly_on_broken_json(monkeypatch: pytest.MonkeyPatch) -> N
 @pytest.mark.parametrize(
     ("entry", "field"),
     [
-        ({"sample_rate": "16000", "channels": 2}, "start_time"),
-        ({"start_time": "N/A", "sample_rate": "16000", "channels": 2}, "start_time"),
-        ({"start_time": "2.0", "channels": 2}, "sample_rate"),
-        ({"start_time": "2.0", "sample_rate": "shuffle", "channels": 2}, "sample_rate"),
-        ({"start_time": "2.0", "sample_rate": "16000"}, "channels"),
+        ({"index": 1, "codec_type": "audio", "sample_rate": "16000", "channels": 2}, "start_time"),
+        (
+            {
+                "index": 1,
+                "codec_type": "audio",
+                "start_time": "N/A",
+                "sample_rate": "16000",
+                "channels": 2,
+            },
+            "start_time",
+        ),
+        (
+            {
+                "index": 1,
+                "codec_type": "audio",
+                "start_time": "1/0",
+                "sample_rate": "16000",
+                "channels": 2,
+            },
+            "start_time",
+        ),
+        ({"index": 1, "codec_type": "audio", "start_time": "2.0", "channels": 2}, "sample_rate"),
+        (
+            {
+                "index": 1,
+                "codec_type": "audio",
+                "start_time": "2.0",
+                "sample_rate": "shuffle",
+                "channels": 2,
+            },
+            "sample_rate",
+        ),
+        (
+            {"index": 1, "codec_type": "audio", "start_time": "2.0", "sample_rate": "16000"},
+            "channels",
+        ),
+        (
+            {"codec_type": "audio", "start_time": "2.0", "sample_rate": "16000", "channels": 2},
+            "index",
+        ),
+        (
+            {
+                "index": -1,
+                "codec_type": "audio",
+                "start_time": "2.0",
+                "sample_rate": "16000",
+                "channels": 2,
+            },
+            "index",
+        ),
+        (
+            {
+                "index": True,
+                "codec_type": "audio",
+                "start_time": "2.0",
+                "sample_rate": "16000",
+                "channels": 2,
+            },
+            "index",
+        ),
     ],
 )
 def test_probe_names_the_field_it_could_not_read(
@@ -400,18 +483,85 @@ def test_probe_names_the_field_it_could_not_read(
         probe_audio_stream(Path("demo.mp4"), 0)
 
 
+def test_probe_rejects_a_stream_that_is_not_audio(monkeypatch: pytest.MonkeyPatch) -> None:
+    _fake_ffmpeg_ffprobe(monkeypatch, _probe_json(codec_type="video"), "", 0)
+    with pytest.raises(RuntimeError, match="오디오가 아닙니다|codec_type"):
+        probe_audio_stream(Path("demo.mp4"), 0)
+    _fake_ffmpeg_ffprobe(monkeypatch, _probe_json(codec_type=None), "", 0)
+    with pytest.raises(RuntimeError, match="오디오가 아닙니다|codec_type"):
+        probe_audio_stream(Path("demo.mp4"), 0)
+
+
+@pytest.mark.parametrize(
+    ("entry", "field"),
+    [
+        (
+            {
+                "index": 1,
+                "codec_type": "audio",
+                "start_time": "2.0",
+                "sample_rate": "0",
+                "channels": 2,
+            },
+            "sample_rate",
+        ),
+        (
+            {
+                "index": 1,
+                "codec_type": "audio",
+                "start_time": "2.0",
+                "sample_rate": "-16000",
+                "channels": 2,
+            },
+            "sample_rate",
+        ),
+        (
+            {
+                "index": 1,
+                "codec_type": "audio",
+                "start_time": "2.0",
+                "sample_rate": "16000",
+                "channels": 0,
+            },
+            "channels",
+        ),
+        (
+            {
+                "index": 1,
+                "codec_type": "audio",
+                "start_time": "2.0",
+                "sample_rate": "16000",
+                "channels": -2,
+            },
+            "channels",
+        ),
+    ],
+)
+def test_probe_rejects_nonpositive_clock_fields(
+    monkeypatch: pytest.MonkeyPatch, entry: dict[str, object], field: str
+) -> None:
+    """주파수·채널은 시계의 단위다 — 0이나 음수면 길이를 셀 수 없다."""
+    _fake_ffmpeg_ffprobe(monkeypatch, json.dumps({"streams": [entry]}), "", 0)
+    with pytest.raises(RuntimeError, match="양수"):
+        probe_audio_stream(Path("demo.mp4"), 0)
+
+
 def test_extraction_command_preserves_the_measured_clock(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`-copyts`로 시계를 유지하고 변환 후 프레임을 보고받는다. argv는 이 하나다."""
-    commands = _fake_ffmpeg_ffprobe(monkeypatch, _probe_json(), _ashowinfo(0, 32000), 64000)
+    """`-copyts`로 시계를 유지하고 변환 후 프레임을 보고받는다. argv는 이 하나다.
+
+    매핑은 ffprobe가 알려준 **전역 번호**다 — 순번 a:1로 물었지만 스트림이
+    전역 5번이면 `0:5`를 짚는다.
+    """
+    commands = _fake_ffmpeg_ffprobe(monkeypatch, _probe_json(index=5), _ashowinfo(0, 32000), 64000)
     extract_pcm_s16le(tmp_path / "in.mp4", tmp_path / "out.pcm", stream_index=1)
 
     assert commands[-1] == [
         "ffmpeg", "-hide_banner", "-loglevel", "info", "-nostdin", "-y",
         "-copyts",
         "-i", str(tmp_path / "in.mp4"),
-        "-map", "0:a:1",
+        "-map", "0:5",
         "-vn",
         "-af", "aresample=16000,aformat=sample_fmts=s16,asettb=1/16000,ashowinfo",
         "-c:a", "pcm_s16le",
@@ -422,14 +572,19 @@ def test_extraction_command_preserves_the_measured_clock(
     assert "asetpts" not in commands[-1][commands[-1].index("-af") + 1]
 
 
-def test_extraction_rate_follows_the_argument(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("bad", [8000, 44100, 48000, 0, -16000, True, 16000.0])
+def test_extraction_rejects_any_rate_but_the_contract_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bad: object
 ) -> None:
-    """주파수는 인자가 정한다 — 필터 사슬 전체가 같은 값으로 묶인다."""
-    commands = _fake_ffmpeg_ffprobe(monkeypatch, _probe_json(), _ashowinfo(0, 0, rate=8000), 64000)
-    extract_pcm_s16le(tmp_path / "in.mp4", tmp_path / "out.pcm", stream_index=0, sample_rate=8000)
-    af = commands[-1][commands[-1].index("-af") + 1]
-    assert af == "aresample=8000,aformat=sample_fmts=s16,asettb=1/8000,ashowinfo"
+    """이 단계의 계약 주파수는 16 kHz 하나다 — 원본 44.1/48 kHz는 **리샘플로** 들어온다."""
+    _fake_ffmpeg_ffprobe(monkeypatch, _probe_json(), _ashowinfo(0, 0), 64000)
+    with pytest.raises(RuntimeError, match="16000"):
+        extract_pcm_s16le(
+            tmp_path / "in.mov",
+            tmp_path / "out.pcm",
+            stream_index=0,
+            sample_rate=bad,  # type: ignore[arg-type]
+        )
 
 
 def test_extraction_reads_the_first_converted_pts_as_the_epoch(
@@ -485,6 +640,45 @@ def test_extraction_fails_when_a_frame_has_no_integer_pts(
     broken = _ashowinfo(0, 0).replace("pts:0 ", "pts:N/A ", 1)
     _fake_ffmpeg_ffprobe(monkeypatch, _probe_json(), broken, 64000)
     with pytest.raises(RuntimeError, match="pts"):
+        extract_pcm_s16le(tmp_path / "in.mov", tmp_path / "out.pcm", stream_index=0)
+
+
+@pytest.mark.parametrize(
+    ("mangle", "field"),
+    [
+        ("pts:0 ", "pts:1.5 "),
+        ("pts:0 ", "pts:1/2 "),
+        ("channels:2 ", "channels:2.5 "),
+        ("rate:16000 ", "rate:16.000 "),
+        ("nb_samples:16000 ", "nb_samples:10.5 "),
+        ("nb_samples:16000 ", "nb_samples:16000/2 "),
+    ],
+)
+def test_extraction_rejects_partial_number_tokens(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mangle: str, field: str
+) -> None:
+    """`pts:1.5`를 `1`로 슬쩍 읽으면 원점이 소리 없이 틀어진다 — 토큰 전체가 정수여야 한다."""
+    broken = _ashowinfo(0, 0).replace(mangle, field, 1)
+    _fake_ffmpeg_ffprobe(monkeypatch, _probe_json(), broken, 64000)
+    name = field.strip().split(":")[0]
+    with pytest.raises(RuntimeError, match=name):
+        extract_pcm_s16le(tmp_path / "in.mov", tmp_path / "out.pcm", stream_index=0)
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        _ashowinfo(0, 0, channels=0),
+        _ashowinfo(0, 0, rate=0),
+        _ashowinfo(0, 0, nb=0),
+    ],
+)
+def test_extraction_rejects_nonpositive_converted_fields(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, line: str
+) -> None:
+    """채널·주파수·프레임 길이가 0이면 시계가 아니다 — pts만 음수를 허용한다."""
+    _fake_ffmpeg_ffprobe(monkeypatch, _probe_json(), line, 0)
+    with pytest.raises(RuntimeError, match="양수"):
         extract_pcm_s16le(tmp_path / "in.mov", tmp_path / "out.pcm", stream_index=0)
 
 
@@ -732,3 +926,44 @@ def test_a_pts_hole_in_the_source_is_rejected_real(tmp_path: Path) -> None:
 
     with pytest.raises(RuntimeError, match="불연속"):
         extract_pcm_s16le(media, tmp_path / "out.pcm", stream_index=0)
+
+
+@needs_ffmpeg
+def test_extraction_maps_the_second_audio_stream_exactly_real(tmp_path: Path) -> None:
+    """영상 0번 + 오디오 둘(1, 2): 순번 a:1은 전역 2번이다 — `0:2`를 정확히 짚는다.
+
+    오디오마다 원점을 다르게 심었다(+2초 / −1/5초). 매핑이 순번을 전역 번호로
+    착각하면 엉뚱한 스트림의 원점이 돌아와 바로 드러난다.
+    """
+    first = tmp_path / "impulse-16000.s16"
+    second = tmp_path / "distractor-16000.s16"
+    first.write_bytes(_impulse_pcm_bytes(16000))
+    second.write_bytes(_impulse_pcm_bytes(16000))
+    media = tmp_path / "two-audio.mkv"
+    subprocess.run(
+        [
+            "ffmpeg", "-v", "error", "-y",
+            "-f", "s16le", "-ar", "16000", "-ac", "2", "-i", str(first),
+            "-f", "s16le", "-ar", "16000", "-ac", "2", "-i", str(second),
+            "-f", "lavfi", "-i", "testsrc=size=16x16:rate=25:duration=1",
+            "-filter_complex",
+            "[0:a]asetpts=PTS+(2/1)/TB[a0];[1:a]asetpts=PTS+(-1/5)/TB[a1]",
+            "-map", "2:v", "-map", "[a0]", "-map", "[a1]",
+            "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+            "-c:a", "pcm_s16le", "-avoid_negative_ts", "disabled",
+            str(media),
+        ],
+        capture_output=True,
+        check=True,
+    )  # fmt: skip
+
+    streams = probe_audio_stream(media, 1)
+    assert streams.stream_index == 2  # 전역 번호 — a:1은 두 번째 오디오다
+    extraction = extract_pcm_s16le(media, tmp_path / "second.pcm", stream_index=1)
+
+    assert extraction.stream.stream_index == 2
+    assert extraction.pcm_sample0_file_time == Fraction(-1, 5)  # a:1의 원점
+    peak_time = extraction.pcm_sample0_file_time + Fraction(
+        _loudest_left_frame(extraction)[0], 16000
+    )
+    assert peak_time == Fraction(1, 20)
