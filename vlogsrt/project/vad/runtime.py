@@ -104,7 +104,23 @@ def create_cpu_session(artifact: VadArtifact) -> object:
     레코드뿐이다(설정 좌표의 두 번째 뿌리를 만들지 않는다, 계약). 공급자는
     CPU 하나뿐이며, 런타임이 스스로 더하거나 바꾼 공급자 목록을 보고하면
     실패 닫힘이다.
+
+    공개 경계 전체가 하나의 보호막 안에 있다 — 의존성·세션·메타데이터에서
+    예상 밖의 Exception이 새어 나가면 이 계약의 실패 닫힘이 깨진다. 안쪽에서
+    이미 문맥을 가진 `VadUnavailable`은 그대로 통과시키고, KeyboardInterrupt·
+    SystemExit는 잡지 않는다.
     """
+    try:
+        return _create_cpu_session(artifact)
+    except VadUnavailable:
+        raise
+    except Exception as exc:
+        raise VadUnavailable(
+            f"VAD CPU 세션 만들기가 예상 밖의 오류로 실패했다 — {type(exc).__name__}: {exc}"
+        ) from exc
+
+
+def _create_cpu_session(artifact: VadArtifact) -> object:
     _revalidate_record(artifact)
     onnxruntime = _load_onnxruntime()
     _assert_numpy_capable()

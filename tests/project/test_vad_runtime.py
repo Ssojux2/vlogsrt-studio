@@ -61,16 +61,36 @@ class _FakeSessionOptions:
 def _install_fake_runtime(
     monkeypatch: pytest.MonkeyPatch,
     *,
-    inputs: Sequence[_FakeNodeArg] | None = None,
-    outputs: Sequence[_FakeNodeArg] | None = None,
+    inputs: Sequence[Any] | None = None,
+    outputs: Sequence[Any] | None = None,
     reported_providers: Sequence[str] | None = None,
     init_error: Exception | None = None,
+    options_error: Exception | None = None,
+    options_assign_error: bool = False,
 ) -> list[dict[str, Any]]:
     """가짜 onnxruntime를 깔고, 세션 생성 호출 인자 기록을 돌려준다.
 
     `reported_providers`는 세션이 스스로 말하는 공급자 목록이다 — 호출 인자와
     다르게 놓아 "런타임이 조용히 공급자를 더하거나 바꾸는" 상황을 만든다.
+    `options_error`는 SessionOptions 생성이, `options_assign_error`는 스레드
+    대입이 터지는 의존성을 흉내낸다.
     """
+    if options_error is not None:
+
+        class _BrokenOptions:
+            def __init__(self) -> None:
+                raise options_error
+
+        options_cls: type = _BrokenOptions
+    elif options_assign_error:
+
+        class _RejectingOptions:
+            def __setattr__(self, name: str, value: object) -> None:
+                raise RuntimeError("thread pin rejected")
+
+        options_cls = _RejectingOptions
+    else:
+        options_cls = _FakeSessionOptions
     created: list[dict[str, Any]] = []
 
     class _FakeInferenceSession:
@@ -109,7 +129,7 @@ def _install_fake_runtime(
             return list(outputs) if outputs is not None else _official_outputs()
 
     module = types.ModuleType("onnxruntime")
-    module.SessionOptions = _FakeSessionOptions
+    module.SessionOptions = options_cls
     module.InferenceSession = _FakeInferenceSession
     monkeypatch.setitem(sys.modules, "onnxruntime", module)
     # 세션 경계는 numpy의 최소 능력도 본다 — 못 쓰는 환경에서 검사하므로
@@ -569,6 +589,53 @@ def test_session_constructor_failure_is_contextual(
     _install_fake_runtime(monkeypatch, init_error=RuntimeError("onnx load failed"))
     artifact = bundled_artifact(ProjectConfig())
     with pytest.raises(VadUnavailable, match="onnx load failed"):
+        create_cpu_session(artifact)
+
+
+def test_session_options_constructor_failure_is_contextual(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SessionOptions()가 터지는 의존성은 세션 try 밖이다 — 새어 나가면 안 된다."""
+    from vlogsrt.project.vad.runtime import VadUnavailable, bundled_artifact, create_cpu_session
+
+    _install_fake_runtime(monkeypatch, options_error=RuntimeError("options broken"))
+    artifact = bundled_artifact(ProjectConfig())
+    with pytest.raises(VadUnavailable, match="options broken"):
+        create_cpu_session(artifact)
+
+
+def test_thread_assignment_failure_is_contextual(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """스레드 핀 대입을 거부하는 의존성도 문맥 있는 실패여야 한다."""
+    from vlogsrt.project.vad.runtime import VadUnavailable, bundled_artifact, create_cpu_session
+
+    _install_fake_runtime(monkeypatch, options_assign_error=True)
+    artifact = bundled_artifact(ProjectConfig())
+    with pytest.raises(VadUnavailable, match="thread pin rejected"):
+        create_cpu_session(artifact)
+
+
+class _NoType:
+    name = "input"
+    shape = [None, None]
+
+
+class _NoShape:
+    name = "input"
+    type = "tensor(float)"
+
+
+@pytest.mark.parametrize("broken", [_NoType, _NoShape])
+def test_malformed_node_metadata_access_is_contextual(
+    monkeypatch: pytest.MonkeyPatch, broken: type
+) -> None:
+    """NodeArg에서 속성이 빠지면 판정 자체가 AttributeError를 낸다 — 닫는다."""
+    from vlogsrt.project.vad.runtime import VadUnavailable, bundled_artifact, create_cpu_session
+
+    _install_fake_runtime(monkeypatch, inputs=[broken(), *_official_inputs()[1:]])
+    artifact = bundled_artifact(ProjectConfig())
+    with pytest.raises(VadUnavailable, match="AttributeError"):
         create_cpu_session(artifact)
 
 
