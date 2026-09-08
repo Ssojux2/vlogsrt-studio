@@ -36,11 +36,12 @@ def partition_blocks(document: ProjectDocument, media: Sequence[ResolvedMedia], 
 - For run length `L`, try `n=ceil(L/max_frames)` balanced integer-frame blocks whose sizes differ by <=1 frame. Use them only if every block >= min frames; otherwise take greedy max-frame blocks and keep the short remainder unchanged.
 - `min_frames=ceil(6s/frame)`, `max_frames=floor(10s/frame)`, `keep_frames=nearest(3s/frame)`, all from config/timebase.
 - Each block has beginning/middle/end keep candidates of exactly `keep_frames` when possible, deduplicated by exact frame interval; never a full-delete candidate.
-- Sample requests are 1 fps plus block endpoints and three candidate centers, unique frame IDs, deterministically reduced to <=16 without dropping endpoints/candidate centers.
+- Every block and candidate interval is half-open `[start_frame, end_frame)`. Required endpoint samples are the first valid frame `start_frame` and last valid frame `end_frame - 1`, never `end_frame` (which may equal the asset frame count).
+- Sample requests are nominal 1 fps plus the valid block endpoints and three candidate centers. Snap nominal times and centers with P1's deterministic exact-rational `frame_nearest` rule to integer original-frame indices, clamp inside the block, then deduplicate with stable unique frame IDs and reduce to <=16 without dropping endpoints/candidate centers. Literal whole-second times at rational rates such as 29.97 are generally off-grid and must never be sent directly to P5-04, which requires on-grid requests.
 
 ## Implementation steps
 
-1. Write failing tests for 6/10/11/12/17/20/22-second runs at all fps, balanced/greedy cases, 30 vs 29.97, guard holes, clip boundaries, locks, analysis error, candidate/sample dedup and cap.
+1. Write failing tests for 6/10/11/12/17/20/22-second runs at all eight supported frame rates, balanced/greedy cases, 30 vs 29.97, asset-last blocks whose end equals frame count, first/last=`end-1` endpoints, rational 1-fps/center snapping, guard holes, clip boundaries, locks, analysis error, candidate/sample dedup and cap.
 2. Implement frame-only partition/candidate/sample logic; no float/model access.
 3. Run focused P6/P5/P1 tests, invariants, full check; commit owned files.
 
