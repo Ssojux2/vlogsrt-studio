@@ -27,10 +27,11 @@
 | Role | Task | Dispatch | State |
 |---|---|---|---|
 | Astra coordinator | Run `run_73768f7c4dec` | terminal `term_892e5ca1-805d-4d8d-b27f-fe7c90994848` | active |
-| Sol manager | `task_a09c7903c32f` | `ctx_1f3f93ffcd1f` | revising briefs/supervising P0 |
+| Sol manager | `task_8f65a57496f6` | `ctx_bfbd07ec7a4c` | supervising P0-02b reconciliation |
 | Opus co-manager | `task_0c2d6966fb52` | `ctx_c60636ed03f1` | P0-02 supervision/review |
 | GLM P0-02 writer | `task_f7788389960b` | `ctx_df9c602e28a2` | completed `df489bb`; correction review pending |
 | GLM P0-02 correction | `task_7d03430673e1` | `ctx_51f56ba3df5c` | completed `51319b9`; reconciliation still open |
+| GLM P0-02b reconciliation | `task_eb3e9e09ca7f` | `ctx_6ca746e225d0` | active in child Run `run_8f41d4a91c5d`, terminal `term_0aa7004f-d352-48fa-aba5-5c31d848add3` |
 
 Initial gate message IDs: root `msg_d8fc69fe164a`; Opus `msg_0f70e95b09f7`.
 
@@ -43,6 +44,7 @@ Initial gate message IDs: root `msg_d8fc69fe164a`; Opus `msg_0f70e95b09f7`.
 - Pre-merge audit found five contract gaps in `df489bb`: optional imports are scoped to all project files rather than exact `project/vad/**`; the CLI exception skips every project import rather than only `project.commands`; `glm-*` is absent from the hardcoded-model check; FCPXML project model freezing is absent; xmllint accepts arbitrary constant argv rather than the exact two allowed shapes. Astra additionally reproduced executable override, opaque keyword, false provenance, extra positional, and valid alias handling defects and recorded the binding correction at `9727b2b`.
 - Opus's first correction worker completed commit `51319b99635f86a68543d02783674d4bf32eb06b` from `df489bb`: Run `run_b6d40d052690`, Task `task_7d03430673e1`, Dispatch `ctx_51f56ba3df5c`, terminal `term_7a94892e-6f38-4421-8273-51b889ce2619`; 461 tests and `make check` passed for its narrower original defect set.
 - Sol reproduced the still-open ratified reconciliation against `51319b9` with isolated source strings: `cli.py -> project.other`, NumPy under `project/vision`, a `glm-5.3-flash` literal, and `subprocess.Popen([exe, "--evil", path])` all returned no checker failure; project model dataclasses are still not inspected. Astra was escalated with messages `msg_c75ad9ff9e82` and `msg_dc58b3e29beb`; P0-02 remains unmergeable until a GLM correction closes these cases.
+- P0-02b launched from the verified clean required base `51319b99635f86a68543d02783674d4bf32eb06b` using fresh `claude-glm --model 'glm-5.3[1m]' --effort max --permission-mode auto`: child Run `run_8f41d4a91c5d`, Task `task_eb3e9e09ca7f`, Dispatch `ctx_6ca746e225d0`, terminal `term_0aa7004f-d352-48fa-aba5-5c31d848add3`. The dispatched brief embeds all five Astra reconciliation requirements and confines ownership to the checker, invariant tests, and contract doc.
 - Known user-owned dirty path is intentionally excluded from every inspection/commit operation. Its contents have not been read.
 
 ## Phase DAG and parallel groups
@@ -88,7 +90,7 @@ P0-03 and P0-04 may execute concurrently from the same corrected P0-02 merge SHA
 | Task | Outcome | Depends on | Owned implementation files | State |
 |---|---|---|---|---|
 | [P0-01](tasks/p0-01-environment.md) | reproducible Python 3.12 venv and baseline evidence | bootstrap commit | none (ignored `.venv` only) | complete; evidence-only |
-| [P0-02](tasks/p0-02-contract-guard.md) | source/derived dependency and subprocess contract | P0-01 | contract doc, pyproject, invariant script/tests | `51319b9`; ratified reconciliation correction required |
+| [P0-02](tasks/p0-02-contract-guard.md) / [P0-02b](tasks/p0-02b-contract-reconciliation.md) | source/derived dependency and subprocess contract | P0-01 | contract doc, pyproject, invariant script/tests | `51319b9`; P0-02b correction active |
 | [P0-03](tasks/p0-03-source-byte-lock.md) | exact synthetic legacy SOURCE SRT regression | corrected P0-02 merge | `tests/test_source_immutability.py` only | ready; parallel with P0-04 |
 | [P0-04](tasks/p0-04-project-skeleton.md) | isolated project package/config/FCPXML-model namespace skeleton | corrected P0-02 merge | project package/config/models + config test only | ready; parallel with P0-03 |
 | [P1-01](tasks/p1-01-rational-time.md) | exact FCP rational/frame math | P0 merge | project time module/tests | drafted |
