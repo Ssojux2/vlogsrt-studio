@@ -44,6 +44,7 @@ def quiet_sample(reference: PcmReference, target: int, search_samples: int, wind
 ```
 
 - `AudioPolicy.stream_index` is the zero-based **audio-stream ordinal** consumed by P2-01 (`0` means first audio), validated as a nonnegative integer with `bool` rejected. It is not a global container-stream index. The resulting `PcmReference` need not duplicate that ordinal because its extraction provenance/analysis key binds the policy, while P2-01's `AudioStreamInfo.stream_index` records the selected global ffprobe index.
+- `AudioPolicy.__post_init__` raises `ValueError` at construction unless `stream_index` is a non-`bool` nonnegative `int`, `sample_rate` is the non-`bool` integer `16000`, and `sample_width` is the non-`bool` integer `2`. Downstream functions may defend again but cannot be the only validation point.
 - `PcmReference` is a total record for an audio-capable input whose P2-01 extraction succeeded. Callers must not invoke `build_reference` for a resource declared without audio and must not fabricate a path, hash, sample count, or origin when probing/extraction failed; the future P3 source-analysis union owns those explicit resource-scoped unavailable dispositions.
 - `analysis_key` hashes original full-content hash, exact audio policy (including audio ordinal), measured `pcm_sample0_file_time`, PCM hash, channel count/rate; paths/names alone are never keys.
 - `source_id` is exactly P1's `ResolvedMedia.asset_content_id`; `original_stem` is retained only to address explicit per-source fixture/artifact namespaces. Validate both as nonempty and retain `original_sha256` so later joins never infer identity from `path`, filename, or parallel sequence position.
@@ -51,11 +52,12 @@ def quiet_sample(reference: PcmReference, target: int, search_samples: int, wind
 - Slice contains only `[start,end)` retained frames from the same stored PCM, interleaved channel-complete, with byte count `(end-start) * sample_width * channels` plus an ordinary WAV header. No removed-audio padding/context.
 - `quiet_sample` searches only the bounded target window in per-channel frame units, measures channels separately and ranks a frame window by their maximum absolute amplitude; ties choose the candidate nearest target, then the earlier candidate. It chooses a cut location only and never labels speech/silence.
 - `file_time = Fraction(sample_index, sample_rate) + pcm_sample0_file_time`; keep this as exact Fraction arithmetic and consume P2-01's proven decoded-clock origin rather than equating it to raw ffprobe `stream.start_time`.
-- Atomic creation and hash verification: a completed destination is reused only when metadata/hash/policy match.
+- Before reuse or extraction, hash the actual original file in full and require equality with supplied `original_sha256`; a mismatch fails contextually before calling P2-01. Atomic creation and hash verification then require that a completed destination is reused only when original/PCM metadata, both hashes, and policy match.
+- The public surface is exactly the dataclasses/functions in the contract block. The file-time formula is consumed directly or through private implementation helpers; do not add an unreviewed public convenience API.
 
 ## Implementation steps
 
-1. Write failing byte-pattern tests for mono/stereo, ceil/floor boundaries, negative/nonzero origin mapping, tail clamp, zero range, hash-key changes, quiet-cut tie behavior, phase-opposed channels, and atomic failure.
+1. Write failing byte-pattern tests for policy construction, original-file hash agreement/mismatch-before-call, mono/stereo, ceil/floor boundaries, negative/nonzero origin mapping, tail clamp, zero range, hash-key changes, quiet-cut tie behavior, phase-opposed channels, and deterministically injected atomic failure.
 2. Implement using P2-01 extraction plus stdlib hash/wave/file operations; no subprocess here.
 3. Run focused/P2/full checks; commit owned files.
 
