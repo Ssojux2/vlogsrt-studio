@@ -25,17 +25,24 @@ lane이 아예 없다.
 읽기만 한다 — 원본 시각 문자열의 정규화는 일어나지 않는다(P1-05 왕복의 기반).
 DTD 검증은 이곳이 아니라 P1-04의 xmllint 경계다. 엔티티 전개 같은 악의적
 입력의 방어도 그 경계와 함께 정해진다 — 여기서는 구문 해석만 한다.
+
+P1-05 왕복은 이 파일의 두 번째 얼굴이다. `write_identity`가 `raw_xml`을 바이트
+그대로 옮기고 `validate_roundtrip`이 그 사본을 증명한다 — 검증 판정은 전부 P1-04
+경계(`xml_validation`)에서 오고 이 모듈은 subprocess를 모른다. 비교는 바이트
+동등성 ＋ 해시 스코프 필드를 뺀 의미 동등성이다. 이것은 편집 직렬화가 아니다.
 """
 
 from __future__ import annotations
 
 import hashlib
+import os
+import tempfile
 import xml.etree.ElementTree as ET
 from fractions import Fraction
 from pathlib import Path
 from typing import Literal, cast
 
-from vlogsrt.project import timebase
+from vlogsrt.project import timebase, xml_validation
 from vlogsrt.project.models import (
     AssetResource,
     ClipInstance,
@@ -685,3 +692,205 @@ def _check_placement(
             f"스토리라인 항목이 문서 순서·시각 순서에서 벗어난다(겹침 또는 역순):"
             f" offset {item.offset}초 < 앞 항목 끝 {previous_end}초",
         )
+
+
+# ─── P1-05 왕복 — 신원 보존 복사와 그 증명 ────────────────────────────────
+
+# 어긋남 진단의 상한 — P1-04 `xml_validation`과 같은 규율이다. 커다란 문서 하나가
+# 로그를 채우지 못하게 한다. 임계값이 아니라 진단 위생의 상수다.
+_MAX_MISMATCH_LINES = 8
+_MAX_MISMATCH_LINE_CHARS = 400
+_TRUNCATION_MARK = "…"
+
+_ASSET_FIELDS = (
+    "xml_id",
+    "uid",
+    "name",
+    "format_id",
+    "frame_duration",
+    "start",
+    "duration",
+    "has_audio",
+    "media_reps",
+)
+"""애셋의 정적 사실 전부 — `scoped_id`만 빼고 문서 간 비교 대상이다.
+
+`scoped_id`·`instance_id`는 입력 해시가 스코프라 문서마다 값이 다른 것이 정상이다
+(같은 바이트라면 우연히 같아질 뿐). 참조는 각 문서 안에서 `resource_scoped_id`가
+가리키는 **자리**로 비교한다.
+"""
+
+_CLIP_FIELDS = ("offset", "start", "duration", "enabled", "src_enable")
+_GAP_FIELDS = ("offset", "duration")
+
+
+def write_identity(document: ProjectDocument, destination: Path) -> Path:
+    """문서의 원본 바이트를 목적지에 그대로 쓴다 — 정규화는 일절 없다.
+
+    같은 디렉터리 임시파일에 쓴 뒤 `os.replace`로 통째로 바꾼다. 그래서 목적지는
+    언제나 온전한 옛 내용이거나 온전한 새 내용뿐이다. 쓰기나 교체가 실패하면
+    임시파일을 치우고 예외를 그대로 흘린다 — 원본 문서와 `raw_xml`은 건드리지
+    않는다. 이것은 신원 복사이지 직렬화가 아니다(P6의 소관).
+    """
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=destination.parent,
+            prefix=f".{destination.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+            handle.write(document.raw_xml)
+        os.replace(temporary, destination)
+    except BaseException:
+        if temporary is not None:  # 생성 자체가 실패하면 치울 임시파일도 없다
+            temporary.unlink(missing_ok=True)
+        raise
+    return destination
+
+
+def validate_roundtrip(
+    source: ProjectDocument, written: Path, *, dtd_path: Path | None = None
+) -> xml_validation.XmlValidation:
+    """쓴 사본이 원본과 같은 문서인지 증명한다 — 판정은 기록으로, 부작용은 없다.
+
+    순서가 계약이다. 먼저 P1-04 xmllint 경계가 사본을 본다 — 도구나 요청한 DTD가
+    없으면 `XmlValidationUnavailable`이 그대로 샌다(판정을 내린 적이 없다). 판정이
+    나왔다면 P1-02 파서로 사본을 다시 읽어 원본과 비교한다: 의미가 전부 같아도
+    바이트가 다르면 어긋남이고, 정규화로 덮지 않는다. 무엇이 어긋나든 합성 통과
+    대신 `valid=False`와 상한 있는 진단으로 돌아온다 — `dtd_checked`는 실제로 DTD를
+    봤는지 그대로 말한다.
+    """
+    validation = xml_validation.validate_xml(written, dtd_path=dtd_path)
+    if not validation.valid:
+        return validation
+    try:
+        reparsed = parse_project(written)
+    except UnsupportedProject as error:
+        return _roundtrip_failure(
+            validation.dtd_checked,
+            [f"재구문 해석 실패 — {error.location}: {error.reason}"],
+        )
+    mismatches = _semantic_mismatches(source, reparsed)
+    written_bytes = written.read_bytes()
+    if not mismatches and written_bytes != source.raw_xml:
+        mismatches = [_first_byte_mismatch(source.raw_xml, written_bytes)]
+    if mismatches:
+        return _roundtrip_failure(validation.dtd_checked, mismatches)
+    return validation
+
+
+def _roundtrip_failure(dtd_checked: bool, mismatches: list[str]) -> xml_validation.XmlValidation:
+    """왕복 어긋남의 기록 — 상한 있는 진단만, XML 덤프는 없다."""
+    return xml_validation.XmlValidation(
+        valid=False,
+        diagnostics=_bounded_lines(mismatches),
+        dtd_checked=dtd_checked,
+    )
+
+
+def _semantic_mismatches(source: ProjectDocument, reparsed: ProjectDocument) -> list[str]:
+    """해시 스코프 필드를 뺀 의미 비교 — 어긋난 자리를 정한 순서로 말한다."""
+    mismatches: list[str] = []
+    for field in ("version", "sequence_tc_start", "frame_duration"):
+        left, right = getattr(source, field), getattr(reparsed, field)
+        if left != right:
+            mismatches.append(_field_mismatch(field, left, right))
+    mismatches += _resource_mismatches(source, reparsed)
+    mismatches += _storyline_mismatches(source, reparsed)
+    return mismatches
+
+
+def _resource_mismatches(source: ProjectDocument, reparsed: ProjectDocument) -> list[str]:
+    if len(source.resources) != len(reparsed.resources):
+        return [_field_mismatch("resources 길이", len(source.resources), len(reparsed.resources))]
+    mismatches: list[str] = []
+    for index, (left, right) in enumerate(zip(source.resources, reparsed.resources, strict=True)):
+        for field in _ASSET_FIELDS:
+            left_value, right_value = getattr(left, field), getattr(right, field)
+            if left_value != right_value:
+                mismatches.append(
+                    _field_mismatch(f"resources[{index}].{field}", left_value, right_value)
+                )
+    return mismatches
+
+
+def _storyline_mismatches(source: ProjectDocument, reparsed: ProjectDocument) -> list[str]:
+    if len(source.storyline) != len(reparsed.storyline):
+        return [_field_mismatch("storyline 길이", len(source.storyline), len(reparsed.storyline))]
+    mismatches: list[str] = []
+    for index, (left, right) in enumerate(zip(source.storyline, reparsed.storyline, strict=True)):
+        where = f"storyline[{index}]"
+        if type(left) is not type(right):
+            mismatches.append(
+                _field_mismatch(f"{where} 항목 종류", type(left).__name__, type(right).__name__)
+            )
+            continue
+        fields = (
+            ("element_path", *_CLIP_FIELDS)
+            if isinstance(left, ClipInstance)
+            else ("element_path", *_GAP_FIELDS)
+        )
+        for field in fields:
+            left_value, right_value = getattr(left, field), getattr(right, field)
+            if left_value != right_value:
+                mismatches.append(_field_mismatch(f"{where}.{field}", left_value, right_value))
+        if isinstance(left, ClipInstance) and isinstance(right, ClipInstance):
+            left_ref, right_ref = _resource_ref(source, left), _resource_ref(reparsed, right)
+            if left_ref != right_ref:
+                mismatches.append(_field_mismatch(f"{where}.ref", left_ref, right_ref))
+    return mismatches
+
+
+def _resource_ref(document: ProjectDocument, clip: ClipInstance) -> str:
+    """클립이 가리키는 애셋의 문서 안 자리 — 스코프 id 대신 비교하는 참조의 뜻."""
+    for index, asset in enumerate(document.resources):
+        if asset.scoped_id == clip.resource_scoped_id:
+            return f"resources[{index}]({asset.xml_id})"
+    return "참조를 잃은 애셋"
+
+
+def _field_mismatch(name: str, left: object, right: object) -> str:
+    return f"{name}: 원본 {_describe(left)} ≠ 사본 {_describe(right)}"
+
+
+def _describe(value: object) -> str:
+    """진단용 한눈 표기 — 시각은 FCPXML 정준형으로, 나머지는 그 값 그대로."""
+    if isinstance(value, Fraction):
+        return timebase.format_fcpx_time(value)
+    if isinstance(value, MediaRep):
+        return f"{value.kind}:{value.src}"
+    if isinstance(value, tuple):
+        return "{" + ", ".join(_describe(item) for item in value) + "}"
+    return str(value)
+
+
+def _first_byte_mismatch(source: bytes, written: bytes) -> str:
+    """바이트 어긋남 한 줄 — 길이와 첫 차이 지점만 말한다(내용은 토하지 않는다)."""
+    limit = min(len(source), len(written))
+    offset = next(
+        (index for index in range(limit) if source[index] != written[index]),
+        limit,
+    )
+    return (
+        f"바이트가 다르다: 원본 {len(source)}바이트 ≠ 사본 {len(written)}바이트,"
+        f" 첫 차이 {offset}번째 바이트"
+    )
+
+
+def _bounded_lines(lines: list[str]) -> tuple[str, ...]:
+    """어긋남 몇 줄로 — 상한을 넘으면 표지를 남긴다(P1-04와 같은 규율)."""
+    if len(lines) <= _MAX_MISMATCH_LINES:
+        return tuple(_bounded_line(line) for line in lines)
+    kept = [_bounded_line(line) for line in lines[: _MAX_MISMATCH_LINES - 1]]
+    kept.append(f"{_TRUNCATION_MARK} 이후 {len(lines) - len(kept)}줄이 잘렸다")
+    return tuple(kept)
+
+
+def _bounded_line(line: str) -> str:
+    """한 줄의 상한 — 잘리면 표지를 붙인다(길이는 상한 ＋ 표지 1글자)."""
+    if len(line) <= _MAX_MISMATCH_LINE_CHARS:
+        return line
+    return line[:_MAX_MISMATCH_LINE_CHARS] + _TRUNCATION_MARK
