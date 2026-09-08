@@ -27,6 +27,8 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
+import tempfile
 from bisect import bisect_right
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -688,7 +690,17 @@ def _published_trace(
             coverage=progress.coverage,
         )
     stem = plan.reference.original_stem
-    srt = output.save_srt(cues, plan.namespace / plan.source_key / f"{stem}.SOURCE.srt")
+    srt = _publish_srt(plan, output.write_srt(cues).encode("utf-8"))
+    if srt is None:
+        return _error_trace(
+            plan,
+            error=(
+                f"완성물이 이미 다른 바이트로 있다: {plan.source_key}/{stem}.SOURCE.srt — "
+                "있는 것을 보존하고 이 번 결과를 버린다"
+            ),
+            draft=evidence,
+            coverage=progress.coverage,
+        )
     log.info(f"소스 전사 완료: {stem} · 큐 {len(cues)}장")
     return _trace(
         plan,
@@ -709,11 +721,12 @@ def transcribe_unique_sources(
     transcriber: Transcriber,
     artifact_dir: Path,
 ) -> tuple[SourceAnalysis, ...]:
-    """입력 쌍마다 분석을 하나씩 돌려준다 — 재사용 신원은 소스 분석 키다.
+    """입력 쌍을 유일 분석으로 정규화해 돌려준다 — 신원은 소스 분석 키다.
 
-    모든 쌍의 신원·스키마를 **호출 앞에서 전부** 검사한다: 하나라도 어긋나면
-    유료 호출은 깨진 입력에 값을 쓰지 않는다. unavailable 기록은 그 자원에 대해
-    한 번만 그대로 흐르고 전사 비용은 0이다.
+    모든 쌍의 신원·삼태·스키마를 **호출 앞에서 전부** 검사한다: 하나라도 어긋나면
+    유료 호출은 깨진 입력에 값을 쓰지 않는다. 실제 참조는 소스 키마다, unavailable
+    기록은 자원마다 **정확히 한 번** 처음 보인 순서로 돌아간다 — 반복 입력이 같은
+    출력을 늘리지 않으므로 소비자는 중복을 정규화하지 않고 거부하면 된다.
     """
     pairs = _validated_pairs(items)
     analyses: list[SourceAnalysis] = []
@@ -721,14 +734,15 @@ def transcribe_unique_sources(
     by_resource: dict[str, UnavailableSourceAudio] = {}
     for media, second in pairs:
         if isinstance(second, UnavailableSourceAudio):
-            analyses.append(by_resource.setdefault(second.resource_scoped_id, second))
+            if second.resource_scoped_id not in by_resource:
+                by_resource[second.resource_scoped_id] = second
+                analyses.append(second)
             continue
         source_key = _source_analysis_key(second, cfg)
-        trace = by_analysis.get(source_key)
-        if trace is None:
+        if source_key not in by_analysis:
             trace = transcribe_source(media, second, cfg, transcriber, artifact_dir)
             by_analysis[source_key] = trace
-        analyses.append(trace)
+            analyses.append(trace)
     return tuple(analyses)
 
 
@@ -776,6 +790,10 @@ def _require_pair(media: ResolvedMedia, reference: PcmReference) -> None:
             "미디어와 참조의 원본 해시가 다르다: "
             f"media={media.original_sha256!r}, reference={reference.original_sha256!r}"
         )
+    if not media.has_audio:
+        raise ValueError(
+            "has_audio=False로 선언된 미디어에 실제 PCM 참조가 왔다 — 선언된 삼태와 어긋난다"
+        )
     _require_reference_shape(reference)
 
 
@@ -796,6 +814,17 @@ def _require_unavailable_pair(
         raise ValueError(
             f"{position}번째 unavailable 기록의 원본 해시가 미디어와 다르다: "
             f"{unavailable.original_sha256!r} != {media.original_sha256!r}"
+        )
+    declared = unavailable.status == "no_audio"
+    if media.has_audio and declared:
+        raise ValueError(
+            f"{position}번째 기록: has_audio=True인 미디어에 선언된 무음(no_audio)이 왔다 — "
+            "삼태는 그 미디어의 선언과 같아야 한다"
+        )
+    if not media.has_audio and not declared:
+        raise ValueError(
+            f"{position}번째 기록: has_audio=False인 미디어에 pre-PCM 오류 기록이 왔다 — "
+            "선언된 무음(no_audio)만 받는다"
         )
 
 
@@ -867,11 +896,52 @@ def _segment_id(analysis_key: str, chunk_index: int, legacy_id: int, span: Sampl
     return hashlib.sha256(material.encode()).hexdigest()
 
 
+def _publish_srt(plan: _SourcePlan, body: bytes) -> Path | None:
+    """소스 로컬 SRT를 독점 출판한다. 충돌이면 None — 있는 바이트를 보존한다.
+
+    같은 분석 키의 완성물은 같은 자리에 산다. 다른 바이트로 덮어쓰는 길은 없다:
+    이미 있던 것과 바이트가 같으면 재사용이고, 다르면 있는 것을 보존한 채 오류다.
+    """
+    stem = plan.reference.original_stem
+    return _publish_exclusive(plan.namespace / plan.source_key / f"{stem}.SOURCE.srt", body)
+
+
+def _publish_exclusive(destination: Path, body: bytes) -> Path | None:
+    """완전한 파일을 원자적으로 독점 생성한다 — 조사 후 덮어쓰는 경주가 아니다.
+
+    임시 이름에 전부 쓴 뒤 `os.link`로 옮겨 닮는다. 링크는 이미 자리가 차 있으면
+    실패하므로, 반쯤 쓴 파일이 완성물 자리에 나타나는 일이 없다. 임시 파일은
+    이 번 호출의 것을 치우는 것뿐 — 완성물을 치우는 길은 없다.
+    """
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    handle, name = tempfile.mkstemp(
+        dir=destination.parent, prefix=f".{destination.name}.", suffix=".tmp"
+    )
+    temporary = Path(name)
+    try:
+        with os.fdopen(handle, "wb") as stream:
+            stream.write(body)
+        try:
+            os.link(temporary, destination)
+        except FileExistsError:
+            return destination if destination.read_bytes() == body else None
+        return destination
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def _empty_trace(plan: _SourcePlan, coverage: tuple[ChunkCoverage, ...]) -> SourceTrace:
     """빈 성공 — 결정적인 빈 SRT와 그 해시를 낸다. 조용한 실패가 아니다."""
     stem = plan.reference.original_stem
-    srt = output.save_srt([], plan.namespace / plan.source_key / f"{stem}.SOURCE.srt")
-    log.info(f"소스 전사 완료: {stem} · 빈 (무음의 증거는 아니다)")
+    srt = _publish_srt(plan, b"")
+    if srt is None:
+        return _error_trace(
+            plan,
+            error=f"완성물이 이미 다른 바이트로 있다: {plan.source_key}/{stem}.SOURCE.srt",
+            draft=(),
+            coverage=coverage,
+        )
+    log.info(f"소스 전사 완료: {stem} · 빈 (무음의 증거가 아니다)")
     return _trace(
         plan,
         status=_STATUS_EMPTY,

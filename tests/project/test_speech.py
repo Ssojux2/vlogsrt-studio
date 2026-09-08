@@ -717,6 +717,69 @@ def test_two_configs_leave_different_trace_fingerprints(tmp_path: Path) -> None:
 
 
 # ─────────────────────────────────────────────────────────────
+#  완성물 출판 — 같은 키의 다른 바이트는 못 덮어쓴다
+# ─────────────────────────────────────────────────────────────
+
+
+def test_two_analysis_keys_retain_different_valid_srt_bytes(tmp_path: Path) -> None:
+    """설정이 다르면 키가 갈라지고 완성물 바이트도 달라질 수 있다 — 둘 다 유효하다."""
+    media, reference, transcriber, artifacts, _namespace = _clean_setup(
+        tmp_path,
+        response={"segments": [_seg(0.5, 2.0, "안녕하세요."), _seg(3.0, 5.5, "망원동입니다.")]},
+    )
+    polished = transcribe_source(media, reference, Config(), transcriber, artifacts)
+    verbatim_transcriber = _Counting(FixtureTranscriber(fixture_dir=tmp_path))
+    verbatim = transcribe_source(
+        media,
+        reference,
+        data_replace(Config(), polish_enabled=False),
+        verbatim_transcriber,
+        artifacts,
+    )
+    assert polished.analysis_key != verbatim.analysis_key
+    first = artifacts / "acid-1" / polished.analysis_key / "demo.SOURCE.srt"
+    second = artifacts / "acid-1" / verbatim.analysis_key / "demo.SOURCE.srt"
+    assert first.is_file() and second.is_file()
+    first_bytes, second_bytes = first.read_bytes(), second.read_bytes()
+    assert first_bytes != second_bytes, "조판 정리 on/off는 다른 바이트를 낸다"
+    assert b"." in second_bytes and b"." not in first_bytes
+    for trace, path in ((polished, first), (verbatim, second)):
+        assert trace.status == "success"
+        assert trace.source_srt_sha256 == hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_the_same_key_with_identical_bytes_is_idempotent_reuse(tmp_path: Path) -> None:
+    media, reference, transcriber, artifacts, namespace = _clean_setup(tmp_path)
+    first = transcribe_source(media, reference, Config(), transcriber, artifacts)
+    srt = artifacts / "acid-1" / first.analysis_key / "demo.SOURCE.srt"
+    written = srt.read_bytes()
+
+    again_transcriber = _Counting(FixtureTranscriber(fixture_dir=tmp_path))
+    again = transcribe_source(media, reference, Config(), again_transcriber, artifacts)
+
+    assert again == first, "같은 키·같은 바이트는 재출판이 아니라 재사용이다"
+    assert srt.read_bytes() == written
+    assert len(list(namespace.glob("*/demo.SOURCE.srt"))) == 1
+
+
+def test_a_conflicting_existing_artifact_is_preserved_and_reported(tmp_path: Path) -> None:
+    media, reference, transcriber, artifacts, _namespace = _clean_setup(tmp_path)
+    first = transcribe_source(media, reference, Config(), transcriber, artifacts)
+    srt = artifacts / "acid-1" / first.analysis_key / "demo.SOURCE.srt"
+    foreign = "이미 있던 다른 완성물\n".encode()
+    srt.write_bytes(foreign)
+
+    again_transcriber = _Counting(FixtureTranscriber(fixture_dir=tmp_path))
+    again = transcribe_source(media, reference, Config(), again_transcriber, artifacts)
+
+    assert again.status == "error"
+    assert again.error is not None and "보존" in again.error
+    assert srt.read_bytes() == foreign, "있는 완성물은 못 덮어쓴다"
+    assert again.source_srt_relative_path is None and again.source_srt_sha256 is None
+    assert len(again.draft) == 3, "이미 만든 초안 증거는 그대로 남는다"
+
+
+# ─────────────────────────────────────────────────────────────
 #  재전사 — 남은 PCM 커터, 유지·접기, 심판
 # ─────────────────────────────────────────────────────────────
 
@@ -1052,8 +1115,8 @@ def test_repeated_sources_share_one_analysis_by_content(tmp_path: Path) -> None:
         [(media, reference), (twin_media, twin)], Config(), transcriber, artifacts
     )
 
-    assert len(analyses) == 2
-    assert isinstance(analyses[0], SourceTrace) and analyses[0] is analyses[1]
+    assert len(analyses) == 1, "같은 내용은 한 번만 전사하고 한 번만 돌아간다"
+    assert isinstance(analyses[0], SourceTrace)
     assert transcriber.kinds() == [FIXTURE_KIND], "같은 내용은 한 번만 전사한다"
 
 
@@ -1114,7 +1177,10 @@ def test_an_unavailable_resource_passes_through_with_zero_calls(
     transcriber = _Counting(FixtureTranscriber(fixture_dir=tmp_path))
 
     analyses = transcribe_unique_sources(
-        [(_media(), reference), (_media(resource_scoped_id="doc-1/r-2"), missing)],
+        [
+            (_media(), reference),
+            (_media(resource_scoped_id="doc-1/r-2", has_audio=False), missing),
+        ],
         Config(),
         transcriber,
         artifacts,
@@ -1126,15 +1192,124 @@ def test_an_unavailable_resource_passes_through_with_zero_calls(
 
     repeated = transcribe_unique_sources(
         [
-            (_media(resource_scoped_id="doc-1/r-2"), missing),
-            (_media(resource_scoped_id="doc-1/r-2"), missing),
+            (_media(resource_scoped_id="doc-1/r-2", has_audio=False), missing),
+            (_media(resource_scoped_id="doc-1/r-2", has_audio=False), missing),
         ],
         Config(),
         transcriber,
         artifacts,
     )
-    assert repeated == (missing, missing)
+    assert repeated == (missing,), "같은 자원의 unavailable은 정확히 한 번만 돌아간다"
     assert transcriber.kinds() == [FIXTURE_KIND], "unavailable은 한 푼도 안 쓴다"
+
+
+@pytest.mark.parametrize(
+    ("media_has_audio", "unavailable", "match"),
+    [
+        pytest.param(False, None, "has_audio|선언", id="no-audio-with-reference"),
+        pytest.param(
+            True, "declared_no_audio", "has_audio|선언", id="audio-with-declared-no-audio"
+        ),
+        pytest.param(
+            False,
+            "stream_unavailable",
+            "has_audio|선언",
+            id="no-audio-with-pre-pcm-error",
+        ),
+    ],
+)
+def test_the_batch_preflight_rejects_disobeying_audio_dispositions(
+    tmp_path: Path, media_has_audio: bool, unavailable: str | None, match: str
+) -> None:
+    """삼태는 정확히 그 미디어의 선언과 같아야 한다 — 없는 오디오에 참조가 올 수 없다."""
+    pcm = _pattern_pcm(320_000)
+    reference = _reference(tmp_path / "ref.pcm", pcm)
+    transcriber = _Counting(FixtureTranscriber(fixture_dir=tmp_path))
+    if unavailable is None:
+        second: Any = reference
+    else:
+        second = _unavailable(
+            status="error" if unavailable != "declared_no_audio" else "no_audio",
+            reason_code=unavailable,
+        )
+    media = _media(resource_scoped_id="doc-1/r-2", has_audio=media_has_audio)
+    with pytest.raises(ValueError, match=match):
+        transcribe_unique_sources([(media, second)], Config(), transcriber, tmp_path / "artifacts")
+    assert transcriber.calls == []
+
+
+def test_a_pre_pcm_error_record_passes_for_a_declared_audio_resource(
+    tmp_path: Path,
+) -> None:
+    """has_audio=True 미디어의 pre-PCM 오류 기록은 그냥 흘러간다 — P7이 만든 기록이다."""
+    failed = _unavailable(
+        resource_scoped_id="doc-1/r-3",
+        status="error",
+        reason_code="pcm_unavailable",
+        reason="추출이 죽었다",
+    )
+    transcriber = _Counting(FixtureTranscriber(fixture_dir=tmp_path))
+    analyses = transcribe_unique_sources(
+        [(_media(resource_scoped_id="doc-1/r-3"), failed)],
+        Config(),
+        transcriber,
+        tmp_path / "artifacts",
+    )
+    assert analyses == (failed,)
+    assert transcriber.calls == []
+
+
+def test_unique_outputs_are_deduplicated_in_first_seen_order(
+    tmp_path: Path,
+) -> None:
+    """출력은 유일 분석마다 정확히 한 번, 처음 보인 순서다 — 반복 입력이 행을 늘리지 않는다."""
+    pcm = _pattern_pcm(320_000)
+    other = _pattern_pcm(319_999)
+    reference = _reference(tmp_path / "a.pcm", pcm)
+    twin = _reference(tmp_path / "a2.pcm", pcm)  # 같은 내용 — 같은 소스 키
+    second_source = _reference(
+        tmp_path / "b.pcm",
+        other,
+        source_id="acid-2",
+        analysis_key="key-2",
+        original_sha256="b" * 64,
+    )
+    artifacts = tmp_path / "artifacts"
+    for source_id in ("acid-1", "acid-2"):
+        _write_fixture(
+            artifacts / source_id,
+            "demo",
+            FIXTURE_KIND,
+            [_record(0, 0.0, {"segments": [_seg(0.5, 2.0, "안녕하세요")]})],
+        )
+    transcriber = _Counting(FixtureTranscriber(fixture_dir=tmp_path))
+    missing = _unavailable()
+
+    analyses = transcribe_unique_sources(
+        [
+            (_media(), reference),
+            (_media(resource_scoped_id="doc-1/r-9"), twin),
+            (_media(), reference),
+            (_media(resource_scoped_id="doc-1/r-2", has_audio=False), missing),
+            (_media(resource_scoped_id="doc-1/r-2", has_audio=False), missing),
+            (
+                _media(
+                    source_id="acid-2", original_sha256="b" * 64, resource_scoped_id="doc-1/r-3"
+                ),
+                second_source,
+            ),
+        ],
+        Config(),
+        transcriber,
+        artifacts,
+    )
+
+    assert len(analyses) == 3, "유일 소스 키·자원마다 한 번씩만 돌아간다"
+    assert isinstance(analyses[0], SourceTrace)
+    assert analyses[1] is missing
+    assert isinstance(analyses[2], SourceTrace)
+    assert analyses[2].analysis_key != analyses[0].analysis_key
+    assert transcriber.kinds() == [FIXTURE_KIND, FIXTURE_KIND], "세 번째 반복은 새 호출이 없다"
 
 
 def test_same_content_with_different_audio_dispositions_stay_distinct(
