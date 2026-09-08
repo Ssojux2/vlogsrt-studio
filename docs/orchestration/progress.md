@@ -27,7 +27,7 @@
 | Role | Task | Dispatch | State |
 |---|---|---|---|
 | Astra coordinator | Run `run_73768f7c4dec` | terminal `term_892e5ca1-805d-4d8d-b27f-fe7c90994848` | active |
-| Sol manager | `task_8f65a57496f6` | `ctx_bfbd07ec7a4c` | supervising P1-05 identity roundtrip; P2 is complete |
+| Sol manager | `task_8f65a57496f6` | `ctx_bfbd07ec7a4c` | supervising disjoint P1-05 roundtrip and P3-01 outcome writers |
 | Opus co-manager | `task_b15d7dad7f7b` | `ctx_f925bd9d4a52` | active through Astra for independent contract/diff review |
 | GLM P0-02 writer | `task_f7788389960b` | `ctx_df9c602e28a2` | completed `df489bb`; correction review pending |
 | GLM P0-02 correction | `task_7d03430673e1` | `ctx_51f56ba3df5c` | completed `51319b9`; reconciliation still open |
@@ -40,6 +40,7 @@
 | GLM P1-03 media identity | `task_673b6cda51a8` | `ctx_6fa094276bb7` | final `287b46f` integrated by Astra as `7a107da`; 1,235-test integration gate passed |
 | GLM P1-04 XML validation | `task_de39de51bd0a` | `ctx_78e4226f911c` | final `182b786` integrated by Astra as `1fe07e5`; 1,274-test gate passed; worker settled |
 | GLM P1-05 identity roundtrip | `task_0a4361c516ef` | `ctx_a29134bebdcf` | active from exact `1fe07e5`, terminal `term_5b760884-61a5-4e6c-84c9-763e9a2f416b` |
+| GLM P3-01 transcription outcome | `task_c6df79a6d95d` | `ctx_99e3555a24d1` | active by Astra dependency exception from exact `1fe07e5`, terminal `term_e8ccdf92-6fac-4ab8-b963-070de645c6fd` |
 | GLM P2-01 PCM extraction | `task_071c14e3282d` | `ctx_dcd31a44ebc6` | final `d301459` integrated by Astra as `5ea9719`; 906-test integration gate passed |
 | GLM P2-02 PCM reference | `task_4428b9adca79` | `ctx_f12626850366` | final `b56c640` integrated by Astra as `35af34b`; 1,156-test integration gate passed |
 | GLM P2-03 S17 regression | `task_7614fbbdde23` | `ctx_444387418221` | final `7ac575b` integrated by Astra as `3760cf9`; 1,250-test integration gate passed; worker settled |
@@ -67,6 +68,7 @@ Initial gate message IDs: root `msg_d8fc69fe164a`; Opus `msg_0f70e95b09f7`.
 - P1-04 launched from exact `7a107da516ce2665b883a618221a43e9b873bcba` in fresh branch `Ssojux2/fcp-p1-xml-validation` using custom `claude-glm --model 'glm-5.3[1m]' --effort max --permission-mode auto`: Task `task_de39de51bd0a`, Dispatch `ctx_78e4226f911c`, terminal `term_5201b3a0-fc66-44f7-8623-ea2d78e4c9aa`. It owns only new `vlogsrt/project/xml_validation.py` and `tests/project/test_xml_validation.py` and uses the exact installed read-only FCPXML 1.14 DTD.
 - P1-04's final `182b786fb5ee7e6219dbdcdea28566ae1e1b8eae` normalizes XML operands to absolute paths before either frozen xmllint argv, preserves scoped missing-tool/spawn failures, and includes isolated regressions for nonexistent `--version`, a real dash-prefixed file, and ordinary relative input. Sol passed 200 focused tests, Opus passed in `msg_817975b45994`, and Astra integrated it as `1fe07e563c89958d2c771594d01645222d9df4aa`; the integrated gate passed 1,274 tests, Ruff on 60 files, mypy on 31 files, and all 19 invariant groups.
 - P1-05 launched from exact `1fe07e563c89958d2c771594d01645222d9df4aa` in fresh branch `Ssojux2/fcp-p1-roundtrip` using custom `claude-glm --model 'glm-5.3[1m]' --effort max --permission-mode auto`: Task `task_0a4361c516ef`, Dispatch `ctx_a29134bebdcf`, terminal `term_5b760884-61a5-4e6c-84c9-763e9a2f416b`. Ownership is only `vlogsrt/project/fcpxml.py` and new `tests/project/test_roundtrip.py`; the embedded brief pins bounded `XmlValidation` mismatch results, byte/source preservation, and atomic failure semantics.
+- By Astra's narrower dependency exception, P3-01 launched alongside P1-05 from the same exact `1fe07e563c89958d2c771594d01645222d9df4aa` because its four legacy source files are disjoint and it consumes none of the P1-05 writer surface: Task `task_c6df79a6d95d`, Dispatch `ctx_99e3555a24d1`, terminal `term_e8ccdf92-6fac-4ab8-b963-070de645c6fd`, branch `Ssojux2/fcp-p3-transcription-outcome`. Its custom GLM max/auto brief embeds strict raw namespace provenance and exact empty/error semantics. P3-02 remains blocked until both P1-05 and P3-01 are reviewed and integrated.
 - P2-01's initial `9ce4e5b` omitted the global ffprobe stream index and accepted ambiguous selection failures; `9b9fb25` fixed the first review, and final `d3014597df5144093bb3a1ca57da54f8c0755b53` split the remaining no-audio, out-of-range, missing-index, and mapped-stream diagnostic paths. Sol passed 74 focused tests, 19 invariants, and full `make check` with 637 tests; Astra's integration gate passed 906 tests and mypy on 27 files, then integrated the branch as `5ea9719cb2fb3ece20ad228fa78481ae60bbdb3b`.
 - P2-02 launched from exact `5ea9719cb2fb3ece20ad228fa78481ae60bbdb3b` in the fresh `fcp-p2-pcm-reference` worktree using `claude-glm --model 'glm-5.3[1m]' --effort max --permission-mode auto`: Task `task_4428b9adca79`, Dispatch `ctx_f12626850366`, terminal `term_16b167fe-4bd5-4e05-980b-068da23374f8`. It owns only `vlogsrt/project/pcm.py` and `tests/project/test_pcm.py`; the brief fixes total audio-only `PcmReference` semantics and forbids fabricated references or P3 construction.
 - P2-02's immutable-generation sequence culminated at `b56c64069058b550ffbbb643589b4c2efbeddff2`: exclusive generation PCM+metadata, one atomic logical pointer, recomputed content-key verification, no generation deletion, and best-effort post-commit temp cleanup preserve every issued reference across metadata/pointer failure, abrupt exit, and successful replacement. Sol and Opus (`msg_3939175c24ae`) passed the exact SHA; Astra integrated it as `35af34b4cdab2e0d96af2b8f6a5530c764e78d12` with 1,156 tests, Ruff on 56 files, mypy on 29 files, and all 19 invariant groups passing.
@@ -84,12 +86,13 @@ P0-01 environment evidence -> P0-03 legacy SOURCE SRT byte lock (Astra dependenc
                            -> [P0-02/P0-04 lineage + P0-03] -> Astra P0 merge
                               |-> P1-01 rational time -> P1-02 FCPXML ingest
                               |                         -> [P1-03 media identity, P1-04 XML validation]
-                              |                         -> P1-05 roundtrip -> Astra P1 merge
+                              |                         -> [P1-05 roundtrip, P3-01 outcome]
+                              |                            (Astra dependency exception at exact `1fe07e5`)
+                              |                         -> P1-05/P3-01 join -> P3-02 per-asset adapter
                               `-> P2-01 measured PCM extraction -> P2-02 PCM reference/slicing
                                                         -> P2-03 S17 regression -> Astra P2 merge
 
-P1 merge + P2 merge -> P3-01 typed transcription outcome -> P3-02 per-asset adapter
-                    -> P3-03 source trace/SOURCE SRT -> Astra P3 merge
+P3-02 -> P3-03 source trace/SOURCE SRT -> Astra P3 merge
 
 P3 merge -> [P4-01 logical retained slices, P5-00 project config]
 P4-01 -> P4-02 boundary request closure -> P4-03 retained-audio transcription
@@ -111,7 +114,7 @@ P6 merge -> P7-01 workspace revisions -> P7-02 budget/cancel/resume runner
          -> PENDING_HUMAN live Final Cut/media/model acceptance
 ```
 
-By explicit Astra dependency audit, P0-03 may run from `58bb25347319301391064d6ba9b6aad33a58f51c` while P0-02c is active: it owns only `tests/test_source_immutability.py` and consumes unchanged legacy source behavior, no checker API or project package. P0-04 still waits for corrected P0-02 integration; Astra joins all three reviewed results at the P0 checkpoint. P1 and P2 may execute concurrently after P0 integration, because they start from the same approved P0 SHA and own disjoint files; Astra must integrate both before P3. After the P3 join, P4-01 and P5-00 may start together from the same exact SHA. While the serial P4 chain advances, at most one ready disjoint P5 task may occupy the other writer slot; P5-03 additionally depends on the integrated P4-04 projection and cannot start earlier. After P4 completes, both writer slots may be used by ready disjoint VAD/vision tasks, still respecting each branch's hard dependencies. P7-04 and P7-05 may run together only from the same integrated P7-03 SHA; they own disjoint reproject/commands versus UI paths and join before P7-06.
+By explicit Astra dependency audit, P0-03 may run from `58bb25347319301391064d6ba9b6aad33a58f51c` while P0-02c is active: it owns only `tests/test_source_immutability.py` and consumes unchanged legacy source behavior, no checker API or project package. P0-04 still waits for corrected P0-02 integration; Astra joins all three reviewed results at the P0 checkpoint. P1 and P2 may execute concurrently after P0 integration, because they start from the same approved P0 SHA and own disjoint files. After P1-04 and P2 were integrated at exact `1fe07e5`, Astra made a narrower exception for disjoint P1-05 and P3-01: P3-01 consumes unchanged legacy Config/Chunk/Segment/build_spine and no P1-05 symbol. P3-02 still waits for both reviewed integrations, so this exception cannot claim a P3 phase completion early. After the P3 join, P4-01 and P5-00 may start together from the same exact SHA. While the serial P4 chain advances, at most one ready disjoint P5 task may occupy the other writer slot; P5-03 additionally depends on the integrated P4-04 projection and cannot start earlier. After P4 completes, both writer slots may be used by ready disjoint VAD/vision tasks, still respecting each branch's hard dependencies. P7-04 and P7-05 may run together only from the same integrated P7-03 SHA; they own disjoint reproject/commands versus UI paths and join before P7-06.
 
 ## Task ledger
 
@@ -129,7 +132,7 @@ By explicit Astra dependency audit, P0-03 may run from `58bb25347319301391064d6b
 | [P2-01](tasks/p2-01-pcm-extraction.md) | measured 16 kHz PCM extraction metadata | P0 merge `cd411c4` | preprocess additions/tests | complete; integrated `5ea9719`, 906-test gate passed |
 | [P2-02](tasks/p2-02-pcm-reference.md) | persistent hashed PCM and exact sample slicing | P2-01 merge `5ea9719` | project PCM/tests | complete; integrated `35af34b`, 1,156-test gate passed |
 | [P2-03](tasks/p2-03-s17-regression.md) | last/intermediate/repair drift regression | P2-02 integration `35af34b` | project PCM helper/tests only | complete; integrated `3760cf9`, 1,250-test gate passed; historical 77-minute acceptance remains `PENDING_HUMAN` |
-| [P3-01](tasks/p3-01-transcription-outcome.md) | explicit success/empty/error contract | P1,P2 merges | transcribe additions/tests | drafted |
+| [P3-01](tasks/p3-01-transcription-outcome.md) | explicit success/empty/error contract | exact `1fe07e5` by Astra dependency exception; joins P1-05 before P3-02 | transcribe additions/tests | active: `task_c6df79a6d95d` / `ctx_99e3555a24d1` |
 | [P3-02](tasks/p3-02-source-adapter.md) | full legacy repair/refine engine once per unique source | P3-01 | project speech plus narrow repair-cutter seam/tests | drafted |
 | [P3-03](tasks/p3-03-source-srt.md) | immutable source-local artifacts and pre-roughcut input-timeline SOURCE SRT | P3-02 | project captions/tests | drafted |
 | [P4-01](tasks/p4-01-logical-slices.md) | coalesced retained logical slices | P3 merge | project boundary models/planner tests | drafted |

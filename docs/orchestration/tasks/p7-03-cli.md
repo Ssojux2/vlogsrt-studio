@@ -41,9 +41,10 @@ def run_project_action(
 
 - The bridge imports only public `vlogsrt.project.commands` and delegates every action to that layer. It exists so `ui.service` can import `vlogsrt.cli` without importing `vlogsrt.project` and without duplicating logic or spawning a subprocess; emitted mappings contain only sanitized progress/status/result paths.
 
-- `inspect` parses/resolves/estimates only and prints readiness/cost; no network.
+- `inspect` parses/resolves/estimates only and prints readiness plus measured quantities, currency/price when complete, `unpriced_components`, `unestimated_resource_ids`, and limitations when incomplete; no network. It may use explicit local media metadata to construct a provenance-tagged duration estimate but cannot fabricate a PCM reference or source trace and cannot assume retained XML duration is the full original duration.
 - `inspect` reports every resource-scoped audio disposition: `no_audio: keep/review` for declared absence, retryable failed state for pre-PCM error, and the normal typed trace status after a real reference. It never labels pre-PCM error completed or billable, and unknown persisted variants/schema revisions exit before calls.
-- `analyze` and `run` require both explicit `--online` and existing cost confirmation/`--yes`; absence refuses before any call. Tests inject fakes only.
+- `analyze` and `run` require both explicit `--online` and existing cost confirmation/`--yes` for **every** online invocation; no duration/price threshold bypasses either gate. An incomplete/unpriced estimate is displayed as such rather than `$0`; explicit confirmation acknowledges that limitation but never substitutes for `--online`. Tests inject fakes only.
+- `analyze` may prepare and measure local PCM before network authorization is consumed, then recomputes and displays the estimate before creating/invoking any client. It still makes zero client calls unless both authorization gates are present.
 - Only after both authorizations may the CLI composition resolve the separately configured vision credential names and pass explicit values into the vision client factory. It must not reuse `OPENAI_API_KEY`/`OPENAI_BASE_URL`, print/log secret values, or read any key for offline commands; tests use a sentinel mapping/loader rather than real `.env` or process secrets.
 - `plan`, `export`, and `captions` force runner `allow_network=False` regardless of environment.
 - `captions` returns explicit `needs_analysis` nonzero status for uncached boundary/new source. Draft warnings are never labeled final.
@@ -52,7 +53,7 @@ def run_project_action(
 
 ## Implementation steps
 
-1. Write failing parser/command tests for every command, exit code, offline gates, media-map error, cost refusal, cancellation, stale/needs-analysis, separate-credential-name resolution after authorization only, secret non-disclosure, and legacy parser regression.
+1. Write failing parser/command tests for every command, exit code, offline gates, cold/warm/unknown-duration/unpriced/partial estimate display, no threshold-based confirmation bypass, local PCM re-estimate before client use, media-map error, cost refusal, cancellation, stale/needs-analysis, separate-credential-name resolution after authorization only, secret non-disclosure, and legacy parser regression.
 2. Add thin commands module over runner/workspace plus the narrow in-process `vlogsrt.cli` bridge; no product logic duplication in argparse callbacks or bridge code.
 3. Run focused CLI/legacy CLI/P7/invariant/full checks; commit owned files.
 
