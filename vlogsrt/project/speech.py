@@ -35,7 +35,7 @@ from itertools import pairwise
 from pathlib import Path
 from typing import Any, Literal, TypeAlias
 
-from vlogsrt import cutpoints, log, output, pipeline, refine, repair, transcribe
+from vlogsrt import log, output, pipeline, refine, repair, transcribe
 from vlogsrt.config import Config
 from vlogsrt.models import Chunk, Cue, Repair, Segment, Span
 from vlogsrt.project.media import ResolvedMedia, sha256_file
@@ -66,6 +66,12 @@ _SAMPLE_WIDTH = 2
 
 _SEGMENT_ID_DOMAIN = "vlogsrt-source-segment-v1"
 """세그먼트 신원의 도메인 구분자 — 다른 해시 재료와 우연히 겹치지 않게 한다."""
+
+_SOURCE_KEY_DOMAIN = "vlogsrt-source-analysis-v1"
+"""소스 분석 키의 도메인 구분자 — PCM 키와 어댑터 스키마를 갈라 붙인다."""
+
+_WAV_HEADER_BYTES = 44
+"""내는 WAV 헤더의 바이트 수 — 바이트 한도는 파일 전체로 잰다(포맷의 사실)."""
 
 _STATUS_SUCCESS = "success"
 _STATUS_EMPTY = "empty"
@@ -215,34 +221,81 @@ AudioSourceInput: TypeAlias = tuple[ResolvedMedia, PcmReference | UnavailableSou
 def plan_source_ranges(reference: PcmReference, cfg: Config) -> tuple[SampleRange, ...]:
     """저장 PCM 전체를 빈틈없이 덮는 조각 범위 — 자리만 고르고 구간은 못 고른다.
 
-    조각 수는 레거시와 같은 두 한도(`chunk_max_bytes`·`chunk_max_seconds`)가 정하고,
-    경계는 목표 지점 주위의 가장 조용한 창(`quiet_sample`)으로 옮긴 뒤 정확한
-    샘플로 자른다. 합치면 언제나 `[0, sample_count)`다(규칙 4).
+    조각 수는 두 한도가 정하고, 경계는 목표 지점 주위의 가장 조용한 창
+    (`quiet_sample`)에서 고른 뒤 정확한 샘플로 자른다. **모든 조각이 두 한도를
+    지킨다** — 조용한 창이 경계를 끌고 가서 남는 조각이 한도를 넘는 일이 없게,
+    경계마다 남은 조각들 몫의 프레임을 남겨 둔다. 합치면 언제나 `[0, sample_count)`다
+    (규칙 4). 바이트 한도는 실제 내는 WAV 바이트(헤더 포함)로 잰다.
     """
     frames = reference.sample_count
     if frames < 1:
         raise ValueError(f"저장 프레임이 없다: {frames!r} — 덮을 오디오가 없다")
     rate = reference.sample_rate
-    duration = float(Fraction(frames, rate))
-    count = cutpoints.chunk_count(_payload_bytes(reference), duration, cfg)
+    max_len = _max_range_frames(reference, cfg)
+    count = max(1, -(-frames // max_len))
     search = max(0, round(cfg.cut_search_seconds * rate))
     window = min(frames, max(1, round(cfg.cut_quiet_window_ms * rate / 1000)))
     cuts: list[int] = []
     previous = 0
     for index in range(1, count):
         target = frames * index // count
-        cut = _quiet_cut(reference, target, search, window)
-        if not previous < cut < frames:
-            cut = target if previous < target < frames else (previous + frames) // 2
-        cuts.append(cut)
-        previous = cut
+        remaining = count - index
+        lo = max(previous + 1, frames - max_len * remaining)
+        hi = min(previous + max_len, frames - remaining)
+        if lo > hi:
+            raise ValueError(
+                f"조각 한도를 채울 수 없다: {frames}프레임을 한도 {max_len}프레임인 "
+                f"{count}조각으로 못 나눈다 ({index}번째 경계 [{lo}, {hi}])"
+            )
+        cuts.append(_bounded_cut(reference, target, search, window, lo, hi))
+        previous = cuts[-1]
     edges = [0, *cuts, frames]
     return tuple(SampleRange(start, end) for start, end in pairwise(edges))
 
 
-def _payload_bytes(reference: PcmReference) -> int:
-    """조각이 실릴 WAV의 데이터 바이트 — 모델 입력 한도를 잰다."""
-    return reference.sample_count * _SAMPLE_WIDTH * reference.channels
+def _max_range_frames(reference: PcmReference, cfg: Config) -> int:
+    """한 조각이 담을 수 있는 최대 프레임 — 초 한도와 실제 WAV 바이트 한도 중 작은 쪽.
+
+    바이트 한도는 내는 파일 전체(44바이트 헤더 포함)로 잰다 — payload만 세면 매
+    조각이 헤더만큼 한도를 넘는다. 한도가 헤더·한 프레임조차 못 담으면 명시적으로
+    죽는다: 조용히 한 조각을 통째로 내는 길이 될 수 없기 때문이다.
+    """
+    if cfg.chunk_max_bytes <= _WAV_HEADER_BYTES:
+        raise ValueError(
+            f"chunk_max_bytes가 WAV 헤더({_WAV_HEADER_BYTES}바이트)보다 작다: "
+            f"{cfg.chunk_max_bytes!r} — 조각 하나를 못 만든다"
+        )
+    frame_bytes = _SAMPLE_WIDTH * reference.channels
+    by_bytes = (cfg.chunk_max_bytes - _WAV_HEADER_BYTES) // frame_bytes
+    if by_bytes < 1:
+        raise ValueError(
+            f"chunk_max_bytes가 한 프레임({frame_bytes}바이트)도 못 담는다: {cfg.chunk_max_bytes!r}"
+        )
+    if cfg.chunk_max_seconds > 0:
+        return min(by_bytes, int(cfg.chunk_max_seconds * reference.sample_rate))
+    return by_bytes
+
+
+def _bounded_cut(
+    reference: PcmReference,
+    target: int,
+    search: int,
+    window: int,
+    lo: int,
+    hi: int,
+) -> int:
+    """조용한 창의 경계 후보를 한도가 허락하는 범위로 묶는다.
+
+    후보(조용한 창)·목표(균등 분할) 순서로 범위 안의 것을 고르고, 둘 다 밖에
+    있으면 가장 가까운 끝에 붙인다. 자를 자리를 못 고르는 것이 구간을 잃을 이유가
+    되지 못한다(규칙 4). 말인지 침묵인지는 판단하지 않는다.
+    """
+    candidate = _quiet_cut(reference, target, search, window)
+    if lo <= candidate <= hi:
+        return candidate
+    if lo <= target <= hi:
+        return target
+    return min(max(target, lo), hi)
 
 
 def _quiet_cut(reference: PcmReference, target: int, search: int, window: int) -> int:
@@ -489,8 +542,25 @@ class _Progress:
     draft: tuple[Segment, ...] = ()
     coverage: tuple[ChunkCoverage, ...] = ()
 
-    def evidence(self, reference: PcmReference) -> tuple[SourceSegment, ...]:
-        return _source_segments(reference, self.ranges, self.draft) if self.draft else ()
+    def evidence(self, plan: _SourcePlan) -> tuple[SourceSegment, ...]:
+        if not self.draft:
+            return ()
+        return _source_segments(plan.reference, plan.source_key, self.ranges, self.draft)
+
+
+@dataclass(frozen=True, slots=True)
+class _SourcePlan:
+    """소스 하나의 이 번 분석 자리 — 참조·설정·분석 키·경로가 다닌다."""
+
+    reference: PcmReference
+    cfg: Config
+    source_key: str
+    artifact_dir: Path
+    namespace: Path
+
+    @property
+    def scratch(self) -> Path:
+        return self.namespace / _SCRATCH_DIR / self.source_key
 
 
 def transcribe_source(
@@ -508,153 +578,123 @@ def transcribe_source(
     unavailable로 강등되지 않고 완성물도 나오지 않는다.
     """
     _require_pair(media, reference)
-    namespace = artifact_dir / media.asset_content_id
-    scratch = namespace / _SCRATCH_DIR / reference.analysis_key
+    plan = _SourcePlan(
+        reference=reference,
+        cfg=cfg,
+        source_key=_source_analysis_key(reference, cfg),
+        artifact_dir=artifact_dir,
+        namespace=artifact_dir / media.asset_content_id,
+    )
     capture = _Capture()
     progress = _Progress()
     try:
-        return _analyze(
-            reference,
-            cfg,
-            _CapturingTranscriber(transcriber, capture),
-            capture,
-            artifact_dir,
-            namespace,
-            scratch,
-            progress,
-        )
+        return _analyze(plan, _CapturingTranscriber(transcriber, capture), capture, progress)
     except Exception as exc:  # noqa: BLE001 - 상태로 바꿔 남긴다. 조용히 두지는 않는다
         capture.record("소스 엔진", exc)
         return _error_trace(
-            reference,
-            cfg,
-            artifact_dir,
+            plan,
             error=capture.describe(),
-            draft=progress.evidence(reference),
+            draft=progress.evidence(plan),
             coverage=progress.coverage,
         )
 
 
 def _analyze(
-    reference: PcmReference,
-    cfg: Config,
+    plan: _SourcePlan,
     wrapped: _CapturingTranscriber,
     capture: _Capture,
-    artifact_dir: Path,
-    namespace: Path,
-    scratch: Path,
     progress: _Progress,
 ) -> SourceTrace:
     """1차 전사의 상태를 갈라 보내고, 초안이 있으면 재전사·조판·SRT로 간다."""
-    outcome = _first_pass(reference, cfg, wrapped, namespace, scratch, progress)
+    outcome = _first_pass(plan, wrapped, progress)
     if outcome.status == _STATUS_ERROR:
         return _error_trace(
-            reference,
-            cfg,
-            artifact_dir,
-            error=outcome.error or "전사가 실패로 돌아왔다",
-            draft=(),
-            coverage=(),
+            plan, error=outcome.error or "전사가 실패로 돌아왔다", draft=(), coverage=()
         )
     progress.draft = outcome.segments
+    if outcome.status == _STATUS_EMPTY:
+        return _empty_trace(plan, progress.coverage)
     if not progress.draft:
-        # 명시적 빈이든 걸러진 빈이든 SRT는 같은 결정적 빈 바이트다.
-        return _empty_trace(reference, cfg, artifact_dir, namespace, progress.coverage)
-    return _settled_trace(
-        reference, cfg, wrapped, capture, artifact_dir, namespace, scratch, progress
-    )
+        # 걸러져 빈 성공은 쓸 초안이 없는 것이다(EmptyTranscript) — 명시적 빈과
+        # 갈라진다. 무음의 증거가 아니므로 빈 성공으로 내주지 않는다.
+        return _error_trace(
+            plan,
+            error="조립 가능한 초안이 하나도 없습니다 — 공백 글자만 걸러져 빈 성공이다",
+            draft=(),
+            coverage=progress.coverage,
+        )
+    return _settled_trace(plan, wrapped, capture, progress)
 
 
 def _first_pass(
-    reference: PcmReference,
-    cfg: Config,
+    plan: _SourcePlan,
     wrapped: _CapturingTranscriber,
-    namespace: Path,
-    scratch: Path,
     progress: _Progress,
 ) -> transcribe.TranscriptionOutcome:
     """조각을 만들어 1차 전사를 부른다. 완성된 증거는 progress에 남긴다."""
-    progress.ranges = plan_source_ranges(reference, cfg)
+    progress.ranges = plan_source_ranges(plan.reference, plan.cfg)
     job = TranscriptionJob(
-        stem=reference.original_stem,
-        chunks=_initial_chunks(reference, progress.ranges, scratch),
-        namespace=namespace,
+        stem=plan.reference.original_stem,
+        chunks=_initial_chunks(plan.reference, progress.ranges, plan.scratch),
+        namespace=plan.namespace,
     )
-    outcome = transcribe.transcribe_outcome(wrapped, job, cfg)
+    outcome = transcribe.transcribe_outcome(wrapped, job, plan.cfg)
     progress.coverage = outcome.coverage
     return outcome
 
 
 def _settled_trace(
-    reference: PcmReference,
-    cfg: Config,
+    plan: _SourcePlan,
     wrapped: _CapturingTranscriber,
     capture: _Capture,
-    artifact_dir: Path,
-    namespace: Path,
-    scratch: Path,
     progress: _Progress,
 ) -> SourceTrace:
     """재전사(주입 커터) → 불변 골격. 포획 실패가 있으면 여기서 끝난다."""
+    reference = plan.reference
     duration = float(Fraction(reference.sample_count, reference.sample_rate))
-    stem = reference.original_stem
     settled = repair.settle(
         list(progress.draft),
         repair.Source(
-            stem=stem,
+            stem=reference.original_stem,
             duration=duration,
-            namespace=namespace,
-            cutter=_repair_cutter(reference, scratch, capture),
+            namespace=plan.namespace,
+            cutter=_repair_cutter(reference, plan.scratch, capture),
         ),
-        cfg,
+        plan.cfg,
         wrapped,
     )
-    evidence = progress.evidence(reference)
+    evidence = progress.evidence(plan)
     if capture.failures:
         return _error_trace(
-            reference,
-            cfg,
-            artifact_dir,
-            error=capture.describe(),
-            draft=evidence,
-            coverage=progress.coverage,
+            plan, error=capture.describe(), draft=evidence, coverage=progress.coverage
         )
-    return _published_trace(
-        reference, cfg, artifact_dir, namespace, settled, evidence, progress, duration
-    )
+    return _published_trace(plan, settled, evidence, progress, duration)
 
 
 def _published_trace(
-    reference: PcmReference,
-    cfg: Config,
-    artifact_dir: Path,
-    namespace: Path,
+    plan: _SourcePlan,
     settled: repair.Settled,
     evidence: tuple[SourceSegment, ...],
     progress: _Progress,
     duration: float,
 ) -> SourceTrace:
     """불변 골격 → 큐 → 정제 → 소스 로컬 SRT. polish은 refine 안에서 한 번뿐이다."""
-    stem = reference.original_stem
-    cues = refine.refine(pipeline.spine_to_cues(list(settled.spine)), cfg, duration)
+    cues = refine.refine(pipeline.spine_to_cues(list(settled.spine)), plan.cfg, duration)
     if not cues:
         return _error_trace(
-            reference,
-            cfg,
-            artifact_dir,
+            plan,
             error="정제를 끝내고 큐가 하나도 남지 않았다",
             draft=evidence,
             coverage=progress.coverage,
         )
-    srt = output.save_srt(cues, namespace / f"{stem}.SOURCE.srt")
+    stem = plan.reference.original_stem
+    srt = output.save_srt(cues, plan.namespace / plan.source_key / f"{stem}.SOURCE.srt")
     log.info(f"소스 전사 완료: {stem} · 큐 {len(cues)}장")
     return _trace(
-        reference,
-        cfg,
-        artifact_dir,
+        plan,
         status=_STATUS_SUCCESS,
         draft=evidence,
-        settled=_source_segments(reference, progress.ranges, settled.spine),
+        settled=_source_segments(plan.reference, plan.source_key, progress.ranges, settled.spine),
         repairs=settled.repairs,
         cues=tuple(cues),
         coverage=progress.coverage,
@@ -669,7 +709,7 @@ def transcribe_unique_sources(
     transcriber: Transcriber,
     artifact_dir: Path,
 ) -> tuple[SourceAnalysis, ...]:
-    """입력 쌍마다 분석을 하나씩 돌려준다 — 재사용 신원은 analysis_key다.
+    """입력 쌍마다 분석을 하나씩 돌려준다 — 재사용 신원은 소스 분석 키다.
 
     모든 쌍의 신원·스키마를 **호출 앞에서 전부** 검사한다: 하나라도 어긋나면
     유료 호출은 깨진 입력에 값을 쓰지 않는다. unavailable 기록은 그 자원에 대해
@@ -683,10 +723,11 @@ def transcribe_unique_sources(
         if isinstance(second, UnavailableSourceAudio):
             analyses.append(by_resource.setdefault(second.resource_scoped_id, second))
             continue
-        trace = by_analysis.get(second.analysis_key)
+        source_key = _source_analysis_key(second, cfg)
+        trace = by_analysis.get(source_key)
         if trace is None:
             trace = transcribe_source(media, second, cfg, transcriber, artifact_dir)
-            by_analysis[second.analysis_key] = trace
+            by_analysis[source_key] = trace
         analyses.append(trace)
     return tuple(analyses)
 
@@ -776,7 +817,10 @@ def _require_reference_shape(reference: PcmReference) -> None:
 
 
 def _source_segments(
-    reference: PcmReference, ranges: Sequence[SampleRange], segments: Sequence[Segment]
+    reference: PcmReference,
+    source_key: str,
+    ranges: Sequence[SampleRange],
+    segments: Sequence[Segment],
 ) -> tuple[SourceSegment, ...]:
     """레거시 세그먼트를 소스 시계의 기록으로 옮긴다 — 값은 고치지 않는다.
 
@@ -795,7 +839,7 @@ def _source_segments(
         audio_end = Fraction(str(segment.end))
         records.append(
             SourceSegment(
-                segment_id=_segment_id(reference.analysis_key, chunk_index, segment.id, span),
+                segment_id=_segment_id(source_key, chunk_index, segment.id, span),
                 audio_start=audio_start,
                 audio_end=audio_end,
                 file_start=audio_start + origin,
@@ -823,20 +867,13 @@ def _segment_id(analysis_key: str, chunk_index: int, legacy_id: int, span: Sampl
     return hashlib.sha256(material.encode()).hexdigest()
 
 
-def _empty_trace(
-    reference: PcmReference,
-    cfg: Config,
-    artifact_dir: Path,
-    namespace: Path,
-    coverage: tuple[ChunkCoverage, ...],
-) -> SourceTrace:
+def _empty_trace(plan: _SourcePlan, coverage: tuple[ChunkCoverage, ...]) -> SourceTrace:
     """빈 성공 — 결정적인 빈 SRT와 그 해시를 낸다. 조용한 실패가 아니다."""
-    srt = output.save_srt([], namespace / f"{reference.original_stem}.SOURCE.srt")
-    log.info(f"소스 전사 완료: {reference.original_stem} · 빈 (무음의 증거는 아니다)")
+    stem = plan.reference.original_stem
+    srt = output.save_srt([], plan.namespace / plan.source_key / f"{stem}.SOURCE.srt")
+    log.info(f"소스 전사 완료: {stem} · 빈 (무음의 증거는 아니다)")
     return _trace(
-        reference,
-        cfg,
-        artifact_dir,
+        plan,
         status=_STATUS_EMPTY,
         draft=(),
         settled=(),
@@ -849,9 +886,7 @@ def _empty_trace(
 
 
 def _error_trace(
-    reference: PcmReference,
-    cfg: Config,
-    artifact_dir: Path,
+    plan: _SourcePlan,
     *,
     error: str,
     draft: tuple[SourceSegment, ...],
@@ -859,9 +894,7 @@ def _error_trace(
 ) -> SourceTrace:
     """실패 기록 — 실제 참조의 신원을 그대로 담고 완성물은 내놓지 않는다."""
     return _trace(
-        reference,
-        cfg,
-        artifact_dir,
+        plan,
         status=_STATUS_ERROR,
         draft=draft,
         settled=(),
@@ -874,9 +907,7 @@ def _error_trace(
 
 
 def _trace(
-    reference: PcmReference,
-    cfg: Config,
-    artifact_dir: Path,
+    plan: _SourcePlan,
     *,
     status: str,
     draft: tuple[SourceSegment, ...],
@@ -887,11 +918,12 @@ def _trace(
     srt: Path | None,
     error: str | None,
 ) -> SourceTrace:
+    reference = plan.reference
     return SourceTrace(
         variant="source_trace",
         source_id=reference.source_id,
         original_stem=reference.original_stem,
-        analysis_key=reference.analysis_key,
+        analysis_key=plan.source_key,
         pcm_analysis_key=reference.analysis_key,
         pcm_sample0_file_time=reference.pcm_sample0_file_time,
         status=status,  # type: ignore[arg-type]
@@ -900,14 +932,32 @@ def _trace(
         repairs=repairs,
         cues=cues,
         coverage=coverage,
-        model=cfg.transcribe_model,
-        config_sha256=_config_sha256(cfg),
+        model=plan.cfg.transcribe_model,
+        config_sha256=_config_sha256(plan.cfg),
         source_srt_relative_path=(
-            srt.relative_to(artifact_dir).as_posix() if srt is not None else None
+            srt.relative_to(plan.artifact_dir).as_posix() if srt is not None else None
         ),
         source_srt_sha256=sha256_file(srt) if srt is not None else None,
         error=error,
     )
+
+
+def _source_analysis_key(reference: PcmReference, cfg: Config) -> str:
+    """소스 분석 키 — PCM 키에 이 분석을 정하는 소스 설정을 더해 파생한다.
+
+    키 재료는 도메인 구분자·PCM 분석 키·설정 지문이다. 설정 지문은 모델과 모든
+    임계값을 담으므로 같은 PCM에 다른 설정은 다른 분석이고, 다른 출판 자리를 얻는다.
+    완성물·스크래치·세그먼트 신원·중복 제거가 전부 이 키를 따르고, 픽스처 뿌리는
+    애셋(`asset_content_id`)에만 남는다.
+    """
+    material = "\n".join(
+        [
+            _SOURCE_KEY_DOMAIN,
+            f"pcm_analysis_key={reference.analysis_key}",
+            f"config_sha256={_config_sha256(cfg)}",
+        ]
+    )
+    return hashlib.sha256(material.encode()).hexdigest()
 
 
 def _config_sha256(cfg: Config) -> str:

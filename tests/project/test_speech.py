@@ -192,6 +192,13 @@ def _wav_frames(path: Path) -> tuple[tuple[int, int, int, int], bytes]:
     return params, raw
 
 
+def _scratch_of(namespace: Path) -> Path:
+    """이 번 실행의 스크래치 — work 아래 분석 키 디렉터리는 하나뿐이다."""
+    children = list((namespace / "work").iterdir())
+    assert len(children) == 1, f"work 아래 분석 키가 하나가 아니다: {children}"
+    return children[0]
+
+
 @dataclass
 class _Counting:
     """FixtureTranscriber를 싸서 호출 기록만 남긴다. 응답은 그대로 흘린다."""
@@ -275,13 +282,12 @@ def _repeat_setup(
     count: int,
     rescue_payload: dict[str, Any],
     arbiter_payload: dict[str, Any] | None,
-    analysis_key: str = "key-1",
     extra_rescue_records: list[dict[str, Any]] | None = None,
 ) -> tuple[ResolvedMedia, PcmReference, _Counting, Path, Path, bytes]:
-    """되풀이 하나(10초부터 1초씩)를 가진 70초 소스."""
+    """되풀이 하나(10초부터 1초씩)를 가진 70초 소스. 픽스처 뿌리는 애셋에만 산다."""
     frames = 70 * RATE
     pcm = _pattern_pcm(frames)
-    reference = _reference(tmp_path / "ref.pcm", pcm, analysis_key=analysis_key)
+    reference = _reference(tmp_path / "ref.pcm", pcm)
     media = _media()
     artifacts = tmp_path / "artifacts"
     namespace = artifacts / "acid-1"
@@ -298,8 +304,7 @@ def _repeat_setup(
     if arbiter_payload is not None:
         _write_fixture(namespace, "demo", ARBITER_KIND, [_record(0, 10.0, arbiter_payload)])
     transcriber = _Counting(FixtureTranscriber(fixture_dir=tmp_path))
-    scratch = namespace / "work" / analysis_key
-    return media, reference, transcriber, artifacts, scratch, pcm
+    return media, reference, transcriber, artifacts, namespace, pcm
 
 
 def _loop_rescue() -> dict[str, Any]:
@@ -330,30 +335,83 @@ def test_plan_covers_the_whole_reference_exactly_once(tmp_path: Path) -> None:
     assert sum(span.end - span.start for span in many) == frames
 
 
-def test_plan_respects_the_byte_limit_too(tmp_path: Path) -> None:
-    """바이트 한도가 이길 때도 조각 수는 그 한도를 따른다(D26·D27)."""
-    frames = 64_000  # s16le 모노 — 128,000바이트
+def test_plan_respects_the_byte_limit_including_the_wav_header(tmp_path: Path) -> None:
+    """바이트 한도는 **실제 내는 WAV 바이트(헤더 포함)**를 잰다(D26·D27).
+
+    64,000프레임 모노 — payload 128,000바이트. 한도 32,000바이트면 조각 하나가
+    담을 수 있는 프레임은 (32000−44)//2 = 15,978개뿐이라 5조각이 필요하다.
+    payload만 세면 4조각을 내고 매 조각이 32,044바이트로 한도를 넘는다.
+    """
+    frames = 64_000
     reference = _reference(tmp_path / "ref.pcm", _pattern_pcm(frames))
     cfg = data_replace(Config(), chunk_max_bytes=32_000)
     ranges = plan_source_ranges(reference, cfg)
-    assert len(ranges) == 4  # ceil(128,000 / 32,000)
+    assert len(ranges) == 5  # ceil(64,000 / 15,978)
     assert sum(span.end - span.start for span in ranges) == frames
+    assert all(44 + (span.end - span.start) * 2 <= 32_000 for span in ranges)
+    assert all(span.end > span.start for span in ranges)
+
+
+@pytest.mark.parametrize("chunk_max_bytes", [44, 45])
+def test_plan_rejects_a_limit_smaller_than_one_wav(tmp_path: Path, chunk_max_bytes: int) -> None:
+    """헤더도 못 담거나 한 프레임도 못 담는 한도는 명시적으로 죽는다."""
+    reference = _reference(tmp_path / "ref.pcm", _pattern_pcm(1_600))
+    cfg = data_replace(Config(), chunk_max_bytes=chunk_max_bytes)
+    with pytest.raises(ValueError, match="chunk_max_bytes"):
+        plan_source_ranges(reference, cfg)
 
 
 def test_plan_moves_the_boundary_to_the_quietest_window(tmp_path: Path) -> None:
-    """목표 경계 근처에서 가장 조용한 창으로 옮겨 자른다 — 없으면 목표 그대로."""
-    frames = 64_000  # 4초
-    # 1.5~1.6초(24000~25600프레임)에만 무음이 있다. 목표는 2.0초(32000).
+    """여유가 있는 한 목표 경계를 가장 조용한 창으로 옮긴다 — 한도가 우선한다."""
+    frames = 64_001  # 4초 + 1프레임 — 2초 한도로 3조각: 조용한 창이 쓸 여유가 있다
+    # 1.5~1.6초(24000~25600프레임)에만 무음이 있다. 첫 목표는 64001//3 = 21333.
     pcm = _quiet_hole_pcm(frames, 24_000, 25_600)
     reference = _reference(tmp_path / "ref.pcm", pcm)
     ranges = plan_source_ranges(reference, data_replace(Config(), chunk_max_seconds=2.0))
-    # 무음 창 안에서 목표에 가장 가까운 시작: 25600 - 320(창 폭) = 25280
-    assert ranges == (SampleRange(0, 25_280), SampleRange(25_280, frames))
+    # 무음 창의 시작 중 목표(21333)에 가장 가까운 곳에서 자른다.
+    assert ranges == (
+        SampleRange(0, 24_000),
+        SampleRange(24_000, 42_667),
+        SampleRange(42_667, frames),
+    )
+    # 모든 조각은 2초 이하다 — 조용한 창이 한도를 넘게 경계를 못 끌고 간다.
+    assert all(span.end - span.start <= 2 * RATE for span in ranges)
 
     # 조용한 곳이 없으면(온통 같은 진폭) 목표 지점에서 잘린다.
     flat = _reference(tmp_path / "flat.pcm", _level_pcm(frames, 1000))
     cuts = plan_source_ranges(flat, data_replace(Config(), chunk_max_seconds=2.0))
-    assert cuts == (SampleRange(0, 32_000), SampleRange(32_000, frames))
+    assert cuts == (
+        SampleRange(0, 21_333),
+        SampleRange(21_333, 42_667),
+        SampleRange(42_667, frames),
+    )
+
+
+@pytest.mark.parametrize("limit", [1.0, 0.25])
+def test_plan_constrains_every_range_when_limits_bind_with_a_quiet_hole(
+    tmp_path: Path, limit: float
+) -> None:
+    """32,000프레임(2초) 모노16k, 무음 창 19200~19520 — 재현된 결함의 회귀.
+
+    조용한 창이 목표에서 멀어도 경계를 그곳으로 끌고 가면 남는 조각이 한도를
+    넘는다(1.2초짜리 조각 + 되풀이 중간쯤 접히는 경계). 경계는 조용한 창을
+    **한도 안에서만** 쫓는다 — 여유가 없으면 균등 분할에 묶인다.
+    """
+    frames = 32_000
+    pcm = _quiet_hole_pcm(frames, 19_200, 19_520)
+    reference = _reference(tmp_path / "ref.pcm", pcm)
+    ranges = plan_source_ranges(reference, data_replace(Config(), chunk_max_seconds=limit))
+
+    max_frames = int(limit * RATE)
+    assert sum(span.end - span.start for span in ranges) == frames
+    assert all(0 < span.end - span.start <= max_frames for span in ranges), (
+        f"한도 {limit}초({max_frames}프레임)를 넘는 조각이 있다: {ranges}"
+    )
+    assert all(later.start >= earlier.end for earlier, later in pairwise(ranges))
+    assert len(ranges) == -(-frames // max_frames)
+    # 여유가 없으므로 경계는 균등 분할에 묶인다 — 무음 창(19200)은 답이 아니다.
+    edges = [frames * index // len(ranges) for index in range(1, len(ranges))]
+    assert [span.start for span in ranges[1:]] == edges
 
 
 def test_plan_rejects_a_reference_with_no_frames(tmp_path: Path) -> None:
@@ -378,8 +436,10 @@ def test_a_clean_source_runs_the_engine_and_publishes_the_source_srt(
     assert trace.status == "success"
     assert trace.source_id == media.asset_content_id == "acid-1"
     assert trace.original_stem == "demo"
-    assert trace.analysis_key == reference.analysis_key
+    # 분석 키는 소스 키다 — PCM 키에 소스 설정을 더해 파생하고, PCM 키는 그대로 남는다.
     assert trace.pcm_analysis_key == reference.analysis_key
+    assert trace.analysis_key != reference.analysis_key
+    assert len(trace.analysis_key) == 64
     assert trace.pcm_sample0_file_time == Fraction(0)
     assert trace.error is None
     assert trace.model == Config().transcribe_model
@@ -401,11 +461,18 @@ def test_a_clean_source_runs_the_engine_and_publishes_the_source_srt(
     assert len(trace.cues) == 3
     assert trace.coverage == (ChunkCoverage(index=0, offset=0.0, duration=20.0, segment_count=3),)
 
-    srt = namespace / "demo.SOURCE.srt"
-    assert trace.source_srt_relative_path == "acid-1/demo.SOURCE.srt"
+    # 완성물 SRT는 분석 키 디렉터리에, 픽스처는 애셋 루트에 — 뿌리가 갈라진다.
+    srt = namespace / trace.analysis_key / "demo.SOURCE.srt"
+    assert trace.source_srt_relative_path == f"acid-1/{trace.analysis_key}/demo.SOURCE.srt"
     assert srt.is_file()
     assert trace.source_srt_sha256 == hashlib.sha256(srt.read_bytes()).hexdigest()
     assert srt.read_text(encoding="utf-8") == output.write_srt(list(trace.cues))
+    assert _scratch_of(namespace).name == trace.analysis_key
+    assert [path.name for path in namespace.iterdir()] == [
+        "demo.whisper.json",
+        trace.analysis_key,
+        "work",
+    ]
 
     # 되풀이가 없으면 재전사는 한 푼도 쓰지 않는다. 모든 잡은 명시적 네임스페이스를 골랐다.
     assert transcriber.kinds() == [FIXTURE_KIND]
@@ -431,12 +498,13 @@ def test_initial_wavs_are_real_pcm_slices_with_snapped_metadata(
     tmp_path: Path,
 ) -> None:
     """조각은 진짜 P2 바이트 슬라이스고, 좌표는 실제 잘린 프레임에서 나온다."""
-    frames = 64_000
-    pcm = _quiet_hole_pcm(frames, 24_000, 25_600)
+    frames = 48_001  # 3초 + 1프레임 — 2초 한도로 2조각
+    pcm = _quiet_hole_pcm(frames, 20_000, 21_600)
     reference = _reference(tmp_path / "ref.pcm", pcm)
     media = _media()
     artifacts = tmp_path / "artifacts"
     namespace = artifacts / "acid-1"
+    boundary = 21_280  # 무음 창의 시작 중 목표(24000)에 가장 가까운 곳
     payload = {"segments": [_seg(0.5, 2.0, "첫마디입니다"), _seg(3.0, 4.5, "둘째 마디입니다")]}
     _write_fixture(
         namespace,
@@ -444,7 +512,7 @@ def test_initial_wavs_are_real_pcm_slices_with_snapped_metadata(
         FIXTURE_KIND,
         [
             _record(0, 0.0, payload),
-            _record(1, float(Fraction(25_280, RATE)), payload),
+            _record(1, float(Fraction(boundary, RATE)), payload),
         ],
     )
     transcriber = _Counting(FixtureTranscriber(fixture_dir=tmp_path))
@@ -454,41 +522,55 @@ def test_initial_wavs_are_real_pcm_slices_with_snapped_metadata(
 
     assert trace.status == "success"
     # 덮개의 좌표는 잘린(snapped) 프레임 그 자체다 — 요청한 초가 아니다.
-    assert [cover.offset for cover in trace.coverage] == [0.0, float(Fraction(25_280, RATE))]
+    assert [cover.offset for cover in trace.coverage] == [0.0, float(Fraction(boundary, RATE))]
     assert [cover.duration for cover in trace.coverage] == [
-        float(Fraction(25_280, RATE)),
-        float(Fraction(frames - 25_280, RATE)),
+        float(Fraction(boundary, RATE)),
+        float(Fraction(frames - boundary, RATE)),
     ]
-    scratch = namespace / "work" / "key-1"
+    scratch = _scratch_of(namespace)
+    assert scratch.name == trace.analysis_key, "스크래치는 분석 키로 산다"
     head, head_raw = _wav_frames(scratch / "initial-0000.wav")
     tail, tail_raw = _wav_frames(scratch / "initial-0001.wav")
-    assert head == (1, 2, RATE, 25_280)
-    assert tail == (1, 2, RATE, frames - 25_280)
-    assert head_raw == pcm[: 25_280 * 2]
-    assert tail_raw == pcm[25_280 * 2 :]
+    assert head == (1, 2, RATE, boundary)
+    assert tail == (1, 2, RATE, frames - boundary)
+    assert head_raw == pcm[: boundary * 2]
+    assert tail_raw == pcm[boundary * 2 :]
 
 
-@pytest.mark.parametrize(
-    "response",
-    [
-        pytest.param({"segments": []}, id="literal-empty"),
-        pytest.param({"segments": [_seg(0.0, 1.0, "   ")]}, id="filtered-empty"),
-    ],
-)
-def test_a_successful_empty_analysis_publishes_the_empty_srt(
-    tmp_path: Path, response: dict[str, Any]
-) -> None:
-    """빈 성공은 결정적인 빈 SRT와 그 해시를 낸다 — 조용한 실패가 아니다."""
-    media, reference, transcriber, artifacts, namespace = _clean_setup(tmp_path, response=response)
+def test_an_explicitly_empty_analysis_publishes_the_empty_srt(tmp_path: Path) -> None:
+    """명시적 빈 결과형만 빈 성공이다 — 결정적인 빈 SRT와 그 해시를 낸다."""
+    media, reference, transcriber, artifacts, namespace = _clean_setup(
+        tmp_path, response={"segments": []}
+    )
     trace = transcribe_source(media, reference, Config(), transcriber, artifacts)
     assert trace.status == "empty"
     assert trace.draft == () and trace.settled_spine == () and trace.cues == ()
     assert trace.repairs == ()
-    srt = namespace / "demo.SOURCE.srt"
+    srt = namespace / trace.analysis_key / "demo.SOURCE.srt"
     assert srt.read_bytes() == b""
-    assert trace.source_srt_relative_path == "acid-1/demo.SOURCE.srt"
+    assert trace.source_srt_relative_path == f"acid-1/{trace.analysis_key}/demo.SOURCE.srt"
     assert trace.source_srt_sha256 == hashlib.sha256(b"").hexdigest()
     assert transcriber.kinds() == [FIXTURE_KIND], "빈 초안에는 재전사가 없다"
+
+
+def test_a_whitespace_only_success_is_no_usable_draft_not_empty(tmp_path: Path) -> None:
+    """공백 글자만 걸러진 성공은 쓸 초안이 없는 것이다 — 빈 성공이 아니라 error다.
+
+    P3-01의 구분을 그대로 잇는다: 명시적 빈 리스트만 'empty'고, 걸러져 빈 것은
+    `EmptyTranscript` — 무음의 증거가 아니다. 덮개 증거는 남고 SRT는 나오지 않는다.
+    """
+    media, reference, transcriber, artifacts, namespace = _clean_setup(
+        tmp_path, response={"segments": [_seg(0.0, 1.0, "   ")]}
+    )
+    trace = transcribe_source(media, reference, Config(), transcriber, artifacts)
+    assert trace.status == "error"
+    assert trace.error is not None and "초안" in trace.error
+    assert trace.pcm_analysis_key == reference.analysis_key
+    assert len(trace.analysis_key) == 64
+    assert trace.coverage == (ChunkCoverage(index=0, offset=0.0, duration=20.0, segment_count=1),)
+    assert trace.draft == ()
+    assert trace.source_srt_relative_path is None and trace.source_srt_sha256 is None
+    assert list(namespace.rglob("*.SOURCE.srt")) == []
 
 
 def test_a_malformed_initial_payload_is_an_error_with_real_provenance(
@@ -501,11 +583,11 @@ def test_a_malformed_initial_payload_is_an_error_with_real_provenance(
     # 실제 참조의 신원은 그대로 남는다 — unavailable로 강등되지 않는다.
     assert trace.source_id == reference.source_id
     assert trace.original_stem == reference.original_stem
-    assert trace.analysis_key == reference.analysis_key
     assert trace.pcm_analysis_key == reference.analysis_key
+    assert len(trace.analysis_key) == 64
     assert trace.pcm_sample0_file_time == reference.pcm_sample0_file_time
     assert trace.source_srt_relative_path is None and trace.source_srt_sha256 is None
-    assert not (namespace / "demo.SOURCE.srt").exists()
+    assert list(namespace.rglob("*.SOURCE.srt")) == []
     assert trace.draft == () and trace.coverage == ()
 
 
@@ -609,12 +691,13 @@ def test_ids_and_artifacts_are_deterministic_across_runs(tmp_path: Path) -> None
     second = transcribe_source(media, reference, Config(), second_transcriber, other)
     assert first == second
     assert first.draft == second.draft
-    assert (artifacts / "acid-1" / "demo.SOURCE.srt").read_bytes() == (
-        other / "acid-1" / "demo.SOURCE.srt"
+    assert (artifacts / "acid-1" / first.analysis_key / "demo.SOURCE.srt").read_bytes() == (
+        other / "acid-1" / second.analysis_key / "demo.SOURCE.srt"
     ).read_bytes()
 
 
 def test_two_configs_leave_different_trace_fingerprints(tmp_path: Path) -> None:
+    """소스 분석 키는 설정에서도 나온다 — 같은 PCM에 다른 설정은 다른 분석이다."""
     media, reference, transcriber, artifacts, _namespace = _clean_setup(tmp_path)
     first = transcribe_source(media, reference, Config(), transcriber, artifacts)
     second_transcriber = _Counting(FixtureTranscriber(fixture_dir=tmp_path))
@@ -626,6 +709,11 @@ def test_two_configs_leave_different_trace_fingerprints(tmp_path: Path) -> None:
         artifacts,
     )
     assert first.config_sha256 != second.config_sha256
+    assert first.analysis_key != second.analysis_key
+    assert first.pcm_analysis_key == second.pcm_analysis_key == reference.analysis_key
+    assert (artifacts / "acid-1" / first.analysis_key).is_dir()
+    assert (artifacts / "acid-1" / second.analysis_key).is_dir()
+    assert first.analysis_key != second.analysis_key
 
 
 # ─────────────────────────────────────────────────────────────
@@ -634,7 +722,7 @@ def test_two_configs_leave_different_trace_fingerprints(tmp_path: Path) -> None:
 
 
 def test_a_recovered_repeat_is_replaced_using_retained_pcm(tmp_path: Path) -> None:
-    media, reference, transcriber, artifacts, scratch, pcm = _repeat_setup(
+    media, reference, transcriber, artifacts, namespace, pcm = _repeat_setup(
         tmp_path, count=8, rescue_payload=_clean_rescue(), arbiter_payload=None
     )
     trace = transcribe_source(media, reference, Config(), transcriber, artifacts)
@@ -650,6 +738,8 @@ def test_a_recovered_repeat_is_replaced_using_retained_pcm(tmp_path: Path) -> No
     assert transcriber.kinds() == [FIXTURE_KIND, RESCUE_KIND]
 
     # 중첩 재전사 WAV는 같은 저장 PCM의 실제 바이트 슬라이스다.
+    scratch = _scratch_of(namespace)
+    assert scratch.name == trace.analysis_key
     repair_wav = scratch / "repair-0000.wav"
     params, raw = _wav_frames(repair_wav)
     assert params == (1, 2, RATE, 8 * RATE)  # 구간 10~18초
@@ -659,7 +749,7 @@ def test_a_recovered_repeat_is_replaced_using_retained_pcm(tmp_path: Path) -> No
 
 
 def test_a_short_unrecovered_repeat_is_kept(tmp_path: Path) -> None:
-    media, reference, transcriber, artifacts, _scratch, _pcm = _repeat_setup(
+    media, reference, transcriber, artifacts, _namespace, _pcm = _repeat_setup(
         tmp_path,
         count=8,
         rescue_payload=_loop_rescue(),
@@ -675,7 +765,7 @@ def test_a_short_unrecovered_repeat_is_kept(tmp_path: Path) -> None:
 
 
 def test_a_long_unrecovered_repeat_is_collapsed(tmp_path: Path) -> None:
-    media, reference, transcriber, artifacts, _scratch, _pcm = _repeat_setup(
+    media, reference, transcriber, artifacts, _namespace, _pcm = _repeat_setup(
         tmp_path,
         count=40,
         rescue_payload=_loop_rescue(),
@@ -692,7 +782,7 @@ def test_a_long_unrecovered_repeat_is_collapsed(tmp_path: Path) -> None:
 
 
 def test_a_positive_arbiter_answer_buys_one_hotter_retry(tmp_path: Path) -> None:
-    media, reference, transcriber, artifacts, _scratch, _pcm = _repeat_setup(
+    media, reference, transcriber, artifacts, _namespace, _pcm = _repeat_setup(
         tmp_path, count=8, rescue_payload=_loop_rescue(), arbiter_payload={"text": CLEAN}
     )
     trace = transcribe_source(media, reference, Config(), transcriber, artifacts)
@@ -709,7 +799,7 @@ def test_a_positive_arbiter_answer_buys_one_hotter_retry(tmp_path: Path) -> None
 @pytest.mark.parametrize("text", ["", "   "], ids=["empty", "blank"])
 def test_an_empty_arbiter_answer_is_valid_no_speech_not_an_error(tmp_path: Path, text: str) -> None:
     """빈 심판 답은 말이 없다는 증거다 — 계약 위반이 아니라 유지·접기 정책으로 흐른다."""
-    media, reference, transcriber, artifacts, _scratch, _pcm = _repeat_setup(
+    media, reference, transcriber, artifacts, _namespace, _pcm = _repeat_setup(
         tmp_path, count=8, rescue_payload=_loop_rescue(), arbiter_payload={"text": text}
     )
     trace = transcribe_source(media, reference, Config(), transcriber, artifacts)
@@ -720,7 +810,7 @@ def test_an_empty_arbiter_answer_is_valid_no_speech_not_an_error(tmp_path: Path,
 
 
 def test_the_arbiter_list_of_text_fallback_shape_is_valid(tmp_path: Path) -> None:
-    media, reference, transcriber, artifacts, _scratch, _pcm = _repeat_setup(
+    media, reference, transcriber, artifacts, _namespace, _pcm = _repeat_setup(
         tmp_path,
         count=8,
         rescue_payload=_loop_rescue(),
@@ -736,7 +826,7 @@ def test_extra_namespace_records_outside_the_retry_subset_are_filtered(
     tmp_path: Path,
 ) -> None:
     """네임스페이스 픽스처의 부분집합 선택은 P3-01을 따른다 — 남는 기록은 결정적으로 걸러진다."""
-    media, reference, transcriber, artifacts, _scratch, _pcm = _repeat_setup(
+    media, reference, transcriber, artifacts, _namespace, _pcm = _repeat_setup(
         tmp_path,
         count=8,
         rescue_payload=_clean_rescue(),
@@ -790,7 +880,7 @@ def test_a_dead_rescue_call_is_captured_not_cached_as_success(
     # 이미 만들어진 초안·덮개 증거는 남는다 — 완성물은 나오지 않는다.
     assert len(trace.draft) == 10
     assert len(trace.coverage) == 1
-    assert not (namespace / "demo.SOURCE.srt").exists()
+    assert list(namespace.rglob("*.SOURCE.srt")) == []
     assert trace.source_srt_relative_path is None
 
 
@@ -838,7 +928,7 @@ def test_a_malformed_arbiter_payload_is_a_captured_operational_error(
     trace = transcribe_source(media, reference, Config(), scripted, artifacts)
     assert trace.status == "error"
     assert trace.error is not None and "심판" in trace.error
-    assert not (namespace / "demo.SOURCE.srt").exists()
+    assert list(namespace.rglob("*.SOURCE.srt")) == []
     assert len(trace.draft) == 10
 
 
@@ -861,7 +951,7 @@ def test_a_failing_pcm_cutter_is_an_error_not_a_silent_success(
     assert trace.status == "error"
     assert trace.error is not None and "슬라이스가 죽었다" in trace.error
     assert len(trace.draft) == 10
-    assert not (namespace / "demo.SOURCE.srt").exists()
+    assert list(namespace.rglob("*.SOURCE.srt")) == []
 
 
 def test_a_duplicate_rescue_response_is_rejected(tmp_path: Path) -> None:
@@ -927,7 +1017,7 @@ def test_broken_initial_coverage_is_rejected_before_any_spine(
     assert trace.status == "error"
     assert trace.error is not None and match in trace.error
     assert trace.draft == () and trace.coverage == ()
-    assert not (tmp_path / "artifacts" / "acid-1" / "demo.SOURCE.srt").exists()
+    assert list((tmp_path / "artifacts").rglob("*.SOURCE.srt")) == []
 
 
 def test_a_non_object_initial_payload_is_rejected(tmp_path: Path) -> None:
