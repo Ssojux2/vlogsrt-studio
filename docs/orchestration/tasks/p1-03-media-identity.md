@@ -34,7 +34,7 @@ def sha256_file(path: Path) -> str: ...
 def resolve_media(document: ProjectDocument, overrides: Sequence[MediaOverride] = ()) -> tuple[ResolvedMedia, ...]: ...
 ```
 
-- `load_media_map` accepts one strict JSON shape: a top-level array of objects with required nonempty string `resource_id` and at least one of optional `original`/`proxy`. No other top-level type, unknown object key, duplicate `resource_id`, empty string, JSON `null`, or non-string field is accepted; raise `ValueError` naming the map path and entry/key location. `original` and `proxy`, when present, are nonempty **relative filesystem path** strings resolved from `path.parent`, never from cwd; absolute paths and URI strings are rejected. This loader validates structure and path addressing only—document membership and media usability remain `resolve_media` checks.
+- `load_media_map` accepts one strict JSON shape: a top-level array of objects with required nonempty string `resource_id` and at least one of optional `original`/`proxy`. No other top-level type, unknown object key, duplicate `resource_id`, empty string, JSON `null`, or non-string field is accepted; raise `ValueError` naming the map path and entry/key location. `original` and `proxy`, when present, are nonempty filesystem path strings: relative paths resolve from `path.parent`, never cwd, while absolute paths remain unchanged. URI strings are rejected, and neither environment-variable nor tilde expansion occurs. This loader validates structure and path addressing only—document membership and media usability remain `resolve_media` checks.
 
 ```json
 [
@@ -52,7 +52,7 @@ def resolve_media(document: ProjectDocument, overrides: Sequence[MediaOverride] 
 
 ## Implementation steps
 
-1. Write failing tests for the strict map schema and example, path resolution from the map parent rather than cwd, rejection of absolute/URI/empty/null/non-string/unknown fields and entries with no media path, override precedence, percent-encoded XML file URIs, same-name/different-content, repeated instances, missing/unusable proxy fallback, missing/unusable original failure, unknown/duplicate map entries, reuse of the same raw `r2` ID in two different documents without cross-document binding, and equal content bytes referenced by resources with different `has_audio` declarations.
+1. Write failing tests for the strict map schema and example, relative-path resolution from the map parent rather than cwd, unchanged absolute paths, rejection of URI/empty/null/non-string/unknown fields and entries with no media path, no environment/tilde expansion, override precedence, percent-encoded XML file URIs, same-name/different-content, repeated instances, missing/unusable proxy fallback, missing/unusable original failure, unknown/duplicate map entries, reuse of the same raw `r2` ID in two different documents without cross-document binding, and equal content bytes referenced by resources with different `has_audio` declarations.
 2. Implement deterministic full hashing and resolution without opening any FCP database.
 3. Run focused tests/invariants/`make check`; commit owned files only.
 
