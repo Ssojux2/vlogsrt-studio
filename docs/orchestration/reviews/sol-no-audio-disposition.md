@@ -1,7 +1,7 @@
 # Sol design disposition: assets with no audio
 
 Date: 2026-09-09  
-Status: proposed for Astra approval before shared-brief edits
+Status: Astra-approved runtime direction; P1 XML `hasAudio` interpretation remains pending schema review
 
 ## Problem
 
@@ -33,6 +33,8 @@ Status: proposed for Astra approval before shared-brief edits
 
    Add `variant: Literal["source_trace"]` to `SourceTrace` so persisted JSON is a stable discriminated union. Enforce `status == "no_audio"` iff `reason_code == "declared_no_audio"`; the two unavailable codes require `status == "error"`. Neither unavailable variant has PCM, origin, analysis-key, coverage, or transcript fields.
 
+   Both `UnavailableSourceAudio` and `SourceTrace` enforce their variant/status/reason invariants in `__post_init__` by raising a typed exception; assertions are not runtime validation. Workspace decoding rejects an unknown variant or schema revision before any media, PCM, STT, or VAD call.
+
    `transcribe_source` stays audio-only. Freeze the aggregate interface as:
 
    ```python
@@ -46,27 +48,30 @@ Status: proposed for Astra approval before shared-brief edits
    ) -> tuple[SourceAnalysis, ...]: ...
    ```
 
-   Validate every pair by `resource_scoped_id`, `source_id`, and original hash. Pass through one unavailable record per resource with zero STT calls. Transcribe only real references and deduplicate those calls by `PcmReference.analysis_key`.
-4. P3-03 accepts `Sequence[SourceAnalysis]` and adds `unavailable_audio: tuple[UnavailableSourceAudio, ...]` to `SourceCaptionSet`. For an audio-capable resource without an unavailable record it still requires one unambiguous `SourceTrace` and the measured origin, including successful-empty traces. For a resource-scoped unavailable variant it emits no cues for only that resource and carries the explicit keep/review disposition; it never fabricates an origin. `status="error"` prevents final-ready publication but does not prevent valid unrelated resources from being analyzed or included in an explicit draft.
+   Validate every pair by `resource_scoped_id`, `source_id`, and original hash. Reject malformed identity/revision inputs before any call. Pass through one unavailable record per resource with zero STT calls. Transcribe only real references and deduplicate those calls by `PcmReference.analysis_key`.
+4. P3-03 accepts `Sequence[SourceAnalysis]` and adds `unavailable_audio: tuple[UnavailableSourceAudio, ...]` to `SourceCaptionSet`. For an audio-capable resource without an unavailable record it still requires one unambiguous `SourceTrace` and the measured origin, including successful-empty traces. For a resource-scoped unavailable variant it emits no cues for only that resource and carries the explicit keep/review disposition; it never fabricates an origin. Each input resource resolves exactly once to either its own unavailable record or one valid shared content/analysis-key trace; duplicate `SourceTrace` values per resource are neither required nor permitted. `status="error"` prevents final-ready publication but does not prevent valid unrelated resources from being analyzed or included in an explicit draft.
 5. P4-01 defines audibility as `media.has_audio and clip.enabled and clip.src_enable == "all"`. Video-only slices remain addressable with `audible=False`, preserve instances/blades, create no boundary requests, and cannot authorize automatic shortening.
 6. P5 VAD consumes only real `PcmReference` values. A no-audio source produces no VAD call/result; its P4 slices are already inaudible and therefore yield no eligible P6 block. P6 records the resource/instances as keep-all review, not an analysis success.
-7. P7 persists each `UnavailableSourceAudio` record as a completed, non-billable source-analysis disposition using its `variant`, `status`, and `reason_code`. Cost estimation and scheduling create zero PCM/STT/VAD requests for it; `inspect` reports either `no_audio: keep/review` or the pre-PCM error, while unrelated assets continue. Reprojection/export retain the XML instances unchanged.
+7. P7 owns construction of pre-PCM unavailability. Its runner catches contextual P2 probe/extraction/reference failures and constructs the P3-owned `UnavailableSourceAudio` before invoking P3 aggregation; P2 remains audio-only, raises contextual errors, never imports P3, and never constructs an unavailable record. A declared-no-audio record is persisted as completed and non-billable. A pre-PCM `status="error"` record is a failed attempt, not a reusable completed success: explicit resume/retry may rerun preprocessing under P7 policy, while STT/VAD remain forbidden until a real `PcmReference` exists. Cost estimation accepts `Sequence[SourceAnalysis]` and creates zero PCM/STT/VAD requests for unavailable records; `inspect` reports either `no_audio: keep/review` or the pre-PCM failure, while unrelated assets continue. Reprojection/export retain the XML instances unchanged.
+
+   An operational failure after a real PCM reference exists remains an error `SourceTrace` carrying the real reference identity, hashes, origin, and analysis key. It is not converted to `UnavailableSourceAudio`; unrelated sources still proceed.
 
 ## Resource/content join cases
 
-- Two audio resources with the same `asset_content_id` and same PCM `analysis_key` share one `SourceTrace`, while each clip still joins through its own `ResolvedMedia.resource_scoped_id`.
+- Two audio resources with the same `asset_content_id` and same PCM `analysis_key` share one `SourceTrace`, while each resource resolves exactly once through its own `ResolvedMedia.resource_scoped_id`.
 - A no-audio resource and an audio resource may resolve to identical content bytes. The former keeps its resource-scoped `UnavailableSourceAudio(status="no_audio")`; the latter may still produce and consume a valid content-scoped `SourceTrace`. The unavailable record never participates in content-ID/analysis-key dedup and cannot suppress the valid trace.
 - If one declared-audio resource has `stream_unavailable`/`pcm_unavailable` while another resource with the same content has a valid reference, only the failing resource is locked/reviewed; the valid resource may analyze. P3-03 checks a resource-scoped unavailable record before falling back to a content-scoped trace.
+- Coalescing tests must include equal content bytes referenced by resources with different `has_audio` declarations. Resource-level disposition wins before content-key sharing, so a declared-no-audio resource cannot inherit or suppress the audio resource's trace.
 
 ## Required brief ownership after approval
 
 - P1-03: add/freeze `ResolvedMedia.has_audio` and propagation tests.
 - P2-02: state that references exist only for `has_audio=True`; no optional/fake reference; declared-audio extraction failure remains an error.
-- P3-02: own `UnavailableSourceAudio`, the stable variant discriminator, `SourceAnalysis`, exact pair joins, and zero-call tests.
+- P3-02: own `UnavailableSourceAudio`, the stable variant discriminator, `SourceAnalysis`, exact pair joins, `__post_init__` validation, and zero-call tests.
 - P3-03: accept the union and distinguish expected no-audio absence from missing audio analysis.
 - P4-01 through P4-03: include `has_audio` in audibility and exclude no-audio from boundary/reference requirements.
 - P5-03/P6-01: prove no-audio instances produce no eligible edit blocks and retain a review reason.
-- P7-01/P7-02/P7-03/P7-06: persist/report the status, estimate zero audio cost, schedule zero audio work, and cover mixed audio/no-audio projects.
+- P7-01/P7-02/P7-03/P7-06: construct pre-PCM unavailable records, reject unknown variants/schema revisions before work, persist/report declared-no-audio versus retryable failure, estimate from `Sequence[SourceAnalysis]`, schedule zero downstream audio work without a real reference, and cover mixed audio/no-audio projects.
 
 ## Acceptance matrix
 
@@ -75,5 +80,11 @@ Status: proposed for Astra approval before shared-brief edits
 - Declared `has_audio=True` but stream missing/malformed: `UnavailableSourceAudio(status="error", reason_code="stream_unavailable")`; never downgraded to `no_audio` or `empty`; unrelated assets proceed.
 - Declared audio whose extraction/reference persistence fails: `UnavailableSourceAudio(status="error", reason_code="pcm_unavailable")`; no fake path/hash/origin; unrelated assets proceed.
 - Mixed/same-content project: valid audio assets still analyze; resource-scoped unavailable variants do not suppress a content-scoped valid trace; video-only assets remain unchanged; no global readiness failure solely because video-only resources exist.
+- Post-PCM operational failure: one error `SourceTrace` with real reference provenance; no unavailable-record downgrade or fabricated reference; unrelated sources proceed.
+- Persistence/restart: declared-no-audio is reusable completed/non-billable; a pre-PCM error is a retryable failed attempt and never a permanent completed success; unknown union variants and schema revisions fail before calls.
+
+## Pending P1 schema decision
+
+The runtime union above does not decide how omitted versus explicit XML `hasAudio` attributes map into `AssetResource.has_audio`. Freeze that parser/resolver rule only after the separate Apple schema/documentation review; do not infer a truthy default from the runtime disposition.
 
 This is intentionally conservative for v1: video-only B-roll is not automatically shortened. A later policy may make silent-video editing eligible only through a separately reviewed contract; this disposition grants no such authority.
