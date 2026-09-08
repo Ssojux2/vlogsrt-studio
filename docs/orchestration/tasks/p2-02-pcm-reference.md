@@ -52,18 +52,22 @@ def quiet_sample(reference: PcmReference, target: int, search_samples: int, wind
 - Slice contains only `[start,end)` retained frames from the same stored PCM, interleaved channel-complete, with byte count `(end-start) * sample_width * channels` plus an ordinary WAV header. No removed-audio padding/context.
 - `quiet_sample` searches only the bounded target window in per-channel frame units, measures channels separately and ranks a frame window by their maximum absolute amplitude; ties choose the candidate nearest target, then the earlier candidate. It chooses a cut location only and never labels speech/silence.
 - `file_time = Fraction(sample_index, sample_rate) + pcm_sample0_file_time`; keep this as exact Fraction arithmetic and consume P2-01's proven decoded-clock origin rather than equating it to raw ffprobe `stream.start_time`.
-- Before reuse or extraction, hash the actual original file in full and require equality with supplied `original_sha256`; a mismatch fails contextually before calling P2-01. Atomic creation and hash verification then require that a completed destination is reused only when original/PCM metadata, both hashes, and policy match.
+- Before reuse or extraction, hash the actual original file in full and require equality with supplied `original_sha256`; a mismatch fails contextually before calling P2-01. Hash verification requires that a completed generation is reused only when original/PCM metadata, both hashes, and policy match.
+- `destination` is a **logical cache address**, not the mutable pathname promised by a returned reference. A completed build writes a new immutable generation PCM and its immutable metadata under private sibling generation paths, verifies that pair completely, and only then publishes one manifest/pointer for `destination` with a same-directory atomic replace. `PcmReference.path` is the immutable generation PCM path selected by that pointer and is not required to equal `destination`.
+- Never rename, remove, or overwrite an existing generation during replacement. Failed extraction, generation-metadata publication, verification, or pointer publication leaves the previous pointer and every prior generation untouched; an immediate process exit before pointer commit has the same property and may leave only unreferenced private generation material. Successful changed-source publication advances the pointer but retains old generations, so every already-issued `PcmReference` remains hash-valid and sliceable after both failed **and successful** updates at the same logical `destination`.
+- A backup/rollback around a mutable destination is not an accepted substitute: `finally` cleanup cannot make that design crash-safe. The pointer may name only a private generation produced for the same logical address, and loading still validates the pointed immutable metadata, PCM size/hash, original identity, and exact policy before reuse.
 - The public surface is exactly the dataclasses/functions in the contract block. The file-time formula is consumed directly or through private implementation helpers; do not add an unreviewed public convenience API.
 
 ## Implementation steps
 
 1. Write failing byte-pattern tests for policy construction, original-file hash agreement/mismatch-before-call, mono/stereo, ceil/floor boundaries, negative/nonzero origin mapping, tail clamp, zero range, hash-key changes, quiet-cut tie behavior, phase-opposed channels, and deterministically injected atomic failure.
-2. Implement using P2-01 extraction plus stdlib hash/wave/file operations; no subprocess here.
-3. Run focused/P2/full checks; commit owned files.
+2. Add red-first publication tests that begin with a valid old `PcmReference`, request a different original/hash at the same logical `destination`, and prove: metadata or pointer failure preserves the old pair and old-reference slice with zero re-extraction; a child process exiting before pointer commit cannot invalidate the old reference; and a successful changed-source update returns a different immutable generation while the held old reference remains usable. Assert the logical pointer never exposes a partial pair and no test depends on `finally` rollback.
+3. Implement using P2-01 extraction plus stdlib hash/wave/file operations; no production subprocess here.
+4. Run focused/P2/full checks; commit owned files.
 
 ## Acceptance
 
-Slices decode to exactly the expected channel frames; no sample outside the retained range appears. Same content/policy yields same key, any audio selection/config/hash change yields a different key. `make check` passes.
+Slices decode to exactly the expected channel frames; no sample outside the retained range appears. Same content/policy yields same key, any audio selection/config/hash change yields a different key. Prior returned references survive failure, abrupt pre-commit process exit, and successful replacement at the same logical address because their immutable generation paths remain present and unchanged. `make check` passes.
 
 ## Failure route
 
