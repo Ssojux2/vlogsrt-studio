@@ -124,5 +124,20 @@
     "context_window": 1000000,
     "result": "GLM_MAX_READY",
     "session": "5a5722f8-ce6e-4eaa-b26b-783cc1b65903"
+  },
+  "bootstrap_commit": "c96e50af3acda91c995183fca879d9538e45529f",
+  "baseline_checks": {
+    "make_check": "passed",
+    "pytest_passed": 389,
+    "invariant_groups_passed": 16,
+    "uv_pip_check": "30 compatible packages",
+    "sandbox_note": "localhost/AppleScript tests require host execution"
+  },
+  "opus_followup": {
+    "task_id": "task_ccb2369295aa",
+    "dispatch_id": "ctx_82a105f90db9",
+    "terminal": "term_0443f96f-45f0-429b-b385-d59e1e7130d7",
+    "launch": "reused exact initial Opus5 high session",
+    "purpose": "reconcile bootstrap review with Astra disposition"
   }
 }

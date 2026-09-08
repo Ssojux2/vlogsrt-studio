@@ -46,7 +46,7 @@ Opus는 일반 claude --model claude-opus-5 --effort high. GLM wrapper를 사용
 GLM은 claude-glm --model 'glm-5.3[1m]' --effort max. 기존 wrapper가 endpoint/key를 프로세스 한정으로 관리한다. 키 파일/.env를 읽어 출력하지 않는다.
 claude-glm fresh terminal이 필요하면 Orca terminal create --command에서 실행하고, task를 worker-start --terminal 또는 dispatch --inject로 연결한다. 일반 claude만 실행해 GLM인 척하지 않는다.
 프로젝트 .claude/settings.json의 보호 규칙을 유지한다. 안전 장치 bypass 플래그를 추가하지 않는다.
-GLM1M CLI xhigh smoke 통과 후 사용자가 max를 선택했다. 새 워커는 max로 실행하고 launch receipt를 확인한다. Z.ai 서버 문서도 max를 제공하지만 서버 내부 매핑을 확인된 사실로 쓰지 않는다.
+사용자가 GLM effort를 max로 변경했고, glm-5.3[1m] --effort max 실행 시험이 GLM_MAX_READY 응답과 contextWindow=1000000으로 통과했다. 새 워커도 max로 실행하고 launch receipt를 확인한다. 서버 내부 effort 매핑이나 실제 1M 입력 부하 시험까지 확인한 것은 아니다.
 관리자는 launch.requested/effective, GLM 실제 모델/컨텍스트와 task/dispatch ID를 ledger에 남긴다.
 전사/vision 실제 API fixture는 기존 정책상 사람이 녹화한다. 이번에 명시적으로 요청한 코딩/리뷰 모델 호출과 혼동하지 않는다.
 

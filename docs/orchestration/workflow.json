@@ -86,7 +86,8 @@
     ],
     "single_task_per_glm_dispatch": true,
     "nested_depth_policy": "never bypass; if depth is denied manager submits exact worker spec to root for dispatch",
-    "role_lifecycle": "all worker outcomes through actual Orca task/dispatch; release/reuse after settlement"
+    "role_lifecycle": "all worker outcomes through actual Orca task/dispatch; release/reuse after settlement",
+    "pending_acceptance_policy": "continue independent offline implementation; pending is never PASS"
   },
   "loop": [
     "Sol writes bounded brief",
@@ -112,5 +113,23 @@
       "reported_context_window": 1000000
     },
     "note": "configuration and runtime receipts prove requests; do not claim server-side effort mapping or 1M-input stress test"
-  }
+  },
+  "toolchain": {
+    "development_python": "3.12.14",
+    "runtime_floor": "3.11",
+    "environment_manager": "uv",
+    "bootstrap": [
+      "uv venv --python python3.12 .venv",
+      "uv pip install --python .venv/bin/python -e '.[dev]'",
+      "uv pip check --python .venv/bin/python"
+    ],
+    "worker_import_gate": "vlogsrt.__file__ must resolve within the worker worktree"
+  },
+  "pending_external_acceptance": [
+    "actual-media S17 reproduction and make verify",
+    "golden evaluation once supplied",
+    "actual Final Cut import/reexport and original-media relink/playback",
+    "pilot audit of every removed audio interval",
+    "human-recorded live STT/vision fixtures"
+  ]
 }

@@ -25,7 +25,7 @@ Transcribe each selected unique source file FULLY once, using explicit per-asset
 Persistent original16k PCM reference with hash, audio stream/channel policy and measured audio_origin. S17: reproduce last/intermediate/repair chunk drift against decoded PCM; correct measured origins/splitting, never magic +0.2s. Audio sync acceptance including boundary snippets gated on this result; XML parser work is independent.
 file_time=audio_time+original_audio_origin.
 input_project_elapsed=clip.offset-sequence.tcStart+asset.start+file_time-clip.start.
-XML times Fraction; convert legacy floats via Fraction(str(value)), no early ms quantization. Source frame grid anchored to asset.start; output integer frames, intervals [start,end). Duration/order/no-overlap/ref checks beyond DTD. Untouched XML time strings preserved. Output SRT round half-up to ms ONCE at final serialization; same boundary same value, adjacent end==start allowed, end>start rejected. Clip-end cue uses exact slice endpoint; don't invent 1frame gaps.
+XML times Fraction; convert legacy floats via Fraction(str(value)), no early ms quantization. Source frame grid anchored to asset.start; output integer frames, intervals [start,end). Duration/order/no-overlap/ref checks beyond DTD. Untouched XML time strings preserved. Output SRT round half-up to ms ONCE at final serialization; same boundary same value. Adjacent cues may satisfy previous.end==next.start; reject previous.end>next.start overlaps and individual cue.end<=cue.start invalid durations. Clip-end cue uses exact slice endpoint; don't invent 1frame gaps.
 IDs: resource IDs scoped to input XML hash, source content identity separate from clip instance. Original file content+audio selection/config in strong cache keys. Reexport rebinds by verified resource identity/content, never r2 or filename alone.
 
 ## Boundary transcripts
@@ -66,6 +66,5 @@ Pilot2min then10-20min actual FCP import-reexport, original4K relink/playback, f
 ## Evidence at handoff
 Baseline source commit matches original doc. Original plan SHA2568b09883ece2d9542119e9594fcb1acf52ffedc137d14763e993bfd22ad2e3e8f.
 Local Final Cut12.3 + FCPXML1.14 DTD; synthetic XML with original/proxy/gap/repeated disabled clips passed xmllint. Existing16 invariant groups passed under python3.12.
-Full makecheck unrun because dev dependencies absent. No actual FCPXML/media sample import, production STT/GLM-Flash or VAD artifact verification claimed.
+At the initial design handoff, full makecheck was unrun because dev dependencies were absent. Execution bootstrap restored Python3.12.14 via uv, installed .[dev], and passed make check (389 tests, Ruff, mypy, all16 invariant groups); uv pip check confirmed30 compatible packages. Sandbox localhost/AppleScript failures disappeared when rerun outside sandbox. No actual FCPXML/media sample import, production STT/GLM-Flash or VAD artifact verification claimed.
 Sources: https://docs.z.ai/guides/vlm/glm-5.3-flash ; https://developer.apple.com/documentation/professional-video-applications/fcpxml-bundle-reference?changes=_3 ; https://support.apple.com/en-ca/guide/final-cut-pro/ver4185ef95a/mac ; https://raw.githubusercontent.com/snakers4/silero-vad/v6.2.1/src/silero_vad/utils_vad.py
-
