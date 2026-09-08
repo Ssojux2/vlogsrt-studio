@@ -126,7 +126,7 @@ def test_wellformedness_argv_is_exactly_the_frozen_shape(
 
     assert len(seen) == 1, "subprocess 호출은 정확히 한 번이다"
     argv, kwargs = seen[0]
-    assert argv == ["/usr/bin/xmllint", "--nonet", "--noout", str(path)]
+    assert argv == ["/usr/bin/xmllint", "--nonet", "--noout", str(path.resolve())]
     assert kwargs["shell"] is False
     assert "executable" not in kwargs
     assert result.valid is True
@@ -154,7 +154,7 @@ def test_dtd_argv_is_exactly_the_frozen_shape_with_a_uri(
         "--noout",
         "--dtdvalid",
         dtd.resolve().as_uri(),
-        str(path),
+        str(path.resolve()),
     ]
     assert " " not in argv[4], "빈칸은 %20으로 인코딩되어 한 argv 칸에 있어야 한다"
     assert "%20" in argv[4]
@@ -175,8 +175,27 @@ def test_a_malicious_looking_path_stays_one_plain_argv_element(
 
     argv, kwargs = seen[0]
     assert len(argv) == 4
-    assert argv[-1] == str(path)
+    assert argv[-1] == str(path.resolve())
     assert kwargs["shell"] is False
+
+
+def test_a_relative_option_looking_path_becomes_an_absolute_operand(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """xmllint는 '-'로 시작하는 글자를 깃발로 읽는다 — 절대 경로만이 피연산자다.
+
+    실측 블로커: `Path('--version')`을 그대로 넘기면 xmllint가 깃발로 받아들여
+    버전 출력과 함께 종료 0 — 없는 파일이 valid=True로 둔갑한다.
+    """
+    seen = _stub_run(monkeypatch)
+    _stub_tool(monkeypatch)
+
+    validate_xml(Path("--version"))
+
+    argv, _kwargs = seen[0]
+    assert argv[-1] == str(Path("--version").resolve())
+    assert argv[-1].startswith("/")
+    assert "--version" not in argv
 
 
 # ─── 없음은 판정이 아니다 — unavailable ─────────────────────────────────
@@ -374,3 +393,25 @@ def test_real_malicious_name_is_validated_never_executed(tmp_path: Path) -> None
 
     assert result.valid is True
     assert not (tmp_path / "pwned").exists(), "셸이었다면 이 흔적이 생겼을 것이다"
+
+
+@needs_xmllint
+def test_real_nonexistent_option_looking_input_is_not_version_output() -> None:
+    """없는 '--version' 입력이 libxml 출력과 valid=True를 내는 일은 없다 — 정규화가 막는다."""
+    result = validate_xml(Path("--version"))
+
+    assert result.valid is False
+    assert result.diagnostics
+    assert not any("libxml" in line for line in result.diagnostics)
+
+
+@needs_xmllint
+def test_real_dash_prefixed_filename_is_a_plain_operand(tmp_path: Path) -> None:
+    """'-'로 시작하는 실재 파일은 피연산자다 — 잘 이루어졌으면 유효하다."""
+    path = tmp_path / "-대시로-시작하는.fcpxml"
+    path.write_text(build_fcpxml(), encoding="utf-8")
+
+    result = validate_xml(path)
+
+    assert result.valid is True
+    assert result.diagnostics == ()

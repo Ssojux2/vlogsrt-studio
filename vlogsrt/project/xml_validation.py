@@ -10,6 +10,10 @@
       [xmllint, "--nonet", "--noout", path]
       [xmllint, "--nonet", "--noout", "--dtdvalid", dtd_uri, path]
 
+  여기서 `path` 칸은 **절대 경로로 정규화한 입력**이다. 상대 경로를 그대로 주면
+  xmllint가 '-'로 시작하는 글자를 깃발로 읽는다 — 실측: `Path('--version')`은
+  없는 파일인데 버전 출력과 함께 종료 0이라 valid=True로 둔갑했다.
+
 DTD를 `Path.resolve().as_uri()`로 넘기는 것은 취향이 아니라 실측이다: 설치된
 Final Cut Pro DTD 경로에는 빈칸이 있고("Final Cut Pro.app"), `--dtdvalid`에
 평범한 경로를 주면 xmllint가 DTD를 아예 읽지 못한다(종료 코드 2). URI의 %20
@@ -55,17 +59,20 @@ class XmlValidationUnavailable(RuntimeError):
 def validate_xml(path: Path, *, dtd_path: Path | None = None) -> XmlValidation:
     """`path`의 XML을 xmllint로 검증한다. `dtd_path`를 주면 DTD 대조까지 한다.
 
-    `path` 자체의 존재는 xmllint에게 맡긴다 — 없는 파일은 0이 아닌 종료 코드와
-    진단으로 돌아온다. 이 경계가 예외를 내는 것은 환경뿐이다(도구·DTD·실행 경주).
+    입력은 절대 경로로 정규화해서 argv에 넣는다 — 상대 경로의 '-' 글자가 xmllint
+    깃발로 읽히는 일을 끊는다. 정규화된 자리에 파일이 없는 것은 xmllint의 0이 아닌
+    종료 코드와 진단으로 돌아온다. 이 경계가 예외를 내는 것은 환경뿐이다(도구·DTD·
+    실행 경주).
     """
     xmllint = shutil.which("xmllint")
     if xmllint is None:
         raise XmlValidationUnavailable("xmllint이 없다 — PATH에서 찾을 수 없다")
+    absolute_path = path.resolve()
     if dtd_path is None:
-        completed = _run_wellformedness(xmllint, path)
+        completed = _run_wellformedness(xmllint, absolute_path)
         dtd_checked = False
     else:
-        completed = _run_dtd_validation(xmllint, path, _dtd_uri(dtd_path))
+        completed = _run_dtd_validation(xmllint, absolute_path, _dtd_uri(dtd_path))
         dtd_checked = True
     return XmlValidation(
         valid=completed.returncode == 0,
