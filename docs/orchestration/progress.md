@@ -76,12 +76,12 @@ P4 merge + P5 merge -> P6-01 eligible block partition -> P6-02 deterministic Edi
                     -> Astra P6 merge
 
 P6 merge -> P7-01 workspace revisions -> P7-02 budget/cancel/resume runner
-         -> P7-03 CLI commands -> P7-04 captions reproject -> P7-05 project UI
+         -> P7-03 CLI commands -> [P7-04 captions reproject, P7-05 project UI]
          -> P7-06 offline acceptance ledger -> Astra P7 integration
          -> PENDING_HUMAN live Final Cut/media/model acceptance
 ```
 
-P0-03 and P0-04 may execute concurrently from the same corrected P0-02 merge SHA: P0-03 owns only `tests/test_source_immutability.py`, while P0-04 owns the new project package/config/model skeleton plus `tests/project/test_project_config.py`; neither edits the invariant checker/tests or a fixture/golden file. P1 and P2 may execute concurrently after P0 integration, because they start from the same approved P0 SHA and own disjoint files; Astra must integrate both before P3. In P5, VAD and vision may execute concurrently only at the explicit first wave above; their follow-ups remain serial within each branch.
+P0-03 and P0-04 may execute concurrently from the same corrected P0-02 merge SHA: P0-03 owns only `tests/test_source_immutability.py`, while P0-04 owns the new project package/config/model skeleton plus `tests/project/test_project_config.py`; neither edits the invariant checker/tests or a fixture/golden file. P1 and P2 may execute concurrently after P0 integration, because they start from the same approved P0 SHA and own disjoint files; Astra must integrate both before P3. In P5, VAD and vision may execute concurrently only at the explicit first wave above; their follow-ups remain serial within each branch. P7-04 and P7-05 may run together only from the same integrated P7-03 SHA; they own disjoint reproject/commands versus UI paths and join before P7-06.
 
 ## Task ledger
 
