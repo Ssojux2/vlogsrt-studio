@@ -12,6 +12,7 @@ from vlogsrt.cli import main
 from vlogsrt.config import Config
 from vlogsrt.models import Chunk, ChunkMark, Trace
 from vlogsrt.output import parse_srt
+from vlogsrt.transcribe import ChunkResponse, EmptyTranscript, TranscriptionJob
 
 SYNTHETIC = Path(__file__).parent / "fixtures" / "synthetic"
 VIDEO = Path("golden/demo.mp4")
@@ -266,3 +267,53 @@ def test_no_cache_run_reuses_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyP
         pipeline.prepare(video, Config(), offline=False, workdir=work, reuse_cache=False)
     assert len(calls) == 2  # 두 번 다 새로 뽑았다
     assert [path.name for path in work.iterdir()] == ["demo.mp3"]
+
+
+# ─────────────────────────────────────────────────────────────
+#  빈 초안의 보고 — EmptyTranscript (P3-01)
+# ─────────────────────────────────────────────────────────────
+
+
+class _Scripted:
+    """정해둔 응답을 그대로 돌려주는 가짜 전사자."""
+
+    def __init__(self, responses: list[ChunkResponse]) -> None:
+        self.responses = responses
+
+    def transcribe(self, job: TranscriptionJob, cfg: Config) -> list[ChunkResponse]:
+        return self.responses
+
+
+def test_fetch_draft_keeps_the_legacy_spine_flow(tmp_path: Path) -> None:
+    """레거시 흐름은 그대로다 — 호출 → build_spine. 바뀌는 건 빈 초안의 예외뿐이다."""
+    job = TranscriptionJob(stem="demo", chunks=(Chunk(tmp_path / "demo.mp3", 0.0, 12.0, 0),))
+    voiced = _Scripted(
+        [ChunkResponse(0, 0.0, {"segments": [{"start": 0.0, "end": 1.0, "text": " 망원동"}]})]
+    )
+    draft = pipeline.fetch_draft(voiced, job, Config())
+    assert [segment.text for segment in draft] == ["망원동"]
+
+
+def test_fetch_draft_raises_empty_transcript_on_an_empty_draft(tmp_path: Path) -> None:
+    job = TranscriptionJob(stem="demo", chunks=(Chunk(tmp_path / "demo.mp3", 0.0, 12.0, 0),))
+    silent = _Scripted([ChunkResponse(0, 0.0, {"segments": []})])
+    with pytest.raises(EmptyTranscript) as excinfo:
+        pipeline.fetch_draft(silent, job, Config())
+    assert isinstance(excinfo.value, RuntimeError)  # 기존 except RuntimeError 호환
+
+
+def test_run_with_only_empty_segments_stops_at_empty_transcript(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """응답이 전부 빈 리스트면 실행은 EmptyTranscript로 멈춘다 — 무음의 증거는 아니다."""
+    fixtures = tmp_path / "silent"
+    fixtures.mkdir()
+    (fixtures / "demo.whisper.json").write_text(
+        json.dumps({"chunks": [{"index": 0, "offset": 0.0, "response": {"segments": []}}]}),
+        encoding="utf-8",
+    )
+    (fixtures / "demo.meta.json").write_text(json.dumps({"duration": 12.0}), encoding="utf-8")
+    monkeypatch.setenv("VLOGSRT_FIXTURE_DIR", str(fixtures))
+
+    with pytest.raises(EmptyTranscript):
+        pipeline.run(VIDEO, Config(), tmp_path / "out", force_offline=True)
