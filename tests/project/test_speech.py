@@ -361,6 +361,34 @@ def test_plan_rejects_a_limit_smaller_than_one_wav(tmp_path: Path, chunk_max_byt
         plan_source_ranges(reference, cfg)
 
 
+@pytest.mark.parametrize("seconds", [0.00001, 1 / (2 * RATE)], ids=["tiny", "half-frame"])
+def test_plan_rejects_a_positive_seconds_limit_below_one_frame(
+    tmp_path: Path, seconds: float
+) -> None:
+    """프레임 하나(1/주파수 초)보다 작은 양의 초 한도는 한 조각도 못 만든다.
+
+    재현(Sol): 16 kHz에서 chunk_max_seconds=0.00001이면 초 환산이 0프레임이고,
+    나눗셈에서 ZeroDivisionError이 새어 나왔다. 계약 위반은 문맥 있는 ValueError로,
+    전사 호출보다 앞에서 죽어야 한다.
+    """
+    reference = _reference(tmp_path / "ref.pcm", _pattern_pcm(1_600))
+    cfg = data_replace(Config(), chunk_max_seconds=seconds)
+    with pytest.raises(ValueError, match="chunk_max_seconds"):
+        plan_source_ranges(reference, cfg)
+
+
+def test_a_sub_sample_seconds_limit_errors_the_source_before_any_call(
+    tmp_path: Path,
+) -> None:
+    media, reference, transcriber, artifacts, _namespace = _clean_setup(tmp_path)
+    cfg = data_replace(Config(), chunk_max_seconds=0.00001)
+    trace = transcribe_source(media, reference, cfg, transcriber, artifacts)
+    assert trace.status == "error"
+    assert trace.error is not None and "chunk_max_seconds" in trace.error
+    assert transcriber.calls == [], "깨진 한도는 호출 앞에서 죽는다"
+    assert trace.draft == () and trace.coverage == ()
+
+
 def test_plan_moves_the_boundary_to_the_quietest_window(tmp_path: Path) -> None:
     """여유가 있는 한 목표 경계를 가장 조용한 창으로 옮긴다 — 한도가 우선한다."""
     frames = 64_001  # 4초 + 1프레임 — 2초 한도로 3조각: 조용한 창이 쓸 여유가 있다

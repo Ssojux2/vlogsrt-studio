@@ -274,7 +274,13 @@ def _max_range_frames(reference: PcmReference, cfg: Config) -> int:
             f"chunk_max_bytes가 한 프레임({frame_bytes}바이트)도 못 담는다: {cfg.chunk_max_bytes!r}"
         )
     if cfg.chunk_max_seconds > 0:
-        return min(by_bytes, int(cfg.chunk_max_seconds * reference.sample_rate))
+        by_seconds = int(cfg.chunk_max_seconds * reference.sample_rate)
+        if by_seconds < 1:
+            raise ValueError(
+                f"chunk_max_seconds가 한 프레임(1/{reference.sample_rate}초)도 못 담는다: "
+                f"{cfg.chunk_max_seconds!r} — 조각 하나를 못 만든다"
+            )
+        return min(by_bytes, by_seconds)
     return by_bytes
 
 
