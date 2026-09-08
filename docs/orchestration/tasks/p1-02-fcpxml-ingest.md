@@ -1,0 +1,100 @@
+# Task P1-02: parse the supported FCPXML 1.14 subset
+
+## Authority
+
+Binding spec `Input and output` plus `Source analysis, clocks, identity`; depends on P1-01. Opus must review the frozen model names before dispatch because P1-03/P1-05 consume them.
+
+## Baseline and ownership
+
+- Fresh `fcp-p1-ingest` child worktree from Astra's approved current P1 base (including P1-01 integration).
+- Modify the P0-created FCPXML-only `vlogsrt/project/models.py`; create `vlogsrt/project/fcpxml.py`, `tests/project/test_fcpxml.py`.
+- No media resolution, subprocess/DTD validation, writing, source transcription, or CLI work.
+
+## Contract
+
+```python
+@dataclass(frozen=True, slots=True)
+class MediaRep:
+    kind: Literal["original", "proxy"]
+    src: str
+
+@dataclass(frozen=True, slots=True)
+class AssetResource:
+    xml_id: str
+    scoped_id: str
+    uid: str
+    name: str
+    format_id: str
+    frame_duration: Fraction
+    start: Fraction
+    duration: Fraction
+    has_audio: bool
+    media_reps: tuple[MediaRep, ...]
+
+@dataclass(frozen=True, slots=True)
+class ClipInstance:
+    instance_id: str
+    element_path: str
+    resource_scoped_id: str
+    offset: Fraction
+    start: Fraction
+    duration: Fraction
+    enabled: bool
+    src_enable: Literal["all", "video"]
+
+@dataclass(frozen=True, slots=True)
+class GapInstance:
+    instance_id: str
+    element_path: str
+    offset: Fraction
+    duration: Fraction
+
+TimelineItem = ClipInstance | GapInstance
+
+@dataclass(frozen=True, slots=True)
+class ProjectDocument:
+    input_path: Path
+    info_path: Path
+    input_sha256: str
+    raw_xml: bytes
+    version: str
+    sequence_tc_start: Fraction
+    frame_duration: Fraction
+    resources: tuple[AssetResource, ...]
+    storyline: tuple[TimelineItem, ...]
+
+class UnsupportedProject(RuntimeError):
+    location: str
+    reason: str
+
+def resolve_info_path(path: Path) -> Path: ...
+def parse_project(path: Path) -> ProjectDocument: ...
+```
+
+- Accept `.fcpxml` and `.fcpxmld/Info.fcpxml`, version exactly 1.14, one project/sequence/spine with only direct `asset-clip` and `gap` children.
+- Resolve each asset/clip format ref and require normal-speed source/project CFR equality at one of the P1-01 supported rates; reject a missing format, unsupported rate, or 30-versus-29.97 mismatch rather than resampling. Sequence duration, clip offset/start/duration, and source bounds must be frame-aligned on that exact grid; direct storyline items must be in document order, non-overlapping, and within sequence duration.
+- Preserve `raw_xml`, resources, UID/static attributes, and original time strings by never normalizing the raw tree during ingest.
+- Reject unresolved refs, connected clips/audio, compound/sync/multicam, retime, transitions, audio routing overrides, and time-varying effects with deterministic element path plus reason. A discovered version other than `1.14` is named in the rejection.
+- Accept `enabled="0"` and `srcEnable` values `video`/`all`; derive audibility later, without dropping clips. `srcEnable="audio"` is valid FCPXML syntax but outside this supported subset and must be rejected with location/reason. `srcEnable="none"` is invalid for an `asset-clip` and is rejected as invalid, not documented as supported.
+- `element_path` is a stable 1-based positional path such as `/fcpxml[1]/library[1]/event[1]/project[1]/sequence[1]/spine[1]/asset-clip[3]`; repeated identical sibling elements therefore receive distinct paths and IDs.
+- `vlogsrt/project/models.py` is explicitly FCPXML-only. Every dataclass in it is frozen; non-FCPXML phase models must not accumulate there.
+- `scoped_id = sha256(input_sha256 + ":resource:" + xml_id).hexdigest()` and `instance_id = sha256(input_sha256 + ":instance:" + element_path).hexdigest()`.
+
+## Implementation steps
+
+1. Write inline/synthetic failing XML tests for the flat supported shape, bundles, gaps, repeated/disabled instances, positional uniqueness of identical siblings, nonzero epochs, unresolved refs, frame-misaligned ranges, out-of-order/overlap/source-bound violations, supported-rate mismatch, and every rejected construct including `audio` and `none` `srcEnable` values.
+2. Add frozen models and a stdlib XML parser with deterministic locations; do not use subprocess or `xmllint` here.
+3. Assert parsed models cannot be mutated and repeated instances share a resource ID but not an instance ID.
+4. Run focused/full checks and commit only owned paths.
+
+## Acceptance
+
+`pytest tests/project/test_fcpxml.py -q`, invariant checker, and `make check` pass. Rejection tests assert location and reason. The input file is never rewritten, and all supported rate fixtures parse through P1-01 functions.
+
+## Failure route
+
+Report minimal XML, location/reason mismatch, exact base/commit and commands. Do not silently flatten or broaden the supported subset. Escalate ambiguous FCP semantics to Opus/Astra before a GLM fix.
+
+## Report
+
+Report Orca IDs/launch receipt, branch/base/commit, files, failing-first and full evidence, unsupported cases, and `ready-to-integrate` status.

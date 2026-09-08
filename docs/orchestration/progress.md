@@ -1,0 +1,131 @@
+# Final Cut project implementation ledger
+
+> **For agentic workers:** Execute only the single linked task brief assigned by the live Orca Dispatch. Product code and tests are written only by fresh `claude-glm --model 'glm-5.3[1m]' --effort max --permission-mode auto` workers; Astra owns phase integration.
+
+**Goal:** Deliver the offline-first Final Cut roughcut and synchronized SOURCE/EDIT SRT package specified in `docs/plans/2026-09-08-final-cut-project.md`.
+
+**Architecture:** The existing subtitle pipeline remains the immutable source engine. A one-way `vlogsrt.project` derived layer consumes its public transcription/preprocess boundaries, models FCPXML and media identity with exact rational clocks, persists content-addressed analysis, and produces deterministic edit/export artifacts without allowing project code to flow back into legacy source modules.
+
+**Tech Stack:** Python 3.11+ runtime (development on Python 3.12.14), stdlib XML/Fraction/wave/hash/JSON, optional NumPy + ONNX Runtime, pytest/ruff/mypy, Final Cut Pro FCPXML 1.14, Silero VAD v6.2.1 ONNX.
+
+**Spec:** `docs/plans/2026-09-08-final-cut-project.md`
+
+## Global constraints
+
+- Integration branch: `feat/final-cut-project`; bootstrap product base: `676460111bad5ef04cbc9d5c776940611fa938a7`; current docs-only integration HEAD observed: `9727b2be887a31e18b81152189cdd6352fce1e50`.
+- Every worker branch starts from the exact phase base SHA approved by Astra, never implicit `origin/main`.
+- Maximum two simultaneous implementation workers, only with disjoint owned files/worktrees and satisfied dependencies.
+- Managers write plans, reviews, and this ledger only. GLM writes all product code and tests; Astra alone integrates phase branches.
+- The user selected normal auto permission mode for this approved project and root recorded it at `274b8e3`; existing deny/offline rules remain binding. Never use bypass mode or automate a response to a blocked prompt.
+- Do not read, edit, stage, revert, copy, or merge `.env.example`; do not access `.env`/keys, `golden/**`, or modify `tests/fixtures/api/**`.
+- No paid STT/vision calls, no `--online`, no fixture recording, no push, and no deploy.
+- No fixture or golden file may be modified or added. Synthetic cases must be inline or generated under pytest `tmp_path`; existing fixture expectations may not be weakened to make failures pass.
+- External FCP import/re-export, original 4K relink/playback, and paid/live-model checks stay `PENDING_HUMAN`; `SKIP` and blocked are never recorded as PASS.
+
+## Live orchestration
+
+| Role | Task | Dispatch | State |
+|---|---|---|---|
+| Astra coordinator | Run `run_73768f7c4dec` | terminal `term_892e5ca1-805d-4d8d-b27f-fe7c90994848` | active |
+| Sol manager | `task_a09c7903c32f` | `ctx_1f3f93ffcd1f` | revising briefs/supervising P0 |
+| Opus co-manager | `task_0c2d6966fb52` | `ctx_c60636ed03f1` | P0-02 supervision/review |
+| GLM P0-02 writer | `task_f7788389960b` | `ctx_df9c602e28a2` | completed `df489bb`; correction review pending |
+| GLM P0-02 correction | `task_7d03430673e1` | `ctx_51f56ba3df5c` | live from `df489bb`; Opus supervised |
+
+Initial gate message IDs: root `msg_d8fc69fe164a`; Opus `msg_0f70e95b09f7`.
+
+## Current evidence and gate
+
+- Root checkout HEAD observed: `9727b2be887a31e18b81152189cdd6352fce1e50` on `feat/final-cut-project`; Astra approved `676460111bad5ef04cbc9d5c776940611fa938a7` as the initial P0 product-code base.
+- Python preflight is complete: `python3.12` and `.venv/bin/python` report `3.12.14`. A uv-created venv need not contain the `pip` module; package health is checked with `uv pip check --python .venv/bin/python`.
+- Baseline `make check` at the initial source baseline passed on 2026-09-08: ruff lint/format, mypy (23 files), pytest (`389 passed`), and all 16 invariant groups.
+- P0-02 completed on branch `Ssojux2/fcp-p0-contract` at `df489bb0a8c077ed6c74c9709dfa929432129d59`, exact base `676460111bad5ef04cbc9d5c776940611fa938a7`. Run `run_b6d40d052690`, Task `task_f7788389960b`, Dispatch `ctx_df9c602e28a2`, terminal `term_ea415fa1-9b4f-402d-922f-4d6dbe039b22`; focused 80 and full 453 tests passed, 18 invariant groups passed, and the worktree was clean.
+- Pre-merge audit found five contract gaps in `df489bb`: optional imports are scoped to all project files rather than exact `project/vad/**`; the CLI exception skips every project import rather than only `project.commands`; `glm-*` is absent from the hardcoded-model check; FCPXML project model freezing is absent; xmllint accepts arbitrary constant argv rather than the exact two allowed shapes. Astra additionally reproduced executable override, opaque keyword, false provenance, extra positional, and valid alias handling defects and recorded the binding correction at `9727b2b`.
+- Opus launched one correction worker with the normal auto mode: Run `run_b6d40d052690`, Task `task_7d03430673e1`, Dispatch `ctx_51f56ba3df5c`, terminal `term_7a94892e-6f38-4421-8273-51b889ce2619`, same branch/worktree, base `df489bb0a8c077ed6c74c9709dfa929432129d59`. No merge or duplicate worker until it settles and Opus/Astra review the revised commit.
+- Known user-owned dirty path is intentionally excluded from every inspection/commit operation. Its contents have not been read.
+
+## Phase DAG and parallel groups
+
+Arrows mean hard dependencies. A bracketed pair is the only permitted two-writer parallel wave; all other tasks are serial. Every phase ends at an Astra integration checkpoint, whose merge SHA becomes the next phase base.
+
+```text
+P0-01 environment evidence -> P0-02 source/derived contract guard
+                           -> [P0-03 legacy SOURCE SRT byte lock,
+                               P0-04 project package/config skeleton] -> Astra P0 merge
+                              |-> P1-01 rational time -> P1-02 FCPXML ingest
+                              |                         -> [P1-03 media identity, P1-04 XML validation]
+                              |                         -> P1-05 roundtrip -> Astra P1 merge
+                              `-> P2-01 measured PCM extraction -> P2-02 PCM reference/slicing
+                                                        -> P2-03 S17 regression -> Astra P2 merge
+
+P1 merge + P2 merge -> P3-01 typed transcription outcome -> P3-02 per-asset adapter
+                    -> P3-03 source trace/SOURCE SRT -> Astra P3 merge
+
+P3 merge -> P4-01 logical retained slices -> P4-02 boundary request closure
+         -> P4-03 retained-audio transcription -> P4-04 instance projection/locks
+         -> Astra P4 merge
+
+P3 merge -> P5-00 project config -> [P5-01 VAD artifact/runtime, P5-04 vision sampling]
+P5-01 -> P5-02 VAD inference -> P5-03 guard union
+P5-04 -> P5-05 saved-response vision policy
+P5-03 + P5-05 -> Astra P5 merge
+
+P4 merge + P5 merge -> P6-01 eligible block partition -> P6-02 deterministic EditPlan
+                    -> P6-03 EDIT cue projection -> P6-04 atomic FCPXML/package export
+                    -> Astra P6 merge
+
+P6 merge -> P7-01 workspace revisions -> P7-02 budget/cancel/resume runner
+         -> P7-03 CLI commands -> P7-04 captions reproject -> P7-05 project UI
+         -> P7-06 offline acceptance ledger -> Astra P7 integration
+         -> PENDING_HUMAN live Final Cut/media/model acceptance
+```
+
+P0-03 and P0-04 may execute concurrently from the same corrected P0-02 merge SHA: P0-03 owns only `tests/test_source_immutability.py`, while P0-04 owns the new project package/config/model skeleton plus `tests/project/test_project_config.py`; neither edits the invariant checker/tests or a fixture/golden file. P1 and P2 may execute concurrently after P0 integration, because they start from the same approved P0 SHA and own disjoint files; Astra must integrate both before P3. In P5, VAD and vision may execute concurrently only at the explicit first wave above; their follow-ups remain serial within each branch.
+
+## Task ledger
+
+| Task | Outcome | Depends on | Owned implementation files | State |
+|---|---|---|---|---|
+| [P0-01](tasks/p0-01-environment.md) | reproducible Python 3.12 venv and baseline evidence | bootstrap commit | none (ignored `.venv` only) | complete; evidence-only |
+| [P0-02](tasks/p0-02-contract-guard.md) | source/derived dependency and subprocess contract | P0-01 | contract doc, pyproject, invariant script/tests | correction Dispatch `ctx_51f56ba3df5c` live |
+| [P0-03](tasks/p0-03-source-byte-lock.md) | exact synthetic legacy SOURCE SRT regression | corrected P0-02 merge | `tests/test_source_immutability.py` only | ready; parallel with P0-04 |
+| [P0-04](tasks/p0-04-project-skeleton.md) | isolated project package/config/FCPXML-model namespace skeleton | corrected P0-02 merge | project package/config/models + config test only | ready; parallel with P0-03 |
+| [P1-01](tasks/p1-01-rational-time.md) | exact FCP rational/frame math | P0 merge | project time module/tests | drafted |
+| [P1-02](tasks/p1-02-fcpxml-ingest.md) | FCPXML/bundle parser and rejection surface | P1-01 | project FCPXML models/parser/tests | drafted |
+| [P1-03](tasks/p1-03-media-identity.md) | original/proxy resolution and strong IDs | P1-02 | project media/tests | drafted |
+| [P1-04](tasks/p1-04-xml-validation.md) | xmllint-only boundary plus structural validation | P1-02 | XML validation/tests | drafted |
+| [P1-05](tasks/p1-05-roundtrip.md) | identity-preserving roundtrip | P1-03,P1-04 | project FCPXML writer/tests | drafted |
+| [P2-01](tasks/p2-01-pcm-extraction.md) | measured 16 kHz PCM extraction metadata | P0 merge | preprocess additions/tests | drafted |
+| [P2-02](tasks/p2-02-pcm-reference.md) | persistent hashed PCM and exact sample slicing | P2-01 | project PCM/tests | drafted |
+| [P2-03](tasks/p2-03-s17-regression.md) | last/intermediate/repair drift regression | P2-02 | preprocess/project PCM tests and narrow fixes | drafted |
+| [P3-01](tasks/p3-01-transcription-outcome.md) | explicit success/empty/error contract | P1,P2 merges | transcribe additions/tests | drafted |
+| [P3-02](tasks/p3-02-source-adapter.md) | full legacy repair/refine engine once per unique source | P3-01 | project speech plus narrow repair-cutter seam/tests | drafted |
+| [P3-03](tasks/p3-03-source-srt.md) | immutable source-local artifacts and pre-roughcut input-timeline SOURCE SRT | P3-02 | project captions/tests | drafted |
+| [P4-01](tasks/p4-01-logical-slices.md) | coalesced retained logical slices | P3 merge | project boundary models/planner tests | drafted |
+| [P4-02](tasks/p4-02-boundary-closure.md) | fixed-point boundary requests | P4-01 | project boundary planner/tests | drafted |
+| [P4-03](tasks/p4-03-boundary-transcribe.md) | retained-audio-only BoundaryTranscript | P4-02 | project boundary runner/tests | drafted |
+| [P4-04](tasks/p4-04-boundary-projection.md) | instance-scoped replacement and locks | P4-03 | project caption projection/tests | drafted |
+| [P5-00](tasks/p5-00-project-config.md) | frozen project-only tunables/shared analysis vocabulary | P3 merge | project config/analysis models/tests | drafted |
+| [P5-01](tasks/p5-01-vad-runtime.md) | pinned Silero model/license/runtime | P5-00 | `project/vad/` runtime/artifact/tests | drafted |
+| [P5-02](tasks/p5-02-vad-inference.md) | channel-wise continuous-state inference | P5-01 | `project/vad/inference.py`/tests | drafted |
+| [P5-03](tasks/p5-03-guard-union.md) | conservative source/instance speech guard | P5-02 | `project/vad/guard.py`/tests | drafted |
+| [P5-04](tasks/p5-04-vision-sampling.md) | deterministic proxy/original frame samples | P5-00 | `project/vision/sampling.py`, preprocess seam/tests | drafted |
+| [P5-05](tasks/p5-05-vision-policy.md) | strict saved-response decision parser | P5-04 | transcribe boundary + `project/vision/policy.py`/tests | drafted |
+| [P6-01](tasks/p6-01-block-partition.md) | eligible 6–10 s blocks and candidates | P4,P5 merges | project edit partition/tests | drafted |
+| [P6-02](tasks/p6-02-edit-plan.md) | immutable deterministic EditPlan | P6-01 | project edit plan/tests | drafted |
+| [P6-03](tasks/p6-03-edit-captions.md) | EDIT SRT projection | P6-02 | project captions/tests | drafted |
+| [P6-04](tasks/p6-04-package-export.md) | atomic linked FCPXML/SRT/review package | P6-03 | export/tests | drafted |
+| [P7-01](tasks/p7-01-workspace.md) | content-keyed revisioned workspace | P6 merge | project workspace/tests | drafted |
+| [P7-02](tasks/p7-02-runner.md) | budgets, cancellation, resumable analysis | P7-01 | project runner/tests | drafted |
+| [P7-03](tasks/p7-03-cli.md) | project inspect/analyze/plan/export/captions/run | P7-02 | CLI/project command tests | drafted |
+| [P7-04](tasks/p7-04-reproject.md) | supported user-recut caption reprojection | P7-03 | reproject/tests | drafted |
+| [P7-05](tasks/p7-05-ui.md) | lightweight project UI flow | P7-03 | UI service/app/tests | drafted |
+| [P7-06](tasks/p7-06-acceptance.md) | offline acceptance matrix and honest pending gates | P7-04,P7-05 | offline acceptance tests/docs | drafted |
+
+## Review and integration protocol
+
+1. Opus records shared-contract/phase findings under `docs/orchestration/reviews/`; Sol resolves ambiguity in task briefs before dispatch.
+2. Each GLM reports launch receipt, exact base SHA, branch, commit(s), changed files, failing-first test evidence, scoped tests, and `make check`.
+3. Sol inspects scope and evidence. Opus reviews nontrivial shared contracts and phase diffs. Corrections are issued to GLM, never edited into product code by managers.
+4. After two repetitions of the same failure, request Terra high (root cause) and Luna high (minimal repro/test evidence), read-only. If synthesis fails, escalate to Opus, then Astra; code still returns to GLM.
+5. Sol sends `merge_ready` with exact branch/commit/base/test/review data. Astra integrates, verifies, records the merge SHA, and only then releases the next phase.
