@@ -1,9 +1,10 @@
-"""원본 PCM 참조 — 저장·키·출판·슬라이스·자를 자리 (P2-02).
+"""원본 PCM 참조 — 저장·키·세대 출판·슬라이스·자를 자리 (P2-02).
 
 참조는 P2-01이 잰 원점을 그대로 믿고 저장 PCM을 내용으로 주소를 매긴다. 슬라이스는
 `[start, end)` 프레임을 **바이트 그대로** 옮긴다 — 제거된 오디오의 덧붙임도 문맥도
-없다는 것을 패턴 바이트로 증명한다. 완성물은 곁 기록이 파일 해시로 증명하는 짝이며,
-출판 도중의 죽음이 짝을 어긋나게 남겨도 완성물로 읽히지 못 함을 실패 주입으로
+없다는 것을 패턴 바이트로 증명한다. 완성물은 논리 주소의 포인터가 가리키는 불변
+세대다: 세대 출판이 실패하거나 프로세스가 포인터 앞에서 죽어도 손에 쥔 옛 참조가
+그대로 읽히고 슬라이스가 재추출 없이 됨을 실패 주입과 실제 자식 프로세스 종료로
 증명한다. ffmpeg 경계는 전부 P2-01 흉내로 대신하고, 실측 증거는 합성 미디어를
 만들어 잰다(미디어는 tmp_path 안에서만 만든다).
 """
@@ -16,6 +17,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import wave
 from dataclasses import dataclass, fields
 from fractions import Fraction
@@ -36,7 +38,7 @@ from vlogsrt.project.pcm import (
 )
 
 # ─────────────────────────────────────────────────────────────
-#  재료 — 패턴 PCM·실제 원본·참조·추출 흉내
+#  재료 — 패턴 PCM·실제 원본·참조·추출 흉내·포인터 도구
 # ─────────────────────────────────────────────────────────────
 
 
@@ -88,9 +90,33 @@ def _hand_reference(
     )
 
 
-def _sidecar(destination: Path) -> Path:
-    """완성 참조의 곁 기록 — 재사용 판정의 전부가 여기 있다."""
-    return destination.with_name(destination.name + ".json")
+def _pointer(destination: Path) -> dict[str, object]:
+    """논리 주소의 포인터 — 세대를 가리키는 작은 JSON이다."""
+    record: dict[str, object] = json.loads(destination.read_text(encoding="utf-8"))
+    return record
+
+
+def _rewrite_pointer(destination: Path, **changes: object) -> None:
+    record: dict[str, object] = json.loads(destination.read_text(encoding="utf-8"))
+    record.update(changes)
+    destination.write_text(json.dumps(record), encoding="utf-8")
+
+
+def _generation_paths(destination: Path) -> tuple[Path, Path]:
+    """포인터가 가리키는 (세대 PCM, 세대 기록)."""
+    pointer = _pointer(destination)
+    base = destination.parent
+    return (
+        base / str(pointer["generation_pcm"]),
+        base / str(pointer["generation_metadata"]),
+    )
+
+
+def _rewrite_generation_record(destination: Path, field: str, value: object) -> None:
+    _, metadata = _generation_paths(destination)
+    record: dict[str, object] = json.loads(metadata.read_text(encoding="utf-8"))
+    record[field] = value
+    metadata.write_text(json.dumps(record), encoding="utf-8")
 
 
 @dataclass
@@ -140,20 +166,23 @@ def _fake_extract(
     return recorder
 
 
-def _failing_replace(target: Path) -> object:
-    """`os.replace` 흉내 — `target`으로의 출판 **첫 번째만** 죽인다(한 번 죽은 디스크가
-    되돌림 rename까지 죽이는 건 현실적이지 않다). 실패 주입의 전부다."""
+def _failing_replace_when(predicate) -> object:
+    """`os.replace` 흉내 — 조건에 맞는 출판 **첫 번째만** 죽인다(한 번 장전)."""
     real_replace = os.replace
     armed = True
 
     def replace(src: object, dst: object) -> None:
         nonlocal armed
-        if armed and Path(str(dst)).resolve() == target.resolve():
+        if armed and predicate(Path(str(dst))):
             armed = False
             raise OSError(f"출판 실패 주입: {dst}")
         real_replace(src, dst)
 
     return replace
+
+
+def _failing_replace(target: Path) -> object:
+    return _failing_replace_when(lambda path: path == target)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -216,7 +245,7 @@ def test_original_hash_mismatch_fails_before_any_work(
     with pytest.raises(ValueError, match="원본 해시"):
         build_reference("asset-1", "demo", original, "c" * 64, AudioPolicy(), out / "ref.pcm")
     assert recorder.calls == []
-    assert list(out.iterdir()) == [] if out.exists() else True
+    assert not (out / "ref.pcm").exists()
 
 
 def test_a_missing_original_fails_before_any_work(
@@ -236,11 +265,11 @@ def test_a_missing_original_fails_before_any_work(
     assert recorder.calls == []
 
 
-@pytest.mark.parametrize("case", ["same_path", "symlink_alias", "sidecar_seat"])
+@pytest.mark.parametrize("case", ["same_path", "symlink_alias"])
 def test_path_collisions_are_rejected_before_any_work(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str
 ) -> None:
-    """원본 미디어는 참조가 사는 곳에 살면 안 된다 — 시작 전에 거부한다."""
+    """원본 미디어는 캐시 주소와 같은 곳에 살면 안 된다 — 시작 전에 거부한다."""
     source = tmp_path / "src"
     out = tmp_path / "out"
     out.mkdir(parents=True)
@@ -249,10 +278,8 @@ def test_path_collisions_are_rejected_before_any_work(
     destination = out / "ref.pcm"
     if case == "same_path":
         destination = original
-    elif case == "symlink_alias":
+    else:
         os.symlink(original, destination)
-    else:  # 곁 기록 자리에 원본이 있다: out/ref.pcm.json
-        original, original_sha = _original(out, "ref.pcm.json", content)
     recorder = _fake_extract(monkeypatch, _pattern_pcm(10, channels=2))
 
     with pytest.raises(ValueError, match="충돌|덮어"):
@@ -267,10 +294,10 @@ def test_path_collisions_are_rejected_before_any_work(
 # ─────────────────────────────────────────────────────────────
 
 
-def test_build_persists_the_pcm_and_the_measured_fields(
+def test_build_persists_an_immutable_generation_under_the_pointer(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """만들면 PCM이 목적지에 남고, 참조는 잰 값들로만 차 있다."""
+    """만들면 세대 PCM·세대 기록이 새 이름에 남고, 포인터만 논리 주소에 산다."""
     source = tmp_path / "src"
     out = tmp_path / "out"
     original, original_sha = _original(source, "in.mov", b"synthetic-original")
@@ -283,8 +310,13 @@ def test_build_persists_the_pcm_and_the_measured_fields(
     )
 
     assert recorder.calls, "추출을 한 번은 불러야 한다"
-    assert destination.read_bytes() == pcm_bytes
-    assert reference.path == destination
+    pointer = _pointer(destination)
+    assert pointer["format"] == "vlogsrt-pcm-pointer-v1"
+    assert set(pointer) == {"format", "generation_pcm", "generation_metadata"}
+    assert reference.path == out / str(pointer["generation_pcm"])
+    assert reference.path != destination, "참조의 길은 세대 PCM이다 — 논리 주소가 아니다"
+    assert reference.path.read_bytes() == pcm_bytes
+    assert (out / str(pointer["generation_metadata"])).is_file()
     assert reference.source_id == "asset-1"
     assert reference.original_stem == "demo"
     assert reference.original_sha256 == original_sha
@@ -294,7 +326,8 @@ def test_build_persists_the_pcm_and_the_measured_fields(
     assert reference.sample_rate == 16000
     assert reference.pcm_sample0_file_time == Fraction(0)
     assert len(reference.analysis_key) == 64
-    assert _sidecar(destination).is_file()
+    assert len(list(out.iterdir())) == 3  # 포인터 + 세대 둘
+    assert not any(path.name.endswith(".tmp") for path in out.iterdir())
 
 
 def test_the_audio_ordinal_is_handed_to_p2_01_as_is(
@@ -432,7 +465,7 @@ def test_analysis_key_changes_with_every_clock_input(
 
 
 def test_analysis_key_material_names_every_input() -> None:
-    """키 재료는 전부 이름 붙여 들어간다 — 정책 주파수·폭도 재용지에 남는다.
+    """키 재료는 전부 이름 붙여 들어간다 — 정책 주파수·폭도 재료에 남는다.
 
     정책 검증이 생성 시점으로 옮겨져 잘못된 정책은 이제 아예 못 만든다. 그래서
     주파수·폭의 키 기여는 해시 이전 재료 문자열로 직접 증명한다.
@@ -452,14 +485,14 @@ def test_analysis_key_material_names_every_input() -> None:
 
 
 # ─────────────────────────────────────────────────────────────
-#  재사용 — 검증된 완성물만
+#  재사용 — 검증된 완성 세대만
 # ─────────────────────────────────────────────────────────────
 
 
-def test_rebuild_reuses_a_verified_destination(
+def test_rebuild_reuses_a_verified_generation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """곁 기록·해시·정책이 전부 맞으면 다시 뽑지 않는다."""
+    """포인터·세대 기록·해시·정책이 전부 맞으면 다시 뽑지 않는다."""
     source = tmp_path / "src"
     out = tmp_path / "out"
     original, original_sha = _original(source, "in.mov", b"synthetic-original")
@@ -469,15 +502,9 @@ def test_rebuild_reuses_a_verified_destination(
     first = build_reference("asset-1", "demo", original, original_sha, AudioPolicy(), destination)
     second = build_reference("asset-1", "demo", original, original_sha, AudioPolicy(), destination)
 
-    assert len(recorder.calls) == 1, "검증된 완성물은 다시 뽑지 않는다"
+    assert len(recorder.calls) == 1, "검증된 완성 세대는 다시 뽑지 않는다"
     assert second == first
-    assert {path.name for path in out.iterdir()} == {"ref.pcm", "ref.pcm.json"}
-
-
-def _tampered_sidecar(destination: Path, field: str, value: object) -> None:
-    record = json.loads(_sidecar(destination).read_text(encoding="utf-8"))
-    record[field] = value
-    _sidecar(destination).write_text(json.dumps(record), encoding="utf-8")
+    assert len(list(out.iterdir())) == 3  # 포인터 + 세대 둘 — 늘어난 게 없다
 
 
 @pytest.mark.parametrize(
@@ -487,13 +514,16 @@ def _tampered_sidecar(destination: Path, field: str, value: object) -> None:
         "truncated_pcm",
         "original_sha256",
         "stream_ordinal",
-        "delete_sidecar",
-        "corrupt_sidecar",
-        "unknown_key",
-        "sidecar_hash_field",
-        "sidecar_count_field",
-        "sidecar_ordinal_field",
-        "sidecar_origin_denominator",
+        "delete_pointer",
+        "corrupt_pointer",
+        "unknown_pointer_key",
+        "pointer_missing_generation",
+        "pointer_escape",
+        "pointer_crossed",
+        "meta_hash_field",
+        "meta_count_field",
+        "meta_ordinal_field",
+        "meta_origin_denominator",
     ],
 )
 def test_reuse_requires_every_recorded_field(
@@ -501,8 +531,8 @@ def test_reuse_requires_every_recorded_field(
 ) -> None:
     """하나라도 어긋나면 재사용하지 않는다 — 어긋난 채 믿는 것이 사고의 씨앗이다.
 
-    곁 기록을 망가뜨린 경우 정책은 그대로다: 같은 입력으로 다시 불러도 재추출이
-    일어나야 한다. 원점 분모 0(`1/0`)은 `ValueError`로 죽어야지
+    포인터·세대 기록을 망가뜨린 경우 정책은 그대로다: 같은 입력으로 다시 불러도
+    재추출이 일어나야 한다. 원점 분모 0(`1/0`)은 `ValueError`로 죽어야지
     `ZeroDivisionError`가 새어 나가면 안 된다.
     """
     source = tmp_path / "src"
@@ -513,12 +543,13 @@ def test_reuse_requires_every_recorded_field(
     recorder = _fake_extract(monkeypatch, pcm_bytes, channels=2)
     destination = out / "ref.pcm"
     build_reference("asset-1", "demo", original, original_sha, AudioPolicy(), destination)
+    generation_pcm, generation_meta = _generation_paths(destination)
 
     if tamper == "pcm_bytes":
-        destination.write_bytes(b"\x00" * len(pcm_bytes))  # 크기는 같고 해시는 다르다
+        generation_pcm.write_bytes(b"\x00" * len(pcm_bytes))  # 크기는 같고 해시는 다르다
         rebuild = (original, original_sha, AudioPolicy())
     elif tamper == "truncated_pcm":
-        destination.write_bytes(pcm_bytes[:-4])  # 프레임 수가 기록과 어긋난다
+        generation_pcm.write_bytes(pcm_bytes[:-4])  # 프레임 수가 기록과 어긋난다
         rebuild = (original, original_sha, AudioPolicy())
     elif tamper == "original_sha256":
         rebuild = (other, other_sha, AudioPolicy())
@@ -526,37 +557,44 @@ def test_reuse_requires_every_recorded_field(
         rebuild = (original, original_sha, AudioPolicy(stream_index=1))
     else:
         rebuild = (original, original_sha, AudioPolicy())
-        if tamper == "delete_sidecar":
-            _sidecar(destination).unlink()
-        elif tamper == "corrupt_sidecar":
-            _sidecar(destination).write_text("{ 반쯤 죽은 JSON", encoding="utf-8")
-        elif tamper == "unknown_key":
-            _tampered_sidecar(destination, "bogus", 1)
-        elif tamper == "sidecar_hash_field":
-            _tampered_sidecar(
+        if tamper == "delete_pointer":
+            destination.unlink()
+        elif tamper == "corrupt_pointer":
+            destination.write_text("{ 반쯤 죽은 JSON", encoding="utf-8")
+        elif tamper == "unknown_pointer_key":
+            _rewrite_pointer(destination, bogus=1)
+        elif tamper == "pointer_missing_generation":
+            _rewrite_pointer(destination, generation_pcm=f"{destination.name}.ghost.pcm")
+        elif tamper == "pointer_escape":
+            _rewrite_pointer(destination, generation_pcm="../escape.pcm")
+        elif tamper == "pointer_crossed":
+            _rewrite_pointer(destination, generation_pcm=generation_meta.name)
+        elif tamper == "meta_hash_field":
+            _rewrite_generation_record(
                 destination, "pcm_sha256", hashlib.sha256("다른 pcm".encode()).hexdigest()
             )
-        elif tamper == "sidecar_count_field":
-            _tampered_sidecar(destination, "sample_count", 1001)
-        elif tamper == "sidecar_ordinal_field":
-            _tampered_sidecar(destination, "stream_index", 1)
-        elif tamper == "sidecar_origin_denominator":
-            _tampered_sidecar(destination, "pcm_sample0_file_time", "1/0")
+        elif tamper == "meta_count_field":
+            _rewrite_generation_record(destination, "sample_count", 1001)
+        elif tamper == "meta_ordinal_field":
+            _rewrite_generation_record(destination, "stream_index", 1)
+        elif tamper == "meta_origin_denominator":
+            _rewrite_generation_record(destination, "pcm_sample0_file_time", "1/0")
 
     build_reference("asset-1", "demo", rebuild[0], rebuild[1], rebuild[2], destination)
     assert len(recorder.calls) == 2, f"{tamper}: 다시 뽑아야 한다"
-    assert destination.read_bytes() == pcm_bytes, "다시 뽑으면 원래 바이트가 돌아온다"
+    new_pcm, _new_meta = _generation_paths(destination)
+    assert new_pcm.read_bytes() == pcm_bytes, "다시 뽑으면 원래 바이트가 돌아온다"
 
 
 # ─────────────────────────────────────────────────────────────
-#  출판 — 실패 주입으로 증명하는 완성물의 정의
+#  세대 출판 — 실패 주입·실제 자식 종료로 증명하는 보존
 # ─────────────────────────────────────────────────────────────
 
 
-def test_failed_extraction_leaves_no_destination(
+def test_failed_extraction_leaves_no_pointer(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """추출이 반쯤 죽으면 목적지도 임시파일도 남지 않는다."""
+    """추출이 반쯤 죽으면 포인터도 세대도 남지 않는다."""
     source = tmp_path / "src"
     out = tmp_path / "out"
     original, original_sha = _original(source, "in.mov", b"synthetic-original")
@@ -566,10 +604,10 @@ def test_failed_extraction_leaves_no_destination(
     assert list(out.iterdir()) == []
 
 
-def test_failed_rebuild_keeps_the_previous_destination(
+def test_failed_rebuild_keeps_the_pointer_and_the_old_generation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """재뽑다가 죽어도 있던 참조는 그대로다 — 반쯤 짠 것으로 못 덮어쓴다."""
+    """재뽑다가 죽으면 포인터와 세대는 그대로다 — 반쯤 짠 것으로 못 덮어쓴다."""
     source = tmp_path / "src"
     out = tmp_path / "out"
     original, original_sha = _original(source, "in.mov", b"synthetic-original")
@@ -577,13 +615,24 @@ def test_failed_rebuild_keeps_the_previous_destination(
     _fake_extract(monkeypatch, pcm_bytes, channels=2)
     destination = out / "ref.pcm"
     build_reference("asset-1", "demo", original, original_sha, AudioPolicy(), destination)
+    old_pointer = destination.read_bytes()
+    generation_pcm, _meta = _generation_paths(destination)
 
-    _sidecar(destination).unlink()  # 재뽑을 강제한다
+    generation_pcm.write_bytes(b"\x00" * len(pcm_bytes))  # 재뽑을 강제한다
     _fake_extract(monkeypatch, b"\x7f" * 100, fail_after_write=True)
     with pytest.raises(RuntimeError, match="반쯤"):
         build_reference("asset-1", "demo", original, original_sha, AudioPolicy(), destination)
-    assert destination.read_bytes() == pcm_bytes
-    assert [path.name for path in out.iterdir()] == ["ref.pcm"]
+    assert destination.read_bytes() == old_pointer, "포인터는 그대로다"
+    assert _generation_paths(destination)[0] == generation_pcm, "세대도 그대로다"
+
+    # 다음 시도는 성공한다 — 새 세대가 수복하고 옛 세대 파일은 남는다.
+    _fake_extract(monkeypatch, pcm_bytes, channels=2)
+    reference = build_reference(
+        "asset-1", "demo", original, original_sha, AudioPolicy(), destination
+    )
+    assert reference.path != generation_pcm, "수복은 새 세대로 한다 — 자리를 고치지 않는다"
+    assert reference.path.read_bytes() == pcm_bytes
+    assert generation_pcm.exists(), "망가진 옛 세대도 지우지 않는다"
 
 
 def test_extraction_of_another_width_is_rejected(
@@ -599,77 +648,10 @@ def test_extraction_of_another_width_is_rejected(
     assert list(out.iterdir()) == []
 
 
-def test_pcm_publication_failure_keeps_the_verified_pair(
+def test_metadata_publication_failure_preserves_the_valid_pair(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """PCM 갈아끼움이 죽으면 있던 완성 짝은 그대로다 — 그리고 여전히 쓸 수 있다."""
-    source = tmp_path / "src"
-    out = tmp_path / "out"
-    one, one_sha = _original(source, "one.mov", "첫 원본".encode())
-    two, two_sha = _original(source, "two.mov", "둘째 원본".encode())
-    pcm_bytes = _pattern_pcm(1000, channels=2)
-    recorder = _fake_extract(monkeypatch, pcm_bytes, channels=2)
-    destination = out / "ref.pcm"
-    first = build_reference("asset-1", "demo", one, one_sha, AudioPolicy(), destination)
-
-    with pytest.MonkeyPatch.context() as injected:
-        injected.setattr(pcm.os, "replace", _failing_replace(destination))
-        with pytest.raises(OSError, match="출판 실패"):
-            build_reference("asset-1", "demo", two, two_sha, AudioPolicy(), destination)
-    assert destination.read_bytes() == pcm_bytes, "출판이 죽어도 낡은 짝이 남는다"
-
-    # 낡은 짝은 여전히 검증을 통과한다 — 원래 입력으로 다시 부르면 재추출 없이 재사용.
-    after = build_reference("asset-1", "demo", one, one_sha, AudioPolicy(), destination)
-    assert len(recorder.calls) == 2, "실패한 시도의 추출 한 번만 더 있었다"
-    assert after == first
-
-
-def test_sidecar_publication_failure_rolls_back_and_recovers(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """곁 기록 출판이 죽으면 자리에 있던 바이트로 되돌린다 — 어긋난 짝은 못 읽는다.
-
-    이 시험의 자리에는 이미 망가진 바이트(강제로 재뽑하게 한 것)가 있었다. 되돌림은
-    그 바이트를 그대로 되돌려 놓을 뿐 — 낡은 곁 기록과 여전히 어긋나므로 완성물로
-    읽히지 못 하고, 다음 빌드가 재추출로 수복한다.
-    """
-    source = tmp_path / "src"
-    out = tmp_path / "out"
-    original, original_sha = _original(source, "in.mov", b"synthetic-original")
-    first_bytes = _pattern_pcm(1000, channels=2)
-    second_bytes = _pattern_pcm(1000, channels=2)[::-1]
-    destination = out / "ref.pcm"
-    _fake_extract(monkeypatch, first_bytes, channels=2)
-    build_reference("asset-1", "demo", original, original_sha, AudioPolicy(), destination)
-
-    broken = b"\x00" * len(first_bytes)
-    destination.write_bytes(broken)  # 재뽑을 강제한다
-    recorder = _fake_extract(monkeypatch, second_bytes, channels=2)
-    with pytest.MonkeyPatch.context() as injected:
-        injected.setattr(pcm.os, "replace", _failing_replace(_sidecar(destination)))
-        with pytest.raises(OSError, match="출판 실패"):
-            build_reference("asset-1", "demo", original, original_sha, AudioPolicy(), destination)
-    # 새 PCM이 놓이다 죽었지만 되돌림이 자리를 지켰다 — 새+낡음 짝은 존재하지 않는다.
-    assert destination.read_bytes() == broken
-    assert [path.name for path in out.iterdir()] == ["ref.pcm", "ref.pcm.json"]
-
-    recovered = build_reference(
-        "asset-1", "demo", original, original_sha, AudioPolicy(), destination
-    )
-    assert len(recorder.calls) == 2, "어긋난 짝은 재사용하지 못 한다"
-    assert recovered.pcm_sha256 == hashlib.sha256(second_bytes).hexdigest()
-    assert destination.read_bytes() == second_bytes
-
-
-def test_failed_publication_of_a_different_reference_preserves_the_valid_pair(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """다른 입력의 출판이 실패해도 옛 완성 짝은 온전하다 — 슬라이스도 재추출 0회로 된다.
-
-    옛 참조를 손에 쥔 채 같은 목적지에 다른 원본의 참조를 요청하고, 곁 기록 출판을
-    죽인다. 옛 PCM 바이트와 옛 곁 기록이 그대로 살아 있어야 하고, 옛 참조의
-    슬라이스가 그냥 되며, 옛 입력의 재빌드는 재추출 없이 재사용한다.
-    """
+    """세대 기록 출판이 죽어도 옛 참조는 그대로다 — 슬라이스도 재추출 0회로 된다."""
     source = tmp_path / "src"
     out = tmp_path / "out"
     one, one_sha = _original(source, "one.mov", "첫 원본".encode())
@@ -679,55 +661,168 @@ def test_failed_publication_of_a_different_reference_preserves_the_valid_pair(
     destination = out / "ref.pcm"
     _fake_extract(monkeypatch, first_bytes, channels=2)
     old = build_reference("asset-1", "demo", one, one_sha, AudioPolicy(), destination)
-    old_sidecar_text = _sidecar(destination).read_text(encoding="utf-8")
+    old_pointer = destination.read_bytes()
 
     recorder = _fake_extract(monkeypatch, second_bytes, channels=2)
     with pytest.MonkeyPatch.context() as injected:
-        injected.setattr(pcm.os, "replace", _failing_replace(_sidecar(destination)))
+        injected.setattr(
+            pcm.os, "replace", _failing_replace_when(lambda path: path.suffix == ".json")
+        )
         with pytest.raises(OSError, match="출판 실패"):
             build_reference("asset-1", "demo", two, two_sha, AudioPolicy(), destination)
 
-    assert destination.read_bytes() == first_bytes, "옛 PCM 바이트가 그대로다"
-    assert _sidecar(destination).read_text(encoding="utf-8") == old_sidecar_text
+    assert destination.read_bytes() == old_pointer, "포인터는 부분 짝을 노출한 적이 없다"
+    assert old.path.read_bytes() == first_bytes, "옛 세대 PCM이 그대로다"
+    write_wav_slice(old, SampleRange(0, 100), out / "old-slice.wav")
+    assert (out / "old-slice.wav").read_bytes()[44:] == first_bytes[: 100 * 2 * 2]
+    assert len(recorder.calls) == 1, "실패한 시도의 추출 한 번뿐이다"
 
-    # 옛 참조는 여전히 산다 — 슬라이스가 재추출 없이 그냥 된다.
+    # 옛 입력의 재빌드는 재추출 없이 재사용한다.
+    again = build_reference("asset-1", "demo", one, one_sha, AudioPolicy(), destination)
+    assert len(recorder.calls) == 1
+    assert again == old
+
+
+def test_pointer_publication_failure_preserves_the_valid_pair(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """포인터 출판이 죽어도 옛 참조는 그대로다 — 슬라이스도 재추출 0회로 된다."""
+    source = tmp_path / "src"
+    out = tmp_path / "out"
+    one, one_sha = _original(source, "one.mov", "첫 원본".encode())
+    two, two_sha = _original(source, "two.mov", "둘째 원본 — 다른 내용".encode())
+    first_bytes = _pattern_pcm(1000, channels=2)
+    second_bytes = _pattern_pcm(999, channels=2)
+    destination = out / "ref.pcm"
+    _fake_extract(monkeypatch, first_bytes, channels=2)
+    old = build_reference("asset-1", "demo", one, one_sha, AudioPolicy(), destination)
+    old_pointer = destination.read_bytes()
+
+    recorder = _fake_extract(monkeypatch, second_bytes, channels=2)
+    with pytest.MonkeyPatch.context() as injected:
+        injected.setattr(pcm.os, "replace", _failing_replace(destination))
+        with pytest.raises(OSError, match="출판 실패"):
+            build_reference("asset-1", "demo", two, two_sha, AudioPolicy(), destination)
+
+    assert destination.read_bytes() == old_pointer, "포인터는 부분 짝을 노출한 적이 없다"
+    assert old.path.read_bytes() == first_bytes, "옛 세대 PCM이 그대로다"
+    write_wav_slice(old, SampleRange(0, 100), out / "old-slice.wav")
+    assert (out / "old-slice.wav").read_bytes()[44:] == first_bytes[: 100 * 2 * 2]
+    assert len(list(out.iterdir())) == 4, "포인터 + 옛 세대 둘 + 슬라이스뿐이다"
+    assert len(recorder.calls) == 1, "실패한 시도의 추출 한 번뿐이다"
+
+    again = build_reference("asset-1", "demo", one, one_sha, AudioPolicy(), destination)
+    assert len(recorder.calls) == 1
+    assert again == old
+
+
+_CHILD_DIES_BEFORE_POINTER = """
+import os
+import sys
+from fractions import Fraction
+from pathlib import Path
+
+from vlogsrt import preprocess
+from vlogsrt.project import pcm
+
+destination = Path(sys.argv[1])
+source = Path(sys.argv[2])
+original_sha256 = sys.argv[3]
+
+
+def fake_extract(source_file, destination_file, *, stream_index, sample_rate=16000):
+    destination_file.write_bytes(b"\\x55" * 2468)
+    return preprocess.PcmExtraction(
+        path=destination_file,
+        stream=preprocess.AudioStreamInfo(
+            stream_index=stream_index + 1,
+            start_time=Fraction(0),
+            sample_rate=44100,
+            channels=2,
+        ),
+        sample_count=617,
+        sample_width=2,
+        pcm_sample0_file_time=Fraction(0),
+    )
+
+
+real_replace = os.replace
+
+
+def dying(src, dst):
+    if Path(str(dst)) == destination:
+        os._exit(77)  # 포인터 출판 직전에 프로세스가 죽는다
+    real_replace(src, dst)
+
+
+pcm.extract_pcm_s16le = fake_extract
+pcm.os.replace = dying
+pcm.build_reference("asset-child", "child", source, original_sha256, pcm.AudioPolicy(), destination)
+raise SystemExit("포인터 출판 앞에서 죽었어야 한다")
+"""
+
+
+def test_a_child_exit_before_pointer_commit_cannot_invalidate_the_old_reference(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """포인터 앞에서 프로세스가 죽는다 — `finally` 같은 안전망은 없다. 그래도 옛 참조는 산다."""
+    source = tmp_path / "src"
+    out = tmp_path / "out"
+    one, one_sha = _original(source, "one.mov", "첫 원본".encode())
+    two, two_sha = _original(source, "two.mov", "둘째 원본 — 다른 내용".encode())
+    first_bytes = _pattern_pcm(1000, channels=2)
+    destination = out / "ref.pcm"
+    _fake_extract(monkeypatch, first_bytes, channels=2)
+    old = build_reference("asset-1", "demo", one, one_sha, AudioPolicy(), destination)
+    old_pointer = destination.read_bytes()
+
+    child = subprocess.run(
+        [sys.executable, "-c", _CHILD_DIES_BEFORE_POINTER, str(destination), str(two), two_sha],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=tmp_path,
+    )
+    assert child.returncode == 77, f"자식이 포인터 앞에서 죽어야 한다: {child.stderr}"
+
+    assert destination.read_bytes() == old_pointer, "포인터는 부분 짝을 노출한 적이 없다"
+    assert old.path.read_bytes() == first_bytes, "옛 세대 PCM이 그대로다"
     write_wav_slice(old, SampleRange(0, 100), out / "old-slice.wav")
     assert (out / "old-slice.wav").read_bytes()[44:] == first_bytes[: 100 * 2 * 2]
 
-    # 옛 입력의 재빌드도 재추출 없이 재사용한다.
+    # 옛 입력의 재빌드는 재추출 없이 재사용한다 — 죽은 시도가 남긴 것은 아무 상관이 없다.
+    recorder = _fake_extract(monkeypatch, first_bytes, channels=2)
     again = build_reference("asset-1", "demo", one, one_sha, AudioPolicy(), destination)
-    assert len(recorder.calls) == 1, "실패한 시도의 추출 한 번뿐이다"
+    assert len(recorder.calls) == 0
     assert again == old
-    assert sorted(path.name for path in out.iterdir()) == [
-        "old-slice.wav",
-        "ref.pcm",
-        "ref.pcm.json",
-    ]
 
 
-def test_stale_pcm_with_new_metadata_cannot_load(
+def test_a_successful_changed_source_update_retains_the_old_generation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """낡은 PCM + 새 곁 기록도 완성물이 아니다 — 해시가 서로를 증명하지 않는다."""
+    """성공한 갱신은 포인터를 옮기고 새 세대를 돌려준다 — 옛 세대도 지우지 않는다."""
     source = tmp_path / "src"
     out = tmp_path / "out"
-    original, original_sha = _original(source, "in.mov", b"synthetic-original")
+    one, one_sha = _original(source, "one.mov", "첫 원본".encode())
+    two, two_sha = _original(source, "two.mov", "둘째 원본 — 다른 내용".encode())
     first_bytes = _pattern_pcm(1000, channels=2)
-    second_bytes = _pattern_pcm(1000, channels=2)[::-1]
+    second_bytes = _pattern_pcm(999, channels=2)
     destination = out / "ref.pcm"
     _fake_extract(monkeypatch, first_bytes, channels=2)
-    build_reference("asset-1", "demo", original, original_sha, AudioPolicy(), destination)
+    old = build_reference("asset-1", "demo", one, one_sha, AudioPolicy(), destination)
 
-    # 곁 기록만 다른 내용을 말하게 한다 — 파일은 처음 것 그대로다.
-    _tampered_sidecar(destination, "pcm_sha256", hashlib.sha256(second_bytes).hexdigest())
-    recorder = _fake_extract(monkeypatch, second_bytes, channels=2)
-    reference = build_reference(
-        "asset-1", "demo", original, original_sha, AudioPolicy(), destination
-    )
+    _fake_extract(monkeypatch, second_bytes, channels=2)
+    new = build_reference("asset-1", "demo", two, two_sha, AudioPolicy(), destination)
 
-    assert len(recorder.calls) == 1, "곁 기록이 말하는 해시와 파일이 다르면 못 믿는다"
-    assert reference.pcm_sha256 == hashlib.sha256(second_bytes).hexdigest()
-    assert destination.read_bytes() == second_bytes
+    assert new.path != old.path, "다른 내용은 다른 불변 세대다"
+    assert new.pcm_sha256 != old.pcm_sha256
+    assert _generation_paths(destination)[0] == new.path, "포인터는 새 세대를 가리킨다"
+    assert new.path.read_bytes() == second_bytes
+    assert old.path.is_file() and old.path.read_bytes() == first_bytes, "옛 세대가 남는다"
+    write_wav_slice(old, SampleRange(0, 100), out / "old-slice.wav")
+    assert (out / "old-slice.wav").read_bytes()[44:] == first_bytes[: 100 * 2 * 2]
+    # 포인터 + 옛 세대 둘 + 새 세대 둘 + 슬라이스 — 아무것도 지워지지 않았다.
+    assert len(list(out.iterdir())) == 6
 
 
 # ─────────────────────────────────────────────────────────────
@@ -883,7 +978,7 @@ def test_every_consumer_verifies_the_stored_hash_not_just_size(tmp_path: Path) -
 
 
 def test_slice_refuses_to_overwrite_the_stored_pcm(tmp_path: Path) -> None:
-    """슬라이스가 저장 PCM을 갈아끼우는 일은 없다 — 경로가 같으면 시작도 안 한다."""
+    """슬라이스가 세대 PCM을 갈아끼우는 일은 없다 — 경로가 같으면 시작도 안 한다."""
     pcm_bytes = _pattern_pcm(100, channels=1)
     stored = tmp_path / "ref.pcm"
     reference = _hand_reference(stored, pcm_bytes)

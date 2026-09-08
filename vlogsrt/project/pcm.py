@@ -5,12 +5,13 @@ P2-01이 잰 시계(`pcm_sample0_file_time`, 변환 후 첫 프레임의 실측 
 키는 원본 해시·오디오 정책·원점·PCM 해시·채널·주파수다 — 경로·이름·source_id는
 키 재료가 아니다. 원본 파일은 통째로 해시해 주어진 정체성과 같은지 직접 확인한다.
 
-**완성물의 정의가 곧 출판 규칙이다.** 완성물은 곁 기록이 목적지 파일을 해시로
-증명하는 짝이다. 목적지에 옛 것이 있으면 새 것을 놓기 전에 백업 자리로 치워
-두고, 출판(새 PCM → 곁 기록)이 온전히 끝나야 백업을 지운다 — 도중에 죽으면 옛
-짝을 제자리로 되돌린다. 그래서 다른 입력의 출판이 실패해도 옛 참조는 그대로
-읽히고 슬라이스도 되며, 짝이 어긋난 채 남는 상태(새 PCM + 낡은 곁 기록, 그
-반대)는 완성물로 읽히지 못 한다 — 다음 빌드가 재추출로 수복한다.
+**완성물은 세대로 산다.** `destination`은 논리 캐시 주소이고 그 자리에는 포인터가
+하나 살 뿐이다. 참조를 만들면 **새 세대** PCM과 세대 기록을 남이 쓰지 않는 새
+이름에 쓰고, 짝을 완전히 검증한 뒤 포인터를 원자적으로 갈아끼운다 — 이 갈아끼움이
+유일한 출판이다. 어떤 세대도 지우거나 덮거나 이름을 바꾸지 않으므로, 출판이
+실패하거나 프로세스가 포인터 앞에서 죽어도 손에 쥔 옛 참조는 그대로 읽히고
+슬라이스도 재추출 없이 된다. 성공한 갱신도 옛 세대를 남긴다. `PcmReference.path`는
+포인터가 가리키는 **불변 세대 PCM 그 자체**다 — 논리 주소가 아니다.
 
 슬라이스는 저장된 그 PCM에서 `[start, end)` 프레임을 **바이트 그대로** 옮긴다.
 시작은 ceil, 끝은 floor — 제거된 오디오의 덧붙임도 문맥도 없고 남은 오디오가
@@ -50,9 +51,10 @@ _CONTRACT_SAMPLE_WIDTH = 2
 _KEY_DOMAIN = "vlogsrt-pcm-reference-v1"
 """분석 키 재료의 언어 구분자 — 다른 해시 재료와 우연히 겹치지 않게 한다."""
 
-_SIDECAR_FORMAT = "vlogsrt-pcm-sidecar-v1"
-_SIDECAR_SUFFIX = ".json"
-_SIDECAR_KEYS = frozenset(
+_POINTER_FORMAT = "vlogsrt-pcm-pointer-v1"
+_GENERATION_FORMAT = "vlogsrt-pcm-generation-v1"
+_POINTER_KEYS = frozenset({"format", "generation_pcm", "generation_metadata"})
+_GENERATION_KEYS = frozenset(
     {
         "format",
         "source_id",
@@ -104,6 +106,8 @@ class AudioPolicy:
 class PcmReference:
     """저장된 원본 PCM과 그 시계의 원점.
 
+    `path`는 포인터가 가리키는 **불변 세대 PCM**이다 — 논리 주소가 아니다. 그래서
+    같은 주소에서 포인터가 바뀌어도 손에 쥔 참조는 그대로 읽힌다.
     `pcm_sample0_file_time`은 P2-01이 잰 디코드 원점이다 — ffprobe의
     `stream.start_time`과 다르고, 그 차이(AAC/MKV에서 64ms)가 자막 전체에
     실린다. `sample_count`는 채널별 프레임 수다.
@@ -131,7 +135,7 @@ class SampleRange:
 
 @dataclass(frozen=True, slots=True)
 class _Stored:
-    """곁 기록에서 읽은 완성물의 사실 — 재사용 판정에만 쓴다."""
+    """세대 기록에서 읽은 완성물의 사실 — 재사용 판정에만 쓴다."""
 
     source_id: str
     original_stem: str
@@ -151,27 +155,25 @@ def build_reference(
     policy: AudioPolicy,
     destination: Path,
 ) -> PcmReference:
-    """원본에서 PCM 참조를 만들어 `destination`에 원자적으로 저장한다.
+    """원본에서 PCM 참조를 만들어 논리 주소 `destination`에 출판한다.
 
     원본은 통째로 해시해 `original_sha256`과 같은지 먼저 확인한다 — 재사용이든
-    추출이든 그 앞에서. `destination`이 이미 있을 때 **재사용하는 조건은
-    전부**다: 곁 기록의 정체성·정책·측정값이 이번 호출과 같고, 파일 크기가
-    프레임 수와 맞고, 파일 해시까지 곁 기록과 일치한다. 하나라도 어긋나면 다시
-    뽑아 덮어쓴다. 원본 미디어를 덮어쓰는 경로는 시작 전에 거부한다.
+    추출이든 그 앞에서. 완성 세대는 포인터가 가리키는 불변 짝이 **전부** 맞을
+    때만 다시 쓴다: 세대 기록의 정체성·정책·측정값이 이번 호출과 같고, PCM
+    크기가 프레임 수와 맞고, 파일 해시까지 기록과 일치한다. 하나라도 어긋나면
+    새 세대를 만들어 포인터를 옮긴다. 원본 미디어를 덮어쓰는 경로는 시작 전에
+    거부한다.
     """
     _require_text(source_id, "source_id")
     _require_text(original_stem, "original_stem")
     _require_text(original_sha256, "original_sha256")
-    sidecar = _sidecar_path(destination)
-    _require_distinct_paths(original, destination, sidecar)
+    _require_distinct_paths(original, destination)
     _require_original_identity(original, original_sha256)
-    reusable = _reusable_reference(
-        destination, sidecar, source_id, original_stem, original_sha256, policy
-    )
+    reusable = _reusable_reference(destination, source_id, original_stem, original_sha256, policy)
     if reusable is not None:
         return reusable
     return _extract_reference(
-        source_id, original_stem, original, original_sha256, policy, destination, sidecar
+        source_id, original_stem, original, original_sha256, policy, destination
     )
 
 
@@ -199,8 +201,8 @@ def write_wav_slice(reference: PcmReference, samples: SampleRange, destination: 
     """저장 PCM의 `[start, end)` 프레임을 보통의 WAV 헤더만 붙여 옮긴다.
 
     데이터는 저장된 바이트 그대로다 — 다시 인코딩하지 않고, 채널 인터리브도
-    그대로다. 제거된 오디오의 덧붙임이나 문맥은 없다. 저장 PCM 자신의 경로로는
-    못 쓴다 — 불변 원본을 슬라이스로 갈아끼우는 일이 없게.
+    그대로다. 제거된 오디오의 덧붙임이나 문맥은 없다. 세대 PCM 자신의 경로로는
+    못 쓴다 — 불변 세대를 슬라이스로 갈아끼우는 일이 없게.
     """
     _require_slice(reference, samples)
     if destination.resolve() == reference.path.resolve():
@@ -268,7 +270,7 @@ def _sample_file_time(reference: PcmReference, sample_index: int) -> Fraction:
 
 
 # ─────────────────────────────────────────────────────────────
-#  참조 만들기 — 추출·곁 기록·재사용
+#  참조 만들기 — 세대·검증·포인터 출판
 # ─────────────────────────────────────────────────────────────
 
 
@@ -279,22 +281,22 @@ def _extract_reference(
     original_sha256: str,
     policy: AudioPolicy,
     destination: Path,
-    sidecar: Path,
 ) -> PcmReference:
-    """P2-01로 임시 파일에 뽑고, 해시로 검증한 뒤 갈아끼운다.
+    """새 불변 세대를 만들고, 짝을 검증한 뒤 포인터를 한 번 갈아끼운다.
 
-    목적지에 옛 것이 있으면 먼저 **치워 둔다**(같은 디렉터리의 백업 자리). 새 PCM을
-    놓고 곁 기록을 쓰는 도중 어느 지점에서 죽어도 치워 둔 옛 것을 제자리로
-    되돌린다 — 백업은 출판이 온전히 끝난 뒤에야 사라진다. 그래서 다른 입력의
-    출판이 실패해도 옛 완성 짝은 그대로 읽히고, 슬라이스도 재추출 없이 된다.
+    세대 PCM과 세대 기록은 남이 쓰지 않는 새 이름에 만든다 — 기존 세대와
+    포인터는 손대지 않는다. 검증이 끝나야 포인터가 새 세대를 가리키므로, 출판이
+    실패하거나 프로세스가 그 앞에서 죽어도 포인터는 옛 세대를 가리킨 채다.
+    `finally` 정리는 실패한 시도의 새 파일을 치우는 위생일 뿐 — 안전은 세대
+    불변이 지킨다.
     """
-    temp = _begin_atomic(destination)
-    parked: Path | None = None
-    committed = False
+    generation_pcm = _begin_atomic(destination, suffix=".pcm")
+    generation_meta = _begin_atomic(destination, suffix=".json")
+    published = False
     try:
         extraction = extract_pcm_s16le(
             original,
-            temp,
+            generation_pcm,
             stream_index=policy.stream_index,
             sample_rate=policy.sample_rate,
         )
@@ -303,39 +305,34 @@ def _extract_reference(
                 f"P2-01 추출의 폭이 정책과 다르다: 요청 {policy.sample_width}바이트, "
                 f"추출 {extraction.sample_width}바이트 — 참조로 삼지 않는다"
             )
-        pcm_sha256 = _sha256_file(temp)
+        pcm_sha256 = _sha256_file(generation_pcm)
         reference = _assemble_reference(
             source_id,
             original_stem,
             original_sha256,
-            destination,
+            generation_pcm,
             policy,
             extraction.pcm_sample0_file_time,
             pcm_sha256,
             extraction.stream.channels,
             extraction.sample_count,
         )
-        if destination.is_file():
-            parked = _begin_atomic(destination)
-            os.replace(destination, parked)
-        os.replace(temp, destination)
-        _write_sidecar(sidecar, reference, policy)
-        committed = True
+        _write_generation(generation_meta, reference, policy)
+        _verify_generation(generation_pcm, generation_meta, reference, policy)
+        _publish_pointer(destination, generation_pcm, generation_meta)
+        published = True
         return reference
     finally:
-        temp.unlink(missing_ok=True)
-        if parked is not None:
-            if committed:
-                parked.unlink(missing_ok=True)
-            elif parked.exists():
-                os.replace(parked, destination)  # 출판이 죽었다 — 옛 것을 제자리로
+        if not published:
+            generation_pcm.unlink(missing_ok=True)
+            generation_meta.unlink(missing_ok=True)
 
 
 def _assemble_reference(
     source_id: str,
     original_stem: str,
     original_sha256: str,
-    destination: Path,
+    generation_pcm: Path,
     policy: AudioPolicy,
     origin: Fraction,
     pcm_sha256: str,
@@ -346,7 +343,7 @@ def _assemble_reference(
         source_id=source_id,
         original_stem=original_stem,
         original_sha256=original_sha256,
-        path=destination,
+        path=generation_pcm,
         pcm_sha256=pcm_sha256,
         analysis_key=_analysis_key(
             original_sha256, policy, origin, pcm_sha256, channels, policy.sample_rate
@@ -360,25 +357,20 @@ def _assemble_reference(
 
 def _reusable_reference(
     destination: Path,
-    sidecar: Path,
     source_id: str,
     original_stem: str,
     original_sha256: str,
     policy: AudioPolicy,
 ) -> PcmReference | None:
-    """곁 기록·파일 해시가 전부 맞는 완성물만 되살린다.
+    """포인터가 가리키는 세대가 이번 호출과 전부 같고 해시까지 증명될 때만 되살린다.
 
-    짝이 어긋난 어떤 상태(새 PCM + 낡은 곁 기록, 그 반대)도 여기를 통과하지
-    못 한다 — 통과하지 못 한 짝은 완성물이 아니므로 재추출이 곧 수복이다.
+    짝이 어긋난 어떤 상태도 여기를 통과하지 못 한다 — 통과하지 못 한 짝은
+    완성물이 아니므로 새 세대가 곧 수복이다.
     """
-    record = _load_sidecar(sidecar)
-    if record is None:
+    generation = _load_generation(destination)
+    if generation is None:
         return None
-    try:
-        stored = _stored_from_record(record)
-    except ValueError:
-        log.debug(f"곁 기록을 못 믿는다 — 다시 뽑는다: {sidecar}")
-        return None
+    generation_pcm, stored = generation
     if (
         stored.source_id != source_id
         or stored.original_stem != original_stem
@@ -387,21 +379,125 @@ def _reusable_reference(
     ):
         return None
     expected = stored.sample_count * stored.policy.sample_width * stored.channels
-    if stored.channels < 1 or not _stored_file_matches(destination, expected, stored.pcm_sha256):
-        log.warn(f"저장 PCM이 곁 기록과 어긋난다 — 다시 뽑는다: {destination}")
+    if stored.channels < 1 or not _stored_file_matches(generation_pcm, expected, stored.pcm_sha256):
+        log.warn(f"가리킨 세대 PCM이 기록과 어긋난다 — 다시 뽑는다: {generation_pcm}")
         return None
-    log.debug(f"검증된 PCM 참조를 다시 쓴다: {destination}")
+    log.debug(f"검증된 PCM 세대를 다시 쓴다: {generation_pcm}")
     return _assemble_reference(
         source_id,
         original_stem,
         original_sha256,
-        destination,
+        generation_pcm,
         policy,
         stored.origin,
         stored.pcm_sha256,
         stored.channels,
         stored.sample_count,
     )
+
+
+def _load_generation(destination: Path) -> tuple[Path, _Stored] | None:
+    """포인터를 읽어 (세대 PCM 경로, 세대 기록). 못 믿으면 `None`."""
+    pointer = _load_json_object(destination)
+    if pointer is None or set(pointer) != _POINTER_KEYS:
+        return None
+    if pointer["format"] != _POINTER_FORMAT:
+        return None
+    generation_pcm = _private_generation_path(destination, pointer["generation_pcm"])
+    generation_meta = _private_generation_path(destination, pointer["generation_metadata"])
+    if generation_pcm is None or generation_meta is None:
+        return None
+    record = _load_json_object(generation_meta)
+    if record is None:
+        return None
+    try:
+        stored = _stored_from_record(record)
+    except ValueError:
+        log.debug(f"세대 기록을 못 믿는다 — 다시 뽑는다: {generation_meta}")
+        return None
+    return generation_pcm, stored
+
+
+def _private_generation_path(destination: Path, name: object) -> Path | None:
+    """포인터는 이 논리 주소를 위해 만든 사유 세대만 가리킬 수 있다.
+
+    같은 디렉터리의, 주소 이름으로 시작하는 평범한 파일 이름이어야 한다 —
+    경로 이탈이나 남의 파일을 가리키는 포인터는 못 믿는다.
+    """
+    if not isinstance(name, str) or not name or Path(name).name != name:
+        return None
+    if not name.startswith(f"{destination.name}."):
+        return None
+    return destination.parent / name
+
+
+def _publish_pointer(destination: Path, generation_pcm: Path, generation_meta: Path) -> None:
+    """유일한 출판 — 논리 주소의 포인터를 같은 디렉터리에서 원자적으로 갈아끼운다."""
+    record: dict[str, object] = {
+        "format": _POINTER_FORMAT,
+        "generation_pcm": generation_pcm.name,
+        "generation_metadata": generation_meta.name,
+    }
+    temp = _begin_atomic(destination)
+    try:
+        temp.write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        os.replace(temp, destination)
+    finally:
+        temp.unlink(missing_ok=True)
+
+
+def _write_generation(path: Path, reference: PcmReference, policy: AudioPolicy) -> None:
+    """세대 기록 — 새 이름에 만드는 불변 파일이다. 기존 세대는 건드리지 않는다."""
+    record: dict[str, object] = {
+        "format": _GENERATION_FORMAT,
+        "source_id": reference.source_id,
+        "original_stem": reference.original_stem,
+        "original_sha256": reference.original_sha256,
+        "stream_index": policy.stream_index,
+        "sample_rate": policy.sample_rate,
+        "sample_width": policy.sample_width,
+        "pcm_sha256": reference.pcm_sha256,
+        "pcm_sample0_file_time": f"{reference.pcm_sample0_file_time.numerator}"
+        f"/{reference.pcm_sample0_file_time.denominator}",
+        "channels": reference.channels,
+        "sample_count": reference.sample_count,
+    }
+    temp = _begin_atomic(path)
+    try:
+        temp.write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        os.replace(temp, path)
+    finally:
+        temp.unlink(missing_ok=True)
+
+
+def _verify_generation(
+    generation_pcm: Path,
+    generation_meta: Path,
+    reference: PcmReference,
+    policy: AudioPolicy,
+) -> None:
+    """포인터를 옮기기 전에 디스크의 짝을 완전히 검증한다 — 부분 짝은 못 나간다."""
+    record = _load_json_object(generation_meta)
+    if record is None:
+        raise RuntimeError(f"세대 기록을 다시 읽지 못했다: {generation_meta}")
+    try:
+        stored = _stored_from_record(record)
+    except ValueError as exc:
+        raise RuntimeError(f"세대 기록이 스스로와 어긋난다: {generation_meta} ({exc})") from exc
+    if (
+        stored.source_id != reference.source_id
+        or stored.original_stem != reference.original_stem
+        or stored.original_sha256 != reference.original_sha256
+        or stored.policy != policy
+        or stored.pcm_sha256 != reference.pcm_sha256
+        or stored.origin != reference.pcm_sample0_file_time
+        or stored.channels != reference.channels
+        or stored.sample_count != reference.sample_count
+    ):
+        raise RuntimeError(f"세대 기록이 참조와 어긋난다: {generation_meta}")
+    expected = reference.sample_count * policy.sample_width * reference.channels
+    if not _stored_file_matches(generation_pcm, expected, reference.pcm_sha256):
+        raise RuntimeError(f"세대 PCM이 참조와 어긋난다: {generation_pcm}")
 
 
 def _analysis_key(
@@ -442,53 +538,25 @@ def _key_material(
     )
 
 
-def _sidecar_path(destination: Path) -> Path:
-    return destination.with_name(destination.name + _SIDECAR_SUFFIX)
-
-
 def _stored_file_matches(path: Path, expected_bytes: int, expected_sha256: str) -> bool:
     if not path.is_file() or path.stat().st_size != expected_bytes:
         return False
     return _sha256_file(path) == expected_sha256
 
 
-def _write_sidecar(sidecar: Path, reference: PcmReference, policy: AudioPolicy) -> None:
-    """완성물의 사실을 곁에 남긴다 — PCM 다음에 쓰므로 증명하는 쪽이 늘 진실이다."""
-    record: dict[str, object] = {
-        "format": _SIDECAR_FORMAT,
-        "source_id": reference.source_id,
-        "original_stem": reference.original_stem,
-        "original_sha256": reference.original_sha256,
-        "stream_index": policy.stream_index,
-        "sample_rate": policy.sample_rate,
-        "sample_width": policy.sample_width,
-        "pcm_sha256": reference.pcm_sha256,
-        "pcm_sample0_file_time": f"{reference.pcm_sample0_file_time.numerator}"
-        f"/{reference.pcm_sample0_file_time.denominator}",
-        "channels": reference.channels,
-        "sample_count": reference.sample_count,
-    }
-    temp = _begin_atomic(sidecar)
+def _load_json_object(path: Path) -> dict[str, object] | None:
     try:
-        temp.write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        os.replace(temp, sidecar)
-    finally:
-        temp.unlink(missing_ok=True)
-
-
-def _load_sidecar(sidecar: Path) -> dict[str, object] | None:
-    try:
-        record = json.loads(sidecar.read_text(encoding="utf-8"))
+        record = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None  # 없거나 깨졌거나 — 다시 뽑는 것이 곧 치료다
     return record if isinstance(record, dict) else None
 
 
 def _stored_from_record(record: dict[str, object]) -> _Stored:
-    if set(record) != _SIDECAR_KEYS:
-        raise ValueError(f"곁 기록 키 집합이 다르다: {sorted(record)}")
-    if record["format"] != _SIDECAR_FORMAT:
-        raise ValueError(f"곁 기록 형식이 다르다: {record['format']!r}")
+    if set(record) != _GENERATION_KEYS:
+        raise ValueError(f"세대 기록 키 집합이 다르다: {sorted(record)}")
+    if record["format"] != _GENERATION_FORMAT:
+        raise ValueError(f"세대 기록 형식이 다르다: {record['format']!r}")
     return _Stored(
         source_id=_record_text(record, "source_id"),
         original_stem=_record_text(record, "original_stem"),
@@ -508,14 +576,14 @@ def _stored_from_record(record: dict[str, object]) -> _Stored:
 def _record_count(record: dict[str, object], key: str) -> int:
     value = record[key]
     if isinstance(value, bool) or not isinstance(value, int):
-        raise ValueError(f"곁 기록 {key}가 정수가 아니다: {value!r}")
+        raise ValueError(f"세대 기록 {key}가 정수가 아니다: {value!r}")
     return value
 
 
 def _record_text(record: dict[str, object], key: str) -> str:
     value = record[key]
     if not isinstance(value, str) or not value:
-        raise ValueError(f"곁 기록 {key}가 비지 않은 문자열이 아니다: {value!r}")
+        raise ValueError(f"세대 기록 {key}가 비지 않은 문자열이 아니다: {value!r}")
     return value
 
 
@@ -571,7 +639,7 @@ def _window_abs_peak(values: array.array[int], start: int, window: int) -> int:
 
 
 # ─────────────────────────────────────────────────────────────
-#  검증·공용구 — 세는 수·문자열·경로·원자적 쓰기
+#  검증·공용구 — 세는 수·문자열·경로·새 파일 이름
 # ─────────────────────────────────────────────────────────────
 
 
@@ -580,13 +648,11 @@ def _require_text(value: object, name: str) -> None:
         raise ValueError(f"{name}은 비지 않은 문자열이어야 한다: {value!r}")
 
 
-def _require_distinct_paths(original: Path, destination: Path, sidecar: Path) -> None:
-    """원본 미디어는 참조가 사는 곳에 살면 안 된다 — 덮어쓸 수 있기 때문이다."""
-    resolved_original = original.resolve()
-    if resolved_original in {destination.resolve(), sidecar.resolve()}:
+def _require_distinct_paths(original: Path, destination: Path) -> None:
+    """원본 미디어는 캐시 주소와 같은 곳에 살면 안 된다 — 덮어쓸 수 있기 때문이다."""
+    if original.resolve() == destination.resolve():
         raise ValueError(
-            f"경로가 충돌한다 — 원본을 덮어쓸 수 없다: 원본 {original}, "
-            f"목적지 {destination}, 곁 기록 {sidecar}"
+            f"경로가 충돌한다 — 원본을 덮어쓸 수 없다: 원본 {original}, 논리 주소 {destination}"
         )
 
 
@@ -639,11 +705,11 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _begin_atomic(destination: Path) -> Path:
-    """같은 디렉터리의 임시 경로 — `os.replace`가 원자적 갈아끼움을 보장한다."""
+def _begin_atomic(destination: Path, suffix: str = ".tmp") -> Path:
+    """같은 디렉터리의 남이 쓰지 않는 새 이름 — 세대도 임시파일도 이것으로 만든다."""
     destination.parent.mkdir(parents=True, exist_ok=True)
     handle, name = tempfile.mkstemp(
-        dir=destination.parent, prefix=f"{destination.name}.", suffix=".tmp"
+        dir=destination.parent, prefix=f"{destination.name}.", suffix=suffix
     )
     os.close(handle)
     return Path(name)
