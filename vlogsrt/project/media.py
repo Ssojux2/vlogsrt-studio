@@ -39,6 +39,19 @@ _READ_CHUNK_BYTES = 1024 * 1024
 _MAP_ENTRY_KEYS = frozenset({"resource_id", "original", "proxy"})
 """미디어 맵 항목의 전체 키 집합 — 여기 없는 키는 오타이므로 거부한다."""
 
+__all__ = [
+    "MediaOverride",
+    "ResolvedMedia",
+    "load_media_map",
+    "resolve_media",
+    "sha256_file",
+]
+"""동결된 공개 면 — 이 모듈은 새 예외 형을 내보내지 않는다.
+
+맵 스키마 위반은 `ValueError`, 문서·파일 준비 거부는 models의
+`UnsupportedProject`를 그대로 쓴다(위치+이유 규율 유지).
+"""
+
 
 @dataclass(frozen=True, slots=True)
 class MediaOverride:
@@ -62,75 +75,89 @@ class ResolvedMedia:
     used_proxy: bool
 
 
-class MediaUnresolved(UnsupportedProject):
-    """미디어를 해석할 수 없다 — 어디서(location) 왜(reason) 막혔는지 말한다.
-
-    지정 부분집합 밖 입력(`UnsupportedProject`) 계열이다: 문서 형태가 아니라
-    가리키는 파일이 준비되지 않았을 때도 같은 자리+이유 규율로 거부한다.
-    """
-
-
 def load_media_map(path: Path) -> tuple[MediaOverride, ...]:
     """미디어 맵 파일(JSON 객체 배열)을 읽는다. 읽는 것 외에 아무것도 안 한다.
 
     배열이어야 하는 이유는 중복에 있다: 객체를 키로 묶으면 JSON은 뒤의 키가
     앞을 조용히 덮어쓴다. 배열은 중복이 **표현되고**, 그래서 거부할 수 있다.
+    스키마 위반은 `ValueError`로 맵 경로와 항목·키를 댄다. 경로 값은 파일
+    경로다: 절대 경로는 그대로, 상대 경로는 **맵 파일의 부모**가 기준이다(cwd
+    무관). `~`·`$…`는 펴지 않고 글자 그대로 남는다. `file://…` 같은 URI는
+    이 층의 입력이 아니므로 거부한다 — URI 해석은 XML media-rep의 몫이다.
     """
     where = str(path)
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError as error:
-        raise MediaUnresolved(where, f"미디어 맵 파일이 없다: {where}") from error
+        raise ValueError(f"{where}: 미디어 맵 파일이 없다") from error
     except OSError as error:
-        raise MediaUnresolved(where, f"미디어 맵 파일을 읽지 못한다: {error}") from error
+        raise ValueError(f"{where}: 미디어 맵 파일을 읽지 못한다 ({error})") from error
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise MediaUnresolved(where, f"미디어 맵이 JSON이 아니다: {error}") from error
+        raise ValueError(f"{where}: 미디어 맵이 JSON이 아니다 ({error})") from error
     if not isinstance(payload, list):
-        raise MediaUnresolved(where, "미디어 맵은 객체의 배열이어야 한다")
+        raise ValueError(f"{where}: 미디어 맵은 객체의 배열이어야 한다")
+    base = path.parent
     overrides: list[MediaOverride] = []
     seen: set[str] = set()
     for position, entry in enumerate(payload, start=1):
-        overrides.append(_map_entry(entry, position, where, seen))
+        overrides.append(_map_entry(entry, position, where, seen, base))
     return tuple(overrides)
 
 
-def _map_entry(entry: object, position: int, where: str, seen: set[str]) -> MediaOverride:
+def _map_entry(
+    entry: object, position: int, where: str, seen: set[str], base: Path
+) -> MediaOverride:
     if not isinstance(entry, dict):
-        raise MediaUnresolved(where, f"미디어 맵 항목 {position}이 객체가 아니다: {entry!r}")
+        raise ValueError(f"{where}: 미디어 맵 항목 {position}이 객체가 아니다: {entry!r}")
     unknown = sorted(set(entry) - _MAP_ENTRY_KEYS)
     if unknown:
-        raise MediaUnresolved(
-            where,
-            f"미디어 맵 항목 {position}에 모르는 키가 있다: {unknown}"
-            " — 받는 키는 resource_id/original/proxy뿐이다",
+        raise ValueError(
+            f"{where}: 미디어 맵 항목 {position}에 모르는 키가 있다: {unknown}"
+            " — 받는 키는 resource_id/original/proxy뿐이다"
         )
     resource_id: object = entry.get("resource_id")
     if not isinstance(resource_id, str) or not resource_id:
-        raise MediaUnresolved(
-            where,
-            f"미디어 맵 항목 {position}의 resource_id가 무효다: {resource_id!r}"
-            " — 비지 않은 문자열이어야 한다",
+        raise ValueError(
+            f"{where}: 미디어 맵 항목 {position}의 resource_id가 무효다: {resource_id!r}"
+            " — 비지 않은 문자열이어야 한다"
         )
     if resource_id in seen:
-        raise MediaUnresolved(where, f"미디어 맵에 중복 resource_id가 있다: {resource_id!r}")
-    seen.add(resource_id)
-    return MediaOverride(
-        resource_id=resource_id,
-        original=_map_path(entry.get("original"), "original", position, where),
-        proxy=_map_path(entry.get("proxy"), "proxy", position, where),
-    )
-
-
-def _map_path(value: object, field: str, position: int, where: str) -> Path | None:
-    if value is None:
-        return None
-    if not isinstance(value, str) or not value:
-        raise MediaUnresolved(
-            where,
-            f"미디어 맵 항목 {position}의 {field}가 무효다: {value!r}"
-            " — 경로 문자열이거나 null이어야 한다",
+        raise ValueError(
+            f"{where}: 미디어 맵 항목 {position}의 resource_id가 중복이다: {resource_id!r}"
         )
-    return Path(value)
+    seen.add(resource_id)
+    original = _map_path(entry, "original", position, where, base)
+    proxy = _map_path(entry, "proxy", position, where, base)
+    if original is None and proxy is None:
+        raise ValueError(
+            f"{where}: 미디어 맵 항목 {position}({resource_id!r})에 경로가 하나도 없다"
+            " — original/proxy 중 적어도 하나는 있어야 한다"
+        )
+    return MediaOverride(resource_id=resource_id, original=original, proxy=proxy)
+
+
+def _map_path(entry: dict, key: str, position: int, where: str, base: Path) -> Path | None:
+    """키가 **있을 때만** 경로다 — 명시적 null과 키 부재는 다르다(동결 계약)."""
+    if key not in entry:
+        return None
+    value: object = entry[key]
+    if value is None:
+        raise ValueError(
+            f"{where}: 미디어 맵 항목 {position}의 {key}가 null이다"
+            " — 키를 아예 빼거나 비지 않은 경로 문자열을 써라"
+        )
+    if not isinstance(value, str) or not value:
+        raise ValueError(
+            f"{where}: 미디어 맵 항목 {position}의 {key}가 무효다: {value!r}"
+            " — 비지 않은 경로 문자열이어야 한다"
+        )
+    if "://" in value:
+        raise ValueError(
+            f"{where}: 미디어 맵 항목 {position}의 {key}가 URI다: {value!r}"
+            " — 여기는 파일 경로지 URI가 아니다"
+        )
+    candidate = Path(value)
+    return candidate if candidate.is_absolute() else base / candidate
 
 
 def sha256_file(path: Path) -> str:
@@ -165,7 +192,7 @@ def _index_overrides(
     indexed: dict[str, MediaOverride] = {}
     for override in overrides:
         if override.resource_id in indexed:
-            raise MediaUnresolved(
+            raise UnsupportedProject(
                 str(document.input_path),
                 f"오버라이드에 중복 resource_id가 있다: {override.resource_id!r}"
                 " — 어느 쪽이 진짜인지 고르지 않는다",
@@ -174,7 +201,7 @@ def _index_overrides(
     known_ids = {resource.xml_id for resource in document.resources}
     unknown = sorted(set(indexed) - known_ids)
     if unknown:
-        raise MediaUnresolved(
+        raise UnsupportedProject(
             str(document.input_path),
             f"문서에 없는 resource_id다: {unknown[0]!r}"
             f" — 이 문서의 애셋 id는 {sorted(known_ids)}뿐이다",
@@ -191,7 +218,9 @@ def _resolve_resource(
     try:
         original_sha256 = sha256_file(original)
     except OSError as error:
-        raise MediaUnresolved(where, f"원본 미디어를 읽을 수 없다: {original} ({error})") from error
+        raise UnsupportedProject(
+            where, f"원본 미디어를 읽을 수 없다: {original} ({error})"
+        ) from error
     image_source = original
     used_proxy = False
     if proxy is not None and proxy.is_file():
@@ -215,13 +244,13 @@ def _select_original(resource: AssetResource, override: MediaOverride | None, wh
         return override.original
     candidates = [rep for rep in resource.media_reps if rep.kind == "original"]
     if not candidates:
-        raise MediaUnresolved(
+        raise UnsupportedProject(
             where,
             "원본(original-media) media-rep이 없다 — 원본은 프록시가 있어도"
             " 언제나 필요하다(프록시는 이미지에만 쓰인다)",
         )
     if len(candidates) > 1:
-        raise MediaUnresolved(
+        raise UnsupportedProject(
             where,
             f"original-media media-rep이 {len(candidates)}개다"
             " — 어느 쪽이 원본인지 못 정하므로 첫째를 고르지 않는다",
@@ -237,7 +266,7 @@ def _select_proxy(
         return override.proxy
     candidates = [rep for rep in resource.media_reps if rep.kind == "proxy"]
     if len(candidates) > 1:
-        raise MediaUnresolved(
+        raise UnsupportedProject(
             where,
             f"proxy-media media-rep이 {len(candidates)}개다"
             " — 어느 쪽이 프록시인지 못 정하므로 첫째를 고르지 않는다",
@@ -252,23 +281,23 @@ def _file_uri_to_path(src: str, where: str) -> Path:
     parsed = urlparse(src)
     scheme = parsed.scheme.lower()
     if not scheme:
-        raise MediaUnresolved(where, f"media-rep src가 file URI가 아니다(스킴이 없다): {src}")
+        raise UnsupportedProject(where, f"media-rep src가 file URI가 아니다(스킴이 없다): {src}")
     if scheme != "file":
-        raise MediaUnresolved(where, f"media-rep src가 file 스킴이 아니다: {scheme!r} — {src}")
+        raise UnsupportedProject(where, f"media-rep src가 file 스킴이 아니다: {scheme!r} — {src}")
     if parsed.hostname not in (None, "localhost"):
-        raise MediaUnresolved(
+        raise UnsupportedProject(
             where, f"로컬 경로로 못 푸는 file URI 호스트다: {parsed.hostname!r} — {src}"
         )
     if parsed.params or parsed.query or parsed.fragment:
-        raise MediaUnresolved(where, f"file URI에 params/query/fragment가 붙어 있다: {src}")
+        raise UnsupportedProject(where, f"file URI에 params/query/fragment가 붙어 있다: {src}")
     try:
         decoded = unquote(parsed.path, encoding="utf-8", errors="strict")
     except UnicodeDecodeError as error:
-        raise MediaUnresolved(
+        raise UnsupportedProject(
             where, f"퍼센트 인코딩이 UTF-8로 해석되지 않는다: {src} ({error})"
         ) from error
     if not decoded:
-        raise MediaUnresolved(where, f"file URI에 경로가 없다: {src}")
+        raise UnsupportedProject(where, f"file URI에 경로가 없다: {src}")
     return Path(decoded)
 
 

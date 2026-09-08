@@ -26,7 +26,6 @@ import pytest
 from vlogsrt.project.fcpxml import parse_project
 from vlogsrt.project.media import (
     MediaOverride,
-    MediaUnresolved,
     ResolvedMedia,
     load_media_map,
     resolve_media,
@@ -199,7 +198,7 @@ def test_non_file_or_unresolvable_uris_are_rejected(tmp_path: Path, src: str, to
     original = write_media(tmp_path, "original.mp4", b"original-bytes")
     assets = [asset("r2", rep(ORIGINAL, src)), asset("r3", rep(ORIGINAL, file_uri(original)))]
     document = parse_media_project(tmp_path, assets, clips("r2", "r3"))
-    with pytest.raises(MediaUnresolved) as excinfo:
+    with pytest.raises(UnsupportedProject) as excinfo:
         resolve_media(document)
     assert excinfo.value.location == ASSET_1, str(excinfo.value)
     assert token in excinfo.value.reason, str(excinfo.value)
@@ -210,7 +209,7 @@ def test_malformed_percent_encoding_is_rejected(tmp_path: Path) -> None:
     document = parse_media_project(
         tmp_path, [asset("r2", rep(ORIGINAL, "file:///media/%FF%FE.mp4"))], clips("r2")
     )
-    with pytest.raises(MediaUnresolved) as excinfo:
+    with pytest.raises(UnsupportedProject) as excinfo:
         resolve_media(document)
     assert excinfo.value.location == ASSET_1
     assert "UTF-8" in excinfo.value.reason
@@ -224,7 +223,7 @@ def test_malformed_proxy_uri_is_rejected_even_with_valid_original(tmp_path: Path
         [asset("r2", rep(ORIGINAL, file_uri(original)) + rep(PROXY, "http://cdn/proxy.mov"))],
         clips("r2"),
     )
-    with pytest.raises(MediaUnresolved) as excinfo:
+    with pytest.raises(UnsupportedProject) as excinfo:
         resolve_media(document)
     assert excinfo.value.location == ASSET_1
     assert "http" in excinfo.value.reason
@@ -244,7 +243,7 @@ def test_multiple_same_kind_reps_are_ambiguous(tmp_path: Path, kind: str) -> Non
         + rep(kind, file_uri(other))
     )
     document = parse_media_project(tmp_path, [asset("r2", reps)], clips("r2"))
-    with pytest.raises(MediaUnresolved) as excinfo:
+    with pytest.raises(UnsupportedProject) as excinfo:
         resolve_media(document)
     assert excinfo.value.location == ASSET_1
     assert kind in excinfo.value.reason
@@ -314,7 +313,7 @@ def test_missing_original_fails_even_when_proxy_exists(tmp_path: Path) -> None:
     document = parse_media_project(
         tmp_path, [asset("r2", rep(PROXY, file_uri(proxy)))], clips("r2")
     )
-    with pytest.raises(MediaUnresolved) as excinfo:
+    with pytest.raises(UnsupportedProject) as excinfo:
         resolve_media(document)
     assert excinfo.value.location == ASSET_1
     assert "original" in excinfo.value.reason
@@ -329,7 +328,7 @@ def test_absent_original_file_blocks_readiness(tmp_path: Path) -> None:
         [asset("r2", rep(ORIGINAL, file_uri(missing)) + rep(PROXY, file_uri(proxy)))],
         clips("r2"),
     )
-    with pytest.raises(MediaUnresolved) as excinfo:
+    with pytest.raises(UnsupportedProject) as excinfo:
         resolve_media(document)
     assert excinfo.value.location == ASSET_1
     assert str(missing) in excinfo.value.reason
@@ -342,7 +341,7 @@ def test_override_original_pointing_at_missing_file_blocks(tmp_path: Path) -> No
     document = parse_media_project(
         tmp_path, [asset("r2", rep(PROXY, file_uri(proxy)))], clips("r2")
     )
-    with pytest.raises(MediaUnresolved) as excinfo:
+    with pytest.raises(UnsupportedProject) as excinfo:
         resolve_media(document, (MediaOverride("r2", original=missing),))
     assert excinfo.value.location == ASSET_1
     assert str(missing) in excinfo.value.reason
@@ -543,7 +542,7 @@ def test_unknown_override_resource_id_is_rejected(tmp_path: Path) -> None:
     document = parse_media_project(
         tmp_path, [asset("r2", rep(ORIGINAL, file_uri(original)))], clips("r2")
     )
-    with pytest.raises(MediaUnresolved) as excinfo:
+    with pytest.raises(UnsupportedProject) as excinfo:
         resolve_media(document, (MediaOverride("rX", original=original),))
     assert excinfo.value.location == str(document.input_path)
     assert "rX" in excinfo.value.reason
@@ -556,7 +555,7 @@ def test_duplicate_override_ids_are_rejected_at_resolve(tmp_path: Path) -> None:
     document = parse_media_project(
         tmp_path, [asset("r2", rep(ORIGINAL, file_uri(original)))], clips("r2")
     )
-    with pytest.raises(MediaUnresolved) as excinfo:
+    with pytest.raises(UnsupportedProject) as excinfo:
         resolve_media(
             document,
             (MediaOverride("r2", original=original), MediaOverride("r2", original=other)),
@@ -593,6 +592,7 @@ def write_map(tmp_path: Path, payload: str) -> Path:
 
 
 def test_load_media_map_reads_entries_in_order(tmp_path: Path) -> None:
+    """절대 경로는 그대로, 상대 경로는 맵 파일의 부모에서 푼다 — 배열 순서 그대로."""
     original = write_media(tmp_path, "original.mp4", b"original-bytes")
     proxy = write_media(tmp_path, "proxy.mov", b"proxy-bytes")
     path = write_map(
@@ -600,18 +600,45 @@ def test_load_media_map_reads_entries_in_order(tmp_path: Path) -> None:
         json.dumps(
             [
                 {"resource_id": "r2", "original": str(original), "proxy": str(proxy)},
-                {"resource_id": "r3", "proxy": str(proxy)},
-                {"resource_id": "r4"},
-                {"resource_id": "r5", "original": None},
+                {"resource_id": "r3", "proxy": "media/proxy.mov"},
+                {"resource_id": "r4", "original": str(original)},
             ]
         ),
     )
     assert load_media_map(path) == (
         MediaOverride("r2", original=original, proxy=proxy),
-        MediaOverride("r3", proxy=proxy),
-        MediaOverride("r4"),
-        MediaOverride("r5"),
+        MediaOverride("r3", proxy=tmp_path / "media" / "proxy.mov"),
+        MediaOverride("r4", original=original),
     )
+
+
+def test_relative_map_paths_ignore_the_process_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """상대 경로의 기준은 맵 파일의 부모다 — cwd를 옮겨도 같은 곳을 가리킨다."""
+    elsewhere = media_dir(tmp_path, "elsewhere")
+    path = write_map(
+        tmp_path, json.dumps([{"resource_id": "r2", "original": "media/original.mp4"}])
+    )
+    monkeypatch.chdir(elsewhere)
+    override = load_media_map(path)[0]
+    assert override.original == tmp_path / "media" / "original.mp4"
+
+
+def test_tilde_and_env_stay_literal_without_expansion(tmp_path: Path) -> None:
+    """`~`·`$HOME`은 펴지 않는다 — 문자 그대로 맵 부모 아래의 상대 경로로 남는다."""
+    path = write_map(
+        tmp_path,
+        json.dumps(
+            [
+                {"resource_id": "r2", "original": "~/clips/a.mp4"},
+                {"resource_id": "r3", "proxy": "$HOME/clips/b.mov"},
+            ]
+        ),
+    )
+    first, second = load_media_map(path)
+    assert first.original == tmp_path / "~/clips/a.mp4"
+    assert second.proxy == tmp_path / "$HOME/clips/b.mov"
 
 
 def test_load_media_map_empty_list_is_allowed(tmp_path: Path) -> None:
@@ -631,6 +658,12 @@ def test_load_media_map_empty_list_is_allowed(tmp_path: Path) -> None:
         ('[{"resource_id": "r2", "original": 5}]', "original"),
         ('[{"resource_id": "r2", "proxy": true}]', "proxy"),
         ('[{"resource_id": "r2", "original": ""}]', "original"),
+        ('[{"resource_id": "r2"}]', "original"),
+        ('[{"resource_id": "r3"}]', "original"),
+        ('[{"resource_id": "r2", "original": null}]', "null"),
+        ('[{"resource_id": "r2", "proxy": null}]', "null"),
+        ('[{"resource_id": "r2", "original": "file:///media/a.mp4"}]', "URI"),
+        ('[{"resource_id": "r2", "proxy": "http://cdn/p.mov"}]', "URI"),
         ('[{"resource_id": "r2"}, {"resource_id": "r2"}]', "r2"),
         ('[{"resource_id": "r2", "original": "/a"}, {"resource_id": "r2"}]', "r2"),
         ("not json at all", "JSON"),
@@ -638,18 +671,19 @@ def test_load_media_map_empty_list_is_allowed(tmp_path: Path) -> None:
     ],
 )
 def test_load_media_map_rejects_malformed_entries(tmp_path: Path, payload: str, token: str) -> None:
+    """맵 스키마 위반은 ValueError다 — 맵 경로와 항목·키를 댄다(동결 계약)."""
     path = write_map(tmp_path, payload)
-    with pytest.raises(MediaUnresolved) as excinfo:
+    with pytest.raises(ValueError) as excinfo:
         load_media_map(path)
-    assert excinfo.value.location == str(path)
-    assert token in excinfo.value.reason, str(excinfo.value)
+    assert str(path) in str(excinfo.value)
+    assert token in str(excinfo.value), str(excinfo.value)
 
 
 def test_load_media_map_missing_file_is_named(tmp_path: Path) -> None:
     missing = tmp_path / "no-such-map.json"
-    with pytest.raises(MediaUnresolved) as excinfo:
+    with pytest.raises(ValueError) as excinfo:
         load_media_map(missing)
-    assert excinfo.value.location == str(missing)
+    assert str(missing) in str(excinfo.value)
 
 
 def test_loaded_map_feeds_resolve_media(tmp_path: Path) -> None:
@@ -712,14 +746,20 @@ def test_media_interface_signatures_match_the_contract() -> None:
     ]
 
 
-def test_media_unresolved_is_an_unsupported_project() -> None:
-    """준비 실패는 '지정 부분집합 밖 입력' 계열이다 — 자리와 이유를 둘 다 말한다."""
-    assert issubclass(MediaUnresolved, UnsupportedProject)
-    assert issubclass(MediaUnresolved, RuntimeError)
-    error = MediaUnresolved(location="/fcpxml[1]/resources[1]/asset[1]", reason="이유")
-    assert error.location == "/fcpxml[1]/resources[1]/asset[1]"
-    assert error.reason == "이유"
-    assert "/fcpxml[1]/resources[1]/asset[1]" in str(error)
+def test_media_public_surface_is_frozen_to_the_contract() -> None:
+    """공개 면은 두 데이터클래스와 네 함수뿐이다 — 새 예외 형을 내보내지 않는다."""
+    import vlogsrt.project.media as media_module
+
+    assert set(media_module.__all__) == {
+        "MediaOverride",
+        "ResolvedMedia",
+        "load_media_map",
+        "resolve_media",
+        "sha256_file",
+    }
+    for name in media_module.__all__:
+        assert getattr(media_module, name) is not None, name
+    assert not hasattr(media_module, "MediaUnresolved")
 
 
 def test_media_module_imports_only_allowed_roots() -> None:
