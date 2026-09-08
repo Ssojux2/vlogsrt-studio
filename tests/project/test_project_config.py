@@ -188,10 +188,12 @@ def test_project_config_is_not_the_legacy_config_type() -> None:
     assert ProjectConfig is not Config
     assert not issubclass(ProjectConfig, Config)
     assert not issubclass(Config, ProjectConfig)
-    # 계약 서명 그대로다 — frozen·slots인 불변 설정 객체.
+    # 계약 서명 그대로다 — frozen·slots인 불변 설정 객체. slots는 공개 관찰로 증명한다:
+    # `__dataclass_params__.slots`는 3.11에 없는 사적 필드다(3.12에 생겼다).
     params = ProjectConfig.__dataclass_params__
     assert params.frozen
-    assert params.slots
+    assert "schema_version" in ProjectConfig.__slots__
+    assert not hasattr(ProjectConfig(), "__dict__")
 
 
 def test_project_config_source_does_not_import_legacy() -> None:
