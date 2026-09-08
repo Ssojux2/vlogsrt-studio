@@ -1,7 +1,7 @@
-# Sol final P3 engine-seam proposal
+# Sol final P3 engine-seam disposition
 
 Date: 2026-09-09  
-Status: proposed to Astra after Opus review; do not dispatch P3 until accepted and folded into briefs
+Status: accepted by Astra in `msg_e4df6816b3ac` and folded into the final P3 briefs at `6c6018e`; P3 still waits for the actual P1/P2 phase joins
 
 ## Minimal legacy-safe seam
 
