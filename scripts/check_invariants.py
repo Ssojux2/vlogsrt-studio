@@ -413,18 +413,73 @@ def _subprocess_calls(
     return calls
 
 
-def _which_calls(tree: ast.Module) -> list[ast.Call]:
-    """`shutil.which(...)` 호출 전부(`from shutil import which` 형태도)."""
-    calls = []
+def _rebound_names(node: ast.AST) -> list[str]:
+    """이 노드가 다시 묶는(그림자) 이름들. 대입·def·class 전부."""
+    if isinstance(node, ast.Assign):
+        return [target.id for target in node.targets if isinstance(target, ast.Name)]
+    if isinstance(node, ast.AnnAssign):
+        if isinstance(node.target, ast.Name) and node.value is not None:
+            return [node.target.id]
+        return []
+    if isinstance(node, (ast.AugAssign, ast.NamedExpr)) and isinstance(node.target, ast.Name):
+        return [node.target.id]
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return [node.name]
+    return []
+
+
+def _shutil_which_bindings(tree: ast.Module) -> tuple[set[str], set[str], set[str], list[int]]:
+    """shutil 묶음 — (참 모듈 별명들, 참 which 별명들, which였던 이름 전부, 별표 줄들).
+
+    `import shutil as sh`·`from shutil import which as find`까지 따라간다. 이름이
+    다른 무엇으로 한 번이라도 다시 묶이면(그림자) 자격을 끊는다. 어떤 객체의
+    `.which`든 믿는 순간 `unrelated.which('xmllint')`가 실행파일 검사를 통과한다.
+    """
+    module_kinds: dict[str, set[str]] = {}
+    which_kinds: dict[str, set[str]] = {}
+    star_lines: list[int] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name.split(".")[0] == "shutil":
+                    module_kinds.setdefault(alias.asname or "shutil", set()).add("import")
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module == "shutil":
+            for alias in node.names:
+                if alias.name == "*":
+                    star_lines.append(node.lineno)
+                elif alias.name == "which":
+                    which_kinds.setdefault(alias.asname or "which", set()).add("import")
+    for node in ast.walk(tree):
+        for name in _rebound_names(node):
+            if name in module_kinds:
+                module_kinds[name].add("shadow")
+            if name in which_kinds:
+                which_kinds[name].add("shadow")
+    genuine_modules = {name for name, kinds in module_kinds.items() if kinds == {"import"}}
+    genuine_which = {name for name, kinds in which_kinds.items() if kinds == {"import"}}
+    return genuine_modules, genuine_which, set(which_kinds), star_lines
+
+
+def _which_calls(
+    tree: ast.Module, module_names: set[str], which_names: set[str], ever_names: set[str]
+) -> tuple[list[ast.Call], list[ast.Call]]:
+    """which 호출을 (shutil 것이 확실한 호출, 출처 불명 호출)로 갈라 돌려준다.
+
+    참 shutil 모듈 별명의 `.which`와 참 별명의 `which(...)`만 확실하다. 그 밖의
+    `.which` 전부와 덮어쓰였거나 수입 증명이 없는 `which` 이름 호출은 출처 불명이다.
+    """
+    genuine: list[ast.Call] = []
+    unknown: list[ast.Call] = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
         func = node.func
-        if (isinstance(func, ast.Attribute) and func.attr == "which") or (
-            isinstance(func, ast.Name) and func.id == "which"
-        ):
-            calls.append(node)
-    return calls
+        if isinstance(func, ast.Attribute) and func.attr == "which":
+            on_module = isinstance(func.value, ast.Name) and func.value.id in module_names
+            (genuine if on_module else unknown).append(node)
+        elif isinstance(func, ast.Name) and (func.id == "which" or func.id in ever_names):
+            (genuine if func.id in which_names else unknown).append(node)
+    return genuine, unknown
 
 
 def _single_const(call: ast.Call) -> object | None:
@@ -462,28 +517,47 @@ def _xmllint_names(tree: ast.Module, which_calls: list[ast.Call]) -> set[str]:
     return sanctioned - tainted
 
 
-def _xmllint_argv_failures(
-    rel: str, site: ast.Call, sanctioned: set[str], which_calls: list[ast.Call]
-) -> list[str]:
-    """호출 하나의 argv 형태를 본다 — 고정 실행파일, 고정 argv, 셸 금지."""
+def _keyword_failures(rel: str, site: ast.Call) -> list[str]:
+    """키워드 인자의 금지 — 셸, 실행파일 오버라이드, 불투명 전개."""
     where = f"{rel}:{site.lineno}"
+    problems: list[str] = []
     shell = next((kw for kw in site.keywords if kw.arg == "shell"), None)
     if shell is not None and not (
         isinstance(shell.value, ast.Constant) and shell.value.value is False
     ):
-        return [f"{where} 셸은 열 수 없다 — shell은 생략하거나 리터럴 False"]
+        problems.append(f"{where} 셸은 열 수 없다 — shell은 생략하거나 리터럴 False")
+    if any(kw.arg == "executable" for kw in site.keywords):
+        problems.append(f"{where} 실행파일 오버라이드(executable=)는 금지다")
+    if any(kw.arg is None for kw in site.keywords):
+        problems.append(f"{where} `**` 전개는 키워드 검사를 무력화한다")
+    return problems
+
+
+def _xmllint_argv_failures(
+    rel: str, site: ast.Call, sanctioned: set[str], which_calls: list[ast.Call]
+) -> list[str]:
+    """호출 하나의 argv 형태를 본다 — 고정 실행파일, 고정 argv, 위치 인자는 argv 하나.
+
+    `run`은 남는 위치 인자를 `Popen`에 그대로 넘긴다 — 뒤쪽 슬롯(bufsize·executable)으로
+    실행파일이 흘러드는 것을 "위치 인자는 argv 하나" 규칙으로 끊는다.
+    """
+    where = f"{rel}:{site.lineno}"
+    problems = _keyword_failures(rel, site)
     if not site.args:
-        return [f"{where} argv 없는 호출"]
+        return problems + [f"{where} argv 없는 호출"]
+    if len(site.args) > 1:
+        return problems + [f"{where} argv는 유일한 위치 인자여야 한다 — executable이 흘러든다"]
     argv = site.args[0]
     if not isinstance(argv, (ast.List, ast.Tuple)):
-        return [f"{where} argv는 리스트 리터럴이어야 한다 — 문자열·변수 조립 금지"]
+        return problems + [f"{where} argv는 리스트 리터럴이어야 한다 — 문자열·변수 조립 금지"]
     head = argv.elts[0] if argv.elts else None
     head_ok = isinstance(head, ast.Name) and head.id in sanctioned
     if not head_ok:
         head_ok = any(
             head is call and _single_const(call) == XMLLINT_EXECUTABLE for call in which_calls
         )
-    problems = [] if head_ok else [f"{where} 실행파일이 shutil.which('xmllint') 결과가 아니다"]
+    if not head_ok:
+        problems.append(f"{where} 실행파일이 shutil.which('xmllint') 결과가 아니다")
     problems += [
         f"{rel}:{element.lineno} argv를 조립했다 — 고정 argv만 허용"
         for element in argv.elts
@@ -500,17 +574,23 @@ def _xmllint_boundary_failures(rel: str, body: str) -> list[str]:
     """
     tree = ast.parse(body)
     failures: list[str] = []
-    which_calls = _which_calls(tree)
+    module_names, which_names, ever_names, shutil_stars = _shutil_which_bindings(tree)
+    module_aliases, symbols, star_lines = _subprocess_bindings(tree)
+    star_lines += shutil_stars
+    failures += [f"{rel}:{lineno} 별표 import는 호출 추적을 무력화한다" for lineno in star_lines]
+    genuine_which, unknown_which = _which_calls(tree, module_names, which_names, ever_names)
+    failures += [
+        f"{rel}:{call.lineno} which 출처를 입증 못 했다 — shutil.which만 허용한다"
+        for call in unknown_which
+    ]
     failures += [
         f"{rel}:{call.lineno} which가 xmllint 외 실행파일을 찾는다"
-        for call in which_calls
+        for call in genuine_which
         if _single_const(call) != XMLLINT_EXECUTABLE
     ]
-    module_aliases, symbols, star_lines = _subprocess_bindings(tree)
-    failures += [f"{rel}:{lineno} 별표 import는 호출 추적을 무력화한다" for lineno in star_lines]
-    sanctioned = _xmllint_names(tree, which_calls)
+    sanctioned = _xmllint_names(tree, genuine_which)
     for call in _subprocess_calls(tree, module_aliases, symbols):
-        failures += _xmllint_argv_failures(rel, call, sanctioned, which_calls)
+        failures += _xmllint_argv_failures(rel, call, sanctioned, genuine_which)
     return failures
 
 

@@ -587,6 +587,114 @@ def test_xmllint_boundary_rejects_star_imports(
     assert check_invariants.check_subprocess_boundaries()
 
 
+# ── P0-02 수정(Astra 재검토): xmllint 경계의 우회와 오답 ─────────────────────
+#
+# 재검토가 재현한 우회 넷(A·B·C·E)과 오답 하나(D)를 소스 문자열로 그대로 세운다.
+# subprocess는 실행하지 않는다 — 파서와 경계 검사만 돈다. 진짜 트리에
+# vlogsrt/project/ 도 만들지 않는다.
+
+_XML_BOUNDARY_REL = "vlogsrt/project/xml_validation.py"
+
+
+def _boundary_case(imports: str, setup: str, call: str) -> str:
+    """경계 모듈의 시뮬라. `setup`은 실행파일 확보 줄, `call`은 subprocess 호출."""
+    return (
+        f"{imports}"
+        "import subprocess\n"
+        "\n"
+        "\n"
+        "def validate(path: str) -> bool:\n"
+        f"    {setup}\n"
+        f"    {call}\n"
+        "    return True\n"
+    )
+
+
+@pytest.mark.parametrize(
+    ("imports", "setup", "call", "expected"),
+    [
+        pytest.param(
+            "import shutil\n",
+            'exe = shutil.which("xmllint")',
+            'completed = subprocess.run([exe, "--nonet", "--noout", path], executable="/bin/sh")',
+            1,
+            id="executable-override",
+        ),
+        pytest.param(
+            "import shutil\n",
+            'exe = shutil.which("xmllint")',
+            'completed = subprocess.run([exe, "--noout", path], **{"shell": True})',
+            1,
+            id="dict-expansion-shell",
+        ),
+        pytest.param(
+            "",
+            'exe = unrelated.which("xmllint")',
+            'completed = subprocess.run([exe, "--noout", path], capture_output=True)',
+            2,
+            id="foreign-which",
+        ),
+        pytest.param(
+            "import shutil\n",
+            'exe = shutil.which("xmllint")',
+            'process = subprocess.Popen([exe, "--noout", path], -1, "/bin/sh")',
+            1,
+            id="popen-positional-executable",
+        ),
+    ],
+)
+def test_xmllint_boundary_rejects_the_reviewed_bypasses(
+    imports: str, setup: str, call: str, expected: int
+) -> None:
+    """재검토가 재현한 우회 넷 — 어느 하나도 조용히 지나가면 안 된다."""
+    body = _boundary_case(imports, setup, call)
+    failures = check_invariants._xmllint_boundary_failures(_XML_BOUNDARY_REL, body)
+    assert len(failures) == expected, failures
+    assert all(_XML_BOUNDARY_REL in failure for failure in failures)
+
+
+def test_xmllint_boundary_accepts_the_aliased_which_import() -> None:
+    """재검토 사례 D — `from shutil import which as …`은 정당한 별명이다."""
+    body = _boundary_case(
+        "from shutil import which as find_executable\n",
+        'exe = find_executable("xmllint")',
+        'completed = subprocess.run([exe, "--noout", path], capture_output=True)',
+    )
+    assert check_invariants._xmllint_boundary_failures(_XML_BOUNDARY_REL, body) == []
+
+
+def test_xmllint_boundary_keeps_passing_the_aliased_import_shapes() -> None:
+    """승인 형태 보존 — 모듈 별명·from-import 별명·리터럴 False·동적 경로."""
+    body = _boundary_case(
+        "import shutil as sh\nfrom subprocess import run as launch\n",
+        'exe = sh.which("xmllint")',
+        'completed = launch([exe, "--noout", path], shell=False, capture_output=True)',
+    )
+    assert check_invariants._xmllint_boundary_failures(_XML_BOUNDARY_REL, body) == []
+
+
+def test_xmllint_boundary_rejects_a_shadowed_which_binding() -> None:
+    """import를 덮어쓴 `which`는 출처 불명이다 — 보수적으로 거부한다."""
+    body = _boundary_case(
+        "from shutil import which\n",
+        'which = str  # import를 덮어썼다\n    exe = which("xmllint")',
+        'completed = subprocess.run([exe, "--noout", path], capture_output=True)',
+    )
+    failures = check_invariants._xmllint_boundary_failures(_XML_BOUNDARY_REL, body)
+    assert len(failures) == 2, failures
+
+
+def test_xmllint_boundary_rejects_shutil_star_imports() -> None:
+    """`from shutil import *`는 which 출처 추적을 무력화한다."""
+    body = _boundary_case(
+        "from shutil import *\n",
+        'exe = which("xmllint")',
+        'completed = subprocess.run([exe, "--noout", path], capture_output=True)',
+    )
+    failures = check_invariants._xmllint_boundary_failures(_XML_BOUNDARY_REL, body)
+    assert len(failures) == 3, failures
+
+
 def test_missing_xml_boundary_neither_crashes_nor_blinds_the_check(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
