@@ -37,6 +37,8 @@ class SourceTrace:
     coverage: tuple[ChunkCoverage, ...]
     model: str
     config_sha256: str
+    source_srt_relative_path: str | None
+    source_srt_sha256: str | None
     error: str | None
 
 def plan_source_ranges(reference: PcmReference, cfg: Config) -> tuple[SampleRange, ...]: ...
@@ -50,10 +52,11 @@ def transcribe_unique_sources(items: Sequence[tuple[ResolvedMedia, PcmReference]
 - Per-asset namespace is the directory `artifact_dir/<asset_content_id>/`; the existing media stem remains `TranscriptionJob.stem`, and every initial/repair/arbiter job carries that same explicit namespace. `FixtureTranscriber` therefore addresses `<namespace>/<stem>.<kind>.json`. No process-global env mutation, stem-only cache, or weak `pipeline.source_fingerprint` may choose or validate reuse.
 - Convert legacy float segment boundaries with `Fraction(str(value))`; add the measured `reference.pcm_sample0_file_time` for `file_*`. Segment IDs hash analysis key, chunk index, legacy segment ID, exact source range.
 - Preserve typed success/empty/error. Missing/malformed/call errors are recorded error, never successful silence. No prompt/forced alignment/word/ratio split.
-- A successful nonempty analysis must reuse the complete existing source engine in this exact order: transcriber responses -> `transcribe.build_spine` draft -> `repair.settle` -> immutable settled spine -> `pipeline.spine_to_cues` -> `refine.refine` -> source-local SRT. `refine.refine` already invokes polish; never call `polish_pass` separately or twice.
+- Successful empty analysis publishes the deterministic empty source-local SRT artifact and its hash; error publishes no SRT path/hash.
+- A successful nonempty analysis must reuse the complete existing source engine in this exact order: transcriber responses -> `transcribe.build_spine` draft -> `repair.settle` -> immutable settled spine -> `pipeline.spine_to_cues` -> `refine.refine` -> source-local SRT. `refine.refine` already invokes polish; never call `polish_pass` separately or twice. The source-local artifact is exactly `<namespace>/<stem>.SOURCE.srt`, uses the existing legacy source serializer, and records a relative path plus SHA-256 in the trace.
 - Repair retranscription still runs under existing defaults. Extend `repair.Source` with the optional explicit namespace and propagate it to every repair/arbiter `TranscriptionJob`. The project adapter injects a cutter backed by the same retained P2 PCM reference, so repair spans do not fall back to legacy MP3 `split_at`; the default `repair.settle` behavior for legacy callers remains byte-identical.
 - Do not reject, delete, or normalize zero/reversed legacy segment durations in the adapter. Existing build/repair/refine presentation semantics decide how those records appear, and every draft/spine/cue/repair record remains traceable.
-- Source Trace, draft, settled spine, repairs, cues, and source-local SRT bytes are immutable once completed. Later project operations consume them but never edit them.
+- Source Trace, draft, settled spine, repairs, cues, and source-local SRT bytes are immutable once completed. Later project operations consume them but never edit them; a changed/missing source-local hash invalidates readiness rather than triggering silent regeneration from a derived timeline.
 
 ## Implementation steps
 
