@@ -99,8 +99,9 @@ def bundled_artifact(cfg: ProjectConfig) -> VadArtifact:
 def create_cpu_session(artifact: VadArtifact) -> object:
     """레코드를 다시 검증한 뒤 CPU 전용 onnxruntime 세션을 만들어 돌려준다.
 
-    레코드는 호출자가 지어낼 수 있으므로 세션을 만들기 전에 고정 계약(
-    ProjectConfig 기본 핀)과 실제 파일 양쪽에서 다시 대조한다. 공급자는
+    레코드는 호출자가 지어낼 수 있으므로 세션을 만들기 전에 두 경로의 실제
+    바이트를 레코드의 해시와 다시 대조한다 — 여기엔 cfg가 없으므로 대조 상대는
+    레코드뿐이다(설정 좌표의 두 번째 뿌리를 만들지 않는다, 계약). 공급자는
     CPU 하나뿐이며, 런타임이 스스로 더하거나 바꾼 공급자 목록을 보고하면
     실패 닫힘이다.
     """
@@ -166,22 +167,22 @@ def _verify_resource(
 
 
 def _revalidate_record(artifact: VadArtifact) -> None:
-    """세션 앞 재검증 — 레코드의 해시가 고정 계약과 파일 양쪽과 같은지 본다."""
-    pinned = ProjectConfig()
-    _assert_pinned_hash("model", artifact.model_sha256, pinned.vad_model_sha256)
-    _assert_pinned_hash("license", artifact.license_sha256, pinned.vad_license_sha256)
+    """세션 앞 재검증 — 두 경로의 실제 바이트를 레코드의 해시와 다시 대조한다.
+
+    대조 상대는 레코드 자체뿐이다. cfg가 없는 이 경로에서 ProjectConfig 기본값을
+    꺼내 비교하면 설정 좌표의 두 번째 뿌리가 생긴다 — bundled_artifact가 이미
+    공급된 cfg와 대조해 레코드를 만들었으므로 여기는 파일만 본다.
+    """
+    _assert_record_hash_shape("model", artifact.model_sha256)
+    _assert_record_hash_shape("license", artifact.license_sha256)
     _verify_resource(artifact.model_path, artifact.model_sha256, "model", _MODEL_BYTES)
     _verify_resource(artifact.license_path, artifact.license_sha256, "license", None)
 
 
-def _assert_pinned_hash(label: str, actual: str, pinned: str) -> None:
-    """지어낸 해시는 형태에서, 옛 해시는 고정 계약과의 대조에서 걸린다."""
+def _assert_record_hash_shape(label: str, actual: str) -> None:
+    """레코드의 해시는 16진수 64자여야 한다 — 아니면 재대조 메시지부터가 무의미하다."""
     if not _SHA256_HEX.fullmatch(actual):
         raise VadUnavailable(f"레코드의 {label} sha256이 16진수 64자가 아니다: {actual!r}")
-    if actual != pinned:
-        raise VadUnavailable(
-            f"레코드의 {label} sha256가 고정 계약(ProjectConfig 핀 {pinned})과 다르다: {actual}"
-        )
 
 
 def _reject_lfs_pointer(path: Path) -> None:

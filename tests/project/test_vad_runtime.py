@@ -450,14 +450,31 @@ def test_session_constructor_failure_is_contextual(
 def test_stale_record_with_wrong_hash_is_rejected(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """세션은 레코드를 믿지 않는다 — 지어낸 해시는 고정 계약에서 걸린다."""
+    """세션은 레코드를 믿지 않는다 — 지어낸 해시는 파일 재해시 대조에서 걸린다."""
     from vlogsrt.project.vad.runtime import VadUnavailable, bundled_artifact, create_cpu_session
 
     _install_fake_runtime(monkeypatch)
     real = bundled_artifact(ProjectConfig())
     stale = dataclasses.replace(real, model_sha256="0" * 64)
-    with pytest.raises(VadUnavailable, match="ProjectConfig"):
+    with pytest.raises(VadUnavailable, match="sha256"):
         create_cpu_session(stale)
+
+
+def test_session_does_not_open_a_second_config_root(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """cfg 없는 경로에서 ProjectConfig를 새로 만들면 설정 뿌리가 둘이 된다 — 금지."""
+    from vlogsrt.project.vad import runtime
+    from vlogsrt.project.vad.runtime import bundled_artifact, create_cpu_session
+
+    def _forbidden(*args: object, **kwargs: object) -> None:
+        raise AssertionError("create_cpu_session은 ProjectConfig를 만들어선 안 된다")
+
+    monkeypatch.setattr(runtime, "ProjectConfig", _forbidden)
+    _install_fake_runtime(monkeypatch)
+    artifact = bundled_artifact(ProjectConfig())
+    session = create_cpu_session(artifact)
+    assert session is not None
 
 
 def test_record_with_malformed_hash_is_rejected(
