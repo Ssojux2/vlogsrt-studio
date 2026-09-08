@@ -14,13 +14,14 @@ Binding source-immutability contract and Astra bootstrap disposition. This task 
 ## Contract
 
 - Exercise the complete existing offline source presentation path for four deterministic synthetic transcript shapes: `demo`, `loopy`, `loopyletter`, and `loopylong`.
+- The test must prevent environment-file discovery before invoking the pipeline (for example, monkeypatch `env.find_env_file` to return `None`, reset its cache, and set only non-secret fixture/offline variables). It must neither inspect `.env*` nor resolve/read any API key.
 - Assert exact UTF-8 SRT bytes, including cue numbering, timestamps, line breaks, punctuation, and final newline. Do not normalize or regenerate expected bytes during the assertion.
 - The lock covers the legacy serializer and source repair/refine presentation behavior. It does not bless a future project serializer or claim media/live-model coverage.
 - Expected bytes must be independently reviewable inline byte literals; the test may not compute its expectation by calling the implementation under test. No fixture/golden file may be added or modified.
 
 ## Red/green procedure
 
-1. Capture the current deterministic outputs and review them against the existing source tests and serializer behavior.
+1. Capture the current deterministic outputs through the forced-offline fixture path with environment-file discovery disabled, and review them against the existing source tests and serializer behavior.
 2. Add exact byte assertions; prove the test detects a one-byte mutation of a copied expectation or actual value.
 3. Run the focused regression, existing source/refine/pipeline tests, and `make check`.
 4. Commit only `tests/test_source_immutability.py`. No product-code, fixture, golden, invariant-checker, or shared-test edit is permitted.
