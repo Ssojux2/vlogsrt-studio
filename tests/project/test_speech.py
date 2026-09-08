@@ -807,6 +807,84 @@ def test_a_conflicting_existing_artifact_is_preserved_and_reported(tmp_path: Pat
     assert len(again.draft) == 3, "이미 만든 초안 증거는 그대로 남는다"
 
 
+def test_a_refine_failure_preserves_the_settled_stages(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """refine이 죽어도 settle이 끝난 골격·재전사 기록은 error에 그대로 남는다.
+
+    재현(Root): settle 뒤 정제가 죽으면 settled_spine·repairs가 빈 채로
+    돌아갔다 — 완성 단계의 증거가 실패와 함께 사라졌다.
+    """
+
+    def dead_refine(cues: list, cfg: Config, duration: float = 0.0) -> list:
+        raise RuntimeError("정제가 죽었다")
+
+    monkeypatch.setattr(refine, "refine", dead_refine)
+    media, reference, transcriber, artifacts, _namespace, _pcm = _repeat_setup(
+        tmp_path, count=8, rescue_payload=_clean_rescue(), arbiter_payload=None
+    )
+    trace = transcribe_source(media, reference, Config(), transcriber, artifacts)
+
+    assert trace.status == "error"
+    assert trace.error is not None and "정제가 죽었다" in trace.error
+    assert len(trace.draft) == 10
+    assert [record.text for record in trace.settled_spine] == [
+        "첫 문장입니다",
+        CLEAN,
+        "마지막 문장입니다",
+    ]
+    assert [record.outcome for record in trace.repairs] == [REPAIR_REPLACED]
+    assert trace.cues == ()
+    assert trace.source_srt_relative_path is None and trace.source_srt_sha256 is None
+
+
+def test_an_empty_refine_result_preserves_the_settled_stages(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(refine, "refine", lambda cues, cfg, duration=0.0: [])
+    media, reference, transcriber, artifacts, _namespace, _pcm = _repeat_setup(
+        tmp_path, count=8, rescue_payload=_clean_rescue(), arbiter_payload=None
+    )
+    trace = transcribe_source(media, reference, Config(), transcriber, artifacts)
+
+    assert trace.status == "error"
+    assert trace.cues == ()
+    assert [record.text for record in trace.settled_spine] == [
+        "첫 문장입니다",
+        CLEAN,
+        "마지막 문장입니다",
+    ]
+    assert [record.outcome for record in trace.repairs] == [REPAIR_REPLACED]
+
+
+def test_a_publication_conflict_after_repair_preserves_every_completed_stage(
+    tmp_path: Path,
+) -> None:
+    """출판 충돌 때에도 초안·골격·재전사·정제된 큐가 전부 남는다."""
+    media, reference, transcriber, artifacts, _namespace, _pcm = _repeat_setup(
+        tmp_path, count=8, rescue_payload=_clean_rescue(), arbiter_payload=None
+    )
+    first = transcribe_source(media, reference, Config(), transcriber, artifacts)
+    srt = artifacts / "acid-1" / first.analysis_key / "demo.SOURCE.srt"
+    foreign = "이미 있던 다른 완성물\n".encode()
+    srt.write_bytes(foreign)
+
+    again_transcriber = _Counting(FixtureTranscriber(fixture_dir=tmp_path))
+    again = transcribe_source(media, reference, Config(), again_transcriber, artifacts)
+
+    assert again.status == "error"
+    assert srt.read_bytes() == foreign
+    assert len(again.draft) == 10
+    assert [record.text for record in again.settled_spine] == [
+        "첫 문장입니다",
+        CLEAN,
+        "마지막 문장입니다",
+    ]
+    assert [record.outcome for record in again.repairs] == [REPAIR_REPLACED]
+    assert len(again.cues) == len(first.cues), "정제까지 끝난 큐가 증거로 남는다"
+    assert again.source_srt_relative_path is None and again.source_srt_sha256 is None
+
+
 # ─────────────────────────────────────────────────────────────
 #  재전사 — 남은 PCM 커터, 유지·접기, 심판
 # ─────────────────────────────────────────────────────────────

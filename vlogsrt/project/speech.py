@@ -544,16 +544,29 @@ def _finite(value: Any) -> bool:
 
 @dataclass
 class _Progress:
-    """이미 완성된 증거 — 실패 기록에도 초안·덮개가 남는다."""
+    """이미 완성된 단계의 증거 — 실패 기록에도 완성된 것은 버리지 않는다.
+
+    초안·덮개는 1차 전사 뒤에, 골격·재전사 기록은 settle 뒤에, 큐는 refine 뒤에
+    채워진다. 실패 시점에 존재하는 단계만큼만 error 기록에 남는다 — 지어내지도
+    조금히 지우지도 않는다.
+    """
 
     ranges: tuple[SampleRange, ...] = ()
     draft: tuple[Segment, ...] = ()
     coverage: tuple[ChunkCoverage, ...] = ()
+    settled: tuple[Segment, ...] = ()
+    repairs: tuple[Repair, ...] = ()
+    cues: tuple[Cue, ...] = ()
 
     def evidence(self, plan: _SourcePlan) -> tuple[SourceSegment, ...]:
         if not self.draft:
             return ()
         return _source_segments(plan.reference, plan.source_key, self.ranges, self.draft)
+
+    def settled_evidence(self, plan: _SourcePlan) -> tuple[SourceSegment, ...]:
+        if not self.settled:
+            return ()
+        return _source_segments(plan.reference, plan.source_key, self.ranges, self.settled)
 
 
 @dataclass(frozen=True, slots=True)
@@ -599,12 +612,7 @@ def transcribe_source(
         return _analyze(plan, _CapturingTranscriber(transcriber, capture), capture, progress)
     except Exception as exc:  # noqa: BLE001 - 상태로 바꿔 남긴다. 조용히 두지는 않는다
         capture.record("소스 엔진", exc)
-        return _error_trace(
-            plan,
-            error=capture.describe(),
-            draft=progress.evidence(plan),
-            coverage=progress.coverage,
-        )
+        return _error_trace(plan, progress, error=capture.describe())
 
 
 def _analyze(
@@ -616,9 +624,7 @@ def _analyze(
     """1차 전사의 상태를 갈라 보내고, 초안이 있으면 재전사·조판·SRT로 간다."""
     outcome = _first_pass(plan, wrapped, progress)
     if outcome.status == _STATUS_ERROR:
-        return _error_trace(
-            plan, error=outcome.error or "전사가 실패로 돌아왔다", draft=(), coverage=()
-        )
+        return _error_trace(plan, progress, error=outcome.error or "전사가 실패로 돌아왔다")
     progress.draft = outcome.segments
     if outcome.status == _STATUS_EMPTY:
         return _empty_trace(plan, progress.coverage)
@@ -627,9 +633,8 @@ def _analyze(
         # 갈라진다. 무음의 증거가 아니므로 빈 성공으로 내주지 않는다.
         return _error_trace(
             plan,
+            progress,
             error="조립 가능한 초안이 하나도 없습니다 — 공백 글자만 걸러져 빈 성공이다",
-            draft=(),
-            coverage=progress.coverage,
         )
     return _settled_trace(plan, wrapped, capture, progress)
 
@@ -671,50 +676,43 @@ def _settled_trace(
         plan.cfg,
         wrapped,
     )
-    evidence = progress.evidence(plan)
+    progress.settled = tuple(settled.spine)
+    progress.repairs = settled.repairs
     if capture.failures:
-        return _error_trace(
-            plan, error=capture.describe(), draft=evidence, coverage=progress.coverage
-        )
-    return _published_trace(plan, settled, evidence, progress, duration)
+        return _error_trace(plan, progress, error=capture.describe())
+    return _published_trace(plan, progress, settled, duration)
 
 
 def _published_trace(
     plan: _SourcePlan,
-    settled: repair.Settled,
-    evidence: tuple[SourceSegment, ...],
     progress: _Progress,
+    settled: repair.Settled,
     duration: float,
 ) -> SourceTrace:
     """불변 골격 → 큐 → 정제 → 소스 로컬 SRT. polish은 refine 안에서 한 번뿐이다."""
     cues = refine.refine(pipeline.spine_to_cues(list(settled.spine)), plan.cfg, duration)
-    if not cues:
-        return _error_trace(
-            plan,
-            error="정제를 끝내고 큐가 하나도 남지 않았다",
-            draft=evidence,
-            coverage=progress.coverage,
-        )
+    progress.cues = tuple(cues)
     stem = plan.reference.original_stem
+    if not cues:
+        return _error_trace(plan, progress, error="정제를 끝내고 큐가 하나도 남지 않았다")
     srt = _publish_srt(plan, output.write_srt(cues).encode("utf-8"))
     if srt is None:
         return _error_trace(
             plan,
+            progress,
             error=(
                 f"완성물이 이미 다른 바이트로 있다: {plan.source_key}/{stem}.SOURCE.srt — "
                 "있는 것을 보존하고 이 번 결과를 버린다"
             ),
-            draft=evidence,
-            coverage=progress.coverage,
         )
     log.info(f"소스 전사 완료: {stem} · 큐 {len(cues)}장")
     return _trace(
         plan,
         status=_STATUS_SUCCESS,
-        draft=evidence,
-        settled=_source_segments(plan.reference, plan.source_key, progress.ranges, settled.spine),
-        repairs=settled.repairs,
-        cues=tuple(cues),
+        draft=progress.evidence(plan),
+        settled=progress.settled_evidence(plan),
+        repairs=progress.repairs,
+        cues=progress.cues,
         coverage=progress.coverage,
         srt=srt,
         error=None,
@@ -943,9 +941,8 @@ def _empty_trace(plan: _SourcePlan, coverage: tuple[ChunkCoverage, ...]) -> Sour
     if srt is None:
         return _error_trace(
             plan,
+            _Progress(coverage=coverage),
             error=f"완성물이 이미 다른 바이트로 있다: {plan.source_key}/{stem}.SOURCE.srt",
-            draft=(),
-            coverage=coverage,
         )
     log.info(f"소스 전사 완료: {stem} · 빈 (무음의 증거가 아니다)")
     return _trace(
@@ -961,22 +958,21 @@ def _empty_trace(plan: _SourcePlan, coverage: tuple[ChunkCoverage, ...]) -> Sour
     )
 
 
-def _error_trace(
-    plan: _SourcePlan,
-    *,
-    error: str,
-    draft: tuple[SourceSegment, ...],
-    coverage: tuple[ChunkCoverage, ...],
-) -> SourceTrace:
-    """실패 기록 — 실제 참조의 신원을 그대로 담고 완성물은 내놓지 않는다."""
+def _error_trace(plan: _SourcePlan, progress: _Progress, *, error: str) -> SourceTrace:
+    """실패 기록 — 실제 참조 신원과 **이미 완성된 단계**를 그대로 담는다.
+
+    초안은 물론 settle이 끝났으면 골격·재전사 기록까지, refine이 끝났으면 큐까지
+    남는다. 완성물(SRT 경로·해시)만은 내놓지 않는다 — 실패를 성공으로 꾸미지
+    않는다는 선과, 실패 때문에 증거를 버린다는 함정을 함께 끊는다.
+    """
     return _trace(
         plan,
         status=_STATUS_ERROR,
-        draft=draft,
-        settled=(),
-        repairs=(),
-        cues=(),
-        coverage=coverage,
+        draft=progress.evidence(plan),
+        settled=progress.settled_evidence(plan),
+        repairs=progress.repairs,
+        cues=progress.cues,
+        coverage=progress.coverage,
         srt=None,
         error=error,
     )
