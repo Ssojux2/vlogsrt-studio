@@ -49,7 +49,8 @@
       "cli_effort": "max",
       "context_window": 1000000,
       "provider_effort": "max requested; server internal mapping not observable",
-      "code_writer": true
+      "code_writer": true,
+      "permission_mode": "auto"
     },
     "diagnosis_terra": {
       "provider": "codex",
@@ -87,7 +88,8 @@
     "single_task_per_glm_dispatch": true,
     "nested_depth_policy": "never bypass; if depth is denied manager submits exact worker spec to root for dispatch",
     "role_lifecycle": "all worker outcomes through actual Orca task/dispatch; release/reuse after settlement",
-    "pending_acceptance_policy": "continue independent offline implementation; pending is never PASS"
+    "pending_acceptance_policy": "continue independent offline implementation; pending is never PASS",
+    "permission_mode_basis": "User selected auto mode in the P0 GLM terminal; retain that preference for subsequent workers in this same approved project with existing deny rules unchanged. No bypassPermissions flags or automated responses to blocked approval prompts."
   },
   "loop": [
     "Sol writes bounded brief",

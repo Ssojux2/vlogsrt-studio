@@ -155,6 +155,8 @@
     "base": "676460111bad5ef04cbc9d5c776940611fa938a7",
     "command": "claude-glm --model 'glm-5.3[1m]' --effort max",
     "supervisor": "Opus5 support for Sol-authored P0 brief",
-    "state": "launched"
+    "state": "implementing",
+    "permission_mode": "auto",
+    "permission_evidence": "User change reported by Opus msg_c44c2e0903d3; root subsequently verified auto mode on banner and edits in three owned files."
   }
 }
