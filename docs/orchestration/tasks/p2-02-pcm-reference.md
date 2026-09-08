@@ -6,7 +6,7 @@ Binding spec `Source analysis, clocks, identity` and `Boundary transcripts`; dep
 
 ## Baseline and ownership
 
-- Fresh `fcp-p2-pcm-reference` worktree from exact P2-01-integrated SHA.
+- Fresh `fcp-p2-pcm-reference` worktree from exact P2-01 integration SHA `5ea9719cb2fb3ece20ad228fa78481ae60bbdb3b`; abort on mismatch.
 - Create `vlogsrt/project/pcm.py`, `tests/project/test_pcm.py`.
 - Do not modify preprocess/media/time modules or external fixtures.
 
@@ -44,6 +44,7 @@ def quiet_sample(reference: PcmReference, target: int, search_samples: int, wind
 ```
 
 - `AudioPolicy.stream_index` is the zero-based **audio-stream ordinal** consumed by P2-01 (`0` means first audio), validated as a nonnegative integer with `bool` rejected. It is not a global container-stream index. The resulting `PcmReference` need not duplicate that ordinal because its extraction provenance/analysis key binds the policy, while P2-01's `AudioStreamInfo.stream_index` records the selected global ffprobe index.
+- `PcmReference` is a total record for an audio-capable input whose P2-01 extraction succeeded. Callers must not invoke `build_reference` for a resource declared without audio and must not fabricate a path, hash, sample count, or origin when probing/extraction failed; the future P3 source-analysis union owns those explicit resource-scoped unavailable dispositions.
 - `analysis_key` hashes original full-content hash, exact audio policy (including audio ordinal), measured `pcm_sample0_file_time`, PCM hash, channel count/rate; paths/names alone are never keys.
 - `source_id` is exactly P1's `ResolvedMedia.asset_content_id`; `original_stem` is retained only to address explicit per-source fixture/artifact namespaces. Validate both as nonempty and retain `original_sha256` so later joins never infer identity from `path`, filename, or parallel sequence position.
 - `sample_count`, `SampleRange.start/end`, `target`, `search_samples`, and `window_samples` are frames per channel. Range conversion uses `ceil(start * sample_rate)` and `floor(end * sample_rate)`, clamped to real per-channel frame count; reject `end <= start` after conversion.
