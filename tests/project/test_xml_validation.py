@@ -195,6 +195,41 @@ def test_missing_tool_raises_unavailable_before_any_spawn(
     assert seen == []
 
 
+def test_units_survive_a_path_without_xmllint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """빈 PATH를 진짜 which로 본다 — 단위 검사는 호스트 도구 없이도 같은 길을 걷는다."""
+    monkeypatch.setenv("PATH", str(tmp_path))
+    seen = _stub_run(monkeypatch)
+
+    with pytest.raises(XmlValidationUnavailable, match="xmllint"):
+        validate_xml(tmp_path / "문서.fcpxml")
+
+    assert seen == []
+
+
+@pytest.mark.parametrize("failure", [FileNotFoundError, PermissionError])
+@pytest.mark.parametrize("with_dtd", [False, True])
+def test_a_dead_executable_is_unavailable_not_a_leaked_oserror(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: type[OSError],
+    with_dtd: bool,
+) -> None:
+    """which는 통과했는데 실행이 죽는 경주 — 판정은 일어나지 않았다, 0이 아니다."""
+    _stub_tool(monkeypatch, tool="/방금-사라진/xmllint")
+
+    def dying_run(argv: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise failure("xmllint 실행 실패")
+
+    monkeypatch.setattr(subprocess, "run", dying_run)
+    dtd = tmp_path / "DTD with  spaces v1.dtd"
+    dtd.write_text("<!ELEMENT fcpxml ANY>", encoding="utf-8")
+
+    with pytest.raises(XmlValidationUnavailable, match="실행하지 못했다"):
+        validate_xml(tmp_path / "문서.fcpxml", dtd_path=dtd if with_dtd else None)
+
+
 def test_missing_requested_dtd_raises_unavailable_before_any_spawn(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -221,6 +256,7 @@ def test_nonzero_exit_is_a_result_not_an_exception(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, returncode: int
 ) -> None:
     """파서 오류(1)·스키마 위반(3) 모두 valid=False와 진단으로 돌아온다."""
+    _stub_tool(monkeypatch)
     _stub_run(monkeypatch, returncode=returncode, stderr="문서.fcpxml:1: parser error : 조각났다\n")
 
     result = validate_xml(tmp_path / "문서.fcpxml")
@@ -240,6 +276,7 @@ def test_diagnostics_are_bounded_and_sanitized(
         + "\x1b[31m빨강\x1b[0m\n"
         + "".join(f"줄 {number}\n" for number in range(100))
     )
+    _stub_tool(monkeypatch)
     _stub_run(monkeypatch, returncode=3, stderr=noisy)
 
     result = validate_xml(tmp_path / "문서.fcpxml")
@@ -258,6 +295,7 @@ def test_result_is_an_immutable_record_of_exactly_three_fields(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """판정 기록은 세 필드의 불변 값이다 — 검증은 표시할 뿐이다."""
+    _stub_tool(monkeypatch)
     _stub_run(monkeypatch)
     result = validate_xml(tmp_path / "문서.fcpxml")
 

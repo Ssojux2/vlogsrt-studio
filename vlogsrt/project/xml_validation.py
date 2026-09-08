@@ -17,7 +17,8 @@ Final Cut Pro DTD 경로에는 빈칸이 있고("Final Cut Pro.app"), `--dtdvali
 스키마를 참조하더라도 가져오지 못하게 막는다.
 
 "없다"와 "틀리다"를 섞지 않는다: 도구나 요청한 DTD가 없으면
-`XmlValidationUnavailable` — 판정을 내린 적이 없다. xmllint가 0이 아닌 코드로
+`XmlValidationUnavailable` — 판정을 내린 적이 없다. which가 통과한 뒤 실행이
+죽는 경주(사라진 실행파일)도 같은 unavailable이다. xmllint가 0이 아닌 코드로
 끝나면 예외 대신 `valid=False`와 진단을 돌려준다 — 진단을 버리는 예외가 더 나쁘다.
 """
 
@@ -55,13 +56,28 @@ def validate_xml(path: Path, *, dtd_path: Path | None = None) -> XmlValidation:
     """`path`의 XML을 xmllint로 검증한다. `dtd_path`를 주면 DTD 대조까지 한다.
 
     `path` 자체의 존재는 xmllint에게 맡긴다 — 없는 파일은 0이 아닌 종료 코드와
-    진단으로 돌아온다. 이 경계가 예외를 내는 것은 환경뿐이다(도구·DTD).
+    진단으로 돌아온다. 이 경계가 예외를 내는 것은 환경뿐이다(도구·DTD·실행 경주).
     """
     xmllint = shutil.which("xmllint")
     if xmllint is None:
         raise XmlValidationUnavailable("xmllint이 없다 — PATH에서 찾을 수 없다")
     if dtd_path is None:
-        completed = subprocess.run(
+        completed = _run_wellformedness(xmllint, path)
+        dtd_checked = False
+    else:
+        completed = _run_dtd_validation(xmllint, path, _dtd_uri(dtd_path))
+        dtd_checked = True
+    return XmlValidation(
+        valid=completed.returncode == 0,
+        diagnostics=_diagnostic_lines(completed.stderr),
+        dtd_checked=dtd_checked,
+    )
+
+
+def _run_wellformedness(xmllint: str, path: Path) -> subprocess.CompletedProcess[str]:
+    """잘 이루어짐 검사 — argv는 이 형태 그대로 얼어 있다(두 형태 중 첫째)."""
+    try:
+        return subprocess.run(
             [xmllint, "--nonet", "--noout", str(path)],
             shell=False,
             capture_output=True,
@@ -69,22 +85,23 @@ def validate_xml(path: Path, *, dtd_path: Path | None = None) -> XmlValidation:
             errors="replace",
             check=False,
         )
-        dtd_checked = False
-    else:
-        completed = subprocess.run(
-            [xmllint, "--nonet", "--noout", "--dtdvalid", _dtd_uri(dtd_path), str(path)],
+    except OSError as error:
+        raise XmlValidationUnavailable(f"xmllint을 실행하지 못했다: {xmllint} ({error})") from error
+
+
+def _run_dtd_validation(xmllint: str, path: Path, dtd_uri: str) -> subprocess.CompletedProcess[str]:
+    """DTD 대조 검사 — argv는 이 형태 그대로 얼어 있다(두 형태 중 둘째)."""
+    try:
+        return subprocess.run(
+            [xmllint, "--nonet", "--noout", "--dtdvalid", dtd_uri, str(path)],
             shell=False,
             capture_output=True,
             text=True,
             errors="replace",
             check=False,
         )
-        dtd_checked = True
-    return XmlValidation(
-        valid=completed.returncode == 0,
-        diagnostics=_diagnostic_lines(completed.stderr),
-        dtd_checked=dtd_checked,
-    )
+    except OSError as error:
+        raise XmlValidationUnavailable(f"xmllint을 실행하지 못했다: {xmllint} ({error})") from error
 
 
 def _dtd_uri(dtd_path: Path) -> str:
