@@ -6,10 +6,11 @@ P2-01이 잰 시계(`pcm_sample0_file_time`, 변환 후 첫 프레임의 실측 
 키 재료가 아니다. 원본 파일은 통째로 해시해 주어진 정체성과 같은지 직접 확인한다.
 
 **완성물의 정의가 곧 출판 규칙이다.** 완성물은 곁 기록이 목적지 파일을 해시로
-증명하는 짝이다. 출판은 임시 쓰기 → `os.replace` 두 번(PCM, 곁 기록)이지만,
-어느 순간에 죽어도 짝이 어긋난 상태는 **완성물로 읽히지 못 한다** — 다음 빌드가
-재추출로 수복한다. 그래서 새 PCM + 낡은 곁 기록, 낡은 PCM + 새 곁 기록 둘 다
-검증을 통과하지 못 하고, 출판 실패 직전의 유효한 짝은 그대로 다시 쓸 수 있다.
+증명하는 짝이다. 목적지에 옛 것이 있으면 새 것을 놓기 전에 백업 자리로 치워
+두고, 출판(새 PCM → 곁 기록)이 온전히 끝나야 백업을 지운다 — 도중에 죽으면 옛
+짝을 제자리로 되돌린다. 그래서 다른 입력의 출판이 실패해도 옛 참조는 그대로
+읽히고 슬라이스도 되며, 짝이 어긋난 채 남는 상태(새 PCM + 낡은 곁 기록, 그
+반대)는 완성물로 읽히지 못 한다 — 다음 빌드가 재추출로 수복한다.
 
 슬라이스는 저장된 그 PCM에서 `[start, end)` 프레임을 **바이트 그대로** 옮긴다.
 시작은 ceil, 끝은 floor — 제거된 오디오의 덧붙임도 문맥도 없고 남은 오디오가
@@ -282,11 +283,14 @@ def _extract_reference(
 ) -> PcmReference:
     """P2-01로 임시 파일에 뽑고, 해시로 검증한 뒤 갈아끼운다.
 
-    PCM을 먼저, 곁 기록을 나중에 둔다. 곁 기록이 쓰히기 전에 죽으면 목적지만
-    새로운 미완성 상태다 — 곁 기록이 증명하지 않는 파일은 완성물로 읽히지
-    못 하므로 다음 빌드가 다시 뽑는다.
+    목적지에 옛 것이 있으면 먼저 **치워 둔다**(같은 디렉터리의 백업 자리). 새 PCM을
+    놓고 곁 기록을 쓰는 도중 어느 지점에서 죽어도 치워 둔 옛 것을 제자리로
+    되돌린다 — 백업은 출판이 온전히 끝난 뒤에야 사라진다. 그래서 다른 입력의
+    출판이 실패해도 옛 완성 짝은 그대로 읽히고, 슬라이스도 재추출 없이 된다.
     """
     temp = _begin_atomic(destination)
+    parked: Path | None = None
+    committed = False
     try:
         extraction = extract_pcm_s16le(
             original,
@@ -311,11 +315,20 @@ def _extract_reference(
             extraction.stream.channels,
             extraction.sample_count,
         )
+        if destination.is_file():
+            parked = _begin_atomic(destination)
+            os.replace(destination, parked)
         os.replace(temp, destination)
         _write_sidecar(sidecar, reference, policy)
+        committed = True
         return reference
     finally:
         temp.unlink(missing_ok=True)
+        if parked is not None:
+            if committed:
+                parked.unlink(missing_ok=True)
+            elif parked.exists():
+                os.replace(parked, destination)  # 출판이 죽었다 — 옛 것을 제자리로
 
 
 def _assemble_reference(
