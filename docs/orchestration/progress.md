@@ -31,7 +31,8 @@
 | Opus co-manager | `task_0c2d6966fb52` | `ctx_c60636ed03f1` | P0-02 supervision/review |
 | GLM P0-02 writer | `task_f7788389960b` | `ctx_df9c602e28a2` | completed `df489bb`; correction review pending |
 | GLM P0-02 correction | `task_7d03430673e1` | `ctx_51f56ba3df5c` | completed `51319b9`; reconciliation still open |
-| GLM P0-02b reconciliation | `task_eb3e9e09ca7f` | `ctx_6ca746e225d0` | active in child Run `run_8f41d4a91c5d`, terminal `term_0aa7004f-d352-48fa-aba5-5c31d848add3` |
+| GLM P0-02b reconciliation | `task_eb3e9e09ca7f` | `ctx_6ca746e225d0` | completed `972a814`; two direct regressions found |
+| GLM P0-02c regression fix | `task_73facc46450a` | `ctx_673955f2284e` | active in child Run `run_8f41d4a91c5d`, terminal `term_3aaadfca-ba88-4152-a686-747ec12deeb1` |
 
 Initial gate message IDs: root `msg_d8fc69fe164a`; Opus `msg_0f70e95b09f7`.
 
@@ -45,6 +46,7 @@ Initial gate message IDs: root `msg_d8fc69fe164a`; Opus `msg_0f70e95b09f7`.
 - Opus's first correction worker completed commit `51319b99635f86a68543d02783674d4bf32eb06b` from `df489bb`: Run `run_b6d40d052690`, Task `task_7d03430673e1`, Dispatch `ctx_51f56ba3df5c`, terminal `term_7a94892e-6f38-4421-8273-51b889ce2619`; 461 tests and `make check` passed for its narrower original defect set.
 - Sol reproduced the still-open ratified reconciliation against `51319b9` with isolated source strings: `cli.py -> project.other`, NumPy under `project/vision`, a `glm-5.3-flash` literal, and `subprocess.Popen([exe, "--evil", path])` all returned no checker failure; project model dataclasses are still not inspected. Astra was escalated with messages `msg_c75ad9ff9e82` and `msg_dc58b3e29beb`; P0-02 remains unmergeable until a GLM correction closes these cases.
 - P0-02b launched from the verified clean required base `51319b99635f86a68543d02783674d4bf32eb06b` using fresh `claude-glm --model 'glm-5.3[1m]' --effort max --permission-mode auto`: child Run `run_8f41d4a91c5d`, Task `task_eb3e9e09ca7f`, Dispatch `ctx_6ca746e225d0`, terminal `term_0aa7004f-d352-48fa-aba5-5c31d848add3`. The dispatched brief embeds all five Astra reconciliation requirements and confines ownership to the checker, invariant tests, and contract doc.
+- P0-02b committed `972a81412756b89fd330da622f22f14a067065e5`, with 149 focused and 522 full tests plus 19 invariant groups passing. Astra then reproduced two remaining static cases before review: ONNX Runtime outside VAD was not scanned and a `subprocess.run` function alias could bypass keyword/argv checks. Fresh P0-02c child Task `task_73facc46450a`, Dispatch `ctx_673955f2284e`, terminal `term_3aaadfca-ba88-4152-a686-747ec12deeb1` is correcting only those cases from clean base `972a814`.
 - Known user-owned dirty path is intentionally excluded from every inspection/commit operation. Its contents have not been read.
 
 ## Phase DAG and parallel groups
@@ -90,7 +92,7 @@ P0-03 and P0-04 may execute concurrently from the same corrected P0-02 merge SHA
 | Task | Outcome | Depends on | Owned implementation files | State |
 |---|---|---|---|---|
 | [P0-01](tasks/p0-01-environment.md) | reproducible Python 3.12 venv and baseline evidence | bootstrap commit | none (ignored `.venv` only) | complete; evidence-only |
-| [P0-02](tasks/p0-02-contract-guard.md) / [P0-02b](tasks/p0-02b-contract-reconciliation.md) | source/derived dependency and subprocess contract | P0-01 | contract doc, pyproject, invariant script/tests | `51319b9`; P0-02b correction active |
+| [P0-02](tasks/p0-02-contract-guard.md) / [P0-02b](tasks/p0-02b-contract-reconciliation.md) / [P0-02c](tasks/p0-02c-contract-regressions.md) | source/derived dependency and subprocess contract | P0-01 | contract doc, pyproject, invariant script/tests | `972a814`; final two regression fixes active |
 | [P0-03](tasks/p0-03-source-byte-lock.md) | exact synthetic legacy SOURCE SRT regression | corrected P0-02 merge | `tests/test_source_immutability.py` only | ready; parallel with P0-04 |
 | [P0-04](tasks/p0-04-project-skeleton.md) | isolated project package/config/FCPXML-model namespace skeleton | corrected P0-02 merge | project package/config/models + config test only | ready; parallel with P0-03 |
 | [P1-01](tasks/p1-01-rational-time.md) | exact FCP rational/frame math | P0 merge | project time module/tests | drafted |
