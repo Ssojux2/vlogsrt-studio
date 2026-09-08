@@ -42,9 +42,21 @@ passed **553 tests**, Ruff lint/format, mypy, and all 19 invariant groups.
 The test uses default legacy Config and normal verification, prevents env-file
 discovery, and compares exact UTF-8 bytes for four synthetic fixture shapes.
 
-## Remaining P0 work
+## P0-04 integration and P0 phase join
 
-P0 is not complete yet. P0-04 package/config skeleton runs from approved
-`45d1393f7e2c2e200868f9c5972ceb20d3409d95` and must pass review and integration
-checks before the P0 phase join. Real Final Cut/media/live-model acceptance remains
-pending; none is implied by static contracts or synthetic tests.
+Astra accepted final `0b1743d3b75d46946231cd3b0537ce09c7ff0cd1` and integrated
+the five owned package/config/test files in
+`cd411c4376ccf548151dbd42a9e11c78bbfb4067` on 2026-09-09 KST.
+
+Review corrected a raw KeyError for empty/comment-only config, silent fallback
+when the default config path was an existing directory, phase-only tests that
+would block planned model/config extensions, and a Python 3.11-incompatible
+assertion against private dataclass internals. Sol and Astra independently ran
+direct `make check`: child checkout **575 tests**; integrated checkout **579
+tests**, Ruff lint/format, mypy (26 source files), and all **19 invariant groups**
+passed. Actual CPython 3.11.16 also passed the public slots observability probe;
+the full test suite ran on 3.12.14, not 3.11.
+
+**P0 is complete.** P1-01 exact frame time and P2-01 measured PCM extraction are
+authorized to run in parallel from the exact integration SHA above. Real Final
+Cut/media/live-model acceptance remains pending; none is implied by P0 checks.
