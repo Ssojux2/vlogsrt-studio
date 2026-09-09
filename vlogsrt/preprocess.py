@@ -161,7 +161,7 @@ def probe_audio_stream(source: Path, stream_index: int) -> AudioStreamInfo:
             str(source),
         ]
     )  # fmt: skip
-    entry = _selected_stream(completed.stdout, source, stream_index)
+    entry = _selected_stream(completed.stdout, source, f"a:{stream_index}", "오디오", "audio")
     return AudioStreamInfo(
         stream_index=_stream_global_index(entry, source),
         start_time=_stream_fraction(entry, "start_time", source),
@@ -170,7 +170,9 @@ def probe_audio_stream(source: Path, stream_index: int) -> AudioStreamInfo:
     )
 
 
-def _selected_stream(stdout: str, source: Path, ordinal: int) -> dict[str, object]:
+def _selected_stream(
+    stdout: str, source: Path, selector: str, kind: str, codec: str
+) -> dict[str, object]:
     """고르기가 실패하는 네 방식은 전부 다른 말로 죽는다 — 원인을 헷갈리지 않게."""
     try:
         data = json.loads(stdout)
@@ -183,18 +185,18 @@ def _selected_stream(stdout: str, source: Path, ordinal: int) -> dict[str, objec
         raise RuntimeError(f"ffprobe JSON의 streams가 목록이 아닙니다: {source} (값 {streams!r})")
     if not streams:
         raise RuntimeError(
-            f"오디오 스트림 a:{ordinal}이 없습니다: {source} — 범위를 벗어난 선택이다"
+            f"{kind} 스트림 {selector}이 없습니다: {source} — 범위를 벗어난 선택이다"
         )
     if len(streams) > 1:
         raise RuntimeError(
-            f"선택이 모호합니다: a:{ordinal}이 스트림 {len(streams)}개를 골랐습니다: {source}"
+            f"선택이 모호합니다: {selector}이 스트림 {len(streams)}개를 골랐습니다: {source}"
         )
     entry = streams[0]
     if not isinstance(entry, dict):
         raise RuntimeError(f"고른 스트림 항목이 깨졌습니다: {source} (값 {entry!r})")
-    if entry.get("codec_type") != "audio":
+    if entry.get("codec_type") != codec:
         raise RuntimeError(
-            f"고른 스트림이 오디오가 아닙니다: {source} (codec_type {entry.get('codec_type')!r})"
+            f"고른 스트림이 {kind}가 아닙니다: {source} (codec_type {entry.get('codec_type')!r})"
         )
     return entry
 
@@ -486,3 +488,216 @@ def cut_spans(audio: Path, spans: Sequence[Span], duration: float, workdir: Path
         if any(low <= piece.offset + piece.duration / 2 < high for low, high in spans)
     ]
     return [replace(piece, index=index) for index, piece in enumerate(wanted)]
+
+
+# ─────────────────────────────────────────────────────────────
+#  비디오 프레임 — CFR 증명과 프레임 추출 (P5-04)
+# ─────────────────────────────────────────────────────────────
+#
+# 여기는 ffprobe/ffmpeg 경계일 뿐이다. 증명된 시계로 무엇을 뽑을지 고르는 것은
+# vlogsrt/project/vision/sampling.py의 몫이다.
+
+_JPEG_QUALITY = 2
+"""mjpeg 품질(2가 최선). 조정 대상이 아니라 해시 대상 바이트를 닫는 포맷 계약이다 —
+같은 프레임은 같은 설정에서 같은 바이트를 내야 한다."""
+
+_JPEG_PIXFMT = "yuvj420p"
+"""JPEG의 풀레인지 4:2:0. 짝수 칸수를 요구한다 — 스케일 필터가 짝수로 맞춘다."""
+
+
+@dataclass(frozen=True, slots=True)
+class VideoStreamInfo:
+    """ffprobe가 **증명한** CFR 비디오 스트림의 시계.
+
+    `presentation_origin`은 첫 디코드 프레임의 실측 PTS(정수 pts × time_base)다 —
+    컨테이너 start_time 같은 작성값이 아니라 측정값이며 그대로 보존된다.
+    `frame_duration`은 선언 r_frame_rate의 정확한 역수, `frame_count`는 프레임
+    타임스탬프 증거로 센 수다. 이 셋은 모든 프레임이 원점+순번 격자 위에 있음을
+    증명한 **뒤에야** 돌아온다 — 정수 PTS × time_base 외의 계산은 없다.
+    """
+
+    stream_index: int
+    presentation_origin: Fraction
+    frame_duration: Fraction
+    frame_count: int
+
+
+def _validate_video_ordinal(stream_index: int) -> None:
+    """비디오 순번은 0 이상 정수다 — bool은 int인 척하지 못 한다."""
+    if isinstance(stream_index, bool) or not isinstance(stream_index, int) or stream_index < 0:
+        raise RuntimeError(f"비디오 순번은 0 이상 정수여야 합니다: {stream_index!r}")
+
+
+def probe_video_stream(source: Path, stream_index: int = 0) -> VideoStreamInfo:
+    """선언과 디코드 증거를 한 번의 ffprobe로 읽어 균일 CFR 그리드를 증명한다.
+
+    명목 r_frame_rate·프레임 수가 같다고 CFR이 증명되지 않는다 — 프레임마다의
+    정수 PTS를 time_base로 곱해 `첫 PTS + 순번 × 프레임 길이` 격자와 **정확
+    유리수로** 대조한다. 선언 시계가 양자화되어 있으면(예: 30000/1001을
+    time_base 1/1000에 담기) 틱 델타가 프레임 길이와 어긋나는데, 원점과 프레임
+    시각이 독립적으로 양자화되므로 한 틱까지의 오차를 허용한다 — 두 틱부터는
+    다른 격자다. 반올림된 pts_time 문자열이나 초 단위 입실론은 쓰지 않는다.
+    증명에 실패하면 조용한 기본값 대신 어긋난 좌표를 말하며 죽는다.
+    """
+    _validate_video_ordinal(stream_index)
+    ffprobe = require_ffmpeg("ffprobe")
+    completed = _run(
+        [
+            ffprobe, "-v", "error",
+            "-select_streams", f"v:{stream_index}",
+            "-show_entries", "stream=index,codec_type,r_frame_rate,time_base",
+            "-show_entries", "frame=pts",
+            "-of", "json",
+            str(source),
+        ]
+    )  # fmt: skip
+    entry = _selected_stream(completed.stdout, source, f"v:{stream_index}", "비디오", "video")
+    rate = _stream_positive_fraction(entry, "r_frame_rate", source)
+    time_base = _stream_positive_fraction(entry, "time_base", source)
+    pts = _frame_pts(completed.stdout, source)
+    frame_duration = Fraction(1) / rate
+    _prove_uniform_grid(pts, time_base, frame_duration, source)
+    return VideoStreamInfo(
+        stream_index=_stream_global_index(entry, source),
+        presentation_origin=pts[0] * time_base,
+        frame_duration=frame_duration,
+        frame_count=len(pts),
+    )
+
+
+def _stream_positive_fraction(entry: dict[str, object], field: str, source: Path) -> Fraction:
+    """스트림의 시계 필드를 정확 분수로 — 0이하는 시계가 아니다."""
+    value = _stream_fraction(entry, field, source)
+    if value <= 0:
+        raise RuntimeError(f"스트림 {field}가 양수가 아닙니다: {source} (값 {value})")
+    return value
+
+
+def _frame_pts(stdout: str, source: Path) -> list[int]:
+    """프레임 타임스탬프 증거를 정수 pts로 읽는다 — 제시(presentation) 순서로 정렬.
+
+    프레임 기록은 디코드 순서로 나올 수 있다(B프레임). 격자는 제시 순서의
+    것이므로 정렬하고, 중복은 엄격한 증가 검사가 잡는다. 건너뛰기 디코딩은
+    증거로 쓰지 않는다 — 이 호출은 스트림의 프레임 전부를 받는다.
+    """
+    try:
+        data = json.loads(stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"ffprobe 출력이 JSON이 아닙니다: {source} ({exc})") from exc
+    frames = data.get("frames") if isinstance(data, dict) else None
+    if not isinstance(frames, list):
+        raise RuntimeError(f"ffprobe JSON의 frames가 목록이 아닙니다: {source} (값 {frames!r})")
+    pts: list[int] = []
+    for frame in frames:
+        value = frame.get("pts") if isinstance(frame, dict) else None
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise RuntimeError(f"프레임 pts를 정수로 읽지 못했습니다: {source} (값 {value!r})")
+        pts.append(value)
+    if not pts:
+        raise RuntimeError(
+            f"디코드 프레임 기록이 없습니다: {source} — CFR 그리드를 증명할 수 없습니다"
+        )
+    return sorted(pts)
+
+
+def _prove_uniform_grid(
+    pts: list[int], time_base: Fraction, frame_duration: Fraction, source: Path
+) -> None:
+    """정렬된 정수 PTS 전부가 `원점 + 순번 × 프레임 길이` 격자 위에 있는지 본다.
+
+    오차 허용은 정확히 한 declared tick(1 × time_base)이다 — 원점과 프레임
+    시각이 독립적으로 양자화되기 때문이고, 그 넘는 어긋남은 잃어버리거나 뛴
+    프레임이다. PTS는 교정하지 않고 측정값을 그대로 둔다.
+    """
+    for ordinal in range(1, len(pts)):
+        if pts[ordinal] <= pts[ordinal - 1]:
+            raise RuntimeError(
+                f"프레임 pts가 엄격하게 증가하지 않습니다: {source} "
+                f"(순번 {ordinal} pts {pts[ordinal]} — 중복)"
+            )
+    origin = pts[0]
+    for ordinal, value in enumerate(pts):
+        error = (value - origin) * time_base - ordinal * frame_duration
+        if abs(error) > time_base:
+            raise RuntimeError(
+                f"프레임 타임스탬프가 원점+순번 격자를 벗어났습니다: {source} "
+                f"(순번 {ordinal}, pts {value}, 오차 {error}초 > 한 틱 {time_base}초) — "
+                "프레임을 잃거나 점프한 그리드는 증명하지 못한다"
+            )
+
+
+def _require_index(value: int, label: str) -> None:
+    """번호는 0 이상 정수다 — bool은 세는 수가 아니다."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise RuntimeError(f"{label}는 0 이상 정수여야 합니다: {value!r}")
+
+
+def _long_edge_scale(long_edge: int) -> str:
+    """긴 변만 long_edge로 줄이는 스케일 — 가로세로비를 지키고 절대 키우지 않는다.
+
+    min()이 입력 칸수를 한도로 묶으므로 작은 영상은 그대로 통과한다(업스케일
+    금지). 짧은 변은 ceil(…/2)*2로 짝수 칸수에 올린다 — yuv420p 계열 인코딩의
+    요건이고 한 칸 미만의 비율 오차만 남긴다.
+    """
+    return (
+        "scale="
+        f"w='if(gt(iw,ih),min(iw,{long_edge}),ceil(min(ih,{long_edge})*iw/ih/2)*2)':"
+        f"h='if(gt(iw,ih),ceil(min(iw,{long_edge})*ih/iw/2)*2,min(ih,{long_edge}))'"
+    )
+
+
+def extract_frame_index(
+    source: Path,
+    stream_index: int,
+    frame_index: int,
+    destination: Path,
+    *,
+    long_edge: int,
+) -> Path:
+    """정확히 한 프레임을 이미지로 뽑는다 — 전역 스트림 번호와 디코드 프레임 번호로.
+
+    `-ss` 시각 탐색을 쓰지 않는다: 요청한 시각과 디코드된 프레임이 어긋나면
+    이웃 프레임이 조용히 뽑힌다. `select=eq(n,번호)`는 디코드 출력(=제시 순서)
+    의 프레임 번호를 직접 고른다. 인코딩 설정은 고정되어 같은 프레임이면 같은
+    바이트를 낸다 — 해시 대상의 결정성이 계약이다(P5-04).
+    """
+    _require_index(stream_index, "스트림 번호")
+    _require_index(frame_index, "프레임 번호")
+    if isinstance(long_edge, bool) or not isinstance(long_edge, int) or long_edge <= 0:
+        raise RuntimeError(f"long_edge는 양수 정수여야 합니다: {long_edge!r}")
+    ffmpeg = require_ffmpeg()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    command = _frame_extraction_command(
+        ffmpeg, source, stream_index, frame_index, destination, long_edge
+    )
+    _run(command)
+    if not destination.is_file():
+        raise RuntimeError(f"프레임 이미지가 남지 않았습니다: {destination}")
+    log.debug(f"프레임 추출 완료: {destination} (스트림 {stream_index}, 프레임 {frame_index})")
+    return destination
+
+
+def _frame_extraction_command(
+    ffmpeg: str,
+    source: Path,
+    stream_index: int,
+    frame_index: int,
+    destination: Path,
+    long_edge: int,
+) -> list[str]:
+    """한 프레임을 뽑는 고정 argv — 셸도 조립도 없이 이 형태 그대로다."""
+    # select 인자 안의 쉼표는 이스케이프(\,)하고 필터 사이 쉼표는 그대로 둔다
+    frame_filter = f"select=eq(n\\,{frame_index})" + "," + _long_edge_scale(long_edge)
+    return [
+        ffmpeg, "-hide_banner", "-nostdin", "-y",
+        "-i", str(source),
+        "-map", f"0:{stream_index}",
+        "-vf", frame_filter,
+        "-fps_mode", "passthrough",
+        "-frames:v", "1",
+        "-q:v", str(_JPEG_QUALITY),
+        "-pix_fmt", _JPEG_PIXFMT,
+        "-fflags", "+bitexact",
+        "-flags:v", "+bitexact",
+        str(destination),
+    ]  # fmt: skip

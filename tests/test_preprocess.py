@@ -14,14 +14,17 @@ import pytest
 from vlogsrt import preprocess
 from vlogsrt.config import Config
 from vlogsrt.preprocess import (
+    VideoStreamInfo,
     amplitudes,
     cut_spans,
     extract_audio,
+    extract_frame_index,
     extract_pcm_s16le,
     find_quiet_point,
     make_chunks,
     probe_audio_stream,
     probe_duration,
+    probe_video_stream,
     split_at,
 )
 
@@ -1006,3 +1009,303 @@ def test_extraction_maps_the_second_audio_stream_exactly_real(tmp_path: Path) ->
         _loudest_left_frame(extraction)[0], 16000
     )
     assert peak_time == Fraction(1, 20)
+
+
+# ─────────────────────────────────────────────────────────────
+#  비디오 프레임 경계 — CFR 증명과 프레임 추출 (P5-04)
+# ─────────────────────────────────────────────────────────────
+
+
+def _video_probe_json(
+    *,
+    rate: str | None = "25/1",
+    time_base: str = "1/12800",
+    index: int = 0,
+    codec_type: str | None = "video",
+    pts: list[int] | None = None,
+    frames_key: str = "frames",
+) -> str:
+    """비디오 프로브 ffprobe JSON. 기본은 원점 5초·25fps·25프레임의 균일 격자다."""
+    if pts is None:
+        pts = [5 * 12800 + ordinal * 512 for ordinal in range(25)]
+    entry: dict[str, object] = {"time_base": time_base}
+    if index is not None:
+        entry["index"] = index
+    if codec_type is not None:
+        entry["codec_type"] = codec_type
+    if rate is not None:
+        entry["r_frame_rate"] = rate
+    return json.dumps({"streams": [entry], frames_key: [{"pts": value} for value in pts]})
+
+
+def test_video_probe_reads_an_exact_rational_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    """원점·프레임 길이는 정확 분수다 — 64000틱 × 1/12800 = 정확히 5초."""
+    _fake_ffmpeg_ffprobe(monkeypatch, _video_probe_json(), "", 0)
+    info = probe_video_stream(Path("demo.mov"))
+    assert info == VideoStreamInfo(
+        stream_index=0,
+        presentation_origin=Fraction(5),
+        frame_duration=Fraction(1, 25),
+        frame_count=25,
+    )
+
+
+def test_video_probe_argv_selects_the_ordinal_and_frame_pts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """스트림 선언과 **프레임 타임스탬프 증거**를 한 번의 ffprobe로 얻는다."""
+    commands = _fake_ffmpeg_ffprobe(monkeypatch, _video_probe_json(), "", 0)
+    probe_video_stream(Path("demo.mov"), 2)
+    (command,) = commands
+    assert command == [
+        "ffprobe", "-v", "error",
+        "-select_streams", "v:2",
+        "-show_entries", "stream=index,codec_type,r_frame_rate,time_base",
+        "-show_entries", "frame=pts",
+        "-of", "json",
+        "demo.mov",
+    ]  # fmt: skip
+
+
+@pytest.mark.parametrize("bad", [-1, True, False, 1.0, "0"])
+def test_video_probe_rejects_an_ordinal_that_is_not_a_count(
+    monkeypatch: pytest.MonkeyPatch, bad: object
+) -> None:
+    """순번은 0 이상 정수다 — bool·float·문자열은 세는 수가 아니다."""
+    _fake_ffmpeg_ffprobe(monkeypatch, _video_probe_json(), "", 0)
+    with pytest.raises(RuntimeError, match="순번"):
+        probe_video_stream(Path("demo.mov"), bad)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("payload", "match"),
+    [
+        (json.dumps({"streams": []}), "비디오 스트림"),
+        (json.dumps({"streams": "한 줄"}), "streams"),
+        (_video_probe_json(codec_type="audio"), "비디오가 아닙니다"),
+        (_video_probe_json(codec_type=None), "비디오가 아닙니다"),
+        (_video_probe_json(rate="0/0"), "r_frame_rate"),
+        (_video_probe_json(rate=None), "r_frame_rate"),
+        (_video_probe_json(rate="shuffle"), "r_frame_rate"),
+        (_video_probe_json(time_base="0/1"), "time_base"),
+        (_video_probe_json(time_base=None), "time_base"),
+        (_video_probe_json(frames_key="packets"), "frames"),
+        (_video_probe_json(pts=[]), "프레임"),
+        (_video_probe_json(pts=[64000, 64512, "N/A"]), "pts"),
+        (_video_probe_json(pts=[64000, 64512.5, 65024]), "pts"),
+        (_video_probe_json(pts=[64000, 64512, 64512]), "엄격|증가|중복"),
+    ],
+)
+def test_video_probe_names_what_it_could_not_prove(
+    monkeypatch: pytest.MonkeyPatch, payload: str, match: str
+) -> None:
+    """증거가 없거나 깨졌으면 조용한 기본값이 아니라 그 필드를 댄다."""
+    _fake_ffmpeg_ffprobe(monkeypatch, payload, "", 0)
+    with pytest.raises(RuntimeError, match=match):
+        probe_video_stream(Path("demo.mov"))
+
+
+def test_video_probe_accepts_decode_order_and_sorts_to_presentation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """B프레임이 있으면 프레임 기록은 디코드 순서로 나온다 — 격자는 제시 순서다."""
+    shuffled = [64000, 65024, 64512]  # 0, 2, 1 순서
+    _fake_ffmpeg_ffprobe(monkeypatch, _video_probe_json(pts=shuffled), "", 0)
+    info = probe_video_stream(Path("demo.mov"))
+    assert info.presentation_origin == Fraction(5)
+    assert info.frame_count == 3
+
+
+def test_video_probe_passes_a_declared_tick_quantized_cfr(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """30000/1001fps를 time_base 1/1000에 담은 스트림 — 틱 델타(33·34)가 프레임
+    길이(33.367)와 어긋나도, 격자 오차가 한 틱 안이면 균일 CFR로 증명한다."""
+    quantized = [0, 33, 67, 100, 133, 167, 200, 234]
+    _fake_ffmpeg_ffprobe(
+        monkeypatch,
+        _video_probe_json(rate="30000/1001", time_base="1/1000", pts=quantized),
+        "",
+        0,
+    )  # fmt: skip
+    info = probe_video_stream(Path("demo.mov"))
+    assert info.frame_duration == Fraction(1001, 30000)
+    assert info.presentation_origin == 0
+    assert info.frame_count == 8
+
+
+def test_video_probe_rejects_a_genuine_frame_jump(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """명목 률·개수가 같아도 타임스탬프에 구멍이면 증명은 실패한다.
+
+    26프레임짜리 깨끗한 격자에서 한 틱을 빼 25프레임으로 맞췄다 — 개수는
+    깨끗한 스트림과 같지만 순번 5부터 한 프레임 어긋난다.
+    """
+    clean = [ordinal * 1001 // 30 for ordinal in range(26)]
+    holed = clean[:5] + clean[6:]
+    assert len(holed) == 25
+    _fake_ffmpeg_ffprobe(
+        monkeypatch, _video_probe_json(rate="30000/1001", time_base="1/1000", pts=holed), "", 0
+    )
+    with pytest.raises(RuntimeError, match="격자"):
+        probe_video_stream(Path("demo.mov"))
+
+
+def test_video_probe_rejects_a_tick_larger_than_one(monkeypatch: pytest.MonkeyPatch) -> None:
+    """한 틱까지는 양자화 오차다 — 두 틱부터는 다른 격자다."""
+    _fake_ffmpeg_ffprobe(
+        monkeypatch,
+        _video_probe_json(rate="1/1", time_base="1/1000", pts=[0, 998, 2000]),
+        "",
+        0,
+    )
+    with pytest.raises(RuntimeError, match="격자"):
+        probe_video_stream(Path("demo.mov"))
+
+
+# ─── 프레임 추출 ───────────────────────────────────────────────
+
+_SCALE_768 = (
+    "scale="
+    "w='if(gt(iw,ih),min(iw,768),ceil(min(ih,768)*iw/ih/2)*2)':"
+    "h='if(gt(iw,ih),ceil(min(iw,768)*ih/iw/2)*2,min(ih,768))'"
+)
+
+
+def test_frame_extraction_argv_selects_the_exact_stream_and_frame(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """매핑은 전역 스트림 번호, 선택은 디코드 프레임 번호 — 스케일은 긴 변 768."""
+    commands = _fake_run(monkeypatch)
+    destination = tmp_path / "out" / "frame.jpg"
+    extract_frame_index(tmp_path / "in.mov", 3, 7, destination, long_edge=768)
+
+    (command,) = commands
+    assert command == [
+        "ffmpeg", "-hide_banner", "-nostdin", "-y",
+        "-i", str(tmp_path / "in.mov"),
+        "-map", "0:3",
+        "-vf", f"select=eq(n\\,7),{_SCALE_768}",
+        "-fps_mode", "passthrough",
+        "-frames:v", "1",
+        "-q:v", "2",
+        "-pix_fmt", "yuvj420p",
+        "-fflags", "+bitexact",
+        "-flags:v", "+bitexact",
+        str(destination),
+    ]  # fmt: skip
+
+
+@pytest.mark.parametrize(
+    ("stream_index", "frame_index", "long_edge", "match"),
+    [
+        (True, 0, 768, "스트림"),
+        (-1, 0, 768, "스트림"),
+        (0, True, 768, "프레임"),
+        (0, -3, 768, "프레임"),
+        (0, 0, 0, "long_edge"),
+        (0, 0, True, "long_edge"),
+    ],
+)
+def test_frame_extraction_rejects_inputs_that_are_not_counts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stream_index: int,
+    frame_index: int,
+    long_edge: int,
+    match: str,
+) -> None:
+    """번호는 0 이상 정수, 긴 변은 양수다 — bool은 세는 수가 아니다."""
+    _fake_run(monkeypatch)
+    with pytest.raises(RuntimeError, match=match):
+        extract_frame_index(
+            tmp_path / "in.mov",
+            stream_index,
+            frame_index,
+            tmp_path / "out.jpg",
+            long_edge=long_edge,
+        )
+
+
+def test_frame_extraction_requires_an_output_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ffmpeg가 성공해도 이미지가 없으면 추출이 아니다 — 조용히 넘기지 않는다."""
+
+    def silent_run(command: list[str]) -> object:
+        class Done:
+            stdout = ""
+            stderr = ""
+
+        return Done()
+
+    monkeypatch.setattr(preprocess, "_run", silent_run)
+    monkeypatch.setattr(preprocess, "require_ffmpeg", lambda tool="ffmpeg": "ffmpeg")
+    with pytest.raises(RuntimeError, match="남지"):
+        extract_frame_index(tmp_path / "in.mov", 0, 0, tmp_path / "out.jpg", long_edge=768)
+
+
+@needs_ffmpeg
+def test_frame_extraction_scales_the_long_edge_and_never_upscales_real(
+    tmp_path: Path,
+) -> None:
+    """긴 변만 768로 — 가로세로비 유지, 작은 입력은 그대로(업스케일 금지)."""
+    import subprocess as sp
+
+    cases = [("1600x900", 768, 432), ("900x1600", 432, 768), ("64x64", 64, 64)]
+    for size, width, height in cases:
+        source = tmp_path / f"{size.replace('x', '_')}.mov"
+        sp.run(
+            [
+                "ffmpeg", "-v", "error", "-y",
+                "-f", "lavfi", "-i", f"testsrc2=size={size}:rate=25:duration=0.04",
+                "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+                str(source),
+            ],
+            capture_output=True,
+            check=True,
+        )  # fmt: skip
+        destination = tmp_path / f"{size.replace('x', '_')}.jpg"
+        extract_frame_index(source, 0, 0, destination, long_edge=768)
+        assert _image_size(destination) == (width, height), size
+
+
+@needs_ffmpeg
+def test_frame_extraction_bytes_are_deterministic_real(tmp_path: Path) -> None:
+    """같은 프레임의 두 추출은 바이트가 같다 — 해시 대상으로 쓸 수 있다."""
+    source = tmp_path / "src.mov"
+    subprocess.run(
+        [
+            "ffmpeg", "-v", "error", "-y",
+            "-f", "lavfi", "-i", "testsrc2=size=64x64:rate=25:duration=1",
+            "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+            str(source),
+        ],
+        capture_output=True,
+        check=True,
+    )  # fmt: skip
+    first = tmp_path / "a.jpg"
+    second = tmp_path / "b.jpg"
+    extract_frame_index(source, 0, 4, first, long_edge=768)
+    extract_frame_index(source, 0, 4, second, long_edge=768)
+    assert first.read_bytes() == second.read_bytes()
+    other = tmp_path / "c.jpg"
+    extract_frame_index(source, 0, 5, other, long_edge=768)
+    assert first.read_bytes() != other.read_bytes()  # 프레임마다 다른 이미지다
+
+
+def _image_size(path: Path) -> tuple[int, int]:
+    completed = subprocess.run(
+        [
+            "ffprobe", "-v", "error", "-select_streams", "v:0",
+            "-show_entries", "stream=width,height",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            str(path),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )  # fmt: skip
+    first, second = completed.stdout.split()
+    return int(first), int(second)
