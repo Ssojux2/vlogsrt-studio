@@ -146,13 +146,14 @@ def _reference(
     *,
     frame_value: Callable[[int, int], int] = _frame_value,
     name: str = "stored",
+    source_id: str = "asset-1",
 ) -> PcmReference:
     """패턴 PCM을 직접 쓰고 참조를 손으로 만든다 — 해시·프레임 수는 진짜."""
     pcm_bytes = _pattern_pcm(frames, channels, frame_value)
     path = tmp_path / f"{name}-{frames}-{channels}.pcm"
     path.write_bytes(pcm_bytes)
     return PcmReference(
-        source_id="asset-1",
+        source_id=source_id,
         original_stem="demo",
         original_sha256="a" * 64,
         path=path,
@@ -349,7 +350,7 @@ def test_state_resets_between_assets(tmp_path: Path, monkeypatch: pytest.MonkeyP
     module = _numpy_or_fake(monkeypatch)
     session = _RecordingSession(module)
     first = _reference(tmp_path, 512, 1, name="first")
-    second = _reference(tmp_path, 512, 1, name="second")
+    second = _reference(tmp_path, 512, 1, name="second", source_id="asset-2")
 
     first_result = infer_vad(first, "asset-1", CFG, session)
     second_result = infer_vad(second, "asset-2", CFG, session)
@@ -483,6 +484,69 @@ def test_nonfinite_probability_fails_whole_asset(
         assert result.status == "error", bad
         assert result.windows == ()
         assert "채널 0" in result.error and "창 1" in result.error, bad
+
+
+def test_forged_source_id_fails_whole_asset_before_any_work(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """남의 참조에 다른 source_id를 갖다 붙이면 위조다 — 파일·세션 앞에서 닫는다."""
+    from vlogsrt.project.vad.inference import infer_vad
+
+    module = _numpy_or_fake(monkeypatch)
+    session = _RecordingSession(module)
+    reference = _error_reference(tmp_path)  # 참조 신원은 asset-1
+
+    result = infer_vad(reference, "other-asset", CFG, session)
+
+    assert result.status == "error"
+    assert result.windows == ()
+    assert result.error is not None
+    assert "asset-1" in result.error and "other-asset" in result.error
+    assert session.calls == []
+
+
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_blank_source_id_fails_whole_asset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, blank: str
+) -> None:
+    """비거나 흰살뿐인 source_id는 신원이 아니다 — 파일·세션 앞에서 닫는다."""
+    from vlogsrt.project.vad.inference import infer_vad
+
+    module = _numpy_or_fake(monkeypatch)
+    session = _RecordingSession(module)
+    reference = _error_reference(tmp_path)
+
+    result = infer_vad(reference, blank, CFG, session)
+
+    assert result.status == "error"
+    assert result.windows == ()
+    assert "source_id" in result.error
+    assert session.calls == []
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+def test_nonfinite_returned_state_fails_whole_asset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bad: float
+) -> None:
+    """돌아온 상태의 원소 하나라도 NaN·무한이면 다음 창에 쓰레기가 흐른다 — 닫는다."""
+    from vlogsrt.project.vad.inference import infer_vad
+
+    module = _numpy_or_fake(monkeypatch)
+    reference = _error_reference(tmp_path)
+
+    def broken(
+        npm: types.ModuleType, index: int, feeds: dict[str, Any], value: float = bad
+    ) -> list[Any]:
+        state = [[[value] * STATE_WIDTH], [[0.0] * STATE_WIDTH]]
+        return [_probability_output(npm, 0.5), npm.asarray(state, npm.float32)]
+
+    session = _RecordingSession(module, _healthy_until(1, broken))
+    result = infer_vad(reference, "asset-1", CFG, session)
+
+    assert result.status == "error", bad
+    assert result.windows == ()
+    assert "채널 0" in result.error and "창 1" in result.error, bad
+    assert "상태" in result.error, bad
 
 
 def test_wrong_output_shape_fails_whole_asset(

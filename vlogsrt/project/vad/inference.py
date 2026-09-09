@@ -15,6 +15,9 @@ union과 보호 판단은 P5-03의 몫이다. 지키는 선:
   수에서만 움직이고 덧대인 샘플에 시각이 붙지 않는다.
 - **유한한 확률은 하나도 버리지 않고, 무한·무효 출력·런타임 오류는 자산 전체를
   `error`로 닫는다.** 부분 성공이란 없다 — 메시지는 채널·창 좌표를 말한다.
+  돌아온 **상태**의 원소도 하나하나 유한해야 한다(무한 상태는 다음 창에 흐른다).
+- **신원은 참조와 정확히 같아야 한다.** 요청 source_id가 참조의 source_id와
+  다르면 위조다 — 파일·세션 작업 앞에서 닫는다.
 
 실패는 예외가 아니라 `VadResult(status="error")`로 돌아온다(자산별 런타임 오류는
 호출자가 keep+review로 다룐다). numpy import는 함수 안에서만 — 모듈 import이
@@ -84,7 +87,7 @@ def infer_vad(
     보호막이다(BaseException은 잡지 않는다).
     """
     try:
-        windows = _infer_reference(reference, cfg, session)
+        windows = _infer_reference(reference, source_id, cfg, session)
     except _VadFailure as failure:
         return VadResult(source_id=source_id, status="error", windows=(), error=str(failure))
     except Exception as exc:
@@ -98,9 +101,10 @@ def infer_vad(
 
 
 def _infer_reference(
-    reference: PcmReference, cfg: ProjectConfig, session: object
+    reference: PcmReference, source_id: str, cfg: ProjectConfig, session: object
 ) -> tuple[VadWindow, ...]:
-    """자산 전체 — 참조 검증 → 저장 PCM 검증 → 채널마다 처음부터 끝까지."""
+    """자산 전체 — 신원·참조 검증 → 저장 PCM 검증 → 채널마다 처음부터 끝까지."""
+    _require_identity(source_id, reference)
     _require_compatible_reference(reference, cfg)
     _verify_stored_pcm(reference)
     windows: list[VadWindow] = []
@@ -176,8 +180,8 @@ def _validate_outputs(outputs: object, channel: int, index: int) -> tuple[float,
             f"{type(outputs).__name__} 항목 {len(outputs) if hasattr(outputs, '__len__') else '?'}"
         )
     try:
-        probability = _window_probability(outputs[0])
-        state = _feedable_state(outputs[1])
+        probability = _window_probability(outputs[0], channel, index)
+        state = _feedable_state(outputs[1], channel, index)
     except _VadFailure:
         raise
     except Exception as exc:
@@ -190,24 +194,55 @@ def _validate_outputs(outputs: object, channel: int, index: int) -> tuple[float,
     return probability, state
 
 
-def _window_probability(output: Any) -> float:
+def _window_probability(output: Any, channel: int, index: int) -> float:
     """첫 출력을 검증하고 스칼라 확률로 편다 — 유한성은 호출자가 본다."""
     if tuple(output.shape) != _OUTPUT_SHAPE:
         raise _VadFailure(
-            f"VAD 출력 모양이 계약과 다르다: 기대 {_OUTPUT_SHAPE}, 실제 {output.shape}"
+            f"VAD 출력 모양이 계약과 다르다 — 채널 {channel} 창 {index}: "
+            f"기대 {_OUTPUT_SHAPE}, 실제 {output.shape}"
         )
     if str(output.dtype) != "float32":
-        raise _VadFailure(f"VAD 출력 타입이 계약과 다르다: 기대 float32, 실제 {output.dtype}")
+        raise _VadFailure(
+            f"VAD 출력 타입이 계약과 다르다 — 채널 {channel} 창 {index}: "
+            f"기대 float32, 실제 {output.dtype}"
+        )
     return float(output[0][0])
 
 
-def _feedable_state(state: Any) -> Any:
-    """둘째 출력은 그대로 다음 호출에 실린다 — 모양·타입만 여기서 증명한다."""
+def _feedable_state(state: Any, channel: int, index: int) -> Any:
+    """둘째 출력은 그대로 다음 호출에 실린다 — 모양·타입·유한성을 여기서 증명한다.
+
+    상태의 원소 하나라도 NaN·무한이면 다음 창부터 확률이 쓰레기로 흐른다 —
+    그 창에서 자산째 닫는다(마지막 창의 상태는 안 쓰이지만 같은 잣대로 본다).
+    """
     if tuple(state.shape) != _STATE_SHAPE:
-        raise _VadFailure(f"VAD 상태 모양이 계약과 다르다: 기대 {_STATE_SHAPE}, 실제 {state.shape}")
+        raise _VadFailure(
+            f"VAD 상태 모양이 계약과 다르다 — 채널 {channel} 창 {index}: "
+            f"기대 {_STATE_SHAPE}, 실제 {state.shape}"
+        )
     if str(state.dtype) != "float32":
-        raise _VadFailure(f"VAD 상태 타입이 계약과 다르다: 기대 float32, 실제 {state.dtype}")
+        raise _VadFailure(
+            f"VAD 상태 타입이 계약과 다르다 — 채널 {channel} 창 {index}: "
+            f"기대 float32, 실제 {state.dtype}"
+        )
+    bad = _first_nonfinite(state.tolist())
+    if bad is not None:
+        raise _VadFailure(
+            f"VAD 상태에 유한하지 않은 원소가 있다 — 채널 {channel} 창 {index}: {bad!r}"
+        )
     return state
+
+
+def _first_nonfinite(values: Any) -> float | None:
+    """중첩 목록을 펴서 처음 나오는 NaN·무한값 — 전부 유한하면 None."""
+    if isinstance(values, list):
+        for value in values:
+            found = _first_nonfinite(value)
+            if found is not None:
+                return found
+        return None
+    number = float(values)
+    return None if math.isfinite(number) else number
 
 
 def _normalized_window(
@@ -270,6 +305,21 @@ def _sha256_stored(path: Path) -> str:
     except OSError as exc:
         raise _VadFailure(f"저장 PCM을 해시하지 못했다: {path} ({exc})") from exc
     return digest.hexdigest()
+
+
+def _require_identity(source_id: str, reference: PcmReference) -> None:
+    """요청 신원은 비지 않은 문자열이고 참조의 신원과 정확히 같아야 한다.
+
+    참조의 PCM으로 다른 source_id의 결과를 내는 것은 위조다 — 파일·세션 작업
+    앞에서 닫고 메시지가 두 신원을 다 말한다.
+    """
+    if not isinstance(source_id, str) or not source_id.strip():
+        raise _VadFailure(f"source_id가 비지 않은 문자열이 아니다: {source_id!r}")
+    if source_id != reference.source_id:
+        raise _VadFailure(
+            f"요청 source_id {source_id!r}가 참조의 신원 {reference.source_id!r}과 다르다 — "
+            "위조 신원으로는 추론하지 않는다"
+        )
 
 
 def _require_compatible_reference(reference: PcmReference, cfg: ProjectConfig) -> None:
