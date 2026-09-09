@@ -27,12 +27,14 @@ class EditBlock:
 class BlockPartition:
     blocks: tuple[EditBlock, ...]
     kept_short_remainders: tuple[tuple[str, FrameInterval], ...]
+    unavailable_instances: tuple[UnavailableInstance, ...]
 
-def partition_blocks(document: ProjectDocument, media: Sequence[ResolvedMedia], guards: Sequence[InstanceGuard], locked_instance_ids: AbstractSet[str], cfg: ProjectConfig) -> BlockPartition: ...
+def partition_blocks(document: ProjectDocument, media: Sequence[ResolvedMedia], guards: Sequence[InstanceGuard], locked_instance_ids: AbstractSet[str], unavailable_instances: Sequence[UnavailableInstance], cfg: ProjectConfig) -> BlockPartition: ...
 ```
 
 - Eligible runs are complements of the instance guard inside each original audible clip, only when all required analysis succeeded and run length is at least frame-ceiled 6 seconds. Never cross a clip/gap/instance boundary.
-- Locked/broken/uncertain/muted/disabled/declared-no-audio/pre-PCM-unavailable instances yield no edit blocks. A video-only slice is conservative keep-all, not analysis success or removable silence.
+- Validate `unavailable_instances` by exact document `resource_scoped_id` plus `instance_id` before content/guard lookup, require every such instance in `locked_instance_ids`, reject duplicates/unknown resources/instances/reason codes, and copy the typed records unchanged into `BlockPartition`. Resource-scoped unavailability wins over any equal-content healthy guard.
+- Locked/broken/uncertain/muted/disabled/declared-no-audio/pre-PCM-unavailable instances yield no edit blocks. Only declared-no-audio is authored inaudible; a declared-audio pre-PCM failure is still excluded by its explicit unavailable record and lock. A video-only or unavailable slice is conservative keep-all, not analysis success or removable silence.
 - For run length `L`, try `n=ceil(L/max_frames)` balanced integer-frame blocks whose sizes differ by <=1 frame. Use them only if every block >= min frames; otherwise take greedy max-frame blocks and keep the short remainder unchanged.
 - `min_frames=ceil(6s/frame)`, `max_frames=floor(10s/frame)`, `keep_frames=nearest(3s/frame)`, all from config/timebase.
 - Each block has beginning/middle/end keep candidates of exactly `keep_frames` when possible, deduplicated by exact frame interval; never a full-delete candidate.
@@ -41,13 +43,13 @@ def partition_blocks(document: ProjectDocument, media: Sequence[ResolvedMedia], 
 
 ## Implementation steps
 
-1. Write failing tests for 6/10/11/12/17/20/22-second runs at all eight supported frame rates, balanced/greedy cases, 30 vs 29.97, asset-last blocks whose end equals frame count, first/last=`end-1` endpoints, rational 1-fps/center snapping, guard holes, clip boundaries, locks, analysis error, candidate/sample dedup and cap.
+1. Write failing tests for 6/10/11/12/17/20/22-second runs at all eight supported frame rates, balanced/greedy cases, 30 vs 29.97, asset-last blocks whose end equals frame count, first/last=`end-1` endpoints, rational 1-fps/center snapping, guard holes, clip boundaries, locks, analysis error, candidate/sample dedup and cap. Add declared-no-audio and both retryable pre-PCM reasons, exact typed carry-through, missing-lock/duplicate/unknown identity rejection, authored-audible pre-PCM failure, and equal-content healthy/unavailable resources proving only the unavailable instance yields zero blocks.
 2. Implement frame-only partition/candidate/sample logic; no float/model access.
 3. Run focused P6/P5/P1 tests, invariants, full check; commit owned files.
 
 ## Acceptance
 
-Blocks cover only eligible frames, do not overlap, and leave short remainders explicitly kept. Candidate length is nearest 3 seconds and no clip can be fully deleted. Sample count is <=16 with mandatory samples present. `make check` passes.
+Blocks cover only eligible frames, do not overlap, and leave short remainders explicitly kept. Candidate length is nearest 3 seconds and no clip can be fully deleted. Sample count is <=16 with mandatory samples present. Every unavailable instance is explicitly carried, locked, and absent from blocks without suppressing healthy equal-content instances. `make check` passes.
 
 ## Failure route
 

@@ -23,7 +23,9 @@ class AuthoredBlade:
 class LogicalSlice:
     slice_id: str
     instance_ids: tuple[str, ...]
+    resource_scoped_id: str
     source_id: str
+    asset_start: Fraction
     source_start: Fraction
     source_end: Fraction
     timeline_start: Fraction
@@ -35,20 +37,20 @@ def logical_slices(document: ProjectDocument, media: Sequence[ResolvedMedia]) ->
 ```
 
 - For a clip edge, source file start is `clip.start - asset.start`; project elapsed start is `clip.offset - sequence.tcStart`. The full mapping must satisfy `input_project_elapsed = clip.offset - sequence.tcStart + asset.start + file_time - clip.start`.
-- Audibility is exactly `media.has_audio and clip.enabled and clip.src_enable == "all"`. A declared-no-audio, disabled, or video-only slice retains identity/blades with `audible=False`, creates no boundary/audio request, and grants no automatic-shortening authority. Join the resource-scoped media record before content coalescing so equal bytes with different `has_audio` declarations cannot share disposition.
-- Coalesce adjacent items only when same source content, contiguous source and timeline ranges, and identical audible policy. Preserve every authored XML blade in `blades` even after logical coalescing.
+- `resource_scoped_id` is the exact document-scoped resource join and `asset_start` is that resource's exact XML epoch. Audibility is authored input state only: exactly `media.has_audio and clip.enabled and clip.src_enable == "all"`, never the later availability of a source trace, PCM reference, or VAD result. A declared-no-audio, disabled, or video-only slice retains identity/blades with `audible=False`, creates no boundary/audio request, and grants no automatic-shortening authority. A declared-audio resource whose PCM later becomes unavailable remains `audible=True`; P4-02 carries its explicit unavailable disposition and locks it.
+- Coalesce adjacent items only when they have the same `resource_scoped_id`, source content, `asset_start`, contiguous source and timeline ranges, and identical audible policy. Preserve every authored XML blade in `blades` even after logical coalescing. Equal-content resources never coalesce across resource identity, even when their current audibility happens to match.
 - Gaps break coalescing and remain represented by the original document, not as speech slices.
 - Slice IDs hash ordered instance IDs and exact ranges; repeated source instances remain distinct.
 
 ## Implementation steps
 
-1. Write failing tests for nonzero epochs, repeated assets, continuous blade coalescing, source-only/timeline-only discontinuity, gaps, muted/disabled/no-audio clips, same filename/different content, and same-content resources with different `has_audio` values.
+1. Write failing tests for nonzero `asset_start` epochs, exact `resource_scoped_id` propagation, repeated assets, continuous same-resource blade coalescing, cross-resource non-coalescing, source-only/timeline-only discontinuity, gaps, muted/disabled/no-audio clips, a declared-audio slice that stays audible when later analysis is unavailable, same filename/different content, and same-content resources with equal or different `has_audio` values.
 2. Implement pure derivation in `boundary.py` using Fraction only.
 3. Run focused P4/P1 integration tests, invariants, full check; commit owned paths.
 
 ## Acceptance
 
-Formula roundtrips at both endpoints for every supported fps; continuous authored blade yields one logical slice with two blade records and causes no extra STT by itself. Muted/gap/repeated cases remain addressable. `make check` passes.
+Formula roundtrips at both endpoints for every supported fps; continuous same-resource authored blades yield one logical slice with two blade records and cause no extra STT by themselves, while a resource boundary always prevents coalescing. Muted/gap/repeated/unavailable-later cases remain addressable with authored audibility intact. `make check` passes.
 
 ## Failure route
 

@@ -43,6 +43,7 @@ class EditPlan:
     retained: tuple[RetainedInterval, ...]
     removed: tuple[RemovedInterval, ...]
     decisions: tuple[VisionDecision, ...]
+    unavailable_instances: tuple[UnavailableInstance, ...]
     review: tuple[ReviewIssue, ...]
 
 def build_edit_plan(document: ProjectDocument, partition: BlockPartition, guards: Sequence[InstanceGuard], decisions: Sequence[VisionDecision], cfg: ProjectConfig) -> EditPlan: ...
@@ -51,21 +52,22 @@ def validate_edit_plan(plan: EditPlan, document: ProjectDocument, guards: Sequen
 
 - Apply at most one known accepted candidate per block; keep all for missing/error/uncertain/low-confidence/unique-event decisions.
 - Retain the chosen 3-second candidate and ripple-remove the rest of that block. Preserve source audio/order/existing gaps, never remove a whole clip, never shorten dialogue/locked instances.
+- Copy `partition.unavailable_instances` unchanged into the plan and require every listed instance to have no block and no removed interval. Emit a deterministic unlocated keep/review issue per record: declared-no-audio is completed absence and does not alone block final acceptance, while `stream_unavailable` and `pcm_unavailable` remain retryable readiness blockers. Resource-scoped records must not suppress or relabel an equal-content healthy instance.
 - Revalidate snapped cuts against guards; any overlap rejects that decision to keep-all plus review, never removes protected frames.
 - Review evidence is structured, not timestamp prose. A location-bearing `ReviewIssue` carries both `instance_id` and `source_frame`, the same exact asset-start-anchored source-frame index used by each retained interval's `source_frames`; this is file time before adding FCPXML `asset.start`, never project/output elapsed time. An unlocated issue carries both location fields as `None`; reject half-populated coordinates. `message` is for humans and is never parsed to recover marker timing; `code` is deterministic machine-readable evidence. P6-04 may turn only located generated issues into XML markers and keeps all issues in `review.json`.
 - Output frames are contiguous after ripple within original storyline semantics; existing gaps remain with their durations/order. Restoration mapping identifies exact removed source/input range and insertion location.
-- `revision` hashes the input/config/partition/full saved decisions and resulting intervals. Same saved inputs produce byte-identical plan; no temperature/dict-order promise.
+- `revision` hashes the input/config/partition/full saved decisions, typed unavailable metadata, and resulting intervals/review. Same saved inputs produce byte-identical plan; no temperature/dict-order promise.
 - Safe synthetic fixture must produce at least one nonempty removed interval; a no-op plan is not adequate acceptance.
 
 ## Implementation steps
 
-1. Write failing tests for accepted/low/error/unique decisions, unknown IDs, one-per-block, guard collision fallback, lock, full-clip prevention, ripple/gaps/order, deterministic revision, structured located/unlocated review issues, rejection of half-populated marker provenance, and actual shortening.
+1. Write failing tests for accepted/low/error/unique decisions, unknown IDs, one-per-block, guard collision fallback, lock, full-clip prevention, ripple/gaps/order, deterministic revision, structured located/unlocated review issues, rejection of half-populated marker provenance, and actual shortening. Add all three unavailable reasons, exact typed carry-through, zero removal/no-block enforcement, retryable-versus-declared readiness review semantics, duplicate/unknown resource-instance rejection, and an equal-content healthy sibling that remains independently eligible.
 2. Implement pure plan/validator; feed only saved decisions and config.
 3. Run focused/all P6 tests, invariants, full check; commit owned paths.
 
 ## Acceptance
 
-No removed frame intersects a guard; no source/clip/gap ordering changes; safe fixture actually shortens; identical saved inputs yield identical revision/serialization data. `make check` passes with zero network.
+No removed frame intersects a guard or unavailable instance; no source/clip/gap ordering changes; safe fixture actually shortens; identical saved inputs yield identical revision/serialization data including unavailable metadata. Declared absence may complete with review, but retryable pre-PCM failure cannot be final-accepted. `make check` passes with zero network.
 
 ## Failure route
 

@@ -46,16 +46,17 @@ def require_revision(refs: Sequence[ArtifactRef], revision: str) -> tuple[Artifa
 - Reuse requires verified content/request hashes and completed metadata. Size, mtime, basename, or `pipeline.source_fingerprint` may be recorded as diagnostics but can never prove cache validity or hide changed content.
 - P3 source-local SRT references are consumed from each `SourceTrace.source_srt_relative_path`; the durable layout includes both asset content identity and `analysis_key`, so changed config/policy generations coexist. Validate the recorded hash before reuse and never reconstruct `<namespace>/<stem>.SOURCE.srt`. A same-key byte-identical completed artifact is idempotent; different bytes at the same key are a conflict that preserves the existing artifact and records an error. Workspace code does not garbage-collect these immutable generations.
 - Workspace decode validates the persisted `SourceAnalysis` discriminator and schema revision and rejects unknown variants/revisions before media, PCM, STT, VAD, or vision calls. Only `UnavailableSourceAudio(status="no_audio", reason_code="declared_no_audio")` is reusable completed/non-billable absence; a pre-PCM `status="error"` is a failed attempt and must not be loaded as completed success forever.
+- Persist and validate the derived P4/P6 `unavailable_instances` records as typed resource/instance/reason metadata in projection/plan artifacts. On reopen, require exact agreement with the current resource-scoped `SourceAnalysis` records before returning a plan/export as reusable: missing, duplicate, unknown, or contradictory dispositions are stale/corrupt. Declared-no-audio may remain completed, but `stream_unavailable` or `pcm_unavailable` keeps the affected attempt retryable and can never load a plan/package as final-accepted.
 
 ## Implementation steps
 
-1. Write failing tests for create/reopen, content reuse, same-stat changed-content rejection, interrupted write, hash mismatch, stale/mixed/unknown schema revisions, unknown source-analysis variant, path traversal/symlink escape, concurrent atomic replacement, analysis-keyed source-SRT generations, same-key identical reuse/conflicting-byte preservation, declared-no-audio completed reuse, and retryable pre-PCM error/usage persistence.
+1. Write failing tests for create/reopen, content reuse, same-stat changed-content rejection, interrupted write, hash mismatch, stale/mixed/unknown schema revisions, unknown source-analysis variant, path traversal/symlink escape, concurrent atomic replacement, analysis-keyed source-SRT generations, same-key identical reuse/conflicting-byte preservation, declared-no-audio completed reuse, and retryable pre-PCM error/usage persistence. Add exact derived unavailable-instance roundtrip, missing/duplicate/unknown/contradictory projection-plan metadata rejection, equal-content resource separation, and refusal to reuse a retryable-unavailable plan/package as final-accepted.
 2. Implement immutable manifest and bounded atomic JSON helpers.
 3. Run focused P7/P6/invariant/full checks; commit owned files.
 
 ## Acceptance
 
-Interrupted/temp data is never returned complete; exact revision is required; separate workspaces cannot see each other's artifacts; `make check` passes.
+Interrupted/temp data is never returned complete; exact revision and resource-scoped unavailable metadata are required; separate workspaces cannot see each other's artifacts; retryable pre-PCM failure never reopens as final success. `make check` passes.
 
 ## Failure route
 

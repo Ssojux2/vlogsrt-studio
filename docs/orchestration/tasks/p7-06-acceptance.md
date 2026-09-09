@@ -13,7 +13,7 @@ Binding spec `Phases and acceptance` and `Evidence at handoff`; depends on integ
 ## Contract
 
 - One offline end-to-end safe fixture must inspect -> fake analyze -> plan -> export -> captions reproject and actually shorten while preserving source and producing all five same-revision artifacts.
-- Matrix covers same-name/repeated asset, same-content resources with differing `has_audio`, declared-no-audio zero PCM/STT/VAD and reusable completed disposition, retryable pre-PCM error, post-PCM error trace provenance, unknown variant/schema pre-call rejection, nonzero epochs, muted/disabled, gaps, all eight fps including 30/29.97, correct PTS/sample origin, empty/error distinction, continuous blade/no extra STT, instance boundary replacement/no recursion, zero-frame mismatch, <=1 ms serialization/no drift, no guard removal/new partial cues, malformed vision/model missing/429/timeout/cancel/resume/stale plan.
+- Matrix covers same-name/repeated asset, same-content resources with differing `has_audio`, declared-no-audio zero PCM/STT/VAD and reusable completed disposition, retryable pre-PCM error, post-PCM error trace provenance, unknown variant/schema pre-call rejection, nonzero epochs, muted/disabled, gaps, all eight fps including 30/29.97, correct PTS/sample origin, empty/error distinction, continuous blade/no extra STT, instance boundary replacement/no recursion, zero-frame mismatch, <=1 ms serialization/no drift, no guard removal/new partial cues, malformed vision/model missing/429/timeout/cancel/resume/stale plan. It also proves exact unavailable resource/instance/reason propagation from P4 through P7, zero edit removal for all unavailable instances, declared-no-audio completion without fabricated analysis, retryable stream/PCM failure preventing `final_accepted=true`, and an equal-content healthy sibling still completing independently.
 - Runbook documents local project extra installation, pinned VAD hashes/license, offline commands, explicit online authorization/cost step, output/review interpretation, SRT import `Relative to Timeline`, supported recut/reproject, and honest external gates.
 - External gates remain exactly: actual 2-minute then 10–20-minute FCP import/re-export; original 4K relink/playback; faint/short/noisy speech removal audit; production STT/GLM-Flash capability; DTD if unavailable. Mark each `PENDING_HUMAN` or actual evidence, never PASS without execution.
 
@@ -33,7 +33,7 @@ Binding spec `Phases and acceptance` and `Evidence at handoff`; depends on integ
 make check
 ```
 
-All commands exit 0, the safe fixture duration decreases, source hashes/records remain identical, five artifacts share one revision, and every unexecuted live gate reads `PENDING_HUMAN`. No paid/network call or protected fixture change occurs.
+All commands exit 0, the safe fixture duration decreases, source hashes/records remain identical, five artifacts share one revision, unavailable instances are never removed, retryable pre-PCM failures are never final-accepted, and every unexecuted live gate reads `PENDING_HUMAN`. No paid/network call or protected fixture change occurs.
 
 ## Failure route
 

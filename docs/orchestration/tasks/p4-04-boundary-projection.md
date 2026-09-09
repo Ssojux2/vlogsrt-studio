@@ -19,6 +19,7 @@ class BoundaryProjection:
     cues: tuple[ProjectCue, ...]
     source_srt: str
     locked_instance_ids: frozenset[str]
+    unavailable_instances: tuple[UnavailableInstance, ...]
     unresolved_request_ids: tuple[str, ...]
     unresolved_cue_ids: tuple[str, ...]
 
@@ -32,16 +33,17 @@ def project_boundaries(plan: BoundaryPlan, transcripts: Sequence[BoundaryTranscr
 - Timeline mapping uses exact P4 formula/Fractions. Output cues are ordered, non-overlapping within the flat storyline, and have `end > start`.
 - Re-run the P3-03 millisecond-representability check only after exact boundary replacement/clamp. If `half_up_ms(end) <= half_up_ms(start)`, retain the exact derived cue, append `subms_collapsed`, add its cue ID to `unresolved_cue_ids`, and omit only that cue from regenerated `source_srt`. Derive current unresolved cue IDs from the current projected cues in deterministic order: retain unrelated/fallback failures, but when a successful exact boundary replacement removes an old placed cue and substitutes a representable cue for that same instance, do not carry the replaced cue's stale unresolved ID into `BoundaryProjection`. The immutable `SourceCaptionSet` remains the evidence for that earlier SOURCE collapse, including when SOURCE itself is still unrepresentable. The downstream review names cue ID and exact endpoints and blocks final acceptance; never mutate a trace, stretch/merge endpoints, invent a frame gap, silently discard the record, or guess a `source_frame` for an XML marker.
 - Locked instances from the plan are returned unchanged; later edit policy must not shorten them again in the same run.
+- `unavailable_instances` is copied from the plan byte-for-byte and in order after validating that every record's instance is locked. Declared-no-audio remains completed/non-billable and does not alone refuse readiness; `stream_unavailable` or `pcm_unavailable` remains retryable, keeps unrelated valid cues in an explicit draft, and blocks final acceptance. Never infer either state from an empty cue list or collapse a genuine post-PCM error `SourceTrace` into this pre-PCM record.
 
 ## Implementation steps
 
-1. Write failing tests for one of two repeated instances, exact replace-not-append, shuffled transcript/trace order, missing/duplicate/mismatched linkage, leading/trailing cuts, empty/error fallback, lock propagation, no recursive request, and interval/order validation. Include the exact `Fraction(133, 8000)` to `+ Fraction(1, 24000)` 17-ms collapse and a collapse created by boundary clamp; both retain flagged exact cues and unresolved IDs while omitting only SRT emission. Add collapse-then-successful-representable-boundary replacement: it clears only the replaced instance's old unresolved cue ID while preserving unrelated/fallback failures and the immutable upstream SOURCE evidence.
+1. Write failing tests for one of two repeated instances, exact replace-not-append, shuffled transcript/trace order, missing/duplicate/mismatched linkage, leading/trailing cuts, empty/error fallback, lock propagation, no recursive request, and interval/order validation. Include the exact `Fraction(133, 8000)` to `+ Fraction(1, 24000)` 17-ms collapse and a collapse created by boundary clamp; both retain flagged exact cues and unresolved IDs while omitting only SRT emission. Add collapse-then-successful-representable-boundary replacement: it clears only the replaced instance's old unresolved cue ID while preserving unrelated/fallback failures and the immutable upstream SOURCE evidence. Add unchanged typed propagation for declared-no-audio and both retryable pre-PCM reason codes, locked-instance validation, equal-content healthy/unavailable resources, and proof that only retryable reasons block final acceptance.
 2. Implement pure projection without modifying trace objects.
 3. Run all P4/P3 tests, invariants, full check; commit owned files.
 
 ## Acceptance
 
-Instance-scoped tests prove no deletion/replacement in the sibling instance; each overlap has exactly one provenance; failed boundaries keep original text and explicit unresolved marker. Millisecond-collapsed cues remain structured and visible, never appear as invalid zero-millisecond SRT cues, and prevent final-ready state. Continuous blade has zero extra STT. `make check` passes.
+Instance-scoped tests prove no deletion/replacement in the sibling instance; each overlap has exactly one provenance; failed boundaries keep original text and explicit unresolved marker. Millisecond-collapsed cues remain structured and visible, never appear as invalid zero-millisecond SRT cues, and prevent final-ready state. Typed unavailable metadata survives unchanged, prevents removal authority, and distinguishes completed declared absence from retryable readiness blockers. Continuous blade has zero extra STT. `make check` passes.
 
 ## Failure route
 
