@@ -236,14 +236,23 @@ def _require_serializable(cue_id: str, start: Fraction, end: Fraction) -> None:
 def _media_by_resource(
     document: ProjectDocument, media: Sequence[ResolvedMedia]
 ) -> dict[str, ResolvedMedia]:
-    known = {resource.scoped_id for resource in document.resources}
+    resources = {resource.scoped_id: resource for resource in document.resources}
     indexed: dict[str, ResolvedMedia] = {}
     for item in media:
-        if item.resource_scoped_id not in known:
+        resource = resources.get(item.resource_scoped_id)
+        if resource is None:
             raise ValueError(f"문서에 없는 자원을 가진 미디어다: {item.resource_scoped_id!r}")
         if item.resource_scoped_id in indexed:
             raise ValueError(
                 f"미디어 자원이 중복이다: {item.resource_scoped_id!r} — 자원마다 정확히 하나다"
+            )
+        if item.has_audio != resource.has_audio:
+            # 가청 선언의 정본은 문서의 asset이다 — 미디어 행이 문서와 어긋나면
+            # 해석이 미디어를 따라가는 순간 조용한 무음·조용한 대사가 된다.
+            raise ValueError(
+                f"미디어의 가청 선언이 문서와 다르다: resource {resource.xml_id!r}는"
+                f" hasAudio={int(resource.has_audio)}인데 media.has_audio={item.has_audio}"
+                " — 자원의 has_audio는 문서의 asset 선언 그대로여야 한다"
             )
         indexed[item.resource_scoped_id] = item
     for resource in document.resources:

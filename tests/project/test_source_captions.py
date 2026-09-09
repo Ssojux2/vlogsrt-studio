@@ -663,6 +663,32 @@ def test_duplicate_media_resource_is_rejected(tmp_path: Path) -> None:
         project_source_captions(document, [*media, media[0]], analyses)
 
 
+def test_forged_media_audibility_against_authored_resource_is_rejected(tmp_path: Path) -> None:
+    """가청 선언의 정본은 문서의 asset이다 — 미디어 행이 거짓말하면 말이 나온다."""
+    document = _document(
+        tmp_path,
+        assets=[_asset_xml("r2", has_audio="0")],
+        items=[_clip_xml("r2", offset="0s", duration="100/25s")],
+    )
+    forged = _media(document, "r2", has_audio=True)  # 문서는 hasAudio="0"이다
+    trace = _trace("acid-r2", cues=[_CueSpec(1.0, 2.0, lines=("지어낸 말",))])
+    with pytest.raises(ValueError, match="hasAudio"):
+        project_source_captions(document, [forged], [trace])
+
+
+def test_silenced_media_against_authored_audible_resource_is_rejected(tmp_path: Path) -> None:
+    """거꾸로도 같다 — 문서가 가청이라면 no_audio 기록으로 덮을 수 없다."""
+    document = _document(
+        tmp_path,
+        assets=[_asset_xml("r2")],
+        items=[_clip_xml("r2", offset="0s", duration="100/25s")],
+    )
+    silenced = _media(document, "r2", has_audio=False)  # 문서는 hasAudio="1"이다
+    record = _unavailable(silenced.resource_scoped_id, "acid-r2", silenced.original_sha256)
+    with pytest.raises(ValueError, match="hasAudio"):
+        project_source_captions(document, [silenced], [record])
+
+
 def test_duplicate_unavailable_per_resource_is_rejected(tmp_path: Path) -> None:
     document = _document(
         tmp_path,
