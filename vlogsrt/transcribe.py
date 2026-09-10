@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import math
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -400,6 +400,46 @@ def get_transcriber(
         return FixtureTranscriber(fixture_dir=env.fixture_dir())
     # online=True는 사람이 --online을 직접 친 경우뿐이다. 그때만 오프라인 기본값을 넘는다.
     return LiveTranscriber(api_key=env.require_api_key(force=online), base_url=env.base_url())
+
+
+# ─────────────────────────────────────────────────────────────
+#  비전 호출 경계 (P5-05) — 파생 계층 비전 모델의 유일한 호출 지점
+# ─────────────────────────────────────────────────────────────
+
+
+def create_vision_client(*, api_key: str, base_url: str | None) -> Any:
+    """비전 전용 클라이언트 — 값은 받은 것만 쓴다.
+
+    환경·파일을 스스로 읽지 않는다. 실제 값은 사람이 승인한 온라인 실행기가
+    `vlogsrt.project.toml`의 자격증명 이름(`vision_api_key_env`·`vision_base_url_env`,
+    P5-00)으로 명시적으로 풀어 넘긴다. 레거시 STT helpers(`env.require_api_key`·
+    `env.base_url`)를 물려받지 않는다 — 한쪽 키가 양쪽 공급자를 열면 안 된다.
+    """
+    import openai  # 지연 import — openai를 얻는 유일한 파일이다(불변 규칙 5)
+
+    if base_url:
+        return openai.OpenAI(api_key=api_key, base_url=base_url)
+    return openai.OpenAI(api_key=api_key)
+
+
+def request_vision(
+    client: Any, *, model: str, payload: Mapping[str, object], online: bool = False
+) -> dict[str, Any]:
+    """비전 판정 호출 — 파생 계층이 얻는 유일한 비전 네트워크 경계다.
+
+    `online=True`는 사람이 명시적으로 승인한 실행에서만 온다(기본은 닫힘).
+    모델은 호출자가 준 `cfg.vision_model` 문자열 그대로다 — 페이로드가 같은 이름을
+    끼어들면 크게 실패하고, 호출이 실패해도 대체 모델로 조용히 갈아끼우지 않는다.
+    재시도도 없다: 429·타임아웃은 명시적 오류 기록물이 되어야지 조용한 지연이
+    되면 안 된다.
+    """
+    if not online:
+        raise RuntimeError(
+            "비전 호출은 명시적 online=True 없이는 닫혀 있다 — "
+            "오프라인 기본값을 넘는 것은 사람의 승인이다"
+        )
+    response = client.chat.completions.create(model=model, **dict(payload))
+    return _to_dict(response)
 
 
 # ─────────────────────────────────────────────────────────────

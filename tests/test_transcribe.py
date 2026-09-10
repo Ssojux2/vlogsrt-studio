@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import os
+import sys
+import types
 from collections.abc import Sequence
 from dataclasses import replace as data_replace
 from pathlib import Path
@@ -23,9 +25,11 @@ from vlogsrt.transcribe import (
     MalformedTranscript,
     TranscriptionJob,
     build_spine,
+    create_vision_client,
     estimate_cost,
     get_transcriber,
     parse_segments,
+    request_vision,
     require_nonempty,
     save_fixture,
     transcribe_outcome,
@@ -884,3 +888,157 @@ def test_the_name_guard_is_namespace_present_only() -> None:
     job = TranscriptionJob(stem="../demo", chunks=())
     with pytest.raises(RuntimeError, match="vlogsrt record"):
         FixtureTranscriber(fixture_dir=SYNTHETIC).transcribe(job, Config())
+
+
+# ─────────────────────────────────────────────────────────────
+#  비전 호출 경계 (P5-05) — 파생 계층 비전 모델의 유일한 호출 지점
+# ─────────────────────────────────────────────────────────────
+
+
+class FakeVisionClient:
+    """`chat.completions.create` 호출 인자만 기록한다. 네트워크 없음."""
+
+    def __init__(self, reply: object | None = None, failure: Exception | None = None) -> None:
+        self.calls: list[dict[str, object]] = []
+        self.reply: object = {} if reply is None else reply
+        self.failure = failure
+        self.chat = self
+        self.completions = self
+
+    def create(self, **kwargs: object) -> object:
+        self.calls.append(kwargs)
+        if self.failure is not None:
+            raise self.failure
+        return self.reply
+
+
+class DumpableVisionReply:
+    """SDK 응답 객체의 최소 모습 — `model_dump`로 사전이 된다."""
+
+    def model_dump(self) -> dict[str, Any]:
+        return {"choices": [{"message": {"content": "{}"}}]}
+
+
+def _status_error(status: int, message: str) -> RuntimeError:
+    error = RuntimeError(f"Error code: {status} - {message}")
+    error.status_code = status  # type: ignore[attr-defined]
+    return error
+
+
+def _fake_openai(monkeypatch: pytest.MonkeyPatch) -> tuple[list[dict[str, object]], object]:
+    """가짜 openai 꾸러미 — `OpenAI()` 생성 인자를 기록한다. 네트워크 없음."""
+    built: list[dict[str, object]] = []
+    sentinel = object()
+
+    def _openai(**kwargs: object) -> object:
+        built.append(kwargs)
+        return sentinel
+
+    module = types.ModuleType("openai")
+    module.OpenAI = _openai
+    monkeypatch.setitem(sys.modules, "openai", module)
+    return built, sentinel
+
+
+VISION_PAYLOAD = {"messages": [{"role": "user", "content": []}]}
+
+
+def test_vision_requests_fail_closed_without_explicit_online() -> None:
+    """기본값도 명시적 False도 같다 — 클라이언트를 만지기 전에 닫힌다."""
+    client = FakeVisionClient()
+    for online in (None, False):
+        kwargs = {} if online is None else {"online": online}
+        with pytest.raises(RuntimeError, match="online=True"):
+            request_vision(client, model="vision-model-x", payload=VISION_PAYLOAD, **kwargs)
+    assert client.calls == []
+
+
+def test_vision_online_sends_the_exact_model_and_payload() -> None:
+    client = FakeVisionClient(reply={"choices": []})
+    raw = request_vision(client, model="vision-model-x", payload=VISION_PAYLOAD, online=True)
+    (call,) = client.calls
+    assert call == {"model": "vision-model-x", **VISION_PAYLOAD}
+    assert raw == {"choices": []}
+
+
+def test_vision_rejects_a_payload_that_redefines_the_model() -> None:
+    """모델의 정본은 함수 인자 하나뿐이다 — 페이로드가 끼어들면 크게 실패한다."""
+    client = FakeVisionClient()
+    with pytest.raises(TypeError):
+        request_vision(
+            client,
+            model="vision-model-x",
+            payload={"model": "other-model", "messages": []},
+            online=True,
+        )
+
+
+def test_vision_converts_sdk_objects_to_dicts() -> None:
+    client = FakeVisionClient(reply=DumpableVisionReply())
+    raw = request_vision(client, model="vision-model-x", payload=VISION_PAYLOAD, online=True)
+    assert raw == {"choices": [{"message": {"content": "{}"}}]}
+
+
+def test_vision_429_is_an_explicit_error_not_a_retry() -> None:
+    """재시도가 없다 — 429는 명시적 오류 기록물이 되어야지 조용한 지연이 되면 안 된다."""
+    client = FakeVisionClient(failure=_status_error(429, "rate limit exceeded"))
+    with pytest.raises(RuntimeError, match="429"):
+        request_vision(client, model="vision-model-x", payload=VISION_PAYLOAD, online=True)
+    assert len(client.calls) == 1
+
+
+def test_vision_timeout_is_an_explicit_error_not_a_retry() -> None:
+    client = FakeVisionClient(failure=TimeoutError("request timed out"))
+    with pytest.raises(TimeoutError, match="timed out"):
+        request_vision(client, model="vision-model-x", payload=VISION_PAYLOAD, online=True)
+    assert len(client.calls) == 1
+
+
+def test_vision_client_takes_explicit_key_and_base_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """값은 받은 것만 간다 — base_url이 없으면 인자 자체를 실리지 않는다."""
+    built, sentinel = _fake_openai(monkeypatch)
+    with_base_url = create_vision_client(
+        api_key="vision-key", base_url="https://vision.example/api"
+    )
+    without_base_url = create_vision_client(api_key="vision-key", base_url=None)
+    assert with_base_url is sentinel and without_base_url is sentinel
+    assert built == [
+        {"api_key": "vision-key", "base_url": "https://vision.example/api"},
+        {"api_key": "vision-key"},
+    ]
+
+
+def test_vision_client_ignores_the_environment_and_legacy_helpers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """비전 자격증명은 별도 이름이다 — 레거시 STT 자격증명 경로를 물려받지 않는다."""
+
+    def _boom(*args: object, **kwargs: object) -> None:
+        raise AssertionError("비전 클라이언트는 legacy STT 자격증명 경로를 쓰면 안 된다")
+
+    for name in ("ZAI_API_KEY", "ZAI_BASE_URL", "OPENAI_API_KEY", "OPENAI_BASE_URL"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr("vlogsrt.env.require_api_key", _boom)
+    monkeypatch.setattr("vlogsrt.env.base_url", _boom)
+    built, _ = _fake_openai(monkeypatch)
+
+    create_vision_client(api_key="vision-key", base_url=None)
+    assert built == [{"api_key": "vision-key"}]
+
+
+def test_offline_defaults_and_lazy_clients_make_zero_constructions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """오프라인 기본은 픽스처고, 실제 호출 경로도 호출 직전까지 클라이언트를 안 만든다."""
+    built, _ = _fake_openai(monkeypatch)
+    monkeypatch.setenv("VLOGSRT_OFFLINE", "1")
+
+    assert isinstance(get_transcriber(None), FixtureTranscriber)
+    responses = FixtureTranscriber(fixture_dir=SYNTHETIC).transcribe(job(), Config())
+    assert responses  # 픽스체 경로는 그대로 산다
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    assert isinstance(get_transcriber(Config(), online=True), LiveTranscriber)
+    assert built == []  # 클라이언트 생성은 실제 전송 직전(지연 import)에야 일어난다
