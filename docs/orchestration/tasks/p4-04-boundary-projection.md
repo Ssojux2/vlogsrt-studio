@@ -2,13 +2,22 @@
 
 ## Authority
 
-Binding spec `Boundary transcripts` and P4 acceptance; depends on P4-03. Ends P4 for Opus phase review and Astra integration.
+Binding spec `Boundary transcripts` and P4 acceptance; depends on P4-03. Ends P4.
+Coordinator/reviewer: Opus 5 (Run `run_a091d4869a98`). Offline only; Opus performs the merge.
 
 ## Baseline and ownership
 
-- Fresh `fcp-p4-boundary-projection` worktree from exact P4-03-integrated SHA.
-- Modify `vlogsrt/project/captions.py`, `vlogsrt/project/boundary.py`; create `tests/project/test_boundary_projection.py`.
-- No XML/edit shortening, transcription calls, source trace mutation, or fixture edits.
+- Worktree `/Users/ssojux2/orca/workspaces/vlogsrt/fcp-p4-boundary-projection`, branch
+  `Ssojux2/fcp-p4-boundary-projection`, already created from exact base `9747988` (which contains the
+  P4-03 integration `f6af955`). Do not rebase, reset, squash, or re-create the branch.
+- Allowed files: `vlogsrt/project/captions.py`, `vlogsrt/project/boundary.py`, and a new
+  `tests/project/test_boundary_projection.py`. Nothing else.
+- Forbidden: any XML/edit shortening, any transcription or network call, any source trace mutation,
+  `tests/fixtures/api/**`, `golden/**`, `.env`, `.env.example`, and every file outside the allowed list.
+- No new dependency. No live/paid call. No `--online`. No `VLOGSRT_OFFLINE=0`.
+- P4-03 landed `BoundaryTranscript`, `transcribe_boundaries`, and the boundary clock helpers in
+  `vlogsrt/project/boundary.py`; read that module before designing the projection so you consume the
+  real shipped types instead of re-deriving them.
 
 ## Contract
 
@@ -47,8 +56,27 @@ Instance-scoped tests prove no deletion/replacement in the sibling instance; eac
 
 ## Failure route
 
-Report slice/instance/request/cue IDs and exact intervals, expected/actual provenance, base/tests/diff. Cross-instance deletion or silent missing text is an immediate Astra escalation; fixes stay GLM.
+Report slice/instance/request/cue IDs and exact intervals, expected/actual provenance, base/tests/diff. Cross-instance deletion or silent missing text is an immediate hard stop: report it and wait. Two repetitions of the same failure -> stop and escalate to the coordinator (Opus 5), who routes to Fable 5.1. Code changes stay with GLM.
 
 ## Report
 
-Report Orca/launch IDs, branch/base/commit, files/tests, unresolved cases/locks, source immutability evidence, and `ready-to-integrate`.
+Before `worker_done`, send the exact committed SHA, `git diff --stat 9747988..HEAD` (which must list
+exactly the three allowed files), the failing-first evidence for the new tests, and the green output of
+every acceptance command with its test count, plus confirmation that zero network calls occurred.
+Then send `worker_done` exactly once.
+
+Acceptance commands, run from the worktree root with the main repo's interpreter
+`/Users/ssojux2/Working/vlogsrt/.venv/bin/python`:
+
+```
+python -m pytest tests/project/test_boundary_projection.py
+python -m pytest tests/project
+python -m ruff check vlogsrt ui tests scripts
+python -m ruff format --check vlogsrt ui tests scripts
+python -m mypy
+python scripts/check_invariants.py
+python -m pytest
+```
+
+The full suite must pass with a count no lower than the 1,898 recorded at `f6af955` plus the new tests,
+and every invariant group must print `[OK]`.
