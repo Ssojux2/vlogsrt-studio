@@ -33,6 +33,7 @@ import dataclasses
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import types
@@ -145,6 +146,21 @@ def _decoded_images(payload: dict[str, Any]) -> list[bytes]:
         base64.b64decode(part["image_url"]["url"].split(",", 1)[1])
         for part in _image_parts(payload)
     ]
+
+
+def _forged(**overrides: Any) -> ProjectConfig:
+    """검증을 한 번도 통과하지 않은 설정 — `__init__`을 건너뛰고 슬롯에 넣는다.
+
+    생성자가 우회를 닫은 뒤(P5-06)로는 공개 생성 경로에서 나쁜 레일 값이
+    소비자까지 도달할 수 없다. 그러면 `_require_config`는 아무 테스트도 거치지
+    않는 죽은 층이 되고, 누군가 지워도 아무도 모른다. 이 손쓰기는 그 층이
+    여전히 산다는 것을 증명하는 유일한 길이다 — 테스트 안에서만 산다.
+    프로덕션이 이 우회를 쓰는 순간 P5-05b가 재현된다.
+    """
+    config = object.__new__(ProjectConfig)
+    for field in dataclasses.fields(ProjectConfig):
+        object.__setattr__(config, field.name, overrides.get(field.name, getattr(CFG, field.name)))
+    return config
 
 
 # ─── 페이로드 — Base64 image_url, 공급 순서, 한도, 무권한 ─────────────────
@@ -505,6 +521,78 @@ def test_a_contract_violating_response_is_an_error_that_keeps_the_block(reply: A
     assert "계약" in decision.reason
 
 
+# ─── 요청 신원 — 판정은 본 요청에 묶인다 (P5-06) ────────────────────────
+
+
+def test_every_path_carries_the_same_request_identity() -> None:
+    """accepted·keep_all·error 세 경로가 모두 요청 신원을 싣는다 — 해시는 요청만
+    본다. 저장된 판정이 이 프레임과 이 후보를 실제로 봤는지는 이 필드로 증명한다.
+    """
+    accepted = policy.parse_decision(_request(), _reply(), CFG)
+    kept = policy.parse_decision(_request(), _reply(choice=policy.KEEP_ALL), CFG)
+    errored = policy.parse_decision(_request(), {"choices": []}, CFG)
+    assert accepted.status == "accepted"
+    assert kept.status == "keep_all"
+    assert errored.status == "error"
+    assert accepted.request_sha256 == kept.request_sha256 == errored.request_sha256
+    assert re.fullmatch(r"[0-9a-f]{64}", accepted.request_sha256)
+
+
+def test_parsing_the_same_request_twice_hashes_identically() -> None:
+    first = policy.parse_decision(_request(), _reply(), CFG)
+    second = policy.parse_decision(_request(), _reply(confidence=0.99), CFG)
+    assert first.request_sha256 == second.request_sha256  # 응답은 재료가 아니다
+
+
+def test_a_different_block_gets_a_different_request_identity() -> None:
+    mine = policy.parse_decision(_request(), _reply(), CFG)
+    other = policy.parse_decision(_request(block_id="block-2"), _reply(), CFG)
+    assert mine.request_sha256 != other.request_sha256
+
+
+def test_frame_order_is_part_of_the_request_identity() -> None:
+    """프레임은 공급된 순서까지가 신원이다 — 같은 묶음이라도 순서가 다르면 딴 요청이다."""
+    forward = policy.parse_decision(_request(frame_ids=("f-00", "f-01", "f-02")), _reply(), CFG)
+    backward = policy.parse_decision(_request(frame_ids=("f-02", "f-01", "f-00")), _reply(), CFG)
+    assert forward.request_sha256 != backward.request_sha256
+
+
+def test_candidate_windows_are_part_of_the_request_identity() -> None:
+    """후보 창이 바뀌면 딴 질문이다 — 같은 아이디라도 유지 구간이 다르면 해시가 갈린다."""
+    widened = _request(
+        candidates=(
+            policy.VisionCandidate("cand-front", Fraction(0), Fraction(4)),
+            policy.VisionCandidate("cand-mid", Fraction(9, 2), Fraction(6)),
+            policy.VisionCandidate("cand-back", Fraction(6), Fraction(9)),
+        )
+    )
+    base = policy.parse_decision(_request(), _reply(), CFG)
+    moved = policy.parse_decision(widened, _reply(), CFG)
+    assert base.request_sha256 != moved.request_sha256
+
+
+def test_candidate_ids_are_part_of_the_request_identity() -> None:
+    renamed = _request(
+        candidates=(
+            policy.VisionCandidate("cand-front-alt", Fraction(0), Fraction(3)),
+            policy.VisionCandidate("cand-mid", Fraction(9, 2), Fraction(6)),
+            policy.VisionCandidate("cand-back", Fraction(6), Fraction(9)),
+        )
+    )
+    base = policy.parse_decision(_request(), _reply(), CFG)
+    other = policy.parse_decision(renamed, _reply(), CFG)
+    assert base.request_sha256 != other.request_sha256
+
+
+def test_adjacent_context_prose_is_not_identity_material() -> None:
+    """이웃 맥락 글월은 안내일 뿐이다 — 바뀌어도 본 요청의 신원은 하나다."""
+    base = policy.parse_decision(_request(), _reply(), CFG)
+    reworded = policy.parse_decision(
+        _request(adjacent_context="앞뒤로 다른 도시 풍경 B-roll이 이어진다"), _reply(), CFG
+    )
+    assert base.request_sha256 == reworded.request_sha256
+
+
 # ─── 설정 레일 — 검증 없이 만든 구성도 문에서 닫는다 ──────────────────────
 
 
@@ -521,46 +609,52 @@ _BAD_CONFIGS = [
     pytest.param("vision_max_images", True, id="max-images-bool"),
     pytest.param("vision_max_images", 16.0, id="max-images-float"),
 ]
-"""`load_project_config`의 값역 검사를 건너뛴 채 흘러들 수 있는 값들."""
+"""`load_project_config`의 값역 검사를 건너뛴 채 흘러들 수 있는 값들.
+
+생성자가 그 길을 닫은 뒤(P5-06)로는 `_forged`로만 소비자에게 들이밀 수 있다 —
+소비자 문이 여전히 산다는 증거다."""
 
 
-def test_a_nan_apply_confidence_cannot_open_the_accept_gate() -> None:
+def test_a_forged_nan_apply_confidence_cannot_open_the_accept_gate() -> None:
     """루트가 재현한 우회를 닫는다 — `max(nan, 0.8)`이 nan이고 `0.5 < nan`이
     거짓이라서, 신뢰도 0.5의 후보가 승인으로 새었다. 설정 결함은 요청 결함과 같은
     프로그래머 잘못이라 예외로 닫는다 — keep_all 오류 판정은 모델 탈로 둔갑시키고
-    못 박은 값으로 덮으면 버그를 감춘다.
+    못 박은 값으로 덮으면 버그를 감춘다. 설정은 `_forged`로 만든다 — 생성자가
+    닫은 지금 소비자의 `_require_config`를 거쳐 볼 수 있는 길은 이것뿐이다.
     """
-    cfg = dataclasses.replace(CFG, vision_apply_confidence=float("nan"))
+    cfg = _forged(vision_apply_confidence=float("nan"))
     with pytest.raises(policy.VisionPolicyError, match="vision_apply_confidence"):
         policy.parse_decision(_request(), _reply(confidence=0.5), cfg)
 
 
 @pytest.mark.parametrize(("field", "value"), _BAD_CONFIGS)
-def test_a_defective_config_raises_from_parse_decision(field: str, value: object) -> None:
-    """파일 해석의 값역 검사는 프로그래밍 구성에는 닿지 않는다 — 문에서 다시 본다."""
-    cfg = dataclasses.replace(CFG, **{field: value})
+def test_a_forged_defective_config_raises_from_parse_decision(field: str, value: object) -> None:
+    """어떤 검증도 통과한 적 없는 설정도 문에서 닫는다 — `_require_config`의 층이다."""
+    cfg = _forged(**{field: value})
     with pytest.raises(policy.VisionPolicyError, match=field):
         policy.parse_decision(_request(), _reply(confidence=0.5), cfg)
 
 
 @pytest.mark.parametrize(("field", "value"), _BAD_CONFIGS)
-def test_a_defective_config_raises_from_build_payload_before_assembly(
+def test_a_forged_defective_config_raises_from_build_payload_before_assembly(
     tmp_path: Path, field: str, value: object
 ) -> None:
     """깨진 설정은 조립 전에 닫는다 — 유료 호출은 결함 있는 레일에 값을 쓰지 않는다."""
-    cfg = dataclasses.replace(CFG, **{field: value})
+    cfg = _forged(**{field: value})
     samples = _samples_for(tmp_path, "f-00", "f-01", "f-02")
     with pytest.raises(policy.VisionPolicyError, match=field):
         policy.build_payload(_request(), samples, cfg)
 
 
-def test_the_config_gate_closes_before_the_images_are_read(tmp_path: Path) -> None:
+def test_the_config_gate_closes_before_the_images_are_read_on_a_forged_config(
+    tmp_path: Path,
+) -> None:
     """설정 검사는 이미지 읽기보다 앞이다 — 해시 결함이 아니라 설정이 먼저 닫는다."""
     stale = dataclasses.replace(
         _sample(tmp_path, "f-01", data=b"stale-bytes"),
         image_sha256=hashlib.sha256(b"different-bytes").hexdigest(),
     )
-    cfg = dataclasses.replace(CFG, vision_apply_confidence=float("nan"))
+    cfg = _forged(vision_apply_confidence=float("nan"))
     with pytest.raises(policy.VisionPolicyError, match="vision_apply_confidence"):
         policy.build_payload(
             _request(), (_sample(tmp_path, "f-00"), stale, _sample(tmp_path, "f-02")), cfg

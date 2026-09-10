@@ -24,7 +24,7 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import fields, replace
 from fractions import Fraction
 from pathlib import Path
 
@@ -734,6 +734,21 @@ def _result(
     )
 
 
+def _forged(**overrides: object) -> ProjectConfig:
+    """검증을 한 번도 통과하지 않은 설정 — `__init__`을 건너뛰고 슬롯에 넣는다.
+
+    생성자가 우회를 닫은 뒤(P5-06)로 `replace(CFG, ...)`는 생성 단계에서 먼저
+    터져 버려서 이 파일의 관문(`build_source_guard`의 `_require_config`)을
+    겨본 적이 없는 채 녹색이 된다. 슬롯에 직접 넣는 이 손쓰기는 그 관문이
+    여전히 산다는 것을 증명한다 — 테스트 안에서만 산다. 프로덕션이 이 우회를
+    쓰는 순간 P5-03b가 재현된다.
+    """
+    config = object.__new__(ProjectConfig)
+    for field in fields(ProjectConfig):
+        object.__setattr__(config, field.name, overrides.get(field.name, getattr(CFG, field.name)))
+    return config
+
+
 def test_config_defects_raise_before_any_protection() -> None:
     reference = _reference()
     trace = _trace(reference.source_id, key=reference.analysis_key)
@@ -745,7 +760,7 @@ def test_config_defects_raise_before_any_protection() -> None:
                 _vad(),
                 _projection(),
                 (),
-                replace(CFG, vad_positive=bad_positive),
+                _forged(vad_positive=bad_positive),
             )
     for bad_padding in (Fraction(0), Fraction(-1, 2), Fraction(-2), 0.5):
         with pytest.raises(ValueError, match="guard_padding_seconds"):
@@ -755,7 +770,7 @@ def test_config_defects_raise_before_any_protection() -> None:
                 _vad(),
                 _projection(),
                 (),
-                replace(CFG, guard_padding_seconds=bad_padding),
+                _forged(guard_padding_seconds=bad_padding),
             )
     # 음수 여유는 protected=[]를 내지 않고 그 자리에서 닫힌다 — 설정 결함은
     # 호출자 잘못이므로 keep_all로 세탁하지도 않는다(P5-05b가 그은 선).

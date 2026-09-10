@@ -627,6 +627,171 @@ def test_block_ordering_allows_equality(tmp_path: Path) -> None:
     assert config.block_min_seconds == config.block_max_seconds == config.keep_seconds
 
 
+# ─── P5-06: 생성자 우회 닫기 — 검증 없이 만든 구성도 생성에서 닫는다 ──────
+#
+# P5-05b·P5-03b가 만났던 구멍이다: `ProjectConfig`를 프로그램식으로 만들면
+# `load_project_config`의 검증을 건너뛴다. 세 소비자가 같은 검사를 각자 다시
+# 짜는 대신 생성자에서 한 번에 닫는다 — 파일 해석이 거부하는 값은 생성도 거부한다.
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        # 실수 필드: nan·inf·범위 밖·bool·문자열
+        pytest.param("vad_positive", float("nan"), id="vad-positive-nan"),
+        pytest.param("vad_positive", float("inf"), id="vad-positive-inf"),
+        pytest.param("vad_positive", float("-inf"), id="vad-positive-neg-inf"),
+        pytest.param("vad_positive", -0.01, id="vad-positive-below-range"),
+        pytest.param("vad_positive", 1.5, id="vad-positive-above-range"),
+        pytest.param("vad_positive", True, id="vad-positive-bool"),
+        pytest.param("vad_positive", "0.5", id="vad-positive-string"),
+        pytest.param("vision_apply_confidence", float("nan"), id="confidence-nan"),
+        pytest.param("vision_apply_confidence", float("inf"), id="confidence-inf"),
+        pytest.param("vision_apply_confidence", -0.2, id="confidence-below-range"),
+        pytest.param("vision_apply_confidence", 1.0001, id="confidence-above-range"),
+        pytest.param("vision_apply_confidence", True, id="confidence-bool"),
+        # 정수 필드: bool·실수·문자열·양수 아닌 값
+        pytest.param("vision_max_images", True, id="max-images-bool"),
+        pytest.param("vision_max_images", 16.0, id="max-images-float"),
+        pytest.param("vision_max_images", "16", id="max-images-string"),
+        pytest.param("vision_max_images", 0, id="max-images-zero"),
+        pytest.param("vision_max_images", -1, id="max-images-negative"),
+        pytest.param("vision_long_edge", 0, id="long-edge-zero"),
+        pytest.param("vision_long_edge", 768.0, id="long-edge-float"),
+        # VAD 좌표는 아티팩트에 고정이다 — 파일 밖에서도 마찬가지다
+        pytest.param("vad_sample_rate", 8000, id="sample-rate-unpinned"),
+        pytest.param("vad_window_samples", True, id="window-samples-bool"),
+        # 분수 필드: 실수·bool·양수 아닌 값·'분자/분모' 아닌 문자열
+        pytest.param("guard_padding_seconds", 0.5, id="padding-float"),
+        pytest.param("guard_padding_seconds", True, id="padding-bool"),
+        pytest.param("guard_padding_seconds", Fraction(0), id="padding-zero"),
+        pytest.param("guard_padding_seconds", Fraction(-1, 2), id="padding-negative"),
+        pytest.param("guard_padding_seconds", "1", id="padding-int-text"),
+        pytest.param("vision_sample_fps", Fraction(0), id="sample-fps-zero"),
+        pytest.param("block_min_seconds", Fraction(-6), id="block-min-negative"),
+        # 스키마·문자열·체크섬·자격증명 이름
+        pytest.param("schema_version", 2, id="schema-unsupported"),
+        pytest.param("schema_version", True, id="schema-bool"),
+        pytest.param("vision_model", "", id="model-blank"),
+        pytest.param("vision_model", 5, id="model-not-a-string"),
+        pytest.param("vad_model_sha256", "not-hex", id="model-sha-not-hex"),
+        pytest.param("vision_api_key_env", "OPENAI_API_KEY", id="stt-credential-reuse"),
+        # 가격: 음수·비유한·실수·bool
+        pytest.param("vision_cost_per_image", Decimal("-0.01"), id="price-negative"),
+        pytest.param("vision_cost_per_image", Decimal("nan"), id="price-nan"),
+        pytest.param("vision_cost_per_image", 0.01, id="price-float"),
+        pytest.param("vision_cost_per_image", True, id="price-bool"),
+    ],
+)
+def test_a_programmatic_defect_is_rejected_at_construction(field: str, value: object) -> None:
+    """파일 해석의 값역 검사는 프로그래밍 구성에는 닿지 않았다 — 이제 생성이 닫는다."""
+    with pytest.raises(ProjectConfigError, match=field):
+        ProjectConfig(**{field: value})
+
+
+def test_the_constructor_names_the_key_and_the_value() -> None:
+    """위반은 키와 값을 대고 말한다 — 어느 필드가 왜 못 났는지 메시지로 남는다."""
+    with pytest.raises(ProjectConfigError) as excinfo:
+        ProjectConfig(vad_positive=float("nan"))
+    message = str(excinfo.value)
+    assert "vad_positive" in message
+    assert "nan" in message
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "keys"),
+    [
+        (
+            {"block_min_seconds": Fraction(11)},
+            ("block_min_seconds", "block_max_seconds"),
+        ),
+        (
+            {"block_max_seconds": Fraction(5)},
+            ("block_min_seconds", "block_max_seconds"),
+        ),
+        (
+            {"keep_seconds": Fraction(7)},
+            ("keep_seconds", "block_min_seconds"),
+        ),
+        ({"vision_cost_per_image": Decimal("0.01")}, ("pricing_currency",)),
+    ],
+)
+def test_cross_violations_are_rejected_at_construction(
+    kwargs: dict[str, object], keys: tuple[str, ...]
+) -> None:
+    """한 키만 봐서 못 잡는 계약도 생성에서 닫는다 — 순서와 라벨 짝."""
+    with pytest.raises(ProjectConfigError) as excinfo:
+        ProjectConfig(**kwargs)
+    message = str(excinfo.value)
+    for key in keys:
+        assert key in message
+
+
+def test_replace_cannot_sneak_a_defect_past_the_constructor() -> None:
+    """P5-05b·P5-03b가 만났던 우회 그 자체다 — `replace`도 생성자를 지난다."""
+    with pytest.raises(ProjectConfigError, match="vision_apply_confidence"):
+        dataclasses.replace(ProjectConfig(), vision_apply_confidence=float("nan"))
+    with pytest.raises(ProjectConfigError, match="guard_padding_seconds"):
+        dataclasses.replace(ProjectConfig(), guard_padding_seconds=Fraction(-1, 2))
+
+
+def test_a_sound_programmatic_config_constructs_and_matches_the_loaded_path(
+    tmp_path: Path,
+) -> None:
+    """이게 없으면 "전부 막혔다"가 "생성자가 망가졌다"와 구별되지 않는다 —
+    정상 구성은 그대로 만들어지고, 파일 해석과 같은 객체·같은 해시를 낸다.
+    """
+    kwargs: dict[str, object] = {
+        "vision_max_images": 8,
+        "keep_seconds": Fraction(2),
+        "vision_long_edge": 1024,
+        "pricing_currency": "KRW",
+        "vision_cost_per_image": Decimal("0.02"),
+    }
+    built = ProjectConfig(**kwargs)
+    loaded = load_project_config(
+        _write(tmp_path / "c.project.toml", "schema_version = 1\n"), kwargs
+    )
+    assert built == loaded
+    assert built.sha256() == loaded.sha256()
+    assert built.keep_seconds == Fraction(2)
+    assert built.vision_cost_per_image == Decimal("0.02")
+
+
+def test_the_constructor_normalizes_like_the_file_path() -> None:
+    """정수 분수·정수 실수도 파일 해석과 같은 정규형으로 들어간다 — 해시는 하나다."""
+    as_int = ProjectConfig(keep_seconds=2, vad_positive=1)
+    as_exact = ProjectConfig(keep_seconds=Fraction(2), vad_positive=1.0)
+    assert as_int == as_exact
+    assert as_int.sha256() == as_exact.sha256()
+    assert as_int.to_dict()["keep_seconds"] == "2/1"
+    assert isinstance(as_int.vad_positive, float)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        pytest.param("vad_positive", 0, id="vad-positive-zero"),
+        pytest.param("vad_positive", 1, id="vad-positive-one"),
+        pytest.param("vision_apply_confidence", 0.0, id="confidence-zero"),
+        pytest.param("vision_apply_confidence", 1.0, id="confidence-one"),
+    ],
+)
+def test_constructor_bounds_are_inclusive(field: str, value: float) -> None:
+    """레일 양 끝은 프로그래머의 정당한 선택이다 — 문은 닫히되 조여 붙이지 않는다."""
+    assert getattr(ProjectConfig(**{field: value}), field) == float(value)
+
+
+def test_constructor_allows_block_ordering_equality() -> None:
+    """생성에서도 등호는 허용한다 — 거부하는 건 min > max와 keep > min뿐이다."""
+    config = ProjectConfig(
+        block_min_seconds=Fraction(10),
+        block_max_seconds=Fraction(10),
+        keep_seconds=Fraction(10),
+    )
+    assert config.block_min_seconds == config.block_max_seconds == config.keep_seconds
+
+
 # ─── P5-00: 자격증명 분리 ──────────────────────────────────────────────
 
 
