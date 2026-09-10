@@ -788,10 +788,13 @@ def test_result_records_are_frozen_with_exact_fields() -> None:
     with pytest.raises(dataclasses.FrozenInstanceError):
         window.channel = 1  # type: ignore[misc]
 
-    result = VadResult(source_id="a", status="success", windows=(window,), error=None)
+    result = VadResult(
+        source_id="a", analysis_key="pcm-a", status="success", windows=(window,), error=None
+    )
     assert type(result) is VadResult
     assert [field.name for field in dataclasses.fields(result)] == [
         "source_id",
+        "analysis_key",
         "status",
         "windows",
         "error",
@@ -813,3 +816,31 @@ def test_import_does_not_pull_optional_runtimes() -> None:
     )
     env = {**os.environ, "PYTHONPATH": str(root)}
     subprocess.run([sys.executable, "-c", code], cwd=root, env=env, check=True)
+
+
+# ─── 신원 — 결과는 자신이 나온 PCM 세대를 증명한다 (P5-03b) ─────────────
+
+
+def test_result_carries_reference_analysis_key_on_both_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """성공·실패 양쪽 경로 모두 참조의 분석 키를 싣는다.
+
+    소비자(P5-03 가드)가 같은 PCM 세대인지 증명하려면 결과가 그 증거를 들고
+    건너와야 한다 — 시각을 정하는 값은 이음매를 건너온다(P4-04와 같은 선).
+    """
+
+    class _BrokenSession:
+        def run(self, output_names: object, feeds: object) -> object:
+            raise RuntimeError("세션이 죽었다")
+
+    from vlogsrt.project.vad.inference import infer_vad
+
+    module = _numpy_or_fake(monkeypatch)
+    reference = _reference(tmp_path, 1000, 1)
+    ok = infer_vad(reference, "asset-1", CFG, _RecordingSession(module))
+    assert ok.status == "success"
+    assert ok.analysis_key == reference.analysis_key
+    failed = infer_vad(reference, "asset-1", CFG, _BrokenSession())
+    assert failed.status == "error"
+    assert failed.analysis_key == reference.analysis_key
