@@ -12,7 +12,8 @@ Coordinator/reviewer: Opus 5 (Run `run_a091d4869a98`). Offline only; Opus perfor
 
 ## Baseline and ownership
 
-- Fresh `fcp-p6-blocks` worktree from the exact base named at dispatch (P0~P5 all integrated).
+- Worktree `/Users/ssojux2/orca/workspaces/vlogsrt/fcp-p6-blocks`, branch `Ssojux2/fcp-p6-blocks`,
+  from exact base `e2edede` (P0~P5 전부 통합됨, P5-06 포함). rebase·reset·squash 금지.
 - Allowed: create `vlogsrt/project/edit.py` and `tests/project/test_block_partition.py`;
   add one import-direction check to `scripts/check_invariants.py` (see 규칙 4·9 below).
 - Forbidden: XML/caption output, any model or network call, config changes, source mutation,
@@ -71,6 +72,19 @@ block_id     = sha256(domain, document.input_sha256, instance_id, source_id,
 candidate_id = sha256(domain, block_id, candidate.source_frames)
 frame_id     = f"{source_id}:{grid_index}"  (또는 그 해시)
 ```
+
+**P5-06이 방금 들어왔다 — 그래도 아래 레일은 그대로 짜라.** `ProjectConfig.__post_init__`이
+이제 생성자에서 범위·교차 검사를 돌리므로 프로그램식 우회는 한 층 막혔다. 그럼에도
+`partition_blocks`의 `_require_config`는 **필수다**: (1) 프레임 환산 뒤의 관계
+(`1 <= keep_frames <= min_frames <= max_frames`)는 생성자가 볼 수 없다 — `frame_duration`이
+문서에서 오기 때문이다. (2) 교차 레일
+`block_max_seconds × vision_sample_fps <= vision_max_images`도 P6 고유다.
+(3) 방어는 겹쳐야 하고, **검사받지 않는 층은 썩는다** — P5-06에서 정확히 그걸 겪었다.
+생성자 층을 이유로 이 층을 생략하지 마라.
+
+또한 `VisionDecision`이 이제 `request_sha256`을 싣는다(P5-06 항목 1). P6-01은 판정을
+읽지 않으므로 직접 쓸 일은 없지만, **네가 만드는 `frame_id`와 `candidate_id`가 그 해시의
+재료**이므로 공식을 바꾸면 하류의 신원 증명이 깨진다. 아래 공식을 그대로 써라.
 
 **`_require_config(cfg)`가 `partition_blocks`의 첫 관문이다.** `ProjectConfig`의 범위 검사는
 `load_project_config`에서만 돈다 — 프로그램식 생성은 건너뛴다. 이 프로젝트가 **같은 우회를
