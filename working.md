@@ -23,9 +23,9 @@
 ## 현재 제품 구현 기준점
 
 - 통합 브랜치: `feat/final-cut-project`
-- **제품 구현 기준 HEAD: `14b60bf` (Merge P5-05 vision decision policy with fail-closed config rails)**
-- 통합 게이트: Ruff lint/format 78개 파일, mypy 41개 소스 파일, pytest **2,022개**, 구조 불변식 **19/19** 통과.
-- P0·P1·P2·P3, P4-01·P4-02·P4-03, P5-00·P5-01·P5-02·P5-04·P5-05가 통합돼 있다.
+- **제품 구현 기준 HEAD: `cb6b039` (Merge P4-04 instance-scoped boundary projection with exact slice anchors)**
+- 통합 게이트: Ruff lint/format 79개 파일, mypy 41개 소스 파일, pytest **2,058개**, 구조 불변식 **19/19** 통과.
+- **P4 페이즈 완료.** P0·P1·P2·P3·P4 전부와 P5-00·P5-01·P5-02·P5-04·P5-05가 통합돼 있다.
 - P1/P2의 실제 Final Cut 및 77분 미디어 인수 검사는 `PENDING_HUMAN`이다.
 
 ## 완료된 단계
@@ -68,30 +68,62 @@
   확인해 위 결과가 "전부 막혀서 통과한 것"이 아님을 증명했다.
 - 통합 후 `make check` 전체 통과: pytest 2,022개, 구조 불변식 19/19.
 
+### P4-04 경계 투영 + P4-04b 정확한 슬라이스 닻 — 통합 완료 (`cb6b039`)
+
+- 후보 `0ef58b2` → 보정 **`f3475f6`** (branch `Ssojux2/fcp-p4-boundary-projection`, base `9747988`)
+- Orca Task `task_2607661f58fe`/`ctx_fc4e96c3bf70`, 보정 `task_777a4117d4f5`/`ctx_5e43ee83e4a0`
+- 1차 후보는 게이트가 전부 초록이었지만(1,931개) 검토에서 계약 결함이 나왔다:
+  `project_boundaries`가 타임라인 이동량 `k`를 **묶인 큐의 두 시계에서 유도**했다.
+  `BoundaryPlan`이 `LogicalSlice`를 싣지 않아서 정확한 닻에 손이 닿지 않았기 때문이다 —
+  브리프의 계약(`project_boundaries(plan, ...)`)이 만든 결함이지 GLM의 실수가 아니다.
+
+#### Fable 5.1 판정 (`docs/orchestration/reviews/fable-p4-04-timeline-shift.md`)
+
+Opus가 세 가지를 주장했고 Fable이 독립 검증해 **둘을 반박**했다. 기록으로 남긴다:
+
+| 주장 | 판정 | 근거 |
+|---|---|---|
+| 전제: `k`는 슬라이스 안에서 상수다 | **확인** | `_continues`가 합쳐진 칼날의 두 시계 끝점을 같게 강제하고 retime은 ingest에서 거부된다 |
+| ① 시각을 유도한다 | **확인** (계약 결함) | 정확한 값이 `LogicalSlice`에 있는데 하류 산출물에서 재구성한다. 다만 whisper 시각은 건드리지 않으므로 규칙 1의 문자적 위반은 아니다 |
+| ② 정상 입력에서 실패할 수 있다 | **반박** | 좁혀지지 않는 경우는 슬라이스에 경계를 걸친 큐가 정확히 하나인 세계뿐이고, 그때 두 가설은 `k`와 같거나 범위 밖이다 |
+| ③ 조용히 틀린 `k`를 고를 수 있다 | **반박** | 틀린 값이 범위에 들려면 요청이 슬라이스 밖이어야 하는데 `_sealed_request`가 그런 요청을 못 만든다 |
+
+Fable의 퍼즈: 프레임 정렬 6,000 세계 / 요청 7,191개 / 비수렴 분기 1,209회 → **raise 0, 틀린 k 0**.
+즉 코드는 **오늘 옳다**. 고친 이유는 그 온전함이 다른 계층의 검증되지 않은 불변 넷
+(칼날별 묶음 의미, P3 큐 비겹침, `_closure` ⊇ 큐 span, 요청 ⊆ 슬라이스) 위에 서 있어서,
+P4-02 폐쇄나 P3-03 배치가 바뀌면 죽은 분기가 살아나는데 그걸 잡을 테스트가 없기 때문이다.
+
+#### P4-04b 보정 (`f3475f6`)
+
+- `BoundaryRequest`에 `timeline_start` 추가, `_sealed_request`가
+  `slice.timeline_start + (start − slice.source_start)`로 채운다 — 명세의 공식 그대로다.
+- `_boundary_project_cues`가 `request.timeline_start − request.source_start`를 쓰고
+  `_slice_timeline_shift`와 `by_slice`/`shifts` 장부는 삭제됐다.
+- `_require_anchor_matches_cue`는 **검사지 대체 계산이 아니다** — 닻이 묶인 큐의 두 시계
+  틈 밖이면 유도하지 않고 닫는다.
+- **신원 보존**: `timeline_start`는 `_request_id` 재료에 없다. Opus가 `_request_id`와
+  `_boundary_cache_key` 함수 본문이 변경 전후 바이트 그대로임을 diff로 확인했고,
+  GLM이 박은 다이제스트 `b9bd7014…`를 **변경 전 트리(`0ef58b2`)에 임시 워크트리를 만들어
+  직접 돌려** 통과시켰다 — 순환 논증이 아님을 증명했다.
+- Opus 독립 게이트: Ruff, mypy 40개 파일, 구조 불변식 **19/19**, pytest 1,934개 통과.
+- 통합 후 `make check` 전체 통과: pytest 2,058개, 구조 불변식 19/19.
+- Fable이 함께 확인: 인스턴스 스코프·밀리초 접힘·연결 검증에 다른 결함 없음.
+  P6를 위한 비대칭 하나를 남겼다 — 내부 칼날을 걸친 소스 큐는 인스턴스마다 `ProjectCue`가
+  둘인데 여러 칼날을 덮는 경계 큐는 `instance_ids`를 다 실은 하나다.
+
 ## 진행 중
 
-### P4-04 경계 투영 — GLM 구현 중
-
-- 브리프: `docs/orchestration/tasks/p4-04-boundary-projection.md`
-- Orca Task `task_2607661f58fe`, Dispatch `ctx_fc4e96c3bf70`, terminal `term_85034743-7e22-4539-a51f-b3e550ff820f`
-- Worktree `/Users/ssojux2/orca/workspaces/vlogsrt/fcp-p4-boundary-projection`, branch `Ssojux2/fcp-p4-boundary-projection`
-- 기준 SHA: `9747988` (P4-03 통합 `f6af955`를 포함한다)
-- 소유 파일: `vlogsrt/project/captions.py`, `vlogsrt/project/boundary.py`, `tests/project/test_boundary_projection.py`
-- 핵심 계약: 성공한 경계 트레이스의 큐는 정확히 `(slice_id, instance_ids, source interval)`에 대해
-  겹치는 소스 큐를 **대체**한다 — 둘을 함께 붙이지 않고 어느 쪽도 다시 정제·조판하지 않는다.
-  반복된 소스 인스턴스 중 그 튜플 밖은 건드리지 않는다. 실패한 경계는 원문을 지키고
-  `boundary_unresolved`로 남는다.
+(없음 — 다음 태스크 대기)
 
 ## 남은 순서
 
-1. **P4-04** 경계 투영 — 인스턴스 스코프 교체와 잠금 (GLM 진행 중).
-2. **P5-03** guard union — 통합된 P4-04와 P5-02가 선행조건이다.
-3. **P6-01** 블록 분할 → **P6-02** EditPlan → **P6-03** EDIT 자막 → **P6-04** 원자적 패키지 내보내기.
-4. **P7-01** workspace → **P7-02** runner → **P7-03** CLI → [**P7-04** reproject · **P7-05** UI]
+1. **P5-03** guard union — 통합된 P4-04와 P5-02가 선행조건이다. **지금 착수 가능하다.**
+2. **P6-01** 블록 분할 → **P6-02** EditPlan → **P6-03** EDIT 자막 → **P6-04** 원자적 패키지 내보내기.
+3. **P7-01** workspace → **P7-02** runner → **P7-03** CLI → [**P7-04** reproject · **P7-05** UI]
    → **P7-06** 오프라인 인수 검사.
-5. 최종 오프라인 흐름은 동일 revision의 FCPXML, SOURCE SRT, EDIT SRT, review JSON, manifest를
+4. 최종 오프라인 흐름은 동일 revision의 FCPXML, SOURCE SRT, EDIT SRT, review JSON, manifest를
    함께 내보내고 러프컷이 실제로 짧아졌음을 합성 데이터로 증명해야 한다.
-6. 실제 Final Cut import/re-export, 원본 4K relink/playback, 실제 77분 미디어, 유료 STT/vision은
+5. 실제 Final Cut import/re-export, 원본 4K relink/playback, 실제 77분 미디어, 유료 STT/vision은
    계속 `PENDING_HUMAN`으로 남긴다.
 
 ## 보존 규칙

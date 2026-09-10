@@ -161,7 +161,7 @@ By explicit Astra dependency audit, P0-03 may run from `58bb25347319301391064d6b
 | [P4-01](tasks/p4-01-logical-slices.md) | coalesced retained logical slices | P3 merge | project boundary models/planner tests | complete; integrated `f5be5bc` |
 | [P4-02](tasks/p4-02-boundary-closure.md) | fixed-point boundary requests | P4-01 | project boundary planner/tests | complete; candidate `092689b` integrated as `8742ebf` |
 | [P4-03](tasks/p4-03-boundary-transcribe.md) | retained-audio-only BoundaryTranscript | P4-02 | project boundary runner/tests | complete; candidate `c7b6c4f` integrated as `f6af955`, 1,898-test gate passed |
-| [P4-04](tasks/p4-04-boundary-projection.md) | instance-scoped replacement and locks | P4-03 | project caption projection/tests | drafted |
+| [P4-04](tasks/p4-04-boundary-projection.md) / [P4-04b](tasks/p4-04b-timeline-anchor.md) | instance-scoped replacement and locks | P4-03 | project caption projection/tests | complete; `0ef58b2`+`f3475f6` integrated as `cb6b039`, 2,058-test gate passed; **P4 phase closed** |
 | [P5-00](tasks/p5-00-project-config.md) | frozen project-only tunables/shared analysis vocabulary | exact `d5a60e0` by Astra independent-config exception | project config/analysis models/tests | complete; integrated `e3dccba`, 1,479-test gate passed |
 | [P5-01](tasks/p5-01-vad-runtime.md) | pinned Silero model/license/runtime | P5-00 acceptance `e2359047` | `project/vad/` runtime/artifact/tests | complete; integrated `2440d6e`, 1,616-test gate passed |
 | [P5-02](tasks/p5-02-vad-inference.md) | channel-wise continuous-state inference | P5-01 acceptance `9c5bccf` | `project/vad/inference.py`/tests | complete product result; `a578018` integrated as `31bac0b`, lifecycle manually stopped |
@@ -237,3 +237,42 @@ and `True` for `vision_max_images`, all raise from both entry points. A control 
 P4-04 (`task_2607661f58fe` / `ctx_fc4e96c3bf70`) runs in parallel from base `9747988` in
 `fcp-p4-boundary-projection`, owning `vlogsrt/project/captions.py`, `vlogsrt/project/boundary.py`,
 and a new `tests/project/test_boundary_projection.py`.
+
+## P4-04 outcome and the Fable adjudication, 2026-09-10
+
+The first candidate `0ef58b2` passed every gate (1,931 tests, 19/19 groups) but review found a
+contract defect: `project_boundaries` reconstructed the per-slice timeline shift `k` by
+intersecting, over the slice's clamped cues, the bounds each cue implies. It did that because
+`BoundaryPlan` carries only `clamped_cues`/`requests`/locks/unavailable and drops the
+`LogicalSlice` records that hold the exact anchor. The task contract caused this, not the worker.
+
+Opus raised three grounds and Fable 5.1 high adjudicated each independently. Two were refuted,
+and that matters more than the confirmation: the premise that `k` is constant within a slice is
+exactly true (`_continues` forces equal source/timeline end-start pairs across coalesced blades,
+retime is rejected at ingest); ground 1 (derives a time) is CONFIRMED as a contract defect but
+not a literal rule-1 breach, since whisper times are untouched and what is reconstructed is an
+XML editorial offset; grounds 2 (can fail on valid input) and 3 (can silently mis-pick) are
+REFUTED for plan-produced input by an algebraic argument — non-narrowing implies exactly one cue
+crossing a slice edge, where both hypotheses equal `k` or fall out of range — corroborated by a
+fuzz of 6,000 frame-aligned worlds: 7,191 requests, 1,209 in the non-narrowing branch, zero
+raises and zero wrong shifts. A hand-built request narrower than its cue raises rather than
+mis-picks. Full write-up: `reviews/fable-p4-04-timeline-shift.md`.
+
+The correction was therefore dispatched as a hardening, with the worker told plainly that its
+code had been adjudicated correct so it would not hunt a nonexistent bug. `f3475f6` adds
+`BoundaryRequest.timeline_start`, set in `_sealed_request` to
+`slice.timeline_start + (start - slice.source_start)` — the binding formula verbatim — computes
+the shift locally in `_boundary_project_cues`, deletes `_slice_timeline_shift` and its
+bookkeeping, and adds `_require_anchor_matches_cue` as a check that closes on contradiction
+rather than a fallback that computes.
+
+Identity preservation was verified rather than trusted. `_request_id` and `_boundary_cache_key`
+are byte-identical before and after (function-body diff), and the worker's pinned digest
+`b9bd7014...` was re-run by Opus inside a throwaway worktree checked out at the pre-change
+commit `0ef58b2`, where it passes — so the pin is genuine and not circular. Independent gate at
+`f3475f6`: Ruff, mypy 40 files, 19/19 invariant groups, 1,934 tests. Integrated as `cb6b039`
+with a 2,058-test post-merge `make check`.
+
+One asymmetry Fable flagged for P6, not a P4-04 defect: a source cue straddling an internal
+blade boundary becomes two `ProjectCue`s (one per instance, same `cue_id`), while a boundary cue
+spanning several blades is a single `ProjectCue` carrying all `request.instance_ids`.
