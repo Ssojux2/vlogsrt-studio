@@ -2,13 +2,31 @@
 
 ## Authority
 
-Binding spec `VAD guard`; depends on P5-02, P3 source traces, P4 boundary projection, and P1 frame math. Ends the VAD branch for P5 integration.
+Binding spec `VAD guard`; depends on P5-02, P3 source traces, P4 boundary projection, and P1 frame math.
+Ends the VAD branch for P5 integration. Coordinator/reviewer: Opus 5 (Run `run_a091d4869a98`).
+Offline only; Opus performs the merge.
 
 ## Baseline and ownership
 
-- Fresh `fcp-p5-guard` worktree from exact SHA containing P5-02 and required integrated contracts.
-- Create `vlogsrt/project/vad/guard.py`, `tests/project/test_guard.py`.
-- No VAD model execution, vision/edit decisions, source mutation, or XML writes.
+- Worktree `/Users/ssojux2/orca/workspaces/vlogsrt/fcp-p5-guard`, branch `Ssojux2/fcp-p5-guard`,
+  already created from exact base `93e62b7`, which contains the whole integrated P4 phase
+  (`cb6b039`) and P5-00/01/02/04/05. Do not rebase, reset, squash, or re-create the branch.
+- Allowed files: create `vlogsrt/project/vad/guard.py` and `tests/project/test_guard.py`.
+  You may add an export line to `vlogsrt/project/vad/__init__.py` if that package's existing
+  convention requires it — check first and match it; touch nothing else in that file.
+- Forbidden: VAD model execution, vision/edit decisions, source mutation, XML writes,
+  `tests/fixtures/api/**`, `golden/**`, `.env`, `.env.example`, and every other file.
+- No new dependency (`numpy`/`onnxruntime` are the existing optional project extra and stay
+  optional — this module must import and be testable without them unless the existing
+  `vlogsrt/project/vad/` modules already establish otherwise; follow their pattern exactly).
+- No live/paid call, no `--online`, no `VLOGSRT_OFFLINE=0`.
+- Read these before designing, and consume the real shipped types rather than re-deriving them:
+  `vlogsrt/project/vad/inference.py` (P5-02 `VadResult`), `vlogsrt/project/boundary.py`
+  (`BoundaryProjection`, `LogicalSlice`, `UnavailableInstance`), `vlogsrt/project/pcm.py`
+  (`PcmReference`, `SampleRange`), `vlogsrt/project/speech.py` (`SourceTrace`), and the P1 frame
+  helper that provides `interval_outward`.
+- Note the P4-04b precedent: an exact upstream value is always preferred over reconstructing one
+  downstream. Do not infer any time you can read.
 
 ## Contract
 
@@ -53,8 +71,28 @@ No protected sample/frame can fall outside the guard; all error modes keep all a
 
 ## Failure route
 
-Report source/instance IDs, input/output intervals, probability/status, frame anchor, base/tests/diff. Any protected-range removal is a hard Astra escalation; no threshold tweak is allowed.
+Report source/instance IDs, input/output intervals, probability/status, frame anchor, base/tests/diff. Any protected-range removal is an immediate hard stop: report it and wait. No threshold tweak is allowed — `0.35`, `0.5 s`, and `250 ms` come from the binding spec and must live in project config or named module constants, never as literals inside a function body (CLAUDE.md rule 8). Two repetitions of the same failure -> stop and escalate to the coordinator (Opus 5), who routes to Fable 5.1.
 
 ## Report
 
-Report Orca/launch IDs, branch/base/commit, files/tests, protected proportions/review cases, and `ready-to-integrate`.
+Before `worker_done`, send the exact committed SHA, `git diff --stat 93e62b7..HEAD` (which must
+list only the allowed files), the failing-first evidence for the new tests, and the green output of
+every acceptance command with its test count and the invariant group count, plus confirmation that
+zero network calls occurred. Then send `worker_done` exactly once.
+
+Acceptance commands, run from the worktree root with
+`/Users/ssojux2/Working/vlogsrt/.venv/bin/python`:
+
+```
+python -m pytest tests/project/test_guard.py
+python -m pytest tests/project
+python -m ruff check vlogsrt ui tests scripts
+python -m ruff format --check vlogsrt ui tests scripts
+python -m mypy
+python scripts/check_invariants.py
+python -m pytest
+```
+
+Expected: Ruff clean, mypy clean, **all 19** invariant groups `[OK]` — count them rather than
+trusting a summary line — and the full suite passing at no fewer than the 2,058 recorded at
+`cb6b039` plus your new tests.
