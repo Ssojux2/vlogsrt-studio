@@ -158,16 +158,16 @@ By explicit Astra dependency audit, P0-03 may run from `58bb25347319301391064d6b
 | [P3-01](tasks/p3-01-transcription-outcome.md) | explicit success/empty/error contract | exact `1fe07e5` by Astra dependency exception; P1-05 join complete | transcribe additions/tests | complete; integrated `46ad02b`, 1,382-test gate passed |
 | [P3-02](tasks/p3-02-source-adapter.md) | full legacy repair/refine engine once per unique source | P3-01 acceptance `81fe02e` | project speech plus narrow repair-cutter seam/tests | complete; integrated `0a9854e`, 1,569-test gate passed |
 | [P3-03](tasks/p3-03-source-srt.md) | immutable source-local artifacts and pre-roughcut input-timeline SOURCE SRT | P3-02 acceptance `304ad689` | project captions/tests | complete; `d1c3205` integrated as `6d5155d`, combined 1,681-test gate passed |
-| [P4-01](tasks/p4-01-logical-slices.md) | coalesced retained logical slices | P3 merge | project boundary models/planner tests | candidate `4782720` passed Sol/root/Opus; Astra integration pending |
-| [P4-02](tasks/p4-02-boundary-closure.md) | fixed-point boundary requests | P4-01 | project boundary planner/tests | drafted |
-| [P4-03](tasks/p4-03-boundary-transcribe.md) | retained-audio-only BoundaryTranscript | P4-02 | project boundary runner/tests | drafted |
+| [P4-01](tasks/p4-01-logical-slices.md) | coalesced retained logical slices | P3 merge | project boundary models/planner tests | complete; integrated `f5be5bc` |
+| [P4-02](tasks/p4-02-boundary-closure.md) | fixed-point boundary requests | P4-01 | project boundary planner/tests | complete; candidate `092689b` integrated as `8742ebf` |
+| [P4-03](tasks/p4-03-boundary-transcribe.md) | retained-audio-only BoundaryTranscript | P4-02 | project boundary runner/tests | complete; candidate `c7b6c4f` integrated as `f6af955`, 1,898-test gate passed |
 | [P4-04](tasks/p4-04-boundary-projection.md) | instance-scoped replacement and locks | P4-03 | project caption projection/tests | drafted |
 | [P5-00](tasks/p5-00-project-config.md) | frozen project-only tunables/shared analysis vocabulary | exact `d5a60e0` by Astra independent-config exception | project config/analysis models/tests | complete; integrated `e3dccba`, 1,479-test gate passed |
 | [P5-01](tasks/p5-01-vad-runtime.md) | pinned Silero model/license/runtime | P5-00 acceptance `e2359047` | `project/vad/` runtime/artifact/tests | complete; integrated `2440d6e`, 1,616-test gate passed |
 | [P5-02](tasks/p5-02-vad-inference.md) | channel-wise continuous-state inference | P5-01 acceptance `9c5bccf` | `project/vad/inference.py`/tests | complete product result; `a578018` integrated as `31bac0b`, lifecycle manually stopped |
 | [P5-03](tasks/p5-03-guard-union.md) | conservative source/instance speech guard | P5-02 and integrated P4-04 projection | `project/vad/guard.py`/tests | drafted |
-| [P5-04](tasks/p5-04-vision-sampling.md) | deterministic proxy/original frame samples | P5-00 | `project/vision/sampling.py`, preprocess seam/tests | candidate `950229e`; Sol correction-required on CFR proof/metadata and odd-size scaling |
-| [P5-05](tasks/p5-05-vision-policy.md) | strict saved-response decision parser | P5-04 | transcribe boundary + `project/vision/policy.py`/tests | drafted |
+| [P5-04](tasks/p5-04-vision-sampling.md) | deterministic proxy/original frame samples | P5-00 | `project/vision/sampling.py`, preprocess seam/tests | complete; corrected candidate `ec4e2b2` integrated as `6a9a98f` |
+| [P5-05](tasks/p5-05-vision-policy.md) / [P5-05b](tasks/p5-05b-vision-policy-rails.md) | strict saved-response decision parser | P5-04 | transcribe boundary + `project/vision/policy.py`/tests | candidate chain `2a25009`->`f3a4911`->`693aa5b` blocked on a reproduced programmatic-NaN rail bypass; P5-05b correction dispatched to GLM |
 | [P6-01](tasks/p6-01-block-partition.md) | eligible 6–10 s blocks and candidates | P4,P5 merges | project edit partition/tests | drafted |
 | [P6-02](tasks/p6-02-edit-plan.md) | immutable deterministic EditPlan | P6-01 | project edit plan/tests | drafted |
 | [P6-03](tasks/p6-03-edit-captions.md) | EDIT SRT projection | P6-02 | project captions/tests | drafted |
@@ -186,3 +186,31 @@ By explicit Astra dependency audit, P0-03 may run from `58bb25347319301391064d6b
 3. Sol inspects scope and evidence. Opus reviews nontrivial shared contracts and phase diffs when available; Astra gives the final exact-SHA disposition. Post-completion corrections use a fresh bounded GLM Dispatch from the exact candidate or accepted base, while managers never edit product code. Settled workers are released immediately; an external terminal is closed only after exact completion/idle proof and explicit cleanup authority.
 4. After two repetitions of the same failure, request Terra high (root cause) and Luna high (minimal repro/test evidence), read-only. If synthesis fails, escalate to Opus, then Astra; code still returns to GLM.
 5. Sol sends `merge_ready` with exact branch/commit/base/test/review data. Astra integrates, verifies, records the merge SHA, and only then releases the next phase.
+
+## 2026-09-10 coordination handover to Opus 5
+
+The user simplified the manager layer on 2026-09-10: Opus 5 coordinates directly in place of the
+Astra/Sol pair. Opus decomposes the remaining plan into task briefs, dispatches each one to a fresh
+`claude-glm glm-5.3[1m] --effort max --permission-mode auto` worker, verifies the candidate itself,
+escalates to Fable 5.1 only when verification finds a defect, and performs the merge into
+`feat/final-cut-project`. Run `run_a091d4869a98`, coordinator terminal
+`term_7c509adc-43bc-40e3-ab6c-0e374d516231`. The earlier Astra/Sol runs stay stopped.
+
+P4-03 was verified independently at exact `c7b6c4f` in its own worktree (Ruff lint/format, mypy 40
+source files, 1,898 tests, 19/19 invariant groups) and reviewed against its brief before merging.
+The review confirmed that the cache key carries no path/stem material, that linkage closes only on
+`(source_id, pcm_analysis_key)` with duplicate rejection plus a separate `pcm_sample0_file_time`
+origin proof, that `_require_retainable` bounds every request before any call, that
+`_clamped_repair_range` clamps nested repair cuts inside the retained range and dies rather than
+padding, that the local -> decoded -> file clock conversion happens exactly once per layer, and that
+`_finite`/`_bad_count` reject NaN, infinity, and `bool` in numeric positions. Integrated as
+`f6af955`; the post-merge `make check` passed with the same 1,898-test/19-group result.
+
+P5-05 remains unintegrated. Root reproduced an acceptance bypass on exact `693aa5b`: `ProjectConfig`
+validates its numeric ranges only inside `load_project_config`, so a programmatically constructed
+config skips validation, and `max(float("nan"), 0.8)` is NaN while `0.5 < NaN` is false — a
+confidence-0.5 candidate is returned as `accepted`. `min(float("nan"), 16)` defeats the frame cap the
+same way. Task P5-05b (`docs/orchestration/tasks/p5-05b-vision-policy-rails.md`, Orca
+`task_35a3d06e8b32` / `ctx_b488232db344`) requires a fail-closed `VisionPolicyError` reached from
+both `build_payload` and `parse_decision`, positioned outside the `try` that manufactures
+`_error_decision`, so a caller bug can never be laundered into a "the model misbehaved" record.
