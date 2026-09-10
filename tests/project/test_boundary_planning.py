@@ -433,6 +433,79 @@ def test_touching_spans_of_same_slice_merge_into_one_request(tmp_path: Path) -> 
     )
 
 
+def test_same_instance_touching_spans_still_merge_and_lock(tmp_path: Path) -> None:
+    """참여 칼날이 같은 닿은 범위는 여전히 호환된다 — 하나의 요청에 잠금이 그 칼날을 덮는다."""
+    document, slices, source, traces, references = _single(
+        tmp_path,
+        cues=[
+            _CueSpec(3.6, 4.4),
+            _CueSpec(4.5, 5.0, seg_ids=(1,)),
+            _CueSpec(5.5, 6.2, seg_ids=(2,)),
+        ],
+        segs=[_SegSpec(3.5, 4.5), _SegSpec(4.5, 5.4), _SegSpec(4.5, 6.3)],
+    )
+    plan = plan_boundaries(slices, source, traces, references)
+    (request,) = plan.requests
+    (clip,) = _clips(document)
+    assert request.instance_ids == (clip.instance_id,)
+    assert request.source_start == Fraction(4)
+    assert request.source_end == Fraction(6)
+    assert plan.locked_instance_ids == frozenset({clip.instance_id})
+
+
+def test_touching_spans_on_different_blades_stay_separate_requests(tmp_path: Path) -> None:
+    """다른 칼날에 앉은 닿은 범위는 합치지 않는다 — 각자의 단일 인스턴스를 이름하는
+    두 요청으로 남고, 병합 호환(자원·슬라이스·인스턴스·가청)은 칼날부터 본다."""
+    document = _document(
+        tmp_path,
+        [_asset_xml("r2")],
+        [
+            _clip_xml("r2", offset="0s", start="2600/25s"),
+            _clip_xml("r2", offset="50/25s", start="2650/25s"),
+        ],
+    )
+    slices, source, traces = _assemble(
+        document,
+        [
+            _trace(
+                "acid-r2",
+                [
+                    _CueSpec(3.6, 4.4),
+                    _CueSpec(5.5, 5.95, seg_ids=(1,)),
+                    _CueSpec(6.05, 7.55, seg_ids=(2,)),
+                    _CueSpec(7.6, 8.2, seg_ids=(3,)),
+                ],
+                [
+                    _SegSpec(3.5, 4.45),
+                    _SegSpec(4.4, 6.0),
+                    _SegSpec(6.0, 7.6),
+                    _SegSpec(7.5, 8.3),
+                ],
+            )
+        ],
+    )
+    references = [_reference(traces[0])]
+    (slice_,) = slices
+    first_clip, second_clip = _clips(document)
+    # 이어진 두 칼날은 하나의 슬라이스 [4, 8)다 — 폐쇄는 6.0에서 닿아 멈춘다
+    assert slice_.instance_ids == (first_clip.instance_id, second_clip.instance_id)
+    plan = plan_boundaries(slices, source, traces, references)
+    assert len(plan.requests) == 2
+    first, second = plan.requests
+    assert first.instance_ids == (first_clip.instance_id,)
+    assert second.instance_ids == (second_clip.instance_id,)
+    assert (first.source_start, first.source_end) == (Fraction(4), Fraction(6))
+    assert (second.source_start, second.source_end) == (Fraction(6), Fraction(8))
+    assert first.sample_range == SampleRange(64000, 96000)
+    assert second.sample_range == SampleRange(96000, 128000)
+    assert first.source_segment_ids == ("acid-r2-seg-0", "acid-r2-seg-1")
+    assert second.source_segment_ids == ("acid-r2-seg-2", "acid-r2-seg-3")
+    assert first.request_id != second.request_id
+    # 두 요청 모두 잠긴다 — 합치지 않은 만큼 잠금은 두 칼날을 다 덮는다
+    assert plan.locked_instance_ids == frozenset({first_clip.instance_id, second_clip.instance_id})
+    assert len(plan.clamped_cues) == 4
+
+
 def test_disjoint_spans_of_same_slice_stay_separate_requests(tmp_path: Path) -> None:
     """갈라진 범위는 호환되지 않는다 — 두 요청으로 남는다."""
     document, slices, source, traces, references = _single(
@@ -685,6 +758,39 @@ def test_reference_origin_mismatch_is_rejected(tmp_path: Path) -> None:
     forged = replace(references[0], pcm_sample0_file_time=Fraction(-1, 20))
     with pytest.raises(ValueError, match="원점이 트레이스와 다르다"):
         plan_boundaries(slices, source, traces, [forged])
+
+
+def test_forged_placed_cue_source_mismatch_is_rejected(tmp_path: Path) -> None:
+    """위조 배치 큐 — 소스 신원이 슬라이스·소스 큐와 다르면 ProjectCue가 하나의
+    소스를 말하고 BoundaryRequest가 다른 소스를 말하는 계획이 나간다 — 그
+    자리에서 이름 붙은 거부로 닫는다."""
+    document, slices, source, traces, references = _single(
+        tmp_path,
+        cues=[_CueSpec(3.6, 4.4)],
+        segs=[_SegSpec(3.5, 4.45)],
+    )
+    (placed,) = source.placed_cues
+    forged = replace(source, placed_cues=(replace(placed, source_id="acid-위조"),))
+    with pytest.raises(ValueError, match="배치 큐의 소스 신원이 슬라이스와 다르다"):
+        plan_boundaries(slices, forged, traces, references)
+
+
+def test_forged_source_cue_identity_mismatch_is_rejected(tmp_path: Path) -> None:
+    """위조 소스 큐 — 배치 큐가 가리키는 소스 큐의 신원이 어긋나도 조용히
+    지나가지 않는다 — 내구 연결은 배치·소스 큐·슬라이스·트레이스가 정확히
+    같을 때만 성립한다."""
+    document, slices, source, traces, references = _single(
+        tmp_path,
+        cues=[_CueSpec(3.6, 4.4)],
+        segs=[_SegSpec(3.5, 4.45)],
+    )
+    (source_cue,) = source.source_cues
+    forged = replace(
+        source,
+        source_cues=(replace(source_cue, source_id="acid-다른-소스"),),
+    )
+    with pytest.raises(ValueError, match="소스 큐의 신원이 배치 큐와 다르다"):
+        plan_boundaries(slices, forged, traces, references)
 
 
 # ─────────────────────────────────────────────────────────────

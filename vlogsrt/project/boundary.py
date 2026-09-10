@@ -24,6 +24,10 @@ P4-02는 그 슬라이스 위에서 경계 전사 **요청**을 계획한다:
   잘리는 순간 요청이 시작되고, 겹치는 큐·세그먼트 의존은 범위가 더 자라지 않을
   때까지 흡수된다(고정점). 요청 경계는 남긴 슬라이스로 묶이고, 저장 PCM 환산은
   원점을 정확히 한 번 뺀 오디오 국소 시계에서 ceil-start/floor-end로 안쪽만 간다.
+- **연결과 병합은 신원으로 닫는다.** 배치 큐의 소스 신원은 슬라이스·소스 큐·
+  트레이스와 정확히 같아야 한다 — 한 큐가 두 소스를 말하는 계획은 내놓지 않는다.
+  닿거나 겹친 범위의 병합은 자원·슬라이스·참여 칼날·가청 정책이 같을 때만 한다 —
+  다른 칼날에 앉은 닿은 범위는 각자 요청으로 남는다.
 - **묶음은 자원 먼저다.** 자원 스코프 unavailable 기록이 있으면 그 자원의
   인스턴스마다 타입 기록과 잠금만 남는다 — 같은 내용의 건강한 트레이스가 있어도
   그 기록을 넘지 않는다. post-PCM 실패 트레이스는 unavailable로 강등되지 않고
@@ -553,25 +557,53 @@ def _convert_placed(
             continue  # 그 자원은 발표도 요청도 내놓지 않는다
         trace, reference = linkage.resolve(slice_.source_id)
         _require_success(placed.cue_id, slice_, trace)
-        clamped.append(
-            ProjectCue(
-                cue_id=placed.cue_id,
-                slice_id=slice_.slice_id,
-                instance_ids=(placed.instance_id,),
-                source_id=placed.source_id,
-                source_start=placed.source_start,
-                source_end=placed.source_end,
-                timeline_start=placed.timeline_start,
-                timeline_end=placed.timeline_end,
-                text=placed.text,
-                provenance="source",
-                flags=placed.flags,
-            )
-        )
+        _require_cue_linkage(placed, slice_, trace, deps)
+        clamped.append(_clamped_cue(placed, slice_))
         span = _seed_span(placed, slice_, deps, trace)
         if span is not None:
             seeds.append(_Seed(slice_, trace, reference, span[0], span[1]))
     return clamped, seeds
+
+
+def _clamped_cue(placed: PlacedSourceCue, slice_: LogicalSlice) -> ProjectCue:
+    """배치 큐 한 장을 슬라이스 큐로 옮긴다 — 원본 기록과 발표를 함께 싣는다."""
+    return ProjectCue(
+        cue_id=placed.cue_id,
+        slice_id=slice_.slice_id,
+        instance_ids=(placed.instance_id,),
+        source_id=placed.source_id,
+        source_start=placed.source_start,
+        source_end=placed.source_end,
+        timeline_start=placed.timeline_start,
+        timeline_end=placed.timeline_end,
+        text=placed.text,
+        provenance="source",
+        flags=placed.flags,
+    )
+
+
+def _require_cue_linkage(
+    placed: PlacedSourceCue, slice_: LogicalSlice, trace: SourceTrace, deps: _Dependencies
+) -> None:
+    """내구 큐 연결 — 배치 큐·소스 큐·슬라이스·트레이스의 소스 신원이 정확히 같다.
+
+    하나의 큐가 두 소스 신원을 말하면 ProjectCue와 BoundaryRequest가 서로 다른
+    소스를 말하는 계획이 나간다 — 그런 계획은 내놓지 않고 그 자리에서 닫는다.
+    """
+    if placed.source_id != slice_.source_id:
+        raise ValueError(
+            f"배치 큐의 소스 신원이 슬라이스와 다르다: cue {placed.cue_id!r}는"
+            f" {placed.source_id!r}인데 slice는 {slice_.source_id!r}다"
+            f" (slice {slice_.slice_id}, instance {placed.instance_id!r})"
+            " — 한 큐가 두 소스를 말할 수 없다"
+        )
+    source_cue = deps.source_cue(placed.cue_id)
+    if source_cue.source_id != placed.source_id:
+        raise ValueError(
+            f"소스 큐의 신원이 배치 큐와 다르다: cue {placed.cue_id!r}의 소스 큐는"
+            f" {source_cue.source_id!r}인데 배치 큐는 {placed.source_id!r}다"
+            f" (trace {trace.source_id!r}) — 연결은 신원으로만 한다"
+        )
 
 
 def _require_success(cue_id: str, slice_: LogicalSlice, trace: SourceTrace) -> None:
@@ -631,17 +663,30 @@ def _closure(
             return lo, hi
 
 
-def _coalesced(
-    spans: Sequence[tuple[Fraction, Fraction]],
-) -> tuple[tuple[Fraction, Fraction], ...]:
-    """같은 슬라이스의 닿거나 겹친 범위를 하나로 합친다 — 호환되는 병합만."""
+@dataclass(frozen=True, slots=True)
+class _ClampedSpan:
+    """묶인 범위 하나와 그에 참여하는 칼날 — 병합 호환 판정의 재료다."""
+
+    start: Fraction
+    end: Fraction
+    instance_ids: tuple[str, ...]
+
+
+def _coalesced(spans: Sequence[_ClampedSpan]) -> tuple[tuple[Fraction, Fraction], ...]:
+    """닿거나 겹친 범위를 합친다 — 참여 칼날이 정확히 같은 묶음 안에서만 한다.
+
+    묶음(bucket)이 이미 자원·슬라이스·가청 정책을 같게 묶었으므로 남은 호환
+    판정은 참여 인스턴스다 — 다른 칼날에 앉은 닿은 범위는 각자 요청으로 남는다.
+    """
     merged: list[list[Fraction]] = []
-    for start, end in sorted(spans):
-        if merged and start <= merged[-1][1]:
-            merged[-1][1] = max(merged[-1][1], end)
+    participants: tuple[str, ...] | None = None
+    for span in sorted(spans, key=lambda item: (item.start, item.end, item.instance_ids)):
+        if merged and span.start <= merged[-1][1] and span.instance_ids == participants:
+            merged[-1][1] = max(merged[-1][1], span.end)
         else:
-            merged.append([start, end])
-    return tuple((span[0], span[1]) for span in merged)
+            merged.append([span.start, span.end])
+            participants = span.instance_ids
+    return tuple((row[0], row[1]) for row in merged)
 
 
 def _build_requests(seeds: Sequence[_Seed], deps: _Dependencies) -> tuple[BoundaryRequest, ...]:
@@ -661,7 +706,12 @@ def _build_requests(seeds: Sequence[_Seed], deps: _Dependencies) -> tuple[Bounda
         )
     requests: list[BoundaryRequest] = []
     for bucket in buckets.values():
-        for start, end in _coalesced(bucket.spans):
+        # 병합 재료는 닫힌 범위와 그에 참여하는 칼날이다 — 칼날부터 세고 나서 합친다.
+        spans = [
+            _ClampedSpan(start, end, _participating_instances(bucket.slice_, start, end))
+            for start, end in bucket.spans
+        ]
+        for start, end in _coalesced(spans):
             requests.append(_sealed_request(bucket, start, end, deps))
     return tuple(requests)
 
