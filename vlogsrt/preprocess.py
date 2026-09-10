@@ -501,8 +501,10 @@ _JPEG_QUALITY = 2
 """mjpeg 품질(2가 최선). 조정 대상이 아니라 해시 대상 바이트를 닫는 포맷 계약이다 —
 같은 프레임은 같은 설정에서 같은 바이트를 내야 한다."""
 
-_JPEG_PIXFMT = "yuvj420p"
-"""JPEG의 풀레인지 4:2:0. 짝수 칸수를 요구한다 — 스케일 필터가 짝수로 맞춘다."""
+_JPEG_PIXFMT = "yuvj444p"
+"""JPEG의 풀레인지 4:4:4. 색차 서브샘플링이 없어 홀수 칸수도 그대로 담는다 —
+4:2:0은 짝수 칸수를 요구해서 65x65 원본을 66x65로 키우는 길이었다. 결정성은
+설정이 고정된 이상 변하지 않는다(같은 프레임 = 같은 바이트)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -535,9 +537,13 @@ def probe_video_stream(source: Path, stream_index: int = 0) -> VideoStreamInfo:
     정수 PTS를 time_base로 곱해 `첫 PTS + 순번 × 프레임 길이` 격자와 **정확
     유리수로** 대조한다. 선언 시계가 양자화되어 있으면(예: 30000/1001을
     time_base 1/1000에 담기) 틱 델타가 프레임 길이와 어긋나는데, 원점과 프레임
-    시각이 독립적으로 양자화되므로 한 틱까지의 오차를 허용한다 — 두 틱부터는
-    다른 격자다. 반올림된 pts_time 문자열이나 초 단위 입실론은 쓰지 않는다.
-    증명에 실패하면 조용한 기본값 대신 어긋난 좌표를 말하며 죽는다.
+    시각이 독립적으로 양자화되므로 한 틱까지의 오차를 허용한다 — 단, 프레임
+    길이가 틱에 정확히 떨어지는 시계에서는 양자화 오차가 아예 없으므로 허용도
+    0이다(25fps를 1/1000에 담은 스트림의 한 틱 어긋남은 지터다). 반올림된
+    pts_time 문자열이나 초 단위 입실론은 쓰지 않는다.
+    격자가 증명되면 선언 메타데이터(avg_frame_rate·nb_frames·start_time·duration)
+    가 디코드 증거와 어긋나지 않는지 마저 본다 — 없거나 모르는(`N/A`) 선언도
+    증명이 아니다. 증명에 실패하면 조용한 기본값 대신 어긋난 좌표를 말하며 죽는다.
     """
     _validate_video_ordinal(stream_index)
     ffprobe = require_ffmpeg("ffprobe")
@@ -545,7 +551,8 @@ def probe_video_stream(source: Path, stream_index: int = 0) -> VideoStreamInfo:
         [
             ffprobe, "-v", "error",
             "-select_streams", f"v:{stream_index}",
-            "-show_entries", "stream=index,codec_type,r_frame_rate,time_base",
+            "-show_entries", "stream=index,codec_type,r_frame_rate,avg_frame_rate,time_base,"
+            "nb_frames,start_time,duration",
             "-show_entries", "frame=pts",
             "-of", "json",
             str(source),
@@ -553,10 +560,12 @@ def probe_video_stream(source: Path, stream_index: int = 0) -> VideoStreamInfo:
     )  # fmt: skip
     entry = _selected_stream(completed.stdout, source, f"v:{stream_index}", "비디오", "video")
     rate = _stream_positive_fraction(entry, "r_frame_rate", source)
+    average = _stream_positive_fraction(entry, "avg_frame_rate", source)
     time_base = _stream_positive_fraction(entry, "time_base", source)
     pts = _frame_pts(completed.stdout, source)
     frame_duration = Fraction(1) / rate
     _prove_uniform_grid(pts, time_base, frame_duration, source)
+    _prove_declared_evidence(entry, rate, average, pts, time_base, frame_duration, source)
     return VideoStreamInfo(
         stream_index=_stream_global_index(entry, source),
         presentation_origin=pts[0] * time_base,
@@ -605,10 +614,14 @@ def _prove_uniform_grid(
 ) -> None:
     """정렬된 정수 PTS 전부가 `원점 + 순번 × 프레임 길이` 격자 위에 있는지 본다.
 
-    오차 허용은 정확히 한 declared tick(1 × time_base)이다 — 원점과 프레임
-    시각이 독립적으로 양자화되기 때문이고, 그 넘는 어긋남은 잃어버리거나 뛴
-    프레임이다. PTS는 교정하지 않고 측정값을 그대로 둔다.
+    오차 허용은 선언 시계가 양자화되어 있을 때만 정확히 한 declared tick
+    (1 × time_base)이다 — 원점과 프레임 시각이 독립적으로 양자화되기 때문이다.
+    프레임 길이가 틱에 **정확히 떨어지면**(예: 25fps = 40틱 @ 1/1000) 양자화
+    오차는 0이고, 한 틱의 어긨남도 진짜 비균일 그리드다. PTS는 교정하지 않고
+    측정값을 그대로 둔다.
     """
+    ticks_per_frame = frame_duration / time_base
+    tolerance = Fraction(0) if ticks_per_frame.denominator == 1 else time_base
     for ordinal in range(1, len(pts)):
         if pts[ordinal] <= pts[ordinal - 1]:
             raise RuntimeError(
@@ -618,12 +631,60 @@ def _prove_uniform_grid(
     origin = pts[0]
     for ordinal, value in enumerate(pts):
         error = (value - origin) * time_base - ordinal * frame_duration
-        if abs(error) > time_base:
+        if abs(error) > tolerance:
             raise RuntimeError(
                 f"프레임 타임스탬프가 원점+순번 격자를 벗어났습니다: {source} "
-                f"(순번 {ordinal}, pts {value}, 오차 {error}초 > 한 틱 {time_base}초) — "
-                "프레임을 잃거나 점프한 그리드는 증명하지 못한다"
+                f"(순번 {ordinal}, pts {value}, 오차 {error}초 > 허용 {tolerance}초) — "
+                "프레임을 잃거나 점프하거나 지터 섞인 그리드는 증명하지 못한다"
             )
+
+
+def _prove_declared_evidence(
+    entry: dict[str, object],
+    rate: Fraction,
+    average: Fraction,
+    pts: list[int],
+    time_base: Fraction,
+    frame_duration: Fraction,
+    source: Path,
+) -> None:
+    """선언 메타데이터가 디코드 증거와 어긋나지 않는지 마저 증명한다.
+
+    격자 증명은 디코드된 PTS만 봤다 — 여기서는 컨테이너가 **선언한** 나머지
+    (avg_frame_rate·nb_frames·start_time·duration)가 그 증거와 닿는지 본다.
+    어긋남의 의미: 평균률이 r과 다르면 비 CFR이고, 선언 개수가 디코드 프레임
+    수와 다르면 컨테이너가 다른 스트림을 설명하고 있으며, start_time·duration이
+    실측 원점·범위와 어긋나면 시계가 하나가 아니다. 없거나 `N/A`인 선언은
+    파싱에서 죽는다(조용한 0이 아니다). 선언값은 소수점 문자열로 인쇄되어
+    있어 독립적으로 양자화되므로 비교 허용은 한 declared tick이다.
+    """
+    if average != rate:
+        raise RuntimeError(
+            f"선언 r_frame_rate와 avg_frame_rate가 다릅니다: {source} "
+            f"(r {rate}, avg {average}) — 평균률이 어긋나는 스트림은 균일 CFR이 아니다"
+        )
+    declared_count = _stream_positive_int(entry, "nb_frames", source)
+    if declared_count != len(pts):
+        raise RuntimeError(
+            f"선언 프레임 수가 디코드 증거와 다릅니다: {source} "
+            f"(선언 {declared_count}, 디코드 {len(pts)})"
+        )
+    origin = pts[0] * time_base
+    start = _stream_fraction(entry, "start_time", source)
+    if abs(start - origin) > time_base:
+        raise RuntimeError(
+            f"선언 start_time이 첫 프레임 원점과 어긋납니다: {source} "
+            f"(선언 {start}초, 실측 {origin}초)"
+        )
+    duration = _stream_fraction(entry, "duration", source)
+    by_count = len(pts) * frame_duration
+    by_last_pts = (pts[-1] - pts[0]) * time_base + frame_duration
+    if abs(duration - by_count) > time_base or abs(duration - by_last_pts) > time_base:
+        raise RuntimeError(
+            f"선언 duration이 프레임 증거와 어긋납니다: {source} "
+            f"(선언 {duration}초, 개수×프레임 길이 {by_count}초, "
+            f"마지막 pts 기준 {by_last_pts}초)"
+        )
 
 
 def _require_index(value: int, label: str) -> None:
@@ -633,16 +694,17 @@ def _require_index(value: int, label: str) -> None:
 
 
 def _long_edge_scale(long_edge: int) -> str:
-    """긴 변만 long_edge로 줄이는 스케일 — 가로세로비를 지키고 절대 키우지 않는다.
+    """긴 변만 long_edge 안으로 줄이는 스케일 — 가로세로비를 지키고 절대 키우지 않는다.
 
-    min()이 입력 칸수를 한도로 묶으므로 작은 영상은 그대로 통과한다(업스케일
-    금지). 짧은 변은 ceil(…/2)*2로 짝수 칸수에 올린다 — yuv420p 계열 인코딩의
-    요건이고 한 칸 미만의 비율 오차만 남긴다.
+    상자를 `min(입력, 한도)`로 양 변 모두 입력 이하로 묶고 거기에 맞추
+    (`force_original_aspect_ratio=decrease`)므로: 한도 안의 입력은 그대로 통과하고,
+    줄일 때도 짧은 변은 올림으로 커지지 않는다. 비율 오차는 정수 래스터 반올림이
+    남기는 것뿐이다. 치수를 짝수로 강제하지 않는다 — 홀수 래스터는 4:4:4 픽셀
+    형식이 그대로 담는다.
     """
     return (
-        "scale="
-        f"w='if(gt(iw,ih),min(iw,{long_edge}),ceil(min(ih,{long_edge})*iw/ih/2)*2)':"
-        f"h='if(gt(iw,ih),ceil(min(iw,{long_edge})*ih/iw/2)*2,min(ih,{long_edge}))'"
+        f"scale=w='min(iw,{long_edge})':h='min(ih,{long_edge})'"
+        ":force_original_aspect_ratio=decrease"
     )
 
 

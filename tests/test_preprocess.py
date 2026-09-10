@@ -1019,13 +1019,22 @@ def test_extraction_maps_the_second_audio_stream_exactly_real(tmp_path: Path) ->
 def _video_probe_json(
     *,
     rate: str | None = "25/1",
+    avg: str | None = "25/1",
     time_base: str = "1/12800",
+    nb_frames: str | None = "25",
+    start_time: str | None = "5.000000",
+    duration: str | None = "1.000000",
     index: int = 0,
     codec_type: str | None = "video",
     pts: list[int] | None = None,
     frames_key: str = "frames",
 ) -> str:
-    """비디오 프로브 ffprobe JSON. 기본은 원점 5초·25fps·25프레임의 균일 격자다."""
+    """비디오 프로브 ffprobe JSON. 기본은 원점 5초·25fps·25프레임의 균일 격자다.
+
+    avg·nb_frames·start_time·duration은 선언 메타데이터다 — None이면 키 자체를
+    뺀다(없는 필드의 재현). 기본값은 디폴트 격자(25프레임×1/25초, 원점 5초)와
+    정확히 일치한다.
+    """
     if pts is None:
         pts = [5 * 12800 + ordinal * 512 for ordinal in range(25)]
     entry: dict[str, object] = {"time_base": time_base}
@@ -1035,6 +1044,14 @@ def _video_probe_json(
         entry["codec_type"] = codec_type
     if rate is not None:
         entry["r_frame_rate"] = rate
+    if avg is not None:
+        entry["avg_frame_rate"] = avg
+    if nb_frames is not None:
+        entry["nb_frames"] = nb_frames
+    if start_time is not None:
+        entry["start_time"] = start_time
+    if duration is not None:
+        entry["duration"] = duration
     return json.dumps({"streams": [entry], frames_key: [{"pts": value} for value in pts]})
 
 
@@ -1053,14 +1070,19 @@ def test_video_probe_reads_an_exact_rational_clock(monkeypatch: pytest.MonkeyPat
 def test_video_probe_argv_selects_the_ordinal_and_frame_pts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """스트림 선언과 **프레임 타임스탬프 증거**를 한 번의 ffprobe로 얻는다."""
+    """스트림 선언 전부와 **프레임 타임스탬프 증거**를 한 번의 ffprobe로 얻는다.
+
+    선언 메타데이터(r·avg·time_base·nb_frames·start_time·duration)는 교차 검증의
+    재료다 — 하나라도 안 물으면 없는 증거를 있는 것으로 믿게 된다.
+    """
     commands = _fake_ffmpeg_ffprobe(monkeypatch, _video_probe_json(), "", 0)
     probe_video_stream(Path("demo.mov"), 2)
     (command,) = commands
     assert command == [
         "ffprobe", "-v", "error",
         "-select_streams", "v:2",
-        "-show_entries", "stream=index,codec_type,r_frame_rate,time_base",
+        "-show_entries", "stream=index,codec_type,r_frame_rate,avg_frame_rate,time_base,"
+        "nb_frames,start_time,duration",
         "-show_entries", "frame=pts",
         "-of", "json",
         "demo.mov",
@@ -1094,12 +1116,26 @@ def test_video_probe_rejects_an_ordinal_that_is_not_a_count(
         (_video_probe_json(pts=[64000, 64512, "N/A"]), "pts"),
         (_video_probe_json(pts=[64000, 64512.5, 65024]), "pts"),
         (_video_probe_json(pts=[64000, 64512, 64512]), "엄격|증가|중복"),
+        (_video_probe_json(avg=None), "avg_frame_rate"),
+        (_video_probe_json(avg="0/0"), "avg_frame_rate"),
+        (_video_probe_json(avg="shuffle"), "avg_frame_rate"),
+        (_video_probe_json(nb_frames=None), "nb_frames"),
+        (_video_probe_json(nb_frames="N/A"), "nb_frames"),
+        (_video_probe_json(nb_frames="25.5"), "nb_frames"),
+        (_video_probe_json(start_time=None), "start_time"),
+        (_video_probe_json(start_time="N/A"), "start_time"),
+        (_video_probe_json(duration=None), "duration"),
+        (_video_probe_json(duration="N/A"), "duration"),
     ],
 )
 def test_video_probe_names_what_it_could_not_prove(
     monkeypatch: pytest.MonkeyPatch, payload: str, match: str
 ) -> None:
-    """증거가 없거나 깨졌으면 조용한 기본값이 아니라 그 필드를 댄다."""
+    """증거가 없거나 깨졌으면 조용한 기본값이 아니라 그 필드를 댄다.
+
+    avg·개수·start·duration은 컨테이너가 선언하는 값이라 없거나(`N/A`) 깨질 수
+    있다 — MKV는 nb_frames를 아예 선언하지 않는다. 없는 선언은 증명이 아니다.
+    """
     _fake_ffmpeg_ffprobe(monkeypatch, payload, "", 0)
     with pytest.raises(RuntimeError, match=match):
         probe_video_stream(Path("demo.mov"))
@@ -1110,10 +1146,36 @@ def test_video_probe_accepts_decode_order_and_sorts_to_presentation(
 ) -> None:
     """B프레임이 있으면 프레임 기록은 디코드 순서로 나온다 — 격자는 제시 순서다."""
     shuffled = [64000, 65024, 64512]  # 0, 2, 1 순서
-    _fake_ffmpeg_ffprobe(monkeypatch, _video_probe_json(pts=shuffled), "", 0)
+    _fake_ffmpeg_ffprobe(
+        monkeypatch,
+        _video_probe_json(pts=shuffled, nb_frames="3", duration="0.120000"),
+        "",
+        0,
+    )
     info = probe_video_stream(Path("demo.mov"))
     assert info.presentation_origin == Fraction(5)
     assert info.frame_count == 3
+
+
+def test_video_probe_rejects_jitter_on_an_exact_tick_clock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**정확 틱 시계에서의 한 틱 지터는 비균일이다** — 양자화가 아니다.
+
+    25fps를 time_base 1/1000에 담으면 프레임 길이는 정확히 40틱이다 — 격자가
+    틱에 정확히 떨어지므로 양자화 오차는 0이고, PTS 0,40,**81**,120의 한 틱
+    어긋남(40·41·39 틱 델타)은 되풀이·드랍이 섞인 비균일 그리드다. 한 틱까지
+    무조건 허용하면 이 스트림이 조용히 통과한다.
+    """
+    _fake_ffmpeg_ffprobe(
+        monkeypatch,
+        _video_probe_json(rate="25/1", time_base="1/1000", pts=[0, 40, 81, 120],
+                          nb_frames="4", start_time="0.000000", duration="0.160000"),
+        "",
+        0,
+    )  # fmt: skip
+    with pytest.raises(RuntimeError, match="격자"):
+        probe_video_stream(Path("demo.mov"))
 
 
 def test_video_probe_passes_a_declared_tick_quantized_cfr(
@@ -1124,7 +1186,9 @@ def test_video_probe_passes_a_declared_tick_quantized_cfr(
     quantized = [0, 33, 67, 100, 133, 167, 200, 234]
     _fake_ffmpeg_ffprobe(
         monkeypatch,
-        _video_probe_json(rate="30000/1001", time_base="1/1000", pts=quantized),
+        _video_probe_json(rate="30000/1001", avg="30000/1001", time_base="1/1000",
+                          nb_frames="8", start_time="0.000000", duration="0.267000",
+                          pts=quantized),
         "",
         0,
     )  # fmt: skip
@@ -1134,29 +1198,67 @@ def test_video_probe_passes_a_declared_tick_quantized_cfr(
     assert info.frame_count == 8
 
 
+@pytest.mark.parametrize(
+    ("payload", "match"),
+    [
+        (_video_probe_json(avg="24/1"), "avg_frame_rate"),
+        (_video_probe_json(nb_frames="24"), "nb_frames|프레임 수"),
+        (_video_probe_json(start_time="0.000000"), "start_time"),
+        (_video_probe_json(duration="2.000000"), "duration"),
+        (_video_probe_json(duration="1.040000"), "duration"),
+    ],
+)
+def test_video_probe_rejects_inconsistent_declared_metadata(
+    monkeypatch: pytest.MonkeyPatch, payload: str, match: str
+) -> None:
+    """**선언끼리·선언과 디코드 증거가 어긋나면 증명이 아니다.**
+
+    디폴트 가짜 payload는 원점 5초·25프레임·1초의 균일 격자다. 평균률이 r과
+    다르거나(비 CFR의 신호), 선언 개수가 디코드 프레임 수와 다르거나, start_time이
+    실측 첫 PTS와 어긋나거나, duration이 개수×프레임 길이·마지막 PTS 기준과
+    어긋나면 각각 그 필드를 댄다.
+    """
+    _fake_ffmpeg_ffprobe(monkeypatch, payload, "", 0)
+    with pytest.raises(RuntimeError, match=match):
+        probe_video_stream(Path("demo.mov"))
+
+
 def test_video_probe_rejects_a_genuine_frame_jump(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """명목 률·개수가 같아도 타임스탬프에 구멍이면 증명은 실패한다.
 
     26프레임짜리 깨끗한 격자에서 한 틱을 빼 25프레임으로 맞췄다 — 개수는
-    깨끗한 스트림과 같지만 순번 5부터 한 프레임 어긋난다.
+    깨끗한 스트림과 같지만 순번 5부터 한 프레임 어긋난다. 선언 메타데이터는
+    전부 정상으로 둔다 — 잡는 것은 디코드 증거다.
     """
     clean = [ordinal * 1001 // 30 for ordinal in range(26)]
     holed = clean[:5] + clean[6:]
     assert len(holed) == 25
     _fake_ffmpeg_ffprobe(
-        monkeypatch, _video_probe_json(rate="30000/1001", time_base="1/1000", pts=holed), "", 0
-    )
+        monkeypatch, _video_probe_json(rate="30000/1001", avg="30000/1001",
+                                       time_base="1/1000", nb_frames="25",
+                                       start_time="0.000000", duration="0.834167",
+                                       pts=holed), "", 0
+    )  # fmt: skip
     with pytest.raises(RuntimeError, match="격자"):
         probe_video_stream(Path("demo.mov"))
 
 
 def test_video_probe_rejects_a_tick_larger_than_one(monkeypatch: pytest.MonkeyPatch) -> None:
-    """한 틱까지는 양자화 오차다 — 두 틱부터는 다른 격자다."""
+    """틱에 정확히 떨어지는 격자(1fps = 1000틱)에서는 어긋남이 2틱이나 된다 —
+    양자화 시계가 아니므로 한 틱 허용조차 생기지 않는다."""
     _fake_ffmpeg_ffprobe(
         monkeypatch,
-        _video_probe_json(rate="1/1", time_base="1/1000", pts=[0, 998, 2000]),
+        _video_probe_json(
+            rate="1/1",
+            avg="1/1",
+            time_base="1/1000",
+            nb_frames="3",
+            start_time="0.000000",
+            duration="3.000000",
+            pts=[0, 998, 2000],
+        ),
         "",
         0,
     )
@@ -1166,11 +1268,7 @@ def test_video_probe_rejects_a_tick_larger_than_one(monkeypatch: pytest.MonkeyPa
 
 # ─── 프레임 추출 ───────────────────────────────────────────────
 
-_SCALE_768 = (
-    "scale="
-    "w='if(gt(iw,ih),min(iw,768),ceil(min(ih,768)*iw/ih/2)*2)':"
-    "h='if(gt(iw,ih),ceil(min(iw,768)*ih/iw/2)*2,min(ih,768))'"
-)
+_SCALE_768 = "scale=w='min(iw,768)':h='min(ih,768)':force_original_aspect_ratio=decrease"
 
 
 def test_frame_extraction_argv_selects_the_exact_stream_and_frame(
@@ -1190,7 +1288,7 @@ def test_frame_extraction_argv_selects_the_exact_stream_and_frame(
         "-fps_mode", "passthrough",
         "-frames:v", "1",
         "-q:v", "2",
-        "-pix_fmt", "yuvj420p",
+        "-pix_fmt", "yuvj444p",
         "-fflags", "+bitexact",
         "-flags:v", "+bitexact",
         str(destination),
@@ -1269,6 +1367,72 @@ def test_frame_extraction_scales_the_long_edge_and_never_upscales_real(
         destination = tmp_path / f"{size.replace('x', '_')}.jpg"
         extract_frame_index(source, 0, 0, destination, long_edge=768)
         assert _image_size(destination) == (width, height), size
+
+
+@needs_ffmpeg
+def test_frame_extraction_keeps_odd_rasters_unchanged_real(tmp_path: Path) -> None:
+    """**홀수 치수의 회귀 테스트** — 한도 안의 입력은 한 칸도 움직이지 않는다.
+
+    65x65는 65x65로 나와야 한다(이전 스케일은 짝수 맞추기 위해 66x65로 **키우고**
+    가로세로비까지 일그러뜨렸다). 65x33·33x65의 홀수 직사각형은 홀수 짧은 변을
+    34로 키워 비율을 바꾸는 길을 막는다 — 긴 변/짧은 변 어느 쪽도 커지지 않는다.
+    """
+    import subprocess as sp
+
+    cases = [("65x65", 65, 65), ("65x33", 65, 33), ("33x65", 33, 65)]
+    for size, width, height in cases:
+        source = tmp_path / f"odd-{size.replace('x', '_')}.mov"
+        # lavfi 원천은 4:2:0을 전제해 홀수 크기를 짝수로 깎는다 — 4:4:0 없는
+        # 형식으로 협상해야 홀수 래스터가 실제로 만들어진다.
+        sp.run(
+            [
+                "ffmpeg", "-v", "error", "-y",
+                "-f", "lavfi", "-i", f"testsrc2=size={size}:rate=25:duration=0.04,format=yuv444p",
+                "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv444p",
+                str(source),
+            ],
+            capture_output=True,
+            check=True,
+        )  # fmt: skip
+        assert _image_size(source) == (width, height), size  # 회귀의 전제 — 진짜 홀수다
+        destination = tmp_path / f"odd-{size.replace('x', '_')}.jpg"
+        extract_frame_index(source, 0, 0, destination, long_edge=768)
+        assert _image_size(destination) == (width, height), size
+
+
+@needs_ffmpeg
+def test_frame_extraction_downscales_odd_rectangles_without_upscale_real(
+    tmp_path: Path,
+) -> None:
+    """홀수 직사각형을 **줄일 때**도 짧은 변은 올림으로 키우지 않는다.
+
+    1025x513은 768x384로 줄어든다(768×513/1025 = 384.38 — 이전 필터는 여기에
+    ceil(…/2)×2를 먹여 386으로 **키우고** 비율까지 일그러뜨렸다). 1601x899의
+    899→431은 정수 래스터 반올림이 남기는 불가피한 오차다(1601/899 = 1.7810,
+    768/431 = 1.7819).
+    """
+    import subprocess as sp
+
+    cases = [("1025x513", 768, 384), ("1601x899", 768, 431)]
+    for size, width, height in cases:
+        source = tmp_path / f"big-{size.replace('x', '_')}.mov"
+        sp.run(
+            [
+                "ffmpeg", "-v", "error", "-y",
+                "-f", "lavfi", "-i", f"testsrc2=size={size}:rate=25:duration=0.04,format=yuv444p",
+                "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv444p",
+                str(source),
+            ],
+            capture_output=True,
+            check=True,
+        )  # fmt: skip
+        destination = tmp_path / f"big-{size.replace('x', '_')}.jpg"
+        extract_frame_index(source, 0, 0, destination, long_edge=768)
+        got_width, got_height = _image_size(destination)
+        in_width, in_height = (int(value) for value in size.split("x"))
+        assert (got_width, got_height) == (width, height), size
+        assert max(got_width, got_height) <= 768  # 긴 변은 한도 안
+        assert got_width <= in_width and got_height <= in_height  # 업스케일 아님
 
 
 @needs_ffmpeg

@@ -652,7 +652,7 @@ def test_a_quantized_tick_cfr_stream_proves_and_samples_real(tmp_path: Path) -> 
     subprocess.run(
         [
             "ffmpeg", "-v", "error", "-y",
-            "-f", "lavfi", "-i", "color=c=blue:size=64x64:rate=30000/1001:duration=0.3",
+            "-f", "lavfi", "-i", "color=c=blue:size=64x64:rate=30000/1001:duration=1",
             "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
             "-video_track_timescale", "1000",
             str(media_file),
@@ -664,9 +664,11 @@ def test_a_quantized_tick_cfr_stream_proves_and_samples_real(tmp_path: Path) -> 
     info = probe_video_stream(media_file)
     # 선언 률 자체는 ffprobe가 틱에서 계산한 값이라 여기 못 박지 않는다 — 정확한
     # 틱 목록 증명은 tests/test_preprocess.py의 가짜 ffprobe 검사가 맡는다.
-    # 이 검사가 증명하는 건 **실제 파일**에서도 양자화된 틱이 증명을 통과한다는 것.
+    # 이 검사가 증명하는 건 **실제 파일**에서도 양자화된 틱과 선언 메타데이터
+    # (r=avg=30000/1001, nb_frames=30, duration=1.001)가 함께 증명을 통과한다는 것.
     assert info.presentation_origin == 0
-    assert info.frame_count == 9
+    assert info.frame_duration == Fraction(1001, 30000)
+    assert info.frame_count == 30
 
     media = ResolvedMedia(
         resource_scoped_id="doc1/r1",
@@ -679,11 +681,57 @@ def test_a_quantized_tick_cfr_stream_proves_and_samples_real(tmp_path: Path) -> 
     )
     samples = sampling.sample_frames(
         media,
-        [_request("mid", 4 * info.frame_duration), _request("tail", 8 * info.frame_duration)],
+        [_request("mid", 10 * info.frame_duration), _request("tail", 29 * info.frame_duration)],
         tmp_path / "out",
         CFG,
     )
-    assert [sample.original_frame_index for sample in samples] == [4, 8]
+    assert [sample.original_frame_index for sample in samples] == [10, 29]
+
+
+@needs_ffmpeg
+def test_a_proxy_without_declared_metadata_falls_back_to_original_real(
+    tmp_path: Path,
+) -> None:
+    """**선언 메타데이터가 없는 실제 프록시** — MKV는 nb_frames를 선언하지 않는다.
+
+    디코드 격자 자체는 멀쩡해도(tick 1/1000, 25fps, 원점 11초) 선언 개수가 없으면
+    교차 증명이 불가능하다. 원본은 이미 증명됐으므로 폴백이지 오류가 아니다 —
+    뽑히는 화소는 원본 직접 추출과 같다.
+    """
+    original = _authored_video(tmp_path, "orig5.mov", origin_seconds=5)
+    proxy = tmp_path / "proxy11.mkv"
+    subprocess.run(
+        [
+            "ffmpeg", "-v", "error", "-y",
+            "-itsoffset", "11000000us",
+            "-i", str(original),
+            "-map", "0:v:0", "-c", "copy",
+            str(proxy),
+        ],
+        capture_output=True,
+        check=True,
+    )  # fmt: skip
+
+    with pytest.raises(RuntimeError, match="nb_frames"):
+        probe_video_stream(proxy)
+
+    media = ResolvedMedia(
+        resource_scoped_id="doc1/r1",
+        asset_content_id=ASSET,
+        original=original,
+        image_source=proxy,
+        original_sha256=sha256_file(original),
+        has_audio=True,
+        used_proxy=True,
+    )
+    (sample,) = sampling.sample_frames(
+        media, [_request("f125", Fraction(5))], tmp_path / "out", CFG
+    )
+    assert sample.used_proxy is False
+    assert sample.review == ("proxy_unproven",)
+    assert sample.image_path.read_bytes() == _direct_image_bytes(
+        original, 0, tmp_path / "direct0.jpg"
+    )
 
 
 @needs_ffmpeg
