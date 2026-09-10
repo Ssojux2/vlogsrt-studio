@@ -69,9 +69,15 @@ class VadWindow:
 
 @dataclass(frozen=True, slots=True)
 class VadResult:
-    """자산 하나의 추론 결과 — 성공이면 창열, 실패면 좌표 있는 error 문구."""
+    """자산 하나의 추론 결과 — 성공이면 창열, 실패면 좌표 있는 error 문구.
+
+    `analysis_key`는 이 창열이 나온 PCM 세대의 증명이다 — 성공·실패 양쪽 경로에서
+    참조의 값으로 싣는다. 소비자(P5-03 가드)가 같은 세대인지 비교할 수 있게 하는
+    이음매 재료다: 시각을 정하는 값은 결과와 함께 건너와야 한다(P4-04의 교훈).
+    """
 
     source_id: str
+    analysis_key: str
     status: Literal["success", "error"]
     windows: tuple[VadWindow, ...]
     error: str | None
@@ -84,20 +90,34 @@ def infer_vad(
 
     어떤 실패도 자산 전체를 `error`로 닫는다 — 창 일부만 실은 부분 성공은
     없다. 새어 나가는 예상 밖의 예외까지 결과 안으로 접는 것은 실패 닫힘의
-    보호막이다(BaseException은 잡지 않는다).
+    보호막이다(BaseException은 잡지 않는다). 세대 증명(`analysis_key`)은 성공·
+    실패 어느 길에서든 참조의 값으로 남는다.
     """
     try:
         windows = _infer_reference(reference, source_id, cfg, session)
     except _VadFailure as failure:
-        return VadResult(source_id=source_id, status="error", windows=(), error=str(failure))
+        return VadResult(
+            source_id=source_id,
+            analysis_key=reference.analysis_key,
+            status="error",
+            windows=(),
+            error=str(failure),
+        )
     except Exception as exc:
         return VadResult(
             source_id=source_id,
+            analysis_key=reference.analysis_key,
             status="error",
             windows=(),
             error=f"VAD 추론이 예상 밖의 오류로 실패했다 — {type(exc).__name__}: {exc}",
         )
-    return VadResult(source_id=source_id, status="success", windows=windows, error=None)
+    return VadResult(
+        source_id=source_id,
+        analysis_key=reference.analysis_key,
+        status="success",
+        windows=windows,
+        error=None,
+    )
 
 
 def _infer_reference(

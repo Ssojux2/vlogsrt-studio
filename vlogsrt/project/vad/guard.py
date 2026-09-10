@@ -12,6 +12,13 @@ P5-02가 낸 확률 창에 임계값(`vad_positive`)을 처음으로 대고, 지
   소스 전체를 보호하고 `keep_all`로 검토를 남긴다. 빈 전사만으로는 침묵이
   아니지만, 글자 없는 덮개는 조각마다 불확실 보호로 들어간다. VAD 양성인데 쓸
   글자가 없는 구간은 보호되고 `vad_without_text`와 검토에 남는다.
+- **레일이 먼저다(P5-03b).** 설정 결함 — `vad_positive`가 [0,1]의 유한 실수가
+  아니거나 `guard_padding_seconds`가 양수 `Fraction`이 아니면 — 은 예외로
+  닫는다. 음수 여유는 합집합을 **줄인다**(`protected=[]`은 전부 잘라도 된다는
+  뜻이다) — 덮거나 `keep_all`로 세탁하지 않는다(P5-05b가 policy.py에서 그은
+  선). 입력 결함(창 끝점·확률·타일링)은 raise가 아니라 `keep_all`이다. 신원은
+  세대까지 증명한다 — 가드도 VAD 결과도 참조의 `analysis_key`·원점을 들고
+  건너와서, 잃어버린 세대의 값이 프레임을 조용히 밀지 못한다(P4-04).
 - **시계 변환은 딱 한 번.** 보호 끝점은 `Fraction(샘플, 주파수) + 참조 원점`으로
   파일 시계에 옮겨지고(읽을 수 있는 시각은 유도하지 않는다 — P4-04b), 슬라이스
   구간과 교집합한 뒤 `interval_outward(시작, 끝, 프레임 길이, 0)`로 소스 격자에
@@ -52,6 +59,7 @@ GUARD_MIN_RUN_SECONDS = Fraction(1, 4)
 
 _STATUS_SUCCESS: Literal["success"] = "success"
 _STATUS_KEEP_ALL: Literal["keep_all"] = "keep_all"
+_STATUS_INAUDIBLE: Literal["inaudible"] = "inaudible"
 
 _SOURCE_GRID_ANCHOR = Fraction(0)
 """소스 격자의 닻 — 파일 시계 끝점을 그대로 주면 격자 인덱스가 곧 나온다.
@@ -79,10 +87,13 @@ class SourceGuard:
     `keep_all`은 실패 닫힘이다 — 가청 소스 전체가 보호이고 이유는 `review`에
     남는다. `vad_without_text`는 말은 있는데 쓸 글자이 없던 VAD 런이다(여유 없는
     런 그 자체). 두 합계는 `protected_samples`/`total_samples`로 보호 비율을
-    바로 잰다.
+    바로 잰다. `analysis_key`·`pcm_sample0_file_time`은 가드를 만든 PCM 세대의
+    증명이다 — 투영이 잃어버린 세대의 참조를 걸러내는 재료다(P4-04).
     """
 
     source_id: str
+    analysis_key: str
+    pcm_sample0_file_time: Fraction
     protected: tuple[SampleRange, ...]
     vad_without_text: tuple[SampleRange, ...]
     protected_samples: int
@@ -93,6 +104,13 @@ class SourceGuard:
     def __post_init__(self) -> None:
         if not isinstance(self.source_id, str) or not self.source_id:
             raise ValueError(f"source_id가 비지 않은 문자열이 아니다: {self.source_id!r}")
+        if not isinstance(self.analysis_key, str) or not self.analysis_key:
+            raise ValueError(f"analysis_key가 비지 않은 문자열이 아니다: {self.analysis_key!r}")
+        if not isinstance(self.pcm_sample0_file_time, Fraction):
+            raise ValueError(
+                f"pcm_sample0_file_time은 정확한 Fraction이어야 한다: "
+                f"{self.pcm_sample0_file_time!r}"
+            )
         if self.status not in {_STATUS_SUCCESS, _STATUS_KEEP_ALL}:
             raise ValueError(f"알 수 없는 상태다: {self.status!r}")
         if _bad_count(self.total_samples) or self.total_samples < 1:
@@ -107,15 +125,26 @@ class SourceGuard:
 
 @dataclass(frozen=True, slots=True)
 class InstanceGuard:
-    """인스턴스 하나의 보호 — 좌표는 소스 격자의 반개 프레임 구간이다."""
+    """인스턴스 하나의 보호 — 좌표는 소스 격자의 반개 프레임 구간이다.
+
+    `status`는 타입 있는 상태다 — 하류(P6)가 한국어 산문을 파싱하거나 슬라이스
+    길이로 추측하지 않게 한다. `inaudible`(제거 권한 자체가 없음)이
+    `keep_all`(실패 닫힘)보다 강한 진술이므로 둘이 겹치면 `inaudible`이 이긴다.
+    """
 
     instance_id: str
+    source_id: str
+    status: Literal["success", "keep_all", "inaudible"]
     protected_frames: tuple[FrameInterval, ...]
     review: tuple[str, ...]
 
     def __post_init__(self) -> None:
         if not isinstance(self.instance_id, str) or not self.instance_id:
             raise ValueError(f"instance_id가 비지 않은 문자열이 아니다: {self.instance_id!r}")
+        if not isinstance(self.source_id, str) or not self.source_id:
+            raise ValueError(f"source_id가 비지 않은 문자열이 아니다: {self.source_id!r}")
+        if self.status not in {_STATUS_SUCCESS, _STATUS_KEEP_ALL, _STATUS_INAUDIBLE}:
+            raise ValueError(f"알 수 없는 상태다: {self.status!r}")
         previous_end: int | None = None
         for span in self.protected_frames:
             if span.end_frame < span.start_frame:
@@ -136,10 +165,17 @@ def build_source_guard(
     repairs: Sequence[Repair],
     cfg: ProjectConfig,
 ) -> SourceGuard:
-    """소스 하나의 보호 합집합을 만든다. 판단이 필요할 때는 늘 더 보호한다."""
+    """소스 하나의 보호 합집합을 만든다. 판단이 필요할 때는 늘 더 보호한다.
+
+    `repairs`는 **디코드 오디오 국소 시계(초)**의 재전사 기록만 받는다 —
+    `SourceTrace.repairs`와 같은 시계다. 경계 재전사 기록(`BoundaryTranscript.
+    repairs`, 남긴 범위 국소 시계)을 여기 넣지 마라: 시계가 다른 기록은 엉뚱한
+    자리에 보호를 놓는다.
+    """
+    _require_config(cfg)
     _require_source_linkage(trace, reference)
     _require_vad_linkage(vad, reference)
-    blocked = _blocked_reviews(trace, vad)
+    blocked = _blocked_reviews(trace, vad, reference)
     if blocked:
         return _keep_all(reference, blocked)
     seeds, evidence, reviews = _source_spans(trace, boundary, repairs, reference)
@@ -162,6 +198,8 @@ def build_source_guard(
         )
     return SourceGuard(
         source_id=reference.source_id,
+        analysis_key=reference.analysis_key,
+        pcm_sample0_file_time=reference.pcm_sample0_file_time,
         protected=protected,
         vad_without_text=without_text,
         protected_samples=sum(span.end - span.start for span in protected),
@@ -187,8 +225,15 @@ def project_guard(
     for slice_ in slices:
         frames = _slice_frames(source_guard, reference, slice_, frame_duration)
         review = _instance_review(source_guard, slice_)
+        status = _instance_status(source_guard, slice_)
         guards.extend(
-            InstanceGuard(instance_id=instance_id, protected_frames=frames, review=review)
+            InstanceGuard(
+                instance_id=instance_id,
+                source_id=source_guard.source_id,
+                status=status,
+                protected_frames=frames,
+                review=review,
+            )
             for instance_id in slice_.instance_ids
         )
     return tuple(guards)
@@ -374,8 +419,12 @@ def _slice_frames(
     slice_: LogicalSlice,
     frame_duration: Fraction,
 ) -> tuple[FrameInterval, ...]:
-    """한 슬라이스 안의 보호 프레임 — 불가청 슬라이스는 전체가 보호다."""
-    if not slice_.audible:
+    """한 슬라이스 안의 보호 프레임 — 불가청·keep_all 슬라이스는 전체가 보호다.
+
+    `keep_all`이 PCM과의 교집합만 지키면 저장 PCM 끝을 넘는 슬라이스 꼬리가
+    잘릴 수 있다(영상이 오디오보다 긴 경우). keep_all은 슬라이스 전체를 지킨다.
+    """
+    if not slice_.audible or source_guard.status == _STATUS_KEEP_ALL:
         whole = interval_outward(
             slice_.source_start, slice_.source_end, frame_duration, _SOURCE_GRID_ANCHOR
         )
@@ -420,6 +469,21 @@ def _instance_review(source_guard: SourceGuard, slice_: LogicalSlice) -> tuple[s
     return tuple(notes)
 
 
+def _instance_status(
+    source_guard: SourceGuard, slice_: LogicalSlice
+) -> Literal["success", "keep_all", "inaudible"]:
+    """인스턴스의 타입 상태 — 불가청이 keep_all보다 강한 진술이다.
+
+    둘이 겹치는 불가청 슬라이스의 keep_all 소스에서는 `inaudible`을 낸다:
+    그 인스턴스의 진실(제거 권한 자체가 없음)이 소스의 실패 이유보다 먼저다.
+    """
+    if not slice_.audible:
+        return _STATUS_INAUDIBLE
+    if source_guard.status == _STATUS_KEEP_ALL:
+        return _STATUS_KEEP_ALL
+    return _STATUS_SUCCESS
+
+
 # ─────────────────────────────────────────────────────────────
 #  연결 검증 — 위조 신원·모순된 짝은 호출 앞에서 닫는다
 # ─────────────────────────────────────────────────────────────
@@ -449,18 +513,32 @@ def _require_source_linkage(trace: SourceTrace, reference: PcmReference) -> None
 
 
 def _require_vad_linkage(vad: VadResult, reference: PcmReference) -> None:
-    """VAD 결과의 신원은 참조와 정확히 같아야 한다 — 남의 창은 위조다."""
+    """VAD 결과의 신원은 참조와 정확히 같아야 한다 — 남의 창은 위조다.
+
+    `analysis_key`까지 같아야 한다: 같은 `source_id`라도 다른 PCM 세대의 창은
+    시각이 통째로 어긋난다(P4-04 — 시각을 정하는 값은 이음매를 건너온다).
+    """
     if vad.source_id != reference.source_id:
         raise ValueError(
             f"VAD 결과의 source_id가 참조와 다르다: vad {vad.source_id!r},"
             f" reference {reference.source_id!r} — 위조 연결로는 가드를 만들지 않는다"
+        )
+    if vad.analysis_key != reference.analysis_key:
+        raise ValueError(
+            f"VAD 결과의 analysis_key가 참조와 다르다: vad {vad.analysis_key!r},"
+            f" reference {reference.analysis_key!r} — 다른 PCM 세대의 창으로는"
+            " 가드를 만들지 않는다"
         )
 
 
 def _require_projection_linkage(
     source_guard: SourceGuard, reference: PcmReference, slices: Sequence[LogicalSlice]
 ) -> None:
-    """투영은 가드를 만든 참조 그 자체만 받는다 — 신원·프레임 수가 증거다."""
+    """투영은 가드를 만든 참조 그 자체만 받는다 — 신원·세대·프레임 수가 증거다.
+
+    `analysis_key`·원점까지 같아야 한다: 같은 `source_id`·같은 프레임 수의 잃어버린
+    세대 참조는 원점이 다르면 프레임을 통째로 밀리게 한다(P4-04).
+    """
     if source_guard.source_id != reference.source_id:
         raise ValueError(
             f"가드와 참조의 source_id가 다르다: guard {source_guard.source_id!r},"
@@ -472,6 +550,19 @@ def _require_projection_linkage(
             f" guard {source_guard.total_samples!r}, reference.sample_count"
             f"={reference.sample_count!r}"
         )
+    if source_guard.analysis_key != reference.analysis_key:
+        raise ValueError(
+            f"가드의 analysis_key가 참조와 다르다: guard {source_guard.analysis_key!r},"
+            f" reference {reference.analysis_key!r} — 다른 PCM 세대의 가드로"
+            " 투영하지 않는다"
+        )
+    if source_guard.pcm_sample0_file_time != reference.pcm_sample0_file_time:
+        raise ValueError(
+            "가드의 원점이 참조와 다르다: guard"
+            f" {source_guard.pcm_sample0_file_time}, reference"
+            f" {reference.pcm_sample0_file_time} — 원점이 어긋나면 프레임이 통째로"
+            " 밀린다"
+        )
     if _bad_count(reference.sample_rate) or reference.sample_rate < 1:
         raise ValueError(f"참조의 sample_rate가 1 이상 정수가 아니다: {reference.sample_rate!r}")
     for slice_ in slices:
@@ -482,18 +573,99 @@ def _require_projection_linkage(
             )
 
 
-def _blocked_reviews(trace: SourceTrace, vad: VadResult) -> list[str]:
+def _blocked_reviews(trace: SourceTrace, vad: VadResult, reference: PcmReference) -> list[str]:
     """전체 보호로 닫는 실패 — 조용한 침묵이 아니라 이유 있는 검토로 남는다."""
     blocked: list[str] = []
     if trace.status == "error":
         blocked.append(f"전사 트레이스가 error다 — 전체를 보호한다: {trace.error}")
     if vad.status == "error":
         blocked.append(f"VAD 추론이 error다 — 전체를 보호한다: {vad.error}")
-    elif not vad.windows:
-        blocked.append("VAD 성공 결과에 창이 하나도 없다 — 전체를 보호한다")
+    else:
+        defect = _vad_input_defect(vad, reference.sample_count)
+        if defect is not None:
+            blocked.append(defect)
     if trace.status != "error" and not trace.coverage:
         blocked.append("전사 덮개(coverage)가 비었다 — 전체를 보호한다")
     return blocked
+
+
+def _vad_input_defect(vad: VadResult, total: int) -> str | None:
+    """성공 결과의 창열 계약 — 결함은 raise가 아니라 keep_all 검토로 닫는다.
+
+    P5-02의 산 결과는 채널마다 저장 PCM을 빈틈없이 덮는다. 하지만 다시 읽은
+    결과나 잃어버린 세대에는 그 보장이 없다 — 덮지 않는 구멍을 침묵으로 두는
+    순간 보호가 아니게 된다. 결함이 없으면 None.
+    """
+    spans: list[SampleRange] = []
+    for position, window in enumerate(vad.windows):
+        if _bad_count(window.start_sample) or _bad_count(window.end_sample):
+            return (
+                f"VAD 창 {position}의 끝점이 정수가 아니다 — 전체를 보호한다:"
+                f" [{window.start_sample!r}, {window.end_sample!r})"
+            )
+        if not 0 <= window.start_sample < window.end_sample <= total:
+            return (
+                f"VAD 창 {position}이 저장 범위 밖이거나 뒤집혔다 — 전체를 보호한다:"
+                f" [{window.start_sample}, {window.end_sample}) (저장 {total}프레임)"
+            )
+        if not _finite_probability(window.probability):
+            return (
+                f"VAD 창 {position}의 확률이 [0,1]의 유한 실수가 아니다 — 전체를"
+                f" 보호한다: {window.probability!r}"
+            )
+        spans.append(SampleRange(window.start_sample, window.end_sample))
+    gap = _first_gap(_merge(spans), total)
+    if gap is not None:
+        return (
+            f"VAD 창의 합집합이 저장 PCM을 덮지 않는다 — 구멍 [{gap.start}, {gap.end})"
+            "을 침묵으로 두지 않고 전체를 보호한다"
+        )
+    return None
+
+
+def _first_gap(merged: tuple[SampleRange, ...], total: int) -> SampleRange | None:
+    """병합된 합집합이 `[0, total)`을 덮지 않을 때 첫 구멍 — 덮으면 None."""
+    cursor = 0
+    for span in merged:
+        if span.start > cursor:
+            return SampleRange(cursor, span.start)
+        cursor = max(cursor, span.end)
+    if cursor < total:
+        return SampleRange(cursor, total)
+    return None
+
+
+def _finite_probability(value: object) -> bool:
+    """확률은 bool이 아닌 유한 실수 — [0,1] 안이어야 한다."""
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(float(value))
+        and 0 <= value <= 1
+    )
+
+
+def _require_config(cfg: ProjectConfig) -> None:
+    """설정 결함은 호출자 잘못이다 — 예외로 닫고 keep_all로 세탁하지 않는다.
+
+    프로그램적으로 만든 설정은 파일 검증(`load_project_config`)을 건너뛰므로
+    소비자가 관문이 된다(P5-05b가 vision policy에서 그은 같은 선). 음수 여유는
+    합집합을 **줄인다** — whisper 세그먼트까지 지우는 `protected=[]`는 이 모듈이
+    존재하는 이유를 뒤집는다.
+    """
+    positive = cfg.vad_positive
+    if (
+        isinstance(positive, bool)
+        or not isinstance(positive, (int, float))
+        or not math.isfinite(positive)
+        or not 0 <= positive <= 1
+    ):
+        raise ValueError(f"vad_positive는 [0,1]의 유한한 실수여야 한다: {positive!r}")
+    padding = cfg.guard_padding_seconds
+    if not isinstance(padding, Fraction) or padding <= 0:
+        raise ValueError(
+            f"guard_padding_seconds는 양수 Fraction이어야 한다(음수는 합집합을 줄인다): {padding!r}"
+        )
 
 
 def _keep_all(reference: PcmReference, reviews: list[str]) -> SourceGuard:
@@ -501,6 +673,8 @@ def _keep_all(reference: PcmReference, reviews: list[str]) -> SourceGuard:
     total = reference.sample_count
     return SourceGuard(
         source_id=reference.source_id,
+        analysis_key=reference.analysis_key,
+        pcm_sample0_file_time=reference.pcm_sample0_file_time,
         protected=(SampleRange(0, total),),
         vad_without_text=(),
         protected_samples=total,

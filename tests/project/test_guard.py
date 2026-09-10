@@ -165,11 +165,13 @@ def _vad(
     status: str = "success",
     error: str | None = None,
     source_id: str = "asset-1",
+    analysis_key: str = "pcm-asset-1",
 ) -> VadResult:
     if windows is None:
         windows = (_window(0, TOTAL, 0.1),)
     return VadResult(
         source_id=source_id,
+        analysis_key=analysis_key,
         status=status,  # type: ignore[arg-type]
         windows=windows,
         error=error,
@@ -261,10 +263,21 @@ def _build(
     cfg: ProjectConfig = CFG,
 ) -> SourceGuard:
     ref = reference or _reference()
+    # 손 창열만으로는 [0, 프레임 수)를 못 덮는다 — 임계값 아래 깔개 창을 넣어
+    # 실제 P5-02 결과의 모양(전체 타일링)을 맞춘다. 깔개는 보호 합집합에 못
+    # 들어가므로 어떤 기대값도 움직이지 않는다(P5-03b 항목 2).
+    if vad is None:
+        vad = _vad(
+            windows=(_window(0, ref.sample_count, 0.1),),
+            source_id=ref.source_id,
+            analysis_key=ref.analysis_key,
+        )
+    elif vad.status == "success" and vad.windows:
+        vad = replace(vad, windows=(*vad.windows, _window(0, ref.sample_count, 0.1)))
     return build_source_guard(
         trace or _trace(ref.source_id, key=ref.analysis_key, origin=ref.pcm_sample0_file_time),
         ref,
-        vad or _vad(source_id=ref.source_id),
+        vad,
         boundary or _projection(),
         repairs,
         cfg,
@@ -696,3 +709,157 @@ def test_unavailable_resources_never_borrow_the_healthy_reference() -> None:
         "stream_unavailable",
         "declared_no_audio",
     ]
+
+
+# ─────────────────────────────────────────────────────────────
+#  레일과 신원 — 설정은 raise, 입력은 keep_all, 세대는 증명 (P5-03b)
+# ─────────────────────────────────────────────────────────────
+
+
+def _result(
+    windows: tuple[VadWindow, ...],
+    *,
+    source_id: str = "asset-1",
+    analysis_key: str = "pcm-asset-1",
+    status: str = "success",
+    error: str | None = None,
+) -> VadResult:
+    """손 VAD 결과 — 정규화 없이 그대로 build_source_guard에 들어간다."""
+    return VadResult(
+        source_id=source_id,
+        analysis_key=analysis_key,
+        status=status,  # type: ignore[arg-type]
+        windows=windows,
+        error=error,
+    )
+
+
+def test_config_defects_raise_before_any_protection() -> None:
+    reference = _reference()
+    trace = _trace(reference.source_id, key=reference.analysis_key)
+    for bad_positive in (float("nan"), 1.5, True, -0.1):
+        with pytest.raises(ValueError, match="vad_positive"):
+            build_source_guard(
+                trace,
+                reference,
+                _vad(),
+                _projection(),
+                (),
+                replace(CFG, vad_positive=bad_positive),
+            )
+    for bad_padding in (Fraction(0), Fraction(-1, 2), Fraction(-2), 0.5):
+        with pytest.raises(ValueError, match="guard_padding_seconds"):
+            build_source_guard(
+                trace,
+                reference,
+                _vad(),
+                _projection(),
+                (),
+                replace(CFG, guard_padding_seconds=bad_padding),
+            )
+    # 음수 여유는 protected=[]를 내지 않고 그 자리에서 닫힌다 — 설정 결함은
+    # 호출자 잘못이므로 keep_all로 세탁하지도 않는다(P5-05b가 그은 선).
+
+
+def test_vad_window_defects_fail_closed_to_keep_all() -> None:
+    reference = _reference()
+    trace = _trace(reference.source_id, key=reference.analysis_key)
+    defects = {
+        "확률 nan": _result((_window(0, TOTAL, float("nan")),)),
+        "확률 범위 밖": _result((_window(0, TOTAL, 1.5),)),
+        "부분 덮음": _result((_window(0, 2 * RATE, 0.9),)),
+        "뒤집힌 창": _result((_window(2 * RATE, RATE, 0.9),)),
+        "범위 밖 창": _result((_window(0, TOTAL + 1, 0.9),)),
+        "실수 끝점": _result(
+            (VadWindow(channel=0, start_sample=0.5, end_sample=512, probability=0.9),)  # type: ignore[arg-type]
+        ),
+        "창 없음": _result(()),
+    }
+    for label, vad in defects.items():
+        guard = build_source_guard(trace, reference, vad, _projection(), (), CFG)
+        assert guard.status == "keep_all", label
+        assert guard.protected == (SampleRange(0, TOTAL),), label
+        assert guard.vad_without_text == (), label
+        assert guard.review, label
+
+
+def test_vad_result_from_another_pcm_generation_is_rejected() -> None:
+    reference = _reference()
+    trace = _trace(reference.source_id, key=reference.analysis_key)
+    forged = _result((_window(0, TOTAL, 0.9),), analysis_key="pcm-forged")
+    with pytest.raises(ValueError, match="analysis_key"):
+        build_source_guard(trace, reference, forged, _projection(), (), CFG)
+
+
+def test_projection_rejects_stale_reference_generation() -> None:
+    fresh = _reference(origin=Fraction(1, 2), sample_count=4 * RATE)
+    guard = _build(fresh, vad=_vad(windows=(_window(0, 2 * RATE, 0.9),)))
+    clip = _slice(fresh.source_id, Fraction(1, 2), Fraction(3, 2), "clip-1")
+    stale_origin = _reference(origin=Fraction(3, 2), sample_count=4 * RATE)
+    with pytest.raises(ValueError, match="원점"):
+        _project(guard, stale_origin, clip)
+    stale_key = _reference(origin=Fraction(1, 2), sample_count=4 * RATE, key="pcm-other")
+    with pytest.raises(ValueError, match="analysis_key"):
+        _project(guard, stale_key, clip)
+
+
+def test_keep_all_protects_the_whole_slice_even_past_pcm_end() -> None:
+    reference = _reference()
+    guard = _build(reference, vad=_vad(status="error", error="세션 run이 실패했다"))
+    tail = _slice(reference.source_id, Fraction(9), Fraction(12), "clip-tail")
+    (instance,) = _project(guard, reference, tail)
+    # PCM은 10초(250프레임)뿐이지만 keep_all은 슬라이스 전체(300프레임)를 지킨다.
+    assert instance.protected_frames == _frames((225, 300))
+    assert instance.status == "keep_all"
+
+
+def test_instance_guards_carry_typed_status_and_source() -> None:
+    reference = _reference()
+    healthy = _build(reference)
+    broken = _build(reference, vad=_vad(status="error", error="세션 run이 실패했다"))
+    live = _slice(reference.source_id, Fraction(1), Fraction(2), "clip-live")
+    mute = _slice(reference.source_id, Fraction(1), Fraction(2), "clip-mute", audible=False)
+    rows = _project(healthy, reference, live, mute)
+    assert [(row.instance_id, row.status, row.source_id) for row in rows] == [
+        ("clip-live", "success", reference.source_id),
+        ("clip-mute", "inaudible", reference.source_id),
+    ]
+    assert _project(broken, reference, live)[0].status == "keep_all"
+    # 불가청이 keep_all보다 강한 진술이다 — 둘이 겹치면 inaudible이 이긴다.
+    assert _project(broken, reference, mute)[0].status == "inaudible"
+
+
+def test_healthy_inputs_still_produce_the_exact_union() -> None:
+    reference = _reference()
+    trace = _trace(reference.source_id, key=reference.analysis_key)
+    vad = _result(
+        (
+            _window(0, 4 * RATE, 0.1),
+            _window(4 * RATE, 5 * RATE, 0.9),
+            _window(5 * RATE, TOTAL, 0.1),
+        )
+    )
+    guard = build_source_guard(trace, reference, vad, _projection(), (), CFG)
+    # 검출 probe의 기준선 그대로 — 골격 [1,2)와 VAD [4,5)만 보호다.
+    assert guard.status == "success"
+    assert guard.protected == (
+        SampleRange(_samples("1/2"), _samples("5/2")),
+        SampleRange(_samples("7/2"), _samples("11/2")),
+    )
+    assert guard.vad_without_text == (SampleRange(4 * RATE, 5 * RATE),)
+    assert len(guard.review) == 1
+
+
+def test_overlapping_windows_across_channels_are_valid_coverage() -> None:
+    reference = _reference()
+    trace = _trace(reference.source_id, key=reference.analysis_key)
+    vad = _result(
+        (
+            _window(0, TOTAL, 0.1),
+            _window(0, TOTAL, 0.05, channel=1),
+        )
+    )
+    guard = build_source_guard(trace, reference, vad, _projection(), (), CFG)
+    assert guard.status == "success"
+    # 채널끼리 겹쳐도 합집합이 [0, TOTAL)을 덮으면 합격 — 양쪽 다 임계값 아래다.
+    assert guard.protected == (SampleRange(_samples("1/2"), _samples("5/2")),)
