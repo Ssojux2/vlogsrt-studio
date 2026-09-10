@@ -13,7 +13,9 @@
 - **승인은 세 조건의 교집합이다.** 알려진 후보 + 명시적 `reason_kind`
   `repetitive_ordinary_broll` + 신뢰도 ≥ `max(cfg.vision_apply_confidence, 0.8)` —
   바닥 위로만 올린 실효 한도다. 한 번뿐인 사건(`unique_event`)과 `uncertain`은
-  숫자 신뢰도와 무관하게 `keep_all`로 정규화된다.
+  숫자 신뢰도와 무관하게 `keep_all`로 정규화된다. 레일 두 값은 조립·해석 문에서
+  값역 검사를 다시 지나는데, 프로그래밍 구성의 NaN이 `max(nan, 0.8)`의 비교를
+  무력화해 승인 문을 열었기 때문이다(루트 재현) — 값역 밖은 예외로 닫는다.
 - **호출 경계는 닫혀 있다가 열린다.** `vlogsrt.transcribe.request_vision`이 유일한
   비전 호출 지점이고 명시적 `online=True` 없이는 클라이언트를 만지지도 않는다.
   모델은 `cfg.vision_model` 문자열 그대로고 폴백·재시도가 없다. 가짜 클라이언트로만
@@ -501,6 +503,122 @@ def test_a_contract_violating_response_is_an_error_that_keeps_the_block(reply: A
     assert decision.evidence_frame_ids == ()
     assert decision.confidence == 0.0
     assert "계약" in decision.reason
+
+
+# ─── 설정 레일 — 검증 없이 만든 구성도 문에서 닫는다 ──────────────────────
+
+
+_BAD_CONFIGS = [
+    pytest.param("vision_apply_confidence", float("nan"), id="confidence-nan"),
+    pytest.param("vision_apply_confidence", float("inf"), id="confidence-inf"),
+    pytest.param("vision_apply_confidence", float("-inf"), id="confidence-neg-inf"),
+    pytest.param("vision_apply_confidence", -0.5, id="confidence-below-range"),
+    pytest.param("vision_apply_confidence", 1.5, id="confidence-above-range"),
+    pytest.param("vision_apply_confidence", True, id="confidence-bool"),
+    pytest.param("vision_max_images", float("nan"), id="max-images-nan"),
+    pytest.param("vision_max_images", 0, id="max-images-zero"),
+    pytest.param("vision_max_images", -1, id="max-images-negative"),
+    pytest.param("vision_max_images", True, id="max-images-bool"),
+    pytest.param("vision_max_images", 16.0, id="max-images-float"),
+]
+"""`load_project_config`의 값역 검사를 건너뛴 채 흘러들 수 있는 값들."""
+
+
+def test_a_nan_apply_confidence_cannot_open_the_accept_gate() -> None:
+    """루트가 재현한 우회를 닫는다 — `max(nan, 0.8)`이 nan이고 `0.5 < nan`이
+    거짓이라서, 신뢰도 0.5의 후보가 승인으로 새었다. 설정 결함은 요청 결함과 같은
+    프로그래머 잘못이라 예외로 닫는다 — keep_all 오류 판정은 모델 탈로 둔갑시키고
+    못 박은 값으로 덮으면 버그를 감춘다.
+    """
+    cfg = dataclasses.replace(CFG, vision_apply_confidence=float("nan"))
+    with pytest.raises(policy.VisionPolicyError, match="vision_apply_confidence"):
+        policy.parse_decision(_request(), _reply(confidence=0.5), cfg)
+
+
+@pytest.mark.parametrize(("field", "value"), _BAD_CONFIGS)
+def test_a_defective_config_raises_from_parse_decision(field: str, value: object) -> None:
+    """파일 해석의 값역 검사는 프로그래밍 구성에는 닿지 않는다 — 문에서 다시 본다."""
+    cfg = dataclasses.replace(CFG, **{field: value})
+    with pytest.raises(policy.VisionPolicyError, match=field):
+        policy.parse_decision(_request(), _reply(confidence=0.5), cfg)
+
+
+@pytest.mark.parametrize(("field", "value"), _BAD_CONFIGS)
+def test_a_defective_config_raises_from_build_payload_before_assembly(
+    tmp_path: Path, field: str, value: object
+) -> None:
+    """깨진 설정은 조립 전에 닫는다 — 유료 호출은 결함 있는 레일에 값을 쓰지 않는다."""
+    cfg = dataclasses.replace(CFG, **{field: value})
+    samples = _samples_for(tmp_path, "f-00", "f-01", "f-02")
+    with pytest.raises(policy.VisionPolicyError, match=field):
+        policy.build_payload(_request(), samples, cfg)
+
+
+def test_the_config_gate_closes_before_the_images_are_read(tmp_path: Path) -> None:
+    """설정 검사는 이미지 읽기보다 앞이다 — 해시 결함이 아니라 설정이 먼저 닫는다."""
+    stale = dataclasses.replace(
+        _sample(tmp_path, "f-01", data=b"stale-bytes"),
+        image_sha256=hashlib.sha256(b"different-bytes").hexdigest(),
+    )
+    cfg = dataclasses.replace(CFG, vision_apply_confidence=float("nan"))
+    with pytest.raises(policy.VisionPolicyError, match="vision_apply_confidence"):
+        policy.build_payload(
+            _request(), (_sample(tmp_path, "f-00"), stale, _sample(tmp_path, "f-02")), cfg
+        )
+
+
+def test_a_stricter_admissible_confidence_still_wins() -> None:
+    """값역 안의 더 센 설정은 그대로 산다 — 닫히는 것은 결함이지 세팅의 자유가 아니다."""
+    cfg = dataclasses.replace(CFG, vision_apply_confidence=0.95)
+    rejected = policy.parse_decision(_request(), _reply(confidence=0.9), cfg)
+    assert rejected.status == "keep_all"
+    assert rejected.choice == policy.KEEP_ALL
+
+    accepted = policy.parse_decision(_request(), _reply(confidence=0.95), cfg)
+    assert accepted.status == "accepted"
+
+
+def test_a_smaller_admissible_frame_cap_still_wins(tmp_path: Path) -> None:
+    """값역 안의 더 낮은 한도는 그대로 산다 — 16장 요청도 4장 한도에 걸린다."""
+    cfg = dataclasses.replace(CFG, vision_max_images=4)
+    sixteen = tuple(f"f-{i:02d}" for i in range(16))
+    with pytest.raises(policy.VisionPolicyError, match="한도"):
+        policy.build_payload(_request(frame_ids=sixteen), _samples_for(tmp_path, *sixteen), cfg)
+
+    four = sixteen[:4]
+    payload = policy.build_payload(_request(frame_ids=four), _samples_for(tmp_path, *four), cfg)
+    assert len(_image_parts(payload)) == 4
+
+
+@pytest.mark.parametrize(
+    ("configured", "reply_confidence", "expected_status"),
+    [
+        pytest.param(0.8, 0.93, "accepted", id="at-the-rail"),
+        pytest.param(0.0, 0.93, "accepted", id="low-extreme-floor-holds"),
+        pytest.param(1.0, 0.93, "keep_all", id="high-extreme-is-stricter"),
+        pytest.param(1.0, 1.0, "accepted", id="high-extreme-accepts-a-perfect-score"),
+    ],
+)
+def test_apply_confidence_at_the_rail_and_extremes_is_admissible(
+    configured: float, reply_confidence: float, expected_status: str
+) -> None:
+    """레일 그대로(0.8)와 양 끝(0.0, 1.0)은 프로그래머의 정당한 선택이다."""
+    cfg = dataclasses.replace(CFG, vision_apply_confidence=configured)
+    decision = policy.parse_decision(_request(), _reply(confidence=reply_confidence), cfg)
+    assert decision.status == expected_status
+
+
+@pytest.mark.parametrize("configured", [16, 1])
+def test_frame_cap_at_the_rail_and_the_extreme_is_admissible(
+    tmp_path: Path, configured: int
+) -> None:
+    """천장 그대로(16)와 한 장(1)도 정당한 선택이다 — 문은 닫히되 조여 붙이지 않는다."""
+    cfg = dataclasses.replace(CFG, vision_max_images=configured)
+    frame_ids = tuple(f"f-{i:02d}" for i in range(configured))
+    payload = policy.build_payload(
+        _request(frame_ids=frame_ids), _samples_for(tmp_path, *frame_ids), cfg
+    )
+    assert len(_image_parts(payload)) == configured
 
 
 # ─── 호출 경계 조합 — 가짜 클라이언트로 배선만 증명한다 ──────────────────

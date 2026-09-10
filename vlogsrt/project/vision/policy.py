@@ -20,6 +20,10 @@
   `min(cfg.vision_max_images, 16)` — 설정은 천장 아래로만 줄인다. 적용 신뢰도는
   `max(cfg.vision_apply_confidence, 0.8)` — 설정은 바닥 위로만 올린다. 프로젝트
   설정 하나로 유료 호출의 프레임 수를 늘리거나 자동 적용의 문을 열 수는 없다.
+  레일 두 값은 조립·해석 문에서 타입·값역 검사를 다시 지나는데, NaN은 비교
+  자체를 무력화해서(`max(nan, 0.8)`이 nan, `0.5 < nan`이 거짓) 검증 없이 만든
+  설정이 승인 문을 열었기 때문이다. 값역 밖은 못 박은 값으로 덮지 않고 예외로
+  닫는다 — 설정 결함은 요청 결함과 같은 프로그래머 잘못이지 모델 잘못이 아니다.
   `reason_kind` 토큰은 모델과의 계약 철자라 이 파일에 얼어 있다.
 
 이미지는 P5-04가 뽑아 해시까지 매긴 파일이다 — 조립은 결정적이지만 바이트는
@@ -78,12 +82,15 @@ _APPLY_CONFIDENCE_FLOOR = 0.8
 
 
 def _effective_max_images(cfg: ProjectConfig) -> int:
-    """실효 프레임 한도 — 설정과 천장 중 작은 쪽."""
+    """실효 프레임 한도 — 설정과 천장 중 작은 쪽. 값역은 `_require_config`가 지켰다."""
     return min(cfg.vision_max_images, _FRAME_CAP_CEILING)
 
 
 def _effective_apply_confidence(cfg: ProjectConfig) -> float:
-    """실효 적용 신뢰도 — 설정과 바닥 중 큰 쪽. 더 센 설정은 그대로 산다."""
+    """실효 적용 신뢰도 — 설정과 바닥 중 큰 쪽. 더 센 설정은 그대로 산다.
+
+    값역은 `_require_config`가 이미 지켰다 — 여기 오는 값은 유한한 [0, 1] 실수다.
+    """
     return max(cfg.vision_apply_confidence, _APPLY_CONFIDENCE_FLOOR)
 
 
@@ -142,8 +149,10 @@ def build_payload(
     """요청과 프레임을 호출 페이로드로 만든다 — 깨진 요청은 여기서 닫는다.
 
     유료 호출은 깨진 요청에 값을 쓰지 않는다: 신원·한도·짝 검사가 이미지를 읽기
-    전에 끝난다. 이미지는 요청 순서로, 글월 안내가 앞에 한 번.
+    전에 끝난다. 설정 레일도 같은 자리에서 닫는다. 이미지는 요청 순서로, 글월
+    안내가 앞에 한 번.
     """
+    _require_config(cfg)
     _require_request(request, cfg)
     by_frame = _samples_by_frame_id(request.frame_ids, samples)
     return {
@@ -160,6 +169,32 @@ def build_payload(
             }
         ]
     }
+
+
+def _require_config(cfg: ProjectConfig) -> None:
+    """레일 두 값의 타입·값역 — 조립과 해석 양쪽 문에서 가장 먼저 지난다.
+
+    `load_project_config`은 파일에서 읽을 때만 범위를 검증한다. 프로그래밍적으로
+    만든 설정은 그 검사를 건너뛰는데, IEEE-754의 NaN은 비교를 무력화한다 —
+    `max(nan, 0.8)`이 nan이 되고 `0.5 < nan`이 거짓이라 신뢰도 0.5의 후보가
+    승인으로 새었다(루트 재현). 그래서 문에서 다시 검사하고 결함은 예외로 닫는다:
+    못 박은 값으로 덮으면 호출자의 버그를 감추고 `keep_all` 오류 판정으로
+    돌리면 모델 탓으로 둔갑시킨다. 검사 칸은 `_confidence_value`와 같은
+    idiom이다 — bool 제외·유한·값역을 한 줄로 본다.
+    """
+    confidence: object = cfg.vision_apply_confidence
+    if (
+        isinstance(confidence, bool)
+        or not isinstance(confidence, (int, float))
+        or not math.isfinite(float(confidence))
+        or not 0.0 <= float(confidence) <= 1.0
+    ):
+        raise VisionPolicyError(
+            f"vision_apply_confidence는 유한한 0 이상 1 이하 실수여야 한다: {confidence!r}"
+        )
+    max_images: object = cfg.vision_max_images
+    if isinstance(max_images, bool) or not isinstance(max_images, int) or max_images < 1:
+        raise VisionPolicyError(f"vision_max_images는 1 이상의 정수여야 한다: {max_images!r}")
 
 
 def _require_request(request: VisionRequest, cfg: ProjectConfig) -> None:
@@ -299,10 +334,13 @@ def parse_decision(
 ) -> VisionDecision:
     """돌아온 응답을 판정으로 정규화한다 — 응답 결함은 예외가 아니라 오류 판정이다.
 
-    요청 결함은 프로그래머 잘못이라 닫히고(`build_payload`와 같은 검사), 응답
-    결함은 모델 잘못이라 `keep_all` 오류 판정으로 남는다. 둘을 섞으면 모델이
-    보낸 쓰레기를 우리 버그로 오독하게 된다.
+    요청·설정 결함은 프로그래머 잘못이라 닫히고(`build_payload`와 같은 검사),
+    응답 결함은 모델 잘못이라 `keep_all` 오류 판정으로 남는다. 설정 검사는 오류
+    판정을 만드는 `try` 바깥에 있다 — 나쁜 설정이 "모델이 어겼다" 기록으로
+    세탁되면 안 되기 때문이다. 둘을 섞으면 모델이 보낸 쓰레기를 우리 버그로
+    오독하게 된다.
     """
+    _require_config(cfg)
     _require_request(request, cfg)
     try:
         choice, reason, reason_kind, evidence, confidence = _decision_fields(request, raw)
