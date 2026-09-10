@@ -426,12 +426,16 @@ def create_vision_client(*, api_key: str, base_url: str | None) -> Any:
 
     `base_url=None`은 환경 상속이 아니라 공개 엔드포인트다(`_PUBLIC_OPENAI_BASE_URL`
     문서 참조). 호출자가 준 base_url은 그대로 간다.
+
+    `max_retries=0`도 명시적으로 못 박는다 — SDK 기본값(2, 설치된 3.8.0 실측)은
+    `request_vision`의 "재시도 없음" 계약 뒤에 숨어서 429·타임아웃을 조용한 지연으로
+    바꾼다. 실패는 한 번의 명시적 시도여야 한다.
     """
     import openai  # 지연 import — openai를 얻는 유일한 파일이다(불변 규칙 5)
 
     if base_url:
-        return openai.OpenAI(api_key=api_key, base_url=base_url)
-    return openai.OpenAI(api_key=api_key, base_url=_PUBLIC_OPENAI_BASE_URL)
+        return openai.OpenAI(api_key=api_key, base_url=base_url, max_retries=0)
+    return openai.OpenAI(api_key=api_key, base_url=_PUBLIC_OPENAI_BASE_URL, max_retries=0)
 
 
 def request_vision(

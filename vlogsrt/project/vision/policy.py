@@ -13,12 +13,14 @@
   글월(자릿수 한도 초과·깊은 중첩·float 밖 큰 정수)도 예외로 새는 것이 아니라 같은
   오류 판정이 된다. 어떤 응답도 편집을 스스로 만들거나 지을 수 없다.
 - **승인은 세 조건의 교집합이다.** 알려진 후보 + 명시적 `reason_kind`
-  `repetitive_ordinary_broll` + 신뢰도 ≥ `cfg.vision_apply_confidence`. 한 번뿐인
+  `repetitive_ordinary_broll` + 신뢰도 ≥ 실효 적용 한도. 한 번뿐인
   사건(`unique_event`)과 `uncertain`은 **숫자 신뢰도와 무관하게** `keep_all`로
   정규화된다 — "한 번뿐인 장면"을 높은 확신으로 잘라내는 일이 없게 하기 위해서다.
-- **모든 임계값은 설정에서 온다.** 프레임 수 한도는 `cfg.vision_max_images`,
-  적용 신뢰도는 `cfg.vision_apply_confidence`. `reason_kind` 토큰은 모델과의
-  계약 철자라 이 파일에 얼어 있다.
+- **임계값은 설정에서 오되 안전선을 못 넘는다.** 프레임 수 한도는
+  `min(cfg.vision_max_images, 16)` — 설정은 천장 아래로만 줄인다. 적용 신뢰도는
+  `max(cfg.vision_apply_confidence, 0.8)` — 설정은 바닥 위로만 올린다. 프로젝트
+  설정 하나로 유료 호출의 프레임 수를 늘리거나 자동 적용의 문을 열 수는 없다.
+  `reason_kind` 토큰은 모델과의 계약 철자라 이 파일에 얼어 있다.
 
 이미지는 P5-04가 뽑아 해시까지 매긴 파일이다 — 조립은 결정적이지만 바이트는
 디스크에서 읽고, 읽은 바이트의 해시가 샘플 해시와 다르면 닫는다. 낡은 이미지를
@@ -57,6 +59,32 @@ REASON_KINDS = frozenset({REASON_REPETITIVE_BROLL, REASON_UNIQUE_EVENT})
 
 _IMAGE_DATA_URL_PREFIX = "data:image/jpeg;base64,"
 """P5-04 추출이 내는 JPEG — 다른 형식은 이 계층에 들어오지 않는다."""
+
+_FRAME_CAP_CEILING = 16
+"""한 번의 비전 호출에 실을 수 있는 프레임 수의 못 박은 천장.
+
+`cfg.vision_max_images`는 이보다 **줄일 수만** 있다 — 프로젝트 설정이 숫자를
+올려도 유료 호출의 크기가 따라 자라는 길이 없다(루트가 재현한 우회).
+기본값과 같은 16이다.
+"""
+
+_APPLY_CONFIDENCE_FLOOR = 0.8
+"""승인(자동 적용)에 필요한 신뢰도의 못 박은 바닥.
+
+`cfg.vision_apply_confidence`는 이보다 **올릴 수만** 있다 — 프로젝트 설정이
+숫자를 내려도 블록을 통째로 갈아끼우는 문이 열리지 않는다(같은 재현).
+기본값과 같은 0.8이다.
+"""
+
+
+def _effective_max_images(cfg: ProjectConfig) -> int:
+    """실효 프레임 한도 — 설정과 천장 중 작은 쪽."""
+    return min(cfg.vision_max_images, _FRAME_CAP_CEILING)
+
+
+def _effective_apply_confidence(cfg: ProjectConfig) -> float:
+    """실효 적용 신뢰도 — 설정과 바닥 중 큰 쪽. 더 센 설정은 그대로 산다."""
+    return max(cfg.vision_apply_confidence, _APPLY_CONFIDENCE_FLOOR)
 
 
 class VisionPolicyError(RuntimeError):
@@ -145,10 +173,9 @@ def _require_request(request: VisionRequest, cfg: ProjectConfig) -> None:
         if frame_id in seen:
             raise VisionPolicyError(f"frame_id {frame_id!r}가 요청에 두 번 있다 — 고유해야 한다")
         seen.add(frame_id)
-    if len(request.frame_ids) > cfg.vision_max_images:
-        raise VisionPolicyError(
-            f"프레임 {len(request.frame_ids)}개는 한도 {cfg.vision_max_images}개를 넘는다"
-        )
+    cap = _effective_max_images(cfg)
+    if len(request.frame_ids) > cap:
+        raise VisionPolicyError(f"프레임 {len(request.frame_ids)}개는 한도 {cap}개를 넘는다")
     _require_candidates(request.candidates)
     if not isinstance(request.adjacent_context, str):
         raise VisionPolicyError(
@@ -379,11 +406,12 @@ def _normalize(
             confidence,
             "keep_all",
         )
-    if confidence < cfg.vision_apply_confidence:
+    threshold = _effective_apply_confidence(cfg)
+    if confidence < threshold:
         return VisionDecision(
             request.block_id,
             KEEP_ALL,
-            f"신뢰도 {confidence}가 적용 한도 {cfg.vision_apply_confidence}에 못 미친다: {reason}",
+            f"신뢰도 {confidence}가 적용 한도 {threshold}에 못 미친다: {reason}",
             tuple(evidence),
             confidence,
             "keep_all",

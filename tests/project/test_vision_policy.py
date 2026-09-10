@@ -3,16 +3,17 @@
 네 가지 선을 증명한다:
 
 - **페이로드는 증거만 싣는다.** 프레임은 Base64 `image_url` 데이터로 **공급된
-  순서 그대로**, 설정 한도(`cfg.vision_max_images`) 안의 고유 아이디만 들어간다.
-  파일 경로·XML·시각·음소거 권한은 실리지 않는다 — 모델이 고르는 것은 우리가
-  만든 후보 아이디 하나뿐이고, 후보 창의 초 숫자조차 나가지 않는다.
+  순서 그대로**, 실효 한도 `min(cfg.vision_max_images, 16)` 안의 고유 아이디만
+  들어간다 — 설정은 천장 아래로만 줄인다. 파일 경로·XML·시각·음소거 권한은 실리지
+  않는다 — 모델이 고르는 것은 우리가 만든 후보 아이디 하나뿐이고, 후보 창의 초
+  숫자조차 나가지 않는다.
 - **파서는 언제나 블록을 보존한다.** 모르는 아이디·NaN·범위 밖 신뢰도·깨진 꼴은
   전부 오류 상태의 `keep_all` 리뷰로 정규화된다. 모델 응답 하나가 편집을 만들거나
   지울 수 있는 길은 없다.
 - **승인은 세 조건의 교집합이다.** 알려진 후보 + 명시적 `reason_kind`
-  `repetitive_ordinary_broll` + 신뢰도 ≥ `cfg.vision_apply_confidence`. 한 번뿐인
-  사건(`unique_event`)과 `uncertain`은 숫자 신뢰도와 무관하게 `keep_all`로
-  정규화된다.
+  `repetitive_ordinary_broll` + 신뢰도 ≥ `max(cfg.vision_apply_confidence, 0.8)` —
+  바닥 위로만 올린 실효 한도다. 한 번뿐인 사건(`unique_event`)과 `uncertain`은
+  숫자 신뢰도와 무관하게 `keep_all`로 정규화된다.
 - **호출 경계는 닫혀 있다가 열린다.** `vlogsrt.transcribe.request_vision`이 유일한
   비전 호출 지점이고 명시적 `online=True` 없이는 클라이언트를 만지지도 않는다.
   모델은 `cfg.vision_model` 문자열 그대로고 폴백·재시도가 없다. 가짜 클라이언트로만
@@ -185,6 +186,25 @@ def test_payload_accepts_the_configured_frame_limit_and_rejects_one_more(
     one_more = frame_ids + (f"f-{limit:02d}",)
     with pytest.raises(policy.VisionPolicyError, match=str(limit)):
         policy.build_payload(_request(frame_ids=one_more), _samples_for(tmp_path, *one_more), CFG)
+
+
+def test_config_cannot_raise_the_frame_cap_past_sixteen(tmp_path: Path) -> None:
+    """천장 16은 못 박은 것이다 — 설정이 17을 말해도 17장은 유료 호출에 안 간다.
+
+    루트가 재현한 우회다: 한도 검사가 `cfg.vision_max_images`를 그대로 믿어서,
+    프로젝트 설정이 이 숫자를 올리면 프레임 수 제한이 통째로 풀렸다. 실효 한도는
+    `min(cfg.vision_max_images, 16)`이다.
+    """
+    cfg = dataclasses.replace(CFG, vision_max_images=17)
+    seventeen = tuple(f"f-{i:02d}" for i in range(17))
+    with pytest.raises(policy.VisionPolicyError, match="16"):
+        policy.build_payload(_request(frame_ids=seventeen), _samples_for(tmp_path, *seventeen), cfg)
+
+    sixteen = seventeen[:16]
+    payload = policy.build_payload(
+        _request(frame_ids=sixteen), _samples_for(tmp_path, *sixteen), cfg
+    )
+    assert len(_image_parts(payload)) == 16
 
 
 @pytest.mark.parametrize(
@@ -368,6 +388,33 @@ def test_acceptance_needs_the_configured_confidence() -> None:
     assert below.status == "keep_all"
     assert below.choice == policy.KEEP_ALL
     assert "한도" in below.reason
+
+
+def test_config_cannot_lower_the_apply_confidence_past_the_floor() -> None:
+    """바닥 0.8은 못 박은 것이다 — 설정이 0.1을 말해도 0.5는 승인되지 않는다.
+
+    루트가 재현한 우회다: 승인 검사가 `cfg.vision_apply_confidence`를 그대로 믿어서,
+    프로젝트 설정이 이 숫자를 내리면 자동 적용 문이 통째로 열렸다. 실효 한도는
+    `max(cfg.vision_apply_confidence, 0.8)`이다.
+    """
+    cfg = dataclasses.replace(CFG, vision_apply_confidence=0.1)
+    rejected = policy.parse_decision(_request(), _reply(confidence=0.5), cfg)
+    assert rejected.status == "keep_all"
+    assert rejected.choice == policy.KEEP_ALL
+    assert "한도" in rejected.reason
+
+    accepted = policy.parse_decision(_request(), _reply(confidence=0.8), cfg)
+    assert accepted.status == "accepted"
+
+
+def test_a_stricter_configured_confidence_is_retained() -> None:
+    """바닥은 최소값이다 — 설정이 0.9를 말하면 실효 한도도 0.9다."""
+    cfg = dataclasses.replace(CFG, vision_apply_confidence=0.9)
+    rejected = policy.parse_decision(_request(), _reply(confidence=0.85), cfg)
+    assert rejected.status == "keep_all"
+
+    accepted = policy.parse_decision(_request(), _reply(confidence=0.9), cfg)
+    assert accepted.status == "accepted"
 
 
 def test_a_normalized_decision_keeps_the_models_reason_for_review() -> None:

@@ -997,7 +997,11 @@ def test_vision_timeout_is_an_explicit_error_not_a_retry() -> None:
 def test_vision_client_takes_explicit_key_and_base_url(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """값은 받은 것만 간다 — base_url이 없으면 공개 엔드포인트를 명시적으로 못 박는다."""
+    """값은 받은 것만 간다 — base_url이 없으면 공개 엔드포인트를 명시적으로 못 박는다.
+
+    `max_retries=0`도 못 박는다 — SDK 기본값 2는 `request_vision`의 "재시도 없음"
+    계약 뒤에 숨은 재시도다(429·타임아웃이 조용한 지연이 되면 안 된다).
+    """
     built, sentinel = _fake_openai(monkeypatch)
     with_base_url = create_vision_client(
         api_key="vision-key", base_url="https://vision.example/api"
@@ -1005,8 +1009,16 @@ def test_vision_client_takes_explicit_key_and_base_url(
     without_base_url = create_vision_client(api_key="vision-key", base_url=None)
     assert with_base_url is sentinel and without_base_url is sentinel
     assert built == [
-        {"api_key": "vision-key", "base_url": "https://vision.example/api"},
-        {"api_key": "vision-key", "base_url": "https://api.openai.com/v1"},
+        {
+            "api_key": "vision-key",
+            "base_url": "https://vision.example/api",
+            "max_retries": 0,
+        },
+        {
+            "api_key": "vision-key",
+            "base_url": "https://api.openai.com/v1",
+            "max_retries": 0,
+        },
     ]
 
 
@@ -1025,7 +1037,13 @@ def test_vision_client_ignores_the_environment_and_legacy_helpers(
     built, _ = _fake_openai(monkeypatch)
 
     create_vision_client(api_key="vision-key", base_url=None)
-    assert built == [{"api_key": "vision-key", "base_url": "https://api.openai.com/v1"}]
+    assert built == [
+        {
+            "api_key": "vision-key",
+            "base_url": "https://api.openai.com/v1",
+            "max_retries": 0,
+        }
+    ]
 
 
 def test_vision_client_without_base_url_does_not_inherit_the_legacy_env(
@@ -1040,6 +1058,7 @@ def test_vision_client_without_base_url_does_not_inherit_the_legacy_env(
     client = create_vision_client(api_key="vision-key", base_url=None)
     assert str(client.base_url).rstrip("/") == "https://api.openai.com/v1"
     assert client.api_key == "vision-key"
+    assert client.max_retries == 0  # SDK 기본값 2는 숨은 재시도다 — 여기선 한 번뿐이어야 한다
 
 
 def test_vision_client_keeps_the_caller_base_url_verbatim_under_the_legacy_env(
@@ -1048,6 +1067,7 @@ def test_vision_client_keeps_the_caller_base_url_verbatim_under_the_legacy_env(
     monkeypatch.setenv("OPENAI_BASE_URL", "https://legacy-stt-proxy.example/v1")
     client = create_vision_client(api_key="vision-key", base_url="https://vision.example/api")
     assert str(client.base_url).rstrip("/") == "https://vision.example/api"
+    assert client.max_retries == 0  # 사용자 base_url에서도 SDK 숨은 재시도는 못 박아 뺀다
 
 
 def test_offline_defaults_and_lazy_clients_make_zero_constructions(
