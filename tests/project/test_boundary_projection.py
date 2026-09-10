@@ -574,7 +574,8 @@ def test_all_empty_fallback_regenerates_the_source_srt_bytes(tmp_path: Path) -> 
 
 
 def test_trailing_cut_replacement_maps_through_the_slice_shift(tmp_path: Path) -> None:
-    """끝머리 잘림 — 슬라이스에 온전한 큐가 없어도 닻은 정확하다(닿은 자루 끝)."""
+    """끝머리 잘림 — 슬라이스에 온전한 큐가 없어도 닻은 정확하다. 요청이 슬라이스
+    닻을 직접 싣고 있으므로 유도도 가설도 없다(P4-04b)."""
     world, transcript = _trailing(tmp_path)
     projection = world.project([transcript])
     (replaced,) = (cue for cue in projection.cues if cue.provenance == "boundary")
@@ -582,6 +583,57 @@ def test_trailing_cut_replacement_maps_through_the_slice_shift(tmp_path: Path) -
     assert replaced.source_end == Fraction(119, 20)
     assert replaced.timeline_start == Fraction(33, 20)
     assert replaced.timeline_end == Fraction(39, 20)
+
+
+def test_single_cue_spanning_the_whole_slice_places_from_the_anchor(tmp_path: Path) -> None:
+    """자루를 통째로 덮은 큐 하나 — 옛 구간 교집합 유도가 가설 없이는 좁힐 수
+    없던 모양이다(P4-04b). 요청은 자루 전체 [4, 6]이고 닻을 직접 싣는다."""
+    world = _world(
+        tmp_path,
+        [_asset_xml("r2")],
+        [_clip_xml("r2", offset="0s", start="2600/25s")],
+        [
+            _trace(
+                "acid-r2",
+                [_CueSpec(Fraction(39, 10), Fraction(61, 10))],
+                [_SegSpec(3.85, 6.15)],
+            )
+        ],
+    )
+    (request,) = world.plan.requests
+    assert (request.source_start, request.source_end) == (Fraction(4), Fraction(6))
+    assert request.timeline_start == Fraction(0)
+    (clamped,) = world.plan.clamped_cues
+    assert (clamped.timeline_start, clamped.timeline_end) == (Fraction(0), Fraction(2))
+    transcript = _transcript(
+        request,
+        [_bcue(0, Fraction(21, 5), Fraction(22, 5), BOUNDARY_TEXT, source_id="acid-r2")],
+    )
+
+    projection = world.project([transcript])
+
+    (restored,) = projection.cues
+    assert restored.provenance == "boundary"
+    assert restored.source_start == Fraction(21, 5)
+    assert restored.source_end == Fraction(22, 5)
+    assert restored.timeline_start == Fraction(1, 5)
+    assert restored.timeline_end == Fraction(2, 5)
+
+
+def test_slice_anchor_contradicting_a_clamped_cue_rejects(tmp_path: Path) -> None:
+    """요청의 닻이 묶인 큐의 배치와 어긋나면 닫는다 — 유도로 덮는 길은 없다."""
+    world, boundary = _leading(tmp_path)
+    (request,) = world.plan.requests
+    clamped, untouched = world.plan.clamped_cues
+    assert clamped.slice_id == request.slice_id
+    drifted = replace(
+        clamped,
+        timeline_start=clamped.timeline_start + Fraction(1),
+        timeline_end=clamped.timeline_end + Fraction(1),
+    )
+    forged = replace(world.plan, clamped_cues=(drifted, untouched))
+    with pytest.raises(ValueError, match="모순"):
+        project_boundaries(forged, [boundary], world.source, world.traces)
 
 
 # ─────────────────────────────────────────────────────────────

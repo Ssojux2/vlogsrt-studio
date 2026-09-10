@@ -178,6 +178,7 @@ def _request(
         pcm_analysis_key=pcm_analysis_key,
         source_start=Fraction(start, RATE) + origin,
         source_end=Fraction(end, RATE) + origin,
+        timeline_start=Fraction(0),  # 이 실행기가 보는 재료가 아니다(P4-04b)
         sample_range=SampleRange(start, end),
         source_segment_ids=("acid-1-seg-0",),
     )

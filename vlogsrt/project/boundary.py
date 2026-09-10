@@ -58,11 +58,13 @@ P4-04는 그 결과를 **갈아끼운다** — 위의 실행은 그대로 있고
 - **갈아끼우기는 정확히 (슬라이스, 인스턴스, 소스 구간) 스코프다.** 성공한 경계
   기록의 이미 정제된 큐가 그 스코프 안의 소스 큐를 대체한다 — 둘을 함께 내지
   않고 어느 쪽도 다시 정제·조판하지 않는다. 형제 인스턴스는 손대지 않는다.
-- **타임라인 이동량은 묶인 큐의 두 시계에서 유도한다.** 슬라이스 안에서
-  `타임라인 = 파일 시계 + k`의 k는 상수다(이웃 합침이 양쪽 시계를 같은 걸음으로
-  이어놓았다). 경계 큐의 디코드 국소 시각에 원점을 정확히 한 번 더하고 k를 더해
-  타임라인이 된다. 밀리초 검사는 교체 뒤에 다시 잰다 — 접힌 큐는 증거로 남고
-  SRT에서 그 장만 뺀다(P3-03과 같은 선).
+- **타임라인 이동량은 요청의 정확한 슬라이스 닻이다.** 계획이 요청에
+  `slice.timeline_start + (요청 시작 − slice.source_start)`를 실어 보내므로 투영은
+  `타임라인 = 파일 시계 + (닻 − 요청 시작)`을 그대로 쓴다. 예전에는 묶인 큐의 두
+  시계에서 구간 교집합으로 이 값을 유도했지만 그 온전함이 다른 계층의 네 불변
+  위에 서 있었으므로 유도를 없애고 닻만 믿는다(P4-04b) — 닻이 큐의 배치와
+  어긋나면 유도하지 않고 닫는다. 밀리초 검사는 교체 뒤에 다시 잰다 — 접힌 큐는
+  증거로 남고 SRT에서 그 장만 뺀다(P3-03과 같은 선).
 - **빈·실패 경계는 조용한 성공이 아니다.** 묶인 원문에 `boundary_unresolved`
   깃발과 요청 신원을 남기고 사람의 검토로 넘긴다. 잠금·부재는 계획의 것을
   그대로 내놓는다 — 선언된 무음은 완결이고 되풀이 가능한 실패만 수락을 막는다.
@@ -411,6 +413,10 @@ class BoundaryRequest:
     `source_start/source_end`는 폐쇄가 요청한 경계 그대로고 `sample_range`는
     환산(ceil-start/floor-end) 뒤 실제 남는 프레임이다 — 둘은 다른 기록이다.
     실측 끝점의 파일 시계는 `Fraction(프레임, 주파수) + 참조 원점`으로 되돌린다.
+    `timeline_start`는 이 요청의 입력 타임라인 시작(슬라이스 닻)이다 — P4-04
+    투영이 묶인 큐에서 유도하지 않고 이 값을 그대로 쓴다(P4-04b). 신원 재료는
+    아니다: `slice_id`가 이미 슬라이스의 네 끝점을 해시하므로 닻을 넣으면 같은
+    계획의 요청 신원이 갈라진다.
     """
 
     request_id: str
@@ -420,6 +426,7 @@ class BoundaryRequest:
     pcm_analysis_key: str
     source_start: Fraction
     source_end: Fraction
+    timeline_start: Fraction
     sample_range: SampleRange
     source_segment_ids: tuple[str, ...]
 
@@ -867,6 +874,7 @@ def _sealed_request(
         pcm_analysis_key=bucket.trace.pcm_analysis_key,
         source_start=start,
         source_end=end,
+        timeline_start=bucket.slice_.timeline_start + (start - bucket.slice_.source_start),
         sample_range=samples,
         source_segment_ids=segment_ids,
     )
@@ -2020,49 +2028,6 @@ def _require_transcript_origin(transcript: BoundaryTranscript, trace: SourceTrac
             )
 
 
-def _slice_timeline_shift(cues: Sequence[ProjectCue], request: BoundaryRequest) -> Fraction:
-    """슬라이스의 타임라인 이동량 k — 묶인 큐의 두 시계에서 정확히 유도한다.
-
-    슬라이스 안에서 `타임라인 = 파일 시계 + k`의 k는 상수다(이웃 합침이 양쪽
-    시계를 같은 걸음으로 이어놓았다). 큐 하나가 주는 것은 k를 담는 닫힌 구간이다 —
-    묶음은 시작을 늦게 만들고 끝을 일찍 만들 뿐이다. 구간들이 한 점으로 좁아지면
-    그 점이 k다. 좁아지지 않는 세계는 큐 하나가 자루를 통째로 덮은 세계뿐인데,
-    그때 요청은 자루 전체이므로 닿은 자루 끝 가설이 k를 정확히 고정한다. 그 밖의
-    어긋남은 모순이거나 모호함이고, 둘 다 지어내지 않고 닫는다.
-    """
-    lo: Fraction | None = None
-    hi: Fraction | None = None
-    for cue in cues:
-        end_gap = cue.timeline_end - cue.source_end
-        start_gap = cue.timeline_start - cue.source_start
-        lo = end_gap if lo is None else max(lo, end_gap)
-        hi = start_gap if hi is None else min(hi, start_gap)
-    if lo is None or hi is None:
-        raise ValueError(
-            f"타임라인 닻이 될 큐가 없다: slice {request.slice_id!r} — 투영할 재료가 아니다"
-        )
-    if lo > hi:
-        raise ValueError(
-            f"타임라인 닻이 모순이다: slice {request.slice_id!r}의 큐들이 공유하는"
-            f" 이동량이 없다 [{lo}, {hi}]"
-        )
-    if lo == hi:
-        return lo
-    earliest = min(cue.timeline_start for cue in cues)
-    latest = max(cue.timeline_end for cue in cues)
-    anchored = {
-        shift
-        for shift in (earliest - request.source_start, latest - request.source_end)
-        if lo <= shift <= hi
-    }
-    if len(anchored) == 1:
-        return anchored.pop()
-    raise ValueError(
-        f"타임라인 닻이 유일하지 않다: slice {request.slice_id!r}의 이동량이"
-        f" [{lo}, {hi}]에서 하나로 좁혀지지 않는다"
-    )
-
-
 def _in_scope(cue: ProjectCue, request: BoundaryRequest) -> bool:
     """큐가 요청의 (슬라이스, 인스턴스, 소스 구간) 스코프 안인가 — 반개 겹침."""
     return (
@@ -2085,10 +2050,6 @@ def _replaced_cues(
 ) -> tuple[tuple[ProjectCue, ...], tuple[ProjectCue, ...]]:
     """스코프 안의 소스 큐를 치우고 경계 큐를 세운다 — 빈·실패는 깃발만 남긴다."""
     cues = plan.clamped_cues
-    by_slice: dict[str, tuple[ProjectCue, ...]] = {}
-    for cue in cues:
-        by_slice[cue.slice_id] = (*by_slice.get(cue.slice_id, ()), cue)
-    shifts: dict[str, Fraction] = {}
     doomed: set[int] = set()
     unresolved: set[int] = set()
     additions: list[ProjectCue] = []
@@ -2099,11 +2060,10 @@ def _replaced_cues(
             unresolved.update(scope)  # 원문이 그대로 검토로 남는다
             continue
         doomed.update(scope)
-        shift = shifts.get(request.slice_id)
-        if shift is None:
-            shift = _slice_timeline_shift(by_slice.get(request.slice_id, ()), request)
-            shifts[request.slice_id] = shift
-        additions.extend(_boundary_project_cues(request, transcript, trace, shift))
+        shift = request.timeline_start - request.source_start
+        for index in scope:
+            _require_anchor_matches_cue(cues[index], request, shift)
+        additions.extend(_boundary_project_cues(request, transcript, trace))
     kept = tuple(
         _with_flag(cue, BOUNDARY_UNRESOLVED) if index in unresolved else cue
         for index, cue in enumerate(cues)
@@ -2112,19 +2072,36 @@ def _replaced_cues(
     return kept, tuple(additions)
 
 
+def _require_anchor_matches_cue(cue: ProjectCue, request: BoundaryRequest, shift: Fraction) -> None:
+    """요청의 슬라이스 닻이 묶인 큐의 배치와 어긋나면 닫는다 — 유도하지 않는다.
+
+    묶음은 큐의 시작을 늦게 만들고 끝을 일찍 만들 뿐이므로, 닻은 큐의 두 시계
+    틈 `end − source_end ≤ k ≤ start − source_start` 안에 있어야 한다. 이것은
+    검사지 대체 이동량을 계산하는 길이 아니다(P4-04b).
+    """
+    lo = cue.timeline_end - cue.source_end
+    hi = cue.timeline_start - cue.source_start
+    if not lo <= shift <= hi:
+        raise ValueError(
+            "요청의 타임라인 닻이 묶인 큐와 모순이다:"
+            f" cue {cue.cue_id!r} (slice {request.slice_id}) —"
+            f" 닻 {shift}가 큐의 두 시계 [{lo}, {hi}] 안에 없다"
+        )
+
+
 def _boundary_project_cues(
     request: BoundaryRequest,
     transcript: BoundaryTranscript,
     trace: SourceTrace,
-    shift: Fraction,
 ) -> tuple[ProjectCue, ...]:
     """경계 큐를 디코드 국소 시계에서 슬라이스 큐로 옮긴다 — 다듬지 않는다.
 
-    원점은 여기서 정확히 한 번 더해 파일 시계가 되고, 슬라이스 이동량을 더해
-    타임라인이 된다. 큐는 요청 구간 안에 순서 있게 양수 길이로 산다 — 위조된
-    기록은 그 자리에서 닫는다.
+    원점은 여기서 정확히 한 번 더해 파일 시계가 되고, 요청의 슬라이스 닻에서
+    나온 이동량을 더해 타임라인이 된다. 큐는 요청 구간 안에 순서 있게 양수
+    길이로 산다 — 위조된 기록은 그 자리에서 닫는다.
     """
     origin = trace.pcm_sample0_file_time
+    shift = request.timeline_start - request.source_start
     projected: list[ProjectCue] = []
     previous_end: Fraction | None = None
     for cue in transcript.cues:
