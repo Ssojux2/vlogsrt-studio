@@ -164,12 +164,44 @@ P6-01은 오디오·전사·VAD·`review` 산문을 **보지 않는다.** 타입
 상류의 보수적 "보호"로 남고 이 계층은 기하만 한다. **그 성질을 깨지 마라** —
 `edit.py`에서 오디오를 열거나 전사 결과를 읽으면 그 순간 규칙 4 위반이다.
 
-기계 검사를 `scripts/check_invariants.py`에 추가하라: `vlogsrt/project/edit.py`는
-`subprocess`, `openai`, `numpy`, `onnxruntime`, `vlogsrt.transcribe`, `vlogsrt.preprocess`,
-`vlogsrt.project.pcm`, `vlogsrt.project.speech`, `vlogsrt.project.vad.inference`,
-`vlogsrt.project.vad.runtime`, `vlogsrt.project.vision.sampling`, `vlogsrt.repetition`,
-`vlogsrt.repair`, `vlogsrt.refine`, `vlogsrt.output`, `vlogsrt.layout`을 **import하지 못한다.**
-기존 검사들과 같은 방식으로 쓰고 `[OK]` 한 줄을 더한다(그러면 20개가 된다).
+기계 검사를 `scripts/check_invariants.py`에 추가하라. **금지는 '행동'이지 '데이터 타입'이
+아니다** — `edit.py`가 프레임을 뽑거나 오디오를 열거나 말을 판단할 **능력**을 갖지 못하게
+하는 것이 목적이고, 요청 기록 하나가 이음매를 건너는 것은 그 능력을 주지 않는다.
+
+`vlogsrt/project/edit.py`에 대해:
+
+1. 모듈을 통째로 드는 형태는 금지(`as` 별칭 포함) — 모듈 핸들을 쥐면 그 안의 전부에 닿는다:
+
+   ```python
+   import vlogsrt.project.vision.sampling   # 금지
+   ```
+
+2. **이 한 형태만 허용**한다. 가져오는 이름이 정확히 `FrameSampleRequest` 하나일 때만이다:
+
+   ```python
+   from vlogsrt.project.vision.sampling import FrameSampleRequest   # 허용
+   ```
+
+   다른 이름이 하나라도 섞이면 실패다:
+
+   ```python
+   from vlogsrt.project.vision.sampling import FrameSampleRequest, sample_frames  # 금지
+   from vlogsrt.project.vision.sampling import sample_frames                      # 금지
+   from vlogsrt.project.vision.sampling import FrameSample                        # 금지
+   ```
+
+3. 나머지는 **어떤 형태로도 금지**: `subprocess`, `openai`, `numpy`, `onnxruntime`,
+   `vlogsrt.transcribe`, `vlogsrt.preprocess`, `vlogsrt.project.pcm`,
+   `vlogsrt.project.speech`, `vlogsrt.project.vad.inference`, `vlogsrt.project.vad.runtime`,
+   `vlogsrt.repetition`, `vlogsrt.repair`, `vlogsrt.refine`, `vlogsrt.output`,
+   `vlogsrt.layout`. 허용목록은 `vision.sampling` 하나뿐이고 그 안에서도 이름 하나뿐이다.
+
+기존 검사들과 같은 방식으로 쓰되 **가져오는 이름까지** 봐야 한다. 검사 이름과 실패
+메시지에 '왜'를 담아라. `[OK]` 한 줄이 늘어 **20개**가 된다.
+
+**허용목록 회귀도 함께 넣어라** — 이게 없으면 목록은 시간이 지나면 그냥 구멍이 된다
+(P5-06에서 겪은 그대로다): 위 2번의 실패 예시 셋이 각각 검사를 실패시키는지, 1번 형태가
+실패하는지, 정상 형태가 통과하는지.
 
 ### 축소 규칙은 결정적이어야 한다
 
