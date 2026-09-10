@@ -13,7 +13,7 @@ Coordinator/reviewer: Opus 5 (Run `run_a091d4869a98`). Offline only; Opus perfor
 ## Baseline and ownership
 
 - Worktree `/Users/ssojux2/orca/workspaces/vlogsrt/fcp-p6-blocks`, branch `Ssojux2/fcp-p6-blocks`,
-  from exact base `e2edede` (P0~P5 전부 통합됨, P5-06 포함). rebase·reset·squash 금지.
+  from exact base `371a020` (P0~P5 전부 통합됨, P5-06 포함). rebase·reset·squash 금지.
 - Allowed: create `vlogsrt/project/edit.py` and `tests/project/test_block_partition.py`;
   add one import-direction check to `scripts/check_invariants.py` (see 규칙 4·9 below).
 - Forbidden: XML/caption output, any model or network call, config changes, source mutation,
