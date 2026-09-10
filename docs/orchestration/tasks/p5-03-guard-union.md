@@ -9,7 +9,7 @@ Offline only; Opus performs the merge.
 ## Baseline and ownership
 
 - Worktree `/Users/ssojux2/orca/workspaces/vlogsrt/fcp-p5-guard`, branch `Ssojux2/fcp-p5-guard`,
-  already created from exact base `93e62b7`, which contains the whole integrated P4 phase
+  already created from exact base `daadf29`, which contains the whole integrated P4 phase
   (`cb6b039`) and P5-00/01/02/04/05. Do not rebase, reset, squash, or re-create the branch.
 - Allowed files: create `vlogsrt/project/vad/guard.py` and `tests/project/test_guard.py`.
   You may add an export line to `vlogsrt/project/vad/__init__.py` if that package's existing
@@ -75,7 +75,7 @@ Report source/instance IDs, input/output intervals, probability/status, frame an
 
 ## Report
 
-Before `worker_done`, send the exact committed SHA, `git diff --stat 93e62b7..HEAD` (which must
+Before `worker_done`, send the exact committed SHA, `git diff --stat daadf29..HEAD` (which must
 list only the allowed files), the failing-first evidence for the new tests, and the green output of
 every acceptance command with its test count and the invariant group count, plus confirmation that
 zero network calls occurred. Then send `worker_done` exactly once.
