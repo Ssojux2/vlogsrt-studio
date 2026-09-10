@@ -168,7 +168,8 @@ By explicit Astra dependency audit, P0-03 may run from `58bb25347319301391064d6b
 | [P5-03](tasks/p5-03-guard-union.md) / [P5-03b](tasks/p5-03b-guard-identity-rails.md) | conservative source/instance speech guard | P5-02 and integrated P4-04 projection | `project/vad/guard.py`/tests | complete; `f2a798f`+`5387c6c` integrated as `4e185f3`, 2,094-test gate passed; **P5 phase closed** |
 | [P5-04](tasks/p5-04-vision-sampling.md) | deterministic proxy/original frame samples | P5-00 | `project/vision/sampling.py`, preprocess seam/tests | complete; corrected candidate `ec4e2b2` integrated as `6a9a98f` |
 | [P5-05](tasks/p5-05-vision-policy.md) / [P5-05b](tasks/p5-05b-vision-policy-rails.md) | strict saved-response decision parser | P5-04 | transcribe boundary + `project/vision/policy.py`/tests | complete; chain `2a25009`->`f3a4911`->`693aa5b`->`05a7455` integrated as `14b60bf`, 2,022-test gate passed |
-| [P6-01](tasks/p6-01-block-partition.md) | eligible 6–10 s blocks and candidates | P4,P5 merges | project edit partition/tests | drafted |
+| [P5-06](tasks/p5-06-upstream-identity-rails.md) | request identity on decisions; constructor-level config rails | Fable P6 pre-phase review | `project/config.py`, `project/vision/policy.py`/tests | complete; `3b33c53` integrated as `eeb8e7a`, 2,152-test gate passed |
+| [P6-01](tasks/p6-01-block-partition.md) | eligible 6–10 s blocks and candidates | P4,P5 merges + P5-06 | project edit partition/tests | brief rebuilt on the Fable pre-phase review; dispatched |
 | [P6-02](tasks/p6-02-edit-plan.md) | immutable deterministic EditPlan | P6-01 | project edit plan/tests | drafted |
 | [P6-03](tasks/p6-03-edit-captions.md) | EDIT SRT projection | P6-02 | project captions/tests | drafted |
 | [P6-04](tasks/p6-04-package-export.md) | atomic linked FCPXML/SRT/review package | P6-03 | export/tests | drafted |

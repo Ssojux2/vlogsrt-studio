@@ -29,8 +29,8 @@
 ## 현재 제품 구현 기준점
 
 - 통합 브랜치: `feat/final-cut-project`
-- **제품 구현 기준 HEAD: `4e185f3` (Merge P5-03 speech guard with fail-closed rails and PCM generation identity)**
-- 통합 게이트: Ruff lint/format 83개 파일, mypy 42개 소스 파일, pytest **2,094개**, 구조 불변식 **19/19** 통과.
+- **제품 구현 기준 HEAD: `eeb8e7a` (Merge P5-06 request identity and constructor-level config rails)**
+- 통합 게이트: Ruff lint/format 83개 파일, mypy 42개 소스 파일, pytest **2,152개**, 구조 불변식 **19/19** 통과.
 - **P0~P5 전 페이즈 완료.** 남은 것은 P6(러프컷 생성·내보내기)와 P7(영속화·CLI·UI·인수)뿐이다.
 - P1/P2의 실제 Final Cut 및 77분 미디어 인수 검사는 `PENDING_HUMAN`이다.
 
@@ -182,9 +182,52 @@ probe (d)만 이전과 같은 `success`로 나와 파고들었더니, 워커가 
 - 독립 게이트: Ruff 83파일, mypy 42파일, 불변식 **19/19**(직접 셈), pytest 2,094개.
 - 통합 후 `make check` 통과: pytest **2,094개**, 불변식 19/19.
 
+### P5-06 요청 신원 + 생성자 레일 — 통합 완료 (`eeb8e7a`)
+
+- 후보 **`3b33c53`** (branch `Ssojux2/fcp-p5-upstream`, base `2f9b9a8`)
+- Fable의 P6 사전 검토가 지목한 **상류 부족 1·2**. P6 시작 전 상류를 고칠 마지막 기회였다.
+- 항목 1 `VisionDecision.request_sha256`: 저장된 판정이 **이 프레임과 이 후보를 실제로
+  봤는지** 증명한다. 세 경로(accepted·keep_all·error) 전부에 실린다.
+- 항목 2 `ProjectConfig.__post_init__`: 범위 검사가 `load_project_config`에만 있어서
+  프로그램식 생성이 건너뛰던 우회를 **생성자에서** 닫았다. 이 저장소가 같은 우회를
+  P5-05b·P5-03b·P6에서 **세 번** 만났고, 세 계층이 같은 검사를 각자 다시 짜고 있었다.
+
+#### 워커가 멈추고 물었다 — 그리고 Opus가 놓친 것을 찾았다
+
+항목 2가 `test_vision_policy.py`의 4개 테스트(24 인스턴스)를 깨뜨렸다. `replace(CFG, ...)`가
+`pytest.raises` 블록 **밖**에 있어서 생성자가 그 줄에서 터진다. 워커는 브리프대로
+**고치지 않고 멈춰서 물었다.**
+
+Opus가 확인하다 더 위험한 것을 찾았다: `test_guard.py`는 "깨지지 않았다"고 보고됐지만
+`replace()`가 `raises` 블록 **안**이라 초록인 채로 **의미를 잃었다** — `ValueError`가
+`guard._require_config`가 아니라 생성자에서 왔다. 시끄러운 실패는 잡혔고 조용한 침식은
+안 잡혔다. **검사받지 않는 방어층은 썩는다** — 이 저장소가 같은 우회를 세 번 만난 이유다.
+
+Opus 결정: 워커가 추천한 (A)를 거절했다. `_require_config`가 공개 생성 경로로 검사
+불가능해지면 죽은 코드가 되고 누가 지워도 아무 테스트도 실패하지 않는다.
+대신 **위조 인스턴스**(`object.__new__`로 `__init__` 우회) 회귀를 **두 파일 모두**에
+넣고, 적응시킨 테스트는 **이름도 바꿔** 의미 변화가 리뷰에 보이게 했다.
+
+#### Opus 검증 — mutation을 직접 재현했다
+
+워커가 지시를 넘어 각 레일을 일부러 망가뜨려 빨개지는지 확인하고 복원했다. Opus가 같은
+것을 독립적으로 다시 돌렸다:
+
+| 무력화 | 결과 | 복원 |
+|---|---|---|
+| `policy._require_config` | test_vision_policy.py **24 failed** | 바이트 그대로 |
+| `guard._require_config` | test_guard.py **1 failed** | 바이트 그대로 |
+| `ProjectConfig.__post_init__` | test_project_config.py **45 failed** | 바이트 그대로 |
+
+가운데 줄이 위 구멍의 답이다 — 재위조를 거쳐 그 테스트가 다시 `guard._require_config`를
+실제로 검사한다. `_forged` 헬퍼는 테스트에만 있고 제품 코드에 새지 않는다(grep 확인).
+
+- 독립 게이트: Ruff 83파일, mypy 42파일, 불변식 **19/19**(직접 셈), pytest 2,152개.
+- 통합 후 `make check` 통과: pytest **2,152개**, 불변식 19/19.
+
 ## 진행 중
 
-(없음 — P6-01 브리프 갱신 후 디스패치 예정)
+P6-01 블록 분할 — GLM 구현 중.
 
 ## 남은 순서
 
