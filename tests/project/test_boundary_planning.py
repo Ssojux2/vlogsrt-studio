@@ -635,6 +635,11 @@ def test_repeated_instance_request_names_only_that_slice(tmp_path: Path) -> None
         assert request.source_start == Fraction(4)
         assert request.source_end == Fraction(89, 20)
         assert request.sample_range == SampleRange(64000, 71200)
+    # 각 요청의 타임라인 닻은 슬라이스 닻에서 나온다 — 투영은 유도하지 않는다(P4-04b)
+    for request, request_slice in ((first_request, first_slice), (second_request, second_slice)):
+        assert request.timeline_start == request_slice.timeline_start + (
+            request.source_start - request_slice.source_start
+        )
     # 배치 큐도 인스턴스마다 하나씩 산다 — 지워지지 않는다
     assert len(plan.clamped_cues) == 2
     assert {cue.instance_ids[0] for cue in plan.clamped_cues} == {
@@ -1100,3 +1105,18 @@ def test_plan_is_pure_request_planning() -> None:
         assert f"import {forbidden}" not in module_source
         assert f"from vlogsrt import {forbidden}" not in module_source
         assert f"vlogsrt.{forbidden}" not in module_source
+
+
+def test_request_id_ignores_the_timeline_anchor(tmp_path: Path) -> None:
+    """요청 신원의 재료에 타임라인 닻은 없다 — 닻이 들어가면 같은 계획의
+    완성물 자리가 갈라진다(P4-04b 계약: `timeline_start` 추가에 신원·캐시 키는
+    바이트 그대로다). 아래 다이제스트는 닻 추가 **이전** 코드가 낸 값이다."""
+    document, slices, source, traces, references = _single(
+        tmp_path,
+        cues=[_CueSpec(3.6, 4.4)],
+        segs=[_SegSpec(3.5, 4.45)],
+    )
+    plan = plan_boundaries(slices, source, traces, references)
+    (request,) = plan.requests
+    assert request.sample_range == SampleRange(64000, 71200)
+    assert request.request_id == "b9bd70145e74b0fe4c51540f1942b6f29f3ed66f449582b6e2f1dc8b87557f6f"

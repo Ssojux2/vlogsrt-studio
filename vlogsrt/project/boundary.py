@@ -52,6 +52,22 @@ P4-03는 계획된 요청을 **실행**한다 — 위의 계획은 순수하게 
   있는 error 기록이고 완성물은 나오지 않는다. 원본 소스 큐는 그대로 남는다.
 - **경계는 재귀하지 않는다.** `cut_truncated`는 종결 메타데이터다 — 자기 끝점
   때문에 다시 경계 요청을 만들지 않지만 재전사·정제는 평범하게 받는다.
+
+P4-04는 그 결과를 **갈아끼운다** — 위의 실행은 그대로 있고 투영만 더한다:
+
+- **갈아끼우기는 정확히 (슬라이스, 인스턴스, 소스 구간) 스코프다.** 성공한 경계
+  기록의 이미 정제된 큐가 그 스코프 안의 소스 큐를 대체한다 — 둘을 함께 내지
+  않고 어느 쪽도 다시 정제·조판하지 않는다. 형제 인스턴스는 손대지 않는다.
+- **타임라인 이동량은 요청의 정확한 슬라이스 닻이다.** 계획이 요청에
+  `slice.timeline_start + (요청 시작 − slice.source_start)`를 실어 보내므로 투영은
+  `타임라인 = 파일 시계 + (닻 − 요청 시작)`을 그대로 쓴다. 예전에는 묶인 큐의 두
+  시계에서 구간 교집합으로 이 값을 유도했지만 그 온전함이 다른 계층의 네 불변
+  위에 서 있었으므로 유도를 없애고 닻만 믿는다(P4-04b) — 닻이 큐의 배치와
+  어긋나면 유도하지 않고 닫는다. 밀리초 검사는 교체 뒤에 다시 잰다 — 접힌 큐는
+  증거로 남고 SRT에서 그 장만 뺀다(P3-03과 같은 선).
+- **빈·실패 경계는 조용한 성공이 아니다.** 묶인 원문에 `boundary_unresolved`
+  깃발과 요청 신원을 남기고 사람의 검토로 넘긴다. 잠금·부재는 계획의 것을
+  그대로 내놓는다 — 선언된 무음은 완결이고 되풀이 가능한 실패만 수락을 막는다.
 """
 
 from __future__ import annotations
@@ -63,7 +79,7 @@ import os
 import tempfile
 from bisect import bisect_right
 from collections.abc import Callable, Iterable, Sequence
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from fractions import Fraction
 from itertools import pairwise
 from pathlib import Path
@@ -72,7 +88,12 @@ from typing import Any, Literal, TypeVar
 from vlogsrt import log, pipeline, refine, repair, transcribe
 from vlogsrt.config import Config
 from vlogsrt.models import Chunk, Cue, Repair, Segment, Span
-from vlogsrt.project.captions import PlacedSourceCue, SourceCaptionSet, SourceCue
+from vlogsrt.project.captions import (
+    SUBMS_COLLAPSED,
+    PlacedSourceCue,
+    SourceCaptionSet,
+    SourceCue,
+)
 from vlogsrt.project.media import ResolvedMedia
 from vlogsrt.project.models import AssetResource, ClipInstance, ProjectDocument
 from vlogsrt.project.pcm import (
@@ -83,6 +104,7 @@ from vlogsrt.project.pcm import (
     write_wav_slice,
 )
 from vlogsrt.project.speech import SourceSegment, SourceTrace, UnavailableSourceAudio
+from vlogsrt.project.timebase import format_srt_time, milliseconds_half_up
 
 _SLICE_ID_DOMAIN = "vlogsrt-logical-slice-v1"
 """슬라이스 신원의 도메인 구분자 — 인스턴스·리소스 해시와 우연히 겹치지 않게 한다."""
@@ -154,6 +176,10 @@ __all__ = [
     "plan_boundaries",
     "BoundaryTranscript",
     "transcribe_boundaries",
+    "BOUNDARY_UNRESOLVED",
+    "RETRYABLE_UNAVAILABLE_REASONS",
+    "BoundaryProjection",
+    "project_boundaries",
 ]
 
 
@@ -387,6 +413,10 @@ class BoundaryRequest:
     `source_start/source_end`는 폐쇄가 요청한 경계 그대로고 `sample_range`는
     환산(ceil-start/floor-end) 뒤 실제 남는 프레임이다 — 둘은 다른 기록이다.
     실측 끝점의 파일 시계는 `Fraction(프레임, 주파수) + 참조 원점`으로 되돌린다.
+    `timeline_start`는 이 요청의 입력 타임라인 시작(슬라이스 닻)이다 — P4-04
+    투영이 묶인 큐에서 유도하지 않고 이 값을 그대로 쓴다(P4-04b). 신원 재료는
+    아니다: `slice_id`가 이미 슬라이스의 네 끝점을 해시하므로 닻을 넣으면 같은
+    계획의 요청 신원이 갈라진다.
     """
 
     request_id: str
@@ -396,6 +426,7 @@ class BoundaryRequest:
     pcm_analysis_key: str
     source_start: Fraction
     source_end: Fraction
+    timeline_start: Fraction
     sample_range: SampleRange
     source_segment_ids: tuple[str, ...]
 
@@ -843,6 +874,7 @@ def _sealed_request(
         pcm_analysis_key=bucket.trace.pcm_analysis_key,
         source_start=start,
         source_end=end,
+        timeline_start=bucket.slice_.timeline_start + (start - bucket.slice_.source_start),
         sample_range=samples,
         source_segment_ids=segment_ids,
     )
@@ -1873,3 +1905,350 @@ def _publish_exclusive(destination: Path, body: bytes) -> Path | None:
         return destination
     finally:
         temporary.unlink(missing_ok=True)
+
+
+# ═══════════════════════════════════════════════════════════════
+#  P4-04 — 경계 전사 결과를 슬라이스 큐로 갈아끼우는 투영
+# ═══════════════════════════════════════════════════════════════
+
+
+BOUNDARY_UNRESOLVED = "boundary_unresolved"
+"""빈·실패 경계의 깃발 — 묶인 원문이 사람의 검토로 남아 있다는 기록이다."""
+
+RETRYABLE_UNAVAILABLE_REASONS: frozenset[str] = frozenset({"stream_unavailable", "pcm_unavailable"})
+"""되풀이 가능한 pre-PCM 부재 — 최종 수락을 막는 사유다. 선언된 무음은 완결이라 막지 않는다."""
+
+
+@dataclass(frozen=True, slots=True)
+class BoundaryProjection:
+    """경계까지 반영된 입력 타임라인의 슬라이스 큐 — 자동 러프컷 이전의 SOURCE SRT.
+
+    `cues`는 타임라인 순서 그대로다. 갈아끼운 큐는 `provenance="boundary"`이고,
+    스코프 밖과 빈·실패 경계의 큐는 `provenance="source"` 그대로다. 트레이스는
+    하나도 고치지 않는다 — 소스·경계 기록 모두 이 투영의 증거로 불변이다.
+    """
+
+    input_sha256: str
+    cues: tuple[ProjectCue, ...]
+    source_srt: str
+    locked_instance_ids: frozenset[str]
+    unavailable_instances: tuple[UnavailableInstance, ...]
+    unresolved_request_ids: tuple[str, ...]
+    unresolved_cue_ids: tuple[str, ...]
+
+
+class _ProjectionLinkage:
+    """요청·경계 기록·소스 트레이스를 신원으로만 묶는다 — 순서는 재료가 아니다."""
+
+    def __init__(
+        self,
+        plan: BoundaryPlan,
+        transcripts: Sequence[BoundaryTranscript],
+        source_traces: Sequence[SourceTrace],
+    ) -> None:
+        self._requests = _index_by(
+            plan.requests, "요청 신원이 중복된다", lambda request: request.request_id
+        )
+        self._traces = _index_by(
+            source_traces, "소스와 PCM 키 하나에 트레이스가 둘 이상이다", _trace_pair
+        )
+        self._transcripts = _index_by(
+            transcripts, "요청 하나에 경계 기록이 둘 이상이다", lambda item: item.request_id
+        )
+        for request_id in self._transcripts:
+            if request_id not in self._requests:
+                raise ValueError(
+                    f"계획에 없는 요청 신원을 가진 경계 기록이다: {request_id!r} — 지어내지 않는다"
+                )
+        self._pairs = {request.request_id: self._resolve(request) for request in plan.requests}
+        self.unresolved_request_ids = tuple(
+            request.request_id
+            for request in plan.requests
+            if self._pairs[request.request_id][0].status != _STATUS_SUCCESS
+        )
+
+    def pair(self, request: BoundaryRequest) -> tuple[BoundaryTranscript, SourceTrace]:
+        """요청 하나의 (경계 기록, 소스 트레이스) — 이미 검사된 짝이다."""
+        return self._pairs[request.request_id]
+
+    def _resolve(self, request: BoundaryRequest) -> tuple[BoundaryTranscript, SourceTrace]:
+        transcript = self._transcripts.get(request.request_id)
+        if transcript is None:
+            raise ValueError(f"요청에 경계 기록이 없다: {request.request_id!r} — 지어내지 않는다")
+        _require_transcript_matches_request(request, transcript)
+        trace = self._traces.get(_request_pair(request))
+        if trace is None:
+            raise ValueError(
+                f"소스의 전사 트레이스가 없다: source_id={request.source_id!r},"
+                f" pcm_analysis_key={request.pcm_analysis_key!r} — 지어내지 않는다"
+            )
+        _require_transcript_origin(transcript, trace)
+        return transcript, trace
+
+
+def _request_pair(request: BoundaryRequest) -> str:
+    return f"{request.source_id}\0{request.pcm_analysis_key}"
+
+
+def _require_transcript_matches_request(
+    request: BoundaryRequest, transcript: BoundaryTranscript
+) -> None:
+    """경계 기록은 요청의 연결 재료와 정확히 같아야 한다 — 어긋남은 모순이다."""
+    if (
+        transcript.source_id != request.source_id
+        or transcript.pcm_analysis_key != request.pcm_analysis_key
+        or transcript.source_start != request.source_start
+        or transcript.source_end != request.source_end
+        or transcript.sample_range != request.sample_range
+    ):
+        raise ValueError(
+            f"경계 기록이 요청과 다르다: request {request.request_id!r}는"
+            f" ({request.source_id!r}, {request.pcm_analysis_key!r},"
+            f" [{request.source_start}, {request.source_end}), {request.sample_range})인데"
+            f" 기록은 ({transcript.source_id!r}, {transcript.pcm_analysis_key!r},"
+            f" [{transcript.source_start}, {transcript.source_end}),"
+            f" {transcript.sample_range})다"
+        )
+
+
+def _require_transcript_origin(transcript: BoundaryTranscript, trace: SourceTrace) -> None:
+    """경계 기록이 증명하는 원점 — 세그먼트의 두 시계 차이가 트레이스와 같아야 한다.
+
+    경계 기록의 `audio_*`·`file_*`는 녹화 때 참조의 원점을 정확히 한 번 더해 만든
+    값이다. 트레이스가 다른 저장 PCM 세대를 가리키면 이 차이가 어긋난다 — 큐의
+    파일 시계가 통째로 밀리는 조용한 실패가 되므로 그 자리에서 닫는다.
+    """
+    for segment in (*transcript.draft, *transcript.settled_spine):
+        baked = segment.file_start - segment.audio_start
+        if baked != trace.pcm_sample0_file_time:
+            raise ValueError(
+                "경계 기록이 증명하는 원점이 트레이스와 다르다:"
+                f" 기록 {baked} 대비 trace {trace.pcm_sample0_file_time}"
+                f" (source_id={trace.source_id!r}, segment {segment.segment_id!r})"
+            )
+
+
+def _in_scope(cue: ProjectCue, request: BoundaryRequest) -> bool:
+    """큐가 요청의 (슬라이스, 인스턴스, 소스 구간) 스코프 안인가 — 반개 겹침."""
+    return (
+        cue.slice_id == request.slice_id
+        and not set(cue.instance_ids).isdisjoint(request.instance_ids)
+        and cue.source_start < request.source_end
+        and request.source_start < cue.source_end
+    )
+
+
+def _with_flag(cue: ProjectCue, flag: str) -> ProjectCue:
+    """큐에 깃발 하나를 얹는다 — 이미 있으면 그대로 돌려준다."""
+    if flag in cue.flags:
+        return cue
+    return replace(cue, flags=(*cue.flags, flag))
+
+
+def _replaced_cues(
+    plan: BoundaryPlan, linkage: _ProjectionLinkage
+) -> tuple[tuple[ProjectCue, ...], tuple[ProjectCue, ...]]:
+    """스코프 안의 소스 큐를 치우고 경계 큐를 세운다 — 빈·실패는 깃발만 남긴다."""
+    cues = plan.clamped_cues
+    doomed: set[int] = set()
+    unresolved: set[int] = set()
+    additions: list[ProjectCue] = []
+    for request in plan.requests:
+        transcript, trace = linkage.pair(request)
+        scope = [index for index, cue in enumerate(cues) if _in_scope(cue, request)]
+        if transcript.status != _STATUS_SUCCESS:
+            unresolved.update(scope)  # 원문이 그대로 검토로 남는다
+            continue
+        doomed.update(scope)
+        shift = request.timeline_start - request.source_start
+        for index in scope:
+            _require_anchor_matches_cue(cues[index], request, shift)
+        additions.extend(_boundary_project_cues(request, transcript, trace))
+    kept = tuple(
+        _with_flag(cue, BOUNDARY_UNRESOLVED) if index in unresolved else cue
+        for index, cue in enumerate(cues)
+        if index not in doomed
+    )
+    return kept, tuple(additions)
+
+
+def _require_anchor_matches_cue(cue: ProjectCue, request: BoundaryRequest, shift: Fraction) -> None:
+    """요청의 슬라이스 닻이 묶인 큐의 배치와 어긋나면 닫는다 — 유도하지 않는다.
+
+    묶음은 큐의 시작을 늦게 만들고 끝을 일찍 만들 뿐이므로, 닻은 큐의 두 시계
+    틈 `end − source_end ≤ k ≤ start − source_start` 안에 있어야 한다. 이것은
+    검사지 대체 이동량을 계산하는 길이 아니다(P4-04b).
+    """
+    lo = cue.timeline_end - cue.source_end
+    hi = cue.timeline_start - cue.source_start
+    if not lo <= shift <= hi:
+        raise ValueError(
+            "요청의 타임라인 닻이 묶인 큐와 모순이다:"
+            f" cue {cue.cue_id!r} (slice {request.slice_id}) —"
+            f" 닻 {shift}가 큐의 두 시계 [{lo}, {hi}] 안에 없다"
+        )
+
+
+def _boundary_project_cues(
+    request: BoundaryRequest,
+    transcript: BoundaryTranscript,
+    trace: SourceTrace,
+) -> tuple[ProjectCue, ...]:
+    """경계 큐를 디코드 국소 시계에서 슬라이스 큐로 옮긴다 — 다듬지 않는다.
+
+    원점은 여기서 정확히 한 번 더해 파일 시계가 되고, 요청의 슬라이스 닻에서
+    나온 이동량을 더해 타임라인이 된다. 큐는 요청 구간 안에 순서 있게 양수
+    길이로 산다 — 위조된 기록은 그 자리에서 닫는다.
+    """
+    origin = trace.pcm_sample0_file_time
+    shift = request.timeline_start - request.source_start
+    projected: list[ProjectCue] = []
+    previous_end: Fraction | None = None
+    for cue in transcript.cues:
+        if cue.source_id != transcript.source_id:
+            raise ValueError(
+                f"경계 큐의 소스 신원이 기록과 다르다: cue {cue.cue_id!r}는"
+                f" {cue.source_id!r}인데 기록은 {transcript.source_id!r}다"
+            )
+        file_start = cue.start + origin
+        file_end = cue.end + origin
+        previous_end = _require_boundary_span(cue, request, file_start, file_end, previous_end)
+        projected.append(
+            ProjectCue(
+                cue_id=cue.cue_id,
+                slice_id=request.slice_id,
+                instance_ids=request.instance_ids,
+                source_id=cue.source_id,
+                source_start=file_start,
+                source_end=file_end,
+                timeline_start=shift + file_start,
+                timeline_end=shift + file_end,
+                text=cue.text,
+                provenance="boundary",
+                flags=cue.flags,
+            )
+        )
+    return tuple(projected)
+
+
+def _require_boundary_span(
+    cue: SourceCue,
+    request: BoundaryRequest,
+    file_start: Fraction,
+    file_end: Fraction,
+    previous_end: Fraction | None,
+) -> Fraction:
+    """경계 큐 한 장의 구간 검사 — 통과하면 이 큐의 파일 시계 끝을 돌려준다."""
+    if file_end <= file_start:
+        raise ValueError(
+            f"경계 큐의 길이가 0 이하다: cue {cue.cue_id!r}, [{file_start}, {file_end})"
+        )
+    if file_start < request.source_start or file_end > request.source_end:
+        raise ValueError(
+            f"경계 큐가 요청 구간 밖이다: cue {cue.cue_id!r}는 [{file_start}, {file_end})"
+            f"인데 요청은 [{request.source_start}, {request.source_end})다"
+        )
+    if previous_end is not None and file_start < previous_end:
+        raise ValueError(
+            f"경계 큐가 서로 겹치거나 순서가 뒤집혔다: cue {cue.cue_id!r}의 시작"
+            f" {file_start}초가 앞 큐 끝 {previous_end}초보다 앞이다"
+        )
+    return file_end
+
+
+def _ordered_projection(cues: Sequence[ProjectCue]) -> tuple[ProjectCue, ...]:
+    """투영 큐를 타임라인 순서로 세운다 — 겹침·길이 0 이하는 닫는다.
+
+    소스 큐는 스토리라인 순서 그대로 왔고 경계 큐는 정확한 자리에 들어가므로
+    정렬은 순서를 고치는 것이 아니라 두 출처를 한 타임라인에서 다시 확인하는 것이다.
+    """
+    ordered = tuple(sorted(cues, key=lambda cue: (cue.timeline_start, cue.timeline_end)))
+    previous_end: Fraction | None = None
+    for cue in ordered:
+        if cue.timeline_end <= cue.timeline_start:
+            raise ValueError(
+                f"투영 큐의 길이가 0 이하다: cue {cue.cue_id!r},"
+                f" [{cue.timeline_start}, {cue.timeline_end})"
+            )
+        if previous_end is not None and cue.timeline_start < previous_end:
+            raise ValueError(
+                f"투영 큐가 타임라인에서 겹친다: cue {cue.cue_id!r}의 시작"
+                f" {cue.timeline_start}초가 앞 큐 끝 {previous_end}초보다 앞이다"
+            )
+        previous_end = cue.timeline_end
+    return ordered
+
+
+def _split_by_representability(
+    cues: Sequence[ProjectCue],
+) -> tuple[tuple[ProjectCue, ...], tuple[str, ...]]:
+    """half-up 뒤 0이 되는 투영 큐를 갈라낸다 — 큐는 남기고 SRT만 뺀다.
+
+    미해결 신원은 **지금 투영된 큐**에서 다시 유도한다: 성공한 경계가 옛 묶인
+    큐를 대체하면 그 옛 신원은 따라 내려가고, 남은 접힘은 그대로 남는다. 상류
+    `SourceCaptionSet`은 옛 접힘의 불변 증거로 그 자리에 있다.
+    """
+    final: list[ProjectCue] = []
+    unresolved: list[str] = []
+    for cue in cues:
+        if milliseconds_half_up(cue.timeline_end) <= milliseconds_half_up(cue.timeline_start):
+            cue = _with_flag(cue, SUBMS_COLLAPSED)
+            if cue.cue_id not in unresolved:
+                unresolved.append(cue.cue_id)
+        final.append(cue)
+    return tuple(final), tuple(unresolved)
+
+
+def _projection_srt(cues: Sequence[ProjectCue]) -> str:
+    """투영 큐의 SOURCE SRT — 접힌 장만 빼고 P3-03과 같은 형식으로 직렬화한다.
+
+    half-up 양자화는 `format_srt_time`이 직렬화 순간에 딱 한 번 한다. 순서·양수
+    길이·겹침 검사는 이미 끝났고, 접힌 큐는 호출 쪽이 이미 걷어냈다.
+    """
+    blocks: list[str] = []
+    emitted = (cue for cue in cues if SUBMS_COLLAPSED not in cue.flags)
+    for number, cue in enumerate(emitted, start=1):
+        timeline = f"{format_srt_time(cue.timeline_start)} --> {format_srt_time(cue.timeline_end)}"
+        blocks.append(f"{number}\n{timeline}\n{cue.text}\n")
+    return "\n".join(blocks)
+
+
+def _require_locked_unavailable(plan: BoundaryPlan) -> None:
+    """unavailable 기록의 인스턴스는 잠겨 있어야 한다 — 아니면 계획이 모순이다."""
+    for record in plan.unavailable_instances:
+        if record.instance_id not in plan.locked_instance_ids:
+            raise ValueError(
+                "unavailable 기록의 인스턴스가 잠겨 있지 않다:"
+                f" instance {record.instance_id!r}"
+                f" (resource {record.resource_scoped_id!r}, {record.reason_code!r})"
+                " — 부재는 잠금과 함께 온다"
+            )
+
+
+def project_boundaries(
+    plan: BoundaryPlan,
+    transcripts: Sequence[BoundaryTranscript],
+    source: SourceCaptionSet,
+    source_traces: Sequence[SourceTrace],
+) -> BoundaryProjection:
+    """성공한 경계 전사를 슬라이스 큐에 갈아끼워 입력 타임라인 SOURCE SRT를 다시 낸다.
+
+    순수한 투영이다 — 모델 호출·오디오 추출·경계 재계획·조판이 없고, 소스·경계
+    트레이스는 하나도 고치지 않는다. 갈아끼우기는 정확히 (슬라이스, 인스턴스,
+    소스 구간) 스코프이고, 빈·실패 경계는 묶인 원문에 `boundary_unresolved` 깃발과
+    요청 신원만 남긴다. 잠금·부재는 계획의 것을 그대로 내놓는다.
+    """
+    _require_locked_unavailable(plan)
+    linkage = _ProjectionLinkage(plan, transcripts, source_traces)
+    kept, additions = _replaced_cues(plan, linkage)
+    ordered = _ordered_projection((*kept, *additions))
+    final, unresolved_cue_ids = _split_by_representability(ordered)
+    return BoundaryProjection(
+        input_sha256=source.input_sha256,
+        cues=final,
+        source_srt=_projection_srt(final),
+        locked_instance_ids=plan.locked_instance_ids,
+        unavailable_instances=plan.unavailable_instances,
+        unresolved_request_ids=linkage.unresolved_request_ids,
+        unresolved_cue_ids=unresolved_cue_ids,
+    )
