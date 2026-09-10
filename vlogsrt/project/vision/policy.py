@@ -80,6 +80,9 @@ _APPLY_CONFIDENCE_FLOOR = 0.8
 기본값과 같은 0.8이다.
 """
 
+_REQUEST_ID_DOMAIN = "vlogsrt-vision-request-v1"
+"""비전 요청 신원의 도메인 구분자 — 다른 해시 재료와 우연히 겹치지 않게 한다."""
+
 
 def _effective_max_images(cfg: ProjectConfig) -> int:
     """실효 프레임 한도 — 설정과 천장 중 작은 쪽. 값역은 `_require_config`가 지켰다."""
@@ -128,9 +131,12 @@ class VisionDecision:
 
     오류·보존 판정의 `choice`는 언제나 `keep_all`이다(블록 보존). `reason`은
     정규화 사유를 앞에 달고 모델의 원문을 지우지 않는다 — 리뷰 기록물의 재료다.
+    `request_sha256`은 판정이 내려진 **요청의 신원**이다 — 모든 경로에서 채워지고,
+    저장된 판정이 이 프레임과 이 후보를 실제로 봤는지를 뒤에서 증명한다(P5-06).
     """
 
     block_id: str
+    request_sha256: str
     choice: str
     reason: str
     evidence_frame_ids: tuple[str, ...]
@@ -431,13 +437,21 @@ def _normalize(
     cfg: ProjectConfig,
 ) -> VisionDecision:
     """승인은 세 조건의 교집합 — 나머지는 전부 블록을 보존하는 keep_all이다."""
+    request_sha256 = _request_sha256(request)
     if choice in (KEEP_ALL, UNCERTAIN):
         return VisionDecision(
-            request.block_id, KEEP_ALL, reason, tuple(evidence), confidence, "keep_all"
+            request.block_id,
+            request_sha256,
+            KEEP_ALL,
+            reason,
+            tuple(evidence),
+            confidence,
+            "keep_all",
         )
     if reason_kind != REASON_REPETITIVE_BROLL:
         return VisionDecision(
             request.block_id,
+            request_sha256,
             KEEP_ALL,
             f"unique_event 정규화 — 한 번뿐인 사건은 신뢰도와 상관없이 keep_all: {reason}",
             tuple(evidence),
@@ -448,22 +462,57 @@ def _normalize(
     if confidence < threshold:
         return VisionDecision(
             request.block_id,
+            request_sha256,
             KEEP_ALL,
             f"신뢰도 {confidence}가 적용 한도 {threshold}에 못 미친다: {reason}",
             tuple(evidence),
             confidence,
             "keep_all",
         )
-    return VisionDecision(request.block_id, choice, reason, tuple(evidence), confidence, "accepted")
+    return VisionDecision(
+        request.block_id, request_sha256, choice, reason, tuple(evidence), confidence, "accepted"
+    )
 
 
 def _error_decision(request: VisionRequest, defect: str) -> VisionDecision:
     """깨진 응답의 정규형 — 블록은 보존되고 결함은 리뷰에 남는다."""
     return VisionDecision(
         block_id=request.block_id,
+        request_sha256=_request_sha256(request),
         choice=KEEP_ALL,
         reason=f"비전 응답이 계약을 어겼다 — {defect}",
         evidence_frame_ids=(),
         confidence=0.0,
         status="error",
     )
+
+
+def _request_sha256(request: VisionRequest) -> str:
+    """요청 신원 — 블록·프레임 순서·후보 아이디와 창을 재료로 한 결정적 해시다.
+
+    재료는 브리프가 정한 그대로다: `block_id`, `frame_ids`(순서 포함), 후보마다
+    아이디와 창 양 끝. 이웃 맥락 글월은 재료가 아니다 — 판정의 근거가 아니라
+    안내다. 어느 경로에서 판정이 나도 신원은 요청 하나에서만 온다.
+    """
+    material = "\0".join(
+        (
+            _REQUEST_ID_DOMAIN,
+            request.block_id,
+            *request.frame_ids,
+            *(
+                part
+                for candidate in request.candidates
+                for part in (
+                    candidate.candidate_id,
+                    _exact(candidate.keep_start),
+                    _exact(candidate.keep_end),
+                )
+            ),
+        )
+    )
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def _exact(value: Fraction) -> str:
+    """창 끝점의 정확한 직렬 — 분모까지 담아야 같은 값이 늘 같은 글자가 된다."""
+    return f"{value.numerator}/{value.denominator}"

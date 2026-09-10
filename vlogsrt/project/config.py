@@ -50,6 +50,9 @@ _STT_CREDENTIAL_ENV_NAMES = frozenset({"OPENAI_API_KEY", "OPENAI_BASE_URL"})
 _HEX64 = re.compile(r"[0-9a-f]{64}")
 _INTEGER = re.compile(r"[+-]?\d+")
 
+_CONSTRUCTOR_SOURCE = "ProjectConfig 생성자"
+"""프로그램식 구성의 진단 라벨 — 파일 경로가 없는 자리에서의 출처다."""
+
 
 class ProjectConfigError(ValueError):
     """프로젝트 설정을 읽지 못했다. 메시지에 경로·키·버전을 담는다."""
@@ -112,6 +115,22 @@ class ProjectConfig:
             allow_nan=False,
         )
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def __post_init__(self) -> None:
+        """생성 우회를 닫는다 — 파일 해석이 거부하는 값은 생성도 거부한다.
+
+        범위·교차 검사는 `load_project_config` 경로에서만 돌았다. 프로그램식
+        구성은 그 검사를 건너뛰었고(P5-05b·P5-03b), 소비자마다 같은 검사를
+        다시 짜야 했다. 필드별 범위 파서와 `_validate_cross`를 그대로 여기서도
+        돌려 한 번에 닫는다 — 새 규칙은 없다. 파서가 돌려준 정규형 값을 다시
+        싣어, 생성 경로와 파일 경로가 같은 객체·같은 해시를 내게 한다.
+        """
+        for field in fields(self):
+            parsed = _FIELD_PARSERS[field.name](
+                field.name, getattr(self, field.name), _CONSTRUCTOR_SOURCE
+            )
+            object.__setattr__(self, field.name, parsed)
+        _validate_cross(self, _CONSTRUCTOR_SOURCE)
 
 
 def load_project_config(
