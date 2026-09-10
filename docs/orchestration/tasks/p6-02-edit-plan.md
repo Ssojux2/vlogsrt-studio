@@ -2,7 +2,12 @@
 
 ## Authority
 
-Binding spec `Visual scoring and deterministic roughcut` plus `Input and output`; depends on P6-01 and saved P5 vision decisions. The plan is the single revision consumed by FCPXML and EDIT SRT.
+Binding spec `Visual scoring and deterministic roughcut`; depends on P6-01.
+Coordinator/reviewer: Opus 5 (Run `run_a091d4869a98`). Offline only; Opus performs the merge.
+
+**이 브리프는 Fable 5.1의 P6 사전 검토로 한 번 고쳐졌다** —
+`docs/orchestration/reviews/fable-p6-prephase.md`. 신원·레일·검증 항목을 단순화하지 마라.
+P6는 **처음으로 구간을 실제 제거하는 계층**이다. CLAUDE.md 규칙 4와 9를 먼저 읽어라.
 
 ## Baseline and ownership
 
@@ -26,7 +31,13 @@ class RemovedInterval:
     instance_id: str
     source_frames: FrameInterval
     input_timeline_frames: FrameInterval
-    restore_before_instance_id: str
+    restore_at_output_frame: int      # 이 구간이 되돌아갈 출력 타임라인 프레임
+
+@dataclass(frozen=True, slots=True)
+class RetainedGap:
+    instance_id: str
+    input_timeline_frames: FrameInterval
+    output_timeline_frames: FrameInterval
 
 @dataclass(frozen=True, slots=True)
 class ReviewIssue:
@@ -40,7 +51,10 @@ class EditPlan:
     revision: str
     input_sha256: str
     config_sha256: str
+    frame_duration: Fraction               # document.frame_duration. P6-03이 격자를 되묻지 않는다
+    locked_instance_ids: frozenset[str]    # 검증자와 P6-03이 대조할 수 있게
     retained: tuple[RetainedInterval, ...]
+    gaps: tuple[RetainedGap, ...]          # 출력 스토리라인. P6-04가 리플을 재계산하지 않는다
     removed: tuple[RemovedInterval, ...]
     decisions: tuple[VisionDecision, ...]
     unavailable_instances: tuple[UnavailableInstance, ...]
@@ -49,6 +63,50 @@ class EditPlan:
 def build_edit_plan(document: ProjectDocument, partition: BlockPartition, guards: Sequence[InstanceGuard], decisions: Sequence[VisionDecision], cfg: ProjectConfig) -> EditPlan: ...
 def validate_edit_plan(plan: EditPlan, document: ProjectDocument, guards: Sequence[InstanceGuard]) -> tuple[str, ...]: ...
 ```
+
+### 신원·레일·적용 규칙 (Fable 사전 검토)
+
+**해시 선검사가 첫 관문이다.** `build_edit_plan`은 블록을 하나도 읽기 전에
+`partition.input_sha256 == document.input_sha256`과 `partition.config_sha256 == cfg.sha256()`를
+요구한다. 어긋나면 **`raise`** — 그건 모델 결함이 아니라 **섞인 리비전**이다.
+그다음 `_require_config(cfg)`(P6-01과 같은 레일).
+
+**적용은 `status`로만 한다.** 후보를 적용하는 조건은 셋의 교집합이다:
+`decision.status == "accepted"` **그리고** `choice`가 **그 블록의** 후보 id **그리고**
+`math.isfinite(confidence) and confidence >= cfg.vision_apply_confidence`.
+마지막 재검사는 **좁히기만** 한다 — `status`는 파싱 시점에 `_normalize`가 확정했다.
+**`confidence`나 `reason`에서 승인을 다시 유도하지 마라.** 그러면 NaN이 비교를 무력화하는
+P5-05b가 그대로 재현된다.
+
+**raise와 keep의 선:**
+
+| 상황 | 처리 |
+|---|---|
+| 설정 결함, 파티션/문서/설정 해시 불일치 | **`raise`** (섞인 리비전·호출자 잘못) |
+| 모르는 `block_id`, 남의 블록 후보를 가리키는 `choice` | **`raise`** (같은 이유) |
+| `status="accepted"`인데 `choice`가 `keep_all`/`uncertain` | keep_all + `ReviewIssue(code="decision_inconsistent")` |
+| 비유한 `confidence`, 한 블록에 판정 둘 | 같음 |
+| guard와 겹치는 스냅 결과 | 그 판정만 keep_all + review. **보호 프레임은 절대 제거하지 않는다** |
+
+**타임라인 격자 앵커를 한 번 명시하라.** 인덱스 `m`은 입력 경과 `m × frame_duration`이고
+`sequence.tcStart`는 이미 빠져 있다(ingest가 모든 `offset`을 그 격자에, 모든 클립 `start`를
+애셋 격자에 강제한다).
+
+### `validate_edit_plan`은 규칙 9를 기계로 지킨다
+
+반환은 브리프대로 `tuple[str, ...]`이고 **비어 있지 않으면 P6-04가 렌더를 거부한다.**
+최소한 이것들을 검사하라:
+
+- **프레임 보존**: 인스턴스마다 `Σretained + Σremoved == 클립 프레임 수`
+- **출력 타일링**: `retained ∪ gaps`의 출력 구간이 `[0, output_end)`를 정확히 덮고
+  겹치지 않으며 입력 순서를 지킨다
+- `removed ∩ protected == ∅`
+- 잠긴 인스턴스와 `unavailable_instances`에는 `RemovedInterval`이 **하나도 없다**
+- 모든 `removed`는 **한 블록 안**에 있다
+- 인스턴스마다 **최소 1프레임은 남는다** (클립 통째 삭제 금지의 기계적 표현)
+
+`guards`가 이 검증에 필요하므로 `render_edit_fcpxml`도 같은 `guards`를 받아야 한다
+(P6-04에서 다룬다).
 
 - Apply at most one known accepted candidate per block; keep all for missing/error/uncertain/low-confidence/unique-event decisions.
 - Retain the chosen 3-second candidate and ripple-remove the rest of that block. Preserve source audio/order/existing gaps, never remove a whole clip, never shorten dialogue/locked instances.
