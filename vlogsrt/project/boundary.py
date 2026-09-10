@@ -35,21 +35,54 @@ P4-02는 그 슬라이스 위에서 경계 전사 **요청**을 계획한다:
   참조 증명과 잠금만 남는다.
 
 이 계획은 요청을 만들 뿐이다 — 모델 호출·오디오 추출·큐 교체가 없다.
+
+P4-03는 계획된 요청을 **실행**한다 — 위의 계획은 순수하게 남는다:
+
+- **입력은 저장 PCM의 남긴 프레임 그대로다.** 요청의 `sample_range`를 바이트
+  단위로 옮기고 그 밖의 프레임은 한 개도 안 들어온다. 재전사 조각도 같은 저장
+  PCM에서 남긴 범위 안으로 묶여 잘린다 — 제거된 오디오의 덧붙임·문맥이 없다.
+- **엔진은 P3 소스 분석과 같은 순서로 돈다.** 1차 전사 → 골격 → 되풀이 재전사 →
+  불변 골격 → 큐 → 정제(조판 정리 포함, 정확히 한 번). 되풀이 재전사는 기본값
+  그대로 살아 있고, 시각과 글자는 여전히 응답의 세그먼트에서만 온다.
+- **시계는 세 층이다.** 엔진·정제는 경계 국소 시계(남긴 프레임 ÷ 주파수), 큐는
+  국소 시각에 남긴 범위의 시작 프레임을 정확히 한 번 더한 디코드 오디오 국소
+  시계, 파일 시계의 원점은 파일/XML 배치 때 한 번 더한다. 반올림은 SRT
+  직렬화까지 없다.
+- **실패는 조용한 성공이 아니다.** 호출·응답 계약 위반과 주입 커터 실패는 타입
+  있는 error 기록이고 완성물은 나오지 않는다. 원본 소스 큐는 그대로 남는다.
+- **경계는 재귀하지 않는다.** `cut_truncated`는 종결 메타데이터다 — 자기 끝점
+  때문에 다시 경계 요청을 만들지 않지만 재전사·정제는 평범하게 받는다.
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
+import math
+import os
+import tempfile
+from bisect import bisect_right
 from collections.abc import Callable, Iterable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from fractions import Fraction
-from typing import Literal, TypeVar
+from itertools import pairwise
+from pathlib import Path
+from typing import Any, Literal, TypeVar
 
+from vlogsrt import log, pipeline, refine, repair, transcribe
+from vlogsrt.config import Config
+from vlogsrt.models import Chunk, Cue, Repair, Segment, Span
 from vlogsrt.project.captions import PlacedSourceCue, SourceCaptionSet, SourceCue
 from vlogsrt.project.media import ResolvedMedia
 from vlogsrt.project.models import AssetResource, ClipInstance, ProjectDocument
-from vlogsrt.project.pcm import PcmReference, SampleRange, retained_sample_range
-from vlogsrt.project.speech import SourceTrace, UnavailableSourceAudio
+from vlogsrt.project.pcm import (
+    PcmReference,
+    SampleRange,
+    quiet_sample,
+    retained_sample_range,
+    write_wav_slice,
+)
+from vlogsrt.project.speech import SourceSegment, SourceTrace, UnavailableSourceAudio
 
 _SLICE_ID_DOMAIN = "vlogsrt-logical-slice-v1"
 """슬라이스 신원의 도메인 구분자 — 인스턴스·리소스 해시와 우연히 겹치지 않게 한다."""
@@ -57,8 +90,56 @@ _SLICE_ID_DOMAIN = "vlogsrt-logical-slice-v1"
 _REQUEST_ID_DOMAIN = "vlogsrt-boundary-request-v1"
 """경계 요청 신원의 도메인 구분자 — 다른 해시 재료와 우연히 겹치지 않게 한다."""
 
+_BOUNDARY_KEY_DOMAIN = "vlogsrt-boundary-analysis-v1"
+"""경계 분석 캐시 키의 도메인 구분자 — 소스 키·PCM 키와 우연히 겹치지 않게 한다."""
+
+_BOUNDARY_ID_DOMAIN = "vlogsrt-boundary-id-v1"
+"""경계 기록 신원의 도메인 구분자 — 다른 해시 재료와 우연히 겹치지 않게 한다."""
+
+_BOUNDARY_SEGMENT_ID_DOMAIN = "vlogsrt-boundary-segment-v1"
+"""경계 골격 세그먼트 신원의 도메인 구분자 — 소스 세그먼트와 갈라놓는다."""
+
+_BOUNDARY_CUE_ID_DOMAIN = "vlogsrt-boundary-cue-v1"
+"""경계 큐 신원의 도메인 구분자 — 소스 큐와 갈라놓는다."""
+
+_MANIFEST_FORMAT = "vlogsrt-boundary-manifest-v1"
+"""경계 완성물 기록의 형식 표지 — 다른 기록과 섞이지 않게 한다."""
+
+_BOUNDARY_DIR = "boundary"
+"""완성물 네임스페이스의 고정된 중간 디렉터리 — 애셋과 경계 캐시를 갈라놓는다."""
+
+_SCRATCH_DIR = "work"
+"""조각 WAV가 사는 휘발성 자리 — 완성물과 갈라진다(P3-02와 같은 형식 사실)."""
+
+_SAMPLE_WIDTH = 2
+"""s16le 한 샘플의 바이트 폭 — 조각 바이트 한도를 잴 때 쓰는 포맷의 사실이다."""
+
+_WAV_HEADER_BYTES = 44
+"""내는 WAV 헤더의 바이트 수 — 바이트 한도는 파일 전체로 잰다(포맷의 사실)."""
+
 _STATUS_SUCCESS = "success"
+_STATUS_EMPTY = "empty"
 _STATUS_ERROR = "error"
+
+_TRANSCRIPT_STATUSES = frozenset({_STATUS_SUCCESS, _STATUS_EMPTY, _STATUS_ERROR})
+_TRANSCRIPT_TEXT_FIELDS = (
+    "boundary_id",
+    "cache_key",
+    "request_id",
+    "source_id",
+    "pcm_analysis_key",
+    "original_stem",
+)
+
+# 글자만 주는 호출. 시각을 만들지 않으므로 응답 계약도 글자만 요구한다(P3-02와
+# 같은 선 — 포획 검증은 이 계층이 소유한 사유 복제본이다).
+_SEGMENT_PAYLOAD_KINDS = frozenset({transcribe.FIXTURE_KIND, transcribe.RESCUE_KIND})
+_KIND_LABELS = {
+    transcribe.FIXTURE_KIND: "전사",
+    transcribe.VERIFY_KIND: "검증",
+    transcribe.RESCUE_KIND: "재전사",
+    transcribe.ARBITER_KIND: "심판",
+}
 
 _T = TypeVar("_T")
 
@@ -71,6 +152,8 @@ __all__ = [
     "UnavailableInstance",
     "BoundaryPlan",
     "plan_boundaries",
+    "BoundaryTranscript",
+    "transcribe_boundaries",
 ]
 
 
@@ -862,3 +945,931 @@ def plan_boundaries(
         locked_instance_ids=frozenset(locked),
         unavailable_instances=tuple(unavailable_instances),
     )
+
+
+# ═══════════════════════════════════════════════════════════════
+#  P4-03 — 남긴 경계 오디오만 다시 전사하는 실행
+# ═══════════════════════════════════════════════════════════════
+
+
+@dataclass(frozen=True, slots=True)
+class BoundaryTranscript:
+    """경계 하나의 다시 전사 결과. 완성되면 불변이고 캐시 신원은 `cache_key`다.
+
+    `cues`는 **디코드 오디오 국소 시계**다 — 국소 시각에 남긴 범위의 시작 프레임을
+    정확히 한 번 더했다. 원점(`pcm_sample0_file_time`)은 아직 아니며 파일/XML 배치
+    때 한 번 더한다. `cut_truncated=True`는 종결 메타데이터다 — 이 기록의 끝점
+    때문에 다시 경계 요청을 만들 수 없다는 뜻이지, 재전사·정제를 뺀 뜻이 아니다.
+    """
+
+    boundary_id: str
+    cache_key: str
+    request_id: str
+    source_id: str
+    pcm_analysis_key: str
+    original_stem: str
+    source_start: Fraction
+    source_end: Fraction
+    sample_range: SampleRange
+    status: Literal["success", "empty", "error"]
+    draft: tuple[SourceSegment, ...]
+    settled_spine: tuple[SourceSegment, ...]
+    repairs: tuple[Repair, ...]
+    cues: tuple[SourceCue, ...]
+    error: str | None
+    cut_truncated: bool = True
+
+    def __post_init__(self) -> None:
+        if self.status not in _TRANSCRIPT_STATUSES:
+            raise ValueError(f"알 수 없는 상태다: {self.status!r}")
+        for name in _TRANSCRIPT_TEXT_FIELDS:
+            value = getattr(self, name)
+            if not isinstance(value, str) or not value:
+                raise ValueError(f"{name}은 비지 않은 문자열이어야 한다: {value!r}")
+        if (self.status == _STATUS_ERROR) != (self.error is not None):
+            raise ValueError(
+                f"status={self.status!r}와 error={self.error!r}가 어긋난다 — 실패는 상태로 남는다"
+            )
+        if self.status == _STATUS_EMPTY and (self.draft or self.settled_spine or self.cues):
+            raise ValueError("빈 성공인데 초안·골격·큐가 남아 있다")
+        if self.status == _STATUS_SUCCESS and not self.cues:
+            raise ValueError("성공인데 큐가 하나도 없다")
+
+
+@dataclass(frozen=True, slots=True)
+class _BoundaryRun:
+    """경계 하나의 이 번 실행 자리 — 참조·설정·캐시 키·네임스페이스가 다닌다."""
+
+    reference: PcmReference
+    trace: SourceTrace
+    request: BoundaryRequest
+    cfg: Config
+    cache_key: str
+    boundary_id: str
+    namespace: Path
+
+    @property
+    def scratch(self) -> Path:
+        return self.namespace / _SCRATCH_DIR
+
+    @property
+    def local_duration(self) -> float:
+        """엔진이 보는 경계 국소 길이 — 남긴 프레임 수 그대로다."""
+        span = self.request.sample_range
+        return float(Fraction(span.end - span.start, self.reference.sample_rate))
+
+    @property
+    def decoded_origin(self) -> Fraction:
+        """국소 → 디코드 국소 변환량 — 남긴 범위의 시작 프레임을 주파수로 나눈 값."""
+        return Fraction(self.request.sample_range.start, self.reference.sample_rate)
+
+
+@dataclass
+class _BoundaryProgress:
+    """이미 완성된 단계의 증거 — 실패 기록에도 완성된 것은 버리지 않는다."""
+
+    ranges: tuple[SampleRange, ...] = ()
+    draft: tuple[Segment, ...] = ()
+    settled: tuple[Segment, ...] = ()
+    repairs: tuple[Repair, ...] = ()
+    cues: tuple[Cue, ...] = ()
+
+
+class _BoundaryLinkage:
+    """요청·참조·트레이스를 (source_id, pcm_analysis_key) 쌍으로만 묶는다."""
+
+    def __init__(self, references: Sequence[PcmReference], traces: Sequence[SourceTrace]) -> None:
+        self._references = _index_by(
+            references, "소스와 PCM 키 하나에 참조가 둘 이상이다", _reference_pair
+        )
+        self._traces = _index_by(traces, "소스와 PCM 키 하나에 트레이스가 둘 이상이다", _trace_pair)
+
+    def resolve(self, request: BoundaryRequest) -> tuple[PcmReference, SourceTrace]:
+        pair = f"{request.source_id}\0{request.pcm_analysis_key}"
+        reference = self._references.get(pair)
+        if reference is None:
+            raise ValueError(
+                f"소스의 PCM 참조가 없다: source_id={request.source_id!r},"
+                f" pcm_analysis_key={request.pcm_analysis_key!r}"
+                " — 경계 전사는 저장 PCM에서만 나온다"
+            )
+        trace = self._traces.get(pair)
+        if trace is None:
+            raise ValueError(
+                f"소스의 전사 트레이스가 없다: source_id={request.source_id!r},"
+                f" pcm_analysis_key={request.pcm_analysis_key!r} — 지어내지 않는다"
+            )
+        _require_boundary_pair(reference, trace)
+        return reference, trace
+
+
+def _reference_pair(reference: PcmReference) -> str:
+    return f"{reference.source_id}\0{reference.analysis_key}"
+
+
+def _trace_pair(trace: SourceTrace) -> str:
+    return f"{trace.source_id}\0{trace.pcm_analysis_key}"
+
+
+def _require_boundary_pair(reference: PcmReference, trace: SourceTrace) -> None:
+    """짝의 원점 증명 — 참조와 트레이스가 같은 저장 PCM을 말하는지 확인한다."""
+    if reference.pcm_sample0_file_time != trace.pcm_sample0_file_time:
+        raise ValueError(
+            "PCM 참조의 원점이 트레이스와 다르다:"
+            f" reference {reference.pcm_sample0_file_time} 대비"
+            f" trace {trace.pcm_sample0_file_time} (source_id={trace.source_id!r})"
+        )
+
+
+def transcribe_boundaries(
+    requests: Sequence[BoundaryRequest],
+    references: Sequence[PcmReference],
+    source_traces: Sequence[SourceTrace],
+    cfg: Config,
+    transcriber: transcribe.Transcriber,
+    artifact_dir: Path,
+) -> tuple[BoundaryTranscript, ...]:
+    """계획된 경계 요청들을 저장 PCM의 남긴 프레임만으로 다시 전사한다.
+
+    연결·범위 검사는 **전 요청을 호출 앞에서** 끝낸다 — 깨진 입력에 유료 호출이
+    값을 쓰지 않는다(P3-02와 같은 선). 기록은 요청 순서 그대로 돌아가고, 실행 중
+    실패는 예외가 아니라 타입 있는 error 기록이다. 완성물은 캐시 키로 주소 붙은
+    네임스페이스에 원자적으로 독점 출판된다.
+    """
+    linkage = _BoundaryLinkage(references, source_traces)
+    runs: list[_BoundaryRun] = []
+    seen: set[str] = set()
+    for request in requests:
+        if request.request_id in seen:
+            raise ValueError(
+                f"요청 신원이 중복된다: {request.request_id!r} — 같은 요청을 두 번 돌리지 않는다"
+            )
+        seen.add(request.request_id)
+        reference, trace = linkage.resolve(request)
+        _require_retainable(reference, request)
+        runs.append(_plan_run(reference, trace, request, cfg, artifact_dir))
+    return tuple(_transcribe_one(run, transcriber) for run in runs)
+
+
+def _plan_run(
+    reference: PcmReference,
+    trace: SourceTrace,
+    request: BoundaryRequest,
+    cfg: Config,
+    artifact_dir: Path,
+) -> _BoundaryRun:
+    cache_key = _boundary_cache_key(reference, trace, request, cfg)
+    return _BoundaryRun(
+        reference=reference,
+        trace=trace,
+        request=request,
+        cfg=cfg,
+        cache_key=cache_key,
+        boundary_id=_boundary_id(cache_key, request.request_id),
+        namespace=artifact_dir / request.source_id / _BOUNDARY_DIR / cache_key,
+    )
+
+
+def _require_retainable(reference: PcmReference, request: BoundaryRequest) -> None:
+    """요청 범위는 참조가 줄 수 있는 프레임 안에 정확히 있어야 한다."""
+    samples = request.sample_range
+    if _bad_count(samples.start) or _bad_count(samples.end):
+        raise ValueError(f"요청 범위는 정수 프레임 번호다: {samples.start!r}..{samples.end!r}")
+    if reference.sample_rate < 1 or reference.channels < 1:
+        raise ValueError(
+            f"참조의 주파수·채널이 1 이상이어야 한다: {reference.sample_rate!r},"
+            f" {reference.channels!r} (source_id={request.source_id!r})"
+        )
+    if samples.start < 0 or samples.end > reference.sample_count or samples.end <= samples.start:
+        raise ValueError(
+            f"참조가 줄 수 없는 범위다: [{samples.start}, {samples.end})"
+            f" (source_id={request.source_id!r}, 저장 {reference.sample_count}프레임)"
+        )
+
+
+def _transcribe_one(run: _BoundaryRun, transcriber: transcribe.Transcriber) -> BoundaryTranscript:
+    """경계 하나를 엔진 전체로 돈다. 예외를 밖으로 새지 않고 상태로 남긴다."""
+    capture = _BoundaryCapture()
+    progress = _BoundaryProgress()
+    wrapped = _BoundaryCapturingTranscriber(transcriber, capture)
+    try:
+        return _analyze_boundary(run, wrapped, capture, progress)
+    except Exception as exc:  # noqa: BLE001 - 상태로 바꿔 남긴다. 조용히 두지는 않는다
+        capture.record("경계 엔진", exc)
+        return _record(run, progress, status=_STATUS_ERROR, error=capture.describe())
+
+
+def _analyze_boundary(
+    run: _BoundaryRun,
+    wrapped: _BoundaryCapturingTranscriber,
+    capture: _BoundaryCapture,
+    progress: _BoundaryProgress,
+) -> BoundaryTranscript:
+    """1차 전사의 상태를 갈라 보내고, 초안이 있으면 재전사·조판으로 간다."""
+    outcome = _first_pass(run, wrapped, progress)
+    if outcome.status == _STATUS_ERROR:
+        return _record(
+            run, progress, status=_STATUS_ERROR, error=outcome.error or "경계 전사가 실패했다"
+        )
+    progress.draft = outcome.segments
+    if outcome.status == _STATUS_EMPTY:
+        return _empty_transcript(run, progress)
+    if not progress.draft:
+        # 걸러져 빈 성공은 쓸 초안이 없는 것이다(EmptyTranscript) — 무음의 증거가
+        # 아니므로 빈 성공으로 내주지 않는다(P3-02와 같은 선).
+        return _record(
+            run,
+            progress,
+            status=_STATUS_ERROR,
+            error="조립 가능한 초안이 하나도 없습니다 — 공백 글자만 걸러져 빈 성공이다",
+        )
+    return _settled_transcript(run, wrapped, capture, progress)
+
+
+def _first_pass(
+    run: _BoundaryRun,
+    wrapped: _BoundaryCapturingTranscriber,
+    progress: _BoundaryProgress,
+) -> transcribe.TranscriptionOutcome:
+    """남긴 범위를 조각으로 만들어 1차 전사를 부른다. 조각 증거는 progress에 남는다."""
+    progress.ranges = _retained_ranges(run.reference, run.request.sample_range, run.cfg)
+    job = transcribe.TranscriptionJob(
+        stem=run.reference.original_stem,
+        chunks=_initial_chunks(
+            run.reference, run.request.sample_range, progress.ranges, run.scratch
+        ),
+        namespace=run.namespace,
+    )
+    return transcribe.transcribe_outcome(wrapped, job, run.cfg)
+
+
+def _settled_transcript(
+    run: _BoundaryRun,
+    wrapped: _BoundaryCapturingTranscriber,
+    capture: _BoundaryCapture,
+    progress: _BoundaryProgress,
+) -> BoundaryTranscript:
+    """재전사(주입 커터) → 불변 골격 → 큐 → 정제 → 완성물 출판."""
+    settled = repair.settle(
+        list(progress.draft),
+        repair.Source(
+            stem=run.reference.original_stem,
+            duration=run.local_duration,
+            namespace=run.namespace,
+            cutter=_repair_cutter(run.reference, run.request.sample_range, run.scratch, capture),
+        ),
+        run.cfg,
+        wrapped,
+    )
+    progress.settled = tuple(settled.spine)
+    progress.repairs = settled.repairs
+    if capture.failures:
+        return _record(run, progress, status=_STATUS_ERROR, error=capture.describe())
+    progress.cues = tuple(
+        refine.refine(pipeline.spine_to_cues(list(settled.spine)), run.cfg, run.local_duration)
+    )
+    if not progress.cues:
+        return _record(
+            run, progress, status=_STATUS_ERROR, error="정제를 끝내고 큐가 하나도 남지 않았다"
+        )
+    return _published_transcript(run, progress)
+
+
+def _empty_transcript(run: _BoundaryRun, progress: _BoundaryProgress) -> BoundaryTranscript:
+    """빈 성공 — 결정적인 빈 기록을 낸다. 조용한 실패가 아니다(P3-02와 같은 선)."""
+    transcript = _record(run, progress, status=_STATUS_EMPTY, error=None)
+    if _publish_transcript(run, transcript) is None:
+        return _record(run, progress, status=_STATUS_ERROR, error=_conflict_error(run))
+    log.info(f"경계 전사 완료: {run.reference.original_stem} · 빈 (무음의 증거가 아니다)")
+    return transcript
+
+
+def _published_transcript(run: _BoundaryRun, progress: _BoundaryProgress) -> BoundaryTranscript:
+    """성공 기록을 완성물로 출판한다 — 충돌이면 있는 바이트를 보존하고 error로 끝낸다."""
+    transcript = _record(run, progress, status=_STATUS_SUCCESS, error=None)
+    if _publish_transcript(run, transcript) is None:
+        return _record(run, progress, status=_STATUS_ERROR, error=_conflict_error(run))
+    log.info(f"경계 전사 완료: {run.reference.original_stem} · 큐 {len(progress.cues)}장")
+    return transcript
+
+
+def _conflict_error(run: _BoundaryRun) -> str:
+    stem = run.reference.original_stem
+    return (
+        f"완성물이 이미 다른 바이트로 있다: {run.cache_key}/{stem}.BOUNDARY.json — "
+        "있는 것을 보존하고 이 번 결과를 버린다"
+    )
+
+
+def _record(
+    run: _BoundaryRun, progress: _BoundaryProgress, *, status: str, error: str | None
+) -> BoundaryTranscript:
+    """완성된 단계의 증거를 기록으로 옮긴다 — 지어내지도 조금도 지우지도 않는다."""
+    draft = _boundary_segments(run, progress.ranges, progress.draft)
+    settled = _boundary_segments(run, progress.ranges, progress.settled)
+    return BoundaryTranscript(
+        boundary_id=run.boundary_id,
+        cache_key=run.cache_key,
+        request_id=run.request.request_id,
+        source_id=run.request.source_id,
+        pcm_analysis_key=run.request.pcm_analysis_key,
+        original_stem=run.reference.original_stem,
+        source_start=run.request.source_start,
+        source_end=run.request.source_end,
+        sample_range=run.request.sample_range,
+        status=status,  # type: ignore[arg-type]
+        draft=draft,
+        settled_spine=settled,
+        repairs=progress.repairs,
+        cues=_boundary_cues(run, progress.cues, settled),
+        error=error,
+    )
+
+
+# ─────────────────────────────────────────────────────────────
+#  캐시 신원 — 내용·정책·남긴 범위·소스 분석·설정이 키다
+# ─────────────────────────────────────────────────────────────
+
+
+def _boundary_cache_key(
+    reference: PcmReference, trace: SourceTrace, request: BoundaryRequest, cfg: Config
+) -> str:
+    """경계 분석 키 — 경로·stem·목록 위치는 재료가 아니다.
+
+    원본 해시·PCM 정책(분석 키가 묶는다)·PCM 내용·채널·주파수·남긴 프레임의 정확한
+    범위·소스 트레이스의 분석 키·모델과 설정 지문을 모은다. 어느 하나라도 달라지면
+    다른 분석이고, 다른 완성물 자리를 얻는다.
+    """
+    material = "\n".join(
+        [
+            _BOUNDARY_KEY_DOMAIN,
+            f"original_sha256={reference.original_sha256}",
+            f"pcm_analysis_key={reference.analysis_key}",
+            f"pcm_sha256={reference.pcm_sha256}",
+            f"channels={reference.channels}",
+            f"sample_rate={reference.sample_rate}",
+            f"sample_range={request.sample_range.start}/{request.sample_range.end}",
+            f"source_analysis_key={trace.analysis_key}",
+            f"model={cfg.transcribe_model}",
+            f"config_sha256={_config_sha256(cfg)}",
+        ]
+    )
+    return hashlib.sha256(material.encode()).hexdigest()
+
+
+def _boundary_id(cache_key: str, request_id: str) -> str:
+    """경계 기록 신원 — 캐시 키와 요청 신원의 결정적 해시다."""
+    material = "\n".join(
+        [_BOUNDARY_ID_DOMAIN, f"cache_key={cache_key}", f"request_id={request_id}"]
+    )
+    return hashlib.sha256(material.encode()).hexdigest()
+
+
+def _config_sha256(cfg: Config) -> str:
+    """설정 스냅샷의 지문 — 같은 설정은 같은 지문을 낸다(P3-02와 같은 자)."""
+    body = json.dumps(cfg.to_dict(), ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(body.encode()).hexdigest()
+
+
+# ─────────────────────────────────────────────────────────────
+#  남긴 범위의 조각 — 저장 PCM을 정확한 프레임으로 덮는다
+# ─────────────────────────────────────────────────────────────
+
+
+def _retained_ranges(
+    reference: PcmReference, span: SampleRange, cfg: Config
+) -> tuple[SampleRange, ...]:
+    """남긴 범위를 빈틈없이 덮는 조각 범위 — 자리만 고르고 구간은 못 고른다.
+
+    P3-02의 전체 조각 계획과 같은 규칙을 남긴 범위 안에서만 적용한다: 두 한도가
+    조각 수를 정하고 경계는 목표 지점 주위의 가장 조용한 창에서 골라 exact 샘플로
+    자른다. 합은 언제나 `[span.start, span.end)`다(규칙 4). 제거된 오디오의 창은
+    경계 **후보**를 잴 수 있어도 경계 자리가 될 수는 없다 — 한도 밴드가 묶는다.
+    """
+    frames = span.end - span.start
+    if frames < 1:
+        raise ValueError(f"남긴 프레임이 없다: {frames!r} — 덮을 오디오가 없다")
+    rate = reference.sample_rate
+    max_len = _max_chunk_frames(reference, cfg)
+    count = max(1, -(-frames // max_len))
+    search = max(0, round(cfg.cut_search_seconds * rate))
+    window = min(frames, max(1, round(cfg.cut_quiet_window_ms * rate / 1000)))
+    cuts: list[int] = []
+    previous = span.start
+    for index in range(1, count):
+        target = span.start + frames * index // count
+        remaining = count - index
+        lo = max(previous + 1, span.end - max_len * remaining)
+        hi = min(previous + max_len, span.end - remaining)
+        if lo > hi:
+            raise ValueError(
+                f"조각 한도를 채울 수 없다: {frames}프레임을 한도 {max_len}프레임인 "
+                f"{count}조각으로 못 나눈다 ({index}번째 경계 [{lo}, {hi}])"
+            )
+        cuts.append(_bounded_quiet_cut(reference, target, search, window, lo, hi))
+        previous = cuts[-1]
+    edges = [span.start, *cuts, span.end]
+    return tuple(SampleRange(start, end) for start, end in pairwise(edges))
+
+
+def _max_chunk_frames(reference: PcmReference, cfg: Config) -> int:
+    """한 조각이 담을 수 있는 최대 프레임 — 초 한도와 실제 WAV 바이트 한도 중 작은 쪽.
+
+    바이트 한도는 내는 파일 전체(44바이트 헤더 포함)로 잰다(P3-02와 같은 자).
+    한도가 헤더·한 프레임조차 못 담으면 명시적으로 죽는다 — 조용히 한 조각을
+    통째로 내는 길이 될 수 없기 때문이다.
+    """
+    if cfg.chunk_max_bytes <= _WAV_HEADER_BYTES:
+        raise ValueError(
+            f"chunk_max_bytes가 WAV 헤더({_WAV_HEADER_BYTES}바이트)보다 작다: "
+            f"{cfg.chunk_max_bytes!r} — 조각 하나를 못 만든다"
+        )
+    frame_bytes = _SAMPLE_WIDTH * reference.channels
+    by_bytes = (cfg.chunk_max_bytes - _WAV_HEADER_BYTES) // frame_bytes
+    if by_bytes < 1:
+        raise ValueError(
+            f"chunk_max_bytes가 한 프레임({frame_bytes}바이트)도 못 담는다: {cfg.chunk_max_bytes!r}"
+        )
+    if cfg.chunk_max_seconds > 0:
+        by_seconds = int(cfg.chunk_max_seconds * reference.sample_rate)
+        if by_seconds < 1:
+            raise ValueError(
+                f"chunk_max_seconds가 한 프레임(1/{reference.sample_rate}초)도 못 담는다: "
+                f"{cfg.chunk_max_seconds!r} — 조각 하나를 못 만든다"
+            )
+        return min(by_bytes, by_seconds)
+    return by_bytes
+
+
+def _bounded_quiet_cut(
+    reference: PcmReference, target: int, search: int, window: int, lo: int, hi: int
+) -> int:
+    """조용한 창의 경계 후보를 한도가 허락하는 범위로 묶는다(P3-02와 같은 자)."""
+    candidate = _quiet_cut(reference, target, search, window)
+    if lo <= candidate <= hi:
+        return candidate
+    if lo <= target <= hi:
+        return target
+    return min(max(target, lo), hi)
+
+
+def _quiet_cut(reference: PcmReference, target: int, search: int, window: int) -> int:
+    """목표 주위의 묶인 창 안에서 가장 조용한 창의 시작 프레임.
+
+    창을 놓을 자리가 없으면 목표 그대로다 — 자를 자리를 못 고르는 것이 구간을
+    잃을 이유가 되지 못한다(규칙 4). 말인지 침묵인지는 판단하지 않는다.
+    """
+    lo = max(0, target - search)
+    hi = min(target + search, reference.sample_count - window)
+    if lo > hi:
+        return target
+    return quiet_sample(reference, target=target, search_samples=search, window_samples=window)
+
+
+def _initial_chunks(
+    reference: PcmReference,
+    retained: SampleRange,
+    ranges: Sequence[SampleRange],
+    scratch: Path,
+) -> tuple[Chunk, ...]:
+    chunks: list[Chunk] = []
+    for index, span in enumerate(ranges):
+        path = scratch / f"initial-{index:04d}.wav"
+        write_wav_slice(reference, span, path)
+        chunks.append(_snapped_chunk(reference, retained, span, index, path))
+    return tuple(chunks)
+
+
+def _repair_cutter(
+    reference: PcmReference,
+    retained: SampleRange,
+    scratch: Path,
+    capture: _BoundaryCapture,
+) -> Callable[[Sequence[Span]], list[Chunk]]:
+    """재전사 구간을 같은 저장 PCM의 남긴 범위 안에서 자르는 주입 커터."""
+
+    def cut(spans: Sequence[Span]) -> list[Chunk]:
+        try:
+            return _repair_chunks(reference, retained, spans, scratch)
+        except Exception as exc:  # noqa: BLE001 - 기록하고 그대로 다시 던진다
+            capture.record("경계 재전사 조각", exc)
+            raise
+
+    return cut
+
+
+def _repair_chunks(
+    reference: PcmReference,
+    retained: SampleRange,
+    spans: Sequence[Span],
+    scratch: Path,
+) -> list[Chunk]:
+    """재전사 조각들 — 구간마다 남긴 범위로 묶어 실제 프레임으로 자른다."""
+    chunks: list[Chunk] = []
+    for index, (low, high) in enumerate(spans):
+        span = _clamped_repair_range(reference, retained, low, high)
+        path = scratch / f"repair-{index:04d}.wav"
+        write_wav_slice(reference, span, path)
+        chunks.append(_snapped_chunk(reference, retained, span, index, path))
+    return chunks
+
+
+def _clamped_repair_range(
+    reference: PcmReference, retained: SampleRange, low: float, high: float
+) -> SampleRange:
+    """국소 재전사 구간을 남긴 범위로 묶어 프레임으로 환산한다 — 시작 ceil·끝 floor.
+
+    여유가 경계 밖으로 나가면 남긴 범위 끝에서 묶인다 — 제거된 오디오의 덧붙임이나
+    문맥은 없다. 묶은 뒤 남는 프레임이 없으면 그 자리에서 죽는다: 여유를 더해
+    살리는 길은 없다.
+    """
+    rate = reference.sample_rate
+    duration = Fraction(retained.end - retained.start, rate)
+    lo = min(max(Fraction(str(low)), Fraction(0)), duration)
+    hi = min(max(Fraction(str(high)), Fraction(0)), duration)
+    start = retained.start + math.ceil(lo * rate)
+    end = retained.start + math.floor(hi * rate)
+    if end <= start:
+        raise ValueError(
+            f"재전사 구간이 남긴 범위 안에서 비었다: 국소 [{lo}, {hi}) (요청 [{low!r}, {high!r}])"
+        )
+    return SampleRange(start, end)
+
+
+def _snapped_chunk(
+    reference: PcmReference, retained: SampleRange, span: SampleRange, index: int, path: Path
+) -> Chunk:
+    """잘린 프레임에서 국소 좌표를 만든다 — 요청한 초 원본이 아니다.
+
+    국소 오프셋은 `Fraction(실제 시작 프레임 − 남긴 범위 시작, 주파수)`이고 길이는
+    실제 잘린 프레임 수다. 엔진 전체가 이 국소 시계에서 돈다.
+    """
+    rate = reference.sample_rate
+    offset = float(Fraction(span.start - retained.start, rate))
+    duration = float(Fraction(span.end - span.start, rate))
+    return Chunk(path=path, offset=offset, duration=duration, index=index)
+
+
+# ─────────────────────────────────────────────────────────────
+#  시계 — 국소 엔진 시각을 디코드 국소·파일 기록으로 정확히 옮긴다
+# ─────────────────────────────────────────────────────────────
+
+
+def _boundary_segments(
+    run: _BoundaryRun,
+    ranges: Sequence[SampleRange],
+    segments: Sequence[Segment],
+) -> tuple[SourceSegment, ...]:
+    """레거시 세그먼트를 디코드 국소 시계의 기록으로 옮긴다 — 값은 고치지 않는다.
+
+    `audio_*`는 국소 시각에 남긴 범위의 시작을 정확히 한 번 더한 디코드 국소
+    시각이고 `file_*`는 거기에 원점을 정확히 한 번 더한 파일 시각이다(P3-02와
+    같은 두 시계). 세그먼트가 어느 조각에서 왔는지는 시작 시각을 덮는 조각으로
+    정한다.
+    """
+    if not ranges or not segments:
+        return ()
+    retained = run.request.sample_range
+    starts = [
+        float(Fraction(span.start - retained.start, run.reference.sample_rate)) for span in ranges
+    ]
+    origin = run.reference.pcm_sample0_file_time
+    records: list[SourceSegment] = []
+    for segment in segments:
+        chunk_index = max(0, bisect_right(starts, segment.start) - 1)
+        span = ranges[chunk_index]
+        audio_start = Fraction(str(segment.start)) + run.decoded_origin
+        audio_end = Fraction(str(segment.end)) + run.decoded_origin
+        records.append(
+            SourceSegment(
+                segment_id=_boundary_segment_id(run.cache_key, chunk_index, segment.id, span),
+                audio_start=audio_start,
+                audio_end=audio_end,
+                file_start=audio_start + origin,
+                file_end=audio_end + origin,
+                text=segment.text,
+                compression_ratio=segment.compression_ratio,
+                avg_logprob=segment.avg_logprob,
+                no_speech_prob=segment.no_speech_prob,
+            )
+        )
+    return tuple(records)
+
+
+def _boundary_segment_id(
+    cache_key: str, chunk_index: int, legacy_id: int, span: SampleRange
+) -> str:
+    """경계 세그먼트 신원 — 캐시 키·조각 번호·레거시 id·정확한 조각 범위의 해시."""
+    material = "\n".join(
+        [
+            _BOUNDARY_SEGMENT_ID_DOMAIN,
+            f"cache_key={cache_key}",
+            f"chunk_index={chunk_index}",
+            f"legacy_segment_id={legacy_id}",
+            f"retained_range={span.start}/{span.end}",
+        ]
+    )
+    return hashlib.sha256(material.encode()).hexdigest()
+
+
+def _boundary_cues(
+    run: _BoundaryRun, cues: Sequence[Cue], spine: Sequence[SourceSegment]
+) -> tuple[SourceCue, ...]:
+    """정제된 큐를 디코드 국소 시계의 소스 큐로 옮긴다 — 다듬지 않는다.
+
+    원점은 더하지 않는다: 파일 시계 변환은 파일/XML 배치 때 정확히 한 번 한다.
+    `segment_ids`는 경계 골격의 결정적 신원이다 — 큐는 골격을 역추적할 수 있어야
+    한다(규칙 2).
+    """
+    records: list[SourceCue] = []
+    for cue in cues:
+        start = Fraction(str(cue.start)) + run.decoded_origin
+        end = Fraction(str(cue.end)) + run.decoded_origin
+        segment_ids = tuple(_spine_segment_id(spine, legacy_id) for legacy_id in cue.seg_ids)
+        records.append(
+            SourceCue(
+                cue_id=_boundary_cue_id(run.cache_key, cue.index, start, end, segment_ids),
+                source_id=run.request.source_id,
+                segment_ids=segment_ids,
+                start=start,
+                end=end,
+                text="\n".join(cue.lines),
+                flags=cue.flags,
+            )
+        )
+    return tuple(records)
+
+
+def _spine_segment_id(spine: Sequence[SourceSegment], legacy_id: int) -> str:
+    """레거시 `seg_id`를 경계 골격 신원으로 — settle이 골격을 0부터 다시 세므로
+    위치가 곧 레거시 id다(P3-03과 같은 자)."""
+    if not 0 <= legacy_id < len(spine):
+        raise ValueError(f"큐의 seg_id {legacy_id}가 골격에 없다 — 골격은 {len(spine)}장이다")
+    return spine[legacy_id].segment_id
+
+
+def _boundary_cue_id(
+    cache_key: str,
+    index: int,
+    start: Fraction,
+    end: Fraction,
+    segment_ids: tuple[str, ...],
+) -> str:
+    """경계 큐 신원 — 캐시 키·큐 번호·정확한 시각·세그먼트의 해시."""
+    material = "\n".join(
+        [
+            _BOUNDARY_CUE_ID_DOMAIN,
+            f"cache_key={cache_key}",
+            f"cue_index={index}",
+            f"start={start}",
+            f"end={end}",
+            f"segment_ids={','.join(segment_ids)}",
+        ]
+    )
+    return hashlib.sha256(material.encode()).hexdigest()
+
+
+# ─────────────────────────────────────────────────────────────
+#  실패 포획 — 사유 래퍼가 계약을 지키고 기록만 남긴다 (P3-02의 사유 복제본)
+# ─────────────────────────────────────────────────────────────
+
+
+@dataclass
+class _BoundaryCapture:
+    """포획된 운영 실패의 목록 — 실행기가 settle 뒤에 보는 유일한 증거."""
+
+    failures: list[str] = field(default_factory=list)
+
+    def record(self, stage: str, exc: BaseException | str) -> None:
+        text = " ".join(str(exc).split())
+        self.failures.append(f"{stage}: {text}" if text else f"{stage}: {exc.__class__.__name__}")
+
+    def describe(self) -> str:
+        return "; ".join(self.failures)
+
+
+class _BoundaryCapturingTranscriber:
+    """주입된 전사기를 싸는 사유 래퍼 — 계약 위반을 기록하고 그대로 다시 던진다.
+
+    레거시 재전사는 이 예외를 오늘과 같이 잡아 되풀이 정책(유지·접기)으로 흘려
+    보내지만, 실행기는 settle 뒤 포획 기록을 보고 완성물을 내주지 않는다.
+    세그먼트를 주는 호출(전사·재전사)은 엄격한 꼴을, 글자만 주는 호출(심판·검증)은
+    명시적 문자열 `text` 또는 `parse_text`가 읽는 목록 형태를 요구한다.
+    """
+
+    def __init__(self, inner: transcribe.Transcriber, capture: _BoundaryCapture) -> None:
+        self._inner = inner
+        self._capture = capture
+
+    def transcribe(
+        self, job: transcribe.TranscriptionJob, cfg: Config
+    ) -> list[transcribe.ChunkResponse]:
+        label = _KIND_LABELS.get(job.kind, job.kind)
+        try:
+            responses = self._inner.transcribe(job, cfg)
+            for chunk, response in _match_requested(job, responses):
+                defect = _response_defect(job.kind, response.payload, f"{label} 조각 {chunk.index}")
+                if defect is not None:
+                    raise transcribe.MalformedTranscript(defect)
+        except Exception as exc:  # noqa: BLE001 - 기록하고 그대로 다시 던진다
+            self._capture.record(f"{label} 호출", exc)
+            raise
+        return responses
+
+
+def _match_requested(
+    job: transcribe.TranscriptionJob, responses: Sequence[transcribe.ChunkResponse]
+) -> list[tuple[Chunk, transcribe.ChunkResponse]]:
+    """요청한 조각마다 응답이 정확히 하나 — 누락·중복·요청 밖·오프셋 어긋남은 위반.
+
+    위치로 짝짓지 않는다. 네임스페이스 안의 부분집합 선택은 픽스처 경계가 이미
+    결정적으로 걸렀다(P3-01) — 여기는 어떤 응답이 왔는지의 계약을 검사한다.
+    """
+    requested = {chunk.index: chunk for chunk in job.chunks}
+    matched: dict[int, transcribe.ChunkResponse] = {}
+    for response in responses:
+        index = response.index
+        if isinstance(index, bool) or not isinstance(index, int):
+            raise transcribe.MalformedTranscript(f"응답 조각 번호가 정수가 아닙니다: {index!r}")
+        if index not in requested:
+            raise transcribe.MalformedTranscript(f"요청하지 않은 조각 응답이 돌아왔다: {index}")
+        if index in matched:
+            raise transcribe.MalformedTranscript(f"조각 {index} 응답이 둘 이상 돌아왔다")
+        chunk = requested[index]
+        if not _finite(response.offset) or response.offset != chunk.offset:
+            raise transcribe.MalformedTranscript(
+                f"조각 {index} 응답 오프셋이 요청({chunk.offset})과 다릅니다: {response.offset!r}"
+            )
+        matched[index] = response
+    absent = sorted(set(requested) - set(matched))
+    if absent:
+        raise transcribe.MalformedTranscript(f"응답이 돌아오지 않은 조각: {absent}")
+    ordered = sorted(job.chunks, key=lambda chunk: chunk.index)
+    return [(chunk, matched[chunk.index]) for chunk in ordered]
+
+
+def _response_defect(kind: str, payload: Any, where: str) -> str | None:
+    """호출 종류별 응답 계약. 위반을 하나만 골라 돌려주고 맞으면 None."""
+    if kind in _SEGMENT_PAYLOAD_KINDS:
+        return _segment_defect(payload, where)
+    return _text_defect(payload, where)
+
+
+def _segment_defect(payload: Any, where: str) -> str | None:
+    """세그먼트를 주는 호출의 엄격한 꼴 — P3-01·P3-02의 전사 결과형과 같은 선.
+
+    공개 결과형을 글자 전용 응답까지 끌어들이는 확장은 하지 않는다 — 이 계층이
+    소유한 사유 복제본이다(P3-02의 결정).
+    """
+    if not isinstance(payload, dict):
+        return f"{where}: 응답이 JSON 객체가 아닙니다: {type(payload).__name__}"
+    if "segments" not in payload:
+        return f"{where}: 응답에 segments가 없습니다"
+    segments = payload["segments"]
+    if not isinstance(segments, list):
+        return f"{where}: segments가 리스트가 아닙니다: {type(segments).__name__}"
+    for position, segment in enumerate(segments):
+        if not isinstance(segment, dict):
+            return f"{where}: 세그먼트 {position}이 JSON 객체가 아닙니다"
+        if "text" not in segment:
+            return f"{where}: 세그먼트 {position}에 text가 없습니다"
+        if not isinstance(segment["text"], str):
+            return f"{where}: 세그먼트 {position}의 text가 문자열이 아닙니다: {segment['text']!r}"
+        for key in ("start", "end"):
+            if key not in segment:
+                return f"{where}: 세그먼트 {position}에 {key}가 없습니다"
+            if not _finite(segment[key]):
+                return (
+                    f"{where}: 세그먼트 {position}의 {key}가 유한 숫자가 아닙니다: {segment[key]!r}"
+                )
+        for key in ("compression_ratio", "avg_logprob", "no_speech_prob"):
+            if key in segment and not _finite(segment[key]):
+                return (
+                    f"{where}: 세그먼트 {position}의 {key}가 유한 숫자가 아닙니다: {segment[key]!r}"
+                )
+    return None
+
+
+def _text_defect(payload: Any, where: str) -> str | None:
+    """글자만 주는 호출(심판·검증)의 꼴 — 시각은 요구하지도 지어내지도 않는다.
+
+    명시적인 문자열 `text`(빈 문자열은 말이 없다는 증거) 또는 `parse_text`가 읽는
+    형태 — `text`가 문자열인 객체들의 목록. 최상위 목록은 이 형태가 아니고, 둘 다
+    없는 꼴(빈 객체 포함)은 위반이다.
+    """
+    if not isinstance(payload, dict):
+        return f"{where}: 응답이 JSON 객체가 아닙니다: {type(payload).__name__}"
+    if "text" in payload:
+        if not isinstance(payload["text"], str):
+            return f"{where}: text가 문자열이 아닙니다: {payload['text']!r}"
+        return None
+    if "segments" in payload:
+        segments = payload["segments"]
+        if not isinstance(segments, list):
+            return f"{where}: segments가 리스트가 아닙니다: {type(segments).__name__}"
+        for position, segment in enumerate(segments):
+            if not isinstance(segment, dict):
+                return f"{where}: 세그먼트 {position}이 JSON 객체가 아닙니다"
+            if "text" not in segment:
+                return f"{where}: 세그먼트 {position}에 text가 없습니다"
+            if not isinstance(segment["text"], str):
+                return (
+                    f"{where}: 세그먼트 {position}의 text가 문자열이 아닙니다: {segment['text']!r}"
+                )
+        return None
+    return f"{where}: 응답에 text도 segments도 없습니다"
+
+
+def _finite(value: Any) -> bool:
+    """숫자이면서 유한한 값만 받는다 — bool과 NaN·무한대는 시각이 될 수 없다."""
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def _bad_count(value: object) -> bool:
+    """bool은 int인 척한다 — 세는 수에서는 걸러낸다."""
+    return isinstance(value, bool) or not isinstance(value, int)
+
+
+# ─────────────────────────────────────────────────────────────
+#  완성물 — 캐시 키로 주소 붙은 자리에 원자적으로 독점 출판한다
+# ─────────────────────────────────────────────────────────────
+
+
+def _publish_transcript(run: _BoundaryRun, transcript: BoundaryTranscript) -> Path | None:
+    """경계 기록을 완성물로 독점 출판한다. 충돌이면 None — 있는 바이트를 보존한다."""
+    destination = run.namespace / f"{run.reference.original_stem}.BOUNDARY.json"
+    return _publish_exclusive(destination, _manifest_bytes(transcript))
+
+
+def _manifest_bytes(transcript: BoundaryTranscript) -> bytes:
+    """기록의 결정적 직렬 — 같은 기록은 언제나 같은 바이트를 낸다."""
+    body: dict[str, object] = {
+        "format": _MANIFEST_FORMAT,
+        "boundary_id": transcript.boundary_id,
+        "cache_key": transcript.cache_key,
+        "request_id": transcript.request_id,
+        "source_id": transcript.source_id,
+        "pcm_analysis_key": transcript.pcm_analysis_key,
+        "original_stem": transcript.original_stem,
+        "source_start": _exact(transcript.source_start),
+        "source_end": _exact(transcript.source_end),
+        "sample_range": [transcript.sample_range.start, transcript.sample_range.end],
+        "status": transcript.status,
+        "draft": [_segment_body(record) for record in transcript.draft],
+        "settled_spine": [_segment_body(record) for record in transcript.settled_spine],
+        "repairs": [asdict(record) for record in transcript.repairs],
+        "cues": [_cue_body(cue) for cue in transcript.cues],
+        "error": transcript.error,
+        "cut_truncated": transcript.cut_truncated,
+    }
+    return (json.dumps(body, ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode("utf-8")
+
+
+def _segment_body(segment: SourceSegment) -> dict[str, object]:
+    return {
+        "segment_id": segment.segment_id,
+        "audio_start": _exact(segment.audio_start),
+        "audio_end": _exact(segment.audio_end),
+        "file_start": _exact(segment.file_start),
+        "file_end": _exact(segment.file_end),
+        "text": segment.text,
+        "compression_ratio": segment.compression_ratio,
+        "avg_logprob": segment.avg_logprob,
+        "no_speech_prob": segment.no_speech_prob,
+    }
+
+
+def _cue_body(cue: SourceCue) -> dict[str, object]:
+    return {
+        "cue_id": cue.cue_id,
+        "source_id": cue.source_id,
+        "segment_ids": list(cue.segment_ids),
+        "start": _exact(cue.start),
+        "end": _exact(cue.end),
+        "text": cue.text,
+        "flags": list(cue.flags),
+    }
+
+
+def _publish_exclusive(destination: Path, body: bytes) -> Path | None:
+    """완전한 파일을 원자적으로 독점 생성한다 — 조사 후 덮어쓰는 경주가 아니다.
+
+    임시 이름에 전부 쓴 뒤 `os.link`로 옮겨 닮는다. 링크는 이미 자리가 차 있으면
+    실패하므로, 반쯤 쓴 파일이 완성물 자리에 나타나는 일이 없다. 임시 파일은 이 번
+    호출의 것을 치우는 것뿐 — 완성물을 치우는 길은 없다(P3-02와 같은 자).
+    """
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    handle, name = tempfile.mkstemp(
+        dir=destination.parent, prefix=f".{destination.name}.", suffix=".tmp"
+    )
+    temporary = Path(name)
+    try:
+        with os.fdopen(handle, "wb") as stream:
+            stream.write(body)
+        try:
+            os.link(temporary, destination)
+        except FileExistsError:
+            return destination if destination.read_bytes() == body else None
+        return destination
+    finally:
+        temporary.unlink(missing_ok=True)
