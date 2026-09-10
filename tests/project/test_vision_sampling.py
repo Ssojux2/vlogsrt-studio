@@ -29,6 +29,7 @@ PENDING_HUMAN).
 
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -476,6 +477,22 @@ needs_ffmpeg = pytest.mark.skipif(
 )
 
 
+def _declared_stream_fields(source: Path) -> dict[str, str]:
+    """선언 메타데이터 원문 — 실제 파일 검사의 전제를 ffprobe에게 직접 확인한다."""
+    completed = subprocess.run(
+        [
+            "ffprobe", "-v", "error", "-select_streams", "v:0",
+            "-show_entries", "stream=r_frame_rate,avg_frame_rate",
+            "-of", "json", str(source),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )  # fmt: skip
+    entry = json.loads(completed.stdout)["streams"][0]
+    return {key: str(value) for key, value in entry.items()}
+
+
 def _authored_video(directory: Path, name: str, *, origin_seconds: int) -> Path:
     """프레임 n의 색이 hue n*37°인 25fps 25프레임 영상. PTS 원점은 origin_seconds초."""
     media = directory / name
@@ -686,6 +703,53 @@ def test_a_quantized_tick_cfr_stream_proves_and_samples_real(tmp_path: Path) -> 
         CFG,
     )
     assert [sample.original_frame_index for sample in samples] == [10, 29]
+
+
+@needs_ffmpeg
+def test_a_non_multiple_length_quantized_cfr_proves_and_samples_real(
+    tmp_path: Path,
+) -> None:
+    """**길이가 프레임 길이의 정수배가 아닌 실제 30000/1001 스트림**(0.5초).
+
+    15프레임의 이상적인 끝은 0.5005초지만 마지막 프레임이 500틱에서 잘린다 —
+    ffprobe는 avg_frame_rate를 개수/길이로 계산해 30/1을 내놓고 r(30000/1001)과
+    합법적으로 어긋난다. avg==r 정확 일치를 요구하는 증명은 이 CFR을 조용히
+    거부한다. 정수 PTS 격자·개수·start_pts·duration_ts가 전부 일관적이면
+    통과해야 한다(끝이 잘린 마지막 프레임도 격자 위에 있다).
+    """
+    media_file = tmp_path / "nonmult.mov"
+    subprocess.run(
+        [
+            "ffmpeg", "-v", "error", "-y",
+            "-f", "lavfi", "-i", "color=c=blue:size=64x64:rate=30000/1001:duration=0.5",
+            "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+            "-video_track_timescale", "1000",
+            str(media_file),
+        ],
+        capture_output=True,
+        check=True,
+    )  # fmt: skip
+    declared = _declared_stream_fields(media_file)
+    assert declared["avg_frame_rate"] != declared["r_frame_rate"]  # 전제: 합법적 어긋남
+
+    info = probe_video_stream(media_file)
+    assert info.presentation_origin == 0
+    assert info.frame_duration == Fraction(1001, 30000)
+    assert info.frame_count == 15
+
+    media = ResolvedMedia(
+        resource_scoped_id="doc1/r1",
+        asset_content_id=ASSET,
+        original=media_file,
+        image_source=media_file,
+        original_sha256=sha256_file(media_file),
+        has_audio=False,
+        used_proxy=False,
+    )
+    (sample,) = sampling.sample_frames(
+        media, [_request("tail", 14 * info.frame_duration)], tmp_path / "out", CFG
+    )
+    assert sample.original_frame_index == 14
 
 
 @needs_ffmpeg

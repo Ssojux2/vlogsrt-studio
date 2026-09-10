@@ -541,8 +541,9 @@ def probe_video_stream(source: Path, stream_index: int = 0) -> VideoStreamInfo:
     길이가 틱에 정확히 떨어지는 시계에서는 양자화 오차가 아예 없으므로 허용도
     0이다(25fps를 1/1000에 담은 스트림의 한 틱 어긋남은 지터다). 반올림된
     pts_time 문자열이나 초 단위 입실론은 쓰지 않는다.
-    격자가 증명되면 선언 메타데이터(avg_frame_rate·nb_frames·start_time·duration)
-    가 디코드 증거와 어긋나지 않는지 마저 본다 — 없거나 모르는(`N/A`) 선언도
+    격자가 증명되면 선언 메타데이터(avg_frame_rate·nb_frames·start_pts·duration_ts)
+    가 디코드 증거와 어긋나지 않는지 마저 본다 — 시각 선언은 정수 start_pts·
+    duration_ts(선언 time_base 단위)로만 읽는다. 없거나 모르는(`N/A`) 선언도
     증명이 아니다. 증명에 실패하면 조용한 기본값 대신 어긋난 좌표를 말하며 죽는다.
     """
     _validate_video_ordinal(stream_index)
@@ -552,7 +553,7 @@ def probe_video_stream(source: Path, stream_index: int = 0) -> VideoStreamInfo:
             ffprobe, "-v", "error",
             "-select_streams", f"v:{stream_index}",
             "-show_entries", "stream=index,codec_type,r_frame_rate,avg_frame_rate,time_base,"
-            "nb_frames,start_time,duration",
+            "nb_frames,start_pts,duration_ts",
             "-show_entries", "frame=pts",
             "-of", "json",
             str(source),
@@ -565,7 +566,7 @@ def probe_video_stream(source: Path, stream_index: int = 0) -> VideoStreamInfo:
     pts = _frame_pts(completed.stdout, source)
     frame_duration = Fraction(1) / rate
     _prove_uniform_grid(pts, time_base, frame_duration, source)
-    _prove_declared_evidence(entry, rate, average, pts, time_base, frame_duration, source)
+    _prove_declared_evidence(entry, average, pts, time_base, frame_duration, source)
     return VideoStreamInfo(
         stream_index=_stream_global_index(entry, source),
         presentation_origin=pts[0] * time_base,
@@ -609,19 +610,27 @@ def _frame_pts(stdout: str, source: Path) -> list[int]:
     return sorted(pts)
 
 
+def _tick_tolerance(time_base: Fraction, frame_duration: Fraction) -> Fraction:
+    """선언 시계가 양자화되어 있을 때만 정확히 한 declared tick을 허용한다.
+
+    프레임 길이가 틱에 정확히 떨어지면(예: 25fps = 40틱 @ 1/1000) 양자화 오차는
+    아예 없고 한 틱의 어긋남도 진짜 비균일이다. 그 밖의 시계(예: 30000/1001을
+    1/1000에 담기 = 프레임당 1001/30틱)에서는 측정값이 틱으로 반올림되므로
+    원점과 각 프레임 시각이 독립적으로 양자화된다 — 한 틱이 그 전부다.
+    """
+    ticks_per_frame = frame_duration / time_base
+    return Fraction(0) if ticks_per_frame.denominator == 1 else time_base
+
+
 def _prove_uniform_grid(
     pts: list[int], time_base: Fraction, frame_duration: Fraction, source: Path
 ) -> None:
     """정렬된 정수 PTS 전부가 `원점 + 순번 × 프레임 길이` 격자 위에 있는지 본다.
 
-    오차 허용은 선언 시계가 양자화되어 있을 때만 정확히 한 declared tick
-    (1 × time_base)이다 — 원점과 프레임 시각이 독립적으로 양자화되기 때문이다.
-    프레임 길이가 틱에 **정확히 떨어지면**(예: 25fps = 40틱 @ 1/1000) 양자화
-    오차는 0이고, 한 틱의 어긨남도 진짜 비균일 그리드다. PTS는 교정하지 않고
+    오차 허용은 `_tick_tolerance`가 정하는 대로다. PTS는 교정하지 않고
     측정값을 그대로 둔다.
     """
-    ticks_per_frame = frame_duration / time_base
-    tolerance = Fraction(0) if ticks_per_frame.denominator == 1 else time_base
+    tolerance = _tick_tolerance(time_base, frame_duration)
     for ordinal in range(1, len(pts)):
         if pts[ordinal] <= pts[ordinal - 1]:
             raise RuntimeError(
@@ -641,7 +650,6 @@ def _prove_uniform_grid(
 
 def _prove_declared_evidence(
     entry: dict[str, object],
-    rate: Fraction,
     average: Fraction,
     pts: list[int],
     time_base: Fraction,
@@ -651,17 +659,27 @@ def _prove_declared_evidence(
     """선언 메타데이터가 디코드 증거와 어긋나지 않는지 마저 증명한다.
 
     격자 증명은 디코드된 PTS만 봤다 — 여기서는 컨테이너가 **선언한** 나머지
-    (avg_frame_rate·nb_frames·start_time·duration)가 그 증거와 닿는지 본다.
-    어긋남의 의미: 평균률이 r과 다르면 비 CFR이고, 선언 개수가 디코드 프레임
-    수와 다르면 컨테이너가 다른 스트림을 설명하고 있으며, start_time·duration이
-    실측 원점·범위와 어긋나면 시계가 하나가 아니다. 없거나 `N/A`인 선언은
-    파싱에서 죽는다(조용한 0이 아니다). 선언값은 소수점 문자열로 인쇄되어
-    있어 독립적으로 양자화되므로 비교 허용은 한 declared tick이다.
+    (avg_frame_rate·nb_frames·start_pts·duration_ts)가 그 증거와 닿는지 본다.
+    시각 선언은 정수 start_pts·duration_ts(선언 time_base 단위)로만 읽는다 —
+    start_time·duration 소수 문자열은 틱에서 반올림된 그림자라 두 번 양자화된다.
+    avg_frame_rate가 r과 **정확히** 같기를 요구하지 않는다: 길이가 프레임 길이의
+    정수배가 아닌 스트림(예: 0.5초짜리 30000/1001)은 ffprobe가 avg를 개수/길이로
+    계산하므로 r과 합법적으로 어긋난다. 대신 개수로 잰 avg 길이가 r 기준 개수
+    길이와 같은 허용(양자화 시계의 한 declared tick) 안인지 본다 — 실제로 어긋나는
+    avg는 여전히 걸린다. 선언 개수가 디코드 프레임 수와 다르면 컨테이너가 다른
+    스트림을 설명하고 있는 것이고, start_pts·duration_ts가 실측 원점·범위와
+    어긋나면 시계가 하나가 아니다. 없거나 `N/A`인 선언은 파싱에서 죽는다(조용한
+    0이 아니다).
     """
-    if average != rate:
+    tolerance = _tick_tolerance(time_base, frame_duration)
+    by_count = len(pts) * frame_duration
+    by_last_pts = (pts[-1] - pts[0]) * time_base + frame_duration
+    by_average = Fraction(len(pts)) / average
+    if abs(by_average - by_count) > tolerance:
         raise RuntimeError(
-            f"선언 r_frame_rate와 avg_frame_rate가 다릅니다: {source} "
-            f"(r {rate}, avg {average}) — 평균률이 어긋나는 스트림은 균일 CFR이 아니다"
+            f"선언 avg_frame_rate가 r_frame_rate 기준 길이와 어긋납니다: {source} "
+            f"(avg {average}, 개수 {len(pts)} → {by_average}초, r 기준 {by_count}초, "
+            f"허용 {tolerance}초) — 평균률이 어긋나는 스트림은 균일 CFR이 아니다"
         )
     declared_count = _stream_positive_int(entry, "nb_frames", source)
     if declared_count != len(pts):
@@ -669,21 +687,22 @@ def _prove_declared_evidence(
             f"선언 프레임 수가 디코드 증거와 다릅니다: {source} "
             f"(선언 {declared_count}, 디코드 {len(pts)})"
         )
-    origin = pts[0] * time_base
-    start = _stream_fraction(entry, "start_time", source)
-    if abs(start - origin) > time_base:
+    start_pts = _stream_int(entry, "start_pts", source)
+    if start_pts != pts[0]:
         raise RuntimeError(
-            f"선언 start_time이 첫 프레임 원점과 어긋납니다: {source} "
-            f"(선언 {start}초, 실측 {origin}초)"
+            f"선언 start_pts가 첫 디코드 pts와 다릅니다: {source} "
+            f"(선언 {start_pts}, 디코드 {pts[0]}) — 정수 비교이며 허용오차가 없다"
         )
-    duration = _stream_fraction(entry, "duration", source)
-    by_count = len(pts) * frame_duration
-    by_last_pts = (pts[-1] - pts[0]) * time_base + frame_duration
-    if abs(duration - by_count) > time_base or abs(duration - by_last_pts) > time_base:
+    duration_ticks = _stream_positive_int(entry, "duration_ts", source)
+    declared_duration = duration_ticks * time_base
+    beyond_count = abs(declared_duration - by_count) > tolerance
+    beyond_last_pts = abs(declared_duration - by_last_pts) > tolerance
+    if beyond_count or beyond_last_pts:
         raise RuntimeError(
-            f"선언 duration이 프레임 증거와 어긋납니다: {source} "
-            f"(선언 {duration}초, 개수×프레임 길이 {by_count}초, "
-            f"마지막 pts 기준 {by_last_pts}초)"
+            f"선언 duration_ts가 프레임 증거와 어긋납니다: {source} "
+            f"(선언 {duration_ticks}틱 = {declared_duration}초, "
+            f"개수×프레임 길이 {by_count}초, 마지막 pts 기준 {by_last_pts}초, "
+            f"허용 {tolerance}초)"
         )
 
 

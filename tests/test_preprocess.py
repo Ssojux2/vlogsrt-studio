@@ -1022,6 +1022,8 @@ def _video_probe_json(
     avg: str | None = "25/1",
     time_base: str = "1/12800",
     nb_frames: str | None = "25",
+    start_pts: int | str | None = 64000,
+    duration_ts: int | str | None = 12800,
     start_time: str | None = "5.000000",
     duration: str | None = "1.000000",
     index: int = 0,
@@ -1031,9 +1033,10 @@ def _video_probe_json(
 ) -> str:
     """비디오 프로브 ffprobe JSON. 기본은 원점 5초·25fps·25프레임의 균일 격자다.
 
-    avg·nb_frames·start_time·duration은 선언 메타데이터다 — None이면 키 자체를
-    뺀다(없는 필드의 재현). 기본값은 디폴트 격자(25프레임×1/25초, 원점 5초)와
-    정확히 일치한다.
+    선언 메타데이터는 실제 ffprobe처럼 **정수 start_pts·duration_ts와 반올림된
+    start_time·duration을 함께** 싣는다 — 증명이 읽는 것은 정수 쪽이다. None이면
+    키 자체를 뺀다(없는 필드의 재현). 기본값은 디폴트 격자(25프레임×1/25초,
+    원점 5초)와 정확히 일치한다.
     """
     if pts is None:
         pts = [5 * 12800 + ordinal * 512 for ordinal in range(25)]
@@ -1048,6 +1051,10 @@ def _video_probe_json(
         entry["avg_frame_rate"] = avg
     if nb_frames is not None:
         entry["nb_frames"] = nb_frames
+    if start_pts is not None:
+        entry["start_pts"] = start_pts
+    if duration_ts is not None:
+        entry["duration_ts"] = duration_ts
     if start_time is not None:
         entry["start_time"] = start_time
     if duration is not None:
@@ -1072,8 +1079,10 @@ def test_video_probe_argv_selects_the_ordinal_and_frame_pts(
 ) -> None:
     """스트림 선언 전부와 **프레임 타임스탬프 증거**를 한 번의 ffprobe로 얻는다.
 
-    선언 메타데이터(r·avg·time_base·nb_frames·start_time·duration)는 교차 검증의
-    재료다 — 하나라도 안 물으면 없는 증거를 있는 것으로 믿게 된다.
+    선언 메타데이터(r·avg·time_base·nb_frames·start_pts·duration_ts)는 교차 검증의
+    재료다 — 하나라도 안 물으면 없는 증거를 있는 것으로 믿게 된다. 시각 증거는
+    **정수 start_pts·duration_ts**(선언 time_base 단위)로 얻는다 — 반올림된
+    start_time·duration 소수 문자열은 두 번 양자화된 그림자다.
     """
     commands = _fake_ffmpeg_ffprobe(monkeypatch, _video_probe_json(), "", 0)
     probe_video_stream(Path("demo.mov"), 2)
@@ -1082,7 +1091,7 @@ def test_video_probe_argv_selects_the_ordinal_and_frame_pts(
         "ffprobe", "-v", "error",
         "-select_streams", "v:2",
         "-show_entries", "stream=index,codec_type,r_frame_rate,avg_frame_rate,time_base,"
-        "nb_frames,start_time,duration",
+        "nb_frames,start_pts,duration_ts",
         "-show_entries", "frame=pts",
         "-of", "json",
         "demo.mov",
@@ -1122,10 +1131,14 @@ def test_video_probe_rejects_an_ordinal_that_is_not_a_count(
         (_video_probe_json(nb_frames=None), "nb_frames"),
         (_video_probe_json(nb_frames="N/A"), "nb_frames"),
         (_video_probe_json(nb_frames="25.5"), "nb_frames"),
-        (_video_probe_json(start_time=None), "start_time"),
-        (_video_probe_json(start_time="N/A"), "start_time"),
-        (_video_probe_json(duration=None), "duration"),
-        (_video_probe_json(duration="N/A"), "duration"),
+        (_video_probe_json(start_pts=None), "start_pts"),
+        (_video_probe_json(start_pts="N/A"), "start_pts"),
+        (_video_probe_json(start_pts="64000.5"), "start_pts"),
+        (_video_probe_json(duration_ts=None), "duration_ts"),
+        (_video_probe_json(duration_ts="N/A"), "duration_ts"),
+        (_video_probe_json(duration_ts="12800.5"), "duration_ts"),
+        (_video_probe_json(duration_ts="0"), "duration_ts"),
+        (_video_probe_json(duration_ts="-12800"), "duration_ts"),
     ],
 )
 def test_video_probe_names_what_it_could_not_prove(
@@ -1133,8 +1146,9 @@ def test_video_probe_names_what_it_could_not_prove(
 ) -> None:
     """증거가 없거나 깨졌으면 조용한 기본값이 아니라 그 필드를 댄다.
 
-    avg·개수·start·duration은 컨테이너가 선언하는 값이라 없거나(`N/A`) 깨질 수
-    있다 — MKV는 nb_frames를 아예 선언하지 않는다. 없는 선언은 증명이 아니다.
+    avg·개수·start_pts·duration_ts는 컨테이너가 선언하는 값이라 없거나(`N/A`)
+    깨질 수 있다 — MKV는 nb_frames를 아예 선언하지 않는다. 없는 선언은 증명이
+    아니다. duration_ts는 0이하도 깨진 것이다 — 길이 0의 시계는 없다.
     """
     _fake_ffmpeg_ffprobe(monkeypatch, payload, "", 0)
     with pytest.raises(RuntimeError, match=match):
@@ -1148,7 +1162,7 @@ def test_video_probe_accepts_decode_order_and_sorts_to_presentation(
     shuffled = [64000, 65024, 64512]  # 0, 2, 1 순서
     _fake_ffmpeg_ffprobe(
         monkeypatch,
-        _video_probe_json(pts=shuffled, nb_frames="3", duration="0.120000"),
+        _video_probe_json(pts=shuffled, nb_frames="3", duration_ts=1536, duration="0.120000"),
         "",
         0,
     )
@@ -1170,7 +1184,8 @@ def test_video_probe_rejects_jitter_on_an_exact_tick_clock(
     _fake_ffmpeg_ffprobe(
         monkeypatch,
         _video_probe_json(rate="25/1", time_base="1/1000", pts=[0, 40, 81, 120],
-                          nb_frames="4", start_time="0.000000", duration="0.160000"),
+                          nb_frames="4", start_pts=0, duration_ts=160,
+                          start_time="0.000000", duration="0.160000"),
         "",
         0,
     )  # fmt: skip
@@ -1187,7 +1202,8 @@ def test_video_probe_passes_a_declared_tick_quantized_cfr(
     _fake_ffmpeg_ffprobe(
         monkeypatch,
         _video_probe_json(rate="30000/1001", avg="30000/1001", time_base="1/1000",
-                          nb_frames="8", start_time="0.000000", duration="0.267000",
+                          nb_frames="8", start_pts=0, duration_ts=267,
+                          start_time="0.000000", duration="0.267000",
                           pts=quantized),
         "",
         0,
@@ -1203,9 +1219,9 @@ def test_video_probe_passes_a_declared_tick_quantized_cfr(
     [
         (_video_probe_json(avg="24/1"), "avg_frame_rate"),
         (_video_probe_json(nb_frames="24"), "nb_frames|프레임 수"),
-        (_video_probe_json(start_time="0.000000"), "start_time"),
-        (_video_probe_json(duration="2.000000"), "duration"),
-        (_video_probe_json(duration="1.040000"), "duration"),
+        (_video_probe_json(start_pts=63999), "start_pts"),
+        (_video_probe_json(duration_ts=25600), "duration_ts"),
+        (_video_probe_json(duration_ts=13312), "duration_ts"),
     ],
 )
 def test_video_probe_rejects_inconsistent_declared_metadata(
@@ -1213,13 +1229,111 @@ def test_video_probe_rejects_inconsistent_declared_metadata(
 ) -> None:
     """**선언끼리·선언과 디코드 증거가 어긋나면 증명이 아니다.**
 
-    디폴트 가짜 payload는 원점 5초·25프레임·1초의 균일 격자다. 평균률이 r과
-    다르거나(비 CFR의 신호), 선언 개수가 디코드 프레임 수와 다르거나, start_time이
-    실측 첫 PTS와 어긋나거나, duration이 개수×프레임 길이·마지막 PTS 기준과
-    어긋나면 각각 그 필드를 댄다.
+    디폴트 가짜 payload는 원점 5초·25프레임·1초의 균일 격자다. 평균률이 개수로
+    잴 때 r 기준 길이와 한 틱 이상 어긋나거나(비 CFR의 신호), 선언 개수가 디코드
+    프레임 수와 다르거나, start_pts가 첫 디코드 pts와 다르거나, duration_ts가
+    개수×프레임 길이·마지막 PTS 기준과 어긋나면 각각 그 필드를 댄다.
     """
     _fake_ffmpeg_ffprobe(monkeypatch, payload, "", 0)
     with pytest.raises(RuntimeError, match=match):
+        probe_video_stream(Path("demo.mov"))
+
+
+def test_video_probe_accepts_an_average_that_disagrees_within_a_declared_tick(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**길이가 프레임 길이의 정수배가 아닌 스트림은 avg가 r과 같을 수 없다.**
+
+    0.5초짜리 30000/1001 스트림(15프레임, 끝이 0.5005초지만 마지막 프레임이
+    500틱에서 잘린다)의 실측 선언 그대로다 — ffprobe는 avg를 개수/길이로 계산해
+    30/1을 내놓고 r(30000/1001)과 어긋난다. avg==r 정확 일치를 요구하면 이
+    합법적인 CFR이 조용히 거부된다. 대신 개수로 잰 avg 길이(0.5초)가 r 기준
+    개수 길이(0.5005초)와 한 declared tick 안인지 본다.
+    """
+    non_multiple = [0, 33, 67, 100, 133, 167, 200, 234, 267, 300, 334, 367, 400, 434, 467]
+    _fake_ffmpeg_ffprobe(
+        monkeypatch,
+        _video_probe_json(rate="30000/1001", avg="30/1", time_base="1/1000",
+                          nb_frames="15", start_pts=0, duration_ts=500,
+                          start_time="0.000000", duration="0.500000",
+                          pts=non_multiple),
+        "",
+        0,
+    )  # fmt: skip
+    info = probe_video_stream(Path("demo.mov"))
+    assert info == VideoStreamInfo(
+        stream_index=0,
+        presentation_origin=Fraction(0),
+        frame_duration=Fraction(1001, 30000),
+        frame_count=15,
+    )
+
+
+def test_video_probe_rejects_an_average_that_disagrees_by_more_than_a_tick(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """평균률 호환 검사에 이빨이 있다 — 개수 길이를 한 틱 넘게 비트는 avg는
+    진짜 비 CFR이다(15프레임 ÷ 25fps = 0.6초는 0.5005초±1틱과 어긋난다)."""
+    non_multiple = [0, 33, 67, 100, 133, 167, 200, 234, 267, 300, 334, 367, 400, 434, 467]
+    _fake_ffmpeg_ffprobe(
+        monkeypatch,
+        _video_probe_json(rate="30000/1001", avg="25/1", time_base="1/1000",
+                          nb_frames="15", start_pts=0, duration_ts=500,
+                          start_time="0.000000", duration="0.500000",
+                          pts=non_multiple),
+        "",
+        0,
+    )  # fmt: skip
+    with pytest.raises(RuntimeError, match="avg_frame_rate"):
+        probe_video_stream(Path("demo.mov"))
+
+
+def test_video_probe_rejects_start_pts_that_differs_from_the_first_decoded_pts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """start_pts는 정수 비교이며 허용오차가 없다 — 첫 디코드 pts와 한 틱이라도
+    다르면 선언이 다른 시계를 말하고 있는 것이다(반올림 비교가 아니다)."""
+    _fake_ffmpeg_ffprobe(monkeypatch, _video_probe_json(start_pts=64001), "", 0)
+    with pytest.raises(RuntimeError, match="start_pts"):
+        probe_video_stream(Path("demo.mov"))
+
+
+def test_video_probe_rejects_duration_beyond_one_declared_tick(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """양자화 시계에서 duration_ts의 허용은 정확히 한 declared tick이다 —
+    270틱(0.270초)은 개수×프레임 길이(0.2669초)·마지막 PTS 기준(0.2674초)과
+    3틱 어긋난 선언이다."""
+    quantized = [0, 33, 67, 100, 133, 167, 200, 234]
+    _fake_ffmpeg_ffprobe(
+        monkeypatch,
+        _video_probe_json(rate="30000/1001", avg="30000/1001", time_base="1/1000",
+                          nb_frames="8", start_pts=0, duration_ts=270,
+                          start_time="0.000000", duration="0.267000",
+                          pts=quantized),
+        "",
+        0,
+    )  # fmt: skip
+    with pytest.raises(RuntimeError, match="duration_ts"):
+        probe_video_stream(Path("demo.mov"))
+
+
+def test_video_probe_rejects_quantized_clock_error_larger_than_one_tick(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """양자화 시계의 격자 허용은 한 틱까지다 — 2틱 드리프트는 양자화가 아니라
+    비균일 그리드다(순번 2의 오차 0.00227초 > 1틱 0.001초)."""
+    drifted = [0, 33, 69, 102, 135, 169, 202, 236]
+    _fake_ffmpeg_ffprobe(
+        monkeypatch,
+        _video_probe_json(rate="30000/1001", avg="30/1", time_base="1/1000",
+                          nb_frames="8", start_pts=0, duration_ts=270,
+                          start_time="0.000000", duration="0.270000",
+                          pts=drifted),
+        "",
+        0,
+    )  # fmt: skip
+    with pytest.raises(RuntimeError, match="격자"):
         probe_video_stream(Path("demo.mov"))
 
 
@@ -1238,6 +1352,7 @@ def test_video_probe_rejects_a_genuine_frame_jump(
     _fake_ffmpeg_ffprobe(
         monkeypatch, _video_probe_json(rate="30000/1001", avg="30000/1001",
                                        time_base="1/1000", nb_frames="25",
+                                       start_pts=0, duration_ts=834,
                                        start_time="0.000000", duration="0.834167",
                                        pts=holed), "", 0
     )  # fmt: skip
@@ -1255,6 +1370,8 @@ def test_video_probe_rejects_a_tick_larger_than_one(monkeypatch: pytest.MonkeyPa
             avg="1/1",
             time_base="1/1000",
             nb_frames="3",
+            start_pts=0,
+            duration_ts=3000,
             start_time="0.000000",
             duration="3.000000",
             pts=[0, 998, 2000],
