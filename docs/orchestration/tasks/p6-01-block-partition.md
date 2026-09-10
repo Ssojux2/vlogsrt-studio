@@ -42,6 +42,33 @@ def partition_blocks(document: ProjectDocument, media: Sequence[ResolvedMedia], 
 - Every block and candidate interval is half-open `[start_frame, end_frame)`. Required endpoint samples are the first valid frame `start_frame` and last valid frame `end_frame - 1`, never `end_frame` (which may equal the asset frame count).
 - Sample requests are nominal 1 fps plus the valid block endpoints and three candidate centers. Snap nominal times and centers with P1's deterministic exact-rational `frame_nearest` rule to integer source-grid indices, clamp inside the block, then emit `FrameSampleRequest.source_time = index * frame_duration` in the common file clock. Deduplicate with stable unique frame IDs and reduce to <=16 without dropping endpoints/candidate centers. Literal whole-second times at rational rates such as 29.97 are generally off-grid and must never be sent directly to P5-04, which requires on-grid requests; P5-04 separately maps that common-clock time through the original stream's presentation origin to a decoded frame index.
 
+### 배포된 guard 타입 (P5-03b 이후 — 이 모양을 그대로 소비하라)
+
+```python
+@dataclass(frozen=True, slots=True)
+class InstanceGuard:
+    instance_id: str
+    source_id: str
+    status: Literal["success", "keep_all", "inaudible"]
+    protected_frames: tuple[FrameInterval, ...]   # 소스 격자, 반개 [start,end), 정렬·병합됨
+    review: tuple[str, ...]
+```
+
+- **`status`를 쓰고 `review` 산문을 파싱하지 마라.** `review`는 사람이 읽는 기록이고
+  한국어다. 분기 판단은 `status`로만 한다(P5-03b 항목 6이 이걸 위해 추가됐다).
+  - `success` — 분석이 성공했다. 여집합에서 자를 후보를 고를 수 있다.
+  - `keep_all` — 실패 닫힘. 그 인스턴스는 통째로 보호이고 **제거 권한이 없다.**
+  - `inaudible` — 선언된 무음·비활성·영상 전용. 역시 제거 권한이 없다.
+    (둘이 겹치면 `inaudible`이 이긴다 — 더 강한 진술이다.)
+- **`status`를 슬라이스 길이나 `protected_frames` 범위로 추측하지 마라.**
+  `keep_all`과 `inaudible`은 둘 다 슬라이스 전체를 덮으므로 기하로는 구분되지 않는다.
+- 합쳐진 슬라이스의 모든 인스턴스는 **슬라이스 전체**의 프레임을 받는다. 맞는 동작이니
+  **클립 경계는 문서(`ProjectDocument`)에서 가져오고 guard 범위에서 유도하지 마라.**
+- `source_id`가 실렸으니 인스턴스 매칭을 `instance_id` 하나로 하지 말고 둘 다 대조하라.
+
+`SourceGuard`도 `analysis_key`와 `pcm_sample0_file_time`을 싣는다(P5-03b 항목 3).
+P6가 직접 쓸 일은 없지만, 세대가 다른 guard를 섞어 받지 않도록 상류에서 검증된다.
+
 ## Implementation steps
 
 1. Write failing tests for 6/10/11/12/17/20/22-second runs at all eight supported frame rates, balanced/greedy cases, 30 vs 29.97, nonzero asset and stream PTS origins, retained XML bounds that differ from probed frame-count bounds, asset-last blocks whose end equals the retained source-grid end, first/last=`end-1` endpoints, rational 1-fps/center snapping and `source_time=index*frame_duration`, guard holes, clip boundaries, locks, analysis error, candidate/sample dedup and cap. Add declared-no-audio and both retryable pre-PCM reasons, exact typed carry-through, missing-lock/duplicate/unknown identity rejection, authored-audible pre-PCM failure, and equal-content healthy/unavailable resources proving only the unavailable instance yields zero blocks.

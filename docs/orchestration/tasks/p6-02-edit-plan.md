@@ -59,6 +59,33 @@ def validate_edit_plan(plan: EditPlan, document: ProjectDocument, guards: Sequen
 - `revision` hashes the input/config/partition/full saved decisions, typed unavailable metadata, and resulting intervals/review. Same saved inputs produce byte-identical plan; no temperature/dict-order promise.
 - Safe synthetic fixture must produce at least one nonempty removed interval; a no-op plan is not adequate acceptance.
 
+### 배포된 guard 타입 (P5-03b 이후 — 이 모양을 그대로 소비하라)
+
+```python
+@dataclass(frozen=True, slots=True)
+class InstanceGuard:
+    instance_id: str
+    source_id: str
+    status: Literal["success", "keep_all", "inaudible"]
+    protected_frames: tuple[FrameInterval, ...]   # 소스 격자, 반개 [start,end), 정렬·병합됨
+    review: tuple[str, ...]
+```
+
+- **`status`를 쓰고 `review` 산문을 파싱하지 마라.** `review`는 사람이 읽는 기록이고
+  한국어다. 분기 판단은 `status`로만 한다(P5-03b 항목 6이 이걸 위해 추가됐다).
+  - `success` — 분석이 성공했다. 여집합에서 자를 후보를 고를 수 있다.
+  - `keep_all` — 실패 닫힘. 그 인스턴스는 통째로 보호이고 **제거 권한이 없다.**
+  - `inaudible` — 선언된 무음·비활성·영상 전용. 역시 제거 권한이 없다.
+    (둘이 겹치면 `inaudible`이 이긴다 — 더 강한 진술이다.)
+- **`status`를 슬라이스 길이나 `protected_frames` 범위로 추측하지 마라.**
+  `keep_all`과 `inaudible`은 둘 다 슬라이스 전체를 덮으므로 기하로는 구분되지 않는다.
+- 합쳐진 슬라이스의 모든 인스턴스는 **슬라이스 전체**의 프레임을 받는다. 맞는 동작이니
+  **클립 경계는 문서(`ProjectDocument`)에서 가져오고 guard 범위에서 유도하지 마라.**
+- `source_id`가 실렸으니 인스턴스 매칭을 `instance_id` 하나로 하지 말고 둘 다 대조하라.
+
+`SourceGuard`도 `analysis_key`와 `pcm_sample0_file_time`을 싣는다(P5-03b 항목 3).
+P6가 직접 쓸 일은 없지만, 세대가 다른 guard를 섞어 받지 않도록 상류에서 검증된다.
+
 ## Implementation steps
 
 1. Write failing tests for accepted/low/error/unique decisions, unknown IDs, one-per-block, guard collision fallback, lock, full-clip prevention, ripple/gaps/order, deterministic revision, structured located/unlocated review issues, rejection of half-populated marker provenance, and actual shortening. Add all three unavailable reasons, exact typed carry-through, zero removal/no-block enforcement, retryable-versus-declared readiness review semantics, duplicate/unknown resource-instance rejection, and an equal-content healthy sibling that remains independently eligible.

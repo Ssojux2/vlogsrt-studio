@@ -29,9 +29,9 @@
 ## 현재 제품 구현 기준점
 
 - 통합 브랜치: `feat/final-cut-project`
-- **제품 구현 기준 HEAD: `cb6b039` (Merge P4-04 instance-scoped boundary projection with exact slice anchors)**
-- 통합 게이트: Ruff lint/format 79개 파일, mypy 41개 소스 파일, pytest **2,058개**, 구조 불변식 **19/19** 통과.
-- **P4 페이즈 완료.** P0·P1·P2·P3·P4 전부와 P5-00·P5-01·P5-02·P5-04·P5-05가 통합돼 있다.
+- **제품 구현 기준 HEAD: `4e185f3` (Merge P5-03 speech guard with fail-closed rails and PCM generation identity)**
+- 통합 게이트: Ruff lint/format 83개 파일, mypy 42개 소스 파일, pytest **2,094개**, 구조 불변식 **19/19** 통과.
+- **P0~P5 전 페이즈 완료.** 남은 것은 P6(러프컷 생성·내보내기)와 P7(영속화·CLI·UI·인수)뿐이다.
 - P1/P2의 실제 Final Cut 및 77분 미디어 인수 검사는 `PENDING_HUMAN`이다.
 
 ## 완료된 단계
@@ -117,19 +117,83 @@ P4-02 폐쇄나 P3-03 배치가 바뀌면 죽은 분기가 살아나는데 그�
   P6를 위한 비대칭 하나를 남겼다 — 내부 칼날을 걸친 소스 큐는 인스턴스마다 `ProjectCue`가
   둘인데 여러 칼날을 덮는 경계 큐는 `instance_ids`를 다 실은 하나다.
 
+### P5-03 guard union + P5-03b 레일·신원 — 통합 완료 (`4e185f3`). **P5 페이즈 닫힘**
+
+- 후보 `f2a798f` → 보정 **`5387c6c`** (branch `Ssojux2/fcp-p5-guard`, base `daadf29`)
+- **새 3층 프로토콜의 첫 적용**이었고, 두 층이 같은 코드에 다른 답을 냈다.
+
+| 층 | 판정 | 답한 질문 |
+|---|---|---|
+| GLM 검증자 (`ctx_38f921126576`) | **ACCEPT** 결함 0 | "구현이 브리프대로인가" → 그렇다 |
+| Fable 5.1 (`ctx_b84bc98e8830`) | **SOUND_WITH_CONCERNS** | "브리프가 애초에 옳은가" → 아니다 |
+
+모순이 아니다. 구현은 실제로 브리프대로였고 **브리프가 틀렸다.**
+
+#### Fable이 재현한 결함 — 전부 `status="success"`로 나왔다
+
+```
+padding=-1/2         → protected=[]        ★ 보호 구간이 통째로 빈다
+vad_positive=nan/1.5 → VAD 창이 전부 사라진다
+prob=nan / 뒤집힌 창 / 범위 밖 창 → 조용히 드롭
+windows가 일부만 덮음 → 나머지가 비speech 취급
+stale origin 참조     → 프레임이 12→37 로 조용히 밀린다
+```
+
+`protected=[]`인데 `success`는 이 시스템 최악의 실패다 — guard는 말을 자르지 않으려
+존재하는데 비면 전부 잘라도 된다는 뜻이 된다. 음수 패딩은 whisper 세그먼트 **자체**를
+줄여서 합집합이 합집합이 아니게 된다.
+
+두 결함 모두 **이미 배운 교훈의 재발이고 Opus 브리프의 책임이다**:
+P4-04b의 **산술** 교훈만 넣고 **신원** 교훈을 빠뜨렸고, P5-05b의 config-bypass 교훈은
+**같은 base에서 여섯 커밋 전에 닫아놓고도** 반영하지 않았다.
+Fable은 내 브리프 문구도 명시적으로 반박했다 — `source_id`·`total_samples`·`sample_rate`
+검증 셋으로는 연결이 유일해지지 않는다(probe f).
+
+#### 검증 층의 구조적 한계가 드러난 지점
+
+GLM 검증자는 같은 신원 구멍을 **보고도** "브리프 검사 목록 밖이라 계약 위반이 아니다"로
+분류했다. 판단 기준이 브리프이기 때문이다. 같은 이유로 검증자의 적대적 재현
+(무작위 200세트·퍼징 300)은 `padding=-1/2`를 **시도조차 하지 않았다** — 그 축이
+검사 목록에 없었다. **이것이 검증을 두 층으로 나눈 이유의 실증이다.**
+
+#### P5-03b 보정 (`5387c6c`) — 7항목
+
+1. `_require_config`: 설정 결함은 `raise` (호출자 잘못)
+2. VAD 입력 검증: 입력 결함은 `keep_all` (모델/데이터 잘못) — 둘의 선을 나눴다
+3. `SourceGuard` += `analysis_key`, `pcm_sample0_file_time`; `project_guard`가 대조
+4. `VadResult` += `analysis_key` (**P5-02 재개방 승인** — 소비자 3곳 확인 후)
+5. `keep_all`이 inaudible과 같은 whole-slice 경로 사용
+6. `InstanceGuard` += `status: Literal["success","keep_all","inaudible"]`, `source_id`
+7. `repairs` 매개변수는 **유지하고 시계 명시** — 떨어뜨리면 수정 금지된 기존 테스트가
+   깨지기 때문이다(워커 판단, 타당)
+
+#### Opus 검증
+
+Fable의 원본 `probe.py`를 **수정 없이 그대로** 고친 코드에 재실행했다. 위 결함이 전부
+`raise` 또는 `keep_all 전체보호`로 닫혔고 **baseline 정상 경로는 그대로 살아 있다**.
+
+probe (d)만 이전과 같은 `success`로 나와 파고들었더니, 워커가 수정한 테스트 헬퍼
+`_build`가 `[0, sample_count)` 필러 창을 자동으로 덧붙여 **probe 입력이 타일링돼 무효화된
+것**이었다 — 코드 결함이 아니다. 헬퍼 없이 `build_source_guard`를 직접 불러 확인했다:
+부분 덮음·고확률 부분 덮음·가운데 구멍 전부 `keep_all` 전체보호, 정상 타일링만 `success`.
+저장소 자체 테스트도 자동 필러가 없는 `_result()`로 직접 호출해 이 축을 덮는다.
+기존 27개 테스트에서 **삭제된 assert 0개**.
+
+- 독립 게이트: Ruff 83파일, mypy 42파일, 불변식 **19/19**(직접 셈), pytest 2,094개.
+- 통합 후 `make check` 통과: pytest **2,094개**, 불변식 19/19.
+
 ## 진행 중
 
-(없음 — 다음 태스크 대기)
+(없음 — P6-01 브리프 갱신 후 디스패치 예정)
 
 ## 남은 순서
 
-1. **P5-03** guard union — 통합된 P4-04와 P5-02가 선행조건이다. **지금 착수 가능하다.**
-2. **P6-01** 블록 분할 → **P6-02** EditPlan → **P6-03** EDIT 자막 → **P6-04** 원자적 패키지 내보내기.
-3. **P7-01** workspace → **P7-02** runner → **P7-03** CLI → [**P7-04** reproject · **P7-05** UI]
+1. **P6-01** 블록 분할 → **P6-02** EditPlan → **P6-03** EDIT 자막 → **P6-04** 원자적 패키지 내보내기.
+2. **P7-01** workspace → **P7-02** runner → **P7-03** CLI → [**P7-04** reproject · **P7-05** UI]
    → **P7-06** 오프라인 인수 검사.
-4. 최종 오프라인 흐름은 동일 revision의 FCPXML, SOURCE SRT, EDIT SRT, review JSON, manifest를
+3. 최종 오프라인 흐름은 동일 revision의 FCPXML, SOURCE SRT, EDIT SRT, review JSON, manifest를
    함께 내보내고 러프컷이 실제로 짧아졌음을 합성 데이터로 증명해야 한다.
-5. 실제 Final Cut import/re-export, 원본 4K relink/playback, 실제 77분 미디어, 유료 STT/vision은
+4. 실제 Final Cut import/re-export, 원본 4K relink/playback, 실제 77분 미디어, 유료 STT/vision은
    계속 `PENDING_HUMAN`으로 남긴다.
 
 ## 보존 규칙
