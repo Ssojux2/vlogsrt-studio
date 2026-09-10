@@ -26,8 +26,9 @@ P4-02는 그 슬라이스 위에서 경계 전사 **요청**을 계획한다:
   원점을 정확히 한 번 뺀 오디오 국소 시계에서 ceil-start/floor-end로 안쪽만 간다.
 - **연결과 병합은 신원으로 닫는다.** 배치 큐의 소스 신원은 슬라이스·소스 큐·
   트레이스와 정확히 같아야 한다 — 한 큐가 두 소스를 말하는 계획은 내놓지 않는다.
-  닿거나 겹친 범위의 병합은 자원·슬라이스·참여 칼날·가청 정책이 같을 때만 한다 —
-  다른 칼날에 앉은 닿은 범위는 각자 요청으로 남는다.
+  엄격히 겹친 범위의 병합은 참여 칼날이 달라도 항상 합집합이다 — 같은 남긴
+  프레임을 두 요청이 겹쳐 덮지 않는다. 닿기만 한 범위는 참여 칼날이 정확히 같을
+  때만 합친다 — 다른 칼날에 앉은 닿은 범위는 각자 요청으로 남는다.
 - **묶음은 자원 먼저다.** 자원 스코프 unavailable 기록이 있으면 그 자원의
   인스턴스마다 타입 기록과 잠금만 남는다 — 같은 내용의 건강한 트레이스가 있어도
   그 기록을 넘지 않는다. post-PCM 실패 트레이스는 unavailable로 강등되지 않고
@@ -672,21 +673,33 @@ class _ClampedSpan:
     instance_ids: tuple[str, ...]
 
 
-def _coalesced(spans: Sequence[_ClampedSpan]) -> tuple[tuple[Fraction, Fraction], ...]:
-    """닿거나 겹친 범위를 합친다 — 참여 칼날이 정확히 같은 묶음 안에서만 한다.
+def _coalesced(
+    slice_: LogicalSlice, spans: Sequence[_ClampedSpan]
+) -> tuple[tuple[Fraction, Fraction], ...]:
+    """엄격히 겹친 범위는 참여 칼날이 달라도 항상 합집합으로 합친다 — 닿기만
+    한 범위는 참여 칼날이 정확히 같을 때만 합친다.
 
-    묶음(bucket)이 이미 자원·슬라이스·가청 정책을 같게 묶었으므로 남은 호환
-    판정은 참여 인스턴스다 — 다른 칼날에 앉은 닿은 범위는 각자 요청으로 남는다.
+    겹친 범위를 각자 내보내면 같은 남긴 프레임을 두 요청이 다시 물으며 겹쳐
+    덮는다. 닿기만 한 범위는 프레임을 공유하지 않으므로 합침이 의무가 아니다 —
+    다른 칼날에 앉은 닿은 범위는 각자 요청으로 남는다. 합쳐진 묶음의 참여
+    칼날은 합쳐진 범위에서 다시 읽는다 — 병합 재료의 순서를 믿지 않는다.
     """
     merged: list[list[Fraction]] = []
-    participants: tuple[str, ...] | None = None
     for span in sorted(spans, key=lambda item: (item.start, item.end, item.instance_ids)):
-        if merged and span.start <= merged[-1][1] and span.instance_ids == participants:
+        if merged and _joinable(slice_, merged[-1], span):
             merged[-1][1] = max(merged[-1][1], span.end)
         else:
             merged.append([span.start, span.end])
-            participants = span.instance_ids
     return tuple((row[0], row[1]) for row in merged)
+
+
+def _joinable(slice_: LogicalSlice, entry: list[Fraction], span: _ClampedSpan) -> bool:
+    """합침 판정 — 겹침은 무조건 합치고 닿음은 참여 칼날이 같을 때만 합친다."""
+    if span.start < entry[1]:
+        return True  # 엄격한 겹침 — 남긴 프레임을 공유하므로 반드시 하나가 된다
+    if span.start > entry[1]:
+        return False
+    return span.instance_ids == _participating_instances(slice_, entry[0], entry[1])
 
 
 def _build_requests(seeds: Sequence[_Seed], deps: _Dependencies) -> tuple[BoundaryRequest, ...]:
@@ -711,7 +724,7 @@ def _build_requests(seeds: Sequence[_Seed], deps: _Dependencies) -> tuple[Bounda
             _ClampedSpan(start, end, _participating_instances(bucket.slice_, start, end))
             for start, end in bucket.spans
         ]
-        for start, end in _coalesced(spans):
+        for start, end in _coalesced(bucket.slice_, spans):
             requests.append(_sealed_request(bucket, start, end, deps))
     return tuple(requests)
 

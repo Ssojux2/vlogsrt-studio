@@ -506,6 +506,83 @@ def test_touching_spans_on_different_blades_stay_separate_requests(tmp_path: Pat
     assert len(plan.clamped_cues) == 4
 
 
+def test_strictly_overlapping_closures_merge_into_union_across_blades(
+    tmp_path: Path,
+) -> None:
+    """Fable 재현 — 칼날 경계 5를 품은 슬라이스 [4,8)에서 폐쇄 [4,4.5](첫 칼날)과
+    [4,6](두 칼날)이 엄격히 겹친다. 남긴 프레임을 두 요청이 겹쳐 다시 물으면 안
+    되므로 겹침은 참여 칼날이 달라도 항상 합집합 [4,6] 하나로 닫는다."""
+    document = _document(
+        tmp_path,
+        [_asset_xml("r2")],
+        [
+            _clip_xml("r2", offset="0s", start="2600/25s", duration="25/25s"),
+            _clip_xml("r2", offset="25/25s", start="2625/25s", duration="75/25s"),
+        ],
+    )
+    slices, source, traces = _assemble(
+        document,
+        [
+            _trace(
+                "acid-r2",
+                # 갈라진 큐는 seg0만, 다듬어 합쳐진 큐는 seg0·seg1을 함께 말한다
+                [_CueSpec(4.2, 4.4), _CueSpec(5.2, 6.0, seg_ids=(0, 1))],
+                [_SegSpec(3.5, 4.5), _SegSpec(4.6, 6.0)],
+            )
+        ],
+    )
+    references = [_reference(traces[0])]
+    (slice_,) = slices
+    first_clip, second_clip = _clips(document)
+    assert (slice_.source_start, slice_.source_end) == (Fraction(4), Fraction(8))
+    assert slice_.instance_ids == (first_clip.instance_id, second_clip.instance_id)
+    plan = plan_boundaries(slices, source, traces, references)
+    # 겹친 두 폐쇄는 합집합 하나다 — 남긴 프레임이 겹쳐 덮이지 않는다
+    assert len(plan.requests) == 1
+    (request,) = plan.requests
+    assert (request.source_start, request.source_end) == (Fraction(4), Fraction(6))
+    assert request.instance_ids == (first_clip.instance_id, second_clip.instance_id)
+    assert request.sample_range == SampleRange(64000, 96000)
+    assert request.source_segment_ids == ("acid-r2-seg-0", "acid-r2-seg-1")
+    assert plan.locked_instance_ids == frozenset({first_clip.instance_id, second_clip.instance_id})
+
+
+def test_merged_request_identity_comes_from_union_not_material(tmp_path: Path) -> None:
+    """합쳐진 요청의 신원·참여 칼날·프레임·세그먼트·잠금은 합집합에서 나온다 —
+    그 합집합을 만든 폐쇄가 몇 개인지는 흔적도 남지 않는다. 칼날을 넘는 큐는
+    인스턴스마다 놓이므로 세계마다 씨앗 수가 달라져도 답은 하나다."""
+
+    def build(world: str, cues: list[_CueSpec]) -> BoundaryPlan:
+        document = _document(
+            tmp_path / world,
+            [_asset_xml("r2")],
+            [
+                _clip_xml("r2", offset="0s", start="2600/25s", duration="25/25s"),
+                _clip_xml("r2", offset="25/25s", start="2625/25s", duration="75/25s"),
+            ],
+        )
+        slices, source, traces = _assemble(
+            document,
+            [_trace("acid-r2", cues, [_SegSpec(3.5, 4.5), _SegSpec(4.6, 6.0)])],
+        )
+        return plan_boundaries(slices, source, traces, [_reference(traces[0])])
+
+    # 두 세계는 같은 합집합 [4,6]을 다른 재료로 만든다 — 하나는 폐쇄 두 개,
+    # 하나는 칼날을 넘는 큐가 인스턴스마다 낸 폐쇄 세 개다
+    single_placement = build("single", [_CueSpec(4.2, 4.4), _CueSpec(5.2, 6.0, seg_ids=(0, 1))])
+    crossing_cue = build("crossing", [_CueSpec(4.2, 4.4), _CueSpec(4.7, 6.0, seg_ids=(0, 1))])
+    assert len(single_placement.clamped_cues) == 2
+    assert len(crossing_cue.clamped_cues) == 3  # 넘는 큐는 두 인스턴스에 모두 놓인다
+    for plan in (single_placement, crossing_cue):
+        (request,) = plan.requests
+        assert (request.source_start, request.source_end) == (Fraction(4), Fraction(6))
+        assert request.sample_range == SampleRange(64000, 96000)
+        assert request.source_segment_ids == ("acid-r2-seg-0", "acid-r2-seg-1")
+    # 신원은 합쳐진 범위의 함수다 — 재료가 달라도 정확히 같은 요청이 나온다
+    assert single_placement.requests == crossing_cue.requests
+    assert single_placement.locked_instance_ids == crossing_cue.locked_instance_ids
+
+
 def test_disjoint_spans_of_same_slice_stay_separate_requests(tmp_path: Path) -> None:
     """갈라진 범위는 호환되지 않는다 — 두 요청으로 남는다."""
     document, slices, source, traces, references = _single(
