@@ -472,6 +472,39 @@ def test_same_content_different_audio_declarations_keep_authored_audibility(
 # ─────────────────────────────────────────────────────────────
 
 
+def test_media_join_is_by_resource_identity_not_row_order(tmp_path: Path) -> None:
+    document = _document(
+        tmp_path,
+        [_asset_xml("r2"), _asset_xml("r3", has_audio="0"), _asset_xml("r4")],
+        [
+            _clip_xml("r3", offset="0s"),
+            _clip_xml("r2", offset="100/25s", start="2650/25s"),
+            _clip_xml("r4", offset="200/25s", start="2700/25s"),
+            _clip_xml("r3", offset="300/25s", start="2750/25s"),
+        ],
+    )
+    # 미디어 행 순서를 자원 순서(r2,r3,r4)도 스토리라인 첫 등장 순서(r3,r2,r4)도
+    # 아닌 순서로 섞는다 — 조인이 위치(zip)로 묶이면 source_id·가청이 뒤섞인다
+    shuffled = [_media(document, "r4"), _media(document, "r2"), _media(document, "r3")]
+    appearance = [clip.resource_scoped_id for clip in _clips(document)]
+    assert [row.resource_scoped_id for row in shuffled] != [
+        resource.scoped_id for resource in document.resources
+    ]
+    assert [row.resource_scoped_id for row in shuffled] != appearance
+    content_by_scoped = {row.resource_scoped_id: row.asset_content_id for row in shuffled}
+    assert len(set(content_by_scoped.values())) == len(shuffled)
+
+    slices = logical_slices(document, shuffled)
+    assert len(slices) == len(_clips(document)) == 4
+    for slice_, clip in zip(slices, _clips(document), strict=True):
+        # 슬라이스마다 자원 신원과 그 자원의 정확한 내용 신원을 가져야 한다
+        assert slice_.resource_scoped_id == clip.resource_scoped_id
+        assert slice_.source_id == content_by_scoped[clip.resource_scoped_id]
+        assert len(slice_.blades) == 1
+    # 섞인 행이 가청까지 뒤섞지 않는다 — 선언된 무음은 r3뿐이다
+    assert [slice_.audible for slice_ in slices] == [False, True, True, False]
+
+
 def test_media_for_unknown_resource_rejected(tmp_path: Path) -> None:
     document = _document(tmp_path, [_asset_xml("r2")], [_clip_xml("r2")])
     bogus = replace(_media(document, "r2"), resource_scoped_id="문서-밖-자원")
