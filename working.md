@@ -23,9 +23,9 @@
 ## 현재 제품 구현 기준점
 
 - 통합 브랜치: `feat/final-cut-project`
-- **제품 구현 기준 HEAD: `f6af955` (Merge P4-03 retained-audio boundary transcription)**
-- 통합 게이트: Ruff lint/format 78개 파일, mypy 40개 소스 파일, pytest **1,898개**, 구조 불변식 **19/19** 통과.
-- P0·P1·P2·P3, P4-01·P4-02·P4-03, P5-00·P5-01·P5-02·P5-04가 통합돼 있다.
+- **제품 구현 기준 HEAD: `14b60bf` (Merge P5-05 vision decision policy with fail-closed config rails)**
+- 통합 게이트: Ruff lint/format 78개 파일, mypy 41개 소스 파일, pytest **2,022개**, 구조 불변식 **19/19** 통과.
+- P0·P1·P2·P3, P4-01·P4-02·P4-03, P5-00·P5-01·P5-02·P5-04·P5-05가 통합돼 있다.
 - P1/P2의 실제 Final Cut 및 77분 미디어 인수 검사는 `PENDING_HUMAN`이다.
 
 ## 완료된 단계
@@ -48,43 +48,50 @@
   - `_finite`/`_bad_count`가 NaN·무한대·`bool`을 숫자 자리에서 걷어낸다(P5-05의 우회와 같은 계열).
 - 통합 후 `make check` 전체 통과.
 
+### P5-05 비전 판정 정책 + 레일 fail-closed — 통합 완료 (`14b60bf`)
+
+- 후보 체인 `2a25009` → `f3a4911` → `693aa5b` → **`05a7455`** (branch `Ssojux2/fcp-p5-vision-policy`)
+- P5-05b 브리프: `docs/orchestration/tasks/p5-05b-vision-policy-rails.md`
+- Orca Task `task_35a3d06e8b32`, Dispatch `ctx_b488232db344`, GLM terminal `term_d8dc9849-86d4-4bda-961c-d7a82f8b8428`
+- 닫은 결함: `ProjectConfig`의 수치 검증은 `load_project_config`에만 있어서 프로그램식 생성이
+  그것을 건너뛴다. 그러면 `max(NaN, 0.8) == NaN`이고 `0.5 < NaN`이 거짓이라 신뢰도 0.5짜리
+  후보가 `accepted`로 승인됐다. 프레임 천장도 `min(NaN, 16) == NaN`으로 같이 뚫렸다.
+- 구현: `_require_config(cfg)`가 `build_payload`와 `parse_decision` **양쪽의 첫 관문**이고,
+  `parse_decision`에서는 `_error_decision`을 만드는 `try` **바깥**에 있다 — 호출자의 버그가
+  "모델이 계약을 어겼다" 기록으로 세탁되지 않는다. `bool` 제외·유한·값역을 한 번에 본다.
+- Opus 독립 검증: Ruff lint/format 통과, mypy 41개 파일 통과, pytest 1,928개 통과,
+  구조 불변식 **19/19** 통과. GLM 보고서의 "15/15"는 보고상의 오기였고 실제 게이트는 19개 전부 통과다.
+- Opus 적대적 재현(고친 트리에서 직접 실행): `vision_apply_confidence`의 NaN·±inf·-0.5·`True`와
+  `vision_max_images`의 NaN·0·`True`가 전부 `VisionPolicyError`로 닫혔다. 같은 값들이
+  `build_payload`에서도 닫혔다. 레일 방향도 그대로다 — 0.95로 조이면 0.93이 `keep_all`이 되고
+  0.10으로 풀어도 바닥은 0.8 아래로 내려가지 않는다. `accepted`가 여전히 도달 가능함을 함께
+  확인해 위 결과가 "전부 막혀서 통과한 것"이 아님을 증명했다.
+- 통합 후 `make check` 전체 통과: pytest 2,022개, 구조 불변식 19/19.
+
 ## 진행 중
 
-### P5-05b 비전 정책 레일의 프로그램식 우회 차단 — GLM 구현 중
+### P4-04 경계 투영 — GLM 구현 중
 
-- 브리프: `docs/orchestration/tasks/p5-05b-vision-policy-rails.md`
-- Orca Task `task_35a3d06e8b32`, Dispatch `ctx_b488232db344`, terminal `term_d8dc9849-86d4-4bda-961c-d7a82f8b8428`
-- Worktree `/Users/ssojux2/orca/workspaces/vlogsrt/fcp-p5-vision-policy`, branch `Ssojux2/fcp-p5-vision-policy`
-- 기준 SHA: `693aa5b8dccb39a5baeec4d88a480b3f19b3d03` (P5-05 후보 체인의 끝)
-- 소유 파일: `vlogsrt/project/vision/policy.py`, `tests/project/test_vision_policy.py`
-- 재현된 결함: `ProjectConfig`의 수치 검증은 `load_project_config`에만 있어서 프로그램식 생성이
-  그것을 건너뛴다. 그러면 `max(NaN, 0.8) == NaN`이고 `0.5 < NaN`이 거짓이라
-  신뢰도 0.5짜리 후보가 `accepted`로 승인된다. 프레임 천장도 `min(NaN, 16) == NaN`으로 같이 뚫린다.
-- 요구한 계약: 설정 결함은 모델 결함이 아니라 **호출자 잘못**이므로 `keep_all` 오류 판정으로
-  세탁하지 말고 `VisionPolicyError`로 닫는다. 검사는 `build_payload`와 `parse_decision` 양쪽에서,
-  `parse_decision`에서는 `_error_decision`을 만드는 `try` **바깥**에서 돈다.
-  레일의 방향은 그대로다 — 설정은 더 안전하게만 바꿀 수 있다.
-
-## P5-05 후보 체인 (미통합)
-
-- 후보 체인: `2a25009` → `f3a4911` → `693aa5b`
-- `693aa5b`까지 반영된 보정: 손상·거대·깊은 JSON 응답을 `error/keep_all`로 닫음 /
-  `base_url=None`을 공개 OpenAI 엔드포인트에 고정 / SDK 내부 재시도를 `max_retries=0`으로 고정 /
-  실효 프레임 수를 `min(config, 16)`으로 제한 / 실효 승인 신뢰도를 `max(config, 0.8)`로 제한
-- 독립 게이트: Ruff/포맷, mypy 41개 파일, pytest 1,896개, 구조 불변식 19/19 통과.
-- **P5-05b가 닫히기 전에는 통합 금지.**
+- 브리프: `docs/orchestration/tasks/p4-04-boundary-projection.md`
+- Orca Task `task_2607661f58fe`, Dispatch `ctx_fc4e96c3bf70`, terminal `term_85034743-7e22-4539-a51f-b3e550ff820f`
+- Worktree `/Users/ssojux2/orca/workspaces/vlogsrt/fcp-p4-boundary-projection`, branch `Ssojux2/fcp-p4-boundary-projection`
+- 기준 SHA: `9747988` (P4-03 통합 `f6af955`를 포함한다)
+- 소유 파일: `vlogsrt/project/captions.py`, `vlogsrt/project/boundary.py`, `tests/project/test_boundary_projection.py`
+- 핵심 계약: 성공한 경계 트레이스의 큐는 정확히 `(slice_id, instance_ids, source interval)`에 대해
+  겹치는 소스 큐를 **대체**한다 — 둘을 함께 붙이지 않고 어느 쪽도 다시 정제·조판하지 않는다.
+  반복된 소스 인스턴스 중 그 튜플 밖은 건드리지 않는다. 실패한 경계는 원문을 지키고
+  `boundary_unresolved`로 남는다.
 
 ## 남은 순서
 
-1. **P5-05b** 검증 → `feat/final-cut-project` 머지 (P5-05 전체 체인이 함께 들어간다).
-2. **P4-04** 경계 투영 — 인스턴스 스코프 교체와 잠금.
-3. **P5-03** guard union — 통합된 P4-04와 P5-02가 선행조건이다.
-4. **P6-01** 블록 분할 → **P6-02** EditPlan → **P6-03** EDIT 자막 → **P6-04** 원자적 패키지 내보내기.
-5. **P7-01** workspace → **P7-02** runner → **P7-03** CLI → [**P7-04** reproject · **P7-05** UI]
+1. **P4-04** 경계 투영 — 인스턴스 스코프 교체와 잠금 (GLM 진행 중).
+2. **P5-03** guard union — 통합된 P4-04와 P5-02가 선행조건이다.
+3. **P6-01** 블록 분할 → **P6-02** EditPlan → **P6-03** EDIT 자막 → **P6-04** 원자적 패키지 내보내기.
+4. **P7-01** workspace → **P7-02** runner → **P7-03** CLI → [**P7-04** reproject · **P7-05** UI]
    → **P7-06** 오프라인 인수 검사.
-6. 최종 오프라인 흐름은 동일 revision의 FCPXML, SOURCE SRT, EDIT SRT, review JSON, manifest를
+5. 최종 오프라인 흐름은 동일 revision의 FCPXML, SOURCE SRT, EDIT SRT, review JSON, manifest를
    함께 내보내고 러프컷이 실제로 짧아졌음을 합성 데이터로 증명해야 한다.
-7. 실제 Final Cut import/re-export, 원본 4K relink/playback, 실제 77분 미디어, 유료 STT/vision은
+6. 실제 Final Cut import/re-export, 원본 4K relink/playback, 실제 77분 미디어, 유료 STT/vision은
    계속 `PENDING_HUMAN`으로 남긴다.
 
 ## 보존 규칙

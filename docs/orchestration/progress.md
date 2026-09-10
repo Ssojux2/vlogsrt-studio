@@ -167,7 +167,7 @@ By explicit Astra dependency audit, P0-03 may run from `58bb25347319301391064d6b
 | [P5-02](tasks/p5-02-vad-inference.md) | channel-wise continuous-state inference | P5-01 acceptance `9c5bccf` | `project/vad/inference.py`/tests | complete product result; `a578018` integrated as `31bac0b`, lifecycle manually stopped |
 | [P5-03](tasks/p5-03-guard-union.md) | conservative source/instance speech guard | P5-02 and integrated P4-04 projection | `project/vad/guard.py`/tests | drafted |
 | [P5-04](tasks/p5-04-vision-sampling.md) | deterministic proxy/original frame samples | P5-00 | `project/vision/sampling.py`, preprocess seam/tests | complete; corrected candidate `ec4e2b2` integrated as `6a9a98f` |
-| [P5-05](tasks/p5-05-vision-policy.md) / [P5-05b](tasks/p5-05b-vision-policy-rails.md) | strict saved-response decision parser | P5-04 | transcribe boundary + `project/vision/policy.py`/tests | candidate chain `2a25009`->`f3a4911`->`693aa5b` blocked on a reproduced programmatic-NaN rail bypass; P5-05b correction dispatched to GLM |
+| [P5-05](tasks/p5-05-vision-policy.md) / [P5-05b](tasks/p5-05b-vision-policy-rails.md) | strict saved-response decision parser | P5-04 | transcribe boundary + `project/vision/policy.py`/tests | complete; chain `2a25009`->`f3a4911`->`693aa5b`->`05a7455` integrated as `14b60bf`, 2,022-test gate passed |
 | [P6-01](tasks/p6-01-block-partition.md) | eligible 6–10 s blocks and candidates | P4,P5 merges | project edit partition/tests | drafted |
 | [P6-02](tasks/p6-02-edit-plan.md) | immutable deterministic EditPlan | P6-01 | project edit plan/tests | drafted |
 | [P6-03](tasks/p6-03-edit-captions.md) | EDIT SRT projection | P6-02 | project captions/tests | drafted |
@@ -214,3 +214,26 @@ same way. Task P5-05b (`docs/orchestration/tasks/p5-05b-vision-policy-rails.md`,
 `task_35a3d06e8b32` / `ctx_b488232db344`) requires a fail-closed `VisionPolicyError` reached from
 both `build_payload` and `parse_decision`, positioned outside the `try` that manufactures
 `_error_decision`, so a caller bug can never be laundered into a "the model misbehaved" record.
+
+## P5-05b outcome, 2026-09-10
+
+GLM closed the rail bypass in `05a7455` by making `_require_config(cfg)` the first gate of both
+`build_payload` and `parse_decision`, positioned outside the `try` that manufactures
+`_error_decision`, so a caller's bad config raises `VisionPolicyError` instead of being laundered
+into a "the model misbehaved" `keep_all` record. The check excludes `bool`, requires
+`math.isfinite`, and requires `[0.0, 1.0]` for `vision_apply_confidence`; `vision_max_images` must
+be a non-`bool` `int` >= 1. The rail directions are unchanged: config may only tighten.
+
+Opus verified the candidate independently rather than trusting the report. The worker's claim of
+"15/15 invariant groups" was a reporting miscount — the actual run prints all 19 groups `[OK]`.
+Ruff, mypy (41 source files), and 1,928 tests pass at exact `05a7455`. Opus then re-ran the exact
+bypass on the fixed tree: NaN, +/-inf, -0.5, and `True` for `vision_apply_confidence`, and NaN, 0,
+and `True` for `vision_max_images`, all raise from both entry points. A control run confirmed
+`accepted` is still reachable at confidence 0.93 under the default 0.8 floor, that a configured
+0.95 floor pushes 0.93 down to `keep_all`, and that a configured 0.10 cannot lower the floor below
+0.8 — so the closures above are real refusals, not a uniformly broken parser. Integrated as
+`14b60bf`; post-merge `make check` passed with 2,022 tests and 19/19 invariant groups.
+
+P4-04 (`task_2607661f58fe` / `ctx_fc4e96c3bf70`) runs in parallel from base `9747988` in
+`fcp-p4-boundary-projection`, owning `vlogsrt/project/captions.py`, `vlogsrt/project/boundary.py`,
+and a new `tests/project/test_boundary_projection.py`.
