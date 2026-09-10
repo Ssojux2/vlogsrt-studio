@@ -997,7 +997,7 @@ def test_vision_timeout_is_an_explicit_error_not_a_retry() -> None:
 def test_vision_client_takes_explicit_key_and_base_url(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """값은 받은 것만 간다 — base_url이 없으면 인자 자체를 실리지 않는다."""
+    """값은 받은 것만 간다 — base_url이 없으면 공개 엔드포인트를 명시적으로 못 박는다."""
     built, sentinel = _fake_openai(monkeypatch)
     with_base_url = create_vision_client(
         api_key="vision-key", base_url="https://vision.example/api"
@@ -1006,7 +1006,7 @@ def test_vision_client_takes_explicit_key_and_base_url(
     assert with_base_url is sentinel and without_base_url is sentinel
     assert built == [
         {"api_key": "vision-key", "base_url": "https://vision.example/api"},
-        {"api_key": "vision-key"},
+        {"api_key": "vision-key", "base_url": "https://api.openai.com/v1"},
     ]
 
 
@@ -1025,7 +1025,29 @@ def test_vision_client_ignores_the_environment_and_legacy_helpers(
     built, _ = _fake_openai(monkeypatch)
 
     create_vision_client(api_key="vision-key", base_url=None)
-    assert built == [{"api_key": "vision-key"}]
+    assert built == [{"api_key": "vision-key", "base_url": "https://api.openai.com/v1"}]
+
+
+def test_vision_client_without_base_url_does_not_inherit_the_legacy_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SDK의 None 폴백은 OPENAI_BASE_URL을 물려받는다(설치된 3.8.0 실측) — 비전은 못 쓴다.
+
+    실제 SDK로 생성만 증명한다(호출은 없다). 없으면 레거시 프록시를 물려받는다.
+    """
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://legacy-stt-proxy.example/v1")
+    monkeypatch.setenv("OPENAI_API_KEY", "legacy-stt-key")
+    client = create_vision_client(api_key="vision-key", base_url=None)
+    assert str(client.base_url).rstrip("/") == "https://api.openai.com/v1"
+    assert client.api_key == "vision-key"
+
+
+def test_vision_client_keeps_the_caller_base_url_verbatim_under_the_legacy_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://legacy-stt-proxy.example/v1")
+    client = create_vision_client(api_key="vision-key", base_url="https://vision.example/api")
+    assert str(client.base_url).rstrip("/") == "https://vision.example/api"
 
 
 def test_offline_defaults_and_lazy_clients_make_zero_constructions(

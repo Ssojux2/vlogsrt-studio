@@ -407,6 +407,15 @@ def get_transcriber(
 # ─────────────────────────────────────────────────────────────
 
 
+_PUBLIC_OPENAI_BASE_URL = "https://api.openai.com/v1"
+"""SDK 3.8.0이 환경 변수 없이 쓰는 공식 공개 엔드포인트(`_client.py`의 기본값).
+
+`base_url=None`을 SDK에 그대로 넘기면 SDK가 먼저 `OPENAI_BASE_URL`을 물려받는다
+(설치된 3.8.0 실측) — 레거시 STT 프록시가 비전 쪽 공급자를 바꿔치는 길이다.
+None은 "환경을 따라간다"가 아니라 **공개 엔드포인트**라 여기서 명시적으로 못 박는다.
+"""
+
+
 def create_vision_client(*, api_key: str, base_url: str | None) -> Any:
     """비전 전용 클라이언트 — 값은 받은 것만 쓴다.
 
@@ -414,12 +423,15 @@ def create_vision_client(*, api_key: str, base_url: str | None) -> Any:
     `vlogsrt.project.toml`의 자격증명 이름(`vision_api_key_env`·`vision_base_url_env`,
     P5-00)으로 명시적으로 풀어 넘긴다. 레거시 STT helpers(`env.require_api_key`·
     `env.base_url`)를 물려받지 않는다 — 한쪽 키가 양쪽 공급자를 열면 안 된다.
+
+    `base_url=None`은 환경 상속이 아니라 공개 엔드포인트다(`_PUBLIC_OPENAI_BASE_URL`
+    문서 참조). 호출자가 준 base_url은 그대로 간다.
     """
     import openai  # 지연 import — openai를 얻는 유일한 파일이다(불변 규칙 5)
 
     if base_url:
         return openai.OpenAI(api_key=api_key, base_url=base_url)
-    return openai.OpenAI(api_key=api_key)
+    return openai.OpenAI(api_key=api_key, base_url=_PUBLIC_OPENAI_BASE_URL)
 
 
 def request_vision(

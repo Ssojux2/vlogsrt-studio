@@ -9,8 +9,9 @@
   XML 경로·파일 경로·시각·음소거 권한은 페이로드에 실리지 않는다 — 후보 창의
   초 숫자조차 나가지 않는다. 모델이 돌려줄 수 있는 것은 후보 아이디 하나뿐이다.
 - **파서는 언제나 블록을 보존한다.** 모르는 아이디·NaN·무한대·범위 밖 신뢰도·
-  깨진 꼴은 전부 오류 상태의 `keep_all` 리뷰로 정규화된다. 어떤 응답도 편집을
-  스스로 만들거나 지을 수 없다.
+  깨진 꼴은 전부 오류 상태의 `keep_all` 리뷰로 정규화된다. 해석기 자체를 넘어뜨리는
+  글월(자릿수 한도 초과·깊은 중첩·float 밖 큰 정수)도 예외로 새는 것이 아니라 같은
+  오류 판정이 된다. 어떤 응답도 편집을 스스로 만들거나 지을 수 없다.
 - **승인은 세 조건의 교집합이다.** 알려진 후보 + 명시적 `reason_kind`
   `repetitive_ordinary_broll` + 신뢰도 ≥ `cfg.vision_apply_confidence`. 한 번뿐인
   사건(`unique_event`)과 `uncertain`은 **숫자 신뢰도와 무관하게** `keep_all`로
@@ -298,7 +299,9 @@ def _decision_fields(
         raise VisionPolicyError(f"message.content가 문자열이 아니다: {content!r}")
     try:
         parsed = json.loads(content)
-    except json.JSONDecodeError as exc:
+    except (ValueError, RecursionError) as exc:
+        # JSONDecodeError도 ValueError의 한 갈래다. 자릿수 한도를 넘는 정수(ValueError)와
+        # 깊은 중첩(RecursionError)까지 — 모델 글월의 결함은 예외가 아니라 오류 판정이다.
         raise VisionPolicyError(f"message.content가 JSON이 아니다: {content!r} ({exc})") from exc
     if not isinstance(parsed, dict):
         raise VisionPolicyError(f"답이 JSON 객체가 아니다: {type(parsed).__name__}")
@@ -329,15 +332,28 @@ def _body_fields(
             raise VisionPolicyError(f"증거가 보내지 않은 프레임을 가리킨다: {frame_id!r}")
     if len(set(evidence)) != len(evidence):
         raise VisionPolicyError(f"증거 아이디가 겹친다: {evidence!r}")
+    return choice, reason, reason_kind, list(evidence), _confidence_value(body)
+
+
+def _confidence_value(body: Mapping[str, object]) -> float:
+    """0 이상 1 이하의 유한 실수로 바꾼다 — float을 넘는 큰 정수도 응답 결함 하나로 묶는다.
+
+    json은 임의 정밀도 정수를 그대로 담는다. 10**400 같은 confidence는 문법적으로
+    멀쩡한 JSON이라 해석은 지나치고, float으로 겹어 입히는 이 지점에서 넘치는 길만
+    남는다 — 그 넘침(OverflowError)도 모델 잘못이지 우리 버그가 아니다.
+    """
     confidence = body.get("confidence")
-    if (
-        isinstance(confidence, bool)
-        or not isinstance(confidence, (int, float))
-        or not math.isfinite(confidence)
-        or not 0.0 <= confidence <= 1.0
-    ):
+    if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
         raise VisionPolicyError(f"confidence가 0 이상 1 이하의 유한 실수가 아니다: {confidence!r}")
-    return choice, reason, reason_kind, list(evidence), float(confidence)
+    try:
+        number = float(confidence)
+    except OverflowError as exc:
+        raise VisionPolicyError(
+            f"confidence가 0 이상 1 이하의 유한 실수가 아니다: {confidence!r}"
+        ) from exc
+    if not math.isfinite(number) or not 0.0 <= number <= 1.0:
+        raise VisionPolicyError(f"confidence가 0 이상 1 이하의 유한 실수가 아니다: {confidence!r}")
+    return number
 
 
 def _normalize(

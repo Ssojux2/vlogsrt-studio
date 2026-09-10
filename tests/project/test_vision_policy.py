@@ -432,6 +432,19 @@ def test_decisions_are_frozen_records() -> None:
         pytest.param(_reply(confidence=float("inf")), id="confidence-inf"),
         pytest.param(_reply(confidence=-0.1), id="confidence-below-range"),
         pytest.param(_reply(confidence=1.5), id="confidence-above-range"),
+        # 아래 셋은 해석기에서 판정이 아니라 예외로 샜던 길이다 — 오류 판정으로 못 박는다.
+        # json은 임의 정밀도 정수를 그대로 담으므로 10**400은 문법적으로 멀쩡한 JSON이고,
+        # 자릿수 한도(4300) 초과는 JSONDecodeError가 아닌 ValueError를,
+        # 깊은 중첩은 RecursionError을 낸다.
+        pytest.param(_reply(confidence=10**400), id="confidence-huge-integer"),
+        pytest.param(
+            {"choices": [{"message": {"content": "1" * 5000}}]},
+            id="content-integer-past-the-digit-limit",
+        ),
+        pytest.param(
+            {"choices": [{"message": {"content": "[" * 100_000 + "]" * 100_000}}]},
+            id="content-nested-past-the-recursion-limit",
+        ),
     ],
 )
 def test_a_contract_violating_response_is_an_error_that_keeps_the_block(reply: Any) -> None:
