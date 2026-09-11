@@ -624,11 +624,13 @@ def _single_instance_shift(
     cue: ProjectCue,
     fd: Fraction,
 ) -> Fraction:
-    """단일 인스턴스 큐 — 그 인스턴스의 run 하나 안에 있어야 한다.
+    """단일 인스턴스 큐 — 제거를 먼저 보고, 그다음 run 포함을 본다.
 
-    `retained`는 제거가 없는 블록 경계마다 쪼개지므로 조각을 요구하지 않는다.
-    run 밖이면 제거와 겹치는지 보고, 그마저 아니면 계획이 이 큐를 덮지
-    않는 것이다 — 둘 다 하드 실패다.
+    P6-03은 시그니처에 문서도 guard도 없어 `validate_edit_plan`을 부를 수
+    없다. 그래서 `runs`와 `removed`가 서로소라고 가정하지 않는다 — 제거는
+    모든 큐에 대해 run 포함보다 먼저 보므로 위조 플랜의 run이 제거 위를
+    덮어도 큐를 내보내지 않는다. `retained`는 제거가 없는 블록 경계마다
+    쪼개지므로 조각을 요구하지 않고, run 밖 진단은 두 번째 실패로 남는다.
     """
     instance = cue.instance_ids[0]
     runs = runs_by_instance.get(instance)
@@ -636,11 +638,11 @@ def _single_instance_shift(
         raise ValueError(
             f"큐의 인스턴스가 계획에 없다: {instance!r} (cue {cue.cue_id!r}) — 지어낼 run이 없다"
         )
+    _require_not_removed(removed_by_instance, cue, instance, fd)
     for run in runs:
         lo, hi = _frames_seconds(run.input_timeline_frames, fd)
         if lo <= cue.timeline_start and cue.timeline_end <= hi:
             return _run_shift(run, fd)
-    _require_not_removed(removed_by_instance, cue, instance, fd)
     raise ValueError(
         f"계획의 어느 run도 이 큐를 덮지 않는다: cue {cue.cue_id!r}"
         f" (인스턴스 {instance!r}, [{cue.timeline_start}, {cue.timeline_end})초)"

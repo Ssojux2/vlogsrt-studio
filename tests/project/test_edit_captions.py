@@ -40,7 +40,7 @@ from vlogsrt.project.edit import (
 from vlogsrt.project.fcpxml import parse_project
 from vlogsrt.project.media import ResolvedMedia
 from vlogsrt.project.models import ClipInstance, ProjectDocument
-from vlogsrt.project.timebase import format_fcpx_time
+from vlogsrt.project.timebase import FrameInterval, format_fcpx_time
 from vlogsrt.project.vad.guard import InstanceGuard
 from vlogsrt.project.vision.policy import VisionDecision, request_sha256
 
@@ -534,6 +534,40 @@ def test_partial_removal_overlap_also_hard_fails(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="제거 구간과 겹친다"):
         project_edit_captions(plan, _projection(document, (cue,)))
+
+
+def test_forged_run_covering_a_removal_still_hard_fails(tmp_path: Path) -> None:
+    """위조 플랜의 run이 제거 위를 덮어도 제거 검사가 먼저 닫는다 — P6-02 안전 문장의 기계 박기.
+
+    `project_edit_captions`은 시그니처에 문서도 guard도 없어 `validate_edit_plan`을
+    부를 수 없다. 그래서 `runs`와 `removed`가 서로소라고 가정하지 않고 제거를
+    모든 큐에 대해 run 포함보다 먼저 본다. 정직한 계획의 `runs`를 클립 전체
+    run 하나로 바꾼 위조 플랜은 run 포함에 성공하지만, 그 큐는 계획 자신의
+    제거 기록과 겹치므로 조용히 내보내지 않고 하드 실패한다.
+    """
+    document, media, guards = _scene25(tmp_path, (_ClipSpec("a1", duration_frames=500),))
+    partition = partition_blocks(document, media, guards, frozenset(), (), ProjectConfig())
+    plan = _plan(document, media, guards, (_front(partition.blocks[0]),))
+    assert [row.input_timeline_frames for row in plan.removed] == [FrameInterval(75, 250)]
+    (clip,) = _clips(document)
+    forged = replace(
+        plan,
+        runs=(
+            RetainedRun(
+                instance_id=clip.instance_id,
+                source_frames=FrameInterval(0, 500),
+                input_timeline_frames=FrameInterval(0, 500),
+                output_timeline_frames=FrameInterval(0, 500),
+                reasons=("kept_block",),
+            ),
+        ),
+    )
+    # [2,8)초 = 프레임 [50,200) — 위조 run [0,500) 안에 온전히 있지만 제거 [75,250)과 겹친다
+    cue = _cue("forged-crosser", (clip.instance_id,), Fraction(2), Fraction(8))
+
+    with pytest.raises(ValueError, match="제거 구간과 겹친다") as excinfo:
+        project_edit_captions(forged, _projection(document, (cue,)))
+    assert "forged-crosser" in str(excinfo.value)
 
 
 def test_repeated_content_instances_project_independently(tmp_path: Path) -> None:
