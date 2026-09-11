@@ -11,9 +11,18 @@ P6는 **처음으로 구간을 실제 제거하는 계층**이다. CLAUDE.md 규
 
 ## Baseline and ownership
 
-- Fresh `fcp-p6-edit-plan` worktree from exact P6-01-integrated SHA.
-- Modify `vlogsrt/project/edit.py`; create `tests/project/test_edit_plan.py`. Safe synthetic project data is inline or generated under pytest `tmp_path`; no fixture/golden file is added or modified.
-- No XML/SRT serialization, network, source trace mutation, or fixture/API edits.
+- Worktree `/Users/ssojux2/orca/workspaces/vlogsrt/fcp-p6-plan`, branch `Ssojux2/fcp-p6-plan`,
+  from exact base `2f45e6a` (P0~P5 + P6-01 통합됨). rebase·reset·squash 금지.
+- 허용 파일: `vlogsrt/project/edit.py`(추가), `tests/project/test_edit_plan.py`(신규).
+  `scripts/check_invariants.py`의 제거 계층 검사는 **이미 있다** — 새 import를 넣으려면
+  그 허용목록을 먼저 보고, 넓혀야 한다면 **고치지 말고 보고하라.**
+- 금지: XML 쓰기, 자막 출력, 모델·네트워크 호출, 설정 변경, 소스 변형,
+  `tests/fixtures/api/**`, `golden/`, `.env`, `.env.example`, 그 밖의 모든 파일.
+- 새 의존성·live 호출·`--online`·`VLOGSRT_OFFLINE=0` 금지.
+- P6-01이 낸 것을 **그대로 소비하라**: `KeepCandidate.source_frames`(프레임이 정본),
+  `BlockPartition.input_sha256`/`config_sha256`/`locked_instance_ids`,
+  `edit.vision_request_for`, `policy.request_sha256`. **나눗셈으로 되돌리지 마라** —
+  P4-04에서 무너진 모양이다.
 
 ## Contract
 
