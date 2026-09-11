@@ -71,6 +71,17 @@ def validate_edit_plan(plan: EditPlan, document: ProjectDocument, guards: Sequen
 요구한다. 어긋나면 **`raise`** — 그건 모델 결함이 아니라 **섞인 리비전**이다.
 그다음 `_require_config(cfg)`(P6-01과 같은 레일).
 
+**판정이 이 블록을 실제로 봤는지 증명하라 — P5-06과 P6-01b가 이걸 위해 있었다.**
+`VisionDecision.request_sha256`(P5-06)과 `edit.vision_request_for(block, adjacent_context)`
+(P6-01b의 정본 투영)이 이미 배포돼 있다. `build_edit_plan`은 후보를 적용하기 전에
+그 블록의 투영으로 만든 요청의 `policy.request_sha256(...)`가 판정의 `request_sha256`과
+같은지 요구한다. 다르면 **`raise`** — 파티션·설정 해시 불일치와 같은 줄(섞인 리비전)이다.
+
+`vision_request_for`를 **반드시 거쳐라.** 재료를 직접 모아 해시하면 러너(P7)와
+검증자(여기)가 다른 것을 해시하게 되고, 그 순간 이 증명은 아무것도 증명하지 않는다.
+id 일치만으로는 부족하다 — 같은 `block_id`라도 다른 기하에서 온 판정이 있을 수 있고,
+`request_sha256`은 **프레임과 후보 창까지** 묶는다.
+
 **적용은 `status`로만 한다.** 후보를 적용하는 조건은 셋의 교집합이다:
 `decision.status == "accepted"` **그리고** `choice`가 **그 블록의** 후보 id **그리고**
 `math.isfinite(confidence) and confidence >= cfg.vision_apply_confidence`.
