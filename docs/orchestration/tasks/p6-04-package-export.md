@@ -37,6 +37,39 @@ def publish_package(destination: Path, document: ProjectDocument, media: Sequenc
 - Draft unresolved boundary/analysis warnings, including unlocated `subms_collapsed` caption issues with exact cue IDs/endpoints, stay explicit and prevent a `final_accepted=true` field; unlocated caption issues never produce guessed XML markers.
 - Serialize every `plan.unavailable_instances` record into both `project_trace.json` and `review.json` with exact resource/instance/reason identity, after checking the supplied review data does not omit or contradict it. Declared-no-audio is a completed keep/review disposition and does not alone prevent `final_accepted=true`; `stream_unavailable` and `pcm_unavailable` are retryable failures, preserve the original instance unchanged, and require `final_accepted` to be absent or false. No unavailable record may be converted into a marker coordinate, successful analysis, or silent deletion.
 
+### 배포된 P6-02 타입과 신뢰 경계 (Fable 검토 — 이 절이 기존 시그니처를 대체한다)
+
+브리프의 옛 시그니처(`source_srt: str`, `review: Mapping`)는 **폐기됐다.** 정본은 이것이다:
+
+```python
+def render_edit_fcpxml(document, media, plan: EditPlan, captions: EditCaptionSet,
+                       guards: Sequence[InstanceGuard]) -> str: ...
+def publish_package(destination, document, media, plan: EditPlan,
+                    edit_captions: EditCaptionSet, source: BoundaryProjection,
+                    guards: Sequence[InstanceGuard], *, dtd_path: Path | None = None) -> ...: ...
+```
+
+- **`source_srt: str`를 받지 마라.** 맨 문자열은 같은 `input_sha256`의 것인지 증명할 수 없다.
+  `VLOG_AI_SOURCE.srt`는 `source.source_srt`에서 나오고
+  `source.input_sha256 == plan.input_sha256 == document.input_sha256`을 요구한다.
+- **`review` 매핑을 받지 마라.** `review.json`과 `project_trace.json`은 **여기서** 짓는다:
+  `plan.review`, `edit_captions.review`, `source.unresolved_request_ids`/`unresolved_cue_ids`,
+  `plan.unavailable_instances`에서. **`final_accepted`는 여기서만 계산한다** —
+  호출자가 주거나 덮어쓸 수 없다(외부 매핑은 기껏해야 `notes: tuple[str, ...]`이다).
+- **`render_edit_fcpxml`은 `validate_edit_plan`을 먼저 부르고 finding이 하나라도 있으면
+  렌더를 거부한다.** 그래서 `guards`가 양쪽 시그니처에 필요하다.
+
+**스토리라인은 조회만 한다 — 리플 산수를 다시 하지 마라.**
+`asset-clip`은 **`plan.runs`마다 하나**(`retained`마다가 아니다 — `retained`는 자르지 않은
+블록 경계마다 쪼개져서 through-edit이 생긴다). 갭은 `plan.gaps`에서 그대로,
+offset은 `m × frame_duration`, `tcStart=0`. 마커 소유자는 **내보낸 run**이고 반개 구간이다.
+
+**신뢰 경계 — 프로세스 안에서 만든 플랜만 렌더한다.**
+렌더하는 `EditPlan`은 **같은 호출 사슬에서 `build_edit_plan`이 만든 것**이어야 하고
+`revision`을 대조한다. 저장된 플랜은 **기록이지 렌더의 입력이 아니다.**
+재개는 저장된 분석에서 플랜을 **다시 만든다**(명세: plan/export는 저장된 분석에서 결정적).
+`validate_edit_plan`은 **구조 관문**이라 출처를 볼 수 없다 — 출처는 이 규칙이 지킨다.
+
 ## Implementation steps
 
 1. Write failing tests for original/proxy refs, new document identity/tcStart, reuse of raw IDs across unrelated inputs without cross-binding, repeated/disabled/gap/order, exact cuts, post-split marker ownership at both sides of a boundary, nonzero `asset.start` plus a trimmed final owner proving marker `start` stays in the asset-anchored source clock, deleted-location review without marker relocation, DTD child order, mixed revision, validation unavailable/invalid refusal, first publish, unmanaged destination refusal, failure before pointer switch, stale prior revision, live/stale-lock refusal, concurrent-writer conflict under the exclusive lock, reader consistency across a switch, and all five names. Add exact unavailable metadata in both JSON artifacts, omitted/contradictory review rejection, unchanged XML retention, no marker fabrication, declared-no-audio final readiness, and retryable stream/PCM failure refusal.
