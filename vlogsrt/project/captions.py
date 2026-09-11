@@ -19,6 +19,20 @@
 - **실패는 조용한 성공이 아니다.** 자원 스코프 unavailable은 내용 중복 제거보다
   먼저 붙는다 — 같은 내용이라 `has_audio` 선언이 다르면 해석이 달라야 한다.
 
+P6-03는 그 SOURCE 위에 **편집 계획을 통과하는 EDIT 투영**만 얹는다:
+
+- **큐 부착은 run 단위다.** `retained`는 제거가 없는 블록 경계마다 쪼개지므로
+  조각 하나 안에 들어가라고 요구하면 자르지 않은 경계를 건너는 큐가 잘못
+  실패한다. 소스와 출력이 둘 다 연속인 `EditPlan.runs`가 정본이고 이동량은
+  `run.output.start − run.input.start` 프레임이다. run 밖의 큐는 제거와 겹친
+  것이다 — 부분 큐를 합성하지 않고 하드 실패한다.
+- **EDIT 신원은 (cue_id, instance_ids)다.** 내부 칼날을 걸친 소스 큐는 인스턴스마다
+  한 장이고 여러 칼날을 덮는 경계 큐는 하나다 — cue_id로 합치면 전자가 뭉개진다.
+- **격자는 `plan.frame_duration`에서 온다.** 느슨한 매개변수를 받으면 플랜과 다른
+  격자로 투영할 수 있으므로 계약이 그 매개변수를 없앴다.
+- **접힘은 EDIT 시계에서 다시 잰다.** 상류 깃발은 증거로 남고 SRT에서 그 장만
+  뺀다(P3-03·P4-04와 같은 선). 늘리거나 합치거나 프레임 틈을 지어내지 않는다.
+
 순수한 조립이다. 호출·ffmpeg·파일 쓰기가 없다.
 """
 
@@ -28,6 +42,8 @@ import hashlib
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from fractions import Fraction
+from itertools import pairwise
+from typing import TYPE_CHECKING
 
 from vlogsrt.models import Cue
 from vlogsrt.project.media import ResolvedMedia
@@ -37,7 +53,13 @@ from vlogsrt.project.speech import (
     SourceTrace,
     UnavailableSourceAudio,
 )
-from vlogsrt.project.timebase import format_srt_time, milliseconds_half_up
+from vlogsrt.project.timebase import FrameInterval, format_srt_time, milliseconds_half_up
+
+if TYPE_CHECKING:
+    # 편집 계층은 이 모듈을 import한다(boundary → captions) — 실행 시점 import는
+    # 순환되므로 형에만 잡고, 실행 시 필요한 ReviewIssue는 함수 안에서 받는다.
+    from vlogsrt.project.boundary import BoundaryProjection, ProjectCue
+    from vlogsrt.project.edit import EditPlan, RemovedInterval, RetainedRun, ReviewIssue
 
 BOUNDARY_REQUIRED = "boundary_required"
 """저변 잘림 깃발 — 발표는 묶었지만 원본 소스 큐는 그대로다(P4가 다시 묻는다)."""
@@ -489,3 +511,311 @@ def _split_by_representability(
         if cue.cue_id not in unresolved:
             unresolved.append(cue.cue_id)
     return final, unresolved
+
+
+# ═══════════════════════════════════════════════════════════════
+#  P6-03 — 편집 계획을 통과하는 EDIT 투영
+# ═══════════════════════════════════════════════════════════════
+
+
+@dataclass(frozen=True, slots=True)
+class EditCaptionSet:
+    """편집 계획을 통과한 자막 한 벌 — 리플 출력 타임라인의 EDIT SRT.
+
+    `cues`의 `timeline_*`은 **출력** 경과 시각(0기반)이고 나머지 필드는 출처
+    큐의 그대로다. `review`는 계획의 구조화 리뷰를 글자 그대로·순서 그대로
+    실고 EDIT 증거를 뒤에 붙인다.
+    """
+
+    plan_revision: str
+    cues: tuple[ProjectCue, ...]
+    srt_text: str
+    review: tuple[ReviewIssue, ...]
+
+
+def project_edit_captions(plan: EditPlan, source: BoundaryProjection) -> EditCaptionSet:
+    """SOURCE 큐를 편집 계획의 리플 출력으로 투영해 EDIT SRT를 낸다.
+
+    순수한 투영이다 — 모델 호출·재전사·글자 합성이 없고 SOURCE 기록은 하나도
+    고치지 않는다. 계획과 출처가 같은 문서·잠금·부재를 말하는지 먼저 보고,
+    큐는 run에 붙여 리플 이동량만 더한다. 제거와 겹치는 큐는 부분 큐를
+    지어내지 않고 하드 실패한다.
+    """
+    _require_edit_revision(plan, source)
+    fd = plan.frame_duration
+    runs_by_instance = _runs_by_instance(plan)
+    removed_by_instance = _removed_by_instance(plan)
+    rippled: list[ProjectCue] = []
+    for cue in source.cues:
+        shift = _edit_shift(runs_by_instance, removed_by_instance, cue, fd)
+        rippled.append(
+            replace(
+                cue,
+                timeline_start=cue.timeline_start + shift,
+                timeline_end=cue.timeline_end + shift,
+            )
+        )
+    ordered = _ordered_edit_cues(rippled)
+    cues, collapsed = _edit_representability(ordered)
+    return EditCaptionSet(
+        plan_revision=plan.revision,
+        cues=cues,
+        srt_text=_edit_srt(cues),
+        review=(*plan.review, *collapsed),
+    )
+
+
+def _require_edit_revision(plan: EditPlan, source: BoundaryProjection) -> None:
+    """신원 대조 셋 — 문서 해시·잠금·부재 기록이 어긋나면 섞인 리비전이다.
+
+    부재 기록은 튜플 그대로 비교한다: stale·누락·재정렬 전부 섞인 입력이므로
+    조용히 자막을 내지 않고 닫는다.
+    """
+    if plan.input_sha256 != source.input_sha256:
+        raise ValueError(
+            f"계획의 문서 해시가 출처와 다르다: {plan.input_sha256} ≠"
+            f" {source.input_sha256} — 섞인 리비전이다"
+        )
+    if plan.locked_instance_ids != source.locked_instance_ids:
+        mismatched = sorted(plan.locked_instance_ids ^ source.locked_instance_ids)
+        raise ValueError(
+            f"계획의 잠긴 인스턴스가 출처와 다르다: 어긋난 인스턴스 {mismatched} — 섞인 리비전이다"
+        )
+    if plan.unavailable_instances != source.unavailable_instances:
+        raise ValueError(
+            "계획의 부재 기록이 출처와 정확히 같지 않다: 계획"
+            f" {len(plan.unavailable_instances)}건, 출처"
+            f" {len(source.unavailable_instances)}건 — stale·누락·재정렬은"
+            " 섞인 리비전이다"
+        )
+
+
+def _runs_by_instance(plan: EditPlan) -> dict[str, tuple[RetainedRun, ...]]:
+    """런을 인스턴스로 묶는다 — 계획 순서(곧 소스 순서)를 그대로 지킨다."""
+    grouped: dict[str, list[RetainedRun]] = {}
+    for run in plan.runs:
+        grouped.setdefault(run.instance_id, []).append(run)
+    return {instance: tuple(runs) for instance, runs in grouped.items()}
+
+
+def _removed_by_instance(plan: EditPlan) -> dict[str, tuple[RemovedInterval, ...]]:
+    """제거 구간을 인스턴스로 묶는다 — 진단이 이름을 댈 수 있게 한다."""
+    grouped: dict[str, list[RemovedInterval]] = {}
+    for row in plan.removed:
+        grouped.setdefault(row.instance_id, []).append(row)
+    return {instance: tuple(rows) for instance, rows in grouped.items()}
+
+
+def _edit_shift(
+    runs_by_instance: dict[str, tuple[RetainedRun, ...]],
+    removed_by_instance: dict[str, tuple[RemovedInterval, ...]],
+    cue: ProjectCue,
+    fd: Fraction,
+) -> Fraction:
+    """큐 한 장의 리플 이동량 — 인스턴스 수로 갈라 단일·경계 규칙을 적용한다."""
+    if len(cue.instance_ids) == 1:
+        return _single_instance_shift(runs_by_instance, removed_by_instance, cue, fd)
+    return _whole_clip_shift(runs_by_instance, cue, fd)
+
+
+def _single_instance_shift(
+    runs_by_instance: dict[str, tuple[RetainedRun, ...]],
+    removed_by_instance: dict[str, tuple[RemovedInterval, ...]],
+    cue: ProjectCue,
+    fd: Fraction,
+) -> Fraction:
+    """단일 인스턴스 큐 — 제거를 먼저 보고, 그다음 run 포함을 본다.
+
+    P6-03은 시그니처에 문서도 guard도 없어 `validate_edit_plan`을 부를 수
+    없다. 그래서 `runs`와 `removed`가 서로소라고 가정하지 않는다 — 제거는
+    모든 큐에 대해 run 포함보다 먼저 보므로 위조 플랜의 run이 제거 위를
+    덮어도 큐를 내보내지 않는다. `retained`는 제거가 없는 블록 경계마다
+    쪼개지므로 조각을 요구하지 않고, run 밖 진단은 두 번째 실패로 남는다.
+    """
+    instance = cue.instance_ids[0]
+    runs = runs_by_instance.get(instance)
+    if runs is None:
+        raise ValueError(
+            f"큐의 인스턴스가 계획에 없다: {instance!r} (cue {cue.cue_id!r}) — 지어낼 run이 없다"
+        )
+    _require_not_removed(removed_by_instance, cue, instance, fd)
+    for run in runs:
+        lo, hi = _frames_seconds(run.input_timeline_frames, fd)
+        if lo <= cue.timeline_start and cue.timeline_end <= hi:
+            return _run_shift(run, fd)
+    raise ValueError(
+        f"계획의 어느 run도 이 큐를 덮지 않는다: cue {cue.cue_id!r}"
+        f" (인스턴스 {instance!r}, [{cue.timeline_start}, {cue.timeline_end})초)"
+        " — 제거도 없이 run 밖에 있는 큐는 섞인 입력이다"
+    )
+
+
+def _require_not_removed(
+    removed_by_instance: dict[str, tuple[RemovedInterval, ...]],
+    cue: ProjectCue,
+    instance: str,
+    fd: Fraction,
+) -> None:
+    """제거 구간과 겹치는 큐는 하드 실패다 — 합성·재전사로 부분 큐를 만들지 않는다."""
+    for row in removed_by_instance.get(instance, ()):
+        lo, hi = _frames_seconds(row.input_timeline_frames, fd)
+        if cue.timeline_start < hi and lo < cue.timeline_end:
+            raise ValueError(
+                f"큐가 제거 구간과 겹친다: cue {cue.cue_id!r} (인스턴스 {instance!r})의"
+                f" [{cue.timeline_start}, {cue.timeline_end})초가 제거 [{lo}, {hi})초와"
+                " 겹친다 — 부분 큐를 지어내지 않고 실패한다"
+            )
+
+
+def _whole_clip_shift(
+    runs_by_instance: dict[str, tuple[RetainedRun, ...]],
+    cue: ProjectCue,
+    fd: Fraction,
+) -> Fraction:
+    """다중 인스턴스(경계) 큐 — 인스턴스마다 통째 유지 run 하나, 출력 연속·같은 이동량.
+
+    경계 요청에 참여한 인스턴스는 잠겨 있으므로 run이 하나씩이다. 그것들이
+    출력에서 연속이고 같은 이동량을 가질 때만 큐가 그 합집합에 붙는다 —
+    사이에 제거가 끼어들면 큐가 잘리므로 하드 실패다.
+    """
+    if not cue.instance_ids:
+        raise ValueError(f"큐에 인스턴스가 없다: cue {cue.cue_id!r} — 붙일 run이 없다")
+    whole: list[RetainedRun] = []
+    for instance in cue.instance_ids:
+        runs = runs_by_instance.get(instance)
+        if runs is None:
+            raise ValueError(f"경계 큐의 인스턴스가 계획에 없다: {instance!r} (cue {cue.cue_id!r})")
+        if len(runs) != 1:
+            raise ValueError(
+                f"경계 큐의 인스턴스가 통째 유지 run 하나가 아니다: {instance!r}이(가)"
+                f" run {len(runs)}개다 (cue {cue.cue_id!r}) — 제거가 있으면 경계 큐가"
+                " 잘리므로 실패다"
+            )
+        whole.append(runs[0])
+    ordered = sorted(whole, key=lambda run: run.output_timeline_frames.start_frame)
+    for previous, following in pairwise(ordered):
+        butted = (
+            previous.output_timeline_frames.end_frame
+            != following.output_timeline_frames.start_frame
+        )
+        if butted:
+            raise ValueError(
+                f"경계 큐의 인스턴스들이 출력에서 연속이 아니다: cue {cue.cue_id!r}"
+                f" (인스턴스 {[run.instance_id for run in ordered]})"
+                " — 사이에 제거가 끼어들었다"
+            )
+    shifts = {_run_shift(run, fd) for run in ordered}
+    if len(shifts) != 1:
+        raise ValueError(
+            f"경계 큐의 인스턴스들이 같은 이동량이 아니다: cue {cue.cue_id!r},"
+            f" 이동량 {sorted(shifts)} — 합집합이 잘못된 세계다"
+        )
+    lo, _ = _frames_seconds(ordered[0].input_timeline_frames, fd)
+    _, last_hi = _frames_seconds(ordered[-1].input_timeline_frames, fd)
+    if cue.timeline_start < lo or cue.timeline_end > last_hi:
+        raise ValueError(
+            f"경계 큐가 통째 유지 합집합 안에 있지 않다: cue {cue.cue_id!r}의"
+            f" [{cue.timeline_start}, {cue.timeline_end})초가 [{lo}, {last_hi})초를"
+            " 벗어난다 — 제거를 건너는 경계 큐다"
+        )
+    return shifts.pop()
+
+
+def _run_shift(run: RetainedRun, fd: Fraction) -> Fraction:
+    """run의 리플 이동량 — 입력 창에서 출력 창으로 밀린 프레임 수 × 프레임 길이."""
+    return (
+        Fraction(run.output_timeline_frames.start_frame - run.input_timeline_frames.start_frame)
+        * fd
+    )
+
+
+def _frames_seconds(window: FrameInterval, fd: Fraction) -> tuple[Fraction, Fraction]:
+    """프레임 창의 초 끝점 — 격자 인덱스 n은 곧 n × 프레임 길이다."""
+    return Fraction(window.start_frame) * fd, Fraction(window.end_frame) * fd
+
+
+def _ordered_edit_cues(cues: Sequence[ProjectCue]) -> tuple[ProjectCue, ...]:
+    """리플 뒤 순서 확인 — 정렬은 순서를 고치는 것이 아니라 다시 확인하는 것이다.
+
+    이동량은 이야기 순서를 따라 단조롭지 않게 내려가므로(제거가 누적된다)
+    정상 입력은 이미 순서대로다. 닿는 경계는 허용하고 겹침은 닫는다.
+    """
+    ordered = tuple(sorted(cues, key=lambda cue: (cue.timeline_start, cue.timeline_end)))
+    previous_end: Fraction | None = None
+    for cue in ordered:
+        if cue.timeline_end <= cue.timeline_start:
+            raise ValueError(
+                f"리플 뒤 큐의 길이가 0 이하다: cue {cue.cue_id!r},"
+                f" [{cue.timeline_start}, {cue.timeline_end})초"
+            )
+        if previous_end is not None and cue.timeline_start < previous_end:
+            raise ValueError(
+                f"리플 뒤 큐가 서로 겹친다: cue {cue.cue_id!r}의 시작"
+                f" {cue.timeline_start}초가 앞 큐 끝 {previous_end}초보다 앞이다"
+            )
+        previous_end = cue.timeline_end
+    return ordered
+
+
+def _edit_representability(
+    cues: Sequence[ProjectCue],
+) -> tuple[tuple[ProjectCue, ...], tuple[ReviewIssue, ...]]:
+    """EDIT 시계에서 접힘을 다시 잰다 — 큐는 남기고 SRT에서 그 장만 뺀다.
+
+    상류 `subms_collapsed` 깃발은 그대로 둔다(P4-04와 같은 선). 리플 이동량이
+    밀리초 정수가 아닌 격자(1001계)에서는 접힘이 생기기도 하고 풀리기도 한다 —
+    그래서 여기서 다시 잰다. 리뷰는 미위치로 남는다: 마커 근원을 지어내지
+    않고 최종 수용을 막는다.
+    """
+    from vlogsrt.project.edit import ReviewIssue
+
+    final: list[ProjectCue] = []
+    issues: list[ReviewIssue] = []
+    for cue in cues:
+        if milliseconds_half_up(cue.timeline_end) > milliseconds_half_up(cue.timeline_start):
+            final.append(cue)
+            continue
+        final.append(_with_subms_flag(cue))
+        issues.append(
+            ReviewIssue(
+                code=SUBMS_COLLAPSED,
+                message=(
+                    "EDIT 리플 뒤 밀리초로 나타낼 수 없다 — cue"
+                    f" {cue.cue_id} (인스턴스 {','.join(cue.instance_ids)}):"
+                    f" start={_fraction_text(cue.timeline_start)}초와"
+                    f" end={_fraction_text(cue.timeline_end)}초가 모두"
+                    f" {milliseconds_half_up(cue.timeline_start)}ms로 반올림된다"
+                ),
+                instance_id=None,
+                source_frame=None,
+            )
+        )
+    return tuple(final), tuple(issues)
+
+
+def _with_subms_flag(cue: ProjectCue) -> ProjectCue:
+    """접힘 깃발을 얹는다 — 이미 있으면 그대로(상류 증거를 중복하지 않는다)."""
+    if SUBMS_COLLAPSED in cue.flags:
+        return cue
+    return replace(cue, flags=(*cue.flags, SUBMS_COLLAPSED))
+
+
+def _edit_srt(cues: Sequence[ProjectCue]) -> str:
+    """EDIT SRT — 경과 0기반, half-up은 직렬화 순간에 딱 한 번, 접힌 장만 뺀다."""
+    blocks: list[str] = []
+    for cue in cues:
+        if SUBMS_COLLAPSED in cue.flags:
+            continue
+        if milliseconds_half_up(cue.timeline_end) <= milliseconds_half_up(cue.timeline_start):
+            raise ValueError(
+                f"직렬화할 수 없는 큐가 깃발 없이 남았다: {cue.cue_id!r} — 접힘 검사를 우회했다"
+            )
+        number = len(blocks) + 1
+        timeline = f"{format_srt_time(cue.timeline_start)} --> {format_srt_time(cue.timeline_end)}"
+        blocks.append(f"{number}\n{timeline}\n{cue.text}\n")
+    return "\n".join(blocks)
+
+
+def _fraction_text(value: Fraction) -> str:
+    """정확 끝점의 직렬 — 분모까지 담아야 같은 값이 늘 같은 글자가 된다."""
+    return f"{value.numerator}/{value.denominator}"
