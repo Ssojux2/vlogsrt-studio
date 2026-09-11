@@ -63,6 +63,18 @@ def project_edit_captions(plan: EditPlan, source: BoundaryProjection) -> EditCap
 - `plan.locked_instance_ids == source.locked_instance_ids`
 - `plan.input_sha256 == source.input_sha256`
 
+### 검사 순서와 접힘 비대칭 (P6-03b에서 확정)
+
+**`removed`는 모든 큐에 대해 *먼저* 본다. run 포함은 그다음이다.**
+`project_edit_captions`는 `validate_edit_plan`을 부를 수 없으므로(시그니처에 document도
+guards도 없다) **`runs`와 `removed`가 서로소라고 가정하지 않는다.** 제거 검사를 run 포함의
+fallback으로 두면, `runs`가 `removed`를 덮는 플랜에서 잘린 구간의 큐가 **조용히 나간다**.
+
+**SOURCE에서 접혔지만 EDIT에서 표현 가능해진 큐**는 EDIT SRT에서 **빠진 채로 두고**
+EDIT 레벨 이슈를 남기지 않는다. 정확한 길이가 여전히 1ms 미만이고 SOURCE 판정이 durable하다.
+따라서 수락을 막는 것은 `source.unresolved_cue_ids` **하나뿐**이다 —
+**P6-04와 P7-04는 빈 EDIT 이슈 목록을 "미해결 없음"으로 읽으면 안 된다.**
+
 ## Implementation steps
 
 0. **먼저 실패 테스트로 이 넷을 박아라**: (a) **자르지 않은 블록 경계를 건너는 큐가 살아남는지**

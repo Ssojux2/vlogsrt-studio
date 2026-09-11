@@ -62,7 +62,19 @@ def publish_package(destination, document, media, plan: EditPlan,
 **스토리라인은 조회만 한다 — 리플 산수를 다시 하지 마라.**
 `asset-clip`은 **`plan.runs`마다 하나**(`retained`마다가 아니다 — `retained`는 자르지 않은
 블록 경계마다 쪼개져서 through-edit이 생긴다). 갭은 `plan.gaps`에서 그대로,
-offset은 `m × frame_duration`, `tcStart=0`. 마커 소유자는 **내보낸 run**이고 반개 구간이다.
+offset은 `m × frame_duration`, `tcStart=0`. 마커 소유자는 **내보낸 run**이고 반개 구간이다 — `retained`가 아니다(조각나 있다).
+
+**레코드 인코더를 여기서 한 쌍만 공개하라 — 인코딩을 둘로 만들 마지막 기회다.**
+`EditPlan`·`EditCaptionSet`·`ProjectCue`·`ReviewIssue`가 전부 `Fraction`과 `FrameInterval`을
+싣는데 패키지 안에 JSON writer가 설정 해시와 경계 기록뿐이다. P6-04가 사적으로 인코딩하면
+**P7-01이 디코딩을 다시 발명한다.** 공개 쌍을 내라:
+`plan_record(plan) -> dict`, `edit_captions_record(captions) -> dict`.
+`Fraction`은 `"num/den"`, `FrameInterval`은 `[start, end]`. P7-01은 **이것으로만** 읽는다.
+
+**빈 EDIT 이슈 목록을 "미해결 없음"으로 읽지 마라.** SOURCE에서 접힌 큐는 EDIT에서
+표현 가능해져도 EDIT SRT에서 빠지고 EDIT 레벨 이슈를 남기지 않는다(P6-03b에서 확정).
+그런 큐의 수락 차단은 `source.unresolved_cue_ids`에서만 온다 —
+`final_accepted` 계산에 반드시 포함하라.
 
 **신뢰 경계 — 프로세스 안에서 만든 플랜만 렌더한다.**
 렌더하는 `EditPlan`은 **같은 호출 사슬에서 `build_edit_plan`이 만든 것**이어야 하고
