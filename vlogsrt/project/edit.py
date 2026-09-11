@@ -760,6 +760,23 @@ class RetainedGap:
 
 
 @dataclass(frozen=True, slots=True)
+class RetainedRun:
+    """유지 런 — 소스와 출력이 둘 다 연속인 같은 인스턴스 유지 구간의 합.
+
+    `retained`는 블록 경계마다 쪼개진다(제거가 없어도). 큐 부착(P6-03)과 클립
+    내보내기(P6-04)가 쓰는 단위는 이 병합이다 — 이음매마다 같은 병합을 다시
+    짜지 않게 생산자가 낸다(P4-04 모양). `reasons`는 합쳐진 조각의 사유를
+    순서 그대로 보존한다.
+    """
+
+    instance_id: str
+    source_frames: FrameInterval
+    input_timeline_frames: FrameInterval
+    output_timeline_frames: FrameInterval
+    reasons: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class ReviewIssue:
     """구조화 리뷰 증거 — `code`가 기계 판독 증거이고 `message`는 사람 글월이다.
 
@@ -799,6 +816,7 @@ class EditPlan:
     frame_duration: Fraction
     locked_instance_ids: frozenset[str]
     retained: tuple[RetainedInterval, ...]
+    runs: tuple[RetainedRun, ...]
     gaps: tuple[RetainedGap, ...]
     removed: tuple[RemovedInterval, ...]
     decisions: tuple[VisionDecision, ...]
@@ -841,6 +859,7 @@ def build_edit_plan(
         frame_duration=document.frame_duration,
         locked_instance_ids=partition.locked_instance_ids,
         retained=retained,
+        runs=_coalesce_runs(retained),
         gaps=gaps,
         removed=removed,
         decisions=tuple(decisions),
@@ -856,11 +875,18 @@ def validate_edit_plan(
 ) -> tuple[str, ...]:
     """규칙 9의 기계 검증 — 비어 있어야 P6-04가 렌더할 수 있다.
 
-    프레임 보존·출력 타일링·보호 겹침·잠금·부재·최소 1프레임 유지를 잰다.
-    "모든 제거는 한 블록 안에 있다"는 성질은 build가 구조로 보증한다 — 제거
-    조각은 늘 한 블록의 보수에서 깎이고 다른 조각과 합쳐지지 않는다. 검증은
-    그 관찰 가능한 결과를 잰다: 보존·경계·분리·남는 프레임. 결함은 예외가
-    아니라 findings 문장이다 — 렌더 거부는 P6-04의 판단이다.
+    **검증기의 범위**: 이것은 구조 관문이다 — 관찰 가능한 결과만 잰다(프레임
+    보존·출력 타일링·보호·잠금·부재·최소 유지·되돌릴 자리·runs 일관성).
+    "모든 제거는 한 블록 안에 있다"는 출처 문장은 여기서 잴 수 없다 — 계획은
+    블록을 싣지 않는다. 그 성질은 build가 구조로 보증한다(제거 조각은 늘 한
+    블록의 보수에서 깎이고 다른 조각과 합쳐지지 않는다) — 출처는 검증자가
+    아니라 **재빌드**가 증명한다. 결함은 예외가 아니라 findings 문장이다 —
+    렌더 거부는 P6-04의 판단이다.
+
+    **신뢰 진술**: 하류(P6-04)는 같은 프로세스에서 `build_edit_plan`이 만든
+    플랜만 렌더하고 `revision`을 대조한다. 저장된 `EditPlan`을 역직렬화해
+    렌더하지 않는다 — 재개는 저장된 분석에서 플랜을 다시 만든다(명세가
+    "plan/export는 저장된 분석에서 결정적"이라고 못 박았다).
     """
     findings: list[str] = []
     findings.extend(_identity_findings(plan, document))
@@ -869,6 +895,8 @@ def validate_edit_plan(
     findings.extend(_conservation_findings(plan, document))
     findings.extend(_protection_findings(plan, document, guards))
     findings.extend(_tiling_findings(plan, document))
+    findings.extend(_restore_findings(plan))
+    findings.extend(_runs_findings(plan))
     return tuple(findings)
 
 
@@ -934,10 +962,16 @@ def _require_plan_blocks(
             raise ValueError(
                 f"잠긴·부재 인스턴스에 블록이 있다: {block.instance_id!r} — 제거 권한이 없다"
             )
-        if guards_by_instance[block.instance_id].source_id != block.source_id:
+        guard = guards_by_instance[block.instance_id]
+        if guard.status != "success":
             raise ValueError(
-                f"guard의 source_id가 블록과 다르다: guard"
-                f" {guards_by_instance[block.instance_id].source_id!r}, 블록 {block.source_id!r}"
+                f"블록 인스턴스의 guard가 success가 아니다: {block.instance_id!r}"
+                f" ({guard.status!r}) — keep_all·inaudible은 빈 protected여도 제거 권한이 없다"
+            )
+        if guard.source_id != block.source_id:
+            raise ValueError(
+                f"guard의 source_id가 블록과 다르다: guard {guard.source_id!r},"
+                f" 블록 {block.source_id!r}"
             )
         source, timeline = _clip_grids(clip, resources[clip.resource_scoped_id], document)
         if not _within(block.source_frames, source) or not _within(block.timeline_frames, timeline):
@@ -956,17 +990,24 @@ def _require_plan_blocks(
 def _require_decision_linkage(
     partition: BlockPartition, decisions: Sequence[VisionDecision]
 ) -> dict[str, tuple[VisionDecision, ...]]:
-    """판정 연결 — 모르는 블록·남의 후보·모르는 choice는 섞인 리비전으로 raise다."""
+    """판정 연결 — 모르는 블록·남의 후보·모르는 choice·거짓 신원은 섞인 리비전이다.
+
+    요청 신원은 **모든 판정**에서 증명한다. 적용 경로에서만 보면 승인되지
+    않은 판정의 위조 해시가 `plan.decisions`와 revision에 조용히 들어간다 —
+    섞인 리비전은 status와 무관하게 섞인 리비전이다.
+    """
     owner: dict[str, str] = {}
+    blocks_by_id: dict[str, EditBlock] = {}
     for block in partition.blocks:
+        blocks_by_id[block.block_id] = block
         for candidate in block.keep_candidates:
             if candidate.candidate_id in owner:
                 raise ValueError(f"후보 아이디가 파티션에서 둘이다: {candidate.candidate_id}")
             owner[candidate.candidate_id] = block.block_id
-    known_blocks = {block.block_id for block in partition.blocks}
     grouped: dict[str, list[VisionDecision]] = {}
     for decision in decisions:
-        if decision.block_id not in known_blocks:
+        named = blocks_by_id.get(decision.block_id)
+        if named is None:
             raise ValueError(
                 f"판정이 파티션에 없는 블록을 가리킨다: {decision.block_id!r} — 섞인 리비전이다"
             )
@@ -979,6 +1020,12 @@ def _require_decision_linkage(
                     f"판정이 남의 블록 후보를 가리킨다: choice {decision.choice!r}는 블록"
                     f" {holder!r}의 것이다 (판정 블록 {decision.block_id!r})"
                 )
+        expected = request_sha256(vision_request_for(named, _PROJECTION_CONTEXT))
+        if decision.request_sha256 != expected:
+            raise ValueError(
+                f"판정의 요청 신원이 이 블록과 다르다: 블록 {decision.block_id!r},"
+                f" 판정 {decision.request_sha256!r} ≠ 정본 투영 {expected!r} — 섞인 리비전이다"
+            )
         grouped.setdefault(decision.block_id, []).append(decision)
     return {block_id: tuple(rows) for block_id, rows in grouped.items()}
 
@@ -1180,8 +1227,8 @@ def _applied_candidate(
     적용은 세 조건의 교집합이다: `status == "accepted"` 그리고 choice가 **이
     블록의** 후보 아이디 그리고 유한한 `confidence ≥ cfg.vision_apply_confidence`.
     재검사는 좁히기만 한다 — 승인을 confidence나 reason에서 다시 유도하지
-    않는다(NaN이 비교를 무력화하는 P5-05b 길이다). 적용 직전에 판정의 요청
-    신원을 정본 투영과 맞춘다 — 다르면 섞인 리비전이라 raise다.
+    않는다(NaN이 비교를 무력화하는 P5-05b 길이다). 판정의 요청 신원은 연결
+    단계에서 모든 판정에 대해 이미 증명됐다.
     """
     if not block_decisions:
         return None, ()
@@ -1198,12 +1245,6 @@ def _applied_candidate(
         return None, (_inconsistent(block, f"status=accepted인데 choice가 {decision.choice!r}다"),)
     if decision.status != "accepted" or decision.confidence < cfg.vision_apply_confidence:
         return None, ()
-    expected = request_sha256(vision_request_for(block, _PROJECTION_CONTEXT))
-    if decision.request_sha256 != expected:
-        raise ValueError(
-            f"판정의 요청 신원이 이 블록과 다르다: 블록 {block.block_id!r},"
-            f" 판정 {decision.request_sha256!r} ≠ 정본 투영 {expected!r} — 섞인 리비전이다"
-        )
     return _guard_clean_candidate(block, decision, guard)
 
 
@@ -1333,8 +1374,15 @@ def _plan_revision(
     """계획 리비전 — 입력·설정·파티션·판정·부재·구간·리뷰 전부를 해시한다.
 
     같은 저장 입력은 같은 리비전을 낸다. 온도·사전 순서 약속은 없다 — 재료의
-    순서는 전부 계약이 정한 입력 순서다(스토리라인·블록·판정·기록).
+    순서는 전부 계약이 정한 입력 순서다(스토리라인·블록·기록). **판정만은
+    파티션 블록 순서로 정규화한다**: `plan.decisions`는 호출자가 준 순서의
+    기록물이지만, 같은 판정 집합이 순서만 다르게 전해졌다고 리비전이 갈라지면
+    "같은 저장 입력 → 같은 계획"이 깨진다(안정 정렬 — 한 블록에 판정이 둘인
+    경우는 원래 순서를 지킨다). `runs`는 retained의 순수 함수이므로 재료에
+    넣지 않는다 — 해시가 같은 값을 두 번 묶지 않는다.
     """
+    block_order = {block.block_id: index for index, block in enumerate(partition.blocks)}
+    ordered_decisions = sorted(decisions, key=lambda decision: block_order[decision.block_id])
     material: list[object] = [
         _PLAN_REVISION_DOMAIN,
         document.input_sha256,
@@ -1346,7 +1394,7 @@ def _plan_revision(
             for record in partition.unavailable_instances
         ],
         sorted(partition.locked_instance_ids),
-        [_decision_record(decision) for decision in decisions],
+        [_decision_record(decision) for decision in ordered_decisions],
         [_retained_record(row) for row in retained],
         [
             [
@@ -1549,6 +1597,17 @@ def _instance_findings(
         span_total += _length(span)
         if isinstance(row, RetainedInterval):
             kept += _length(span)
+            if _length(span) < 1:
+                findings.append(
+                    f"유지 구간의 소스 길이가 0이다: 인스턴스 {clip.instance_id!r},"
+                    f" {_frames(span)} — 프레임은 음수가 아니어도 비어 있으면 못 쓴다"
+                )
+            if _length(row.output_timeline_frames) != _length(span):
+                findings.append(
+                    f"유지 구간의 출력 길이가 소스와 다르다: 인스턴스 {clip.instance_id!r},"
+                    f" 소스 {_frames(span)} → 출력 {_frames(row.output_timeline_frames)}"
+                    " — 렌더가 소스를 자르거나 출력을 겹치게 만든다"
+                )
     if span_total != _length(source):
         findings.append(
             f"프레임 보존 위반: 인스턴스 {clip.instance_id!r} — 유지·제거 합계"
@@ -1580,7 +1639,14 @@ def _protection_findings(
             )
         elif len(rows) > 1:
             findings.append(f"인스턴스에 guard가 둘 이상 있다: {clip.instance_id!r}")
+        removals = [row for row in plan.removed if row.instance_id == clip.instance_id]
         for guard in rows:
+            if removals and guard.status != "success":
+                findings.append(
+                    f"guard 상태가 {guard.status!r}인 인스턴스에서 제거가 일어났다:"
+                    f" {clip.instance_id!r} — keep_all·inaudible은 빈 protected여도"
+                    " 제거 권한이 없다"
+                )
             findings.extend(_removal_vs_guard(plan, clip, guard))
     for row in plan.removed:
         if row.instance_id in plan.locked_instance_ids:
@@ -1624,6 +1690,10 @@ def _tiling_findings(plan: EditPlan, document: ProjectDocument) -> list[str]:
     previous_input: int | None = None
     for output, incoming, instance_id in tiles:
         if _length(output) == 0:
+            findings.append(
+                f"출력 길이가 0인 타일이다: 인스턴스 {instance_id!r}, 입력 {_frames(incoming)}"
+                " — 정직한 계획은 0 길이 타일을 만들지 않는다(파서가 0 길이를 거부한다)"
+            )
             continue
         if output.start_frame != expected:
             kind = "출력에 구멍이 있다" if output.start_frame > expected else "출력 구간이 겹친다"
@@ -1656,6 +1726,94 @@ def _tiling_findings(plan: EditPlan, document: ProjectDocument) -> list[str]:
     if plan_gaps != expected_gaps:
         findings.append("갭의 순서·입력 창이 문서와 다르다 — 기존 갭은 그대로여야 한다")
     return findings
+
+
+def _restore_findings(plan: EditPlan) -> list[str]:
+    """되돌릴 자리 — 제거의 입력 끝 이후 첫 타일의 출력 시작과 같아야 한다.
+
+    그런 타일이 없으면(제거가 스토리라인 끝에 붙으면) 출력 끝이다. 이 값이
+    `project_trace.json`이 복원 지점을 말하는 근거라 틀리면 복원 기록이 거짓이
+    된다 — 보존도 타일링도 이 값 자체는 보지 않는다.
+    """
+    tiles = sorted(
+        [
+            (row.input_timeline_frames, row.output_timeline_frames, row.instance_id)
+            for row in plan.retained
+        ]
+        + [
+            (row.input_timeline_frames, row.output_timeline_frames, row.instance_id)
+            for row in plan.gaps
+        ],
+        key=lambda tile: tile[0].start_frame,
+    )
+    output_end = max((tile[1].end_frame for tile in tiles), default=0)
+    findings: list[str] = []
+    for row in plan.removed:
+        expected = next(
+            (
+                tile[1].start_frame
+                for tile in tiles
+                if tile[0].start_frame >= row.input_timeline_frames.end_frame
+            ),
+            output_end,
+        )
+        if row.restore_at_output_frame != expected:
+            findings.append(
+                f"되돌릴 자리가 틀리다: 인스턴스 {row.instance_id!r}, 제거 입력"
+                f" {_frames(row.input_timeline_frames)}, restore_at_output_frame"
+                f" {row.restore_at_output_frame} ≠ 기대 {expected}"
+            )
+    return findings
+
+
+def _runs_findings(plan: EditPlan) -> list[str]:
+    """runs 일관성 — retained를 병합한 것과 정확히 같아야 한다."""
+    if plan.runs != _coalesce_runs(plan.retained):
+        return ["runs가 retained의 병합과 일치하지 않는다 — 손으로 고쳐졌다"]
+    return []
+
+
+def _coalesce_runs(retained: tuple[RetainedInterval, ...]) -> tuple[RetainedRun, ...]:
+    """유지 구간을 런으로 병합 — 같은 인스턴스·소스 연속·출력 연속일 때만 잇는다.
+
+    하나라도 끊기면 run이 갈라진다: 제거가 있었던 자리는 소스가, 리플 차이는
+    출력이 끊는다. 제거가 없는 블록 경계는 둘 다 이어지므로 run에 남는다.
+    """
+    runs: list[RetainedRun] = []
+    for row in retained:
+        last = runs[-1] if runs else None
+        if (
+            last is not None
+            and row.instance_id == last.instance_id
+            and row.source_frames.start_frame == last.source_frames.end_frame
+            and row.output_timeline_frames.start_frame == last.output_timeline_frames.end_frame
+        ):
+            runs[-1] = RetainedRun(
+                instance_id=last.instance_id,
+                source_frames=FrameInterval(
+                    last.source_frames.start_frame, row.source_frames.end_frame
+                ),
+                input_timeline_frames=FrameInterval(
+                    last.input_timeline_frames.start_frame,
+                    row.input_timeline_frames.end_frame,
+                ),
+                output_timeline_frames=FrameInterval(
+                    last.output_timeline_frames.start_frame,
+                    row.output_timeline_frames.end_frame,
+                ),
+                reasons=last.reasons + (row.reason,),
+            )
+            continue
+        runs.append(
+            RetainedRun(
+                instance_id=row.instance_id,
+                source_frames=row.source_frames,
+                input_timeline_frames=row.input_timeline_frames,
+                output_timeline_frames=row.output_timeline_frames,
+                reasons=(row.reason,),
+            )
+        )
+    return tuple(runs)
 
 
 def _timeline_window(

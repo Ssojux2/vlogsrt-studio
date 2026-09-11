@@ -1199,3 +1199,209 @@ def test_plan_actually_shortens(tmp_path: Path) -> None:
         row.input_timeline_frames.end_frame for row in (*plan.retained, *plan.gaps, *plan.removed)
     )
     assert output_end < input_end
+
+
+# ═════════════════════════════════════════════════════════════
+#  P6-02b — 조용한 통과 경로를 닫는다 (Fable 재현 A·B·C·D·E + α)
+# ═════════════════════════════════════════════════════════════
+
+
+def test_retained_output_shorter_than_source_is_a_finding(tmp_path: Path) -> None:
+    """재현 A — 보존은 소스를 세고 타일링은 출력을 세므로 둘을 묶는다.
+
+    소스 [0,75)를 출력 [0,50)으로 내보내고 다음 타일을 [50,325)로 붙이면
+    타일링은 깨끗하다 — 유지 구간마다 출력 길이 == 소스 길이가 그 구멍을 닫는다.
+    """
+    document, guards, partition = _standard(tmp_path)
+    plan = _plan(document, partition, guards, (_front(partition.blocks[0]),))
+    shrunk = replace(
+        plan,
+        retained=(
+            replace(plan.retained[0], output_timeline_frames=FrameInterval(0, 50)),
+            replace(plan.retained[1], output_timeline_frames=FrameInterval(50, 325)),
+        ),
+    )
+    findings = validate_edit_plan(shrunk, document, guards)
+    assert any("출력 길이가 소스와" in finding for finding in findings)
+
+
+def test_zero_length_output_tile_is_a_finding(tmp_path: Path) -> None:
+    """재현 B — 길이 0 타일은 건너뛰지 않고 finding이다.
+
+    소스 75프레임 유지 구간의 출력을 [0,0)으로 낸다: 유지 구간 길이 검사와
+    타일링의 길이 0 검사가 둘 다 말해야 한다.
+    """
+    document, guards, partition = _standard(tmp_path)
+    plan = _plan(document, partition, guards, (_front(partition.blocks[0]),))
+    emptied = replace(
+        plan,
+        retained=(
+            replace(plan.retained[0], output_timeline_frames=FrameInterval(0, 0)),
+            replace(plan.retained[1], output_timeline_frames=FrameInterval(0, 250)),
+        ),
+    )
+    findings = validate_edit_plan(emptied, document, guards)
+    assert any("출력 길이가 소스와" in finding for finding in findings)
+    assert any("길이가 0" in finding for finding in findings)
+
+
+def test_wrong_restore_frame_is_a_finding(tmp_path: Path) -> None:
+    """재현 C — restore_at_output_frame은 다음 타일의 출력 시작과 같아야 한다.
+
+    9999를 넣어도 보존·타일링은 그대로다 — 되돌릴 자리만 거짓이 된다.
+    """
+    document, guards, partition = _standard(tmp_path)
+    plan = _plan(document, partition, guards, (_front(partition.blocks[0]),))
+    wrong = replace(plan, removed=(replace(plan.removed[0], restore_at_output_frame=9999),))
+    findings = validate_edit_plan(wrong, document, guards)
+    assert any("되돌릴" in finding for finding in findings)
+
+
+def test_keep_all_guard_with_empty_protection_and_blocks_raises(tmp_path: Path) -> None:
+    """재현 D — keep_all guard는 빈 protected여도 제거 권한이 없다.
+
+    `protected=()`를 "보호할 게 없다"로 읽으면 `protected=[]`가 옷만 갈아입은
+    것이다(P5-03b 계보). 성공 guard로 지은 파티션에 keep_all guard를 내밀면
+    블록 검증이 닫는다.
+    """
+    document, guards, partition = _standard(tmp_path)
+    demoted = _guards(document, _media(document), status="keep_all")
+    with pytest.raises(ValueError, match="제거 권한"):
+        build_edit_plan(
+            document, partition, demoted, (_front(partition.blocks[0]),), ProjectConfig()
+        )
+
+
+def test_inaudible_guard_on_forged_video_only_partition_raises(tmp_path: Path) -> None:
+    """재현 E — 비디오 전용 클립의 위조 파티션 + 빈 inaudible guard도 같은 줄이다."""
+    document, media = _scene(
+        tmp_path, clips=(_ClipSpec("a1", duration_frames=500, src_enable="video"),)
+    )
+    guards = _guards(document, media, status="inaudible")
+    partition = _partition(document, media, guards)
+    forged_block = EditBlock(
+        block_id="forged-block",
+        instance_id=_clips(document)[0].instance_id,
+        source_id=media[0].asset_content_id,
+        timeline_frames=FrameInterval(0, 250),
+        source_frames=FrameInterval(0, 250),
+        keep_candidates=(),
+        sample_requests=(),
+    )
+    forged = replace(partition, blocks=(forged_block,))
+    with pytest.raises(ValueError, match="제거 권한"):
+        _plan(document, forged, guards, ())
+
+
+def test_removal_under_non_success_guard_is_a_finding(tmp_path: Path) -> None:
+    """검증 시점에 guard가 keep_all로 강등되면 이미 만든 제거도 거부된다."""
+    document, guards, partition = _standard(tmp_path)
+    plan = _plan(document, partition, guards, (_front(partition.blocks[0]),))
+    demoted = _guards(document, _media(document), status="keep_all")
+    findings = validate_edit_plan(plan, document, demoted)
+    assert any("제거 권한" in finding for finding in findings)
+
+
+def test_non_accepted_decision_with_stale_request_hash_raises(tmp_path: Path) -> None:
+    """재현 I — keep_all 판정의 쓰레기 해시도 섞인 리비전이다.
+
+    적용 경로에서만 신원을 보면 승인되지 않은 판정의 위조가 기록과 리비전에
+    그대로 들어간다 — 연결 단계에서 모든 판정을 증명한다.
+    """
+    document, guards, partition = _standard(tmp_path)
+    block = partition.blocks[0]
+    stale = _decision(
+        block,
+        block.keep_candidates[0].candidate_id,
+        status="keep_all",
+        confidence=0.5,
+        request="0" * 64,
+    )
+    with pytest.raises(ValueError, match="요청 신원"):
+        _plan(document, partition, guards, (stale,))
+
+
+def test_below_threshold_decision_with_stale_request_hash_raises(tmp_path: Path) -> None:
+    """재현 J — 임계 미만 승인 판정의 쓰레기 해시도 같은 줄이다."""
+    cfg = ProjectConfig(vision_apply_confidence=0.9)
+    document, media = _scene(tmp_path, clips=(_ClipSpec("a1", duration_frames=500),))
+    guards = _guards(document, media)
+    partition = _partition(document, media, guards, cfg=cfg)
+    block = partition.blocks[0]
+    stale = _decision(
+        block,
+        block.keep_candidates[0].candidate_id,
+        confidence=0.85,
+        request="f" * 64,
+    )
+    with pytest.raises(ValueError, match="요청 신원"):
+        _plan(document, partition, guards, (stale,), cfg=cfg)
+
+
+def test_uncut_clip_yields_one_run(tmp_path: Path) -> None:
+    """판정 없는 500프레임 클립 — 블록 경계마다 쪼개지지 않고 run 하나다."""
+    document, guards, partition = _standard(tmp_path)
+    plan = _plan(document, partition, guards)
+    clip = _clips(document)[0]
+    assert len(plan.runs) == 1
+    (run,) = plan.runs
+    assert run.instance_id == clip.instance_id
+    assert run.source_frames == FrameInterval(0, 500)
+    assert run.input_timeline_frames == FrameInterval(0, 500)
+    assert run.output_timeline_frames == FrameInterval(0, 500)
+    assert run.reasons == ("kept_block", "kept_block")
+
+
+def test_protected_prefix_yields_one_run(tmp_path: Path) -> None:
+    """보호 접두 100프레임 — 유지 조각 셋이 run 하나로 합친다(전부 shift 0)."""
+    document, media = _scene(tmp_path, clips=(_ClipSpec("a1", duration_frames=500),))
+    guards = _guards(document, media, protected_by_clip={0: (FrameInterval(0, 100),)})
+    partition = _partition(document, media, guards)
+    plan = _plan(document, partition, guards)
+    assert [row.reason for row in plan.retained] == [
+        "kept_outside_blocks",
+        "kept_block",
+        "kept_block",
+    ]
+    assert len(plan.runs) == 1
+    (run,) = plan.runs
+    assert run.source_frames == FrameInterval(0, 500)
+    assert run.output_timeline_frames == FrameInterval(0, 500)
+    assert run.reasons == ("kept_outside_blocks", "kept_block", "kept_block")
+
+
+def test_one_removal_yields_two_runs_with_different_shifts(tmp_path: Path) -> None:
+    """제거 하나 — shift 0인 run과 밀린 run 둘로 갈라진다."""
+    document, guards, partition = _standard(tmp_path)
+    plan = _plan(document, partition, guards, (_front(partition.blocks[0]),))
+    clip = _clips(document)[0]
+    assert len(plan.runs) == 2
+    first, second = plan.runs
+    assert (first.instance_id, second.instance_id) == (clip.instance_id, clip.instance_id)
+    assert first.source_frames == FrameInterval(0, 75)
+    assert first.output_timeline_frames == FrameInterval(0, 75)
+    assert first.reasons == ("kept_candidate",)
+    assert second.source_frames == FrameInterval(250, 500)
+    assert second.output_timeline_frames == FrameInterval(75, 325)
+    assert second.reasons == ("kept_block",)
+
+
+def test_tampered_runs_are_a_finding(tmp_path: Path) -> None:
+    """runs는 retained의 병합과 일치해야 한다 — 손으로 고쳤으면 finding이다."""
+    document, guards, partition = _standard(tmp_path)
+    plan = _plan(document, partition, guards)
+    findings = validate_edit_plan(replace(plan, runs=()), document, guards)
+    assert any("run" in finding for finding in findings)
+
+
+def test_decision_order_does_not_change_revision(tmp_path: Path) -> None:
+    """판정 순서는 리비전을 바꾸지 않는다 — 해시는 파티션 블록 순서로 정규화한다."""
+    document, guards, partition = _standard(tmp_path)
+    first = _front(partition.blocks[0])
+    second = _decision(partition.blocks[1], partition.blocks[1].keep_candidates[2].candidate_id)
+    forward = _plan(document, partition, guards, (first, second))
+    backward = _plan(document, partition, guards, (second, first))
+    assert forward.revision == backward.revision
+    # 기록물은 입력 순서 그대로다 — 정규화는 해시 재료에만 적용된다.
+    assert forward.decisions == (first, second)
+    assert backward.decisions == (second, first)
