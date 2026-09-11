@@ -7,7 +7,7 @@ Binding spec `Input and output`, clock/SRT rules, and P6; depends on P6-02 and P
 ## Baseline and ownership
 
 - Worktree `/Users/ssojux2/orca/workspaces/vlogsrt/fcp-p6-captions`, branch
-  `Ssojux2/fcp-p6-captions`, from the exact base named at dispatch. rebase·reset·squash 금지.
+  `Ssojux2/fcp-p6-captions`, from exact base `5396242` (P0~P5 + P6-01 + P6-02 통합됨). rebase·reset·squash 금지.
 - 허용 파일: `vlogsrt/project/captions.py`, `tests/project/test_edit_captions.py`(신규).
 - 금지: EditPlan 변형, XML·패키지 출력, 소스 트레이스·SOURCE SRT 변경, 네트워크,
   `tests/fixtures/api/**`, `golden/`, `.env`, `.env.example`, 그 밖의 모든 파일.
