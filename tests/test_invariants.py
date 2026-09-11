@@ -1363,6 +1363,9 @@ def test_edit_layer_rejects_every_other_name_from_sampling(
     [
         "import vlogsrt.project.vision.sampling\n",
         "import vlogsrt.project.vision.sampling as sampling\n",
+        # 별명 우회 — asname이 허용 형태의 이름처럼 보여도 `ast.Import` 행은
+        # 모듈 경로가 곧 가져온 이름이다. 통과하면 허용목록이 뚫린다(P6-01b 항목 3).
+        "import vlogsrt.project.vision.sampling as FrameSampleRequest\n",
         "from vlogsrt.project.vision import sampling\n",
         "from vlogsrt.project.vision import sampling as frames\n",
         "from .vision.sampling import FrameSampleRequest, sample_frames\n",

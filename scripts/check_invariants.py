@@ -493,13 +493,17 @@ def check_edit_layer_ignores_audio() -> list[str]:
 
 
 def _edit_imports(body: str) -> list[tuple[int, str, tuple[str, ...]]]:
-    """edit.py의 import문 — (줄, 풀 모듈 경로, 가져온 이름들). 상대 import도 푼다."""
+    """edit.py의 import문 — (줄, 풀 모듈 경로, 가져온 이름들). 상대 import도 푼다.
+
+    `ast.Import` 행의 "가져온 이름"은 **모듈 경로 그 자체**(`alias.name`)다 —
+    asname을 적으면 `import …sampling as FrameSampleRequest`가 허용 형태처럼
+    보여 별명 우회가 열린다(P6-01b). 별명은 그저 묶는 이름일 뿐 가져온 것이
+    아니다.
+    """
     rows: list[tuple[int, str, tuple[str, ...]]] = []
     for node in ast.walk(ast.parse(body)):
         if isinstance(node, ast.Import):
-            rows.extend(
-                (node.lineno, alias.name, (alias.asname or alias.name,)) for alias in node.names
-            )
+            rows.extend((node.lineno, alias.name, (alias.name,)) for alias in node.names)
         elif isinstance(node, ast.ImportFrom):
             rows.append(
                 (node.lineno, _edit_from_module(node), tuple(alias.name for alias in node.names))

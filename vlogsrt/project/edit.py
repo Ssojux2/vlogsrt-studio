@@ -54,6 +54,7 @@ from vlogsrt.project.timebase import (
 from vlogsrt.project.vad.guard import InstanceGuard
 from vlogsrt.project.vision.policy import (
     VisionCandidate,
+    VisionRequest,
     _effective_max_images,
 )
 from vlogsrt.project.vision.policy import (
@@ -174,15 +175,34 @@ def partition_blocks(
     )
 
 
+def vision_request_for(block: EditBlock, adjacent_context: str) -> VisionRequest:
+    """블록 → `VisionRequest`의 정본 투영 — 러너(P7)와 검증자(P6-02)가 같은 재료를 해시한다.
+
+    `frame_ids`는 표본 순서 그대로, `candidates`는 후보 순서 그대로다. 다시
+    고르거나 다시 정렬하지 않는다 — `policy.request_sha256`의 재료가 이 투영
+    하나에서만 나와야 저장된 판정(`VisionDecision.request_sha256`)이 이 프레임과
+    이 후보를 봤는지 증명한다(P5-06). 이웃 맥락 글월은 안내일 뿐 해시 재료가
+    아니다.
+    """
+    return VisionRequest(
+        block_id=block.block_id,
+        frame_ids=tuple(request.frame_id for request in block.sample_requests),
+        candidates=tuple(candidate.vision for candidate in block.keep_candidates),
+        adjacent_context=adjacent_context,
+    )
+
+
 def _require_config(cfg: ProjectConfig, frame_duration: Fraction) -> _Limits:
     """P6 레일 — 설정 결함은 예외로 닫는다(keep+review 세탁 금지).
 
     생성자(P5-06)가 이미 범위·교차 검사를 돌려도 이 관문은 필요하다:
     (1) 프레임 환산 뒤 관계는 `frame_duration`이 문서에서 오므로 생성자가 볼 수
-    없고, (2) 교차 레일 `block_max_seconds × vision_sample_fps <=
-    vision_max_images`은 P6 고유며("성긴 이미지는 아무것도 증명하지 못한다"),
-    (3) 검사받지 않는 층은 썩는다. `vision_apply_confidence`는 policy의 관문을
-    그대로 재사용한다.
+    없고, (2) 교차 레일 `block_max_seconds × vision_sample_fps <= 실효 프레임
+    한도`는 P6 고유며("성긴 이미지는 아무것도 증명하지 못한다") — 정책이
+    `_effective_max_images`로 깎은 **실효** 천장과 비교한다. 날것
+    `vision_max_images`와 비교하면 32를 설정한 20초 블록이 표본 15장으로
+    판정된다(P6-01b). (3) 검사받지 않는 층은 썩는다. `vision_apply_confidence`는
+    policy의 관문을 그대로 재사용한다.
     """
     for name in ("block_min_seconds", "block_max_seconds", "keep_seconds", "vision_sample_fps"):
         value = getattr(cfg, name)
@@ -208,12 +228,14 @@ def _require_config(cfg: ProjectConfig, frame_duration: Fraction) -> _Limits:
             f" 성립해야 한다: keep={limits.keep_frames}, min={limits.min_frames},"
             f" max={limits.max_frames} (프레임 길이 {frame_duration}초)"
         )
-    if cfg.block_max_seconds * cfg.vision_sample_fps > cfg.vision_max_images:
+    ceiling = _effective_max_images(cfg)
+    if cfg.block_max_seconds * cfg.vision_sample_fps > ceiling:
         raise ValueError(
             f"설정 결함: block_max_seconds({cfg.block_max_seconds}) ×"
-            f" vision_sample_fps({cfg.vision_sample_fps})가"
-            f" vision_max_images({cfg.vision_max_images})를 넘는다"
-            " — 성긴 이미지는 아무것도 증명하지 못한다"
+            f" vision_sample_fps({cfg.vision_sample_fps})가 실효 프레임 한도"
+            f" min(vision_max_images, 16)={ceiling}을 넘는다"
+            f" (vision_max_images={cfg.vision_max_images}) —"
+            " 성긴 이미지는 아무것도 증명하지 못한다"
         )
     return limits
 
@@ -565,9 +587,11 @@ def _sample_requests(
 
     필수 표본은 블록의 첫 유효 프레임 `start_frame`과 마지막 유효 프레임
     `end_frame − 1`(`end_frame`은 애셋 프레임 수와 같을 수 있다), 그리고 각
-    후보의 중앙 `시작 + ceil(keep/2)`이다. 명목 표본은 `t = k / fps < 블록 길이`를
-    P1 `frame_nearest` half-up으로 격자 인덱스에 붙이고 블록 안쪽으로 묶는다 —
-    29.97처럼 정수 초가 격자 밖이면 그 초를 절대 직접 보내지 않는다.
+    후보의 중앙 `min(시작 + ceil(keep/2), 길이 − 1)`이다 — `keep_frames == 1`이면
+    중앙이 `end_frame`에 딱 걸리므로 명목과 마찬가지로 묶는다. 명목 표본은
+    `t = k / fps < 블록 길이`를 P1 `frame_nearest` half-up으로 격자 인덱스에
+    붙이고 블록 안쪽으로 묶는다 — 29.97처럼 정수 초가 격자 밖이면 그 초를 절대
+    직접 보내지 않는다.
 
     축소 규칙(결정적): 필수는 절대 안 덜고 명목만 줄인다. 명목에서 필수와 겹치는
     인덱스를 먼저 빼고, 남은 수가 방보다 많으면 `step = ceil(남은 수 / 방)` 간격
@@ -578,8 +602,14 @@ def _sample_requests(
     length = block.end_frame - block.start_frame
     keep = candidates[0].source_frames.end_frame - candidates[0].source_frames.start_frame
     mandatory = {0, length - 1}
+    # 중앙도 명목과 같은 클램프를 받는다 — keep_frames == 1이면 (1+1)//2 == 1이
+    # 되어 끝 후보의 중앙이 end_frame에 딱 걸린다(P6-01b). end_frame은 애셋
+    # 프레임 수와 같을 수 있으므로 절대 표본이 될 수 없다.
     mandatory.update(
-        candidate.source_frames.start_frame - block.start_frame + (keep + 1) // 2
+        min(
+            candidate.source_frames.start_frame - block.start_frame + (keep + 1) // 2,
+            length - 1,
+        )
         for candidate in candidates
     )
     nominal = _nominal_indices(length, fd, cfg.vision_sample_fps)

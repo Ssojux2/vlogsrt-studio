@@ -28,7 +28,7 @@ import pytest
 
 from vlogsrt.project.boundary import UnavailableInstance
 from vlogsrt.project.config import ProjectConfig, ProjectConfigError
-from vlogsrt.project.edit import BlockPartition, EditBlock, partition_blocks
+from vlogsrt.project.edit import BlockPartition, EditBlock, partition_blocks, vision_request_for
 from vlogsrt.project.fcpxml import parse_project
 from vlogsrt.project.media import ResolvedMedia
 from vlogsrt.project.models import ClipInstance, ProjectDocument
@@ -41,6 +41,7 @@ from vlogsrt.project.timebase import (
     frame_nearest,
 )
 from vlogsrt.project.vad.guard import InstanceGuard
+from vlogsrt.project.vision.policy import request_sha256
 from vlogsrt.project.vision.sampling import FrameSampleRequest
 
 FD25 = Fraction(1, 25)
@@ -300,6 +301,20 @@ def test_partition_level_config_defects_raise_before_any_block(
     cfg = ProjectConfig(**overrides)  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="설정"):
         partition_blocks(document, media, guards, frozenset(), (), cfg)
+
+
+def test_cross_rail_uses_the_policy_effective_ceiling(tmp_path: Path) -> None:
+    """교차 레일은 정책의 실효 천장 min(vision_max_images, 16)을 본다.
+
+    `block_max_seconds=20, vision_max_images=32`는 날것 비교(20 ≤ 32)를 통과한
+    뒤 20초 블록을 표본 15장으로 판정하게 둔다 — 레일이 존재하는 이유인 "성긴
+    이미지는 아무것도 증명하지 못한다" 바로 그 경우다. 정책이 실제로 쓰는
+    천장으로 재야 한다(P6-01b 항목 2).
+    """
+    document, media, guards = _healthy_scene(tmp_path)
+    cfg = ProjectConfig(block_max_seconds=Fraction(20), vision_max_images=32)
+    with pytest.raises(ValueError, match="성긴 이미지"):
+        _partition(document, media, guards, cfg=cfg)
 
 
 def test_healthy_config_yields_real_blocks(tmp_path: Path) -> None:
@@ -873,6 +888,49 @@ def test_sample_cap_thins_nominal_samples_by_stride(tmp_path: Path) -> None:
     partition = _partition(document, media, guards, cfg=cfg)
     (block,) = partition.blocks
     assert _sample_grid_indices(block) == [0, 38, 50, 126, 213, 249]
+
+
+def test_candidate_centre_samples_stay_inside_the_block(tmp_path: Path) -> None:
+    """keep_frames == 1 극단 — 중앙 표본도 블록 안쪽으로 묶인다.
+
+    `keep_seconds = 1/25`(한 프레임)은 모든 레일을 통과한다. 이때 끝 후보의
+    중앙은 `start + (1+1)//2 == end_frame`이 되는데, 그 값은 브리프가 "마지막
+    유효 프레임은 `end_frame - 1`이고 `end_frame`은 절대 아니다"라고 못 박은
+    바로 그 금지값이다. 공칭 표본만 묶고 후보 중앙을 안 묶으면 블록 [0,250)이
+    인덱스 250을, [250,500)이 500을 내보낸다(P6-01b 항목 1).
+    """
+    document, media = _scene(tmp_path, rate=FD25, clips=(_ClipSpec("a1", duration_frames=500),))
+    guards = _guards(document, media)
+    partition = _partition(document, media, guards, cfg=ProjectConfig(keep_seconds=Fraction(1, 25)))
+    assert _block_sizes(partition) == [250, 250]
+    for block in partition.blocks:
+        assert len(block.keep_candidates) == 3
+        for request in block.sample_requests:
+            index = int(request.source_time * 25)
+            assert block.source_frames.start_frame <= index < block.source_frames.end_frame, (
+                f"표본 {request.frame_id}가 블록 {block.source_frames} 밖이다"
+            )
+
+
+def test_vision_request_projection_is_the_canonical_identity(tmp_path: Path) -> None:
+    """vision_request_for — EditBlock → VisionRequest 투영의 정본이다.
+
+    같은 블록에서는 `request_sha256`이 결정적으로 같고(이웃 맥락 글월은 재료가
+    아니다), 블록이 달라지면 달라진다. 러너(P7)와 검증자(P6-02)가 같은 재료를
+    해시하는 것은 이 투영이 유일한 정의여야 한다(P6-01b 항목 4).
+    """
+    document, media, guards = _healthy_scene(tmp_path)
+    partition = _partition(document, media, guards)
+    first, second = partition.blocks
+    request = vision_request_for(first, "이웃 맥락")
+    assert request.block_id == first.block_id
+    assert request.frame_ids == tuple(r.frame_id for r in first.sample_requests)
+    assert request.candidates == tuple(k.vision for k in first.keep_candidates)
+    # 이웃 맥락은 안내다 — 바뀌어도 요청 신원은 하나다.
+    assert request_sha256(request) == request_sha256(
+        vision_request_for(first, "전혀 다른 맥락 글월")
+    )
+    assert request_sha256(request) != request_sha256(vision_request_for(second, "이웃 맥락"))
 
 
 # ─────────────────────────────────────────────────────────────

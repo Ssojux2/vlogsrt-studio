@@ -593,6 +593,20 @@ def test_adjacent_context_prose_is_not_identity_material() -> None:
     assert base.request_sha256 == reworded.request_sha256
 
 
+def test_request_sha256_is_the_public_canonical_function() -> None:
+    """P6-02 재검증용 — 요청 신원 함수는 공개 이름 `request_sha256`으로 산다.
+
+    판정의 모든 경로가 실은 이 함수 하나다: 공개 함수로 계산한 값이 accepted·
+    error 어느 판정에 실리는 값과도 같아야 한다. 러너(P7)와 검증자(P6-02)가
+    같은 재료를 해시하는 것은 이 이름이 공개여야 한다(P6-01b 항목 4).
+    """
+    request = _request()
+    accepted = policy.parse_decision(request, _reply(), CFG)
+    errored = policy.parse_decision(request, {"choices": []}, CFG)
+    assert policy.request_sha256(request) == accepted.request_sha256
+    assert policy.request_sha256(request) == errored.request_sha256
+
+
 # ─── 설정 레일 — 검증 없이 만든 구성도 문에서 닫는다 ──────────────────────
 
 
