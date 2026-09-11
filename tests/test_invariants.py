@@ -253,6 +253,11 @@ def _fake_source_tree(
         "XML_VALIDATION_MODULE",
         tmp_path / "vlogsrt" / "project" / "xml_validation.py",
     )
+    monkeypatch.setattr(
+        check_invariants,
+        "EDIT_MODULE_PATH",
+        tmp_path / "vlogsrt" / "project" / "edit.py",
+    )
 
 
 def _xml_boundary_source(run: str, extra: str = "") -> str:
@@ -1291,3 +1296,141 @@ def test_a_cli_basename_spoof_gets_no_exception(
     failures = check_invariants.check_source_does_not_import_project()
     assert len(failures) == 1, failures
     assert "ui/cli.py" in failures[0]
+
+
+# ── P6-01(규칙 4·9): 제거 계층은 오디오를 듣지 않는다 ──────────────────────────
+#
+# edit.py의 import 방향 검사기 자체를 시험한다. 유일한 예외는 FrameSampleRequest
+# 데이터 타입 한 형태다 — **타입은 이음매를 건너도 되고 행동은 안 된다**(코디네이터
+# 재결). 허용목록이 조용히 넓어지는 것을 이 회귀 셋이 막는다(P5-06의 교훈).
+
+_EDIT_REL = "vlogsrt/project/edit.py"
+
+
+def test_edit_layer_accepts_the_sanctioned_sample_type_import(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """정당한 형태 — sampling에서 FrameSampleRequest 하나만, policy·guard 타입은 자유."""
+    _fake_source_tree(
+        monkeypatch,
+        tmp_path,
+        {
+            _EDIT_REL: (
+                "from vlogsrt.project.vision.policy import VisionCandidate\n"
+                "from vlogsrt.project.vision.sampling import FrameSampleRequest\n"
+                "from vlogsrt.project.vad.guard import InstanceGuard\n"
+            )
+        },
+    )
+    assert check_invariants.check_edit_layer_ignores_audio() == []
+
+
+def test_edit_layer_accepts_an_aliased_sample_type_import(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """가져오는 이름이 정확히 하나면 별명 자체는 죄가 아니다 — 대상이 그 타입일 때만."""
+    _fake_source_tree(
+        monkeypatch,
+        tmp_path,
+        {_EDIT_REL: "from vlogsrt.project.vision.sampling import FrameSampleRequest as Sample\n"},
+    )
+    assert check_invariants.check_edit_layer_ignores_audio() == []
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "from vlogsrt.project.vision.sampling import sample_frames\n",
+        "from vlogsrt.project.vision.sampling import establish_correspondence\n",
+        "from vlogsrt.project.vision.sampling import FrameSampleRequest, sample_frames\n",
+        "from vlogsrt.project.vision.sampling import FrameSample, FrameSampleRequest\n",
+        "from vlogsrt.project.vision.sampling import *\n",
+    ],
+)
+def test_edit_layer_rejects_every_other_name_from_sampling(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, statement: str
+) -> None:
+    """데이터 타입 외의 이름 — 추출·프로브 행동이 이음매를 건너는 순간이다."""
+    _fake_source_tree(monkeypatch, tmp_path, {_EDIT_REL: statement})
+    failures = check_invariants.check_edit_layer_ignores_audio()
+    assert len(failures) == 1, failures
+    assert _EDIT_REL in failures[0]
+    assert "FrameSampleRequest" in failures[0]
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "import vlogsrt.project.vision.sampling\n",
+        "import vlogsrt.project.vision.sampling as sampling\n",
+        # 별명 우회 — asname이 허용 형태의 이름처럼 보여도 `ast.Import` 행은
+        # 모듈 경로가 곧 가져온 이름이다. 통과하면 허용목록이 뚫린다(P6-01b 항목 3).
+        "import vlogsrt.project.vision.sampling as FrameSampleRequest\n",
+        "from vlogsrt.project.vision import sampling\n",
+        "from vlogsrt.project.vision import sampling as frames\n",
+        "from .vision.sampling import FrameSampleRequest, sample_frames\n",
+        "from .vision import sampling\n",
+    ],
+)
+def test_edit_layer_rejects_the_sampling_module_handle(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, statement: str
+) -> None:
+    """모듈 핸들을 쥐면 그 안의 전부에 닿는다 — 통째로 드는 형태는 금지다."""
+    _fake_source_tree(monkeypatch, tmp_path, {_EDIT_REL: statement})
+    failures = check_invariants.check_edit_layer_ignores_audio()
+    assert len(failures) == 1, failures
+    assert _EDIT_REL in failures[0]
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "import subprocess\n",
+        "import openai\n",
+        "import numpy\n",
+        "import onnxruntime\n",
+        "import vlogsrt.transcribe\n",
+        "from vlogsrt.transcribe import request_vision\n",
+        "from vlogsrt.preprocess import probe_video_stream\n",
+        "from vlogsrt.project.pcm import PcmReference\n",
+        "from vlogsrt.project.speech import SourceTrace\n",
+        "from vlogsrt.project.vad.inference import VadResult\n",
+        "from vlogsrt.project.vad.runtime import load_vad_model\n",
+        "from vlogsrt.repetition import find_repeats\n",
+        "from vlogsrt.repair import settle\n",
+        "from vlogsrt.refine import refine\n",
+        "from vlogsrt.output import save_srt\n",
+        "from vlogsrt.layout import layout\n",
+        # 상대 형태 — edit.py는 vlogsrt/project/ 안에 산다
+        "from .pcm import PcmReference\n",
+        "from .speech import SourceTrace\n",
+        "from .vad.inference import VadResult\n",
+        "from ..transcribe import request_vision\n",
+        # 모듈 핸들 우회 — 경로는 부모지만 묶는 이름이 금지 모듈이다
+        "from vlogsrt.project import pcm\n",
+        "from vlogsrt import transcribe\n",
+        # 하위 모듈 경로도 금지 대상의 접두사로 잡는다
+        "from vlogsrt.project.vad.inference.windows import something\n",
+    ],
+)
+def test_edit_layer_rejects_every_banned_module_in_any_form(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, statement: str
+) -> None:
+    """금지 목록의 모듈은 절대·상대·별명·하위 경로 어떤 형태로도 못 들어온다."""
+    _fake_source_tree(monkeypatch, tmp_path, {_EDIT_REL: statement})
+    failures = check_invariants.check_edit_layer_ignores_audio()
+    assert len(failures) >= 1, failures
+    assert all(_EDIT_REL in failure for failure in failures)
+
+
+def test_edit_layer_tolerates_a_missing_module(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """edit.py가 없는 동안은 통과다 — P6-01이 만들 때 선이 먼저 서 있다."""
+    _fake_source_tree(monkeypatch, tmp_path, {"vlogsrt/gadget.py": "import subprocess\n"})
+    assert check_invariants.check_edit_layer_ignores_audio() == []
+
+
+def test_the_real_edit_module_passes_the_removal_layer_check() -> None:
+    """진짜 edit.py는 이 검사를 통과한다 — 허용목록이 실제 코드와 함께 산다."""
+    assert check_invariants.check_edit_layer_ignores_audio() == []

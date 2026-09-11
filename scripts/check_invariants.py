@@ -43,6 +43,25 @@ ALLOWED_DEPENDENCIES = {"openai", "tomli-w", "rich"}
 # 파일이 예외를 물려받는다 — `vlogsrt/project/transcribe.py`가 openai를 얻는 식이다.
 OPENAI_BOUNDARY_PATH = "vlogsrt/transcribe.py"
 SUBPROCESS_BOUNDARY_PATHS = ("vlogsrt/preprocess.py", "vlogsrt/project/xml_validation.py")
+
+# 제거 계층(규칙 4·9) — P6는 이 프로젝트에서 처음으로 구간을 실제 제거하는 계층이다.
+# edit.py는 오디오·전사·VAD·조판 계층을 import하지 못한다. 유일한 예외는
+# FrameSampleRequest 데이터 타입 하나: **타입은 이음매를 건너도 되고 행동은 안
+# 된다** — 브리프 계약이 EditBlock에 그 순수 기록을 실으므로(코디네이터 재결).
+EDIT_MODULE_PATH = PROJECT_PACKAGE / "edit.py"
+EDIT_BANNED_IMPORTS = (
+    "subprocess", "openai", "numpy", "onnxruntime",
+    "vlogsrt.transcribe", "vlogsrt.preprocess",
+    "vlogsrt.project.pcm", "vlogsrt.project.speech",
+    "vlogsrt.project.vad.inference", "vlogsrt.project.vad.runtime",
+    "vlogsrt.project.vision.sampling",
+    "vlogsrt.repetition", "vlogsrt.repair", "vlogsrt.refine",
+    "vlogsrt.output", "vlogsrt.layout",
+)  # fmt: skip
+EDIT_SAMPLE_TYPE_MODULE = "vlogsrt.project.vision.sampling"
+EDIT_SAMPLE_TYPE = "FrameSampleRequest"
+EDIT_PACKAGE = "vlogsrt.project"
+
 MODEL_LITERAL_PATHS = ("vlogsrt/config.py", "vlogsrt/project/config.py")
 # glm-*은 파생 계층의 비전 모델이다 — 새 튜너블은 프로젝트 config에만 산다(재검토).
 PROJECT_MODEL_LITERAL_PATHS = ("vlogsrt/project/config.py",)
@@ -450,6 +469,81 @@ def check_repair_stays_upstream() -> list[str]:
             f"{name}: {leaked}를 import한다 — 되풀이 판정이 조판까지 샜다"
             for leaked in _imports(target.read_text(encoding="utf-8"), forbidden)
         ]
+    return failures
+
+
+def check_edit_layer_ignores_audio() -> list[str]:
+    """규칙 4·9 — 제거 계층(edit.py)은 오디오·전사·판정 계층을 import하지 못한다.
+
+    데이터 타입은 이음매를 건너도 되고 행동은 안 된다. 유일한 허용 형태는
+    `from vlogsrt.project.vision.sampling import FrameSampleRequest` 한 줄이다 —
+    EditBlock 계약이 실는 순수 기록(frame_id·source_id·source_time). 모듈 통째로
+    드는 형태와 그 밖의 이름(sample_frames 같은 추출·프로브 함수)은 전부 거부한다.
+    상대 import·별명도 풀 경로로 귀결해 잡는다. 파일이 없는 동안은 통과다 —
+    P6-01이 만들 때 이 선이 먼저 서 있다.
+    """
+    path = EDIT_MODULE_PATH
+    if not path.exists():
+        return []
+    rel = _rel(path)
+    failures: list[str] = []
+    for lineno, module, names in _edit_imports(path.read_text(encoding="utf-8")):
+        failures.extend(_edit_import_failures(rel, lineno, module, names))
+    return failures
+
+
+def _edit_imports(body: str) -> list[tuple[int, str, tuple[str, ...]]]:
+    """edit.py의 import문 — (줄, 풀 모듈 경로, 가져온 이름들). 상대 import도 푼다.
+
+    `ast.Import` 행의 "가져온 이름"은 **모듈 경로 그 자체**(`alias.name`)다 —
+    asname을 적으면 `import …sampling as FrameSampleRequest`가 허용 형태처럼
+    보여 별명 우회가 열린다(P6-01b). 별명은 그저 묶는 이름일 뿐 가져온 것이
+    아니다.
+    """
+    rows: list[tuple[int, str, tuple[str, ...]]] = []
+    for node in ast.walk(ast.parse(body)):
+        if isinstance(node, ast.Import):
+            rows.extend((node.lineno, alias.name, (alias.name,)) for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            rows.append(
+                (node.lineno, _edit_from_module(node), tuple(alias.name for alias in node.names))
+            )
+    return rows
+
+
+def _edit_from_module(node: ast.ImportFrom) -> str:
+    """from-import의 풀 모듈 경로 — edit.py는 vlogsrt/project/ 안에 산다."""
+    if node.level == 0:
+        return node.module or ""
+    parts = EDIT_PACKAGE.split(".")
+    if node.level >= 2:
+        parts = parts[: len(parts) - (node.level - 1)]
+    prefix = ".".join(parts)
+    return f"{prefix}.{node.module}" if node.module else prefix
+
+
+def _edit_import_failures(rel: str, lineno: int, module: str, names: tuple[str, ...]) -> list[str]:
+    where = f"{rel}:{lineno}"
+    if module == EDIT_SAMPLE_TYPE_MODULE:
+        if names != (EDIT_SAMPLE_TYPE,):
+            return [
+                f"{where} sampling에서 {EDIT_SAMPLE_TYPE} 외의 이름 {list(names)}을(를)"
+                " 가져온다 — 데이터 타입은 이음매를 건너도 행동은 못 건넌다 (규칙 4·9)"
+            ]
+        return []
+    failures = [
+        f"{where} 제거 계층이 {banned}을(를) import한다 — 오디오·판정을 몰라야 한다 (규칙 4·9)"
+        for banned in EDIT_BANNED_IMPORTS
+        if module == banned or module.startswith(banned + ".")
+    ]
+    # 모듈 핸들 우회 — `from vlogsrt.project.vision import sampling`은 경로가
+    # vision이지만 묶는 이름 자체가 금지 모듈이다.
+    failures.extend(
+        f"{where} 제거 계층이 {banned} 모듈 핸들을 가져온다 — 행동이 새어 든다 (규칙 4·9)"
+        for banned in EDIT_BANNED_IMPORTS
+        for name in names
+        if f"{module}.{name}" == banned
+    )
     return failures
 
 
@@ -949,6 +1043,7 @@ CHECKS = (
     ("모델 이름 비하드코딩", check_no_hardcoded_model),
     ("레거시는 project를 import하지 않는다", check_source_does_not_import_project),
     ("선택 의존성 범위", check_project_dependency_scope),
+    ("제거 계층은 오디오를 듣지 않는다", check_edit_layer_ignores_audio),
 )
 
 

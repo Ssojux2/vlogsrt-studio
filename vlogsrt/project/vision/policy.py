@@ -437,11 +437,11 @@ def _normalize(
     cfg: ProjectConfig,
 ) -> VisionDecision:
     """승인은 세 조건의 교집합 — 나머지는 전부 블록을 보존하는 keep_all이다."""
-    request_sha256 = _request_sha256(request)
+    request_sha256_value = request_sha256(request)
     if choice in (KEEP_ALL, UNCERTAIN):
         return VisionDecision(
             request.block_id,
-            request_sha256,
+            request_sha256_value,
             KEEP_ALL,
             reason,
             tuple(evidence),
@@ -451,7 +451,7 @@ def _normalize(
     if reason_kind != REASON_REPETITIVE_BROLL:
         return VisionDecision(
             request.block_id,
-            request_sha256,
+            request_sha256_value,
             KEEP_ALL,
             f"unique_event 정규화 — 한 번뿐인 사건은 신뢰도와 상관없이 keep_all: {reason}",
             tuple(evidence),
@@ -462,7 +462,7 @@ def _normalize(
     if confidence < threshold:
         return VisionDecision(
             request.block_id,
-            request_sha256,
+            request_sha256_value,
             KEEP_ALL,
             f"신뢰도 {confidence}가 적용 한도 {threshold}에 못 미친다: {reason}",
             tuple(evidence),
@@ -470,7 +470,13 @@ def _normalize(
             "keep_all",
         )
     return VisionDecision(
-        request.block_id, request_sha256, choice, reason, tuple(evidence), confidence, "accepted"
+        request.block_id,
+        request_sha256_value,
+        choice,
+        reason,
+        tuple(evidence),
+        confidence,
+        "accepted",
     )
 
 
@@ -478,7 +484,7 @@ def _error_decision(request: VisionRequest, defect: str) -> VisionDecision:
     """깨진 응답의 정규형 — 블록은 보존되고 결함은 리뷰에 남는다."""
     return VisionDecision(
         block_id=request.block_id,
-        request_sha256=_request_sha256(request),
+        request_sha256=request_sha256(request),
         choice=KEEP_ALL,
         reason=f"비전 응답이 계약을 어겼다 — {defect}",
         evidence_frame_ids=(),
@@ -487,12 +493,16 @@ def _error_decision(request: VisionRequest, defect: str) -> VisionDecision:
     )
 
 
-def _request_sha256(request: VisionRequest) -> str:
+def request_sha256(request: VisionRequest) -> str:
     """요청 신원 — 블록·프레임 순서·후보 아이디와 창을 재료로 한 결정적 해시다.
 
     재료는 브리프가 정한 그대로다: `block_id`, `frame_ids`(순서 포함), 후보마다
     아이디와 창 양 끝. 이웃 맥락 글월은 재료가 아니다 — 판정의 근거가 아니라
     안내다. 어느 경로에서 판정이 나도 신원은 요청 하나에서만 온다.
+
+    공개 이름이다(P6-01b): 러너(P7)와 검증자(P6-02)가 `vision_request_for` 투영의
+    같은 재료를 해시해 `VisionDecision.request_sha256`과 대조한다. 이름만 공개로
+    바꿨다 — 재료와 계산은 그대로다.
     """
     material = "\0".join(
         (
