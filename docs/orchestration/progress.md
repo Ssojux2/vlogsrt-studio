@@ -171,7 +171,7 @@ By explicit Astra dependency audit, P0-03 may run from `58bb25347319301391064d6b
 | [P5-06](tasks/p5-06-upstream-identity-rails.md) | request identity on decisions; constructor-level config rails | Fable P6 pre-phase review | `project/config.py`, `project/vision/policy.py`/tests | complete; `3b33c53` integrated as `eeb8e7a`, 2,152-test gate passed |
 | [P6-01](tasks/p6-01-block-partition.md) / [P6-01b](tasks/p6-01b-sample-clamp-and-rails.md) | eligible 6–10 s blocks and candidates | P4,P5 merges + P5-06 | project edit partition/tests | complete; `be2c570`+`d9cfd5c` integrated as `8a1135f`, 2,298-test gate, 20th invariant added |
 | [P6-02](tasks/p6-02-edit-plan.md) / [P6-02b](tasks/p6-02b-validator-and-runs.md) | immutable deterministic EditPlan | P6-01 | project edit plan/tests | complete; `bde0368`+`0422987` integrated as `ad80db5`, 2,368-test gate; synthetic roughcut shortens 20s→13s |
-| [P6-03](tasks/p6-03-edit-captions.md) | EDIT SRT projection | P6-02 | project captions/tests | drafted |
+| [P6-03](tasks/p6-03-edit-captions.md) / [P6-03b](tasks/p6-03b-removal-check-order.md) | EDIT SRT projection | P6-02 | project captions/tests | complete; `a022f96`+`d52c809` integrated as `97e1063`, 2,392-test gate |
 | [P6-04](tasks/p6-04-package-export.md) | atomic linked FCPXML/SRT/review package | P6-03 | export/tests | drafted |
 | [P7-01](tasks/p7-01-workspace.md) | content-keyed revisioned workspace | P6 merge | project workspace/tests | drafted |
 | [P7-02](tasks/p7-02-runner.md) | budgets, cancellation, resumable analysis | P7-01 | project runner/tests | drafted |

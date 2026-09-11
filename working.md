@@ -29,8 +29,8 @@
 ## 현재 제품 구현 기준점
 
 - 통합 브랜치: `feat/final-cut-project`
-- **제품 구현 기준 HEAD: `ad80db5` (Merge P6-02 deterministic EditPlan with a machine-checked removal validator)**
-- 통합 게이트: Ruff lint/format 86개 파일, mypy 43개 소스 파일, pytest **2,368개**, 구조 불변식 **20/20** 통과
+- **제품 구현 기준 HEAD: `97e1063` (Merge P6-03 EDIT caption projection through plan runs)**
+- 통합 게이트: Ruff lint/format 87개 파일, mypy 43개 소스 파일, pytest **2,392개**, 구조 불변식 **20/20** 통과
   (P6-01이 20번째 검사 '제거 계층은 오디오를 듣지 않는다'를 더했다).
 - **P0~P5 전 페이즈 완료.** 남은 것은 P6(러프컷 생성·내보내기)와 P7(영속화·CLI·UI·인수)뿐이다.
 - P1/P2의 실제 Final Cut 및 77분 미디어 인수 검사는 `PENDING_HUMAN`이다.
@@ -265,13 +265,63 @@ Opus 결정: 워커가 추천한 (A)를 거절했다. `_require_config`가 공�
   확인했고, `runs`가 조각 2개를 1개로 병합하는 것과 정직한 입력의 revision이
   `c62669923df0…435`로 **바이트 동일**한 것을 확인했다.
 
+### P6-03 EDIT 자막 투영 + P6-03b — 통합 완료 (`97e1063`)
+
+- 후보 `a022f96` → 보정 **`d52c809`** (branch `Ssojux2/fcp-p6-captions`, base `5396242`)
+- 이 계층은 P6-02가 제거한 footage 위에 **자막을 얹는 곳**이라, 틀리면 자막이 실제로 사라진다.
+- 네 핵심 케이스가 전부 닫혔다(두 검토 모두 확인): 자르지 않은 블록 경계를 건너는 큐가
+  `runs` 덕에 살아남고, 제거를 건너는 큐는 하드 실패하고, 칼날을 걸친 소스 큐는 두 장으로
+  리플 뒤 인접하고, 잠긴 두 칼날의 경계 큐는 한 장으로 남는다.
+- GLM 검증자 **ACCEPT_WITH_FINDINGS**(코드 결함 0). 신원 삼중 대조·격자·SOURCE 바이트
+  불변·EDIT 시계 접힘 재측정을 전부 독립 재현했다.
+
+#### Fable이 자기 주장을 뒤집었다
+
+P6-02 검토에서 Fable은 "guard 밖 큐는 P6-03에서 하드 실패한다"고 썼고 나는 그걸 P6-02
+안전 논증의 근거로 받았다. 이번에 **그 문장이 조건부로만 참**임을 자기가 재현했다:
+
+```
+정직한 플랜에서 runs만 [0,500) 하나로 바꾸고 removed=[75,250)은 그대로 →
+  validate_edit_plan: finding 1개
+  project_edit_captions: 큐를 그냥 내보냄 (00:00:02,000 --> 00:00:11,000)
+```
+
+원인은 `_single_instance_shift`가 **run 포함을 먼저** 보고 `_require_not_removed`를
+fallback으로 둔 것이고, `project_edit_captions`는 시그니처에 문서도 guard도 없어
+`validate_edit_plan`을 **부를 수 없다.** 그래서 보증이 "일관된 플랜이 주어졌을 때"였다.
+
+**내 브리프가 원인이다** — "제거와 겹치는 큐를 거부한다"고만 쓰고
+"무조건, run 포함보다 먼저"를 안 적었다. 구현자는 fallback으로 읽었고 자연스러운 독해다.
+
+#### 두 검토자가 갈린 지점 — Fable이 옳았다
+
+GLM 검증자는 "SOURCE에서 접힌 큐가 EDIT에서 표현 가능해져도 여전히 빠진다"를 LOW로 올렸다.
+Fable은 **그게 옳다**고 판단했다 — 정확한 길이가 여전히 1ms 미만이고 SOURCE 판정이
+durable하다. 대신 수락 차단이 `source.unresolved_cue_ids` 하나뿐이 되므로
+**P6-04·P7-04가 빈 EDIT 이슈 목록을 "미해결 없음"으로 읽으면 안 된다**고 기록하게 했다.
+코드를 고치지 않고 브리프 양쪽에 못 박았다.
+
+#### 보정과 검증
+
+`d52c809`는 `_require_not_removed`를 run 루프 **위로** 한 줄 올리고 docstring에 왜인지
+적었다. Opus 검증: 위조 플랜이 이제 raise하고(red-first `DID NOT RAISE` 확인),
+**정직한 입력 7개 시나리오의 EDIT SRT sha256이 수정 전후 동일**하다.
+통합 후 `make check` 통과: pytest 2,392개, 불변식 20/20.
+
+#### P7을 위해 미리 채운 것
+
+Fable이 "인코딩을 둘로 만들 마지막 기회"라고 지적했다 — `EditPlan`·`EditCaptionSet`이
+`Fraction`·`FrameInterval`을 싣는데 패키지에 JSON writer가 없어서, P6-04가 사적으로
+인코딩하면 P7-01이 디코딩을 다시 발명한다. P6-04 브리프에 공개 쌍
+(`plan_record`/`edit_captions_record`)을 박았다.
+
 ## 진행 중
 
-P6-03 EDIT 자막 투영 — GLM 구현 중 (`task_dd7768a2992c` / `ctx_ef227a36561f`).
+P6-04 원자적 패키지 내보내기 — GLM 구현 중 (`task_afd16da13b24` / `ctx_f3268ae8a3f3`). **P6의 마지막 태스크다.**
 
 ## 남은 순서
 
-1. **P6-03** EDIT 자막(진행 중) → **P6-04** 원자적 패키지 내보내기.
+1. **P6-04** 원자적 패키지 내보내기(진행 중) — 끝나면 P6 페이즈가 닫힌다.
 2. **P7-01** workspace → **P7-02** runner → **P7-03** CLI → [**P7-04** reproject · **P7-05** UI]
    → **P7-06** 오프라인 인수 검사.
 3. 최종 오프라인 흐름은 동일 revision의 FCPXML, SOURCE SRT, EDIT SRT, review JSON, manifest를
