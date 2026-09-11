@@ -122,7 +122,10 @@ P5-05b가 그대로 재현된다.
   겹치지 않으며 입력 순서를 지킨다
 - `removed ∩ protected == ∅`
 - 잠긴 인스턴스와 `unavailable_instances`에는 `RemovedInterval`이 **하나도 없다**
-- 모든 `removed`는 **한 블록 안**에 있다
+- (삭제됨 — P6-02b) "모든 `removed`는 한 블록 안" 검사는 **이 시그니처로 불가능하다.**
+  `validate_edit_plan`에 파티션이 없다. 검증기는 **구조 관문**이고 관찰 가능한 결과만
+  측정한다. 출처는 **재빌드로 증명**한다 — P6-04는 같은 프로세스에서 `build_edit_plan`이
+  만든 플랜만 렌더하고 `revision`을 대조하며, 저장된 플랜을 역직렬화해 렌더하지 않는다.
 - 인스턴스마다 **최소 1프레임은 남는다** (클립 통째 삭제 금지의 기계적 표현)
 
 `guards`가 이 검증에 필요하므로 `render_edit_fcpxml`도 같은 `guards`를 받아야 한다
