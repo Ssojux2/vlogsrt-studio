@@ -7,7 +7,7 @@ Binding spec `Input and output`, P6 export, and `Evidence at handoff`; depends o
 ## Baseline and ownership
 
 - Worktree `/Users/ssojux2/orca/workspaces/vlogsrt/fcp-p6-export`, branch
-  `Ssojux2/fcp-p6-export`, from exact base `fd29992` (P0~P5 + P6-01·02·03 통합됨).
+  `Ssojux2/fcp-p6-export`, from exact base `924b5d1` (P0~P5 + P6-01·02·03 통합됨).
   rebase·reset·squash 금지.
 - 허용 파일: `vlogsrt/project/export.py`(신규), `tests/project/test_export.py`(신규),
   `vlogsrt/project/fcpxml.py`(EDIT 렌더에 필요한 만큼만),
