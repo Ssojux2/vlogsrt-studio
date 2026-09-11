@@ -6,9 +6,20 @@ Binding spec `Input and output`, P6 export, and `Evidence at handoff`; depends o
 
 ## Baseline and ownership
 
-- Fresh `fcp-p6-export` worktree from exact P6-03-integrated SHA.
-- Create `vlogsrt/project/export.py`, `tests/project/test_export.py`; modify `vlogsrt/project/fcpxml.py` only for plan application writer. Synthetic packages are inline or generated under pytest `tmp_path`; no fixture/golden file is added or modified.
-- No network/workspace orchestration/CLI/UI, no source input rewrite, and no external fixture changes.
+- Worktree `/Users/ssojux2/orca/workspaces/vlogsrt/fcp-p6-export`, branch
+  `Ssojux2/fcp-p6-export`, from exact base named at dispatch (P0~P5 + P6-01·02·03 통합됨).
+  rebase·reset·squash 금지.
+- 허용 파일: `vlogsrt/project/export.py`(신규), `tests/project/test_export.py`(신규),
+  `vlogsrt/project/fcpxml.py`(EDIT 렌더에 필요한 만큼만),
+  `scripts/check_invariants.py`(20번째 검사를 `export.py`까지 넓힌다).
+- 금지: EditPlan·EditCaptionSet·SOURCE 변형, 모델·네트워크 호출, 설정 변경,
+  `tests/fixtures/api/**`, `golden/`, `.env`, `.env.example`, 그 밖의 모든 파일.
+- 새 의존성 금지. `xmllint` subprocess는 **기존 XML 검증 경계에서만** 허용된다
+  (`vlogsrt/project/xml_validation.py`) — `export.py`에서 직접 부르지 마라.
+- `.venv` 심링크를 만들지 마라. 인터프리터는
+  `/Users/ssojux2/Working/vlogsrt/.venv/bin/python` 절대 경로를 써라.
+- **P6의 마지막 태스크다.** 끝나면 FCPXML·SOURCE SRT·EDIT SRT·review·manifest가
+  한 revision으로 함께 나와야 한다.
 
 ## Contract
 
