@@ -84,9 +84,9 @@ class ProjectConfig:
     vad_positive: float = 0.35
     guard_padding_seconds: Fraction = Fraction(1, 2)
 
-    vision_model: str = "glm-5.3-flash"
-    vision_api_key_env: str = "ZAI_API_KEY"
-    vision_base_url_env: str = "ZAI_BASE_URL"
+    vision_model: str = "gemini-3.8-flash"
+    vision_api_key_env: str = "GOOGLE_API_KEY"
+    vision_base_url_env: str = "GEMINI_BASE_URL"
     vision_long_edge: int = 768
     vision_sample_fps: Fraction = Fraction(1)
     vision_max_images: int = 16

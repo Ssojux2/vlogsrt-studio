@@ -341,9 +341,9 @@ def test_defaults_are_the_binding_values() -> None:
     assert config.vad_context_samples == 64
     assert config.vad_positive == 0.35
     assert config.guard_padding_seconds == Fraction(1, 2)
-    assert config.vision_model == "glm-5.3-flash"
-    assert config.vision_api_key_env == "ZAI_API_KEY"
-    assert config.vision_base_url_env == "ZAI_BASE_URL"
+    assert config.vision_model == "gemini-3.8-flash"
+    assert config.vision_api_key_env == "GOOGLE_API_KEY"
+    assert config.vision_base_url_env == "GEMINI_BASE_URL"
     assert config.vision_long_edge == 768
     assert config.vision_sample_fps == Fraction(1)
     assert config.vision_max_images == 16
@@ -412,9 +412,9 @@ def _fully_spelled_defaults_toml() -> str:
         "vad_context_samples = 64",
         "vad_positive = 0.35",
         'guard_padding_seconds = "1/2"',
-        'vision_model = "glm-5.3-flash"',
-        'vision_api_key_env = "ZAI_API_KEY"',
-        'vision_base_url_env = "ZAI_BASE_URL"',
+        'vision_model = "gemini-3.8-flash"',
+        'vision_api_key_env = "GOOGLE_API_KEY"',
+        'vision_base_url_env = "GEMINI_BASE_URL"',
         "vision_long_edge = 768",
         'vision_sample_fps = "1/1"',
         "vision_max_images = 16",
@@ -816,7 +816,7 @@ def test_loading_reads_nothing_from_the_environment(
 ) -> None:
     """설정 적재는 환경을 보지 않는다 — 자격증명·가격 값은 오직 명시적 계층에서."""
     monkeypatch.chdir(tmp_path)  # 기본 파일도 없다 → 코드 기본값
-    for name in ("OPENAI_API_KEY", "OPENAI_BASE_URL", "ZAI_API_KEY", "ZAI_BASE_URL"):
+    for name in ("OPENAI_API_KEY", "OPENAI_BASE_URL", "GOOGLE_API_KEY", "GEMINI_BASE_URL"):
         monkeypatch.setenv(name, "set-by-test")
     monkeypatch.setenv("VLOGSRT_PRICING_CURRENCY", "USD")
     config = load_project_config(None)
@@ -953,9 +953,9 @@ def test_overrides_work_over_absent_default_file(
 ) -> None:
     """overrides는 파일 없이도 쓸 수 있다 — 두 번째 뿌리가 아니라 덧층이다."""
     monkeypatch.chdir(tmp_path)
-    config = load_project_config(None, {"vision_model": "glm-5.3"})
-    assert config.vision_model == "glm-5.3"
-    assert config == ProjectConfig(vision_model="glm-5.3")
+    config = load_project_config(None, {"vision_model": "gemini-3.5-flash-lite"})
+    assert config.vision_model == "gemini-3.5-flash-lite"
+    assert config == ProjectConfig(vision_model="gemini-3.5-flash-lite")
 
 
 def test_empty_overrides_behave_like_none(tmp_path: Path) -> None:

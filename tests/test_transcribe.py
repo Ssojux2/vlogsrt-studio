@@ -1030,7 +1030,7 @@ def test_vision_client_ignores_the_environment_and_legacy_helpers(
     def _boom(*args: object, **kwargs: object) -> None:
         raise AssertionError("비전 클라이언트는 legacy STT 자격증명 경로를 쓰면 안 된다")
 
-    for name in ("ZAI_API_KEY", "ZAI_BASE_URL", "OPENAI_API_KEY", "OPENAI_BASE_URL"):
+    for name in ("GOOGLE_API_KEY", "GEMINI_BASE_URL", "OPENAI_API_KEY", "OPENAI_BASE_URL"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr("vlogsrt.env.require_api_key", _boom)
     monkeypatch.setattr("vlogsrt.env.base_url", _boom)

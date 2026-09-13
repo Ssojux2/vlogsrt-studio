@@ -124,10 +124,15 @@ openai import의 허용 지점은 **정확 경로 `vlogsrt/transcribe.py` 하나
 
 엔진 모델 리터럴(`whisper-1`, `gpt-*transcribe*`)은 **정확 경로
 `vlogsrt/config.py`와 `vlogsrt/project/config.py`**에만 있을 수 있다. 파생 계층의
-비전 모델 `glm-*` 리터럴은 **정확 경로 `vlogsrt/project/config.py` 하나**에만
-있을 수 있다 — 새 튜너블은 전부 프로젝트 config에 살기 때문에 원본
-`vlogsrt/config.py`는 glm 예외를 물려받지 않는다. 중첩 경로의 같은 이름 파일
+비전 모델 리터럴(`glm-*`, `gemini-*`)은 **정확 경로 `vlogsrt/project/config.py`
+하나**에만 있을 수 있다 — 새 튜너블은 전부 프로젝트 config에 살기 때문에 원본
+`vlogsrt/config.py`는 비전 모델 예외를 물려받지 않는다. 중첩 경로의 같은 이름 파일
 (`vlogsrt/project/tuning/config.py` 등)도 예외를 물려받지 못한다.
+
+**공급자를 바꿔도 접두사 목록은 좁히지 않는다.** 2026-09-13에 기본 비전 공급자가
+z.ai(`glm-5.3-flash`)에서 Google(`gemini-3.8-flash`)로 바뀌었지만 `glm-*`은 금지
+목록에 그대로 남아 있다(D34). 쓰지 않게 된 접두사를 지우면 되돌리기가 조용히
+커밋된다 — 이 검사는 "지금 쓰는 모델"이 아니라 "코드에 박힌 모델 이름"을 막는다.
 
 ## 8. 파생 데이터클래스 — frozen, 정확 경로에서
 

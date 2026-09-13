@@ -1951,3 +1951,62 @@ D32가 살려 놓은 검사 다섯은 **전부 골격만** 본다. 조판 계층
   **조판 갈림이 사라졌으므로 다음 재실행에서 남는 지연은 그쪽 것이다.**
 - `LAG_LATE_RATE_TOL`의 근거가 **회차 하나**다. `GLUE_RISE_TOL`과 같은 처지이고,
   검증 도구의 판정 기준이지 파이프라인 임계값이 아니다.
+
+---
+
+## D34 — 비전 판정 모델을 Gemini로 바꾼다 (2026-09-13)
+
+러프컷의 **6단계 비전 판정**(블록 프레임을 보고 남길 후보를 고르는 곳)의 기본
+공급자를 z.ai `glm-5.3-flash`에서 Google `gemini-3.8-flash`로 바꾼다.
+
+### 왜 바꿀 수 있었나 — 의존성이 늘지 않는다
+
+Gemini는 **OpenAI 호환 엔드포인트**(`https://generativelanguage.googleapis.com/v1beta/openai/`)
+를 제공한다. `vlogsrt/transcribe.py`의 `create_vision_client`는 이미
+`openai.OpenAI(api_key=…, base_url=…)` 하나로 되어 있고 환경을 스스로 읽지 않는다 —
+**base_url·키·모델명만 바뀐다.**
+
+- 불변 규칙 10(의존성 `openai`·`tomli-w`·`rich`) 그대로.
+- 계약 §4(openai import는 `vlogsrt/transcribe.py` 정확 경로 하나) 그대로.
+- `build_payload`가 내는 `image_url` + `data:image/…;base64,`를 호환 레이어가 받는다.
+- STT 자격증명과 분리되는 선도 그대로 — `_STT_CREDENTIAL_ENV_NAMES` 재사용 금지가
+  `GOOGLE_API_KEY`에도 그대로 적용된다.
+
+### 바꾼 값
+
+| 필드 | 전 | 후 |
+|---|---|---|
+| `vision_model` | `glm-5.3-flash` | `gemini-3.8-flash` |
+| `vision_api_key_env` | `ZAI_API_KEY` | `GOOGLE_API_KEY` |
+| `vision_base_url_env` | `ZAI_BASE_URL` | `GEMINI_BASE_URL` |
+
+`gemini-2.5-flash`는 2026-10-16 종료 예정이라 기본값 후보에서 제외했다. 더 싼
+`gemini-3.5-flash-lite`도 쓸 수 있다 — 블록 하나당 이미지 16장이라 전체 비용 차이가
+영상 한 편에 몇십 센트 수준이어서 **판정 정확도를 택했다**. 바꾸려면
+`vlogsrt.project.toml`의 `vision_model` 한 줄이다.
+
+### 난간은 좁히지 않았다
+
+`check_no_hardcoded_model`의 `PROJECT_MODEL_LITERAL`을 `glm-`에서
+`(?:glm|gemini)-`로 **넓혔다.** glm을 빼지 않은 이유: 쓰지 않게 된 접두사를 지우면
+되돌리기가 조용히 커밋된다. 이 검사는 "지금 쓰는 모델"이 아니라 **"코드에 박힌 모델
+이름"**을 막는 것이다. 넓히지 않았다면 `"gemini-3.8-flash"`를 아무 파일에나 박아도
+검사가 못 잡았을 것이다 — 공급자 교체가 난간을 조용히 없앨 뻔한 자리였다.
+
+### 확인하지 못한 것
+
+- **실제 계정의 Gemini 비전 능력·응답 형태·단가.** `glm-5.3-flash`도 같은 상태로
+  남아 있었다(기준 명세: *"live account capability not yet tested"*). 유료 호출은
+  사람이 한다.
+- 호환 레이어가 16장 동시 입력과 구조화 JSON 응답을 우리 스키마대로 내는지.
+  `parse_decision`의 엄격한 거부 경로가 이 미검증을 fail-closed로 받는다.
+
+### 하지 않은 것 — 네이티브 비디오 입력
+
+Gemini는 영상을 그대로 받을 수 있고, 그러면 기준 명세가 스스로 인정한 약점
+(*"Sparse images not proof of motion/blur/no speech"*)이 사라진다. 이번에는 **하지
+않았다.** 영상에는 오디오가 딸려 오는데, 불변식 20번이 "제거 계층은 오디오를 듣지
+않는다"이다. 모델이 소리를 듣고 "여긴 말이 없으니 잘라도 된다"고 하면 **모델이
+오디오로 제거 권한을 만드는 것**이고, 제거 권한은 가드에서만 나온다. 하려면 오디오를
+벗기고 `request_sha256`을 프레임 목록이 아니라 클립 바이트로 다시 정의해야 한다 —
+P5-04·P5-05·P6-01의 재설계다. 별도 판단으로 남긴다.

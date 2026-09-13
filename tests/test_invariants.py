@@ -721,7 +721,7 @@ def test_a_clean_fake_tree_passes_every_contract_check(
             "vlogsrt/transcribe.py": "import openai\n",
             "vlogsrt/preprocess.py": "import subprocess\nsubprocess.run(['ffmpeg'])\n",
             "vlogsrt/config.py": 'MODEL = "whisper-1"\n',
-            "vlogsrt/project/config.py": 'VISION_MODEL = "glm-5.3-flash"\n',
+            "vlogsrt/project/config.py": 'VISION_MODEL = "gemini-3.8-flash"\n',
             "vlogsrt/project/vad/model.py": "import numpy as np\n",
         },
     )
@@ -789,7 +789,7 @@ def test_project_sources_stay_below_the_project_package() -> None:
 # ── P0-02b(Astra 재조정): 비준된 원본/파생 계약의 다섯 가지 좁히기 ────────────
 #
 # ① 선택 extra는 `vlogsrt/project/vad/` 아래로, ② CLI 예외는 project.commands로,
-# ③ glm-* 모델 리터럴 가드(정확히 프로젝트 config 예외), ④ project models.py의
+# ③ glm-*·gemini-* 모델 리터럴 가드(정확히 프로젝트 config 예외), ④ project models.py의
 # frozen, ⑤ XML 경계의 subprocess API를 run 하나·argv 두 형태로 얼린다.
 # 전부 파서만 돈다 — 실행하지 않는다.
 
@@ -927,7 +927,7 @@ def test_glm_literals_pass_inside_the_exact_config_paths(
         tmp_path,
         {
             "vlogsrt/config.py": 'MODEL = "whisper-1"\n',
-            "vlogsrt/project/config.py": 'VISION_MODEL = "glm-5.3-flash"\n',
+            "vlogsrt/project/config.py": 'VISION_MODEL = "gemini-3.8-flash"\n',
         },
     )
     assert check_invariants.check_no_hardcoded_model() == []
@@ -942,11 +942,16 @@ def test_glm_literals_pass_inside_the_exact_config_paths(
         "vlogsrt/project/tuning/config.py",
     ],
 )
-def test_glm_literals_fail_outside_the_exact_project_config(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, rel: str
+@pytest.mark.parametrize("literal", ["glm-5.3-flash", "gemini-3.8-flash"])
+def test_vision_literals_fail_outside_the_exact_project_config(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, rel: str, literal: str
 ) -> None:
-    """glm-*은 파생 계층의 비전 모델이다 — 원본 config는 물려받지 않는다."""
-    _fake_source_tree(monkeypatch, tmp_path, {rel: 'MODEL = "glm-5.3-flash"\n'})
+    """비전 모델 리터럴은 파생 계층의 것이다 — 원본 config는 물려받지 않는다.
+
+    공급자를 glm에서 gemini로 바꿔도 난간은 좁아지지 않는다: 쓰지 않게 된
+    접두사도 계속 걸린다. 안 그러면 되돌리기가 조용히 커밋된다.
+    """
+    _fake_source_tree(monkeypatch, tmp_path, {rel: f'MODEL = "{literal}"\n'})
     failures = check_invariants.check_no_hardcoded_model()
     assert len(failures) == 1, failures
     assert rel in failures[0]

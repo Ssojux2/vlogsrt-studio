@@ -63,10 +63,11 @@ EDIT_SAMPLE_TYPE = "FrameSampleRequest"
 EDIT_PACKAGE = "vlogsrt.project"
 
 MODEL_LITERAL_PATHS = ("vlogsrt/config.py", "vlogsrt/project/config.py")
-# glm-*은 파생 계층의 비전 모델이다 — 새 튜너블은 프로젝트 config에만 산다(재검토).
+# glm-*·gemini-*은 파생 계층의 비전 모델이다 — 새 튜너블은 프로젝트 config에만 산다(재검토).
+# 공급자를 바꿔도 난간은 좁아지지 않는다: 쓰지 않게 된 접두사도 목록에 남겨 둔다.
 PROJECT_MODEL_LITERAL_PATHS = ("vlogsrt/project/config.py",)
 ENGINE_MODEL_LITERAL = re.compile(r"[\"'](whisper-1|gpt-[\w.-]*transcribe[\w.-]*)[\"']")
-PROJECT_MODEL_LITERAL = re.compile(r"[\"']glm-[\w.-]+[\"']")
+PROJECT_MODEL_LITERAL = re.compile(r"[\"'](?:glm|gemini)-[\w.-]+[\"']")
 # 레거시가 project를 import할 수 있는 유일한 진입점 — 문서화된 CLI 조립 지점.
 # 예외도 정확히 `project.commands` 모듈로 좁다: CLI는 명령 묶음만 조립한다(재조정).
 CLI_COMPOSITION_ENTRYPOINT = "vlogsrt/cli.py"
@@ -1005,8 +1006,8 @@ def check_one_transcription_call() -> list[str]:
 def check_no_hardcoded_model() -> list[str]:
     """규칙 6 — 모델 이름도 config에서 온다. 코드에 박으면 되돌리기가 커밋이 된다.
 
-    glm-*은 파생 계층의 비전 모델이다 — 원본 config(`vlogsrt/config.py`)는 엔진
-    모델(whisper-1·gpt-*transcribe*)만 예외로 받고 glm은 물려받지 않는다(재검토).
+    glm-*·gemini-*은 파생 계층의 비전 모델이다 — 원본 config(`vlogsrt/config.py`)는 엔진
+    모델(whisper-1·gpt-*transcribe*)만 예외로 받고 비전 모델은 물려받지 않는다(재검토).
     """
     failures = []
     for path in _sources():
