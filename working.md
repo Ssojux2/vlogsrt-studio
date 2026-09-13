@@ -19,6 +19,9 @@
 | 검증 — 토큰 무거운 부분 | `claude-glm` `glm-5.3[1m]` max | **구현자와 다른** fresh 워커 |
 | 계획·방향성의 자세한 검토 | Fable 5.1 high | 브리프가 애초에 옳은지 |
 
+- **2026-09-13: Opus 사용량 보전 이관.** 토큰 무거운 일(보고서 정독·문서 본문 작성·
+  머지 준비·코드 조사)은 전부 `gpt-5.6-sol`로 넘겼다. Opus는 짧은 판정과 최종 머지만
+  한다. 세 검토 층의 분리는 그대로다 — 상세는 `docs/orchestration/verification-protocol.md`.
 - Orca Run: `run_a091d4869a98` (coordinator terminal `term_7c509adc-43bc-40e3-ab6c-0e374d516231`)
 - 이 저장소에 `run_phase.sh`나 `--director` 플래그는 **없다** — 오케스트레이션은 Orca가 한다.
 - 태스크 하나가 끝날 때마다: GLM 검증 → Fable 방향 검토 → Opus 머지 → `make check` →
