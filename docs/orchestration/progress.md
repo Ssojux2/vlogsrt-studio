@@ -187,7 +187,7 @@ findings folded in, and the twelve reversed Opus claims are listed in that plan'
 
 | Task | Outcome | Depends on | Owned files | State |
 |---|---|---|---|---|
-| **R-00** | rule 4/9 amendment and the derived-edit audit contract (**D35**) | — | `CLAUDE.md`, `DECISIONS.md`, `PROJECT_CONTRACTS.md`, plans | **next** |
+| **R-00** | rule 4/9 amendment and the derived-edit audit contract (**D35**) | — | `CLAUDE.md`, `DECISIONS.md`, plans | complete; **`19e80d8`** — legacy rules kept verbatim, derived-layer clause added narrowly; 20/20 invariants |
 | **R-01** | availability locks only, derived from media + PCM | R-00 | new `project/availability.py` | planned |
 | **R-02** | `SpeechEvidence` guard; no empty default, evidence in revision | R-00 | `vad/guard.py`, `project/config.py`, `edit.py`, export | planned |
 | **R-03** | per-retained-range independent engine run; requested/completed/failed range types | R-02 | `project/speech.py`, `project/boundary.py` | planned |
