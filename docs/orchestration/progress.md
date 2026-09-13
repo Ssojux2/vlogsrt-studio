@@ -173,12 +173,38 @@ By explicit Astra dependency audit, P0-03 may run from `58bb25347319301391064d6b
 | [P6-02](tasks/p6-02-edit-plan.md) / [P6-02b](tasks/p6-02b-validator-and-runs.md) | immutable deterministic EditPlan | P6-01 | project edit plan/tests | complete; `bde0368`+`0422987` integrated as `ad80db5`, 2,368-test gate; synthetic roughcut shortens 20s→13s |
 | [P6-03](tasks/p6-03-edit-captions.md) / [P6-03b](tasks/p6-03b-removal-check-order.md) | EDIT SRT projection | P6-02 | project captions/tests | complete; `a022f96`+`d52c809` integrated as `97e1063`, 2,392-test gate |
 | [P6-04](tasks/p6-04-package-export.md) | atomic linked FCPXML/SRT/review package | P6-03 | export/tests | drafted |
-| [P7-01](tasks/p7-01-workspace.md) | content-keyed revisioned workspace | P6 merge | project workspace/tests | drafted |
-| [P7-02](tasks/p7-02-runner.md) | budgets, cancellation, resumable analysis | P7-01 | project runner/tests | drafted |
-| [P7-03](tasks/p7-03-cli.md) | project inspect/analyze/plan/export/captions/run | P7-02 | CLI/project command tests | drafted |
-| [P7-04](tasks/p7-04-reproject.md) | supported user-recut caption reprojection | P7-03 | reproject/tests | drafted |
-| [P7-05](tasks/p7-05-ui.md) | lightweight project UI flow | P7-03 | UI service/app/tests | drafted |
-| [P7-06](tasks/p7-06-acceptance.md) | offline acceptance matrix and honest pending gates | P7-04,P7-05 | offline acceptance tests/docs | drafted |
+| D34 | vision judge moved to Google `gemini-3.8-flash`; hardcoded-model guard widened to `(?:glm\|gemini)-` | — | project config, invariant checker, contracts, tests | complete; **`b1fbc45`**, 2,396-test gate, 20/20 invariants, mutation-proven |
+
+### 2026-09-13 replan — cut-first ordering and the Final Cut plugin
+
+The product order is inverted (**cut → caption**) and the delivery form is a **Final Cut
+Workflow Extension**. Binding revision: [`docs/plans/2026-09-13-cut-first-and-plugin.md`](../plans/2026-09-13-cut-first-and-plugin.md).
+Direction review: [`astra-replan-cut-first.md`](reviews/astra-replan-cut-first.md) — **UNSOUND**
+on the first draft (6 blocking), three defects reproduced with synthetic calls; all twelve
+findings folded in, and the twelve reversed Opus claims are listed in that plan's §7.
+
+**Execution order: X-01 (human) · P6-04b → R-00 → rest of R → P7 (rewritten) → rest of X.**
+
+| Task | Outcome | Depends on | Owned files | State |
+|---|---|---|---|---|
+| **R-00** | rule 4/9 amendment and the derived-edit audit contract (**D35**) | — | `CLAUDE.md`, `DECISIONS.md`, `PROJECT_CONTRACTS.md`, plans | **next** |
+| **R-01** | availability locks only, derived from media + PCM | R-00 | new `project/availability.py` | planned |
+| **R-02** | `SpeechEvidence` guard; no empty default, evidence in revision | R-00 | `vad/guard.py`, `project/config.py`, `edit.py`, export | planned |
+| **R-03** | per-retained-range independent engine run; requested/completed/failed range types | R-02 | `project/speech.py`, `project/boundary.py` | planned |
+| **R-04** | `caption_timeline` — captions from whatever timeline is given | R-03 | new `project/recaption.py` | planned |
+| **R-05** | candidate-block verification transcription (safety level A) | R-02 | `edit.py` or new module | planned |
+| **R-06** | `analysis_complete`/`review_required`/approval/`caption_complete`, bound to the cut revision | R-02 | `edit.py`, export, workspace | planned |
+| **R-07** | cut-only package; caption-only artifact without an `EditPlan` | P6-04b, R-06 | `project/export.py` | planned |
+| **R-08** | input adapter wrapping a single browser clip as a project | — | `project/fcpxml.py` or new module | planned |
+| **R-09** | remove Gradio entirely; reverse D11/D14 (**D36**) | — | delete `ui/**`, `pyproject.toml`, invariant checker, contracts §1·§6 | planned, no dependencies |
+| [P7-01](tasks/p7-01-workspace.md) | content-keyed revisioned workspace | R phase | project workspace/tests | **rewrite required** — partial request keys, completed/failed state, cut↔caption revision relation |
+| [P7-02](tasks/p7-02-runner.md) | budgets, cancellation, resumable analysis | P7-01 | project runner/tests | **rewrite required** — brief demands full-source cost and bans network in `captions`; both conflict with the new order |
+| [P7-03](tasks/p7-03-cli.md) | `project inspect\|cut\|approve\|caption` | P7-02 | CLI/project command tests | **rewrite required** — no single `run` command; it would bypass the human gate |
+| [P7-04](tasks/p7-04-reproject.md) | supported user-recut caption reprojection | P7-03 | reproject/tests | **shrink only after** identity rebind / stale / cache / failure disposition actually move into R-04 |
+| [P7-05](tasks/p7-05-ui.md) | lightweight project UI flow | — | — | **dropped** (R-09) |
+| [P7-06](tasks/p7-06-acceptance.md) | offline acceptance matrix and honest pending gates | P7-04 | offline acceptance tests/docs | rewrite — drop UI dependency, add the new state machine |
+| **X-01** | drag-in payload, Apple-events return, real `FCPXTimeline` capability | — | spike only | **PENDING_HUMAN** — needs Xcode + installed FCP; it decides the I/O contract, so it leads |
+| **X-02**…**X-06** | app + extension shell, engine bundling, helper/entitlements, result return, signing | X-01, engine | new macOS targets | planned |
 
 ## Review and integration protocol
 

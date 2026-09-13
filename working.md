@@ -1,8 +1,9 @@
 # Final Cut 프로젝트 작업 인계
 
-마지막 갱신: 2026-09-10 (Asia/Seoul)
+마지막 갱신: 2026-09-13 (Asia/Seoul)
 
-이 문서는 현재 구현 루프의 상태 기록이다. 기준 명세는 `docs/plans/2026-09-08-final-cut-project.md`,
+이 문서는 현재 구현 루프의 상태 기록이다. 기준 명세는 `docs/plans/2026-09-08-final-cut-project.md`
+＋ **개정 `docs/plans/2026-09-13-cut-first-and-plugin.md`(컷→자막 순서·플러그인)**,
 운영 규칙은 `docs/orchestration/README.md`, 상세 과거 기록은 `docs/orchestration/progress.md`를 따른다.
 
 ## 이번 세션의 운영 모델
@@ -30,10 +31,14 @@
 ## 현재 제품 구현 기준점
 
 - 통합 브랜치: `feat/final-cut-project`
-- **제품 구현 기준 HEAD: `97e1063` (Merge P6-03 EDIT caption projection through plan runs)**
-- 통합 게이트: Ruff lint/format 87개 파일, mypy 43개 소스 파일, pytest **2,392개**, 구조 불변식 **20/20** 통과
-  (P6-01이 20번째 검사 '제거 계층은 오디오를 듣지 않는다'를 더했다).
-- **P0~P5 전 페이즈 완료.** 남은 것은 P6(러프컷 생성·내보내기)와 P7(영속화·CLI·UI·인수)뿐이다.
+- **제품 구현 기준 HEAD: `b1fbc45` (D34 비전 판정 모델 Gemini 전환)**
+  — 그 앞의 페이즈 기준은 `97e1063` (Merge P6-03 EDIT caption projection through plan runs)
+- 통합 게이트: Ruff lint/format, mypy, pytest **2,396개**, 구조 불변식 **20/20** 통과
+  (P6-01이 20번째 검사 '제거 계층은 오디오를 듣지 않는다'를 더했다. D34가 금지 시험을
+  두 비전 접두사로 parametrize해 +4개).
+- **P0~P5 전 페이즈 완료.** 남은 것은 P6-04(내보내기), **R 페이즈(순서 역전)**,
+  P7(재작성 — 영속화·러너·CLI·인수), **X 페이즈(Workflow Extension)**다.
+  2026-09-13에 계획이 뒤집혔다 — 아래 「계획이 뒤집혔다」 절을 먼저 읽어라.
 - P1/P2의 실제 Final Cut 및 77분 미디어 인수 검사는 `PENDING_HUMAN`이다.
 
 ## 완료된 단계
@@ -316,19 +321,62 @@ Fable이 "인코딩을 둘로 만들 마지막 기회"라고 지적했다 — `E
 인코딩하면 P7-01이 디코딩을 다시 발명한다. P6-04 브리프에 공개 쌍
 (`plan_record`/`edit_captions_record`)을 박았다.
 
-## 진행 중
+## 2026-09-13 — 계획이 뒤집혔다: 컷 → 자막, 그리고 플러그인
 
-P6-04 원자적 패키지 내보내기 — GLM 구현 중 (`task_afd16da13b24` / `ctx_f3268ae8a3f3`). **P6의 마지막 태스크다.**
+사용자가 방향을 바꿨다. **자막 → 컷편집**이 아니라 **컷편집 → 자막**이고, 납품 형태는
+CLI가 아니라 **Final Cut Workflow Extension**이다. 확정 계획:
+`docs/plans/2026-09-13-cut-first-and-plugin.md` (2026-09-08 명세를 대체하지 않고 개정한다).
 
-## 남은 순서
+### 검토 기록 — Astra가 v1을 **UNSOUND**로 돌려보냈다
 
-1. **P6-04** 원자적 패키지 내보내기(진행 중) — 끝나면 P6 페이즈가 닫힌다.
-2. **P7-01** workspace → **P7-02** runner → **P7-03** CLI → [**P7-04** reproject · **P7-05** UI]
-   → **P7-06** 오프라인 인수 검사.
-3. 최종 오프라인 흐름은 동일 revision의 FCPXML, SOURCE SRT, EDIT SRT, review JSON, manifest를
-   함께 내보내고 러프컷이 실제로 짧아졌음을 합성 데이터로 증명해야 한다.
-4. 실제 Final Cut import/re-export, 원본 4K relink/playback, 실제 77분 미디어, 유료 STT/vision은
-   계속 `PENDING_HUMAN`으로 남긴다.
+`codex --model gpt-6-astra` xhigh read-only. 차단 6 · 높음 5 · 중간 1.
+전문: `docs/orchestration/reviews/astra-replan-cut-first.md`.
+
+세 가지는 **합성 호출로 직접 재현**됐다(파일은 쓰지 않았다):
+
+- 떨어진 `[10,11)`·`[40,41)`·`[70,71)`의 '치즈' 셋이 **61초짜리 되풀이 하나**로 묶여
+  repair 요청이 `[10,71)`이 된다 — 빼놓은 58초를 다시 듣는다. 검출기가 시간 간격을
+  보지 않고 이웃 텍스트를 묶기 때문이다(`repetition.py:124`, `repair.py:498`).
+- 부분 coverage를 가진 `SourceTrace`가 **미해결 표시 없이 SRT를 만든다**.
+  `ChunkCoverage`는 "요청한 조각에 응답이 왔는지"만 보고 "필요한 구간을 다 요청했는지"는
+  아무도 안 본다(`transcribe.py:648`, `speech.py:151`).
+- 그 부분 trace를 나중에 가드 증거로 재사용하면 **미전사 영역이 다시 무보호가 된다**
+  (`guard.py:587`) — `protected=[]` 계열의 **여섯 번째 얼굴**이다.
+
+Opus 주장 12건이 뒤집혔다(확정 계획 §7). 특히 **"사람 검토가 전사 보호선보다 강하다"는
+틀렸다** — 편집본 재생으로는 이미 사라진 대사를 못 찾고, 오검출을 **먼저 지우면** 그 뒤
+전사에서 발견할 기회까지 없어진다. 그래서 안전 수준 A(후보 검증 전사)를 택했다.
+
+### 완료 — D34 비전 판정 모델을 Gemini로 (`b1fbc45`)
+
+- `gemini-3.8-flash` · `GOOGLE_API_KEY` · `GEMINI_BASE_URL`. OpenAI 호환 엔드포인트라
+  **코드는 한 줄도 안 바뀌었다** — `create_vision_client`가 이미 공급자 중립이다.
+- 난간을 **넓혔다**: `PROJECT_MODEL_LITERAL`이 `glm-`만 잡고 있어서, 공급자를 바꾸면
+  `"gemini-…"` 하드코딩을 못 잡을 참이었다. `(?:glm|gemini)-`로 넓히고 glm은 남겼다.
+  뮤테이션으로 확인 — `policy.py`에 박으니 `[FAIL]`, 복원하니 20/20.
+- 게이트: pytest **2,396개**(+4), 불변식 **20/20**(`[OK]` 줄 직접 셈), ruff·mypy 통과.
+
+## 남은 순서 (개정)
+
+실행 순서: **X-01(사람) · P6-04b → R-00 → R 나머지 → P7(재작성) → X 나머지**
+
+1. **X-01** 스파이크 — 사람만 할 수 있다(Xcode + 설치된 FCP). 입출력 계약을 정하므로
+   **선행**이다: 브라우저 드래그로 무엇이 오는가, Apple events로 FCPXML을 돌려보낼 수
+   있는가, `FCPXTimeline`이 실제로 주는 것.
+2. **P6-04b** 패키지 내보내기 보정 — 후보 `defe23f`는 `ruff format --check` 실패와
+   Fable의 P7 블로커 둘을 안고 있다. 보정 브리프는 **아직 커밋되지 않았다**.
+   v1의 "R과 무관"은 철회했다 — `publish_package`가 `EditCaptionSet`·`BoundaryProjection`을
+   **필수**로 받아서 STT 0회의 컷 패키지를 만들 수 없다(R-07이 다시 연다).
+3. **R-00** 계약 결정(규칙 4·9 개정, D35) → **R-01** 가용성 잠금 → **R-02** 증거 있는 가드 →
+   **R-03** 범위별 독립 전사 → **R-04** 타임라인 자막 → **R-05** 후보 검증 전사 →
+   **R-06** 검토 상태 기계 → **R-07** 컷 전용 패키지 → **R-08** 입력 어댑터.
+   **R-09** Gradio 철거(D36)는 의존성이 없어 아무 때나 병행한다.
+4. **P7 재작성** — 이름만 바꾸는 것이 아니다. P7-01/02는 부분 요청 키·컷/자막 revision
+   관계·범위별 비용으로, P7-03은 `inspect|cut|approve|caption` 표면으로. **`run` 단일
+   명령은 두지 않는다**(사람 게이트를 우회한다). **P7-05는 폐기**(R-09).
+5. 실제 Final Cut import/re-export, 원본 4K relink/playback, 실제 77분 미디어,
+   유료 STT/vision, 공증 앱 설치, **희미한/음악 아래 발화의 실제 검출률**은
+   계속 `PENDING_HUMAN`이다.
 
 ## 보존 규칙
 
