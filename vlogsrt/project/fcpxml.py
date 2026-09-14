@@ -129,6 +129,15 @@ def resolve_info_path(path: Path) -> Path:
     )
 
 
+def element_tree(raw_xml: bytes, location: str) -> ET.Element:
+    """원본 바이트 → 구문 트리 — 재구문 해석의 경계(엔티티 거부 포함)를 그대로 지난다.
+
+    P6-04 편집 직렬화가 같은 경계를 쓴다: 여기서도 문서 바이트는 읽기만 하고
+    트리를 고쳐 쓰는 일은 호출자의 새 문서에서만 일어난다.
+    """
+    return _parse_root(Path(location), raw_xml)
+
+
 def parse_project(path: Path) -> ProjectDocument:
     """입력 프로젝트를 불변 문서로 파싱한다. 읽기만 한다 — 절대 다시 쓰지 않는다."""
     info_path = resolve_info_path(path)
