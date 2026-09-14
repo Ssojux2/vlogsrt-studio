@@ -26,8 +26,11 @@ through-edit을 낸다). 갭은 `plan.gaps`에서 그대로, 오프셋은 `m × 
 
 **`final_accepted`는 여기서만 계산한다.** SOURCE에서 접힌 큐는 EDIT에서
 표현 가능해져도 EDIT 이슈를 남기지 않는다(P6-03b) — 그 차단 증거는
-`source.unresolved_cue_ids`뿐이므로 반드시 본다. 선언된 무음 부재는 완결된
-기록이라 단독으로는 막지 않고, 스트림·PCM 부재는 재시도 가능한 실패라 막는다.
+`source.unresolved_cue_ids`뿐이므로 반드시 본다. caption·edit 리뷰 코드는
+허용 집합으로 판정한다 — `unavailable_declared_no_audio`(완결된 기록) 외의
+코드는 예외 없이 블로커다. 판정이 없거나 오류인 블록도 리뷰 증거로 흘러
+분석이 일어나지 않은 패키지가 승인으로 나가지 못한다. 스트림·PCM 부재는
+재시도 가능한 실패라 막는다.
 """
 
 from __future__ import annotations
@@ -80,6 +83,16 @@ _STAGING_SUFFIX = ".tmp"
 
 _RETRYABLE_UNAVAILABLE_REASONS = frozenset({"stream_unavailable", "pcm_unavailable"})
 """재시도 가능한 부재 — 준비 블로커다. 선언된 무음은 완결된 기록이라 빠진다."""
+
+_FINAL_REVIEW_CODES_ALLOWED = frozenset({"unavailable_declared_no_audio"})
+"""최종 수용과 양립하는 리뷰 코드 — 선언된 무음 부재 하나뿐이다.
+
+허용 집합으로 판정한다: 이 집합에 없는 caption·edit 리뷰 코드는 예외 없이
+블로커다. 블로커 쪽을 열거하면 다음 리뷰 코드가 생길 때마다 이 관문이
+묵시적으로 뚫린다 — 판정 없음·오류가 리뷰에 남지 않아 분석이 일어나지 않은
+패키지가 승인으로 나가던 결함(P6-04b)이 그 형태였다. 양립해야 하는 새 코드는
+여기에 하나씩 더하고 그 근거를 문장으로 남긴다.
+"""
 
 _MAX_REFUSAL_LINES = 4
 """거부 문장에 실을 findings·진단의 상한 — 로그 위생 상수다(P1-04와 같은 규율)."""
@@ -694,11 +707,18 @@ def _review_payload(plan: EditPlan, captions: EditCaptionSet, source: BoundaryPr
 def _final_blockers(
     plan: EditPlan, captions: EditCaptionSet, source: BoundaryProjection
 ) -> list[str]:
-    """최종 수용을 막는 기계 코드 — 미해결 경계·출처 큐·EDIT 접힘·재시도 부재.
+    """최종 수용을 막는 기계 코드 — 미해결 경계·출처 큐·EDIT 접힘·재시도 부재·리뷰.
 
     SOURCE에서 접힌 큐는 EDIT에서 표현 가능해져도 EDIT 이슈를 남기지 않는다
     (P6-03b). 그래서 접힘 깃발을 큐에서도 다시 본다 — 이슈 목록만 보면 빈
     EDIT 이슈를 '미해결 없음'으로 잘못 읽는다.
+
+    리뷰 코드는 허용 집합으로 판정한다: caption·edit 리뷰에
+    `unavailable_declared_no_audio` 외의 코드가 하나라도 있으면 그 코드가
+    곧 블로커다(중복 제거·정렬). 판정이 없거나 오류인 블록의 대기·실패
+    증거가 이 길로 흘러 최종 수용을 막는다 — `decisions == ()` 같은 개수
+    검사는 하지 않는다: 블록 없는 프로젝트도 정상이므로 신호는 계획과
+    리뷰에서 온다(P4-04 모양).
     """
     blockers: list[str] = []
     if source.unresolved_request_ids:
@@ -712,6 +732,15 @@ def _final_blockers(
         blockers.append("subms_collapsed_edit_cues")
     if any(row.reason_code in _RETRYABLE_UNAVAILABLE_REASONS for row in plan.unavailable_instances):
         blockers.append("retryable_unavailable_instances")
+    blockers.extend(
+        sorted(
+            {
+                issue.code
+                for issue in (*plan.review, *captions.review)
+                if issue.code not in _FINAL_REVIEW_CODES_ALLOWED
+            }
+        )
+    )
     return blockers
 
 

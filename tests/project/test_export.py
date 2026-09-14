@@ -291,6 +291,8 @@ def build_plan(
     front_on_first_block: bool = False,
     middle_on_second_block: bool = False,
     inconsistent_on_first_block: bool = False,
+    error_on_all_blocks: bool = False,
+    keep_all_on_remaining_blocks: bool = False,
     lock_second: bool = False,
     unavailable_second_asset: str | None = None,
 ) -> _Bundle:
@@ -330,6 +332,15 @@ def build_plan(
     if middle_on_second_block:
         second = partition.blocks[1]
         decisions.append(_decision(second, second.keep_candidates[1].candidate_id))
+    if error_on_all_blocks:
+        decisions.extend(_decision(block, "keep_all", status="error") for block in partition.blocks)
+    if keep_all_on_remaining_blocks:
+        decided = {decision.block_id for decision in decisions}
+        decisions.extend(
+            _decision(block, "keep_all", status="keep_all")
+            for block in partition.blocks
+            if block.block_id not in decided
+        )
     build_guards = _guards(document, media, protected)
     plan = build_edit_plan(document, partition, build_guards, tuple(decisions), ProjectConfig())
     return _Bundle(
@@ -520,9 +531,7 @@ def test_render_rebinds_by_resource_identity_not_raw_ids(tmp_path: Path) -> None
     assert src_two == "file:///media-two/a1.mp4"
     # 남의 문서 미디어는 같은 낡은 id(a1)를 가리켜도 거부된다 — 스코프 신원이 다르다.
     with pytest.raises(ValueError, match="문서에 없는 자원"):
-        render_edit_fcpxml(
-            first.document, second.media, first.plan, _captions(first), first.guards
-        )
+        render_edit_fcpxml(first.document, second.media, first.plan, _captions(first), first.guards)
 
 
 def test_render_preserves_repeats_gaps_disabled_and_order(tmp_path: Path) -> None:
@@ -888,15 +897,63 @@ def test_unavailable_records_are_exact_in_both_artifacts(tmp_path: Path) -> None
 
 
 def test_final_accepted_true_when_clean(tmp_path: Path) -> None:
-    review = _load_json(_publish(tmp_path).review)
+    review = _load_json(_publish(tmp_path, keep_all_on_remaining_blocks=True).review)
     assert review["final_accepted"] is True
     assert review["final_blockers"] == []
+
+
+def test_final_accepted_blocked_by_missing_decisions(tmp_path: Path) -> None:
+    """블록이 있는데 판정이 하나도 없다 — 분석이 일어나지 않은 패키지는 승인이 아니다."""
+    package = _publish(tmp_path, front_on_first_block=False)
+    review = _load_json(package.review)
+    assert review["final_accepted"] is False
+    assert review["final_blockers"] == ["decision_missing"]
+    assert [row["code"] for row in review["review"]] == [
+        "decision_missing",
+        "decision_missing",
+    ], "실패는 사람이 읽는 파일에도 명시돼야 한다"
+
+
+def test_final_accepted_blocked_by_error_decisions(tmp_path: Path) -> None:
+    """모든 판정이 오류다 — 429·뒤틀린 응답만 남은 패키지도 승인이 아니다."""
+    package = _publish(tmp_path, front_on_first_block=False, error_on_all_blocks=True)
+    review = _load_json(package.review)
+    assert review["final_accepted"] is False
+    assert review["final_blockers"] == ["decision_error"]
+
+
+def test_final_accepted_blocked_by_inconsistent_decisions(tmp_path: Path) -> None:
+    """모순 판정은 모델 계약 위반이다 — 나머지가 전부 완결이어도 막는다."""
+    package = _publish(
+        tmp_path, inconsistent_on_first_block=True, keep_all_on_remaining_blocks=True
+    )
+    review = _load_json(package.review)
+    assert review["final_accepted"] is False
+    assert review["final_blockers"] == ["decision_inconsistent"]
+
+
+def test_final_accepted_blocked_by_guard_overlap(tmp_path: Path) -> None:
+    """보호 겹침 마커가 XML에 있는 '최종'은 모순이다 — 판정은 물러나고 승인도 막힌다."""
+    package = _publish(
+        tmp_path,
+        protected=((300, 360),),
+        front_on_first_block=True,
+        middle_on_second_block=True,
+    )
+    review = _load_json(package.review)
+    assert review["final_accepted"] is False
+    assert review["final_blockers"] == ["guard_overlap"]
 
 
 def test_final_accepted_blocked_by_source_unresolved_cues(tmp_path: Path) -> None:
     """SOURCE에서 접힌 큐는 EDIT 이슈를 남기지 않는다 — 출처 목록이 유일한 증거다."""
     destination = tmp_path / "export"
-    bundle = build_plan(tmp_path, (CLIP("a1", duration_frames=500),), front_on_first_block=True)
+    bundle = build_plan(
+        tmp_path,
+        (CLIP("a1", duration_frames=500),),
+        front_on_first_block=True,
+        keep_all_on_remaining_blocks=True,
+    )
     projection = build_projection(
         bundle.document, (cue(bundle.document, "c1", Fraction(1), Fraction(2)),)
     )
@@ -970,7 +1027,11 @@ def test_final_accepted_blocked_by_edit_collapse_issues(tmp_path: Path) -> None:
 
 def test_declared_no_audio_alone_still_reaches_final(tmp_path: Path) -> None:
     """선언된 무음은 완결된 기록이다 — 단독으로는 최종 승인을 막지 않는다."""
-    package = _publish(tmp_path, unavailable_second_asset="declared_no_audio")
+    package = _publish(
+        tmp_path,
+        unavailable_second_asset="declared_no_audio",
+        keep_all_on_remaining_blocks=True,
+    )
     review = _load_json(package.review)
     assert review["final_accepted"] is True
     assert review["final_blockers"] == []

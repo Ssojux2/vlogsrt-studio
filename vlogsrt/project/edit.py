@@ -713,6 +713,8 @@ _PLAN_REVISION_DOMAIN = "vlogsrt-edit-plan-v1"
 """계획 리비전의 도메인 구분자 — 블록·후보 신원과 같은 재료라도 갈라진다."""
 
 _REVIEW_DECISION_INCONSISTENT = "decision_inconsistent"
+_REVIEW_DECISION_MISSING = "decision_missing"
+_REVIEW_DECISION_ERROR = "decision_error"
 _REVIEW_GUARD_OVERLAP = "guard_overlap"
 
 _PROJECTION_CONTEXT = ""
@@ -1222,21 +1224,25 @@ def _applied_candidate(
     guard: InstanceGuard,
     cfg: ProjectConfig,
 ) -> tuple[KeepCandidate | None, tuple[ReviewIssue, ...]]:
-    """한 블록의 판정을 후보로 바꾼다 — 모자란 판정은 keep_all, 모순은 리뷰다.
+    """한 블록의 판정을 후보로 바꾼다 — 모자란 판정도 keep_all이고 리뷰로 남는다.
 
     적용은 세 조건의 교집합이다: `status == "accepted"` 그리고 choice가 **이
     블록의** 후보 아이디 그리고 유한한 `confidence ≥ cfg.vision_apply_confidence`.
     재검사는 좁히기만 한다 — 승인을 confidence나 reason에서 다시 유도하지
     않는다(NaN이 비교를 무력화하는 P5-05b 길이다). 판정의 요청 신원은 연결
-    단계에서 모든 판정에 대해 이미 증명됐다.
+    단계에서 모든 판정에 대해 이미 증명됐다. 판정이 없거나(미분석) 오류면
+    블록은 그대로 남고 대기·실패 증거가 리뷰에 기록된다 — P6-04가 이 코드로
+    최종 수용을 막는다.
     """
     if not block_decisions:
-        return None, ()
+        return None, (_missing_decision_review(block),)
     if len(block_decisions) > 1:
         return None, (
             _inconsistent(block, f"판정이 {len(block_decisions)}개다 — 블록마다 하나여야 한다"),
         )
     decision = block_decisions[0]
+    if decision.status == "error":
+        return None, (_error_decision_review(block, decision),)
     if not math.isfinite(decision.confidence):
         return None, (
             _inconsistent(block, f"신뢰도가 유한 실수가 아니다: {decision.confidence!r}"),
@@ -1302,6 +1308,34 @@ def _inconsistent(block: EditBlock, detail: str) -> ReviewIssue:
     return ReviewIssue(
         code=_REVIEW_DECISION_INCONSISTENT,
         message=f"판정 모순 — 블록 {block.block_id}: {detail}",
+        instance_id=None,
+        source_frame=None,
+    )
+
+
+def _missing_decision_review(block: EditBlock) -> ReviewIssue:
+    """미분석 블록의 리뷰 — 판정이 없으면 대기 증거가 리뷰에 남는다.
+
+    위치는 없다: 마커 근원을 지어내지 않고, "없음"은 프레임이 아니라 판정
+    집합의 성질이다. 이 코드를 P6-04가 최종 수용 블로커로 읽는다.
+    """
+    return ReviewIssue(
+        code=_REVIEW_DECISION_MISSING,
+        message=f"판정이 없다 — 블록 {block.block_id}: 아직 분석되지 않았다",
+        instance_id=None,
+        source_frame=None,
+    )
+
+
+def _error_decision_review(block: EditBlock, decision: VisionDecision) -> ReviewIssue:
+    """오류 판정의 리뷰 — 블록은 남고 실패 사유가 그대로 실린다.
+
+    `decision.reason`이 정규화 사유("비전 응답이 계약을 어겼다 — …")를 이미
+    달고 있으므로 여기서 다시 쓰지 않는다.
+    """
+    return ReviewIssue(
+        code=_REVIEW_DECISION_ERROR,
+        message=f"판정 오류 — 블록 {block.block_id}: {decision.reason}",
         instance_id=None,
         source_frame=None,
     )
