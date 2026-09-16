@@ -24,6 +24,7 @@ from . import (
 from .config import Config, format_config, load_config
 from .evaluate import DASHBOARD_HEADER, build_dashboard_row
 from .output import parse_srt
+from .project import commands
 
 DASHBOARD_BEGIN = "<!-- vlogsrt:dashboard -->"
 DASHBOARD_END = "<!-- /vlogsrt:dashboard -->"
@@ -88,7 +89,49 @@ def build_parser() -> argparse.ArgumentParser:
     words.add_argument("action", choices=["show"])
     words.add_argument("--file", type=Path, default=None)
     _add_config_options(words)
+    _add_project_command(sub)
     return parser
+
+
+def _add_project_command(sub: argparse._SubParsersAction) -> None:
+    """파생 계층 명령 — cli.py가 보는 것은 `project.commands` 하나다(불변식 18).
+
+    `run`은 임시다: 최종 표면은 `inspect | cut | approve | caption`이고 사람 게이트
+    우회인 `run`을 두지 않는다. 비용 길이 안전장치는 없다(추정은 `inspect`의 몫).
+    """
+    project = sub.add_parser(
+        "project", help="Final Cut 프로젝트에서 러프컷 초안 자막을 만든다 (파생 계층)"
+    )
+    project_commands = project.add_subparsers(dest="project_command", required=True)
+    run = project_commands.add_parser(
+        "run",
+        help="컷 → 자막 파이프라인을 한 번에 (임시 — 최종 표면은 inspect|cut|approve|caption)",
+    )
+    run.add_argument("input", type=Path, help="Final Cut 프로젝트(.fcpxml)")
+    run.add_argument(
+        "-o",
+        "--out",
+        type=Path,
+        required=True,
+        help="산출 뿌리 — artifacts/와 package/가 형제로 생긴다",
+    )
+    run.add_argument(
+        "--media-map", type=Path, default=None, help="미디어 맵 JSON (resource_id 경로 지정)"
+    )
+    run.add_argument(
+        "--project-config",
+        type=Path,
+        default=None,
+        help="vlogsrt.project.toml 경로 — 없으면 cwd의 기본 경로",
+    )
+    run.add_argument(
+        "--dtd", type=Path, default=None, help="DTD 경로 — 주지 않으면 대조하지 않는다"
+    )
+    mode = run.add_mutually_exclusive_group()
+    mode.add_argument("--offline", action="store_true", help="픽스처만 사용 (기본값)")
+    mode.add_argument(
+        "--online", action="store_true", help="실제 API 호출. 유료. 길이 안전장치 없음"
+    )
 
 
 def _add_config_options(parser: argparse.ArgumentParser) -> None:
@@ -292,6 +335,11 @@ def cmd_keywords(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_project(args: argparse.Namespace) -> int:
+    """파생 계층 — 계산·자격증명·예외 변환은 전부 project.commands의 몫이다."""
+    return commands.project_run(args)
+
+
 _COMMANDS = {
     "run": cmd_run,
     "redo": cmd_redo,
@@ -301,6 +349,7 @@ _COMMANDS = {
     "record": cmd_record,
     "config": cmd_config,
     "keywords": cmd_keywords,
+    "project": cmd_project,
 }
 
 
