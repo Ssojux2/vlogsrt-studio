@@ -381,6 +381,64 @@ Opus 주장 12건이 뒤집혔다(확정 계획 §7). 특히 **"사람 검토가
    유료 STT/vision, 공증 앱 설치, **희미한/음악 아래 발화의 실제 검출률**은
    계속 `PENDING_HUMAN`이다.
 
+## 2026-09-16 — 프로토타입 우선, 그리고 codex 소진
+
+### 방향: 프로토타입을 먼저 돌린다
+
+사용자가 "우선 프로그램을 사용할 수 있도록 완성"을 최우선으로 지시했다. **R 페이즈(순서
+역전)와 P7 전체는 미룬다.** 현재 순서(자막 → 컷) 그대로 FCPXML 하나를 끝까지 돌려
+**실데이터에서 실제로 무엇이 깨지는지 보고** 거기서 고친다.
+
+작업 라인은 worktree `/Users/ssojux2/orca/workspaces/vlogsrt/fcp-prototype`,
+브랜치 `Ssojux2/fcp-prototype`.
+
+- `ebfa367` — `Ssojux2/fcp-p6-export`(`defe23f`)를 프로토타입 라인에 머지. **충돌 0.**
+  D34(`gemini-3.8-flash`·`GOOGLE_API_KEY`·넓힌 정규식) 보존 확인, 불변식 20/20,
+  pytest 2,442개, mypy 44파일. `ruff format --check`만 1파일 실패.
+- `83dcc57` — **PROTO-1. 거짓 성공을 막았다.** 그 전까지 export는 비전 판정이 하나도
+  없거나 전부 error여도 `final_accepted=true`를 냈다. `edit.py`가 `decision_missing`·
+  `decision_error`를 리뷰 이슈로 내고, `export.py`가 `unavailable_declared_no_audio`
+  **하나만 통과시키는 허용 목록**으로 차단한다. 차단 목록이면 새 리뷰 코드가 조용히
+  문을 여는 구조가 되므로 방향을 뒤집었다.
+  `EditPlan`에 원래 블록 수가 없으므로 `decisions == ()` 검사는 **금지**했다 — P4-04
+  모양(시그니처가 값을 안 나르면 소비자가 유도한다)이고, 블록이 정말 0개인 프로젝트도
+  정상이다.
+- **`make check`가 아직 빨갛다** — `tests/project/test_edit_captions.py` 6개. 원인은
+  제품 결함이 아니라 **장면이 "분석이 끝났다"고 거짓말하던 것**이다(500프레임 = 블록 2개에
+  판정을 안 주고 `review == ()`를 단언). PROTO-1b로 분리해 디스패치했다.
+
+남은 순서: runner 3분할(GLM) → `commands.py`+CLI(코디네이터) → e2e+RUNBOOK →
+**실물 FCPXML 실행**(사람과 함께). 마지막이 진짜 관문이다.
+
+### Xcode 라이선스 미동의로 `/usr/bin` shim이 전부 죽었다
+
+`xcode-select -p`가 `/Applications/Xcode.app/...`을 가리키는데 **그 라이선스가
+미동의**라, 그리로 넘기는 `/usr/bin` shim이 전부 exit 69로 죽는다. `git`만이 아니다 —
+`/usr/bin/python3`도 같이 죽어 있다(실측).
+
+```
+You have not agreed to the Xcode license agreements.
+```
+
+- **우회로(확인됨)**: `/Library/Developer/CommandLineTools/usr/bin/git` (2.50.1) 정상.
+- **사람이 할 일**: `sudo xcodebuild -license accept` 또는
+  `sudo xcode-select -s /Library/Developer/CommandLineTools`.
+- 그때까지 모든 워커 브리프에 절대 경로를 명시한다.
+
+### codex 소진 — 역할 재배치
+
+`gpt-5.6-sol`과 `gpt-6-astra` 두 자리가 비었다. 전문은
+`docs/orchestration/verification-protocol.md`의 2026-09-16 절.
+
+핵심만: **Sol의 자리는 Opus가 회수하고, Astra의 자리는 둘로 쪼갠다.** Astra의 직무는
+"코디네이터의 브리프가 틀렸다고 말하는 것"이라 같은 세션의 Opus가 대신할 수 없다.
+**(A)** 컨텍스트가 완전히 분리된 `claude -p --model claude-opus-5 --effort high` 워커와
+**(B)** 구현자·검증자와 또 다른 `claude-glm` 워커에게 같은 헌장을 주고, **두 보고서의
+불일치**를 신호로 쓴다. (B)가 모델 다양성을 Claude 사용량 0으로 복원한다.
+
+정직하게: 이 배치는 Sol·Astra 시절보다 **Claude 사용량을 늘린다.** 그래서 읽는 일은
+전부 GLM으로 보내고, 브리프를 짧게 쓰고, 방향 검토를 새 계약·새 타입·새 모듈에만 붙인다.
+
 ## 보존 규칙
 
 - 사용자 소유 `.env.example` 변경은 읽기·수정·스테이징·되돌리기·해시·복사하지 않는다.
