@@ -205,7 +205,7 @@ def _plan(
     return build_edit_plan(document, partition, guards, decisions, ProjectConfig())
 
 
-def _decision(block: EditBlock, choice: str) -> VisionDecision:
+def _decision(block: EditBlock, choice: str, *, status: str = "accepted") -> VisionDecision:
     """손 판정 — 요청 신원은 정본 투영에서 만든다."""
     return VisionDecision(
         block_id=block.block_id,
@@ -214,8 +214,13 @@ def _decision(block: EditBlock, choice: str) -> VisionDecision:
         reason="같은 내용의 단순 되풀이 B-roll이다",
         evidence_frame_ids=(),
         confidence=0.9,
-        status="accepted",
+        status=status,  # type: ignore[arg-type]
     )
+
+
+def _keep_all(block: EditBlock) -> VisionDecision:
+    """보존 판정 — 분석이 끝났고 결과가 통째 유지다. 리뷰에 대기 증거를 남기지 않는다."""
+    return _decision(block, "keep_all", status="keep_all")
 
 
 def _front(block: EditBlock) -> VisionDecision:
@@ -652,7 +657,16 @@ def test_unavailable_metadata_must_match_exactly(tmp_path: Path) -> None:
         _unavailable(quiet3, document, "declared_no_audio"),
     )
     locked = frozenset({quiet2.instance_id, quiet3.instance_id})
-    plan = _plan(document, media, guards, locked=locked, unavailable=records)
+    # 분석이 끝난 장면 — 부재 기록 대조가 주제이므로 건강한 클립의 블록은 보존 판정으로 완결한다.
+    partition = partition_blocks(document, media, guards, locked, records, ProjectConfig())
+    plan = _plan(
+        document,
+        media,
+        guards,
+        tuple(_keep_all(block) for block in partition.blocks),
+        locked=locked,
+        unavailable=records,
+    )
     cue = _cue("ok", (healthy.instance_id,), Fraction(1), Fraction(2))
 
     # 정확히 같은 기록은 통과하고 리뷰에 타입 코드가 순서 그대로 남는다
@@ -690,7 +704,16 @@ def test_declared_no_audio_completes_with_typed_review(tmp_path: Path) -> None:
     healthy, quiet = _clips(document)
     records = (_unavailable(quiet, document, "declared_no_audio"),)
     locked = frozenset({quiet.instance_id})
-    plan = _plan(document, media, guards, locked=locked, unavailable=records)
+    # 분석이 끝난 장면 — "완결"이 주제다. 건강한 쪽도 분석이 끝나야 타입 리뷰 하나만 남는다.
+    partition = partition_blocks(document, media, guards, locked, records, ProjectConfig())
+    plan = _plan(
+        document,
+        media,
+        guards,
+        tuple(_keep_all(block) for block in partition.blocks),
+        locked=locked,
+        unavailable=records,
+    )
     cue = _cue("ok", (healthy.instance_id,), Fraction(1), Fraction(2))
 
     result = project_edit_captions(
@@ -719,7 +742,16 @@ def test_retryable_unavailability_carries_blocking_code(tmp_path: Path) -> None:
     healthy, broken = _clips(document)
     records = (_unavailable(broken, document, "stream_unavailable"),)
     locked = frozenset({broken.instance_id})
-    plan = _plan(document, media, guards, locked=locked, unavailable=records)
+    # 분석이 끝난 장면 — 블로커 코드 하나만 남는지 보려면 건강한 쪽은 완결이어야 한다.
+    partition = partition_blocks(document, media, guards, locked, records, ProjectConfig())
+    plan = _plan(
+        document,
+        media,
+        guards,
+        tuple(_keep_all(block) for block in partition.blocks),
+        locked=locked,
+        unavailable=records,
+    )
     cue = _cue("ok", (healthy.instance_id,), Fraction(1), Fraction(2))
 
     result = project_edit_captions(
@@ -771,8 +803,10 @@ def test_plan_review_is_preserved_and_edit_issues_append(tmp_path: Path) -> None
     """계획의 구조화 리뷰는 글자 그대로·순서 그대로 먼저 온다 — EDIT 증거는 뒤에 붙는다."""
     document, media, guards = _scene25(tmp_path, (_ClipSpec("a1", duration_frames=500),))
     partition = partition_blocks(document, media, guards, frozenset(), (), ProjectConfig())
+    # 분석이 끝난 장면 — 모순 판정 하나가 계획 리뷰의 전부여야 EDIT 증거가 "뒤에 붙는"지 잰다.
     repeated = _front(partition.blocks[0])
-    plan = _plan(document, media, guards, (repeated, repeated))
+    decided = (repeated, repeated) + tuple(_keep_all(block) for block in partition.blocks[1:])
+    plan = _plan(document, media, guards, decided)
     assert [issue.code for issue in plan.review] == ["decision_inconsistent"]
     (clip,) = _clips(document)
     healthy = _cue("healthy", (clip.instance_id,), Fraction(1), Fraction(3, 2), text="온전한 마디")
@@ -799,7 +833,9 @@ def test_plan_review_is_preserved_and_edit_issues_append(tmp_path: Path) -> None
 def test_zero_cue_projection_stays_zero(tmp_path: Path) -> None:
     """큐가 없으면 EDIT도 없다 — 빈 성공이 아니라 빈 그대로다."""
     document, media, guards = _scene25(tmp_path, (_ClipSpec("a1", duration_frames=500),))
-    plan = _plan(document, media, guards)
+    # 분석이 끝난 장면 — "빈 그대로"는 완결된 계획의 성질이다. 미분석이면 빈 이유가 달라진다.
+    partition = partition_blocks(document, media, guards, frozenset(), (), ProjectConfig())
+    plan = _plan(document, media, guards, tuple(_keep_all(block) for block in partition.blocks))
 
     result = project_edit_captions(plan, _projection(document, ()))
 
@@ -862,8 +898,12 @@ def test_collapse_introduced_only_by_the_ripple(tmp_path: Path) -> None:
     media = _media(document)
     guards = _guards(document, media)
     partition = partition_blocks(document, media, guards, frozenset(), (), ProjectConfig())
+    # 분석이 끝난 장면 — "새 리뷰는 하나뿐"이 주제다. 리플 밖 블록은 보존 판정으로 완결한다.
     # 앞 블록의 뒤 후보 [160,250)만 남긴다 — 머리 [0,160)이 나가 런이 −160프레임 밀린다
-    plan = _plan(document, media, guards, (_back(partition.blocks[0]),))
+    decided = (_back(partition.blocks[0]),) + tuple(
+        _keep_all(block) for block in partition.blocks[1:]
+    )
+    plan = _plan(document, media, guards, decided)
     (clip,) = _clips(document)
     assert Fraction(-160) * FDNTSC == Fraction(-2002, 375)
     shrinks = _cue(
