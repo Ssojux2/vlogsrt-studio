@@ -4,7 +4,7 @@
 >
 > **판정 UNSOUND.** 브리프 §3-a의 처방이 `--offline`을 지키지 못하고,
 > 종료 코드 표에 필요한 값이 러너 반환 타입에 없다고 지적했다.
-> **미반영 — 코디네이터가 (B) 도착 후 함께 판정할 것.**
+> **반영 완료 — 브리프 v2 §9.**
 
 Permission deny rule (.claude/settings.json): Write(./golden/**) is not matched by file permission checks — only Edit(path) rules are. Use Edit(./golden/**) instead (Edit rules cover all file-editing tools).
 Permission deny rule (.claude/settings.json): Write(./tests/fixtures/api/**) is not matched by file permission checks — only Edit(path) rules are. Use Edit(./tests/fixtures/api/**) instead (Edit rules cover all file-editing tools).
