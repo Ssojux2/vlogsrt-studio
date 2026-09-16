@@ -470,20 +470,22 @@ numpy 없는 환경에서 쓰지도 않을 이유로 죽는다.
 참조가 둘 → `_index_by`가 **값이 같아도** 거부해 정상 입력이 죽는다.
 PROTO-2가 접는 것은 **PCM 주소**지 목록이 아니었다.
 
-### 이 머신의 `make`도 죽어 있다
+### DoD는 더 이상 `make check`가 아니다
 
-Xcode 라이선스 미동의가 `git`·`python3`만이 아니라 **`make`까지** 막는다.
-**DoD는 더 이상 `make check`가 아니다** — 각 브리프 §7의 여섯 명령을 개별로 돌린다.
+`make`도 같은 이유로 죽어 있다 — 각 브리프 §7의 여섯 명령을 개별로 돌린다.
 
 남은 순서: **PROTO-4**(블록·비전·edit·export) → **PROTO-5** `commands.py`+CLI →
 **PROTO-6** e2e+RUNBOOK → **PROTO-7 실물 FCPXML 실행**(사람과 함께).
 마지막이 진짜 관문이다. 보드는 `TASKS.md`의 PROTO 시리즈.
 
-### Xcode 라이선스 미동의로 `/usr/bin` shim이 전부 죽었다
+### Xcode 라이선스 미동의로 툴체인 shim이 죽었다
 
 `xcode-select -p`가 `/Applications/Xcode.app/...`을 가리키는데 **그 라이선스가
-미동의**라, 그리로 넘기는 `/usr/bin` shim이 전부 exit 69로 죽는다. `git`만이 아니다 —
-`/usr/bin/python3`도 같이 죽어 있다(실측).
+미동의**라, 그리로 넘기는 shim이 exit 69로 죽는다. `git`·`python3`, 그리고 **`make`까지**.
+
+**"`/usr/bin`이 전부 죽었다"는 내 진술은 너무 넓었다**(PROTO-4 검토가 반박했다) —
+`xmllint`는 정상이다(rc 0, libxml 20913). 죽은 것은 Xcode 툴체인 shim뿐이다.
+출판 경로가 `validate_xml`을 지나므로 이 구분이 중요하다.
 
 ```
 You have not agreed to the Xcode license agreements.
