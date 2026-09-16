@@ -437,9 +437,47 @@ ffmpeg 미설치가 부재 기록 N개가 아니라 한 번의 하드 실패가 
 바꾸니 `test_two_ids_over_the_same_bytes_extract_once`가 `assert 2 == 1`로 죽는다.
 레일이 우연히 초록인 게 아니라 실제로 문다.
 
-남은 순서: **PROTO-3**(전사·경계·VAD·가드) → **PROTO-4**(블록·비전·edit·export) →
-**PROTO-5** `commands.py`+CLI(코디네이터) → e2e+RUNBOOK → **실물 FCPXML 실행**(사람과 함께).
-마지막이 진짜 관문이다.
+- `7cae54d` — **PROTO-3. 러너 2/3.** `analyze_audio` → `AnalyzedAudio`.
+  부재 소스의 **합성 가드**가 여기서 난다. pytest **2477**, 불변식 20.
+
+### PROTO-3에서 배운 것 — 난간의 주소를 틀렸다
+
+**두 검토자가 같은 주장을 독립으로 반박했다**(수렴이라 판정이 필요 없었다). 내가
+*"`edit.py:415`가 불가청 인스턴스의 `success` 가드를 거부하니 `declared_no_audio`를
+`keep_all`로 잘못 찍으면 그 자리에서 터진다"* 고 썼는데 **안 터진다** —
+`_require_audible_link`는 `success`만 거부하고 docstring이 이유를 적어 놓았다.
+저장소 전체에서 `inaudible`과 `keep_all`을 구별해 다루는 자리는 **없다.**
+
+**(A)가 진짜 위험을 혼자 찾았다.** `stream_unavailable`·`pcm_unavailable`은 문서가
+`hasAudio=1`로 선언하므로 `_audible`이 그 클립을 **가청**으로 보고
+`_require_audible_link`가 불린 적도 없다 — `success`·`protected=()` 합성 가드가
+**통과하고 클립 전체가 제거 후보가 된다**(재현: 블록 2개, 500프레임).
+
+> **그래서 v1의 테스트 4는 승인 도장이 될 참이었다.** 구현자가 `declared_no_audio`
+> (진짜로 raise한다)로 red-first를 통과시키고 "여섯 번 당한 결함이 막힌다"고 보고하면
+> 정작 위험한 두 코드는 한 번도 증명되지 않는다.
+
+테스트 4를 세 줄로 쪼개 **위험한 조합이 raise하지 *않는다*는 것 자체를 못 박게** 했고,
+`__post_init__` 다섯 단언으로 A1을 **표현 불가능**하게 만들었다. 내가 단언 3·4를
+무력화하는 뮤테이션으로 직접 확인했다 — 대응 테스트 둘이 정확히 죽는다.
+
+(A)는 v1이 **자기 유비를 어긴 것**도 짚었다: ONNX 게이트가 유료 호출 **뒤**에 있어
+아티팩트가 깨진 환경에서 77분 회차 전사비를 다 치르고 죽는다. (B)는 나머지 반쪽 —
+전 리소스가 `declared_no_audio`인 프로젝트는 VAD를 안 쓰므로 세션을 무조건 만들면
+numpy 없는 환경에서 쓰지도 않을 이유로 죽는다.
+
+**둘 다 최우선으로 꼽은 것**: 같은 바이트를 가리키는 리소스 둘 → 같은 `source_id`의
+참조가 둘 → `_index_by`가 **값이 같아도** 거부해 정상 입력이 죽는다.
+PROTO-2가 접는 것은 **PCM 주소**지 목록이 아니었다.
+
+### 이 머신의 `make`도 죽어 있다
+
+Xcode 라이선스 미동의가 `git`·`python3`만이 아니라 **`make`까지** 막는다.
+**DoD는 더 이상 `make check`가 아니다** — 각 브리프 §7의 여섯 명령을 개별로 돌린다.
+
+남은 순서: **PROTO-4**(블록·비전·edit·export) → **PROTO-5** `commands.py`+CLI →
+**PROTO-6** e2e+RUNBOOK → **PROTO-7 실물 FCPXML 실행**(사람과 함께).
+마지막이 진짜 관문이다. 보드는 `TASKS.md`의 PROTO 시리즈.
 
 ### Xcode 라이선스 미동의로 `/usr/bin` shim이 전부 죽었다
 

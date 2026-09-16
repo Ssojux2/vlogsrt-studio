@@ -36,6 +36,28 @@
 | **Q2** | 온도 0.6 재검토 — 깨끗한 음성의 정확도(D28이 인정한 대가) | 📋 유료 A/B 필요 |
 | **Q3** | 2번째 모델로 글자 교정 — 규칙 1·5 개정 | 📋 계획 전 |
 
+### PROTO 시리즈 — Final Cut 프로토타입 (2026-09-16~)
+
+**현재 순서(자막 → 컷) 그대로 FCPXML 하나를 끝까지 돌린다.** 순서 역전(R)과 P7 전체는
+미뤄져 있다 — `docs/plans/2026-09-13-cut-first-and-plugin.md`.
+작업 라인은 worktree `fcp-prototype` / 브랜치 `Ssojux2/fcp-prototype`.
+
+| 태스크 | 내용 | 상태 |
+|---|---|---|
+| PROTO-1 | 거짓 성공 차단 — 판정 0개·전부 error에 `final_accepted=true`가 나오던 것 | ✅ `83dcc57` |
+| PROTO-1b | PROTO-1이 드러낸 낡은 장면 6개 (단언이 아니라 장면을 고쳤다) | ✅ `3b7337b`·`03e22ae` |
+| PROTO-2 | 러너 1/3 — 파싱·미디어·PCM·**부재의 기록** | ✅ `d8eed17` |
+| PROTO-3 | 러너 2/3 — 전사·자막 투영·경계·VAD·**합성 가드** | ✅ `7cae54d` |
+| PROTO-4 | 러너 3/3 — 블록·프레임 표본·비전·EditPlan·EDIT 자막·패키지 | 📋 방향 검토 중 |
+| PROTO-5 | `project/commands.py` + `cli.py` — 계약 §1의 유일한 CLI 예외 | 📋 |
+| PROTO-6 | 한 프로세스 e2e 테스트 + `docs/RUNBOOK.md` | 📋 |
+| PROTO-7 | **실물 FCPXML 실행 · Final Cut import · 첫 실패 기록** | 🧑 대기 |
+
+브리프는 `docs/orchestration/tasks/proto-*.md`, 방향 검토는
+`docs/orchestration/reviews/{opus,glm}-proto-*-direction.md`.
+**DoD는 `make check`가 아니다** — 이 머신의 `make`가 Xcode 라이선스로 죽어 있어
+각 브리프 §7의 여섯 명령을 개별로 돌린다.
+
 ---
 
 ## S6 — 되풀이 재전사 (D27) ✅
