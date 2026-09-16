@@ -382,13 +382,17 @@ def test_a_second_run_into_the_same_out_passes_the_managed_root_gate(
     _stub_transcriber(monkeypatch)
 
     assert cli.main(_argv(project, out, project_config)) == 1
-    cli.main(_argv(project, out, project_config))  # 같은 명령을 그대로 두 번째
+    second = cli.main(_argv(project, out, project_config))  # 같은 명령을 그대로 두 번째
     captured = capsys.readouterr()
 
     # destination을 OUT 자체로 두면 artifacts가 관리 뿌리 안에 들어가 이 검사에 걸린다.
     # 형제 배치면 통과한다 — 같은 리비전의 재게시는 배타 생성에서 실패하는데(export),
     # 그건 관리 뿌리 검사와는 다른, 의도된 닫힘이다.
     assert "관리 밖 내용" not in captured.err
+    # 재게시의 실제 모습을 버리지 않고 못 박는다: 같은 입력·같은 설정은 같은 계획
+    # 리비전을 내고 `_create_revision`의 배타 mkdir이 ValueError로 죽는다 — 종료 2.
+    assert second == 2
+    assert "리비전 디렉터리가 이미 있다" in captured.err
     assert (out / "package" / "current").is_symlink()
     assert (out / "artifacts").is_dir()
 
