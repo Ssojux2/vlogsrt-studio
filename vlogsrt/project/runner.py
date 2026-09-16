@@ -1,11 +1,13 @@
-"""러너 1/3 — 파싱 · 미디어 해석 · PCM, 그리고 부재의 기록 (PROTO-2).
+"""러너 1/3 · 2/3 — 파싱 · 미디어 해석 · PCM · 부재의 기록, 그리고 분석 (PROTO-2·3).
 
-파이프라인의 단계들은 이미 다 있다 — 이 모듈은 그 첫 조각을 잇는다: 문서를 파싱하고,
-미디어를 해석하고, 오디오를 PCM으로 저장하고, 전사할 수 없는 리소스는 **기록으로**
-남긴다. 산출물은 `speech.transcribe_unique_sources`가 이미 고정한 쌍 모양 그대로다 —
-러너가 새 모양을 발명하면 소비자의 신원 검사가 짝짓기 오류를 흘려보낸다.
+파이프라인의 단계들은 이미 다 있다 — 이 모듈은 그 조각들을 잇는다. 1/3(`prepare_audio`,
+PROTO-2)은 문서를 파싱하고, 미디어를 해석하고, 오디오를 PCM으로 저장하고, 전사할 수
+없는 리소스는 **기록으로** 남긴다. 산출물은 `speech.transcribe_unique_sources`가 이미
+고정한 쌍 모양 그대로다 — 러너가 새 모양을 발명하면 소비자의 신원 검사가 짝짓기
+오류를 흘려보낸다. 2/3(`analyze_audio`, PROTO-3)은 그 산출물을 받아 전사·자막 투영·
+경계 재전사·VAD·가드를 한 번에 흘려 **분석이 끝난 상태**를 낸다.
 
-세 가지 부재가 여기서만 난다:
+세 가지 부재가 1/3에서만 난다:
 
 - `declared_no_audio` — 리소스가 `hasAudio=0`으로 선언했다. probe하지 않는다:
   `has_audio`은 정확히 그 리소스의 선언에서만 온다(media.py 계약).
@@ -40,15 +42,41 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from vlogsrt import log
+from vlogsrt import log, transcribe
 from vlogsrt.config import Config
 from vlogsrt.preprocess import probe_audio_stream, require_ffmpeg
+from vlogsrt.project.boundary import (
+    BoundaryPlan,
+    BoundaryProjection,
+    BoundaryTranscript,
+    LogicalSlice,
+    UnavailableInstance,
+    logical_slices,
+    plan_boundaries,
+    project_boundaries,
+    transcribe_boundaries,
+)
+from vlogsrt.project.captions import SourceCaptionSet, project_source_captions
 from vlogsrt.project.config import ProjectConfig
 from vlogsrt.project.fcpxml import parse_project
 from vlogsrt.project.media import MediaOverride, ResolvedMedia, resolve_media
-from vlogsrt.project.models import ProjectDocument
-from vlogsrt.project.pcm import AudioPolicy, build_reference
-from vlogsrt.project.speech import AudioSourceInput, UnavailableSourceAudio
+from vlogsrt.project.models import ClipInstance, ProjectDocument
+from vlogsrt.project.pcm import AudioPolicy, PcmReference, build_reference
+from vlogsrt.project.speech import (
+    AudioSourceInput,
+    SourceAnalysis,
+    SourceTrace,
+    UnavailableSourceAudio,
+    transcribe_unique_sources,
+)
+from vlogsrt.project.vad.guard import (
+    InstanceGuard,
+    SourceGuard,
+    build_source_guard,
+    project_guard,
+)
+from vlogsrt.project.vad.inference import VadResult, infer_vad
+from vlogsrt.project.vad.runtime import bundled_artifact, create_cpu_session
 
 _PCM_DIR = "pcm"
 """PCM 논리 주소의 네임스페이스 — source·boundary가 쓰는 애셋 디렉터리와 갈라진다."""
@@ -242,4 +270,358 @@ def _log_summary(result: PreparedAudio) -> None:
     log.info(
         f"오디오 준비 완료: 리소스 {len(result.audio_inputs)}개 — "
         f"PCM {len(result.audio_inputs) - unavailable}, 부재 {unavailable}"
+    )
+
+
+# ═══════════════════════════════════════════════════════════════
+#  PROTO-3 — 전사 · 자막 투영 · 경계 · VAD · 가드 (러너 2/3)
+# ═══════════════════════════════════════════════════════════════
+
+
+_UNAVAILABLE_GUARD_STATUS: Mapping[str, Literal["inaudible", "keep_all"]] = {
+    "declared_no_audio": "inaudible",
+    "stream_unavailable": "keep_all",
+    "pcm_unavailable": "keep_all",
+}
+"""부재 사유 → 합성 가드 상태. 선언된 무음은 가청이 아니고, 나머지 둘은 들을 수
+있었는데 못 들은 **실패**다 — 무음이 아니라 실패 닫힘(keep_all)으로 남는다.
+하류(`edit._require_audible_link`)는 success만 거부하고 이 대응을 검사하지
+않으므로, 이 표를 어기는 짝을 잡는 곳은 `AnalyzedAudio.__post_init__`뿐이다."""
+
+
+@dataclass(frozen=True, slots=True)
+class AnalyzedAudio:
+    """분석이 끝난 상태 — PROTO-4(`partition_blocks` 이후)가 그대로 먹는 산출물.
+
+    frozen이지만 `PreparedAudio`와 같은 이유로 깊은 불변은 문서로만 선을 긋는다.
+    `instance_guards`는 **문서의 클립 인스턴스 순서 그대로, 인스턴스마다 정확히
+    하나**다 — `project_guard`가 내는 소스별 순서를 여기서 다시 세운다. 잠금·부재는
+    `BoundaryProjection`이 내놓는 것을 그대로 옮긴다(다시 계산하지 않는다).
+    `source_guards`를 버리면 `vad_without_text`의 실제 프레임 수와 보호 비율은
+    재유도가 아니라 복원 불가다(D35의 검토 상태). `transcripts`를 여기 실지 않으면
+    디스크 캐시 재독으로만 회수된다.
+    """
+
+    prepared: PreparedAudio
+    analyses: tuple[SourceAnalysis, ...]
+    source_captions: SourceCaptionSet
+    slices: tuple[LogicalSlice, ...]
+    boundary_plan: BoundaryPlan
+    boundary: BoundaryProjection
+    vad_by_source: Mapping[str, VadResult]
+    instance_guards: tuple[InstanceGuard, ...]
+    locked_instance_ids: frozenset[str]
+    unavailable_instances: tuple[UnavailableInstance, ...]
+    source_guards: tuple[SourceGuard, ...]
+    transcripts: tuple[BoundaryTranscript, ...]
+
+    def __post_init__(self) -> None:
+        """규칙 9를 타입으로 못 깨게 한다 — 하류에 없는 난간을 여기서 만든다.
+
+        `partition_blocks`는 부재 인스턴스의 가드 상태 대응을 검사하지 않는다:
+        keep_all·inaudible 오기는 조용히 통과하고(B3), success에 잠금·부재까지
+        빼면 클립 전체가 제거 후보가 된다(A1). 그래서 이 다섯 단언이 유일한 난간이다.
+        """
+        clips = _document_clips(self.prepared.document)
+        self._require_guard_count(clips)
+        self._require_guard_order(clips)
+        self._require_unavailable_status(clips)
+        self._require_unavailable_locked(clips)
+        self._require_vad_coverage()
+
+    def _require_guard_count(self, clips: tuple[ClipInstance, ...]) -> None:
+        """단언 1 — 인스턴스마다 가드가 정확히 하나다."""
+        if len(self.instance_guards) != len(clips):
+            raise ValueError(
+                f"instance_guards({len(self.instance_guards)})가 문서의 클립 인스턴스"
+                f" 수({len(clips)})와 다르다 — 없음이 보호 없음이 되면 안 된다"
+            )
+
+    def _require_guard_order(self, clips: tuple[ClipInstance, ...]) -> None:
+        """단언 2 — 순서·신원이 문서 순서와 정확히 일치한다."""
+        expected = tuple(clip.instance_id for clip in clips)
+        actual = tuple(guard.instance_id for guard in self.instance_guards)
+        if actual != expected:
+            raise ValueError(
+                f"instance_guards의 순서·신원이 문서와 어긋난다: {actual} != {expected}"
+            )
+
+    def _require_unavailable_status(self, clips: tuple[ClipInstance, ...]) -> None:
+        """단언 3 — 부재 리소스의 인스턴스는 §2 표의 상태 그대로다(B3 오기를 잡는 유일한 자리)."""
+        by_id = {guard.instance_id: guard for guard in self.instance_guards}
+        for clip in clips:
+            second = self.prepared.inputs_by_resource[clip.resource_scoped_id][1]
+            if not isinstance(second, UnavailableSourceAudio):
+                continue
+            expected = _UNAVAILABLE_GUARD_STATUS[second.reason_code]
+            actual = by_id[clip.instance_id].status
+            if actual != expected:
+                raise ValueError(
+                    f"부재 인스턴스의 guard 상태가 대응표와 다르다: {clip.element_path} —"
+                    f" {second.reason_code}는 {expected!r}인데 {actual!r}다"
+                    " (success는 어떤 부재에도 올 수 없다)"
+                )
+
+    def _require_unavailable_locked(self, clips: tuple[ClipInstance, ...]) -> None:
+        """단언 4 — 부재 인스턴스는 잠금·부재 기록과 함께 온다(A1을 표현 불가능하게 한다)."""
+        recorded = {record.instance_id for record in self.unavailable_instances}
+        for clip in clips:
+            second = self.prepared.inputs_by_resource[clip.resource_scoped_id][1]
+            if not isinstance(second, UnavailableSourceAudio):
+                continue
+            if clip.instance_id not in self.locked_instance_ids or (
+                clip.instance_id not in recorded
+            ):
+                raise ValueError(
+                    f"부재 인스턴스가 잠금·부재 기록과 함께 오지 않았다: {clip.element_path}"
+                    " — 잠금·부재 쌍이 빈 success 가드의 제거 권한을 막는 유일한 난간이다"
+                )
+
+    def _require_vad_coverage(self) -> None:
+        """단언 5 — VAD 키 집합 == PCM 참조를 가진 소스 집합."""
+        pcm_sources = frozenset(
+            second.source_id
+            for _media, second in self.prepared.audio_inputs
+            if isinstance(second, PcmReference)
+        )
+        if frozenset(self.vad_by_source) != pcm_sources:
+            raise ValueError(
+                f"vad_by_source의 키 {sorted(self.vad_by_source)}가 PCM 참조를 가진 소스"
+                f" {sorted(pcm_sources)}와 다르다 — '키가 없다'는 '검사할 것이 없다'가 아니다"
+            )
+
+
+def analyze_audio(
+    prepared: PreparedAudio,
+    *,
+    transcriber: transcribe.Transcriber,
+    session: object | None = None,
+) -> AnalyzedAudio:
+    """오디오 준비 산출물을 분석이 끝난 상태로 만든다 — 유료 호출은 게이트 뒤에 있다.
+
+    전사기는 주입받는다(openai 경계는 `vlogsrt/transcribe.py`뿐이다 — 계약 §4).
+    ONNX 세션도 주입받을 수 있고, 아니면 참조가 하나라도 있을 때만 게이트에서
+    만든다. `build_source_guard`의 `repairs`는 `()`다 — 이 단계가 손에 쥔
+    경계 재전사 기록은 **남긴 범위 국소 시계**라 시계가 다르다(guard.py:168-174).
+    """
+    references = _unique_references(prepared.audio_inputs)
+    vad_session = _vad_session(prepared, references, session)
+    analyses = transcribe_unique_sources(
+        prepared.audio_inputs, prepared.config, transcriber, prepared.artifact_dir
+    )
+    traces = tuple(item for item in analyses if isinstance(item, SourceTrace))
+    source_captions = project_source_captions(prepared.document, prepared.media, analyses)
+    slices = logical_slices(prepared.document, prepared.media)
+    boundary_plan, transcripts, boundary = _boundary_stage(
+        prepared, references, traces, source_captions, slices, transcriber
+    )
+    vad_by_source = _infer_vads(prepared, references, vad_session)
+    source_guards, by_instance = _projected_guards(
+        prepared, references, traces, slices, boundary, vad_by_source
+    )
+    _add_all(by_instance, _unavailable_guards(prepared))
+    result = AnalyzedAudio(
+        prepared=prepared,
+        analyses=analyses,
+        source_captions=source_captions,
+        slices=slices,
+        boundary_plan=boundary_plan,
+        boundary=boundary,
+        vad_by_source=vad_by_source,
+        instance_guards=_document_order_guards(prepared.document, by_instance),
+        locked_instance_ids=boundary.locked_instance_ids,
+        unavailable_instances=boundary.unavailable_instances,
+        source_guards=source_guards,
+        transcripts=transcripts,
+    )
+    _log_analysis(result)
+    return result
+
+
+def _boundary_stage(
+    prepared: PreparedAudio,
+    references: Sequence[PcmReference],
+    traces: tuple[SourceTrace, ...],
+    source_captions: SourceCaptionSet,
+    slices: tuple[LogicalSlice, ...],
+    transcriber: transcribe.Transcriber,
+) -> tuple[BoundaryPlan, tuple[BoundaryTranscript, ...], BoundaryProjection]:
+    """경계 계획 → 재전사 → 투영 — 잠금·부재의 정본은 BoundaryProjection이 내놓는다."""
+    plan = plan_boundaries(slices, source_captions, traces, references)
+    transcripts = transcribe_boundaries(
+        plan.requests, references, traces, prepared.config, transcriber, prepared.artifact_dir
+    )
+    return plan, transcripts, project_boundaries(plan, transcripts, source_captions, traces)
+
+
+def _infer_vads(
+    prepared: PreparedAudio, references: Sequence[PcmReference], session: object
+) -> dict[str, VadResult]:
+    """소스마다 VAD를 돈다 — 실패한 결과도 그대로 남긴다(가드가 keep_all로 닫는다)."""
+    return {
+        reference.source_id: infer_vad(
+            reference, reference.source_id, prepared.project_config, session
+        )
+        for reference in references
+    }
+
+
+def _unique_references(inputs: Sequence[AudioSourceInput]) -> tuple[PcmReference, ...]:
+    """PCM 참조를 source_id로 유일화한다 — 문서 리소스마다 한 칸씩이므로 같은 내용이 여러 번 온다.
+
+    `prepared.audio_inputs`는 문서 리소스마다 한 쌍이고, PROTO-2가 접는 것은 PCM
+    **주소**지 목록이 아니다. 서로 다른 xml_id가 같은 바이트를 가리키면 같은
+    source_id의 참조가 둘 오는데, `plan_boundaries`·`transcribe_boundaries`의
+    `_index_by`는 같은 값이어도 신원이 두 번 나오면 거부한다 — 유일화가 없으면
+    정상 입력이 거기서 죽는다. 트레이스는 `transcribe_unique_sources`가 이미
+    정규화해 주지만 참조를 정규화해 주는 곳은 없다.
+    """
+    by_source: dict[str, PcmReference] = {}
+    references: list[PcmReference] = []
+    for _media, second in inputs:
+        if isinstance(second, PcmReference) and second.source_id not in by_source:
+            by_source[second.source_id] = second
+            references.append(second)
+    return tuple(references)
+
+
+def _vad_session(
+    prepared: PreparedAudio, references: Sequence[PcmReference], injected: object | None
+) -> object | None:
+    """ONNX 게이트 — 유료 호출 **앞**에서 한 번만 만든다(해시 검증 하나라 공짜다).
+
+    아티팩트가 깨진 환경에서 세션을 전사 뒤에 만들면 77분 회차 전사비를 다 치르고
+    나서 `VadUnavailable`로 죽는다 — `require_ffmpeg`를 자원 루프 앞으로 뺀 것과
+    같은 논리다. 참조가 하나도 없으면(전 리소스가 `declared_no_audio`) VAD를 한 번도
+    안 쓰므로 묻지도 않는다: extra 없는 환경에서 쓰지도 않을 이유로 죽지 않는다.
+    환경 실패는 소스마다 부재 기록 N개로 번역하지 않고 그대로 올라온다.
+    """
+    if injected is not None:
+        return injected
+    if not references:
+        return None
+    return create_cpu_session(bundled_artifact(prepared.project_config))
+
+
+def _projected_guards(
+    prepared: PreparedAudio,
+    references: Sequence[PcmReference],
+    traces: Sequence[SourceTrace],
+    slices: Sequence[LogicalSlice],
+    boundary: BoundaryProjection,
+    vad_by_source: Mapping[str, VadResult],
+) -> tuple[tuple[SourceGuard, ...], dict[str, InstanceGuard]]:
+    """참조마다 소스 가드를 만들고 인스턴스로 내린다 — 합성 가드는 별도다(아래)."""
+    traces_by_source = _traces_by_source(traces)
+    slices_by_source: dict[str, list[LogicalSlice]] = {}
+    for slice_ in slices:
+        slices_by_source.setdefault(slice_.source_id, []).append(slice_)
+    by_instance: dict[str, InstanceGuard] = {}
+    source_guards: list[SourceGuard] = []
+    for reference in references:
+        trace = traces_by_source.get(reference.source_id)
+        if trace is None:
+            raise ValueError(
+                f"소스의 전사 트레이스가 없다: source_id={reference.source_id!r}"
+                " — 가드를 지어내지 않는다"
+            )
+        guard = build_source_guard(
+            trace,
+            reference,
+            vad_by_source[reference.source_id],
+            boundary,
+            (),
+            prepared.project_config,
+        )
+        source_guards.append(guard)
+        _add_all(
+            by_instance,
+            project_guard(
+                guard,
+                reference,
+                slices_by_source.get(reference.source_id, ()),
+                prepared.document.frame_duration,
+            ),
+        )
+    return tuple(source_guards), by_instance
+
+
+def _unavailable_guards(prepared: PreparedAudio) -> tuple[InstanceGuard, ...]:
+    """부재 소스의 인스턴스마다 합성 가드 — 문서 클립 순서 그대로.
+
+    `protected_frames`는 `()`지만 그것이 안전한 이유는 `status`가 막기 때문이다
+    (`edit.py`: keep_all·inaudible은 빈 protected여도 제거 권한이 없다).
+    **`status="success"`인 합성 가드는 어떤 이유로도 만들지 않는다** — 소리를 못
+    들은 클립이 "보호할 것이 없는 클립"이 되는, 이 저장소에서 여섯 번 재발한 결함이다.
+    """
+    guards: list[InstanceGuard] = []
+    for clip in _document_clips(prepared.document):
+        second = prepared.inputs_by_resource[clip.resource_scoped_id][1]
+        if not isinstance(second, UnavailableSourceAudio):
+            continue
+        guards.append(
+            InstanceGuard(
+                instance_id=clip.instance_id,
+                source_id=second.source_id,
+                status=_UNAVAILABLE_GUARD_STATUS[second.reason_code],
+                protected_frames=(),
+                review=(f"소스 오디오 부재({second.reason_code}) — {second.reason}",),
+            )
+        )
+    return tuple(guards)
+
+
+def _document_order_guards(
+    document: ProjectDocument, by_instance: Mapping[str, InstanceGuard]
+) -> tuple[InstanceGuard, ...]:
+    """가드를 문서의 클립 순서로 재배열한다 — 소스별로 뭉친 순서가 아니라.
+
+    `project_guard`는 슬라이스 × 인스턴스 순서로 내놓는다. 소스마다 부른 결과를
+    이어 붙이면 소스별로 뭉친 순서이고, `_require_guard_linkage`는 순서를 보지
+    않으므로 하류는 통과한다 — 문서 순서를 지키는 곳은 여기뿐이다.
+    """
+    ordered: list[InstanceGuard] = []
+    for clip in _document_clips(document):
+        guard = by_instance.get(clip.instance_id)
+        if guard is None:
+            raise ValueError(
+                f"클립 인스턴스에 guard가 없다: {clip.element_path}"
+                " — 없음이 보호 없음이 되면 안 된다"
+            )
+        ordered.append(guard)
+    return tuple(ordered)
+
+
+def _document_clips(document: ProjectDocument) -> tuple[ClipInstance, ...]:
+    """스토리라인의 클립 순서 — 갭은 가드와 무관하다."""
+    return tuple(item for item in document.storyline if isinstance(item, ClipInstance))
+
+
+def _traces_by_source(traces: Sequence[SourceTrace]) -> dict[str, SourceTrace]:
+    """트레이스를 source_id로 묶는다 — 중복은 곧 모호함이므로 그 자리에서 거부한다."""
+    indexed: dict[str, SourceTrace] = {}
+    for trace in traces:
+        if trace.source_id in indexed:
+            raise ValueError(f"소스 하나에 트레이스가 둘 이상이다: {trace.source_id!r}")
+        indexed[trace.source_id] = trace
+    return indexed
+
+
+def _add_all(by_instance: dict[str, InstanceGuard], guards: Sequence[InstanceGuard]) -> None:
+    """가드를 인스턴스로 무는다 — 둘 이상이면 어느 쪽이 진짜 보호인지 말할 수 없다."""
+    for guard in guards:
+        if guard.instance_id in by_instance:
+            raise ValueError(
+                f"인스턴스에 guard가 둘 이상 있다: {guard.instance_id!r} — 정확히 하나여야 한다"
+            )
+        by_instance[guard.instance_id] = guard
+
+
+def _log_analysis(result: AnalyzedAudio) -> None:
+    """단계의 결산 — 부재·VAD 실패도 세어 보고한다(있는 것만 세면 조용한 손실이 된다)."""
+    vad_failed = sum(1 for vad in result.vad_by_source.values() if vad.status != "success")
+    log.info(
+        f"분석 완료: 인스턴스 가드 {len(result.instance_guards)}개 — "
+        f"소스 가드 {len(result.source_guards)}, 경계 재전사 {len(result.transcripts)}, "
+        f"부재 인스턴스 {len(result.unavailable_instances)}, VAD 실패 {vad_failed}"
     )
