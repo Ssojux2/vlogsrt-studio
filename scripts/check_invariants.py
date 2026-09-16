@@ -395,6 +395,13 @@ VERIFY_MUST_NOT_IMPORT = ("refine", "output", "layout", "polish")
 # 재전사는 **골격이 조립되기 전**에 끝난다. 조판 계층을 알면 그 선이 무너진다(D27).
 REPAIR_MUST_NOT_IMPORT = ("refine", "output", "layout", "polish", "verify")
 
+# 글자 교정은 **계획만 세우는 순수 함수**다(D37). 응답 형태·호출·조판·재전사를 알면
+# 교체 판정이 다른 계층의 행동에 기대게 된다 — 입력은 값으로만 받는다.
+RETEXT_MUST_NOT_IMPORT = (
+    "transcribe", "preprocess", "verify", "refine", "output", "layout", "repair", "polish",
+    "openai", "subprocess",
+)  # fmt: skip
+
 # 조판 이후 계층이 되풀이 판정을 알면, 판정이 파이프라인 아래로 새어나간다(D27).
 DOWNSTREAM_MUST_NOT_IMPORT = {
     "refine.py": ("repair", "repetition"),
@@ -478,6 +485,20 @@ def check_repair_stays_upstream() -> list[str]:
             for leaked in _imports(target.read_text(encoding="utf-8"), forbidden)
         ]
     return failures
+
+
+def check_retext_stays_pure() -> list[str]:
+    """D37 — `retext.py`는 세그먼트·조각 글자·repairs를 **값으로** 받아 계획만 돌려준다.
+
+    파일이 사라지면 조용히 통과하지 않는다 — 교정 권한이 어디로 옮겨 갔는지 모르게 된다.
+    """
+    path = PACKAGE / "retext.py"
+    if not path.exists():
+        return ["vlogsrt/retext.py: 글자 교정 계층이 사라졌다 (D37)"]
+    return [
+        f"retext.py: {name}을 import한다 — 교정 계획이 순수 함수가 아니게 된다 (D37)"
+        for name in _imports(path.read_text(encoding="utf-8"), RETEXT_MUST_NOT_IMPORT)
+    ]
 
 
 def check_edit_layer_ignores_audio() -> list[str]:
@@ -1050,6 +1071,7 @@ CHECKS = (
     ("판정 계층 부활 금지", check_inspection_stays_dead),
     ("검증은 출력을 못 건드린다", check_verify_cannot_touch_output),
     ("재전사는 전사 단계에 머문다", check_repair_stays_upstream),
+    ("글자 교정은 순수하다", check_retext_stays_pure),
     ("신뢰도 메타 보존", check_confidence_meta_survives),
     ("전사 호출 1개", check_one_transcription_call),
     ("모델 이름 비하드코딩", check_no_hardcoded_model),

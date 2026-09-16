@@ -1,7 +1,8 @@
-"""파이프라인 조립 — 오디오 추출 → 조각 나누기 → 전사 → 정제 → SRT.
+"""파이프라인 조립 — 오디오 추출 → 조각 나누기 → 전사 → 글자 교정 → 정제 → SRT.
 
 각 단계는 순수 함수 모듈에 있고, 여기서는 순서와 입출력만 다룬다.
 시각은 전부 whisper 세그먼트에서 오고, 조각 오프셋을 더한 것이 전부다(D25).
+글자는 게이트를 통과한 세그먼트만 두 번째 모델의 것으로 바뀐다(D37).
 """
 
 from __future__ import annotations
@@ -10,12 +11,30 @@ import hashlib
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from . import env, log, preprocess, refine, repair, transcribe, verify
+from . import env, log, preprocess, refine, repair, retext, transcribe, verify
 from .config import Config
-from .models import Chunk, ChunkMark, Cue, Repair, Segment, Trace
+from .models import (
+    REPAIR_COLLAPSED,
+    RETEXT_APPLIED,
+    Chunk,
+    ChunkMark,
+    Cue,
+    Repair,
+    RetextRecord,
+    Segment,
+    Trace,
+)
 from .output import save_srt
-from .transcribe import VERIFY_KIND, LiveTranscriber, Transcriber, TranscriptionJob
+from .transcribe import (
+    VERIFY_KIND,
+    ChunkResponse,
+    LiveTranscriber,
+    Transcriber,
+    TranscriptionJob,
+)
 from .verify import Verification
+
+RETEXTED = "retext"  # 글자를 두 번째 모델의 것으로 갈아낀 큐(D37)
 
 
 @dataclass(frozen=True, slots=True)
@@ -158,7 +177,11 @@ def settle_spine(
 
 
 def spine_to_cues(spine: list[Segment]) -> list[Cue]:
-    """골격 하나에 큐 하나. 시각도 텍스트도 세그먼트 그대로다(규칙 1)."""
+    """골격 하나에 큐 하나. 시각도 텍스트도 세그먼트 그대로다(규칙 1).
+
+    **whisper 글자 전용이다.** 파생 계층은 이 함수만 부르므로 gpt 글자가 닿지 않는다(D37) —
+    글자 교정은 엔진의 `apply_retext`가 따로 얹는다.
+    """
     return [
         Cue(
             start=segment.start,
@@ -169,6 +192,24 @@ def spine_to_cues(spine: list[Segment]) -> list[Cue]:
         )
         for position, segment in enumerate(spine)
     ]
+
+
+def apply_retext(cues: list[Cue], record: RetextRecord) -> list[Cue]:
+    """교정 계획의 글자만 얹는다. **시각·`seg_ids`·큐 수는 그대로다**(D37).
+
+    `spine_to_cues` 직후의 큐(세그먼트 하나에 큐 하나)에만 쓴다. 계획에 없는 세그먼트는
+    whisper 글자가 그대로 나간다.
+    """
+    texts = dict(record.texts)
+    applied: list[Cue] = []
+    for cue in cues:
+        (seg_id,) = cue.seg_ids
+        text = texts.get(seg_id)
+        if text is None or text == cue.text:
+            applied.append(cue)
+            continue
+        applied.append(cue.with_text(text).with_flag(RETEXTED))
+    return applied
 
 
 # ─────────────────────────────────────────────────────────────
@@ -201,7 +242,31 @@ def run(
         cfg = replace(cfg, repair_enabled=False)
 
     settled = _make_spine(prepared, cfg, transcriber)
-    cues = _make_cues(settled.spine, cfg, prepared.duration)
+    # **글자 교정이 켜져 있으면 두 번째 모델은 SRT 앞에서 부른다** — 검증 플래그와 무관하게.
+    # 검증을 끄면 교정이 조용히 꺼져 SRT가 검증 플래그에 따라 달라지던 길을 막는다(D37).
+    second = _SecondModel.ask(transcriber, prepared, cfg) if cfg.retext_enabled else None
+    record = _plan_retext(settled, second, prepared, cfg)
+    result = _publish(video, prepared, cfg, settled, record, outdir, artifacts=artifacts)
+    if not verify_with_second_model:
+        return result
+    # SRT는 이미 디스크에 있다. 검증은 여기서부터 무슨 일이 나도 그 파일을 못 건드린다(규칙 5).
+    # 교정이 이미 받은 응답이 있으면 다시 부르지 않는다 — 같은 오디오에 두 번 결제하지 않는다.
+    second = second or _SecondModel.ask(transcriber, prepared, cfg)
+    return replace(result, verification=report_verification(result, prepared, cfg, second))
+
+
+def _publish(
+    video: Path,
+    prepared: Prepared,
+    cfg: Config,
+    settled: repair.Settled,
+    record: RetextRecord,
+    outdir: Path,
+    *,
+    artifacts: bool,
+) -> RunResult:
+    """골격 → 큐 → SRT 저장. 여기서 자막은 끝난다 — 뒤에 오는 것은 표시뿐이다."""
+    cues = _make_cues(settled.spine, cfg, prepared.duration, record)
     trace = Trace(
         source=str(video),
         duration=prepared.duration,
@@ -210,15 +275,27 @@ def run(
         config_snapshot=cfg.to_dict(),
         repairs=settled.repairs,
         chunks=tuple(ChunkMark.of(chunk) for chunk in prepared.chunks),
+        retext=record,
     )
-    result = replace(
-        _finish(trace, cues, outdir, prepared.stem, artifacts=artifacts),
-        repairs=settled.repairs,
-    )
-    if not verify_with_second_model:
-        return result
-    # SRT는 이미 디스크에 있다. 검증은 여기서부터 무슨 일이 나도 그 파일을 못 건드린다(규칙 5).
-    return replace(result, verification=report_verification(result, prepared, cfg, transcriber))
+    finished = _finish(trace, cues, outdir, prepared.stem, artifacts=artifacts)
+    return replace(finished, repairs=settled.repairs)
+
+
+@dataclass(frozen=True, slots=True)
+class _SecondModel:
+    """두 번째 모델 응답 한 벌. 교정과 검증이 같이 쓴다. 못 받았으면 `failure`에 이유가 있다."""
+
+    responses: tuple[ChunkResponse, ...] = ()
+    failure: str = ""
+
+    @staticmethod
+    def ask(transcriber: Transcriber, prepared: Prepared, cfg: Config) -> _SecondModel:
+        """실패는 SRT를 막지 않는다 — 삼키지 않고 이유를 들고 나간다(규칙 5)."""
+        try:
+            responses = transcriber.transcribe(build_job(prepared, VERIFY_KIND), cfg)
+        except Exception as exc:  # noqa: BLE001 - 두 번째 모델이 죽어도 whisper 자막은 나온다
+            return _SecondModel(failure=f"{exc.__class__.__name__}: {exc}")
+        return _SecondModel(responses=tuple(responses))
 
 
 def _make_spine(prepared: Prepared, cfg: Config, transcriber: Transcriber) -> repair.Settled:
@@ -230,8 +307,51 @@ def _make_spine(prepared: Prepared, cfg: Config, transcriber: Transcriber) -> re
     return settled
 
 
-def _make_cues(spine: tuple[Segment, ...], cfg: Config, duration: float) -> list[Cue]:
-    cues = refine.refine(spine_to_cues(list(spine)), cfg, duration)
+def _plan_retext(
+    settled: repair.Settled, second: _SecondModel | None, prepared: Prepared, cfg: Config
+) -> RetextRecord:
+    if second is None:
+        return retext.switched_off()
+    if second.failure:
+        log.warn(f"글자 교정을 건너뛴다 — 자막은 whisper 글자로 나간다: {second.failure}")
+        return retext.unavailable(second.failure)
+    chunks = [
+        retext.ChunkText(response.index, response.offset, transcribe.parse_text(response.payload))
+        for response in second.responses
+    ]
+    record = retext.plan(settled.spine, chunks, prepared.duration, settled.repairs, cfg)
+    report_retext(record)
+    return record
+
+
+def report_retext(record: RetextRecord) -> None:
+    """**교정하지 못한 자리를 조용히 두지 않는다.** 되풀이 제외는 전부 WARN이다(규칙 9)."""
+    if record.status != RETEXT_APPLIED:
+        log.warn(f"글자 교정: {record.status} — 자막은 whisper 글자로 나간다. {record.error}")
+        return
+    passed = sum(1 for chunk in record.chunks if chunk.accepted)
+    missing = sum(item.chars for item in record.unplaced)
+    log.info(
+        f"글자 교정: 조각 {len(record.chunks)}개 중 {passed}개 통과"
+        f" · 교체 {len(record.texts)} · 불통과 {len(record.rejections)}"
+        f" · 되풀이 제외 {sum(len(item.seg_ids) for item in record.excluded)}"
+        f" · 자리 없는 gpt 글자 {missing}자 (출력하지 않는다)"
+    )
+    for item in record.excluded:
+        where = f"{item.span[0]:.0f}~{item.span[1]:.0f}초"
+        kind = "접힌" if item.outcome == REPAIR_COLLAPSED else "유지된"
+        log.warn(
+            f"  {where} {kind} 되풀이는 교정하지 않는다 — 그 자리에 gpt 글자 {item.gpt_chars}자."
+            f" 실제 발화가 있었을 수 있다."
+        )
+        if item.span_missing:
+            log.warn(f"  {where} 재전사 구간이 기록되지 않아 되풀이 구간으로 대신 찾았다.")
+
+
+def _make_cues(
+    spine: tuple[Segment, ...], cfg: Config, duration: float, record: RetextRecord
+) -> list[Cue]:
+    cues = refine.refine(apply_retext(spine_to_cues(list(spine)), record), cfg, duration)
     if not cues:
         raise RuntimeError("자막 큐가 하나도 남지 않았습니다. 오디오를 확인하세요.")
     log.info(f"큐 {len(cues)}개")
@@ -253,16 +373,23 @@ def _finish(
 
 
 def report_verification(
-    result: RunResult, prepared: Prepared, cfg: Config, transcriber: Transcriber
+    result: RunResult, prepared: Prepared, cfg: Config, second: _SecondModel
 ) -> Verification | None:
-    """두 번째 모델로 같은 오디오를 받아 대조하고 **표시만 한다**(규칙 5).
+    """두 번째 모델과 **출력 큐를** 대조하고 **표시만 한다**(규칙 5).
 
     실패해도 SRT를 막지 않는다 — 픽스처가 없거나 계정에 모델이 없거나 API가 죽어도
     자막은 이미 나와 있다. 그래서 여기서만은 예외를 삼키되, 조용히는 아니다.
+
+    교정이 켜져 있으면 갈아낀 큐는 자명하게 일치한다. **whisper로 남은 큐의 불일치가 곧
+    교정하지 못한 자리다.** 두 모델의 원래 차이는 `trace.retext`가 담는다(D37).
     """
+    if second.failure:
+        log.warn(f"검증을 건너뛴다: {second.failure}")
+        return None
     try:
-        responses = transcriber.transcribe(build_job(prepared, VERIFY_KIND), cfg)
-        report = verify.verify(result.cues, result.trace.spine, responses, prepared.duration, cfg)
+        report = verify.verify(
+            result.cues, result.trace.spine, second.responses, prepared.duration, cfg
+        )
     except Exception as exc:  # noqa: BLE001 - 검증 실패가 자막을 막으면 안 된다
         log.warn(f"검증을 건너뛴다: {exc}")
         return None
@@ -355,12 +482,19 @@ def _record_one(
 
 
 def redo(trace_path: Path, cfg: Config, outdir: Path) -> RunResult:
-    """API 없이 골격에서 다시 조판한다. 임계값을 바꿔가며 재측정하는 용도다."""
+    """API 없이 골격에서 다시 조판한다. 임계값을 바꿔가며 재측정하는 용도다.
+
+    글자 교정은 **기록된 매핑을 그대로** 다시 얹는다. `retext_*` 임계값을 바꿔 재계획하려면
+    두 번째 모델 응답이 필요하므로 `run`을 다시 돌려야 한다.
+    """
     trace = Trace.load(trace_path)
     if not trace.spine:
         raise RuntimeError(f"{trace_path}에 골격이 없습니다. `vlogsrt run`을 먼저 실행하세요.")
     stem = Path(trace.source).stem
-    cues = refine.refine(spine_to_cues(list(trace.spine)), cfg, trace.duration)
+    # 교정 매핑도 골격처럼 기록된 증거다. 다시 얹지 않으면 gpt 글자가 조용히 되돌아간다(D37).
+    cues = refine.refine(
+        apply_retext(spine_to_cues(list(trace.spine)), trace.retext), cfg, trace.duration
+    )
     updated = replace(trace, cues=tuple(cues), config_snapshot=cfg.to_dict())
     # 재전사는 API가 필요하다. 골격에 이미 반영돼 있으니 기록만 그대로 들고 간다.
     return replace(_finish(updated, cues, outdir, stem), repairs=trace.repairs)

@@ -44,12 +44,20 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument(
         "--no-verify",
         action="store_true",
-        help="교차 확인을 끈다. 기본은 켜져 있고, 표시만 하므로 자막은 안 바뀐다.",
+        help=(
+            "교차 확인을 끈다. 표시만 하므로 자막은 안 바뀐다. "
+            "글자 교정이 켜져 있으면 두 번째 모델은 그대로 부른다 — 비용은 줄지 않는다."
+        ),
     )
     run.add_argument(
         "--no-repair",
         action="store_true",
         help="되풀이 재전사를 끈다. 기본은 켜져 있다 — 되풀이 구간만 다시 물어 갈아끼운다.",
+    )
+    run.add_argument(
+        "--no-retext",
+        action="store_true",
+        help="글자 교정을 끈다. 기본은 켜져 있다 — 시각은 whisper, 글자는 두 번째 모델(D37).",
     )
     _add_polish_option(run)
 
@@ -78,7 +86,11 @@ def build_parser() -> argparse.ArgumentParser:
     record = sub.add_parser("record", help="실제 API를 호출해 픽스처를 녹화한다 (유료)")
     record.add_argument("video", type=Path)
     record.add_argument("--yes", action="store_true", help="비용 확인을 건너뛴다")
-    record.add_argument("--no-verify", action="store_true", help="검증용 응답은 녹화하지 않는다")
+    record.add_argument(
+        "--no-verify",
+        action="store_true",
+        help="검증용 응답은 녹화하지 않는다. 글자 교정이 켜져 있으면 그래도 녹화한다.",
+    )
     _add_config_options(record)
 
     settings = sub.add_parser("config", help="설정 확인")
@@ -200,12 +212,19 @@ def _confirm_cost(duration: float, cfg: Config, assume_yes: bool, models: int = 
 # ─────────────────────────────────────────────────────────────
 
 
+def _models_paid(args: argparse.Namespace, cfg: Config) -> int:
+    """두 번째 모델은 검증과 글자 교정이 **함께** 쓴다. 둘 다 꺼야 한 번만 낸다(D37)."""
+    return 1 if args.no_verify and not cfg.retext_enabled else 2
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     cfg = config_from_args(args)
+    if args.no_retext:
+        cfg = replace(cfg, retext_enabled=False)
     online = _resolve_online(args)
     if args.dry_run:
         prepared = pipeline.prepare(args.video, cfg, offline=args.offline or not online)
-        cost = transcribe.estimate_cost(prepared.duration, cfg) * (1 if args.no_verify else 2)
+        cost = transcribe.estimate_cost(prepared.duration, cfg) * _models_paid(args, cfg)
         pieces = max(1, len(prepared.chunks))
         log.out(
             f"길이 {prepared.duration:.1f}초 · 조각 {pieces}개"
@@ -217,9 +236,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         return 0
     if online:
         # 오디오를 뽑기 전에 원본 길이만 보고 확인한다. ffprobe는 즉시 끝난다.
-        _confirm_cost(
-            preprocess.probe_duration(args.video), cfg, args.yes, 1 if args.no_verify else 2
-        )
+        _confirm_cost(preprocess.probe_duration(args.video), cfg, args.yes, _models_paid(args, cfg))
     result = pipeline.run(
         args.video,
         cfg,
@@ -314,8 +331,10 @@ def cmd_probe(args: argparse.Namespace) -> int:
 def cmd_record(args: argparse.Namespace) -> int:
     """사람만 실행한다. 실제 API를 부르고 요금이 발생한다."""
     cfg = config_from_args(args)
-    _confirm_cost(preprocess.probe_duration(args.video), cfg, args.yes, 1 if args.no_verify else 2)
-    for path in pipeline.record_fixtures(args.video, cfg, verify=not args.no_verify).values():
+    _confirm_cost(preprocess.probe_duration(args.video), cfg, args.yes, _models_paid(args, cfg))
+    # 글자 교정이 켜져 있으면 오프라인 재생에도 두 번째 모델 응답이 필요하다(D37).
+    wanted = not args.no_verify or cfg.retext_enabled
+    for path in pipeline.record_fixtures(args.video, cfg, verify=wanted).values():
         log.out(str(path))
     return 0
 
