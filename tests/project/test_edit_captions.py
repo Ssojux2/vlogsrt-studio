@@ -19,6 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from fractions import Fraction
 from pathlib import Path
+from typing import Literal
 
 import pytest
 
@@ -43,6 +44,9 @@ from vlogsrt.project.models import ClipInstance, ProjectDocument
 from vlogsrt.project.timebase import FrameInterval, format_fcpx_time
 from vlogsrt.project.vad.guard import InstanceGuard
 from vlogsrt.project.vision.policy import VisionDecision, request_sha256
+
+DecisionStatus = Literal["accepted", "keep_all", "error"]
+GuardStatus = Literal["success", "keep_all", "inaudible"]
 
 FD25 = Fraction(1, 25)
 FDNTSC = Fraction(1001, 30000)
@@ -175,7 +179,7 @@ def _guards(
     document: ProjectDocument,
     media: tuple[ResolvedMedia, ...],
     *,
-    status_by_clip: dict[int, str] | None = None,
+    status_by_clip: dict[int, GuardStatus] | None = None,
 ) -> tuple[InstanceGuard, ...]:
     """문서의 클립마다 guard 하나 — 기본 success, 불가청·부재 클립은 따로 준다."""
     content = {row.resource_scoped_id: row.asset_content_id for row in media}
@@ -184,7 +188,7 @@ def _guards(
         InstanceGuard(
             instance_id=clip.instance_id,
             source_id=content[clip.resource_scoped_id],
-            status=statuses.get(position, "success"),  # type: ignore[arg-type]
+            status=statuses.get(position, "success"),
             protected_frames=(),
             review=(),
         )
@@ -205,7 +209,9 @@ def _plan(
     return build_edit_plan(document, partition, guards, decisions, ProjectConfig())
 
 
-def _decision(block: EditBlock, choice: str, *, status: str = "accepted") -> VisionDecision:
+def _decision(
+    block: EditBlock, choice: str, *, status: DecisionStatus = "accepted"
+) -> VisionDecision:
     """손 판정 — 요청 신원은 정본 투영에서 만든다."""
     return VisionDecision(
         block_id=block.block_id,
@@ -214,7 +220,7 @@ def _decision(block: EditBlock, choice: str, *, status: str = "accepted") -> Vis
         reason="같은 내용의 단순 되풀이 B-roll이다",
         evidence_frame_ids=(),
         confidence=0.9,
-        status=status,  # type: ignore[arg-type]
+        status=status,
     )
 
 

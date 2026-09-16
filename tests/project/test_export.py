@@ -28,6 +28,7 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass, replace
 from fractions import Fraction
 from pathlib import Path
+from typing import Literal
 
 import pytest
 
@@ -61,6 +62,8 @@ from vlogsrt.project.timebase import FrameInterval, format_fcpx_time
 from vlogsrt.project.vad.guard import InstanceGuard
 from vlogsrt.project.vision.policy import VisionDecision, request_sha256
 from vlogsrt.project.xml_validation import XmlValidationUnavailable
+
+DecisionStatus = Literal["accepted", "keep_all", "error"]
 
 FD25 = Fraction(1, 25)
 
@@ -243,6 +246,7 @@ def _guards(
     spans = (FrameInterval(low, high) for low, high in protected)
     guards: list[InstanceGuard] = []
     for position, clip in enumerate(_clips(document)):
+        status: Literal["success", "keep_all", "inaudible"]
         if not has_audio[clip.resource_scoped_id]:
             status = "inaudible"
         elif not clip.enabled or clip.src_enable != "all":
@@ -253,7 +257,7 @@ def _guards(
             InstanceGuard(
                 instance_id=clip.instance_id,
                 source_id=f"acid-{_xml_id_of(document, clip)}",
-                status=status,  # type: ignore[arg-type]
+                status=status,
                 protected_frames=tuple(spans) if position == 0 else (),
                 review=(),
             )
@@ -268,7 +272,9 @@ def _xml_id_of(document: ProjectDocument, clip: ClipInstance) -> str:
     raise AssertionError("클립이 가리키는 자원이 없다")
 
 
-def _decision(block: EditBlock, choice: str, *, status: str = "accepted") -> VisionDecision:
+def _decision(
+    block: EditBlock, choice: str, *, status: DecisionStatus = "accepted"
+) -> VisionDecision:
     return VisionDecision(
         block_id=block.block_id,
         request_sha256=request_sha256(vision_request_for(block, "")),
@@ -276,7 +282,7 @@ def _decision(block: EditBlock, choice: str, *, status: str = "accepted") -> Vis
         reason="같은 내용의 단순 되풀이 B-roll이다",
         evidence_frame_ids=(),
         confidence=0.9,
-        status=status,  # type: ignore[arg-type]
+        status=status,
     )
 
 
