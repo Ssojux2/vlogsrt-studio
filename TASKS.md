@@ -48,8 +48,8 @@
 | PROTO-1b | PROTO-1이 드러낸 낡은 장면 6개 (단언이 아니라 장면을 고쳤다) | ✅ `3b7337b`·`03e22ae` |
 | PROTO-2 | 러너 1/3 — 파싱·미디어·PCM·**부재의 기록** | ✅ `d8eed17` |
 | PROTO-3 | 러너 2/3 — 전사·자막 투영·경계·VAD·**합성 가드** | ✅ `7cae54d` |
-| PROTO-4 | 러너 3/3 — 블록·프레임 표본·비전·EditPlan·EDIT 자막·패키지 | 📋 방향 검토 중 |
-| PROTO-5 | `project/commands.py` + `cli.py` — 계약 §1의 유일한 CLI 예외 | 📋 |
+| PROTO-4 | 러너 3/3 — 블록·프레임 표본·비전·EditPlan·EDIT 자막·패키지 | ✅ `8ca214d` |
+| PROTO-5 | `project/commands.py` + `cli.py` — **비용 경계가 사는 자리** | 📋 방향 검토 중 |
 | PROTO-6 | 한 프로세스 e2e 테스트 + `docs/RUNBOOK.md` | 📋 |
 | PROTO-7 | **실물 FCPXML 실행 · Final Cut import · 첫 실패 기록** | 🧑 대기 |
 

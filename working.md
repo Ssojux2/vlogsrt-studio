@@ -474,9 +474,43 @@ PROTO-2가 접는 것은 **PCM 주소**지 목록이 아니었다.
 
 `make`도 같은 이유로 죽어 있다 — 각 브리프 §7의 여섯 명령을 개별로 돌린다.
 
-남은 순서: **PROTO-4**(블록·비전·edit·export) → **PROTO-5** `commands.py`+CLI →
+- `8ca214d` — **PROTO-4. 러너 3/3. 러너가 완성됐다.**
+  `publish_project` → `PublishedProject`. pytest **2488**, 불변식 20.
+
+### PROTO-4에서 배운 것 — 승인을 표현할 칸이 없었다
+
+(A)가 **UNSOUND**를 냈고 옳았다. `transcribe.request_vision`은
+`online: bool = False`이고 클라이언트를 만지기 전에 raise한다. v1의 입력 넷에는 그
+승인을 실을 칸이 없어서 구현자가 고를 수 있는 길이 둘뿐이었고 **둘 다 틀린다** —
+기본값이면 모든 블록이 error라 **운영에서 한 번도 성공하지 못하고**, `online=True`를
+러너에 박으면 **fail-closed 게이트가 영구히 열리고** PROTO-5가 러너를 닫힌 채 부를
+방법이 없어진다. 후자가 일곱 번째 `protected=[]`다. `online: bool = False`를 입력으로
+넣고 회귀 테스트를 못 박았다.
+
+**내가 안심하려고 쓴 테스트 하나는 공허했다.** "설정 결함은 전파된다"는
+`ProjectConfig.__post_init__`의 검사가 `policy._require_config`의 **상위집합**이라
+**측정 자체가 불가능**하다(위조해도 `partition_blocks`가 먼저 죽는다). 초록이 되면서
+아무것도 재지 못하는 동안, 진짜 세탁 위험인 `build_payload` 실패는 표에 줄조차 없었다.
+
+(A)가 더 찾은 것: `request_vision`을 **이름으로** 안 불러서 직접 호출이 열려 있었고
+(그 길로 가면 `_to_dict`를 잃어 **전 블록이 오류 판정**이 된다), 세 단언이
+`__post_init__`에만 있어 **`current` 포인터를 갈아끼운 뒤에** 돌았다 — 결함 리비전이
+공개된 채로 터진다.
+
+(B)가 혼자 재현한 것: `dtd_path=None`이면 `validate_xml`의 `dtd_checked=False`를
+`_write_revision`이 **버려서**(`export.py:822-828`) 패키지 기록 어디에도 "DTD를
+대조했는가"가 남지 않는다.
+
+**내가 뮤테이션으로 확인했다**: `online=online`을 `online=True`로 바꾸니
+`test_online_false_closes_every_decision_and_blocks_final` 하나만 정확히 죽는다.
+
+남은 순서: **PROTO-5** `commands.py`+CLI(비용 경계가 사는 자리) →
 **PROTO-6** e2e+RUNBOOK → **PROTO-7 실물 FCPXML 실행**(사람과 함께).
 마지막이 진짜 관문이다. 보드는 `TASKS.md`의 PROTO 시리즈.
+
+**PROTO-5는 원래 내가 하려던 것인데 GLM에 넘긴다** — 이 저장소의 상시 규칙이
+"관리자는 제품 코드를 쓰지 않는다"이고(`verification-protocol.md`), PROTO-2~4에서
+방향 검토 + GLM 구현 조합이 매번 결함을 잡았다. 나는 브리프와 판정만 쥔다.
 
 ### Xcode 라이선스 미동의로 툴체인 shim이 죽었다
 
