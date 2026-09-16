@@ -1,11 +1,14 @@
-"""러너 1/3 · 2/3 — 파싱 · 미디어 해석 · PCM · 부재의 기록, 그리고 분석 (PROTO-2·3).
+"""러너 전 단계 — 파싱 · 미디어 해석 · PCM · 부재의 기록 · 분석 · 출판 (PROTO-2·3·4).
 
 파이프라인의 단계들은 이미 다 있다 — 이 모듈은 그 조각들을 잇는다. 1/3(`prepare_audio`,
 PROTO-2)은 문서를 파싱하고, 미디어를 해석하고, 오디오를 PCM으로 저장하고, 전사할 수
 없는 리소스는 **기록으로** 남긴다. 산출물은 `speech.transcribe_unique_sources`가 이미
 고정한 쌍 모양 그대로다 — 러너가 새 모양을 발명하면 소비자의 신원 검사가 짝짓기
 오류를 흘려보낸다. 2/3(`analyze_audio`, PROTO-3)은 그 산출물을 받아 전사·자막 투영·
-경계 재전사·VAD·가드를 한 번에 흘려 **분석이 끝난 상태**를 낸다.
+경계 재전사·VAD·가드를 한 번에 흘려 **분석이 끝난 상태**를 낸다. 3/3(`publish_project`,
+PROTO-4)은 그 상태를 받아 블록마다 프레임 표본과 비전 판정을 만들고, 계획·검증·
+EDIT 자막을 거쳐 패키지를 출판한다 — 비전 호출은 `transcribe.request_vision` 이름으로만
+나가고 러너는 클라이언트를 만들지 않으며 주입받는다.
 
 세 가지 부재가 1/3에서만 난다:
 
@@ -38,7 +41,7 @@ ffmpeg·ffprobe는 `preprocess.probe_audio_stream`과 `pcm.build_reference`를 �
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal
 
@@ -56,8 +59,24 @@ from vlogsrt.project.boundary import (
     project_boundaries,
     transcribe_boundaries,
 )
-from vlogsrt.project.captions import SourceCaptionSet, project_source_captions
+from vlogsrt.project.captions import (
+    EditCaptionSet,
+    SourceCaptionSet,
+    project_edit_captions,
+    project_source_captions,
+)
 from vlogsrt.project.config import ProjectConfig
+from vlogsrt.project.edit import (
+    _PROJECTION_CONTEXT,
+    BlockPartition,
+    EditBlock,
+    EditPlan,
+    build_edit_plan,
+    partition_blocks,
+    validate_edit_plan,
+    vision_request_for,
+)
+from vlogsrt.project.export import ExportPackage, publish_package
 from vlogsrt.project.fcpxml import parse_project
 from vlogsrt.project.media import MediaOverride, ResolvedMedia, resolve_media
 from vlogsrt.project.models import ClipInstance, ProjectDocument
@@ -77,6 +96,18 @@ from vlogsrt.project.vad.guard import (
 )
 from vlogsrt.project.vad.inference import VadResult, infer_vad
 from vlogsrt.project.vad.runtime import bundled_artifact, create_cpu_session
+from vlogsrt.project.vision.policy import (
+    VisionDecision,
+    VisionPolicyError,
+    VisionRequest,
+    _error_decision,
+    build_payload,
+    parse_decision,
+)
+from vlogsrt.project.vision.policy import (
+    _require_config as _require_policy_config,
+)
+from vlogsrt.project.vision.sampling import FrameSamplingError, sample_frames
 
 _PCM_DIR = "pcm"
 """PCM 논리 주소의 네임스페이스 — source·boundary가 쓰는 애셋 디렉터리와 갈라진다."""
@@ -624,4 +655,221 @@ def _log_analysis(result: AnalyzedAudio) -> None:
         f"분석 완료: 인스턴스 가드 {len(result.instance_guards)}개 — "
         f"소스 가드 {len(result.source_guards)}, 경계 재전사 {len(result.transcripts)}, "
         f"부재 인스턴스 {len(result.unavailable_instances)}, VAD 실패 {vad_failed}"
+    )
+
+
+# ═══════════════════════════════════════════════════════════════
+#  PROTO-4 — 블록 · 프레임 표본 · 비전 판정 · 계획 · EDIT 자막 · 패키지 (러너 3/3)
+# ═══════════════════════════════════════════════════════════════
+
+
+@dataclass(frozen=True, slots=True)
+class PublishedProject:
+    """출판이 끝난 상태 — 러너의 마지막 산출물.
+
+    `decisions`는 블록 순서 그대로 블록마다 정확히 하나다. `findings`는 성공한
+    결과에서 언제나 `()`다 — `publish_package`가 스스로 재검사해 findings가 있으면
+    거부하므로(export) "검사했음"의 기록으로만 유효하다. `dtd_path`는 실제로 쓴
+    값이다: `validate_xml`이 `dtd_checked=False`를 돌려주면 `_write_revision`이
+    그것을 버리므로 패키지 기록 어디에도 "DTD를 대조했는가"가 남지 않는다 —
+    러너가 노출하는 것이 유일한 완화다(export 쪽 수정은 이 태스크 범위 밖).
+    """
+
+    analyzed: AnalyzedAudio
+    partition: BlockPartition
+    decisions: tuple[VisionDecision, ...]
+    plan: EditPlan
+    findings: tuple[str, ...]
+    edit_captions: EditCaptionSet
+    package: ExportPackage
+    dtd_path: Path | None
+
+    def __post_init__(self) -> None:
+        """같은 세 단언의 뒤쪽 난간 — 출판 앞 검사를 지난 값이라도 다시 못 박는다."""
+        _require_decision_alignment(self.partition.blocks, self.decisions)
+
+
+def publish_project(
+    analyzed: AnalyzedAudio,
+    *,
+    vision_client: object,
+    destination: Path,
+    online: bool = False,
+    dtd_path: Path | None = None,
+) -> PublishedProject:
+    """분석이 끝난 상태를 패키지로 출판한다 — 러너의 마지막 조각.
+
+    비전 클라이언트는 주입받는다(openai 경계는 `vlogsrt/transcribe.py`뿐이다 —
+    계약 §4). `online`은 사람의 승인을 표현하는 러너의 인자이고 `request_vision`에
+    그대로 간다: 거짓이면 블록마다 오류 판정이 남고 `final_accepted`가 막힌다 —
+    그것이 정직한 닫힘이다(승인의 부재가 항상 승인이 되는 길을 끊는다).
+    """
+    prepared = analyzed.prepared
+    partition, decisions = _partition_and_decide(analyzed, vision_client, online)
+    _require_decision_alignment(partition.blocks, decisions)
+    plan = build_edit_plan(
+        prepared.document, partition, analyzed.instance_guards, decisions, prepared.project_config
+    )
+    findings = validate_edit_plan(plan, prepared.document, analyzed.instance_guards)
+    edit_captions = project_edit_captions(plan, analyzed.boundary)
+    package = publish_package(
+        destination,
+        prepared.document,
+        prepared.media,
+        plan,
+        edit_captions,
+        source=analyzed.boundary,
+        guards=analyzed.instance_guards,
+        dtd_path=dtd_path,
+    )
+    result = PublishedProject(
+        analyzed=analyzed,
+        partition=partition,
+        decisions=decisions,
+        plan=plan,
+        findings=findings,
+        edit_captions=edit_captions,
+        package=package,
+        dtd_path=dtd_path,
+    )
+    _log_publish(result)
+    return result
+
+
+def _partition_and_decide(
+    analyzed: AnalyzedAudio, vision_client: object, online: bool
+) -> tuple[BlockPartition, tuple[VisionDecision, ...]]:
+    """분할 → 블록마다 판정 — 설정 게이트가 블록 루프 앞에 선다.
+
+    `build_payload`와 `parse_decision`의 설정 검사는 같은 예외 타입이라 블록 루프
+    안에서는 구분할 수 없다. 루프 앞에서 한 번 통과시켜 그 뒤의 `VisionPolicyError`는
+    전부 그 블록의 사실이게 한다 — 나쁜 설정이 "그 블록이 실패했다" 기록으로
+    세탁되면 나머지 블록의 판정까지 버리게 된다.
+    """
+    prepared = analyzed.prepared
+    cfg = prepared.project_config
+    _require_policy_config(cfg)
+    partition = partition_blocks(
+        prepared.document,
+        prepared.media,
+        analyzed.instance_guards,
+        analyzed.locked_instance_ids,
+        analyzed.unavailable_instances,
+        cfg,
+    )
+    media_by_content = _media_by_content(prepared.media)
+    decisions = tuple(
+        _decide_block(
+            block,
+            media_by_content[block.source_id],
+            vision_client,
+            prepared.frames_dir,
+            cfg,
+            online,
+        )
+        for block in partition.blocks
+    )
+    return partition, decisions
+
+
+def _decide_block(
+    block: EditBlock,
+    media: ResolvedMedia,
+    vision_client: object,
+    frames_dir: Path,
+    cfg: ProjectConfig,
+    online: bool,
+) -> VisionDecision:
+    """블록 하나의 판정 — 표본·조립·전송 실패는 그 블록의 오류 판정이다.
+
+    모델 응답 결함은 `parse_decision`이 이미 오류 판정으로 정규화하므로 그 경로를
+    재구현하지 않는다. 전송 실패는 넓게 잡는다(SDK 예외 타입을 import 없이 분간할
+    수 없으므로) — 잡은 즉시 오류 판정으로 바꿔 남기고 조용히 두지도 밖으로
+    던지지도 않는다. 예외가 블록 루프를 넘어 올라오면 JPEG 한 장 때문에 프로젝트
+    전체 출판이 죽고 나머지 블록의 판정까지 버린다.
+    """
+    request = vision_request_for(block, _PROJECTION_CONTEXT)
+    try:
+        samples = sample_frames(media, block.sample_requests, frames_dir, cfg)
+    except (FrameSamplingError, OSError) as exc:
+        return _failure_decision(request, "프레임 표본 실패", exc)
+    try:
+        payload = build_payload(request, samples, cfg)
+    except VisionPolicyError as exc:
+        return _failure_decision(request, "비전 페이로드 조립 실패", exc)
+    try:
+        raw = transcribe.request_vision(
+            vision_client,
+            model=cfg.vision_model,
+            payload=payload,
+            online=online,
+        )
+    except Exception as exc:  # noqa: BLE001 - 블록의 실패 기록으로 바꿔 남긴다
+        return _failure_decision(request, "비전 호출 실패", exc)
+    return parse_decision(request, raw, cfg)
+
+
+def _failure_decision(request: VisionRequest, stage: str, exc: BaseException) -> VisionDecision:
+    """실패의 판정 — 모양은 정본(`policy._error_decision`)에서, 글월은 실제 예외에서.
+
+    정본이 다는 머리글("비전 응답이 계약을 어겼다")은 모델 응답 결함의 문장이다.
+    표본·조립·전송 실패는 다른 사실이므로 머리글만 단계 이름으로 바꾼다 — 나머지
+    칸(choice·요청 신원·증거·신뢰도·상태)은 여전히 정본이 계산한다. 손으로 다시
+    짜다 하나라도 어긋나면 `_require_decision_linkage`가 raise해 "차단된 패키지"가
+    "패키지 없음"으로 바뀐다.
+    """
+    reason = " ".join(str(exc).split()) or exc.__class__.__name__
+    return replace(_error_decision(request, ""), reason=f"{stage} — {reason}")
+
+
+def _media_by_content(media: Sequence[ResolvedMedia]) -> dict[str, ResolvedMedia]:
+    """내용 신원 → 미디어 — 문서 순서에서 첫 항목이 이긴다.
+
+    블록이 드는 `source_id`는 내용 신원인데, 서로 다른 xml_id가 같은 바이트를
+    가리키면 같은 신원에 `ResolvedMedia`가 여럿 온다. 원본 바이트는 같아도 프록시
+    연결은 다를 수 있고 어느 쪽을 고르느냐가 `used_proxy`·추출 스트림·`review` 사유를
+    바꾼다 — 결정성은 이 규칙 한 줄에 달려 있다.
+    """
+    indexed: dict[str, ResolvedMedia] = {}
+    for row in media:
+        indexed.setdefault(row.asset_content_id, row)
+    return indexed
+
+
+def _require_decision_alignment(
+    blocks: Sequence[EditBlock], decisions: Sequence[VisionDecision]
+) -> None:
+    """판정 정렬의 난간 — 세 검사가 각자 따로 문다: 개수 → 중복 → 순서·신원.
+
+    `__post_init__`에만 두면 `publish_package`가 `current` 포인터를 원자적으로
+    갈아끼운 **뒤에** 돈다 — 디스크에는 결함 리비전이 이미 공개된 채 단언이
+    터진다. 파티션과 판정만 있으면 전부 잴 수 있으므로 같은 검사를 출판 앞
+    (`build_edit_plan` 호출 전)에서 먼저 돈다. 블록이 0개면 판정도 0개다 —
+    `decisions == ()`은 결함이 아니라 정상이다.
+    """
+    if len(decisions) != len(blocks):
+        raise ValueError(
+            f"판정 {len(decisions)}개가 파티션 블록 {len(blocks)}개와 다르다"
+            " — 블록마다 정확히 하나여야 한다"
+        )
+    seen: set[str] = set()
+    for decision in decisions:
+        if decision.block_id in seen:
+            raise ValueError(f"판정이 같은 블록을 두 번 가리킨다: {decision.block_id!r}")
+        seen.add(decision.block_id)
+    for block, decision in zip(blocks, decisions, strict=True):
+        if decision.block_id != block.block_id:
+            raise ValueError(
+                f"판정의 순서·신원이 블록과 어긋난다: 판정 {decision.block_id!r} ≠"
+                f" 블록 {block.block_id!r} — 블록 순서 그대로여야 한다"
+            )
+
+
+def _log_publish(result: PublishedProject) -> None:
+    """단계의 결산 — 오류 판정도 세어 보고한다(있는 것만 세면 조용한 손실이 된다)."""
+    errors = sum(1 for decision in result.decisions if decision.status == "error")
+    removed = len(result.plan.removed)
+    log.info(
+        f"출판 완료: 블록 {len(result.partition.blocks)}개 — 판정 {len(result.decisions)}개"
+        f" (오류 {errors}), 제거 {removed}건, 리비전 {result.package.plan_revision[:12]}"
     )
