@@ -18,6 +18,13 @@ claude-glm --effort max --permission-mode plan \
 
 둘 다 **읽기 전용**이다(`--permission-mode plan`). 코드를 고치지 않는다.
 
+**보고 위치를 브리프 뒤에 한 줄 덧붙여라** — 안 하면 `plan` 모드의 워커가 보고서를
+`~/.claude/plans/`의 플랜 파일에 쓰고 stdout에는 "ExitPlanMode가 없어 여기서 닫는다"만
+남긴다(2026-09-16 첫 실행에서 실제로 그랬다):
+
+> **보고서 전문을 stdout에 그대로 출력하라.** 파일로 쓰지 말고, 플랜 파일에 넣지 말고,
+> ExitPlanMode를 부르지 마라 — 이 세션에는 없다.
+
 ---
 
 ## 헌장 본문 (워커에게 그대로 준다)
