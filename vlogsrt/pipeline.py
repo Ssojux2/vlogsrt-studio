@@ -354,6 +354,12 @@ def _make_cues(
     cues = refine.refine(apply_retext(spine_to_cues(list(spine)), record), cfg, duration)
     if not cues:
         raise RuntimeError("자막 큐가 하나도 남지 않았습니다. 오디오를 확인하세요.")
+    over_width = sum(1 for cue in cues for line in cue.lines if len(line) > cfg.max_chars_per_line)
+    if over_width:
+        log.warn(
+            f"줄 폭 {cfg.max_chars_per_line}자를 넘는 줄 {over_width}줄이 그대로 나간다 "
+            "— 어울리는 어절 경계가 없거나 짧아서 못 쪼갠 큐다(S12)"
+        )
     log.info(f"큐 {len(cues)}개")
     return cues
 
