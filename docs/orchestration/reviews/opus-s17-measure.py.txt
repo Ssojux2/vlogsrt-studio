@@ -1,0 +1,72 @@
+"""조각의 첫 소리가 원본의 어느 시각인지 상호상관으로 잰다.
+
+CSV가 말한 시작과 실제 내용의 시작이 다르면 그 차이가 자막 전체에 실린다.
+API를 부르지 않는다 — ffmpeg 디코딩과 numpy만 쓴다.
+"""
+
+import subprocess
+import sys
+from pathlib import Path
+
+import numpy as np
+
+RATE = 16000
+PROBE_SECONDS = 2.0  # 조각에서 떼어 맞춰 볼 길이
+WINDOW_SECONDS = 3.0  # 원본에서 훑을 창 (앞뒤 여유 포함)
+SLACK = 0.5  # 창을 CSV 시작보다 얼마나 앞에서 시작할지
+
+
+def pcm(path: Path, start: float | None, length: float) -> np.ndarray:
+    cmd = ["ffmpeg", "-v", "error", "-accurate_seek"]
+    if start is not None:
+        cmd += ["-ss", f"{start:.6f}"]
+    cmd += ["-i", str(path), "-t", f"{length:.6f}",
+            "-f", "s16le", "-ar", str(RATE), "-ac", "1", "-"]  # fmt: skip
+    raw = subprocess.run(cmd, capture_output=True, check=True).stdout
+    return np.frombuffer(raw, dtype="<i2").astype(np.float64)
+
+
+def lag_seconds(needle: np.ndarray, haystack: np.ndarray) -> tuple[float, float]:
+    """needle이 haystack 안에서 가장 잘 맞는 자리와 정규화 상관계수."""
+    needle = needle - needle.mean()
+    best_score, best_index = -2.0, 0
+    span = len(haystack) - len(needle)
+    if span <= 0:
+        return float("nan"), 0.0
+    # 성긴 탐색 뒤 정밀 탐색. 전수 상관은 느리다.
+    for step in (80, 1):
+        low = max(0, best_index - 160) if step == 1 else 0
+        high = min(span, best_index + 160) if step == 1 else span
+        for index in range(low, high + 1, step):
+            piece = haystack[index : index + len(needle)]
+            piece = piece - piece.mean()
+            denominator = np.linalg.norm(piece) * np.linalg.norm(needle)
+            if denominator == 0:
+                continue
+            score = float(piece @ needle / denominator)
+            if score > best_score:
+                best_score, best_index = score, index
+    return best_index / RATE, best_score
+
+
+def main() -> None:
+    cache = Path(sys.argv[1])
+    source = cache / "fr_day_3.mp3"
+    rows = [
+        line.split(",")
+        for line in (cache / "fr_day_3.segments.csv").read_text().strip().splitlines()
+    ]
+
+    print(f"{'조각':<22}{'CSV시작':>12}{'실제내용':>12}{'어긋남':>10}{'상관':>8}")
+    for name, start_text, _end_text in rows:
+        start = float(start_text)
+        window_start = max(0.0, start - SLACK)
+        needle = pcm(cache / name, None, PROBE_SECONDS)
+        haystack = pcm(source, window_start, WINDOW_SECONDS)
+        lag, score = lag_seconds(needle, haystack)
+        actual = window_start + lag
+        print(f"{name:<22}{start:>12.3f}{actual:>12.3f}{actual - start:>+10.3f}{score:>8.3f}")
+
+
+if __name__ == "__main__":
+    main()
