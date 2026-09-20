@@ -16,7 +16,8 @@ import pytest
 from vlogsrt import pipeline, refine
 from vlogsrt.config import Config
 from vlogsrt.hangul import strip_for_compare
-from vlogsrt.models import Cue, Segment
+from vlogsrt.layout import FORCED_BREAK, TOO_LONG
+from vlogsrt.models import RETEXT_OFF, Cue, RetextRecord, Segment
 
 SYNTHETIC = Path(__file__).parent / "fixtures" / "synthetic"
 ROOT = Path(__file__).resolve().parent.parent
@@ -136,6 +137,48 @@ def test_polishing_the_real_episode_deletes_marks_and_nothing_else() -> None:
     assert strip_for_compare(" ".join(cue.text for cue in polished)) == strip_for_compare(
         " ".join(cue.text for cue in plain)
     )
+
+
+def test_every_over_width_line_is_flagged_on_the_real_episode() -> None:
+    """S12·규칙 9 — 폭을 넘긴 줄은 조용히 넘어가지 않는다. 실측 회차 전체로 못 박는다.
+
+    16자는 목표 폭이다. 어절 경계가 안 맞아 넘는 줄은 그대로 두되, 반드시
+    `too_long`·`forced_break` 표시를 달고 나가야 한다.
+    """
+    cfg = Config()
+    spine, duration = _real_episode()
+    cues = refine.refine(pipeline.spine_to_cues(spine), cfg, duration)
+    over_width = [
+        (cue.index, len(line))
+        for cue in cues
+        for line in cue.lines
+        if len(line) > cfg.max_chars_per_line
+    ]
+    # 폭 초과 줄이 아예 없으면 이 검사는 아무것도 안 본다(D32의 교훈).
+    assert over_width, "실측 회차에서 폭 초과 줄이 사라졌다 — 표본을 다시 확인하라"
+    for cue in cues:
+        if any(len(line) > cfg.max_chars_per_line for line in cue.lines):
+            assert {TOO_LONG, FORCED_BREAK} & set(cue.flags), (
+                f"큐 {cue.index}의 폭 초과 줄이 표시 없이 나갔다"
+            )
+
+
+def test_make_cues_warns_once_counting_lines_not_cues(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """S12·규칙 9 — 그래도 폭을 넘긴 줄이 남으면 `WARN` 한 줄로 센다. 큐 수가 아니라 줄 수다."""
+    monkeypatch.setenv("VLOGSRT_LOG_LEVEL", "WARN")
+    cfg = Config()
+    blob = (Segment(id=0, start=0.0, end=1.5, text="가" * 20 + " " + "나" * 19),)
+    cues = pipeline._make_cues(blob, cfg, 2.5, RetextRecord(status=RETEXT_OFF))
+    err = capsys.readouterr().err
+    assert len(cues) == 1  # 짧아서 못 쪼갠 큐 한 장 — 줄은 둘 다 폭을 넘는다
+    assert err.count("WARN") == 1
+    assert "넘는 줄 2줄이" in err
+
+    calm = (Segment(id=0, start=0.0, end=2.0, text="짧은 자막"),)
+    pipeline._make_cues(calm, cfg, 3.0, RetextRecord(status=RETEXT_OFF))
+    assert "WARN" not in capsys.readouterr().err
 
 
 def _real_episode() -> tuple[list[Segment], float]:
