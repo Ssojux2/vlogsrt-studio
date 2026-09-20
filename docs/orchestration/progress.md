@@ -303,3 +303,73 @@ with a 2,058-test post-merge `make check`.
 One asymmetry Fable flagged for P6, not a P4-04 defect: a source cue straddling an internal
 blade boundary becomes two `ProjectCue`s (one per instance, same `cue_id`), while a boundary cue
 spanning several blades is a single `ProjectCue` carrying all `request.instance_ids`.
+
+## 2026-09-16 PROTO-6 로컬 스모크
+
+PROTO-6 브리프 §2의 실측이다. 테스트가 아니라 **이 머신에서 실제로 한 번** 돌렸다 —
+실제 ffmpeg·ffprobe(/opt/homebrew/bin)·xmllint(/usr/bin)·Silero ONNX(번들 아티팩트,
+venv의 numpy 2.5.3·onnxruntime 1.30.0). 유료 호출 0회(무플래그 = 오프라인 기본).
+스크래치 디렉터리는 `$TMPDIR/proto6-smoke.Ruy9eu`(커밋 안 함).
+
+**재료.** 합성 미디어:
+
+```
+ffmpeg -f lavfi -i "testsrc2=duration=10:size=320x240:rate=30" \
+       -f lavfi -i "sine=frequency=440:duration=10" \
+       -c:v libx264 -pix_fmt yuv420p -c:a aac -b:a 64k -shortest clip.mp4
+```
+
+10.000초·30fps·AAC. 손으로 쓴 최소 FCPXML(`version="1.14"`, format r1 frameDuration
+1/30s, asset r2 hasAudio="1" + `media-rep kind="original-media"`, asset-clip 하나
+offset/start 0s duration 10s, sequence duration 10s)은 **파서가 그대로 받았다** — 거부
+문구를 기록할 일은 없었다. 프로젝트 설정은 `schema_version = 1` 한 줄.
+
+**명령.**
+
+```
+.venv/bin/python -m vlogsrt.cli project run $SMOKE/smoke.fcpxml \
+    -o $SMOKE/out --project-config $SMOKE/smoke.project.toml
+```
+
+**1차 실행 — 종료 코드 0.** stdout 전문:
+
+```
+최종 판정: 차단 없음
+리비전: …/out/package/revisions/1ae323f30a305aff908620a0426c6fe7093d4f2ebf93696709eb4fd7aa7a056f
+판정 0개 · 제거 구간 0건
+DTD 대조 안 함
+```
+
+stderr 전문(기본 로그 레벨): `오디오 준비 와료: 리소스 1개 — PCM 1, 부재 0` / `분석
+완료: 인스턴스 가드 1개 — 소스 가드 1, 경계 재전사 0, 부재 인스턴스 0, VAD 실패 0` /
+`출판 완료: 블록 0개 — 판정 0개 (오류 0), 제거 0건, 리비전 1ae323f30a30`.
+
+산출: `OUT/artifacts/`(PCM `reference.pcm` 160000프레임=10초@16kHz + 세대 기록 + 전사
+조각 `initial-0000.wav`), `OUT/package/current` → 리비전 다섯 파일
+(`VLOG_AI_EDIT.fcpxml` 781B · `VLOG_AI_EDIT.srt` **0B** · `VLOG_AI_SOURCE.srt` **0B** ·
+`project_trace.json` · `review.json`). review.json: `final_accepted: true`,
+`final_blockers: []`. 내보낸 FCPXML은 전체 보존 사본이다(300프레임 그대로, 새
+event/project 이름 `VLOG_AI_EDIT`, 원본 media-rep 재묶음) — 단독 `xmllint --noout`도
+통과.
+
+**픽스처 없는 클립의 실제 동작 — 사람이 반드시 알아야 할 것.** 예외도 종료 2도 막힌
+패키지(1)도 아니다. 오프라인 전사기가 `픽스처가 없습니다: …/clip.whisper.json`으로
+죽고, 그 예외는 소스 **error 기록**(in-memory `SourceTrace.status="error"`)으로 바뀐다.
+`boundary._resolve_slices`가 error 소스의 인스턴스 전부를 **잠근다**(boundary.py:649) —
+계획의 `retained` 이유가 `kept_locked`인 것이 그 흔적이다. 잠긴 클립은 컷 후보가 못
+되므로 블록 0 · 판정 0 · 제거 0이고, `_final_blockers`는 아무 코드도 보지 못해
+`final_accepted: true`로 **종료 0**에 자막 0장인 패키지가 나온다. 즉 실패 닫힘(보존)은
+지켜지지만 **실패의 이유가 어디에도 남지 않는다**: stderr의 요약 3줄에 없고,
+`VLOGSRT_LOG_LEVEL=DEBUG`에서도 없고(별도 OUT으로 재실측), review.json·
+project_trace.json·artifacts 어디에도 error 문구가 없다. 제품 코드는 고치지 않았다
+(범위 밖) — RUNBOOK의 "오프라인의 실제 모습" 절에 이 사실을 적었다.
+
+**실제로 돌았던 것:** ffprobe 오디오 probe(전역 1번)·ffmpeg PCM 추출(로그 "PCM 추출
+완료 … 원점 0초")·Silero ONNX VAD("VAD 실패 0" — 세션 생성 실패였으면 VadUnavailable
+하드 실패로 exit 2였을 것)·xmllint(게시 관문 안). 프레임 표본의 ffmpeg는 블록이 0이라
+한 번도 안 돌았다.
+
+**재실행(§3 실측).** 같은 명령을 같은 OUT에 그대로 두 번째: **종료 코드 2**, stderr
+한 줄 `ERR 리비전 디렉터리가 이미 있다: 1ae323f3… — 같은 리비전의 재게시는 배타 생성에서
+결정적으로 실패한다`. 첫 리비전·`current` 심링크는 그대로다. PROTO-5 테스트 9의 새
+단언(종료 2 + 이 문구)과 일치한다.

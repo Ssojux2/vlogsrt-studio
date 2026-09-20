@@ -253,3 +253,128 @@ vlogsrt run <video> --online    ← 유료
 ```
 
 나머지는 전부 무료다.
+
+---
+
+## Final Cut 프로젝트 러프컷 (프로토타입)
+
+파생 계층(`vlogsrt project`)이다 — Final Cut 프로젝트(FCPXML)를 읽어 **러프컷을 만들고
+그 위에 자막을 얹는다**. 원본 자막 엔진(`vlogsrt run`)과는 다른 길이고, 계약은
+`docs/PROJECT_CONTRACTS.md`에 있다. 2026-09-13부터 순서가 **컷 → 자막**이고 납품 형태는
+Final Cut 플러그인이다(`docs/plans/2026-09-13-cut-first-and-plugin.md`). 이 절의 사실은
+전부 이 머신에서 실측한 것이다(2026-09-16, `docs/orchestration/progress.md`의 PROTO-6 절).
+
+### 준비
+
+```bash
+.venv/bin/pip install -e '.[project]'   # numpy + onnxruntime (VAD용 선택 extra)
+brew install ffmpeg                     # ffmpeg + ffprobe
+xmllint                                 # macOS이면 /usr/bin에 이미 있다
+```
+
+Final Cut에서 **파일 → XML 내보내기…** 로 `.fcpxml`(version 1.14)을 뽑는다. 파서는
+**지원 부분집합**만 받는다 — 거부 문구 기준으로 막히는 것: 연결 오디오(`audio`·
+`audio-clip`)·타이틀(`title`)·전환(`transition`)·불러온 자막(`caption`)·연결 비디오(
+`video`)·compound/multicam(`ref-clip`·`sync-clip`·`compound-clip`·`multicam-clip`)·
+중첩 스토리라인·리타임(`retime` — 정상 속도만). lane≠0 연결 클립도 안 된다. 메인
+스토리라인의 `asset-clip`과 `gap`만 오면 된다.
+
+원본 미디어가 XML의 `file:` 경로에 그대로 있어야 한다. 옮겼다면 `--media-map`으로
+연결한다 — **객체의 배열**이고 키는 `resource_id`(XML 안 asset의 `id`, 예: `r2`)·
+`original`·`proxy` 셋뿐이다. 상대 경로는 맵 파일이 있는 디렉터리 기준으로 붙는다:
+
+```json
+[
+  {"resource_id": "r2", "original": "/Volumes/Media/clip_원본.mov"},
+  {"resource_id": "r5", "original": "proxy/clip5.mov", "proxy": "proxy/clip5_proxy.mov"}
+]
+```
+
+### 키 (이름만 — 값은 `.env`)
+
+| 이름 | 쓰는 곳 |
+|---|---|
+| `OPENAI_API_KEY` | STT(whisper-1) |
+| `GOOGLE_API_KEY` + `GEMINI_BASE_URL` | 비전 판정 |
+
+`--online`은 두 비전 값이 **둘 다** 차 있어야 시작한다. base URL이 비면 거부된다 —
+비워두면 SDK가 공개 엔드포인트로 가서 Google 키가 다른 공급자로 전송되기 때문이다.
+
+### 명령 — 오프라인 먼저, 온라인은 나중에
+
+```bash
+# 1) 오프라인 (무료). 픽스처가 없으면 아래 "오프라인의 실제 모습"처럼 나온다.
+.venv/bin/python -m vlogsrt.cli project run 프로젝트.fcpxml -o OUT --project-config vlogsrt.project.toml
+
+# 2) 온라인 (유료)
+.venv/bin/python -m vlogsrt.cli project run 프로젝트.fcpxml -o OUT --project-config vlogsrt.project.toml --online
+```
+
+**`--online`은 유료이고 길이 안전장치가 없다.** 레거시 `run`의 비용 확인 프롬프트가
+이 길에는 없다 — 확인 없이 전체 길이의 STT와 블록 수만큼의 비전 호출이 나간다.
+`--dtd <경로>`를 주면 게시 때 FCPXML을 그 DTD에 대조한다(안 주면 잘 이루어짐만 본다).
+
+### 산출
+
+`-o OUT`은 **형제 배치**다 — `OUT/artifacts/`와 `OUT/package/`가 나란히 생긴다.
+
+- `OUT/artifacts/` — PCM(`pcm/<내용신원>/reference.pcm`), 전사 조각, 프레임 표본
+  (`frames/`). 재실행 때 재사용되는 캐시다.
+- `OUT/package/current` → `revisions/<계획 리비전>/` — 한 리비전에 **다섯 파일**이
+  묶음으로 나온다:
+
+| 파일 | 무엇 |
+|---|---|
+| `VLOG_AI_EDIT.fcpxml` | 컷이 적용된 새 Final Cut 프로젝트 |
+| `VLOG_AI_EDIT.srt` | 리플 뒤 시각의 EDIT 자막 |
+| `VLOG_AI_SOURCE.srt` | 원본 시각의 SOURCE 자막 |
+| `project_trace.json` | 계획·판정·자막의 정규 기록(재개용 manifest) |
+| `review.json` | 최종 판정·블로커·검토 이슈 |
+
+### 종료 코드 — 0도 "초안"이다
+
+| 코드 | 뜻 |
+|---|---|
+| 0 | 차단 없음. **자동 컷은 사람 검토를 거치지 않았다** — stdout의 `사람 검토 없음(초안)` |
+| 1 | 막힌 패키지. `review.json`의 `final_blockers`가 이유를 말한다 (예: `decision_error` = 비전 판정이 오류라 컷을 못 믿었다) |
+| 2 | 실패. 파이프라인 예외·파싱 거부·재게시 충돌 등 — 패키지가 나오지 않았다 |
+
+### 재실행 — 같은 OUT은 한 번뿐
+
+같은 입력·같은 설정으로 같은 `OUT`에 다시 돌리면 **종료 코드 2**다 — 같은 계획 리비전의
+재게시가 배타 생성에서 결정적으로 실패한다(`ERR 리비전 디렉터리가 이미 있다`). 리비전은
+불변이라는 설계이며 옛 패키지는 그대로 보존된다. 다시 돌리려면 **새 `OUT`**을 쓰거나,
+옛 결과를 보존할 필요가 없으면 `OUT/package`를 옮겨두고 돌린다(`OUT/artifacts` 캐시는
+그대로 두면 PCM을 다시 뽑지 않는다).
+
+### 오프라인의 실제 모습 — 픽스처 없는 클립
+
+오프라인(무플래그)에서 이 클립 전사 픽스처(`OUT/artifacts/<내용신원>/clip.whisper.json`
+형태)가 없으면: 전사가 실패로 닫히고 **그 클립은 잠겨 전체 보존**된다(계획 기록의
+`kept_locked`). 블록이 0개라 비전 호출도 없고, 자막은 0장이며, `final_blockers`도
+비어 **종료 코드 0**으로 나온다 — "성공"이 아니라 "판정할 것이 없었다"이다. 현재 버전은
+이 실패 이유를 로그·review 어디에도 남기지 않으므로(2026-09-16 실측), 오프라인 결과의
+빈 SRT는 **픽스처 부재를 의심하라**. 설정이나 미디어를 바꿨다면 리비전이 달라져 같은
+OUT에도 게시된다(입력·설정 해시가 리비전을 정한다).
+
+### Final Cut에서 열기
+
+`OUT/package/current/VLOG_AI_EDIT.fcpxml`을 **File → Import → XML**로 가져온다.
+새 이벤트(`VLOG_AI_EDIT`)로 들어온다. 미디어가 옮겨져 있으면 relink가 필요할 수 있다 —
+내보낸 문서는 원본 media-rep만 링크한다(프록시를 원본으로 가장하지 않는다).
+
+### 비용 가늠 (1분 클립 기준)
+
+STT 약 `$0.006`(분당) + 비전 약 `$0.10` 내외 → **보수적으로 $0.10~0.25**로 잡아라.
+비전은 **블록 수에 비례**한다 — 조용한 구간이 많으면 블록이 많아지고 비용도 그만큼
+늘어난다. 자막만 있는 구간(보호 구간)은 블록이 되지 않는다.
+
+### 아직 아닌 것
+
+자막의 글자는 현재 **whisper-1**이다. gpt-transcribe 하이브리드(Q3)는 진행 중이며
+적용되면 이 절을 갱신한다.
+
+### 첫 실행 뒤 할 일
+
+실패·이상한 점은 `docs/orchestration/progress.md`에 관측 그대로 기록한다 — 고치지
+말고 적는다. 스모크 선례가 같은 파일의 `## 2026-09-16 PROTO-6 로컬 스모크` 절에 있다.

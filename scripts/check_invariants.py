@@ -49,6 +49,13 @@ SUBPROCESS_BOUNDARY_PATHS = ("vlogsrt/preprocess.py", "vlogsrt/project/xml_valid
 # FrameSampleRequest 데이터 타입 하나: **타입은 이음매를 건너도 되고 행동은 안
 # 된다** — 브리프 계약이 EditBlock에 그 순수 기록을 실으므로(코디네이터 재결).
 EDIT_MODULE_PATH = PROJECT_PACKAGE / "edit.py"
+REMOVAL_LAYER_MODULES = ("edit.py", "export.py")
+"""제거 계층의 파일들 — P6-02 계획과 P6-04 내보내기. 같은 선을 함께 지킨다.
+
+export.py도 이 계획을 직렬화한다 — 오디오·전사·판정 계층을 알면 렌더가
+판정에 오염된다. 경로는 호출 시점에 PROJECT_PACKAGE에서 푼다(가짜 트리 시험이
+PROJECT_PACKAGE를 통째로 바꾸므로 상수로 두면 진짜 트리을 보게 된다).
+"""
 EDIT_BANNED_IMPORTS = (
     "subprocess", "openai", "numpy", "onnxruntime",
     "vlogsrt.transcribe", "vlogsrt.preprocess",
@@ -388,6 +395,13 @@ VERIFY_MUST_NOT_IMPORT = ("refine", "output", "layout", "polish")
 # 재전사는 **골격이 조립되기 전**에 끝난다. 조판 계층을 알면 그 선이 무너진다(D27).
 REPAIR_MUST_NOT_IMPORT = ("refine", "output", "layout", "polish", "verify")
 
+# 글자 교정은 **계획만 세우는 순수 함수**다(D37). 응답 형태·호출·조판·재전사를 알면
+# 교체 판정이 다른 계층의 행동에 기대게 된다 — 입력은 값으로만 받는다.
+RETEXT_MUST_NOT_IMPORT = (
+    "transcribe", "preprocess", "verify", "refine", "output", "layout", "repair", "polish",
+    "openai", "subprocess",
+)  # fmt: skip
+
 # 조판 이후 계층이 되풀이 판정을 알면, 판정이 파이프라인 아래로 새어나간다(D27).
 DOWNSTREAM_MUST_NOT_IMPORT = {
     "refine.py": ("repair", "repetition"),
@@ -473,23 +487,41 @@ def check_repair_stays_upstream() -> list[str]:
     return failures
 
 
+def check_retext_stays_pure() -> list[str]:
+    """D37 — `retext.py`는 세그먼트·조각 글자·repairs를 **값으로** 받아 계획만 돌려준다.
+
+    파일이 사라지면 조용히 통과하지 않는다 — 교정 권한이 어디로 옮겨 갔는지 모르게 된다.
+    """
+    path = PACKAGE / "retext.py"
+    if not path.exists():
+        return ["vlogsrt/retext.py: 글자 교정 계층이 사라졌다 (D37)"]
+    return [
+        f"retext.py: {name}을 import한다 — 교정 계획이 순수 함수가 아니게 된다 (D37)"
+        for name in _imports(path.read_text(encoding="utf-8"), RETEXT_MUST_NOT_IMPORT)
+    ]
+
+
 def check_edit_layer_ignores_audio() -> list[str]:
-    """규칙 4·9 — 제거 계층(edit.py)은 오디오·전사·판정 계층을 import하지 못한다.
+    """규칙 4·9 — 제거 계층(edit.py·export.py)은 오디오·전사·판정 계층을 import하지 못한다.
 
     데이터 타입은 이음매를 건너도 되고 행동은 안 된다. 유일한 허용 형태는
     `from vlogsrt.project.vision.sampling import FrameSampleRequest` 한 줄이다 —
     EditBlock 계약이 실는 순수 기록(frame_id·source_id·source_time). 모듈 통째로
     드는 형태와 그 밖의 이름(sample_frames 같은 추출·프로브 함수)은 전부 거부한다.
     상대 import·별명도 풀 경로로 귀결해 잡는다. 파일이 없는 동안은 통과다 —
-    P6-01이 만들 때 이 선이 먼저 서 있다.
+    P6-01·P6-04가 만들 때 이 선이 먼저 서 있다.
     """
-    path = EDIT_MODULE_PATH
-    if not path.exists():
-        return []
-    rel = _rel(path)
     failures: list[str] = []
-    for lineno, module, names in _edit_imports(path.read_text(encoding="utf-8")):
-        failures.extend(_edit_import_failures(rel, lineno, module, names))
+    for name in REMOVAL_LAYER_MODULES:
+        path = PROJECT_PACKAGE / name
+        if not path.exists():
+            continue
+        rel = _rel(path)
+        failures.extend(
+            failure
+            for lineno, module, names in _edit_imports(path.read_text(encoding="utf-8"))
+            for failure in _edit_import_failures(rel, lineno, module, names)
+        )
     return failures
 
 
@@ -1039,6 +1071,7 @@ CHECKS = (
     ("판정 계층 부활 금지", check_inspection_stays_dead),
     ("검증은 출력을 못 건드린다", check_verify_cannot_touch_output),
     ("재전사는 전사 단계에 머문다", check_repair_stays_upstream),
+    ("글자 교정은 순수하다", check_retext_stays_pure),
     ("신뢰도 메타 보존", check_confidence_meta_survives),
     ("전사 호출 1개", check_one_transcription_call),
     ("모델 이름 비하드코딩", check_no_hardcoded_model),

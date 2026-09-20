@@ -34,7 +34,9 @@
 | **Q0** | **파형 기준 측정 도구** — VAD로 환각·손실을 잰다 | ✅ |
 | **Q1** | **재전사 채택에 심판 승인과 커버리지를 요구한다** | ⚠️ **구현 완료·머지 보류** (`899efbc`) |
 | **Q2** | 온도 0.6 재검토 — 깨끗한 음성의 정확도(D28이 인정한 대가) | 📋 유료 A/B 필요 |
-| **Q3** | 2번째 모델로 글자 교정 — 규칙 1·5 개정. **사용자 결정(09-16): 하이브리드 — 시각 whisper-1, 글자 gpt-transcribe** | 🔎 방향 검토 중 (`docs/orchestration/tasks/q3-retext.md`) |
+| **Q3-1** | 2번째 모델로 글자 교정 — 엔진 · 규칙 1·5 개정 (D37) | ✅ |
+| **Q3-2** | 글자 교정을 파생 계층(`vlogsrt/project/`)에 켠다 | 📋 |
+| **Q3-H** | 사람 — 현재 설정(180초 조각)으로 재녹화해 `retext_*` 잠정값을 다시 정한다 | 🧑 대기 |
 
 ### PROTO 시리즈 — Final Cut 프로토타입 (2026-09-16~)
 
@@ -50,7 +52,8 @@
 | PROTO-3 | 러너 2/3 — 전사·자막 투영·경계·VAD·**합성 가드** | ✅ `7cae54d` |
 | PROTO-4 | 러너 3/3 — 블록·프레임 표본·비전·EditPlan·EDIT 자막·패키지 | ✅ `8ca214d` |
 | PROTO-5 | `project/commands.py` + `cli.py` — **비용 경계가 사는 자리** | ✅ `f0702c8` |
-| PROTO-6 | 한 프로세스 e2e 테스트 + **로컬 실측 스모크** + `docs/RUNBOOK.md` | 🔨 구현 중 |
+| PROTO-6 | 한 프로세스 e2e 테스트 + **로컬 실측 스모크** + `docs/RUNBOOK.md` | ✅ `92c4ddf` |
+| PROTO-6b | **분석 실패가 「차단 없음」으로 나간다** — 종료 0에 0바이트 SRT | 📋 브리프 확정 |
 | PROTO-7 | **실물 FCPXML 실행 · Final Cut import · 첫 실패 기록** | 🧑 대기 |
 
 브리프는 `docs/orchestration/tasks/proto-*.md`, 방향 검토는
@@ -404,3 +407,33 @@ Q1이 끝나면 유료 재실행으로 위 두 굵은 숫자가 줄어드는지 
 **재개 조건**: Fable의 수정 7개. 그중 둘(`repair_coverage_max_uncovered_seconds`의
 가장자리 tolerance, `repair_avg_logprob_floor`를 게이트에서 빼고 측정만)은 **유료
 재실행으로 온도 0.8 분포를 받은 뒤** 값을 정해야 한다. 브랜치와 워크트리는 보존한다.
+
+---
+
+## Q3 — 글자는 gpt-transcribe, 시각은 whisper-1 (D37)
+
+### Q3-1 엔진 ✅
+
+`vlogsrt/retext.py`(순수 함수) + `pipeline.apply_retext`. 시각·세그먼트 경계는 whisper
+그대로, 게이트를 통과한 세그먼트의 글자만 바꾼다. 세그먼트 사이에 낀 gpt 글자는 출력하지
+않고 `trace.retext.unplaced`에 남긴다. 두 번째 모델 호출은 `retext_enabled`에만 달려 있고
+검증이 그 응답을 재사용한다. `redo`는 기록된 매핑을 다시 얹는다. `TRACE_VERSION` 10.0.
+
+### Q3-H 사람 인수 (`PENDING_HUMAN`)
+
+`retext_*` 다섯 값은 잠정이다. 유일한 실데이터 `fr_day_1_2_fhd`는 38분 조각 2개 + 규칙 6
+이전 prompt로 녹화돼 분포 근거가 못 된다. 현재 설정으로 재녹화한 뒤 세그먼트별 일치율·
+길이 비 분포로 다시 정한다.
+
+    vlogsrt record <video>      # whisper + gpt. 약 $0.012/분
+
+### Q3-2 파생 계층 📋
+
+- `project/speech.py`·`project/boundary.py`는 지금 `pipeline.spine_to_cues`(whisper 전용)만
+  부른다. 켜려면 `retext.plan` + `apply_retext`를 거기에 배선한다.
+- **분석 키 버전을 올려라.** 설정 지문은 `cfg.to_dict()` 전체 해시라 `retext_*`가 이미 들어
+  있다. 값이 그대로인 채 동작만 켜지면 옛 whisper 글자 완성물이 같은 키로 재사용된다.
+- **새 유료 호출이다.** 파생 계층은 오늘 gpt-transcribe를 부르지 않는다. 모든 소스 전사에
+  두 번째 모델 호출이 더해진다 — 비용 추정(`inspect`)도 함께 고친다.
+- 되풀이 제외·unplaced 기록을 `SourceTrace`에 싣는 방법은 거기서 정한다.
+

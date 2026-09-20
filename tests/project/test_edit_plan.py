@@ -440,28 +440,33 @@ def test_low_confidence_decision_keeps_block(tmp_path: Path) -> None:
         status="keep_all",
         confidence=0.5,
     )
-    plan = _plan(document, partition, guards, (low,))
+    settled = _decision(partition.blocks[1], "keep_all", status="keep_all")
+    plan = _plan(document, partition, guards, (low, settled))
     assert plan.removed == ()
     assert plan.review == ()
     assert [row.reason for row in plan.retained] == ["kept_block", "kept_block"]
 
 
-def test_error_decision_keeps_block(tmp_path: Path) -> None:
+def test_error_decision_keeps_block_with_failed_review(tmp_path: Path) -> None:
+    """오류 판정은 블록을 남기고 리뷰로 남는다 — 최종 수용은 게시 관문이 막는다."""
     document, guards, partition = _standard(tmp_path)
     block = partition.blocks[0]
     error = _decision(block, "keep_all", status="error", confidence=0.0)
-    plan = _plan(document, partition, guards, (error,))
+    settled = _decision(partition.blocks[1], "keep_all", status="keep_all")
+    plan = _plan(document, partition, guards, (error, settled))
     assert plan.removed == ()
-    assert plan.review == ()
+    assert [issue.code for issue in plan.review] == ["decision_error"]
+    assert plan.review[0].instance_id is None and plan.review[0].source_frame is None
     assert [row.reason for row in plan.retained] == ["kept_block", "kept_block"]
 
 
-def test_missing_decisions_keep_everything(tmp_path: Path) -> None:
-    """판정이 없는 블록은 통째 유지 — 없음은 오류가 아니라 무권한이다."""
+def test_missing_decisions_keep_everything_with_pending_review(tmp_path: Path) -> None:
+    """판정이 없는 블록은 통째 유지 — 없음은 무권한이고 대기 증거는 리뷰에 남는다."""
     document, guards, partition = _standard(tmp_path)
     plan = _plan(document, partition, guards)
     assert plan.removed == ()
-    assert plan.review == ()
+    assert [issue.code for issue in plan.review] == ["decision_missing", "decision_missing"]
+    assert all(issue.instance_id is None for issue in plan.review)
     assert [row.source_frames for row in plan.retained] == [
         FrameInterval(0, 250),
         FrameInterval(250, 500),
@@ -477,7 +482,8 @@ def test_plan_time_threshold_narrows_without_review(tmp_path: Path) -> None:
     partition = _partition(document, media, guards, cfg=cfg)
     block = partition.blocks[0]
     borderline = _decision(block, block.keep_candidates[0].candidate_id, confidence=0.85)
-    plan = _plan(document, partition, guards, (borderline,), cfg=cfg)
+    settled = _decision(partition.blocks[1], "keep_all", status="keep_all")
+    plan = _plan(document, partition, guards, (borderline, settled), cfg=cfg)
     assert plan.removed == ()
     assert plan.review == ()
     assert validate_edit_plan(plan, document, guards) == ()
@@ -491,7 +497,8 @@ def test_plan_time_threshold_narrows_without_review(tmp_path: Path) -> None:
 def test_accepted_with_keep_all_choice_is_inconsistent(tmp_path: Path) -> None:
     document, guards, partition = _standard(tmp_path)
     inconsistent = _decision(partition.blocks[0], "keep_all")
-    plan = _plan(document, partition, guards, (inconsistent,))
+    settled = _decision(partition.blocks[1], "keep_all", status="keep_all")
+    plan = _plan(document, partition, guards, (inconsistent, settled))
     assert plan.removed == ()
     assert [issue.code for issue in plan.review] == ["decision_inconsistent"]
     assert plan.review[0].instance_id is None
@@ -501,14 +508,16 @@ def test_accepted_with_keep_all_choice_is_inconsistent(tmp_path: Path) -> None:
 def test_accepted_with_uncertain_choice_is_inconsistent(tmp_path: Path) -> None:
     document, guards, partition = _standard(tmp_path)
     inconsistent = _decision(partition.blocks[0], "uncertain")
-    plan = _plan(document, partition, guards, (inconsistent,))
+    settled = _decision(partition.blocks[1], "keep_all", status="keep_all")
+    plan = _plan(document, partition, guards, (inconsistent, settled))
     assert [issue.code for issue in plan.review] == ["decision_inconsistent"]
 
 
 def test_duplicate_decisions_for_one_block_are_inconsistent(tmp_path: Path) -> None:
     document, guards, partition = _standard(tmp_path)
     block = partition.blocks[0]
-    plan = _plan(document, partition, guards, (_front(block), _front(block)))
+    settled = _decision(partition.blocks[1], "keep_all", status="keep_all")
+    plan = _plan(document, partition, guards, (_front(block), _front(block), settled))
     assert plan.removed == ()
     assert [issue.code for issue in plan.review] == ["decision_inconsistent"]
 
@@ -524,7 +533,8 @@ def test_non_finite_confidence_is_inconsistent(tmp_path: Path, status: str) -> N
         status=status,
         confidence=float("nan"),
     )
-    plan = _plan(document, partition, guards, (nan,))
+    settled = _decision(partition.blocks[1], "keep_all", status="keep_all")
+    plan = _plan(document, partition, guards, (nan, settled))
     assert plan.removed == ()
     assert [issue.code for issue in plan.review] == ["decision_inconsistent"]
 
@@ -540,8 +550,9 @@ def test_guard_collision_rejects_decision_to_keep_all(tmp_path: Path) -> None:
     stricter = _guards(
         document, _media(document), protected_by_clip={0: (FrameInterval(100, 200),)}
     )
+    settled = _decision(partition.blocks[1], "keep_all", status="keep_all")
     collided = build_edit_plan(
-        document, partition, stricter, (_front(partition.blocks[0]),), ProjectConfig()
+        document, partition, stricter, (_front(partition.blocks[0]), settled), ProjectConfig()
     )
     clip = _clips(document)[0]
     assert collided.removed == ()
