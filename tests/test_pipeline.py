@@ -12,7 +12,12 @@ from vlogsrt.cli import main
 from vlogsrt.config import Config
 from vlogsrt.models import Chunk, ChunkMark, Trace
 from vlogsrt.output import parse_srt
-from vlogsrt.transcribe import ChunkResponse, EmptyTranscript, TranscriptionJob
+from vlogsrt.transcribe import (
+    ChunkResponse,
+    EmptyTranscript,
+    MalformedTranscript,
+    TranscriptionJob,
+)
 
 SYNTHETIC = Path(__file__).parent / "fixtures" / "synthetic"
 VIDEO = Path("golden/demo.mp4")
@@ -31,6 +36,34 @@ def test_run_end_to_end(tmp_path: Path) -> None:
     srt = parse_srt(result.outputs["srt"].read_text(encoding="utf-8"))
     assert len(srt) == len(result.cues)
     assert [cue.index for cue in srt] == list(range(1, len(srt) + 1))
+
+
+def test_checked_caption_path_rejects_an_unanswered_chunk(tmp_path: Path) -> None:
+    """최종 자막에서 일부 조각 응답 누락이 짧은 SRT 성공으로 둔갑하는 회귀를 잡는다."""
+    prepared = pipeline.Prepared(
+        stem="final",
+        duration=2.0,
+        chunks=(
+            Chunk(tmp_path / "0.mp3", 0.0, 1.0, 0),
+            Chunk(tmp_path / "1.mp3", 1.0, 1.0, 1),
+        ),
+        source="final.wav",
+    )
+
+    class MissingSecond:
+        def transcribe(self, job: TranscriptionJob, cfg: Config) -> list[ChunkResponse]:
+            return [
+                ChunkResponse(
+                    index=0,
+                    offset=0.0,
+                    payload={"segments": [{"start": 0.0, "end": 0.5, "text": "안녕"}]},
+                )
+            ]
+
+    with pytest.raises(MalformedTranscript, match="응답이 돌아오지 않은 조각"):
+        pipeline._make_spine(  # noqa: SLF001 - coverage 관문의 좁은 회귀 시험
+            prepared, Config(), MissingSecond(), require_complete_coverage=True
+        )
 
 
 def test_output_text_comes_straight_from_the_transcription(tmp_path: Path) -> None:

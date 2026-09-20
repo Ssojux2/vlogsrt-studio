@@ -114,10 +114,14 @@ def _add_project_command(sub: argparse._SubParsersAction) -> None:
     project = sub.add_parser(
         "project", help="Final Cut 프로젝트에서 러프컷 초안 자막을 만든다 (파생 계층)"
     )
-    project_commands = project.add_subparsers(dest="project_command", required=True)
+    project_commands = project.add_subparsers(
+        dest="project_command",
+        required=True,
+        metavar="{receive,analyze,review,roughcut,caption}",
+    )
     run = project_commands.add_parser(
         "run",
-        help="컷 → 자막 파이프라인을 한 번에 (임시 — 최종 표면은 inspect|cut|approve|caption)",
+        help=argparse.SUPPRESS,
     )
     run.add_argument("input", type=Path, help="Final Cut 프로젝트(.fcpxml)")
     run.add_argument(
@@ -150,6 +154,36 @@ def _add_project_command(sub: argparse._SubParsersAction) -> None:
     mode.add_argument(
         "--online", action="store_true", help="실제 API 호출. 유료. 길이 안전장치 없음"
     )
+    # 진단 호환 명령은 파싱되지만 도움말 선택지에서는 숨긴다.
+    project_commands._choices_actions = [
+        action for action in project_commands._choices_actions if action.dest != "run"
+    ]
+
+    receive = project_commands.add_parser("receive", help="FCPXML을 작업공간에 수신")
+    receive.add_argument("input", type=Path)
+    receive.add_argument("--workspace", type=Path, required=True)
+
+    analyze = project_commands.add_parser("analyze", help="작업 프로세스의 후보 JSONL을 검사")
+    analyze.add_argument("workspace", type=Path)
+    analyze.add_argument("--candidates", type=Path, required=True)
+
+    review = project_commands.add_parser("review", help="사람이 승인한 후보로 계획 고정")
+    review.add_argument("workspace", type=Path)
+    review.add_argument("--approve", action="append", default=[])
+
+    roughcut = project_commands.add_parser("roughcut", help="승인 계획을 새 FCPXML로 렌더")
+    roughcut.add_argument("workspace", type=Path)
+    roughcut.add_argument("-o", "--out", type=Path, required=True)
+
+    caption = project_commands.add_parser("caption", help="최종 공유 오디오로 한국어 SRT 생성")
+    caption.add_argument("workspace", type=Path)
+    caption.add_argument("render_audio", type=Path)
+    caption.add_argument("final_fcpxml", type=Path)
+    caption.add_argument("-o", "--out", type=Path, required=True)
+    caption.add_argument("--yes", action="store_true", help="표시된 온라인 예상 비용 확인")
+    caption_mode = caption.add_mutually_exclusive_group()
+    caption_mode.add_argument("--offline", action="store_true", help="픽스처만 사용 (기본값)")
+    caption_mode.add_argument("--online", action="store_true", help="실제 API 호출. 유료")
 
 
 def _add_config_options(parser: argparse.ArgumentParser) -> None:
@@ -362,7 +396,7 @@ def cmd_keywords(args: argparse.Namespace) -> int:
 
 def cmd_project(args: argparse.Namespace) -> int:
     """파생 계층 — 계산·자격증명·예외 변환은 전부 project.commands의 몫이다."""
-    return commands.project_run(args)
+    return commands.project_command(args)
 
 
 _COMMANDS = {

@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from vlogsrt import cli
 from vlogsrt.project.fcpxml import parse_project
 from vlogsrt.project.review import (
     CandidateAnalysis,
@@ -16,7 +17,7 @@ from vlogsrt.project.review import (
 )
 from vlogsrt.project.timebase import FrameInterval, parse_fcpx_time
 from vlogsrt.project.vad.guard import InstanceGuard
-from vlogsrt.project.workflow_protocol import ProjectRevision
+from vlogsrt.project.workflow_protocol import ProjectRevision, WorkflowJournal, encode_message
 
 
 def _project(tmp_path: Path) -> tuple[Path, object]:
@@ -233,3 +234,56 @@ def test_review_plan_rejects_unknown_and_stale_candidate_ids(tmp_path: Path) -> 
     )
     with pytest.raises(ValueError, match="리비전"):
         build_review_plan(wrong_revision, (stale,), approved_candidate_ids=())
+
+
+def test_staged_cli_roundtrip_applies_only_the_reviewed_candidate(tmp_path: Path) -> None:
+    """receive→analyze→review→roughcut의 파일 계약과 사람 게이트를 끝에서 끝까지 지킨다."""
+    input_path, document = _project(tmp_path)
+    workspace = tmp_path / "workspace"
+    assert cli.main(["project", "receive", str(input_path), "--workspace", str(workspace)]) == 0
+    journal = WorkflowJournal.open(workspace / "workflow.jsonl")
+    batch = generate_silence_candidates(
+        document,
+        journal.revision,
+        (_guard(document),),
+        locked_instance_ids=frozenset(),
+        analysis=_analysis(document),
+    )
+    candidates_path = tmp_path / "candidates.jsonl"
+    candidates_path.write_text(
+        "".join(encode_message(candidate) for candidate in batch.candidates), encoding="utf-8"
+    )
+
+    assert (
+        cli.main(
+            [
+                "project",
+                "analyze",
+                str(workspace),
+                "--candidates",
+                str(candidates_path),
+            ]
+        )
+        == 0
+    )
+    assert (
+        cli.main(
+            [
+                "project",
+                "review",
+                str(workspace),
+                "--approve",
+                batch.candidates[0].candidate_id,
+            ]
+        )
+        == 0
+    )
+    roughcut = tmp_path / "rough.fcpxml"
+    assert cli.main(["project", "roughcut", str(workspace), "-o", str(roughcut)]) == 0
+
+    assert roughcut.is_file()
+    assert WorkflowJournal.open(workspace / "workflow.jsonl").state == "roughcut_imported"
+    root = ET.fromstring(roughcut.read_bytes())
+    markers = root.findall("library/event/project/sequence/spine/asset-clip/marker")
+    assert len(markers) == 1
+    assert batch.candidates[0].candidate_id in markers[0].get("value", "")

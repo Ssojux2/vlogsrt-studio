@@ -134,6 +134,19 @@ def _squash(text: str) -> str:
     return re.sub(r"\s+", "", text)
 
 
+def test_project_help_exposes_stages_and_hides_diagnostic_run(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """사람 게이트를 우회하는 `project run`이 공개 사용 흐름으로 다시 보이는 회귀를 잡는다."""
+    with pytest.raises(SystemExit) as stopped:
+        cli.main(["project", "--help"])
+    assert stopped.value.code == 0
+    help_text = capsys.readouterr().out
+    for command in ("receive", "analyze", "review", "roughcut", "caption"):
+        assert command in help_text
+    assert "run" not in help_text
+
+
 # ─────────────────────────────────────────────────────────────
 #  스텁 — 전사기 · VAD 세션 · ffmpeg 계층 · 프레임 경계 · 비전 클라이언트
 # ─────────────────────────────────────────────────────────────

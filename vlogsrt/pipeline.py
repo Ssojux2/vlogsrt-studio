@@ -228,6 +228,7 @@ def run(
     artifacts: bool = True,
     verify_with_second_model: bool = True,
     repair_repeats: bool = True,
+    require_complete_coverage: bool = False,
 ) -> RunResult:
     """`artifacts=False`면 SRT 하나만 남기고 trace는 쓰지 않는다.
 
@@ -241,7 +242,9 @@ def run(
     if not repair_repeats:
         cfg = replace(cfg, repair_enabled=False)
 
-    settled = _make_spine(prepared, cfg, transcriber)
+    settled = _make_spine(
+        prepared, cfg, transcriber, require_complete_coverage=require_complete_coverage
+    )
     # **글자 교정이 켜져 있으면 두 번째 모델은 SRT 앞에서 부른다** — 검증 플래그와 무관하게.
     # 검증을 끄면 교정이 조용히 꺼져 SRT가 검증 플래그에 따라 달라지던 길을 막는다(D37).
     second = _SecondModel.ask(transcriber, prepared, cfg) if cfg.retext_enabled else None
@@ -298,9 +301,19 @@ class _SecondModel:
         return _SecondModel(responses=tuple(responses))
 
 
-def _make_spine(prepared: Prepared, cfg: Config, transcriber: Transcriber) -> repair.Settled:
+def _make_spine(
+    prepared: Prepared,
+    cfg: Config,
+    transcriber: Transcriber,
+    *,
+    require_complete_coverage: bool = False,
+) -> repair.Settled:
     """1차 전사 → 되풀이 재전사 → 골격 확정. 이 함수가 끝나면 골격은 불변이다(규칙 2)."""
-    draft = fetch_draft(transcriber, build_job(prepared), cfg)
+    if require_complete_coverage:
+        outcome = transcribe.transcribe_outcome(transcriber, build_job(prepared), cfg)
+        draft = list(transcribe.require_nonempty(outcome))
+    else:
+        draft = fetch_draft(transcriber, build_job(prepared), cfg)
     log.info(f"1차 전사 {len(draft)}개 세그먼트")
     settled = settle_spine(draft, prepared, cfg, transcriber)
     log.info(f"골격 {len(settled.spine)}개 세그먼트")

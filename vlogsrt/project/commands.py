@@ -29,14 +29,218 @@ caption`이고 `run`을 두지 않는다(사람 게이트 우회).
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import os
+import shutil
 from pathlib import Path
 
 from vlogsrt import env, log, transcribe
 from vlogsrt.config import load_config
 from vlogsrt.project import runner
 from vlogsrt.project.config import ProjectConfig, load_project_config
+from vlogsrt.project.fcpxml import element_tree, parse_project
+from vlogsrt.project.final_caption import create_caption_request, generate_final_captions
 from vlogsrt.project.media import MediaOverride, load_media_map
+from vlogsrt.project.review import build_review_plan, render_approved_roughcut
+from vlogsrt.project.timebase import parse_fcpx_time
+from vlogsrt.project.workflow_protocol import (
+    CutCandidate,
+    EditPlan,
+    ProjectRevision,
+    ProtocolMessage,
+    WorkflowJournal,
+    decode_message,
+    encode_message,
+)
+
+_JOURNAL = "workflow.jsonl"
+_INPUT = "input.fcpxml"
+_REVISION = "revision.jsonl"
+_CANDIDATES = "candidates.jsonl"
+_PLAN = "edit-plan.jsonl"
+
+
+def project_command(args: argparse.Namespace) -> int:
+    """단계형 명령의 단일 CLI 경계. 진단용 run만 기존 실행기를 유지한다."""
+    if args.project_command == "run":
+        return project_run(args)
+    handlers = {
+        "receive": _project_receive,
+        "analyze": _project_analyze,
+        "review": _project_review,
+        "roughcut": _project_roughcut,
+        "caption": _project_caption,
+    }
+    try:
+        return handlers[args.project_command](args)
+    except Exception as exc:  # noqa: BLE001 - CLI는 traceback 없이 단계 실패를 보고한다
+        log.error(str(exc))
+        return 2
+
+
+def _project_receive(args: argparse.Namespace) -> int:
+    document = parse_project(args.input)
+    root = element_tree(document.raw_xml, str(document.info_path))
+    project = root.find("library/event/project")
+    sequence = root.find("library/event/project/sequence")
+    if project is None or sequence is None:
+        raise ValueError("FCPXML에 project/sequence가 없다")
+    name = project.get("name", "").strip()
+    if not name:
+        raise ValueError("FCPXML 프로젝트 이름이 비어 있다")
+    uid = (
+        project.get("uid", "").strip()
+        or hashlib.sha256(f"{document.input_sha256}:project".encode()).hexdigest()
+    )
+    duration_text = sequence.get("duration")
+    if duration_text is None:
+        raise ValueError("FCPXML sequence.duration이 없다")
+    revision = ProjectRevision(
+        input_sha256=document.input_sha256,
+        project_uid=uid,
+        project_name=name,
+        frame_duration=document.frame_duration,
+        duration=parse_fcpx_time(duration_text),
+    )
+    workspace = args.workspace
+    workspace.mkdir(parents=True, exist_ok=True)
+    if (workspace / _JOURNAL).exists():
+        raise ValueError(f"이미 수신된 작업공간이다: {workspace}")
+    shutil.copyfile(document.info_path, workspace / _INPUT)
+    WorkflowJournal.create(workspace / _JOURNAL, revision)
+    _write_messages(workspace / _REVISION, (revision,))
+    log.out(encode_message(revision).rstrip())
+    return 0
+
+
+def _project_analyze(args: argparse.Namespace) -> int:
+    workspace = args.workspace
+    journal = WorkflowJournal.open(workspace / _JOURNAL)
+    if journal.state != "received":
+        raise ValueError(f"analyze는 received 상태에서만 가능하다: {journal.state}")
+    candidates = tuple(_read_candidates(args.candidates, journal.revision.revision))
+    # 외부 작업 프로세스 결과를 전부 검증한 뒤에만 상태를 움직인다.
+    journal.transition(journal.revision.revision, "analyzing")
+    _write_messages(workspace / _CANDIDATES, candidates)
+    journal.transition(journal.revision.revision, "review_required")
+    log.out(f"컷 후보 {len(candidates)}건 · 사람 검토 필요")
+    return 0
+
+
+def _project_review(args: argparse.Namespace) -> int:
+    workspace = args.workspace
+    journal = WorkflowJournal.open(workspace / _JOURNAL)
+    if journal.state != "review_required":
+        raise ValueError(f"review는 review_required 상태에서만 가능하다: {journal.state}")
+    candidates = tuple(_read_candidates(workspace / _CANDIDATES, journal.revision.revision))
+    plan = build_review_plan(
+        journal.revision, candidates, approved_candidate_ids=tuple(args.approve)
+    )
+    _write_messages(workspace / _PLAN, (plan,))
+    log.out(encode_message(plan).rstrip())
+    return 0
+
+
+def _project_roughcut(args: argparse.Namespace) -> int:
+    workspace = args.workspace
+    journal = WorkflowJournal.open(workspace / _JOURNAL)
+    if journal.state != "review_required":
+        raise ValueError(f"roughcut은 review_required 상태에서만 가능하다: {journal.state}")
+    candidates = tuple(_read_candidates(workspace / _CANDIDATES, journal.revision.revision))
+    plan_message = _read_one(workspace / _PLAN)
+    if not isinstance(plan_message, EditPlan):
+        raise ValueError("edit-plan.jsonl의 메시지가 EditPlan이 아니다")
+    document = parse_project(workspace / _INPUT)
+    rendered = render_approved_roughcut(document, journal.revision, candidates, plan_message)
+    _write_bytes(args.out, rendered.xml_bytes)
+    report = args.out.with_suffix(args.out.suffix + ".review.json")
+    _write_json(
+        report,
+        {
+            "input_revision": journal.revision.revision,
+            "plan_revision": plan_message.plan_revision,
+            "project_name": rendered.project_name,
+            "removed_candidate_ids": list(rendered.removed_candidate_ids),
+        },
+    )
+    journal.transition(journal.revision.revision, "roughcut_imported")
+    log.out(f"roughcut: {args.out}")
+    log.out(f"review: {report}")
+    return 0
+
+
+def _project_caption(args: argparse.Namespace) -> int:
+    workspace = args.workspace
+    journal = WorkflowJournal.open(workspace / _JOURNAL)
+    if journal.state != "roughcut_imported":
+        raise ValueError(f"caption은 roughcut_imported 상태에서만 가능하다: {journal.state}")
+    request = create_caption_request(
+        journal.revision.revision, args.render_audio, args.final_fcpxml
+    )
+    _write_messages(workspace / "caption-request.jsonl", (request,))
+    journal.transition(journal.revision.revision, "caption_requested")
+    delivery = generate_final_captions(
+        request,
+        load_config(),
+        args.out,
+        online=bool(args.online),
+        confirmed_cost=bool(args.yes),
+    )
+    _write_messages(workspace / "caption-result.jsonl", (delivery.result,))
+    journal.transition(journal.revision.revision, "caption_ready")
+    if delivery.result.srt_path is None:
+        log.out("자막 상태: 발화 없음")
+    else:
+        log.out(f"srt: {delivery.result.srt_path}")
+    log.out("Final Cut Pro: File > Import > Captions → Relative to Timeline")
+    return 0
+
+
+def _read_candidates(path: Path, revision: str) -> list[CutCandidate]:
+    messages = _read_messages(path)
+    candidates: list[CutCandidate] = []
+    for message in messages:
+        if not isinstance(message, CutCandidate):
+            raise ValueError(
+                f"후보 JSONL에 CutCandidate 아닌 메시지가 있다: {type(message).__name__}"
+            )
+        if message.input_revision != revision:
+            raise ValueError("후보 JSONL에 다른 입력 리비전이 섞였다")
+        candidates.append(message)
+    return candidates
+
+
+def _read_messages(path: Path) -> list[ProtocolMessage]:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    except OSError as exc:
+        raise ValueError(f"JSONL을 읽을 수 없다: {path}") from exc
+    return [decode_message(line) for line in lines]
+
+
+def _read_one(path: Path) -> ProtocolMessage:
+    messages = _read_messages(path)
+    if len(messages) != 1:
+        raise ValueError(f"JSONL에는 메시지가 정확히 하나여야 한다: {path}")
+    return messages[0]
+
+
+def _write_messages(path: Path, messages: tuple[ProtocolMessage, ...]) -> None:
+    text = "".join(encode_message(message) for message in messages)
+    _write_bytes(path, text.encode())
+
+
+def _write_json(path: Path, payload: dict[str, object]) -> None:
+    text = json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
+    _write_bytes(path, text.encode())
+
+
+def _write_bytes(path: Path, payload: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary.write_bytes(payload)
+    os.replace(temporary, path)
 
 
 def project_run(args: argparse.Namespace) -> int:
