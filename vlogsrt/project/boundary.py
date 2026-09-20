@@ -42,8 +42,10 @@ P4-03는 계획된 요청을 **실행**한다 — 위의 계획은 순수하게 
   단위로 옮기고 그 밖의 프레임은 한 개도 안 들어온다. 재전사 조각도 같은 저장
   PCM에서 남긴 범위 안으로 묶여 잘린다 — 제거된 오디오의 덧붙임·문맥이 없다.
 - **엔진은 P3 소스 분석과 같은 순서로 돈다.** 1차 전사 → 골격 → 되풀이 재전사 →
-  불변 골격 → 큐 → 정제(조판 정리 포함, 정확히 한 번). 되풀이 재전사는 기본값
-  그대로 살아 있고, 시각과 글자는 여전히 응답의 세그먼트에서만 온다.
+  불변 골격 → 두 번째 모델 교정(1차 전사와 같은 조각 경계, D39) → 큐 → 정제(조판
+  정리 포함, 정확히 한 번). 되풀이 재전사는 기본값 그대로 살아 있고, 시각과 경계는
+  여전히 응답의 세그먼트에서만 나온다 — 게이트를 통과한 세그먼트의 글자만 두 번째
+  모델의 것으로 갈아낸다(D37). 그 호출이 죽어도 기록은 whisper 글자로 나간다.
 - **시계는 세 층이다.** 엔진·정제는 경계 국소 시계(남긴 프레임 ÷ 주파수), 큐는
   국소 시각에 남긴 범위의 시작 프레임을 정확히 한 번 더한 디코드 오디오 국소
   시계, 파일 시계의 원점은 파일/XML 배치 때 한 번 더한다. 반올림은 SRT
@@ -85,9 +87,9 @@ from itertools import pairwise
 from pathlib import Path
 from typing import Any, Literal, TypeVar
 
-from vlogsrt import log, pipeline, refine, repair, transcribe
+from vlogsrt import log, pipeline, refine, repair, retext, transcribe
 from vlogsrt.config import Config
-from vlogsrt.models import Chunk, Cue, Repair, Segment, Span
+from vlogsrt.models import Chunk, Cue, Repair, RetextRecord, Segment, Span
 from vlogsrt.project.captions import (
     SUBMS_COLLAPSED,
     PlacedSourceCue,
@@ -112,8 +114,12 @@ _SLICE_ID_DOMAIN = "vlogsrt-logical-slice-v1"
 _REQUEST_ID_DOMAIN = "vlogsrt-boundary-request-v1"
 """경계 요청 신원의 도메인 구분자 — 다른 해시 재료와 우연히 겹치지 않게 한다."""
 
-_BOUNDARY_KEY_DOMAIN = "vlogsrt-boundary-analysis-v1"
-"""경계 분석 캐시 키의 도메인 구분자 — 소스 키·PCM 키와 우연히 겹치지 않게 한다."""
+_BOUNDARY_KEY_DOMAIN = "vlogsrt-boundary-analysis-v2"
+"""경계 분석 캐시 키의 도메인 구분자 — 소스 키·PCM 키와 우연히 겹치지 않게 한다.
+
+v2(D39): 글자 교정이 파생 계층에 켜졌다. 설정 지문은 `cfg.to_dict()` 전체 해시라
+`retext_*`가 이미 들어 있지만 값이 그대로인 채 동작만 켜지면 옛 whisper 글자
+완성물이 같은 키로 재사용된다 — 소스 키 도메인과 함께 올려 키를 갈라놓는다."""
 
 _BOUNDARY_ID_DOMAIN = "vlogsrt-boundary-id-v1"
 """경계 기록 신원의 도메인 구분자 — 다른 해시 재료와 우연히 겹치지 않게 한다."""
@@ -1010,6 +1016,8 @@ class BoundaryTranscript:
     cues: tuple[SourceCue, ...]
     error: str | None
     cut_truncated: bool = True
+    # 글자 교정 기록(D39). 선택 필드다 — None은 이 단계에 도달하지 못했다는 뜻이다.
+    retext: RetextRecord | None = None
 
     def __post_init__(self) -> None:
         if self.status not in _TRANSCRIPT_STATUSES:
@@ -1058,13 +1066,19 @@ class _BoundaryRun:
 
 @dataclass
 class _BoundaryProgress:
-    """이미 완성된 단계의 증거 — 실패 기록에도 완성된 것은 버리지 않는다."""
+    """이미 완성된 단계의 증거 — 실패 기록에도 완성된 것은 버리지 않는다.
+
+    초안은 1차 전사 뒤에, 골격·재전사 기록은 settle 뒤에, 교정 기록은 settle 뒤
+    큐 앞에서, 큐는 refine 뒤에 채워진다.
+    """
 
     ranges: tuple[SampleRange, ...] = ()
+    chunks: tuple[Chunk, ...] = ()  # 두 번째 모델이 같은 경계를 봐야 한다(D39)
     draft: tuple[Segment, ...] = ()
     settled: tuple[Segment, ...] = ()
     repairs: tuple[Repair, ...] = ()
     cues: tuple[Cue, ...] = ()
+    retext: RetextRecord | None = None
 
 
 class _BoundaryLinkage:
@@ -1225,11 +1239,12 @@ def _first_pass(
 ) -> transcribe.TranscriptionOutcome:
     """남긴 범위를 조각으로 만들어 1차 전사를 부른다. 조각 증거는 progress에 남는다."""
     progress.ranges = _retained_ranges(run.reference, run.request.sample_range, run.cfg)
+    progress.chunks = _initial_chunks(
+        run.reference, run.request.sample_range, progress.ranges, run.scratch
+    )
     job = transcribe.TranscriptionJob(
         stem=run.reference.original_stem,
-        chunks=_initial_chunks(
-            run.reference, run.request.sample_range, progress.ranges, run.scratch
-        ),
+        chunks=progress.chunks,
         namespace=run.namespace,
     )
     return transcribe.transcribe_outcome(wrapped, job, run.cfg)
@@ -1241,7 +1256,7 @@ def _settled_transcript(
     capture: _BoundaryCapture,
     progress: _BoundaryProgress,
 ) -> BoundaryTranscript:
-    """재전사(주입 커터) → 불변 골격 → 큐 → 정제 → 완성물 출판."""
+    """재전사(주입 커터) → 불변 골격 → 글자 교정 계획 → 큐 → 정제 → 완성물 출판."""
     settled = repair.settle(
         list(progress.draft),
         repair.Source(
@@ -1257,14 +1272,57 @@ def _settled_transcript(
     progress.repairs = settled.repairs
     if capture.failures:
         return _record(run, progress, status=_STATUS_ERROR, error=capture.describe())
+    record = _plan_boundary_retext(run, wrapped, progress, settled)
+    progress.retext = record
     progress.cues = tuple(
-        refine.refine(pipeline.spine_to_cues(list(settled.spine)), run.cfg, run.local_duration)
+        refine.refine(
+            pipeline.apply_retext(pipeline.spine_to_cues(list(settled.spine)), record),
+            run.cfg,
+            run.local_duration,
+        )
     )
     if not progress.cues:
         return _record(
             run, progress, status=_STATUS_ERROR, error="정제를 끝내고 큐가 하나도 남지 않았다"
         )
     return _published_transcript(run, progress)
+
+
+def _plan_boundary_retext(
+    run: _BoundaryRun,
+    wrapped: _BoundaryCapturingTranscriber,
+    progress: _BoundaryProgress,
+    settled: repair.Settled,
+) -> RetextRecord:
+    """settle 뒤 큐 앞에서 세그먼트마다 갈 글자를 정한다(D37·D39).
+
+    두 번째 모델은 1차 전사와 **같은 조각**(남긴 범위의 국소 좌표)을 다시 본다 —
+    두 모델이 같은 경계를 봐야 대조가 성립한다. 호출이 죽어도 경계 기록은 whisper
+    글자로 나간다(레거시 `pipeline.run`과 같은 선): 실패는 `unavailable` 기록과 WARN으로
+    남고 오류가 아니다 — 재전사·심판·커터 실패와 다른 선이다. 포획 목록에 남은 이
+    실패를 오류로 세는 길은 없다 — 이미 기록했다.
+    """
+    if not run.cfg.retext_enabled:
+        return retext.switched_off()
+    job = transcribe.TranscriptionJob(
+        stem=run.reference.original_stem,
+        chunks=progress.chunks,
+        namespace=run.namespace,
+        kind=transcribe.VERIFY_KIND,
+    )
+    try:
+        responses = wrapped.transcribe(job, run.cfg)
+    except Exception as exc:  # noqa: BLE001 - 두 번째 모델이 죽어도 whisper 자막은 나온다
+        record = retext.unavailable(f"{exc.__class__.__name__}: {exc}")
+        pipeline.report_retext(record)
+        return record
+    chunks = [
+        retext.ChunkText(response.index, response.offset, transcribe.parse_text(response.payload))
+        for response in responses
+    ]
+    record = retext.plan(settled.spine, chunks, run.local_duration, settled.repairs, run.cfg)
+    pipeline.report_retext(record)
+    return record
 
 
 def _empty_transcript(run: _BoundaryRun, progress: _BoundaryProgress) -> BoundaryTranscript:
@@ -1315,6 +1373,7 @@ def _record(
         repairs=progress.repairs,
         cues=_boundary_cues(run, progress.cues, settled),
         error=error,
+        retext=progress.retext,
     )
 
 
@@ -1853,6 +1912,7 @@ def _manifest_bytes(transcript: BoundaryTranscript) -> bytes:
         "cues": [_cue_body(cue) for cue in transcript.cues],
         "error": transcript.error,
         "cut_truncated": transcript.cut_truncated,
+        "retext": None if transcript.retext is None else transcript.retext.to_dict(),
     }
     return (json.dumps(body, ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode("utf-8")
 

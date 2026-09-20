@@ -49,7 +49,7 @@ from vlogsrt.project.runner import AnalyzedAudio, PreparedAudio
 from vlogsrt.project.speech import UnavailableSourceAudio
 from vlogsrt.project.vad.guard import InstanceGuard
 from vlogsrt.project.vad.runtime import VadUnavailable
-from vlogsrt.transcribe import FIXTURE_KIND, ChunkResponse, TranscriptionJob
+from vlogsrt.transcribe import FIXTURE_KIND, VERIFY_KIND, ChunkResponse, TranscriptionJob
 
 RATE = 16000
 DEFAULT_FRAMES = 24 * RATE
@@ -411,7 +411,10 @@ def test_one_audio_source_flows_to_guards_and_partition(tmp_path: Path) -> None:
     assert all(guard.status == "success" for guard in result.instance_guards)
     assert len(result.source_guards) == 1
     assert result.locked_instance_ids == frozenset()
-    assert [job.kind for job in scripted.calls] == [FIXTURE_KIND]  # 소스 전사 한 번
+    assert [job.kind for job in scripted.calls] == [
+        FIXTURE_KIND,
+        VERIFY_KIND,
+    ]  # 소스 전사 한 번(교정 호출이 따라 붙는다, D39)
     partition = _partition_of(result)
     assert partition.blocks  # 보호의 여집합이 블록으로 나온다
     # 블록은 문서의 클립 인스턴스에서 왔다 — 지어낸 인스턴스가 없다
@@ -738,7 +741,10 @@ def test_two_ids_over_the_same_bytes_flow_to_the_end(tmp_path: Path) -> None:
 
     assert len(result.vad_by_source) == 1  # 참조는 source_id로 유일화된다
     assert len([item for item in result.analyses if item.status == "success"]) == 1
-    assert len(scripted.source_calls()) == 1  # 전사도 한 번이다
+    assert [job.kind for job in scripted.source_calls()] == [
+        FIXTURE_KIND,
+        VERIFY_KIND,
+    ]  # 전사도 한 번이다(교정 호출이 따라 붙는다, D39)
     assert len(result.instance_guards) == 2
     partition = _partition_of(result)
     assert partition.blocks
@@ -768,6 +774,11 @@ def test_a_cut_segment_drives_boundary_retranscription(tmp_path: Path) -> None:
     assert result.transcripts[0].source_id == "acid-r2"
     assert result.boundary.unresolved_request_ids == ()
     assert any(cue.provenance == "boundary" for cue in result.boundary.cues)
-    assert [job.kind for job in scripted.calls] == [FIXTURE_KIND, FIXTURE_KIND]
+    assert [job.kind for job in scripted.calls] == [
+        FIXTURE_KIND,
+        VERIFY_KIND,
+        FIXTURE_KIND,
+        VERIFY_KIND,
+    ]  # 소스 전사·경계 전사 각각 교정 호출이 따라 붙는다(D39)
     partition = _partition_of(result)
     assert partition.blocks == ()  # 보호가 클립을 덮는다 — 분할은 통과만 한다
