@@ -58,8 +58,9 @@ from vlogsrt.project.export import (
 from vlogsrt.project.fcpxml import parse_project
 from vlogsrt.project.media import ResolvedMedia
 from vlogsrt.project.models import ClipInstance, ProjectDocument
+from vlogsrt.project.pcm import SampleRange
 from vlogsrt.project.timebase import FrameInterval, format_fcpx_time
-from vlogsrt.project.vad.guard import InstanceGuard
+from vlogsrt.project.vad.guard import InstanceGuard, SourceGuard
 from vlogsrt.project.vision.policy import VisionDecision, request_sha256
 from vlogsrt.project.xml_validation import XmlValidationUnavailable
 
@@ -270,6 +271,34 @@ def _xml_id_of(document: ProjectDocument, clip: ClipInstance) -> str:
         if resource.scoped_id == clip.resource_scoped_id:
             return resource.xml_id
     raise AssertionError("클립이 가리키는 자원이 없다")
+
+
+def _keep_all_source_guard(source_id: str, review: tuple[str, ...]) -> SourceGuard:
+    """실패 닫힌 소스 가드 — 전사 트레이스 error가 만든 모양(전체 보호·이유 문장)."""
+    total = 160_000
+    return SourceGuard(
+        source_id=source_id,
+        analysis_key=f"analysis-key-{source_id}",
+        pcm_sample0_file_time=Fraction(0),
+        protected=(SampleRange(0, total),),
+        vad_without_text=(),
+        protected_samples=total,
+        total_samples=total,
+        status="keep_all",
+        review=review,
+    )
+
+
+def _with_keep_all_guard(
+    bundle: _Bundle, instance_id: str, review: tuple[str, ...]
+) -> tuple[InstanceGuard, ...]:
+    """한 인스턴스의 가드를 실패 닫힘(keep_all)으로 바꾼다 — 이유 문장을 싣는다."""
+    return tuple(
+        replace(guard, status="keep_all", review=review)
+        if guard.instance_id == instance_id
+        else guard
+        for guard in bundle.guards
+    )
 
 
 def _decision(
@@ -799,6 +828,7 @@ def _publish(
     *,
     front_on_first_block: bool = True,
     unavailable_second_asset: str | None = None,
+    source_guards: tuple[SourceGuard, ...] = (),
     **kwargs,
 ) -> ExportPackage:
     dtd_path = kwargs.pop("dtd_path", None)
@@ -835,6 +865,7 @@ def _publish(
         captions,
         projection,
         bundle.guards,
+        source_guards=source_guards,
         dtd_path=dtd_path,
     )
 
@@ -906,6 +937,7 @@ def test_final_accepted_true_when_clean(tmp_path: Path) -> None:
     review = _load_json(_publish(tmp_path, keep_all_on_remaining_blocks=True).review)
     assert review["final_accepted"] is True
     assert review["final_blockers"] == []
+    assert review["analysis_failures"] == []
 
 
 def test_final_accepted_blocked_by_missing_decisions(tmp_path: Path) -> None:
@@ -976,6 +1008,7 @@ def test_final_accepted_blocked_by_source_unresolved_cues(tmp_path: Path) -> Non
         captions,
         collapsed,
         bundle.guards,
+        source_guards=(),
     )
     review = _load_json(package.review)
     assert review["final_accepted"] is False
@@ -1001,6 +1034,7 @@ def test_final_accepted_blocked_by_unresolved_requests(tmp_path: Path) -> None:
         captions,
         projection,
         bundle.guards,
+        source_guards=(),
     )
     review = _load_json(package.review)
     assert review["final_accepted"] is False
@@ -1022,6 +1056,7 @@ def test_final_accepted_blocked_by_edit_collapse_issues(tmp_path: Path) -> None:
         captions,
         projection,
         bundle.guards,
+        source_guards=(),
     )
     review = _load_json(package.review)
     assert review["final_accepted"] is False
@@ -1042,6 +1077,119 @@ def test_declared_no_audio_alone_still_reaches_final(tmp_path: Path) -> None:
     assert review["final_accepted"] is True
     assert review["final_blockers"] == []
     assert review["unavailable_instances"][0]["reason_code"] == "declared_no_audio"
+
+
+# ─────────────────────────────────────────────────────────────
+#  PROTO-6b — 분석 실패(keep_all 가드)는 "차단 없음"으로 나가지 않는다
+# ─────────────────────────────────────────────────────────────
+
+
+def test_keep_all_guard_blocks_final_with_analysis_failures(tmp_path: Path) -> None:
+    """실패 닫힘(keep_all) 인스턴스 가드는 블로커다 — 이유 문장이 기록에 남는다.
+
+    픽스처 없는 클립을 오프라인으로 돌린 스모크(PROTO-6b §1)의 계약판: 판정은
+    타입(`status`)으로만 하고 한국어 review 문장을 파싱하지 않는다. 소스 가드의
+    이유 문장(전사 트레이스 error 등)도 `source_review`로 함께 남는다.
+    """
+    destination = tmp_path / "export"
+    bundle = build_plan(
+        tmp_path, (CLIP("a1", duration_frames=500),), keep_all_on_remaining_blocks=True
+    )
+    instance_id = _clips(bundle.document)[0].instance_id
+    instance_review = ("소스 가드가 keep_all이다 — 이 슬라이스 전체가 보호다",)
+    source_review = ("전사 트레이스가 error다 — 전체를 보호한다: RuntimeError: 픽스처가 없습니다",)
+    package = publish_package(
+        destination,
+        bundle.document,
+        bundle.media,
+        bundle.plan,
+        _captions(bundle),
+        build_projection(bundle.document, (), locked=bundle.locked, unavailable=bundle.unavailable),
+        _with_keep_all_guard(bundle, instance_id, instance_review),
+        source_guards=(_keep_all_source_guard("acid-a1", source_review),),
+    )
+    review = _load_json(package.review)
+    assert review["final_accepted"] is False, "분석이 실패로 닫힌 패키지는 승인이 아니다"
+    assert "analysis_failed_instances" in review["final_blockers"]
+    assert review["analysis_failures"] == [
+        {
+            "instance_id": instance_id,
+            "source_id": "acid-a1",
+            "review": list(instance_review),
+            "source_review": list(source_review),
+        }
+    ], "실패 이유가 가드의 review 문장 그대로 기록에 남아야 한다"
+
+
+def test_inaudible_guard_alone_is_not_an_analysis_failure(tmp_path: Path) -> None:
+    """불가청(선언된 무음)은 완결된 사실이다 — 실패 닫힘과 달리 블로커가 아니다."""
+    destination = tmp_path / "export"
+    items = (CLIP("a1", duration_frames=500), CLIP("a2", offset_frames=500, duration_frames=250))
+    bundle = build_plan(
+        tmp_path,
+        items,
+        assets=(_AssetSpec("a1"), _AssetSpec("a2", has_audio=False)),
+        keep_all_on_remaining_blocks=True,
+    )
+    inaudible = [
+        guard for guard in bundle.guards if guard.status == "inaudible" and guard.review == ()
+    ]
+    assert inaudible, "이 장면은 불가청 가드를 만들어야 한다 — 아니면 장면이 틀렸다"
+    package = publish_package(
+        destination,
+        bundle.document,
+        bundle.media,
+        bundle.plan,
+        _captions(bundle),
+        build_projection(bundle.document, (), locked=bundle.locked, unavailable=bundle.unavailable),
+        bundle.guards,
+        source_guards=(),
+    )
+    review = _load_json(package.review)
+    assert review["final_accepted"] is True
+    assert review["final_blockers"] == []
+    assert review["analysis_failures"] == []
+
+
+def test_unavailable_keep_all_guard_carries_reason_and_both_blockers(tmp_path: Path) -> None:
+    """합성 가드(부재)도 keep_all이다 — 인스턴스 문장이 원인, 소스 문장칸은 비어 있다.
+
+    `stream_unavailable`은 `retryable_unavailable_instances`와 `analysis_failed_instances`
+    둘 다 낸다 — 중복이 아니라 다른 증거 두 개다(부재 기록·실패 닫힘 가드).
+    """
+    destination = tmp_path / "export"
+    items = (CLIP("a1", duration_frames=500), CLIP("a2", offset_frames=500, duration_frames=250))
+    bundle = build_plan(
+        tmp_path,
+        items,
+        unavailable_second_asset="stream_unavailable",
+        lock_second=True,
+        keep_all_on_remaining_blocks=True,
+    )
+    second = _clips(bundle.document)[1]
+    synthesized_review = ("소스 오디오 부재(stream_unavailable) — ffprobe가 죽었다",)
+    package = publish_package(
+        destination,
+        bundle.document,
+        bundle.media,
+        bundle.plan,
+        _captions(bundle),
+        build_projection(bundle.document, (), locked=bundle.locked, unavailable=bundle.unavailable),
+        _with_keep_all_guard(bundle, second.instance_id, synthesized_review),
+        source_guards=(),
+    )
+    review = _load_json(package.review)
+    assert review["final_accepted"] is False
+    assert "analysis_failed_instances" in review["final_blockers"]
+    assert "retryable_unavailable_instances" in review["final_blockers"]
+    assert review["analysis_failures"] == [
+        {
+            "instance_id": second.instance_id,
+            "source_id": "acid-a2",
+            "review": list(synthesized_review),
+            "source_review": [],  # 부재 소스에는 소스 가드가 없다 — 인스턴스 문장이 원인이다
+        }
+    ]
 
 
 def test_retryable_unavailable_blocks_final(tmp_path: Path) -> None:

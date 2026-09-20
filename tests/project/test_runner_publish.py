@@ -626,7 +626,13 @@ def test_payload_hash_failure_isolates_to_its_block(
 def test_zero_block_project_publishes_with_zero_decisions(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """가드가 keep_all로 닫힌 세계 — 오디오는 있어도 블록은 없다."""
+    """가드가 keep_all로 닫힌 세계 — 오디오는 있어도 블록은 없다.
+
+    PROTO-6b 이전엔 이 세계가 `차단 없음`(종료 0)으로 나갔다 — VAD가 죽어
+    소스 전체를 보호로 닫았는데 판정할 것이 없다고 승인된 것이다. 이제
+    keep_all 가드가 `analysis_failed_instances`로 막는다(실패를 다루는 장면이라
+    기대값을 새 사실로 고쳤다 — 단언을 약화하지 않는다).
+    """
     result, client, _frames = _publish(
         tmp_path, monkeypatch, clips=(_ClipSpec("r2", duration="24s"),), session=_BrokenSession()
     )
@@ -635,7 +641,10 @@ def test_zero_block_project_publishes_with_zero_decisions(
     assert result.decisions == ()
     assert client.calls == []
     review = _review_of(result)
-    assert review["final_accepted"] is True
+    assert review["final_accepted"] is False, "분석이 실패로 닫힌 패키지는 승인이 아니다"
+    assert review["final_blockers"] == ["analysis_failed_instances"]
+    assert len(review["analysis_failures"]) == len(result.analyzed.instance_guards)
+    assert review["analysis_failures"][0]["source_review"], "VAD 실패 이유가 기록에 남는다"
     assert result.package.fcpxml.is_file()
 
 

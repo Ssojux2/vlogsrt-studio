@@ -30,7 +30,11 @@ through-edit을 낸다). 갭은 `plan.gaps`에서 그대로, 오프셋은 `m × 
 허용 집합으로 판정한다 — `unavailable_declared_no_audio`(완결된 기록) 외의
 코드는 예외 없이 블로커다. 판정이 없거나 오류인 블록도 리뷰 증거로 흘러
 분석이 일어나지 않은 패키지가 승인으로 나가지 못한다. 스트림·PCM 부재는
-재시도 가능한 실패라 막는다.
+재시도 가능한 실패라 막는다. **실패 닫힘(`keep_all`) 인스턴스 가드도 막는다**
+(PROTO-6b) — 판정은 타입(`status`)으로만 하고 한국어 review 문장을 파싱하지
+않는다. `inaudible`(선언된 무음)은 완결된 사실이라 막지 않는다. 가드의 이유
+문장은 `analysis_failures`에 인스턴스·소스 가드 그대로 남는다 — 실패 이유가
+기록 어디에도 없던 결함을 이 필드가 닫는다.
 """
 
 from __future__ import annotations
@@ -60,7 +64,7 @@ from vlogsrt.project.fcpxml import element_tree, parse_project
 from vlogsrt.project.media import ResolvedMedia
 from vlogsrt.project.models import AssetResource, ClipInstance, ProjectDocument
 from vlogsrt.project.timebase import FrameInterval, format_fcpx_time
-from vlogsrt.project.vad.guard import InstanceGuard
+from vlogsrt.project.vad.guard import InstanceGuard, SourceGuard
 
 FCPXML_NAME = "VLOG_AI_EDIT.fcpxml"
 EDIT_SRT_NAME = "VLOG_AI_EDIT.srt"
@@ -608,6 +612,7 @@ def publish_package(
     edit_captions: EditCaptionSet,
     source: BoundaryProjection,
     guards: Sequence[InstanceGuard],
+    source_guards: Sequence[SourceGuard],
     *,
     dtd_path: Path | None = None,
 ) -> ExportPackage:
@@ -617,12 +622,16 @@ def publish_package(
     불변 리비전 쓰기·해시·재구문·xmllint → 배타 잠금 아래 포인터 읽기·검사·교체.
     포인터 교체 전에 무엇이 실패하면 이 호출이 만든 리비전 디렉터리만 치우고
     옛 포인터·옛 리비전·사용자 물건은 그대로 둔다.
+
+    `source_guards`는 필수 인자다 — 빈 기본값을 주지 않는다. 실패 닫힌 소스의
+    이유 문장이 여기서 review.json으로 흐르는데, 안 넘기면 조용히 빈 성공이
+    되는 길이 다시 열린다(PROTO-6b).
     """
     root = Path(os.path.abspath(destination))
     _require_managed_root(root)
     text, emitted = _render_for_publication(document, media, plan, edit_captions, guards)
     _require_source_identity(document, plan, source)
-    review_payload = _review_payload(plan, edit_captions, source)
+    review_payload = _review_payload(plan, edit_captions, source, guards, source_guards)
     revision_dir = _create_revision(root, plan.revision)
     try:
         package = _write_revision(
@@ -680,15 +689,22 @@ def _require_source_identity(
         )
 
 
-def _review_payload(plan: EditPlan, captions: EditCaptionSet, source: BoundaryProjection) -> dict:
+def _review_payload(
+    plan: EditPlan,
+    captions: EditCaptionSet,
+    source: BoundaryProjection,
+    guards: Sequence[InstanceGuard],
+    source_guards: Sequence[SourceGuard],
+) -> dict:
     """review.json의 전부 — 최종 수용 판정은 여기서만 계산된다."""
-    blockers = _final_blockers(plan, captions, source)
+    blockers = _final_blockers(plan, captions, source, guards)
     return {
         "kind": _REVIEW_KIND,
         "plan_revision": plan.revision,
         "input_sha256": plan.input_sha256,
         "final_accepted": not blockers,
         "final_blockers": blockers,
+        "analysis_failures": _analysis_failures(guards, source_guards),
         "review": [_issue_record(issue) for issue in captions.review],
         "unavailable_instances": [_unavailable_record(row) for row in plan.unavailable_instances],
         "unresolved_request_ids": list(source.unresolved_request_ids),
@@ -704,14 +720,53 @@ def _review_payload(plan: EditPlan, captions: EditCaptionSet, source: BoundaryPr
     }
 
 
+def _analysis_failures(
+    guards: Sequence[InstanceGuard], source_guards: Sequence[SourceGuard]
+) -> list[dict]:
+    """실패 닫힘(`keep_all`) 가드의 기록 — 이유 문장을 문서 인스턴스 순서로 남긴다.
+
+    인스턴스 문장(`review`)은 그 인스턴스의 가드가, 소스 문장(`source_review`)은
+    그 소스의 keep_all 가드가 말한 것을 그대로 실는다 — 전사 트레이스 error 같은
+    원인은 소스 가드에만 산다. 부재 소스의 합성 가드는 소스 가드가 없으므로
+    `source_review`가 비지만 인스턴스 문장이 이미 원인을 말한다. `inaudible`은
+    완결된 사실이지 실패가 아니므로 여기에 오지 않는다.
+    """
+    keep_all_sources = {
+        guard.source_id: guard for guard in source_guards if guard.status == "keep_all"
+    }
+    return [
+        {
+            "instance_id": guard.instance_id,
+            "source_id": guard.source_id,
+            "review": list(guard.review),
+            "source_review": (
+                list(keep_all_sources[guard.source_id].review)
+                if guard.source_id in keep_all_sources
+                else []
+            ),
+        }
+        for guard in guards
+        if guard.status == "keep_all"
+    ]
+
+
 def _final_blockers(
-    plan: EditPlan, captions: EditCaptionSet, source: BoundaryProjection
+    plan: EditPlan,
+    captions: EditCaptionSet,
+    source: BoundaryProjection,
+    guards: Sequence[InstanceGuard],
 ) -> list[str]:
-    """최종 수용을 막는 기계 코드 — 미해결 경계·출처 큐·EDIT 접힘·재시도 부재·리뷰.
+    """최종 수용을 막는 기계 코드 — 미해결 경계·출처 큐·EDIT 접힘·재시도 부재·가드·리뷰.
 
     SOURCE에서 접힌 큐는 EDIT에서 표현 가능해져도 EDIT 이슈를 남기지 않는다
     (P6-03b). 그래서 접힘 깃발을 큐에서도 다시 본다 — 이슈 목록만 보면 빈
     EDIT 이슈를 '미해결 없음'으로 잘못 읽는다.
+
+    실패 닫힘(`keep_all`) 인스턴스 가드는 블로커다(PROTO-6b): 전사·VAD가 죽어
+    소스 전체를 보호로 닫은 패키지가 '성공, 자막 0장'으로 나가던 결함이다.
+    판정은 타입(`status`)으로만 한다 — 한국어 review 문장을 파싱하지 않는다.
+    `inaudible`은 완결된 사실이라 막지 않는다. 합성 부재 가드도 keep_all이므로
+    `retryable_unavailable_instances`와 함께 뜬다 — 중복이 아니라 다른 증거다.
 
     리뷰 코드는 허용 집합으로 판정한다: caption·edit 리뷰에
     `unavailable_declared_no_audio` 외의 코드가 하나라도 있으면 그 코드가
@@ -732,6 +787,8 @@ def _final_blockers(
         blockers.append("subms_collapsed_edit_cues")
     if any(row.reason_code in _RETRYABLE_UNAVAILABLE_REASONS for row in plan.unavailable_instances):
         blockers.append("retryable_unavailable_instances")
+    if any(guard.status == "keep_all" for guard in guards):
+        blockers.append("analysis_failed_instances")
     blockers.extend(
         sorted(
             {

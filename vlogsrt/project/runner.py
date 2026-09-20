@@ -720,6 +720,7 @@ def publish_project(
         edit_captions,
         source=analyzed.boundary,
         guards=analyzed.instance_guards,
+        source_guards=analyzed.source_guards,
         dtd_path=dtd_path,
     )
     result = PublishedProject(
