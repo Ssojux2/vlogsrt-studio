@@ -1,7 +1,11 @@
 # PROTO-6b — 분석 실패가 "차단 없음"으로 나가는 결함
 
 작업 디렉터리: `/Users/ssojux2/orca/workspaces/vlogsrt/proto-6b-failed-blocks`
-브랜치: `Ssojux2/proto-6b-failed-blocks`, 기준 **`569aecb`** (트리 깨끗, pytest 2500 passed)
+브랜치: `Ssojux2/proto-6b-failed-blocks`, 기준 **`b10e54b`** (트리 깨끗, pytest 2539 passed)
+
+> 기준을 두 번 옮겼다. 원래 `92c4ddf`였고, 통합 `569aecb` 뒤 S12가 들어가면서
+> `b10e54b`가 됐다. 실제로 판 워크트리와 워커에게 준 기준선이 이 값이다.
+> 구현은 `d5f5435`로 끝났고 통합은 `cc61a2f`다.
 
 **툴체인 shim 사망**: git은 `/Library/Developer/CommandLineTools/usr/bin/git`, 파이썬은
 `.venv/bin/python`, **`make` 금지**. ffmpeg·xmllint 정상.
