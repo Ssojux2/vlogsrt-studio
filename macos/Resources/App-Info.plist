@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleDisplayName</key><string>Final Cut Agent</string>
+  <key>CFBundleIdentifier</key><string>com.ssojux2.vlogsrt</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleDocumentTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleTypeExtensions</key><array><string>fcpxml</string><string>fcpxmld</string></array>
+      <key>CFBundleTypeName</key><string>Final Cut Pro XML</string>
+      <key>CFBundleTypeRole</key><string>Editor</string>
+    </dict>
+    <dict>
+      <key>CFBundleTypeExtensions</key><array><string>wav</string></array>
+      <key>CFBundleTypeName</key><string>PCM Audio</string>
+      <key>CFBundleTypeRole</key><string>Viewer</string>
+    </dict>
+  </array>
+  <key>com.apple.proapps.MediaAssetProtocol</key><dict/>
+</dict>
+</plist>
+
