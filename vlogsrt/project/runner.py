@@ -7,8 +7,9 @@ PROTO-2)은 문서를 파싱하고, 미디어를 해석하고, 오디오를 PCM�
 오류를 흘려보낸다. 2/3(`analyze_audio`, PROTO-3)은 그 산출물을 받아 전사·자막 투영·
 경계 재전사·VAD·가드를 한 번에 흘려 **분석이 끝난 상태**를 낸다. 3/3(`publish_project`,
 PROTO-4)은 그 상태를 받아 블록마다 프레임 표본과 비전 판정을 만들고, 계획·검증·
-EDIT 자막을 거쳐 패키지를 출판한다 — 비전 호출은 `transcribe.request_vision` 이름으로만
-나가고 러너는 클라이언트를 만들지 않으며 주입받는다.
+EDIT 자막을 거쳐 패키지를 출판한다 — 비전 판정은 주입받은 `transcribe.VisionResponder`
+가 내리고, 러너는 그 종류(실제·픽스처·닫힘)를 모른다. 조립된 페이로드는 블록마다
+`artifacts/vision/<block_id>.request.json`으로 남는다(재생과 유료 1콜 진단의 재료).
 
 세 가지 부재가 1/3에서만 난다:
 
@@ -40,6 +41,7 @@ ffmpeg·ffprobe는 `preprocess.probe_audio_stream`과 `pcm.build_reference`를 �
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -107,13 +109,16 @@ from vlogsrt.project.vision.policy import (
 from vlogsrt.project.vision.policy import (
     _require_config as _require_policy_config,
 )
-from vlogsrt.project.vision.sampling import FrameSamplingError, sample_frames
+from vlogsrt.project.vision.sampling import FrameSample, FrameSamplingError, sample_frames
 
 _PCM_DIR = "pcm"
 """PCM 논리 주소의 네임스페이스 — source·boundary가 쓰는 애셋 디렉터리와 갈라진다."""
 
 _FRAMES_DIR = "frames"
 """프레임 표본(PROTO-4)의 네임스페이스 뿌리 — 미리 만들어 경로로 돌려준다."""
+
+_VISION_DIR = "vision"
+"""비전 요청 덤프의 네임스페이스 — 표본이 실제로 뽑힐 때만 파일이 생긴다."""
 
 _POINTER_NAME = "reference.pcm"
 """논리 캐시 주소의 파일 이름 — 세대 PCM·세대 기록은 이 이름을 앞두고 나란히 산다."""
@@ -692,20 +697,20 @@ class PublishedProject:
 def publish_project(
     analyzed: AnalyzedAudio,
     *,
-    vision_client: object,
+    vision: transcribe.VisionResponder,
     destination: Path,
-    online: bool = False,
     dtd_path: Path | None = None,
 ) -> PublishedProject:
     """분석이 끝난 상태를 패키지로 출판한다 — 러너의 마지막 조각.
 
-    비전 클라이언트는 주입받는다(openai 경계는 `vlogsrt/transcribe.py`뿐이다 —
-    계약 §4). `online`은 사람의 승인을 표현하는 러너의 인자이고 `request_vision`에
-    그대로 간다: 거짓이면 블록마다 오류 판정이 남고 `final_accepted`가 막힌다 —
-    그것이 정직한 닫힘이다(승인의 부재가 항상 승인이 되는 길을 끊는다).
+    비전 재생기는 주입받는다(openai 경계는 `vlogsrt/transcribe.py`뿐이다 —
+    계약 §4). 러너는 재생기의 종류를 모른다: 실제·픽스처·닫힘 어느 것이 와도
+    `vision.decide(...)` 하나만 부른다. 닫힌 재생기는 블록마다 오류 판정을 남고
+    `final_accepted`가 막힌다 — 그것이 정직한 닫힘이다(승인의 부재가 항상
+    승인이 되는 길을 끊는다).
     """
     prepared = analyzed.prepared
-    partition, decisions = _partition_and_decide(analyzed, vision_client, online)
+    partition, decisions = _partition_and_decide(analyzed, vision)
     _require_decision_alignment(partition.blocks, decisions)
     plan = build_edit_plan(
         prepared.document, partition, analyzed.instance_guards, decisions, prepared.project_config
@@ -738,7 +743,7 @@ def publish_project(
 
 
 def _partition_and_decide(
-    analyzed: AnalyzedAudio, vision_client: object, online: bool
+    analyzed: AnalyzedAudio, vision: transcribe.VisionResponder
 ) -> tuple[BlockPartition, tuple[VisionDecision, ...]]:
     """분할 → 블록마다 판정 — 설정 게이트가 블록 루프 앞에 선다.
 
@@ -763,10 +768,10 @@ def _partition_and_decide(
         _decide_block(
             block,
             media_by_content[block.source_id],
-            vision_client,
+            vision,
             prepared.frames_dir,
+            prepared.artifact_dir / _VISION_DIR,
             cfg,
-            online,
         )
         for block in partition.blocks
     )
@@ -776,10 +781,10 @@ def _partition_and_decide(
 def _decide_block(
     block: EditBlock,
     media: ResolvedMedia,
-    vision_client: object,
+    vision: transcribe.VisionResponder,
     frames_dir: Path,
+    vision_dir: Path,
     cfg: ProjectConfig,
-    online: bool,
 ) -> VisionDecision:
     """블록 하나의 판정 — 표본·조립·전송 실패는 그 블록의 오류 판정이다.
 
@@ -787,7 +792,9 @@ def _decide_block(
     재구현하지 않는다. 전송 실패는 넓게 잡는다(SDK 예외 타입을 import 없이 분간할
     수 없으므로) — 잡은 즉시 오류 판정으로 바꿔 남기고 조용히 두지도 밖으로
     던지지도 않는다. 예외가 블록 루프를 넘어 올라오면 JPEG 한 장 때문에 프로젝트
-    전체 출판이 죽고 나머지 블록의 판정까지 버린다.
+    전체 출판이 죽고 나머지 블록의 판정까지 버린다. 단 `MissingVisionFixture`는
+    그 블록의 실패가 아니라 실행 설정의 결함이라 그대로 올린다 — 재생기를 고른
+    실행에서 픽스처가 없으면 남은 블록도 전부 같은 이유로 비어 있다.
     """
     request = vision_request_for(block, _PROJECTION_CONTEXT)
     try:
@@ -798,16 +805,81 @@ def _decide_block(
         payload = build_payload(request, samples, cfg)
     except VisionPolicyError as exc:
         return _failure_decision(request, "비전 페이로드 조립 실패", exc)
+    _dump_vision_request(vision_dir, block.block_id, payload, samples)
     try:
-        raw = transcribe.request_vision(
-            vision_client,
-            model=cfg.vision_model,
-            payload=payload,
-            online=online,
-        )
+        raw = vision.decide(model=cfg.vision_model, payload=payload, block_id=block.block_id)
+    except transcribe.MissingVisionFixture:
+        raise
     except Exception as exc:  # noqa: BLE001 - 블록의 실패 기록으로 바꿔 남긴다
         return _failure_decision(request, "비전 호출 실패", exc)
     return parse_decision(request, raw, cfg)
+
+
+def _dump_vision_request(
+    vision_dir: Path,
+    block_id: str,
+    payload: Mapping[str, object],
+    samples: Sequence[FrameSample],
+) -> None:
+    """조립된 페이로드를 블록마다 남긴다 — base64 blob은 프레임 설명으로 치환한다.
+
+    유료 1콜이 실패했을 때 "페이로드가 틀렸나 / 계정이 거부했나"를 가르는 증거다.
+    프레임 바이트는 이미 `frames_dir`에 있으므로 같은 바이트를 두 번 쓰지 않는다
+    — 이미지 칸은 `{frame_id, image_path, sha256, bytes}` 설명으로 바꾸고 안내
+    문장은 원문 그대로 남긴다. 표본 순서가 곧 페이로드의 이미지 순서다
+    (`build_payload`가 요청 순서대로 실으므로). **보내는 페이로드는 건드리지
+    않는다** — 덤프는 새로운 구조를 조립하고 원본 항목은 읽기만 한다.
+    """
+    content = _payload_content(payload, block_id)
+    pending = iter(samples)
+    dump_content: list[object] = []
+    for item in content:
+        if isinstance(item, dict) and item.get("type") == "image_url":
+            sample = next(pending, None)
+            if sample is None:
+                raise ValueError(
+                    f"페이로드 이미지가 표본 {len(samples)}개보다 많다 — 블록"
+                    f" {block_id!r}, 덤프를 믿을 수 없다"
+                )
+            dump_content.append(
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "frame_id": sample.frame_id,
+                        "image_path": str(sample.image_path),
+                        "sha256": sample.image_sha256,
+                        "bytes": sample.image_path.stat().st_size,
+                    },
+                }
+            )
+        else:
+            dump_content.append(item)
+    if next(pending, None) is not None:
+        raise ValueError(
+            f"페이로드 이미지가 표본 {len(samples)}개보다 적다 — 블록 {block_id!r},"
+            " 덤프를 믿을 수 없다"
+        )
+    vision_dir.mkdir(parents=True, exist_ok=True)
+    path = vision_dir / f"{block_id}.request.json"
+    path.write_text(
+        json.dumps({"messages": [{"content": dump_content}]}, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _payload_content(payload: Mapping[str, object], block_id: str) -> list[object]:
+    """페이로드에서 안내·이미지 칸 목록을 꺼낸다 — 모양이 어긋나면 덤프하지 않고 닫는다."""
+    messages = payload.get("messages")
+    if not isinstance(messages, list) or len(messages) != 1:
+        raise ValueError(f"페이로드의 messages가 정확히 하나가 아니다 — 블록 {block_id!r}")
+    message = messages[0]
+    content = message.get("content") if isinstance(message, dict) else None
+    if not isinstance(content, list):
+        raise ValueError(f"페이로드의 content가 리스트가 아니다 — 블록 {block_id!r}")
+    for item in content:
+        if not isinstance(item, dict):
+            raise ValueError(f"페이로드의 칸이 JSON 객체가 아니다 — 블록 {block_id!r}")
+    return content
 
 
 def _failure_decision(request: VisionRequest, stage: str, exc: BaseException) -> VisionDecision:

@@ -165,6 +165,24 @@ whisper 글자로 완성물이 나간다. 재전사·심판·커터 실패가 �
 재실행에서 교정 결과가 다르면 독점 출판 충돌(오류)로 끝난다 — 분석 키 도메인은 이
 때문에 v2로 올라갔다. 비용 추정기(`inspect`)는 아직 없다 — P7-03의 몫이다.
 
+## 10. 비전 판정 재생 — 출처는 계약 기록물에 남는다 (D40, V1)
+
+비전 판정의 주입 경계는 `transcribe.VisionResponder`다(`LiveVisionResponder`·
+`FixtureVisionResponder`·`ClosedVisionResponder` — 유료 경로는 실제 구현체 하나뿐).
+`--vision-fixtures` 재생으로 나온 판정은 **진짜 판정이 아니고 그 사실이 산출물에
+남아야 한다**:
+
+- stdout 한 줄이 재생을 먼저 밝힌다.
+- 재생 판정의 `reason`은 `재생 판정(픽스처) — ` 접두를 달고 `project_trace.json`의
+  `decisions[].reason`에 실린다 — 이 접두는 **선택 필드가 아니라** 모양이 멀쩡한
+  재생 답변마다 반드시 붙는다. `review.json`에는 재생 여부 필드를 두지 않는다:
+  그 파일의 바이트는 `export.py`가 홀로 정하는데, 필드를 더하는 것은 곧
+  `export.py` 수정이라 이 경로를 열려면 이 계약의 작성자 경계를 먼저 고쳐야 한다.
+- 블록마다 `artifacts/vision/<block_id>.request.json` 덤프가 남는다 — base64 blob은
+  프레임 설명으로 치환되고 보내는 페이로드는 건드리지 않는다.
+- 재생 픽스처가 없으면 블록 오류 판정으로 세탁되지 않고 실행 실패로 닫힌다
+  (`MissingVisionFixture` — 전사 픽스처 부재와 같은 선).
+
 ## 집행
 
 `scripts/check_invariants.py`가 이 계약의 **구문 경계** — import 방향과 CLI 예외의

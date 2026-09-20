@@ -300,15 +300,27 @@ Final Cut에서 **파일 → XML 내보내기…** 로 `.fcpxml`(version 1.14)�
 `--online`은 두 비전 값이 **둘 다** 차 있어야 시작한다. base URL이 비면 거부된다 —
 비워두면 SDK가 공개 엔드포인트로 가서 Google 키가 다른 공급자로 전송되기 때문이다.
 
-### 명령 — 오프라인 먼저, 온라인은 나중에
+### 명령 — 오프라인 먼저, 재생으로 보고, 온라인은 나중에
 
 ```bash
 # 1) 오프라인 (무료). 픽스처가 없으면 아래 "오프라인의 실제 모습"처럼 나온다.
 .venv/bin/python -m vlogsrt.cli project run 프로젝트.fcpxml -o OUT --project-config vlogsrt.project.toml
 
-# 2) 온라인 (유료)
+# 2) 비전 재생 (무료). 블록이 있는 실행은 OUT/artifacts/vision/ 아래에 블록마다
+#    <block_id>.request.json 덤프를 남긴다 — 파일 이름이 블록 아이디고 안내 문장에서
+#    후보 아이디를 읽는다. 각 블록의 판정을 <block_id>.vision.json로 한 디렉터리에 놓고:
+.venv/bin/python -m vlogsrt.cli project run 프로젝트.fcpxml -o OUT2 --project-config vlogsrt.project.toml --vision-fixtures 그디렉터리
+
+# 3) 온라인 (유료)
 .venv/bin/python -m vlogsrt.cli project run 프로젝트.fcpxml -o OUT --project-config vlogsrt.project.toml --online
 ```
+
+`--vision-fixtures`는 **재생**이다 — 기록해 둔 판정을 다시 얹을 뿐 모델을 부르지
+않는다. 재생으로 컷이 적용된 FCPXML을 무료로 처음 보는 길이 여기다. 재생 판정은
+진짜 판정이 아니므로 그 사실이 stdout 한 줄과 패키지 기록
+(`project_trace.json`의 각 판정 `reason` 앞 `재생 판정(픽스처) — ` 접두)에 남는다.
+픽스처가 없는 블록이 있으면 블록 오류(1)가 아니라 **실패(2)**로 닫힌다.
+`--online`과 함께 쓸 수 없다.
 
 **`--online`은 유료이고 길이 안전장치가 없다.** 레거시 `run`의 비용 확인 프롬프트가
 이 길에는 없다 — 확인 없이 전체 길이의 STT와 블록 수만큼의 비전 호출이 나간다.
@@ -319,7 +331,8 @@ Final Cut에서 **파일 → XML 내보내기…** 로 `.fcpxml`(version 1.14)�
 `-o OUT`은 **형제 배치**다 — `OUT/artifacts/`와 `OUT/package/`가 나란히 생긴다.
 
 - `OUT/artifacts/` — PCM(`pcm/<내용신원>/reference.pcm`), 전사 조각, 프레임 표본
-  (`frames/`). 재실행 때 재사용되는 캐시다.
+  (`frames/`), 비전 요청 덤프(`vision/<block_id>.request.json` — base64 blob 대신
+  프레임 설명이 실린다). 재실행 때 재사용되는 캐시다.
 - `OUT/package/current` → `revisions/<계획 리비전>/` — 한 리비전에 **다섯 파일**이
   묶음으로 나온다:
 

@@ -458,6 +458,142 @@ def request_vision(
     return _to_dict(response)
 
 
+class VisionResponder(Protocol):
+    """비전 판정의 주입 경계 — `Transcriber`와 대칭이다.
+
+    구현체가 셋(실제/픽스처/닫힘)이라 실제로 필요하다. `block_id`는 픽스처를
+    블록마다 고르는 재료다 — 실제·닫힘 구현은 그 값을 쓰지 않아도 계약의
+    대칭이 우선한다.
+    """
+
+    def decide(
+        self, *, model: str, payload: Mapping[str, object], block_id: str
+    ) -> dict[str, Any]: ...
+
+
+@dataclass(frozen=True, slots=True)
+class LiveVisionResponder:
+    """실제 비전 호출 — `create_vision_client`로 만든 클라이언트를 들고 있다.
+
+    **유료 경로는 여기 하나뿐이다.** 클라이언트는 사람이 `--online`을 직접 친
+    실행에서 `commands`가 만들어 넘긴다 — 이 객체를 만들었다고 저절로 비용이
+    나가지는 않고, `request_vision(online=True)`만이 문을 연다.
+    """
+
+    client: Any
+
+    def decide(self, *, model: str, payload: Mapping[str, object], block_id: str) -> dict[str, Any]:
+        return request_vision(self.client, model=model, payload=payload, online=True)
+
+
+class MissingVisionFixture(RuntimeError):
+    """재생할 비전 픽스처가 없다 — 블록 하나의 실패가 아니라 실행 설정의 결함이다.
+
+    `FixtureTranscriber`의 `_missing_fixture`와 같은 선: 전사 픽스처가 없으면
+    블록마다 오류로 닫히는 게 아니라 실행 자체가 실패로 끝난다. 러너는 이 예외를
+    블록 실패 판정으로 바꾸지 않고 그대로 올린다 — 남은 블록도 같은 이유로
+    비어 있으므로 오류 판정 N개는 아무것도 새로 말하지 않는다.
+    """
+
+
+def _vision_fixture_path(namespace: Path, block_id: str) -> Path:
+    """namespace 안에 머무는 경로만 만든다 — `_namespace_path`와 같은 선이다.
+
+    파일명 조각 검사일 뿐 샌드박스가 아니다(block_id는 sha256 16진수라 지금은
+    항상 통과한다). 검사는 block_id의 모양이 바뀌어도 이 선이 먼저 서 있게 한다.
+    """
+    if not block_id or block_id in {".", ".."} or "/" in block_id or "\\" in block_id:
+        raise RuntimeError(f"비전 픽스처의 block_id가 안전한 파일명 조각이 아닙니다: {block_id!r}")
+    return namespace / f"{block_id}.vision.json"
+
+
+def _missing_vision_fixture(path: Path, block_id: str) -> MissingVisionFixture:
+    """문투는 `_missing_fixture`를 따르되, 이 파일은 사람이 직접 놓는다(녹화기가 없다)."""
+    return MissingVisionFixture(
+        f"비전 픽스처가 없습니다: {path}\n"
+        f"재생하려면 그 경로에 파일을 놓아야 합니다:\n"
+        f"  {block_id}.vision.json — 기록된 모델 응답 전체(JSON 객체, choices 포함)\n"
+        f"블록 아이디와 후보는 artifacts/vision/{block_id}.request.json 덤프에서 확인한다"
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class FixtureVisionResponder:
+    """녹화된 비전 응답을 읽는 재생기 — 네트워크를 모른다.
+
+    `openai`를 import하지 않고 클라이언트를 만들지도 않는다. 블록마다
+    `<namespace>/<block_id>.vision.json`을 읽는데, 모양이 멀쩡한 답의 `reason`에는
+    반드시 출처를 달아 돌려준다(`_REPLAY_MARK`) — 이 문장이 판정을 거쳐
+    패키지 기록(`project_trace.json`의 `decisions[].reason`)에 실리므로 재생 판정이
+    진짜 판정으로 읽히는 길이 없다. 정규화·요청 신원 연결은 실제 호출과 같은 길을
+    지나므로 낡은 픽스처는 연결 검사에서 닫힌다.
+    """
+
+    namespace: Path
+
+    def decide(self, *, model: str, payload: Mapping[str, object], block_id: str) -> dict[str, Any]:
+        path = _vision_fixture_path(self.namespace, block_id)
+        if not path.is_file():
+            raise _missing_vision_fixture(path, block_id)
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"비전 픽스처가 올바른 JSON이 아닙니다: {path} ({exc})") from exc
+        if not isinstance(raw, dict):
+            raise RuntimeError(f"비전 픽스처가 JSON 객체가 아닙니다: {path}")
+        return _marked_as_replayed(raw)
+
+
+_REPLAY_MARK = "재생 판정(픽스처) — "
+"""재생 답변의 reason 앞에 다는 출처 — 패키지 기록까지 그대로 흘러간다(V1)."""
+
+
+def _marked_as_replayed(raw: dict[str, Any]) -> dict[str, Any]:
+    """모양이 멀쩡한 답에만 출처를 단다 — 깨진 답은 손대지 않고 그대로 흘려보낸다.
+
+    깨진 답은 어차피 오류 판정으로 정규화되므로 accepted로 위장될 수 없다. 그래서
+    표시는 **승인될 수 있는 형태의 답**에만 필요하고, 그 형태가 아니면 건드리지
+    않는다(표시를 다다가 답을 깨뜨리는 것이 더 나쁘다). 답의 다른 칸은 한 글자도
+    바꾸지 않는다.
+    """
+    choices = raw.get("choices")
+    if not isinstance(choices, list) or len(choices) != 1:
+        return raw
+    first = dict(choices[0])
+    message = first.get("message")
+    if not isinstance(message, dict):
+        return raw
+    content = message.get("content")
+    if not isinstance(content, str):
+        return raw
+    try:
+        body = json.loads(content)
+    except ValueError:
+        return raw
+    if not isinstance(body, dict) or not isinstance(body.get("reason"), str):
+        return raw
+    body["reason"] = _REPLAY_MARK + body["reason"]
+    replayed_message = dict(message)
+    replayed_message["content"] = json.dumps(body, ensure_ascii=False)
+    first["message"] = replayed_message
+    marked = dict(raw)
+    marked["choices"] = [first]
+    return marked
+
+
+@dataclass(frozen=True, slots=True)
+class ClosedVisionResponder:
+    """재생기도 승인도 선택되지 않은 기본값 — 승인 없는 호출은 닫혀 있다.
+
+    게이트 문구를 다시 쓰지 않는다: `request_vision(online=False)`가 던지는
+    그 예외가 곧 이 재생기의 답이다. 블록마다 오류 판정으로 남고 출판은
+    종료 1로 막힌다 — 승인의 부재가 승인이 되는 길이 없다.
+    """
+
+    def decide(self, *, model: str, payload: Mapping[str, object], block_id: str) -> dict[str, Any]:
+        return request_vision(client=None, model=model, payload=payload, online=False)
+
+
 # ─────────────────────────────────────────────────────────────
 #  응답 해석
 # ─────────────────────────────────────────────────────────────

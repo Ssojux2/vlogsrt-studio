@@ -19,10 +19,14 @@ from vlogsrt.transcribe import (
     FIXTURE_KIND,
     ChunkCoverage,
     ChunkResponse,
+    ClosedVisionResponder,
     EmptyTranscript,
     FixtureTranscriber,
+    FixtureVisionResponder,
     LiveTranscriber,
+    LiveVisionResponder,
     MalformedTranscript,
+    MissingVisionFixture,
     TranscriptionJob,
     build_spine,
     create_vision_client,
@@ -1084,3 +1088,90 @@ def test_offline_defaults_and_lazy_clients_make_zero_constructions(
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     assert isinstance(get_transcriber(Config(), online=True), LiveTranscriber)
     assert built == []  # 클라이언트 생성은 실제 전송 직전(지연 import)에야 일어난다
+
+
+# ─────────────────────────────────────────────────────────────
+#  비전 재생기 (V1 §3-a) — Transcriber와 대칭인 주입 경계
+# ─────────────────────────────────────────────────────────────
+
+
+def test_live_responder_opens_the_paid_gate_and_passes_payload_verbatim() -> None:
+    """LiveVisionResponder는 request_vision(online=True) 하나로 간다 — 우회 호출이 없다."""
+    client = FakeVisionClient(reply={"choices": []})
+    raw = LiveVisionResponder(client=client).decide(
+        model="vision-model-x", payload=VISION_PAYLOAD, block_id="b" * 64
+    )
+    (call,) = client.calls
+    assert call == {"model": "vision-model-x", **VISION_PAYLOAD}
+    assert raw == {"choices": []}
+
+
+def test_closed_responder_raises_the_gate_itself() -> None:
+    """닫힘의 문구를 다시 쓰지 않는다 — request_vision의 게이트 예외가 곧 답이다."""
+    with pytest.raises(RuntimeError, match="online=True"):
+        ClosedVisionResponder().decide(
+            model="vision-model-x", payload=VISION_PAYLOAD, block_id="b" * 64
+        )
+
+
+def test_fixture_responder_reads_the_recorded_reply_per_block(tmp_path: Path) -> None:
+    """블록마다 파일 하나 — reason에 출처가 달린 채로 돌아간다(정규화는 러너가 한다)."""
+    body = {"choice": "c1", "reason": "되풀이 B-roll이다", "confidence": 0.9}
+    reply = {"choices": [{"message": {"content": json.dumps(body, ensure_ascii=False)}}]}
+    (tmp_path / "aaa.vision.json").write_text(
+        json.dumps(reply, ensure_ascii=False), encoding="utf-8"
+    )
+    responder = FixtureVisionResponder(namespace=tmp_path)
+    marked = responder.decide(model="vision-model-x", payload=VISION_PAYLOAD, block_id="aaa")
+    replayed = json.loads(marked["choices"][0]["message"]["content"])
+    assert replayed["reason"] == "재생 판정(픽스처) — 되풀이 B-roll이다"
+    assert replayed["choice"] == "c1" and replayed["confidence"] == 0.9  # 다른 칸은 그대로
+    recorded = json.loads(reply["choices"][0]["message"]["content"])
+    assert recorded["reason"] == "되풀이 B-roll이다"  # 기록 파일의 원문은 그대로다
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        {"choices": []},
+        {"choices": "no"},
+        {"choices": [{"message": {"content": "{not json"}}]},
+        {"choices": [{"message": {"content": "{}"}}]},  # reason이 없는 몸통
+    ],
+)
+def test_fixture_responder_leaves_broken_replies_untouched(tmp_path: Path, reply: dict) -> None:
+    """깨진 답은 표시를 다다가 오히려 깨뜨리지 않는다 — 어차피 오류 판정으로 간다."""
+    (tmp_path / "aaa.vision.json").write_text(json.dumps(reply), encoding="utf-8")
+    responder = FixtureVisionResponder(namespace=tmp_path)
+    assert responder.decide(model="m", payload=VISION_PAYLOAD, block_id="aaa") == reply, (
+        "멀쩡한 답만 표시한다 — 승인될 수 없는 답은 위장될 수도 없다"
+    )
+
+
+def test_fixture_responder_missing_file_is_a_loud_configuration_failure(
+    tmp_path: Path,
+) -> None:
+    """픽스처가 없으면 조용히 통과하지 않는다 — 파일을 놓으라고 안내한다."""
+    with pytest.raises(MissingVisionFixture, match="aaa.vision.json"):
+        FixtureVisionResponder(namespace=tmp_path).decide(
+            model="vision-model-x", payload=VISION_PAYLOAD, block_id="aaa"
+        )
+
+
+def test_fixture_responder_rejects_broken_records(tmp_path: Path) -> None:
+    (tmp_path / "bad.vision.json").write_text("{not json", encoding="utf-8")
+    (tmp_path / "list.vision.json").write_text("[1, 2]", encoding="utf-8")
+    responder = FixtureVisionResponder(namespace=tmp_path)
+    with pytest.raises(RuntimeError, match="올바른 JSON이 아닙니다"):
+        responder.decide(model="m", payload=VISION_PAYLOAD, block_id="bad")
+    with pytest.raises(RuntimeError, match="JSON 객체가 아닙니다"):
+        responder.decide(model="m", payload=VISION_PAYLOAD, block_id="list")
+
+
+@pytest.mark.parametrize("block_id", ["", ".", "..", "a/b", "a\\b"])
+def test_fixture_responder_rejects_unsafe_block_ids(tmp_path: Path, block_id: str) -> None:
+    """`_namespace_path`와 같은 선 — namespace 밖으로 나가는 경로는 아예 만들지 않는다."""
+    with pytest.raises(RuntimeError, match="안전한 파일명 조각이 아닙니다"):
+        FixtureVisionResponder(namespace=tmp_path).decide(
+            model="m", payload=VISION_PAYLOAD, block_id=block_id
+        )

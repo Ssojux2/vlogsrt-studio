@@ -36,6 +36,7 @@ from typing import Any
 
 import pytest
 
+from vlogsrt import transcribe
 from vlogsrt.config import Config
 from vlogsrt.models import Chunk
 from vlogsrt.preprocess import VideoStreamInfo
@@ -474,18 +475,28 @@ def _publish(
     fail_extract: bool = False,
     corrupt_digest_from: int | None = None,
 ) -> tuple[runner.PublishedProject, _FakeVisionClient, _FrameFake]:
-    """기본 장면(블록 둘)을 분석해 출판한다 — 나머지 선택은 깃발로 고른다."""
+    """기본 장면(블록 둘)을 분석해 출판한다 — 나머지 선택은 깃발로 고른다.
+
+    `online=True`(기본)는 승인된 실행의 모양 — 가짜 클라이언트를 든
+    `LiveVisionResponder`. `online=False`는 닫힌 재생기 — `request_vision`의
+    게이트가 블록마다 오류 판정을 만든다. 가짜 클라이언트는 두 경우 모두
+    돌려주니 "불리지 않았다"가 개수로 증명된다.
+    """
     prepared = _prepared(tmp_path, specs, clips)
     analyzed = runner.analyze_audio(prepared, transcriber=_Scripted(), session=session)
     frames = _fake_frames(
         monkeypatch, fail_extract=fail_extract, corrupt_digest_from=corrupt_digest_from
     )
     client = _FakeVisionClient(respond)
+    vision: transcribe.VisionResponder = (
+        transcribe.LiveVisionResponder(client=client)
+        if online
+        else transcribe.ClosedVisionResponder()
+    )
     result = runner.publish_project(
         analyzed,
-        vision_client=client,
+        vision=vision,
         destination=tmp_path / "export",
-        online=online,
     )
     return result, client, frames
 
@@ -542,6 +553,45 @@ def test_accepted_decisions_shrink_the_published_package(
     assert (tmp_path / "export" / "current").is_symlink()
 
 
+def test_payload_dump_replaces_blobs_and_never_touches_the_sent_payload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """조립된 페이로드는 블록마다 덤프에 남는다 — blob은 설명으로, 본체는 그대로(V1 §3-d).
+
+    덤프의 존재 이유는 유료 1콜 실패의 진단이다. base64 blob이 덤프에까지 실리면
+    같은 바이트가 두 번 쓰인다 — 이미지 칸은 `{frame_id, image_path, sha256, bytes}`
+    설명으로 치환되고 안내 문장은 원문 그대로 남는다. 모델에게 간 본체는
+    한 글자도 바뀌면 안 된다: 덤프가 페이로드를 오염시키면 재생과 실제 호출이
+    다른 질문을 하게 된다.
+    """
+    result, client, _frames = _publish(tmp_path, monkeypatch)
+
+    dumps = sorted((tmp_path / "artifacts" / "vision").glob("*.request.json"))
+    assert [dump.name[: -len(".request.json")] for dump in dumps] == sorted(
+        block.block_id for block in result.partition.blocks
+    )
+    dumped_texts: set[str] = set()
+    for dump in dumps:
+        raw = dump.read_text(encoding="utf-8")
+        assert "base64" not in raw, "덤프에 blob이 실렸다 — 같은 바이트를 두 번 쓴다"
+        content = json.loads(raw)["messages"][0]["content"]
+        assert content[0]["type"] == "text"
+        dumped_texts.add(content[0]["text"])
+        for item in content[1:]:
+            assert item["type"] == "image_url"
+            descriptor = item["image_url"]
+            assert set(descriptor) == {"frame_id", "image_path", "sha256", "bytes"}
+            assert descriptor["bytes"] == Path(descriptor["image_path"]).stat().st_size
+    # 보낸 본체는 데이터 URL 그대로 — 덤프가 페이로드를 오염시키지 않았다
+    sent_texts: set[str] = set()
+    for _model, messages in client.calls:
+        sent_texts.add(messages[0]["content"][0]["text"])
+        for item in messages[0]["content"]:
+            if item["type"] == "image_url":
+                assert item["image_url"]["url"].startswith("data:image/jpeg;base64,")
+    assert dumped_texts == sent_texts, "안내 문장이 원문 그대로 덤프에 실리지 않았다"
+
+
 # ─────────────────────────────────────────────────────────────
 #  2 · 3 · 4 — 실패는 그 블록의 error 판정이고 난간이 문다
 # ─────────────────────────────────────────────────────────────
@@ -596,6 +646,28 @@ def test_online_false_closes_every_decision_and_blocks_final(
     assert review["final_accepted"] is False
     assert review["final_blockers"] == ["decision_error"]
     assert result.package.fcpxml.is_file()
+
+
+def test_a_missing_vision_fixture_aborts_instead_of_error_decisions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """픽스처가 없으면 블록 오류 판정으로 세탁되지 않고 실행이 실패로 닫힌다(V1 §5).
+
+    전사 픽스처 부재가 실행 실패로 닫히는 것과 같은 선이다 — 남은 블록도 같은
+    이유로 비어 있으므로 오류 판정 N개는 아무것도 새로 말하지 않는다. 조용히
+    통과하는 길은 더 없다.
+    """
+    prepared = _prepared(tmp_path, (_AssetSpec("r2"),), (_ClipSpec("r2", duration="24s"),))
+    analyzed = runner.analyze_audio(
+        prepared, transcriber=_Scripted(), session=_ConstantSession(0.1)
+    )
+    _fake_frames(monkeypatch)
+    with pytest.raises(transcribe.MissingVisionFixture, match="비전 픽스처가 없습니다"):
+        runner.publish_project(
+            analyzed,
+            vision=transcribe.FixtureVisionResponder(namespace=tmp_path / "no-fixtures"),
+            destination=tmp_path / "export",
+        )
 
 
 # ─────────────────────────────────────────────────────────────

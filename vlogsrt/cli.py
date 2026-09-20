@@ -139,6 +139,12 @@ def _add_project_command(sub: argparse._SubParsersAction) -> None:
     run.add_argument(
         "--dtd", type=Path, default=None, help="DTD 경로 — 주지 않으면 대조하지 않는다"
     )
+    run.add_argument(
+        "--vision-fixtures",
+        type=Path,
+        default=None,
+        help="비전 판정 재생 — <block_id>.vision.json 이 담긴 디렉터리. 유료 호출 0회",
+    )
     mode = run.add_mutually_exclusive_group()
     mode.add_argument("--offline", action="store_true", help="픽스처만 사용 (기본값)")
     mode.add_argument(

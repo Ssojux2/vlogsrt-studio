@@ -2324,3 +2324,61 @@ whisper 글자, 둘째는 살아 gpt 글자) 완성물 바이트가 갈라져 �
 기록이 같으려면 gpt 픽스처도 같은 자리에 있어야 하므로 그 재료를 추가했다. 목록
 순서에 의존하던 디렉터리 단언 하나는 키 해시가 바뀌며 APFS 열거 순서가 뒤집혀
 `sorted()`로 바꿨다(항목의 집합은 그대로 못 박는다).
+
+---
+
+## D40 — 비전 판정은 주입받은 재생기가 내린다. 재생은 출처를 달고 나간다 (2026-09-20, V1)
+
+**문제**: "영상이 실제로 짧아지는가"를 사람이 무료로 확인할 길이 없었다. 비전
+클라이언트는 `--online`일 때만 만들어지고, 오프라인에서 블록이 생기면 블록마다
+`decision_error`로 막혀 종료 1 — 재료(전사 픽스처)가 다 있어도 판정 이후를
+돌려볼 수 없었다. 반대로 테스트의 mimic은 "이미지"가 `frame:37` 텍스트 바이트였고
+가짜 모델은 안내 문장을 문자열 파싱할 뿐 이미지를 한 번도 안 봤다.
+
+**해법**: `publish_project`가 받는 것을 `vision_client + online`에서
+`VisionResponder` 하나로 바꿨다. 구현체는 셋이다(`vlogsrt/transcribe.py`):
+
+| 구현체 | 하는 일 |
+|---|---|
+| `LiveVisionResponder` | 들고 있던 클라이언트로 `request_vision(online=True)` — **유료 경로는 여기 하나** |
+| `FixtureVisionResponder` | `<namespace>/<block_id>.vision.json`을 읽는다. openai를 import하지 않는다 |
+| `ClosedVisionResponder` | `request_vision(online=False)`의 게이트 예외를 그대로 던진다 — 무플래그 기본값 |
+
+선택은 `project/commands.py`가 한다(`--online` → 실제, `--vision-fixtures` → 재생,
+둘 다 없음 → 닫힘, 동시 지정 금지). **`online`이라는 단어가 러너에서 사라져
+commands에만 남는다** — PROTO-5의 "비용 경계는 commands.py"가 강해진 셈이고,
+재생기에 `online=True`를 먹이는 우회로가 타입 수준에서 없어졌다.
+`request_vision`의 `online` 게이트 자체는 한 글자도 안 고쳤다.
+
+**재생 판정은 진짜 판정으로 위장되지 않는다.** 세 곳에 출처가 남는다:
+
+1. stdout 한 줄 — "비전 판정 재생(픽스처 …) — 진짜 판정이 아니고 유료 호출은 0회다"
+2. 판정의 `reason` 앞 `재생 판정(픽스처) — ` 접두 — `project_trace.json`의
+   `decisions[].reason`에 그대로 실려 패키지 안에 남는다. 접두는
+   `FixtureVisionResponder`가 **모양이 멀쩡한 답에만** 단다 — 깨진 답은 어차피
+   오류 판정으로 정규화되므로 위장될 수 없고, 표시를 다다가 답을 깨뜨리는 것이
+   더 나쁘다.
+3. 블록마다 남는 `artifacts/vision/<block_id>.request.json` 덤프 — 유료 1콜이
+   실패했을 때 "페이로드가 틀렸나 / 계정이 거부했나"를 가르는 재료다. base64
+   blob은 `{frame_id, image_path, sha256, bytes}` 설명으로 치환하고(같은 바이트를
+   두 번 쓰지 않는다) 안내 문장은 원문 그대로다. **덤프는 보내는 페이로드를
+   건드리지 않는다** — 새 구조를 조립하고 원본은 읽기만 한다.
+
+review.json에는 필드를 더하지 **않았다**. review.json의 바이트는
+`project/export.py`가 홀로 정하는 계약 기록물인데 그 파일은 이 태스크의 금지
+목록에 있었다 — 선택지는 "금지를 좁히기"와 "출처를 다른 계약 기록물(trace)에
+싣기"였고, 위장 방지에 필요한 성질(승인될 수 있는 판정마다 출처가 보인다)을
+trace가 이미 지니므로 후자를 택했다. 재생 사실의 자리는
+`docs/PROJECT_CONTRACTS.md` §10에 적었다.
+
+**픽스처 부재는 블록 실패가 아니다.** `FixtureTranscriber`와 같은 선 — 전사
+픽스처가 없으면 블록마다 오류로 닫히는 게 아니라 실행이 실패로 끝나듯, 비전
+픽스처가 없으면 `MissingVisionFixture`가 블록 오류 판정으로 **세탁되지 않고**
+그대로 올라와 종료 2로 닫힌다. 남은 블록도 같은 이유로 비어 있으므로 오류 판정
+N개는 아무것도 새로 말하지 않는다.
+
+스모크(`scripts/smoke_project.py`)가 이 길을 전 구간으로 밟는다 — 클립 30초
+(앞 10초만 소리, 영상은 `testsrc` — 이 머신 ffmpeg에 `drawtext`가 없어 프레임
+카운터를 소스 자체에 각인한다), 합성 전사는 0~10초만 덮어 여집합 ≈20초를 블록으로
+만들고, 세 번의 실행(픽스처 없음 → 닫힘+덤프 → 재생)으로 제거 ≥1건·출력 duration <
+입력 duration·프레임 전부 진짜 JPEG(매직 바이트)를 기계로 확인한다.

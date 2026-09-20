@@ -443,3 +443,146 @@ def test_offline_blocks_on_decision_error_without_a_vision_client(
     assert vision_calls == []  # 비전 생성자 0회 — off라서가 아니라 만들 이유가 없다
     assert (out / "package" / "current").is_symlink()  # 막힌 패키지지 패키지 없음이 아니다
     assert (out / "artifacts").is_dir()
+
+
+# ─────────────────────────────────────────────────────────────
+#  3 — 재생: 픽스처 판정으로 오프라인에서 끝까지 (V1)
+# ─────────────────────────────────────────────────────────────
+
+
+def _vision_dumps(out: Path) -> dict[str, Path]:
+    """블록 아이디 → 요청 덤프 — 닫힌 실행이 남긴 재생 재료다."""
+    vision = out / "artifacts" / "vision"
+    assert vision.is_dir(), "비전 요청 덤프가 남지 않았다 — 재생 재료가 없다"
+    dumps = {path.name[: -len(".request.json")]: path for path in vision.glob("*.request.json")}
+    assert dumps, "덤프가 한 개도 없다 — 블록 0개로는 재생을 증명할 수 없다"
+    return dumps
+
+
+def _front_candidate_of_dump(dump: Path) -> str:
+    """덤프의 안내 문장에서 첫 후보 아이디 — 픽스처가 고를 값이다."""
+    text = json.loads(dump.read_text(encoding="utf-8"))["messages"][0]["content"][0]["text"]
+    for line in text.splitlines():
+        if line.startswith("후보(블록 앞쪽부터): "):
+            return line.split("후보(블록 앞쪽부터): ", 1)[1].split(",")[0].strip()
+    raise AssertionError("덤프의 안내 문장에서 후보 목록을 찾지 못했다")
+
+
+def _place_vision_fixtures(dumps: dict[str, Path], namespace: Path) -> None:
+    """블록마다 승인 응답 픽스처를 만든다 — 사람이 손으로 놓는 파일과 같은 모양이다."""
+    namespace.mkdir(parents=True, exist_ok=True)
+    for block_id, dump in dumps.items():
+        body = json.dumps(
+            {
+                "choice": _front_candidate_of_dump(dump),
+                "reason": "재생 픽스처 — 같은 내용의 단순 되풀이 B-roll이다",
+                "reason_kind": "repetitive_ordinary_broll",
+                "evidence_frame_ids": [],
+                "confidence": 0.9,
+            },
+            ensure_ascii=False,
+        )
+        (namespace / f"{block_id}.vision.json").write_text(
+            json.dumps({"choices": [{"message": {"content": body}}]}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+
+def test_vision_fixture_replay_shortens_the_sequence_offline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--vision-fixtures` 재생이 무료로 끝까지 간다 — 패키지 다섯 파일·짧아진 출력(V1).
+
+    유료 경로는 한 번도 열리지 않는다: `openai.OpenAI` 가드가 살아 있고 비전 클라이언트
+    생성자도 한 번도 불리지 않는다. 재생 사실은 stdout에 먼저 밝힌다 — 진짜 판정으로
+    읽히면 안 되기 때문이다.
+    """
+    project = _write_project(tmp_path, _media_file(tmp_path, "clip.mp4", b"synthetic-original"))
+    project_config = _write_project_config(tmp_path)
+    _patch_boundaries(monkeypatch)
+    _stub_transcriber(monkeypatch)
+    _forbid_real_openai(monkeypatch)
+    monkeypatch.setattr(transcribe, "create_vision_client", _fail_if_called("create_vision_client"))
+
+    closed_out = tmp_path / "out-closed"
+    assert cli.main(_argv(project, closed_out, project_config)) == 1  # 닫힌 기본값은 그대로
+    dumps = _vision_dumps(closed_out)
+    assert len(dumps) == 2  # 이 재료의 블록은 둘 — 닫힌 실행은 블록 수만큼 덤프를 남긴다
+
+    namespace = tmp_path / "vision-fixtures"
+    _place_vision_fixtures(dumps, namespace)
+    replay_out = tmp_path / "out-replay"
+    code = cli.main(
+        _argv(project, replay_out, project_config, extra=["--vision-fixtures", str(namespace)])
+    )
+    captured = capsys.readouterr()
+
+    assert code == 0
+    pointer = replay_out / "package" / "current"
+    assert pointer.is_symlink()
+    revision = pointer.resolve()
+    assert {entry.name for entry in revision.iterdir()} == set(PACKAGE_FILES)
+    validation = xml_validation.validate_xml(revision / FCPXML_NAME)
+    assert validation.valid, validation.diagnostics
+    assert Fraction(0) < _sequence_duration(revision / FCPXML_NAME) < Fraction(CLIP_SECONDS)
+    review = json.loads((revision / "review.json").read_text(encoding="utf-8"))
+    assert review["final_accepted"] is True
+    # 재생 판정의 출처가 패키지 기록에 남는다 — 진짜 판정으로 읽히면 안 된다.
+    trace = json.loads((revision / TRACE_NAME).read_text(encoding="utf-8"))
+    decisions = trace["plan"]["decisions"]
+    assert decisions and all(
+        decision["reason"].startswith("재생 판정(픽스처) — ") for decision in decisions
+    ), "패키지 안의 모든 판정이 재생 출처를 달아야 한다"
+    # 재생 사실이 결과보다 눈에 띄게 나온다 — 로그 레벨에 억제되면 안 된다.
+    squashed = _squash(captured.out + captured.err)
+    assert "비전판정재생" in squashed
+    assert "진짜판정이아니고" in squashed
+
+
+def test_online_and_vision_fixtures_are_mutually_exclusive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--online`과 `--vision-fixtures`는 함께 쓸 수 없다 — 파이프라인 시작 전에 닫는다."""
+    project = _write_project(tmp_path, _media_file(tmp_path, "clip.mp4", b"synthetic-original"))
+    project_config = _write_project_config(tmp_path)
+    _patch_boundaries(monkeypatch)
+    _stub_transcriber(monkeypatch)
+    _forbid_real_openai(monkeypatch)
+    monkeypatch.setattr(transcribe, "create_vision_client", _fail_if_called("create_vision_client"))
+
+    code = cli.main(
+        _argv(
+            project,
+            tmp_path / "out",
+            project_config,
+            extra=["--online", "--vision-fixtures", str(tmp_path / "vf")],
+        )
+    )
+    captured = capsys.readouterr()
+
+    assert code == 2
+    assert "--online과 --vision-fixtures는 함께 쓸 수 없다" in " ".join(
+        (captured.out + captured.err).split()
+    )
+
+
+def test_a_missing_vision_fixture_fails_loudly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """재생 픽스처가 없으면 조용히 통과하지 않는다 — 실행 실패(2)로 닫힌다."""
+    project = _write_project(tmp_path, _media_file(tmp_path, "clip.mp4", b"synthetic-original"))
+    project_config = _write_project_config(tmp_path)
+    empty = tmp_path / "empty-fixtures"
+    empty.mkdir()
+    _patch_boundaries(monkeypatch)
+    _stub_transcriber(monkeypatch)
+    _forbid_real_openai(monkeypatch)
+    monkeypatch.setattr(transcribe, "create_vision_client", _fail_if_called("create_vision_client"))
+
+    out = tmp_path / "out"
+    code = cli.main(_argv(project, out, project_config, extra=["--vision-fixtures", str(empty)]))
+    captured = capsys.readouterr()
+
+    assert code == 2, "블록 오류 판정(1)이 아니라 실행 실패여야 한다"
+    assert "비전 픽스처가 없습니다" in captured.out + captured.err
+    assert not (out / "package" / "current").exists(), "실패한 실행은 패키지를 내지 않는다"

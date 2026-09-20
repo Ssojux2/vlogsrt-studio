@@ -8,10 +8,13 @@ CLI(`cli.py`)는 파싱과 출력 조립만 하고, 이 모듈이 설정을 읽�
   `force_offline`을 빼면 셸의 `VLOGSRT_OFFLINE=0`이 `--offline`을 뚫고
   LiveTranscriber를 만든다(transcribe.py의 오프라인 판정식) — 레거시 `run`이 같은
   이유로 같은 선을 긋는다.
-- 비전 클라이언트는 `--online`일 때만 만들고, 자격증명은 `vlogsrt.project.toml`이
-  지정한 환경변수 **이름**에서만 푼다. base URL 값이 비면 `create_vision_client`가
-  공개 엔드포인트로 가므로 Google 키가 다른 공급자로 전송된다 — 파이프라인 시작
-  전에 멈춘다. 오류 문구에는 이름만 있고 값은 없다.
+- 비전 재생기는 `_vision_responder`가 고른다(셋 중 하나). 실제(`LiveVisionResponder`)
+  는 `--online`일 때만 만들고, 자격증명은 `vlogsrt.project.toml`이 지정한 환경변수
+  **이름**에서만 푼다. base URL 값이 비면 `create_vision_client`가 공개 엔드포인트로
+  가므로 Google 키가 다른 공급자로 전송된다 — 파이프라인 시작 전에 멈춘다. 오류
+  문구에는 이름만 있고 값은 없다. 재생(`--vision-fixtures`)은 네트워크를 모르는
+  `FixtureVisionResponder`로, 무플래그는 닫힌 재생기로 — 블록마다 오류 판정이 남는
+  지금의 기본값 그대로다.
 
 비용 길이 안전장치(레거시 `_confirm_cost`에 해당하는 것)는 없다 — 비용 추정은
 `inspect`의 몫이다. `run`은 임시 명령이다: 최종 표면은 `inspect | cut | approve |
@@ -58,7 +61,7 @@ def _run_pipeline(args: argparse.Namespace) -> int:
     )
     online = bool(args.online)
     transcriber = transcribe.get_transcriber(cfg, online=online, force_offline=not online)
-    vision_client = _vision_client(project_config) if online else None
+    vision = _vision_responder(args, project_config)
     prepared = runner.prepare_audio(
         args.input,
         args.out / "artifacts",
@@ -69,12 +72,33 @@ def _run_pipeline(args: argparse.Namespace) -> int:
     analyzed = runner.analyze_audio(prepared, transcriber=transcriber)
     published = runner.publish_project(
         analyzed,
-        vision_client=vision_client,
+        vision=vision,
         destination=args.out / "package",
-        online=online,
         dtd_path=args.dtd,
     )
-    return _report(published, dtd_path=args.dtd)
+    return _report(published, dtd_path=args.dtd, vision_fixtures=fixtures_of(args))
+
+
+def _vision_responder(
+    args: argparse.Namespace, project_config: ProjectConfig
+) -> transcribe.VisionResponder:
+    """재생기 선택 — 비전 비용 경계는 이 문 하나다(V1).
+
+    `--online`이면 실제(유료), `--vision-fixtures`면 픽스처 재생, 둘 다 없으면
+    닫힘 — 블록마다 오류 판정으로 막히는 기본값 그대로다. 동시 지정은 파이프라인
+    시작 전에 닫는다: 재생 판정이 유료 호출과 섞이면 어느 쪽 기록도 믿을 수 없다.
+    """
+    fixtures = getattr(args, "vision_fixtures", None)
+    if args.online and fixtures is not None:
+        raise RuntimeError(
+            "--online과 --vision-fixtures는 함께 쓸 수 없다 — 유료 호출과 재생이 섞이면"
+            " 기록을 믿을 수 없다"
+        )
+    if args.online:
+        return transcribe.LiveVisionResponder(client=_vision_client(project_config))
+    if fixtures is not None:
+        return transcribe.FixtureVisionResponder(namespace=Path(fixtures))
+    return transcribe.ClosedVisionResponder()
 
 
 def _vision_client(project_config: ProjectConfig) -> object:
@@ -106,16 +130,27 @@ def _vision_credentials(project_config: ProjectConfig) -> tuple[str, str]:
     return api_key, base_url
 
 
-def _report(published: runner.PublishedProject, *, dtd_path: Path | None) -> int:
+def fixtures_of(args: argparse.Namespace) -> Path | None:
+    """재생 픽스처 디렉터리 — 보고가 쓸 값만 꺼낸다(선택 로직은 `_vision_responder`)."""
+    value = getattr(args, "vision_fixtures", None)
+    return Path(value) if value is not None else None
+
+
+def _report(
+    published: runner.PublishedProject, *, dtd_path: Path | None, vision_fixtures: Path | None
+) -> int:
     """출판된 기록에서 종료 코드를 정한다 — `final_accepted`는 review.json의 것이다.
 
     `ExportPackage`·`PublishedProject`에는 그 값이 없다(경로뿐). `export`의 내부
-    함수로 재유도하지 않는다 — 출판된 기록이 정본이다.
+    함수로 재유도하지 않는다 — 출판된 기록이 정본이다. 재생기가 쓰였으면 그 사실을
+    결과보다 먼저 한 줄로 남긴다 — 진짜 판정으로 읽히면 안 되기 때문이다.
     """
     review = json.loads(published.package.review.read_text(encoding="utf-8"))
     final_accepted = bool(review["final_accepted"])
     blockers = list(review["final_blockers"])
     removed = len(published.plan.removed)
+    if vision_fixtures is not None:
+        log.out(f"비전 판정 재생(픽스처 {vision_fixtures}) — 진짜 판정이 아니고 유료 호출은 0회다")
     if removed:
         # 진단(warn)이 아니라 실행 결과다 — 로그 레벨에 억제되면 안 되므로 stdout으로.
         log.out(f"자동 컷 {removed}건 — 사람 검토 없음(초안)")
