@@ -41,6 +41,9 @@ from vlogsrt.models import (
     REPAIR_COLLAPSED,
     REPAIR_KEPT,
     REPAIR_REPLACED,
+    RETEXT_APPLIED,
+    RETEXT_OFF,
+    RETEXT_UNAVAILABLE,
     Cue,
     Segment,
 )
@@ -56,6 +59,7 @@ from vlogsrt.transcribe import (
     ARBITER_KIND,
     FIXTURE_KIND,
     RESCUE_KIND,
+    VERIFY_KIND,
     ChunkResponse,
     FixtureTranscriber,
     TranscriptionJob,
@@ -219,6 +223,7 @@ class _Scripted:
     whisper: Callable[[TranscriptionJob], list[ChunkResponse]] = field(default=lambda job: [])
     rescue: Callable[[TranscriptionJob], list[ChunkResponse]] | None = None
     arbiter: Callable[[TranscriptionJob], list[ChunkResponse]] | None = None
+    verify: Callable[[TranscriptionJob], list[ChunkResponse]] | None = None
 
     def transcribe(self, job: TranscriptionJob, cfg: Config) -> list[ChunkResponse]:
         self.calls.append(job)
@@ -226,6 +231,7 @@ class _Scripted:
             FIXTURE_KIND: self.whisper,
             RESCUE_KIND: self.rescue,
             ARBITER_KIND: self.arbiter,
+            VERIFY_KIND: self.verify,
         }
         handler = handlers.get(job.kind)
         if handler is None:
@@ -406,7 +412,8 @@ def test_success_transcribes_exactly_the_retained_samples(tmp_path: Path) -> Non
     assert (namespace / "demo.BOUNDARY.json").is_file()
     # 완성물은 완성물 뿌리 안에만 산다.
     assert sorted(path.name for path in tmp_path.iterdir()) == ["artifacts", "ref.pcm"]
-    assert scripted.kinds() == [FIXTURE_KIND], "되풀이가 없으면 재전사는 한 푼도 안 쓴다"
+    # 되풀이가 없으면 재전사는 한 푼도 안 쓴다 — 교정 호출만 따라 붙는다(D39).
+    assert scripted.kinds() == [FIXTURE_KIND, VERIFY_KIND]
 
 
 def test_multi_chunk_plan_snaps_offsets_and_durations_to_actual_frames(
@@ -424,7 +431,7 @@ def test_multi_chunk_plan_snaps_offsets_and_durations_to_actual_frames(
     transcript, artifacts = _run(tmp_path, reference, trace, request, cfg, scripted)
 
     assert transcript.status == "success"
-    (job,) = scripted.calls
+    (job,) = [call for call in scripted.calls if call.kind == FIXTURE_KIND]
     chunks = sorted(job.chunks, key=lambda chunk: chunk.index)
     assert [(chunk.index, chunk.offset, chunk.duration) for chunk in chunks] == [
         (0, 0.0, float(Fraction(30_000, RATE))),
@@ -456,7 +463,7 @@ def test_namespace_is_asset_boundary_cache_key_with_the_reference_stem(
     transcript, artifacts = _run(tmp_path, reference, trace, request, cfg, scripted)
 
     assert transcript.status == "success"
-    assert scripted.kinds() == [FIXTURE_KIND, RESCUE_KIND, ARBITER_KIND, RESCUE_KIND]
+    assert scripted.kinds() == [FIXTURE_KIND, RESCUE_KIND, ARBITER_KIND, RESCUE_KIND, VERIFY_KIND]
     namespace = artifacts / "acid-1" / "boundary" / transcript.cache_key
     assert {job.namespace for job in scripted.calls} == {namespace}
     assert {job.stem for job in scripted.calls} == {"demo"}, "잡 stem은 참조의 original_stem이다"
@@ -782,7 +789,7 @@ def test_recovered_repeat_is_replaced_from_the_retained_pcm(tmp_path: Path) -> N
         CLEAN,
         "끝 마디입니다",
     ]
-    assert scripted.kinds() == [FIXTURE_KIND, RESCUE_KIND]
+    assert scripted.kinds() == [FIXTURE_KIND, RESCUE_KIND, VERIFY_KIND]
     scratch = artifacts / "acid-1" / "boundary" / transcript.cache_key / "work"
     params, raw = _wav_frames(scratch / "repair-0000.wav")
     assert params == (1, 2, RATE, 48_000)  # 국소 [2, 5) — margin=0
@@ -835,7 +842,7 @@ def test_short_unrecovered_repeat_is_kept(tmp_path: Path) -> None:
     assert [record.text for record in transcript.settled_spine] == [
         record.text for record in transcript.draft
     ]
-    assert scripted.kinds() == [FIXTURE_KIND, RESCUE_KIND, ARBITER_KIND]
+    assert scripted.kinds() == [FIXTURE_KIND, RESCUE_KIND, ARBITER_KIND, VERIFY_KIND]
 
 
 def test_long_unrecovered_repeat_is_collapsed(tmp_path: Path) -> None:
@@ -861,7 +868,7 @@ def test_a_positive_arbiter_answer_buys_one_hotter_retry(tmp_path: Path) -> None
         hotter_clean=True,
     )
     transcript, _artifacts = _run(tmp_path, reference, trace, request, cfg, scripted)
-    assert scripted.kinds() == [FIXTURE_KIND, RESCUE_KIND, ARBITER_KIND, RESCUE_KIND]
+    assert scripted.kinds() == [FIXTURE_KIND, RESCUE_KIND, ARBITER_KIND, RESCUE_KIND, VERIFY_KIND]
     assert transcript.repairs[0].arbiter_clean and transcript.repairs[0].arbiter_answered
     assert transcript.status == "success"
 
@@ -873,7 +880,7 @@ def test_an_empty_arbiter_answer_is_valid_no_speech_not_an_error(tmp_path: Path,
         tmp_path, count=3, rescue_payload=_loop_rescue(), arbiter_payload={"text": text}
     )
     transcript, _artifacts = _run(tmp_path, reference, trace, request, cfg, scripted)
-    assert scripted.kinds() == [FIXTURE_KIND, RESCUE_KIND, ARBITER_KIND]
+    assert scripted.kinds() == [FIXTURE_KIND, RESCUE_KIND, ARBITER_KIND, VERIFY_KIND]
     assert transcript.status == "success"
     assert transcript.error is None
     assert transcript.repairs[0].arbiter_answered and not transcript.repairs[0].arbiter_clean
@@ -898,6 +905,9 @@ def test_reference_stem_fixture_namespace_reuse_and_retry_subset(tmp_path: Path)
         tmp_path, count=3, rescue_payload=_clean_rescue(), arbiter_payload=None
     )
     artifacts = tmp_path / "artifacts"
+    # 회복된 골격 그대로의 gpt 응답 — 세 실행이 같은 교정 기록을 내는 재료다(D39).
+    gpt_payload = {"text": f"첫 마디입니다 {CLEAN} 끝 마디입니다"}
+    scripted.verify = lambda job: _echo(job, gpt_payload)
     first = transcribe_boundaries([request], [reference], [trace], cfg, scripted, artifacts)[0]
 
     namespace = artifacts / "acid-1" / "boundary" / first.cache_key
@@ -921,6 +931,7 @@ def test_reference_stem_fixture_namespace_reuse_and_retry_subset(tmp_path: Path)
         RESCUE_KIND,
         [_record(0, 2.0, _clean_rescue()), _record(1, 9.9, _loop_rescue())],
     )
+    _write_fixture(namespace, "demo", VERIFY_KIND, [_record(0, 0.0, gpt_payload)])
 
     replay = transcribe_boundaries(
         [request],
@@ -941,7 +952,165 @@ def test_reference_stem_fixture_namespace_reuse_and_retry_subset(tmp_path: Path)
 
     assert replay == first == again, "같은 키의 같은 바이트는 재출판이 아니라 재사용이다"
     assert len(list(namespace.glob("*.BOUNDARY.json"))) == 1
-    assert [job.kind for job in scripted.calls] == [FIXTURE_KIND, RESCUE_KIND]
+    assert [job.kind for job in scripted.calls] == [FIXTURE_KIND, RESCUE_KIND, VERIFY_KIND]
+
+
+# ─────────────────────────────────────────────────────────────
+#  글자 교정 — 두 번째 모델을 남긴 범위의 같은 경계로 묻는다 (Q3-2, D39)
+# ─────────────────────────────────────────────────────────────
+
+
+def test_gpt_letters_replace_whisper_letters_on_unchanged_times(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """게이트를 통과한 세그먼트만 글자가 바뀐다 — 시각·seg_ids·큐 수는 한 칸도 안 움직인다."""
+    reference, trace, request, scripted, cfg, _pcm = _world(tmp_path)
+    scripted.verify = lambda job: _echo(
+        job, {"text": "안녕하세요 오늘은 방원동에 왔습니다 브이로그입니다"}
+    )
+
+    entering: dict[str, list[Cue]] = {}
+    real_refine = refine.refine
+
+    def refine_spy(cues: list[Cue], cfg: Config, duration: float = 0.0) -> list[Cue]:
+        entering["cues"] = list(cues)
+        return real_refine(cues, cfg, duration)
+
+    monkeypatch.setattr(refine, "refine", refine_spy)
+    transcript, artifacts = _run(tmp_path, reference, trace, request, cfg, scripted)
+
+    assert transcript.status == "success"
+    assert transcript.retext is not None and transcript.retext.status == RETEXT_APPLIED
+    # refine에 들어가는 큐는 세그먼트 시각·seg_ids·번호 그대로다 — 교정이 얹은 것은
+    # 글자와 깃발뿐이다(D37). 시각이 한 밀리초라도 움직이면 이 등식이 깨진다.
+    assert [(c.start, c.end, c.seg_ids, c.index) for c in entering["cues"]] == [
+        (0.5, 2.0, (0,), 1),
+        (3.0, 5.5, (1,), 2),
+        (6.0, 7.5, (2,), 3),
+    ]
+    assert [c.text for c in entering["cues"]] == [
+        "안녕하세요",
+        "오늘은 방원동에 왔습니다",
+        "브이로그입니다",
+    ]
+    assert [pipeline.RETEXTED in c.flags for c in entering["cues"]] == [False, True, False]
+    # 교정을 끈 실행과 큐 시각·개수는 같다 — 글자만 다르다. 큐 시각은 디코드 국소
+    # 시계 그대로다(원점은 배치 때 한 번 더한다).
+    plain = _Scripted(whisper=_clean_whisper)
+    plain_transcript, _plain_artifacts = _run(
+        tmp_path, reference, trace, request, data_replace(Config(), retext_enabled=False), plain
+    )
+    assert plain_transcript.status == "success"
+    assert [(cue.start, cue.end) for cue in transcript.cues] == [
+        (cue.start, cue.end) for cue in plain_transcript.cues
+    ]
+    assert [cue.text for cue in transcript.cues] != [cue.text for cue in plain_transcript.cues]
+    # 완성물 기록에 교정 계획이 실린다 — seg_id는 경계 골격 위치 그대로다.
+    manifest = json.loads(
+        (artifacts / "acid-1" / "boundary" / transcript.cache_key / "demo.BOUNDARY.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert manifest["retext"]["status"] == RETEXT_APPLIED
+    assert manifest["retext"]["texts"] == {
+        "0": "안녕하세요",
+        "1": "오늘은 방원동에 왔습니다",
+        "2": "브이로그입니다",
+    }
+
+
+def test_a_dead_second_model_still_publishes_whisper_cues(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """두 번째 모델이 죽어도 경계 기록은 whisper 글자로 나간다 — 조용히도, error도 아니다."""
+    monkeypatch.setenv("VLOGSRT_LOG_LEVEL", "WARN")
+    reference, trace, request, scripted, cfg, _pcm = _world(tmp_path)
+    transcript, _artifacts = _run(tmp_path, reference, trace, request, cfg, scripted)
+
+    assert transcript.status == "success"
+    assert transcript.retext is not None and transcript.retext.status == RETEXT_UNAVAILABLE
+    assert transcript.retext.error
+    assert any("망원동" in cue.text for cue in transcript.cues)
+    assert all("방원동" not in cue.text for cue in transcript.cues)
+    assert scripted.kinds() == [FIXTURE_KIND, VERIFY_KIND], "교정 호출은 실제로 일어났다"
+    assert "글자 교정" in capsys.readouterr().err
+
+
+def test_retext_off_never_calls_the_second_model(tmp_path: Path) -> None:
+    reference, trace, request, scripted, _cfg, _pcm = _world(tmp_path)
+    scripted.verify = lambda job: _echo(job, {"text": "예약돼 있어도 부르지 않는다"})
+    cfg = data_replace(Config(), retext_enabled=False)
+    transcript, artifacts = _run(tmp_path, reference, trace, request, cfg, scripted)
+
+    assert transcript.status == "success"
+    assert scripted.kinds() == [FIXTURE_KIND], "꺼져 있으면 두 번째 모델을 아예 부르지 않는다"
+    assert transcript.retext is not None and transcript.retext.status == RETEXT_OFF
+    manifest = json.loads(
+        (artifacts / "acid-1" / "boundary" / transcript.cache_key / "demo.BOUNDARY.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert manifest["retext"]["status"] == RETEXT_OFF
+
+
+def test_the_cache_key_left_the_whisper_only_domain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """교정이 켜진 경계 분석은 옛(whisper 전용) 도메인 키와 다른 자리에 산다(D39).
+    소스 키만 올라가도 캐시 키는 갈라지지만, 도메인 자체가 그 분석의 의미를 말한다."""
+    assert boundary._BOUNDARY_KEY_DOMAIN == "vlogsrt-boundary-analysis-v2"
+    reference, trace, request, scripted, cfg, _pcm = _world(tmp_path)
+    fresh, _artifacts = _run(tmp_path, reference, trace, request, cfg, scripted)
+
+    monkeypatch.setattr(boundary, "_BOUNDARY_KEY_DOMAIN", "vlogsrt-boundary-analysis-v1")
+    old, artifacts = _run(tmp_path, reference, trace, request, cfg, scripted)
+
+    assert fresh.status == old.status == "success"
+    assert old.cache_key != fresh.cache_key
+    root = artifacts / "acid-1" / "boundary"
+    assert (root / fresh.cache_key / "demo.BOUNDARY.json").is_file()
+    assert (root / old.cache_key / "demo.BOUNDARY.json").is_file()
+
+
+def test_unplaced_letters_between_segments_stay_in_the_record(tmp_path: Path) -> None:
+    """세그먼트 사이에 낀 gpt 글자는 시각이 없어 출력하지 않는다 — 기록에만 남는다(규칙 9)."""
+    reference, trace, request, scripted, cfg, _pcm = _world(tmp_path)
+    scripted.verify = lambda job: _echo(
+        job, {"text": "안녕하세요 오늘은 망원동에 왔습니다 카메라를 켰습니다 브이로그입니다"}
+    )
+    transcript, _artifacts = _run(tmp_path, reference, trace, request, cfg, scripted)
+
+    assert transcript.status == "success"
+    record = transcript.retext
+    assert record is not None and record.status == RETEXT_APPLIED
+    assert [(item.text, item.before, item.after) for item in record.unplaced] == [
+        ("카메라를 켰습니다", 1, 2)
+    ]
+    assert all("카메라를 켰습니다" not in cue.text for cue in transcript.cues)
+    assert any("망원동" in cue.text for cue in transcript.cues), "통과한 세그먼트는 교정된다"
+
+
+def test_kept_repeat_segments_are_excluded_from_retext(tmp_path: Path) -> None:
+    """회복 못 한 되풀이와 겹치는 세그먼트는 교정하지 않는다 — gpt가 들은 글자 수와
+    함께 기록에 남는다. 그 자리에 실제 발화가 있었을 수 있다(규칙 9)."""
+    reference, trace, request, scripted, cfg, _pcm = _repeat_world(
+        tmp_path, count=3, rescue_payload=_loop_rescue(), arbiter_payload={"text": LOOP * 12}
+    )
+    scripted.verify = lambda job: _echo(
+        job, {"text": f"첫 마디입니다 {' '.join([LOOP] * 2)} 끝 마디입니다"}
+    )
+    transcript, _artifacts = _run(tmp_path, reference, trace, request, cfg, scripted)
+
+    assert transcript.status == "success"
+    assert [record.outcome for record in transcript.repairs] == [REPAIR_KEPT]
+    record = transcript.retext
+    assert record is not None and record.status == RETEXT_APPLIED
+    assert record.excluded and record.excluded[0].outcome == REPAIR_KEPT
+    assert len(record.excluded[0].seg_ids) == 3
+    assert record.excluded[0].gpt_chars > 0, "제외 자리의 gpt 글자 수가 함께 남는다"
+    assert dict(record.texts).keys() <= {0, 4}, "되풀이 세그먼트는 whisper 글자 그대로다"
 
 
 # ─────────────────────────────────────────────────────────────
@@ -1213,7 +1382,7 @@ def test_cut_truncated_is_terminal_and_still_repairs_and_refines(tmp_path: Path)
 
     assert transcript.status == "success"
     assert transcript.cut_truncated is True, "종결 메타데이터는 기본 참이다"
-    assert scripted.kinds() == [FIXTURE_KIND], "자기 끝점의 재귀 경계 요청은 없다"
+    assert scripted.kinds() == [FIXTURE_KIND, VERIFY_KIND], "자기 끝점의 재귀 경계 요청은 없다"
     base = Fraction(160_000, RATE)
     assert transcript.cues[-1].end == base + 8 == Fraction(18), "정제는 국소 길이 그대로다"
     assert len(transcript.settled_spine) == 2

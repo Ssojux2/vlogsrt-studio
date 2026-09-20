@@ -41,6 +41,10 @@ from vlogsrt.models import (
     REPAIR_COLLAPSED,
     REPAIR_KEPT,
     REPAIR_REPLACED,
+    RETEXT_APPLIED,
+    RETEXT_OFF,
+    RETEXT_UNAVAILABLE,
+    Cue,
     Segment,
 )
 from vlogsrt.project import speech
@@ -58,6 +62,7 @@ from vlogsrt.transcribe import (
     ARBITER_KIND,
     FIXTURE_KIND,
     RESCUE_KIND,
+    VERIFY_KIND,
     ChunkCoverage,
     ChunkResponse,
     FixtureTranscriber,
@@ -496,14 +501,13 @@ def test_a_clean_source_runs_the_engine_and_publishes_the_source_srt(
     assert trace.source_srt_sha256 == hashlib.sha256(srt.read_bytes()).hexdigest()
     assert srt.read_text(encoding="utf-8") == output.write_srt(list(trace.cues))
     assert _scratch_of(namespace).name == trace.analysis_key
-    assert [path.name for path in namespace.iterdir()] == [
-        "demo.whisper.json",
-        trace.analysis_key,
-        "work",
-    ]
+    assert sorted(path.name for path in namespace.iterdir()) == sorted(
+        ["demo.whisper.json", trace.analysis_key, "work"]
+    )
 
-    # 되풀이가 없으면 재전사는 한 푼도 쓰지 않는다. 모든 잡은 명시적 네임스페이스를 골랐다.
-    assert transcriber.kinds() == [FIXTURE_KIND]
+    # 되풀이가 없으면 재전사는 한 푼도 쓰지 않는다 — 교정 호출만 settle 뒤에 따라
+    # 붙는다(D39). 모든 잡은 명시적 네임스페이스를 골랐다.
+    assert transcriber.kinds() == [FIXTURE_KIND, VERIFY_KIND]
     assert all(ns == namespace for _kind, _chunks, ns in transcriber.calls)
 
     # 아무것도 artifact_dir 밖에 쓰지 않는다.
@@ -642,7 +646,10 @@ def test_finite_zero_and_reversed_segments_are_retained(tmp_path: Path) -> None:
 def test_the_engine_runs_in_order_with_one_polish_and_the_pcm_duration(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """build_spine → settle → spine_to_cues → refine. polish은 refine 안에서 딱 한 번."""
+    """build_spine → settle → spine_to_cues → apply_retext → refine.
+
+    polish은 refine 안에서 딱 한 번.
+    """
     order: list[str] = []
     seen: dict[str, float] = {}
     polish_count = {"n": 0}
@@ -650,6 +657,7 @@ def test_the_engine_runs_in_order_with_one_polish_and_the_pcm_duration(
     real_build = transcribe.build_spine
     real_settle = repair.settle
     real_cues = pipeline.spine_to_cues
+    real_retext = pipeline.apply_retext
     real_refine = refine.refine
     real_polish = refine.polish_pass
 
@@ -666,6 +674,10 @@ def test_the_engine_runs_in_order_with_one_polish_and_the_pcm_duration(
         order.append("spine_to_cues")
         return real_cues(spine)
 
+    def retext_spy(cues, record):
+        order.append("apply_retext")
+        return real_retext(cues, record)
+
     def refine_spy(cues, cfg, duration=0.0):
         order.append("refine")
         seen["refine_duration"] = duration
@@ -678,6 +690,7 @@ def test_the_engine_runs_in_order_with_one_polish_and_the_pcm_duration(
     monkeypatch.setattr(transcribe, "build_spine", build_spine_spy)
     monkeypatch.setattr(repair, "settle", settle_spy)
     monkeypatch.setattr(pipeline, "spine_to_cues", cues_spy)
+    monkeypatch.setattr(pipeline, "apply_retext", retext_spy)
     monkeypatch.setattr(refine, "refine", refine_spy)
     monkeypatch.setattr(refine, "polish_pass", polish_spy)
 
@@ -685,7 +698,7 @@ def test_the_engine_runs_in_order_with_one_polish_and_the_pcm_duration(
     trace = transcribe_source(media, reference, Config(), transcriber, artifacts)
 
     assert trace.status == "success"
-    assert order == ["build_spine", "settle", "spine_to_cues", "refine"]
+    assert order == ["build_spine", "settle", "spine_to_cues", "apply_retext", "refine"]
     assert polish_count["n"] == 1, "refine가 이미 polish을 부른다 — 두 번 부르면 안 된다"
     expected = float(Fraction(reference.sample_count, reference.sample_rate))
     assert seen["source_duration"] == expected == 20.0
@@ -694,27 +707,33 @@ def test_the_engine_runs_in_order_with_one_polish_and_the_pcm_duration(
 
 def test_ids_and_artifacts_are_deterministic_across_runs(tmp_path: Path) -> None:
     media, reference, transcriber, artifacts, _namespace = _clean_setup(tmp_path)
+    _write_gpt_fixture(artifacts / "acid-1", "안녕하세요 오늘은 망원동에 왔습니다 브이로그입니다")
     first = transcribe_source(media, reference, Config(), transcriber, artifacts)
 
     other = tmp_path / "other-artifacts"
-    _write_fixture(
-        other / "acid-1",
-        "demo",
-        FIXTURE_KIND,
-        [
-            _record(
-                0,
-                0.0,
-                {
-                    "segments": [
-                        _seg(0.5, 2.0, "안녕하세요"),
-                        _seg(3.0, 5.5, "오늘은 망원동에 왔습니다"),
-                        _seg(8.0, 10.0, "브이로그입니다"),
-                    ]
-                },
-            )
-        ],
-    )
+    for kind, body in (
+        (
+            FIXTURE_KIND,
+            [
+                _record(
+                    0,
+                    0.0,
+                    {
+                        "segments": [
+                            _seg(0.5, 2.0, "안녕하세요"),
+                            _seg(3.0, 5.5, "오늘은 망원동에 왔습니다"),
+                            _seg(8.0, 10.0, "브이로그입니다"),
+                        ]
+                    },
+                )
+            ],
+        ),
+        (
+            VERIFY_KIND,
+            [_record(0, 0.0, {"text": "안녕하세요 오늘은 망원동에 왔습니다 브이로그입니다"})],
+        ),
+    ):
+        _write_fixture(other / "acid-1", "demo", kind, body)
     second_transcriber = _Counting(FixtureTranscriber(fixture_dir=tmp_path))
     second = transcribe_source(media, reference, Config(), second_transcriber, other)
     assert first == second
@@ -903,8 +922,8 @@ def test_a_recovered_repeat_is_replaced_using_retained_pcm(tmp_path: Path) -> No
         CLEAN,
         "마지막 문장입니다",
     ]
-    # 회복하면 심판은 한 푼도 안 쓴다.
-    assert transcriber.kinds() == [FIXTURE_KIND, RESCUE_KIND]
+    # 회복하면 심판은 한 푼도 안 쓴다 — 교정 호출만 settle 뒤에 따라 붙는다.
+    assert transcriber.kinds() == [FIXTURE_KIND, RESCUE_KIND, VERIFY_KIND]
 
     # 중첩 재전사 WAV는 같은 저장 PCM의 실제 바이트 슬라이스다.
     scratch = _scratch_of(namespace)
@@ -930,7 +949,7 @@ def test_a_short_unrecovered_repeat_is_kept(tmp_path: Path) -> None:
     assert [record.text for record in trace.settled_spine] == [
         record.text for record in trace.draft
     ]
-    assert transcriber.kinds() == [FIXTURE_KIND, RESCUE_KIND, ARBITER_KIND]
+    assert transcriber.kinds() == [FIXTURE_KIND, RESCUE_KIND, ARBITER_KIND, VERIFY_KIND]
 
 
 def test_a_long_unrecovered_repeat_is_collapsed(tmp_path: Path) -> None:
@@ -960,6 +979,7 @@ def test_a_positive_arbiter_answer_buys_one_hotter_retry(tmp_path: Path) -> None
         RESCUE_KIND,
         ARBITER_KIND,
         RESCUE_KIND,
+        VERIFY_KIND,
     ]
     assert trace.repairs[0].arbiter_clean and trace.repairs[0].arbiter_answered
     assert trace.status == "success"
@@ -972,7 +992,7 @@ def test_an_empty_arbiter_answer_is_valid_no_speech_not_an_error(tmp_path: Path,
         tmp_path, count=8, rescue_payload=_loop_rescue(), arbiter_payload={"text": text}
     )
     trace = transcribe_source(media, reference, Config(), transcriber, artifacts)
-    assert transcriber.kinds() == [FIXTURE_KIND, RESCUE_KIND, ARBITER_KIND]
+    assert transcriber.kinds() == [FIXTURE_KIND, RESCUE_KIND, ARBITER_KIND, VERIFY_KIND]
     assert trace.status == "success"
     assert trace.error is None
     assert trace.repairs[0].arbiter_answered and not trace.repairs[0].arbiter_clean
@@ -1005,6 +1025,151 @@ def test_extra_namespace_records_outside_the_retry_subset_are_filtered(
     trace = transcribe_source(media, reference, Config(), transcriber, artifacts)
     assert trace.status == "success"
     assert [record.outcome for record in trace.repairs] == [REPAIR_REPLACED]
+
+
+# ─────────────────────────────────────────────────────────────
+#  글자 교정 — 두 번째 모델을 같은 경계로 묻는다 (Q3-2, D39)
+# ─────────────────────────────────────────────────────────────
+
+
+def _write_gpt_fixture(namespace: Path, text: str) -> Path:
+    """두 번째 모델 조각 응답 — 1차 전사와 같은 조각(0번, 오프셋 0)을 본다."""
+    return _write_fixture(namespace, "demo", VERIFY_KIND, [_record(0, 0.0, {"text": text})])
+
+
+def test_gpt_letters_replace_whisper_letters_on_unchanged_times(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """게이트를 통과한 세그먼트만 글자가 바뀐다 — 시각·seg_ids·큐 수는 한 칸도 안 움직인다."""
+    media, reference, transcriber, artifacts, namespace = _clean_setup(tmp_path)
+    _write_gpt_fixture(namespace, "안녕하세요 오늘은 방원동에 왔습니다 브이로그입니다")
+
+    entering: dict[str, list[Cue]] = {}
+    real_refine = refine.refine
+
+    def refine_spy(cues: list[Cue], cfg: Config, duration: float = 0.0) -> list[Cue]:
+        entering["cues"] = list(cues)
+        return real_refine(cues, cfg, duration)
+
+    monkeypatch.setattr(refine, "refine", refine_spy)
+    trace = transcribe_source(media, reference, Config(), transcriber, artifacts)
+
+    assert trace.status == "success"
+    assert trace.retext is not None and trace.retext.status == RETEXT_APPLIED
+    srt = (namespace / trace.analysis_key / "demo.SOURCE.srt").read_text(encoding="utf-8")
+    assert "방원동" in srt and "망원동" not in srt
+
+    # refine에 들어가는 큐는 세그먼트 시각·seg_ids·번호 그대로다 — 교정이 얹은 것은
+    # 글자와 깃발뿐이다(D37). 시각이 한 밀리초라도 움직이면 이 등식이 깨진다.
+    assert [(c.start, c.end, c.seg_ids, c.index) for c in entering["cues"]] == [
+        (0.5, 2.0, (0,), 1),
+        (3.0, 5.5, (1,), 2),
+        (8.0, 10.0, (2,), 3),
+    ]
+    assert [c.text for c in entering["cues"]] == [
+        "안녕하세요",
+        "오늘은 방원동에 왔습니다",
+        "브이로그입니다",
+    ]
+    assert [pipeline.RETEXTED in c.flags for c in entering["cues"]] == [False, True, False]
+
+
+def test_a_dead_second_model_still_publishes_whisper_letters(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """두 번째 모델이 죽어도 소스 SRT는 whisper 글자로 나간다 — 조용히도, error도 아니다."""
+    monkeypatch.setenv("VLOGSRT_LOG_LEVEL", "WARN")
+    media, reference, transcriber, artifacts, namespace = _clean_setup(tmp_path)
+    trace = transcribe_source(media, reference, Config(), transcriber, artifacts)
+
+    assert trace.status == "success"
+    assert trace.retext is not None and trace.retext.status == RETEXT_UNAVAILABLE
+    assert trace.retext.error
+    srt = (namespace / trace.analysis_key / "demo.SOURCE.srt").read_text(encoding="utf-8")
+    assert "망원동" in srt and "방원동" not in srt
+    assert transcriber.kinds() == [FIXTURE_KIND, VERIFY_KIND], "교정 호출은 실제로 일어났다"
+    assert "글자 교정" in capsys.readouterr().err
+
+
+def test_retext_off_never_calls_the_second_model(tmp_path: Path) -> None:
+    media, reference, transcriber, artifacts, namespace = _clean_setup(tmp_path)
+    _write_gpt_fixture(namespace, "픽스처가 있어도 부르지 않는다")
+    cfg = data_replace(Config(), retext_enabled=False)
+    trace = transcribe_source(media, reference, cfg, transcriber, artifacts)
+
+    assert trace.status == "success"
+    assert transcriber.kinds() == [FIXTURE_KIND], "꺼져 있으면 두 번째 모델을 아예 부르지 않는다"
+    assert trace.retext is not None and trace.retext.status == RETEXT_OFF
+    assert "망원동" in (namespace / trace.analysis_key / "demo.SOURCE.srt").read_text(
+        encoding="utf-8"
+    )
+
+
+def test_the_analysis_key_left_the_whisper_only_domain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """교정이 켜진 분석은 옛(whisper 전용) 도메인 키와 다른 자리에 산다 — 옛 완성물
+    재사용이 없다. 설정 지문이 같아도 도메인이 키를 갈라놓는다(D39)."""
+    assert speech._SOURCE_KEY_DOMAIN == "vlogsrt-source-analysis-v2"
+    media, reference, transcriber, artifacts, namespace = _clean_setup(tmp_path)
+    fresh = transcribe_source(media, reference, Config(), transcriber, artifacts)
+
+    monkeypatch.setattr(speech, "_SOURCE_KEY_DOMAIN", "vlogsrt-source-analysis-v1")
+    old = transcribe_source(
+        media,
+        reference,
+        Config(),
+        _Counting(FixtureTranscriber(fixture_dir=tmp_path)),
+        artifacts,
+    )
+
+    assert old.status == fresh.status == "success"
+    assert old.analysis_key != fresh.analysis_key
+    assert (namespace / fresh.analysis_key / "demo.SOURCE.srt").is_file()
+    assert (namespace / old.analysis_key / "demo.SOURCE.srt").is_file()
+
+
+def test_unplaced_letters_between_segments_stay_in_the_record(tmp_path: Path) -> None:
+    """세그먼트 사이에 낀 gpt 글자는 시각이 없어 출력하지 않는다 — 기록에만 남는다(규칙 9)."""
+    media, reference, transcriber, artifacts, namespace = _clean_setup(tmp_path)
+    _write_gpt_fixture(
+        namespace, "안녕하세요 오늘은 망원동에 왔습니다 카메라를 켰습니다 브이로그입니다"
+    )
+    trace = transcribe_source(media, reference, Config(), transcriber, artifacts)
+
+    assert trace.status == "success"
+    record = trace.retext
+    assert record is not None and record.status == RETEXT_APPLIED
+    assert [(item.text, item.before, item.after) for item in record.unplaced] == [
+        ("카메라를 켰습니다", 1, 2)
+    ]
+    srt = (namespace / trace.analysis_key / "demo.SOURCE.srt").read_text(encoding="utf-8")
+    assert "카메라를 켰습니다" not in srt
+    assert "망원동" in srt, "게이트를 통과한 세그먼트는 여전히 교정된다"
+
+
+def test_kept_repeat_segments_are_excluded_from_retext(tmp_path: Path) -> None:
+    """회복 못 한 되풀이와 겹치는 세그먼트는 교정하지 않는다 — gpt가 들은 글자 수와
+    함께 기록에 남는다. 그 자리에 실제 발화가 있었을 수 있다(규칙 9)."""
+    media, reference, transcriber, artifacts, _namespace, _pcm = _repeat_setup(
+        tmp_path, count=8, rescue_payload=_loop_rescue(), arbiter_payload={"text": LOOP * 12}
+    )
+    _write_gpt_fixture(
+        artifacts / "acid-1", f"첫 문장입니다 {' '.join([LOOP] * 4)} 마지막 문장입니다"
+    )
+    trace = transcribe_source(media, reference, Config(), transcriber, artifacts)
+
+    assert trace.status == "success"
+    assert [record.outcome for record in trace.repairs] == [REPAIR_KEPT]
+    record = trace.retext
+    assert record is not None and record.status == RETEXT_APPLIED
+    assert record.excluded and record.excluded[0].outcome == REPAIR_KEPT
+    assert len(record.excluded[0].seg_ids) == 8
+    assert record.excluded[0].gpt_chars > 0, "제외 자리의 gpt 글자 수가 함께 남는다"
+    # 유지된 되풀이 세그먼트는 whisper 글자 그대로 나간다.
+    assert dict(record.texts).keys() <= {0, 9}
 
 
 # ─────────────────────────────────────────────────────────────
@@ -1223,7 +1388,7 @@ def test_repeated_sources_share_one_analysis_by_content(tmp_path: Path) -> None:
 
     assert len(analyses) == 1, "같은 내용은 한 번만 전사하고 한 번만 돌아간다"
     assert isinstance(analyses[0], SourceTrace)
-    assert transcriber.kinds() == [FIXTURE_KIND], "같은 내용은 한 번만 전사한다"
+    assert transcriber.kinds() == [FIXTURE_KIND, VERIFY_KIND], "같은 내용은 한 번만 전사한다"
 
 
 def test_same_stem_different_content_are_two_analyses(tmp_path: Path) -> None:
@@ -1264,7 +1429,7 @@ def test_same_stem_different_content_are_two_analyses(tmp_path: Path) -> None:
 
     assert analyses[0] is not analyses[1]
     assert analyses[0].analysis_key != analyses[1].analysis_key
-    assert transcriber.kinds() == [FIXTURE_KIND, FIXTURE_KIND]
+    assert transcriber.kinds() == [FIXTURE_KIND, VERIFY_KIND, FIXTURE_KIND, VERIFY_KIND]
 
 
 def test_an_unavailable_resource_passes_through_with_zero_calls(
@@ -1294,7 +1459,7 @@ def test_an_unavailable_resource_passes_through_with_zero_calls(
 
     assert isinstance(analyses[0], SourceTrace)
     assert analyses[1] is missing
-    assert transcriber.kinds() == [FIXTURE_KIND]
+    assert transcriber.kinds() == [FIXTURE_KIND, VERIFY_KIND]
 
     repeated = transcribe_unique_sources(
         [
@@ -1306,7 +1471,7 @@ def test_an_unavailable_resource_passes_through_with_zero_calls(
         artifacts,
     )
     assert repeated == (missing,), "같은 자원의 unavailable은 정확히 한 번만 돌아간다"
-    assert transcriber.kinds() == [FIXTURE_KIND], "unavailable은 한 푼도 안 쓴다"
+    assert transcriber.kinds() == [FIXTURE_KIND, VERIFY_KIND], "unavailable은 한 푼도 안 쓴다"
 
 
 @pytest.mark.parametrize(
@@ -1415,7 +1580,12 @@ def test_unique_outputs_are_deduplicated_in_first_seen_order(
     assert analyses[1] is missing
     assert isinstance(analyses[2], SourceTrace)
     assert analyses[2].analysis_key != analyses[0].analysis_key
-    assert transcriber.kinds() == [FIXTURE_KIND, FIXTURE_KIND], "세 번째 반복은 새 호출이 없다"
+    assert transcriber.kinds() == [
+        FIXTURE_KIND,
+        VERIFY_KIND,
+        FIXTURE_KIND,
+        VERIFY_KIND,
+    ], "세 번째 반복은 새 호출이 없다"
 
 
 def test_same_content_with_different_audio_dispositions_stay_distinct(
@@ -1444,7 +1614,7 @@ def test_same_content_with_different_audio_dispositions_stay_distinct(
 
     assert isinstance(analyses[0], SourceTrace) and analyses[0].status == "success"
     assert analyses[1] is silent
-    assert transcriber.kinds() == [FIXTURE_KIND]
+    assert transcriber.kinds() == [FIXTURE_KIND, VERIFY_KIND], "선언된 무음은 한 푼도 안 쓴다"
 
 
 # ─────────────────────────────────────────────────────────────

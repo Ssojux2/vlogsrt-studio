@@ -5,10 +5,13 @@
 - **소스 하나는 내용이다.** 재사용 신원은 `analysis_key`(원본 해시·정책·원점·
   PCM 해시·채널·주파수)이고, 경로·이름·XML 국소 resource id는 신원이 아니다.
   같은 내용의 반복 인스턴스는 한 번만 전사하고 같은 기록을 소비한다.
-- **엔진은 레거시 그대로다.** 시각과 글자는 whisper 응답에서만 나온다(규칙 1).
-  이 모듈이 새로 만드는 것은 조각의 좌표(저장 PCM의 정확한 샘플)와 실패의
-  상태뿐이다. `parse_segments`·`build_spine`·`repair.settle`·`refine.refine`의
-  float 호환은 그대로 쓴다.
+- **엔진은 레거시 그대로다.** 시각과 세그먼트 경계는 whisper 응답에서만 나온다
+  (규칙 1). 게이트를 통과한 세그먼트의 글자만 두 번째 모델의 것으로 갈아낸다
+  (D37·D39) — 파생 계층도 이제 하이브리드고, 두 번째 모델은 1차 전사와 **같은
+  조각 경계**를 보며 죽으면 whisper 글자로 나간다. 이 모듈이 새로 만드는 것은
+  조각의 좌표(저장 PCM의 정확한 샘플)와 실패의 상태뿐이다.
+  `parse_segments`·`build_spine`·`repair.settle`·`refine.refine`의 float 호환은
+  그대로 쓴다.
 - **시계는 두 개가 나란히 남는다.** `SourceSegment.audio_*`는 레거시 세그먼트의
   디코드 오디오 국소 시각을 `Fraction(str(value))`로 옮긴 것이고, `file_*`는
   거기에 잰 원점 `pcm_sample0_file_time`을 **정확히 한 번** 더한 것이다.
@@ -37,9 +40,9 @@ from itertools import pairwise
 from pathlib import Path
 from typing import Any, Literal, TypeAlias
 
-from vlogsrt import log, output, pipeline, refine, repair, transcribe
+from vlogsrt import log, output, pipeline, refine, repair, retext, transcribe
 from vlogsrt.config import Config
-from vlogsrt.models import Chunk, Cue, Repair, Segment, Span
+from vlogsrt.models import Chunk, Cue, Repair, RetextRecord, Segment, Span
 from vlogsrt.project.media import ResolvedMedia, sha256_file
 from vlogsrt.project.pcm import (
     PcmReference,
@@ -69,8 +72,12 @@ _SAMPLE_WIDTH = 2
 _SEGMENT_ID_DOMAIN = "vlogsrt-source-segment-v1"
 """세그먼트 신원의 도메인 구분자 — 다른 해시 재료와 우연히 겹치지 않게 한다."""
 
-_SOURCE_KEY_DOMAIN = "vlogsrt-source-analysis-v1"
-"""소스 분석 키의 도메인 구분자 — PCM 키와 어댑터 스키마를 갈라 붙인다."""
+_SOURCE_KEY_DOMAIN = "vlogsrt-source-analysis-v2"
+"""소스 분석 키의 도메인 구분자 — PCM 키와 어댑터 스키마를 갈라 붙인다.
+
+v2(D39): 글자 교정이 파생 계층에 켜졌다. 설정 지문은 `cfg.to_dict()` 전체 해시라
+`retext_*`가 이미 들어 있지만 값이 그대로인 채 동작만 켜지면 옛 whisper 글자
+완성물이 같은 키로 재사용된다 — 도메인을 올려 키 자체를 갈라놓는다."""
 
 _WAV_HEADER_BYTES = 44
 """내는 WAV 헤더의 바이트 수 — 바이트 한도는 파일 전체로 잰다(포맷의 사실)."""
@@ -147,6 +154,8 @@ class SourceTrace:
     source_srt_relative_path: str | None
     source_srt_sha256: str | None
     error: str | None
+    # 글자 교정 기록(D39). 선택 필드다 — None은 이 단계에 도달하지 못했다는 뜻이다.
+    retext: RetextRecord | None = None
 
     def __post_init__(self) -> None:
         if self.variant != "source_trace":
@@ -546,17 +555,19 @@ def _finite(value: Any) -> bool:
 class _Progress:
     """이미 완성된 단계의 증거 — 실패 기록에도 완성된 것은 버리지 않는다.
 
-    초안·덮개는 1차 전사 뒤에, 골격·재전사 기록은 settle 뒤에, 큐는 refine 뒤에
-    채워진다. 실패 시점에 존재하는 단계만큼만 error 기록에 남는다 — 지어내지도
-    조금히 지우지도 않는다.
+    초안·덮개는 1차 전사 뒤에, 골격·재전사 기록은 settle 뒤에, 교정 기록은 settle 뒤
+    큐 앞에서, 큐는 refine 뒤에 채워진다. 실패 시점에 존재하는 단계만큼만 error 기록에
+    남는다 — 지어내지도 조금히 지우지도 않는다.
     """
 
     ranges: tuple[SampleRange, ...] = ()
+    chunks: tuple[Chunk, ...] = ()  # 두 번째 모델이 같은 경계를 봐야 한다(D39)
     draft: tuple[Segment, ...] = ()
     coverage: tuple[ChunkCoverage, ...] = ()
     settled: tuple[Segment, ...] = ()
     repairs: tuple[Repair, ...] = ()
     cues: tuple[Cue, ...] = ()
+    retext: RetextRecord | None = None
 
     def evidence(self, plan: _SourcePlan) -> tuple[SourceSegment, ...]:
         if not self.draft:
@@ -594,9 +605,11 @@ def transcribe_source(
     """검증된 짝 하나를 레거시 엔진 전체로 전사한다. 예외를 밖으로 새지 않는다.
 
     순서: 조각 계획 → 1차 전사(P3-01 결과형) → `repair.settle`(주입 커터) →
-    불변 골격 → `pipeline.spine_to_cues` → `refine.refine`(polish 포함, 한 번) →
-    소스 로컬 SRT. 실패는 언제나 **실제 참조의 신원을 가진 error 기록**이다 —
-    unavailable로 강등되지 않고 완성물도 나오지 않는다.
+    불변 골격 → 두 번째 모델 조각 응답(같은 경계, D39) → `retext.plan` →
+    `pipeline.spine_to_cues` → `pipeline.apply_retext` → `refine.refine`(polish 포함,
+    한 번) → 소스 로컬 SRT. 실패는 언제나 **실제 참조의 신원을 가진 error 기록**이다
+    — unavailable로 강등되지 않고 완성물도 나오지 않는다. 두 번째 모델 호출만은
+    예외다: 죽어도 whisper 글자로 완성물이 나간다(D37과 같은 선).
     """
     _require_pair(media, reference)
     plan = _SourcePlan(
@@ -646,9 +659,10 @@ def _first_pass(
 ) -> transcribe.TranscriptionOutcome:
     """조각을 만들어 1차 전사를 부른다. 완성된 증거는 progress에 남긴다."""
     progress.ranges = plan_source_ranges(plan.reference, plan.cfg)
+    progress.chunks = _initial_chunks(plan.reference, progress.ranges, plan.scratch)
     job = TranscriptionJob(
         stem=plan.reference.original_stem,
-        chunks=_initial_chunks(plan.reference, progress.ranges, plan.scratch),
+        chunks=progress.chunks,
         namespace=plan.namespace,
     )
     outcome = transcribe.transcribe_outcome(wrapped, job, plan.cfg)
@@ -662,7 +676,7 @@ def _settled_trace(
     capture: _Capture,
     progress: _Progress,
 ) -> SourceTrace:
-    """재전사(주입 커터) → 불변 골격. 포획 실패가 있으면 여기서 끝난다."""
+    """재전사(주입 커터) → 불변 골격 → 글자 교정 계획. 포획 실패가 있으면 여기서 끝난다."""
     reference = plan.reference
     duration = float(Fraction(reference.sample_count, reference.sample_rate))
     settled = repair.settle(
@@ -680,7 +694,46 @@ def _settled_trace(
     progress.repairs = settled.repairs
     if capture.failures:
         return _error_trace(plan, progress, error=capture.describe())
-    return _published_trace(plan, progress, settled, duration)
+    record = _plan_retext(plan, wrapped, progress, settled, duration)
+    progress.retext = record
+    return _published_trace(plan, progress, settled, duration, record)
+
+
+def _plan_retext(
+    plan: _SourcePlan,
+    wrapped: _CapturingTranscriber,
+    progress: _Progress,
+    settled: repair.Settled,
+    duration: float,
+) -> RetextRecord:
+    """settle 뒤 큐 앞에서 세그먼트마다 갈 글자를 정한다(D37·D39).
+
+    두 번째 모델은 1차 전사와 **같은 조각**을 다시 본다 — 두 모델이 같은 경계를 봐야
+    대조가 성립한다. 호출이 죽어도 완성물은 whisper 글자로 나간다(레거시
+    `pipeline.run`과 같은 선): 실패는 `unavailable` 기록과 WARN으로 남고 오류가
+    아니다. 포획 목록에 남은 이 실패를 오류로 세는 길은 없다 — 이미 기록했다.
+    """
+    if not plan.cfg.retext_enabled:
+        return retext.switched_off()
+    job = TranscriptionJob(
+        stem=plan.reference.original_stem,
+        chunks=progress.chunks,
+        namespace=plan.namespace,
+        kind=VERIFY_KIND,
+    )
+    try:
+        responses = wrapped.transcribe(job, plan.cfg)
+    except Exception as exc:  # noqa: BLE001 - 두 번째 모델이 죽어도 whisper 자막은 나온다
+        record = retext.unavailable(f"{exc.__class__.__name__}: {exc}")
+        pipeline.report_retext(record)
+        return record
+    chunks = [
+        retext.ChunkText(response.index, response.offset, transcribe.parse_text(response.payload))
+        for response in responses
+    ]
+    record = retext.plan(settled.spine, chunks, duration, settled.repairs, plan.cfg)
+    pipeline.report_retext(record)
+    return record
 
 
 def _published_trace(
@@ -688,9 +741,14 @@ def _published_trace(
     progress: _Progress,
     settled: repair.Settled,
     duration: float,
+    record: RetextRecord,
 ) -> SourceTrace:
-    """불변 골격 → 큐 → 정제 → 소스 로컬 SRT. polish은 refine 안에서 한 번뿐이다."""
-    cues = refine.refine(pipeline.spine_to_cues(list(settled.spine)), plan.cfg, duration)
+    """불변 골격 → 큐 → 교정 → 정제 → 소스 로컬 SRT. polish은 refine 안에서 한 번뿐이다."""
+    cues = refine.refine(
+        pipeline.apply_retext(pipeline.spine_to_cues(list(settled.spine)), record),
+        plan.cfg,
+        duration,
+    )
     progress.cues = tuple(cues)
     stem = plan.reference.original_stem
     if not cues:
@@ -716,6 +774,7 @@ def _published_trace(
         coverage=progress.coverage,
         srt=srt,
         error=None,
+        retext_record=record,
     )
 
 
@@ -955,15 +1014,17 @@ def _empty_trace(plan: _SourcePlan, coverage: tuple[ChunkCoverage, ...]) -> Sour
         coverage=coverage,
         srt=srt,
         error=None,
+        retext_record=None,
     )
 
 
 def _error_trace(plan: _SourcePlan, progress: _Progress, *, error: str) -> SourceTrace:
     """실패 기록 — 실제 참조 신원과 **이미 완성된 단계**를 그대로 담는다.
 
-    초안은 물론 settle이 끝났으면 골격·재전사 기록까지, refine이 끝났으면 큐까지
-    남는다. 완성물(SRT 경로·해시)만은 내놓지 않는다 — 실패를 성공으로 꾸미지
-    않는다는 선과, 실패 때문에 증거를 버린다는 함정을 함께 끊는다.
+    초안은 물론 settle이 끝났으면 골격·재전사 기록까지, 교정 계획이 섰으면 그
+    기록까지, refine이 끝났으면 큐까지 남는다. 완성물(SRT 경로·해시)만은 내놓지
+    않는다 — 실패를 성공으로 꾸미지 않는다는 선과, 실패 때문에 증거를 버린다는
+    함정을 함께 끊는다.
     """
     return _trace(
         plan,
@@ -975,6 +1036,7 @@ def _error_trace(plan: _SourcePlan, progress: _Progress, *, error: str) -> Sourc
         coverage=progress.coverage,
         srt=None,
         error=error,
+        retext_record=progress.retext,
     )
 
 
@@ -989,6 +1051,7 @@ def _trace(
     coverage: tuple[ChunkCoverage, ...],
     srt: Path | None,
     error: str | None,
+    retext_record: RetextRecord | None,
 ) -> SourceTrace:
     reference = plan.reference
     return SourceTrace(
@@ -1011,6 +1074,7 @@ def _trace(
         ),
         source_srt_sha256=sha256_file(srt) if srt is not None else None,
         error=error,
+        retext=retext_record,
     )
 
 
