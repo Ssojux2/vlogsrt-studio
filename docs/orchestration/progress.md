@@ -373,3 +373,39 @@ project_trace.json·artifacts 어디에도 error 문구가 없다. 제품 코드
 한 줄 `ERR 리비전 디렉터리가 이미 있다: 1ae323f3… — 같은 리비전의 재게시는 배타 생성에서
 결정적으로 실패한다`. 첫 리비전·`current` 심링크는 그대로다. PROTO-5 테스트 9의 새
 단언(종료 2 + 이 문구)과 일치한다.
+
+---
+
+## 통합 `569aecb` — 코드선과 문서선을 합친다 (2026-09-20)
+
+`Ssojux2/q3-retext` `97e7172`를 `feat/final-cut-project` `53423f9`에 머지했다. 코드
+11커밋(P6-04 · PROTO-1~6 · Q3-1)과 문서 13커밋이 `vlogsrt/**`·`tests/**` 대 `docs/**`로
+갈려 있어 겹친 파일은 `TASKS.md` 하나였고, 손으로 해결했다 — 코드선의 Q3-1·Q3-2·Q3-H
+행을 살리고 문서선의 PROTO 표를 유지했다. PROTO-6의 「구현 중」을 `92c4ddf`로 바꾸고
+PROTO-6b를 보드에 올렸다.
+
+**`INTEGRATION_HEAD = 569aecb`.** 이후 모든 태스크 브랜치는 이 커밋에서 분기한다.
+
+게이트는 `make`가 Xcode 라이선스로 죽어 있어 개별로 돌렸다: `ruff check` 통과 ·
+`ruff format --check` 99개 파일 · `mypy` 47개 파일 · `pytest` 2531 통과 ·
+`check_invariants.py` 21개 `[OK]`. 사용자 소유의 `.env.example` 미커밋 변경은 머지
+전후로 건드리지 않았다.
+
+**통합 권한 변경(기록).** README는 머지를 Astra 소유로 둔다. 이번 주기에 Astra는
+가동하지 않으므로 사용자 승인 아래 Opus가 통합을 대행한다. 역할 변경을 몰래 하지
+않는다는 규칙에 따라 여기에 남긴다.
+
+### 이번 주기 실행안
+
+승인된 계획: 통합 → 2레인 병렬 → 유료 실측 1회 → 값 확정 후속.
+
+| 레인 | 태스크 | 워크트리 | 소유 파일 |
+|---|---|---|---|
+| A1 | S12 줄 폭 16자 | 새 워크트리 | `refine.py` · `layout.py` · `pipeline.py` · `tests/test_refine.py` · `tests/test_invariants.py` |
+| A2 | S17 마지막 조각 0.2초 (A1 다음) | 새 워크트리 | `preprocess.py` · `cutpoints.py` · `scripts/verify_timing.py` |
+| B1 | PROTO-6b 분석 실패의 침묵 | 새 워크트리 | `project/export.py` · `project/commands.py` · 테스트 3개 |
+| B2 | Q3-2 파생 계층 글자 교정 (B1 다음) | 새 워크트리 | `project/speech.py` · `project/boundary.py` |
+
+두 레인은 `vlogsrt/{refine,layout,pipeline}.py` 대 `vlogsrt/project/**`로 갈려 파일이
+겹치지 않는다. 의미 충돌은 하나뿐이다 — `Config`에 필드가 늘면 `_config_sha256`이
+바뀌어 `project/`의 분석 키가 전부 깨진다. A1은 새 설정 필드를 추가하지 않는다.
