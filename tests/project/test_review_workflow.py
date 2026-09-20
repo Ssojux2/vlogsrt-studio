@@ -15,7 +15,13 @@ from vlogsrt.project.review import (
     generate_silence_candidates,
     render_approved_roughcut,
 )
-from vlogsrt.project.timebase import FrameInterval, parse_fcpx_time
+from vlogsrt.project.timebase import (
+    SUPPORTED_FRAME_DURATIONS,
+    FrameInterval,
+    format_fcpx_time,
+    frame_ceil,
+    parse_fcpx_time,
+)
 from vlogsrt.project.vad.guard import InstanceGuard
 from vlogsrt.project.workflow_protocol import ProjectRevision, WorkflowJournal, encode_message
 
@@ -287,3 +293,73 @@ def test_staged_cli_roundtrip_applies_only_the_reviewed_candidate(tmp_path: Path
     markers = root.findall("library/event/project/sequence/spine/asset-clip/marker")
     assert len(markers) == 1
     assert batch.candidates[0].candidate_id in markers[0].get("value", "")
+
+
+@pytest.mark.parametrize("frame_duration", sorted(SUPPORTED_FRAME_DURATIONS))
+def test_silence_candidates_and_ripple_stay_on_every_supported_frame_grid(
+    tmp_path: Path, frame_duration: Fraction
+) -> None:
+    """지원 frame rate 하나가 float 환산으로 격자 밖 컷이나 틀린 출력 길이를 내는 회귀를 잡는다."""
+    speech = frame_ceil(Fraction(1), frame_duration)
+    silence = frame_ceil(Fraction(2), frame_duration)
+    boundaries = (0, speech, speech + silence, 2 * speech + silence, 2 * (speech + silence))
+    total_frames = boundaries[-1] + speech
+    duration = total_frames * frame_duration
+    xml = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE fcpxml>\n'
+        '<fcpxml version="1.14"><resources>'
+        f'<format id="r1" name="rate" frameDuration="{format_fcpx_time(frame_duration)}"/>'
+        f'<asset id="r2" name="clip" uid="A" start="0s" '
+        f'duration="{format_fcpx_time(duration)}" hasAudio="1" format="r1">'
+        '<media-rep kind="original-media" src="file:///tmp/clip.mov"/></asset>'
+        '</resources><library><event name="E"><project name="P" uid="P1">'
+        f'<sequence format="r1" duration="{format_fcpx_time(duration)}" tcStart="0s">'
+        f'<spine><asset-clip ref="r2" offset="0s" start="0s" '
+        f'duration="{format_fcpx_time(duration)}"/></spine></sequence>'
+        "</project></event></library></fcpxml>\n"
+    )
+    path = tmp_path / f"rate-{frame_duration.numerator}-{frame_duration.denominator}.fcpxml"
+    path.write_text(xml, encoding="utf-8")
+    document = parse_project(path)
+    clip = document.storyline[0]
+    revision = ProjectRevision(
+        input_sha256=document.input_sha256,
+        project_uid="P1",
+        project_name="P",
+        frame_duration=frame_duration,
+        duration=duration,
+    )
+    guard = InstanceGuard(
+        instance_id=clip.instance_id,
+        source_id="source",
+        status="success",
+        protected_frames=(
+            FrameInterval(boundaries[0], boundaries[1]),
+            FrameInterval(boundaries[2], boundaries[3]),
+            FrameInterval(boundaries[4], total_frames),
+        ),
+        review=(),
+    )
+    batch = generate_silence_candidates(
+        document,
+        revision,
+        (guard,),
+        locked_instance_ids=frozenset(),
+        analysis=_analysis(document),
+    )
+    assert len(batch.candidates) == 2
+    for candidate in batch.candidates:
+        assert (candidate.source_range.start / frame_duration).denominator == 1
+        assert (candidate.source_range.end / frame_duration).denominator == 1
+        assert (candidate.timeline_range.start / frame_duration).denominator == 1
+        assert (candidate.timeline_range.end / frame_duration).denominator == 1
+    plan = build_review_plan(
+        revision,
+        batch.candidates,
+        approved_candidate_ids=tuple(row.candidate_id for row in batch.candidates),
+    )
+    rendered = render_approved_roughcut(document, revision, batch.candidates, plan)
+    root = ET.fromstring(rendered.xml_bytes)
+    sequence = root.find("library/event/project/sequence")
+    assert sequence is not None
+    assert parse_fcpx_time(sequence.get("duration", "")) == plan.expected_output_duration
