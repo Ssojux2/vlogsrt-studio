@@ -24,9 +24,10 @@ public enum ShareInbox {
     in job: URL,
     fileManager: FileManager = .default
   ) throws -> SharedExport {
+    let sourceXML = try FCPXMLDocument.resolve(export.fcpxml)
     let audio = job.appendingPathComponent("final.wav")
     let xml = job.appendingPathComponent("final.fcpxml")
-    for (source, target) in [(export.audio, audio), (export.fcpxml, xml)] {
+    for (source, target) in [(export.audio, audio), (sourceXML, xml)] {
       if fileManager.fileExists(atPath: target.path) {
         throw ShareInboxError.destinationExists(target)
       }
@@ -44,10 +45,13 @@ public enum ShareInbox {
     let staged = try stage(export, in: job, fileManager: fileManager)
     let xmlData = try Data(contentsOf: staged.fcpxml)
     let digest = SHA256.hash(data: xmlData).map { String(format: "%02x", $0) }.joined()
+    let audioData = try Data(contentsOf: staged.audio)
+    let audioDigest = SHA256.hash(data: audioData).map { String(format: "%02x", $0) }.joined()
     let request = CaptionRequest(
       originRevision: originRevision,
       finalRevision: digest,
       renderAudio: staged.audio.path,
+      renderAudioSHA256: audioDigest,
       finalFCPXML: staged.fcpxml.path
     )
     let requestURL = job.appendingPathComponent("caption-request.jsonl")
@@ -57,7 +61,25 @@ public enum ShareInbox {
   }
 }
 
+public enum FCPXMLDocument {
+  public static func resolve(_ url: URL) throws -> URL {
+    if url.pathExtension.lowercased() == "fcpxmld" {
+      let info = url.appendingPathComponent("Info.fcpxml")
+      guard FileManager.default.isReadableFile(atPath: info.path) else {
+        throw ShareInboxError.missingBundleInfo(info)
+      }
+      return info
+    }
+    guard url.pathExtension.lowercased() == "fcpxml" else {
+      throw ShareInboxError.unsupportedFCPXML(url)
+    }
+    return url
+  }
+}
+
 public enum ShareInboxError: Error {
   case expectedOneAudioAndOneFCPXML(audioCount: Int, xmlCount: Int)
   case destinationExists(URL)
+  case missingBundleInfo(URL)
+  case unsupportedFCPXML(URL)
 }

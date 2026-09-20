@@ -66,6 +66,30 @@ def test_checked_caption_path_rejects_an_unanswered_chunk(tmp_path: Path) -> Non
         )
 
 
+def test_checked_caption_does_not_call_whitespace_an_affirmative_silence(tmp_path: Path) -> None:
+    prepared = pipeline.Prepared(
+        stem="final",
+        duration=1.0,
+        chunks=(Chunk(tmp_path / "0.mp3", 0.0, 1.0, 0),),
+        source="final.wav",
+    )
+
+    class Whitespace:
+        def transcribe(self, job: TranscriptionJob, cfg: Config) -> list[ChunkResponse]:
+            return [
+                ChunkResponse(
+                    index=0,
+                    offset=0.0,
+                    payload={"segments": [{"start": 0.0, "end": 1.0, "text": "   "}]},
+                )
+            ]
+
+    with pytest.raises(EmptyTranscript):
+        pipeline._make_spine(  # noqa: SLF001
+            prepared, Config(), Whitespace(), require_complete_coverage=True
+        )
+
+
 def test_output_text_comes_straight_from_the_transcription(tmp_path: Path) -> None:
     """규칙 1 — 모든 글자는 모델 응답에서 온다. 아무도 고쳐 쓰지 않는다."""
     result = pipeline.run(VIDEO, Config(), tmp_path, force_offline=True)
@@ -132,7 +156,7 @@ def test_a_trace_without_chunk_marks_still_loads(tmp_path: Path) -> None:
     """조각 경계는 기록일 뿐이다. 없다고 `redo`가 막히면 안 된다."""
     pipeline.run(VIDEO, Config(), tmp_path, force_offline=True)
     body = json.loads((tmp_path / "trace.json").read_text("utf-8"))
-    assert body["chunks"] == [], "메타 픽스처만 쓴 실행에는 조각이 없다"
+    assert [row["offset"] for row in body["chunks"]] == [0.0, 12.0]
     del body["chunks"]
     (tmp_path / "old.json").write_text(json.dumps(body), encoding="utf-8")
 

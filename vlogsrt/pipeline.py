@@ -121,8 +121,31 @@ def _prepare_from_fixture(video: Path, stem: str) -> Prepared | None:
     그때 재전사는 `<stem>.rescue.json`을 읽는다."""
     meta = transcribe.load_meta(env.fixture_dir(), stem)
     if meta.get("duration"):
-        log.info(f"메타 픽스처 사용: {stem} ({float(meta['duration']):.1f}초)")
-        return Prepared(stem=stem, duration=float(meta["duration"]), chunks=(), source=str(video))
+        duration = float(meta["duration"])
+        responses = transcribe.load_fixture_responses(
+            env.fixture_dir() / f"{stem}.{transcribe.FIXTURE_KIND}.json"
+        )
+        ordered = sorted(responses, key=lambda response: response.offset)
+        chunks = tuple(
+            Chunk(
+                path=env.fixture_dir() / f"{stem}.fixture-{response.index}.mp3",
+                offset=response.offset,
+                duration=(
+                    ordered[index + 1].offset - response.offset
+                    if index + 1 < len(ordered)
+                    else duration - response.offset
+                ),
+                index=response.index,
+            )
+            for index, response in enumerate(ordered)
+        )
+        expected = int(meta.get("chunk_count", len(chunks)))
+        if len(chunks) != expected or any(chunk.duration <= 0 for chunk in chunks):
+            raise RuntimeError(
+                f"메타·전사 픽스처의 조각 기록이 어긋난다: 기대 {expected}, 실제 {len(chunks)}"
+            )
+        log.info(f"메타 픽스처 사용: {stem} ({duration:.1f}초)")
+        return Prepared(stem=stem, duration=duration, chunks=chunks, source=str(video))
     if not video.is_file():
         raise RuntimeError(
             f"영상도 메타 픽스처도 없습니다: {video}\n"
@@ -311,6 +334,8 @@ def _make_spine(
     """1차 전사 → 되풀이 재전사 → 골격 확정. 이 함수가 끝나면 골격은 불변이다(규칙 2)."""
     if require_complete_coverage:
         outcome = transcribe.transcribe_outcome(transcriber, build_job(prepared), cfg)
+        if outcome.status == "empty":
+            raise transcribe.ConfirmedNoSpeech("모든 요청 조각이 명시적으로 빈 응답이다")
         draft = list(transcribe.require_nonempty(outcome))
     else:
         draft = fetch_draft(transcriber, build_job(prepared), cfg)

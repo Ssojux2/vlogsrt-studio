@@ -67,6 +67,7 @@ def test_jsonl_protocol_round_trips_every_public_message_deterministically(tmp_p
             origin_revision=revision.revision,
             final_revision="b" * 64,
             render_audio=tmp_path / "mix.wav",
+            render_audio_sha256="c" * 64,
             final_fcpxml=tmp_path / "final.fcpxml",
         ),
         CaptionResult(
@@ -151,6 +152,17 @@ def test_journal_only_accepts_forward_transitions_for_its_bound_revision(tmp_pat
     lines = journal.path.read_bytes().splitlines(keepends=True)
     assert all(hashlib.sha256(line).digest() for line in lines)
     assert len(lines) == 6
+
+
+def test_two_open_journals_cannot_append_the_same_transition(tmp_path: Path) -> None:
+    """두 프로세스의 낡은 cached state가 중복 전이를 써 원장을 깨뜨리는 회귀를 잡는다."""
+    revision = _revision()
+    first = WorkflowJournal.create(tmp_path / "workflow.jsonl", revision)
+    stale = WorkflowJournal.open(first.path)
+    first.transition(revision.revision, "analyzing")
+    with pytest.raises(ValueError, match="허용되지 않는 상태 전이"):
+        stale.transition(revision.revision, "analyzing")
+    assert WorkflowJournal.open(first.path).state == "analyzing"
 
 
 def test_protocol_rejects_unknown_versions_and_overlapping_approval_sets() -> None:

@@ -8,11 +8,13 @@ import os
 import tempfile
 import wave
 from dataclasses import dataclass
+from fractions import Fraction
 from pathlib import Path
 
 from vlogsrt import pipeline, transcribe
 from vlogsrt.config import Config
 from vlogsrt.project.fcpxml import element_tree
+from vlogsrt.project.timebase import parse_fcpx_time
 from vlogsrt.project.workflow_protocol import CaptionRequest, CaptionResult
 
 
@@ -39,6 +41,7 @@ def create_caption_request(
         origin_revision=origin_revision,
         final_revision=hashlib.sha256(raw).hexdigest(),
         render_audio=render_audio,
+        render_audio_sha256=_file_sha256(render_audio),
         final_fcpxml=final_fcpxml,
     )
 
@@ -52,9 +55,14 @@ def generate_final_captions(
     confirmed_cost: bool,
 ) -> CaptionDelivery:
     """최종 48kHz PCM을 새로 전사하고 SRT와 검토 보고서를 원자적으로 공개한다."""
-    duration = _validate_pcm(request.render_audio)
-    project_name = _validate_final_xml(request)
-    estimated_cost = transcribe.estimate_cost(duration, config) * 2
+    audio_duration = _validate_pcm(request)
+    project_name, timeline_duration = _validate_final_xml(request)
+    if abs(audio_duration - timeline_duration) > Fraction(1, 48_000):
+        raise CaptionGenerationError(
+            f"렌더 오디오와 최종 타임라인 길이가 다르다: "
+            f"{float(audio_duration):.6f}초 ≠ {float(timeline_duration):.6f}초"
+        )
+    estimated_cost = transcribe.estimate_cost(float(audio_duration), config) * 2
     if online and not confirmed_cost:
         raise CaptionGenerationError(
             f"예상 비용 ${estimated_cost:.3f}를 확인해야 온라인 전사를 시작할 수 있다"
@@ -79,7 +87,7 @@ def generate_final_captions(
                     repair_repeats=True,
                     require_complete_coverage=True,
                 )
-            except transcribe.EmptyTranscript:
+            except transcribe.ConfirmedNoSpeech:
                 result = CaptionResult(
                     final_revision=request.final_revision,
                     srt_path=None,
@@ -116,7 +124,13 @@ def generate_final_captions(
         raise CaptionGenerationError(f"최종 자막 생성 실패: {exc}") from exc
 
 
-def _validate_pcm(path: Path) -> float:
+def _validate_pcm(request: CaptionRequest) -> Fraction:
+    path = request.render_audio
+    actual_sha256 = _file_sha256(path)
+    if actual_sha256 != request.render_audio_sha256:
+        raise CaptionGenerationError(
+            f"렌더 오디오 해시가 요청과 다르다: {actual_sha256} ≠ {request.render_audio_sha256}"
+        )
     try:
         with wave.open(str(path), "rb") as stream:
             rate = stream.getframerate()
@@ -130,10 +144,10 @@ def _validate_pcm(path: Path) -> float:
         )
     if frames <= 0:
         raise CaptionGenerationError("렌더 오디오에 샘플이 없다")
-    return frames / rate
+    return Fraction(frames, rate)
 
 
-def _validate_final_xml(request: CaptionRequest) -> str:
+def _validate_final_xml(request: CaptionRequest) -> tuple[str, Fraction]:
     try:
         raw = request.final_fcpxml.read_bytes()
     except OSError as exc:
@@ -148,10 +162,29 @@ def _validate_final_xml(request: CaptionRequest) -> str:
     except Exception as exc:
         raise CaptionGenerationError(f"최종 FCPXML을 해석할 수 없다: {exc}") from exc
     project = root.find("library/event/project")
+    sequence = root.find("library/event/project/sequence")
     name = project.get("name", "").strip() if project is not None else ""
     if not name:
         raise CaptionGenerationError("최종 FCPXML에 프로젝트 이름이 없다")
-    return name
+    duration_text = sequence.get("duration") if sequence is not None else None
+    if duration_text is None:
+        raise CaptionGenerationError("최종 FCPXML에 sequence.duration이 없다")
+    try:
+        duration = parse_fcpx_time(duration_text)
+    except ValueError as exc:
+        raise CaptionGenerationError(f"최종 타임라인 길이를 읽을 수 없다: {exc}") from exc
+    return name, duration
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as stream:
+            while block := stream.read(1024 * 1024):
+                digest.update(block)
+    except OSError as exc:
+        raise CaptionGenerationError(f"파일을 읽을 수 없다: {path}") from exc
+    return digest.hexdigest()
 
 
 def _safe_filename(value: str) -> str:
@@ -170,6 +203,7 @@ def _write_review(
         "estimated_cost": estimated_cost,
         "final_revision": request.final_revision,
         "origin_revision": request.origin_revision,
+        "render_audio_sha256": request.render_audio_sha256,
         "quality": list(result.quality),
         "speech_status": result.speech_status,
         "timeline_approval": "custom_share_destination",

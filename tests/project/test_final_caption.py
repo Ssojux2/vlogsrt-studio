@@ -56,7 +56,7 @@ def test_final_caption_uses_checked_pipeline_and_revision_filename(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """최종 공유 오디오가 컷 분석용 전사를 재투영하거나 coverage 검사를 빼는 회귀를 잡는다."""
-    audio = _wav(tmp_path / "mix.wav")
+    audio = _wav(tmp_path / "mix.wav", frames=48_000)
     xml = _fcpxml(tmp_path / "final.fcpxml")
     request = create_caption_request("a" * 64, audio, xml)
     calls: list[dict[str, object]] = []
@@ -89,11 +89,11 @@ def test_final_caption_uses_checked_pipeline_and_revision_filename(
 def test_explicit_empty_coverage_reports_no_speech_without_creating_srt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    audio = _wav(tmp_path / "mix.wav")
+    audio = _wav(tmp_path / "mix.wav", frames=48_000)
     request = create_caption_request("a" * 64, audio, _fcpxml(tmp_path / "final.fcpxml"))
 
     def no_speech(*args: object, **kwargs: object) -> pipeline.RunResult:
-        raise transcribe.EmptyTranscript("모든 조각이 명시적으로 비었다")
+        raise transcribe.ConfirmedNoSpeech("모든 조각이 명시적으로 비었다")
 
     monkeypatch.setattr(pipeline, "run", no_speech)
     delivery = generate_final_captions(
@@ -107,7 +107,7 @@ def test_explicit_empty_coverage_reports_no_speech_without_creating_srt(
 def test_zero_byte_srt_is_never_reported_as_success(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    audio = _wav(tmp_path / "mix.wav")
+    audio = _wav(tmp_path / "mix.wav", frames=48_000)
     request = create_caption_request("a" * 64, audio, _fcpxml(tmp_path / "final.fcpxml"))
 
     def empty_file(audio: Path, cfg: Config, outdir: Path, **kwargs: object) -> pipeline.RunResult:
@@ -137,7 +137,7 @@ def test_caption_rejects_non_48khz_pcm_and_changed_fcpxml(tmp_path: Path) -> Non
             request, Config(), tmp_path / "out", online=False, confirmed_cost=False
         )
 
-    audio = _wav(tmp_path / "mix.wav")
+    audio = _wav(tmp_path / "mix.wav", frames=48_000)
     request = create_caption_request("a" * 64, audio, xml)
     _fcpxml(xml, name="Changed")
     with pytest.raises(CaptionGenerationError, match="리비전"):
@@ -150,7 +150,9 @@ def test_online_caption_requires_cost_confirmation_before_pipeline(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     request = create_caption_request(
-        "a" * 64, _wav(tmp_path / "mix.wav"), _fcpxml(tmp_path / "final.fcpxml")
+        "a" * 64,
+        _wav(tmp_path / "mix.wav", frames=48_000),
+        _fcpxml(tmp_path / "final.fcpxml"),
     )
     monkeypatch.setattr(
         pipeline, "run", lambda *args, **kwargs: pytest.fail("확인 전에 파이프라인이 열렸다")
@@ -159,3 +161,45 @@ def test_online_caption_requires_cost_confirmation_before_pipeline(
         generate_final_captions(
             request, Config(), tmp_path / "out", online=True, confirmed_cost=False
         )
+
+
+def test_caption_request_binds_audio_bytes_and_timeline_duration(tmp_path: Path) -> None:
+    audio = _wav(tmp_path / "mix.wav", frames=48_000)
+    xml = _fcpxml(tmp_path / "final.fcpxml")
+    request = create_caption_request("a" * 64, audio, xml)
+    with audio.open("r+b") as stream:
+        stream.seek(-2, 2)
+        stream.write(b"\1\0")
+    with pytest.raises(CaptionGenerationError, match="오디오 해시"):
+        generate_final_captions(
+            request, Config(), tmp_path / "changed", online=False, confirmed_cost=False
+        )
+
+    short = _wav(tmp_path / "short.wav", frames=24_000)
+    mismatch = create_caption_request("a" * 64, short, xml)
+    with pytest.raises(CaptionGenerationError, match="길이"):
+        generate_final_captions(
+            mismatch, Config(), tmp_path / "mismatch", online=False, confirmed_cost=False
+        )
+
+
+def test_recorded_offline_fixtures_work_with_checked_caption_coverage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixtures = Path(__file__).parents[1] / "fixtures" / "synthetic"
+    monkeypatch.setenv("VLOGSRT_FIXTURE_DIR", str(fixtures))
+    audio = _wav(tmp_path / "demo.wav", frames=48_000 * 24)
+    xml = tmp_path / "final.fcpxml"
+    xml.write_text(
+        '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE fcpxml>\n'
+        '<fcpxml version="1.14"><resources/><library><event name="E">'
+        '<project name="Demo"><sequence duration="24s" tcStart="0s">'
+        "<spine/></sequence></project></event></library></fcpxml>\n",
+        encoding="utf-8",
+    )
+    request = create_caption_request("a" * 64, audio, xml)
+    delivery = generate_final_captions(
+        request, Config(), tmp_path / "out", online=False, confirmed_cost=False
+    )
+    assert delivery.result.speech_status == "speech"
+    assert delivery.result.srt_path is not None and delivery.result.srt_path.stat().st_size > 0

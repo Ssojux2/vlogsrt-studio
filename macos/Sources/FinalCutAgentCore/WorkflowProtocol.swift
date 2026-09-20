@@ -21,6 +21,7 @@ public struct CaptionRequest: Codable, Equatable, Sendable {
   public let originRevision: String
   public let finalRevision: String
   public let renderAudio: String
+  public let renderAudioSHA256: String
   public let finalFCPXML: String
   public let insertionMethod: String
 
@@ -28,12 +29,14 @@ public struct CaptionRequest: Codable, Equatable, Sendable {
     originRevision: String,
     finalRevision: String,
     renderAudio: String,
+    renderAudioSHA256: String,
     finalFCPXML: String,
     insertionMethod: String = "relative"
   ) {
     self.originRevision = originRevision
     self.finalRevision = finalRevision
     self.renderAudio = renderAudio
+    self.renderAudioSHA256 = renderAudioSHA256
     self.finalFCPXML = finalFCPXML
     self.insertionMethod = insertionMethod
   }
@@ -42,6 +45,7 @@ public struct CaptionRequest: Codable, Equatable, Sendable {
     case originRevision = "origin_revision"
     case finalRevision = "final_revision"
     case renderAudio = "render_audio"
+    case renderAudioSHA256 = "render_audio_sha256"
     case finalFCPXML = "final_fcpxml"
     case insertionMethod = "insertion_method"
   }

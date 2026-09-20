@@ -1,14 +1,21 @@
 from __future__ import annotations
 
 import hashlib
+import wave
 import xml.etree.ElementTree as ET
+from dataclasses import replace
 from fractions import Fraction
 from pathlib import Path
 
 import pytest
 
 from vlogsrt import cli
+from vlogsrt.project import commands as project_commands
 from vlogsrt.project.fcpxml import parse_project
+from vlogsrt.project.final_caption import (
+    CaptionDelivery,
+    CaptionGenerationError,
+)
 from vlogsrt.project.review import (
     CandidateAnalysis,
     build_review_plan,
@@ -23,7 +30,12 @@ from vlogsrt.project.timebase import (
     parse_fcpx_time,
 )
 from vlogsrt.project.vad.guard import InstanceGuard
-from vlogsrt.project.workflow_protocol import ProjectRevision, WorkflowJournal, encode_message
+from vlogsrt.project.workflow_protocol import (
+    CaptionResult,
+    ProjectRevision,
+    WorkflowJournal,
+    encode_message,
+)
 
 
 def _project(tmp_path: Path) -> tuple[Path, object]:
@@ -241,8 +253,20 @@ def test_review_plan_rejects_unknown_and_stale_candidate_ids(tmp_path: Path) -> 
     with pytest.raises(ValueError, match="리비전"):
         build_review_plan(wrong_revision, (stale,), approved_candidate_ids=())
 
+    moved = replace(
+        stale,
+        source_range=candidate_range(stale.source_range.start + 2, stale.source_range.end + 2),
+        timeline_range=candidate_range(
+            stale.timeline_range.start + 2, stale.timeline_range.end + 2
+        ),
+    )
+    with pytest.raises(ValueError, match="후보 ID"):
+        build_review_plan(revision, (moved,), approved_candidate_ids=(moved.candidate_id,))
 
-def test_staged_cli_roundtrip_applies_only_the_reviewed_candidate(tmp_path: Path) -> None:
+
+def test_staged_cli_roundtrip_applies_only_the_reviewed_candidate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """receive→analyze→review→roughcut의 파일 계약과 사람 게이트를 끝에서 끝까지 지킨다."""
     input_path, document = _project(tmp_path)
     workspace = tmp_path / "workspace"
@@ -284,6 +308,11 @@ def test_staged_cli_roundtrip_applies_only_the_reviewed_candidate(tmp_path: Path
         )
         == 0
     )
+    original = input_path.read_bytes()
+    assert cli.main(["project", "roughcut", str(workspace), "-o", str(input_path)]) == 2
+    assert input_path.read_bytes() == original
+    assert WorkflowJournal.open(workspace / "workflow.jsonl").state == "review_required"
+
     roughcut = tmp_path / "rough.fcpxml"
     assert cli.main(["project", "roughcut", str(workspace), "-o", str(roughcut)]) == 0
 
@@ -293,6 +322,128 @@ def test_staged_cli_roundtrip_applies_only_the_reviewed_candidate(tmp_path: Path
     markers = root.findall("library/event/project/sequence/spine/asset-clip/marker")
     assert len(markers) == 1
     assert batch.candidates[0].candidate_id in markers[0].get("value", "")
+
+    audio = tmp_path / "final.wav"
+    with wave.open(str(audio), "wb") as stream:
+        stream.setnchannels(1)
+        stream.setsampwidth(2)
+        stream.setframerate(48_000)
+        stream.writeframes(b"\0\0" * 48_000 * 12)
+
+    def caption_stub(request, config, destination, *, online, confirmed_cost):
+        if not confirmed_cost:
+            raise CaptionGenerationError("예상 비용 확인 필요")
+        report = destination / "review.json"
+        report.parent.mkdir(parents=True, exist_ok=True)
+        report.write_text("{}\n", encoding="utf-8")
+        result = CaptionResult(
+            final_revision=request.final_revision,
+            srt_path=None,
+            warnings=("발화 없음",),
+            quality=("coverage:complete",),
+            speech_status="no_speech",
+        )
+        return CaptionDelivery(result=result, review_report=report, estimated_cost=0.1)
+
+    monkeypatch.setattr(project_commands, "generate_final_captions", caption_stub)
+    caption_args = [
+        "project",
+        "caption",
+        str(workspace),
+        str(audio),
+        str(roughcut),
+        "-o",
+        str(tmp_path / "captions"),
+        "--online",
+    ]
+    assert cli.main(caption_args) == 2
+    assert WorkflowJournal.open(workspace / "workflow.jsonl").state == "roughcut_imported"
+    assert cli.main([*caption_args, "--yes"]) == 0
+    assert WorkflowJournal.open(workspace / "workflow.jsonl").state == "caption_ready"
+
+
+def test_noop_render_preserves_sparse_leading_timeline_space(tmp_path: Path) -> None:
+    """명시 gap 없이 offset으로 표현된 앞 2초가 no-op 러프컷에서 사라지는 회귀를 잡는다."""
+    path = tmp_path / "sparse.fcpxml"
+    path.write_text(
+        '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE fcpxml>\n'
+        '<fcpxml version="1.14"><resources>'
+        '<format id="r1" name="rate" frameDuration="1/25s"/>'
+        '<asset id="r2" name="clip" uid="A" start="0s" duration="10s" '
+        'hasAudio="1" format="r1"><media-rep kind="original-media" '
+        'src="file:///tmp/clip.mov"/></asset></resources>'
+        '<library><event name="E"><project name="Sparse" uid="P">'
+        '<sequence format="r1" duration="12s" tcStart="0s"><spine>'
+        '<asset-clip ref="r2" offset="2s" start="0s" duration="10s"/>'
+        "</spine></sequence></project></event></library></fcpxml>\n",
+        encoding="utf-8",
+    )
+    document = parse_project(path)
+    revision = ProjectRevision(
+        input_sha256=document.input_sha256,
+        project_uid="P",
+        project_name="Sparse",
+        frame_duration=Fraction(1, 25),
+        duration=Fraction(12),
+    )
+    plan = build_review_plan(revision, (), approved_candidate_ids=())
+    rendered = render_approved_roughcut(document, revision, (), plan)
+    root = ET.fromstring(rendered.xml_bytes)
+    clip = root.find("library/event/project/sequence/spine/asset-clip")
+    sequence = root.find("library/event/project/sequence")
+    assert clip is not None and clip.get("offset") == "2s"
+    assert sequence is not None and sequence.get("duration") == "12s"
+
+
+def test_split_clip_preserves_and_clamps_timed_and_untimed_metadata(tmp_path: Path) -> None:
+    """컷을 가로지르는 keyword와 clip metadata가 뒤 조각에서 사라지는 회귀를 잡는다."""
+    path = tmp_path / "metadata.fcpxml"
+    path.write_text(
+        '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE fcpxml>\n'
+        '<fcpxml version="1.14"><resources>'
+        '<format id="r1" name="rate" frameDuration="1/25s"/>'
+        '<asset id="r2" name="clip" uid="A" start="0s" duration="12s" '
+        'hasAudio="1" format="r1"><media-rep kind="original-media" '
+        'src="file:///tmp/clip.mov"/></asset></resources>'
+        '<library><event name="E"><project name="Metadata" uid="P">'
+        '<sequence format="r1" duration="12s" tcStart="0s"><spine>'
+        '<asset-clip ref="r2" offset="0s" start="0s" duration="12s">'
+        '<keyword start="1s" duration="10s" value="wide"/>'
+        '<metadata><md key="com.example.note" value="keep"/></metadata>'
+        "</asset-clip></spine></sequence></project></event></library></fcpxml>\n",
+        encoding="utf-8",
+    )
+    document = parse_project(path)
+    revision = ProjectRevision(
+        input_sha256=document.input_sha256,
+        project_uid="P",
+        project_name="Metadata",
+        frame_duration=Fraction(1, 25),
+        duration=Fraction(12),
+    )
+    batch = generate_silence_candidates(
+        document,
+        revision,
+        (_guard(document),),
+        locked_instance_ids=frozenset(),
+        analysis=_analysis(document),
+    )
+    plan = build_review_plan(
+        revision,
+        batch.candidates,
+        approved_candidate_ids=(batch.candidates[0].candidate_id,),
+    )
+    rendered = render_approved_roughcut(document, revision, batch.candidates, plan)
+    root = ET.fromstring(rendered.xml_bytes)
+    clips = root.findall("library/event/project/sequence/spine/asset-clip")
+    assert len(clips) == 2
+    keywords = [clip.find("keyword") for clip in clips]
+    assert all(keyword is not None for keyword in keywords)
+    assert [(row.get("start"), row.get("duration")) for row in keywords if row is not None] == [
+        ("1s", "33/25s"),
+        ("92/25s", "183/25s"),
+    ]
+    assert all(clip.find("metadata/md") is not None for clip in clips)
 
 
 @pytest.mark.parametrize("frame_duration", sorted(SUPPORTED_FRAME_DURATIONS))

@@ -33,6 +33,7 @@ import hashlib
 import json
 import os
 import shutil
+import sys
 from pathlib import Path
 
 from vlogsrt import env, log, transcribe
@@ -59,6 +60,7 @@ _INPUT = "input.fcpxml"
 _REVISION = "revision.jsonl"
 _CANDIDATES = "candidates.jsonl"
 _PLAN = "edit-plan.jsonl"
+_SOURCE = "source.json"
 
 
 def project_command(args: argparse.Namespace) -> int:
@@ -108,21 +110,33 @@ def _project_receive(args: argparse.Namespace) -> int:
     if (workspace / _JOURNAL).exists():
         raise ValueError(f"이미 수신된 작업공간이다: {workspace}")
     shutil.copyfile(document.info_path, workspace / _INPUT)
+    _write_json(
+        workspace / _SOURCE,
+        {
+            "input_path": str(document.input_path.resolve()),
+            "info_path": str(document.info_path.resolve()),
+        },
+    )
     WorkflowJournal.create(workspace / _JOURNAL, revision)
     _write_messages(workspace / _REVISION, (revision,))
-    log.out(encode_message(revision).rstrip())
+    _protocol_out(revision)
     return 0
 
 
 def _project_analyze(args: argparse.Namespace) -> int:
     workspace = args.workspace
     journal = WorkflowJournal.open(workspace / _JOURNAL)
-    if journal.state != "received":
-        raise ValueError(f"analyze는 received 상태에서만 가능하다: {journal.state}")
+    if journal.state not in {"received", "analyzing"}:
+        raise ValueError(f"analyze는 received/analyzing 상태에서만 가능하다: {journal.state}")
     candidates = tuple(_read_candidates(args.candidates, journal.revision.revision))
-    # 외부 작업 프로세스 결과를 전부 검증한 뒤에만 상태를 움직인다.
-    journal.transition(journal.revision.revision, "analyzing")
-    _write_messages(workspace / _CANDIDATES, candidates)
+    if journal.state == "received":
+        # 외부 작업 프로세스 결과를 전부 검사·저장한 뒤에만 상태를 움직인다.
+        _write_messages(workspace / _CANDIDATES, candidates)
+        journal.transition(journal.revision.revision, "analyzing")
+    else:
+        stored = tuple(_read_candidates(workspace / _CANDIDATES, journal.revision.revision))
+        if stored != candidates:
+            raise ValueError("재개한 분석 후보가 저장된 analyzing 결과와 다르다")
     journal.transition(journal.revision.revision, "review_required")
     log.out(f"컷 후보 {len(candidates)}건 · 사람 검토 필요")
     return 0
@@ -138,7 +152,7 @@ def _project_review(args: argparse.Namespace) -> int:
         journal.revision, candidates, approved_candidate_ids=tuple(args.approve)
     )
     _write_messages(workspace / _PLAN, (plan,))
-    log.out(encode_message(plan).rstrip())
+    _protocol_out(plan)
     return 0
 
 
@@ -152,6 +166,7 @@ def _project_roughcut(args: argparse.Namespace) -> int:
     if not isinstance(plan_message, EditPlan):
         raise ValueError("edit-plan.jsonl의 메시지가 EditPlan이 아니다")
     document = parse_project(workspace / _INPUT)
+    _require_safe_roughcut_output(workspace, args.out)
     rendered = render_approved_roughcut(document, journal.revision, candidates, plan_message)
     _write_bytes(args.out, rendered.xml_bytes)
     report = args.out.with_suffix(args.out.suffix + ".review.json")
@@ -178,8 +193,6 @@ def _project_caption(args: argparse.Namespace) -> int:
     request = create_caption_request(
         journal.revision.revision, args.render_audio, args.final_fcpxml
     )
-    _write_messages(workspace / "caption-request.jsonl", (request,))
-    journal.transition(journal.revision.revision, "caption_requested")
     delivery = generate_final_captions(
         request,
         load_config(),
@@ -187,6 +200,8 @@ def _project_caption(args: argparse.Namespace) -> int:
         online=bool(args.online),
         confirmed_cost=bool(args.yes),
     )
+    _write_messages(workspace / "caption-request.jsonl", (request,))
+    journal.transition(journal.revision.revision, "caption_requested")
     _write_messages(workspace / "caption-result.jsonl", (delivery.result,))
     journal.transition(journal.revision.revision, "caption_ready")
     if delivery.result.srt_path is None:
@@ -231,6 +246,12 @@ def _write_messages(path: Path, messages: tuple[ProtocolMessage, ...]) -> None:
     _write_bytes(path, text.encode())
 
 
+def _protocol_out(message: ProtocolMessage) -> None:
+    """JSONL은 Rich wrapping·markup을 거치지 않고 stdout에 그대로 쓴다."""
+    sys.stdout.write(encode_message(message))
+    sys.stdout.flush()
+
+
 def _write_json(path: Path, payload: dict[str, object]) -> None:
     text = json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
     _write_bytes(path, text.encode())
@@ -241,6 +262,33 @@ def _write_bytes(path: Path, payload: bytes) -> None:
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     temporary.write_bytes(payload)
     os.replace(temporary, path)
+
+
+def _require_safe_roughcut_output(workspace: Path, output: Path) -> None:
+    target = output.resolve()
+    protected_names = (
+        _INPUT,
+        _JOURNAL,
+        _SOURCE,
+        _REVISION,
+        _CANDIDATES,
+        _PLAN,
+        "caption-request.jsonl",
+        "caption-result.jsonl",
+    )
+    protected = {(workspace / name).resolve() for name in protected_names}
+    source_path = workspace / _SOURCE
+    try:
+        source = json.loads(source_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"원본 경로 기록을 읽을 수 없다: {source_path}") from exc
+    for key in ("input_path", "info_path"):
+        value = source.get(key)
+        if not isinstance(value, str):
+            raise ValueError(f"원본 경로 기록의 {key}가 문자열이 아니다")
+        protected.add(Path(value).resolve())
+    if target in protected:
+        raise ValueError(f"러프컷 출력이 보호된 원본·작업 파일과 같다: {target}")
 
 
 def project_run(args: argparse.Namespace) -> int:

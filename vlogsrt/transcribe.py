@@ -680,6 +680,10 @@ class EmptyTranscript(RuntimeError):
     """
 
 
+class ConfirmedNoSpeech(EmptyTranscript):
+    """요청한 모든 조각이 정상 응답했고 segments가 전부 명시적으로 비었다."""
+
+
 class MalformedTranscript(RuntimeError):
     """응답 꼴이 계약을 어겨 초안을 만들 수 없다. 호출은 이웃하지 계산은 못 한다."""
 

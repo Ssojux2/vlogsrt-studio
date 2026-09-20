@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
@@ -151,12 +152,14 @@ class CaptionRequest:
     origin_revision: str
     final_revision: str
     render_audio: Path
+    render_audio_sha256: str
     final_fcpxml: Path
     insertion_method: Literal["relative"] = "relative"
 
     def __post_init__(self) -> None:
         _require_sha256(self.origin_revision, "원본 워크플로 리비전")
         _require_sha256(self.final_revision, "최종 FCPXML 리비전")
+        _require_sha256(self.render_audio_sha256, "렌더 오디오")
         if self.insertion_method != "relative":
             raise ValueError("자막 삽입 방식은 relative만 지원한다")
 
@@ -254,6 +257,10 @@ class WorkflowJournal:
             lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
         except FileNotFoundError as exc:
             raise ValueError(f"워크플로 원장이 없다: {path}") from exc
+        return cls._from_lines(path, lines)
+
+    @classmethod
+    def _from_lines(cls, path: Path, lines: list[str]) -> WorkflowJournal:
         if not lines:
             raise ValueError(f"워크플로 원장이 비어 있다: {path}")
         first = decode_message(lines[0])
@@ -273,18 +280,26 @@ class WorkflowJournal:
         return cls(path, first, state)
 
     def transition(self, input_revision: str, state: WorkflowState) -> None:
-        if input_revision != self.revision.revision:
-            raise ValueError(
-                f"입력 리비전이 워크플로와 다르다: {input_revision} ≠ {self.revision.revision}"
-            )
-        expected = _NEXT_STATE.get(self.state)
-        if state != expected:
-            raise ValueError(f"허용되지 않는 상태 전이: {self.state} → {state}")
-        with self.path.open("a", encoding="utf-8", newline="\n") as stream:
-            stream.write(encode_message(WorkflowStateEvent(input_revision, state)))
-            stream.flush()
-            os.fsync(stream.fileno())
-        self.state = state
+        with self.path.open("r+", encoding="utf-8", newline="\n") as stream:
+            fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+            try:
+                stream.seek(0)
+                current = self._from_lines(self.path, stream.readlines())
+                if input_revision != current.revision.revision:
+                    raise ValueError(
+                        f"입력 리비전이 워크플로와 다르다: {input_revision} ≠ "
+                        f"{current.revision.revision}"
+                    )
+                expected = _NEXT_STATE.get(current.state)
+                if state != expected:
+                    raise ValueError(f"허용되지 않는 상태 전이: {current.state} → {state}")
+                stream.seek(0, os.SEEK_END)
+                stream.write(encode_message(WorkflowStateEvent(input_revision, state)))
+                stream.flush()
+                os.fsync(stream.fileno())
+                self.state = state
+            finally:
+                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
 
 
 def _message_payload(message: ProtocolMessage) -> dict[str, object]:
@@ -324,6 +339,7 @@ def _message_payload(message: ProtocolMessage) -> dict[str, object]:
             "insertion_method": message.insertion_method,
             "origin_revision": message.origin_revision,
             "render_audio": str(message.render_audio),
+            "render_audio_sha256": message.render_audio_sha256,
         }
     if isinstance(message, CaptionResult):
         return {
@@ -386,6 +402,7 @@ def _decode_payload(kind: object, payload: dict[str, object]) -> ProtocolMessage
             origin_revision=_string(payload, "origin_revision"),
             final_revision=_string(payload, "final_revision"),
             render_audio=Path(_string(payload, "render_audio")),
+            render_audio_sha256=_string(payload, "render_audio_sha256"),
             final_fcpxml=Path(_string(payload, "final_fcpxml")),
             insertion_method=cast(Literal["relative"], _string(payload, "insertion_method")),
         )

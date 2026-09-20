@@ -142,6 +142,7 @@ def build_review_plan(
     """후보 전부를 승인/거절로 닫고 승인 구간 길이만 출력 길이에서 뺀다."""
     by_id: dict[str, CutCandidate] = {}
     for candidate in candidates:
+        _require_candidate_identity(candidate)
         if candidate.input_revision != revision.revision:
             raise ValueError(
                 f"후보의 입력 리비전이 현재 프로젝트 리비전과 다르다: "
@@ -185,6 +186,9 @@ def render_approved_roughcut(
     approved = [candidates_by_id[candidate_id] for candidate_id in plan.approved_candidate_ids]
     if any(candidate.input_revision != revision.revision for candidate in approved):
         raise ValueError("승인 후보에 다른 입력 리비전이 섞였다")
+    for candidate in approved:
+        _require_candidate_identity(candidate)
+        _require_candidate_geometry(document, candidate)
     _require_nonoverlapping(approved)
     root = element_tree(document.raw_xml, str(document.info_path))
     project = root.find("library/event/project")
@@ -200,46 +204,42 @@ def render_approved_roughcut(
     by_instance: dict[str, list[CutCandidate]] = {}
     for candidate in approved:
         by_instance.setdefault(candidate.clip_instance_id, []).append(candidate)
-    cursor = document.sequence_tc_start
+    removed_before = Fraction()
     resources = {resource.scoped_id: resource for resource in document.resources}
     for item, source in zip(document.storyline, original_children, strict=True):
         if isinstance(item, GapInstance):
             element = copy.deepcopy(source)
-            element.set("offset", format_fcpx_time(cursor))
+            element.set("offset", format_fcpx_time(item.offset - removed_before))
             spine.append(element)
-            cursor += item.duration
             continue
         cuts = sorted(by_instance.get(item.instance_id, ()), key=lambda row: row.source_range.start)
         pieces = _retained_pieces(item, cuts)
+        piece_offset = item.offset - removed_before
         for index, (start, end, preceding_cut) in enumerate(pieces):
             if end <= start:
                 continue
             element = copy.deepcopy(source)
-            element.set("offset", format_fcpx_time(cursor))
+            element.set("offset", format_fcpx_time(piece_offset))
             element.set("start", format_fcpx_time(start))
             element.set("duration", format_fcpx_time(end - start))
             _preserve_children(element, source, start, end, first=index == 0)
             if preceding_cut is not None:
-                element.append(
-                    ET.Element(
-                        "marker",
-                        {
-                            "start": format_fcpx_time(start),
-                            "duration": format_fcpx_time(document.frame_duration),
-                            "value": (
-                                f"{_CUT_MARKER_PREFIX}{preceding_cut.candidate_id}:"
-                                f"{preceding_cut.reason}"
-                            ),
-                        },
-                    )
+                _insert_cut_marker(
+                    element,
+                    start,
+                    document.frame_duration,
+                    preceding_cut,
                 )
             spine.append(element)
-            cursor += end - start
+            piece_offset += end - start
+        removed_before += sum(
+            (cut.source_range.end - cut.source_range.start for cut in cuts), start=Fraction()
+        )
         resource = resources[item.resource_scoped_id]
         resource_end = resource.start + resource.duration
         if not resource.start <= item.start < item.start + item.duration <= resource_end:
             raise ValueError(f"클립이 애셋 범위를 벗어난다: {item.element_path}")
-    output_duration = cursor - document.sequence_tc_start
+    output_duration = revision.duration - removed_before
     if output_duration != plan.expected_output_duration:
         raise ValueError(
             f"렌더 길이가 승인 계획과 다르다: {output_duration} ≠ {plan.expected_output_duration}"
@@ -351,27 +351,24 @@ def _candidate(
         document.sequence_tc_start + timeline.start_frame * fd,
         document.sequence_tc_start + timeline.end_frame * fd,
     )
-    material = json.dumps(
-        [
-            revision.revision,
-            clip.instance_id,
-            source.start_frame,
-            source.end_frame,
-            timeline.start_frame,
-            timeline.end_frame,
-            "internal_silence",
-        ],
-        ensure_ascii=True,
-        separators=(",", ":"),
+    evidence = ("vad:no_speech", "transcript:no_unique_speech", "vision:no_continuity")
+    candidate_id = _candidate_id(
+        revision.revision,
+        clip.instance_id,
+        source_range,
+        timeline_range,
+        "internal_silence",
+        evidence,
+        analysis.confidence,
     )
     return CutCandidate(
-        candidate_id=hashlib.sha256(material.encode("utf-8")).hexdigest(),
+        candidate_id=candidate_id,
         input_revision=revision.revision,
         clip_instance_id=clip.instance_id,
         source_range=source_range,
         timeline_range=timeline_range,
         reason="internal_silence",
-        evidence=("vad:no_speech", "transcript:no_unique_speech", "vision:no_continuity"),
+        evidence=evidence,
         confidence=analysis.confidence,
     )
 
@@ -432,7 +429,109 @@ def _preserve_children(
                 position = parse_fcpx_time(child_start)
             except ValueError:
                 continue
-            if start <= position < end:
-                target.append(copy.deepcopy(child))
-        elif first:
+            duration_text = child.get("duration")
+            if duration_text is None:
+                if start <= position < end:
+                    target.append(copy.deepcopy(child))
+                continue
+            try:
+                child_end = position + parse_fcpx_time(duration_text)
+            except ValueError:
+                continue
+            overlap_start = max(position, start)
+            overlap_end = min(child_end, end)
+            if overlap_start < overlap_end:
+                copied = copy.deepcopy(child)
+                copied.set("start", format_fcpx_time(overlap_start))
+                copied.set("duration", format_fcpx_time(overlap_end - overlap_start))
+                target.append(copied)
+        else:
             target.append(copy.deepcopy(child))
+
+
+def _candidate_id(
+    input_revision: str,
+    clip_instance_id: str,
+    source_range: RationalRange,
+    timeline_range: RationalRange,
+    reason: str,
+    evidence: tuple[str, ...],
+    confidence: str,
+) -> str:
+    material = json.dumps(
+        [
+            input_revision,
+            clip_instance_id,
+            [str(source_range.start), str(source_range.end)],
+            [str(timeline_range.start), str(timeline_range.end)],
+            reason,
+            list(evidence),
+            confidence,
+        ],
+        ensure_ascii=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(material.encode()).hexdigest()
+
+
+def _require_candidate_identity(candidate: CutCandidate) -> None:
+    expected = _candidate_id(
+        candidate.input_revision,
+        candidate.clip_instance_id,
+        candidate.source_range,
+        candidate.timeline_range,
+        candidate.reason,
+        candidate.evidence,
+        candidate.confidence,
+    )
+    if candidate.candidate_id != expected:
+        raise ValueError(f"후보 ID가 후보 내용과 다르다: {candidate.candidate_id} ≠ {expected}")
+
+
+def _require_candidate_geometry(document: ProjectDocument, candidate: CutCandidate) -> None:
+    clips = {
+        item.instance_id: item for item in document.storyline if isinstance(item, ClipInstance)
+    }
+    clip = clips.get(candidate.clip_instance_id)
+    if clip is None:
+        raise ValueError(f"후보의 클립 인스턴스가 문서에 없다: {candidate.clip_instance_id}")
+    if (
+        not clip.start
+        < candidate.source_range.start
+        < candidate.source_range.end
+        < (clip.start + clip.duration)
+    ):
+        raise ValueError(f"후보 소스 구간이 클립 내부가 아니다: {candidate.candidate_id}")
+    expected_start = clip.offset + candidate.source_range.start - clip.start
+    expected_end = clip.offset + candidate.source_range.end - clip.start
+    if candidate.timeline_range != RationalRange(expected_start, expected_end):
+        raise ValueError(f"후보의 소스·타임라인 매핑이 어긋난다: {candidate.candidate_id}")
+    fd = document.frame_duration
+    endpoints = (
+        candidate.source_range.start,
+        candidate.source_range.end,
+        candidate.timeline_range.start - document.sequence_tc_start,
+        candidate.timeline_range.end - document.sequence_tc_start,
+    )
+    if any((value / fd).denominator != 1 for value in endpoints):
+        raise ValueError(f"후보 끝점이 프레임 격자 밖이다: {candidate.candidate_id}")
+
+
+def _insert_cut_marker(
+    element: ET.Element,
+    start: Fraction,
+    frame_duration: Fraction,
+    candidate: CutCandidate,
+) -> None:
+    marker = ET.Element(
+        "marker",
+        {
+            "start": format_fcpx_time(start),
+            "duration": format_fcpx_time(frame_duration),
+            "value": f"{_CUT_MARKER_PREFIX}{candidate.candidate_id}:{candidate.reason}",
+        },
+    )
+    metadata_index = next(
+        (index for index, child in enumerate(element) if child.tag == "metadata"), len(element)
+    )
+    element.insert(metadata_index, marker)

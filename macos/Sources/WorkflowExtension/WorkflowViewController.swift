@@ -31,7 +31,8 @@ public final class WorkflowViewController: NSViewController {
     }
     panel.allowsMultipleSelection = false
     guard panel.runModal() == .OK, let url = panel.url,
-      let data = try? Data(contentsOf: url)
+      let resolved = try? FCPXMLDocument.resolve(url),
+      let data = try? Data(contentsOf: resolved)
     else { return }
     _ = receive(data)
   }
