@@ -94,6 +94,8 @@ class ProjectConfig:
     block_max_seconds: Fraction = Fraction(10)
     keep_seconds: Fraction = Fraction(3)
     vision_apply_confidence: float = 0.8
+    silence_min_seconds: Fraction = Fraction(2)
+    silence_handle_seconds: Fraction = Fraction(3, 10)
 
     pricing_currency: str | None = None
     source_audio_cost_per_minute: Decimal | None = None
@@ -407,6 +409,8 @@ _FIELD_PARSERS: dict[str, Callable[[str, object, str], Any]] = {
     "block_max_seconds": _parse_positive_fraction,
     "keep_seconds": _parse_positive_fraction,
     "vision_apply_confidence": _parse_unit_float,
+    "silence_min_seconds": _parse_positive_fraction,
+    "silence_handle_seconds": _parse_positive_fraction,
     "pricing_currency": _parse_optional_nonblank_str,
     "source_audio_cost_per_minute": _parse_price,
     "repair_verify_audio_cost_per_minute": _parse_price,

@@ -387,6 +387,8 @@ def test_project_config_field_set_is_the_p5_00_contract() -> None:
         "block_max_seconds",
         "keep_seconds",
         "vision_apply_confidence",
+        "silence_min_seconds",
+        "silence_handle_seconds",
         "pricing_currency",
         "source_audio_cost_per_minute",
         "repair_verify_audio_cost_per_minute",

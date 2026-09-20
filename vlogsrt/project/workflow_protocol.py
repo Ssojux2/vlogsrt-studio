@@ -117,8 +117,6 @@ class EditPlan:
         overlap = sorted(set(approved) & set(rejected))
         if overlap:
             raise ValueError(f"후보가 승인과 거절에 동시에 들어 있다: {overlap}")
-        if not approved and not rejected:
-            raise ValueError("승인 또는 거절한 후보가 하나 이상 있어야 한다")
         if expected_output_duration <= 0:
             raise ValueError("예상 출력 길이는 양수여야 한다")
         payload = {

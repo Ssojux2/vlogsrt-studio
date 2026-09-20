@@ -164,3 +164,14 @@ def test_protocol_rejects_unknown_versions_and_overlapping_approval_sets() -> No
             rejected_candidate_ids=("same",),
             expected_output_duration=Fraction(1),
         )
+
+
+def test_an_empty_review_is_a_valid_noop_plan() -> None:
+    """후보가 없는 안전한 프로젝트를 오류로 만들어 상태 기계를 멈추는 회귀를 잡는다."""
+    plan = EditPlan.create(
+        input_revision=_revision().revision,
+        approved_candidate_ids=(),
+        rejected_candidate_ids=(),
+        expected_output_duration=Fraction(10),
+    )
+    assert plan.approved_candidate_ids == plan.rejected_candidate_ids == ()
