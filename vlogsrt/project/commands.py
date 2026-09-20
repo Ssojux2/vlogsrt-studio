@@ -123,8 +123,27 @@ def _report(published: runner.PublishedProject, *, dtd_path: Path | None) -> int
         log.out("최종 판정: 차단 없음")
     else:
         log.error(f"최종 판정: 차단 — {blockers}")
+    _report_analysis_failures(review)
     log.out(f"리비전: {published.package.fcpxml.parent}")
     log.out(f"판정 {len(published.decisions)}개 · 제거 구간 {removed}건")
     if dtd_path is None:
         log.out("DTD 대조 안 함")
     return 0 if final_accepted else 1
+
+
+def _report_analysis_failures(review: dict) -> None:
+    """분석 실패를 눈에 띄게 — 개수와 각 이유를 log.out으로 낸다(PROTO-6b).
+
+    `analysis_failures`가 있는 판정이 '성공, 자막 0장'으로 읽히면 안 된다 —
+    초안 경고와 같은 이유로 억제 불가 채널(stdout)로 나간다. 문장의 줄바꿈은
+    한 줄로 접는다 — 원인 문장의 정본은 review.json에 있다.
+    """
+    failures = review.get("analysis_failures") or []
+    if not failures:
+        return
+    log.out(f"분석 실패 {len(failures)}건 — 이유:")
+    for row in failures:
+        sentences = (*row.get("review", ()), *row.get("source_review", ()))
+        folded = [" ".join(sentence.split()) for sentence in sentences]
+        shown = " / ".join(folded) or "(이유 문장 없음)"
+        log.out(f"  · {row['instance_id'][:12]}… ({row['source_id'][:12]}…): {shown}")

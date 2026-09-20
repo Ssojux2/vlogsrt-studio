@@ -409,3 +409,32 @@ PROTO-6b를 보드에 올렸다.
 두 레인은 `vlogsrt/{refine,layout,pipeline}.py` 대 `vlogsrt/project/**`로 갈려 파일이
 겹치지 않는다. 의미 충돌은 하나뿐이다 — `Config`에 필드가 늘면 `_config_sha256`이
 바뀌어 `project/`의 분석 키가 전부 깨진다. A1은 새 설정 필드를 추가하지 않는다.
+
+## 2026-09-20 PROTO-6b 스모크 재실행
+
+PROTO-6 스모크와 같은 재료(합성 10초 클립 `testsrc2+sine`, 손 FCPXML 1.14, 전사
+픽스처 없음)를 PROTO-6b 수정 뒤에 **새 OUT**으로 다시 돌렸다. 스크래치 디렉터리
+`$TMPDIR/proto6b-repro*`(커밋 안 함), 유료 호출 0회, 실제 ffmpeg·ffprobe·xmllint·
+Silero ONNX 세션 사용.
+
+**고치기 전(같은 재료, 옛 코드) — 결함 재현:** 종료 코드 **0**, stdout `최종 판정: 차단
+없음`, review.json `final_accepted: true`·`final_blockers: []`·`review: []`,
+`VLOG_AI_EDIT.srt`·`VLOG_AI_SOURCE.srt` **0바이트**. 실패 이유("픽스처가 없습니다")는
+stdout·stderr·review·trace 어디에도 없었다.
+
+**고친 뒤:**
+
+```
+EXIT=1
+stdout: 분석 실패 1건 — 이유:
+        · 4c369780bd09… (e376cf020de7…): 소스 가드가 keep_all이다 — … /
+          전사 트레이스가 error다 — 전체를 보호한다: RuntimeError: 픽스처가 없습니다: …
+stderr: ERR 최종 판정: 차단 — ['analysis_failed_instances']
+review.json: final_accepted=false, final_blockers=["analysis_failed_instances"],
+             analysis_failures=[{instance_id, source_id, review:[인스턴스 문장],
+             source_review:["전사 트레이스가 error다 — …픽스처가 없습니다…"]}]
+```
+
+SRT는 여전히 0장이다 — 하지만 이제 그 사실이 판정·기록·종료 코드에 남는다(실패를 빈
+성공으로 바꾸지 않는다, D35). 원인 문장의 정본은 review.json `analysis_failures`에
+줄바꿈 그대로 살고 stdout 에서는 한 줄로 접는다.

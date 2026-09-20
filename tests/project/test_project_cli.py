@@ -177,7 +177,11 @@ class _Scripted:
         return list(self.whisper(job))
 
 
-def _stub_transcriber(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, bool]]:
+def _stub_transcriber(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    whisper: Callable[[TranscriptionJob], list[ChunkResponse]] | None = None,
+) -> list[dict[str, bool]]:
     """`get_transcriber`를 기록하는 스텁으로 갈아끼운다 — kwargs가 곧 계약이다."""
     calls: list[dict[str, bool]] = []
 
@@ -185,7 +189,7 @@ def _stub_transcriber(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, bool]]:
         cfg: Config | None = None, *, online: bool = False, force_offline: bool = False
     ) -> _Scripted:
         calls.append({"online": online, "force_offline": force_offline})
-        return _Scripted()
+        return _Scripted(whisper=whisper)
 
     monkeypatch.setattr(transcribe, "get_transcriber", factory)
     return calls
@@ -369,6 +373,44 @@ def test_offline_run_publishes_a_blocked_draft_and_exits_1(
     assert review["final_blockers"] == ["decision_error"]
     assert (out / "package" / "current").is_symlink()  # 차단된 패키지지 패키지 없음이 아니다
     assert (out / "artifacts").is_dir()
+
+
+def test_offline_transcriber_failure_blocks_final_with_reasons(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """전사기가 죽는 오프라인 실행(스모크와 같은 모양) — 분석 실패는 종료 1과 이유로 닫는다.
+
+    픽스처 없는 클립은 예전에 `차단 없음`·종료 0·자막 0장으로 나갔다(PROTO-6b 결함).
+    이제 keep_all 가드가 `analysis_failed_instances`로 막고, 이유 문장(인스턴스·소스)
+    이 review.json과 stdout 둘 다에 남는다.
+    """
+
+    def failing_whisper(job: TranscriptionJob) -> list[ChunkResponse]:
+        raise RuntimeError("픽스처가 없습니다: …/clip.whisper.json")
+
+    project = _write_project(tmp_path, _media_file(tmp_path, "clip.mp4", b"synthetic-original"))
+    project_config = _write_project_config(tmp_path)
+    out = tmp_path / "out"
+    _patch_pipeline(monkeypatch)
+    _stub_transcriber(monkeypatch, whisper=failing_whisper)
+
+    code = cli.main(_argv(project, out, project_config))
+    captured = capsys.readouterr()
+
+    assert code == 1, "'성공, 자막 0장'이 아니라 막힌 패키지다"
+    review = json.loads((out / "package" / "current" / "review.json").read_text(encoding="utf-8"))
+    assert review["final_accepted"] is False
+    assert review["final_blockers"] == ["analysis_failed_instances"]
+    failures = review["analysis_failures"]
+    assert len(failures) == 1
+    assert failures[0]["review"] == ["소스 가드가 keep_all이다 — 이 슬라이스 전체가 보호다"]
+    assert failures[0]["source_review"], "원인 문장이 기록에 남아야 한다"
+    assert "전사 트레이스가 error다" in failures[0]["source_review"][0]
+    assert (out / "package" / "current").is_symlink()  # 막힌 패키지지 패키지 없음이 아니다
+    assert (out / "package" / "current" / "VLOG_AI_EDIT.srt").stat().st_size == 0
+    squashed = _squash(captured.out)
+    assert "분석실패1건" in squashed, "개수가 눈에 띄게 나와야 한다"
+    assert "전사트레이스가error다" in squashed, "이유 문장이 stdout에도 나와야 한다"
 
 
 def test_a_second_run_into_the_same_out_passes_the_managed_root_gate(
