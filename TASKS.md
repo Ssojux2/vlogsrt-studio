@@ -53,7 +53,7 @@
 | PROTO-4 | 러너 3/3 — 블록·프레임 표본·비전·EditPlan·EDIT 자막·패키지 | ✅ `8ca214d` |
 | PROTO-5 | `project/commands.py` + `cli.py` — **비용 경계가 사는 자리** | ✅ `f0702c8` |
 | PROTO-6 | 한 프로세스 e2e 테스트 + **로컬 실측 스모크** + `docs/RUNBOOK.md` | ✅ `92c4ddf` |
-| PROTO-6b | **분석 실패가 「차단 없음」으로 나간다** — 종료 0에 0바이트 SRT | 📋 브리프 확정 |
+| PROTO-6b | **분석 실패가 「차단 없음」으로 나간다** — 종료 0에 0바이트 SRT | ✅ `cc61a2f` |
 | PROTO-7 | **실물 FCPXML 실행 · Final Cut import · 첫 실패 기록** | 🧑 대기 |
 
 브리프는 `docs/orchestration/tasks/proto-*.md`, 방향 검토는
