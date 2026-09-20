@@ -1,7 +1,7 @@
 # PROTO-6b — 분석 실패가 "차단 없음"으로 나가는 결함
 
-작업 디렉터리: `/Users/ssojux2/orca/workspaces/vlogsrt/fcp-prototype`
-브랜치: `Ssojux2/fcp-prototype`, 기준 **`92c4ddf`** (트리 깨끗, pytest 2500 passed)
+작업 디렉터리: `/Users/ssojux2/orca/workspaces/vlogsrt/proto-6b-failed-blocks`
+브랜치: `Ssojux2/proto-6b-failed-blocks`, 기준 **`569aecb`** (트리 깨끗, pytest 2500 passed)
 
 **툴체인 shim 사망**: git은 `/Library/Developer/CommandLineTools/usr/bin/git`, 파이썬은
 `.venv/bin/python`, **`make` 금지**. ffmpeg·xmllint 정상.
