@@ -2,14 +2,18 @@ import Foundation
 
 public enum ProtocolCodec {
   public static let version = "1.0"
+  public static let analysisVersion = "1.1"
 
   public static func encode<Payload: Encodable>(
     _ payload: Payload,
-    type: String
+    type: String,
+    version protocolVersion: String = version
   ) throws -> String {
     let encoder = JSONEncoder()
     encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
-    let data = try encoder.encode(Envelope(payload: payload, protocolVersion: version, type: type))
+    let data = try encoder.encode(
+      Envelope(payload: payload, protocolVersion: protocolVersion, type: type)
+    )
     guard let text = String(data: data, encoding: .utf8) else {
       throw ProtocolCodecError.invalidUTF8
     }

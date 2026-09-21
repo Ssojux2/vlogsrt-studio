@@ -13,6 +13,7 @@ public enum RoundTripStatus: String, Codable, Sendable {
 /// 모든 쓰기는 이미 있는 파일을 조용히 덮어쓰지 않는다.
 public struct RoundTripJob: Equatable, Sendable {
   public static let inputFileName = "input.fcpxml"
+  public static let projectSelectionFileName = "project-selection.jsonl"
   public static let requestFileName = "roundtrip-request.jsonl"
   public static let outputFileName = "roundtrip.fcpxml"
   public static let resultFileName = "roundtrip-result.jsonl"
@@ -31,12 +32,28 @@ public struct RoundTripJob: Equatable, Sendable {
   }
 
   public var inputURL: URL { directoryURL.appendingPathComponent(Self.inputFileName) }
+  public var projectSelectionURL: URL {
+    directoryURL.appendingPathComponent(Self.projectSelectionFileName)
+  }
   public var requestURL: URL { directoryURL.appendingPathComponent(Self.requestFileName) }
   public var outputURL: URL { directoryURL.appendingPathComponent(Self.outputFileName) }
   public var resultURL: URL { directoryURL.appendingPathComponent(Self.resultFileName) }
 
   public func writeInput(_ data: Data, fileManager: FileManager = .default) throws {
     try Self.writeNew(data, to: inputURL, fileManager: fileManager)
+  }
+
+  public func writeProjectSelection(
+    _ selection: ActiveProjectSelection,
+    fileManager: FileManager = .default
+  ) throws {
+    let message = try ProjectSelectionMessage.create(selection)
+    let line = try ProtocolCodec.encode(
+      message,
+      type: "ProjectSelection",
+      version: ProtocolCodec.analysisVersion
+    )
+    try Self.writeNew(Data(line.utf8), to: projectSelectionURL, fileManager: fileManager)
   }
 
   public func writeRequest(

@@ -30,3 +30,16 @@ import Testing
     )
   }
 }
+
+@Test func workflowExtensionCanReadUserSelectedFCPXML() throws {
+  let macosRoot = URL(fileURLWithPath: #filePath)
+    .deletingLastPathComponent()
+    .deletingLastPathComponent()
+    .deletingLastPathComponent()
+  let entitlements = try String(
+    contentsOf: macosRoot.appendingPathComponent("Resources/WorkflowExtension.entitlements"),
+    encoding: .utf8
+  )
+  #expect(entitlements.contains("com.apple.security.files.user-selected.read-only"))
+  #expect(entitlements.contains("<true/>"))
+}

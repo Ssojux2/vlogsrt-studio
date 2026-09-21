@@ -51,6 +51,9 @@ targets:
         # (SDK_NAMES에는 잡히지만 ld 명령에 경로가 붙지 않음). 템플릿 동작을
         # 복원하려면 lib 위치를 직접 알려준다. ADDITIONAL_SDKS는 계약값 그대로.
         LIBRARY_SEARCH_PATHS: "$(inherited) /Library/Developer/SDKs/WorkflowExtensionSDK.sdk/usr/lib"
+        FRAMEWORK_SEARCH_PATHS: "$(inherited) /Library/Developer/SDKs/WorkflowExtensionSDK.sdk/Library/Frameworks"
+        HEADER_SEARCH_PATHS: "$(inherited) /Library/Developer/SDKs/WorkflowExtensionSDK.sdk/usr/include"
+        SWIFT_OBJC_BRIDGING_HEADER: Resources/FinalCutAgentWorkflowExtension-Bridging-Header.h
         LD_ENTRY_POINT: _ProExtensionMain
         OTHER_LDFLAGS: "$(inherited) -fapplication-extension -lProExtension"
         APPLICATION_EXTENSION_API_ONLY: YES

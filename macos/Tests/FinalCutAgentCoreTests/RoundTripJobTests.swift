@@ -24,6 +24,26 @@ import Testing
   #expect(job.resultURL.lastPathComponent == "roundtrip-result.jsonl")
 }
 
+@Test func roundTripJobStoresTheActiveProjectSelectionBeforeAnalysis() throws {
+  let root = FileManager.default.temporaryDirectory
+    .appendingPathComponent(UUID().uuidString, isDirectory: true)
+  defer { try? FileManager.default.removeItem(at: root) }
+  let workspace = AppGroupWorkspace(rootURL: root)
+  _ = try workspace.createJob(id: "analysis-1")
+  let job = try RoundTripJob(workspace: workspace, id: "analysis-1")
+  let selection = ActiveProjectSelection(
+    projectUID: "P-1",
+    projectName: "Project",
+    timelineStart: RationalTime(value: 0, timescale: 1),
+    duration: RationalTime(value: 10, timescale: 1),
+    frameDuration: RationalTime(value: 1, timescale: 25)
+  )
+  try job.writeProjectSelection(selection)
+  let text = try String(contentsOf: job.projectSelectionURL, encoding: .utf8)
+  #expect(text.contains("\"protocol_version\":\"1.1\""))
+  #expect(text.contains("\"project_uid\":\"P-1\""))
+}
+
 @Test func roundTripJobRejectsTraversalIDs() {
   let workspace = AppGroupWorkspace(rootURL: FileManager.default.temporaryDirectory)
   #expect(throws: WorkspaceError.self) {

@@ -19,8 +19,10 @@
 		7B15858CECF631D1876C8320 /* FinalCutPasteboard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0ABF9EFE3FDDC83B32482D93 /* FinalCutPasteboard.swift */; };
 		831D930AD8367A81F3DB7598 /* RoundTripMessages.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2053A676E444A5D3827BA357 /* RoundTripMessages.swift */; };
 		86DFE00C9230AB03E0957176 /* EngineProcess.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6425D219B5CA268C97A7AA77 /* EngineProcess.swift */; };
+		A1F38E6A058AD2E99A2DC1E7 /* FinalCutTimelineBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF2B01A5B1D09C8DCF304FC3 /* FinalCutTimelineBridge.swift */; };
 		A5603A6524A5E9EDBF476E26 /* WorkflowProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26833B0223E418B4ABC94592 /* WorkflowProtocol.swift */; };
 		AE20558BDFA20F94997DD325 /* libFinalCutAgentCore.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 162A42CFC45AE937A1F021B9 /* libFinalCutAgentCore.a */; };
+		B2598061B18308745D250C52 /* ActiveProject.swift in Sources */ = {isa = PBXBuildFile; fileRef = E140ABBDF04A5ECFBD3F1713 /* ActiveProject.swift */; };
 		CDD075051619C39B61CFFCAF /* SecurityScopedBookmarkStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57320E6BA7114BEE91B0AE57 /* SecurityScopedBookmarkStore.swift */; };
 		DE2E3290799026BDB31925D9 /* ShareInbox.swift in Sources */ = {isa = PBXBuildFile; fileRef = D73C8DEC3C5E76180C3C885F /* ShareInbox.swift */; };
 		E76E587A5DD469682B532F9A /* WorkflowViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = C263664F6E10FCD89C5CC000 /* WorkflowViewController.swift */; };
@@ -82,6 +84,8 @@
 		C263664F6E10FCD89C5CC000 /* WorkflowViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkflowViewController.swift; sourceTree = "<group>"; };
 		CB047E1AA867D819DDA5D4B2 /* AppGroupWorkspace.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppGroupWorkspace.swift; sourceTree = "<group>"; };
 		D73C8DEC3C5E76180C3C885F /* ShareInbox.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareInbox.swift; sourceTree = "<group>"; };
+		E140ABBDF04A5ECFBD3F1713 /* ActiveProject.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActiveProject.swift; sourceTree = "<group>"; };
+		FF2B01A5B1D09C8DCF304FC3 /* FinalCutTimelineBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FinalCutTimelineBridge.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -117,6 +121,7 @@
 		4DB7EBF7190C0D991FC7F707 /* FinalCutAgentCore */ = {
 			isa = PBXGroup;
 			children = (
+				E140ABBDF04A5ECFBD3F1713 /* ActiveProject.swift */,
 				CB047E1AA867D819DDA5D4B2 /* AppGroupWorkspace.swift */,
 				6425D219B5CA268C97A7AA77 /* EngineProcess.swift */,
 				6832A3B51FA754EC6959C587 /* FinalCutImporter.swift */,
@@ -162,6 +167,7 @@
 		E2C42A6D5E73EF5D7EBDCAAF /* WorkflowExtension */ = {
 			isa = PBXGroup;
 			children = (
+				FF2B01A5B1D09C8DCF304FC3 /* FinalCutTimelineBridge.swift */,
 				C263664F6E10FCD89C5CC000 /* WorkflowViewController.swift */,
 			);
 			path = WorkflowExtension;
@@ -296,6 +302,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				A1F38E6A058AD2E99A2DC1E7 /* FinalCutTimelineBridge.swift in Sources */,
 				E76E587A5DD469682B532F9A /* WorkflowViewController.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -304,6 +311,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				B2598061B18308745D250C52 /* ActiveProject.swift in Sources */,
 				6A374178121C2DAE331BD569 /* AppGroupWorkspace.swift in Sources */,
 				86DFE00C9230AB03E0957176 /* EngineProcess.swift in Sources */,
 				0F52AD7FD9F1954D2B62D9F2 /* FinalCutImporter.swift in Sources */,
@@ -377,7 +385,9 @@
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CODE_SIGN_ENTITLEMENTS = Resources/WorkflowExtension.entitlements;
 				COMBINE_HIDPI_IMAGES = YES;
+				FRAMEWORK_SEARCH_PATHS = "$(inherited) /Library/Developer/SDKs/WorkflowExtensionSDK.sdk/Library/Frameworks";
 				GENERATE_INFOPLIST_FILE = NO;
+				HEADER_SEARCH_PATHS = "$(inherited) /Library/Developer/SDKs/WorkflowExtensionSDK.sdk/usr/include";
 				INFOPLIST_FILE = "Resources/WorkflowExtension-Info.plist";
 				LD_ENTRY_POINT = _ProExtensionMain;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -393,6 +403,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = com.ssojux2.vlogsrt.workflow;
 				SDKROOT = macosx;
 				SKIP_INSTALL = YES;
+				SWIFT_OBJC_BRIDGING_HEADER = "Resources/FinalCutAgentWorkflowExtension-Bridging-Header.h";
 			};
 			name = Debug;
 		};
@@ -499,7 +510,9 @@
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CODE_SIGN_ENTITLEMENTS = Resources/WorkflowExtension.entitlements;
 				COMBINE_HIDPI_IMAGES = YES;
+				FRAMEWORK_SEARCH_PATHS = "$(inherited) /Library/Developer/SDKs/WorkflowExtensionSDK.sdk/Library/Frameworks";
 				GENERATE_INFOPLIST_FILE = NO;
+				HEADER_SEARCH_PATHS = "$(inherited) /Library/Developer/SDKs/WorkflowExtensionSDK.sdk/usr/include";
 				INFOPLIST_FILE = "Resources/WorkflowExtension-Info.plist";
 				LD_ENTRY_POINT = _ProExtensionMain;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -515,6 +528,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = com.ssojux2.vlogsrt.workflow;
 				SDKROOT = macosx;
 				SKIP_INSTALL = YES;
+				SWIFT_OBJC_BRIDGING_HEADER = "Resources/FinalCutAgentWorkflowExtension-Bridging-Header.h";
 			};
 			name = Release;
 		};

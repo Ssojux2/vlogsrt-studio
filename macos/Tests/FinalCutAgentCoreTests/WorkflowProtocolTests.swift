@@ -18,6 +18,29 @@ import Testing
   #expect(line.contains("\"insertion_method\":\"relative\""))
 }
 
+@Test func projectSelectionUsesAnalysisProtocol11AndReducedRationalTimes() throws {
+  let selection = try ActiveProjectSelection.validated(
+    projectUID: "P-1",
+    projectName: "Project",
+    timelineStart: RationalTime(value: 3_600, timescale: 100),
+    duration: RationalTime(value: 12_000, timescale: 100),
+    frameDuration: RationalTime(value: 100, timescale: 2_500)
+  )
+  let message = try ProjectSelectionMessage.create(selection)
+  let line = try ProtocolCodec.encode(
+    message,
+    type: "ProjectSelection",
+    version: ProtocolCodec.analysisVersion
+  )
+  let object = try #require(JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any])
+  #expect(object["protocol_version"] as? String == "1.1")
+  let payload = try #require(object["payload"] as? [String: Any])
+  #expect(payload["timeline_start"] as? String == "36/1")
+  #expect(payload["duration"] as? String == "120/1")
+  #expect(payload["frame_duration"] as? String == "1/25")
+  #expect((payload["selection_revision"] as? String)?.count == 64)
+}
+
 @Test func shareInboxRequiresExactlyOnePCMAndOneFCPXML() throws {
   let root = FileManager.default.temporaryDirectory
     .appendingPathComponent(UUID().uuidString, isDirectory: true)
