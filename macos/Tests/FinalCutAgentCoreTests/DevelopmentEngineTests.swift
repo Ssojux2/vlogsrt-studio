@@ -50,3 +50,40 @@ import Testing
   #expect(FileManager.default.fileExists(atPath: groupJob.appendingPathComponent("candidates.jsonl").path))
   #expect(!FileManager.default.fileExists(atPath: groupJob.appendingPathComponent(".env").path))
 }
+
+@Test func developmentJobStagerRejectsSymlinkedRootsAndDirectoryResults() throws {
+  let root = FileManager.default.temporaryDirectory
+    .appendingPathComponent(UUID().uuidString, isDirectory: true)
+  defer { try? FileManager.default.removeItem(at: root) }
+  let groupJob = root.appendingPathComponent("group-job", isDirectory: true)
+  let external = root.appendingPathComponent("external", isDirectory: true)
+  let escaped = root.appendingPathComponent("escaped", isDirectory: true)
+  try FileManager.default.createDirectory(at: groupJob, withIntermediateDirectories: true)
+  try FileManager.default.createDirectory(at: external, withIntermediateDirectories: true)
+  try FileManager.default.createDirectory(at: escaped, withIntermediateDirectories: true)
+  try Data("xml".utf8).write(to: groupJob.appendingPathComponent("input.fcpxml"))
+  try FileManager.default.createSymbolicLink(
+    at: external.appendingPathComponent("Jobs"),
+    withDestinationURL: escaped
+  )
+  #expect(throws: DevelopmentEngineError.self) {
+    try DevelopmentJobStager.stage(
+      jobID: "analysis-1",
+      appGroupJob: groupJob,
+      externalRoot: external
+    )
+  }
+
+  let cleanExternal = root.appendingPathComponent("clean", isDirectory: true)
+  let staged = try DevelopmentJobStager.stage(
+    jobID: "analysis-2",
+    appGroupJob: groupJob,
+    externalRoot: cleanExternal
+  )
+  let fakeResult = staged.appendingPathComponent("candidates.jsonl", isDirectory: true)
+  try FileManager.default.createDirectory(at: fakeResult, withIntermediateDirectories: true)
+  try Data("secret".utf8).write(to: fakeResult.appendingPathComponent(".env"))
+  #expect(throws: DevelopmentEngineError.self) {
+    try DevelopmentJobStager.syncResults(from: staged, to: groupJob)
+  }
+}

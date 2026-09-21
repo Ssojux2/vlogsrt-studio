@@ -41,12 +41,12 @@ from fractions import Fraction
 from pathlib import Path
 
 from vlogsrt import env, log, transcribe
-from vlogsrt.config import load_config
+from vlogsrt.config import Config, load_config
 from vlogsrt.project import runner
 from vlogsrt.project.config import ProjectConfig, load_project_config
 from vlogsrt.project.fcpxml import element_tree, parse_project
 from vlogsrt.project.final_caption import create_caption_request, generate_final_captions
-from vlogsrt.project.media import MediaOverride, load_media_map
+from vlogsrt.project.media import MediaOverride, load_media_map, resolve_media
 from vlogsrt.project.models import ClipInstance
 from vlogsrt.project.review import (
     CandidateAnalysis,
@@ -55,18 +55,28 @@ from vlogsrt.project.review import (
     render_approved_roughcut,
 )
 from vlogsrt.project.timebase import parse_fcpx_time
-from vlogsrt.project.vision.sampling import FrameSampleRequest, sample_frames
+from vlogsrt.project.vision.sampling import (
+    FrameSampleRequest,
+    establish_correspondence,
+    sample_frames,
+)
 from vlogsrt.project.workflow_analysis import (
     AnalysisSettings,
     CandidateSeed,
+    CandidateWindowPlan,
     LunaFrame,
     LunaWindow,
     TranscriptEvidence,
     build_analysis_estimate,
     build_luna_payload,
+    effective_analysis_settings_sha256,
+    eligible_transcript_evidence,
     finalize_candidate,
     luna_cache_key,
+    luna_request_sha256,
     normalize_luna_response,
+    plan_candidate_windows,
+    project_transcript_evidence,
     safe_transcript_candidates,
     select_frame_times,
 )
@@ -162,18 +172,50 @@ def _project_inspect(args: argparse.Namespace) -> int:
     journal = WorkflowJournal.open(workspace / _JOURNAL)
     if journal.state != "received":
         raise ValueError(f"inspect는 received 상태에서만 가능하다: {journal.state}")
-    document = parse_project(workspace / _INPUT)
-    project_config = load_project_config(args.project_config)
-    estimate = build_analysis_estimate(
-        document,
-        journal.revision,
-        AnalysisSettings(),
-        source_audio_cost_per_minute=project_config.source_audio_cost_per_minute,
-        vision_cost_per_image=project_config.vision_cost_per_image,
-    )
+    estimate = _current_analysis_estimate(args, workspace, journal.revision)
     _write_messages(workspace / _ESTIMATE, (estimate,))
     _protocol_out(estimate)
     return 0
+
+
+def _current_analysis_estimate(
+    args: argparse.Namespace, workspace: Path, revision: ProjectRevision
+) -> AnalysisEstimate:
+    document = parse_project(workspace / _INPUT)
+    cfg = load_config()
+    project_config = load_project_config(args.project_config)
+    media_map = getattr(args, "media_map", None)
+    overrides: tuple[MediaOverride, ...] = (
+        load_media_map(media_map) if media_map is not None else ()
+    )
+    media = resolve_media(document, overrides)
+    override_payload = [
+        {
+            "original": str(row.original) if row.original is not None else None,
+            "proxy": str(row.proxy) if row.proxy is not None else None,
+            "resource_id": row.resource_id,
+        }
+        for row in overrides
+    ]
+    override_sha256 = hashlib.sha256(
+        json.dumps(override_payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    settings = AnalysisSettings()
+    fingerprint = effective_analysis_settings_sha256(
+        settings,
+        engine_config=cfg.to_dict(),
+        project_config=project_config.to_dict(),
+        media_overrides_sha256=override_sha256,
+        source_sha256s=tuple(row.original_sha256 for row in media),
+    )
+    return build_analysis_estimate(
+        document,
+        revision,
+        settings,
+        source_audio_cost_per_minute=project_config.source_audio_cost_per_minute,
+        vision_cost_per_image=project_config.vision_cost_per_image,
+        settings_sha256=fingerprint,
+    )
 
 
 def _project_analyze(args: argparse.Namespace) -> int:
@@ -189,6 +231,9 @@ def _project_analyze(args: argparse.Namespace) -> int:
         estimate_message = loaded_estimate
         if estimate_message.input_revision != journal.revision.revision:
             raise ValueError("비용 추정의 입력 리비전이 현재 작업과 다르다")
+        current_estimate = _current_analysis_estimate(args, workspace, journal.revision)
+        if current_estimate != estimate_message:
+            raise ValueError("현재 분석 설정·미디어가 승인 전 비용 추정과 다르다")
     if bool(args.online):
         assert estimate_message is not None
         if args.authorization is None:
@@ -492,8 +537,8 @@ def _produce_analysis_candidates(
 ) -> tuple[CutCandidate, ...]:
     """기존 소스 전사/VAD를 재사용하고 안전 seed만 Luna에 제공한다."""
     settings = AnalysisSettings()
-    if estimate.model != settings.model or estimate.settings_sha256 != settings.sha256():
-        raise ValueError("승인된 비용 추정과 현재 Luna 설정이 다르다")
+    if estimate.model != settings.model:
+        raise ValueError("승인된 비용 추정과 현재 Luna 모델이 다르다")
     if bool(args.online) == (args.vision_fixtures is not None):
         raise ValueError("분석은 --online 또는 --vision-fixtures 하나만 선택해야 한다")
     cfg = load_config()
@@ -501,8 +546,11 @@ def _produce_analysis_candidates(
     overrides: tuple[MediaOverride, ...] = (
         load_media_map(args.media_map) if args.media_map is not None else ()
     )
-    transcriber = transcribe.get_transcriber(
-        cfg, online=bool(args.online), force_offline=not bool(args.online)
+    transcriber = _BudgetedTranscriber(
+        transcribe.get_transcriber(
+            cfg, online=bool(args.online), force_offline=not bool(args.online)
+        ),
+        estimate.transcription_seconds,
     )
     prepared = runner.prepare_audio(
         workspace / _INPUT,
@@ -515,6 +563,19 @@ def _produce_analysis_candidates(
         raise ValueError("분석 준비 문서가 승인된 입력 리비전과 다르다")
     analyzed = runner.analyze_audio(prepared, transcriber=transcriber)
     seeds = _analysis_seeds(analyzed, revision, settings)
+    clip_ranges = {
+        item.instance_id: RationalRange(item.offset, item.offset + item.duration)
+        for item in prepared.document.storyline
+        if isinstance(item, ClipInstance)
+    }
+    windows = plan_candidate_windows(
+        seeds,
+        input_revision=revision.revision,
+        clip_ranges=clip_ranges,
+        window_seconds=settings.window_seconds,
+    )
+    if len(windows) > estimate.max_windows:
+        raise ValueError("실제 Luna 창 수가 승인된 상한을 넘는다")
     client = None
     if bool(args.online):
         client = transcribe.create_vision_client(
@@ -522,23 +583,45 @@ def _produce_analysis_candidates(
         )
     decisions: list[VisionWindowDecision] = []
     candidates: list[CutCandidate] = []
-    for seed in _split_seeds(seeds, revision.revision, settings.window_seconds):
-        decision = _decide_seed(
-            seed,
+    used_images = 0
+    for planned in windows:
+        decision, image_count = _decide_window(
+            planned,
             analyzed,
             revision.revision,
             settings,
             project_config,
+            estimate.settings_sha256,
             workspace,
             client=client,
             fixtures=Path(args.vision_fixtures) if args.vision_fixtures is not None else None,
         )
+        used_images += image_count
+        if used_images > estimate.max_images:
+            raise ValueError("실제 Luna 이미지 수가 승인된 상한을 넘는다")
         decisions.append(decision)
-        candidate = finalize_candidate(seed, decision)
-        if candidate is not None:
-            candidates.append(candidate)
+        for seed in planned.candidates:
+            candidate = finalize_candidate(seed, decision)
+            if candidate is not None:
+                candidates.append(candidate)
     _write_messages(workspace / "vision-decisions.jsonl", tuple(decisions))
     return tuple(candidates)
+
+
+class _BudgetedTranscriber:
+    def __init__(self, delegate: transcribe.Transcriber, limit: Fraction) -> None:
+        self.delegate = delegate
+        self.limit = limit
+        self.used = Fraction()
+
+    def transcribe(
+        self, job: transcribe.TranscriptionJob, cfg: Config
+    ) -> list[transcribe.ChunkResponse]:
+        requested = sum((Fraction(str(chunk.duration)) for chunk in job.chunks), start=Fraction())
+        if self.used + requested > self.limit:
+            raise RuntimeError("전사 요청 길이가 승인된 비용 상한을 넘는다")
+        self.used += requested
+        return self.delegate.transcribe(job, cfg)
 
 
 def _analysis_seeds(
@@ -575,22 +658,43 @@ def _analysis_seeds(
         )
         for row in silence.candidates
     ]
-    transcript = tuple(
-        TranscriptEvidence(
-            cue.cue_id,
-            cue.instance_id,
-            RationalRange(cue.source_start, cue.source_end),
-            RationalRange(cue.timeline_start, cue.timeline_end),
-            cue.text,
-            True,
-        )
-        for cue in analyzed.source_captions.placed_cues
-        if cue.source_end > cue.source_start and cue.timeline_end > cue.timeline_start
-    )
-    seeds.extend(safe_transcript_candidates(transcript, revision.revision, settings))
     clips = {
         item.instance_id: item for item in document.storyline if isinstance(item, ClipInstance)
     }
+    resources = {row.scoped_id: row for row in document.resources}
+    guards = {row.instance_id: row for row in analyzed.instance_guards}
+    locked = set(analyzed.locked_instance_ids) | {
+        row.instance_id for row in analyzed.unavailable_instances
+    }
+    unresolved = set(analyzed.source_captions.unresolved_cue_ids)
+    transcript_rows: list[TranscriptEvidence] = []
+    for cue in analyzed.source_captions.placed_cues:
+        clip = clips.get(cue.instance_id)
+        guard = guards.get(cue.instance_id)
+        if clip is None or guard is None or guard.status != "success" or cue.instance_id in locked:
+            continue
+        resource = resources[clip.resource_scoped_id]
+        evidence = project_transcript_evidence(
+            utterance_id=cue.cue_id,
+            clip_instance_id=cue.instance_id,
+            source_range=RationalRange(cue.source_start, cue.source_end),
+            text=cue.text,
+            complete=cue.cue_id not in unresolved,
+            clip_source_start=clip.start,
+            clip_timeline_start=clip.offset,
+            resource_start=resource.start,
+            frame_duration=document.frame_duration,
+        )
+        if evidence is not None and evidence.source_range.end < clip.start + clip.duration:
+            transcript_rows.append(evidence)
+    transcript = eligible_transcript_evidence(
+        transcript_rows,
+        successful_instance_ids={
+            row.instance_id for row in analyzed.instance_guards if row.status == "success"
+        },
+        locked_instance_ids=locked,
+    )
+    seeds.extend(safe_transcript_candidates(transcript, revision.revision, settings))
     valid = [
         seed
         for seed in seeds
@@ -606,94 +710,57 @@ def _analysis_seeds(
     return tuple(by_id.values())
 
 
-def _split_seeds(
-    seeds: tuple[CandidateSeed, ...], input_revision: str, maximum: Fraction
-) -> tuple[CandidateSeed, ...]:
-    split: list[CandidateSeed] = []
-    for seed in seeds:
-        cursor = seed.timeline_range.start
-        while cursor < seed.timeline_range.end:
-            end = min(cursor + maximum, seed.timeline_range.end)
-            delta_start = cursor - seed.timeline_range.start
-            delta_end = end - seed.timeline_range.start
-            source = RationalRange(
-                seed.source_range.start + delta_start, seed.source_range.start + delta_end
-            )
-            timeline = RationalRange(cursor, end)
-            window_id = hashlib.sha256(
-                f"vlogsrt-luna-window-v1\0{input_revision}\0{seed.clip_instance_id}"
-                f"\0{cursor}\0{end}".encode()
-            ).hexdigest()
-            candidate_id = CutCandidate.identity(
-                input_revision=input_revision,
-                clip_instance_id=seed.clip_instance_id,
-                source_range=source,
-                timeline_range=timeline,
-                reason=seed.reason,
-                evidence=seed.evidence,
-                window_id=window_id,
-            )
-            split.append(
-                CandidateSeed(
-                    candidate_id,
-                    window_id,
-                    seed.clip_instance_id,
-                    source,
-                    timeline,
-                    seed.reason,
-                    seed.evidence,
-                )
-            )
-            cursor = end
-    return tuple(split)
-
-
-def _decide_seed(
-    seed: CandidateSeed,
+def _decide_window(
+    planned: CandidateWindowPlan,
     analyzed: runner.AnalyzedAudio,
     input_revision: str,
     settings: AnalysisSettings,
     project_config: ProjectConfig,
+    cache_settings_sha256: str,
     workspace: Path,
     *,
     client: object | None,
     fixtures: Path | None,
-) -> VisionWindowDecision:
+) -> tuple[VisionWindowDecision, int]:
     document = analyzed.prepared.document
     clip = next(
         item
         for item in document.storyline
-        if isinstance(item, ClipInstance) and item.instance_id == seed.clip_instance_id
+        if isinstance(item, ClipInstance) and item.instance_id == planned.clip_instance_id
     )
     media = next(
         row for row in analyzed.prepared.media if row.resource_scoped_id == clip.resource_scoped_id
     )
     resource = next(row for row in document.resources if row.scoped_id == clip.resource_scoped_id)
-    half_padding = max(
-        Fraction(),
-        (settings.window_seconds - (seed.timeline_range.end - seed.timeline_range.start)) / 2,
-    )
-    clip_timeline = RationalRange(
-        document.sequence_tc_start + clip.offset,
-        document.sequence_tc_start + clip.offset + clip.duration,
-    )
-    window_start = max(clip_timeline.start, seed.timeline_range.start - half_padding)
-    window_end = min(clip_timeline.end, window_start + settings.window_seconds)
-    window_start = max(clip_timeline.start, window_end - settings.window_seconds)
+    window_start = planned.timeline_range.start
+    window_end = planned.timeline_range.end
     source_window = RationalRange(
-        clip.start + window_start - clip_timeline.start,
-        clip.start + window_end - clip_timeline.start,
+        clip.start + window_start - clip.offset,
+        clip.start + window_end - clip.offset,
+    )
+    correspondence = establish_correspondence(media)
+    file_origin = correspondence.original.presentation_origin
+    file_window = RationalRange(
+        file_origin + source_window.start - resource.start,
+        file_origin + source_window.end - resource.start,
+    )
+    file_candidates = tuple(
+        RationalRange(
+            file_origin + row.source_range.start - resource.start,
+            file_origin + row.source_range.end - resource.start,
+        )
+        for row in planned.candidates
     )
     times = select_frame_times(
-        source_window,
-        (seed.source_range,),
+        file_window,
+        file_candidates,
         frame_duration=document.frame_duration,
-        grid_anchor=resource.start,
+        grid_anchor=file_origin,
         max_images=settings.max_images,
     )
     requests = tuple(
         FrameSampleRequest(
-            hashlib.sha256(f"{seed.window_id}\0{time}".encode()).hexdigest()[:24],
+            hashlib.sha256(f"{planned.window_id}\0{time}".encode()).hexdigest()[:24],
             media.asset_content_id,
             time,
         )
@@ -711,26 +778,26 @@ def _decide_seed(
     )
     window = LunaWindow(
         input_revision=input_revision,
-        window_id=seed.window_id,
-        candidate_ids=(seed.candidate_id,),
+        window_id=planned.window_id,
+        candidate_ids=tuple(row.candidate_id for row in planned.candidates),
         frame_ids=tuple(frame.frame_id for frame in frames),
         transcript_context=_window_transcript(analyzed, window_start, window_end),
         source_hashes=(media.original_sha256,),
     )
-    payload = build_luna_payload(window, (seed,), frames)
+    payload = build_luna_payload(window, planned.candidates, frames)
+    request_sha256 = luna_request_sha256(window, planned.candidates, frames)
     key = luna_cache_key(
         prompt_revision=settings.prompt_revision,
         model=settings.model,
-        settings_sha256=settings.sha256(),
-        frame_sha256s=tuple(frame.sha256 for frame in frames),
-        source_sha256s=window.source_hashes,
+        settings_sha256=cache_settings_sha256,
+        request_sha256=request_sha256,
     )
     cache_path = workspace / "artifacts" / "luna-cache" / f"{key}.json"
     raw: object
     if cache_path.is_file():
         raw = json.loads(cache_path.read_text(encoding="utf-8"))
     elif fixtures is not None:
-        fixture = fixtures / f"{seed.window_id}.luna.json"
+        fixture = fixtures / f"{planned.window_id}.luna.json"
         if not fixture.is_file():
             raise ValueError(f"Luna 픽스처가 없다: {fixture}")
         raw = json.loads(fixture.read_text(encoding="utf-8"))
@@ -743,14 +810,18 @@ def _decide_seed(
             raw = exc
     if isinstance(raw, dict) and not cache_path.exists():
         _write_json(cache_path, raw)
-    return normalize_luna_response(window, raw if isinstance(raw, (dict, BaseException)) else {})
+    return (
+        normalize_luna_response(window, raw if isinstance(raw, (dict, BaseException)) else {}),
+        len(frames),
+    )
 
 
 def _window_transcript(analyzed: runner.AnalyzedAudio, start: Fraction, end: Fraction) -> str:
     rows = [
         cue.text
         for cue in analyzed.source_captions.placed_cues
-        if cue.timeline_start < end and start < cue.timeline_end
+        if analyzed.prepared.document.sequence_tc_start + cue.timeline_start < end
+        and start < analyzed.prepared.document.sequence_tc_start + cue.timeline_end
     ]
     return " / ".join(rows) if rows else "전사 없음(VAD 무음 후보)"
 

@@ -44,6 +44,52 @@ import Testing
   #expect(text.contains("\"project_uid\":\"P-1\""))
 }
 
+@Test func jobWritesAuthorizationAndApprovedCandidateIDsWithoutArguments() throws {
+  let root = FileManager.default.temporaryDirectory
+    .appendingPathComponent(UUID().uuidString, isDirectory: true)
+  defer { try? FileManager.default.removeItem(at: root) }
+  let workspace = AppGroupWorkspace(rootURL: root)
+  _ = try workspace.createJob(id: "analysis-2")
+  let job = try RoundTripJob(workspace: workspace, id: "analysis-2")
+  try job.writeAnalysisAuthorization(
+    AnalysisAuthorizationMessage(
+      inputRevision: "a".padding(toLength: 64, withPad: "a", startingAt: 0),
+      estimateRevision: "b".padding(toLength: 64, withPad: "b", startingAt: 0),
+      authorizedAt: "2026-09-21T06:00:00Z"
+    )
+  )
+  try job.writeApprovedCandidateIDs(["c".padding(toLength: 64, withPad: "c", startingAt: 0)])
+  #expect(try String(contentsOf: job.analysisAuthorizationURL).contains("\"protocol_version\":\"1.1\""))
+  #expect(try String(contentsOf: job.approvedCandidatesURL) == String(repeating: "c", count: 64) + "\n")
+}
+
+@Test func activeSelectionRegistryRejectsDelayedJobsAfterProjectChange() throws {
+  let suite = "test.active.selection.\(UUID().uuidString)"
+  let defaults = try #require(UserDefaults(suiteName: suite))
+  defer { defaults.removePersistentDomain(forName: suite) }
+  let registry = ActiveSelectionRegistry(defaults: defaults)
+  let first = ActiveProjectSelection(
+    projectUID: "P-1",
+    projectName: "One",
+    timelineStart: RationalTime(value: 0, timescale: 1),
+    duration: RationalTime(value: 10, timescale: 1),
+    frameDuration: RationalTime(value: 1, timescale: 25)
+  )
+  let second = ActiveProjectSelection(
+    projectUID: "P-2",
+    projectName: "Two",
+    timelineStart: RationalTime(value: 0, timescale: 1),
+    duration: RationalTime(value: 10, timescale: 1),
+    frameDuration: RationalTime(value: 1, timescale: 25)
+  )
+  let firstRevision = try registry.activate(first)
+  try registry.requireCurrent(firstRevision)
+  _ = try registry.activate(second)
+  #expect(throws: ActiveSelectionRegistryError.self) {
+    try registry.requireCurrent(firstRevision)
+  }
+}
+
 @Test func roundTripJobRejectsTraversalIDs() {
   let workspace = AppGroupWorkspace(rootURL: FileManager.default.temporaryDirectory)
   #expect(throws: WorkspaceError.self) {

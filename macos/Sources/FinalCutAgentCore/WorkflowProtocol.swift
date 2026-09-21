@@ -25,19 +25,97 @@ public enum ProtocolCodec {
   public static func decode<Payload: Decodable>(
     _ payload: Payload.Type,
     type: String,
+    version expectedVersion: String = version,
     from line: String
   ) throws -> Payload {
     let envelope = try JSONDecoder().decode(
       DecodedEnvelope<Payload>.self,
       from: Data(line.utf8)
     )
-    guard envelope.protocolVersion == version else {
+    guard envelope.protocolVersion == expectedVersion else {
       throw ProtocolCodecError.unsupportedVersion(envelope.protocolVersion)
     }
     guard envelope.type == type else {
       throw ProtocolCodecError.typeMismatch(expected: type, actual: envelope.type)
     }
     return envelope.payload
+  }
+}
+
+public struct AnalysisEstimateMessage: Codable, Equatable, Sendable {
+  public let inputRevision: String
+  public let model: String
+  public let uniqueSourceAudioSeconds: String
+  public let transcriptionSeconds: String
+  public let maxWindows: Int
+  public let maxImages: Int
+  public let maxImageTokens: Int
+  public let costUpperBound: String?
+  public let settingsSHA256: String
+  public let estimateRevision: String
+
+  enum CodingKeys: String, CodingKey {
+    case inputRevision = "input_revision"
+    case model
+    case uniqueSourceAudioSeconds = "unique_source_audio_seconds"
+    case transcriptionSeconds = "transcription_seconds"
+    case maxWindows = "max_windows"
+    case maxImages = "max_images"
+    case maxImageTokens = "max_image_tokens"
+    case costUpperBound = "cost_upper_bound"
+    case settingsSHA256 = "settings_sha256"
+    case estimateRevision = "estimate_revision"
+  }
+}
+
+public struct RationalRangeMessage: Codable, Equatable, Sendable {
+  public let start: String
+  public let end: String
+}
+
+public struct CutCandidateMessage: Codable, Equatable, Sendable {
+  public let candidateID: String
+  public let inputRevision: String
+  public let clipInstanceID: String
+  public let sourceRange: RationalRangeMessage
+  public let timelineRange: RationalRangeMessage
+  public let reason: String
+  public let evidence: [String]
+  public let confidence: String
+  public let windowID: String
+  public let decisionRevision: String
+  public let selectedByDefault: Bool
+
+  enum CodingKeys: String, CodingKey {
+    case candidateID = "candidate_id"
+    case inputRevision = "input_revision"
+    case clipInstanceID = "clip_instance_id"
+    case sourceRange = "source_range"
+    case timelineRange = "timeline_range"
+    case reason
+    case evidence
+    case confidence
+    case windowID = "window_id"
+    case decisionRevision = "decision_revision"
+    case selectedByDefault = "selected_by_default"
+  }
+}
+
+public struct AnalysisAuthorizationMessage: Codable, Equatable, Sendable {
+  public let inputRevision: String
+  public let estimateRevision: String
+  public let authorizedAt: String
+
+  public init(inputRevision: String, estimateRevision: String, authorizedAt: String) {
+    self.inputRevision = inputRevision
+    self.estimateRevision = estimateRevision
+    self.authorizedAt = authorizedAt
+  }
+
+  enum CodingKeys: String, CodingKey {
+    case inputRevision = "input_revision"
+    case estimateRevision = "estimate_revision"
+    case authorizedAt = "authorized_at"
   }
 }
 

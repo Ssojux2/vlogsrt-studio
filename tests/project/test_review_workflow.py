@@ -43,13 +43,15 @@ from vlogsrt.project.workflow_protocol import (
 
 
 def _project(tmp_path: Path) -> tuple[Path, object]:
-    xml = b"""<?xml version="1.0" encoding="UTF-8"?>
+    media = tmp_path / "clip.mov"
+    media.write_bytes(b"synthetic-media")
+    xml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE fcpxml>
 <fcpxml version="1.14">
   <resources>
     <format id="r1" name="FFVideoFormat1080p25" frameDuration="1/25s"/>
     <asset id="r2" name="clip.mov" uid="ASSET-1" start="0s" duration="12s" hasAudio="1" format="r1">
-      <media-rep kind="original-media" src="file:///tmp/clip.mov"/>
+      <media-rep kind="original-media" src="{media.as_uri()}"/>
     </asset>
   </resources>
   <library><event name="Event" uid="EVENT-1"><project name="My Vlog" uid="PROJECT-1">
@@ -58,7 +60,7 @@ def _project(tmp_path: Path) -> tuple[Path, object]:
     </spine></sequence>
   </project></event></library>
 </fcpxml>
-"""
+""".encode()
     path = tmp_path / "input.fcpxml"
     path.write_bytes(xml)
     return path, parse_project(path)
@@ -230,6 +232,10 @@ def test_only_explicitly_approved_candidate_changes_the_new_fcpxml(tmp_path: Pat
     assert rejected.candidate_id not in rendered.xml_bytes.decode("utf-8")
     assert input_path.read_bytes() == original
     assert rendered.removed_candidate_ids == (approved.candidate_id,)
+
+    drifted = replace(approved, decision_revision="f" * 64, confidence="0")
+    with pytest.raises(ValueError, match="판정 리비전"):
+        render_approved_roughcut(document, revision, (drifted, rejected), plan)
 
 
 def test_review_plan_rejects_unknown_and_stale_candidate_ids(tmp_path: Path) -> None:

@@ -97,6 +97,7 @@ class ProjectSelection:
 class AnalysisEstimate:
     input_revision: str
     model: str
+    unique_source_audio_seconds: Fraction
     transcription_seconds: Fraction
     max_windows: int
     max_images: int
@@ -111,6 +112,7 @@ class AnalysisEstimate:
         *,
         input_revision: str,
         model: str,
+        unique_source_audio_seconds: Fraction,
         transcription_seconds: Fraction,
         max_windows: int,
         max_images: int,
@@ -121,6 +123,7 @@ class AnalysisEstimate:
         payload = _analysis_estimate_payload(
             input_revision=input_revision,
             model=model,
+            unique_source_audio_seconds=unique_source_audio_seconds,
             transcription_seconds=transcription_seconds,
             max_windows=max_windows,
             max_images=max_images,
@@ -131,6 +134,7 @@ class AnalysisEstimate:
         return cls(
             input_revision=input_revision,
             model=model,
+            unique_source_audio_seconds=unique_source_audio_seconds,
             transcription_seconds=transcription_seconds,
             max_windows=max_windows,
             max_images=max_images,
@@ -146,8 +150,10 @@ class AnalysisEstimate:
         _require_sha256(self.estimate_revision, "비용 추정 리비전")
         if not self.model:
             raise ValueError("분석 모델이 비어 있다")
-        if self.transcription_seconds < 0:
-            raise ValueError("전사 길이는 0 이상이어야 한다")
+        if self.unique_source_audio_seconds < 0 or self.transcription_seconds < 0:
+            raise ValueError("고유 소스·전사 길이는 0 이상이어야 한다")
+        if self.transcription_seconds < self.unique_source_audio_seconds:
+            raise ValueError("전사 상한이 고유 소스 길이보다 짧다")
         for name in ("max_windows", "max_images", "max_image_tokens"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
@@ -357,6 +363,7 @@ class CutCandidate:
 class EditPlan:
     input_revision: str
     approved_candidate_ids: tuple[str, ...]
+    approved_decision_revisions: tuple[tuple[str, str], ...]
     rejected_candidate_ids: tuple[str, ...]
     expected_output_duration: Fraction
     plan_revision: str
@@ -369,9 +376,15 @@ class EditPlan:
         approved_candidate_ids: tuple[str, ...],
         rejected_candidate_ids: tuple[str, ...],
         expected_output_duration: Fraction,
+        approved_decision_revisions: tuple[tuple[str, str], ...] = (),
     ) -> EditPlan:
         _require_sha256(input_revision, "입력 리비전")
         approved = tuple(sorted(set(approved_candidate_ids)))
+        revisions = tuple(sorted(approved_decision_revisions))
+        if {candidate_id for candidate_id, _revision in revisions} != set(approved):
+            raise ValueError("승인 후보와 판정 리비전 집합이 다르다")
+        for _candidate_id, decision_revision in revisions:
+            _require_sha256(decision_revision, "비전 판정 리비전")
         rejected = tuple(sorted(set(rejected_candidate_ids)))
         overlap = sorted(set(approved) & set(rejected))
         if overlap:
@@ -380,6 +393,7 @@ class EditPlan:
             raise ValueError("예상 출력 길이는 양수여야 한다")
         payload = {
             "approved_candidate_ids": list(approved),
+            "approved_decision_revisions": [list(row) for row in revisions],
             "expected_output_duration": _fraction_text(expected_output_duration),
             "input_revision": input_revision,
             "rejected_candidate_ids": list(rejected),
@@ -387,6 +401,7 @@ class EditPlan:
         return cls(
             input_revision=input_revision,
             approved_candidate_ids=approved,
+            approved_decision_revisions=revisions,
             rejected_candidate_ids=rejected,
             expected_output_duration=expected_output_duration,
             plan_revision=_digest(payload),
@@ -579,6 +594,7 @@ def _message_payload(message: ProtocolMessage) -> dict[str, object]:
             **_analysis_estimate_payload(
                 input_revision=message.input_revision,
                 model=message.model,
+                unique_source_audio_seconds=message.unique_source_audio_seconds,
                 transcription_seconds=message.transcription_seconds,
                 max_windows=message.max_windows,
                 max_images=message.max_images,
@@ -633,6 +649,9 @@ def _message_payload(message: ProtocolMessage) -> dict[str, object]:
     if isinstance(message, EditPlan):
         return {
             "approved_candidate_ids": list(message.approved_candidate_ids),
+            "approved_decision_revisions": [
+                list(row) for row in message.approved_decision_revisions
+            ],
             "expected_output_duration": _fraction_text(message.expected_output_duration),
             "input_revision": message.input_revision,
             "plan_revision": message.plan_revision,
@@ -694,6 +713,7 @@ def _decode_payload(kind: object, payload: dict[str, object]) -> ProtocolMessage
         estimate = AnalysisEstimate.create(
             input_revision=_string(payload, "input_revision"),
             model=_string(payload, "model"),
+            unique_source_audio_seconds=_fraction(payload, "unique_source_audio_seconds"),
             transcription_seconds=_fraction(payload, "transcription_seconds"),
             max_windows=_integer(payload, "max_windows"),
             max_images=_integer(payload, "max_images"),
@@ -758,6 +778,7 @@ def _decode_payload(kind: object, payload: dict[str, object]) -> ProtocolMessage
         plan = EditPlan.create(
             input_revision=_string(payload, "input_revision"),
             approved_candidate_ids=_strings(payload, "approved_candidate_ids"),
+            approved_decision_revisions=_string_pairs(payload, "approved_decision_revisions"),
             rejected_candidate_ids=_strings(payload, "rejected_candidate_ids"),
             expected_output_duration=_fraction(payload, "expected_output_duration"),
         )
@@ -825,6 +846,7 @@ def _analysis_estimate_payload(
     *,
     input_revision: str,
     model: str,
+    unique_source_audio_seconds: Fraction,
     transcription_seconds: Fraction,
     max_windows: int,
     max_images: int,
@@ -847,6 +869,7 @@ def _analysis_estimate_payload(
         "model": model,
         "settings_sha256": settings_sha256,
         "transcription_seconds": _fraction_text(transcription_seconds),
+        "unique_source_audio_seconds": _fraction_text(unique_source_audio_seconds),
     }
 
 
@@ -911,6 +934,16 @@ def _strings(payload: dict[str, object], key: str) -> tuple[str, ...]:
     return tuple(value)
 
 
+def _string_pairs(payload: dict[str, object], key: str) -> tuple[tuple[str, str], ...]:
+    value = payload.get(key)
+    if not isinstance(value, list) or not all(
+        isinstance(item, list) and len(item) == 2 and all(isinstance(part, str) for part in item)
+        for item in value
+    ):
+        raise ValueError(f"{key}는 문자열 쌍의 배열이어야 한다")
+    return tuple((item[0], item[1]) for item in value)
+
+
 def _integer(payload: dict[str, object], key: str) -> int:
     value = payload.get(key)
     if isinstance(value, bool) or not isinstance(value, int):
@@ -963,6 +996,7 @@ _ANALYSIS_11_TYPES = frozenset(
         "AnalysisAttempt",
         "VisionWindowDecision",
         "CutCandidate",
+        "EditPlan",
     }
 )
 

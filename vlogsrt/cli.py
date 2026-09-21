@@ -166,6 +166,7 @@ def _add_project_command(sub: argparse._SubParsersAction) -> None:
     inspect = project_commands.add_parser("inspect", help="네트워크 없이 분석 비용 상한 산출")
     inspect.add_argument("workspace", type=Path)
     inspect.add_argument("--project-config", type=Path, default=None)
+    inspect.add_argument("--media-map", type=Path, default=None)
 
     analyze = project_commands.add_parser("analyze", help="승인된 온라인 또는 픽스처 분석")
     analyze.add_argument("workspace", type=Path)

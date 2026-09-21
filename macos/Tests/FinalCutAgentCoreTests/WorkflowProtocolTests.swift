@@ -41,6 +41,32 @@ import Testing
   #expect((payload["selection_revision"] as? String)?.count == 64)
 }
 
+@Test func analysisEstimateAndCandidateDecodeFromPython11() throws {
+  let estimateLine = """
+    {"payload":{"cost_upper_bound":"1.25","estimate_revision":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","input_revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","max_image_tokens":510,"max_images":6,"max_windows":1,"model":"gpt-5.6-luna","settings_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","transcription_seconds":"40/1","unique_source_audio_seconds":"10/1"},"protocol_version":"1.1","type":"AnalysisEstimate"}
+    """
+  let estimate = try ProtocolCodec.decode(
+    AnalysisEstimateMessage.self,
+    type: "AnalysisEstimate",
+    version: ProtocolCodec.analysisVersion,
+    from: estimateLine.trimmingCharacters(in: .newlines)
+  )
+  #expect(estimate.maxImages == 6)
+  #expect(estimate.costUpperBound == "1.25")
+
+  let candidateLine = """
+    {"payload":{"candidate_id":"candidate-1","clip_instance_id":"clip-1","confidence":"0.93","decision_revision":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","evidence":["vad:no_speech"],"input_revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","reason":"internal_silence","selected_by_default":true,"source_range":{"end":"2/1","start":"1/1"},"timeline_range":{"end":"3602/1","start":"3601/1"},"window_id":"window-1"},"protocol_version":"1.1","type":"CutCandidate"}
+    """
+  let candidate = try ProtocolCodec.decode(
+    CutCandidateMessage.self,
+    type: "CutCandidate",
+    version: ProtocolCodec.analysisVersion,
+    from: candidateLine.trimmingCharacters(in: .newlines)
+  )
+  #expect(candidate.selectedByDefault)
+  #expect(candidate.timelineRange.start == "3601/1")
+}
+
 @Test func shareInboxRequiresExactlyOnePCMAndOneFCPXML() throws {
   let root = FileManager.default.temporaryDirectory
     .appendingPathComponent(UUID().uuidString, isDirectory: true)

@@ -32,6 +32,7 @@ public enum DevelopmentJobStager {
     "project-selection.jsonl",
     "analysis-authorization.jsonl",
     "edit-plan.jsonl",
+    "approved-candidates.txt",
   ]
   private static let results = [
     "analysis-estimate.jsonl",
@@ -52,12 +53,20 @@ public enum DevelopmentJobStager {
     guard AppGroupWorkspace.isSafeJobID(jobID) else {
       throw WorkspaceError.invalidJobID(jobID)
     }
-    let jobs = externalRoot.appendingPathComponent("Jobs", isDirectory: true)
+    try fileManager.createDirectory(at: externalRoot, withIntermediateDirectories: true)
+    let confinedRoot = externalRoot.resolvingSymlinksInPath().standardizedFileURL
+    let jobs = confinedRoot.appendingPathComponent("Jobs", isDirectory: true)
+    try requireDirectoryOrMissing(jobs, fileManager: fileManager)
     let destination = jobs.appendingPathComponent(jobID, isDirectory: true)
     try fileManager.createDirectory(at: destination, withIntermediateDirectories: true)
+    try requireDirectory(destination, fileManager: fileManager)
+    guard destination.resolvingSymlinksInPath().path.hasPrefix(confinedRoot.path + "/") else {
+      throw DevelopmentEngineError.unsafePath(destination.path)
+    }
     for name in inputs {
       let source = appGroupJob.appendingPathComponent(name)
       guard fileManager.fileExists(atPath: source.path) else { continue }
+      try requireRegularFile(source)
       try copyStable(source, destination.appendingPathComponent(name), fileManager: fileManager)
     }
     guard fileManager.fileExists(atPath: destination.appendingPathComponent("input.fcpxml").path)
@@ -75,6 +84,7 @@ public enum DevelopmentJobStager {
       let workspaceSource = externalJob.appendingPathComponent("workspace").appendingPathComponent(name)
       let source = fileManager.fileExists(atPath: rootSource.path) ? rootSource : workspaceSource
       guard fileManager.fileExists(atPath: source.path) else { continue }
+      try requireRegularFile(source)
       let destination = appGroupJob.appendingPathComponent(name)
       if fileManager.fileExists(atPath: destination.path) {
         try fileManager.removeItem(at: destination)
@@ -95,6 +105,29 @@ public enum DevelopmentJobStager {
       return
     }
     try fileManager.copyItem(at: source, to: destination)
+  }
+
+  private static func requireDirectoryOrMissing(
+    _ url: URL, fileManager: FileManager
+  ) throws {
+    guard fileManager.fileExists(atPath: url.path) else { return }
+    try requireDirectory(url, fileManager: fileManager)
+  }
+
+  private static func requireDirectory(
+    _ url: URL, fileManager: FileManager
+  ) throws {
+    let values = try url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+    guard values.isDirectory == true, values.isSymbolicLink != true else {
+      throw DevelopmentEngineError.unsafePath(url.path)
+    }
+  }
+
+  private static func requireRegularFile(_ url: URL) throws {
+    let values = try url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
+    guard values.isRegularFile == true, values.isSymbolicLink != true else {
+      throw DevelopmentEngineError.nonRegularFile(url.lastPathComponent)
+    }
   }
 }
 
@@ -118,6 +151,8 @@ public final class DevelopmentEngineLauncher: @unchecked Sendable {
 public enum DevelopmentEngineError: Error, Equatable, LocalizedError {
   case missingInput
   case stagedInputChanged(String)
+  case unsafePath(String)
+  case nonRegularFile(String)
 
   public var errorDescription: String? {
     switch self {
@@ -125,6 +160,10 @@ public enum DevelopmentEngineError: Error, Equatable, LocalizedError {
       "App Group job에 input.fcpxml이 없습니다"
     case .stagedInputChanged(let name):
       "재개하려는 외부 작업의 입력이 바뀌었습니다: \(name)"
+    case .unsafePath(let path):
+      "작업 폴더가 symlink이거나 허용 범위 밖입니다: \(path)"
+    case .nonRegularFile(let name):
+      "동기화 대상이 일반 파일이 아닙니다: \(name)"
     }
   }
 }

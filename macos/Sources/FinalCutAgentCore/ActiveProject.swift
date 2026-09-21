@@ -214,3 +214,52 @@ public enum ActiveProjectError: Error, Equatable, LocalizedError {
     }
   }
 }
+
+public struct ActiveSelectionRegistry {
+  private static let revisionKey = "activeProjectSelectionRevision"
+  public let defaults: UserDefaults
+
+  public init(defaults: UserDefaults) {
+    self.defaults = defaults
+  }
+
+  public static func live() throws -> Self {
+    guard let defaults = UserDefaults(suiteName: AppGroupWorkspace.identifier) else {
+      throw ActiveSelectionRegistryError.defaultsUnavailable
+    }
+    return Self(defaults: defaults)
+  }
+
+  @discardableResult
+  public func activate(_ selection: ActiveProjectSelection) throws -> String {
+    let revision = try ProjectSelectionMessage.create(selection).selectionRevision
+    defaults.set(revision, forKey: Self.revisionKey)
+    defaults.synchronize()
+    return revision
+  }
+
+  public func invalidate() {
+    defaults.removeObject(forKey: Self.revisionKey)
+    defaults.synchronize()
+  }
+
+  public func requireCurrent(_ revision: String) throws {
+    guard defaults.string(forKey: Self.revisionKey) == revision else {
+      throw ActiveSelectionRegistryError.staleSelection
+    }
+  }
+}
+
+public enum ActiveSelectionRegistryError: Error, Equatable, LocalizedError {
+  case defaultsUnavailable
+  case staleSelection
+
+  public var errorDescription: String? {
+    switch self {
+    case .defaultsUnavailable:
+      "활성 프로젝트 App Group 상태를 열 수 없습니다"
+    case .staleSelection:
+      "활성 프로젝트가 바뀌어 이 작업은 더 이상 유효하지 않습니다"
+    }
+  }
+}

@@ -129,6 +129,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         defer { if accessed { externalRoot.stopAccessingSecurityScopedResource() } }
         let workspace = try AppGroupWorkspace.live()
         let job = try RoundTripJob(workspace: workspace, id: jobID)
+        let selectionRevision = try job.readProjectSelection().selectionRevision
+        let registry = try ActiveSelectionRegistry.live()
+        try registry.requireCurrent(selectionRevision)
         let externalJob = try DevelopmentJobStager.stage(
           jobID: jobID,
           appGroupJob: job.directoryURL,
@@ -147,8 +150,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
           applicationScriptsDirectory: scripts
         )
         _ = try await DevelopmentEngineLauncher().run(invocation)
+        try registry.requireCurrent(selectionRevision)
         try DevelopmentJobStager.syncResults(from: externalJob, to: job.directoryURL)
         if operation == .roughcut {
+          try registry.requireCurrent(selectionRevision)
           try await FinalCutImporter().sendOpenDocument(
             job.directoryURL.appendingPathComponent("roughcut.fcpxml")
           )

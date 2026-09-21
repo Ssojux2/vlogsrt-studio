@@ -164,6 +164,9 @@ def build_review_plan(
     return EditPlan.create(
         input_revision=revision.revision,
         approved_candidate_ids=approved,
+        approved_decision_revisions=tuple(
+            (candidate_id, by_id[candidate_id].decision_revision) for candidate_id in approved
+        ),
         rejected_candidate_ids=tuple(sorted(set(by_id) - set(approved))),
         expected_output_duration=revision.duration - removed,
     )
@@ -184,6 +187,10 @@ def render_approved_roughcut(
     if missing:
         raise ValueError(f"승인 ID가 제공된 후보 집합에 없다: {missing}")
     approved = [candidates_by_id[candidate_id] for candidate_id in plan.approved_candidate_ids]
+    expected_decisions = dict(plan.approved_decision_revisions)
+    for candidate in approved:
+        if expected_decisions.get(candidate.candidate_id) != candidate.decision_revision:
+            raise ValueError(f"후보의 판정 리비전이 승인 계획과 다르다: {candidate.candidate_id}")
     if any(candidate.input_revision != revision.revision for candidate in approved):
         raise ValueError("승인 후보에 다른 입력 리비전이 섞였다")
     for candidate in approved:

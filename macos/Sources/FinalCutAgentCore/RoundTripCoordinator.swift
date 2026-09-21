@@ -98,7 +98,9 @@ public final class RoundTripCoordinator {
     let result: RoundTripResult
     do {
       _ = try Self.validatedRequest(job: job, jobID: jobID)
+      try Self.requireCurrentSelection(job)
       try service.roundTrip(inputURL: job.inputURL, outputURL: job.outputURL, fileManager: fileManager)
+      try Self.requireCurrentSelection(job)
       try await importer.sendOpenDocument(job.outputURL)
       result = try RoundTripResult(
         jobID: jobID,
@@ -116,6 +118,12 @@ public final class RoundTripCoordinator {
     }
     try job.writeResult(result, fileManager: fileManager)
     return result
+  }
+
+  private static func requireCurrentSelection(_ job: RoundTripJob) throws {
+    guard FileManager.default.fileExists(atPath: job.projectSelectionURL.path) else { return }
+    let selection = try job.readProjectSelection()
+    try ActiveSelectionRegistry.live().requireCurrent(selection.selectionRevision)
   }
 
   /// extension이 남긴 request가 계약과 정확히 일치할 때만 변환을 시작한다.

@@ -54,6 +54,7 @@ def _estimate(revision: ProjectRevision) -> AnalysisEstimate:
     return AnalysisEstimate.create(
         input_revision=revision.revision,
         model="gpt-5.6-luna",
+        unique_source_audio_seconds=Fraction(121, 2),
         transcription_seconds=Fraction(121, 2),
         max_windows=7,
         max_images=42,
@@ -70,6 +71,7 @@ def test_jsonl_protocol_round_trips_every_public_message_deterministically(tmp_p
     plan = EditPlan.create(
         input_revision=revision.revision,
         approved_candidate_ids=(candidate.candidate_id,),
+        approved_decision_revisions=((candidate.candidate_id, candidate.decision_revision),),
         rejected_candidate_ids=("silence-002",),
         expected_output_duration=Fraction(1781, 10),
     )
@@ -194,18 +196,21 @@ def test_project_and_plan_revisions_bind_all_semantic_inputs() -> None:
     first = EditPlan.create(
         input_revision=original.revision,
         approved_candidate_ids=("b", "a", "a"),
+        approved_decision_revisions=(("a", "d" * 64), ("b", "e" * 64)),
         rejected_candidate_ids=("c",),
         expected_output_duration=Fraction(100),
     )
     same = EditPlan.create(
         input_revision=original.revision,
         approved_candidate_ids=("a", "b"),
+        approved_decision_revisions=(("b", "e" * 64), ("a", "d" * 64)),
         rejected_candidate_ids=("c",),
         expected_output_duration=Fraction(100),
     )
     changed = EditPlan.create(
         input_revision=original.revision,
         approved_candidate_ids=("a",),
+        approved_decision_revisions=(("a", "f" * 64),),
         rejected_candidate_ids=("b", "c"),
         expected_output_duration=Fraction(101),
     )
@@ -268,6 +273,7 @@ def test_protocol_rejects_unknown_versions_and_overlapping_approval_sets() -> No
         EditPlan.create(
             input_revision=_revision().revision,
             approved_candidate_ids=("same",),
+            approved_decision_revisions=(("same", "d" * 64),),
             rejected_candidate_ids=("same",),
             expected_output_duration=Fraction(1),
         )

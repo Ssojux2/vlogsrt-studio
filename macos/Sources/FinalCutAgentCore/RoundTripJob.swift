@@ -14,6 +14,10 @@ public enum RoundTripStatus: String, Codable, Sendable {
 public struct RoundTripJob: Equatable, Sendable {
   public static let inputFileName = "input.fcpxml"
   public static let projectSelectionFileName = "project-selection.jsonl"
+  public static let analysisAuthorizationFileName = "analysis-authorization.jsonl"
+  public static let candidatesFileName = "candidates.jsonl"
+  public static let analysisEstimateFileName = "analysis-estimate.jsonl"
+  public static let approvedCandidatesFileName = "approved-candidates.txt"
   public static let requestFileName = "roundtrip-request.jsonl"
   public static let outputFileName = "roundtrip.fcpxml"
   public static let resultFileName = "roundtrip-result.jsonl"
@@ -35,6 +39,16 @@ public struct RoundTripJob: Equatable, Sendable {
   public var projectSelectionURL: URL {
     directoryURL.appendingPathComponent(Self.projectSelectionFileName)
   }
+  public var analysisAuthorizationURL: URL {
+    directoryURL.appendingPathComponent(Self.analysisAuthorizationFileName)
+  }
+  public var candidatesURL: URL { directoryURL.appendingPathComponent(Self.candidatesFileName) }
+  public var analysisEstimateURL: URL {
+    directoryURL.appendingPathComponent(Self.analysisEstimateFileName)
+  }
+  public var approvedCandidatesURL: URL {
+    directoryURL.appendingPathComponent(Self.approvedCandidatesFileName)
+  }
   public var requestURL: URL { directoryURL.appendingPathComponent(Self.requestFileName) }
   public var outputURL: URL { directoryURL.appendingPathComponent(Self.outputFileName) }
   public var resultURL: URL { directoryURL.appendingPathComponent(Self.resultFileName) }
@@ -54,6 +68,58 @@ public struct RoundTripJob: Equatable, Sendable {
       version: ProtocolCodec.analysisVersion
     )
     try Self.writeNew(Data(line.utf8), to: projectSelectionURL, fileManager: fileManager)
+  }
+
+  public func writeAnalysisAuthorization(
+    _ authorization: AnalysisAuthorizationMessage,
+    fileManager: FileManager = .default
+  ) throws {
+    let line = try ProtocolCodec.encode(
+      authorization,
+      type: "AnalysisAuthorization",
+      version: ProtocolCodec.analysisVersion
+    )
+    try Self.writeNew(Data(line.utf8), to: analysisAuthorizationURL, fileManager: fileManager)
+  }
+
+  public func writeApprovedCandidateIDs(
+    _ identifiers: [String],
+    fileManager: FileManager = .default
+  ) throws {
+    let unique = Array(Set(identifiers)).sorted()
+    guard unique.allSatisfy(Self.isSHA256) else {
+      throw RoundTripJobError.invalidCandidateID
+    }
+    let text = unique.isEmpty ? "" : unique.joined(separator: "\n") + "\n"
+    try Self.writeNew(Data(text.utf8), to: approvedCandidatesURL, fileManager: fileManager)
+  }
+
+  public func readProjectSelection() throws -> ProjectSelectionMessage {
+    try readOne(
+      ProjectSelectionMessage.self,
+      type: "ProjectSelection",
+      at: projectSelectionURL
+    )
+  }
+
+  public func readAnalysisEstimate() throws -> AnalysisEstimateMessage {
+    try readOne(
+      AnalysisEstimateMessage.self,
+      type: "AnalysisEstimate",
+      at: analysisEstimateURL
+    )
+  }
+
+  public func readCandidates() throws -> [CutCandidateMessage] {
+    let text = try String(contentsOf: candidatesURL, encoding: .utf8)
+    return try text.split(separator: "\n").map { line in
+      try ProtocolCodec.decode(
+        CutCandidateMessage.self,
+        type: "CutCandidate",
+        version: ProtocolCodec.analysisVersion,
+        from: String(line)
+      )
+    }
   }
 
   public func writeRequest(
@@ -78,8 +144,32 @@ public struct RoundTripJob: Equatable, Sendable {
     }
     try data.write(to: url, options: .atomic)
   }
+
+  private func readOne<Payload: Decodable>(
+    _ payload: Payload.Type,
+    type: String,
+    at url: URL
+  ) throws -> Payload {
+    var line = try String(contentsOf: url, encoding: .utf8)
+    if line.hasSuffix("\n") { line.removeLast() }
+    guard !line.isEmpty, !line.contains("\n") else {
+      throw RoundTripJobError.notSingleJSONLine(url)
+    }
+    return try ProtocolCodec.decode(
+      payload,
+      type: type,
+      version: ProtocolCodec.analysisVersion,
+      from: line
+    )
+  }
+
+  private static func isSHA256(_ value: String) -> Bool {
+    value.count == 64 && value.allSatisfy { $0.isHexDigit && !$0.isUppercase }
+  }
 }
 
 public enum RoundTripJobError: Error, Equatable {
   case destinationExists(URL)
+  case invalidCandidateID
+  case notSingleJSONLine(URL)
 }

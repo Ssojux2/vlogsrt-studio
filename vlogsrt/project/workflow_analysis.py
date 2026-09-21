@@ -24,7 +24,10 @@ from vlogsrt.project.workflow_protocol import (
 )
 
 _PROMPT_REVISION = "roughcut-luna-v1"
-_NG_PHRASES = ("잠깐 다시", "다시 할게", "다시 갈게", "엔지", "ng")
+_NG_EXPRESSION = re.compile(
+    r"^\s*(?:아+[\s,]*)?(?:잠깐\s*)?(?:다시\s*(?:할게|갈게|가자|해볼게|찍을게)|엔지|ng|컷)\s*[.!?…]*\s*$",
+    re.IGNORECASE,
+)
 _TEXT_CHARS = re.compile(r"[^0-9a-z가-힣]+")
 
 
@@ -35,6 +38,7 @@ class AnalysisSettings:
     max_images: int = 6
     image_long_edge: int = 512
     low_detail_image_tokens: int = 85
+    transcription_call_multiplier: int = 4
     review_confidence: Decimal = Decimal("0.90")
     retake_horizon_seconds: Fraction = Fraction(30)
     retake_similarity: Decimal = Decimal("0.72")
@@ -51,6 +55,8 @@ class AnalysisSettings:
             raise ValueError("이미지 긴 변은 1~512px이어야 한다")
         if self.low_detail_image_tokens < 1:
             raise ValueError("이미지 토큰 상한은 양수여야 한다")
+        if self.transcription_call_multiplier < 1:
+            raise ValueError("전사 호출 배수는 1 이상이어야 한다")
         for name in ("review_confidence", "retake_similarity"):
             value = getattr(self, name)
             if not value.is_finite() or not Decimal(0) <= value <= Decimal(1):
@@ -99,6 +105,14 @@ class LunaFrame:
     sha256: str
 
 
+@dataclass(frozen=True, slots=True)
+class CandidateWindowPlan:
+    window_id: str
+    clip_instance_id: str
+    timeline_range: RationalRange
+    candidates: tuple[CandidateSeed, ...]
+
+
 def build_analysis_estimate(
     document: ProjectDocument,
     revision: ProjectRevision,
@@ -106,6 +120,7 @@ def build_analysis_estimate(
     *,
     source_audio_cost_per_minute: Decimal | None = None,
     vision_cost_per_image: Decimal | None = None,
+    settings_sha256: str | None = None,
 ) -> AnalysisEstimate:
     """네트워크 없이 고유 소스 오디오와 최악의 창/이미지/토큰 사용량을 센다."""
     if document.input_sha256 != revision.input_sha256:
@@ -115,7 +130,8 @@ def build_analysis_estimate(
         if resource.has_audio:
             key = resource.uid or resource.media_reps[0].src
             unique_audio.setdefault(key, resource.duration)
-    transcription_seconds = sum(unique_audio.values(), start=Fraction())
+    unique_source_audio_seconds = sum(unique_audio.values(), start=Fraction())
+    transcription_seconds = unique_source_audio_seconds * settings.transcription_call_multiplier
     max_windows = sum(
         _ceil_fraction(item.duration / settings.window_seconds)
         for item in document.storyline
@@ -136,12 +152,13 @@ def build_analysis_estimate(
     return AnalysisEstimate.create(
         input_revision=revision.revision,
         model=settings.model,
+        unique_source_audio_seconds=unique_source_audio_seconds,
         transcription_seconds=transcription_seconds,
         max_windows=max_windows,
         max_images=max_images,
         max_image_tokens=max_images * settings.low_detail_image_tokens,
         cost_upper_bound=_decimal_text(cost) if cost is not None else None,
-        settings_sha256=settings.sha256(),
+        settings_sha256=settings_sha256 or settings.sha256(),
     )
 
 
@@ -218,7 +235,7 @@ def safe_transcript_candidates(
             ),
             None,
         )
-        is_ng = any(phrase in current.text.lower() for phrase in _NG_PHRASES)
+        is_ng = _NG_EXPRESSION.fullmatch(current.text) is not None
         if repeated is None and not is_ng:
             continue
         reason = "retake_overlap" if repeated is not None else "ng_with_followup"
@@ -246,6 +263,113 @@ def safe_transcript_candidates(
             )
         )
     return tuple(candidates)
+
+
+def eligible_transcript_evidence(
+    utterances: Sequence[TranscriptEvidence],
+    *,
+    successful_instance_ids: set[str],
+    locked_instance_ids: set[str],
+) -> tuple[TranscriptEvidence, ...]:
+    return tuple(
+        row
+        for row in utterances
+        if row.clip_instance_id in successful_instance_ids
+        and row.clip_instance_id not in locked_instance_ids
+    )
+
+
+def project_transcript_evidence(
+    *,
+    utterance_id: str,
+    clip_instance_id: str,
+    source_range: RationalRange,
+    text: str,
+    complete: bool,
+    clip_source_start: Fraction,
+    clip_timeline_start: Fraction,
+    resource_start: Fraction,
+    frame_duration: Fraction,
+) -> TranscriptEvidence | None:
+    """file/asset 시계의 cue를 소스 격자에 안쪽 정렬하고 timeline을 재투영한다."""
+    start = _frame_ceil(source_range.start, frame_duration, resource_start)
+    end = _frame_floor(source_range.end, frame_duration, resource_start)
+    if not clip_source_start < start < end:
+        return None
+    source = RationalRange(start, end)
+    timeline = RationalRange(
+        clip_timeline_start + start - clip_source_start,
+        clip_timeline_start + end - clip_source_start,
+    )
+    return TranscriptEvidence(
+        utterance_id,
+        clip_instance_id,
+        source,
+        timeline,
+        text,
+        complete,
+    )
+
+
+def plan_candidate_windows(
+    seeds: Sequence[CandidateSeed],
+    *,
+    input_revision: str,
+    clip_ranges: Mapping[str, RationalRange],
+    window_seconds: Fraction,
+) -> tuple[CandidateWindowPlan, ...]:
+    """clip을 최대 window_seconds로 나눈 고정 창에 후보를 묶는다."""
+    grouped: dict[tuple[str, int], list[CandidateSeed]] = {}
+    windows: dict[tuple[str, int], RationalRange] = {}
+    for seed in seeds:
+        clip = clip_ranges.get(seed.clip_instance_id)
+        if clip is None:
+            continue
+        cursor = max(seed.timeline_range.start, clip.start)
+        stop = min(seed.timeline_range.end, clip.end)
+        while cursor < stop:
+            index = int((cursor - clip.start) // window_seconds)
+            window_start = clip.start + index * window_seconds
+            window_end = min(clip.end, window_start + window_seconds)
+            piece_end = min(stop, window_end)
+            delta_start = cursor - seed.timeline_range.start
+            delta_end = piece_end - seed.timeline_range.start
+            source = RationalRange(
+                seed.source_range.start + delta_start,
+                seed.source_range.start + delta_end,
+            )
+            timeline = RationalRange(cursor, piece_end)
+            window_id = hashlib.sha256(
+                f"vlogsrt-luna-window-v2\0{input_revision}\0{seed.clip_instance_id}"
+                f"\0{window_start}\0{window_end}".encode()
+            ).hexdigest()
+            candidate_id = CutCandidate.identity(
+                input_revision=input_revision,
+                clip_instance_id=seed.clip_instance_id,
+                source_range=source,
+                timeline_range=timeline,
+                reason=seed.reason,
+                evidence=seed.evidence,
+                window_id=window_id,
+            )
+            key = (seed.clip_instance_id, index)
+            grouped.setdefault(key, []).append(
+                CandidateSeed(
+                    candidate_id,
+                    window_id,
+                    seed.clip_instance_id,
+                    source,
+                    timeline,
+                    seed.reason,
+                    seed.evidence,
+                )
+            )
+            windows[key] = RationalRange(window_start, window_end)
+            cursor = piece_end
+    return tuple(
+        CandidateWindowPlan(rows[0].window_id, key[0], windows[key], tuple(rows))
+        for key, rows in sorted(grouped.items(), key=lambda item: (windows[item[0]].start, item[0]))
+    )
 
 
 def build_luna_payload(
@@ -363,20 +487,70 @@ def finalize_candidate(seed: CandidateSeed, decision: VisionWindowDecision) -> C
     )
 
 
+def luna_request_sha256(
+    window: LunaWindow,
+    candidates: Sequence[CandidateSeed],
+    frames: Sequence[LunaFrame],
+) -> str:
+    return _digest(
+        {
+            "candidate_ids": list(window.candidate_ids),
+            "candidates": [
+                {
+                    "candidate_id": row.candidate_id,
+                    "clip_instance_id": row.clip_instance_id,
+                    "evidence": list(row.evidence),
+                    "reason": row.reason,
+                    "source_range": [str(row.source_range.start), str(row.source_range.end)],
+                    "timeline_range": [
+                        str(row.timeline_range.start),
+                        str(row.timeline_range.end),
+                    ],
+                    "window_id": row.window_id,
+                }
+                for row in candidates
+            ],
+            "frame_ids": list(window.frame_ids),
+            "frame_sha256s": [frame.sha256 for frame in frames],
+            "input_revision": window.input_revision,
+            "source_hashes": list(window.source_hashes),
+            "transcript_context": window.transcript_context,
+            "window_id": window.window_id,
+        }
+    )
+
+
 def luna_cache_key(
     *,
     prompt_revision: str,
     model: str,
     settings_sha256: str,
-    frame_sha256s: tuple[str, ...],
+    request_sha256: str,
+) -> str:
+    return _digest(
+        {
+            "model": model,
+            "prompt_revision": prompt_revision,
+            "request_sha256": request_sha256,
+            "settings_sha256": settings_sha256,
+        }
+    )
+
+
+def effective_analysis_settings_sha256(
+    settings: AnalysisSettings,
+    *,
+    engine_config: Mapping[str, object],
+    project_config: Mapping[str, object],
+    media_overrides_sha256: str,
     source_sha256s: tuple[str, ...],
 ) -> str:
     return _digest(
         {
-            "frame_sha256s": list(frame_sha256s),
-            "model": model,
-            "prompt_revision": prompt_revision,
-            "settings_sha256": settings_sha256,
+            "analysis_settings_sha256": settings.sha256(),
+            "engine_config": dict(engine_config),
+            "media_overrides_sha256": media_overrides_sha256,
+            "project_config": dict(project_config),
             "source_sha256s": list(source_sha256s),
         }
     )
