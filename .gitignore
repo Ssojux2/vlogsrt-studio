@@ -30,6 +30,14 @@ venv/
 dist/
 build/
 
+# ─── macOS / Xcode ────────────────────────────────────────
+# project.yml이 정본. .xcodeproj는 xcodegen 산출물이지만 재생성 diff 검사를
+# 위해 커밋한다. 사용자 상태·빌드 산출물·로컬 서명은 제외.
+xcuserdata/
+*.xcuserstate
+DerivedData/
+macos/LocalSigning.xcconfig
+
 # ─── OS / 편집기 ───────────────────────────────────────────
 .DS_Store
 .vscode/

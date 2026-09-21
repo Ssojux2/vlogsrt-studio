@@ -1,0 +1,84 @@
+# Xcode 프로젝트 정본. 수정은 이 파일에서만 하고 xcodegen generate로
+# FinalCutAgent.xcodeproj를 다시 만든다. 생성물을 직접 고치지 않는다.
+name: FinalCutAgent
+options:
+  bundleIdPrefix: com.ssojux2.vlogsrt
+  createIntermediateGroups: true
+  deploymentTarget:
+    macOS: "14.0"
+
+configs:
+  Debug: debug
+  Release: release
+
+settings:
+  base:
+    MACOSX_DEPLOYMENT_TARGET: "14.0"
+    SWIFT_VERSION: "6.0"
+    MARKETING_VERSION: "1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    # 서명은 unsigned 검증(CODE_SIGNING_ALLOWED=NO) 다음 단계다.
+    # Team ID는 project에 넣지 않는다. 로컬 서명은 gitignored
+    # macos/LocalSigning.xcconfig로 덮어쓴다.
+    CODE_SIGN_STYLE: Manual
+    DEVELOPMENT_TEAM: ""
+
+targets:
+  FinalCutAgentCore:
+    type: library.static
+    platform: macOS
+    sources:
+      - path: Sources/FinalCutAgentCore
+
+  FinalCutAgentWorkflowExtension:
+    type: app-extension
+    platform: macOS
+    sources:
+      - path: Sources/WorkflowExtension
+    dependencies:
+      - target: FinalCutAgentCore
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.ssojux2.vlogsrt.workflow
+        # entitlements: 키를 쓰면 XcodeGen이 파일 내용까지 다시 쓴다
+        # (App Group이 비워지는 사고의 원인). 파일은 손대지 않게 경로만 건다.
+        CODE_SIGN_ENTITLEMENTS: Resources/WorkflowExtension.entitlements
+        INFOPLIST_FILE: Resources/WorkflowExtension-Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        # Final Cut Workflow Extension SDK (Apple 배포, 별도 설치)
+        ADDITIONAL_SDKS: /Library/Developer/SDKs/WorkflowExtensionSDK.sdk
+        # Xcode 27은 ADDITIONAL_SDKS를 링크 검색경로에 반영하지 않는다
+        # (SDK_NAMES에는 잡히지만 ld 명령에 경로가 붙지 않음). 템플릿 동작을
+        # 복원하려면 lib 위치를 직접 알려준다. ADDITIONAL_SDKS는 계약값 그대로.
+        LIBRARY_SEARCH_PATHS: "$(inherited) /Library/Developer/SDKs/WorkflowExtensionSDK.sdk/usr/lib"
+        LD_ENTRY_POINT: _ProExtensionMain
+        OTHER_LDFLAGS: "$(inherited) -fapplication-extension -lProExtension"
+        APPLICATION_EXTENSION_API_ONLY: YES
+        SKIP_INSTALL: YES
+
+  FinalCutAgent:
+    type: application
+    platform: macOS
+    sources:
+      - path: Sources/FinalCutAgentApp
+    dependencies:
+      - target: FinalCutAgentCore
+      - target: FinalCutAgentWorkflowExtension
+        embed: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.ssojux2.vlogsrt
+        CODE_SIGN_ENTITLEMENTS: Resources/FinalCutAgent.entitlements
+        INFOPLIST_FILE: Resources/App-Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        SKIP_INSTALL: NO
+
+schemes:
+  FinalCutAgent:
+    build:
+      targets:
+        FinalCutAgent: all
+    run:
+      config: Debug
+    archive:
+      config: Release

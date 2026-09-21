@@ -40,15 +40,10 @@ enum AppError: Error {
   case noActiveRoughCutRevision
 }
 
-@main
-enum FinalCutAgentMain {
-  @MainActor
-  static func main() {
-    let application = NSApplication.shared
-    let delegate = AppDelegate()
-    application.delegate = delegate
-    application.setActivationPolicy(.regular)
-    application.run()
-    withExtendedLifetime(delegate) {}
-  }
-}
+// Xcode는 main.swift 안의 @main을 "top-level code와 충돌"로 거부하고
+// SPM은 top-level 진입점만 받는다. 두 빌드가 함께 쓰는 형태가 이 파일이다.
+let application = NSApplication.shared
+let delegate = AppDelegate()
+application.delegate = delegate
+application.setActivationPolicy(.regular)
+application.run()

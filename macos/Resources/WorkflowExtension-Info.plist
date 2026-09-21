@@ -3,11 +3,16 @@
 <plist version="1.0">
 <dict>
   <key>CFBundleDisplayName</key><string>AI Rough Cut</string>
-  <key>CFBundleIdentifier</key><string>com.ssojux2.vlogsrt.workflow</string>
+  <key>CFBundleExecutable</key><string>$(EXECUTABLE_NAME)</string>
+  <key>CFBundleIdentifier</key><string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+  <key>CFBundleName</key><string>$(PRODUCT_NAME)</string>
   <key>CFBundlePackageType</key><string>XPC!</string>
+  <key>CFBundleShortVersionString</key><string>$(MARKETING_VERSION)</string>
+  <key>CFBundleVersion</key><string>$(CURRENT_PROJECT_VERSION)</string>
+  <key>LSMinimumSystemVersion</key><string>$(MACOSX_DEPLOYMENT_TARGET)</string>
   <key>NSExtension</key>
   <dict>
-    <key>NSExtensionPointIdentifier</key><string>com.apple.FinalCut.WorkfloWExtension</string>
+    <key>NSExtensionPointIdentifier</key><string>com.apple.FinalCut.WorkflowExtension</string>
     <key>ProExtensionPrincipalViewControllerClass</key><string>$(PRODUCT_MODULE_NAME).WorkflowViewController</string>
     <key>ProExtensionAttributes</key>
     <dict>
@@ -17,4 +22,3 @@
   </dict>
 </dict>
 </plist>
-
