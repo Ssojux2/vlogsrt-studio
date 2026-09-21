@@ -2,16 +2,20 @@ import AppKit
 import FinalCutAgentCore
 import UniformTypeIdentifiers
 
-@MainActor
-public final class WorkflowViewController: NSViewController {
-  private let status = NSTextField(labelWithString: "프로젝트를 여기에 드래그하세요")
-  private let confirmButton = NSButton(
-    title: "왕복 확인", target: nil, action: nil
-  )
+// Workflow SDK는 XPC 응답 큐에서 initWithNibName:bundle:로 주 클래스를 만든다
+// (2026-09-21 .ips). MainActor 서브클래스의 @objc init thunk에는 Swift 6가
+// dispatch_assert_queue를 심으므로 상속 격리를 유지하면 그 큐에서 프로세스가
+// 죽는다. 이 클래스만 격리를 내리고, UI는 구성원 단위 @MainActor로 지킨다.
+// 뷰 구성은 AppKit이 메인에서 부르는 loadView에서 처음 일어난다.
+public nonisolated final class WorkflowViewController: NSViewController {
+  private var status: NSTextField!
+  private var confirmButton: NSButton!
   private var job: RoundTripJob?
 
-  public override func loadView() {
+  @MainActor public override func loadView() {
     let root = DropView(frame: NSRect(x: 0, y: 0, width: 420, height: 520))
+    status = NSTextField(labelWithString: "프로젝트를 여기에 드래그하세요")
+    confirmButton = NSButton(title: "왕복 확인", target: nil, action: nil)
     root.onDrop = { [weak self] data in self?.receive(data) ?? false }
     confirmButton.target = self
     confirmButton.action = #selector(confirmRoundTrip)
@@ -31,7 +35,7 @@ public final class WorkflowViewController: NSViewController {
     view = root
   }
 
-  @objc private func chooseFile() {
+  @objc @MainActor private func chooseFile() {
     let panel = NSOpenPanel()
     panel.allowedContentTypes = ["fcpxml", "fcpxmld"].compactMap {
       UTType(filenameExtension: $0)
@@ -44,7 +48,7 @@ public final class WorkflowViewController: NSViewController {
     _ = receive(data)
   }
 
-  private func receive(_ data: Data) -> Bool {
+  @MainActor private func receive(_ data: Data) -> Bool {
     do {
       let workspace = try AppGroupWorkspace.live()
       let id = "roundtrip-\(UUID().uuidString)"
@@ -61,7 +65,7 @@ public final class WorkflowViewController: NSViewController {
     }
   }
 
-  @objc private func confirmRoundTrip() {
+  @objc @MainActor private func confirmRoundTrip() {
     guard let job else { return }
     do {
       // extension은 XML 변환도 Final Cut 전송도 하지 않는다 —

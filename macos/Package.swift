@@ -17,6 +17,7 @@ let package = Package(
         .target(name: "WorkflowExtension", dependencies: ["FinalCutAgentCore"]),
         .executableTarget(name: "FinalCutAgentApp", dependencies: ["FinalCutAgentCore"]),
         .testTarget(name: "FinalCutAgentCoreTests", dependencies: ["FinalCutAgentCore"]),
+        .testTarget(name: "WorkflowExtensionTests", dependencies: ["WorkflowExtension"]),
     ]
 )
 
