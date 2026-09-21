@@ -19,25 +19,39 @@ from pathlib import Path
 from typing import Literal, TypeAlias, cast
 
 PROTOCOL_VERSION = "1.0"
-ANALYSIS_PROTOCOL_VERSION = "1.1"
+ANALYSIS_PROTOCOL_VERSION = "1.2"
+LEGACY_ANALYSIS_PROTOCOL_VERSION = "1.1"
+CAPTION_PROTOCOL_VERSION = "1.1"
 DEFAULT_REVIEW_CONFIDENCE = Decimal("0.90")
 
 WorkflowState: TypeAlias = Literal[
     "received",
+    "estimate_ready",
+    "authorized",
     "analyzing",
     "review_required",
     "roughcut_imported",
-    "caption_requested",
+    "caption_received",
+    "caption_estimate_ready",
+    "caption_authorized",
     "caption_ready",
+    "cancelled",
+    "failed",
 ]
 
 _NEXT_STATE: dict[WorkflowState, WorkflowState] = {
-    "received": "analyzing",
+    "received": "estimate_ready",
+    "estimate_ready": "authorized",
+    "authorized": "analyzing",
     "analyzing": "review_required",
     "review_required": "roughcut_imported",
-    "roughcut_imported": "caption_requested",
-    "caption_requested": "caption_ready",
+    "roughcut_imported": "caption_received",
+    "caption_received": "caption_estimate_ready",
+    "caption_estimate_ready": "caption_authorized",
+    "caption_authorized": "caption_ready",
 }
+
+_TERMINAL_STATES = frozenset({"cancelled", "failed"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,6 +108,96 @@ class ProjectSelection:
 
 
 @dataclass(frozen=True, slots=True)
+class PricingSnapshot:
+    """승인에 묶이는 공식 Standard 공개 가격의 정규 스냅샷."""
+
+    effective_date: str
+    currency: str
+    processing_region: str
+    service_tier: str
+    luna_model: str
+    luna_input_per_million_tokens: str
+    luna_output_per_million_tokens: str
+    whisper_model: str
+    whisper_per_minute: str
+    gpt_transcribe_model: str
+    gpt_transcribe_per_minute: str
+    documentation_urls: tuple[str, ...]
+    snapshot_revision: str
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        effective_date: str,
+        currency: str,
+        processing_region: str,
+        service_tier: str,
+        luna_model: str,
+        luna_input_per_million_tokens: str,
+        luna_output_per_million_tokens: str,
+        whisper_model: str,
+        whisper_per_minute: str,
+        gpt_transcribe_model: str,
+        gpt_transcribe_per_minute: str,
+        documentation_urls: tuple[str, ...],
+    ) -> PricingSnapshot:
+        payload = _pricing_snapshot_payload(
+            effective_date=effective_date,
+            currency=currency,
+            processing_region=processing_region,
+            service_tier=service_tier,
+            luna_model=luna_model,
+            luna_input_per_million_tokens=luna_input_per_million_tokens,
+            luna_output_per_million_tokens=luna_output_per_million_tokens,
+            whisper_model=whisper_model,
+            whisper_per_minute=whisper_per_minute,
+            gpt_transcribe_model=gpt_transcribe_model,
+            gpt_transcribe_per_minute=gpt_transcribe_per_minute,
+            documentation_urls=documentation_urls,
+        )
+        return cls(
+            effective_date=effective_date,
+            currency=currency,
+            processing_region=processing_region,
+            service_tier=service_tier,
+            luna_model=luna_model,
+            luna_input_per_million_tokens=cast(str, payload["luna_input_per_million_tokens"]),
+            luna_output_per_million_tokens=cast(str, payload["luna_output_per_million_tokens"]),
+            whisper_model=whisper_model,
+            whisper_per_minute=cast(str, payload["whisper_per_minute"]),
+            gpt_transcribe_model=gpt_transcribe_model,
+            gpt_transcribe_per_minute=cast(str, payload["gpt_transcribe_per_minute"]),
+            documentation_urls=documentation_urls,
+            snapshot_revision=_digest(payload),
+        )
+
+    def __post_init__(self) -> None:
+        _require_sha256(self.snapshot_revision, "가격 스냅샷 리비전")
+        for name in (
+            "effective_date",
+            "currency",
+            "processing_region",
+            "service_tier",
+            "luna_model",
+            "whisper_model",
+            "gpt_transcribe_model",
+        ):
+            if not getattr(self, name):
+                raise ValueError(f"{name}은 비어 있을 수 없다")
+        if not self.documentation_urls or any(not value for value in self.documentation_urls):
+            raise ValueError("가격 스냅샷에는 공식 문서 URL이 필요하다")
+        for name in (
+            "luna_input_per_million_tokens",
+            "luna_output_per_million_tokens",
+            "whisper_per_minute",
+            "gpt_transcribe_per_minute",
+        ):
+            if _decimal(getattr(self, name), name) < 0:
+                raise ValueError(f"{name}은 0 이상이어야 한다")
+
+
+@dataclass(frozen=True, slots=True)
 class AnalysisEstimate:
     input_revision: str
     model: str
@@ -104,6 +208,8 @@ class AnalysisEstimate:
     max_image_tokens: int
     cost_upper_bound: str | None
     settings_sha256: str
+    pricing_snapshot_revision: str
+    media_grant_revision: str
     estimate_revision: str
 
     @classmethod
@@ -119,6 +225,8 @@ class AnalysisEstimate:
         max_image_tokens: int,
         cost_upper_bound: str | None,
         settings_sha256: str,
+        pricing_snapshot_revision: str,
+        media_grant_revision: str,
     ) -> AnalysisEstimate:
         payload = _analysis_estimate_payload(
             input_revision=input_revision,
@@ -130,6 +238,8 @@ class AnalysisEstimate:
             max_image_tokens=max_image_tokens,
             cost_upper_bound=cost_upper_bound,
             settings_sha256=settings_sha256,
+            pricing_snapshot_revision=pricing_snapshot_revision,
+            media_grant_revision=media_grant_revision,
         )
         return cls(
             input_revision=input_revision,
@@ -141,12 +251,16 @@ class AnalysisEstimate:
             max_image_tokens=max_image_tokens,
             cost_upper_bound=cast(str | None, payload["cost_upper_bound"]),
             settings_sha256=settings_sha256,
+            pricing_snapshot_revision=pricing_snapshot_revision,
+            media_grant_revision=media_grant_revision,
             estimate_revision=_digest(payload),
         )
 
     def __post_init__(self) -> None:
         _require_sha256(self.input_revision, "입력 리비전")
         _require_sha256(self.settings_sha256, "분석 설정")
+        _require_sha256(self.pricing_snapshot_revision, "가격 스냅샷 리비전")
+        _require_sha256(self.media_grant_revision, "미디어 권한 리비전")
         _require_sha256(self.estimate_revision, "비용 추정 리비전")
         if not self.model:
             raise ValueError("분석 모델이 비어 있다")
@@ -170,19 +284,33 @@ class AnalysisEstimate:
 class AnalysisAuthorization:
     input_revision: str
     estimate_revision: str
+    pricing_snapshot_revision: str
+    media_grant_revision: str
     authorized_at: str
 
     def __post_init__(self) -> None:
         _require_sha256(self.input_revision, "입력 리비전")
         _require_sha256(self.estimate_revision, "비용 추정 리비전")
+        _require_sha256(self.pricing_snapshot_revision, "가격 스냅샷 리비전")
+        _require_sha256(self.media_grant_revision, "미디어 권한 리비전")
         if not self.authorized_at:
             raise ValueError("승인 시각이 비어 있다")
 
-    def require_matches(self, input_revision: str, estimate_revision: str) -> None:
+    def require_matches(
+        self,
+        input_revision: str,
+        estimate_revision: str,
+        pricing_snapshot_revision: str,
+        media_grant_revision: str,
+    ) -> None:
         if self.input_revision != input_revision:
             raise ValueError("승인의 입력 리비전이 현재 입력과 다르다")
         if self.estimate_revision != estimate_revision:
             raise ValueError("승인의 추정 리비전이 현재 비용 추정과 다르다")
+        if self.pricing_snapshot_revision != pricing_snapshot_revision:
+            raise ValueError("승인의 가격 스냅샷이 현재 가격과 다르다")
+        if self.media_grant_revision != media_grant_revision:
+            raise ValueError("승인의 미디어 권한 리비전이 현재 권한과 다르다")
 
 
 AnalysisAttemptStatus: TypeAlias = Literal["pending", "running", "succeeded", "failed", "cancelled"]
@@ -208,6 +336,98 @@ class AnalysisAttempt:
             raise ValueError("실패한 분석 시도에는 오류가 필요하다")
         if self.status != "failed" and self.error is not None:
             raise ValueError("실패가 아닌 분석 시도는 오류를 가질 수 없다")
+
+
+@dataclass(frozen=True, slots=True)
+class CancellationRequest:
+    input_revision: str
+    attempt_id: str
+    requested_at: str
+    reason: Literal["user", "active_project_changed"]
+    cancellation_revision: str
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        input_revision: str,
+        attempt_id: str,
+        requested_at: str,
+        reason: Literal["user", "active_project_changed"],
+    ) -> CancellationRequest:
+        payload = {
+            "attempt_id": attempt_id,
+            "input_revision": input_revision,
+            "reason": reason,
+            "requested_at": requested_at,
+        }
+        return cls(input_revision, attempt_id, requested_at, reason, _digest(payload))
+
+    def __post_init__(self) -> None:
+        _require_sha256(self.input_revision, "입력 리비전")
+        _require_sha256(self.cancellation_revision, "취소 리비전")
+        if not self.attempt_id or not self.requested_at:
+            raise ValueError("취소 시도 ID·요청 시각은 비어 있을 수 없다")
+        if self.reason not in {"user", "active_project_changed"}:
+            raise ValueError(f"알 수 없는 취소 사유다: {self.reason!r}")
+
+
+@dataclass(frozen=True, slots=True)
+class ActualUsage:
+    input_revision: str
+    attempt_id: str
+    window_id: str | None
+    model: str
+    input_tokens: int
+    output_tokens: int
+    audio_seconds: Fraction
+    cost: str
+    usage_revision: str
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        input_revision: str,
+        attempt_id: str,
+        window_id: str | None,
+        model: str,
+        input_tokens: int,
+        output_tokens: int,
+        audio_seconds: Fraction = Fraction(),
+        cost: str,
+    ) -> ActualUsage:
+        payload = _actual_usage_payload(
+            input_revision=input_revision,
+            attempt_id=attempt_id,
+            window_id=window_id,
+            model=model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            audio_seconds=audio_seconds,
+            cost=cost,
+        )
+        return cls(
+            input_revision,
+            attempt_id,
+            window_id,
+            model,
+            input_tokens,
+            output_tokens,
+            audio_seconds,
+            cast(str, payload["cost"]),
+            _digest(payload),
+        )
+
+    def __post_init__(self) -> None:
+        _require_sha256(self.input_revision, "입력 리비전")
+        _require_sha256(self.usage_revision, "사용량 리비전")
+        if not self.attempt_id or not self.model:
+            raise ValueError("사용량의 시도 ID·모델은 비어 있을 수 없다")
+        if min(self.input_tokens, self.output_tokens) < 0 or self.audio_seconds < 0:
+            raise ValueError("토큰·오디오 사용량은 0 이상이어야 한다")
+        if _decimal(self.cost, "실제 비용") < 0:
+            raise ValueError("실제 비용은 0 이상이어야 한다")
 
 
 @dataclass(frozen=True, slots=True)
@@ -263,6 +483,8 @@ class VisionWindowDecision:
             raise ValueError("keep 판정은 후보 ID를 가질 수 없다")
         if self.choice == "propose_cut" and not self.candidate_id:
             raise ValueError("propose_cut 판정에는 후보 ID가 필요하다")
+        if self.choice == "propose_cut" and not self.evidence_frame_ids:
+            raise ValueError("propose_cut 판정에는 근거 프레임 ID가 하나 이상 필요하다")
         confidence_value = _confidence(self.confidence)
         if not confidence_value.is_finite() or not 0 <= confidence_value <= 1:
             raise ValueError("신뢰도는 유한한 0~1이어야 한다")
@@ -360,6 +582,65 @@ class CutCandidate:
 
 
 @dataclass(frozen=True, slots=True)
+class CandidatePreview:
+    candidate_id: str
+    input_revision: str
+    frame_id: str
+    thumbnail_path: Path
+    thumbnail_sha256: str
+    reason: str
+    confidence: str
+    removal_duration: Fraction
+    preview_revision: str
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        candidate_id: str,
+        input_revision: str,
+        frame_id: str,
+        thumbnail_path: Path,
+        thumbnail_sha256: str,
+        reason: str,
+        confidence: str,
+        removal_duration: Fraction,
+    ) -> CandidatePreview:
+        payload = _candidate_preview_payload(
+            candidate_id=candidate_id,
+            input_revision=input_revision,
+            frame_id=frame_id,
+            thumbnail_path=thumbnail_path,
+            thumbnail_sha256=thumbnail_sha256,
+            reason=reason,
+            confidence=confidence,
+            removal_duration=removal_duration,
+        )
+        return cls(
+            candidate_id,
+            input_revision,
+            frame_id,
+            thumbnail_path,
+            thumbnail_sha256,
+            reason,
+            cast(str, payload["confidence"]),
+            removal_duration,
+            _digest(payload),
+        )
+
+    def __post_init__(self) -> None:
+        _require_sha256(self.candidate_id, "후보 ID")
+        _require_sha256(self.input_revision, "입력 리비전")
+        _require_sha256(self.thumbnail_sha256, "후보 미리보기")
+        _require_sha256(self.preview_revision, "미리보기 리비전")
+        if not self.frame_id or not self.reason or self.removal_duration <= 0:
+            raise ValueError("미리보기 프레임·사유는 필요하고 제거 길이는 양수여야 한다")
+        value = _confidence(self.confidence)
+        if value < 0 or value > 1:
+            raise ValueError("미리보기 신뢰도는 0~1이어야 한다")
+
+
+@dataclass(frozen=True, slots=True)
 class EditPlan:
     input_revision: str
     approved_candidate_ids: tuple[str, ...]
@@ -436,6 +717,107 @@ class CaptionRequest:
         if self.insertion_method != "relative":
             raise ValueError("자막 삽입 방식은 relative만 지원한다")
 
+    @property
+    def request_revision(self) -> str:
+        return _digest(
+            {
+                "final_revision": self.final_revision,
+                "origin_revision": self.origin_revision,
+                "render_audio_sha256": self.render_audio_sha256,
+            }
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class CaptionEstimate:
+    request_revision: str
+    origin_revision: str
+    final_revision: str
+    render_audio_sha256: str
+    audio_seconds: Fraction
+    transcription_seconds: Fraction
+    cost_upper_bound: str
+    pricing_snapshot_revision: str
+    settings_sha256: str
+    estimate_revision: str
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        request_revision: str,
+        origin_revision: str,
+        final_revision: str,
+        render_audio_sha256: str,
+        audio_seconds: Fraction,
+        transcription_seconds: Fraction,
+        cost_upper_bound: str,
+        pricing_snapshot_revision: str,
+        settings_sha256: str,
+    ) -> CaptionEstimate:
+        payload = _caption_estimate_payload(
+            request_revision=request_revision,
+            origin_revision=origin_revision,
+            final_revision=final_revision,
+            render_audio_sha256=render_audio_sha256,
+            audio_seconds=audio_seconds,
+            transcription_seconds=transcription_seconds,
+            cost_upper_bound=cost_upper_bound,
+            pricing_snapshot_revision=pricing_snapshot_revision,
+            settings_sha256=settings_sha256,
+        )
+        return cls(
+            request_revision,
+            origin_revision,
+            final_revision,
+            render_audio_sha256,
+            audio_seconds,
+            transcription_seconds,
+            cast(str, payload["cost_upper_bound"]),
+            pricing_snapshot_revision,
+            settings_sha256,
+            _digest(payload),
+        )
+
+    def __post_init__(self) -> None:
+        for value, label in (
+            (self.request_revision, "자막 요청 리비전"),
+            (self.origin_revision, "원본 리비전"),
+            (self.final_revision, "최종 리비전"),
+            (self.render_audio_sha256, "렌더 오디오"),
+            (self.pricing_snapshot_revision, "가격 스냅샷"),
+            (self.settings_sha256, "자막 설정"),
+            (self.estimate_revision, "자막 추정"),
+        ):
+            _require_sha256(value, label)
+        if self.audio_seconds <= 0 or self.transcription_seconds < self.audio_seconds:
+            raise ValueError("자막 오디오 길이는 양수이고 전사 상한 이하여야 한다")
+        if _decimal(self.cost_upper_bound, "자막 비용 상한") < 0:
+            raise ValueError("자막 비용 상한은 0 이상이어야 한다")
+
+
+@dataclass(frozen=True, slots=True)
+class CaptionAuthorization:
+    request_revision: str
+    estimate_revision: str
+    pricing_snapshot_revision: str
+    authorized_at: str
+
+    def __post_init__(self) -> None:
+        _require_sha256(self.request_revision, "자막 요청 리비전")
+        _require_sha256(self.estimate_revision, "자막 추정 리비전")
+        _require_sha256(self.pricing_snapshot_revision, "가격 스냅샷 리비전")
+        if not self.authorized_at:
+            raise ValueError("자막 승인 시각이 비어 있다")
+
+    def require_matches(self, estimate: CaptionEstimate) -> None:
+        if self.request_revision != estimate.request_revision:
+            raise ValueError("자막 승인의 요청 리비전이 현재 요청과 다르다")
+        if self.estimate_revision != estimate.estimate_revision:
+            raise ValueError("자막 승인의 비용 추정이 현재 추정과 다르다")
+        if self.pricing_snapshot_revision != estimate.pricing_snapshot_revision:
+            raise ValueError("자막 승인의 가격 스냅샷이 현재 가격과 다르다")
+
 
 @dataclass(frozen=True, slots=True)
 class CaptionResult:
@@ -465,14 +847,20 @@ class WorkflowStateEvent:
 ProtocolMessage: TypeAlias = (
     ProjectRevision
     | ProjectSelection
+    | PricingSnapshot
     | AnalysisEstimate
     | AnalysisAuthorization
     | AnalysisAttempt
+    | CancellationRequest
+    | ActualUsage
     | VisionWindowDecision
     | CutCandidate
+    | CandidatePreview
     | EditPlan
     | CutResult
     | CaptionRequest
+    | CaptionEstimate
+    | CaptionAuthorization
     | CaptionResult
     | WorkflowStateEvent
 )
@@ -552,8 +940,10 @@ class WorkflowJournal:
                 raise ValueError("워크플로 원장의 상태 줄은 WorkflowStateEvent여야 한다")
             if event.input_revision != first.revision:
                 raise ValueError("워크플로 원장에 다른 입력 리비전의 상태가 섞였다")
+            if state in _TERMINAL_STATES:
+                raise ValueError(f"종료 상태 뒤에는 전이가 없다: {state} → {event.state}")
             expected = _NEXT_STATE.get(state)
-            if event.state != expected:
+            if event.state != expected and event.state not in _TERMINAL_STATES:
                 raise ValueError(f"허용되지 않는 상태 전이: {state} → {event.state}")
             state = event.state
         return cls(path, first, state)
@@ -570,7 +960,9 @@ class WorkflowJournal:
                         f"{current.revision.revision}"
                     )
                 expected = _NEXT_STATE.get(current.state)
-                if state != expected:
+                if current.state in _TERMINAL_STATES:
+                    raise ValueError(f"종료 상태 뒤에는 전이가 없다: {current.state} → {state}")
+                if state != expected and state not in _TERMINAL_STATES:
                     raise ValueError(f"허용되지 않는 상태 전이: {current.state} → {state}")
                 stream.seek(0, os.SEEK_END)
                 stream.write(encode_message(WorkflowStateEvent(input_revision, state)))
@@ -589,6 +981,24 @@ def _message_payload(message: ProtocolMessage) -> dict[str, object]:
             **_project_selection_payload(message),
             "selection_revision": message.selection_revision,
         }
+    if isinstance(message, PricingSnapshot):
+        return {
+            **_pricing_snapshot_payload(
+                effective_date=message.effective_date,
+                currency=message.currency,
+                processing_region=message.processing_region,
+                service_tier=message.service_tier,
+                luna_model=message.luna_model,
+                luna_input_per_million_tokens=message.luna_input_per_million_tokens,
+                luna_output_per_million_tokens=message.luna_output_per_million_tokens,
+                whisper_model=message.whisper_model,
+                whisper_per_minute=message.whisper_per_minute,
+                gpt_transcribe_model=message.gpt_transcribe_model,
+                gpt_transcribe_per_minute=message.gpt_transcribe_per_minute,
+                documentation_urls=message.documentation_urls,
+            ),
+            "snapshot_revision": message.snapshot_revision,
+        }
     if isinstance(message, AnalysisEstimate):
         return {
             **_analysis_estimate_payload(
@@ -601,6 +1011,8 @@ def _message_payload(message: ProtocolMessage) -> dict[str, object]:
                 max_image_tokens=message.max_image_tokens,
                 cost_upper_bound=message.cost_upper_bound,
                 settings_sha256=message.settings_sha256,
+                pricing_snapshot_revision=message.pricing_snapshot_revision,
+                media_grant_revision=message.media_grant_revision,
             ),
             "estimate_revision": message.estimate_revision,
         }
@@ -609,6 +1021,8 @@ def _message_payload(message: ProtocolMessage) -> dict[str, object]:
             "authorized_at": message.authorized_at,
             "estimate_revision": message.estimate_revision,
             "input_revision": message.input_revision,
+            "media_grant_revision": message.media_grant_revision,
+            "pricing_snapshot_revision": message.pricing_snapshot_revision,
         }
     if isinstance(message, AnalysisAttempt):
         return {
@@ -618,6 +1032,28 @@ def _message_payload(message: ProtocolMessage) -> dict[str, object]:
             "input_revision": message.input_revision,
             "started_at": message.started_at,
             "status": message.status,
+        }
+    if isinstance(message, CancellationRequest):
+        return {
+            "attempt_id": message.attempt_id,
+            "cancellation_revision": message.cancellation_revision,
+            "input_revision": message.input_revision,
+            "reason": message.reason,
+            "requested_at": message.requested_at,
+        }
+    if isinstance(message, ActualUsage):
+        return {
+            **_actual_usage_payload(
+                input_revision=message.input_revision,
+                attempt_id=message.attempt_id,
+                window_id=message.window_id,
+                model=message.model,
+                input_tokens=message.input_tokens,
+                output_tokens=message.output_tokens,
+                audio_seconds=message.audio_seconds,
+                cost=message.cost,
+            ),
+            "usage_revision": message.usage_revision,
         }
     if isinstance(message, VisionWindowDecision):
         return {
@@ -646,6 +1082,20 @@ def _message_payload(message: ProtocolMessage) -> dict[str, object]:
             "timeline_range": _range_payload(message.timeline_range),
             "window_id": message.window_id,
         }
+    if isinstance(message, CandidatePreview):
+        return {
+            **_candidate_preview_payload(
+                candidate_id=message.candidate_id,
+                input_revision=message.input_revision,
+                frame_id=message.frame_id,
+                thumbnail_path=message.thumbnail_path,
+                thumbnail_sha256=message.thumbnail_sha256,
+                reason=message.reason,
+                confidence=message.confidence,
+                removal_duration=message.removal_duration,
+            ),
+            "preview_revision": message.preview_revision,
+        }
     if isinstance(message, EditPlan):
         return {
             "approved_candidate_ids": list(message.approved_candidate_ids),
@@ -672,6 +1122,28 @@ def _message_payload(message: ProtocolMessage) -> dict[str, object]:
             "origin_revision": message.origin_revision,
             "render_audio": str(message.render_audio),
             "render_audio_sha256": message.render_audio_sha256,
+        }
+    if isinstance(message, CaptionEstimate):
+        return {
+            **_caption_estimate_payload(
+                request_revision=message.request_revision,
+                origin_revision=message.origin_revision,
+                final_revision=message.final_revision,
+                render_audio_sha256=message.render_audio_sha256,
+                audio_seconds=message.audio_seconds,
+                transcription_seconds=message.transcription_seconds,
+                cost_upper_bound=message.cost_upper_bound,
+                pricing_snapshot_revision=message.pricing_snapshot_revision,
+                settings_sha256=message.settings_sha256,
+            ),
+            "estimate_revision": message.estimate_revision,
+        }
+    if isinstance(message, CaptionAuthorization):
+        return {
+            "authorized_at": message.authorized_at,
+            "estimate_revision": message.estimate_revision,
+            "pricing_snapshot_revision": message.pricing_snapshot_revision,
+            "request_revision": message.request_revision,
         }
     if isinstance(message, CaptionResult):
         return {
@@ -709,6 +1181,24 @@ def _decode_payload(kind: object, payload: dict[str, object]) -> ProtocolMessage
         if payload.get("selection_revision") != selection.selection_revision:
             raise ValueError("ProjectSelection의 계산 리비전이 기록과 다르다")
         return selection
+    if kind == "PricingSnapshot":
+        snapshot = PricingSnapshot.create(
+            effective_date=_string(payload, "effective_date"),
+            currency=_string(payload, "currency"),
+            processing_region=_string(payload, "processing_region"),
+            service_tier=_string(payload, "service_tier"),
+            luna_model=_string(payload, "luna_model"),
+            luna_input_per_million_tokens=_string(payload, "luna_input_per_million_tokens"),
+            luna_output_per_million_tokens=_string(payload, "luna_output_per_million_tokens"),
+            whisper_model=_string(payload, "whisper_model"),
+            whisper_per_minute=_string(payload, "whisper_per_minute"),
+            gpt_transcribe_model=_string(payload, "gpt_transcribe_model"),
+            gpt_transcribe_per_minute=_string(payload, "gpt_transcribe_per_minute"),
+            documentation_urls=_strings(payload, "documentation_urls"),
+        )
+        if payload.get("snapshot_revision") != snapshot.snapshot_revision:
+            raise ValueError("PricingSnapshot의 계산 리비전이 기록과 다르다")
+        return snapshot
     if kind == "AnalysisEstimate":
         estimate = AnalysisEstimate.create(
             input_revision=_string(payload, "input_revision"),
@@ -720,6 +1210,8 @@ def _decode_payload(kind: object, payload: dict[str, object]) -> ProtocolMessage
             max_image_tokens=_integer(payload, "max_image_tokens"),
             cost_upper_bound=_optional_string(payload, "cost_upper_bound"),
             settings_sha256=_string(payload, "settings_sha256"),
+            pricing_snapshot_revision=_string(payload, "pricing_snapshot_revision"),
+            media_grant_revision=_string(payload, "media_grant_revision"),
         )
         if payload.get("estimate_revision") != estimate.estimate_revision:
             raise ValueError("AnalysisEstimate의 계산 리비전이 기록과 다르다")
@@ -728,8 +1220,37 @@ def _decode_payload(kind: object, payload: dict[str, object]) -> ProtocolMessage
         return AnalysisAuthorization(
             input_revision=_string(payload, "input_revision"),
             estimate_revision=_string(payload, "estimate_revision"),
+            pricing_snapshot_revision=_string(payload, "pricing_snapshot_revision"),
+            media_grant_revision=_string(payload, "media_grant_revision"),
             authorized_at=_string(payload, "authorized_at"),
         )
+    if kind == "CancellationRequest":
+        cancellation = CancellationRequest.create(
+            input_revision=_string(payload, "input_revision"),
+            attempt_id=_string(payload, "attempt_id"),
+            requested_at=_string(payload, "requested_at"),
+            reason=cast(Literal["user", "active_project_changed"], _string(payload, "reason")),
+        )
+        if payload.get("cancellation_revision") != cancellation.cancellation_revision:
+            raise ValueError("CancellationRequest의 계산 리비전이 기록과 다르다")
+        return cancellation
+    if kind == "ActualUsage":
+        window_id = payload.get("window_id")
+        if window_id is not None and not isinstance(window_id, str):
+            raise ValueError("ActualUsage.window_id는 문자열 또는 null이어야 한다")
+        usage = ActualUsage.create(
+            input_revision=_string(payload, "input_revision"),
+            attempt_id=_string(payload, "attempt_id"),
+            window_id=window_id,
+            model=_string(payload, "model"),
+            input_tokens=_integer(payload, "input_tokens"),
+            output_tokens=_integer(payload, "output_tokens"),
+            audio_seconds=_fraction(payload, "audio_seconds"),
+            cost=_string(payload, "cost"),
+        )
+        if payload.get("usage_revision") != usage.usage_revision:
+            raise ValueError("ActualUsage의 계산 리비전이 기록과 다르다")
+        return usage
     if kind == "AnalysisAttempt":
         error = payload.get("error")
         if error is not None and not isinstance(error, str):
@@ -774,6 +1295,20 @@ def _decode_payload(kind: object, payload: dict[str, object]) -> ProtocolMessage
         if payload.get("selected_by_default") is not candidate.selected_by_default:
             raise ValueError("CutCandidate의 기본 선택 값이 신뢰도와 다르다")
         return candidate
+    if kind == "CandidatePreview":
+        preview = CandidatePreview.create(
+            candidate_id=_string(payload, "candidate_id"),
+            input_revision=_string(payload, "input_revision"),
+            frame_id=_string(payload, "frame_id"),
+            thumbnail_path=Path(_string(payload, "thumbnail_path")),
+            thumbnail_sha256=_string(payload, "thumbnail_sha256"),
+            reason=_string(payload, "reason"),
+            confidence=_string(payload, "confidence"),
+            removal_duration=_fraction(payload, "removal_duration"),
+        )
+        if payload.get("preview_revision") != preview.preview_revision:
+            raise ValueError("CandidatePreview의 계산 리비전이 기록과 다르다")
+        return preview
     if kind == "EditPlan":
         plan = EditPlan.create(
             input_revision=_string(payload, "input_revision"),
@@ -800,6 +1335,28 @@ def _decode_payload(kind: object, payload: dict[str, object]) -> ProtocolMessage
             render_audio_sha256=_string(payload, "render_audio_sha256"),
             final_fcpxml=Path(_string(payload, "final_fcpxml")),
             insertion_method=cast(Literal["relative"], _string(payload, "insertion_method")),
+        )
+    if kind == "CaptionEstimate":
+        caption_estimate = CaptionEstimate.create(
+            request_revision=_string(payload, "request_revision"),
+            origin_revision=_string(payload, "origin_revision"),
+            final_revision=_string(payload, "final_revision"),
+            render_audio_sha256=_string(payload, "render_audio_sha256"),
+            audio_seconds=_fraction(payload, "audio_seconds"),
+            transcription_seconds=_fraction(payload, "transcription_seconds"),
+            cost_upper_bound=_string(payload, "cost_upper_bound"),
+            pricing_snapshot_revision=_string(payload, "pricing_snapshot_revision"),
+            settings_sha256=_string(payload, "settings_sha256"),
+        )
+        if payload.get("estimate_revision") != caption_estimate.estimate_revision:
+            raise ValueError("CaptionEstimate의 계산 리비전이 기록과 다르다")
+        return caption_estimate
+    if kind == "CaptionAuthorization":
+        return CaptionAuthorization(
+            request_revision=_string(payload, "request_revision"),
+            estimate_revision=_string(payload, "estimate_revision"),
+            pricing_snapshot_revision=_string(payload, "pricing_snapshot_revision"),
+            authorized_at=_string(payload, "authorized_at"),
         )
     if kind == "CaptionResult":
         srt = payload.get("srt_path")
@@ -853,9 +1410,13 @@ def _analysis_estimate_payload(
     max_image_tokens: int,
     cost_upper_bound: str | None,
     settings_sha256: str,
+    pricing_snapshot_revision: str,
+    media_grant_revision: str,
 ) -> dict[str, object]:
     _require_sha256(input_revision, "입력 리비전")
     _require_sha256(settings_sha256, "분석 설정")
+    _require_sha256(pricing_snapshot_revision, "가격 스냅샷 리비전")
+    _require_sha256(media_grant_revision, "미디어 권한 리비전")
     return {
         "cost_upper_bound": (
             _decimal_text(_decimal(cost_upper_bound, "비용 상한"))
@@ -866,10 +1427,125 @@ def _analysis_estimate_payload(
         "max_image_tokens": max_image_tokens,
         "max_images": max_images,
         "max_windows": max_windows,
+        "media_grant_revision": media_grant_revision,
         "model": model,
+        "pricing_snapshot_revision": pricing_snapshot_revision,
         "settings_sha256": settings_sha256,
         "transcription_seconds": _fraction_text(transcription_seconds),
         "unique_source_audio_seconds": _fraction_text(unique_source_audio_seconds),
+    }
+
+
+def _pricing_snapshot_payload(
+    *,
+    effective_date: str,
+    currency: str,
+    processing_region: str,
+    service_tier: str,
+    luna_model: str,
+    luna_input_per_million_tokens: str,
+    luna_output_per_million_tokens: str,
+    whisper_model: str,
+    whisper_per_minute: str,
+    gpt_transcribe_model: str,
+    gpt_transcribe_per_minute: str,
+    documentation_urls: tuple[str, ...],
+) -> dict[str, object]:
+    for name in (effective_date, currency, processing_region, service_tier):
+        if not name:
+            raise ValueError(f"가격 스냅샷의 {name}이 비어 있다")
+    if not documentation_urls or any(not value for value in documentation_urls):
+        raise ValueError("가격 스냅샷에는 공식 문서 URL이 필요하다")
+    return {
+        "currency": currency,
+        "documentation_urls": list(documentation_urls),
+        "effective_date": effective_date,
+        "gpt_transcribe_model": gpt_transcribe_model,
+        "gpt_transcribe_per_minute": _decimal_text(
+            _decimal(gpt_transcribe_per_minute, "gpt-transcribe 분당 가격")
+        ),
+        "luna_input_per_million_tokens": _decimal_text(
+            _decimal(luna_input_per_million_tokens, "Luna 입력 토큰 가격")
+        ),
+        "luna_model": luna_model,
+        "luna_output_per_million_tokens": _decimal_text(
+            _decimal(luna_output_per_million_tokens, "Luna 출력 토큰 가격")
+        ),
+        "processing_region": processing_region,
+        "service_tier": service_tier,
+        "whisper_model": whisper_model,
+        "whisper_per_minute": _decimal_text(_decimal(whisper_per_minute, "whisper 분당 가격")),
+    }
+
+
+def _actual_usage_payload(
+    *,
+    input_revision: str,
+    attempt_id: str,
+    window_id: str | None,
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+    audio_seconds: Fraction,
+    cost: str,
+) -> dict[str, object]:
+    return {
+        "attempt_id": attempt_id,
+        "audio_seconds": _fraction_text(audio_seconds),
+        "cost": _decimal_text(_decimal(cost, "실제 비용")),
+        "input_revision": input_revision,
+        "input_tokens": input_tokens,
+        "model": model,
+        "output_tokens": output_tokens,
+        "window_id": window_id,
+    }
+
+
+def _candidate_preview_payload(
+    *,
+    candidate_id: str,
+    input_revision: str,
+    frame_id: str,
+    thumbnail_path: Path,
+    thumbnail_sha256: str,
+    reason: str,
+    confidence: str,
+    removal_duration: Fraction,
+) -> dict[str, object]:
+    return {
+        "candidate_id": candidate_id,
+        "confidence": _decimal_text(_confidence(confidence)),
+        "frame_id": frame_id,
+        "input_revision": input_revision,
+        "reason": reason,
+        "removal_duration": _fraction_text(removal_duration),
+        "thumbnail_path": str(thumbnail_path),
+        "thumbnail_sha256": thumbnail_sha256,
+    }
+
+
+def _caption_estimate_payload(
+    *,
+    request_revision: str,
+    origin_revision: str,
+    final_revision: str,
+    render_audio_sha256: str,
+    audio_seconds: Fraction,
+    transcription_seconds: Fraction,
+    cost_upper_bound: str,
+    pricing_snapshot_revision: str,
+    settings_sha256: str,
+) -> dict[str, object]:
+    return {
+        "audio_seconds": _fraction_text(audio_seconds),
+        "cost_upper_bound": _decimal_text(_decimal(cost_upper_bound, "자막 비용 상한")),
+        "final_revision": final_revision,
+        "origin_revision": origin_revision,
+        "pricing_snapshot_revision": pricing_snapshot_revision,
+        "render_audio_sha256": render_audio_sha256,
+        "request_revision": request_revision,
+        "settings_sha256": settings_sha256,
+        "transcription_seconds": _fraction_text(transcription_seconds),
     }
 
 
@@ -988,15 +1664,28 @@ def _digest_sequence(parts: tuple[str, ...]) -> str:
     return hashlib.sha256("\0".join(parts).encode("utf-8")).hexdigest()
 
 
-_ANALYSIS_11_TYPES = frozenset(
+_ANALYSIS_PROTOCOL_TYPES = frozenset(
     {
         "ProjectSelection",
+        "PricingSnapshot",
         "AnalysisEstimate",
         "AnalysisAuthorization",
         "AnalysisAttempt",
+        "CancellationRequest",
+        "ActualUsage",
         "VisionWindowDecision",
         "CutCandidate",
+        "CandidatePreview",
         "EditPlan",
+    }
+)
+
+_CAPTION_PROTOCOL_TYPES = frozenset(
+    {
+        "CaptionRequest",
+        "CaptionEstimate",
+        "CaptionAuthorization",
+        "CaptionResult",
     }
 )
 
@@ -1006,4 +1695,8 @@ def _protocol_version(message: ProtocolMessage) -> str:
 
 
 def _protocol_version_for_kind(kind: object) -> str:
-    return ANALYSIS_PROTOCOL_VERSION if kind in _ANALYSIS_11_TYPES else PROTOCOL_VERSION
+    if kind in _ANALYSIS_PROTOCOL_TYPES:
+        return ANALYSIS_PROTOCOL_VERSION
+    if kind in _CAPTION_PROTOCOL_TYPES:
+        return CAPTION_PROTOCOL_VERSION
+    return PROTOCOL_VERSION

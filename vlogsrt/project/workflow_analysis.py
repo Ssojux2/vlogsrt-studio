@@ -12,12 +12,16 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, fields
 from decimal import Decimal
 from fractions import Fraction
+from pathlib import Path
 from typing import Any
 
 from vlogsrt.project.models import ClipInstance, ProjectDocument
 from vlogsrt.project.workflow_protocol import (
+    ActualUsage,
     AnalysisEstimate,
+    CandidatePreview,
     CutCandidate,
+    PricingSnapshot,
     ProjectRevision,
     RationalRange,
     VisionWindowDecision,
@@ -37,7 +41,9 @@ class AnalysisSettings:
     window_seconds: Fraction = Fraction(10)
     max_images: int = 6
     image_long_edge: int = 512
-    low_detail_image_tokens: int = 85
+    # low detail 이미지는 512×512로 내려가고 장당 308 입력 토큰이다(2026-09-21 요금).
+    low_detail_image_tokens: int = 308
+    window_output_tokens: int = 256
     transcription_call_multiplier: int = 4
     review_confidence: Decimal = Decimal("0.90")
     retake_horizon_seconds: Fraction = Fraction(30)
@@ -55,6 +61,8 @@ class AnalysisSettings:
             raise ValueError("이미지 긴 변은 1~512px이어야 한다")
         if self.low_detail_image_tokens < 1:
             raise ValueError("이미지 토큰 상한은 양수여야 한다")
+        if self.window_output_tokens < 1:
+            raise ValueError("창 출력 토큰 상한은 양수여야 한다")
         if self.transcription_call_multiplier < 1:
             raise ValueError("전사 호출 배수는 1 이상이어야 한다")
         for name in ("review_confidence", "retake_similarity"):
@@ -103,6 +111,14 @@ class LunaFrame:
     frame_id: str
     jpeg_bytes: bytes
     sha256: str
+    source_time: Fraction
+    timeline_time: Fraction
+
+    def __post_init__(self) -> None:
+        if not self.frame_id:
+            raise ValueError("프레임 ID는 비어 있을 수 없다")
+        if self.source_time < 0 or self.timeline_time < 0:
+            raise ValueError("프레임 시각은 0 이상이어야 한다")
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,13 +134,20 @@ def build_analysis_estimate(
     revision: ProjectRevision,
     settings: AnalysisSettings,
     *,
-    source_audio_cost_per_minute: Decimal | None = None,
-    vision_cost_per_image: Decimal | None = None,
+    pricing: PricingSnapshot,
+    media_grant_revision: str,
     settings_sha256: str | None = None,
 ) -> AnalysisEstimate:
-    """네트워크 없이 고유 소스 오디오와 최악의 창/이미지/토큰 사용량을 센다."""
+    """네트워크 없이 고유 소스 오디오와 최악의 창/이미지/토큰 사용량을 센다.
+
+    비용 상한은 공식 가격 스냅샷 하나로 계산한다 — 사용자 예산 가정과 섞지
+    않는다(승인은 스냅샷 리비전에 묶인다). 전사 상한은 whisper와 gpt-transcribe
+    분당가를 합친 보수적 상한이다(배수가 실제 호출 조합을 이미 덮는다).
+    """
     if document.input_sha256 != revision.input_sha256:
         raise ValueError("비용 추정의 문서와 입력 리비전이 다르다")
+    if pricing.luna_model != settings.model:
+        raise ValueError("가격 스냅샷의 Luna 모델과 분석 모델이 다르다")
     unique_audio: dict[str, Fraction] = {}
     for resource in document.resources:
         if resource.has_audio:
@@ -138,17 +161,17 @@ def build_analysis_estimate(
         if isinstance(item, ClipInstance)
     )
     max_images = max_windows * settings.max_images
-    cost: Decimal | None = None
-    if source_audio_cost_per_minute is not None and vision_cost_per_image is not None:
-        if source_audio_cost_per_minute < 0 or vision_cost_per_image < 0:
-            raise ValueError("비용 가정은 0 이상이어야 한다")
-        cost = (
-            Decimal(transcription_seconds.numerator)
-            / Decimal(transcription_seconds.denominator)
-            / Decimal(60)
-            * source_audio_cost_per_minute
-            + Decimal(max_images) * vision_cost_per_image
-        )
+    cost = (
+        _fraction_decimal(transcription_seconds)
+        / Decimal(60)
+        * (Decimal(pricing.whisper_per_minute) + Decimal(pricing.gpt_transcribe_per_minute))
+        + Decimal(max_images * settings.low_detail_image_tokens)
+        * Decimal(pricing.luna_input_per_million_tokens)
+        / Decimal(1_000_000)
+        + Decimal(max_windows * settings.window_output_tokens)
+        * Decimal(pricing.luna_output_per_million_tokens)
+        / Decimal(1_000_000)
+    )
     return AnalysisEstimate.create(
         input_revision=revision.revision,
         model=settings.model,
@@ -157,8 +180,10 @@ def build_analysis_estimate(
         max_windows=max_windows,
         max_images=max_images,
         max_image_tokens=max_images * settings.low_detail_image_tokens,
-        cost_upper_bound=_decimal_text(cost) if cost is not None else None,
+        cost_upper_bound=_decimal_text(cost),
         settings_sha256=settings_sha256 or settings.sha256(),
+        pricing_snapshot_revision=pricing.snapshot_revision,
+        media_grant_revision=media_grant_revision,
     )
 
 
@@ -373,9 +398,18 @@ def plan_candidate_windows(
 
 
 def build_luna_payload(
-    window: LunaWindow, candidates: Sequence[CandidateSeed], frames: Sequence[LunaFrame]
+    window: LunaWindow,
+    candidates: Sequence[CandidateSeed],
+    frames: Sequence[LunaFrame],
+    *,
+    max_output_tokens: int = 256,
 ) -> dict[str, object]:
-    """Responses API input. 경로와 자격증명은 받지도 직렬화하지도 않는다."""
+    """Responses API input. 경로와 자격증명은 받지도 직렬화하지도 않는다.
+
+    이미지마다 바로 앞에 `input_text`로 frame_id·소스 시각·타임라인 시각을 밝힌다
+    — 판정의 근거 프레임이 어느 시각인지 모델과 기록이 같은 눈으로 본다. 창
+    출력은 256 토큰, reasoning은 none(출력 토큰을 판정 JSON에만 쓴다).
+    """
     _require_window(window, candidates, frames)
     candidate_text = "\n".join(
         f"- {row.candidate_id}: {row.reason} [{row.timeline_range.start},{row.timeline_range.end})"
@@ -395,13 +429,27 @@ def build_luna_payload(
         frame = by_id[frame_id]
         content.append(
             {
+                "type": "input_text",
+                "text": (
+                    f"frame_id={frame.frame_id} "
+                    f"source_time={_fraction_decimal(frame.source_time)}s "
+                    f"timeline_time={_fraction_decimal(frame.timeline_time)}s"
+                ),
+            }
+        )
+        content.append(
+            {
                 "type": "input_image",
                 "detail": "low",
                 "image_url": "data:image/jpeg;base64,"
                 + base64.b64encode(frame.jpeg_bytes).decode("ascii"),
             }
         )
-    return {"input": [{"role": "user", "content": content}]}
+    return {
+        "input": [{"role": "user", "content": content}],
+        "max_output_tokens": max_output_tokens,
+        "reasoning": {"effort": "none"},
+    }
 
 
 def normalize_luna_response(
@@ -512,6 +560,8 @@ def luna_request_sha256(
             ],
             "frame_ids": list(window.frame_ids),
             "frame_sha256s": [frame.sha256 for frame in frames],
+            "frame_source_times": [_fraction_text(frame.source_time) for frame in frames],
+            "frame_timeline_times": [_fraction_text(frame.timeline_time) for frame in frames],
             "input_revision": window.input_revision,
             "source_hashes": list(window.source_hashes),
             "transcript_context": window.transcript_context,
@@ -553,6 +603,110 @@ def effective_analysis_settings_sha256(
             "project_config": dict(project_config),
             "source_sha256s": list(source_sha256s),
         }
+    )
+
+
+class CostCeilingExceeded(RuntimeError):
+    """기록된 실제 사용량이 승인된 비용 상한을 넘었다 — 다음 호출을 시작하지 않는다."""
+
+
+class UsageLedger:
+    """실제 사용량의 누계가 승인 상한을 넘는 순간 닫히는 게이트.
+
+    기록(`record`)은 언제나 남긴다 — 초과 분을 숨기면 안 되므로 UsageLedger에
+    더한 뒤에 판정한다. 예외는 "다음 호출" 앞에서 일어난다(호출 루프가 멈춘다).
+    """
+
+    def __init__(self, limit: Decimal) -> None:
+        if not limit.is_finite() or limit < 0:
+            raise ValueError("비용 상한은 유한한 0 이상이어야 한다")
+        self.limit = limit
+        self.spent = Decimal(0)
+
+    def record(self, usage: ActualUsage) -> None:
+        self.spent += Decimal(usage.cost)
+        if self.spent > self.limit:
+            raise CostCeilingExceeded(
+                f"실제 사용량 {_decimal_text(self.spent)}USD가 승인 상한 "
+                f"{_decimal_text(self.limit)}USD를 넘었다 — 남은 호출을 중단한다"
+            )
+
+
+def luna_usage(
+    *,
+    window: LunaWindow,
+    raw: Mapping[str, object],
+    pricing: PricingSnapshot,
+    attempt_id: str,
+) -> ActualUsage | None:
+    """Responses 응답의 `usage` 블록에서 이 창의 실제 사용량을 만든다.
+
+    usage 블록이 없거나 숫자가 아니면 `None`이다 — 없는 사용량을 0으로 꾸미지
+    않는다(기록 없음과 0USD는 다른 사실이다).
+    """
+    usage = raw.get("usage") if isinstance(raw, Mapping) else None
+    if not isinstance(usage, Mapping):
+        return None
+    input_tokens = usage.get("input_tokens")
+    output_tokens = usage.get("output_tokens")
+    if (
+        isinstance(input_tokens, bool)
+        or not isinstance(input_tokens, int)
+        or isinstance(output_tokens, bool)
+        or not isinstance(output_tokens, int)
+    ):
+        return None
+    cost = (
+        Decimal(input_tokens) * Decimal(pricing.luna_input_per_million_tokens)
+        + Decimal(output_tokens) * Decimal(pricing.luna_output_per_million_tokens)
+    ) / Decimal(1_000_000)
+    return ActualUsage.create(
+        input_revision=window.input_revision,
+        attempt_id=attempt_id,
+        window_id=window.window_id,
+        model=pricing.luna_model,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cost=_decimal_text(cost),
+    )
+
+
+def transcription_usage(
+    *,
+    input_revision: str,
+    attempt_id: str,
+    model: str,
+    audio_seconds: Fraction,
+    per_minute: str,
+) -> ActualUsage:
+    if audio_seconds < 0:
+        raise ValueError("전사 사용량 오디오 길이는 0 이상이어야 한다")
+    cost = _fraction_decimal(audio_seconds) / Decimal(60) * Decimal(per_minute)
+    return ActualUsage.create(
+        input_revision=input_revision,
+        attempt_id=attempt_id,
+        window_id=None,
+        model=model,
+        input_tokens=0,
+        output_tokens=0,
+        audio_seconds=audio_seconds,
+        cost=_decimal_text(cost),
+    )
+
+
+def build_candidate_preview(
+    candidate: CutCandidate, frame: LunaFrame, thumbnail_path: Path
+) -> CandidatePreview:
+    """검토 화면의 미리보기 — 후보·프레임·썸네일 해시가 한 리비전으로 묶인다."""
+    return CandidatePreview.create(
+        candidate_id=candidate.candidate_id,
+        input_revision=candidate.input_revision,
+        frame_id=frame.frame_id,
+        thumbnail_path=thumbnail_path,
+        thumbnail_sha256=frame.sha256,
+        reason=candidate.reason,
+        confidence=candidate.confidence,
+        removal_duration=candidate.timeline_range.end - candidate.timeline_range.start,
     )
 
 
@@ -615,6 +769,10 @@ def _ceil_fraction(value: Fraction) -> int:
     return -(-value.numerator // value.denominator)
 
 
+def _fraction_decimal(value: Fraction) -> Decimal:
+    return Decimal(value.numerator) / Decimal(value.denominator)
+
+
 def _decimal_text(value: Decimal) -> str:
     if value == 0:
         return "0"
@@ -627,6 +785,10 @@ def _setting_value(value: object) -> object:
     if isinstance(value, Decimal):
         return _decimal_text(value)
     return value
+
+
+def _fraction_text(value: Fraction) -> str:
+    return f"{value.numerator}/{value.denominator}"
 
 
 def _digest(payload: Mapping[str, Any]) -> str:

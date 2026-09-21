@@ -35,8 +35,10 @@ import os
 import shutil
 import sys
 import uuid
+from collections.abc import Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
+from decimal import Decimal
 from fractions import Fraction
 from pathlib import Path
 
@@ -45,9 +47,21 @@ from vlogsrt.config import Config, load_config
 from vlogsrt.project import runner
 from vlogsrt.project.config import ProjectConfig, load_project_config
 from vlogsrt.project.fcpxml import element_tree, parse_project
-from vlogsrt.project.final_caption import create_caption_request, generate_final_captions
-from vlogsrt.project.media import MediaOverride, load_media_map, resolve_media
+from vlogsrt.project.final_caption import (
+    build_caption_estimate,
+    caption_settings_sha256,
+    create_caption_request,
+    generate_final_captions,
+    measure_caption_request,
+)
+from vlogsrt.project.media import (
+    MediaOverride,
+    ResolvedMedia,
+    load_media_map,
+    resolve_media,
+)
 from vlogsrt.project.models import ClipInstance
+from vlogsrt.project.pricing import official_pricing_snapshot
 from vlogsrt.project.review import (
     CandidateAnalysis,
     build_review_plan,
@@ -67,6 +81,7 @@ from vlogsrt.project.workflow_analysis import (
     LunaFrame,
     LunaWindow,
     TranscriptEvidence,
+    UsageLedger,
     build_analysis_estimate,
     build_luna_payload,
     effective_analysis_settings_sha256,
@@ -74,18 +89,25 @@ from vlogsrt.project.workflow_analysis import (
     finalize_candidate,
     luna_cache_key,
     luna_request_sha256,
+    luna_usage,
     normalize_luna_response,
     plan_candidate_windows,
     project_transcript_evidence,
     safe_transcript_candidates,
     select_frame_times,
+    transcription_usage,
 )
 from vlogsrt.project.workflow_protocol import (
     AnalysisAttempt,
     AnalysisAuthorization,
     AnalysisEstimate,
+    CancellationRequest,
+    CaptionAuthorization,
+    CaptionEstimate,
+    CaptionRequest,
     CutCandidate,
     EditPlan,
+    PricingSnapshot,
     ProjectRevision,
     ProtocolMessage,
     RationalRange,
@@ -98,11 +120,95 @@ from vlogsrt.project.workflow_protocol import (
 _JOURNAL = "workflow.jsonl"
 _INPUT = "input.fcpxml"
 _REVISION = "revision.jsonl"
+_PRICING = "pricing-snapshot.jsonl"
 _ESTIMATE = "analysis-estimate.jsonl"
 _ATTEMPTS = "analysis-attempts.jsonl"
+_USAGE = "analysis-usage.jsonl"
 _CANDIDATES = "candidates.jsonl"
 _PLAN = "edit-plan.jsonl"
 _SOURCE = "source.json"
+_CANCEL = "cancellation.jsonl"
+_CAPTION_REQUEST = "caption-request.jsonl"
+_CAPTION_ESTIMATE = "caption-estimate.jsonl"
+_CAPTION_RESULT = "caption-result.jsonl"
+
+
+class WorkflowCancelled(RuntimeError):
+    """앱이 기록한 CancellationRequest를 단계 경계에서 만났다 — 남은 호출을 하지 않는다."""
+
+    def __init__(self, cancellation: CancellationRequest) -> None:
+        super().__init__(
+            f"취소 요청({cancellation.reason}, {cancellation.requested_at})을 만났다 — "
+            "분석을 중단한다"
+        )
+        self.cancellation = cancellation
+
+
+def _check_cancellation(workspace: Path, input_revision: str, attempt_id: str) -> None:
+    """API·전사·ffmpeg 단계 사이에만 확인한다 — 취소 뒤 새 호출은 없다.
+
+    앱은 `cancellation.jsonl`에 CancellationRequest를 기록한다(App Group 작업
+    폴더와 같은 내용). 앱이 실행 중인 시도 ID를 모를 때 — 사용자 취소 버튼·활성
+    프로젝트 변경 — 는 `attempt_id="*"`로 기록하고 그 입력 리비전의 모든 시도에
+    적용한다. 캐시는 그냥 둔다 — 취소는 지금 실행만 멈춘다.
+    """
+    path = workspace / _CANCEL
+    if not path.is_file():
+        return
+    for message in _read_messages(path):
+        if not isinstance(message, CancellationRequest):
+            raise ValueError(f"취소 기록에 CancellationRequest가 아닌 메시지가 있다: {path}")
+        if message.input_revision != input_revision:
+            continue
+        if message.attempt_id != attempt_id and message.attempt_id != "*":
+            continue
+        raise WorkflowCancelled(message)
+
+
+def _media_grant_revision(
+    media: Sequence[ResolvedMedia], app_grant_revision: str | None = None
+) -> str:
+    """허용된 미디어 루트(북마크)와 실제 미디어 해시가 함께 묶인 권한 리비전.
+
+    앱이 스테이징한 `media-grant.json`의 grant revision(북마크 루트의 지문)을
+    함께 묶는다 — 같은 FCPXML·미디어라도 앱 쪽 허용 루트가 바뀌면 다른 권한이고,
+    비용 추정·승인이 그대로 드리프트로 잡힌다.
+    """
+    rows = sorted(
+        (
+            {
+                "original_sha256": row.original_sha256,
+                "resource": row.resource_scoped_id,
+            }
+            for row in media
+        ),
+        key=lambda row: (row["resource"], row["original_sha256"]),
+    )
+    payload: dict[str, object]
+    if app_grant_revision is not None:
+        payload = {"app_grant_revision": app_grant_revision, "media": rows}
+    else:
+        payload = {"media": rows}
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _staged_app_grant_revision(workspace: Path) -> str | None:
+    """앱이 스테이징한 media-grant.json의 grant revision — 없으면 None(순수 CLI 실행)."""
+    path = workspace / "media-grant.json"
+    if not path.is_file():
+        return None
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"media-grant.json을 해석할 수 없다: {path}") from exc
+    revision = document.get("grant_revision") if isinstance(document, dict) else None
+    if not isinstance(revision, str):
+        raise ValueError("media-grant.json에 grant_revision이 없다")
+    if len(revision) != 64 or any(char not in "0123456789abcdef" for char in revision):
+        raise ValueError("media-grant.json의 grant_revision이 SHA-256이 아니다")
+    return revision
 
 
 def project_command(args: argparse.Namespace) -> int:
@@ -127,9 +233,14 @@ def project_command(args: argparse.Namespace) -> int:
 def _project_receive(args: argparse.Namespace) -> int:
     document = parse_project(args.input)
     root = element_tree(document.raw_xml, str(document.info_path))
-    project = root.find("library/event/project")
+    projects = root.findall("library/event/project")
+    if len(projects) != 1:
+        # 한 작업공간은 한 프로젝트다 — 여러 개가 섞이면 승인·리비전이 어느
+        # 프로젝트의 것인지 말할 수 없다.
+        raise ValueError(f"FCPXML에는 프로젝트가 정확히 하나여야 한다: {len(projects)}개")
+    project = projects[0]
     sequence = root.find("library/event/project/sequence")
-    if project is None or sequence is None:
+    if sequence is None:
         raise ValueError("FCPXML에 project/sequence가 없다")
     name = project.get("name", "").strip()
     if not name:
@@ -167,19 +278,26 @@ def _project_receive(args: argparse.Namespace) -> int:
 
 
 def _project_inspect(args: argparse.Namespace) -> int:
-    """네트워크를 열지 않고 사용량과 사용자 가격 가정의 상한을 고정한다."""
+    """네트워크를 열지 않고 공식 가격 스냅샷과 비용 상한을 고정한다."""
     workspace = args.workspace
     journal = WorkflowJournal.open(workspace / _JOURNAL)
     if journal.state != "received":
         raise ValueError(f"inspect는 received 상태에서만 가능하다: {journal.state}")
-    estimate = _current_analysis_estimate(args, workspace, journal.revision)
+    pricing = official_pricing_snapshot(AnalysisSettings().model)
+    estimate = _current_analysis_estimate(args, workspace, journal.revision, pricing)
+    _write_messages(workspace / _PRICING, (pricing,))
     _write_messages(workspace / _ESTIMATE, (estimate,))
+    _protocol_out(pricing)
     _protocol_out(estimate)
+    journal.transition(journal.revision.revision, "estimate_ready")
     return 0
 
 
 def _current_analysis_estimate(
-    args: argparse.Namespace, workspace: Path, revision: ProjectRevision
+    args: argparse.Namespace,
+    workspace: Path,
+    revision: ProjectRevision,
+    pricing: PricingSnapshot,
 ) -> AnalysisEstimate:
     document = parse_project(workspace / _INPUT)
     cfg = load_config()
@@ -212,8 +330,8 @@ def _current_analysis_estimate(
         document,
         revision,
         settings,
-        source_audio_cost_per_minute=project_config.source_audio_cost_per_minute,
-        vision_cost_per_image=project_config.vision_cost_per_image,
+        pricing=pricing,
+        media_grant_revision=_media_grant_revision(media, _staged_app_grant_revision(workspace)),
         settings_sha256=fingerprint,
     )
 
@@ -221,8 +339,16 @@ def _current_analysis_estimate(
 def _project_analyze(args: argparse.Namespace) -> int:
     workspace = args.workspace
     journal = WorkflowJournal.open(workspace / _JOURNAL)
-    if journal.state not in {"received", "analyzing"}:
-        raise ValueError(f"analyze는 received/analyzing 상태에서만 가능하다: {journal.state}")
+    if journal.state not in {"estimate_ready", "authorized", "analyzing"}:
+        raise ValueError(
+            f"analyze는 estimate_ready/authorized/analyzing 상태에서만 가능하다: {journal.state}"
+        )
+    pricing = official_pricing_snapshot(AnalysisSettings().model)
+    stored_pricing = _read_one(workspace / _PRICING)
+    if not isinstance(stored_pricing, PricingSnapshot):
+        raise ValueError("pricing-snapshot.jsonl의 메시지가 PricingSnapshot이 아니다")
+    if stored_pricing != pricing:
+        raise ValueError("기록된 가격 스냅샷이 현재 공식 가격과 다르다 — inspect를 다시 돌린다")
     estimate_message: AnalysisEstimate | None = None
     if bool(args.online) or args.vision_fixtures is not None:
         loaded_estimate = _read_one(workspace / _ESTIMATE)
@@ -231,7 +357,9 @@ def _project_analyze(args: argparse.Namespace) -> int:
         estimate_message = loaded_estimate
         if estimate_message.input_revision != journal.revision.revision:
             raise ValueError("비용 추정의 입력 리비전이 현재 작업과 다르다")
-        current_estimate = _current_analysis_estimate(args, workspace, journal.revision)
+        if estimate_message.pricing_snapshot_revision != pricing.snapshot_revision:
+            raise ValueError("비용 추정이 현재 가격 스냅샷에 묶이지 않았다")
+        current_estimate = _current_analysis_estimate(args, workspace, journal.revision, pricing)
         if current_estimate != estimate_message:
             raise ValueError("현재 분석 설정·미디어가 승인 전 비용 추정과 다르다")
     if bool(args.online):
@@ -241,9 +369,17 @@ def _project_analyze(args: argparse.Namespace) -> int:
         authorization = _read_one(args.authorization)
         if not isinstance(authorization, AnalysisAuthorization):
             raise ValueError("승인 JSONL이 AnalysisAuthorization이 아니다")
-        authorization.require_matches(journal.revision.revision, estimate_message.estimate_revision)
+        authorization.require_matches(
+            journal.revision.revision,
+            estimate_message.estimate_revision,
+            pricing.snapshot_revision,
+            estimate_message.media_grant_revision,
+        )
         if estimate_message.cost_upper_bound is None:
             raise ValueError("온라인 분석 비용 상한이 미설정이다")
+    if journal.state == "estimate_ready":
+        # 유료 호출은 승인 파일이, 픽스처 재생은 깃발이 분석 착수를 승인한다.
+        journal.transition(journal.revision.revision, "authorized")
     attempt_id: str | None = None
     if args.candidates is not None:
         if bool(args.online):
@@ -283,7 +419,7 @@ def _project_analyze(args: argparse.Namespace) -> int:
                 )
             else:
                 candidates = _produce_analysis_candidates(
-                    args, workspace, journal.revision, estimate_message
+                    args, workspace, journal.revision, estimate_message, attempt_id, pricing
                 )
         except KeyboardInterrupt:
             _append_message(
@@ -297,6 +433,21 @@ def _project_analyze(args: argparse.Namespace) -> int:
                     None,
                 ),
             )
+            journal.transition(journal.revision.revision, "cancelled")
+            raise
+        except WorkflowCancelled:
+            _append_message(
+                workspace / _ATTEMPTS,
+                AnalysisAttempt(
+                    journal.revision.revision,
+                    estimate_message.estimate_revision,
+                    attempt_id,
+                    "cancelled",
+                    started_at,
+                    None,
+                ),
+            )
+            journal.transition(journal.revision.revision, "cancelled")
             raise
         except Exception as exc:
             _append_message(
@@ -311,7 +462,7 @@ def _project_analyze(args: argparse.Namespace) -> int:
                 ),
             )
             raise
-    if journal.state == "received":
+    if journal.state == "authorized":
         # 외부 작업 프로세스 결과를 전부 검사·저장한 뒤에만 상태를 움직인다.
         _write_messages(workspace / _CANDIDATES, candidates)
         journal.transition(journal.revision.revision, "analyzing")
@@ -382,26 +533,64 @@ def _project_roughcut(args: argparse.Namespace) -> int:
 def _project_caption(args: argparse.Namespace) -> int:
     workspace = args.workspace
     journal = WorkflowJournal.open(workspace / _JOURNAL)
-    if journal.state != "roughcut_imported":
-        raise ValueError(f"caption은 roughcut_imported 상태에서만 가능하다: {journal.state}")
+    if journal.state not in {"roughcut_imported", "caption_estimate_ready"}:
+        raise ValueError(
+            f"caption은 roughcut_imported/caption_estimate_ready 상태에서만 가능하다: "
+            f"{journal.state}"
+        )
+    # 승인 파일은 상태를 움직이기 전에 검사한다 — 실패가 저널에 흔적을 남기지 않는다.
+    authorization: CaptionAuthorization | None = None
+    if bool(args.online):
+        if args.caption_authorization is None:
+            raise ValueError("온라인 자막은 --caption-authorization JSONL이 필요하다")
+        loaded = _read_one(args.caption_authorization)
+        if not isinstance(loaded, CaptionAuthorization):
+            raise ValueError("자막 승인 JSONL이 CaptionAuthorization이 아니다")
+        authorization = loaded
     request = create_caption_request(
         journal.revision.revision, args.render_audio, args.final_fcpxml
     )
+    cfg = load_config()
+    pricing = official_pricing_snapshot()
+    audio_seconds = measure_caption_request(request)
+    estimate = build_caption_estimate(
+        request,
+        audio_seconds=audio_seconds,
+        pricing=pricing,
+        settings_sha256=caption_settings_sha256(cfg),
+    )
+    if journal.state == "roughcut_imported":
+        _write_messages(workspace / _CAPTION_REQUEST, (request,))
+        journal.transition(journal.revision.revision, "caption_received")
+        _write_messages(workspace / "pricing-caption.jsonl", (pricing,))
+        _write_messages(workspace / _CAPTION_ESTIMATE, (estimate,))
+        journal.transition(journal.revision.revision, "caption_estimate_ready")
+    else:
+        # 드리프트 재시도: 이미 고정된 요청·추정과 지금 입력이 같은지만 본다.
+        stored_request = _read_one(workspace / _CAPTION_REQUEST)
+        if not isinstance(stored_request, CaptionRequest) or stored_request != request:
+            raise ValueError("자막 요청이 고정된 추정과 다르다 — 새 작업공간으로 시작한다")
+        stored_estimate = _read_one(workspace / _CAPTION_ESTIMATE)
+        if not isinstance(stored_estimate, CaptionEstimate) or stored_estimate != estimate:
+            raise ValueError("현재 자막 추정이 고정된 추정과 다르다 — 새 작업공간으로 시작한다")
+    if authorization is not None:
+        authorization.require_matches(estimate)
+    journal.transition(journal.revision.revision, "caption_authorized")
     delivery = generate_final_captions(
         request,
-        load_config(),
+        cfg,
         args.out,
         online=bool(args.online),
         confirmed_cost=bool(args.yes),
     )
-    _write_messages(workspace / "caption-request.jsonl", (request,))
-    journal.transition(journal.revision.revision, "caption_requested")
-    _write_messages(workspace / "caption-result.jsonl", (delivery.result,))
+    _write_messages(workspace / _CAPTION_RESULT, (delivery.result,))
     journal.transition(journal.revision.revision, "caption_ready")
     if delivery.result.srt_path is None:
         log.out("자막 상태: 발화 없음")
     else:
         log.out(f"srt: {delivery.result.srt_path}")
+        log.out(f"finder: {delivery.result.srt_path.parent}")
+    # 자동 import는 하지 않는다 — 사람이 Finder에서 확인하고 직접 넣는다.
     log.out("Final Cut Pro: File > Import > Captions → Relative to Timeline")
     return 0
 
@@ -477,10 +666,18 @@ def _require_safe_roughcut_output(workspace: Path, output: Path) -> None:
         _JOURNAL,
         _SOURCE,
         _REVISION,
+        _PRICING,
+        _ESTIMATE,
+        _ATTEMPTS,
+        _USAGE,
         _CANDIDATES,
         _PLAN,
-        "caption-request.jsonl",
-        "caption-result.jsonl",
+        _CANCEL,
+        _CAPTION_REQUEST,
+        _CAPTION_ESTIMATE,
+        _CAPTION_RESULT,
+        "pricing-caption.jsonl",
+        "vision-decisions.jsonl",
     )
     protected = {(workspace / name).resolve() for name in protected_names}
     source_path = workspace / _SOURCE
@@ -534,6 +731,8 @@ def _produce_analysis_candidates(
     workspace: Path,
     revision: ProjectRevision,
     estimate: AnalysisEstimate,
+    attempt_id: str,
+    pricing: PricingSnapshot,
 ) -> tuple[CutCandidate, ...]:
     """기존 소스 전사/VAD를 재사용하고 안전 seed만 Luna에 제공한다."""
     settings = AnalysisSettings()
@@ -546,12 +745,14 @@ def _produce_analysis_candidates(
     overrides: tuple[MediaOverride, ...] = (
         load_media_map(args.media_map) if args.media_map is not None else ()
     )
+    ledger = UsageLedger(Decimal(estimate.cost_upper_bound or "0"))
     transcriber = _BudgetedTranscriber(
         transcribe.get_transcriber(
             cfg, online=bool(args.online), force_offline=not bool(args.online)
         ),
         estimate.transcription_seconds,
     )
+    _check_cancellation(workspace, revision.revision, attempt_id)
     prepared = runner.prepare_audio(
         workspace / _INPUT,
         workspace / "artifacts",
@@ -561,7 +762,19 @@ def _produce_analysis_candidates(
     )
     if prepared.document.input_sha256 != revision.input_sha256:
         raise ValueError("분석 준비 문서가 승인된 입력 리비전과 다르다")
+    _check_cancellation(workspace, revision.revision, attempt_id)
     analyzed = runner.analyze_audio(prepared, transcriber=transcriber)
+    if transcriber.used > 0:
+        # 실제로 보낸 whisper 오디오만 기록한다 — 예측이 아니라 측정값이다.
+        usage = transcription_usage(
+            input_revision=revision.revision,
+            attempt_id=attempt_id,
+            model=pricing.whisper_model,
+            audio_seconds=transcriber.used,
+            per_minute=pricing.whisper_per_minute,
+        )
+        _append_message(workspace / _USAGE, usage)
+        ledger.record(usage)
     seeds = _analysis_seeds(analyzed, revision, settings)
     clip_ranges = {
         item.instance_id: RationalRange(item.offset, item.offset + item.duration)
@@ -585,6 +798,7 @@ def _produce_analysis_candidates(
     candidates: list[CutCandidate] = []
     used_images = 0
     for planned in windows:
+        _check_cancellation(workspace, revision.revision, attempt_id)
         decision, image_count = _decide_window(
             planned,
             analyzed,
@@ -595,6 +809,9 @@ def _produce_analysis_candidates(
             workspace,
             client=client,
             fixtures=Path(args.vision_fixtures) if args.vision_fixtures is not None else None,
+            attempt_id=attempt_id,
+            pricing=pricing,
+            ledger=ledger,
         )
         used_images += image_count
         if used_images > estimate.max_images:
@@ -721,6 +938,9 @@ def _decide_window(
     *,
     client: object | None,
     fixtures: Path | None,
+    attempt_id: str,
+    pricing: PricingSnapshot,
+    ledger: UsageLedger,
 ) -> tuple[VisionWindowDecision, int]:
     document = analyzed.prepared.document
     clip = next(
@@ -773,7 +993,13 @@ def _decide_window(
         replace(project_config, vision_long_edge=settings.image_long_edge),
     )
     frames = tuple(
-        LunaFrame(sample.frame_id, sample.image_path.read_bytes(), sample.image_sha256)
+        LunaFrame(
+            sample.frame_id,
+            sample.image_path.read_bytes(),
+            sample.image_sha256,
+            source_time=sample.source_time,
+            timeline_time=window_start + (sample.source_time - file_window.start),
+        )
         for sample in samples
     )
     window = LunaWindow(
@@ -784,7 +1010,9 @@ def _decide_window(
         transcript_context=_window_transcript(analyzed, window_start, window_end),
         source_hashes=(media.original_sha256,),
     )
-    payload = build_luna_payload(window, planned.candidates, frames)
+    payload = build_luna_payload(
+        window, planned.candidates, frames, max_output_tokens=settings.window_output_tokens
+    )
     request_sha256 = luna_request_sha256(window, planned.candidates, frames)
     key = luna_cache_key(
         prompt_revision=settings.prompt_revision,
@@ -793,8 +1021,9 @@ def _decide_window(
         request_sha256=request_sha256,
     )
     cache_path = workspace / "artifacts" / "luna-cache" / f"{key}.json"
+    from_cache = cache_path.is_file()
     raw: object
-    if cache_path.is_file():
+    if from_cache:
         raw = json.loads(cache_path.read_text(encoding="utf-8"))
     elif fixtures is not None:
         fixture = fixtures / f"{planned.window_id}.luna.json"
@@ -808,8 +1037,13 @@ def _decide_window(
             )
         except Exception as exc:  # noqa: BLE001 - API 오류는 이 창을 keep으로 닫는다
             raw = exc
-    if isinstance(raw, dict) and not cache_path.exists():
+    if isinstance(raw, dict) and not from_cache:
         _write_json(cache_path, raw)
+        usage = luna_usage(window=window, raw=raw, pricing=pricing, attempt_id=attempt_id)
+        if usage is not None:
+            # 실 Responses 사용량을 먼저 남기고, 상한을 넘었으면 다음 호출을 끊는다.
+            _append_message(workspace / _USAGE, usage)
+            ledger.record(usage)
     return (
         normalize_luna_response(window, raw if isinstance(raw, (dict, BaseException)) else {}),
         len(frames),

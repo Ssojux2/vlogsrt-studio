@@ -6,15 +6,26 @@ from pathlib import Path
 
 import pytest
 
+from vlogsrt.project.pricing import official_pricing_snapshot
 from vlogsrt.project.workflow_protocol import (
+    ANALYSIS_PROTOCOL_VERSION,
+    CAPTION_PROTOCOL_VERSION,
+    LEGACY_ANALYSIS_PROTOCOL_VERSION,
+    PROTOCOL_VERSION,
+    ActualUsage,
     AnalysisAttempt,
     AnalysisAuthorization,
     AnalysisEstimate,
+    CancellationRequest,
+    CandidatePreview,
+    CaptionAuthorization,
+    CaptionEstimate,
     CaptionRequest,
     CaptionResult,
     CutCandidate,
     CutResult,
     EditPlan,
+    PricingSnapshot,
     ProjectRevision,
     ProjectSelection,
     RationalRange,
@@ -58,15 +69,18 @@ def _estimate(revision: ProjectRevision) -> AnalysisEstimate:
         transcription_seconds=Fraction(121, 2),
         max_windows=7,
         max_images=42,
-        max_image_tokens=3570,
+        max_image_tokens=42 * 308,
         cost_upper_bound="1.25",
         settings_sha256="e" * 64,
+        pricing_snapshot_revision=official_pricing_snapshot().snapshot_revision,
+        media_grant_revision="9" * 64,
     )
 
 
 def test_jsonl_protocol_round_trips_every_public_message_deterministically(tmp_path: Path) -> None:
     """필드 순서나 locale이 바뀌어 같은 응답의 JSONL 바이트가 달라지는 회귀를 잡는다."""
     revision = _revision()
+    pricing = official_pricing_snapshot()
     candidate = _candidate(revision)
     plan = EditPlan.create(
         input_revision=revision.revision,
@@ -74,6 +88,24 @@ def test_jsonl_protocol_round_trips_every_public_message_deterministically(tmp_p
         approved_decision_revisions=((candidate.candidate_id, candidate.decision_revision),),
         rejected_candidate_ids=("silence-002",),
         expected_output_duration=Fraction(1781, 10),
+    )
+    caption_request = CaptionRequest(
+        origin_revision=revision.revision,
+        final_revision="b" * 64,
+        render_audio=tmp_path / "mix.wav",
+        render_audio_sha256="c" * 64,
+        final_fcpxml=tmp_path / "final.fcpxml",
+    )
+    caption_estimate = CaptionEstimate.create(
+        request_revision=caption_request.request_revision,
+        origin_revision=caption_request.origin_revision,
+        final_revision=caption_request.final_revision,
+        render_audio_sha256=caption_request.render_audio_sha256,
+        audio_seconds=Fraction(1801, 10),
+        transcription_seconds=Fraction(1801, 5),
+        cost_upper_bound="0.0543",
+        pricing_snapshot_revision=pricing.snapshot_revision,
+        settings_sha256="2" * 64,
     )
     messages = (
         revision,
@@ -84,10 +116,13 @@ def test_jsonl_protocol_round_trips_every_public_message_deterministically(tmp_p
             duration=revision.duration,
             frame_duration=revision.frame_duration,
         ),
+        pricing,
         _estimate(revision),
         AnalysisAuthorization(
             input_revision=revision.revision,
             estimate_revision=_estimate(revision).estimate_revision,
+            pricing_snapshot_revision=pricing.snapshot_revision,
+            media_grant_revision="9" * 64,
             authorized_at="2026-09-21T04:00:00Z",
         ),
         AnalysisAttempt(
@@ -97,6 +132,31 @@ def test_jsonl_protocol_round_trips_every_public_message_deterministically(tmp_p
             status="running",
             started_at="2026-09-21T04:00:01Z",
             error=None,
+        ),
+        CancellationRequest.create(
+            input_revision=revision.revision,
+            attempt_id="attempt-001",
+            requested_at="2026-09-21T04:01:00Z",
+            reason="user",
+        ),
+        ActualUsage.create(
+            input_revision=revision.revision,
+            attempt_id="attempt-001",
+            window_id="window-001",
+            model=pricing.luna_model,
+            input_tokens=3600,
+            output_tokens=90,
+            cost="0.000819",
+        ),
+        ActualUsage.create(
+            input_revision=revision.revision,
+            attempt_id="attempt-001",
+            window_id=None,
+            model=pricing.whisper_model,
+            input_tokens=0,
+            output_tokens=0,
+            audio_seconds=Fraction(121, 2),
+            cost="0.00605",
         ),
         VisionWindowDecision.create(
             input_revision=revision.revision,
@@ -108,6 +168,16 @@ def test_jsonl_protocol_round_trips_every_public_message_deterministically(tmp_p
             response_sha256="f" * 64,
         ),
         candidate,
+        CandidatePreview.create(
+            candidate_id="a" * 64,
+            input_revision=revision.revision,
+            frame_id="f-001",
+            thumbnail_path=tmp_path / "previews" / "silence-001.jpg",
+            thumbnail_sha256="7" * 64,
+            reason=candidate.reason,
+            confidence="0.93",
+            removal_duration=Fraction(2),
+        ),
         plan,
         CutResult(
             plan_revision=plan.plan_revision,
@@ -115,12 +185,13 @@ def test_jsonl_protocol_round_trips_every_public_message_deterministically(tmp_p
             output_fcpxml=tmp_path / "rough.fcpxml",
             review_report=tmp_path / "review.json",
         ),
-        CaptionRequest(
-            origin_revision=revision.revision,
-            final_revision="b" * 64,
-            render_audio=tmp_path / "mix.wav",
-            render_audio_sha256="c" * 64,
-            final_fcpxml=tmp_path / "final.fcpxml",
+        caption_request,
+        caption_estimate,
+        CaptionAuthorization(
+            request_revision=caption_request.request_revision,
+            estimate_revision=caption_estimate.estimate_revision,
+            pricing_snapshot_revision=pricing.snapshot_revision,
+            authorized_at="2026-09-21T05:00:00Z",
         ),
         CaptionResult(
             final_revision="b" * 64,
@@ -137,25 +208,45 @@ def test_jsonl_protocol_round_trips_every_public_message_deterministically(tmp_p
     assert first == second
     assert all(line.endswith("\n") and line.count("\n") == 1 for line in first)
     assert [decode_message(line) for line in first] == list(messages)
-    assert '"protocol_version":"1.0"' in first[0]
-    assert '"protocol_version":"1.1"' in first[1]
-    assert '"protocol_version":"1.0"' in first[-1]
+    assert f'"protocol_version":"{PROTOCOL_VERSION}"' in first[0]
+    assert f'"protocol_version":"{ANALYSIS_PROTOCOL_VERSION}"' in first[3]
+    assert f'"protocol_version":"{CAPTION_PROTOCOL_VERSION}"' in first[-1]
 
 
-def test_analysis_11_rejects_stale_or_malformed_authority_and_decisions() -> None:
-    """입력/추정 드리프트와 모델의 복수·미지 후보가 삭제 권한으로 바뀌는 회귀를 잡는다."""
+def test_analysis_12_rejects_stale_or_malformed_authority_and_decisions() -> None:
+    """입력/추정/가격/권한 드리프트와 모델의 복수·미지 후보가 삭제 권한으로 바뀌는 회귀를 잡는다."""
     revision = _revision()
+    pricing = official_pricing_snapshot()
     estimate = _estimate(revision)
     authorization = AnalysisAuthorization(
         input_revision=revision.revision,
         estimate_revision=estimate.estimate_revision,
+        pricing_snapshot_revision=pricing.snapshot_revision,
+        media_grant_revision=estimate.media_grant_revision,
         authorized_at="2026-09-21T04:00:00Z",
     )
-    authorization.require_matches(revision.revision, estimate.estimate_revision)
+    authorization.require_matches(
+        revision.revision,
+        estimate.estimate_revision,
+        pricing.snapshot_revision,
+        estimate.media_grant_revision,
+    )
     with pytest.raises(ValueError, match="입력 리비전"):
-        authorization.require_matches("b" * 64, estimate.estimate_revision)
+        authorization.require_matches(
+            "b" * 64, estimate.estimate_revision, pricing.snapshot_revision, "9" * 64
+        )
     with pytest.raises(ValueError, match="추정 리비전"):
-        authorization.require_matches(revision.revision, "c" * 64)
+        authorization.require_matches(
+            revision.revision, "c" * 64, pricing.snapshot_revision, "9" * 64
+        )
+    with pytest.raises(ValueError, match="가격 스냅샷"):
+        authorization.require_matches(
+            revision.revision, estimate.estimate_revision, "8" * 64, "9" * 64
+        )
+    with pytest.raises(ValueError, match="미디어 권한"):
+        authorization.require_matches(
+            revision.revision, estimate.estimate_revision, pricing.snapshot_revision, "7" * 64
+        )
 
     keep = VisionWindowDecision.create(
         input_revision=revision.revision,
@@ -177,12 +268,136 @@ def test_analysis_11_rejects_stale_or_malformed_authority_and_decisions() -> Non
             confidence="0.5",
             response_sha256="f" * 64,
         )
+    with pytest.raises(ValueError, match="근거 프레임"):
+        VisionWindowDecision.create(
+            input_revision=revision.revision,
+            window_id="window-001",
+            choice="propose_cut",
+            candidate_id="silence-001",
+            evidence_frame_ids=(),
+            confidence="0.99",
+            response_sha256="f" * 64,
+        )
 
-    old_candidate = encode_message(_candidate(revision)).replace(
-        '"protocol_version":"1.1"', '"protocol_version":"1.0"'
+    for legacy in (PROTOCOL_VERSION, LEGACY_ANALYSIS_PROTOCOL_VERSION, "9.0"):
+        stale = encode_message(_candidate(revision)).replace(
+            f'"protocol_version":"{ANALYSIS_PROTOCOL_VERSION}"',
+            f'"protocol_version":"{legacy}"',
+        )
+        with pytest.raises(ValueError, match="프로토콜"):
+            decode_message(stale)
+
+
+def test_pricing_snapshot_revision_binds_official_prices_and_models() -> None:
+    """같은 가격은 같은 리비전, 하나라도 바뀌면 다른 리비전 — 승인 재사용을 끊는다."""
+    base = official_pricing_snapshot()
+    assert base.currency == "USD"
+    assert base.processing_region == "global"
+    assert base.service_tier == "standard"
+    assert base.whisper_per_minute == "0.006"
+    assert base.gpt_transcribe_per_minute == "0.0045"
+    assert base.luna_input_per_million_tokens == "0.2"
+    assert base.luna_output_per_million_tokens == "1.2"
+    # 공식 문서 URL은 사용자 계획의 정확한 네 개 — 하나라도 바뀌면 스냅샷 리비전이
+    # 바뀌어야 한다(아래 repriced 단언과 함께 이 계약을 못 박는다).
+    assert base.documentation_urls == (
+        "https://developers.openai.com/api/docs/models/gpt-5.6-luna",
+        "https://developers.openai.com/api/docs/pricing",
+        "https://developers.openai.com/api/docs/models/whisper-1",
+        "https://developers.openai.com/api/docs/guides/images-vision",
     )
-    with pytest.raises(ValueError, match="프로토콜"):
-        decode_message(old_candidate)
+    assert base.snapshot_revision == official_pricing_snapshot().snapshot_revision
+    assert (
+        PricingSnapshot.create(
+            effective_date=base.effective_date,
+            currency=base.currency,
+            processing_region=base.processing_region,
+            service_tier=base.service_tier,
+            luna_model=base.luna_model,
+            luna_input_per_million_tokens=base.luna_input_per_million_tokens,
+            luna_output_per_million_tokens=base.luna_output_per_million_tokens,
+            whisper_model=base.whisper_model,
+            whisper_per_minute=base.whisper_per_minute,
+            gpt_transcribe_model=base.gpt_transcribe_model,
+            gpt_transcribe_per_minute=base.gpt_transcribe_per_minute,
+            documentation_urls=base.documentation_urls,
+        )
+        == base
+    )
+    repriced = PricingSnapshot.create(
+        effective_date=base.effective_date,
+        currency=base.currency,
+        processing_region=base.processing_region,
+        service_tier=base.service_tier,
+        luna_model=base.luna_model,
+        luna_input_per_million_tokens="0.30",
+        luna_output_per_million_tokens=base.luna_output_per_million_tokens,
+        whisper_model=base.whisper_model,
+        whisper_per_minute=base.whisper_per_minute,
+        gpt_transcribe_model=base.gpt_transcribe_model,
+        gpt_transcribe_per_minute=base.gpt_transcribe_per_minute,
+        documentation_urls=base.documentation_urls,
+    )
+    assert repriced.snapshot_revision != base.snapshot_revision
+    with pytest.raises(ValueError, match="문서 URL"):
+        PricingSnapshot.create(
+            effective_date=base.effective_date,
+            currency=base.currency,
+            processing_region=base.processing_region,
+            service_tier=base.service_tier,
+            luna_model=base.luna_model,
+            luna_input_per_million_tokens=base.luna_input_per_million_tokens,
+            luna_output_per_million_tokens=base.luna_output_per_million_tokens,
+            whisper_model=base.whisper_model,
+            whisper_per_minute=base.whisper_per_minute,
+            gpt_transcribe_model=base.gpt_transcribe_model,
+            gpt_transcribe_per_minute=base.gpt_transcribe_per_minute,
+            documentation_urls=(),
+        )
+
+
+def test_cancellation_and_usage_revisions_reject_tampered_records() -> None:
+    """취소·사용량 기록의 리비전 계산이 드리프트를 못 잡으면 승인 상한이 무력해진다."""
+    revision = _revision()
+    cancellation = CancellationRequest.create(
+        input_revision=revision.revision,
+        attempt_id="attempt-001",
+        requested_at="2026-09-21T04:01:00Z",
+        reason="active_project_changed",
+    )
+    forged = encode_message(cancellation).replace("attempt-001", "attempt-002")
+    with pytest.raises(ValueError, match="계산 리비전"):
+        decode_message(forged)
+    with pytest.raises(ValueError, match="취소 사유"):
+        CancellationRequest.create(
+            input_revision=revision.revision,
+            attempt_id="attempt-001",
+            requested_at="2026-09-21T04:01:00Z",
+            reason="budget",
+        )
+
+    usage = ActualUsage.create(
+        input_revision=revision.revision,
+        attempt_id="attempt-001",
+        window_id="window-001",
+        model="gpt-5.6-luna",
+        input_tokens=1000,
+        output_tokens=256,
+        cost="0.000456",
+    )
+    inflated = encode_message(usage).replace('"input_tokens":1000', '"input_tokens":9000')
+    with pytest.raises(ValueError, match="계산 리비전"):
+        decode_message(inflated)
+    with pytest.raises(ValueError, match="0 이상"):
+        ActualUsage.create(
+            input_revision=revision.revision,
+            attempt_id="attempt-001",
+            window_id=None,
+            model="gpt-5.6-luna",
+            input_tokens=1,
+            output_tokens=1,
+            cost="-0.01",
+        )
 
 
 def test_project_and_plan_revisions_bind_all_semantic_inputs() -> None:
@@ -227,12 +442,16 @@ def test_candidate_default_selection_uses_decimal_threshold_without_float_roundi
     assert _candidate(revision, confidence="0.8999999999999999").selected_by_default is False
 
 
-def test_journal_only_accepts_forward_transitions_for_its_bound_revision(tmp_path: Path) -> None:
+def test_journal_walks_the_authorized_state_machine_and_stops_at_terminals(
+    tmp_path: Path,
+) -> None:
     """오래된 분석·승인이 새 입력 워크플로에 붙거나 사람 게이트를 건너뛰는 버그를 잡는다."""
     revision = _revision()
     journal = WorkflowJournal.create(tmp_path / "workflow.jsonl", revision)
     assert journal.state == "received"
 
+    journal.transition(revision.revision, "estimate_ready")
+    journal.transition(revision.revision, "authorized")
     journal.transition(revision.revision, "analyzing")
     journal.transition(revision.revision, "review_required")
     reloaded = WorkflowJournal.open(journal.path)
@@ -241,17 +460,48 @@ def test_journal_only_accepts_forward_transitions_for_its_bound_revision(tmp_pat
     with pytest.raises(ValueError, match="리비전"):
         reloaded.transition(_revision(digest="c" * 64).revision, "roughcut_imported")
     with pytest.raises(ValueError, match="허용되지 않는 상태 전이"):
-        reloaded.transition(revision.revision, "caption_requested")
+        reloaded.transition(revision.revision, "caption_received")
+    with pytest.raises(ValueError, match="허용되지 않는 상태 전이"):
+        reloaded.transition(revision.revision, "estimate_ready")
     assert WorkflowJournal.open(journal.path).state == "review_required"
 
     reloaded.transition(revision.revision, "roughcut_imported")
-    reloaded.transition(revision.revision, "caption_requested")
+    reloaded.transition(revision.revision, "caption_received")
+    reloaded.transition(revision.revision, "caption_estimate_ready")
+    reloaded.transition(revision.revision, "caption_authorized")
     reloaded.transition(revision.revision, "caption_ready")
     assert WorkflowJournal.open(journal.path).state == "caption_ready"
 
     lines = journal.path.read_bytes().splitlines(keepends=True)
     assert all(hashlib.sha256(line).digest() for line in lines)
-    assert len(lines) == 6
+    assert len(lines) == 10
+
+
+def test_journal_accepts_terminal_states_from_running_states_only_as_endpoints(
+    tmp_path: Path,
+) -> None:
+    """실행 상태에서 cancelled|failed로 닫히고, 종료 뒤에는 어떤 전이도 붙지 않는다."""
+    revision = _revision()
+    journal = WorkflowJournal.create(tmp_path / "workflow.jsonl", revision)
+    journal.transition(revision.revision, "estimate_ready")
+    journal.transition(revision.revision, "authorized")
+    journal.transition(revision.revision, "analyzing")
+    journal.transition(revision.revision, "cancelled")
+    assert WorkflowJournal.open(journal.path).state == "cancelled"
+    with pytest.raises(ValueError, match="종료 상태"):
+        journal.transition(revision.revision, "review_required")
+    with pytest.raises(ValueError, match="종료 상태"):
+        journal.transition(revision.revision, "failed")
+
+    failed = WorkflowJournal.create(tmp_path / "failed.jsonl", revision)
+    failed.transition(revision.revision, "estimate_ready")
+    failed.transition(revision.revision, "authorized")
+    failed.transition(revision.revision, "failed")
+    assert WorkflowJournal.open(failed.path).state == "failed"
+
+    early = WorkflowJournal.create(tmp_path / "early.jsonl", revision)
+    early.transition(revision.revision, "cancelled")
+    assert WorkflowJournal.open(early.path).state == "cancelled"
 
 
 def test_two_open_journals_cannot_append_the_same_transition(tmp_path: Path) -> None:
@@ -259,10 +509,10 @@ def test_two_open_journals_cannot_append_the_same_transition(tmp_path: Path) -> 
     revision = _revision()
     first = WorkflowJournal.create(tmp_path / "workflow.jsonl", revision)
     stale = WorkflowJournal.open(first.path)
-    first.transition(revision.revision, "analyzing")
+    first.transition(revision.revision, "estimate_ready")
     with pytest.raises(ValueError, match="허용되지 않는 상태 전이"):
-        stale.transition(revision.revision, "analyzing")
-    assert WorkflowJournal.open(first.path).state == "analyzing"
+        stale.transition(revision.revision, "estimate_ready")
+    assert WorkflowJournal.open(first.path).state == "estimate_ready"
 
 
 def test_protocol_rejects_unknown_versions_and_overlapping_approval_sets() -> None:
@@ -288,3 +538,35 @@ def test_an_empty_review_is_a_valid_noop_plan() -> None:
         expected_output_duration=Fraction(10),
     )
     assert plan.approved_candidate_ids == plan.rejected_candidate_ids == ()
+
+
+def test_candidate_preview_binds_thumbnail_and_removal_duration(tmp_path: Path) -> None:
+    """미리보기가 다른 후보의 썸네일이나 낡은 제거 길이를 가리키는 회귀를 잡는다."""
+    revision = _revision()
+    preview = CandidatePreview.create(
+        candidate_id="a" * 64,
+        input_revision=revision.revision,
+        frame_id="f-001",
+        thumbnail_path=tmp_path / "silence-001.jpg",
+        thumbnail_sha256="7" * 64,
+        reason="internal_silence",
+        confidence="0.93",
+        removal_duration=Fraction(2),
+    )
+    assert decode_message(encode_message(preview)) == preview
+    swapped = encode_message(preview).replace(
+        '"removal_duration":"2/1"', '"removal_duration":"9/1"'
+    )
+    with pytest.raises(ValueError, match="계산 리비전"):
+        decode_message(swapped)
+    with pytest.raises(ValueError, match="양수"):
+        CandidatePreview.create(
+            candidate_id="a" * 64,
+            input_revision=revision.revision,
+            frame_id="f-001",
+            thumbnail_path=tmp_path / "silence-001.jpg",
+            thumbnail_sha256="7" * 64,
+            reason="internal_silence",
+            confidence="0.93",
+            removal_duration=Fraction(0),
+        )

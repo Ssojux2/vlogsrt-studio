@@ -8,6 +8,7 @@ import os
 import tempfile
 import wave
 from dataclasses import dataclass
+from decimal import Decimal
 from fractions import Fraction
 from pathlib import Path
 
@@ -15,7 +16,12 @@ from vlogsrt import pipeline, transcribe
 from vlogsrt.config import Config
 from vlogsrt.project.fcpxml import element_tree
 from vlogsrt.project.timebase import parse_fcpx_time
-from vlogsrt.project.workflow_protocol import CaptionRequest, CaptionResult
+from vlogsrt.project.workflow_protocol import (
+    CaptionEstimate,
+    CaptionRequest,
+    CaptionResult,
+    PricingSnapshot,
+)
 
 
 class CaptionGenerationError(RuntimeError):
@@ -44,6 +50,63 @@ def create_caption_request(
         render_audio_sha256=_file_sha256(render_audio),
         final_fcpxml=final_fcpxml,
     )
+
+
+def measure_caption_request(request: CaptionRequest) -> Fraction:
+    """승인 전에 돈이 되는 입력만 검사한다 — 48kHz PCM 길이를 돌려준다."""
+    return _validate_pcm(request)
+
+
+def caption_settings_sha256(config: Config) -> str:
+    """자막 생성에 영향을 주는 엔진 설정의 지문 — 추정·승인이 여기에 묶인다."""
+    payload = {
+        "transcribe_model": config.transcribe_model,
+        "verify_model": config.verify_model,
+        "transcribe_temperature": repr(config.transcribe_temperature),
+        "chunk_max_seconds": config.chunk_max_seconds,
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def build_caption_estimate(
+    request: CaptionRequest,
+    *,
+    audio_seconds: Fraction,
+    pricing: PricingSnapshot,
+    settings_sha256: str,
+    transcription_call_multiplier: int = 2,
+) -> CaptionEstimate:
+    """whisper 1차＋gpt-transcribe 교정(×2)의 공식 가격 상한을 고정한다."""
+    if audio_seconds <= 0:
+        raise CaptionGenerationError("자막 오디오 길이는 양수여야 한다")
+    if transcription_call_multiplier < 1:
+        raise ValueError("전사 호출 배수는 1 이상이어야 한다")
+    transcription_seconds = audio_seconds * transcription_call_multiplier
+    cost = (
+        Decimal(transcription_seconds.numerator)
+        / Decimal(transcription_seconds.denominator)
+        / Decimal(60)
+        * (Decimal(pricing.whisper_per_minute) + Decimal(pricing.gpt_transcribe_per_minute))
+    )
+    return CaptionEstimate.create(
+        request_revision=request.request_revision,
+        origin_revision=request.origin_revision,
+        final_revision=request.final_revision,
+        render_audio_sha256=request.render_audio_sha256,
+        audio_seconds=audio_seconds,
+        transcription_seconds=transcription_seconds,
+        cost_upper_bound=_decimal_text(cost),
+        pricing_snapshot_revision=pricing.snapshot_revision,
+        settings_sha256=settings_sha256,
+    )
+
+
+def _decimal_text(value: Decimal) -> str:
+    if value == 0:
+        return "0"
+    return format(value.normalize(), "f")
 
 
 def generate_final_captions(

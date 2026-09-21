@@ -6,25 +6,33 @@ from decimal import Decimal
 from fractions import Fraction
 from pathlib import Path
 
+import pytest
+
 from vlogsrt.project.models import AssetResource, ClipInstance, MediaRep, ProjectDocument
+from vlogsrt.project.pricing import official_pricing_snapshot
 from vlogsrt.project.workflow_analysis import (
     AnalysisSettings,
     CandidateSeed,
+    CostCeilingExceeded,
     LunaFrame,
     LunaWindow,
     TranscriptEvidence,
+    UsageLedger,
     build_analysis_estimate,
+    build_candidate_preview,
     build_luna_payload,
     effective_analysis_settings_sha256,
     eligible_transcript_evidence,
     finalize_candidate,
     luna_cache_key,
     luna_request_sha256,
+    luna_usage,
     normalize_luna_response,
     plan_candidate_windows,
     project_transcript_evidence,
     safe_transcript_candidates,
     select_frame_times,
+    transcription_usage,
 )
 from vlogsrt.project.workflow_protocol import CutCandidate, ProjectRevision, RationalRange
 
@@ -95,22 +103,32 @@ def _document() -> tuple[ProjectDocument, ProjectRevision]:
 def test_estimate_deduplicates_source_audio_and_caps_windows_images_and_tokens() -> None:
     """같은 소스 재사용이 전사비를 중복 계산하거나 창당 6장 제한을 넘기는 버그를 잡는다."""
     document, revision = _document()
+    pricing = official_pricing_snapshot()
     estimate = build_analysis_estimate(
         document,
         revision,
         AnalysisSettings(),
-        source_audio_cost_per_minute=Decimal("0.01"),
-        vision_cost_per_image=Decimal("0.002"),
+        pricing=pricing,
+        media_grant_revision="9" * 64,
     )
     assert estimate.model == "gpt-5.6-luna"
     assert estimate.unique_source_audio_seconds == 30
     assert estimate.transcription_seconds == 120
     assert estimate.max_windows == 4
     assert estimate.max_images == 24
-    assert estimate.max_image_tokens == 24 * 85
-    assert estimate.cost_upper_bound == "0.068"
-    unpriced = build_analysis_estimate(document, revision, AnalysisSettings())
-    assert unpriced.cost_upper_bound is None
+    assert estimate.max_image_tokens == 24 * 308
+    assert estimate.pricing_snapshot_revision == pricing.snapshot_revision
+    assert estimate.media_grant_revision == "9" * 64
+    # 120s 전사 × (whisper 0.006 + gpt 0.0045) + 24×308 입력 + 4×256 출력 토큰.
+    assert estimate.cost_upper_bound == "0.0237072"
+    with pytest.raises(ValueError, match="다르다"):
+        build_analysis_estimate(
+            document,
+            revision,
+            AnalysisSettings(),
+            pricing=official_pricing_snapshot("other-model"),
+            media_grant_revision="9" * 64,
+        )
 
 
 def test_effective_settings_fingerprint_binds_engine_project_media_and_sources() -> None:
@@ -294,15 +312,38 @@ def test_luna_payload_uses_responses_low_detail_and_never_includes_paths() -> No
         evidence=("vad:no_speech",),
     )
     frames = (
-        LunaFrame("f1", b"jpeg-one", hashlib.sha256(b"jpeg-one").hexdigest()),
-        LunaFrame("f2", b"jpeg-two", hashlib.sha256(b"jpeg-two").hexdigest()),
+        LunaFrame(
+            "f1",
+            b"jpeg-one",
+            hashlib.sha256(b"jpeg-one").hexdigest(),
+            source_time=Fraction(1),
+            timeline_time=Fraction(3601),
+        ),
+        LunaFrame(
+            "f2",
+            b"jpeg-two",
+            hashlib.sha256(b"jpeg-two").hexdigest(),
+            source_time=Fraction(2),
+            timeline_time=Fraction(3602),
+        ),
     )
     payload = build_luna_payload(_window(seed), (seed,), frames)
     assert "messages" not in payload
+    assert payload["max_output_tokens"] == 256
+    assert payload["reasoning"] == {"effort": "none"}
     content = payload["input"][0]["content"]
     images = [item for item in content if item["type"] == "input_image"]
     assert [item["detail"] for item in images] == ["low", "low"]
     assert base64.b64decode(images[0]["image_url"].split(",", 1)[1]) == b"jpeg-one"
+    texts = [item for item in content if item["type"] == "input_text"]
+    # 이미지마다 바로 앞 input_text가 frame_id·소스·타임라인 시각을 밝힌다.
+    assert len(texts) == 3
+    assert "frame_id=f1" in texts[1]["text"]
+    assert "source_time=1" in texts[1]["text"]
+    assert "timeline_time=3601" in texts[1]["text"]
+    assert "frame_id=f2" in texts[2]["text"]
+    order = [item["type"] for item in content]
+    assert order.index("input_text") < order.index("input_image")
     rendered = str(payload)
     assert "/tmp" not in rendered and "OPENAI_API_KEY" not in rendered
 
@@ -378,7 +419,15 @@ def test_cache_key_binds_prompt_model_settings_frames_and_sources() -> None:
         "first transcript",
         ("c" * 64,),
     )
-    frames = (LunaFrame("f1", b"jpeg", hashlib.sha256(b"jpeg").hexdigest()),)
+    frames = (
+        LunaFrame(
+            "f1",
+            b"jpeg",
+            hashlib.sha256(b"jpeg").hexdigest(),
+            source_time=Fraction(1),
+            timeline_time=Fraction(2),
+        ),
+    )
     request = luna_request_sha256(window, (seed,), frames)
     base = luna_cache_key(
         prompt_revision="p1",
@@ -409,3 +458,80 @@ def test_cache_key_binds_prompt_model_settings_frames_and_sources() -> None:
             frames,
         ),
     )
+
+
+def test_usage_ledger_records_then_stops_the_next_call_at_the_authorized_ceiling() -> None:
+    """실제 사용량이 상한을 넘었는데 다음 유료 호출이 계속되는 회귀를 잡는다."""
+    pricing = official_pricing_snapshot()
+    window = LunaWindow("a" * 64, "window-1", (), (), "", ())
+    ledger = UsageLedger(Decimal("0.001"))
+    first = luna_usage(
+        window=window,
+        raw={"usage": {"input_tokens": 2000, "output_tokens": 100}},
+        pricing=pricing,
+        attempt_id="attempt-1",
+    )
+    assert first is not None
+    assert first.input_tokens == 2000 and first.output_tokens == 100
+    # 2000×0.20 + 100×1.20 = 520 tokens-dollar per million → 0.00052
+    assert first.cost == "0.00052"
+    ledger.record(first)
+    over = luna_usage(
+        window=window,
+        raw={"usage": {"input_tokens": 2000, "output_tokens": 100}},
+        pricing=pricing,
+        attempt_id="attempt-1",
+    )
+    assert over is not None
+    with pytest.raises(CostCeilingExceeded):
+        ledger.record(over)
+    assert ledger.spent == Decimal("0.00104")
+    # usage 블록이 없거나 숫자가 아니면 기록을 지어내지 않는다.
+    assert luna_usage(window=window, raw={}, pricing=pricing, attempt_id="a") is None
+    assert (
+        luna_usage(
+            window=window,
+            raw={"usage": {"input_tokens": "many", "output_tokens": 1}},
+            pricing=pricing,
+            attempt_id="a",
+        )
+        is None
+    )
+    whisper = transcription_usage(
+        input_revision="a" * 64,
+        attempt_id="attempt-1",
+        model=pricing.whisper_model,
+        audio_seconds=Fraction(60),
+        per_minute=pricing.whisper_per_minute,
+    )
+    assert whisper.cost == "0.006"
+    assert whisper.window_id is None
+
+
+def test_candidate_preview_binds_frame_hash_and_removal_duration(tmp_path: Path) -> None:
+    """미리보기가 근거 프레임 해시와 후보 제거 길이를 그대로 실는지 확인한다."""
+    decision_revision = "d" * 64
+    candidate = CutCandidate(
+        candidate_id="c" * 64,
+        input_revision="a" * 64,
+        clip_instance_id="clip-a",
+        source_range=RationalRange(Fraction(1), Fraction(4)),
+        timeline_range=RationalRange(Fraction(10), Fraction(13)),
+        reason="retake_overlap",
+        evidence=("transcript:retake_overlap",),
+        confidence="0.93",
+        window_id="window-1",
+        decision_revision=decision_revision,
+    )
+    frame = LunaFrame(
+        "f1",
+        b"jpeg",
+        hashlib.sha256(b"jpeg").hexdigest(),
+        source_time=Fraction(1),
+        timeline_time=Fraction(10),
+    )
+    preview = build_candidate_preview(candidate, frame, tmp_path / "c.jpg")
+    assert preview.thumbnail_sha256 == frame.sha256
+    assert preview.removal_duration == Fraction(3)
+    assert preview.frame_id == "f1"
+    assert preview.confidence == "0.93"
