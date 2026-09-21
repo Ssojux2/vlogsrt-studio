@@ -4,20 +4,28 @@
 
   ○ 자동 시험 범위
 
-  - Python 엔진, JSONL, Swift 코어의 동작 확인 완료
-  - 실제 Final Cut Pro UI와 `.appex` 등록은 `PENDING_HUMAN`임
+  - Python 2,620건, 불변식 21건, Swift 38건 통과
+  - XcodeGen 무차이, unsigned 35건, signed app/appex 검증 통과
+  - 설치 경로: `/Applications/FinalCutAgent.app`
+
+  ○ 실기 미확인
+
+  - Final Cut 창의 AX 읽기가 차단되어 패널 화면 확인 불가
+  - 근거: Orca Accessibility·화면 캡처 권한은 granted, Final Cut AX 응답만 timeout
 
   ○ 실기 시작 조건
 
-  - Apple Workflow Extension SDK와 Xcode 템플릿 설치 필요
-  - 컨테이너 앱과 확장에 같은 App Group 개발 서명 필요
+  - Apple Workflow Extension SDK 1.0.3 설치 완료
+  - 컨테이너 앱과 확장의 Team-ID App Group 개발 서명 완료
 
 □ 1단계: 프로젝트 받기
 
   ○ 2분 합성 프로젝트 드롭
 
+  - 패널에 활성 프로젝트 UID·이름·시작·길이·프레임 길이 표시 확인
   - 패널에 프로젝트를 드롭해 `input.fcpxml` 생성 확인
   - 실패하면 같은 패널의 `FCPXML 직접 선택`으로 수신 확인
+  - 같은 이름·다른 UID와 다중 프로젝트 FCPXML 거부 확인
   - 증거: 입력 XML SHA-256, Final Cut Pro 버전, 화면 녹화 경로 기록
 
   ○ 10~20분 실제 프로젝트 드롭
@@ -79,4 +87,3 @@
 
   - 위 항목 통과 뒤에만 77분 실제 프로젝트 실행
   - 비용, 실행 시간, 취소·재개 결과를 함께 기록
-

@@ -11,6 +11,8 @@ XcodeGen 2.46.0의 생성물이며 재생성 검사를 위해 함께 커밋한�
 
 - `FinalCutPasteboard`: `com.apple.finalcutpro.xml.v1-14`, 이전 버전, generic XML 순으로 수신
 - `WorkflowViewController`: 패널 드롭과 수동 `.fcpxml/.fcpxmld` 선택 fallback
+- `FinalCutTimelineBridge`: 타임라인에 열린 프로젝트 UID·이름·시간 표시와 playhead 이동
+- `FCPXMLProjectGate`: 드롭·직접 선택 FCPXML의 단일 프로젝트 UID 일치 강제
 - `AppGroupWorkspace`: `5955379R8P.com.ssojux2.vlogsrt`의 작업 디렉터리 —
   macOS Personal Team 형식(`<TeamID>.<group name>`). 프로비저닝된 `group.`
   식별자도 macOS에서 지원되지만, 이 Personal Team 빌드의 embedded profile에는
@@ -18,20 +20,22 @@ XcodeGen 2.46.0의 생성물이며 재생성 검사를 위해 함께 커밋한�
   TCC 보호 컨테이너 요청으로 거부했다. Team ID 접두사 형식은 profile 없이 쓴다
 - `KeychainStore`: API 키 값 보관. 키 값은 JSONL·로그에 넣지 않음
 - `SecurityScopedBookmarkStore`: 사용자가 고른 미디어/도구 경로 bookmark
+- `DevelopmentEngineLauncher`: Application Scripts의 `vlogsrt-engine`를 `NSUserUnixTask`로 실행
+- `DevelopmentJobStager`: App Group 입력을 bookmark 작업 폴더로 복사하고 허용된 결과만 동기화
 - `FinalCutImporter`: `NSWorkspace` Open Document로 새 FCPXML을 Final Cut Pro에 전송
 - `ShareInbox`: 공유 대상의 WAV+FCPXML을 함께 복사하고 `CaptionRequest` JSONL 생성
 - `EngineProcess`: 컨테이너 앱에서 장시간 Python 작업을 실행하는 경계
 
-## unsigned-first 빌드 흐름
+## 빌드 검증 흐름
 
-서명은 아직 단계에 없다. 검증은 `CODE_SIGNING_ALLOWED=NO`로 하고, Team ID는
-project에 넣지 않는다. 전 검사는 한 줄로:
+Team ID는 project에 넣지 않고 로컬 `LocalSigning.xcconfig`에만 둔다.
+unsigned 자동 검사는 한 줄로 실행함:
 
 ```bash
 scripts/check_macos_xcode.sh
 ```
 
-내용(35건): xcodegen 재생성 결정성 · plist/entitlements 문법 · App Group
+내용(35건): XcodeGen 재생성 결정성 · plist/entitlements 문법 · App Group
 보존(재생성이 entitlements를 비우지 않는다) · extension source 무 Process ·
 unsigned clean build · compiler/linker warning 0건 · `.app` 안
 `Contents/PlugIns`의 `.appex` embed · 실행 파일 Mach-O · 빌드된 plist 값
@@ -69,7 +73,7 @@ swift test --package-path macos --scratch-path /private/tmp/vlogsrt-x01-swift-bu
 - `appintentsmetadataprocessor`가 "Metadata extraction skipped" 경고를
   남기지만 compiler/linker 경고가 아니며 끄는 build setting도 없다.
 
-## 서명 단계 (아직 범위 밖)
+## 로컬 개발 서명
 
 `project.yml`은 `LocalSigning.xcconfig`를 include하지 않는다 — 빌드할 때
 직접 넘겨야 효력이 생긴다.
@@ -78,9 +82,9 @@ swift test --package-path macos --scratch-path /private/tmp/vlogsrt-x01-swift-bu
    `DEVELOPMENT_TEAM = XXXXXXXXXX`
 2. 그 파일을 실제로 적용해 빌드한다:
    `xcodebuild -project macos/FinalCutAgent.xcodeproj -scheme FinalCutAgent -configuration Debug -xcconfig macos/LocalSigning.xcconfig -allowProvisioningUpdates build`
-3. App Group entitlements가 서명 시 적용되는지 확인한다.
-4. extension은 Final Cut Pro가 로드하므로 개발 서명 검증은 Final Cut 실측과
-   함께 한다.
+3. app은 App Group·user-selected read-write가, appex는 App Group·user-selected
+   read-only가 서명 결과에 남아야 함.
+4. `macos/scripts/install-development-engine.sh`를 실행해 Application Scripts 런처를 설치함.
 
 공증, 배포 서명, 자동 업데이트는 첫 개인용 버전 범위 밖이다. 사용자 지정 공유 대상의
 Create Asset/Get Property Apple-event scripting target은 실제 Final Cut 왕복 스파이크에서
