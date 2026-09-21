@@ -19,6 +19,7 @@
 		7B15858CECF631D1876C8320 /* FinalCutPasteboard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0ABF9EFE3FDDC83B32482D93 /* FinalCutPasteboard.swift */; };
 		831D930AD8367A81F3DB7598 /* RoundTripMessages.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2053A676E444A5D3827BA357 /* RoundTripMessages.swift */; };
 		86DFE00C9230AB03E0957176 /* EngineProcess.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6425D219B5CA268C97A7AA77 /* EngineProcess.swift */; };
+		9072E384849414798A547EF7 /* DevelopmentEngineLauncher.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1AD671ADEA772B9A1C2E7AB1 /* DevelopmentEngineLauncher.swift */; };
 		A1F38E6A058AD2E99A2DC1E7 /* FinalCutTimelineBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF2B01A5B1D09C8DCF304FC3 /* FinalCutTimelineBridge.swift */; };
 		A5603A6524A5E9EDBF476E26 /* WorkflowProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26833B0223E418B4ABC94592 /* WorkflowProtocol.swift */; };
 		AE20558BDFA20F94997DD325 /* libFinalCutAgentCore.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 162A42CFC45AE937A1F021B9 /* libFinalCutAgentCore.a */; };
@@ -69,6 +70,7 @@
 /* Begin PBXFileReference section */
 		0ABF9EFE3FDDC83B32482D93 /* FinalCutPasteboard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FinalCutPasteboard.swift; sourceTree = "<group>"; };
 		162A42CFC45AE937A1F021B9 /* libFinalCutAgentCore.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = libFinalCutAgentCore.a; sourceTree = BUILT_PRODUCTS_DIR; };
+		1AD671ADEA772B9A1C2E7AB1 /* DevelopmentEngineLauncher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DevelopmentEngineLauncher.swift; sourceTree = "<group>"; };
 		2053A676E444A5D3827BA357 /* RoundTripMessages.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoundTripMessages.swift; sourceTree = "<group>"; };
 		26833B0223E418B4ABC94592 /* WorkflowProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkflowProtocol.swift; sourceTree = "<group>"; };
 		2C7DB4044A45662630C30DA8 /* IdentityRoundTripService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IdentityRoundTripService.swift; sourceTree = "<group>"; };
@@ -123,6 +125,7 @@
 			children = (
 				E140ABBDF04A5ECFBD3F1713 /* ActiveProject.swift */,
 				CB047E1AA867D819DDA5D4B2 /* AppGroupWorkspace.swift */,
+				1AD671ADEA772B9A1C2E7AB1 /* DevelopmentEngineLauncher.swift */,
 				6425D219B5CA268C97A7AA77 /* EngineProcess.swift */,
 				6832A3B51FA754EC6959C587 /* FinalCutImporter.swift */,
 				0ABF9EFE3FDDC83B32482D93 /* FinalCutPasteboard.swift */,
@@ -313,6 +316,7 @@
 			files = (
 				B2598061B18308745D250C52 /* ActiveProject.swift in Sources */,
 				6A374178121C2DAE331BD569 /* AppGroupWorkspace.swift in Sources */,
+				9072E384849414798A547EF7 /* DevelopmentEngineLauncher.swift in Sources */,
 				86DFE00C9230AB03E0957176 /* EngineProcess.swift in Sources */,
 				0F52AD7FD9F1954D2B62D9F2 /* FinalCutImporter.swift in Sources */,
 				7B15858CECF631D1876C8320 /* FinalCutPasteboard.swift in Sources */,

@@ -11,6 +11,7 @@ public nonisolated final class WorkflowViewController: NSViewController {
   private var status: NSTextField!
   private var activeProjectLabel: NSTextField!
   private var confirmButton: NSButton!
+  private var analyzeButton: NSButton!
   private var job: RoundTripJob?
   private var activeProject: ActiveProjectSelection?
   private var timelineBridge: FinalCutTimelineBridge?
@@ -21,12 +22,14 @@ public nonisolated final class WorkflowViewController: NSViewController {
     activeProjectLabel = NSTextField(labelWithString: "활성 프로젝트: 없음")
     activeProjectLabel.maximumNumberOfLines = 3
     confirmButton = NSButton(title: "왕복 확인", target: nil, action: nil)
+    analyzeButton = NSButton(title: "AI 분석 요청", target: self, action: #selector(requestAnalysis))
     root.onDrop = { [weak self] data in self?.receive(data) ?? false }
     confirmButton.target = self
     confirmButton.action = #selector(confirmRoundTrip)
     confirmButton.isEnabled = false
+    analyzeButton.isEnabled = false
     let choose = NSButton(title: "FCPXML 직접 선택", target: self, action: #selector(chooseFile))
-    let stack = NSStackView(views: [activeProjectLabel, status, choose, confirmButton])
+    let stack = NSStackView(views: [activeProjectLabel, status, choose, analyzeButton, confirmButton])
     stack.orientation = .vertical
     stack.spacing = 16
     stack.translatesAutoresizingMaskIntoConstraints = false
@@ -92,6 +95,7 @@ public nonisolated final class WorkflowViewController: NSViewController {
       job = roundTripJob
       status.stringValue = "수신 완료 (\(RoundTripStatus.received.rawValue)) · 왕복 대기"
       confirmButton.isEnabled = true
+      analyzeButton.isEnabled = true
       return true
     } catch {
       status.stringValue = "수신 실패: \(error.localizedDescription)"
@@ -106,6 +110,7 @@ public nonisolated final class WorkflowViewController: NSViewController {
       activeProjectLabel.stringValue = "활성 프로젝트: 없음"
       job = nil
       confirmButton.isEnabled = false
+      analyzeButton.isEnabled = false
       status.stringValue = "Final Cut 타임라인에 프로젝트를 열어주세요"
       return
     }
@@ -116,12 +121,35 @@ public nonisolated final class WorkflowViewController: NSViewController {
     if let oldUID, oldUID != selection.projectUID {
       job = nil
       confirmButton.isEnabled = false
+      analyzeButton.isEnabled = false
       status.stringValue = "활성 프로젝트가 바뀌어 기존 분석 작업을 폐기했습니다"
     }
   }
 
   @MainActor private func movePlayheadToCandidate(_ start: RationalTime) {
     timelineBridge?.movePlayhead(to: start)
+  }
+
+  @objc @MainActor private func requestAnalysis() {
+    guard let job else { return }
+    do {
+      let url = try AgentURL.analyzeURL(jobID: job.id)
+      guard let context = extensionContext else {
+        throw RoundTripExtensionError.noExtensionContext
+      }
+      status.stringValue = "AI 분석을 컨테이너에 요청했습니다"
+      analyzeButton.isEnabled = false
+      context.open(url) { [weak self] opened in
+        guard !opened, let self else { return }
+        Task { @MainActor in
+          self.status.stringValue = "컨테이너 앱 열기 실패"
+          self.analyzeButton.isEnabled = true
+        }
+      }
+    } catch {
+      status.stringValue = "분석 요청 실패: \(error.localizedDescription)"
+      analyzeButton.isEnabled = true
+    }
   }
 
   @objc @MainActor private func confirmRoundTrip() {

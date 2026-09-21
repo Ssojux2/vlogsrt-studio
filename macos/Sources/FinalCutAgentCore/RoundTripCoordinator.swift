@@ -5,23 +5,41 @@ import Foundation
 public enum AgentURL {
   public static let scheme = "vlogsrt-agent"
   public static let roundTripHost = "roundtrip"
+  public static let analyzeHost = "analyze"
+  public static let roughcutHost = "roughcut"
 
   public static func roundTripURL(jobID: String) throws -> URL {
+    try operationURL(host: roundTripHost, jobID: jobID)
+  }
+
+  public static func analyzeURL(jobID: String) throws -> URL {
+    try operationURL(host: analyzeHost, jobID: jobID)
+  }
+
+  public static func roughcutURL(jobID: String) throws -> URL {
+    try operationURL(host: roughcutHost, jobID: jobID)
+  }
+
+  private static func operationURL(host: String, jobID: String) throws -> URL {
     guard AppGroupWorkspace.isSafeJobID(jobID) else {
       throw AgentURLError.invalidJobID(jobID)
     }
-    guard let url = URL(string: "\(scheme)://\(roundTripHost)/\(jobID)") else {
+    guard let url = URL(string: "\(scheme)://\(host)/\(jobID)") else {
       throw AgentURLError.invalidJobID(jobID)
     }
     return url
   }
 
   public static func roundTripJobID(_ url: URL) throws -> String {
+    guard case .roundtrip(let jobID) = try request(url) else {
+      throw AgentURLError.invalidHost(url.host ?? "")
+    }
+    return jobID
+  }
+
+  public static func request(_ url: URL) throws -> AgentRequest {
     guard url.scheme?.lowercased() == scheme else {
       throw AgentURLError.notAgentURL(url)
-    }
-    guard url.host?.lowercased() == roundTripHost else {
-      throw AgentURLError.invalidHost(url.host ?? "")
     }
     guard url.query == nil, url.fragment == nil else {
       throw AgentURLError.unexpectedQueryOrFragment
@@ -30,8 +48,19 @@ public enum AgentURL {
     guard !jobID.isEmpty, !jobID.contains("/"), AppGroupWorkspace.isSafeJobID(jobID) else {
       throw AgentURLError.invalidJobID(jobID)
     }
-    return jobID
+    switch url.host?.lowercased() {
+    case roundTripHost: return .roundtrip(jobID)
+    case analyzeHost: return .analyze(jobID)
+    case roughcutHost: return .roughcut(jobID)
+    default: throw AgentURLError.invalidHost(url.host ?? "")
+    }
   }
+}
+
+public enum AgentRequest: Equatable, Sendable {
+  case roundtrip(String)
+  case analyze(String)
+  case roughcut(String)
 }
 
 public enum AgentURLError: Error, Equatable {

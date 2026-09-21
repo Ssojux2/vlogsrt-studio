@@ -50,6 +50,16 @@ private let minimalFCPXML = """
   }
 }
 
+@Test func agentURLSeparatesAnalyzeAndRoughcutOperations() throws {
+  let analyze = try AgentURL.analyzeURL(jobID: "job-1")
+  let roughcut = try AgentURL.roughcutURL(jobID: "job-1")
+  #expect(try AgentURL.request(analyze) == .analyze("job-1"))
+  #expect(try AgentURL.request(roughcut) == .roughcut("job-1"))
+  #expect(throws: AgentURLError.self) {
+    try AgentURL.request(URL(string: "vlogsrt-agent://analyze/job-1?token=secret")!)
+  }
+}
+
 @Test @MainActor func coordinatorWritesReadyResultAfterImportSucceeds() async throws {
   let fixture = try makeReceivedJob(xml: minimalFCPXML, jobID: "roundtrip-ok", request: try validRequest(jobID: "roundtrip-ok"))
   let importer = FakeImporter()
