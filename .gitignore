@@ -46,3 +46,6 @@ macos/LocalSigning.xcconfig
 # ─── Claude Code ───────────────────────────────────────────
 # 팀 설정은 커밋, 개인 설정은 제외
 .claude/settings.local.json
+
+# SwiftPM 빌드 산물
+.build/
