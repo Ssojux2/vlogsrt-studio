@@ -1,7 +1,7 @@
 import Foundation
 
 public struct AppGroupWorkspace: Sendable {
-  public static let identifier = "group.com.ssojux2.vlogsrt"
+  public static let identifier = "5955379R8P.com.ssojux2.vlogsrt"
   public let rootURL: URL
 
   public init(rootURL: URL) {

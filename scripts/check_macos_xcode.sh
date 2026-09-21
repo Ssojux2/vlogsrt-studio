@@ -94,11 +94,11 @@ expect_contains \
 expect_contains \
   "app entitlements App Group 보존" \
   "$(cat "$ROOT/macos/Resources/FinalCutAgent.entitlements" 2>/dev/null)" \
-  "group.com.ssojux2.vlogsrt"
+  "5955379R8P.com.ssojux2.vlogsrt"
 expect_contains \
   "appex entitlements App Group 보존" \
   "$(cat "$ROOT/macos/Resources/WorkflowExtension.entitlements" 2>/dev/null)" \
-  "group.com.ssojux2.vlogsrt"
+  "5955379R8P.com.ssojux2.vlogsrt"
 # extension은 XML 변환도 Python 엔진 실행도 하지 않는다(X-01B).
 PROCESS_HITS=$(grep -cE "Process\(|EngineProcess" \
   "$ROOT/macos/Sources/WorkflowExtension/WorkflowViewController.swift" 2>/dev/null || true)
