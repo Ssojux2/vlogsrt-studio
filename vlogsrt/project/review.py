@@ -352,6 +352,14 @@ def _candidate(
         document.sequence_tc_start + timeline.end_frame * fd,
     )
     evidence = ("vad:no_speech", "transcript:no_unique_speech", "vision:no_continuity")
+    window_id = _window_id(revision.revision, clip.instance_id, timeline_range)
+    decision_revision = hashlib.sha256(
+        json.dumps(
+            [window_id, "propose_cut", list(evidence), analysis.confidence],
+            ensure_ascii=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
     candidate_id = _candidate_id(
         revision.revision,
         clip.instance_id,
@@ -360,6 +368,7 @@ def _candidate(
         "internal_silence",
         evidence,
         analysis.confidence,
+        window_id,
     )
     return CutCandidate(
         candidate_id=candidate_id,
@@ -370,6 +379,8 @@ def _candidate(
         reason="internal_silence",
         evidence=evidence,
         confidence=analysis.confidence,
+        window_id=window_id,
+        decision_revision=decision_revision,
     )
 
 
@@ -457,6 +468,7 @@ def _candidate_id(
     reason: str,
     evidence: tuple[str, ...],
     confidence: str,
+    window_id: str,
 ) -> str:
     material = json.dumps(
         [
@@ -467,6 +479,7 @@ def _candidate_id(
             reason,
             list(evidence),
             confidence,
+            window_id,
         ],
         ensure_ascii=True,
         separators=(",", ":"),
@@ -483,9 +496,23 @@ def _require_candidate_identity(candidate: CutCandidate) -> None:
         candidate.reason,
         candidate.evidence,
         candidate.confidence,
+        candidate.window_id,
     )
     if candidate.candidate_id != expected:
         raise ValueError(f"후보 ID가 후보 내용과 다르다: {candidate.candidate_id} ≠ {expected}")
+
+
+def _window_id(input_revision: str, clip_instance_id: str, timeline_range: RationalRange) -> str:
+    material = "\0".join(
+        (
+            "vlogsrt-workflow-window-v1",
+            input_revision,
+            clip_instance_id,
+            str(timeline_range.start),
+            str(timeline_range.end),
+        )
+    )
+    return hashlib.sha256(material.encode()).hexdigest()
 
 
 def _require_candidate_geometry(document: ProjectDocument, candidate: CutCandidate) -> None:

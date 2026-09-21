@@ -7,13 +7,18 @@ from pathlib import Path
 import pytest
 
 from vlogsrt.project.workflow_protocol import (
+    AnalysisAttempt,
+    AnalysisAuthorization,
+    AnalysisEstimate,
     CaptionRequest,
     CaptionResult,
     CutCandidate,
     CutResult,
     EditPlan,
     ProjectRevision,
+    ProjectSelection,
     RationalRange,
+    VisionWindowDecision,
     WorkflowJournal,
     decode_message,
     encode_message,
@@ -40,6 +45,21 @@ def _candidate(revision: ProjectRevision, *, confidence: str = "0.93") -> CutCan
         reason="internal_silence",
         evidence=("vad:no-speech", "transcript:empty"),
         confidence=confidence,
+        window_id="window-001",
+        decision_revision="d" * 64,
+    )
+
+
+def _estimate(revision: ProjectRevision) -> AnalysisEstimate:
+    return AnalysisEstimate.create(
+        input_revision=revision.revision,
+        model="gpt-5.6-luna",
+        transcription_seconds=Fraction(121, 2),
+        max_windows=7,
+        max_images=42,
+        max_image_tokens=3570,
+        cost_upper_bound="1.25",
+        settings_sha256="e" * 64,
     )
 
 
@@ -55,6 +75,36 @@ def test_jsonl_protocol_round_trips_every_public_message_deterministically(tmp_p
     )
     messages = (
         revision,
+        ProjectSelection(
+            project_uid=revision.project_uid,
+            project_name=revision.project_name,
+            timeline_start=Fraction(3600),
+            duration=revision.duration,
+            frame_duration=revision.frame_duration,
+        ),
+        _estimate(revision),
+        AnalysisAuthorization(
+            input_revision=revision.revision,
+            estimate_revision=_estimate(revision).estimate_revision,
+            authorized_at="2026-09-21T04:00:00Z",
+        ),
+        AnalysisAttempt(
+            input_revision=revision.revision,
+            estimate_revision=_estimate(revision).estimate_revision,
+            attempt_id="attempt-001",
+            status="running",
+            started_at="2026-09-21T04:00:01Z",
+            error=None,
+        ),
+        VisionWindowDecision.create(
+            input_revision=revision.revision,
+            window_id="window-001",
+            choice="propose_cut",
+            candidate_id=candidate.candidate_id,
+            evidence_frame_ids=("f-001", "f-002"),
+            confidence="0.93",
+            response_sha256="f" * 64,
+        ),
         candidate,
         plan,
         CutResult(
@@ -86,6 +136,51 @@ def test_jsonl_protocol_round_trips_every_public_message_deterministically(tmp_p
     assert all(line.endswith("\n") and line.count("\n") == 1 for line in first)
     assert [decode_message(line) for line in first] == list(messages)
     assert '"protocol_version":"1.0"' in first[0]
+    assert '"protocol_version":"1.1"' in first[1]
+    assert '"protocol_version":"1.0"' in first[-1]
+
+
+def test_analysis_11_rejects_stale_or_malformed_authority_and_decisions() -> None:
+    """입력/추정 드리프트와 모델의 복수·미지 후보가 삭제 권한으로 바뀌는 회귀를 잡는다."""
+    revision = _revision()
+    estimate = _estimate(revision)
+    authorization = AnalysisAuthorization(
+        input_revision=revision.revision,
+        estimate_revision=estimate.estimate_revision,
+        authorized_at="2026-09-21T04:00:00Z",
+    )
+    authorization.require_matches(revision.revision, estimate.estimate_revision)
+    with pytest.raises(ValueError, match="입력 리비전"):
+        authorization.require_matches("b" * 64, estimate.estimate_revision)
+    with pytest.raises(ValueError, match="추정 리비전"):
+        authorization.require_matches(revision.revision, "c" * 64)
+
+    keep = VisionWindowDecision.create(
+        input_revision=revision.revision,
+        window_id="window-001",
+        choice="keep",
+        candidate_id=None,
+        evidence_frame_ids=(),
+        confidence="0",
+        response_sha256="f" * 64,
+    )
+    assert keep.choice == "keep"
+    with pytest.raises(ValueError, match="keep"):
+        VisionWindowDecision.create(
+            input_revision=revision.revision,
+            window_id="window-001",
+            choice="keep",
+            candidate_id="unexpected",
+            evidence_frame_ids=(),
+            confidence="0.5",
+            response_sha256="f" * 64,
+        )
+
+    old_candidate = encode_message(_candidate(revision)).replace(
+        '"protocol_version":"1.1"', '"protocol_version":"1.0"'
+    )
+    with pytest.raises(ValueError, match="프로토콜"):
+        decode_message(old_candidate)
 
 
 def test_project_and_plan_revisions_bind_all_semantic_inputs() -> None:

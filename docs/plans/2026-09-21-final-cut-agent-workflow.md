@@ -65,3 +65,50 @@
   이 파일을 재사용하지 않고 공유 대상이 보낸 최종 FCPXML을 새 리비전으로 계산한다.
 - Task 3의 작업 디렉터리 레이아웃을 Task 4 Swift 앱도 그대로 사용한다.
 
+## 2026-09-21 실기 플러그인 반영 추가 작업
+
+기존 Task 1–5와 X-01A/B에서 서명된 app/appex, Team-ID App Group,
+off-main 확장 초기화 수정, Swift-only FCPXML 왕복을 완료했다. 이 상태를
+기준으로 다음 비어 있는 계약을 이어서 구현한다.
+
+### Task 6 — 분석 JSONL 1.1
+
+- `ProjectSelection`, `AnalysisEstimate`, `AnalysisAuthorization`, `AnalysisAttempt`,
+  `VisionWindowDecision`을 결정적 JSONL로 추가한다.
+- `CutCandidate`에 `window_id`과 `decision_revision`을 묶고, 1.0 후보나
+  승인을 새 분석에 재사용하지 않는다.
+- Caption과 Swift 왕복 1.0 계약은 유지한다.
+
+### Task 7 — 비용 승인과 Luna 안전 후보 엔진
+
+- `project inspect`는 네트워크 없이 고유 오디오 길이, 10초 창, 6장
+  이미지, 이미지 토큰 상한을 계산한다.
+- `AnalysisAuthorization`이 입력·추정 리비전에 일치할 때만 온라인
+  전사와 `gpt-5.6-luna` Responses 호출을 시작한다.
+- 10초 창마다 512px JPEG 최대 6장을 `detail: low`로 보내고, 모델은
+  `keep`과 제공된 후보 ID 하나만 고른다.
+- 응답 결함·API 실패·분석 실패는 모두 keep으로 닫고, 취소 후에도
+  완료된 전사·프레임·판정 캐시를 남긴다.
+
+### Task 8 — Final Cut 활성 프로젝트와 입력 게이트
+
+- `ProExtensionHostSingleton`/`FCPXTimelineObserver`로 타임라인에 열린 프로젝트의
+  UID·이름·시작·길이·프레임 길이를 표시한다.
+- 드롭·직접 선택은 프로젝트 하나와 활성 UID 일치를 강제하고,
+  `.fcpxmld/Info.fcpxml`을 해석한다.
+- 직접 선택은 비동기 `NSOpenPanel`로 운영하고 read-only user-selected
+  entitlement를 추가한다.
+
+### Task 9 — 개발용 작업 폴더·엔진 런처
+
+- security-scoped bookmark로 사용자가 고른 작업 폴더를 저장한다.
+- 확장의 App Group 입력을 작업 폴더로 복사한 뒤 `NSUserUnixTask`로
+  저장소 `.venv`를 실행하고 결과만 App Group으로 돌려놓는다.
+- URL을 `vlogsrt-agent://analyze/<job-id>`와
+  `vlogsrt-agent://roughcut/<job-id>`로 분리한다.
+
+### Task 10 — 자동 검증과 실기 인수
+
+- Python/Swift 회귀, XcodeGen 무차이, signed bundle 권한을 재검증한다.
+- Final Cut UI에서 활성 프로젝트, 파일 선택, 드롭, 재생 헤드 이동,
+  승인된 컷만 반영된 새 프로젝트 import를 확인한다.

@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Literal, TypeAlias, cast
 
 PROTOCOL_VERSION = "1.0"
+ANALYSIS_PROTOCOL_VERSION = "1.1"
 DEFAULT_REVIEW_CONFIDENCE = Decimal("0.90")
 
 WorkflowState: TypeAlias = Literal[
@@ -72,6 +73,195 @@ class ProjectRevision:
 
 
 @dataclass(frozen=True, slots=True)
+class ProjectSelection:
+    """Final Cut 타임라인에 열린 프로젝트의 실시간 식별정보."""
+
+    project_uid: str
+    project_name: str
+    timeline_start: Fraction
+    duration: Fraction
+    frame_duration: Fraction
+
+    def __post_init__(self) -> None:
+        if not self.project_uid or not self.project_name:
+            raise ValueError("프로젝트 UID·이름은 비어 있을 수 없다")
+        if self.timeline_start < 0 or self.duration <= 0 or self.frame_duration <= 0:
+            raise ValueError("타임라인 시작은 0 이상, 길이·프레임 길이는 양수여야 한다")
+
+    @property
+    def selection_revision(self) -> str:
+        return _digest(_project_selection_payload(self))
+
+
+@dataclass(frozen=True, slots=True)
+class AnalysisEstimate:
+    input_revision: str
+    model: str
+    transcription_seconds: Fraction
+    max_windows: int
+    max_images: int
+    max_image_tokens: int
+    cost_upper_bound: str
+    settings_sha256: str
+    estimate_revision: str
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        input_revision: str,
+        model: str,
+        transcription_seconds: Fraction,
+        max_windows: int,
+        max_images: int,
+        max_image_tokens: int,
+        cost_upper_bound: str,
+        settings_sha256: str,
+    ) -> AnalysisEstimate:
+        payload = _analysis_estimate_payload(
+            input_revision=input_revision,
+            model=model,
+            transcription_seconds=transcription_seconds,
+            max_windows=max_windows,
+            max_images=max_images,
+            max_image_tokens=max_image_tokens,
+            cost_upper_bound=cost_upper_bound,
+            settings_sha256=settings_sha256,
+        )
+        return cls(
+            input_revision=input_revision,
+            model=model,
+            transcription_seconds=transcription_seconds,
+            max_windows=max_windows,
+            max_images=max_images,
+            max_image_tokens=max_image_tokens,
+            cost_upper_bound=cast(str, payload["cost_upper_bound"]),
+            settings_sha256=settings_sha256,
+            estimate_revision=_digest(payload),
+        )
+
+    def __post_init__(self) -> None:
+        _require_sha256(self.input_revision, "입력 리비전")
+        _require_sha256(self.settings_sha256, "분석 설정")
+        _require_sha256(self.estimate_revision, "비용 추정 리비전")
+        if not self.model:
+            raise ValueError("분석 모델이 비어 있다")
+        if self.transcription_seconds < 0:
+            raise ValueError("전사 길이는 0 이상이어야 한다")
+        for name in ("max_windows", "max_images", "max_image_tokens"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"{name}는 0 이상 정수여야 한다")
+        if self.max_images > self.max_windows * 6:
+            raise ValueError("이미지 상한이 창당 6장 상한을 넘는다")
+        cost = _decimal(self.cost_upper_bound, "비용 상한")
+        if cost < 0:
+            raise ValueError("비용 상한은 0 이상이어야 한다")
+
+
+@dataclass(frozen=True, slots=True)
+class AnalysisAuthorization:
+    input_revision: str
+    estimate_revision: str
+    authorized_at: str
+
+    def __post_init__(self) -> None:
+        _require_sha256(self.input_revision, "입력 리비전")
+        _require_sha256(self.estimate_revision, "비용 추정 리비전")
+        if not self.authorized_at:
+            raise ValueError("승인 시각이 비어 있다")
+
+    def require_matches(self, input_revision: str, estimate_revision: str) -> None:
+        if self.input_revision != input_revision:
+            raise ValueError("승인의 입력 리비전이 현재 입력과 다르다")
+        if self.estimate_revision != estimate_revision:
+            raise ValueError("승인의 추정 리비전이 현재 비용 추정과 다르다")
+
+
+AnalysisAttemptStatus: TypeAlias = Literal["pending", "running", "succeeded", "failed", "cancelled"]
+
+
+@dataclass(frozen=True, slots=True)
+class AnalysisAttempt:
+    input_revision: str
+    estimate_revision: str
+    attempt_id: str
+    status: AnalysisAttemptStatus
+    started_at: str
+    error: str | None
+
+    def __post_init__(self) -> None:
+        _require_sha256(self.input_revision, "입력 리비전")
+        _require_sha256(self.estimate_revision, "비용 추정 리비전")
+        if not self.attempt_id or not self.started_at:
+            raise ValueError("시도 ID·시작 시각은 비어 있을 수 없다")
+        if self.status not in {"pending", "running", "succeeded", "failed", "cancelled"}:
+            raise ValueError(f"알 수 없는 분석 시도 상태다: {self.status!r}")
+        if self.status == "failed" and not self.error:
+            raise ValueError("실패한 분석 시도에는 오류가 필요하다")
+        if self.status != "failed" and self.error is not None:
+            raise ValueError("실패가 아닌 분석 시도는 오류를 가질 수 없다")
+
+
+@dataclass(frozen=True, slots=True)
+class VisionWindowDecision:
+    input_revision: str
+    window_id: str
+    choice: Literal["keep", "propose_cut"]
+    candidate_id: str | None
+    evidence_frame_ids: tuple[str, ...]
+    confidence: str
+    response_sha256: str
+    decision_revision: str
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        input_revision: str,
+        window_id: str,
+        choice: Literal["keep", "propose_cut"],
+        candidate_id: str | None,
+        evidence_frame_ids: tuple[str, ...],
+        confidence: str,
+        response_sha256: str,
+    ) -> VisionWindowDecision:
+        payload = _vision_decision_payload(
+            input_revision=input_revision,
+            window_id=window_id,
+            choice=choice,
+            candidate_id=candidate_id,
+            evidence_frame_ids=evidence_frame_ids,
+            confidence=confidence,
+            response_sha256=response_sha256,
+        )
+        return cls(
+            input_revision=input_revision,
+            window_id=window_id,
+            choice=choice,
+            candidate_id=candidate_id,
+            evidence_frame_ids=evidence_frame_ids,
+            confidence=cast(str, payload["confidence"]),
+            response_sha256=response_sha256,
+            decision_revision=_digest(payload),
+        )
+
+    def __post_init__(self) -> None:
+        _require_sha256(self.input_revision, "입력 리비전")
+        _require_sha256(self.response_sha256, "모델 응답")
+        _require_sha256(self.decision_revision, "비전 판정 리비전")
+        if not self.window_id:
+            raise ValueError("창 ID가 비어 있다")
+        if self.choice == "keep" and self.candidate_id is not None:
+            raise ValueError("keep 판정은 후보 ID를 가질 수 없다")
+        if self.choice == "propose_cut" and not self.candidate_id:
+            raise ValueError("propose_cut 판정에는 후보 ID가 필요하다")
+        confidence_value = _confidence(self.confidence)
+        if not confidence_value.is_finite() or not 0 <= confidence_value <= 1:
+            raise ValueError("신뢰도는 유한한 0~1이어야 한다")
+
+
+@dataclass(frozen=True, slots=True)
 class CutCandidate:
     candidate_id: str
     input_revision: str
@@ -81,11 +271,16 @@ class CutCandidate:
     reason: str
     evidence: tuple[str, ...]
     confidence: str
+    window_id: str
+    decision_revision: str
 
     def __post_init__(self) -> None:
         _require_sha256(self.input_revision, "입력 리비전")
         if not self.candidate_id or not self.clip_instance_id or not self.reason:
             raise ValueError("후보 ID·클립 인스턴스·사유는 비어 있을 수 없다")
+        if not self.window_id:
+            raise ValueError("후보의 창 ID가 비어 있다")
+        _require_sha256(self.decision_revision, "비전 판정 리비전")
         value = _confidence(self.confidence)
         if value < 0 or value > 1:
             raise ValueError(f"신뢰도는 0~1이어야 한다: {self.confidence!r}")
@@ -191,6 +386,11 @@ class WorkflowStateEvent:
 
 ProtocolMessage: TypeAlias = (
     ProjectRevision
+    | ProjectSelection
+    | AnalysisEstimate
+    | AnalysisAuthorization
+    | AnalysisAttempt
+    | VisionWindowDecision
     | CutCandidate
     | EditPlan
     | CutResult
@@ -205,7 +405,7 @@ def encode_message(message: ProtocolMessage) -> str:
     payload = _message_payload(message)
     envelope = {
         "payload": payload,
-        "protocol_version": PROTOCOL_VERSION,
+        "protocol_version": _protocol_version(message),
         "type": type(message).__name__,
     }
     return _canonical_json(envelope) + "\n"
@@ -221,10 +421,11 @@ def decode_message(line: str) -> ProtocolMessage:
         raise ValueError(f"JSONL 메시지를 해석할 수 없다: {exc}") from exc
     if not isinstance(envelope, dict):
         raise ValueError("JSONL 메시지 최상위 값은 객체여야 한다")
-    version = envelope.get("protocol_version")
-    if version != PROTOCOL_VERSION:
-        raise ValueError(f"지원하지 않는 프로토콜 버전이다: {version!r}")
     kind = envelope.get("type")
+    version = envelope.get("protocol_version")
+    expected_version = _protocol_version_for_kind(kind)
+    if version != expected_version:
+        raise ValueError(f"지원하지 않는 프로토콜 버전이다: {version!r}")
     payload = envelope.get("payload")
     if not isinstance(payload, dict):
         raise ValueError("JSONL 메시지 payload는 객체여야 한다")
@@ -305,6 +506,53 @@ class WorkflowJournal:
 def _message_payload(message: ProtocolMessage) -> dict[str, object]:
     if isinstance(message, ProjectRevision):
         return {**_project_revision_payload(message), "revision": message.revision}
+    if isinstance(message, ProjectSelection):
+        return {
+            **_project_selection_payload(message),
+            "selection_revision": message.selection_revision,
+        }
+    if isinstance(message, AnalysisEstimate):
+        return {
+            **_analysis_estimate_payload(
+                input_revision=message.input_revision,
+                model=message.model,
+                transcription_seconds=message.transcription_seconds,
+                max_windows=message.max_windows,
+                max_images=message.max_images,
+                max_image_tokens=message.max_image_tokens,
+                cost_upper_bound=message.cost_upper_bound,
+                settings_sha256=message.settings_sha256,
+            ),
+            "estimate_revision": message.estimate_revision,
+        }
+    if isinstance(message, AnalysisAuthorization):
+        return {
+            "authorized_at": message.authorized_at,
+            "estimate_revision": message.estimate_revision,
+            "input_revision": message.input_revision,
+        }
+    if isinstance(message, AnalysisAttempt):
+        return {
+            "attempt_id": message.attempt_id,
+            "error": message.error,
+            "estimate_revision": message.estimate_revision,
+            "input_revision": message.input_revision,
+            "started_at": message.started_at,
+            "status": message.status,
+        }
+    if isinstance(message, VisionWindowDecision):
+        return {
+            **_vision_decision_payload(
+                input_revision=message.input_revision,
+                window_id=message.window_id,
+                choice=message.choice,
+                candidate_id=message.candidate_id,
+                evidence_frame_ids=message.evidence_frame_ids,
+                confidence=message.confidence,
+                response_sha256=message.response_sha256,
+            ),
+            "decision_revision": message.decision_revision,
+        }
     if isinstance(message, CutCandidate):
         return {
             "candidate_id": message.candidate_id,
@@ -312,10 +560,12 @@ def _message_payload(message: ProtocolMessage) -> dict[str, object]:
             "confidence": message.confidence,
             "evidence": list(message.evidence),
             "input_revision": message.input_revision,
+            "decision_revision": message.decision_revision,
             "reason": message.reason,
             "selected_by_default": message.selected_by_default,
             "source_range": _range_payload(message.source_range),
             "timeline_range": _range_payload(message.timeline_range),
+            "window_id": message.window_id,
         }
     if isinstance(message, EditPlan):
         return {
@@ -366,6 +616,65 @@ def _decode_payload(kind: object, payload: dict[str, object]) -> ProtocolMessage
         if payload.get("revision") != message.revision:
             raise ValueError("ProjectRevision의 계산 리비전이 기록과 다르다")
         return message
+    if kind == "ProjectSelection":
+        selection = ProjectSelection(
+            project_uid=_string(payload, "project_uid"),
+            project_name=_string(payload, "project_name"),
+            timeline_start=_fraction(payload, "timeline_start"),
+            duration=_fraction(payload, "duration"),
+            frame_duration=_fraction(payload, "frame_duration"),
+        )
+        if payload.get("selection_revision") != selection.selection_revision:
+            raise ValueError("ProjectSelection의 계산 리비전이 기록과 다르다")
+        return selection
+    if kind == "AnalysisEstimate":
+        estimate = AnalysisEstimate.create(
+            input_revision=_string(payload, "input_revision"),
+            model=_string(payload, "model"),
+            transcription_seconds=_fraction(payload, "transcription_seconds"),
+            max_windows=_integer(payload, "max_windows"),
+            max_images=_integer(payload, "max_images"),
+            max_image_tokens=_integer(payload, "max_image_tokens"),
+            cost_upper_bound=_string(payload, "cost_upper_bound"),
+            settings_sha256=_string(payload, "settings_sha256"),
+        )
+        if payload.get("estimate_revision") != estimate.estimate_revision:
+            raise ValueError("AnalysisEstimate의 계산 리비전이 기록과 다르다")
+        return estimate
+    if kind == "AnalysisAuthorization":
+        return AnalysisAuthorization(
+            input_revision=_string(payload, "input_revision"),
+            estimate_revision=_string(payload, "estimate_revision"),
+            authorized_at=_string(payload, "authorized_at"),
+        )
+    if kind == "AnalysisAttempt":
+        error = payload.get("error")
+        if error is not None and not isinstance(error, str):
+            raise ValueError("AnalysisAttempt.error는 문자열 또는 null이어야 한다")
+        return AnalysisAttempt(
+            input_revision=_string(payload, "input_revision"),
+            estimate_revision=_string(payload, "estimate_revision"),
+            attempt_id=_string(payload, "attempt_id"),
+            status=cast(AnalysisAttemptStatus, _string(payload, "status")),
+            started_at=_string(payload, "started_at"),
+            error=error,
+        )
+    if kind == "VisionWindowDecision":
+        candidate_id = payload.get("candidate_id")
+        if candidate_id is not None and not isinstance(candidate_id, str):
+            raise ValueError("VisionWindowDecision.candidate_id는 문자열 또는 null이어야 한다")
+        decision = VisionWindowDecision.create(
+            input_revision=_string(payload, "input_revision"),
+            window_id=_string(payload, "window_id"),
+            choice=cast(Literal["keep", "propose_cut"], _string(payload, "choice")),
+            candidate_id=candidate_id,
+            evidence_frame_ids=_strings(payload, "evidence_frame_ids"),
+            confidence=_string(payload, "confidence"),
+            response_sha256=_string(payload, "response_sha256"),
+        )
+        if payload.get("decision_revision") != decision.decision_revision:
+            raise ValueError("VisionWindowDecision의 계산 리비전이 기록과 다르다")
+        return decision
     if kind == "CutCandidate":
         candidate = CutCandidate(
             candidate_id=_string(payload, "candidate_id"),
@@ -376,6 +685,8 @@ def _decode_payload(kind: object, payload: dict[str, object]) -> ProtocolMessage
             reason=_string(payload, "reason"),
             evidence=_strings(payload, "evidence"),
             confidence=_string(payload, "confidence"),
+            window_id=_string(payload, "window_id"),
+            decision_revision=_string(payload, "decision_revision"),
         )
         if payload.get("selected_by_default") is not candidate.selected_by_default:
             raise ValueError("CutCandidate의 기본 선택 값이 신뢰도와 다르다")
@@ -437,6 +748,62 @@ def _project_revision_payload(message: ProjectRevision) -> dict[str, object]:
     }
 
 
+def _project_selection_payload(message: ProjectSelection) -> dict[str, object]:
+    return {
+        "duration": _fraction_text(message.duration),
+        "frame_duration": _fraction_text(message.frame_duration),
+        "project_name": message.project_name,
+        "project_uid": message.project_uid,
+        "timeline_start": _fraction_text(message.timeline_start),
+    }
+
+
+def _analysis_estimate_payload(
+    *,
+    input_revision: str,
+    model: str,
+    transcription_seconds: Fraction,
+    max_windows: int,
+    max_images: int,
+    max_image_tokens: int,
+    cost_upper_bound: str,
+    settings_sha256: str,
+) -> dict[str, object]:
+    _require_sha256(input_revision, "입력 리비전")
+    _require_sha256(settings_sha256, "분석 설정")
+    return {
+        "cost_upper_bound": _decimal_text(_decimal(cost_upper_bound, "비용 상한")),
+        "input_revision": input_revision,
+        "max_image_tokens": max_image_tokens,
+        "max_images": max_images,
+        "max_windows": max_windows,
+        "model": model,
+        "settings_sha256": settings_sha256,
+        "transcription_seconds": _fraction_text(transcription_seconds),
+    }
+
+
+def _vision_decision_payload(
+    *,
+    input_revision: str,
+    window_id: str,
+    choice: str,
+    candidate_id: str | None,
+    evidence_frame_ids: tuple[str, ...],
+    confidence: str,
+    response_sha256: str,
+) -> dict[str, object]:
+    return {
+        "candidate_id": candidate_id,
+        "choice": choice,
+        "confidence": _decimal_text(_confidence(confidence)),
+        "evidence_frame_ids": list(evidence_frame_ids),
+        "input_revision": input_revision,
+        "response_sha256": response_sha256,
+        "window_id": window_id,
+    }
+
+
 def _range_payload(value: RationalRange) -> dict[str, str]:
     return {"end": _fraction_text(value.end), "start": _fraction_text(value.start)}
 
@@ -470,11 +837,31 @@ def _strings(payload: dict[str, object], key: str) -> tuple[str, ...]:
     return tuple(value)
 
 
+def _integer(payload: dict[str, object], key: str) -> int:
+    value = payload.get(key)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{key}는 정수여야 한다")
+    return value
+
+
 def _confidence(value: str) -> Decimal:
+    return _decimal(value, "신뢰도")
+
+
+def _decimal(value: str, label: str) -> Decimal:
     try:
-        return Decimal(value)
+        parsed = Decimal(value)
     except InvalidOperation as exc:
-        raise ValueError(f"신뢰도가 십진수가 아니다: {value!r}") from exc
+        raise ValueError(f"{label}가 십진수가 아니다: {value!r}") from exc
+    if not parsed.is_finite():
+        raise ValueError(f"{label}가 유한한 십진수가 아니다: {value!r}")
+    return parsed
+
+
+def _decimal_text(value: Decimal) -> str:
+    if value == 0:
+        return "0"
+    return format(value.normalize(), "f")
 
 
 def _require_sha256(value: str, label: str) -> None:
@@ -488,3 +875,23 @@ def _canonical_json(payload: Mapping[str, object]) -> str:
 
 def _digest(payload: Mapping[str, object]) -> str:
     return hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
+
+
+_ANALYSIS_11_TYPES = frozenset(
+    {
+        "ProjectSelection",
+        "AnalysisEstimate",
+        "AnalysisAuthorization",
+        "AnalysisAttempt",
+        "VisionWindowDecision",
+        "CutCandidate",
+    }
+)
+
+
+def _protocol_version(message: ProtocolMessage) -> str:
+    return _protocol_version_for_kind(type(message).__name__)
+
+
+def _protocol_version_for_kind(kind: object) -> str:
+    return ANALYSIS_PROTOCOL_VERSION if kind in _ANALYSIS_11_TYPES else PROTOCOL_VERSION
