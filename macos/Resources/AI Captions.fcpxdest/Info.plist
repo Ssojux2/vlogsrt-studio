@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!--
+    AI Captions 사용자 지정 공유 대상 — WAV(48kHz PCM) + FCPXML을 한 번에 내보낸다.
+    엔진 계약: 오디오는 48kHz PCM WAV여야 하고(final_caption.py의 검증), FCPXML은
+    자막을 얹을 최종 타임라인이다. 두 파일이 같은 공유로 들어와야 ShareInbox가
+    짝을 이룬다. 설치 위치는 ShareDestination.installedDirectory를 본다.
+  -->
+  <key>CFBundleIdentifier</key>
+  <string>com.ssojux2.vlogsrt.share.ai-captions</string>
+  <key>CFBundleName</key>
+  <string>AI Captions</string>
+  <key>FFExports</key>
+  <array>
+    <dict>
+      <key>kind</key>
+      <string>audio</string>
+      <key>format</key>
+      <string>wav</string>
+      <key>sampleRate</key>
+      <integer>48000</integer>
+      <key>pcm</key>
+      <true/>
+    </dict>
+    <dict>
+      <key>kind</key>
+      <string>fcpxml</string>
+      <key>version</key>
+      <string>1.14</string>
+    </dict>
+  </array>
+</dict>
+</plist>

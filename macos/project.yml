@@ -64,6 +64,14 @@ targets:
     platform: macOS
     sources:
       - path: Sources/FinalCutAgentApp
+      # 번들 자원 — Engine은 build_engine.py가 채우고 README만 있으면
+      # EngineLaunchMode가 development로 닫힌다(빈 엔진을 성공으로 꾸미지 않는다).
+      - path: Resources/Engine
+        buildPhase: resources
+      - path: Resources/AI Captions.fcpxdest
+        buildPhase: resources
+      - path: Resources/FinalCutAgent.sdef
+        buildPhase: resources
     dependencies:
       - target: FinalCutAgentCore
       - target: FinalCutAgentWorkflowExtension

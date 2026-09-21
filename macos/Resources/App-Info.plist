@@ -33,5 +33,6 @@
     </dict>
   </array>
   <key>com.apple.proapps.MediaAssetProtocol</key><dict/>
+  <key>OSAScriptingDefinition</key><string>FinalCutAgent.sdef</string>
 </dict>
 </plist>

@@ -167,6 +167,12 @@ public nonisolated final class WorkflowViewController: NSViewController {
 
   @objc @MainActor private func requestAnalysis() {
     guard let job else { return }
+    // 취소된 작업은 다시 부르지 않는다 — 취소 뒤 새 호출·sync·import 차단.
+    if CancellationStore.isCancelled(jobURL: job.directoryURL) {
+      status.stringValue = "취소된 작업입니다 — 새 분석을 시작하려면 새 작업을 만드세요"
+      analyzeButton.isEnabled = false
+      return
+    }
     do {
       if FileManager.default.fileExists(atPath: job.candidatesURL.path) {
         try loadCandidates(job)
@@ -207,6 +213,8 @@ public nonisolated final class WorkflowViewController: NSViewController {
             AnalysisAuthorizationMessage(
               inputRevision: estimate.inputRevision,
               estimateRevision: estimate.estimateRevision,
+              pricingSnapshotRevision: estimate.pricingSnapshotRevision,
+              mediaGrantRevision: estimate.mediaGrantRevision,
               authorizedAt: ISO8601DateFormatter().string(from: Date())
             )
           )
@@ -238,6 +246,11 @@ public nonisolated final class WorkflowViewController: NSViewController {
 
   @objc @MainActor private func requestRoughcut() {
     guard let job else { return }
+    if CancellationStore.isCancelled(jobURL: job.directoryURL) {
+      status.stringValue = "취소된 작업입니다 — 러프컷을 만들 수 없습니다"
+      roughcutButton.isEnabled = false
+      return
+    }
     do {
       try job.writeApprovedCandidateIDs(
         candidateRows.filter(\.isApproved).map { $0.candidate.candidateID }
