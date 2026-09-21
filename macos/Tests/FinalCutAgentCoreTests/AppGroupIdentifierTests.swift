@@ -3,9 +3,10 @@ import Testing
 
 @testable import FinalCutAgentCore
 
-/// App Group 식별자는 macOS Personal Team 형식(`<TeamID>.<group name>`)이어야 한다.
-/// iOS식 `group.` 접두사는 서명 entitlement와 무관하게 containermanagerd가
-/// TCC 보호 컨테이너 요청으로 거부한다 — 이 값이 곧 배포 계약이다.
+/// App Group 식별자는 macOS Personal Team 형식(`<TeamID>.<group name>`)이다.
+/// 프로비저닝된 `group.` 식별자도 macOS에서 지원되지만, 이 Personal Team 빌드의
+/// embedded provisioning profile에는 com.apple.security.application-groups가
+/// 없어 containermanagerd가 그 group을 거부했다 — 이 값이 곧 배포 계약이다.
 @Test func appGroupIdentifierUsesMacOSTeamPrefixedForm() {
   #expect(AppGroupWorkspace.identifier == "5955379R8P.com.ssojux2.vlogsrt")
 }
@@ -25,7 +26,7 @@ import Testing
     )
     #expect(
       !plist.contains("group.com.ssojux2.vlogsrt"),
-      "\(resource)에 거부되는 iOS식 group. 식별자가 남아 있다"
+      "\(resource)에 이전 iOS식 group. 식별자가 남아 있다"
     )
   }
 }

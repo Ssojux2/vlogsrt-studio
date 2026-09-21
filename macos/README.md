@@ -12,8 +12,10 @@ XcodeGen 2.46.0의 생성물이며 재생성 검사를 위해 함께 커밋한�
 - `FinalCutPasteboard`: `com.apple.finalcutpro.xml.v1-14`, 이전 버전, generic XML 순으로 수신
 - `WorkflowViewController`: 패널 드롭과 수동 `.fcpxml/.fcpxmld` 선택 fallback
 - `AppGroupWorkspace`: `5955379R8P.com.ssojux2.vlogsrt`의 작업 디렉터리 —
-  macOS Personal Team 형식(`<TeamID>.<group name>`). iOS식 `group.` 접두사는
-  containermanagerd가 TCC 보호 컨테이너 요청으로 거부한다
+  macOS Personal Team 형식(`<TeamID>.<group name>`). 프로비저닝된 `group.`
+  식별자도 macOS에서 지원되지만, 이 Personal Team 빌드의 embedded profile에는
+  com.apple.security.application-groups가 없어 containermanagerd가 그 group을
+  TCC 보호 컨테이너 요청으로 거부했다. Team ID 접두사 형식은 profile 없이 쓴다
 - `KeychainStore`: API 키 값 보관. 키 값은 JSONL·로그에 넣지 않음
 - `SecurityScopedBookmarkStore`: 사용자가 고른 미디어/도구 경로 bookmark
 - `FinalCutImporter`: `NSWorkspace` Open Document로 새 FCPXML을 Final Cut Pro에 전송
