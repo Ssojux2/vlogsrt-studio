@@ -11,6 +11,14 @@
   <key>CFBundleVersion</key><string>$(CURRENT_PROJECT_VERSION)</string>
   <key>LSMinimumSystemVersion</key><string>$(MACOSX_DEPLOYMENT_TARGET)</string>
   <key>NSPrincipalClass</key><string>NSApplication</string>
+  <key>CFBundleURLTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleURLName</key><string>com.ssojux2.vlogsrt.agent</string>
+      <key>CFBundleURLSchemes</key>
+      <array><string>vlogsrt-agent</string></array>
+    </dict>
+  </array>
   <key>CFBundleDocumentTypes</key>
   <array>
     <dict>

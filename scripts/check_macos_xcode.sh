@@ -99,6 +99,10 @@ expect_contains \
   "appex entitlements App Group 보존" \
   "$(cat "$ROOT/macos/Resources/WorkflowExtension.entitlements" 2>/dev/null)" \
   "group.com.ssojux2.vlogsrt"
+# extension은 XML 변환도 Python 엔진 실행도 하지 않는다(X-01B).
+PROCESS_HITS=$(grep -cE "Process\(|EngineProcess" \
+  "$ROOT/macos/Sources/WorkflowExtension/WorkflowViewController.swift" 2>/dev/null || true)
+expect_value "extension source에 Python Process 실행 없음" "${PROCESS_HITS:-0}" "0"
 
 # ─── 4. unsigned 빌드 ──────────────────────────────────────────
 
@@ -157,9 +161,22 @@ if [[ -f "$APPEX_PLIST" ]]; then
   expect_value "appex extension point" \
     "$(plutil -extract NSExtension.NSExtensionPointIdentifier raw "$APPEX_PLIST" 2>/dev/null)" \
     "com.apple.FinalCut.WorkflowExtension"
+  expect_value "appex principal class" \
+    "$(plutil -extract NSExtension.ProExtensionPrincipalViewControllerClass raw "$APPEX_PLIST" 2>/dev/null)" \
+    "FinalCutAgentWorkflowExtension.WorkflowViewController"
 else
   fail "appex plist bundle id (plist 없음)"
   fail "appex extension point (plist 없음)"
+  fail "appex principal class (plist 없음)"
+fi
+if [[ -f "$APP_PLIST" ]]; then
+  # 주의: plutil -extract <keypath> json <file>은 -o가 없으면 파일을 제자리에서
+  # 추출 결과로 덮어쓴다. 반드시 -o - (stdout)으로 읽는다.
+  URL_SCHEMES=$(plutil -convert json -o - "$APP_PLIST" 2>/dev/null \
+    | grep -c '"vlogsrt-agent"' || true)
+  expect_value "app plist vlogsrt-agent URL scheme 1개" "${URL_SCHEMES:-0}" "1"
+else
+  fail "app plist vlogsrt-agent URL scheme 1개 (plist 없음)"
 fi
 
 # ─── 6. build setting 계약 ─────────────────────────────────────

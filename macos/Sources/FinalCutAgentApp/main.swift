@@ -4,6 +4,7 @@ import FinalCutAgentCore
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
   private var window: NSWindow?
+  private var roundTripCoordinator: RoundTripCoordinator?
 
   func applicationDidFinishLaunching(_ notification: Notification) {
     let label = NSTextField(labelWithString: "Final Cut Agent 작업 프로세스")
@@ -18,6 +19,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   }
 
   func application(_ application: NSApplication, open urls: [URL]) {
+    let fileURLs = urls.filter { $0.isFileURL }
+    let customURLs = urls.filter { !$0.isFileURL }
+    if !fileURLs.isEmpty {
+      handleSharedFiles(fileURLs)
+    }
+    for url in customURLs {
+      handleAgentURL(url)
+    }
+  }
+
+  private func handleSharedFiles(_ urls: [URL]) {
     do {
       let export = try ShareInbox.classify(urls)
       let workspace = try AppGroupWorkspace.live()
@@ -32,6 +44,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       )
     } catch {
       NSAlert(error: error).runModal()
+    }
+  }
+
+  private func handleAgentURL(_ url: URL) {
+    let coordinator: RoundTripCoordinator
+    do {
+      if let existing = roundTripCoordinator {
+        coordinator = existing
+      } else {
+        coordinator = RoundTripCoordinator(
+          workspace: try AppGroupWorkspace.live(),
+          importer: FinalCutImporter()
+        )
+        roundTripCoordinator = coordinator
+      }
+    } catch {
+      NSAlert(error: error).runModal()
+      return
+    }
+    // URL/Job 검증 실패만 여기서 보이고, job 안의 실패는 Result로 남는다.
+    Task {
+      do {
+        _ = try await coordinator.handle(url: url)
+      } catch {
+        NSAlert(error: error).runModal()
+      }
     }
   }
 }

@@ -9,11 +9,15 @@
 /* Begin PBXBuildFile section */
 		0F52AD7FD9F1954D2B62D9F2 /* FinalCutImporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6832A3B51FA754EC6959C587 /* FinalCutImporter.swift */; };
 		11BEB3475A7A691F2B66E924 /* libFinalCutAgentCore.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 162A42CFC45AE937A1F021B9 /* libFinalCutAgentCore.a */; };
+		2653D9611BD41AB6FA3CDA06 /* RoundTripJob.swift in Sources */ = {isa = PBXBuildFile; fileRef = 97CAE484F153252E07D1BF7F /* RoundTripJob.swift */; };
 		32F18F2AD1B130CF72C724D2 /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = B21E719A4E3F22B9B8B435ED /* main.swift */; };
+		3EDFB72203E00D8CB43C3AA6 /* RoundTripCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 41E6E3FF248873A70D179DB7 /* RoundTripCoordinator.swift */; };
 		401695FCC125D9B3A1EEC426 /* FinalCutAgentWorkflowExtension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = BF3C5A5E380F891AB16ACB4F /* FinalCutAgentWorkflowExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		52A1F4E57DD9A0488CE5C99B /* KeychainStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6852655CCFB4C1839FD4A0FE /* KeychainStore.swift */; };
 		6A374178121C2DAE331BD569 /* AppGroupWorkspace.swift in Sources */ = {isa = PBXBuildFile; fileRef = CB047E1AA867D819DDA5D4B2 /* AppGroupWorkspace.swift */; };
+		757008D9DBF574C4BE97B53C /* IdentityRoundTripService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C7DB4044A45662630C30DA8 /* IdentityRoundTripService.swift */; };
 		7B15858CECF631D1876C8320 /* FinalCutPasteboard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0ABF9EFE3FDDC83B32482D93 /* FinalCutPasteboard.swift */; };
+		831D930AD8367A81F3DB7598 /* RoundTripMessages.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2053A676E444A5D3827BA357 /* RoundTripMessages.swift */; };
 		86DFE00C9230AB03E0957176 /* EngineProcess.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6425D219B5CA268C97A7AA77 /* EngineProcess.swift */; };
 		A5603A6524A5E9EDBF476E26 /* WorkflowProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26833B0223E418B4ABC94592 /* WorkflowProtocol.swift */; };
 		AE20558BDFA20F94997DD325 /* libFinalCutAgentCore.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 162A42CFC45AE937A1F021B9 /* libFinalCutAgentCore.a */; };
@@ -63,12 +67,16 @@
 /* Begin PBXFileReference section */
 		0ABF9EFE3FDDC83B32482D93 /* FinalCutPasteboard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FinalCutPasteboard.swift; sourceTree = "<group>"; };
 		162A42CFC45AE937A1F021B9 /* libFinalCutAgentCore.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = libFinalCutAgentCore.a; sourceTree = BUILT_PRODUCTS_DIR; };
+		2053A676E444A5D3827BA357 /* RoundTripMessages.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoundTripMessages.swift; sourceTree = "<group>"; };
 		26833B0223E418B4ABC94592 /* WorkflowProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkflowProtocol.swift; sourceTree = "<group>"; };
+		2C7DB4044A45662630C30DA8 /* IdentityRoundTripService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IdentityRoundTripService.swift; sourceTree = "<group>"; };
+		41E6E3FF248873A70D179DB7 /* RoundTripCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoundTripCoordinator.swift; sourceTree = "<group>"; };
 		57320E6BA7114BEE91B0AE57 /* SecurityScopedBookmarkStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SecurityScopedBookmarkStore.swift; sourceTree = "<group>"; };
 		6425D219B5CA268C97A7AA77 /* EngineProcess.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EngineProcess.swift; sourceTree = "<group>"; };
 		6832A3B51FA754EC6959C587 /* FinalCutImporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FinalCutImporter.swift; sourceTree = "<group>"; };
 		6852655CCFB4C1839FD4A0FE /* KeychainStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainStore.swift; sourceTree = "<group>"; };
 		93627080B08E56ADEB1484CC /* FinalCutAgent.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = FinalCutAgent.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		97CAE484F153252E07D1BF7F /* RoundTripJob.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoundTripJob.swift; sourceTree = "<group>"; };
 		B21E719A4E3F22B9B8B435ED /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
 		BF3C5A5E380F891AB16ACB4F /* FinalCutAgentWorkflowExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = FinalCutAgentWorkflowExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		C263664F6E10FCD89C5CC000 /* WorkflowViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkflowViewController.swift; sourceTree = "<group>"; };
@@ -113,7 +121,11 @@
 				6425D219B5CA268C97A7AA77 /* EngineProcess.swift */,
 				6832A3B51FA754EC6959C587 /* FinalCutImporter.swift */,
 				0ABF9EFE3FDDC83B32482D93 /* FinalCutPasteboard.swift */,
+				2C7DB4044A45662630C30DA8 /* IdentityRoundTripService.swift */,
 				6852655CCFB4C1839FD4A0FE /* KeychainStore.swift */,
+				41E6E3FF248873A70D179DB7 /* RoundTripCoordinator.swift */,
+				97CAE484F153252E07D1BF7F /* RoundTripJob.swift */,
+				2053A676E444A5D3827BA357 /* RoundTripMessages.swift */,
 				57320E6BA7114BEE91B0AE57 /* SecurityScopedBookmarkStore.swift */,
 				D73C8DEC3C5E76180C3C885F /* ShareInbox.swift */,
 				26833B0223E418B4ABC94592 /* WorkflowProtocol.swift */,
@@ -296,7 +308,11 @@
 				86DFE00C9230AB03E0957176 /* EngineProcess.swift in Sources */,
 				0F52AD7FD9F1954D2B62D9F2 /* FinalCutImporter.swift in Sources */,
 				7B15858CECF631D1876C8320 /* FinalCutPasteboard.swift in Sources */,
+				757008D9DBF574C4BE97B53C /* IdentityRoundTripService.swift in Sources */,
 				52A1F4E57DD9A0488CE5C99B /* KeychainStore.swift in Sources */,
+				3EDFB72203E00D8CB43C3AA6 /* RoundTripCoordinator.swift in Sources */,
+				2653D9611BD41AB6FA3CDA06 /* RoundTripJob.swift in Sources */,
+				831D930AD8367A81F3DB7598 /* RoundTripMessages.swift in Sources */,
 				CDD075051619C39B61CFFCAF /* SecurityScopedBookmarkStore.swift in Sources */,
 				DE2E3290799026BDB31925D9 /* ShareInbox.swift in Sources */,
 				A5603A6524A5E9EDBF476E26 /* WorkflowProtocol.swift in Sources */,

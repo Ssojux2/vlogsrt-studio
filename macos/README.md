@@ -27,11 +27,12 @@ project에 넣지 않는다. 전 검사는 한 줄로:
 scripts/check_macos_xcode.sh
 ```
 
-내용(32건): xcodegen 재생성 결정성 · plist/entitlements 문법 · App Group
-보존(재생성이 entitlements를 비우지 않는다) · unsigned clean build ·
-compiler/linker warning 0건 · `.app` 안 `Contents/PlugIns`의 `.appex`
-embed · 실행 파일 Mach-O · 빌드된 plist 값 · `-showBuildSettings`
-계약(SDK·entry point·linker flag·bundle ID).
+내용(35건): xcodegen 재생성 결정성 · plist/entitlements 문법 · App Group
+보존(재생성이 entitlements를 비우지 않는다) · extension source 무 Process ·
+unsigned clean build · compiler/linker warning 0건 · `.app` 안
+`Contents/PlugIns`의 `.appex` embed · 실행 파일 Mach-O · 빌드된 plist 값
+(bundle id · extension point · principal class · `vlogsrt-agent` URL scheme 1개) ·
+`-showBuildSettings` 계약(SDK·entry point·linker flag·bundle ID).
 
 수동으로 같은 일을 하려면:
 
