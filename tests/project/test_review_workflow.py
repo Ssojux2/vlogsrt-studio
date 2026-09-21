@@ -31,8 +31,12 @@ from vlogsrt.project.timebase import (
 )
 from vlogsrt.project.vad.guard import InstanceGuard
 from vlogsrt.project.workflow_protocol import (
+    AnalysisAttempt,
+    AnalysisAuthorization,
+    AnalysisEstimate,
     CaptionResult,
     ProjectRevision,
+    VisionWindowDecision,
     WorkflowJournal,
     encode_message,
 )
@@ -360,6 +364,102 @@ def test_staged_cli_roundtrip_applies_only_the_reviewed_candidate(
     assert WorkflowJournal.open(workspace / "workflow.jsonl").state == "roughcut_imported"
     assert cli.main([*caption_args, "--yes"]) == 0
     assert WorkflowJournal.open(workspace / "workflow.jsonl").state == "caption_ready"
+
+
+def test_inspect_is_network_free_and_online_analyze_rejects_stale_authorization(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """비용 추정 전 네트워크 호출과 설정/입력 드리프트 뒤의 낡은 승인을 잡는다."""
+    input_path, _document_value = _project(tmp_path)
+    workspace = tmp_path / "workspace"
+    assert cli.main(["project", "receive", str(input_path), "--workspace", str(workspace)]) == 0
+
+    monkeypatch.setattr(
+        project_commands.transcribe,
+        "request_luna_vision",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("network called")),
+    )
+    assert cli.main(["project", "inspect", str(workspace)]) == 0
+    estimate_message = project_commands._read_one(workspace / "analysis-estimate.jsonl")
+    assert isinstance(estimate_message, AnalysisEstimate)
+    assert estimate_message.model == "gpt-5.6-luna"
+    assert WorkflowJournal.open(workspace / "workflow.jsonl").state == "received"
+
+    stale = AnalysisAuthorization(
+        input_revision="b" * 64,
+        estimate_revision=estimate_message.estimate_revision,
+        authorized_at="2026-09-21T04:00:00Z",
+    )
+    authorization = tmp_path / "authorization.jsonl"
+    authorization.write_text(encode_message(stale), encoding="utf-8")
+    assert (
+        cli.main(
+            [
+                "project",
+                "analyze",
+                str(workspace),
+                "--online",
+                "--authorization",
+                str(authorization),
+            ]
+        )
+        == 2
+    )
+    assert WorkflowJournal.open(workspace / "workflow.jsonl").state == "received"
+
+
+def test_offline_analysis_replays_bound_luna_decisions_and_records_attempts(
+    tmp_path: Path,
+) -> None:
+    """오프라인 재생이 후보/창/판정 리비전 불일치를 건너뛰거나 시도 이력을 잃는 회귀를 잡는다."""
+    input_path, document = _project(tmp_path)
+    workspace = tmp_path / "workspace"
+    assert cli.main(["project", "receive", str(input_path), "--workspace", str(workspace)]) == 0
+    assert cli.main(["project", "inspect", str(workspace)]) == 0
+    journal = WorkflowJournal.open(workspace / "workflow.jsonl")
+    batch = generate_silence_candidates(
+        document,
+        journal.revision,
+        (_guard(document),),
+        locked_instance_ids=frozenset(),
+        analysis=_analysis(document),
+    )
+    original = batch.candidates[0]
+    decision = VisionWindowDecision.create(
+        input_revision=journal.revision.revision,
+        window_id=original.window_id,
+        choice="propose_cut",
+        candidate_id=original.candidate_id,
+        evidence_frame_ids=(),
+        confidence=original.confidence,
+        response_sha256="f" * 64,
+    )
+    candidate = replace(original, decision_revision=decision.decision_revision)
+    fixtures = tmp_path / "vision-fixtures"
+    fixtures.mkdir()
+    (fixtures / "candidates.jsonl").write_text(encode_message(candidate), encoding="utf-8")
+    (fixtures / "decisions.jsonl").write_text(encode_message(decision), encoding="utf-8")
+
+    assert (
+        cli.main(
+            [
+                "project",
+                "analyze",
+                str(workspace),
+                "--offline",
+                "--vision-fixtures",
+                str(fixtures),
+            ]
+        )
+        == 0
+    )
+    attempts = project_commands._read_messages(workspace / "analysis-attempts.jsonl")
+    assert [message.status for message in attempts if isinstance(message, AnalysisAttempt)] == [
+        "pending",
+        "running",
+        "succeeded",
+    ]
+    assert WorkflowJournal.open(workspace / "workflow.jsonl").state == "review_required"
 
 
 def test_noop_render_preserves_sparse_leading_timeline_space(tmp_path: Path) -> None:

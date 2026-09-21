@@ -360,18 +360,7 @@ def _candidate(
             separators=(",", ":"),
         ).encode()
     ).hexdigest()
-    candidate_id = _candidate_id(
-        revision.revision,
-        clip.instance_id,
-        source_range,
-        timeline_range,
-        "internal_silence",
-        evidence,
-        analysis.confidence,
-        window_id,
-    )
-    return CutCandidate(
-        candidate_id=candidate_id,
+    return CutCandidate.create(
         input_revision=revision.revision,
         clip_instance_id=clip.instance_id,
         source_range=source_range,
@@ -467,24 +456,17 @@ def _candidate_id(
     timeline_range: RationalRange,
     reason: str,
     evidence: tuple[str, ...],
-    confidence: str,
     window_id: str,
 ) -> str:
-    material = json.dumps(
-        [
-            input_revision,
-            clip_instance_id,
-            [str(source_range.start), str(source_range.end)],
-            [str(timeline_range.start), str(timeline_range.end)],
-            reason,
-            list(evidence),
-            confidence,
-            window_id,
-        ],
-        ensure_ascii=True,
-        separators=(",", ":"),
+    return CutCandidate.identity(
+        input_revision=input_revision,
+        clip_instance_id=clip_instance_id,
+        source_range=source_range,
+        timeline_range=timeline_range,
+        reason=reason,
+        evidence=evidence,
+        window_id=window_id,
     )
-    return hashlib.sha256(material.encode()).hexdigest()
 
 
 def _require_candidate_identity(candidate: CutCandidate) -> None:
@@ -495,7 +477,6 @@ def _require_candidate_identity(candidate: CutCandidate) -> None:
         candidate.timeline_range,
         candidate.reason,
         candidate.evidence,
-        candidate.confidence,
         candidate.window_id,
     )
     if candidate.candidate_id != expected:

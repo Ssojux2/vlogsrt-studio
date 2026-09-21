@@ -117,7 +117,7 @@ def _add_project_command(sub: argparse._SubParsersAction) -> None:
     project_commands = project.add_subparsers(
         dest="project_command",
         required=True,
-        metavar="{receive,analyze,review,roughcut,caption}",
+        metavar="{receive,inspect,analyze,review,roughcut,caption}",
     )
     run = project_commands.add_parser(
         "run",
@@ -163,9 +163,22 @@ def _add_project_command(sub: argparse._SubParsersAction) -> None:
     receive.add_argument("input", type=Path)
     receive.add_argument("--workspace", type=Path, required=True)
 
-    analyze = project_commands.add_parser("analyze", help="작업 프로세스의 후보 JSONL을 검사")
+    inspect = project_commands.add_parser("inspect", help="네트워크 없이 분석 비용 상한 산출")
+    inspect.add_argument("workspace", type=Path)
+    inspect.add_argument("--project-config", type=Path, default=None)
+
+    analyze = project_commands.add_parser("analyze", help="승인된 온라인 또는 픽스처 분석")
     analyze.add_argument("workspace", type=Path)
-    analyze.add_argument("--candidates", type=Path, required=True)
+    analyze.add_argument("--candidates", type=Path, default=None, help=argparse.SUPPRESS)
+    analyze.add_argument("--authorization", type=Path, default=None)
+    analyze.add_argument("--vision-fixtures", type=Path, default=None)
+    analyze.add_argument("--project-config", type=Path, default=None)
+    analyze.add_argument("--media-map", type=Path, default=None)
+    analyze_mode = analyze.add_mutually_exclusive_group()
+    analyze_mode.add_argument("--offline", action="store_true", help="픽스처만 사용")
+    analyze_mode.add_argument(
+        "--online", action="store_true", help="승인 JSONL에 묶인 실제 API 호출"
+    )
 
     review = project_commands.add_parser("review", help="사람이 승인한 후보로 계획 고정")
     review.add_argument("workspace", type=Path)

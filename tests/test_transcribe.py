@@ -33,6 +33,7 @@ from vlogsrt.transcribe import (
     estimate_cost,
     get_transcriber,
     parse_segments,
+    request_luna_vision,
     request_vision,
     require_nonempty,
     save_fixture,
@@ -923,6 +924,22 @@ class DumpableVisionReply:
         return {"choices": [{"message": {"content": "{}"}}]}
 
 
+class FakeResponsesClient:
+    """`responses.create`의 모델/페이로드와 재시도 없는 1회 호출을 기록한다."""
+
+    def __init__(self, reply: object | None = None, failure: Exception | None = None) -> None:
+        self.calls: list[dict[str, object]] = []
+        self.reply = reply if reply is not None else {"output_text": "{}"}
+        self.failure = failure
+        self.responses = self
+
+    def create(self, **kwargs: object) -> object:
+        self.calls.append(kwargs)
+        if self.failure is not None:
+            raise self.failure
+        return self.reply
+
+
 def _status_error(status: int, message: str) -> RuntimeError:
     error = RuntimeError(f"Error code: {status} - {message}")
     error.status_code = status  # type: ignore[attr-defined]
@@ -945,6 +962,18 @@ def _fake_openai(monkeypatch: pytest.MonkeyPatch) -> tuple[list[dict[str, object
 
 
 VISION_PAYLOAD = {"messages": [{"role": "user", "content": []}]}
+LUNA_PAYLOAD = {"input": [{"role": "user", "content": []}]}
+
+
+def test_luna_vision_uses_responses_api_only_after_online_gate() -> None:
+    """rough-cut Luna가 chat.completions로 회귀하거나 승인 없이 호출되는 버그를 잡는다."""
+    client = FakeResponsesClient(reply={"output_text": '{"choice":"keep"}'})
+    with pytest.raises(RuntimeError, match="online=True"):
+        request_luna_vision(client, model="gpt-5.6-luna", payload=LUNA_PAYLOAD)
+    assert client.calls == []
+    raw = request_luna_vision(client, model="gpt-5.6-luna", payload=LUNA_PAYLOAD, online=True)
+    assert client.calls == [{"model": "gpt-5.6-luna", **LUNA_PAYLOAD}]
+    assert raw == {"output_text": '{"choice":"keep"}'}
 
 
 def test_vision_requests_fail_closed_without_explicit_online() -> None:

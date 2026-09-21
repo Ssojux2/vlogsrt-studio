@@ -101,7 +101,7 @@ class AnalysisEstimate:
     max_windows: int
     max_images: int
     max_image_tokens: int
-    cost_upper_bound: str
+    cost_upper_bound: str | None
     settings_sha256: str
     estimate_revision: str
 
@@ -115,7 +115,7 @@ class AnalysisEstimate:
         max_windows: int,
         max_images: int,
         max_image_tokens: int,
-        cost_upper_bound: str,
+        cost_upper_bound: str | None,
         settings_sha256: str,
     ) -> AnalysisEstimate:
         payload = _analysis_estimate_payload(
@@ -135,7 +135,7 @@ class AnalysisEstimate:
             max_windows=max_windows,
             max_images=max_images,
             max_image_tokens=max_image_tokens,
-            cost_upper_bound=cast(str, payload["cost_upper_bound"]),
+            cost_upper_bound=cast(str | None, payload["cost_upper_bound"]),
             settings_sha256=settings_sha256,
             estimate_revision=_digest(payload),
         )
@@ -154,9 +154,10 @@ class AnalysisEstimate:
                 raise ValueError(f"{name}는 0 이상 정수여야 한다")
         if self.max_images > self.max_windows * 6:
             raise ValueError("이미지 상한이 창당 6장 상한을 넘는다")
-        cost = _decimal(self.cost_upper_bound, "비용 상한")
-        if cost < 0:
-            raise ValueError("비용 상한은 0 이상이어야 한다")
+        if self.cost_upper_bound is not None:
+            cost = _decimal(self.cost_upper_bound, "비용 상한")
+            if cost < 0:
+                raise ValueError("비용 상한은 0 이상이어야 한다")
 
 
 @dataclass(frozen=True, slots=True)
@@ -273,6 +274,68 @@ class CutCandidate:
     confidence: str
     window_id: str
     decision_revision: str
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        input_revision: str,
+        clip_instance_id: str,
+        source_range: RationalRange,
+        timeline_range: RationalRange,
+        reason: str,
+        evidence: tuple[str, ...],
+        confidence: str,
+        window_id: str,
+        decision_revision: str,
+    ) -> CutCandidate:
+        return cls(
+            candidate_id=cls.identity(
+                input_revision=input_revision,
+                clip_instance_id=clip_instance_id,
+                source_range=source_range,
+                timeline_range=timeline_range,
+                reason=reason,
+                evidence=evidence,
+                window_id=window_id,
+            ),
+            input_revision=input_revision,
+            clip_instance_id=clip_instance_id,
+            source_range=source_range,
+            timeline_range=timeline_range,
+            reason=reason,
+            evidence=evidence,
+            confidence=confidence,
+            window_id=window_id,
+            decision_revision=decision_revision,
+        )
+
+    @staticmethod
+    def identity(
+        *,
+        input_revision: str,
+        clip_instance_id: str,
+        source_range: RationalRange,
+        timeline_range: RationalRange,
+        reason: str,
+        evidence: tuple[str, ...],
+        window_id: str,
+    ) -> str:
+        # evidence는 Luna가 근거 프레임을 더하면서 풍부해질 수 있다. 모델이 고르는
+        # 안정 후보 ID는 호출 전후 같아야 하므로 신원은 기하·사유·창까지만 묶는다.
+        _ = evidence
+        return _digest_sequence(
+            (
+                input_revision,
+                clip_instance_id,
+                _fraction_text(source_range.start),
+                _fraction_text(source_range.end),
+                _fraction_text(timeline_range.start),
+                _fraction_text(timeline_range.end),
+                reason,
+                window_id,
+            )
+        )
 
     def __post_init__(self) -> None:
         _require_sha256(self.input_revision, "입력 리비전")
@@ -635,7 +698,7 @@ def _decode_payload(kind: object, payload: dict[str, object]) -> ProtocolMessage
             max_windows=_integer(payload, "max_windows"),
             max_images=_integer(payload, "max_images"),
             max_image_tokens=_integer(payload, "max_image_tokens"),
-            cost_upper_bound=_string(payload, "cost_upper_bound"),
+            cost_upper_bound=_optional_string(payload, "cost_upper_bound"),
             settings_sha256=_string(payload, "settings_sha256"),
         )
         if payload.get("estimate_revision") != estimate.estimate_revision:
@@ -766,13 +829,17 @@ def _analysis_estimate_payload(
     max_windows: int,
     max_images: int,
     max_image_tokens: int,
-    cost_upper_bound: str,
+    cost_upper_bound: str | None,
     settings_sha256: str,
 ) -> dict[str, object]:
     _require_sha256(input_revision, "입력 리비전")
     _require_sha256(settings_sha256, "분석 설정")
     return {
-        "cost_upper_bound": _decimal_text(_decimal(cost_upper_bound, "비용 상한")),
+        "cost_upper_bound": (
+            _decimal_text(_decimal(cost_upper_bound, "비용 상한"))
+            if cost_upper_bound is not None
+            else None
+        ),
         "input_revision": input_revision,
         "max_image_tokens": max_image_tokens,
         "max_images": max_images,
@@ -830,6 +897,13 @@ def _string(payload: dict[str, object], key: str) -> str:
     return value
 
 
+def _optional_string(payload: dict[str, object], key: str) -> str | None:
+    value = payload.get(key)
+    if value is not None and not isinstance(value, str):
+        raise ValueError(f"{key}는 문자열 또는 null이어야 한다")
+    return value
+
+
 def _strings(payload: dict[str, object], key: str) -> tuple[str, ...]:
     value = payload.get(key)
     if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
@@ -875,6 +949,10 @@ def _canonical_json(payload: Mapping[str, object]) -> str:
 
 def _digest(payload: Mapping[str, object]) -> str:
     return hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
+
+
+def _digest_sequence(parts: tuple[str, ...]) -> str:
+    return hashlib.sha256("\0".join(parts).encode("utf-8")).hexdigest()
 
 
 _ANALYSIS_11_TYPES = frozenset(

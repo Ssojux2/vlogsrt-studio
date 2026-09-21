@@ -458,6 +458,28 @@ def request_vision(
     return _to_dict(response)
 
 
+def request_luna_vision(
+    client: Any, *, model: str, payload: Mapping[str, object], online: bool = False
+) -> dict[str, Any]:
+    """승인형 rough-cut 비전의 Responses API 경계.
+
+    기존 B-roll 프로토타입의 Chat Completions 경로를 바꾸지 않고, 새 1.1 분석만
+    이 함수를 쓴다. 명시적 승인에서 온 ``online=True`` 없이는 클라이언트도
+    만지지 않는다.
+    """
+    if not online:
+        raise RuntimeError(
+            "Luna 비전 호출은 명시적 online=True 없이는 닫혀 있다 — "
+            "AnalysisAuthorization 승인이 필요하다"
+        )
+    response = client.responses.create(model=model, **dict(payload))
+    converted = _to_dict(response)
+    output_text = getattr(response, "output_text", None)
+    if "output_text" not in converted and isinstance(output_text, str):
+        converted["output_text"] = output_text
+    return converted
+
+
 class VisionResponder(Protocol):
     """비전 판정의 주입 경계 — `Transcriber`와 대칭이다.
 

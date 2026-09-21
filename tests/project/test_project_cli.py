@@ -142,7 +142,7 @@ def test_project_help_exposes_stages_and_hides_diagnostic_run(
         cli.main(["project", "--help"])
     assert stopped.value.code == 0
     help_text = capsys.readouterr().out
-    for command in ("receive", "analyze", "review", "roughcut", "caption"):
+    for command in ("receive", "inspect", "analyze", "review", "roughcut", "caption"):
         assert command in help_text
     assert "run" not in help_text
 
