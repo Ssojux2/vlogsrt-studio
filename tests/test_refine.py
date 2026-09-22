@@ -54,12 +54,18 @@ def test_split_cuts_at_a_word_boundary_in_proportion_to_the_text() -> None:
     assert pieces[0].end == pytest.approx(cue.duration * ratio - cfg.min_gap / 2, abs=0.01)
 
 
-def test_split_gives_up_on_a_single_long_word() -> None:
+def test_split_cuts_a_single_long_word_in_half() -> None:
+    """S12 — 공백이 없어도 글자 비율 자리에서 자른다(D38).
+
+    예전 기대값은 한 장으로 남고 `no_split_point`가 붙는 것이었지만, 그 포기가
+    `16자 + 56자` 화면 밖 줄을 내보냈다. 어절 경계가 없다는 이유로 글자 중간을
+    못 자르는 근거는 없다 — 시각은 여전히 글자 수 비례다.
+    """
     cfg = Config()
     cue = make_cue(0.0, 8.0, "가" * 40)
     pieces = split_cue(cue, cfg)
-    assert len(pieces) == 1
-    assert "no_split_point" in pieces[0].flags
+    assert [piece.text for piece in pieces] == ["가" * 20, "가" * 20]
+    assert all("no_split_point" not in piece.flags for piece in pieces)
 
 
 def test_split_respects_recursion_limit() -> None:
@@ -77,6 +83,72 @@ def test_split_keeps_pieces_inside_the_original_span() -> None:
     assert pieces[-1].end <= cue.end
     for previous, following in zip(pieces, pieces[1:], strict=False):
         assert previous.end <= following.start
+
+
+# ─────────────────────────────────────────────────────────────
+#  S12 — 공백 없는 덩어리도 줄 폭 16자 안에 둔다 (D38)
+# ─────────────────────────────────────────────────────────────
+
+
+def test_a_spaceless_blob_splits_until_every_line_fits() -> None:
+    """실측 42번 큐 — `ㅋ` 72자가 `16자 + 56자`로 화면 밖으로 나갔다.
+
+    공백이 없어도 글자 비율 자리에서 재귀 분할한다. 72자는 두 번 나뉘어
+    18자 큐 네 장이 되고, 조판이 각각 `9/9`로 나눈다.
+    """
+    cfg = Config()
+    cues = refine([make_cue(0.0, 6.8, "ㅋ" * 72)], cfg, duration=8.0)
+    assert len(cues) == 4
+    assert all(len(line) <= cfg.max_chars_per_line for cue in cues for line in cue.lines)
+
+
+def test_a_dense_spaceless_cue_splits_in_half() -> None:
+    """실측 265번 큐 — `ㅋ` 26자. 글자 수는 한도 안이어도 초당 글자수가 넘으면 반으로 나뉜다."""
+    cfg = Config()
+    cues = refine([make_cue(0.0, 1.86, "ㅋ" * 26)], cfg, duration=2.5)
+    assert [cue.text for cue in cues] == ["ㅋ" * 13, "ㅋ" * 13]
+
+
+def test_a_spaceless_cue_that_needs_no_split_breaks_in_the_middle() -> None:
+    """분할할 이유가 없는 공백 없는 큐는 강제 분리가 가운데 균형으로 나뉜다."""
+    cfg = Config()
+    cues = refine([make_cue(0.0, 3.0, "ㅋ" * 20)], cfg, duration=4.0)
+    assert len(cues) == 1
+    assert [len(line) for line in cues[0].lines] == [10, 10]
+
+
+def test_spaceless_pieces_rejoin_to_the_original_text() -> None:
+    """글자 중간에서 나뉘어도 조각을 순서대로 이어 붙이면 원문과 정확히 같다.
+
+    조각 사이에 공백이 새로 끼지 않는다 — `Cue.text`가 줄 사이에 공백을 넣는 건
+    조판 뒤의 출력 형태일 뿐, 분할·병합이 글자를 더하거나 잃지는 않는다.
+    """
+    cfg = Config()
+    text = "ㅋ" * 72
+    pieces = split_pass([make_cue(0.0, 6.8, text)], cfg)
+    assert "".join(piece.text for piece in pieces) == text
+
+
+def test_a_word_boundary_overflow_stays_one_cue() -> None:
+    """16자는 목표 폭이지 절대 한도가 아니다.
+
+    어절 경계가 안 맞아 첫 줄이 17자가 되는 정상 문장을 두 큐로 쪼개
+    한도를 맞추지 않는다 — 읽는 흐름이 갈린다. `17/14`로 그대로 둔다.
+    """
+    cfg = Config()
+    text = "먹으려고했는데웨이팅이너무길어서요 그냥 다른 데로 가 버렸다"
+    cues = refine([make_cue(0.0, 6.2, text)], cfg, duration=7.5)
+    assert len(cues) == 1
+    assert [len(line) for line in cues[0].lines] == [17, 14]
+
+
+def test_an_unsplittable_cue_flags_its_over_width_line() -> None:
+    """시간이 짧아 못 쪼갠 큐는 여전히 넘친다 — 조용히 넘기지 않고 표시를 남긴다(규칙 9)."""
+    cfg = Config()
+    cues = refine([make_cue(0.0, 1.5, "가" * 40)], cfg, duration=2.5)
+    assert len(cues) == 1
+    assert any(len(line) > cfg.max_chars_per_line for line in cues[0].lines)
+    assert "forced_break" in cues[0].flags
 
 
 # ─────────────────────────────────────────────────────────────

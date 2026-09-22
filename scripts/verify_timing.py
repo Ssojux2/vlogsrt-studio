@@ -521,26 +521,62 @@ def _boundaries(
     return marks_from_offsets([response.offset for response in responses], duration), "응답 오프셋"
 
 
+def _fixture_responses(path: Path) -> Sequence[ChunkResponse]:
+    """녹화된 1차 응답 — 실제 유료 실행에는 없다. 없으면 빈 채로 간다.
+
+    예전에는 없으면 그 자리에서 죽어서, 픽스처를 녹화한 회차에만 이 게이트가 돌았다.
+    trace가 있으면 골격도 조각 경계도 trace가 더 옳다(재전사가 반영된 최종본이다).
+    """
+    if not path.exists():
+        return ()
+    return load_fixture_responses(path)
+
+
 def _run_checks(found: Located, stem: str, meta: dict, outdir: Path) -> list[Check]:
     fixtures = ROOT / "tests" / "fixtures" / "api"
-    responses = load_fixture_responses(fixtures / f"{stem}.{FIXTURE_KIND}.json")
+    responses = _fixture_responses(fixtures / f"{stem}.{FIXTURE_KIND}.json")
     # 골격은 trace가 있으면 그쪽이 옳다 — 재전사가 반영된 최종본이기 때문이다.
+    if found.trace is None and not responses:
+        raise SystemExit(
+            f"{stem}의 골격을 알 수 없다 — trace.json 도 녹화된 응답도 없다.\n"
+            "건너뛰는 것은 통과가 아니다."
+        )
     spine = list(found.trace.spine) if found.trace else build_spine(responses)
     duration = float(meta["duration"])
     marks, source = _boundaries(found.trace, responses, duration)
+    # 조각 정렬도 같은 출처를 쓴다 — trace의 경계가 실제로 자른 자리다.
+    offsets = [mark.offset for mark in sorted(marks, key=lambda mark: mark.index)]
     return [
         check_durations(found.video, found.audio, meta),
-        check_chunks(
-            found.audio,
-            found.chunks,
-            [r.offset for r in sorted(responses, key=lambda x: x.index)],
-            probe_duration(found.audio),
-        ),
+        check_chunks(found.audio, found.chunks, offsets, probe_duration(found.audio)),
         check_spine_shift(found.audio, spine),
         check_glue(spine, marks, source),
         check_cue_lag(found.trace),
         check_srt_coverage(outdir / "output.srt", duration),
     ]
+
+
+def _episode_meta(stem: str, outdir: Path) -> tuple[dict, str]:
+    """회차 길이와 조각 수 — 픽스처 meta가 정본이고, 없으면 실제 실행의 trace다.
+
+    예전에는 `tests/fixtures/api/<stem>.meta.json`만 봤다. 그래서 **녹화된 픽스처가
+    있는 회차에만** 이 게이트가 돌았고, 실제 유료 실행의 산출물(`out/<stem>/trace.json`)
+    에는 한 번도 돌지 않았다 — 프로젝트의 유일한 자동 시각 게이트가 정작 실물을
+    못 본 셈이다.
+
+    둘 다 없으면 **조용히 건너뛰지 않고 죽는다**(D32: SKIP은 통과가 아니다).
+    길이 출처는 화면에 찍어서, trace에서 온 값을 픽스처 검증으로 오해하지 않게 한다.
+    """
+    fixture = ROOT / "tests" / "fixtures" / "api" / f"{stem}.meta.json"
+    if fixture.exists():
+        return json.loads(fixture.read_text("utf-8")), "픽스처 meta"
+    trace = load_trace(outdir)
+    if trace is None:
+        raise SystemExit(
+            f"{stem}의 길이를 알 수 없다 — {fixture} 도 {outdir / 'trace.json'} 도 없다.\n"
+            "먼저 `vlogsrt run`을 돌리거나 픽스처를 녹화해라. 건너뛰는 것은 통과가 아니다."
+        )
+    return {"duration": trace.duration, "chunk_count": len(trace.chunks)}, "trace.json"
 
 
 def main(argv: list[str]) -> int:
@@ -551,13 +587,12 @@ def main(argv: list[str]) -> int:
 
     stem = Path(args.stem).stem
     outdir = args.out if args.out.is_absolute() else ROOT / args.out
-    meta = json.loads(
-        (ROOT / "tests" / "fixtures" / "api" / f"{stem}.meta.json").read_text("utf-8")
-    )
+    meta, origin = _episode_meta(stem, outdir)
     checks = _run_checks(locate(stem, outdir), stem, meta, outdir)
 
     print(
-        f"\n=== {stem} · {float(meta['duration']):.0f}초 · 청크 {meta.get('chunk_count')}개 ===\n"
+        f"\n=== {stem} · {float(meta['duration']):.0f}초 · 청크 {meta.get('chunk_count')}개"
+        f" · 길이 출처 {origin} ===\n"
     )
     for check in checks:
         print(f"[{check.label}] {check.name}: {check.detail}")

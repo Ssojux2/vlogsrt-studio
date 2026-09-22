@@ -24,6 +24,7 @@ from . import (
 from .config import Config, format_config, load_config
 from .evaluate import DASHBOARD_HEADER, build_dashboard_row
 from .output import parse_srt
+from .project import commands
 
 DASHBOARD_BEGIN = "<!-- vlogsrt:dashboard -->"
 DASHBOARD_END = "<!-- /vlogsrt:dashboard -->"
@@ -43,12 +44,20 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument(
         "--no-verify",
         action="store_true",
-        help="교차 확인을 끈다. 기본은 켜져 있고, 표시만 하므로 자막은 안 바뀐다.",
+        help=(
+            "교차 확인을 끈다. 표시만 하므로 자막은 안 바뀐다. "
+            "글자 교정이 켜져 있으면 두 번째 모델은 그대로 부른다 — 비용은 줄지 않는다."
+        ),
     )
     run.add_argument(
         "--no-repair",
         action="store_true",
         help="되풀이 재전사를 끈다. 기본은 켜져 있다 — 되풀이 구간만 다시 물어 갈아끼운다.",
+    )
+    run.add_argument(
+        "--no-retext",
+        action="store_true",
+        help="글자 교정을 끈다. 기본은 켜져 있다 — 시각은 whisper, 글자는 두 번째 모델(D37).",
     )
     _add_polish_option(run)
 
@@ -77,7 +86,11 @@ def build_parser() -> argparse.ArgumentParser:
     record = sub.add_parser("record", help="실제 API를 호출해 픽스처를 녹화한다 (유료)")
     record.add_argument("video", type=Path)
     record.add_argument("--yes", action="store_true", help="비용 확인을 건너뛴다")
-    record.add_argument("--no-verify", action="store_true", help="검증용 응답은 녹화하지 않는다")
+    record.add_argument(
+        "--no-verify",
+        action="store_true",
+        help="검증용 응답은 녹화하지 않는다. 글자 교정이 켜져 있으면 그래도 녹화한다.",
+    )
     _add_config_options(record)
 
     settings = sub.add_parser("config", help="설정 확인")
@@ -88,7 +101,109 @@ def build_parser() -> argparse.ArgumentParser:
     words.add_argument("action", choices=["show"])
     words.add_argument("--file", type=Path, default=None)
     _add_config_options(words)
+    _add_project_command(sub)
     return parser
+
+
+def _add_project_command(sub: argparse._SubParsersAction) -> None:
+    """파생 계층 명령 — cli.py가 보는 것은 `project.commands` 하나다(불변식 18).
+
+    `run`은 임시다: 최종 표면은 `inspect | cut | approve | caption`이고 사람 게이트
+    우회인 `run`을 두지 않는다. 비용 길이 안전장치는 없다(추정은 `inspect`의 몫).
+    """
+    project = sub.add_parser(
+        "project", help="Final Cut 프로젝트에서 러프컷 초안 자막을 만든다 (파생 계층)"
+    )
+    project_commands = project.add_subparsers(
+        dest="project_command",
+        required=True,
+        metavar="{receive,inspect,analyze,review,roughcut,caption}",
+    )
+    run = project_commands.add_parser(
+        "run",
+        help=argparse.SUPPRESS,
+    )
+    run.add_argument("input", type=Path, help="Final Cut 프로젝트(.fcpxml)")
+    run.add_argument(
+        "-o",
+        "--out",
+        type=Path,
+        required=True,
+        help="산출 뿌리 — artifacts/와 package/가 형제로 생긴다",
+    )
+    run.add_argument(
+        "--media-map", type=Path, default=None, help="미디어 맵 JSON (resource_id 경로 지정)"
+    )
+    run.add_argument(
+        "--project-config",
+        type=Path,
+        default=None,
+        help="vlogsrt.project.toml 경로 — 없으면 cwd의 기본 경로",
+    )
+    run.add_argument(
+        "--dtd", type=Path, default=None, help="DTD 경로 — 주지 않으면 대조하지 않는다"
+    )
+    run.add_argument(
+        "--vision-fixtures",
+        type=Path,
+        default=None,
+        help="비전 판정 재생 — <block_id>.vision.json 이 담긴 디렉터리. 유료 호출 0회",
+    )
+    mode = run.add_mutually_exclusive_group()
+    mode.add_argument("--offline", action="store_true", help="픽스처만 사용 (기본값)")
+    mode.add_argument(
+        "--online", action="store_true", help="실제 API 호출. 유료. 길이 안전장치 없음"
+    )
+    # 진단 호환 명령은 파싱되지만 도움말 선택지에서는 숨긴다.
+    project_commands._choices_actions = [
+        action for action in project_commands._choices_actions if action.dest != "run"
+    ]
+
+    receive = project_commands.add_parser("receive", help="FCPXML을 작업공간에 수신")
+    receive.add_argument("input", type=Path)
+    receive.add_argument("--workspace", type=Path, required=True)
+
+    inspect = project_commands.add_parser("inspect", help="네트워크 없이 분석 비용 상한 산출")
+    inspect.add_argument("workspace", type=Path)
+    inspect.add_argument("--project-config", type=Path, default=None)
+    inspect.add_argument("--media-map", type=Path, default=None)
+
+    analyze = project_commands.add_parser("analyze", help="승인된 온라인 또는 픽스처 분석")
+    analyze.add_argument("workspace", type=Path)
+    analyze.add_argument("--candidates", type=Path, default=None, help=argparse.SUPPRESS)
+    analyze.add_argument("--authorization", type=Path, default=None)
+    analyze.add_argument("--vision-fixtures", type=Path, default=None)
+    analyze.add_argument("--project-config", type=Path, default=None)
+    analyze.add_argument("--media-map", type=Path, default=None)
+    analyze_mode = analyze.add_mutually_exclusive_group()
+    analyze_mode.add_argument("--offline", action="store_true", help="픽스처만 사용")
+    analyze_mode.add_argument(
+        "--online", action="store_true", help="승인 JSONL에 묶인 실제 API 호출"
+    )
+
+    review = project_commands.add_parser("review", help="사람이 승인한 후보로 계획 고정")
+    review.add_argument("workspace", type=Path)
+    review.add_argument("--approve", action="append", default=[])
+
+    roughcut = project_commands.add_parser("roughcut", help="승인 계획을 새 FCPXML로 렌더")
+    roughcut.add_argument("workspace", type=Path)
+    roughcut.add_argument("-o", "--out", type=Path, required=True)
+
+    caption = project_commands.add_parser("caption", help="최종 공유 오디오로 한국어 SRT 생성")
+    caption.add_argument("workspace", type=Path)
+    caption.add_argument("render_audio", type=Path)
+    caption.add_argument("final_fcpxml", type=Path)
+    caption.add_argument("-o", "--out", type=Path, required=True)
+    caption.add_argument("--yes", action="store_true", help="표시된 온라인 예상 비용 확인")
+    caption.add_argument(
+        "--caption-authorization",
+        type=Path,
+        default=None,
+        help="CaptionAuthorization JSONL — 온라인 자막은 승인이 필요하다",
+    )
+    caption_mode = caption.add_mutually_exclusive_group()
+    caption_mode.add_argument("--offline", action="store_true", help="픽스처만 사용 (기본값)")
+    caption_mode.add_argument("--online", action="store_true", help="실제 API 호출. 유료")
 
 
 def _add_config_options(parser: argparse.ArgumentParser) -> None:
@@ -157,12 +272,19 @@ def _confirm_cost(duration: float, cfg: Config, assume_yes: bool, models: int = 
 # ─────────────────────────────────────────────────────────────
 
 
+def _models_paid(args: argparse.Namespace, cfg: Config) -> int:
+    """두 번째 모델은 검증과 글자 교정이 **함께** 쓴다. 둘 다 꺼야 한 번만 낸다(D37)."""
+    return 1 if args.no_verify and not cfg.retext_enabled else 2
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     cfg = config_from_args(args)
+    if args.no_retext:
+        cfg = replace(cfg, retext_enabled=False)
     online = _resolve_online(args)
     if args.dry_run:
         prepared = pipeline.prepare(args.video, cfg, offline=args.offline or not online)
-        cost = transcribe.estimate_cost(prepared.duration, cfg) * (1 if args.no_verify else 2)
+        cost = transcribe.estimate_cost(prepared.duration, cfg) * _models_paid(args, cfg)
         pieces = max(1, len(prepared.chunks))
         log.out(
             f"길이 {prepared.duration:.1f}초 · 조각 {pieces}개"
@@ -174,9 +296,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         return 0
     if online:
         # 오디오를 뽑기 전에 원본 길이만 보고 확인한다. ffprobe는 즉시 끝난다.
-        _confirm_cost(
-            preprocess.probe_duration(args.video), cfg, args.yes, 1 if args.no_verify else 2
-        )
+        _confirm_cost(preprocess.probe_duration(args.video), cfg, args.yes, _models_paid(args, cfg))
     result = pipeline.run(
         args.video,
         cfg,
@@ -271,8 +391,10 @@ def cmd_probe(args: argparse.Namespace) -> int:
 def cmd_record(args: argparse.Namespace) -> int:
     """사람만 실행한다. 실제 API를 부르고 요금이 발생한다."""
     cfg = config_from_args(args)
-    _confirm_cost(preprocess.probe_duration(args.video), cfg, args.yes, 1 if args.no_verify else 2)
-    for path in pipeline.record_fixtures(args.video, cfg, verify=not args.no_verify).values():
+    _confirm_cost(preprocess.probe_duration(args.video), cfg, args.yes, _models_paid(args, cfg))
+    # 글자 교정이 켜져 있으면 오프라인 재생에도 두 번째 모델 응답이 필요하다(D37).
+    wanted = not args.no_verify or cfg.retext_enabled
+    for path in pipeline.record_fixtures(args.video, cfg, verify=wanted).values():
         log.out(str(path))
     return 0
 
@@ -292,6 +414,11 @@ def cmd_keywords(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_project(args: argparse.Namespace) -> int:
+    """파생 계층 — 계산·자격증명·예외 변환은 전부 project.commands의 몫이다."""
+    return commands.project_command(args)
+
+
 _COMMANDS = {
     "run": cmd_run,
     "redo": cmd_redo,
@@ -301,6 +428,7 @@ _COMMANDS = {
     "record": cmd_record,
     "config": cmd_config,
     "keywords": cmd_keywords,
+    "project": cmd_project,
 }
 
 

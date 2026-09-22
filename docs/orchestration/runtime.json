@@ -1,0 +1,162 @@
+{
+  "run_id": "run_73768f7c4dec",
+  "integration_branch": "feat/final-cut-project",
+  "root_terminal": "term_892e5ca1-805d-4d8d-b27f-fe7c90994848",
+  "sol": {
+    "runId": "run_73768f7c4dec",
+    "taskId": "task_a09c7903c32f",
+    "dispatchId": "ctx_1f3f93ffcd1f",
+    "state": "ready",
+    "stage": "input_accepted",
+    "setup": {
+      "requested": "not_applicable",
+      "effective": "not_applicable",
+      "source": "existing_worktree",
+      "hookFound": false,
+      "startupPolicy": "start-immediately",
+      "state": "not_applicable"
+    },
+    "launch": {
+      "requested": {
+        "agent": "codex",
+        "model": "gpt-5.6-sol",
+        "effort": "xhigh"
+      },
+      "effective": {
+        "agent": "codex",
+        "model": "gpt-5.6-sol",
+        "effort": "xhigh"
+      }
+    },
+    "timeoutMs": 60000,
+    "effects": [
+      {
+        "kind": "worktree",
+        "action": "reused",
+        "id": "ba49164d-1473-47e2-94be-8b1ac13c2f7a::/Users/ssojux2/Working/vlogsrt"
+      },
+      {
+        "kind": "setup",
+        "action": "not_applicable",
+        "state": "not_applicable"
+      },
+      {
+        "kind": "terminal",
+        "role": "agent",
+        "action": "created",
+        "id": "term_e2b46e7e-5ae5-4197-ac5a-f110f49f6365",
+        "surface": "visible"
+      },
+      {
+        "kind": "dispatch_input",
+        "role": "agent",
+        "id": "term_e2b46e7e-5ae5-4197-ac5a-f110f49f6365",
+        "state": "accepted"
+      }
+    ],
+    "residualResources": [],
+    "mutation": {
+      "requestId": "985e27cc-8ac4-4cce-b15d-38141b88418d",
+      "replayed": false
+    }
+  },
+  "opus": {
+    "runId": "run_73768f7c4dec",
+    "taskId": "task_0c2d6966fb52",
+    "dispatchId": "ctx_c60636ed03f1",
+    "state": "ready",
+    "stage": "input_accepted",
+    "setup": {
+      "requested": "not_applicable",
+      "effective": "not_applicable",
+      "source": "existing_worktree",
+      "hookFound": false,
+      "startupPolicy": "start-immediately",
+      "state": "not_applicable"
+    },
+    "launch": {
+      "requested": {
+        "agent": "claude",
+        "model": "claude-opus-5",
+        "effort": "high"
+      },
+      "effective": {
+        "agent": "claude",
+        "model": "claude-opus-5",
+        "effort": "high"
+      }
+    },
+    "timeoutMs": 60000,
+    "effects": [
+      {
+        "kind": "worktree",
+        "action": "reused",
+        "id": "ba49164d-1473-47e2-94be-8b1ac13c2f7a::/Users/ssojux2/Working/vlogsrt"
+      },
+      {
+        "kind": "setup",
+        "action": "not_applicable",
+        "state": "not_applicable"
+      },
+      {
+        "kind": "terminal",
+        "role": "agent",
+        "action": "created",
+        "id": "term_0443f96f-45f0-429b-b385-d59e1e7130d7",
+        "surface": "visible"
+      },
+      {
+        "kind": "dispatch_input",
+        "role": "agent",
+        "id": "term_0443f96f-45f0-429b-b385-d59e1e7130d7",
+        "state": "accepted"
+      }
+    ],
+    "residualResources": [],
+    "mutation": {
+      "requestId": "1f894896-e7ae-4813-9613-25aaf83a2b58",
+      "replayed": false
+    }
+  },
+  "glm_smoke": {
+    "model": "glm-5.3[1m]",
+    "effort": "max",
+    "context_window": 1000000,
+    "result": "GLM_MAX_READY",
+    "session": "5a5722f8-ce6e-4eaa-b26b-783cc1b65903"
+  },
+  "bootstrap_commit": "c96e50af3acda91c995183fca879d9538e45529f",
+  "baseline_checks": {
+    "make_check": "passed",
+    "pytest_passed": 389,
+    "invariant_groups_passed": 16,
+    "uv_pip_check": "30 compatible packages",
+    "sandbox_note": "localhost/AppleScript tests require host execution"
+  },
+  "opus_followup": {
+    "task_id": "task_ccb2369295aa",
+    "dispatch_id": "ctx_82a105f90db9",
+    "terminal": "term_0443f96f-45f0-429b-b385-d59e1e7130d7",
+    "launch": "reused exact initial Opus5 high session",
+    "purpose": "reconcile bootstrap review with Astra disposition"
+  },
+  "opus_p0_support": {
+    "task_id": "task_a70b03288740",
+    "dispatch_id": "ctx_9e309f79053a",
+    "terminal": "term_0443f96f-45f0-429b-b385-d59e1e7130d7"
+  },
+  "p0_glm": {
+    "run_id": "run_b6d40d052690",
+    "task_id": "task_f7788389960b",
+    "dispatch_id": "ctx_df9c602e28a2",
+    "terminal": "term_ea415fa1-9b4f-402d-922f-4d6dbe039b22",
+    "worktree": "/Users/ssojux2/orca/workspaces/vlogsrt/fcp-p0-contract",
+    "branch": "Ssojux2/fcp-p0-contract",
+    "base": "676460111bad5ef04cbc9d5c776940611fa938a7",
+    "command": "claude-glm --model 'glm-5.3[1m]' --effort max",
+    "supervisor": "Opus5 support for Sol-authored P0 brief",
+    "state": "implementing",
+    "permission_mode": "auto",
+    "permission_evidence": "User change reported by Opus msg_c44c2e0903d3; root subsequently verified auto mode on banner and edits in three owned files."
+  }
+}

@@ -75,8 +75,10 @@ def break_text(text: str, cfg: Config) -> tuple[list[str], list[str]]:
             flags.append(TOO_LONG)
         return [first, second], flags
 
-    # 공백이 없는 긴 문자열. 자를 곳이 없으니 폭에서 끊고 표시를 남긴다.
-    cut = _shift_off_particle(body, cfg.max_chars_per_line, cfg)
+    # 공백이 없는 긴 본문. 폭에서 끊되 `16자 + 2자` 같은 외톨이 줄이 안 생기게
+    # 가운데 균형으로 나눈다(D38). 몸통이 폭의 두 배를 넘으면 어쩔 수 없이 폭에서
+    # 끊는다 — 나머지는 정제의 분할이 미리 줄여 뒀다.
+    cut = _shift_off_particle(body, min(cfg.max_chars_per_line, (len(body) + 1) // 2), cfg)
     return [body[:cut], body[cut:]], [FORCED_BREAK]
 
 

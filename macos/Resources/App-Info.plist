@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleDisplayName</key><string>Final Cut Agent</string>
+  <key>CFBundleExecutable</key><string>$(EXECUTABLE_NAME)</string>
+  <key>CFBundleIdentifier</key><string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+  <key>CFBundleName</key><string>$(PRODUCT_NAME)</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>$(MARKETING_VERSION)</string>
+  <key>CFBundleVersion</key><string>$(CURRENT_PROJECT_VERSION)</string>
+  <key>LSMinimumSystemVersion</key><string>$(MACOSX_DEPLOYMENT_TARGET)</string>
+  <key>NSPrincipalClass</key><string>NSApplication</string>
+  <key>CFBundleURLTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleURLName</key><string>com.ssojux2.vlogsrt.agent</string>
+      <key>CFBundleURLSchemes</key>
+      <array><string>vlogsrt-agent</string></array>
+    </dict>
+  </array>
+  <key>CFBundleDocumentTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleTypeExtensions</key><array><string>fcpxml</string><string>fcpxmld</string></array>
+      <key>CFBundleTypeName</key><string>Final Cut Pro XML</string>
+      <key>CFBundleTypeRole</key><string>Editor</string>
+    </dict>
+    <dict>
+      <key>CFBundleTypeExtensions</key><array><string>wav</string></array>
+      <key>CFBundleTypeName</key><string>PCM Audio</string>
+      <key>CFBundleTypeRole</key><string>Viewer</string>
+    </dict>
+  </array>
+  <key>com.apple.proapps.MediaAssetProtocol</key><dict/>
+  <key>OSAScriptingDefinition</key><string>FinalCutAgent.sdef</string>
+</dict>
+</plist>

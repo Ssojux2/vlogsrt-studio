@@ -50,12 +50,19 @@ def needs_split(cue: Cue, cfg: Config) -> bool:
 
 
 def _char_split_index(text: str, ratio: float) -> int | None:
-    """비율에 가장 가까운 어절 경계. 공백이 없으면 None."""
-    spaces = [index for index, ch in enumerate(text) if ch == " " and 0 < index < len(text) - 1]
-    if not spaces:
-        return None
+    """비율에 가장 가까운 어절 경계. 공백이 없으면 같은 비율의 글자 자리다(D38).
+
+    공백이 없다고 포기하면 덩어리 전체가 한 줄로 화면 밖으로 나갔다(S12). 어절이
+    없을 뿐 글자는 있으니 같은 비율의 글자 중간에서 자른다 — 시각은 어절 경계에서
+    잘랐을 때와 같은 식으로 글자 수에 비례한다.
+    """
     target = len(text) * ratio
-    return min(spaces, key=lambda index: abs(index - target))
+    spaces = [index for index, ch in enumerate(text) if ch == " " and 0 < index < len(text) - 1]
+    if spaces:
+        return min(spaces, key=lambda index: abs(index - target))
+    if len(text) < 2:
+        return None
+    return min(range(1, len(text)), key=lambda index: abs(index - target))
 
 
 def split_cue(cue: Cue, cfg: Config, depth: int = 0) -> list[Cue]:

@@ -18,11 +18,21 @@ prompt = ""
 
 # ── 검증 ────────────────────────────────────────────────────────────
 # 같은 오디오를 gpt-transcribe로 한 번 더 받아 대조한다. **기본으로 켜져 있다.**
-# 표시만 하므로 자막은 절대 안 바뀐다(규칙 5) — 대신 비용이 2배다.
+# 표시만 하므로 자막은 절대 안 바뀐다(규칙 5) — 대신 비용이 2배다(글자 교정과 같은 호출).
 # 끄려면 `vlogsrt run <video> --no-verify`.
 #   verify_model = "gpt-transcribe"
 #   verify_chunk_sim_floor = 0.80   # 이 아래면 자막이 발화를 놓쳤을 수 있다
 #   verify_cue_match_floor = 0.60   # 이 아래인 큐를 '의심'으로 표시한다
+
+# ── 글자 교정 ───────────────────────────────────────────────────────
+# 시각은 whisper 그대로, 글자만 gpt-transcribe의 것으로 갈아낀다(D37). **기본으로 켜져 있다.**
+# 검증과 같은 응답을 쓰므로 교정이 켜져 있으면 `--no-verify`로도 비용이 줄지 않는다.
+# 끄려면 `vlogsrt run <video> --no-retext`. 아래 값은 전부 잠정이다.
+#   retext_segment_match_floor = 0.5     # 세그먼트 안 일치율 하한
+#   retext_length_ratio_max = 1.5        # gpt 글자 / whisper 글자 상한
+#   retext_length_ratio_min = 0.67       # 하한 — gpt가 말을 지우는 방향
+#   retext_length_slack_chars = 3        # 이 이하의 글자 수 차이는 비율을 보지 않는다
+#   retext_chunk_similarity_floor = 0.5  # 조각 전체 유사도 하한(보조선)
 
 # ── 온도 ────────────────────────────────────────────────────────────
 # **되풀이를 막는 유일한 예방책이다(D28).** whisper는 30초 창의 디코딩 결과를 다음

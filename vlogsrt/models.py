@@ -23,6 +23,11 @@ REPAIR_REPLACED = "replaced"  # 재전사가 성공해 그 구간을 갈아끼�
 REPAIR_COLLAPSED = "collapsed"  # 회복 못 했다. 첫 장만 남기고 나머지는 비웠다
 REPAIR_KEPT = "kept"  # 손대지 않았다
 
+# 글자 교정을 어떻게 했는가(D37)
+RETEXT_APPLIED = "applied"  # 두 번째 모델 응답을 받아 세그먼트마다 판정했다
+RETEXT_UNAVAILABLE = "unavailable"  # 응답을 못 받았다. 전부 whisper 글자다
+RETEXT_OFF = "off"  # 꺼져 있었다
+
 # 시간 구간 `(start, end)`. 초 단위.
 Span = tuple[float, float]
 
@@ -228,6 +233,139 @@ class Repair:
 
 
 @dataclass(frozen=True, slots=True)
+class RetextChunk:
+    """조각 하나의 교정 판정. 유사도는 **교정 전** 두 모델의 차이다.
+
+    교정된 큐는 검증에서 자명하게 일치하므로 두 모델의 독립 대조는 여기로 옮겨 왔다(D37).
+    """
+
+    index: int
+    span: Span
+    similarity: float
+    accepted: bool  # 조각 게이트
+    replaced: int
+    rejected: int
+
+    @staticmethod
+    def from_dict(raw: dict[str, Any]) -> RetextChunk:
+        return RetextChunk(
+            index=int(raw["index"]),
+            span=(float(raw["span"][0]), float(raw["span"][1])),
+            similarity=float(raw["similarity"]),
+            accepted=bool(raw["accepted"]),
+            replaced=int(raw["replaced"]),
+            rejected=int(raw["rejected"]),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class RetextRejection:
+    """게이트를 통과하지 못한 세그먼트. whisper 글자가 그대로 나간다."""
+
+    seg_id: int
+    reason: str
+    match: float
+    length_ratio: float
+    candidate: str
+
+    @staticmethod
+    def from_dict(raw: dict[str, Any]) -> RetextRejection:
+        return RetextRejection(
+            seg_id=int(raw["seg_id"]),
+            reason=str(raw["reason"]),
+            match=float(raw["match"]),
+            length_ratio=float(raw["length_ratio"]),
+            candidate=str(raw["candidate"]),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class RetextUnplaced:
+    """**세그먼트 사이에 낀 gpt 글자.** 시각이 없어서 출력하지 않는다.
+
+    whisper가 놓친 말일 수 있다 — 교정은 그 말을 되살리지 못하고 여기 남길 뿐이다(D37).
+    """
+
+    chunk_index: int
+    text: str
+    chars: int
+    before: int | None  # 앞 세그먼트 id
+    after: int | None
+
+    @staticmethod
+    def from_dict(raw: dict[str, Any]) -> RetextUnplaced:
+        before, after = raw.get("before"), raw.get("after")
+        return RetextUnplaced(
+            chunk_index=int(raw["chunk_index"]),
+            text=str(raw["text"]),
+            chars=int(raw["chars"]),
+            before=None if before is None else int(before),
+            after=None if after is None else int(after),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class RetextExcluded:
+    """교정하지 않은 되풀이 구간. `gpt_chars`가 크면 접힌 자리에 실제 발화가 있었을 수 있다."""
+
+    span: Span
+    outcome: str
+    seg_ids: tuple[int, ...]
+    gpt_chars: int
+    span_missing: bool = False  # 재전사 구간이 기록되지 않아 되풀이 자체의 구간을 썼다
+
+    @staticmethod
+    def from_dict(raw: dict[str, Any]) -> RetextExcluded:
+        return RetextExcluded(
+            span=(float(raw["span"][0]), float(raw["span"][1])),
+            outcome=str(raw["outcome"]),
+            seg_ids=tuple(int(i) for i in raw["seg_ids"]),
+            gpt_chars=int(raw["gpt_chars"]),
+            span_missing=bool(raw.get("span_missing", False)),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class RetextRecord:
+    """글자 교정의 전부(D37). 골격은 whisper 글자 그대로 남는다.
+
+    `texts`가 `redo`가 다시 얹는 매핑이다.
+    """
+
+    status: str
+    texts: tuple[tuple[int, str], ...] = ()  # (seg_id, 교체 글자), seg_id 순
+    chunks: tuple[RetextChunk, ...] = ()
+    rejections: tuple[RetextRejection, ...] = ()
+    unplaced: tuple[RetextUnplaced, ...] = ()
+    excluded: tuple[RetextExcluded, ...] = ()
+    error: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "status": self.status,
+            "texts": {str(seg_id): text for seg_id, text in self.texts},
+            "chunks": [asdict(chunk) for chunk in self.chunks],
+            "rejections": [asdict(rejection) for rejection in self.rejections],
+            "unplaced": [asdict(item) for item in self.unplaced],
+            "excluded": [asdict(item) for item in self.excluded],
+            "error": self.error,
+        }
+
+    @staticmethod
+    def from_dict(raw: dict[str, Any]) -> RetextRecord:
+        texts = sorted((int(seg_id), str(text)) for seg_id, text in raw.get("texts", {}).items())
+        return RetextRecord(
+            status=str(raw["status"]),
+            texts=tuple(texts),
+            chunks=tuple(RetextChunk.from_dict(c) for c in raw.get("chunks", ())),
+            rejections=tuple(RetextRejection.from_dict(r) for r in raw.get("rejections", ())),
+            unplaced=tuple(RetextUnplaced.from_dict(u) for u in raw.get("unplaced", ())),
+            excluded=tuple(RetextExcluded.from_dict(e) for e in raw.get("excluded", ())),
+            error=str(raw.get("error", "")),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class Trace:
     """파이프라인 전 과정의 스냅샷. `redo`는 이 파일만 읽고 API를 호출하지 않는다."""
 
@@ -239,6 +377,8 @@ class Trace:
     repairs: tuple[Repair, ...] = ()
     # 조각 경계. 시각을 만들지 않고 **어디서 잘렸는지만** 남긴다(D32).
     chunks: tuple[ChunkMark, ...] = ()
+    # 글자 교정 기록(D37). 골격은 whisper 글자 그대로이고, 교체는 여기서만 온다.
+    retext: RetextRecord = field(default_factory=lambda: RetextRecord(status=RETEXT_OFF))
     version: str = TRACE_VERSION
 
     def to_dict(self) -> dict[str, Any]:
@@ -251,6 +391,7 @@ class Trace:
             "config_snapshot": self.config_snapshot,
             "repairs": [asdict(repair) for repair in self.repairs],
             "chunks": [asdict(mark) for mark in self.chunks],
+            "retext": self.retext.to_dict(),
         }
 
     def save(self, path: Path) -> Path:
@@ -284,5 +425,6 @@ class Trace:
             config_snapshot=dict(raw.get("config_snapshot", {})),
             repairs=tuple(Repair.from_dict(r) for r in raw.get("repairs", ())),
             chunks=tuple(ChunkMark.from_dict(c) for c in raw.get("chunks", ())),
+            retext=RetextRecord.from_dict(raw.get("retext", {"status": RETEXT_OFF})),
             version=version,
         )

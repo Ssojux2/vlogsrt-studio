@@ -1,0 +1,733 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		0F52AD7FD9F1954D2B62D9F2 /* FinalCutImporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6832A3B51FA754EC6959C587 /* FinalCutImporter.swift */; };
+		11BEB3475A7A691F2B66E924 /* libFinalCutAgentCore.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 162A42CFC45AE937A1F021B9 /* libFinalCutAgentCore.a */; };
+		2653D9611BD41AB6FA3CDA06 /* RoundTripJob.swift in Sources */ = {isa = PBXBuildFile; fileRef = 97CAE484F153252E07D1BF7F /* RoundTripJob.swift */; };
+		2DA460A2348F5014D5D0EBA7 /* README.md in Resources */ = {isa = PBXBuildFile; fileRef = BCF0401E24FA669233607967 /* README.md */; };
+		321BE228504D9C851B58B978 /* LegacyJobStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 714BD102C51B1A26375F63BF /* LegacyJobStore.swift */; };
+		32F18F2AD1B130CF72C724D2 /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = B21E719A4E3F22B9B8B435ED /* main.swift */; };
+		3EDFB72203E00D8CB43C3AA6 /* RoundTripCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 41E6E3FF248873A70D179DB7 /* RoundTripCoordinator.swift */; };
+		401695FCC125D9B3A1EEC426 /* FinalCutAgentWorkflowExtension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = BF3C5A5E380F891AB16ACB4F /* FinalCutAgentWorkflowExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		52A1F4E57DD9A0488CE5C99B /* KeychainStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6852655CCFB4C1839FD4A0FE /* KeychainStore.swift */; };
+		61691110A241AAB76BD89561 /* BundledEngineLauncher.swift in Sources */ = {isa = PBXBuildFile; fileRef = 36EC8A37599443FB62130C7B /* BundledEngineLauncher.swift */; };
+		6A374178121C2DAE331BD569 /* AppGroupWorkspace.swift in Sources */ = {isa = PBXBuildFile; fileRef = CB047E1AA867D819DDA5D4B2 /* AppGroupWorkspace.swift */; };
+		70146EE378CB76A246D0AA11 /* ShareDestination.swift in Sources */ = {isa = PBXBuildFile; fileRef = B080868081DD514BA06BA887 /* ShareDestination.swift */; };
+		757008D9DBF574C4BE97B53C /* IdentityRoundTripService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C7DB4044A45662630C30DA8 /* IdentityRoundTripService.swift */; };
+		7B15858CECF631D1876C8320 /* FinalCutPasteboard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0ABF9EFE3FDDC83B32482D93 /* FinalCutPasteboard.swift */; };
+		7B9C21ADBBF564CB5FC4E15E /* EngineRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB6586463B6A94DBFAE39DDA /* EngineRuntime.swift */; };
+		831D930AD8367A81F3DB7598 /* RoundTripMessages.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2053A676E444A5D3827BA357 /* RoundTripMessages.swift */; };
+		86DFE00C9230AB03E0957176 /* EngineProcess.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6425D219B5CA268C97A7AA77 /* EngineProcess.swift */; };
+		8EDCF61837103AFD7DECFBEF /* MediaAssetScripting.swift in Sources */ = {isa = PBXBuildFile; fileRef = 66FF409DA890D46893AF2224 /* MediaAssetScripting.swift */; };
+		9072E384849414798A547EF7 /* DevelopmentEngineLauncher.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1AD671ADEA772B9A1C2E7AB1 /* DevelopmentEngineLauncher.swift */; };
+		A1F38E6A058AD2E99A2DC1E7 /* FinalCutTimelineBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF2B01A5B1D09C8DCF304FC3 /* FinalCutTimelineBridge.swift */; };
+		A5603A6524A5E9EDBF476E26 /* WorkflowProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26833B0223E418B4ABC94592 /* WorkflowProtocol.swift */; };
+		AE20558BDFA20F94997DD325 /* libFinalCutAgentCore.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 162A42CFC45AE937A1F021B9 /* libFinalCutAgentCore.a */; };
+		B2598061B18308745D250C52 /* ActiveProject.swift in Sources */ = {isa = PBXBuildFile; fileRef = E140ABBDF04A5ECFBD3F1713 /* ActiveProject.swift */; };
+		CDD075051619C39B61CFFCAF /* SecurityScopedBookmarkStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57320E6BA7114BEE91B0AE57 /* SecurityScopedBookmarkStore.swift */; };
+		D347F5DEA99B803FB0A2CC50 /* MediaAssetProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = E578D4512019F6D1BA041A0C /* MediaAssetProtocol.swift */; };
+		D3B14EF17B5B2C0A94CFA026 /* CancellationStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC442752B095717FB0C36A5C /* CancellationStore.swift */; };
+		D543AC03D35B5E23D11EF842 /* FinalCutAgent.sdef in Resources */ = {isa = PBXBuildFile; fileRef = 9A8AFE5D5262B92C8568EFDC /* FinalCutAgent.sdef */; };
+		DB54A64731712314496280CA /* MediaGrant.swift in Sources */ = {isa = PBXBuildFile; fileRef = 512CE9B1424FE331272CB1F5 /* MediaGrant.swift */; };
+		DE2E3290799026BDB31925D9 /* ShareInbox.swift in Sources */ = {isa = PBXBuildFile; fileRef = D73C8DEC3C5E76180C3C885F /* ShareInbox.swift */; };
+		E76E587A5DD469682B532F9A /* WorkflowViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = C263664F6E10FCD89C5CC000 /* WorkflowViewController.swift */; };
+		F92FDF327CB983321AF120B1 /* AI Captions.fcpxdest in Resources */ = {isa = PBXBuildFile; fileRef = 20D61F88703BC6F0641A0B83 /* AI Captions.fcpxdest */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		5B2504DE6A83FDD5C6D8A230 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 858E05CF7484AB74CCC60651 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = A0D09B804A5E3650C8252A7F;
+			remoteInfo = FinalCutAgentWorkflowExtension;
+		};
+		D8A7461AB5C5B7C20F9B7820 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 858E05CF7484AB74CCC60651 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 5E31834AA5A36D32DECC95EC;
+			remoteInfo = FinalCutAgentCore;
+		};
+		E5776DB512C8B118734B02BC /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 858E05CF7484AB74CCC60651 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 5E31834AA5A36D32DECC95EC;
+			remoteInfo = FinalCutAgentCore;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		786FE16B19E1593F5ABBE1FC /* Embed Foundation Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				401695FCC125D9B3A1EEC426 /* FinalCutAgentWorkflowExtension.appex in Embed Foundation Extensions */,
+			);
+			name = "Embed Foundation Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
+/* Begin PBXFileReference section */
+		0ABF9EFE3FDDC83B32482D93 /* FinalCutPasteboard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FinalCutPasteboard.swift; sourceTree = "<group>"; };
+		162A42CFC45AE937A1F021B9 /* libFinalCutAgentCore.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = libFinalCutAgentCore.a; sourceTree = BUILT_PRODUCTS_DIR; };
+		1AD671ADEA772B9A1C2E7AB1 /* DevelopmentEngineLauncher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DevelopmentEngineLauncher.swift; sourceTree = "<group>"; };
+		2053A676E444A5D3827BA357 /* RoundTripMessages.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoundTripMessages.swift; sourceTree = "<group>"; };
+		20D61F88703BC6F0641A0B83 /* AI Captions.fcpxdest */ = {isa = PBXFileReference; path = "AI Captions.fcpxdest"; sourceTree = "<group>"; };
+		26833B0223E418B4ABC94592 /* WorkflowProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkflowProtocol.swift; sourceTree = "<group>"; };
+		2C7DB4044A45662630C30DA8 /* IdentityRoundTripService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IdentityRoundTripService.swift; sourceTree = "<group>"; };
+		36EC8A37599443FB62130C7B /* BundledEngineLauncher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BundledEngineLauncher.swift; sourceTree = "<group>"; };
+		41E6E3FF248873A70D179DB7 /* RoundTripCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoundTripCoordinator.swift; sourceTree = "<group>"; };
+		512CE9B1424FE331272CB1F5 /* MediaGrant.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaGrant.swift; sourceTree = "<group>"; };
+		57320E6BA7114BEE91B0AE57 /* SecurityScopedBookmarkStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SecurityScopedBookmarkStore.swift; sourceTree = "<group>"; };
+		6425D219B5CA268C97A7AA77 /* EngineProcess.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EngineProcess.swift; sourceTree = "<group>"; };
+		66FF409DA890D46893AF2224 /* MediaAssetScripting.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaAssetScripting.swift; sourceTree = "<group>"; };
+		6832A3B51FA754EC6959C587 /* FinalCutImporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FinalCutImporter.swift; sourceTree = "<group>"; };
+		6852655CCFB4C1839FD4A0FE /* KeychainStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainStore.swift; sourceTree = "<group>"; };
+		714BD102C51B1A26375F63BF /* LegacyJobStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LegacyJobStore.swift; sourceTree = "<group>"; };
+		93627080B08E56ADEB1484CC /* FinalCutAgent.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = FinalCutAgent.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		97CAE484F153252E07D1BF7F /* RoundTripJob.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoundTripJob.swift; sourceTree = "<group>"; };
+		9A8AFE5D5262B92C8568EFDC /* FinalCutAgent.sdef */ = {isa = PBXFileReference; path = FinalCutAgent.sdef; sourceTree = "<group>"; };
+		AB6586463B6A94DBFAE39DDA /* EngineRuntime.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EngineRuntime.swift; sourceTree = "<group>"; };
+		B080868081DD514BA06BA887 /* ShareDestination.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareDestination.swift; sourceTree = "<group>"; };
+		B21E719A4E3F22B9B8B435ED /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
+		BCF0401E24FA669233607967 /* README.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = README.md; sourceTree = "<group>"; };
+		BF3C5A5E380F891AB16ACB4F /* FinalCutAgentWorkflowExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = FinalCutAgentWorkflowExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		C263664F6E10FCD89C5CC000 /* WorkflowViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkflowViewController.swift; sourceTree = "<group>"; };
+		CB047E1AA867D819DDA5D4B2 /* AppGroupWorkspace.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppGroupWorkspace.swift; sourceTree = "<group>"; };
+		D73C8DEC3C5E76180C3C885F /* ShareInbox.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareInbox.swift; sourceTree = "<group>"; };
+		E140ABBDF04A5ECFBD3F1713 /* ActiveProject.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActiveProject.swift; sourceTree = "<group>"; };
+		E578D4512019F6D1BA041A0C /* MediaAssetProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaAssetProtocol.swift; sourceTree = "<group>"; };
+		FC442752B095717FB0C36A5C /* CancellationStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CancellationStore.swift; sourceTree = "<group>"; };
+		FF2B01A5B1D09C8DCF304FC3 /* FinalCutTimelineBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FinalCutTimelineBridge.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		B384034483803E23DA616EB9 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				AE20558BDFA20F94997DD325 /* libFinalCutAgentCore.a in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		DB9170B554EAF620EB292AF2 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				11BEB3475A7A691F2B66E924 /* libFinalCutAgentCore.a in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		47E693B4F3F7BB8E31B925B1 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				93627080B08E56ADEB1484CC /* FinalCutAgent.app */,
+				BF3C5A5E380F891AB16ACB4F /* FinalCutAgentWorkflowExtension.appex */,
+				162A42CFC45AE937A1F021B9 /* libFinalCutAgentCore.a */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		4DB7EBF7190C0D991FC7F707 /* FinalCutAgentCore */ = {
+			isa = PBXGroup;
+			children = (
+				E140ABBDF04A5ECFBD3F1713 /* ActiveProject.swift */,
+				CB047E1AA867D819DDA5D4B2 /* AppGroupWorkspace.swift */,
+				36EC8A37599443FB62130C7B /* BundledEngineLauncher.swift */,
+				FC442752B095717FB0C36A5C /* CancellationStore.swift */,
+				1AD671ADEA772B9A1C2E7AB1 /* DevelopmentEngineLauncher.swift */,
+				6425D219B5CA268C97A7AA77 /* EngineProcess.swift */,
+				AB6586463B6A94DBFAE39DDA /* EngineRuntime.swift */,
+				6832A3B51FA754EC6959C587 /* FinalCutImporter.swift */,
+				0ABF9EFE3FDDC83B32482D93 /* FinalCutPasteboard.swift */,
+				2C7DB4044A45662630C30DA8 /* IdentityRoundTripService.swift */,
+				6852655CCFB4C1839FD4A0FE /* KeychainStore.swift */,
+				714BD102C51B1A26375F63BF /* LegacyJobStore.swift */,
+				E578D4512019F6D1BA041A0C /* MediaAssetProtocol.swift */,
+				66FF409DA890D46893AF2224 /* MediaAssetScripting.swift */,
+				512CE9B1424FE331272CB1F5 /* MediaGrant.swift */,
+				41E6E3FF248873A70D179DB7 /* RoundTripCoordinator.swift */,
+				97CAE484F153252E07D1BF7F /* RoundTripJob.swift */,
+				2053A676E444A5D3827BA357 /* RoundTripMessages.swift */,
+				57320E6BA7114BEE91B0AE57 /* SecurityScopedBookmarkStore.swift */,
+				B080868081DD514BA06BA887 /* ShareDestination.swift */,
+				D73C8DEC3C5E76180C3C885F /* ShareInbox.swift */,
+				26833B0223E418B4ABC94592 /* WorkflowProtocol.swift */,
+			);
+			path = FinalCutAgentCore;
+			sourceTree = "<group>";
+		};
+		50AF9154C25EA763A6C6A2DD /* Sources */ = {
+			isa = PBXGroup;
+			children = (
+				ACD395829A7C19B94D0A3504 /* FinalCutAgentApp */,
+				4DB7EBF7190C0D991FC7F707 /* FinalCutAgentCore */,
+				E2C42A6D5E73EF5D7EBDCAAF /* WorkflowExtension */,
+			);
+			path = Sources;
+			sourceTree = "<group>";
+		};
+		79C07BE62C41846CDBDBA498 = {
+			isa = PBXGroup;
+			children = (
+				F32382DA9CD2326EC95A5ED9 /* Resources */,
+				50AF9154C25EA763A6C6A2DD /* Sources */,
+				47E693B4F3F7BB8E31B925B1 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		A5897861725185359B776876 /* Engine */ = {
+			isa = PBXGroup;
+			children = (
+				BCF0401E24FA669233607967 /* README.md */,
+			);
+			path = Engine;
+			sourceTree = "<group>";
+		};
+		ACD395829A7C19B94D0A3504 /* FinalCutAgentApp */ = {
+			isa = PBXGroup;
+			children = (
+				B21E719A4E3F22B9B8B435ED /* main.swift */,
+			);
+			path = FinalCutAgentApp;
+			sourceTree = "<group>";
+		};
+		E2C42A6D5E73EF5D7EBDCAAF /* WorkflowExtension */ = {
+			isa = PBXGroup;
+			children = (
+				FF2B01A5B1D09C8DCF304FC3 /* FinalCutTimelineBridge.swift */,
+				C263664F6E10FCD89C5CC000 /* WorkflowViewController.swift */,
+			);
+			path = WorkflowExtension;
+			sourceTree = "<group>";
+		};
+		F32382DA9CD2326EC95A5ED9 /* Resources */ = {
+			isa = PBXGroup;
+			children = (
+				20D61F88703BC6F0641A0B83 /* AI Captions.fcpxdest */,
+				9A8AFE5D5262B92C8568EFDC /* FinalCutAgent.sdef */,
+				A5897861725185359B776876 /* Engine */,
+			);
+			path = Resources;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		5E31834AA5A36D32DECC95EC /* FinalCutAgentCore */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 0B2F3D5B05A168F236CE94B1 /* Build configuration list for PBXNativeTarget "FinalCutAgentCore" */;
+			buildPhases = (
+				7A11E1789A87826E76B62EEC /* Sources */,
+				8A3E5FE1F3ED9B8FDDBEE671 /* Copy Swift Objective-C Interface Header */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = FinalCutAgentCore;
+			packageProductDependencies = (
+			);
+			productName = FinalCutAgentCore;
+			productReference = 162A42CFC45AE937A1F021B9 /* libFinalCutAgentCore.a */;
+			productType = "com.apple.product-type.library.static";
+		};
+		6E7833288224AAC3762FD46C /* FinalCutAgent */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = FC121F0E3D6FF7356848AEFA /* Build configuration list for PBXNativeTarget "FinalCutAgent" */;
+			buildPhases = (
+				A44CC88F29CC0EB985BEF783 /* Sources */,
+				1DA665D856C574AA7F8C4F11 /* Resources */,
+				DB9170B554EAF620EB292AF2 /* Frameworks */,
+				786FE16B19E1593F5ABBE1FC /* Embed Foundation Extensions */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				5A6308E5A66B692E049A1560 /* PBXTargetDependency */,
+				871E377829090E4193302F0B /* PBXTargetDependency */,
+			);
+			name = FinalCutAgent;
+			packageProductDependencies = (
+			);
+			productName = FinalCutAgent;
+			productReference = 93627080B08E56ADEB1484CC /* FinalCutAgent.app */;
+			productType = "com.apple.product-type.application";
+		};
+		A0D09B804A5E3650C8252A7F /* FinalCutAgentWorkflowExtension */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 898B04677690FCFADC51E257 /* Build configuration list for PBXNativeTarget "FinalCutAgentWorkflowExtension" */;
+			buildPhases = (
+				0802F9BCE58E57F72C8877CA /* Sources */,
+				B384034483803E23DA616EB9 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				2F872CCA040BA3E690042FB2 /* PBXTargetDependency */,
+			);
+			name = FinalCutAgentWorkflowExtension;
+			packageProductDependencies = (
+			);
+			productName = FinalCutAgentWorkflowExtension;
+			productReference = BF3C5A5E380F891AB16ACB4F /* FinalCutAgentWorkflowExtension.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		858E05CF7484AB74CCC60651 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1430;
+				TargetAttributes = {
+					5E31834AA5A36D32DECC95EC = {
+						DevelopmentTeam = "";
+						ProvisioningStyle = Manual;
+					};
+					6E7833288224AAC3762FD46C = {
+						DevelopmentTeam = "";
+						ProvisioningStyle = Manual;
+					};
+					A0D09B804A5E3650C8252A7F = {
+						DevelopmentTeam = "";
+						ProvisioningStyle = Manual;
+					};
+				};
+			};
+			buildConfigurationList = 533119983072E298B4399274 /* Build configuration list for PBXProject "FinalCutAgent" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = 79C07BE62C41846CDBDBA498;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 47E693B4F3F7BB8E31B925B1 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				5E31834AA5A36D32DECC95EC /* FinalCutAgentCore */,
+				A0D09B804A5E3650C8252A7F /* FinalCutAgentWorkflowExtension */,
+				6E7833288224AAC3762FD46C /* FinalCutAgent */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		1DA665D856C574AA7F8C4F11 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				F92FDF327CB983321AF120B1 /* AI Captions.fcpxdest in Resources */,
+				D543AC03D35B5E23D11EF842 /* FinalCutAgent.sdef in Resources */,
+				2DA460A2348F5014D5D0EBA7 /* README.md in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		8A3E5FE1F3ED9B8FDDBEE671 /* Copy Swift Objective-C Interface Header */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputPaths = (
+				"$(DERIVED_SOURCES_DIR)/$(SWIFT_OBJC_INTERFACE_HEADER_NAME)",
+			);
+			name = "Copy Swift Objective-C Interface Header";
+			outputPaths = (
+				"$(BUILT_PRODUCTS_DIR)/include/$(PRODUCT_MODULE_NAME)/$(SWIFT_OBJC_INTERFACE_HEADER_NAME)",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "ditto \"${SCRIPT_INPUT_FILE_0}\" \"${SCRIPT_OUTPUT_FILE_0}\"\n";
+		};
+/* End PBXShellScriptBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		0802F9BCE58E57F72C8877CA /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A1F38E6A058AD2E99A2DC1E7 /* FinalCutTimelineBridge.swift in Sources */,
+				E76E587A5DD469682B532F9A /* WorkflowViewController.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		7A11E1789A87826E76B62EEC /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				B2598061B18308745D250C52 /* ActiveProject.swift in Sources */,
+				6A374178121C2DAE331BD569 /* AppGroupWorkspace.swift in Sources */,
+				61691110A241AAB76BD89561 /* BundledEngineLauncher.swift in Sources */,
+				D3B14EF17B5B2C0A94CFA026 /* CancellationStore.swift in Sources */,
+				9072E384849414798A547EF7 /* DevelopmentEngineLauncher.swift in Sources */,
+				86DFE00C9230AB03E0957176 /* EngineProcess.swift in Sources */,
+				7B9C21ADBBF564CB5FC4E15E /* EngineRuntime.swift in Sources */,
+				0F52AD7FD9F1954D2B62D9F2 /* FinalCutImporter.swift in Sources */,
+				7B15858CECF631D1876C8320 /* FinalCutPasteboard.swift in Sources */,
+				757008D9DBF574C4BE97B53C /* IdentityRoundTripService.swift in Sources */,
+				52A1F4E57DD9A0488CE5C99B /* KeychainStore.swift in Sources */,
+				321BE228504D9C851B58B978 /* LegacyJobStore.swift in Sources */,
+				D347F5DEA99B803FB0A2CC50 /* MediaAssetProtocol.swift in Sources */,
+				8EDCF61837103AFD7DECFBEF /* MediaAssetScripting.swift in Sources */,
+				DB54A64731712314496280CA /* MediaGrant.swift in Sources */,
+				3EDFB72203E00D8CB43C3AA6 /* RoundTripCoordinator.swift in Sources */,
+				2653D9611BD41AB6FA3CDA06 /* RoundTripJob.swift in Sources */,
+				831D930AD8367A81F3DB7598 /* RoundTripMessages.swift in Sources */,
+				CDD075051619C39B61CFFCAF /* SecurityScopedBookmarkStore.swift in Sources */,
+				70146EE378CB76A246D0AA11 /* ShareDestination.swift in Sources */,
+				DE2E3290799026BDB31925D9 /* ShareInbox.swift in Sources */,
+				A5603A6524A5E9EDBF476E26 /* WorkflowProtocol.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A44CC88F29CC0EB985BEF783 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				32F18F2AD1B130CF72C724D2 /* main.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		2F872CCA040BA3E690042FB2 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 5E31834AA5A36D32DECC95EC /* FinalCutAgentCore */;
+			targetProxy = E5776DB512C8B118734B02BC /* PBXContainerItemProxy */;
+		};
+		5A6308E5A66B692E049A1560 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 5E31834AA5A36D32DECC95EC /* FinalCutAgentCore */;
+			targetProxy = D8A7461AB5C5B7C20F9B7820 /* PBXContainerItemProxy */;
+		};
+		871E377829090E4193302F0B /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = A0D09B804A5E3650C8252A7F /* FinalCutAgentWorkflowExtension */;
+			targetProxy = 5B2504DE6A83FDD5C6D8A230 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		0FFFCEDD709F660E5E422670 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = Resources/FinalCutAgent.entitlements;
+				COMBINE_HIDPI_IMAGES = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = "Resources/App-Info.plist";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-ObjC",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.ssojux2.vlogsrt;
+				SDKROOT = macosx;
+				SKIP_INSTALL = NO;
+			};
+			name = Release;
+		};
+		10003542A0C70E520A289AFB /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ADDITIONAL_SDKS = /Library/Developer/SDKs/WorkflowExtensionSDK.sdk;
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_ENTITLEMENTS = Resources/WorkflowExtension.entitlements;
+				COMBINE_HIDPI_IMAGES = YES;
+				FRAMEWORK_SEARCH_PATHS = "$(inherited) /Library/Developer/SDKs/WorkflowExtensionSDK.sdk/Library/Frameworks";
+				GENERATE_INFOPLIST_FILE = NO;
+				HEADER_SEARCH_PATHS = "$(inherited) /Library/Developer/SDKs/WorkflowExtensionSDK.sdk/usr/include";
+				INFOPLIST_FILE = "Resources/WorkflowExtension-Info.plist";
+				LD_ENTRY_POINT = _ProExtensionMain;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@executable_path/../../../../Frameworks",
+				);
+				LIBRARY_SEARCH_PATHS = "$(inherited) /Library/Developer/SDKs/WorkflowExtensionSDK.sdk/usr/lib";
+				OTHER_LDFLAGS = (
+					"$(inherited) -fapplication-extension -lProExtension",
+					"-ObjC",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.ssojux2.vlogsrt.workflow;
+				SDKROOT = macosx;
+				SKIP_INSTALL = YES;
+				SWIFT_OBJC_BRIDGING_HEADER = "Resources/FinalCutAgentWorkflowExtension-Bridging-Header.h";
+			};
+			name = Debug;
+		};
+		1299E4DFA6682674F14C5970 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_STYLE = Manual;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DEVELOPMENT_TEAM = "";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MARKETING_VERSION = 1.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 6.0;
+			};
+			name = Release;
+		};
+		27F4AE43B81F0FD450DB0C63 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				COMBINE_HIDPI_IMAGES = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.ssojux2.vlogsrt.FinalCutAgentCore;
+				SDKROOT = macosx;
+				SKIP_INSTALL = YES;
+			};
+			name = Release;
+		};
+		3498FE8159E973143957FA0A /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = Resources/FinalCutAgent.entitlements;
+				COMBINE_HIDPI_IMAGES = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = "Resources/App-Info.plist";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-ObjC",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.ssojux2.vlogsrt;
+				SDKROOT = macosx;
+				SKIP_INSTALL = NO;
+			};
+			name = Debug;
+		};
+		7B8F771A02C42733B08E3E8D /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ADDITIONAL_SDKS = /Library/Developer/SDKs/WorkflowExtensionSDK.sdk;
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_ENTITLEMENTS = Resources/WorkflowExtension.entitlements;
+				COMBINE_HIDPI_IMAGES = YES;
+				FRAMEWORK_SEARCH_PATHS = "$(inherited) /Library/Developer/SDKs/WorkflowExtensionSDK.sdk/Library/Frameworks";
+				GENERATE_INFOPLIST_FILE = NO;
+				HEADER_SEARCH_PATHS = "$(inherited) /Library/Developer/SDKs/WorkflowExtensionSDK.sdk/usr/include";
+				INFOPLIST_FILE = "Resources/WorkflowExtension-Info.plist";
+				LD_ENTRY_POINT = _ProExtensionMain;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@executable_path/../../../../Frameworks",
+				);
+				LIBRARY_SEARCH_PATHS = "$(inherited) /Library/Developer/SDKs/WorkflowExtensionSDK.sdk/usr/lib";
+				OTHER_LDFLAGS = (
+					"$(inherited) -fapplication-extension -lProExtension",
+					"-ObjC",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.ssojux2.vlogsrt.workflow;
+				SDKROOT = macosx;
+				SKIP_INSTALL = YES;
+				SWIFT_OBJC_BRIDGING_HEADER = "Resources/FinalCutAgentWorkflowExtension-Bridging-Header.h";
+			};
+			name = Release;
+		};
+		BE67FC7ACE35CF91E229C602 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_STYLE = Manual;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				DEVELOPMENT_TEAM = "";
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MARKETING_VERSION = 1.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 6.0;
+			};
+			name = Debug;
+		};
+		F16359A2FB6DC848C018A578 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				COMBINE_HIDPI_IMAGES = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.ssojux2.vlogsrt.FinalCutAgentCore;
+				SDKROOT = macosx;
+				SKIP_INSTALL = YES;
+			};
+			name = Debug;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		0B2F3D5B05A168F236CE94B1 /* Build configuration list for PBXNativeTarget "FinalCutAgentCore" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				F16359A2FB6DC848C018A578 /* Debug */,
+				27F4AE43B81F0FD450DB0C63 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		533119983072E298B4399274 /* Build configuration list for PBXProject "FinalCutAgent" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				BE67FC7ACE35CF91E229C602 /* Debug */,
+				1299E4DFA6682674F14C5970 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		898B04677690FCFADC51E257 /* Build configuration list for PBXNativeTarget "FinalCutAgentWorkflowExtension" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				10003542A0C70E520A289AFB /* Debug */,
+				7B8F771A02C42733B08E3E8D /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		FC121F0E3D6FF7356848AEFA /* Build configuration list for PBXNativeTarget "FinalCutAgent" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				3498FE8159E973143957FA0A /* Debug */,
+				0FFFCEDD709F660E5E422670 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 858E05CF7484AB74CCC60651 /* Project object */;
+}

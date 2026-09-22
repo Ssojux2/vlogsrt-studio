@@ -12,6 +12,12 @@ from vlogsrt.cli import main
 from vlogsrt.config import Config
 from vlogsrt.models import Chunk, ChunkMark, Trace
 from vlogsrt.output import parse_srt
+from vlogsrt.transcribe import (
+    ChunkResponse,
+    EmptyTranscript,
+    MalformedTranscript,
+    TranscriptionJob,
+)
 
 SYNTHETIC = Path(__file__).parent / "fixtures" / "synthetic"
 VIDEO = Path("golden/demo.mp4")
@@ -30,6 +36,58 @@ def test_run_end_to_end(tmp_path: Path) -> None:
     srt = parse_srt(result.outputs["srt"].read_text(encoding="utf-8"))
     assert len(srt) == len(result.cues)
     assert [cue.index for cue in srt] == list(range(1, len(srt) + 1))
+
+
+def test_checked_caption_path_rejects_an_unanswered_chunk(tmp_path: Path) -> None:
+    """최종 자막에서 일부 조각 응답 누락이 짧은 SRT 성공으로 둔갑하는 회귀를 잡는다."""
+    prepared = pipeline.Prepared(
+        stem="final",
+        duration=2.0,
+        chunks=(
+            Chunk(tmp_path / "0.mp3", 0.0, 1.0, 0),
+            Chunk(tmp_path / "1.mp3", 1.0, 1.0, 1),
+        ),
+        source="final.wav",
+    )
+
+    class MissingSecond:
+        def transcribe(self, job: TranscriptionJob, cfg: Config) -> list[ChunkResponse]:
+            return [
+                ChunkResponse(
+                    index=0,
+                    offset=0.0,
+                    payload={"segments": [{"start": 0.0, "end": 0.5, "text": "안녕"}]},
+                )
+            ]
+
+    with pytest.raises(MalformedTranscript, match="응답이 돌아오지 않은 조각"):
+        pipeline._make_spine(  # noqa: SLF001 - coverage 관문의 좁은 회귀 시험
+            prepared, Config(), MissingSecond(), require_complete_coverage=True
+        )
+
+
+def test_checked_caption_does_not_call_whitespace_an_affirmative_silence(tmp_path: Path) -> None:
+    prepared = pipeline.Prepared(
+        stem="final",
+        duration=1.0,
+        chunks=(Chunk(tmp_path / "0.mp3", 0.0, 1.0, 0),),
+        source="final.wav",
+    )
+
+    class Whitespace:
+        def transcribe(self, job: TranscriptionJob, cfg: Config) -> list[ChunkResponse]:
+            return [
+                ChunkResponse(
+                    index=0,
+                    offset=0.0,
+                    payload={"segments": [{"start": 0.0, "end": 1.0, "text": "   "}]},
+                )
+            ]
+
+    with pytest.raises(EmptyTranscript):
+        pipeline._make_spine(  # noqa: SLF001
+            prepared, Config(), Whitespace(), require_complete_coverage=True
+        )
 
 
 def test_output_text_comes_straight_from_the_transcription(tmp_path: Path) -> None:
@@ -98,7 +156,7 @@ def test_a_trace_without_chunk_marks_still_loads(tmp_path: Path) -> None:
     """조각 경계는 기록일 뿐이다. 없다고 `redo`가 막히면 안 된다."""
     pipeline.run(VIDEO, Config(), tmp_path, force_offline=True)
     body = json.loads((tmp_path / "trace.json").read_text("utf-8"))
-    assert body["chunks"] == [], "메타 픽스처만 쓴 실행에는 조각이 없다"
+    assert [row["offset"] for row in body["chunks"]] == [0.0, 12.0]
     del body["chunks"]
     (tmp_path / "old.json").write_text(json.dumps(body), encoding="utf-8")
 
@@ -266,3 +324,53 @@ def test_no_cache_run_reuses_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyP
         pipeline.prepare(video, Config(), offline=False, workdir=work, reuse_cache=False)
     assert len(calls) == 2  # 두 번 다 새로 뽑았다
     assert [path.name for path in work.iterdir()] == ["demo.mp3"]
+
+
+# ─────────────────────────────────────────────────────────────
+#  빈 초안의 보고 — EmptyTranscript (P3-01)
+# ─────────────────────────────────────────────────────────────
+
+
+class _Scripted:
+    """정해둔 응답을 그대로 돌려주는 가짜 전사자."""
+
+    def __init__(self, responses: list[ChunkResponse]) -> None:
+        self.responses = responses
+
+    def transcribe(self, job: TranscriptionJob, cfg: Config) -> list[ChunkResponse]:
+        return self.responses
+
+
+def test_fetch_draft_keeps_the_legacy_spine_flow(tmp_path: Path) -> None:
+    """레거시 흐름은 그대로다 — 호출 → build_spine. 바뀌는 건 빈 초안의 예외뿐이다."""
+    job = TranscriptionJob(stem="demo", chunks=(Chunk(tmp_path / "demo.mp3", 0.0, 12.0, 0),))
+    voiced = _Scripted(
+        [ChunkResponse(0, 0.0, {"segments": [{"start": 0.0, "end": 1.0, "text": " 망원동"}]})]
+    )
+    draft = pipeline.fetch_draft(voiced, job, Config())
+    assert [segment.text for segment in draft] == ["망원동"]
+
+
+def test_fetch_draft_raises_empty_transcript_on_an_empty_draft(tmp_path: Path) -> None:
+    job = TranscriptionJob(stem="demo", chunks=(Chunk(tmp_path / "demo.mp3", 0.0, 12.0, 0),))
+    silent = _Scripted([ChunkResponse(0, 0.0, {"segments": []})])
+    with pytest.raises(EmptyTranscript) as excinfo:
+        pipeline.fetch_draft(silent, job, Config())
+    assert isinstance(excinfo.value, RuntimeError)  # 기존 except RuntimeError 호환
+
+
+def test_run_with_only_empty_segments_stops_at_empty_transcript(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """응답이 전부 빈 리스트면 실행은 EmptyTranscript로 멈춘다 — 무음의 증거는 아니다."""
+    fixtures = tmp_path / "silent"
+    fixtures.mkdir()
+    (fixtures / "demo.whisper.json").write_text(
+        json.dumps({"chunks": [{"index": 0, "offset": 0.0, "response": {"segments": []}}]}),
+        encoding="utf-8",
+    )
+    (fixtures / "demo.meta.json").write_text(json.dumps({"duration": 12.0}), encoding="utf-8")
+    monkeypatch.setenv("VLOGSRT_FIXTURE_DIR", str(fixtures))
+
+    with pytest.raises(EmptyTranscript):
+        pipeline.run(VIDEO, Config(), tmp_path / "out", force_offline=True)

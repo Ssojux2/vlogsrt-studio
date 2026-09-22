@@ -88,6 +88,19 @@ class Config:
     # 재전사 결과에서 되풀이가 이 비율을 넘게 덮으면 회복 실패로 본다. 일부만 되풀이인
     # 결과는 통째로 버리지 않는다 — 원본보다는 낫다.
     loop_repetitive_share: float = 0.5
+    # ─── 글자 교정 (기본으로 켜져 있다) ──────────────────────
+    # 시각과 세그먼트 경계는 whisper 그대로 두고 **글자만** `verify_model`의 것으로 갈아낀다
+    # (D37). 끄려면 `--no-retext`. 아래 값은 전부 잠정이다 — 현재 설정(180초 조각)으로 녹화한
+    # 실데이터가 없어서 교체를 **덜 하는 쪽**으로 골랐다. 근거는 값마다 D37에 있다.
+    retext_enabled: bool = True
+    # **안전선은 세그먼트 게이트다.** 조각 유사도가 0.91~0.98로 멀쩡한 조각에서도 큐 하나에
+    # 82~165배가 몰렸다(D37). 셋 다 통과해야 교체한다.
+    retext_segment_match_floor: float = 0.5  # whisper 글자의 절반은 gpt도 같은 자리에서 들었다
+    retext_length_ratio_max: float = 1.5  # 더 불면 whisper가 놓친 말을 시각 없이 싣는 것이다
+    retext_length_ratio_min: float = 0.67  # gpt가 말을 **지우는** 방향도 같은 폭으로 막는다
+    retext_length_slack_chars: int = 3  # 이 이하의 차이는 비율을 보지 않는다 — 1~2자 세그먼트
+    # 보조선. 무관한 한국어 텍스트끼리도 0.03~0.22가 나온다(D37 실측). 이 아래면 조각이 틀렸다.
+    retext_chunk_similarity_floor: float = 0.5
 
     api_max_retries: int = 4
     api_backoff_base: float = 2.0
