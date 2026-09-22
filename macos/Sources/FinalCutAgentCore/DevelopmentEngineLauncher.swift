@@ -30,18 +30,27 @@ public enum DevelopmentJobStager {
   private static let inputs = [
     "input.fcpxml",
     "project-selection.jsonl",
+    "pricing-snapshot.jsonl",
     "analysis-authorization.jsonl",
     "edit-plan.jsonl",
     "approved-candidates.txt",
+    "cancellation.jsonl",
+    "media-grant.json",
+    "caption-authorization.jsonl",
   ]
   private static let results = [
     "analysis-estimate.jsonl",
     "analysis-attempts.jsonl",
+    "analysis-usage.jsonl",
     "candidates.jsonl",
     "vision-decisions.jsonl",
     "edit-plan.jsonl",
     "roughcut.fcpxml",
     "roughcut.fcpxml.review.json",
+    "caption-request.jsonl",
+    "caption-estimate.jsonl",
+    "caption-result.jsonl",
+    "cancellation.jsonl",
   ]
 
   public static func stage(
@@ -79,6 +88,10 @@ public enum DevelopmentJobStager {
     to appGroupJob: URL,
     fileManager: FileManager = .default
   ) throws {
+    // 취소된 작업의 결과는 동기화하지 않는다 — 취소 뒤 새 호출·sync·import 차단.
+    guard !CancellationStore.isCancelled(jobURL: externalJob, fileManager: fileManager) else {
+      throw DevelopmentEngineError.cancelled
+    }
     for name in results {
       let rootSource = externalJob.appendingPathComponent(name)
       let workspaceSource = externalJob.appendingPathComponent("workspace").appendingPathComponent(name)
@@ -153,6 +166,7 @@ public enum DevelopmentEngineError: Error, Equatable, LocalizedError {
   case stagedInputChanged(String)
   case unsafePath(String)
   case nonRegularFile(String)
+  case cancelled
 
   public var errorDescription: String? {
     switch self {
@@ -164,6 +178,8 @@ public enum DevelopmentEngineError: Error, Equatable, LocalizedError {
       "작업 폴더가 symlink이거나 허용 범위 밖입니다: \(path)"
     case .nonRegularFile(let name):
       "동기화 대상이 일반 파일이 아닙니다: \(name)"
+    case .cancelled:
+      "취소된 작업입니다 — 새 호출·동기화·import를 하지 않습니다"
     }
   }
 }

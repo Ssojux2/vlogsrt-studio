@@ -6,5 +6,6 @@
   <array><string>5955379R8P.com.ssojux2.vlogsrt</string></array>
   <key>com.apple.security.files.user-selected.read-write</key><true/>
   <key>com.apple.security.automation.apple-events</key><true/>
+  <key>com.apple.security.network.client</key><true/>
 </dict></plist>
 

@@ -42,6 +42,7 @@ ignore = ["SIM108"]
 
 [tool.ruff.lint.per-file-ignores]
 "scripts/*" = ["T20"]
+"macos/scripts/*" = ["T20"]
 "tests/*" = ["T20"]
 
 [tool.mypy]

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import wave
 import xml.etree.ElementTree as ET
 from dataclasses import replace
@@ -15,7 +16,11 @@ from vlogsrt.project.fcpxml import parse_project
 from vlogsrt.project.final_caption import (
     CaptionDelivery,
     CaptionGenerationError,
+    build_caption_estimate,
+    caption_settings_sha256,
+    create_caption_request,
 )
+from vlogsrt.project.pricing import official_pricing_snapshot
 from vlogsrt.project.review import (
     CandidateAnalysis,
     build_review_plan,
@@ -34,6 +39,7 @@ from vlogsrt.project.workflow_protocol import (
     AnalysisAttempt,
     AnalysisAuthorization,
     AnalysisEstimate,
+    CaptionAuthorization,
     CaptionResult,
     ProjectRevision,
     VisionWindowDecision,
@@ -293,6 +299,8 @@ def test_staged_cli_roundtrip_applies_only_the_reviewed_candidate(
     candidates_path.write_text(
         "".join(encode_message(candidate) for candidate in batch.candidates), encoding="utf-8"
     )
+    assert cli.main(["project", "inspect", str(workspace)]) == 0
+    assert WorkflowJournal.open(workspace / "workflow.jsonl").state == "estimate_ready"
 
     assert (
         cli.main(
@@ -368,7 +376,45 @@ def test_staged_cli_roundtrip_applies_only_the_reviewed_candidate(
     ]
     assert cli.main(caption_args) == 2
     assert WorkflowJournal.open(workspace / "workflow.jsonl").state == "roughcut_imported"
-    assert cli.main([*caption_args, "--yes"]) == 0
+    # 승인은 방금 고정된 추정과 요청·가격 리비전에 정확히 묶인 것만 통과한다.
+    request = create_caption_request(
+        WorkflowJournal.open(workspace / "workflow.jsonl").revision.revision, audio, roughcut
+    )
+    pricing = official_pricing_snapshot()
+    estimate = build_caption_estimate(
+        request,
+        audio_seconds=Fraction(12),
+        pricing=pricing,
+        settings_sha256=caption_settings_sha256(project_commands.load_config()),
+    )
+    assert estimate.audio_seconds == Fraction(12)
+    authorization = tmp_path / "caption-authorization.jsonl"
+    authorization.write_text(
+        encode_message(
+            CaptionAuthorization(
+                request_revision=request.request_revision,
+                estimate_revision=estimate.estimate_revision,
+                pricing_snapshot_revision=pricing.snapshot_revision,
+                authorized_at="2026-09-21T05:00:00Z",
+            )
+        ),
+        encoding="utf-8",
+    )
+    stale = tmp_path / "caption-authorization-stale.jsonl"
+    stale.write_text(
+        encode_message(
+            CaptionAuthorization(
+                request_revision="b" * 64,
+                estimate_revision=estimate.estimate_revision,
+                pricing_snapshot_revision=pricing.snapshot_revision,
+                authorized_at="2026-09-21T05:00:00Z",
+            )
+        ),
+        encoding="utf-8",
+    )
+    assert cli.main([*caption_args, "--yes", "--caption-authorization", str(stale)]) == 2
+    assert WorkflowJournal.open(workspace / "workflow.jsonl").state == "caption_estimate_ready"
+    assert cli.main([*caption_args, "--yes", "--caption-authorization", str(authorization)]) == 0
     assert WorkflowJournal.open(workspace / "workflow.jsonl").state == "caption_ready"
 
 
@@ -389,11 +435,16 @@ def test_inspect_is_network_free_and_online_analyze_rejects_stale_authorization(
     estimate_message = project_commands._read_one(workspace / "analysis-estimate.jsonl")
     assert isinstance(estimate_message, AnalysisEstimate)
     assert estimate_message.model == "gpt-5.6-luna"
-    assert WorkflowJournal.open(workspace / "workflow.jsonl").state == "received"
+    assert estimate_message.pricing_snapshot_revision == (
+        official_pricing_snapshot().snapshot_revision
+    )
+    assert WorkflowJournal.open(workspace / "workflow.jsonl").state == "estimate_ready"
 
     stale = AnalysisAuthorization(
         input_revision="b" * 64,
         estimate_revision=estimate_message.estimate_revision,
+        pricing_snapshot_revision=estimate_message.pricing_snapshot_revision,
+        media_grant_revision=estimate_message.media_grant_revision,
         authorized_at="2026-09-21T04:00:00Z",
     )
     authorization = tmp_path / "authorization.jsonl"
@@ -411,7 +462,7 @@ def test_inspect_is_network_free_and_online_analyze_rejects_stale_authorization(
         )
         == 2
     )
-    assert WorkflowJournal.open(workspace / "workflow.jsonl").state == "received"
+    assert WorkflowJournal.open(workspace / "workflow.jsonl").state == "estimate_ready"
 
 
 def test_offline_analysis_replays_bound_luna_decisions_and_records_attempts(
@@ -436,7 +487,7 @@ def test_offline_analysis_replays_bound_luna_decisions_and_records_attempts(
         window_id=original.window_id,
         choice="propose_cut",
         candidate_id=original.candidate_id,
-        evidence_frame_ids=(),
+        evidence_frame_ids=("evidence-frame-1",),
         confidence=original.confidence,
         response_sha256="f" * 64,
     )
@@ -620,3 +671,33 @@ def test_silence_candidates_and_ripple_stay_on_every_supported_frame_grid(
     sequence = root.find("library/event/project/sequence")
     assert sequence is not None
     assert parse_fcpx_time(sequence.get("duration", "")) == plan.expected_output_duration
+
+
+def test_staged_media_grant_binds_the_estimate_and_drift_closes_it(tmp_path: Path) -> None:
+    """앱이 스테이징한 media-grant.json이 비용 추정 권한 리비전에 묶이는지 잡는다."""
+    input_path, _document_value = _project(tmp_path)
+    workspace = tmp_path / "workspace"
+    assert cli.main(["project", "receive", str(input_path), "--workspace", str(workspace)]) == 0
+    assert cli.main(["project", "inspect", str(workspace)]) == 0
+    without_grant = project_commands._read_one(workspace / "analysis-estimate.jsonl")
+    assert isinstance(without_grant, AnalysisEstimate)
+
+    # 같은 미디어, 다른 앱 권한 — 추정 리비전이 달라져야 한다.
+    workspace2 = tmp_path / "workspace-granted"
+    assert cli.main(["project", "receive", str(input_path), "--workspace", str(workspace2)]) == 0
+    (workspace2 / "media-grant.json").write_text(
+        json.dumps({"grant_revision": "d" * 64, "roots": ["/Volumes/Media"]}),
+        encoding="utf-8",
+    )
+    assert cli.main(["project", "inspect", str(workspace2)]) == 0
+    with_grant = project_commands._read_one(workspace2 / "analysis-estimate.jsonl")
+    assert isinstance(with_grant, AnalysisEstimate)
+    assert with_grant.media_grant_revision != without_grant.media_grant_revision
+    assert with_grant.estimate_revision != without_grant.estimate_revision
+    assert with_grant.cost_upper_bound == without_grant.cost_upper_bound
+
+    # 형태가 틀린 권한 기록은 조용히 무시하지 않고 실패로 닫는다.
+    workspace3 = tmp_path / "workspace-broken-grant"
+    assert cli.main(["project", "receive", str(input_path), "--workspace", str(workspace3)]) == 0
+    (workspace3 / "media-grant.json").write_text('{"grant_revision": "nope"}', encoding="utf-8")
+    assert cli.main(["project", "inspect", str(workspace3)]) == 2

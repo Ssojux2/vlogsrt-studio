@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE dictionary SYSTEM "http://www.apple.com/DTDs/sdef-1.0.dtd">
+<!--
+  Final Cut Agent — Apple Media Asset Protocol 확장 사전.
+
+  계약 모양은 정본 구조를 따른다: `asset`은 **클래스**이고 asset location·
+  library location·data options는 그 **속성**이며, 새 자산 만들기는 표준
+  `make` **명령** 하나다. Apple event(SDEF/AppleScript) 응답 계층은 구현되어
+  있다 — cocoa class가 FinalCutAgentCore의 @objc 노출 클래스
+  (MediaAssetProxy·CreateAssetCommand)로 연결되고 Get Property는 KVC로,
+  make는 NSScriptCommand 서브클래스로 답한다.
+
+  주의: 이것은 Apple event 계층이다. Final Cut 앱이 확장과 실제로 통신하는
+  Media Asset Protocol XPC(ProExtensionHost) 와이어링은 여전히 구현되지
+  않았다 — SDK가 있는 빌드에서 별도 어댑터가 이 모델을 연결해야 한다.
+-->
+<dictionary title="Final Cut Agent">
+  <suite name="Media Asset Protocol" code="FCAp" description="Final Cut과 확장 사이의 미디어 자산 경계">
+    <class name="asset" code="FCAa" description="Final Cut이 확장에 노출하는 미디어 자산" plural="assets">
+      <cocoa class="MediaAssetProxy"/>
+      <property name="asset location" code="aloc" type="file" access="r"
+        description="프로젝트·이벤트 자산의 실제 파일 위치">
+        <cocoa key="assetLocation"/>
+      </property>
+      <property name="library location" code="lloc" type="file" access="r"
+        description="라이브러리 저장 위치">
+        <cocoa key="libraryLocation"/>
+      </property>
+      <property name="data options" code="dopt" type="record" access="rw"
+        description="자산 데이터 접근 옵션(원본/프록시·최대 해상도)">
+        <cocoa key="dataOptions"/>
+      </property>
+    </class>
+    <command name="make" code="fcapmake" description="새 자산(렌더 결과 등)을 만들어 등록한다">
+      <cocoa class="CreateAssetCommand"/>
+      <direct-parameter type="file" description="새 자산 파일"/>
+      <result type="asset" description="등록된 자산"/>
+    </command>
+  </suite>
+</dictionary>

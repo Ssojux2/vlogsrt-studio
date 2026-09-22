@@ -195,6 +195,12 @@ def _add_project_command(sub: argparse._SubParsersAction) -> None:
     caption.add_argument("final_fcpxml", type=Path)
     caption.add_argument("-o", "--out", type=Path, required=True)
     caption.add_argument("--yes", action="store_true", help="표시된 온라인 예상 비용 확인")
+    caption.add_argument(
+        "--caption-authorization",
+        type=Path,
+        default=None,
+        help="CaptionAuthorization JSONL — 온라인 자막은 승인이 필요하다",
+    )
     caption_mode = caption.add_mutually_exclusive_group()
     caption_mode.add_argument("--offline", action="store_true", help="픽스처만 사용 (기본값)")
     caption_mode.add_argument("--online", action="store_true", help="실제 API 호출. 유료")

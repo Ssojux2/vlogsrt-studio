@@ -2382,3 +2382,49 @@ N개는 아무것도 새로 말하지 않는다.
 카운터를 소스 자체에 각인한다), 합성 전사는 0~10초만 덮어 여집합 ≈20초를 블록으로
 만들고, 세 번의 실행(픽스처 없음 → 닫힘+덤프 → 재생)으로 제거 ≥1건·출력 duration <
 입력 duration·프레임 전부 진짜 JPEG(매직 바이트)를 기계로 확인한다.
+
+---
+
+## D41 — Media Asset Protocol의 XPC 어댑터는 SDK에 자리가 없다. Apple event가 유일한 표면이다 (2026-09-21)
+
+**문제**: 인수인계 기록이 남긴 다음 행동 하나가 "Workflow Extension SDK의 Media
+Asset Protocol XPC adapter를 구현하거나 SDK 부재 근거를 기록함"이었다. 두 갈래
+모두 전제가 확인된 적이 없었다 — SDK가 이 머신에 있는지도, 그 SDK에 자산 API가
+있는지도 본 사람이 없었다.
+
+**실측**: 둘 다 열어 봤다.
+
+| 확인한 것 | 결과 |
+|---|---|
+| `/Library/Developer/SDKs/WorkflowExtensionSDK.sdk` | **있다.** `project.yml`의 `ADDITIONAL_SDKS`가 가리키는 그 경로다 |
+| `usr/include/ProExtension/ProExtension.h` | 선언 하나뿐 — `ProExtensionHostSingleton()` |
+| `Library/Frameworks/ProExtensionHost.framework/Headers` | `FCPXHost.h` · `ProExtensionHost.h` 둘. `Modules/module.modulemap` 있음 |
+| `FCPXHost` 프로토콜 | `timeline` · `versionString` · `bundleIdentifier` · `name`. 전부 읽기 전용 |
+| `FCPXTimeline` | `movePlayheadTo:` · `playheadTime` · `activeSequence` · `sequenceTimeRange` · 관찰자 등록 |
+| `FCPXLibrary` · `FCPXEvent` · `FCPXProject` · `FCPXSequence` | 이름 · UID · URL · 시각. 전부 읽기 전용 속성 |
+| 헤더 전체에서 `asset` · `xpc` · `media` 검색 | **0건.** `CMTime` import 두 줄이 전부다 |
+
+**결정**: XPC 어댑터를 구현하지 않는다. 구현할 자리가 없다 — SDK가 노출하는
+것은 활성 타임라인을 **읽고 재생헤드를 옮기는** 표면 하나이며, 자산을 만들거나
+등록하는 API도, 그 용도의 XPC 서비스도 선언되어 있지 않다.
+
+Apple이 자산 쪽에 정한 표면은 **Apple event와 SDEF**다. 이미 그 길로 구현되어
+있다 — `macos/Resources/FinalCutAgent.sdef`가 `asset`을 클래스로, asset location ·
+library location · data options를 속성으로, 자산 등록을 표준 `make` 명령으로
+선언하고, `MediaAssetScripting.swift`가 `NSScriptCommand`와 KVC로 답한다.
+`MediaAssetProtocol.swift`는 그 계약의 값과 검증만 소유한다.
+
+**그래서 두 표면은 겹치지 않고 나뉜다.**
+
+| 표면 | 무엇을 하나 | 어디에 |
+|---|---|---|
+| ProExtensionHost (`canImport` 안) | 활성 시퀀스·재생헤드를 읽고 옮긴다 | `WorkflowExtension/FinalCutTimelineBridge.swift` |
+| Apple event · SDEF | 자산 위치를 답하고 `make`로 등록한다 | `FinalCutAgentCore/MediaAssetScripting.swift` |
+
+**남는 것은 구현이 아니라 실기 확인이다.** KVC Apple event 계층은 빌드되고
+단위 시험도 있지만, 실제 Final Cut이 이 응답을 받아들이는지는 서명된 앱으로
+한 번 돌려봐야 안다. 그 확인이 끝나기 전에는 자산 표면을 "된다"고 적지 않는다.
+
+**근거의 한계**: 위 표는 설치된 SDK(2024-10-30 배포분)와 Final Cut Pro
+번들 안의 `ProExtensionHost.framework`를 읽은 결과다. Apple이 이후 배포에서
+자산 API를 더할 가능성은 배제하지 않는다. 더해지면 이 결정을 다시 연다.
