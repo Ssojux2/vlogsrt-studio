@@ -45,6 +45,7 @@ from pathlib import Path
 from vlogsrt import env, log, transcribe
 from vlogsrt.config import Config, load_config
 from vlogsrt.project import runner
+from vlogsrt.project.clips import collect_clip_paths, probe_clips, synthesize_fcpxml
 from vlogsrt.project.config import ProjectConfig, load_project_config
 from vlogsrt.project.fcpxml import element_tree, parse_project
 from vlogsrt.project.final_caption import (
@@ -231,7 +232,12 @@ def project_command(args: argparse.Namespace) -> int:
 
 
 def _project_receive(args: argparse.Namespace) -> int:
-    document = parse_project(args.input)
+    workspace = args.workspace
+    workspace.mkdir(parents=True, exist_ok=True)
+    if (workspace / _JOURNAL).exists():
+        raise ValueError(f"이미 수신된 작업공간이다: {workspace}")
+    source, origin = _receive_source(args, workspace)
+    document = parse_project(source)
     root = element_tree(document.raw_xml, str(document.info_path))
     projects = root.findall("library/event/project")
     if len(projects) != 1:
@@ -259,22 +265,48 @@ def _project_receive(args: argparse.Namespace) -> int:
         frame_duration=document.frame_duration,
         duration=parse_fcpx_time(duration_text),
     )
-    workspace = args.workspace
-    workspace.mkdir(parents=True, exist_ok=True)
-    if (workspace / _JOURNAL).exists():
-        raise ValueError(f"이미 수신된 작업공간이다: {workspace}")
-    shutil.copyfile(document.info_path, workspace / _INPUT)
+    stored = workspace / _INPUT
+    if document.info_path.resolve() != stored.resolve():
+        shutil.copyfile(document.info_path, stored)
     _write_json(
         workspace / _SOURCE,
         {
             "input_path": str(document.input_path.resolve()),
             "info_path": str(document.info_path.resolve()),
+            "origin": origin,
         },
     )
     WorkflowJournal.create(workspace / _JOURNAL, revision)
     _write_messages(workspace / _REVISION, (revision,))
     _protocol_out(revision)
     return 0
+
+
+def _receive_source(args: argparse.Namespace, workspace: Path) -> tuple[Path, dict[str, object]]:
+    """입력을 확정한다 — FCPXML은 그대로, 영상 묶음은 타임라인을 합성한다.
+
+    합성물은 곧바로 작업공간의 `input.fcpxml`이 되고, 그 뒤로는 내보낸 XML과
+    구별되지 않는다. 같은 파서·같은 거부 규율을 그대로 받는다는 뜻이다.
+    `origin`은 어디서 왔는지의 기록이다 — 합성이면 어떤 파일을 어떤 순서로
+    묶었는지 남겨야 리비전이 무엇을 설명하는지 말할 수 있다.
+    """
+    from_clips = getattr(args, "from_clips", None)
+    if (args.input is None) == (from_clips is None):
+        raise ValueError("입력 FCPXML과 --from-clips 중 정확히 하나를 주어야 한다")
+    if from_clips is None:
+        return args.input, {"kind": "fcpxml"}
+    directory = Path(from_clips)
+    probes = probe_clips(collect_clip_paths(directory))
+    destination = workspace / _INPUT
+    destination.write_bytes(synthesize_fcpxml(probes, project_name=directory.name))
+    return destination, {
+        "kind": "clips",
+        "directory": str(directory.resolve()),
+        "clips": [
+            {"name": probe.path.name, "sha256": probe.content_sha256, "frames": probe.frame_count}
+            for probe in probes
+        ],
+    }
 
 
 def _project_inspect(args: argparse.Namespace) -> int:

@@ -159,8 +159,16 @@ def _add_project_command(sub: argparse._SubParsersAction) -> None:
         action for action in project_commands._choices_actions if action.dest != "run"
     ]
 
-    receive = project_commands.add_parser("receive", help="FCPXML을 작업공간에 수신")
-    receive.add_argument("input", type=Path)
+    receive = project_commands.add_parser(
+        "receive", help="FCPXML 또는 원본 영상 묶음을 작업공간에 수신"
+    )
+    receive.add_argument("input", type=Path, nargs="?", default=None)
+    receive.add_argument(
+        "--from-clips",
+        type=Path,
+        default=None,
+        help="원본 영상이 든 디렉터리 — 파일명 순서로 이어 붙인 타임라인을 합성한다",
+    )
     receive.add_argument("--workspace", type=Path, required=True)
 
     inspect = project_commands.add_parser("inspect", help="네트워크 없이 분석 비용 상한 산출")

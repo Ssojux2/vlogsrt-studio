@@ -170,6 +170,95 @@ def probe_audio_stream(source: Path, stream_index: int) -> AudioStreamInfo:
     )
 
 
+@dataclass(frozen=True, slots=True)
+class MediaSummary:
+    """한 파일의 스트림 구성과 화면 기하 — 입력 합성이 선언해야 하는 것만 담는다.
+
+    `probe_video_stream`이 증명하는 것은 시계뿐이다. 영상 파일에서 FCPXML
+    `format`·`asset`을 적으려면 화면 크기와 색 좌표, 오디오 유무를 더 알아야 한다.
+    그 값들을 **같은 ffprobe 한 번**에서 읽어 선언과 증거가 갈라지지 않게 한다.
+    모르는 값은 빈 문자열·`None`으로 그대로 돌려준다 — 여기서 기본값을 지어내면
+    그 추측이 타임라인 선언이 되어 버린다.
+    """
+
+    video_streams: int
+    audio_streams: int
+    width: int
+    height: int
+    color_primaries: str
+    color_transfer: str
+    color_matrix: str
+    audio_channels: int | None
+    audio_rate: int | None
+
+
+def probe_media_summary(source: Path) -> MediaSummary:
+    """스트림 구성·화면 크기·색 좌표·오디오 파라미터를 한 번에 읽는다.
+
+    비디오 스트림이 없으면 죽는다 — 화면이 없는 입력은 컷 대상이 아니다. 오디오는
+    없을 수 있고 그때 `audio_*`는 `None`이다. 기하와 색은 **첫 비디오 스트림**,
+    오디오 파라미터는 **첫 오디오 스트림**의 것이다.
+    """
+    ffprobe = require_ffmpeg("ffprobe")
+    completed = _run(
+        [
+            ffprobe, "-v", "error",
+            "-show_entries", "stream=index,codec_type,width,height,"
+            "color_primaries,color_transfer,color_space,channels,sample_rate",
+            "-of", "json",
+            str(source),
+        ]
+    )  # fmt: skip
+    streams = _stream_entries(completed.stdout, source)
+    videos = [entry for entry in streams if entry.get("codec_type") == "video"]
+    audios = [entry for entry in streams if entry.get("codec_type") == "audio"]
+    if not videos:
+        raise RuntimeError(f"비디오 스트림이 없습니다: {source}")
+    first_audio = audios[0] if audios else None
+    return MediaSummary(
+        video_streams=len(videos),
+        audio_streams=len(audios),
+        width=_stream_positive_int(videos[0], "width", source),
+        height=_stream_positive_int(videos[0], "height", source),
+        color_primaries=_stream_text(videos[0], "color_primaries"),
+        color_transfer=_stream_text(videos[0], "color_transfer"),
+        color_matrix=_stream_text(videos[0], "color_space"),
+        audio_channels=(
+            None if first_audio is None else _stream_positive_int(first_audio, "channels", source)
+        ),
+        audio_rate=(
+            None
+            if first_audio is None
+            else _stream_positive_int(first_audio, "sample_rate", source)
+        ),
+    )
+
+
+def _stream_entries(stdout: str, source: Path) -> list[dict[str, object]]:
+    """ffprobe JSON의 streams 목록 — 항목이 아닌 것이 섞이면 죽는다."""
+    try:
+        data = json.loads(stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"ffprobe 출력이 JSON이 아닙니다: {source} ({exc})") from exc
+    streams = data.get("streams") if isinstance(data, dict) else None
+    if not isinstance(streams, list):
+        raise RuntimeError(f"ffprobe JSON의 streams가 목록이 아닙니다: {source} (값 {streams!r})")
+    entries: list[dict[str, object]] = []
+    for entry in streams:
+        if not isinstance(entry, dict):
+            raise RuntimeError(f"스트림 항목이 깨졌습니다: {source} (값 {entry!r})")
+        entries.append(entry)
+    return entries
+
+
+def _stream_text(entry: dict[str, object], field: str) -> str:
+    """선언 문자열을 그대로 — 없거나 `unknown`이면 빈 문자열이다(추측 금지)."""
+    value = entry.get(field)
+    if not isinstance(value, str) or value in ("", "unknown"):
+        return ""
+    return value
+
+
 def _selected_stream(
     stdout: str, source: Path, selector: str, kind: str, codec: str
 ) -> dict[str, object]:
@@ -573,6 +662,75 @@ def probe_video_stream(source: Path, stream_index: int = 0) -> VideoStreamInfo:
         frame_duration=frame_duration,
         frame_count=len(pts),
     )
+
+
+def probe_video_grid(source: Path, stream_index: int) -> VideoStreamInfo:
+    """같은 격자를 **패킷 타임스탬프**로 증명한다 — 디코드하지 않는다.
+
+    `probe_video_stream`은 프레임을 전부 디코드해 증거를 모은다. 그 값은 실측에서
+    4K HEVC 1,940프레임에 40초가 넘었고, 75분 묶음이면 한 시간대가 된다 — 입력을
+    합성하려고 영상을 통째로 디코드할 수는 없다. 비디오 패킷은 프레임 하나에
+    하나씩 붙고 그 pts가 곧 제시 시각이라, 디먹싱만으로 같은 격자를 증명한다
+    (실측: 40,730프레임이 1.4초).
+
+    증명 절차와 허용 오차는 프레임 경로와 **같은 함수**를 쓴다. 다른 것은 증거의
+    출처뿐이라 진단 문구도 그대로다. 디코더가 실제로 그 프레임을 내는지까지 봐야
+    하는 곳(프레임 표본 추출)은 여전히 `probe_video_stream`을 쓴다 — 이 함수는
+    그것을 대신하지 않는다.
+    """
+    _validate_video_ordinal(stream_index)
+    ffprobe = require_ffmpeg("ffprobe")
+    completed = _run(
+        [
+            ffprobe, "-v", "error",
+            "-select_streams", f"v:{stream_index}",
+            "-show_entries", "stream=index,codec_type,r_frame_rate,avg_frame_rate,time_base,"
+            "nb_frames,start_pts,duration_ts",
+            "-show_entries", "packet=pts",
+            "-of", "json",
+            str(source),
+        ]
+    )  # fmt: skip
+    entry = _selected_stream(completed.stdout, source, f"v:{stream_index}", "비디오", "video")
+    rate = _stream_positive_fraction(entry, "r_frame_rate", source)
+    average = _stream_positive_fraction(entry, "avg_frame_rate", source)
+    time_base = _stream_positive_fraction(entry, "time_base", source)
+    pts = _packet_pts(completed.stdout, source)
+    frame_duration = Fraction(1) / rate
+    _prove_uniform_grid(pts, time_base, frame_duration, source)
+    _prove_declared_evidence(entry, average, pts, time_base, frame_duration, source)
+    return VideoStreamInfo(
+        stream_index=_stream_global_index(entry, source),
+        presentation_origin=pts[0] * time_base,
+        frame_duration=frame_duration,
+        frame_count=len(pts),
+    )
+
+
+def _packet_pts(stdout: str, source: Path) -> list[int]:
+    """패킷 타임스탬프를 정수 pts로 — 제시 순서로 정렬한다.
+
+    패킷은 디코드 순서로 나온다(B프레임). 격자는 제시 순서의 것이므로 정렬하고,
+    중복은 엄격한 증가 검사가 잡는다.
+    """
+    try:
+        data = json.loads(stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"ffprobe 출력이 JSON이 아닙니다: {source} ({exc})") from exc
+    packets = data.get("packets") if isinstance(data, dict) else None
+    if not isinstance(packets, list):
+        raise RuntimeError(f"ffprobe JSON의 packets가 목록이 아닙니다: {source} (값 {packets!r})")
+    pts: list[int] = []
+    for packet in packets:
+        value = packet.get("pts") if isinstance(packet, dict) else None
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise RuntimeError(f"패킷 pts를 정수로 읽지 못했습니다: {source} (값 {value!r})")
+        pts.append(value)
+    if not pts:
+        raise RuntimeError(
+            f"비디오 패킷 기록이 없습니다: {source} — CFR 그리드를 증명할 수 없습니다"
+        )
+    return sorted(pts)
 
 
 def _stream_positive_fraction(entry: dict[str, object], field: str, source: Path) -> Fraction:
