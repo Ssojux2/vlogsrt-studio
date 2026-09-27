@@ -44,7 +44,7 @@ from pathlib import Path
 
 from vlogsrt import env, log, transcribe
 from vlogsrt.config import Config, load_config
-from vlogsrt.project import runner
+from vlogsrt.project import runner, topology
 from vlogsrt.project.clips import collect_clip_paths, probe_clips, synthesize_fcpxml
 from vlogsrt.project.config import ProjectConfig, load_project_config
 from vlogsrt.project.fcpxml import element_tree, parse_project
@@ -238,8 +238,14 @@ def _media_grant_revision(
     ).hexdigest()
 
 
-def _staged_app_grant_revision(workspace: Path) -> str | None:
-    """앱이 스테이징한 media-grant.json의 grant revision — 없으면 None(순수 CLI 실행)."""
+def _staged_grant_document(workspace: Path) -> dict[str, object] | None:
+    """앱이 스테이징한 media-grant.json — 없으면 None(순수 CLI 실행).
+
+    낡은 camelCase 문서(`grantRevision`)도 **읽는다**(S2A-2): Swift 쪽이 그
+    철자로 쓰던 시절에 남은 기록의 정본을 잃지 않게. 두 철자가 함께 있으면
+    거부한다 — 읽는 쪽이 어느 것이 정본인지 말할 수 없다. 쓰는 쪽(Swift)은
+    snake_case 하나로만 쓴다.
+    """
     path = workspace / "media-grant.json"
     if not path.is_file():
         return None
@@ -247,12 +253,109 @@ def _staged_app_grant_revision(workspace: Path) -> str | None:
         document = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise ValueError(f"media-grant.json을 해석할 수 없다: {path}") from exc
-    revision = document.get("grant_revision") if isinstance(document, dict) else None
+    if not isinstance(document, dict):
+        raise ValueError("media-grant.json이 객체가 아니다")
+    if "grant_revision" in document and "grantRevision" in document:
+        raise ValueError("media-grant.json에 grant_revision 철자가 둘 다 있다")
+    if "grant_revision" not in document and "grantRevision" not in document:
+        raise ValueError("media-grant.json에 grant_revision이 없다")
+    return document
+
+
+def _staged_app_grant_revision(workspace: Path) -> str | None:
+    """앱이 스테이징한 media-grant.json의 grant revision — 없으면 None(순수 CLI 실행)."""
+    document = _staged_grant_document(workspace)
+    if document is None:
+        return None
+    revision = document.get("grant_revision", document.get("grantRevision"))
     if not isinstance(revision, str):
         raise ValueError("media-grant.json에 grant_revision이 없다")
     if len(revision) != 64 or any(char not in "0123456789abcdef" for char in revision):
         raise ValueError("media-grant.json의 grant_revision이 SHA-256이 아니다")
     return revision
+
+
+def _within_any_root(path: Path, roots: Sequence[str]) -> bool:
+    """경로가 뿌리 중 하나 **안**에 있는가 — 구성요소 경계로 잰다(접두사 아님)."""
+    resolved = path.resolve()
+    for root in roots:
+        anchored = Path(root).resolve()
+        if resolved == anchored or anchored in resolved.parents:
+            return True
+    return False
+
+
+def _swift_grant_revision(roots: Sequence[str]) -> str:
+    """루트 목록의 지문 — Swift `MediaGrantDocument.revision`과 같은 재료·모양.
+
+    Swift JSONEncoder(sortedKeys·슬래시 무이스케이프)의 바이트와 같아야 하므로
+    `ensure_ascii=False`·콤팩트 구분자로 맞춘다. 두 쪽이 같은 지문을 말하는
+    것이 '문서가 루트와 함께 만들어졌다'의 증거다.
+    """
+    payload = json.dumps(
+        {"rootPaths": sorted(roots)}, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _staged_grant_roots(document: dict[str, object]) -> list[str]:
+    """문서의 루트 목록 — 절대·비지 않은 경로 문자열만 받는다.
+
+    상대 경로·빈 칸·다른형은 권한이 아니라 깨진 문서다 — 그대로 지나가면
+    어디에도 닿지 않는 '허용'으로 읽힌다. **글자는 그대로** 쓴다: 공백 정리를
+    하면 끝에 공백이 있는 정당한 절대 경로가 변형되고, Swift가 계산한 지문과
+    어긋난다(검사에만 strip하고 값은 원문).
+    """
+    roots = document.get("roots")
+    if (
+        not isinstance(roots, list)
+        or not roots
+        or not all(
+            isinstance(row, str) and row.strip() and Path(row).is_absolute() for row in roots
+        )
+    ):
+        raise ValueError("media-grant.json의 roots가 절대 경로 문자열 목록이 아니다")
+    return [row for row in roots if isinstance(row, str)]
+
+
+def _require_staged_grant_document(workspace: Path) -> None:
+    """앱이 관리하는 실행(V2 운반 적용)에는 권한 문서가 **필수**다(S2A-2).
+
+    마커 없는 직접 CLI는 문서 없이도 돈다 — 그 계약은 그대로 둔다. 앱 경로는
+    문서 없이 열리면 안 된다: 앱의 준비를 거치지 않고 들어온 실행이기 때문이다.
+    """
+    if not env.role_credentials_applied():
+        return
+    if (workspace / "media-grant.json").is_file():
+        return
+    raise ValueError(
+        "앱이 관리하는 실행에는 스테이징된 미디어 권한 문서(media-grant.json)이 필요하다"
+        " — 앱에서 미디어 루트를 지정한 뒤 다시 실행하세요"
+    )
+
+
+def _require_staged_grant_coverage(media: Sequence[ResolvedMedia], workspace: Path) -> None:
+    """권한 문서가 스테이징되어 있으면 원본 전부가 그 루트 안인지 잰다(S2A-2).
+
+    앱이 검사했다고 믿는 대신 엔진이 스스로 잰다 — Swift를 거치지 않은 직접
+    실행도 같은 문을 지나며, 재개 실행도 다시 잰다. 문서가 없으면(순수 CLI)
+    그냥 지나간다. 루트는 절대 경로만 받고, 지문은 루트와 묶여야 한다(Swift와
+    같은 재료) — 깨진 문서가 권한으로 읽히는 길이 없다.
+    """
+    document = _staged_grant_document(workspace)
+    if document is None:
+        return
+    roots = _staged_grant_roots(document)
+    revision = document.get("grant_revision", document.get("grantRevision"))
+    if revision != _swift_grant_revision(roots):
+        raise ValueError("media-grant.json의 지문이 루트 목록과 맞지 않는다")
+    escaped = sorted(
+        {str(row.original) for row in media if not _within_any_root(row.original, roots)}
+    )
+    if escaped:
+        raise ValueError(
+            "권한 루트 밖 미디어가 있다: " + ", ".join(escaped) + " — 미디어 루트를 확인하세요"
+        )
 
 
 def project_command(args: argparse.Namespace) -> int:
@@ -273,7 +376,10 @@ def project_command(args: argparse.Namespace) -> int:
         log.error(str(exc))
         return 2
     except Exception as exc:  # noqa: BLE001 - CLI는 traceback 없이 단계 실패를 보고한다
-        log.error(str(exc))
+        # 이 문이 준비 진단(위상·권한·역할)의 사용자 표면이다 — 원문 그대로는
+        # 나가지 않는다. ffprobe stderr 같은 자식 출력에 운반된 값이 섞여 있으면
+        # 지우고, 지움 자체가 무너지면 정해진 글로 닫는다(원문 폭기 금지, S2A-2).
+        log.error(_sanitize_cli_failure(args, str(exc)))
         return 2
 
 
@@ -362,7 +468,11 @@ def _project_inspect(args: argparse.Namespace) -> int:
     if journal.state != "received":
         raise ValueError(f"inspect는 received 상태에서만 가능하다: {journal.state}")
     pricing = official_pricing_snapshot(AnalysisSettings().model)
-    estimate = _current_analysis_estimate(args, workspace, journal.revision, pricing)
+    # 추정은 키 없이도 실제 준비를 잰다(S2A-2) — 오디오 위상과 권한 문서
+    # 커버리지. 지원하지 않는 구성은 비용부터 드러난다.
+    estimate = _current_analysis_estimate(
+        args, workspace, journal.revision, pricing, verify_prerequisites=True
+    )
     _write_messages(workspace / _PRICING, (pricing,))
     _write_messages(workspace / _ESTIMATE, (estimate,))
     _protocol_out(pricing)
@@ -376,7 +486,22 @@ def _current_analysis_estimate(
     workspace: Path,
     revision: ProjectRevision,
     pricing: PricingSnapshot,
+    *,
+    verify_prerequisites: bool = False,
 ) -> AnalysisEstimate:
+    """지금 계산한 비용 추정 — `verify_prerequisites`면 실제 준비를 잰다(S2A-2).
+
+    실제 원본의 오디오 위상과(위상 관문) 스테이징된 권한 문서의 루트 안
+    커버리지를 같이 잴 수 있다. 둘 다 키가 없어도 돈다(읽기 전용) — 추정이
+    지원하지 않는 구성을 드러내는 것이 이 매개변수의 목적이다. 유료 실행의
+    재계산도 이 자리를 다시 지나므로, 저장된 추정이 있어도 실행 때 다시 잰다.
+
+    순서: 앱 관리 실행의 문서 필수 검사가 **미디어를 읽기 전에** 오고, 권한
+    커버리지가 위상 확인보다 먼저다 — 루트 밖 미디어를 ffprobe로 찔러 보고
+    나서 거절하면, 권한 없는 경로를 탐색한 셈이 된다.
+    """
+    if verify_prerequisites:
+        _require_staged_grant_document(workspace)
     document = parse_project(workspace / _INPUT)
     cfg = load_config()
     project_config = load_project_config(args.project_config)
@@ -385,6 +510,9 @@ def _current_analysis_estimate(
         load_media_map(media_map) if media_map is not None else ()
     )
     media = resolve_media(document, overrides)
+    if verify_prerequisites:
+        _require_staged_grant_coverage(media, workspace)
+        topology.require_supported_audio_topology(media)
     override_payload = [
         {
             "original": str(row.original) if row.original is not None else None,
@@ -433,6 +561,19 @@ def _redact_failure_text(args: argparse.Namespace, text: str) -> str:
     return env.redact_secrets(text, secrets=tuple(secrets))
 
 
+def _sanitize_cli_failure(args: argparse.Namespace, text: str) -> str:
+    """CLI 실패 문면의 마지막 문 — 지움이 무너지면 원문 대신 정해진 글.
+
+    준비 진단(ffprobe stderr 포함)은 이 문을 지나 사용자에게 나간다. 지우개
+    구성이 실패해도 원문을 폭기하지 않는다: 원문에 키가 있었는지 알 수 없으므로
+    있었다고 가정하는 쪽이 안전하다.
+    """
+    try:
+        return _redact_failure_text(args, text)
+    except Exception:  # noqa: BLE001 - 지움 보조 실패는 원문 폭기로 이어지지 않는다
+        return "실패 진단을 정리하지 못했습니다 — 명령을 다시 실행해 주세요"
+
+
 def _project_analyze(args: argparse.Namespace) -> int:
     workspace = args.workspace
     journal = WorkflowJournal.open(workspace / _JOURNAL)
@@ -456,7 +597,9 @@ def _project_analyze(args: argparse.Namespace) -> int:
             raise ValueError("비용 추정의 입력 리비전이 현재 작업과 다르다")
         if estimate_message.pricing_snapshot_revision != pricing.snapshot_revision:
             raise ValueError("비용 추정이 현재 가격 스냅샷에 묶이지 않았다")
-        current_estimate = _current_analysis_estimate(args, workspace, journal.revision, pricing)
+        current_estimate = _current_analysis_estimate(
+            args, workspace, journal.revision, pricing, verify_prerequisites=bool(args.online)
+        )
         if current_estimate != estimate_message:
             raise ValueError("현재 분석 설정·미디어가 승인 전 비용 추정과 다르다")
     if bool(args.online):
@@ -474,6 +617,12 @@ def _project_analyze(args: argparse.Namespace) -> int:
         )
         if estimate_message.cost_upper_bound is None:
             raise ValueError("온라인 분석 비용 상한이 미설정이다")
+        # 유료 역할은 파이프라인 시작 **전에** 전부 유효해야 한다(S2A-2 마지막
+        # 단위). 전사기가 먼저 만들어지고 비전 공장에서 뒤늦게 부재를 발견하면
+        # 이미 STT 호출이 열린 뒤다 — 어느 역할의 부재도 유료 호출 0회로 닫힌다.
+        # 재개(authorized/analyzing)도 이 문을 다시 지난다. 직접 CLI·V1의 이름
+        # 계약은 그대로다(이 검사는 값의 존재만 확인한다).
+        require_paid_roles(args)
     if journal.state == "estimate_ready":
         # 유료 호출은 승인 파일이, 픽스처 재생은 깃발이 분석 착수를 승인한다.
         journal.transition(journal.revision.revision, "authorized")
@@ -660,6 +809,7 @@ def _project_roughcut(args: argparse.Namespace) -> int:
         raise ValueError("edit-plan.jsonl의 메시지가 EditPlan이 아니다")
     document = parse_project(workspace / _INPUT)
     _require_safe_roughcut_output(workspace, args.out)
+    _require_writable_output(args.out)
     rendered = render_approved_roughcut(document, journal.revision, candidates, plan_message)
     _write_bytes(args.out, rendered.xml_bytes)
     report = args.out.with_suffix(args.out.suffix + ".review.json")
@@ -813,6 +963,27 @@ def _discard_file(path: Path) -> None:
         path.unlink()
     except FileNotFoundError:
         return
+
+
+def _require_writable_output(destination: Path) -> None:
+    """결과 자리의 쓰기 증명(S2A-2) — 렌더보다 앞서고 산물은 건드리지 않는다.
+
+    이미 있는 읽기 전용 파일·디렉터리 자리는 교정 글로 닫는다. 없는 자리는
+    상한 있는 임시 생성/제거로 '그 자리에 만들 수 있다'를 증명한다.
+    """
+    if destination.is_dir():
+        raise ValueError(f"결과를 쓸 자리가 디렉터리다: {destination} — 파일 경로를 주세요")
+    if destination.exists() and not os.access(destination, os.W_OK):
+        raise ValueError(
+            f"결과를 쓸 자리가 읽기 전용이다: {destination} — 쓰기 가능하게 만들거나 지우세요"
+        )
+    probe = destination.parent / f".vlogsrt-write-probe-{uuid.uuid4().hex}"
+    try:
+        probe.write_text("", encoding="utf-8")
+    except OSError as exc:
+        raise ValueError(f"결과를 쓸 자리에 만들 수 없다: {destination} ({exc})") from exc
+    finally:
+        probe.unlink(missing_ok=True)
 
 
 def _require_safe_roughcut_output(workspace: Path, output: Path) -> None:
@@ -1015,9 +1186,11 @@ def _produce_analysis_outcome(
         raise ValueError("실제 Luna 창 수가 승인된 상한을 넘는다")
     client = None
     if bool(args.online):
-        client = transcribe.create_vision_client(
-            api_key=env.require_api_key(force=True), base_url=env.base_url()
-        )
+        # 비전 자격 증명은 게이트와 같은 문에서 온다(`_staged_vision_credentials`)
+        # — V2 앱 운반이면 별도 역할 값, 마커 없는 직접 경로면 낡은 공유 키
+        # 계약 그대로. 게이트가 통과시킨 값과 공장이 받는 값이 같다는 보장이다.
+        vision_key, vision_base = _staged_vision_credentials(project_config)
+        client = transcribe.create_vision_client(api_key=vision_key, base_url=vision_base)
     decisions: list[VisionWindowDecision] = []
     candidates: list[CutCandidate] = []
     used_images = 0
@@ -1479,6 +1652,35 @@ def _run_pipeline(args: argparse.Namespace) -> int:
         dtd_path=args.dtd,
     )
     return _report(published, dtd_path=args.dtd, vision_fixtures=fixtures_of(args))
+
+
+def _staged_vision_credentials(project_config: ProjectConfig) -> tuple[str, str | None]:
+    """스테이징 분석의 비전 자격 증명 — V2 앱 운반이면 역할 값, 아니면 낡은 공유 경로.
+
+    사전 게이트(`require_paid_roles`)와 실제 공장(`_produce_analysis_outcome`)이
+    **같은 문**을 쓴다: 게이트가 본 값과 공장이 받는 값이 어긋나면 준비가
+    거짓말이 된다. 마커 없는 직접 경로는 기본선(c96e0d5)의 소비 계약 그대로다
+    — `require_api_key(force=True)` + `base_url()`(값이 없으면 공개 엔드포인트).
+    V2(`role_credentials_applied`)로 증명된 앱 운반만 별도 역할 값(비전 키·
+    엔드포인트, URL 정책 포함)을 쓴다 — 한 키가 양쪽 공급자를 열지 않는다.
+    """
+    if env.role_credentials_applied():
+        return _vision_credentials(project_config)
+    return env.require_api_key(force=True), env.base_url()
+
+
+def require_paid_roles(args: argparse.Namespace) -> None:
+    """유료 분석의 모든 역할을 **공급자 construction보다 앞서** 검증한다(S2A-2).
+
+    STT와 비전을 한 문에서 잰다: 어느 하나라도 부재면 전사기조차 만들지 않고
+    닫는다. 재개(authorized/analyzing)도 이 문을 다시 지난다. 비전은 운반 형태에
+    따라 갈린다(`_staged_vision_credentials`) — V2 앱 운반이면 역할 값 전부,
+    마커 없는 직접 경로면 낡은 공유 키 계약 그대로. force는 명시적 --online이
+    VLOGSRT_OFFLINE=1을 이기는 기존 계약이다.
+    """
+    project_config = load_project_config(args.project_config)
+    env.require_api_key(force=True)
+    _staged_vision_credentials(project_config)
 
 
 def _vision_responder(

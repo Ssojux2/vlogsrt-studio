@@ -242,24 +242,13 @@ def validate_role_env_names(vision_key_name: str, vision_url_name: str) -> None:
             )
 
 
-def resolve_vision_role_names(
-    project_config: Path | None = None,
-) -> tuple[str, str]:
-    """작업이 쓰는 **같은** 공개 프로젝트 설정에서 비전 역할 이름을 푼다.
-
-    운반자 적용과 작업 실행이 다른 이름을 보면 안 되므로 로더도 같은 뿌리
-    (`vlogsrt.project.toml`, 없으면 코드 기본값)를 쓴다. 설정 파일이 있으면서
-    못 읽는 경우는 그 오류를 그대로 올린다 — 조용한 기본값 드리움은 오해를
-    남긴다.
-    """
-    from vlogsrt.project.config import load_project_config
-
-    config = load_project_config(project_config)
-    return config.vision_api_key_env, config.vision_base_url_env
-
-
 def apply_role_credentials(
-    stt_key: str, vision_key: str, vision_base_url: str, *, project_config: Path | None = None
+    stt_key: str,
+    vision_key: str,
+    vision_base_url: str,
+    *,
+    vision_key_name: str = VISION_ROLE_DEFAULT_KEY_ENV,
+    vision_base_url_name: str = VISION_ROLE_DEFAULT_URL_ENV,
 ) -> None:
     """V2 운반자의 세 값을 제 이름에 **권위적으로** 얹는다(S2A-2 단위2).
 
@@ -267,17 +256,22 @@ def apply_role_credentials(
     낡은 값을 대체하고, 빈 값은 '없음'으로 그 자리를 막아 dotenv의 setdefault가
     다시 채우는 길을 끊는다(V1의 명시적 부재 계약과 같은 원리). 이름 검사가
     실패하면 **어떤 배정도 일어나지 않는다** — 부분 적용은 부분 병합이다.
+
+    역할 이름은 **이미 풀린 값**으로 받는다(기본은 코드 상수). 이 모듈은
+    하위층이라 프로젝트 설정을 수입하지 못한다 — 설정에서 이름을 푸는 일은
+    엔진/작업 경계(`vlogsrt-engine.py`의 `_resolve_vision_role_names`)가 한다:
+    운반자 적용과 작업 실행이 다른 이름을 보면 안 되므로 같은 뿌리에서 풀어
+    넘긴다.
     """
     global _applied_vision_key_name
-    vision_key_name, vision_url_name = resolve_vision_role_names(project_config)
-    validate_role_env_names(vision_key_name, vision_url_name)
+    validate_role_env_names(vision_key_name, vision_base_url_name)
     # URL 검증은 **어떤 배정보다 앞선다** — 잘못된 엔드포인트가 환경에 얹히면
     # 그 뒤 모든 소비자가 그 값을 물려받는다(S2A-2 단위2). 제출된 두 키 값도
     # 이 자리의 키 재료다.
     validate_vision_base_url(vision_base_url, secrets=(stt_key, vision_key))
     os.environ[STT_ROLE_KEY_ENV] = stt_key
     os.environ[vision_key_name] = vision_key
-    os.environ[vision_url_name] = vision_base_url
+    os.environ[vision_base_url_name] = vision_base_url
     _applied_vision_key_name = vision_key_name
 
 

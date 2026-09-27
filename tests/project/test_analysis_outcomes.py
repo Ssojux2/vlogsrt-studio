@@ -54,6 +54,18 @@ SEGMENTS = ((0.5, 1.0, "인사"), (10.5, 11.0, "마무리"))
 REASON_CODE = re.compile(r"^[a-z][a-z0-9_]*$")
 
 
+@pytest.fixture(autouse=True)
+def supported_audio_topology(monkeypatch: pytest.MonkeyPatch) -> None:
+    """이 파일의 합성 미디어는 오디오 스트림 하나다(S2A-2 위상 관문의 전제).
+
+    `_prepare`의 inspect와 유료 analyze가 실제 위상 검사를 지나므로 확인
+    함수만 1스트림으로 대신한다 — 검사 자체의 경로는 test_media_topology.py가 든다.
+    """
+    from vlogsrt.project import topology
+
+    monkeypatch.setattr(topology, "probe_audio_stream_count", lambda source: 1)
+
+
 # ─────────────────────────────────────────────────────────────
 #  입력 문서 — 한 클립 · 두 클립 · 무오디오
 # ─────────────────────────────────────────────────────────────
@@ -312,6 +324,9 @@ def _keep_response() -> dict:
 def _patch_paid_boundaries(monkeypatch: pytest.MonkeyPatch, luna: _LunaScript) -> None:
     monkeypatch.setattr(project_commands.env, "require_api_key", lambda **kwargs: "test-key")
     monkeypatch.setattr(project_commands.env, "base_url", lambda: "https://example.invalid")
+    # 유료 역할 게이트가 공급자 앞에서 비전 역할도 잰다(S2A-2) — 합성값으로 채운다.
+    monkeypatch.setenv("GOOGLE_API_KEY", "synthetic-vision-key")
+    monkeypatch.setenv("GEMINI_BASE_URL", "https://example.invalid")
     monkeypatch.setattr(transcribe, "create_vision_client", lambda **kwargs: object())
     monkeypatch.setattr(transcribe, "request_luna_vision", luna)
 
@@ -968,6 +983,8 @@ def test_stage_failure_before_windows_persists_sanitized_error_aggregate(
         stage_patch.setattr(runner, patch_stage, boom)
         monkeypatch.setattr(project_commands.env, "require_api_key", lambda **kwargs: "test-key")
         monkeypatch.setattr(project_commands.env, "base_url", lambda: "https://example.invalid")
+        monkeypatch.setenv("GOOGLE_API_KEY", "synthetic-vision-key")
+        monkeypatch.setenv("GEMINI_BASE_URL", "https://example.invalid")
         monkeypatch.setattr(transcribe, "create_vision_client", lambda **kwargs: object())
         authorization = tmp_path / f"authorization-{stage_name}.jsonl"
         estimate = project_commands._read_one(workspace / "analysis-estimate.jsonl")

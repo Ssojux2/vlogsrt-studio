@@ -635,10 +635,16 @@ def test_paid_attempt_record_never_persists_the_submitted_key(
     engine = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(engine)
 
+    from tests.project.test_engine_entrypoint import _patch_analysis_boundaries
+
     monkeypatch.chdir(tmp_path)
     job_dir = _stage_job(tmp_path)
+    _fake_supported_topology(monkeypatch)
     assert engine.main(["analyze", "job-1", str(job_dir)]) == 0
     _write_authorization(job_dir)
+    # 합성 미디어의 준비 경계(ffmpeg/PCM/프레임/VAD)를 가짜로 막는다 — 이 시험의
+    # 실패 지점은 SDK 경계뿐이어야 한다(준비가 먼저 죽으면 반향을 못 본다).
+    _patch_analysis_boundaries(monkeypatch)
     _patch_paid_gates(monkeypatch)
 
     # SDK 경계가 키를 되뇌며 죽는다 — 유료 호출은커녕 클라이언트 생성에서 실패한다.
@@ -647,7 +653,12 @@ def test_paid_attempt_record_never_persists_the_submitted_key(
 
     import vlogsrt.transcribe as transcribe_module
 
+    # 준비·전사는 위의 _patch_analysis_boundaries가 합성으로 채운다(전사기는
+    # 그 헬퍼의 _Scripted가 담당) — 이 시험의 실패 지점은 SDK 경계뿐이다.
+    reached: list[str] = []
+
     def echoing_client(**kwargs: object) -> object:
+        reached.append("create_vision_client")
         raise RuntimeError(f"401 unauthorized: api key {submitted} rejected")
 
     monkeypatch.setattr(transcribe_module, "create_vision_client", echoing_client)
@@ -656,6 +667,9 @@ def test_paid_attempt_record_never_persists_the_submitted_key(
     assert engine.main(["analyze", "job-1", str(job_dir)]) == 1
     captured = capfd.readouterr()
 
+    # 파이프라인이 주입된 SDK 예외에 실제로 도달했다 — 앞 단계 실패로 흉내 낸
+    # 부재가 아니다(reached 없이는 아래 주장을 믿지 않는다).
+    assert reached == ["create_vision_client"]
     attempts = (job_dir / "analysis-attempts.jsonl").read_text(encoding="utf-8")
     assert submitted not in attempts
     assert env.REDACTED_MARK in attempts
@@ -664,6 +678,31 @@ def test_paid_attempt_record_never_persists_the_submitted_key(
     for record in job_dir.iterdir():
         if record.is_file():
             assert submitted not in record.read_text(encoding="utf-8"), record.name
+
+
+def _fake_supported_topology(monkeypatch: pytest.MonkeyPatch) -> None:
+    """실제 진입점을 지나는 시험의 새 전제 — 합성 미디어는 1오디오 스트림이다."""
+    from vlogsrt.project import topology
+
+    monkeypatch.setattr(topology, "probe_audio_stream_count", lambda source: 1)
+
+
+def _stage_valid_grant(job_dir: Path) -> None:
+    """V2 적용 실행에 필요한 유효한 권한 문서 — 루트와 지문이 묶여 있다."""
+    import json as _json
+
+    from vlogsrt.project import commands as project_commands
+
+    roots = [str(job_dir.parent)]
+    (job_dir / "media-grant.json").write_text(
+        _json.dumps(
+            {
+                "grant_revision": project_commands._swift_grant_revision(roots),
+                "roots": roots,
+            }
+        ),
+        encoding="utf-8",
+    )
 
 
 # ─────────────────────────────────────────────────────────────
@@ -1116,6 +1155,10 @@ def test_engine_reports_a_malformed_config_as_a_controlled_failure(
     # 재시도 — 잠금은 이미 풀려 있다. 설정을 고치면 같은 job이 정상 소유권부터
     # 다시 돈다(0). 상태 경로는 호출마다 새로운 것이다.
     config.write_text("schema_version = 1\n", encoding="utf-8")
+    # 재시도는 성공 경로다 — V2 적용 실행의 새 전제(유효한 권한 문서·합성 위상)를
+    # 갖춘다(S2A-2). 첫 시도의 통제된 실패(1)는 그대로 위에서 증명됐다.
+    _stage_valid_grant(job_dir)
+    _fake_supported_topology(monkeypatch)
     monkeypatch.setattr(
         "sys.stdin",
         _pipe_stdin(
@@ -1287,6 +1330,8 @@ def test_blank_roles_still_produce_a_key_free_estimate(
 
     monkeypatch.chdir(tmp_path)
     job_dir = _stage_job(tmp_path)
+    _fake_supported_topology(monkeypatch)
+    _stage_valid_grant(job_dir)
     monkeypatch.setattr(
         "sys.stdin",
         _pipe_stdin(_framed_roles({"stt_key": "", "vision_key": "", "vision_base_url": ""})),
@@ -1360,3 +1405,31 @@ def test_role_payload_escaped_lone_surrogate_fails_closed_before_assignment(
     monkeypatch.setattr("sys.stdin", _pipe_stdin(frame))
     assert engine.main(["analyze", "job-1", str(job_dir), "--stdin-carrier"]) == 2
     assert not (job_dir / "workspace").exists()  # 소유권·실행 흔적이 없다
+
+
+def test_engine_boundary_fails_closed_on_a_broken_role_name_config(
+    monkeypatch: pytest.MonkeyPatch, engine: ModuleType, tmp_path: Path
+) -> None:
+    """역할 이름을 푸는 경계는 엔진이다 — 깨진 설정은 조용한 기본 드리움 없이 닫는다.
+
+    하위층(env)은 프로젝트 설정을 수입하지 못하므로 이 주장의 주인은 이제
+    이 경계다(불변식 위반 수정, S2A-2 마지막 단위). 배정 전에 닫힌다.
+    """
+    from vlogsrt.project.config import ProjectConfigError
+
+    (tmp_path / "vlogsrt.project.toml").write_text(
+        "schema_version = 1\nbroken =\n", encoding="utf-8"
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv(_ENGINE_KEY_NAME, "untouched")
+
+    with pytest.raises(ProjectConfigError):
+        engine._resolve_vision_role_names()
+
+    # V2 운반 적용도 같은 문에서 닫는다 — 어떤 배정도 일어나기 전에.
+    carried = engine._resolve_carried_credentials(
+        ("2", '{"stt_key": "a", "vision_key": "b", "vision_base_url": ""}')
+    )
+    with pytest.raises(ProjectConfigError):
+        engine._carry_credentials(carried)
+    assert os.environ[_ENGINE_KEY_NAME] == "untouched"

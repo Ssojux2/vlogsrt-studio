@@ -119,6 +119,28 @@ public struct DevelopmentEngineInvocation: Equatable, Sendable {
       credentialEnvelope: .roles(credentials)
     )
   }
+
+  /// readiness 호출 조립 — 읽기 전용 자식도 같은 래퍼·같은 운반자를 지난다
+  /// (S2A-2 마지막 단위). 잡 자리는 App Group을 가리킨다: 진입점은 그 디렉터리의
+  /// 존재만 확인하고 상태는 쓰지 않는다.
+  public static func createReadiness(
+    jobID: String,
+    appGroupJob: URL,
+    applicationScriptsDirectory: URL,
+    credentials: EngineRoleCredentials
+  ) throws -> Self {
+    guard AppGroupWorkspace.isSafeJobID(jobID) else {
+      throw WorkspaceError.invalidJobID(jobID)
+    }
+    return Self(
+      executableURL: applicationScriptsDirectory.appendingPathComponent(scriptName),
+      arguments: [
+        EngineReadiness.operationName, jobID, appGroupJob.standardizedFileURL.path,
+        Self.carrierMarkerArgument,
+      ],
+      credentialEnvelope: .roles(credentials)
+    )
+  }
 }
 
 public enum DevelopmentJobStager {
@@ -277,40 +299,10 @@ public final class DevelopmentEngineLauncher: @unchecked Sendable {
     let capture = try EngineStatusCapture.make()
     defer { capture.discard() }  // 시작 실패·취소·오류 어떤 끝에서도 치운다.
     let task = try NSUserUnixTask(url: invocation.executableURL)
-    // 봉투의 생애 — 되감기 없는 한 방향이다(S2A-2 재정리).
-    //   ① 검증·부호화가 먼저(과대·NUL은 파이프조차 만들지 않는다)
-    //   ② 사적 Pipe — 읽기 끝을 자식 stdin으로, 쓰기 끝은 이쪽이 쥔다
-    //   ③ 쓰기 끝을 논블로킹으로
-    //   ④ 프레임 전부를 큐에 넣는다(부분·EINTR 계속, EAGAIN·오류는 그 자리에서 실패)
-    //   ⑤ 쓰기 끝을 execute 앞에서 정확히 한 번 닫는다
-    //   ⑥ 전부 쓰였을 때만 실행기를 띄운다
-    //   ⑦ 읽기 끝은 completion(성공·실패 어느 쪽이든)에서 정확히 한 번 닫는다
-    // prefill 동안 부모가 읽기 끝을 계속 쥐고 있으므로 파이프에는 언제나 독자가
-    // 있다 — 쓰다가 EPIPE/SIGPIPE를 만날 길이 없고, 전역 신호·환경 손대기도 없다.
-    // 읽기 끝이 execute를 넘겨까지 사는 이유는 XPC가 standardInput을 execute
-    // 안에서 전송 인자로 부호화하기 때문이다.
-    var carrier: CarrierPipeEnds? = nil
-    if let envelope = invocation.credentialEnvelope {
-      let wire = try envelope.wire  // ①
-      let pipe = Pipe()
-      let ends = CarrierPipeEnds(pipe: pipe)
-      do {
-        task.standardInput = pipe.fileHandleForReading  // ②
-        try ends.makeWriteEndNonBlocking()  // ③
-        try ends.queueFrame(wire, rawWrite: rawWrite)  // ④
-        ends.closeWriteOnce()  // ⑤
-      } catch {
-        // prefill 실패 — 남은 끝을 닫고 실행기는 띄우지 않는다(실패 닫힘).
-        ends.closeRemainingOnce()
-        throw error
-      }
-      carrier = ends
-    }
-    // completion(@Sendable)은 불변 참조만 잡는다 — var를 잡으면 자료 경쟁 경고다.
-    let readEndCloser: CarrierPipeEnds? = carrier
+    let readEndCloser = try prefillCarrier(task: task, invocation: invocation)
     return try await withCheckedThrowingContinuation { continuation in
       task.execute(withArguments: invocation.arguments + [capture.fileURL.path]) { error in
-        readEndCloser?.closeReadOnce()  // ⑦ — 읽기 끝은 여기서만 닫힌다
+        readEndCloser?.closeReadOnce()  // 읽기 끝은 여기서만 닫힌다
         continuation.resume(with: Result {
           // 오류(비0 종료·신호·시작 실패·낡은 래퍼)는 기록이 있어도 재분류하지
           // 않는다 — 없는 기록과 함께 오류로 나간다.
@@ -319,6 +311,64 @@ public final class DevelopmentEngineLauncher: @unchecked Sendable {
         })
       }
     }
+  }
+
+  /// 읽기 전용 readiness 자식 — 같은 래퍼·같은 운반자로 돌고, 보고서는 상태
+  /// 기록 옆(`readiness.json`)에서 상한 안으로 읽는다(S2A-2 마지막 단위).
+  public func runReadiness(
+    _ invocation: DevelopmentEngineInvocation
+  ) async throws -> EngineReadinessReport {
+    let capture = try EngineStatusCapture.make()
+    defer { capture.discard() }
+    let task = try NSUserUnixTask(url: invocation.executableURL)
+    let readEndCloser = try prefillCarrier(task: task, invocation: invocation)
+    let status = try await withCheckedThrowingContinuation { continuation in
+      task.execute(withArguments: invocation.arguments + [capture.fileURL.path]) { error in
+        readEndCloser?.closeReadOnce()
+        continuation.resume(with: Result {
+          if let error { throw error }
+          return try capture.readExitStatus()
+        })
+      }
+    }
+    guard status == 0 else {
+      // 진입점의 실패 문면은 정해진 글뿐이다(지워진 뒤에만 나간다) — 코드만 붙인다.
+      throw EnginePreflightError.readinessFailed(
+        "개발 엔진 준비 확인이 실패로 끝났습니다(종료 코드 \(status))"
+          + " — macos/scripts/install-development-engine.sh로 다시 설치하세요")
+    }
+    return try EngineReadinessProber.decodeBoundedReport(
+      at: capture.directory.appendingPathComponent("readiness.json"))
+  }
+
+  /// 봉투의 생애 — 되감기 없는 한 방향이다(S2A-2 재정리).
+  ///   ① 검증·부호화가 먼저(과대·NUL은 파이프조차 만들지 않는다)
+  ///   ② 사적 Pipe — 읽기 끝을 자식 stdin으로, 쓰기 끝은 이쪽이 쥔다
+  ///   ③ 쓰기 끝을 논블로킹으로
+  ///   ④ 프레임 전부를 큐에 넣는다(부분·EINTR 계속, EAGAIN·오류는 그 자리에서 실패)
+  ///   ⑤ 쓰기 끝을 execute 앞에서 정확히 한 번 닫는다
+  /// prefill 동안 부모가 읽기 끝을 계속 쥐고 있으므로 파이프에는 언제나 독자가
+  /// 있다 — 쓰다가 EPIPE/SIGPIPE를 만날 길이 없고, 전역 신호·환경 손대기도 없다.
+  /// 읽기 끝은 completion에서 닫는다(호출자) — XPC가 standardInput을 execute
+  /// 안에서 전송 인자로 부호화하기 때문이다.
+  private func prefillCarrier(
+    task: NSUserUnixTask, invocation: DevelopmentEngineInvocation
+  ) throws -> CarrierPipeEnds? {
+    guard let envelope = invocation.credentialEnvelope else { return nil }
+    let wire = try envelope.wire  // ①
+    let pipe = Pipe()
+    let ends = CarrierPipeEnds(pipe: pipe)
+    do {
+      task.standardInput = pipe.fileHandleForReading  // ②
+      try ends.makeWriteEndNonBlocking()  // ③
+      try ends.queueFrame(wire, rawWrite: rawWrite)  // ④
+      ends.closeWriteOnce()  // ⑤
+    } catch {
+      // prefill 실패 — 남은 끝을 닫고 실행기는 띄우지 않는다(실패 닫힘).
+      ends.closeRemainingOnce()
+      throw error
+    }
+    return ends
   }
 }
 

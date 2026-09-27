@@ -35,7 +35,20 @@ from vlogsrt.project.workflow_protocol import (
 
 _ENGINE_SCRIPT = Path(__file__).resolve().parents[2] / "macos" / "scripts" / "vlogsrt-engine.py"
 _JOB_DIR_ENV = "VLOGSRT_ENGINE_JOB_DIR"
-_GRANT = json.dumps({"grant_revision": "a" * 64})
+
+
+def _grant_document(root: Path) -> str:
+    """앱이 스테이징하는 모양의 권한 문서 — 루트와 지문이 묶여 있다(S2A-2).
+
+    엔진이 문서를 스스로 검증한다(절대 루트·지문 일치·커버리지) — 손으로
+    지은 낡은 모양(`grant_revision`만)은 이제 깨진 문서로 거절된다.
+    """
+    from vlogsrt.project import commands as project_commands
+
+    roots = [str(root)]
+    return json.dumps(
+        {"grant_revision": project_commands._swift_grant_revision(roots), "roots": roots}
+    )
 
 
 def _load_engine() -> ModuleType:
@@ -58,6 +71,19 @@ def offline_dotenv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     dotenv = stage_synthetic_dotenv(tmp_path)
     monkeypatch.chdir(tmp_path)
     yield dotenv
+
+
+@pytest.fixture(autouse=True)
+def supported_audio_topology(monkeypatch: pytest.MonkeyPatch) -> None:
+    """이 파일의 합성 미디어는 오디오 스트림 하나다(S2A-2 위상 관문의 전제).
+
+    진입점이 receive·inspect를 돌면 실제 위상 검사가 실제 ffprobe를 부른다 —
+    합성 바이트는 ffprobe가 읽을 수 없으므로 확인 함수만 1스트림으로 대신한다.
+    위상 검사의 실패·거절 경로는 test_media_topology.py가 진짜 경계에서 든다.
+    """
+    from vlogsrt.project import topology
+
+    monkeypatch.setattr(topology, "probe_audio_stream_count", lambda source: 1)
 
 
 @pytest.fixture()
@@ -130,7 +156,8 @@ def test_engine_main_stages_selected_files_into_a_fresh_workspace(
     """workspace가 없는 새 job에서 스테이징이 먼저 무너지는 결함을 잡는다."""
     monkeypatch.chdir(tmp_path)
     job_dir = _stage_job(tmp_path)
-    (job_dir / "media-grant.json").write_text(_GRANT, encoding="utf-8")
+    grant = _grant_document(tmp_path)
+    (job_dir / "media-grant.json").write_text(grant, encoding="utf-8")
     staged = _staged_cancellation("b" * 64)
     (job_dir / "cancellation.jsonl").write_text(staged, encoding="utf-8")
     workspace = job_dir / "workspace"
@@ -143,9 +170,9 @@ def test_engine_main_stages_selected_files_into_a_fresh_workspace(
     assert (workspace / "analysis-estimate.jsonl").is_file()
     assert (job_dir / "analysis-estimate.jsonl").is_file()
     # 스테이징 파일은 바이트 그대로 workspace로 들어가고 원본은 그대로다.
-    assert (workspace / "media-grant.json").read_text(encoding="utf-8") == _GRANT
+    assert (workspace / "media-grant.json").read_text(encoding="utf-8") == grant
     assert (workspace / "cancellation.jsonl").read_text(encoding="utf-8") == staged
-    assert (job_dir / "media-grant.json").read_text(encoding="utf-8") == _GRANT
+    assert (job_dir / "media-grant.json").read_text(encoding="utf-8") == grant
     assert (job_dir / "cancellation.jsonl").read_text(encoding="utf-8") == staged
     # 진입점은 job 루트를 알린다 — 실행 중 취소 관측 계약(S1A).
     assert os.environ[_JOB_DIR_ENV] == str(job_dir.resolve())
@@ -237,6 +264,10 @@ def _patch_paid_gates(
 
     monkeypatch.setattr(project_commands.env, "require_api_key", lambda **kwargs: "test-key")
     monkeypatch.setattr(project_commands.env, "base_url", lambda: "https://example.invalid")
+    # 유료 역할 게이트가 공급자 앞에서 두 역할을 다 잰다(S2A-2 마지막 단위) —
+    # 비전 역할 값은 합성물로 채운다(진짜 값은 쓰지 않는다).
+    monkeypatch.setenv("GOOGLE_API_KEY", "synthetic-vision-key")
+    monkeypatch.setenv("GEMINI_BASE_URL", "https://example.invalid")
     monkeypatch.setattr(transcribe, "create_vision_client", lambda **kwargs: object())
 
     def keep(client: object, *, model: str, payload: dict, online: bool) -> dict:

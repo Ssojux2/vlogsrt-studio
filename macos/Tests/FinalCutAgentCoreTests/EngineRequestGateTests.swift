@@ -965,6 +965,26 @@ nonisolated func _emitChildGuard(
   return env
 }
 
+/// 시험 소유 도구 bin — 실제 진입점을 지나는 시험의 새 전제(S2A-2): inspect가
+/// 실제 원본의 오디오 위상을 ffprobe로 확인한다. 합성 미디어는 진짜 ffprobe가
+/// 읽을 수 없으므로, 어떤 호출이든 한 비디오·한 오디오 스트림의 JSON로 답하는
+/// 실행파일을 시험 소유 경로에 둔다. 보호 의미는 그대로다(env -i 허용목록에
+/// 이 디렉터리만 더한다).
+nonisolated func _writeSyntheticTools(sandbox: BridgeSandbox) throws -> URL {
+  let bin = sandbox.root.appendingPathComponent("synthetic tools", isDirectory: true)
+  try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+  let response = """
+    #!/bin/sh
+    printf '%s\\n' '{"streams": [{"codec_type": "video"}, {"codec_type": "audio"}]}'
+    """
+  for tool in ["ffprobe", "ffmpeg"] {
+    let path = bin.appendingPathComponent(tool)
+    try Data(response.utf8).write(to: path)
+    try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: path.path)
+  }
+  return bin
+}
+
 /// 시험 소유 해석기 심 — env -i로 **문자 그대로의** 허용목록 환경만 남기고
 /// 드라이버를 띄운다(부모 상속·사전 복사 없음). 심 자체는 시험마다 **한 번**
 /// 쓰고 안 바뀐다(불변) — 호출별 상태는 드라이버가 job 단위 증명·결과 파일로
@@ -979,8 +999,9 @@ nonisolated func _writeGuardedShim(
   omitGuard: Bool = false
 ) throws -> [String: String] {
   let guardEnv = try _emitChildGuard(sandbox: sandbox, breakBootstrap: breakBootstrap)
+  let toolsBin = try _writeSyntheticTools(sandbox: sandbox)
   var literals: [String] = [
-    "PATH=/usr/bin:/bin",
+    "PATH=\(toolsBin.path):/usr/bin:/bin",
     "HOME=\(sandbox.home.path)",
     "TMPDIR=\(sandbox.tmp.path)",
     "PYTHONPATH=\(omitGuard ? sandbox.repo.path : "\(sandbox.guardBoot.path):\(sandbox.repo.path)")",
@@ -1254,6 +1275,13 @@ nonisolated func _assertRoleConsumerResult(
     """
   try Data(fcpxml.utf8).write(to: goodJob.appendingPathComponent("input.fcpxml"))
 
+  // Swift가 실제로 쓴 권한 문서가 실제 파이썬 소비자를 지난다(S2A-2): 통신
+  // 철자가 어긋나면 inspect가 'grant_revision이 없다'로 죽는다 — exit 0이
+  // 곧 실제 교차의 증명이다.
+  let grant = try MediaGrantValidator.validate(
+    fcpxml: goodJob.appendingPathComponent("input.fcpxml"), roots: [sandbox.root])
+  try grant.write(to: goodJob)
+
   let launcher = DevelopmentEngineLauncher()
   let succeeding = DevelopmentEngineInvocation(
     executableURL: wrapper, arguments: ["analyze", "job good", goodJob.path])
@@ -1303,6 +1331,219 @@ nonisolated func _assertRoleConsumerResult(
   // 같은 job의 증명은 두 번째 호출에서도 새로 남았다 — 꼬리 기록이 이 호출의 것이다.
   try _assertJobProof(sandbox: sandbox, jobID: "job good", minimumRecords: 2)
 }
+
+/// **실제 다리(readiness 편, S2A-2 마지막 단위)** — 실제 설치 래퍼 → 보호 심 →
+/// 드라이버 → 바이트 동일 엔진의 `readiness` 연산까지, 개발 실행기
+/// (`runReadiness`)로 통째로 잇는다. 보고서의 도구 칸은 **자식 환경의 실제
+/// 값**(시험 소유 도구 bin)이어야 한다 — 앱이 PATH를 추측한 값이 아니다.
+@Test func readinessCrossesTheRealDevelopmentLauncher() async throws {
+  let sandbox = try _makeBridgeSandbox(
+    label: "S2A-2 readiness dev", dotenv: "VLOGSRT_OFFLINE=1\n")
+  defer { try? FileManager.default.removeItem(at: sandbox.root) }
+  _ = try _writeGuardedShim(sandbox: sandbox)
+  try _runShimCanary(sandbox: sandbox)
+  let scriptsDirectory = try _installDevelopmentWrapper(sandbox: sandbox)
+    .deletingLastPathComponent()
+  let toolsBin = try _writeSyntheticTools(sandbox: sandbox)
+  let job = sandbox.root.appendingPathComponent("readiness job", isDirectory: true)
+  try FileManager.default.createDirectory(at: job, withIntermediateDirectories: true)
+
+  let invocation = try DevelopmentEngineInvocation.createReadiness(
+    jobID: "readiness-job",
+    appGroupJob: job,
+    applicationScriptsDirectory: scriptsDirectory,
+    credentials: EngineRoleCredentials())
+  let report = try await _withDeadline(seconds: 60, label: "readiness 개발") {
+    try await DevelopmentEngineLauncher().runReadiness(invocation)
+  }
+
+  #expect(report.engine == "vlogsrt-engine")
+  #expect(report.readinessVersion == 1)
+  #expect(!(report.pythonExecutable ?? "").isEmpty)
+  #expect(!(report.pythonVersion ?? "").isEmpty)
+  #expect(report.ffmpeg == toolsBin.appendingPathComponent("ffmpeg").path)
+  #expect(report.ffprobe == toolsBin.appendingPathComponent("ffprobe").path)
+  // 보호 증명은 이 readiness 자식의 것이다 — 사전확인 카나리가 아니다.
+  try _assertJobProof(sandbox: sandbox, jobID: "readiness-job", minimumRecords: 1)
+}
+
+/// **실제 다리(readiness 편, 번들)** — 생산 공장(`createReadiness`)과 생산
+/// 탐침(`EngineReadinessProber`)을 그대로: 번들 engineRoot의 실행기 자리에
+/// 시험 소유 실행기를 두되 PATH·cwd·인자는 공장이 정한 대로 흐른다. 보호·
+/// HOME 변수만 실행기가 더한다(생산 PATH 계약을 대체하지 않는다). 도구는
+/// 번들 bin에서 풀린다 — 공유 심의 도구 디렉터리가 빠진 번들을 가리지 않는다.
+@Test func readinessCrossesTheRealBundledFactoryAndProber() async throws {
+  let sandbox = try _makeBridgeSandbox(
+    label: "S2A-2 readiness bundle", dotenv: "VLOGSRT_OFFLINE=1\n")
+  defer { try? FileManager.default.removeItem(at: sandbox.root) }
+    // 심을 먼저 만든다 — 카나리가 payload와 같은 보호 해석기를 봐야 한다.
+  let guardEnv = try _writeGuardedShim(sandbox: sandbox)
+  try _runShimCanary(sandbox: sandbox)
+  let engineRoot = sandbox.root.appendingPathComponent("synthetic engine", isDirectory: true)
+  let bin = engineRoot.appendingPathComponent("bin", isDirectory: true)
+  try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+  let toolsResponse = """
+    #!/bin/sh
+    printf '%s\\n' '{"streams": [{"codec_type": "video"}, {"codec_type": "audio"}]}'
+    """
+  for tool in ["ffmpeg", "ffprobe"] {
+    let path = bin.appendingPathComponent(tool)
+    try Data(toolsResponse.utf8).write(to: path)
+    try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: path.path)
+  }
+  try _writeTestBundleExecutable(
+    sandbox: sandbox, engineRoot: engineRoot, guardEnv: guardEnv)
+  let job = sandbox.root.appendingPathComponent("readiness bundled job", isDirectory: true)
+  try FileManager.default.createDirectory(at: job, withIntermediateDirectories: true)
+  try Data("<fcpxml/>\n".utf8).write(to: job.appendingPathComponent("input.fcpxml"))
+  let before = try FileManager.default.contentsOfDirectory(atPath: job.path).sorted()
+
+  let request = EngineReadinessRequest(
+    mode: .bundled,
+    jobID: "readiness-bundled",
+    appGroupJob: job,
+    applicationScriptsDirectory: nil,
+    engineRoot: engineRoot,
+    credentials: EngineRoleCredentials())
+  let report = try await _withDeadline(seconds: 60, label: "readiness 번들") {
+    try await EngineReadinessProber.probe(request)
+  }
+
+  #expect(report.engine == "vlogsrt-engine")
+  #expect(report.readinessVersion == 1)
+  // 문자열 철자(/var vs /private/var)가 아니라 물리 동일성으로 잰다 — 그리고
+  // 생산 판정이 이 보고를 준비로 받아들이는 것이 본 증명이다.
+  func physical(_ value: String?) -> String {
+    guard let value else { return "" }
+    return _physicalRoot(URL(fileURLWithPath: value)).path
+  }
+  #expect(physical(report.ffmpeg) == _physicalRoot(bin.appendingPathComponent("ffmpeg")).path)
+  #expect(physical(report.ffprobe) == _physicalRoot(bin.appendingPathComponent("ffprobe")).path)
+  try EngineReadiness.evaluate(
+    report: report, mode: .bundled, engineRoot: engineRoot, requiresTools: true)
+  // 보호 증명은 이 readiness 자식의 것이다 — 사전확인 카나리가 아니다.
+  try _assertJobProof(
+    sandbox: sandbox, jobID: "readiness-bundled", minimumRecords: 1, expectedCWD: engineRoot)
+  let after = try FileManager.default.contentsOfDirectory(atPath: job.path).sorted()
+  #expect(after == before)  // 읽기 전용 계약 — 잠금·workspace 없음
+}
+
+/// 번들 모양의 자리에서 **도구가 없으면** 생산 판정이 닫힌다 — 탐침은 보고를
+/// 내지만 준비는 번들 bin의 실물을 요구한다.
+@Test func bundledReadinessWithoutBundledToolsFailsClosed() async throws {
+  let sandbox = try _makeBridgeSandbox(
+    label: "S2A-2 readiness bundle empty", dotenv: "VLOGSRT_OFFLINE=1\n")
+  defer { try? FileManager.default.removeItem(at: sandbox.root) }
+    // 심을 먼저 만든다 — 카나리가 payload와 같은 보호 해석기를 봐야 한다.
+  let guardEnv = try _writeGuardedShim(sandbox: sandbox)
+  try _runShimCanary(sandbox: sandbox)
+  let engineRoot = sandbox.root.appendingPathComponent("synthetic engine", isDirectory: true)
+  try FileManager.default.createDirectory(
+    at: engineRoot.appendingPathComponent("bin", isDirectory: true),
+    withIntermediateDirectories: true)  // 빈 bin — 도구가 없다
+  try _writeTestBundleExecutable(
+    sandbox: sandbox, engineRoot: engineRoot, guardEnv: guardEnv)
+  let job = sandbox.root.appendingPathComponent("readiness empty job", isDirectory: true)
+  try FileManager.default.createDirectory(at: job, withIntermediateDirectories: true)
+
+  let request = EngineReadinessRequest(
+    mode: .bundled,
+    jobID: "readiness-empty",
+    appGroupJob: job,
+    applicationScriptsDirectory: nil,
+    engineRoot: engineRoot,
+    credentials: EngineRoleCredentials())
+  let report = try await _withDeadline(seconds: 60, label: "readiness 번들 빈 bin") {
+    try await EngineReadinessProber.probe(request)
+  }
+  #expect(report.ffmpeg == nil && report.ffprobe == nil)  // 자식은 사실을 말한다
+  try _assertJobProof(
+    sandbox: sandbox, jobID: "readiness-empty", minimumRecords: 1, expectedCWD: engineRoot)
+  do {
+    try EngineReadiness.evaluate(
+      report: report, mode: .bundled, engineRoot: engineRoot, requiresTools: true)
+    Issue.record("빈 번들 bin이 준비로 지나갔다")
+  } catch let error as EnginePreflightError {
+    #expect((error.errorDescription ?? "").contains("번들"))
+  }
+}
+
+/// 번들 실행기가 띄울 수 없으면 탐침은 정해진 글로 닫는다 — 원본 오류가
+/// 부모 환경을 흘리지 않는다.
+@Test func bundledReadinessWithABrokenLauncherClosesWithAFixedReason() async throws {
+  let sandbox = try _makeBridgeSandbox(
+    label: "S2A-2 readiness bundle broken", dotenv: "VLOGSRT_OFFLINE=1\n")
+  defer { try? FileManager.default.removeItem(at: sandbox.root) }
+    // 심을 먼저 만든다 — 카나리가 payload와 같은 보호 해석기를 봐야 한다.
+  let guardEnv = try _writeGuardedShim(sandbox: sandbox)
+  try _runShimCanary(sandbox: sandbox)
+  let engineRoot = sandbox.root.appendingPathComponent("synthetic engine", isDirectory: true)
+  try FileManager.default.createDirectory(
+    at: engineRoot.appendingPathComponent("bin", isDirectory: true),
+    withIntermediateDirectories: true)
+  try _writeTestBundleExecutable(
+    sandbox: sandbox, engineRoot: engineRoot, guardEnv: guardEnv)
+  // 실행 권한을 뗀다 — 시작 실패의 실제 모양이다.
+  let executable = engineRoot
+    .appendingPathComponent("Contents", isDirectory: true)
+    .appendingPathComponent("MacOS", isDirectory: true)
+    .appendingPathComponent(DevelopmentEngineInvocation.scriptName)
+  try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: executable.path)
+  let job = sandbox.root.appendingPathComponent("readiness broken job", isDirectory: true)
+  try FileManager.default.createDirectory(at: job, withIntermediateDirectories: true)
+
+  let request = EngineReadinessRequest(
+    mode: .bundled,
+    jobID: "readiness-broken",
+    appGroupJob: job,
+    applicationScriptsDirectory: nil,
+    engineRoot: engineRoot,
+    credentials: EngineRoleCredentials())
+  do {
+    _ = try await _withDeadline(seconds: 60, label: "readiness 부서진 번들") {
+      try await EngineReadinessProber.probe(request)
+    }
+    Issue.record("띄울 수 없는 실행기가 지나갔다")
+  } catch let error as EnginePreflightError {
+    #expect((error.errorDescription ?? "").contains("번들"))
+  }
+}
+
+/// 시험 소유 번들 실행기 — 생산 호출 계약(PATH·cwd·인자)은 그대로 두고
+/// 보호·HOME 변수만 env -i로 더한다. 드라이버를 거쳐 실제 엔진 스크립트가
+/// 돈다(보호 증명도 이 자식의 것이다).
+nonisolated func _writeTestBundleExecutable(
+  sandbox: BridgeSandbox, engineRoot: URL, guardEnv: [String: String]
+) throws {
+  let executable = engineRoot
+    .appendingPathComponent("Contents", isDirectory: true)
+    .appendingPathComponent("MacOS", isDirectory: true)
+    .appendingPathComponent(DevelopmentEngineInvocation.scriptName)
+  try FileManager.default.createDirectory(
+    at: executable.deletingLastPathComponent(), withIntermediateDirectories: true)
+  let script = """
+    #!/bin/sh
+    # 시험 소유 번들 실행기(S2A-2) — 생산 PATH·인자는 그대로, 보호 변수만 더한다.
+    exec /usr/bin/env -i \\
+      PATH="$PATH" \\
+      VLOGSRT_ENGINE_ROLE_CREDENTIALS="$VLOGSRT_ENGINE_ROLE_CREDENTIALS" \\
+      HOME=\(_shQuoted(sandbox.home.path)) \\
+      TMPDIR=\(_shQuoted(sandbox.tmp.path)) \\
+      PYTHONPATH=\(_shQuoted("\(sandbox.guardBoot.path):\(sandbox.repo.path)")) \\
+      VLOGSRT_OFFLINE=1 \\
+      VLOGSRT_TEST_GUARD_ROOTS=\(_shQuoted(guardEnv["VLOGSRT_TEST_GUARD_ROOTS"] ?? "")) \\
+      VLOGSRT_TEST_GUARD_STANDIN=\(_shQuoted(sandbox.standin.path)) \\
+      VLOGSRT_TEST_GUARD_PROOF=\(_shQuoted(sandbox.root.appendingPathComponent("guard-proof.jsonl").path)) \\
+      VLOGSRT_TEST_EXPECTED_CWD=\(_shQuoted(engineRoot.path)) \\
+      VLOGSRT_TEST_EXPECTED_INIT=\(_shQuoted(sandbox.repo.appendingPathComponent("vlogsrt/__init__.py").path)) \\
+      VLOGSRT_TEST_PROOF_DIR=\(_shQuoted(sandbox.proofDir.path)) \\
+      VLOGSRT_TEST_RESULT_DIR=\(_shQuoted(sandbox.resultDir.path)) \\
+      \(_shQuoted(sandbox.realPython.path)) \(_shQuoted(sandbox.driver.path)) \(_shQuoted(sandbox.engineScript.path)) "$@"
+    """
+  try Data(script.utf8).write(to: executable)
+  try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+}
+
 
 /// **실제 다리(자격 증명 편, S2A-2)** — 진짜 설치 래퍼 → 실제 파이썬 → 바이트 동일
 /// 엔진 스크립트를 NSUserUnixTask로 건너, stdin 봉투가 마커와 함께 흘러가는지를

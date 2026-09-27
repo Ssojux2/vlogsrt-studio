@@ -74,6 +74,80 @@ def probe_duration(path: Path) -> float:
         raise RuntimeError(f"길이를 읽지 못했습니다: {path} (ffprobe 출력 {raw!r})") from exc
 
 
+# 스트림 확인 ffprobe의 마감 — 동작 임계값이 아니라 멈춘 자식을 무한히 기다리지
+# 않는 상한이다(S2A-2 위상 검사). 조각 분할·추출에는 붙지 않는다: 그 경로들은
+# 이미 실패 전파와 재시도 계약을 가진다.
+_PROBE_TIMEOUT_SECONDS = 30.0
+
+
+def _run_probe(command: list[str]) -> str:
+    """마감이 정해진 ffprobe 한 번 — 위상 확인 전용의 `_run` 변형.
+
+    실패의 네 가지 모양(실행 불가·비0 종료·마감 초과·깨진 출력)이 전부
+    RuntimeError로 나간다. 이 경로의 호출자는 실패를 **절대 0으로 해석해서는
+    안 된다** — '스트림 0개·무음'은 지원되는 상태지 실패의 위장이 아니다.
+    """
+    try:
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=_PROBE_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"스트림 확인이 마감({_PROBE_TIMEOUT_SECONDS:.0f}초)을 넘겼다:"
+            f" {command[0]} {command[-1]}"
+        ) from exc
+    except OSError as exc:
+        raise RuntimeError(f"명령 실행 실패: {command[0]} ({exc})") from exc
+    if completed.returncode != 0:
+        tail = "\n".join(completed.stderr.strip().splitlines()[-5:])
+        raise RuntimeError(f"{command[0]} 실패 (코드 {completed.returncode})\n{tail}")
+    return completed.stdout
+
+
+_KNOWN_CODEC_TYPES = frozenset({"video", "audio", "subtitle", "data", "attachment"})
+"""ffprobe `codec_type`의 닫힌 값 집합 — 이 밖의 값은 증거가 깨졌다는 뜻이다.
+
+위상 검사는 스트림 수로 유료 호출을 가르므로, 항목 하나의 분류를 모르는 채
+'오디오 아님'으로 세면 깨진 증거가 0스트림(무음)으로 위장된다. 그래서 이
+호출의 판독은 닫힌 집합 밖을 받지 않는다(다른 소비자의 `_stream_entries`
+계약은 그대로다).
+"""
+
+
+def _stream_codec_type(entry: dict[str, object], source: Path) -> str:
+    """한 스트림의 분류 — 없거나·틀린형이거나·모르는 값이면 죽는다(실패 닫힘)."""
+    value = entry.get("codec_type")
+    if not isinstance(value, str) or not value:
+        raise RuntimeError(f"스트림 항목에 codec_type이 없습니다: {source} (값 {value!r})")
+    if value not in _KNOWN_CODEC_TYPES:
+        raise RuntimeError(f"스트림 항목의 codec_type을 모릅니다: {source} (값 {value!r})")
+    return value
+
+
+def probe_audio_stream_count(source: Path) -> int:
+    """ffprobe가 본 오디오 **스트림** 수 — 영상 유무와 무관하다(S2A-2).
+
+    `probe_media_summary`는 컷 합성을 위해 영상 기하를 요구하지만, 위상 검사는
+    오디오만 있는 원본도 받아야 한다. 이 호출은 `codec_type`만 센다: 스테레오·
+    멀티채널 채널은 한 스트림이고, 실패는 결코 0으로 번역되지 않는다.
+    """
+    ffprobe = require_ffmpeg("ffprobe")
+    completed = _run_probe(
+        [
+            ffprobe, "-v", "error",
+            "-show_entries", "stream=codec_type",
+            "-of", "json",
+            str(source),
+        ]
+    )  # fmt: skip
+    streams = _stream_entries(completed, source)
+    return sum(1 for entry in streams if _stream_codec_type(entry, source) == "audio")
+
+
 def extract_audio(src: Path, dst: Path, cfg: Config) -> Path:
     """오디오를 손대지 않고 뽑는다 — 필터 없음(D20).
 

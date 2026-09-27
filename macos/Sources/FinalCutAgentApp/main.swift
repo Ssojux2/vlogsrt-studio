@@ -253,107 +253,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // URL 계산으로만 정한다 — 청구 전에 아무것도 만들지 않는다. 같은 job의
         // 동시 요청은 본문을 시작하지 않고 alreadyRunning으로 물러나며, 첫 소유권·
         // 취소 기록·실행을 건드리지 않는다.
-        let outcome = try await engineRequestGate.perform(jobURL: job.directoryURL) {
-          let ownershipKey = EngineRequestGate.ownershipKey(for: job.directoryURL)
-          // 미디어 권한: 참조 전체가 활성 루트 안인지 보고 문서를 스테이징한다.
-          // 현재 작업 표시는 이 검증이 **통과한 뒤에만** 남긴다 — 실패가 stale
-          // 상태를 남기지 않는다.
-          let bookmarkStore = try SecurityScopedBookmarkStore()
-          let roots = try bookmarkStore.allowedRoots()
-          let grant = try MediaGrantValidator.validate(
-            fcpxml: job.inputURL, roots: roots
-          )
-          try grant.write(to: job.directoryURL)
-
-          // scope는 엔진이 끝날 때까지 유지한다. 하나라도 시작에 실패하면 이미
-          // 걸은 scope를 전부 풀고 실패로 닫는다 — 부분 권한으로 계속하지 않는다.
-          var scopes: [URL] = []
-          for root in roots {
-            guard root.startAccessingSecurityScopedResource() else {
-              for started in scopes {
-                started.stopAccessingSecurityScopedResource()
-              }
-              throw AppError.securityScopeUnavailable(root.path)
-            }
-            scopes.append(root)
+        let ownershipKey = EngineRequestGate.ownershipKey(for: job.directoryURL)
+        // 준비 본문은 core의 조정자가 가진다(S2A-2 마지말 단위) — 앱은 배선과
+        // 표시만 한다. 같은 배선이 시험을 통과한 조정자다(복사한 시험 논리가 아니다).
+        let bookmarkStore = try SecurityScopedBookmarkStore()
+        var sessionStarted = false
+        let dependencies = EngineRequestCoordinator.Dependencies.live(
+          bookmarkAccess: bookmarkStore,
+          loadCredentials: {
+            EngineRoleCredentialStore(storage: KeychainStore()).loadSnapshot()
+          },
+          executor: ProcessEngineExecutor(),
+          importRoughcut: { url in
+            try await FinalCutImporter().sendOpenDocument(url)
           }
-          defer {
-            for scope in scopes {
-              scope.stopAccessingSecurityScopedResource()
-            }
-          }
-          currentJobLabel?.stringValue = "현재 작업: \(jobID) (\(operation.rawValue))"
-          defer {
-            // 이 job만 판에서 내린다 — 다른 job이 돌고 있으면 그 취소 문맥과
-            // '현재 작업' 표시는 그대로 산다(S2A-1).
-            engineJobBoard.end(key: ownershipKey)
-            if let running = engineJobBoard.current {
-              currentJobLabel?.stringValue = "현재 작업: \(running.jobID)"
-            } else {
-              currentJobLabel?.stringValue = "현재 작업: 없음"
-            }
-          }
-
-          let selectionRevision = try job.readProjectSelection().selectionRevision
-          let registry = try ActiveSelectionRegistry.live()
-
-          var externalJob: URL?
-          if Self.buildConfiguration == .debug {
-            if let externalRoot = try bookmarkStore.resolve(
-              key: Self.developmentWorkspaceBookmark
-            ) {
-              externalJob = try DevelopmentJobStager.stage(
-                jobID: jobID,
-                appGroupJob: job.directoryURL,
-                externalRoot: externalRoot
-              )
-            }
-          }
-
-          let engineRoot = Bundle.main.resourceURL?
-            .appendingPathComponent("Engine", isDirectory: true)
-          let scripts = try FileManager.default.url(
-            for: .applicationScriptsDirectory,
-            in: .userDomainMask,
-            appropriateFor: nil,
-            create: true
-          )
-          // 세 저장 값을 한 덩어리로 읽고 실행 직전에 다시 검증한다(S2A-2 단위2).
-          // 읽기 실패는 정해진 글 + 실행 없음이다. 빈 값은 부재일 뿐 — 추정·
-          // 러프컷은 키 없이도 돈다. 재검증은 저장 때가 아니라 **지금** 키 재료와
-          // 견준다(키가 바뀐 뒤 낡은 엔드포인트가 지나가는 길을 닫는다).
-          let snapshot = EngineRoleCredentialStore(storage: KeychainStore()).loadSnapshot()
-          guard case .ready(let credentials) = snapshot else {
-            throw AppError.credentialStorageUnavailable
-          }
-          if let blocker = EngineRoleCredentialStore.launchBlocker(for: credentials) {
-            throw AppError.visionEndpointInvalid(blocker)
-          }
-          let plan = EngineRuntime.resolvePlan(
-            configuration: Self.buildConfiguration,
-            operation: operation,
-            jobID: jobID,
-            appGroupJob: job.directoryURL,
-            engineRoot: engineRoot,
-            applicationScriptsDirectory: scripts,
-            developmentExternalJob: externalJob,
-            credentials: credentials
-          )
-          let runner = EngineSessionRunner(executor: ProcessEngineExecutor())
-          let context = EngineSessionContext(
-            operation: operation,
-            jobID: jobID,
-            appGroupJob: job.directoryURL,
-            externalJob: externalJob,
-            plan: plan,
-            selectionRevision: selectionRevision,
-            registry: registry
-          )
+        ).attachingSessionStart { [weak self] context in
+          guard let self else { return }
+          sessionStarted = true
+          self.currentJobLabel?.stringValue = "현재 작업: \(jobID) (\(operation.rawValue))"
           // 실행 마커는 계획이 정해진 뒤 — 취소 기록이 실행 경로와 미러 대상을
-          // 실행 때의 값으로만 알아야 한다(S1A-R1). 취소 시점에 북마크를 다시 풀면
-          // 바뀐·없는 북마크가 번들 취소 기록조차 막는다. job별 판에 올린다 — 다른
+          // 실행 때의 값으로만 알아야 한다(S1A-R1). job별 판에 올린다 — 다른
           // job이 함께 돌아도 이 취소 문맥은 이 job이 끝날 때만 사라진다.
-          engineJobBoard.begin(
+          self.engineJobBoard.begin(
             key: ownershipKey,
             context: EngineJobBoard.Context(
               jobID: jobID,
@@ -362,37 +283,59 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
               externalJob: context.externalJob
             )
           )
-          let sessionOutcome = try await runner.run(
-            context,
-            importRoughcut: { url in
-              try await FinalCutImporter().sendOpenDocument(url)
+        }
+        let coordinator = EngineRequestCoordinator(dependencies: dependencies)
+        defer {
+          // 세션이 시작됐던 job만 판에서 내린다 — 준비 실패는 아무 표시도 남기지
+          // 않고, 다른 job이 돌고 있으면 그 취소 문맥과 표시는 그대로 산다(S2A-1).
+          if sessionStarted {
+            engineJobBoard.end(key: ownershipKey)
+            if let running = engineJobBoard.current {
+              currentJobLabel?.stringValue = "현재 작업: \(running.jobID)"
+            } else {
+              currentJobLabel?.stringValue = "현재 작업: 없음"
             }
+          }
+        }
+        let outcome = try await engineRequestGate.perform(jobURL: job.directoryURL) {
+          try await coordinator.run(
+            operation: operation,
+            job: job,
+            configuration: Self.buildConfiguration,
+            engineRoot: Bundle.main.resourceURL?
+              .appendingPathComponent("Engine", isDirectory: true),
+            applicationScriptsDirectory: try FileManager.default.url(
+              for: .applicationScriptsDirectory,
+              in: .userDomainMask,
+              appropriateFor: nil,
+              create: true
+            ),
+            registry: try ActiveSelectionRegistry.live()
           )
-          statusLabel?.stringValue = Self.describe(sessionOutcome, operation: operation, jobID: jobID)
-          // 종료 코드 0만으로 전체 성공으로 말하지 않는다 — 완료한 분석의 요약은
-          // 집계가 말한다: 성공·부분 실패·알 수 없음 모두 그 요약으로 보여준다(S1B-R1).
-          if case .completed = sessionOutcome, operation == .analyze {
-            switch job.readAnalysisRecord() {
-            case .valid(let result):
-              statusLabel?.stringValue =
-                "\(Self.describe(sessionOutcome, operation: operation, jobID: jobID)) · "
-                + AnalysisOutcome.make(result).userFacingSummary
-            case .unknown:
-              statusLabel?.stringValue =
-                "\(Self.describe(sessionOutcome, operation: operation, jobID: jobID)) · "
-                + AnalysisOutcome.legacyUnknown.userFacingSummary
-            case .fresh:
-              break  // 기록이 없는 새 작업 — 일반 완료 문구 그대로 둔다.
-            }
+        }
+        statusLabel?.stringValue = Self.describe(outcome, operation: operation, jobID: jobID)
+        // 종료 코드 0만으로 전체 성공으로 말하지 않는다 — 완료한 분석의 요약은
+        // 집계가 말한다: 성공·부분 실패·알 수 없음 모두 그 요약으로 보여준다(S1B-R1).
+        if case .completed = outcome, operation == .analyze {
+          switch job.readAnalysisRecord() {
+          case .valid(let result):
+            statusLabel?.stringValue =
+              "\(Self.describe(outcome, operation: operation, jobID: jobID)) · "
+              + AnalysisOutcome.make(result).userFacingSummary
+          case .unknown:
+            statusLabel?.stringValue =
+              "\(Self.describe(outcome, operation: operation, jobID: jobID)) · "
+              + AnalysisOutcome.legacyUnknown.userFacingSummary
+          case .fresh:
+            break  // 기록이 없는 새 작업 — 일반 완료 문구 그대로 둔다.
           }
-          if case .unavailable = sessionOutcome {
-            NSAlert(
-              error: AppError.engineUnavailable(
-                Self.describe(sessionOutcome, operation: operation, jobID: jobID)
-              )
-            ).runModal()
-          }
-          return sessionOutcome
+        }
+        if case .unavailable = outcome {
+          NSAlert(
+            error: AppError.engineUnavailable(
+              Self.describe(outcome, operation: operation, jobID: jobID)
+            )
+          ).runModal()
         }
         if case .alreadyRunning = outcome {
           statusLabel?.stringValue = Self.describe(outcome, operation: operation, jobID: jobID)

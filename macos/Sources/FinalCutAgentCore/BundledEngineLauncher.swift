@@ -86,6 +86,39 @@ public struct BundledEngineInvocation: Equatable, Sendable {
   public static let roleCarrierEnvironmentName = "VLOGSRT_ENGINE_ROLE_CREDENTIALS"
   public static let pathEnvironmentName = "PATH"
 
+  /// 번들 readiness 호출 조립 — 넷째 인자는 보고서 자리다(상태 기록 계약 없음).
+  /// 환경은 작업 호출과 같은 한 통(PATH + V2 운반자)이므로, 보고서의 도구 칸이
+  /// 곧 작업 자식이 볼 환경이다(S2A-2 마지막 단위).
+  public static func createReadiness(
+    jobID: String,
+    jobDirectory: URL,
+    engineRoot: URL,
+    reportURL: URL,
+    credentials: EngineRoleCredentials
+  ) throws -> Self {
+    guard AppGroupWorkspace.isSafeJobID(jobID) else {
+      throw WorkspaceError.invalidJobID(jobID)
+    }
+    let executable = engineRoot
+      .appendingPathComponent("Contents", isDirectory: true)
+      .appendingPathComponent("MacOS", isDirectory: true)
+      .appendingPathComponent(DevelopmentEngineInvocation.scriptName)
+    let payload = try credentials.encodedPayload()
+    let environment = [
+      Self.pathEnvironmentName: Self.bundledToolPath(engineRoot: engineRoot),
+      Self.roleCarrierEnvironmentName: String(decoding: payload, as: UTF8.self),
+    ]
+    return Self(
+      executableURL: executable,
+      arguments: [
+        EngineReadiness.operationName, jobID, jobDirectory.standardizedFileURL.path,
+        reportURL.standardizedFileURL.path,
+      ],
+      currentDirectory: engineRoot,
+      environment: environment
+    )
+  }
+
   /// 번들의 도구 경로 — bin/ffmpeg·bin/ffprobe가 여기서 발견된다.
   public static func bundledToolPath(engineRoot: URL) -> String {
     "\(engineRoot.standardizedFileURL.path)/bin:/usr/bin:/bin"

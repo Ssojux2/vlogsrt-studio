@@ -138,7 +138,11 @@ func _testRegistry(selection: String = "a".padding(toLength: 64, withPad: "a", s
     !(invocation.environment[BundledEngineInvocation.pathEnvironmentName] ?? "")
       .contains("/opt/homebrew"))
 
-  // Debug는 번들이 없을 때 개발 실행기로 되돌린다.
+  // Debug는 번들이 없을 때 개발 실행기로 되돌린다 — 이제 **실행 가능한** 래퍼가
+  // 있어야 한다(S2A-2: 없는 래퍼의 development 계획은 준비의 말이 거짓이다).
+  let wrapper = scripts.appendingPathComponent(DevelopmentEngineInvocation.scriptName)
+  try Data("#!/bin/sh\n".utf8).write(to: wrapper)
+  try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: wrapper.path)
   let debug = EngineRuntime.resolvePlan(
     configuration: .debug,
     operation: .analyze,
@@ -166,6 +170,117 @@ func _testRegistry(selection: String = "a".padding(toLength: 64, withPad: "a", s
     apiKey: nil
   )
   #expect(!stranded.isExecutable)
+}
+
+// ─────────────────────────────────────────────────────────────
+//  STAB-S2A-2 마지막 단위 — 초기 RED: 실제 호출 경계의 두 결함
+// ─────────────────────────────────────────────────────────────
+
+/// Debug 폴백은 **실행 가능한** 개발 래퍼가 있을 때만이다 — 래퍼가 없거나 실행
+/// 권한이 없으면 unavailable로 닫혀야 한다. 오늘 resolvePlan은 래퍼의 존재를
+/// 보지 않고 development 계획을 내주므로, 실행은 시작 단계에서만 죽는다.
+@Test func debugFallbackRequiresAnExecutableDevelopmentWrapper() throws {
+  let root = FileManager.default.temporaryDirectory
+    .appendingPathComponent(UUID().uuidString, isDirectory: true)
+  let scripts = root.appendingPathComponent("Scripts", isDirectory: true)
+  let external = root.appendingPathComponent("external-job", isDirectory: true)
+  try FileManager.default.createDirectory(at: scripts, withIntermediateDirectories: true)
+  try FileManager.default.createDirectory(at: external, withIntermediateDirectories: true)
+  defer { try? FileManager.default.removeItem(at: root) }
+  let wrapper = scripts.appendingPathComponent(DevelopmentEngineInvocation.scriptName)
+
+  // 래퍼가 아예 없다 — development가 아니라 unavailable이어야 한다.
+  let missing = EngineRuntime.resolvePlan(
+    configuration: .debug,
+    operation: .analyze,
+    jobID: "job-42",
+    appGroupJob: root,
+    engineRoot: nil,
+    applicationScriptsDirectory: scripts,
+    developmentExternalJob: external,
+    apiKey: nil
+  )
+  guard case .unavailable(let missingReason) = missing else {
+    Issue.record("래퍼가 없으면 unavailable이어야 한다: \(missing)")
+    return
+  }
+  #expect(missingReason.contains("개발"))
+
+  // 래퍼가 있지만 실행 권한이 없다 — 같은 판정이다.
+  try Data("#!/bin/sh\n".utf8).write(to: wrapper)
+  let nonExecutable = EngineRuntime.resolvePlan(
+    configuration: .debug,
+    operation: .analyze,
+    jobID: "job-42",
+    appGroupJob: root,
+    engineRoot: nil,
+    applicationScriptsDirectory: scripts,
+    developmentExternalJob: external,
+    apiKey: nil
+  )
+  guard case .unavailable = nonExecutable else {
+    Issue.record("실행 권한 없는 래퍼는 unavailable이어야 한다: \(nonExecutable)")
+    return
+  }
+
+  // 실행 권한을 주면 그제야 development가 된다 — 같은 입력의 대조군이다.
+  try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: wrapper.path)
+  let executable = EngineRuntime.resolvePlan(
+    configuration: .debug,
+    operation: .analyze,
+    jobID: "job-42",
+    appGroupJob: root,
+    engineRoot: nil,
+    applicationScriptsDirectory: scripts,
+    developmentExternalJob: external,
+    apiKey: nil
+  )
+  guard case .development = executable else {
+    Issue.record("실행 가능한 래퍼는 development여야 한다: \(executable)")
+    return
+  }
+}
+
+/// 권한 문서의 JSON은 파이썬 소비자(`_staged_app_grant_revision`)가 읽는 키로
+/// 나가야 한다 — `grant_revision`(snake_case). 오늘 부호화는 Swift 프로퍼티
+/// 이름(grantRevision)을 그대로 쓰므로, 앱이 스테이징한 문서는 엔진 쪽에서
+/// 'grant_revision이 없다'로 죽는다. 문서의 바이트가 계약이다.
+@Test func mediaGrantDocumentWireJSONCarriesThePythonConsumedKey() throws {
+  let root = FileManager.default.temporaryDirectory
+    .appendingPathComponent(UUID().uuidString, isDirectory: true)
+  let mediaRoot = root.appendingPathComponent("media", isDirectory: true)
+  try FileManager.default.createDirectory(at: mediaRoot, withIntermediateDirectories: true)
+  defer { try? FileManager.default.removeItem(at: root) }
+
+  let grant = MediaGrantDocument(roots: [mediaRoot])
+  let job = root.appendingPathComponent("job", isDirectory: true)
+  try FileManager.default.createDirectory(at: job, withIntermediateDirectories: true)
+  try grant.write(to: job)
+
+  let raw = try String(
+    contentsOf: job.appendingPathComponent(MediaGrantDocument.fileName), encoding: .utf8)
+  let payload = try #require(
+    JSONSerialization.jsonObject(with: Data(raw.utf8)) as? [String: Any])
+  // 파이썬이 읽는 키 — 이 자리에 값이 없으면 엔진의 준비가 죽는다.
+  let revision = try #require(payload["grant_revision"] as? String)
+  #expect(revision == grant.grantRevision)
+  #expect(revision.count == 64)
+  // 낡은 camelCase 키는 더 이상 나가지 않는다 — 두 철자가 함께 있으면 읽는
+  // 쪽이 어느 것이 정본인지 말할 수 없다.
+  #expect(payload["grantRevision"] == nil)
+
+  // 교차 증명: 파이썬 소비자의 지문 재료(`_swift_grant_revision`)와 같은 바이트를
+  // 말한다 — 유니코드·끝 공백 경로에서도 글자를 가공하지 않는다.
+  let unicodeRoot = root.appendingPathComponent("미디어 루트 한글 ", isDirectory: true)
+  let unicodeGrant = MediaGrantDocument(roots: [unicodeRoot])
+  let canonical = unicodeRoot.resolvingSymlinksInPath().standardizedFileURL.path
+  let twin = Data("{\"rootPaths\":[\"\(canonical)\"]}".utf8)
+  let twinDigest = SHA256.hash(data: twin).map { String(format: "%02x", $0) }.joined()
+  #expect(unicodeGrant.grantRevision == twinDigest)
+  let unicodePayload = try #require(
+    JSONSerialization.jsonObject(
+      with: JSONEncoder().encode(unicodeGrant)) as? [String: Any])
+  #expect((unicodePayload["roots"] as? [String]) == [canonical])  // 원문 글자 그대로
 }
 
 @Test func engineSessionGatesCancellationBeforeRunAndFailureSyncsDiagnostics() async throws {
@@ -714,6 +829,10 @@ enum EngineRuntimeTestFixtures {}
   defer { try? FileManager.default.removeItem(at: root) }
   try Data("#!/bin/sh\n".utf8).write(to: executable)
   try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+  // 개발 폴백도 실행 가능한 래퍼가 있어야 한다(S2A-2).
+  let wrapper = scripts.appendingPathComponent(DevelopmentEngineInvocation.scriptName)
+  try Data("#!/bin/sh\n".utf8).write(to: wrapper)
+  try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: wrapper.path)
 
   let roles = EngineRoleCredentials(
     sttKey: "synthetic-stt-key",

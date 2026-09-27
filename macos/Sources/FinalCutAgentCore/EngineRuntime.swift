@@ -33,25 +33,29 @@ public enum EngineRuntime {
     apiKey: String?,
     fileManager: FileManager = .default
   ) -> EngineLaunchPlan {
-    resolvePlan(
-      configuration: configuration,
-      operation: operation,
-      jobID: jobID,
-      appGroupJob: appGroupJob,
-      engineRoot: engineRoot,
-      applicationScriptsDirectory: applicationScriptsDirectory,
-      developmentExternalJob: developmentExternalJob,
-      bundled: { engineRoot in
-        try BundledEngineInvocation.create(
-          operation: operation, jobID: jobID, jobDirectory: appGroupJob,
-          engineRoot: engineRoot, apiKey: apiKey)
-      },
-      development: { scripts, externalJob in
-        try DevelopmentEngineInvocation.create(
-          operation: operation, jobID: jobID, externalJob: externalJob,
-          applicationScriptsDirectory: scripts, apiKey: apiKey)
-      },
-      fileManager: fileManager)
+    guard
+      let plan = try? resolvePlanThrowing(
+        configuration: configuration,
+        bundled: { engineRoot in
+          try BundledEngineInvocation.create(
+            operation: operation, jobID: jobID, jobDirectory: appGroupJob,
+            engineRoot: engineRoot, apiKey: apiKey)
+        },
+        development: { scripts, externalJob in
+          try DevelopmentEngineInvocation.create(
+            operation: operation, jobID: jobID, externalJob: externalJob,
+            applicationScriptsDirectory: scripts, apiKey: apiKey)
+        },
+        applicationScriptsDirectory: applicationScriptsDirectory,
+        developmentExternalJob: developmentExternalJob,
+        engineRoot: engineRoot,
+        fileManager: fileManager)
+    else {
+      return .unavailable(
+        "실행 가능한 엔진이 없다 — Debug에서는 개발 스크립트와 외부 작업 폴더가 필요하다"
+      )
+    }
+    return plan
   }
 
   /// V2 역할 경로 — 앱 호출의 정상 경로다(S2A-2 단위2). 세 값이 함께 가고
@@ -68,14 +72,49 @@ public enum EngineRuntime {
     credentials: EngineRoleCredentials,
     fileManager: FileManager = .default
   ) -> EngineLaunchPlan {
-    resolvePlan(
+    guard
+      let plan = try? resolvePlanThrowing(
+        configuration: configuration,
+        bundled: { engineRoot in
+          try BundledEngineInvocation.createRoles(
+            operation: operation, jobID: jobID, jobDirectory: appGroupJob,
+            engineRoot: engineRoot, credentials: credentials)
+        },
+        development: { scripts, externalJob in
+          try DevelopmentEngineInvocation.createRoles(
+            operation: operation, jobID: jobID, externalJob: externalJob,
+            applicationScriptsDirectory: scripts, credentials: credentials)
+        },
+        applicationScriptsDirectory: applicationScriptsDirectory,
+        developmentExternalJob: developmentExternalJob,
+        engineRoot: engineRoot,
+        fileManager: fileManager)
+    else {
+      return .unavailable(
+        "실행 가능한 엔진이 없다 — Debug에서는 개발 스크립트와 외부 작업 폴더가 필요하다"
+      )
+    }
+    return plan
+  }
+
+  /// 검증 계획 — 호출 조립 실패를 삼키지 않고 그대로 던진다(S2A-2 마지막 단위).
+  ///
+  /// 그르른 운반자(NUL·과대 봉투)를 이유로 다른 엔진을 조용히 고르는 길이
+  /// 없다: 실패는 호출자의 교정 글로 올라간다. 모드 선택·실행 가능 검사는
+  /// 비검증 경로와 같은 표를 쓴다.
+  public static func resolvePlanValidated(
+    configuration: EngineBuildConfiguration,
+    operation: DevelopmentEngineOperation,
+    jobID: String,
+    appGroupJob: URL,
+    engineRoot: URL?,
+    applicationScriptsDirectory: URL?,
+    developmentExternalJob: URL?,
+    credentials: EngineRoleCredentials,
+    fileManager: FileManager = .default
+  ) throws -> EngineLaunchPlan {
+    try resolvePlanThrowing(
       configuration: configuration,
-      operation: operation,
-      jobID: jobID,
-      appGroupJob: appGroupJob,
-      engineRoot: engineRoot,
-      applicationScriptsDirectory: applicationScriptsDirectory,
-      developmentExternalJob: developmentExternalJob,
       bundled: { engineRoot in
         try BundledEngineInvocation.createRoles(
           operation: operation, jobID: jobID, jobDirectory: appGroupJob,
@@ -86,6 +125,9 @@ public enum EngineRuntime {
           operation: operation, jobID: jobID, externalJob: externalJob,
           applicationScriptsDirectory: scripts, credentials: credentials)
       },
+      applicationScriptsDirectory: applicationScriptsDirectory,
+      developmentExternalJob: developmentExternalJob,
+      engineRoot: engineRoot,
       fileManager: fileManager)
   }
 
@@ -93,24 +135,23 @@ public enum EngineRuntime {
   /// 선택된 실행길의 비선택값(옵셔널)은 이 문에서 풀어 클로저 인자로 넘긴다 —
   /// 클로저가 바깥 옵셔널을 포획하면 호출부의 보장이 클로저 안까지 좁혀지지
   /// 않는다(컴파일 오류). 대상은 언제나 풀린 값이다.
-  private static func resolvePlan(
+  ///
+  /// 호출 조립(`bundled`·`development`)이 던지면 그대로 올라간다 — 검증 경로는
+  /// 교정 글로, 비검증 경로는 unavailable 하나로 접는다. 그르른 운반자를 이유로
+  /// 다른 엔진을 조용히 고르는 길은 어느 쪽에도 없다(S2A-2).
+  private static func resolvePlanThrowing(
     configuration: EngineBuildConfiguration,
-    operation: DevelopmentEngineOperation,
-    jobID: String,
-    appGroupJob: URL,
-    engineRoot: URL?,
-    applicationScriptsDirectory: URL?,
-    developmentExternalJob: URL?,
     bundled: (URL) throws -> BundledEngineInvocation,
     development: (URL, URL) throws -> DevelopmentEngineInvocation,
+    applicationScriptsDirectory: URL?,
+    developmentExternalJob: URL?,
+    engineRoot: URL?,
     fileManager: FileManager
-  ) -> EngineLaunchPlan {
+  ) throws -> EngineLaunchPlan {
     if let engineRoot, EngineLaunchMode.resolve(bundleURL: engineRoot, fileManager: fileManager)
       == .bundled
     {
-      if let invocation = try? bundled(engineRoot) {
-        return .bundled(invocation)
-      }
+      return .bundled(try bundled(engineRoot))
     }
     guard configuration == .debug else {
       return .unavailable(
@@ -118,9 +159,17 @@ public enum EngineRuntime {
       )
     }
     if let scripts = applicationScriptsDirectory, let externalJob = developmentExternalJob {
-      if let invocation = try? development(scripts, externalJob) {
-        return .development(invocation)
+      // 개발 폴백은 **실행 가능한** 래퍼가 있을 때만이다(S2A-2). 래퍼의 존재를
+      // 보지 않으면 계획이 development로 나가 실행 단계에서야 죽는다 — 준비의
+      // 말이 거짓이 된다. 교정 글이 설치를 가리킨다.
+      let wrapper = scripts.appendingPathComponent(DevelopmentEngineInvocation.scriptName)
+      guard fileManager.isExecutableFile(atPath: wrapper.path) else {
+        return .unavailable(
+          "개발 엔진 래퍼(\(DevelopmentEngineInvocation.scriptName))가 실행 가능하지 않다"
+            + " — macos/scripts/install-development-engine.sh로 설치하세요: \(wrapper.path)"
+        )
       }
+      return .development(try development(scripts, externalJob))
     }
     return .unavailable(
       "실행 가능한 엔진이 없다 — Debug에서는 개발 스크립트와 외부 작업 폴더가 필요하다"
@@ -212,7 +261,11 @@ public struct EngineSessionRunner {
     self.executor = executor
   }
 
-  public func run(
+  /// `nonisolated(nonsending)`(SE-0461) — 실행 전체가 **호출자의 격리 위에서**
+  /// 돈다. 문맥(레지스트리 등 비-Sendable 재료)은 격리를 넘지 않고, 무거운
+  /// 프로세스 대기만 실행기 안의 detached 작업으로 나간다. 취소·드리프트·
+  /// 세션 계약과 서로 다른 job의 독립 실행은 그대로다.
+  public nonisolated(nonsending) func run(
     _ context: EngineSessionContext,
     syncResults: @escaping (URL, URL, Bool) throws -> Void = { from, to, diagnosticsOnly in
       try DevelopmentJobStager.syncResults(from: from, to: to, diagnosticsOnly: diagnosticsOnly)

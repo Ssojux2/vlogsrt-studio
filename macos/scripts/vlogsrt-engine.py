@@ -33,6 +33,14 @@ job 상태(별칭 포함)와 분리돼 있으며 이미 있어서는 안 된다 
 **전달 성공으로만 0**으로 끝난다(실패·신호·크래시는 기록이 없거나 못 미더워
 기록으로 재분류되지 않는다). 3-인자 호출(번들·직접 계약)과 계약 밖 경로에서는
 아무 것도 쓰지 않고 안쪽 종료 코드가 곧 프로세스 종료 코드다.
+
+`readiness`는 읽기 전용 준비 확인 계약이다(S2A-2 마지막 단위). 같은 CLI 모양
+`readiness <job_id> <job_dir> <보고서|상태기록>`에서 넷째 인자가 `.status`로
+끝나면 상태 기록으로 읽고 보고서는 그 옆(`readiness.json`)에 남으며, 아니면
+그 경로가 곧 보고서 자리다(호출 소유 `vlogsrt-…` 디렉터리 안의 절대 경로).
+운반자는 실제 적용 경로를 지나 검증되고, 보고서는 공개 데이터 한 줄(파이썬
+실행 파일·버전, 실제 자식 환경의 ffmpeg·ffprobe, 운반자 버전)만 담는다 —
+잠금·workspace·결과 동기화가 전부 없다.
 """
 
 from __future__ import annotations
@@ -101,6 +109,17 @@ _STATUS_DIR_PREFIX = "vlogsrt-status-"
 _STATUS_SUFFIX = ".status"
 _STATUS_TOKEN = re.compile(r"^[A-Za-z0-9-]+$")
 
+# 읽기 전용 readiness 계약(S2A-2 마지막 단위) — 준비 검사가 **실제 선택된
+# 실행길**의 환경에서 무엇을 보는지 묻는 narrow 통로다. 잠금·workspace·결과
+# 동기화가 전부 없다: 남기는 것은 호출 소유의 보고서 한 줄뿐이다. 보고서는
+# 공개 데이터만 담는다(파이썬 실행 파일·버전, 실제 자식 환경에서 풀린 도구,
+# 이해한 운반자 버전) — 환경 통째로·자격 증명 재료는 결코 없다.
+_READINESS_OPERATION = "readiness"
+_READINESS_REPORT_NAME = "readiness.json"
+# 보고서의 상한 — 읽는 쪽이 상한 안에서 읽도록 쓰는 쪽도 같은 상한을 지킨다.
+_READINESS_MAX_BYTES = 4096
+_READINESS_VERSION = 1
+
 
 def _status_destination_error(path_text: str, canonical_job: Path) -> str | None:
     """상태 기록 경로의 계약을 **소유권 확보 전에**(읽기만으로) 검사한다.
@@ -142,6 +161,75 @@ def _write_status_record(path_text: str, code: int) -> None:
         os.write(fd, record.encode("utf-8"))
     finally:
         os.close(fd)
+
+
+def _readiness_destination_error(path_text: str, canonical_job: Path) -> str | None:
+    """readiness 보고서 자리의 계약 — 상태 기록과 같은 규율, 다른 모양.
+
+    절대 경로여야 하고 이름은 `readiness.json`이며, 부모 디렉터리가 호출 소유
+    임시 네임스페이스(`vlogsrt-…`) 안이어야 한다. job 상태(별칭 경로 포함)와는
+    분리돼 있어야 하고 이미 있으면 안 된다 — 남의 바이트를 덮어쓰는 길이 없다.
+    """
+    path = Path(path_text)
+    if not path.is_absolute():
+        return "readiness report must be an absolute path"
+    if path.name != _READINESS_REPORT_NAME:
+        return f"readiness report must be named {_READINESS_REPORT_NAME}"
+    if not path.parent.name.startswith("vlogsrt-"):
+        return "readiness report must live in an invocation-owned vlogsrt-<token> directory"
+    if path.resolve().is_relative_to(canonical_job):
+        return "readiness report must live outside the job directory"
+    if path.exists():
+        return "readiness report must not already exist"
+    return None
+
+
+def _readiness_payload() -> dict[str, object]:
+    """공개 준비 데이터 — 도구는 **이 프로세스의 환경**에서 푼다(PATH 추측 없음).
+
+    번들 실행이면 부모가 준 PATH(번들 bin + 시스템 최소)가 이 환경이고, 개발
+    실행이면 설치 래퍼가 물려준 환경이 그대로 이곳이다. 못 찾으면 null이다 —
+    빈 문자열로 '있다'는 말을 하지 않는다.
+    """
+    return {
+        "engine": "vlogsrt-engine",
+        "readiness_version": _READINESS_VERSION,
+        "python": {
+            "executable": sys.executable or None,
+            "version": _python_version(),
+        },
+        "tools": {
+            "ffmpeg": shutil.which("ffmpeg"),
+            "ffprobe": shutil.which("ffprobe"),
+        },
+        "carrier_versions": list(_CARRIER_VERSIONS),
+    }
+
+
+def _python_version() -> str | None:
+    """해석기의 버전 — `platform` 없이 sys에서 직접(수입 최소)."""
+    info = sys.version_info
+    return ".".join(str(part) for part in info[:3]) or None
+
+
+def _write_readiness_report(path_text: str) -> None:
+    """보고서 한 줄을 배타 생성으로 남긴다 — 상한을 넘으면 쓰지 않고 실패한다."""
+    import json
+
+    line = json.dumps(_readiness_payload(), sort_keys=True) + "\n"
+    encoded = line.encode("utf-8")
+    if len(encoded) > _READINESS_MAX_BYTES:
+        raise OSError("readiness report exceeds its bound")
+    fd = os.open(path_text, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+    try:
+        os.write(fd, encoded)
+    finally:
+        os.close(fd)
+
+
+def _derived_readiness_report(status_file: str) -> str:
+    """상태 기록 옆의 보고서 자리 — 개발 실행기는 경로를 더 늘리지 않는다."""
+    return str(Path(status_file).parent / _READINESS_REPORT_NAME)
 
 
 class _ExecutionLock:
@@ -279,6 +367,21 @@ def _resolve_carried_credentials(
     return _CarriedCredentials(roles=None, stt_key=None)
 
 
+def _resolve_vision_role_names() -> tuple[str, str]:
+    """작업이 쓰는 **같은** 공개 프로젝트 설정에서 비전 역할 이름을 푼다.
+
+    하위층(`vlogsrt.env`)은 프로젝트 설정을 수입하지 못한다 — 이름을 푸는 일은
+    이 엔진/작업 경계가 한다. 운반자 적용과 작업 실행이 다른 이름을 보면 안
+    되므로 같은 뿌리(`vlogsrt.project.toml`, 없으면 코드 기본값)를 쓴다. 설정
+    파일이 있으면서 못 읽는 경우는 그 오류를 그대로 올린다 — 조용한 기본값
+    드리움은 오해를 남긴다.
+    """
+    from vlogsrt.project.config import load_project_config
+
+    config = load_project_config(None)
+    return config.vision_api_key_env, config.vision_base_url_env
+
+
 def _carry_credentials(carried: _CarriedCredentials) -> None:
     """결정된 운반을 엔진이 읽는 이름들로 옮겨 담는다 — dotenv 해석보다 앞서 권위적으로.
 
@@ -290,10 +393,13 @@ def _carry_credentials(carried: _CarriedCredentials) -> None:
     if carried.roles is not None:
         from vlogsrt.env import apply_role_credentials
 
+        vision_key_name, vision_url_name = _resolve_vision_role_names()
         apply_role_credentials(
             carried.roles["stt_key"],
             carried.roles["vision_key"],
             carried.roles["vision_base_url"],
+            vision_key_name=vision_key_name,
+            vision_base_url_name=vision_url_name,
         )
     elif carried.stt_key is not None:
         os.environ[_ENGINE_KEY_NAME] = carried.stt_key
@@ -521,7 +627,7 @@ def _dispatch(argv: list[str]) -> tuple[int, str | None]:
     operation, job_id, job_dir_text = argv[0], argv[1], argv[2]
     if "/" in job_id or ".." in job_id:
         return 2, None
-    if operation not in {"analyze", "roughcut"}:
+    if operation not in {"analyze", "roughcut", _READINESS_OPERATION}:
         print(f"unknown operation: {operation}", file=sys.stderr)
         return 2, None
     job_dir = Path(job_dir_text)
@@ -532,6 +638,7 @@ def _dispatch(argv: list[str]) -> tuple[int, str | None]:
     canonical = job_dir.resolve()
     tail = argv[3:]
     status_file: str | None = None
+    report_file: str | None = None
     reads_envelope = False
     for argument in tail:
         if argument == _CARRIER_MARKER:
@@ -539,12 +646,21 @@ def _dispatch(argv: list[str]) -> tuple[int, str | None]:
                 print(f"vlogsrt-engine: {argument} given twice", file=sys.stderr)
                 return 2, None
             reads_envelope = True
-        elif status_file is None:
-            problem = _status_destination_error(argument, canonical)
-            if problem:
-                print(f"vlogsrt-engine: {problem}", file=sys.stderr)
-                return 2, None
-            status_file = argument
+        elif status_file is None and report_file is None:
+            # readiness의 넷째 인자는 상태 기록이 아닐 수 있다 — 보고서 자리다.
+            # 모양으로 갈라 읽는다: `.status`는 개발 실행기의 소유 채널이다.
+            if operation == _READINESS_OPERATION and not argument.endswith(_STATUS_SUFFIX):
+                problem = _readiness_destination_error(argument, canonical)
+                if problem:
+                    print(f"vlogsrt-engine: {problem}", file=sys.stderr)
+                    return 2, None
+                report_file = argument
+            else:
+                problem = _status_destination_error(argument, canonical)
+                if problem:
+                    print(f"vlogsrt-engine: {problem}", file=sys.stderr)
+                    return 2, None
+                status_file = argument
         else:
             print(
                 f"vlogsrt-engine: unrecognized argument after status file: {argument!r}",
@@ -563,6 +679,10 @@ def _dispatch(argv: list[str]) -> tuple[int, str | None]:
     except _CarrierEnvelopeError as error:
         print(f"vlogsrt-engine: {error}", file=sys.stderr)
         return 2, status_file
+    if operation == _READINESS_OPERATION:
+        # 읽기 전용 경로다 — 잠금도 workspace도 결과 동기화도 없다. 운반자만
+        # 실제 적용 경로를 지나 검증된다(문제면 1). 성공은 보고서가 남은 뒤에만 0.
+        return _run_readiness(carried, status_file, report_file), status_file
     lock = _ExecutionLock(canonical)
     try:
         owned = lock.acquire()
@@ -594,19 +714,56 @@ def _sanitize_carrier_error(message: str, carried: _CarriedCredentials) -> str:
     return redact_secrets(message, secrets=secrets)
 
 
-def _run_owned(operation: str, job_dir: Path, carried: _CarriedCredentials) -> int:
-    """잠긴 상태에서 실행하는 본문 — 스테이징·엔진 호출·결과 동기화 전부(S2A-1)."""
+def _apply_carried_credentials(carried: _CarriedCredentials) -> int | None:
+    """운반자를 실제 적용 경로로 옮긴다 — 실패면 종료 코드, 성공이면 None.
+
+    적용은 검증을 포함한다(역할 이름·URL 대 키 재료). readiness와 실제 실행이
+    같은 문을 지나므로, 준비가 통과한 값이 실행에서 다른 판정을 받는 길이 없다.
+    문면은 지워진 뒤에만 나간다(S2A-2).
+    """
     try:
         _carry_credentials(carried)
     except (OSError, RuntimeError, ValueError) as error:
-        # 운반 적용 실패(설정 해석·이름·URL 검사)는 통제된 실행 실패다. 잠금은
-        # 호출자의 finally가 놓고, 상태 기록은 main이 남긴다 — traceback은 없다.
         try:
             detail = _sanitize_carrier_error(str(error), carried)
         except Exception:  # 지우개를 얻지 못했다 — 문면을 버리고 정해진 글만 남는다.
             detail = "credential application failed"
         print(f"vlogsrt-engine: cannot apply carried credentials: {detail}", file=sys.stderr)
         return 1
+    return None
+
+
+def _run_readiness(
+    carried: _CarriedCredentials, status_file: str | None, report_file: str | None
+) -> int:
+    """읽기 전용 readiness 본문 — 보고서 한 줄, 그 밖의 어떤 상태 쓰기도 없다."""
+    failure = _apply_carried_credentials(carried)
+    if failure is not None:
+        return failure
+    report = report_file
+    if report is None and status_file is not None:
+        report = _derived_readiness_report(status_file)
+    if report is None:
+        print(
+            "vlogsrt-engine: readiness requires a report or status destination",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        _write_readiness_report(report)
+    except OSError as error:
+        print(f"vlogsrt-engine: cannot write readiness report: {error}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def _run_owned(operation: str, job_dir: Path, carried: _CarriedCredentials) -> int:
+    """잠긴 상태에서 실행하는 본문 — 스테이징·엔진 호출·결과 동기화 전부(S2A-1)."""
+    # 운반 적용 실패(설정 해석·이름·URL 검사)는 통제된 실행 실패다. 잠금은
+    # 호출자의 finally가 놓고, 상태 기록은 main이 남긴다 — traceback은 없다.
+    failure = _apply_carried_credentials(carried)
+    if failure is not None:
+        return failure
     workspace = job_dir / "workspace"
     # 스테이징 복사가 workspace를 만들기 전에 일어나면 FileNotFoundError다 —
     # 새 job에서도 안전하게 먼저 만든다(있으면 그대로 둔다).

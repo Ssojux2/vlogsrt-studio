@@ -17,7 +17,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from test_engine_entrypoint import _GRANT, _stage_job, _staged_cancellation
+from test_engine_entrypoint import _grant_document, _stage_job, _staged_cancellation
 from test_engine_execution_lock import _snapshot
 
 from tests._dotenv_guard import (
@@ -89,18 +89,48 @@ def test_installed_wrapper_delegates_both_operations_to_the_shared_entrypoint(
     assert len(log.read_text(encoding="utf-8").splitlines()) == 2
 
 
-def _guarded_wrapper_env(sandbox: EngineSandbox, standin: Path) -> dict[str, str]:
+def _synthetic_tools_bin(sandbox: EngineSandbox, *, variant: str = "one-audio") -> Path:
+    """시험 소유 ffprobe — 실제 진입점을 지나는 시험의 새 전제(S2A-2).
+
+    inspect가 실제 원본의 오디오 위상을 ffprobe로 확인하므로 합성 미디어를
+    읽을 실행파일이 필요하다. 기본은 한 비디오·한 오디오 스트림; `variant`로
+    위상 검사의 실제 경계를 흉내 낸다(multi/zero/fail). 보호 의미는 그대로다
+    (PATH 에 이 디렉터리만 더한다).
+    """
+    bodies = {
+        "one-audio": 'printf \'%s\\n\' \'{"streams": [{"codec_type": "video"},'
+        ' {"codec_type": "audio"}]}\'',
+        "multi-audio": 'printf \'%s\\n\' \'{"streams": [{"codec_type": "video"},'
+        ' {"codec_type": "audio"}, {"codec_type": "audio"}]}\'',
+        "zero-audio": 'printf \'%s\\n\' \'{"streams": [{"codec_type": "video"}]}\'',
+        "fail": "echo 'synthetic probe failure' >&2; exit 1",
+    }
+    bin_dir = sandbox.base / f"synthetic tools {variant}"
+    bin_dir.mkdir(exist_ok=True)
+    script = "#!/bin/sh\n" + bodies[variant] + "\n"
+    for tool in ("ffprobe", "ffmpeg"):
+        probe = bin_dir / tool
+        probe.write_text(script, encoding="utf-8")
+        probe.chmod(0o755)
+    return bin_dir
+
+
+def _guarded_wrapper_env(
+    sandbox: EngineSandbox, standin: Path, *, tools_variant: str = "one-audio"
+) -> dict[str, str]:
     """래퍼가 export하는 모양 그대로 PYTHONPATH를 앞에 두고 보호 환경을 섞는다.
 
     canary가 실제 자식과 같은 수입 경로로 sitecustomize를 찾아야 사전확인이
-    같은 세계를 본다.
+    같은 세계를 본다. PATH는 시험 소유 도구 bin을 앞에 둔다(S2A-2 위상 확인).
     """
     inherited = os.environ.get("PYTHONPATH", "")
     prefix = str(sandbox.repo) + (os.pathsep + inherited if inherited else "")
+    tools = str(_synthetic_tools_bin(sandbox, variant=tools_variant))
     return {
         **os.environ,
         "VLOGSRT_OFFLINE": "1",
         "PYTHONPATH": prefix,
+        "PATH": tools + os.pathsep + os.environ.get("PATH", ""),
         **sandbox.guard_env(standin=standin),
     }
 
@@ -138,7 +168,8 @@ def test_installed_wrapper_runs_the_real_engine_on_a_fresh_job(tmp_path: Path) -
     guarded_env = _guarded_wrapper_env(sandbox, standin)
     wrapper = _install(tmp_path, repo=sandbox.repo)
     job_dir = _stage_job(tmp_path)
-    (job_dir / "media-grant.json").write_text(_GRANT, encoding="utf-8")
+    grant = _grant_document(tmp_path)
+    (job_dir / "media-grant.json").write_text(grant, encoding="utf-8")
     staged = _staged_cancellation("b" * 64)
     (job_dir / "cancellation.jsonl").write_text(staged, encoding="utf-8")
     workspace = job_dir / "workspace"
@@ -150,7 +181,7 @@ def test_installed_wrapper_runs_the_real_engine_on_a_fresh_job(tmp_path: Path) -
     assert completed.returncode == 0
     assert (workspace / "workflow.jsonl").is_file()
     assert (job_dir / "analysis-estimate.jsonl").is_file()
-    assert (workspace / "media-grant.json").read_text(encoding="utf-8") == _GRANT
+    assert (workspace / "media-grant.json").read_text(encoding="utf-8") == grant
     assert (workspace / "cancellation.jsonl").read_text(encoding="utf-8") == staged
 
     # 재개: 앱이 실행 중 새로 남긴 루트 기록이 workspace 기록을 덮어쓰지 않는다.
@@ -247,3 +278,121 @@ def test_wrapper_launch_gate_refuses_editable_fallback_when_the_sandbox_package_
         _run_installed_wrapper(wrapper, ["analyze", "job-1", str(job)], sandbox=sandbox, env=env)
     assert _snapshot(job) == before
     assert not (job / "workspace").exists()
+
+
+def _run_wrapper_captured(
+    wrapper: Path, argv: list[str], *, sandbox: EngineSandbox, env: dict[str, str]
+) -> subprocess.CompletedProcess[str]:
+    """위상 경계 시험용 실행 — 사전확인 게이트는 그대로, 출력을 붙잡는다."""
+    preflight_child_guard(env, cwd=sandbox.repo, expected_package_root=sandbox.package)
+    return subprocess.run(
+        [str(wrapper), *argv],
+        cwd=sandbox.repo,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+
+def _stage_job_no_audio_declaration(tmp_path: Path) -> Path:
+    """hasAudio=0으로 선언된 잡 — 선언이 실제 위상을 숨일 수 없음을 증명하는 재료."""
+    job = tmp_path / "job-no-audio"
+    job.mkdir()
+    media = tmp_path / "clip.mov"
+    media.write_bytes(b"synthetic-topology-media")
+    body = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE fcpxml>\n'
+        '<fcpxml version="1.14">\n  <resources>\n    '
+        '<format id="r1" name="FFVideoFormat1080p30" frameDuration="1/30s"'
+        ' width="1920" height="1080"/>\n    '
+        '<asset id="r2" name="clip.mov" start="0s" duration="600s" hasAudio="0"'
+        f' format="r1">\n      <media-rep kind="original-media" src="file://{media}"/>\n'
+        '    </asset>\n  </resources>\n  <library>\n    <event name="이벤트">\n'
+        '      <project name="위상" uid="PROJECT-TOPOLOGY">\n'
+        '        <sequence format="r1" tcStart="0s" duration="600s">\n'
+        "          <spine>\n"
+        '            <asset-clip ref="r2" name="클립0" offset="0s" start="0s" duration="12s"/>\n'
+        "          </spine>\n        </sequence>\n      </project>\n    </event>\n"
+        "  </library>\n</fcpxml>\n"
+    )
+    (job / "input.fcpxml").write_text(body, encoding="utf-8")
+    return job
+
+
+def test_real_engine_rejects_multi_audio_despite_a_zero_audio_declaration(
+    tmp_path: Path,
+) -> None:
+    """실제 래퍼 → 실제 진입점 → 실제 위상 관문: hasAudio=0 선언 뒤의 실제
+    스트림 둘은 거절된다 — 추정·후보는 남지 않는다(유료 호출 0회)."""
+    sandbox = build_engine_sandbox(tmp_path, source=REPO)
+    standin = stage_canary_standin(tmp_path / "sealed")
+    guarded_env = _guarded_wrapper_env(sandbox, standin, tools_variant="multi-audio")
+    wrapper = _install(tmp_path, repo=sandbox.repo)
+    job_dir = _stage_job_no_audio_declaration(tmp_path)
+
+    completed = _run_wrapper_captured(
+        wrapper, ["analyze", "job-1", str(job_dir)], sandbox=sandbox, env=guarded_env
+    )
+
+    assert completed.returncode != 0
+    assert "오디오 스트림" in completed.stderr
+    assert "믹스다운" in completed.stderr
+    assert not (job_dir / "analysis-estimate.jsonl").is_file()
+    assert not (job_dir / "candidates.jsonl").is_file()
+    _assert_engine_sandbox_hygiene(sandbox)
+
+
+def test_real_engine_accepts_zero_and_single_audio_topologies(tmp_path: Path) -> None:
+    """0스트림·1스트림은 실제 진입점에서 계속 지원된다 — 추정이 나온다."""
+    sandbox = build_engine_sandbox(tmp_path, source=REPO)
+    standin = stage_canary_standin(tmp_path / "sealed")
+
+    zero_env = _guarded_wrapper_env(sandbox, standin, tools_variant="zero-audio")
+    wrapper = _install(tmp_path, repo=sandbox.repo)
+    zero_job = _stage_job(tmp_path)
+    zero = _run_wrapper_captured(
+        wrapper, ["analyze", "job-1", str(zero_job)], sandbox=sandbox, env=zero_env
+    )
+    assert zero.returncode == 0
+    assert (zero_job / "analysis-estimate.jsonl").is_file()
+
+    # 1스트림(기본 도구)은 격리 뿌리에서 새 job로 다시 — workspace 재사용 금지.
+    second_root = tmp_path / "second"
+    second_sandbox = build_engine_sandbox(second_root, source=REPO)
+    second_standin = stage_canary_standin(second_root / "sealed")
+    one_env = _guarded_wrapper_env(second_sandbox, second_standin, tools_variant="one-audio")
+    second_wrapper = _install(second_root, repo=second_sandbox.repo)
+    one_job = _stage_job(second_root)
+    one = _run_wrapper_captured(
+        second_wrapper, ["analyze", "job-1", str(one_job)], sandbox=second_sandbox, env=one_env
+    )
+    assert one.returncode == 0
+    assert (one_job / "analysis-estimate.jsonl").is_file()
+    _assert_engine_sandbox_hygiene(second_sandbox)
+
+
+def test_real_engine_probe_failure_is_an_error_never_silence(tmp_path: Path) -> None:
+    """ffprobe가 실패로 끝나면 위상은 '0스트림·무음'이 아니라 실패다 — 실행
+    가능한 문면으로 죽고 추정은 남지 않는다."""
+    sandbox = build_engine_sandbox(tmp_path, source=REPO)
+    standin = stage_canary_standin(tmp_path / "sealed")
+    guarded_env = _guarded_wrapper_env(sandbox, standin, tools_variant="fail")
+    wrapper = _install(tmp_path, repo=sandbox.repo)
+    job_dir = _stage_job(tmp_path)
+
+    completed = _run_wrapper_captured(
+        wrapper, ["analyze", "job-1", str(job_dir)], sandbox=sandbox, env=guarded_env
+    )
+
+    assert completed.returncode != 0
+    assert "ffprobe" in completed.stderr
+    assert not (job_dir / "analysis-estimate.jsonl").is_file()
+    assert not (job_dir / "candidates.jsonl").is_file()
+    _assert_engine_sandbox_hygiene(sandbox)
+
+
+def _assert_engine_sandbox_hygiene(sandbox: EngineSandbox) -> None:
+    """보호 철자·심볼링크 위생 — 위상 시험도 같은 경계 안에 있다."""
+    assert sandbox.dotenv_files() == [sandbox.dotenv]
+    assert sandbox.symlinks() == []

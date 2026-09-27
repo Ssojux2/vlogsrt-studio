@@ -43,6 +43,18 @@ FD30 = Fraction(1, 30)
 SEGMENTS = ((0.5, 1.0, "인사"), (10.5, 11.0, "마무리"))
 
 
+@pytest.fixture(autouse=True)
+def supported_audio_topology(monkeypatch: pytest.MonkeyPatch) -> None:
+    """이 파일의 합성 미디어는 오디오 스트림 하나다(S2A-2 위상 관문의 전제).
+
+    inspect·유료 analyze가 실제 위상 검사를 지나므로 확인 함수만 1스트림으로
+    대신한다 — 위상 검사 자체의 실패·거절 경로는 test_media_topology.py가 든다.
+    """
+    from vlogsrt.project import topology
+
+    monkeypatch.setattr(topology, "probe_audio_stream_count", lambda source: 1)
+
+
 def _file_uri(path: Path) -> str:
     return "file://" + quote(str(path))
 
@@ -256,11 +268,28 @@ def _patch_boundaries(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
-def _patch_paid_boundaries(monkeypatch: pytest.MonkeyPatch, luna_responses: list[dict]) -> None:
-    """온라인 경로의 유료 문을 전부 가짜로 막는다 — 키 값은 절대 만들지 않는다."""
+def _patch_paid_boundaries(
+    monkeypatch: pytest.MonkeyPatch,
+    luna_responses: list[dict],
+    vision_seen: dict[str, object] | None = None,
+) -> None:
+    """온라인 경로의 유료 문을 전부 가짜로 막는다 — 키 값은 절대 만들지 않는다.
+
+    `vision_seen`을 주면 실제 비전 공장이 받은 kwargs를 기록한다(S2A-2 호환성
+    증명) — 공장은 가짜로 갈아끼우되 소비 지점과 값은 진짜 경로로 잰다.
+    """
     monkeypatch.setattr(project_commands.env, "require_api_key", lambda **kwargs: "test-key")
     monkeypatch.setattr(project_commands.env, "base_url", lambda: "https://example.invalid")
-    monkeypatch.setattr(transcribe, "create_vision_client", lambda **kwargs: object())
+    # 유료 역할 게이트가 공급자 앞에서 비전 역할도 잰다(S2A-2) — 합성값으로 채운다.
+    monkeypatch.setenv("GOOGLE_API_KEY", "synthetic-vision-key")
+    monkeypatch.setenv("GEMINI_BASE_URL", "https://example.invalid")
+
+    def vision_client(**kwargs: object) -> object:
+        if vision_seen is not None:
+            vision_seen.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(transcribe, "create_vision_client", vision_client)
 
     def fake_luna(client: object, *, model: str, payload: dict, online: bool) -> dict:
         response = {
@@ -915,3 +944,81 @@ def test_input_bound_pre_receive_cancellation_stops_analyze_before_model_calls(
     assert [row.status for row in attempts] == ["pending", "running", "cancelled"]
     assert WorkflowJournal.open(workspace / "workflow.jsonl").state == "cancelled"
     assert not (workspace / "candidates.jsonl").exists()
+
+
+def _keep_luna_responses(count: int = 8) -> list[dict]:
+    return [
+        {
+            "output_text": json.dumps(
+                {"choice": "keep", "confidence": 0.5, "evidence_frame_ids": []}
+            ),
+            "usage": {"input_tokens": 100, "output_tokens": 10},
+        }
+        for _ in range(count)
+    ]
+
+
+def test_staged_vision_consumer_separates_v2_roles_from_the_legacy_shared_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """실제 소비자가 받는 비전 자격 증명(S2A-2 호환성 보존).
+
+    마커 없는 직접 실행은 기본선(c96e0d5)의 계약 그대로 — 공유 키와 base URL가
+    비전 공장으로 간다. V2 앱 운반이 적용된 실행은 별도 역할 값(비전 키·엔드
+    포인트)만 간다. SDK 생성은 가짜로 막히고 네트워크는 0회다.
+    """
+    from vlogsrt import env
+
+    # 마커 없는 경로 — 실제 파이프라인이 비전 공장까지 간다.
+    input_path = _project(tmp_path)
+    workspace = tmp_path / "workspace"
+    project_config = _write_config(tmp_path)
+    argv_tail = ["--project-config", str(project_config)]
+    assert cli.main(["project", "receive", str(input_path), "--workspace", str(workspace)]) == 0
+    assert cli.main(["project", "inspect", str(workspace), *argv_tail]) == 0
+    _patch_boundaries(monkeypatch)
+    _stub_transcriber(monkeypatch)
+    legacy_seen: dict[str, object] = {}
+    _patch_paid_boundaries(monkeypatch, _keep_luna_responses(), legacy_seen)
+    assert (
+        cli.main(_analyze_argv(workspace, _authorization_file(tmp_path, workspace)) + argv_tail)
+        == 0
+    )
+    assert legacy_seen == {"api_key": "test-key", "base_url": "https://example.invalid"}
+
+    # V2 앱 운반 — 실제 적용 + 유효한 권한 문서 아래에서 같은 파이프라인.
+    second = tmp_path / "second"
+    second.mkdir()
+    input_path = _project(second)
+    v2_workspace = second / "workspace"
+    assert cli.main(["project", "receive", str(input_path), "--workspace", str(v2_workspace)]) == 0
+    (v2_workspace / "media-grant.json").write_text(
+        json.dumps(
+            {
+                "grant_revision": project_commands._swift_grant_revision([str(second)]),
+                "roots": [str(second)],
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert cli.main(["project", "inspect", str(v2_workspace), *argv_tail]) == 0
+    v2_seen: dict[str, object] = {}
+    # V2 적용은 패치 **뒤에** 온다 — 패치가 환경 이름을 덮어쓰면 역할 값이
+    # 섞이기 때문이다(실제 순서: 경계 가짜 → 실제 운반 적용 → 실행).
+    _patch_paid_boundaries(monkeypatch, _keep_luna_responses(), v2_seen)
+    env.apply_role_credentials(
+        "synthetic-stt-key", "synthetic-vision-key", "https://example.invalid/v1"
+    )
+    try:
+        assert (
+            cli.main(
+                _analyze_argv(v2_workspace, _authorization_file(second, v2_workspace)) + argv_tail
+            )
+            == 0
+        )
+        assert v2_seen == {
+            "api_key": "synthetic-vision-key",
+            "base_url": "https://example.invalid/v1",
+        }
+    finally:
+        env._applied_vision_key_name = None  # 과정 표식을 시험이 치운다

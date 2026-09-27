@@ -48,6 +48,18 @@ from vlogsrt.project.workflow_protocol import (
 )
 
 
+@pytest.fixture(autouse=True)
+def supported_audio_topology(monkeypatch: pytest.MonkeyPatch) -> None:
+    """이 파일의 합성 미디어는 오디오 스트림 하나다(S2A-2 위상 관문의 전제).
+
+    준비 왕복(inspect)이 실제 위상 검사를 지나므로 확인 함수만 1스트림으로
+    대신한다 — 검사 자체의 경로는 test_media_topology.py가 든다.
+    """
+    from vlogsrt.project import topology
+
+    monkeypatch.setattr(topology, "probe_audio_stream_count", lambda source: 1)
+
+
 def _project(tmp_path: Path) -> tuple[Path, object]:
     media = tmp_path / "clip.mov"
     media.write_bytes(b"synthetic-media")
@@ -682,11 +694,19 @@ def test_staged_media_grant_binds_the_estimate_and_drift_closes_it(tmp_path: Pat
     without_grant = project_commands._read_one(workspace / "analysis-estimate.jsonl")
     assert isinstance(without_grant, AnalysisEstimate)
 
-    # 같은 미디어, 다른 앱 권한 — 추정 리비전이 달라져야 한다.
+    # 같은 미디어, 다른 앱 권한 — 추정 리비전이 달라져야 한다. 문서는 이제
+    # 실제 모양(절대 루트 + 루트와 묶인 지문)이어야 한다(S2A-2 검증). 루트는
+    # 미디어를 포함해야 한다(커버리지 검증).
     workspace2 = tmp_path / "workspace-granted"
     assert cli.main(["project", "receive", str(input_path), "--workspace", str(workspace2)]) == 0
+    granted_roots = [str(tmp_path)]
     (workspace2 / "media-grant.json").write_text(
-        json.dumps({"grant_revision": "d" * 64, "roots": ["/Volumes/Media"]}),
+        json.dumps(
+            {
+                "grant_revision": project_commands._swift_grant_revision(granted_roots),
+                "roots": granted_roots,
+            }
+        ),
         encoding="utf-8",
     )
     assert cli.main(["project", "inspect", str(workspace2)]) == 0

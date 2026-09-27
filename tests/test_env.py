@@ -406,21 +406,22 @@ def test_apply_role_credentials_empty_values_block_dotenv_revival(
     reset_cache()
 
 
-def test_apply_role_credentials_fails_closed_on_a_broken_config(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+def test_apply_role_credentials_rejects_illegal_resolved_names(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """설정 파일이 있으면서 못 읽으면 조용한 기본 드리움 없이 그 오류로 닫는다."""
+    """이름 검사는 배정 순간에 일어난다 — 이미 풀린 이름이 모호하면 닫는다.
+
+    프로젝트 설정 해석 자체의 실패 주장(깨진 설정 = 닫힘)은 이름을 푸는 경계,
+    엔진 진입점 시험이 담당한다 — 하위층 적용은 풀린 이름만 받는다.
+    """
     from vlogsrt.env import apply_role_credentials
-    from vlogsrt.project.config import ProjectConfigError
 
-    (tmp_path / "vlogsrt.project.toml").write_text(
-        "schema_version = 1\nbroken =\n", encoding="utf-8"
-    )
-    monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("OPENAI_API_KEY", "untouched")
-
-    with pytest.raises(ProjectConfigError):
-        apply_role_credentials("a", "b", "c")
+    for key_name, url_name in [("OPENAI_API_KEY", "GEMINI_BASE_URL"), ("A", "A"), ("PATH", "X")]:
+        with pytest.raises(RuntimeError):
+            apply_role_credentials(
+                "a", "b", "c", vision_key_name=key_name, vision_base_url_name=url_name
+            )
     assert os.environ["OPENAI_API_KEY"] == "untouched"
 
 
