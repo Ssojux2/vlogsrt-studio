@@ -79,14 +79,17 @@ from vlogsrt.project.workflow_analysis import (
     AnalysisSettings,
     CandidateSeed,
     CandidateWindowPlan,
+    CostCeilingExceeded,
     LunaFrame,
     LunaWindow,
     TranscriptEvidence,
     UsageLedger,
+    aggregate_analysis_outcome,
     build_analysis_estimate,
     build_luna_payload,
     effective_analysis_settings_sha256,
     eligible_transcript_evidence,
+    error_window_decision,
     finalize_candidate,
     luna_cache_key,
     luna_request_sha256,
@@ -96,12 +99,14 @@ from vlogsrt.project.workflow_analysis import (
     project_transcript_evidence,
     safe_transcript_candidates,
     select_frame_times,
+    skipped_window_decision,
     transcription_usage,
 )
 from vlogsrt.project.workflow_protocol import (
     AnalysisAttempt,
     AnalysisAuthorization,
     AnalysisEstimate,
+    AnalysisResult,
     CancellationRequest,
     CaptionAuthorization,
     CaptionEstimate,
@@ -112,6 +117,7 @@ from vlogsrt.project.workflow_protocol import (
     ProjectRevision,
     ProtocolMessage,
     RationalRange,
+    UpstreamStages,
     VisionWindowDecision,
     WorkflowJournal,
     decode_message,
@@ -132,6 +138,8 @@ _CANCEL = "cancellation.jsonl"
 _CAPTION_REQUEST = "caption-request.jsonl"
 _CAPTION_ESTIMATE = "caption-estimate.jsonl"
 _CAPTION_RESULT = "caption-result.jsonl"
+_ANALYSIS_RESULT = "analysis-result.jsonl"
+_DECISIONS = "vision-decisions.jsonl"
 
 
 class WorkflowCancelled(BaseException):
@@ -451,6 +459,7 @@ def _project_analyze(args: argparse.Namespace) -> int:
         # 유료 호출은 승인 파일이, 픽스처 재생은 깃발이 분석 착수를 승인한다.
         journal.transition(journal.revision.revision, "authorized")
     attempt_id: str | None = None
+    result: AnalysisResult | None = None
     if args.candidates is not None:
         if bool(args.online):
             raise ValueError("외부 --candidates는 온라인 승인 분석에 사용할 수 없다")
@@ -483,13 +492,25 @@ def _project_analyze(args: argparse.Namespace) -> int:
                     None,
                 ),
             )
+            # 새 시도가 시작됐다 — 이전 시도의 집계가 지금 시도의 결과로 읽히면 안 된다.
+            _discard_file(workspace / _ANALYSIS_RESULT)
             if args.vision_fixtures is not None and not bool(args.online):
-                candidates = _replay_analysis(
-                    Path(args.vision_fixtures), journal.revision, estimate_message
+                candidates, result = _replay_analysis(
+                    Path(args.vision_fixtures),
+                    workspace,
+                    journal.revision,
+                    estimate_message,
+                    attempt_id,
                 )
             else:
-                candidates = _produce_analysis_candidates(
-                    args, workspace, journal.revision, estimate_message, attempt_id, pricing
+                candidates, result = _produce_analysis_outcome(
+                    args,
+                    workspace,
+                    journal.revision,
+                    estimate_message,
+                    attempt_id,
+                    started_at,
+                    pricing,
                 )
         except KeyboardInterrupt:
             _append_message(
@@ -519,6 +540,9 @@ def _project_analyze(args: argparse.Namespace) -> int:
             )
             journal.transition(journal.revision.revision, "cancelled")
             raise
+        except _StageFailure as exc:
+            # 집계·시도 기록은 단계 안에서 정돈되어 이미 남았다 — 중복 기록 없이 넘긴다.
+            raise ValueError(str(exc)) from exc
         except Exception as exc:
             _append_message(
                 workspace / _ATTEMPTS,
@@ -532,6 +556,23 @@ def _project_analyze(args: argparse.Namespace) -> int:
                 ),
             )
             raise
+        if result.status == "error":
+            # 전체 실패 — 집계·판정·사용량은 이미 남았다. 저널은 authorized에 두므로
+            # 같은 입력으로 재시도할 수 있다. 취소는 여기를 지나지 않는다 — 별개 결과다.
+            _append_message(
+                workspace / _ATTEMPTS,
+                AnalysisAttempt(
+                    journal.revision.revision,
+                    estimate_message.estimate_revision,
+                    attempt_id,
+                    "failed",
+                    started_at,
+                    _result_error_text(result),
+                ),
+            )
+            raise ValueError(_result_error_text(result))
+        # partial_error는 안전 후보와 함께 정상 검토 경로로 간다 — 발행·검토 가능성이
+        # 실패 증거를 가리지 않게 경고를 같이 낸다(종료 코드 0이 성공 요약을 못 박지 않는다).
     if journal.state == "authorized":
         # 외부 작업 프로세스 결과를 전부 검사·저장한 뒤에만 상태를 움직인다.
         _write_messages(workspace / _CANDIDATES, candidates)
@@ -553,6 +594,15 @@ def _project_analyze(args: argparse.Namespace) -> int:
             ),
         )
     journal.transition(journal.revision.revision, "review_required")
+    if result is not None and result.status == "partial_error":
+        # 종료 코드 0이지만 성공이 아니다 — 부분 실패 사실을 검토 화면보다 먼저 못 박는다.
+        log.out(
+            f"분석 부분 실패 — 창 성공 {result.windows_successful}/실패 {result.windows_failed}"
+            f"/미처리 {result.windows_skipped} · 사유: {', '.join(result.reason_codes)}"
+        )
+    if result is not None and result.status == "success" and result.windows_total == 0:
+        # 창 0개 성공은 정상이다(무오디오·무발화) — 실패로 읽히지 않게 말로 못 박는다.
+        log.out("분석 완료: 창 0개 · 발화·후보 없음(정상)")
     log.out(f"컷 후보 {len(candidates)}건 · 사람 검토 필요")
     return 0
 
@@ -729,6 +779,14 @@ def _write_bytes(path: Path, payload: bytes) -> None:
     os.replace(temporary, path)
 
 
+def _discard_file(path: Path) -> None:
+    """시작을 알리는 지우개 — 없으면 아무것도 하지 않는다(조용한 성공이 아니다)."""
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return
+
+
 def _require_safe_roughcut_output(workspace: Path, output: Path) -> None:
     target = output.resolve()
     protected_names = (
@@ -747,7 +805,8 @@ def _require_safe_roughcut_output(workspace: Path, output: Path) -> None:
         _CAPTION_ESTIMATE,
         _CAPTION_RESULT,
         "pricing-caption.jsonl",
-        "vision-decisions.jsonl",
+        _DECISIONS,
+        _ANALYSIS_RESULT,
     )
     protected = {(workspace / name).resolve() for name in protected_names}
     source_path = workspace / _SOURCE
@@ -764,9 +823,25 @@ def _require_safe_roughcut_output(workspace: Path, output: Path) -> None:
         raise ValueError(f"러프컷 출력이 보호된 원본·작업 파일과 같다: {target}")
 
 
+def _result_error_text(result: AnalysisResult) -> str:
+    """집계 실패의 사용자 보이는 요약 — 정돈된 사유 코드뿐이다."""
+    reasons = ", ".join(result.reason_codes) or "(사유 없음)"
+    return (
+        f"분석이 완전히 성공하지 못했다: {result.status} — 창 성공 {result.windows_successful}"
+        f"/실패 {result.windows_failed}/미처리 {result.windows_skipped},"
+        f" 상류 실패 오디오 {result.upstream_audio_failed}"
+        f"/전사 {result.upstream_transcription_failed}/VAD {result.upstream_vad_failed}"
+        f" · 사유: {reasons}"
+    )
+
+
 def _replay_analysis(
-    fixtures: Path, revision: ProjectRevision, estimate: AnalysisEstimate
-) -> tuple[CutCandidate, ...]:
+    fixtures: Path,
+    workspace: Path,
+    revision: ProjectRevision,
+    estimate: AnalysisEstimate,
+    attempt_id: str,
+) -> tuple[tuple[CutCandidate, ...], AnalysisResult]:
     """1.1 픽스처의 후보가 같은 창 판정에 정확히 묶였을 때만 재생한다."""
     if estimate.input_revision != revision.revision:
         raise ValueError("픽스처 재생의 비용 추정이 현재 입력과 다르다")
@@ -779,6 +854,12 @@ def _replay_analysis(
             raise ValueError("판정 픽스처에 VisionWindowDecision이 아닌 메시지가 있다")
         if message.input_revision != revision.revision:
             raise ValueError("판정 픽스처에 다른 입력 리비전이 섞였다")
+        if message.status != "success":
+            # 낡은(상태 없는) 기록은 legacy/unknown이다 — 성공 증거로 재생하지 않고
+            # 모호하다고 재실행하지도 않는다. 사람이 픽스처를 다시 기록한다.
+            raise ValueError(
+                f"판정 픽스처가 결과 상태를 가지고 있지 않다(재기록 필요): {message.window_id}"
+            )
         if message.window_id in decisions:
             raise ValueError(f"판정 픽스처 창이 중복이다: {message.window_id}")
         decisions[message.window_id] = message
@@ -793,18 +874,37 @@ def _replay_analysis(
         ):
             raise ValueError(f"후보가 Luna 판정과 다르다: {candidate.candidate_id}")
     build_review_plan(revision, candidates, approved_candidate_ids=())
-    return candidates
+    ordered = tuple(decisions.values())
+    result = aggregate_analysis_outcome(
+        input_revision=revision.revision,
+        attempt_id=attempt_id,
+        estimate_revision=estimate.estimate_revision,
+        decisions=ordered,
+        windows_total=len(ordered),
+        candidate_count=len(candidates),
+        upstream=UpstreamStages(),
+    )
+    _write_messages(workspace / _DECISIONS, ordered)
+    _write_messages(workspace / _ANALYSIS_RESULT, (result,))
+    return candidates, result
 
 
-def _produce_analysis_candidates(
+def _produce_analysis_outcome(
     args: argparse.Namespace,
     workspace: Path,
     revision: ProjectRevision,
     estimate: AnalysisEstimate,
     attempt_id: str,
+    started_at: str,
     pricing: PricingSnapshot,
-) -> tuple[CutCandidate, ...]:
-    """기존 소스 전사/VAD를 재사용하고 안전 seed만 Luna에 제공한다."""
+) -> tuple[tuple[CutCandidate, ...], AnalysisResult]:
+    """기존 소스 전사/VAD를 재사용하고 안전 seed만 Luna에 제공한다.
+
+    창 하나의 실패는 실행 전체를 무너뜨리지 않는다 — 판정을 error로 남기고 다음
+    창으로 간다. 이미 끝난 창의 판정은 완성되는 채로 창마다 기록에 더한다(뒤 창의
+    예외가 앞 증거를 지우지 않는다). 비용 상한에 걸리면 남은 창을 부르지 않고
+    skipped로 덮는다. 취소(WorkflowCancelled·BaseException)는 여기서 잡지 않는다.
+    """
     settings = AnalysisSettings()
     if estimate.model != settings.model:
         raise ValueError("승인된 비용 추정과 현재 Luna 모델이 다르다")
@@ -833,17 +933,28 @@ def _produce_analysis_candidates(
         gate=cancellation,
     )
     _check_cancellation(workspace, revision.revision, attempt_id, revision.input_sha256)
-    prepared = runner.prepare_audio(
-        workspace / _INPUT,
-        workspace / "artifacts",
-        overrides=overrides,
-        config=cfg,
-        project_config=project_config,
-    )
+    try:
+        prepared = runner.prepare_audio(
+            workspace / _INPUT,
+            workspace / "artifacts",
+            overrides=overrides,
+            config=cfg,
+            project_config=project_config,
+        )
+    except Exception as exc:  # noqa: BLE001 - 준비 단계 실패도 정돈된 집계로 남는다
+        raise _close_stage_failure(
+            workspace, revision, estimate, attempt_id, started_at, "preparation_error"
+        ) from exc
     if prepared.document.input_sha256 != revision.input_sha256:
         raise ValueError("분석 준비 문서가 승인된 입력 리비전과 다르다")
     _check_cancellation(workspace, revision.revision, attempt_id, revision.input_sha256)
-    analyzed = runner.analyze_audio(prepared, transcriber=transcriber)
+    try:
+        analyzed = runner.analyze_audio(prepared, transcriber=transcriber)
+    except Exception as exc:  # noqa: BLE001 - 분석 단계 실패도 정돈된 집계로 남는다
+        raise _close_stage_failure(
+            workspace, revision, estimate, attempt_id, started_at, "analysis_stage_error"
+        ) from exc
+    stop_reason: str | None = None
     if transcriber.used > 0:
         # 실제로 보낸 whisper 오디오만 기록한다 — 예측이 아니라 측정값이다.
         usage = transcription_usage(
@@ -854,7 +965,12 @@ def _produce_analysis_candidates(
             per_minute=pricing.whisper_per_minute,
         )
         _append_message(workspace / _USAGE, usage)
-        ledger.record(usage)
+        try:
+            ledger.record(usage)
+        except CostCeilingExceeded:
+            # 전사에서 이미 상한을 넘었다 — 창은 하나도 부르지 않고 전부 미처리로 남는다.
+            stop_reason = "cost_ceiling_exceeded"
+    upstream, upstream_reasons = _upstream_stages(prepared, analyzed)
     seeds = _analysis_seeds(analyzed, revision, settings)
     clip_ranges = {
         item.instance_id: RationalRange(item.offset, item.offset + item.duration)
@@ -877,37 +993,105 @@ def _produce_analysis_candidates(
     decisions: list[VisionWindowDecision] = []
     candidates: list[CutCandidate] = []
     used_images = 0
+    # 시도마다 판정 기록을 새로 연다 — 창이 끝날 때마다 더하므로 뒤 창의 실패가
+    # 앞 창의 증거를 지우지 않는다. 창이 하나도 없으면 빈 기록으로 남는다.
+    _write_messages(workspace / _DECISIONS, ())
     for planned in windows:
         _check_cancellation(workspace, revision.revision, attempt_id, revision.input_sha256)
-        decision, image_count = _decide_window(
-            planned,
-            analyzed,
-            revision.revision,
-            settings,
-            project_config,
-            estimate.settings_sha256,
-            workspace,
-            client=client,
-            fixtures=Path(args.vision_fixtures) if args.vision_fixtures is not None else None,
-            attempt_id=attempt_id,
-            pricing=pricing,
-            ledger=ledger,
-            input_sha256=revision.input_sha256,
-        )
-        used_images += image_count
-        if used_images > estimate.max_images:
-            raise ValueError("실제 Luna 이미지 수가 승인된 상한을 넘는다")
+        if stop_reason is not None:
+            decision = skipped_window_decision(revision.revision, planned.window_id, stop_reason)
+        else:
+            try:
+                decision, image_count = _decide_window(
+                    planned,
+                    analyzed,
+                    revision.revision,
+                    settings,
+                    project_config,
+                    estimate.settings_sha256,
+                    workspace,
+                    client=client,
+                    fixtures=(
+                        Path(args.vision_fixtures) if args.vision_fixtures is not None else None
+                    ),
+                    attempt_id=attempt_id,
+                    pricing=pricing,
+                    ledger=ledger,
+                    input_sha256=revision.input_sha256,
+                )
+            except CostCeilingExceeded:
+                # 이 창의 사용량은 이미 기록에 남았다 — 돈이 든 다음 호출은 없다.
+                stop_reason = "cost_ceiling_exceeded"
+                decision = skipped_window_decision(
+                    revision.revision, planned.window_id, stop_reason
+                )
+            except Exception:  # noqa: BLE001 - 창 하나의 실패가 전체 증거를 지우지 않는다
+                decision = error_window_decision(revision.revision, planned.window_id)
+            else:
+                used_images += image_count
+                for seed in planned.candidates:
+                    candidate = finalize_candidate(seed, decision)
+                    if candidate is not None:
+                        candidates.append(candidate)
+                if used_images > estimate.max_images:
+                    # 상한 위반은 다음 호출 앞에서 끊는다 — 이미 받은 판정은 그대로 둔다.
+                    stop_reason = "image_budget_exceeded"
         decisions.append(decision)
-        for seed in planned.candidates:
-            candidate = finalize_candidate(seed, decision)
-            if candidate is not None:
-                candidates.append(candidate)
-    _write_messages(workspace / "vision-decisions.jsonl", tuple(decisions))
+        _append_message(workspace / _DECISIONS, decision)
     # 발행 앞의 마지막 확인 — 마지막 소스·Luna 호출이 진행 중인 사이 남겨진 취소가
-    # 성공(succeeded·review_required)으로 못 간다. 창이 하나도 없으면 이 게이트가
-    # 유일한 사후 확인이다. 이미 남긴 판정·사용량 기록은 그대로 둔다(S1A-R1).
+    # 성공 집계로 못 간다. 판정·사용량 기록은 그대로 두되 집계는 쓰지 않는다(S1A-R1).
     _check_cancellation(workspace, revision.revision, attempt_id, revision.input_sha256)
-    return tuple(candidates)
+    result = aggregate_analysis_outcome(
+        input_revision=revision.revision,
+        attempt_id=attempt_id,
+        estimate_revision=estimate.estimate_revision,
+        decisions=tuple(decisions),
+        windows_total=len(windows),
+        candidate_count=len(candidates),
+        upstream=upstream,
+        upstream_reasons=upstream_reasons,
+    )
+    _write_messages(workspace / _ANALYSIS_RESULT, (result,))
+    return tuple(candidates), result
+
+
+class _StageFailure(Exception):
+    """준비·분석 단계가 창 loop 앞에서 무너진 것 — 집계·시도 기록은 이미 남았다."""
+
+
+def _close_stage_failure(
+    workspace: Path,
+    revision: ProjectRevision,
+    estimate: AnalysisEstimate,
+    attempt_id: str,
+    started_at: str,
+    reason_code: str,
+) -> _StageFailure:
+    """단계 실패를 정돈된 집계·시도 기록으로 닫는다 — 원문 예외는 기록에 못 들어간다."""
+    result = aggregate_analysis_outcome(
+        input_revision=revision.revision,
+        attempt_id=attempt_id,
+        estimate_revision=estimate.estimate_revision,
+        decisions=(),
+        windows_total=0,
+        candidate_count=0,
+        upstream=UpstreamStages(),
+        stage_failure=reason_code,
+    )
+    _write_messages(workspace / _ANALYSIS_RESULT, (result,))
+    text = f"분석 단계 실패: {reason_code}"
+    _append_message(
+        workspace / _ATTEMPTS,
+        AnalysisAttempt(
+            revision.revision,
+            estimate.estimate_revision,
+            attempt_id,
+            "failed",
+            started_at,
+            text,
+        ),
+    )
+    return _StageFailure(text)
 
 
 class _BudgetedTranscriber:
@@ -939,6 +1123,71 @@ class _BudgetedTranscriber:
             raise RuntimeError("전사 요청 길이가 승인된 비용 상한을 넘는다")
         self.used += requested
         return self.delegate.transcribe(job, cfg)
+
+
+def _upstream_stages(
+    prepared: runner.PreparedAudio, analyzed: runner.AnalyzedAudio
+) -> tuple[UpstreamStages, tuple[str, ...]]:
+    """상류 단계의 시도·실패·미적용 수와 쓸 수 있는 소스 수 — 집계의 근거.
+
+    실패는 각 단계가 남긴 error 상태만 센다. 선언된 무오디오(no_audio)와 빈 전사
+    (empty)는 실패가 아니다 — 미적용·정상으로 갈라 보인다. 소스 단위 수는 자원
+    기준으로 중복을 묶는다(같은 미디어를 여러 클립에 써도 소스는 하나다).
+    `sources_usable`은 오디오가 열리고 전사가 error가 아니고 VAD가 성공한 소스다 —
+    창이 0개여도 독립적으로 쓸 수 있는 커버리지다.
+    """
+    reasons: set[str] = set()
+    pcm_sources: set[str] = set()
+    unavailable: set[str] = set()
+    for media, second in prepared.audio_inputs:
+        if isinstance(second, runner.UnavailableSourceAudio):
+            unavailable.add(media.resource_scoped_id)
+            if second.status == "error":
+                reasons.add(second.reason_code)
+        else:
+            pcm_sources.add(second.source_id)
+    # audio_input은 클립마다 반복될 수 있다 — 자원 단위로 한 번만 센다.
+    audio_failed_resources: set[str] = set()
+    audio_skipped_resources: set[str] = set()
+    for media, second in prepared.audio_inputs:
+        if isinstance(second, runner.UnavailableSourceAudio):
+            target = audio_failed_resources if second.status == "error" else audio_skipped_resources
+            target.add(media.resource_scoped_id)
+    traces = {
+        row.source_id: row for row in analyzed.analyses if isinstance(row, runner.SourceTrace)
+    }
+    transcription_failed = sum(1 for row in traces.values() if row.status == "error")
+    if transcription_failed:
+        reasons.add("transcription_error")
+    vad_failed = sum(1 for row in analyzed.vad_by_source.values() if row.status != "success")
+    if vad_failed:
+        reasons.add("vad_error")
+    sources_total = len(pcm_sources | unavailable)
+    usable = sum(
+        1
+        for source_id in pcm_sources
+        if traces.get(source_id) is not None
+        and traces[source_id].status != "error"
+        and analyzed.vad_by_source.get(source_id) is not None
+        and analyzed.vad_by_source[source_id].status == "success"
+    )
+    return (
+        UpstreamStages(
+            audio_total=sources_total,
+            audio_failed=len(audio_failed_resources),
+            audio_skipped=len(audio_skipped_resources),
+            # 세 단계 모두 total은 계획한 소스 전체다 — 시도한 수가 아니다.
+            transcription_total=sources_total,
+            transcription_failed=transcription_failed,
+            transcription_skipped=sources_total - len(traces),
+            vad_total=sources_total,
+            vad_failed=vad_failed,
+            vad_skipped=sources_total - len(analyzed.vad_by_source),
+            sources_total=sources_total,
+            sources_usable=usable,
+        ),
+        tuple(sorted(reasons)),
+    )
 
 
 def _analysis_seeds(

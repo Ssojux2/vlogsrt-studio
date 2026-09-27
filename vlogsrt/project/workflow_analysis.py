@@ -19,11 +19,15 @@ from vlogsrt.project.models import ClipInstance, ProjectDocument
 from vlogsrt.project.workflow_protocol import (
     ActualUsage,
     AnalysisEstimate,
+    AnalysisResult,
+    AnalysisResultStatus,
     CandidatePreview,
     CutCandidate,
     PricingSnapshot,
     ProjectRevision,
     RationalRange,
+    UpstreamStages,
+    VisionDecisionStatus,
     VisionWindowDecision,
 )
 
@@ -452,34 +456,63 @@ def build_luna_payload(
     }
 
 
+class _DecisionError(Exception):
+    """정규화가 판정을 error로 닫을 때의 사유 코드 운반 — 원문은 절대 실지 않는다."""
+
+    def __init__(self, reason_code: str) -> None:
+        super().__init__(reason_code)
+        self.reason_code = reason_code
+
+
 def normalize_luna_response(
     window: LunaWindow, raw: Mapping[str, object] | BaseException
 ) -> VisionWindowDecision:
-    """모델/API 결함은 예외 없이 keep으로 닫고 원문 해시만 남긴다."""
+    """모델/API 결함은 상태 error인 keep으로 닫고 원문은 해시만 남긴다.
+
+    사유는 정돈된 코드뿐이다 — 예외 문장·응답 본문·비밀이 사용자 보이는 기록에
+    흐르지 않는다. error 판정은 후보를 만들지 못하므로 그 창의 영상은 전부 보존된다.
+    """
     response_sha256 = _response_hash(raw)
+
+    def closed(reason_code: str) -> VisionWindowDecision:
+        return VisionWindowDecision.create(
+            input_revision=window.input_revision,
+            window_id=window.window_id,
+            choice="keep",
+            candidate_id=None,
+            evidence_frame_ids=(),
+            confidence="0",
+            response_sha256=response_sha256,
+            status="error",
+            reason_code=reason_code,
+        )
+
     try:
         if isinstance(raw, BaseException):
-            raise ValueError(raw.__class__.__name__)
+            raise _DecisionError("api_exception")
         text = raw.get("output_text")
         if not isinstance(text, str) or not text:
-            raise ValueError("empty output")
-        body = json.loads(text)
+            raise _DecisionError("empty_output")
+        try:
+            body = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise _DecisionError("malformed_response") from exc
         if not isinstance(body, dict):
-            raise ValueError("response body")
+            raise _DecisionError("malformed_response")
         choice = body.get("choice")
         confidence = body.get("confidence")
         evidence = body.get("evidence_frame_ids")
         if not isinstance(choice, str):
-            raise ValueError("choice")
+            raise _DecisionError("invalid_choice")
         if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
-            raise ValueError("confidence")
+            raise _DecisionError("invalid_confidence")
         confidence_float = float(confidence)
         if not math.isfinite(confidence_float) or not 0 <= confidence_float <= 1:
-            raise ValueError("confidence range")
+            raise _DecisionError("invalid_confidence")
         if not isinstance(evidence, list) or not all(isinstance(item, str) for item in evidence):
-            raise ValueError("evidence")
+            raise _DecisionError("invalid_evidence")
         if len(evidence) != len(set(evidence)) or not set(evidence) <= set(window.frame_ids):
-            raise ValueError("evidence identity")
+            raise _DecisionError("invalid_evidence_identity")
         confidence_text = _decimal_text(Decimal(str(confidence)))
         if choice == "keep":
             return VisionWindowDecision.create(
@@ -492,7 +525,11 @@ def normalize_luna_response(
                 response_sha256=response_sha256,
             )
         if choice not in window.candidate_ids:
-            raise ValueError("unknown candidate")
+            raise _DecisionError("unknown_candidate")
+        if not evidence:
+            # 후보를 댔으면 근거 프레임이 하나 이상 필요하다 — 빈 근거의 propose_cut은
+            # 유효한 판정이 아니라 error로 닫는다(프로토콜 검증에 부딪히게 두지 않는다).
+            raise _DecisionError("invalid_evidence")
         return VisionWindowDecision.create(
             input_revision=window.input_revision,
             window_id=window.window_id,
@@ -502,21 +539,107 @@ def normalize_luna_response(
             confidence=confidence_text,
             response_sha256=response_sha256,
         )
-    except (ValueError, TypeError, json.JSONDecodeError):
-        return VisionWindowDecision.create(
-            input_revision=window.input_revision,
-            window_id=window.window_id,
-            choice="keep",
-            candidate_id=None,
-            evidence_frame_ids=(),
-            confidence="0",
-            response_sha256=response_sha256,
-        )
+    except _DecisionError as failure:
+        return closed(failure.reason_code)
+
+
+def error_window_decision(
+    input_revision: str, window_id: str, reason_code: str = "window_error"
+) -> VisionWindowDecision:
+    """창을 끝까지 묻지 못한 실패의 기록 — 호출 전 준비가 무너진 경우 등."""
+    return _unprocessed_decision(input_revision, window_id, "error", reason_code)
+
+
+def skipped_window_decision(
+    input_revision: str, window_id: str, reason_code: str
+) -> VisionWindowDecision:
+    """호출하지 않기로 결정한 창의 기록 — 예산 상한 등으로 남은 창을 덮는다."""
+    return _unprocessed_decision(input_revision, window_id, "skipped", reason_code)
+
+
+def _unprocessed_decision(
+    input_revision: str,
+    window_id: str,
+    status: VisionDecisionStatus,
+    reason_code: str,
+) -> VisionWindowDecision:
+    return VisionWindowDecision.create(
+        input_revision=input_revision,
+        window_id=window_id,
+        choice="keep",
+        candidate_id=None,
+        evidence_frame_ids=(),
+        confidence="0",
+        response_sha256=_digest(
+            {"reason_code": reason_code, "status": status, "window_id": window_id}
+        ),
+        status=status,
+        reason_code=reason_code,
+    )
+
+
+def aggregate_analysis_outcome(
+    *,
+    input_revision: str,
+    attempt_id: str,
+    estimate_revision: str,
+    decisions: Sequence[VisionWindowDecision],
+    windows_total: int,
+    candidate_count: int,
+    upstream: UpstreamStages,
+    upstream_reasons: Sequence[str] = (),
+    stage_failure: str = "",
+) -> AnalysisResult:
+    """시도 하나의 집계 상태 — 성공 커버리지가 없으면 실패가 성공을 흉내 못 내게 한다.
+
+    창 0개는 상류가 전부 성공했을 때만 success다. 시도한 창이 전부 실패하면 상류가
+    성공했어도 error다. 상위 단계(전사 등)가 성공했더라도 다른 단계(VAD 등)가 실패한
+    소스는 커버리지가 아니다 — "전사는 됐으니 성공"이 무발화 성공으로 읽히면 안
+    된다. 창이 0개일 때 쓸 수 있는 소스(오디오·전사·VAD 전부 성공)가 하나라도 있으면
+    실패가 섞여도 partial_error다. `stage_failure`는 창 loop 앞에서 무너진 단계(준비·
+    분석)의 정돈된 사유다 — 커버리지가 없으므로 error로 닫는다. legacy(결과 상태 없는
+    낡은 기록)는 성공도 재실행 근거도 아니다 — 실패로 세되 그 사유 코드를 드러낸다.
+    """
+    successful = sum(1 for row in decisions if row.status == "success")
+    failed = sum(1 for row in decisions if row.status in {"error", "legacy"})
+    skipped = sum(1 for row in decisions if row.status == "skipped")
+    upstream_failed = upstream.audio_failed + upstream.transcription_failed + upstream.vad_failed
+    any_failure = bool(stage_failure) or failed > 0 or skipped > 0 or upstream_failed > 0
+    # 시도한 창이 하나라도 있으면 창이 커버리지를 말한다 — 전부 실패한 창은 상류가
+    # 성공했어도 error다. 창이 0개일 때만 쓸 수 있는 소스(오디오·전사·VAD 전부
+    # 성공)가 커버리지가 된다 — 좋은 무발화 소스 옆의 실패 소스는 부분 실패다.
+    usable_coverage = successful > 0 or (windows_total == 0 and upstream.sources_usable > 0)
+    status: AnalysisResultStatus
+    if not any_failure:
+        status = "success"
+    elif usable_coverage:
+        status = "partial_error"
+    else:
+        status = "error"
+    reasons = {
+        *(row.reason_code for row in decisions if row.status != "success"),
+        *upstream_reasons,
+        *({stage_failure} if stage_failure else ()),
+    }
+    return AnalysisResult.create(
+        input_revision=input_revision,
+        attempt_id=attempt_id,
+        estimate_revision=estimate_revision,
+        status=status,
+        windows_total=windows_total,
+        windows_successful=successful,
+        windows_failed=failed,
+        windows_skipped=skipped,
+        candidate_count=candidate_count,
+        upstream=upstream,
+        reason_codes=tuple(reasons),
+    )
 
 
 def finalize_candidate(seed: CandidateSeed, decision: VisionWindowDecision) -> CutCandidate | None:
     if (
         decision.choice != "propose_cut"
+        or decision.status != "success"
         or decision.candidate_id != seed.candidate_id
         or decision.window_id != seed.window_id
     ):

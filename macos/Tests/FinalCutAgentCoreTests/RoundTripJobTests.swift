@@ -40,7 +40,7 @@ import Testing
   )
   try job.writeProjectSelection(selection)
   let text = try String(contentsOf: job.projectSelectionURL, encoding: .utf8)
-  #expect(text.contains("\"protocol_version\":\"1.2\""))
+  #expect(text.contains("\"protocol_version\":\"\(ProtocolCodec.analysisVersion)\""))
   #expect(text.contains("\"project_uid\":\"P-1\""))
 }
 
@@ -61,7 +61,7 @@ import Testing
     )
   )
   try job.writeApprovedCandidateIDs(["c".padding(toLength: 64, withPad: "c", startingAt: 0)])
-  #expect(try String(contentsOf: job.analysisAuthorizationURL).contains("\"protocol_version\":\"1.2\""))
+  #expect(try String(contentsOf: job.analysisAuthorizationURL).contains("\"protocol_version\":\"\(ProtocolCodec.analysisVersion)\""))
   #expect(try String(contentsOf: job.approvedCandidatesURL) == String(repeating: "c", count: 64) + "\n")
 }
 

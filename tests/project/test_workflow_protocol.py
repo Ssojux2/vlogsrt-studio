@@ -11,11 +11,13 @@ from vlogsrt.project.workflow_protocol import (
     ANALYSIS_PROTOCOL_VERSION,
     CAPTION_PROTOCOL_VERSION,
     LEGACY_ANALYSIS_PROTOCOL_VERSION,
+    PRIOR_ANALYSIS_PROTOCOL_VERSION,
     PROTOCOL_VERSION,
     ActualUsage,
     AnalysisAttempt,
     AnalysisAuthorization,
     AnalysisEstimate,
+    AnalysisResult,
     CancellationRequest,
     CandidatePreview,
     CaptionAuthorization,
@@ -29,6 +31,7 @@ from vlogsrt.project.workflow_protocol import (
     ProjectRevision,
     ProjectSelection,
     RationalRange,
+    UpstreamStages,
     VisionWindowDecision,
     WorkflowJournal,
     decode_message,
@@ -133,6 +136,26 @@ def test_jsonl_protocol_round_trips_every_public_message_deterministically(tmp_p
             started_at="2026-09-21T04:00:01Z",
             error=None,
         ),
+        AnalysisResult.create(
+            input_revision=revision.revision,
+            attempt_id="attempt-001",
+            estimate_revision=_estimate(revision).estimate_revision,
+            status="success",
+            windows_total=2,
+            windows_successful=2,
+            windows_failed=0,
+            windows_skipped=0,
+            candidate_count=1,
+            upstream=UpstreamStages(
+                audio_total=1,
+                audio_failed=0,
+                transcription_total=1,
+                transcription_failed=0,
+                vad_total=1,
+                vad_failed=0,
+            ),
+            reason_codes=(),
+        ),
         CancellationRequest.create(
             input_revision=revision.revision,
             attempt_id="attempt-001",
@@ -213,7 +236,7 @@ def test_jsonl_protocol_round_trips_every_public_message_deterministically(tmp_p
     assert f'"protocol_version":"{CAPTION_PROTOCOL_VERSION}"' in first[-1]
 
 
-def test_analysis_12_rejects_stale_or_malformed_authority_and_decisions() -> None:
+def test_analysis_13_reads_legacy_versions_but_rejects_stale_authority() -> None:
     """입력/추정/가격/권한 드리프트와 모델의 복수·미지 후보가 삭제 권한으로 바뀌는 회귀를 잡는다."""
     revision = _revision()
     pricing = official_pricing_snapshot()
@@ -279,10 +302,18 @@ def test_analysis_12_rejects_stale_or_malformed_authority_and_decisions() -> Non
             response_sha256="f" * 64,
         )
 
-    for legacy in (PROTOCOL_VERSION, LEGACY_ANALYSIS_PROTOCOL_VERSION, "9.0"):
+    for legacy in (PRIOR_ANALYSIS_PROTOCOL_VERSION, LEGACY_ANALYSIS_PROTOCOL_VERSION):
+        # 낡은 분석 기록은 읽는다 — 후보 페이로드는 그대로다(S1B). 단 판정은
+        # 결과 상태가 없어 legacy/unknown로만 읽힌다(위 재생 시험이 닫는다).
         stale = encode_message(_candidate(revision)).replace(
             f'"protocol_version":"{ANALYSIS_PROTOCOL_VERSION}"',
             f'"protocol_version":"{legacy}"',
+        )
+        assert decode_message(stale) == _candidate(revision)
+    for rejected in (PROTOCOL_VERSION, "9.0"):
+        stale = encode_message(_candidate(revision)).replace(
+            f'"protocol_version":"{ANALYSIS_PROTOCOL_VERSION}"',
+            f'"protocol_version":"{rejected}"',
         )
         with pytest.raises(ValueError, match="프로토콜"):
             decode_message(stale)

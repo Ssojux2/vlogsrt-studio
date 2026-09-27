@@ -118,7 +118,7 @@ public struct EngineSessionContext {
 public enum EngineSessionOutcome: Equatable, Sendable {
   /// 엔진이 0으로 끝났고 결과를 동기화했다(roughcut이면 import도 허용된 상태).
   case completed
-  /// 엔진 종료코드가 0이 아니다 — 동기화·import 없이 실패로 닫는다.
+  /// 엔진 종료코드가 0이 아니다 — 진단 증거만 동기화하고 실패로 닫는다(성공 산물·import 없음).
   case engineFailed(Int32)
   /// 실행 전에 취소 기록이 있었다 — 엔진을 부르지 않았다.
   case cancelledBeforeRun
@@ -137,6 +137,8 @@ public enum EngineSessionOutcome: Equatable, Sendable {
 /// 순서가 계약이다: (1) 실행 전 취소·드리프트 (2) 엔진 실행 (3) sync 전 재확인
 /// (4) roughcut이면 import 전 재확인. 드리프트를 만나는 순간 CancellationRequest
 /// (active_project_changed)를 App Group과 외부 작업 폴더 양쪽에 남긴다.
+/// 엔진이 실패(종료코드 비0)로 끝나도 sync 게이트를 지난 뒤 **진단 증거만**
+/// 가져온다 — 취소·드리프트는 여전히 아무것도 가져오지 않는다(S1A·S1B).
 public struct EngineSessionRunner {
   public let executor: any EngineExecuting
 
@@ -146,8 +148,8 @@ public struct EngineSessionRunner {
 
   public func run(
     _ context: EngineSessionContext,
-    syncResults: @escaping (URL, URL) throws -> Void = { from, to in
-      try DevelopmentJobStager.syncResults(from: from, to: to)
+    syncResults: @escaping (URL, URL, Bool) throws -> Void = { from, to, diagnosticsOnly in
+      try DevelopmentJobStager.syncResults(from: from, to: to, diagnosticsOnly: diagnosticsOnly)
     },
     importRoughcut: (@Sendable (URL) async throws -> Void)? = nil,
     fileManager: FileManager = .default
@@ -168,9 +170,6 @@ public struct EngineSessionRunner {
       return .staleSelection
     }
     let status = try await executor.run(context.plan)
-    if status != 0 {
-      return .engineFailed(status)
-    }
     if CancellationStore.isCancelled(jobURL: context.appGroupJob, fileManager: fileManager) {
       return .stoppedBeforeSync
     }
@@ -181,7 +180,11 @@ public struct EngineSessionRunner {
       return .staleSelection
     }
     if let externalJob = context.externalJob {
-      try syncResults(externalJob, context.appGroupJob)
+      // 실패(비0)여도 증거는 나간다 — 단 진단 파일뿐이고 성공 산물은 없다.
+      try syncResults(externalJob, context.appGroupJob, status != 0)
+    }
+    if status != 0 {
+      return .engineFailed(status)
     }
     guard context.operation == .roughcut, let importRoughcut else { return .completed }
     if CancellationStore.isCancelled(jobURL: context.appGroupJob, fileManager: fileManager) {

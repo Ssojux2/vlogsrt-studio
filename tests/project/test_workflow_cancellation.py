@@ -825,6 +825,8 @@ def test_root_cancellation_during_the_final_luna_call_closes_cancelled(
     # 발행은 막고 증거는 남긴다 — 판정 기록은 그대로, 후보 발행은 없다.
     assert not (workspace / "candidates.jsonl").exists()
     assert (workspace / "vision-decisions.jsonl").is_file()
+    # 취소된 시도는 성공 집계를 남기지 않는다 — 앱이 취소를 성공으로 읽으면 안 된다(S1B).
+    assert not (workspace / "analysis-result.jsonl").exists()
 
 
 def test_root_cancellation_after_sources_with_no_windows_closes_cancelled(

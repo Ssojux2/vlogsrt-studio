@@ -247,6 +247,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
           }
         )
         statusLabel?.stringValue = Self.describe(outcome, operation: operation, jobID: jobID)
+        // 종료 코드 0만으로 전체 성공으로 말하지 않는다 — 집계가 부분 실패를
+        // 말하면 그 요약이 사용자에게 보여야 한다(S1B).
+        if case .completed = outcome, operation == .analyze {
+          let analysisOutcome = job.readAnalysisOutcome()
+          if case .partial = analysisOutcome {
+            statusLabel?.stringValue =
+              "\(Self.describe(outcome, operation: operation, jobID: jobID)) · "
+              + analysisOutcome.userFacingSummary
+          }
+        }
         if case .unavailable = outcome {
           NSAlert(
             error: AppError.engineUnavailable(

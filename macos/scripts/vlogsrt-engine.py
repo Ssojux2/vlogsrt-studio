@@ -25,6 +25,15 @@ _RESULT_FILES = (
     "analysis-usage.jsonl",
     "candidates.jsonl",
     "vision-decisions.jsonl",
+    "analysis-result.jsonl",
+)
+# 실패한 실행이 job 루트로 내놓는 진단 증거 — 성공 산물(후보·러프컷)은 없다.
+# 앱이 실패를 보여주려고 성공 실행을 한 번 더 요구하는 일이 없게 한다(S1B).
+_DIAGNOSTIC_FILES = (
+    "analysis-attempts.jsonl",
+    "analysis-usage.jsonl",
+    "vision-decisions.jsonl",
+    "analysis-result.jsonl",
 )
 _CARRIER = "VLOGSRT_ENGINE_API_KEY"
 _ENGINE_KEY_NAME = "OPENAI_API_KEY"
@@ -82,12 +91,27 @@ def _step(argv: list[str], *, when: bool = True) -> int:
     return 0
 
 
+def _sync_results(job_dir: Path, workspace: Path, *, diagnostics_only: bool) -> None:
+    """workspace의 결과를 job 루트로 옮긴다 — 실패면 진단 파일만.
+
+    취소된 실행도 실패 종료로 여기에 들어오지만 앱 쪽 게이트(CancellationStore)가
+    취소 뒤 sync·import를 막는다(S1A). 엔진은 진단만 전달한다.
+    """
+    for name in _DIAGNOSTIC_FILES if diagnostics_only else _RESULT_FILES:
+        source = workspace / name
+        if source.is_file():
+            shutil.copyfile(source, job_dir / name)
+
+
 def main(argv: list[str]) -> int:
     if len(argv) != 3:
         print("usage: vlogsrt-engine <operation> <job_id> <job_dir>", file=sys.stderr)
         return 2
     operation, job_id, job_dir_text = argv
     if "/" in job_id or ".." in job_id:
+        return 2
+    if operation not in {"analyze", "roughcut"}:
+        print(f"unknown operation: {operation}", file=sys.stderr)
         return 2
     _carry_api_key()
     job_dir = Path(job_dir_text)
@@ -97,6 +121,20 @@ def main(argv: list[str]) -> int:
     workspace.mkdir(parents=True, exist_ok=True)
     _expose_job_dir(job_dir)
     _propagate_staged(job_dir, workspace)
+    exit_code = _run_operation(operation, job_dir, workspace)
+    if exit_code == 2:
+        # 호출 계약 위반이지 실행 실패가 아니다 — 진단도 없다.
+        return 2
+    if exit_code:
+        # 실패해도 시도·사용량·판정·집계는 앱으로 나간다 — 성공 산물은 나가지 않는다.
+        _sync_results(job_dir, workspace, diagnostics_only=True)
+        return 1
+    _sync_results(job_dir, workspace, diagnostics_only=False)
+    return 0
+
+
+def _run_operation(operation: str, job_dir: Path, workspace: Path) -> int:
+    """operation의 단계를 실행한다 — 0 성공, 1 실행 실패, 2 호출 계약 위반."""
     if _step(
         [
             "project",
@@ -127,7 +165,7 @@ def main(argv: list[str]) -> int:
             when=authorization.is_file(),
         ):
             return 1
-    elif operation == "roughcut":
+    else:
         review_args = ["project", "review", str(workspace)]
         approved = job_dir / "approved-candidates.txt"
         if approved.is_file():
@@ -139,12 +177,6 @@ def main(argv: list[str]) -> int:
             return 1
         if _step(["project", "roughcut", str(workspace), "-o", str(job_dir / "roughcut.fcpxml")]):
             return 1
-    else:
-        return 2
-    for name in _RESULT_FILES:
-        source = workspace / name
-        if source.is_file():
-            shutil.copyfile(source, job_dir / name)
     return 0
 
 

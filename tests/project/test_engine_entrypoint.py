@@ -14,13 +14,22 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+from collections.abc import Callable
 from pathlib import Path
 from types import ModuleType
 from urllib.parse import quote
 
 import pytest
 
-from vlogsrt.project.workflow_protocol import CancellationRequest, encode_message
+from vlogsrt import transcribe
+from vlogsrt.project import runner
+from vlogsrt.project.workflow_protocol import (
+    AnalysisAuthorization,
+    AnalysisEstimate,
+    AnalysisResult,
+    CancellationRequest,
+    encode_message,
+)
 
 _ENGINE_SCRIPT = Path(__file__).resolve().parents[2] / "macos" / "scripts" / "vlogsrt-engine.py"
 _JOB_DIR_ENV = "VLOGSRT_ENGINE_JOB_DIR"
@@ -46,27 +55,42 @@ def engine() -> ModuleType:
         os.environ[_JOB_DIR_ENV] = saved
 
 
-def _stage_job(tmp_path: Path) -> Path:
+def _stage_job(tmp_path: Path, *, two_clips: bool = False) -> Path:
     """input.fcpxml만 있는 새 job 폴더 — 미디어는 합성 바이트다."""
     job_dir = tmp_path / "engine-job"
     job_dir.mkdir()
     media = tmp_path / "clip.mov"
     media.write_bytes(b"synthetic-entrypoint-media")
+    media_rep = '      <media-rep kind="original-media" src="file://{src}"/>\n    </asset>\n    '
+
+    def asset(index: int, name: str, path: Path) -> str:
+        return (
+            f'<asset id="r{index + 2}" name="{name}" start="0s" duration="600s"'
+            f' hasAudio="1" format="r1">\n' + media_rep.format(src=quote(str(path)))
+        )
+
+    assets = asset(0, "clip.mov", media)
+    clips = (
+        '<asset-clip ref="r2" name="클립0" offset="0s" start="0s" duration="12s"/>\n            '
+    )
+    if two_clips:
+        media_b = tmp_path / "clip-b.mov"
+        media_b.write_bytes(b"synthetic-entrypoint-media-b")
+        assets += asset(1, "clip-b.mov", media_b)
+        clips += (
+            '<asset-clip ref="r3" name="클립1" offset="12s" start="0s"'
+            ' duration="12s"/>\n            '
+        )
     body = (
         '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE fcpxml>\n'
         '<fcpxml version="1.14">\n  <resources>\n    '
         '<format id="r1" name="FFVideoFormat1080p30" frameDuration="1/30s"'
-        ' width="1920" height="1080"/>\n    '
-        '<asset id="r2" name="clip.mov" start="0s" duration="600s" hasAudio="1"'
-        ' format="r1">\n'
-        f'      <media-rep kind="original-media" src="file://{quote(str(media))}"/>\n    </asset>\n'
-        '  </resources>\n  <library>\n    <event name="이벤트">\n'
+        f' width="1920" height="1080"/>\n    {assets}</resources>\n  <library>\n    '
+        '<event name="이벤트">\n'
         '      <project name="진입점 프로젝트" uid="PROJECT-ENTRY">\n'
         '        <sequence format="r1" tcStart="0s" duration="600s">\n'
-        "          <spine>\n"
-        '            <asset-clip ref="r2" name="클립0" offset="0s" start="0s"'
-        ' duration="12s"/>\n'
-        "          </spine>\n        </sequence>\n      </project>\n    </event>\n"
+        f"          <spine>\n            {clips}"
+        "</spine>\n        </sequence>\n      </project>\n    </event>\n"
         "  </library>\n</fcpxml>\n"
     )
     (job_dir / "input.fcpxml").write_text(body, encoding="utf-8")
@@ -149,3 +173,289 @@ def test_engine_main_rejects_broken_invocations(tmp_path: Path, engine: ModuleTy
     assert engine.main(["analyze", "a/b", str(job_dir)]) == 2
     assert engine.main(["analyze", "..", str(job_dir)]) == 2
     assert engine.main(["transcribe", "job-1", str(job_dir)]) == 2
+
+
+# ─────────────────────────────────────────────────────────────
+#  STAB-S1B — 실패한 실행도 증거를 job 루트로 옮긴다(진단 파일만)
+# ─────────────────────────────────────────────────────────────
+
+
+def _write_authorization(job_dir: Path) -> None:
+    """job 루트의 추정에서 승인 파일을 만든다 — 실제 앱이 남기는 모양이다."""
+    from vlogsrt.project import commands as project_commands
+
+    estimate = project_commands._read_one(job_dir / "analysis-estimate.jsonl")
+    assert isinstance(estimate, AnalysisEstimate)
+    (job_dir / "analysis-authorization.jsonl").write_text(
+        encode_message(
+            AnalysisAuthorization(
+                input_revision=estimate.input_revision,
+                estimate_revision=estimate.estimate_revision,
+                pricing_snapshot_revision=estimate.pricing_snapshot_revision,
+                media_grant_revision=estimate.media_grant_revision,
+                authorized_at="2026-09-27T04:00:00Z",
+            )
+        ),
+        encoding="utf-8",
+    )
+
+
+def _patch_paid_gates(
+    monkeypatch: pytest.MonkeyPatch,
+    luna: Callable[..., dict] | None = None,
+) -> None:
+    from vlogsrt.project import commands as project_commands
+
+    monkeypatch.setattr(project_commands.env, "require_api_key", lambda **kwargs: "test-key")
+    monkeypatch.setattr(project_commands.env, "base_url", lambda: "https://example.invalid")
+    monkeypatch.setattr(transcribe, "create_vision_client", lambda **kwargs: object())
+
+    def keep(client: object, *, model: str, payload: dict, online: bool) -> dict:
+        return {
+            "output_text": json.dumps(
+                {"choice": "keep", "confidence": 0.5, "evidence_frame_ids": []}
+            ),
+            "usage": {"input_tokens": 100, "output_tokens": 10},
+        }
+
+    monkeypatch.setattr(transcribe, "request_luna_vision", luna or keep)
+
+    import openai
+
+    monkeypatch.setattr(
+        openai,
+        "OpenAI",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("paid path")),
+    )
+
+
+class _ProposingLuna:
+    """문면의 첫 후보를 propose_cut로 답한다 — 지정한 창은 예외로 실패한다."""
+
+    def __init__(self, fail_windows: set[int] | None = None) -> None:
+        self.fail_windows = fail_windows or set()
+        self.calls = 0
+
+    def __call__(self, client: object, *, model: str, payload: dict, online: bool) -> dict:
+        import re
+
+        index = self.calls
+        self.calls += 1
+        if index in self.fail_windows:
+            raise RuntimeError("luna flaked")
+        content = payload["input"][0]["content"]
+        texts = [item["text"] for item in content if item.get("type") == "input_text"]
+        candidate = re.search(r"- ([0-9a-f]{64}): ", texts[0])
+        assert candidate is not None
+        frames = re.findall(r"frame_id=(\S+)", " ".join(texts))
+        assert frames
+        return {
+            "output_text": json.dumps(
+                {
+                    "choice": candidate.group(1),
+                    "confidence": 0.9,
+                    "evidence_frame_ids": [frames[0]],
+                }
+            ),
+            "usage": {"input_tokens": 100, "output_tokens": 10},
+        }
+
+
+def test_engine_nonzero_exit_still_copies_diagnostics_but_no_artifacts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, engine: ModuleType
+) -> None:
+    """분석이 실패로 끝나도 시도·집계 증거는 job 루트로 나온다 — 후보는 나오지 않는다."""
+    monkeypatch.chdir(tmp_path)
+    job_dir = _stage_job(tmp_path)
+    assert engine.main(["analyze", "job-1", str(job_dir)]) == 0
+    _write_authorization(job_dir)
+
+    def no_stream(source: Path, stream_index: int) -> object:
+        raise RuntimeError("no stream")
+
+    monkeypatch.setattr(runner, "require_ffmpeg", lambda tool="ffmpeg": f"/fake/bin/{tool}")
+    monkeypatch.setattr(runner, "probe_audio_stream", no_stream)
+    _patch_paid_gates(monkeypatch)
+
+    assert engine.main(["analyze", "job-1", str(job_dir)]) == 1
+
+    # 진단 증거 — 집계·시도는 실패 사실을 job 루트로 전한다.
+    result = _read_result(job_dir / "analysis-result.jsonl")
+    assert result.status == "error"
+    assert result.upstream_audio_failed == 1
+    attempts = (job_dir / "analysis-attempts.jsonl").read_text(encoding="utf-8")
+    assert '"failed"' in attempts
+    # 성공 산물은 나오지 않는다 — 실패 동기화는 진단 전용이다.
+    assert not (job_dir / "candidates.jsonl").exists()
+    assert not (job_dir / "roughcut.fcpxml").exists()
+
+
+def test_engine_success_copies_aggregate_with_candidates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, engine: ModuleType
+) -> None:
+    """성공 실행은 집계·판정·후보를 모두 job 루트로 옮긴다 — 후보는 실물이다."""
+    monkeypatch.chdir(tmp_path)
+    job_dir = _stage_job(tmp_path)
+    assert engine.main(["analyze", "job-1", str(job_dir)]) == 0
+    _write_authorization(job_dir)
+    _patch_analysis_boundaries(monkeypatch)
+    _patch_paid_gates(monkeypatch, _ProposingLuna())
+
+    assert engine.main(["analyze", "job-1", str(job_dir)]) == 0
+
+    result = _read_result(job_dir / "analysis-result.jsonl")
+    assert result.status == "success"
+    assert result.candidate_count == 1
+    assert (job_dir / "vision-decisions.jsonl").is_file()
+    candidates = (job_dir / "candidates.jsonl").read_text(encoding="utf-8")
+    assert '"propose_cut"' in candidates or '"CutCandidate"' in candidates
+
+
+def test_engine_partial_failure_exits_zero_and_propagates_safe_candidates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, engine: ModuleType
+) -> None:
+    """부분 실패는 종료 코드 0으로 검토 경로를 간다 — 안전 후보가 앱에 보인다."""
+    monkeypatch.chdir(tmp_path)
+    job_dir = _stage_job(tmp_path, two_clips=True)
+    assert engine.main(["analyze", "job-1", str(job_dir)]) == 0
+    _write_authorization(job_dir)
+    _patch_analysis_boundaries(monkeypatch)
+    _patch_paid_gates(monkeypatch, _ProposingLuna(fail_windows={1}))
+
+    assert engine.main(["analyze", "job-1", str(job_dir)]) == 0
+
+    result = _read_result(job_dir / "analysis-result.jsonl")
+    assert result.status == "partial_error"
+    assert result.windows_successful == 1
+    assert result.windows_failed == 1
+    # 앱에 보이는 안전 후보 — 성공한 창의 것만, 실패 창의 것은 없다.
+    candidates = (job_dir / "candidates.jsonl").read_text(encoding="utf-8")
+    assert candidates.count('"type":"CutCandidate"') == 1
+    decisions = (job_dir / "vision-decisions.jsonl").read_text(encoding="utf-8")
+    assert '"status":"error"' in decisions
+
+
+def _read_result(path: Path) -> AnalysisResult:
+    from vlogsrt.project import commands as project_commands
+
+    message = project_commands._read_one(path)
+    assert isinstance(message, AnalysisResult)
+    return message
+
+
+def _patch_analysis_boundaries(monkeypatch: pytest.MonkeyPatch) -> None:
+    """ffmpeg/PCM/프레임/VAD 경계를 가짜로 막는다 — 미디어 바이트는 합성물이다."""
+    import array
+    from fractions import Fraction
+
+    from vlogsrt import preprocess
+    from vlogsrt.config import Config
+    from vlogsrt.project import pcm as pcm_module
+    from vlogsrt.project.vision import sampling
+    from vlogsrt.transcribe import FIXTURE_KIND, ChunkResponse, TranscriptionJob
+
+    rate = 16000
+
+    class _FakeArray:
+        __slots__ = ("data", "shape", "dtype")
+
+        def __init__(self, data: object, dtype: str) -> None:
+            self.data = data
+            self.dtype = dtype
+            dims: list[int] = []
+            level = data
+            while isinstance(level, list):
+                dims.append(len(level))
+                level = level[0] if level else None
+            self.shape = tuple(dims)
+
+        def __getitem__(self, index: int) -> object:
+            return self.data[index]  # type: ignore[index]
+
+        def tolist(self) -> object:
+            return self.data
+
+    class _ConstantSession:
+        def run(self, output_names: object, feeds: dict[str, object]) -> list[_FakeArray]:
+            return [
+                _FakeArray([[0.1]], "float32"),
+                _FakeArray([[[0.0] * 128], [[0.0] * 128]], "float32"),
+            ]
+
+    class _Scripted:
+        def transcribe(self, job: TranscriptionJob, cfg: Config) -> list[ChunkResponse]:
+            if job.kind != FIXTURE_KIND:
+                raise RuntimeError(f"예약하지 않은 {job.kind} 호출이다")
+            payload = {
+                "segments": [
+                    {"start": 0.5, "end": 1.0, "text": "인사"},
+                    {"start": 10.5, "end": 11.0, "text": "마무리"},
+                ]
+            }
+            return [
+                ChunkResponse(index=chunk.index, offset=chunk.offset, payload=payload)
+                for chunk in job.chunks
+            ]
+
+    monkeypatch.setattr(runner, "require_ffmpeg", lambda tool="ffmpeg": f"/fake/bin/{tool}")
+    monkeypatch.setattr(
+        runner,
+        "probe_audio_stream",
+        lambda source, stream_index: preprocess.AudioStreamInfo(
+            stream_index=1, start_time=Fraction(0), sample_rate=48000, channels=1
+        ),
+    )
+
+    def extract_pcm(
+        source: Path, destination: Path, *, stream_index: int, sample_rate: int = 16000
+    ) -> preprocess.PcmExtraction:
+        values = array.array("h", ((frame * 3) % 28001 - 14000 for frame in range(12 * rate)))
+        destination.write_bytes(values.tobytes())
+        return preprocess.PcmExtraction(
+            path=destination,
+            stream=preprocess.AudioStreamInfo(
+                stream_index=stream_index + 1,
+                start_time=Fraction(0),
+                sample_rate=48000,
+                channels=1,
+            ),
+            sample_count=len(values),
+            sample_width=2,
+            pcm_sample0_file_time=Fraction(0),
+        )
+
+    monkeypatch.setattr(pcm_module, "extract_pcm_s16le", extract_pcm)
+    monkeypatch.setattr(runner, "bundled_artifact", lambda cfg: Path("/fake/silero.onnx"))
+    monkeypatch.setattr(runner, "create_cpu_session", lambda artifact: _ConstantSession())
+    monkeypatch.setattr(
+        sampling,
+        "probe_video_stream",
+        lambda source, stream_index=0: preprocess.VideoStreamInfo(
+            stream_index=0,
+            presentation_origin=Fraction(0),
+            frame_duration=Fraction(1, 30),
+            frame_count=360,
+        ),
+    )
+
+    def extract_frame(
+        source: Path,
+        stream_index: int,
+        frame_index: int,
+        destination: Path,
+        *,
+        long_edge: int,
+    ) -> Path:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(f"frame:{frame_index}".encode())
+        return destination
+
+    monkeypatch.setattr(sampling, "extract_frame_index", extract_frame)
+
+    def sha256_of(path: Path) -> str:
+        import hashlib
+
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+
+    monkeypatch.setattr(sampling, "sha256_file", sha256_of)
+    monkeypatch.setattr(transcribe, "get_transcriber", lambda *args, **kwargs: _Scripted())

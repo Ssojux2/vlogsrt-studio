@@ -168,7 +168,7 @@ func _testRegistry(selection: String = "a".padding(toLength: 64, withPad: "a", s
   #expect(!stranded.isExecutable)
 }
 
-@Test func engineSessionGatesCancellationBeforeRunAndFailureSkipsSync() async throws {
+@Test func engineSessionGatesCancellationBeforeRunAndFailureSyncsDiagnostics() async throws {
   let root = FileManager.default.temporaryDirectory
     .appendingPathComponent(UUID().uuidString, isDirectory: true)
   let job = root.appendingPathComponent("job", isDirectory: true)
@@ -185,14 +185,45 @@ func _testRegistry(selection: String = "a".padding(toLength: 64, withPad: "a", s
   #expect(outcome == .cancelledBeforeRun)
   #expect(executor.plans.isEmpty)
 
-  // 종료코드 비0 — 동기화 없이 실패로 닫는다.
+  // 종료코드 비0(번들 실행 — 외부 작업이 없으니 동기화 자체가 없다).
   try FileManager.default.removeItem(at: job.appendingPathComponent(CancellationStore.fileName))
-  var synced: [URL] = []
+  var synced: [(URL, Bool)] = []
   let failed = try await EngineSessionRunner(executor: RecordingExecutor(status: 3)).run(
     _runtimeContext(plan: try makeBundledPlan(), registry: registry, revision: revision, appGroupJob: job),
-    syncResults: { _, to in synced.append(to) }
+    syncResults: { _, to, diagnosticsOnly in synced.append((to, diagnosticsOnly)) }
   )
   #expect(failed == .engineFailed(3))
+  #expect(synced.isEmpty)
+
+  // 개발(외부) 실행이 실패로 끝나도 진단 증거는 앱으로 나온다 — 진단 전용 동기다(S1B).
+  let external = root.appendingPathComponent("external", isDirectory: true)
+  try FileManager.default.createDirectory(at: external, withIntermediateDirectories: true)
+  let failedExternal = try await EngineSessionRunner(executor: RecordingExecutor(status: 3)).run(
+    _runtimeContext(
+      plan: try makeBundledPlan(), registry: registry, revision: revision,
+      appGroupJob: job, externalJob: external
+    ),
+    syncResults: { _, to, diagnosticsOnly in synced.append((to, diagnosticsOnly)) }
+  )
+  #expect(failedExternal == .engineFailed(3))
+  #expect(synced.count == 1)
+  #expect(synced.first?.0 == job)
+  #expect(synced.first?.1 == true)
+
+  // 취소된 실패 실행은 증거를 가져오지 않는다 — 취소 게이트가 먼저다(S1A).
+  let cancelOnFailure = RecordingExecutor(status: 2, onRun: {
+    try? Data("cancelled\n".utf8)
+      .write(to: job.appendingPathComponent(CancellationStore.fileName))
+  })
+  synced.removeAll()
+  let cancelledFailure = try await EngineSessionRunner(executor: cancelOnFailure).run(
+    _runtimeContext(
+      plan: try makeBundledPlan(), registry: registry, revision: revision,
+      appGroupJob: job, externalJob: external
+    ),
+    syncResults: { _, to, diagnosticsOnly in synced.append((to, diagnosticsOnly)) }
+  )
+  #expect(cancelledFailure == .stoppedBeforeSync)
   #expect(synced.isEmpty)
 }
 
@@ -218,7 +249,7 @@ func _testRegistry(selection: String = "a".padding(toLength: 64, withPad: "a", s
       plan: try makeBundledPlan(), registry: registry, revision: revision,
       appGroupJob: job, externalJob: external
     ),
-    syncResults: { _, to in synced.append(to) },
+    syncResults: { _, to, _ in synced.append(to) },
     importRoughcut: { imported.urls.append($0) }
   )
   #expect(stopped == .stoppedBeforeSync)
@@ -232,7 +263,7 @@ func _testRegistry(selection: String = "a".padding(toLength: 64, withPad: "a", s
       plan: try makeBundledPlan(), registry: registry, revision: revision,
       appGroupJob: job, externalJob: external, operation: .roughcut
     ),
-    syncResults: { _, to in
+    syncResults: { _, to, _ in
       synced.append(to)
       try? Data("cancelled\n".utf8)
         .write(to: job.appendingPathComponent(CancellationStore.fileName))
@@ -250,7 +281,7 @@ func _testRegistry(selection: String = "a".padding(toLength: 64, withPad: "a", s
       plan: try makeBundledPlan(), registry: registry, revision: revision,
       appGroupJob: job, externalJob: external, operation: .roughcut
     ),
-    syncResults: { _, to in synced.append(to) },
+    syncResults: { _, to, _ in synced.append(to) },
     importRoughcut: { imported.urls.append($0) }
   )
   #expect(completed == .completed)
@@ -291,7 +322,7 @@ func _testRegistry(selection: String = "a".padding(toLength: 64, withPad: "a", s
     #expect(line.contains("\"reason\":\"active_project_changed\""))
     #expect(line.contains("\"attempt_id\":\"*\""))
     #expect(line.contains(inputRevision))
-    #expect(line.contains("\"protocol_version\":\"1.2\""))
+    #expect(line.contains("\"protocol_version\":\"\(ProtocolCodec.analysisVersion)\""))
   }
   // 취소됐으므로 다음 실행은 시작조차 하지 않는다.
   let again = try await EngineSessionRunner(executor: RecordingExecutor()).run(

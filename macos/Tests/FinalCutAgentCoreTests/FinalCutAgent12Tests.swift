@@ -53,7 +53,7 @@ import Testing
   for base in [appGroupJob, externalJob] {
     let written = try String(contentsOf: base.appendingPathComponent("cancellation.jsonl"), encoding: .utf8)
     #expect(written == expectedLine)
-    #expect(written.contains("\"protocol_version\":\"1.2\""))
+    #expect(written.contains("\"protocol_version\":\"\(ProtocolCodec.analysisVersion)\""))
   }
 
   // 외부 쪽 기록을 App Group으로 가져온다 — 이미 있으면 덮어쓰지 않는다.

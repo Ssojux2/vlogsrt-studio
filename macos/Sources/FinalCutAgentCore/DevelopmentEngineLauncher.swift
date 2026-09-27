@@ -44,6 +44,7 @@ public enum DevelopmentJobStager {
     "analysis-usage.jsonl",
     "candidates.jsonl",
     "vision-decisions.jsonl",
+    "analysis-result.jsonl",
     "edit-plan.jsonl",
     "roughcut.fcpxml",
     "roughcut.fcpxml.review.json",
@@ -51,6 +52,14 @@ public enum DevelopmentJobStager {
     "caption-estimate.jsonl",
     "caption-result.jsonl",
     "cancellation.jsonl",
+  ]
+  /// 실패한 실행이 앱으로 나갈 수 있는 진단 증표 — 성공 산물(후보·러프컷)은 없다.
+  /// 실패를 보여주려고 성공 실행을 다시 요구하지 않는다(S1B).
+  private static let diagnostics = [
+    "analysis-attempts.jsonl",
+    "analysis-usage.jsonl",
+    "vision-decisions.jsonl",
+    "analysis-result.jsonl",
   ]
 
   public static func stage(
@@ -86,13 +95,14 @@ public enum DevelopmentJobStager {
   public static func syncResults(
     from externalJob: URL,
     to appGroupJob: URL,
+    diagnosticsOnly: Bool = false,
     fileManager: FileManager = .default
   ) throws {
     // 취소된 작업의 결과는 동기화하지 않는다 — 취소 뒤 새 호출·sync·import 차단.
     guard !CancellationStore.isCancelled(jobURL: externalJob, fileManager: fileManager) else {
       throw DevelopmentEngineError.cancelled
     }
-    for name in results {
+    for name in diagnosticsOnly ? diagnostics : results {
       let rootSource = externalJob.appendingPathComponent(name)
       let workspaceSource = externalJob.appendingPathComponent("workspace").appendingPathComponent(name)
       let source = fileManager.fileExists(atPath: rootSource.path) ? rootSource : workspaceSource
