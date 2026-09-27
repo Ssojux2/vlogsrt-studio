@@ -39,3 +39,11 @@ Expose optional generic observation around each actual transcription SDK attempt
 At the final stable boundary, stop edits and send a blocking ask. Sol will run targeted tests, existing transcribe/cancellation/affected boundary tests, Ruff/mypy/invariants and broader gates if the final shared-boundary impact requires them. No runtime verification by GLM. Do not weaken tests to obtain green.
 
 Commit only the two owned paths after Sol's explicit acceptance. Report SHA, exact paths, skill-read/preflight evidence, all observed failures/corrections and remaining integration limits. Consume and ACK full mailbox deliveries at natural checkpoints and before the single worker_done. Then idle for cleanup; do not compact or change ROOT's model.
+
+## Accepted offline — 2026-09-28
+
+- Code `db32c8503db2d0581a87607a3f7ab4f3a0aa10cc`, exactly the two owned paths; immutable 2-file/2-module/shared-API scope retained. Accepted hashes matched after final gates and commit.
+- Sol final target: 31 passed in 0.09s. Final `make check`: 2,962 passed in 66.47s, Ruff check/format 130 files, mypy 56 sources, all 21 invariants; original exit 0. The earlier affected subset passed 194 cases; the final aggregate covers the accepted source.
+- The missing-API collection RED, one product callable-arity defect and fake-SDK namespace defect (18 failing cases in the first extended run), cancellation/admission corrections and stronger deterministic test ordering are recorded in the [feedback report](../../reports/2026-09-27-high-agency-implementation-feedback.md). No scoped failure remains.
+- Generic hooks are available; the project does not yet pass a durable ledger observer into production analysis. S2B-2b must bind actual endpoint/config/pricing/authorization identity, per-request bounds and metering to the accepted ledger. S2B-3 owns successful cache/retry and cost protocol/UI integration. Python 3.11 compatibility was reviewed from source/docs; runtime validation used 3.12. No real provider/media/FCP or unchanged Swift/native gate was exercised.
+- Task `task_2ff24b9963e4` / Dispatch `ctx_b9eed3e720a8` succeeded; exact idle GLM terminal closed, delivery `delivery_90058102f3b8` ACKed. Preserve these settled IDs.
