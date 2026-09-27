@@ -201,7 +201,8 @@ import Testing
   #expect(!path.contains("/opt/homebrew"))
   #expect(path.hasSuffix(":/usr/bin:/bin"))
 
-  // 키가 없으면(오프라인 실행) 키 변수 자체가 없다 — 빈 값으로 오인하지 않는다.
+  // 키가 없어도 운반자는 **항시** 실린다(S2A-2): 빈 값은 '이 실행에는 키가
+  // 없다'는 명시적 선언이라 자식 안에서 상속·dotenv의 낡은 키 부활을 닫는다.
   let offline = try BundledEngineInvocation.create(
     operation: .roughcut,
     jobID: "job-42",
@@ -209,7 +210,7 @@ import Testing
     engineRoot: engineRoot,
     apiKey: nil
   )
-  #expect(offline.environment[BundledEngineInvocation.apiKeyEnvironmentName] == nil)
+  #expect(offline.environment[BundledEngineInvocation.apiKeyEnvironmentName] == "")
   #expect(offline.environment[BundledEngineInvocation.pathEnvironmentName] != nil)
   #expect(
     BundledEngineInvocation.bundledToolPath(engineRoot: engineRoot)

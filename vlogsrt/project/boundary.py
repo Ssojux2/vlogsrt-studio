@@ -87,7 +87,7 @@ from itertools import pairwise
 from pathlib import Path
 from typing import Any, Literal, TypeVar
 
-from vlogsrt import log, pipeline, refine, repair, retext, transcribe
+from vlogsrt import env, log, pipeline, refine, repair, retext, transcribe
 from vlogsrt.config import Config
 from vlogsrt.models import Chunk, Cue, Repair, RetextRecord, Segment, Span
 from vlogsrt.project.captions import (
@@ -1732,7 +1732,9 @@ class _BoundaryCapture:
     failures: list[str] = field(default_factory=list)
 
     def record(self, stage: str, exc: BaseException | str) -> None:
-        text = " ".join(str(exc).split())
+        # SDK 오류 문면에 키가 실려 오면 기록이 그대로 흘러간다 — 포획 문에서
+        # 값을 지우고 모양만 남긴다(S2A-2).
+        text = env.redact_secrets(" ".join(str(exc).split()))
         self.failures.append(f"{stage}: {text}" if text else f"{stage}: {exc.__class__.__name__}")
 
     def describe(self) -> str:

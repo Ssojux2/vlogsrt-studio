@@ -373,10 +373,16 @@ def _install_read_guard(real_open, real_os_open, real_read_text, real_read_bytes
 
 
 def _block_network(real_socket):
+    class _BlockedSocket:
+        # 클래스여야 한다: ssl.py가 `class SSLSocket(socket)`로 상속한다 — 함수를
+        # 끼우면 수입 자체가 부서진다. 생성을 막는 것으로 거부 의미는 그대로다.
+        def __init__(self, *args, **kwargs):
+            raise RuntimeError("blocked network in test child")
+
     def no_network(*args, **kwargs):
         raise RuntimeError("blocked network in test child")
 
-    socket.socket = no_network
+    socket.socket = _BlockedSocket
     socket.create_connection = no_network
 
 
@@ -547,6 +553,16 @@ _PROOF_REQUIRED_TRUE = (
 )
 
 
+def _is_within(path: str, root: str) -> bool:
+    """경로가 root **안**에 있는가 — 구성요소 경계로 잰다.
+
+    접두사 비교만으로는 `/x/vlogsrt-evil`이 `/x/vlogsrt` 안으로 새어 들어간다.
+    경계는 구분자 자체다: root 그 자체이거나 root + 구분자로 시작해야 한다.
+    """
+    boundary = root.rstrip(os.sep) + os.sep
+    return path == root or path.startswith(boundary)
+
+
 def preflight_child_guard(
     guard_env: dict[str, str],
     *,
@@ -582,7 +598,7 @@ def preflight_child_guard(
             raise RuntimeError(f"자식 보호 사전확인 실패({field}) — payload를 띄우지 않는다")
     if latest["cwd"] != str(cwd.resolve()):
         raise RuntimeError("자식 보호 사전확인 실패(cwd) — payload를 띄우지 않는다")
-    if not latest["vlogsrt_file"].startswith(str(expected_package_root.resolve())):
+    if not _is_within(str(latest["vlogsrt_file"]), str(expected_package_root.resolve())):
         raise RuntimeError("자식 보호 사전확인 실패(수입 출처) — payload를 띄우지 않는다")
     return latest
 
@@ -663,3 +679,35 @@ class EngineSandbox:
 def build_engine_sandbox(base: Path, *, source: Path) -> EngineSandbox:
     """base 아래 합성 저장소를 만든다 — 실제 저장소를 참조하는 것은 공개 원본뿐이다."""
     return EngineSandbox(base, source=source)
+
+
+def _emit_cli(argv: list[str]) -> int:
+    """승인된 자식 보호를 그대로 내보내는 명령줄 — Swift 시험 부모가 쓴다.
+
+    보호 문면의 정의는 이 파일 하나뿐이어야 한다(S2A-2 회복 계약): Swift 쪽에서
+    다시 짜면 두 정의가 어긋난다. 인자는 전부 명시적 경로이고 표준 출력은 환경
+    변수 사전의 JSON 한 줄이다. 접근·네트워크 거부 규칙은 그대로다(손대지 않는다).
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(prog="tests/_dotenv_guard.py emit-guard")
+    parser.add_argument("command", choices=["emit-guard"])
+    parser.add_argument("--root", type=Path, required=True)
+    parser.add_argument("--allow", type=Path, action="append", required=True)
+    parser.add_argument("--standin", type=Path)
+    parser.add_argument("--proof", type=Path, required=True)
+    parser.add_argument("--break-bootstrap", action="store_true")
+    args = parser.parse_args(argv)
+    guard_env = emit_child_guard(
+        args.root,
+        allow_roots=tuple(args.allow),
+        standin=args.standin,
+        proof=args.proof,
+        break_bootstrap=args.break_bootstrap,
+    )
+    print(json.dumps(guard_env))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(_emit_cli(sys.argv[1:]))

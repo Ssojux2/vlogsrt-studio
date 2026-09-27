@@ -414,6 +414,24 @@ def _current_analysis_estimate(
     )
 
 
+def _redact_failure_text(args: argparse.Namespace, text: str) -> str:
+    """실패 문면에서 자격 증명 값을 지운다(S2A-2) — 엔진 STT 키와 설정이 고른 비전 키.
+
+    비전 키 이름은 프로젝트 설정이 정한다(P5-00) — 이름을 바꾸거나 한 키를 양쪽에
+    얹지 않는다. 설정을 읽지 못하면 엔진 키만 지우고 진단은 살린다: 지움 실패가
+    원본 실패를 묻게 두지 않는다.
+    """
+    secrets: list[str] = []
+    try:
+        key_name = load_project_config(args.project_config).vision_api_key_env
+        vision_key = env.get(key_name)
+        if vision_key:
+            secrets.append(vision_key)
+    except Exception:  # noqa: BLE001 - 지움 보조가 원본 실패를 대신 실패시키지 않는다
+        log.warn("비전 키 이름을 확인하지 못했다 — 엔진 키만 지운다")
+    return env.redact_secrets(text, secrets=tuple(secrets))
+
+
 def _project_analyze(args: argparse.Namespace) -> int:
     workspace = args.workspace
     journal = WorkflowJournal.open(workspace / _JOURNAL)
@@ -544,6 +562,10 @@ def _project_analyze(args: argparse.Namespace) -> int:
             # 집계·시도 기록은 단계 안에서 정돈되어 이미 남았다 — 중복 기록 없이 넘긴다.
             raise ValueError(str(exc)) from exc
         except Exception as exc:
+            # 실패 문면은 지속 기록(attempts)과 다시 던져지는 예외 두 표면으로
+            # 나간다 — 두 곳 모두 자격 증명 값을 지우고 지나간다(S2A-2).
+            raw = " ".join(str(exc).split()) or exc.__class__.__name__
+            reason = _redact_failure_text(args, raw)
             _append_message(
                 workspace / _ATTEMPTS,
                 AnalysisAttempt(
@@ -552,10 +574,15 @@ def _project_analyze(args: argparse.Namespace) -> int:
                     attempt_id,
                     "failed",
                     started_at,
-                    " ".join(str(exc).split()) or exc.__class__.__name__,
+                    reason,
                 ),
             )
-            raise
+            if reason == raw:
+                raise  # 비밀이 없으면 원문 진단을 그대로 둔다
+            # RuntimeError여야 cli.main이 한 줄로 인쇄하고 실패(1) 경로의 진단
+            # 동기화가 그대로 흐른다. `from None`은 사슬(원문 예외 문면)을 끊는다 —
+            # 그 문면에 키가 있었다는 것이 이 갈림길의 조건이다.
+            raise RuntimeError(reason) from None
         if result.status == "error":
             # 전체 실패 — 집계·판정·사용량은 이미 남았다. 저널은 authorized에 두므로
             # 같은 입력으로 재시도할 수 있다. 취소는 여기를 지나지 않는다 — 별개 결과다.

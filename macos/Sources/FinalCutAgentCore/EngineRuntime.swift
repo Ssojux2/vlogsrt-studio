@@ -56,7 +56,8 @@ public enum EngineRuntime {
         operation: operation,
         jobID: jobID,
         externalJob: externalJob,
-        applicationScriptsDirectory: scripts
+        applicationScriptsDirectory: scripts,
+        apiKey: apiKey
       )
       if let invocation {
         return .development(invocation)

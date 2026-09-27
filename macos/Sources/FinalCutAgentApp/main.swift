@@ -11,6 +11,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   private var mediaRootsLabel: NSTextField?
   private var shareDestinationLabel: NSTextField?
   private var currentJobLabel: NSTextField?
+  private var apiKeyField: NSSecureTextField?
+  private var apiKeyStatusLabel: NSTextField?
+  private var apiKeyModel: CredentialEntryModel?
   private var roundTripCoordinator: RoundTripCoordinator?
   /// 같은 job의 동시 요청을 막는 앱 게이트(S2A-1) — 청구는 스테이징·상태 쓰기
   /// 보다 먼저고, 해제는 어떤 끝에서든 일어난다. 실행 중 job의 취소 문맥은
@@ -53,6 +56,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       target: self,
       action: #selector(cancelCurrentJob)
     )
+    // API 키 입력(S2A-2) — 보안 필드가 값을 감싸고, 모델이 문면·수명을 정한다.
+    // 저장된 값은 화면 어디에도 다시 나오지 않는다: 상태는 있음/없음/실패뿐.
+    let keyField = NSSecureTextField()
+    keyField.placeholderString = "OpenAI API 키 (유료 실행용)"
+    apiKeyField = keyField
+    let saveKey = NSButton(
+      title: "API 키 저장",
+      target: self,
+      action: #selector(saveApiKey)
+    )
+    let keyStatus = NSTextField(labelWithString: "")
+    keyStatus.maximumNumberOfLines = 2
+    apiKeyStatusLabel = keyStatus
+    apiKeyModel = CredentialEntryModel(
+      storage: KeychainStore(), account: Self.apiKeyAccount
+    )
+    apiKeyModel?.refresh()
+    refreshApiKeyStatus()
     let stack = NSStackView(
       views: [
         label,
@@ -61,6 +82,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSStackView(views: [addRoot, removeRoot]),
         shareDestinationLabel!,
         revealDestination,
+        NSStackView(views: [keyField, saveKey]),
+        keyStatus,
         currentJobLabel!,
         cancelButton,
       ]
@@ -334,6 +357,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   }
 
   // ─── UI 동작 ──────────────────────────────────────────────────
+
+  @objc private func saveApiKey() {
+    guard let model = apiKeyModel, let field = apiKeyField else { return }
+    // 필드가 모델의 유일한 입력원 — 성공 저장 뒤 모델이 지운 값을 필드에 되돌린다.
+    model.updateSubmitted(field.stringValue)
+    model.save()
+    field.stringValue = model.submittedText
+    refreshApiKeyStatus()
+  }
+
+  private func refreshApiKeyStatus() {
+    guard let model = apiKeyModel else { return }
+    apiKeyStatusLabel?.stringValue = "API 키: \(model.status.message)"
+  }
 
   @objc private func chooseDevelopmentWorkspace() {
     let panel = NSOpenPanel()

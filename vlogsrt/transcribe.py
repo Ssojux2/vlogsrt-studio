@@ -292,7 +292,12 @@ class LiveTranscriber:
                 if not extras:
                     raise
                 dropped = _rejected(str(exc), extras) or sorted(extras)
-                log.warn(f"{what}: API가 {dropped}를 거부했다({exc}). 빼고 다시 부른다.")
+                # 400 문면은 그대로 stderr로 나간다 — SDK가 키를 되뇌면 여기가
+                # 첫 표면이다. 인자 해석(_rejected)은 원문으로, 인쇄는 가려서.
+                log.warn(
+                    f"{what}: API가 {dropped}를 거부했다({env.redact_secrets(str(exc))}). "
+                    "빼고 다시 부른다."
+                )
                 extras = {name: value for name, value in extras.items() if name not in dropped}
 
     def transcribe(self, job: TranscriptionJob, cfg: Config) -> list[ChunkResponse]:

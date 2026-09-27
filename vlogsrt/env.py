@@ -185,3 +185,21 @@ def require_api_key(force: bool = False) -> str:
 def base_url() -> str | None:
     raw = get("OPENAI_BASE_URL").strip()
     return raw or None
+
+
+# 문면에서 자격 증명 값을 대체하는 표식 — 값이 어느 키였는지 말하지 않는다.
+REDACTED_MARK = "∙∙∙"
+
+
+def redact_secrets(text: str, secrets: tuple[str, ...] = ()) -> str:
+    """자격 증명 값을 문면에서 지운다 — 지속·인쇄 표면 앞의 마지막 문이다(S2A-2).
+
+    기본은 엔진 STT 키(`OPENAI_API_KEY`)의 현재 값이고, 다른 이름(예: 설정이
+    고른 비전 키)의 값은 `secrets`로 넣는다. **이름을 대체하지 않는다** — 값만
+    지운다. 값은 절대 만들어 내지 않는다: 문면에 없으면 문장은 그대로 둬서
+    진단을 죽이지 않는다. 빈 값은 아무것도 지우지 않는다.
+    """
+    candidates = (os.environ.get("OPENAI_API_KEY"), *secrets)
+    for value in dict.fromkeys(item for item in candidates if item):
+        text = text.replace(value, REDACTED_MARK)
+    return text

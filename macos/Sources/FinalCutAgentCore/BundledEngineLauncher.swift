@@ -15,6 +15,11 @@ public struct BundledEngineInvocation: Equatable, Sendable {
   /// 키를 환경변수 한 통으로만 전달한다 — 그 밖의 경로는 만들지 않는다.
   /// 진입점 CLI 계약은 개발 래퍼와 같다: `<operation> <job_id> <job_dir>`.
   ///
+  /// 앱이 만드는 호출은 **항상** 운반자를 실는다(S2A-2): 키가 있으면 그 값,
+  /// 없으면 빈 값. 빈 운반자는 '이 실행에는 키가 없다'는 명시적 선언이라 자식
+  /// 안에서 상속·dotenv의 낡은 키가 다시 살아나는 길을 닫는다 — 운반자가
+  /// 아예 없으면 자식이 그 차이를 못 본다.
+  ///
   /// PATH는 번들 `bin/`(ffmpeg·ffprobe)과 시스템 최소 경로뿐이다 — Homebrew
   /// (/opt/homebrew)는 없으므로 Release 번들 실행이 조용히 시스템 ffmpeg로
   /// 되돌아가는 길이 없다. 도구가 없으면 `require_ffmpeg`가 실패로 닫는다.
@@ -32,10 +37,10 @@ public struct BundledEngineInvocation: Equatable, Sendable {
       .appendingPathComponent("Contents", isDirectory: true)
       .appendingPathComponent("MacOS", isDirectory: true)
       .appendingPathComponent(DevelopmentEngineInvocation.scriptName)
-    var environment = [Self.pathEnvironmentName: Self.bundledToolPath(engineRoot: engineRoot)]
-    if let apiKey, !apiKey.isEmpty {
-      environment[Self.apiKeyEnvironmentName] = apiKey
-    }
+    let environment = [
+      Self.pathEnvironmentName: Self.bundledToolPath(engineRoot: engineRoot),
+      Self.apiKeyEnvironmentName: apiKey ?? "",
+    ]
     return Self(
       executableURL: executable,
       arguments: [operation.rawValue, jobID, jobDirectory.standardizedFileURL.path],

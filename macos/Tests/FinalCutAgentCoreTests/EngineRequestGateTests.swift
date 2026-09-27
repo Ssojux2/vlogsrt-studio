@@ -1,7 +1,15 @@
+import CryptoKit
 import Foundation
 import Testing
 
 @testable import FinalCutAgentCore
+
+/// 합성 키의 sha256 다이제스트 — 소비 기대값은 이 모양으로만 자식에 간다.
+/// 원문 합성 키는 시험 재료 어디에도 쓰지 않는다(지속 표면 검사가 드라이버·
+/// 심까지 훑는다).
+nonisolated func _digestOf(_ value: String) -> String {
+  SHA256.hash(data: Data(value.utf8)).map { String(format: "%02x", $0) }.joined()
+}
 
 // ─────────────────────────────────────────────────────────────
 //  STAB-S2A-1 — job 실행 소유권: 중복은 alreadyRunning, sync/import 없음
@@ -517,58 +525,296 @@ nonisolated func _lockHolderAnnounced(_ handle: FileHandle) -> Bool {
   }
 }
 
-/// 실제 다리: **설치 스크립트가 만든 진짜 개발 래퍼** → 실제 파이썬 → 실제
-/// `vlogsrt-engine.py`. NSUserUnixTask → 래퍼의 넷째 인자 전달 → 소유된 상태
-/// 기록 → 실행기 판독까지 통째로 잇는다(손으로 쓴 래퍼가 아니다).
-///
-/// 보호 분리: 래퍼는 `cd <repo>` 후 진입점을 부른다 — 진입점의 dotenv 로더는
-/// cwd 조상과 `PACKAGE_ROOT`(패키지 경로)에서 `.env`를 찾는다. 그래서 이 시험은
-/// 실제 저장소 대신 **공백이 든 임시 합성 저장소**를 만든다: 공개 파이썬 소스와
-/// 엔진 스크립트만 명시적으로 복사하고(바이트 동일 주장), 해석기만 실제 venv로
-/// 심볼링크한다. cwd·PYTHONPATH·PACKAGE_ROOT가 전부 임시 안에 머물러 보호된
-/// `.env`로 흐를 길이 없다(합성 저장소에 그런 파일은 만들지 않는다).
-/// 성공(0)·안쪽 실패(1)·실제 잡힌 잠금 앞의 중복(3)을 본다.
-@Test func launcherReadsTheRealPythonEntrypointStatusRecord() async throws {
-  let repo = URL(fileURLWithPath: #filePath)
+// ─── 실제 다리의 공용 재료(S2A-2 회복) — 합성 저장소·승인된 자식 보호·같은-해석기 드라이버 ──
+
+/// 실제 다리 시험의 합성 무대 — 공개 파이썬 소스와 바이트 동일 엔진 스크립트만
+/// 실제 저장소에서 온다. 경로에 공백이 있고, 임시 뿌리를 미리 resolve해
+/// 파이촌의 resolve() 철자와 어긋나지 않게 한다(보호 뿌리 비교는 어휘적이다).
+struct BridgeSandbox {
+  let root: URL
+  let repo: URL
+  let realPython: URL
+  let home: URL
+  let tmp: URL
+  let guardBoot: URL
+  let standin: URL
+  let engineScript: URL
+  let driver: URL
+  let proofDir: URL
+  let resultDir: URL
+}
+
+/// #filePath에서 실제 저장소 뿌리까지 — 네 번 지운다(Tests·FinalCutAgentCoreTests·
+/// macos·파일 이름). 세 번이면 macos에 남는다.
+nonisolated func _bridgeRepoRoot() -> URL {
+  URL(fileURLWithPath: #filePath)
     .deletingLastPathComponent()  // EngineRequestGateTests.swift
     .deletingLastPathComponent()  // FinalCutAgentCoreTests
     .deletingLastPathComponent()  // Tests
     .deletingLastPathComponent()  // macos → 저장소 루트
-  let python = repo.appendingPathComponent(".venv/bin/python")
-  let installer = repo.appendingPathComponent("macos/scripts/install-development-engine.sh")
+}
+
+/// sh 안전 인용 — 값 하나를 한 인자로 묶는다. JSON의 따옴표·경로의 공백이
+/// 흩어지지 않게 한다(이중 인용은 JSON의 `"`에 부서진다).
+nonisolated func _shQuoted(_ value: String) -> String {
+  "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
+}
+
+/// 과정 하나에 정해진 시간 상한 — 무한 waitUntilExit가 시험을 잡아매지 못하게
+/// 한다. 종료 관찰은 **run 앞에 단 terminationHandler**가 한다(이 보조자가 시작을
+/// 소유한다): 호출자를 세마포로 막아 둔 채 전역 큐에서 waitUntilExit를 돌리던
+/// 옛 모양이 타임아웃에 걸린 것은 종료 전달과의 경합으로 보는 **추론**이다(유일하게
+/// 증명된 원인은 아니다 — 증상만 실측됐다). 넘으면 SIGTERM → 그래도 살아 있으면
+/// SIGKILL로 못 박는다. `terminationStatus`는 **isRunning이 거짓일 때만** 읽는다 —
+/// 달리는 과정에서 읽으면 상태 보고 대신 예외가 터진다. 회계가 안 닫히면 상태를
+/// 모른 채 불확실로 보고한다(추측하지 않는다).
+nonisolated func _runBounded(_ process: Process, seconds: Double, label: String) throws {
+  let finished = DispatchSemaphore(value: 0)
+  process.terminationHandler = { _ in finished.signal() }  // run보다 먼저 단다
+  try process.run()
+  let expired = finished.wait(timeout: .now() + seconds) == .timedOut
+  if expired {
+    if process.isRunning { process.terminate() }
+    if finished.wait(timeout: .now() + 2) == .timedOut, process.isRunning {
+      kill(process.processIdentifier, SIGKILL)  // 딱딱한 상한 — 무시 못 하는 신호
+      _ = finished.wait(timeout: .now() + 5)
+    }
+  }
+  let completed = !process.isRunning
+  // 회계가 닫혔을 때만 상태를 읽는다 — 안 닫혔면 상태 자체를 모른다.
+  let status: Int32? = completed ? process.terminationStatus : nil
+  process.terminationHandler = nil
+  if expired || !completed {
+    let detail = completed
+      ? " — 종료시켰다(마지막 상태 \(status.map(String.init) ?? "?"))"
+      : " — SIGKILL 후에도 완결 회계가 안 닫힌다(상태 미확정)"
+    throw NSError(
+      domain: "bridge-bounded", code: 1,
+      userInfo: [NSLocalizedDescriptionKey: "\(label)이 \(Int(seconds))초 안에 끝나지 않았다" + detail])
+  }
+}
+
+/// 비동기 본문 하나에 시간 상한 — 실행기 호출마다 붙는다.
+///
+/// **이것은 딱딱한 상한이 아니다**라는 것이 이 문서의 요점이다: NSUserUnixTask
+/// 실행은 XPC 완료를 기다리는 취소 불가 연속(continuation) 안에서 기다린다 —
+/// 시한이 지나도 구조화된 작업 그룹은 그 본문이 돌아올 때까지 기다린다. 시한
+/// 초과는 시험을 실패로 **표시**할 뿐 매달린 실행을 강제로 끊지 못한다. 소유
+/// 자식의 딱딱한 종료 상한은 `_runBounded`(SIGTERM→SIGKILL)이고, 시험 과정
+/// 전체의 딱딱한 상한은 인수에서 쓰는 **외부 감시자**(수용 검증이 그렇게
+/// 돌았다)다. XPC 실행기 자식에는 부모 쪽 프로세스 손잡이가 없다 — 그 이상의
+/// 강제 종료는 플랫폼 경계로 남는다.
+nonisolated func _withDeadline<T: Sendable>(
+  seconds: Double, label: String, _ body: @escaping @Sendable () async throws -> T
+) async throws -> T {
+  try await withThrowingTaskGroup(of: T.self) { group in
+    group.addTask { try await body() }
+    group.addTask {
+      try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+      throw NSError(
+        domain: "bridge-deadline", code: 1,
+        userInfo: [NSLocalizedDescriptionKey: "\(label)이 \(Int(seconds))초를 넘었다"])
+    }
+    guard let result = try await group.next() else {
+      throw NSError(domain: "bridge-deadline", code: 2,
+                    userInfo: [NSLocalizedDescriptionKey: "\(label) 결과가 없다"])
+    }
+    group.cancelAll()
+    return result
+  }
+}
+
+/// 시험 소유 보호 드라이버 — payload와 **같은 해석기**에서 보호를 확인하고
+/// 복사된 실제 엔진을 runpy로 돈다(사전 부트스트랩 프로세스가 아니다). 확인이
+/// payload보다 먼저고, 어떤 확인이 실패해도 payload는 뜨지 않는다(exit 125).
+/// 소비 경계(선택)는 실제 운반 적용 → 실제 `env.require_api_key` → 실제
+/// `get_transcriber` 공장 → 가짜 `openai.OpenAI`까지만 가고, 기대값은 sha256
+/// 다이제스트로만 받아 **결과는 참/거짓뿐** 남긴다 — 원문 합성 키는 시험 재료
+/// 어디에도 쓰지 않는다(지속 표면 검사가 드라이버까지 훑는다).
+let _bridgeDriverSource = #"""
+import hashlib
+import importlib.util
+import json
+import os
+import runpy
+import sys
+
+try:
+    import sitecustomize  # 명시적 적재 — 자동 sitecustomize만 믿지 않는다
+except BaseException:
+    print("bridge-driver: sitecustomize", file=sys.stderr)
+    sys.exit(125)  # 보호가 없다 — payload 없이 끝난다
+
+
+def _fail(stage):
+    # 고정 단계 이름만 말한다 — 환경·경로·값은 실지 않는다(진단은 단계로 충분하다).
+    print("bridge-driver: " + stage, file=sys.stderr)
+    sys.exit(125)
+
+
+def _record(path, payload):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+
+
+refused = False
+try:
+    open(os.environ["VLOGSRT_TEST_GUARD_STANDIN"], "rb")
+except sitecustomize.GuardedEnvAccess:
+    refused = True
+import socket
+
+socket_refused = False
+try:
+    socket.socket()
+except RuntimeError:
+    socket_refused = True
+if not refused:
+    _fail("standin-refusal")
+if not socket_refused:
+    _fail("socket-refusal")
+
+if os.getcwd() != os.environ["VLOGSRT_TEST_EXPECTED_CWD"]:
+    _fail("cwd")
+import vlogsrt
+
+if os.path.realpath(vlogsrt.__file__) != os.path.realpath(
+    os.environ["VLOGSRT_TEST_EXPECTED_INIT"]
+):
+    _fail("provenance")
+
+engine_args = sys.argv[1:]
+if engine_args and engine_args[0] == "--bridge-self-check":
+    _record(
+        os.path.join(os.environ["VLOGSRT_TEST_PROOF_DIR"], "self-check.jsonl"),
+        {
+            "refused": refused,
+            "socket_refused": socket_refused,
+            "cwd": os.getcwd(),
+            "vlogsrt_file": os.path.realpath(vlogsrt.__file__),
+        },
+    )
+    sys.exit(0)
+
+job_id = engine_args[2] if len(engine_args) > 2 else ""
+_record(
+    os.path.join(os.environ["VLOGSRT_TEST_PROOF_DIR"], job_id + ".jsonl"),
+    {
+        "refused": refused,
+        "socket_refused": socket_refused,
+        "cwd": os.getcwd(),
+        "vlogsrt_file": os.path.realpath(vlogsrt.__file__),
+        "job_id": job_id,
+    },
+)
+
+digests_raw = os.environ.get("VLOGSRT_TEST_CONSUMER_DIGESTS", "")
+if digests_raw:
+    spec = importlib.util.spec_from_file_location("vlogsrt_engine_bridge", engine_args[0])
+    engine = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(engine)
+    digests = json.loads(digests_raw)
+
+    def _run_operation_synthetic(operation, job_dir, workspace):
+        # 실제 `_run_owned`이 이미 운반을 적용한 뒤에만 온다 — 여기서 운반을
+        # 흉내 내면 생산 순서를 증명하지 못한다. 실제 자격 증명 판독과 실제 SDK
+        # 공장만 부르고, 공장이 받은 값을 다이제스트로 판정한다.
+        from vlogsrt import env, transcribe
+
+        reader_refused = False
+        try:
+            env.require_api_key(force=True)
+        except RuntimeError:
+            reader_refused = True
+        consumer_ok = False
+        if not reader_refused:
+            seen = {}
+
+            class _FakeOpenAI:
+                def __init__(self, **kwargs):
+                    seen.update(kwargs)
+
+            import openai
+
+            openai.OpenAI = _FakeOpenAI
+            transcribe.get_transcriber(online=True)._client()
+            captured = seen.get("api_key")
+            consumer_ok = (
+                captured is not None
+                and hashlib.sha256(captured.encode()).hexdigest() == digests.get(job_id)
+            )
+        _record(
+            os.path.join(os.environ["VLOGSRT_TEST_RESULT_DIR"], job_id + ".jsonl"),
+            {"consumer_ok": consumer_ok, "reader_refused": reader_refused},
+        )
+        return 0
+
+    engine._run_operation = _run_operation_synthetic
+    sys.argv = engine_args
+    # 패치가 붙은 **같은 모듈 객체**의 진짜 main을 부른다 — runpy는 새 이름공간을
+    # 만들어 패치가 묻는다. main→_dispatch→소유권→봉투→_run_owned(실재)→(여기)다.
+    raise SystemExit(engine.main(engine_args[1:]))
+
+sys.argv = engine_args
+runpy.run_path(engine_args[0], run_name="__main__")
+"""#
+
+/// 경로의 물리 철자 — realpath(3)로 연다. URL.resolvingSymlinksInPath는
+/// /var→/private/var 굳은링크를 넘지 않는데 자식의 os.getcwd()/realpath는
+/// 물리 경로로 답한다: 기대값과 자식이 **같은 철자**를 쓰게 하는 유일한 길이다.
+nonisolated func _physicalRoot(_ url: URL) -> URL {
+  let physical = url.path.withCString { cPath -> String? in
+    guard let resolved = realpath(cPath, nil) else { return nil }
+    defer { free(resolved) }
+    return String(cString: resolved)
+  }
+  return URL(fileURLWithPath: physical ?? url.path)
+}
+
+/// 공개 재료만 담은 합성 저장소를 만든다 — 심볼링크 원본은 거절한다(복사가
+/// 곧 증명이다). dotenv는 시험이 직접 쓴 합성물이다(보호 뿌리 안에 산다).
+nonisolated func _makeBridgeSandbox(label: String, dotenv: String) throws -> BridgeSandbox {
+  let repo = _bridgeRepoRoot()
+  let realPython = repo.appendingPathComponent(".venv/bin/python")
+  try FileManager.default.attributesOfItem(atPath: realPython.path)  // venv 없으면 즉시 실패
   let engineScript = repo.appendingPathComponent("macos/scripts/vlogsrt-engine.py")
   let packageRoot = repo.appendingPathComponent("vlogsrt", isDirectory: true)
-  try FileManager.default.attributesOfItem(atPath: python.path)  // venv 없으면 즉시 실패
 
-  let root = FileManager.default.temporaryDirectory
-    .appendingPathComponent("S2A-1 bridge \(UUID().uuidString)", isDirectory: true)
-  try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-  defer { try? FileManager.default.removeItem(at: root) }
+  // 임시 뿌리를 만든 뒤 물리 철자로 못 박는다 — 자식의 getcwd/realpath와
+  // 어긋나는 철자(/var vs /private/var)가 cwd·수입 출처 증명을 부수지 않게.
+  let rawRoot = FileManager.default.temporaryDirectory
+    .appendingPathComponent("\(label) \(UUID().uuidString)", isDirectory: true)
+  try FileManager.default.createDirectory(at: rawRoot, withIntermediateDirectories: true)
+  let root = _physicalRoot(rawRoot)
 
-  // 합성 저장소 — 경로에 공백이 있고, 실제 저장소의 어떤 파일도 참조하지 않는다.
   let syntheticRepo = root.appendingPathComponent("synthetic repo", isDirectory: true)
   let syntheticScripts = syntheticRepo.appendingPathComponent("macos/scripts", isDirectory: true)
   try FileManager.default.createDirectory(at: syntheticScripts, withIntermediateDirectories: true)
   try Data("[project]\nname='synthetic-bridge'\n".utf8)
     .write(to: syntheticRepo.appendingPathComponent("pyproject.toml"))
-  // 합성 dotenv — 이 시험이 직접 쓰는 오프라인 설정(실제 워크스페이스에서 복사하거나
-  // 읽지 않는다). dotenv 로더의 cwd 조상 탐색이 여기서 멈춘다.
-  try Data("VLOGSRT_OFFLINE=1\n".utf8)
-    .write(to: syntheticRepo.appendingPathComponent(".env"))
+  // 합성 dotenv — 시험이 직접 쓴 오프라인 설정(실제 파일을 읽지 않는다).
+  try Data(dotenv.utf8).write(to: syntheticRepo.appendingPathComponent(".env"))
   // 엔진 스크립트는 바이트 그대로 — 복사본이 흘러가는 일이 없게 못 박는다.
-  try FileManager.default.copyItem(at: engineScript, to: syntheticScripts.appendingPathComponent("vlogsrt-engine.py"))
-  let engineBytes = try Data(contentsOf: engineScript)
-  let copiedEngineBytes = try Data(contentsOf: syntheticScripts.appendingPathComponent("vlogsrt-engine.py"))
-  #expect(engineBytes == copiedEngineBytes)
+  let copiedEngine = syntheticScripts.appendingPathComponent("vlogsrt-engine.py")
+  try FileManager.default.copyItem(at: engineScript, to: copiedEngine)
+  guard try Data(contentsOf: engineScript) == Data(contentsOf: copiedEngine) else {
+    throw NSError(domain: "bridge-sandbox", code: 1,
+                  userInfo: [NSLocalizedDescriptionKey: "엔진 스크립트가 바이트 동일하지 않다"])
+  }
   // 공개 파이썬 소스만 명시적으로 복사한다 — PACKAGE_ROOT가 임시 안에 갇힌다.
   let syntheticPackage = syntheticRepo.appendingPathComponent("vlogsrt", isDirectory: true)
   let items = FileManager.default.enumerator(
-    at: packageRoot, includingPropertiesForKeys: [.isRegularFileKey]
+    at: packageRoot, includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey]
   )?.allObjects.compactMap { $0 as? URL } ?? []
   var copiedSources = 0
   for url in items {
-    let values = try url.resourceValues(forKeys: [.isRegularFileKey])
+    let values = try url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
     guard url.pathExtension == "py", values.isRegularFile == true else { continue }
+    guard values.isSymbolicLink != true else {
+      throw NSError(domain: "bridge-sandbox", code: 2,
+                    userInfo: [NSLocalizedDescriptionKey: "공개 원본이 심볼링크다 — 복사를 거절한다: \(url.path)"])
+    }
     let relative = String(url.path.dropFirst(packageRoot.path.count + 1))
     let target = syntheticPackage.appendingPathComponent(relative)
     try FileManager.default.createDirectory(
@@ -576,38 +822,306 @@ nonisolated func _lockHolderAnnounced(_ handle: FileHandle) -> Bool {
     try FileManager.default.copyItem(at: url, to: target)
     copiedSources += 1
   }
-  #expect(copiedSources > 20)  // 패키지 통째가 와야 cli가 돈다 — 빠뜨림은 설정 실패다
-  #expect(FileManager.default.fileExists(atPath: syntheticPackage.appendingPathComponent("__init__.py").path))
-  // 해석기 참조만 실제 venv로 — 심볼링크는 venv 접두어 해석이 합성 쪽으로 샜다
-  // (rich를 못 찾음). exec 짐으로 진짜 파이썬을 진짜 접두어와 함께 부른다.
-  let syntheticVenvBin = syntheticRepo.appendingPathComponent(".venv/bin", isDirectory: true)
-  try FileManager.default.createDirectory(at: syntheticVenvBin, withIntermediateDirectories: true)
-  let shim = syntheticVenvBin.appendingPathComponent("python")
-  try Data("#!/bin/sh\nexec \"\(python.path)\" \"$@\"\n".utf8).write(to: shim)
-  try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: shim.path)
+  guard copiedSources > 20 else {
+    throw NSError(domain: "bridge-sandbox", code: 3,
+                  userInfo: [NSLocalizedDescriptionKey: "패키지 통째가 와야 cli가 돈다 — 빠뜨림은 설정 실패다"])
+  }
+  let packageInit = syntheticPackage.appendingPathComponent("__init__.py")
+  guard FileManager.default.fileExists(atPath: packageInit.path) else {
+    throw NSError(domain: "bridge-sandbox", code: 4,
+                  userInfo: [NSLocalizedDescriptionKey: "vlogsrt/__init__.py이 없다 — 수입 출처 증명이 불가능하다"])
+  }
+  // 합성 HOME·TMPDIR — 자식 환경은 아래 심의 허용목록만 쓴다.
+  let home = root.appendingPathComponent("synthetic home", isDirectory: true)
+  let tmp = root.appendingPathComponent("synthetic tmp", isDirectory: true)
+  try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+  try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+  // stand-in — 허용 뿌리 밖의 보호 철자. 내용은 합성이고 어디에도 기록하지 않는다.
+  let standinDir = root.appendingPathComponent("outside roots", isDirectory: true)
+  try FileManager.default.createDirectory(at: standinDir, withIntermediateDirectories: true)
+  let standin = standinDir.appendingPathComponent(".env")
+  try Data("SYNTHETIC_STANDIN=1\n".utf8).write(to: standin)
+  // 드라이버 — 같은-해석기 보호 확인과 (선택) 소비 경계를 산다.
+  let driver = root.appendingPathComponent("bridge driver.py")
+  try Data(_bridgeDriverSource.utf8).write(to: driver)
+  // 호출별 증명·결과 디렉터리 — 드라이버가 job 단위 파일로 남긴다(심은 불변이다).
+  let proofDir = root.appendingPathComponent("invocation proofs", isDirectory: true)
+  let resultDir = root.appendingPathComponent("consumer results", isDirectory: true)
+  try FileManager.default.createDirectory(at: proofDir, withIntermediateDirectories: true)
+  try FileManager.default.createDirectory(at: resultDir, withIntermediateDirectories: true)
+  return BridgeSandbox(
+    root: root, repo: syntheticRepo, realPython: realPython, home: home, tmp: tmp,
+    guardBoot: root.appendingPathComponent("guard boot", isDirectory: true),
+    standin: standin, engineScript: copiedEngine, driver: driver,
+    proofDir: proofDir, resultDir: resultDir)
+}
 
-  // 진짜 설치 스크립트를 합성 저장소로 돌려 래퍼를 만든다 — 공백이 든 경로에.
-  let scriptsDirectory = root.appendingPathComponent("engine scripts", isDirectory: true)
+/// 승인된 자식 보호(tests/_dotenv_guard.py)를 **그 정의 그대로** 내보낸다 —
+/// Swift 쪽에서 보호 문면을 다시 짜지 않는다(정의는 하나뿐이다). 이 과정도
+/// 문자 그대로의 허용목록 환경에서 돈다(주변 상속이 없다).
+nonisolated func _emitChildGuard(
+  sandbox: BridgeSandbox, breakBootstrap: Bool = false
+) throws -> [String: String] {
+  let guardScript = _bridgeRepoRoot().appendingPathComponent("tests/_dotenv_guard.py")
+  let guardProof = sandbox.root.appendingPathComponent("guard-proof.jsonl")
+  let emit = Process()
+  emit.executableURL = sandbox.realPython
+  emit.arguments = [
+    guardScript.path, "emit-guard",
+    "--root", sandbox.guardBoot.path,
+    "--allow", sandbox.repo.path,
+    "--standin", sandbox.standin.path,
+    "--proof", guardProof.path,
+  ] + (breakBootstrap ? ["--break-bootstrap"] : [])
+  emit.currentDirectoryURL = sandbox.root
+  emit.environment = [
+    "PATH": "/usr/bin:/bin", "HOME": sandbox.home.path, "TMPDIR": sandbox.tmp.path,
+  ]
+  let out = Pipe()
+  emit.standardOutput = out
+  emit.standardError = Pipe()
+  try _runBounded(emit, seconds: 30, label: "자식 보호 내보내기")  // 시작도 보조자가 소유한다
+  let text = String(
+    data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+  guard emit.terminationStatus == 0,
+    let data = text.data(using: .utf8),
+    let env = try JSONSerialization.jsonObject(with: data) as? [String: String],
+    !env.isEmpty
+  else {
+    throw NSError(domain: "bridge-guard", code: 1,
+                  userInfo: [NSLocalizedDescriptionKey: "자식 보호 내보내기 실패(exit \(emit.terminationStatus))"])
+  }
+  return env
+}
+
+/// 시험 소유 해석기 심 — env -i로 **문자 그대로의** 허용목록 환경만 남기고
+/// 드라이버를 띄운다(부모 상속·사전 복사 없음). 심 자체는 시험마다 **한 번**
+/// 쓰고 안 바뀐다(불변) — 호출별 상태는 드라이버가 job 단위 증명·결과 파일로
+/// 남긴다. 소비 기대값은 sha256 다이제스트 사전만 간다(원문 합성 키는 없다).
+/// `omitGuard`는 '보호 없음' 음성 시험용 — PYTHONPATH에서 보호 뿌리를 뺀다.
+/// 남은 경계: zsh -f여도 시스템 /etc/zshenv은 항상 읽힌다 — 밝혀두되 들여다보지 않는다.
+nonisolated func _writeGuardedShim(
+  sandbox: BridgeSandbox, credentials: [String: String] = [:],
+  consumerDigests: [String: String] = [:], breakBootstrap: Bool = false,
+  omitGuard: Bool = false
+) throws -> [String: String] {
+  let guardEnv = try _emitChildGuard(sandbox: sandbox, breakBootstrap: breakBootstrap)
+  var literals: [String] = [
+    "PATH=/usr/bin:/bin",
+    "HOME=\(sandbox.home.path)",
+    "TMPDIR=\(sandbox.tmp.path)",
+    "PYTHONPATH=\(omitGuard ? sandbox.repo.path : "\(sandbox.guardBoot.path):\(sandbox.repo.path)")",
+    "VLOGSRT_OFFLINE=1",
+    "VLOGSRT_TEST_GUARD_STANDIN=\(sandbox.standin.path)",
+    "VLOGSRT_TEST_EXPECTED_CWD=\(sandbox.repo.path)",
+    "VLOGSRT_TEST_EXPECTED_INIT=\(sandbox.repo.path)/vlogsrt/__init__.py",
+    "VLOGSRT_TEST_PROOF_DIR=\(sandbox.proofDir.path)",
+    "VLOGSRT_TEST_RESULT_DIR=\(sandbox.resultDir.path)",
+  ]
+  if !omitGuard {
+    literals.append("VLOGSRT_TEST_GUARD_ROOTS=\(guardEnv["VLOGSRT_TEST_GUARD_ROOTS"] ?? "")")
+    literals.append("VLOGSRT_TEST_GUARD_PROOF=\(sandbox.root.appendingPathComponent("guard-proof.jsonl").path)")
+  }
+  if let injectedBreak = guardEnv["VLOGSRT_TEST_GUARD_BREAK"] {
+    literals.append("VLOGSRT_TEST_GUARD_BREAK=\(injectedBreak)")
+  }
+  if !consumerDigests.isEmpty,
+    let data = try? JSONSerialization.data(withJSONObject: consumerDigests),
+    let digestJSON = String(data: data, encoding: .utf8) {
+    literals.append("VLOGSRT_TEST_CONSUMER_DIGESTS=\(digestJSON)")
+  }
+  literals += credentials.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }
+  // env -i 세그먼트 — sh 안전 인용으로 값 하나가 인자 하나로 간다(JSON 따옴표·
+  // 공백 경로 포함). 절대 경로 /usr/bin/env만 쓴다.
+  let envSegments = literals.map { _shQuoted($0) }.joined(separator: " \\\n  ")
+  let script = """
+    #!/bin/sh
+    # 시험 소유 해석기 심(S2A-2 회복) — env -i: 문자 그대로의 환경만. 상속 없음.
+    # 드라이버가 같은 해석기에서 보호를 확인하고 payload(실제 엔진)를 돈다.
+    exec /usr/bin/env -i \\
+      \(envSegments) \\
+      \(_shQuoted(sandbox.realPython.path)) \(_shQuoted(sandbox.driver.path)) "$@"
+    """
+  let shimDirectory = sandbox.repo.appendingPathComponent(".venv/bin", isDirectory: true)
+  try FileManager.default.createDirectory(at: shimDirectory, withIntermediateDirectories: true)
+  let shim = shimDirectory.appendingPathComponent("python")
+  try Data(script.utf8).write(to: shim)
+  try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: shim.path)
+  return guardEnv
+}
+
+/// 진짜 설치 스크립트를 합성 저장소로 돌려 래퍼를 만든다 — 공백이 든 경로에.
+/// 설치는 심이 이미 있을 때 돈다(래퍼는 합성 .venv/bin/python을 실행 가능으로
+/// 검사한다). 이 과정도 문자 그대로의 환경에서만 돈다.
+nonisolated func _installDevelopmentWrapper(sandbox: BridgeSandbox) throws -> URL {
+  let installer = _bridgeRepoRoot()
+    .appendingPathComponent("macos/scripts/install-development-engine.sh")
+  let scriptsDirectory = sandbox.root.appendingPathComponent("engine scripts", isDirectory: true)
   try FileManager.default.createDirectory(at: scriptsDirectory, withIntermediateDirectories: true)
   let install = Process()
   install.executableURL = installer
-  install.arguments = [syntheticRepo.path, scriptsDirectory.path]
+  install.arguments = [sandbox.repo.path, scriptsDirectory.path]
+  install.currentDirectoryURL = sandbox.root
+  install.environment = [
+    "PATH": "/usr/bin:/bin", "HOME": sandbox.home.path, "TMPDIR": sandbox.tmp.path,
+  ]
   let installDiagnosis = Pipe()
   install.standardOutput = installDiagnosis
   install.standardError = installDiagnosis
-  try install.run()
-  install.waitUntilExit()
+  try _runBounded(install, seconds: 30, label: "래퍼 설치")
   let installLog = String(
     data: installDiagnosis.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-  try #require(
-    install.terminationStatus == 0, "설치 실패(\(install.terminationStatus)): \(installLog)")
+  guard install.terminationStatus == 0 else {
+    throw NSError(domain: "bridge-install", code: Int(install.terminationStatus),
+                  userInfo: [NSLocalizedDescriptionKey: "설치 실패(\(install.terminationStatus)): \(installLog)"])
+  }
   let wrapper = scriptsDirectory.appendingPathComponent("vlogsrt-engine")
-  #expect(FileManager.default.isExecutableFile(atPath: wrapper.path))
+  guard FileManager.default.isExecutableFile(atPath: wrapper.path) else {
+    throw NSError(domain: "bridge-install", code: 1,
+                  userInfo: [NSLocalizedDescriptionKey: "래퍼가 실행 가능하지 않다"])
+  }
+  return wrapper
+}
+
+/// 보호 자체가 125로 물러난 단계 — 증명 파일의 마지막 'bootstrap failed' 기록에서
+/// 고정 단계 이름만 읽는다(환경·값은 실지 않는다). 없으면 빈 문면.
+nonisolated func guardAbortStage(_ sandbox: BridgeSandbox) -> String {
+  let proof = sandbox.root.appendingPathComponent("guard-proof.jsonl")
+  guard let raw = try? String(contentsOf: proof, encoding: .utf8) else { return "" }
+  for line in raw.split(separator: "\n").reversed() {
+    guard let data = String(line).data(using: .utf8),
+      let record = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+      record["bootstrap"] as? String == "failed",
+      let stage = record["stage"] as? String
+    else { continue }
+    return "(보호 단계: \(stage))"
+  }
+  return "(보호 기록에 실패 단계가 없다)"
+}
+
+/// payload 없는 사전확인(canary) — payload를 띄우기 전에 드라이버의 자기검증
+/// 경로(보호 거부·cwd·수입 출처)가 0으로 끝나는지를 본다. 문자 그대로의 환경.
+/// `expectedFailure`가 있으면 그 **원본 종료 코드**로 죽어야 한다(무관한 실패 X).
+nonisolated func _runShimCanary(
+  sandbox: BridgeSandbox, expectFailure expectedExit: Int? = nil
+) throws {
+  let canary = Process()
+  canary.executableURL = sandbox.repo.appendingPathComponent(".venv/bin/python")
+  canary.arguments = ["--bridge-self-check"]
+  canary.currentDirectoryURL = sandbox.repo
+  canary.environment = [
+    "PATH": "/usr/bin:/bin", "HOME": sandbox.home.path, "TMPDIR": sandbox.tmp.path,
+  ]
+  let diagnose = Pipe()
+  canary.standardError = diagnose
+  try _runBounded(canary, seconds: 30, label: "사전확인")
+  let log = String(
+    data: diagnose.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+  if let expectedExit {
+    guard Int(canary.terminationStatus) == expectedExit else {
+      throw NSError(domain: "bridge-canary", code: 1,
+                    userInfo: [NSLocalizedDescriptionKey: "사전확인이 기대한 \(expectedExit)가 아니라 \(canary.terminationStatus)로 끝났다: \(log) \(guardAbortStage(sandbox))"])
+    }
+    return
+  }
+  guard canary.terminationStatus == 0 else {
+    throw NSError(domain: "bridge-canary", code: Int(canary.terminationStatus),
+                  userInfo: [NSLocalizedDescriptionKey: "사전확인 실패(exit \(canary.terminationStatus)): \(log) \(guardAbortStage(sandbox))"])
+  }
+  // 자기검증 증명이 실제로 남았는지 — cwd·수입 출처까지 같은 해석기가 기록했다.
+  let selfCheck = sandbox.proofDir.appendingPathComponent("self-check.jsonl")
+  let raw = try String(contentsOf: selfCheck, encoding: .utf8)
+  guard let line = raw.split(separator: "\n").last,
+    let data = String(line).data(using: .utf8),
+    let record = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+    record["refused"] as? Bool == true,
+    record["socket_refused"] as? Bool == true,
+    record["cwd"] as? String == sandbox.repo.path,
+    record["vlogsrt_file"] as? String
+      == sandbox.repo.appendingPathComponent("vlogsrt/__init__.py").path
+  else {
+    throw NSError(domain: "bridge-canary", code: 2,
+                  userInfo: [NSLocalizedDescriptionKey: "자기검증 증명이 온전하지 않다"])
+  }
+}
+
+/// 이 호출의 증명(job 단위 파일)을 못 박는다 — 보호 거부·네트워크 거부가 참이고
+/// cwd는 기대한 자리(기본: 합성 저장소, 번들은 create가 정한 engineRoot), 수입
+/// 출처는 복사본 **__init__.py 그 자체**다. 증명이 없거나 깨지면 시험이 실패한다.
+nonisolated func _assertJobProof(
+  sandbox: BridgeSandbox, jobID: String, minimumRecords: Int, expectedCWD: URL? = nil
+) throws {
+  let proof = sandbox.proofDir.appendingPathComponent("\(jobID).jsonl")
+  let raw = try String(contentsOf: proof, encoding: .utf8)
+  let records: [[String: Any]] = raw.split(separator: "\n").compactMap { line in
+    guard let data = String(line).data(using: .utf8) else { return nil }
+    return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+  }
+  guard records.count >= minimumRecords else {
+    throw NSError(domain: "bridge-proof", code: 1,
+                  userInfo: [NSLocalizedDescriptionKey: "\(jobID) 증명 기록이 \(records.count)건 — 최소 \(minimumRecords)건이어야 한다(보호가 실제로 붙었나)"])
+  }
+  guard let last = records.last else { return }
+  guard last["refused"] as? Bool == true, last["socket_refused"] as? Bool == true else {
+    throw NSError(domain: "bridge-proof", code: 2,
+                  userInfo: [NSLocalizedDescriptionKey: "\(jobID) 증명의 보호 거부가 참이 아니다"])
+  }
+  guard last["cwd"] as? String == (expectedCWD ?? sandbox.repo).path else {
+    throw NSError(domain: "bridge-proof", code: 3,
+                  userInfo: [NSLocalizedDescriptionKey: "\(jobID) 증명의 cwd가 기대한 자리가 아니다"])
+  }
+  guard last["vlogsrt_file"] as? String
+    == sandbox.repo.appendingPathComponent("vlogsrt/__init__.py").path else {
+    throw NSError(domain: "bridge-proof", code: 4,
+                  userInfo: [NSLocalizedDescriptionKey: "\(jobID) 증명의 수입 출처가 복사본 __init__.py가 아니다"])
+  }
+  guard last["job_id"] as? String == jobID else {
+    throw NSError(domain: "bridge-proof", code: 5,
+                  userInfo: [NSLocalizedDescriptionKey: "\(jobID) 증명의 job 표식이 어긋난다"])
+  }
+}
+
+/// 소비 경계의 결과(job 단위 파일) — 참/거짓만 읽는다. 원문 키는 어디에도 없다.
+nonisolated func _assertConsumerResult(
+  sandbox: BridgeSandbox, jobID: String, consumerOK: Bool, readerRefused: Bool
+) throws {
+  let result = sandbox.resultDir.appendingPathComponent("\(jobID).jsonl")
+  let raw = try String(contentsOf: result, encoding: .utf8)
+  guard let line = raw.split(separator: "\n").last,
+    let data = String(line).data(using: .utf8),
+    let record = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+  else {
+    throw NSError(domain: "bridge-consumer", code: 1,
+                  userInfo: [NSLocalizedDescriptionKey: "\(jobID) 소비 결과 기록이 없다"])
+  }
+  guard record["consumer_ok"] as? Bool == consumerOK,
+    record["reader_refused"] as? Bool == readerRefused else {
+    throw NSError(domain: "bridge-consumer", code: 2,
+                  userInfo: [NSLocalizedDescriptionKey: "\(jobID) 소비 결과가 기대와 다르다: \(record)"])
+  }
+}
+
+/// 실제 다리: **설치 스크립트가 만든 진짜 개발 래퍼** → 실제 파이썬 → 실제
+/// `vlogsrt-engine.py`. NSUserUnixTask → 래퍼의 넷째 인자 전달 → 소유된 상태
+/// 기록 → 실행기 판독까지 통째로 잇는다(손으로 쓴 래퍼이 아니다).
+///
+/// 보호 분리(S2A-2 회복): 이 다리도 승인된 자식 보호 아래 둔다 — 합성 저장소,
+/// env -i 허용목록 심(불변), 드라이버의 같은-해석기 확인, payload 없는 사전확인,
+/// job 단위 증명 파일. 나중에 전체 시험이 이 구멍을 다시 열 수 없다.
+/// 성공(0)·안쪽 실패(1)·실제 잡힌 잠금 앞의 중복(3)을 본다.
+@Test func launcherReadsTheRealPythonEntrypointStatusRecord() async throws {
+  let sandbox = try _makeBridgeSandbox(
+    label: "S2A-1 bridge", dotenv: "VLOGSRT_OFFLINE=1\n")
+  defer { try? FileManager.default.removeItem(at: sandbox.root) }
+  // 심은 시험마다 한 번 쓰고 불변이다 — 호출별 상태는 드라이버의 job 단위 파일.
+  _ = try _writeGuardedShim(sandbox: sandbox)
+  try _runShimCanary(sandbox: sandbox)
+  let wrapper = try _installDevelopmentWrapper(sandbox: sandbox)
 
   // 성공 job — 최소 오프라인 프로젝트(receive·inspect까지 0으로 끝난다).
-  let goodJob = root.appendingPathComponent("job good", isDirectory: true)
+  let goodJob = sandbox.root.appendingPathComponent("job good", isDirectory: true)
   try FileManager.default.createDirectory(at: goodJob, withIntermediateDirectories: true)
-  let media = root.appendingPathComponent("clip.mov")
+  let media = sandbox.root.appendingPathComponent("clip.mov")
   try Data("synthetic-bridge-media".utf8).write(to: media)
   let fcpxml = """
     <?xml version="1.0" encoding="UTF-8"?>
@@ -638,22 +1152,24 @@ nonisolated func _lockHolderAnnounced(_ handle: FileHandle) -> Bool {
   let succeeding = DevelopmentEngineInvocation(
     executableURL: wrapper, arguments: ["analyze", "job good", goodJob.path])
   #expect(try await launcher.run(succeeding) == 0)
+  try _assertJobProof(sandbox: sandbox, jobID: "job good", minimumRecords: 1)
   #expect(
     FileManager.default.fileExists(
       atPath: goodJob.appendingPathComponent("analysis-estimate.jsonl").path))
 
   // 실패 job — input이 없어 receive가 실패한다. 엔진은 안쪽 1로 끝나고, NSUserUnixTask는
   // 그 1을 오류로만 전한다 — 소유된 기록이 1을 되찾는다.
-  let badJob = root.appendingPathComponent("job bad", isDirectory: true)
+  let badJob = sandbox.root.appendingPathComponent("job bad", isDirectory: true)
   try FileManager.default.createDirectory(at: badJob, withIntermediateDirectories: true)
   let failing = DevelopmentEngineInvocation(
     executableURL: wrapper, arguments: ["analyze", "job bad", badJob.path])
   #expect(try await launcher.run(failing) == 1)
+  try _assertJobProof(sandbox: sandbox, jobID: "job bad", minimumRecords: 1)
 
   // 실제 잡힌 잠금 앞의 중복 — 합성 보유자가 goodJob의 flock을 쥔 사이에 같은 job을
   // 돌리면 안쪽 3이 기록으로 나가고 실행기가 3을 돌려준다(보유자는 표준 라이브러리만
   // 쓴다 — dotenv 로더에 닿지 않는다).
-  let holderScript = root.appendingPathComponent("hold-lock.py")
+  let holderScript = sandbox.root.appendingPathComponent("hold-lock.py")
   try Data(
     """
     import fcntl, os, sys, time
@@ -664,7 +1180,7 @@ nonisolated func _lockHolderAnnounced(_ handle: FileHandle) -> Bool {
     """.utf8
   ).write(to: holderScript)
   let holder = Process()
-  holder.executableURL = python
+  holder.executableURL = sandbox.realPython
   holder.arguments = [holderScript.path, goodJob.appendingPathComponent(".vlogsrt-engine.lock").path]
   let holderOut = Pipe()
   holder.standardOutput = holderOut
@@ -678,4 +1194,318 @@ nonisolated func _lockHolderAnnounced(_ handle: FileHandle) -> Bool {
   let duplicate = DevelopmentEngineInvocation(
     executableURL: wrapper, arguments: ["analyze", "job good", goodJob.path])
   #expect(try await launcher.run(duplicate) == 3)
+  // 같은 job의 증명은 두 번째 호출에서도 새로 남았다 — 꼬리 기록이 이 호출의 것이다.
+  try _assertJobProof(sandbox: sandbox, jobID: "job good", minimumRecords: 2)
+}
+
+/// **실제 다리(자격 증명 편, S2A-2)** — 진짜 설치 래퍼 → 실제 파이썬 → 바이트 동일
+/// 엔진 스크립트를 NSUserUnixTask로 건너, stdin 봉투가 마커와 함께 흘러가는지를
+/// 본다. 소비는 **자식 안에서** 증명한다(드라이버의 같은-해석기 경계): 실제 운반
+/// 적용 → 실제 `env.require_api_key` → 실제 `get_transcriber` 공장 → 가짜
+/// `openai.OpenAI`. 기대값은 sha256 다이제스트로만 자식에 가고 결과는 참/거짓뿐 —
+/// 낡은 상속 키·낡은 dotenv 키가 봉투에 못 박히는 장면이 여기서 실측된다.
+/// 핵심 판별 하나: 마커만 있고 봉투를 붙이지 않으면 stdin은 기본(/dev/null)에
+/// 묶인다 — 엔진이 마커를 읽었다면 빈 stdin에 실패 닫힘(2)이고, 래퍼가 마커를
+/// 흘려보내지 않았다면 낡은 3-인자 계약으로 0이다.
+@Test func credentialEnvelopeCrossesTheRealDevelopmentBridge() async throws {
+  // 낡은 키는 두 표면에 심어둔다 — dotenv와 환경(운반자 이름 포함). job 표식은
+  // 안전한 조각만 쓰고(create의 계약), 공백은 **경로**에 남긴다.
+  let sandbox = try _makeBridgeSandbox(
+    label: "S2A-2 credential bridge",
+    dotenv: "VLOGSRT_OFFLINE=1\nOPENAI_API_KEY=stale-dotenv-key\nVLOGSRT_ENGINE_API_KEY=stale-dotenv-carrier\n")
+  defer { try? FileManager.default.removeItem(at: sandbox.root) }
+  let submitted = "synthetic-bridge-submitted-key"
+  let otherKey = "synthetic-bridge-other-key"
+  let staleCredentials = [
+    "OPENAI_API_KEY": "stale-env-key",
+    "VLOGSRT_ENGINE_API_KEY": "stale-env-carrier",
+  ]
+  _ = try _writeGuardedShim(
+    sandbox: sandbox, credentials: staleCredentials,
+    consumerDigests: [
+      "job-keyed": _digestOf(submitted),
+      "job-c-key": _digestOf(otherKey),
+    ])
+  try _runShimCanary(sandbox: sandbox)
+  let wrapperParent = try _installDevelopmentWrapper(sandbox: sandbox)
+    .deletingLastPathComponent()
+
+  func makeJob(_ name: String) throws -> URL {
+    let job = sandbox.root.appendingPathComponent(name, isDirectory: true)
+    try FileManager.default.createDirectory(at: job, withIntermediateDirectories: true)
+    return job
+  }
+
+  let launcher = DevelopmentEngineLauncher()
+
+  // (1) 키 봉투 — 봉투의 키가 상속·dotenv의 낡은 키를 이기고 SDK 공장까지 간다.
+  // 실제 순서가 증명된다: 실제 _run_owned이 운반을 적용한 뒤 소비 경계가 온다.
+  let keyedJob = try makeJob("job keyed dir")
+  let keyed = try DevelopmentEngineInvocation.create(
+    operation: .analyze,
+    jobID: "job-keyed",
+    externalJob: keyedJob,
+    applicationScriptsDirectory: wrapperParent,
+    apiKey: submitted
+  )
+  #expect(!keyed.arguments.joined().contains(submitted))
+  #expect(
+    try await _withDeadline(seconds: 60, label: "키 봉투 실행") {
+      try await launcher.run(keyed)
+    } == 0)
+  try _assertJobProof(sandbox: sandbox, jobID: "job-keyed", minimumRecords: 1)
+  try _assertConsumerResult(
+    sandbox: sandbox, jobID: "job-keyed", consumerOK: true, readerRefused: false)
+  try _assertNoDurableSecret(under: sandbox.root, secret: submitted)
+
+  // (2) '키 없음' 봉투 — 빈 운반은 낡은 상속·dotenv 키를 부활시키지 않는다:
+  // 자격 증명 판독이 거부된다(공장은 아예 세워지지 않는다).
+  let emptyJob = try makeJob("job empty dir")
+  let empty = try DevelopmentEngineInvocation.create(
+    operation: .analyze,
+    jobID: "job-empty",
+    externalJob: emptyJob,
+    applicationScriptsDirectory: wrapperParent,
+    apiKey: nil
+  )
+  #expect(empty.credentialEnvelope == .explicitNoKey)
+  #expect(
+    try await _withDeadline(seconds: 60, label: "빈 봉투 실행") {
+      try await launcher.run(empty)
+    } == 0)
+  try _assertJobProof(sandbox: sandbox, jobID: "job-empty", minimumRecords: 1)
+  try _assertConsumerResult(
+    sandbox: sandbox, jobID: "job-empty", consumerOK: false, readerRefused: true)
+
+  // (3) 마커만 있고 봉투 없음 — stdin은 기본(/dev/null)이다. 엔진이 마커를
+  // 읽었다면 빈 입력에 실패 닫힘(2)이고, 안 읽었다면 낡은 계약의 0이다.
+  // exit 2가 마커·stdin 판독의 실측 증명이다(소비 경계는 오기 전에 죽는다).
+  let markerOnlyJob = try makeJob("job marker only dir")
+  let markerOnly = DevelopmentEngineInvocation(
+    executableURL: wrapperParent.appendingPathComponent("vlogsrt-engine"),
+    arguments: [
+      "analyze", "job-marker-only", markerOnlyJob.path,
+      DevelopmentEngineInvocation.carrierMarkerArgument,
+    ])
+  #expect(
+    try await _withDeadline(seconds: 60, label: "마커만 실행") {
+      try await launcher.run(markerOnly)
+    } == 2)
+  try _assertJobProof(sandbox: sandbox, jobID: "job-marker-only", minimumRecords: 1)
+  #expect(
+    !FileManager.default.fileExists(
+      atPath: sandbox.resultDir.appendingPathComponent("job-marker-only.jsonl").path))
+
+  // (4) 서로 다른 봉투의 동시 실행 — 불변 심 하나, job별 증명·결과 파일은
+  // 독립이다. 파이프가 섞이면 한쪽이 남의 봉투나 깨진 봉투를 읽어 2로 죽는다.
+  // 여기서는 값 수준까지 본다: 각 자식이 제 봉투의 키만 봤다(다이제스트 판정).
+  let concurrentKeyedJob = try makeJob("job c key dir")
+  let concurrentEmptyJob = try makeJob("job c empty dir")
+  let concurrentKeyed = try DevelopmentEngineInvocation.create(
+    operation: .analyze,
+    jobID: "job-c-key",
+    externalJob: concurrentKeyedJob,
+    applicationScriptsDirectory: wrapperParent,
+    apiKey: otherKey
+  )
+  let concurrentEmpty = try DevelopmentEngineInvocation.create(
+    operation: .analyze,
+    jobID: "job-c-empty",
+    externalJob: concurrentEmptyJob,
+    applicationScriptsDirectory: wrapperParent,
+    apiKey: nil
+  )
+  async let firstRun = _withDeadline(seconds: 60, label: "동시 실행(키)") {
+    try await launcher.run(concurrentKeyed)
+  }
+  async let secondRun = _withDeadline(seconds: 60, label: "동시 실행(빈)") {
+    try await launcher.run(concurrentEmpty)
+  }
+  #expect(try await firstRun == 0)
+  #expect(try await secondRun == 0)
+  try _assertJobProof(sandbox: sandbox, jobID: "job-c-key", minimumRecords: 1)
+  try _assertJobProof(sandbox: sandbox, jobID: "job-c-empty", minimumRecords: 1)
+  try _assertConsumerResult(
+    sandbox: sandbox, jobID: "job-c-key", consumerOK: true, readerRefused: false)
+  try _assertConsumerResult(
+    sandbox: sandbox, jobID: "job-c-empty", consumerOK: false, readerRefused: true)
+  try _assertNoDurableSecret(under: sandbox.root, secret: otherKey)
+}
+
+/// **보호 음성 시험** — 보호가 부서졌거나 없으면 자식은 payload **앞에서** 죽는다.
+/// 원본 종료 코드 125를 직접 보고(사전확인·실제 엔진 인자 직통 실행 둘 다),
+/// 실행기 호에는 오류로 나가며, payload가 돌았다면 남았을 흔적(증명·소비 결과·
+/// 소유권 잠금)이 하나도 없어야 한다. 각 음성은 제 무대(심 변형)에서 돈다.
+@Test func unguardedChildrenNeverReachThePayload() async throws {
+  for variant in ["broken", "missing"] {
+    let sandbox = try _makeBridgeSandbox(
+      label: "S2A-2 guard \(variant)",
+      dotenv: "VLOGSRT_OFFLINE=1\nOPENAI_API_KEY=stale-dotenv-key\n")
+    defer { try? FileManager.default.removeItem(at: sandbox.root) }
+    _ = try _writeGuardedShim(
+      sandbox: sandbox,
+      credentials: ["OPENAI_API_KEY": "stale-env-key"],
+      consumerDigests: ["job-guarded": _digestOf("synthetic-never-delivered-key")],
+      breakBootstrap: variant == "broken",
+      omitGuard: variant == "missing")
+    // 사전확인부터 실패해야 한다 — 성공하면 보호 없이 payload가 뜰 수 있다.
+    try _runShimCanary(sandbox: sandbox, expectFailure: 125)
+    let wrapperParent = try _installDevelopmentWrapper(sandbox: sandbox)
+      .deletingLastPathComponent()
+    let job = sandbox.root.appendingPathComponent("job guarded dir", isDirectory: true)
+    try FileManager.default.createDirectory(at: job, withIntermediateDirectories: true)
+
+    // 직통 실행 — 심을 실제 엔진 인자로 부르면 원본 종료 코드 125가 그대로 나온다.
+    let direct = Process()
+    direct.executableURL = sandbox.repo.appendingPathComponent(".venv/bin/python")
+    direct.arguments = [sandbox.engineScript.path, "analyze", "job-guarded", job.path]
+    direct.currentDirectoryURL = sandbox.repo
+    direct.environment = [
+      "PATH": "/usr/bin:/bin", "HOME": sandbox.home.path, "TMPDIR": sandbox.tmp.path,
+    ]
+    direct.standardError = Pipe()
+    try _runBounded(direct, seconds: 30, label: "\(variant) 직통 자식")
+    #expect(direct.terminationStatus == 125, "\(variant): 원본 종료 코드는 125여야 한다")
+
+    let invocation = try DevelopmentEngineInvocation.create(
+      operation: .analyze,
+      jobID: "job-guarded",
+      externalJob: job,
+      applicationScriptsDirectory: wrapperParent,
+      apiKey: "synthetic-never-delivered-key"
+    )
+    do {
+      _ = try await _withDeadline(seconds: 60, label: "\(variant) 실행기 호") {
+        try await DevelopmentEngineLauncher().run(invocation)
+      }
+      Issue.record("\(variant): 보호 없는 자식은 오류여야 한다")
+    } catch {
+      // 기대 — 125로 payload 앞에서 죽는다(상태 기록 없음 오류).
+    }
+    // payload가 돌지 않았다는 흔적 증명 — 세 표면 모두 비어 있어야 한다.
+    #expect(
+      !FileManager.default.fileExists(
+        atPath: sandbox.proofDir.appendingPathComponent("job-guarded.jsonl").path),
+      "\(variant): 증명 기록이 남았다 — 드라이버가 payload 판을 지났다")
+    #expect(
+      !FileManager.default.fileExists(
+        atPath: sandbox.resultDir.appendingPathComponent("job-guarded.jsonl").path),
+      "\(variant): 소비 결과가 남았다 — payload가 돌았다")
+    #expect(
+      !FileManager.default.fileExists(
+        atPath: job.appendingPathComponent(".vlogsrt-engine.lock").path),
+      "\(variant): 소유권 잠금이 남았다 — 엔진 본체가 돌았다")
+  }
+}
+
+/// **번들 소비 경계** — 실제 BundledEngineLauncher(Process, 환경 통째 교체 계약)로
+/// 자식을 띄워 환경 운반자(VLOGSRT_ENGINE_API_KEY)가 실제 SDK 공장까지 가는지를
+/// 본다. 자격 증명 환경·인자·작업 디렉터리는 **실제 create API가 파생**한 것에서
+/// 시작한다(운반자 시맨틱을 손으로 다시 짜지 않는다) — 시험 전용 문맥(보호·드라이버
+/// 경로·다이제스트)만 문자 그대로 얹는다. 빈 운반자도 명시적으로 가야 낡은 상속
+/// 키가 부활하지 않는다.
+@Test func bundledCarrierReachesTheLaunchedConsumer() async throws {
+  let sandbox = try _makeBridgeSandbox(
+    label: "S2A-2 bundled consumer",
+    dotenv: "VLOGSRT_OFFLINE=1\nOPENAI_API_KEY=stale-dotenv-key\n")
+  defer { try? FileManager.default.removeItem(at: sandbox.root) }
+  let carried = "synthetic-bundled-carried-key"
+  let digests = ["job-bundled-keyed": _digestOf(carried)]
+  let digestJSON = String(
+    data: try JSONSerialization.data(withJSONObject: digests), encoding: .utf8)!
+  let guardEnv = try _writeGuardedShim(sandbox: sandbox, consumerDigests: digests)
+  try _runShimCanary(sandbox: sandbox)
+
+  /// 실제 create로 파생한 호출에 시험 전용 문맥만 얹는다 — 실행기는 실물 그대로.
+  func derivedInvocation(carrier: String, jobID: String, job: URL) throws -> BundledEngineInvocation {
+    // engineRoot는 create의 작업 디렉터리·PATH의 뿌리 — 실제로 있어야 실행기가
+    // 그 안에서 자식을 띄운다(없으면 Process 시작 자체가 실패한다).
+    let engineRoot = sandbox.root.appendingPathComponent("synthetic engine", isDirectory: true)
+    try FileManager.default.createDirectory(at: engineRoot, withIntermediateDirectories: true)
+    let real = try BundledEngineInvocation.create(
+      operation: .analyze,
+      jobID: jobID,
+      jobDirectory: job,
+      engineRoot: engineRoot,
+      apiKey: carrier.isEmpty ? nil : carrier
+    )
+    // 파생 근거를 못 박는다 — 운반자는 create가 준 값 그대로다(빈 포함).
+    #expect(real.environment[BundledEngineInvocation.apiKeyEnvironmentName] == carrier)
+    var environment = real.environment
+    environment["HOME"] = sandbox.home.path
+    environment["TMPDIR"] = sandbox.tmp.path
+    environment["PYTHONPATH"] = "\(sandbox.guardBoot.path):\(sandbox.repo.path)"
+    environment["VLOGSRT_OFFLINE"] = "1"
+    environment["VLOGSRT_TEST_GUARD_ROOTS"] = guardEnv["VLOGSRT_TEST_GUARD_ROOTS"] ?? ""
+    environment["VLOGSRT_TEST_GUARD_STANDIN"] = sandbox.standin.path
+    environment["VLOGSRT_TEST_GUARD_PROOF"] =
+      sandbox.root.appendingPathComponent("guard-proof.jsonl").path
+    environment["VLOGSRT_TEST_EXPECTED_CWD"] = real.currentDirectory.path
+    environment["VLOGSRT_TEST_EXPECTED_INIT"] =
+      sandbox.repo.appendingPathComponent("vlogsrt/__init__.py").path
+    environment["VLOGSRT_TEST_PROOF_DIR"] = sandbox.proofDir.path
+    environment["VLOGSRT_TEST_RESULT_DIR"] = sandbox.resultDir.path
+    environment["VLOGSRT_TEST_CONSUMER_DIGESTS"] = digestJSON
+    return BundledEngineInvocation(
+      executableURL: sandbox.realPython,
+      arguments: [
+        sandbox.driver.path, sandbox.engineScript.path, "analyze", jobID,
+        job.standardizedFileURL.path,
+      ],
+      currentDirectory: real.currentDirectory,
+      environment: environment)
+  }
+
+  let keyedJob = sandbox.root.appendingPathComponent("job bundled keyed dir", isDirectory: true)
+  try FileManager.default.createDirectory(at: keyedJob, withIntermediateDirectories: true)
+  let keyedInvocation = try derivedInvocation(
+    carrier: carried, jobID: "job-bundled-keyed", job: keyedJob)
+  let keyedStatus = try await _withDeadline(seconds: 60, label: "번들 소비(키)") {
+    try await Task.detached { try BundledEngineLauncher().run(keyedInvocation) }.value
+  }
+  #expect(keyedStatus == 0)
+  // 번들 자식의 자리는 create가 정한 engineRoot다 — 저장소가 아니다.
+  try _assertJobProof(
+    sandbox: sandbox, jobID: "job-bundled-keyed", minimumRecords: 1,
+    expectedCWD: keyedInvocation.currentDirectory)
+  try _assertConsumerResult(
+    sandbox: sandbox, jobID: "job-bundled-keyed", consumerOK: true, readerRefused: false)
+
+  // 빈 운반자 — create(apiKey: nil)의 명시적 빈 값이 낡은 상속·dotenv 키를 누른다.
+  let emptyJob = sandbox.root.appendingPathComponent("job bundled empty dir", isDirectory: true)
+  try FileManager.default.createDirectory(at: emptyJob, withIntermediateDirectories: true)
+  let emptyInvocation = try derivedInvocation(
+    carrier: "", jobID: "job-bundled-empty", job: emptyJob)
+  let emptyStatus = try await _withDeadline(seconds: 60, label: "번들 소비(빈)") {
+    try await Task.detached { try BundledEngineLauncher().run(emptyInvocation) }.value
+  }
+  #expect(emptyStatus == 0)
+  try _assertJobProof(
+    sandbox: sandbox, jobID: "job-bundled-empty", minimumRecords: 1,
+    expectedCWD: emptyInvocation.currentDirectory)
+  try _assertConsumerResult(
+    sandbox: sandbox, jobID: "job-bundled-empty", consumerOK: false, readerRefused: true)
+  try _assertNoDurableSecret(under: sandbox.root, secret: carried)
+}
+
+/// 지속 표면의 비밀 부재 증명 — 뿌리 아래 모든 파일(합성 재료 포함)을 **바이트로**
+/// 훑어 제출값이 한 번도 기록되지 않았음을 못 박는다. 텍스트 판독은 __pycache__
+/// 같은 이진 파일에서 깨진다 — 바이트 탐색은 텍스트·이진을 가리지 않아 더 세다.
+/// 심·래퍼·sitecustomize에 있는 것은 시험이 심어둔 **낡은** 합성 값뿐이라는 것이
+/// 이 검사의 요점이므로 예외 없이 전부 훑는다.
+nonisolated func _assertNoDurableSecret(under root: URL, secret: String) throws {
+  let needle = Data(secret.utf8)
+  let items = FileManager.default.enumerator(
+    at: root, includingPropertiesForKeys: [.isRegularFileKey]
+  )?.allObjects.compactMap { $0 as? URL } ?? []
+  for url in items {
+    let values = try url.resourceValues(forKeys: [.isRegularFileKey])
+    guard values.isRegularFile == true else { continue }
+    let bytes = try Data(contentsOf: url)
+    if bytes.range(of: needle) != nil {
+      throw NSError(
+        domain: "bridge-secret", code: 1,
+        userInfo: [NSLocalizedDescriptionKey: "지속 표면에서 제출값이 발견됐다: \(url.path)"])
+    }
+  }
 }
