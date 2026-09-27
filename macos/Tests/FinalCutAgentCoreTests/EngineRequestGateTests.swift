@@ -432,21 +432,22 @@ final class ThrowingExecutor: EngineExecuting, @unchecked Sendable {
   #expect(board.current == nil)
 }
 
-/// 실제 NSUserUnixTask를 통한 소유된 상태 기록 계약: 엔진 진입점이 남기는
-/// 정확히 한 줄 `VLOGSRT-ENGINE-STATUS <token> <code>`만이 이 호출의 종료
-/// 코드다. 비0 종료는 NSUserUnixTask가 오류로만 알리므로 기록이 유일한 길이고,
-/// 없거나 깨진 기록·시작 실패는 상태 추측 없이 오류로 나간다.
+/// 실제 NSUserUnixTask를 통한 소유된 상태 기록 계약: 진입점은 상태 전달이
+/// 끝난 뒤에만 0으로 끝난다 — 그래서 기록은 **오류가 없을 때만** 받아들인다.
+/// 비0 종료·신호로 끝난 스크립트가 온전한 기록을 남겼어도 재분류하지 않고,
+/// 없거나 깨진 기록·시작 실패도 상태 추측 없이 오류로 나간다.
 @Test func developmentLauncherPropagatesScriptExitStatuses() async throws {
   let dir = FileManager.default.temporaryDirectory
     .appendingPathComponent(UUID().uuidString, isDirectory: true)
   try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
   defer { try? FileManager.default.removeItem(at: dir) }
 
-  /// 상태 파일($1)에 기록을 남기는 스크립트를 만든다. noise는 기록 앞에
-  /// 흘려보내는 출력 바이트 수 — 파이프 용량을 넘겨도 막히지 않음을 본다.
+  /// 상태 파일($1)에 기록을 남기는 스크립트. 진입점 계약대로 기록 뒤 exit 0으로
+  /// 끝난다(finish가 있으면 그 결말로 끝낸다). noise는 기록 앞에 흘려보내는 출력
+  /// 바이트 수 — 파이프 용량을 넘겨도 막히지 않음을 본다.
   func invocation(
-    exit code: Int32, record: Bool = true, noise: Int = 0, rawRecord: String? = nil,
-    oversize: Bool = false, mode: Int = 0o755
+    record code: Int32, noise: Int = 0, rawRecord: String? = nil, oversize: Bool = false,
+    finish: String? = nil, recordless: Bool = false, mode: Int = 0o755
   ) throws -> DevelopmentEngineInvocation {
     var lines = ["#!/bin/sh"]
     if noise > 0 {
@@ -454,7 +455,7 @@ final class ThrowingExecutor: EngineExecuting, @unchecked Sendable {
     }
     if oversize {
       lines.append("head -c 300 /dev/zero > \"$1\"")
-    } else if record {
+    } else if !recordless {
       if let rawRecord {
         lines.append("printf '\(rawRecord)' > \"$1\"")
       } else {
@@ -462,7 +463,7 @@ final class ThrowingExecutor: EngineExecuting, @unchecked Sendable {
         lines.append("printf 'VLOGSRT-ENGINE-STATUS %s \(code)\\n' \"$token\" > \"$1\"")
       }
     }
-    lines.append("exit \(code)")
+    lines.append(finish ?? "exit 0")
     let url = dir.appendingPathComponent("engine-\(UUID().uuidString).sh")
     try Data(lines.joined(separator: "\n").appending("\n").utf8).write(to: url)
     try FileManager.default.setAttributes([.posixPermissions: mode], ofItemAtPath: url.path)
@@ -479,22 +480,28 @@ final class ThrowingExecutor: EngineExecuting, @unchecked Sendable {
   }
 
   let launcher = DevelopmentEngineLauncher()
-  #expect(try await launcher.run(invocation(exit: 0)) == 0)
-  #expect(try await launcher.run(invocation(exit: 3)) == 3)
-  #expect(try await launcher.run(invocation(exit: 1)) == 1)
+  // 전달 성공(스크립트 exit 0)이면 안쪽 코드가 그대로 상태가 된다.
+  #expect(try await launcher.run(invocation(record: 0)) == 0)
+  #expect(try await launcher.run(invocation(record: 3)) == 3)
+  #expect(try await launcher.run(invocation(record: 1)) == 1)
   // 파이프 용량(64KB)을 훌쩍 넘는 출력 — 상태 기록은 별도 채널이라 영향이 없다.
-  #expect(try await launcher.run(invocation(exit: 0, noise: 200_000)) == 0)
+  #expect(try await launcher.run(invocation(record: 0, noise: 200_000)) == 0)
+
+  // 온전한 기록을 남기고 비0으로 끝나면(낡은 래퍼 모양) 재분류하지 않는다.
+  try await assertThrowsStatusError(invocation(record: 3, finish: "exit 3"))
+  // 온전한 기록을 남기고 신호로 죽어도 오류다 — 기록이 오류를 덮지 못한다.
+  try await assertThrowsStatusError(invocation(record: 3, finish: "kill -9 $$"))
 
   // 기록이 없으면 상태를 추측하지 않는다 — 오류다.
-  try await assertThrowsStatusError(invocation(exit: 0, record: false))
+  try await assertThrowsStatusError(invocation(record: 0, recordless: true))
   // 기록이 이 호출의 것이 아니면(잘못된 token·쓰레기·과대) 오류다.
   try await assertThrowsStatusError(
-    invocation(exit: 3, rawRecord: "VLOGSRT-ENGINE-STATUS not-my-token 3\\n"))
-  try await assertThrowsStatusError(invocation(exit: 0, rawRecord: "garbage"))
-  try await assertThrowsStatusError(invocation(exit: 0, oversize: true))
+    invocation(record: 3, rawRecord: "VLOGSRT-ENGINE-STATUS not-my-token 3\\n"))
+  try await assertThrowsStatusError(invocation(record: 0, rawRecord: "garbage"))
+  try await assertThrowsStatusError(invocation(record: 0, oversize: true))
 
   // 시작 실패(실행 권한 없음)도 상태가 아니라 오류로 나간다.
-  try await assertThrowsStatusError(invocation(exit: 0, mode: 0o644))
+  try await assertThrowsStatusError(invocation(record: 0, mode: 0o644))
 }
 
 /// 실제 다리: NSUserUnixTask → 래퍼 모양의 sh → 저장소 venv 파이썬 → 실제

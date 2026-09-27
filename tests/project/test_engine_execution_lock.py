@@ -403,7 +403,8 @@ def test_entrypoint_writes_this_invocations_status_record(tmp_path: Path) -> Non
         job_before_duplicate = _snapshot(job)
         duplicate_status = _status_path(tmp_path, "token-duplicate")
         duplicate = _run_engine(control, str(job), status_file=duplicate_status)
-        assert duplicate.returncode == 3
+        # 4-인자 계약 — 프로세스는 전달 성공으로 0, 안쪽 중복(3)은 기록으로 나간다.
+        assert duplicate.returncode == 0, duplicate.stderr
         assert (
             duplicate_status.read_text(encoding="utf-8") == f"{_STATUS_PREFIX} token-duplicate 3\n"
         )
@@ -415,6 +416,40 @@ def test_entrypoint_writes_this_invocations_status_record(tmp_path: Path) -> Non
     finally:
         _settle(control, holder)
     assert holder_status.read_text(encoding="utf-8") == f"{_STATUS_PREFIX} {holder_token} 0\n"
+
+
+def test_status_record_never_overwrites_a_file_created_during_the_run(
+    tmp_path: Path, control: _FakeCli
+) -> None:
+    """검증 뒤 실행 중 그 자리에 파일이 생기면 기록은 실패(1)다 — 남의 바이트를 지키며."""
+    job = tmp_path / "job"
+    job.mkdir()
+    status_file = _status_path(tmp_path, "hijacked")
+
+    calls_before = len(control.calls())
+    holder = _spawn_engine(control, str(job), status_file=status_file)
+    try:
+        _await_execution(control, calls_before, job)
+        status_file.write_text("occupied-during-run", encoding="utf-8")
+        control.release()
+        # 안쪽 실행은 0이었지만 전달이 실패했다 — 프로세스는 1로 끝난다.
+        assert holder.wait(timeout=_WAIT_SECONDS) == 1
+        assert status_file.read_text(encoding="utf-8") == "occupied-during-run"
+    finally:
+        _settle(control, holder)
+
+
+def test_status_token_must_be_alphanumeric(tmp_path: Path, control: _FakeCli) -> None:
+    """token에 공백·개행이 섞이면 계약 위반이다 — 해석기는 정확히 한 줄만 읽는다."""
+    job = tmp_path / "job"
+    job.mkdir()
+    spaced = tmp_path / "status" / "vlogsrt-status-bad token" / "bad token.status"
+    spaced.parent.mkdir(parents=True)
+
+    result = _run_engine(control, str(job), status_file=spaced)
+    assert result.returncode == 2, result.stderr
+    assert not spaced.exists()
+    assert not (job / "workspace").exists()
 
 
 def test_entrypoint_without_status_argument_writes_nothing(tmp_path: Path) -> None:

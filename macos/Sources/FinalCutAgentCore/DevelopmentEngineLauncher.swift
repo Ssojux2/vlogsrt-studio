@@ -158,48 +158,23 @@ public final class DevelopmentEngineLauncher: @unchecked Sendable {
   public init() {}
 
   public func run(_ invocation: DevelopmentEngineInvocation) async throws -> Int32 {
-    // NSUserUnixTask는 비0 종료를 오류로만 알린다. 이 실행의 정말 종료 코드는
-    // 엔진 진입점이 남기는 소유된 기록으로만 읽는다(S2A-1) — 시스템 오류 문면을
-    // 해석하는 휴리스틱은 쓰지 않는다.
+    // NSUserUnixTask는 비0 종료·신호를 오류로만 알린다. 이 실행의 안쪽 종료
+    // 코드는 엔진 진입점이 남기는 소유된 기록으로만 읽는다(S2A-1). 계약: 진입점은
+    // 상태 전달이 끝난 뒤에만 0으로 끝난다 — 그러므로 기록은 **오류가 없을 때만**
+    // 받아들인다. 오류 문면을 해석하는 휴리스틱은 아예 없다.
     let capture = try EngineStatusCapture.make()
     defer { capture.discard() }  // 시작 실패·취소·오류 어떤 끝에서도 치운다.
     let task = try NSUserUnixTask(url: invocation.executableURL)
     return try await withCheckedThrowingContinuation { continuation in
       task.execute(withArguments: invocation.arguments + [capture.fileURL.path]) { error in
         continuation.resume(with: Result {
-          do {
-            let code = try capture.readExitStatus()
-            // 실행 보고와 기록이 어긋나면 상태를 믿지 않는다: 성공 보고(error 없음)에
-            // 비0 기록, 실패 보고에 0 기록은 둘 다 오류다.
-            if error == nil && code != 0 {
-              throw DevelopmentEngineError.malformedStatusRecord
-            }
-            if let error {
-              // 기록이 있어도 시작·신호 오류는 기록이 못 덮는다 — 스크립트가 실제로
-              // 돌다 끝난 보고(실측 NSPOSIXErrorDomain 코드 2)일 때만 비0 기록을 믿는다.
-              guard code != 0, Self.isScriptTermination(error) else { throw error }
-            }
-            return code
-          } catch let captureError {
-            // 기록이 깨졌으면 그것이 정확한 원인이다. 기록이 아예 없을 때는 실행
-            // 오류(시작 실패·낡은 래퍼)가 더 정직한 보고다.
-            if case DevelopmentEngineError.malformedStatusRecord = captureError {
-              throw captureError
-            }
-            if let error { throw error }
-            throw captureError
-          }
+          // 오류(비0 종료·신호·시작 실패·낡은 래퍼)는 기록이 있어도 재분류하지
+          // 않는다 — 없는 기록과 함께 오류로 나간다.
+          if let error { throw error }
+          return try capture.readExitStatus()
         })
       }
     }
-  }
-
-  /// 스크립트가 실제로 돌다 비0으로 끝났다는 시스템 보고인가 — 기록 값을 받아들이는
-  /// 문턱으로만 쓴다(값 자체는 어디까지나 소유된 기록에서 온다). 실측: 비0 종료는
-  /// NSPOSIXErrorDomain 코드 2, 시작 실패는 다른 모양이다.
-  static func isScriptTermination(_ error: Error) -> Bool {
-    let nsError = error as NSError
-    return nsError.domain == NSPOSIXErrorDomain && nsError.code == 2
   }
 }
 

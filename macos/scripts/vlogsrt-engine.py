@@ -16,11 +16,13 @@ API 키는 부모가 준 환경변수(VLOGSRT_ENGINE_API_KEY)로만 받는다 �
 `[status_file]`은 개발 실행기 전용 부가 계약이다(비밀이 아닌 임시 경로).
 NSUserUnixTask는 비0 종료를 오류로만 알리기 때문에, 실행기가 이 실행의
 정말 종료 코드를 읽는 소유된 채널이다. 경로는 이 호출 전용 모양
-`<임시>/vlogsrt-status-<token>/<token>.status`여야 하고 job 상태(별칭 포함)와
-분리돼 있으며 이미 있어서는 안 된다 — 검증은 읽기만으로, 소유권 확보보다
-먼저다. 조건을 갖추면 정확히 한 줄 `VLOGSRT-ENGINE-STATUS <token> <code>`를
-배타 생성으로 남긴다. 3-인자 호출(번들·직접 계약)과 계약 밖 경로에서는 아무
-것도 쓰지 않고 종료 코드 계약은 그대로다.
+`<임시>/vlogsrt-status-<token>/<token>.status`(token은 영숫자·하이픈)여야 하고
+job 상태(별칭 포함)와 분리돼 있으며 이미 있어서는 안 된다 — 검증은 읽기만으로,
+소유권 확보보다 먼저다. 조건을 갖추면 정확히 한 줄
+`VLOGSRT-ENGINE-STATUS <token> <code>`를 배타 생성으로 남기고 프로세스는
+**전달 성공으로만 0**으로 끝난다(실패·신호·크래시는 기록이 없거나 못 미더워
+기록으로 재분류되지 않는다). 3-인자 호출(번들·직접 계약)과 계약 밖 경로에서는
+아무 것도 쓰지 않고 안쪽 종료 코드가 곧 프로세스 종료 코드다.
 """
 
 from __future__ import annotations
@@ -61,15 +63,16 @@ _ALREADY_RUNNING = "vlogsrt-engine: job already running (duplicate request rejec
 _STATUS_PREFIX = "VLOGSRT-ENGINE-STATUS"
 _STATUS_DIR_PREFIX = "vlogsrt-status-"
 _STATUS_SUFFIX = ".status"
+_STATUS_TOKEN = re.compile(r"^[A-Za-z0-9-]+$")
 
 
 def _status_destination_error(path_text: str, canonical_job: Path) -> str | None:
     """상태 기록 경로의 계약을 **소유권 확보 전에**(읽기만으로) 검사한다.
 
-    기록은 이 호출 전용 모양이어야 한다: `<임시>/vlogsrt-status-<token>/<token>.status`.
-    job 상태(별칭 경로 포함) 안이면 안 된다 — 중복 판정이 남의 파일을 덮어쓰는
-    길이 생긴다. 이미 있는 파일(최종이든 부분이든)은 절대 덮어쓰지 않는다.
-    문제가 있으면 계약 위반 문면을, 없으면 None.
+    기록은 이 호출 전용 모양이어야 한다: `<임시>/vlogsrt-status-<token>/<token>.status`
+    (token은 영숫자·하이픈 — 해석기가 정확히 한 줄만 읽도록). job 상태(별칭 경로
+    포함) 안이면 안 된다 — 중복 판정이 남의 파일을 덮어쓰는 길이 생긴다. 이미
+    있는 파일은 절대 덮어쓰지 않는다. 문제가 있으면 계약 위반 문면을, 없으면 None.
     """
     path = Path(path_text)
     if not path.is_absolute():
@@ -80,29 +83,29 @@ def _status_destination_error(path_text: str, canonical_job: Path) -> str | None
             "status file must be an invocation-owned "
             f"{_STATUS_DIR_PREFIX}<token>/{token}{_STATUS_SUFFIX} path"
         )
+    if not _STATUS_TOKEN.fullmatch(token):
+        return "status file token must be alphanumeric"
     if path.resolve().is_relative_to(canonical_job):
         return "status file must live outside the job directory"
-    if path.exists() or path.with_name(path.name + ".partial").exists():
+    if path.exists():
         return "status file must not already exist"
     return None
 
 
 def _write_status_record(path_text: str, code: int) -> None:
-    """이 실행의 종료 코드를 실행기가 만든 전용 경로에 남긴다(S2A-1).
+    """이 실행의 안쪽 종료 코드를 실행기가 만든 전용 경로에 남긴다(S2A-1).
 
-    경로 검증은 main이 끝냈다 — 여기는 배타 생성으로만 쓴다: 이미 있는 파일을
-    덮어쓰는 경로가 아예 없다. 쓰기는 os.replace로 한 번에 끝난다 — 부분 기록이
-    실행기에게 잘못된 상태로 보이지 않게.
+    배타 생성으로만 쓴다 — 실행 중 누가 그 자리에 파일을 만들었다면 여기서
+    실패하고(기록 없음) 남의 바이트는 그대로다. 실행기는 프로세스가 끝난 뒤에만
+    읽으므로 도중 임시파일·이름바꾸기는 필요 없다.
     """
     path = Path(path_text)
     record = f"{_STATUS_PREFIX} {path.stem} {code}\n"
-    partial = path.with_name(path.name + ".partial")
-    fd = os.open(partial, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
     try:
         os.write(fd, record.encode("utf-8"))
     finally:
         os.close(fd)
-    os.replace(partial, path)
 
 
 class _ExecutionLock:
@@ -216,11 +219,17 @@ def _sync_results(job_dir: Path, workspace: Path, *, diagnostics_only: bool) -> 
 
 def main(argv: list[str]) -> int:
     exit_code, status_file = _dispatch(argv)
-    if status_file is not None:
-        # 정상 종료에만 기록한다 — 예외로 무너진 실행은 기록이 없고 실행기는
-        # 그것을 상태 추측이 아니라 오류로 다룬다.
+    if status_file is None:
+        return exit_code  # 3-인자(번들·직접) 계약 — 안쪽 코드가 곧 종료 코드다.
+    # 4-인자(개발 실행기) 계약 — 안쪽 코드는 기록으로 전달되고, 프로세스는
+    # **전달이 끝난 뒤에만** 0으로 끝난다. 전달이 실패하면 1이고 기록은 없다:
+    # 실행기는 오류(exit 비0·신호)를 기록으로 재분류하는 길이 아예 없다.
+    try:
         _write_status_record(status_file, exit_code)
-    return exit_code
+    except OSError as error:
+        print(f"vlogsrt-engine: cannot write status record: {error}", file=sys.stderr)
+        return 1
+    return 0
 
 
 def _dispatch(argv: list[str]) -> tuple[int, str | None]:
