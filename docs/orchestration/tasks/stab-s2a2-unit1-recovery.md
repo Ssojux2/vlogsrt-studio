@@ -1,4 +1,5 @@
 # S2A-2 unit1 recovery — bounded implementation and test gate
+Status: accepted at `f56545b`; [Sol evidence](../reviews/stab-s2a2-unit1-sol.md). This is the historical recovery contract, not authorization to retry the settled Task/Dispatch. Next role/preflight units require fresh bounded worker Tasks after parent resumes Sol.
 Outcome: accept only credentials/UI, private launch transport and error safety; no preflight/multi-audio/unit2 here.
 Baseline HEAD31b79fc plus the preserved uncommitted first-attempt draft. Previous ctx_80c55eec0ac2 settled failed and terminal closed; use a fresh retry Dispatch only. Read AGENTS.md, common execution contract, S2A-2 brief and this bounded brief; do not repeat broad discovery. Preserve uncommitted prior work, repair rather than reset it.
 Tests/child probes frozen until the exact synthetic harness design below is implemented and Sol reviews its diff.
