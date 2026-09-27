@@ -26,3 +26,10 @@ Impact: propagating | files<=18 | modules<=5 | boundary=shared-api
 
 ## Boundaries
 Product/tests only. Never read/change `.env.example`, `.env`, secrets, real API fixtures, original media, or make live API/FCP calls. No pushes/deployments. Preserve approval defaults, frame timing, thresholds and original subtitle contracts. Send exactly one worker_done when scoped work is complete.
+
+## Status after the S2B-1 foundation — 2026-09-28
+
+- S2B-1's durable ledger primitive was accepted offline in commit `99e0202a6e7cab38ee16a081ebbf9dc30fa23ed6`; exact two-path hashes, baseline/v1 corrections, exact commands, results and limits are in [the Sol review](../reviews/stab-s2b1-durable-ledger-sol.md). This is a foundation only: existing production requests do not yet reserve or reconcile against it.
+- Final S2B-1 evidence was 46 targeted ledger cases, 22 affected workflow protocol/analysis cases, mypy on one file, Ruff check/format on two files, and 21 invariants. The initial missing-module collection RED was expected and distinct from v1's two test failures/four mypy errors. No full `make check`, Swift or native gates ran in that isolated unit; integrated S2B owns the aggregate gates.
+- **Planned next boundary (not yet a dispatched implementation brief):** refine S2B-2a around generic per-actual-request observer hooks in `transcribe.py`, carrying primitive identity/model/chunk/response data so legacy code never imports project code. Give Sol a small functional source checkpoint before the extended matrix. Then limit S2B-2b to the project ledger adapter and conservative estimates against the accepted API. Cache/retry and Python/Swift cost UI remain S2B-3. Root owns final file scope and acceptance for the fresh bounded GLM source-only Task.
+- Use `/tmp/stab-s2b-next-integration-notes.md` as an integration-design pointer when refining those units; it is not itself an implementation brief. Preserve the estimate's actual request text/dimension/output bounds, endpoint/schema/options identity, measured-usage reconciliation and successful-normalization-before-cache-publication requirements.
