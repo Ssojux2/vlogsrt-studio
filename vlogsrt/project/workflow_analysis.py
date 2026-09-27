@@ -48,11 +48,34 @@ class AnalysisSettings:
     # low detail 이미지는 512×512로 내려가고 장당 308 입력 토큰이다(2026-09-21 요금).
     low_detail_image_tokens: int = 308
     window_output_tokens: int = 256
+    # 전사 **작업 몫** 배수: 고유 오디오 × 이 값 = 허용 전사량(1차·재전사·심판·
+    # 교정·재시도·조각을 한 데 몰아 넣은 정액 몫). 실제 호출이 몫을 넘으면 원장이
+    # 이후 예약을 거부하고 실행은 cost_ceiling_exceeded로 멈춘다(S2B-2b) — 전
+    # 과정 완료의 보증이 아니라 정직한 소진 경계다.
     transcription_call_multiplier: int = 4
     review_confidence: Decimal = Decimal("0.90")
     retake_horizon_seconds: Fraction = Fraction(30)
     retake_similarity: Decimal = Decimal("0.72")
     prompt_revision: str = _PROMPT_REVISION
+    # ── 견적·요청 상한 정책(S2B-2b) — 추정과 실제 승인이 **같은** 상한을 쓴다 ──
+    # 직렬화된 입력 글자의 보수적 토큰 상한. 바이트당 토큰 수가 1이면 "토큰이
+    # 바이트보다 많다"는 방향으로 안전하다(한글 음절은 UTF-8 3바이트이고 토큰은
+    # 대개 그보다 적다). 토큰 변환 비율을 발명하지 않는 유일한 결정적 상한이다.
+    quote_text_bytes_per_token: int = 1
+    quote_structural_overhead_tokens: int = 64
+    # low detail 정액(308)의 2배 — 실제 과금이 정액과 어긋나도 예약이 모자라지
+    # 않게 하는 여유분이다. base64 이미지 바이트를 글자 토큰으로 세지 않는다.
+    quote_image_input_tokens: int = 616
+    # 요청 **구조**의 바이트 상한 — 항목(entry)·마디(part)·이미지 겉면 각각의
+    # 정액 여유다. 마디 수를 늘려 고정 여유 64토큰을 넘기는 길을 막는다: 구조
+    # 바이트도 글자 바이트 상한 안에서 함께 센다(마디가 아무리 많아도 상한을
+    # 넘으면 안전하게 실패한다). 겉면 값은 직렬화 최소 모양보다 크게 잡았다.
+    quote_entry_overhead_bytes: int = 64
+    quote_image_envelope_bytes: int = 128
+    quote_structural_overhead_bytes: int = 64
+    max_request_text_bytes: int = 8_192
+    max_request_images: int = 6
+    max_request_output_tokens: int = 1_024
 
     def __post_init__(self) -> None:
         if not self.model or not self.prompt_revision:
@@ -73,6 +96,27 @@ class AnalysisSettings:
             value = getattr(self, name)
             if not value.is_finite() or not Decimal(0) <= value <= Decimal(1):
                 raise ValueError(f"{name}는 유한한 0~1이어야 한다")
+        if self.quote_text_bytes_per_token < 1:
+            raise ValueError("견적 바이트당 토큰은 1 이상이어야 한다")
+        if self.quote_structural_overhead_tokens < 0:
+            raise ValueError("견적 구조 여유 토큰은 0 이상이어야 한다")
+        if self.quote_image_input_tokens < 1:
+            raise ValueError("견적 이미지 토큰 상한은 양수여야 한다")
+        for name in (
+            "quote_entry_overhead_bytes",
+            "quote_image_envelope_bytes",
+            "quote_structural_overhead_bytes",
+        ):
+            if getattr(self, name) < 0:
+                raise ValueError(f"{name}은 0 이상이어야 한다")
+        if self.max_request_text_bytes < 1:
+            raise ValueError("요청 글자 바이트 상한은 양수여야 한다")
+        if self.max_request_images < 1 or self.max_request_images > 6:
+            raise ValueError("요청 이미지 상한은 1~6장이어야 한다")
+        if self.max_request_output_tokens < 1:
+            raise ValueError("요청 출력 토큰 상한은 양수여야 한다")
+        if self.window_output_tokens > self.max_request_output_tokens:
+            raise ValueError("창 출력 상한이 요청 출력 상한보다 크다 — 예약이 상한을 못 믿는다")
 
     def sha256(self) -> str:
         payload = {field.name: _setting_value(getattr(self, field.name)) for field in fields(self)}
@@ -145,8 +189,14 @@ def build_analysis_estimate(
     """네트워크 없이 고유 소스 오디오와 최악의 창/이미지/토큰 사용량을 센다.
 
     비용 상한은 공식 가격 스냅샷 하나로 계산한다 — 사용자 예산 가정과 섞지
-    않는다(승인은 스냅샷 리비전에 묶인다). 전사 상한은 whisper와 gpt-transcribe
-    분당가를 합친 보수적 상한이다(배수가 실제 호출 조합을 이미 덮는다).
+    않는다(승인은 스냅샷 리비전에 묶인다). 전사 항은 **정해진 작업 몫**이다:
+    고유 오디오에 `transcription_call_multiplier`를 곱한 양을 whisper+gpt 합산
+    분당가로 환산한 허용량이며, 실제 호출 조합(1차·재전사·심판·교정·재시도·
+    조각)이 이를 넘으면 원장이 이후 예약을 거부해 실행은 `cost_ceiling_exceeded`
+    로 정직하게 멈춘다(S2B-2b). **전 과정 완료의 보증이 아니다** — 완료를
+    보증하려면 통과·재시도별 유한 상한을 따로 증명해야 한다. Luna 입력 상한은
+    이미지·출력과 같은 표면에 **직렬화 글자** 상한이 함께 들어간다 — 실제
+    요청의 예약이 승인보다 클 수 없어야 하기 때문이다.
     """
     if document.input_sha256 != revision.input_sha256:
         raise ValueError("비용 추정의 문서와 입력 리비전이 다르다")
@@ -165,11 +215,13 @@ def build_analysis_estimate(
         if isinstance(item, ClipInstance)
     )
     max_images = max_windows * settings.max_images
+    max_image_tokens = max_images * settings.quote_image_input_tokens
+    max_text_tokens = max_windows * window_text_token_ceiling(settings)
     cost = (
         _fraction_decimal(transcription_seconds)
         / Decimal(60)
         * (Decimal(pricing.whisper_per_minute) + Decimal(pricing.gpt_transcribe_per_minute))
-        + Decimal(max_images * settings.low_detail_image_tokens)
+        + Decimal(max_image_tokens + max_text_tokens)
         * Decimal(pricing.luna_input_per_million_tokens)
         / Decimal(1_000_000)
         + Decimal(max_windows * settings.window_output_tokens)
@@ -183,11 +235,23 @@ def build_analysis_estimate(
         transcription_seconds=transcription_seconds,
         max_windows=max_windows,
         max_images=max_images,
-        max_image_tokens=max_images * settings.low_detail_image_tokens,
+        max_image_tokens=max_image_tokens,
         cost_upper_bound=_decimal_text(cost),
         settings_sha256=settings_sha256 or settings.sha256(),
         pricing_snapshot_revision=pricing.snapshot_revision,
         media_grant_revision=media_grant_revision,
+    )
+
+
+def window_text_token_ceiling(settings: AnalysisSettings) -> int:
+    """한 창 요청의 직렬화 글자 토큰 보수적 상한 — 추정과 실제 승인이 같은 값.
+
+    바이트 상한을 바이트당 토큰으로 나눈 올림에 구조 여유를 더한다. 토큰 변환
+    비율을 발명하지 않는 결정적 상한이다(토크나이저 의존 없음).
+    """
+    return (
+        -(-settings.max_request_text_bytes // settings.quote_text_bytes_per_token)
+        + settings.quote_structural_overhead_tokens
     )
 
 
@@ -717,14 +781,25 @@ def effective_analysis_settings_sha256(
     project_config: Mapping[str, object],
     media_overrides_sha256: str,
     source_sha256s: tuple[str, ...],
+    endpoint_sha256: str,
+    workspace_binding_sha256: str,
 ) -> str:
+    """유효 분석 설정의 지문 — 엔드포인트와 작업공간 자리도 함께 묶는다(S2B-2b).
+
+    엔드포인트가 바뀌면 같은 추정이 아니고(승인이 다른 공급자를 열지 않는다),
+    작업공간 자리가 바뀌어도 같은 추정이 아니다(다른 개발 루트의 같은 job이
+    낡은 승인으로 유료 재실행을 여는 길을 닫는다). 둘 다 **다이제스트만** 들어
+    간다 — 값이나 경로 원문은 지문 밖에 없다.
+    """
     return _digest(
         {
             "analysis_settings_sha256": settings.sha256(),
+            "endpoint_sha256": endpoint_sha256,
             "engine_config": dict(engine_config),
             "media_overrides_sha256": media_overrides_sha256,
             "project_config": dict(project_config),
             "source_sha256s": list(source_sha256s),
+            "workspace_binding_sha256": workspace_binding_sha256,
         }
     )
 

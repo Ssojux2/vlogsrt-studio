@@ -55,6 +55,17 @@ def supported_audio_topology(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(topology, "probe_audio_stream_count", lambda source: 1)
 
 
+@pytest.fixture(autouse=True)
+def synthetic_stt_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
+    """엔드포인트 신원이 inspect·analyze에서 같은 값을 보게 한다(S2B-2b).
+
+    추정 지문이 실제 엔드포인트를 묶는 지금, inspect(패치 전)과 analyze(패치
+    후)이 다른 값을 보면 정당한 드리프트 거부가 된다 — 이 파일의 시험들이 보려는
+    것(취소)과 무관하므로 파일 전체에서 한 값으로 못 박는다.
+    """
+    monkeypatch.setattr(project_commands.env, "base_url", lambda: "https://example.invalid")
+
+
 def _file_uri(path: Path) -> str:
     return "file://" + quote(str(path))
 
@@ -291,7 +302,15 @@ def _patch_paid_boundaries(
 
     monkeypatch.setattr(transcribe, "create_vision_client", vision_client)
 
-    def fake_luna(client: object, *, model: str, payload: dict, online: bool) -> dict:
+    def fake_luna(
+        client: object,
+        *,
+        model: str,
+        payload: dict,
+        online: bool,
+        observer: object = None,
+        cancellation: object = None,
+    ) -> dict:
         response = {
             "output_text": json.dumps(
                 {"choice": "keep", "confidence": 0, "evidence_frame_ids": []}
@@ -315,6 +334,78 @@ def _stub_transcriber(monkeypatch: pytest.MonkeyPatch) -> _Scripted:
     scripted = _Scripted()
     monkeypatch.setattr(transcribe, "get_transcriber", lambda *args, **kwargs: scripted)
     return scripted
+
+
+class _SdkFace:
+    """가짜 SDK의 실제 호출 자리 — `audio.transcriptions.create` 한 군데만 산다."""
+
+    def __init__(self, sdk: _SdkFake) -> None:
+        self._sdk = sdk
+        self.transcriptions = self
+
+    def create(self, **kwargs: object) -> dict[str, object]:
+        self._sdk.transcription_calls.append(kwargs)
+        model = str(kwargs.get("model", ""))
+        payload: dict[str, object] = {"duration": float(CLIP_SECONDS)}
+        if model == "gpt-transcribe":  # Config.verify_model 기본값 — 글자 교정 호출
+            payload["text"] = "인사 마무리"
+        else:
+            payload["segments"] = [
+                {"start": start, "end": end, "text": text} for start, end, text in SEGMENTS
+            ]
+        return payload
+
+
+class _ResponsesFace:
+    def __init__(self, sdk: _SdkFake) -> None:
+        self._sdk = sdk
+
+    def create(self, **kwargs: object) -> dict[str, object]:
+        self._sdk.responses_calls.append(kwargs)
+        return {
+            "output_text": json.dumps(
+                {"choice": "keep", "confidence": 0.5, "evidence_frame_ids": []}
+            ),
+            "usage": {"input_tokens": 100, "output_tokens": 10},
+        }
+
+
+class _SdkFake:
+    """`openai.OpenAI` 생성자 자리의 가짜 SDK — 관찰자·원장은 이 안에서 움직인다."""
+
+    def __init__(self) -> None:
+        self.transcription_calls: list[dict[str, object]] = []
+        self.responses_calls: list[dict[str, object]] = []
+
+    def __call__(
+        self, *, api_key: str, base_url: str | None = None, max_retries: int = -1
+    ) -> _SdkFake:
+        assert max_retries == 0, "SDK 내부 재시도는 관찰 경계를 우회한다"
+        return self
+
+    @property
+    def audio(self) -> _SdkFace:
+        return _SdkFace(self)
+
+    @property
+    def responses(self) -> _ResponsesFace:
+        return _ResponsesFace(self)
+
+
+def _patch_sdk_paid_boundary(monkeypatch: pytest.MonkeyPatch) -> _SdkFake:
+    """유료 경계 전부를 실제 SDK 호출 자리로 가짜로 채운다 — 과금 단언용(S2B-2b).
+
+    `create_vision_client`는 진짜로 지나간다 — 가짜 SDK(응답 경계 포함)가 그 안에서
+    만들어져야 Luna 호출이 실제 자리까지 닿는다.
+    """
+    monkeypatch.setattr(project_commands.env, "require_api_key", lambda **kwargs: "test-key")
+    monkeypatch.setenv("GOOGLE_API_KEY", "synthetic-vision-key")
+    monkeypatch.setenv("GEMINI_BASE_URL", "https://example.invalid")
+    sdk = _SdkFake()
+    import openai
+
+    monkeypatch.setattr(openai, "OpenAI", sdk)
+    return sdk
 
 
 def _authorization_file(tmp_path: Path, workspace: Path) -> Path:
@@ -437,9 +528,9 @@ def test_cancellation_for_another_attempt_does_not_stop_this_run(
     )
 
     _patch_boundaries(monkeypatch)
-    _stub_transcriber(monkeypatch)
-    luna_calls: list[dict] = []
-    _patch_paid_boundaries(monkeypatch, luna_calls)
+    # 과금 단언이 있는 시험이다 — 전사기·Luna을 통째로 바꾸면 회계를 증명하지
+    # 못하므로 가짜 SDK를 **실제 호출 자리**(openai.OpenAI → create)에 앉힌다.
+    sdk = _patch_sdk_paid_boundary(monkeypatch)
 
     argv = _analyze_argv(workspace, _authorization_file(tmp_path, workspace)) + argv_tail
     assert cli.main(argv) == 0
@@ -451,16 +542,18 @@ def test_cancellation_for_another_attempt_does_not_stop_this_run(
     ]
     assert [row.status for row in attempts] == ["pending", "running", "succeeded"]
     # 이 실행과 무관한 취소 기록은 Luna 호출을 막지 않는다.
+    assert sdk.responses_calls, "취소와 무관한 실행인데 Luna 호출이 일어나지 않았다"
     usage = [
         row
         for row in project_commands._read_messages(workspace / "analysis-usage.jsonl")
         if isinstance(row, ActualUsage)
     ]
+    # 사용량 줄은 원장 확정의 투영이다 — 전사 실측(창 없음)과 Luna 실측(창 있음)이
+    # 실제 SDK 호출 수와 정확히 짝을 이룬다.
     whisper_rows = [row for row in usage if row.window_id is None]
     assert whisper_rows and all(row.model for row in whisper_rows)
-    if luna_calls:
-        luna_rows = [row for row in usage if row.window_id is not None]
-        assert len(luna_rows) == len(luna_calls)
+    luna_rows = [row for row in usage if row.window_id is not None]
+    assert len(luna_rows) == len(sdk.responses_calls)
 
 
 def test_receive_rejects_multi_project_fcpxml(tmp_path: Path) -> None:
@@ -1001,15 +1094,16 @@ def test_staged_vision_consumer_separates_v2_roles_from_the_legacy_shared_key(
         ),
         encoding="utf-8",
     )
-    assert cli.main(["project", "inspect", str(v2_workspace), *argv_tail]) == 0
     v2_seen: dict[str, object] = {}
-    # V2 적용은 패치 **뒤에** 온다 — 패치가 환경 이름을 덮어쓰면 역할 값이
-    # 섞이기 때문이다(실제 순서: 경계 가짜 → 실제 운반 적용 → 실행).
+    # V2 적용은 패치 **뒤에, inspect보다 앞에** 온다 — 패치가 환경 이름을 덮어쓰면
+    # 역할 값이 섞이고(실제 순서: 경계 가짜 → 실제 운반 적용 → 실행), 추정 지문이
+    # 엔드포인트를 묶는 지금 inspect와 analyze가 같은 역할 라우팅을 봐야 한다.
     _patch_paid_boundaries(monkeypatch, _keep_luna_responses(), v2_seen)
     env.apply_role_credentials(
         "synthetic-stt-key", "synthetic-vision-key", "https://example.invalid/v1"
     )
     try:
+        assert cli.main(["project", "inspect", str(v2_workspace), *argv_tail]) == 0
         assert (
             cli.main(
                 _analyze_argv(v2_workspace, _authorization_file(second, v2_workspace)) + argv_tail

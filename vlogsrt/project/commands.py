@@ -44,7 +44,7 @@ from pathlib import Path
 
 from vlogsrt import env, log, transcribe
 from vlogsrt.config import Config, load_config
-from vlogsrt.project import runner, topology
+from vlogsrt.project import request_accounting, runner, topology
 from vlogsrt.project.clips import collect_clip_paths, probe_clips, synthesize_fcpxml
 from vlogsrt.project.config import ProjectConfig, load_project_config
 from vlogsrt.project.fcpxml import element_tree, parse_project
@@ -79,11 +79,9 @@ from vlogsrt.project.workflow_analysis import (
     AnalysisSettings,
     CandidateSeed,
     CandidateWindowPlan,
-    CostCeilingExceeded,
     LunaFrame,
     LunaWindow,
     TranscriptEvidence,
-    UsageLedger,
     aggregate_analysis_outcome,
     build_analysis_estimate,
     build_luna_payload,
@@ -93,14 +91,12 @@ from vlogsrt.project.workflow_analysis import (
     finalize_candidate,
     luna_cache_key,
     luna_request_sha256,
-    luna_usage,
     normalize_luna_response,
     plan_candidate_windows,
     project_transcript_evidence,
     safe_transcript_candidates,
     select_frame_times,
     skipped_window_decision,
-    transcription_usage,
 )
 from vlogsrt.project.workflow_protocol import (
     AnalysisAttempt,
@@ -627,6 +623,10 @@ def _current_analysis_estimate(
         project_config=project_config.to_dict(),
         media_overrides_sha256=override_sha256,
         source_sha256s=tuple(row.original_sha256 for row in media),
+        # 엔드포인트·작업공간 자리도 지문에 묶는다(S2B-2b) — 다른 공급자·다른
+        # 개발 루트가 같은 승인을 재사용하는 길을 추정 단계에서부터 닫는다.
+        endpoint_sha256=request_accounting.endpoint_identity_sha256(project_config),
+        workspace_binding_sha256=request_accounting.workspace_binding_sha256(workspace),
     )
     return build_analysis_estimate(
         document,
@@ -684,6 +684,7 @@ def _project_analyze(args: argparse.Namespace) -> int:
     if stored_pricing != pricing:
         raise ValueError("기록된 가격 스냅샷이 현재 공식 가격과 다르다 — inspect를 다시 돌린다")
     estimate_message: AnalysisEstimate | None = None
+    authorization: AnalysisAuthorization | None = None
     if bool(args.online) or args.vision_fixtures is not None:
         loaded_estimate = _read_one(workspace / _ESTIMATE)
         if not isinstance(loaded_estimate, AnalysisEstimate):
@@ -702,9 +703,10 @@ def _project_analyze(args: argparse.Namespace) -> int:
         assert estimate_message is not None
         if args.authorization is None:
             raise ValueError("온라인 분석은 --authorization JSONL이 필요하다")
-        authorization = _read_one(args.authorization)
-        if not isinstance(authorization, AnalysisAuthorization):
+        loaded_authorization = _read_one(args.authorization)
+        if not isinstance(loaded_authorization, AnalysisAuthorization):
             raise ValueError("승인 JSONL이 AnalysisAuthorization이 아니다")
+        authorization = loaded_authorization
         authorization.require_matches(
             journal.revision.revision,
             estimate_message.estimate_revision,
@@ -786,6 +788,7 @@ def _project_analyze(args: argparse.Namespace) -> int:
                     started_at,
                     pricing,
                     progress,
+                    authorization,
                 )
         except KeyboardInterrupt:
             progress.terminate("cancelled")
@@ -1218,13 +1221,16 @@ def _produce_analysis_outcome(
     started_at: str,
     pricing: PricingSnapshot,
     progress: _ProgressPublisher,
+    authorization: AnalysisAuthorization | None = None,
 ) -> tuple[tuple[CutCandidate, ...], AnalysisResult]:
     """기존 소스 전사/VAD를 재사용하고 안전 seed만 Luna에 제공한다.
 
     창 하나의 실패는 실행 전체를 무너뜨리지 않는다 — 판정을 error로 남기고 다음
     창으로 간다. 이미 끝난 창의 판정은 완성되는 채로 창마다 기록에 더한다(뒤 창의
-    예외가 앞 증거를 지우지 않는다). 비용 상한에 걸리면 남은 창을 부르지 않고
-    skipped로 덮는다. 취소(WorkflowCancelled·BaseException)는 여기서 잡지 않는다.
+    예외가 앞 증거를 지우지 않는다). 비용은 유료 실행에서 내구 원장이 요청마다
+    예약·확정한다(S2B-2b) — 예약 거부는 남은 창을 미처리로 덮고, 회계 자체의
+    실패는 실행 전체를 닫는다. 취소(WorkflowCancelled·BaseException)는 여기서
+    잡지 않는다.
     """
     settings = AnalysisSettings()
     if estimate.model != settings.model:
@@ -1236,21 +1242,36 @@ def _produce_analysis_outcome(
     overrides: tuple[MediaOverride, ...] = (
         load_media_map(args.media_map) if args.media_map is not None else ()
     )
-    ledger = UsageLedger(Decimal(estimate.cost_upper_bound or "0"))
+    accounting: request_accounting.AnalysisAccounting | None = None
+    if bool(args.online):
+        # 유료 실행의 회계 문맥 — 원장은 같은 신원으로 다시 열려 지난 실측과 남은
+        # 예약을 되살린다. 원장 없는 과거 기록은 명시적 조치 없이는 시작하지 않는다.
+        assert authorization is not None
+        accounting = request_accounting.AnalysisAccounting.open(
+            workspace=workspace,
+            settings=settings,
+            pricing=pricing,
+            authorization=authorization,
+            settings_sha256=estimate.settings_sha256,
+            project_config=project_config,
+            attempt_id=attempt_id,
+            approval_limit=Decimal(estimate.cost_upper_bound or "0"),
+        )
 
     def cancellation() -> None:
         _check_cancellation(workspace, revision.revision, attempt_id, revision.input_sha256)
 
-    transcriber = _BudgetedTranscriber(
+    transcriber = _GatedTranscriber(
         transcribe.get_transcriber(
             cfg,
             online=bool(args.online),
             force_offline=not bool(args.online),
-            # 실제 호출 경로(LiveTranscriber)에는 조각·재시도마다 지난다.
-            # 픽스처·가짜 전사기는 _BudgetedTranscriber의 위임 직전 게이트가 지킨다.
+            # 실제 호출 경로(LiveTranscriber)에는 관찰자가 조각·재시도마다 붙는다
+            # — 예약·확정은 그 안에서 일어난다. 픽스처·가짜 전사기는 유료 호출이
+            # 아니므로 관찰자가 없고, 위임 직전 게이트만 지난다.
             cancellation=cancellation,
+            observer=None if accounting is None else accounting.observer(),
         ),
-        estimate.transcription_seconds,
         gate=cancellation,
     )
     _check_cancellation(workspace, revision.revision, attempt_id, revision.input_sha256)
@@ -1276,22 +1297,11 @@ def _produce_analysis_outcome(
         raise _close_stage_failure(
             workspace, revision, estimate, attempt_id, started_at, "analysis_stage_error", progress
         ) from exc
+    if accounting is not None:
+        # 회계 기반구조의 실패는 소스 오류로 위장하지 않는다 — 단계 사이에서
+        # 즉시 실행 실패로 들춘다(예약 거부는 닫지 않는다: 상한이 하는 일이다).
+        accounting.ensure_healthy()
     stop_reason: str | None = None
-    if transcriber.used > 0:
-        # 실제로 보낸 whisper 오디오만 기록한다 — 예측이 아니라 측정값이다.
-        usage = transcription_usage(
-            input_revision=revision.revision,
-            attempt_id=attempt_id,
-            model=pricing.whisper_model,
-            audio_seconds=transcriber.used,
-            per_minute=pricing.whisper_per_minute,
-        )
-        _append_message(workspace / _USAGE, usage)
-        try:
-            ledger.record(usage)
-        except CostCeilingExceeded:
-            # 전사에서 이미 상한을 넘었다 — 창은 하나도 부르지 않고 전부 미처리로 남는다.
-            stop_reason = "cost_ceiling_exceeded"
     upstream, upstream_reasons = _upstream_stages(prepared, analyzed)
     seeds = _analysis_seeds(analyzed, revision, settings)
     clip_ranges = {
@@ -1341,16 +1351,21 @@ def _produce_analysis_outcome(
                         Path(args.vision_fixtures) if args.vision_fixtures is not None else None
                     ),
                     attempt_id=attempt_id,
-                    pricing=pricing,
-                    ledger=ledger,
+                    observer=None
+                    if accounting is None
+                    else accounting.window_observer(planned.window_id),
                     input_sha256=revision.input_sha256,
                 )
-            except CostCeilingExceeded:
-                # 이 창의 사용량은 이미 기록에 남았다 — 돈이 든 다음 호출은 없다.
-                stop_reason = "cost_ceiling_exceeded"
-                decision = skipped_window_decision(
-                    revision.revision, planned.window_id, stop_reason
-                )
+            except transcribe.ObserverFailure as exc:
+                if request_accounting.is_budget_denial(exc):
+                    # 예약 거부 — 이 창의 호출은 가지 않았다. 돈이 든 다음 호출도 없다.
+                    stop_reason = "cost_ceiling_exceeded"
+                    decision = skipped_window_decision(
+                        revision.revision, planned.window_id, stop_reason
+                    )
+                else:
+                    # 회계 기반구조의 실패는 창 실패가 아니다 — 실행 전체를 닫는다.
+                    raise
             except Exception:  # noqa: BLE001 - 창 하나의 실패가 전체 증거를 지우지 않는다
                 decision = error_window_decision(revision.revision, planned.window_id)
             else:
@@ -1424,34 +1439,28 @@ def _close_stage_failure(
     return _StageFailure(text)
 
 
-class _BudgetedTranscriber:
+class _GatedTranscriber:
     """위임 직전 취소 게이트를 곁들인 전사기 — 1차·재전사·두 번째 모델이 모두 지난다.
 
     이 계층의 `transcribe`는 소스 전사·경계 재전사·글자 교정의 두 번째 모델 호출이
     공통으로 지나는 유일한 고리다. 게이트가 `WorkflowCancelled`(BaseException)를
     던지면 실패로 상태 기록을 만드는 `except Exception` 층들을 뚫고 올라와 실행
-    전체를 `cancelled`로 닫는다.
+    전체를 `cancelled`로 닫는다. 예산은 더 이계층의 몫이 아니다 — 유료 호출의
+    상한은 내구 원장이 요청마다 예약한다(S2B-2b).
     """
 
     def __init__(
         self,
         delegate: transcribe.Transcriber,
-        limit: Fraction,
         gate: Callable[[], None] = lambda: None,
     ) -> None:
         self.delegate = delegate
-        self.limit = limit
         self.gate = gate
-        self.used = Fraction()
 
     def transcribe(
         self, job: transcribe.TranscriptionJob, cfg: Config
     ) -> list[transcribe.ChunkResponse]:
         self.gate()
-        requested = sum((Fraction(str(chunk.duration)) for chunk in job.chunks), start=Fraction())
-        if self.used + requested > self.limit:
-            raise RuntimeError("전사 요청 길이가 승인된 비용 상한을 넘는다")
-        self.used += requested
         return self.delegate.transcribe(job, cfg)
 
 
@@ -1618,8 +1627,7 @@ def _decide_window(
     client: object | None,
     fixtures: Path | None,
     attempt_id: str,
-    pricing: PricingSnapshot,
-    ledger: UsageLedger,
+    observer: transcribe.RequestObserver | None,
     input_sha256: str = "",
 ) -> tuple[VisionWindowDecision, int]:
     document = analyzed.prepared.document
@@ -1704,6 +1712,7 @@ def _decide_window(
     from_cache = cache_path.is_file()
     raw: object
     if from_cache:
+        # 캐시 재생은 유료 호출이 아니다 — 예약도 확정도 없다(S2B-2b).
         raw = json.loads(cache_path.read_text(encoding="utf-8"))
     elif fixtures is not None:
         fixture = fixtures / f"{planned.window_id}.luna.json"
@@ -1716,17 +1725,23 @@ def _decide_window(
         _check_cancellation(workspace, input_revision, attempt_id, input_sha256)
         try:
             raw = transcribe.request_luna_vision(
-                client, model=settings.model, payload=payload, online=True
+                client,
+                model=settings.model,
+                payload=payload,
+                online=True,
+                # 관찰자는 예약(호출 전)·확정(응답 직후)을 이 경계 안에서 처리한다.
+                observer=observer,
+                cancellation=lambda: _check_cancellation(
+                    workspace, input_revision, attempt_id, input_sha256
+                ),
             )
+        except transcribe.ObserverFailure:
+            # 회계 실패는 이 창의 API 오류가 아니다 — 창 루프가 실행 전체로 올린다.
+            raise
         except Exception as exc:  # noqa: BLE001 - API 오류는 이 창을 keep으로 닫는다
             raw = exc
     if isinstance(raw, dict) and not from_cache:
         _write_json(cache_path, raw)
-        usage = luna_usage(window=window, raw=raw, pricing=pricing, attempt_id=attempt_id)
-        if usage is not None:
-            # 실 Responses 사용량을 먼저 남기고, 상한을 넘었으면 다음 호출을 끊는다.
-            _append_message(workspace / _USAGE, usage)
-            ledger.record(usage)
     return (
         normalize_luna_response(window, raw if isinstance(raw, (dict, BaseException)) else {}),
         len(frames),

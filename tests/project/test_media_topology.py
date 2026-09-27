@@ -533,10 +533,13 @@ def test_missing_vision_role_with_a_valid_stt_key_makes_zero_provider_calls(
     workspace = _staged_workspace(tmp_path)
     _wire_stream_count(monkeypatch, {"clip.mov": 1})
     (workspace / "media-grant.json").write_text(_grant_document([str(tmp_path)]), encoding="utf-8")
+    # V2 역할은 inspect **앞에** 적용한다 — 추정 지문이 역할 라우팅·엔드포인트를
+    # 묶는 지금(S2B-2b) inspect와 analyze가 같은 라우팅을 봐야 한다. 비전 역할의
+    # 부재(빈 값)는 소비 문에서 걸린다 — 그것이 이 시험의 대상이다.
+    _apply_v2_roles(stt="synthetic-stt-key", vision="")  # 비전 역할만 부재
     assert cli.main(["project", "inspect", str(workspace)]) == 0
     authorization = _stage_authorization(tmp_path, workspace)
 
-    _apply_v2_roles(stt="synthetic-stt-key", vision="")  # 비전 역할만 부재
     monkeypatch.setattr(
         transcribe,
         "get_transcriber",
@@ -577,10 +580,12 @@ def test_missing_stt_role_closes_the_paid_path_the_same_way(
     workspace = _staged_workspace(tmp_path)
     _wire_stream_count(monkeypatch, {"clip.mov": 1})
     (workspace / "media-grant.json").write_text(_grant_document([str(tmp_path)]), encoding="utf-8")
+    # 위와 같은 이유로 역할 적용이 inspect보다 앞선다(S2B-2b) — STT 부재도
+    # 소비 문에서 같은 모양으로 닫혀야 한다.
+    _apply_v2_roles(stt="", vision="synthetic-vision-key")
     assert cli.main(["project", "inspect", str(workspace)]) == 0
     authorization = _stage_authorization(tmp_path, workspace)
 
-    _apply_v2_roles(stt="", vision="synthetic-vision-key")
     monkeypatch.setattr(
         transcribe,
         "get_transcriber",

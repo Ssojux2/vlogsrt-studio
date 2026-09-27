@@ -86,6 +86,19 @@ def supported_audio_topology(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(topology, "probe_audio_stream_count", lambda source: 1)
 
 
+@pytest.fixture(autouse=True)
+def synthetic_stt_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
+    """엔드포인트 신원이 첫 실행(inspect)과 둘째 실행(analyze)에서 같게(S2B-2b).
+
+    추정 지문이 실제 엔드포인트를 묶는 지금, 패치 전후의 값이 다르면 정당한
+    드리프트 거부가 된다 — 이 파일이 보려는 것(진입점 소유권·동기화)과 무관하므로
+    파일 전체에서 한 값으로 못 박는다.
+    """
+    from vlogsrt.project import commands as project_commands
+
+    monkeypatch.setattr(project_commands.env, "base_url", lambda: "https://example.invalid")
+
+
 @pytest.fixture()
 def engine() -> ModuleType:
     """진입점 모듈 — main이 남기는 job 루트 환경변수를 테스트 뒤 되돌린다."""
@@ -270,7 +283,15 @@ def _patch_paid_gates(
     monkeypatch.setenv("GEMINI_BASE_URL", "https://example.invalid")
     monkeypatch.setattr(transcribe, "create_vision_client", lambda **kwargs: object())
 
-    def keep(client: object, *, model: str, payload: dict, online: bool) -> dict:
+    def keep(
+        client: object,
+        *,
+        model: str,
+        payload: dict,
+        online: bool,
+        observer: object = None,
+        cancellation: object = None,
+    ) -> dict:
         return {
             "output_text": json.dumps(
                 {"choice": "keep", "confidence": 0.5, "evidence_frame_ids": []}
@@ -296,7 +317,16 @@ class _ProposingLuna:
         self.fail_windows = fail_windows or set()
         self.calls = 0
 
-    def __call__(self, client: object, *, model: str, payload: dict, online: bool) -> dict:
+    def __call__(
+        self,
+        client: object,
+        *,
+        model: str,
+        payload: dict,
+        online: bool,
+        observer: object = None,
+        cancellation: object = None,
+    ) -> dict:
         import re
 
         index = self.calls

@@ -15,6 +15,7 @@ import json
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from decimal import Decimal
 from fractions import Fraction
 from pathlib import Path
 from urllib.parse import quote
@@ -36,6 +37,7 @@ from vlogsrt.project.workflow_analysis import (
     skipped_window_decision,
 )
 from vlogsrt.project.workflow_protocol import (
+    ActualUsage,
     AnalysisAttempt,
     AnalysisEstimate,
     AnalysisResult,
@@ -64,6 +66,17 @@ def supported_audio_topology(monkeypatch: pytest.MonkeyPatch) -> None:
     from vlogsrt.project import topology
 
     monkeypatch.setattr(topology, "probe_audio_stream_count", lambda source: 1)
+
+
+@pytest.fixture(autouse=True)
+def synthetic_stt_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
+    """엔드포인트 신원이 inspect·analyze에서 같은 값을 보게 한다(S2B-2b).
+
+    추정 지문이 실제 엔드포인트를 묶는 지금, inspect(패치 전)과 analyze(패치
+    후)이 다른 값을 보면 정당한 드리프트 거부가 된다 — 이 파일의 시험들이 보려는
+    것(결과 상태)과 무관하므로 파일 전체에서 한 값으로 못 박는다.
+    """
+    monkeypatch.setattr(project_commands.env, "base_url", lambda: "https://example.invalid")
 
 
 # ─────────────────────────────────────────────────────────────
@@ -269,7 +282,16 @@ class _LunaScript:
         self.responses = responses
         self.calls = 0
 
-    def __call__(self, client: object, *, model: str, payload: dict, online: bool) -> dict:
+    def __call__(
+        self,
+        client: object,
+        *,
+        model: str,
+        payload: dict,
+        online: bool,
+        observer: object = None,
+        cancellation: object = None,
+    ) -> dict:
         response = self.responses[min(self.calls, len(self.responses) - 1)]
         self.calls += 1
         if isinstance(response, BaseException):
@@ -290,7 +312,16 @@ class _ProposingLuna:
         self.fail_windows = fail_windows or set()
         self.calls = 0
 
-    def __call__(self, client: object, *, model: str, payload: dict, online: bool) -> dict:
+    def __call__(
+        self,
+        client: object,
+        *,
+        model: str,
+        payload: dict,
+        online: bool,
+        observer: object = None,
+        cancellation: object = None,
+    ) -> dict:
         index = self.calls
         self.calls += 1
         if index in self.fail_windows:
@@ -342,6 +373,68 @@ def _stub_transcriber(monkeypatch: pytest.MonkeyPatch, *, fail: bool = False) ->
     scripted = _Scripted(fail=fail)
     monkeypatch.setattr(transcribe, "get_transcriber", lambda *args, **kwargs: scripted)
     return scripted
+
+
+class _AudioFace:
+    def __init__(self, sdk: _SdkFake) -> None:
+        self._sdk = sdk
+        self.transcriptions = self
+
+    def create(self, **kwargs: object) -> dict[str, object]:
+        self._sdk.transcription_calls.append(kwargs)
+        model = str(kwargs.get("model", ""))
+        payload: dict[str, object] = {"duration": self._sdk.audio_duration}
+        if model == "gpt-transcribe":  # Config.verify_model 기본값 — 글자 교정 호출
+            payload["text"] = "인사 마무리"
+        else:
+            payload["segments"] = [
+                {"start": start, "end": end, "text": text} for start, end, text in SEGMENTS
+            ]
+        return payload
+
+
+class _ResponsesFace:
+    def __init__(self, sdk: _SdkFake) -> None:
+        self._sdk = sdk
+
+    def create(self, **kwargs: object) -> dict[str, object]:
+        self._sdk.responses_calls.append(kwargs)
+        return _keep_response()
+
+
+class _SdkFake:
+    """`openai.OpenAI` 생성자 자리의 가짜 SDK — 실제 호출 자리에서 응답·미터링을 낸다."""
+
+    def __init__(self, *, audio_duration: float = float(CLIP_SECONDS)) -> None:
+        self.audio_duration = audio_duration
+        self.transcription_calls: list[dict[str, object]] = []
+        self.responses_calls: list[dict[str, object]] = []
+
+    def __call__(
+        self, *, api_key: str, base_url: str | None = None, max_retries: int = -1
+    ) -> _SdkFake:
+        assert max_retries == 0, "SDK 내부 재시도는 관찰 경계를 우회한다"
+        return self
+
+    @property
+    def audio(self) -> _AudioFace:
+        return _AudioFace(self)
+
+    @property
+    def responses(self) -> _ResponsesFace:
+        return _ResponsesFace(self)
+
+
+def _patch_sdk_paid_boundaries(monkeypatch: pytest.MonkeyPatch, sdk: _SdkFake) -> _SdkFake:
+    """유료 경계 전부를 실제 SDK 호출 자리의 가짜로 채운다 — 과금 경로 시험용(S2B-2b)."""
+    monkeypatch.setattr(project_commands.env, "require_api_key", lambda **kwargs: "test-key")
+    monkeypatch.setenv("GOOGLE_API_KEY", "synthetic-vision-key")
+    monkeypatch.setenv("GEMINI_BASE_URL", "https://example.invalid")
+    monkeypatch.setattr(transcribe, "create_vision_client", lambda **kwargs: object())
+    import openai
+
+    monkeypatch.setattr(openai, "OpenAI", sdk)
+    return sdk
 
 
 def _analyze(
@@ -1146,18 +1239,16 @@ def test_all_vad_failure_with_zero_windows_is_error(
 def test_cost_ceiling_marks_windows_skipped_not_successful(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """비용 상한에 걸린 창은 skipped — 성공으로 세지 않고 나머지도 부르지 않는다."""
+    """비용 상한에 걸린 창은 skipped — 성공으로 세지 않고 나머지도 부르지 않는다.
+
+    전사 응답의 실측 길이를 승인 상한보다 크게 만든다(1,000만 초 × whisper 분당가
+    ≈ $1,000 ≫ 상한). 실측 초과는 기록으로 남고 이후 **모든** 예약이 거부된다 —
+    남은 전사 시도도 소스 오류로 닫히고, Luna 호출은 물리적으로 한 번도 가지
+    않는다(S2B-2b). 실제로 계획된 창 전부가 미처리로 덮이는지만 본다.
+    """
     workspace = _prepare(tmp_path, _two_clip_project(tmp_path))
     _patch_boundaries(monkeypatch)
-    _stub_transcriber(monkeypatch)
-    luna = _LunaScript([_keep_response(), _keep_response()])
-    _patch_paid_boundaries(monkeypatch, luna)
-    # 첫 usage 기록이 상한을 넘게 만든다 — 첫 창 뒤 남은 창은 skipped다.
-    monkeypatch.setattr(
-        project_commands,
-        "UsageLedger",
-        lambda limit: _ZeroCeilingLedger(limit),
-    )
+    sdk = _patch_sdk_paid_boundaries(monkeypatch, _SdkFake(audio_duration=10_000_000.0))
     authorization = tmp_path / "authorization.jsonl"
     estimate = project_commands._read_one(workspace / "analysis-estimate.jsonl")
     assert isinstance(estimate, AnalysisEstimate)
@@ -1190,22 +1281,22 @@ def test_cost_ceiling_marks_windows_skipped_not_successful(
     )
     result = _result(workspace)
     assert result.status == "error"
-    assert result.windows_skipped == 2
-    # 상한은 첫 사용량 기록(전사)에서 이미 걸렸다 — Luna 호출은 한 번도 없다.
-    assert luna.calls == 0
+    assert result.windows_total >= 1
+    assert result.windows_successful == 0
+    assert result.windows_skipped == result.windows_total
+    # 나중 전사 시도(재전사·교정 등)도 예약 거부로 소스 오류로 닫힌다 — 몫의
+    # 소진은 완료 보증이 아니라 정직한 정지다(S2B-2b 작업 몫 계약).
+    assert result.upstream_transcription_failed >= 1
+    # 상한은 전사 실측에서 이미 넘었다 — Luna 호출은 한 번도 없다.
+    assert sdk.responses_calls == []
+    # 초과 실측은 숨기지 않고 원장에 남는다 — 사용량 투영에 그대로 나온다.
+    usage = [
+        row
+        for row in project_commands._read_messages(workspace / "analysis-usage.jsonl")
+        if isinstance(row, ActualUsage)
+    ]
+    assert any(Decimal(row.cost) > Decimal(estimate.cost_upper_bound or "0") for row in usage)
     assert "cost_ceiling_exceeded" in result.reason_codes
-
-
-class _ZeroCeilingLedger:
-    """첫 기록에서 즉시 상한을 넘는 장부 — UsageLedger와 같은 계약."""
-
-    def __init__(self, limit: object) -> None:
-        self.limit = limit
-
-    def record(self, usage: object) -> None:
-        from vlogsrt.project.workflow_analysis import CostCeilingExceeded
-
-        raise CostCeilingExceeded("실제 사용량이 승인 상한을 넘었다")
 
 
 def test_cancellation_stays_cancelled_and_writes_no_result(

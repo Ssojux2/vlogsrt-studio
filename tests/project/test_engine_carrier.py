@@ -640,12 +640,15 @@ def test_paid_attempt_record_never_persists_the_submitted_key(
     monkeypatch.chdir(tmp_path)
     job_dir = _stage_job(tmp_path)
     _fake_supported_topology(monkeypatch)
-    assert engine.main(["analyze", "job-1", str(job_dir)]) == 0
-    _write_authorization(job_dir)
-    # 합성 미디어의 준비 경계(ffmpeg/PCM/프레임/VAD)를 가짜로 막는다 — 이 시험의
-    # 실패 지점은 SDK 경계뿐이어야 한다(준비가 먼저 죽으면 반향을 못 본다).
+    # 합성 미디어의 준비 경계(ffmpeg/PCM/프레임/VAD)와 유료 게이트의 합성
+    # 엔드포인트는 **첫 inspect부터** 깔린다 — 추정 지문이 엔드포인트를 묶는
+    # 지금(S2B-2b) inspect와 analyze가 다른 값을 보면 승인 전에 거부돼 이
+    # 시험의 실패 지점(SDK 키 반향)에 못 닿는다. 준비 경계 가짜도 이 시험의
+    # 실패 지점이 SDK 경계뿐이게 하는 조건의 일부다.
     _patch_analysis_boundaries(monkeypatch)
     _patch_paid_gates(monkeypatch)
+    assert engine.main(["analyze", "job-1", str(job_dir)]) == 0
+    _write_authorization(job_dir)
 
     # SDK 경계가 키를 되뇌며 죽는다 — 유료 호출은커녕 클라이언트 생성에서 실패한다.
     submitted = "synthetic-echoed-key"
