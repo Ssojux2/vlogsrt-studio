@@ -495,3 +495,13 @@
 - 이후 Sol이 작업 인수 또는 미해결 실패마다 갱신한다. GLM은 구현/검증 증거를 제공한다.
 - 제품 결함, 도구 운영, 스킬 적용 부족, 스킬 자체 결함을 구분한다.
 - 제안은 실제 적용/미적용과 적용 전후 결과를 구분한다. 설치된 스킬 자체는 별도 요청 없이 수정하지 않는다.
+
+## STAB-S2A-2 unit1 first attempt — failed recovery boundary (2026-09-27)
+
+- Outcome: no accepted product commit; `ctx_80c55eec0ac2` settled failed and exact idle GLM terminal closed. Uncommitted work preserved. Details and sanitized chronology: [Sol attempt review](../orchestration/reviews/stab-s2a2-unit1-attempt1-sol.md).
+- Actual skill use: visible direct High Agency read; worker used a reported immutable propagating/file22/module7/shared-api estimate and meaningful carrier RED, but full durable estimate/mail acknowledgment lagged edits. Long discovery and unchecked runtime assumptions defeated the evidence principle; this is observation, not proof that effort/model caused the errors.
+- Product findings: wrong stdin descriptor/lifetime, size/framing mismatch, arbitrary credential error text, bundled empty-carrier omission; worker reported three signal6 bridge failures, not acceptance. Sol routed corrections without writing product/tests.
+- Constraint violations: new Swift bridge omitted required child guard, then a probe dumped ambient environment and read it with grep/wc before deletion. Contents/credential presence unknown; filtered output does not mean unread bytes. No retrospective investigation or no-access claim. This repeats a testing-boundary problem and requires an explicit pre-execution design gate.
+- Tooling: generic local Bash permission rejection on status bodies, source/rule unknown; permitted scratch-reference reporting worked. Several diagnostic pipelines lost original exits; speculative denial times conflicted with dispatch creation and were rejected. Terminal queued nudges were not receipt proof; interrupt-only plus exact idle wait established pause.
+- Improvement: fresh bounded writer, explicit allowlisted test bootstrap, component-safe provenance enforced before every payload, startup-suppressed public wrapper, no ambient discovery, and Sol read-only harness approval before any new child execution. Parent's exceptional Astra high review was static and did not establish runtime safety.
+- Client compact evidence: parent verified Luna max selected, bare compact completed19s, Sol high restored/status15.3K/828K. Do not infer the hidden compaction model; argument-bearing slash input had been plain text.
