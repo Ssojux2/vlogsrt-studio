@@ -6,13 +6,14 @@ import json
 import os
 import sys
 import types
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import replace as data_replace
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from vlogsrt import env
 from vlogsrt.config import Config
 from vlogsrt.models import Chunk
 from vlogsrt.transcribe import (
@@ -238,10 +239,14 @@ def real_job(tmp_path: Path) -> TranscriptionJob:
     return TranscriptionJob(stem="demo", chunks=(Chunk(audio, 0.0, 24.0, 0),))
 
 
-def _live(monkeypatch: pytest.MonkeyPatch, client: FakeClient) -> LiveTranscriber:
+def _live(
+    monkeypatch: pytest.MonkeyPatch,
+    client: FakeClient,
+    cancellation: Callable[[], None] | None = None,
+) -> LiveTranscriber:
     """`LiveTranscriber`는 frozen+slots라 인스턴스에 못 꽂는다. 클래스에 꽂는다."""
     monkeypatch.setattr(LiveTranscriber, "_client", lambda self: client)
-    return LiveTranscriber(api_key="sk-test")
+    return LiveTranscriber(api_key="sk-test", cancellation=cancellation)
 
 
 def test_the_call_asks_for_a_format_that_carries_times(
@@ -286,6 +291,144 @@ def test_retries_without_extras_on_400(monkeypatch: pytest.MonkeyPatch, tmp_path
 
     assert len(client.calls) == 2
     assert "language" in client.calls[0] and "language" not in client.calls[1]
+
+
+# ─────────────────────────────────────────────────────────────
+#  호출 직전 취소 게이트 (S1A) — 조각·재시도·거부 재요청마다 지난다
+# ─────────────────────────────────────────────────────────────
+
+
+class Cancelled(BaseException):
+    """프로젝트 계층의 WorkflowCancelled와 같은 부류 — `except Exception`에 잡히지 않는다."""
+
+
+class Throttled(FakeClient):
+    """429로 답한다 — 재시도 판단을 유도한다."""
+
+    def create(self, **kwargs: object) -> dict[str, object]:
+        self.calls.append(kwargs)
+        error = RuntimeError("Error code: 429 - rate limited")
+        error.status_code = 429  # type: ignore[attr-defined]
+        raise error
+
+
+def _gate_after(limit: int) -> tuple[list[int], Callable[[], None]]:
+    """`limit`번 확인 뒤 취소되는 게이트 — 확인 횟수를 세서 돌려준다."""
+    checks: list[int] = []
+
+    def gate() -> None:
+        checks.append(len(checks) + 1)
+        if len(checks) > limit:
+            raise Cancelled
+
+    return checks, gate
+
+
+def multi_job(tmp_path: Path) -> TranscriptionJob:
+    audio = tmp_path / "demo.mp3"
+    audio.write_bytes(b"\x00")
+    return TranscriptionJob(
+        stem="demo",
+        chunks=(
+            Chunk(audio, 0.0, 24.0, 0),
+            Chunk(audio, 24.0, 24.0, 1),
+            Chunk(audio, 48.0, 24.0, 2),
+        ),
+    )
+
+
+def test_cancellation_gate_blocks_the_transient_retry_attempt(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """429 뒤의 재시도 직전에 취소가 보이면 재요청이 없다."""
+    client = Throttled()
+    _, gate = _gate_after(1)
+    live = _live(monkeypatch, client, gate)
+    cfg = data_replace(Config(), api_backoff_base=0.0)  # 대기 없이 즉시 재시도한다
+
+    with pytest.raises(Cancelled):
+        live.transcribe(real_job(tmp_path), cfg)
+    assert len(client.calls) == 1  # 첫 시도만 — 재시도 요청은 없다
+
+
+def test_cancellation_gate_blocks_later_chunks(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """둘째 조각 직전에 취소가 보이면 그 조각 요청이 없다."""
+    monkeypatch.setattr(env, "max_workers", lambda: 1)  # 조각을 한 줄로 세워 순서를 잡는다
+    client = FakeClient()
+    _, gate = _gate_after(1)
+    live = _live(monkeypatch, client, gate)
+
+    with pytest.raises(Cancelled):
+        live.transcribe(multi_job(tmp_path), Config())
+    assert len(client.calls) == 1  # 첫 조각만 — 둘째·셋째 요청은 없다
+
+
+def test_cancellation_gate_blocks_the_rejected_parameter_reak(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """400으로 부가 인자를 떼고 다시 부르는 재요청도 게이트를 지난다."""
+
+    class Rejecting(FakeClient):
+        def create(self, **kwargs: object) -> dict[str, object]:
+            self.calls.append(kwargs)
+            if "language" in kwargs:
+                error = RuntimeError("Error code: 400 - unknown parameter 'language'")
+                error.status_code = 400  # type: ignore[attr-defined]
+                raise error
+            return {"segments": []}
+
+    client = Rejecting()
+    _, gate = _gate_after(1)
+    live = _live(monkeypatch, client, gate)
+
+    with pytest.raises(Cancelled):
+        live.transcribe(real_job(tmp_path), Config())
+    assert len(client.calls) == 1  # 거부당한 원요청만 — 떼고 다시 부르는 요청은 없다
+
+
+def test_cancellation_is_not_swallowed_as_a_transcription_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """게이트의 취소는 실패 상태 기록이 아니다 — 결과형 안에서 사라지지 않는다."""
+    client = Throttled()
+    _, gate = _gate_after(1)
+    live = _live(monkeypatch, client, gate)
+    cfg = data_replace(Config(), api_backoff_base=0.0)
+
+    # transcribe_outcome의 `except Exception`은 상태 기록으로 바꿔 삼키는 층이다 —
+    # 취소(BaseException)는 여기를 뚫고 올라가야 실행 전체가 cancelled로 닫힌다.
+    with pytest.raises(Cancelled):
+        transcribe_outcome(live, real_job(tmp_path), cfg)
+
+
+def test_get_transcriber_routes_the_gate_to_the_live_path_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+
+    def gate() -> None:
+        raise Cancelled
+
+    live = get_transcriber(Config(), online=True, cancellation=gate)
+    assert isinstance(live, LiveTranscriber)
+    assert live.cancellation is gate
+    # 픽스처 경로는 외부 호출이 없다 — 게이트를 물려주지 않는다.
+    assert isinstance(get_transcriber(None, cancellation=gate), FixtureTranscriber)
+
+
+def test_stt_client_pins_the_sdk_hidden_retries_to_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SDK 기본 재시도(2)는 게이트 밖에서 조용히 재호출한다 — 재시도는 _retry가 한다.
+
+    실제 SDK로 생성만 증명한다(호출은 없다). 비전 클라이언트와 같은 규율이다.
+    """
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    assert LiveTranscriber(api_key="sk-test")._client().max_retries == 0
+    proxy = LiveTranscriber(api_key="sk-test", base_url="https://stt.example/v1")
+    assert proxy._client().max_retries == 0
 
 
 def test_the_model_and_format_that_carry_times_are_required(

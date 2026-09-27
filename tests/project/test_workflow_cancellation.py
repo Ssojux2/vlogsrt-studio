@@ -11,6 +11,7 @@ from __future__ import annotations
 import array
 import hashlib
 import json
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from fractions import Fraction
 from pathlib import Path
@@ -33,7 +34,7 @@ from vlogsrt.project.workflow_protocol import (
     WorkflowJournal,
     encode_message,
 )
-from vlogsrt.transcribe import FIXTURE_KIND, ChunkResponse, TranscriptionJob
+from vlogsrt.transcribe import FIXTURE_KIND, ChunkResponse, LiveTranscriber, TranscriptionJob
 
 RATE = 16000
 CLIP_SECONDS = 12
@@ -66,6 +67,39 @@ def _project(tmp_path: Path) -> Path:
         "  </library>\n</fcpxml>\n"
     )
     path = tmp_path / "cancel.fcpxml"
+    path.write_text(body, encoding="utf-8")
+    return path
+
+
+def _two_clip_project(tmp_path: Path) -> Path:
+    """서로 다른 미디어 두 개를 잇는 프로젝트 — 창이 둘 이상 나와야 하는 시험용."""
+    media_a = tmp_path / "clip-a.mov"
+    media_b = tmp_path / "clip-b.mov"
+    media_a.write_bytes(b"synthetic-cancellation-media-a")
+    media_b.write_bytes(b"synthetic-cancellation-media-b")
+    body = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE fcpxml>\n'
+        '<fcpxml version="1.14">\n  <resources>\n    '
+        '<format id="r1" name="FFVideoFormat1080p30" frameDuration="1/30s"'
+        ' width="1920" height="1080"/>\n    '
+        '<asset id="r2" name="clip-a.mov" start="0s" duration="600s" hasAudio="1"'
+        ' format="r1">\n'
+        f'      <media-rep kind="original-media" src="{_file_uri(media_a)}"/>\n    </asset>\n    '
+        '<asset id="r3" name="clip-b.mov" start="0s" duration="600s" hasAudio="1"'
+        ' format="r1">\n'
+        f'      <media-rep kind="original-media" src="{_file_uri(media_b)}"/>\n    </asset>\n'
+        '  </resources>\n  <library>\n    <event name="이벤트">\n'
+        '      <project name="취소 프로젝트" uid="PROJECT-CANCEL">\n'
+        '        <sequence format="r1" tcStart="0s" duration="600s">\n'
+        "          <spine>\n"
+        '            <asset-clip ref="r2" name="클립0" offset="0s" start="0s"'
+        ' duration="12s"/>\n'
+        '            <asset-clip ref="r3" name="클립1" offset="12s" start="0s"'
+        ' duration="12s"/>\n'
+        "          </spine>\n        </sequence>\n      </project>\n    </event>\n"
+        "  </library>\n</fcpxml>\n"
+    )
+    path = tmp_path / "cancel-two.fcpxml"
     path.write_text(body, encoding="utf-8")
     return path
 
@@ -452,3 +486,266 @@ def test_wildcard_cancellation_stops_any_attempt_for_its_revision(
     assert [row.status for row in attempts] == ["pending", "running", "cancelled"]
     assert WorkflowJournal.open(workspace / "workflow.jsonl").state == "cancelled"
     assert luna_calls == []
+
+
+# ─────────────────────────────────────────────────────────────
+#  엔진 잡 루트 관측 — 앱 CancellationStore가 남기는 곳을 엔진이 본다(S1A)
+# ─────────────────────────────────────────────────────────────
+
+_JOB_DIR_ENV = "VLOGSRT_ENGINE_JOB_DIR"
+
+
+def _record_root_cancellation(job_root: Path, workspace: Path) -> None:
+    """앱 CancellationStore와 같은 모양으로 job 루트에만 남긴다 — workspace는 비워둔다.
+
+    앱은 사용자 취소를 `attempt_id="*"`와 진행 중인 입력 리비전으로 기록한다.
+    엔진 진입점이 job 루트를 `_JOB_DIR_ENV`로 알리므로 실행 중 기록도 보인다.
+    """
+    revision = WorkflowJournal.open(workspace / "workflow.jsonl").revision.revision
+    project_commands._append_message(
+        job_root / "cancellation.jsonl",
+        CancellationRequest.create(
+            input_revision=revision,
+            attempt_id="*",
+            requested_at="2026-09-27T05:00:00Z",
+            reason="user",
+        ),
+    )
+
+
+class _RootCancellingTranscriber:
+    """첫 위임 호출이 끝난 뒤 job 루트에 취소를 남긴다 — 앱의 실행 중 취소 흉내."""
+
+    def __init__(self, inner: _Scripted, record: Callable[[], None]) -> None:
+        self._inner = inner
+        self._record = record
+        self.kinds: list[str] = []
+
+    def transcribe(self, job: TranscriptionJob, cfg: Config) -> list[ChunkResponse]:
+        self.kinds.append(job.kind)
+        responses = self._inner.transcribe(job, cfg)
+        if len(self.kinds) == 1:
+            self._record()
+        return responses
+
+
+def _engine_job(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, input_path: Path) -> Path:
+    """엔진이 잡는 job 폴더 모양(`<job>/workspace`)을 만들고 루트를 알린다."""
+    job_root = tmp_path / "engine-job"
+    workspace = job_root / "workspace"
+    project_config = _write_config(tmp_path)
+    argv_tail = ["--project-config", str(project_config)]
+    assert cli.main(["project", "receive", str(input_path), "--workspace", str(workspace)]) == 0
+    assert cli.main(["project", "inspect", str(workspace), *argv_tail]) == 0
+    monkeypatch.setenv(_JOB_DIR_ENV, str(job_root))
+    return job_root
+
+
+def _engine_analyze(tmp_path: Path, job_root: Path) -> tuple[list[str], Path]:
+    workspace = job_root / "workspace"
+    argv_tail = ["--project-config", str(_write_config(tmp_path))]
+    return (
+        _analyze_argv(workspace, _authorization_file(tmp_path, workspace)) + argv_tail,
+        workspace,
+    )
+
+
+def test_root_cancellation_after_the_first_transcription_call_blocks_every_later_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """첫 전사 위임 뒤 job 루트에 남긴 취소가 두 번째 전사·Luna 호출을 막는다."""
+    job_root = _engine_job(tmp_path, monkeypatch, _project(tmp_path))
+    workspace = job_root / "workspace"
+
+    _patch_boundaries(monkeypatch)
+    cancelling = _RootCancellingTranscriber(
+        _Scripted(), lambda: _record_root_cancellation(job_root, workspace)
+    )
+    monkeypatch.setattr(transcribe, "get_transcriber", lambda *args, **kwargs: cancelling)
+    luna_calls: list[dict] = []
+    _patch_paid_boundaries(monkeypatch, luna_calls)
+
+    argv, workspace = _engine_analyze(tmp_path, job_root)
+    assert cli.main(argv) == 2
+    # 취소는 첫 1차 전사가 끝난 뒤에 왔다 — 그 뒤의 어떤 위임(재전사·두 번째
+    # 모델)도 일어나지 않는다.
+    assert cancelling.kinds == [FIXTURE_KIND]
+    assert luna_calls == []
+    attempts = [
+        row
+        for row in project_commands._read_messages(workspace / "analysis-attempts.jsonl")
+        if isinstance(row, AnalysisAttempt)
+    ]
+    assert [row.status for row in attempts] == ["pending", "running", "cancelled"]
+    assert WorkflowJournal.open(workspace / "workflow.jsonl").state == "cancelled"
+    # 관측 근거: 취소는 job 루트에만 있다 — workspace 복사가 아니라 루트 경로로 읽었다.
+    assert (job_root / "cancellation.jsonl").is_file()
+    assert not (workspace / "cancellation.jsonl").exists()
+
+
+def test_root_cancellation_during_frame_sampling_blocks_the_next_luna_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """창 게이트가 지난 뒤 프레임 뽑기 동안 남은 취소가 Luna API 호출을 막는다."""
+    job_root = _engine_job(tmp_path, monkeypatch, _two_clip_project(tmp_path))
+    workspace = job_root / "workspace"
+
+    _patch_boundaries(monkeypatch)
+    _stub_transcriber(monkeypatch)
+    luna_calls: list[dict] = []
+    _patch_paid_boundaries(monkeypatch, luna_calls)
+
+    real_sample = project_commands.sample_frames
+    sample_calls: list[object] = []
+
+    def sample_then_cancel(*args: object, **kwargs: object) -> object:
+        samples = real_sample(*args, **kwargs)
+        sample_calls.append(samples)
+        # 첫 창의 Luna 호출은 이미 끝났고, 둘째 창의 프레임을 뽑는 지금이다 —
+        # 창 loop의 취소 확인은 지나갔으니 Luna 직전 게이트가 잡아야 한다.
+        if len(sample_calls) == 2:
+            _record_root_cancellation(job_root, workspace)
+        return samples
+
+    monkeypatch.setattr(project_commands, "sample_frames", sample_then_cancel)
+
+    argv, workspace = _engine_analyze(tmp_path, job_root)
+    assert cli.main(argv) == 2
+    assert len(sample_calls) >= 2, "둘째 창이 있어야 Luna 직전 게이트를 잰다"
+    assert len(luna_calls) == 1
+    attempts = [
+        row
+        for row in project_commands._read_messages(workspace / "analysis-attempts.jsonl")
+        if isinstance(row, AnalysisAttempt)
+    ]
+    assert [row.status for row in attempts] == ["pending", "running", "cancelled"]
+    assert WorkflowJournal.open(workspace / "workflow.jsonl").state == "cancelled"
+
+
+def test_root_cancellation_for_foreign_revisions_does_not_stop_this_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """job 루트의 다른 리비전·다른 시도 기록은 현재 실행을 가로채지 않는다."""
+    job_root = _engine_job(tmp_path, monkeypatch, _project(tmp_path))
+    workspace = job_root / "workspace"
+    journal = WorkflowJournal.open(workspace / "workflow.jsonl")
+    (job_root / "cancellation.jsonl").write_text(
+        encode_message(
+            CancellationRequest.create(
+                input_revision=journal.revision.revision,
+                attempt_id="attempt-something-else",
+                requested_at="2026-09-27T05:00:30Z",
+                reason="user",
+            )
+        )
+        + encode_message(
+            CancellationRequest.create(
+                input_revision="b" * 64,
+                attempt_id="*",
+                requested_at="2026-09-27T05:00:31Z",
+                reason="active_project_changed",
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    _patch_boundaries(monkeypatch)
+    _stub_transcriber(monkeypatch)
+    luna_calls: list[dict] = []
+    _patch_paid_boundaries(monkeypatch, luna_calls)
+
+    argv, workspace = _engine_analyze(tmp_path, job_root)
+    assert cli.main(argv) == 0
+    assert WorkflowJournal.open(workspace / "workflow.jsonl").state == "review_required"
+
+
+def test_root_cancellation_reaches_the_live_transcriber_chunk_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """LiveTranscriber 안의 조각 게이트가 잡 루트 취소를 보고 실행을 cancelled로 닫는다.
+
+    첫 조각 요청이 진행 중인 동안 앱이 취소를 남기는 모양이다 — 위임 호출 게이트가
+    아니라 조각 단위 게이트가 잡아야 한다(한 위임에 조각이 여럿일 때).
+    """
+    media = tmp_path / "clip-long.mov"
+    media.write_bytes(b"synthetic-cancellation-media-long")
+    body = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE fcpxml>\n'
+        '<fcpxml version="1.14">\n  <resources>\n    '
+        '<format id="r1" name="FFVideoFormat1080p30" frameDuration="1/30s"'
+        ' width="1920" height="1080"/>\n    '
+        '<asset id="r2" name="clip-long.mov" start="0s" duration="600s" hasAudio="1"'
+        ' format="r1">\n'
+        f'      <media-rep kind="original-media" src="{_file_uri(media)}"/>\n    </asset>\n'
+        '  </resources>\n  <library>\n    <event name="이벤트">\n'
+        '      <project name="취소 프로젝트" uid="PROJECT-CANCEL-LONG">\n'
+        '        <sequence format="r1" tcStart="0s" duration="600s">\n'
+        "          <spine>\n"
+        '            <asset-clip ref="r2" name="클립0" offset="0s" start="0s"'
+        ' duration="300s"/>\n'
+        "          </spine>\n        </sequence>\n      </project>\n    </event>\n"
+        "  </library>\n</fcpxml>\n"
+    )
+    input_path = tmp_path / "cancel-long.fcpxml"
+    input_path.write_text(body, encoding="utf-8")
+    job_root = _engine_job(tmp_path, monkeypatch, input_path)
+    workspace = job_root / "workspace"
+
+    # 300초 PCM — 조각이 둘이 되어 둘째 조각 직전 게이트가 온다.
+    _patch_boundaries(monkeypatch)
+
+    def long_pcm(
+        source: Path, destination: Path, *, stream_index: int, sample_rate: int = 16000
+    ) -> preprocess.PcmExtraction:
+        pcm = _pattern_pcm(300 * RATE)
+        destination.write_bytes(pcm)
+        return preprocess.PcmExtraction(
+            path=destination,
+            stream=preprocess.AudioStreamInfo(
+                stream_index=stream_index + 1,
+                start_time=Fraction(0),
+                sample_rate=48000,
+                channels=1,
+            ),
+            sample_count=len(pcm) // 2,
+            sample_width=2,
+            pcm_sample0_file_time=Fraction(0),
+        )
+
+    monkeypatch.setattr(pcm_module, "extract_pcm_s16le", long_pcm)
+
+    class RecordingClient:
+        """실제 LiveTranscriber 밑에 깔리는 클라이언트 — 첫 조각 요청 중에 취소를 남긴다."""
+
+        def __init__(self) -> None:
+            self.audio = self
+            self.transcriptions = self
+            self.calls: list[dict[str, object]] = []
+
+        def create(self, **kwargs: object) -> dict[str, object]:
+            self.calls.append(kwargs)
+            if len(self.calls) == 1:
+                _record_root_cancellation(job_root, workspace)
+            return {
+                "segments": [
+                    {"start": start, "end": end, "text": text} for start, end, text in SEGMENTS
+                ]
+            }
+
+    client = RecordingClient()
+    monkeypatch.setattr(LiveTranscriber, "_client", lambda self: client)
+    luna_calls: list[dict] = []
+    _patch_paid_boundaries(monkeypatch, luna_calls)
+
+    argv, workspace = _engine_analyze(tmp_path, job_root)
+    assert cli.main(argv) == 2
+    # 첫 조각만 나갔다 — 둘째 조각 요청은 조각 게이트가 막았다.
+    assert len(client.calls) == 1
+    assert luna_calls == []
+    attempts = [
+        row
+        for row in project_commands._read_messages(workspace / "analysis-attempts.jsonl")
+        if isinstance(row, AnalysisAttempt)
+    ]
+    assert [row.status for row in attempts] == ["pending", "running", "cancelled"]
+    assert WorkflowJournal.open(workspace / "workflow.jsonl").state == "cancelled"

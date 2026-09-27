@@ -228,4 +228,24 @@ public struct EngineSessionRunner {
     else { return nil }
     return payload["revision"] as? String
   }
+
+  /// 실행 중 엔진의 입력 리비전 — App Group workspace가 먼저고 개발 실행의 외부
+  /// job workspace가 그 다음이다(S1A).
+  ///
+  /// 개발 실행기(NSUserUnixTask)는 App Group 밖의 외부 job 폴더에서 돌므로
+  /// revision.jsonl이 거기에만 생긴다. App Group만 보고 all-zero 리비전으로 취소를
+  /// 남기면 엔진은 그 기록을 다른 리비전의 요청으로 무시한다 — 실행 중 취소가
+  /// 전달되지 않는다. 어느 쪽에도 없으면(receive 전) nil이고, 호출자가 all-zero로
+  /// 기록한 취소는 엔진이 무시하되 앱 쪽 게이트는 파일 존재로 닫힌다.
+  public static func runningInputRevision(
+    appGroupJob: URL,
+    externalJob: URL?,
+    fileManager: FileManager = .default
+  ) -> String? {
+    if let revision = stagedInputRevision(job: appGroupJob, fileManager: fileManager) {
+      return revision
+    }
+    guard let externalJob else { return nil }
+    return stagedInputRevision(job: externalJob, fileManager: fileManager)
+  }
 }

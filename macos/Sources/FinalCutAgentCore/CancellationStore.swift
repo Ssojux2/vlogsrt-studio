@@ -18,7 +18,10 @@ public struct CancellationStore: Sendable {
     self.externalJob = externalJob
   }
 
-  /// 취소를 기록한다 — 이미 같은 리비전의 기록이 있으면 덮어쓰지 않는다.
+  /// 취소를 기록한다 — 한 job 폴더에 항상 마지막 요청 한 줄만 남는다(원자적 덮어쓰기).
+  ///
+  /// job 폴더가 아직 없어도 안전하다: 엔진이 workspace를 만들기 전의 기록도
+  /// 유실되지 않아야 하므로(생성 전/후 race) 폴더를 만들고 원자적으로 쓴다.
   public func record(
     _ request: CancellationRequestMessage,
     fileManager: FileManager = .default
@@ -29,6 +32,7 @@ public struct CancellationStore: Sendable {
       version: ProtocolCodec.analysisVersion
     )
     for base in targets(fileManager: fileManager) {
+      try fileManager.createDirectory(at: base, withIntermediateDirectories: true)
       let destination = base.appendingPathComponent(Self.fileName)
       try Data(line.utf8).write(to: destination, options: [.atomic])
     }
@@ -65,6 +69,24 @@ public extension CancellationStore {
   /// 캐시는 보존한다: 취소는 지금 실행만 멈추는 것이지 기록을 지우지 않는다.
   static func isCancelled(jobURL: URL, fileManager: FileManager = .default) -> Bool {
     fileManager.fileExists(atPath: jobURL.appendingPathComponent(fileName).path)
+  }
+
+  /// 엔진 작업 폴더 안 workspace 디렉터리 이름 — `vlogsrt-engine` 진입점 계약.
+  static let workspaceDirectoryName = "workspace"
+
+  /// Python 엔진이 취소 기록을 관측하는 경로 — job 루트와 workspace 안.
+  ///
+  /// `vlogsrt.project.commands._check_cancellation`이 이 둘을 읽는다: job 루트는
+  /// 엔진 진입점(`vlogsrt-engine.py` — 개발 래퍼도 여기에 위임한다)이
+  /// `VLOGSRT_ENGINE_JOB_DIR`로 알리고, workspace 쪽은 시작 때 루트에서 복사된다.
+  /// 엔진이 workspace를 만들기 전에는 둘째 경로가 아직 없다 — 그래서 record는
+  /// 루트에만 남겨도 유실되지 않는다. 경로·파일 이름을 바꾸면 양쪽 계약이
+  /// 같이 움직여야 한다.
+  static func engineObservationPaths(jobURL: URL) -> [URL] {
+    [
+      jobURL.appendingPathComponent(fileName),
+      jobURL.appendingPathComponent(workspaceDirectoryName).appendingPathComponent(fileName),
+    ]
   }
 }
 

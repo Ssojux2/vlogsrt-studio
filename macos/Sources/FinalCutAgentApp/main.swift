@@ -357,14 +357,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       return
     }
     do {
-      let revision = EngineSessionRunner.stagedInputRevision(
-        job: current.jobURL, fileManager: .default
-      ) ?? String(repeating: "0", count: 64)
-      let requestedAt = ISO8601DateFormatter().string(from: Date())
       let external = try SecurityScopedBookmarkStore()
         .resolve(key: Self.developmentWorkspaceBookmark)?
         .appendingPathComponent("Jobs", isDirectory: true)
         .appendingPathComponent(current.jobID, isDirectory: true)
+      // 개발 실행은 외부 job 폴더에서 돈다 — 리비전도 거기서 읽어야 실행 중
+      // 취소가 엔진에 닿는다(all-zero는 엔진이 다른 리비전으로 무시한다).
+      let revision = EngineSessionRunner.runningInputRevision(
+        appGroupJob: current.jobURL, externalJob: external
+      ) ?? String(repeating: "0", count: 64)
+      let requestedAt = ISO8601DateFormatter().string(from: Date())
       let message = CancellationRequestMessage(
         inputRevision: revision,
         attemptID: "*",

@@ -305,6 +305,50 @@ func _testRegistry(selection: String = "a".padding(toLength: 64, withPad: "a", s
     EngineSessionRunner.stagedInputRevision(job: external, fileManager: .default) == nil)
 }
 
+@Test func runningInputResolutionCoversDevelopmentAndPreReceiveJobs() throws {
+  let root = FileManager.default.temporaryDirectory
+    .appendingPathComponent(UUID().uuidString, isDirectory: true)
+  let appGroup = root.appendingPathComponent("app-group-job", isDirectory: true)
+  let external = root.appendingPathComponent("external-job", isDirectory: true)
+  try FileManager.default.createDirectory(at: appGroup, withIntermediateDirectories: true)
+  try FileManager.default.createDirectory(at: external, withIntermediateDirectories: true)
+  defer { try? FileManager.default.removeItem(at: root) }
+
+  // receive 전 — 어느 쪽 workspace에도 리비전이 없다(all-zero 취소와 구분된다).
+  #expect(
+    EngineSessionRunner.runningInputRevision(appGroupJob: appGroup, externalJob: external)
+      == nil)
+
+  // 개발 실행은 외부 job 폴더에서 돈다 — 리비전이 거기에만 생겨도 읽는다.
+  let externalWorkspace = external.appendingPathComponent("workspace", isDirectory: true)
+  try FileManager.default.createDirectory(
+    at: externalWorkspace, withIntermediateDirectories: true)
+  let externalRevision = String(repeating: "e", count: 64)
+  try Data(
+    ("{\"payload\":{\"revision\":\"\(externalRevision)\"},\"protocol_version\":\"1.0\","
+      + "\"type\":\"ProjectRevision\"}\n").utf8
+  ).write(to: externalWorkspace.appendingPathComponent("revision.jsonl"))
+  #expect(
+    EngineSessionRunner.runningInputRevision(appGroupJob: appGroup, externalJob: external)
+      == externalRevision)
+  // 외부 job을 모르는 호출자는 nil — 짐작으로 외부 리비전을 쓰지 않는다.
+  #expect(
+    EngineSessionRunner.runningInputRevision(appGroupJob: appGroup, externalJob: nil) == nil)
+
+  // App Group workspace가 생기면 그쪽이 먼저다(번들 실행).
+  let appGroupWorkspace = appGroup.appendingPathComponent("workspace", isDirectory: true)
+  try FileManager.default.createDirectory(
+    at: appGroupWorkspace, withIntermediateDirectories: true)
+  let bundledRevision = String(repeating: "a", count: 64)
+  try Data(
+    ("{\"payload\":{\"revision\":\"\(bundledRevision)\"},\"protocol_version\":\"1.0\","
+      + "\"type\":\"ProjectRevision\"}\n").utf8
+  ).write(to: appGroupWorkspace.appendingPathComponent("revision.jsonl"))
+  #expect(
+    EngineSessionRunner.runningInputRevision(appGroupJob: appGroup, externalJob: external)
+      == bundledRevision)
+}
+
 func makeBundledPlan() throws -> EngineLaunchPlan {
   let invocation = try? BundledEngineInvocation.create(
     operation: .analyze,

@@ -225,21 +225,37 @@ def _is_retryable(exc: Exception) -> bool:
 
 @dataclass(frozen=True, slots=True)
 class LiveTranscriber:
-    """실제 OpenAI 호출. `record`와 `--online`에서만 만들어진다."""
+    """실제 OpenAI 호출. `record`와 `--online`에서만 만들어진다.
+
+    `cancellation`은 외부 호출 직전 게이트다(S1A) — 조각·재시도·거부 인자 재요청의
+    모든 시도가 `_retry`를 지나므로 게이트도 거기서 한 번에 지난다. 게이트가 던지는
+    취소(WorkflowCancelled, BaseException)는 아래 `except Exception` 재시도 판단에
+    잡히지 않고 그대로 올라간다. 기본 None은 하위 호환이다 — 게이트 없이 만든
+    호출자(레거시 `pipeline`)는 예전과 같이 움직인다.
+    """
 
     api_key: str
     base_url: str | None = None
+    cancellation: Callable[[], None] | None = None
 
     def _client(self) -> Any:
         import openai  # 지연 import — 오프라인 경로에서는 패키지조차 건드리지 않는다.
 
+        # SDK 기본 재시도(2, 설치된 3.8.0 실측)는 `_retry`의 게이트를 우회하는 숨은
+        # 재호출이다 — 재시도는 게이트를 지나는 `_retry`에서만 일어난다.
         if self.base_url:
-            return openai.OpenAI(api_key=self.api_key, base_url=self.base_url)
-        return openai.OpenAI(api_key=self.api_key)
+            return openai.OpenAI(api_key=self.api_key, base_url=self.base_url, max_retries=0)
+        return openai.OpenAI(api_key=self.api_key, max_retries=0)
+
+    def _gate(self) -> None:
+        """매 API 시도 직전 취소 확인 — 취소 뒤 새 조각·재시도·재요청이 없다."""
+        if self.cancellation is not None:
+            self.cancellation()
 
     def _retry(self, call: Callable[[], Any], what: str, cfg: Config) -> Any:
         last: Exception | None = None
         for attempt in range(cfg.api_max_retries):
+            self._gate()
             try:
                 return call()
             except Exception as exc:  # noqa: BLE001 - 재시도 판단 후 즉시 재던진다
@@ -393,13 +409,25 @@ def _to_dict(response: Any) -> dict[str, Any]:
 
 
 def get_transcriber(
-    cfg: Config | None = None, *, online: bool = False, force_offline: bool = False
+    cfg: Config | None = None,
+    *,
+    online: bool = False,
+    force_offline: bool = False,
+    cancellation: Callable[[], None] | None = None,
 ) -> Transcriber:
-    """오프라인이면 언제나 픽스처를 돌려준다. 이 함수가 비용 안전장치다."""
+    """오프라인이면 언제나 픽스처를 돌려준다. 이 함수가 비용 안전장치다.
+
+    `cancellation`은 실제 호출 경로에만 심는다(S1A) — 픽스처는 외부 호출이
+    없어 게이트가 확인할 것도 없다.
+    """
     if force_offline or (not online and env.is_offline()):
         return FixtureTranscriber(fixture_dir=env.fixture_dir())
     # online=True는 사람이 --online을 직접 친 경우뿐이다. 그때만 오프라인 기본값을 넘는다.
-    return LiveTranscriber(api_key=env.require_api_key(force=online), base_url=env.base_url())
+    return LiveTranscriber(
+        api_key=env.require_api_key(force=online),
+        base_url=env.base_url(),
+        cancellation=cancellation,
+    )
 
 
 # ─────────────────────────────────────────────────────────────

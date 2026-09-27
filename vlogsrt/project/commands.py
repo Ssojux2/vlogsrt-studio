@@ -35,7 +35,7 @@ import os
 import shutil
 import sys
 import uuid
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -134,8 +134,15 @@ _CAPTION_ESTIMATE = "caption-estimate.jsonl"
 _CAPTION_RESULT = "caption-result.jsonl"
 
 
-class WorkflowCancelled(RuntimeError):
-    """앱이 기록한 CancellationRequest를 단계 경계에서 만났다 — 남은 호출을 하지 않는다."""
+class WorkflowCancelled(BaseException):
+    """앱이 기록한 CancellationRequest를 호출 직전 게이트에서 만났다 — 남은 외부 호출이 없다.
+
+    `BaseException`인 이유가 중요하다: 전사 경로는 실패를 상태 기록으로 바꿔 삼키는
+    `except Exception` 층들(`transcribe_source`·`transcribe_outcome`·경계 전사)을 지나
+    내려가는데, 취소는 어느 소스·경계의 실패가 아니라 실행 전체를 멈추는 신호다.
+    `KeyboardInterrupt`와 같은 부류로 취급한다 — 잡는 곳은 상태를 `cancelled`로
+    닫는 `_project_analyze`와 종료 코드를 정하는 `project_command`뿐이다.
+    """
 
     def __init__(self, cancellation: CancellationRequest) -> None:
         super().__init__(
@@ -143,6 +150,27 @@ class WorkflowCancelled(RuntimeError):
             "분석을 중단한다"
         )
         self.cancellation = cancellation
+
+
+_ENGINE_JOB_DIR = "VLOGSRT_ENGINE_JOB_DIR"
+
+
+def _cancellation_paths(workspace: Path) -> tuple[Path, ...]:
+    """엔진이 취소 기록을 찾는 경로 — workspace와 엔진 작업 폴더 루트.
+
+    앱(`CancellationStore`)은 App Group job 루트와 개발 외부 job 루트에 기록한다.
+    엔진 진입점(`vlogsrt-engine.py` — 개발 래퍼가 위임한다)이 그 루트를
+    `_ENGINE_JOB_DIR`로 알려준다. 시작할 때 한 번 복사만 하면 실행 중 기록이
+    유실되므로 확인마다 둘 다 읽는다 — workspace가 생기기 전에 기록돼도 잃히지
+    않는다.
+    """
+    paths = [workspace / _CANCEL]
+    root = env.get(_ENGINE_JOB_DIR).strip()
+    if root:
+        staged = Path(root) / _CANCEL
+        if staged != paths[0]:
+            paths.append(staged)
+    return tuple(paths)
 
 
 def _check_cancellation(workspace: Path, input_revision: str, attempt_id: str) -> None:
@@ -153,17 +181,17 @@ def _check_cancellation(workspace: Path, input_revision: str, attempt_id: str) -
     프로젝트 변경 — 는 `attempt_id="*"`로 기록하고 그 입력 리비전의 모든 시도에
     적용한다. 캐시는 그냥 둔다 — 취소는 지금 실행만 멈춘다.
     """
-    path = workspace / _CANCEL
-    if not path.is_file():
-        return
-    for message in _read_messages(path):
-        if not isinstance(message, CancellationRequest):
-            raise ValueError(f"취소 기록에 CancellationRequest가 아닌 메시지가 있다: {path}")
-        if message.input_revision != input_revision:
+    for path in _cancellation_paths(workspace):
+        if not path.is_file():
             continue
-        if message.attempt_id != attempt_id and message.attempt_id != "*":
-            continue
-        raise WorkflowCancelled(message)
+        for message in _read_messages(path):
+            if not isinstance(message, CancellationRequest):
+                raise ValueError(f"취소 기록에 CancellationRequest가 아닌 메시지가 있다: {path}")
+            if message.input_revision != input_revision:
+                continue
+            if message.attempt_id != attempt_id and message.attempt_id != "*":
+                continue
+            raise WorkflowCancelled(message)
 
 
 def _media_grant_revision(
@@ -226,6 +254,9 @@ def project_command(args: argparse.Namespace) -> int:
     }
     try:
         return handlers[args.project_command](args)
+    except WorkflowCancelled as exc:  # BaseException이라 Exception 절로는 안 잡힌다
+        log.error(str(exc))
+        return 2
     except Exception as exc:  # noqa: BLE001 - CLI는 traceback 없이 단계 실패를 보고한다
         log.error(str(exc))
         return 2
@@ -778,11 +809,21 @@ def _produce_analysis_candidates(
         load_media_map(args.media_map) if args.media_map is not None else ()
     )
     ledger = UsageLedger(Decimal(estimate.cost_upper_bound or "0"))
+
+    def cancellation() -> None:
+        _check_cancellation(workspace, revision.revision, attempt_id)
+
     transcriber = _BudgetedTranscriber(
         transcribe.get_transcriber(
-            cfg, online=bool(args.online), force_offline=not bool(args.online)
+            cfg,
+            online=bool(args.online),
+            force_offline=not bool(args.online),
+            # 실제 호출 경로(LiveTranscriber)에는 조각·재시도마다 지난다.
+            # 픽스처·가짜 전사기는 _BudgetedTranscriber의 위임 직전 게이트가 지킨다.
+            cancellation=cancellation,
         ),
         estimate.transcription_seconds,
+        gate=cancellation,
     )
     _check_cancellation(workspace, revision.revision, attempt_id)
     prepared = runner.prepare_audio(
@@ -858,14 +899,29 @@ def _produce_analysis_candidates(
 
 
 class _BudgetedTranscriber:
-    def __init__(self, delegate: transcribe.Transcriber, limit: Fraction) -> None:
+    """위임 직전 취소 게이트를 곁들인 전사기 — 1차·재전사·두 번째 모델이 모두 지난다.
+
+    이 계층의 `transcribe`는 소스 전사·경계 재전사·글자 교정의 두 번째 모델 호출이
+    공통으로 지나는 유일한 고리다. 게이트가 `WorkflowCancelled`(BaseException)를
+    던지면 실패로 상태 기록을 만드는 `except Exception` 층들을 뚫고 올라와 실행
+    전체를 `cancelled`로 닫는다.
+    """
+
+    def __init__(
+        self,
+        delegate: transcribe.Transcriber,
+        limit: Fraction,
+        gate: Callable[[], None] = lambda: None,
+    ) -> None:
         self.delegate = delegate
         self.limit = limit
+        self.gate = gate
         self.used = Fraction()
 
     def transcribe(
         self, job: transcribe.TranscriptionJob, cfg: Config
     ) -> list[transcribe.ChunkResponse]:
+        self.gate()
         requested = sum((Fraction(str(chunk.duration)) for chunk in job.chunks), start=Fraction())
         if self.used + requested > self.limit:
             raise RuntimeError("전사 요청 길이가 승인된 비용 상한을 넘는다")
@@ -1063,6 +1119,9 @@ def _decide_window(
             raise ValueError(f"Luna 픽스처가 없다: {fixture}")
         raw = json.loads(fixture.read_text(encoding="utf-8"))
     else:
+        # Luna 호출 직전 재확인 — 창 게이트가 지난 뒤 프레임 뽑기(ffmpeg) 동안
+        # 기록된 취소까지 잡는다. 취소 뒤 새 API 호출은 없다.
+        _check_cancellation(workspace, input_revision, attempt_id)
         try:
             raw = transcribe.request_luna_vision(
                 client, model=settings.model, payload=payload, online=True
