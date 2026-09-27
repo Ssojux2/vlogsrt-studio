@@ -3,7 +3,7 @@
 Read [the common execution contract](stab-execution-contract.md) before edits; it fixes the required High Agency, mailbox, protected-file and verification workflow.
 
 ## Execution split
-The umbrella requirements below remain intact. Execute serial bounded units under their live Dispatches: [S2A-1 ownership](stab-s2a-1-execution-ownership.md) covers 1–2; [S2A-2 credentials/preflight](stab-s2a-2-credentials-preflight.md) covers 3–4; [S2A-3 progress/refresh](stab-s2a-3-progress-refresh.md) covers 5–6. S2A-1 is accepted; S2A-2 is internally staged and incomplete. Each worker supplies a fresh immutable Impact estimate; the original umbrella estimate below is not permission to expand a unit.
+The umbrella requirements below remain intact. Execute serial bounded units under their live Dispatches: [S2A-1 ownership](stab-s2a-1-execution-ownership.md) covers 1–2; [S2A-2 credentials/preflight](stab-s2a-2-credentials-preflight.md) covers 3–4; [S2A-3 progress/refresh](stab-s2a-3-progress-refresh.md) covers 5–6. S2A-1 and S2A-2 are accepted offline; S2A-2 final code is `37a7bc5` with [independent evidence](../reviews/stab-s2a2-final-preflight-sol.md). S2A-3 remains pending. Each worker supplies a fresh immutable Impact estimate; the original umbrella estimate below is not permission to expand a unit.
 
 ## Target and ownership
 After S1 acceptance, GLM implements runtime/UX in Python engine entrypoint and Swift core, app and extension, plus tests. Sol owns documentation and validation. Scope is S2 runtime UX; budget/cache accounting is S2B and import lifecycle is S2C. Read the approved stabilization plan and this brief. Work serially in the current checkout.

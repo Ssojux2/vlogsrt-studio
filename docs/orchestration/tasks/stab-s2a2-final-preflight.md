@@ -1,5 +1,7 @@
 # STAB-S2A-2 final unit — actual readiness and audio topology
 
+**Accepted offline at `37a7bc5` (2026-09-27).** [Sol review](../reviews/stab-s2a2-final-preflight-sol.md): final guarded `make check` 2,868 Python, 142 total Swift, unsigned native app/extension and uncovered scripts all pass. Original Impact below remains immutable; Sol explicitly approved 25 files / 7 modules in `msg_789f35095768` to repair the inherited env-to-project import violation and its tests. No invariant was relaxed. Low-level env application now receives resolved role names from the engine boundary; actual carrier/config compatibility is preserved. S2A-3 and later phases remain pending.
+
 Baseline code `c96e0d5`, docs `9ec7e7a`; credential foundation and role credentials are accepted. This brief completes remaining [S2A-2 requirements](stab-s2a-2-credentials-preflight.md) under the [execution contract](stab-execution-contract.md). Do not redo credentials or implement S2A-3 progress, budget, caption or import lifecycle features.
 
 ## Ownership and immutable bound
