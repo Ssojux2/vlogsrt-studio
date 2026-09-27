@@ -603,3 +603,30 @@ Final child commands used the following literal clean environment. They were sup
 
 - Existing conftest guards remain cooperative, not an OS sandbox or retrospective no-access proof. The watchdog bounds its process group, not unrelated or independently detached children. No live product provider, original media, FCP, Swift/native rerun or current compact success is claimed.
 - **Settlement:** `task_2ff24b9963e4` / `ctx_b9eed3e720a8` succeeded via `msg_ad0871324707`; both paths were correctly listed in the completion payload. ROOT verified hashes and idle state, released and closed the exact external terminal (`ptyKilled=true`), and ACKed `delivery_90058102f3b8`. No reclaimable workers remained. Next is S2B-2b project ledger/estimate integration, followed by S2B-3 cache/retry/cost UI; the overall project is incomplete.
+
+## STAB-S2B-2b 유료 요청 회계 인수 — e76df91 (2026-09-28)
+
+□ 모델·작업 범위
+  ○ GLM은 설치된 High Agency 0.10.1 스킬을 읽고 `high / files<=8 / modules<=8 / shared-api`를 사전 기록함
+  ○ 실제 커밋 11개 경로: 원래 소유 7개와 Sol이 단계별로 승인한 테스트 확장 4개. 파일 수 예상은 빗나감
+  ○ GLM은 소스와 정적 검사만 담당함. Sol은 가짜 SDK의 실제 호출 경계에서 모든 실행 검증을 담당함
+
+□ 관찰된 오류와 고친 내용
+  ○ 첫 RED 테스트는 600초 리소스 때문에 승인액을 전사에서 먼저 소진함. 합성 리소스를 12초로 맞춰 Luna 호출 도달을 증명함
+  ○ 과거 기록 검사가 JSONL 줄바꿈을 빼고 디코더를 호출해 현재 시도까지 거부함. 줄바꿈을 보존하도록 수정함
+  ○ 기존 진행률·엔진 가짜 Luna 함수가 새 관찰자 인자를 받지 못해 5개 창이 오류가 됨. 함수 계약을 맞춤
+  ○ 병렬 사용량 투영은 잠금 전에 스냅샷을 읽어 오래된 내용으로 덮을 수 있었음. 잠금 순서를 고치고 결정적 경합 검사를 추가함
+  ○ GPT 전사의 `UsageDuration.seconds`를 해석하지 못하던 경로를 고침. 미터링 해석 오류는 회계 문맥 전체를 닫도록 함
+
+□ 검사에서 드러난 개선점
+  ○ 고정 4회 전사 배수는 재시도까지 포함한 완료 비용 상한의 증거가 아님. 승인된 작업 몫으로 설명을 바꾸고 소진 시 정직하게 중단함
+  ○ 견적 지문이 엔드포인트·역할을 묶자, 기존 테스트 3개가 검사와 실행 사이에 값을 바꿔 의도한 키 검사에 도달하지 못함. 합성 설정을 검사 전부터 고정함
+  ○ 새 요청 형식의 구조·추가 필드를 엄격히 검사함. 앞으로 요청 모양을 바꾸면 견적 정책과 회귀 검사를 함께 갱신해야 함
+  ○ High Agency 파일 예상 `<=8` 대비 실제 11개임. 초기 경계 설계에 기존 테스트의 설정 순서 영향까지 포함해야 함
+  ○ GLM이 Sol의 늦은 소스 검토 메시지를 읽기 전에 최종 인수 질문을 보냄. 최종 질문 직전 수신함을 비우고 미해결 지적을 확인하는 절차 필요
+
+□ 검증과 남은 일
+  ○ Sol 관련 검사 103개 통과. 첫 전체 검사 2,975개 통과·3개 실패를 고친 뒤 최종 2,978개 통과, Ruff·mypy·불변 규칙 통과
+  ○ 코드 커밋 `e76df91f951c0b28e7fe60c29d35929f0a56f06b`; 상세 근거는 `docs/orchestration/reviews/stab-s2b2b-accounting-integration-sol.md`에 남김
+  ○ 미지수 사용량과 원장 수치는 아직 앱 화면에 나오지 않음. 성공 캐시·명시적 재시도·비용 화면은 S2B-3에서 구현 필요
+  ○ 실제 공급자·원본 미디어·Final Cut Pro는 실행하지 않음. 앞선 작업의 보호 한계나 과거 자격 증명 접근 여부는 이 통과 결과로 달라지지 않음
