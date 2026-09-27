@@ -10,6 +10,7 @@ Applies to every STAB implementation task. The approved plan and current live Di
 
 ## During work
 - Keep scope to the current task. No additional agents, manager layers or model swaps.
+- Shared-checkout mitigation: Sol prepares briefs before GLM launch and keeps in-flight review notes/logs outside tracked work. During GLM's final verification/settlement, defer shared docs/checkpoint mutations until the worker's final turn is idle/closed; this avoids invalidating the High Agency whole-tree snapshot. Do not modify the installed plugin to bypass its guard.
 - At each natural file/test checkpoint and immediately before settlement, consume pending follow-ups; acknowledge material scope changes explicitly through Orca.
 - Keep five-minute heartbeats outside blocking ask/check waits. A successful send is not proof of recipient acknowledgment.
 - After edits, verify the touched behavior first, then affected/full gates where shared contracts require them. Preserve real command exits using redirection or pipefail; a trailing `tail` exit is not the test exit.
