@@ -247,14 +247,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
           }
         )
         statusLabel?.stringValue = Self.describe(outcome, operation: operation, jobID: jobID)
-        // 종료 코드 0만으로 전체 성공으로 말하지 않는다 — 집계가 부분 실패를
-        // 말하면 그 요약이 사용자에게 보여야 한다(S1B).
+        // 종료 코드 0만으로 전체 성공으로 말하지 않는다 — 완료한 분석의 요약은
+        // 집계가 말한다: 성공·부분 실패·알 수 없음 모두 그 요약으로 보여준다(S1B-R1).
         if case .completed = outcome, operation == .analyze {
-          let analysisOutcome = job.readAnalysisOutcome()
-          if case .partial = analysisOutcome {
+          switch job.readAnalysisRecord() {
+          case .valid(let result):
             statusLabel?.stringValue =
               "\(Self.describe(outcome, operation: operation, jobID: jobID)) · "
-              + analysisOutcome.userFacingSummary
+              + AnalysisOutcome.make(result).userFacingSummary
+          case .unknown:
+            statusLabel?.stringValue =
+              "\(Self.describe(outcome, operation: operation, jobID: jobID)) · "
+              + AnalysisOutcome.legacyUnknown.userFacingSummary
+          case .fresh:
+            break  // 기록이 없는 새 작업 — 일반 완료 문구 그대로 둔다.
           }
         }
         if case .unavailable = outcome {

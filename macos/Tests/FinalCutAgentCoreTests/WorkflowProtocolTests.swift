@@ -93,6 +93,94 @@ private let analysisErrorLine = """
   {"payload":{"attempt_id":"attempt-001","candidate_count":0,"estimate_revision":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","input_revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","reason_codes":["stream_unavailable"],"result_revision":"17b3555d17ad45913ee710c9fe77262107e512a114743160b32980abe814468f","status":"error","upstream":{"audio":{"failed":1,"skipped":0,"total":1},"sources":{"total":1,"usable":0},"transcription":{"failed":0,"skipped":1,"total":1},"vad":{"failed":0,"skipped":1,"total":1}},"windows":{"failed":1,"skipped":0,"successful":0,"total":1}},"protocol_version":"1.3","type":"AnalysisResult"}
   """
 
+/// 성공 집계 — 시도 상태 불일치(failed 시도 + success 집계) 시험의 재료.
+private let analysisSuccessLine = """
+  {"payload":{"attempt_id":"attempt-001","candidate_count":1,"estimate_revision":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","input_revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","reason_codes":[],"result_revision":"ffa04e67f64c58e86cb720cceec797189be2c247ebb63222f244ad1574c7981a","status":"success","upstream":{"audio":{"failed":0,"skipped":0,"total":1},"sources":{"total":1,"usable":1},"transcription":{"failed":0,"skipped":0,"total":1},"vad":{"failed":0,"skipped":0,"total":1}},"windows":{"failed":0,"skipped":0,"successful":1,"total":1}},"protocol_version":"1.3","type":"AnalysisResult"}
+  """
+
+/// STAB-S1B-R1 — 소비자 우회 회귀: 묶을 수 없는 기록이 검토를 켜거나 재실행으로 흐른다.
+/// 지금 판독기(readAnalysisOutcome)와 공유 라우팅 어미(shouldLoadCandidates)를 함께 쓴다.
+@Test func unboundHistoryMustNotEnableCandidateReviewOrImplicitRerun() throws {
+  let root = FileManager.default.temporaryDirectory
+    .appendingPathComponent(UUID().uuidString, isDirectory: true)
+  defer { try? FileManager.default.removeItem(at: root) }
+  let workspace = AppGroupWorkspace(rootURL: root)
+  _ = try workspace.createJob(id: "job-r1")
+  let job = try RoundTripJob(workspace: workspace, id: "job-r1")
+  let attemptsURL = job.directoryURL.appendingPathComponent("analysis-attempts.jsonl")
+
+  func stage(
+    result: String, attempts: [String], estimate: String? = estimateLine,
+    staleCandidates: Bool = true
+  ) throws {
+    try? FileManager.default.removeItem(at: job.analysisResultURL)
+    try? FileManager.default.removeItem(at: job.analysisEstimateURL)
+    try? FileManager.default.removeItem(at: job.candidatesURL)
+    try Data(result.utf8).write(to: job.analysisResultURL, options: .atomic)
+    try Data((attempts.joined(separator: "\n") + "\n").utf8)
+      .write(to: attemptsURL, options: .atomic)
+    if let estimate {
+      try Data(estimate.utf8).write(to: job.analysisEstimateURL, options: .atomic)
+    }
+    if staleCandidates {
+      try Data("stale\n".utf8).write(to: job.candidatesURL, options: .atomic)
+    }
+  }
+
+  func mustNotBeReviewable() throws {
+    let outcome = job.readAnalysisOutcome()
+    #expect(
+      !AnalysisOutcome.shouldLoadCandidates(
+        outcome: outcome, candidatesFileExists: true
+      ),
+      "묶을 수 없는 기록이 후보 검토를 켰다: \(outcome)"
+    )
+  }
+
+  // 낡은 집계(더 최근 시도) — 지금 결과로 읽히면 안 된다.
+  try stage(
+    result: analysisResultLine,
+    attempts: [attempt("failed"), attempt("succeeded", id: "attempt-002")]
+  )
+  try mustNotBeReviewable()
+
+  // 마지막 시도 running·cancelled — 검토를 켤 수 없다.
+  try stage(result: analysisResultLine, attempts: [attempt("running")])
+  try mustNotBeReviewable()
+  try stage(result: analysisResultLine, attempts: [attempt("cancelled")])
+  try mustNotBeReviewable()
+
+  // 추정 기록이 없거나 깨졌다 — 옛 유효 기록으로 넘어가면 안 된다.
+  try stage(result: analysisResultLine, attempts: [attempt("succeeded")], estimate: nil)
+  try mustNotBeReviewable()
+  try stage(result: analysisResultLine, attempts: [attempt("succeeded")], estimate: "not json\n")
+  try mustNotBeReviewable()
+  try stage(
+    result: analysisResultLine, attempts: [attempt("succeeded")],
+    estimate: estimateLine.dropFirst(200).description
+  )
+  try mustNotBeReviewable()
+
+  // 시도 기록이 없거나 깨졌다 — 묶음의 증거가 없다.
+  try stage(result: analysisResultLine, attempts: [])
+  try mustNotBeReviewable()
+  try stage(result: analysisResultLine, attempts: ["garbage\n"])
+  try mustNotBeReviewable()
+
+  // 시도 상태 불일치 — success 집계에 failed 시도는 성공이 아니다.
+  try stage(result: analysisSuccessLine, attempts: [attempt("failed")])
+  try mustNotBeReviewable()
+  // partial 집계에 cancelled 시도도 검토를 켤 수 없다.
+  try stage(result: analysisResultLine, attempts: [attempt("cancelled")])
+  try mustNotBeReviewable()
+
+  // 헤드라인 우회: 상태 없음(unknown)이 낡은 후보 파일을 검토 가능으로 만든다.
+  #expect(
+    !AnalysisOutcome.shouldLoadCandidates(outcome: .legacyUnknown, candidatesFileExists: true),
+    "unknown이 후보 검토를 켰다"
+  )
+}
+
 @Test func analysisResultDecodesAndSummarizesAllFourOutcomeFaces() throws {
   let result = try #require(
     try ProtocolCodec.decode(
@@ -127,7 +215,8 @@ private let analysisErrorLine = """
   #expect(summaries[1].contains("검토 가능"))
   #expect(summaries[2].contains("분석 실패"))
   #expect(summaries[2].contains("보존"))
-  #expect(summaries[3].contains("구형 엔진"))
+  #expect(summaries[3].contains("알 수 없다"))
+  #expect(summaries[3].contains("자동 재실행하지 않는다"))
   #expect(Set(summaries).count == 4)
 
   // 낡은 봉투의 집계는 해석할 수 없다 — 성공도 재실행도 아닌 unknown이다.
@@ -232,13 +321,16 @@ private let analysisErrorLine = """
   let job = try RoundTripJob(workspace: workspace, id: "job-outcome")
 
   func stageJob(
-    result: String, attempts: [String], estimate: String? = nil
+    result: String, attempts: [String], estimate: String? = estimateLine
   ) throws {
     try? FileManager.default.removeItem(at: job.analysisResultURL)
     try Data(result.utf8).write(to: job.analysisResultURL, options: .atomic)
     let attemptsURL = job.directoryURL.appendingPathComponent("analysis-attempts.jsonl")
-    try Data((attempts.joined(separator: "\n") + "\n").utf8)
-      .write(to: attemptsURL, options: .atomic)
+    try? FileManager.default.removeItem(at: attemptsURL)
+    if !attempts.isEmpty {
+      try Data((attempts.joined(separator: "\n") + "\n").utf8)
+        .write(to: attemptsURL, options: .atomic)
+    }
     if let estimate {
       try Data(estimate.utf8).write(to: job.analysisEstimateURL, options: .atomic)
     } else {
@@ -246,11 +338,13 @@ private let analysisErrorLine = """
     }
   }
 
-  // 기록이 없으면 unknown — 구형 엔진의 흔적을 성공으로 읽지 않는다.
-  #expect(job.readAnalysisOutcome() == .legacyUnknown)
+  // 기록이 전혀 없으면 새 작업이다 — 모호한 기록과 갈라 말한다(S1B-R1).
+  #expect(job.readAnalysisRecord() == .fresh)
 
-  // 마지막 시도가 집계와 같은 job(리비전·시도)에 묶였을 때만 읽힌다.
-  try stageJob(result: analysisResultLine, attempts: [attempt("running"), attempt("succeeded")])
+  // 마지막 시도가 집계와 같은 job(리비전·시도·상태)에 묶였을 때만 읽힌다.
+  try stageJob(
+    result: analysisResultLine, attempts: [attempt("running"), attempt("succeeded")]
+  )
   let outcome = job.readAnalysisOutcome()
   #expect(outcome == .partial(
     candidateCount: 1, windowsFailed: 1, windowsSkipped: 0, reasons: ["api_exception"]
@@ -259,36 +353,43 @@ private let analysisErrorLine = """
 
   // 마지막 시도가 취소·running이면 집계는 검토를 켜지 못한다.
   try stageJob(result: analysisResultLine, attempts: [attempt("succeeded"), attempt("cancelled")])
-  #expect(job.readAnalysisOutcome() == .legacyUnknown)
+  #expect(job.readAnalysisRecord() == .unknown)
   try stageJob(result: analysisResultLine, attempts: [attempt("succeeded"), attempt("running")])
-  #expect(job.readAnalysisOutcome() == .legacyUnknown)
+  #expect(job.readAnalysisRecord() == .unknown)
 
   // 낡은 집계(더 최근 시도가 성공)도 지금 결과로 읽히지 않는다.
   try stageJob(
     result: analysisResultLine,
     attempts: [attempt("failed"), attempt("succeeded", id: "attempt-002")]
   )
-  #expect(job.readAnalysisOutcome() == .legacyUnknown)
+  #expect(job.readAnalysisRecord() == .unknown)
 
-  // 추정 리비전이 job의 기록과 다른 집계는 묶이지 않은 것이다.
-  try stageJob(
-    result: analysisResultLine, attempts: [attempt("succeeded")],
-    estimate: estimateLine
+  // 시도 상태 불일치 — success 집계에 failed 시도는 성공이 아니다.
+  try stageJob(result: analysisSuccessLine, attempts: [attempt("failed")])
+  #expect(job.readAnalysisRecord() == .unknown)
+
+  // 추정 기록이 없거나 리비전이 다른 집계는 묶이지 않은 것이다 — 옛 기록으로
+  // 넘어가지 않는다.
+  try stageJob(result: analysisResultLine, attempts: [attempt("succeeded")], estimate: nil)
+  #expect(job.readAnalysisRecord() == .unknown)
+  try stageJob(result: analysisResultLine, attempts: [attempt("succeeded")])
+  #expect(
+    job.readAnalysisOutcome() == .partial(
+      candidateCount: 1, windowsFailed: 1, windowsSkipped: 0, reasons: ["api_exception"]
+    )
   )
-  #expect(job.readAnalysisOutcome() == .partial(candidateCount: 1, windowsFailed: 1, windowsSkipped: 0, reasons: ["api_exception"]))
   try stageJob(
     result: analysisResultLine, attempts: [attempt("succeeded")],
     estimate: estimateLine.replacingOccurrences(
       of: String(repeating: "e", count: 64), with: String(repeating: "f", count: 64)
     )
   )
-  #expect(job.readAnalysisOutcome() == .legacyUnknown)
+  #expect(job.readAnalysisRecord() == .unknown)
 
   // 옛 시도가 남긴 후보 파일이 있어도 지금 집계가 실패면 검토로 보이지 않는다.
   try stageJob(
     result: analysisErrorLine,
-    attempts: [attempt("running"), attempt("failed")],
-    estimate: estimateLine
+    attempts: [attempt("running"), attempt("failed")]
   )
   try Data("stale\n".utf8).write(to: job.candidatesURL, options: .atomic)
   let failed = job.readAnalysisOutcome()
@@ -301,12 +402,70 @@ private let analysisErrorLine = """
       candidatesFileExists: FileManager.default.fileExists(atPath: job.candidatesURL.path)
     )
   )
-  #expect(AnalysisOutcome.shouldLoadCandidates(outcome: .legacyUnknown, candidatesFileExists: true))
+  // unknown은 어떤 후보 파일도 검토로 켜지 않는다 — 헤드라인 우회의 못 박기.
+  #expect(
+    !AnalysisOutcome.shouldLoadCandidates(outcome: .legacyUnknown, candidatesFileExists: true)
+  )
   #expect(
     !AnalysisOutcome.shouldLoadCandidates(
       outcome: .partial(candidateCount: 2, windowsFailed: 1, windowsSkipped: 0, reasons: []),
       candidatesFileExists: false
     )
+  )
+}
+
+/// 공유 라우터 — 새 작업·검증된 결과·모호한 기록의 행선을 못 박는다(S1B-R1).
+/// unknown은 엔진 호출·후보 검토 어디로도 가지 않는다.
+@Test func reviewRouterSeparatesFreshValidAndUnknownHistory() throws {
+  #expect(
+    AnalysisReviewRouter.route(record: .fresh, candidatesFileExists: false, retryArmed: false)
+      == .freshJob
+  )
+  // 낡은 후보 파일이 있어도 새 작업 판정은 기록이 전혀 없을 때뿐이다.
+  #expect(
+    AnalysisReviewRouter.route(record: .fresh, candidatesFileExists: true, retryArmed: true)
+      == .freshJob
+  )
+  #expect(
+    AnalysisReviewRouter.route(record: .unknown, candidatesFileExists: true, retryArmed: true)
+      == .showUnknown
+  )
+  #expect(
+    AnalysisReviewRouter.route(record: .unknown, candidatesFileExists: true, retryArmed: false)
+      == .showUnknown
+  )
+
+  // 검증된 success·partial은 후보 검토로, 검증된 실패는 명시적 재시도로만.
+  let partial = try decodeResult(analysisResultLine)
+  let success = try decodeResult(analysisSuccessLine)
+  let error = try decodeResult(analysisErrorLine)
+  #expect(
+    AnalysisReviewRouter.route(record: .valid(partial), candidatesFileExists: true, retryArmed: true)
+      == .reviewCandidates(
+        .partial(candidateCount: 1, windowsFailed: 1, windowsSkipped: 0, reasons: ["api_exception"])
+      )
+  )
+  #expect(
+    AnalysisReviewRouter.route(
+      record: .valid(success), candidatesFileExists: false, retryArmed: false
+    ) == .reviewCandidates(.success(candidateCount: 1))
+  )
+  #expect(
+    AnalysisReviewRouter.route(record: .valid(error), candidatesFileExists: true, retryArmed: false)
+      == .showFailure(.failed(reasons: ["stream_unavailable"]))
+  )
+  #expect(
+    AnalysisReviewRouter.route(record: .valid(error), candidatesFileExists: true, retryArmed: true)
+      == .retryEngine
+  )
+}
+
+private func decodeResult(_ line: String) throws -> AnalysisResultMessage {
+  try ProtocolCodec.decode(
+    AnalysisResultMessage.self,
+    type: "AnalysisResult",
+    version: ProtocolCodec.analysisVersion,
+    from: line.trimmingCharacters(in: .newlines)
   )
 }
 

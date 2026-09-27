@@ -462,9 +462,9 @@ public struct AnalysisResultMessage: Codable, Equatable, Sendable {
 }
 
 /// 앱이 사용자에게 보여주는 분석 결과의 네 가지 얼굴 — 성공(후보 0건 포함)·
-/// 부분 실패·전체 실패·구형 기록(상태 없음). 구형은 새 성공 증거도 재실행
-/// 근거도 아니다 — "모른다"로 보여줄 뿐이다. 종료 코드 0만으로 전체 성공
-/// 요약을 내리지 않는다.
+/// 부분 실패·전체 실패·알 수 없음(구형·낡은·중단·진행 중 기록). 알 수 없음은
+/// 새 성공 증거도 재실행 근거도 아니다 — "모른다"로 보여줄 뿐이다. 종료 코드
+/// 0만으로 전체 성공 요약을 내리지 않는다.
 public enum AnalysisOutcome: Equatable, Sendable {
   case success(candidateCount: Int)
   case partial(candidateCount: Int, windowsFailed: Int, windowsSkipped: Int, reasons: [String])
@@ -503,24 +503,25 @@ public enum AnalysisOutcome: Equatable, Sendable {
     case .failed(let reasons):
       "분석 실패 — 성공한 창이 없다 (사유: \(reasons.joined(separator: ", "))) · 영상은 보존됨"
     case .legacyUnknown:
-      "분석 결과 기록이 없다(구형 엔진) — 상태를 알 수 없다"
+      "분석 상태를 알 수 없다 — 기록이 구형·낡았거나 진행 중·중단이다 · 자동 재실행하지 않는다"
     }
   }
 
-  /// 지금 시도의 결과로 후보 검토 화면을 열어도 되는가 — 실패가 오래된 후보
-  /// 파일보다 앞선다. 옛 시도가 남긴 candidates 파일이 있어도 지금 집계가
-  /// 실패면 검토 가능으로 보이지 않는다. 구형(기록 없음)은 파일이 있을 때만
-  /// 예전처럼 연다 — 상태를 알 수 없다고 지우지는 않는다.
+  /// 지금 시도의 결과로 후보 검토 화면을 열어도 되는가 — 검토는 **검증된 지금
+  /// success·partial 결과**에만 켠다. 옛 시도가 남긴 candidates 파일이 있어도
+  /// 알 수 없음·실패는 검토 가능으로 보이지 않는다(S1B-R1).
   public static func shouldLoadCandidates(
     outcome: AnalysisOutcome, candidatesFileExists: Bool
   ) -> Bool {
-    if case .failed = outcome { return false }
-    return candidatesFileExists
+    switch outcome {
+    case .success, .partial: candidatesFileExists
+    case .failed, .legacyUnknown: false
+    }
   }
 
   /// 실패한 작업의 다음 요청이 어디로 가는가 — 같은 작업 재시도는 명시적이다.
   /// 첫 실패는 안내만 보여주고(재시도 가능), 사용자가 다시 누르면 엔진을 다시
-  /// 부른다. 구형(상태 없음)은 자동 재실행하지 않는다 — 기존 승인 흐름으로 간다.
+  /// 부른다. 알 수 없음은 재실행하지 않는다 — 실패와 섞지 않는다.
   public static func retryRoute(outcome: AnalysisOutcome, retryArmed: Bool) -> AnalysisRetryRoute {
     switch outcome {
     case .failed:
@@ -536,4 +537,55 @@ public enum AnalysisRetryRoute: Equatable, Sendable {
   case showFailure(canRetry: Bool)
   case retryEngine
   case noOutcome
+}
+
+/// job 기록의 셋 중 하나 — 새 작업과 모호한 기록을 갈라 말한다(S1B-R1).
+/// `fresh`는 시도·집계·후보 기록이 전혀 없는 새 job이고, `unknown`은 기록은
+/// 있으되 지금 job의 리비전·시도·상태와 묶을 수 없는 것이다 — 낡은 집계,
+/// 진행 중·취소 시도, 없거나 깨진 추정/시도 기록이 모두 여기다.
+public enum AnalysisRecordState: Equatable, Sendable {
+  case fresh
+  case valid(AnalysisResultMessage)
+  case unknown
+}
+
+/// 검토 화면의 행선지 — 모호한 기록은 요약만 보여주고 정지한다(재실행 없음).
+public enum AnalysisReviewRoute: Equatable, Sendable {
+  /// 새 작업 — 승인·분석 요청 흐름으로 간다.
+  case freshJob
+  /// 검증된 success·partial — 후보 검토와 함께 요약을 보여준다.
+  case reviewCandidates(AnalysisOutcome)
+  /// 검증된 실패 — 안내만 보여준다(재시도는 사용자의 다음 누름).
+  case showFailure(AnalysisOutcome)
+  /// 검증된 실패의 명시적 재시도 — 엔진을 다시 부른다.
+  case retryEngine
+  /// 모호한 기록 — 정직한 unknown 요약을 보여주고 정지한다.
+  case showUnknown
+}
+
+/// 기록 상태를 화면 행선으로 정규화하는 공유 라우터 — extension과 앱이 같은
+/// 표를 쓴다. unknown은 어떤 경우도 엔진 호출·후보 검토로 가지 않는다.
+public enum AnalysisReviewRouter {
+  public static func route(
+    record: AnalysisRecordState,
+    candidatesFileExists: Bool,
+    retryArmed: Bool
+  ) -> AnalysisReviewRoute {
+    switch record {
+    case .fresh:
+      return AnalysisReviewRoute.freshJob
+    case .unknown:
+      return AnalysisReviewRoute.showUnknown
+    case .valid(let result):
+      let outcome = AnalysisOutcome.make(result)
+      switch outcome {
+      case .success, .partial:
+        return AnalysisReviewRoute.reviewCandidates(outcome)
+      case .failed:
+        return retryArmed ? .retryEngine : .showFailure(outcome)
+      case .legacyUnknown:
+        return AnalysisReviewRoute.showUnknown
+      }
+    }
+  }
 }

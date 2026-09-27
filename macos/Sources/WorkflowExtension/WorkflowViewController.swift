@@ -176,63 +176,52 @@ public nonisolated final class WorkflowViewController: NSViewController {
       return
     }
     do {
-      // 집계 결과가 먼저다 — 실패·부분 실패는 후보 0건 성공과 다르게 말한다.
-      // 실패가 오래된 후보 파일보다 앞선다: 옛 시도의 candidates가 남아 있어도
-      // 지금 시도가 실패였으면 검토 가능으로 보이지 않는다. 실패 증거는 이미
-      // 동기화돼 있으므로 성공 실행을 다시 요구하지 않는다.
-      let outcome = job.readAnalysisOutcome()
-      if case .failed = outcome {
-        // 실패한 같은 작업의 재시도는 명시적이다 — 첫 실패는 안내만, 다시 누르면
-        // 엔진을 다시 부른다(위 취소 게이트·승인 게이트를 그대로 지난다).
-        switch AnalysisOutcome.retryRoute(outcome: outcome, retryArmed: failureRetryArmed) {
-        case .showFailure:
-          failureRetryArmed = true
-          clearCandidates()
-          roughcutButton.isEnabled = false
-          status.stringValue =
-            outcome.userFacingSummary + " · 다시 시도하려면 AI 분석 요청을 누르세요"
+      // 기록 상태를 공유 라우터로 정규화한다 — 모호한 기록(낡음·진행 중·취소·
+      // 깨진 추정/시도)은 후보 검토도 재실행도 켜지 않고 정직한 요약으로 정지한다.
+      let route = AnalysisReviewRouter.route(
+        record: job.readAnalysisRecord(),
+        candidatesFileExists: FileManager.default.fileExists(atPath: job.candidatesURL.path),
+        retryArmed: failureRetryArmed
+      )
+      switch route {
+      case .freshJob:
+        failureRetryArmed = false
+        if FileManager.default.fileExists(atPath: job.analysisEstimateURL.path),
+          !FileManager.default.fileExists(atPath: job.analysisAuthorizationURL.path)
+        {
+          try presentAuthorization(job)
           return
-        case .retryEngine:
-          failureRetryArmed = false
-          try openAgentURL(AgentURL.analyzeURL(jobID: job.id), pending: "분석 재시도 요청됨")
-          return
-        case .noOutcome:
-          break
         }
-      }
-      failureRetryArmed = false
-      switch outcome {
-      case .failed:
-        return
-      case .partial:
+        try openAgentURL(AgentURL.analyzeURL(jobID: job.id), pending: "비용 추정·분석 요청됨")
+      case .reviewCandidates(let outcome):
+        failureRetryArmed = false
         if AnalysisOutcome.shouldLoadCandidates(
           outcome: outcome,
           candidatesFileExists: FileManager.default.fileExists(atPath: job.candidatesURL.path)
         ) {
           try loadCandidates(job)
+        } else {
+          clearCandidates()
+          roughcutButton.isEnabled = false
         }
         status.stringValue = outcome.userFacingSummary
-        return
-      case .success(let candidateCount) where candidateCount == 0:
-        status.stringValue = outcome.userFacingSummary
-        return
-      case .legacyUnknown, .success:
-        break
+      case .showFailure(let outcome):
+        // 검증된 실패의 재시도는 명시적이다 — 첫 실패는 안내만, 다시 누르면 엔진을
+        // 다시 부른다(위 취소 게이트·승인 게이트를 그대로 지난다).
+        failureRetryArmed = true
+        clearCandidates()
+        roughcutButton.isEnabled = false
+        status.stringValue =
+          outcome.userFacingSummary + " · 다시 시도하려면 AI 분석 요청을 누르세요"
+      case .retryEngine:
+        failureRetryArmed = false
+        try openAgentURL(AgentURL.analyzeURL(jobID: job.id), pending: "분석 재시도 요청됨")
+      case .showUnknown:
+        failureRetryArmed = false
+        clearCandidates()
+        roughcutButton.isEnabled = false
+        status.stringValue = AnalysisOutcome.legacyUnknown.userFacingSummary
       }
-      if AnalysisOutcome.shouldLoadCandidates(
-        outcome: outcome,
-        candidatesFileExists: FileManager.default.fileExists(atPath: job.candidatesURL.path)
-      ) {
-        try loadCandidates(job)
-        return
-      }
-      if FileManager.default.fileExists(atPath: job.analysisEstimateURL.path),
-        !FileManager.default.fileExists(atPath: job.analysisAuthorizationURL.path)
-      {
-        try presentAuthorization(job)
-        return
-      }
-      try openAgentURL(AgentURL.analyzeURL(jobID: job.id), pending: "비용 추정·분석 요청됨")
     } catch {
       status.stringValue = "분석 요청 실패: \(error.localizedDescription)"
       analyzeButton.isEnabled = true

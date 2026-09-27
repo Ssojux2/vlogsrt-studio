@@ -115,24 +115,38 @@ public struct RoundTripJob: Equatable, Sendable {
     )
   }
 
-  /// 집계 결과 — 1.3 기록만 성공·실패를 말하고, **지금 job에 묶인 것만** 돌아온다.
-  /// 입력 리비전·추정 리비전이 job의 기록과 다르거나(낡은 집계), 마지막 시도가
-  /// 집계의 시도가 아니거나(취소·running·더 최근 시도) nil이다 — 모호한 기록을
-  /// 성공으로도 재실행으로도 쓰지 않는다.
-  public func readAnalysisResult() -> AnalysisResultMessage? {
-    guard let result = decodeResultLine() else { return nil }
-    if let estimate = try? readAnalysisEstimate() {
-      guard estimate.inputRevision == result.inputRevision,
-        estimate.estimateRevision == result.estimateRevision
-      else { return nil }
-    }
-    guard let latest = readAnalysisAttempts().last else { return nil }
+  /// job 기록 상태 — 새 작업(fresh)과 모호한 기록(unknown)을 갈라 돌려준다(S1B-R1).
+  /// 묶음에는 **읽을 수 있는 현재 추정**이 필수다(없으면 옛 유효 기록으로 넘어가지
+  /// 않는다): 입력·추정 리비전이 job의 기록과 같고, 마지막 시도가 집계의 시도와
+  /// 신원이 같고, 상태가 집계와 일치해야 한다(success·partial은 succeeded,
+  /// error는 failed). 낡은 집계·진행 중·취소 시도·깨진 기록은 전부 unknown이다.
+  public func readAnalysisRecord() -> AnalysisRecordState {
+    let fileManager = FileManager.default
+    let attemptsURL = directoryURL.appendingPathComponent(Self.analysisAttemptsFileName)
+    let hasHistory =
+      fileManager.fileExists(atPath: analysisResultURL.path)
+      || fileManager.fileExists(atPath: attemptsURL.path)
+      || fileManager.fileExists(atPath: candidatesURL.path)
+    guard hasHistory else { return .fresh }
+    guard let result = decodeResultLine() else { return .unknown }
+    guard let estimate = try? readAnalysisEstimate() else { return .unknown }
+    guard estimate.inputRevision == result.inputRevision,
+      estimate.estimateRevision == result.estimateRevision
+    else { return .unknown }
+    guard let latest = readAnalysisAttempts()?.last else { return .unknown }
     guard latest.attemptID == result.attemptID,
       latest.inputRevision == result.inputRevision,
-      latest.estimateRevision == result.estimateRevision,
-      latest.status == "succeeded" || latest.status == "failed"
-    else { return nil }
-    return result
+      latest.estimateRevision == result.estimateRevision
+    else { return .unknown }
+    let requiredStatus = result.status == "error" ? "failed" : "succeeded"
+    guard latest.status == requiredStatus else { return .unknown }
+    return .valid(result)
+  }
+
+  /// 집계 결과 — 지금 job에 묶인 것만 돌아온다. 그 밖은 nil(unknown 취급).
+  public func readAnalysisResult() -> AnalysisResultMessage? {
+    if case .valid(let result) = readAnalysisRecord() { return result }
+    return nil
   }
 
   /// 사용자에게 보여줄 분석 결과 — 기록이 없거나 지금 job에 묶이지 않으면 unknown이다.
@@ -155,18 +169,27 @@ public struct RoundTripJob: Equatable, Sendable {
     )
   }
 
-  private func readAnalysisAttempts() -> [AnalysisAttemptMessage] {
+  /// 시도 기록 — 한 줄이라도 해석에 실패하면 nil이다. 깨진 원장의 유효한 마지막
+  /// 줄로 묶음을 증명하게 두지 않는다.
+  private func readAnalysisAttempts() -> [AnalysisAttemptMessage]? {
     let path = directoryURL.appendingPathComponent(Self.analysisAttemptsFileName)
     guard let text = try? String(contentsOf: path, encoding: .utf8), !text.isEmpty else {
-      return []
+      return nil
     }
-    return text.split(separator: "\n").compactMap { line in
-      try? ProtocolCodec.decodeAnalysis(
-        AnalysisAttemptMessage.self,
-        type: "AnalysisAttempt",
-        from: String(line)
-      )
+    let lines = text.split(separator: "\n").map(String.init)
+    guard !lines.isEmpty else { return nil }
+    var attempts: [AnalysisAttemptMessage] = []
+    for line in lines {
+      guard
+        let attempt = try? ProtocolCodec.decodeAnalysis(
+          AnalysisAttemptMessage.self,
+          type: "AnalysisAttempt",
+          from: line
+        )
+      else { return nil }
+      attempts.append(attempt)
     }
+    return attempts
   }
 
   public func readCandidates() throws -> [CutCandidateMessage] {
