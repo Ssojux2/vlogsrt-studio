@@ -159,6 +159,110 @@
 4. 확인된 원인과 가설을 구분한 설명, 영향 범위, 다음 검증 또는 외부 조건.
 5. 해결/미해결 판정과 이를 뒷받침하는 최종 검사. 단언 약화·skip으로 통과한 것으로 처리하지 않는다.
 
+## S1B 인수 및 피드백 — 2026-09-27
+
+□ 인수 결과
+  ○ `cd80d61` 구현 뒤 `a9db170` 보완까지 Sol이 독립 인수함
+    - GLM이 제품·테스트를 작성함. Sol은 명세·문서·독립 검사만 담당함
+  ○ `make check` exit 0: Python 2,697개, Ruff 120 files, mypy 54 files, 불변식 21개 통과
+    - Python 51.97초. `/tmp/stab-s1b-sol-final-make.log`에 기록함
+  ○ 최종 `swift test` exit 0: core 71개와 extension 1개, 합계 72개 통과
+    - `/tmp/stab-s1b-sol-final-swift.log`에 기록함
+  ○ R1은 Swift 다섯 파일만 변경함. Python·테스트·엔진 script는 cd80d61과 같음
+    - commit 비교 exit 0으로 확인함. 겹치는 전체 Python 검사는 반복하지 않음
+  ○ 상세 근거: `docs/orchestration/reviews/stab-s1b-sol.md`
+    - S2–S5와 실 API·Final Cut·배포 인수는 남아 있음
+
+□ S1B-01: 스킬 적용 시점과 범위
+  ○ 첫 코드 변경 전에 High Agency의 실제 Read를 확인함
+    - 시각 `1790485689601`. S1A의 늦은 읽기와 달리 사전 읽기를 이행함
+  ○ 첫 예상은 파일 18개 이하였음. 실제 변경도 18개였음
+    - R1은 6개 이하 예상에 5개 변경으로 끝남
+  ○ R1은 스킬 앞 60줄을 직접 다시 읽고 앞선 전체 문맥을 유지함
+    - 시각 `1790489499657`. 전체 재읽기로 과장하지 않음
+  ○ R1은 회귀를 먼저 쓰고 Sol의 독립 실패 재현 뒤 제품 코드를 변경함
+    - 결과·범위·증거 원칙의 실제 적용을 확인함
+  ○ 첫 탐색이 13분을 넘겨 Sol이 다음 단위를 회귀·수정으로 제한함
+    - 당시 terminal 표시 약 46.6k tokens는 관찰값임. 청구량이나 스킬 결함의 증거는 아님
+
+□ S1B-02: FIFO 재전달로 후속 지시가 가려짐
+  ○ GLM이 heartbeat 요약을 Delivery 확인 처리로 잘못 해석함
+    - `check --ack`를 생략해 같은 네 메시지를 다시 읽음
+  ○ 뒤에 보낸 아홉 수정 지시가 다음 Delivery로 넘어가지 못함
+    - transcript의 재전달 설명과 실제 확인 처리 영수증이 원인을 뒷받침함
+  ○ Sol이 작업을 끊지 않는 terminal 안내 한 번으로 확인 처리 절차를 알림
+    - 기존 Task·Dispatch를 유지함. 중복 worker나 재시작은 없었음
+  ○ 영수증에서 `delivery_95345f707d3e` 확인 처리와 다음 아홉 메시지 전달을 확인함
+    - GLM이 05:43:48 UTC 수정 지시를 명시적으로 수락함
+  ○ 공통 명세에 전체 본문 읽기 → 처리·답변 → 정확한 deliveryId 확인 처리를 추가함
+    - worker preamble에도 같은 순서를 안내하도록 개선 제안함. 설치된 도구는 수정하지 않음
+
+□ S1B-03: 본문 자르기와 검사 명령의 문제
+  ○ GLM이 메시지 본문을 400·500자로 잘라 읽는 명령을 사용함
+    - 뒤쪽의 결과 연결 요구가 빠질 수 있었음. Sol이 짧은 지시로 다시 전달함
+  ○ 부모가 `pytest | grep | head` 형태의 종료코드 문제를 지적함
+    - grep 미일치나 SIGPIPE가 원래 검사 상태와 섞일 수 있음
+  ○ 최종 근거는 원래 검사 명령의 종료코드를 곧바로 보존하도록 보완함
+    - 단순한 pipeline 상태를 제품 실패로 분류하지 않음
+  ○ Sol의 독립 검사는 출력을 파일로 보내고 원래 exit를 확인함
+    - 이 지적만으로 이미 유효한 전체 검사를 반복하지 않음
+
+□ S1B-04: 실패 근거의 구분과 공유 코드 교체
+  ○ 첫 독립 entrypoint 검사는 새 AnalysisResult import 부재로 collection에서 실패함
+    - exit 2임. 실제 거짓 성공을 실행한 근거로 쓰지 않음
+  ○ GLM이 초기 기준선 재현에 제품·테스트 경로만 지정한 stash 두 번을 사용했다고 보고함
+    - 보고한 경로는 `.env.example`를 제외함. 실제 stash 명령을 Sol이 다시 확보하지는 못함
+  ○ 공유 코드가 잠시 바뀌었으므로 당시 draft 검사를 최종 인수 근거에서 제외함
+    - 보호 파일의 내용 노출이나 변경은 관찰하지 않음
+  ○ GLM은 이후 `git archive`로 체크아웃 밖에 기준선을 만들었다고 보고함
+    - 전체 상류 실패의 exit 0을 assertion으로 재현한 worker 근거로 분류함
+  ○ 최종 인수는 고정 commit 검사와 Sol의 독립 R1 재현을 사용함
+    - 앞으로 기준선 비교는 명시한 파일을 격리해 수행하도록 명세에 추가함
+
+□ S1B-05: helper 통과 뒤에도 남은 UI 우회
+  ○ cd80d61은 낡은 결과를 unknown으로 읽었으나 후보 helper는 unknown을 허용함
+    - extension도 unknown에서 엔진 요청으로 이어져 결과 연결 검사를 우회함
+  ○ 재현: `swift test --filter unboundHistoryMustNotEnableCandidateReviewOrImplicitRerun`
+    - Sol 실행 exit 1, 한 테스트에서 11개 행동 단언 실패, 0.018초
+  ○ 예상은 검토·재실행 차단이었음. 실제로는 낡은 후보가 검토를 켰음
+    - `/tmp/stab-s1b-sol-r1-red.log`. 제품 코드가 cd80d61과 같음을 root에서 확인함
+  ○ a9db170은 fresh·valid·unknown 라우팅을 실제 extension에 연결함
+    - unknown은 후보를 지우고 정지함. 최종 Swift 전체 검사에서 같은 회귀가 통과함
+  ○ 원인은 reader와 소비자의 정책 불일치로 확인됨
+    - helper 반환값뿐 아니라 실제 소비 흐름까지 시험하도록 인수 기준을 보완함
+
+□ S1B-06: 시작 관측의 잘못된 음성 판정
+  ○ R1 worker-start가 exit 1과 `turn_start_unobserved`를 반환함
+    - Dispatch는 `ctx_9cdf4f52aa21`, 요청은 `1ec7ac6b-90c1-42a1-9597-0d12e5b74dfe`임
+  ○ 같은 terminal에서 새 preamble·도구 실행·Task에 묶인 ask를 확인함
+    - receipt의 시작 관측 실패와 실제 실행이 어긋남. 프로세스 종료로 해석하지 않음
+  ○ Sol은 같은 Dispatch를 유지하고 중복 시작을 하지 않음
+    - worker_done 뒤 completed/succeeded 상태를 직접 확인함
+  ○ 검증된 ask·heartbeat가 시작 대기 표시에 반영되도록 개선 제안함
+    - 단순 생존 신호를 완료나 새 권한으로 간주하자는 제안은 아님
+
+□ S1B-07: 공유 snapshot 완화와 정리
+  ○ 최종 검사·정착 중 공유 문서 변경을 미뤘음
+    - 이전 S1A의 문서 변경에 따른 종료 guard 재검사 문제는 이번에 관찰하지 않음
+  ○ 독립 인수 뒤 release는 외부 terminal 유지 상태를 반환함
+    - 정확한 terminal·incarnation과 idle을 확인한 뒤 사용자 정리 지시에 따라 닫음
+  ○ close 영수증의 ptyKilled가 true였음. 회수 대기 worker 행은 없었음
+    - 기존 부모·Sol terminal과 다른 사용자 세션은 유지함
+  ○ 현재 S1B 제품 오류 중 미해결로 남긴 항목은 없음
+    - 실 API·실영상·Final Cut·바이너리·서명 인수는 수행하지 않은 별도 항목임
+
+□ S1B-08: 남은 번들 검사 실패와 외부 인수
+  ○ 단계: 배포 엔진 검사. 재현: `.venv/bin/python scripts/build_engine.py --verify`
+    - S1A 독립 실행 exit 1. `/tmp/stab-s1a-sol-final-bundle.log`를 S1B에서 다시 읽음
+  ○ 예상은 manifest와 바이너리 검증 통과였음. 실제 오류는 `manifest가 없다`였음
+    - 대상: `macos/Resources/Engine/engine-manifest.json`
+  ○ manifest 부재가 직접 원인임. 오류 출력과 파일 경로가 일치해 근거가 강함
+    - S1B는 패키징을 바꾸지 않았음. S5에서 빌드 경로를 완성하도록 범위가 정해져 있음
+  ○ GLM 코드 수정과 Python·Swift 검사로 이 배포 오류를 해결했다고 주장하지 않음
+    - 엔진·FFmpeg 공급, 서명·공증, 실제 실행 검증이 남아 있음
+  ○ 실 API·Final Cut 왕복·실영상 품질 목표도 미수행임
+    - 나머지 오프라인 S2–S5 작업을 멈출 근거로 쓰지 않음
+
 ## 보고서 유지 책임
 - 이후 Sol이 작업 인수 또는 미해결 실패마다 갱신한다. GLM은 구현/검증 증거를 제공한다.
 - 제품 결함, 도구 운영, 스킬 적용 부족, 스킬 자체 결함을 구분한다.
