@@ -271,6 +271,116 @@
   ○ 이후 문서 경로를 명시한 검사만 수행함
     - 파일 내용을 다시 확인하지 않음. 제품 인수 결과에는 영향이 없음
 
+## S2A-1 — 실행 소유권 구현과 독립 인수
+
+□ S2A-1-01: 범위와 스킬 적용
+  ○ Sol이 S2A를 실행 소유권·자격증명/사전 검사·진행 갱신으로 나눔
+    - 이번 실행은 소유권만 다룸. 나머지 요구는 각각의 brief에 남김
+  ○ GLM의 High Agency 직접 Read를 코드 변경 전에 확인함
+    - 최초 timestamp1790490883899. 첫 Impact는 files<=8/modules<=4/shared-api임
+  ○ 실제 변경은 11개 파일임. 첫 추정은 고치지 않음
+    - 취소 시험·설치 래퍼·XcodeGen 산출물 추가를 Sol과 부모가 명시적으로 승인함
+  ○ R1은 시험 파일 한 개만 바꿈
+    - Read는 첫60줄이며 앞선 전체 문맥을 이어받음. local/files<=1 추정과 일치함
+  ○ 초기 조사에 약10분이 걸림
+    - 화면의 토큰 수는 비용 근거가 아님. 지연을 스킬 자체 결함으로 단정하지 않음
+
+□ S2A-1-02: 실제 경계의 실패 재현
+  ○ Sol이 변경 없는 a9db170 제품 경로에서 중복 실행을 직접 재현함
+    - 실제 Python 진입점의 별칭 중복이 실행에 들어가 30초 뒤 timeout으로 실패함
+  ○ Swift의 기존 runner도 중복 상태3을 실패로 분류하고 sync를 실행함
+    - 독립 검사 exit1. 한 시험에서 행동 단언 두 개가 실패함
+  ○ Task에 묶인 ask에서 GLM을 멈춘 뒤 Sol이 재현 결과로 구현을 승인함
+    - msg_ed39a8557300 → msg_ff4c44460798. import·컴파일 오류를 RED로 쓰지 않음
+  ○ 최종 Python은 정준 경로의 OS 잠금을 먼저 얻음
+    - 중복·별칭·다른 job·실패·실제 취소·SIGKILL·서술자 상속을 검증함
+
+□ S2A-1-03: 초안의 잠금·앱 오류 수정
+  ○ 모든 flock OSError를 중복으로 처리하던 초안을 반려함
+    - EAGAIN/EWOULDBLOCK만 중복임. 나머지는 실패로 나가고 서술자를 닫음
+  ○ unlock 오류가 나도 finally에서 서술자를 닫도록 수정함
+    - 실패한 획득 뒤 fstat의 EBADF와 실제 재획득을 시험함
+  ○ 중복 상태3보다 드리프트 기록이 먼저여서 정상 실행을 취소할 수 있었음
+    - 상태3을 실행 반환 직후 처리함. 취소·드리프트가 겹쳐도 쓰기·sync·import 없음
+  ○ 한 job의 종료가 다른 job의 취소 문맥을 지우던 단일 슬롯을 수정함
+    - 실제 main.swift가 job별 EngineJobBoard를 사용함. 두 종료 순서를 시험함
+  ○ 반환값으로만 흉내 낸 취소 시험을 보강함
+    - 실제 Task.cancel·던지는 실행기·동시에 도는 다른 job으로 해제와 재획득을 검증함
+
+□ S2A-1-04: 개발 실행기의 상태 전달
+  ○ 가정한 NSUserUnixTask 오류 domain이 실제 실행과 달랐음
+    - 합성 실행기 관측으로 드러남. 영문 오류 문면 파싱도 인수하지 않음
+  ○ 상태 전달을 호출마다 새 임시 파일에 묶음
+    - token·경로·크기를 검사함. 최대257바이트만 읽음. job 밖에만 기록함
+  ○ 배타 생성으로 기록을 게시함
+    - 검증 뒤 생긴 파일도 덮어쓰지 않음. 잘못된 인자는 기록·workspace를 만들지 않음
+  ○ 넷째 인자가 있는 전달 모드는 기록 완료 뒤에만 process exit0을 냄
+    - 안쪽 상태는 기록에 있음. 3인자 직접 호출의 기존0/1/2/3 계약은 유지함
+  ○ 실행기가 오류·신호 종료를 보고하면 온전한 기록도 받아들이지 않음
+    - 실제 합성 실행기로 큰 출력·기록 불일치·비0 종료·SIGKILL을 시험함
+
+□ S2A-1-05: 시험 근거 보완과 실제 빌드
+  ○ 누적 호출 수가 이전 실행에 맞아 거짓 통과할 수 있던 대기를 고침
+    - 실행별 시작 수와 경로로 도착을 확인함. 실패 표식을 release보다 먼저 씀
+  ○ 유효하지 않은 취소 기록과 일반 실패로 취소 해제를 주장하던 시험을 바꿈
+    - 기존 오프라인 진입점으로 실제 취소된 attempt와 재획득을 검증함
+  ○ 부모가 새 Swift 파일의 Xcode 대상 누락을 발견함
+    - Sol 초기 brief의 생성 프로젝트 항목 누락도 기록함. XcodeGen으로만 고침
+  ○ Sol의 새 derived-data 경로에서 unsigned Debug 앱·extension 빌드가 통과함
+    - exit0, BUILD SUCCEEDED. SwiftPM 결과와 구분함
+  ○ R1은 손으로 만든 래퍼 대신 실제 설치 스크립트의 출력을 사용함
+    - 공백 경로에서 launcher → 설치 래퍼 → Python의0/1/잡힌 잠금3을 독립 검증함
+
+□ S2A-1-06: 명령·수신·시작 관측 문제
+  ○ GLM의 첫 pytest 명령은 tail 뒤의 exit를 출력함
+    - 그 값을 시험 exit로 쓰지 않음. 직접 리다이렉션과 원래 exit로 다시 검증함
+  ○ 일부 ack 결과를 head로 잘라 다음 batch를 놓칠 위험이 있었음
+    - 전체 결과 처리·정확한 deliveryId ack·뒤 batch 반복을 다시 요구함
+  ○ 부모도 처리한 delivery_2252b5c1233c의 ack를 놓쳤다고 보고함
+    - replay를 보고 ack함. 뒤 보고가 늦었으나 중복 Dispatch·제품 변경은 없었음
+  ○ R1 시작 영수증은 turn_start_unobserved였으나 새 preamble·Read가 실행됨
+    - ctx_f0ea0d922f8f를 유지함. 중복 시작 없이 completed/succeeded로 정착함
+  ○ 늦게 도착한 실제 설치 래퍼 시험 요청은 최초 정착을 넘김
+    - 정착한 ID를 재사용하지 않고 새 R1 Task/Dispatch로 처리함
+
+□ S2A-1-07: dotenv 격리 경계의 공개
+  ○ 공개 코드에서 cli.main의 ensure_loaded 호출을 확인함
+    - cwd 조상과 PACKAGE_ROOT의 dotenv를 찾음. offline 설정은 탐색을 막지 않음
+  ○ 기존 conftest는 네트워크를 막으나 실제 dotenv 탐색은 격리하지 않음
+    - 이전 make·bridge 검사가 이 경로를 실행함. 파일이 있었다면 읽을 수 있었음
+  ○ 실제 보호 파일의 존재·내용은 확인하지 않음
+    - 노출을 단정하지 않음. 반환된 출력에서 키 내용을 관찰하지 않았으며 변경도 관찰하지 않음
+  ○ GLM은 R1의 실제 저장소 대상 실행 한 번을 공개함
+    - 관측 시각07:34:33.821 UTC. 보고한 16:57은 부정확하여 시각 근거로 쓰지 않음
+  ○ 이 문제는 Sol의 시험 격리 검토 누락도 포함함
+    - 보호 파일을 직접 열지 않았다는 사실만으로 간접 접근 회피를 주장하지 않음
+
+□ S2A-1-08: 격리 수정과 남은 시험 작업
+  ○ 최종 Swift bridge는 공개 Python 소스와 진입점만 임시 저장소로 복사함
+    - 실제 dotenv·자격증명·미디어·API fixture는 복사하지 않음
+  ○ 시험이 직접 만든 offline dotenv로 조상 탐색을 멈춤
+    - PACKAGE_ROOT도 임시 복사본 안에 있음. 진입점 바이트가 원본 코드와 같음을 확인함
+  ○ 해석기 symlink는 venv 접두어를 잃어 rich import에 실패함
+    - 실제 해석기를 부르는 exec shim으로 수정함. 최종 독립 Swift83 통과함
+  ○ 기존 Python 전체 시험의 격리는 아직 별도 작업임
+    - 다음 broad suite 전에 stab-test-isolation.md의 시험 전용 작업을 수행해야 함
+  ○ 제품 기본 설정을 바꾸거나 격리되지 않은 전체 검사를 다시 돌리지 않음
+    - 원인 근거는 공개 코드이며 보호 파일 내용을 읽어 확인하지 않음
+
+□ S2A-1-09: 최종 근거·정리·외부 인수
+  ○ Sol make check는2715 Python·Ruff121·mypy54·불변 규칙21 통과함
+    - 7d3fe93 기준 exit0. 이후 해당 경로가 같음을 diff exit0으로 확인함
+  ○ 최종853c031의 Swift는82 core+1 extension 통과함
+    - 실제 설치 래퍼의 격리 시험 포함. unsigned native 빌드도 독립 exit0임
+  ○ GLM의 정확한 terminal·incarnation·idle을 확인하고 정리함
+    - release는 external 유지였음. 사용자 정리 권한으로 close, ptyKilled=true 확인함
+  ○ 이전 S1A 번들 검증 오류는 아직 별개임
+    - build_engine.py --verify exit1, engine-manifest.json 없음. S2A-1에서 재검사하지 않음
+  ○ 바이너리 공급·서명/공증·실 API·실영상/FCP 인수는 미수행임
+    - S2A-2부터 S5까지와 시험 격리 작업이 남음. 스킬 설치 파일은 바꾸지 않음
+
+근거: [S2A-1 독립 인수 보고](../orchestration/reviews/stab-s2a-1-sol.md), [실행 소유권 계약](../EXECUTION_OWNERSHIP.md), [다음 시험 격리 작업](../orchestration/tasks/stab-test-isolation.md).
+
 ## 보고서 유지 책임
 - 이후 Sol이 작업 인수 또는 미해결 실패마다 갱신한다. GLM은 구현/검증 증거를 제공한다.
 - 제품 결함, 도구 운영, 스킬 적용 부족, 스킬 자체 결함을 구분한다.

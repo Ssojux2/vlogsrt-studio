@@ -16,6 +16,7 @@ Applies to every STAB implementation task. The approved plan and current live Di
 - Keep five-minute heartbeats outside blocking ask/check waits. A successful send is not proof of recipient acknowledgment.
 - After edits, verify the touched behavior first, then affected/full gates where shared contracts require them. Preserve real command exits using redirection or pipefail; a trailing `tail` exit is not the test exit.
 - One final `make check` satisfies the overlapping full Python/Ruff/mypy/invariant requirements in individual briefs. Do not run those broad checks separately and immediately repeat them through `make check` without a new edit/failure/concern. Add Swift and macOS script checks not covered by Makefile separately. Format first, then run final gates once.
+- Before the next broad suite, complete the test-only [dotenv isolation prerequisite](stab-test-isolation.md). Offline/network blocking does not suppress production dotenv lookup; isolate cwd, package fallback and subprocess configuration with test-owned fixtures/read guards. Do not probe real protected files to investigate prior access. Preserve numerical evidence and its isolation limitation separately.
 - On failure, record repro, expected/actual, sanitized error/exit, attempted change, fresh result and cause confidence. Never weaken assertions/thresholds or add skips merely to pass.
 
 ## Completion
