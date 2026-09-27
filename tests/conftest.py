@@ -1,6 +1,9 @@
 """테스트 공통 설정.
 
 네트워크를 원천 차단한다. 실수로 실제 API를 부르면 테스트가 즉시 실패해야 한다.
+dotenv 보호도 여기서 시작한다 — 수집·수입 시각(conftest 수입)부터 붙으므로
+어떤 테스트 코드보다 앞서고, monkeypatch가 아니라 직접 얹었으므로 시험
+왕복(teardown)에 풀리지 않는다.
 """
 
 from __future__ import annotations
@@ -8,10 +11,18 @@ from __future__ import annotations
 import socket
 from pathlib import Path
 
-import pytest
+from tests._dotenv_guard import install as install_dotenv_guard
 
-from vlogsrt.config import Config
-from vlogsrt.models import Cue, Segment
+# 실제 `.env`·`.env.example`을 향한 탐색·읽기를 가린다(STAB-TEST-ISOLATION).
+# vlogsrt(와 그 밖의 어떤 모듈)보다 **먼저** 붙는다 — 수입 시각 보호가 구조적으로
+# 참이어야 한다. 수입 뒤 설치는 '수입에는 보호가 없었다'를 남긴다.
+install_dotenv_guard()
+
+import pytest  # noqa: E402
+
+from tests._dotenv_guard import stage_synthetic_dotenv  # noqa: E402
+from vlogsrt.config import Config  # noqa: E402
+from vlogsrt.models import Cue, Segment  # noqa: E402
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures"
 
@@ -38,6 +49,16 @@ def block_network(monkeypatch: pytest.MonkeyPatch) -> None:
 def offline_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("VLOGSRT_OFFLINE", "1")
     monkeypatch.setenv("VLOGSRT_LOG_LEVEL", "ERROR")
+
+
+@pytest.fixture
+def synthetic_dotenv(tmp_path: Path) -> Path:
+    """테스트가 직접 쓴 오프라인 dotenv — 로더의 조상 탐색이 이 뿌리에서 멈춘다.
+
+    PACKAGE_ROOT fallback(진짜 저장소 `.env`)에 닿기 전에 탐색이 끝나야 하는
+    시험이 쓴다(S2A-1 격리 원리). 실제 로더가 이 파일을 찾고 파싱한다.
+    """
+    return stage_synthetic_dotenv(tmp_path)
 
 
 @pytest.fixture

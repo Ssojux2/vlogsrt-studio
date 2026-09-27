@@ -23,6 +23,17 @@ from types import ModuleType
 
 import pytest
 
+from tests._dotenv_guard import (
+    CANARY_VALUE,
+    CHILD_BOOTSTRAP_FAILED_EXIT,
+    CHILD_GUARD_BREAK,
+    CHILD_GUARD_PROOF,
+    emit_child_guard,
+    preflight_child_guard,
+    read_child_proofs,
+    stage_canary_standin,
+)
+
 _ENGINE_SCRIPT = Path(__file__).resolve().parents[2] / "macos" / "scripts" / "vlogsrt-engine.py"
 _INSTALLER_SCRIPT = (
     Path(__file__).resolve().parents[2] / "macos" / "scripts" / "install-development-engine.sh"
@@ -67,16 +78,30 @@ def main(argv):
 
 
 class _FakeCli:
-    """가짜 vlogsrt 패키지와 제어 파일의 주인 — 자식 환경만 꾸민다(전역은 안 고친다)."""
+    """가짜 vlogsrt 패키지와 제어 파일의 주인 — 자식 환경만 꾸민다(전역은 안 고친다).
+
+    root는 자식의 cwd이자 자식 보호(sitecustomize)의 등록 뿌리다. stand-in은
+    등록 밖 `sealed/`에 둔다 — 자식이 보호 없이 그 철자에 닿으면 증명이 거짓으로
+    드러난다(카나리 내용은 증명에 절대 없다).
+    """
 
     def __init__(self, root: Path, *, spawn_child: bool = False) -> None:
         self.root = root
+        self.standin = stage_canary_standin(root.parent / "sealed")
+        self.proof = root / "guard-proof.jsonl"
         package = root / "vlogsrt"
         package.mkdir(parents=True)
         (package / "__init__.py").write_text("", encoding="utf-8")
         (package / "cli.py").write_text(_FAKE_CLI_SOURCE, encoding="utf-8")
         if spawn_child:
             (root / "spawn-child").write_text("", encoding="utf-8")
+        self._guard_env = emit_child_guard(
+            root, allow_roots=(root,), standin=self.standin, proof=self.proof
+        )
+
+    def broken_guard_env(self, broken_proof: Path) -> dict[str, str]:
+        """bootstrap을 일부러 부순 자식 환경 — 실패 닫힘 증명용 주입구다."""
+        return {**self.env, CHILD_GUARD_BREAK: "1", CHILD_GUARD_PROOF: str(broken_proof)}
 
     @property
     def env(self) -> dict[str, str]:
@@ -84,6 +109,7 @@ class _FakeCli:
         existing = env.get("PYTHONPATH", "")
         env["PYTHONPATH"] = str(self.root) + (os.pathsep + existing if existing else "")
         env["FAKE_ENGINE_CONTROL"] = str(self.root)
+        env.update(self._guard_env)
         return env
 
     def calls(self) -> list[dict]:
@@ -132,9 +158,13 @@ def _spawn_engine(
     argv = [sys.executable, str(_ENGINE_SCRIPT), "analyze", job_id, job_dir_text]
     if status_file is not None:
         argv.append(str(status_file))
+    # 자식 cwd의 기본은 통제 뿌리다 — 실제 저장소에서 띄우지 않는다.
+    child_cwd = cwd if cwd is not None else control.root
+    # 보호 사전확인 게이트 — sitecustomize가 없거나 깨졌으면 payload를 띄우지 않는다.
+    preflight_child_guard(control.env, cwd=child_cwd, expected_package_root=control.root)
     return subprocess.Popen(
         argv,
-        cwd=cwd,
+        cwd=child_cwd,
         env=control.env,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -152,9 +182,11 @@ def _run_engine(
     argv = [sys.executable, str(_ENGINE_SCRIPT), "analyze", job_id, job_dir_text]
     if status_file is not None:
         argv.append(str(status_file))
+    child_cwd = cwd if cwd is not None else control.root
+    preflight_child_guard(control.env, cwd=child_cwd, expected_package_root=control.root)
     return subprocess.run(
         argv,
-        cwd=cwd,
+        cwd=child_cwd,
         env=control.env,
         capture_output=True,
         text=True,
@@ -361,6 +393,117 @@ def test_missing_job_root_is_rejected_without_creating_anything(
     assert control.calls() == []  # 엔진 호출도 없다
 
 
+def test_children_run_guarded_from_a_synthetic_cwd(tmp_path: Path, control: _FakeCli) -> None:
+    """자식은 보호가 켜진 채 임시 cwd에서 돈다 — vlogsrt도 통제 뿌리에서 온다.
+
+    sitecustomize 증명이 없으면 보호가 자식에 실리지 않은 것이다(RED) —
+    인터프리터가 sitecustomize 예외를 삼키므로 증명 부재를 실패로 다룬다.
+    증명은 참/거짓과 경로뿐이고 카나리 값은 어디에도 없다.
+    """
+    job = tmp_path / "job"
+    job.mkdir()
+    calls_before = len(control.calls())
+    holder = _spawn_engine(control, str(job))
+    try:
+        _await_execution(control, calls_before, job)
+        control.release()
+        assert holder.wait(timeout=_WAIT_SECONDS) == 0
+    finally:
+        _settle(control, holder)
+    proofs = read_child_proofs(control.proof)
+    assert proofs, "자식 보호 증명이 없다 — sitecustomize가 자식에 실리지 않았다"
+    for record in proofs:
+        assert record["blocked_read"] is True
+        assert record["blocked_read_bytes"] is True
+        assert record["blocked_path_open"] is True
+        assert record["blocked_io_open"] is True
+        assert record["blocked_os_open"] is True
+        assert record["probe_miss"] is True
+        assert record["socket_refused"] is True
+        assert record["connect_refused"] is True
+        assert record["cwd"] == str(control.root.resolve())
+        assert record["vlogsrt_file"].startswith(str(control.root.resolve()))
+    assert CANARY_VALUE not in control.proof.read_text(encoding="utf-8")
+
+
+def test_broken_child_guard_bootstrap_prevents_the_payload(
+    tmp_path: Path, control: _FakeCli
+) -> None:
+    """보호 bootstrap이 부서지면 payload는 도직전에 끝난다(실패 닫힘).
+
+    해석기는 sitecustomize 안의 예외를 조용히 삼키므로, bootstrap은 스스로
+    프로세스를 끝내야 한다 — 엔진 호출 기록(calls.jsonl)이 늘지 않는 것이
+    payload가 도 직전에 막혔다는 증거다. 부서진 bootstrap의 사실은 별도
+    증명 파일에 stage로 남는다.
+    """
+    job = tmp_path / "job"
+    job.mkdir()
+    broken_proof = tmp_path / "broken-guard-proof.jsonl"
+    result = subprocess.run(
+        [sys.executable, str(_ENGINE_SCRIPT), "analyze", "job-1", str(job)],
+        cwd=control.root,
+        env=control.broken_guard_env(broken_proof),
+        capture_output=True,
+        text=True,
+        timeout=_WAIT_SECONDS,
+    )
+    assert result.returncode == CHILD_BOOTSTRAP_FAILED_EXIT, result.stderr
+    assert control.calls() == []  # payload marker — 엔진 호출은 한 번도 없다
+    assert broken_proof.is_file()
+    broken = broken_proof.read_text(encoding="utf-8")
+    assert '"bootstrap": "failed"' in broken
+    assert '"stage": "install"' in broken
+    assert CANARY_VALUE not in broken
+
+
+def test_broken_bootstrap_still_terminates_when_the_proof_write_fails(
+    tmp_path: Path, control: _FakeCli
+) -> None:
+    """진단 기록을 못 남겨도 종료는 무조건이다 — 기록 실패가 payload를 열지 않는다."""
+    job = tmp_path / "job"
+    job.mkdir()
+    unreachable_proof = tmp_path / "absent-dir" / "proof.jsonl"
+    result = subprocess.run(
+        [sys.executable, str(_ENGINE_SCRIPT), "analyze", "job-1", str(job)],
+        cwd=control.root,
+        env={
+            **control.env,
+            CHILD_GUARD_BREAK: "1",
+            CHILD_GUARD_PROOF: str(unreachable_proof),
+        },
+        capture_output=True,
+        text=True,
+        timeout=_WAIT_SECONDS,
+    )
+    assert result.returncode == CHILD_BOOTSTRAP_FAILED_EXIT, result.stderr
+    assert control.calls() == []  # payload는 여전히 도 직전에 끝났다
+    assert not unreachable_proof.parent.exists()  # 기록은 못 남겼다 — 그래도 끝났다
+
+
+def test_launch_gate_refuses_when_the_child_guard_bootstrap_is_missing(
+    tmp_path: Path, control: _FakeCli
+) -> None:
+    """sitecustomize가 없으면 해석기가 조용히 무시한다 — 게이트가 payload를 막는다."""
+    (control.root / "sitecustomize.py").unlink()
+    job = tmp_path / "job"
+    job.mkdir()
+    with pytest.raises(RuntimeError, match="사전확인 실패"):
+        _run_engine(control, str(job))
+    assert control.calls() == []  # payload는 띄우지 않았다
+
+
+def test_launch_gate_refuses_when_the_child_guard_bootstrap_is_syntactically_broken(
+    tmp_path: Path, control: _FakeCli
+) -> None:
+    """문법이 깨진 sitecustomize도 조용히 무시된다 — 게이트가 payload를 막는다."""
+    (control.root / "sitecustomize.py").write_text("def broken(:\n", encoding="utf-8")
+    job = tmp_path / "job"
+    job.mkdir()
+    with pytest.raises(RuntimeError, match="사전확인 실패"):
+        _run_engine(control, str(job))
+    assert control.calls() == []  # payload는 띄우지 않았다
+
+
 # ─────────────────────────────────────────────────────────────
 #  개발 실행기의 소유된 상태 기록 — 이 호출에 묶인 정확히 한 줄
 # ─────────────────────────────────────────────────────────────
@@ -478,6 +621,8 @@ def test_relative_status_argument_is_a_contract_violation(tmp_path: Path) -> Non
     job.mkdir()
     result = _run_engine(control, str(job), status_file=Path("relative.status"))
     assert result.returncode == 2, result.stderr
+    # 자식 cwd(통제 뿌리)에도, 옛 자리(부모 cwd)에도 그 파일은 없다.
+    assert not (control.root / "relative.status").exists()
     assert not Path("relative.status").exists()
     assert not (job / "workspace").exists()
 

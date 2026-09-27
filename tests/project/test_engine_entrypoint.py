@@ -21,7 +21,9 @@ from urllib.parse import quote
 
 import pytest
 
+from tests._dotenv_guard import stage_synthetic_dotenv
 from vlogsrt import transcribe
+from vlogsrt.env import find_env_file
 from vlogsrt.project import runner
 from vlogsrt.project.workflow_protocol import (
     AnalysisAuthorization,
@@ -42,6 +44,20 @@ def _load_engine() -> ModuleType:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+@pytest.fixture(autouse=True)
+def offline_dotenv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """진입점이 참조하는 dotenv는 이 모듈이 지은 합성물뿐이다.
+
+    cli.main의 ensure_loaded가 cwd 조상을 거슬러 올라가므로, 합성 dotenv를
+    tmp_path 꼭대기에 두고 실행 위치도 그 안으로 옮겨 탐색이 실제 저장소
+    (PACKAGE_ROOT fallback 포함)에 닿기 전에 멈춘다(S2A-1 격리 원리).
+    conftest의 dotenv 보호가 그 경계를 못 박는다.
+    """
+    dotenv = stage_synthetic_dotenv(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    yield dotenv
 
 
 @pytest.fixture()
@@ -133,6 +149,19 @@ def test_engine_main_stages_selected_files_into_a_fresh_workspace(
     assert (job_dir / "cancellation.jsonl").read_text(encoding="utf-8") == staged
     # 진입점은 job 루트를 알린다 — 실행 중 취소 관측 계약(S1A).
     assert os.environ[_JOB_DIR_ENV] == str(job_dir.resolve())
+
+
+def test_engine_cli_loads_only_the_staged_synthetic_dotenv(
+    tmp_path: Path, engine: ModuleType
+) -> None:
+    """cli 진입의 ensure_loaded가 찾는 dotenv는 합성물 하나뿐이다.
+
+    실행 뒤에도 탐색 결과는 tmp_path의 합성 `.env`다 — PACKAGE_ROOT(진짜
+    저장소) fallback으로 흐르지 않는다는 구조적 증명이다.
+    """
+    job_dir = _stage_job(tmp_path)
+    assert engine.main(["analyze", "job-1", str(job_dir)]) == 0
+    assert find_env_file() == (tmp_path / ".env").resolve()
 
 
 def test_engine_main_resume_skips_receive_and_keeps_workspace_bytes(
