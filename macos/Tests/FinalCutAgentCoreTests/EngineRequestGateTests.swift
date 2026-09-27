@@ -709,6 +709,68 @@ _record(
     },
 )
 
+
+def _digest(value):
+    import hashlib
+
+    return hashlib.sha256(value.encode()).hexdigest()
+
+
+# V2 소비 경계 — 실제 STT 판독·공장과 실제 비전 자격증명·공장을 지나간다.
+# 역할마다 독립 판정: STT가 비면 판독이 거부되고, 비전이 비면 자격증명 문이
+# 거부된다 — 한쪽 부재가 다른 쪽 증명을 묻히지 않는다(S2A-2 단위2). 실제 운반
+# 적용 뒤에만 오고, 두 공장 모두 **생산 공장**을 그대로 부른다(openai.OpenAI
+# 생성자만 가짜로 갈아끼운다 — 네트워크 없음). 기대값은 sha256 다이제스트로만
+# 받아 결과는 참/거짓뿐 남긴다.
+def _consume_role_credentials(env, transcribe, entry):
+    import openai
+    from vlogsrt.project import commands as project_commands
+    from vlogsrt.project.config import ProjectConfig
+
+    record = {
+        "stt_ok": False,
+        "stt_refused": False,
+        "vision_refused": False,
+        "vision_key_ok": False,
+        "vision_url_ok": False,
+    }
+    stt_seen = {}
+    vision_seen = {}
+
+    class _FakeSTTOpenAI:
+        def __init__(self, **kwargs):
+            stt_seen.update(kwargs)
+
+    class _FakeVisionOpenAI:
+        def __init__(self, **kwargs):
+            vision_seen.update(kwargs)
+
+    openai.OpenAI = _FakeSTTOpenAI
+    try:
+        env.require_api_key(force=True)
+    except RuntimeError:
+        record["stt_refused"] = True
+    if not record["stt_refused"]:
+        transcribe.get_transcriber(online=True)._client()
+        record["stt_ok"] = _digest(stt_seen.get("api_key", "")) == entry.get("stt")
+    try:
+        project_commands._vision_credentials(ProjectConfig())
+    except RuntimeError:
+        record["vision_refused"] = True
+    if not record["vision_refused"]:
+        # 생산 공장 경계: 실제 _vision_client → 실제 create_vision_client →
+        # (가짜) openai.OpenAI 생성자 — 공장 자체를 흉내 내지 않는다.
+        openai.OpenAI = _FakeVisionOpenAI
+        project_commands._vision_client(ProjectConfig())
+        record["vision_key_ok"] = (
+            _digest(vision_seen.get("api_key", "")) == entry.get("vision_key")
+        )
+        record["vision_url_ok"] = (
+            _digest(vision_seen.get("base_url", "")) == entry.get("vision_base_url")
+        )
+    return record
+
+
 digests_raw = os.environ.get("VLOGSRT_TEST_CONSUMER_DIGESTS", "")
 if digests_raw:
     spec = importlib.util.spec_from_file_location("vlogsrt_engine_bridge", engine_args[0])
@@ -721,6 +783,15 @@ if digests_raw:
         # 흉내 내면 생산 순서를 증명하지 못한다. 실제 자격 증명 판독과 실제 SDK
         # 공장만 부르고, 공장이 받은 값을 다이제스트로 판정한다.
         from vlogsrt import env, transcribe
+
+        entry = digests.get(job_id)
+        if isinstance(entry, dict):
+            record = _consume_role_credentials(env, transcribe, entry)
+            _record(
+                os.path.join(os.environ["VLOGSRT_TEST_RESULT_DIR"], job_id + ".jsonl"),
+                record,
+            )
+            return 0
 
         reader_refused = False
         try:
@@ -902,7 +973,9 @@ nonisolated func _emitChildGuard(
 /// 남은 경계: zsh -f여도 시스템 /etc/zshenv은 항상 읽힌다 — 밝혀두되 들여다보지 않는다.
 nonisolated func _writeGuardedShim(
   sandbox: BridgeSandbox, credentials: [String: String] = [:],
-  consumerDigests: [String: String] = [:], breakBootstrap: Bool = false,
+  consumerDigests: [String: String] = [:],
+  roleConsumerDigests: [String: [String: String]] = [:],
+  breakBootstrap: Bool = false,
   omitGuard: Bool = false
 ) throws -> [String: String] {
   let guardEnv = try _emitChildGuard(sandbox: sandbox, breakBootstrap: breakBootstrap)
@@ -925,8 +998,14 @@ nonisolated func _writeGuardedShim(
   if let injectedBreak = guardEnv["VLOGSRT_TEST_GUARD_BREAK"] {
     literals.append("VLOGSRT_TEST_GUARD_BREAK=\(injectedBreak)")
   }
-  if !consumerDigests.isEmpty,
-    let data = try? JSONSerialization.data(withJSONObject: consumerDigests),
+  // 소비 기대값 — V1은 job→다이제스트 문자열, V2는 job→역할별 다이제스트 사전.
+  // **사전 그대로** 부호화한다(문자열로 두 번 싸지 않는다): 드라이버의 json.loads가
+  // V2 항목을 사전으로 읽어야 역할 분기가 켜진다.
+  var mergedExpectations: [String: Any] = [:]
+  for (key, value) in consumerDigests { mergedExpectations[key] = value }
+  for (key, value) in roleConsumerDigests { mergedExpectations[key] = value }
+  if !mergedExpectations.isEmpty,
+    let data = try? JSONSerialization.data(withJSONObject: mergedExpectations),
     let digestJSON = String(data: data, encoding: .utf8) {
     literals.append("VLOGSRT_TEST_CONSUMER_DIGESTS=\(digestJSON)")
   }
@@ -1098,6 +1177,33 @@ nonisolated func _assertConsumerResult(
     record["reader_refused"] as? Bool == readerRefused else {
     throw NSError(domain: "bridge-consumer", code: 2,
                   userInfo: [NSLocalizedDescriptionKey: "\(jobID) 소비 결과가 기대와 다르다: \(record)"])
+  }
+}
+
+/// V2 소비 경계의 결과(job 단위 파일) — 역할마다 참/거짓만 읽는다(S2A-2 단위2).
+nonisolated func _assertRoleConsumerResult(
+  sandbox: BridgeSandbox, jobID: String,
+  sttOK: Bool, sttRefused: Bool,
+  visionRefused: Bool, visionKeyOK: Bool, visionURLOK: Bool
+) throws {
+  let result = sandbox.resultDir.appendingPathComponent("\(jobID).jsonl")
+  let raw = try String(contentsOf: result, encoding: .utf8)
+  guard let line = raw.split(separator: "\n").last,
+    let data = String(line).data(using: .utf8),
+    let record = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+  else {
+    throw NSError(domain: "bridge-consumer", code: 1,
+                  userInfo: [NSLocalizedDescriptionKey: "\(jobID) 역할 소비 결과 기록이 없다"])
+  }
+  let expected: [String: Bool] = [
+    "stt_ok": sttOK, "stt_refused": sttRefused, "vision_refused": visionRefused,
+    "vision_key_ok": visionKeyOK, "vision_url_ok": visionURLOK,
+  ]
+  for (key, value) in expected {
+    guard record[key] as? Bool == value else {
+      throw NSError(domain: "bridge-consumer", code: 2,
+                    userInfo: [NSLocalizedDescriptionKey: "\(jobID) 역할 소비 결과가 기대와 다르다(\(key)): \(record)"])
+    }
   }
 }
 
@@ -1508,4 +1614,220 @@ nonisolated func _assertNoDurableSecret(under root: URL, secret: String) throws 
         userInfo: [NSLocalizedDescriptionKey: "지속 표면에서 제출값이 발견됐다: \(url.path)"])
     }
   }
+}
+
+/// **실제 다리(역할 자격 증명 편, S2A-2 단위2)** — 진짜 설치 래퍼 → 실제 파이썬
+/// → 바이트 동일 엔진 스크립트를 NSUserUnixTask로 건너, V2 stdin 봉투(세 역할
+/// JSON)가 실제 운반 적용을 지나 **두 공장 모두**(STT `get_transcriber`·비전
+/// `_vision_credentials`→`create_vision_client`)에 제 값을 내리는지를 본다.
+/// 기대값은 역할별 sha256 다이제스트 사전만 자식에 가고 결과는 참/거짓뿐이다.
+/// 역할마다 독립 부재도 여기서 실측한다 — 비전만 비워도 STT 공장은 살고,
+/// STT만 비워도 비전 자격증명은 산다.
+@Test func roleCredentialEnvelopeCrossesTheRealDevelopmentBridge() async throws {
+  let sandbox = try _makeBridgeSandbox(
+    label: "S2A-2 role credential bridge",
+    dotenv: "VLOGSRT_OFFLINE=1\nOPENAI_API_KEY=stale-dotenv-stt\n"
+      + "GOOGLE_API_KEY=stale-dotenv-vision\nGEMINI_BASE_URL=https://stale.example/v1\n")
+  defer { try? FileManager.default.removeItem(at: sandbox.root) }
+  let sttKey = "synthetic-role-bridge-stt-key"
+  let visionKey = "synthetic-role-bridge-vision-key"
+  let endpoint = "https://synthetic-vision.example/v1"
+
+  func roleEntry(stt: String, vision: String, url: String) -> [String: String] {
+    [
+      "stt": _digestOf(stt),
+      "vision_key": _digestOf(vision),
+      "vision_base_url": _digestOf(url),
+    ]
+  }
+  _ = try _writeGuardedShim(
+    sandbox: sandbox,
+    credentials: [
+      "OPENAI_API_KEY": "stale-env-stt",
+      "GOOGLE_API_KEY": "stale-env-vision",
+      "GEMINI_BASE_URL": "https://stale-env.example/v1",
+    ],
+    roleConsumerDigests: [
+      "job-roles-full": roleEntry(stt: sttKey, vision: visionKey, url: endpoint),
+      "job-roles-no-vision": roleEntry(stt: sttKey, vision: "", url: ""),
+      "job-roles-no-stt": roleEntry(stt: "", vision: visionKey, url: endpoint),
+    ])
+  try _runShimCanary(sandbox: sandbox)
+  let wrapperParent = try _installDevelopmentWrapper(sandbox: sandbox)
+    .deletingLastPathComponent()
+  let launcher = DevelopmentEngineLauncher()
+
+  func makeJob(_ name: String) throws -> URL {
+    let job = sandbox.root.appendingPathComponent(name, isDirectory: true)
+    try FileManager.default.createDirectory(at: job, withIntermediateDirectories: true)
+    return job
+  }
+
+  // (1) 세 역할 전부 — 상속·dotenv의 낡은 값을 이기고 두 공장이 제 값을 본다.
+  let full = try DevelopmentEngineInvocation.createRoles(
+    operation: .analyze,
+    jobID: "job-roles-full",
+    externalJob: try makeJob("job roles full dir"),
+    applicationScriptsDirectory: wrapperParent,
+    credentials: EngineRoleCredentials(
+      sttKey: sttKey, visionKey: visionKey, visionBaseURL: endpoint)
+  )
+  #expect(try await _withDeadline(seconds: 60, label: "역할 봉투 실행") {
+    try await launcher.run(full)
+  } == 0)
+  try _assertJobProof(sandbox: sandbox, jobID: "job-roles-full", minimumRecords: 1)
+  try _assertRoleConsumerResult(
+    sandbox: sandbox, jobID: "job-roles-full",
+    sttOK: true, sttRefused: false, visionRefused: false, visionKeyOK: true, visionURLOK: true)
+  try _assertNoDurableSecret(under: sandbox.root, secret: sttKey)
+  try _assertNoDurableSecret(under: sandbox.root, secret: visionKey)
+
+  // (2) 비전만 부재 — STT 공장은 살아 있고(독립 부재) 비전 자격증명 문은 닫는다.
+  let noVision = try DevelopmentEngineInvocation.createRoles(
+    operation: .analyze,
+    jobID: "job-roles-no-vision",
+    externalJob: try makeJob("job roles no vision dir"),
+    applicationScriptsDirectory: wrapperParent,
+    credentials: EngineRoleCredentials(sttKey: sttKey, visionKey: "", visionBaseURL: "")
+  )
+  #expect(try await _withDeadline(seconds: 60, label: "역할 봉투(비전 없음)") {
+    try await launcher.run(noVision)
+  } == 0)
+  try _assertJobProof(sandbox: sandbox, jobID: "job-roles-no-vision", minimumRecords: 1)
+  try _assertRoleConsumerResult(
+    sandbox: sandbox, jobID: "job-roles-no-vision",
+    sttOK: true, sttRefused: false, visionRefused: true, visionKeyOK: false, visionURLOK: false)
+
+  // (3) STT만 부재 — 반대 방향: STT 판독은 거부되고 비전 두 값은 여전히 산다.
+  let noSTT = try DevelopmentEngineInvocation.createRoles(
+    operation: .analyze,
+    jobID: "job-roles-no-stt",
+    externalJob: try makeJob("job roles no stt dir"),
+    applicationScriptsDirectory: wrapperParent,
+    credentials: EngineRoleCredentials(sttKey: "", visionKey: visionKey, visionBaseURL: endpoint)
+  )
+  #expect(try await _withDeadline(seconds: 60, label: "역할 봉투(STT 없음)") {
+    try await launcher.run(noSTT)
+  } == 0)
+  try _assertJobProof(sandbox: sandbox, jobID: "job-roles-no-stt", minimumRecords: 1)
+  try _assertRoleConsumerResult(
+    sandbox: sandbox, jobID: "job-roles-no-stt",
+    sttOK: false, sttRefused: true, visionRefused: false, visionKeyOK: true, visionURLOK: true)
+  try _assertNoDurableSecret(under: sandbox.root, secret: visionKey)
+}
+
+/// **번들 역할 소비 경계(S2A-2 단위2)** — 실제 BundledEngineLauncher가 createRoles
+/// 가 파생한 환경(V2 사적 운반자 한 통, V1 운반자 없음)으로 자식을 띄워 두 공장
+/// 모두가 제 값을 보는지를 본다. 빈 역할도 명시적으로 가서 낡은 상속 키가
+/// 부활하지 않는다. 호출 환경은 실제 create가 준 것에서 시험 문맥만 얹는다.
+@Test func bundledRoleCarrierReachesTheLaunchedConsumer() async throws {
+  let sandbox = try _makeBridgeSandbox(
+    label: "S2A-2 bundled role consumer",
+    dotenv: "VLOGSRT_OFFLINE=1\nOPENAI_API_KEY=stale-dotenv-stt\n"
+      + "GOOGLE_API_KEY=stale-dotenv-vision\nGEMINI_BASE_URL=https://stale.example/v1\n")
+  defer { try? FileManager.default.removeItem(at: sandbox.root) }
+  let sttKey = "synthetic-bundled-role-stt-key"
+  let visionKey = "synthetic-bundled-role-vision-key"
+  let endpoint = "https://synthetic-vision.example/v1"
+
+  func roleEntry(stt: String, vision: String, url: String) -> [String: String] {
+    [
+      "stt": _digestOf(stt),
+      "vision_key": _digestOf(vision),
+      "vision_base_url": _digestOf(url),
+    ]
+  }
+  let digestMap = [
+    "job-bundled-roles": roleEntry(stt: sttKey, vision: visionKey, url: endpoint),
+    "job-bundled-roles-empty": roleEntry(stt: "", vision: "", url: ""),
+  ]
+  // 부호화는 심의 병합 부호화와 같은 모양 — job→사전 그대로(JSON 문자열 이중 포장 없음).
+  var digestPayload: [String: Any] = [:]
+  for (key, value) in digestMap { digestPayload[key] = value }
+  let digestJSON = String(
+    data: try JSONSerialization.data(withJSONObject: digestPayload), encoding: .utf8)!
+  let guardEnv = try _writeGuardedShim(
+    sandbox: sandbox, roleConsumerDigests: digestMap)
+  try _runShimCanary(sandbox: sandbox)
+
+  func derivedRoleInvocation(
+    credentials: EngineRoleCredentials, jobID: String, job: URL
+  ) throws -> BundledEngineInvocation {
+    let engineRoot = sandbox.root.appendingPathComponent("synthetic engine", isDirectory: true)
+    try FileManager.default.createDirectory(at: engineRoot, withIntermediateDirectories: true)
+    let real = try BundledEngineInvocation.createRoles(
+      operation: .analyze,
+      jobID: jobID,
+      jobDirectory: job,
+      engineRoot: engineRoot,
+      credentials: credentials
+    )
+    // 파생 근거를 못 박는다 — V2 운반자만 실렸고 V1 운반자는 없다.
+    let expectedPayload = try credentials.encodedPayload()
+    #expect(
+      real.environment[BundledEngineInvocation.roleCarrierEnvironmentName]
+        == String(decoding: expectedPayload, as: UTF8.self))
+    #expect(real.environment[BundledEngineInvocation.apiKeyEnvironmentName] == nil)
+    var environment = real.environment
+    environment["HOME"] = sandbox.home.path
+    environment["TMPDIR"] = sandbox.tmp.path
+    environment["PYTHONPATH"] = "\(sandbox.guardBoot.path):\(sandbox.repo.path)"
+    environment["VLOGSRT_OFFLINE"] = "1"
+    environment["VLOGSRT_TEST_GUARD_ROOTS"] = guardEnv["VLOGSRT_TEST_GUARD_ROOTS"] ?? ""
+    environment["VLOGSRT_TEST_GUARD_STANDIN"] = sandbox.standin.path
+    environment["VLOGSRT_TEST_GUARD_PROOF"] =
+      sandbox.root.appendingPathComponent("guard-proof.jsonl").path
+    environment["VLOGSRT_TEST_EXPECTED_CWD"] = real.currentDirectory.path
+    environment["VLOGSRT_TEST_EXPECTED_INIT"] =
+      sandbox.repo.appendingPathComponent("vlogsrt/__init__.py").path
+    environment["VLOGSRT_TEST_PROOF_DIR"] = sandbox.proofDir.path
+    environment["VLOGSRT_TEST_RESULT_DIR"] = sandbox.resultDir.path
+    environment["VLOGSRT_TEST_CONSUMER_DIGESTS"] = digestJSON
+    return BundledEngineInvocation(
+      executableURL: sandbox.realPython,
+      arguments: [
+        sandbox.driver.path, sandbox.engineScript.path, "analyze", jobID,
+        job.standardizedFileURL.path,
+      ],
+      currentDirectory: real.currentDirectory,
+      environment: environment)
+  }
+
+  // 세 역할 전부 — 두 공장 모두 제 값을 본다.
+  let keyedJob = sandbox.root.appendingPathComponent("job bundled roles dir", isDirectory: true)
+  try FileManager.default.createDirectory(at: keyedJob, withIntermediateDirectories: true)
+  let keyed = try derivedRoleInvocation(
+    credentials: EngineRoleCredentials(
+      sttKey: sttKey, visionKey: visionKey, visionBaseURL: endpoint),
+    jobID: "job-bundled-roles", job: keyedJob)
+  let keyedStatus = try await _withDeadline(seconds: 60, label: "번들 역할 소비(키)") {
+    try await Task.detached { try BundledEngineLauncher().run(keyed) }.value
+  }
+  #expect(keyedStatus == 0)
+  try _assertJobProof(
+    sandbox: sandbox, jobID: "job-bundled-roles", minimumRecords: 1,
+    expectedCWD: keyed.currentDirectory)
+  try _assertRoleConsumerResult(
+    sandbox: sandbox, jobID: "job-bundled-roles",
+    sttOK: true, sttRefused: false, visionRefused: false, visionKeyOK: true, visionURLOK: true)
+  try _assertNoDurableSecret(under: sandbox.root, secret: sttKey)
+  try _assertNoDurableSecret(under: sandbox.root, secret: visionKey)
+
+  // 전부 비어도 V2 운반자는 간다 — 두 자격증명 문 모두 거부(명시적 부재).
+  let emptyJob = sandbox.root
+    .appendingPathComponent("job bundled roles empty dir", isDirectory: true)
+  try FileManager.default.createDirectory(at: emptyJob, withIntermediateDirectories: true)
+  let empty = try derivedRoleInvocation(
+    credentials: EngineRoleCredentials(),
+    jobID: "job-bundled-roles-empty", job: emptyJob)
+  let emptyStatus = try await _withDeadline(seconds: 60, label: "번들 역할 소비(빈)") {
+    try await Task.detached { try BundledEngineLauncher().run(empty) }.value
+  }
+  #expect(emptyStatus == 0)
+  try _assertJobProof(
+    sandbox: sandbox, jobID: "job-bundled-roles-empty", minimumRecords: 1,
+    expectedCWD: empty.currentDirectory)
+  try _assertRoleConsumerResult(
+    sandbox: sandbox, jobID: "job-bundled-roles-empty",
+    sttOK: false, sttRefused: true, visionRefused: true, visionKeyOK: false, visionURLOK: false)
 }

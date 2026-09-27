@@ -5,7 +5,6 @@ import FinalCutAgentCore
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
   private static let developmentWorkspaceBookmark = "developmentEngineWorkspace"
-  private static let apiKeyAccount = "engine"
   private var window: NSWindow?
   private var statusLabel: NSTextField?
   private var mediaRootsLabel: NSTextField?
@@ -14,6 +13,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   private var apiKeyField: NSSecureTextField?
   private var apiKeyStatusLabel: NSTextField?
   private var apiKeyModel: CredentialEntryModel?
+  private var visionKeyField: NSSecureTextField?
+  private var visionKeyStatusLabel: NSTextField?
+  private var visionKeyModel: CredentialEntryModel?
+  private var visionEndpointField: NSTextField?
+  private var visionEndpointStatusLabel: NSTextField?
+  private var visionEndpointModel: VisionEndpointEntryModel?
   private var roundTripCoordinator: RoundTripCoordinator?
   /// 같은 job의 동시 요청을 막는 앱 게이트(S2A-1) — 청구는 스테이징·상태 쓰기
   /// 보다 먼저고, 해제는 어떤 끝에서든 일어난다. 실행 중 job의 취소 문맥은
@@ -56,24 +61,82 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       target: self,
       action: #selector(cancelCurrentJob)
     )
-    // API 키 입력(S2A-2) — 보안 필드가 값을 감싸고, 모델이 문면·수명을 정한다.
-    // 저장된 값은 화면 어디에도 다시 나오지 않는다: 상태는 있음/없음/실패뿐.
+    // 역할 자격 증명 입력(S2A-2 단위2) — STT·비전 키는 각자 보안 필드·모델·
+    // 계정을 가진다. 저장된 값은 화면 어디에도 다시 나오지 않는다: 상태는
+    // 있음/없음/실패뿐이다. 한 역할을 지워도 다른 역할은 그대로 산다.
+    let secureStore = KeychainStore()
     let keyField = NSSecureTextField()
-    keyField.placeholderString = "OpenAI API 키 (유료 실행용)"
+    keyField.placeholderString = "OpenAI API 키 (STT·유료 실행용)"
     apiKeyField = keyField
     let saveKey = NSButton(
-      title: "API 키 저장",
+      title: "저장",
       target: self,
       action: #selector(saveApiKey)
+    )
+    let clearKey = NSButton(
+      title: "지우기",
+      target: self,
+      action: #selector(clearApiKey)
     )
     let keyStatus = NSTextField(labelWithString: "")
     keyStatus.maximumNumberOfLines = 2
     apiKeyStatusLabel = keyStatus
     apiKeyModel = CredentialEntryModel(
-      storage: KeychainStore(), account: Self.apiKeyAccount
+      storage: secureStore, account: EngineRoleCredentialStore.sttAccount
     )
     apiKeyModel?.refresh()
     refreshApiKeyStatus()
+
+    let visionField = NSSecureTextField()
+    visionField.placeholderString = "Google API 키 (비전·유료 분석용)"
+    visionKeyField = visionField
+    let saveVisionKey = NSButton(
+      title: "저장",
+      target: self,
+      action: #selector(saveVisionKey)
+    )
+    let clearVisionKey = NSButton(
+      title: "지우기",
+      target: self,
+      action: #selector(clearVisionKey)
+    )
+    let visionStatus = NSTextField(labelWithString: "")
+    visionStatus.maximumNumberOfLines = 2
+    visionKeyStatusLabel = visionStatus
+    visionKeyModel = CredentialEntryModel(
+      storage: secureStore,
+      account: EngineRoleCredentialStore.visionAccount,
+      roleNoun: "비전 키"
+    )
+    visionKeyModel?.refresh()
+    refreshVisionKeyStatus()
+
+    // 비전 base URL — 사람이 직접 입력한다(기본값·프리셋 없음). https여야 하고
+    // 저장 전에 검증한다. 저장된 값은 앱 재시작에도 살지만 문면에는 유무만
+    // 나간다 — 오류 문면은 URL을 절대 되뇌지 않는다.
+    let endpointLabel = NSTextField(labelWithString: "비전 API base URL (https)")
+    let endpointField = NSTextField()
+    endpointField.placeholderString = "https://… (예: 호스트/v1 — 유료 분석이 쓸 엔드포인트)"
+    visionEndpointField = endpointField
+    let saveEndpoint = NSButton(
+      title: "저장",
+      target: self,
+      action: #selector(saveVisionEndpoint)
+    )
+    let clearEndpoint = NSButton(
+      title: "지우기",
+      target: self,
+      action: #selector(clearVisionEndpoint)
+    )
+    let endpointStatus = NSTextField(labelWithString: "")
+    endpointStatus.maximumNumberOfLines = 2
+    visionEndpointStatusLabel = endpointStatus
+    visionEndpointModel = VisionEndpointEntryModel(
+      storage: secureStore,
+      knownSecrets: { [weak self] in try self?.gatherEndpointSecretMaterial() ?? [] }
+    )
+    visionEndpointModel?.refresh()
+    refreshVisionEndpointStatus()
     let stack = NSStackView(
       views: [
         label,
@@ -82,8 +145,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSStackView(views: [addRoot, removeRoot]),
         shareDestinationLabel!,
         revealDestination,
-        NSStackView(views: [keyField, saveKey]),
+        NSStackView(views: [keyField, saveKey, clearKey]),
         keyStatus,
+        NSStackView(views: [visionField, saveVisionKey, clearVisionKey]),
+        visionStatus,
+        endpointLabel,
+        NSStackView(views: [endpointField, saveEndpoint, clearEndpoint]),
+        endpointStatus,
         currentJobLabel!,
         cancelButton,
       ]
@@ -93,7 +161,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let controller = NSViewController()
     controller.view = stack
     let window = NSWindow(contentViewController: controller)
-    window.setContentSize(NSSize(width: 460, height: 420))
+    window.setContentSize(NSSize(width: 520, height: 620))
     window.title = "Final Cut Agent"
     window.makeKeyAndOrderFront(nil)
     self.window = window
@@ -250,7 +318,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             appropriateFor: nil,
             create: true
           )
-          let apiKey = try KeychainStore().load(account: Self.apiKeyAccount)
+          // 세 저장 값을 한 덩어리로 읽고 실행 직전에 다시 검증한다(S2A-2 단위2).
+          // 읽기 실패는 정해진 글 + 실행 없음이다. 빈 값은 부재일 뿐 — 추정·
+          // 러프컷은 키 없이도 돈다. 재검증은 저장 때가 아니라 **지금** 키 재료와
+          // 견준다(키가 바뀐 뒤 낡은 엔드포인트가 지나가는 길을 닫는다).
+          let snapshot = EngineRoleCredentialStore(storage: KeychainStore()).loadSnapshot()
+          guard case .ready(let credentials) = snapshot else {
+            throw AppError.credentialStorageUnavailable
+          }
+          if let blocker = EngineRoleCredentialStore.launchBlocker(for: credentials) {
+            throw AppError.visionEndpointInvalid(blocker)
+          }
           let plan = EngineRuntime.resolvePlan(
             configuration: Self.buildConfiguration,
             operation: operation,
@@ -259,7 +337,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             engineRoot: engineRoot,
             applicationScriptsDirectory: scripts,
             developmentExternalJob: externalJob,
-            apiKey: apiKey
+            credentials: credentials
           )
           let runner = EngineSessionRunner(executor: ProcessEngineExecutor())
           let context = EngineSessionContext(
@@ -367,9 +445,72 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     refreshApiKeyStatus()
   }
 
+  @objc private func clearApiKey() {
+    guard let model = apiKeyModel, let field = apiKeyField else { return }
+    model.clear()
+    field.stringValue = model.submittedText
+    refreshApiKeyStatus()
+  }
+
   private func refreshApiKeyStatus() {
     guard let model = apiKeyModel else { return }
-    apiKeyStatusLabel?.stringValue = "API 키: \(model.status.message)"
+    apiKeyStatusLabel?.stringValue = "STT 키: \(model.status.message)"
+  }
+
+  @objc private func saveVisionKey() {
+    guard let model = visionKeyModel, let field = visionKeyField else { return }
+    model.updateSubmitted(field.stringValue)
+    model.save()
+    field.stringValue = model.submittedText
+    refreshVisionKeyStatus()
+  }
+
+  @objc private func clearVisionKey() {
+    guard let model = visionKeyModel, let field = visionKeyField else { return }
+    model.clear()
+    field.stringValue = model.submittedText
+    refreshVisionKeyStatus()
+  }
+
+  private func refreshVisionKeyStatus() {
+    guard let model = visionKeyModel else { return }
+    visionKeyStatusLabel?.stringValue = model.status.message
+  }
+
+  @objc private func saveVisionEndpoint() {
+    guard let model = visionEndpointModel, let field = visionEndpointField else { return }
+    model.updateSubmitted(field.stringValue)
+    model.save()
+    field.stringValue = model.submittedText
+    refreshVisionEndpointStatus()
+  }
+
+  @objc private func clearVisionEndpoint() {
+    guard let model = visionEndpointModel, let field = visionEndpointField else { return }
+    model.clear()
+    field.stringValue = model.submittedText
+    refreshVisionEndpointStatus()
+  }
+
+  private func refreshVisionEndpointStatus() {
+    guard let model = visionEndpointModel else { return }
+    visionEndpointStatusLabel?.stringValue = model.status.message
+  }
+
+  /// 엔드포인트 검증이 견주는 키 재료 — 저장된 두 역할 값 **와** 방금 제출된
+  /// 보안 필드 값까지(S2A-2 단위2). 저장 읽기에 실패하면 던진다: 재료를 모르는
+  /// 채 검증을 지나가는 것보다 실패로 닫는 쪽이 안전하다(모델이 정해진 글로
+  /// 받는다). 값은 이 문 안에서만 산다.
+  private func gatherEndpointSecretMaterial() throws -> [String] {
+    let store = KeychainStore()
+    let storedSTT = try store.load(account: EngineRoleCredentialStore.sttAccount) ?? ""
+    let storedVision = try store.load(account: EngineRoleCredentialStore.visionAccount) ?? ""
+    var values = [storedSTT, storedVision]
+    if let submitted = apiKeyField?.stringValue, !submitted.isEmpty { values.append(submitted) }
+    if let submitted = visionKeyField?.stringValue, !submitted.isEmpty {
+      values.append(submitted)
+    }
+    return values.filter { !$0.isEmpty }
   }
 
   @objc private func chooseDevelopmentWorkspace() {
@@ -542,11 +683,24 @@ enum CryptoKitSHA256 {
   }
 }
 
-enum AppError: Error {
+enum AppError: LocalizedError {
   case noActiveRoughCutRevision
   case noDevelopmentWorkspace
   case engineUnavailable(String)
   case securityScopeUnavailable(String)
+  case credentialStorageUnavailable
+  case visionEndpointInvalid(String)
+
+  var errorDescription: String? {
+    switch self {
+    case .credentialStorageUnavailable:
+      EngineRoleSnapshot.storageFailedMessage
+    case .visionEndpointInvalid(let message):
+      message
+    default:
+      nil  // 낡은 사례의 문면 표시 계약은 그대로 둔다
+    }
+  }
 }
 
 // Xcode는 main.swift 안의 @main을 "top-level code와 충돌"로 거부하고

@@ -49,7 +49,41 @@ public struct BundledEngineInvocation: Equatable, Sendable {
     )
   }
 
+  /// V2 역할 호출 조립 — 세 값을 사적 환경 운반자 **한 통**으로만 전단한다
+  /// (S2A-2 단위2). 값은 stdin V2 봉투와 같은 JSON 계약이고, 자식은 소비 뒤
+  /// 이름을 지운다. V1 운반자와 나란히 오지 않는다 — 두 운반자가 같은 호출에
+  /// 있으면 자식이 충돌로 닫는다(부분 병합 금지).
+  public static func createRoles(
+    operation: DevelopmentEngineOperation,
+    jobID: String,
+    jobDirectory: URL,
+    engineRoot: URL,
+    credentials: EngineRoleCredentials
+  ) throws -> Self {
+    guard AppGroupWorkspace.isSafeJobID(jobID) else {
+      throw WorkspaceError.invalidJobID(jobID)
+    }
+    let executable = engineRoot
+      .appendingPathComponent("Contents", isDirectory: true)
+      .appendingPathComponent("MacOS", isDirectory: true)
+      .appendingPathComponent(DevelopmentEngineInvocation.scriptName)
+    let payload = try credentials.encodedPayload()
+    let environment = [
+      Self.pathEnvironmentName: Self.bundledToolPath(engineRoot: engineRoot),
+      Self.roleCarrierEnvironmentName: String(decoding: payload, as: UTF8.self),
+    ]
+    return Self(
+      executableURL: executable,
+      arguments: [operation.rawValue, jobID, jobDirectory.standardizedFileURL.path],
+      currentDirectory: engineRoot,
+      environment: environment
+    )
+  }
+
   public static let apiKeyEnvironmentName = "VLOGSRT_ENGINE_API_KEY"
+  /// V2 환경 운반자 — 파이촌 진입점의 `VLOGSRT_ENGINE_ROLE_CREDENTIALS`와
+  /// 같은 이름. 값은 argv·기록·부모 환경 어디에도 가지 않는다.
+  public static let roleCarrierEnvironmentName = "VLOGSRT_ENGINE_ROLE_CREDENTIALS"
   public static let pathEnvironmentName = "PATH"
 
   /// 번들의 도구 경로 — bin/ffmpeg·bin/ffprobe가 여기서 발견된다.

@@ -12,6 +12,13 @@ API 키는 부모가 준 환경변수(VLOGSRT_ENGINE_API_KEY)로만 받는다 �
 — 봉투가 있으면 그 값이 권위적이다(상속 키 대체·빈 값은 키 없음), 마커 없는
 호출은 stdin을 건드리지 않는 낡은 계약 그대로다.
 
+봉투와 환경 운반자는 버전이 갈린다(S2A-2 단위2). V1은 단일 STT 키다. V2
+(`VLOGSRT-ENGINE-CARRIER 2` stdin 봉투 또는 VLOGSRT_ENGINE_ROLE_CREDENTIALS
+환경값)는 세 역할 필드의 JSON이다 — `stt_key`·`vision_key`·`vision_base_url`.
+셋 다 빈 문자열일 수 있고, 빈 값은 권위적 부재다(상속·dotenv 부활 없음). 비전
+두 값은 작업이 쓰는 공개 프로젝트 설정이 정하는 이름에 얹힌다. V2는 호출의
+자격 증명 전부를 정의하므로 다른 운반자와 나란히 오면 충돌로 닫는다.
+
 종료 코드는 넷이다: 0 성공, 1 실패한 실행, 2 호출 계약 위반, 3 같은 job이
 이미 어딘가에서 도는 중(중복 요청) — 3은 성공도 실패 시도도 아니므로 아무
 기록도 쓰지 않는다(S2A-1).
@@ -58,6 +65,9 @@ _DIAGNOSTIC_FILES = (
     "analysis-result.jsonl",
 )
 _CARRIER = "VLOGSRT_ENGINE_API_KEY"
+# V2 환경 운반자(번들) — 값은 stdin V2 봉투와 같은 JSON 세 필드다(S2A-2 단위2).
+# 적용·제거 시점은 V1과 같다: 공급자 해석 전에 소비되고 이름은 지운다.
+_ROLE_CARRIER = "VLOGSRT_ENGINE_ROLE_CREDENTIALS"
 _ENGINE_KEY_NAME = "OPENAI_API_KEY"
 # 개발 실행기의 사적 stdin 봉투 — NSUserUnixTask에는 per-task 환경이 없다(S2A-2).
 # 마법줄·상한은 계약이고, 마커(argv, 비밀 아님)는 "이 호출은 봉투를 읽는다"의
@@ -65,6 +75,14 @@ _ENGINE_KEY_NAME = "OPENAI_API_KEY"
 _CARRIER_MARKER = "--stdin-carrier"
 _CARRIER_MAGIC = "VLOGSRT-ENGINE-CARRIER"
 _CARRIER_VERSION = "1"
+# V2 — 세 역할 필드의 JSON 페이로드. STT·비전 키·비전 base URL이 함께 가고
+# 빈 문자열은 권위적 부재다(S2A-2 단위2). V1 바이트·계약은 그대로 산다.
+_ROLE_CARRIER_VERSION = "2"
+_CARRIER_VERSIONS = (_CARRIER_VERSION, _ROLE_CARRIER_VERSION)
+_MAGIC_LINES = tuple(f"{_CARRIER_MAGIC} {version}".encode() for version in _CARRIER_VERSIONS)
+_MAGIC_LINE_MAX = len(_MAGIC_LINES[0])
+# V2 페이로드의 논리 필드 — 정확히 이 셋뿐이다(중복·불명·결실은 닫는다).
+_ROLE_FIELDS = ("stt_key", "vision_key", "vision_base_url")
 _CARRIER_MAX_BYTES = 8192
 # 머릿줄(마법줄+버전, 길이 줄)의 상한 — 이 안에 두 번째 줄바꿈이 오지 않으면
 # 모양 오류로 닫는다. 마법줄은 25바이트, 길이는 상한(8192)에 4자리면 충분하다.
@@ -172,33 +190,123 @@ class _ExecutionLock:
             os.close(fd)
 
 
-def _carry_api_key(stdin_carrier: str | None = None) -> None:
-    """앱이 보낸 키를 엔진이 읽는 이름(OPENAI_API_KEY)으로 옮겨 담는다.
+class _CarriedCredentials:
+    """한 호출이 운반하는 자격 증명 — V2면 세 역할, V1이면 STT 하나, 없으면 상속 그대로.
 
-    우선순위는 정해져 있다: stdin 봉투 > 환경 운반자 > 낡은 직접 호출(건드리지
-    않는다). 앱 실행의 운반은 **권위적**이다 — 값이 있으면 이미 상속된 낡은 키를
-    대체하고(교체가 묻히면 앱에서 갈아끼운 키가 영영 안 닿는다), 값이 비면
-    '키 없음'으로 상속 키를 내려놓는다(앱에 키가 없는데 셸의 낡은 키로 유료
-    호출이 열리면 사전 검사가 거짓말이 된다). 빈 값을 지우지 않고 빈 채로 두는
-    것은 dotenv의 setdefault가 그 자리를 다시 채우는 길을 끊는 것이다.
+    어느 쪽도 **권위적**이다: 값이 있으면 상속·dotenv의 낡은 값을 대체하고(교체가
+    묻히면 앱에서 갈아끼운 키가 영영 안 닿는다), 값이 비면 '없음'으로 그 자리를
+    막는다(앱에 없는데 셸의 낡은 키로 유료 호출이 열리면 사전 검사가 거짓말이
+    된다). V2는 세 역할을 통째로 정의한다 — 다른 운반자와 나란히 오면 충돌로
+    닫고 부분 병합은 하지 않는다.
     """
-    if stdin_carrier is not None:
-        carried = stdin_carrier
-    elif _CARRIER in os.environ:
-        carried = os.environ[_CARRIER]
-    else:
-        carried = None  # 낡은 직접 호출 — 상속 환경을 그대로 둔다
-    if carried is not None:
-        os.environ[_ENGINE_KEY_NAME] = carried
+
+    def __init__(self, roles: dict[str, str] | None, stt_key: str | None) -> None:
+        self.roles = roles
+        self.stt_key = stt_key
+
+
+def _parse_role_payload(payload: str) -> dict[str, str]:
+    """V2 페이로드의 계약 — 정확히 세 문자열 필드(S2A-2 단위2).
+
+    중복 필드(JSON 해석기는 조용히 마지막 값을 고른다), 불명 필드, 결실 필드,
+    문자열 아닌 값, 값 안의 NUL은 모두 닫는다. 탈출된 외로운 서러게이트(UTF-8로
+    부호화되지 않는 글자)도 닫는다 — 환경 배정은 부호화 가능한 값만 받으므로,
+    이를 지나치면 역할 하나를 얹은 뒤에 죽는 반쪽 배정이 된다. 오류 문면은
+    모양만 말하고 페이로드를 절대 되뇌지 않는다.
+    """
+    import json
+
+    def _reject_duplicates(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        seen: set[str] = set()
+        for name, _ in pairs:
+            if name in seen:
+                raise _CarrierEnvelopeError("carrier payload repeats a field")
+            seen.add(name)
+        return dict(pairs)
+
+    try:
+        decoded = json.loads(payload, object_pairs_hook=_reject_duplicates)
+    except json.JSONDecodeError as error:
+        raise _CarrierEnvelopeError("carrier payload is not a valid JSON object") from error
+    if not isinstance(decoded, dict) or set(decoded) != set(_ROLE_FIELDS):
+        raise _CarrierEnvelopeError("carrier payload must carry exactly the three role fields")
+    for value in decoded.values():
+        if not isinstance(value, str):
+            raise _CarrierEnvelopeError("carrier payload fields must be strings")
+        if "\x00" in value:
+            raise _CarrierEnvelopeError("carrier payload contains a NUL byte")
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError as error:
+            raise _CarrierEnvelopeError("carrier payload is not encodable as UTF-8") from error
+    return {name: decoded[name] for name in _ROLE_FIELDS}
+
+
+def _resolve_carried_credentials(
+    stdin_frame: tuple[str, str] | None,
+) -> _CarriedCredentials:
+    """한 호출의 운반자를 하나로 정한다 — 읽기만 하고 배정은 나중이다.
+
+    V1 안에서는 낡은 우선순위(stdin > 환경)를 유지한다. V2가 오면 그것이 호출의
+    자격 증명 **전부**다 — 다른 어떤 운반자와 나란히 오면 충돌로 닫는다: 조용히
+    병합하면 'STT는 V1의 것, 비전은 V2의 것'인 반쪽 상태가 되고, 어느 쪽
+    기록도 믿을 수 없어진다.
+    """
+    stdin_roles: dict[str, str] | None = None
+    stdin_stt: str | None = None
+    if stdin_frame is not None:
+        version, payload = stdin_frame
+        if version == _ROLE_CARRIER_VERSION:
+            stdin_roles = _parse_role_payload(payload)
+        else:
+            stdin_stt = payload
+    env_v2 = os.environ.get(_ROLE_CARRIER)
+    env_v1 = os.environ.get(_CARRIER)
+    new_carriers = (stdin_roles is not None) + (env_v2 is not None)
+    legacy_carriers = (stdin_stt is not None) + (env_v1 is not None)
+    if new_carriers > 1 or (new_carriers and legacy_carriers):
+        raise _CarrierEnvelopeError("conflicting credential carriers")
+    if env_v2 is not None:
+        if len(env_v2.encode("utf-8")) > _CARRIER_MAX_BYTES:
+            raise _CarrierEnvelopeError("carrier envelope exceeds the size limit")
+        return _CarriedCredentials(roles=_parse_role_payload(env_v2), stt_key=None)
+    if stdin_roles is not None:
+        return _CarriedCredentials(roles=stdin_roles, stt_key=None)
+    if stdin_stt is not None:
+        return _CarriedCredentials(roles=None, stt_key=stdin_stt)
+    if env_v1 is not None:
+        return _CarriedCredentials(roles=None, stt_key=env_v1)
+    return _CarriedCredentials(roles=None, stt_key=None)
+
+
+def _carry_credentials(carried: _CarriedCredentials) -> None:
+    """결정된 운반을 엔진이 읽는 이름들로 옮겨 담는다 — dotenv 해석보다 앞서 권위적으로.
+
+    V2는 세 역할을 프로젝트 설정이 정한 이름에 얹는다(기본 GOOGLE_API_KEY·
+    GEMINI_BASE_URL). 빈 값을 지우지 않고 빈 채로 두는 것은 dotenv의 setdefault가
+    그 자리를 다시 채우는 길을 끊는 것이다. 이름 검사가 실패하면 어떤 배정도
+    일어나기 전에 닫는다.
+    """
+    if carried.roles is not None:
+        from vlogsrt.env import apply_role_credentials
+
+        apply_role_credentials(
+            carried.roles["stt_key"],
+            carried.roles["vision_key"],
+            carried.roles["vision_base_url"],
+        )
+    elif carried.stt_key is not None:
+        os.environ[_ENGINE_KEY_NAME] = carried.stt_key
     # 운반자 이름은 지운다 — 키가 두 이름으로 흐르지 않게.
     os.environ.pop(_CARRIER, None)
+    os.environ.pop(_ROLE_CARRIER, None)
 
 
 class _CarrierEnvelopeError(Exception):
     """봉투가 계약을 어긴 것 — 문면은 모양·길이만 말하고 페이로드는 모른다."""
 
 
-def _read_carrier_envelope(stream: object | None = None) -> str:
+def _read_carrier_envelope(stream: object | None = None) -> tuple[str, str]:
     """개발 실행기의 사적 1회 봉투를 stdin에서 읽는다 — NSUserUnixTask에는
     환경 운반이 없어서 이 통로가 유일한 per-task 채널이다.
 
@@ -206,10 +314,11 @@ def _read_carrier_envelope(stream: object | None = None) -> str:
     무제한 버퍼 읽기는 멈춘 쓰기 끝 앞에서 영원히 블록된다. 마감은 조각 읽기와
     EOF 확인이 **함께 쓰는 하나의 예산**이다(조각마다 다시 걸지 않는다 — 한
     바이트씩 흘리면 마감이 무한히 늘어난다). 모양은 정확히 네 덩어리다: 마법줄·
-    버전, 십진 바이트 길이, 본문, 끝표식 줄바꿈. 끝은 엄격하다: 쓰는 쪽이 execute
-    앞에서 쓰기 끝을 닫으므로 EOF는 반드시 오고, 끝표식 뒤 바이트가 하나라도
-    더 보이면 잔여 입력으로 거절하며, 마감 안에 EOF가 오지 않으면 실패로 닫는다.
-    본문의 NUL도 닫는다. 예외 문면은 모양·길이만 말하고 페이로드는 모른다.
+    버전(V1·V2), 십진 바이트 길이, 본문, 끝표식 줄바꿈. 끝은 엄격하다: 쓰는 쪽이
+    execute 앞에서 쓰기 끝을 닫으므로 EOF는 반드시 오고, 끝표식 뒤 바이트가
+    하나라도 더 보이면 잔여 입력으로 거절하며, 마감 안에 EOF가 오지 않으면
+    실패로 닫는다. 본문의 NUL도 닫는다. 예외 문면은 모양·길이만 말고 페이로드는
+    모른다. 반환은 (버전, 페이로드)다 — 버전이 페이로드의 계약을 정한다.
     """
     source = sys.stdin if stream is None else stream
     raw = getattr(source, "buffer", source)
@@ -220,10 +329,10 @@ def _read_carrier_envelope(stream: object | None = None) -> str:
     deadline = time.monotonic() + _CARRIER_READ_DEADLINE_SECONDS
     buffer = bytearray()
     while True:
-        payload = _parse_carrier_envelope(bytes(buffer))
-        if payload is not None:
+        frame = _parse_carrier_envelope(bytes(buffer))
+        if frame is not None:
             _require_clean_eof(fd, deadline)
-            return payload
+            return frame
         if len(buffer) > _CARRIER_HEADER_MAX_BYTES + _CARRIER_MAX_BYTES + 1:
             raise _CarrierEnvelopeError("carrier envelope exceeds the size limit")
         chunk = _read_chunk(fd, deadline)
@@ -275,23 +384,26 @@ def _require_clean_eof(fd: int, deadline: float) -> None:
         return  # EOF — 끝표식 뒤가 깨끗하다
 
 
-def _parse_carrier_envelope(head: bytes) -> str | None:
-    """완결된 봉투면 페이로드를, 아니면 None을 — 잘못된 모양은 예외로 닫는다.
+def _parse_carrier_envelope(head: bytes) -> tuple[str, str] | None:
+    """완결된 봉투면 (버전, 페이로드)를, 아니면 None을 — 잘못된 모양은 예외로 닫는다.
 
     반환 None은 "아직 덜 왔다"뿐이다(조각 읽기). 모양이 틀렸다는 것은 데이터로
     증명되는 순간 곧바로 예외다 — 마법줄이 온전히 온 뒤에만 비교하고(온전한
     마법줄을 '틀렸다'로 오판하지 않는다), 끝표식 뒤에 **이미 읽힌** 바이트가
     하나라도 있으면 잔여 입력으로 거절한다(나중에 오는 바이트는 호출자의
-    EOF 확인이 잡는다).
+    EOF 확인이 잡는다). 마법줄은 V1·V2 둘 다 받는다 — 버전이 페이로드의
+    계약(단일 키 vs 세 역할 필드)을 정한다.
     """
-    magic = f"{_CARRIER_MAGIC} {_CARRIER_VERSION}".encode()
     first_newline = head.find(b"\n")
     if first_newline == -1:
-        if len(head) > len(magic):
+        if len(head) > _MAGIC_LINE_MAX:
             raise _CarrierEnvelopeError("carrier envelope magic line does not match")
         return None  # 마법줄이 아직 못 끝났다 — 온전해질 때까지 미완이다
-    if head[:first_newline] != magic:
+    magic_line = head[:first_newline]
+    matched = next((line for line in _MAGIC_LINES if line == magic_line), None)
+    if matched is None:
         raise _CarrierEnvelopeError("carrier envelope magic line does not match")
+    version = matched.decode("ascii").rsplit(" ", 1)[1]
     rest = head[first_newline + 1 :]
     second_newline = rest.find(b"\n")
     if second_newline == -1:
@@ -322,7 +434,7 @@ def _parse_carrier_envelope(head: bytes) -> str | None:
     if b"\x00" in payload:
         raise _CarrierEnvelopeError("carrier envelope payload contains a NUL byte")
     try:
-        return payload.decode("utf-8")
+        return version, payload.decode("utf-8")
     except UnicodeDecodeError as error:
         raise _CarrierEnvelopeError("carrier envelope payload is not valid UTF-8") from error
 
@@ -439,13 +551,18 @@ def _dispatch(argv: list[str]) -> tuple[int, str | None]:
                 file=sys.stderr,
             )
             return 2, None
-    stdin_carrier: str | None = None
+    stdin_frame: tuple[str, str] | None = None
     if reads_envelope:
         try:
-            stdin_carrier = _read_carrier_envelope()
+            stdin_frame = _read_carrier_envelope()
         except _CarrierEnvelopeError as error:
             print(f"vlogsrt-engine: {error}", file=sys.stderr)
             return 2, status_file
+    try:
+        carried = _resolve_carried_credentials(stdin_frame)
+    except _CarrierEnvelopeError as error:
+        print(f"vlogsrt-engine: {error}", file=sys.stderr)
+        return 2, status_file
     lock = _ExecutionLock(canonical)
     try:
         owned = lock.acquire()
@@ -458,14 +575,38 @@ def _dispatch(argv: list[str]) -> tuple[int, str | None]:
         print(_ALREADY_RUNNING, file=sys.stderr)
         return _DUPLICATE_EXIT, status_file
     try:
-        return _run_owned(operation, canonical, stdin_carrier), status_file
+        return _run_owned(operation, canonical, carried), status_file
     finally:
         lock.release()
 
 
-def _run_owned(operation: str, job_dir: Path, stdin_carrier: str | None = None) -> int:
+def _sanitize_carrier_error(message: str, carried: _CarriedCredentials) -> str:
+    """운반 적용 실패 문면에서 관리 값·제출값을 지운다 — 지우개가 없으면 통째로 버린다.
+
+    설정 해석 오류(ProjectConfigError 등)는 파일 내용을 문면에 실을 수 있다.
+    배정은 실패로 끝났으므로 지우개가 아는 관리 값은 낡은 상속 값들이고, 제출값은
+    운반 객체가 들고 있다 — 둘 다 지운다. 지우개 자체를 얻지 못하면 문면을 아예
+    버린다: 반향 위험을 안고 진단을 살리는 선택지는 없다.
+    """
+    from vlogsrt.env import redact_secrets
+
+    secrets = tuple(carried.roles.values()) if carried.roles is not None else ()
+    return redact_secrets(message, secrets=secrets)
+
+
+def _run_owned(operation: str, job_dir: Path, carried: _CarriedCredentials) -> int:
     """잠긴 상태에서 실행하는 본문 — 스테이징·엔진 호출·결과 동기화 전부(S2A-1)."""
-    _carry_api_key(stdin_carrier)
+    try:
+        _carry_credentials(carried)
+    except (OSError, RuntimeError, ValueError) as error:
+        # 운반 적용 실패(설정 해석·이름·URL 검사)는 통제된 실행 실패다. 잠금은
+        # 호출자의 finally가 놓고, 상태 기록은 main이 남긴다 — traceback은 없다.
+        try:
+            detail = _sanitize_carrier_error(str(error), carried)
+        except Exception:  # 지우개를 얻지 못했다 — 문면을 버리고 정해진 글만 남는다.
+            detail = "credential application failed"
+        print(f"vlogsrt-engine: cannot apply carried credentials: {detail}", file=sys.stderr)
+        return 1
     workspace = job_dir / "workspace"
     # 스테이징 복사가 workspace를 만들기 전에 일어나면 FileNotFoundError다 —
     # 새 job에서도 안전하게 먼저 만든다(있으면 그대로 둔다).

@@ -10,31 +10,45 @@ public enum DevelopmentEngineOperation: String, Sendable {
 /// `.key`는 이 호출이 쓸 키이고, `.explicitNoKey`는 "이 실행에는 키가 없다"는
 /// 명시적 선언이다. 둘 다 stdin 봉투로 흘러가 자식 안에서 상속된 낡은 키를
 /// 대체하거나 내려놓는다 — argv·파일·부모 환경 전역 뮤테이션은 없다.
+/// `.roles`는 V2 봉투다 — 세 역할 값이 JSON으로 함께 가고, 빈 문자열은
+/// 역할마다 독립 부재다(S2A-2 단위2). 앱 호출은 이제 이쪽이 정상 경로다.
 public enum EngineCredentialEnvelope: Equatable, Sendable {
   public static let maximumByteCount = 8192
+  /// V2 봉투의 마법줄 버전 — 파이촌 판독기(`_ROLE_CARRIER_VERSION`)와 같은 값.
+  public static let roleCarrierVersion = "2"
 
   case key(String)
   case explicitNoKey
+  case roles(EngineRoleCredentials)
 
   /// stdin 봉투의 바이트 — 마법줄·버전, 십진 **바이트** 길이, 본문, 끝표식
   /// 줄바꿈. 끝표식이 있어 봉투는 스스로 끝난다: 읽는 쪽이 쓰기 끝의 닫힘
   /// 시점을 기다리지 않는다. 페이로드에 NUL이 있거나 상한을 넘으면 만들지
-  /// 않는다(실패 닫힘) — 파이촌 판독기의 상한·검사와 같은 값이다.
+  /// 않는다(실패 닫힘) — 파이촌 판독기의 상한·검사와 같은 값이다. V2의 상한은
+  /// JSON 부호화 **포함** 바이트 수다(따옴표·이스케이프까지).
   public var wire: Data {
     get throws {
+      let version: String
       let payload: Data
       switch self {
       case .key(let value):
         guard !value.contains("\0") else {
           throw DevelopmentEngineError.credentialEnvelopeContainsNUL
         }
+        version = "1"
         payload = Data(value.utf8)
-      case .explicitNoKey: payload = Data()
+      case .explicitNoKey:
+        version = "1"
+        payload = Data()
+      case .roles(let roles):
+        version = Self.roleCarrierVersion
+        payload = try roles.encodedPayload()
       }
       guard payload.count <= Self.maximumByteCount else {
         throw DevelopmentEngineError.credentialEnvelopeTooLarge
       }
-      let header = "VLOGSRT-ENGINE-CARRIER 1\n\(payload.count)\n".data(using: .utf8) ?? Data()
+      let header =
+        "VLOGSRT-ENGINE-CARRIER \(version)\n\(payload.count)\n".data(using: .utf8) ?? Data()
       return header + payload + Data("\n".utf8)
     }
   }
@@ -80,6 +94,29 @@ public struct DevelopmentEngineInvocation: Equatable, Sendable {
         Self.carrierMarkerArgument,
       ],
       credentialEnvelope: envelope
+    )
+  }
+
+  /// V2 역할 호출 조립 — 세 값이 함께 가고, 빈 값은 역할마다 독립 부재다
+  /// (S2A-2 단위2). 앱 호출의 정상 경로다: 어느 역할이 비었는지가 자식 안에서
+  /// 그대로 권위가 된다.
+  public static func createRoles(
+    operation: DevelopmentEngineOperation,
+    jobID: String,
+    externalJob: URL,
+    applicationScriptsDirectory: URL,
+    credentials: EngineRoleCredentials
+  ) throws -> Self {
+    guard AppGroupWorkspace.isSafeJobID(jobID) else {
+      throw WorkspaceError.invalidJobID(jobID)
+    }
+    return Self(
+      executableURL: applicationScriptsDirectory.appendingPathComponent(scriptName),
+      arguments: [
+        operation.rawValue, jobID, externalJob.standardizedFileURL.path,
+        Self.carrierMarkerArgument,
+      ],
+      credentialEnvelope: .roles(credentials)
     )
   }
 }

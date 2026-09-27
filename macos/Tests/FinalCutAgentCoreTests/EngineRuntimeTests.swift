@@ -690,3 +690,77 @@ enum EngineRuntimeTestFixtures {}
   // 코어 모델의 dataOptions 기본 — 분석은 원본 우선 512px.
   #expect(MediaDataOptions.analysis.maxLongEdge == 512)
 }
+
+// ─────────────────────────────────────────────────────────────
+//  STAB-S2A-2 단위2 — V2 역할 계획 — 두 실행길의 운반 모양
+// ─────────────────────────────────────────────────────────────
+
+@Test func roleCredentialsPlanCarriesTheV2CarrierOnBothPaths() throws {
+  /// 번들길은 사적 환경 운반자 한 통, 개발길은 stdin 봉투 — V1 운반자는
+  /// 실리지 않는다(자식의 충돌 판정이 두 운반자를 금한다).
+  let root = FileManager.default.temporaryDirectory
+    .appendingPathComponent(UUID().uuidString, isDirectory: true)
+  let engineRoot = root.appendingPathComponent("Engine", isDirectory: true)
+  let scripts = root.appendingPathComponent("Scripts", isDirectory: true)
+  let external = root.appendingPathComponent("external-job", isDirectory: true)
+  let executable = engineRoot
+    .appendingPathComponent("Contents", isDirectory: true)
+    .appendingPathComponent("MacOS", isDirectory: true)
+    .appendingPathComponent("vlogsrt-engine")
+  try FileManager.default.createDirectory(
+    at: executable.deletingLastPathComponent(), withIntermediateDirectories: true)
+  try FileManager.default.createDirectory(at: scripts, withIntermediateDirectories: true)
+  try FileManager.default.createDirectory(at: external, withIntermediateDirectories: true)
+  defer { try? FileManager.default.removeItem(at: root) }
+  try Data("#!/bin/sh\n".utf8).write(to: executable)
+  try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+
+  let roles = EngineRoleCredentials(
+    sttKey: "synthetic-stt-key",
+    visionKey: "synthetic-vision-key",
+    visionBaseURL: "https://vision.example/v1")
+
+  guard case .bundled(let bundled) = EngineRuntime.resolvePlan(
+    configuration: .release,
+    operation: .analyze,
+    jobID: "job-42",
+    appGroupJob: root,
+    engineRoot: engineRoot,
+    applicationScriptsDirectory: nil,
+    developmentExternalJob: nil,
+    credentials: roles
+  ) else {
+    Issue.record("번들이 있으면 bundled여야 한다")
+    return
+  }
+  // V2 운반자 한 통 — 값은 JSON 세 필드로만 간다.
+  let carried = try #require(bundled.environment[BundledEngineInvocation.roleCarrierEnvironmentName])
+  let decoded = try #require(
+    JSONSerialization.jsonObject(with: Data(carried.utf8)) as? [String: String])
+  #expect(decoded[EngineRoleCredentials.sttKeyField] == "synthetic-stt-key")
+  #expect(decoded[EngineRoleCredentials.visionKeyField] == "synthetic-vision-key")
+  #expect(decoded[EngineRoleCredentials.visionBaseURLField] == "https://vision.example/v1")
+  // V1 운반자는 실리지 않는다 — 두 운반자가 같은 호출에 오면 자식이 닫는다.
+  #expect(bundled.environment[BundledEngineInvocation.apiKeyEnvironmentName] == nil)
+  #expect(
+    bundled.environment[BundledEngineInvocation.pathEnvironmentName]
+      == "\(engineRoot.standardizedFileURL.path)/bin:/usr/bin:/bin")
+
+  guard case .development(let development) = EngineRuntime.resolvePlan(
+    configuration: .debug,
+    operation: .analyze,
+    jobID: "job-42",
+    appGroupJob: root,
+    engineRoot: nil,
+    applicationScriptsDirectory: scripts,
+    developmentExternalJob: external,
+    credentials: roles
+  ) else {
+    Issue.record("Debug 폴백이 development여야 한다")
+    return
+  }
+  #expect(development.credentialEnvelope == .roles(roles))
+  let joined = development.arguments.joined()
+  #expect(!joined.contains("synthetic-stt-key"))
+  #expect(!joined.contains("synthetic-vision-key"))
+}

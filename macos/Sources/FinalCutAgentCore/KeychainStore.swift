@@ -8,6 +8,9 @@ import Security
 public protocol SecureKeyValueStorage: Sendable {
   func save(_ value: String, account: String) throws
   func load(account: String) throws -> String?
+  /// 항목을 지운다 — 없어도 멱등 성공이다(S2A-2 단위2). 역할마다 독립이라
+  /// 한 계정을 지워도 다른 계정은 그대로다.
+  func remove(account: String) throws
 }
 
 public struct KeychainStore: Sendable, SecureKeyValueStorage {
@@ -57,6 +60,19 @@ public struct KeychainStore: Sendable, SecureKeyValueStorage {
       let value = String(data: data, encoding: .utf8)
     else { throw KeychainError.status(status) }
     return value
+  }
+
+  public func remove(account: String) throws {
+    let query: [String: Any] = [
+      kSecClass as String: kSecClassGenericPassword,
+      kSecAttrService as String: service,
+      kSecAttrAccount as String: account,
+    ]
+    let status = SecItemDelete(query as CFDictionary)
+    // 없는 항목은 이미 목표 상태다 — 지움 동작의 멱등 성공이다.
+    guard status == errSecSuccess || status == errSecItemNotFound else {
+      throw KeychainError.status(status)
+    }
   }
 }
 

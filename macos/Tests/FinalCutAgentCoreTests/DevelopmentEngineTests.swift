@@ -369,3 +369,56 @@ final class PrefillScriptState: @unchecked Sendable {
 struct PrefillScriptError: Error, Equatable {
   static let injected = PrefillScriptError()
 }
+
+// ─────────────────────────────────────────────────────────────
+//  STAB-S2A-2 단위2 — V2 역할 호출 조립
+// ─────────────────────────────────────────────────────────────
+
+@Test func developmentRolesInvocationCarriesTheEnvelopeMarkerWithoutSecrets() throws {
+  /// V2 호출 — argv에는 마커만, 값은 봉투 안에만. 빈 역할도 통째로 간다.
+  let scripts = URL(fileURLWithPath: "/Users/test/Library/Application Scripts/com.ssojux2.vlogsrt")
+  let job = URL(fileURLWithPath: "/Users/test/Movies/VlogJobs/analysis-42")
+  let roles = EngineRoleCredentials(
+    sttKey: "synthetic-stt-key",
+    visionKey: "synthetic-vision-key",
+    visionBaseURL: "https://vision.example/v1")
+
+  let invocation = try DevelopmentEngineInvocation.createRoles(
+    operation: .analyze,
+    jobID: "analysis-42",
+    externalJob: job,
+    applicationScriptsDirectory: scripts,
+    credentials: roles
+  )
+  #expect(
+    invocation.arguments == [
+      "analyze", "analysis-42", "/Users/test/Movies/VlogJobs/analysis-42",
+      DevelopmentEngineInvocation.carrierMarkerArgument,
+    ])
+  #expect(invocation.credentialEnvelope == .roles(roles))
+  // argv에는 어떤 역할 값도 실리지 않는다 — JSON 조각조차 없다.
+  let joined = invocation.arguments.joined()
+  #expect(!joined.contains("synthetic-stt-key"))
+  #expect(!joined.contains("synthetic-vision-key"))
+  #expect(!joined.contains("vision.example"))
+
+  // 전부 비어도 '부재 선언' 봉투로 간다 — 상속 키 부활의 길이 없다.
+  let absent = try DevelopmentEngineInvocation.createRoles(
+    operation: .roughcut,
+    jobID: "analysis-42",
+    externalJob: job,
+    applicationScriptsDirectory: scripts,
+    credentials: EngineRoleCredentials()
+  )
+  #expect(absent.credentialEnvelope == .roles(EngineRoleCredentials()))
+
+  #expect(throws: WorkspaceError.self) {
+    try DevelopmentEngineInvocation.createRoles(
+      operation: .roughcut,
+      jobID: "../escape",
+      externalJob: URL(fileURLWithPath: "/tmp/escape"),
+      applicationScriptsDirectory: scripts,
+      credentials: roles
+    )
+  }
+}

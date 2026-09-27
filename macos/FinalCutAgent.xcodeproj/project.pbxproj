@@ -27,6 +27,7 @@
 		86DFE00C9230AB03E0957176 /* EngineProcess.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6425D219B5CA268C97A7AA77 /* EngineProcess.swift */; };
 		8EDCF61837103AFD7DECFBEF /* MediaAssetScripting.swift in Sources */ = {isa = PBXBuildFile; fileRef = 66FF409DA890D46893AF2224 /* MediaAssetScripting.swift */; };
 		9072E384849414798A547EF7 /* DevelopmentEngineLauncher.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1AD671ADEA772B9A1C2E7AB1 /* DevelopmentEngineLauncher.swift */; };
+		5C8A2D94E1F7B360A93C4D2E /* EngineRoleCredentials.swift in Sources */ = {isa = PBXBuildFile; fileRef = B7E4109C5A28D6F31E0C47A9 /* EngineRoleCredentials.swift */; };
 		A1F38E6A058AD2E99A2DC1E7 /* FinalCutTimelineBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF2B01A5B1D09C8DCF304FC3 /* FinalCutTimelineBridge.swift */; };
 		A5603A6524A5E9EDBF476E26 /* WorkflowProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26833B0223E418B4ABC94592 /* WorkflowProtocol.swift */; };
 		AE20558BDFA20F94997DD325 /* libFinalCutAgentCore.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 162A42CFC45AE937A1F021B9 /* libFinalCutAgentCore.a */; };
@@ -84,6 +85,7 @@
 		0ABF9EFE3FDDC83B32482D93 /* FinalCutPasteboard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FinalCutPasteboard.swift; sourceTree = "<group>"; };
 		162A42CFC45AE937A1F021B9 /* libFinalCutAgentCore.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = libFinalCutAgentCore.a; sourceTree = BUILT_PRODUCTS_DIR; };
 		1AD671ADEA772B9A1C2E7AB1 /* DevelopmentEngineLauncher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DevelopmentEngineLauncher.swift; sourceTree = "<group>"; };
+		B7E4109C5A28D6F31E0C47A9 /* EngineRoleCredentials.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EngineRoleCredentials.swift; sourceTree = "<group>"; };
 		2053A676E444A5D3827BA357 /* RoundTripMessages.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoundTripMessages.swift; sourceTree = "<group>"; };
 		20D61F88703BC6F0641A0B83 /* AI Captions.fcpxdest */ = {isa = PBXFileReference; path = "AI Captions.fcpxdest"; sourceTree = "<group>"; };
 		26833B0223E418B4ABC94592 /* WorkflowProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkflowProtocol.swift; sourceTree = "<group>"; };
@@ -157,6 +159,7 @@
 				1AD671ADEA772B9A1C2E7AB1 /* DevelopmentEngineLauncher.swift */,
 				6425D219B5CA268C97A7AA77 /* EngineProcess.swift */,
 				C07C38B451E68FDE56A5A4F0 /* EngineRequestGate.swift */,
+				B7E4109C5A28D6F31E0C47A9 /* EngineRoleCredentials.swift */,
 				AB6586463B6A94DBFAE39DDA /* EngineRuntime.swift */,
 				6832A3B51FA754EC6959C587 /* FinalCutImporter.swift */,
 				0ABF9EFE3FDDC83B32482D93 /* FinalCutPasteboard.swift */,
@@ -391,6 +394,7 @@
 				9072E384849414798A547EF7 /* DevelopmentEngineLauncher.swift in Sources */,
 				86DFE00C9230AB03E0957176 /* EngineProcess.swift in Sources */,
 				1DE4C06EB9AF7DD45BFA62CD /* EngineRequestGate.swift in Sources */,
+				5C8A2D94E1F7B360A93C4D2E /* EngineRoleCredentials.swift in Sources */,
 				7B9C21ADBBF564CB5FC4E15E /* EngineRuntime.swift in Sources */,
 				0F52AD7FD9F1954D2B62D9F2 /* FinalCutImporter.swift in Sources */,
 				7B15858CECF631D1876C8320 /* FinalCutPasteboard.swift in Sources */,

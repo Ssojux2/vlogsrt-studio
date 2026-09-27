@@ -21,6 +21,7 @@ public enum EngineLaunchPlan: Equatable, Sendable {
 
 /// 실행기 선택과 호출 인자 조립 — 이 표가 앱의 유일한 분기다.
 public enum EngineRuntime {
+  /// V1 단일 키 경로 — 낡은 계약 그대로다(직접 호출·기존 호출자).
   public static func resolvePlan(
     configuration: EngineBuildConfiguration,
     operation: DevelopmentEngineOperation,
@@ -32,17 +33,82 @@ public enum EngineRuntime {
     apiKey: String?,
     fileManager: FileManager = .default
   ) -> EngineLaunchPlan {
+    resolvePlan(
+      configuration: configuration,
+      operation: operation,
+      jobID: jobID,
+      appGroupJob: appGroupJob,
+      engineRoot: engineRoot,
+      applicationScriptsDirectory: applicationScriptsDirectory,
+      developmentExternalJob: developmentExternalJob,
+      bundled: { engineRoot in
+        try BundledEngineInvocation.create(
+          operation: operation, jobID: jobID, jobDirectory: appGroupJob,
+          engineRoot: engineRoot, apiKey: apiKey)
+      },
+      development: { scripts, externalJob in
+        try DevelopmentEngineInvocation.create(
+          operation: operation, jobID: jobID, externalJob: externalJob,
+          applicationScriptsDirectory: scripts, apiKey: apiKey)
+      },
+      fileManager: fileManager)
+  }
+
+  /// V2 역할 경로 — 앱 호출의 정상 경로다(S2A-2 단위2). 세 값이 함께 가고
+  /// 빈 문자열은 역할마다 독립 부재다. V1 운반자는 아예 실리지 않는다(자식의
+  /// 충돌 판정이 두 운반자를 같은 호출에 허용하지 않는다).
+  public static func resolvePlan(
+    configuration: EngineBuildConfiguration,
+    operation: DevelopmentEngineOperation,
+    jobID: String,
+    appGroupJob: URL,
+    engineRoot: URL?,
+    applicationScriptsDirectory: URL?,
+    developmentExternalJob: URL?,
+    credentials: EngineRoleCredentials,
+    fileManager: FileManager = .default
+  ) -> EngineLaunchPlan {
+    resolvePlan(
+      configuration: configuration,
+      operation: operation,
+      jobID: jobID,
+      appGroupJob: appGroupJob,
+      engineRoot: engineRoot,
+      applicationScriptsDirectory: applicationScriptsDirectory,
+      developmentExternalJob: developmentExternalJob,
+      bundled: { engineRoot in
+        try BundledEngineInvocation.createRoles(
+          operation: operation, jobID: jobID, jobDirectory: appGroupJob,
+          engineRoot: engineRoot, credentials: credentials)
+      },
+      development: { scripts, externalJob in
+        try DevelopmentEngineInvocation.createRoles(
+          operation: operation, jobID: jobID, externalJob: externalJob,
+          applicationScriptsDirectory: scripts, credentials: credentials)
+      },
+      fileManager: fileManager)
+  }
+
+  /// 분기의 본문 — 두 공개 경로가 같은 표를 쓴다(운반자 조립만 갈라진다).
+  /// 선택된 실행길의 비선택값(옵셔널)은 이 문에서 풀어 클로저 인자로 넘긴다 —
+  /// 클로저가 바깥 옵셔널을 포획하면 호출부의 보장이 클로저 안까지 좁혀지지
+  /// 않는다(컴파일 오류). 대상은 언제나 풀린 값이다.
+  private static func resolvePlan(
+    configuration: EngineBuildConfiguration,
+    operation: DevelopmentEngineOperation,
+    jobID: String,
+    appGroupJob: URL,
+    engineRoot: URL?,
+    applicationScriptsDirectory: URL?,
+    developmentExternalJob: URL?,
+    bundled: (URL) throws -> BundledEngineInvocation,
+    development: (URL, URL) throws -> DevelopmentEngineInvocation,
+    fileManager: FileManager
+  ) -> EngineLaunchPlan {
     if let engineRoot, EngineLaunchMode.resolve(bundleURL: engineRoot, fileManager: fileManager)
       == .bundled
     {
-      let invocation = try? BundledEngineInvocation.create(
-        operation: operation,
-        jobID: jobID,
-        jobDirectory: appGroupJob,
-        engineRoot: engineRoot,
-        apiKey: apiKey
-      )
-      if let invocation {
+      if let invocation = try? bundled(engineRoot) {
         return .bundled(invocation)
       }
     }
@@ -52,14 +118,7 @@ public enum EngineRuntime {
       )
     }
     if let scripts = applicationScriptsDirectory, let externalJob = developmentExternalJob {
-      let invocation = try? DevelopmentEngineInvocation.create(
-        operation: operation,
-        jobID: jobID,
-        externalJob: externalJob,
-        applicationScriptsDirectory: scripts,
-        apiKey: apiKey
-      )
-      if let invocation {
+      if let invocation = try? development(scripts, externalJob) {
         return .development(invocation)
       }
     }

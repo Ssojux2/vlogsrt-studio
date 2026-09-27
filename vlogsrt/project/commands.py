@@ -418,8 +418,9 @@ def _redact_failure_text(args: argparse.Namespace, text: str) -> str:
     """실패 문면에서 자격 증명 값을 지운다(S2A-2) — 엔진 STT 키와 설정이 고른 비전 키.
 
     비전 키 이름은 프로젝트 설정이 정한다(P5-00) — 이름을 바꾸거나 한 키를 양쪽에
-    얹지 않는다. 설정을 읽지 못하면 엔진 키만 지우고 진단은 살린다: 지움 실패가
-    원본 실패를 묻게 두지 않는다.
+    얹지 않는다. 설정을 읽지 못해도 `env.redact_secrets`가 관리 값(엔진 키와
+    적재된·기본 비전 키)을 스스로 알고 긴 값부터 지우므로(S2A-2 단위2) 가림이
+    한쪽으로 줄지 않는다. 지움 실패가 원본 실패를 묻게 두지 않는다.
     """
     secrets: list[str] = []
     try:
@@ -428,7 +429,7 @@ def _redact_failure_text(args: argparse.Namespace, text: str) -> str:
         if vision_key:
             secrets.append(vision_key)
     except Exception:  # noqa: BLE001 - 지움 보조가 원본 실패를 대신 실패시키지 않는다
-        log.warn("비전 키 이름을 확인하지 못했다 — 엔진 키만 지운다")
+        log.warn("비전 키 이름을 확인하지 못했다 — 관리 값만으로 지운다")
     return env.redact_secrets(text, secrets=tuple(secrets))
 
 
@@ -1513,7 +1514,9 @@ def _vision_credentials(project_config: ProjectConfig) -> tuple[str, str]:
 
     base URL 값이 비면 `create_vision_client`가 공개 엔드포인트로 간다 — 기본
     모델이 Gemini이므로 Google 키가 다른 공급자로 전송된다. 키와 마찬가지로
-    파이프라인 시작 전에 멈춘다. 문구에 값은 없다.
+    파이프라인 시작 전에 멈춘다. 문구에 값은 없다. 앱 관리(V2) 운반이 적용된
+    실행에서는 비지 않은 값을 공장 앞에서 다시 검증한다(S2A-2 단위2) — 직접
+    CLI 계약의 엔드포인트 동작은 바꾸지 않는다.
     """
     key_name = project_config.vision_api_key_env
     url_name = project_config.vision_base_url_env
@@ -1528,6 +1531,11 @@ def _vision_credentials(project_config: ProjectConfig) -> tuple[str, str]:
             f"비전 base URL 환경변수가 비어 있다: {url_name} — 값이 없으면"
             " 공개 엔드포인트로 가고 키가 다른 공급자로 전송된다"
         )
+    # 새 URL 정책은 **앱 관리(V2) 값에만** 붙는다 — 직접 CLI 계약의 엔드포인트
+    # 동작은 그대로다(예: 사용자가 명시한 http 호환 엔드포인트). 적용 시점
+    # 검증(배정 전)을 통과한 앱 값이라도 공장 앞에서 한 번 더 견준다.
+    if env.role_credentials_applied():
+        env.validate_vision_base_url(base_url, secrets=(api_key,))
     return api_key, base_url
 
 

@@ -325,3 +325,116 @@ def test_blocked_attempts_are_recorded_without_content(tmp_path: Path) -> None:
     assert str(standin) in recorded
     assert CANARY_KEY not in recorded
     assert CANARY_VALUE not in recorded
+
+
+# ─────────────────────────────────────────────────────────────
+#  역할 자격 증명 (S2A-2 단위2) — 이름 검사·권위적 배정·가림
+# ─────────────────────────────────────────────────────────────
+
+
+def test_legal_vision_role_names_pass(monkeypatch: pytest.MonkeyPatch) -> None:
+    """기본 이름과 정당한 사용자 지정 이름은 통과한다 — 직접 CLI 계약은 그대로다."""
+    from vlogsrt.env import validate_role_env_names
+
+    validate_role_env_names("GOOGLE_API_KEY", "GEMINI_BASE_URL")
+    validate_role_env_names("MY_VISION_KEY", "MY_VISION_URL")
+
+
+@pytest.mark.parametrize(
+    ("key_name", "url_name"),
+    [
+        ("SAME_NAME", "SAME_NAME"),  # 키와 URL 이름이 같다
+        ("OPENAI_API_KEY", "MY_URL"),  # STT 키 이름 재사용
+        ("MY_KEY", "OPENAI_API_KEY"),
+        ("OPENAI_BASE_URL", "MY_URL"),  # STT base URL 이름 재사용
+        ("MY_KEY", "OPENAI_BASE_URL"),
+        ("PATH", "MY_URL"),  # 실행 민감 이름
+        ("MY_KEY", "HOME"),
+        ("MY_KEY", "BASH_ENV"),
+        ("MY_KEY", "ZDOTDIR"),
+        ("PYTHONPATH", "MY_URL"),  # 보호 접두사
+        ("MY_KEY", "DYLD_INSERT_LIBRARIES"),
+        ("MY_KEY", "LD_LIBRARY_PATH"),
+        ("VLOGSRT_OFFLINE", "MY_URL"),
+    ],
+)
+def test_ambiguous_vision_role_names_are_rejected(key_name: str, url_name: str) -> None:
+    """모호한 역할 이름은 닫는다 — 배정 순간에만 검사한다(설정 해석이 아니다)."""
+    from vlogsrt.env import validate_role_env_names
+
+    with pytest.raises(RuntimeError):
+        validate_role_env_names(key_name, url_name)
+
+
+def test_apply_role_credentials_is_authoritative(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """세 값은 setdefault가 아니라 배정이다 — 상속 낡은 값은 대체된다."""
+    from vlogsrt.env import apply_role_credentials
+
+    monkeypatch.chdir(tmp_path)  # 프로젝트 설정 없음 — 코드 기본 이름
+    monkeypatch.setenv("OPENAI_API_KEY", "stale-stt")
+    monkeypatch.setenv("GOOGLE_API_KEY", "stale-vision")
+    monkeypatch.setenv("GEMINI_BASE_URL", "https://stale.example/v1")
+
+    apply_role_credentials("synthetic-stt", "synthetic-vision", "https://vision.example/v1")
+
+    assert os.environ["OPENAI_API_KEY"] == "synthetic-stt"
+    assert os.environ["GOOGLE_API_KEY"] == "synthetic-vision"
+    assert os.environ["GEMINI_BASE_URL"] == "https://vision.example/v1"
+
+
+def test_apply_role_credentials_empty_values_block_dotenv_revival(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """빈 세 값은 권위적 부재다 — dotenv의 setdefault가 낡은 키를 되살리지 못한다."""
+    from vlogsrt.env import apply_role_credentials, ensure_loaded, reset_cache
+
+    allow_dotenv_under(tmp_path)
+    (tmp_path / ".env").write_text(
+        "VLOGSRT_OFFLINE=1\nOPENAI_API_KEY=stale-dotenv\n", encoding="utf-8"
+    )
+    monkeypatch.chdir(tmp_path)
+    reset_cache()
+    apply_role_credentials("", "", "")
+
+    assert os.environ["OPENAI_API_KEY"] == ""  # 지운 것이 아니라 빈 채로 막는다
+    ensure_loaded()
+    assert os.environ["OPENAI_API_KEY"] == ""
+    assert os.environ["GOOGLE_API_KEY"] == ""
+    assert os.environ["GEMINI_BASE_URL"] == ""
+    reset_cache()
+
+
+def test_apply_role_credentials_fails_closed_on_a_broken_config(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """설정 파일이 있으면서 못 읽으면 조용한 기본 드리움 없이 그 오류로 닫는다."""
+    from vlogsrt.env import apply_role_credentials
+    from vlogsrt.project.config import ProjectConfigError
+
+    (tmp_path / "vlogsrt.project.toml").write_text(
+        "schema_version = 1\nbroken =\n", encoding="utf-8"
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("OPENAI_API_KEY", "untouched")
+
+    with pytest.raises(ProjectConfigError):
+        apply_role_credentials("a", "b", "c")
+    assert os.environ["OPENAI_API_KEY"] == "untouched"
+
+
+def test_redact_secrets_knows_the_managed_vision_value_without_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """가림의 기본 후보는 관리 값 둘 — 설정 해석과 무관하게 비전 키를 안다."""
+    from vlogsrt.env import redact_secrets
+
+    monkeypatch.setenv("OPENAI_API_KEY", "synthetic-engine-key")
+    monkeypatch.setenv("GOOGLE_API_KEY", "synthetic-vision-key")
+
+    text = redact_secrets("engine=synthetic-engine-key vision=synthetic-vision-key")
+
+    assert "synthetic-engine-key" not in text
+    assert "synthetic-vision-key" not in text
+    assert redact_secrets("ffprobe not found") == "ffprobe not found"
