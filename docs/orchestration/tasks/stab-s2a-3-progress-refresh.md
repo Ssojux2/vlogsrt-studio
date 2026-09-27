@@ -1,6 +1,8 @@
-# STAB-S2A-3 — Progress and automatic refresh (pending)
+# STAB-S2A-3 — Progress and automatic refresh (accepted offline)
 
-This reserved unit retains S2A umbrella requirements 5–6 and corresponding acceptance/boundaries; read [umbrella](stab-s2a-runtime-ux.md) and [common contract](stab-execution-contract.md). Execute only under a fresh Dispatch after ownership and preflight acceptance. Sol must refine the bounded brief against accepted APIs before launching GLM.
+S2A-3 retained umbrella requirements 5–6 and their acceptance boundaries; see [umbrella](stab-s2a-runtime-ux.md) and [common contract](stab-execution-contract.md). The bounded brief below is retained as the historical implementation scope. Sol refined it against accepted APIs before the GLM implementation.
+
+**Offline acceptance:** code `320dff4aef31643a4c3bbeb05779f3f207f53786`, accepted against Sol’s independent review in [stab-s2a3-progress-refresh-sol.md](../reviews/stab-s2a3-progress-refresh-sol.md). The accepted result stays within 14 files / 5 modules and the original 18-file cap. S2B is the next authorized stage; this completed brief is not a new Dispatch.
 
 - Extension automatically refreshes durable atomic job progress/results during a single engine request with a bounded timer or equivalent. Stop on terminal state, job replacement, teardown or cancellation; never launch the engine to refresh.
 - Preserve checkbox choices for the same candidate revision, reset for a new revision, retain S1 partial/error/unknown behavior and S2A-1 duplicate ownership.
@@ -8,7 +10,7 @@ This reserved unit retains S2A umbrella requirements 5–6 and corresponding acc
 - Tests update a synthetic result while execution blocks and prove UI model refresh/terminal state without reexecution, lifecycle stop conditions, revision-aware selections and invalid/legacy snapshots. Update Python/Swift contracts coherently with legacy reads.
 - GLM product/tests, Sol docs/independent acceptance; targeted checks then one final aggregate gate plus uncovered Swift/scripts. Protected credentials/media/fixtures remain untouched; no APIs/FCP/push/deploy. Budget/cache is S2B and import lifecycle S2C.
 
-## Refined execution brief (after accepted S2A-2, 2026-09-27)
+## Refined execution brief (historical; after accepted S2A-2, 2026-09-27)
 
 **SOURCE ONLY for GLM. Sol runs every runtime test/probe, including RED.** Do not execute Python imports, fixtures, project CLIs, test collection, Swift builds/tests, app/engine/SDK or ad-hoc probes. Static reads, source edits, formatting and explicit owned-path git operations are allowed. Read AGENTS.md, common contract and installed High Agency 0.10.1 directly; report exact skill path and immutable Impact before editing. User routing overrides generic native-agent defaults; no additional workers.
 
@@ -32,4 +34,4 @@ Impact baseline: propagating | files<=18 | modules<=5 | boundary=shared-api. Mod
 - Python tests cover wire validity/roundtrip, atomic intermediate snapshots during blocked synthetic analysis, actual counts, terminal failure/cancel, stale identity and actual entrypoint propagation. Any child test uses accepted guard, copied package, synthetic cwd/HOME/settings and provenance assertions; no ambient subprocess.
 - Swift tests cover actual file updates while a fake executor remains blocked, both launch modes, one executor invocation, intermediate progress, final coherent result, estimate-only ready, failure/cancel, teardown/replacement and stale callbacks. Prove same-revision choice preservation/new-revision reset and conservative legacy/malformed reads through the model actually used by the extension. Avoid timing-only tests; use controlled dependencies and short bounded timeouts.
 - Sol performs targeted Python/Swift checks, reviews actual extension integration, then one final `make check`, full Swift and unsigned native build. Existing 2,868 Python/142 Swift passing evidence is baseline only. Register new sources in Xcode as well as SwiftPM.
-- On acceptance, commit explicit owned product/test paths and send one worker_done using the live Task/Dispatch, then idle. Sol owns docs, error/skill feedback report, checkpoint and cleanup. No real secrets/media/provider/FCP/signed build acceptance is implied.
+- Historical handoff condition completed: the implementation committed explicit owned product/test paths and settled its live Task/Dispatch. Sol owns the shared review, error/skill feedback report, checkpoint and cleanup. No real secrets/media/provider/FCP/signed build acceptance is implied.
