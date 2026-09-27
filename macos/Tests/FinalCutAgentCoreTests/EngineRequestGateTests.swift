@@ -504,10 +504,30 @@ final class ThrowingExecutor: EngineExecuting, @unchecked Sendable {
   try await assertThrowsStatusError(invocation(record: 0, mode: 0o644))
 }
 
-/// 실제 다리: NSUserUnixTask → 래퍼 모양의 sh → 저장소 venv 파이썬 → 실제
-/// `vlogsrt-engine.py`가 소유된 상태 기록을 남기고 실행기가 그 값을 읽는다.
-/// 실패(1) 케이스가 핵심이다 — 비0 종료를 오류로만 알리는 NSUserUnixTask의 한계를
-/// 기록이 넘어선다. 셸 가짜가 아닌 진짜 진입점이 기록을 쓴다.
+/// 자식 stdout에서 "held" 줄이 나올 때까지 읽는다 — 잠금 보유자가 실제로
+/// flock을 쥐었다는 관측 신호다. EOF(잡는 자체가 죽음)는 거짓.
+nonisolated func _lockHolderAnnounced(_ handle: FileHandle) -> Bool {
+  var buffer = Data()
+  while true {
+    let chunk = handle.availableData
+    if chunk.isEmpty { return false }
+    buffer.append(chunk)
+    if let text = String(data: buffer, encoding: .utf8),
+      text.split(separator: "\n").contains("held") { return true }
+  }
+}
+
+/// 실제 다리: **설치 스크립트가 만든 진짜 개발 래퍼** → 실제 파이썬 → 실제
+/// `vlogsrt-engine.py`. NSUserUnixTask → 래퍼의 넷째 인자 전달 → 소유된 상태
+/// 기록 → 실행기 판독까지 통째로 잇는다(손으로 쓴 래퍼가 아니다).
+///
+/// 보호 분리: 래퍼는 `cd <repo>` 후 진입점을 부른다 — 진입점의 dotenv 로더는
+/// cwd 조상과 `PACKAGE_ROOT`(패키지 경로)에서 `.env`를 찾는다. 그래서 이 시험은
+/// 실제 저장소 대신 **공백이 든 임시 합성 저장소**를 만든다: 공개 파이썬 소스와
+/// 엔진 스크립트만 명시적으로 복사하고(바이트 동일 주장), 해석기만 실제 venv로
+/// 심볼링크한다. cwd·PYTHONPATH·PACKAGE_ROOT가 전부 임시 안에 머물러 보호된
+/// `.env`로 흐를 길이 없다(합성 저장소에 그런 파일은 만들지 않는다).
+/// 성공(0)·안쪽 실패(1)·실제 잡힌 잠금 앞의 중복(3)을 본다.
 @Test func launcherReadsTheRealPythonEntrypointStatusRecord() async throws {
   let repo = URL(fileURLWithPath: #filePath)
     .deletingLastPathComponent()  // EngineRequestGateTests.swift
@@ -515,24 +535,77 @@ final class ThrowingExecutor: EngineExecuting, @unchecked Sendable {
     .deletingLastPathComponent()  // Tests
     .deletingLastPathComponent()  // macos → 저장소 루트
   let python = repo.appendingPathComponent(".venv/bin/python")
+  let installer = repo.appendingPathComponent("macos/scripts/install-development-engine.sh")
   let engineScript = repo.appendingPathComponent("macos/scripts/vlogsrt-engine.py")
+  let packageRoot = repo.appendingPathComponent("vlogsrt", isDirectory: true)
   try FileManager.default.attributesOfItem(atPath: python.path)  // venv 없으면 즉시 실패
 
   let root = FileManager.default.temporaryDirectory
-    .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    .appendingPathComponent("S2A-1 bridge \(UUID().uuidString)", isDirectory: true)
   try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
   defer { try? FileManager.default.removeItem(at: root) }
-  let wrapper = root.appendingPathComponent("bridge.sh")
-  try Data(
-    (
-      "#!/bin/sh\nexport VLOGSRT_OFFLINE=1\n"
-        + "exec \"\(python.path)\" \"\(engineScript.path)\" \"$@\"\n"
-    ).utf8
-  ).write(to: wrapper)
-  try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: wrapper.path)
+
+  // 합성 저장소 — 경로에 공백이 있고, 실제 저장소의 어떤 파일도 참조하지 않는다.
+  let syntheticRepo = root.appendingPathComponent("synthetic repo", isDirectory: true)
+  let syntheticScripts = syntheticRepo.appendingPathComponent("macos/scripts", isDirectory: true)
+  try FileManager.default.createDirectory(at: syntheticScripts, withIntermediateDirectories: true)
+  try Data("[project]\nname='synthetic-bridge'\n".utf8)
+    .write(to: syntheticRepo.appendingPathComponent("pyproject.toml"))
+  // 합성 dotenv — 이 시험이 직접 쓰는 오프라인 설정(실제 워크스페이스에서 복사하거나
+  // 읽지 않는다). dotenv 로더의 cwd 조상 탐색이 여기서 멈춘다.
+  try Data("VLOGSRT_OFFLINE=1\n".utf8)
+    .write(to: syntheticRepo.appendingPathComponent(".env"))
+  // 엔진 스크립트는 바이트 그대로 — 복사본이 흘러가는 일이 없게 못 박는다.
+  try FileManager.default.copyItem(at: engineScript, to: syntheticScripts.appendingPathComponent("vlogsrt-engine.py"))
+  let engineBytes = try Data(contentsOf: engineScript)
+  let copiedEngineBytes = try Data(contentsOf: syntheticScripts.appendingPathComponent("vlogsrt-engine.py"))
+  #expect(engineBytes == copiedEngineBytes)
+  // 공개 파이썬 소스만 명시적으로 복사한다 — PACKAGE_ROOT가 임시 안에 갇힌다.
+  let syntheticPackage = syntheticRepo.appendingPathComponent("vlogsrt", isDirectory: true)
+  let items = FileManager.default.enumerator(
+    at: packageRoot, includingPropertiesForKeys: [.isRegularFileKey]
+  )?.allObjects.compactMap { $0 as? URL } ?? []
+  var copiedSources = 0
+  for url in items {
+    let values = try url.resourceValues(forKeys: [.isRegularFileKey])
+    guard url.pathExtension == "py", values.isRegularFile == true else { continue }
+    let relative = String(url.path.dropFirst(packageRoot.path.count + 1))
+    let target = syntheticPackage.appendingPathComponent(relative)
+    try FileManager.default.createDirectory(
+      at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try FileManager.default.copyItem(at: url, to: target)
+    copiedSources += 1
+  }
+  #expect(copiedSources > 20)  // 패키지 통째가 와야 cli가 돈다 — 빠뜨림은 설정 실패다
+  #expect(FileManager.default.fileExists(atPath: syntheticPackage.appendingPathComponent("__init__.py").path))
+  // 해석기 참조만 실제 venv로 — 심볼링크는 venv 접두어 해석이 합성 쪽으로 샜다
+  // (rich를 못 찾음). exec 짐으로 진짜 파이썬을 진짜 접두어와 함께 부른다.
+  let syntheticVenvBin = syntheticRepo.appendingPathComponent(".venv/bin", isDirectory: true)
+  try FileManager.default.createDirectory(at: syntheticVenvBin, withIntermediateDirectories: true)
+  let shim = syntheticVenvBin.appendingPathComponent("python")
+  try Data("#!/bin/sh\nexec \"\(python.path)\" \"$@\"\n".utf8).write(to: shim)
+  try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: shim.path)
+
+  // 진짜 설치 스크립트를 합성 저장소로 돌려 래퍼를 만든다 — 공백이 든 경로에.
+  let scriptsDirectory = root.appendingPathComponent("engine scripts", isDirectory: true)
+  try FileManager.default.createDirectory(at: scriptsDirectory, withIntermediateDirectories: true)
+  let install = Process()
+  install.executableURL = installer
+  install.arguments = [syntheticRepo.path, scriptsDirectory.path]
+  let installDiagnosis = Pipe()
+  install.standardOutput = installDiagnosis
+  install.standardError = installDiagnosis
+  try install.run()
+  install.waitUntilExit()
+  let installLog = String(
+    data: installDiagnosis.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+  try #require(
+    install.terminationStatus == 0, "설치 실패(\(install.terminationStatus)): \(installLog)")
+  let wrapper = scriptsDirectory.appendingPathComponent("vlogsrt-engine")
+  #expect(FileManager.default.isExecutableFile(atPath: wrapper.path))
 
   // 성공 job — 최소 오프라인 프로젝트(receive·inspect까지 0으로 끝난다).
-  let goodJob = root.appendingPathComponent("job-good", isDirectory: true)
+  let goodJob = root.appendingPathComponent("job good", isDirectory: true)
   try FileManager.default.createDirectory(at: goodJob, withIntermediateDirectories: true)
   let media = root.appendingPathComponent("clip.mov")
   try Data("synthetic-bridge-media".utf8).write(to: media)
@@ -563,17 +636,46 @@ final class ThrowingExecutor: EngineExecuting, @unchecked Sendable {
 
   let launcher = DevelopmentEngineLauncher()
   let succeeding = DevelopmentEngineInvocation(
-    executableURL: wrapper, arguments: ["analyze", "job-good", goodJob.path])
+    executableURL: wrapper, arguments: ["analyze", "job good", goodJob.path])
   #expect(try await launcher.run(succeeding) == 0)
   #expect(
     FileManager.default.fileExists(
       atPath: goodJob.appendingPathComponent("analysis-estimate.jsonl").path))
 
-  // 실패 job — input이 없어 receive가 실패한다. 엔진은 1로 끝나고, NSUserUnixTask는
+  // 실패 job — input이 없어 receive가 실패한다. 엔진은 안쪽 1로 끝나고, NSUserUnixTask는
   // 그 1을 오류로만 전한다 — 소유된 기록이 1을 되찾는다.
-  let badJob = root.appendingPathComponent("job-bad", isDirectory: true)
+  let badJob = root.appendingPathComponent("job bad", isDirectory: true)
   try FileManager.default.createDirectory(at: badJob, withIntermediateDirectories: true)
   let failing = DevelopmentEngineInvocation(
-    executableURL: wrapper, arguments: ["analyze", "job-bad", badJob.path])
+    executableURL: wrapper, arguments: ["analyze", "job bad", badJob.path])
   #expect(try await launcher.run(failing) == 1)
+
+  // 실제 잡힌 잠금 앞의 중복 — 합성 보유자가 goodJob의 flock을 쥔 사이에 같은 job을
+  // 돌리면 안쪽 3이 기록으로 나가고 실행기가 3을 돌려준다(보유자는 표준 라이브러리만
+  // 쓴다 — dotenv 로더에 닿지 않는다).
+  let holderScript = root.appendingPathComponent("hold-lock.py")
+  try Data(
+    """
+    import fcntl, os, sys, time
+    fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT, 0o644)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    print("held", flush=True)
+    time.sleep(120)
+    """.utf8
+  ).write(to: holderScript)
+  let holder = Process()
+  holder.executableURL = python
+  holder.arguments = [holderScript.path, goodJob.appendingPathComponent(".vlogsrt-engine.lock").path]
+  let holderOut = Pipe()
+  holder.standardOutput = holderOut
+  holder.standardError = Pipe()
+  try holder.run()
+  defer {
+    holder.terminate()
+    holder.waitUntilExit()
+  }
+  #expect(_lockHolderAnnounced(holderOut.fileHandleForReading))
+  let duplicate = DevelopmentEngineInvocation(
+    executableURL: wrapper, arguments: ["analyze", "job good", goodJob.path])
+  #expect(try await launcher.run(duplicate) == 3)
 }
