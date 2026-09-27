@@ -58,3 +58,11 @@
 - 실패를 숨기거나 기대값만 느슨하게 만들지 않는다.
 - 변경 파일을 명시한 로컬 commit을 만들고 push하지 않는다.
 - 완료 보고에는 commit SHA, 파일 목록, 실행 명령/exit, 미실행 외부 인수를 적는다.
+
+## Sol integration review additions (2026-09-27)
+- Impact: propagating | files<=16 | modules<=5 | boundary=shared-api
+- The installed development wrapper is a separate implementation in `macos/scripts/install-development-engine.sh`; cover its real installed invocation and staged media grant, not just the frozen Python entrypoint. Sharing the Python entrypoint is preferred to duplicate flows.
+- `main.swift` cancellation currently resolves revision only in App Group workspace; development execution creates it in the external job. Resolve the actual running job revision and test pre-receive cancellation without treating unrelated revision requests as current cancellation.
+- Check before each actual STT chunk, retry and rejected-parameter retry, not only delegate job calls. Hidden SDK retry paths must not bypass the gate. Propagate cancellation through broad exception adapters so the attempt/journal is cancelled rather than successful no-speech or ordinary failure.
+- These adjacent product/app/transcriber files and their regression tests are authorized for S1A. Docs remain Sol-owned. Read required contract/brief documents; never read protected env/secrets or alter real API fixtures/media.
+- The updated approved plan requires a checkpoint and idle compact boundary after each accepted task. GLM settles once with its evidence; Sol independently accepts/corrects, then the parent compacts idle Sol before the next task.
