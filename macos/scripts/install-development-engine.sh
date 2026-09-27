@@ -40,7 +40,8 @@ escaped_repo=${escaped_repo//\"/\\\"}
   print '[[ "$job_id" == */* || "$job_id" == *..* ]] && exit 2'
   print 'cd "$repo_root"'
   print 'export PYTHONPATH="$repo_root${PYTHONPATH:+:$PYTHONPATH}"'
-  print '"$python_path" "$repo_root/macos/scripts/vlogsrt-engine.py" "$operation" "$job_id" "$job_dir"'
+  # 넷째 인자는 개발 실행기의 상태 기록 경로다(선택) — 있을 때만 앞으로 넘긴다.
+  print '"$python_path" "$repo_root/macos/scripts/vlogsrt-engine.py" "$operation" "$job_id" "$job_dir" ${4:+"$4"}'
 } > "$wrapper"
 chmod 700 "$wrapper"
 print "$wrapper"

@@ -343,6 +343,44 @@ def _read_result(path: Path) -> AnalysisResult:
     return message
 
 
+# ─────────────────────────────────────────────────────────────
+#  STAB-S2A-1 — 취소로 끝난 실행도 소유권을 돌려준다
+# ─────────────────────────────────────────────────────────────
+
+
+def test_engine_releases_ownership_after_a_cancelled_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, engine: ModuleType
+) -> None:
+    """취소된 실행(실패 종료) 뒤에도 같은 job은 곧바로 다시 실행된다 — exit 3이 아니다.
+
+    진짜 오프라인 경로로 취소를 일으킨다: job 루트에 남은 취소 기록을 집계의
+    리비전에 묶어 스테이징하면 승인된 analyze가 시작 게이트에서 멈춘다.
+    잠금이 취소된 실행 뒤에도 남아 있다면 다음 호출은 중복(3)으로 물러나야
+    한다 — 그 반대를 못 박는다.
+    """
+    monkeypatch.chdir(tmp_path)
+    job_dir = _stage_job(tmp_path)
+    assert engine.main(["analyze", "job-1", str(job_dir)]) == 0
+    _write_authorization(job_dir)
+    _patch_paid_gates(monkeypatch)
+
+    from vlogsrt.project import commands as project_commands
+
+    estimate = project_commands._read_one(job_dir / "analysis-estimate.jsonl")
+    assert isinstance(estimate, AnalysisEstimate)
+    (job_dir / "cancellation.jsonl").write_text(
+        _staged_cancellation(estimate.input_revision), encoding="utf-8"
+    )
+
+    assert engine.main(["analyze", "job-1", str(job_dir)]) == 1
+    attempts = (job_dir / "analysis-attempts.jsonl").read_text(encoding="utf-8")
+    assert '"cancelled"' in attempts  # 실패가 아니라 취소로 끝났다
+
+    # 취소된 실행도 소유권을 돌려줬다 — 다시 실행은 중복(3)이 아니라 취소(1)다.
+    # 중복 진단의 실제 stderr 계약은 subprocess 시험(test_engine_execution_lock.py)이 못 박는다.
+    assert engine.main(["analyze", "job-1", str(job_dir)]) == 1
+
+
 def _patch_analysis_boundaries(monkeypatch: pytest.MonkeyPatch) -> None:
     """ffmpeg/PCM/프레임/VAD 경계를 가짜로 막는다 — 미디어 바이트는 합성물이다."""
     import array

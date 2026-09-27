@@ -120,6 +120,9 @@ public enum EngineSessionOutcome: Equatable, Sendable {
   case completed
   /// 엔진 종료코드가 0이 아니다 — 진단 증거만 동기화하고 실패로 닫는다(성공 산물·import 없음).
   case engineFailed(Int32)
+  /// 엔진이 exit 3으로 물러났다 — 같은 job이 이미 다른 곳에서 도는 중이다(S2A-1).
+  /// 성공도 실패 시도도 아니므로 어떤 결과도 동기화·가져오기·import를 하지 않는다.
+  case alreadyRunning
   /// 실행 전에 취소 기록이 있었다 — 엔진을 부르지 않았다.
   case cancelledBeforeRun
   /// 실행은 끝났지만 sync 전 취소/드리프트 — 결과를 가져오지 않았다.
@@ -130,6 +133,9 @@ public enum EngineSessionOutcome: Equatable, Sendable {
   case staleSelection
   /// 실행기가 없다(Release에서 번들 엔진 부재 등).
   case unavailable(String)
+
+  /// 엔진 진입점이 중복 소유권으로 예약한 종료 코드다(S2A-1).
+  public static let alreadyRunningExitCode: Int32 = 3
 }
 
 /// 한 번의 엔진 실행을 감싸는 게이트 — 취소·드리프트를 매 단계 앞에서 확인한다.
@@ -170,6 +176,12 @@ public struct EngineSessionRunner {
       return .staleSelection
     }
     let status = try await executor.run(context.plan)
+    // 중복 소유권 종료(3)는 이 실행의 시도가 아니다(S2A-1). 실행기가 돌려준 순간
+    // 어떤 읽기·쓰기보다 먼저 판정한다 — 정상 소유자가 그 사이에 취소됐어도 이
+    // 요청의 결과는 alreadyRunning이고, 드리프트 기록·동기화는 없다.
+    if status == EngineSessionOutcome.alreadyRunningExitCode {
+      return .alreadyRunning
+    }
     if CancellationStore.isCancelled(jobURL: context.appGroupJob, fileManager: fileManager) {
       return .stoppedBeforeSync
     }

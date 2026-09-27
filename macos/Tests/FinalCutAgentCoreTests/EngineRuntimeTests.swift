@@ -185,27 +185,28 @@ func _testRegistry(selection: String = "a".padding(toLength: 64, withPad: "a", s
   #expect(outcome == .cancelledBeforeRun)
   #expect(executor.plans.isEmpty)
 
-  // 종료코드 비0(번들 실행 — 외부 작업이 없으니 동기화 자체가 없다).
+  // 종료코드 비0(번들 실행 — 외부 작업이 없으니 동기화 자체가 없다). 3은 중복
+  // 소유권으로 예약됐으니 일반 실패는 4로 본다(S2A-1).
   try FileManager.default.removeItem(at: job.appendingPathComponent(CancellationStore.fileName))
   var synced: [(URL, Bool)] = []
-  let failed = try await EngineSessionRunner(executor: RecordingExecutor(status: 3)).run(
+  let failed = try await EngineSessionRunner(executor: RecordingExecutor(status: 4)).run(
     _runtimeContext(plan: try makeBundledPlan(), registry: registry, revision: revision, appGroupJob: job),
     syncResults: { _, to, diagnosticsOnly in synced.append((to, diagnosticsOnly)) }
   )
-  #expect(failed == .engineFailed(3))
+  #expect(failed == .engineFailed(4))
   #expect(synced.isEmpty)
 
   // 개발(외부) 실행이 실패로 끝나도 진단 증거는 앱으로 나온다 — 진단 전용 동기다(S1B).
   let external = root.appendingPathComponent("external", isDirectory: true)
   try FileManager.default.createDirectory(at: external, withIntermediateDirectories: true)
-  let failedExternal = try await EngineSessionRunner(executor: RecordingExecutor(status: 3)).run(
+  let failedExternal = try await EngineSessionRunner(executor: RecordingExecutor(status: 4)).run(
     _runtimeContext(
       plan: try makeBundledPlan(), registry: registry, revision: revision,
       appGroupJob: job, externalJob: external
     ),
     syncResults: { _, to, diagnosticsOnly in synced.append((to, diagnosticsOnly)) }
   )
-  #expect(failedExternal == .engineFailed(3))
+  #expect(failedExternal == .engineFailed(4))
   #expect(synced.count == 1)
   #expect(synced.first?.0 == job)
   #expect(synced.first?.1 == true)

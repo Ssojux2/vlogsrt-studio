@@ -158,16 +158,96 @@ public final class DevelopmentEngineLauncher: @unchecked Sendable {
   public init() {}
 
   public func run(_ invocation: DevelopmentEngineInvocation) async throws -> Int32 {
+    // NSUserUnixTask는 비0 종료를 오류로만 알린다. 이 실행의 정말 종료 코드는
+    // 엔진 진입점이 남기는 소유된 기록으로만 읽는다(S2A-1) — 시스템 오류 문면을
+    // 해석하는 휴리스틱은 쓰지 않는다.
+    let capture = try EngineStatusCapture.make()
+    defer { capture.discard() }  // 시작 실패·취소·오류 어떤 끝에서도 치운다.
     let task = try NSUserUnixTask(url: invocation.executableURL)
     return try await withCheckedThrowingContinuation { continuation in
-      task.execute(withArguments: invocation.arguments) { error in
-        if let error {
-          continuation.resume(throwing: error)
-        } else {
-          continuation.resume(returning: 0)
-        }
+      task.execute(withArguments: invocation.arguments + [capture.fileURL.path]) { error in
+        continuation.resume(with: Result {
+          do {
+            let code = try capture.readExitStatus()
+            // 실행 보고와 기록이 어긋나면 상태를 믿지 않는다: 성공 보고(error 없음)에
+            // 비0 기록, 실패 보고에 0 기록은 둘 다 오류다.
+            if error == nil && code != 0 {
+              throw DevelopmentEngineError.malformedStatusRecord
+            }
+            if let error {
+              // 기록이 있어도 시작·신호 오류는 기록이 못 덮는다 — 스크립트가 실제로
+              // 돌다 끝난 보고(실측 NSPOSIXErrorDomain 코드 2)일 때만 비0 기록을 믿는다.
+              guard code != 0, Self.isScriptTermination(error) else { throw error }
+            }
+            return code
+          } catch let captureError {
+            // 기록이 깨졌으면 그것이 정확한 원인이다. 기록이 아예 없을 때는 실행
+            // 오류(시작 실패·낡은 래퍼)가 더 정직한 보고다.
+            if case DevelopmentEngineError.malformedStatusRecord = captureError {
+              throw captureError
+            }
+            if let error { throw error }
+            throw captureError
+          }
+        })
       }
     }
+  }
+
+  /// 스크립트가 실제로 돌다 비0으로 끝났다는 시스템 보고인가 — 기록 값을 받아들이는
+  /// 문턱으로만 쓴다(값 자체는 어디까지나 소유된 기록에서 온다). 실측: 비0 종료는
+  /// NSPOSIXErrorDomain 코드 2, 시작 실패는 다른 모양이다.
+  static func isScriptTermination(_ error: Error) -> Bool {
+    let nsError = error as NSError
+    return nsError.domain == NSPOSIXErrorDomain && nsError.code == 2
+  }
+}
+
+/// 호출 한 번의 종료 상태 기록 — 실행기가 만든 전용 임시 경로에 엔진이 남긴다.
+///
+/// 경로는 job 상태 밖의 고유한 임시 디렉터리 안에 있고 호출마다 새로 만든다:
+/// 낡은 기록·남의 기록이 이 실행으로 읽힐 자리가 없다(token은 파일 이름 줄기).
+/// 읽기는 상한(256바이트+1)까지만 — 큰 기록이 메모리를 채우는 길이 없다.
+/// 기록이 없으면(낡은 래퍼·시작 실패·비정상 종료) 오류다 — 상태를 추측하지 않는다.
+struct EngineStatusCapture {
+  static let prefix = "VLOGSRT-ENGINE-STATUS"
+  static let maximumByteCount = 256
+
+  let directory: URL
+  let token: String
+
+  var fileURL: URL { directory.appendingPathComponent("\(token).status") }
+
+  static func make(fileManager: FileManager = .default) throws -> Self {
+    let token = UUID().uuidString
+    let directory = fileManager.temporaryDirectory
+      .appendingPathComponent("vlogsrt-status-\(token)", isDirectory: true)
+    try fileManager.createDirectory(at: directory, withIntermediateDirectories: false)
+    return Self(directory: directory, token: token)
+  }
+
+  func readExitStatus() throws -> Int32 {
+    guard let handle = FileHandle(forReadingAtPath: fileURL.path) else {
+      throw DevelopmentEngineError.missingStatusRecord
+    }
+    defer { try? handle.close() }
+    // 상한보다 한 바이트 더 읽는다 — 그 한 바이트가 차면 과대 기록이다.
+    guard
+      let head = try handle.read(upToCount: Self.maximumByteCount + 1),
+      head.count <= Self.maximumByteCount,
+      var line = String(data: head, encoding: .utf8),
+      line.hasSuffix("\n")
+    else { throw DevelopmentEngineError.malformedStatusRecord }
+    line.removeLast()
+    let parts = line.split(separator: " ")
+    guard parts.count == 3, parts[0] == Self.prefix, parts[1] == Substring(token),
+      let code = Int32(parts[2]), (0...255).contains(code)
+    else { throw DevelopmentEngineError.malformedStatusRecord }
+    return code
+  }
+
+  func discard(fileManager: FileManager = .default) {
+    try? fileManager.removeItem(at: directory)
   }
 }
 
@@ -177,6 +257,8 @@ public enum DevelopmentEngineError: Error, Equatable, LocalizedError {
   case unsafePath(String)
   case nonRegularFile(String)
   case cancelled
+  case missingStatusRecord
+  case malformedStatusRecord
 
   public var errorDescription: String? {
     switch self {
@@ -190,6 +272,10 @@ public enum DevelopmentEngineError: Error, Equatable, LocalizedError {
       "동기화 대상이 일반 파일이 아닙니다: \(name)"
     case .cancelled:
       "취소된 작업입니다 — 새 호출·동기화·import를 하지 않습니다"
+    case .missingStatusRecord:
+      "엔진이 종료 상태 기록을 남기지 않았습니다 — 상태를 추측하지 않습니다"
+    case .malformedStatusRecord:
+      "엔진의 종료 상태 기록이 이 실행의 것이 아닙니다"
     }
   }
 }
