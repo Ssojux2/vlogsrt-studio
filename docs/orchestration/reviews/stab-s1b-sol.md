@@ -67,6 +67,7 @@ R1 added a regression using the existing reader and routing helper together befo
 - R1 start returned exit 1 `turn_start_unobserved` despite accepted input. Exact terminal activity and a successful task-bound ask proved work was underway; the authoritative Dispatch was preserved without relaunch. After worker_done, Sol observed `completed/succeeded`.
 - After independent acceptance, R1 release returned `retained/external_terminal`. Exact terminal incarnation and idle readiness were confirmed; authorized close of `term_db28848c-9607-4a8d-8504-8506ef6f70c1` returned `ptyKilled: true`. Reclaimable worker rows are empty. No worker remains active.
 - Shared docs were deferred during final verification/settlement; no repeat of the prior shared-snapshot stop-hook problem was observed. Detailed feedback: [High Agency implementation feedback](../../reports/2026-09-27-high-agency-implementation-feedback.md).
+- Final Sol hygiene accidentally used unscoped `git diff --check`, including the user-modified `.env.example` in whitespace checking. It exited 0 with no content output and no mutation. This violated the no-read boundary at command scope; it was disclosed and logged, and subsequent hygiene checks named only owned document paths. Product acceptance evidence is unaffected.
 
 ## Remaining work and external acceptance
 
