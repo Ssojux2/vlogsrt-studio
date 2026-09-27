@@ -1,6 +1,6 @@
 # STAB-TEST-ISOLATION — prerequisite before the next broad suite
 
-Status: **active bounded prerequisite after S2A-1**, Sol task `task_ad2785c1b0f5` / `ctx_debf6903938c`. Parent instruction `msg_c172e135f623` requires this boundary before another broad suite. Keep production configuration defaults unchanged. Sol coordinates and validates; Claude-GLM writes test code under a fresh Dispatch.
+Status: **accepted offline at `01f8616` over `69790b4`**, Sol task `task_ad2785c1b0f5` / `ctx_debf6903938c`. Independent final targeted 67 tests and guarded `make check` (2,735 Python tests, Ruff/mypy/21 invariants) passed. See [Sol review](../reviews/stab-test-isolation-sol.md) for exact coverage, the unsafe initial RED disclosure, and residual limits. Production defaults are unchanged; S2A-2 is next after the requested checkpoint/compact boundary.
 
 ## Established evidence
 - `vlogsrt/cli.py:main` calls `env.ensure_loaded()` on every CLI entry. `vlogsrt/env.py:find_env_file` searches cwd ancestors, then the resolved package root. `VLOGSRT_OFFLINE=1` does not suppress dotenv loading.

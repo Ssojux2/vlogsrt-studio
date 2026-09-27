@@ -1,6 +1,6 @@
 # Stabilization worker execution contract
 
-Applies to every STAB implementation task. The approved plan and current live Dispatch remain authoritative. Sol writes briefs/docs and independently tests/reviews; Claude-GLM alone writes product/tests. Use one writer in the current checkout with `claude-glm --model 'glm-5.3[1m]' --effort max --permission-mode auto`.
+Applies to every STAB implementation task. The approved plan, current live Dispatch and latest AGENTS.md routing remain authoritative. Sol writes briefs/docs and independently tests/reviews; Claude-GLM alone writes product/tests. Use one writer in the current checkout with `claude-glm --model 'glm-5.3[1m]' --effort <task-appropriate-effort> --permission-mode auto`. Choose and record supported effort at the next task boundary; never interrupt an active task just to change it. STAB-TEST-ISOLATION retained its explicitly requested max launcher. Easy work uses Luna max, complex planning/acceptance Sol high; parent owns idle model selection for compact and must distinguish client selection from hidden compaction-model evidence.
 
 ## Before first code mutation
 1. Read the live preamble and consume same-Dispatch follow-ups with its exact `orca orchestration check` command.
@@ -16,7 +16,7 @@ Applies to every STAB implementation task. The approved plan and current live Di
 - Keep five-minute heartbeats outside blocking ask/check waits. A successful send is not proof of recipient acknowledgment.
 - After edits, verify the touched behavior first, then affected/full gates where shared contracts require them. Preserve real command exits using redirection or pipefail; a trailing `tail` exit is not the test exit.
 - One final `make check` satisfies the overlapping full Python/Ruff/mypy/invariant requirements in individual briefs. Do not run those broad checks separately and immediately repeat them through `make check` without a new edit/failure/concern. Add Swift and macOS script checks not covered by Makefile separately. Format first, then run final gates once.
-- Before the next broad suite, complete the test-only [dotenv isolation prerequisite](stab-test-isolation.md). Offline/network blocking does not suppress production dotenv lookup; isolate cwd, package fallback and subprocess configuration with test-owned fixtures/read guards. Do not probe real protected files to investigate prior access. Preserve numerical evidence and its isolation limitation separately.
+- The test-only [dotenv isolation prerequisite](stab-test-isolation.md) is accepted at `01f8616`; preserve it on every later test run. Offline/network blocking alone does not suppress production dotenv lookup. New CLI subprocess tests must use the guarded launch setup and prove cwd, copied-package provenance and test-owned configuration before a broad run. Do not disable conftest for a full-file RED: use a fully synthetic isolated harness with no real fallback. Do not probe real protected files or inspect unsafe raw logs to investigate prior access; earlier numerical results retain their access uncertainty.
 - On failure, record repro, expected/actual, sanitized error/exit, attempted change, fresh result and cause confidence. Never weaken assertions/thresholds or add skips merely to pass.
 
 ## Completion

@@ -381,6 +381,116 @@
 
 근거: [S2A-1 독립 인수 보고](../orchestration/reviews/stab-s2a-1-sol.md), [실행 소유권 계약](../EXECUTION_OWNERSHIP.md), [다음 시험 격리 작업](../orchestration/tasks/stab-test-isolation.md).
 
+## STAB-TEST-ISOLATION: 시험 격리 인수와 절차 위반
+
+□ TI-01: 최종 인수 근거
+  ○ 시험 전용 코드69790b4와01f8616을 인수함
+    - 여섯 시험 파일만 변경함. 제품·Swift·설치 스크립트·기본 설정은 그대로임
+  ○ Sol의 최종 표적 검사는67개 통과함
+    - 원래 exit0, 5.62초. `/tmp/stab-isolation-sol-final-targeted.log`
+  ○ Sol의 guarded make check는2,735개 통과함
+    - 원래 exit0, 60.08초. Ruff122파일·mypy54파일·불변 규칙21개도 통과함
+  ○ 같은 경로의 broad 검사를 GLM이 중복 실행하지 않음
+    - 이전 Swift83·unsigned native 빌드·스크립트 검사는 변경 없음 근거로 재사용함
+  ○ S2A-2는 아직 시작하지 않음
+    - 현재 단위는 오프라인 시험 격리임. 실영상·실 API·FCP 인수와 구분함
+
+□ TI-02: 금지된 첫 RED 선택과 보고 한계
+  ○ GLM이 보호 설치 전에 tests/test_env.py 전체를 RED로 실행함
+    - 원래 exit1·실패7개 보고임. 합성 사례만 선택하라는 brief를 위반함
+  ○ 실제 저장소의 dotenv 탐색 경로가 포함됨
+    - find_env_file·api_key_source와 ensure_loaded를 거치는 호출이 선택됨
+  ○ 실제 보호 파일의 존재·내용·읽기 여부는 조사하지 않음
+    - Sol은 raw RED log를 열지 않음. 부모가 사용자에게 경계 위반을 알렸음
+  ○ 시각 근거는 log의 birth/mtime17:09:56 KST뿐임
+    - 명령 실행 시각으로 바꾸어 보고하지 않음. 과거 접근 없음도 주장하지 않음
+  ○ scratch 보고의 tmp-only load_env 주장은 Sol이 반려함
+    - ensure_loaded의 간접 읽기는 배제할 수 없음. 정착 뒤 송신 거부로 최종 Sol 보고에 바로잡음
+
+□ TI-03: 보호 초안의 오류와 수정
+  ○ 차단된 os.path probe가 True를 반환하던 조건식을 수정함
+    - 합성 파일의 존재 probe가 모두 False인지 시험함
+  ○ stat 차단 예외 때문에 pytest 수집이 exit4로 멈춤
+    - 보호 대상 stat은 실행하지 않고 FileNotFoundError로 일정하게 숨기도록 고침
+  ○ 소스에 있던 고정 canary를 실행별 값으로 바꿈
+    - 초안 소스 검토에서 고정 문면이 보였음. 실 키가 아니며 최종 증명에는 값이 없음
+  ○ pathlib 읽기를 builtins.open으로 막았다는 잘못된 주장을 수정함
+    - 실제 io.open 경로와 os.open·read_bytes·Path.open을 자식 안에서 각각 시험함
+  ○ 제품 import보다 늦던 conftest 보호 설치를 앞으로 옮김
+    - 보호를 켠 뒤 Config·Segment를 import함. 필요한 줄에만 E402 예외를 둠
+
+□ TI-04: 자식 실행 전에 실패를 막는 검증
+  ○ 실행 뒤 proof 부재만 검사하는 초안을 인수하지 않음
+    - 보호 없는 payload 실행을 되돌릴 수 없으므로 실행 전 게이트를 추가함
+  ○ 오류 기록 실패가 종료를 우회할 수 있던 경로를 수정함
+    - proof 디렉터리가 없어도 exit125임. payload 호출 기록과 job 변경이 없음
+  ○ sitecustomize 부재·문법 오류를 실제 launch helper로 시험함
+    - Python이 시작 오류를 무시해도 사전 증명이 없으면 payload를 띄우지 않음
+  ○ 설치 래퍼의 첫 실행과 재개를 같은 게이트로 묶음
+    - 설치 래퍼의 부재·문법 오류 시험에서도 job 트리가 그대로임
+  ○ 합성 패키지가 사라진 editable fallback을 직접 검증함
+    - 보호가 켜진 자식의 공개 패키지 import 출처를 기록하고 실행 전에 거부함
+
+□ TI-05: 격리 범위와 남은 한계
+  ○ 공개 Python 소스와 바이트 동일 엔진만 합성 저장소로 복사함
+    - source symlink를 거부함. 실제 dotenv·원본 미디어·실 API fixture를 복사하지 않음
+  ○ 정상 자식은 합성 cwd·패키지를 사용함
+    - Sol이 proof의 경로와 읽기·socket 거부 boolean을 독립 확인함
+  ○ 보호는 협조적인 Python 시험 harness 범위임
+    - 디렉터리 이름 나열·기존 fd·os.access/readlink·다른 이름의 alias는 포괄 차단하지 않음
+  ○ 자식 Path.resolve와 native 소비자는 별도 한계임
+    - zsh는 합성 입력으로 격리함. 사전 검사 뒤 악의적인 파일 교체도 보장 범위 밖임
+  ○ 새 dotenv CLI subprocess는 같은 게이트와 출처 증명이 필요함
+    - 기존에 없던 native·alias 경로가 필요하면 별도 시험 범위를 먼저 정함
+
+□ TI-06: 수신·CLI 운영 오류
+  ○ GLM이 ack 결과를 head -8로 잘라 다음 Delivery를 놓침
+    - delivery_7d329b6fc536 전체 재처리·ack를 요구함. 후속 증거에 ack를 기록함
+  ○ 이번에도 전체 batch 처리 규칙을 반복해서 요구함
+    - heartbeat와 ack를 혼동하지 않음. 경고 전달만으로 처리 완료를 주장하지 않음
+  ○ Sol의 run-show --run이 exit1로 거부됨
+    - 명령이 돌려준 지원 flag인 --id로 수정함. 상태 조회만 실패했음
+  ○ Sol의 중복 actionable wait가 waiter_exists로 거부됨
+    - 기존 waiter를 유지함. 새 작업이나 중복 writer를 만들지 않음
+  ○ 마지막 scratch 문구 수정 송신은 dispatch_inactive로 거부됨
+    - 이미 완료된 ctx_f95bd6962daf를 다시 쓰지 않고 Sol의 최종 문서에서 바로잡음
+
+□ TI-07: 스킬 적용과 재발 방지
+  ○ GLM의 High Agency 직접 Read를 코드 수정 전에 관찰함
+    - 첫 Impact는 propagating·files≤6·modules≤2·private이며 실제 여섯 시험 파일과 일치함
+  ○ 직접 Read만으로 지침 준수가 보장되지는 않았음
+    - 합성 RED 선택과 전체 mailbox 처리에서 위반이 관찰됨. 스킬 자체 결함으로 단정하지 않음
+  ○ 표적 증명 뒤 Sol 승인으로 broad 검사를 여는 게이트가 작동함
+    - 첫 후보64개 통과 뒤에도 실제 래퍼와 fallback 검증을 보완하여67개로 인수함
+  ○ 다음 RED는 실제 경로가 없는 합성 harness로 제한함
+    - 전체 모듈에서 보호를 끄는 방식은 금지함. 공통 실행 계약에 반영함
+  ○ 설치된 스킬·hook 파일은 수정하지 않음
+    - shared docs는 GLM 정착·idle·close 뒤에만 최종 수정함
+
+□ TI-08: 최신 사용자 모델 선택과 관측 한계
+  ○ 쉬운 작업은 Luna max, 복잡한 계획·독립 인수는 Sol high로 지정됨
+    - 큰 구현은 GLM임. 다음 Task 시작 때 난도에 맞는 effort를 정하도록 AGENTS를 갱신함
+  ○ 진행 중인 isolation GLM은 요청된 max 설정을 유지함
+    - 모델 변경만을 위해 작업을 끊거나 관리자를 추가하지 않음
+  ○ 부모는 Orca의 Luna max 시작 거부를 보고함
+    - invalid_argument였음. 직접 Codex 실행 화면의 Luna max와 readiness 확인 뒤 adoption함
+  ○ 이 차이는 Orca와 Codex의 모델 capability 검증 불일치로 기록함
+    - downgrade는 없었음. High Agency가 원인이라는 증거는 없음
+  ○ 부모가 idle 모델 선택과 standalone compact를 맡음
+    - client 선택 증거만으로 내부 compaction 모델까지 Luna라고 주장하지 않음
+
+□ TI-09: 정착과 다음 경계
+  ○ GLM done msg_e66425299357을 completed/succeeded로 확인함
+    - ctx_f95bd6962daf와 정확한 terminal/incarnation을 검증함
+  ○ idle 뒤 external release와 명시적 close를 수행함
+    - ptyKilled=true임. reclaimable worker 조회 결과는 비어 있음
+  ○ 바이너리·서명/공증·실 API·실영상/FCP 인수는 그대로 남음
+    - 기존 manifest 부재 exit1은 이번 단위에서 재검사하지 않음
+  ○ 다음 구현은 S2A-2이며 현재 Dispatch에서 시작하지 않음
+    - S2A-3·S2B/C·S3–S5도 계속 남음. 전체 계획 완료로 보고하지 않음
+
+근거: [시험 격리 독립 인수 보고](../orchestration/reviews/stab-test-isolation-sol.md), [시험 격리 brief](../orchestration/tasks/stab-test-isolation.md), [공통 실행 계약](../orchestration/tasks/stab-execution-contract.md).
+
 ## 보고서 유지 책임
 - 이후 Sol이 작업 인수 또는 미해결 실패마다 갱신한다. GLM은 구현/검증 증거를 제공한다.
 - 제품 결함, 도구 운영, 스킬 적용 부족, 스킬 자체 결함을 구분한다.
