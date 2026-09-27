@@ -1,5 +1,7 @@
 # STAB-S2A-2 — Credentials and truthful preflight (implementation brief)
 
+**Current retry scope (2026-09-27): UNIT 1 RECOVERY ONLY.** The first attempt `ctx_80c55eec0ac2` failed and closed with uncommitted draft preserved. A retry of `task_418804c480c4` must follow [the recovery brief](stab-s2a2-unit1-recovery.md), which overrides the original broad task spec: no preflight/unit2, no aggregate, and **no child execution/test/probe until Sol explicitly accepts the repaired harness by read-only review**. Product edits and static source/compiler analysis are permitted before that gate; no environment discovery. Send a concise safe report reference and wait for Sol's decision at the harness gate.
+
 This unit retains S2A umbrella requirements 3–4 and all corresponding acceptance/boundaries; read [umbrella](stab-s2a-runtime-ux.md) and [common contract](stab-execution-contract.md). Baseline `cbde02a` includes accepted S2A-1 ownership and guarded test isolation `69790b4`/`01f8616`. Current Dispatch authorizes S2A-2 only; the umbrella's old S2A-1-only sentence is historical.
 
 - Existing KeychainStore-backed API-key input/replacement, empty input and save/error status; fake injected storage in tests, no real credential access.
