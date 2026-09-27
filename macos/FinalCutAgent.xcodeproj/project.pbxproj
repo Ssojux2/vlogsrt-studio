@@ -31,6 +31,7 @@
 		5C8A2D94E1F7B360A93C4D2E /* EngineRoleCredentials.swift in Sources */ = {isa = PBXBuildFile; fileRef = B7E4109C5A28D6F31E0C47A9 /* EngineRoleCredentials.swift */; };
 		A1F38E6A058AD2E99A2DC1E7 /* FinalCutTimelineBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF2B01A5B1D09C8DCF304FC3 /* FinalCutTimelineBridge.swift */; };
 		A5603A6524A5E9EDBF476E26 /* WorkflowProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26833B0223E418B4ABC94592 /* WorkflowProtocol.swift */; };
+		7A3C91E50C4B2D8FA0E1E7B5 /* WorkflowProgress.swift in Sources */ = {isa = PBXBuildFile; fileRef = 92B4D7C31A8F60B5E2D93C08 /* WorkflowProgress.swift */; };
 		AE20558BDFA20F94997DD325 /* libFinalCutAgentCore.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 162A42CFC45AE937A1F021B9 /* libFinalCutAgentCore.a */; };
 		B2598061B18308745D250C52 /* ActiveProject.swift in Sources */ = {isa = PBXBuildFile; fileRef = E140ABBDF04A5ECFBD3F1713 /* ActiveProject.swift */; };
 		CDD075051619C39B61CFFCAF /* SecurityScopedBookmarkStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57320E6BA7114BEE91B0AE57 /* SecurityScopedBookmarkStore.swift */; };
@@ -90,6 +91,7 @@
 		2053A676E444A5D3827BA357 /* RoundTripMessages.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoundTripMessages.swift; sourceTree = "<group>"; };
 		20D61F88703BC6F0641A0B83 /* AI Captions.fcpxdest */ = {isa = PBXFileReference; path = "AI Captions.fcpxdest"; sourceTree = "<group>"; };
 		26833B0223E418B4ABC94592 /* WorkflowProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkflowProtocol.swift; sourceTree = "<group>"; };
+		92B4D7C31A8F60B5E2D93C08 /* WorkflowProgress.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkflowProgress.swift; sourceTree = "<group>"; };
 		2C7DB4044A45662630C30DA8 /* IdentityRoundTripService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IdentityRoundTripService.swift; sourceTree = "<group>"; };
 		36EC8A37599443FB62130C7B /* BundledEngineLauncher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BundledEngineLauncher.swift; sourceTree = "<group>"; };
 		41E6E3FF248873A70D179DB7 /* RoundTripCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoundTripCoordinator.swift; sourceTree = "<group>"; };
@@ -179,6 +181,7 @@
 				B080868081DD514BA06BA887 /* ShareDestination.swift */,
 				D73C8DEC3C5E76180C3C885F /* ShareInbox.swift */,
 				26833B0223E418B4ABC94592 /* WorkflowProtocol.swift */,
+				92B4D7C31A8F60B5E2D93C08 /* WorkflowProgress.swift */,
 			);
 			path = FinalCutAgentCore;
 			sourceTree = "<group>";
@@ -415,6 +418,7 @@
 				70146EE378CB76A246D0AA11 /* ShareDestination.swift in Sources */,
 				DE2E3290799026BDB31925D9 /* ShareInbox.swift in Sources */,
 				A5603A6524A5E9EDBF476E26 /* WorkflowProtocol.swift in Sources */,
+				7A3C91E50C4B2D8FA0E1E7B5 /* WorkflowProgress.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

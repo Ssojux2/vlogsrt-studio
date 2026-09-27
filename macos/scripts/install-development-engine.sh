@@ -45,10 +45,10 @@ escaped_repo=${escaped_repo//\"/\\\"}
   print '[[ "$job_id" == */* || "$job_id" == *..* ]] && exit 2'
   print 'cd "$repo_root"'
   print 'export PYTHONPATH="$repo_root${PYTHONPATH:+:$PYTHONPATH}"'
-  # 넷째 인자는 개발 실행기의 상태 기록 경로다(선택) — 있을 때만 앞으로 넘긴다.
-  # 다섯째 인자는 stdin 봉투 마커다(선택, 비밀 아님) — 실행기가 자격 증명을
-  # 사적 stdin 통로로 운반할 때만 붙는다(S2A-2).
-  print '"$python_path" "$repo_root/macos/scripts/vlogsrt-engine.py" "$operation" "$job_id" "$job_dir" ${4:+"$4"} ${5:+"$5"}'
+  # 넷째 인자부터는 개발 실행기의 부가 계약이다(상태 기록 경로·stdin 봉투
+  # 마커·호출 신원 깃발, 모두 선택·모두 비밀 아님) — 있는 것만 앞으로 넘긴다.
+  # 호출 신원 깃발(--invocation-id <token>)은 값 짝이므로 통째로 흘러가야 한다.
+  print '"$python_path" "$repo_root/macos/scripts/vlogsrt-engine.py" "$operation" "$job_id" "$job_dir" "${@:4}"'
 } > "$wrapper"
 chmod 700 "$wrapper"
 print "$wrapper"

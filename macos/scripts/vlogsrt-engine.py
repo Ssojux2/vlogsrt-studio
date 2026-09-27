@@ -2,6 +2,7 @@
 """번들 엔진 진입점 — 개발 래퍼(install-development-engine.sh)과 같은 CLI 계약.
 
     vlogsrt-engine <operation> <job_id> <job_dir> [status_file] [--stdin-carrier]
+                   [--invocation-id <token>]
 
 PyInstaller onedir로 얼릴 때 이 파일이 진입점이다(scripts/build_engine.py).
 개발 래퍼와 달리 파이썬을 다시 띄우지 않고 `vlogsrt.cli`를 직접 부른다.
@@ -99,6 +100,16 @@ _CARRIER_HEADER_MAX_BYTES = 40
 # 조각마다 마감을 다시 걸면 한 바이트씩 흘리는 쓰기가 마감을 무한히 늘린다.
 _CARRIER_READ_DEADLINE_SECONDS = 10.0
 _JOB_DIR_ENV = "VLOGSRT_ENGINE_JOB_DIR"
+# 잠금 소유자만 아는 호출 신원(S2A-3) — 앱 실행기가 요청마다 만들어 argv로
+# 싣는다(비밀 아님). 진위는 소유권이 증명한다: 이 값을 프로세스 안에 옮기는
+# 지점이 실행 잠금을 **얻은 뒤**뿐이므로, 중복(3)으로 물러난 호출은 자기
+# 신원을 진행 기록에 전혀 못 실는다. 낡은 호출의 스냅샷을 새 호출이 흉내 내는
+# 길이 없다.
+_JOB_ID_ENV = "VLOGSRT_ENGINE_JOB_ID"
+_ENGINE_INVOCATION_ENV = "VLOGSRT_ENGINE_INVOCATION_ID"
+_INVOCATION_MARKER = "--invocation-id"
+_INVOCATION_TOKEN = re.compile(r"^[A-Za-z0-9-]{1,128}$")
+_PROGRESS_NAME = "analysis-progress.jsonl"
 _ENGINE_LOCK_NAME = ".vlogsrt-engine.lock"
 # 중복 소유권 전용 종료 코드다 — 성공(0)도 실패 시도(1)도 호출 계약 위반(2)도 아니다.
 _DUPLICATE_EXIT = 3
@@ -617,10 +628,10 @@ def main(argv: list[str]) -> int:
 
 def _dispatch(argv: list[str]) -> tuple[int, str | None]:
     """검증(읽기 전용) → 소유권 → 실행. 상태 경로는 검증을 통과해야 돌아온다."""
-    if len(argv) not in (3, 4, 5):
+    if len(argv) < 3:
         print(
             "usage: vlogsrt-engine <operation> <job_id> <job_dir> [status_file] "
-            f"[{_CARRIER_MARKER}]",
+            f"[{_CARRIER_MARKER}] [{_INVOCATION_MARKER} <token>]",
             file=sys.stderr,
         )
         return 2, None
@@ -640,12 +651,31 @@ def _dispatch(argv: list[str]) -> tuple[int, str | None]:
     status_file: str | None = None
     report_file: str | None = None
     reads_envelope = False
-    for argument in tail:
+    invocation_id: str | None = None
+    index = 0
+    while index < len(tail):
+        argument = tail[index]
+        index += 1
         if argument == _CARRIER_MARKER:
             if reads_envelope:
                 print(f"vlogsrt-engine: {argument} given twice", file=sys.stderr)
                 return 2, None
             reads_envelope = True
+        elif argument == _INVOCATION_MARKER:
+            if invocation_id is not None:
+                print(f"vlogsrt-engine: {argument} given twice", file=sys.stderr)
+                return 2, None
+            if index >= len(tail):
+                print(f"vlogsrt-engine: {argument} requires a token", file=sys.stderr)
+                return 2, None
+            invocation_id = tail[index]
+            index += 1
+            if not _INVOCATION_TOKEN.fullmatch(invocation_id):
+                print(
+                    f"vlogsrt-engine: {argument} token must be alphanumeric",
+                    file=sys.stderr,
+                )
+                return 2, None
         elif status_file is None and report_file is None:
             # readiness의 넷째 인자는 상태 기록이 아닐 수 있다 — 보고서 자리다.
             # 모양으로 갈라 읽는다: `.status`는 개발 실행기의 소유 채널이다.
@@ -695,7 +725,7 @@ def _dispatch(argv: list[str]) -> tuple[int, str | None]:
         print(_ALREADY_RUNNING, file=sys.stderr)
         return _DUPLICATE_EXIT, status_file
     try:
-        return _run_owned(operation, canonical, carried), status_file
+        return _run_owned(operation, job_id, canonical, carried, invocation_id), status_file
     finally:
         lock.release()
 
@@ -757,7 +787,13 @@ def _run_readiness(
     return 0
 
 
-def _run_owned(operation: str, job_dir: Path, carried: _CarriedCredentials) -> int:
+def _run_owned(
+    operation: str,
+    job_id: str,
+    job_dir: Path,
+    carried: _CarriedCredentials,
+    invocation_id: str | None,
+) -> int:
     """잠긴 상태에서 실행하는 본문 — 스테이징·엔진 호출·결과 동기화 전부(S2A-1)."""
     # 운반 적용 실패(설정 해석·이름·URL 검사)는 통제된 실행 실패다. 잠금은
     # 호출자의 finally가 놓고, 상태 기록은 main이 남긴다 — traceback은 없다.
@@ -769,6 +805,12 @@ def _run_owned(operation: str, job_dir: Path, carried: _CarriedCredentials) -> i
     # 새 job에서도 안전하게 먼저 만든다(있으면 그대로 둔다).
     workspace.mkdir(parents=True, exist_ok=True)
     _expose_job_dir(job_dir)
+    _expose_invocation_identity(job_id, invocation_id)
+    if operation == "analyze":
+        # 새 분석 호출은 낡은 진행 스냅샷을 못 박고 시작한다 — 잠금 소유자만
+        # 지울 수 있으므로 지는 중복 호출이 이긴 호출의 관측 기록을 지우는 길이
+        # 없다(S2A-3).
+        _discard_stale_progress(job_dir, workspace)
     _propagate_staged(job_dir, workspace)
     exit_code = _run_operation(operation, job_dir, workspace)
     if exit_code == 2:
@@ -780,6 +822,30 @@ def _run_owned(operation: str, job_dir: Path, carried: _CarriedCredentials) -> i
         return 1
     _sync_results(job_dir, workspace, diagnostics_only=False)
     return 0
+
+
+def _expose_invocation_identity(job_id: str, invocation_id: str | None) -> None:
+    """잠금을 얻은 뒤에만 부르는 자리 — job·호출 신원을 안 관측 경로로 옮긴다.
+
+    진행 발행(`vlogsrt.project.commands`)이 job 루트에 스냅샷을 남기는 것도 이
+    두 값이 함께 있을 때뿐이다. 호출 신원이 없으면(낡은 실행기·직접 호출)
+    스냅샷은 여전히 남되 invocation_id 없이 남아, 새 문지방 쪽 릴레이가 그것을
+    이긴 호출의 것으로 받아들이지 않는다.
+    """
+    os.environ[_JOB_ID_ENV] = job_id
+    if invocation_id is not None:
+        os.environ[_ENGINE_INVOCATION_ENV] = invocation_id
+    else:
+        os.environ.pop(_ENGINE_INVOCATION_ENV, None)
+
+
+def _discard_stale_progress(job_dir: Path, workspace: Path) -> None:
+    """시작을 알리는 지우개 — 없으면 아무것도 하지 않는다(조용한 성공이 아니다)."""
+    for path in (job_dir / _PROGRESS_NAME, workspace / _PROGRESS_NAME):
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            continue
 
 
 def _run_operation(operation: str, job_dir: Path, workspace: Path) -> int:

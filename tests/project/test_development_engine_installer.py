@@ -396,3 +396,37 @@ def _assert_engine_sandbox_hygiene(sandbox: EngineSandbox) -> None:
     """보호 철자·심볼링크 위생 — 위상 시험도 같은 경계 안에 있다."""
     assert sandbox.dotenv_files() == [sandbox.dotenv]
     assert sandbox.symlinks() == []
+
+
+def test_installed_wrapper_forwards_extra_launch_arguments(tmp_path: Path) -> None:
+    """부가 실행 인자(상태 기록·호출 신원)가 래퍼를 통과해 그대로 간다(S2A-3).
+
+    래퍼는 옛 계약처럼 넷째·다섯째 인자만 골라 넘기지 않는다 — 호출 신원 깃발은
+    값 짝이므로 찢어지면 진행 발행의 신원 계약이 무너진다.
+    """
+    repo = _fake_repo_with_logging_python(tmp_path)
+    wrapper = _install(tmp_path, repo=repo)
+    job = tmp_path / "job"
+    job.mkdir()
+    status = tmp_path / "vlogsrt-status-token7" / "token7.status"
+    status.parent.mkdir()
+    log = repo / "calls.log"
+    engine_script = str(repo / "macos/scripts/vlogsrt-engine.py")
+
+    completed = subprocess.run(
+        [
+            str(wrapper),
+            "analyze",
+            "job-7",
+            str(job),
+            str(status),
+            "--invocation-id",
+            "inv-wrap-7",
+        ],
+        check=False,
+        env={**os.environ, "VLOGSRT_OFFLINE": "1"},
+    )
+    assert completed.returncode == 0
+    assert log.read_text(encoding="utf-8").splitlines() == [
+        f"{engine_script} analyze job-7 {job} {status} --invocation-id inv-wrap-7",
+    ]

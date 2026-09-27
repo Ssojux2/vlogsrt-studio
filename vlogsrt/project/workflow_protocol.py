@@ -342,6 +342,107 @@ class AnalysisAttempt:
             raise ValueError("실패가 아닌 분석 시도는 오류를 가질 수 없다")
 
 
+ProgressStage: TypeAlias = Literal["preparation", "audio", "vision", "publication"]
+ProgressStatus: TypeAlias = Literal["running", "succeeded", "failed", "cancelled"]
+
+_PROGRESS_STAGES = frozenset({"preparation", "audio", "vision", "publication"})
+_PROGRESS_STATUSES = frozenset({"running", "succeeded", "failed", "cancelled"})
+
+
+@dataclass(frozen=True, slots=True)
+class AnalysisProgress:
+    """시도 하나의 진행 경계(S2A-3) — 원자 스냅샷 한 장으로 남는다.
+
+    신원은 작업·입력·추정·시도 넷이다: job은 파일의 자리가 아니라 엔진이 알린
+    ``job_id``로, 호출은 잠금 소유자만 아는 ``invocation_id``로 묶는다(중복
+    요청의 릴레이가 남의 호출 진행을 흉내 내는 길을 닫는다). 계수는 **아는
+    때만** 실린다 — 창 계획이 선 뒤의 vision 단계뿐이고, 단위 수가 전체
+    백분율인 척하지 않는다. 준비·오디오 단계는 부정(ineterminate)이다.
+    ``succeeded``는 발행(publication) 단계에만 올 수 있다 — 후보·시도·집계가
+    내구적으로 정착한 뒤의 마지막 경계다. 오류 문면은 절대 실리지 않는다.
+    """
+
+    input_revision: str
+    estimate_revision: str
+    attempt_id: str
+    job_id: str | None
+    invocation_id: str | None
+    stage: ProgressStage
+    status: ProgressStatus
+    completed: int | None
+    total: int | None
+    recorded_at: str
+    progress_revision: str
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        input_revision: str,
+        estimate_revision: str,
+        attempt_id: str,
+        job_id: str | None,
+        invocation_id: str | None,
+        stage: ProgressStage,
+        status: ProgressStatus,
+        recorded_at: str,
+        completed: int | None = None,
+        total: int | None = None,
+    ) -> AnalysisProgress:
+        payload = _analysis_progress_payload(
+            input_revision=input_revision,
+            estimate_revision=estimate_revision,
+            attempt_id=attempt_id,
+            job_id=job_id,
+            invocation_id=invocation_id,
+            stage=stage,
+            status=status,
+            completed=completed,
+            total=total,
+            recorded_at=recorded_at,
+        )
+        return cls(
+            input_revision,
+            estimate_revision,
+            attempt_id,
+            job_id,
+            invocation_id,
+            stage,
+            status,
+            completed,
+            total,
+            recorded_at,
+            _digest(payload),
+        )
+
+    def __post_init__(self) -> None:
+        _require_sha256(self.input_revision, "입력 리비전")
+        _require_sha256(self.estimate_revision, "비용 추정 리비전")
+        _require_sha256(self.progress_revision, "진행 리비전")
+        if not self.attempt_id or not self.recorded_at:
+            raise ValueError("진행의 시도 ID·기록 시각은 비어 있을 수 없다")
+        if self.job_id is not None and not self.job_id:
+            raise ValueError("진행의 job ID는 비어 있으면 안 된다")
+        if self.invocation_id is not None and not self.invocation_id:
+            raise ValueError("진행의 호출 ID는 비어 있으면 안 된다")
+        if self.stage not in _PROGRESS_STAGES:
+            raise ValueError(f"알 수 없는 진행 단계다: {self.stage!r}")
+        if self.status not in _PROGRESS_STATUSES:
+            raise ValueError(f"알 수 없는 진행 상태다: {self.status!r}")
+        if (self.completed is None) != (self.total is None):
+            raise ValueError("창 계수는 완료·전체가 함께 와야 한다")
+        if self.completed is not None and self.total is not None:
+            for name, value in (("completed", self.completed), ("total", self.total)):
+                if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                    raise ValueError(f"{name}는 0 이상 정수여야 한다")
+            if self.completed > self.total:
+                raise ValueError("완료 창 수가 전체 창 수보다 크다")
+            if self.stage != "vision":
+                raise ValueError("창 계수는 vision 단계에만 붙는다")
+        if self.status == "succeeded" and self.stage != "publication":
+            raise ValueError("succeeded는 발행 단계의 마지막 경계에만 올 수 있다")
+
+
 @dataclass(frozen=True, slots=True)
 class CancellationRequest:
     input_revision: str
@@ -1085,6 +1186,7 @@ ProtocolMessage: TypeAlias = (
     | AnalysisEstimate
     | AnalysisAuthorization
     | AnalysisAttempt
+    | AnalysisProgress
     | CancellationRequest
     | ActualUsage
     | VisionWindowDecision
@@ -1272,6 +1374,22 @@ def _message_payload(message: ProtocolMessage) -> dict[str, object]:
             "input_revision": message.input_revision,
             "started_at": message.started_at,
             "status": message.status,
+        }
+    if isinstance(message, AnalysisProgress):
+        return {
+            **_analysis_progress_payload(
+                input_revision=message.input_revision,
+                estimate_revision=message.estimate_revision,
+                attempt_id=message.attempt_id,
+                job_id=message.job_id,
+                invocation_id=message.invocation_id,
+                stage=message.stage,
+                status=message.status,
+                completed=message.completed,
+                total=message.total,
+                recorded_at=message.recorded_at,
+            ),
+            "progress_revision": message.progress_revision,
         }
     if isinstance(message, CancellationRequest):
         return {
@@ -1534,6 +1652,25 @@ def _decode_payload(kind: object, payload: dict[str, object], version: str) -> P
             started_at=_string(payload, "started_at"),
             error=error,
         )
+    if kind == "AnalysisProgress":
+        # 진행 스냅샷은 관측이지 결과가 아니다 — 깨진 신원·계수·열거는 회복하지
+        # 않고 그냥 거절한다. 낡은 작업공간에는 파일 자체가 없으므로 legacy 읽기는
+        # '없음'(부재)으로 흘러간다.
+        progress = AnalysisProgress.create(
+            input_revision=_string(payload, "input_revision"),
+            estimate_revision=_string(payload, "estimate_revision"),
+            attempt_id=_string(payload, "attempt_id"),
+            job_id=_optional_string(payload, "job_id"),
+            invocation_id=_optional_string(payload, "invocation_id"),
+            stage=cast(ProgressStage, _string(payload, "stage")),
+            status=cast(ProgressStatus, _string(payload, "status")),
+            recorded_at=_string(payload, "recorded_at"),
+            completed=_optional_integer(payload, "completed"),
+            total=_optional_integer(payload, "total"),
+        )
+        if payload.get("progress_revision") != progress.progress_revision:
+            raise ValueError("AnalysisProgress의 계산 리비전이 기록과 다르다")
+        return progress
     if kind == "VisionWindowDecision":
         candidate_id = payload.get("candidate_id")
         if candidate_id is not None and not isinstance(candidate_id, str):
@@ -1795,6 +1932,33 @@ def _pricing_snapshot_payload(
     }
 
 
+def _analysis_progress_payload(
+    *,
+    input_revision: str,
+    estimate_revision: str,
+    attempt_id: str,
+    job_id: str | None,
+    invocation_id: str | None,
+    stage: str,
+    status: str,
+    completed: int | None,
+    total: int | None,
+    recorded_at: str,
+) -> dict[str, object]:
+    return {
+        "attempt_id": attempt_id,
+        "completed": completed,
+        "estimate_revision": estimate_revision,
+        "input_revision": input_revision,
+        "invocation_id": invocation_id,
+        "job_id": job_id,
+        "recorded_at": recorded_at,
+        "stage": stage,
+        "status": status,
+        "total": total,
+    }
+
+
 def _actual_usage_payload(
     *,
     input_revision: str,
@@ -1986,6 +2150,15 @@ def _optional_string(payload: dict[str, object], key: str) -> str | None:
     return value
 
 
+def _optional_integer(payload: dict[str, object], key: str) -> int | None:
+    value = payload.get(key)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{key}는 정수 또는 null이어야 한다")
+    return value
+
+
 def _strings(payload: dict[str, object], key: str) -> tuple[str, ...]:
     value = payload.get(key)
     if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
@@ -2054,6 +2227,7 @@ _ANALYSIS_PROTOCOL_TYPES = frozenset(
         "AnalysisEstimate",
         "AnalysisAuthorization",
         "AnalysisAttempt",
+        "AnalysisProgress",
         "CancellationRequest",
         "ActualUsage",
         "VisionWindowDecision",

@@ -23,6 +23,10 @@ public struct RoundTripJob: Equatable, Sendable {
   public static let requestFileName = "roundtrip-request.jsonl"
   public static let outputFileName = "roundtrip.fcpxml"
   public static let resultFileName = "roundtrip-result.jsonl"
+  /// 엔진 진입점이 job 루트에 남기는 러프컷 산출물(S2A-3 관측 계약).
+  public static let roughcutFileName = "roughcut.fcpxml"
+  /// 시도의 진행 스냅샷 — 파이썬 발행기가 원자적으로 남기는 한 장(S2A-3).
+  public static let progressFileName = "analysis-progress.jsonl"
 
   public let id: String
   public let directoryURL: URL
@@ -108,11 +112,39 @@ public struct RoundTripJob: Equatable, Sendable {
   }
 
   public func readAnalysisEstimate() throws -> AnalysisEstimateMessage {
-    try readOne(
+    try Self.readAnalysisEstimateAt(directoryURL: directoryURL)
+  }
+
+  /// 같은 규율을 job 폴더 경로만으로 — 새로고침 관측이 쓰는 자리다(S2A-3).
+  public static func readAnalysisEstimateAt(directoryURL: URL) throws -> AnalysisEstimateMessage {
+    try Self.decodeSingleLine(
       AnalysisEstimateMessage.self,
       type: "AnalysisEstimate",
-      at: analysisEstimateURL
+      from: try String(
+        contentsOf: directoryURL.appendingPathComponent(Self.analysisEstimateFileName),
+        encoding: .utf8)
     )
+  }
+
+  /// 해석 가능한 추정이 있을 때만 — 파일 존재가 아니라 메시지가 근거다(S2A-3).
+  public static func readAnalysisEstimateIfPresent(
+    directoryURL: URL, fileManager: FileManager = .default
+  ) -> AnalysisEstimateMessage? {
+    guard
+      fileManager.fileExists(
+        atPath: directoryURL.appendingPathComponent(Self.analysisEstimateFileName).path)
+    else { return nil }
+    return try? Self.readAnalysisEstimateAt(directoryURL: directoryURL)
+  }
+
+  /// 마지막 시도의 신원 — 진행 파일이 없는 낡은 job의 baseline 재료(S2A-3).
+  /// 한 줄이라도 해석에 실패하면 nil이다.
+  public static func readLatestAttemptID(
+    directoryURL: URL, fileManager: FileManager = .default
+  ) -> String? {
+    Self.readAnalysisAttempts(
+      at: directoryURL.appendingPathComponent(Self.analysisAttemptsFileName)
+    )?.last?.attemptID
   }
 
   /// job 기록 상태 — 새 작업(fresh)과 모호한 기록(unknown)을 갈라 돌려준다(S1B-R1).
@@ -121,19 +153,35 @@ public struct RoundTripJob: Equatable, Sendable {
   /// 신원이 같고, 상태가 집계와 일치해야 한다(success·partial은 succeeded,
   /// error는 failed). 낡은 집계·진행 중·취소 시도·깨진 기록은 전부 unknown이다.
   public func readAnalysisRecord() -> AnalysisRecordState {
-    let fileManager = FileManager.default
-    let attemptsURL = directoryURL.appendingPathComponent(Self.analysisAttemptsFileName)
+    Self.readAnalysisRecord(directoryURL: directoryURL)
+  }
+
+  /// 같은 판정을 job 폴더 경로만으로 — 확장의 새로고침 관측이 인스턴스 없이
+  /// 쓰는 자리다(S2A-3). 모든 읽기는 이 디렉터리 안에서만 일어난다.
+  public static func readAnalysisRecord(
+    directoryURL: URL, fileManager: FileManager = .default
+  ) -> AnalysisRecordState {
+    let attemptsURL = directoryURL.appendingPathComponent(analysisAttemptsFileName)
+    let resultURL = directoryURL.appendingPathComponent(analysisResultFileName)
+    let candidatesURL = directoryURL.appendingPathComponent(candidatesFileName)
+    let estimateURL = directoryURL.appendingPathComponent(analysisEstimateFileName)
     let hasHistory =
-      fileManager.fileExists(atPath: analysisResultURL.path)
+      fileManager.fileExists(atPath: resultURL.path)
       || fileManager.fileExists(atPath: attemptsURL.path)
       || fileManager.fileExists(atPath: candidatesURL.path)
     guard hasHistory else { return .fresh }
-    guard let result = decodeResultLine() else { return .unknown }
-    guard let estimate = try? readAnalysisEstimate() else { return .unknown }
+    guard let result = Self.decodeResultLine(at: resultURL) else { return .unknown }
+    guard
+      let line = try? String(contentsOf: estimateURL, encoding: .utf8),
+      let estimate = try? Self.decodeSingleLine(
+        AnalysisEstimateMessage.self, type: "AnalysisEstimate", from: line)
+    else { return .unknown }
     guard estimate.inputRevision == result.inputRevision,
       estimate.estimateRevision == result.estimateRevision
     else { return .unknown }
-    guard let latest = readAnalysisAttempts()?.last else { return .unknown }
+    guard let latest = Self.readAnalysisAttempts(at: attemptsURL)?.last else {
+      return .unknown
+    }
     guard latest.attemptID == result.attemptID,
       latest.inputRevision == result.inputRevision,
       latest.estimateRevision == result.estimateRevision
@@ -154,8 +202,8 @@ public struct RoundTripJob: Equatable, Sendable {
     AnalysisOutcome.make(readAnalysisResult())
   }
 
-  private func decodeResultLine() -> AnalysisResultMessage? {
-    guard let line = try? String(contentsOf: analysisResultURL, encoding: .utf8) else {
+  private static func decodeResultLine(at url: URL) -> AnalysisResultMessage? {
+    guard let line = try? String(contentsOf: url, encoding: .utf8) else {
       return nil
     }
     var trimmed = line
@@ -171,9 +219,8 @@ public struct RoundTripJob: Equatable, Sendable {
 
   /// 시도 기록 — 한 줄이라도 해석에 실패하면 nil이다. 깨진 원장의 유효한 마지막
   /// 줄로 묶음을 증명하게 두지 않는다.
-  private func readAnalysisAttempts() -> [AnalysisAttemptMessage]? {
-    let path = directoryURL.appendingPathComponent(Self.analysisAttemptsFileName)
-    guard let text = try? String(contentsOf: path, encoding: .utf8), !text.isEmpty else {
+  private static func readAnalysisAttempts(at url: URL) -> [AnalysisAttemptMessage]? {
+    guard let text = try? String(contentsOf: url, encoding: .utf8), !text.isEmpty else {
       return nil
     }
     let lines = text.split(separator: "\n").map(String.init)
@@ -241,6 +288,18 @@ public struct RoundTripJob: Equatable, Sendable {
       type: type,
       from: line
     )
+  }
+
+  /// 한 줄짜리 JSONL을 typed payload로 — 정적 관측 경로가 같은 규율을 쓴다(S2A-3).
+  private static func decodeSingleLine<Payload: Decodable>(
+    _ payload: Payload.Type, type: String, from line: String
+  ) throws -> Payload {
+    var trimmed = line
+    if trimmed.hasSuffix("\n") { trimmed.removeLast() }
+    guard !trimmed.isEmpty, !trimmed.contains("\n") else {
+      throw RoundTripJobError.notSingleJSONLine(URL(fileURLWithPath: type))
+    }
+    return try ProtocolCodec.decodeAnalysis(payload, type: type, from: trimmed)
   }
 
   private static func isSHA256(_ value: String) -> Bool {

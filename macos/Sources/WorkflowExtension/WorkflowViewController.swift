@@ -20,6 +20,12 @@ public nonisolated final class WorkflowViewController: NSViewController {
   private var timelineBridge: FinalCutTimelineBridge?
   /// 실패 안내를 이미 보여줬다 — 다음 요청은 같은 작업의 명시적 재시도다.
   private var failureRetryArmed = false
+  /// 자동 새로고침 세션(S2A-3) — loadView 뒤 MainActor에서 만들어 쓴다.
+  /// SDK 초기화 회귀(nonisolated init)를 그대로 두기 위해 저장값은 값 타입·
+  /// nil 뿐이다.
+  private var refreshSession: WorkflowRefreshSession?
+  private var refreshGeneration = 0
+  private var selectionModel = CandidateSelectionModel()
 
   @MainActor public override func loadView() {
     let root = DropView(frame: NSRect(x: 0, y: 0, width: 420, height: 520))
@@ -73,9 +79,14 @@ public nonisolated final class WorkflowViewController: NSViewController {
   @MainActor public override func viewDidAppear() {
     super.viewDidAppear()
     timelineBridge?.start()
+    if job != nil {
+      // 나타난 시점의 내구 상태를 스스로 새로고친다 — 엔진 호출은 없다(S2A-3).
+      startRefreshing(.analysis)
+    }
   }
 
   @MainActor public override func viewWillDisappear() {
+    stopRefreshing()
     timelineBridge?.stop()
     super.viewWillDisappear()
   }
@@ -122,6 +133,8 @@ public nonisolated final class WorkflowViewController: NSViewController {
       analyzeButton.isEnabled = true
       roughcutButton.isEnabled = false
       clearCandidates()
+      selectionModel = CandidateSelectionModel()
+      startRefreshing(.analysis)
       return true
     } catch {
       status.stringValue = "수신 실패: \(error.localizedDescription)"
@@ -135,6 +148,7 @@ public nonisolated final class WorkflowViewController: NSViewController {
     guard let selection else {
       try? ActiveSelectionRegistry.live().invalidate()
       activeProjectLabel.stringValue = "활성 프로젝트: 없음"
+      stopRefreshing()
       job = nil
       confirmButton.isEnabled = false
       analyzeButton.isEnabled = false
@@ -154,6 +168,7 @@ public nonisolated final class WorkflowViewController: NSViewController {
       + "시작 \(selection.timelineStart.secondsText) · 길이 \(selection.duration.secondsText)"
       + " · 프레임 \(selection.frameDuration.secondsText)"
     if let oldUID, oldUID != selection.projectUID {
+      stopRefreshing()
       job = nil
       confirmButton.isEnabled = false
       analyzeButton.isEnabled = false
@@ -192,7 +207,11 @@ public nonisolated final class WorkflowViewController: NSViewController {
           try presentAuthorization(job)
           return
         }
-        try openAgentURL(AgentURL.analyzeURL(jobID: job.id), pending: "비용 추정·분석 요청됨")
+        try openAgentURL(
+          AgentURL.analyzeURL(jobID: job.id),
+          pending: "비용 추정·분석 요청됨",
+          monitor: .analysis,
+          baselineAttemptID: currentAttemptID())
       case .reviewCandidates(let outcome):
         failureRetryArmed = false
         if AnalysisOutcome.shouldLoadCandidates(
@@ -215,7 +234,11 @@ public nonisolated final class WorkflowViewController: NSViewController {
           outcome.userFacingSummary + " · 다시 시도하려면 AI 분석 요청을 누르세요"
       case .retryEngine:
         failureRetryArmed = false
-        try openAgentURL(AgentURL.analyzeURL(jobID: job.id), pending: "분석 재시도 요청됨")
+        try openAgentURL(
+          AgentURL.analyzeURL(jobID: job.id),
+          pending: "분석 재시도 요청됨",
+          monitor: .analysis,
+          baselineAttemptID: currentAttemptID())
       case .showUnknown:
         failureRetryArmed = false
         clearCandidates()
@@ -242,9 +265,20 @@ public nonisolated final class WorkflowViewController: NSViewController {
     alert.addButton(withTitle: "승인하고 분석")
     alert.addButton(withTitle: "취소")
     guard let window = view.window else { return }
+    // 시트의 응답도 늦은 배달이다 — 열린 순간의 job·세대로 문지기를 잡는다.
+    let gate = WorkflowDeliveryGate(jobID: job.id, generation: refreshGeneration)
     alert.beginSheetModal(for: window) { [weak self] response in
       Task { @MainActor in
         guard response == .alertFirstButtonReturn, let self else { return }
+        // 시트가 열려 있는 사이 활성 프로젝트가 바뀌어 job이 갈렸거나 같은 job의
+        // 새 요청이 세대를 올렸으면 승인을 쓰지 않는다 — 남의 요청에 승인·실행을
+        // 남기는 길이다(S2A-3).
+        guard gate.accepts(currentJobID: self.job?.id, currentGeneration: self.refreshGeneration)
+        else {
+          // 낡은 응답은 어떤 UI 손대기 없이 조용히 버린다 — 새 job·요청의
+          // 상태를 덮는 길이 여기 없어야 한다(S2A-3).
+          return
+        }
         do {
           try job.writeAnalysisAuthorization(
             AnalysisAuthorizationMessage(
@@ -257,7 +291,9 @@ public nonisolated final class WorkflowViewController: NSViewController {
           )
           try self.openAgentURL(
             AgentURL.analyzeURL(jobID: job.id),
-            pending: "승인된 AI 분석 요청됨"
+            pending: "승인된 AI 분석 요청됨",
+            monitor: .analysis,
+            baselineAttemptID: self.currentAttemptID()
           )
         } catch {
           self.status.stringValue = "승인 기록 실패: \(error.localizedDescription)"
@@ -267,10 +303,20 @@ public nonisolated final class WorkflowViewController: NSViewController {
   }
 
   @MainActor private func loadCandidates(_ job: RoundTripJob) throws {
-    clearCandidates()
+    // 잠시 못 읽는 스냅샷이면 이 호출이 실패로 올라가 지금 줄·선택이 그대로
+    // 남는다 — 같은 리비전의 새로고침에서 선택을 보존한다(S2A-3).
     let candidates = try job.readCandidates()
+    selectionModel.recordUserChoices(
+      Set(candidateRows.filter(\.isApproved).map(\.candidate.candidateID)))
+    let approved = selectionModel.effectiveSelection(
+      resultRevision: job.readAnalysisResult()?.resultRevision,
+      candidates: candidates)
+    clearCandidates()
     for candidate in candidates {
-      let row = CandidateReviewRow(candidate: candidate) { [weak self] candidate in
+      let row = CandidateReviewRow(
+        candidate: candidate,
+        approved: approved.contains(candidate.candidateID)
+      ) { [weak self] candidate in
         guard let start = Self.rational(candidate.timelineRange.start) else { return }
         self?.movePlayheadToCandidate(start)
       }
@@ -294,7 +340,8 @@ public nonisolated final class WorkflowViewController: NSViewController {
       )
       try openAgentURL(
         AgentURL.roughcutURL(jobID: job.id),
-        pending: "승인 후보로 러프컷 요청됨"
+        pending: "승인 후보로 러프컷 요청됨",
+        monitor: .roughcut
       )
       roughcutButton.isEnabled = false
     } catch {
@@ -302,16 +349,35 @@ public nonisolated final class WorkflowViewController: NSViewController {
     }
   }
 
-  @MainActor private func openAgentURL(_ url: URL, pending: String) throws {
+  @MainActor private func openAgentURL(
+    _ url: URL,
+    pending: String,
+    monitor: WorkflowRefreshModel.Flavor? = nil,
+    baselineAttemptID: String? = nil
+  ) throws {
     guard let context = extensionContext else {
       throw RoundTripExtensionError.noExtensionContext
     }
-    status.stringValue = pending + " · 완료 후 AI 분석 요청을 다시 눌러 새로고침"
+    status.stringValue = pending + " · 진행을 자동으로 새로고칩니다"
+    if let monitor {
+      // 요청 세션 — 요청 순간의 마지막 시도를 baseline으로 묶어, 새 엔진이
+      // 시작을 알리기 전에 낡은 종료 상태를 성공으로 소비하지 않는다(S2A-3).
+      startRefreshing(monitor, baselineAttemptID: baselineAttemptID)
+    }
+    // 문지기는 모니터 시작 **뒤에** 잡는다 — 세대는 그 시작이 올린 값이다.
+    let gate = WorkflowDeliveryGate(jobID: job?.id ?? "", generation: refreshGeneration)
     context.open(url) { [weak self] opened in
       guard let self else { return }
       Task { @MainActor in
+        // 늦은 열기 결과가 새 job·새 요청의 상태를 덮는 길을 닫는다(S2A-3).
+        guard
+          gate.accepts(currentJobID: self.job?.id, currentGeneration: self.refreshGeneration)
+        else { return }
         self.analyzeButton.isEnabled = true
-        if !opened { self.status.stringValue = "컨테이너 앱 열기 실패" }
+        if !opened {
+          self.stopRefreshing()
+          self.status.stringValue = "컨테이너 앱 열기 실패"
+        }
       }
     }
   }
@@ -321,6 +387,141 @@ public nonisolated final class WorkflowViewController: NSViewController {
     for view in candidatesStack?.arrangedSubviews ?? [] {
       candidatesStack.removeArrangedSubview(view)
       view.removeFromSuperview()
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  //  STAB-S2A-3 — 자동 새로고침(내구 상태 읽기 전용)
+  // ─────────────────────────────────────────────────────────────
+
+  /// 요청 순간의 마지막 시도 — 재시도 세션의 baseline 재료. 진행 파일이 없는
+  /// 낡은 job은 묶음 검증 기록, 그다음 시도 원장에서 얻는다(유령 완료 금지).
+  @MainActor private func currentAttemptID() -> String? {
+    guard let job else { return nil }
+    if let attempt = WorkflowProgressStore.read(jobURL: job.directoryURL)?.attemptID {
+      return attempt
+    }
+    if case .valid(let result) = job.readAnalysisRecord() {
+      return result.attemptID
+    }
+    return RoundTripJob.readLatestAttemptID(directoryURL: job.directoryURL)
+  }
+
+  /// 관측을 멈추고 무효화한다 — 늦게 도착할 알림의 세대까지 끊는다.
+  @MainActor private func stopRefreshing() {
+    refreshGeneration += 1
+    refreshSession?.stop()
+  }
+
+  /// 관측을 시작(또는 교체)한다 — 시작·교체는 이전 과제와 세대를 끊는다. 엔진
+  /// 호출도 승인도 하지 않는다: 읽는 것은 job 폴더의 내구 상태뿐이다.
+  @MainActor private func startRefreshing(
+    _ flavor: WorkflowRefreshModel.Flavor,
+    baselineAttemptID: String? = nil
+  ) {
+    guard let job else { return }
+    refreshGeneration += 1
+    let generation = refreshGeneration
+    refreshSession?.stop()
+    let jobID = job.id
+    let jobURL = job.directoryURL
+    let expectedInputRevision = RoundTripJob.readAnalysisEstimateIfPresent(
+      directoryURL: jobURL
+    )?.inputRevision
+    let session = WorkflowRefreshSession(
+      observe: { url in WorkflowDurableObservation.live(jobURL: url) },
+      notify: { [weak self] state in
+        Task { @MainActor in
+          self?.refreshDidUpdate(state, jobID: jobID, generation: generation)
+        }
+      })
+    refreshSession = session
+    session.start(
+      jobURL: jobURL,
+      jobID: jobID,
+      flavor: flavor,
+      expectedInputRevision: expectedInputRevision,
+      baselineAttemptID: baselineAttemptID)
+  }
+
+  /// 세션의 알림 — 늦게 온 옛 알림은 현재 job·세대와 신원이 다르면 버린다.
+  /// 같은 job의 새 요청 세대까지 갈라 본다(옛 알림이 새 상태를 덮는 금지).
+  @MainActor private func refreshDidUpdate(
+    _ state: WorkflowRefreshState, jobID: String, generation: Int
+  ) {
+    guard let job, job.id == jobID, generation == refreshGeneration else { return }
+    switch state {
+    case .analyzing(let progress):
+      status.stringValue = progress.userFacingProgressText
+    case .lastKnown(let progress):
+      status.stringValue = progress.userFacingProgressText
+        + WorkflowRefreshModel.lastKnownSuffix
+    case .finalizing(let progress):
+      status.stringValue = progress.userFacingProgressText + " · 결과 정리 대기 중"
+    case .estimateReady:
+      // 비용 추정만 완료 — 승인 UI를 노출할 뿐 자동 승인·유료 실행은 없다.
+      failureRetryArmed = false
+      analyzeButton.isEnabled = true
+      try? presentAuthorization(job)
+    case .completed:
+      failureRetryArmed = false
+      applyAnalysisRecordRoute(job)
+    case .terminated(let progress):
+      failureRetryArmed = progress.status == "failed"
+      clearCandidates()
+      roughcutButton.isEnabled = false
+      status.stringValue = progress.status == "cancelled"
+        ? "분석이 취소되었습니다 — 취소된 작업은 다시 부르지 않습니다"
+        : "분석이 실패했습니다 · 다시 시도하려면 AI 분석 요청을 누르세요"
+    case .roughcutCompleted:
+      roughcutButton.isEnabled = !candidateRows.isEmpty
+      status.stringValue = "러프컷 완료 — Final Cut에서 확인하세요"
+    case .cancelledJob:
+      analyzeButton.isEnabled = false
+      status.stringValue = "취소된 작업입니다 — 새 분석을 시작하려면 새 작업을 만드세요"
+    case .manualRecovery(let text):
+      analyzeButton.isEnabled = true
+      status.stringValue = text
+    }
+  }
+
+  /// 기록 상태를 화면에 반영하는 공유 경로 — 재실행 분기(요청) 없이 검토·실패·
+  /// 모호만 다룬다. 자동 새로고침이 완료를 볼 때 쓰는 자리다.
+  @MainActor private func applyAnalysisRecordRoute(_ job: RoundTripJob) {
+    let route = AnalysisReviewRouter.route(
+      record: job.readAnalysisRecord(),
+      candidatesFileExists: FileManager.default.fileExists(atPath: job.candidatesURL.path),
+      retryArmed: false)
+    switch route {
+    case .freshJob:
+      break
+    case .reviewCandidates(let outcome):
+      do {
+        if AnalysisOutcome.shouldLoadCandidates(
+          outcome: outcome,
+          candidatesFileExists: FileManager.default.fileExists(atPath: job.candidatesURL.path)
+        ) {
+          try loadCandidates(job)
+        } else {
+          clearCandidates()
+          roughcutButton.isEnabled = false
+        }
+        status.stringValue = outcome.userFacingSummary
+      } catch {
+        // 잠시 못 읽는 스냅샷 — 지금 줄·선택을 그대로 두고 다음 관측을 기다린다.
+        status.stringValue = "결과를 다시 읽지 못했습니다: \(error.localizedDescription)"
+      }
+    case .showFailure(let outcome):
+      failureRetryArmed = true
+      clearCandidates()
+      roughcutButton.isEnabled = false
+      status.stringValue = outcome.userFacingSummary + " · 다시 시도하려면 AI 분석 요청을 누르세요"
+    case .retryEngine:
+      break  // 새로고침 경로는 엔진을 부르지 않는다 — 재시도는 사용자의 누름이다.
+    case .showUnknown:
+      clearCandidates()
+      roughcutButton.isEnabled = false
+      status.stringValue = AnalysisOutcome.legacyUnknown.userFacingSummary
     }
   }
 
@@ -377,12 +578,13 @@ private final class CandidateReviewRow: NSObject {
 
   init(
     candidate: CutCandidateMessage,
+    approved: Bool,
     onMove: @escaping @MainActor (CutCandidateMessage) -> Void
   ) {
     self.candidate = candidate
     self.onMove = onMove
     checkbox = NSButton(checkboxWithTitle: "", target: nil, action: nil)
-    checkbox.state = candidate.selectedByDefault ? .on : .off
+    checkbox.state = approved ? .on : .off
     let label = NSTextField(
       wrappingLabelWithString:
         "\(candidate.reason) · confidence \(candidate.confidence) · "

@@ -106,6 +106,7 @@ from vlogsrt.project.workflow_protocol import (
     AnalysisAttempt,
     AnalysisAuthorization,
     AnalysisEstimate,
+    AnalysisProgress,
     AnalysisResult,
     CancellationRequest,
     CaptionAuthorization,
@@ -114,6 +115,8 @@ from vlogsrt.project.workflow_protocol import (
     CutCandidate,
     EditPlan,
     PricingSnapshot,
+    ProgressStage,
+    ProgressStatus,
     ProjectRevision,
     ProtocolMessage,
     RationalRange,
@@ -140,6 +143,7 @@ _CAPTION_ESTIMATE = "caption-estimate.jsonl"
 _CAPTION_RESULT = "caption-result.jsonl"
 _ANALYSIS_RESULT = "analysis-result.jsonl"
 _DECISIONS = "vision-decisions.jsonl"
+_PROGRESS = "analysis-progress.jsonl"
 
 
 class WorkflowCancelled(BaseException):
@@ -161,6 +165,98 @@ class WorkflowCancelled(BaseException):
 
 
 _ENGINE_JOB_DIR = "VLOGSRT_ENGINE_JOB_DIR"
+# 엔진 진입점이 잠금 소유자만 아는 호출 신원을 알린다(S2A-3) — 중복(3)으로 물러나는
+# 호출은 이 값을 전혀 못 본다. 진행 스냅샷의 invocation_id와 묶여, 지는 쪽 요청의
+# 릴레이가 이긴 쪽 호출의 진행을 흉내 내는 길을 닫는다.
+_ENGINE_JOB_ID_ENV = "VLOGSRT_ENGINE_JOB_ID"
+_ENGINE_INVOCATION_ENV = "VLOGSRT_ENGINE_INVOCATION_ID"
+
+
+def _engine_job_root(workspace: Path) -> Path | None:
+    """엔진이 알린 job 루트 — 없으면(직접 CLI) 진행은 workspace에만 남는다.
+
+    루트와 job 신원 **둘 다** 와야 하고, 루트는 **이 workspace의 부모**여야 한다:
+    남아 있거나 잘못된 환경값이 남의 job에 진행을 쓰는 길을 구성요소 경계로
+    닫는다(무경계 전역 출력 금지, S2A-3). 비교는 정준 경로로 한다.
+    """
+    root = env.get(_ENGINE_JOB_DIR).strip()
+    job_id = env.get(_ENGINE_JOB_ID_ENV).strip()
+    if not root or not job_id:
+        return None
+    path = Path(root)
+    if not path.is_dir() or path.resolve() != workspace.parent.resolve():
+        return None
+    return path
+
+
+class _ProgressPublisher:
+    """시도 하나의 진행 경계를 원자 스냅샷 한 장으로 남긴다(S2A-3).
+
+    두 자리에 쓴다: workspace(기록의 정본)와 — 엔진이 job 루트를 알린 경우 —
+    job 루트(앱이 실행 중 읽는 자리). 발행 실패는 시도를 망치지 않는다: 진행은
+    관측이지 결과가 아니므로 경고만 남긴다. 오류 문면은 절대 실지 않는다 —
+    실패의 정본은 시도 기록(attempts)이 이미 지워 담고 있다.
+    """
+
+    def __init__(
+        self,
+        workspace: Path,
+        input_revision: str,
+        estimate_revision: str,
+        attempt_id: str,
+    ) -> None:
+        self._workspace = workspace
+        self._input_revision = input_revision
+        self._estimate_revision = estimate_revision
+        self._attempt_id = attempt_id
+        self._job_root = _engine_job_root(workspace)
+        self._job_id = env.get(_ENGINE_JOB_ID_ENV).strip() or None
+        self._invocation_id = env.get(_ENGINE_INVOCATION_ENV).strip() or None
+        self._stage: ProgressStage = "preparation"
+
+    def boundary(
+        self,
+        stage: ProgressStage,
+        *,
+        status: ProgressStatus = "running",
+        completed: int | None = None,
+        total: int | None = None,
+    ) -> None:
+        self._stage = stage
+        self._publish(stage, status=status, completed=completed, total=total)
+
+    def terminate(self, status: ProgressStatus) -> None:
+        """실패·취소 — 지금 단계에서 종료 상태로만 닫는다(계수·문면 없이)."""
+        self._publish(self._stage, status=status)
+
+    def _publish(
+        self,
+        stage: ProgressStage,
+        *,
+        status: ProgressStatus,
+        completed: int | None = None,
+        total: int | None = None,
+    ) -> None:
+        message = AnalysisProgress.create(
+            input_revision=self._input_revision,
+            estimate_revision=self._estimate_revision,
+            attempt_id=self._attempt_id,
+            job_id=self._job_id,
+            invocation_id=self._invocation_id,
+            stage=stage,
+            status=status,
+            completed=completed,
+            total=total,
+            recorded_at=_utc_now(),
+        )
+        destinations = [self._workspace / _PROGRESS]
+        if self._job_root is not None:
+            destinations.append(self._job_root / _PROGRESS)
+        for path in destinations:
+            try:
+                _write_bytes(path, encode_message(message).encode())
+            except Exception:  # noqa: BLE001 - 진행 발행 실패는 실행 종료를 가리지 않는다
+                log.warn(f"진행 스냅샷을 남기지 못했다: {path.name}")
 
 
 def _cancellation_paths(workspace: Path) -> tuple[Path, ...]:
@@ -648,6 +744,14 @@ def _project_analyze(args: argparse.Namespace) -> int:
                 None,
             ),
         )
+        # 진행 발행기는 try 밖에서 만든다 — 안쪽 어느 지점에서 무너져도 종료 경계를
+        # 남길 수 있어야 한다(준비 경계는 running 기록 뒤에 곧바로 간다).
+        progress = _ProgressPublisher(
+            workspace,
+            journal.revision.revision,
+            estimate_message.estimate_revision,
+            attempt_id,
+        )
         try:
             _append_message(
                 workspace / _ATTEMPTS,
@@ -662,6 +766,7 @@ def _project_analyze(args: argparse.Namespace) -> int:
             )
             # 새 시도가 시작됐다 — 이전 시도의 집계가 지금 시도의 결과로 읽히면 안 된다.
             _discard_file(workspace / _ANALYSIS_RESULT)
+            progress.boundary("preparation")
             if args.vision_fixtures is not None and not bool(args.online):
                 candidates, result = _replay_analysis(
                     Path(args.vision_fixtures),
@@ -669,6 +774,7 @@ def _project_analyze(args: argparse.Namespace) -> int:
                     journal.revision,
                     estimate_message,
                     attempt_id,
+                    progress,
                 )
             else:
                 candidates, result = _produce_analysis_outcome(
@@ -679,8 +785,10 @@ def _project_analyze(args: argparse.Namespace) -> int:
                     attempt_id,
                     started_at,
                     pricing,
+                    progress,
                 )
         except KeyboardInterrupt:
+            progress.terminate("cancelled")
             _append_message(
                 workspace / _ATTEMPTS,
                 AnalysisAttempt(
@@ -695,6 +803,7 @@ def _project_analyze(args: argparse.Namespace) -> int:
             journal.transition(journal.revision.revision, "cancelled")
             raise
         except WorkflowCancelled:
+            progress.terminate("cancelled")
             _append_message(
                 workspace / _ATTEMPTS,
                 AnalysisAttempt(
@@ -716,6 +825,7 @@ def _project_analyze(args: argparse.Namespace) -> int:
             # 나간다 — 두 곳 모두 자격 증명 값을 지우고 지나간다(S2A-2).
             raw = " ".join(str(exc).split()) or exc.__class__.__name__
             reason = _redact_failure_text(args, raw)
+            progress.terminate("failed")
             _append_message(
                 workspace / _ATTEMPTS,
                 AnalysisAttempt(
@@ -736,6 +846,7 @@ def _project_analyze(args: argparse.Namespace) -> int:
         if result.status == "error":
             # 전체 실패 — 집계·판정·사용량은 이미 남았다. 저널은 authorized에 두므로
             # 같은 입력으로 재시도할 수 있다. 취소는 여기를 지나지 않는다 — 별개 결과다.
+            progress.terminate("failed")
             _append_message(
                 workspace / _ATTEMPTS,
                 AnalysisAttempt(
@@ -781,6 +892,10 @@ def _project_analyze(args: argparse.Namespace) -> int:
         # 창 0개 성공은 정상이다(무오디오·무발화) — 실패로 읽히지 않게 말로 못 박는다.
         log.out("분석 완료: 창 0개 · 발화·후보 없음(정상)")
     log.out(f"컷 후보 {len(candidates)}건 · 사람 검토 필요")
+    if attempt_id is not None:
+        # 마지막 경계 — 후보·시도 기록·저널이 모두 정착한 뒤에야 성공을 말한다
+        # (S2A-3). 외부 후보 경로에는 시도가 없으니 진행도 없다.
+        progress.boundary("publication", status="succeeded")
     return 0
 
 
@@ -1006,6 +1121,7 @@ def _require_safe_roughcut_output(workspace: Path, output: Path) -> None:
         "pricing-caption.jsonl",
         _DECISIONS,
         _ANALYSIS_RESULT,
+        _PROGRESS,
     )
     protected = {(workspace / name).resolve() for name in protected_names}
     source_path = workspace / _SOURCE
@@ -1040,6 +1156,7 @@ def _replay_analysis(
     revision: ProjectRevision,
     estimate: AnalysisEstimate,
     attempt_id: str,
+    progress: _ProgressPublisher,
 ) -> tuple[tuple[CutCandidate, ...], AnalysisResult]:
     """1.1 픽스처의 후보가 같은 창 판정에 정확히 묶였을 때만 재생한다."""
     if estimate.input_revision != revision.revision:
@@ -1074,6 +1191,9 @@ def _replay_analysis(
             raise ValueError(f"후보가 Luna 판정과 다르다: {candidate.candidate_id}")
     build_review_plan(revision, candidates, approved_candidate_ids=())
     ordered = tuple(decisions.values())
+    # 재생의 진행도 실제 창 수를 말한다 — 유료 호출이었다는 뜻은 담지 않는다(S2A-3).
+    progress.boundary("vision", completed=0, total=len(ordered))
+    progress.boundary("vision", completed=len(ordered), total=len(ordered))
     result = aggregate_analysis_outcome(
         input_revision=revision.revision,
         attempt_id=attempt_id,
@@ -1085,6 +1205,7 @@ def _replay_analysis(
     )
     _write_messages(workspace / _DECISIONS, ordered)
     _write_messages(workspace / _ANALYSIS_RESULT, (result,))
+    progress.boundary("publication")
     return candidates, result
 
 
@@ -1096,6 +1217,7 @@ def _produce_analysis_outcome(
     attempt_id: str,
     started_at: str,
     pricing: PricingSnapshot,
+    progress: _ProgressPublisher,
 ) -> tuple[tuple[CutCandidate, ...], AnalysisResult]:
     """기존 소스 전사/VAD를 재사용하고 안전 seed만 Luna에 제공한다.
 
@@ -1133,6 +1255,7 @@ def _produce_analysis_outcome(
     )
     _check_cancellation(workspace, revision.revision, attempt_id, revision.input_sha256)
     try:
+        progress.boundary("audio")
         prepared = runner.prepare_audio(
             workspace / _INPUT,
             workspace / "artifacts",
@@ -1142,7 +1265,7 @@ def _produce_analysis_outcome(
         )
     except Exception as exc:  # noqa: BLE001 - 준비 단계 실패도 정돈된 집계로 남는다
         raise _close_stage_failure(
-            workspace, revision, estimate, attempt_id, started_at, "preparation_error"
+            workspace, revision, estimate, attempt_id, started_at, "preparation_error", progress
         ) from exc
     if prepared.document.input_sha256 != revision.input_sha256:
         raise ValueError("분석 준비 문서가 승인된 입력 리비전과 다르다")
@@ -1151,7 +1274,7 @@ def _produce_analysis_outcome(
         analyzed = runner.analyze_audio(prepared, transcriber=transcriber)
     except Exception as exc:  # noqa: BLE001 - 분석 단계 실패도 정돈된 집계로 남는다
         raise _close_stage_failure(
-            workspace, revision, estimate, attempt_id, started_at, "analysis_stage_error"
+            workspace, revision, estimate, attempt_id, started_at, "analysis_stage_error", progress
         ) from exc
     stop_reason: str | None = None
     if transcriber.used > 0:
@@ -1184,6 +1307,8 @@ def _produce_analysis_outcome(
     )
     if len(windows) > estimate.max_windows:
         raise ValueError("실제 Luna 창 수가 승인된 상한을 넘는다")
+    # 창 계획이 섰다 — 이제부터 계수를 아는데, 전체 일감의 백분율이 아니다(S2A-3).
+    progress.boundary("vision", completed=0, total=len(windows))
     client = None
     if bool(args.online):
         # 비전 자격 증명은 게이트와 같은 문에서 온다(`_staged_vision_credentials`)
@@ -1239,6 +1364,7 @@ def _produce_analysis_outcome(
                     stop_reason = "image_budget_exceeded"
         decisions.append(decision)
         _append_message(workspace / _DECISIONS, decision)
+        progress.boundary("vision", completed=len(decisions), total=len(windows))
     # 발행 앞의 마지막 확인 — 마지막 소스·Luna 호출이 진행 중인 사이 남겨진 취소가
     # 성공 집계로 못 간다. 판정·사용량 기록은 그대로 두되 집계는 쓰지 않는다(S1A-R1).
     _check_cancellation(workspace, revision.revision, attempt_id, revision.input_sha256)
@@ -1253,6 +1379,7 @@ def _produce_analysis_outcome(
         upstream_reasons=upstream_reasons,
     )
     _write_messages(workspace / _ANALYSIS_RESULT, (result,))
+    progress.boundary("publication")
     return tuple(candidates), result
 
 
@@ -1267,8 +1394,10 @@ def _close_stage_failure(
     attempt_id: str,
     started_at: str,
     reason_code: str,
+    progress: _ProgressPublisher,
 ) -> _StageFailure:
     """단계 실패를 정돈된 집계·시도 기록으로 닫는다 — 원문 예외는 기록에 못 들어간다."""
+    progress.terminate("failed")
     result = aggregate_analysis_outcome(
         input_revision=revision.revision,
         attempt_id=attempt_id,

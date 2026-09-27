@@ -1,5 +1,127 @@
 import Foundation
 
+/// 개발 실행의 둘째 운송 구간(S2A-3) — 실행기가 도는 동안 외부 job의 진행
+/// 스냅샷을 App Group job으로 원자적으로 옮긴다.
+///
+/// 복사는 **이 호출의 증거에 묶인다**: 상한 안에서 한 번 읽은 바이트를 해석해
+/// invocation_id가 이 실행이 자식 argv에 심은 호출 신원과 같을 때, **그 바이트
+/// 그대로**를 발행한다. 검증과 발행이 같은 바이트를 보므로 그 사이에 소스가
+/// 바뀌어도 다른 호출의 스냅샷이 흘러들 길이 없다. 그 신원은 엔진이 실행 잠금을
+/// 얻은 뒤에만 기록에 실으므로, 중복(3)으로 지는 호출은 이긴 호출의 진행을 흉내
+/// 내지 못한다. 성공 산물(후보·러프컷)은 여전히 실행 뒤의 동기화 게이트로만
+/// 나간다 — 이 릴레이가 옮기는 것은 진행 한 장뿐이다.
+public struct EngineProgressRelay: Sendable {
+  public let intervalNanoseconds: UInt64
+  private let tick: @Sendable (UInt64) async throws -> Void
+  private let read: @Sendable (URL) -> Data?
+  private let decode: @Sendable (Data) -> AnalysisProgressMessage?
+  private let publish: @Sendable (Data, URL) throws -> Void
+
+  /// 선택 클로저는 몸통에서 풀린다 — 공개 초기화의 기본 인자가 내부 도우미를
+  /// 참조할 수 없기 때문이다(가림 없는 기본값만 공개 계약에 남는다).
+  public init(
+    intervalNanoseconds: UInt64 = 500_000_000,
+    tick: @escaping @Sendable (UInt64) async throws -> Void = {
+      try await Task.sleep(nanoseconds: $0)
+    },
+    read: (@Sendable (URL) -> Data?)? = nil,
+    decode: (@Sendable (Data) -> AnalysisProgressMessage?)? = nil,
+    publish: (@Sendable (Data, URL) throws -> Void)? = nil
+  ) {
+    self.intervalNanoseconds = intervalNanoseconds
+    self.tick = tick
+    self.read = read ?? { url in EngineProgressRelay.readBoundedBytes(at: url) }
+    self.decode = decode ?? { bytes in EngineProgressRelay.decodeSnapshot(bytes) }
+    self.publish = publish ?? { bytes, destination in
+      try EngineProgressRelay.atomicPublish(bytes, to: destination)
+    }
+  }
+
+  /// 실행기가 도는 동안 돌리는 과제 — 호출자가 끝에서 취소·합류한다. 정지
+  /// 조건(취소·활성 선택 드리프트)은 호출자가 이 실행의 재료로 넣는다.
+  func start(
+    externalJob: URL,
+    appGroupJob: URL,
+    invocationID: String,
+    isStopped: @escaping @Sendable () -> Bool
+  ) -> Task<Void, Never> {
+    let interval = intervalNanoseconds
+    let sourceURL = externalJob.appendingPathComponent(RoundTripJob.progressFileName)
+    let destinationURL = appGroupJob.appendingPathComponent(RoundTripJob.progressFileName)
+    return Task.detached { [tick, read, decode, publish] in
+      while true {
+        do { try await tick(interval) } catch { return }
+        if Task.isCancelled { return }
+        // 검증과 발행이 같은 바이트를 본다 — 소스가 그 사이에 바뀌어도 이미
+        // 검증한 스냅샷만 흘러간다(S2A-3).
+        guard let bytes = read(sourceURL), let snapshot = decode(bytes),
+          snapshot.invocationID == invocationID
+        else { continue }
+        if Task.isCancelled || isStopped() { return }  // 발행 직전 게이트
+        try? publish(bytes, destinationURL)
+      }
+    }
+  }
+
+  /// 상한 안의 한 덩어리 읽기 — 과대·줄바꿈 없음은 nil(흘러들지 않는다).
+  static func readBoundedBytes(at url: URL) -> Data? {
+    guard let handle = FileHandle(forReadingAtPath: url.path) else { return nil }
+    defer { try? handle.close() }
+    guard
+      let head = try? handle.read(upToCount: WorkflowProgressStore.maximumByteCount + 1),
+      head.count <= WorkflowProgressStore.maximumByteCount,
+      head.last == UInt8(ascii: "\n")
+    else { return nil }
+    return head
+  }
+
+  static func decodeSnapshot(_ bytes: Data) -> AnalysisProgressMessage? {
+    guard var line = String(data: bytes, encoding: .utf8), line.hasSuffix("\n") else {
+      return nil
+    }
+    line.removeLast()
+    guard
+      let message = try? ProtocolCodec.decodeAnalysis(
+        AnalysisProgressMessage.self, type: "AnalysisProgress", from: line)
+    else { return nil }
+    return AnalysisProgressValidator.validate(message) ? message : nil
+  }
+
+  /// 검증된 바이트의 원자 발행 — 읽는 쪽은 반쪽 바이트를 못 본다(임시 쓰기 →
+  /// 자리 바꿈치기).
+  static func atomicPublish(_ bytes: Data, to destination: URL) throws {
+    let fileManager = FileManager.default
+    let temporary = destination.deletingLastPathComponent()
+      .appendingPathComponent(".\(destination.lastPathComponent).relay.tmp")
+    try bytes.write(to: temporary, options: [.atomic])
+    if fileManager.fileExists(atPath: destination.path) {
+      _ = try fileManager.replaceItemAt(destination, withItemAt: temporary)
+    } else {
+      try fileManager.moveItem(at: temporary, to: destination)
+    }
+  }
+}
+
+/// 활성 선택의 읽기 전용 탐침(S2A-3) — 릴레이의 정지 조건이 @Sendable 경계
+/// 너머에서 재료를 쓰기 위한 좁은 그릇. UserDefaults는 같은 인스턴스 안의
+/// 스레드 안전을 애플이 문서로 보증한다 — 그 보증 위에만 얹힌 @unchecked다.
+/// 레지스트리를 여는 것이 아니라 이 읽기 하나만 실어 나르고, 비공개 키는
+/// `requireCurrent` 안에 그대로 봉인돼 있다.
+private struct SelectionDriftProbe: @unchecked Sendable {
+  private let registry: ActiveSelectionRegistry
+  private let revision: String
+
+  init(registry: ActiveSelectionRegistry, revision: String) {
+    self.registry = registry
+    self.revision = revision
+  }
+
+  /// 활성 선택이 아직 이 리비전인가 — 던지는 `requireCurrent`의 값 판정 짝.
+  func isCurrent() -> Bool {
+    (try? registry.requireCurrent(revision)) != nil
+  }
+}
+
 /// 엔진 실행 계획 — Release는 번들만, Debug만 개발 폴백을 허용한다.
 public enum EngineBuildConfiguration: String, Sendable, Equatable {
   case debug
@@ -271,6 +393,8 @@ public struct EngineSessionRunner {
       try DevelopmentJobStager.syncResults(from: from, to: to, diagnosticsOnly: diagnosticsOnly)
     },
     importRoughcut: (@Sendable (URL) async throws -> Void)? = nil,
+    invocationID: String? = nil,
+    progressRelay: EngineProgressRelay = EngineProgressRelay(),
     fileManager: FileManager = .default
   ) async throws -> EngineSessionOutcome {
     guard context.plan.isExecutable else {
@@ -288,10 +412,39 @@ public struct EngineSessionRunner {
       try recordDriftCancellation(context, fileManager: fileManager)
       return .staleSelection
     }
-    let status = try await executor.run(context.plan)
+    // 진행 릴레이(S2A-3): 개발(외부) 실행 동안에만 돈다. 이 실행의 호출 신원을
+    // 자식 argv에 심고, 그 신원이 실린 스냅샷만 옮긴다 — 실행기가 끝나거나
+    // 취소·드리프트로 흐트러지면 과제를 끊고 합류한 뒤 원래의 종료를 지킨다.
+    let relayID = invocationID ?? UUID().uuidString
+    let ownedPlan = Self.planAppendingInvocationID(context.plan, invocationID: relayID)
+    var relayTask: Task<Void, Never>?
+    if let externalJob = context.externalJob {
+      let appGroupJob = context.appGroupJob
+      let driftProbe = SelectionDriftProbe(
+        registry: context.registry, revision: context.selectionRevision)
+      relayTask = progressRelay.start(
+        externalJob: externalJob,
+        appGroupJob: appGroupJob,
+        invocationID: relayID,
+        isStopped: {
+          // 취소든 활성 선택 드리프트든 — 이 실행이 무효인 순간 관측 발행도 멈춘다.
+          CancellationStore.isCancelled(jobURL: appGroupJob) || !driftProbe.isCurrent()
+        })
+    }
+    let status: Int32
+    do {
+      status = try await executor.run(ownedPlan)
+    } catch {
+      relayTask?.cancel()
+      if let relayTask { _ = await relayTask.value }
+      throw error
+    }
+    relayTask?.cancel()
+    if let relayTask { _ = await relayTask.value }
     // 중복 소유권 종료(3)는 이 실행의 시도가 아니다(S2A-1). 실행기가 돌려준 순간
     // 어떤 읽기·쓰기보다 먼저 판정한다 — 정상 소유자가 그 사이에 취소됐어도 이
-    // 요청의 결과는 alreadyRunning이고, 드리프트 기록·동기화는 없다.
+    // 요청의 결과는 alreadyRunning이고, 드리프트 기록·동기화는 없다. 릴레이는
+    // 이미 끊혔다 — 지는 호출이 이긴 호출의 진행·결과를 흘려보내지 않는다.
     if status == EngineSessionOutcome.alreadyRunningExitCode {
       return .alreadyRunning
     }
@@ -325,6 +478,32 @@ public struct EngineSessionRunner {
       context.appGroupJob.appendingPathComponent("roughcut.fcpxml")
     )
     return .completed
+  }
+
+  /// 자식 argv에 이 실행의 호출 신원을 심는다 — 계획의 나머지는 그대로다.
+  /// 신원은 잠금 소유자만 기록에 실으므로, 이 값을 받은 자식이 실제로 소유권을
+  /// 얻었을 때만 릴레이가 그 진행을 옮긴다(S2A-3).
+  static func planAppendingInvocationID(
+    _ plan: EngineLaunchPlan, invocationID: String
+  ) -> EngineLaunchPlan {
+    let flag = DevelopmentEngineInvocation.invocationIDArgument
+    switch plan {
+    case .bundled(let invocation):
+      return .bundled(
+        BundledEngineInvocation(
+          executableURL: invocation.executableURL,
+          arguments: invocation.arguments + [flag, invocationID],
+          currentDirectory: invocation.currentDirectory,
+          environment: invocation.environment))
+    case .development(let invocation):
+      return .development(
+        DevelopmentEngineInvocation(
+          executableURL: invocation.executableURL,
+          arguments: invocation.arguments + [flag, invocationID],
+          credentialEnvelope: invocation.credentialEnvelope))
+    case .unavailable(let reason):
+      return .unavailable(reason)
+    }
   }
 
   /// 드리프트 취소 기록 — 리비전은 실행 경로에서 묶는다(S1A-R1).

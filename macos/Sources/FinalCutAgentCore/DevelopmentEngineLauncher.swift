@@ -58,6 +58,8 @@ public struct DevelopmentEngineInvocation: Equatable, Sendable {
   public static let scriptName = "vlogsrt-engine"
   /// stdin 봉투를 켜는 argv 마커 — 비밀이 아니다(값은 절대 argv에 오지 않는다).
   public static let carrierMarkerArgument = "--stdin-carrier"
+  /// 진행 호출 신원 깃발(S2A-3) — 값 짝(토큰)과 함께 자식 argv로 간다. 비밀 아님.
+  public static let invocationIDArgument = "--invocation-id"
   public let executableURL: URL
   public let arguments: [String]
   /// nil이면 낡은 계약(argv만, stdin을 열지 않는다) — 앱 경로는 항상 봉투를 낀다.
