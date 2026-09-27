@@ -106,11 +106,90 @@ public enum CancellationCodec {
     guard let data = try? encoder.encode(payload) else {
       preconditionFailure("CancellationDigestPayload은 항상 인코딩된다")
     }
-    return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    return hex(SHA256.hash(data: data))
+  }
+
+  /// 바이트를 소문자 16진수로 — 해시 표현이 한 곳에서만 정의된다.
+  public static func hex<D: Sequence>(_ digest: D) -> String where D.Element == UInt8 {
+    digest.map { String(format: "%02x", $0) }.joined()
   }
 
   /// 허용된 취소 사유 — 그 밖의 값은 엔진이 거부한다.
   public static let allowedReasons: Set<String> = ["user", "active_project_changed"]
+}
+
+/// 실행 중 엔진 작업에 남길 취소 기록 — 리비전 근원이 실행 경로를 따른다(S1A-R1).
+///
+/// 개발 실행(NSUserUnixTask)은 외부 job 폴더에서 돌고 번들 실행은 App Group에서
+/// 돈다. 리비전은 그 실행 경로의 workspace에서만 읽는다 — 반대쪽에 낡은 기록이
+/// 남아 있어도 실행 중인 입력이라는 보장이 없다. receive 전에는 리비전 기록이
+/// 없으므로 스테이징된 `input.fcpxml`의 SHA-256(엔진 `input_sha256`과 같은 값)로
+/// job에 묶는다. 그마저 없으면 all-zero — 엔진은 다른 리비전으로 무시하지만 앱
+/// 게이트(재실행·sync·import)는 파일 존재로 닫힌다. Python 쪽 짝은
+/// `vlogsrt.project.commands._check_cancellation`의 input_sha256 매칭이다.
+public struct RunningJobCancellation: Sendable {
+  /// 엔진 진입점이 받는 스테이징 입력 이름 — `DevelopmentJobStager.inputs`와 같다.
+  static let inputFileName = "input.fcpxml"
+
+  public let appGroupJob: URL
+  public let externalJob: URL?
+  /// 엔진이 실제로 돌고 있는 job 폴더 — 계획이 정한다(번들=App Group, 개발=외부).
+  public let runningJob: URL
+
+  public init(appGroupJob: URL, externalJob: URL?, runningJob: URL) {
+    self.appGroupJob = appGroupJob
+    self.externalJob = externalJob
+    self.runningJob = runningJob
+  }
+
+  /// 취소 기록의 input_revision — 실행 workspace 리비전 → 스테이징 input 해시 → all-zero.
+  public func inputRevision(fileManager: FileManager = .default) -> String {
+    if let revision = EngineSessionRunner.stagedInputRevision(job: runningJob, fileManager: fileManager) {
+      return revision
+    }
+    for base in [runningJob, appGroupJob] {
+      let input = base.appendingPathComponent(Self.inputFileName)
+      if let data = try? Data(contentsOf: input) {
+        return CancellationCodec.hex(SHA256.hash(data: data))
+      }
+    }
+    return String(repeating: "0", count: 64)
+  }
+
+  /// 같은 payload를 양쪽 job 루트에 남긴다 — 시도는 와일드카드(앱은 시도 ID를 모른다).
+  ///
+  /// 실행 루트는 묶음 대상과 어긋나도 반드시 받는다 — 미러 목록이 바뀌었어도
+  /// 엔진이 도는 폴더의 기록이 빠지면 실행 중 취소가 유실된다.
+  public func record(
+    reason: String, requestedAt: String, fileManager: FileManager = .default
+  ) throws {
+    let revision = inputRevision(fileManager: fileManager)
+    let message = CancellationRequestMessage(
+      inputRevision: revision,
+      attemptID: "*",
+      requestedAt: requestedAt,
+      reason: reason,
+      cancellationRevision: CancellationCodec.revision(
+        inputRevision: revision,
+        attemptID: "*",
+        requestedAt: requestedAt,
+        reason: reason
+      )
+    )
+    try CancellationStore(appGroupJob: appGroupJob, externalJob: externalJob)
+      .record(message, fileManager: fileManager)
+    let mirrored = [appGroupJob, externalJob].compactMap { $0 }
+    if !mirrored.contains(where: { isSameDirectory($0, runningJob, fileManager: fileManager) }) {
+      try CancellationStore(appGroupJob: runningJob, externalJob: nil)
+        .record(message, fileManager: fileManager)
+    }
+  }
+
+  private func isSameDirectory(
+    _ left: URL, _ right: URL, fileManager: FileManager
+  ) -> Bool {
+    left.standardizedFileURL.path == right.standardizedFileURL.path
+  }
 }
 
 private struct CancellationDigestPayload: Codable {

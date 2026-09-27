@@ -12,7 +12,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   private var shareDestinationLabel: NSTextField?
   private var currentJobLabel: NSTextField?
   private var roundTripCoordinator: RoundTripCoordinator?
-  private var currentEngineJob: (jobID: String, jobURL: URL)?
+  private var currentEngineJob: (
+    jobID: String, jobURL: URL, runningJob: URL, externalJob: URL?
+  )?
 
   func applicationDidFinishLaunching(_ notification: Notification) {
     preserveLegacyJobsIfNeeded()
@@ -181,7 +183,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             scope.stopAccessingSecurityScopedResource()
           }
         }
-        currentEngineJob = (jobID, job.directoryURL)
         currentJobLabel?.stringValue = "현재 작업: \(jobID) (\(operation.rawValue))"
         defer {
           currentEngineJob = nil
@@ -224,16 +225,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
           apiKey: apiKey
         )
         let runner = EngineSessionRunner(executor: ProcessEngineExecutor())
+        let context = EngineSessionContext(
+          operation: operation,
+          jobID: jobID,
+          appGroupJob: job.directoryURL,
+          externalJob: externalJob,
+          plan: plan,
+          selectionRevision: selectionRevision,
+          registry: registry
+        )
+        // 실행 마커는 계획이 정해진 뒤 — 취소 기록이 실행 경로와 미러 대상을
+        // 실행 때의 값으로만 알아야 한다(S1A-R1). 취소 시점에 북마크를 다시 풀면
+        // 바뀐·없는 북마크가 번들 취소 기록조차 막는다.
+        currentEngineJob = (
+          jobID, job.directoryURL, context.runningJobURL, context.externalJob
+        )
         let outcome = try await runner.run(
-          EngineSessionContext(
-            operation: operation,
-            jobID: jobID,
-            appGroupJob: job.directoryURL,
-            externalJob: externalJob,
-            plan: plan,
-            selectionRevision: selectionRevision,
-            registry: registry
-          ),
+          context,
           importRoughcut: { url in
             try await FinalCutImporter().sendOpenDocument(url)
           }
@@ -357,31 +365,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       return
     }
     do {
-      let external = try SecurityScopedBookmarkStore()
-        .resolve(key: Self.developmentWorkspaceBookmark)?
-        .appendingPathComponent("Jobs", isDirectory: true)
-        .appendingPathComponent(current.jobID, isDirectory: true)
-      // 개발 실행은 외부 job 폴더에서 돈다 — 리비전도 거기서 읽어야 실행 중
-      // 취소가 엔진에 닿는다(all-zero는 엔진이 다른 리비전으로 무시한다).
-      let revision = EngineSessionRunner.runningInputRevision(
-        appGroupJob: current.jobURL, externalJob: external
-      ) ?? String(repeating: "0", count: 64)
-      let requestedAt = ISO8601DateFormatter().string(from: Date())
-      let message = CancellationRequestMessage(
-        inputRevision: revision,
-        attemptID: "*",
-        requestedAt: requestedAt,
+      // 묶음 대상은 실행 때의 문맥 그대로 — 북마크를 다시 풀지 않는다(S1A-R1).
+      // 바뀐·없는 북마크가 번들 취소 기록을 막거나 엉뚱한 미러로 보내면 안 된다.
+      try RunningJobCancellation(
+        appGroupJob: current.jobURL,
+        externalJob: current.externalJob,
+        runningJob: current.runningJob
+      ).record(
         reason: "user",
-        cancellationRevision: CancellationCodec.revision(
-          inputRevision: revision,
-          attemptID: "*",
-          requestedAt: requestedAt,
-          reason: "user"
-        )
+        requestedAt: ISO8601DateFormatter().string(from: Date())
       )
-      try CancellationStore(
-        appGroupJob: current.jobURL, externalJob: external
-      ).record(message)
       statusLabel?.stringValue = "취소를 기록했습니다: \(current.jobID)"
     } catch {
       NSAlert(error: error).runModal()

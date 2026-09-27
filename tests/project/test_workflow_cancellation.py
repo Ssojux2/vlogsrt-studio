@@ -11,6 +11,7 @@ from __future__ import annotations
 import array
 import hashlib
 import json
+import shutil
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from fractions import Fraction
@@ -100,6 +101,32 @@ def _two_clip_project(tmp_path: Path) -> Path:
         "  </library>\n</fcpxml>\n"
     )
     path = tmp_path / "cancel-two.fcpxml"
+    path.write_text(body, encoding="utf-8")
+    return path
+
+
+def _no_audio_project(tmp_path: Path) -> Path:
+    """오디오가 없는 프로젝트 — 전사도 Luna 창도 없이 review_required까지 간다."""
+    media = tmp_path / "clip.mov"
+    media.write_bytes(b"synthetic-cancellation-media")
+    body = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE fcpxml>\n'
+        '<fcpxml version="1.14">\n  <resources>\n    '
+        '<format id="r1" name="FFVideoFormat1080p30" frameDuration="1/30s"'
+        ' width="1920" height="1080"/>\n    '
+        '<asset id="r2" name="clip.mov" start="0s" duration="600s" hasAudio="0"'
+        ' format="r1">\n'
+        f'      <media-rep kind="original-media" src="{_file_uri(media)}"/>\n    </asset>\n'
+        '  </resources>\n  <library>\n    <event name="이벤트">\n'
+        '      <project name="취소 프로젝트" uid="PROJECT-CANCEL">\n'
+        '        <sequence format="r1" tcStart="0s" duration="600s">\n'
+        "          <spine>\n"
+        '            <asset-clip ref="r2" name="클립0" offset="0s" start="0s"'
+        ' duration="12s"/>\n'
+        "          </spine>\n        </sequence>\n      </project>\n    </event>\n"
+        "  </library>\n</fcpxml>\n"
+    )
+    path = tmp_path / "cancel-noaudio.fcpxml"
     path.write_text(body, encoding="utf-8")
     return path
 
@@ -645,6 +672,14 @@ def test_root_cancellation_for_foreign_revisions_does_not_stop_this_run(
                 requested_at="2026-09-27T05:00:31Z",
                 reason="active_project_changed",
             )
+        )
+        + encode_message(
+            CancellationRequest.create(
+                input_revision="0" * 64,
+                attempt_id="*",
+                requested_at="2026-09-27T05:00:32Z",
+                reason="user",
+            )
         ),
         encoding="utf-8",
     )
@@ -749,3 +784,132 @@ def test_root_cancellation_reaches_the_live_transcriber_chunk_gate(
     ]
     assert [row.status for row in attempts] == ["pending", "running", "cancelled"]
     assert WorkflowJournal.open(workspace / "workflow.jsonl").state == "cancelled"
+
+
+def test_root_cancellation_during_the_final_luna_call_closes_cancelled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """마지막 Luna 호출이 진행 중인 사이 남겨진 취소가 성공 발행으로 못 간다(S1A-R1).
+
+    마지막 창의 호출 직전 게이트는 이미 지났고 그 뒤에는 아무 게이트도 없다 —
+    발행(candidates.jsonl·review_required) 앞의 마지막 확인이 이를 닫는다.
+    이미 남은 증거(판정·사용량)는 지우지 않는다.
+    """
+    job_root = _engine_job(tmp_path, monkeypatch, _project(tmp_path))
+    workspace = job_root / "workspace"
+
+    _patch_boundaries(monkeypatch)
+    _stub_transcriber(monkeypatch)
+    luna_calls: list[dict] = []
+    _patch_paid_boundaries(monkeypatch, luna_calls)
+    argv, workspace = _engine_analyze(tmp_path, job_root)
+    inner_luna = transcribe.request_luna_vision
+
+    def luna_then_cancel(*args: object, **kwargs: object) -> object:
+        response = inner_luna(*args, **kwargs)
+        if len(luna_calls) == 1:  # 이 프로젝트의 창은 하나 — 이 호출이 마지막이다
+            _record_root_cancellation(job_root, workspace)
+        return response
+
+    monkeypatch.setattr(transcribe, "request_luna_vision", luna_then_cancel)
+
+    assert cli.main(argv) == 2
+    assert len(luna_calls) == 1
+    attempts = [
+        row
+        for row in project_commands._read_messages(workspace / "analysis-attempts.jsonl")
+        if isinstance(row, AnalysisAttempt)
+    ]
+    assert [row.status for row in attempts] == ["pending", "running", "cancelled"]
+    assert WorkflowJournal.open(workspace / "workflow.jsonl").state == "cancelled"
+    # 발행은 막고 증거는 남긴다 — 판정 기록은 그대로, 후보 발행은 없다.
+    assert not (workspace / "candidates.jsonl").exists()
+    assert (workspace / "vision-decisions.jsonl").is_file()
+
+
+def test_root_cancellation_after_sources_with_no_windows_closes_cancelled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """창이 하나도 없는 실행에서 마지막 소스 뒤의 취소도 성공 발행을 막는다(S1A-R1).
+
+    오디오가 없는 프로젝트는 전사도 Luna 호출도 없다 — 창 loop은 한 번도 돌지
+    않으므로 발행 앞의 마지막 확인이 유일한 사후 게이트다.
+    """
+    job_root = _engine_job(tmp_path, monkeypatch, _no_audio_project(tmp_path))
+    workspace = job_root / "workspace"
+
+    _patch_boundaries(monkeypatch)
+    _stub_transcriber(monkeypatch)
+    luna_calls: list[dict] = []
+    _patch_paid_boundaries(monkeypatch, luna_calls)
+    real_analyze = runner.analyze_audio
+
+    def analyze_then_cancel(*args: object, **kwargs: object) -> object:
+        analyzed = real_analyze(*args, **kwargs)
+        _record_root_cancellation(job_root, job_root / "workspace")
+        return analyzed
+
+    monkeypatch.setattr(runner, "analyze_audio", analyze_then_cancel)
+
+    argv, workspace = _engine_analyze(tmp_path, job_root)
+    assert cli.main(argv) == 2
+    assert luna_calls == []
+    attempts = [
+        row
+        for row in project_commands._read_messages(workspace / "analysis-attempts.jsonl")
+        if isinstance(row, AnalysisAttempt)
+    ]
+    assert [row.status for row in attempts] == ["pending", "running", "cancelled"]
+    assert WorkflowJournal.open(workspace / "workflow.jsonl").state == "cancelled"
+    assert not (workspace / "candidates.jsonl").exists()
+
+
+def test_input_bound_pre_receive_cancellation_stops_analyze_before_model_calls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """receive 전의 취소는 스테이징된 input.fcpxml 해시로 job에 묶여 분석을 막는다(S1A-R1).
+
+    앱은 리비전을 아직 모른다 — 엔진의 input_sha256과 같은 값으로 묶으면 all-zero
+    와일드카드 없이도 이 job의 첫 모델 호출 앞에서 정확히 걸린다.
+    """
+    input_path = _project(tmp_path)
+    job_root = tmp_path / "engine-job"
+    job_root.mkdir()
+    staged_input = job_root / "input.fcpxml"
+    shutil.copyfile(input_path, staged_input)
+    input_sha256 = hashlib.sha256(staged_input.read_bytes()).hexdigest()
+    project_commands._append_message(
+        job_root / "cancellation.jsonl",
+        CancellationRequest.create(
+            input_revision=input_sha256,
+            attempt_id="*",
+            requested_at="2026-09-27T06:00:00Z",
+            reason="user",
+        ),
+    )
+
+    workspace = job_root / "workspace"
+    project_config = _write_config(tmp_path)
+    argv_tail = ["--project-config", str(project_config)]
+    assert cli.main(["project", "receive", str(staged_input), "--workspace", str(workspace)]) == 0
+    assert cli.main(["project", "inspect", str(workspace), *argv_tail]) == 0
+    monkeypatch.setenv(_JOB_DIR_ENV, str(job_root))
+
+    _patch_boundaries(monkeypatch)
+    scripted = _stub_transcriber(monkeypatch)
+    luna_calls: list[dict] = []
+    _patch_paid_boundaries(monkeypatch, luna_calls)
+
+    argv, workspace = _engine_analyze(tmp_path, job_root)
+    assert cli.main(argv) == 2
+    # 첫 게이트에서 막는다 — 모델 호출은 하나도 나가지 않는다.
+    assert scripted.whisper_calls == []
+    assert luna_calls == []
+    attempts = [
+        row
+        for row in project_commands._read_messages(workspace / "analysis-attempts.jsonl")
+        if isinstance(row, AnalysisAttempt)
+    ]
+    assert [row.status for row in attempts] == ["pending", "running", "cancelled"]
+    assert WorkflowJournal.open(workspace / "workflow.jsonl").state == "cancelled"
+    assert not (workspace / "candidates.jsonl").exists()

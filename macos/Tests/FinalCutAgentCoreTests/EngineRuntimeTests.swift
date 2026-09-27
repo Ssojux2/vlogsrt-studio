@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import Testing
 
@@ -305,21 +306,145 @@ func _testRegistry(selection: String = "a".padding(toLength: 64, withPad: "a", s
     EngineSessionRunner.stagedInputRevision(job: external, fileManager: .default) == nil)
 }
 
-@Test func runningInputResolutionCoversDevelopmentAndPreReceiveJobs() throws {
+@Test func developmentDriftCancellationBindsToTheRunningExternalRevision() async throws {
+  // 외부 job workspace에만 리비전이 있고 App Group에는 없다 — 개발 실행 중 드리프트
+  // 취소는 실행 경로(외부)의 리비전을 실어야 엔진이 이 실행을 멈춘다(S1A-R1).
   let root = FileManager.default.temporaryDirectory
     .appendingPathComponent(UUID().uuidString, isDirectory: true)
-  let appGroup = root.appendingPathComponent("app-group-job", isDirectory: true)
-  let external = root.appendingPathComponent("external-job", isDirectory: true)
+  let job = root.appendingPathComponent("job", isDirectory: true)
+  let external = root.appendingPathComponent("Jobs", isDirectory: true)
+    .appendingPathComponent("job-42", isDirectory: true)
+  try FileManager.default.createDirectory(at: job, withIntermediateDirectories: true)
+  try FileManager.default.createDirectory(at: external, withIntermediateDirectories: true)
+  defer { try? FileManager.default.removeItem(at: root) }
+  let (registry, revision) = try _testRegistry()
+
+  let externalWorkspace = external.appendingPathComponent("workspace", isDirectory: true)
+  try FileManager.default.createDirectory(
+    at: externalWorkspace, withIntermediateDirectories: true)
+  let inputRevision = String(repeating: "e", count: 64)
+  try Data(
+    ("{\"payload\":{\"revision\":\"\(inputRevision)\"},\"protocol_version\":\"1.0\","
+      + "\"type\":\"ProjectRevision\"}\n").utf8
+  ).write(to: externalWorkspace.appendingPathComponent("revision.jsonl"))
+
+  let scripts = root.appendingPathComponent("Scripts", isDirectory: true)
+  try FileManager.default.createDirectory(at: scripts, withIntermediateDirectories: true)
+  let plan = EngineLaunchPlan.development(
+    try DevelopmentEngineInvocation.create(
+      operation: .analyze,
+      jobID: "job-42",
+      externalJob: external,
+      applicationScriptsDirectory: scripts
+    )
+  )
+
+  let driftMidRun = RecordingExecutor(onRun: { registry.invalidate() })
+  let outcome = try await EngineSessionRunner(executor: driftMidRun).run(
+    _runtimeContext(
+      plan: plan, registry: registry, revision: revision,
+      appGroupJob: job, externalJob: external
+    )
+  )
+  #expect(outcome == .staleSelection)
+  for base in [job, external] {
+    let line = try String(
+      contentsOf: base.appendingPathComponent(CancellationStore.fileName), encoding: .utf8)
+    #expect(line.contains(inputRevision))
+  }
+}
+
+@Test func runningJobCancellationPrefersTheRunningEngineWorkspace() throws {
+  // 양쪽에 서로 다른 리비전이 있다 — 기록은 실행 경로의 것만 실린다(S1A-R1).
+  // App Group을 먼저 읽으면 개발 실행 중 취소가 낡은 리비전으로 묶인다.
+  let root = FileManager.default.temporaryDirectory
+    .appendingPathComponent(UUID().uuidString, isDirectory: true)
+  let appGroup = root.appendingPathComponent("job", isDirectory: true)
+  let external = root.appendingPathComponent("Jobs", isDirectory: true)
+    .appendingPathComponent("job-42", isDirectory: true)
   try FileManager.default.createDirectory(at: appGroup, withIntermediateDirectories: true)
   try FileManager.default.createDirectory(at: external, withIntermediateDirectories: true)
   defer { try? FileManager.default.removeItem(at: root) }
+  let appGroupRevision = String(repeating: "a", count: 64)
+  let externalRevision = String(repeating: "e", count: 64)
+  for (base, revision) in [(appGroup, appGroupRevision), (external, externalRevision)] {
+    let workspace = base.appendingPathComponent("workspace", isDirectory: true)
+    try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true)
+    try Data(
+      ("{\"payload\":{\"revision\":\"\(revision)\"},\"protocol_version\":\"1.0\","
+        + "\"type\":\"ProjectRevision\"}\n").utf8
+    ).write(to: workspace.appendingPathComponent("revision.jsonl"))
+  }
 
-  // receive 전 — 어느 쪽 workspace에도 리비전이 없다(all-zero 취소와 구분된다).
-  #expect(
-    EngineSessionRunner.runningInputRevision(appGroupJob: appGroup, externalJob: external)
-      == nil)
+  let development = RunningJobCancellation(
+    appGroupJob: appGroup, externalJob: external, runningJob: external)
+  #expect(development.inputRevision() == externalRevision)
+  try development.record(reason: "user", requestedAt: "2026-09-27T06:00:00Z")
+  for base in [appGroup, external] {
+    let line = try String(
+      contentsOf: base.appendingPathComponent(CancellationStore.fileName), encoding: .utf8)
+    #expect(line.contains(externalRevision))
+    #expect(!line.contains(appGroupRevision))
+  }
 
-  // 개발 실행은 외부 job 폴더에서 돈다 — 리비전이 거기에만 생겨도 읽는다.
+  let bundled = RunningJobCancellation(
+    appGroupJob: appGroup, externalJob: external, runningJob: appGroup)
+  #expect(bundled.inputRevision() == appGroupRevision)
+  try bundled.record(reason: "user", requestedAt: "2026-09-27T06:00:01Z")
+  let line = try String(
+    contentsOf: appGroup.appendingPathComponent(CancellationStore.fileName), encoding: .utf8)
+  #expect(line.contains(appGroupRevision))
+}
+
+@Test func runningJobCancellationBindsPreReceiveToTheStagedInput() throws {
+  // receive 전 — 리비전 기록이 없다. 스테이징된 input.fcpxml의 SHA-256(엔진의
+  // input_sha256)로 job에 묶는다. all-zero 와일드카드가 아니다(S1A-R1).
+  let root = FileManager.default.temporaryDirectory
+    .appendingPathComponent(UUID().uuidString, isDirectory: true)
+  let appGroup = root.appendingPathComponent("job", isDirectory: true)
+  let external = root.appendingPathComponent("Jobs", isDirectory: true)
+    .appendingPathComponent("job-42", isDirectory: true)
+  try FileManager.default.createDirectory(at: appGroup, withIntermediateDirectories: true)
+  try FileManager.default.createDirectory(at: external, withIntermediateDirectories: true)
+  defer { try? FileManager.default.removeItem(at: root) }
+  let stagedInput = Data("<fcpxml version=\"1.14\"/>\n".utf8)
+  try stagedInput.write(to: appGroup.appendingPathComponent(RunningJobCancellation.inputFileName))
+  try stagedInput.write(to: external.appendingPathComponent(RunningJobCancellation.inputFileName))
+  let expected = CancellationCodec.hex(SHA256.hash(data: stagedInput))
+
+  let preReceive = RunningJobCancellation(
+    appGroupJob: appGroup, externalJob: external, runningJob: external)
+  #expect(preReceive.inputRevision() == expected)
+  try preReceive.record(reason: "user", requestedAt: "2026-09-27T06:02:00Z")
+  for base in [appGroup, external] {
+    let line = try String(
+      contentsOf: base.appendingPathComponent(CancellationStore.fileName), encoding: .utf8)
+    #expect(line.contains(expected))
+    #expect(!line.contains(String(repeating: "0", count: 64)))
+  }
+
+  // 스테이징 입력마저 없으면 all-zero — 엔진은 무시하지만 앱 게이트는 닫힌다.
+  let bare = root.appendingPathComponent("bare", isDirectory: true)
+  try FileManager.default.createDirectory(at: bare, withIntermediateDirectories: true)
+  let empty = RunningJobCancellation(appGroupJob: bare, externalJob: nil, runningJob: bare)
+  #expect(empty.inputRevision() == String(repeating: "0", count: 64))
+}
+
+@Test func runningJobCancellationAlwaysRecordsTheRunningRootDespiteMirrorDrift() throws {
+  // 미러가 어긋나거나 없어도 실행 루트는 반드시 받는다(S1A-R1) — 실행 폴더의
+  // 기록이 빠지면 실행 중 취소가 유실된다.
+  let root = FileManager.default.temporaryDirectory
+    .appendingPathComponent(UUID().uuidString, isDirectory: true)
+  let appGroup = root.appendingPathComponent("job", isDirectory: true)
+  let external = root.appendingPathComponent("Jobs", isDirectory: true)
+    .appendingPathComponent("job-42", isDirectory: true)
+  let unrelatedMirror = root.appendingPathComponent("stale-mirror", isDirectory: true)
+  try FileManager.default.createDirectory(at: appGroup, withIntermediateDirectories: true)
+  try FileManager.default.createDirectory(at: external, withIntermediateDirectories: true)
+  try FileManager.default.createDirectory(at: unrelatedMirror, withIntermediateDirectories: true)
+  defer { try? FileManager.default.removeItem(at: root) }
+
+  // 개발 실행 — 실행 경로(외부)에만 리비전이 있고 미러는 이 실행과 무관한 폴더다.
   let externalWorkspace = external.appendingPathComponent("workspace", isDirectory: true)
   try FileManager.default.createDirectory(
     at: externalWorkspace, withIntermediateDirectories: true)
@@ -328,25 +453,39 @@ func _testRegistry(selection: String = "a".padding(toLength: 64, withPad: "a", s
     ("{\"payload\":{\"revision\":\"\(externalRevision)\"},\"protocol_version\":\"1.0\","
       + "\"type\":\"ProjectRevision\"}\n").utf8
   ).write(to: externalWorkspace.appendingPathComponent("revision.jsonl"))
-  #expect(
-    EngineSessionRunner.runningInputRevision(appGroupJob: appGroup, externalJob: external)
-      == externalRevision)
-  // 외부 job을 모르는 호출자는 nil — 짐작으로 외부 리비전을 쓰지 않는다.
-  #expect(
-    EngineSessionRunner.runningInputRevision(appGroupJob: appGroup, externalJob: nil) == nil)
 
-  // App Group workspace가 생기면 그쪽이 먼저다(번들 실행).
+  let development = RunningJobCancellation(
+    appGroupJob: appGroup, externalJob: unrelatedMirror, runningJob: external)
+  try development.record(reason: "user", requestedAt: "2026-09-27T06:04:00Z")
+  let devLine = try String(
+    contentsOf: external.appendingPathComponent(CancellationStore.fileName), encoding: .utf8)
+  #expect(devLine.contains(externalRevision))
+
+  // 개발 실행 — App Group을 못 믿어도(없는 경로) 실행 루트는 받는다.
+  let missing = root.appendingPathComponent("not-there", isDirectory: true)
+  let orphan = RunningJobCancellation(
+    appGroupJob: missing, externalJob: nil, runningJob: external)
+  try orphan.record(reason: "user", requestedAt: "2026-09-27T06:04:01Z")
+  #expect(
+    FileManager.default.fileExists(
+      atPath: external.appendingPathComponent(CancellationStore.fileName).path))
+
+  // 번들 실행 — 낡은 외부 미러가 남아 있어도 App Group(실행 루트)이 정본이다.
   let appGroupWorkspace = appGroup.appendingPathComponent("workspace", isDirectory: true)
   try FileManager.default.createDirectory(
     at: appGroupWorkspace, withIntermediateDirectories: true)
-  let bundledRevision = String(repeating: "a", count: 64)
+  let appGroupRevision = String(repeating: "a", count: 64)
   try Data(
-    ("{\"payload\":{\"revision\":\"\(bundledRevision)\"},\"protocol_version\":\"1.0\","
+    ("{\"payload\":{\"revision\":\"\(appGroupRevision)\"},\"protocol_version\":\"1.0\","
       + "\"type\":\"ProjectRevision\"}\n").utf8
   ).write(to: appGroupWorkspace.appendingPathComponent("revision.jsonl"))
-  #expect(
-    EngineSessionRunner.runningInputRevision(appGroupJob: appGroup, externalJob: external)
-      == bundledRevision)
+  let bundled = RunningJobCancellation(
+    appGroupJob: appGroup, externalJob: unrelatedMirror, runningJob: appGroup)
+  try bundled.record(reason: "user", requestedAt: "2026-09-27T06:04:02Z")
+  let bundledLine = try String(
+    contentsOf: appGroup.appendingPathComponent(CancellationStore.fileName), encoding: .utf8)
+  #expect(bundledLine.contains(appGroupRevision))
+  #expect(!bundledLine.contains(externalRevision))
 }
 
 func makeBundledPlan() throws -> EngineLaunchPlan {

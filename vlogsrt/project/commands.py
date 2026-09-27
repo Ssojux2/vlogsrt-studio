@@ -173,13 +173,20 @@ def _cancellation_paths(workspace: Path) -> tuple[Path, ...]:
     return tuple(paths)
 
 
-def _check_cancellation(workspace: Path, input_revision: str, attempt_id: str) -> None:
+def _check_cancellation(
+    workspace: Path, input_revision: str, attempt_id: str, input_sha256: str = ""
+) -> None:
     """API·전사·ffmpeg 단계 사이에만 확인한다 — 취소 뒤 새 호출은 없다.
 
     앱은 `cancellation.jsonl`에 CancellationRequest를 기록한다(App Group 작업
     폴더와 같은 내용). 앱이 실행 중인 시도 ID를 모를 때 — 사용자 취소 버튼·활성
     프로젝트 변경 — 는 `attempt_id="*"`로 기록하고 그 입력 리비전의 모든 시도에
     적용한다. 캐시는 그냥 둔다 — 취소는 지금 실행만 멈춘다.
+
+    리비전 매칭은 두 묶음만 받는다: 완성 리비전, 아니면 엔진 `input_sha256`과 같은
+    값(앱이 receive 전에 스테이징된 input.fcpxml의 해시로 남긴 묶음, S1A-R1).
+    그 밖의 리비전 — all-zero 포함 — 은 이 job의 취소가 아니다. 와일드카드로
+    넓혀 읽지 않는다.
     """
     for path in _cancellation_paths(workspace):
         if not path.is_file():
@@ -187,7 +194,7 @@ def _check_cancellation(workspace: Path, input_revision: str, attempt_id: str) -
         for message in _read_messages(path):
             if not isinstance(message, CancellationRequest):
                 raise ValueError(f"취소 기록에 CancellationRequest가 아닌 메시지가 있다: {path}")
-            if message.input_revision != input_revision:
+            if message.input_revision != input_revision and message.input_revision != input_sha256:
                 continue
             if message.attempt_id != attempt_id and message.attempt_id != "*":
                 continue
@@ -811,7 +818,7 @@ def _produce_analysis_candidates(
     ledger = UsageLedger(Decimal(estimate.cost_upper_bound or "0"))
 
     def cancellation() -> None:
-        _check_cancellation(workspace, revision.revision, attempt_id)
+        _check_cancellation(workspace, revision.revision, attempt_id, revision.input_sha256)
 
     transcriber = _BudgetedTranscriber(
         transcribe.get_transcriber(
@@ -825,7 +832,7 @@ def _produce_analysis_candidates(
         estimate.transcription_seconds,
         gate=cancellation,
     )
-    _check_cancellation(workspace, revision.revision, attempt_id)
+    _check_cancellation(workspace, revision.revision, attempt_id, revision.input_sha256)
     prepared = runner.prepare_audio(
         workspace / _INPUT,
         workspace / "artifacts",
@@ -835,7 +842,7 @@ def _produce_analysis_candidates(
     )
     if prepared.document.input_sha256 != revision.input_sha256:
         raise ValueError("분석 준비 문서가 승인된 입력 리비전과 다르다")
-    _check_cancellation(workspace, revision.revision, attempt_id)
+    _check_cancellation(workspace, revision.revision, attempt_id, revision.input_sha256)
     analyzed = runner.analyze_audio(prepared, transcriber=transcriber)
     if transcriber.used > 0:
         # 실제로 보낸 whisper 오디오만 기록한다 — 예측이 아니라 측정값이다.
@@ -871,7 +878,7 @@ def _produce_analysis_candidates(
     candidates: list[CutCandidate] = []
     used_images = 0
     for planned in windows:
-        _check_cancellation(workspace, revision.revision, attempt_id)
+        _check_cancellation(workspace, revision.revision, attempt_id, revision.input_sha256)
         decision, image_count = _decide_window(
             planned,
             analyzed,
@@ -885,6 +892,7 @@ def _produce_analysis_candidates(
             attempt_id=attempt_id,
             pricing=pricing,
             ledger=ledger,
+            input_sha256=revision.input_sha256,
         )
         used_images += image_count
         if used_images > estimate.max_images:
@@ -895,6 +903,10 @@ def _produce_analysis_candidates(
             if candidate is not None:
                 candidates.append(candidate)
     _write_messages(workspace / "vision-decisions.jsonl", tuple(decisions))
+    # 발행 앞의 마지막 확인 — 마지막 소스·Luna 호출이 진행 중인 사이 남겨진 취소가
+    # 성공(succeeded·review_required)으로 못 간다. 창이 하나도 없으면 이 게이트가
+    # 유일한 사후 확인이다. 이미 남긴 판정·사용량 기록은 그대로 둔다(S1A-R1).
+    _check_cancellation(workspace, revision.revision, attempt_id, revision.input_sha256)
     return tuple(candidates)
 
 
@@ -1029,6 +1041,7 @@ def _decide_window(
     attempt_id: str,
     pricing: PricingSnapshot,
     ledger: UsageLedger,
+    input_sha256: str = "",
 ) -> tuple[VisionWindowDecision, int]:
     document = analyzed.prepared.document
     clip = next(
@@ -1121,7 +1134,7 @@ def _decide_window(
     else:
         # Luna 호출 직전 재확인 — 창 게이트가 지난 뒤 프레임 뽑기(ffmpeg) 동안
         # 기록된 취소까지 잡는다. 취소 뒤 새 API 호출은 없다.
-        _check_cancellation(workspace, input_revision, attempt_id)
+        _check_cancellation(workspace, input_revision, attempt_id, input_sha256)
         try:
             raw = transcribe.request_luna_vision(
                 client, model=settings.model, payload=payload, online=True
