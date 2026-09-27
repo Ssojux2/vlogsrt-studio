@@ -9,6 +9,7 @@
 /* Begin PBXBuildFile section */
 		0F52AD7FD9F1954D2B62D9F2 /* FinalCutImporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6832A3B51FA754EC6959C587 /* FinalCutImporter.swift */; };
 		11BEB3475A7A691F2B66E924 /* libFinalCutAgentCore.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 162A42CFC45AE937A1F021B9 /* libFinalCutAgentCore.a */; };
+		1DE4C06EB9AF7DD45BFA62CD /* EngineRequestGate.swift in Sources */ = {isa = PBXBuildFile; fileRef = C07C38B451E68FDE56A5A4F0 /* EngineRequestGate.swift */; };
 		2653D9611BD41AB6FA3CDA06 /* RoundTripJob.swift in Sources */ = {isa = PBXBuildFile; fileRef = 97CAE484F153252E07D1BF7F /* RoundTripJob.swift */; };
 		2DA460A2348F5014D5D0EBA7 /* README.md in Resources */ = {isa = PBXBuildFile; fileRef = BCF0401E24FA669233607967 /* README.md */; };
 		321BE228504D9C851B58B978 /* LegacyJobStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 714BD102C51B1A26375F63BF /* LegacyJobStore.swift */; };
@@ -103,6 +104,7 @@
 		B21E719A4E3F22B9B8B435ED /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
 		BCF0401E24FA669233607967 /* README.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = README.md; sourceTree = "<group>"; };
 		BF3C5A5E380F891AB16ACB4F /* FinalCutAgentWorkflowExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = FinalCutAgentWorkflowExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		C07C38B451E68FDE56A5A4F0 /* EngineRequestGate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EngineRequestGate.swift; sourceTree = "<group>"; };
 		C263664F6E10FCD89C5CC000 /* WorkflowViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkflowViewController.swift; sourceTree = "<group>"; };
 		CB047E1AA867D819DDA5D4B2 /* AppGroupWorkspace.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppGroupWorkspace.swift; sourceTree = "<group>"; };
 		D73C8DEC3C5E76180C3C885F /* ShareInbox.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareInbox.swift; sourceTree = "<group>"; };
@@ -151,6 +153,7 @@
 				FC442752B095717FB0C36A5C /* CancellationStore.swift */,
 				1AD671ADEA772B9A1C2E7AB1 /* DevelopmentEngineLauncher.swift */,
 				6425D219B5CA268C97A7AA77 /* EngineProcess.swift */,
+				C07C38B451E68FDE56A5A4F0 /* EngineRequestGate.swift */,
 				AB6586463B6A94DBFAE39DDA /* EngineRuntime.swift */,
 				6832A3B51FA754EC6959C587 /* FinalCutImporter.swift */,
 				0ABF9EFE3FDDC83B32482D93 /* FinalCutPasteboard.swift */,
@@ -383,6 +386,7 @@
 				D3B14EF17B5B2C0A94CFA026 /* CancellationStore.swift in Sources */,
 				9072E384849414798A547EF7 /* DevelopmentEngineLauncher.swift in Sources */,
 				86DFE00C9230AB03E0957176 /* EngineProcess.swift in Sources */,
+				1DE4C06EB9AF7DD45BFA62CD /* EngineRequestGate.swift in Sources */,
 				7B9C21ADBBF564CB5FC4E15E /* EngineRuntime.swift in Sources */,
 				0F52AD7FD9F1954D2B62D9F2 /* FinalCutImporter.swift in Sources */,
 				7B15858CECF631D1876C8320 /* FinalCutPasteboard.swift in Sources */,
