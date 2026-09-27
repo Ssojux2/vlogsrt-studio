@@ -1,5 +1,7 @@
 # STAB-S5A — Sequential source sampling and verified stage resume
 
+Read [the common execution contract](stab-execution-contract.md) before edits; it fixes the required High Agency, mailbox, protected-file and verification workflow.
+
 ## Scope
 After S4 acceptance, GLM changes `vlogsrt/preprocess.py`, project vision sampling, approved analysis orchestration/checkpoints and tests. Sol owns docs/review. Read approved plan and existing frame-correspondence contracts. Keep media decoder subprocesses in preprocess boundary; no new dependencies.
 

@@ -1,5 +1,7 @@
 # STAB-S4B — Share-to-job mapping, estimate approval and SRT delivery UI
 
+Read [the common execution contract](stab-execution-contract.md) before edits; it fixes the required High Agency, mailbox, protected-file and verification workflow.
+
 ## Scope
 GLM connects app share handling, core ShareInbox/job mapping, extension/app caption UI and tests after S4A. Sol owns docs/review. Read approved plan and S2C origin/result mapping. Current checkout, product/tests only.
 

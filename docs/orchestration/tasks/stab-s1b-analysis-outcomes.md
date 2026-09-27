@@ -1,5 +1,7 @@
 # STAB-S1B — Explicit analysis outcomes across engine and app
 
+Read [the common execution contract](stab-execution-contract.md) before edits; it fixes the required High Agency, mailbox, protected-file and verification workflow.
+
 ## Target and ownership
 Implement the failure-reporting half of S1 after S1A is accepted. GLM alone edits product code/tests; Sol owns this brief, contract documentation updates, and independent acceptance. Work in the current checkout, using the approved stabilization plan. Expected files: `vlogsrt/project/workflow_protocol.py`, `workflow_analysis.py`, `commands.py`, engine entrypoint/stager, Swift workflow protocol/job/runtime/extension consumers, and their tests. Adjacent files are allowed only to complete this boundary.
 

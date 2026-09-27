@@ -1,5 +1,7 @@
 # STAB-S4A — Final-audio caption estimate and authorized engine execution
 
+Read [the common execution contract](stab-execution-contract.md) before edits; it fixes the required High Agency, mailbox, protected-file and verification workflow.
+
 ## Scope
 After S3 acceptance, GLM implements caption operations in Python commands/final_caption/protocol/engine entrypoint and Swift invocation/codec/staging plus tests. Sol owns docs/review. Read approved plan and prior accepted lifecycle/accounting contracts.
 

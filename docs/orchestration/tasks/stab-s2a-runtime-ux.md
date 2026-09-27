@@ -1,5 +1,7 @@
 # STAB-S2A — Single execution, preflight, credentials and progress
 
+Read [the common execution contract](stab-execution-contract.md) before edits; it fixes the required High Agency, mailbox, protected-file and verification workflow.
+
 ## Target and ownership
 After S1 acceptance, GLM implements runtime/UX in Python engine entrypoint and Swift core, app and extension, plus tests. Sol owns documentation and validation. Scope is S2 runtime UX; budget/cache accounting is S2B and import lifecycle is S2C. Read the approved stabilization plan and this brief. Work serially in the current checkout.
 

@@ -1,5 +1,7 @@
 # STAB-S3A — Approved dialogue and B-roll candidate pipeline
 
+Read [the common execution contract](stab-execution-contract.md) before edits; it fixes the required High Agency, mailbox, protected-file and verification workflow.
+
 ## Scope
 After S2 acceptance, GLM integrates candidate production through the approved `project analyze -> review -> roughcut` path, reusing `runner.py`, `review.py`, `edit.py`, speech/VAD/vision protection and block logic. Change Python workflow/protocol and compatible Swift candidate decoding plus tests. Sol owns docs and review. Read the approved plan; current checkout, one GLM writer.
 

@@ -1,5 +1,7 @@
 # STAB-S3B — Evidence-rich review and atomic approval
 
+Read [the common execution contract](stab-execution-contract.md) before edits; it fixes the required High Agency, mailbox, protected-file and verification workflow.
+
 ## Scope and requirements
 GLM implements Swift extension/app/core candidate review and Python preview/result production as needed after S3A; Sol owns docs/review. Read the approved plan and S3A schema. Current checkout, product/tests only, one writer.
 

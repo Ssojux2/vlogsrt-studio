@@ -1,5 +1,7 @@
 # STAB-S5B — Verifiable bundled-engine and FFmpeg build path
 
+Read [the common execution contract](stab-execution-contract.md) before edits; it fixes the required High Agency, mailbox, protected-file and verification workflow.
+
 ## Scope
 GLM completes local app packaging/build tooling and tests after S5A; Sol updates README/board/acceptance docs after independent validation. Inspect `scripts/build_engine.py`, `scripts/verify_ffmpeg.py`, macOS project resources/launchers and engine supply tests. Product/config/scripts/tests may be edited only as needed; no dependency or binary download/install, signing credential access or deployment.
 

@@ -1,5 +1,7 @@
 # STAB-S2C — Roughcut generation, import request and confirmation
 
+Read [the common execution contract](stab-execution-contract.md) before edits; it fixes the required High Agency, mailbox, protected-file and verification workflow.
+
 ## Scope
 GLM implements Python workflow/roughcut state, Swift runtime/importer/job/extension UI and tests after S2B. Sol owns docs/review. Read approved stabilization plan; current checkout, serial writer, explicit-path commits.
 

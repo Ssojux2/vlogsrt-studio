@@ -1,5 +1,7 @@
 # STAB-S2B — Durable per-call budgets, actual usage and successful-cache reuse
 
+Read [the common execution contract](stab-execution-contract.md) before edits; it fixes the required High Agency, mailbox, protected-file and verification workflow.
+
 ## Scope
 GLM implements cost/cache behavior in workflow analysis/protocol/commands and the existing transcription request boundary, Swift cost readers/UI and tests. S1 and S2A must be accepted first. Sol owns docs and independent validation. Retain existing pricing snapshot values; this is accounting correctness, not a pricing update. Read approved stabilization plan and this brief.
 
