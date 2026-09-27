@@ -16,6 +16,13 @@ Impact: propagating | files<=18 | modules<=5 | boundary=shared-api
 6. Update Python and Swift JSONL readers/writers coherently. Retain reading old analysis protocol versions. Old records lacking outcome fields are legacy/unknown, not new successful-cache evidence. Do not auto-rerun ambiguous records. Keep digest validation and version identity correct; add a protocol version when payload digests change.
 7. Persist per-window progress/results as work completes so an exception at a later window does not erase completed evidence. Full cache retry/budget accounting is S2B; do not expand this task into that redesign.
 
+## S1B boundary decisions (2026-09-27 supervision)
+- A usable partial result persists `partial_error`, retains only safe candidates, reaches `review_required`, and exits 0 with an explicit warning in app/extension. An aggregate `error` closes the attempt as failed and exits nonzero. Exit 0 alone must never drive a full-success summary.
+- Nonzero-exit propagation uses a diagnostic-only allowlist: aggregate result, attempts, usage and window decisions. It must not copy stale candidates or roughcut/export artifacts. Preserve cancellation and active-selection drift gates before applying artifacts, and never import on failure.
+- Stage counts and usable coverage are different. All windows failing is aggregate error even if upstream stages succeeded. A sole source whose transcription succeeds but VAD fails cannot become successful zero-window analysis. Independently usable successful coverage plus failed coverage is partial error.
+- Confirmed no-speech and declared no-audio are not provider failures. Record non-applicable/skipped stages honestly; do not count them as attempted analysis success. Test valid no-speech/no-audio separately from all-transcription, PCM/preparation and VAD failures.
+- Preserve evidence already persisted when a later window's preparation, frame sampling or provider call fails. Check both the Python entrypoint copy boundary and Swift development-job synchronization boundary, not only result helpers.
+
 ## Acceptance (offline only)
 - Normalization tests distinguish valid keep, valid proposed cut, API exception, malformed/empty response, unknown candidate/frame and skipped state; every error/skipped case yields no cut.
 - Command/real-entrypoint integration covers valid zero-window success, all upstream audio/transcription/VAD failure with zero windows, all-window failure, mixed success/failure, cancellation, and nonzero-exit result propagation. Assert persisted aggregate, attempt status, exit and app-visible files, not just helper return values.
