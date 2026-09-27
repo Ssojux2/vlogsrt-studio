@@ -1,6 +1,13 @@
 # STAB-S1A-R1 — Required integration corrections before S1A acceptance
 
-Status: prepared against the in-progress S1A draft; dispatch only after current worker settlement or explicit coordinator recovery. Do not duplicate the active writer. Read the main S1A brief and this correction brief; current checkout and protected-file boundaries still apply.
+Status: **completed and independently accepted at `975fb9c`**. This brief records the correction required after `616d233`; all three findings below were resolved and verified. See `../reviews/stab-s1a-sol.md` for final evidence. Current checkout and protected-file boundaries still apply to follow-up work.
+
+## Remaining acceptance findings at 616d233
+1. `runningInputRevision` prefers App Group even when the external workspace is the running engine; choose the actual running path and test both differing revisions.
+2. Pre-receive cancellation still uses all-zero revision that Python ignores; add a safe job/input-bound pending cancellation path with zero subsequent model calls, without weakening wrong-revision/attempt filtering.
+3. No final `_check_cancellation` after last source/Luna call permits succeeded/review_required despite a cancellation during that final call; test no-window and last-window cases and preserve recorded evidence.
+
+Task `task_9c1fc63e6acf` uses the same GLM terminal after settlement; no duplicate writer. The detailed sections below preserve the rationale, but already-completed inner gates and wrapper behavior need regression preservation rather than reimplementation.
 
 ## First actions and ownership
 1. Read the live lifecycle preamble, consume all same-Dispatch follow-ups, and acknowledge exact current scope before edits.

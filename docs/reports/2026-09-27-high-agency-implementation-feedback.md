@@ -1,6 +1,6 @@
 # High Agency 적용과 브이로그 자동 편집 개선 기록
 
-작성일: 2026-09-27. 상태: 진행 중. 이 문서는 완료 보고서가 아니라 작업별 증거를 누적하는 기록이다.
+작성일: 2026-09-27. S1A는 `975fb9c`에서 독립 인수 완료. S1B–S5는 다음 작업으로 남아 있음. 이 문서는 작업별 증거를 누적하는 기록임.
 
 ## 목적과 실행 조건
 - 목적: Claude-GLM 구현 과정의 오류와 비효율을 재현 가능한 근거로 정리하고, 제품·운영 방식·스킬 개선에 활용한다.
@@ -19,11 +19,11 @@
 ## 제품 오류
 | ID | 관찰 및 재현 | 예상/실제 | 상태와 개선 방향 |
 |---|---|---|---|
-| P-01 | 빈 job에 media-grant.json을 둔 뒤 번들 staging 실행 | workspace를 만든 뒤 복사 / FileNotFoundError | S1A 구현 중. 실제 main 진입점 회귀 필요 |
-| P-02 | 엔진 시작 뒤 앱 job root에 취소 기록 | 이후 외부 호출 중단 / workspace에서 취소를 보지 못함 | S1A 구현 중. 경로·리비전·조각·재시도 호출 게이트 검증 필요 |
+| P-01 | 빈 job에 media-grant.json을 둔 뒤 번들 staging 실행 | workspace를 만든 뒤 복사 / FileNotFoundError | 616d233 수정, 975fb9c 최종 독립 인수. 실제 main·설치 wrapper 회귀 통과 |
+| P-02 | 엔진 시작 뒤 앱 job root에 취소 기록 | 이후 외부 호출 중단 / workspace에서 취소를 보지 못함 | 616d233·975fb9c 수정. 조각·재시도·마지막 호출·시작 전 취소 회귀 통과 |
 | P-03 | 비전 정규화에 API 예외와 정상 keep 응답을 각각 입력 | 오류/보존 구분 / 둘 다 keep, confidence 0, 빈 evidence | S1B 명세 완료. upstream 분석 실패까지 집계 필요 |
 | P-04 | 앱 공유 수신과 엔진 operation 코드 추적 | 공유 뒤 자막 생성 / stage에서 종료, 원본 리비전 저장 경로 없음 | S4 계획. 정적 분석 근거이며 실기 재현은 미수행 |
-| P-05 | Sol이 개발용 취소 요청 생성 경로 추적 | external workspace의 현재 리비전 사용 / app workspace만 찾아 0 리비전 가능 | S1A 보완 전달. 정적 분석 결과이며 회귀 시험 대기 |
+| P-05 | Sol이 개발용 취소 요청 생성 경로 추적 | 실행 경로의 리비전 사용 / app workspace만 찾아 0 리비전 가능 | 975fb9c 수정. 선택한 실행 경로·입력 해시·취소 목적지 시험 통과 |
 
 ## 에이전트·도구 운영에서 관찰한 문제
 ### O-01: Sol 첫 실행이 CLI 업데이트 뒤 종료됨
@@ -52,7 +52,8 @@
 ## 작업별 스킬 적용·검증 기록
 | 작업 | 스킬 읽기 증거 | Impact/범위 | 실패 재현 → 수정 → 독립 검증 | compact | 판정 |
 |---|---|---|---|---|---|
-| S1A | 04:20:54 UTC `Read` event 확인 | Sol 첫 추정: propagating, 16 files, 5 modules, shared-api. GLM 사전 추정 없음 | 초기 표적 Python 검사 Sol exit 0. 내부 호출·앱 경계 보완 중 | 미실행, 인수 완료 후 실행 예정 | 인수 보류 |
+| S1A | 04:20:54 UTC `Read` event 확인. 첫 수정 뒤 읽음 | Sol 추정 16 files·5 modules, 실제 13 files. GLM 사전 추정 없음 | 616d233에서 세 경계 보완 요구, R1로 수정 | 미실행 | 975fb9c에서 인수 완료 |
+| S1A-R1 | 앞서 읽은 스킬 유지. 새 `Read`로 기록하지 않음 | GLM 사전 추정 10 files·3 modules, 실제 6 files | Sol 2 failed → 3 passed, 최종 make check·Swift exit 0 | 부모가 idle Sol에서 실행 예정 | 인수 완료 |
 
 □ O-04: Orca 재시작 중 대기 연결 종료
   ○ 발생 시각: 2026-09-27 04:14 UTC경. `check --wait`에서 `runtime_unavailable`, exit 1 반환
@@ -98,6 +99,57 @@
     - 완성된 코드의 독립 검증과 실제 효과 판정은 아직 끝나지 않음
 
 ## 미해결 오류를 보고하는 형식
+
+□ R1에서 독립 재현한 성공 상태 오기록
+  ○ 명령: `pytest tests/project/test_workflow_cancellation.py -k 'final_luna or no_windows or input_bound_pre_receive'`
+    - `.venv/bin/python -m`으로 실행함. 로그: `/tmp/stab-s1a-sol-r1-before.log`
+  ○ 예상: 마지막 호출·소스 분석 뒤 취소를 감지해 exit 2와 cancelled 상태 기록
+    - 실제: 마지막 Luna 호출과 창 없는 분석이 exit 0으로 성공 처리됨
+  ○ 결과: exit 1, 2 failed·1 passed·8 deselected, 0.67초
+    - 수정 중인 작업공간 측정임. 입력 해시 기반 취소는 그 시점에 이미 통과함
+  ○ 원인: 성공 발행 전 최종 취소 확인이 없음. 코드 경로와 실패 시험이 일치함
+    - 975fb9c에서 수정 완료. 같은 표적 명령은 3 passed·8 deselected, exit 0으로 바뀜
+
+□ Sol 보고 과정의 정정
+  ○ 한 상태 메시지에 잘못된 임시 메시지 ID가 포함돼 바로 실제 ID로 정정함
+    - 실행 명령에는 잘못된 ID를 쓰지 않았음
+  ○ R1 재현 메시지 제목을 세 건 실패로 적은 뒤 로그에서 두 건 실패를 확인해 즉시 정정함
+    - 최종 기록은 2 failed·1 passed임. 읽기 전에 요약하지 않도록 절차 보완 필요
+
+□ O-06: 겹치는 전체 검사
+  ○ GLM이 전체 pytest·Ruff·mypy를 실행한 뒤 `make check`로 같은 검사를 반복한 흐름 관찰
+    - 부모도 04:49 UTC 같은 반복을 확인함. 현재 실행을 중단할 사유로 쓰지 않음
+  ○ 개별 brief가 검사 항목과 `make check`를 함께 나열해 중복으로 읽힐 여지가 있었음
+    - worker 행동만의 문제로 단정하지 않음. Sol 명세도 집계 범위를 분명히 할 필요가 있음
+  ○ 공통 실행 명세에 최종 `make check` 한 번으로 겹치는 요구를 충족한다고 명시함
+    - Swift·macOS script처럼 포함되지 않은 경계만 별도 검사하도록 보완함
+  ○ 목표: 표적 회귀 → 수정·포맷 → 집계 검사 한 번 → 독립 인수
+    - 새 수정·실패·미해결 우려가 있을 때만 관련 검사를 반복함. 시간 절감 효과는 아직 측정하지 않음
+
+□ O-07: 공유 작업공간과 High Agency 종료 guard의 충돌
+  ○ R1 worker_done 뒤 High Agency verification guard가 추가 검사를 요구함
+    - 메시지: `Git working-tree snapshot changed after the last valid verification`
+  ○ GLM이 검증한 975fb9c의 제품·테스트 diff는 비어 있었음
+    - 바뀐 항목은 Sol 문서 등 공유 작업공간의 별도 소유 파일이었음. Sol도 제품 diff exit 0을 확인함
+  ○ GLM이 16개 표적 검사를 추가 실행한 뒤 idle로 돌아감
+    - 종료 감지 대기는 먼저 timeout을 반환함. Sol은 최종 idle 화면을 확인한 뒤에만 해당 터미널을 닫음
+  ○ 개선 제안: guard를 검증한 파일·의존 경로와 연결하고 다른 소유자의 문서 변경을 구분
+    - worker_done 뒤 추가 작업을 유발하지 않도록 Orca 정착 단계와 guard 실행 순서도 맞출 필요가 있음
+  ○ 근거 범위: 한 번의 공유 checkout 실행에서 실제 guard 오류를 관찰함
+    - 모든 환경의 스킬 결함으로 일반화하지 않음. 설치된 스킬 자체는 수정하지 않았음
+
+□ 최종 S1A 독립 검사
+  ○ `make check` exit 0: Python 2,675개, Ruff 119 files, mypy 54 files, 불변식 21개 통과
+    - Python 실행 시간 55.97초. 로그: `/tmp/stab-s1a-sol-final-make.log`
+  ○ `cd macos && swift test` exit 0: core 66개와 extension 1개, 합계 67개 통과
+    - 로그: `/tmp/stab-s1a-sol-final-swift.log`
+  ○ 엔진 script Ruff check/format과 설치 script `zsh -n` 모두 exit 0
+    - 제품·테스트가 검증 commit 이후 바뀌지 않았음도 exit 0으로 확인함
+  ○ `scripts/build_engine.py --verify` exit 1: engine-manifest.json 없음
+    - 실 API·Final Cut·배포 바이너리·서명·실영상 품질은 인수하지 않았음
+  ○ 상세 증거: `docs/orchestration/reviews/stab-s1a-sol.md`
+    - 정착한 GLM은 release 뒤 외부 터미널로 남아, 사용자의 정리 지시에 따라 idle 확인 후 닫음
+
 각 오류마다 다음을 남긴다.
 1. 작업/기준 commit, 실행 환경, 실패 단계와 재현 명령.
 2. 예상 결과, 실제 결과, exit code와 비밀을 제거한 핵심 로그.
