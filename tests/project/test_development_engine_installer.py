@@ -16,10 +16,13 @@ import stat
 import subprocess
 from pathlib import Path
 
+import pytest
 from test_engine_entrypoint import _GRANT, _stage_job, _staged_cancellation
+from test_engine_execution_lock import _snapshot
 
 from tests._dotenv_guard import (
     CANARY_VALUE,
+    EngineSandbox,
     build_engine_sandbox,
     preflight_child_guard,
     read_child_proofs,
@@ -86,6 +89,38 @@ def test_installed_wrapper_delegates_both_operations_to_the_shared_entrypoint(
     assert len(log.read_text(encoding="utf-8").splitlines()) == 2
 
 
+def _guarded_wrapper_env(sandbox: EngineSandbox, standin: Path) -> dict[str, str]:
+    """래퍼가 export하는 모양 그대로 PYTHONPATH를 앞에 두고 보호 환경을 섞는다.
+
+    canary가 실제 자식과 같은 수입 경로로 sitecustomize를 찾아야 사전확인이
+    같은 세계를 본다.
+    """
+    inherited = os.environ.get("PYTHONPATH", "")
+    prefix = str(sandbox.repo) + (os.pathsep + inherited if inherited else "")
+    return {
+        **os.environ,
+        "VLOGSRT_OFFLINE": "1",
+        "PYTHONPATH": prefix,
+        **sandbox.guard_env(standin=standin),
+    }
+
+
+def _run_installed_wrapper(
+    wrapper: Path,
+    argv: list[str],
+    *,
+    sandbox: EngineSandbox,
+    env: dict[str, str],
+) -> subprocess.CompletedProcess[bytes]:
+    """설치된 래퍼를 보호 사전확인 **뒤에만** 띄운다 — 이 모듈의 유일한 실행 길이다.
+
+    첫 실행이든 재개든 이 helper를 지나며, canary가 보호 증명을 못 내면
+    래퍼는 아예 뜨지 않는다(실패 닫힘).
+    """
+    preflight_child_guard(env, cwd=sandbox.repo, expected_package_root=sandbox.package)
+    return subprocess.run([str(wrapper), *argv], check=False, env=env)
+
+
 def test_installed_wrapper_runs_the_real_engine_on_a_fresh_job(tmp_path: Path) -> None:
     """설치된 래퍼 → 실제 파이썬 → 실제 엔진까지 오프라인으로 잇는다 — 합성 저장소 안에서.
 
@@ -93,12 +128,14 @@ def test_installed_wrapper_runs_the_real_engine_on_a_fresh_job(tmp_path: Path) -
     재개 실행 때 이미 있는 workspace 기록을 덮어쓰지 않는다(번들 엔진과 같은 순서).
     래퍼는 `cd <repo>` 후 진입점을 부르므로 저장소는 sandbox여야 한다: cwd·
     PYTHONPATH·PACKAGE_ROOT가 전부 임시 안에 갇혀 실제 저장소의 보호된 `.env`로
-    흐를 길이 없다(S2A-1 브리지 시험과 같은 원리).
+    흐를 길이 없다(S2A-1 브리지 시험과 같은 원리). 첫 실행과 재개 모두 보호
+    사전확인 게이트를 지난다.
     """
     sandbox = build_engine_sandbox(tmp_path, source=REPO)
     assert sandbox.dotenv_files() == [sandbox.dotenv]  # 보호 철자는 합성 dotenv 하나뿐이다
     assert sandbox.symlinks() == []  # 저장소 원본을 향한 심볼링크는 없다
     standin = stage_canary_standin(tmp_path / "sealed")
+    guarded_env = _guarded_wrapper_env(sandbox, standin)
     wrapper = _install(tmp_path, repo=sandbox.repo)
     job_dir = _stage_job(tmp_path)
     (job_dir / "media-grant.json").write_text(_GRANT, encoding="utf-8")
@@ -107,23 +144,8 @@ def test_installed_wrapper_runs_the_real_engine_on_a_fresh_job(tmp_path: Path) -
     workspace = job_dir / "workspace"
     assert not workspace.exists()
 
-    # 자식 보호(sitecustomize)가 이 환경에 함께 흘러간다 — 증명은 임시 안에 남는다.
-    # PYTHONPATH는 래퍼가 export하는 모양 그대로 앞에 붙인다 — canary가 실제 자식과
-    # 같은 수입 경로로 sitecustomize를 찾아야 사전확인이 같은 세계를 본다.
-    guard_env = sandbox.guard_env(standin=standin)
-    inherited = os.environ.get("PYTHONPATH", "")
-    guarded_env = {
-        **os.environ,
-        "VLOGSRT_OFFLINE": "1",
-        "PYTHONPATH": str(sandbox.repo) + (os.pathsep + inherited if inherited else ""),
-        **guard_env,
-    }
-    # 보호 사전확인 게이트 — 설치된 래퍼를 띄우기 전에 canary로 증명한다.
-    preflight_child_guard(guarded_env, cwd=sandbox.repo, expected_package_root=sandbox.package)
-    completed = subprocess.run(
-        [str(wrapper), "analyze", "job-1", str(job_dir)],
-        check=False,
-        env=guarded_env,
+    completed = _run_installed_wrapper(
+        wrapper, ["analyze", "job-1", str(job_dir)], sandbox=sandbox, env=guarded_env
     )
     assert completed.returncode == 0
     assert (workspace / "workflow.jsonl").is_file()
@@ -133,14 +155,10 @@ def test_installed_wrapper_runs_the_real_engine_on_a_fresh_job(tmp_path: Path) -
 
     # 재개: 앱이 실행 중 새로 남긴 루트 기록이 workspace 기록을 덮어쓰지 않는다.
     (job_dir / "cancellation.jsonl").write_text(_staged_cancellation("c" * 64), encoding="utf-8")
-    assert (
-        subprocess.run(
-            [str(wrapper), "analyze", "job-1", str(job_dir)],
-            check=False,
-            env=guarded_env,
-        ).returncode
-        == 0
+    resumed = _run_installed_wrapper(
+        wrapper, ["analyze", "job-1", str(job_dir)], sandbox=sandbox, env=guarded_env
     )
+    assert resumed.returncode == 0
     assert (workspace / "cancellation.jsonl").read_text(encoding="utf-8") == staged
 
     # 자식 증명 — 보호 작동, cwd·수입 출처 전부 합성 저장소 안이다(카나리는 없다).
@@ -158,3 +176,74 @@ def test_installed_wrapper_runs_the_real_engine_on_a_fresh_job(tmp_path: Path) -
         assert record["cwd"] == str(sandbox.repo.resolve())
         assert record["vlogsrt_file"].startswith(str(sandbox.package.resolve()))
     assert CANARY_VALUE not in sandbox.proof.read_text(encoding="utf-8")
+
+
+# ─────────────────────────────────────────────────────────────
+#  STAB-TEST-ISOLATION — 설치 래퍼 길의 보호 게이트
+# ─────────────────────────────────────────────────────────────
+
+
+def _prepare_wrapped_sandbox_job(
+    tmp_path: Path,
+) -> tuple[EngineSandbox, Path, Path, dict[str, str]]:
+    """게이트 시험이 쓰는 재료 — sandbox·래퍼·job·보호 환경을 한 자리에 묶는다."""
+    sandbox = build_engine_sandbox(tmp_path, source=REPO)
+    standin = stage_canary_standin(tmp_path / "sealed")
+    env = _guarded_wrapper_env(sandbox, standin)
+    wrapper = _install(tmp_path, repo=sandbox.repo)
+    job = tmp_path / "engine-job"
+    job.mkdir()
+    (job / "input.fcpxml").write_text("<fcpxml/>\n", encoding="utf-8")
+    return sandbox, wrapper, job, env
+
+
+def test_wrapper_launch_gate_refuses_when_the_child_guard_bootstrap_is_missing(
+    tmp_path: Path,
+) -> None:
+    """sitecustomize가 없으면 canary가 증명을 못 낸다 — 래퍼는 뜨지도 않는다.
+
+    job 트리는 그대로다(workspace도 잠금 파일도 시도 기록도 없다) — 게이트가
+    실제 실행 길(_run_installed_wrapper)에서 막는 것을 잠금 시험과 별개로 못 박는다.
+    """
+    sandbox, wrapper, job, env = _prepare_wrapped_sandbox_job(tmp_path)
+    (sandbox.repo / "sitecustomize.py").unlink()
+    before = _snapshot(job)
+
+    with pytest.raises(RuntimeError, match="사전확인 실패"):
+        _run_installed_wrapper(wrapper, ["analyze", "job-1", str(job)], sandbox=sandbox, env=env)
+    assert _snapshot(job) == before
+    assert not (job / "workspace").exists()
+    assert not (job / ".vlogsrt-engine.lock").exists()
+
+
+def test_wrapper_launch_gate_refuses_when_the_child_guard_bootstrap_is_broken_syntax(
+    tmp_path: Path,
+) -> None:
+    """문법이 깨진 sitecustomize도 조용히 무시된다 — 게이트가 래퍼를 막는다."""
+    sandbox, wrapper, job, env = _prepare_wrapped_sandbox_job(tmp_path)
+    (sandbox.repo / "sitecustomize.py").write_text("def broken(:\n", encoding="utf-8")
+    before = _snapshot(job)
+
+    with pytest.raises(RuntimeError, match="사전확인 실패"):
+        _run_installed_wrapper(wrapper, ["analyze", "job-1", str(job)], sandbox=sandbox, env=env)
+    assert _snapshot(job) == before
+    assert not (job / "workspace").exists()
+
+
+def test_wrapper_launch_gate_refuses_editable_fallback_when_the_sandbox_package_is_missing(
+    tmp_path: Path,
+) -> None:
+    """합성 패키지가 없으면 canary의 `import vlogsrt`가 편집 설치로 샌다 — 거부된다.
+
+    수입 출처 증명이 곧 게이트다: vlogsrt가 sandbox 밖(실제 저장소)에서 오면
+    payload는 띄우지 않는다. 보호는 이미 켜져 있고 보호 대상 파일은 조사하지
+    않는다 — 이 시험은 실제 저장소 **원본**을 향한 실행 거부만 증명한다.
+    """
+    sandbox, wrapper, job, env = _prepare_wrapped_sandbox_job(tmp_path)
+    sandbox.package.rename(sandbox.base / "package-hidden")  # 합성 패키지를 치운다
+    before = _snapshot(job)
+
+    with pytest.raises(RuntimeError, match="사전확인 실패"):
+        _run_installed_wrapper(wrapper, ["analyze", "job-1", str(job)], sandbox=sandbox, env=env)
+    assert _snapshot(job) == before
+    assert not (job / "workspace").exists()
