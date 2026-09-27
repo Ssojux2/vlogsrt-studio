@@ -8,14 +8,18 @@ from __future__ import annotations
 
 import json
 import math
+import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from copy import deepcopy
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Literal, Protocol
+from uuid import uuid4
 
 from . import env, log
 from .config import Config
@@ -223,6 +227,237 @@ def _is_retryable(exc: Exception) -> bool:
     return exc.__class__.__name__ in {"APIConnectionError", "APITimeoutError"}
 
 
+# ─────────────────────────────────────────────────────────────
+#  요청 관찰 (S2B-2a) — 실제 호출을 겉에서 본다. 출력은 못 바꾼다
+# ─────────────────────────────────────────────────────────────
+
+
+TRANSCRIPTION_OPERATION = "audio.transcriptions"
+"""오디오 전사 SDK 연산 — `client.audio.transcriptions.create` 한 번."""
+
+RESPONSES_OPERATION = "responses.create"
+"""Responses SDK 연산 — `client.responses.create` 한 번."""
+
+_REDACTED_OPTION_KEYS = frozenset({"api_key", "extra_headers"})
+"""메타의 인자 사본에 아예 담지 않는 자격 칸 — 나가는 요청에서 걷어내는 게 아니라
+비추지 않는 것뿐이다(요건 2)."""
+
+
+class ObserverFailure(RuntimeError):
+    """관찰자(회계 기반구조) 자신의 실패 — SDK 오류와는 종류가 다른 치명 사고다.
+
+    SDK 오류로 위장할 수 없다. 이 클래스는 `status_code`를 물려받지 않으므로
+    `_is_retryable`·`_is_bad_request` 어느 재시도 판정에도 걸리지 않고, 관찰자의
+    실패를 오류 훅으로 다시 보고하지도 않는다. 원인 예외는 `__cause__` 사슬로
+    보존된다. 관찰자가 없는 호출자는 이 예외를 아예 볼 수 없다.
+    """
+
+
+@dataclass(frozen=True, slots=True)
+class RequestAttemptMeta:
+    """실제 SDK 호출 **시도 하나**의 불변 신원(S2B-2a).
+
+    `attempt_id`는 SDK 요청 한 번의 신원이지 프로젝트 실행의 AnalysisAttempt ID와는
+    다른 층이다 — 재시도·거부 인자 재요청마다 새로 생긴다. 넣는 것: 시도 신원·실제
+    모델·연산·(오디오) 작업 종류와 출처·조각 좌표·실제로 실리는 인자의 방어 사본.
+    안 넣는 것: API 키·인증 헤더·파일 핸들. 엔드포인트·설정·가격 신원은 관찰자를
+    만드는 호출자 소유다 — 이 파일은 환경 탐색을 하지 않는다.
+
+    `options`는 나가는 요청의 깊은 사본을 읽기 전용으로 감싼 것이다. 관찰자가 이
+    사본을 어떻게 손대도 나가는 요청은 변하지 않고, 나르개의 자격 칸(`api_key`·
+    `extra_headers`)은 사본에 아예 담지 않는다.
+    """
+
+    attempt_id: str
+    operation: str
+    model: str
+    kind: str = ""  # 오디오 호출의 작업 종류. Responses 호출은 비워 둔다
+    stem: str = ""
+    source: str = ""
+    chunk_index: int | None = None
+    chunk_offset: float | None = None
+    chunk_duration: float | None = None
+    # 빈 사전을 그대로 기본값으로 두면 3.11의 dataclass가 "해시 불가능한 기본값"으로
+    # 거부한다(mappingproxy의 hash 지원은 3.12부터) — 공장으로 만들어 피한다.
+    options: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
+
+
+class RequestObserver(Protocol):
+    """실제 호출 하나하나를 겉에서 보는 주입 경계(S2B-2a).
+
+    구현체가 실제로 여럿(예산 원장 어댑터·기록기)이므로 Protocol이 필요하다 —
+    `Transcriber`·`VisionResponder`와 같은 판단이다. 티켓은 불투명하다: `authorize`가
+    돌려준 값을 되돌려줄 뿐 해석하지 않는다. 훅이 던지면 그 관찰자는 고장난 것이다
+    — `ObserverFailure`로 갈라 올라가고 SDK 재시도로 취급되지 않는다.
+    """
+
+    def authorize(self, meta: RequestAttemptMeta) -> Any: ...
+
+    def on_response(self, ticket: Any, meta: RequestAttemptMeta, response: Any) -> None: ...
+
+    def on_error(self, ticket: Any, meta: RequestAttemptMeta, error: Exception) -> None: ...
+
+
+@dataclass(slots=True)
+class _AttemptWatch:
+    """`transcribe` 호출 하나의 관찰 맥락. 치명 표시는 잠금 안에서 한 번만 정해진다.
+
+    `admit`의 잠금이 이 호출의 **입장 선형화 지점**이다 — 치명 확인·취소 확인·관찰자
+    승인이 같은 잠금 안에서 일어나므로 그 사이를 비집고 들어올 틈이 없다. 이미
+    승인받은 병렬 조각은 그대로 끝까지 돌고 결과를 보고한다 — 그 위의 실행 전체를
+    끊는 건 이 계층의 권한이 아니다.
+    """
+
+    observer: RequestObserver
+    stem: str = ""
+    source: str = ""
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    _fatal: ObserverFailure | None = None
+
+    def admit(
+        self,
+        make_meta: Callable[[], RequestAttemptMeta],
+        gate: Callable[[], None] | None = None,
+    ) -> tuple[Any, RequestAttemptMeta]:
+        """치명 확인 · 메타 준비 · 취소 확인 · 승인을 한 잠금 안에서 끝낸다(S2B-2a).
+
+        취소 확인이 잠금 **안**에 있는 것이 핵심이다 — 입장 줄에 서서 다른 승인을
+        기다리는 동안 취소가 켜져도 잠금을 얻는 순간 새로 확인하므로 그 시도의
+        승인은 일어나지 않는다.
+        """
+        with self._lock:
+            if self._fatal is not None:
+                raise ObserverFailure(
+                    "관찰자 치명 실패 뒤에는 새 승인이 없다 — 이 시도는 SDK를 부르지 않는다"
+                ) from self._fatal
+            try:
+                meta = make_meta()
+            except Exception as exc:  # noqa: BLE001 - 관찰 준비의 실패도 관찰자 실패다
+                failure = ObserverFailure(f"요청 관찰의 메타 준비가 실패했다: {exc}")
+                self._fatal = failure
+                raise failure from exc
+            if gate is not None:
+                gate()  # 메타 뒤·승인 직전 — 잠금 안의 마지막 확인
+            try:
+                ticket = self.observer.authorize(meta)
+            except Exception as exc:  # noqa: BLE001 - 관찰자 실패로 바꿔 올린다
+                failure = ObserverFailure(f"요청 관찰자의 authorize 훅이 실패했다: {exc}")
+                self._fatal = failure  # 잠금 안이다 — 첫 실패가 그대로 first-wins다
+                raise failure from exc
+            return ticket, meta
+
+    def record_fatal(self, failure: ObserverFailure) -> None:
+        with self._lock:
+            if self._fatal is None:
+                self._fatal = failure
+
+
+def _hook_failure(watch: _AttemptWatch, stage: str, exc: Exception) -> ObserverFailure:
+    """관찰자 실패를 치명 사고로 만든다. 첫 실패가 이 호출의 새 승인을 막는다."""
+    failure = ObserverFailure(f"요청 관찰자의 {stage} 훅이 실패했다: {exc}")
+    watch.record_fatal(failure)
+    return failure
+
+
+def _observed_call(
+    watch: _AttemptWatch,
+    make_meta: Callable[[], RequestAttemptMeta],
+    call: Callable[[Any], Any],
+    prepare: Callable[[], Any] | None = None,
+    gate: Callable[[], None] | None = None,
+) -> Callable[[], Any]:
+    """SDK 호출 하나를 관찰 훅으로 감싼다 — S2B-2a 요건 7의 작은 래퍼.
+
+    `_retry`는 결과를 일반 호출처럼 부른다. 안에서는 (지역 전제) → 승인 → (취소
+    확인) → SDK 호출 → 응답/오류 훅 순서로만 움직이므로 재시도·거부 인자 재요청마다
+    새 티켓이 자연히 생긴다. 승인 **직전**의 취소 확인은 `watch.admit`의 잠금 안에
+    하나만 있다 — 줄 밖의 확인은 기다림 사이가 뚫리므로 따로 두지 않는다. 관찰자
+    자신의 실패는 `ObserverFailure`로 갈라 올라가 SDK 예외와 섞이지 않는다. 취소
+    (BaseException)는 오류 훅 없이 그대로 올라간다 — 승인이 이미 났다면 예약은
+    불확실성으로 보수적으로 남는다.
+    """
+
+    def attempt() -> Any:
+        prepared = None if prepare is None else prepare()  # 지역 전제가 승인보다 먼저다
+        try:
+            ticket, meta = watch.admit(make_meta, gate)
+            if gate is not None:
+                gate()  # 승인이 늦어지는 동안 취소가 왔으면 SDK를 부르지 않는다
+            try:
+                response = call(prepared)
+            except Exception as exc:  # noqa: BLE001 - 오류 훅이 먼저, 재분류는 _retry가 한다
+                try:
+                    watch.observer.on_error(ticket, meta, exc)
+                except Exception as hook_exc:  # noqa: BLE001
+                    raise _hook_failure(watch, "on_error", hook_exc) from hook_exc
+                raise
+            try:
+                watch.observer.on_response(ticket, meta, response)
+            except Exception as exc:  # noqa: BLE001
+                raise _hook_failure(watch, "on_response", exc) from exc
+            return response
+        finally:
+            if prepared is not None:
+                prepared.close()
+
+    return attempt
+
+
+def _snapshot_options(options: Mapping[str, Any]) -> Mapping[str, Any]:
+    """나가는 인자의 깊은 사본을 읽기 전용으로 돌려준다. 자격 칸은 담지 않는다.
+
+    사본일 뿐 나가는 요청은 한 글자도 안 바뀐다 — 관찰자가 이 사본을 어떻게 손대도
+    실제 요청은 그대로다(요건 2).
+    """
+    return MappingProxyType(
+        {
+            name: deepcopy(value)
+            for name, value in options.items()
+            if name not in _REDACTED_OPTION_KEYS
+        }
+    )
+
+
+def _audio_attempt_meta(
+    watch: _AttemptWatch,
+    chunk: Chunk,
+    kind: str,
+    required: dict[str, Any],
+    extras: dict[str, Any],
+) -> RequestAttemptMeta:
+    """오디오 시도의 관찰 메타. 인자는 **지금 이 시도에** 실릴 것만 담는다.
+
+    400으로 인자를 떼고 다시 부르는 재요청은 `extras`가 줄어든 채로 여기를 다시
+    지나므로 관찰자가 원요청과 축소 재요청을 구분할 수 있다.
+    """
+    return RequestAttemptMeta(
+        attempt_id=uuid4().hex,
+        operation=TRANSCRIPTION_OPERATION,
+        model=str(required.get("model", "")),
+        kind=kind,
+        stem=watch.stem,
+        source=watch.source,
+        chunk_index=chunk.index,
+        chunk_offset=chunk.offset,
+        chunk_duration=chunk.duration,
+        options=_snapshot_options({**required, **extras}),
+    )
+
+
+def _responses_attempt_meta(model: str, payload: Mapping[str, object]) -> RequestAttemptMeta:
+    """Responses 호출의 관찰 메타. 페이로드는 방어적 깊은 사본이다.
+
+    창·블록 같은 사업 신원은 페이로드 안에 있고 그 해석은 호출자 소유다 — 여기는
+    실려 나가는 값 자체만 비춘다.
+    """
+    return RequestAttemptMeta(
+        attempt_id=uuid4().hex,
+        operation=RESPONSES_OPERATION,
+        model=model,
+        options=_snapshot_options({"model": model, **dict(payload)}),
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class LiveTranscriber:
     """실제 OpenAI 호출. `record`와 `--online`에서만 만들어진다.
@@ -232,11 +467,16 @@ class LiveTranscriber:
     취소(WorkflowCancelled, BaseException)는 아래 `except Exception` 재시도 판단에
     잡히지 않고 그대로 올라간다. 기본 None은 하위 호환이다 — 게이트 없이 만든
     호출자(레거시 `pipeline`)는 예전과 같이 움직인다.
+
+    `observer`는 실제 SDK 호출 하나하나를 겉에서 보는 선택 경계다(S2B-2a). 맨 뒤에
+    붙었으니 위치 인자 호출자는 그대로다. 기본 None은 하위 호환 — 관찰자가 없으면
+    지금과 완전히 같이 움직인다.
     """
 
     api_key: str
     base_url: str | None = None
     cancellation: Callable[[], None] | None = None
+    observer: RequestObserver | None = None
 
     def _client(self) -> Any:
         import openai  # 지연 import — 오프라인 경로에서는 패키지조차 건드리지 않는다.
@@ -274,15 +514,26 @@ class LiveTranscriber:
         cfg: Config,
         extras: dict[str, Any],
         kind: str = FIXTURE_KIND,
+        watch: _AttemptWatch | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         """청크 하나를 전사한다. 응답과 **통과한 부가 인자**를 함께 돌려준다.
 
         400이면 오류 메시지가 지목한 인자만 떼고 다시 부른다. 아무 이름도 짚어주지
         않으면 그때만 전부 뗀다 — 힌트 하나 때문에 언어 지정까지 잃을 이유가 없다.
+        `watch`가 있으면 매 시도를 관찰 훅으로 감싼다(S2B-2a).
         """
         what = f"{_KIND_LABELS.get(kind, '전사')} 조각 {chunk.index}"
         while True:
-            attempt = partial(_create, client, chunk, _required(cfg, kind), extras)
+            required = _required(cfg, kind)
+            attempt: Callable[[], Any] = partial(_create, client, chunk, required, extras)
+            if watch is not None:
+                attempt = _observed_call(
+                    watch,
+                    partial(_audio_attempt_meta, watch, chunk, kind, required, extras),
+                    partial(_send_audio, client, required, extras),
+                    prepare=partial(_open_audio, chunk),
+                    gate=self.cancellation,
+                )
             try:
                 return _to_dict(self._retry(attempt, what, cfg)), extras
             except Exception as exc:  # noqa: BLE001 - 400만 걸러내고 나머지는 재던진다
@@ -305,20 +556,28 @@ class LiveTranscriber:
 
         첫 조각을 혼자 보내 인자 조합을 확정한 뒤 나머지를 병렬로 던진다. 인자가
         틀렸을 때 조각 수만큼 똑같이 실패하며 업로드를 낭비하지 않기 위해서다.
+        빈 작업은 클라이언트도 관찰 훅도 없이 곧장 돌아간다(요건 3).
         """
         if not job.chunks:
             return []
         client = self._client()
         head, *tail = job.chunks
         opening = _verify_extras(cfg) if job.kind in _HINTED_KINDS else _extras(cfg)
-        first, extras = self._one_chunk(client, head, cfg, opening, job.kind)
+        watch = (
+            None
+            if self.observer is None
+            else _AttemptWatch(observer=self.observer, stem=job.stem, source=job.source)
+        )
+        first, extras = self._one_chunk(client, head, cfg, opening, job.kind, watch)
 
         payloads = [first]
         if tail:
             with ThreadPoolExecutor(max_workers=env.max_workers()) as pool:
                 payloads.extend(
                     pool.map(
-                        lambda chunk: self._one_chunk(client, chunk, cfg, extras, job.kind)[0],
+                        lambda chunk: self._one_chunk(client, chunk, cfg, extras, job.kind, watch)[
+                            0
+                        ],
                         tail,
                     )
                 )
@@ -329,8 +588,21 @@ class LiveTranscriber:
 
 
 def _create(client: Any, chunk: Chunk, required: dict[str, Any], extras: dict[str, Any]) -> Any:
+    """관찰이 없을 때의 한 덩어리 길 — 열어서 보내고 닫는다."""
     with chunk.path.open("rb") as handle:
-        return client.audio.transcriptions.create(file=handle, **required, **extras)
+        return _send_audio(client, required, extras, handle)
+
+
+def _open_audio(chunk: Chunk) -> Any:
+    """SDK 호출의 지역 전제(S2B-2a) — 승인은 이 문이 지난 뒤에만 일어난다.
+
+    파일이 없거나 읽히지 않으면 승인도 SDK 호출도 없이 그대로 실패한다.
+    """
+    return chunk.path.open("rb")
+
+
+def _send_audio(client: Any, required: dict[str, Any], extras: dict[str, Any], handle: Any) -> Any:
+    return client.audio.transcriptions.create(file=handle, **required, **extras)
 
 
 def _is_bad_request(exc: Exception) -> bool:
@@ -419,11 +691,13 @@ def get_transcriber(
     online: bool = False,
     force_offline: bool = False,
     cancellation: Callable[[], None] | None = None,
+    observer: RequestObserver | None = None,
 ) -> Transcriber:
     """오프라인이면 언제나 픽스처를 돌려준다. 이 함수가 비용 안전장치다.
 
     `cancellation`은 실제 호출 경로에만 심는다(S1A) — 픽스처는 외부 호출이
-    없어 게이트가 확인할 것도 없다.
+    없어 게이트가 확인할 것도 없다. `observer`도 같은 길이다(S2B-2a): 픽스처
+    재생은 관찰 훅을 일으키지 않는다(요건 3).
     """
     if force_offline or (not online and env.is_offline()):
         return FixtureTranscriber(fixture_dir=env.fixture_dir())
@@ -432,6 +706,7 @@ def get_transcriber(
         api_key=env.require_api_key(force=online),
         base_url=env.base_url(),
         cancellation=cancellation,
+        observer=observer,
     )
 
 
@@ -492,25 +767,59 @@ def request_vision(
 
 
 def request_luna_vision(
-    client: Any, *, model: str, payload: Mapping[str, object], online: bool = False
+    client: Any,
+    *,
+    model: str,
+    payload: Mapping[str, object],
+    online: bool = False,
+    observer: RequestObserver | None = None,
+    cancellation: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     """승인형 rough-cut 비전의 Responses API 경계.
 
     기존 B-roll 프로토타입의 Chat Completions 경로를 바꾸지 않고, 새 1.1 분석만
     이 함수를 쓴다. 명시적 승인에서 온 ``online=True`` 없이는 클라이언트도
-    만지지 않는다.
+    만지지 않는다. `observer`는 실제 요청 하나를 겉에서 보는 선택 경계다(S2B-2a)
+    — 승인 게이트를 지난 뒤에만 움직이고, 단발 요청이라 기다리는 대기열이 없다.
+    `cancellation`은 승인·전송 주위의 선택 게이트다. 이미 날아간 SDK 호출은
+    되돌릴 수 없으니 결과 보고는 그대로 둔다.
     """
     if not online:
         raise RuntimeError(
             "Luna 비전 호출은 명시적 online=True 없이는 닫혀 있다 — "
             "AnalysisAuthorization 승인이 필요하다"
         )
-    response = client.responses.create(model=model, **dict(payload))
+    if "model" in payload:
+        # 지역 요청 결함이다 — 승인(유료 예약)을 소비한 뒤 SDK가 TypeError로 닫는
+        # 길을 만들지 않는다. 관찰자가 없어도 같은 TypeError로 닫힌다.
+        raise TypeError(
+            f"payload가 model을 다시 정의한다({payload['model']!r}) — "
+            "모델의 정본은 함수 인자 하나뿐이다"
+        )
+
+    def send(_prepared: Any) -> Any:
+        return _responses_create(client, model, payload)
+
+    if observer is None:
+        if cancellation is not None:
+            cancellation()
+        response = send(None)
+    else:
+        response = _observed_call(
+            _AttemptWatch(observer=observer),
+            partial(_responses_attempt_meta, model, payload),
+            send,
+            gate=cancellation,
+        )()
     converted = _to_dict(response)
     output_text = getattr(response, "output_text", None)
     if "output_text" not in converted and isinstance(output_text, str):
         converted["output_text"] = output_text
     return converted
+
+
+def _responses_create(client: Any, model: str, payload: Mapping[str, object]) -> Any:
+    return client.responses.create(model=model, **dict(payload))
 
 
 class VisionResponder(Protocol):
