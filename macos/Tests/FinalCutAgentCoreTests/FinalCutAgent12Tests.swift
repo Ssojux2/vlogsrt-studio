@@ -302,7 +302,7 @@ func wavHeader(rate: UInt32) -> Data {
 @Test func shareDestinationReportsInstallStateAgainstTheBundledRevision() throws {
   let root = FileManager.default.temporaryDirectory
     .appendingPathComponent(UUID().uuidString, isDirectory: true)
-  let installed = root.appendingPathComponent("ShareTemplates", isDirectory: true)
+  let installed = root.appendingPathComponent("Share Destinations", isDirectory: true)
   try FileManager.default.createDirectory(at: installed, withIntermediateDirectories: true)
   defer { try? FileManager.default.removeItem(at: root) }
 
@@ -324,5 +324,5 @@ func wavHeader(rate: UInt32) -> Data {
 
   #expect(
     ShareDestination.defaultInstalledDirectory()
-      .path.hasSuffix("Library/Application Support/ProApps/ShareTemplates"))
+      .path.hasSuffix("Library/Application Support/ProApps/Share Destinations"))
 }
