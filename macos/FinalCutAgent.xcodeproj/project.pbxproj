@@ -508,7 +508,7 @@
 				);
 				LIBRARY_SEARCH_PATHS = "$(inherited) /Library/Developer/SDKs/WorkflowExtensionSDK.sdk/usr/lib";
 				OTHER_LDFLAGS = (
-					"$(inherited) -fapplication-extension -lProExtension",
+					"$(inherited) -fapplication-extension -lProExtension -rpath \"/Applications/Final Cut Pro.app/Contents/Frameworks\"",
 					"-ObjC",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.ssojux2.vlogsrt.workflow;
@@ -633,7 +633,7 @@
 				);
 				LIBRARY_SEARCH_PATHS = "$(inherited) /Library/Developer/SDKs/WorkflowExtensionSDK.sdk/usr/lib";
 				OTHER_LDFLAGS = (
-					"$(inherited) -fapplication-extension -lProExtension",
+					"$(inherited) -fapplication-extension -lProExtension -rpath \"/Applications/Final Cut Pro.app/Contents/Frameworks\"",
 					"-ObjC",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.ssojux2.vlogsrt.workflow;
