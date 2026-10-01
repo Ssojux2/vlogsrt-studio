@@ -186,12 +186,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let job = try RoundTripJob(workspace: workspace, id: jobID)
         let store = try SecurityScopedBookmarkStore()
         let granted = LibraryGrantStore.bookmarkedRoot(bookmarkStore: store)
-        let grant = try LibraryGrantStore.validate(
-          workspace: workspace, bookmarkedRoot: granted)
         let accessing = granted?.startAccessingSecurityScopedResource() ?? false
         defer {
           if accessing, let granted { granted.stopAccessingSecurityScopedResource() }
         }
+        let grant = try LibraryGrantStore.validate(
+          workspace: workspace, bookmarkedRoot: granted)
         let placed = try SRTDelivery.placeBesideBundle(job: job, grant: grant)
         NSLog("SRT 배달: %@ — Final Cut Pro: File > Import > Captions → Relative to Timeline", placed.path)
       } catch {

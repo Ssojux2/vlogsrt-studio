@@ -713,42 +713,26 @@ public nonisolated final class WorkflowViewController: NSViewController {
 
   /// 호스트 실행기 URL 열기 — 문지기는 현재 자막 job에 묶는다.
   @MainActor private func openCaptionAgentURL(_ url: URL, pending: String) throws {
-    guard let context = extensionContext else {
-      throw RoundTripExtensionError.noExtensionContext
-    }
-    // 열기 **전에** 우편함에 남긴다 — ExtensionContext.open의 URL은 사라질
-    // 수 있지만 App Group 기록은 남는다. 넣지 못한 요청을 열지 않는다.
+    // Workflow SDK가 만든 view controller에는 extensionContext가 주입되지 않을 수
+    // 있다. URL은 wake-up 신호일 뿐이고 권위는 mailbox이므로 먼저 기록한다.
     try HostActionMailbox.enqueue(url: url, workspace: try AppGroupWorkspace.live())
     captionStatusLabel.stringValue = pending
-    context.open(url) { [weak self] opened in
-      guard let self else { return }
-      Task { @MainActor in
-        if !opened {
-          self.captionStatusLabel.stringValue =
-            "컨테이너 앱 열기 실패 — 앱이 실행 중인지 확인하세요"
-        }
-        self.refreshCaptionPanel()
-      }
+    guard wakeHost(url) else {
+      captionStatusLabel.stringValue = "컨테이너 앱 열기 실패 — 앱이 실행 중인지 확인하세요"
+      return
     }
+    refreshCaptionPanel()
   }
 
   @MainActor private func openHostURL(_ url: URL, pending: String) throws {
-    guard let context = extensionContext else {
-      throw RoundTripExtensionError.noExtensionContext
-    }
-    // 열기 전에 우편함에 남긴다(다른 열기 도우미와 같은 계약) — 권한 요청이
-    // 사라지면 선택기가 아예 뜨지 않는다.
+    // controller extensionContext는 Workflow SDK lifecycle의 authority가 아니다.
     try HostActionMailbox.enqueue(url: url, workspace: try AppGroupWorkspace.live())
     status.stringValue = pending
-    context.open(url) { [weak self] opened in
-      guard let self else { return }
-      Task { @MainActor in
-        if !opened {
-          self.status.stringValue = "컨테이너 앱 열기 실패 — 앱이 실행 중인지 확인하세요"
-        }
-        self.refreshGrantStatus()
-      }
+    guard wakeHost(url) else {
+      status.stringValue = "컨테이너 앱 열기 실패 — 앱이 실행 중인지 확인하세요"
+      return
     }
+    refreshGrantStatus()
   }
 
   @MainActor private func openAgentURL(
@@ -757,9 +741,6 @@ public nonisolated final class WorkflowViewController: NSViewController {
     monitor: WorkflowRefreshModel.Flavor? = nil,
     baselineAttemptID: String? = nil
   ) throws {
-    guard let context = extensionContext else {
-      throw RoundTripExtensionError.noExtensionContext
-    }
     status.stringValue = pending + " · 진행을 자동으로 새로고칩니다"
     if let monitor {
       // 요청 세션 — 요청 순간의 마지막 시도를 baseline으로 묶어, 새 엔진이
@@ -771,20 +752,19 @@ public nonisolated final class WorkflowViewController: NSViewController {
     // 열기 직전에 우편함에 남긴다 — 분석·러프컷 요청도 URL이 사라지는 결함의
     // 범위 안에 있다(권한 요청만의 문제가 아니다).
     try HostActionMailbox.enqueue(url: url, workspace: try AppGroupWorkspace.live())
-    context.open(url) { [weak self] opened in
-      guard let self else { return }
-      Task { @MainActor in
-        // 늦은 열기 결과가 새 job·새 요청의 상태를 덮는 길을 닫는다(S2A-3).
-        guard
-          gate.accepts(currentJobID: self.job?.id, currentGeneration: self.refreshGeneration)
-        else { return }
-        self.analyzeButton.isEnabled = true
-        if !opened {
-          self.stopRefreshing()
-          self.status.stringValue = "컨테이너 앱 열기 실패"
-        }
-      }
+    // 늦은 wake 결과가 새 job·새 요청의 상태를 덮는 길을 닫는다(S2A-3).
+    guard gate.accepts(currentJobID: job?.id, currentGeneration: refreshGeneration) else { return }
+    analyzeButton.isEnabled = true
+    if !wakeHost(url) {
+      stopRefreshing()
+      status.stringValue = "컨테이너 앱 열기 실패"
     }
+  }
+
+  /// App Extension controller의 context 주입 여부와 무관하게 host를 깨운다.
+  /// URL은 mailbox에 이미 기록된 action을 소비하라는 wake-up 신호다.
+  @MainActor private func wakeHost(_ url: URL) -> Bool {
+    NSWorkspace.shared.open(url)
   }
 
   @MainActor private func clearCandidates() {
