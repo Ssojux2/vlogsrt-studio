@@ -22,6 +22,7 @@
 		61691110A241AAB76BD89561 /* BundledEngineLauncher.swift in Sources */ = {isa = PBXBuildFile; fileRef = 36EC8A37599443FB62130C7B /* BundledEngineLauncher.swift */; };
 		6A374178121C2DAE331BD569 /* AppGroupWorkspace.swift in Sources */ = {isa = PBXBuildFile; fileRef = CB047E1AA867D819DDA5D4B2 /* AppGroupWorkspace.swift */; };
 		6B0B26CDFC83ABA99403586B /* RoughCutInbox.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9097DBB5E43B39E4C5C64139 /* RoughCutInbox.swift */; };
+		6F6C0095669547A52FA4D6CB /* HostActionMailbox.swift in Sources */ = {isa = PBXBuildFile; fileRef = C4A497F8C21046101563B674 /* HostActionMailbox.swift */; };
 		70146EE378CB76A246D0AA11 /* ShareDestination.swift in Sources */ = {isa = PBXBuildFile; fileRef = B080868081DD514BA06BA887 /* ShareDestination.swift */; };
 		757008D9DBF574C4BE97B53C /* IdentityRoundTripService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C7DB4044A45662630C30DA8 /* IdentityRoundTripService.swift */; };
 		7B15858CECF631D1876C8320 /* FinalCutPasteboard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0ABF9EFE3FDDC83B32482D93 /* FinalCutPasteboard.swift */; };
@@ -126,6 +127,7 @@
 		BF3C5A5E380F891AB16ACB4F /* FinalCutAgentWorkflowExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = FinalCutAgentWorkflowExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		C07C38B451E68FDE56A5A4F0 /* EngineRequestGate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EngineRequestGate.swift; sourceTree = "<group>"; };
 		C263664F6E10FCD89C5CC000 /* WorkflowViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkflowViewController.swift; sourceTree = "<group>"; };
+		C4A497F8C21046101563B674 /* HostActionMailbox.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostActionMailbox.swift; sourceTree = "<group>"; };
 		CA7429B15E68FD7888AAC6FD /* EngineRoleCredentials.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EngineRoleCredentials.swift; sourceTree = "<group>"; };
 		CB047E1AA867D819DDA5D4B2 /* AppGroupWorkspace.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppGroupWorkspace.swift; sourceTree = "<group>"; };
 		D3DE2FF617C73D3120B40667 /* EngineRequestReadiness.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EngineRequestReadiness.swift; sourceTree = "<group>"; };
@@ -185,6 +187,7 @@
 				AB6586463B6A94DBFAE39DDA /* EngineRuntime.swift */,
 				6832A3B51FA754EC6959C587 /* FinalCutImporter.swift */,
 				0ABF9EFE3FDDC83B32482D93 /* FinalCutPasteboard.swift */,
+				C4A497F8C21046101563B674 /* HostActionMailbox.swift */,
 				2C7DB4044A45662630C30DA8 /* IdentityRoundTripService.swift */,
 				6852655CCFB4C1839FD4A0FE /* KeychainStore.swift */,
 				714BD102C51B1A26375F63BF /* LegacyJobStore.swift */,
@@ -430,6 +433,7 @@
 				7B9C21ADBBF564CB5FC4E15E /* EngineRuntime.swift in Sources */,
 				0F52AD7FD9F1954D2B62D9F2 /* FinalCutImporter.swift in Sources */,
 				7B15858CECF631D1876C8320 /* FinalCutPasteboard.swift in Sources */,
+				6F6C0095669547A52FA4D6CB /* HostActionMailbox.swift in Sources */,
 				757008D9DBF574C4BE97B53C /* IdentityRoundTripService.swift in Sources */,
 				52A1F4E57DD9A0488CE5C99B /* KeychainStore.swift in Sources */,
 				321BE228504D9C851B58B978 /* LegacyJobStore.swift in Sources */,

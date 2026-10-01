@@ -716,6 +716,9 @@ public nonisolated final class WorkflowViewController: NSViewController {
     guard let context = extensionContext else {
       throw RoundTripExtensionError.noExtensionContext
     }
+    // 열기 **전에** 우편함에 남긴다 — ExtensionContext.open의 URL은 사라질
+    // 수 있지만 App Group 기록은 남는다. 넣지 못한 요청을 열지 않는다.
+    try HostActionMailbox.enqueue(url: url, workspace: try AppGroupWorkspace.live())
     captionStatusLabel.stringValue = pending
     context.open(url) { [weak self] opened in
       guard let self else { return }
@@ -733,6 +736,9 @@ public nonisolated final class WorkflowViewController: NSViewController {
     guard let context = extensionContext else {
       throw RoundTripExtensionError.noExtensionContext
     }
+    // 열기 전에 우편함에 남긴다(다른 열기 도우미와 같은 계약) — 권한 요청이
+    // 사라지면 선택기가 아예 뜨지 않는다.
+    try HostActionMailbox.enqueue(url: url, workspace: try AppGroupWorkspace.live())
     status.stringValue = pending
     context.open(url) { [weak self] opened in
       guard let self else { return }
@@ -762,6 +768,9 @@ public nonisolated final class WorkflowViewController: NSViewController {
     }
     // 문지기는 모니터 시작 **뒤에** 잡는다 — 세대는 그 시작이 올린 값이다.
     let gate = WorkflowDeliveryGate(jobID: job?.id ?? "", generation: refreshGeneration)
+    // 열기 직전에 우편함에 남긴다 — 분석·러프컷 요청도 URL이 사라지는 결함의
+    // 범위 안에 있다(권한 요청만의 문제가 아니다).
+    try HostActionMailbox.enqueue(url: url, workspace: try AppGroupWorkspace.live())
     context.open(url) { [weak self] opened in
       guard let self else { return }
       Task { @MainActor in

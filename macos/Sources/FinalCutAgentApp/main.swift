@@ -1,4 +1,5 @@
 import AppKit
+import Carbon.HIToolbox
 import CryptoKit
 import FinalCutAgentCore
 
@@ -13,7 +14,9 @@ import FinalCutAgentCore
 //    실행이 일어나지 않는다. 흐름은 패널의 명시적 동작으로만 열린다.
 //  - vlogsrt-agent:// URL(analyze·roughcut·import·caption-estimate·
 //    caption-run)은 각 조정자를 통해 엔진을 실행하고 결과를 job 폴더에
-//    동기화한다 — 상태도 패널이 그 기록을 읽어 보여준다.
+//    동기화한다 — 상태도 패널이 그 기록을 읽어 보여준다. URL 자체는
+//    사라질 수 있어 깨움 신호일 뿐이고, 실행할 동작은 확장이 열기 전에
+//    남긴 App Group 우편함(HostActionMailbox)에서 배타적으로 나온다.
 // ─────────────────────────────────────────────────────────────
 
 @MainActor
@@ -22,8 +25,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   /// 보다 먼저고, 해제는 어떤 끝에서든 일어난다.
   private let engineRequestGate = EngineRequestGate()
 
+  /// ExtensionContext.open은 host가 막 시작될 때 일반 URL delegate를 건너뛸 수 있다.
+  /// URL launch Apple event를 launch 전부터 직접 받아 우편함 소비의 깨움 신호로 쓴다.
+  func applicationWillFinishLaunching(_ notification: Notification) {
+    NSAppleEventManager.shared().setEventHandler(
+      self,
+      andSelector: #selector(handleGetURLAppleEvent(_:withReplyEvent:)),
+      forEventClass: AEEventClass(kInternetEventClass),
+      andEventID: AEEventID(kAEGetURL)
+    )
+  }
+
   func applicationDidFinishLaunching(_ notification: Notification) {
     preserveLegacyJobsIfNeeded()
+    // 찬 시작에서 URL이 사라진 경우 — 우편함이 곧 배달 경로다.
+    drainHostActionMailbox()
+  }
+
+  @objc private func handleGetURLAppleEvent(
+    _ event: NSAppleEventDescriptor,
+    withReplyEvent replyEvent: NSAppleEventDescriptor
+  ) {
+    guard
+      let raw = event.paramDescriptor(forKeyword: AEKeyword(keyDirectObject))?.stringValue,
+      let url = URL(string: raw)
+    else { return }
+    wakeUpFromAgentURL(url)
   }
 
   func application(_ application: NSApplication, open urls: [URL]) {
@@ -33,6 +60,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       handleSharedFiles(fileURLs)
     }
     for url in customURLs {
+      wakeUpFromAgentURL(url)
+    }
+  }
+
+  // ─── 확장 동작 우편함 — URL은 깨움일 뿐 권위는 우편함에 있다 ────
+
+  /// ExtensionContext.open이 호스트를 깨울 때 URL 자체는 사라질 수 있다
+  /// (찬·따뜻한 시작 모두 실측 — 권한 선택기가 뜨지 않았다). 그래서 URL
+  /// 도착은 소비 신호로만 쓰고, 실행할 동작은 App Group 우편함에서
+  /// 배타적으로 꺼내 기존 핸들러로 돌린다.
+  private func wakeUpFromAgentURL(_ url: URL) {
+    NSLog("에이전트 URL 깨움: %@", url.absoluteString)
+    drainHostActionMailbox()
+  }
+
+  private func drainHostActionMailbox() {
+    let drain: HostActionDrain
+    do {
+      drain = try HostActionMailbox.drain(workspace: try AppGroupWorkspace.live())
+    } catch {
+      NSLog("호스트 동작 우편함 소비 실패: %@", String(describing: error))
+      return
+    }
+    for discard in drain.discarded {
+      NSLog("호스트 동작 폐기: %@ (%@)", discard.id, discard.reason.rawValue)
+    }
+    for envelope in drain.delivered {
+      guard let url = URL(string: envelope.url) else { continue }
       handleAgentURL(url)
     }
   }
@@ -103,25 +158,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     panel.canChooseFiles = false
     panel.allowsMultipleSelection = false
     panel.message = "Final Cut 라이브러리(.fcpbundle)가 있는 폴더를 선택하세요 — SRT를 그 옆에 저장합니다"
-    panel.begin { response in
-      Task { @MainActor in
-        guard response == .OK, let url = panel.url else { return }
-        do {
-          let name = try LibraryGrantStore.bundleName(
-            inRoot: url.standardizedFileURL.path, fileManager: .default)
-          let store = try SecurityScopedBookmarkStore()
-          try store.save(url, key: LibraryGrantStore.bookmarkKey)
-          try LibraryGrantStore.save(
-            LibraryGrant(
-              rootPath: url.standardizedFileURL.path,
-              bundleName: name,
-              grantedAt: ISO8601DateFormatter().string(from: Date())),
-            workspace: try AppGroupWorkspace.live())
-          NSLog("라이브러리 폴더 권한 기록: %@ (번들 %@)", url.path, name)
-        } catch {
-          NSAlert(error: error).runModal()
-        }
-      }
+    NSApp.activate(ignoringOtherApps: true)
+    guard panel.runModal() == .OK, let url = panel.url else { return }
+    do {
+      let name = try LibraryGrantStore.bundleName(
+        inRoot: url.standardizedFileURL.path, fileManager: .default)
+      let store = try SecurityScopedBookmarkStore()
+      try store.save(url, key: LibraryGrantStore.bookmarkKey)
+      try LibraryGrantStore.save(
+        LibraryGrant(
+          rootPath: url.standardizedFileURL.path,
+          bundleName: name,
+          grantedAt: ISO8601DateFormatter().string(from: Date())),
+        workspace: try AppGroupWorkspace.live())
+      NSLog("라이브러리 폴더 권한 기록: %@ (번들 %@)", url.path, name)
+    } catch {
+      NSAlert(error: error).runModal()
     }
   }
 
