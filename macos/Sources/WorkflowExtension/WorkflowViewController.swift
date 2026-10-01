@@ -207,9 +207,16 @@ public nonisolated final class WorkflowViewController: NSViewController {
   @MainActor private func refreshStep() {
     let captionDelivered =
       captionDeliverButton.isEnabled || captionStatusLabel.stringValue.contains("완료")
+    let libraryGranted: Bool
+    if let workspace = try? AppGroupWorkspace.live() {
+      libraryGranted = LibraryGrantStore.loadIfPresent(workspace: workspace) != nil
+    } else {
+      libraryGranted = false
+    }
     let step: Int
     if job == nil {
-      step = intakeButton.isEnabled ? 1 : 0
+      // 권한이 저장된 뒤에는 아직 inbox가 없어도 다음 action은 공유 내보내기다.
+      step = libraryGranted ? 1 : 0
     } else if roughcutButton.isEnabled || !candidateRows.isEmpty {
       step = 3
     } else if importConfirmButton.isEnabled || importRetryButton.isEnabled {
@@ -221,7 +228,7 @@ public nonisolated final class WorkflowViewController: NSViewController {
     } else {
       step = 2
     }
-    let names = ["권한", "내보내기", "분석", "검토·러프컷", "가져오기·자막"]
+    let names = ["권한", "내보내기", "분석", "검토·러프컷", "가져오기", "자막"]
     stepLabel.stringValue = "단계 \(step)/5 · \(names[min(step, names.count - 1)])"
   }
 
