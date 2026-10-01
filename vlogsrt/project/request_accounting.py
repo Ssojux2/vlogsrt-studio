@@ -21,6 +21,10 @@
 교체한다. 아직 UI가 보지 못하는 내부 산물(가격 없는 미터링 증거)은
 ``accounting/unpriced-usage.jsonl``에 남긴다 — S2B-3가 사용자 표면을 만든다.
 
+자막 실행(S4A)도 같은 원장·같은 규율을 쓴다 — ``CaptionAccounting``이 자막
+승인의 신원으로 묶는다. 투영은 ``caption-usage.jsonl``이고 재시도 누적(같은
+승인의 원장 이어받기)은 원장 정본이 담보한다.
+
 이 모듈은 ``transcribe``를 import하지 않는다. 관찰자는 구조적 프로토콜
 (``authorize``/``on_response``/``on_error``)만 지키면 되고, 연산 구분은 메타의
 ``operation`` 문자열로 한다 — 레거시→프로젝트 import 경계는 그대로다.
@@ -58,6 +62,7 @@ from vlogsrt.project.workflow_analysis import AnalysisSettings
 from vlogsrt.project.workflow_protocol import (
     ActualUsage,
     AnalysisAuthorization,
+    CaptionAuthorization,
     PricingSnapshot,
     decode_message,
     encode_message,
@@ -67,6 +72,10 @@ ACCOUNTING_DIR = "accounting"
 LEDGER_NAME = "budget-ledger.json"
 EVIDENCE_NAME = "unpriced-usage.jsonl"
 USAGE_NAME = "analysis-usage.jsonl"
+# 자막 작업의 투영·시도 기록 이름(S4A) — 원장 파일은 analysis와 같은 자리·같은
+# 이름이다(작업공간이 다른 job이므로 겹치지 않는다).
+CAPTION_USAGE_NAME = "caption-usage.jsonl"
+CAPTION_ATTEMPTS_NAME = "caption-attempts.jsonl"
 
 _TRANSCRIPTION_OPERATION = "audio.transcriptions"
 _RESPONSES_OPERATION = "responses.create"
@@ -148,6 +157,23 @@ def authorization_identity_sha256(authorization: AnalysisAuthorization) -> str:
     )
 
 
+def caption_authorization_identity_sha256(authorization: CaptionAuthorization) -> str:
+    """자막 승인 전체의 지문 — 같은 재료·같은 규율(S4A).
+
+    요청 리비전이 이미 오디오·XML·원본 리비전을 함께 묶고 있으므로 넷 대신 셋에
+    승인 시각을 얹는다. 시각까지 묶는 이유는 분석과 같다 — 같은 승인을 시각만
+    바꿔 다시 써서 지출 원장을 리셋하는 길이 없다.
+    """
+    return _digest(
+        {
+            "authorized_at": authorization.authorized_at,
+            "estimate_revision": authorization.estimate_revision,
+            "pricing_snapshot_revision": authorization.pricing_snapshot_revision,
+            "request_revision": authorization.request_revision,
+        }
+    )
+
+
 def quote_policy_sha256(settings: AnalysisSettings) -> str:
     return _digest(
         {
@@ -177,6 +203,21 @@ def ledger_policy_sha256(
     )
 
 
+def caption_ledger_policy_sha256(*, settings_sha256: str, project_config: ProjectConfig) -> str:
+    """자막 원장의 정책 지문 — 자막 설정 지문과 엔드포인트만 묶는다(S4A).
+
+    자막 호출은 전사뿐이라 견적 정책(Luna 토큰 환산)이 없다. 대신 자막 설정
+    지문(``caption_settings_sha256`` — 모델·온도·조각 길이)이 승인·추정과 원장을
+    같은 재료로 묶는다.
+    """
+    return _digest(
+        {
+            "caption_settings_sha256": settings_sha256,
+            "endpoint_sha256": endpoint_identity_sha256(project_config),
+        }
+    )
+
+
 # ─────────────────────────────────────────────────────────────
 #  요청 상한 — 추정과 실제 승인이 같은 식을 쓴다
 # ─────────────────────────────────────────────────────────────
@@ -191,18 +232,23 @@ def audio_per_minute_rate(model: str, pricing: PricingSnapshot) -> Decimal:
     raise AccountingError(f"가격 스냅샷에 없는 전사 모델이다 — 상한을 정할 수 없다: {model!r}")
 
 
-def request_bound(meta: Any, *, settings: AnalysisSettings, pricing: PricingSnapshot) -> Decimal:
+def request_bound(
+    meta: Any, *, settings: AnalysisSettings | None, pricing: PricingSnapshot
+) -> Decimal:
     """이 요청 하나의 보수적 상한 — 예약은 이 금액으로 디스크에 남는다.
 
     오디오는 조각 길이 전부를 그 모델의 분당가로 잰다(재시도·거부 인자 재요청은
     각각 새 요청이니 새 예약이다). Luna은 직렬화 글자 바이트·이미지 장수·출력
     상한을 정책 토큰식으로 환산한다 — base64 이미지 바이트를 글자 토큰으로 세지
-    않고 low detail 정액의 여유 배수로 잰다.
+    않고 low detail 정액의 여유 배수로 잰다. ``settings``는 Luna 상한에만 필요하다
+    — 전사만 쓰는 실행(자막, S4A)은 없어도 된다.
     """
     operation = getattr(meta, "operation", "")
     if operation == _TRANSCRIPTION_OPERATION:
         return _audio_bound(meta, pricing=pricing)
     if operation == _RESPONSES_OPERATION:
+        if settings is None:
+            raise AccountingError("Responses 상한에는 견적 정책이 필요하다 — 안전하게 실패한다")
         return _luna_bound(meta, settings=settings, pricing=pricing)
     raise AccountingError(f"지원하지 않는 연산이다 — 상한을 정할 수 없다: {operation!r}")
 
@@ -550,92 +596,37 @@ class _Ticket:
     window_id: str | None
 
 
-class AnalysisAccounting:
-    """실행 하나의 내구 회계 문맥 — 원장·투영·증거를 소유한다.
+class _LedgerAccounting:
+    """실행 하나의 내구 회계 문맥 — 원장·투영·증거를 소유한다(분석·자막 공통).
 
     치명 실패가 한 번이라도 일어나면 문맥이 닫힌다(``ensure_healthy``가 실행
     단계 사이에서 들춘다). 예산 거부는 닫지 않는다 — 그건 고장이 아니라 상한이
-    하는 일이다.
+    하는 일이다. 하위 클래스가 정하는 것은 상한 계산(``_request_bound``)과
+    원장 신원·과거 기록 검사(``open``)뿐이다.
     """
 
     def __init__(
         self,
         *,
         workspace: Path,
-        settings: AnalysisSettings,
         pricing: PricingSnapshot,
         ledger: BudgetLedger,
         attempt_id: str,
         input_revision: str,
+        usage_name: str,
     ) -> None:
         self._workspace = workspace
-        self._settings = settings
         self._pricing = pricing
         self._ledger = ledger
         self._attempt_id = attempt_id
         self._input_revision = input_revision
-        self._usage_path = workspace / USAGE_NAME
+        self._usage_path = workspace / usage_name
         self._evidence_path = workspace / ACCOUNTING_DIR / EVIDENCE_NAME
         self._lock = threading.Lock()
         self._fatal: AccountingError | None = None
 
-    @classmethod
-    def open(
-        cls,
-        *,
-        workspace: Path,
-        settings: AnalysisSettings,
-        pricing: PricingSnapshot,
-        authorization: AnalysisAuthorization,
-        settings_sha256: str,
-        project_config: ProjectConfig,
-        attempt_id: str,
-        approval_limit: Decimal,
-    ) -> AnalysisAccounting:
-        """원장을 열거나 다시 열고, 쓰기 전에 투영을 원장에서 다시 세운다.
-
-        원장이 없는 데 지난 사용량·시도 기록이 있으면 이주하지 않는다 — 그 기록은
-        0원의 증거가 아니다. 방금 붙인 이번 시도 기록은 현재 시도 ID로 구별한다.
-        """
-        ledger_path = workspace / ACCOUNTING_DIR / LEDGER_NAME
-        exists = _path_exists(ledger_path)
-        if not exists:
-            _require_clean_history(workspace, attempt_id)
-        accounting_dir = ledger_path.parent
-        _durable_mkdir(accounting_dir)
-        identity = LedgerIdentity(
-            input_revision=authorization.input_revision,
-            policy_digest=ledger_policy_sha256(
-                settings, settings_sha256=settings_sha256, project_config=project_config
-            ),
-            pricing_revision=pricing.snapshot_revision,
-            authorization_id=authorization_identity_sha256(authorization),
-        )
-        try:
-            ledger = BudgetLedger.open(
-                ledger_path, identity=identity, approval_limit=approval_limit
-            )
-        except (BudgetLedgerError, LedgerUnavailable) as exc:
-            raise AccountingError(f"내구 원장을 열지 못했다: {exc}") from exc
-        context = cls(
-            workspace=workspace,
-            settings=settings,
-            pricing=pricing,
-            ledger=ledger,
-            attempt_id=attempt_id,
-            input_revision=authorization.input_revision,
-        )
-        context.rebuild_projection()
-        return context
-
-    # ── 관찰자 ──
-
-    def observer(self) -> _AccountingObserver:
-        return _AccountingObserver(self)
-
-    def window_observer(self, window_id: str) -> _WindowObserver:
-        """Responses 호출용 — 티켓에 창 신원을 묶어 실측이 창과 함께 기록되게 한다."""
-        return _WindowObserver(self, window_id)
+    def _request_bound(self, meta: Any) -> Decimal:
+        raise NotImplementedError
 
     # ── 상태 ──
 
@@ -669,7 +660,7 @@ class AnalysisAccounting:
 
     def _authorize(self, meta: Any, *, window_id: str | None) -> _Ticket:
         self._require_open()
-        bound = request_bound(meta, settings=self._settings, pricing=self._pricing)
+        bound = self._request_bound(meta)
         request_id = f"{self._attempt_id}:{getattr(meta, 'attempt_id', '')}"
         try:
             self._ledger.reserve(
@@ -781,7 +772,7 @@ class AnalysisAccounting:
     # ── 투영 — 원장이 정본, 파일은 다시 만든 결과물 ──
 
     def rebuild_projection(self) -> None:
-        """확정 기록을 원장에서 다시 만들어 ``analysis-usage.jsonl``에 멱등으로 놓는다.
+        """확정 기록을 원장에서 다시 만들어 사용량 투영 파일에 멱등으로 놓는다.
 
         **투영 잠금을 먼저 얻고 그 안에서** (원장 스냅샷 → 전량 교체)를 한다.
         스냅샷을 잠금 밖에서 먼저 뽑으면 늦게 온 스레드가 낡은 스냅샷으로 새
@@ -807,10 +798,184 @@ class AnalysisAccounting:
             raise self._fail(exc, "projection") from exc
 
 
+def _open_ledger(
+    workspace: Path,
+    *,
+    identity: LedgerIdentity,
+    approval_limit: Decimal,
+    history: tuple[str, str],
+    attempt_id: str,
+) -> BudgetLedger:
+    """원장을 열거나 다시 연다 — 과거 기록 검사·내구화·열기를 한 문에서.
+
+    ``history``는 (사용량 투영 파일, 시도 기록 파일) 이름이다. 원장이 없는 데 그
+    기록들이 있으면 이주하지 않는다 — 지난 지출을 0원 시작으로 덮는 길이 없다.
+    """
+    ledger_path = workspace / ACCOUNTING_DIR / LEDGER_NAME
+    if not _path_exists(ledger_path):
+        _require_clean_history(
+            workspace, attempt_id, usage_name=history[0], attempts_name=history[1]
+        )
+    _durable_mkdir(ledger_path.parent)
+    try:
+        return BudgetLedger.open(ledger_path, identity=identity, approval_limit=approval_limit)
+    except (BudgetLedgerError, LedgerUnavailable) as exc:
+        raise AccountingError(f"내구 원장을 열지 못했다: {exc}") from exc
+
+
+class AnalysisAccounting(_LedgerAccounting):
+    """승인된 분석 실행의 회계 문맥 — 원장 신원이 분석 승인·견적 정책에 묶인다."""
+
+    def __init__(
+        self,
+        *,
+        workspace: Path,
+        settings: AnalysisSettings,
+        pricing: PricingSnapshot,
+        ledger: BudgetLedger,
+        attempt_id: str,
+        input_revision: str,
+    ) -> None:
+        super().__init__(
+            workspace=workspace,
+            pricing=pricing,
+            ledger=ledger,
+            attempt_id=attempt_id,
+            input_revision=input_revision,
+            usage_name=USAGE_NAME,
+        )
+        self._settings = settings
+
+    @classmethod
+    def open(
+        cls,
+        *,
+        workspace: Path,
+        settings: AnalysisSettings,
+        pricing: PricingSnapshot,
+        authorization: AnalysisAuthorization,
+        settings_sha256: str,
+        project_config: ProjectConfig,
+        attempt_id: str,
+        approval_limit: Decimal,
+    ) -> AnalysisAccounting:
+        """원장을 열거나 다시 열고, 쓰기 전에 투영을 원장에서 다시 세운다.
+
+        원장이 없는 데 지난 사용량·시도 기록이 있으면 이주하지 않는다 — 그 기록은
+        0원의 증거가 아니다. 방금 붙인 이번 시도 기록은 현재 시도 ID로 구별한다.
+        """
+        identity = LedgerIdentity(
+            input_revision=authorization.input_revision,
+            policy_digest=ledger_policy_sha256(
+                settings, settings_sha256=settings_sha256, project_config=project_config
+            ),
+            pricing_revision=pricing.snapshot_revision,
+            authorization_id=authorization_identity_sha256(authorization),
+        )
+        ledger = _open_ledger(
+            workspace,
+            identity=identity,
+            approval_limit=approval_limit,
+            history=(USAGE_NAME, "analysis-attempts.jsonl"),
+            attempt_id=attempt_id,
+        )
+        context = cls(
+            workspace=workspace,
+            settings=settings,
+            pricing=pricing,
+            ledger=ledger,
+            attempt_id=attempt_id,
+            input_revision=authorization.input_revision,
+        )
+        context.rebuild_projection()
+        return context
+
+    def _request_bound(self, meta: Any) -> Decimal:
+        return request_bound(meta, settings=self._settings, pricing=self._pricing)
+
+    # ── 관찰자 ──
+
+    def observer(self) -> _AccountingObserver:
+        return _AccountingObserver(self)
+
+    def window_observer(self, window_id: str) -> _WindowObserver:
+        """Responses 호출용 — 티켓에 창 신원을 묶어 실측이 창과 함께 기록되게 한다."""
+        return _WindowObserver(self, window_id)
+
+
+class CaptionAccounting(_LedgerAccounting):
+    """승인된 자막 실행의 회계 문맥(S4A) — 원장 신원이 자막 승인에 묶인다.
+
+    같은 요청·같은 추정의 재시도는 같은 신원으로 원장을 다시 열므로 누적 예약·
+    확정이 그대로 이어진다. 오디오 전사만 쓰므로 견적 정책(토큰 환산)은 없다.
+    """
+
+    def __init__(
+        self,
+        *,
+        workspace: Path,
+        pricing: PricingSnapshot,
+        ledger: BudgetLedger,
+        attempt_id: str,
+        request_revision: str,
+    ) -> None:
+        super().__init__(
+            workspace=workspace,
+            pricing=pricing,
+            ledger=ledger,
+            attempt_id=attempt_id,
+            input_revision=request_revision,
+            usage_name=CAPTION_USAGE_NAME,
+        )
+
+    @classmethod
+    def open(
+        cls,
+        *,
+        workspace: Path,
+        pricing: PricingSnapshot,
+        authorization: CaptionAuthorization,
+        settings_sha256: str,
+        project_config: ProjectConfig,
+        attempt_id: str,
+        approval_limit: Decimal,
+    ) -> CaptionAccounting:
+        identity = LedgerIdentity(
+            input_revision=authorization.request_revision,
+            policy_digest=caption_ledger_policy_sha256(
+                settings_sha256=settings_sha256, project_config=project_config
+            ),
+            pricing_revision=pricing.snapshot_revision,
+            authorization_id=caption_authorization_identity_sha256(authorization),
+        )
+        ledger = _open_ledger(
+            workspace,
+            identity=identity,
+            approval_limit=approval_limit,
+            history=(CAPTION_USAGE_NAME, CAPTION_ATTEMPTS_NAME),
+            attempt_id=attempt_id,
+        )
+        context = cls(
+            workspace=workspace,
+            pricing=pricing,
+            ledger=ledger,
+            attempt_id=attempt_id,
+            request_revision=authorization.request_revision,
+        )
+        context.rebuild_projection()
+        return context
+
+    def _request_bound(self, meta: Any) -> Decimal:
+        return request_bound(meta, settings=None, pricing=self._pricing)
+
+    def observer(self) -> _AccountingObserver:
+        return _AccountingObserver(self)
+
+
 class _AccountingObserver:
     """오디오 경계에 들어가는 관찰자 — 창 없는 요청의 실측은 window_id 없이 남는다."""
 
-    def __init__(self, context: AnalysisAccounting) -> None:
+    def __init__(self, context: AnalysisAccounting | CaptionAccounting) -> None:
         self._context = context
 
     def authorize(self, meta: Any) -> _Ticket:
@@ -852,7 +1017,9 @@ def _path_exists(path: Path) -> bool:
         raise AccountingError(f"원장 자리를 확인할 수 없다: {path}") from exc
 
 
-def _require_clean_history(workspace: Path, attempt_id: str) -> None:
+def _require_clean_history(
+    workspace: Path, attempt_id: str, *, usage_name: str, attempts_name: str
+) -> None:
     """원장을 새로 만들기 전에 지난 사용량·시도 기록이 없는지 본다.
 
     사용량 줄이 하나라도 있거나(실제 과금의 흔적), 이번 시도 외의 시도 기록이
@@ -860,7 +1027,7 @@ def _require_clean_history(workspace: Path, attempt_id: str) -> None:
     붙은 이번 시도(pending·running)는 현재 시도 ID로 구별해 세지 않는다.
     """
     explicit = "새 작업공간에서 시작하거나, 지난 기록을 직접 정리한 뒤 다시 시도하세요"
-    usage_path = workspace / USAGE_NAME
+    usage_path = workspace / usage_name
     try:
         usage_text = usage_path.read_text(encoding="utf-8") if usage_path.is_file() else ""
     except OSError as exc:
@@ -870,7 +1037,7 @@ def _require_clean_history(workspace: Path, attempt_id: str) -> None:
             f"원장 없이 사용량 기록이 남아 있다: {usage_path} — 지난 지출을 0으로 "
             f"시작하는 길은 없다. {explicit}"
         )
-    attempts_path = workspace / "analysis-attempts.jsonl"
+    attempts_path = workspace / attempts_name
     try:
         attempts_text = attempts_path.read_text(encoding="utf-8") if attempts_path.is_file() else ""
     except OSError as exc:

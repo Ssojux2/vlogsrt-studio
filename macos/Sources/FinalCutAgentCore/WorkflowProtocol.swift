@@ -323,6 +323,44 @@ public struct CaptionAuthorizationMessage: Codable, Equatable, Sendable {
   }
 }
 
+/// 자막 실행의 결과(S4A) — 성공한 무발화와 실패한 전사가 갈라져 있다.
+/// `srtPath`는 오직 `speech`일 때만 있고, 실패 결과는 앱이 시도 기록에서 본다.
+public struct CaptionResultMessage: Codable, Equatable, Sendable {
+  public let finalRevision: String
+  public let srtPath: String?
+  public let warnings: [String]
+  public let quality: [String]
+  public let speechStatus: String
+
+  enum CodingKeys: String, CodingKey {
+    case finalRevision = "final_revision"
+    case srtPath = "srt_path"
+    case warnings
+    case quality
+    case speechStatus = "speech_status"
+  }
+}
+
+/// 자막 시도 하나의 상태(S4A) — `pending → running → 결과`의 내구 진행 기록.
+/// 실패에만 오류 문면이 실리고, 그 외 상태는 오류를 가질 수 없다.
+public struct CaptionAttemptMessage: Codable, Equatable, Sendable {
+  public let requestRevision: String
+  public let estimateRevision: String
+  public let attemptID: String
+  public let status: String
+  public let startedAt: String
+  public let error: String?
+
+  enum CodingKeys: String, CodingKey {
+    case requestRevision = "request_revision"
+    case estimateRevision = "estimate_revision"
+    case attemptID = "attempt_id"
+    case status
+    case startedAt = "started_at"
+    case error
+  }
+}
+
 private struct DecodedEnvelope<Payload: Decodable>: Decodable {
   let payload: Payload
   let protocolVersion: String

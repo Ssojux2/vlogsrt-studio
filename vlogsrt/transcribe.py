@@ -1209,6 +1209,10 @@ def transcribe_outcome(
         if all(cover.segment_count == 0 for cover in coverage):
             return TranscriptionOutcome(status="empty", segments=(), coverage=coverage, error=None)
         segments = tuple(build_spine(matched))
+    except ObserverFailure:
+        # 관찰자(회계) 실패는 전사 결과가 아니라 기반구조 사고다 — 문자열로 상태에
+        # 묻으면 원인 사슬이 끊겨 예산 거부가 일반 오류로 위장된다(S4A). 그대로 올린다.
+        raise
     except Exception as exc:  # noqa: BLE001 - 상태로 바꿔 남긴다. 조용히 두지는 않는다
         return TranscriptionOutcome(
             status="error", segments=(), coverage=(), error=f"{exc.__class__.__name__}: {exc}"

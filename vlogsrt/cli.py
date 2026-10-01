@@ -117,7 +117,7 @@ def _add_project_command(sub: argparse._SubParsersAction) -> None:
     project_commands = project.add_subparsers(
         dest="project_command",
         required=True,
-        metavar="{receive,inspect,analyze,review,roughcut,caption}",
+        metavar="{receive,inspect,analyze,review,roughcut,caption,caption-estimate,caption-run}",
     )
     run = project_commands.add_parser(
         "run",
@@ -212,6 +212,38 @@ def _add_project_command(sub: argparse._SubParsersAction) -> None:
     caption_mode = caption.add_mutually_exclusive_group()
     caption_mode.add_argument("--offline", action="store_true", help="픽스처만 사용 (기본값)")
     caption_mode.add_argument("--online", action="store_true", help="실제 API 호출. 유료")
+
+    # 공유 받기로 시작한 자막 job의 두 문(S4A) — 러프컷 workflow가 없는 job에서
+    # 추정과 실행이 각각 승인 문을 지난다. 위 `caption`(통합 흐름)과 자리가 다르다.
+    caption_estimate = project_commands.add_parser(
+        "caption-estimate",
+        help="스테이징된 최종 내보내기의 자막 비용 고정 (전사 없음, 키 없음)",
+    )
+    caption_estimate.add_argument(
+        "job_dir",
+        type=Path,
+        help="final.wav·final.fcpxml·caption-origin.json이 스테이징된 job 폴더",
+    )
+
+    caption_run = project_commands.add_parser(
+        "caption-run", help="승인된 자막 실행 — 최종 오디오로 SRT 생성"
+    )
+    caption_run.add_argument(
+        "job_dir", type=Path, help="추정이 고정된 자막 job 폴더 (승인 문서 포함)"
+    )
+    caption_run.add_argument(
+        "-o", "--out", type=Path, required=True, help="SRT·검토 보고서가 나가는 폴더"
+    )
+    caption_run.add_argument(
+        "--project-config", type=Path, default=None, help="vlogsrt.project.toml 경로"
+    )
+    caption_run_mode = caption_run.add_mutually_exclusive_group()
+    caption_run_mode.add_argument(
+        "--offline", action="store_true", help="픽스처만 사용 — 유료 호출 0회"
+    )
+    caption_run_mode.add_argument(
+        "--online", action="store_true", help="승인 문서에 묶인 실제 API 호출. 유료"
+    )
 
 
 def _add_config_options(parser: argparse.ArgumentParser) -> None:

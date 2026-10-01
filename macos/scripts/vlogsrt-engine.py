@@ -42,6 +42,12 @@ job 상태(별칭 포함)와 분리돼 있으며 이미 있어서는 안 된다 
 운반자는 실제 적용 경로를 지나 검증되고, 보고서는 공개 데이터 한 줄(파이썬
 실행 파일·버전, 실제 자식 환경의 ffmpeg·ffprobe, 운반자 버전)만 담는다 —
 잠금·workspace·결과 동기화가 전부 없다.
+
+`caption-estimate`·`caption-run`은 공유 받기로 시작한 자막 job의 두 문이다
+(S4A). 이 job에는 `input.fcpxml`이 없으므로 receive를 거치지 않는다 — 입력은
+스테이징된 `final.wav`·`final.fcpxml`·`caption-origin.json`이고, 실행 문은
+`caption-authorization.jsonl`을 요구한다. SRT·검토 보고서는 job 루트의
+`captions/`에 나간다(앱이 보는 자리).
 """
 
 from __future__ import annotations
@@ -73,6 +79,22 @@ _DIAGNOSTIC_FILES = (
     "vision-decisions.jsonl",
     "analysis-result.jsonl",
 )
+# 자막 job(S4A)의 기록 동기화 — SRT·검토 보고서는 엔진이 workspace가 아니라
+# job 루트의 captions/ 에 직접 쓰므로(앱에 보이는 자리) 여기 없다.
+_CAPTION_RESULT_FILES = (
+    "caption-request.jsonl",
+    "caption-estimate.jsonl",
+    "pricing-caption.jsonl",
+    "caption-attempts.jsonl",
+    "caption-usage.jsonl",
+    "caption-result.jsonl",
+)
+_CAPTION_DIAGNOSTIC_FILES = (
+    "caption-attempts.jsonl",
+    "caption-usage.jsonl",
+)
+_CAPTION_DELIVERY_DIR = "captions"
+_CAPTION_OPERATIONS = frozenset({"caption-estimate", "caption-run"})
 _CARRIER = "VLOGSRT_ENGINE_API_KEY"
 # V2 환경 운반자(번들) — 값은 stdin V2 봉투와 같은 JSON 세 필드다(S2A-2 단위2).
 # 적용·제거 시점은 V1과 같다: 공급자 해석 전에 소비되고 이름은 지운다.
@@ -599,13 +621,24 @@ def _step(argv: list[str], *, when: bool = True) -> int:
     return 0
 
 
-def _sync_results(job_dir: Path, workspace: Path, *, diagnostics_only: bool) -> None:
+def _sync_results(
+    job_dir: Path,
+    workspace: Path,
+    *,
+    diagnostics_only: bool,
+    caption: bool = False,
+) -> None:
     """workspace의 결과를 job 루트로 옮긴다 — 실패면 진단 파일만.
 
     취소된 실행도 실패 종료로 여기에 들어오지만 앱 쪽 게이트(CancellationStore)가
-    취소 뒤 sync·import를 막는다(S1A). 엔진은 진단만 전달한다.
+    취소 뒤 sync·import를 막는다(S1A). 엔진은 진단만 전달한다. 자막 job은 자막
+    기록 묶음을 쓴다(S4A) — SRT·검토 보고서는 이미 job 루트 `captions/`에 있다.
     """
-    for name in _DIAGNOSTIC_FILES if diagnostics_only else _RESULT_FILES:
+    if caption:
+        names = _CAPTION_DIAGNOSTIC_FILES if diagnostics_only else _CAPTION_RESULT_FILES
+    else:
+        names = _DIAGNOSTIC_FILES if diagnostics_only else _RESULT_FILES
+    for name in names:
         source = workspace / name
         if source.is_file():
             shutil.copyfile(source, job_dir / name)
@@ -638,7 +671,7 @@ def _dispatch(argv: list[str]) -> tuple[int, str | None]:
     operation, job_id, job_dir_text = argv[0], argv[1], argv[2]
     if "/" in job_id or ".." in job_id:
         return 2, None
-    if operation not in {"analyze", "roughcut", _READINESS_OPERATION}:
+    if operation not in {"analyze", "roughcut", _READINESS_OPERATION, *_CAPTION_OPERATIONS}:
         print(f"unknown operation: {operation}", file=sys.stderr)
         return 2, None
     job_dir = Path(job_dir_text)
@@ -813,14 +846,15 @@ def _run_owned(
         _discard_stale_progress(job_dir, workspace)
     _propagate_staged(job_dir, workspace)
     exit_code = _run_operation(operation, job_dir, workspace)
+    caption = operation in _CAPTION_OPERATIONS
     if exit_code == 2:
         # 호출 계약 위반이지 실행 실패가 아니다 — 진단도 없다.
         return 2
     if exit_code:
         # 실패해도 시도·사용량·판정·집계는 앱으로 나간다 — 성공 산물은 나가지 않는다.
-        _sync_results(job_dir, workspace, diagnostics_only=True)
+        _sync_results(job_dir, workspace, diagnostics_only=True, caption=caption)
         return 1
-    _sync_results(job_dir, workspace, diagnostics_only=False)
+    _sync_results(job_dir, workspace, diagnostics_only=False, caption=caption)
     return 0
 
 
@@ -850,6 +884,11 @@ def _discard_stale_progress(job_dir: Path, workspace: Path) -> None:
 
 def _run_operation(operation: str, job_dir: Path, workspace: Path) -> int:
     """operation의 단계를 실행한다 — 0 성공, 1 실행 실패, 2 호출 계약 위반."""
+    if operation in _CAPTION_OPERATIONS:
+        # 자막 job(S4A)은 receive를 지나지 않는다 — input.fcpxml도 러프컷 workflow도
+        # 없는 job이고, 스테이징된 final.wav·final.fcpxml·caption-origin.json이 곧
+        # 입력이다. 새 러프컷 workflow를 우발적으로 만드는 길도 여기서 끊는다.
+        return _run_caption_operation(operation, job_dir, workspace)
     if _step(
         [
             "project",
@@ -893,6 +932,26 @@ def _run_operation(operation: str, job_dir: Path, workspace: Path) -> int:
         if _step(["project", "roughcut", str(workspace), "-o", str(job_dir / "roughcut.fcpxml")]):
             return 1
     return 0
+
+
+def _run_caption_operation(operation: str, job_dir: Path, workspace: Path) -> int:
+    """자막 job의 두 문(S4A) — 추정은 키 없이, 실행은 스테이징된 승인 문서와 함께.
+
+    SRT·검토 보고서는 job 루트의 `captions/`에 directly 나간다 — 개발 실행의
+    workspace는 앱이 못 보는 자리이므로 결과 경로가 거기를 가리켜선 안 된다.
+    """
+    if operation == "caption-estimate":
+        return _step(["project", "caption-estimate", str(job_dir)])
+    return _step(
+        [
+            "project",
+            "caption-run",
+            str(job_dir),
+            "--online",
+            "-o",
+            str(job_dir / _CAPTION_DELIVERY_DIR),
+        ]
+    )
 
 
 if __name__ == "__main__":

@@ -422,3 +422,119 @@ struct PrefillScriptError: Error, Equatable {
     )
   }
 }
+
+// ─────────────────────────────────────────────────────────────
+//  STAB-S4A — 자막 job 스테이징·호출·산물 동기화 (input.fcpxml 없는 job)
+// ─────────────────────────────────────────────────────────────
+
+@Test func captionJobStagingSkipsRoughcutInputAndInvokesCaptionOperations() throws {
+  let root = FileManager.default.temporaryDirectory
+    .appendingPathComponent(UUID().uuidString, isDirectory: true)
+  defer { try? FileManager.default.removeItem(at: root) }
+  let appGroup = root.appendingPathComponent("group", isDirectory: true)
+  let external = root.appendingPathComponent("external", isDirectory: true)
+  let workspace = AppGroupWorkspace(rootURL: appGroup)
+  let groupJob = try workspace.createJob(id: "caption-1")
+  for (name, bytes) in [
+    ("final.wav", Data("synthetic-wav".utf8)),
+    ("final.fcpxml", Data("synthetic-xml".utf8)),
+    ("caption-origin.json", Data("{\"origin_job_id\":\"roughcut-7\"}".utf8)),
+    ("caption-authorization.jsonl", Data("synthetic-auth".utf8)),
+    ("cancellation.jsonl", Data("synthetic-cancel".utf8)),
+  ] {
+    try bytes.write(to: groupJob.appendingPathComponent(name))
+  }
+
+  let staged = try DevelopmentJobStager.stageCaption(
+    jobID: "caption-1", appGroupJob: groupJob, externalRoot: external)
+  // 이 job에는 input.fcpxml이 없다 — 자막 스테이징은 요구하지 않고, 러프컷
+  // 스테이징은 이 재료가 없어 실패한다(우발적인 새 workflow가 열리지 않는다).
+  #expect(
+    !FileManager.default.fileExists(
+      atPath: staged.appendingPathComponent("input.fcpxml").path))
+  #expect(throws: DevelopmentEngineError.self) {
+    _ = try DevelopmentJobStager.stage(
+      jobID: "caption-1", appGroupJob: groupJob, externalRoot: external)
+  }
+  for name in [
+    "final.wav", "final.fcpxml", "caption-origin.json", "caption-authorization.jsonl",
+    "cancellation.jsonl",
+  ] {
+    #expect(FileManager.default.fileExists(atPath: staged.appendingPathComponent(name).path))
+  }
+
+  // 필수 재료가 하나 빠지면 반쪽 job은 스테이징하지 않는다.
+  let bare = try workspace.createJob(id: "caption-2")
+  try Data("synthetic-wav".utf8).write(to: bare.appendingPathComponent("final.wav"))
+  try Data("synthetic-xml".utf8).write(to: bare.appendingPathComponent("final.fcpxml"))
+  #expect(throws: DevelopmentEngineError.self) {
+    _ = try DevelopmentJobStager.stageCaption(
+      jobID: "caption-2", appGroupJob: bare, externalRoot: external)
+  }
+
+  // 호출 인자 — 두 문 모두 같은 CLI 모양, operation만 다르다(비밀은 봉투 안).
+  let scripts = URL(fileURLWithPath: "/Users/test/Library/Application Scripts/com.ssojux2.vlogsrt")
+  let estimate = try DevelopmentEngineInvocation.createRoles(
+    operation: .captionEstimate,
+    jobID: "caption-1",
+    externalJob: staged,
+    applicationScriptsDirectory: scripts,
+    credentials: EngineRoleCredentials())
+  #expect(
+    estimate.arguments == [
+      "caption-estimate", "caption-1", staged.standardizedFileURL.path,
+      DevelopmentEngineInvocation.carrierMarkerArgument,
+    ])
+  let run = try DevelopmentEngineInvocation.createRoles(
+    operation: .captionRun,
+    jobID: "caption-1",
+    externalJob: staged,
+    applicationScriptsDirectory: scripts,
+    credentials: EngineRoleCredentials())
+  #expect(run.arguments.first == "caption-run")
+  #expect(run.credentialEnvelope == .roles(EngineRoleCredentials()))
+}
+
+@Test func captionResultsSyncBringsRecordsAndSrtBackButOnlyOnSuccess() throws {
+  let root = FileManager.default.temporaryDirectory
+    .appendingPathComponent(UUID().uuidString, isDirectory: true)
+  defer { try? FileManager.default.removeItem(at: root) }
+  let groupJob = root.appendingPathComponent("group-job", isDirectory: true)
+  let externalJob = root.appendingPathComponent("external/Jobs/caption-1", isDirectory: true)
+  let workspaceDir = externalJob.appendingPathComponent("workspace", isDirectory: true)
+  try FileManager.default.createDirectory(at: groupJob, withIntermediateDirectories: true)
+  try FileManager.default.createDirectory(at: workspaceDir, withIntermediateDirectories: true)
+  try Data("attempt".utf8).write(
+    to: workspaceDir.appendingPathComponent("caption-attempts.jsonl"))
+  try Data("usage".utf8).write(
+    to: workspaceDir.appendingPathComponent("caption-usage.jsonl"))
+  try Data("result".utf8).write(
+    to: workspaceDir.appendingPathComponent("caption-result.jsonl"))
+  let captions = externalJob.appendingPathComponent(
+    DevelopmentJobStager.captionDeliveryDirectoryName, isDirectory: true)
+  try FileManager.default.createDirectory(at: captions, withIntermediateDirectories: true)
+  try Data("srt".utf8).write(to: captions.appendingPathComponent("캡션 프로젝트.ko.srt"))
+  try Data("review".utf8).write(
+    to: captions.appendingPathComponent("캡션 프로젝트.ko.review.json"))
+  // 자막 산물 폴더를 가장한 밀수꾼 — 허용목록 밖이라 건너뛴다.
+  try Data("decoy".utf8).write(to: captions.appendingPathComponent(".env"))
+
+  // 실패 동기화 — 시도·사용량 진단은 나가지만 SRT(성공 산물)는 나가지 않는다.
+  try DevelopmentJobStager.syncResults(from: externalJob, to: groupJob, diagnosticsOnly: true)
+  #expect(FileManager.default.fileExists(atPath: groupJob.appendingPathComponent("caption-attempts.jsonl").path))
+  #expect(FileManager.default.fileExists(atPath: groupJob.appendingPathComponent("caption-usage.jsonl").path))
+  #expect(!FileManager.default.fileExists(atPath: groupJob.appendingPathComponent("caption-result.jsonl").path))
+  #expect(
+    !FileManager.default.fileExists(
+      atPath: groupJob.appendingPathComponent(
+        DevelopmentJobStager.captionDeliveryDirectoryName).appendingPathComponent("캡션 프로젝트.ko.srt").path))
+
+  // 성공 동기화 — 기록 전부와 SRT 폴더가 App Group job으로 나간다.
+  try DevelopmentJobStager.syncResults(from: externalJob, to: groupJob, diagnosticsOnly: false)
+  #expect(FileManager.default.fileExists(atPath: groupJob.appendingPathComponent("caption-result.jsonl").path))
+  let delivered = groupJob.appendingPathComponent(
+    DevelopmentJobStager.captionDeliveryDirectoryName)
+  #expect(try Data(contentsOf: delivered.appendingPathComponent("캡션 프로젝트.ko.srt")) == Data("srt".utf8))
+  #expect(FileManager.default.fileExists(atPath: delivered.appendingPathComponent("캡션 프로젝트.ko.review.json").path))
+  #expect(!FileManager.default.fileExists(atPath: delivered.appendingPathComponent(".env").path))
+}

@@ -49,11 +49,14 @@ from vlogsrt.project.clips import collect_clip_paths, probe_clips, synthesize_fc
 from vlogsrt.project.config import ProjectConfig, load_project_config
 from vlogsrt.project.fcpxml import element_tree, parse_project
 from vlogsrt.project.final_caption import (
+    ValidatedCaptionInput,
     build_caption_estimate,
     caption_settings_sha256,
     create_caption_request,
     generate_final_captions,
+    load_caption_origin,
     measure_caption_request,
+    validate_caption_request,
 )
 from vlogsrt.project.media import (
     MediaOverride,
@@ -105,9 +108,13 @@ from vlogsrt.project.workflow_protocol import (
     AnalysisProgress,
     AnalysisResult,
     CancellationRequest,
+    CaptionAttempt,
+    CaptionAttemptStatus,
     CaptionAuthorization,
     CaptionEstimate,
+    CaptionJournal,
     CaptionRequest,
+    CaptionResult,
     CutCandidate,
     EditPlan,
     PricingSnapshot,
@@ -137,6 +144,16 @@ _CANCEL = "cancellation.jsonl"
 _CAPTION_REQUEST = "caption-request.jsonl"
 _CAPTION_ESTIMATE = "caption-estimate.jsonl"
 _CAPTION_RESULT = "caption-result.jsonl"
+# 공유 받기로 시작한 자막 job의 스테이징·기록 이름(S4A) — 러프컷 workflow와 자리가
+# 다르다: input.fcpxml도 workflow.jsonl도 없고, 첫 줄이 CaptionRequest인 자막
+# 원장(caption.jsonl)이 상태를 소유한다.
+_CAPTION_JOURNAL = "caption.jsonl"
+_CAPTION_ORIGIN = "caption-origin.json"
+_CAPTION_ATTEMPTS = "caption-attempts.jsonl"
+_CAPTION_AUTHORIZATION = "caption-authorization.jsonl"
+_CAPTION_PRICING = "pricing-caption.jsonl"
+_FINAL_AUDIO = "final.wav"
+_FINAL_XML = "final.fcpxml"
 _ANALYSIS_RESULT = "analysis-result.jsonl"
 _DECISIONS = "vision-decisions.jsonl"
 _PROGRESS = "analysis-progress.jsonl"
@@ -461,6 +478,8 @@ def project_command(args: argparse.Namespace) -> int:
         "review": _project_review,
         "roughcut": _project_roughcut,
         "caption": _project_caption,
+        "caption-estimate": _project_caption_estimate,
+        "caption-run": _project_caption_run,
     }
     try:
         return handlers[args.project_command](args)
@@ -978,7 +997,7 @@ def _project_caption(args: argparse.Namespace) -> int:
     if journal.state == "roughcut_imported":
         _write_messages(workspace / _CAPTION_REQUEST, (request,))
         journal.transition(journal.revision.revision, "caption_received")
-        _write_messages(workspace / "pricing-caption.jsonl", (pricing,))
+        _write_messages(workspace / _CAPTION_PRICING, (pricing,))
         _write_messages(workspace / _CAPTION_ESTIMATE, (estimate,))
         journal.transition(journal.revision.revision, "caption_estimate_ready")
     else:
@@ -1009,6 +1028,225 @@ def _project_caption(args: argparse.Namespace) -> int:
     # 자동 import는 하지 않는다 — 사람이 Finder에서 확인하고 직접 넣는다.
     log.out("Final Cut Pro: File > Import > Captions → Relative to Timeline")
     return 0
+
+
+# ─────────────────────────────────────────────────────────────
+#  STAB-S4A — 공유 받기로 시작한 자막 job: 추정과 실행이 갈린다
+# ─────────────────────────────────────────────────────────────
+
+
+def _caption_job_facts(job_dir: Path) -> tuple[CaptionRequest, ValidatedCaptionInput]:
+    """스테이징된 최종 내보내기에서 요청을 다시 만들고 통째로 재검증한다(S4A).
+
+    원본 문서(`caption-origin.json`)가 없으면 그 자체가 실패이다 — 원본 오디오로
+    되돌아가는 길도, 매핑을 모른 채 진행하는 길도 없다. 이 함수는 추정 직전·실행
+    직전에 같은 문으로 불리므로 승인 뒤 바뀐 오디오·XML·UID·길이는 여기서 걸린다.
+    """
+    origin = load_caption_origin(job_dir / _CAPTION_ORIGIN)
+    request = create_caption_request(
+        origin.origin_revision, job_dir / _FINAL_AUDIO, job_dir / _FINAL_XML
+    )
+    validated = validate_caption_request(request, origin)
+    return request, validated
+
+
+def _project_caption_estimate(args: argparse.Namespace) -> int:
+    """최종 내보내기의 자막 비용을 고정한다 — 전사도 API 키도 없다(S4A).
+
+    스테이징된 WAV·FCPXML·원본 문서를 그대로 잰다. 첫 실행이면 자막 원장을 만들
+    고 요청·가격·추정을 고정하며, 다시 돌면 이미 고정된 것과 지금 재료가 같은지만
+    본다(드리프트는 거절). 상태는 `caption_estimate_ready`에서 멈춘다 — 승인은
+    실행 문(`caption-run`)이 요구한다.
+    """
+    job_dir: Path = args.job_dir
+    request, validated = _caption_job_facts(job_dir)
+    cfg = load_config()
+    pricing = official_pricing_snapshot()
+    estimate = build_caption_estimate(
+        request,
+        audio_seconds=validated.audio_seconds,
+        pricing=pricing,
+        settings_sha256=caption_settings_sha256(cfg),
+    )
+    workspace = job_dir / "workspace"
+    journal_path = workspace / _CAPTION_JOURNAL
+    if journal_path.is_file():
+        journal = CaptionJournal.open(journal_path)
+        if journal.state not in {"caption_estimate_ready", "caption_authorized"}:
+            raise ValueError(
+                "caption-estimate는 caption_estimate_ready/caption_authorized 상태에서만"
+                f" 가능하다: {journal.state}"
+            )
+        stored_request = _read_one(workspace / _CAPTION_REQUEST)
+        if not isinstance(stored_request, CaptionRequest) or stored_request != request:
+            raise ValueError(
+                "스테이징된 최종 내보내기가 고정된 자막 요청과 다르다 — 새 job으로 시작한다"
+            )
+        stored_estimate = _read_one(workspace / _CAPTION_ESTIMATE)
+        if not isinstance(stored_estimate, CaptionEstimate) or stored_estimate != estimate:
+            raise ValueError("현재 자막 추정이 고정된 추정과 다르다 — 새 job으로 시작한다")
+    else:
+        journal = CaptionJournal.create(journal_path, request)
+        _write_messages(workspace / _CAPTION_REQUEST, (request,))
+        _write_messages(workspace / _CAPTION_PRICING, (pricing,))
+        _write_messages(workspace / _CAPTION_ESTIMATE, (estimate,))
+        journal.transition(request.request_revision, "caption_estimate_ready")
+    _protocol_out(estimate)
+    log.out(
+        f"자막 추정: 오디오 {float(validated.audio_seconds):.1f}초 ·"
+        f" 상한 ${Decimal(estimate.cost_upper_bound):.3f} · 승인 대기"
+    )
+    return 0
+
+
+def _project_caption_run(args: argparse.Namespace) -> int:
+    """승인된 자막 실행 — 같은 요청으로 실패 뒤 재시도가 열려 있다(S4A).
+
+    승인 문서는 자막 것(`CaptionAuthorization`)이어야 하고 지금 추정에 묶여 있어야
+    한다 — 러프컷 승인은 자막을 승인하지 않는다. 시도는 pending→running→결과로
+    기록에 남고, 실패해도 원장은 `caption_authorized`에 둔다(같은 유효 승인으로 다시
+    실행할 수 있다). 취소만 종료 상태로 닫는다.
+    """
+    job_dir: Path = args.job_dir
+    workspace = job_dir / "workspace"
+    journal = CaptionJournal.open(workspace / _CAPTION_JOURNAL)
+    if journal.state not in {"caption_estimate_ready", "caption_authorized"}:
+        raise ValueError(
+            "caption-run은 caption_estimate_ready/caption_authorized 상태에서만 가능하다: "
+            f"{journal.state}"
+        )
+    authorization_path = job_dir / _CAPTION_AUTHORIZATION
+    if not authorization_path.is_file():
+        raise ValueError(
+            f"자막 승인 문서가 없다: {authorization_path} — 승인 없이 자막을 실행하지 않는다"
+        )
+    authorization_message = _read_one(authorization_path)
+    if not isinstance(authorization_message, CaptionAuthorization):
+        # 러프컷 승인(AnalysisAuthorization)을 얹어도 여기서 닫힌다 — 승인은 종류별이다.
+        raise ValueError(
+            "자막 승인 문서가 CaptionAuthorization가 아니다 — 러프컷 승인은 자막을 승인하지 않는다"
+        )
+    # 재검증이자 드리프트 검사: 실행 직전에 승인 전과 같은 문으로 다시 잰다.
+    request, validated = _caption_job_facts(job_dir)
+    cfg = load_config()
+    pricing = official_pricing_snapshot()
+    stored_pricing = _read_one(workspace / _CAPTION_PRICING)
+    if not isinstance(stored_pricing, PricingSnapshot) or stored_pricing != pricing:
+        raise ValueError(
+            "기록된 자막 가격 스냅샷이 현재 공식 가격과 다르다 — caption-estimate를 다시 돌린다"
+        )
+    estimate = build_caption_estimate(
+        request,
+        audio_seconds=validated.audio_seconds,
+        pricing=pricing,
+        settings_sha256=caption_settings_sha256(cfg),
+    )
+    stored_estimate = _read_one(workspace / _CAPTION_ESTIMATE)
+    if not isinstance(stored_estimate, CaptionEstimate) or stored_estimate != estimate:
+        raise ValueError("현재 자막 추정이 고정된 추정과 다르다 — 새 job으로 시작한다")
+    authorization_message.require_matches(estimate)
+    if journal.state == "caption_estimate_ready":
+        journal.transition(request.request_revision, "caption_authorized")
+    attempt_id = f"caption-{uuid.uuid4()}"
+    started_at = _utc_now()
+
+    def record_attempt(status: CaptionAttemptStatus, error: str | None = None) -> None:
+        """시도의 내구 진행 기록 — pending→running→결과가 줄마다 남는다(S4A)."""
+        _append_message(
+            workspace / _CAPTION_ATTEMPTS,
+            CaptionAttempt(
+                request.request_revision,
+                estimate.estimate_revision,
+                attempt_id,
+                status,
+                started_at,
+                error,
+            ),
+        )
+
+    record_attempt("pending")
+    online = bool(args.online)
+
+    def gate() -> None:
+        # 자막 job의 취소 묶음 두 개: 완성 요청 리비전, 아니면 스테이징된 최종
+        # FCPXML의 해시(앱이 receive 전에 계산할 수 있는 값 — S1A-R1과 같은 자리).
+        _check_cancellation(workspace, request.request_revision, attempt_id, request.final_revision)
+
+    try:
+        record_attempt("running")
+        # 새 시도가 시작됐다 — 이전 시도의 결과가 지금 시도의 것으로 읽히면 안 된다.
+        _discard_file(workspace / _CAPTION_RESULT)
+        accounting: request_accounting.CaptionAccounting | None = None
+        if online:
+            accounting = request_accounting.CaptionAccounting.open(
+                workspace=workspace,
+                pricing=pricing,
+                authorization=authorization_message,
+                settings_sha256=estimate.settings_sha256,
+                project_config=load_project_config(args.project_config),
+                attempt_id=attempt_id,
+                approval_limit=Decimal(estimate.cost_upper_bound),
+            )
+        # 유료 실행은 예약이 살아 있는 동안에만 키를 푼다 — 승인 문서가 곧 비용
+        # 확인이다(추정의 상한에 묶였다). 픽스처 실행은 게이트만 지난다.
+        transcriber = _GatedTranscriber(
+            transcribe.get_transcriber(
+                cfg,
+                online=online,
+                force_offline=not online,
+                cancellation=gate,
+                observer=None if accounting is None else accounting.observer(),
+            ),
+            gate=gate,
+        )
+        gate()
+        delivery = generate_final_captions(
+            request,
+            cfg,
+            args.out,
+            online=online,
+            confirmed_cost=True,
+            transcriber=transcriber,
+            srt_stem=f"{validated.project_name}.ko",
+        )
+        if accounting is not None:
+            # 회계 기반구조의 실패는 자막 오류로 위장하지 않는다(S2B-2b와 같은 선).
+            accounting.ensure_healthy()
+        _write_messages(workspace / _CAPTION_RESULT, (delivery.result,))
+        record_attempt("succeeded")
+        journal.transition(request.request_revision, "caption_ready")
+        _report_caption_delivery(delivery.result)
+    except (WorkflowCancelled, KeyboardInterrupt):
+        record_attempt("cancelled")
+        journal.transition(request.request_revision, "cancelled")
+        raise
+    except Exception as exc:
+        # 예산 거부는 원인 사슬 깊은 데서 관찰자 예외로 올라와 자막 실패로 한 번
+        # 감싸진다 — 문면보다 종류로 갈라 본다(거부 문면에는 비밀이 없다).
+        if request_accounting.is_budget_denial(exc):
+            record_attempt("failed", "누적 예약이 승인 상한을 넘어 이 요청은 보내지 않았다")
+            raise ValueError("자막 실행 실패: 예산 상한 — 이 요청은 보내지 않았다") from exc
+        raw = " ".join(str(exc).split()) or exc.__class__.__name__
+        reason = _redact_failure_text(args, raw)
+        record_attempt("failed", reason)
+        if reason == raw:
+            raise
+        raise RuntimeError(reason) from None
+    return 0
+
+
+def _report_caption_delivery(result: CaptionResult) -> None:
+    """마지막 경계 — 결과·시도·원장이 모두 정착한 뒤에만 성공을 말한다(S4A)."""
+    _protocol_out(result)
+    if result.srt_path is None:
+        log.out("자막 상태: 발화 없음(성공)")
+    else:
+        log.out(f"srt: {result.srt_path}")
+        log.out(f"finder: {result.srt_path.parent}")
+    if result.warnings:
+        log.out(f"경고 {len(result.warnings)}건: {' · '.join(result.warnings)}")
+    # 자동 import는 하지 않는다 — 사람이 Finder에서 확인하고 직접 넣는다.
+    log.out("Final Cut Pro: File > Import > Captions → Relative to Timeline")
 
 
 def _read_candidates(path: Path, revision: str) -> list[CutCandidate]:

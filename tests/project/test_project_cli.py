@@ -142,9 +142,19 @@ def test_project_help_exposes_stages_and_hides_diagnostic_run(
         cli.main(["project", "--help"])
     assert stopped.value.code == 0
     help_text = capsys.readouterr().out
-    for command in ("receive", "inspect", "analyze", "review", "roughcut", "caption"):
+    for command in (
+        "receive",
+        "inspect",
+        "analyze",
+        "review",
+        "roughcut",
+        "caption",
+        "caption-estimate",
+        "caption-run",
+    ):
         assert command in help_text
-    assert "run" not in help_text
+    # 진단용 `run`만 숨겨져 있다 — 'caption-run'의 일부가 아니라 홀로 선 run 토큰이 없다.
+    assert re.search(r"(^|[^\w-])run([^\w-]|$)", help_text) is None
 
 
 # ─────────────────────────────────────────────────────────────

@@ -252,16 +252,20 @@ def run(
     verify_with_second_model: bool = True,
     repair_repeats: bool = True,
     require_complete_coverage: bool = False,
+    transcriber: transcribe.Transcriber | None = None,
 ) -> RunResult:
     """`artifacts=False`면 SRT 하나만 남기고 trace는 쓰지 않는다.
 
     `workdir`를 임시 폴더로 주면 오디오도 그 안에서 만들고 끝나면 함께 사라진다.
-    실행 기록을 남기지 않는 경로가 이 둘을 같이 쓴다.
+    실행 기록을 남기지 않는 경로가 이 둘을 같이 쓴다. `transcriber`를 주면 그것이
+    곧 전사기다 — 파생 계층이 취소 게이트와 회계 관찰자를 붙인 위임물을 넘긴다.
+    주지 않으면 이 파이프라인이 스스로 만드는 기본 경로 그대로다.
     """
     online = online and not force_offline
     offline = force_offline or not online and env.is_offline()
     prepared = prepare(video, cfg, offline=offline, workdir=workdir, reuse_cache=artifacts)
-    transcriber = transcribe.get_transcriber(cfg, online=online, force_offline=offline)
+    if transcriber is None:
+        transcriber = transcribe.get_transcriber(cfg, online=online, force_offline=offline)
     if not repair_repeats:
         cfg = replace(cfg, repair_enabled=False)
 

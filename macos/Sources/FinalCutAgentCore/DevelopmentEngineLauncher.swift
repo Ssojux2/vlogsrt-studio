@@ -3,6 +3,9 @@ import Foundation
 public enum DevelopmentEngineOperation: String, Sendable {
   case analyze
   case roughcut
+  /// 공유 받기로 시작한 자막 job의 두 문(S4A) — 이 job에는 input.fcpxml이 없다.
+  case captionEstimate = "caption-estimate"
+  case captionRun = "caption-run"
 }
 
 /// 앱 실행의 사적 자격 증명 운반 — 값은 이 enum 안에만 산다(S2A-2).
@@ -156,6 +159,9 @@ public enum DevelopmentJobStager {
     "cancellation.jsonl",
     "media-grant.json",
     "caption-authorization.jsonl",
+    "caption-origin.json",
+    "final.wav",
+    "final.fcpxml",
   ]
   private static let results = [
     "analysis-estimate.jsonl",
@@ -169,17 +175,30 @@ public enum DevelopmentJobStager {
     "roughcut.fcpxml.review.json",
     "caption-request.jsonl",
     "caption-estimate.jsonl",
+    "caption-attempts.jsonl",
+    "caption-usage.jsonl",
     "caption-result.jsonl",
+    "pricing-caption.jsonl",
     "cancellation.jsonl",
   ]
-  /// 실패한 실행이 앱으로 나갈 수 있는 진단 증표 — 성공 산물(후보·러프컷)은 없다.
+  /// 실패한 실행이 앱으로 나갈 수 있는 진단 증표 — 성공 산물(후보·러프컷·SRT)은 없다.
   /// 실패를 보여주려고 성공 실행을 다시 요구하지 않는다(S1B).
   private static let diagnostics = [
     "analysis-attempts.jsonl",
     "analysis-usage.jsonl",
     "vision-decisions.jsonl",
     "analysis-result.jsonl",
+    "caption-attempts.jsonl",
+    "caption-usage.jsonl",
   ]
+  /// 자막 job의 스테이징 필수 재료(S4A) — 러프컷 workflow가 없는 job의 입력이다.
+  private static let captionInputs = [
+    "final.wav",
+    "final.fcpxml",
+    "caption-origin.json",
+  ]
+  /// 자막 실행의 산물이 나가는 job 루트 폴더 — SRT·검토 보고서가 여기 있다.
+  public static let captionDeliveryDirectoryName = "captions"
 
   public static func stage(
     jobID: String,
@@ -211,6 +230,45 @@ public enum DevelopmentJobStager {
     return destination
   }
 
+  /// 공유 받기로 시작한 자막 job의 스테이징(S4A) — `input.fcpxml`을 요구하지 않는다.
+  ///
+  /// 이 job은 러프컷 workflow를 갖지 않는다: 필수 재료는 내보내기 한 벌
+  /// (`final.wav`·`final.fcpxml`)과 원본 매핑 문서(`caption-origin.json`)다.
+  /// 취소 기록·미디어 권한·자막 승인 문서가 있으면 함께 들어간다(있는 것만).
+  public static func stageCaption(
+    jobID: String,
+    appGroupJob: URL,
+    externalRoot: URL,
+    fileManager: FileManager = .default
+  ) throws -> URL {
+    guard AppGroupWorkspace.isSafeJobID(jobID) else {
+      throw WorkspaceError.invalidJobID(jobID)
+    }
+    try fileManager.createDirectory(at: externalRoot, withIntermediateDirectories: true)
+    let confinedRoot = externalRoot.resolvingSymlinksInPath().standardizedFileURL
+    let jobs = confinedRoot.appendingPathComponent("Jobs", isDirectory: true)
+    try requireDirectoryOrMissing(jobs, fileManager: fileManager)
+    let destination = jobs.appendingPathComponent(jobID, isDirectory: true)
+    try fileManager.createDirectory(at: destination, withIntermediateDirectories: true)
+    try requireDirectory(destination, fileManager: fileManager)
+    guard destination.resolvingSymlinksInPath().path.hasPrefix(confinedRoot.path + "/") else {
+      throw DevelopmentEngineError.unsafePath(destination.path)
+    }
+    for name in captionInputs + [
+      "cancellation.jsonl", "media-grant.json", "caption-authorization.jsonl",
+    ] {
+      let source = appGroupJob.appendingPathComponent(name)
+      guard fileManager.fileExists(atPath: source.path) else { continue }
+      try requireRegularFile(source)
+      try copyStable(source, destination.appendingPathComponent(name), fileManager: fileManager)
+    }
+    for name in captionInputs {
+      guard fileManager.fileExists(atPath: destination.appendingPathComponent(name).path)
+      else { throw DevelopmentEngineError.missingCaptionInput(name) }
+    }
+    return destination
+  }
+
   public static func syncResults(
     from externalJob: URL,
     to appGroupJob: URL,
@@ -232,6 +290,42 @@ public enum DevelopmentJobStager {
         try fileManager.removeItem(at: destination)
       }
       try fileManager.copyItem(at: source, to: destination)
+    }
+    // 자막 산물(SRT·검토 보고서)은 job 루트 `captions/` 폴더째로 나간다(S4A).
+    // 진단 동기화(실패 실행)에는 없다 — 성공 산물이므로.
+    if !diagnosticsOnly {
+      try syncCaptionDelivery(from: externalJob, to: appGroupJob, fileManager: fileManager)
+    }
+  }
+
+  /// `captions/` 폴더의 일반 파일들을 App Group job으로 옮긴다 — SRT 파일 이름은
+  /// 프로젝트 이름에서 오므로 고정 목록이 아니라 확장자 허용목록으로 걸러 옮긴다.
+  /// 그 밖의 파일은 자막 산물이 아니므로 건너뛴다(엔진이 만든 폴더가 아닌 것까지
+  /// 앱 그룹으로 실어 나르지 않는다).
+  private static func syncCaptionDelivery(
+    from externalJob: URL,
+    to appGroupJob: URL,
+    fileManager: FileManager
+  ) throws {
+    let source = externalJob.appendingPathComponent(
+      captionDeliveryDirectoryName, isDirectory: true)
+    guard fileManager.fileExists(atPath: source.path) else { return }
+    try requireDirectory(source, fileManager: fileManager)
+    let destination = appGroupJob.appendingPathComponent(
+      captionDeliveryDirectoryName, isDirectory: true)
+    try fileManager.createDirectory(at: destination, withIntermediateDirectories: true)
+    for entry in try fileManager.contentsOfDirectory(
+      at: source, includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey])
+    {
+      guard entry.lastPathComponent.hasSuffix(".srt")
+        || entry.lastPathComponent.hasSuffix(".review.json")
+      else { continue }
+      try requireRegularFile(entry)
+      let target = destination.appendingPathComponent(entry.lastPathComponent)
+      if fileManager.fileExists(atPath: target.path) {
+        try fileManager.removeItem(at: target)
+      }
+      try fileManager.copyItem(at: entry, to: target)
     }
   }
 
@@ -515,6 +609,7 @@ struct EngineStatusCapture {
 
 public enum DevelopmentEngineError: Error, Equatable, LocalizedError {
   case missingInput
+  case missingCaptionInput(String)
   case stagedInputChanged(String)
   case unsafePath(String)
   case nonRegularFile(String)
@@ -530,6 +625,8 @@ public enum DevelopmentEngineError: Error, Equatable, LocalizedError {
     switch self {
     case .missingInput:
       "App Group job에 input.fcpxml이 없습니다"
+    case .missingCaptionInput(let name):
+      "자막 job에 필수 재료 \(name)이(가) 없습니다"
     case .stagedInputChanged(let name):
       "재개하려는 외부 작업의 입력이 바뀌었습니다: \(name)"
     case .unsafePath(let path):

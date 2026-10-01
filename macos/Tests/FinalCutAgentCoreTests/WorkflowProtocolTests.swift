@@ -249,6 +249,49 @@ private let analysisSuccessLine = """
   }
 }
 
+/// Python CaptionResult(1.1) 한 줄 — 성공한 무발화(SRT 없음)의 실제 모양(S4A).
+private let captionNoSpeechLine = """
+  {"payload":{"final_revision":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","quality":["coverage:complete"],"speech_status":"no_speech","srt_path":null,"warnings":["발화 없음"]},"protocol_version":"1.1","type":"CaptionResult"}
+  """
+
+/// Python CaptionAttempt(1.1) 한 줄 — 시도가 실행 중이라는 내구 진행 기록(S4A).
+private let captionAttemptLine = """
+  {"payload":{"attempt_id":"caption-attempt-001","error":null,"estimate_revision":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","request_revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","started_at":"2026-10-01T04:00:00Z","status":"running"},"protocol_version":"1.1","type":"CaptionAttempt"}
+  """
+
+@Test func captionResultAndAttemptDecodeFromPythonLines() throws {
+  let result = try ProtocolCodec.decode(
+    CaptionResultMessage.self,
+    type: "CaptionResult",
+    version: ProtocolCodec.captionVersion,
+    from: captionNoSpeechLine.trimmingCharacters(in: .newlines)
+  )
+  #expect(result.speechStatus == "no_speech")
+  #expect(result.srtPath == nil)
+  #expect(result.warnings == ["발화 없음"])
+  #expect(result.quality == ["coverage:complete"])
+
+  let attempt = try ProtocolCodec.decode(
+    CaptionAttemptMessage.self,
+    type: "CaptionAttempt",
+    version: ProtocolCodec.captionVersion,
+    from: captionAttemptLine.trimmingCharacters(in: .newlines)
+  )
+  #expect(attempt.status == "running")
+  #expect(attempt.error == nil)
+  #expect(attempt.requestRevision.count == 64)
+
+  // 승인이 없는 자막 결과는 앱이 읽을 이유가 없다 — 버전·타입이 어긋나면 만들지 않는다.
+  #expect(throws: ProtocolCodecError.self) {
+    _ = try ProtocolCodec.decode(
+      CaptionAttemptMessage.self,
+      type: "CaptionAttempt",
+      version: ProtocolCodec.captionVersion,
+      from: captionAttemptLine.replacingOccurrences(of: "\"1.1\"", with: "\"1.0\"")
+    )
+  }
+}
+
 @Test func shareInboxStagesAPythonCompatibleCaptionRequest() throws {
   let root = FileManager.default.temporaryDirectory
     .appendingPathComponent(UUID().uuidString, isDirectory: true)

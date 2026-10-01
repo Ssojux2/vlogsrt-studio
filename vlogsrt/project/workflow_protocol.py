@@ -1170,6 +1170,56 @@ class CaptionResult:
             raise ValueError("발화 없음 또는 오류 결과는 SRT 경로를 가질 수 없다")
 
 
+CaptionAttemptStatus: TypeAlias = Literal["pending", "running", "succeeded", "failed", "cancelled"]
+
+# 자막 작업만 쓰는 상태 — 원본 러프컷 워크플로(`WorkflowJournal`)와 자리가 다르다.
+# 공유 받기로 시작한 job에는 input.fcpxml이 없으므로 ProjectRevision도 없다: 이
+# 원장의 첫 줄은 CaptionRequest고 상태는 request_revision에 묶인다(S4A).
+_CAPTION_ORDERED_STATES: tuple[WorkflowState, ...] = (
+    "caption_received",
+    "caption_estimate_ready",
+    "caption_authorized",
+    "caption_ready",
+)
+_NEXT_CAPTION_STATE = dict(zip(_CAPTION_ORDERED_STATES, _CAPTION_ORDERED_STATES[1:], strict=False))
+_CAPTION_STATES = frozenset(_CAPTION_ORDERED_STATES)
+
+
+@dataclass(frozen=True, slots=True)
+class CaptionStateEvent:
+    request_revision: str
+    state: WorkflowState
+
+    def __post_init__(self) -> None:
+        _require_sha256(self.request_revision, "자막 요청 리비전")
+        if self.state not in _CAPTION_STATES and self.state not in _TERMINAL_STATES:
+            raise ValueError(f"자막 작업에는 없는 상태다: {self.state!r}")
+
+
+@dataclass(frozen=True, slots=True)
+class CaptionAttempt:
+    """자막 시도 하나의 상태 — 성공한 무발화와 실패한 전사를 갈라 남긴다(S4A)."""
+
+    request_revision: str
+    estimate_revision: str
+    attempt_id: str
+    status: CaptionAttemptStatus
+    started_at: str
+    error: str | None
+
+    def __post_init__(self) -> None:
+        _require_sha256(self.request_revision, "자막 요청 리비전")
+        _require_sha256(self.estimate_revision, "자막 추정 리비전")
+        if not self.attempt_id or not self.started_at:
+            raise ValueError("시도 ID·시작 시각은 비어 있을 수 없다")
+        if self.status not in {"pending", "running", "succeeded", "failed", "cancelled"}:
+            raise ValueError(f"알 수 없는 자막 시도 상태다: {self.status!r}")
+        if self.status == "failed" and not self.error:
+            raise ValueError("실패한 자막 시도에는 오류가 필요하다")
+        if self.status != "failed" and self.error is not None:
+            raise ValueError("실패가 아닌 자막 시도는 오류를 가질 수 없다")
+
+
 @dataclass(frozen=True, slots=True)
 class WorkflowStateEvent:
     input_revision: str
@@ -1199,6 +1249,8 @@ ProtocolMessage: TypeAlias = (
     | CaptionEstimate
     | CaptionAuthorization
     | CaptionResult
+    | CaptionAttempt
+    | CaptionStateEvent
     | WorkflowStateEvent
 )
 
@@ -1308,6 +1360,87 @@ class WorkflowJournal:
                     raise ValueError(f"허용되지 않는 상태 전이: {current.state} → {state}")
                 stream.seek(0, os.SEEK_END)
                 stream.write(encode_message(WorkflowStateEvent(input_revision, state)))
+                stream.flush()
+                os.fsync(stream.fileno())
+                self.state = state
+            finally:
+                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+
+
+class CaptionJournal:
+    """공유 받기로 시작한 자막 작업의 append-only 상태 원장(S4A).
+
+    첫 줄은 ``CaptionRequest``고 그 뒤의 상태 줄은 전부 ``request_revision``에
+    묶인다. ``caption_authorized``는 종료 상태가 아니다 — 시도가 예외로 무너져도
+    같은 요청·같은 추정으로 다시 실행할 수 있어야 한다(분석의 ``authorized``와
+    같은 규율). 종료 상태는 ``cancelled``·``failed`` 둘뿐이다.
+    """
+
+    def __init__(self, path: Path, request: CaptionRequest, state: WorkflowState) -> None:
+        self.path = path
+        self.request = request
+        self.state = state
+
+    @classmethod
+    def create(cls, path: Path, request: CaptionRequest) -> CaptionJournal:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with path.open("x", encoding="utf-8", newline="\n") as stream:
+                stream.write(encode_message(request))
+                stream.flush()
+                os.fsync(stream.fileno())
+        except FileExistsError as exc:
+            raise ValueError(f"자막 작업 원장이 이미 있다: {path}") from exc
+        return cls(path, request, "caption_received")
+
+    @classmethod
+    def open(cls, path: Path) -> CaptionJournal:
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+        except FileNotFoundError as exc:
+            raise ValueError(f"자막 작업 원장이 없다: {path}") from exc
+        return cls._from_lines(path, lines)
+
+    @classmethod
+    def _from_lines(cls, path: Path, lines: list[str]) -> CaptionJournal:
+        if not lines:
+            raise ValueError(f"자막 작업 원장이 비어 있다: {path}")
+        first = decode_message(lines[0])
+        if not isinstance(first, CaptionRequest):
+            raise ValueError("자막 작업 원장의 첫 줄은 CaptionRequest여야 한다")
+        state: WorkflowState = "caption_received"
+        for line in lines[1:]:
+            event = decode_message(line)
+            if not isinstance(event, CaptionStateEvent):
+                raise ValueError("자막 작업 원장의 상태 줄은 CaptionStateEvent여야 한다")
+            if event.request_revision != first.request_revision:
+                raise ValueError("자막 작업 원장에 다른 요청 리비전의 상태가 섞였다")
+            if state in _TERMINAL_STATES:
+                raise ValueError(f"종료 상태 뒤에는 전이가 없다: {state} → {event.state}")
+            expected = _NEXT_CAPTION_STATE.get(state)
+            if event.state != expected and event.state not in _TERMINAL_STATES:
+                raise ValueError(f"허용되지 않는 상태 전이: {state} → {event.state}")
+            state = event.state
+        return cls(path, first, state)
+
+    def transition(self, request_revision: str, state: WorkflowState) -> None:
+        with self.path.open("r+", encoding="utf-8", newline="\n") as stream:
+            fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+            try:
+                stream.seek(0)
+                current = self._from_lines(self.path, stream.readlines())
+                if request_revision != current.request.request_revision:
+                    raise ValueError(
+                        f"요청 리비전이 자막 작업과 다르다: {request_revision} ≠ "
+                        f"{current.request.request_revision}"
+                    )
+                expected = _NEXT_CAPTION_STATE.get(current.state)
+                if current.state in _TERMINAL_STATES:
+                    raise ValueError(f"종료 상태 뒤에는 전이가 없다: {current.state} → {state}")
+                if state != expected and state not in _TERMINAL_STATES:
+                    raise ValueError(f"허용되지 않는 상태 전이: {current.state} → {state}")
+                stream.seek(0, os.SEEK_END)
+                stream.write(encode_message(CaptionStateEvent(request_revision, state)))
                 stream.flush()
                 os.fsync(stream.fileno())
                 self.state = state
@@ -1542,6 +1675,17 @@ def _message_payload(message: ProtocolMessage) -> dict[str, object]:
             "srt_path": str(message.srt_path) if message.srt_path is not None else None,
             "warnings": list(message.warnings),
         }
+    if isinstance(message, CaptionAttempt):
+        return {
+            "attempt_id": message.attempt_id,
+            "error": message.error,
+            "estimate_revision": message.estimate_revision,
+            "request_revision": message.request_revision,
+            "started_at": message.started_at,
+            "status": message.status,
+        }
+    if isinstance(message, CaptionStateEvent):
+        return {"request_revision": message.request_revision, "state": message.state}
     if isinstance(message, WorkflowStateEvent):
         return {"input_revision": message.input_revision, "state": message.state}
     raise TypeError(f"지원하지 않는 프로토콜 메시지다: {type(message).__name__}")
@@ -1824,6 +1968,23 @@ def _decode_payload(kind: object, payload: dict[str, object], version: str) -> P
             speech_status=cast(
                 Literal["speech", "no_speech", "error"], _string(payload, "speech_status")
             ),
+        )
+    if kind == "CaptionAttempt":
+        error = payload.get("error")
+        if error is not None and not isinstance(error, str):
+            raise ValueError("CaptionAttempt.error는 문자열 또는 null이어야 한다")
+        return CaptionAttempt(
+            request_revision=_string(payload, "request_revision"),
+            estimate_revision=_string(payload, "estimate_revision"),
+            attempt_id=_string(payload, "attempt_id"),
+            status=cast(CaptionAttemptStatus, _string(payload, "status")),
+            started_at=_string(payload, "started_at"),
+            error=error,
+        )
+    if kind == "CaptionStateEvent":
+        return CaptionStateEvent(
+            request_revision=_string(payload, "request_revision"),
+            state=cast(WorkflowState, _string(payload, "state")),
         )
     if kind == "WorkflowStateEvent":
         return WorkflowStateEvent(
@@ -2249,6 +2410,8 @@ _CAPTION_PROTOCOL_TYPES = frozenset(
         "CaptionEstimate",
         "CaptionAuthorization",
         "CaptionResult",
+        "CaptionAttempt",
+        "CaptionStateEvent",
     }
 )
 

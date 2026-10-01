@@ -20,10 +20,13 @@ from vlogsrt.project.workflow_protocol import (
     AnalysisResult,
     CancellationRequest,
     CandidatePreview,
+    CaptionAttempt,
     CaptionAuthorization,
     CaptionEstimate,
+    CaptionJournal,
     CaptionRequest,
     CaptionResult,
+    CaptionStateEvent,
     CutCandidate,
     CutResult,
     EditPlan,
@@ -222,6 +225,18 @@ def test_jsonl_protocol_round_trips_every_public_message_deterministically(tmp_p
             warnings=("coverage:complete",),
             quality=("timing:pass",),
             speech_status="speech",
+        ),
+        CaptionAttempt(
+            request_revision=caption_request.request_revision,
+            estimate_revision=caption_estimate.estimate_revision,
+            attempt_id="caption-attempt-001",
+            status="failed",
+            started_at="2026-09-21T05:01:00Z",
+            error="전사 실패",
+        ),
+        CaptionStateEvent(
+            request_revision=caption_request.request_revision,
+            state="caption_ready",
         ),
     )
 
@@ -544,6 +559,71 @@ def test_two_open_journals_cannot_append_the_same_transition(tmp_path: Path) -> 
     with pytest.raises(ValueError, match="허용되지 않는 상태 전이"):
         stale.transition(revision.revision, "estimate_ready")
     assert WorkflowJournal.open(first.path).state == "estimate_ready"
+
+
+def _caption_request(tmp_path: Path) -> CaptionRequest:
+    return CaptionRequest(
+        origin_revision="a" * 64,
+        final_revision="b" * 64,
+        render_audio=tmp_path / "mix.wav",
+        render_audio_sha256="c" * 64,
+        final_fcpxml=tmp_path / "final.fcpxml",
+    )
+
+
+def test_caption_journal_keeps_failed_attempts_retryable_under_one_request(
+    tmp_path: Path,
+) -> None:
+    """자막 job 원장(S4A) — 시도 실패로 종료하지 않고 같은 요청·승인으로 재시도한다."""
+    request = _caption_request(tmp_path)
+    journal = CaptionJournal.create(tmp_path / "caption.jsonl", request)
+    assert journal.state == "caption_received"
+
+    journal.transition(request.request_revision, "caption_estimate_ready")
+    journal.transition(request.request_revision, "caption_authorized")
+    # 실패한 시도가 원장을 종료 상태로 옮기지 않는다 — 여기가 재시도의 문이다.
+    assert CaptionJournal.open(journal.path).state == "caption_authorized"
+    journal.transition(request.request_revision, "caption_ready")
+    assert CaptionJournal.open(journal.path).state == "caption_ready"
+    # 완료 상태는 종료가 아니지만 뒤로는 못 돌아간다 — 재실행은 새 job이다.
+    with pytest.raises(ValueError, match="허용되지 않는 상태 전이"):
+        journal.transition(request.request_revision, "caption_authorized")
+
+    # 원장이 이미 있으면 배타 생성으로 거부다 — 승인 뒤 조용히 새 원장이 열리지 않는다.
+    with pytest.raises(ValueError, match="이미 있다"):
+        CaptionJournal.create(tmp_path / "caption.jsonl", request)
+
+    # 다른 요청 리비전의 상태는 섞이지 않는다.
+    with pytest.raises(ValueError, match="리비전"):
+        journal.transition("d" * 64, "caption_ready")
+
+    # 취소는 종료 상태다 — 어떤 실행 상태에서도 닫히고 그 뒤는 없다.
+    cancelled = CaptionJournal.create(tmp_path / "cancelled.jsonl", request)
+    cancelled.transition(request.request_revision, "caption_estimate_ready")
+    cancelled.transition(request.request_revision, "cancelled")
+    assert CaptionJournal.open(cancelled.path).state == "cancelled"
+    with pytest.raises(ValueError, match="종료 상태"):
+        cancelled.transition(request.request_revision, "caption_authorized")
+
+    # 상태 줄이 아닌 기록은 자막 원장이 아니다 — 러프컷 상태와 자리가 다르다.
+    foreign = tmp_path / "foreign.jsonl"
+    foreign.write_text(encode_message(request) + encode_message(request), encoding="utf-8")
+    with pytest.raises(ValueError, match="CaptionStateEvent"):
+        CaptionJournal.open(foreign)
+
+    # 러프컷 상태는 자막 원장에 못 들어간다 — 만들 때도, 읽을 때도 같은 규칙이다.
+    with pytest.raises(ValueError, match="없는 상태"):
+        CaptionStateEvent(request_revision=request.request_revision, state="received")
+    valid_event = encode_message(
+        CaptionStateEvent(request_revision=request.request_revision, state="caption_ready")
+    )
+    mixed = tmp_path / "mixed.jsonl"
+    mixed.write_text(
+        encode_message(request) + valid_event.replace('"caption_ready"', '"received"'),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="없는 상태"):
+        CaptionJournal.open(mixed)
 
 
 def test_protocol_rejects_unknown_versions_and_overlapping_approval_sets() -> None:
