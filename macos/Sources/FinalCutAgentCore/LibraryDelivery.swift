@@ -80,16 +80,6 @@ public enum LibraryGrantStore {
     return try? JSONDecoder().decode(LibraryGrant.self, from: data)
   }
 
-  /// 북마크가 풀리는 루트 — 권한 흐름이 호스트에 남긴 보안 북마크다.
-  public static func bookmarkedRoot(
-    bookmarkStore: SecurityScopedBookmarkStore
-  ) -> URL? {
-    if let peeked = (try? bookmarkStore.peek(key: bookmarkKey)) ?? nil {
-      return peeked.url
-    }
-    return nil
-  }
-
   /// 권한의 현재 유효성 — 북마크·기록·폴더 사실이 모두 같아야 한다.
   ///
   /// 어긋남(북마크가 다른 폴더를 가리킴·루트가 사라짐·번들 목록 변동)은
@@ -147,9 +137,58 @@ public enum SRTDeliveryError: Error, Equatable, LocalizedError {
   }
 }
 
+/// 보안 스코프의 열기·닫기 주입점 — 배달 순서 시험이 가짜로 대체한다.
+public struct LibraryScopeAccess: Sendable {
+  public let start: @Sendable (URL) -> Bool
+  public let stop: @Sendable (URL) -> Void
+
+  public init(
+    start: @escaping @Sendable (URL) -> Bool,
+    stop: @escaping @Sendable (URL) -> Void
+  ) {
+    self.start = start
+    self.stop = stop
+  }
+
+  /// 실물 — 북마크 루트의 보안 스코프를 건다.
+  public static func live() -> LibraryScopeAccess {
+    LibraryScopeAccess(
+      start: { url in url.startAccessingSecurityScopedResource() },
+      stop: { url in url.stopAccessingSecurityScopedResource() })
+  }
+}
+
 /// SRT를 번들 옆에 원자적으로 놓는 문 — 자동 가져오기는 없다(안내 문구뿐).
 public enum SRTDelivery {
   public static let deliveryRecordName = "srt-delivery.json"
+
+  /// SRT 배달의 전체 문 — 북마크 스코프를 **먼저** 걸고 권한 검증과 복사가
+  /// 그 안에서 일어나게 한다(어느 끝에서 실패해도 스코프는 닫는다).
+  ///
+  /// 순서가 계약이다: `LibraryGrantStore.validate`는 파일시스템 검사(폴더
+  /// 있음·번들 목록)를 하는데, 샌드박스 안에서 권한 폴더는 스코프가 걸린
+  /// 뒤에만 보인다. 검증을 먼저 하면 유효한 권한도 "폴더가 그 자리에 없다"로
+  /// 폐쇄된다 — 스코프가 validate보다 앞서야 한다.
+  @discardableResult
+  public static func deliver(
+    job: RoundTripJob,
+    workspace: AppGroupWorkspace,
+    bookmarks: BookmarkAccess,
+    fileManager: FileManager = .default,
+    scope: LibraryScopeAccess = .live()
+  ) throws -> URL {
+    guard let peeked = try bookmarks.peek(key: LibraryGrantStore.bookmarkKey) else {
+      throw LibraryGrantError.mismatch(detail: "보안 북마크가 없다")
+    }
+    let root = peeked.url
+    let accessing = scope.start(root)
+    defer {
+      if accessing { scope.stop(root) }
+    }
+    let grant = try LibraryGrantStore.validate(
+      workspace: workspace, bookmarkedRoot: root, fileManager: fileManager)
+    return try placeBesideBundle(job: job, grant: grant, fileManager: fileManager)
+  }
 
   /// job의 captions/ 안에서 성공 SRT를 찾아 권한 폴더(번들 옆)로 원자 복사한다.
   ///

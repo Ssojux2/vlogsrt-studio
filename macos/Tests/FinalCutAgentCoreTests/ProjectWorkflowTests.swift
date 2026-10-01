@@ -184,6 +184,99 @@ private func grantFixture() throws -> (
   }
 }
 
+// ─── SRT 배달 문 — 스코프가 권한 검증보다 먼저다 ────────────────────
+
+/// 순서 기록 상자 — 스코프 열기와 파일 검사의 선후를 같은 줄에 남긴다.
+private final class ScopeOrderRecorder: @unchecked Sendable {
+  private(set) var events: [String] = []
+  func append(_ event: String) { events.append(event) }
+}
+
+/// 파일 검사(fileExists·디렉터리 목록)를 기록하는 FileManager —
+/// LibraryGrantStore.validate의 검사가 스코프 뒤에 오는지 본다.
+private final class ScopeOrderFileManager: FileManager {
+  private let recorder: ScopeOrderRecorder
+
+  init(recorder: ScopeOrderRecorder) {
+    self.recorder = recorder
+    super.init()
+  }
+
+  override func fileExists(
+    atPath path: String, isDirectory: UnsafeMutablePointer<ObjCBool>?
+  ) -> Bool {
+    recorder.append("file-check")
+    return super.fileExists(atPath: path, isDirectory: isDirectory)
+  }
+
+  override func contentsOfDirectory(atPath path: String) throws -> [String] {
+    recorder.append("file-check")
+    return try super.contentsOfDirectory(atPath: path)
+  }
+}
+
+/// 가짜 북마크 저장소 — 권한 루트 하나만 되살린다(순서 시험은 북마크 복원
+/// 자체가 대상이 아니다).
+private struct SingleRootBookmarks: BookmarkAccess {
+  let key: String
+  let url: URL
+
+  func peekStoredBookmarks(prefix: String) throws ->
+    [SecurityScopedBookmarkStore.PeekedBookmark] { [] }
+  func peek(key: String) throws -> SecurityScopedBookmarkStore.PeekedBookmark? {
+    guard key == self.key else { return nil }
+    return SecurityScopedBookmarkStore.PeekedBookmark(
+      key: key, url: url, isStale: false)
+  }
+  func settle(_ bookmark: SecurityScopedBookmarkStore.PeekedBookmark) throws -> URL {
+    bookmark.url
+  }
+}
+
+@Test func srtDeliveryStartsTheBookmarkScopeBeforeGrantValidationFileChecks() throws {
+  let fixture = try grantFixture()
+  defer { try? FileManager.default.removeItem(at: fixture.root) }
+  let job = try RoundTripJob(workspace: fixture.workspace, id: "caption-2")
+  let captions = job.captionsDirectoryURL
+  try FileManager.default.createDirectory(at: captions, withIntermediateDirectories: true)
+  try Data("1\n00:00:01,000 --> 00:00:02,000\n첫 문장\n".utf8)
+    .write(to: captions.appendingPathComponent("프로젝트.ko.srt"))
+  try LibraryGrantStore.save(
+    LibraryGrant(
+      rootPath: fixture.libraryParent.path, bundleName: "Vlog.fcpbundle",
+      grantedAt: "2026-10-01T00:00:00Z"),
+    workspace: fixture.workspace)
+
+  let recorder = ScopeOrderRecorder()
+  let scope = LibraryScopeAccess(
+    start: { _ in
+      recorder.append("start-scope")
+      return true
+    },
+    stop: { _ in recorder.append("stop-scope") })
+
+  let placed = try SRTDelivery.deliver(
+    job: job,
+    workspace: fixture.workspace,
+    bookmarks: SingleRootBookmarks(
+      key: LibraryGrantStore.bookmarkKey, url: fixture.libraryParent),
+    fileManager: ScopeOrderFileManager(recorder: recorder),
+    scope: scope)
+
+  let events = recorder.events
+  // 계약: 스코프가 걸린 뒤에야 validate의 파일 검사가 폴더를 본다 —
+  // 반대 순서면 샌드박스 안에서 유효한 권한도 폐쇄된다.
+  #expect(events.first == "start-scope")
+  #expect(events.last == "stop-scope")
+  let firstFileCheck = try #require(events.firstIndex(of: "file-check"))
+  #expect(events.firstIndex(of: "start-scope")! < firstFileCheck)
+  // 배달도 실제로 이뤄졌다 — 순서만 지켜진 실패 경로가 아니다.
+  #expect(placed.deletingLastPathComponent().path == fixture.libraryParent.path)
+  #expect(
+    FileManager.default.fileExists(
+      atPath: fixture.libraryParent.appendingPathComponent("프로젝트.ko.srt").path))
+}
+
 // ─── 새 에이전트 URL — 권한 요청과 배달 요청 ──────────────────────
 
 @Test func agentURLCarriesTheLibraryGrantAndDeliveryHosts() throws {

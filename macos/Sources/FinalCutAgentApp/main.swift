@@ -184,15 +184,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       do {
         let workspace = try AppGroupWorkspace.live()
         let job = try RoundTripJob(workspace: workspace, id: jobID)
-        let store = try SecurityScopedBookmarkStore()
-        let granted = LibraryGrantStore.bookmarkedRoot(bookmarkStore: store)
-        let accessing = granted?.startAccessingSecurityScopedResource() ?? false
-        defer {
-          if accessing, let granted { granted.stopAccessingSecurityScopedResource() }
-        }
-        let grant = try LibraryGrantStore.validate(
-          workspace: workspace, bookmarkedRoot: granted)
-        let placed = try SRTDelivery.placeBesideBundle(job: job, grant: grant)
+        // 배달 문은 core에 있다 — 북마크 스코프가 validate의 파일 검사보다
+        // 먼저라는 순서 계약과 함께(스코프 없이 검증하면 유효한 권한도
+        // "폴더가 그 자리에 없다"로 폐쇄된다).
+        let placed = try SRTDelivery.deliver(
+          job: job, workspace: workspace, bookmarks: try SecurityScopedBookmarkStore())
         NSLog("SRT 배달: %@ — Final Cut Pro: File > Import > Captions → Relative to Timeline", placed.path)
       } catch {
         NSAlert(error: error).runModal()

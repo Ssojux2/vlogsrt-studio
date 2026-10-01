@@ -235,3 +235,75 @@ private let _base = Date(timeIntervalSince1970: 1_800_000_000)
   }
   #expect(_pendingFileNames(workspace).count == 1)
 }
+
+// ─── 열기 경계 — extensionContext가 nil이어도 넣기가 먼저다 ─────────
+
+@Test @MainActor func openingWithoutExtensionContextEnqueuesBeforeWaking() throws {
+  let workspace = try _workspace()
+  defer { try? FileManager.default.removeItem(at: workspace.rootURL) }
+  let url = try AgentURL.libraryGrantURL()
+  // SDK 호스트(ProExtensionRequestHandling)는 extension 문맥을 주 클래스
+  // NSViewController에 주입하지 않는다 — 깨움 경계는 그것과 무관해야 한다.
+  // 가짜 운반으로 경계를 지킨다(실 NSWorkspace 열기를 부르지 않는다).
+  var wokeURLs: [URL] = []
+  var pendingAtWake: Bool? = nil
+  let wake = HostWakeTransport { url, completion in
+    wokeURLs.append(url)
+    // 깨움이 일어나는 순간 우편함에는 이미 동작이 남아 있다 — 넣기가 먼저다.
+    pendingAtWake = !_pendingFileNames(workspace).isEmpty
+    completion(true)
+  }
+
+  try HostActionOpener.open(url: url, workspace: workspace, wake: wake)
+
+  #expect(wokeURLs == [url])
+  #expect(pendingAtWake == true)
+  // 동작은 남는다 — 깨움 결과와 무관하게 호스트가 소비할 내구 기록이다.
+  #expect(_pendingFileNames(workspace).count == 1)
+}
+
+@Test @MainActor func failedEnqueueNeverWakesTheHost() throws {
+  let workspace = try _workspace()
+  defer { try? FileManager.default.removeItem(at: workspace.rootURL) }
+  var wakeCount = 0
+  let wake = HostWakeTransport { _, completion in
+    wakeCount += 1
+    completion(true)
+  }
+
+  // 계약 밖 URL — 넣기가 실패하면 깨우지 않는다(배달할 동작 없는 깨움).
+  #expect(throws: AgentURLError.self) {
+    try HostActionOpener.open(
+      url: URL(string: "https://example.com")!, workspace: workspace, wake: wake)
+  }
+  #expect(wakeCount == 0)
+  #expect(_pendingFileNames(workspace).isEmpty)
+}
+
+/// @Sendable 완료 핸들러에서 값을 돌려받는 시험 상자 — 동시 문맥이라도
+/// 여기서는 동기 호출 한 번뿐이므로 잠금 없이 읽는다.
+private final class SendableBox<T>: @unchecked Sendable {
+  private(set) var value: T?
+
+  func set(_ newValue: T) { value = newValue }
+}
+
+@Test @MainActor func wakeFailureIsReportedButTheActionStaysQueued() throws {
+  let workspace = try _workspace()
+  defer { try? FileManager.default.removeItem(at: workspace.rootURL) }
+  let reported = SendableBox<Bool>()
+  let wake = HostWakeTransport { _, completion in
+    completion(false)
+  }
+
+  try HostActionOpener.open(
+    url: AgentURL.analyzeURL(jobID: "job-1"), workspace: workspace, wake: wake
+  ) { opened in
+    reported.set(opened)
+  }
+
+  // 깨움이 실패해도 동작은 우편함에 남는다 — 호스트는 다음 시작·깨움마다
+  // 소비하므로 요청이 사라지지 않는다.
+  #expect(reported.value == false)
+  #expect(_pendingFileNames(workspace).count == 1)
+}
