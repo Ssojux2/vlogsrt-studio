@@ -8,6 +8,8 @@ public enum AgentURL {
   public static let analyzeHost = "analyze"
   public static let roughcutHost = "roughcut"
   public static let importHost = "import"
+  public static let captionEstimateHost = "caption-estimate"
+  public static let captionRunHost = "caption-run"
 
   public static func roundTripURL(jobID: String) throws -> URL {
     try operationURL(host: roundTripHost, jobID: jobID)
@@ -24,6 +26,16 @@ public enum AgentURL {
   /// 러프컷 가져오기 재시도(S2C) — 같은 검증된 출력을 다시 Final Cut으로 보낸다.
   public static func importURL(jobID: String) throws -> URL {
     try operationURL(host: importHost, jobID: jobID)
+  }
+
+  /// 자막 추정(무료·무키) — 패널의 명시적 동작만 부른다(S4B 패널 계약).
+  public static func captionEstimateURL(jobID: String) throws -> URL {
+    try operationURL(host: captionEstimateHost, jobID: jobID)
+  }
+
+  /// 자막 실행(유료) — 승인 문서가 스테이징된 job만 통과한다.
+  public static func captionRunURL(jobID: String) throws -> URL {
+    try operationURL(host: captionRunHost, jobID: jobID)
   }
 
   private static func operationURL(host: String, jobID: String) throws -> URL {
@@ -59,6 +71,8 @@ public enum AgentURL {
     case analyzeHost: return .analyze(jobID)
     case roughcutHost: return .roughcut(jobID)
     case importHost: return .importJob(jobID)
+    case captionEstimateHost: return .captionEstimate(jobID)
+    case captionRunHost: return .captionRun(jobID)
     default: throw AgentURLError.invalidHost(url.host ?? "")
     }
   }
@@ -69,6 +83,8 @@ public enum AgentRequest: Equatable, Sendable {
   case analyze(String)
   case roughcut(String)
   case importJob(String)
+  case captionEstimate(String)
+  case captionRun(String)
 }
 
 public enum AgentURLError: Error, Equatable {

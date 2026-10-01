@@ -95,7 +95,9 @@ public final class CaptionJobCoordinator {
           return try bookmarkStore?.settle(peeked)
         },
         loadCredentials: {
-          EngineRoleCredentialStore(storage: KeychainStore()).loadSnapshot()
+          // 패널 계약의 단일 공유 OpenAI 키 — STT·비전이 같은 키를 공식
+          // 엔드포인트로 쓴다(낡은 Google 저장값은 사용에서 빠진다).
+          EngineRoleCredentialStore(storage: KeychainStore()).loadSharedOpenAIRoles()
         },
         startScope: { url in url.startAccessingSecurityScopedResource() },
         stopScope: { url in url.stopAccessingSecurityScopedResource() },

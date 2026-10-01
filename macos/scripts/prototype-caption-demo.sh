@@ -6,10 +6,12 @@
 #   2. 앱의 원본 지도(origin-map.jsonl)에 데모 UID 매핑을 심는다 — 실제로는
 #      확장의 "가져오기 완료로 표시"가 남기는 기록이다(S2C).
 #   3. 개발 엔진 래퍼가 없으면 설치하고, 앱으로 WAV+FCPXML을 연다(open) —
-#      앱의 공유 받기가 job을 만들고 caption-estimate를 자동으로 돌린다.
+#      창 없는 호스트가 인박스에 스테이징한다(job·추정·실행은 일어나지 않는다).
 #
-# 이 뒤는 사람이 한다: 앱 창에서 "자막 승인·실행" 클릭 → caption-run(유료,
-# 4초 무음 기준 약 $0.01) → 결과·경고·"SRT Finder에 보이기".
+# 이 뒤는 Final Cut 확장 패널이 한다(창 없는 호스트는 스테이징만 한다):
+# 패널이 인박스를 폴링해 "자막 추정 요청" → 승인 → caption-run(유료, 4초 무음
+# 기준 약 $0.01) → 결과·경고·Relative to Timeline 안내. 패널은 서명 빌드가
+# 필요하다 — 그 전까지 이 스크립트는 인박스 스테이징 스모크다.
 #
 # 쓰임: prototype-caption-demo.sh [앱 경로] [길이(초, 기본 4)]
 set -eu
@@ -66,5 +68,6 @@ printf '%s\n' \
 print "준비 완료:"
 print "  재료: $stage/mix.wav · $stage/edit.fcpxml"
 print "  원본 지도: $group_root/origin-map.jsonl (UID $uid)"
-print "앱을 열어 공유 받기를 시작합니다 — 이어서 앱 창에서 승인하세요."
+print "호스트 앱을 열어 공유 받기를 스테이징합니다(자동 실행 없음)."
+print "이어서는 Final Cut 확장 패널: '자막 추정 요청' → '승인하고 자막 생성'."
 open -a "$app_path" "$stage/mix.wav" "$stage/edit.fcpxml"

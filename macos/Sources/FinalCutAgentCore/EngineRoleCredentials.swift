@@ -140,6 +140,10 @@ public struct EngineRoleCredentialStore: Sendable {
   public static let sttAccount = "engine"
   public static let visionAccount = "vision"
   public static let visionBaseURLAccount = "vision-base-url"
+  /// 패널 시대의 단일 공유 OpenAI 키 계정 — 설정은 확장 패널에만 있다.
+  public static let sharedOpenAIAccount = "shared-openai"
+  /// 공식 OpenAI 엔드포인트 — 공유 키가 있으면 STT·비전이 함께 쓰는 자리다.
+  public static let officialOpenAIEndpoint = "https://api.openai.com/v1"
 
   public let storage: any SecureKeyValueStorage
 
@@ -154,6 +158,26 @@ public struct EngineRoleCredentialStore: Sendable {
       let endpoint = try storage.load(account: Self.visionBaseURLAccount) ?? ""
       return .ready(
         EngineRoleCredentials(sttKey: stt, visionKey: vision, visionBaseURL: endpoint))
+    } catch {
+      return .storageFailed
+    }
+  }
+
+  /// 단일 공유 OpenAI 키의 역할 스냅숏 — STT와 비전이 같은 키를 쓰고 비전은
+  /// 공식 OpenAI 엔드포인트로 간다(패널 계약).
+  ///
+  /// 낡은 Google 비전 키·엔드포인트 저장값(`vision`·`vision-base-url` 계정)은
+  /// **보존되지만 이 문이 다시 읽지 않는다** — 값 삭제·이주 없이 사용에서만
+  /// 빼낸다. 키가 비면 세 역할 전부 권위적 부재다(추정·러프컷은 무키로 돈다).
+  public func loadSharedOpenAIRoles() -> EngineRoleSnapshot {
+    do {
+      let key = (try storage.load(account: Self.sharedOpenAIAccount) ?? "")
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+      return .ready(
+        EngineRoleCredentials(
+          sttKey: key,
+          visionKey: key,
+          visionBaseURL: key.isEmpty ? "" : Self.officialOpenAIEndpoint))
     } catch {
       return .storageFailed
     }

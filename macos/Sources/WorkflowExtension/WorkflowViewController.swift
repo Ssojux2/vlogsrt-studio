@@ -17,6 +17,23 @@ public nonisolated final class WorkflowViewController: NSViewController {
   private var importRetryButton: NSButton!
   private var importConfirmButton: NSButton!
   private var candidatesStack: NSStackView!
+  // 자막 흐름(S4B 패널 계약) — 받은 내보내기 폴링·승인·재시도가 전부 패널에 있다.
+  private var captionStatusLabel: NSTextField!
+  private var captionEstimateButton: NSButton!
+  private var captionApproveButton: NSButton!
+  private var captionRetryButton: NSButton!
+  private var openAIKeyField: NSSecureTextField!
+  private var openAIKeyStatusLabel: NSTextField!
+  private var openAIKeyModel: CredentialEntryModel?
+  private var captionModel: CaptionPanelModel?
+  private var captionPollTimer: Timer?
+  /// 진행 중인 자막 job — App Group 기본값에 남아 패널을 닫아도 이어진다.
+  private var captionJobID: String? {
+    didSet {
+      let defaults = UserDefaults(suiteName: AppGroupWorkspace.identifier)
+      defaults?.set(captionJobID, forKey: "captionPanel.activeJobID")
+    }
+  }
   private var candidateRows: [CandidateReviewRow] = []
   private var job: RoundTripJob?
   private var activeProject: ActiveProjectSelection?
@@ -55,6 +72,44 @@ public nonisolated final class WorkflowViewController: NSViewController {
       action: #selector(confirmRoughcutImport)
     )
     importConfirmButton.isEnabled = false
+    // 자막 패널(S4B) — 인박스 폴링 상태·추정 요청·승인 실행·재시도의 네 버튼과
+    // 상태 문면. SRT는 자동으로 가져가지 않는다: 안내 문구만 남는다.
+    captionStatusLabel = NSTextField(labelWithString: "자막: 대기 중")
+    captionStatusLabel.maximumNumberOfLines = 4
+    captionEstimateButton = NSButton(
+      title: "자막 추정 요청",
+      target: self,
+      action: #selector(requestCaptionEstimate)
+    )
+    captionEstimateButton.isEnabled = false
+    captionApproveButton = NSButton(
+      title: "승인하고 자막 생성",
+      target: self,
+      action: #selector(approveCaptionRun)
+    )
+    captionApproveButton.isEnabled = false
+    captionRetryButton = NSButton(
+      title: "자막 재시도",
+      target: self,
+      action: #selector(retryCaptionRun)
+    )
+    captionRetryButton.isEnabled = false
+    // 단일 공유 OpenAI 키 설정 — STT·비전이 같은 키를 공식 OpenAI 엔드포인트로
+    // 쓴다. 값은 어느 문면에도 다시 나오지 않는다(상태는 있음/없음/실패).
+    openAIKeyField = NSSecureTextField()
+    openAIKeyField.placeholderString = "OpenAI API 키 (STT·비전 공유)"
+    let saveOpenAIKey = NSButton(
+      title: "저장", target: self, action: #selector(saveOpenAIKey))
+    let clearOpenAIKey = NSButton(
+      title: "지우기", target: self, action: #selector(clearOpenAIKey))
+    openAIKeyStatusLabel = NSTextField(labelWithString: "")
+    openAIKeyStatusLabel.maximumNumberOfLines = 2
+    openAIKeyModel = CredentialEntryModel(
+      storage: KeychainStore(),
+      account: EngineRoleCredentialStore.sharedOpenAIAccount,
+      roleNoun: "OpenAI 키")
+    openAIKeyModel?.refresh()
+    refreshOpenAIKeyStatus()
     candidatesStack = NSStackView()
     candidatesStack.orientation = .vertical
     candidatesStack.spacing = 8
@@ -74,6 +129,11 @@ public nonisolated final class WorkflowViewController: NSViewController {
         roughcutButton,
         NSStackView(views: [importRetryButton, importConfirmButton]),
         confirmButton,
+        captionStatusLabel!,
+        NSStackView(
+          views: [captionEstimateButton, captionApproveButton, captionRetryButton]),
+        NSStackView(views: [openAIKeyField, saveOpenAIKey, clearOpenAIKey]),
+        openAIKeyStatusLabel,
       ]
     )
     stack.orientation = .vertical
@@ -90,6 +150,14 @@ public nonisolated final class WorkflowViewController: NSViewController {
     timelineBridge = FinalCutTimelineBridge { [weak self] selection in
       self?.activeProjectDidChange(selection)
     }
+    // 자막 패널 모델 — App Group에 산 job·인박스 기록이 정본이다. 진행 중 job는
+    // 기본값에서 되살려 패널을 닫았다 열어도 흐름이 이어진다.
+    if let workspace = try? AppGroupWorkspace.live() {
+      captionModel = CaptionPanelModel(workspace: workspace)
+    }
+    captionJobID = UserDefaults(suiteName: AppGroupWorkspace.identifier)?
+      .string(forKey: "captionPanel.activeJobID")
+    refreshCaptionPanel()
   }
 
   @MainActor public override func viewDidAppear() {
@@ -99,9 +167,13 @@ public nonisolated final class WorkflowViewController: NSViewController {
       // 나타난 시점의 내구 상태를 스스로 새로고친다 — 엔진 호출은 없다(S2A-3).
       startRefreshing(.analysis)
     }
+    // 자막 인박스 폴링(S4B) — 공유 받기는 호스트가 스테이징만 하므로 패널이
+    // 내구 기록을 읽어 변화를 안다. 폴링은 읽기만 한다.
+    startCaptionPolling()
   }
 
   @MainActor public override func viewWillDisappear() {
+    stopCaptionPolling()
     stopRefreshing()
     timelineBridge?.stop()
     super.viewWillDisappear()
@@ -183,6 +255,9 @@ public nonisolated final class WorkflowViewController: NSViewController {
       "활성 프로젝트: \(selection.projectName)\nUID: \(selection.projectUID)\n"
       + "시작 \(selection.timelineStart.secondsText) · 길이 \(selection.duration.secondsText)"
       + " · 프레임 \(selection.frameDuration.secondsText)"
+    // 활성 UID가 자막 인박스의 키다 — 프로젝트가 바뀌면 받은 내보내기 대기도
+    // 다시 잰다(S4B).
+    refreshCaptionPanel()
     if let oldUID, oldUID != selection.projectUID {
       // 분석 job의 드리프트 규율은 그대로다 — 단 배달 확인 대기 중이라면 새로
       // 열린 프로젝트가 러프컷 결과일 수 있으니 확인 자격만 다시 잰다(S2C).
@@ -449,6 +524,144 @@ public nonisolated final class WorkflowViewController: NSViewController {
     } catch {
       status.stringValue = "확인 기록 실패: \(error.localizedDescription)"
     }
+  }
+
+  // ─── 자막 패널(S4B) — 폴링·승인·재시도, 유료 실행은 동작으로만 ────
+
+  /// 인박스·job 기록 폴링 — 읽기만 한다. 공유 받기 자체는 아무 것도 실행하지
+  /// 않으므로 패널이 여기서 변화를 발견한다.
+  @MainActor private func startCaptionPolling() {
+    captionPollTimer?.invalidate()
+    captionPollTimer = Timer.scheduledTimer(
+      withTimeInterval: 1.5, repeats: true
+    ) { [weak self] _ in
+      Task { @MainActor [weak self] in self?.refreshCaptionPanel() }
+    }
+  }
+
+  @MainActor private func stopCaptionPolling() {
+    captionPollTimer?.invalidate()
+    captionPollTimer = nil
+  }
+
+  /// 자막 상태 갱신 — 관측은 모델이 파일에서 읽는다(엔진 호출 없음).
+  @MainActor private func refreshCaptionPanel() {
+    guard let captionModel else { return }
+    var captionJob: RoundTripJob? = nil
+    if let captionJobID, let workspace = try? AppGroupWorkspace.live() {
+      captionJob = try? RoundTripJob(workspace: workspace, id: captionJobID)
+    }
+    let phase = captionModel.observe(
+      activeProjectUID: activeProject?.projectUID, job: captionJob)
+    captionStatusLabel.stringValue = phase.userFacingText
+    captionEstimateButton.isEnabled = {
+      if case .intakeReady = phase { return true }
+      return false
+    }()
+    captionApproveButton.isEnabled = {
+      if case .estimateReady = phase { return true }
+      return false
+    }()
+    captionRetryButton.isEnabled = {
+      if case .failed = phase { return true }
+      return false
+    }()
+    // 끝난 job는 패널에서 내린다 — 다음 공유 받기가 새 흐름으로 시작된다.
+    switch phase {
+    case .succeededNoSpeech, .succeededSrt:
+      captionJobID = nil
+    default:
+      break
+    }
+  }
+
+  /// 추정 요청 — 받은 내보내기를 job로 스테이징하고 추정(무료)을 호스트에 연다.
+  @objc @MainActor private func requestCaptionEstimate() {
+    guard let captionModel, let active = activeProject else { return }
+    do {
+      let action = try captionModel.requestEstimate(activeProjectUID: active.projectUID)
+      guard case .openCaptionEstimate(let jobID) = action, let url = action.url else {
+        captionStatusLabel.stringValue = "추정 요청을 만들지 못했다 — 다시 시도하세요"
+        return
+      }
+      captionJobID = jobID
+      try openCaptionAgentURL(url, pending: "자막 추정 요청됨")
+    } catch {
+      captionStatusLabel.stringValue = error.localizedDescription
+    }
+  }
+
+  /// 승인 실행 — 방금 고정된 추정에 묶인 승인 문서를 쓰고 실행(유료)을 연다.
+  @objc @MainActor private func approveCaptionRun() {
+    guard let captionModel, let captionJobID,
+      let workspace = try? AppGroupWorkspace.live(),
+      let job = try? RoundTripJob(workspace: workspace, id: captionJobID)
+    else { return }
+    do {
+      let action = try captionModel.authorizeRun(job: job)
+      guard let url = action.url else {
+        captionStatusLabel.stringValue = "실행 요청을 만들지 못했다 — 다시 승인하세요"
+        return
+      }
+      try openCaptionAgentURL(url, pending: "승인됨 — 자막 실행을 시작합니다")
+    } catch {
+      captionStatusLabel.stringValue = error.localizedDescription
+    }
+  }
+
+  /// 재시도 — 같은 유효 승인으로 다시 실행한다(승인 문서를 다시 쓰지 않는다).
+  @objc @MainActor private func retryCaptionRun() {
+    guard let captionModel, let captionJobID,
+      let workspace = try? AppGroupWorkspace.live(),
+      let job = try? RoundTripJob(workspace: workspace, id: captionJobID)
+    else { return }
+    do {
+      let action = try captionModel.retryRun(job: job)
+      guard let url = action.url else { return }
+      try openCaptionAgentURL(url, pending: "자막 재시도 요청됨")
+    } catch {
+      captionStatusLabel.stringValue = error.localizedDescription
+    }
+  }
+
+  /// 호스트 실행기 URL 열기 — 문지기는 현재 자막 job에 묶는다.
+  @MainActor private func openCaptionAgentURL(_ url: URL, pending: String) throws {
+    guard let context = extensionContext else {
+      throw RoundTripExtensionError.noExtensionContext
+    }
+    captionStatusLabel.stringValue = pending
+    context.open(url) { [weak self] opened in
+      guard let self else { return }
+      Task { @MainActor in
+        if !opened {
+          self.captionStatusLabel.stringValue =
+            "컨테이너 앱 열기 실패 — 앱이 실행 중인지 확인하세요"
+        }
+        self.refreshCaptionPanel()
+      }
+    }
+  }
+
+  // ─── 공유 OpenAI 키 설정 — STT·비전이 같은 키를 쓴다 ────────────
+
+  @objc @MainActor private func saveOpenAIKey() {
+    guard let model = openAIKeyModel, let field = openAIKeyField else { return }
+    model.updateSubmitted(field.stringValue)
+    model.save()
+    field.stringValue = model.submittedText
+    refreshOpenAIKeyStatus()
+  }
+
+  @objc @MainActor private func clearOpenAIKey() {
+    guard let model = openAIKeyModel else { return }
+    model.clear()
+    openAIKeyField?.stringValue = model.submittedText
+    refreshOpenAIKeyStatus()
+  }
+
+  @MainActor private func refreshOpenAIKeyStatus() {
+    guard let model = openAIKeyModel else { return }
+    openAIKeyStatusLabel.stringValue = "\(model.status.message) · 공식 OpenAI 엔드포인트 사용"
   }
 
   @MainActor private func openAgentURL(
