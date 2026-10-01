@@ -5,4 +5,10 @@
   <key>com.apple.security.files.user-selected.read-only</key><true/>
   <key>com.apple.security.application-groups</key>
   <array><string>5955379R8P.com.ssojux2.vlogsrt</string></array>
+  <key>com.apple.security.automation.apple-events</key><true/>
+  <key>com.apple.security.scripting-targets</key>
+  <dict>
+    <key>com.apple.FinalCut</key>
+    <array><string>com.apple.FinalCut.library.inspection</string></array>
+  </dict>
 </dict></plist>
