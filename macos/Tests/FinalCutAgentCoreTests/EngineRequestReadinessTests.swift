@@ -943,7 +943,7 @@ private final class FakeBookmarkAccess: BookmarkAccess, @unchecked Sendable {
           key: "developmentEngineWorkspace", url: fixture.externalRoot, isStale: false)
       },
       settleDevelopmentWorkspace: { peeked in peeked?.url },
-  
+
       startScope: { _ in true },
       stopScope: { _ in },
       readiness: { _ in
