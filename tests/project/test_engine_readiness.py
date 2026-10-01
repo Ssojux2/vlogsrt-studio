@@ -96,8 +96,11 @@ def _read_report(path: Path) -> dict[str, object]:
 
 
 def test_readiness_writes_one_bounded_public_report_and_touches_nothing(
-    tmp_path: Path, engine: ModuleType
+    tmp_path: Path, engine: ModuleType, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # 키 유무는 환경이 정한다 — 같은 프로세스의 앞선 시험이 남긴 dotenv 캐시와
+    # 무관하게, 이 시험의 부재 판정을 명시적으로 고정한다.
+    monkeypatch.setenv("OPENAI_API_KEY", "")
     job = _job_dir(tmp_path)
     before = sorted(path.name for path in job.iterdir())
     report = _report_root(tmp_path)
@@ -113,12 +116,14 @@ def test_readiness_writes_one_bounded_public_report_and_touches_nothing(
     assert set(payload) == {
         "engine",
         "readiness_version",
+        "openai_key_present",
         "python",
         "tools",
         "carrier_versions",
     }
     assert payload["engine"] == "vlogsrt-engine"
     assert payload["readiness_version"] == 1
+    assert payload["openai_key_present"] is False
     python = payload["python"]
     assert isinstance(python, dict)
     assert isinstance(python["executable"], str) and python["executable"]
@@ -278,3 +283,24 @@ def test_readiness_rejects_unknown_job_shapes(tmp_path: Path, engine: ModuleType
     assert engine.main(["readiness", "job-1", str(tmp_path / "missing")]) == 2
     assert engine.main(["preflight", "job-1", str(_job_dir(tmp_path)), str(report)]) == 2
     assert not report.exists()
+
+
+def test_readiness_reports_openai_key_presence_and_never_the_value(
+    tmp_path: Path, engine: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """개발 .env의 OpenAI 키는 유무만 보고된다(패널 시대 계약) — 값은 없다."""
+    job = _job_dir(tmp_path)
+    report = _report_root(tmp_path, "presence")
+    monkeypatch.setenv("OPENAI_API_KEY", "synthetic-readiness-key")
+
+    assert engine.main(["readiness", "job-1", str(job), str(report)]) == 0
+    payload = _read_report(report)
+    assert payload["openai_key_present"] is True
+    # 보고서는 유무불리언 외에 키 재료를 어떤 형태로도 실어 나르지 않는다.
+    assert "synthetic-readiness-key" not in report.read_text(encoding="utf-8")
+
+    # 빈 값은 부재다 — 공백만 남은 키로 '있다'고 말하지 않는다.
+    report2 = _report_root(tmp_path, "absence")
+    monkeypatch.setenv("OPENAI_API_KEY", "   ")
+    assert engine.main(["readiness", "job-1", str(job), str(report2)]) == 0
+    assert _read_report(report2)["openai_key_present"] is False

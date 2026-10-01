@@ -1,16 +1,19 @@
 import AppKit
 import FinalCutAgentCore
-import UniformTypeIdentifiers
 
 // Workflow SDK는 XPC 응답 큐에서 initWithNibName:bundle:로 주 클래스를 만든다
 // (2026-09-21 .ips). MainActor 서브클래스의 @objc init thunk에는 Swift 6가
 // dispatch_assert_queue를 심으므로 상속 격리를 유지하면 그 큐에서 프로세스가
 // 죽는다. 이 클래스만 격리를 내리고, UI는 구성원 단위 @MainActor로 지킨다.
 // 뷰 구성은 AppKit이 메인에서 부르는 loadView에서 처음 일어난다.
+//
+// 단계별 단일 패널(FCP 프로젝트 워크플로): 권한 → 내보내기 → 분석 → 검토·
+// 러프컷 → 자막. 드래그·FCPXML 직접 선택·키 입력 UI는 없다 — 입력은 AI Rough
+// Cut 공유 메뉴와 활성 프로젝트 문맥으로만 들어온다.
 public nonisolated final class WorkflowViewController: NSViewController {
+  private var stepLabel: NSTextField!
   private var status: NSTextField!
   private var activeProjectLabel: NSTextField!
-  private var confirmButton: NSButton!
   private var analyzeButton: NSButton!
   private var roughcutButton: NSButton!
   // 러프컷 배달 수명주기(S2C) — 재시도는 앱에, 확인은 관찰된 프로젝트 신원으로.
@@ -22,9 +25,12 @@ public nonisolated final class WorkflowViewController: NSViewController {
   private var captionEstimateButton: NSButton!
   private var captionApproveButton: NSButton!
   private var captionRetryButton: NSButton!
-  private var openAIKeyField: NSSecureTextField!
-  private var openAIKeyStatusLabel: NSTextField!
-  private var openAIKeyModel: CredentialEntryModel?
+  private var captionDeliverButton: NSButton!
+  // 단계 0·1 — 라이브러리 부모 권한과 AI Rough Cut 받은 내보내기.
+  private var grantStatusLabel: NSTextField!
+  private var grantButton: NSButton!
+  private var intakeStatusLabel: NSTextField!
+  private var intakeButton: NSButton!
   private var captionModel: CaptionPanelModel?
   private var captionPollTimer: Timer?
   /// 진행 중인 자막 job — App Group 기본값에 남아 패널을 닫아도 이어진다.
@@ -48,12 +54,42 @@ public nonisolated final class WorkflowViewController: NSViewController {
   private var selectionModel = CandidateSelectionModel()
 
   @MainActor public override func loadView() {
-    let root = DropView(frame: NSRect(x: 0, y: 0, width: 420, height: 520))
-    status = NSTextField(labelWithString: "프로젝트를 여기에 드래그하세요")
+    let root = NSView(frame: NSRect(x: 0, y: 0, width: 420, height: 640))
+    stepLabel = NSTextField(labelWithString: "단계 0/5 · 권한")
+    stepLabel.font = NSFont.boldSystemFont(ofSize: 12)
     activeProjectLabel = NSTextField(labelWithString: "활성 프로젝트: 없음")
     activeProjectLabel.maximumNumberOfLines = 3
-    confirmButton = NSButton(title: "왕복 확인", target: nil, action: nil)
-    analyzeButton = NSButton(title: "AI 분석 요청", target: self, action: #selector(requestAnalysis))
+    status = NSTextField(labelWithString: "Final Cut 타임라인에 프로젝트를 열어주세요")
+    status.maximumNumberOfLines = 4
+
+    // 단계 0 — 라이브러리 부모 권한. SRT를 번들 옆에 저장할 쓰기 자리다.
+    grantStatusLabel = NSTextField(labelWithString: "")
+    grantStatusLabel.maximumNumberOfLines = 3
+    grantButton = NSButton(
+      title: "라이브러리 폴더 권한 부여",
+      target: self,
+      action: #selector(requestLibraryGrant)
+    )
+
+    // 단계 1 — AI Rough Cut 공유로 받은 현재 프로젝트 내보내기.
+    intakeStatusLabel = NSTextField(labelWithString: "내보내기 대기 중")
+    intakeStatusLabel.maximumNumberOfLines = 3
+    intakeButton = NSButton(
+      title: "작업 만들기",
+      target: self,
+      action: #selector(startRoughCutJob)
+    )
+    intakeButton.isEnabled = false
+
+    // 단계 2~3 — 분석·검토.
+    analyzeButton = NSButton(
+      title: "AI 분석 요청", target: self, action: #selector(requestAnalysis))
+    analyzeButton.isEnabled = false
+    candidatesStack = NSStackView()
+    candidatesStack.orientation = .vertical
+    candidatesStack.spacing = 8
+
+    // 단계 4 — 러프컷 생성·가져오기·확인.
     roughcutButton = NSButton(
       title: "승인 후보로 러프컷 생성",
       target: self,
@@ -72,8 +108,8 @@ public nonisolated final class WorkflowViewController: NSViewController {
       action: #selector(confirmRoughcutImport)
     )
     importConfirmButton.isEnabled = false
-    // 자막 패널(S4B) — 인박스 폴링 상태·추정 요청·승인 실행·재시도의 네 버튼과
-    // 상태 문면. SRT는 자동으로 가져가지 않는다: 안내 문구만 남는다.
+
+    // 단계 5 — 자막. SRT는 자동으로 가져가지 않는다: 배달과 안내 문구만.
     captionStatusLabel = NSTextField(labelWithString: "자막: 대기 중")
     captionStatusLabel.maximumNumberOfLines = 4
     captionEstimateButton = NSButton(
@@ -94,50 +130,36 @@ public nonisolated final class WorkflowViewController: NSViewController {
       action: #selector(retryCaptionRun)
     )
     captionRetryButton.isEnabled = false
-    // 단일 공유 OpenAI 키 설정 — STT·비전이 같은 키를 공식 OpenAI 엔드포인트로
-    // 쓴다. 값은 어느 문면에도 다시 나오지 않는다(상태는 있음/없음/실패).
-    openAIKeyField = NSSecureTextField()
-    openAIKeyField.placeholderString = "OpenAI API 키 (STT·비전 공유)"
-    let saveOpenAIKey = NSButton(
-      title: "저장", target: self, action: #selector(saveOpenAIKey))
-    let clearOpenAIKey = NSButton(
-      title: "지우기", target: self, action: #selector(clearOpenAIKey))
-    openAIKeyStatusLabel = NSTextField(labelWithString: "")
-    openAIKeyStatusLabel.maximumNumberOfLines = 2
-    openAIKeyModel = CredentialEntryModel(
-      storage: KeychainStore(),
-      account: EngineRoleCredentialStore.sharedOpenAIAccount,
-      roleNoun: "OpenAI 키")
-    openAIKeyModel?.refresh()
-    refreshOpenAIKeyStatus()
-    candidatesStack = NSStackView()
-    candidatesStack.orientation = .vertical
-    candidatesStack.spacing = 8
-    root.onDrop = { [weak self] data in self?.receive(data) ?? false }
-    confirmButton.target = self
-    confirmButton.action = #selector(confirmRoundTrip)
-    confirmButton.isEnabled = false
-    analyzeButton.isEnabled = false
-    let choose = NSButton(title: "FCPXML 직접 선택", target: self, action: #selector(chooseFile))
+    captionDeliverButton = NSButton(
+      title: "SRT 라이브러리 옆에 저장",
+      target: self,
+      action: #selector(deliverCaptionSRT)
+    )
+    captionDeliverButton.isEnabled = false
+
     let stack = NSStackView(
       views: [
+        stepLabel,
         activeProjectLabel,
         status,
-        choose,
+        grantStatusLabel!,
+        grantButton,
+        intakeStatusLabel!,
+        intakeButton,
         analyzeButton,
         candidatesStack,
         roughcutButton,
         NSStackView(views: [importRetryButton, importConfirmButton]),
-        confirmButton,
         captionStatusLabel!,
         NSStackView(
-          views: [captionEstimateButton, captionApproveButton, captionRetryButton]),
-        NSStackView(views: [openAIKeyField, saveOpenAIKey, clearOpenAIKey]),
-        openAIKeyStatusLabel,
+          views: [
+            captionEstimateButton, captionApproveButton, captionRetryButton,
+            captionDeliverButton,
+          ]),
       ]
     )
     stack.orientation = .vertical
-    stack.spacing = 16
+    stack.spacing = 12
     stack.translatesAutoresizingMaskIntoConstraints = false
     root.addSubview(stack)
     NSLayoutConstraint.activate([
@@ -145,7 +167,6 @@ public nonisolated final class WorkflowViewController: NSViewController {
       stack.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -24),
       stack.topAnchor.constraint(equalTo: root.topAnchor, constant: 24),
     ])
-    root.registerForDraggedTypes(FinalCutPasteboard.supportedTypes)
     view = root
     timelineBridge = FinalCutTimelineBridge { [weak self] selection in
       self?.activeProjectDidChange(selection)
@@ -157,6 +178,7 @@ public nonisolated final class WorkflowViewController: NSViewController {
     }
     captionJobID = UserDefaults(suiteName: AppGroupWorkspace.identifier)?
       .string(forKey: "captionPanel.activeJobID")
+    refreshGrantStatus()
     refreshCaptionPanel()
   }
 
@@ -167,7 +189,7 @@ public nonisolated final class WorkflowViewController: NSViewController {
       // 나타난 시점의 내구 상태를 스스로 새로고친다 — 엔진 호출은 없다(S2A-3).
       startRefreshing(.analysis)
     }
-    // 자막 인박스 폴링(S4B) — 공유 받기는 호스트가 스테이징만 하므로 패널이
+    // 인박스 폴링(S4B 패널 계약) — 공유 받기는 호스트가 스테이징만 하므로 패널이
     // 내구 기록을 읽어 변화를 안다. 폴링은 읽기만 한다.
     startCaptionPolling()
   }
@@ -179,55 +201,28 @@ public nonisolated final class WorkflowViewController: NSViewController {
     super.viewWillDisappear()
   }
 
-  @objc @MainActor private func chooseFile() {
-    let panel = NSOpenPanel()
-    panel.allowedContentTypes = ["fcpxml", "fcpxmld"].compactMap {
-      UTType(filenameExtension: $0)
-    }
-    panel.allowsMultipleSelection = false
-    panel.begin { [weak self] response in
-      Task { @MainActor in
-        guard let self else { return }
-        guard response == .OK, let url = panel.url else {
-          self.status.stringValue = "파일 선택을 취소했습니다"
-          return
-        }
-        do {
-          let resolved = try FCPXMLDocument.resolve(url)
-          let accessed = url.startAccessingSecurityScopedResource()
-          defer { if accessed { url.stopAccessingSecurityScopedResource() } }
-          let data = try Data(contentsOf: resolved)
-          _ = self.receive(data)
-        } catch {
-          self.status.stringValue = "FCPXML 읽기 실패: \(error.localizedDescription)"
-        }
-      }
-    }
-  }
+  // ─── 단계 표시 — 같은 패널이 단계를 갈아 끼운다 ──────────────────
 
-  @MainActor private func receive(_ data: Data) -> Bool {
-    do {
-      guard let activeProject else { throw ActiveProjectError.noActiveProject }
-      _ = try FCPXMLProjectGate.validate(data, activeProject: activeProject)
-      let workspace = try AppGroupWorkspace.live()
-      let id = "roundtrip-\(UUID().uuidString)"
-      _ = try workspace.createJob(id: id)
-      let roundTripJob = try RoundTripJob(workspace: workspace, id: id)
-      try roundTripJob.writeProjectSelection(activeProject)
-      try roundTripJob.writeInput(data)
-      job = roundTripJob
-      status.stringValue = "수신 완료 (\(RoundTripStatus.received.rawValue)) · 왕복 대기"
-      confirmButton.isEnabled = true
-      analyzeButton.isEnabled = true
-      roughcutButton.isEnabled = false
-      clearCandidates()
-      selectionModel = CandidateSelectionModel()
-      startRefreshing(.analysis)
-      return true
-    } catch {
-      status.stringValue = "수신 실패: \(error.localizedDescription)"
-      return false
+  /// 지금 사용자가 있을 단계 — 아래로만 내려가는 흐름과 각 단계의 완료 표시.
+  @MainActor private func refreshStep() {
+    let captionDelivered =
+      captionDeliverButton.isEnabled || captionStatusLabel.stringValue.contains("완료")
+    let step: Int
+    if job == nil {
+      step = intakeButton.isEnabled ? 1 : 0
+    } else if roughcutButton.isEnabled || !candidateRows.isEmpty {
+      step = 3
+    } else if importConfirmButton.isEnabled || importRetryButton.isEnabled {
+      step = 4
+    } else if captionEstimateButton.isEnabled || captionApproveButton.isEnabled
+      || captionRetryButton.isEnabled || captionDelivered
+    {
+      step = 5
+    } else {
+      step = 2
     }
+    let names = ["권한", "내보내기", "분석", "검토·러프컷", "가져오기·자막"]
+    stepLabel.stringValue = "단계 \(step)/5 · \(names[min(step, names.count - 1)])"
   }
 
   @MainActor private func activeProjectDidChange(_ selection: ActiveProjectSelection?) {
@@ -238,11 +233,13 @@ public nonisolated final class WorkflowViewController: NSViewController {
       activeProjectLabel.stringValue = "활성 프로젝트: 없음"
       stopRefreshing()
       job = nil
-      confirmButton.isEnabled = false
       analyzeButton.isEnabled = false
       roughcutButton.isEnabled = false
       clearCandidates()
       status.stringValue = "Final Cut 타임라인에 프로젝트를 열어주세요"
+      refreshIntakeAvailability()
+      refreshCaptionPanel()
+      refreshStep()
       return
     }
     do {
@@ -255,8 +252,9 @@ public nonisolated final class WorkflowViewController: NSViewController {
       "활성 프로젝트: \(selection.projectName)\nUID: \(selection.projectUID)\n"
       + "시작 \(selection.timelineStart.secondsText) · 길이 \(selection.duration.secondsText)"
       + " · 프레임 \(selection.frameDuration.secondsText)"
-    // 활성 UID가 자막 인박스의 키다 — 프로젝트가 바뀌면 받은 내보내기 대기도
+    // 활성 UID가 두 인박스의 키다 — 프로젝트가 바뀌면 받은 내보내기 대기도
     // 다시 잰다(S4B).
+    refreshIntakeAvailability()
     refreshCaptionPanel()
     if let oldUID, oldUID != selection.projectUID {
       // 분석 job의 드리프트 규율은 그대로다 — 단 배달 확인 대기 중이라면 새로
@@ -265,20 +263,86 @@ public nonisolated final class WorkflowViewController: NSViewController {
         record.state == .importRequested || record.state == .importSent
       {
         refreshImportConfirmEligibility(job)
+        refreshStep()
         return
       }
       stopRefreshing()
       job = nil
-      confirmButton.isEnabled = false
       analyzeButton.isEnabled = false
       roughcutButton.isEnabled = false
       clearCandidates()
       status.stringValue = "활성 프로젝트가 바뀌어 기존 분석 작업을 폐기했습니다"
     }
+    refreshStep()
   }
 
   @MainActor private func movePlayheadToCandidate(_ start: RationalTime) {
     timelineBridge?.movePlayhead(to: start)
+  }
+
+  // ─── 단계 0 — 라이브러리 부모 권한 ─────────────────────────────
+
+  @MainActor private func refreshGrantStatus() {
+    guard let workspace = try? AppGroupWorkspace.live() else { return }
+    let granted = LibraryGrantStore.loadIfPresent(workspace: workspace)
+    if let granted {
+      grantStatusLabel.stringValue =
+        "라이브러리 폴더: \(granted.rootPath)\n번들: \(granted.bundleName) — SRT는 이 폴더에 저장됩니다"
+    } else {
+      grantStatusLabel.stringValue =
+        "Final Cut 라이브러리(.fcpbundle)가 있는 폴더의 쓰기 권한이 필요합니다"
+    }
+  }
+
+  /// 권한 요청 — 파워박스는 호스트 앱의 몫이다(확장은 쓰기 권한을 받지 못한다).
+  @objc @MainActor private func requestLibraryGrant() {
+    do {
+      try openHostURL(AgentURL.libraryGrantURL(), pending: "권한 요청 — 앱에서 폴더를 선택하세요")
+    } catch {
+      grantStatusLabel.stringValue = "권한 요청 실패: \(error.localizedDescription)"
+    }
+  }
+
+  // ─── 단계 1 — AI Rough Cut 받은 내보내기 → job ─────────────────
+
+  /// 인박스에서 활성 프로젝트의 내보내기를 찾아 '작업 만들기' 자격을 정한다.
+  @MainActor private func refreshIntakeAvailability() {
+    guard let activeProject, let workspace = try? AppGroupWorkspace.live() else {
+      intakeButton.isEnabled = false
+      intakeStatusLabel.stringValue = "활성 프로젝트를 열면 받은 내보내기를 찾습니다"
+      return
+    }
+    if let entry = try? RoughCutInbox.entry(
+      forProjectUID: activeProject.projectUID, workspace: workspace)
+    {
+      intakeButton.isEnabled = true
+      intakeStatusLabel.stringValue =
+        "받은 내보내기 있음(\(entry.projectUID.prefix(12))…) — '작업 만들기'로 시작합니다"
+    } else {
+      intakeButton.isEnabled = false
+      intakeStatusLabel.stringValue =
+        "Final Cut 공유 메뉴의 'AI Rough Cut'으로 현재 프로젝트를 보내주세요"
+    }
+  }
+
+  /// job 시작 — 활성 프로젝트 문맥과 인박스 사본으로 만든다(원본은 그대로다).
+  @objc @MainActor private func startRoughCutJob() {
+    guard let activeProject else { return }
+    do {
+      let workspace = try AppGroupWorkspace.live()
+      let started = try RoughCutIntake.startJob(
+        activeProject: activeProject, workspace: workspace)
+      job = started
+      analyzeButton.isEnabled = true
+      roughcutButton.isEnabled = false
+      clearCandidates()
+      selectionModel = CandidateSelectionModel()
+      status.stringValue = "작업 생성 완료 — 'AI 분석 요청'으로 계속합니다"
+      startRefreshing(.analysis)
+    } catch {
+      status.stringValue = "작업 생성 실패: \(error.localizedDescription)"
+    }
+    refreshStep()
   }
 
   @objc @MainActor private func requestAnalysis() {
@@ -348,6 +412,7 @@ public nonisolated final class WorkflowViewController: NSViewController {
       status.stringValue = "분석 요청 실패: \(error.localizedDescription)"
       analyzeButton.isEnabled = true
     }
+    refreshStep()
   }
 
   @MainActor private func presentAuthorization(_ job: RoundTripJob) throws {
@@ -386,8 +451,7 @@ public nonisolated final class WorkflowViewController: NSViewController {
               pricingSnapshotRevision: estimate.pricingSnapshotRevision,
               mediaGrantRevision: estimate.mediaGrantRevision,
               authorizedAt: ISO8601DateFormatter().string(from: Date())
-            )
-          )
+            ))
           try self.openAgentURL(
             AgentURL.analyzeURL(jobID: job.id),
             pending: "승인된 AI 분석 요청됨",
@@ -402,11 +466,11 @@ public nonisolated final class WorkflowViewController: NSViewController {
   }
 
   @MainActor private func loadCandidates(_ job: RoundTripJob) throws {
-    // 잠시 못 읽는 스냅샷이면 이 호출이 실패로 올라가 지금 줄·선택이 그대로
+    // 잠시 못 읽는 스냅숏이면 이 호출이 실패로 올라가 지금 줄·선택이 그대로
     // 남는다 — 같은 리비전의 새로고침에서 선택을 보존한다(S2A-3).
     let candidates = try job.readCandidates()
     selectionModel.recordUserChoices(
-      Set(candidateRows.filter(\.isApproved).map(\.candidate.candidateID)))
+      Set(candidateRows.filter(\.isApproved).map { $0.candidate.candidateID }))
     let approved = selectionModel.effectiveSelection(
       resultRevision: job.readAnalysisResult()?.resultRevision,
       candidates: candidates)
@@ -535,7 +599,12 @@ public nonisolated final class WorkflowViewController: NSViewController {
     captionPollTimer = Timer.scheduledTimer(
       withTimeInterval: 1.5, repeats: true
     ) { [weak self] _ in
-      Task { @MainActor [weak self] in self?.refreshCaptionPanel() }
+      Task { @MainActor [weak self] in
+        self?.refreshIntakeAvailability()
+        self?.refreshGrantStatus()
+        self?.refreshCaptionPanel()
+        self?.refreshStep()
+      }
     }
   }
 
@@ -566,6 +635,11 @@ public nonisolated final class WorkflowViewController: NSViewController {
       if case .failed = phase { return true }
       return false
     }()
+    if case .succeededSrt = phase {
+      captionDeliverButton.isEnabled = true
+    } else if case .succeededNoSpeech = phase {
+      captionDeliverButton.isEnabled = false
+    }
     // 끝난 job는 패널에서 내린다 — 다음 공유 받기가 새 흐름으로 시작된다.
     switch phase {
     case .succeededNoSpeech, .succeededSrt:
@@ -624,6 +698,19 @@ public nonisolated final class WorkflowViewController: NSViewController {
     }
   }
 
+  /// SRT 배달 — 검증된 권한 폴더(번들 옆)에 호스트가 원자적으로 놓는다.
+  /// 가져오기는 하지 않는다: 안내 문구만 남는다.
+  @objc @MainActor private func deliverCaptionSRT() {
+    guard let captionJobID else { return }
+    do {
+      try openCaptionAgentURL(
+        AgentURL.captionDeliverURL(jobID: captionJobID),
+        pending: "SRT 배달 요청됨 — 라이브러리 번들 옆에 저장합니다")
+    } catch {
+      captionStatusLabel.stringValue = "배달 요청 실패: \(error.localizedDescription)"
+    }
+  }
+
   /// 호스트 실행기 URL 열기 — 문지기는 현재 자막 job에 묶는다.
   @MainActor private func openCaptionAgentURL(_ url: URL, pending: String) throws {
     guard let context = extensionContext else {
@@ -642,26 +729,20 @@ public nonisolated final class WorkflowViewController: NSViewController {
     }
   }
 
-  // ─── 공유 OpenAI 키 설정 — STT·비전이 같은 키를 쓴다 ────────────
-
-  @objc @MainActor private func saveOpenAIKey() {
-    guard let model = openAIKeyModel, let field = openAIKeyField else { return }
-    model.updateSubmitted(field.stringValue)
-    model.save()
-    field.stringValue = model.submittedText
-    refreshOpenAIKeyStatus()
-  }
-
-  @objc @MainActor private func clearOpenAIKey() {
-    guard let model = openAIKeyModel else { return }
-    model.clear()
-    openAIKeyField?.stringValue = model.submittedText
-    refreshOpenAIKeyStatus()
-  }
-
-  @MainActor private func refreshOpenAIKeyStatus() {
-    guard let model = openAIKeyModel else { return }
-    openAIKeyStatusLabel.stringValue = "\(model.status.message) · 공식 OpenAI 엔드포인트 사용"
+  @MainActor private func openHostURL(_ url: URL, pending: String) throws {
+    guard let context = extensionContext else {
+      throw RoundTripExtensionError.noExtensionContext
+    }
+    status.stringValue = pending
+    context.open(url) { [weak self] opened in
+      guard let self else { return }
+      Task { @MainActor in
+        if !opened {
+          self.status.stringValue = "컨테이너 앱 열기 실패 — 앱이 실행 중인지 확인하세요"
+        }
+        self.refreshGrantStatus()
+      }
+    }
   }
 
   @MainActor private func openAgentURL(
@@ -759,7 +840,7 @@ public nonisolated final class WorkflowViewController: NSViewController {
       baselineAttemptID: baselineAttemptID)
   }
 
-  /// 세션의 알림 — 늦게 온 옛 알림은 현재 job·세대와 신원이 다르면 버린다.
+  /// 세션의 알림 — 늦은 온 옛 알림은 현재 job·세대와 신원이 다르면 버린다.
   /// 같은 job의 새 요청 세대까지 갈라 본다(옛 알림이 새 상태를 덮는 금지).
   @MainActor private func refreshDidUpdate(
     _ state: WorkflowRefreshState, jobID: String, generation: Int
@@ -798,6 +879,7 @@ public nonisolated final class WorkflowViewController: NSViewController {
       analyzeButton.isEnabled = true
       status.stringValue = text
     }
+    refreshStep()
   }
 
   /// 기록 상태를 화면에 반영하는 공유 경로 — 재실행 분기(요청) 없이 검토·실패·
@@ -823,7 +905,7 @@ public nonisolated final class WorkflowViewController: NSViewController {
         }
         status.stringValue = outcome.userFacingSummary
       } catch {
-        // 잠시 못 읽는 스냅샷 — 지금 줄·선택을 그대로 두고 다음 관측을 기다린다.
+        // 잠시 못 읽는 스냅숏 — 지금 줄·선택을 그대로 두고 다음 관측을 기다린다.
         status.stringValue = "결과를 다시 읽지 못했습니다: \(error.localizedDescription)"
       }
     case .showFailure(let outcome):
@@ -845,35 +927,6 @@ public nonisolated final class WorkflowViewController: NSViewController {
     guard parts.count == 2, let value = Int64(parts[0]), let scale = Int32(parts[1]), scale > 0
     else { return nil }
     return RationalTime(value: value, timescale: scale)
-  }
-
-  @objc @MainActor private func confirmRoundTrip() {
-    guard let job else { return }
-    do {
-      // extension은 XML 변환도 Final Cut 전송도 하지 않는다 —
-      // 요청을 쓰고 container를 여는 것만이 extension의 일이다.
-      try job.writeRequest(
-        RoundTripRequest(
-          jobID: job.id,
-          inputFileName: RoundTripJob.inputFileName,
-          outputFileName: RoundTripJob.outputFileName
-        )
-      )
-      status.stringValue = "왕복 요청됨 (\(RoundTripStatus.roundtripRequested.rawValue))"
-      confirmButton.isEnabled = false
-      let url = try AgentURL.roundTripURL(jobID: job.id)
-      guard let context = extensionContext else {
-        throw RoundTripExtensionError.noExtensionContext
-      }
-      context.open(url) { [weak self] opened in
-        guard !opened, let self else { return }
-        Task { @MainActor in
-          self.status.stringValue = "컨테이너 앱 열기 실패 — 앱을 직접 실행해 왕복을 마쳐주세요"
-        }
-      }
-    } catch {
-      status.stringValue = "요청 실패: \(error.localizedDescription)"
-    }
   }
 }
 
@@ -917,21 +970,5 @@ private final class CandidateReviewRow: NSObject {
 
   @objc private func movePlayhead() {
     onMove(candidate)
-  }
-}
-
-@MainActor
-private final class DropView: NSView {
-  var onDrop: ((Data) -> Bool)?
-
-  override func draggingEntered(_ sender: any NSDraggingInfo) -> NSDragOperation {
-    FinalCutPasteboard.bestData(on: sender.draggingPasteboard) == nil ? [] : .copy
-  }
-
-  override func performDragOperation(_ sender: any NSDraggingInfo) -> Bool {
-    guard let data = FinalCutPasteboard.bestData(on: sender.draggingPasteboard) else {
-      return false
-    }
-    return onDrop?(data) ?? false
   }
 }

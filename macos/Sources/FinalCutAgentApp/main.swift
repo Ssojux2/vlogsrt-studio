@@ -39,13 +39,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
   // ─── 공유 받기 — 스테이징만 한다, 실행은 패널 동작으로만 ────────
 
+  /// 공유의 종류로 갈라 스테이징한다: FCPXML 하나는 AI Rough Cut 내보내기,
+  /// WAV+FCPXML 짝은 AI Captions 내보내기다. 어느 쪽도 job·분석·실행을 만들지
+  /// 않는다 — 흐름은 패널의 명시적 동작으로만 열린다.
   private func handleSharedFiles(_ urls: [URL]) {
     do {
       let workspace = try AppGroupWorkspace.live()
-      let entry = try CaptionInbox.stage(urls: urls, workspace: workspace)
-      NSLog(
-        "공유 받기 스테이징: 프로젝트 %@ · 인박스 대기(자동 실행 없음)",
-        entry.projectUID)
+      let audio = urls.filter { $0.pathExtension.lowercased() == "wav" }
+      if audio.isEmpty {
+        let entry = try RoughCutInbox.stage(urls: urls, workspace: workspace)
+        NSLog(
+          "AI Rough Cut 내보내기 스테이징: 프로젝트 %@ · 인박스 대기(자동 실행 없음)",
+          entry.projectUID)
+      } else {
+        let entry = try CaptionInbox.stage(urls: urls, workspace: workspace)
+        NSLog(
+          "AI Captions 내보내기 스테이징: 프로젝트 %@ · 인박스 대기(자동 실행 없음)",
+          entry.projectUID)
+      }
     } catch {
       // 창 없는 실행기 — 패널에 보일 상태가 없는 실패는 로그로 남는다.
       NSLog("공유 받기 스테이징 실패: \(error.localizedDescription)")
@@ -69,9 +80,71 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         runCaptionOperation(.captionEstimate, jobID: jobID)
       case .captionRun(let jobID):
         runCaptionOperation(.captionRun, jobID: jobID)
+      case .captionDeliver(let jobID):
+        deliverCaptionSRT(jobID: jobID)
+      case .libraryGrant:
+        grantLibraryParent()
       }
     } catch {
       NSAlert(error: error).runModal()
+    }
+  }
+
+  // ─── 라이브러리 부모 권한(SRT 배달의 쓰기 자리)과 SRT 배달 ──────
+
+  /// 첫 실행 권한 흐름의 실행 몸체 — 폴더 선택·북마크·내구 기록까지 한 문에서.
+  ///
+  /// 선택은 사람이 한다(호스트는 창 없는 실행기지만 파워박스는 이 프로세스의
+  /// 몫이다 — 확장은 쓰기 권한을 받을 수 없다). 폴더 안에 단일 .fcpbundle가
+  /// 있어야 기록으로 남는다: 라이브러리 **부모**가 아니면 폐쇄다.
+  private func grantLibraryParent() {
+    let panel = NSOpenPanel()
+    panel.canChooseDirectories = true
+    panel.canChooseFiles = false
+    panel.allowsMultipleSelection = false
+    panel.message = "Final Cut 라이브러리(.fcpbundle)가 있는 폴더를 선택하세요 — SRT를 그 옆에 저장합니다"
+    panel.begin { response in
+      Task { @MainActor in
+        guard response == .OK, let url = panel.url else { return }
+        do {
+          let name = try LibraryGrantStore.bundleName(
+            inRoot: url.standardizedFileURL.path, fileManager: .default)
+          let store = try SecurityScopedBookmarkStore()
+          try store.save(url, key: LibraryGrantStore.bookmarkKey)
+          try LibraryGrantStore.save(
+            LibraryGrant(
+              rootPath: url.standardizedFileURL.path,
+              bundleName: name,
+              grantedAt: ISO8601DateFormatter().string(from: Date())),
+            workspace: try AppGroupWorkspace.live())
+          NSLog("라이브러리 폴더 권한 기록: %@ (번들 %@)", url.path, name)
+        } catch {
+          NSAlert(error: error).runModal()
+        }
+      }
+    }
+  }
+
+  /// SRT 배달 — job의 성공 SRT를 검증된 권한 폴더(번들 옆)에 원자적으로 놓는다.
+  /// 가져오기는 하지 않는다: 사람이 File > Import > Captions로 직접 한다.
+  private func deliverCaptionSRT(jobID: String) {
+    Task { @MainActor in
+      do {
+        let workspace = try AppGroupWorkspace.live()
+        let job = try RoundTripJob(workspace: workspace, id: jobID)
+        let store = try SecurityScopedBookmarkStore()
+        let granted = LibraryGrantStore.bookmarkedRoot(bookmarkStore: store)
+        let grant = try LibraryGrantStore.validate(
+          workspace: workspace, bookmarkedRoot: granted)
+        let accessing = granted?.startAccessingSecurityScopedResource() ?? false
+        defer {
+          if accessing, let granted { granted.stopAccessingSecurityScopedResource() }
+        }
+        let placed = try SRTDelivery.placeBesideBundle(job: job, grant: grant)
+        NSLog("SRT 배달: %@ — Final Cut Pro: File > Import > Captions → Relative to Timeline", placed.path)
+      } catch {
+        NSAlert(error: error).runModal()
+      }
     }
   }
 
@@ -107,9 +180,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let bookmarkStore = try SecurityScopedBookmarkStore()
         let dependencies = EngineRequestCoordinator.Dependencies.live(
           bookmarkAccess: bookmarkStore,
-          loadCredentials: {
-            EngineRoleCredentialStore(storage: KeychainStore()).loadSharedOpenAIRoles()
-          },
           executor: ProcessEngineExecutor(),
           // 러프컷 배달은 기록을 남기는 앱 경계를 지난다(S2C) — 전송 성공만으로
           // 확인이라 말하지 않는다.

@@ -219,6 +219,37 @@ public enum EngineRuntime {
     return plan
   }
 
+  /// 상속 계획(패널 계약) — 자격 증명 운반자가 없다. 개발 `.env`의 OpenAI 키를
+  /// 엔진 경계에서 풀게 두고(값은 앱으로 한 번도 오지 않는다), 유무 판정은
+  /// readiness 보고서의 불리언으로만 돌아온다. 모드 선택·실행 가능 검사는 같은
+  /// 표를 쓴다.
+  public static func resolvePlanInheriting(
+    configuration: EngineBuildConfiguration,
+    operation: DevelopmentEngineOperation,
+    jobID: String,
+    appGroupJob: URL,
+    engineRoot: URL?,
+    applicationScriptsDirectory: URL?,
+    developmentExternalJob: URL?,
+    fileManager: FileManager = .default
+  ) throws -> EngineLaunchPlan {
+    try resolvePlanThrowing(
+      configuration: configuration,
+      bundled: { engineRoot in
+        try BundledEngineInvocation.createInheriting(
+          operation: operation, jobID: jobID, jobDirectory: appGroupJob, engineRoot: engineRoot)
+      },
+      development: { scripts, externalJob in
+        try DevelopmentEngineInvocation.createInheriting(
+          operation: operation, jobID: jobID, externalJob: externalJob,
+          applicationScriptsDirectory: scripts)
+      },
+      applicationScriptsDirectory: applicationScriptsDirectory,
+      developmentExternalJob: developmentExternalJob,
+      engineRoot: engineRoot,
+      fileManager: fileManager)
+  }
+
   /// 검증 계획 — 호출 조립 실패를 삼키지 않고 그대로 던진다(S2A-2 마지막 단위).
   ///
   /// 그르른 운반자(NUL·과대 봉투)를 이유로 다른 엔진을 조용히 고르는 길이

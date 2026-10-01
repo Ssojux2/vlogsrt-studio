@@ -1403,8 +1403,7 @@ nonisolated func _assertRoleConsumerResult(
     jobID: "readiness-bundled",
     appGroupJob: job,
     applicationScriptsDirectory: nil,
-    engineRoot: engineRoot,
-    credentials: EngineRoleCredentials())
+    engineRoot: engineRoot)
   let report = try await _withDeadline(seconds: 60, label: "readiness 번들") {
     try await EngineReadinessProber.probe(request)
   }
@@ -1451,8 +1450,7 @@ nonisolated func _assertRoleConsumerResult(
     jobID: "readiness-empty",
     appGroupJob: job,
     applicationScriptsDirectory: nil,
-    engineRoot: engineRoot,
-    credentials: EngineRoleCredentials())
+    engineRoot: engineRoot)
   let report = try await _withDeadline(seconds: 60, label: "readiness 번들 빈 bin") {
     try await EngineReadinessProber.probe(request)
   }
@@ -1497,8 +1495,7 @@ nonisolated func _assertRoleConsumerResult(
     jobID: "readiness-broken",
     appGroupJob: job,
     applicationScriptsDirectory: nil,
-    engineRoot: engineRoot,
-    credentials: EngineRoleCredentials())
+    engineRoot: engineRoot)
   do {
     _ = try await _withDeadline(seconds: 60, label: "readiness 부서진 번들") {
       try await EngineReadinessProber.probe(request)
@@ -1524,9 +1521,11 @@ nonisolated func _writeTestBundleExecutable(
   let script = """
     #!/bin/sh
     # 시험 소유 번들 실행기(S2A-2) — 생산 PATH·인자는 그대로, 보호 변수만 더한다.
+    # 운반자 변수는 값이 있을 때만 건너간다(상속 호출은 아예 없다) — 빈 값이
+    # '있음'으로 해석되면 엔진이 계약 위반(2)으로 닫는다.
     exec /usr/bin/env -i \\
       PATH="$PATH" \\
-      VLOGSRT_ENGINE_ROLE_CREDENTIALS="$VLOGSRT_ENGINE_ROLE_CREDENTIALS" \\
+      ${VLOGSRT_ENGINE_ROLE_CREDENTIALS:+VLOGSRT_ENGINE_ROLE_CREDENTIALS="$VLOGSRT_ENGINE_ROLE_CREDENTIALS"} \\
       HOME=\(_shQuoted(sandbox.home.path)) \\
       TMPDIR=\(_shQuoted(sandbox.tmp.path)) \\
       PYTHONPATH=\(_shQuoted("\(sandbox.guardBoot.path):\(sandbox.repo.path)")) \\

@@ -181,8 +181,8 @@ private func _captionFixture() throws -> (
 @MainActor
 private func _captionDeps(
   fixture: (root: URL, job: RoundTripJob, scripts: URL, externalRoot: URL, appGroup: AppGroupWorkspace),
-  credentials: EngineRoleCredentials,
-  executor: any EngineExecuting
+  executor: any EngineExecuting,
+  openAIKeyPresent: Bool = true
 ) -> CaptionJobCoordinator.Dependencies {
   CaptionJobCoordinator.Dependencies(
     peekDevelopmentWorkspace: {
@@ -190,23 +190,26 @@ private func _captionDeps(
         key: "developmentEngineWorkspace", url: fixture.externalRoot, isStale: false)
     },
     settleDevelopmentWorkspace: { $0?.url },
-    loadCredentials: { .ready(credentials) },
     startScope: { _ in true },
     stopScope: { _ in },
     stageCaptionJob: { jobID, appGroupJob, externalRoot in
       try DevelopmentJobStager.stageCaption(
         jobID: jobID, appGroupJob: appGroupJob, externalRoot: externalRoot)
     },
-    executor: executor)
+    executor: executor,
+    readiness: { _ in
+      EngineReadinessReport(
+        engine: "vlogsrt-engine", readinessVersion: 1, pythonExecutable: nil,
+        pythonVersion: nil, ffmpeg: nil, ffprobe: nil, openAIKeyPresent: openAIKeyPresent)
+    })
 }
 
 @Test @MainActor func captionEstimateRunsKeylessThroughTheCaptionStager() async throws {
   let fixture = try _captionFixture()
   defer { try? FileManager.default.removeItem(at: fixture.root) }
   let capture = PlanCapture()
-  let deps = _captionDeps(
-    fixture: fixture, credentials: EngineRoleCredentials(), executor: capture)
-  // 빈 역할(키 전부 부재)로도 추정은 돈다 — 전사기도 키도 필요 없다(S4A/S4B).
+  let deps = _captionDeps(fixture: fixture, executor: capture, openAIKeyPresent: false)
+  // 키 보고가 없어도 추정은 돈다 — 전사기도 키도 필요 없다(S4A/S4B).
   let outcome = try await CaptionJobCoordinator(dependencies: deps).run(
     operation: .captionEstimate,
     job: fixture.job,
@@ -228,16 +231,13 @@ private func _captionDeps(
       atPath: externalJob.appendingPathComponent("input.fcpxml").path))
 }
 
-@Test @MainActor func captionRunRequiresAuthorizationAndSTTKey() async throws {
+@Test @MainActor func captionRunRequiresAuthorizationAndADevKey() async throws {
   let fixture = try _captionFixture()
   defer { try? FileManager.default.removeItem(at: fixture.root) }
   let capture = PlanCapture()
 
   // 승인 문서가 없으면 실행은 열리지 않는다 — 호출 0회.
-  let noAuthorization = _captionDeps(
-    fixture: fixture,
-    credentials: EngineRoleCredentials(sttKey: "synthetic-stt", visionKey: "", visionBaseURL: ""),
-    executor: capture)
+  let noAuthorization = _captionDeps(fixture: fixture, executor: capture)
   await #expect(throws: EnginePreflightError.self) {
     _ = try await CaptionJobCoordinator(dependencies: noAuthorization).run(
       operation: .captionRun,
@@ -246,16 +246,15 @@ private func _captionDeps(
       engineRoot: nil,
       applicationScriptsDirectory: fixture.scripts)
   }
-  let beforeSTT = await capture.plans.count
-  #expect(beforeSTT == 0)
+  let beforeAuth = await capture.plans.count
+  #expect(beforeAuth == 0)
 
-  // 승인 문서가 있어도 STT 역할이 비면 유료 실행은 닫힌다.
+  // 승인 문서가 있어도 개발 .env 키 유무가 없으면(패널 계약) 유료 실행은 닫힌다.
   try Data("authorized".utf8).write(
     to: fixture.job.directoryURL.appendingPathComponent("caption-authorization.jsonl"))
-  let noSTT = _captionDeps(
-    fixture: fixture, credentials: EngineRoleCredentials(), executor: capture)
+  let noKey = _captionDeps(fixture: fixture, executor: capture, openAIKeyPresent: false)
   await #expect(throws: EnginePreflightError.self) {
-    _ = try await CaptionJobCoordinator(dependencies: noSTT).run(
+    _ = try await CaptionJobCoordinator(dependencies: noKey).run(
       operation: .captionRun,
       job: fixture.job,
       configuration: .debug,
@@ -265,11 +264,8 @@ private func _captionDeps(
   let beforeReady = await capture.plans.count
   #expect(beforeReady == 0)
 
-  // 승인 + STT가 함께면 실행이 열린다.
-  let ready = _captionDeps(
-    fixture: fixture,
-    credentials: EngineRoleCredentials(sttKey: "synthetic-stt", visionKey: "", visionBaseURL: ""),
-    executor: capture)
+  // 승인 + 키 유무 보고가 함께면 실행이 열린다.
+  let ready = _captionDeps(fixture: fixture, executor: capture, openAIKeyPresent: true)
   let outcome = try await CaptionJobCoordinator(dependencies: ready).run(
     operation: .captionRun,
     job: fixture.job,

@@ -223,10 +223,15 @@ def _readiness_payload() -> dict[str, object]:
     번들 실행이면 부모가 준 PATH(번들 bin + 시스템 최소)가 이 환경이고, 개발
     실행이면 설치 래퍼가 물려준 환경이 그대로 이곳이다. 못 찾으면 null이다 —
     빈 문자열로 '있다'는 말을 하지 않는다.
+
+    개발 .env의 OpenAI 키는 **유무만** 실린다(패널 시대 계약): 값은 어느
+    기록에도 오지 않는다. 유료 호출의 문은 이 불리언과 엔진 안의 실제 관문
+    (`require_paid_roles`)이 함께 닫는다.
     """
     return {
         "engine": "vlogsrt-engine",
         "readiness_version": _READINESS_VERSION,
+        "openai_key_present": _openai_key_present(),
         "python": {
             "executable": sys.executable or None,
             "version": _python_version(),
@@ -237,6 +242,13 @@ def _readiness_payload() -> dict[str, object]:
         },
         "carrier_versions": list(_CARRIER_VERSIONS),
     }
+
+
+def _openai_key_present() -> bool:
+    """개발 .env(또는 상속 환경)의 OpenAI 키 유무 — 값은 절대 밖으로 나가지 않는다."""
+    from vlogsrt import env
+
+    return bool(env.get("OPENAI_API_KEY").strip())
 
 
 def _python_version() -> str | None:

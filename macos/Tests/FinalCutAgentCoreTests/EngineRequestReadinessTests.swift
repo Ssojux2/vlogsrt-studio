@@ -52,12 +52,14 @@ actor PlanCapture: EngineExecuting {
 
 /// 성공 보고 — 도구가 둘 다 있는 기본 모양. `tools`가 **있으면** 그 값 그대로다:
 /// 명시적 (nil, nil)은 '도구 없음'이지 기본 경로로 바꿔 치울 값이 아니다.
-private func _healthyReport(tools: (String?, String?)? = nil) -> EngineReadinessReport {
+private func _healthyReport(
+  tools: (String?, String?)? = nil, openAIKeyPresent: Bool = true
+) -> EngineReadinessReport {
   let pair = tools ?? ("/synthetic/bin/ffmpeg", "/synthetic/bin/ffprobe")
   return EngineReadinessReport(
     engine: "vlogsrt-engine", readinessVersion: 1,
     pythonExecutable: "/synthetic/python", pythonVersion: "3.11.9",
-    ffmpeg: pair.0, ffprobe: pair.1)
+    ffmpeg: pair.0, ffprobe: pair.1, openAIKeyPresent: openAIKeyPresent)
 }
 
 /// 조정자가 쓸 주입 경계의 기본 모음 — 시험마다 필요한 것만 갈아끼운다.
@@ -67,7 +69,6 @@ private func _readinessDeps(
   job: RoundTripJob,
   mediaRoot: URL,
   developmentWorkspace: URL? = nil,
-  credentials: EngineRoleCredentials = EngineRoleCredentials(),
   readiness: @escaping @Sendable (EngineReadinessRequest) async throws -> EngineReadinessReport =
     { _ in _healthyReport() },
   executor: any EngineExecuting = PlanCapture(),
@@ -94,7 +95,6 @@ private func _readinessDeps(
       if peeked != nil { scopeLog.record("settle-workspace") }
       return peeked?.url
     },
-    loadCredentials: { .ready(credentials) },
     startScope: { url in
       let canonical = url.resolvingSymlinksInPath().standardizedFileURL.path
       scopeLog.record("start:\(canonical)")
@@ -252,8 +252,9 @@ private func _run(
   #expect(invocation.arguments[0] == "analyze")
   #expect(invocation.arguments[1] == "job-42")
   #expect(invocation.arguments[2] == staged.standardizedFileURL.path)
-  #expect(invocation.arguments.contains(DevelopmentEngineInvocation.carrierMarkerArgument))
-  #expect(invocation.credentialEnvelope == .roles(EngineRoleCredentials()))
+  // 상속 호출(패널 계약) — 마커도 봉투도 없다. 키는 엔진 경계의 .env이 푼다.
+  #expect(!invocation.arguments.contains(DevelopmentEngineInvocation.carrierMarkerArgument))
+  #expect(invocation.credentialEnvelope == nil)
   // 권한 문서도 잡 디렉터리에 남는다.
   #expect(
     FileManager.default.fileExists(
@@ -335,7 +336,7 @@ private final class FakeBookmarkAccess: BookmarkAccess, @unchecked Sendable {
 
   let dependencies = EngineRequestCoordinator.Dependencies.live(
     bookmarkAccess: fake,
-    loadCredentials: { .ready(EngineRoleCredentials()) },
+
     executor: PlanCapture(),
     startScope: { url in
       scopeLog.record("start:\(url.resolvingSymlinksInPath().path)")
@@ -379,7 +380,7 @@ private final class FakeBookmarkAccess: BookmarkAccess, @unchecked Sendable {
   let executor = PlanCapture()
   let dependencies = EngineRequestCoordinator.Dependencies.live(
     bookmarkAccess: fake,
-    loadCredentials: { .ready(EngineRoleCredentials()) },
+
     executor: executor,
     startScope: { url in
       let canonical = url.resolvingSymlinksInPath().standardizedFileURL.path
@@ -442,7 +443,7 @@ private final class FakeBookmarkAccess: BookmarkAccess, @unchecked Sendable {
         key: "developmentEngineWorkspace", url: fixture.externalRoot, isStale: false)
     },
     settleDevelopmentWorkspace: { peeked in peeked?.url },
-    loadCredentials: { .ready(EngineRoleCredentials()) },
+
     startScope: { url in
       scopeLog.record("start:\(url.path)")
       return true
@@ -471,9 +472,9 @@ private final class FakeBookmarkAccess: BookmarkAccess, @unchecked Sendable {
     Issue.record("번들 계획이어야 한다")
     return
   }
-  // V1 운반자는 실리지 않는다 — V2 한 통만.
+  // 상속 호출(패널 계약) — 운반자 환경은 아예 없다. PATH만 간다.
   #expect(invocation.environment[BundledEngineInvocation.apiKeyEnvironmentName] == nil)
-  #expect(invocation.environment[BundledEngineInvocation.roleCarrierEnvironmentName] != nil)
+  #expect(invocation.environment[BundledEngineInvocation.roleCarrierEnvironmentName] == nil)
 }
 
 /// scope 시작이 도중에 실패하면 이미 걸은 scope만 해제하고 실행기·readiness는
@@ -591,7 +592,7 @@ private final class FakeBookmarkAccess: BookmarkAccess, @unchecked Sendable {
         key: "developmentEngineWorkspace", url: fixture.externalRoot, isStale: false)
     },
     settleDevelopmentWorkspace: { peeked in peeked?.url },
-    loadCredentials: { .ready(EngineRoleCredentials()) },
+
     startScope: { _ in true },
     stopScope: { _ in },
     readiness: { _ in
@@ -615,92 +616,55 @@ private final class FakeBookmarkAccess: BookmarkAccess, @unchecked Sendable {
   #expect(scopeLog.events.isEmpty)
 }
 
-/// 그르른 운반자(NUL 등)는 '다른 엔진 조용히 고르기'가 아니라 봉투 계약 위반으로
-/// 나간다 — 번들이 있어도 개발로 물러나지 않고, 아무것도 쓰지 않는다.
-@Test @MainActor func malformedCredentialCarrierFailsClosedInsteadOfSelectingAnotherEngine()
-  async throws
-{
-  let fixture = try _readinessFixture(configuration: .debug, bundlePresent: true)
+/// 승인 파일이 스테이징된 analyze는 유료다(패널 계약) — 개발 .env의 키 유무가
+/// readiness 보고서에 없으면 실행기·스테이징·scope는 아예 없다. 문면에 값은
+/// 절대 없다(불리언만 오고 간다).
+@Test @MainActor func paidAnalyzeIsBlockedWhenTheEngineReportsNoDevKey() async throws {
+  let fixture = try _readinessFixture(configuration: .debug)
   defer { try? FileManager.default.removeItem(at: fixture.root) }
-  let malformed = EngineRoleCredentials(
-    sttKey: "synthetic\0key", visionKey: "", visionBaseURL: "")
-  let readinessCalls = CountBox()
+  try Data("{}".utf8).write(to: fixture.job.analysisAuthorizationURL)
   let scopeLog = ScopeLog()
-  let deps = EngineRequestCoordinator.Dependencies(
-    peekRoots: {
-      [
-        SecurityScopedBookmarkStore.PeekedBookmark(
-          key: "media-root.synthetic", url: fixture.mediaRoot, isStale: false)
-      ]
-    },
-    settleRoots: { peeked in peeked.map(\.url) },
-    peekDevelopmentWorkspace: {
-      SecurityScopedBookmarkStore.PeekedBookmark(
-        key: "developmentEngineWorkspace", url: fixture.externalRoot, isStale: false)
-    },
-    settleDevelopmentWorkspace: { peeked in peeked?.url },
-    loadCredentials: { .ready(malformed) },
-    startScope: { _ in true },
-    stopScope: { _ in },
+  let readinessCalls = CountBox()
+  let deps = _readinessDeps(
+    job: fixture.job,
+    mediaRoot: fixture.mediaRoot,
+    developmentWorkspace: fixture.externalRoot,
     readiness: { _ in
       readinessCalls.value += 1
-      throw NSError(domain: "readiness", code: 9)
+      return _healthyReport(openAIKeyPresent: false)
     },
-    stageDevelopmentJob: { _, _, _ in
-      Issue.record("운반자가 그르르면 스테이징도 없다")
-      throw NSError(domain: "readiness", code: 1)
-    },
-    executor: PlanCapture())
+    executor: PlanCapture(),
+    scopeLog: scopeLog)
   do {
     _ = try await _run(
       deps, job: fixture.job, engineRoot: fixture.engineRoot, scripts: fixture.scripts)
-    Issue.record("그르른 운반자는 실패해야 한다")
-  } catch is DevelopmentEngineError {
-    // 봉투 계약 위반이 그대로 나오는 것이 정답이다 — 재분류 금지.
+    Issue.record("키 없는 보고서로 유료 요청이 지나갔다")
   } catch let error as EnginePreflightError {
-    Issue.record("봉투 오류가 준비 오류로 재분류됐다: \(error)")
+    let message = error.errorDescription ?? ""
+    #expect(message.contains("OpenAI"))
+    #expect(!message.contains("synthetic"))
   }
-  #expect(readinessCalls.value == 0)
-  #expect(scopeLog.events.isEmpty)
+  #expect(readinessCalls.value == 1)
+  // 게이트는 readiness 뒤(보고서가 재료)지만 실행기 앞이다 — 엔진 호출은 없다.
+  let engineCalls = await (deps.executor as? PlanCapture)?.plans.count ?? 0
+  #expect(engineCalls == 0)
 }
 
-/// 승인 파일이 스테이징된 analyze는 유료다 — 세 역할 중 비어 있는 것을 말하고,
-/// readiness·실행기·스테이징·scope는 아예 없다. 문면에 값은 절대 없다.
-@Test @MainActor func paidAnalyzeRequiresSttKeyVisionKeyAndEndpointBeforeAnything() async throws {
-  for missing: String in ["stt", "vision", "endpoint"] {
-    let fixture = try _readinessFixture(configuration: .debug)
-    defer { try? FileManager.default.removeItem(at: fixture.root) }
-    try Data("{}".utf8).write(to: fixture.job.analysisAuthorizationURL)
-    let credentials = EngineRoleCredentials(
-      sttKey: missing == "stt" ? "" : "synthetic-stt",
-      visionKey: missing == "vision" ? "" : "synthetic-vision",
-      visionBaseURL: missing == "endpoint" ? "" : "https://vision.example/v1")
-    let scopeLog = ScopeLog()
-    let readinessCalls = CountBox()
-    let deps = _readinessDeps(
-      job: fixture.job,
-      mediaRoot: fixture.mediaRoot,
-      developmentWorkspace: fixture.externalRoot,
-      credentials: credentials,
-      readiness: { _ in
-        readinessCalls.value += 1
-        throw NSError(domain: "readiness", code: 9)
-      },
-      executor: PlanCapture(),
-      scopeLog: scopeLog)
-    do {
-      _ = try await _run(
-        deps, job: fixture.job, engineRoot: fixture.engineRoot, scripts: fixture.scripts)
-      Issue.record("유료 요청이 역할 없이 지나갔다 (\(missing))")
-    } catch let error as EnginePreflightError {
-      let message = error.errorDescription ?? ""
-      #expect(
-        message.contains(missing == "stt" ? "STT" : missing == "vision" ? "비전" : "엔드포인트"))
-      #expect(!message.contains("synthetic"))
-    }
-    #expect(readinessCalls.value == 0)
-    #expect(scopeLog.events.isEmpty)
-  }
+/// 키 유무 보고가 참이면 승인된 분석은 준비를 지나 실행기까지 간다.
+@Test @MainActor func paidAnalyzeProceedsWhenTheEngineReportsADevKey() async throws {
+  let fixture = try _readinessFixture(configuration: .debug)
+  defer { try? FileManager.default.removeItem(at: fixture.root) }
+  try Data("{}".utf8).write(to: fixture.job.analysisAuthorizationURL)
+  let deps = _readinessDeps(
+    job: fixture.job,
+    mediaRoot: fixture.mediaRoot,
+    developmentWorkspace: fixture.externalRoot,
+    readiness: { _ in _healthyReport(openAIKeyPresent: true) },
+    executor: PlanCapture(),
+    scopeLog: ScopeLog())
+  let outcome = try await _run(
+    deps, job: fixture.job, engineRoot: fixture.engineRoot, scripts: fixture.scripts)
+  #expect(outcome == .completed)
 }
 
 /// 승인 없는 analyze는 키 없이도 준비를 지난다 — 읽기 전용 readiness 자식이
@@ -713,7 +677,6 @@ private final class FakeBookmarkAccess: BookmarkAccess, @unchecked Sendable {
     job: fixture.job,
     mediaRoot: fixture.mediaRoot,
     developmentWorkspace: fixture.externalRoot,
-    credentials: EngineRoleCredentials(),  // 전부 비어 있음 — 권위적 부재
     readiness: { _ in
       readinessCalls.value += 1
       return _healthyReport()
@@ -737,7 +700,6 @@ private final class FakeBookmarkAccess: BookmarkAccess, @unchecked Sendable {
       job: fixture.job,
       mediaRoot: fixture.mediaRoot,
       developmentWorkspace: mode == "development" ? fixture.externalRoot : nil,
-      credentials: EngineRoleCredentials(),
       readiness: { _ in _healthyReport(tools: (nil, nil)) },
       executor: PlanCapture(),
       scopeLog: ScopeLog())
@@ -981,7 +943,7 @@ private final class FakeBookmarkAccess: BookmarkAccess, @unchecked Sendable {
           key: "developmentEngineWorkspace", url: fixture.externalRoot, isStale: false)
       },
       settleDevelopmentWorkspace: { peeked in peeked?.url },
-      loadCredentials: { .ready(EngineRoleCredentials()) },
+  
       startScope: { _ in true },
       stopScope: { _ in },
       readiness: { _ in
@@ -1039,7 +1001,7 @@ private final class FakeBookmarkAccess: BookmarkAccess, @unchecked Sendable {
     settleRoots: { peeked in peeked.map(\.url) },
     peekDevelopmentWorkspace: { nil },
     settleDevelopmentWorkspace: { peeked in peeked?.url },
-    loadCredentials: { .ready(EngineRoleCredentials()) },
+
     startScope: { _ in
       scopeLog.record("start")
       return true

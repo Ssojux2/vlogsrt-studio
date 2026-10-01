@@ -10,6 +10,10 @@ public enum AgentURL {
   public static let importHost = "import"
   public static let captionEstimateHost = "caption-estimate"
   public static let captionRunHost = "caption-run"
+  /// 첫 실행 권한 흐름 — 라이브러리 부모 폴더의 쓰기 권한을 호스트가 받는다.
+  public static let libraryGrantHost = "library-grant"
+  /// SRT를 라이브러리 번들 옆에 놓는 배달 — 자동 가져오기는 없다.
+  public static let captionDeliverHost = "caption-deliver"
 
   public static func roundTripURL(jobID: String) throws -> URL {
     try operationURL(host: roundTripHost, jobID: jobID)
@@ -36,6 +40,19 @@ public enum AgentURL {
   /// 자막 실행(유료) — 승인 문서가 스테이징된 job만 통과한다.
   public static func captionRunURL(jobID: String) throws -> URL {
     try operationURL(host: captionRunHost, jobID: jobID)
+  }
+
+  /// 라이브러리 부모 권한 요청 — 호스트가 폴더 선택을 받아 북마크로 남긴다.
+  public static func libraryGrantURL() throws -> URL {
+    guard let url = URL(string: "\(scheme)://\(libraryGrantHost)/grant") else {
+      throw AgentURLError.invalidHost(libraryGrantHost)
+    }
+    return url
+  }
+
+  /// SRT 배달 요청 — job의 성공 SRT를 번들 옆에 원자적으로 놓는다.
+  public static func captionDeliverURL(jobID: String) throws -> URL {
+    try operationURL(host: captionDeliverHost, jobID: jobID)
   }
 
   private static func operationURL(host: String, jobID: String) throws -> URL {
@@ -73,6 +90,11 @@ public enum AgentURL {
     case importHost: return .importJob(jobID)
     case captionEstimateHost: return .captionEstimate(jobID)
     case captionRunHost: return .captionRun(jobID)
+    case captionDeliverHost: return .captionDeliver(jobID)
+    case libraryGrantHost:
+      // 권한 요청은 job에 묶이지 않는다 — 세션 단위 동작이다(경로는 고정 글자).
+      guard jobID == "grant" else { throw AgentURLError.invalidJobID(jobID) }
+      return .libraryGrant
     default: throw AgentURLError.invalidHost(url.host ?? "")
     }
   }
@@ -85,6 +107,8 @@ public enum AgentRequest: Equatable, Sendable {
   case importJob(String)
   case captionEstimate(String)
   case captionRun(String)
+  case captionDeliver(String)
+  case libraryGrant
 }
 
 public enum AgentURLError: Error, Equatable {

@@ -71,6 +71,7 @@ targets:
       - path: Resources/Engine
         buildPhase: resources
       - path: Resources/AI Captions.fcpxdest
+      - path: Resources/AI Rough Cut.fcpxdest
         buildPhase: resources
       - path: Resources/FinalCutAgent.sdef
         buildPhase: resources

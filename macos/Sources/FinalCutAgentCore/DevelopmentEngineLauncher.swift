@@ -125,6 +125,27 @@ public struct DevelopmentEngineInvocation: Equatable, Sendable {
     )
   }
 
+  /// 상속 호출 조립(패널 계약) — 마커도 봉투도 없다. 자격 증명은 개발 `.env`가
+  /// 엔진 경계에서 풀고(값은 앱으로 오지 않는다), 유무 판정은 readiness
+  /// 보고서의 불리언으로만 돌아온다. 낡은 3-인자 계약과 같은 모양이다.
+  public static func createInheriting(
+    operation: DevelopmentEngineOperation,
+    jobID: String,
+    externalJob: URL,
+    applicationScriptsDirectory: URL
+  ) throws -> Self {
+    guard AppGroupWorkspace.isSafeJobID(jobID) else {
+      throw WorkspaceError.invalidJobID(jobID)
+    }
+    return Self(
+      executableURL: applicationScriptsDirectory.appendingPathComponent(scriptName),
+      arguments: [
+        operation.rawValue, jobID, externalJob.standardizedFileURL.path,
+      ],
+      credentialEnvelope: nil
+    )
+  }
+
   /// readiness 호출 조립 — 읽기 전용 자식도 같은 래퍼·같은 운반자를 지난다
   /// (S2A-2 마지막 단위). 잡 자리는 App Group을 가리킨다: 진입점은 그 디렉터리의
   /// 존재만 확인하고 상태는 쓰지 않는다.
@@ -144,6 +165,25 @@ public struct DevelopmentEngineInvocation: Equatable, Sendable {
         Self.carrierMarkerArgument,
       ],
       credentialEnvelope: .roles(credentials)
+    )
+  }
+
+  /// 상속 readiness 호출(패널 계약) — 봉투 없이 엔진 경계의 .env이 키를 풀게
+  /// 둔다. 보고서의 `openai_key_present` 불리언만 돌아온다(값은 없다).
+  public static func createReadinessInheriting(
+    jobID: String,
+    appGroupJob: URL,
+    applicationScriptsDirectory: URL
+  ) throws -> Self {
+    guard AppGroupWorkspace.isSafeJobID(jobID) else {
+      throw WorkspaceError.invalidJobID(jobID)
+    }
+    return Self(
+      executableURL: applicationScriptsDirectory.appendingPathComponent(scriptName),
+      arguments: [
+        EngineReadiness.operationName, jobID, appGroupJob.standardizedFileURL.path,
+      ],
+      credentialEnvelope: nil
     )
   }
 }

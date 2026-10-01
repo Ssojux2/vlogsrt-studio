@@ -9,6 +9,9 @@ import Foundation
 public struct EngineReadinessReport: Equatable, Sendable, Decodable {
   public let engine: String?
   public let readinessVersion: Int?
+  /// 개발 .env의 OpenAI 키 **유무**(패널 계약) — 값은 어느 보고서에도 없다.
+  /// 없는 보고서(낡은 엔진)는 부재로 읽는다: 유료 실행은 닫힌 쪽이 안전하다.
+  public let openAIKeyPresent: Bool
   public let pythonExecutable: String?
   public let pythonVersion: String?
   public let ffmpeg: String?
@@ -16,7 +19,7 @@ public struct EngineReadinessReport: Equatable, Sendable, Decodable {
 
   public init(
     engine: String?, readinessVersion: Int?, pythonExecutable: String?, pythonVersion: String?,
-    ffmpeg: String?, ffprobe: String?
+    ffmpeg: String?, ffprobe: String?, openAIKeyPresent: Bool = false
   ) {
     self.engine = engine
     self.readinessVersion = readinessVersion
@@ -24,11 +27,13 @@ public struct EngineReadinessReport: Equatable, Sendable, Decodable {
     self.pythonVersion = pythonVersion
     self.ffmpeg = ffmpeg
     self.ffprobe = ffprobe
+    self.openAIKeyPresent = openAIKeyPresent
   }
 
   private enum CodingKeys: String, CodingKey {
     case engine
     case readinessVersion = "readiness_version"
+    case openAIKeyPresent = "openai_key_present"
     case python
     case tools
   }
@@ -47,6 +52,8 @@ public struct EngineReadinessReport: Equatable, Sendable, Decodable {
     let container = try decoder.container(keyedBy: CodingKeys.self)
     self.engine = try container.decodeIfPresent(String.self, forKey: .engine)
     self.readinessVersion = try container.decodeIfPresent(Int.self, forKey: .readinessVersion)
+    self.openAIKeyPresent =
+      (try? container.decodeIfPresent(Bool.self, forKey: .openAIKeyPresent)) ?? false
     let python = try? container.nestedContainer(keyedBy: PythonKeys.self, forKey: .python)
     self.pythonExecutable = try python?.decodeIfPresent(String.self, forKey: .executable)
     self.pythonVersion = try python?.decodeIfPresent(String.self, forKey: .version)
@@ -63,22 +70,19 @@ public struct EngineReadinessRequest: Sendable {
   public let appGroupJob: URL
   public let applicationScriptsDirectory: URL?
   public let engineRoot: URL?
-  public let credentials: EngineRoleCredentials
 
   public init(
     mode: EngineLaunchMode,
     jobID: String,
     appGroupJob: URL,
     applicationScriptsDirectory: URL?,
-    engineRoot: URL?,
-    credentials: EngineRoleCredentials
+    engineRoot: URL?
   ) {
     self.mode = mode
     self.jobID = jobID
     self.appGroupJob = appGroupJob
     self.applicationScriptsDirectory = applicationScriptsDirectory
     self.engineRoot = engineRoot
-    self.credentials = credentials
   }
 }
 
@@ -105,6 +109,8 @@ public enum EnginePreflightError: Error, Equatable, LocalizedError {
   case missingCaptionInput(String)
   case missingCaptionAuthorization
   case captionSTTKeyMissing
+  /// 패널 계약 — 개발 .env에 OpenAI 키가 없어 유료 실행을 호출 전에 닫는다.
+  case openAIKeyMissing
 
   public var errorDescription: String? {
     switch self {
@@ -116,6 +122,8 @@ public enum EnginePreflightError: Error, Equatable, LocalizedError {
       "자막 승인 문서(caption-authorization.jsonl)가 없습니다 — 추정을 승인한 뒤 실행하세요"
     case .captionSTTKeyMissing:
       "승인된 자막 실행에는 STT API 키가 필요합니다 — 키를 저장한 뒤 다시 실행하세요"
+    case .openAIKeyMissing:
+      "개발 .env에 OpenAI API 키가 없습니다 — .env를 채운 뒤 다시 실행하세요(값은 앱이 다루지 않습니다)"
     case .unreadableInput:
       "input.fcpxml을 읽을 수 없습니다 — Final Cut에서 프로젝트를 다시 공유하세요"
     case .missingProjectSelection:
@@ -242,11 +250,10 @@ public enum EngineReadinessProber {
         throw EnginePreflightError.readinessFailed(
           "개발 실행 스크립트 위치를 알 수 없습니다 — 설치 스크립트를 다시 돌리세요")
       }
-      let invocation = try DevelopmentEngineInvocation.createReadiness(
+      let invocation = try DevelopmentEngineInvocation.createReadinessInheriting(
         jobID: request.jobID,
         appGroupJob: request.appGroupJob,
-        applicationScriptsDirectory: scripts,
-        credentials: request.credentials)
+        applicationScriptsDirectory: scripts)
       return try await DevelopmentEngineLauncher().runReadiness(invocation)
     case .bundled:
       guard let engineRoot = request.engineRoot else {
@@ -259,12 +266,11 @@ public enum EngineReadinessProber {
       try fileManager.createDirectory(at: directory, withIntermediateDirectories: false)
       defer { try? fileManager.removeItem(at: directory) }
       let reportURL = directory.appendingPathComponent("readiness.json")
-      let invocation = try BundledEngineInvocation.createReadiness(
+      let invocation = try BundledEngineInvocation.createReadinessInheriting(
         jobID: request.jobID,
         jobDirectory: request.appGroupJob,
         engineRoot: engineRoot,
-        reportURL: reportURL,
-        credentials: request.credentials)
+        reportURL: reportURL)
       let launcher = BundledEngineLauncher()
       let status: Int32
       do {
@@ -382,7 +388,6 @@ public final class EngineRequestCoordinator {
     public let settleDevelopmentWorkspace: @Sendable (
       SecurityScopedBookmarkStore.PeekedBookmark?
     ) throws -> URL?
-    public let loadCredentials: @Sendable () -> EngineRoleSnapshot
     public let startScope: @Sendable (URL) -> Bool
     public let stopScope: @Sendable (URL) -> Void
     public let readiness: @Sendable (EngineReadinessRequest) async throws -> EngineReadinessReport
@@ -402,7 +407,6 @@ public final class EngineRequestCoordinator {
       settleDevelopmentWorkspace: @escaping @Sendable (
         SecurityScopedBookmarkStore.PeekedBookmark?
       ) throws -> URL?,
-      loadCredentials: @escaping @Sendable () -> EngineRoleSnapshot,
       startScope: @escaping @Sendable (URL) -> Bool,
       stopScope: @escaping @Sendable (URL) -> Void,
       readiness: @escaping @Sendable (
@@ -420,7 +424,6 @@ public final class EngineRequestCoordinator {
       self.settleRoots = settleRoots
       self.peekDevelopmentWorkspace = peekDevelopmentWorkspace
       self.settleDevelopmentWorkspace = settleDevelopmentWorkspace
-      self.loadCredentials = loadCredentials
       self.startScope = startScope
       self.stopScope = stopScope
       self.readiness = readiness
@@ -452,7 +455,6 @@ public final class EngineRequestCoordinator {
     {
       return early
     }
-    let credentials = try loadAndGateCredentials(operation: operation, job: job)
     // 스냅숏: 루트와 실행길은 한 번만 읽는다 — scope가 권한 검사·스테이징과
     // 항상 같은 값을 보게 하는 유일한 방법이다. 북마크는 **1단계 복원만** 한다
     // (보호받는 읽기·갱신 저장 없음) — 검증·갱신은 scope가 걸린 뒤 settle에서.
@@ -468,7 +470,7 @@ public final class EngineRequestCoordinator {
       mode == .development ? try deps.peekDevelopmentWorkspace() : nil
     let launcher = try validateLauncher(
       operation: operation, job: job, configuration: configuration, engineRoot: engineRoot,
-      applicationScriptsDirectory: applicationScriptsDirectory, credentials: credentials,
+      applicationScriptsDirectory: applicationScriptsDirectory,
       peekedWorkspace: peekedWorkspace, fileManager: fileManager)
     var scopes = AcquiredScopes(start: deps.startScope, stop: deps.stopScope)
     defer { scopes.releaseAll() }
@@ -484,16 +486,14 @@ public final class EngineRequestCoordinator {
     try verifyWritableSurfaces(
       operation: operation, job: job, externalJob: stagedFuture, fileManager: fileManager)
     try await probeReadiness(
-      operation: operation, job: job, launcher: launcher, credentials: credentials,
-      fileManager: fileManager)
+      operation: operation, job: job, launcher: launcher, fileManager: fileManager)
     try grant.write(to: job.directoryURL, fileManager: fileManager)
     let externalJob = try stageDevelopmentJob(job: job, devWorkspace: devWorkspace)
     // 스테이징이 만든 실제 자리를 다시 잰다 — 미리 보던 자리와 같다는 보장이
     // 아니라 그 자리의 사실이다(외부 job 안의 workspace 자리 포함).
     try verifyStagedSurfaces(operation: operation, job: job, externalJob: externalJob)
     let plan = try buildFinalPlan(
-      operation: operation, job: job, launcher: launcher, externalJob: externalJob,
-      credentials: credentials)
+      operation: operation, job: job, launcher: launcher, externalJob: externalJob)
     return try await runSession(
       operation: operation, job: job, plan: plan, externalJob: externalJob,
       selection: selection.selectionRevision, registry: registry)
@@ -540,36 +540,18 @@ public final class EngineRequestCoordinator {
     return nil
   }
 
-  /// 3단계: 스냅숏 한 덩어리 + 역할 게이트 — 유료 analyze만 세 값을 요구한다.
-  private func loadAndGateCredentials(
-    operation: DevelopmentEngineOperation, job: RoundTripJob
-  ) throws -> EngineRoleCredentials {
-    let snapshot = deps.loadCredentials()
-    guard case .ready(let credentials) = snapshot else {
-      throw EnginePreflightError.credentialStorageUnavailable
-    }
-    if let blocker = EngineRoleCredentialStore.launchBlocker(for: credentials) {
-      throw EnginePreflightError.visionEndpointInvalid(blocker)
-    }
+  /// 3단계(패널 계약): 유료 실행의 키 게이트 — 자격 증명은 엔진 경계(개발 .env)가
+  /// 풀고 앱은 값을 다루지 않는다. readiness 보고서의 유무 불리언만으로 승인된
+  /// 분석을 호출 **전에** 닫는다.
+  private func requireOpenAIKeyIfPaid(
+    operation: DevelopmentEngineOperation, job: RoundTripJob, report: EngineReadinessReport
+  ) throws {
     guard operation == .analyze,
       FileManager.default.fileExists(atPath: job.analysisAuthorizationURL.path)
-    else { return credentials }
-    // 공백만 남은 값은 부재다 — 저장 문면을 그대로 믿지 않고 '실효 값'을 잰다.
-    let effective = (
-      stt: credentials.sttKey.trimmingCharacters(in: .whitespacesAndNewlines),
-      vision: credentials.visionKey.trimmingCharacters(in: .whitespacesAndNewlines),
-      endpoint: credentials.visionBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
-    )
-    for role in ["stt", "vision", "endpoint"] {
-      let present: Bool
-      switch role {
-      case "stt": present = !effective.stt.isEmpty
-      case "vision": present = !effective.vision.isEmpty
-      default: present = !effective.endpoint.isEmpty
-      }
-      guard present else { throw EnginePreflightError.paidCredentialMissing(role: role) }
+    else { return }
+    guard report.openAIKeyPresent else {
+      throw EnginePreflightError.openAIKeyMissing
     }
-    return credentials
   }
 
   /// 4단계: 실행길 검증 — 모드·실행 가능성·Release 무폴백·운반자 부호화가
@@ -581,7 +563,6 @@ public final class EngineRequestCoordinator {
     configuration: EngineBuildConfiguration,
     engineRoot: URL?,
     applicationScriptsDirectory: URL?,
-    credentials: EngineRoleCredentials,
     peekedWorkspace: SecurityScopedBookmarkStore.PeekedBookmark?,
     fileManager: FileManager
   ) throws -> LauncherSelection {
@@ -596,8 +577,9 @@ public final class EngineRequestCoordinator {
       }
     }
     // 검증 계획(throwing)으로 호출 조립까지 잰다 — 결과 계획은 버린다(개발 자리가
-    // 뿌리라서). 그르른 운반자·없는 래퍼는 이 자리에서 정해진 글로 죽는다.
-    let probe = try EngineRuntime.resolvePlanValidated(
+    // 뿌리라서). 없는 래퍼는 이 자리에서 정해진 글로 죽는다. 상속 계획(패널
+    // 계약) — 자격 증명은 엔진 경계의 .env이 푼다.
+    let probe = try EngineRuntime.resolvePlanInheriting(
       configuration: configuration,
       operation: operation,
       jobID: job.id,
@@ -605,7 +587,6 @@ public final class EngineRequestCoordinator {
       engineRoot: engineRoot,
       applicationScriptsDirectory: applicationScriptsDirectory,
       developmentExternalJob: devWorkspace,
-      credentials: credentials,
       fileManager: fileManager)
     guard probe.isExecutable else {
       if case .unavailable(let reason) = probe {
@@ -702,38 +683,37 @@ public final class EngineRequestCoordinator {
   }
 
   /// 최종 호출 — 개발길의 argv는 **스테이징된 job**을 가리킨다(뿌리가 아니다).
-  /// 운반자는 검증 때와 같은 값이다.
+  /// 상속 계획(패널 계약) — 마커도 운반자도 없다.
   private func buildFinalPlan(
     operation: DevelopmentEngineOperation,
     job: RoundTripJob,
     launcher: LauncherSelection,
-    externalJob: URL?,
-    credentials: EngineRoleCredentials
+    externalJob: URL?
   ) throws -> EngineLaunchPlan {
     switch launcher.mode {
     case .bundled:
       guard let engineRoot = launcher.engineRoot else {
         throw EnginePreflightError.engineUnavailable("번들 엔진 뿌리를 알 수 없다")
       }
-      return .bundled(try BundledEngineInvocation.createRoles(
+      return .bundled(try BundledEngineInvocation.createInheriting(
         operation: operation, jobID: job.id, jobDirectory: job.directoryURL,
-        engineRoot: engineRoot, credentials: credentials))
+        engineRoot: engineRoot))
     case .development:
       guard let externalJob, let scripts = launcher.applicationScriptsDirectory else {
         throw EnginePreflightError.engineUnavailable("개발 외부 job이 스테이징되지 않았다")
       }
-      return .development(try DevelopmentEngineInvocation.createRoles(
+      return .development(try DevelopmentEngineInvocation.createInheriting(
         operation: operation, jobID: job.id, externalJob: externalJob,
-        applicationScriptsDirectory: scripts, credentials: credentials))
+        applicationScriptsDirectory: scripts))
     }
   }
 
-  /// 7단계: 읽기 전용 readiness 자식 — analyze만 도구를 요구한다.
+  /// 7단계: 읽기 전용 readiness 자식 — analyze만 도구를 요구하고, 승인된 유료
+  /// 분석은 보고서의 키 유무 불리언으로 호출 전에 닫힌다(패널 계약).
   private func probeReadiness(
     operation: DevelopmentEngineOperation,
     job: RoundTripJob,
     launcher: LauncherSelection,
-    credentials: EngineRoleCredentials,
     fileManager: FileManager
   ) async throws {
     let request = EngineReadinessRequest(
@@ -741,8 +721,7 @@ public final class EngineRequestCoordinator {
       jobID: job.id,
       appGroupJob: job.directoryURL,
       applicationScriptsDirectory: launcher.applicationScriptsDirectory,
-      engineRoot: launcher.engineRoot,
-      credentials: credentials)
+      engineRoot: launcher.engineRoot)
     let report: EngineReadinessReport
     do {
       report = try await deps.readiness(request)
@@ -757,6 +736,7 @@ public final class EngineRequestCoordinator {
     try EngineReadiness.evaluate(
       report: report, mode: launcher.mode, engineRoot: launcher.engineRoot,
       requiresTools: operation == .analyze, fileManager: fileManager)
+    try requireOpenAIKeyIfPaid(operation: operation, job: job, report: report)
   }
 
   /// 9단계: 세션 — scope는 이 문 안에서 살고, 호출자의 defer가 한다.
@@ -833,7 +813,6 @@ extension EngineRequestCoordinator.Dependencies {
       settleRoots: settleRoots,
       peekDevelopmentWorkspace: peekDevelopmentWorkspace,
       settleDevelopmentWorkspace: settleDevelopmentWorkspace,
-      loadCredentials: loadCredentials,
       startScope: startScope,
       stopScope: stopScope,
       readiness: readiness,
@@ -846,7 +825,6 @@ extension EngineRequestCoordinator.Dependencies {
 
   public static func live(
     bookmarkAccess: any BookmarkAccess,
-    loadCredentials: @escaping @Sendable () -> EngineRoleSnapshot,
     executor: any EngineExecuting,
     importRoughcut: (@Sendable (URL) async throws -> Void)? = nil,
     startScope: @escaping @Sendable (URL) -> Bool = {
@@ -865,7 +843,6 @@ extension EngineRequestCoordinator.Dependencies {
         guard let peeked else { return nil }
         return try bookmarkAccess.settle(peeked)
       },
-      loadCredentials: loadCredentials,
       // 기본은 실물 scope다 — 시험은 같은 조립에 기록 가짜를 넣는다(성공·실패).
       startScope: startScope,
       stopScope: stopScope,

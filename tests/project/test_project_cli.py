@@ -29,6 +29,7 @@
 
 from __future__ import annotations
 
+import argparse
 import array
 import hashlib
 import json
@@ -643,3 +644,26 @@ def test_accepted_online_run_reports_the_draft_and_exits_0(
     assert "DTD대조안함" in squashed
     revision_dir = (out / "package" / "current").resolve()
     assert _squash(str(revision_dir)) in squashed  # 리비전 경로가 출력에 있다
+
+
+def test_paid_analysis_is_blocked_before_any_call_without_a_dev_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """개발 .env에 OpenAI 키가 없으면 유료 분석은 호출 열기 전에 닫힌다(패널 계약).
+
+    cwd를 키 없는 임시 자리로 옮기고 상속 환경까지 비우면 `require_paid_roles`가
+    문을 닫는다: 전사기 공장도 readiness도 아무 호출도 일어나기 전이다.
+    문면은 키 유무만 말한다.
+    """
+    from vlogsrt.project import commands as project_commands
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setattr(
+        project_commands.transcribe,
+        "get_transcriber",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("paid path")),
+    )
+    args = argparse.Namespace(project_config=None)
+    with pytest.raises(RuntimeError, match="키"):
+        project_commands.require_paid_roles(args)

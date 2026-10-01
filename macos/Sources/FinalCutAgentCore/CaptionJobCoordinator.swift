@@ -17,14 +17,14 @@ import Foundation
 
 @MainActor
 public final class CaptionJobCoordinator {
-  /// 주입 경계 — 시험은 workspace·자격 증명·readiness·실행기를 갈아끼운다.
+  /// 주입 경계 — 시험은 workspace·readiness·실행기를 갈아끼운다. 자격 증명은
+  /// 없다: 상속 호출이 엔진 경계(개발 .env)에 키를 풀게 둔다(패널 계약).
   public struct Dependencies: Sendable {
     public let peekDevelopmentWorkspace: @Sendable () throws ->
       SecurityScopedBookmarkStore.PeekedBookmark?
     public let settleDevelopmentWorkspace: @Sendable (
       SecurityScopedBookmarkStore.PeekedBookmark?
     ) throws -> URL?
-    public let loadCredentials: @Sendable () -> EngineRoleSnapshot
     public let startScope: @Sendable (URL) -> Bool
     public let stopScope: @Sendable (URL) -> Void
     public let stageCaptionJob: @Sendable (
@@ -41,7 +41,6 @@ public final class CaptionJobCoordinator {
       settleDevelopmentWorkspace: @escaping @Sendable (
         SecurityScopedBookmarkStore.PeekedBookmark?
       ) throws -> URL?,
-      loadCredentials: @escaping @Sendable () -> EngineRoleSnapshot,
       startScope: @escaping @Sendable (URL) -> Bool,
       stopScope: @escaping @Sendable (URL) -> Void,
       stageCaptionJob: @escaping @Sendable (
@@ -54,7 +53,6 @@ public final class CaptionJobCoordinator {
     ) {
       self.peekDevelopmentWorkspace = peekDevelopmentWorkspace
       self.settleDevelopmentWorkspace = settleDevelopmentWorkspace
-      self.loadCredentials = loadCredentials
       self.startScope = startScope
       self.stopScope = stopScope
       self.stageCaptionJob = stageCaptionJob
@@ -71,7 +69,6 @@ public final class CaptionJobCoordinator {
       Dependencies(
         peekDevelopmentWorkspace: peekDevelopmentWorkspace,
         settleDevelopmentWorkspace: settleDevelopmentWorkspace,
-        loadCredentials: loadCredentials,
         startScope: startScope,
         stopScope: stopScope,
         stageCaptionJob: stageCaptionJob,
@@ -93,11 +90,6 @@ public final class CaptionJobCoordinator {
         settleDevelopmentWorkspace: { peeked in
           guard let peeked else { return nil }
           return try bookmarkStore?.settle(peeked)
-        },
-        loadCredentials: {
-          // 패널 계약의 단일 공유 OpenAI 키 — STT·비전이 같은 키를 공식
-          // 엔드포인트로 쓴다(낡은 Google 저장값은 사용에서 빠진다).
-          EngineRoleCredentialStore(storage: KeychainStore()).loadSharedOpenAIRoles()
         },
         startScope: { url in url.startAccessingSecurityScopedResource() },
         stopScope: { url in url.stopAccessingSecurityScopedResource() },
@@ -134,7 +126,6 @@ public final class CaptionJobCoordinator {
     if CancellationStore.isCancelled(jobURL: job.directoryURL, fileManager: fileManager) {
       return .cancelledBeforeRun
     }
-    let credentials = try loadAndGateCredentials(operation: operation)
     let mode = EngineLaunchMode.resolve(bundleURL: engineRoot, fileManager: fileManager)
     if mode == .development, configuration != .debug {
       throw EnginePreflightError.engineUnavailable(
@@ -153,12 +144,15 @@ public final class CaptionJobCoordinator {
         jobID: job.id,
         appGroupJob: job.directoryURL,
         applicationScriptsDirectory: applicationScriptsDirectory,
-        engineRoot: engineRoot,
-        credentials: credentials)
-      _ = try await readiness(request)
+        engineRoot: engineRoot)
+      let report = try await readiness(request)
+      // 개발 .env에 키가 없으면 실행은 호출 전에 닫힌다 — 값은 앱이 모른다.
+      guard report.openAIKeyPresent else {
+        throw EnginePreflightError.openAIKeyMissing
+      }
     }
     let externalJob = try stageDevelopmentJob(job: job, devWorkspace: devWorkspace)
-    let plan = try EngineRuntime.resolvePlanValidated(
+    let plan = try EngineRuntime.resolvePlanInheriting(
       configuration: configuration,
       operation: operation,
       jobID: job.id,
@@ -166,7 +160,6 @@ public final class CaptionJobCoordinator {
       engineRoot: engineRoot,
       applicationScriptsDirectory: applicationScriptsDirectory,
       developmentExternalJob: externalJob,
-      credentials: credentials,
       fileManager: fileManager)
     guard plan.isExecutable else {
       if case .unavailable(let reason) = plan {
@@ -212,25 +205,6 @@ public final class CaptionJobCoordinator {
         throw EnginePreflightError.missingCaptionAuthorization
       }
     }
-  }
-
-  /// 추정은 무자격도 돈다 — 실행만 STT 역할 하나를 요구한다(비전은 자막에 없다).
-  private func loadAndGateCredentials(
-    operation: DevelopmentEngineOperation
-  ) throws -> EngineRoleCredentials {
-    let snapshot = deps.loadCredentials()
-    guard case .ready(let credentials) = snapshot else {
-      throw EnginePreflightError.credentialStorageUnavailable
-    }
-    guard operation == .captionRun else { return credentials }
-    if let blocker = EngineRoleCredentialStore.launchBlocker(for: credentials) {
-      throw EnginePreflightError.visionEndpointInvalid(blocker)
-    }
-    let stt = credentials.sttKey.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !stt.isEmpty else {
-      throw EnginePreflightError.captionSTTKeyMissing
-    }
-    return credentials
   }
 
   /// 쓰기 증명 — job 자리와 workspace, 실행이면 산물 폴더(captions/)까지.

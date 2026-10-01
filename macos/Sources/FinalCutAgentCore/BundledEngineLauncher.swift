@@ -86,6 +86,29 @@ public struct BundledEngineInvocation: Equatable, Sendable {
   public static let roleCarrierEnvironmentName = "VLOGSRT_ENGINE_ROLE_CREDENTIALS"
   public static let pathEnvironmentName = "PATH"
 
+  /// 상속 호출 조립(패널 계약) — 운반자 환경이 없다. PATH만 준다: 자격 증명은
+  /// 엔진 경계(개발 .env)에서 풀고 앱은 값을 다루지 않는다.
+  public static func createInheriting(
+    operation: DevelopmentEngineOperation,
+    jobID: String,
+    jobDirectory: URL,
+    engineRoot: URL
+  ) throws -> Self {
+    guard AppGroupWorkspace.isSafeJobID(jobID) else {
+      throw WorkspaceError.invalidJobID(jobID)
+    }
+    let executable = engineRoot
+      .appendingPathComponent("Contents", isDirectory: true)
+      .appendingPathComponent("MacOS", isDirectory: true)
+      .appendingPathComponent(DevelopmentEngineInvocation.scriptName)
+    return Self(
+      executableURL: executable,
+      arguments: [operation.rawValue, jobID, jobDirectory.standardizedFileURL.path],
+      currentDirectory: engineRoot,
+      environment: [Self.pathEnvironmentName: Self.bundledToolPath(engineRoot: engineRoot)]
+    )
+  }
+
   /// 번들 readiness 호출 조립 — 넷째 인자는 보고서 자리다(상태 기록 계약 없음).
   /// 환경은 작업 호출과 같은 한 통(PATH + V2 운반자)이므로, 보고서의 도구 칸이
   /// 곧 작업 자식이 볼 환경이다(S2A-2 마지막 단위).
@@ -116,6 +139,32 @@ public struct BundledEngineInvocation: Equatable, Sendable {
       ],
       currentDirectory: engineRoot,
       environment: environment
+    )
+  }
+
+  /// 상속 readiness 호출(패널 계약) — 운반자 없이 PATH만. 키 유무는 엔진 경계의
+  /// 판정을 보고서 불리언으로만 돌려받는다.
+  public static func createReadinessInheriting(
+    jobID: String,
+    jobDirectory: URL,
+    engineRoot: URL,
+    reportURL: URL
+  ) throws -> Self {
+    guard AppGroupWorkspace.isSafeJobID(jobID) else {
+      throw WorkspaceError.invalidJobID(jobID)
+    }
+    let executable = engineRoot
+      .appendingPathComponent("Contents", isDirectory: true)
+      .appendingPathComponent("MacOS", isDirectory: true)
+      .appendingPathComponent(DevelopmentEngineInvocation.scriptName)
+    return Self(
+      executableURL: executable,
+      arguments: [
+        EngineReadiness.operationName, jobID, jobDirectory.standardizedFileURL.path,
+        reportURL.standardizedFileURL.path,
+      ],
+      currentDirectory: engineRoot,
+      environment: [Self.pathEnvironmentName: Self.bundledToolPath(engineRoot: engineRoot)]
     )
   }
 

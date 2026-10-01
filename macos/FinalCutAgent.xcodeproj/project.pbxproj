@@ -9,6 +9,7 @@
 /* Begin PBXBuildFile section */
 		0F52AD7FD9F1954D2B62D9F2 /* FinalCutImporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6832A3B51FA754EC6959C587 /* FinalCutImporter.swift */; };
 		11BEB3475A7A691F2B66E924 /* libFinalCutAgentCore.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 162A42CFC45AE937A1F021B9 /* libFinalCutAgentCore.a */; };
+		13D98111C0B3DB6C6F858FEF /* AI Rough Cut.fcpxdest in Resources */ = {isa = PBXBuildFile; fileRef = 902ACC5C6CBCD24A89172AFE /* AI Rough Cut.fcpxdest */; };
 		1DE4C06EB9AF7DD45BFA62CD /* EngineRequestGate.swift in Sources */ = {isa = PBXBuildFile; fileRef = C07C38B451E68FDE56A5A4F0 /* EngineRequestGate.swift */; };
 		2653D9611BD41AB6FA3CDA06 /* RoundTripJob.swift in Sources */ = {isa = PBXBuildFile; fileRef = 97CAE484F153252E07D1BF7F /* RoundTripJob.swift */; };
 		2DA460A2348F5014D5D0EBA7 /* README.md in Resources */ = {isa = PBXBuildFile; fileRef = BCF0401E24FA669233607967 /* README.md */; };
@@ -17,8 +18,10 @@
 		3EDFB72203E00D8CB43C3AA6 /* RoundTripCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 41E6E3FF248873A70D179DB7 /* RoundTripCoordinator.swift */; };
 		401695FCC125D9B3A1EEC426 /* FinalCutAgentWorkflowExtension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = BF3C5A5E380F891AB16ACB4F /* FinalCutAgentWorkflowExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		52A1F4E57DD9A0488CE5C99B /* KeychainStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6852655CCFB4C1839FD4A0FE /* KeychainStore.swift */; };
+		591422383F1ED8E3C4E4ACF5 /* LibraryDelivery.swift in Sources */ = {isa = PBXBuildFile; fileRef = 27BEC42F768BBFF7559E89DB /* LibraryDelivery.swift */; };
 		61691110A241AAB76BD89561 /* BundledEngineLauncher.swift in Sources */ = {isa = PBXBuildFile; fileRef = 36EC8A37599443FB62130C7B /* BundledEngineLauncher.swift */; };
 		6A374178121C2DAE331BD569 /* AppGroupWorkspace.swift in Sources */ = {isa = PBXBuildFile; fileRef = CB047E1AA867D819DDA5D4B2 /* AppGroupWorkspace.swift */; };
+		6B0B26CDFC83ABA99403586B /* RoughCutInbox.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9097DBB5E43B39E4C5C64139 /* RoughCutInbox.swift */; };
 		70146EE378CB76A246D0AA11 /* ShareDestination.swift in Sources */ = {isa = PBXBuildFile; fileRef = B080868081DD514BA06BA887 /* ShareDestination.swift */; };
 		757008D9DBF574C4BE97B53C /* IdentityRoundTripService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C7DB4044A45662630C30DA8 /* IdentityRoundTripService.swift */; };
 		7B15858CECF631D1876C8320 /* FinalCutPasteboard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0ABF9EFE3FDDC83B32482D93 /* FinalCutPasteboard.swift */; };
@@ -95,6 +98,7 @@
 		2053A676E444A5D3827BA357 /* RoundTripMessages.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoundTripMessages.swift; sourceTree = "<group>"; };
 		20D61F88703BC6F0641A0B83 /* AI Captions.fcpxdest */ = {isa = PBXFileReference; path = "AI Captions.fcpxdest"; sourceTree = "<group>"; };
 		26833B0223E418B4ABC94592 /* WorkflowProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkflowProtocol.swift; sourceTree = "<group>"; };
+		27BEC42F768BBFF7559E89DB /* LibraryDelivery.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryDelivery.swift; sourceTree = "<group>"; };
 		2C7DB4044A45662630C30DA8 /* IdentityRoundTripService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IdentityRoundTripService.swift; sourceTree = "<group>"; };
 		36EC8A37599443FB62130C7B /* BundledEngineLauncher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BundledEngineLauncher.swift; sourceTree = "<group>"; };
 		41E6E3FF248873A70D179DB7 /* RoundTripCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoundTripCoordinator.swift; sourceTree = "<group>"; };
@@ -109,6 +113,8 @@
 		6832A3B51FA754EC6959C587 /* FinalCutImporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FinalCutImporter.swift; sourceTree = "<group>"; };
 		6852655CCFB4C1839FD4A0FE /* KeychainStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainStore.swift; sourceTree = "<group>"; };
 		714BD102C51B1A26375F63BF /* LegacyJobStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LegacyJobStore.swift; sourceTree = "<group>"; };
+		902ACC5C6CBCD24A89172AFE /* AI Rough Cut.fcpxdest */ = {isa = PBXFileReference; path = "AI Rough Cut.fcpxdest"; sourceTree = "<group>"; };
+		9097DBB5E43B39E4C5C64139 /* RoughCutInbox.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoughCutInbox.swift; sourceTree = "<group>"; };
 		93627080B08E56ADEB1484CC /* FinalCutAgent.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = FinalCutAgent.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		97CAE484F153252E07D1BF7F /* RoundTripJob.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoundTripJob.swift; sourceTree = "<group>"; };
 		9A8AFE5D5262B92C8568EFDC /* FinalCutAgent.sdef */ = {isa = PBXFileReference; path = FinalCutAgent.sdef; sourceTree = "<group>"; };
@@ -182,10 +188,12 @@
 				2C7DB4044A45662630C30DA8 /* IdentityRoundTripService.swift */,
 				6852655CCFB4C1839FD4A0FE /* KeychainStore.swift */,
 				714BD102C51B1A26375F63BF /* LegacyJobStore.swift */,
+				27BEC42F768BBFF7559E89DB /* LibraryDelivery.swift */,
 				E578D4512019F6D1BA041A0C /* MediaAssetProtocol.swift */,
 				66FF409DA890D46893AF2224 /* MediaAssetScripting.swift */,
 				512CE9B1424FE331272CB1F5 /* MediaGrant.swift */,
 				556A9523F428168EC0936DF2 /* RoughcutDeliveryStore.swift */,
+				9097DBB5E43B39E4C5C64139 /* RoughCutInbox.swift */,
 				41E6E3FF248873A70D179DB7 /* RoundTripCoordinator.swift */,
 				97CAE484F153252E07D1BF7F /* RoundTripJob.swift */,
 				2053A676E444A5D3827BA357 /* RoundTripMessages.swift */,
@@ -246,6 +254,7 @@
 			isa = PBXGroup;
 			children = (
 				20D61F88703BC6F0641A0B83 /* AI Captions.fcpxdest */,
+				902ACC5C6CBCD24A89172AFE /* AI Rough Cut.fcpxdest */,
 				9A8AFE5D5262B92C8568EFDC /* FinalCutAgent.sdef */,
 				A5897861725185359B776876 /* Engine */,
 			);
@@ -364,6 +373,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				F92FDF327CB983321AF120B1 /* AI Captions.fcpxdest in Resources */,
+				13D98111C0B3DB6C6F858FEF /* AI Rough Cut.fcpxdest in Resources */,
 				D543AC03D35B5E23D11EF842 /* FinalCutAgent.sdef in Resources */,
 				2DA460A2348F5014D5D0EBA7 /* README.md in Resources */,
 			);
@@ -423,9 +433,11 @@
 				757008D9DBF574C4BE97B53C /* IdentityRoundTripService.swift in Sources */,
 				52A1F4E57DD9A0488CE5C99B /* KeychainStore.swift in Sources */,
 				321BE228504D9C851B58B978 /* LegacyJobStore.swift in Sources */,
+				591422383F1ED8E3C4E4ACF5 /* LibraryDelivery.swift in Sources */,
 				D347F5DEA99B803FB0A2CC50 /* MediaAssetProtocol.swift in Sources */,
 				8EDCF61837103AFD7DECFBEF /* MediaAssetScripting.swift in Sources */,
 				DB54A64731712314496280CA /* MediaGrant.swift in Sources */,
+				6B0B26CDFC83ABA99403586B /* RoughCutInbox.swift in Sources */,
 				95D5C089F84A496F263A54EE /* RoughcutDeliveryStore.swift in Sources */,
 				3EDFB72203E00D8CB43C3AA6 /* RoundTripCoordinator.swift in Sources */,
 				2653D9611BD41AB6FA3CDA06 /* RoundTripJob.swift in Sources */,

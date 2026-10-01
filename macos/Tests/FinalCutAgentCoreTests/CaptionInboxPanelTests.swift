@@ -233,63 +233,23 @@ private func demoOrigin(uid: String, jobID: String = "roundtrip-7") -> OriginMap
   #expect(model.observe(activeProjectUID: "FINAL-UID-1", job: job) == .succeededNoSpeech)
 }
 
-// ─── 공유 OpenAI 키 — 두 역할이 같은 키·공식 엔드포인트, 낡은 값은 배제 ──
+// ─── 상속 호출 계약 — 키는 엔진 경계(.env)의 몫이다 ────────────────
 
-private final class InMemorySecureStorage: SecureKeyValueStorage, @unchecked Sendable {
-  private let lock = NSLock()
-  private var items: [String: String] = [:]
+/// 상속 호출 계약(패널 시대) — 키는 개발 .env이 엔진 경계에서 풀고 앱은 값을
+/// 다루지 않는다. 준비 보고서의 유무 불리언 해석만 앱의 몫이다: 칸이 없는
+/// 낡은 보고서는 부재로 읽어 유료 실행을 닫는 쪽이 안전하다.
+@Test func readinessKeyPresenceDecodesFailClosedForOldReports() throws {
+  let payload = """
+    {"engine":"vlogsrt-engine","readiness_version":1,"python":{},"tools":{}}
+    """.data(using: .utf8)!
+  let legacy = try JSONDecoder().decode(EngineReadinessReport.self, from: payload)
+  #expect(legacy.openAIKeyPresent == false)
 
-  func save(_ value: String, account: String) throws {
-    lock.lock()
-    items[account] = value
-    lock.unlock()
-  }
-
-  func load(account: String) throws -> String? {
-    lock.lock()
-    defer { lock.unlock() }
-    return items[account]
-  }
-
-  func remove(account: String) throws {
-    lock.lock()
-    items.removeValue(forKey: account)
-    lock.unlock()
-  }
-}
-
-@Test func sharedOpenAIKeyFeedsBothRolesAndExcludesLegacyValues() throws {
-  let storage = InMemorySecureStorage()
-  // 낡은 저장값 — Google 비전 키·별도 엔드포인트 시절의 것이다.
-  try storage.save("legacy-stt", account: EngineRoleCredentialStore.sttAccount)
-  try storage.save("legacy-google-vision", account: EngineRoleCredentialStore.visionAccount)
-  try storage.save("https://gemini.example/v1", account: EngineRoleCredentialStore.visionBaseURLAccount)
-  try storage.save(
-    "sk-openai-shared", account: EngineRoleCredentialStore.sharedOpenAIAccount)
-
-  guard case .ready(let roles) = EngineRoleCredentialStore(storage: storage)
-    .loadSharedOpenAIRoles()
-  else {
-    Issue.record("공유 키 스냅숏이 준비되지 않았다")
-    return
-  }
-  // STT·비전이 같은 키를 쓰고 비전은 공식 OpenAI 엔드포인트로 간다.
-  #expect(roles.sttKey == "sk-openai-shared")
-  #expect(roles.visionKey == "sk-openai-shared")
-  #expect(roles.visionBaseURL == EngineRoleCredentialStore.officialOpenAIEndpoint)
-  // 낡은 값은 어느 역할에도 실리지 않는다(보존되었지만 사용에서 빠진다).
-  #expect(roles.sttKey != "legacy-stt")
-  #expect(roles.visionKey != "legacy-google-vision")
-  #expect(roles.visionBaseURL != "https://gemini.example/v1")
-  // 공식 엔드포인트는 실행 전 검증을 통과한다.
-  #expect(EngineRoleCredentialStore.launchBlocker(for: roles) == nil)
-
-  // 공유 키가 비면 세 역할 전부 권위적 부재다 — 추정·러프컷은 무키로 돈다.
-  try storage.remove(account: EngineRoleCredentialStore.sharedOpenAIAccount)
-  guard case .ready(let absent) = EngineRoleCredentialStore(storage: storage)
-    .loadSharedOpenAIRoles()
-  else { return }
-  #expect(absent == EngineRoleCredentials())
+  let present = """
+    {"engine":"vlogsrt-engine","readiness_version":1,"openai_key_present":true,
+     "python":{},"tools":{}}
+    """.data(using: .utf8)!
+  #expect(try JSONDecoder().decode(EngineReadinessReport.self, from: present).openAIKeyPresent)
 }
 
 // ─── 새 에이전트 URL 호스트 ─────────────────────────────────────
