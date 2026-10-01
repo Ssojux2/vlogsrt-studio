@@ -13,6 +13,9 @@ public nonisolated final class WorkflowViewController: NSViewController {
   private var confirmButton: NSButton!
   private var analyzeButton: NSButton!
   private var roughcutButton: NSButton!
+  // 러프컷 배달 수명주기(S2C) — 재시도는 앱에, 확인은 관찰된 프로젝트 신원으로.
+  private var importRetryButton: NSButton!
+  private var importConfirmButton: NSButton!
   private var candidatesStack: NSStackView!
   private var candidateRows: [CandidateReviewRow] = []
   private var job: RoundTripJob?
@@ -40,6 +43,18 @@ public nonisolated final class WorkflowViewController: NSViewController {
       action: #selector(requestRoughcut)
     )
     roughcutButton.isEnabled = false
+    importRetryButton = NSButton(
+      title: "가져오기 재시도",
+      target: self,
+      action: #selector(retryRoughcutImport)
+    )
+    importRetryButton.isEnabled = false
+    importConfirmButton = NSButton(
+      title: "가져오기 완료로 표시",
+      target: self,
+      action: #selector(confirmRoughcutImport)
+    )
+    importConfirmButton.isEnabled = false
     candidatesStack = NSStackView()
     candidatesStack.orientation = .vertical
     candidatesStack.spacing = 8
@@ -57,6 +72,7 @@ public nonisolated final class WorkflowViewController: NSViewController {
         analyzeButton,
         candidatesStack,
         roughcutButton,
+        NSStackView(views: [importRetryButton, importConfirmButton]),
         confirmButton,
       ]
     )
@@ -168,6 +184,14 @@ public nonisolated final class WorkflowViewController: NSViewController {
       + "시작 \(selection.timelineStart.secondsText) · 길이 \(selection.duration.secondsText)"
       + " · 프레임 \(selection.frameDuration.secondsText)"
     if let oldUID, oldUID != selection.projectUID {
+      // 분석 job의 드리프트 규율은 그대로다 — 단 배달 확인 대기 중이라면 새로
+      // 열린 프로젝트가 러프컷 결과일 수 있으니 확인 자격만 다시 잰다(S2C).
+      if let job, let record = RoughcutDeliveryStore.current(jobURL: job.directoryURL),
+        record.state == .importRequested || record.state == .importSent
+      {
+        refreshImportConfirmEligibility(job)
+        return
+      }
       stopRefreshing()
       job = nil
       confirmButton.isEnabled = false
@@ -349,6 +373,84 @@ public nonisolated final class WorkflowViewController: NSViewController {
     }
   }
 
+  // ─── 러프컷 배달 수명주기(S2C) — 전송 성공은 확인이 아니다 ──────
+
+  /// 마지막 배달 기록을 읽어 버튼·문구를 맞춘다.
+  @MainActor private func refreshRoughcutDelivery(_ job: RoundTripJob) {
+    guard let record = RoughcutDeliveryStore.current(jobURL: job.directoryURL) else {
+      importRetryButton.isEnabled = false
+      importConfirmButton.isEnabled = false
+      status.stringValue = "러프컷 완료 — Final Cut에서 확인하세요"
+      return
+    }
+    switch record.state {
+    case .generated, .importRequested, .importSent:
+      importRetryButton.isEnabled = true
+      refreshImportConfirmEligibility(job)
+      status.stringValue =
+        record.state == .generated
+        ? "러프컷 생성 완료 — Final Cut으로 가져갑니다(실패하면 재시도 버튼)"
+        : "가져오기 요청됨 — Final Cut에서 프로젝트를 연 뒤 완료로 표시하세요"
+    case .importFailed:
+      importRetryButton.isEnabled = true
+      importConfirmButton.isEnabled = false
+      status.stringValue = "가져오기 실패 — 재시도 버튼으로 다시 보낼 수 있습니다"
+    case .importConfirmed:
+      importRetryButton.isEnabled = false
+      importConfirmButton.isEnabled = false
+      status.stringValue =
+        "가져오기 확인됨 — 최종 편집 뒤 WAV+FCPXML을 공유하면 자막 job이 이어집니다"
+    }
+  }
+
+  /// 확인 자격 — 활성 프로젝트가 관찰되고 원본(입력) 프로젝트가 아니어야 한다.
+  @MainActor private func refreshImportConfirmEligibility(_ job: RoundTripJob) {
+    let sourceUID = (try? job.readProjectSelection())?.projectUID
+    importConfirmButton.isEnabled = RoughcutConfirmation.eligible(
+      activeProjectUID: activeProject?.projectUID, sourceProjectUID: sourceUID)
+    if importConfirmButton.isEnabled, let active = activeProject {
+      status.stringValue +=
+        "\n확인 대상: \(active.projectName) (\(active.projectUID.prefix(12))…)"
+    }
+  }
+
+  /// 가져오기 재시도 — 앱이 같은 출력(해시 검증)을 다시 Final Cut으로 보낸다.
+  @objc @MainActor private func retryRoughcutImport() {
+    guard let job else { return }
+    do {
+      try openAgentURL(
+        AgentURL.importURL(jobID: job.id),
+        pending: "가져오기 재시도 요청됨"
+      )
+    } catch {
+      status.stringValue = "재시도 요청 실패: \(error.localizedDescription)"
+    }
+  }
+
+  /// 가져오기 확인 — 관찰된 결과 프로젝트 UID를 원본 job/리비전에 잇는다(S4B).
+  @objc @MainActor private func confirmRoughcutImport() {
+    guard let job, let active = activeProject else { return }
+    do {
+      let sourceUID = (try? job.readProjectSelection())?.projectUID
+      guard
+        RoughcutConfirmation.eligible(
+          activeProjectUID: active.projectUID, sourceProjectUID: sourceUID)
+      else {
+        status.stringValue = "지금 열린 프로젝트로는 확인할 수 없다 — 러프컷 결과 프로젝트를 열어주세요"
+        return
+      }
+      try RoughcutConfirmation.confirm(
+        jobID: job.id,
+        jobURL: job.directoryURL,
+        activeProjectUID: active.projectUID,
+        originMap: OriginMapStore(workspace: try AppGroupWorkspace.live())
+      )
+      refreshRoughcutDelivery(job)
+    } catch {
+      status.stringValue = "확인 기록 실패: \(error.localizedDescription)"
+    }
+  }
+
   @MainActor private func openAgentURL(
     _ url: URL,
     pending: String,
@@ -475,7 +577,7 @@ public nonisolated final class WorkflowViewController: NSViewController {
         : "분석이 실패했습니다 · 다시 시도하려면 AI 분석 요청을 누르세요"
     case .roughcutCompleted:
       roughcutButton.isEnabled = !candidateRows.isEmpty
-      status.stringValue = "러프컷 완료 — Final Cut에서 확인하세요"
+      refreshRoughcutDelivery(job)
     case .cancelledJob:
       analyzeButton.isEnabled = false
       status.stringValue = "취소된 작업입니다 — 새 분석을 시작하려면 새 작업을 만드세요"

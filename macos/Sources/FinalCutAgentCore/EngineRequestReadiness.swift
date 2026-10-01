@@ -101,11 +101,21 @@ public enum EnginePreflightError: Error, Equatable, LocalizedError {
   case workspaceNotWritable(String)
   case destinationNotWritable(String)
   case readinessFailed(String)
+  /// 자막 job(S4A/S4B) — 스테이징된 최종 내보내기 재료가 없다.
+  case missingCaptionInput(String)
+  case missingCaptionAuthorization
+  case captionSTTKeyMissing
 
   public var errorDescription: String? {
     switch self {
     case .missingInput:
       "작업 폴더에 input.fcpxml이 없습니다 — Final Cut에서 프로젝트를 다시 공유하세요"
+    case .missingCaptionInput(let name):
+      "자막 작업 폴더에 \(name)이 없습니다 — 공유 받기를 다시 하세요"
+    case .missingCaptionAuthorization:
+      "자막 승인 문서(caption-authorization.jsonl)가 없습니다 — 추정을 승인한 뒤 실행하세요"
+    case .captionSTTKeyMissing:
+      "승인된 자막 실행에는 STT API 키가 필요합니다 — 키를 저장한 뒤 다시 실행하세요"
     case .unreadableInput:
       "input.fcpxml을 읽을 수 없습니다 — Final Cut에서 프로젝트를 다시 공유하세요"
     case .missingProjectSelection:

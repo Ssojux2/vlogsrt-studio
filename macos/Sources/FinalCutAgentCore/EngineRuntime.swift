@@ -311,7 +311,8 @@ public struct EngineSessionContext {
   public let externalJob: URL?
   public let plan: EngineLaunchPlan
   public let selectionRevision: String
-  public let registry: ActiveSelectionRegistry
+  /// 없으면 선택 드리프트 게이트가 없다 — FCP 선택에 묶이지 않는 job(자막, S4B).
+  public let registry: ActiveSelectionRegistry?
   public let now: () -> String
 
   public init(
@@ -321,7 +322,7 @@ public struct EngineSessionContext {
     externalJob: URL?,
     plan: EngineLaunchPlan,
     selectionRevision: String,
-    registry: ActiveSelectionRegistry,
+    registry: ActiveSelectionRegistry?,
     now: @escaping () -> String = { ISO8601DateFormatter().string(from: Date()) }
   ) {
     self.operation = operation
@@ -406,11 +407,13 @@ public struct EngineSessionRunner {
     if CancellationStore.isCancelled(jobURL: context.appGroupJob, fileManager: fileManager) {
       return .cancelledBeforeRun
     }
-    do {
-      try context.registry.requireCurrent(context.selectionRevision)
-    } catch {
-      try recordDriftCancellation(context, fileManager: fileManager)
-      return .staleSelection
+    if let registry = context.registry {
+      do {
+        try registry.requireCurrent(context.selectionRevision)
+      } catch {
+        try recordDriftCancellation(context, fileManager: fileManager)
+        return .staleSelection
+      }
     }
     // 진행 릴레이(S2A-3): 개발(외부) 실행 동안에만 돈다. 이 실행의 호출 신원을
     // 자식 argv에 심고, 그 신원이 실린 스냅샷만 옮긴다 — 실행기가 끝나거나
@@ -420,15 +423,17 @@ public struct EngineSessionRunner {
     var relayTask: Task<Void, Never>?
     if let externalJob = context.externalJob {
       let appGroupJob = context.appGroupJob
-      let driftProbe = SelectionDriftProbe(
-        registry: context.registry, revision: context.selectionRevision)
+      let driftProbe = context.registry.map {
+        SelectionDriftProbe(registry: $0, revision: context.selectionRevision)
+      }
       relayTask = progressRelay.start(
         externalJob: externalJob,
         appGroupJob: appGroupJob,
         invocationID: relayID,
         isStopped: {
           // 취소든 활성 선택 드리프트든 — 이 실행이 무효인 순간 관측 발행도 멈춘다.
-          CancellationStore.isCancelled(jobURL: appGroupJob) || !driftProbe.isCurrent()
+          CancellationStore.isCancelled(jobURL: appGroupJob)
+            || !(driftProbe?.isCurrent() ?? true)
         })
     }
     let status: Int32
@@ -451,11 +456,13 @@ public struct EngineSessionRunner {
     if CancellationStore.isCancelled(jobURL: context.appGroupJob, fileManager: fileManager) {
       return .stoppedBeforeSync
     }
-    do {
-      try context.registry.requireCurrent(context.selectionRevision)
-    } catch {
-      try recordDriftCancellation(context, fileManager: fileManager)
-      return .staleSelection
+    if let registry = context.registry {
+      do {
+        try registry.requireCurrent(context.selectionRevision)
+      } catch {
+        try recordDriftCancellation(context, fileManager: fileManager)
+        return .staleSelection
+      }
     }
     if let externalJob = context.externalJob {
       // 실패(비0)여도 증거는 나간다 — 단 진단 파일뿐이고 성공 산물은 없다.
@@ -468,11 +475,13 @@ public struct EngineSessionRunner {
     if CancellationStore.isCancelled(jobURL: context.appGroupJob, fileManager: fileManager) {
       return .stoppedBeforeImport
     }
-    do {
-      try context.registry.requireCurrent(context.selectionRevision)
-    } catch {
-      try recordDriftCancellation(context, fileManager: fileManager)
-      return .staleSelection
+    if let registry = context.registry {
+      do {
+        try registry.requireCurrent(context.selectionRevision)
+      } catch {
+        try recordDriftCancellation(context, fileManager: fileManager)
+        return .staleSelection
+      }
     }
     try await importRoughcut(
       context.appGroupJob.appendingPathComponent("roughcut.fcpxml")

@@ -292,28 +292,90 @@ private let captionAttemptLine = """
   }
 }
 
-@Test func shareInboxStagesAPythonCompatibleCaptionRequest() throws {
+@Test func shareInboxStagesCaptionOriginFromAResolvedMapping() throws {
   let root = FileManager.default.temporaryDirectory
     .appendingPathComponent(UUID().uuidString, isDirectory: true)
   let incoming = root.appendingPathComponent("incoming", isDirectory: true)
-  let job = root.appendingPathComponent("job", isDirectory: true)
-  try FileManager.default.createDirectory(at: incoming, withIntermediateDirectories: true)
-  try FileManager.default.createDirectory(at: job, withIntermediateDirectories: true)
   defer { try? FileManager.default.removeItem(at: root) }
+  try FileManager.default.createDirectory(at: incoming, withIntermediateDirectories: true)
   let audio = incoming.appendingPathComponent("mix.wav")
   let xml = incoming.appendingPathComponent("edit.fcpxml")
-  try Data("audio".utf8).write(to: audio)
-  try Data("<fcpxml/>".utf8).write(to: xml)
+  try Data(pcm48kWAVHeader()).write(to: audio)
+  try Data(
+    """
+    <fcpxml version="1.14"><library><event name="E">\
+    <project name="P" uid="FINAL-UID-1"><sequence duration="1s"/></project>\
+    </event></library></fcpxml>
+    """.utf8
+  ).write(to: xml)
 
-  let requestURL = try ShareInbox.stageCaptionRequest(
-    SharedExport(audio: audio, fcpxml: xml),
-    originRevision: String(repeating: "a", count: 64),
-    in: job
-  )
-  let line = try String(contentsOf: requestURL, encoding: .utf8)
-  #expect(line.contains("\"type\":\"CaptionRequest\""))
-  #expect(line.contains("\"render_audio\":\"" + job.appendingPathComponent("final.wav").path))
-  #expect(line.contains("\"final_fcpxml\":\"" + job.appendingPathComponent("final.fcpxml").path))
+  // 엔진이 요구하는 원본 문서(S4A) — 앱은 매핑을 조회해 이 문서를 스테이징한다.
+  let workspace = AppGroupWorkspace(rootURL: root)
+  let origin = OriginMapping(
+    projectUID: "FINAL-UID-1", originJobID: "roundtrip-7",
+    originRevision: String(repeating: "a", count: 64), recordedAt: "2026-10-01T00:00:00Z")
+  let originURL = try ShareInbox.receive(
+    urls: [audio, xml], workspace: workspace, jobID: "caption-1", origin: origin)
+  let document = try JSONSerialization.jsonObject(
+    with: Data(contentsOf: originURL)) as? [String: String]
+  #expect(
+    document == [
+      "origin_job_id": "roundtrip-7",
+      "origin_revision": String(repeating: "a", count: 64),
+      "project_uid": "FINAL-UID-1",
+    ])
+  #expect(
+    FileManager.default.fileExists(
+      atPath: workspace.rootURL.appendingPathComponent("Jobs/caption-1/final.wav").path))
+  // 요청(caption-request.jsonl)은 엔진이 만든다 — 앱이 미리 쓰지 않는다(S4A).
+  #expect(
+    !FileManager.default.fileExists(
+      atPath: workspace.rootURL.appendingPathComponent("Jobs/caption-1/caption-request.jsonl")
+        .path))
+
+  // 매핑의 UID와 공유의 UID가 다르면 남의 타임라인이다 — job이 생기지 않는다.
+  let foreign = OriginMapping(
+    projectUID: "SOMEONE-ELSE", originJobID: "roundcut-9",
+    originRevision: String(repeating: "b", count: 64), recordedAt: "2026-10-01T00:00:00Z")
+  #expect(throws: ShareInboxError.self) {
+    _ = try ShareInbox.receive(
+      urls: [audio, xml], workspace: workspace, jobID: "caption-2", origin: foreign)
+  }
+  #expect(
+    !FileManager.default.fileExists(
+      atPath: workspace.rootURL.appendingPathComponent("Jobs/caption-2").path))
+}
+
+@Test func shareInboxParsesTheFinalProjectUID() throws {
+  let data = Data(
+    """
+    <?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE fcpxml>\
+    <fcpxml version="1.14"><library><event name="E">\
+    <project name="캡션" uid="FINAL-UID-9"><sequence duration="2s"/></project>\
+    </event></library></fcpxml>
+    """.utf8)
+  #expect(ShareInbox.finalProjectUID(data) == "FINAL-UID-9")
+  #expect(ShareInbox.finalProjectUID(Data("<fcpxml><library/>".utf8)) == nil)
+}
+
+/// ShareInbox.validate를 통과하는 최소 48kHz PCM WAV 머릿부.
+private func pcm48kWAVHeader() -> [UInt8] {
+  var header = [UInt8]()
+  header.append(contentsOf: Array("RIFF".utf8))
+  header.append(contentsOf: [0, 0, 0, 0])
+  header.append(contentsOf: Array("WAVE".utf8))
+  header.append(contentsOf: Array("fmt ".utf8))
+  header.append(contentsOf: [16, 0, 0, 0])
+  header.append(contentsOf: [1, 0])  // PCM
+  header.append(contentsOf: [1, 0])  // 채널 1
+  header.append(contentsOf: [0x80, 0xBB, 0, 0])  // 48000Hz
+  header.append(contentsOf: [0x00, 0x77, 1, 0])  // 바이트 레이트
+  header.append(contentsOf: [2, 0])  // 블록 정렬
+  header.append(contentsOf: [16, 0])  // 비트 깊이
+  header.append(contentsOf: Array("data".utf8))
+  header.append(contentsOf: [0, 0, 0, 0])
+  header.append(contentsOf: [0, 0])  // 샘플 최소 1바이트 — 0바이트 파일이 아니게
+  return header
 }
 
 @Test func fcpxmldBundlesResolveToInfoXMLBeforeStaging() throws {

@@ -10,7 +10,6 @@
 		0F52AD7FD9F1954D2B62D9F2 /* FinalCutImporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6832A3B51FA754EC6959C587 /* FinalCutImporter.swift */; };
 		11BEB3475A7A691F2B66E924 /* libFinalCutAgentCore.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 162A42CFC45AE937A1F021B9 /* libFinalCutAgentCore.a */; };
 		1DE4C06EB9AF7DD45BFA62CD /* EngineRequestGate.swift in Sources */ = {isa = PBXBuildFile; fileRef = C07C38B451E68FDE56A5A4F0 /* EngineRequestGate.swift */; };
-		AA11BB22CC33DD44EE55FF01 /* EngineRequestReadiness.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA11BB22CC33DD44EE55FF02 /* EngineRequestReadiness.swift */; };
 		2653D9611BD41AB6FA3CDA06 /* RoundTripJob.swift in Sources */ = {isa = PBXBuildFile; fileRef = 97CAE484F153252E07D1BF7F /* RoundTripJob.swift */; };
 		2DA460A2348F5014D5D0EBA7 /* README.md in Resources */ = {isa = PBXBuildFile; fileRef = BCF0401E24FA669233607967 /* README.md */; };
 		321BE228504D9C851B58B978 /* LegacyJobStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 714BD102C51B1A26375F63BF /* LegacyJobStore.swift */; };
@@ -25,13 +24,15 @@
 		7B15858CECF631D1876C8320 /* FinalCutPasteboard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0ABF9EFE3FDDC83B32482D93 /* FinalCutPasteboard.swift */; };
 		7B9C21ADBBF564CB5FC4E15E /* EngineRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB6586463B6A94DBFAE39DDA /* EngineRuntime.swift */; };
 		831D930AD8367A81F3DB7598 /* RoundTripMessages.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2053A676E444A5D3827BA357 /* RoundTripMessages.swift */; };
+		8553C2A0EE0E6643C52ED863 /* WorkflowProgress.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4535AB3505BBB7E4B4B56C12 /* WorkflowProgress.swift */; };
+		862923844AC567FCF30D7D91 /* CaptionJobCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 019C9025414A398DB8E15434 /* CaptionJobCoordinator.swift */; };
 		86DFE00C9230AB03E0957176 /* EngineProcess.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6425D219B5CA268C97A7AA77 /* EngineProcess.swift */; };
+		89CB3E6FD8E2A8538F6C144C /* EngineRequestReadiness.swift in Sources */ = {isa = PBXBuildFile; fileRef = D3DE2FF617C73D3120B40667 /* EngineRequestReadiness.swift */; };
 		8EDCF61837103AFD7DECFBEF /* MediaAssetScripting.swift in Sources */ = {isa = PBXBuildFile; fileRef = 66FF409DA890D46893AF2224 /* MediaAssetScripting.swift */; };
 		9072E384849414798A547EF7 /* DevelopmentEngineLauncher.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1AD671ADEA772B9A1C2E7AB1 /* DevelopmentEngineLauncher.swift */; };
-		5C8A2D94E1F7B360A93C4D2E /* EngineRoleCredentials.swift in Sources */ = {isa = PBXBuildFile; fileRef = B7E4109C5A28D6F31E0C47A9 /* EngineRoleCredentials.swift */; };
+		95D5C089F84A496F263A54EE /* RoughcutDeliveryStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 556A9523F428168EC0936DF2 /* RoughcutDeliveryStore.swift */; };
 		A1F38E6A058AD2E99A2DC1E7 /* FinalCutTimelineBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF2B01A5B1D09C8DCF304FC3 /* FinalCutTimelineBridge.swift */; };
 		A5603A6524A5E9EDBF476E26 /* WorkflowProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26833B0223E418B4ABC94592 /* WorkflowProtocol.swift */; };
-		7A3C91E50C4B2D8FA0E1E7B5 /* WorkflowProgress.swift in Sources */ = {isa = PBXBuildFile; fileRef = 92B4D7C31A8F60B5E2D93C08 /* WorkflowProgress.swift */; };
 		AE20558BDFA20F94997DD325 /* libFinalCutAgentCore.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 162A42CFC45AE937A1F021B9 /* libFinalCutAgentCore.a */; };
 		B2598061B18308745D250C52 /* ActiveProject.swift in Sources */ = {isa = PBXBuildFile; fileRef = E140ABBDF04A5ECFBD3F1713 /* ActiveProject.swift */; };
 		CDD075051619C39B61CFFCAF /* SecurityScopedBookmarkStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57320E6BA7114BEE91B0AE57 /* SecurityScopedBookmarkStore.swift */; };
@@ -39,6 +40,7 @@
 		D347F5DEA99B803FB0A2CC50 /* MediaAssetProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = E578D4512019F6D1BA041A0C /* MediaAssetProtocol.swift */; };
 		D3B14EF17B5B2C0A94CFA026 /* CancellationStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC442752B095717FB0C36A5C /* CancellationStore.swift */; };
 		D543AC03D35B5E23D11EF842 /* FinalCutAgent.sdef in Resources */ = {isa = PBXBuildFile; fileRef = 9A8AFE5D5262B92C8568EFDC /* FinalCutAgent.sdef */; };
+		D9465BC10A7FF79F4A41B609 /* EngineRoleCredentials.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA7429B15E68FD7888AAC6FD /* EngineRoleCredentials.swift */; };
 		DB54A64731712314496280CA /* MediaGrant.swift in Sources */ = {isa = PBXBuildFile; fileRef = 512CE9B1424FE331272CB1F5 /* MediaGrant.swift */; };
 		DE2E3290799026BDB31925D9 /* ShareInbox.swift in Sources */ = {isa = PBXBuildFile; fileRef = D73C8DEC3C5E76180C3C885F /* ShareInbox.swift */; };
 		E76E587A5DD469682B532F9A /* WorkflowViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = C263664F6E10FCD89C5CC000 /* WorkflowViewController.swift */; };
@@ -84,19 +86,20 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		019C9025414A398DB8E15434 /* CaptionJobCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptionJobCoordinator.swift; sourceTree = "<group>"; };
 		0ABF9EFE3FDDC83B32482D93 /* FinalCutPasteboard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FinalCutPasteboard.swift; sourceTree = "<group>"; };
 		162A42CFC45AE937A1F021B9 /* libFinalCutAgentCore.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = libFinalCutAgentCore.a; sourceTree = BUILT_PRODUCTS_DIR; };
 		1AD671ADEA772B9A1C2E7AB1 /* DevelopmentEngineLauncher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DevelopmentEngineLauncher.swift; sourceTree = "<group>"; };
-		B7E4109C5A28D6F31E0C47A9 /* EngineRoleCredentials.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EngineRoleCredentials.swift; sourceTree = "<group>"; };
 		2053A676E444A5D3827BA357 /* RoundTripMessages.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoundTripMessages.swift; sourceTree = "<group>"; };
 		20D61F88703BC6F0641A0B83 /* AI Captions.fcpxdest */ = {isa = PBXFileReference; path = "AI Captions.fcpxdest"; sourceTree = "<group>"; };
 		26833B0223E418B4ABC94592 /* WorkflowProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkflowProtocol.swift; sourceTree = "<group>"; };
-		92B4D7C31A8F60B5E2D93C08 /* WorkflowProgress.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkflowProgress.swift; sourceTree = "<group>"; };
 		2C7DB4044A45662630C30DA8 /* IdentityRoundTripService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IdentityRoundTripService.swift; sourceTree = "<group>"; };
 		36EC8A37599443FB62130C7B /* BundledEngineLauncher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BundledEngineLauncher.swift; sourceTree = "<group>"; };
 		41E6E3FF248873A70D179DB7 /* RoundTripCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoundTripCoordinator.swift; sourceTree = "<group>"; };
+		4535AB3505BBB7E4B4B56C12 /* WorkflowProgress.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkflowProgress.swift; sourceTree = "<group>"; };
 		512CE9B1424FE331272CB1F5 /* MediaGrant.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaGrant.swift; sourceTree = "<group>"; };
 		5384A9E18EC174EAC4E64C94 /* CredentialEntryModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CredentialEntryModel.swift; sourceTree = "<group>"; };
+		556A9523F428168EC0936DF2 /* RoughcutDeliveryStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoughcutDeliveryStore.swift; sourceTree = "<group>"; };
 		57320E6BA7114BEE91B0AE57 /* SecurityScopedBookmarkStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SecurityScopedBookmarkStore.swift; sourceTree = "<group>"; };
 		6425D219B5CA268C97A7AA77 /* EngineProcess.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EngineProcess.swift; sourceTree = "<group>"; };
 		66FF409DA890D46893AF2224 /* MediaAssetScripting.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaAssetScripting.swift; sourceTree = "<group>"; };
@@ -112,9 +115,10 @@
 		BCF0401E24FA669233607967 /* README.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = README.md; sourceTree = "<group>"; };
 		BF3C5A5E380F891AB16ACB4F /* FinalCutAgentWorkflowExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = FinalCutAgentWorkflowExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		C07C38B451E68FDE56A5A4F0 /* EngineRequestGate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EngineRequestGate.swift; sourceTree = "<group>"; };
-		AA11BB22CC33DD44EE55FF02 /* EngineRequestReadiness.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EngineRequestReadiness.swift; sourceTree = "<group>"; };
 		C263664F6E10FCD89C5CC000 /* WorkflowViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkflowViewController.swift; sourceTree = "<group>"; };
+		CA7429B15E68FD7888AAC6FD /* EngineRoleCredentials.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EngineRoleCredentials.swift; sourceTree = "<group>"; };
 		CB047E1AA867D819DDA5D4B2 /* AppGroupWorkspace.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppGroupWorkspace.swift; sourceTree = "<group>"; };
+		D3DE2FF617C73D3120B40667 /* EngineRequestReadiness.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EngineRequestReadiness.swift; sourceTree = "<group>"; };
 		D73C8DEC3C5E76180C3C885F /* ShareInbox.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareInbox.swift; sourceTree = "<group>"; };
 		E140ABBDF04A5ECFBD3F1713 /* ActiveProject.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActiveProject.swift; sourceTree = "<group>"; };
 		E578D4512019F6D1BA041A0C /* MediaAssetProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaAssetProtocol.swift; sourceTree = "<group>"; };
@@ -159,12 +163,13 @@
 				CB047E1AA867D819DDA5D4B2 /* AppGroupWorkspace.swift */,
 				36EC8A37599443FB62130C7B /* BundledEngineLauncher.swift */,
 				FC442752B095717FB0C36A5C /* CancellationStore.swift */,
+				019C9025414A398DB8E15434 /* CaptionJobCoordinator.swift */,
 				5384A9E18EC174EAC4E64C94 /* CredentialEntryModel.swift */,
 				1AD671ADEA772B9A1C2E7AB1 /* DevelopmentEngineLauncher.swift */,
 				6425D219B5CA268C97A7AA77 /* EngineProcess.swift */,
 				C07C38B451E68FDE56A5A4F0 /* EngineRequestGate.swift */,
-				AA11BB22CC33DD44EE55FF02 /* EngineRequestReadiness.swift */,
-				B7E4109C5A28D6F31E0C47A9 /* EngineRoleCredentials.swift */,
+				D3DE2FF617C73D3120B40667 /* EngineRequestReadiness.swift */,
+				CA7429B15E68FD7888AAC6FD /* EngineRoleCredentials.swift */,
 				AB6586463B6A94DBFAE39DDA /* EngineRuntime.swift */,
 				6832A3B51FA754EC6959C587 /* FinalCutImporter.swift */,
 				0ABF9EFE3FDDC83B32482D93 /* FinalCutPasteboard.swift */,
@@ -174,14 +179,15 @@
 				E578D4512019F6D1BA041A0C /* MediaAssetProtocol.swift */,
 				66FF409DA890D46893AF2224 /* MediaAssetScripting.swift */,
 				512CE9B1424FE331272CB1F5 /* MediaGrant.swift */,
+				556A9523F428168EC0936DF2 /* RoughcutDeliveryStore.swift */,
 				41E6E3FF248873A70D179DB7 /* RoundTripCoordinator.swift */,
 				97CAE484F153252E07D1BF7F /* RoundTripJob.swift */,
 				2053A676E444A5D3827BA357 /* RoundTripMessages.swift */,
 				57320E6BA7114BEE91B0AE57 /* SecurityScopedBookmarkStore.swift */,
 				B080868081DD514BA06BA887 /* ShareDestination.swift */,
 				D73C8DEC3C5E76180C3C885F /* ShareInbox.swift */,
+				4535AB3505BBB7E4B4B56C12 /* WorkflowProgress.swift */,
 				26833B0223E418B4ABC94592 /* WorkflowProtocol.swift */,
-				92B4D7C31A8F60B5E2D93C08 /* WorkflowProgress.swift */,
 			);
 			path = FinalCutAgentCore;
 			sourceTree = "<group>";
@@ -396,12 +402,13 @@
 				6A374178121C2DAE331BD569 /* AppGroupWorkspace.swift in Sources */,
 				61691110A241AAB76BD89561 /* BundledEngineLauncher.swift in Sources */,
 				D3B14EF17B5B2C0A94CFA026 /* CancellationStore.swift in Sources */,
+				862923844AC567FCF30D7D91 /* CaptionJobCoordinator.swift in Sources */,
 				D21C5C45B7CF97C48D2068F9 /* CredentialEntryModel.swift in Sources */,
 				9072E384849414798A547EF7 /* DevelopmentEngineLauncher.swift in Sources */,
 				86DFE00C9230AB03E0957176 /* EngineProcess.swift in Sources */,
 				1DE4C06EB9AF7DD45BFA62CD /* EngineRequestGate.swift in Sources */,
-				AA11BB22CC33DD44EE55FF01 /* EngineRequestReadiness.swift in Sources */,
-				5C8A2D94E1F7B360A93C4D2E /* EngineRoleCredentials.swift in Sources */,
+				89CB3E6FD8E2A8538F6C144C /* EngineRequestReadiness.swift in Sources */,
+				D9465BC10A7FF79F4A41B609 /* EngineRoleCredentials.swift in Sources */,
 				7B9C21ADBBF564CB5FC4E15E /* EngineRuntime.swift in Sources */,
 				0F52AD7FD9F1954D2B62D9F2 /* FinalCutImporter.swift in Sources */,
 				7B15858CECF631D1876C8320 /* FinalCutPasteboard.swift in Sources */,
@@ -411,14 +418,15 @@
 				D347F5DEA99B803FB0A2CC50 /* MediaAssetProtocol.swift in Sources */,
 				8EDCF61837103AFD7DECFBEF /* MediaAssetScripting.swift in Sources */,
 				DB54A64731712314496280CA /* MediaGrant.swift in Sources */,
+				95D5C089F84A496F263A54EE /* RoughcutDeliveryStore.swift in Sources */,
 				3EDFB72203E00D8CB43C3AA6 /* RoundTripCoordinator.swift in Sources */,
 				2653D9611BD41AB6FA3CDA06 /* RoundTripJob.swift in Sources */,
 				831D930AD8367A81F3DB7598 /* RoundTripMessages.swift in Sources */,
 				CDD075051619C39B61CFFCAF /* SecurityScopedBookmarkStore.swift in Sources */,
 				70146EE378CB76A246D0AA11 /* ShareDestination.swift in Sources */,
 				DE2E3290799026BDB31925D9 /* ShareInbox.swift in Sources */,
+				8553C2A0EE0E6643C52ED863 /* WorkflowProgress.swift in Sources */,
 				A5603A6524A5E9EDBF476E26 /* WorkflowProtocol.swift in Sources */,
-				7A3C91E50C4B2D8FA0E1E7B5 /* WorkflowProgress.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

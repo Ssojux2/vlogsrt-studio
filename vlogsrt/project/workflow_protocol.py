@@ -34,6 +34,9 @@ WorkflowState: TypeAlias = Literal[
     "authorized",
     "analyzing",
     "review_required",
+    # 러프컷 쓰기가 끝난 정직한 상태(S2C) — 가져오기는 별개의 요청·확인 기록이고
+    # 저널은 여기서 멈춘다. `roughcut_imported`는 같은 자리의 낡은 이름이다.
+    "roughcut_generated",
     "roughcut_imported",
     "caption_received",
     "caption_estimate_ready",
@@ -48,12 +51,20 @@ _NEXT_STATE: dict[WorkflowState, WorkflowState] = {
     "estimate_ready": "authorized",
     "authorized": "analyzing",
     "analyzing": "review_required",
-    "review_required": "roughcut_imported",
+    "review_required": "roughcut_generated",
+    "roughcut_generated": "caption_received",
+    # 낡은 저널은 이 자리에 roughcut_imported로 멈춰 있다 — 그 뒤는 그대로 이어
+    # 간다(읽기 호환). 새 쓰기는 roughcut_generated만 쓴다.
     "roughcut_imported": "caption_received",
     "caption_received": "caption_estimate_ready",
     "caption_estimate_ready": "caption_authorized",
     "caption_authorized": "caption_ready",
 }
+
+# 낡은 기록을 읽을 때만 받는 전이(S2C) — 재생은 호환, 새 쓰기는 정준 계승만.
+_LEGACY_TRANSITIONS: frozenset[tuple[WorkflowState, WorkflowState]] = frozenset(
+    {("review_required", "roughcut_imported")}
+)
 
 _TERMINAL_STATES = frozenset({"cancelled", "failed"})
 
@@ -1337,7 +1348,8 @@ class WorkflowJournal:
             if state in _TERMINAL_STATES:
                 raise ValueError(f"종료 상태 뒤에는 전이가 없다: {state} → {event.state}")
             expected = _NEXT_STATE.get(state)
-            if event.state != expected and event.state not in _TERMINAL_STATES:
+            legacy = (state, event.state) in _LEGACY_TRANSITIONS
+            if event.state != expected and not legacy and event.state not in _TERMINAL_STATES:
                 raise ValueError(f"허용되지 않는 상태 전이: {state} → {event.state}")
             state = event.state
         return cls(path, first, state)

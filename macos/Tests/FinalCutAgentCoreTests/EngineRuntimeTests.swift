@@ -656,9 +656,18 @@ func makeBundledPlan() throws -> EngineLaunchPlan {
   try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
   defer { try? FileManager.default.removeItem(at: root) }
   let workspace = AppGroupWorkspace(rootURL: root)
+  let origin = OriginMapping(
+    projectUID: "FINAL-UID-1", originJobID: "roundtrip-7",
+    originRevision: String(repeating: "a", count: 64), recordedAt: "2026-10-01T00:00:00Z")
 
   let xml = root.appendingPathComponent("final.fcpxml")
-  try Data("<fcpxml/>".utf8).write(to: xml)
+  try Data(
+    """
+    <fcpxml version="1.14"><library><event name="E">\
+    <project name="P" uid="FINAL-UID-1"><sequence duration="1s"/></project>\
+    </event></library></fcpxml>
+    """.utf8
+  ).write(to: xml)
   let bad = root.appendingPathComponent("bad.wav")
   try Data().write(to: bad)
 
@@ -667,23 +676,26 @@ func makeBundledPlan() throws -> EngineLaunchPlan {
       urls: [xml, bad],
       workspace: workspace,
       jobID: "caption-1",
-      originRevision: String(repeating: "a", count: 64)
+      origin: origin
     )
   }
   #expect(
     !FileManager.default.fileExists(
       atPath: root.appendingPathComponent("Jobs").appendingPathComponent("caption-1").path))
 
-  // 유효한 쌍만 잡을 만든다.
+  // 유효한 쌍만 잡을 만든다 — 스테이징되는 문서는 엔진이 요구하는 원본 매핑이다.
   let good = root.appendingPathComponent("good.wav")
   try Data(wavHeader(rate: 48_000)).write(to: good)
-  let requestURL = try ShareInbox.receive(
+  let originURL = try ShareInbox.receive(
     urls: [xml, good],
     workspace: workspace,
     jobID: "caption-2",
-    originRevision: String(repeating: "a", count: 64)
+    origin: origin
   )
-  #expect(requestURL.lastPathComponent == "caption-request.jsonl")
+  #expect(originURL.lastPathComponent == "caption-origin.json")
+  #expect(
+    !FileManager.default.fileExists(
+      atPath: root.appendingPathComponent("Jobs/caption-2/caption-request.jsonl").path))
 }
 
 // ─────────────────────────────────────────────────────────────

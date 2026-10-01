@@ -7,6 +7,7 @@ public enum AgentURL {
   public static let roundTripHost = "roundtrip"
   public static let analyzeHost = "analyze"
   public static let roughcutHost = "roughcut"
+  public static let importHost = "import"
 
   public static func roundTripURL(jobID: String) throws -> URL {
     try operationURL(host: roundTripHost, jobID: jobID)
@@ -18,6 +19,11 @@ public enum AgentURL {
 
   public static func roughcutURL(jobID: String) throws -> URL {
     try operationURL(host: roughcutHost, jobID: jobID)
+  }
+
+  /// 러프컷 가져오기 재시도(S2C) — 같은 검증된 출력을 다시 Final Cut으로 보낸다.
+  public static func importURL(jobID: String) throws -> URL {
+    try operationURL(host: importHost, jobID: jobID)
   }
 
   private static func operationURL(host: String, jobID: String) throws -> URL {
@@ -52,6 +58,7 @@ public enum AgentURL {
     case roundTripHost: return .roundtrip(jobID)
     case analyzeHost: return .analyze(jobID)
     case roughcutHost: return .roughcut(jobID)
+    case importHost: return .importJob(jobID)
     default: throw AgentURLError.invalidHost(url.host ?? "")
     }
   }
@@ -61,6 +68,7 @@ public enum AgentRequest: Equatable, Sendable {
   case roundtrip(String)
   case analyze(String)
   case roughcut(String)
+  case importJob(String)
 }
 
 public enum AgentURLError: Error, Equatable {

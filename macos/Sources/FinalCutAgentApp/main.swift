@@ -25,6 +25,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   /// job별 판(engineJobBoard)이 든다 — 한 job이 끝나도 다른 job의 취소는 산다.
   private let engineRequestGate = EngineRequestGate()
   private let engineJobBoard = EngineJobBoard()
+  // 자막 job(S4B) — 공유 받기로 생기고, 추정→승인→실행이 앱 창에서 이어진다.
+  private var captionJob: RoundTripJob?
+  private var captionStatusLabel: NSTextField?
+  private var captionApproveButton: NSButton?
+  private var captionRevealButton: NSButton?
+  private var captionSRTURL: URL?
 
   func applicationDidFinishLaunching(_ notification: Notification) {
     preserveLegacyJobsIfNeeded()
@@ -61,6 +67,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       target: self,
       action: #selector(cancelCurrentJob)
     )
+    // 자막 흐름(S4B) — 공유 받기가 추정을 자동으로 돌리고, 승인 버튼이 실행을
+    // 연다. SRT는 자동으로 가져오지 않는다: 보이기 버튼과 안내 문구만 있다.
+    let captionHeader = NSTextField(labelWithString: "자막: 공유 받기(WAV+FCPXML)로 시작합니다")
+    captionHeader.maximumNumberOfLines = 3
+    captionStatusLabel = captionHeader
+    let approve = NSButton(
+      title: "자막 승인·실행",
+      target: self,
+      action: #selector(approveCaptionRun)
+    )
+    approve.isEnabled = false
+    captionApproveButton = approve
+    let reveal = NSButton(
+      title: "SRT Finder에 보이기",
+      target: self,
+      action: #selector(revealCaptionSRT)
+    )
+    reveal.isEnabled = false
+    captionRevealButton = reveal
     // 역할 자격 증명 입력(S2A-2 단위2) — STT·비전 키는 각자 보안 필드·모델·
     // 계정을 가진다. 저장된 값은 화면 어디에도 다시 나오지 않는다: 상태는
     // 있음/없음/실패뿐이다. 한 역할을 지워도 다른 역할은 그대로 산다.
@@ -154,6 +179,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         endpointStatus,
         currentJobLabel!,
         cancelButton,
+        captionHeader,
+        NSStackView(views: [approve, reveal]),
       ]
     )
     stack.orientation = .vertical
@@ -161,7 +188,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let controller = NSViewController()
     controller.view = stack
     let window = NSWindow(contentViewController: controller)
-    window.setContentSize(NSSize(width: 520, height: 620))
+    window.setContentSize(NSSize(width: 520, height: 700))
     window.title = "Final Cut Agent"
     window.makeKeyAndOrderFront(nil)
     self.window = window
@@ -183,19 +210,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
   // ─── 공유 받기 — 검증이 통과해야 job이 생긴다 ───────────────────
 
+  /// 자막 공유 받기(S4B): 최종 프로젝트 UID로 원본 러프컷 연결을 찾고, 매핑이
+  /// 확정돼 있을 때만 job을 만든다. 모르는·모호한 UID는 조용히 붙지 않고 실패로
+  /// 닫힌다 — 마지막 job에 몰래 연결되는 길이 없다.
   private func handleSharedFiles(_ urls: [URL]) {
     do {
-      guard let defaults = UserDefaults(suiteName: AppGroupWorkspace.identifier),
-        let originRevision = defaults.string(forKey: "activeOriginRevision")
-      else { throw AppError.noActiveRoughCutRevision }
       let workspace = try AppGroupWorkspace.live()
+      let export = try ShareInbox.classify(urls)
+      let xmlData = try Data(contentsOf: FCPXMLDocument.resolve(export.fcpxml))
+      guard let uid = ShareInbox.finalProjectUID(xmlData) else {
+        throw AppError.captionOriginUnresolved("최종 FCPXML에 프로젝트 UID가 없다")
+      }
+      let mapping = OriginMapStore(workspace: workspace)
+      guard let origin = try mapping.lookup(projectUID: uid) else {
+        throw AppError.captionOriginUnresolved(
+          "이 프로젝트(\(uid.prefix(12))…)의 원본 러프컷 연결이 없다 — Final Cut 확장에서"
+            + " 가져오기 확인을 먼저 끝내주세요")
+      }
+      let jobID = "caption-\(UUID().uuidString)"
       _ = try ShareInbox.receive(
-        urls: urls,
-        workspace: workspace,
-        jobID: "caption-\(UUID().uuidString)",
-        originRevision: originRevision
-      )
-      statusLabel?.stringValue = "공유 받기 완료 — 자막 작업이 스테이징됐습니다"
+        urls: urls, workspace: workspace, jobID: jobID, origin: origin)
+      captionJob = try RoundTripJob(workspace: workspace, id: jobID)
+      captionSRTURL = nil
+      captionRevealButton?.isEnabled = false
+      captionApproveButton?.isEnabled = false
+      captionStatusLabel?.stringValue =
+        "공유 받기 완료(원본: \(origin.originJobID)) — 자막 추정을 시작합니다"
+      runCaptionOperation(.captionEstimate, job: captionJob!)
     } catch {
       NSAlert(error: error).runModal()
     }
@@ -210,6 +251,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         handleEngine(operation: .analyze, jobID: jobID)
       case .roughcut(let jobID):
         handleEngine(operation: .roughcut, jobID: jobID)
+      case .importJob(let jobID):
+        handleImportRetry(jobID: jobID)
       }
     } catch {
       NSAlert(error: error).runModal()
@@ -264,11 +307,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             EngineRoleCredentialStore(storage: KeychainStore()).loadSnapshot()
           },
           executor: ProcessEngineExecutor(),
+          // 러프컷 배달은 기록을 남기는 앱 경계를 지난다(S2C) — 전송 성공만으로
+          // 확인이라 말하지 않는다.
           importRoughcut: { url in
-            try await FinalCutImporter().sendOpenDocument(url)
+            try await Self.deliverRoughcut(output: url)
           }
-        ).attachingSessionStart { [weak self] context in
-          guard let self else { return }
+        ).attachingSessionStart { context in
           sessionStarted = true
           self.currentJobLabel?.stringValue = "현재 작업: \(jobID) (\(operation.rawValue))"
           // 실행 마커는 계획이 정해진 뒤 — 취소 기록이 실행 경로와 미러 대상을
@@ -352,6 +396,210 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     #else
       return .release
     #endif
+  }
+
+  // ─── 자막 job 실행(S4B) — 추정과 실행이 같은 문을 지난다 ─────────
+
+  /// 자막 조정자 호출 — 중복 게이트·job 판 배선은 분석과 같은 모양이다.
+  private func runCaptionOperation(
+    _ operation: DevelopmentEngineOperation, job: RoundTripJob
+  ) {
+    Task { @MainActor in
+      do {
+        let ownershipKey = EngineRequestGate.ownershipKey(for: job.directoryURL)
+        var sessionStarted = false
+        let dependencies = CaptionJobCoordinator.Dependencies.live(
+          executor: ProcessEngineExecutor()
+        ).attachingSessionStart { context in
+          sessionStarted = true
+          self.currentJobLabel?.stringValue = "현재 작업: \(job.id) (\(operation.rawValue))"
+          self.engineJobBoard.begin(
+            key: ownershipKey,
+            context: EngineJobBoard.Context(
+              jobID: job.id,
+              jobURL: job.directoryURL,
+              runningJob: context.runningJobURL,
+              externalJob: context.externalJob))
+        }
+        let coordinator = CaptionJobCoordinator(dependencies: dependencies)
+        defer {
+          if sessionStarted {
+            engineJobBoard.end(key: ownershipKey)
+            if let running = engineJobBoard.current {
+              currentJobLabel?.stringValue = "현재 작업: \(running.jobID)"
+            } else {
+              currentJobLabel?.stringValue = "현재 작업: 없음"
+            }
+          }
+        }
+        let outcome = try await engineRequestGate.perform(jobURL: job.directoryURL) {
+          try await coordinator.run(
+            operation: operation,
+            job: job,
+            configuration: Self.buildConfiguration,
+            engineRoot: Bundle.main.resourceURL?
+              .appendingPathComponent("Engine", isDirectory: true),
+            applicationScriptsDirectory: try FileManager.default.url(
+              for: .applicationScriptsDirectory,
+              in: .userDomainMask,
+              appropriateFor: nil,
+              create: true
+            )
+          )
+        }
+        reportCaptionOutcome(outcome, operation: operation, job: job)
+      } catch {
+        NSAlert(error: error).runModal()
+      }
+    }
+  }
+
+  /// 자막 결과의 사용자 표면 — 추정은 승인을 기다리고, 실행은 상태를 말한다.
+  private func reportCaptionOutcome(
+    _ outcome: EngineSessionOutcome,
+    operation: DevelopmentEngineOperation,
+    job: RoundTripJob
+  ) {
+    switch outcome {
+    case .completed:
+      if operation == .captionEstimate {
+        do {
+          let estimate = try job.readCaptionEstimate()
+          captionStatusLabel?.stringValue =
+            "자막 추정: 오디오 \(estimate.audioSeconds)초 · 상한 $\(estimate.costUpperBound)"
+            + " · 승인 대기"
+          captionApproveButton?.title = "자막 승인·실행"
+          captionApproveButton?.isEnabled = true
+        } catch {
+          captionStatusLabel?.stringValue =
+            "추정 기록을 읽지 못했다: \(error.localizedDescription)"
+        }
+      } else {
+        reportCaptionRunResult(job: job)
+      }
+    case .engineFailed(let status):
+      let reason = job.readLastCaptionAttemptIfPresent()?.error
+      if let reason, operation == .captionRun {
+        captionStatusLabel?.stringValue =
+          "자막 실패(엔진 \(status)): \(reason) — 같은 승인으로 다시 시도할 수 있습니다"
+      } else {
+        captionStatusLabel?.stringValue = "자막 실패 — 엔진 종료코드 \(status): \(job.id)"
+      }
+      if operation == .captionRun {
+        captionApproveButton?.title = "자막 재시도"
+        captionApproveButton?.isEnabled = true
+      }
+    case .alreadyRunning:
+      captionStatusLabel?.stringValue =
+        "이미 실행 중인 자막 작업이다 — 중복 요청은 실행하지 않았다: \(job.id)"
+    case .cancelledBeforeRun:
+      captionStatusLabel?.stringValue = "취소된 자막 작업이다: \(job.id)"
+    case .stoppedBeforeSync:
+      captionStatusLabel?.stringValue =
+        "엔진은 끝났지만 취소되어 자막 결과를 가져오지 않았다: \(job.id)"
+    case .stoppedBeforeImport, .staleSelection:
+      // 자막 세션에는 가져오기·선택 드리프트가 없다 — 도달하지 않는다.
+      captionStatusLabel?.stringValue = "자막 실행이 끝나지 않았다: \(job.id)"
+    case .unavailable(let reason):
+      captionStatusLabel?.stringValue = reason
+    }
+  }
+
+  /// 실행 결과 — 성공한 무발화와 실패 전사를 갈라 보인다(S4A 계약 그대로).
+  private func reportCaptionRunResult(job: RoundTripJob) {
+    guard let result = job.readCaptionResultIfPresent() else {
+      captionStatusLabel?.stringValue =
+        "자막 실행이 끝났지만 결과 기록이 없다 — 시도 기록을 확인하세요: \(job.id)"
+      return
+    }
+    if result.srtPath == nil {
+      captionStatusLabel?.stringValue = "자막 완료: 발화 없음(성공)"
+      return
+    }
+    // 결과의 경로는 엔진이 실행한 자리(외부 job)를 가리킨다 — 앱이 보는 산물은
+    // 같은 이름으로 App Group job의 captions/ 에 동기화돼 있다(S4A).
+    let name = ((result.srtPath ?? "") as NSString).lastPathComponent
+    let srt = job.captionsDirectoryURL.appendingPathComponent(name)
+    captionSRTURL = srt
+    captionRevealButton?.isEnabled = FileManager.default.fileExists(atPath: srt.path)
+    var text = "자막 완료: \(name.isEmpty ? "SRT" : name)"
+    if !result.warnings.isEmpty {
+      text += " · 경고 \(result.warnings.count)건: \(result.warnings.joined(separator: " · "))"
+    }
+    text += "\nFinal Cut Pro: File > Import > Captions → Relative to Timeline"
+    captionStatusLabel?.stringValue = text
+  }
+
+  /// 승인 버튼 — 방금 읽은 추정에 묶인 승인 문서를 쓰고 실행을 연다. 재시도는
+  /// 이미 승인 문서가 있으므로 그냥 다시 실행한다(엔진 저널은 승인 상태다).
+  @objc private func approveCaptionRun() {
+    guard let job = captionJob else { return }
+    do {
+      if !FileManager.default.fileExists(atPath: job.captionAuthorizationURL.path) {
+        let estimate = try job.readCaptionEstimate()
+        try job.writeCaptionAuthorization(
+          CaptionAuthorizationMessage(
+            requestRevision: estimate.requestRevision,
+            estimateRevision: estimate.estimateRevision,
+            pricingSnapshotRevision: estimate.pricingSnapshotRevision,
+            authorizedAt: ISO8601DateFormatter().string(from: Date())
+          ))
+      }
+      captionApproveButton?.isEnabled = false
+      captionStatusLabel?.stringValue = "승인됨 — 자막 실행을 시작합니다"
+      runCaptionOperation(.captionRun, job: job)
+    } catch {
+      NSAlert(error: error).runModal()
+    }
+  }
+
+  /// SRT를 Finder에서 보여줄 뿐 가져오지 않는다 — import는 사람이 한다.
+  @objc private func revealCaptionSRT() {
+    guard let url = captionSRTURL else { return }
+    NSWorkspace.shared.activateFileViewerSelecting([url])
+  }
+
+  // ─── 러프컷 배달(S2C) — 생성 기록 → 요청 → 전송 → 결과 기록 ────
+
+  /// 가져오기 재시도 요청(확장의 재시도 버튼) — 재분석 없이 같은 출력을 다시
+  /// 보낸다. 해시가 바뀐 출력은 여기서 거부된다(새 검토가 필요하다).
+  private func handleImportRetry(jobID: String) {
+    Task { @MainActor in
+      do {
+        let workspace = try AppGroupWorkspace.live()
+        let job = try RoundTripJob(workspace: workspace, id: jobID)
+        if CancellationStore.isCancelled(jobURL: job.directoryURL) {
+          statusLabel?.stringValue = "취소된 작업이다 — 가져오기를 다시 하지 않는다: \(jobID)"
+          return
+        }
+        let output = job.directoryURL.appendingPathComponent(RoundTripJob.roughcutFileName)
+        _ = try await engineRequestGate.perform(jobURL: job.directoryURL) {
+          try await Self.deliverRoughcut(output: output)
+          return .completed
+        }
+        statusLabel?.stringValue =
+          "러프컷 가져오기 재요청: \(jobID) — Final Cut에서 열렸는지 확인하세요"
+      } catch {
+        NSAlert(error: error).runModal()
+      }
+    }
+  }
+
+  /// 배달의 앱 경계 — 세션 안 자동 전송과 재시도가 같은 문을 쓴다(S2C).
+  static func deliverRoughcut(output: URL) async throws {
+    let jobURL = output.deletingLastPathComponent()
+    let jobID = jobURL.lastPathComponent
+    let inputRevision =
+      EngineSessionRunner.stagedInputRevision(job: jobURL, fileManager: .default) ?? ""
+    let session = RoughcutImportSession(jobID: jobID, jobURL: jobURL)
+    try session.recordGenerated(inputRevision: inputRevision)
+    let sent = try await session.send(inputRevision: inputRevision) { url in
+      try await FinalCutImporter().sendOpenDocument(url)
+    }
+    if !sent {
+      throw AppError.engineUnavailable(
+        "가져올 러프컷이 없거나 이미 확인된 출력이다 — 새로 분석해야 한다: \(jobID)")
+    }
   }
 
   static func describe(
@@ -627,7 +875,7 @@ enum CryptoKitSHA256 {
 }
 
 enum AppError: LocalizedError {
-  case noActiveRoughCutRevision
+  case captionOriginUnresolved(String)
   case noDevelopmentWorkspace
   case engineUnavailable(String)
   case securityScopeUnavailable(String)
@@ -636,6 +884,8 @@ enum AppError: LocalizedError {
 
   var errorDescription: String? {
     switch self {
+    case .captionOriginUnresolved(let message):
+      message
     case .credentialStorageUnavailable:
       EngineRoleSnapshot.storageFailedMessage
     case .visionEndpointInvalid(let message):

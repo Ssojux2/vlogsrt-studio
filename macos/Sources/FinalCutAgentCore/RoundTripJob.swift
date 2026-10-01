@@ -27,6 +27,12 @@ public struct RoundTripJob: Equatable, Sendable {
   public static let roughcutFileName = "roughcut.fcpxml"
   /// 시도의 진행 스냅샷 — 파이썬 발행기가 원자적으로 남기는 한 장(S2A-3).
   public static let progressFileName = "analysis-progress.jsonl"
+  // 자막 job(S4A/S4B)의 job 루트 기록 — SRT·검토 보고서는 captions/ 폴더에.
+  public static let captionEstimateFileName = "caption-estimate.jsonl"
+  public static let captionAuthorizationFileName = "caption-authorization.jsonl"
+  public static let captionResultFileName = "caption-result.jsonl"
+  public static let captionAttemptsFileName = "caption-attempts.jsonl"
+  public static let captionsDirectoryName = "captions"
 
   public let id: String
   public let directoryURL: URL
@@ -57,6 +63,18 @@ public struct RoundTripJob: Equatable, Sendable {
   }
   public var approvedCandidatesURL: URL {
     directoryURL.appendingPathComponent(Self.approvedCandidatesFileName)
+  }
+  public var captionEstimateURL: URL {
+    directoryURL.appendingPathComponent(Self.captionEstimateFileName)
+  }
+  public var captionAuthorizationURL: URL {
+    directoryURL.appendingPathComponent(Self.captionAuthorizationFileName)
+  }
+  public var captionResultURL: URL {
+    directoryURL.appendingPathComponent(Self.captionResultFileName)
+  }
+  public var captionsDirectoryURL: URL {
+    directoryURL.appendingPathComponent(Self.captionsDirectoryName, isDirectory: true)
   }
   public var requestURL: URL { directoryURL.appendingPathComponent(Self.requestFileName) }
   public var outputURL: URL { directoryURL.appendingPathComponent(Self.outputFileName) }
@@ -89,6 +107,63 @@ public struct RoundTripJob: Equatable, Sendable {
       version: ProtocolCodec.analysisVersion
     )
     try Self.writeNew(Data(line.utf8), to: analysisAuthorizationURL, fileManager: fileManager)
+  }
+
+  /// 자막 추정 — 스테이징 없이 지금 파일의 한 줄을 읽는다(동기화 뒤에만 있다).
+  public func readCaptionEstimate() throws -> CaptionEstimateMessage {
+    var line = try String(contentsOf: captionEstimateURL, encoding: .utf8)
+    if line.hasSuffix("\n") { line.removeLast() }
+    return try ProtocolCodec.decode(
+      CaptionEstimateMessage.self,
+      type: "CaptionEstimate",
+      version: ProtocolCodec.captionVersion,
+      from: line)
+  }
+
+  /// 자막 승인 — 방금 읽은 추정에 정확히 묶인 문서만 쓴다(S4B).
+  public func writeCaptionAuthorization(
+    _ authorization: CaptionAuthorizationMessage,
+    fileManager: FileManager = .default
+  ) throws {
+    let line = try ProtocolCodec.encode(
+      authorization,
+      type: "CaptionAuthorization",
+      version: ProtocolCodec.captionVersion
+    )
+    try Self.writeNew(Data(line.utf8), to: captionAuthorizationURL, fileManager: fileManager)
+  }
+
+  /// 자막 결과 — 성공한 무발화(srtPath 없음)와 실패(파일 없음)를 갈라 읽는다.
+  public func readCaptionResultIfPresent() -> CaptionResultMessage? {
+    guard let line = try? String(contentsOf: captionResultURL, encoding: .utf8),
+      !line.isEmpty
+    else { return nil }
+    var trimmed = line
+    if trimmed.hasSuffix("\n") { trimmed.removeLast() }
+    return try? ProtocolCodec.decode(
+      CaptionResultMessage.self,
+      type: "CaptionResult",
+      version: ProtocolCodec.captionVersion,
+      from: trimmed)
+  }
+
+  /// 마지막 자막 시도 — 실패 문면은 여기 있다(결과 파일은 성공에만 남는다).
+  public func readLastCaptionAttemptIfPresent() -> CaptionAttemptMessage? {
+    guard let text = try? String(contentsOf: directoryURL.appendingPathComponent(
+      Self.captionAttemptsFileName), encoding: .utf8), !text.isEmpty
+    else { return nil }
+    var last: CaptionAttemptMessage?
+    for line in text.split(separator: "\n") {
+      guard
+        let attempt = try? ProtocolCodec.decode(
+          CaptionAttemptMessage.self,
+          type: "CaptionAttempt",
+          version: ProtocolCodec.captionVersion,
+          from: String(line))
+      else { return nil }
+      last = attempt
+    }
+    return last
   }
 
   public func writeApprovedCandidateIDs(

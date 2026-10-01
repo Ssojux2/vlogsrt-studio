@@ -37,6 +37,7 @@ from vlogsrt.project.workflow_protocol import (
     UpstreamStages,
     VisionWindowDecision,
     WorkflowJournal,
+    WorkflowStateEvent,
     decode_message,
     encode_message,
 )
@@ -504,14 +505,17 @@ def test_journal_walks_the_authorized_state_machine_and_stops_at_terminals(
     assert reloaded.state == "review_required"
 
     with pytest.raises(ValueError, match="리비전"):
-        reloaded.transition(_revision(digest="c" * 64).revision, "roughcut_imported")
+        reloaded.transition(_revision(digest="c" * 64).revision, "roughcut_generated")
+    with pytest.raises(ValueError, match="허용되지 않는 상태 전이"):
+        # 낡은 이름은 이제 새 쓰기로 못 박지 않는다(S2C) — 기록은 읽기 호환일 뿐.
+        reloaded.transition(revision.revision, "roughcut_imported")
     with pytest.raises(ValueError, match="허용되지 않는 상태 전이"):
         reloaded.transition(revision.revision, "caption_received")
     with pytest.raises(ValueError, match="허용되지 않는 상태 전이"):
         reloaded.transition(revision.revision, "estimate_ready")
     assert WorkflowJournal.open(journal.path).state == "review_required"
 
-    reloaded.transition(revision.revision, "roughcut_imported")
+    reloaded.transition(revision.revision, "roughcut_generated")
     reloaded.transition(revision.revision, "caption_received")
     reloaded.transition(revision.revision, "caption_estimate_ready")
     reloaded.transition(revision.revision, "caption_authorized")
@@ -521,6 +525,23 @@ def test_journal_walks_the_authorized_state_machine_and_stops_at_terminals(
     lines = journal.path.read_bytes().splitlines(keepends=True)
     assert all(hashlib.sha256(line).digest() for line in lines)
     assert len(lines) == 10
+
+
+def test_workflow_journal_reads_legacy_roughcut_imported_and_continues(
+    tmp_path: Path,
+) -> None:
+    """S2C 읽기 호환 — 낡은 저널의 roughcut_imported는 재생되고 그 뒤는 이어진다."""
+    revision = _revision()
+    journal = WorkflowJournal.create(tmp_path / "workflow.jsonl", revision)
+    for state in ("estimate_ready", "authorized", "analyzing", "review_required"):
+        journal.transition(revision.revision, state)
+    with (tmp_path / "workflow.jsonl").open("a", encoding="utf-8", newline="\n") as stream:
+        stream.write(encode_message(WorkflowStateEvent(revision.revision, "roughcut_imported")))
+
+    reloaded = WorkflowJournal.open(tmp_path / "workflow.jsonl")
+    assert reloaded.state == "roughcut_imported"
+    reloaded.transition(revision.revision, "caption_received")
+    assert WorkflowJournal.open(tmp_path / "workflow.jsonl").state == "caption_received"
 
 
 def test_journal_accepts_terminal_states_from_running_states_only_as_endpoints(

@@ -959,7 +959,7 @@ def _project_roughcut(args: argparse.Namespace) -> int:
             "removed_candidate_ids": list(rendered.removed_candidate_ids),
         },
     )
-    journal.transition(journal.revision.revision, "roughcut_imported")
+    journal.transition(journal.revision.revision, "roughcut_generated")
     log.out(f"roughcut: {args.out}")
     log.out(f"review: {report}")
     return 0
@@ -968,9 +968,14 @@ def _project_roughcut(args: argparse.Namespace) -> int:
 def _project_caption(args: argparse.Namespace) -> int:
     workspace = args.workspace
     journal = WorkflowJournal.open(workspace / _JOURNAL)
-    if journal.state not in {"roughcut_imported", "caption_estimate_ready"}:
+    # roughcut_imported는 낡은 저널의 같은 자리다(S2C) — 읽기 호환으로 받는다.
+    if journal.state not in {
+        "roughcut_generated",
+        "roughcut_imported",
+        "caption_estimate_ready",
+    }:
         raise ValueError(
-            f"caption은 roughcut_imported/caption_estimate_ready 상태에서만 가능하다: "
+            f"caption은 roughcut_generated/caption_estimate_ready 상태에서만 가능하다: "
             f"{journal.state}"
         )
     # 승인 파일은 상태를 움직이기 전에 검사한다 — 실패가 저널에 흔적을 남기지 않는다.
@@ -994,7 +999,8 @@ def _project_caption(args: argparse.Namespace) -> int:
         pricing=pricing,
         settings_sha256=caption_settings_sha256(cfg),
     )
-    if journal.state == "roughcut_imported":
+    if journal.state in {"roughcut_generated", "roughcut_imported"}:
+        # 낡은 저널의 roughcut_imported도 같은 자리로 받는다(S2C 읽기 호환).
         _write_messages(workspace / _CAPTION_REQUEST, (request,))
         journal.transition(journal.revision.revision, "caption_received")
         _write_messages(workspace / _CAPTION_PRICING, (pricing,))

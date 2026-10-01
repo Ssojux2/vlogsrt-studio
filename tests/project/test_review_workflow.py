@@ -347,7 +347,7 @@ def test_staged_cli_roundtrip_applies_only_the_reviewed_candidate(
     assert cli.main(["project", "roughcut", str(workspace), "-o", str(roughcut)]) == 0
 
     assert roughcut.is_file()
-    assert WorkflowJournal.open(workspace / "workflow.jsonl").state == "roughcut_imported"
+    assert WorkflowJournal.open(workspace / "workflow.jsonl").state == "roughcut_generated"
     root = ET.fromstring(roughcut.read_bytes())
     markers = root.findall("library/event/project/sequence/spine/asset-clip/marker")
     assert len(markers) == 1
@@ -387,7 +387,7 @@ def test_staged_cli_roundtrip_applies_only_the_reviewed_candidate(
         "--online",
     ]
     assert cli.main(caption_args) == 2
-    assert WorkflowJournal.open(workspace / "workflow.jsonl").state == "roughcut_imported"
+    assert WorkflowJournal.open(workspace / "workflow.jsonl").state == "roughcut_generated"
     # 승인은 방금 고정된 추정과 요청·가격 리비전에 정확히 묶인 것만 통과한다.
     request = create_caption_request(
         WorkflowJournal.open(workspace / "workflow.jsonl").revision.revision, audio, roughcut
