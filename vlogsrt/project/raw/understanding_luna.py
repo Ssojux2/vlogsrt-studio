@@ -49,6 +49,7 @@ from vlogsrt.project.raw.understanding import (
     SegmentationProposal,
     SelectedAudio,
     UtteranceEvidence,
+    VideoGrid,
     WindowPlan,
     WindowVerdict,
     stage1_evidence_document,
@@ -741,6 +742,110 @@ class OnlineAnalysisApproval:
     budget: AnalysisBudget
 
 
+@dataclass(frozen=True, slots=True)
+class OnlineVisualAnalysisApproval:
+    """무성 원본의 실제 Luna 승인 — 오디오가 없어도 지어내지 않는다(A4-F1).
+
+    오디오 원본의 승인(`OnlineAnalysisApproval`)은 `SelectedAudio`를 묶는다 —
+    무성 원본에 그 승인을 억지로 맞추려면 없는 오디오를 지어내야 한다. 이
+    승인은 **증명된 비디오 격자와 실제 창 계획**을 묶는다: 출처 해시·프레임
+    수·창 수·실측 시각 지문·Luna 모델·예산. ASR 칸이 아예 없다 — 무성 원본의
+    실제 호출은 Luna뿐이다(§7.3·§14.3).
+    """
+
+    approved: bool
+    source_sha256: str
+    frame_count: int
+    window_count: int
+    fingerprint: str
+    luna_model: str
+    budget: AnalysisBudget
+
+
+def require_online_visual_approval(
+    approval: OnlineVisualAnalysisApproval,
+    *,
+    settings: RawWorkflowConfig,
+    source_sha256: str,
+    video: VideoGrid,
+    plan: WindowPlan,
+    fingerprint: str,
+) -> None:
+    """무성 원본의 온라인 실행 문 — 환경·설정·출처·격자·창 수·모델·예산을 본다.
+
+    오디오 승인의 문(`require_online_approval`)과 같은 규칙을 시각 증거에
+    적용한다. 무성 원본은 시간 제공자 역할이 없으므로 ASR 모델 검사가 없다 —
+    없는 역할을 승인하게 만들지 않는다.
+    """
+    validate_raw_workflow_config(settings)
+    blocked = online_env_blocked()
+    if blocked is not None:
+        raise AnalysisApprovalError(blocked)
+    if settings.network_mode != "online":
+        raise AnalysisApprovalError(
+            f"네트워크 모드가 {settings.network_mode!r}다 — 온라인 실행 문은 닫혀 있다"
+        )
+    if not approval.approved:
+        raise AnalysisApprovalError("승인되지 않은 온라인 실행이다")
+    if approval.fingerprint != fingerprint:
+        raise AnalysisApprovalError(
+            "승인이 본 시각 지문과 실행 지문이 다르다 — 새 추정과 새 승인을 받아라"
+        )
+    if approval.source_sha256 != source_sha256:
+        raise AnalysisApprovalError("승인이 본 원본과 실행 대상 원본이 다르다")
+    if approval.frame_count != video.frame_count:
+        raise AnalysisApprovalError(
+            f"승인이 본 프레임 수({approval.frame_count})와 실행 프레임 수"
+            f"({video.frame_count})가 다르다"
+        )
+    if approval.window_count != len(plan.windows):
+        raise AnalysisApprovalError(
+            f"승인이 본 창 수({approval.window_count})와 실행 창 수({len(plan.windows)})가 다르다"
+        )
+    if approval.luna_model != settings.models.luna_model:
+        raise AnalysisApprovalError("승인이 본 Luna 모델과 설정 모델이 다르다")
+    if len(plan.windows) > approval.budget.max_luna_requests:
+        raise AnalysisApprovalError("승인 예산의 Luna 요청 한도를 창 수가 넘는다")
+
+
+def visual_analysis_fingerprint(
+    *,
+    source_sha256: str,
+    video: VideoGrid,
+    plan: WindowPlan,
+    settings: RawUnderstandingSettings,
+    luna_model: str,
+) -> str:
+    """무성 원본의 분석 지문 — 비디오 격자·창·프레임 표본·모델을 묶는다(§14.2).
+
+    오디오 지문(`analysis_fingerprint`)과 schema 접두어가 다르다 — 같은 원본의
+    오디오 지문과 시각 지문이 우연히 같아지는 길을 원천적으로 닫는다. 출처
+    해시는 호출자(가져오기 때 검증된 원본 해시)가 명시적으로 준다 — 비디오
+    격자는 시계 증명이지 출처 증명이 아니다.
+    """
+    parts = [
+        "raw-understanding-fingerprint/visual-v1",
+        UNDERSTANDING_SCHEMA_VERSION,
+        source_sha256,
+        str(video.stream_index),
+        f"{video.frame_duration.numerator}/{video.frame_duration.denominator}",
+        str(video.frame_count),
+        str(settings.prompt_revision),
+        str(settings.image_long_edge),
+        LUNA_OUTPUT_SCHEMA_NAME,
+        luna_model,
+    ]
+    for window in plan.windows:
+        parts.append(
+            f"{window.window_id}:{window.core_start.numerator}/{window.core_start.denominator}"
+            f"-{window.core_end.numerator}/{window.core_end.denominator}"
+            f":{','.join(str(item.frame_index) for item in window.frame_plans)}"
+        )
+    for candidate in plan.candidates:
+        parts.append(f"{candidate.boundary_id}:{candidate.kind}:{candidate.tick}")
+    return hashlib.sha256("\0".join(parts).encode("utf-8")).hexdigest()
+
+
 def online_env_blocked() -> str | None:
     """환경의 오프라인 스위치 — 설정이 online이어도 환경이 닫으면 닫는다.
 
@@ -927,6 +1032,200 @@ def validated_luna_responder(
         gate=bounded_gate,
         observer=observer,
         cancellation=cancellation,
+        context=context,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class OnlineVisualLunaExecutionContext:
+    """무성 원본의 검증된 온라인 실행 문맥 — 시각 증거로만 스스로 증명한다.
+
+    오디오 문맥(`OnlineLunaExecutionContext`)과 같은 자기 증명 구조를 시각
+    증거에 적용한다: 시각 지문을 자기 입력에서 다시 계산해 승인 문
+    (`require_online_visual_approval`)을 직접 지나고, 증거 창이 창 계획 그
+    자신인지 보고, 요청 신원 지도는 증거에서 지은 해시와 같은지만 확인한 뒤
+    얼어붙은 사본으로 남긴다. 발화 증거는 무성 원본에서 빈 배열이어야 한다 —
+    없는 오디오의 발화를 지어내는 자리가 아니다(§7.3).
+    """
+
+    settings: RawWorkflowConfig
+    understanding: RawUnderstandingSettings
+    source_sha256: str
+    video: VideoGrid
+    plan: WindowPlan
+    approval: OnlineVisualAnalysisApproval
+    evidence_windows: tuple[WindowEvidence, ...]
+    request_sha256s: Mapping[str, str]
+    gate: ReservationGate
+    fingerprint: str
+
+    def __post_init__(self) -> None:
+        if not self.approval.approved:
+            raise AnalysisApprovalError("승인되지 않은 실행이다 — 검증 문맥이 만들어지지 않는다")
+        if self.gate is None:
+            raise AnalysisApprovalError("예약 문 없이는 검증 문맥이 만들어지지 않는다")
+        validate_understanding_settings(self.understanding)
+        if tuple(item.window for item in self.evidence_windows) != self.plan.windows:
+            raise AnalysisApprovalError(
+                "증거 창이 창 계획 그 자신과 다르다 — 계획 밖 창·빠진 창은 계약 위반이다"
+            )
+        built_fingerprint = visual_analysis_fingerprint(
+            source_sha256=self.source_sha256,
+            video=self.video,
+            plan=self.plan,
+            settings=self.understanding,
+            luna_model=self.settings.models.luna_model,
+        )
+        if self.fingerprint != built_fingerprint:
+            raise AnalysisApprovalError(
+                "문맥이 말하는 지문이 실행 입력의 지문과 다르다 — 지문은 문맥이 다시 잰 값이다"
+            )
+        require_online_visual_approval(
+            self.approval,
+            settings=self.settings,
+            source_sha256=self.source_sha256,
+            video=self.video,
+            plan=self.plan,
+            fingerprint=built_fingerprint,
+        )
+        built_hashes = {
+            evidence.window.window_id: luna_request_sha256(
+                self.settings.models.luna_model, build_luna_payload(evidence, self.understanding)
+            )
+            for evidence in self.evidence_windows
+        }
+        if dict(self.request_sha256s) != built_hashes:
+            raise AnalysisApprovalError(
+                "요청 신원 지도가 증거에서 지은 신원과 다르다 — 문맥은 증거가 말하는 해시만 얼는다"
+            )
+        object.__setattr__(self, "request_sha256s", MappingProxyType(built_hashes))
+
+
+@dataclass(frozen=True, slots=True)
+class VisualLunaSemanticResponder:
+    """무성 원본의 실제 Luna 전송 경계 — 검증된 시각 문맥 없이는 존재하지 않는다.
+
+    오디오 응답자와 같은 이중 문 구조다: 전송 순간마다 환경·네트워크 모드·창
+    신원·페이로드 신원·예약을 다시 본다. 승인은 시각 승인(`OnlineVisualAnalysisApproval`)
+    이고 문맥이 검증한 것과 같은 객체여야 한다.
+    """
+
+    client: object
+    model: str
+    approval: OnlineVisualAnalysisApproval
+    gate: ReservationGate
+    context: OnlineVisualLunaExecutionContext
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.approval, OnlineVisualAnalysisApproval):
+            raise AnalysisApprovalError(
+                f"시각 승인 레코드가 아니다: {self.approval!r} — 전송 경계를 만들 수 없다"
+            )
+        if not self.approval.approved:
+            raise AnalysisApprovalError(
+                "승인되지 않은 온라인 실행이다 — 전송 경계가 만들어지지 않는다"
+            )
+        if self.model != self.approval.luna_model:
+            raise AnalysisApprovalError(
+                f"응답자 모델({self.model!r})이 승인이 본 Luna 모델"
+                f"({self.approval.luna_model!r})과 다르다"
+            )
+        if self.approval is not self.context.approval:
+            raise AnalysisApprovalError(
+                "응답자의 승인이 실행 문맥이 검증한 승인과 다른 객체다 — 문맥 밖 승인은 없다"
+            )
+        if self.gate is not self.context.gate:
+            raise AnalysisApprovalError(
+                "응답자의 예약 문이 실행 문맥의 예약 문과 다른 객체다 — 문맥 밖 예산은 없다"
+            )
+
+    def respond(self, *, window_id: str, payload: Mapping[str, object]) -> Mapping[str, object]:
+        blocked = online_env_blocked()
+        if blocked is not None:
+            raise AnalysisApprovalError(blocked)
+        if self.context.settings.network_mode != "online":
+            mode = self.context.settings.network_mode
+            raise AnalysisApprovalError(f"네트워크 모드가 {mode!r}다 — 전송 순간의 문이 닫혀 있다")
+        expected = self.context.request_sha256s.get(window_id)
+        if expected is None:
+            raise AnalysisApprovalError(
+                f"승인·검증된 창이 아니다: {window_id!r} — 이 실행 문맥에 없는 창이다"
+            )
+        if luna_request_sha256(self.model, payload) != expected:
+            raise AnalysisApprovalError(
+                f"페이로드가 검증된 요청 신원과 다르다: {window_id!r} — "
+                "바뀐 증거·위조 페이로드로는 보낼 수 없다"
+            )
+        self.gate.reserve(count=1, key=window_id)
+        return request_luna_vision(
+            self.client,
+            model=self.model,
+            payload=payload,
+            online=True,
+        )
+
+
+def validated_visual_luna_responder(
+    *,
+    client: object,
+    settings: RawWorkflowConfig,
+    understanding: RawUnderstandingSettings,
+    source_sha256: str,
+    video: VideoGrid,
+    plan: WindowPlan,
+    frames: FrameSamplingResult,
+    approval: OnlineVisualAnalysisApproval,
+    gate: ReservationGate | None = None,
+) -> VisualLunaSemanticResponder:
+    """무성 원본의 검증된 온라인 실행 응답자 — 시각 승인 문을 통과해서만 존재한다.
+
+    오디오 공장(`validated_luna_responder`)의 시각 짝이다: 발화 증거는 오지
+    않는다(무성 원본 — 없는 오디오의 발화를 지어내지 않는다). 지문은 여기서
+    다시 계산하고 예약 문은 기본으로 승인 예산의 게이트다. 창 증거는 문맥에
+    얼어붙으니 호출자는 `responder.context.evidence_windows`를 그대로
+    `annotate_windows`에 넘긴다.
+    """
+    validate_understanding_settings(understanding)
+    evidence_windows = window_evidence(plan, frames, ())
+    fingerprint = visual_analysis_fingerprint(
+        source_sha256=source_sha256,
+        video=video,
+        plan=plan,
+        settings=understanding,
+        luna_model=settings.models.luna_model,
+    )
+    require_online_visual_approval(
+        approval,
+        settings=settings,
+        source_sha256=source_sha256,
+        video=video,
+        plan=plan,
+        fingerprint=fingerprint,
+    )
+    bounded_gate = gate if gate is not None else CountingReservationGate(approval.budget)
+    request_sha256s = {
+        evidence.window.window_id: luna_request_sha256(
+            settings.models.luna_model, build_luna_payload(evidence, understanding)
+        )
+        for evidence in evidence_windows
+    }
+    context = OnlineVisualLunaExecutionContext(
+        settings=settings,
+        understanding=understanding,
+        source_sha256=source_sha256,
+        video=video,
+        plan=plan,
+        approval=approval,
+        evidence_windows=evidence_windows,
+        request_sha256s=request_sha256s,
+        gate=bounded_gate,
+        fingerprint=fingerprint,
+    )
+    return VisualLunaSemanticResponder(
+        client=client,
+        model=settings.models.luna_model,
+        approval=approval,
+        gate=bounded_gate,
         context=context,
     )
 

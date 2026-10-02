@@ -140,10 +140,11 @@ def test_copy_runs_as_a_job_and_reports_progress(
     record = _wait_terminal(server, root, job_id)
     assert record.status == "succeeded", record.error
 
-    refreshed, jobs_dropdown = server.ingest_refresh_view(signature)
+    header, refreshed, jobs_dropdown = server.ingest_refresh_view(signature)
     assert "ready" in refreshed
     assert "DJI_0002.MP4" in refreshed and "DJI_0010.MP4" in refreshed
     assert jobs_dropdown.choices == []  # 성공한 작업은 재시도 목록에 남지 않는다
+    assert "등록 미디어 2건" in header  # 머리글도 함께 내린다 — 오래된 0건 표시가 없다
     assert len(server.raw.list_media(root)) == 2
 
 
