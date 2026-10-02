@@ -35,11 +35,29 @@ from vlogsrt.project.raw.analysis_config import (
     validate_understanding_settings,
 )
 from vlogsrt.project.raw.analysis_store import ANALYSIS_ROOT, AnalysisStore
+from vlogsrt.project.raw.browser_runtime import (
+    BrowserRuntimeError,
+    EnvironmentCredentials,
+    asr_estimate_digest,
+    caption_transport_providers,
+    capture_environment_credentials,
+    live_transport_for_credentials,
+    mint_asr_approvals,
+    mint_luna_approvals,
+    production_live_transport,
+    semantic_estimate_digest,
+)
+from vlogsrt.project.raw.caption_manual import ms as caption_ms
+from vlogsrt.project.raw.caption_workspace_types import (
+    CaptionWorkspaceError,
+    ManualHeadConflict,
+)
 from vlogsrt.project.raw.config import (
     WORKFLOW_SCHEMA_VERSION,
     RawWorkflowConfig,
     validate_raw_workflow_config,
 )
+from vlogsrt.project.raw.final_video import FinalVideoError
 from vlogsrt.project.raw.ingest import (
     IngestConfirmation,
     IngestProposal,
@@ -105,7 +123,27 @@ from vlogsrt.project.raw.models import (
     SegmentPlanSnapshot,
     SourceAsset,
     SourceOrderRevision,
+    WorkspaceModuleUnavailableError,
     WorkspaceStatus,
+)
+from vlogsrt.project.raw.segment_review import ReviewError, StaleRevisionError
+from vlogsrt.project.raw.segment_review import (
+    boundary_edit as review_boundary_edit,
+)
+from vlogsrt.project.raw.segment_review import (
+    merge_edit as review_merge_edit,
+)
+from vlogsrt.project.raw.segment_review import (
+    note_edit as review_note_edit,
+)
+from vlogsrt.project.raw.segment_review import (
+    override_edit as review_override_edit,
+)
+from vlogsrt.project.raw.segment_review import (
+    selection_edit as review_selection_edit,
+)
+from vlogsrt.project.raw.segment_review import (
+    split_edit as review_split_edit,
 )
 from vlogsrt.project.raw.source_order import propose_global_order as _propose_global_order
 from vlogsrt.project.raw.understanding_luna import (
@@ -116,7 +154,6 @@ from vlogsrt.project.raw.understanding_luna import (
     online_env_blocked,
 )
 from vlogsrt.project.raw.workspace import (
-    DB_SCHEMA_VERSION,
     RawWorkspace,
     new_segment_plan_revision_id,
 )
@@ -137,7 +174,9 @@ __all__ = [
     "AnalysisSummary",
     "AsrPhaseApproval",
     "BrowseNotAllowedError",
+    "BrowserRuntimeError",
     "ByteRange",
+    "EnvironmentCredentials",
     "ClipArtifact",
     "EXTRACT_PROFILES",
     "ExtractJobError",
@@ -180,17 +219,40 @@ __all__ = [
     "SourceAsset",
     "SourceInspection",
     "SourceOrderRevision",
+    "WorkspaceModuleUnavailableError",
     "WorkspaceStatus",
+    "asr_estimate_digest",
+    "caption_ms",
+    "caption_run_identity",
+    "CaptionPreviewMedia",
+    "CaptionWorkspaceError",
+    "FinalVideoError",
+    "ManualHeadConflict",
+    "ReviewError",
+    "StaleRevisionError",
     "browse_folder",
+    "capture_environment_credentials",
+    "caption_transport_providers",
     "content_type_for",
     "ffprobe_media_inspector",
     "host_header_allowed",
+    "live_transport_for_credentials",
     "loopback_hosts",
+    "mint_asr_approvals",
+    "mint_luna_approvals",
     "mounted_device_candidates",
     "mutation_request_allowed",
     "origin_header_allowed",
     "parse_range",
+    "production_live_transport",
     "referer_header_allowed",
+    "review_boundary_edit",
+    "review_merge_edit",
+    "review_note_edit",
+    "review_override_edit",
+    "review_selection_edit",
+    "review_split_edit",
+    "semantic_estimate_digest",
 ]
 
 MEDIA_CONTENT_TYPES: dict[str, str] = {
@@ -202,6 +264,8 @@ MEDIA_CONTENT_TYPES: dict[str, str] = {
     ".mp3": "audio/mpeg",
     ".wav": "audio/wav",
     ".m4a": "audio/mp4",
+    ".srt": "application/x-subrip",
+    ".vtt": "text/vtt",
 }
 
 
@@ -585,7 +649,7 @@ class RawWorkspaceService:
             workspace_id=workspace.workspace_id(),
             name=workspace.name,
             workflow_schema_version=WORKFLOW_SCHEMA_VERSION,
-            db_schema_version=DB_SCHEMA_VERSION,
+            db_schema_version=workspace.db_schema_version(),
             network_mode=config.network_mode,
             created_at=workspace.created_at,
             media_count=workspace.media_count(),
@@ -900,9 +964,12 @@ class RawWorkspaceService:
     ) -> JobHandle:
         """분할 계획을 실제 조각 폴더로 추출하는 작업을 제출한다 — API 없음(§14.3).
 
-        같은 지문(계획·프로파일·핸들·도구)의 완성된 package가 있으면 다시 만들지
-        않고 알린다. 진행 중이거나 실패한 package가 있으면 그 package를 이어
-        쓴다 — 같은 작업 재개가 조각 ID·번호를 유지하는 길이다(§6.3).
+        같은 지문(**계획 리비전**·프로파일·핸들·도구)의 완성된 package가 있으면
+        다시 만들지 않고 알린다. 같은 형상의 **새 계획 리비전**(결정적 → 의미 등)은
+        새 package에서 뽑는다 — 완성 재사용 판정이 형상만 보면 새 리비전이 영영
+        시작하지 못한다(루트 브라우저 재현, §6.5). 진행 중이거나 실패한 package가
+        있으면 그 package를 이어 쓴다 — 같은 작업 재개가 조각 ID·번호를 유지하는
+        길이다(§6.3).
         """
         workspace = self._workspace(root)
         snapshot = self._plan_snapshot(root, plan_revision_id)
@@ -910,7 +977,7 @@ class RawWorkspaceService:
         assets = self._plan_assets(root, snapshot)
         handles = _validated_handles(handles_before, handles_after)
         fingerprint = extract_runner.extraction_fingerprint(
-            snapshot.fingerprint, profile.name, handles, preprocess.ffmpeg_provenance()
+            _plan_bound_material(snapshot), profile.name, handles, preprocess.ffmpeg_provenance()
         )
         package = self._reusable_or_reserved_package(
             workspace, snapshot, profile.name, handles, fingerprint
@@ -928,7 +995,8 @@ class RawWorkspaceService:
 
         계획·프로파일·핸들은 package 행에서 다시 만들고(`reconfirm_extraction`),
         지문은 **지금의 도구 버전으로 다시 계산해** 기록과 맞춘다 — 도구가 바뀌었으면
-        재결합이 거부된다(다른 도구의 출력을 같은 package에 섞지 않는다).
+        재결합이 거부된다(다른 도구의 출력을 같은 package에 섞지 않는다). 승격 전에
+        예약된 package(계획 지문만 묶은 옛 키)도 그 키로 다시 붙는다.
         """
         workspace = self._workspace(root)
         record = self.get_job(root, job_id)
@@ -941,17 +1009,25 @@ class RawWorkspaceService:
                 workspace, package.package_dir
             )
             assets = self._plan_assets(root, plan)
-            fingerprint = extract_runner.extraction_fingerprint(
-                plan.fingerprint,
-                confirmed.profile_name,
-                handles,
-                preprocess.ffmpeg_provenance(),
+            provenance = preprocess.ffmpeg_provenance()
+            fresh = extract_runner.extraction_fingerprint(
+                _plan_bound_material(plan), confirmed.profile_name, handles, provenance
             )
+            if fresh != record.input_fingerprint:
+                legacy = extract_runner.extraction_fingerprint(
+                    plan.fingerprint, confirmed.profile_name, handles, provenance
+                )
+                if legacy != record.input_fingerprint:
+                    raise ExtractJobError(
+                        f"작업 {job_id}의 지문을 지금의 도구로 다시 계산하지 못했다 —"
+                        " 도구가 바뀌었으면 새 추출을 시작하세요"
+                    )
+                fresh = legacy
             return self.resume_job(
                 root,
                 job_id,
                 _extract_body(workspace, plan, confirmed, assets, handles),
-                fingerprint,
+                fresh,
             )
         raise ExtractJobError(
             f"작업 {job_id}의 지문과 같은 package를 찾지 못했다 — 계획이 지워지지"
@@ -1476,6 +1552,225 @@ class RawWorkspaceService:
             basis=SEGMENTATION_BASIS_SEMANTIC,
         )
 
+    def register_review_vtt(
+        self, root: Path, segment_id: str, package_dir: str | None = None
+    ) -> ReviewVttRegistration | None:
+        """검토 자막(VTT)을 제공 가능한 자리에 등록한다 — 내용은 백엔드가 잰 그대로.
+
+        검토 저장소 자리(`review/`)는 브라우저 제공 대상이 아니다(§4.4). 이 함수는
+        백엔드가 **측정으로** 만든 VTT 본문(`ReviewVttOutput.vtt.text`)을 내용 해시
+        이름의 `previews/review-vtt/` 파일로 쓰고 미디어로 등록한다 — 같은 내용은
+        같은 자리(멱등), 제공은 등록 ID로만. 출처(`ReviewProvenance` — 원본 경로·
+        해시 대 추출 경로·해시·잰 길이)를 함께 돌려 화면이 나란히 보여 준다.
+        """
+        workspace = self._workspace(root)
+        facade = self.review_workspace_facade(root)
+        result = facade.review_vtt(segment_id, package_dir)
+        text = _vtt_text_of(result)
+        if text is None:
+            return None
+        digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        relative = f"previews/review-vtt/{digest[:24]}.vtt"
+        target = workspace.root / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if not target.is_file():
+            temp = target.with_name(target.name + ".partial")
+            temp.write_text(text, encoding="utf-8")
+            os.replace(temp, target)
+        for registered in self.list_media(root, kind="preview"):
+            if registered.relative_path == relative:
+                return ReviewVttRegistration(registered, result.provenance)
+        registration = self.register_media(root, target, "preview")
+        return ReviewVttRegistration(registration, result.provenance)
+
+    def caption_preview(self, root: Path, registration: Any) -> CaptionPreviewMedia:
+        """선택 오디오 미리보기 — 같은 (렌더, 서수, 도구)면 ffmpeg 없이 등록만 돌려준다.
+
+        브라우저는 컨테이너의 오디오 트랙을 못 고르므로(Chromium `audioTracks=null`),
+        자막이 묶인 **그 트랙만** 담은 MP4를 `previews/captions/`에 만들어 등록한다.
+        원본(검증 사본)은 읽기만 한다. 캐시 키는 렌더 해시·오디오 서수·도구 판·조리법
+        판이고, 잰 원점은 짝지은 기록 파일에 남아 재사용 때 ffmpeg이 다시 돌지
+        않는다 — 미디어·트랙이 바뀐 경우에만 만든다(표시 갱신은 만들지 않는다).
+        """
+        workspace = self._workspace(root)
+        if not registration.ready:
+            raise RawWorkspaceError(
+                f"등록이 {registration.status!r}다 — 오디오 선택이 확정된 등록만 미리보기를 만든다"
+            )
+        if registration.verified_copy_rel is None or registration.audio_stream_index is None:
+            raise RawWorkspaceError(
+                "준비된 등록에 검증 사본·오디오 스트림 번호가 없다 — 손상된 행이다"
+            )
+        if registration.audio_ordinal is None:
+            raise RawWorkspaceError("준비된 등록에 오디오 서수가 없다 — 손상된 행이다")
+        ordinal = int(registration.audio_ordinal)
+        tool = self._preview_tool_line()
+        recipe_key = "|".join(
+            (
+                registration.final_video_revision,
+                f"o{ordinal}",
+                tool,
+                CAPTION_PREVIEW_RECIPE,
+            )
+        )
+        media_key = hashlib.sha256(recipe_key.encode("utf-8")).hexdigest()[:24]
+        relative = f"{CAPTION_PREVIEW_REL}/{media_key}.mp4"
+        record_relative = f"{CAPTION_PREVIEW_REL}/{media_key}.json"
+        target = workspace.root / relative
+        record = workspace.root / record_relative
+        reused = self._reused_caption_preview(target, record, media_key)
+        built = False
+        if reused is None:
+            # 깨진 짝(영상만 있거나 기록이 못 믿을 때)은 이 이름공간의 캐시다 —
+            # 버리고 다시 만든다. 원본·확정본은 이 디렉터리에 없다.
+            target.unlink(missing_ok=True)
+            record.unlink(missing_ok=True)
+            extraction = preprocess.extract_caption_preview(
+                workspace.root / registration.verified_copy_rel,
+                target,
+                audio_stream_index=registration.audio_stream_index,
+            )
+            payload = {
+                "schema": CAPTION_PREVIEW_RECIPE,
+                "key": media_key,
+                "source_revision": registration.final_video_revision,
+                "audio_ordinal": ordinal,
+                "audio_origin": str(extraction.audio_origin),
+                "duration": str(extraction.duration),
+                "remuxed": extraction.remuxed,
+                "video_codec": extraction.video_codec,
+                "audio_codec": extraction.audio_codec,
+                "ffmpeg_version": extraction.ffmpeg_version,
+                "warnings": list(extraction.warnings),
+            }
+            record.parent.mkdir(parents=True, exist_ok=True)
+            temp = record.with_name(record.name + ".partial")
+            temp.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            os.replace(temp, record)
+            reused = (
+                Fraction(str(payload["audio_origin"])),
+                Fraction(str(payload["duration"])),
+                bool(payload["remuxed"]),
+                str(payload["video_codec"]),
+                str(payload["audio_codec"]),
+                str(payload["ffmpeg_version"]),
+                tuple(str(item) for item in payload["warnings"]),
+            )
+            built = True
+        origin, duration, remuxed, video_codec, audio_codec, ffmpeg_version, warnings = reused
+        media_registration = self._caption_preview_registration(
+            workspace, root, target, relative, built
+        )
+        return CaptionPreviewMedia(
+            registration=media_registration,
+            media_key=media_key,
+            source_revision=registration.final_video_revision,
+            audio_ordinal=ordinal,
+            audio_origin=origin,
+            duration=duration,
+            remuxed=remuxed,
+            video_codec=video_codec,
+            audio_codec=audio_codec,
+            built=built,
+            ffmpeg_version=ffmpeg_version,
+            warnings=warnings,
+        )
+
+    @staticmethod
+    def _preview_tool_line() -> str:
+        """미리보기 키에 쓰는 도구 판 — 한 번 재고 가둔다."""
+        if "ffmpeg" not in _FFMPEG_VERSION_LINE:
+            _FFMPEG_VERSION_LINE["ffmpeg"] = preprocess.ffmpeg_provenance().splitlines()[0]
+        return _FFMPEG_VERSION_LINE["ffmpeg"]
+
+    @staticmethod
+    def _reused_caption_preview(
+        target: Path, record: Path, media_key: str
+    ) -> tuple[Fraction, Fraction, bool, str, str, str, tuple[str, ...]] | None:
+        """재사용 가능한 미리보기 — 영상·기록이 온전히 짝지어 있을 때만 그 값을 믿는다."""
+        if not target.is_file() or not record.is_file():
+            return None
+        try:
+            payload = json.loads(record.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        if not isinstance(payload, dict) or payload.get("key") != media_key:
+            return None
+        try:
+            origin = Fraction(str(payload["audio_origin"]))
+            duration = Fraction(str(payload["duration"]))
+            remuxed = bool(payload["remuxed"])
+            video_codec = str(payload["video_codec"])
+            audio_codec = str(payload["audio_codec"])
+            ffmpeg_version = str(payload["ffmpeg_version"])
+            warnings = tuple(str(item) for item in payload["warnings"])
+        except (KeyError, TypeError, ZeroDivisionError, ValueError):
+            return None
+        return origin, duration, remuxed, video_codec, audio_codec, ffmpeg_version, warnings
+
+    def _caption_preview_registration(
+        self, workspace: RawWorkspace, root: Path, target: Path, relative: str, rebuilt: bool
+    ) -> MediaRegistration:
+        """미리보기의 등록 행 — 재사용은 그대로, 다시 만들었으면 지문을 다시 박는다.
+
+        정리(purge)는 파일만 지우고 행은 남긴다. 다시 만든 파일은 지문이 어긋나므로
+        같은 경로의 행에 `refresh_media_fingerprint`로 새 지문을 박는다 — 낡은
+        file_id는 그대로 다시 쓰고(제공 안전망은 그대로), 어긋난 지문의 문은 닫힌다.
+        """
+        for registered in self.list_media(root, kind="preview"):
+            if registered.relative_path == relative:
+                if rebuilt:
+                    workspace.refresh_media_fingerprint(registered.file_id)
+                    probed = target.lstat()
+                    return MediaRegistration(
+                        file_id=registered.file_id,
+                        kind=registered.kind,
+                        relative_path=registered.relative_path,
+                        status=registered.status,
+                        size_bytes=probed.st_size,
+                        registered_at=registered.registered_at,
+                    )
+                return registered
+        return self.register_media(root, target, "preview")
+
+    # ── A5/A6·A7 백엔드 작업공간 — 공개 경계로만 내놓는다(병합 뒤 활성) ──
+
+    def review_workspace_facade(self, root: Path) -> Any:
+        """검토 작업공간 파사드(W3) — 검토 리비전·편집·측정 VTT·확정·정리의 정본.
+
+        화면은 `vlogsrt.project.raw.service`만 가져가므로 백엔드 모듈도 이 handle로
+        쓴다(계약: UI 임포트 경로 예외). 모듈이 이 빌드에 없으면 정직한 오류로
+        닫는다 — 조용한 대체·부분 동작은 없다. 사업 논리는 전부 그 모듈에 있다
+        (여기서 다시 쓰지 않는다).
+        """
+        try:
+            from vlogsrt.project.raw.review_workspace import ReviewWorkspaceFacade
+        except ImportError as error:
+            raise WorkspaceModuleUnavailableError(
+                "검토 작업공간 백엔드(review_workspace)가 이 빌드에 없다 — 병합 뒤"
+                " 활성화된다. 그 전까지 검토 화면은 안내만 보인다."
+            ) from error
+        return ReviewWorkspaceFacade(self._workspace(root).root)
+
+    def caption_workspace(self, root: Path) -> Any:
+        """자막 작업공간(W2) — 등록→추정→승인→실행→검토→확정의 정본 handle.
+
+        검토 파사드와 같은 규칙: 화면은 이 handle만 쓰고, 모듈이 없으면 정직하게
+        닫는다. 유료 호출 재료는 사람이 주입하는 제공자뿐이다(이 handle은
+        제공자를 스스로 만들지 않는다).
+        """
+        try:
+            from vlogsrt.project.raw.caption_workspace import open_caption_workspace
+        except ImportError as error:
+            raise WorkspaceModuleUnavailableError(
+                "자막 작업공간 백엔드(caption_workspace)가 이 빌드에 없다 — 병합 뒤"
+                " 활성화된다. 그 전까지 자막 화면은 안내만 보인다."
+            ) from error
+        return open_caption_workspace(self._workspace(root))
+
     # ── A4 내부 — 선택·지문·공급자·구간 조립 ────────────────────
 
     def _analysis_selection(
@@ -1927,5 +2222,103 @@ def _validated_handles(before: Fraction, after: Fraction) -> preprocess.RawClipH
     return handles
 
 
+EXTRACT_PLAN_BINDING_SCHEMA = "raw-extract-plan-binding/v1"
+"""추출 캐시 키가 계획 리비전 신원까지 묶는다는 표기(같은 형상의 새 리비전 구분)."""
+
+
+def _plan_bound_material(snapshot: SegmentPlanSnapshot) -> str:
+    """작업·package 신원의 계획 재료 — 계획 지문에 **리비전 신원**까지 묶는다.
+
+    묶는 것은 **작업/package 지문**뿐이다: 같은 형상의 새 계획 리비전(결정적 →
+    의미 등)도 새 package에서 뽑고, 같은 리비전의 재추출은 멱등 경계로 막힌다
+    (§6.5). 조각 매체의 렌더 재사용 판정은 이 키를 쓰지 않는다 — 매체는 언제나
+    원본 SHA·core 범위·프로파일·도구 버전에서 결정되므로, 리비전이 갈라져도
+    같은 범위의 매체 계산은 여전히 같은 입력을 본다.
+    """
+    return json.dumps(
+        {
+            "schema": EXTRACT_PLAN_BINDING_SCHEMA,
+            "plan_revision": snapshot.revision_id,
+            "plan_fingerprint": snapshot.fingerprint,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+
+
+def caption_run_identity(revision: str, run_id: str, fingerprint: str) -> Any:
+    """자막 실행 신원 값 — 백엔드(W2)의 정의를 그대로 쓴다(여기서 다시 만들지 않는다).
+
+    화면은 이 공개 경로로만 신원을 만든다(계약: UI 임포트 경로 예외). 백엔드
+    모듈이 없는 빌드에서는 정직한 오류로 닫는다.
+    """
+    try:
+        from vlogsrt.project.raw.caption_workspace_types import RunIdentity
+    except ImportError as error:
+        raise WorkspaceModuleUnavailableError(
+            "자막 작업공간 백엔드(caption_workspace)가 이 빌드에 없다 — 병합 뒤 활성화된다."
+        ) from error
+    return RunIdentity(final_video_revision=revision, run_id=run_id, fingerprint=fingerprint)
+
+
+@dataclass(frozen=True)
+class ReviewVttRegistration:
+    """검토 VTT 등록 결과 — 등록 미디어와 출처(원본 대 추출)를 함께 돌려준다.
+
+    `provenance`는 W3 `ReviewProvenance` 그대로다(경로·SHA-256·잰 매체 길이).
+    화면은 이 값을 나란히 보여 조각이 어느 원본에서 왔는지 숨기지 않는다.
+    """
+
+    registration: MediaRegistration
+    provenance: Any
+
+
+CAPTION_PREVIEW_REL = "previews/captions"
+"""선택 오디오 미리보기의 자리 — `previews/`는 정리 대상이라 재생성이 원칙이다."""
+
+CAPTION_PREVIEW_RECIPE = "caption-preview/v1"
+"""미리보기 캐시 키의 조리법 판 — 키 재료나 인코딩 설정이 바뀌면 이 값을 올린다."""
+
+_FFMPEG_VERSION_LINE: dict[str, str] = {}
+"""미리보기 키에 쓰는 도구 판 — 프로세스에서 한 번만 재고 가둔다(조회마다 재생 없음)."""
+
+
+@dataclass(frozen=True)
+class CaptionPreviewMedia:
+    """선택 오디오 미리보기의 등록 결과 — 표시 갱신 판정 키와 잰 원점까지.
+
+    `audio_origin`은 미리보기 파일의 선택 오디오를 자막 시계와 같은 16 kHz
+    파이프라인으로 잰 원점이다. 큐 시각은 최종 영상 시계(등록 원점 포함)이므로,
+    미리보기 재생 위치는 `audio_origin − 등록 원점 + 큐 시각`이다. `built`는 이
+    호출에서 ffmpeg을 실제로 돌렸는지를 가린다(미디어·트랙이 바뀐 경우에만 참이어야
+    한다 — 표시 갱신은 거짓).
+    """
+
+    registration: MediaRegistration
+    media_key: str
+    source_revision: str
+    audio_ordinal: int
+    audio_origin: Fraction
+    duration: Fraction
+    remuxed: bool
+    video_codec: str
+    audio_codec: str
+    built: bool
+    ffmpeg_version: str
+    warnings: tuple[str, ...]
+
+
 def _plan_timestamp() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
+
+
+def _vtt_text_of(result: Any) -> str | None:
+    """검토 VTT 결과(`ReviewVttOutput`)에서 렌더 본문만 꺼낸다 — 계약 밖 모양은 못 들어온다.
+
+    백엔드의 `.vtt`는 `RenderedVtt`(본문 문자열)다. 본문이 비었으면 None —
+    조용한 빈 성공이 아니라 호출자가 안내로 답하는 자리다.
+    """
+    text = getattr(getattr(result, "vtt", None), "text", None)
+    if isinstance(text, str) and text.strip():
+        return text
+    return None
