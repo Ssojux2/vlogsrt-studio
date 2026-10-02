@@ -14,7 +14,7 @@
 | SD/폴더 조사·복사·검증(A2) | 실행 가능 | UI 화면 1 · `vlogsrt media import` |
 | 전체 원본 순서 확정 | 실행 가능 | UI 화면 1 버튼(전용 CLI 동사는 없다) |
 | 결정적 분할 계획·추출·조각 목록(A3) | 실행 가능 | UI 화면 2 · `vlogsrt media plan/extract/clips` |
-| 의미 분석(A4) | 실행 가능 — 재생 전용 | UI 화면 2 분석 패널 · `vlogsrt media analyze` |
+| 의미 분석(A4) | 실행 가능 — UI 온라인 실행은 단계별 승인 필요, CLI는 재생 전용 | UI 화면 2 분석 패널 · `vlogsrt media analyze` |
 | 조각 검토·경계 편집·VTT(A5) | 실행 가능 | UI 화면 2 검토 패널 · `vlogsrt media review` |
 | 편집용 폴더 확정·캐시 정리(A6) | 실행 가능 | UI 화면 3 · 확정 내보내기·캐시 정리 |
 | 최종 자막(A7) | 실행 가능 — 실행은 승인 게이트 뒤 | UI 화면 4 · `vlogsrt media caption`(등록·추정) |
