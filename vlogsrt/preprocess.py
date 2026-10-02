@@ -10,7 +10,9 @@ from __future__ import annotations
 import array
 import json
 import math
+import os
 import re
+import secrets
 import shutil
 import subprocess
 from collections.abc import Mapping, Sequence
@@ -1044,6 +1046,14 @@ class RawClipVerificationError(RuntimeError):
     """추출물 검증 실패 — 이 파일은 게시할 수 없다(스테이징에 머문다)."""
 
 
+class RawStagingError(RuntimeError):
+    """스테이징 배치의 거부 — 원본이나 이웃 출력을 덮어칠 수 있는 자리는 쓰지 않는다.
+
+    A3P-F2: ffmpeg을 시작하기 전(별칭·이미 있는 경로)과 게시 직전(경합)에 일어난다.
+    무엇 하나 덮어쓰지 않은 채로 죽는다 — 원본 불변은 이 경계의 절대 조건이다.
+    """
+
+
 @dataclass(frozen=True, slots=True)
 class CreationTime:
     """컨테이너가 적은 촬영 시각과 그 판정.
@@ -1752,6 +1762,7 @@ class _RawMediaPlan:
     core_local_start: Fraction
     core_local_end: Fraction
     out_duration: Fraction
+    final_clip: bool
     mapped_audio: tuple[AudioPacketExtent, ...]
     unmapped: tuple[tuple[int, str], ...]
     warnings: tuple[str, ...]
@@ -1799,12 +1810,21 @@ def _plan_raw_media(
     media_range = clock_frame_range(clock, media_first, media_after)
     media_start = media_range.start_seconds
     media_end = media_range.end_seconds
-    mapping = _map_raw_audio(audio_extents, media_start, media_end)
+    # 오디오 꼬리 보존은 원본의 마지막 영상 프레임을 담은 클립에서만 한다(A3P-F2).
+    # 내부 클립이 남은 원본 오디오를 통째로 싣으면 인접 클립끼리 같은 소리를 반복해
+    # 순서 결합의 구간 계약이 깨진다(실측: 1초 클립에 7초 오디오).
+    final_clip = media_after >= clock.frame_count
+    mapping = _map_raw_audio(audio_extents, media_start, media_end, preserve_tail=final_clip)
     out_duration = max(media_end - media_start, mapping.audio_tail_local)
     warnings = list(mapping.warnings)
     if out_duration > media_end - media_start:
         warnings.append(
             f"영상 끝 뒤 오디오 꼬리 {out_duration - (media_end - media_start)}초를 보존한다"
+        )
+    elif not final_clip:
+        warnings.append(
+            "내부 클립이다 — 오디오는 매체 끝에서 잘린다(경계에 걸친 마지막 패킷 하나는 "
+            "코덱 패킷 반올림으로 통째로 남는다)"
         )
     return _RawMediaPlan(
         media_range=media_range,
@@ -1815,6 +1835,7 @@ def _plan_raw_media(
         core_local_start=core_start - media_start,
         core_local_end=core_end - media_start,
         out_duration=out_duration,
+        final_clip=final_clip,
         mapped_audio=mapping.mapped,
         unmapped=mapping.unmapped,
         warnings=tuple(warnings),
@@ -1830,13 +1851,19 @@ class _RawAudioMapping:
 
 
 def _map_raw_audio(
-    audio_extents: Sequence[AudioPacketExtent], media_start: Fraction, media_end: Fraction
+    audio_extents: Sequence[AudioPacketExtent],
+    media_start: Fraction,
+    media_end: Fraction,
+    *,
+    preserve_tail: bool,
 ) -> _RawAudioMapping:
     """구간 안에 패킷이 있는 오디오 트랙만 매핑한다.
 
     패킷이 하나도 없는 트랙은 빈 스트림이 되어 컨테이너에서 사라진다 — 조용히
-    버리는 대신 unmapped로 남긴다. 영상 끝을 넘는 오디오 꼬리는 자르지 않고
-    보존한다(코디네이터 재결).
+    버리는 대신 unmapped로 남긴다. 영상 끝을 넘는 **원본 꼬리**는 마지막 클립
+    (`preserve_tail`)에서만 보존한다(코디네이터 재결) — 내부 클립은 매체 끝
+    경계에서 잘린다. ffmpeg `-t`는 패킷 눈금으로 자르므로 경계에 걸친 마지막
+    패킷 하나는 통째로 남는다(코덱 패킷 반올림, 검증이 한 패킷+한 틱만 허용).
     """
     mapped: list[AudioPacketExtent] = []
     unmapped: list[tuple[int, str]] = []
@@ -1852,8 +1879,9 @@ def _map_raw_audio(
             unmapped.append((extent.stream_index, "이 구간에 오디오 패킷이 없다"))
             continue
         mapped.append(extent)
-        packet = extent.packet_ticks * extent.time_base
-        tail = max(tail, last + packet - media_start)
+        if preserve_tail:
+            packet = extent.packet_ticks * extent.time_base
+            tail = max(tail, last + packet - media_start)
     if unmapped:
         listed = ", ".join(f"스트림 {index}: {reason}" for index, reason in unmapped)
         warnings.append(f"매핑하지 않은 오디오: {listed}")
@@ -1906,6 +1934,74 @@ def _raw_color_args(video: RawVideoMedia) -> list[str]:
     return args
 
 
+def _assert_safe_staging(source: Path, staging_output: Path) -> None:
+    """스테이징 경로가 원본을 가리키는지를 ffmpeg보다 먼저 잡는다(A3P-F2).
+
+    같은 경로·심볼릭 링크 별칭(상위 디렉터리 심볼릭 링크 포함 — resolve로 푼다)·
+    하드링크 별칭(samefile)은 무조건 거부한다. 이미 있는 출력물도 `-y`로 덮어쓰는
+    대신 거부한다 — 게시는 os.link(있으면 실패)로 원자적으로 하므로 ffmpeg이
+    호출자 경로를 직접 쓸 일이 아예 없다. 원본이 없는 호출은 여기서 보지 않고
+    조사(ffprobe)가 크게 죽게 둔다.
+    """
+    if not os.path.exists(source):
+        return
+    if staging_output.resolve() == source.resolve():
+        raise RawStagingError(
+            f"스테이징 경로가 원본을 가리킨다(같은 파일: {staging_output} → "
+            f"{source}) — 원본은 절대 덮어쓰지 않는다"
+        )
+    if os.path.lexists(staging_output):
+        if os.path.exists(staging_output) and os.path.samefile(source, staging_output):
+            raise RawStagingError(
+                f"스테이징 경로가 원본의 별칭이다(하드링크: {staging_output}) — "
+                "원본은 절대 덮어쓰지 않는다"
+            )
+        raise RawStagingError(
+            f"스테이징 경로에 이미 무언가 있다(덮어쓰지 않는다): {staging_output}"
+        )
+
+
+def _reserve_staging_temp(staging_output: Path) -> Path:
+    """호출자 경로 옆에 O_EXCL로만 만드는 전용 임시 파일 — 자리를 원자적으로 맡는다.
+
+    ffmpeg 출력과 검증은 전부 이 임시 파일에서 일어난다. `-y`가 못 박는 대상은
+    이 파일뿐인데, 이름을 우리가 O_EXCL로 exclusively 만들었으므로 이웃이나 원본을
+    덮어칠 경로가 될 수 없다(원본 이름과 전혀 다른 접두·pid·무작위 토큰).
+    """
+    for _ in range(64):
+        candidate = staging_output.parent / (
+            f".{staging_output.name}.{os.getpid()}.{secrets.token_hex(4)}.part"
+        )
+        try:
+            descriptor = os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            continue
+        os.close(descriptor)
+        return candidate
+    raise RawStagingError(f"스테이징 임시 자리를 못 잡는다: {staging_output.parent}")
+
+
+def _publish_staged_clip(temp: Path, staging_output: Path) -> None:
+    """검증을 통과한 임시 파일을 호출자 경로로 원자 게시 — 이미 있으면 절대 덮어치지 않는다.
+
+    link(2)는 마지막 이름 요소를 따라가지 않으므로, 게시 순간 경로가 심볼릭
+    링크로 바뀌어 있어도 EEXIST로 막힌다(경합에서도 원본을 못 건드린다).
+    """
+    try:
+        os.link(temp, staging_output)
+    except FileExistsError:
+        temp.unlink(missing_ok=True)
+        raise RawStagingError(
+            f"게시 경로가 이미 있다(경합 — 아무것도 덮어쓰지 않았다): {staging_output}"
+        ) from None
+    except OSError as exc:
+        temp.unlink(missing_ok=True)
+        raise RawStagingError(
+            f"게시에 실패했다(아무것도 덮어쓰지 않았다): {staging_output} ({exc})"
+        ) from exc
+    temp.unlink(missing_ok=True)
+
+
 def _raw_extract_command(
     source: Path,
     staging_output: Path,
@@ -1919,6 +2015,9 @@ def _raw_extract_command(
     # 한 틱 일찍는 이전 프레임을 되살리지 못한다(프레임 간격 ≫ 틱). 음수 -ss는
     # ffmpeg가 '지연'으로 읽으므로 0에서 자른다.
     seek = max(Fraction(0), plan.media_range.start_seconds - probe.video.time_base)
+    # -y는 호출자 경로가 아니라 우리가 O_EXCL로 exclusively 맡은 임시 파일에만
+    # 붙는다(A3P-F2). 임시 파일은 검증을 통과한 뒤 os.link로 원자 게시된다 —
+    # 있으면 EEXIST라 경합에서도 아무것도 덮어쓰지 않는다.
     command = [
         require_ffmpeg(), "-hide_banner", "-nostdin", "-y",
         "-ss", _format_us(seek, ceil=False),
@@ -1994,8 +2093,14 @@ def extract_raw_clip(
     변경은 없다. 검증(디먹스·격자·프레임 수·기하·색·오디오·디코드)을 통과해야
     값을 돌려주고, 실패하면 `RawClipVerificationError`로 죽는다 — 0바이트·깨진
     파일은 절대 성공으로 보이지 않는다.
+
+    스테이징 안전(A3P-F2): 원본을 가리키는 경로(같은 경로·심볼릭 링크·상위
+    심볼릭 링크·하드링크 별칭)와 이미 있는 출력은 ffmpeg보다 먼저 `RawStagingError`로
+    거부한다. ffmpeg은 O_EXCL로 맡은 임시 파일에만 쓰고, 호출자 경로에는 검증
+    통과 뒤 link(2) 한 번으로만 생긴다(있으면 실패 — 경합도 덮어쓰지 않는다).
     """
     _validate_raw_range(source_range)
+    _assert_safe_staging(source, staging_output)
     media_probe = probe if probe is not None else probe_raw_media(source)
     video_clock = clock if clock is not None else probe_extraction_clock(source, probe=media_probe)
     extents = audio_extents if audio_extents is not None else probe_audio_extents(source)
@@ -2003,10 +2108,16 @@ def extract_raw_clip(
     _assert_raw_supported(media_probe, video_clock)
     plan = _plan_raw_media(video_clock, source_range, clip_handles, extents)
     staging_output.parent.mkdir(parents=True, exist_ok=True)
-    _run(_raw_extract_command(source, staging_output, media_probe, profile, plan))
-    out_probe, out_clock = _verify_raw_output(
-        staging_output, media_probe, video_clock, profile, plan
-    )
+    staged = _reserve_staging_temp(staging_output)
+    try:
+        _run(_raw_extract_command(source, staged, media_probe, profile, plan))
+        out_probe, out_clock = _verify_raw_output(staged, media_probe, video_clock, profile, plan)
+    except BaseException:
+        # 실패 잔여물은 임시 이름으로만 존재하다 사라진다 — 호출자 경로에는
+        # 절대 얼굴을 내밀지 않는다(반쯤 된 파일이 '있는 출력'처럼 보이면 안 된다).
+        staged.unlink(missing_ok=True)
+        raise
+    _publish_staged_clip(staged, staging_output)
     rotation_applied = media_probe.video.rotation_degrees != 0
     warnings = plan.warnings
     if rotation_applied:
@@ -2088,7 +2199,7 @@ def _verify_raw_output(
     out_clock = probe_extraction_clock(staging_output, probe=out_probe)
     failures: list[str] = []
     failures += _verify_raw_video(out_probe, out_clock, source_probe, source_clock, profile, plan)
-    failures += _verify_raw_audio(out_probe, plan)
+    failures += _verify_raw_audio(out_probe, probe_audio_extents(staging_output), plan)
     failures += _verify_raw_duration(out_probe, plan)
     if failures:
         raise RawClipVerificationError(
@@ -2171,14 +2282,26 @@ def _verify_raw_colors(video: RawVideoMedia, source: RawVideoMedia) -> list[str]
     return failures
 
 
-def _verify_raw_audio(out_probe: RawMediaProbe, plan: _RawMediaPlan) -> list[str]:
+def _verify_raw_audio(
+    out_probe: RawMediaProbe,
+    out_extents: tuple[AudioPacketExtent, ...],
+    plan: _RawMediaPlan,
+) -> list[str]:
     failures: list[str] = []
     if len(out_probe.audio) != len(plan.mapped_audio):
         failures.append(
             f"오디오 트랙 수가 다릅니다: 기대 {len(plan.mapped_audio)}, 출력 {len(out_probe.audio)}"
         )
         return failures
-    for extent, track in zip(plan.mapped_audio, out_probe.audio, strict=True):
+    if len(out_extents) != len(out_probe.audio):
+        failures.append(
+            f"출력 오디오 패킷 증거 수가 다릅니다: 트랙 {len(out_probe.audio)}, "
+            f"증거 {len(out_extents)}"
+        )
+        return failures
+    for extent, track, out_extent in zip(
+        plan.mapped_audio, out_probe.audio, out_extents, strict=True
+    ):
         source = extent.first_pts * extent.time_base if extent.first_pts is not None else None
         if source is None:
             failures.append(f"오디오 스트림 {extent.stream_index}: 매핑했는데 패킷 증거가 없다")
@@ -2191,6 +2314,23 @@ def _verify_raw_audio(out_probe: RawMediaProbe, plan: _RawMediaPlan) -> list[str
                 f"오디오 스트림 {track.stream_index}의 시작이 어긋납니다: "
                 f"기대(지역) {expected}초, 출력 {measured}초, 허용 {tolerance}초 "
                 "— 공통 기준 변환이 깨졌다"
+            )
+        if out_extent.last_pts is None or out_extent.packet_ticks == 0:
+            failures.append(f"오디오 스트림 {track.stream_index}: 출력에 패킷 증거가 없다")
+            continue
+        # 구간 계약(A3P-F2 둘째): 매핑된 오디오는 계획된 출력 길이를 코덱 패킷
+        # 반올림(경계에 걸친 한 패킷)과 한 틱까지만 넘을 수 있다. 내부 클립이
+        # 원본의 남은 오디오를 통째로 싣는 것(실측: 1초 클립에 7초)을 여기서 잡는다.
+        out_packet = out_extent.packet_ticks * out_extent.time_base
+        source_packet = extent.packet_ticks * extent.time_base
+        audio_end = out_extent.last_pts * out_extent.time_base + out_packet
+        bound = plan.out_duration + max(out_packet, source_packet) + extent.time_base
+        if audio_end > bound:
+            failures.append(
+                f"오디오 스트림 {track.stream_index}가 매체 끝을 넘는다: "
+                f"끝 {audio_end}초, 계획 길이 {plan.out_duration}초, "
+                f"허용(패킷 반올림) {max(out_packet, source_packet) + extent.time_base}초 "
+                "— 내부 클립은 경계에서 잘린다"
             )
     return failures
 

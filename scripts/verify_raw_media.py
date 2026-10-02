@@ -100,6 +100,10 @@ def _report_extraction(source: Path, span: tuple[float, float], out_dir: Path) -
         # 같은 파일명의 다른 카드 원본이 서로를 덮어쓰지 않게 해시를 이름에 싣는다(§5.2).
         digest = _hash(source)[:12]
         target = out_dir / f"{source.stem}.{digest}.span-{span[0]:.3f}-{span[1]:.3f}.mp4"
+        # 재실행으로 같은 이름이 남아 있으면 여기서 정리한다 — 경계(preprocess)는
+        # 있는 출력을 덮어쓰지 않고 거부한다(A3P-F2). 이 이름은 이 도구가 정한
+        # 것이고, unlink는 심볼릭 링크를 따라가지 않으므로 원본을 건드릴 수 없다.
+        target.unlink(missing_ok=True)
         before = _hash(source)
         result = preprocess.extract_raw_clip(
             source, target, source_range, preprocess.RAW_SOURCE_MATCHED
@@ -107,7 +111,7 @@ def _report_extraction(source: Path, span: tuple[float, float], out_dir: Path) -
         if _hash(source) != before:
             print(f"EXTRACT FAILED: 원본이 바뀌었다 — 즉시 보고: {source}")
             return 3
-    except RuntimeError as exc:  # RawMediaUnsupported·RawClipVerificationError 포함
+    except (RuntimeError, OSError) as exc:  # RawMediaUnsupported·검증·스테이징 거부 포함
         print(f"EXTRACT FAILED: {source}\n{exc}")
         return 3
     print(
