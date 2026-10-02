@@ -59,5 +59,17 @@ no_implicit_optional = true
 no_site_packages = true
 
 [[tool.mypy.overrides]]
-module = ["openai.*", "rich.*", "tomli_w.*", "gradio.*", "numpy.*", "onnxruntime.*"]
+module = [
+    "openai.*",
+    "rich.*",
+    "tomli_w.*",
+    "gradio.*",
+    "numpy.*",
+    "onnxruntime.*",
+    # 아래 셋은 gradio(ui extra)가 끌어들이는 전이 의존이다. 핵심 의존성은
+    # 여전히 openai·tomli-w·rich 셋뿐이다(불변 규칙 7) — ui/ 계층의 타입 검사용.
+    "fastapi.*",
+    "starlette.*",
+    "uvicorn.*",
+]
 ignore_missing_imports = true

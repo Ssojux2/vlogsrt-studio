@@ -69,15 +69,31 @@ EDIT_SAMPLE_TYPE_MODULE = "vlogsrt.project.vision.sampling"
 EDIT_SAMPLE_TYPE = "FrameSampleRequest"
 EDIT_PACKAGE = "vlogsrt.project"
 
-MODEL_LITERAL_PATHS = ("vlogsrt/config.py", "vlogsrt/project/config.py")
+MODEL_LITERAL_PATHS = (
+    "vlogsrt/config.py",
+    "vlogsrt/project/config.py",
+    "vlogsrt/project/raw/config.py",
+)
 # glm-*·gemini-*은 파생 계층의 비전 모델이다 — 새 튜너블은 프로젝트 config에만 산다(재검토).
 # 공급자를 바꿔도 난간은 좁아지지 않는다: 쓰지 않게 된 접두사도 목록에 남겨 둔다.
 PROJECT_MODEL_LITERAL_PATHS = ("vlogsrt/project/config.py",)
+# 원본 영상 브라우저 v2의 모델 리터럴(문구·시간·의미 분석 역할)은 새 설정 경로
+# 하나에만 산다(2026-10-02 계획 §3.2·§15.1). 다른 config도 이 예외를 물려받지
+# 않는다 — 중첩 경로의 같은 이름 파일도 마찬가지다.
+RAW_MODEL_LITERAL_PATHS = ("vlogsrt/project/raw/config.py",)
 ENGINE_MODEL_LITERAL = re.compile(r"[\"'](whisper-1|gpt-[\w.-]*transcribe[\w.-]*)[\"']")
 PROJECT_MODEL_LITERAL = re.compile(r"[\"'](?:glm|gemini)-[\w.-]+[\"']")
+RAW_MODEL_LITERAL = re.compile(r"[\"']gpt-6-luna[\w.-]*[\"']")
 # 레거시가 project를 import할 수 있는 유일한 진입점 — 문서화된 CLI 조립 지점.
 # 예외도 정확히 `project.commands` 모듈로 좁다: CLI는 명령 묶음만 조립한다(재조정).
 CLI_COMPOSITION_ENTRYPOINT = "vlogsrt/cli.py"
+CLI_ALLOWED_PROJECT_TARGET: tuple[str, ...] = ("commands",)
+# 브라우저 작업공간 서비스의 진입점 — v2 계획이 정확 경로 예외로 허가했다
+# (2026-10-02 계획 §3.2). 예외도 정확히 `project.raw.service` 모듈로 좁고,
+# 상대 import는 인정하지 않는다: ui/는 vlogsrt 패키지 안이 아니라 `.project`가
+# vlogsrt.project로 귀결하지 않는다.
+UI_RAW_SERVICE_ENTRYPOINT = "ui/workspace_service.py"
+UI_ALLOWED_PROJECT_TARGET: tuple[str, ...] = ("raw", "service")
 XMLLINT_EXECUTABLE = "xmllint"
 # XML 검증 경계의 subprocess API는 run 하나로 얼어 있다(재검토). 별명은 정적으로 푼다.
 SUBPROCESS_API_SYMBOLS = ("run", "Popen", "call", "check_call", "check_output")
@@ -298,24 +314,65 @@ def check_source_does_not_import_project() -> list[str]:
 
     절대(`import vlogsrt.project`, `from vlogsrt import project`)와
     상대(`from .project import x`, `from . import project`) 전부 거부한다.
-    예외는 CLI 조립 진입점 `vlogsrt/cli.py` 하나(정확 경로)뿐이고, 그 예외도
-    **정확히 `project.commands` 모듈** 대상으로 좁다 — 하위 모듈(commands.parser)도
-    거부한다(재조정). 방향은 project → 레거시 공개 경계로만 열려 있다.
+    예외는 둘이고 둘 다 정확 경로다 — CLI 조립 진입점 `vlogsrt/cli.py`는
+    **정확히 `project.commands` 모듈**, 브라우저 작업공간 진입점
+    `ui/workspace_service.py`는 **정확히 `project.raw.service` 모듈**까지다
+    (2026-10-02 계획 §3.2). 어느 쪽 예외도 하위 모듈(commands.parser·
+    raw.service.models)과 패키지 핸들은 거부한다. UI 예외는 절대 형태만 인정한다 —
+    ui/는 vlogsrt 안이 아니라 상대 형태가 vlogsrt.project로 귀결하지 않는다.
+    방향은 project → 레거시 공개 경계로만 열려 있다.
     """
     failures = []
     for path in _legacy_sources():
         rel = _rel(path)
-        is_cli = rel == CLI_COMPOSITION_ENTRYPOINT
-        for lineno, form, commands_only in _project_imports(path.read_text(encoding="utf-8")):
-            if is_cli and commands_only:
+        allowance = _legacy_project_import_allowance(rel)
+        for lineno, form, level, tail, names in _project_imports(path.read_text(encoding="utf-8")):
+            if allowance is not None and _import_targets_allowed_module(
+                level, tail, names, allowance
+            ):
                 continue
-            why = (
-                "CLI 예외는 project.commands로 좁다"
-                if is_cli
-                else "레거시가 vlogsrt.project를 import한다"
-            )
-            failures.append(f"{rel}:{lineno} {why} ({form})")
+            failures.append(f"{rel}:{lineno} {_project_import_failure_reason(rel)} ({form})")
     return failures
+
+
+def _legacy_project_import_allowance(rel: str) -> tuple[tuple[str, ...], bool] | None:
+    """정확 경로 예외의 허용 모듈 — (프로젝트 아래 경로, 절대 형태 한정 여부).
+
+    CLI는 vlogsrt 패키지 안에 살아 `.project` 상대 형태가 project로 귀결한다.
+    ui/는 그렇지 않으므로 절대 형태만 인정한다.
+    """
+    if rel == CLI_COMPOSITION_ENTRYPOINT:
+        return CLI_ALLOWED_PROJECT_TARGET, False
+    if rel == UI_RAW_SERVICE_ENTRYPOINT:
+        return UI_ALLOWED_PROJECT_TARGET, True
+    return None
+
+
+def _import_targets_allowed_module(
+    level: int,
+    tail: tuple[str, ...],
+    names: tuple[str, ...],
+    allowance: tuple[tuple[str, ...], bool],
+) -> bool:
+    """import 하나가 허용 모듈로 귀결하는가 — 모듈 자체만, 하위·패키지 핸들은 안 된다.
+
+    `from …project.raw import service`는 마지막 한 칸을 가져온 이름이 채워
+    `project.raw.service`로 귀결하므로 통과한다(가져온 이름 전부가 그 한 칸일 때만).
+    """
+    allowed, absolute_only = allowance
+    if absolute_only and level != 0:
+        return False
+    if tail == allowed:
+        return True
+    return tail == allowed[:-1] and bool(names) and all(name == allowed[-1] for name in names)
+
+
+def _project_import_failure_reason(rel: str) -> str:
+    if rel == CLI_COMPOSITION_ENTRYPOINT:
+        return "CLI 예외는 project.commands로 좁다"
+    if rel == UI_RAW_SERVICE_ENTRYPOINT:
+        return "UI 예외는 절대 형태의 project.raw.service로 좁다"
+    return "레거시가 vlogsrt.project를 import한다"
 
 
 def check_project_dependency_scope() -> list[str]:
@@ -336,22 +393,25 @@ def check_project_dependency_scope() -> list[str]:
     return failures
 
 
-def _project_imports(body: str) -> list[tuple[int, str, bool]]:
-    """vlogsrt.project를 참조하는 import문 (줄번호, 형태 서술, commands 대상 여부).
+ProjectImportRef = tuple[int, str, int, tuple[str, ...], tuple[str, ...]]
+"""project를 참조하는 import문 하나 — (줄번호, 형태 서술, 상대 단계, 프로젝트 아래
+모듈 경로, 가져온 이름들). 경로가 비면 project 패키지(또는 그 핸들) 자체다."""
 
-    commands 대상은 **정확히 `project.commands` 모듈**이다 — 그 하위
-    (`commands.parser`)가 아니라(재조정). `from …project import commands`와
-    `from …project.commands import 이름`은 그 모듈 자체를 쓰는 형태라 통과한다.
-    project 패키지 전체를 묶는 형태는 CLI에서도 거짓이다.
+
+def _project_imports(body: str) -> list[ProjectImportRef]:
+    """vlogsrt.project를 참조하는 import문 전부 — 절대·상대·별명을 AST로 뽑는다.
+
+    허용 판정은 `_import_targets_allowed_module`이 파일별 허용 모듈로 내린다 —
+    CLI는 `project.commands`, 브라우저 작업공간 서비스는 `project.raw.service`
+    (2026-10-02 계획 §3.2). 어느 쪽도 하위 모듈이나 패키지 핸들은 통과하지 못한다.
     """
-    hits: list[tuple[int, str, bool]] = []
+    hits: list[ProjectImportRef] = []
     for node in ast.walk(ast.parse(body)):
         if isinstance(node, ast.Import):
             for alias in node.names:
                 parts = alias.name.split(".")
                 if parts[:2] == ["vlogsrt", "project"]:
-                    commands_only = parts[2:] == ["commands"]
-                    hits.append((node.lineno, f"import {alias.name}", commands_only))
+                    hits.append((node.lineno, f"import {alias.name}", 0, tuple(parts[2:]), ()))
         elif isinstance(node, ast.ImportFrom):
             hit = _project_importfrom(node)
             if hit is not None:
@@ -359,18 +419,24 @@ def _project_imports(body: str) -> list[tuple[int, str, bool]]:
     return hits
 
 
-def _project_importfrom(node: ast.ImportFrom) -> tuple[int, str, bool] | None:
+def _project_importfrom(node: ast.ImportFrom) -> ProjectImportRef | None:
     module = node.module or ""
     dots = "." * node.level
     if _targets_project_package(module, node.level):
-        # project 바로 아래에서 가져올 때는 가져온 이름 전부가 commands여야 한다.
-        tail = module.split(".")[2 if node.level == 0 else 1 :]
-        commands_only = tail == ["commands"] or (
-            not tail and all(alias.name == "commands" for alias in node.names)
-        )
-        return node.lineno, f"from {dots}{module} import …", commands_only
+        # from 모듈의 프로젝트 아래 경로. `import`문과 달리 이름이 마지막 한 칸을
+        # 채울 수 있다 — 허용 판정이 그 조합을 본다.
+        tail = tuple(module.split(".")[2 if node.level == 0 else 1 :])
+        names = tuple(alias.name for alias in node.names)
+        return node.lineno, f"from {dots}{module} import …", node.level, tail, names
     if module in ("", "vlogsrt") and any(alias.name == "project" for alias in node.names):
-        return node.lineno, f"from {dots}{module or 'vlogsrt'} import project", False
+        # project 패키지 핸들을 직접 묶는 형태 — 경로 없음(패키지 자체)으로 귀결한다.
+        return (
+            node.lineno,
+            f"from {dots}{module or 'vlogsrt'} import project",
+            node.level,
+            (),
+            ("project",),
+        )
     return None
 
 
@@ -1038,18 +1104,22 @@ def check_one_transcription_call() -> list[str]:
 def check_no_hardcoded_model() -> list[str]:
     """규칙 6 — 모델 이름도 config에서 온다. 코드에 박으면 되돌리기가 커밋이 된다.
 
-    glm-*·gemini-*은 파생 계층의 비전 모델이다 — 원본 config(`vlogsrt/config.py`)는 엔진
-    모델(whisper-1·gpt-*transcribe*)만 예외로 받고 비전 모델은 물려받지 않는다(재검토).
+    경로별 허용 폭: `vlogsrt/config.py`·`vlogsrt/project/raw/config.py`는 엔진 모델
+    (whisper-1·gpt-*transcribe*)을 놓아도 되지만 glm·gemini는 금지다.
+    `vlogsrt/project/config.py`는 셋 다 놓아도 되나 raw 전용 리터럴(gpt-6-luna)은
+    금지다. gpt-6-luna는 정확히 `vlogsrt/project/raw/config.py`에만 있을 수 있다
+    (2026-10-02 계획 §3.2 — 모델 리터럴은 허용된 설정 경로에만 둔다).
     """
     failures = []
     for path in _sources():
         rel = _rel(path)
-        if rel in PROJECT_MODEL_LITERAL_PATHS:
-            continue
-        # 원본 config는 엔진 모델을 놓아도 된다 — 금지하는 건 glm뿐이다.
-        patterns = (PROJECT_MODEL_LITERAL,)
-        if rel not in MODEL_LITERAL_PATHS:
-            patterns = (ENGINE_MODEL_LITERAL, PROJECT_MODEL_LITERAL)
+        patterns = (ENGINE_MODEL_LITERAL, PROJECT_MODEL_LITERAL, RAW_MODEL_LITERAL)
+        if rel in RAW_MODEL_LITERAL_PATHS:
+            patterns = (PROJECT_MODEL_LITERAL,)
+        elif rel in PROJECT_MODEL_LITERAL_PATHS:
+            patterns = (RAW_MODEL_LITERAL,)
+        elif rel in MODEL_LITERAL_PATHS:
+            patterns = (PROJECT_MODEL_LITERAL, RAW_MODEL_LITERAL)
         for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
             if any(pattern.search(line) for pattern in patterns):
                 failures.append(f"{rel}:{number} 모델 이름이 코드에 박혀 있다")

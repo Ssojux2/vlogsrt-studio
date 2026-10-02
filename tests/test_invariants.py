@@ -519,13 +519,14 @@ def test_preprocess_keeps_the_subprocess_monopoly_by_exact_path(
 def test_model_literals_live_only_in_the_exact_config_paths(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """모델 리터럴은 `vlogsrt/config.py`와 `vlogsrt/project/config.py`에만 있다."""
+    """모델 리터럴은 config 경로 셋에만 있다 — 2026-10-02 v2가 raw config를 더했다."""
     _fake_source_tree(
         monkeypatch,
         tmp_path,
         {
             "vlogsrt/config.py": 'MODEL = "whisper-1"\n',
             "vlogsrt/project/config.py": 'MODEL = "whisper-1"\n',
+            "vlogsrt/project/raw/config.py": 'MODEL = "whisper-1"\n',
             "vlogsrt/project/tuning/config.py": 'MODEL = "whisper-1"\n',
             "vlogsrt/gadget.py": 'name = "gpt-4o-transcribe"\n',
         },
@@ -962,6 +963,142 @@ def test_the_commands_exception_stays_confined_to_the_cli(
     assert any("ui/page.py" in failure for failure in failures)
 
 
+# ── A0(2026-10-02 v2 계획 §3.2): 브라우저 작업공간 서비스의 정확 경로 예외 ──────
+#
+# `ui/workspace_service.py` 한 파일이 **정확히 `vlogsrt.project.raw.service` 모듈**을
+# 가져올 수 있다. CLI 예외와 같은 모양의 난간이다 — 하위 모듈·패키지 핸들은
+# 거부하고, ui/는 vlogsrt 패키지 안이 아니라서 상대 형태는 애초에
+# vlogsrt.project로 귀결하지도 않는다(절대 형태만 인정).
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "import vlogsrt.project.raw.service",
+        "import vlogsrt.project.raw.service as raw_service",
+        "from vlogsrt.project.raw.service import RawWorkspaceService",
+        "from vlogsrt.project.raw import service",
+        "from vlogsrt.project.raw import service as raw_service",
+    ],
+)
+def test_the_workspace_service_may_compose_only_raw_service(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, statement: str
+) -> None:
+    """절대 형태가 정확히 project.raw.service 모듈로 귀결할 때만 통과한다."""
+    _fake_source_tree(monkeypatch, tmp_path, {"ui/workspace_service.py": statement + "\n"})
+    assert check_invariants.check_source_does_not_import_project() == []
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        # 패키지 핸들과 이웃 모듈
+        "import vlogsrt.project",
+        "import vlogsrt.project.raw",
+        "import vlogsrt.project.commands",
+        "from vlogsrt import project",
+        "from vlogsrt.project import raw",
+        "from vlogsrt.project import service",
+        "from vlogsrt.project.raw import models",
+        "from vlogsrt.project.raw import service, models",
+        "from vlogsrt.project.commands import build_parser",
+        # 하위 모듈(descendant) — 예외는 모듈 자체까지만이다
+        "import vlogsrt.project.raw.service.models",
+        "from vlogsrt.project.raw.service.models import WorkspaceModels",
+        # 상대 형태 — ui/ 안에서 `.project`는 vlogsrt.project가 아니다
+        "from .project.raw.service import RawWorkspaceService",
+        "from .project import raw",
+        "from . import project",
+        "from ..project.raw import service",
+    ],
+)
+def test_the_workspace_service_rejects_every_other_project_import(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, statement: str
+) -> None:
+    """UI 예외는 raw.service 모듈 하나다 — 하위·이웃·상대 형태는 전부 거부한다."""
+    _fake_source_tree(monkeypatch, tmp_path, {"ui/workspace_service.py": statement + "\n"})
+    failures = check_invariants.check_source_does_not_import_project()
+    assert len(failures) == 1, failures
+    assert "ui/workspace_service.py" in failures[0]
+
+
+def test_the_workspace_service_exception_does_not_cover_sibling_imports(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """허용된 import 옆의 다른 project import는 그대로 걸린다 — 예외는 문장 단위다."""
+    _fake_source_tree(
+        monkeypatch,
+        tmp_path,
+        {
+            "ui/workspace_service.py": (
+                "import vlogsrt.project.raw.service\nfrom vlogsrt.project import config\n"
+            )
+        },
+    )
+    failures = check_invariants.check_source_does_not_import_project()
+    assert len(failures) == 1, failures
+    assert "ui/workspace_service.py" in failures[0]
+
+
+def test_the_raw_service_exception_stays_confined_to_workspace_service(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """다른 ui 파일·레거시·CLI는 raw.service조차 못 가져온다 — 예외가 이동하지 않는다."""
+    _fake_source_tree(
+        monkeypatch,
+        tmp_path,
+        {
+            "ui/app.py": "import vlogsrt.project.raw.service\n",
+            "ui/service.py": "from vlogsrt.project.raw import service\n",
+            "ui/components/player.py": "import vlogsrt.project.raw.service\n",
+            "vlogsrt/engine.py": "import vlogsrt.project.raw.service\n",
+            "vlogsrt/cli.py": "import vlogsrt.project.raw.service\n",
+        },
+    )
+    failures = check_invariants.check_source_does_not_import_project()
+    assert len(failures) == 5, failures
+    for rel in (
+        "ui/app.py",
+        "ui/service.py",
+        "ui/components/player.py",
+        "vlogsrt/engine.py",
+        "vlogsrt/cli.py",
+    ):
+        assert any(f"{rel}:" in failure for failure in failures)
+
+
+@pytest.mark.parametrize(
+    "rel",
+    [
+        "ui/raw_service.py",
+        "ui/workspace.py",
+        "ui/deep/workspace_service.py",
+        "vlogsrt/workspace_service.py",
+    ],
+)
+def test_the_workspace_service_exception_is_an_exact_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, rel: str
+) -> None:
+    """`ui/workspace_service.py`만 진입점이다 — 비슷한 이름·중첩 경로는 물려받지 못한다."""
+    _fake_source_tree(monkeypatch, tmp_path, {rel: "import vlogsrt.project.raw.service\n"})
+    failures = check_invariants.check_source_does_not_import_project()
+    assert len(failures) == 1, failures
+    assert failures[0].startswith(f"{rel}:")
+
+
+def test_the_cli_exception_does_not_cover_raw_service(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """CLI 예외는 commands뿐이다 — raw.service는 CLI에서도 거부한다."""
+    _fake_source_tree(
+        monkeypatch, tmp_path, {"vlogsrt/cli.py": "from vlogsrt.project.raw import service\n"}
+    )
+    failures = check_invariants.check_source_does_not_import_project()
+    assert len(failures) == 1, failures
+    assert "vlogsrt/cli.py" in failures[0]
+    assert "vlogsrt.project.raw" in failures[0]
+
+
 def test_glm_literals_pass_inside_the_exact_config_paths(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -983,18 +1120,60 @@ def test_glm_literals_pass_inside_the_exact_config_paths(
         "vlogsrt/gadget.py",
         "vlogsrt/project/vision.py",
         "vlogsrt/project/tuning/config.py",
+        "vlogsrt/project/raw/config.py",
     ],
 )
 @pytest.mark.parametrize("literal", ["glm-5.3-flash", "gemini-3.8-flash"])
 def test_vision_literals_fail_outside_the_exact_project_config(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, rel: str, literal: str
 ) -> None:
-    """비전 모델 리터럴은 파생 계층의 것이다 — 원본 config는 물려받지 않는다.
+    """비전 모델 리터럴은 파생 계층의 것이다 — 원본·raw config는 물려받지 않는다.
 
     공급자를 glm에서 gemini로 바꿔도 난간은 좁아지지 않는다: 쓰지 않게 된
     접두사도 계속 걸린다. 안 그러면 되돌리기가 조용히 커밋된다.
     """
     _fake_source_tree(monkeypatch, tmp_path, {rel: f'MODEL = "{literal}"\n'})
+    failures = check_invariants.check_no_hardcoded_model()
+    assert len(failures) == 1, failures
+    assert rel in failures[0]
+
+
+# ── A0(2026-10-02 v2 계획 §3.2): raw 전용 모델 리터럴의 정확 경로 가드 ─────────
+
+
+def test_raw_model_literals_pass_inside_the_exact_raw_config(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """문구·시간·의미 분석 역할의 리터럴 셋은 `vlogsrt/project/raw/config.py`에 산다."""
+    _fake_source_tree(
+        monkeypatch,
+        tmp_path,
+        {
+            "vlogsrt/project/raw/config.py": (
+                'TEXT_MODEL = "gpt-transcribe"\n'
+                'TIMING_MODEL = "whisper-1"\n'
+                'LUNA_MODEL = "gpt-6-luna"\n'
+            )
+        },
+    )
+    assert check_invariants.check_no_hardcoded_model() == []
+
+
+@pytest.mark.parametrize(
+    "rel",
+    [
+        "vlogsrt/config.py",
+        "vlogsrt/project/config.py",
+        "vlogsrt/gadget.py",
+        "vlogsrt/project/raw/models.py",
+        "vlogsrt/project/tuning/raw/config.py",
+    ],
+)
+def test_luna_literals_fail_outside_the_exact_raw_config(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, rel: str
+) -> None:
+    """의미 분석 모델 리터럴은 다른 config도 물려받지 못한다 — 오직 raw config뿐."""
+    _fake_source_tree(monkeypatch, tmp_path, {rel: 'MODEL = "gpt-6-luna"\n'})
     failures = check_invariants.check_no_hardcoded_model()
     assert len(failures) == 1, failures
     assert rel in failures[0]
