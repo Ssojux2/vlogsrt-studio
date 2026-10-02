@@ -3,7 +3,7 @@
 Source: `docs/plans/2026-10-02-raw-video-browser-v2.md` (byte-identical user source).
 Branch: `Ssojux2/r08-clip-input`; initial HEAD `ddd5efe`.
 Coordinator: GPT-6.1-Sol high (actual Orca screen); implementation: exact Claude-GLM `glm-5.3[1m]` high wrapper, no fallback.
-Scope: A0-A8. A0/A1 accepted; A2 ingest/order foundation, A3 native media primitives, A4 understanding library and A7-1 adapters accepted and merged. Whole workflow and A3-A8 service/UI completion remain pending. Only offline/synthetic product verification is authorized.
+Scope: A0-A8. A0/A1 accepted; A2 ingest/order foundation, A3 native media primitives, A4 understanding library and A7-1 adapters accepted and merged. A3 offline vertical workflow is accepted; A4-A8 service/UI completion and full workflow acceptance remain pending. Only offline/synthetic product verification is authorized.
 
 ## Baseline
 
@@ -163,3 +163,57 @@ A7 final-video repair/retext/manual/draft/final caption revisions; A8 full brows
 and execution documentation. This checkpoint accepts merged foundations, not those stages.
 Paid product API, personal original/physical SD, HDR/Log and Final Cut remain
 NOT_RUN/PENDING_HUMAN. No paid API or deletion approval inferred from merge authorization.
+
+## Continued implementation — A3 accepted, 2026-10-02
+
+A3 offline vertical workflow73309a4 accepted and no-ff merged after root independent
+847affectedtests exit0 (58.42s), Ruff181/mypy75/all21 PASS, final feature diffcheck PASS.
+Root actual multi-source stereo/delayed-audio+NTSCnoaudio sameplan creates sevenMP4
+and sevenMOV files in separateimmutablepackages; originalSHA retained. Root injected
+second extractor failure: no third/latercall, explicit samejobID resume completes
+with sameclipIDs/numbers and unchanged firstpublishedbytes. Early missingendpoint and
+package-unboundclipID bugs independently reproduced and closed. Source creationTime
+binding uses valid container tag only, no mtime chronology. New DBv4 migrations/relative
+path movement/cancel/process restart covered by affected suite, UI controller tests PASS.
+Evidence/tmp/vlogsrt-raw-A3-runner-root-{final-tests,final-quality,post-ack}.log and
+/tmp/vlogsrt-raw-A3-resume-root.log. Full final browser scenario remains A8.
+Remaining fullworkflowA4-A8 continued; A7-2 candidate57e399c+b30d8ff notaccepted until
+offline+approvedlive zero-calls and actualcachedsample-range identity probes PASS.
+A5 pure librarya4539d1 root39tests/basicprojection PASS, finalaudioTailprojection F1 active.
+
+A5 domain accepted a4539d1+5c134de, mergedf7c0fd3: root46tests/0.11s PASS;
+independent split/selection/immutable-roundtrip/markupVTT/finalmeasuredaudio-tail
+projection PASS. Whole-source frame grid retained, fakeextra frames refused;
+metadata/selection-only change has no reextract impact. UI/DB wiring remains pending.
+
+A7-2 engine accepted57e399c+b30d8ff+ac71857 and merged: root297affectedtests/10.55s,
+Ruff180/mypy76/all21 PASS and focused cache/gate/publication diff reviewed.
+Independent realstereo delayedAudio source: bothproviderroles shareexactwavehash/sample
+ranges, correspondence-approved latesttext is actually adopted, normalized timing spine
+projects once to finalfile clock, verifyoff/on yields identicalSRTbytes and4textcalls each.
+Independent workflowoffline+envonline+matchingapproval knownLIVEtransports now zero
+fake sends, successful emptyresponses stayreview_required. Reusedworkdir changedchunksize
+0.8->1.6 now actualWAVframes25600/22869 match declaredranges (old12800 reusebug closed).
+No paidAPIcalls, final userreview/manual publication remains A7-3.
+
+Actual A3 browser on synthetic guardedloopback server: createproject, inspectcards valid
+creationtimes, confirm+copy+globalorder, createfullcoverageplan, twoactualMP4clips published
+chronologically with manifests/CSV/README, registeredopaqueID browser decode duration3.4
+readyState4, seek1sec completedseekingfalse. Browsererrors empty, fourtabs render.
+Ownscreenshots/tmp/vlogsrt-raw-A3-browser-{main,extracted}.png; serverlog/tmp/vlogsrt-raw-A3-browser-server.log.
+Intermediate UI has staleplaceholder import-nextstage and headercount0 afterimport;
+noted for nextownedUI edit. FullA8 browser acceptance remains pending.
+
+A6 filesystem library70c5dd7 accepted and mergedf939478. Root19targetedtests/0.14s,
+Ruff189/mypy79/all21 PASS; focused copy/readback/protectedcache/path/pubdiffreview.
+Independent REAL A3browserpackage full+selectedexports verified, cache/previews purge
+then bothconfirmed folders reverified and oldclippayloadSHA unchanged.
+/tmp/vlogsrt-raw-A6-root-after-interface.log, root-quality.log supporting evidence.
+Whole UI/DB reservation/registeredfiles integration pending W1; no claimA6fullstage done.
+Worker lifecycle firstcapability-invalid rejection was NOT accepted; later valid
+worker_done msg4a0bf9b0164c /ctx151066393a04 settledsucceeded, hostreceiptconfirmed.
+
+Latest combined main f939478: make check exit0, 3746passed/140.98s plus Ruff/format/mypy/all21; /tmp/vlogsrt-raw-integration-wave-check.log.
+A4 f431d4a root34testsPASS but NOTaccepted; two-phase ASR→explicitsemanticapproval and noaudio livevisual approval unfinished, W1F1active.
+A7-3 13ad043 root46testsPASS but NOTaccepted: independent REAL delayedstereo finalreparse falsely rejects fractional3.183; samevideohash differentvalidPCM accepted staleAuto; final/key symlink writesoutside. Rootprobe /tmp/vlogsrt-raw-A7-3-root.py exit1, W2F1active.
+User requested installed AI Rough Cut removal: pluginkit ignore IDcom.ssojux2.vlogsrt.workflow then -r all5 paths; repeatedmatch0. Installedhost safelymoved /Users/ssojux2/.Trash/FinalCutAgent-disabled-20261002-220737.app; runningFinalCut notquit, projectdata/keychain/sourcecode untouched. Do not reinstall.
