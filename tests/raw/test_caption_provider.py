@@ -156,8 +156,13 @@ def test_binding_rejects_broken_sample_ranges(
 
 
 def test_provider_rejects_a_stale_binding_before_sending(tmp_path: Path) -> None:
-    """묶은 뒤 청크 내용이 바뀌면 낡은 신원이다 — 전송은 한 번도 나가지 않는다(루트 리뷰)."""
-    from vlogsrt.project.raw.caption_provider import ChunkBindingMismatch
+    """묶은 뒤 청크 내용이 바뀌면 낡은 신원이다 — 전송은 한 번도 나가지 않는다(루트 리뷰).
+
+    `InvalidChunkBinding`으로 잡히는지도 본다(루트 재검) — 신원을 못 만드는 경우와
+    신원이 더 사실이 아닌 경우가 한 예외형으로 닫혀야 호출자가 샘플 좌표·해시·
+    번호의 어긋남을 같은 문에서 받는다.
+    """
+    from vlogsrt.project.raw.caption_provider import ChunkBindingMismatch, InvalidChunkBinding
 
     sender = RecordingSender(text=TEXT_PAYLOAD, timing=TIMING_PAYLOAD)
     timing_provider, text_provider = providers(sender)
@@ -168,7 +173,7 @@ def test_provider_rejects_a_stale_binding_before_sending(tmp_path: Path) -> None
         timing_provider.timed_transcript(
             binding=binding, chunk=target, settings=RawWorkflowConfig(), on=BEFORE_SHUTDOWN
         )
-    with pytest.raises(ChunkBindingMismatch):
+    with pytest.raises(InvalidChunkBinding):  # 부모형으로도 잡힌다(루트 독립 검사 모양)
         text_provider.text_transcript(
             binding=binding, chunk=target, settings=RawWorkflowConfig(), on=BEFORE_SHUTDOWN
         )
@@ -285,19 +290,76 @@ def test_parse_text_response_rejects_malformed(payload: object, tmp_path: Path) 
         parse_text_response(payload, binding=binding_of(chunk(tmp_path)), model="m")
 
 
-def test_parse_text_response_preserves_the_plural_languages_array(tmp_path: Path) -> None:
-    """복수형 languages 배열은 있는 것만 보존한다 — 없어도 무발화가 아니다(루트 리뷰)."""
+def test_parse_text_response_normalizes_the_sdk_language_object_array(tmp_path: Path) -> None:
+    """SDK 3.8.0의 문서화된 모양은 객체 배열이다 — 실제 모델 model_dump로 재현한다(루트 재검).
+
+    핸드메이드 픽스처가 아니라 설치된 SDK의 `Transcription`을 합성 값으로 만들어
+    `model_dump()`한 것을 파서에 통과시킨다. 코드 원터플로 정규화하고 원 배열은
+    `response`에 그대로 남는다.
+    """
+    from openai.types.audio.transcription import Transcription
+    from openai.types.audio.transcription_language import TranscriptionLanguage
+
+    dumped = Transcription(
+        text="정확한 문구",
+        languages=[TranscriptionLanguage(code="ko"), TranscriptionLanguage(code="en")],
+    ).model_dump()
+    assert dumped["languages"] == [{"code": "ko"}, {"code": "en"}]  # 객체 배열이 맞는지 먼저 확인
+    transcript = parse_text_response(dumped, binding=binding_of(chunk(tmp_path)), model="m")
+    assert transcript.text == "정확한 문구"
+    assert transcript.languages == ("ko", "en")
+    assert transcript.response["languages"] == [{"code": "ko"}, {"code": "en"}]  # 원본 보존
+    single = parse_text_response(
+        {"text": "x", "languages": [{"code": "ko"}]},
+        binding=binding_of(chunk(tmp_path)),
+        model="m",
+    )
+    assert single.languages == ("ko",)  # 루트 독립 검사의 기대 모양 그대로
+
+
+def test_parse_text_response_languages_empty_or_absent_never_means_no_speech(
+    tmp_path: Path,
+) -> None:
+    """빈 배열·없는 칸은 '언어를 확정 못 했다'일 뿐 무발화가 아니다(SDK 문서문)."""
+    from openai.types.audio.transcription import Transcription
+
+    empty = Transcription(text="어쨌든 말은 있다", languages=[]).model_dump()
+    transcript = parse_text_response(empty, binding=binding_of(chunk(tmp_path)), model="m")
+    assert transcript.languages == () and transcript.text == "어쨌든 말은 있다"
+    absent = parse_text_response({"text": "x"}, binding=binding_of(chunk(tmp_path)), model="m")
+    assert absent.languages == ()
+
+
+def test_parse_text_response_tolerates_string_arrays_as_explicit_legacy(tmp_path: Path) -> None:
+    """문자열 배열은 합성 픽스처·낡은 기록을 위한 명시적 관용이다 — 문서화된 모양이 아니다."""
+    legacy = parse_text_response(
+        {"text": "안녕", "languages": ["ko", "en"]}, binding=binding_of(chunk(tmp_path)), model="m"
+    )
+    assert legacy.languages == ("ko", "en")
+
+
+@pytest.mark.parametrize(
+    "languages",
+    [
+        "ko",  # 배열이 아니다
+        [{"lang": "ko"}],  # code가 없다
+        [{"code": 5}],
+        [{"code": None}],
+        [{"code": "  "}],
+        ["ko", {"code": "en"}],  # 두 모양을 섞으면 애매하다 — 거짓말의 길이다
+    ],
+)
+def test_parse_text_response_rejects_malformed_language_metadata(
+    tmp_path: Path, languages: object
+) -> None:
     from vlogsrt.project.raw.caption_provider import MalformedCaptionResponse
 
-    binding = binding_of(chunk(tmp_path))
-    multi = parse_text_response(
-        {"text": "안녕", "languages": ["ko", "en"]}, binding=binding, model="m"
-    )
-    assert multi.languages == ("ko", "en")
-    absent = parse_text_response({"text": "안녕"}, binding=binding, model="m")
-    assert absent.languages == ()  # 빈 칸은 지어내지 않는다
     with pytest.raises(MalformedCaptionResponse):
-        parse_text_response({"text": "안녕", "languages": "ko"}, binding=binding, model="m")
+        parse_text_response(
+            {"text": "안녕", "languages": languages},
+            binding=binding_of(chunk(tmp_path)),
+            model="m",
+        )
 
 
 def test_parse_text_response_keeps_empty_text(tmp_path: Path) -> None:
