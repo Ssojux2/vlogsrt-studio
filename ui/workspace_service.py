@@ -51,21 +51,34 @@ def default_state_path() -> Path:
 class RawWorkspaceUi:
     """작업공간 브라우저 서버 하나 — 상태 파일·Gradio 화면·HTTP 경계를 소유한다."""
 
-    def __init__(self, port: int = 7860, state_path: Path | None = None) -> None:
+    def __init__(
+        self,
+        port: int = 7860,
+        state_path: Path | None = None,
+        inspector: raw_service.MediaInspect | None = None,
+    ) -> None:
         self.port = port
         self.raw = raw_service.RawWorkspaceService()
         self.state_path = state_path if state_path is not None else default_state_path()
+        self._inspector = inspector  # None이면 서비스 기본(ffprobe). 시험은 가짜 조사자를 넣는다.
         self._root: Path | None = None
         self._selection_lock = threading.Lock()
         self._last_listing: raw_service.FolderListing | None = None
+        # 가져오기 화면 상태 — 조사 제안과 확정은 **현재 작업공간 서명에 묶여**
+        # 산다. 작업공간을 바꾸는 순간 함께 지운다(새 상태로 시작한다).
+        self._ingest_proposal: raw_service.IngestProposal | None = None
+        self._ingest_signature: str | None = None
+        self._ingest_confirmation: raw_service.IngestConfirmation | None = None
         # 화면 구성요소 참조 — 만들어지기 전에는 None(조립은 build_blocks에서 끝난다).
         self._workspace_md: gr.Markdown | None = None
         self._settings_md: gr.Markdown | None = None
         self._listing_md: gr.Markdown | None = None
         self._jobs_md: gr.Markdown | None = None
+        self._ingest_md: gr.Markdown | None = None
         self._media_dd: gr.Dropdown | None = None
         self._jobs_dd: gr.Dropdown | None = None
         self._devices_dd: gr.Dropdown | None = None
+        self._ingest_jobs_dd: gr.Dropdown | None = None
         self._signature_state: gr.State | None = None
 
     # ── 서버 상태 — 새로고침·재시작을 건넌다 ───────────────────
@@ -103,13 +116,23 @@ class RawWorkspaceUi:
         )
 
     def _set_root(self, root: Path | None) -> None:
-        """선택된 작업공간 교체 — 자물쇠 안에서 한 번에(코디네이터 재결)."""
+        """선택된 작업공간 교체 — 자물쇠 안에서 한 번에(코디네이터 재결).
+
+        가져오기 화면 상태(조사 제안·확정)도 같은 자물쇠 안에서 지운다 — 작업공간을
+        바꾸고 나면 이전 프로젝트의 제안이 남아 있지 않아야 한다(새 상태로 시작).
+        """
         with self._selection_lock:
             self._root = root
+            self._ingest_proposal = None
+            self._ingest_signature = None
+            self._ingest_confirmation = None
 
     def _remember(self, root: Path | None) -> None:
         with self._selection_lock:
             self._root = root
+            self._ingest_proposal = None
+            self._ingest_signature = None
+            self._ingest_confirmation = None
         if root is not None:
             self._write_state(root)
 
@@ -336,6 +359,42 @@ class RawWorkspaceUi:
 
             browse_button.click(on_browse, source_box, [self._listing_md, source_box])
             self._devices_dd.select(on_device, self._devices_dd, [self._listing_md, source_box])
+
+            # ── 가져오기 — 조사 → 순서 확인(명시적) → 복사·검증 → 새로고침/재시도 ──
+            gr.Markdown("---")
+            with gr.Row():
+                scan_button = gr.Button("조사 (가져올 영상 확인)", scale=2)
+                confirm_button = gr.Button("원본 순서 확인", variant="primary", scale=2)
+                copy_button = gr.Button("복사 및 검증", scale=2)
+                refresh_ingest = gr.Button("진행 상태 새로고침", scale=2)
+            with gr.Row():
+                self._ingest_jobs_dd = gr.Dropdown(
+                    choices=self.resumable_ingest_choices(),
+                    label="재시도할 가져오기 작업",
+                    interactive=True,
+                    scale=6,
+                )
+                retry_button = gr.Button("재시도", scale=1)
+            self._ingest_md = gr.Markdown(self._ingest_state_markdown(self._snapshot_root()))
+            scan_button.click(
+                self.ingest_scan_view, [self._signature_state, source_box], self._ingest_md
+            )
+            confirm_button.click(self.ingest_confirm_view, self._signature_state, self._ingest_md)
+            copy_button.click(
+                self.ingest_copy_view,
+                self._signature_state,
+                [self._ingest_md, self._ingest_jobs_dd],
+            )
+            refresh_ingest.click(
+                self.ingest_refresh_view,
+                self._signature_state,
+                [self._ingest_md, self._ingest_jobs_dd],
+            )
+            retry_button.click(
+                self.ingest_retry_view,
+                [self._signature_state, self._ingest_jobs_dd],
+                self._ingest_md,
+            )
         return open_button, create_button, ws_path_box, new_name_box
 
     # ── 화면 2 — 분석 · 조각 검토 ──────────────────────────────
@@ -409,12 +468,13 @@ class RawWorkspaceUi:
 
     def open_workspace_view(
         self, path_text: str
-    ) -> tuple[str, str | None, gr.Dropdown, gr.Dropdown, str, str]:
+    ) -> tuple[str, str | None, gr.Dropdown, gr.Dropdown, str, str, str, gr.Dropdown]:
         """기존 작업공간 열기 이벤트 — 서명·미디어·작업·설정까지 한 번에 갱신한다.
 
         새로고침 없이 같은 화면에서 프로젝트를 바꿀 수 있어야 한다(루트 재현:
         Markdown만 갱신되면 이 화면의 서명은 옛 프로젝트에 남아, 방금 만든
-        프로젝트의 작업 취소가 '선택이 바뀌었다'로 실패했다).
+        프로젝트의 작업 취소가 '선택이 바뀌었다'로 실패했다). 가져오기 패널도
+        같이 내린다 — 이전 프로젝트의 제안·확정이 남지 않는다(새 상태).
         """
         text = (path_text or "").strip()
         if not text:
@@ -428,7 +488,7 @@ class RawWorkspaceUi:
 
     def create_workspace_view(
         self, name: str, path_text: str
-    ) -> tuple[str, str | None, gr.Dropdown, gr.Dropdown, str, str]:
+    ) -> tuple[str, str | None, gr.Dropdown, gr.Dropdown, str, str, str, gr.Dropdown]:
         """새 작업공간 만들기 이벤트 — 첫 생성(서명 None)에서도 같은 화면이 즉시 연결된다."""
         if not (name or "").strip():
             raise gr.Error("새 프로젝트 이름을 입력하세요.")
@@ -443,11 +503,12 @@ class RawWorkspaceUi:
 
     def workspace_view_values(
         self,
-    ) -> tuple[str, str | None, gr.Dropdown, gr.Dropdown, str, str]:
+    ) -> tuple[str, str | None, gr.Dropdown, gr.Dropdown, str, str, str, gr.Dropdown]:
         """작업공간 전환 뒤 화면이 받아야 하는 전체 보기(서명 포함).
 
         루트를 **한 번** 찍어 모든 조각에 통과시킨다 — 전환이 끼어들어도 이 보기가
-        두 작업공간에 걸치지 않는다(코디네이터 재결).
+        두 작업공간에 걸치지 않는다(코디네이터 재결). 마지막 두 값은 가져오기
+        패널(안내·재시도 목록)이다.
         """
         root = self._snapshot_root()
         return (
@@ -457,6 +518,8 @@ class RawWorkspaceUi:
             gr.Dropdown(choices=self.active_job_choices(root)),
             self.jobs_markdown(root),
             self.settings_markdown(root),
+            self._ingest_state_markdown(root),
+            gr.Dropdown(choices=self.resumable_ingest_choices(root)),
         )
 
     def _selection_outputs(self) -> list[object]:
@@ -465,8 +528,10 @@ class RawWorkspaceUi:
             self._workspace_md is not None
             and self._settings_md is not None
             and self._jobs_md is not None
+            and self._ingest_md is not None
             and self._media_dd is not None
             and self._jobs_dd is not None
+            and self._ingest_jobs_dd is not None
             and self._signature_state is not None
         )
         return [
@@ -476,12 +541,200 @@ class RawWorkspaceUi:
             self._jobs_dd,
             self._jobs_md,
             self._settings_md,
+            self._ingest_md,
+            self._ingest_jobs_dd,
         ]
 
     def cancel_view(self, signature: str | None, job_id: str | None) -> tuple[gr.Dropdown, str]:
         """취소 이벤트 — 안내 문장과 함께 진행 중 작업 목록도 다시 내린다."""
         message = self.cancel_selected(signature, job_id)
         return gr.Dropdown(choices=self.active_job_choices()), message
+
+    # ── 화면 1 — SD/폴더 가져오기(조사 → 순서 확인 → 복사·검증) ──
+
+    @staticmethod
+    def _human_bytes(size: float) -> str:
+        scaled = float(size)
+        for unit in ("B", "KB", "MB", "GB", "TB"):
+            if scaled < 1024 or unit == "TB":
+                return f"{scaled:,.0f}{unit}" if unit == "B" else f"{scaled:,.1f}{unit}"
+            scaled /= 1024
+        return f"{scaled:,.1f}TB"
+
+    def _proposal_markdown(self, proposal: raw_service.IngestProposal | None) -> str:
+        """조사 제안 보기 — 촬영 시각은 미조사임을 숨기지 않고 적는다(§6.2)."""
+        if proposal is None:
+            return (
+                "원본 폴더를 넣고 **조사**를 누르면 가져올 영상 목록·공간 견적이 여기"
+                " 나타난다. 아직 아무 것도 복사하지 않는다."
+            )
+        lines = [
+            f"**조사 결과** — 후보 {len(proposal.order)}건 · 제외 {len(proposal.scan.rejected)}건",
+            "",
+        ]
+        lines += ["| 순서 | 파일 | 크기 | 길이 | 해상도 | 촬영 시각 |", "|---|---|---|---|---|---|"]
+        for index, candidate in enumerate(proposal.order, start=1):
+            inspection = candidate.inspection
+            duration = (
+                "미확인"
+                if inspection.duration_seconds is None
+                else f"{inspection.duration_seconds:.1f}초"
+            )
+            resolution = (
+                "미확인"
+                if inspection.width is None or inspection.height is None
+                else f"{inspection.width}×{inspection.height}"
+            )
+            lines.append(
+                f"| {index} | `{candidate.source_relative_path}` | "
+                f"{self._human_bytes(candidate.size_bytes)} | {duration} | {resolution} | 미조사 |"
+            )
+        space = proposal.space
+        verdict = "충분" if space.sufficient else "**부족 — 복사가 시작 전에 차단된다**"
+        lines += [
+            "",
+            f"- 예상 복사 공간 {self._human_bytes(space.copy_bytes)} · 작업공간 남은 "
+            f"{self._human_bytes(space.free_bytes)} → {verdict}",
+            "- 촬영 시각은 아직 조사하지 않았다 — 순서 제안은 자연 파일 번호 정렬이다(§6.2).",
+        ]
+        if proposal.scan.rejected:
+            lines += ["", "**제외된 항목(사유)**"]
+            lines += [
+                f"- `{item.source_relative_path}` — {item.reason}"
+                for item in proposal.scan.rejected
+            ]
+        return "\n".join(lines)
+
+    def _ingest_state_markdown(self, root: Path | None) -> str:
+        """가져오기 패널 전체 보기 — 제안·확정·복사 진행을 한눈에(상태는 DB에서)."""
+        proposal = None
+        with self._selection_lock:
+            if root is not None and self._ingest_signature == self._signature_for(root):
+                proposal = self._ingest_proposal
+        base = self._proposal_markdown(proposal)
+        if root is None:
+            return base
+        assets, revision, jobs = self.raw.ingest_overview(root)
+        if not assets:
+            return base
+        lines = [
+            base,
+            "",
+            f"**확정 순서** — 배치 `{revision.batch_dir if revision else '?'}`"
+            f" · 근거 {revision.basis if revision else '?'}"
+            f" · 리비전 `{revision.revision_id if revision else '?'}`",
+            "",
+        ]
+        lines += ["| 순번 | 파일 | 상태 | 크기 | 비고 |", "|---|---|---|---|---|"]
+        for asset in assets:
+            note = "중복(같은 내용 먼저 검증본 있음)" if asset.duplicate_of else ""
+            if asset.error:
+                note = asset.error
+            lines.append(
+                f"| {asset.ordinal} | `{asset.source_relative_path}` | {asset.status} | "
+                f"{self._human_bytes(asset.size_bytes)} | {note} |"
+            )
+        if jobs:
+            lines += ["", "**가져오기 작업**"]
+            lines += [
+                f"- `{job.job_id}` {job.status} {job.progress_current}/{job.progress_total}"
+                + (f" — {job.error}" if job.error else "")
+                for job in jobs
+            ]
+        return "\n".join(lines)
+
+    def ingest_scan_view(self, signature: str | None, source_text: str) -> str:
+        """조사 이벤트 — 읽기만 한다. 제안은 현재 작업공간 서명에 묶어 보관한다."""
+        root = self._require_current_selection(signature)
+        text = (source_text or "").strip()
+        if not text:
+            raise gr.Error("원본 폴더(SD 카드) 경로를 입력하세요.")
+        try:
+            proposal = self.raw.scan_sources(
+                root, Path(text), self._inspector or raw_service.ffprobe_media_inspector
+            )
+        except raw_service.RawWorkspaceError as error:
+            raise gr.Error(str(error)) from error
+        except OSError as error:
+            raise gr.Error(f"원본 폴더를 읽지 못했다: {error}") from error
+        with self._selection_lock:
+            self._ingest_proposal = proposal
+            self._ingest_signature = self._signature_for(root)
+            self._ingest_confirmation = None
+        return self._ingest_state_markdown(root)
+
+    def _require_ingest_proposal(self, root: Path) -> raw_service.IngestProposal:
+        """이 작업공간을 위해 조사한 제안 — 없으면(또는 다른 작업공간의 것이면) 안내한다."""
+        signature = self._signature_for(root)
+        with self._selection_lock:
+            proposal = self._ingest_proposal if self._ingest_signature == signature else None
+        if proposal is None:
+            raise gr.Error(
+                "먼저 이 작업공간에서 원본 폴더 조사를 실행하세요 — 확정은 조사 제안만 받는다."
+            )
+        return proposal
+
+    def ingest_confirm_view(self, signature: str | None) -> str:
+        """원본 순서 확인 이벤트 — 명시적 확인으로 배치·불변 순서 리비전을 만든다."""
+        root = self._require_current_selection(signature)
+        proposal = self._require_ingest_proposal(root)
+        try:
+            confirmation = self.raw.confirm_ingest(root, proposal)
+        except raw_service.RawWorkspaceError as error:
+            raise gr.Error(str(error)) from error
+        with self._selection_lock:
+            self._ingest_confirmation = confirmation
+        return self._ingest_state_markdown(root)
+
+    def ingest_copy_view(self, signature: str | None) -> tuple[str, gr.Dropdown]:
+        """복사 및 검증 이벤트 — 확정된 순서 그대로 작업을 제출한다(완료를 가장하지 않는다)."""
+        root = self._require_current_selection(signature)
+        with self._selection_lock:
+            confirmation = self._ingest_confirmation
+        if confirmation is None:
+            assets, _, _ = self.raw.ingest_overview(root)
+            if not assets:
+                raise gr.Error(
+                    "먼저 조사 후 원본 순서 확인을 누르세요 — 확정 없이 복사하지 않는다."
+                )
+            raise gr.Error("새로 고침으로 확정이 풀렸다 — 다시 조사·확인한 뒤 복사하세요.")
+        self.raw.start_ingest_copy(root, confirmation)
+        return self._ingest_state_markdown(root), gr.Dropdown(
+            choices=self.resumable_ingest_choices(root)
+        )
+
+    def ingest_refresh_view(self, signature: str | None) -> tuple[str, gr.Dropdown]:
+        """진행 상태 새로고침 — 서버(DB)가 정본, 화면은 다시 읽기만 한다."""
+        root = self._require_current_selection(signature)
+        return self._ingest_state_markdown(root), gr.Dropdown(
+            choices=self.resumable_ingest_choices(root)
+        )
+
+    def ingest_retry_view(self, signature: str | None, job_id: str | None) -> str:
+        """명시적 재시도 — 같은 작업 ID·같은 지문으로 다시 붙고 ready는 건너뛴다."""
+        root = self._require_current_selection(signature)
+        if not job_id:
+            raise gr.Error("재시도할 가져오기 작업을 고르세요.")
+        try:
+            handle = self.raw.retry_ingest_copy(root, job_id)
+        except raw_service.RawWorkspaceError as error:
+            raise gr.Error(str(error)) from error
+        return f"재시도 제출 — `{handle.job_id}`. 진행은 새로고침으로 확인하세요."
+
+    def resumable_ingest_choices(self, root: Path | None = None) -> list[tuple[str, str]]:
+        """재시도 가능한 가져오기 작업 — 실패·중단·이어하기 상태만 골라 보인다."""
+        root = root if root is not None else self._snapshot_root()
+        if root is None:
+            return []
+        resumable = {"failed", "interrupted", "paused"}
+        return [
+            (
+                f"{job.job_id} · {job.status} · {job.progress_current}/{job.progress_total}",
+                job.job_id,
+            )
+            for job in self.raw.list_jobs(root)
+            if job.kind == raw_service.INGEST_JOB_KIND and job.status in resumable
+        ]
 
     # ── 화면 3 · 화면 4 — 아직 열리지 않은 단계 ─────────────────
 
@@ -510,7 +763,9 @@ class RawWorkspaceUi:
 
     def refresh_outputs(
         self,
-    ) -> tuple[str, gr.Dropdown, str, gr.Dropdown, str, gr.Dropdown, str, str | None]:
+    ) -> tuple[
+        str, gr.Dropdown, str, gr.Dropdown, str, gr.Dropdown, str, str | None, str, gr.Dropdown
+    ]:
         """페이지 로드·새로고침 — 상태를 전부 서버에서 다시 읽는다.
 
         복구(recover)는 서버 시작 때 한 번뿐이다 — 새로고침이 작업 상태를 바꾸지
@@ -526,6 +781,8 @@ class RawWorkspaceUi:
             gr.Dropdown(choices=self.active_job_choices()),
             self.settings_markdown(),
             self.current_signature(),
+            self._ingest_state_markdown(self._snapshot_root()),
+            gr.Dropdown(choices=self.resumable_ingest_choices()),
         )
 
     def build_blocks(self) -> gr.Blocks:
@@ -557,9 +814,11 @@ class RawWorkspaceUi:
             and self._settings_md is not None
             and self._listing_md is not None
             and self._jobs_md is not None
+            and self._ingest_md is not None
             and self._media_dd is not None
             and self._jobs_dd is not None
             and self._devices_dd is not None
+            and self._ingest_jobs_dd is not None
             and self._signature_state is not None
         )
         return [
@@ -571,6 +830,8 @@ class RawWorkspaceUi:
             self._jobs_dd,
             self._settings_md,
             self._signature_state,
+            self._ingest_md,
+            self._ingest_jobs_dd,
         ]
 
     # ── HTTP 경계 — 모든 요청에 Host/Origin 가드, 미디어는 ID로만 ──

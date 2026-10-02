@@ -1,8 +1,9 @@
-"""A1 데이터 계약 — 작업공간·미디어 등록·폴더 탐색·작업 상태의 동결 기록.
+"""A1·A2 데이터 계약 — 작업공간·미디어 등록·폴더 탐색·작업 상태·가져오기의 동결 기록.
 
-`docs/plans/2026-10-02-raw-video-browser-v2.md` §13.1·§14.1의 A1 부분을 값으로
-못 박는다. 여기엔 동작이 없다 — DB 접근은 `workspace.py`·`jobs.py`, 조립은
-`service.py`가 맡는다. 모든 레코드는 frozen이고, 시각 문자열은 UTC ISO-8601다.
+`docs/plans/2026-10-02-raw-video-browser-v2.md` §13.1·§14.1의 A1 부분과 §5·§6.2의
+A2 부분(가져오기 자산·원본 순서 리비전)을 값으로 못 박는다. 여기엔 동작이 없다 —
+DB 접근은 `workspace.py`·`jobs.py`, 조립은 `service.py`가 맡는다. 모든 레코드는
+frozen이고, 시각 문자열은 UTC ISO-8601다.
 """
 
 from __future__ import annotations
@@ -194,3 +195,128 @@ class RangeNotSatisfiableError(RawWorkspaceError):
 
 class BrowseNotAllowedError(RawWorkspaceError):
     """탐색할 수 없는 경로 — 없는 곳, 파일, 숨김 항목."""
+
+
+# ── A2 — SD/폴더 가져오기·원본 순서(계획 §5·§6.2·§13.1) ───────────────────────
+
+INGEST_ASSET_STATUSES: tuple[str, ...] = (
+    "pending",
+    "copying",
+    "verifying",
+    "ready",
+    "failed",
+)
+"""가져오기 자산의 상태 전부(§5.3). `ready`만 검증을 마친 원본이고, 그 밖은
+중간 상태다 — 검증되지 않은 파일은 후속 처리·브라우저 제공 대상이 아니다."""
+
+INGEST_JOB_KIND = "ingest_copy"
+"""가져오기 복사 작업의 종류 표기 — 같은 지문의 활성 작업 재제출이 여기 묶인다."""
+
+ORDER_BASIS_USER_CONFIRMED = "user_confirmed"
+"""순서 리비전의 근거 표기 — A2의 확정은 언제나 사람의 명시적 확인이다(§6.2)."""
+
+
+@dataclass(frozen=True, slots=True)
+class SourceAssetDraft:
+    """확정 때 만드는 자산 초안 — 출처 신원과 스캔 때 조사값만 담는다.
+
+    `batch_dir`·최종 상대 경로·자산 ID·상태는 작업공간이 배치를 여는 한
+    트랜잭션에서 정한다. `source_mtime_ns`·`source_inode`는 **변경 검출**용
+    스냅숏이지 촬영 시각이 아니다 — 촬영 시각은 `capture_time`뿐이다.
+    """
+
+    source_root: str
+    source_relative_path: str
+    source_name: str
+    size_bytes: int
+    source_mtime_ns: int
+    source_inode: int
+    capture_time: str | None
+    duration_seconds: float | None
+    width: int | None
+    height: int | None
+    ordinal: int
+    basis_note: str
+
+
+@dataclass(frozen=True, slots=True)
+class SourceAsset:
+    """가져오기 원본 한 건 — 원본 출처(provenance)와 검증 상태의 정본 기록(§13.1).
+
+    `content_sha256`은 목적지를 **다시 읽어** 확인한 값이다(§5.3). `capture_time`은
+    촬영 시각의 신뢰할 근거가 생겼을 때만 채운다 — 파일 수정 시각(mtime)을 촬영
+    시각으로 대체하지 않는다(§6.2).
+    """
+
+    asset_id: str
+    batch_dir: str
+    relative_path: str
+    status: str
+    size_bytes: int
+    source_root: str
+    source_relative_path: str
+    source_name: str
+    content_sha256: str | None
+    file_id: str | None
+    duplicate_of: str | None
+    capture_time: str | None
+    duration_seconds: float | None
+    width: int | None
+    height: int | None
+    error: str | None
+    source_mtime_ns: int
+    source_inode: int
+    ordinal: int
+    created_at: str
+    updated_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class SourceOrderEntry:
+    """순서 리비전의 한 항목 — 자산 ID와 확정 순번, 그리고 이 순서의 근거."""
+
+    asset_id: str
+    ordinal: int
+    basis_note: str
+
+
+@dataclass(frozen=True, slots=True)
+class SourceOrderRevision:
+    """확정된 원본 순서 — 불변 기록이다. 바꾸려면 새 리비전을 만든다(§6.5).
+
+    항목은 확정 때 고른 자산(candidate)을 가리키고, 그 자산이 `ready`로 검증된
+    뒤에도 같은 ID로 읽힌다 — 순서와 검증 상태가 어긋나지 않는다.
+    """
+
+    revision_id: str
+    batch_dir: str
+    basis: str
+    entries: tuple[SourceOrderEntry, ...]
+    created_at: str
+
+
+# ── A2 공개 오류 ─────────────────────────────────────────────────────────────
+
+
+class IngestError(RawWorkspaceError):
+    """가져오기 계층 오류의 기본형."""
+
+
+class SourceNestingError(IngestError):
+    """원본 루트와 작업공간이 서로 안쪽이다 — 재귀 복사·자기 복사가 된다(§5.2)."""
+
+
+class SourceChangedError(IngestError):
+    """원본이 스캔 뒤 바뀌었다 — 확인(확정)이나 복사를 시작할 수 없다(§5.3)."""
+
+
+class InsufficientSpaceError(IngestError):
+    """복사 공간이 부족하다 — 복사 시작 전에 차단한다(§5.2)."""
+
+
+class NoIngestCandidatesError(IngestError):
+    """가져올 영상이 없다 — 빈 확정·빈 복사는 성공으로 위장하지 않는다."""
+
+
+class IngestCopyError(IngestError):
+    """복사·검증 실패 모음 — 작업을 실패 상태로 남겨 재개하게 한다(§5.3)."""

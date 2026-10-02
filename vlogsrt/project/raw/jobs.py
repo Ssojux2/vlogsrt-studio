@@ -46,6 +46,10 @@ class JobContext:
     def set_total(self, total: int) -> None:
         JobStore(self._workspace).update(self.job_id, progress_total=total)
 
+    def set_progress(self, current: int) -> None:
+        """이번 실행의 진행값을 다시 맞춘다 — 재시도가 지난 진행 위에 더 쌓지 않는다."""
+        JobStore(self._workspace).update(self.job_id, progress_current=current)
+
     def advance(self) -> None:
         JobStore(self._workspace).advance(self.job_id)
 

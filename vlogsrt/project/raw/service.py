@@ -19,15 +19,27 @@ from vlogsrt.project.raw.config import (
     RawWorkflowConfig,
     validate_raw_workflow_config,
 )
+from vlogsrt.project.raw.ingest import (
+    IngestConfirmation,
+    IngestProposal,
+    MediaInspect,
+    confirm_ingest,
+    ffprobe_media_inspector,
+    reconfirm_ingest,
+    run_ingest_copy,
+    scan_sources,
+)
 from vlogsrt.project.raw.jobs import JobContext, JobManager
 from vlogsrt.project.raw.models import (
     ACTIVE_JOB_STATUSES,
+    INGEST_JOB_KIND,
     MEDIA_KINDS,
     MEDIA_SUFFIXES,
     BrowseNotAllowedError,
     ByteRange,
     FolderEntry,
     FolderListing,
+    IngestError,
     JobHandle,
     JobRecord,
     MediaNotAllowedError,
@@ -38,6 +50,8 @@ from vlogsrt.project.raw.models import (
     RangeNotSatisfiableError,
     RawWorkspaceError,
     ResolvedMedia,
+    SourceAsset,
+    SourceOrderRevision,
     WorkspaceStatus,
 )
 from vlogsrt.project.raw.workspace import DB_SCHEMA_VERSION, RawWorkspace
@@ -49,10 +63,15 @@ __all__ = [
     "ByteRange",
     "FolderEntry",
     "FolderListing",
+    "INGEST_JOB_KIND",
+    "IngestConfirmation",
+    "IngestError",
+    "IngestProposal",
     "JobContext",
     "JobHandle",
     "JobRecord",
     "MEDIA_KINDS",
+    "MediaInspect",
     "MediaNotAllowedError",
     "MediaNotFoundError",
     "MediaNotReadyError",
@@ -62,9 +81,12 @@ __all__ = [
     "RawWorkspaceError",
     "RawWorkspaceService",
     "ResolvedMedia",
+    "SourceAsset",
+    "SourceOrderRevision",
     "WorkspaceStatus",
     "browse_folder",
     "content_type_for",
+    "ffprobe_media_inspector",
     "host_header_allowed",
     "loopback_hosts",
     "mounted_device_candidates",
@@ -84,6 +106,18 @@ MEDIA_CONTENT_TYPES: dict[str, str] = {
     ".wav": "audio/wav",
     ".m4a": "audio/mp4",
 }
+
+
+def _ingest_body(
+    workspace: RawWorkspace, confirmation: IngestConfirmation
+) -> Callable[[JobContext], None]:
+    """복사 작업 본문 묶기 — 호출 시점의 확인 객체를 즉시 묶는다(늦은 묶음 없이)."""
+
+    def body(context: JobContext) -> None:
+        run_ingest_copy(context, workspace, confirmation)
+
+    return body
+
 
 BROWSE_ENTRY_LIMIT = 500
 """한 번의 명시적 탐색이 보여주는 최대 항목 수 — 재귀 스캔이 아닌 한 층이다(§4.2)."""
@@ -392,3 +426,77 @@ class RawWorkspaceService:
     def recover_interrupted_jobs(self, root: Path) -> int:
         """서버 시작 경로 전용 — 진행 중 작업을 재개 가능 상태로 돌린다(§14.1)."""
         return self._jobs(root).recover_interrupted()
+
+    # ── A2 — SD/폴더 가져오기·원본 순서 ───────────────────────
+
+    def scan_sources(
+        self,
+        root: Path,
+        source_root: Path,
+        inspect: MediaInspect = ffprobe_media_inspector,
+    ) -> IngestProposal:
+        """원본 폴더를 발견·조사해 제안을 만든다 — 읽기만 한다(§5.1의 확인 단계 전)."""
+        workspace = self._workspace(root)
+        return scan_sources(source_root, workspace.root, inspect)
+
+    def confirm_ingest(self, root: Path, proposal: IngestProposal) -> IngestConfirmation:
+        """사람의 명시적 확인을 받은 제안만 확정한다 — 배치·자산·불변 순서 리비전."""
+        workspace = self._workspace(root)
+        return confirm_ingest(workspace, proposal)
+
+    def start_ingest_copy(self, root: Path, confirmation: IngestConfirmation) -> JobHandle:
+        """확정된 순서 그대로 복사·검증 작업을 제출한다 — 같은 지문의 활성 작업은 하나다."""
+        workspace = self._workspace(root)
+        return self.submit_job(
+            root,
+            INGEST_JOB_KIND,
+            confirmation.job_fingerprint,
+            _ingest_body(workspace, confirmation),
+            total=len(confirmation.assets),
+        )
+
+    def retry_ingest_copy(self, root: Path, job_id: str) -> JobHandle:
+        """실패·중단된 가져오기의 명시적 재시도 — 같은 작업 ID·같은 지문으로 다시 붙는다.
+
+        확인 객체는 DB의 배치 기록에서 다시 만든다(`reconfirm_ingest`). 지문이
+        어긋나면(원본이 바뀌었다면) 재결합하지 않고 새 가져오기를 요구한다.
+        """
+        workspace = self._workspace(root)
+        record = self.get_job(root, job_id)
+        if record.kind != INGEST_JOB_KIND:
+            raise IngestError(f"가져오기 작업이 아니다: {job_id} ({record.kind})")
+        for revision in workspace.list_order_revisions():
+            confirmation = reconfirm_ingest(workspace, revision.batch_dir)
+            if confirmation.job_fingerprint == record.input_fingerprint:
+                return self.resume_job(
+                    root,
+                    job_id,
+                    _ingest_body(workspace, confirmation),
+                    record.input_fingerprint,
+                )
+        raise IngestError(
+            f"작업 {job_id}의 지문과 같은 가져오기 배치를 찾지 못했다 — "
+            "원본이 바뀌었으면 다시 조사·확정하세요"
+        )
+
+    def ingest_overview(
+        self, root: Path, batch_dir: str | None = None
+    ) -> tuple[tuple[SourceAsset, ...], SourceOrderRevision | None, tuple[JobRecord, ...]]:
+        """가져오기 읽기 모델 — 자산(확정 순번순)·순서 리비전·가져오기 작업 최근 순."""
+        workspace = self._workspace(root)
+        assets = workspace.list_source_assets(batch_dir)
+        revision = None
+        if assets:
+            revision = workspace.order_revision(assets[0].batch_dir)
+        elif batch_dir is not None:
+            revision = workspace.order_revision(batch_dir)
+        jobs = tuple(job for job in self.list_jobs(root) if job.kind == INGEST_JOB_KIND)
+        return assets, revision, jobs
+
+    def list_source_assets(
+        self, root: Path, batch_dir: str | None = None
+    ) -> tuple[SourceAsset, ...]:
+        return self._workspace(root).list_source_assets(batch_dir)
+
+    def list_order_revisions(self, root: Path) -> tuple[SourceOrderRevision, ...]:
+        return self._workspace(root).list_order_revisions()
