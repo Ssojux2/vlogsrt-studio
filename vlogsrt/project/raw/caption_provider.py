@@ -49,8 +49,13 @@ class InvalidChunkBinding(ValueError):
     """청크 신원이 계약을 어긴다 — 샘플 범위는 `[start, end)` 반개구간이다(§13.3)."""
 
 
-class ChunkBindingMismatch(RuntimeError):
-    """신원과 청크가 어긋난다 — 낡은 신원으로는 전송하지 않는다(루트 리뷰)."""
+class ChunkBindingMismatch(InvalidChunkBinding):
+    """신원과 청크가 어긋난다 — 낡은 신원으로는 전송하지 않는다(루트 재검).
+
+    `InvalidChunkBinding`의 한 갈래다: 신원을 **만들 수 없는** 경우와 마찬가지로
+    신원이 **더 사실이 아닌** 경우도 같은 문에서 닫힌다 — 호출자는 한 예외형으로
+    샘플 좌표·해시·번호의 어긋남을 모두 받는다.
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -149,8 +154,9 @@ class TextTranscript:
     detected_language: str | None
     usage: Mapping[str, object] | None
     response: Mapping[str, object]
-    # 모델이 실어 준 복수형 언어 배열 — 있던 것만 보존한다(루트 리뷰). 없거나 비어
-    # 있어도 무발화의 뜻이 아니다. 지어내는 칸은 없다.
+    # 문서화된 객체 배열([{"code": "ko"}, ...])에서 정규화한 코드 원터플(루트 재검).
+    # 원 배열 그대로는 response 칸에 보존된다. 없거나 빈 배열은 언어를 확정 못 했다는
+    # 뜻일 뿐 무발화가 아니다. 지어내는 칸은 없다.
     languages: tuple[str, ...] = ()
 
 
@@ -210,7 +216,8 @@ def parse_text_response(
 
     `text`가 빈 문자열인 것은 위반이 아니다(§11.11) — 빈 문자열 하나만으로
     무발화를 확정하지도 않는다. 판정은 소비 계층의 몫이다. 복수형 `languages`
-    배열은 모델이 실어 준 것만 보존한다(루트 리뷰) — 없으면 빈 채로 둔다.
+    배열은 코드 원터플로 정규화하고 원 배열은 `response`에 그대로 남긴다(루트
+    재검).
     """
     if not isinstance(payload, Mapping):
         raise MalformedCaptionResponse(f"문구 응답이 JSON 객체가 아니다: {type(payload).__name__}")
@@ -234,13 +241,41 @@ def parse_text_response(
 
 
 def _response_languages(payload: Mapping[object, object]) -> tuple[str, ...]:
-    """복수형 languages 배열의 보존 — 문자열 목록이 아니면 계약 위반이다."""
+    """복수형 languages 배열을 코드 원터플로 정규화한다(루트 재검).
+
+    SDK 3.8.0의 문서화된 모양은 객체 배열이다 — `Transcription.languages`가
+    `Optional[List[TranscriptionLanguage]]`이고 `TranscriptionLanguage.code`가
+    문자열이다. `model_dump()`를 거치면 `[{"code": "ko"}, ...]`로 온다. 문자열
+    배열은 합성 픽스처·낡은 기록을 위한 **명시적 관용**일 뿐 문서화된 모양이
+    아니다. 둘을 섞은 배열·`code`가 없거나 문자열이 아닌 객체는 거짓말의 길이므로
+    거부한다. 없거나 빈 배열은 언어를 확정 못 했다는 뜻일 뿐 무발화가 아니다.
+    """
     raw = payload.get("languages")
     if raw is None:
         return ()
-    if not isinstance(raw, list) or not all(isinstance(item, str) for item in raw):
-        raise MalformedCaptionResponse(f"languages가 문자열 배열이 아니다: {raw!r}")
-    return tuple(raw)
+    if not isinstance(raw, list):
+        raise MalformedCaptionResponse(f"languages가 배열이 아니다: {raw!r}")
+    codes: list[str] = []
+    kinds: set[str] = set()
+    for item in raw:
+        if isinstance(item, Mapping):
+            code = item.get("code")
+            if not isinstance(code, str) or not code.strip():
+                raise MalformedCaptionResponse(f"languages 항목에 문자열 code가 없다: {item!r}")
+            kinds.add("object")
+            codes.append(code)
+        elif isinstance(item, str):
+            if not item.strip():
+                raise MalformedCaptionResponse("languages에 빈 문자열이 있다")
+            kinds.add("string")
+            codes.append(item)
+        else:
+            raise MalformedCaptionResponse(f"languages 항목을 이해할 수 없다: {item!r}")
+    if len(kinds) > 1:
+        raise MalformedCaptionResponse(
+            f"languages가 두 모양을 섞었다 — 어느 쪽 해석도 확정할 수 없다: {raw!r}"
+        )
+    return tuple(codes)
 
 
 def parse_timing_response(
