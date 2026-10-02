@@ -6,10 +6,12 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import math
 import threading
 import time
+import unicodedata
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
@@ -29,6 +31,8 @@ FIXTURE_KIND = "whisper"  # 자막을 만드는 호출
 VERIFY_KIND = "gpt"  # 대조용 호출. 출력을 바꾸지 못한다(규칙 5)
 RESCUE_KIND = "rescue"  # 되풀이 구간만 다시 묻는 호출. 같은 모델, 다른 온도(D27)
 ARBITER_KIND = "arbiter"  # 그 구간을 심판하는 두 번째 모델. 시각을 만들지 않는다
+CAPTION_TEXT_KIND = "caption-text"  # 파생 계층 문구 경로 — json `text`, 시각 없음(A7-1)
+CAPTION_TIMING_KIND = "caption-timing"  # 파생 계층 시간 경로 — verbose_json 세그먼트(A7-1)
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,6 +69,8 @@ _KIND_LABELS = {
     VERIFY_KIND: "검증",
     RESCUE_KIND: "재전사",
     ARBITER_KIND: "심판",
+    CAPTION_TEXT_KIND: "문구 전사",
+    CAPTION_TIMING_KIND: "시간 전사",
 }
 
 
@@ -586,6 +592,40 @@ class LiveTranscriber:
             for chunk, payload in zip(job.chunks, payloads, strict=True)
         ]
 
+    def send_request(
+        self,
+        request: AudioTranscriptionRequest,
+        cfg: Config,
+        *,
+        kind: str,
+        stem: str = "",
+        source: str = "",
+    ) -> dict[str, Any]:
+        """파생 계층의 공개 전송(A7-1) — 레거시 전사와 **같은 호출 지점**을 지난다.
+
+        검증은 클라이언트를 만들기 전에 끝난다. 400이 나도 인자를 몰래 떼고 다시
+        부르지 않는다 — 확인된 기능 등록표가 틀렸다는 신호라 값을 더 쓰지 않고
+        그대로 올린다(§11.8). 재시도·취소 게이트·관찰 훅은 `_retry` 한 길이다.
+        """
+        validate_transport_request(request)
+        client = self._client()
+        required, extras = _transport_fields(request)
+        chunk = request.chunk
+        what = f"{_KIND_LABELS.get(kind, kind)} 조각 {chunk.index}"
+        attempt: Callable[[], Any]
+        if self.observer is None:
+            attempt = partial(_create, client, chunk, required, extras)
+        else:
+            watch = _AttemptWatch(observer=self.observer, stem=stem, source=source)
+            attempt = _observed_call(
+                watch,
+                partial(_audio_attempt_meta, watch, chunk, kind, required, extras),
+                partial(_send_audio, client, required, extras),
+                prepare=partial(_open_audio, chunk),
+                gate=self.cancellation,
+            )
+        return _to_dict(self._retry(attempt, what, cfg))
+
 
 def _create(client: Any, chunk: Chunk, required: dict[str, Any], extras: dict[str, Any]) -> Any:
     """관찰이 없을 때의 한 덩어리 길 — 열어서 보내고 닫는다."""
@@ -708,6 +748,179 @@ def get_transcriber(
         cancellation=cancellation,
         observer=observer,
     )
+
+
+# ─────────────────────────────────────────────────────────────
+#  공개 전송 경계 (A7-1) — 파생 계층이 실제 호출에 쓰는 좁은 타입 요청
+# ─────────────────────────────────────────────────────────────
+#
+# 파생 계층(vlogsrt/project/raw)은 SDK를 모른다. 이 아래의 불변 요청형과
+# 전송 메서드가 **이미 존재하는** 유일한 호출 지점(_send_audio)을 그대로 쓴다 —
+# 호출 지점이 둘이면 출처가 둘이다(불변 규칙 1). 역할별 조합의 금지(문구 모델에
+# 세그먼트 시간 요청 등)는 파생 계층의 기능 등록표가 정하고, 여기는 모든 역할에
+# 참인 형태만 검사한다.
+
+TRANSPORT_RESPONSE_FORMATS = ("json", "verbose_json")
+"""전송 경계가 아는 응답 형식 둘뿐이다 — srt·vtt는 어떤 역할에도 못 실는다."""
+
+TRANSPORT_TIMESTAMP_GRANULARITIES = ("segment", "word")
+"""timestamp_granularities의 API enum. word는 별도 계약이 필요하다(§11.3)."""
+
+
+class UnsupportedTranscriptionRequest(ValueError):
+    """전송 요청의 형태가 계약을 어긴다 — 호출 한 번도 나가기 전에 닫힌다."""
+
+
+@dataclass(frozen=True, slots=True)
+class AudioTranscriptionRequest:
+    """파생 계층이 실제 호출에 실을 수 있는 인자 전부 — 이 칸 밖은 없다.
+
+    `logprobs`를 보낼 칸이 아예 없다. `response_format`은 확인된 두 형식만
+    받는다(아래 검사). 문구 어댑터는 힌트 칸만 쓰고 시간 어댑터는 세그먼트
+    입자 칸만 쓴다 — 힌트가 시간 요청에 실리는 일은 어댑터 구조로 막힌다.
+    """
+
+    chunk: Chunk
+    model: str
+    response_format: str
+    languages: tuple[str, ...] = ()
+    keywords: tuple[str, ...] = ()
+    prompt: str = ""
+    timestamp_granularities: tuple[str, ...] = ()
+    temperature: float | None = None
+
+
+def transport_request_problems(request: AudioTranscriptionRequest) -> list[str]:
+    """모든 역할에 참인 형태 검사. 역할별 조합은 등록표 계층의 몫이다(A7-1)."""
+    problems: list[str] = []
+    if not request.model.strip():
+        problems.append("모델이 비어 있다")
+    if request.response_format not in TRANSPORT_RESPONSE_FORMATS:
+        problems.append(
+            f"응답 형식 {request.response_format!r}는 전송 계약에 없다 — srt·vtt는 못 실는다"
+        )
+    problems += _hint_shape_problems(request.languages, request.keywords, request.prompt)
+    problems += _granularity_problems(request)
+    if request.temperature is not None and not math.isfinite(request.temperature):
+        problems.append("온도가 유한 숫자가 아니다")
+    if not _finite_number(request.chunk.offset) or not _finite_number(request.chunk.duration):
+        problems.append(f"조각 {request.chunk.index} 좌표가 유한 숫자가 아니다")
+    return problems
+
+
+def _hint_shape_problems(
+    languages: tuple[str, ...], keywords: tuple[str, ...], prompt: str
+) -> list[str]:
+    """힌트는 전송 전에 검사한다 — 줄바꿈·제어문자는 못 넣는다(§11.4)."""
+    problems: list[str] = []
+    for label, values in (("예상 언어", languages), ("고유명사 힌트", keywords)):
+        for value in values:
+            if not value.strip():
+                problems.append(f"{label}에 빈 문자열이 있다")
+            elif any(unicodedata.category(char).startswith("C") for char in value):
+                problems.append(f"{label}에 줄바꿈·제어문자가 있다")
+    if prompt and any(unicodedata.category(char).startswith("C") for char in prompt):
+        problems.append("문맥 힌트에 줄바꿈·제어문자가 있다")
+    return problems
+
+
+def _granularity_problems(request: AudioTranscriptionRequest) -> list[str]:
+    """입자는 API enum 안이고 verbose_json과만 짝한다 — json+입자는 서버가 거절한다."""
+    problems = [
+        f"시간 입자 {granularity!r}는 API enum에 없다"
+        for granularity in request.timestamp_granularities
+        if granularity not in TRANSPORT_TIMESTAMP_GRANULARITIES
+    ]
+    if request.timestamp_granularities and request.response_format != "verbose_json":
+        problems.append("시간 입자는 verbose_json과만 함께 보낼 수 있다")
+    return problems
+
+
+def validate_transport_request(request: AudioTranscriptionRequest) -> None:
+    """문제가 하나라도 있으면 호출 전에 끝난다 — 유료 호출은 깨진 요청에 값을 쓰지 않는다."""
+    problems = transport_request_problems(request)
+    if problems:
+        raise UnsupportedTranscriptionRequest("전송 요청이 계약을 어긴다: " + "; ".join(problems))
+
+
+_SDK_NATIVE_HINT_CACHE: tuple[str, ...] | None = None
+"""프로세스마다 한 번만 묻는다 — 설치된 SDK가 languages·keywords를 정식 인자로 받는가."""
+
+
+def sdk_native_hint_params() -> tuple[str, ...]:
+    """설치된 SDK가 정식 인자로 받는 힌트 칸 — 3.8.0 실측으로 둘 다 정식이다.
+
+    정식 인자가 없는 옛 버전에서는 공식 안내의 `extra_body` 길로 보낸다. 어느
+    한쪽만 쓰므로 같은 필드가 두 경로로 중복 전달되는 일은 없다(§11.4).
+    """
+    global _SDK_NATIVE_HINT_CACHE
+    if _SDK_NATIVE_HINT_CACHE is None:
+        _SDK_NATIVE_HINT_CACHE = _probe_sdk_native_hint_params()
+    return _SDK_NATIVE_HINT_CACHE
+
+
+def _probe_sdk_native_hint_params() -> tuple[str, ...]:
+    import openai  # 지연 import — openai을 얻는 유일한 파일이다(불변 규칙 5)
+
+    try:
+        signature = inspect.signature(openai.resources.audio.transcriptions.Transcriptions.create)
+    except (AttributeError, TypeError, ValueError):
+        # 인터페이스를 들여다볼 수 없는 빌드에서 정식 인자라고 단정하면 안 된다 —
+        # 문서화된 extra_body 길이 안전하다. 실패를 숨기는 게 아니라 보수적 선택이다.
+        return ()
+    return tuple(name for name in ("languages", "keywords") if name in signature.parameters)
+
+
+def _transport_fields(request: AudioTranscriptionRequest) -> tuple[dict[str, Any], dict[str, Any]]:
+    """요청을 뺄 수 없는 인자와 부가 인자로 가른다. 빈 힌트는 필드째 뺀다(§11.4)."""
+    required = {"model": request.model, "response_format": request.response_format}
+    extras: dict[str, Any] = {}
+    if request.temperature is not None:
+        extras["temperature"] = request.temperature
+    if request.timestamp_granularities:
+        extras["timestamp_granularities"] = list(request.timestamp_granularities)
+    extras.update(_hint_fields(request.languages, request.keywords, request.prompt))
+    return required, extras
+
+
+def _hint_fields(
+    languages: tuple[str, ...], keywords: tuple[str, ...], prompt: str
+) -> dict[str, Any]:
+    """힌트 필드 조립 — SDK 정식 인자 또는 extra_body, 한쪽만(§11.4).
+
+    `prompt`는 옛 SDK에서도 정식 인자다. languages·keywords만 SDK 버전에 따라
+    갈린다. 비어 있으면 아예 실리지 않는다.
+    """
+    native = frozenset(sdk_native_hint_params())
+    fields: dict[str, Any] = {}
+    body: dict[str, Any] = {}
+    for name, values in (("languages", languages), ("keywords", keywords)):
+        if not values:
+            continue
+        packed = list(values)
+        if name in native:
+            fields[name] = packed
+        else:
+            body[name] = packed
+    if prompt:
+        fields["prompt"] = prompt
+    if body:
+        fields["extra_body"] = body
+    return fields
+
+
+class TranscriptionSender(Protocol):
+    """파생 계층이 보는 좁은 전송 경계 — 구현체는 LiveTranscriber와 시험 픽스처다."""
+
+    def send_request(
+        self,
+        request: AudioTranscriptionRequest,
+        cfg: Config,
+        *,
+        kind: str,
+        stem: str = "",
+        source: str = "",
+    ) -> dict[str, Any]: ...
 
 
 # ─────────────────────────────────────────────────────────────

@@ -391,3 +391,63 @@ def test_the_json_roundtrip_is_fail_closed(
     payload = mutate(raw_workflow_config_to_json(RawWorkflowConfig()))
     with pytest.raises(ValueError, match=expected_fragment):
         raw_workflow_config_from_json(payload)
+
+
+# A0/A1에서 수락된 저장 설정의 글자 그대로의 스냅샷이다. 데이터 계약에 칸을
+# 더하는 순간 이 문자열은 더 이상 열리지 않는다 — 그때는 마이그레이션을 먼저
+# 정의하고 이 고정 값을 갱신해야 한다(A7-1은 이 파일의 칸을 건드리지 않았다).
+ACCEPTED_SETTINGS_JSON = """{
+  "caption": {
+    "allow_guessed_timestamps": false,
+    "allow_silent_model_fallback": false,
+    "keywords": [],
+    "languages": [
+      "ko"
+    ],
+    "profile": "latest_openai_srt",
+    "schema_version": "raw-caption/v2",
+    "text_response_format": "json",
+    "timestamp_granularities": [
+      "segment"
+    ],
+    "timing_provider": "whisper_verbose_json",
+    "timing_response_format": "verbose_json"
+  },
+  "models": {
+    "luna_model": "gpt-6-luna",
+    "text_model": "gpt-transcribe",
+    "timing_model": "whisper-1"
+  },
+  "network_mode": "offline",
+  "pricing": {
+    "checked_at": "2026-10-02",
+    "currency": "USD",
+    "text_per_minute": "0.0045",
+    "timing_per_minute": "0.006"
+  },
+  "registry": {
+    "account_access_status": "unverified",
+    "block_online_at_shutdown_date": true,
+    "docs_checked_at": "2026-10-02",
+    "integration_test_status": "not_run",
+    "revision": "openai-caption-2026-10-02-v1",
+    "source_urls": [
+      "https://developers.openai.com/api/docs/models/gpt-transcribe",
+      "https://developers.openai.com/api/docs/guides/transcription",
+      "https://developers.openai.com/api/reference/resources/audio/subresources/transcriptions/methods/create",
+      "https://developers.openai.com/api/docs/deprecations",
+      "https://developers.openai.com/api/docs/models/whisper-1"
+    ],
+    "timing_deprecation_notice_date": "2026-08-26",
+    "timing_shutdown_date": "2027-02-26"
+  },
+  "require_explicit_authorization": true,
+  "workflow_schema_version": "raw-workspace/v1"
+}"""
+
+
+def test_accepted_saved_settings_json_still_round_trips() -> None:
+    """수락된 저장 설정은 A7-1 이후에도 그대로 열린다 — JSON 호환이 깨지면 여기서 먼저 울린다."""
+    config = raw_workflow_config_from_json(ACCEPTED_SETTINGS_JSON)
+    assert config == RawWorkflowConfig()
+    assert raw_workflow_config_to_json(config) == ACCEPTED_SETTINGS_JSON
