@@ -10,7 +10,9 @@
   못한다(§7.5).
 - 실제 호출은 `vlogsrt/transcribe.request_luna_vision`의 승인형 경계 하나뿐이다.
   승인은 출처·설정 지문·범위·모델·예산을 묶은 `OnlineAnalysisApproval`이며
-  오프라인 설정이 항상 우선한다(§14.3).
+  오프라인 설정이 항상 우선한다(§14.3). 실제 전송 응답자는 `validated_luna_responder`가
+  승인 문을 통과해 만든 **검증 문맥** 없이는 존재할 수 없다 — 미승인·미검증
+  경로가 전송에 닿는 길이 애초에 없다.
 
 비용은 추정만 존재한다. Luna 단가는 미확인이며 0원으로 계산하지 않는다 —
 정직한 `unknown`이거나 사용자 제공 상한일 뿐이다(§14.3).
@@ -30,9 +32,13 @@ from typing import Protocol
 from vlogsrt.project.raw.analysis_config import (
     UNDERSTANDING_SCHEMA_VERSION,
     RawUnderstandingSettings,
+    validate_understanding_settings,
 )
 from vlogsrt.project.raw.config import RawWorkflowConfig, validate_raw_workflow_config
 from vlogsrt.project.raw.understanding import (
+    EXECUTION_MODE_LIVE,
+    EXECUTION_MODE_MIXED,
+    EXECUTION_MODE_REPLAY,
     AnalysisWindow,
     AsrEvidence,
     BoundaryCandidate,
@@ -53,6 +59,13 @@ LUNA_OUTPUT_SCHEMA_NAME = "raw_understanding_window_v1"
 ANNOTATION_ACCEPTED = "accepted"
 ANNOTATION_REJECTED = "rejected"
 ANNOTATION_FAILED = "failed"
+
+ORIGIN_LIVE = "live"
+ORIGIN_REPLAY = "replay"
+LIVE_ORIGINS = frozenset({ORIGIN_LIVE, EXECUTION_MODE_LIVE})
+"""판정 근원 문자열 중 실제 호출을 뜻하는 철자들 — 문서 모드 파생이 본다."""
+REPLAY_ORIGINS = frozenset({ORIGIN_REPLAY, EXECUTION_MODE_REPLAY})
+"""판정 근원 문자열 중 픽스처 재생을 뜻하는 철자들."""
 
 PRICE_UNKNOWN = "unknown"
 PRICE_USER_SUPPLIED = "user_supplied"
@@ -450,11 +463,13 @@ class ReplaySemanticResponder:
 
 @dataclass(frozen=True, slots=True)
 class LunaSemanticResponder:
-    """실제 Luna 호출 — 승인·예약 문을 지난 뒤에만 전송 경계를 연다.
+    """실제 Luna 호출 — **검증된 실행 문맥**이 없으면 존재 자체가 불가능하다.
 
     `request_luna_vision`의 `online=True`도 사람 승인의 결과로만 온다 — 이
-    객체가 승인을 만들지 않는다. 예약 게이트는 창마다 한 번(같은 창 재시도는
-    새 예약을 세지 않는다).
+    객체가 승인을 만들지 않는다. 문맥은 `validated_luna_responder`가
+    `require_online_approval`을 통과해서 만든 것만 받는다(위조·미검증 객체는
+    `AnalysisApprovalError`). 전송 순간마다 환경·설정·창 신원·페이로드 신원·
+    예약을 다시 본다 — 승인 때 열려 있어도 지금 어긋나면 안 간다.
     """
 
     client: object
@@ -463,13 +478,55 @@ class LunaSemanticResponder:
     gate: ReservationGate | None = None
     observer: RequestObserver | None = None
     cancellation: Callable[[], None] | None = None
+    context: OnlineLunaExecutionContext | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.approval, OnlineAnalysisApproval):
+            raise AnalysisApprovalError(
+                f"온라인 승인 레코드가 아니다: {self.approval!r} — 전송 경계를 만들 수 없다"
+            )
+        if not self.approval.approved:
+            raise AnalysisApprovalError(
+                "승인되지 않은 온라인 실행이다 — 전송 경계가 만들어지지 않는다"
+            )
+        if self.model != self.approval.luna_model:
+            raise AnalysisApprovalError(
+                f"응답자 모델({self.model!r})이 승인이 본 Luna 모델({self.approval.luna_model!r})"
+                "과 다르다"
+            )
+        if self.gate is None:
+            raise AnalysisApprovalError(
+                "예약 문 없이는 전송 경계를 만들 수 없다 — 요청 수 한도가 사라진다"
+            )
+        if not isinstance(self.context, OnlineLunaExecutionContext):
+            raise AnalysisApprovalError(
+                "검증된 실행 문맥 없이는 전송 경계를 만들 수 없다 — "
+                "validated_luna_responder로 만들어라"
+            )
 
     def respond(self, *, window_id: str, payload: Mapping[str, object]) -> Mapping[str, object]:
         blocked = online_env_blocked()  # 이중 문 — 승인 때 열려도 지금 닫혀 있으면 안 간다
         if blocked is not None:
             raise AnalysisApprovalError(blocked)
-        if self.gate is not None:
-            self.gate.reserve(count=1, key=window_id)
+        context = self.context
+        assert context is not None  # __post_init__이 보증한다 — 타입 좁히기만 한다
+        if context.settings.network_mode != "online":
+            raise AnalysisApprovalError(
+                f"네트워크 모드가 {context.settings.network_mode!r}다 — 전송 순간의 문이 닫혀 있다"
+            )
+        expected = context.request_sha256s.get(window_id)
+        if expected is None:
+            raise AnalysisApprovalError(
+                f"승인·검증된 창이 아니다: {window_id!r} — 이 실행 문맥에 없는 창이다"
+            )
+        if luna_request_sha256(self.model, payload) != expected:
+            raise AnalysisApprovalError(
+                f"페이로드가 검증된 요청 신원과 다르다: {window_id!r} — "
+                "바뀐 증거·위조 페이로드로는 보낼 수 없다"
+            )
+        gate = self.gate
+        assert gate is not None  # 위와 같다
+        gate.reserve(count=1, key=window_id)
         return request_luna_vision(
             self.client,
             model=self.model,
@@ -494,6 +551,10 @@ def annotate_windows(
     기록이고 보수적 유지의 재료다(§7.6). 조립 오류는 여기서 닫는다: 깨진 증거로
     유료 호출이 나가는 일이 없어야 한다.
     """
+    if origin not in LIVE_ORIGINS | REPLAY_ORIGINS:
+        raise LunaEvidenceError(
+            f"판정 근원을 알 수 없다: {origin!r} — 문서의 실행 모드가 거짓말을 하게 된다"
+        )
     annotations: list[SemanticAnnotation] = []
     for evidence in evidence_windows:
         payload = build_luna_payload(evidence, settings)
@@ -633,6 +694,8 @@ class CountingReservationGate:
         self.remaining = self.budget.max_luna_requests
 
     def reserve(self, *, count: int, key: str) -> None:
+        if isinstance(count, bool) or not isinstance(count, int) or count < 1:
+            raise ValueError(f"예약 수는 1 이상 정수다: {count!r}")
         if key in self.keys:
             return
         if count > self.remaining:
@@ -728,6 +791,102 @@ def require_online_approval(
         raise AnalysisApprovalError("승인 예산의 Luna 요청 한도를 창 수가 넘는다")
 
 
+@dataclass(frozen=True, slots=True)
+class OnlineLunaExecutionContext:
+    """검증을 마친 온라인 실행 문맥 — 전송 경계가 세워지는 유일한 근거.
+
+    승인·설정·원본·창 계획이 서로 일치함을 **만들 때 한 번** 증명하고(공장이
+    `require_online_approval`을 지나게 한다), 창마다 요청 신원(모델+페이로드
+    해시)을 얼어붙은 기록으로 남긴다. 전송 순간의 재검사는 이 기록과 실제
+    요청을 대조한다 — 문맥 없는 전송, 문맥과 다른 전송이 모두 닫힌다.
+    """
+
+    settings: RawWorkflowConfig
+    understanding: RawUnderstandingSettings
+    audio: SelectedAudio
+    plan: WindowPlan
+    approval: OnlineAnalysisApproval
+    evidence_windows: tuple[WindowEvidence, ...]
+    request_sha256s: Mapping[str, str]
+    gate: ReservationGate
+    fingerprint: str
+
+    def __post_init__(self) -> None:
+        if not self.approval.approved:
+            raise AnalysisApprovalError("승인되지 않은 실행이다 — 검증 문맥이 만들어지지 않는다")
+        if self.gate is None:
+            raise AnalysisApprovalError("예약 문 없이는 검증 문맥이 만들어지지 않는다")
+        window_ids = {evidence.window.window_id for evidence in self.evidence_windows}
+        if set(self.request_sha256s) != window_ids:
+            raise AnalysisApprovalError(
+                "창마다 요청 신원이 있어야 한다 — 비어 있거나 남는 신원은 계약 위반이다"
+            )
+
+
+def validated_luna_responder(
+    *,
+    client: object,
+    settings: RawWorkflowConfig,
+    understanding: RawUnderstandingSettings,
+    audio: SelectedAudio,
+    plan: WindowPlan,
+    utterances: Sequence[UtteranceEvidence],
+    frames: FrameSamplingResult,
+    approval: OnlineAnalysisApproval,
+    gate: ReservationGate | None = None,
+    observer: RequestObserver | None = None,
+    cancellation: Callable[[], None] | None = None,
+) -> LunaSemanticResponder:
+    """검증된 온라인 실행 응답자를 만든다 — 승인 문을 통과해서만 존재한다.
+
+    지문은 여기서 다시 계산한다(호출자가 말하는 값이 아니라 실행 입력의
+    값이다). 환경·설정·승인의 어긋남은 `AnalysisApprovalError`로 닫히고,
+    예약 문은 기본으로 승인 예산의 `CountingReservationGate`다 — 문맥에
+    예약 없는 길이 없다. 창 증거는 문맥에 얼어붙으니 호출자는
+    `responder.context.evidence_windows`를 그대로 `annotate_windows`에
+    넘기면 페이로드 신원이 어긋나지 않는다.
+    """
+    validate_understanding_settings(understanding)
+    evidence_windows = window_evidence(plan, frames, utterances)
+    fingerprint = analysis_fingerprint(
+        audio=audio,
+        plan=plan,
+        settings=understanding,
+        asr_model=settings.models.timing_model,
+        luna_model=settings.models.luna_model,
+    )
+    require_online_approval(
+        approval, settings=settings, audio=audio, plan=plan, fingerprint=fingerprint
+    )
+    bounded_gate = gate if gate is not None else CountingReservationGate(approval.budget)
+    request_sha256s = {
+        evidence.window.window_id: luna_request_sha256(
+            settings.models.luna_model, build_luna_payload(evidence, understanding)
+        )
+        for evidence in evidence_windows
+    }
+    context = OnlineLunaExecutionContext(
+        settings=settings,
+        understanding=understanding,
+        audio=audio,
+        plan=plan,
+        approval=approval,
+        evidence_windows=evidence_windows,
+        request_sha256s=request_sha256s,
+        gate=bounded_gate,
+        fingerprint=fingerprint,
+    )
+    return LunaSemanticResponder(
+        client=client,
+        model=settings.models.luna_model,
+        approval=approval,
+        gate=bounded_gate,
+        observer=observer,
+        cancellation=cancellation,
+        context=context,
+    )
+
+
 # ─────────────────────────────────────────────────────────────
 #  지문 — 캐시와 승인의 열쇠
 # ─────────────────────────────────────────────────────────────
@@ -817,6 +976,31 @@ def annotation_json(annotation: SemanticAnnotation) -> dict[str, object]:
     }
 
 
+def document_execution_mode(annotations: Sequence[SemanticAnnotation]) -> str:
+    """실행 증거에서 문서의 실행 모드를 내린다 — 설정이 아니라 증거가 말한다.
+
+    호출이 없으면(빈 판정) replay다. 전부 실제 호출이면 live, 전부 재생이면
+    replay, 섞였으면 섞였다고 말한다 — 재생을 live로 표시하는 길은 없다(§14.3).
+    근원을 모르는 판정은 진실을 말할 수 없으므로 여기서 닫는다.
+    """
+    live = False
+    replay = False
+    for annotation in annotations:
+        if annotation.origin in LIVE_ORIGINS:
+            live = True
+        elif annotation.origin in REPLAY_ORIGINS:
+            replay = True
+        else:
+            raise LunaEvidenceError(
+                f"판정 근원을 알 수 없다: {annotation.window_id} origin={annotation.origin!r}"
+            )
+    if live and replay:
+        return EXECUTION_MODE_MIXED
+    if live:
+        return EXECUTION_MODE_LIVE
+    return EXECUTION_MODE_REPLAY
+
+
 def stage1_document(
     *,
     audio: SelectedAudio,
@@ -830,10 +1014,10 @@ def stage1_document(
     workflow: RawWorkflowConfig,
     fingerprint: str,
 ) -> dict[str, object]:
-    """첫 단계 문서를 조립한다 — 실행 모드는 설정이 말한다(replay/live).
+    """첫 단계 문서를 조립한다 — 실행 모드는 판정의 근원 증거가 말한다.
 
-    `network_mode`가 online이어도 실제 호출이 없었다면 문서는 replay다 — 이
-    함수는 기록의 진실만 말한다.
+    `network_mode`가 online이어도 실제 호출이 없었다면(빈 판정·재생 판정)
+    문서는 replay다. 설정은 모델 이름만 말한다 — 기록의 진실은 실행이 정한다.
     """
     return stage1_evidence_document(
         audio=audio,
@@ -849,5 +1033,5 @@ def stage1_document(
         },
         prompt_revision=settings.prompt_revision,
         fingerprint=fingerprint,
-        execution_mode="online_live" if workflow.network_mode == "online" else "offline_replay",
+        execution_mode=document_execution_mode(annotations),
     )

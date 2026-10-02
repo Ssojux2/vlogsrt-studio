@@ -1234,6 +1234,19 @@ def segmentation_json(proposal: SegmentationProposal) -> dict[str, object]:
     }
 
 
+EXECUTION_MODE_REPLAY = "offline_replay"
+"""실행 증거에 실제 호출이 없다 — 픽스처 재생만 있었거나 호출이 아직 없다."""
+
+EXECUTION_MODE_LIVE = "online_live"
+"""실행 증거 전부가 실제 호출이다."""
+
+EXECUTION_MODE_MIXED = "mixed_live_and_replay"
+"""실행 증거가 섞여 있다 — 재생 판정과 실제 호출 판정이 같은 기록에 있다."""
+
+EXECUTION_MODES = frozenset({EXECUTION_MODE_REPLAY, EXECUTION_MODE_LIVE, EXECUTION_MODE_MIXED})
+"""실행 모드의 값역 — 이 세 값 밖은 기록 자체가 계약 위반이다."""
+
+
 def stage1_evidence_document(
     *,
     audio: SelectedAudio,
@@ -1252,10 +1265,10 @@ def stage1_evidence_document(
 
     SRT·VTT는 없다(§7.1): 이 문서가 전부다. `annotations`는 이미 JSON 모양으로
     변환된 Luna 판정(`understanding_luna.annotation_json`)이고 `execution_mode`는
-    `offline_replay`·`online_live` 둘뿐이다 — 재생을 실제 성공으로 표시하지
-    않는다(§14.3).
+    실행 **증거**에서 내린 값 세 개뿐이다 — 재생을 실제 성공으로 표시하지
+    않는다(§14.3). 섞인 실행은 섞였다고 말한다.
     """
-    if execution_mode not in {"offline_replay", "online_live"}:
+    if execution_mode not in EXECUTION_MODES:
         raise AnalysisPlanningError(f"실행 모드 값이 계약 밖이다: {execution_mode!r}")
     return {
         "stage": "understanding_stage1",

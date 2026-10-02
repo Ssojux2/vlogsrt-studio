@@ -1,8 +1,8 @@
-"""A4 Luna 의미 판정 — TEXT+IMAGE 증거, 제한 JSON, 승인·예산·지문.
+"""A4 Luna 의미 판정 — TEXT+IMAGE 증거, 제한 JSON, 승인·예산·지문·전송 경계.
 
 `docs/plans/2026-10-02-raw-video-browser-v2.md` §7.2·§7.5·§14.2·§14.3. 실제
-호출은 없다 — 응답자는 가짜이고 승인 문은 거부 경로만 시험한다(유료 실기는
-루트의 별도 승인 뒤 NOT_RUN으로 남는다).
+호출은 없다 — 전송 경로(`request_luna_vision`)는 모듈 경계에서 가로채 가짜로
+돌려준다(유료 실기는 루트의 별도 승인 뒤 NOT_RUN으로 남는다).
 """
 
 from __future__ import annotations
@@ -46,11 +46,13 @@ from vlogsrt.project.raw.understanding_luna import (
     annotation_cache_document,
     build_luna_payload,
     cacheable,
+    document_execution_mode,
     estimate_luna_cost,
     luna_output_schema,
     parse_luna_response,
     require_online_approval,
     stage1_document,
+    validated_luna_responder,
     verdicts_from_annotations,
     window_evidence,
 )
@@ -130,8 +132,10 @@ def accepted_body(evidence: WindowEvidence, **overrides: Any) -> dict[str, Any]:
         "speech_summary": "도착 인사",
         "visual_summary": "실내",
         "scene_tags": ["talking"],
-        "evidence_ids": [evidence.utterances[0].utterance_id],
-        "suggested_boundary_ids": [evidence.candidates[0].boundary_id],
+        "evidence_ids": [evidence.utterances[0].utterance_id] if evidence.utterances else [],
+        "suggested_boundary_ids": (
+            [evidence.candidates[0].boundary_id] if evidence.candidates else []
+        ),
         "editing_notes": [],
         "needs_review": False,
         "uncertainties": [],
@@ -504,8 +508,9 @@ def test_env_offline_blocks_even_an_online_config(
 ) -> None:
     """VLOGSRT_OFFLINE이 사람의 손으로 열리기 전까지 유료 호출은 없다(§14.3).
 
-    설정이 online이고 승인이 전부 일치해도 환경이 오프라인(기본)이면 문은
-    닫혀 있다 — UI가 설정을 바꿔서 환경을 우회하는 길이 없다.
+    설정이 online이고 승인이 전부 일치해도 환경이 오프라인(기본)이면 승인
+    문도, 검증 문맥 공장도 닫혀 있다 — UI가 설정을 바꿔서 환경을 우회하는
+    길이 없다.
     """
     audio = make_audio(tmp_path)
     utterances = [make_utterance(0, 1.0, 4.0)]
@@ -514,8 +519,6 @@ def test_env_offline_blocks_even_an_online_config(
         audio=audio, plan=plan, settings=SETTINGS, asr_model="m", luna_model="l"
     )
     granted, granted_audio, granted_plan = approval(tmp_path, fingerprint=fingerprint)
-    from vlogsrt.project.raw.understanding_luna import LunaSemanticResponder
-
     with pytest.raises(AnalysisApprovalError, match="VLOGSRT_OFFLINE"):
         require_online_approval(
             granted,
@@ -524,9 +527,264 @@ def test_env_offline_blocks_even_an_online_config(
             plan=granted_plan,
             fingerprint=fingerprint,
         )
-    responder = LunaSemanticResponder(client=object(), model="l", approval=granted)
     with pytest.raises(AnalysisApprovalError, match="VLOGSRT_OFFLINE"):
-        responder.respond(window_id="window_000000", payload={})
+        validated_luna_responder(
+            client=object(),
+            settings=online_workflow(),
+            understanding=SETTINGS,
+            audio=granted_audio,
+            plan=granted_plan,
+            utterances=utterances,
+            frames=FrameSamplingResult((), ()),
+            approval=granted,
+        )
+
+
+# ─────────────────────────────────────────────────────────────
+# 전송 경계 — 검증 문맥 없이는 응답자 자체가 존재하지 않는다
+# ─────────────────────────────────────────────────────────────
+
+
+def online_run(
+    tmp_path: Path, *, seconds: float = 20.0
+) -> tuple[SelectedAudio, Any, list[UtteranceEvidence], str]:
+    """검증 문맥 시험용 실행 재료 — 실제 레지스트리 모델로 지문을 잰다."""
+    audio = make_audio(tmp_path, seconds=seconds)
+    both = [make_utterance(0, 1.0, 4.0), make_utterance(1, 16.0, 18.0)]
+    utterances = both[: 2 if seconds > 16 else 1]
+    plan = stage1.plan_windows(audio, utterances, SETTINGS, None, video_status=stage1.VIDEO_ABSENT)
+    workflow = online_workflow()
+    fingerprint = analysis_fingerprint(
+        audio=audio,
+        plan=plan,
+        settings=SETTINGS,
+        asr_model=workflow.models.timing_model,
+        luna_model=workflow.models.luna_model,
+    )
+    return audio, plan, utterances, fingerprint
+
+
+def matched_approval(
+    audio: SelectedAudio, plan: Any, fingerprint: str, *, approved: bool = True
+) -> OnlineAnalysisApproval:
+    """실행 재료와 전부 일치하는 승인 — 어긋남 시험의 출발점."""
+    return OnlineAnalysisApproval(
+        approved=approved,
+        source_sha256=audio.source_sha256,
+        audio_stream_index=audio.audio_stream_index,
+        sample_count=audio.sample_count,
+        window_count=len(plan.windows),
+        fingerprint=fingerprint,
+        asr_model=RawWorkflowConfig().models.timing_model,
+        luna_model=RawWorkflowConfig().models.luna_model,
+        budget=AnalysisBudget(max_luna_requests=len(plan.windows), max_asr_chunks=9),
+    )
+
+
+def test_responder_cannot_exist_without_a_validated_context(tmp_path: Path) -> None:
+    """미승인·모델 어긋남·예약 문 없음·검증 문맥 없음·위조 문맥 — 응답자가
+    만들어지지 않는다(전송 경계보다 앞선 문이다)."""
+    audio, plan, _, fingerprint = online_run(tmp_path)
+    granted = matched_approval(audio, plan, fingerprint)
+    gate = CountingReservationGate(granted.budget)
+    with pytest.raises(AnalysisApprovalError, match="승인되지 않은"):  # 루트 probe 경로 그대로
+        luna.LunaSemanticResponder(object(), "luna-role", replace(granted, approved=False))
+    with pytest.raises(AnalysisApprovalError, match="승인되지 않은"):
+        luna.LunaSemanticResponder(
+            object(), granted.luna_model, replace(granted, approved=False), gate=gate
+        )
+    with pytest.raises(AnalysisApprovalError, match="다르다"):  # 모델이 승인과 다르다
+        luna.LunaSemanticResponder(object(), "other-luna", granted, gate=gate)
+    with pytest.raises(AnalysisApprovalError, match="예약 문"):
+        luna.LunaSemanticResponder(object(), granted.luna_model, granted)
+    with pytest.raises(AnalysisApprovalError, match="실행 문맥"):
+        luna.LunaSemanticResponder(object(), granted.luna_model, granted, gate=gate)
+    with pytest.raises(AnalysisApprovalError, match="실행 문맥"):  # 위조 문맥
+        luna.LunaSemanticResponder(
+            object(), granted.luna_model, granted, gate=gate, context=object()
+        )
+
+
+def test_validated_responder_sends_bounded_fake_live_requests(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """검증 문맥을 지난 응답자만 전송한다 — 가짜 전송 경로로 실제 호출 없이 증명.
+
+    창마다 페이로드 신원이 검증된 그대로 나가고(online=True), 예약은 창 수만큼만
+    열리며, 예산이 닫히면 새 창은 문 앞에서 멈춘다.
+    """
+    env_online(monkeypatch)
+    audio, plan, utterances, fingerprint = online_run(tmp_path)
+    granted = matched_approval(audio, plan, fingerprint)
+    responder = validated_luna_responder(
+        client=object(),
+        settings=online_workflow(),
+        understanding=SETTINGS,
+        audio=audio,
+        plan=plan,
+        utterances=utterances,
+        frames=FrameSamplingResult((), ()),
+        approval=granted,
+    )
+    context = responder.context
+    sent: list[dict[str, Any]] = []
+    by_id = {item.window.window_id: item for item in context.evidence_windows}
+
+    def fake_send(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        sent.append(kwargs)
+        instruction = kwargs["payload"]["input"][0]["content"][0]["text"]
+        window_id = next(
+            line.split(":", 1)[1].strip()
+            for line in instruction.splitlines()
+            if line.startswith("window_id:")
+        )
+        return respond(accepted_body(by_id[window_id]))
+
+    monkeypatch.setattr(luna, "request_luna_vision", fake_send)
+    annotations = annotate_windows(
+        context.evidence_windows,
+        responder,
+        settings=SETTINGS,
+        model=online_workflow().models.luna_model,
+        origin="live",
+    )
+    assert all(item.status == luna.ANNOTATION_ACCEPTED for item in annotations)
+    assert len(sent) == len(context.evidence_windows)
+    assert all(call["online"] is True for call in sent)
+    assert all(call["model"] == online_workflow().models.luna_model for call in sent)
+    assert document_execution_mode(annotations) == "online_live"
+    gate = context.gate
+    assert isinstance(gate, CountingReservationGate)
+    assert gate.remaining == 0  # 창 수만큼만 — 예산이 정확히 닫힌다
+    assert responder.respond(  # 같은 창 재시도는 새 예약이 아니다
+        window_id=context.evidence_windows[0].window.window_id,
+        payload=build_luna_payload(context.evidence_windows[0], SETTINGS),
+    )
+    assert len(sent) == len(context.evidence_windows) + 1  # 재전송은 일어나도
+    assert gate.remaining == 0  # 예약은 두 번 세지 않는다
+
+
+def test_validated_responder_denies_foreign_windows_and_drifted_payloads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """승인·검증된 창이 아니거나 페이로드가 검증 때와 다르면 전송은 없다."""
+    env_online(monkeypatch)
+    audio, plan, utterances, fingerprint = online_run(tmp_path)
+    granted = matched_approval(audio, plan, fingerprint)
+    responder = validated_luna_responder(
+        client=object(),
+        settings=online_workflow(),
+        understanding=SETTINGS,
+        audio=audio,
+        plan=plan,
+        utterances=utterances,
+        frames=FrameSamplingResult((), ()),
+        approval=granted,
+    )
+    first = responder.context.evidence_windows[0]
+    sent: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        luna, "request_luna_vision", lambda *a, **k: sent.append(k) or {"output_text": "{}"}
+    )
+    payload = build_luna_payload(first, SETTINGS)
+    with pytest.raises(AnalysisApprovalError, match="승인·검증된 창"):
+        responder.respond(window_id="window_000999", payload=payload)
+    forged = {"input": [{"role": "user", "content": [{"type": "input_text", "text": "위조"}]}]}
+    with pytest.raises(AnalysisApprovalError, match="요청 신원과 다르다"):
+        responder.respond(window_id=first.window.window_id, payload=forged)
+    second = responder.context.evidence_windows[1]
+    with pytest.raises(AnalysisApprovalError, match="요청 신원과 다르다"):  # 남의 창 페이로드
+        responder.respond(
+            window_id=first.window.window_id,
+            payload=build_luna_payload(second, SETTINGS),
+        )
+    assert sent == []  # 세 길 모두 전송 경계 앞에서 닫혔다
+
+
+def test_budget_closes_the_send_boundary_mid_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """예약이 바닥나면 다음 창은 전송 경계 앞에서 멈춘다 — 문맥이 옳아도."""
+    env_online(monkeypatch)
+    audio, plan, utterances, fingerprint = online_run(tmp_path)
+    granted = matched_approval(audio, plan, fingerprint)
+    one_shot = CountingReservationGate(
+        AnalysisBudget(max_luna_requests=1, max_asr_chunks=9)
+    )  # 공유 게이트가 이미 대부분을 쓴 모양
+    responder = validated_luna_responder(
+        client=object(),
+        settings=online_workflow(),
+        understanding=SETTINGS,
+        audio=audio,
+        plan=plan,
+        utterances=utterances,
+        frames=FrameSamplingResult((), ()),
+        approval=granted,
+        gate=one_shot,
+    )
+    sent: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        luna, "request_luna_vision", lambda *a, **k: sent.append(k) or {"output_text": "{}"}
+    )
+    first, second = responder.context.evidence_windows[:2]
+    assert responder.respond(
+        window_id=first.window.window_id, payload=build_luna_payload(first, SETTINGS)
+    )
+    with pytest.raises(BudgetExhausted):
+        responder.respond(
+            window_id=second.window.window_id, payload=build_luna_payload(second, SETTINGS)
+        )
+    assert len(sent) == 1
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        "unapproved",
+        "fingerprint",
+        "source",
+        "stream",
+        "extent",
+        "window_count",
+        "budget",
+        "offline_config",
+    ],
+)
+def test_factory_denies_forged_or_drifted_contexts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tamper: str
+) -> None:
+    """승인이 본 것과 공장이 본 것이 다르면 검증 문맥은 만들어지지 않는다."""
+    env_online(monkeypatch)
+    audio, plan, utterances, fingerprint = online_run(tmp_path)
+    settings: RawWorkflowConfig = online_workflow()
+    granted = matched_approval(audio, plan, fingerprint)
+    if tamper == "unapproved":
+        granted = replace(granted, approved=False)
+    elif tamper == "fingerprint":
+        granted = replace(granted, fingerprint="0" * 64)
+    elif tamper == "source":
+        audio = replace(audio, source_sha256="b" * 64)
+    elif tamper == "stream":
+        audio = replace(audio, audio_stream_index=7)
+    elif tamper == "extent":
+        audio = replace(audio, sample_count=audio.sample_count - 16000)
+    elif tamper == "window_count":
+        granted = replace(granted, window_count=99)
+    elif tamper == "budget":
+        granted = replace(granted, budget=AnalysisBudget(max_luna_requests=1, max_asr_chunks=9))
+    else:
+        settings = RawWorkflowConfig()  # 오프라인 설정 — 공장이 닫는다
+    with pytest.raises(AnalysisApprovalError):
+        validated_luna_responder(
+            client=object(),
+            settings=settings,
+            understanding=SETTINGS,
+            audio=audio,
+            plan=plan,
+            utterances=utterances,
+            frames=FrameSamplingResult((), ()),
+            approval=granted,
+        )
 
 
 def test_unverified_registry_still_cannot_reach_the_gate(tmp_path: Path) -> None:
@@ -618,27 +876,90 @@ def test_rejected_annotations_never_enter_the_success_cache(tmp_path: Path) -> N
 # ─────────────────────────────────────────────────────────────
 
 
-def test_stage1_document_marks_replay_versus_live(tmp_path: Path) -> None:
-    """실행 모드는 설정이 말한다 — 재생을 실제 성공으로 표시하지 않는다(§14.3)."""
+def annotation_of(window_id: str, origin: str) -> SemanticAnnotation:
+    """실행 근원이 확정된 판정 — 문서 모드 파생의 재료."""
+    return SemanticAnnotation(
+        window_id=window_id,
+        status=luna.ANNOTATION_ACCEPTED,
+        request_sha256="r" * 64,
+        luna_model="l",
+        prompt_revision=SETTINGS.prompt_revision,
+        origin=origin,
+    )
+
+
+def test_stage1_document_mode_comes_from_execution_evidence(tmp_path: Path) -> None:
+    """실행 모드는 판정 근원 증거가 정한다 — 설정 online은 재생을 live로 못 박지 못한다."""
     audio, plan = full_plan(tmp_path)
     asr = AsrEvidence(request_id="run", sample_rate=stage1.PCM_SAMPLE_RATE, chunks=())
     utterances = [make_utterance(0, 1.0, 4.0)]
     frames = FrameSamplingResult((), ())
     verdicts = {"window_000000": WindowVerdict("window_000000", False, (), True, "replay")}
     segmentation = propose_segmentation(plan, verdicts, utterances)
-    common = {
-        "audio": audio,
-        "asr": asr,
-        "utterances": utterances,
-        "plan": plan,
-        "frames": frames,
-        "segmentation": segmentation,
-        "annotations": [],
-        "settings": SETTINGS,
-        "fingerprint": "f" * 64,
-    }
-    replay = stage1_document(workflow=RawWorkflowConfig(), **common)
-    live = stage1_document(workflow=online_workflow(), **common)
+
+    def document(
+        *, workflow: RawWorkflowConfig, annotations: tuple[SemanticAnnotation, ...]
+    ) -> Any:
+        return stage1_document(
+            audio=audio,
+            asr=asr,
+            utterances=utterances,
+            plan=plan,
+            frames=frames,
+            segmentation=segmentation,
+            annotations=annotations,
+            settings=SETTINGS,
+            workflow=workflow,
+            fingerprint="f" * 64,
+        )
+
+    # 루트 probe 그대로 — 설정이 online이어도 재생 판정은 replay다
+    replay = document(
+        workflow=online_workflow(), annotations=(annotation_of("window_000000", "replay"),)
+    )
     assert replay["execution_mode"] == "offline_replay"
+    # 호출이 없으면(빈 판정) online 설정과 무관하게 replay다
+    assert (
+        document(workflow=online_workflow(), annotations=())["execution_mode"] == "offline_replay"
+    )
+    # 실제 호출 판정만 live다 — 설정이 offline로 바뀌어도 증거가 이긴다
+    live = document(
+        workflow=RawWorkflowConfig(), annotations=(annotation_of("window_000000", "live"),)
+    )
     assert live["execution_mode"] == "online_live"
-    assert replay["models"]["asr"] == RawWorkflowConfig().models.timing_model
+    # 섞인 실행은 섞였다고 말한다 — 재생을 live로 묻는 길은 없다
+    mixed = document(
+        workflow=online_workflow(),
+        annotations=(
+            annotation_of("window_000000", "replay"),
+            annotation_of("window_000001", "live"),
+        ),
+    )
+    assert mixed["execution_mode"] == "mixed_live_and_replay"
+    assert live["models"]["asr"] == RawWorkflowConfig().models.timing_model
+
+
+def test_unknown_annotation_origin_cannot_reach_the_document(tmp_path: Path) -> None:
+    """근원을 모르는 판정은 진실을 말할 수 없다 — 조립과 파생 양쪽에서 닫는다."""
+    evidence = make_evidence(tmp_path)
+    replays = {evidence.window.window_id: respond(accepted_body(evidence))}
+    with pytest.raises(luna.LunaEvidenceError, match="판정 근원"):
+        annotate_windows(
+            (evidence,),
+            ReplaySemanticResponder(replays),
+            settings=SETTINGS,
+            model="l",
+            origin="cargo",
+        )
+    with pytest.raises(luna.LunaEvidenceError, match="판정 근원"):
+        document_execution_mode((annotation_of("window_000000", "cargo"),))
+
+
+def test_gate_rejects_non_integer_reservation_counts() -> None:
+    """예약 수는 엄격한 양의 정수다 — bool·0·음수·실수·문자열은 받지 않는다."""
+    gate = CountingReservationGate(AnalysisBudget(max_luna_requests=3, max_asr_chunks=9))
+    for bad in (True, 0, -1, 1.5, "1"):
+        with pytest.raises(ValueError):
+            gate.reserve(count=bad, key="window_000000")  # type: ignore[arg-type]
+    gate.reserve(count=2, key="window_000000")
+    assert gate.remaining == 1
