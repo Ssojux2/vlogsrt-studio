@@ -9,11 +9,20 @@
 
 from __future__ import annotations
 
+import hashlib
+import math
 import os
 import threading
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from fractions import Fraction
 from pathlib import Path
 
+from vlogsrt import preprocess
+from vlogsrt.project.raw import package as package_layout
+from vlogsrt.project.raw import runner as extract_runner
+from vlogsrt.project.raw import segmentation
 from vlogsrt.project.raw.config import (
     WORKFLOW_SCHEMA_VERSION,
     RawWorkflowConfig,
@@ -23,6 +32,7 @@ from vlogsrt.project.raw.ingest import (
     IngestConfirmation,
     IngestProposal,
     MediaInspect,
+    SourceInspection,
     confirm_ingest,
     ffprobe_media_inspector,
     reconfirm_ingest,
@@ -32,12 +42,18 @@ from vlogsrt.project.raw.ingest import (
 from vlogsrt.project.raw.jobs import JobContext, JobManager
 from vlogsrt.project.raw.models import (
     ACTIVE_JOB_STATUSES,
+    EXTRACT_PROFILES,
     INGEST_JOB_KIND,
     MEDIA_KINDS,
     MEDIA_SUFFIXES,
     ORDER_BASIS_USER_CONFIRMED,
+    SEGMENT_JOB_KIND,
+    SEGMENTATION_BASIS_DETERMINISTIC,
+    SEGMENTATION_BASIS_PLANNED,
     BrowseNotAllowedError,
     ByteRange,
+    ClipArtifact,
+    ExtractJobError,
     FolderEntry,
     FolderListing,
     GlobalOrderEntry,
@@ -51,21 +67,38 @@ from vlogsrt.project.raw.models import (
     MediaNotReadyError,
     MediaRegistration,
     MediaTargetChangedError,
+    OrderNotConfirmedError,
+    PackageError,
+    PackageRevision,
+    PackageSummary,
+    PlannedInterval,
+    PlanNotFoundError,
     RangeNotSatisfiableError,
     RawWorkspaceError,
     ResolvedMedia,
+    SegmentationError,
+    SegmentCoverage,
+    SegmentPlanEntry,
+    SegmentPlanSnapshot,
     SourceAsset,
     SourceOrderRevision,
     WorkspaceStatus,
 )
 from vlogsrt.project.raw.source_order import propose_global_order as _propose_global_order
-from vlogsrt.project.raw.workspace import DB_SCHEMA_VERSION, RawWorkspace
+from vlogsrt.project.raw.workspace import (
+    DB_SCHEMA_VERSION,
+    RawWorkspace,
+    new_segment_plan_revision_id,
+)
 
 __all__ = [
     # UI는 이 모듈만 가져갈 수 있다(정확 경로 예외) — 계약 오류도 여기서 다시 낸다.
     "ACTIVE_JOB_STATUSES",
     "BrowseNotAllowedError",
     "ByteRange",
+    "ClipArtifact",
+    "EXTRACT_PROFILES",
+    "ExtractJobError",
     "FolderEntry",
     "FolderListing",
     "GlobalOrderEntry",
@@ -85,11 +118,23 @@ __all__ = [
     "MediaNotReadyError",
     "MediaRegistration",
     "MediaTargetChangedError",
+    "OrderNotConfirmedError",
+    "PackageError",
+    "PackageRevision",
+    "PackageSummary",
+    "PlannedInterval",
+    "PlanNotFoundError",
     "RangeNotSatisfiableError",
     "RawWorkspaceError",
     "RawWorkspaceService",
     "ResolvedMedia",
+    "SEGMENT_JOB_KIND",
+    "SegmentCoverage",
+    "SegmentPlanEntry",
+    "SegmentPlanSnapshot",
+    "SegmentationError",
     "SourceAsset",
+    "SourceInspection",
     "SourceOrderRevision",
     "WorkspaceStatus",
     "browse_folder",
@@ -123,6 +168,21 @@ def _ingest_body(
 
     def body(context: JobContext) -> None:
         run_ingest_copy(context, workspace, confirmation)
+
+    return body
+
+
+def _extract_body(
+    workspace: RawWorkspace,
+    plan: SegmentPlanSnapshot,
+    package: PackageRevision,
+    assets: Mapping[str, SourceAsset],
+    handles: preprocess.RawClipHandles,
+) -> Callable[[JobContext], None]:
+    """추출 작업 본문 묶기 — 예약된 package와 계획을 즉시 묶는다(§14.1)."""
+
+    def body(context: JobContext) -> None:
+        extract_runner.run_segment_extraction(context, workspace, plan, package, assets, handles)
 
     return body
 
@@ -576,3 +636,318 @@ class RawWorkspaceService:
 
     def list_global_source_orders(self, root: Path) -> tuple[GlobalOrderRevision, ...]:
         return self._workspace(root).list_global_order_revisions()
+
+    # ── A3 — 결정적 분할 계획(확정 전체 순서 위의 불변 리비전) ──
+
+    def plan_segmentation(
+        self,
+        root: Path,
+        order_revision_id: str | None = None,
+        intervals: Mapping[str, Sequence[PlannedInterval]] | None = None,
+        tile_seconds: Fraction = segmentation.DEFAULT_TILE_SECONDS,
+    ) -> SegmentPlanSnapshot:
+        """확정된 전체 순서 위에서 원본별 시계를 잰 뒤 분할 계획 리비전을 만든다.
+
+        원본은 **지금 다시 검증한다**(크기·SHA-256 재독출) — 계획의 지문이 원본
+        내용을 묶으므로, 검증된 적 없거나 그 사이 바뀐 원본 위에 계획을 세우지
+        않는다(§14.2). 구간을 주면 그 격자로, 안 주면 균일 타일로 전체를 덮는다.
+        새 계획은 새 리비전일 뿐 옛 계획을 다시 쓰지 않는다(§6.5).
+        """
+        workspace = self._workspace(root)
+        revision = self._order_revision(root, order_revision_id)
+        planned = intervals or {}
+        unknown = sorted(set(planned) - {entry.asset_id for entry in revision.entries})
+        if unknown:
+            raise SegmentationError(
+                f"순서 리비전에 없는 자산에게 구간을 주었다: {', '.join(unknown[:3])}"
+            )
+        entries: list[SegmentPlanEntry] = []
+        coverage: list[SegmentCoverage] = []
+        clocks: dict[str, dict[str, object]] = {}
+        for order_entry in sorted(revision.entries, key=lambda item: item.ordinal):
+            asset = _verified_asset(workspace, order_entry.asset_id)
+            facts = _measured_source(workspace, asset)
+            spans, proof = segmentation.plan_segments(
+                asset_id=asset.asset_id,
+                batch_dir=order_entry.batch_dir,
+                source_order=order_entry.ordinal,
+                time_base=facts.clock.time_base,
+                presentation_origin_pts=facts.clock.first_pts,
+                frame_count=facts.clock.frame_count,
+                frame_duration=facts.clock.frame_duration,
+                exact_end_pts=facts.exact_end_pts,
+                intervals=planned.get(asset.asset_id),
+                order_revision_id=revision.revision_id,
+                tile_seconds=tile_seconds,
+            )
+            entries.extend(spans)
+            coverage.append(proof)
+            clocks[asset.asset_id] = _plan_fingerprint_inputs(asset, facts, spans)
+        snapshot = SegmentPlanSnapshot(
+            revision_id=new_segment_plan_revision_id(),
+            order_revision_id=revision.revision_id,
+            basis=SEGMENTATION_BASIS_PLANNED if planned else SEGMENTATION_BASIS_DETERMINISTIC,
+            entries=tuple(
+                sorted(entries, key=lambda item: (item.source_order, item.segment_order))
+            ),
+            coverage=tuple(coverage),
+            fingerprint=segmentation.segmentation_fingerprint(revision.revision_id, clocks),
+            created_at=_plan_timestamp(),
+        )
+        workspace.insert_segment_plan_revision(snapshot)
+        return snapshot
+
+    def segment_plan_revision(self, root: Path, revision_id: str) -> SegmentPlanSnapshot:
+        return self._workspace(root).segment_plan_revision(revision_id)
+
+    def list_segment_plan_revisions(self, root: Path) -> tuple[SegmentPlanSnapshot, ...]:
+        return self._workspace(root).list_segment_plan_revisions()
+
+    def latest_segment_plan(self, root: Path) -> SegmentPlanSnapshot | None:
+        revisions = self.list_segment_plan_revisions(root)
+        return revisions[-1] if revisions else None
+
+    # ── A3 — 순차 추출 작업 제출·재개 ───────────────────────────
+
+    def start_segment_extraction(
+        self,
+        root: Path,
+        plan_revision_id: str | None = None,
+        profile_name: str = "source_matched",
+        handles_before: Fraction = Fraction(0),
+        handles_after: Fraction = Fraction(0),
+    ) -> JobHandle:
+        """분할 계획을 실제 조각 폴더로 추출하는 작업을 제출한다 — API 없음(§14.3).
+
+        같은 지문(계획·프로파일·핸들·도구)의 완성된 package가 있으면 다시 만들지
+        않고 알린다. 진행 중이거나 실패한 package가 있으면 그 package를 이어
+        쓴다 — 같은 작업 재개가 조각 ID·번호를 유지하는 길이다(§6.3).
+        """
+        workspace = self._workspace(root)
+        snapshot = self._plan_snapshot(root, plan_revision_id)
+        profile = extract_runner.profile_for(profile_name)
+        assets = self._plan_assets(root, snapshot)
+        handles = _validated_handles(handles_before, handles_after)
+        fingerprint = extract_runner.extraction_fingerprint(
+            snapshot.fingerprint, profile.name, handles, preprocess.ffmpeg_provenance()
+        )
+        package = self._reusable_or_reserved_package(
+            workspace, snapshot, profile.name, handles, fingerprint
+        )
+        return self.submit_job(
+            root,
+            SEGMENT_JOB_KIND,
+            fingerprint,
+            _extract_body(workspace, snapshot, package, assets, handles),
+            total=len(snapshot.entries),
+        )
+
+    def retry_segment_extraction(self, root: Path, job_id: str) -> JobHandle:
+        """실패·중단된 추출의 명시적 재시도 — 같은 작업 ID·같은 지문으로 다시 붙는다.
+
+        계획·프로파일·핸들은 package 행에서 다시 만들고(`reconfirm_extraction`),
+        지문은 **지금의 도구 버전으로 다시 계산해** 기록과 맞춘다 — 도구가 바뀌었으면
+        재결합이 거부된다(다른 도구의 출력을 같은 package에 섞지 않는다).
+        """
+        workspace = self._workspace(root)
+        record = self.get_job(root, job_id)
+        if record.kind != SEGMENT_JOB_KIND:
+            raise ExtractJobError(f"추출 작업이 아니다: {job_id} ({record.kind})")
+        for package in workspace.list_package_revisions():
+            if package.job_fingerprint != record.input_fingerprint:
+                continue
+            plan, confirmed, handles = extract_runner.reconfirm_extraction(
+                workspace, package.package_dir
+            )
+            assets = self._plan_assets(root, plan)
+            fingerprint = extract_runner.extraction_fingerprint(
+                plan.fingerprint,
+                confirmed.profile_name,
+                handles,
+                preprocess.ffmpeg_provenance(),
+            )
+            return self.resume_job(
+                root,
+                job_id,
+                _extract_body(workspace, plan, confirmed, assets, handles),
+                fingerprint,
+            )
+        raise ExtractJobError(
+            f"작업 {job_id}의 지문과 같은 package를 찾지 못했다 — 계획이 지워지지"
+            " 않았다면 작업 목록을 확인하세요"
+        )
+
+    def package_overview(self, root: Path, package_dir: str | None = None) -> PackageSummary | None:
+        """package 읽기 모델 — 조각 목록·총 길이·전달물 경로까지 한눈에(화면 3)."""
+        workspace = self._workspace(root)
+        packages = workspace.list_package_revisions()
+        package = None
+        if package_dir is not None:
+            package = next((item for item in packages if item.package_dir == package_dir), None)
+        elif packages:
+            package = packages[-1]
+        if package is None:
+            return None
+        clips = workspace.list_clip_artifacts(package.package_dir)
+        total = sum((Fraction(clip.media_local_duration) for clip in clips), Fraction(0))
+        bytes_used = sum(clip.size_bytes or 0 for clip in clips)
+        manifests = tuple(
+            f"{package.package_dir}/{name}"
+            for name in package_layout.manifest_names()
+            if (workspace.root / package.package_dir / name).is_file()
+        )
+        return PackageSummary(
+            package=package,
+            clips=clips,
+            total_duration_seconds=str(total),
+            total_bytes=bytes_used,
+            manifest_relative_paths=manifests,
+        )
+
+    def list_package_clips(self, root: Path, package_dir: str) -> tuple[ClipArtifact, ...]:
+        return self._workspace(root).list_clip_artifacts(package_dir)
+
+    # ── A3 내부 — 계획·package 짝 맞추기 ────────────────────────
+
+    def _order_revision(self, root: Path, revision_id: str | None) -> GlobalOrderRevision:
+        """전체 순서 리비전 찾기 — 없으면(확정이 없으면) 계획은 시작하지 않는다."""
+        workspace = self._workspace(root)
+        if revision_id is None:
+            revision = workspace.latest_global_order_revision()
+            if revision is None:
+                raise OrderNotConfirmedError(
+                    "확정된 전체 원본 순서가 없다 — 가져오기를 마치고 전체 순서를"
+                    " 확정한 뒤 계획하세요"
+                )
+            return revision
+        for revision in workspace.list_global_order_revisions():
+            if revision.revision_id == revision_id:
+                return revision
+        raise OrderNotConfirmedError(f"없는 전체 순서 리비전: {revision_id}")
+
+    def _plan_snapshot(self, root: Path, revision_id: str | None) -> SegmentPlanSnapshot:
+        workspace = self._workspace(root)
+        if revision_id is None:
+            snapshot = self.latest_segment_plan(root)
+            if snapshot is None:
+                raise PlanNotFoundError("분할 계획이 없다 — 먼저 결정적 분할 계획을 만드세요")
+            return snapshot
+        return workspace.segment_plan_revision(revision_id)
+
+    def _plan_assets(self, root: Path, snapshot: SegmentPlanSnapshot) -> dict[str, SourceAsset]:
+        """계획이 가리키는 원본 전부 — 하나라도 ready가 아니면 추출은 시작하지 않는다."""
+        workspace = self._workspace(root)
+        assets: dict[str, SourceAsset] = {}
+        for asset_id in {entry.asset_id for entry in snapshot.entries}:
+            assets[asset_id] = _verified_asset(workspace, asset_id)
+        return assets
+
+    def _reusable_or_reserved_package(
+        self,
+        workspace: RawWorkspace,
+        snapshot: SegmentPlanSnapshot,
+        profile_name: str,
+        handles: preprocess.RawClipHandles,
+        fingerprint: str,
+    ) -> PackageRevision:
+        """같은 지문의 package가 있으면 이어 쓰고, 없으면 새로 예약한다(§6.5)."""
+        for package in workspace.list_package_revisions():
+            if package.job_fingerprint != fingerprint:
+                continue
+            if package.status == "complete":
+                raise PackageError(
+                    f"이미 완성된 package가 있다: {package.package_dir} — 같은 계획·"
+                    "프로파일·핸들·도구의 재추출은 새 계획 리비전에서 시작하세요"
+                )
+            return package
+        return workspace.reserve_package(
+            plan_revision_id=snapshot.revision_id,
+            order_revision_id=snapshot.order_revision_id,
+            profile_name=profile_name,
+            handles_before=str(handles.before),
+            handles_after=str(handles.after),
+            job_fingerprint=fingerprint,
+            clip_total=len(snapshot.entries),
+        )
+
+
+def _verified_asset(workspace: RawWorkspace, asset_id: str) -> SourceAsset:
+    """ready 원본의 재검증 — 크기·SHA-256을 지금 다시 읽어 계획의 밑천을 확인한다.
+
+    검증 이력(`content_sha256`)이 없는 원본은 계획 재료가 되지 못한다 — 상태표가
+    아니라 내용으로 판단한다(§5.3의 완료 정의를 계획에도 그대로 적용한다).
+    """
+    asset = workspace.source_asset(asset_id)
+    if asset.status != "ready" or asset.content_sha256 is None:
+        raise SegmentationError(
+            f"원본이 검증 준비 상태가 아니다: {asset.source_relative_path}"
+            f" ({asset.status}) — 가져오기(복사·검증)를 먼저 끝내세요"
+        )
+    path = workspace.root / asset.relative_path
+    probed = path.stat()
+    if probed.st_size != asset.size_bytes:
+        raise SegmentationError(
+            f"원본 크기가 가져오기 때와 다르다: {asset.source_relative_path}"
+            f" ({asset.size_bytes} → {probed.st_size}B)"
+        )
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(block)
+    if digest.hexdigest() != asset.content_sha256:
+        raise SegmentationError(
+            f"원본 내용이 가져오기 때와 다르다: {asset.source_relative_path}"
+            " — 다시 가져오세요(새 배치)"
+        )
+    return asset
+
+
+@dataclass(frozen=True, slots=True)
+class _MeasuredSource:
+    """원본 하나의 계획용 측정 — 시계·원점·정규화 종료(§7.6의 1단계, 의미 없이).
+
+    원본별 시계는 이 계층이 소유한다: 계획은 측정값을 값으로 받고, 추출은 같은
+    시계 규칙(preprocess)을 다시 잰다 — 두 측정이 어긋나면 추출 검증이 잡는다.
+    """
+
+    clock: preprocess.RawVideoClock
+    exact_end_pts: int
+
+
+def _measured_source(workspace: RawWorkspace, asset: SourceAsset) -> _MeasuredSource:
+    path = workspace.root / asset.relative_path
+    probe = preprocess.probe_raw_media(path)
+    clock = preprocess.probe_extraction_clock(path, probe=probe)
+    if not clock.uniform_grid:
+        raise SegmentationError(
+            f"원본이 균일 격자가 아니다(VFR) — 추출 지원 밖이다: "
+            f"{asset.source_relative_path} ({clock.grid_note})"
+        )
+    return _MeasuredSource(clock=clock, exact_end_pts=math.ceil(clock.exact_end / clock.time_base))
+
+
+def _plan_fingerprint_inputs(
+    asset: SourceAsset, facts: _MeasuredSource, spans: Sequence[SegmentPlanEntry]
+) -> dict[str, object]:
+    """계획 지문의 원본별 재료 — 내용 해시·시계·선택된 경계 틱(§14.2)."""
+    clock = facts.clock
+    return {
+        "content_sha256": asset.content_sha256,
+        "time_base": f"{clock.time_base.numerator}/{clock.time_base.denominator}",
+        "origin_pts": clock.first_pts,
+        "frame_count": clock.frame_count,
+        "frame_duration": str(clock.frame_duration),
+        "boundaries": [span.core_start_pts for span in spans] + [spans[-1].core_end_pts],
+    }
+
+
+def _validated_handles(before: Fraction, after: Fraction) -> preprocess.RawClipHandles:
+    """핸들 검증 — 음수가 아니면 정확한 유리수로 묶는다(§6.5 기본 0)."""
+    handles = preprocess.RawClipHandles(before=Fraction(before), after=Fraction(after))
+    if handles.before < 0 or handles.after < 0:
+        raise PackageError(f"핸들은 0 이상이어야 한다: 앞 {before}, 뒤 {after}")
+    return handles
+
+
+def _plan_timestamp() -> str:
+    return datetime.now(UTC).isoformat(timespec="seconds")

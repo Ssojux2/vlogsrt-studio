@@ -27,7 +27,7 @@ from vlogsrt.project.raw.models import (
     SourceChangedError,
     WorkspaceVersionError,
 )
-from vlogsrt.project.raw.workspace import DB_NAME
+from vlogsrt.project.raw.workspace import DB_NAME, DB_SCHEMA_VERSION
 
 TERMINAL = frozenset({"succeeded", "failed", "cancelled"})
 
@@ -405,7 +405,7 @@ def test_v1_workspace_upgrades_transactionally_and_keeps_data(
     # 다시 여는 주체는 새 서버다(재시작) — 캐시가 아니라 디스크의 v1을 연다.
     restarted = raw.RawWorkspaceService()
     reopened = restarted.open_workspace(workspace)
-    assert reopened.db_schema_version == "raw-workspace-db/3"
+    assert reopened.db_schema_version == DB_SCHEMA_VERSION
     assert restarted.resolve_media(workspace, registration.file_id).size_bytes == len(b"handmade")
     assert restarted.get_job(workspace, blocked.job_id).status == "failed"
     # 갱신 뒤에도 가져오기가 그 작업공간에서 그대로 돈다.

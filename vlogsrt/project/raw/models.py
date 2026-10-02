@@ -9,6 +9,7 @@ frozen이고, 시각 문자열은 UTC ISO-8601다.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from fractions import Fraction
 from pathlib import Path
 
 MEDIA_KINDS: tuple[str, ...] = ("original", "preview", "artifact")
@@ -351,3 +352,243 @@ class IngestCopyError(IngestError):
 
 class GlobalOrderError(IngestError):
     """전체 순서 확정의 입력 오류 — 모르는 자산·ready 아님·빠진 원본."""
+
+
+# ── A2 남은 몫 — 조사가 묶는 촬영 시각의 상태 ─────────────────────────────────
+
+
+CAPTURE_STATUS_UNINSPECTED = "uninspected"
+CAPTURE_STATUS_INVALID = "invalid"
+CAPTURE_STATUS_VALID = "valid"
+"""조사자가 촬영 시각에 대해 말할 수 있는 세 가지다. `valid`일 때만
+`capture_time`에 값이 들어가고 순서 근거로 쓴다 — `invalid`는 값을 버린 채
+'조사했으나 못 믿는다'로 남고, `uninspected`는 아예 묻지 않은 것이다.
+어느 쪽도 mtime으로 메워지지 않는다(§6.2)."""
+
+
+# ── A3 — 결정적 분할·실제 추출·package(계획 §6·§8·§9·§13.1) ───────────────────
+
+
+SEGMENT_JOB_KIND = "segment_extract"
+"""분할 추출 작업의 종류 표기 — 같은 지문의 활성 작업 재제출이 여기 묶인다."""
+
+SEGMENTATION_BASIS_DETERMINISTIC = "deterministic_tiling"
+"""A3 기본 분할 근거 — 의미 분석 없이 전체 재생 구간을 격자 위에 빈틈없이 타일링."""
+
+SEGMENTATION_BASIS_PLANNED = "user_planned"
+"""사람이 명시적으로 준 구간으로 타일링한 근거 — 역시 전체 덮음이 계약이다."""
+
+SEGMENT_RECOMMENDATION_NORMAL = "normal"
+"""A3 조각의 검토 상태 — 의미 등급(recommended/review_required)은 A4가 붙인다."""
+
+SEGMENT_EXPORT_STATUSES: tuple[str, ...] = (
+    "pending",
+    "extracting",
+    "published",
+    "failed",
+)
+"""조각의 추출 상태 — 서버가 소유한다(계획 §14.1). `published`만 편집용 목록에
+오르고, 실패 조각은 이유와 함께 눈에 보인다."""
+
+PACKAGE_STATUSES: tuple[str, ...] = (
+    "reserved",
+    "publishing",
+    "complete",
+    "failed",
+    "interrupted",
+)
+"""package의 서버 소유 상태 — 예약이 곧 경합 경계다(같은 package_dir은 하나만)."""
+
+EXTRACT_PROFILES: tuple[str, ...] = ("source_matched", "edit_prores")
+"""A3가 노출하는 추출 프로파일 — preprocess의 동결 프로파일과 한 쌍이다(§8.1)."""
+
+
+@dataclass(frozen=True, slots=True)
+class PlannedInterval:
+    """사람이 준 구간 하나 — `[start, end)`초(정확한 유리수).
+
+    구간은 **전체를 덮는 타일**이어야 한다: 첫 구간은 0에서 시작하고, 이웃 구간은
+    경계를 공유하고, 마지막 구간은 원본 끝을 넘거나 닿는다(넘으면 원본 끝으로
+    자른다). 덮지 못하는 입력은 계획이 되지 못하고 이유를 말한다(§6.1).
+    """
+
+    start: Fraction
+    end: Fraction
+
+
+@dataclass(frozen=True, slots=True)
+class SegmentPlanEntry:
+    """확정 분할 계획의 조각 하나 — 불변 기록(§13.1 SegmentPlan).
+
+    시각은 전부 **원본 좌표 정수 틱**이고 `time_base`와 함께 읽는다(§13.3).
+    `media_*`는 기본 핸들 0의 값이라 core와 같다 — 핸들은 추출 요청에 붙고,
+    실제 매체 범위는 `ClipArtifact`가 측정값으로 남긴다. `export_status`는
+    계획이 아니라 서버 소유 상태라 여기 없다.
+    """
+
+    segment_id: str
+    asset_id: str
+    batch_dir: str
+    source_order: int
+    segment_order: int
+    time_base_num: int
+    time_base_den: int
+    core_start_pts: int
+    core_end_pts: int
+    media_start_pts: int
+    media_end_pts: int
+    core_first_frame: int
+    core_after_last_frame: int
+    source_frame_count: int
+    recommendation: str
+    basis: str
+
+    @property
+    def time_base(self) -> Fraction:
+        return Fraction(self.time_base_num, self.time_base_den)
+
+    @property
+    def core_range_ticks(self) -> tuple[int, int]:
+        return (self.core_start_pts, self.core_end_pts)
+
+
+@dataclass(frozen=True, slots=True)
+class SegmentCoverage:
+    """원본 하나의 타일링 증명 — 계획과 함께 얼어 붙는다(§6.1).
+
+    `first_core_start_pts == presentation 원점 틱`, `last_core_end_pts == 정규화된
+    재생 종료 틱`, 이웃 조각의 경계 틱 일치, 순번 오름차순 = 시작 오름차순을
+    여기 다시 못 박는다. 증명이 아니라 **증거 요약**이다 — 검증은 순수 함수가
+    계획 생성 시에 이미 통과시켰다.
+    """
+
+    asset_id: str
+    source_order: int
+    segment_count: int
+    source_frame_count: int
+    first_core_start_pts: int
+    last_core_end_pts: int
+    presentation_origin_pts: int
+    exact_end_pts: int
+    time_base_num: int
+    time_base_den: int
+
+
+@dataclass(frozen=True, slots=True)
+class SegmentPlanSnapshot:
+    """분할 계획 리비전 — 전체 순서 리비전 위의 불변 스냅샷(§6.5).
+
+    새 계획은 새 리비전일 뿐 옛 스냅샷을 다시 쓰지 않는다. `fingerprint`는
+    원본 해시·시계·경계까지 묶은 sha256으로, 추출 작업 지문의 밑천이 된다.
+    """
+
+    revision_id: str
+    order_revision_id: str
+    basis: str
+    entries: tuple[SegmentPlanEntry, ...]
+    coverage: tuple[SegmentCoverage, ...]
+    fingerprint: str
+    created_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class ClipArtifact:
+    """게시된 조각 파일 한 건의 정본 기록(§13.1 ClipArtifact).
+
+    `content_sha256`은 게시된 **파일을 다시 읽은** 값이다. `core_local_*`·
+    `media_local_duration`은 클립 지역 시각(초, 정확한 유리수의 문자열 직렬화)로
+    `clips.jsonl`과 같은 값을 가진다. 실패 조각도 `error`와 함께 행으로 남는다 —
+    조용히 사라지는 조각은 없다(§6.3).
+    """
+
+    clip_id: str
+    package_dir: str
+    segment_id: str
+    asset_id: str
+    source_order: int
+    segment_order: int
+    profile_name: str
+    relative_path: str
+    status: str
+    content_sha256: str | None
+    size_bytes: int | None
+    file_id: str | None
+    time_base_num: int
+    time_base_den: int
+    core_start_pts: int
+    core_end_pts: int
+    media_start_pts: int
+    media_end_pts: int
+    core_local_start: str
+    core_local_end: str
+    media_local_duration: str
+    frame_count: int | None
+    error: str | None
+    created_at: str
+    updated_at: str
+
+    @property
+    def time_base(self) -> Fraction:
+        """원본 time_base — 조각 계획에서 물려받아 틱 해석에 쓴다(§13.3)."""
+        return Fraction(self.time_base_num, self.time_base_den)
+
+
+@dataclass(frozen=True, slots=True)
+class PackageRevision:
+    """편집용 폴더 한 벌의 기록 — 경합 예약에서 완전성까지(§13.1 PackageRevision).
+
+    `package_dir`는 작업공간 상대 경로(`clips/package_000001`)이고 유일하다.
+    옛 package는 다시 쓰지 않는다 — 새 추출은 새 package 연다(§6.5).
+    """
+
+    package_dir: str
+    plan_revision_id: str
+    order_revision_id: str
+    profile_name: str
+    handles_before: str
+    handles_after: str
+    job_fingerprint: str
+    status: str
+    clip_total: int
+    clip_published: int
+    error: str | None
+    created_at: str
+    updated_at: str
+
+    @property
+    def complete(self) -> bool:
+        return self.status == "complete"
+
+
+@dataclass(frozen=True, slots=True)
+class PackageSummary:
+    """화면 3에 그대로 뿌리는 package 요약 — 검증 결과까지 숨기지 않는다."""
+
+    package: PackageRevision
+    clips: tuple[ClipArtifact, ...]
+    total_duration_seconds: str
+    total_bytes: int
+    manifest_relative_paths: tuple[str, ...]
+
+
+# ── A3 공개 오류 ─────────────────────────────────────────────────────────────
+
+
+class SegmentationError(RawWorkspaceError):
+    """분할 계획 오류의 기본형 — 계획이 되지 못한 이유를 말한다."""
+
+
+class PlanNotFoundError(SegmentationError):
+    """없는 분할 계획 리비전 — 다시 계획을 세워야 한다."""
+
+
+class OrderNotConfirmedError(SegmentationError):
+    """확정된 전체 순서가 없다 — A3는 확정 순서 위에서만 계획한다."""
+
+
+class PackageError(RawWorkspaceError):
+    """package 계층 오류 — 예약 경합·경로 위반·완전성 위반."""
+
+
+class ExtractJobError(RawWorkspaceError):
+    """추출 작업 오류 — 실패 조각 정보를 실은 채 작업을 실패로 남긴다."""
