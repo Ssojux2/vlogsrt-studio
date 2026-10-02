@@ -14,10 +14,15 @@ from typing import Any
 import pytest
 
 from vlogsrt import env
+from vlogsrt import transcribe as transcribe_module
 from vlogsrt.config import Config
 from vlogsrt.models import Chunk
 from vlogsrt.transcribe import (
+    CAPTION_TEXT_KIND,
+    CAPTION_TIMING_KIND,
     FIXTURE_KIND,
+    TRANSCRIPTION_OPERATION,
+    AudioTranscriptionRequest,
     ChunkCoverage,
     ChunkResponse,
     ClosedVisionResponder,
@@ -29,6 +34,7 @@ from vlogsrt.transcribe import (
     MalformedTranscript,
     MissingVisionFixture,
     TranscriptionJob,
+    UnsupportedTranscriptionRequest,
     build_spine,
     create_vision_client,
     estimate_cost,
@@ -1347,3 +1353,222 @@ def test_fixture_responder_rejects_unsafe_block_ids(tmp_path: Path, block_id: st
         FixtureVisionResponder(namespace=tmp_path).decide(
             model="m", payload=VISION_PAYLOAD, block_id=block_id
         )
+
+
+# ─────────────────────────────────────────────────────────────
+#  공개 전송 경계 (A7-1) — 파생 계층의 좁은 요청이 같은 호출 지점을 지난다
+# ─────────────────────────────────────────────────────────────
+
+
+def text_request(tmp_path: Path) -> AudioTranscriptionRequest:
+    """문구 경로 요청 — 확인된 힌트 세 칸만 쓴다(§11.4)."""
+    audio = tmp_path / "final.mp3"
+    audio.write_bytes(b"\x00")
+    chunk = Chunk(audio, 0.0, 24.0, 0)
+    return AudioTranscriptionRequest(
+        chunk=chunk,
+        model=Config().verify_model,
+        response_format="json",
+        languages=("ko",),
+        keywords=("블루펭귄",),
+        prompt="망원동, 아페로",
+    )
+
+
+def timing_request(tmp_path: Path) -> AudioTranscriptionRequest:
+    """시간 경로 요청 — 문구 힌트 칸이 비어 있는 것이 배선 자체다(§11.4)."""
+    audio = tmp_path / "final.mp3"
+    audio.write_bytes(b"\x00")
+    chunk = Chunk(audio, 0.0, 24.0, 0)
+    return AudioTranscriptionRequest(
+        chunk=chunk,
+        model=Config().transcribe_model,
+        response_format="verbose_json",
+        timestamp_granularities=("segment",),
+    )
+
+
+@pytest.mark.parametrize("response_format", ["srt", "vtt", "text", ""])
+def test_transport_rejects_subtitle_formats_before_any_call(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, response_format: str
+) -> None:
+    """srt·vtt는 전송 계약에 없다 — 클라이언트를 만들기도 전에 끝난다."""
+    client = FakeClient()
+    live = _live(monkeypatch, client)
+    request = AudioTranscriptionRequest(
+        chunk=real_job(tmp_path).chunks[0], model="m", response_format=response_format
+    )
+    with pytest.raises(UnsupportedTranscriptionRequest, match="전송 계약에 없다"):
+        live.send_request(request, Config(), kind=CAPTION_TEXT_KIND)
+    assert client.calls == []
+
+
+def test_transport_rejects_broken_shapes_before_any_call(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    client = FakeClient()
+    live = _live(monkeypatch, client)
+    chunk = real_job(tmp_path).chunks[0]
+    broken = [
+        AudioTranscriptionRequest(chunk=chunk, model="  ", response_format="json"),
+        AudioTranscriptionRequest(
+            chunk=chunk, model="m", response_format="json", prompt="줄\n바꿈"
+        ),
+        AudioTranscriptionRequest(chunk=chunk, model="m", response_format="json", keywords=("",)),
+        AudioTranscriptionRequest(
+            chunk=chunk, model="m", response_format="json", timestamp_granularities=("frame",)
+        ),
+        AudioTranscriptionRequest(
+            chunk=chunk,
+            model="m",
+            response_format="json",
+            timestamp_granularities=("segment",),  # 입자는 verbose_json과만 짝한다
+        ),
+        AudioTranscriptionRequest(
+            chunk=chunk, model="m", response_format="json", temperature=float("nan")
+        ),
+    ]
+    for request in broken:
+        with pytest.raises(UnsupportedTranscriptionRequest):
+            live.send_request(request, Config(), kind=CAPTION_TEXT_KIND)
+    assert client.calls == []
+
+
+def test_text_request_sends_native_hint_arrays(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """설치된 SDK(3.8)는 languages·keywords를 정식 인자로 받는다 — extra_body 없이."""
+    client = FakeClient()
+    _live(monkeypatch, client).send_request(
+        text_request(tmp_path), Config(), kind=CAPTION_TEXT_KIND
+    )
+    (call,) = client.calls
+    assert call["languages"] == ["ko"]
+    assert call["keywords"] == ["블루펭귄"]
+    assert call["prompt"] == "망원동, 아페로"
+    assert "extra_body" not in call
+    assert "timestamp_granularities" not in call
+    assert call["response_format"] == "json"
+
+
+def test_empty_hints_are_omitted_not_sent_empty(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """빈 힌트는 빈 배열로 보내지 않고 필드째 뺀다(§11.4)."""
+    client = FakeClient()
+    request = AudioTranscriptionRequest(
+        chunk=real_job(tmp_path).chunks[0], model="m", response_format="json"
+    )
+    _live(monkeypatch, client).send_request(request, Config(), kind=CAPTION_TEXT_KIND)
+    (call,) = client.calls
+    for absent in ("languages", "keywords", "prompt", "extra_body"):
+        assert absent not in call
+
+
+def test_old_sdk_gets_hints_through_documented_extra_body(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """정식 인자가 없는 옛 SDK는 extra_body 길로 — 같은 필드를 두 경로로 보내지 않는다."""
+    monkeypatch.setattr(transcribe_module, "sdk_native_hint_params", lambda: ())
+    client = FakeClient()
+    _live(monkeypatch, client).send_request(
+        text_request(tmp_path), Config(), kind=CAPTION_TEXT_KIND
+    )
+    (call,) = client.calls
+    assert call["extra_body"] == {"languages": ["ko"], "keywords": ["블루펭귄"]}
+    assert "languages" not in call and "keywords" not in call  # 중복 전달 금지
+    assert call["prompt"] == "망원동, 아페로"  # prompt는 옛 SDK에서도 정식 인자다
+
+
+def test_timing_request_carries_no_text_hints(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """문구 힌트가 시간 요청에 실리는 일은 요청 칸이 아니라 배선에서 막힌다."""
+    client = FakeClient()
+    _live(monkeypatch, client).send_request(
+        timing_request(tmp_path), Config(), kind=CAPTION_TIMING_KIND
+    )
+    (call,) = client.calls
+    for absent in ("prompt", "keywords", "languages", "extra_body"):
+        assert absent not in call
+    assert call["timestamp_granularities"] == ["segment"]
+    assert call["response_format"] == "verbose_json"
+
+
+def test_transport_retries_transient_failures_and_propagates(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """429는 `_retry`의 바운드 안에서만 다시 묻는다 — 못 하면 그대로 올라간다."""
+    client = Throttled()
+    live = _live(monkeypatch, client)
+    cfg = data_replace(Config(), api_max_retries=3, api_backoff_base=0.0)
+    with pytest.raises(RuntimeError, match="429"):
+        live.send_request(timing_request(tmp_path), cfg, kind=CAPTION_TIMING_KIND)
+    assert len(client.calls) == 3  # 바운드를 넘은 몰래 재시도는 없다
+
+
+def test_transport_does_not_silently_drop_fields_on_400(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """확인된 등록표가 틀렸다는 신호다 — 인자를 떼고 다시 부르지 않는다(§11.8)."""
+
+    class Rejecting(FakeClient):
+        def create(self, **kwargs: object) -> dict[str, object]:
+            self.calls.append(kwargs)
+            error = RuntimeError("Error code: 400 - unknown parameter 'languages'")
+            error.status_code = 400  # type: ignore[attr-defined]
+            raise error
+
+    client = Rejecting()
+    live = _live(monkeypatch, client)
+    with pytest.raises(RuntimeError, match="400"):
+        live.send_request(text_request(tmp_path), Config(), kind=CAPTION_TEXT_KIND)
+    assert len(client.calls) == 1  # 레거시와 달리 축소 재요청이 없다
+
+
+def test_transport_cancellation_gate_blocks_before_the_call(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """승인 직전의 취소 확인 — 게이트가 닫히면 SDK를 부르지 않는다(S1A)."""
+    client = FakeClient()
+
+    def gate() -> None:
+        raise Cancelled
+
+    live = _live(monkeypatch, client, gate)
+    with pytest.raises(Cancelled):
+        live.send_request(timing_request(tmp_path), Config(), kind=CAPTION_TIMING_KIND)
+    assert client.calls == []
+
+
+def test_transport_observer_sees_kind_and_sanitized_options(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """관찰 훅은 파생 계층 호출에도 그대로 붙는다 — 인자 사본에 자격 칸은 없다."""
+    metas: list[object] = []
+    responses: list[object] = []
+
+    class Ledger:
+        def authorize(self, meta: object) -> None:
+            metas.append(meta)
+
+        def on_response(self, ticket: object, meta: object, response: object) -> None:
+            responses.append(response)
+
+        def on_error(self, ticket: object, meta: object, error: object) -> None:
+            raise AssertionError("성공 경로에서 오류 훅은 없다")
+
+    client = FakeClient()
+    monkeypatch.setattr(LiveTranscriber, "_client", lambda self: client)  # type: ignore[arg-type]
+    live = LiveTranscriber(api_key="sk-test", observer=Ledger())  # type: ignore[arg-type]
+    payload = live.send_request(
+        timing_request(tmp_path), Config(), kind=CAPTION_TIMING_KIND, stem="final-01"
+    )
+    (meta,) = metas
+    assert meta.kind == CAPTION_TIMING_KIND
+    assert meta.operation == TRANSCRIPTION_OPERATION
+    assert meta.stem == "final-01"
+    assert meta.options["response_format"] == "verbose_json"
+    assert "api_key" not in meta.options
+    assert payload == {"segments": []}
+    assert len(responses) == 1
