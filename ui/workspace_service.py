@@ -395,6 +395,22 @@ class RawWorkspaceUi:
                 [self._signature_state, self._ingest_jobs_dd],
                 self._ingest_md,
             )
+
+            # ── 전체 원본 순서 — 가져온 배치를 넘어 사람이 명시적으로 확정 ──
+            with gr.Row():
+                global_order_box = gr.Textbox(
+                    label="전체 원본 순서(선택)",
+                    info="비우면 제안(배치 순서·배치 안 확정 순번) 그대로다. "
+                    "직접 정하려면 ready 원본의 자산 ID를 줄/쉼표로 모두 나열한다.",
+                    placeholder="source_…, source_… (모든 ready 원본)",
+                    scale=6,
+                )
+                global_confirm_button = gr.Button("전체 원본 순서 확정", scale=1)
+            global_confirm_button.click(
+                self.ingest_global_confirm_view,
+                [self._signature_state, global_order_box],
+                self._ingest_md,
+            )
         return open_button, create_button, ws_path_box, new_name_box
 
     # ── 화면 2 — 분석 · 조각 검토 ──────────────────────────────
@@ -641,7 +657,56 @@ class RawWorkspaceUi:
                 + (f" — {job.error}" if job.error else "")
                 for job in jobs
             ]
-        return "\n".join(lines)
+        return "\n".join(lines) + self._global_order_markdown(root)
+
+    def _global_order_markdown(self, root: Path) -> str:
+        """전체 원본 순서 보기 — 배치를 넘는 확정 기록(옛 리비전은 다시 쓰지 않는다)."""
+        revision = self.raw.latest_global_source_order(root)
+        proposal = self.raw.global_order_proposal(root)
+        if revision is None:
+            if not proposal:
+                return ""
+            names = ", ".join(
+                f"{index}. `{asset.asset_id}`({asset.batch_dir}/{asset.source_name})"
+                for index, asset in enumerate(proposal, start=1)
+            )
+            return (
+                "\n\n**전체 원본 순서** — 아직 확정하지 않았다. 제안(배치 순서·배치 안"
+                f" 확정 순번): {names}"
+            )
+        entries = "\n".join(
+            f"- {entry.ordinal}. `{entry.asset_id}` (배치 {entry.batch_dir})"
+            for entry in revision.entries
+        )
+        return (
+            f"\n\n**전체 원본 순서** — 리비전 `{revision.revision_id}` · 근거 "
+            f"{revision.basis} · 확정 {revision.created_at}\n{entries}\n"
+            f"(리비전 총 {len(self.raw.list_global_source_orders(root))}개 — 순서를 바꾸면"
+            " 새 리비전이 쌓이고, 배치 안 확정 순서·옛 스냅숏은 그대로다.)"
+        )
+
+    def ingest_global_confirm_view(self, signature: str | None, order_text: str) -> str:
+        """전체 원본 순서 확정 이벤트 — 배치를 넘는 순서를 사람이 명시적으로 못 박는다.
+
+        빈 입력은 제안(배치 순서·배치 안 확정 순번) 확정이다. 이 확정은 새 전체
+        리비전을 만들 뿐 — 배치 안 순서나 옛 리비전을 조용히 다시 섞지 않는다.
+        """
+        root = self._require_current_selection(signature)
+        asset_ids: list[str] | None = None
+        text = (order_text or "").strip()
+        if text:
+            asset_ids = [
+                chunk.strip()
+                for chunk in text.replace(",", "\n").replace(";", "\n").splitlines()
+                if chunk.strip()
+            ]
+        try:
+            revision = self.raw.confirm_global_source_order(root, asset_ids)
+        except raw_service.RawWorkspaceError as error:
+            raise gr.Error(str(error)) from error
+        # 성공 증거는 갱신된 패널 자체다 — 새 리비전 번호와 항목이 거기 나타난다.
+        _ = revision
+        return self._ingest_state_markdown(root)
 
     def ingest_scan_view(self, signature: str | None, source_text: str) -> str:
         """조사 이벤트 — 읽기만 한다. 제안은 현재 작업공간 서명에 묶어 보관한다."""

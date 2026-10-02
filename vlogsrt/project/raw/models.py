@@ -295,6 +295,33 @@ class SourceOrderRevision:
     created_at: str
 
 
+# ── A2F1 — 가져온 원본 전체(배치를 넘어)의 확정 순서 ─────────────────────────
+
+
+@dataclass(frozen=True, slots=True)
+class GlobalOrderEntry:
+    """전체 순서 리비전의 한 항목 — 자산과 그 확정 순번, 소속 배치."""
+
+    asset_id: str
+    ordinal: int
+    batch_dir: str
+
+
+@dataclass(frozen=True, slots=True)
+class GlobalOrderRevision:
+    """모든 배치의 현재 선택(ready) 원본을 묶은 불변 전체 순서 — A3 소비 계약.
+
+    배치 안의 순서는 그 배치의 `SourceOrderRevision`이 그대로 지킨다. 이 리비전은
+    배치 **사이**를 잇는 확정 기록이다: 순서가 바뀌면 새 리비전을 만들 뿐, 옛
+    스냅숏은 다시 쓰지 않는다(§6.5 — 앞 시각 원본을 늦게 넣어도 옛 패키지는 유지).
+    """
+
+    revision_id: str
+    basis: str
+    entries: tuple[GlobalOrderEntry, ...]
+    created_at: str
+
+
 # ── A2 공개 오류 ─────────────────────────────────────────────────────────────
 
 
@@ -320,3 +347,7 @@ class NoIngestCandidatesError(IngestError):
 
 class IngestCopyError(IngestError):
     """복사·검증 실패 모음 — 작업을 실패 상태로 남겨 재개하게 한다(§5.3)."""
+
+
+class GlobalOrderError(IngestError):
+    """전체 순서 확정의 입력 오류 — 모르는 자산·ready 아님·빠진 원본."""

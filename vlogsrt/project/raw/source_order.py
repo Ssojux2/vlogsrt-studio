@@ -92,6 +92,21 @@ def propose_order(candidates: Sequence[SourceAsset]) -> tuple[SourceAsset, ...]:
     )
 
 
+def propose_global_order(assets: Sequence[SourceAsset]) -> tuple[SourceAsset, ...]:
+    """배치를 넘는 제안 순서 — 가져온 배치 연대순, 배치 안은 확정 순번 그대로.
+
+    배치 사이를 임의로 다시 섞지 않는다(§6.5). 사용자가 배치를 건너 뛰어 놓고
+    싶으면 확정 때 명시적인 순서를 주면 된다 — 이 함수는 조용한 재배열을 하지
+    않는다. 배치 안 순서는 각 배치의 `SourceOrderRevision`이 이미 확정한 것이다.
+    """
+    return tuple(
+        sorted(
+            assets,
+            key=lambda asset: (natural_key(asset.batch_dir), asset.ordinal, asset.asset_id),
+        )
+    )
+
+
 def revision_entries(ordered: Sequence[SourceAsset]) -> tuple[SourceOrderEntry, ...]:
     """정렬된 자산에 확정 순번을 붙인다 — 순번은 1부터, 제안 그대로다."""
     return tuple(

@@ -489,27 +489,39 @@ def reconfirm_ingest(workspace: RawWorkspace, batch_dir: str) -> IngestConfirmat
 # ── 복사·검증 — 파일 단위. ready만 나가고, 나머지는 재개 가능하게 남는다 ─────────
 
 
+PASS_SKIP = "skip"
+"""이번 실행에서 그대로 두는 몫 — ready이고 재독출 재검증까지 통과했다."""
+
+PASS_HEAL = "heal"
+"""검증된 적 있고 내용이 다시 맞는 몫 — 파일을 건드리지 않고 ready로 되돌린다."""
+
+PASS_INVALID = "invalid"
+"""검증된 적 있으나 지금 어긋나는 몫 — 파일·해시 기록·등록 ID 모두 불가침이다."""
+
+PASS_COPY = "copy"
+"""아직 한 번도 검증된 적 없는 몫 — 이번 실행이 복사할 유일한 대상이다."""
+
+
 def run_ingest_copy(
     context: JobContext, workspace: RawWorkspace, confirmation: IngestConfirmation
 ) -> None:
     """확정된 순서대로 파일 단위 복사·검증 — 작업 본문(`jobs`가 부른다).
 
-    시작 전에 **실제** 남은 분량으로 공간을 다시 본다 — ready 표시라도 재검증을
-    통과하지 못하면 다시 복사할 몫으로 센다. 진행값은 이번 실행 기준으로 다시
-    맞춘다(재시도가 지난 진행 위에 두 번 쌓지 않는다). 검증된(ready) 파일은 다시
-    읽어 확인한 뒤 건너뛰고, ready 표시가 재검증에 실패한 파일은 **건드리지 않고**
-    실패로 남긴다 — 한번 검증된 원본을 지우는 길은 없다(코디네이터 재검토).
+    **한번 검증된 원본은 영원히 불가침이다**: 재검증이 어긋나면 파일을 그대로 둔 채
+    실패로 남고, 몇 번을 재시도해도 다시 복사·삭제·덮어쓰기가 일어나지 않는다 —
+    다시 가져오는 길은 새 가져오기(새 배치)뿐이다. 실제 복사할 몫(`PASS_COPY`)만
+    공간 게이트에 들고, 진행값은 이번 실행 기준으로 다시 맞춘다.
     """
     ordered = tuple(sorted(confirmation.assets, key=lambda asset: asset.ordinal))
     passes = _survey_pending(workspace, ordered)
-    pending_bytes = sum(live.size_bytes for live, verified in passes if not verified)
+    pending_bytes = sum(live.size_bytes for live, kind in passes if kind == PASS_COPY)
     _require_copy_space(workspace.root, pending_bytes)
     context.set_total(len(passes))
     context.set_progress(0)
     failures: list[str] = []
-    for live, verified in passes:
+    for live, kind in passes:
         context.check_cancel()
-        failure = _attempt_one_pass(workspace, live, verified)
+        failure = _attempt_one_pass(workspace, live, kind)
         if failure is not None:
             failures.append(failure)
         context.advance()
@@ -521,16 +533,18 @@ def run_ingest_copy(
         )
 
 
-def _attempt_one_pass(workspace: RawWorkspace, live: SourceAsset, verified: bool) -> str | None:
-    """한 건의 이번 실행 처리 — 성공이면 None, 실패 문장을 돌려준다.
-
-    검증됐으면 조용히 건너뛴다. ready 표시가 재검증에 실패했으면 파일을 그대로
-    둔 채 실패로 남긴다(한번 검증된 원본을 지우는 길은 없다). 그 외는 복사한다.
-    """
-    if verified:
+def _attempt_one_pass(workspace: RawWorkspace, live: SourceAsset, kind: str) -> str | None:
+    """한 건의 이번 실행 처리 — 성공이면 None, 실패 문장을 돌려준다."""
+    if kind == PASS_SKIP:
         return None
-    if live.status == "ready":
-        return _record_asset_failure(workspace, live.asset_id, _invalid_ready_error(live))
+    if kind == PASS_HEAL:
+        try:
+            _heal_ever_verified(workspace, live)
+        except Exception as error:  # noqa: BLE001 - 회복 실패도 파일 없이 기록된다
+            return _record_asset_failure(workspace, live.asset_id, error)
+        return None
+    if kind == PASS_INVALID:
+        return _record_asset_failure(workspace, live.asset_id, _ever_verified_invalid_error(live))
     try:
         _copy_one_asset(workspace, live.asset_id)
     except JobCancelledError:
@@ -540,27 +554,59 @@ def _attempt_one_pass(workspace: RawWorkspace, live: SourceAsset, verified: bool
     return None
 
 
+def _heal_ever_verified(workspace: RawWorkspace, live: SourceAsset) -> None:
+    """검증 원본의 내용이 다시 맞으로 돌아왔다 — 파일은 건드리지 않고 상태만 되돌린다.
+
+    등록 행은 **같은 file_id로** 지문만 다시 찍는다(되살린 파일의 mtime·inode가
+    등록 때와 어긋나 있어도 제공이 끊기지 않게). ID·경로는 그대로다.
+    """
+    if live.file_id is not None:
+        workspace.refresh_media_fingerprint(live.file_id)
+    workspace.update_source_asset(live.asset_id, status="ready", error=None)
+
+
 def _survey_pending(
     workspace: RawWorkspace, ordered: tuple[SourceAsset, ...]
-) -> list[tuple[SourceAsset, bool]]:
-    """이번 실행의 실제 대상 — 상태표가 아니라 재검증 결과로 가른다.
+) -> list[tuple[SourceAsset, str]]:
+    """이번 실행의 실제 대상 — 상태표가 아니라 내용 재독출·검증 이력으로 가른다.
 
-    ready 표시가 깨졌거나(파일 변조) 알 수 없는 상태면 복사할 몫이다. 상태가
-    ready가 아닌 것은 당연히 복사할 몫이다(공간 게이트가 이 합을 본다).
+    `content_sha256`이 남아 있으면 **한번 검증된 원본**이다: 내용이 다시 맞으면
+    heal, 어긋나면 invalid — 어느 쪽도 파일을 쓰지 않는다. 복사는 검증 이력이
+    없는 몫에만 일어나므로, 실패 상태로 내버려둔 검증 원본이 다음 재시도에
+    덮어쓰이는 일은 없다(루트 재현).
     """
-    passes: list[tuple[SourceAsset, bool]] = []
+    passes: list[tuple[SourceAsset, str]] = []
     for asset in ordered:
         live = workspace.source_asset(asset.asset_id)
-        verified = live.status == "ready" and _destination_still_verified(workspace, live)
-        passes.append((live, verified))
+        content_ok = _destination_content_matches(workspace, live)
+        registration_ok = live.file_id is None or _registration_resolves(workspace, live)
+        if live.status == "ready" and content_ok and registration_ok:
+            kind = PASS_SKIP
+        elif live.content_sha256 is not None:
+            kind = PASS_HEAL if content_ok else PASS_INVALID
+        else:
+            kind = PASS_COPY
+        passes.append((live, kind))
     return passes
 
 
-def _invalid_ready_error(live: SourceAsset) -> IngestError:
-    """ready 표시 원본의 재검증 실패 문장 — 파일은 그대로 두고 사람에게 넘긴다."""
+def _registration_resolves(workspace: RawWorkspace, live: SourceAsset) -> bool:
+    """등록 행이 아직 제공 가능한가 — 지문 어긋남은 '변했다'로 잡힌다(A1 계약)."""
+    if live.file_id is None:
+        return True
+    try:
+        workspace.resolve_media_file(live.file_id)
+    except RawWorkspaceError:
+        return False
+    return True
+
+
+def _ever_verified_invalid_error(live: SourceAsset) -> IngestError:
+    """검증 이력이 있는 원본의 재검증 실패 문장 — 파일은 그대로 두고 사람에게 넘긴다."""
     return IngestError(
-        f"ready로 표시된 원본이 재검증에 실패했다: {live.source_relative_path} — "
-        "파일을 그대로 두었다. 다시 가져오려면 같은 원본을 새 가져오기로 확정하세요"
+        f"검증된 적 있는 원본이 재검증에 실패했다: {live.source_relative_path} — "
+        "파일·내용 해시 기록·등록 ID를 그대로 둔다. 다시 가져오려면 새 가져오기"
+        "(새 배치)를 확정하세요"
     )
 
 
@@ -677,10 +723,17 @@ def _source_stat(source: Path, live: SourceAsset) -> os.stat_result:
 def _prepare_destination(workspace: RawWorkspace, live: SourceAsset, destination: Path) -> None:
     """목적지 정리 — 잔해 partial은 덮고, 장부와 어긋난 최종 파일은 치운다.
 
-    치울 수 있는 것은 **우리가 쓴 미검증 잔해**뿐이다. 경로 증명(`_validated_tree`)을
-    지난 뒤에만 mkdir·unlink가 일어나고, 링크로 바뀐 칸이나 링크로 놓인 잔해는
-    그 자리에서 실패한다 — 링크 너머로 무엇도 쓰지 않는다(코디네이터 재검토).
+    치울 수 있는 것은 **우리가 쓴 미검증 잔해**뿐이다. 검증 이력(`content_sha256`)이
+    있는 자산은 어떤 상태로 와도 여기서 실패한다 — 한번 검증된 원본의 목적지를
+    치우는 길은 존재하지 않는다(재시도가 몇 번이든, 루트 재현). 경로 증명
+    (`_validated_tree`)을 지난 뒤에만 mkdir·unlink가 일어나고, 링크로 바뀐 칸이나
+    링크로 놓인 잔해도 그 자리에서 실패한다 — 링크 너머로 무엇도 쓰지 않는다.
     """
+    if live.content_sha256 is not None:
+        raise IngestError(
+            f"검증된 적 있는 원본의 목적지는 다시 준비하지 않는다: {live.source_relative_path}"
+            " — 새 가져오기(새 배치)로 다시 가져오세요"
+        )
     destination.parent.mkdir(parents=True, exist_ok=True)
     partial = destination.with_name(destination.name + PARTIAL_SUFFIX)
     if partial.exists():
@@ -716,10 +769,12 @@ def _register_verified(
         return workspace.register_media_file(destination, "original")
 
 
-def _destination_still_verified(workspace: RawWorkspace, live: SourceAsset) -> bool:
-    """ready 표시의 재확인 — 크기·등록·내용 해시를 다시 읽어 믿는다(맹신 금지).
+def _destination_content_matches(workspace: RawWorkspace, live: SourceAsset) -> bool:
+    """목적지 내용 재확인 — 크기·내용 해시를 다시 읽어 믿는다(맹신 금지).
 
     재독출 전에 조상 칸까지 링크가 아님을 증명한다 — 링크 너머를 읽지 않는다.
+    검증 이력(`content_sha256`)이 없으면 거짓이다 — 비교할 근거가 없다. 등록 행
+    상태는 여기 보지 않는다(제공 안전망과 회복 판정은 갈라 본다).
     """
     try:
         destination = _validated_tree(
@@ -734,11 +789,6 @@ def _destination_still_verified(workspace: RawWorkspace, live: SourceAsset) -> b
         return False
     if live.content_sha256 is None:
         return False
-    if live.file_id is not None:
-        try:
-            workspace.resolve_media_file(live.file_id)
-        except RawWorkspaceError:
-            return False
     return _sha256_file(destination) == live.content_sha256
 
 

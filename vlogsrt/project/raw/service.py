@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import os
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from vlogsrt.project.raw.config import (
@@ -35,10 +35,14 @@ from vlogsrt.project.raw.models import (
     INGEST_JOB_KIND,
     MEDIA_KINDS,
     MEDIA_SUFFIXES,
+    ORDER_BASIS_USER_CONFIRMED,
     BrowseNotAllowedError,
     ByteRange,
     FolderEntry,
     FolderListing,
+    GlobalOrderEntry,
+    GlobalOrderError,
+    GlobalOrderRevision,
     IngestError,
     JobHandle,
     JobRecord,
@@ -54,6 +58,7 @@ from vlogsrt.project.raw.models import (
     SourceOrderRevision,
     WorkspaceStatus,
 )
+from vlogsrt.project.raw.source_order import propose_global_order as _propose_global_order
 from vlogsrt.project.raw.workspace import DB_SCHEMA_VERSION, RawWorkspace
 
 __all__ = [
@@ -63,6 +68,9 @@ __all__ = [
     "ByteRange",
     "FolderEntry",
     "FolderListing",
+    "GlobalOrderEntry",
+    "GlobalOrderError",
+    "GlobalOrderRevision",
     "INGEST_JOB_KIND",
     "IngestConfirmation",
     "IngestError",
@@ -500,3 +508,71 @@ class RawWorkspaceService:
 
     def list_order_revisions(self, root: Path) -> tuple[SourceOrderRevision, ...]:
         return self._workspace(root).list_order_revisions()
+
+    # ── A2F1 — 배치를 넘는 전체 순서 확정(A3 소비 계약) ────────
+
+    def global_order_proposal(self, root: Path) -> tuple[SourceAsset, ...]:
+        """전체 순서 제안 — 현재 ready 원본을 배치 연대순·배치 안 확정 순번으로."""
+        ready = [
+            asset for asset in self._workspace(root).list_source_assets() if asset.status == "ready"
+        ]
+        return _propose_global_order(ready)
+
+    def confirm_global_source_order(
+        self, root: Path, asset_ids: Sequence[str] | None = None
+    ) -> GlobalOrderRevision:
+        """현재 선택(ready) 원본 전부의 전체 순서를 확정한다 — 불변 리비전.
+
+        순서를 주지 않으면 제안(배치 연대순·배치 안 확정 순번) 그대로다. 주면
+        **지금 ready인 원본 전부**를 빠짐없이, 겹침 없이, 알맞은 ID로 담아야 한다 —
+        모르는 ID·ready 아님·빠진 원본은 확정을 만들지 않고 알린다. 확정은 새
+        리비전을 만들 뿐: 옛 스냅숏은 다시 쓰지 않고, 배치 안 리비전도 건드리지
+        않는다(옛 패키지를 조용히 다시 섞지 않는다, §6.5).
+        """
+        workspace = self._workspace(root)
+        ready = {asset.asset_id: asset for asset in self.global_order_proposal(root)}
+        if not ready:
+            raise GlobalOrderError("확정할 ready 원본이 없다 — 가져오기(복사·검증)를 먼저 끝내세요")
+        ordered_ids = self._validated_global_ids(asset_ids, ready)
+        entries = tuple(
+            GlobalOrderEntry(
+                asset_id=asset_id,
+                ordinal=index + 1,
+                batch_dir=ready[asset_id].batch_dir,
+            )
+            for index, asset_id in enumerate(ordered_ids)
+        )
+        return workspace.create_global_order_revision(entries, ORDER_BASIS_USER_CONFIRMED)
+
+    @staticmethod
+    def _validated_global_ids(
+        asset_ids: Sequence[str] | None, ready: dict[str, SourceAsset]
+    ) -> list[str]:
+        """전체 순서 입력 검사 — 빈 값은 제안 순서, 그 외는 완전·유일해야 한다."""
+        if asset_ids is None:
+            return list(ready)
+        given = [item.strip() for item in asset_ids if item.strip()]
+        unknown = [item for item in given if item not in ready]
+        if unknown:
+            known_hint = ", ".join(sorted(ready)[:3])
+            raise GlobalOrderError(
+                f"모르는 자산 ID가 있다: {', '.join(unknown[:3])}"
+                f" — 현재 ready 원본의 ID만 쓸 수 있다(예: {known_hint}…)"
+            )
+        duplicates = sorted({item for item in given if given.count(item) > 1})
+        if duplicates:
+            raise GlobalOrderError(f"중복된 자산 ID가 있다: {', '.join(duplicates[:3])}")
+        missing = [asset_id for asset_id in ready if asset_id not in given]
+        if missing:
+            raise GlobalOrderError(
+                f"순서에서 빠진 ready 원본이 {len(missing)}건이다"
+                f" (예: {', '.join(missing[:3])}) — 전체 확정은 현재 ready 전부를"
+                " 담아야 한다"
+            )
+        return given
+
+    def latest_global_source_order(self, root: Path) -> GlobalOrderRevision | None:
+        return self._workspace(root).latest_global_order_revision()
+
+    def list_global_source_orders(self, root: Path) -> tuple[GlobalOrderRevision, ...]:
+        return self._workspace(root).list_global_order_revisions()

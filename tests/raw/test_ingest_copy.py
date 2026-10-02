@@ -405,7 +405,7 @@ def test_v1_workspace_upgrades_transactionally_and_keeps_data(
     # 다시 여는 주체는 새 서버다(재시작) — 캐시가 아니라 디스크의 v1을 연다.
     restarted = raw.RawWorkspaceService()
     reopened = restarted.open_workspace(workspace)
-    assert reopened.db_schema_version == "raw-workspace-db/2"
+    assert reopened.db_schema_version == "raw-workspace-db/3"
     assert restarted.resolve_media(workspace, registration.file_id).size_bytes == len(b"handmade")
     assert restarted.get_job(workspace, blocked.job_id).status == "failed"
     # 갱신 뒤에도 가져오기가 그 작업공간에서 그대로 돈다.
@@ -581,3 +581,111 @@ def test_symlinked_source_parent_refuses_copy(workspace: Path, tmp_path: Path) -
     (asset,) = service.list_source_assets(workspace)
     assert asset.status == "failed"
     assert not (workspace / asset.relative_path).exists()
+
+
+def test_repeated_retry_never_touches_formerly_verified_original(
+    workspace: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """루트 재현 — 두 번째 재시도가 '실패 상태'를 몰아서 검증 원본을 덮어쓰지 않는다.
+
+    첫 재시도는 검증 원본을 failed로 남기고 파일을 지키지만, 그 뒤 상태가
+    failed이므로 두 번째 재시도가 예전 규칙(비-ready 잔해 치우기)에 따라 파일을
+    지웠다. 검증 이력(content_sha256)은 상태와 무관하게 살아 있어야 하고, 그것이
+    있는 한 어떤 재시도도 그 목적지를 다시 준비하지 않는다.
+    """
+    card = _card(tmp_path, "card", {"1.mp4": b"verified-first", "2.mp4": b"second"})
+    service = raw.RawWorkspaceService()
+    confirmation = service.confirm_ingest(
+        workspace, service.scan_sources(workspace, card, _fake_inspector)
+    )
+
+    broken = {"active": True}
+    real_copy = ingest._copy_with_hash
+
+    def failing_second(source: Path, target: Path) -> str:
+        if broken["active"] and source.name == "2.mp4":
+            raise OSError("synthetic card failure")
+        return real_copy(source, target)
+
+    monkeypatch.setattr(ingest, "_copy_with_hash", failing_second)
+    handle = service.start_ingest_copy(workspace, confirmation)
+    assert _wait_terminal(service, workspace, handle.job_id).status == "failed"
+    broken["active"] = False  # 카드는 다시 붙었다 — 남은 실패 요인은 변조뿐이다
+
+    first = service.list_source_assets(workspace, confirmation.batch_dir)[0]
+    destination = workspace / first.relative_path
+    destination.write_bytes(b"explicit synthetic corrupted formerly verified original")
+    before = destination.read_bytes()
+    tampered_stat = destination.stat()
+
+    for _ in range(2):  # 룹 탐침과 같은 이중 재시도
+        same = service.retry_ingest_copy(workspace, handle.job_id)
+        assert same.job_id == handle.job_id
+        record = _wait_terminal(service, workspace, same.job_id)
+        assert destination.read_bytes() == before  # 파일이 덮어쓰이지 않았다
+        assert record.progress_current <= record.progress_total
+
+    states = {a.source_name: a for a in service.list_source_assets(workspace)}
+    assert states["2.mp4"].status == "ready"  # 회복 가능한 쪽은 첫 재시도에 끝났다
+    assert states["1.mp4"].status == "failed"
+    assert states["1.mp4"].content_sha256 == first.content_sha256  # 검증 이력 유지
+    assert states["1.mp4"].file_id == first.file_id  # 등록 ID도 그대로
+    after = destination.stat()
+    assert (after.st_size, after.st_mtime_ns) == (tampered_stat.st_size, tampered_stat.st_mtime_ns)
+
+
+def test_restored_formerly_verified_original_heals_without_touching_file(
+    workspace: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """변조됐던 검증 원본이 원래 내용으로 돌아오면 상태만 ready로 되돌린다."""
+    card = _card(tmp_path, "card", {"1.mp4": b"verified-first", "2.mp4": b"second"})
+    service = raw.RawWorkspaceService()
+    confirmation = service.confirm_ingest(
+        workspace, service.scan_sources(workspace, card, _fake_inspector)
+    )
+
+    broken = {"active": True}
+    real_copy = ingest._copy_with_hash
+
+    def failing_second(source: Path, target: Path) -> str:
+        if broken["active"] and source.name == "2.mp4":
+            raise OSError("synthetic card failure")
+        return real_copy(source, target)
+
+    monkeypatch.setattr(ingest, "_copy_with_hash", failing_second)
+    handle = service.start_ingest_copy(workspace, confirmation)
+    assert _wait_terminal(service, workspace, handle.job_id).status == "failed"
+
+    first = service.list_source_assets(workspace, confirmation.batch_dir)[0]
+    destination = workspace / first.relative_path
+    destination.write_bytes(b"tampered")
+    broken["active"] = False
+    service.retry_ingest_copy(workspace, handle.job_id)
+    assert _wait_terminal(service, workspace, handle.job_id).status == "failed"
+
+    destination.write_bytes(b"verified-first")  # 원래 내용으로 되돌아왔다
+    restored_stat = destination.stat()
+    service.retry_ingest_copy(workspace, handle.job_id)
+    record = _wait_terminal(service, workspace, handle.job_id)
+    assert record.status == "succeeded", record.error
+    (healed,) = [a for a in service.list_source_assets(workspace) if a.source_name == "1.mp4"]
+    assert healed.status == "ready" and healed.error is None
+    after = destination.stat()
+    assert (after.st_size, after.st_mtime_ns) == (restored_stat.st_size, restored_stat.st_mtime_ns)
+
+
+def test_verification_hash_marker_is_never_discarded(workspace: Path, tmp_path: Path) -> None:
+    """저장소가 검증 이력 표식을 지키는 선 — 해시 지우기·바꾸기는 거절한다."""
+    card = _card(tmp_path, "card", {"a.mp4": b"payload"})
+    service = raw.RawWorkspaceService()
+    confirmation, _, record = _run_ingest(service, workspace, card)
+    assert record.status == "succeeded"
+    workspace_obj = service._workspace(workspace)
+    (asset,) = service.list_source_assets(workspace)
+    with pytest.raises(raw.RawWorkspaceError, match="내용 해시는 못 바꾼다"):
+        workspace_obj.update_source_asset(asset.asset_id, content_sha256=None)
+    with pytest.raises(raw.RawWorkspaceError, match="내용 해시는 못 바꾼다"):
+        workspace_obj.update_source_asset(asset.asset_id, content_sha256="deadbeef")
+    kept = service.list_source_assets(workspace)[0]
+    assert kept.content_sha256 == asset.content_sha256
+    _ = confirmation
