@@ -86,7 +86,48 @@ swift test --package-path macos --scratch-path /private/tmp/vlogsrt-x01-swift-bu
    read-only가 서명 결과에 남아야 함.
 4. `macos/scripts/install-development-engine.sh`를 실행해 Application Scripts 런처를 설치함.
 
-공증, 배포 서명, 자동 업데이트는 첫 개인용 버전 범위 밖이다. 사용자 지정 공유 대상의
-Create Asset/Get Property Apple-event scripting target은 실제 Final Cut 왕복 스파이크에서
-Apple의 Asset Management Suite 템플릿으로 생성해야 한다. capability와 Open Document
-수신 경계는 준비되어 있지만, 실측 전에는 완성됐다고 보지 않는다.
+공증, 배포 서명, 자동 업데이트는 첫 개인용 버전 범위 밖이다.
+
+## 사용자 지정 공유 대상 — Apple Media Asset Protocol
+
+`FinalCutAgent.sdef`와 `MediaAssetScripting.swift`는 Apple의 정본 문서
+("Receiving Media and Data Through a Custom Share Destination" ·
+"Creating Scripting Definitions for Custom Share Destinations" ·
+"Responding to Apple Events from Final Cut Pro")가 정의하는 Apple event
+생명주기를 따른다:
+
+1. **make(corecrel)** — `make new asset with properties {name, metadata,
+   data options}`로 자리표시자 자산을 만들고 그 지시자
+   (application의 `assets` 요소 안 id)를 돌려준다.
+2. **get location info** — asset location 레코드. AI Rough Cut은 **XML
+   전용**이다: `has description: true`·`has media: false`, 폴더는 App Group의
+   `ShareStaging/<자산 id>`(없으면 임시 폴더)다.
+3. **get library info** — 라이브러리 보관을 원하지 않는다는 답(두 플래그 모두
+   거짓).
+4. **get metadata** — 받은 공유 메타데이터 + `com.apple.proapps.share.id`.
+5. **get data options** — 후보에서 고른 답: 보기는 "None", DTD 버전은 엔진
+   계약(1.14)에 가장 가까운 것.
+6. **open** — 내보낸 파일이 도착하면 기존 인박스 스테이징
+   (`RoughCutInbox`·`CaptionInbox`)이 그대로 받는다. 원본 미디어는 건드리지
+   않는다.
+
+sandbox Final Cut이 이 객체·명령에 닿으려면 access group
+(`com.apple.proapps.assetmanagement.import`)이 자산 클래스·컨테이너의 asset
+요소·make 명령에 붙어 있어야 한다(문서 요구사항).
+
+**`.fcpxdest`는 Final Cut이 만들어야 한다.** `Resources/`의 손수 만든
+Info.plist뿐인 `.fcpxdest` 번들은 Final Cut이 **무시한다** — 끌어다 놔도
+설치되지 않는다(실측). 정본은 Final Cut UI에서 만든다:
+
+1. Final Cut → File > Share > Add Destination에서 Export File을 복제해 이름을
+   정한다(예: AI Rough Cut).
+2. "Open with" 메뉴에서 Other → 이 앱을 고른다.
+3. Final Cut > Preferences > Destinations에서 그 대상을 Finder로 끌어내면
+   진짜 `.fcpxdest` 파일이 생긴다 — 그것을 배포·설치한다.
+
+Apple event 왕복은 `scripts/apple-event-smoke.applescript`로 누른다(설치본
+대상, 첫 실행의 Automation 동의 필요). 2026-10 실측 참고: 이 시스템
+(macOS 26.6)은 로컬 unsigned/개발 서명 번들에 scripting terminology를
+실어주지 않는다 — smoke는 제대로 서명·설치된 앱에서만 용어 형태가 컴파일된다
+(원시 이벤트 형태는 그 게이트를 우회해 계약 자체를 잡는다). 그 왕복을 실측하기
+전까지 이 경계를 완성됐다고 보지 않는다.

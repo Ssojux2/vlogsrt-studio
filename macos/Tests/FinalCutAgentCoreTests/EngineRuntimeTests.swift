@@ -784,7 +784,7 @@ enum EngineRuntimeTestFixtures {}
 //  SDEF — asset 클래스/속성 + make 명령 구조
 // ─────────────────────────────────────────────────────────────
 
-@Test func sdefDeclaresAssetClassWithPropertiesAndAMakeCommand() throws {
+@Test func sdefDeclaresApplesDocumentedMediaAssetProtocol() throws {
   let sdefURL = URL(fileURLWithPath: #filePath)
     .deletingLastPathComponent()
     .deletingLastPathComponent()
@@ -793,29 +793,125 @@ enum EngineRuntimeTestFixtures {}
     .appendingPathComponent("macos/Resources/FinalCutAgent.sdef")
   let data = try Data(contentsOf: sdefURL)
   let document = try XMLDocument(data: data, options: [])
-  let classes = try document.nodes(forXPath: "/dictionary/suite/class")
-  #expect(classes.count == 1)
-  let asset = try #require(classes.first as? XMLElement)
-  #expect(asset.attribute(forName: "name")?.stringValue == "asset")
-  let propertyNames = try document.nodes(forXPath: "/dictionary/suite/class/property")
-    .compactMap { ($0 as? XMLElement)?.attribute(forName: "name")?.stringValue }
-  #expect(
-    propertyNames == ["asset location", "library location", "data options"])
-  // 속성은 4자 코드와 cocoa 키를 가진다 — AppleScript가 잡아 쓰는 좌표다.
-  for node in try document.nodes(forXPath: "/dictionary/suite/class/property") {
-    let element = try #require(node as? XMLElement)
-    #expect(element.attribute(forName: "code")?.stringValue?.count == 4)
-    #expect(element.attribute(forName: "type")?.stringValue != nil)
+
+  func names(_ xpath: String) throws -> [String] {
+    try document.nodes(forXPath: xpath)
+      .compactMap { ($0 as? XMLElement)?.attribute(forName: "name")?.stringValue }
   }
-  // make는 명령이지 속성이 아니다 — asset을 명령으로 선언하지 않는다.
-  let commands = try document.nodes(forXPath: "/dictionary/suite/command")
-    .compactMap { ($0 as? XMLElement)?.attribute(forName: "name")?.stringValue }
-  #expect(commands == ["make"])
+  func codes(_ xpath: String) throws -> [String] {
+    try document.nodes(forXPath: xpath)
+      .compactMap { ($0 as? XMLElement)?.attribute(forName: "code")?.stringValue }
+  }
+
+  // 표준 suite를 XInclude로 싣는다 — get·open 등 기본 용어의 뿌리다.
+  #expect(try document.nodes(forXPath: "//*[local-name()='include']").count == 1)
+
+  // record-type 두 개 — 문서가 정의한 레코드 형(asset location·library location).
+  #expect(try names("/dictionary/suite/record-type") == ["asset location", "library location"])
+  #expect(try codes("/dictionary/suite/record-type") == ["aslc", "lblc"])
+  #expect(
+    try names("/dictionary/suite/record-type[@name='asset location']/property")
+      == ["folder", "base name", "has media", "has description"])
+  #expect(
+    try codes("/dictionary/suite/record-type[@name='asset location']/property")
+      == ["asfd", "asbn", "ashm", "ashd"])
+  #expect(
+    try names("/dictionary/suite/record-type[@name='library location']/property")
+      == ["library folder", "library base name", "has archive", "has library description"])
+  #expect(
+    try codes("/dictionary/suite/record-type[@name='library location']/property")
+      == ["lbfd", "lbbn", "lbha", "lbhd"])
+
+  // user defined record(usrf) — metadata·data options의 값 형.
+  #expect(try names("/dictionary/suite/value-type") == ["user defined record"])
+  #expect(try codes("/dictionary/suite/value-type") == ["usrf"])
+
+  // make는 표준 corecrel을 이 suite에서 다시 선언한다 — 문서의 정본 매개변수.
+  let makeCommand = try #require(
+    try document.nodes(forXPath: "/dictionary/suite/command[@name='make']")
+      .first as? XMLElement)
+  #expect(makeCommand.attribute(forName: "code")?.stringValue == "corecrel")
+  #expect(
+    try names("/dictionary/suite/command[@name='make']/parameter")
+      == ["new", "at", "with data", "with properties"])
+  #expect(
+    try codes("/dictionary/suite/command[@name='make']/parameter")
+      == ["kocl", "insh", "data", "prdt"])
+  let makeCocoa = try #require(
+    try document.nodes(forXPath: "/dictionary/suite/command[@name='make']/cocoa")
+      .first as? XMLElement)
+  #expect(makeCocoa.attribute(forName: "class")?.stringValue == "MakeAssetCommand")
+  let makeResult = try #require(
+    try document.nodes(forXPath: "/dictionary/suite/command[@name='make']/result")
+      .first as? XMLElement)
+  #expect(makeResult.attribute(forName: "type")?.stringValue == "specifier")
+  // open은 Cocoa scripting(NSApplication 위임)이 처리한다 — access group만 얹는다.
+  #expect(try codes("/dictionary/suite/command[@name='open']") == ["aevtodoc"])
+
+  // asset은 application의 요소다 — 창 없는 실행기의 컨테이너 계층.
+  let element = try #require(
+    try document.nodes(
+      forXPath: "/dictionary/suite/class-extension[@name='application']/element"
+    ).first as? XMLElement)
+  #expect(element.attribute(forName: "type")?.stringValue == "asset")
+  let elementCocoa = try #require(
+    try document.nodes(
+      forXPath: "/dictionary/suite/class-extension[@name='application']/element/cocoa"
+    ).first as? XMLElement)
+  #expect(elementCocoa.attribute(forName: "key")?.stringValue == "assets")
+
+  // asset 클래스 — 문서가 정의한 여섯 속성(id부터 data options까지).
+  let assetClass = try #require(
+    try document.nodes(forXPath: "/dictionary/suite/class[@name='asset']")
+      .first as? XMLElement)
+  #expect(assetClass.attribute(forName: "code")?.stringValue == "aset")
+  let assetCocoa = try #require(
+    try document.nodes(forXPath: "/dictionary/suite/class[@name='asset']/cocoa")
+      .first as? XMLElement)
+  #expect(assetCocoa.attribute(forName: "class")?.stringValue == "MediaAssetProxy")
+  let propertyNames = try names("/dictionary/suite/class[@name='asset']/property")
+  #expect(
+    propertyNames
+      == ["id", "name", "location info", "library info", "metadata", "data options"])
+  #expect(
+    try codes("/dictionary/suite/class[@name='asset']/property")
+      == ["ID  ", "pnam", "locn", "lbry", "meta", "dopt"])
   let modelProperties = MediaAssetProperty.allCases.map(\.rawValue)
   #expect(modelProperties == propertyNames)
   #expect(MediaAssetMakeCommand.make.rawValue == "make")
-  // 코어 모델의 dataOptions 기본 — 분석은 원본 우선 512px.
-  #expect(MediaDataOptions.analysis.maxLongEdge == 512)
+
+  // 코드 길이는 sdef DTD의 하드 한도다 — suite·클래스·속성·레코드는 4자,
+  // 명령은 이벤트 클래스+ID가 붙은 8자(corecrel·aevtodoc)다.
+  let fourCharacterCodeAxes = [
+    "/dictionary/suite", "/dictionary/suite/record-type", "/dictionary/suite/value-type",
+    "/dictionary/suite/command/parameter",
+    "/dictionary/suite/class", "/dictionary/suite/class/property",
+    "/dictionary/suite/record-type/property",
+  ]
+  for axis in fourCharacterCodeAxes {
+    for code in try codes(axis) {
+      #expect(code.count == 4, "4자 코드여야 한다: \(code) (\(axis))")
+    }
+  }
+  for code in try codes("/dictionary/suite/command") {
+    #expect(code.count == 8, "8자 코드(이벤트 클래스+ID)여야 한다: \(code)")
+  }
+
+  // 접근 그룹 — sandbox Final Cut이 자산·요소·make에 닿는 문서 요구사항.
+  let accessGroups = try document.nodes(forXPath: "//access-group")
+    .compactMap { ($0 as? XMLElement)?.attribute(forName: "identifier")?.stringValue }
+  #expect(!accessGroups.isEmpty)
+  #expect(accessGroups.allSatisfy { $0 == "com.apple.proapps.assetmanagement.import" })
+  #expect(
+    try document.nodes(
+      forXPath: "/dictionary/suite/class[@name='asset']/access-group").count == 1)
+  #expect(
+    try document.nodes(
+      forXPath: "/dictionary/suite/class-extension[@name='application']/element/access-group"
+    ).count == 1)
+  #expect(
+    try document.nodes(
+      forXPath: "/dictionary/suite/command[@name='make']/access-group").count == 1)
 }
 
 // ─────────────────────────────────────────────────────────────

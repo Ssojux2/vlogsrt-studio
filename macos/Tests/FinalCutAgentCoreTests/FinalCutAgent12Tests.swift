@@ -275,28 +275,50 @@ func wavHeader(rate: UInt32) -> Data {
   return data
 }
 
-@Test func mediaAssetProtocolValidatesLocationsAndCreations() throws {
-  let root = FileManager.default.temporaryDirectory
-    .appendingPathComponent(UUID().uuidString, isDirectory: true)
-  let mediaRoot = root.appendingPathComponent("media", isDirectory: true)
-  let clip = mediaRoot.appendingPathComponent("clip.mov")
-  try FileManager.default.createDirectory(at: mediaRoot, withIntermediateDirectories: true)
-  try Data("media".utf8).write(to: clip)
-  defer { try? FileManager.default.removeItem(at: root) }
+@Test func mediaAssetProtocolAnswersTheDocumentedRecords() throws {
+  let folder = FileManager.default.temporaryDirectory
+    .appendingPathComponent("share-staging", isDirectory: true)
 
-  let inside = MediaAssetLocation.validate(assetID: "a1", fileURL: clip, allowedRoots: [mediaRoot])
-  #expect(inside.isUnderAllowedRoot)
-  let outside = MediaAssetLocation.validate(
-    assetID: "a1", fileURL: root.appendingPathComponent("outside.mov"), allowedRoots: [mediaRoot])
-  #expect(!outside.isUnderAllowedRoot)
+  // asset location — XML 전용 내보내기의 답: 미디어는 받지 않고 FCPXML만 받는다.
+  let location = AssetLocationRecord.xmlOnly(folder: folder, baseName: "에피소드 12")
+  #expect(location.hasMedia == false)
+  #expect(location.hasDescription == true)
+  #expect(location.cocoaDictionary["basename"] as? String == "에피소드 12")
+  #expect(location.cocoaDictionary["hasMedia"] as? Bool == false)
+  #expect(location.cocoaDictionary["hasDescription"] as? Bool == true)
+  #expect((location.cocoaDictionary["folder"] as? URL) == folder)
 
-  let creation = try MediaAssetCreation.validate(assetID: "render-1", fileURL: clip)
-  #expect(creation.assetID == "render-1")
-  #expect(throws: MediaAssetProtocolError.self) {
-    _ = try MediaAssetCreation.validate(assetID: "", fileURL: clip)
-  }
-  #expect(MediaDataOptions.analysis.maxLongEdge == 512)
-  #expect(MediaDataOptions.analysis.preferProxy == false)
+  // library location — 라이브러리 보관을 원하지 않는다는 명시적 답(플래그 둘뿐).
+  let library = LibraryLocationRecord.none()
+  #expect(library.hasArchive == false)
+  #expect(library.hasLibraryDescription == false)
+  #expect(library.cocoaDictionary.count == 2)
+  #expect(library.cocoaDictionary["hasArchive"] as? Bool == false)
+  #expect(library.cocoaDictionary["hasDescription"] as? Bool == false)
+
+  // data options 답 — 후보에서 "None" 보기와 1.14에 가장 가까운 버전을 고른다.
+  let reply = DataOptionsReply.choose(
+    availableMetadataSets: ["Camera View", "None"],
+    availableVersions: ["1.13", "1.14", "1.15"])
+  #expect(reply.metadataViewName == "None")
+  #expect(reply.dtdVersion == "1.14")
+  // 1.14가 없으면 가장 가까운 아래(1.13)지 위(1.16)가 아니다.
+  let fallback = DataOptionsReply.choose(
+    availableMetadataSets: [], availableVersions: ["1.13", "1.16"])
+  #expect(fallback.metadataViewName == nil)
+  #expect(fallback.dtdVersion == "1.13")
+  let empty = DataOptionsReply.choose(availableMetadataSets: [], availableVersions: [])
+  #expect(empty.metadataViewName == nil)
+  #expect(empty.dtdVersion == nil)
+  #expect(reply.cocoaDictionary["metadataSet"] as? String == "None")
+  #expect(reply.cocoaDictionary["descriptionVersion"] as? String == "1.14")
+
+  // metadata 답 — 받은 키를 그대로 되돌리고 share.id(추적 ID)를 보탠다.
+  let metadata = ShareMetadataReply.reply(
+    received: ["com.apple.proapps.share.episodeID": "MyNewEpisode"],
+    uniqueID: "asset-track-1")
+  #expect(metadata["com.apple.proapps.share.episodeID"] as? String == "MyNewEpisode")
+  #expect(metadata[ShareMetadataReply.shareIDKey] as? String == "asset-track-1")
 }
 
 @Test func shareDestinationReportsInstallStateAgainstTheBundledRevision() throws {

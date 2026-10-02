@@ -1,40 +1,150 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE dictionary SYSTEM "http://www.apple.com/DTDs/sdef-1.0.dtd">
+<!DOCTYPE dictionary SYSTEM "file://localhost/System/Library/DTDs/sdef.dtd">
 <!--
-  Final Cut Agent — Apple Media Asset Protocol 확장 사전.
+  Final Cut Agent — Apple Media Asset Protocol 사전.
 
-  계약 모양은 정본 구조를 따른다: `asset`은 **클래스**이고 asset location·
-  library location·data options는 그 **속성**이며, 새 자산 만들기는 표준
-  `make` **명령** 하나다. Apple event(SDEF/AppleScript) 응답 계층은 구현되어
-  있다 — cocoa class가 FinalCutAgentCore의 @objc 노출 클래스
-  (MediaAssetProxy·CreateAssetCommand)로 연결되고 Get Property는 KVC로,
-  make는 NSScriptCommand 서브클래스로 답한다.
+  모양은 Apple의 정본 문서를 따른다("Creating Scripting Definitions for
+  Custom Share Destinations"의 Asset Management Suite 예):
+  - asset은 클래스(aset)이고 location info·library info는 **레코드 형** 속성,
+    metadata·data options는 user defined record(usrf)다.
+  - make는 표준 suite의 corecrel을 우리 suite 안에 다시 선언해 access group과
+    cocoa class(MakeAssetCommand)를 얹는다 — direct parameter가 아니라
+    new/at/with data/with properties 매개변수를 받는다.
+  - Final Cut이 sandbox 앱이므로 자산 클래스·컨테이너의 asset 요소·make 명령에
+    access group(com.apple.proapps.assetmanagement.import)이 있어야 한다.
+  - 포함 계층은 무관하다는 것이 계약이다 — 이 앱은 창 없는 실행기라 asset을
+    application의 요소로 둔다(document 아니다).
 
-  주의: 이것은 Apple event 계층이다. Final Cut 앱이 확장과 실제로 통신하는
-  Media Asset Protocol XPC(ProExtensionHost) 와이어링은 여전히 구현되지
-  않았다 — SDK가 있는 빌드에서 별도 어댑터가 이 모델을 연결해야 한다.
+  이 사전은 Apple event 계층만 정의한다. .fcpxdest 번들 자체는 Final Cut UI에서
+  만들어 내보낸 정본만 설치된다 — Resources의 손수 만든 번들은 참고 본이다.
 -->
-<dictionary title="Final Cut Agent">
-  <suite name="Media Asset Protocol" code="FCAp" description="Final Cut과 확장 사이의 미디어 자산 경계">
-    <class name="asset" code="FCAa" description="Final Cut이 확장에 노출하는 미디어 자산" plural="assets">
+<dictionary title="Final Cut Agent" xmlns:xi="http://www.w3.org/2003/XInclude">
+  <!-- 표준 suite — make·get·open 등 기본 용어의 뿌리 -->
+  <xi:include href="file:///System/Library/ScriptingDefinitions/CocoaStandard.sdef"
+    xpointer="xpointer(/dictionary/suite)"/>
+  <suite name="Media Asset Protocol" code="FCAp"
+    description="Final Cut 사용자 지정 공유 대상이 이 앱에 미디어·데이터를 전달하는 Apple event 용어">
+    <!-- 자산 위치 레코드 — Final Cut이 어디에 무엇을 내보낼지 묻는 답 -->
+    <record-type name="asset location" code="aslc"
+      description="asset의 내보내기 출력 파일 위치">
+      <access-group identifier="com.apple.proapps.assetmanagement.import" access="rw"/>
+      <property name="folder" code="asfd" type="file"
+        description="내보내기 출력 파일이 담길 폴더">
+        <cocoa key="folder"/>
+      </property>
+      <property name="base name" code="asbn" type="text"
+        description="내보내기 출력 파일의 기본 이름 — 자산 이름과 같아야 한다">
+        <cocoa key="basename"/>
+      </property>
+      <property name="has media" code="ashm" type="boolean"
+        description="렌더된 미디어를 받으면 참">
+        <cocoa key="hasMedia"/>
+      </property>
+      <property name="has description" code="ashd" type="boolean"
+        description="FCPXML 편집 기술을 받으면 참">
+        <cocoa key="hasDescription"/>
+      </property>
+    </record-type>
+    <!-- 라이브러리 위치 레코드 — 라이브러리 보관을 원하지 않으면 두 플래그 모두 거짓 -->
+    <record-type name="library location" code="lblc"
+      description="asset이 속한 라이브러리 파일의 위치">
+      <access-group identifier="com.apple.proapps.assetmanagement.import" access="rw"/>
+      <property name="library folder" code="lbfd" type="file"
+        description="라이브러리 출력 파일이 담길 폴더">
+        <cocoa key="folder"/>
+      </property>
+      <property name="library base name" code="lbbn" type="text"
+        description="라이브러리 출력 파일의 기본 이름">
+        <cocoa key="basename"/>
+      </property>
+      <property name="has archive" code="lbha" type="boolean"
+        description="라이브러리 보관 파일을 받으면 참">
+        <cocoa key="hasArchive"/>
+      </property>
+      <property name="has library description" code="lbhd" type="boolean"
+        description="라이브러리 FCPXML을 받으면 참">
+        <cocoa key="hasDescription"/>
+      </property>
+    </record-type>
+    <!-- 공유 메타데이터·데이터 선택답의 값 형 — 키는 문자열 그대로다 -->
+    <value-type name="user defined record" code="usrf">
+      <cocoa class="NSDictionary"/>
+    </value-type>
+    <!-- open은 Cocoa scripting(NSApplication 위임)이 처리한다 — access group만 얹는다 -->
+    <command name="open" code="aevtodoc" description="문서를 연다">
+      <access-group identifier="com.apple.proapps.assetmanagement.import" access="rw"/>
+      <direct-parameter description="열 파일(들)">
+        <type type="file"/>
+        <type type="file" list="yes"/>
+      </direct-parameter>
+    </command>
+    <!-- 표준 make(corecrel)를 이 suite 안에 다시 선언한다 — Apple 예제의 정본 모양.
+         Final Cut은 new·with properties만 쓴다(at·with data는 표준 상속분이다). -->
+    <command name="make" code="corecrel" description="새 객체를 만든다">
+      <access-group identifier="com.apple.proapps.assetmanagement.import" access="rw"/>
+      <cocoa class="MakeAssetCommand"/>
+      <parameter name="new" code="kocl" type="type"
+        description="새 객체의 클래스">
+        <cocoa key="ObjectClass"/>
+      </parameter>
+      <parameter name="at" code="insh" type="location specifier" optional="yes"
+        description="새 객체를 넣을 위치">
+        <cocoa key="Location"/>
+      </parameter>
+      <parameter name="with data" code="data" type="any" optional="yes"
+        description="객체의 초기 내용">
+        <cocoa key="ObjectData"/>
+      </parameter>
+      <parameter name="with properties" code="prdt" type="record" optional="yes"
+        description="새 객체 속성의 초기값 — name(pnam)·metadata(meta)·data options(dopt)">
+        <cocoa key="KeyDictionary"/>
+      </parameter>
+      <result type="specifier" description="새 객체"/>
+    </command>
+    <!-- 컨테이너 — 창 없는 실행기라 application이 곧 컨테이너다 -->
+    <class-extension name="application" extends="application">
+      <access-group identifier="com.apple.proapps.assetmanagement.import" access="rw"/>
+      <cocoa class="NSApplication"/>
+      <element type="asset">
+        <access-group identifier="com.apple.proapps.assetmanagement.import" access="rw"/>
+        <cocoa key="assets"/>
+      </element>
+    </class-extension>
+    <!-- 자산 — 내보내기 출력의 자리표시자. 시각·경계는 여기 없다(자막 엔진과 무관) -->
+    <class name="asset" code="aset" description="Final Cut 내보내기 출력에 대응하는 미디어 자산"
+      plural="assets">
+      <access-group identifier="com.apple.proapps.assetmanagement.import" access="rw"/>
       <cocoa class="MediaAssetProxy"/>
-      <property name="asset location" code="aloc" type="file" access="r"
-        description="프로젝트·이벤트 자산의 실제 파일 위치">
-        <cocoa key="assetLocation"/>
+      <property name="id" code="ID  " type="text" access="r"
+        description="자산의 고유 식별자">
+        <access-group identifier="com.apple.proapps.assetmanagement.import" access="rw"/>
+        <cocoa key="uniqueID"/>
       </property>
-      <property name="library location" code="lloc" type="file" access="r"
-        description="라이브러리 저장 위치">
-        <cocoa key="libraryLocation"/>
+      <property name="name" code="pnam" type="text" access="r"
+        description="자산 이름 — Final Cut이 프로젝트 이름에서 만든다">
+        <access-group identifier="com.apple.proapps.assetmanagement.import" access="rw"/>
+        <cocoa key="name"/>
       </property>
-      <property name="data options" code="dopt" type="record" access="rw"
-        description="자산 데이터 접근 옵션(원본/프록시·최대 해상도)">
+      <property name="location info" code="locn" type="asset location" access="r"
+        description="내보내기 출력 파일의 위치 정보">
+        <access-group identifier="com.apple.proapps.assetmanagement.import" access="rw"/>
+        <cocoa key="locationInfo"/>
+      </property>
+      <property name="library info" code="lbry" type="library location" access="r"
+        description="라이브러리 출력 파일의 위치 정보">
+        <access-group identifier="com.apple.proapps.assetmanagement.import" access="rw"/>
+        <cocoa key="libraryInfo"/>
+      </property>
+      <property name="metadata" code="meta" type="user defined record" access="rw"
+        description="자산에 붙는 공유 메타데이터 집합">
+        <access-group identifier="com.apple.proapps.assetmanagement.import" access="rw"/>
+        <cocoa key="metadata"/>
+      </property>
+      <property name="data options" code="dopt" type="user defined record" access="rw"
+        description="내보내기 데이터 생성 선택 — 메타데이터 보기·DTD 버전">
+        <access-group identifier="com.apple.proapps.assetmanagement.import" access="rw"/>
         <cocoa key="dataOptions"/>
       </property>
     </class>
-    <command name="make" code="fcapmake" description="새 자산(렌더 결과 등)을 만들어 등록한다">
-      <cocoa class="CreateAssetCommand"/>
-      <direct-parameter type="file" description="새 자산 파일"/>
-      <result type="asset" description="등록된 자산"/>
-    </command>
   </suite>
 </dictionary>
