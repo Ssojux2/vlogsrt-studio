@@ -1,0 +1,237 @@
+"""`vlogsrt media` — A2 가져오기의 진단·자동화 CLI(계획 §15.2).
+
+브라우저가 기본 실행 경로다. 이 명령은 시험·진단·자동화용이며, 공개 서비스
+(`vlogsrt.project.raw.service`)만을 부른다 — 이 계층이 네트워크를 아는 길은
+없다. `import --confirm`이 승인하는 것은 **로컬 복사뿐**이다: 어떤 플래그도
+유료 호출·온라인 분석을 켜지 않는다(코디네이터 ACK). 이 모듈은 `cli.py`를
+import하지 못한다(계약 §1) — 조립은 `vlogsrt/project/commands.py`가 맡는다.
+"""
+
+from __future__ import annotations
+
+import argparse
+import time
+from collections.abc import Callable
+from pathlib import Path
+
+from vlogsrt import log
+from vlogsrt.project.raw import service as raw_service
+
+JOB_WAIT_SECONDS = 600.0
+"""복사 작업 완료 대기 상한 — 진단 명령이 무한히 묶여 있지 않게 한다."""
+
+JOB_POLL_SECONDS = 0.2
+"""작업 상태 확인 간격 — DB 갱신을 얻어맞지 않게 짧게 쉰다."""
+
+_TERMINAL_STATUSES = frozenset({"succeeded", "failed", "cancelled"})
+
+
+def _service() -> raw_service.RawWorkspaceService:
+    return raw_service.RawWorkspaceService()
+
+
+def _human_bytes(size: int) -> str:
+    scaled = float(size)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if scaled < 1024 or unit == "TB":
+            return f"{scaled:,.0f}{unit}" if unit == "B" else f"{scaled:,.1f}{unit}"
+        scaled /= 1024
+    return f"{scaled:,.1f}TB"
+
+
+def cmd_init(args: argparse.Namespace) -> int:
+    """`media init` — 작업공간 생성(진단용). 브라우저 만들기와 같은 규칙을 지난다."""
+    root = Path(args.path)
+    try:
+        status = _service().create_workspace(root, args.name)
+    except raw_service.RawWorkspaceError as error:
+        log.error(str(error))
+        return 1
+    log.out(f"작업공간을 만들었다: {status.workspace_root} (신원 {status.workspace_id})")
+    return 0
+
+
+def cmd_import(args: argparse.Namespace) -> int:
+    """`media import` — 조사·제안 인쇄. `--confirm`일 때만 확정·복사까지 간다.
+
+    `--confirm`은 로컬 복사의 명시적 승인이다(사람의 순서 확인에 해당).
+    없으면 제안만 보이고 아무 것도 쓰지 않는다 — 완료로 위장하지 않는다.
+    """
+    service = _service()
+    workspace_root = Path(args.workspace)
+    try:
+        status = service.open_workspace(workspace_root)
+        proposal = service.scan_sources(Path(status.workspace_root), Path(args.source))
+    except raw_service.RawWorkspaceError as error:
+        log.error(str(error))
+        return 1
+    _print_proposal(proposal)
+    if not proposal.order:
+        log.warn("가져올 영상이 없다 — 제외 사유를 확인하세요.")
+        return 1
+    if not args.confirm:
+        log.out("\n--confirm 없이는 복사하지 않는다 — 이 제안을 확정하려면 --confirm을 붙여라.")
+        return 0
+    try:
+        confirmation = service.confirm_ingest(Path(status.workspace_root), proposal)
+    except raw_service.RawWorkspaceError as error:
+        log.error(f"확정 실패(아무 것도 쓰지 않았다): {error}")
+        return 1
+    log.out(
+        f"확정 — 배치 {confirmation.batch_dir} · 순서 리비전 {confirmation.revision.revision_id}"
+        f" · 작업 지문 {confirmation.job_fingerprint[:12]}…"
+    )
+    handle = service.start_ingest_copy(Path(status.workspace_root), confirmation)
+    return _await_ingest_job(service, Path(status.workspace_root), handle.job_id)
+
+
+def cmd_retry(args: argparse.Namespace) -> int:
+    """`media retry` — 실패·중단된 가져오기 작업의 명시적 재시도(같은 ID·지문)."""
+    service = _service()
+    workspace_root = Path(args.workspace)
+    try:
+        status = service.open_workspace(workspace_root)
+        handle = service.retry_ingest_copy(Path(status.workspace_root), args.job)
+    except raw_service.RawWorkspaceError as error:
+        log.error(str(error))
+        return 1
+    log.out(f"재시도 제출 — {handle.job_id}")
+    return _await_ingest_job(service, Path(status.workspace_root), handle.job_id)
+
+
+def cmd_inspect(args: argparse.Namespace) -> int:
+    """`media inspect` — 자산·순서 리비전·중복·작업의 현재 상태 인쇄."""
+    service = _service()
+    try:
+        status = service.open_workspace(Path(args.workspace))
+    except raw_service.RawWorkspaceError as error:
+        log.error(str(error))
+        return 1
+    assets, revision, jobs = service.ingest_overview(Path(status.workspace_root), args.batch)
+    if not assets:
+        log.out("가져오기 자산이 없다.")
+        return 0
+    log.out(
+        f"배치 {assets[0].batch_dir} · 순서 리비전 {revision.revision_id if revision else '?'}"
+        f" · 근거 {revision.basis if revision else '?'}"
+    )
+    for asset in assets:
+        digest = (asset.content_sha256 or "")[:12] or "—"
+        duplicate = f" · 중복_of {asset.duplicate_of}" if asset.duplicate_of else ""
+        error_note = f" · 오류 {asset.error}" if asset.error else ""
+        log.out(
+            f"{asset.ordinal:3d}. [{asset.status:8s}] {asset.source_relative_path}"
+            f" · {_human_bytes(asset.size_bytes)} · sha256 {digest}…{duplicate}{error_note}"
+        )
+    for job in jobs:
+        log.out(
+            f"작업 {job.job_id} {job.status} {job.progress_current}/{job.progress_total}"
+            + (f" — {job.error}" if job.error else "")
+        )
+    return 0
+
+
+def _print_proposal(proposal: raw_service.IngestProposal) -> None:
+    log.out(f"원본 루트: {proposal.scan.source_root}")
+    log.out(
+        f"후보 {len(proposal.order)}건 · 제외 {len(proposal.scan.rejected)}건 · 총 "
+        f"{_human_bytes(proposal.scan.total_bytes)}"
+    )
+    for index, candidate in enumerate(proposal.order, start=1):
+        inspection = candidate.inspection
+        duration = (
+            "미확인"
+            if inspection.duration_seconds is None
+            else f"{inspection.duration_seconds:.1f}초"
+        )
+        log.out(
+            f"{index:3d}. {candidate.source_relative_path} · "
+            f"{_human_bytes(candidate.size_bytes)} · {duration} · 촬영 시각 미조사"
+        )
+    for item in proposal.scan.rejected:
+        log.warn(f"제외: {item.source_relative_path} — {item.reason}")
+    space = proposal.space
+    verdict = "충분" if space.sufficient else "부족 — 복사가 시작 전에 차단된다"
+    log.out(
+        f"공간: 필요 {_human_bytes(space.required_bytes)}(여유 포함) / "
+        f"남은 {_human_bytes(space.free_bytes)} → {verdict}"
+    )
+
+
+def _await_ingest_job(service: raw_service.RawWorkspaceService, root: Path, job_id: str) -> int:
+    """작업이 끝날 때까지 기다리고 결과를 인쇄한다 — 진단 CLI는 완결 보고가 몫이다."""
+    deadline = time.monotonic() + JOB_WAIT_SECONDS
+    while time.monotonic() < deadline:
+        record = service.get_job(root, job_id)
+        if record.status in _TERMINAL_STATUSES:
+            _print_ingest_result(service, root, record.status, record.error)
+            return 0 if record.status == "succeeded" else 1
+        time.sleep(JOB_POLL_SECONDS)
+    log.warn(f"작업 {job_id}가 아직 끝나지 않았다 — 브라우저 또는 media inspect로 확인하세요.")
+    return 1
+
+
+def _print_ingest_result(
+    service: raw_service.RawWorkspaceService, root: Path, status: str, error: str | None
+) -> None:
+    assets, _, _ = service.ingest_overview(root)
+    ready = [asset for asset in assets if asset.status == "ready"]
+    failed = [asset for asset in assets if asset.status == "failed"]
+    incomplete = [asset for asset in assets if asset.status not in ("ready", "failed")]
+    log.out(f"복사 작업 {status} — ready {len(ready)}/{len(assets)}건")
+    for asset in ready:
+        log.out(
+            f"  ready  {asset.source_relative_path} · sha256 {(asset.content_sha256 or '')[:12]}…"
+        )
+    for asset in failed:
+        log.warn(f"  failed {asset.source_relative_path} — {asset.error}")
+    for asset in incomplete:
+        log.warn(f"  {asset.status:8s} {asset.source_relative_path} (재시도 가능)")
+    if error:
+        log.error(f"작업 오류: {error}")
+
+
+def media_command(args: argparse.Namespace) -> int:
+    """`vlogsrt media` 진입 — 하위 명령으로 갈라 보낸다."""
+    handlers: dict[str, Callable[[argparse.Namespace], int]] = {
+        "init": cmd_init,
+        "import": cmd_import,
+        "retry": cmd_retry,
+        "inspect": cmd_inspect,
+    }
+    return handlers[args.media_command](args)
+
+
+def add_media_parser(sub: argparse._SubParsersAction) -> None:
+    """`vlogsrt media` 하위 명령 정의 — 조립은 이 함수 하나로 끝난다."""
+    media = sub.add_parser(
+        "media", help="원본 영상 브라우저 v2 — 작업공간·가져오기 진단 (로컬만, 네트워크 없음)"
+    )
+    commands = media.add_subparsers(
+        dest="media_command", required=True, metavar="{init,import,retry,inspect}"
+    )
+
+    init = commands.add_parser("init", help="빈 폴더에 v2 작업공간을 만든다")
+    init.add_argument("path", type=Path, help="작업공간으로 쓸 **빈** 폴더 경로")
+    init.add_argument("--name", required=True, help="프로젝트 이름")
+
+    source = commands.add_parser(
+        "import", help="SD/폴더를 조사해 제안을 인쇄한다(--confirm이면 복사까지)"
+    )
+    source.add_argument("source", type=Path, help="원본 폴더(SD 카드) 경로")
+    source.add_argument("--workspace", type=Path, required=True, help="가져올 작업공간 경로")
+    source.add_argument(
+        "--confirm",
+        action="store_true",
+        help="제안된 원본 순서를 확정하고 로컬 복사·검증을 시작한다(유료 호출 없음)",
+    )
+
+    retry = commands.add_parser("retry", help="실패·중단된 가져오기의 명시적 재시도")
+    retry.add_argument("--workspace", type=Path, required=True, help="작업공간 경로")
+    retry.add_argument("job", help="재시도할 작업 ID(예: job_000001)")
+
+    inspect = commands.add_parser("inspect", help="가져오기 자산·순서·작업 상태를 인쇄한다")
+    inspect.add_argument("--workspace", type=Path, required=True, help="작업공간 경로")
+    inspect.add_argument(
+        "--batch", default=None, help="볼 배치(예: import_000001). 없으면 최근 배치"
+    )

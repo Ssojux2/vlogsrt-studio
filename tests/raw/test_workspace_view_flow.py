@@ -65,11 +65,12 @@ def test_same_view_create_switches_the_whole_view(tmp_path: Path, local_socket: 
     server.build_blocks()  # 실제 배선 — 만들기·열기 출력에 서명 state가 들어가 있다
 
     first = server.create_workspace_view("A", str(tmp_path / "a"))
-    workspace_md, signature_a, media_dd, jobs_dd, jobs_md, settings_md = first
+    workspace_md, signature_a, media_dd, jobs_dd, jobs_md, settings_md, ingest_md, ingest_dd = first
     assert signature_a is not None
     assert "A" in workspace_md
     assert "자막 프리셋" in settings_md  # 설정 요약도 같은 화면에 내려왔다(빈 안내 아님)
-    _ = media_dd, jobs_dd, jobs_md
+    assert "조사" in ingest_md  # 가져오기 패널도 같은 화면에 내려왔다(새 상태 안내)
+    _ = media_dd, jobs_dd, jobs_md, ingest_dd
 
     second = server.create_workspace_view("B", str(tmp_path / "b"))
     assert second[1] is not None and second[1] != signature_a  # 서명이 B로 갱신
@@ -207,7 +208,8 @@ def test_view_values_never_span_two_workspaces(tmp_path: Path, local_socket: Non
     samples = 0
     try:
         for _ in range(300):
-            markdown, signature, _media, _jobs, _jobs_md, _settings = server.workspace_view_values()
+            view = server.workspace_view_values()
+            markdown, signature, ingest_md = view[0], view[1], view[6]
             # 이름을 실은 Markdown과 서명이 같은 작업공간에서 왔는지 본다.
             if signature == signature_a:
                 assert "A" in markdown
@@ -215,6 +217,8 @@ def test_view_values_never_span_two_workspaces(tmp_path: Path, local_socket: Non
                 assert "B" in markdown
             else:
                 pytest.fail("보기가 어느 작업공간에도 속하지 않는 서명을 실었다")
+            # 가져오기 패널도 전환마다 새 상태다 — 옛 제안·확정이 남지 않는다.
+            assert "확정 순서" not in ingest_md
             samples += 1
     finally:
         stop.set()

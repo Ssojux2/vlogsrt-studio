@@ -467,6 +467,25 @@ def _require_staged_grant_coverage(media: Sequence[ResolvedMedia], workspace: Pa
         )
 
 
+def media_command(args: argparse.Namespace) -> int:
+    """`vlogsrt media` — 원본 영상 브라우저 v2의 진단 CLI(A2 가져오기).
+
+    조립 경계(계약 §1): cli.py는 이 모듈만 보고, 이 함수는 계층 안의
+    `vlogsrt.project.raw.commands`로 갈라 보낸다. 로컬 복사만 다룬다 —
+    어떤 플래그도 유료 호출을 켜지 않는다.
+    """
+    from vlogsrt.project.raw import commands as raw_media_commands
+
+    return raw_media_commands.media_command(args)
+
+
+def add_media_parser(sub: argparse._SubParsersAction) -> None:
+    """`vlogsrt media` 하위 명령 정의를 계층 안에서 가져온다(조립 위임)."""
+    from vlogsrt.project.raw import commands as raw_media_commands
+
+    raw_media_commands.add_media_parser(sub)
+
+
 def project_command(args: argparse.Namespace) -> int:
     """단계형 명령의 단일 CLI 경계. 진단용 run만 기존 실행기를 유지한다."""
     if args.project_command == "run":

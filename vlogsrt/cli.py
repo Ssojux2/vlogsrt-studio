@@ -102,6 +102,8 @@ def build_parser() -> argparse.ArgumentParser:
     words.add_argument("--file", type=Path, default=None)
     _add_config_options(words)
     _add_project_command(sub)
+    # 원본 영상 브라우저 v2 — 조립만 여기서, 실행은 project.raw.commands가 맡는다.
+    commands.add_media_parser(sub)
     return parser
 
 
@@ -459,6 +461,11 @@ def cmd_project(args: argparse.Namespace) -> int:
     return commands.project_command(args)
 
 
+def cmd_media(args: argparse.Namespace) -> int:
+    """원본 영상 브라우저 v2의 진단 CLI — 조립만 하고 실행은 raw.commands가 맡는다."""
+    return commands.media_command(args)
+
+
 _COMMANDS = {
     "run": cmd_run,
     "redo": cmd_redo,
@@ -469,6 +476,7 @@ _COMMANDS = {
     "config": cmd_config,
     "keywords": cmd_keywords,
     "project": cmd_project,
+    "media": cmd_media,
 }
 
 

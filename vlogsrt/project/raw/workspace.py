@@ -9,6 +9,7 @@ DB가 자산·작업 상태의 정본이고, 내부 경로는 **작업공간 루
 
 from __future__ import annotations
 
+import json
 import os
 import secrets
 import sqlite3
@@ -16,6 +17,7 @@ import stat as stat_module
 import tomllib
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -33,11 +35,18 @@ from vlogsrt.project.raw.models import (
     MEDIA_STATUS_READY,
     MEDIA_SUFFIXES,
     SERVABLE_MEDIA_STATUSES,
+    GlobalOrderEntry,
+    GlobalOrderRevision,
     MediaNotAllowedError,
     MediaNotFoundError,
     MediaNotReadyError,
     MediaRegistration,
     MediaTargetChangedError,
+    RawWorkspaceError,
+    SourceAsset,
+    SourceAssetDraft,
+    SourceOrderEntry,
+    SourceOrderRevision,
     WorkspaceAlreadyExistsError,
     WorkspaceNotFoundError,
     WorkspaceVersionError,
@@ -45,9 +54,31 @@ from vlogsrt.project.raw.models import (
 
 PROJECT_TOML_NAME = "project.toml"
 DB_NAME = "project.sqlite3"
-DB_SCHEMA_VERSION = "raw-workspace-db/1"
+DB_SCHEMA_VERSION = "raw-workspace-db/3"
+DB_SCHEMA_VERSION_V1 = "raw-workspace-db/1"
+DB_SCHEMA_VERSION_V2 = "raw-workspace-db/2"
+"""A1이 v1을, A2가 `source_assets`·`source_order_revisions`를 더한 v2를, A2F1이
+`global_order_revisions`를 더한 v3을 만들었다. 덧붙이기만 한 옛 버전 열기는 한
+트랜잭션으로 올리고 meta에 기록한다 — 이미 있는 설정·미디어·작업·작업공간
+신원은 그대로다. 이 프로그램이 모르는 버전은 여전히 조용히 마이그레이션하지
+않고 실패한다(코디네이터 ACK)."""
 WORKSPACE_ID_KEY = "workspace_id"
 """meta 표의 작업공간 신원 키 — 생성 때 한 번 정해지고 절대 바뀌지 않는다."""
+
+
+def new_source_asset_id() -> str:
+    """가져오기 자산의 전역 유일 불투명 ID — 미디어 ID와 같은 규칙(128비트)."""
+    return f"source_{secrets.token_hex(8)}"
+
+
+def new_order_revision_id() -> str:
+    """원본 순서 리비전의 전역 유일 불투명 ID — 한 번 정해지면 불변이다."""
+    return f"order_{secrets.token_hex(8)}"
+
+
+def new_global_order_revision_id() -> str:
+    """전체 순서 리비전의 전역 유일 불투명 ID — 배치 순서와 표기를 갈라 놓는다."""
+    return f"gorder_{secrets.token_hex(8)}"
 
 
 def new_media_file_id() -> str:
@@ -115,9 +146,186 @@ CREATE TABLE jobs (
 CREATE INDEX idx_jobs_active ON jobs (kind, input_fingerprint, status);
 """
 
+_INGEST_SCHEMA_STATEMENTS: tuple[str, ...] = (
+    """
+    CREATE TABLE IF NOT EXISTS source_assets (
+        asset_id TEXT PRIMARY KEY,
+        batch_dir TEXT NOT NULL,
+        relative_path TEXT NOT NULL UNIQUE,
+        status TEXT NOT NULL,
+        size_bytes INTEGER NOT NULL,
+        content_sha256 TEXT,
+        file_id TEXT,
+        duplicate_of TEXT,
+        source_root TEXT NOT NULL,
+        source_relative_path TEXT NOT NULL,
+        source_name TEXT NOT NULL,
+        capture_time TEXT,
+        duration_seconds REAL,
+        width INTEGER,
+        height INTEGER,
+        error TEXT,
+        source_mtime_ns INTEGER NOT NULL,
+        source_inode INTEGER NOT NULL,
+        ordinal INTEGER NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_source_assets_batch ON source_assets (batch_dir, ordinal)",
+    "CREATE INDEX IF NOT EXISTS idx_source_assets_hash ON source_assets (content_sha256, status)",
+    """
+    CREATE TABLE IF NOT EXISTS source_order_revisions (
+        revision_id TEXT PRIMARY KEY,
+        batch_dir TEXT NOT NULL UNIQUE,
+        basis TEXT NOT NULL,
+        entries_json TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS global_order_revisions (
+        revision_id TEXT PRIMARY KEY,
+        basis TEXT NOT NULL,
+        entries_json TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    )
+    """,
+)
+"""A2·A2F1이 더한 표 — 가져오기 자산의 출처·검증 상태, 배치 불변 순서 리비전,
+배치를 넘는 전체 불변 순서 리비전(§13.1). `entries_json`은 각각
+[{asset_id, ordinal, basis_note}]·[{asset_id, ordinal, batch_dir}] 배열의
+정렬된 JSON이다. 문장 목록로 두는 이유는 하나의 트랜잭션 안에서 실행하기
+위해서다 — `executescript`는 먼저 commit하므로 마이그레이션의 원자성을 깬다."""
+
 
 def _now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
+
+
+def _insert_source_asset(
+    connection: sqlite3.Connection,
+    batch_dir: str,
+    draft: SourceAssetDraft,
+    now: str,
+) -> tuple[SourceAsset, SourceOrderEntry]:
+    """자산 한 행과 순서 항목을 만든다 — 초안의 순번이 곧 확정 순번이다."""
+    asset_id = new_source_asset_id()
+    relative = f"originals/{batch_dir}/{draft.source_relative_path}"
+    connection.execute(
+        "INSERT INTO source_assets (asset_id, batch_dir, relative_path, status,"
+        " size_bytes, source_root, source_relative_path, source_name, capture_time,"
+        " duration_seconds, width, height, source_mtime_ns, source_inode, ordinal,"
+        " created_at, updated_at)"
+        " VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        _source_asset_values(asset_id, batch_dir, relative, draft, now),
+    )
+    asset = _asset_from_draft(asset_id, batch_dir, relative, draft, now)
+    entry = SourceOrderEntry(asset_id=asset_id, ordinal=draft.ordinal, basis_note=draft.basis_note)
+    return asset, entry
+
+
+def _source_asset_values(
+    asset_id: str,
+    batch_dir: str,
+    relative: str,
+    draft: SourceAssetDraft,
+    now: str,
+) -> tuple[object, ...]:
+    """자산 한 행의 SQL 매개변수 — 초안의 출처 신원을 그대로 옮긴다."""
+    return (
+        asset_id,
+        batch_dir,
+        relative,
+        draft.size_bytes,
+        draft.source_root,
+        draft.source_relative_path,
+        draft.source_name,
+        draft.capture_time,
+        draft.duration_seconds,
+        draft.width,
+        draft.height,
+        draft.source_mtime_ns,
+        draft.source_inode,
+        draft.ordinal,
+        now,
+        now,
+    )
+
+
+def _asset_from_draft(
+    asset_id: str,
+    batch_dir: str,
+    relative: str,
+    draft: SourceAssetDraft,
+    now: str,
+) -> SourceAsset:
+    """삽입 직후의 자산 기록 — 아직 검증 전이므로 해시·등록은 비어 있다."""
+    return SourceAsset(
+        asset_id=asset_id,
+        batch_dir=batch_dir,
+        relative_path=relative,
+        status="pending",
+        size_bytes=draft.size_bytes,
+        source_root=draft.source_root,
+        source_relative_path=draft.source_relative_path,
+        source_name=draft.source_name,
+        content_sha256=None,
+        file_id=None,
+        duplicate_of=None,
+        capture_time=draft.capture_time,
+        duration_seconds=draft.duration_seconds,
+        width=draft.width,
+        height=draft.height,
+        error=None,
+        source_mtime_ns=draft.source_mtime_ns,
+        source_inode=draft.source_inode,
+        ordinal=draft.ordinal,
+        created_at=now,
+        updated_at=now,
+    )
+
+
+def _insert_order_revision(
+    connection: sqlite3.Connection,
+    batch_dir: str,
+    basis: str,
+    entries: list[SourceOrderEntry],
+    now: str,
+) -> str:
+    """순서 리비전 한 행 — 만들기만 하고 고치는 길은 없다(불변 기록)."""
+    revision_id = new_order_revision_id()
+    connection.execute(
+        "INSERT INTO source_order_revisions (revision_id, batch_dir, basis,"
+        " entries_json, created_at) VALUES (?, ?, ?, ?, ?)",
+        (
+            revision_id,
+            batch_dir,
+            basis,
+            json.dumps([asdict(entry) for entry in entries], ensure_ascii=False, sort_keys=True),
+            now,
+        ),
+    )
+    return revision_id
+
+
+def _apply_ingest_schema(connection: sqlite3.Connection) -> None:
+    """A2 표를 (있으면 그대로 두고) 만든다 — 생성·마이그레이션이 같은 문장을 쓴다."""
+    for statement in _INGEST_SCHEMA_STATEMENTS:
+        connection.execute(statement)
+
+
+def _write_project_toml(root: Path, name: str, created_at: str) -> None:
+    """작업공간 신원 문서 — schema·이름·생성 시각 세 가지뿐이다."""
+    (root / PROJECT_TOML_NAME).write_bytes(
+        tomli_w.dumps(
+            {
+                "schema_version": WORKFLOW_SCHEMA_VERSION,
+                "name": name,
+                "created_at": created_at,
+            }
+        ).encode("utf-8")
+    )
 
 
 class RawWorkspace:
@@ -147,18 +355,11 @@ class RawWorkspace:
         for directory in WORKSPACE_LAYOUT:
             (root / directory).mkdir()
         created_at = _now()
-        (root / PROJECT_TOML_NAME).write_bytes(
-            tomli_w.dumps(
-                {
-                    "schema_version": WORKFLOW_SCHEMA_VERSION,
-                    "name": name.strip(),
-                    "created_at": created_at,
-                }
-            ).encode("utf-8")
-        )
+        _write_project_toml(root, name.strip(), created_at)
         workspace = cls(root, name.strip(), created_at)
         with workspace.connect() as connection:
             connection.executescript(_SCHEMA_SQL)  # executescript는 먼저 commit한다
+            _apply_ingest_schema(connection)
             connection.execute(
                 "INSERT INTO meta (key, value) VALUES ('db_schema_version', ?)",
                 (DB_SCHEMA_VERSION,),
@@ -187,11 +388,30 @@ class RawWorkspace:
         identity = cls._read_identity(root)
         workspace = cls(root, identity["name"], identity["created_at"])
         version = workspace.db_schema_version()
-        if version != DB_SCHEMA_VERSION:
+        if version in (DB_SCHEMA_VERSION_V1, DB_SCHEMA_VERSION_V2):
+            workspace._upgrade_ingest_tables()
+        elif version != DB_SCHEMA_VERSION:
             raise WorkspaceVersionError(
                 f"DB schema가 다르다: {version} (이 프로그램은 {DB_SCHEMA_VERSION})"
             )
         return workspace
+
+    def _upgrade_ingest_tables(self) -> None:
+        """v1/v2 → 현재 열기 — 덧붙이기만 한 한 트랜잭션, 이미 있는 행은 그대로 둔다.
+
+        이미 받아들인 옛 작업공간을 버리지 않기 위한 유일한 마이그레이션이다.
+        없는 표를 만들고 meta의 버전을 올리는 것 외에 아무 행도 고치지 않는다 —
+        설정·미디어·작업·작업공간 신원이 그대로 보존된다. 그 밖의 버전 차이는
+        `WorkspaceVersionError`로 계속 실패한다(조용한 마이그레이션 금지).
+        """
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            _apply_ingest_schema(connection)
+            connection.execute(
+                "UPDATE meta SET value = ? WHERE key = 'db_schema_version'",
+                (DB_SCHEMA_VERSION,),
+            )
+            connection.commit()
 
     @staticmethod
     def _read_identity(root: Path) -> dict[str, str]:
@@ -492,3 +712,293 @@ class RawWorkspace:
                 f"등록된 자리의 파일이 바뀌었다: {file_id} — 다시 등록해야 한다"
             )
         return target, probed.st_size, str(row["kind"])
+
+    # ── A2 — 가져오기 자산·원본 순서 리비전 ─────────────────────
+
+    def create_ingest_batch(
+        self, drafts: tuple[SourceAssetDraft, ...], basis: str
+    ) -> tuple[tuple[SourceAsset, ...], SourceOrderRevision]:
+        """확정된 초안들로 배치 하나를 연다 — 한 트랜잭션에 자산·순서 리비전까지.
+
+        `batch_dir`은 이 트랜잭션 안에서 다음 번호로 정한다(경합에서 두 배치가
+        같은 디렉터리를 받지 않는다). 자산은 확정 순번(ordinal) 오름차순으로
+        들어가고, 순서 리비전은 같은 트랜잭션에서 **불변 기록**으로 남는다.
+        """
+        if not drafts:
+            raise RawWorkspaceError("확정할 자산이 없다")
+        now = _now()
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            batch_dir = self._next_batch_dir(connection)
+            assets: list[SourceAsset] = []
+            entries: list[SourceOrderEntry] = []
+            for draft in sorted(drafts, key=lambda item: item.ordinal):
+                asset, entry = _insert_source_asset(connection, batch_dir, draft, now)
+                assets.append(asset)
+                entries.append(entry)
+            revision_id = _insert_order_revision(connection, batch_dir, basis, entries, now)
+            connection.commit()
+        return tuple(assets), SourceOrderRevision(
+            revision_id=revision_id,
+            batch_dir=batch_dir,
+            basis=basis,
+            entries=tuple(entries),
+            created_at=now,
+        )
+
+    @staticmethod
+    def _next_batch_dir(connection: sqlite3.Connection) -> str:
+        row = connection.execute(
+            "SELECT batch_dir FROM source_order_revisions ORDER BY batch_dir DESC LIMIT 1"
+        ).fetchone()
+        number = 1
+        if row is not None:
+            _, _, tail = str(row[0]).rpartition("_")
+            number = int(tail) + 1 if tail.isdigit() else 1
+        return f"import_{number:06d}"
+
+    def source_asset(self, asset_id: str) -> SourceAsset:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM source_assets WHERE asset_id = ?", (asset_id,)
+            ).fetchone()
+        if row is None:
+            raise RawWorkspaceError(f"없는 자산 ID: {asset_id}")
+        return self._source_asset(row)
+
+    def list_source_assets(self, batch_dir: str | None = None) -> tuple[SourceAsset, ...]:
+        """배치(없으면 전체)의 자산 — 전체일 땐 배치 연대순, 배치 안은 확정 순번순.
+
+        전체 목록이 `ordinal`만으로 정렬되면 모든 배치의 1번이 무작위 자산 ID로
+        뒤섞인다(루트 지적). 배치 디렉터리(가져온 순서)를 앞에 두고, 그 안에서만
+        사람이 확정한 순번을 지킨다 — 배치 안 사용자 순서는 그대로다.
+        """
+        query = "SELECT * FROM source_assets"
+        params: tuple[str, ...] = ()
+        if batch_dir is not None:
+            query += " WHERE batch_dir = ?"
+            params = (batch_dir,)
+        query += " ORDER BY batch_dir, ordinal, asset_id"
+        with self.connect() as connection:
+            rows = connection.execute(query, params).fetchall()
+        return tuple(self._source_asset(row) for row in rows)
+
+    def update_source_asset(self, asset_id: str, **changes: object) -> SourceAsset:
+        """가져오기 상태 갱신 — 상태·검증 필드만 고친다. 출처 신원은 불변이다.
+
+        `content_sha256`은 **검증 이력 표식**이다: 한번 기록되면 못 지우고 못
+        바꾼다 — 상태가 어떻게 오가든(실패·재검증 실패) 검증된 적 있다는 사실이
+        남아야, 어떤 재시도도 검증된 원본을 다시 쓰는 길로 빠지지 않는다(루트 재현).
+        """
+        allowed = {
+            "status",
+            "content_sha256",
+            "file_id",
+            "duplicate_of",
+            "error",
+        }
+        illegal = set(changes) - allowed
+        if illegal:
+            raise RawWorkspaceError(f"자산의 이 필드는 못 고친다: {sorted(illegal)}")
+        self._refuse_hash_removal(asset_id, changes)
+        columns = ", ".join(f"{name} = ?" for name in changes)
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            cursor = connection.execute(
+                f"UPDATE source_assets SET {columns}, updated_at = ? WHERE asset_id = ?",
+                (*changes.values(), _now(), asset_id),
+            )
+            connection.commit()
+        if cursor.rowcount != 1:
+            raise RawWorkspaceError(f"없는 자산 ID: {asset_id}")
+        return self.source_asset(asset_id)
+
+    def _refuse_hash_removal(self, asset_id: str, changes: dict[str, object]) -> None:
+        """검증 이력 표식 보호 — 기록된 해시를 지우거나 바꾸는 갱신은 거절한다."""
+        if "content_sha256" not in changes:
+            return
+        current = self.source_asset(asset_id)
+        if (
+            current.content_sha256 is not None
+            and changes["content_sha256"] != current.content_sha256
+        ):
+            raise RawWorkspaceError(
+                f"한번 검증된 자산의 내용 해시는 못 바꾼다: {asset_id} "
+                f"({current.content_sha256[:12]}… → {changes['content_sha256']!r})"
+                " — 다시 가져오려면 새 가져오기(새 배치)를 만들어라"
+            )
+
+    def first_ready_asset_with_hash(self, content_sha256: str, exclude_asset_id: str) -> str | None:
+        """같은 내용을 가진 먼저 검증된 자산 — 중복 출처 표시용(§5.2)."""
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT asset_id FROM source_assets WHERE content_sha256 = ?"
+                " AND status = 'ready' AND asset_id != ?"
+                " ORDER BY created_at, asset_id LIMIT 1",
+                (content_sha256, exclude_asset_id),
+            ).fetchone()
+        return None if row is None else str(row[0])
+
+    def order_revision(self, batch_dir: str) -> SourceOrderRevision | None:
+        """그 배치의 순서 리비전 — 배치마다 정확히 하나(불변)."""
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM source_order_revisions WHERE batch_dir = ?", (batch_dir,)
+            ).fetchone()
+        if row is None:
+            return None
+        entries = [
+            SourceOrderEntry(
+                asset_id=str(entry["asset_id"]),
+                ordinal=int(entry["ordinal"]),
+                basis_note=str(entry["basis_note"]),
+            )
+            for entry in json.loads(str(row["entries_json"]))
+        ]
+        return SourceOrderRevision(
+            revision_id=str(row["revision_id"]),
+            batch_dir=str(row["batch_dir"]),
+            basis=str(row["basis"]),
+            entries=tuple(sorted(entries, key=lambda entry: entry.ordinal)),
+            created_at=str(row["created_at"]),
+        )
+
+    def list_order_revisions(self) -> tuple[SourceOrderRevision, ...]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT batch_dir FROM source_order_revisions ORDER BY batch_dir"
+            ).fetchall()
+        revisions = [self.order_revision(str(row["batch_dir"])) for row in rows]
+        return tuple(revision for revision in revisions if revision is not None)
+
+    # ── A2F1 — 배치를 넘는 전체 순서 리비전(불변) ───────────────
+
+    def create_global_order_revision(
+        self, entries: tuple[GlobalOrderEntry, ...], basis: str
+    ) -> GlobalOrderRevision:
+        """전체 순서 리비전 한 행 — 만들기만 한다. 고치는 길은 없다(불변 기록)."""
+        if not entries:
+            raise RawWorkspaceError("확정할 전체 순서 항목이 없다")
+        ordered = tuple(sorted(entries, key=lambda entry: entry.ordinal))
+        revision_id = new_global_order_revision_id()
+        created_at = _now()
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                "INSERT INTO global_order_revisions (revision_id, basis, entries_json,"
+                " created_at) VALUES (?, ?, ?, ?)",
+                (
+                    revision_id,
+                    basis,
+                    json.dumps(
+                        [asdict(entry) for entry in ordered], ensure_ascii=False, sort_keys=True
+                    ),
+                    created_at,
+                ),
+            )
+            connection.commit()
+        return GlobalOrderRevision(
+            revision_id=revision_id,
+            basis=basis,
+            entries=ordered,
+            created_at=created_at,
+        )
+
+    def latest_global_order_revision(self) -> GlobalOrderRevision | None:
+        """가장 최근의 전체 순서 리비전 — 삽입 역순(rowid), 옛 것은 그대로 산다."""
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM global_order_revisions ORDER BY rowid DESC LIMIT 1"
+            ).fetchone()
+        return None if row is None else self._global_order_revision(row)
+
+    def list_global_order_revisions(self) -> tuple[GlobalOrderRevision, ...]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM global_order_revisions ORDER BY rowid"
+            ).fetchall()
+        return tuple(self._global_order_revision(row) for row in rows)
+
+    @staticmethod
+    def _global_order_revision(row: sqlite3.Row) -> GlobalOrderRevision:
+        entries = [
+            GlobalOrderEntry(
+                asset_id=str(entry["asset_id"]),
+                ordinal=int(entry["ordinal"]),
+                batch_dir=str(entry["batch_dir"]),
+            )
+            for entry in json.loads(str(row["entries_json"]))
+        ]
+        return GlobalOrderRevision(
+            revision_id=str(row["revision_id"]),
+            basis=str(row["basis"]),
+            entries=tuple(sorted(entries, key=lambda entry: entry.ordinal)),
+            created_at=str(row["created_at"]),
+        )
+
+    def refresh_media_fingerprint(self, file_id: str) -> None:
+        """등록 행의 지문만 다시 찍는다 — ID·경로는 그대로(A2F1 회복 전용).
+
+        검증됐던 원본이 변조 뒤 원래 내용으로 돌아오면(heal) 등록 때 찍어둔
+        size·mtime·inode는 이미 어긋나 있다. 행을 새로 만들면 file_id가 바뀌므로,
+        **같은 ID로** 현재 파일의 지문을 다시 박는다 — 이후 다른 변조는 여전히
+        어긋나는 지문으로 잡힌다(제공 안전망은 그대로).
+        """
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT relative_path FROM media_files WHERE file_id = ?", (file_id,)
+            ).fetchone()
+            if row is None:
+                connection.rollback()
+                raise MediaNotFoundError(f"없는 미디어 ID: {file_id}")
+            target = self.root / str(row["relative_path"])
+            probed = target.lstat()
+            connection.execute(
+                "UPDATE media_files SET size_bytes = ?, mtime_ns = ?, inode = ? WHERE file_id = ?",
+                (probed.st_size, probed.st_mtime_ns, probed.st_ino, file_id),
+            )
+            connection.commit()
+
+    def discard_media_registration(self, relative_path: str) -> bool:
+        """그 상대 경로의 미디어 등록 행을 지운다 — 검증 전 표기의 회복 전용.
+
+        복사는 성공해 등록까지 됐는데 자산 표시가 `ready`로 못 남은 창을 닫는
+        길이다. 자산 장부(source_assets)가 정본이므로 장부와 어긋난 등록 행은
+        다음 시도에서 다시 만들어진다. 파일은 지우지 않는다 — 호출자의 몫이다.
+        """
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            cursor = connection.execute(
+                "DELETE FROM media_files WHERE relative_path = ?", (relative_path,)
+            )
+            connection.commit()
+        return cursor.rowcount == 1
+
+    @staticmethod
+    def _source_asset(row: sqlite3.Row) -> SourceAsset:
+        return SourceAsset(
+            asset_id=str(row["asset_id"]),
+            batch_dir=str(row["batch_dir"]),
+            relative_path=str(row["relative_path"]),
+            status=str(row["status"]),
+            size_bytes=int(row["size_bytes"]),
+            source_root=str(row["source_root"]),
+            source_relative_path=str(row["source_relative_path"]),
+            source_name=str(row["source_name"]),
+            content_sha256=None if row["content_sha256"] is None else str(row["content_sha256"]),
+            file_id=None if row["file_id"] is None else str(row["file_id"]),
+            duplicate_of=None if row["duplicate_of"] is None else str(row["duplicate_of"]),
+            capture_time=None if row["capture_time"] is None else str(row["capture_time"]),
+            duration_seconds=None
+            if row["duration_seconds"] is None
+            else float(row["duration_seconds"]),
+            width=None if row["width"] is None else int(row["width"]),
+            height=None if row["height"] is None else int(row["height"]),
+            error=None if row["error"] is None else str(row["error"]),
+            source_mtime_ns=int(row["source_mtime_ns"]),
+            source_inode=int(row["source_inode"]),
+            ordinal=int(row["ordinal"]),
+            created_at=str(row["created_at"]),
+            updated_at=str(row["updated_at"]),
+        )
