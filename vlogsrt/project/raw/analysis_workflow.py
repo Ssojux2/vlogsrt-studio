@@ -39,6 +39,10 @@ from typing import Any, Protocol
 from vlogsrt import log, preprocess
 from vlogsrt.project.raw import understanding as stage1
 from vlogsrt.project.raw import understanding_luna as luna
+from vlogsrt.project.raw.analysis_approval import (
+    AsrPhaseApproval,
+    require_live_asr_approval,
+)
 from vlogsrt.project.raw.analysis_config import (
     UNDERSTANDING_SCHEMA_VERSION,
     RawUnderstandingSettings,
@@ -83,11 +87,14 @@ from vlogsrt.project.raw.understanding import (
 from vlogsrt.project.raw.understanding_luna import (
     AnalysisApprovalError,
     OnlineAnalysisApproval,
+    OnlineVisualAnalysisApproval,
     ReplaySemanticResponder,
     SemanticAnnotation,
     SemanticResponder,
     annotation_json,
     document_execution_mode,
+    validated_visual_luna_responder,
+    visual_analysis_fingerprint,
 )
 from vlogsrt.project.raw.workspace import RawWorkspace
 
@@ -99,6 +106,12 @@ ANALYSIS_DOCUMENT_NAME = "analysis_transcript.json"
 
 ANALYSIS_RECORD_NAME = "analysis_record.json"
 """A4 조정 기록(사이드카) — 리비전·시간축·구간·캐시 출처를 실은 실행 증명."""
+
+ASR_PHASE_DOCUMENT_NAME = "asr_phase.json"
+"""1단계(내부 ASR) 불변 기록(A4-F1) — 전사·발화·창·프레임과 실측 2단계 지문."""
+
+ASR_PHASE_SCHEMA = "raw-analysis-asr-phase/v1"
+"""1단계 기록의 schema — 2단계 재개가 이 값으로 기록 모양을 검증한다."""
 
 REPLAY_FIXTURES_DIRNAME = "replay"
 """작업공간 안 재생 픽스처의 관습 자리 — `analysis/replay/`."""
@@ -352,6 +365,58 @@ class ApprovedTimingProvider:
             raise AnalysisApprovalError("승인이 본 오디오 스트림과 지금의 선택이 다르다")
         if self.audio.sample_count != self.approval.sample_count:
             raise AnalysisApprovalError("승인이 본 오디오 분량과 지금의 분량이 다르다")
+        if binding.sample_start < 0 or binding.sample_end > self.audio.sample_count:
+            raise AnalysisApprovalError(
+                f"청크 범위가 선택 오디오 밖이다: [{binding.sample_start}, {binding.sample_end})"
+                f" / {self.audio.sample_count} 샘플"
+            )
+        self.gate.reserve(count=1, key=str(binding.request_id))
+        return self.inner.timed_transcript(
+            binding=binding, chunk=chunk, settings=settings, on=on, stem=stem, source=source
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ApprovedPhaseAsrProvider:
+    """1단계(내부 ASR) 전송 경계 — `AsrPhaseApproval`을 청크마다 다시 지난다.
+
+    단일 승인형 응답자와 다른 점은 묶는 값이다: 1단계 승인은 전사 **전에** 알 수
+    있는 값(출처·스트림·설정 지문·모델·예산)만 묶으므로, 전송 순간의 재검사도
+    그 값들을 본다. 청크 범위가 선택 오디오 밖이면 닫고, 예약 문
+    (`CountingAsrGate`)은 승인 예산을 넘지 않는다. 수명주기(종료 예정일)는 안쪽
+    전송 경계가 맨 먼저 돈다(§11.10·§14.3).
+    """
+
+    inner: TimingProvider
+    workflow: RawWorkflowConfig
+    understanding: RawUnderstandingSettings
+    audio: SelectedAudio
+    approval: AsrPhaseApproval
+    gate: AsrReservationGate
+
+    def timed_transcript(
+        self,
+        *,
+        binding: Any,
+        chunk: Any,
+        settings: RawWorkflowConfig,
+        on: date_type,
+        stem: str = "",
+        source: str = "",
+    ) -> Any:
+        require_live_asr_approval(
+            self.approval,
+            workflow=self.workflow,
+            understanding=self.understanding,
+            source_sha256=self.audio.source_sha256,
+            on=on,
+        )
+        if settings.network_mode != "online":
+            raise AnalysisApprovalError(
+                "네트워크 모드가 online이 아니다 — 내부 ASR 전송 문이 닫혀 있다"
+            )
+        if self.audio.audio_stream_index != self.approval.audio_stream_index:
+            raise AnalysisApprovalError("승인이 본 오디오 스트림과 지금의 선택이 다르다")
         if binding.sample_start < 0 or binding.sample_end > self.audio.sample_count:
             raise AnalysisApprovalError(
                 f"청크 범위가 선택 오디오 밖이다: [{binding.sample_start}, {binding.sample_end})"
@@ -630,14 +695,22 @@ def _require_video_coverage(proposal: SegmentationProposal, video: VideoGrid) ->
 
 @dataclass(frozen=True, slots=True)
 class AnalysisProviders:
-    """작업이 쓸 호출 경계들 — 재생 묶음이거나 승인된 실제 호출 재료다."""
+    """작업이 쓸 호출 경계들 — 재생 묶음이거나 단계별 승인된 실제 호출 재료다.
+
+    실제 호출은 두 단계로만 열린다(A4-F1): `phase="asr"`은 1단계 전사만
+    (`asr_approvals`가 문을 지킨다 — Luna는 한 번도 가지 않는다), `phase="semantic"`
+    은 2단계 의미 판정만 (`luna_approvals`가 1단계 기록의 실측 지문을 검증한다 —
+    전사를 다시 부르지 않는다). `phase="full"`은 재생의 단일 패스다.
+    """
 
     origin: str
+    phase: str = "full"
     replay: ReplayFixtures | None = None
     live_sender: object | None = None
     live_cfg: object | None = None
     live_client: object | None = None
-    approvals: Mapping[str, OnlineAnalysisApproval] | None = None
+    asr_approvals: Mapping[str, AsrPhaseApproval] | None = None
+    luna_approvals: Mapping[str, object] | None = None
     on: date_type | None = None
 
     def is_live(self) -> bool:
@@ -658,7 +731,9 @@ def run_analysis(
 
     원본 하나의 실패는 그 원본의 기록으로 남고 다음 원본을 멈추지 않는다(§7.3).
     같은 지문의 성공 결과는 캐시로 이어 붙인다 — 재개는 완료 원본을 다시 부르지
-    않는다(§14.2). 취소 게이트는 원본 사이에 선다(§14.1).
+    않는다(§14.2). 취소 게이트는 원본 사이에 선다(§14.1). 1단계(`phase="asr"`)는
+    전사가 끝난 원본이 하나라도 있으면 리비전을 `awaiting_semantic`으로 멈춘다 —
+    두 번째 사람 승인 전에 Luna는 가지 않는다(A4-F1).
     """
     store = AnalysisStore(workspace)
     ordered = sorted(order.entries, key=lambda item: item.ordinal)
@@ -694,7 +769,12 @@ def run_analysis(
     except Exception as error:  # noqa: BLE001 - 실행 전체를 멈추는 실패는 기록하고 올린다
         store.update_revision(revision.revision_id, status="failed", error=str(error)[:480])
         raise
-    store.update_revision(revision.revision_id, status="complete", error=None)
+    final = "complete"
+    if providers.phase == "asr":
+        rows = store.list_source_results(revision.revision_id)
+        if any(row.status == "transcribed" for row in rows):
+            final = "awaiting_semantic"
+    store.update_revision(revision.revision_id, status=final, error=None)
 
 
 def _record_unanalyzed(
@@ -728,6 +808,11 @@ def _analyze_one(
     providers: AnalysisProviders,
 ) -> AnalysisSourceResult:
     """원본 하나의 분석 — 실패는 이 원본의 기록이지 전체 실패가 아니다."""
+    existing = store.source_result(revision.revision_id, asset.asset_id)
+    if existing is not None and existing.status in ("analyzed", "cached"):
+        # 같은 리비전의 재개가 이미 성공한 원본을 다시 부르지 않는다(§14.2) —
+        # 유료 2단계 재시도가 완료 창을 다시 사지 않게 하는 문이다.
+        return existing
     _upsert(
         store,
         revision,
@@ -746,14 +831,19 @@ def _analyze_one(
     except Exception as error:  # noqa: BLE001 - 원본 단위 실패는 기록하고 다음으로
         note = f"{type(error).__name__}: {error}"[:480]
         log.warn(f"의미 분석 원본 실패 {asset.source_name}: {note}")
+        # 1단계 기록 포인터는 실패로 지우지 않는다 — 2단계 재개가 그 기록에서
+        # 다시 시작한다(전사를 다시 부르지 않는다, A4-F1).
+        existing = store.source_result(revision.revision_id, asset.asset_id)
         return _upsert(
             store,
             revision,
             asset_id=asset.asset_id,
             source_order=source_order,
             source_name=asset.source_name,
-            fingerprint="-",
+            fingerprint=existing.fingerprint if existing is not None else "-",
             status="failed",
+            document_path=existing.document_path if existing is not None else None,
+            window_count=existing.window_count if existing is not None else 0,
             error=note,
         )
 
@@ -792,6 +882,22 @@ def _analyze_source(
         / _source_folder(source_order, asset.asset_id)
     )
     source_dir.mkdir(parents=True, exist_ok=True)
+    if providers.phase == "semantic":
+        # 2단계는 1단계가 남긴 PCM·전사를 재검증해서 쓴다 — 다시 뽑지 않는다.
+        return _semantic_phase_source(
+            context,
+            workspace,
+            store,
+            revision,
+            source_order,
+            asset,
+            settings,
+            workflow,
+            providers,
+            path=path,
+            grid=grid,
+            source_dir=source_dir,
+        )
     audio = None
     if probe.audio:
         audio = stage1.select_audio(path, source_dir, source_id=asset.asset_id, audio_ordinal=0)
@@ -823,6 +929,33 @@ def _analyze_source(
             cached_from=cached.cached_from or cached.revision_id,
         )
 
+    if providers.phase == "asr":
+        return _asr_phase_source(
+            context,
+            workspace,
+            store,
+            revision,
+            source_order,
+            asset,
+            settings,
+            workflow,
+            providers,
+            path=path,
+            grid=grid,
+            source_dir=source_dir,
+            audio=audio,
+            timeline=timeline,
+            input_fp=input_fp,
+        )
+    if providers.phase == "semantic":
+        raise AnalysisError(
+            "2단계(의미) 실행은 1단계 기록에서 시작한다 — 전사 단계부터 다시 걸어야 한다"
+        )
+    if providers.is_live():
+        raise AnalysisApprovalError(
+            "승인 없는 실제 호출 전체 실행은 없다 — 1단계(전사)와 2단계(의미) 승인을"
+            " 각각 받아라(A4-F1)"
+        )
     asr_evidence: AsrEvidence | None = None
     utterances: tuple[UtteranceEvidence, ...] = ()
     if audio is not None:
@@ -849,11 +982,282 @@ def _analyze_source(
         settings=settings,
         sampler=stage1.PreprocessFrameSampler(path),
     )
+    return _finish_source(
+        context,
+        workspace,
+        store,
+        revision,
+        source_order,
+        asset,
+        settings,
+        workflow,
+        providers,
+        path=path,
+        grid=grid,
+        timeline=timeline,
+        audio=audio,
+        asr_evidence=asr_evidence,
+        plan=plan,
+        spoken=spoken,
+        frames=frames,
+        input_fp=input_fp,
+        source_dir=source_dir,
+    )
+
+
+def _asr_phase_source(
+    context: JobContext,
+    workspace: RawWorkspace,
+    store: AnalysisStore,
+    revision: AnalysisRevision,
+    source_order: int,
+    asset: SourceAsset,
+    settings: RawUnderstandingSettings,
+    workflow: RawWorkflowConfig,
+    providers: AnalysisProviders,
+    *,
+    path: Path,
+    grid: VideoGrid,
+    source_dir: Path,
+    audio: SelectedAudio | None,
+    timeline: CommonFileTimeline,
+    input_fp: str,
+) -> AnalysisSourceResult:
+    """1단계(내부 ASR) — 전사·창·프레임을 남기고 **의미 승인 앞에서 멈춘다**.
+
+    Luna는 한 번도 가지 않는다. 무성 원본은 전송이 없는 그대로 창·프레임만
+    남긴다(ASR 작업을 지어내지 않는다, §7.3). 같은 지문의 1단계 기록이 이미
+    있으면 다시 부르지 않는다 — 재시작·재개는 전사를 재사용한다(A4-F1).
+    """
+    artifact_path = source_dir / ASR_PHASE_DOCUMENT_NAME
+    if artifact_path.is_file():
+        artifact = _read_asr_phase_artifact(artifact_path)
+        if str(artifact.get("input_fingerprint")) != input_fp:
+            raise AnalysisError(
+                f"1단계 기록이 지금의 입력과 다르다: {asset.source_name} — 새 분석"
+                " 리비전으로 1단계부터 다시 받아라"
+            )
+        log.out(f"1단계 전사 기록 재사용: {asset.source_name} (ASR 재호출 없음)")
+        return _upsert(
+            store,
+            revision,
+            asset_id=asset.asset_id,
+            source_order=source_order,
+            source_name=asset.source_name,
+            fingerprint=input_fp,
+            status="transcribed",
+            document_path=str(artifact_path.relative_to(workspace.root)),
+            window_count=int(artifact.get("window_count") or 0),
+        )
+    asr_evidence: AsrEvidence | None = None
+    utterances: tuple[UtteranceEvidence, ...] = ()
+    if audio is not None:
+        context.check_cancel()
+        asr_provider = _asr_provider_for(providers, workflow, settings, audio, asset.asset_id)
+        spans = stage1.plan_audio_chunks(audio, settings)
+        asr_evidence = stage1.transcribe_selected_audio(
+            audio,
+            spans,
+            settings=workflow,
+            understanding=settings,
+            provider=asr_provider,
+            on=providers.on or datetime.now(UTC).date(),
+            request_id=f"{revision.revision_id}:{asset.asset_id}",
+            workdir=source_dir,
+        )
+        utterances = stage1.utterance_evidence(audio, asr_evidence)
+    plan = plan_common_windows(timeline, utterances, settings)
+    context.check_cancel()
+    frames = stage1.sample_frames(
+        plan,
+        directory=source_dir / "frames",
+        settings=settings,
+        sampler=stage1.PreprocessFrameSampler(path),
+    )
+    semantic_fp = _semantic_fingerprint(asset, grid, audio, plan, settings, workflow)
+    _write_json_atomic(
+        artifact_path,
+        {
+            "schema": ASR_PHASE_SCHEMA,
+            "analysis_revision_id": revision.revision_id,
+            "asset_id": asset.asset_id,
+            "source_order": source_order,
+            "source_name": asset.source_name,
+            "source_sha256": asset.content_sha256 or "",
+            "input_fingerprint": input_fp,
+            "mode": providers.origin,
+            "phase_kind": "semantic" if audio is not None else "visual",
+            "video": {
+                "stream_index": grid.stream_index,
+                "presentation_origin": _fraction_json(grid.presentation_origin),
+                "frame_duration": _fraction_json(grid.frame_duration),
+                "frame_count": grid.frame_count,
+            },
+            "audio": (
+                {"status": stage1.SPEECH_AUDIO_ABSENT}
+                if audio is None
+                else stage1.selected_audio_json(audio)
+            ),
+            "asr": (
+                {"status": stage1.SPEECH_AUDIO_ABSENT, "request_id": None, "chunks": []}
+                if asr_evidence is None
+                else stage1.asr_evidence_json(asr_evidence)
+            ),
+            "utterances": stage1.utterances_json(utterances),
+            "windows": stage1.window_plan_json(plan),
+            "frames": stage1.frame_sampling_json(frames),
+            "semantic_fingerprint": semantic_fp,
+            "window_count": len(plan.windows),
+            "image_count": len(frames.frames),
+            "created_at": _now(),
+        },
+    )
+    return _upsert(
+        store,
+        revision,
+        asset_id=asset.asset_id,
+        source_order=source_order,
+        source_name=asset.source_name,
+        fingerprint=input_fp,
+        status="transcribed",
+        document_path=str(artifact_path.relative_to(workspace.root)),
+        window_count=len(plan.windows),
+    )
+
+
+def _semantic_phase_source(
+    context: JobContext,
+    workspace: RawWorkspace,
+    store: AnalysisStore,
+    revision: AnalysisRevision,
+    source_order: int,
+    asset: SourceAsset,
+    settings: RawUnderstandingSettings,
+    workflow: RawWorkflowConfig,
+    providers: AnalysisProviders,
+    *,
+    path: Path,
+    grid: VideoGrid,
+    source_dir: Path,
+) -> AnalysisSourceResult:
+    """2단계(의미 Luna) — 1단계 불변 기록을 재검증해서 그 위에서만 판정한다.
+
+    전사를 다시 부르지 않는다(ASR 0송신). 1단계 기록의 입력 지문·실측 의미
+    지문을 지금의 증거에서 다시 계산해 같은지 보고, 어긋나면 닫는다 — 낡은
+    승인으로 바뀐 증거를 판정하게 하는 길은 없다(A4-F1).
+    """
+    artifact_path = source_dir / ASR_PHASE_DOCUMENT_NAME
+    if not artifact_path.is_file():
+        raise AnalysisError(
+            f"1단계 전사 기록이 없다: {asset.source_name} — 먼저 1단계(전사) 실제"
+            " 호출을 마쳐야 한다"
+        )
+    artifact = _read_asr_phase_artifact(artifact_path)
+    if (
+        str(artifact.get("analysis_revision_id")) != revision.revision_id
+        or str(artifact.get("asset_id")) != asset.asset_id
+    ):
+        raise AnalysisError("1단계 기록의 신원이 이 리비전·원본과 다르다 — 새 1단계를 받아라")
+    if str(artifact.get("source_sha256")) != (asset.content_sha256 or ""):
+        raise AnalysisError(
+            f"1단계 기록이 본 원본과 지금의 원본이 다르다: {asset.source_name} — 다시 가져오세요"
+        )
+    _require_artifact_grid(artifact, grid)
+    audio = _audio_from_artifact(artifact, source_dir, path, asset)
+    utterances = _utterances_from_artifact(artifact)
+    timeline = common_timeline(source_id=asset.asset_id, video=grid, audio=audio)
+    input_fp = source_input_fingerprint(
+        source_sha256=asset.content_sha256 or "",
+        video=grid,
+        audio=audio,
+        settings=settings,
+        workflow=workflow,
+    )
+    if input_fp != str(artifact.get("input_fingerprint")):
+        raise AnalysisError(
+            f"설정·원본이 1단계 기록과 다르다: {asset.source_name} — 새 1단계 승인을 받아라"
+        )
+    cached = _reusable_cache(store, workspace, input_fp, asset.content_sha256 or "")
+    if cached is not None:
+        log.out(f"의미 분석 캐시 재사용(2단계): {asset.source_name} ({input_fp[:12]}…)")
+        return _upsert(
+            store,
+            revision,
+            asset_id=asset.asset_id,
+            source_order=source_order,
+            source_name=asset.source_name,
+            fingerprint=input_fp,
+            status="cached",
+            speech_status=cached.speech_status,
+            execution_mode=cached.execution_mode,
+            document_path=cached.document_path,
+            record_path=cached.record_path,
+            window_count=cached.window_count,
+            segment_count=cached.segment_count,
+            cached_from=cached.cached_from or cached.revision_id,
+        )
+    plan = plan_common_windows(timeline, utterances, settings)
+    spoken = utterances_in_common_clock(timeline, utterances)
+    frames = _frames_from_artifact(artifact, source_dir / "frames")
+    semantic_fp = _semantic_fingerprint(asset, grid, audio, plan, settings, workflow)
+    if semantic_fp != str(artifact.get("semantic_fingerprint")):
+        raise AnalysisError(
+            f"1단계 기록의 실측 지문과 지금의 증거가 다르다: {asset.source_name} — 1단계를"
+            " 다시 실행하라"
+        )
+    asr_evidence = _asr_from_artifact(artifact) if audio is not None else None
+    context.check_cancel()
+    return _finish_source(
+        context,
+        workspace,
+        store,
+        revision,
+        source_order,
+        asset,
+        settings,
+        workflow,
+        providers,
+        path=path,
+        grid=grid,
+        timeline=timeline,
+        audio=audio,
+        asr_evidence=asr_evidence,
+        plan=plan,
+        spoken=spoken,
+        frames=frames,
+        input_fp=input_fp,
+        source_dir=source_dir,
+    )
+
+
+def _finish_source(
+    context: JobContext,
+    workspace: RawWorkspace,
+    store: AnalysisStore,
+    revision: AnalysisRevision,
+    source_order: int,
+    asset: SourceAsset,
+    settings: RawUnderstandingSettings,
+    workflow: RawWorkflowConfig,
+    providers: AnalysisProviders,
+    *,
+    path: Path,
+    grid: VideoGrid,
+    timeline: CommonFileTimeline,
+    audio: SelectedAudio | None,
+    asr_evidence: AsrEvidence | None,
+    plan: WindowPlan,
+    spoken: Sequence[UtteranceEvidence],
+    frames: FrameSamplingResult,
+    input_fp: str,
+    source_dir: Path,
+) -> AnalysisSourceResult:
+    """판정→조정→문서 기록까지의 공통 꼬리 — 재생 전체·2단계가 같은 길을 쓴다."""
     evidence_windows = luna.window_evidence(plan, frames, spoken)
     annotations = luna.annotate_windows(
         evidence_windows,
         _luna_responder_for(
-            providers, workflow, settings, audio, plan, spoken, frames, asset.asset_id
+            providers, workflow, settings, audio, grid, plan, spoken, frames, asset
         ),
         settings=settings,
         model=workflow.models.luna_model,
@@ -958,14 +1362,14 @@ def _asr_provider_for(
     audio: SelectedAudio,
     asset_id: str,
 ) -> TimingProvider:
-    """원본 하나의 내부 ASR 경계 — 재생이거나 승인·예약이 검증된 실제 호출이다."""
+    """원본 하나의 내부 ASR 경계 — 재생이거나 1단계 승인이 검증된 실제 호출이다."""
     if not providers.is_live():
         if providers.replay is None:
             raise AnalysisError("재생 픽스처가 없다 — 오프라인 재생 분석을 시작할 수 없다")
         return providers.replay.asr_for(audio.source_sha256)
-    approval = (providers.approvals or {}).get(asset_id)
+    approval = (providers.asr_approvals or {}).get(asset_id)
     if approval is None:
-        raise AnalysisApprovalError(f"실제 호출 승인이 없는 원본이다: {asset_id}")
+        raise AnalysisApprovalError(f"1단계(전사) 승인이 없는 원본이다: {asset_id}")
     sender = providers.live_sender
     cfg = providers.live_cfg
     if sender is None or cfg is None:
@@ -973,18 +1377,26 @@ def _asr_provider_for(
             "실제 호출에는 전송 경계(sender)와 엔진 설정(cfg)이 필요하다 — 사람이 공급한다"
         )
     spans = stage1.plan_audio_chunks(audio, settings)
-    if len(spans) > approval.budget.max_asr_chunks:
+    if len(spans) > approval.chunk_budget:
         raise AnalysisApprovalError(
-            f"승인 예산의 ASR 청크 한도({approval.budget.max_asr_chunks})를"
+            f"승인 예산의 ASR 청크 한도({approval.chunk_budget})를"
             f" 실행 청크 수({len(spans)})가 넘는다"
         )
+    require_live_asr_approval(
+        approval,
+        workflow=workflow,
+        understanding=settings,
+        source_sha256=audio.source_sha256,
+        on=providers.on or datetime.now(UTC).date(),
+    )
     inner = TransportTimingProvider(sender=sender, cfg=cfg)  # type: ignore[arg-type]
-    return ApprovedTimingProvider(
+    return ApprovedPhaseAsrProvider(
         inner=inner,
         workflow=workflow,
+        understanding=settings,
         audio=audio,
         approval=approval,
-        gate=CountingAsrGate(limit=approval.budget.max_asr_chunks),
+        gate=CountingAsrGate(limit=approval.chunk_budget),
     )
 
 
@@ -993,39 +1405,313 @@ def _luna_responder_for(
     workflow: RawWorkflowConfig,
     settings: RawUnderstandingSettings,
     audio: SelectedAudio | None,
+    grid: VideoGrid,
     plan: WindowPlan,
     spoken: Sequence[UtteranceEvidence],
     frames: FrameSamplingResult,
-    asset_id: str,
+    asset: SourceAsset,
 ) -> SemanticResponder:
-    """Luna 판정 경계 — 재생이거나 라이브러리의 자체 검증 응답자다(우회 불가)."""
+    """Luna 판정 경계 — 재생이거나 라이브러리의 자체 검증 응답자다(우회 불가).
+
+    실제 호출은 2단계 승인만 받는다: 오디오 원본은 `OnlineAnalysisApproval`
+    (실측 post-ASR 지문), 무성 원본은 시각 승인 `OnlineVisualAnalysisApproval`
+    — 없는 오디오를 지어내지 않는다(A4-F1).
+    """
     if not providers.is_live():
         if providers.replay is None:
             raise AnalysisError("재생 픽스처가 없다 — 오프라인 재생 분석을 시작할 수 없다")
         return providers.replay.luna_responder()
-    approval = (providers.approvals or {}).get(asset_id)
+    approval = (providers.luna_approvals or {}).get(asset.asset_id)
     if approval is None:
-        raise AnalysisApprovalError(f"실제 호출 승인이 없는 원본이다: {asset_id}")
-    if audio is None:
-        raise AnalysisApprovalError(
-            "오디오 트랙이 없는 원본의 실제 Luna 호출은 아직 승인 계약이 없다 — "
-            "오프라인 재생으로 분석하세요"
-        )
+        raise AnalysisApprovalError(f"2단계(의미) 승인이 없는 원본이다: {asset.asset_id}")
     client = providers.live_client
     if client is None:
         raise AnalysisApprovalError(
             "실제 호출에는 Responses 클라이언트가 필요하다 — 사람이 공급한다"
         )
-    return luna.validated_luna_responder(
+    if audio is not None:
+        if not isinstance(approval, OnlineAnalysisApproval):
+            raise AnalysisApprovalError(
+                f"오디오 원본의 2단계 승인은 OnlineAnalysisApproval이어야 한다: {asset.source_name}"
+            )
+        return luna.validated_luna_responder(
+            client=client,
+            settings=workflow,
+            understanding=settings,
+            audio=audio,
+            plan=plan,
+            utterances=spoken,
+            frames=frames,
+            approval=approval,
+        )
+    if not isinstance(approval, OnlineVisualAnalysisApproval):
+        raise AnalysisApprovalError(
+            f"무성 원본의 2단계 승인은 OnlineVisualAnalysisApproval이어야 한다: {asset.source_name}"
+        )
+    return validated_visual_luna_responder(
         client=client,
         settings=workflow,
         understanding=settings,
-        audio=audio,
+        source_sha256=asset.content_sha256 or "",
+        video=grid,
         plan=plan,
-        utterances=spoken,
         frames=frames,
         approval=approval,
     )
+
+
+# ─────────────────────────────────────────────────────────────
+#  1단계 불변 기록 — 쓰기·읽기·재구성(2단계 재개의 근거)
+# ─────────────────────────────────────────────────────────────
+
+
+def _semantic_fingerprint(
+    asset: SourceAsset,
+    grid: VideoGrid,
+    audio: SelectedAudio | None,
+    plan: WindowPlan,
+    settings: RawUnderstandingSettings,
+    workflow: RawWorkflowConfig,
+) -> str:
+    """2단계 승인이 묶는 실측 지문 — 오디오 원본과 무성 원본이 각자의 schema로."""
+    if audio is not None:
+        return luna.analysis_fingerprint(
+            audio=audio,
+            plan=plan,
+            settings=settings,
+            asr_model=workflow.models.timing_model,
+            luna_model=workflow.models.luna_model,
+        )
+    return visual_analysis_fingerprint(
+        source_sha256=asset.content_sha256 or "",
+        video=grid,
+        plan=plan,
+        settings=settings,
+        luna_model=workflow.models.luna_model,
+    )
+
+
+def semantic_job_fingerprint(revision_id: str) -> str:
+    """2단계 작업의 지문 — 리비전 신원에서 결정적으로 나온다(재결합의 키)."""
+    digest = hashlib.sha256(f"raw-analysis-semantic/v1\0{revision_id}".encode()).hexdigest()
+    return digest
+
+
+def read_asr_phase_binding(document_path: Path) -> dict[str, Any]:
+    """1단계 기록에서 2단계 승인·견적이 볼 값만 꺼낸다(지문·창·이미지·단계).
+
+    서비스의 빠른 실패(2단계 시작 문)가 쓴다 — 기록 전체를 믿고 실행하는
+    자리가 아니라, 승인이 본 값이 기록과 같은지만 본다.
+    """
+    artifact = _read_asr_phase_artifact(document_path)
+    return {
+        "asset_id": str(artifact["asset_id"]),
+        "phase_kind": str(artifact["phase_kind"]),
+        "semantic_fingerprint": str(artifact["semantic_fingerprint"]),
+        "window_count": int(artifact["window_count"]),
+        "image_count": int(artifact["image_count"]),
+    }
+
+
+def _read_asr_phase_artifact(path: Path) -> dict[str, Any]:
+    """1단계 기록 읽기 — 모양이 계약과 다르면 조용히 넘기지 않는다."""
+    try:
+        body = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise AnalysisError(f"1단계 기록을 읽지 못했다: {path.name} — {error}") from error
+    if not isinstance(body, dict) or body.get("schema") != ASR_PHASE_SCHEMA:
+        raise AnalysisError(f"1단계 기록이 {ASR_PHASE_SCHEMA} 모양이 아니다: {path.name}")
+    required = (
+        "analysis_revision_id",
+        "asset_id",
+        "source_sha256",
+        "input_fingerprint",
+        "phase_kind",
+        "video",
+        "semantic_fingerprint",
+        "window_count",
+        "image_count",
+    )
+    missing = [key for key in required if key not in body]
+    if missing:
+        raise AnalysisError(f"1단계 기록에 필수 칸이 비었다: {', '.join(missing)}")
+    return body
+
+
+def _fraction_from_json(value: object, where: str) -> Fraction:
+    if not isinstance(value, Mapping) or "num" not in value or "den" not in value:
+        raise AnalysisError(f"1단계 기록의 유리수 칸이 어긋났다: {where}")
+    return Fraction(int(value["num"]), int(value["den"]))
+
+
+def _require_artifact_grid(artifact: Mapping[str, object], grid: VideoGrid) -> None:
+    """지금 증명한 비디오 격자가 1단계 기록과 같은지 — 다르면 2단계를 시작하지 않는다."""
+    video = artifact.get("video")
+    if not isinstance(video, Mapping):
+        raise AnalysisError("1단계 기록에 비디오 격자가 없다")
+    recorded = (
+        int(video.get("stream_index", -1)),
+        _fraction_from_json(video.get("presentation_origin"), "video.presentation_origin"),
+        _fraction_from_json(video.get("frame_duration"), "video.frame_duration"),
+        int(video.get("frame_count", -1)),
+    )
+    current = (
+        grid.stream_index,
+        grid.presentation_origin,
+        grid.frame_duration,
+        grid.frame_count,
+    )
+    if recorded != current:
+        raise AnalysisError(
+            "지금 증명한 비디오 격자가 1단계 기록과 다르다 — 원본이 바뀌었다, 1단계부터 다시 받아라"
+        )
+
+
+def _audio_from_artifact(
+    artifact: Mapping[str, object], source_dir: Path, path: Path, asset: SourceAsset
+) -> SelectedAudio | None:
+    """1단계가 잰 선택 오디오를 재구성한다 — PCM 증거의 해시를 다시 잰다."""
+    audio = artifact.get("audio")
+    if not isinstance(audio, Mapping) or audio.get("status") == stage1.SPEECH_AUDIO_ABSENT:
+        return None
+    required = (
+        "source_sha256",
+        "audio_stream_index",
+        "pcm_sha256",
+        "sample_rate",
+        "channels",
+        "sample_count",
+        "pcm_sample0_file_time",
+    )
+    missing = [key for key in required if key not in audio]
+    if missing:
+        raise AnalysisError(f"1단계 기록의 오디오 신원 칸이 비었다: {', '.join(missing)}")
+    pcm_path = source_dir / "analysis.pcm"
+    if not pcm_path.is_file():
+        raise AnalysisError(
+            "1단계가 남긴 PCM 증거가 없다 — 전사 기록을 다시 만들려면 1단계부터 다시 받아라"
+        )
+    pcm_sha = _file_sha256(pcm_path)
+    if pcm_sha != str(audio["pcm_sha256"]):
+        raise AnalysisError(
+            "1단계 PCM 증거의 해시가 기록과 다르다 — 증거가 변했으니 1단계부터 다시 받아라"
+        )
+    return SelectedAudio(
+        source_id=asset.asset_id,
+        source_path=path,
+        source_sha256=str(audio["source_sha256"]),
+        audio_stream_index=int(audio["audio_stream_index"]),
+        pcm_path=pcm_path,
+        pcm_sha256=pcm_sha,
+        sample_rate=int(audio["sample_rate"]),
+        channels=int(audio["channels"]),
+        sample_count=int(audio["sample_count"]),
+        pcm_sample0_file_time=_fraction_from_json(
+            audio["pcm_sample0_file_time"], "audio.pcm_sample0_file_time"
+        ),
+    )
+
+
+def _utterances_from_artifact(artifact: Mapping[str, object]) -> tuple[UtteranceEvidence, ...]:
+    """1단계 발화 증거를 재구성한다 — 틱·아이디·글자는 기록 그대로다."""
+    raw = artifact.get("utterances")
+    if not isinstance(raw, list):
+        raise AnalysisError("1단계 기록에 발화 증거가 없다")
+    utterances: list[UtteranceEvidence] = []
+    for item in raw:
+        if not isinstance(item, Mapping):
+            raise AnalysisError("1단계 기록의 발화 항목이 객체가 아니다")
+        utterances.append(
+            UtteranceEvidence(
+                utterance_id=str(item["utterance_id"]),
+                chunk_index=int(item["chunk_index"]),
+                position=int(item["position"]),
+                text=str(item["text"]),
+                start=_fraction_from_json(item.get("start"), "utterance.start"),
+                end=_fraction_from_json(item.get("end"), "utterance.end"),
+                start_sample=int(item["start_sample"]),
+                end_sample=int(item["end_sample"]),
+                evidence_id=str(item["evidence_id"]),
+            )
+        )
+    return tuple(utterances)
+
+
+def _asr_from_artifact(artifact: Mapping[str, object]) -> AsrEvidence:
+    """1단계 전사 증거를 재구성한다 — 실패 청크도 그대로(빈 성공이 아니다)."""
+    raw = artifact.get("asr")
+    if not isinstance(raw, Mapping) or "chunks" not in raw or not isinstance(raw["chunks"], list):
+        raise AnalysisError("1단계 기록에 전사 증거가 없다")
+    chunks: list[AsrChunkOutcome] = []
+    for item in raw["chunks"]:
+        if not isinstance(item, Mapping):
+            raise AnalysisError("1단계 기록의 청크 항목이 객체가 아니다")
+        transcript = tuple(
+            (float(seg["start"]), float(seg["end"]), str(seg["text"]))
+            for seg in item.get("segments", [])
+            if isinstance(seg, Mapping)
+        )
+        chunks.append(
+            AsrChunkOutcome(
+                chunk_index=int(item["chunk_index"]),
+                sample_start=int(item["sample_start"]),
+                sample_end=int(item["sample_end"]),
+                wav_sha256=str(item["wav_sha256"]),
+                request_id=str(item["request_id"]),
+                transcript=transcript,
+                failure=str(item.get("failure") or ""),
+            )
+        )
+    return AsrEvidence(
+        request_id=str(raw.get("request_id") or ""),
+        sample_rate=int(raw.get("sample_rate") or stage1.PCM_SAMPLE_RATE),
+        chunks=tuple(chunks),
+    )
+
+
+def _frames_from_artifact(artifact: Mapping[str, object], frames_dir: Path) -> FrameSamplingResult:
+    """1단계가 뽑아 남긴 프레임 증거를 재구성한다 — 이미지 해시를 다시 잰다."""
+    raw = artifact.get("frames")
+    if not isinstance(raw, Mapping) or not isinstance(raw.get("frames"), list):
+        raise AnalysisError("1단계 기록에 프레임 표본이 없다")
+    frames: list[stage1.FrameEvidence] = []
+    failures: list[stage1.FrameExtractionFailure] = []
+    for item in raw["frames"]:
+        if not isinstance(item, Mapping):
+            raise AnalysisError("1단계 기록의 프레임 항목이 객체가 아니다")
+        image_path = frames_dir / f"{str(item['frame_id'])}.jpg"
+        if not image_path.is_file():
+            raise AnalysisError(
+                f"1단계가 남긴 프레임 증거가 없다: {image_path.name} — 1단계부터 다시 받아라"
+            )
+        digest = _file_sha256(image_path)
+        if digest != str(item["image_sha256"]):
+            raise AnalysisError(f"프레임 증거의 해시가 1단계 기록과 다르다: {image_path.name}")
+        frames.append(
+            stage1.FrameEvidence(
+                frame_id=str(item["frame_id"]),
+                frame_index=int(item["frame_index"]),
+                image_path=image_path,
+                image_sha256=digest,
+                file_time=_fraction_from_json(item.get("file_time"), "frame.file_time"),
+            )
+        )
+    for item in raw.get("failures", []) if isinstance(raw.get("failures"), list) else []:
+        if isinstance(item, Mapping):
+            failures.append(
+                stage1.FrameExtractionFailure(
+                    frame_id=str(item["frame_id"]), error=str(item["error"])
+                )
+            )
+    return FrameSamplingResult(tuple(frames), tuple(failures))
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def _stage1_document(
@@ -1215,9 +1901,12 @@ __all__ = [
     "ANALYSIS_DOCUMENT_NAME",
     "ANALYSIS_RECORD_NAME",
     "ANALYSIS_ROOT",
+    "ASR_PHASE_DOCUMENT_NAME",
+    "ASR_PHASE_SCHEMA",
     "REPLAY_FIXTURES_DIRNAME",
     "AnalysisError",
     "AnalysisProviders",
+    "ApprovedPhaseAsrProvider",
     "ApprovedTimingProvider",
     "AsrBudgetExhausted",
     "CountingAsrGate",
@@ -1228,7 +1917,9 @@ __all__ = [
     "INPUT_FINGERPRINT_SCHEMA",
     "load_replay_fixtures",
     "new_revision_id",
+    "read_asr_phase_binding",
     "reconcile_to_video_lattice",
     "run_analysis",
+    "semantic_job_fingerprint",
     "source_input_fingerprint",
 ]

@@ -104,11 +104,16 @@ class RawWorkspaceUi:
         port: int = 7860,
         state_path: Path | None = None,
         inspector: raw_service.MediaInspect | None = None,
+        live: raw_service.LiveAnalysisTransport | None = None,
     ) -> None:
         self.port = port
         self.raw = raw_service.RawWorkspaceService()
         self.state_path = state_path if state_path is not None else default_state_path()
         self._inspector = inspector  # None이면 서비스 기본(ffprobe). 시험은 가짜 조사자를 넣는다.
+        # 실제 호출 재료는 사람이 서버를 띄울 때 명시적으로 주입한다 — 화면이
+        # 자격증명을 찾거나 승인을 만드는 길은 없다(§14.3). 없으면 실제 호출
+        # 단추는 정직한 오류로 끝난다.
+        self._live_transport = live
         self._root: Path | None = None
         self._selection_lock = threading.Lock()
         self._last_listing: raw_service.FolderListing | None = None
@@ -384,7 +389,8 @@ class RawWorkspaceUi:
             with gr.Row():
                 source_box = gr.Textbox(
                     label="원본 폴더(SD 카드)",
-                    info="가져올 원본이 있는 폴더. 아직 가져오기 실행은 다음 단계에서 열린다.",
+                    info="가져올 원본이 있는 폴더. 아래 조사 → 원본 순서 확인 → 복사 및 검증이"
+                    " 이 탭에서 바로 이어진다.",
                     placeholder="/Volumes/SDCARD/DCIM",
                     scale=6,
                 )
@@ -444,7 +450,7 @@ class RawWorkspaceUi:
             refresh_ingest.click(
                 self.ingest_refresh_view,
                 self._signature_state,
-                [self._ingest_md, self._ingest_jobs_dd],
+                [self._workspace_md, self._ingest_md, self._ingest_jobs_dd],
             )
             retry_button.click(
                 self.ingest_retry_view,
@@ -496,10 +502,21 @@ class RawWorkspaceUi:
                 analysis_start = gr.Button("오프라인 재생 분석 시작", variant="primary", scale=2)
                 analysis_refresh = gr.Button("분석 상태 새로고침", scale=2)
                 analysis_plan = gr.Button("분석 결과로 분할 계획", scale=2)
+            # ── 실제 호출(두 단계 승인) — 주입된 전송 경계가 있을 때만 ──
+            gr.Markdown(
+                "> **실제 호출은 두 단계다.** 1단계(전사) 승인 → 전사·프레임 기록 →"
+                " **의미 승인 대기** → 2단계(의미 Luna) 승인 → 완료. 승인 기록은"
+                " 사람이 만들어 서버에 주입한다 — 이 화면은 자격증명을 찾지 않고,"
+                " 주입이 없으면 단추가 정직한 오류로 끝난다(§14.3)."
+            )
+            with gr.Row():
+                live_asr_button = gr.Button("실제 호출 1단계(전사) 시작", scale=2)
+                semantic_estimate_button = gr.Button("2단계 견적(로컬·전사 후 실측)", scale=2)
+                semantic_resume_button = gr.Button("실제 호출 2단계(의미) 재개", scale=2)
             with gr.Row():
                 self._analysis_jobs_dd = gr.Dropdown(
                     choices=self.resumable_analysis_choices(),
-                    label="재시도할 분석 작업",
+                    label="재시도·2단계 재개 대상 분석 작업",
                     interactive=True,
                     scale=6,
                 )
@@ -526,6 +543,21 @@ class RawWorkspaceUi:
                 self.analysis_retry_view,
                 [self._signature_state, self._analysis_jobs_dd],
                 self._analysis_md,
+            )
+            live_asr_button.click(
+                self.analysis_live_asr_view,
+                [self._signature_state, self._analysis_sources_group],
+                [self._analysis_md, self._analysis_jobs_dd],
+            )
+            semantic_estimate_button.click(
+                self.analysis_semantic_estimate_view,
+                self._signature_state,
+                self._analysis_md,
+            )
+            semantic_resume_button.click(
+                self.analysis_semantic_resume_view,
+                [self._signature_state, self._analysis_jobs_dd],
+                [self._analysis_md, self._analysis_jobs_dd],
             )
             gr.Markdown("---")
             # ── 결정적 분할(오프라인) ─────────────────────────────
@@ -1013,11 +1045,17 @@ class RawWorkspaceUi:
             choices=self.resumable_ingest_choices(root)
         )
 
-    def ingest_refresh_view(self, signature: str | None) -> tuple[str, gr.Dropdown]:
-        """진행 상태 새로고침 — 서버(DB)가 정본, 화면은 다시 읽기만 한다."""
+    def ingest_refresh_view(self, signature: str | None) -> tuple[str, str, gr.Dropdown]:
+        """진행 상태 새로고침 — 서버(DB)가 정본, 화면은 다시 읽기만 한다.
+
+        머리글(등록 미디어 수)도 함께 내린다 — 복사가 끝났는데 머리글이 0건인
+        채로 남는 오래된 표시를 새로고침이 못 고치는 일이 없게 한다.
+        """
         root = self._require_current_selection(signature)
-        return self._ingest_state_markdown(root), gr.Dropdown(
-            choices=self.resumable_ingest_choices(root)
+        return (
+            self.workspace_markdown(root),
+            self._ingest_state_markdown(root),
+            gr.Dropdown(choices=self.resumable_ingest_choices(root)),
         )
 
     def ingest_retry_view(self, signature: str | None, job_id: str | None) -> str:
@@ -1061,6 +1099,23 @@ class RawWorkspaceUi:
         "online_live": "실제 호출",
         "mixed_live_and_replay": "혼합(재생+실제)",
     }
+    _SOURCE_STATUS_LABELS: dict[str, str] = {
+        "pending": "대기",
+        "analyzing": "분석 중",
+        "transcribed": "전사 완료(2단계 대기)",
+        "analyzed": "분석 완료",
+        "cached": "캐시",
+        "failed": "실패",
+        "unanalyzed": "미선택 보존",
+    }
+    _REVISION_STATUS_LABELS: dict[str, str] = {
+        "reserved": "예약",
+        "analyzing": "실행 중",
+        "awaiting_semantic": "의미 승인 대기",
+        "complete": "완성",
+        "failed": "실패",
+        "interrupted": "중단",
+    }
 
     def analysis_source_choices(self, root: Path | None = None) -> list[tuple[str, str]]:
         """분석 선택 목록 — 확정 전체 순서의 ready 원본(순서 그대로)."""
@@ -1095,7 +1150,12 @@ class RawWorkspaceUi:
             f"분석 설정(동결 기본값): 시간창 15초 · 문맥 앞뒤 2초 · 창당 프레임 8장 ·"
             f" 긴변 768px · 내부 ASR `{config.models.timing_model}`(단일 패스) ·"
             f" 의미 판정 `{config.models.luna_model}` — 최종 자막 파이프라인은"
-            " 아니다(이 단계의 산출은 요약·태그·경계 제안뿐)"
+            " 아니다(이 단계의 산출은 요약·태그·경계 제안뿐)\n\n"
+            f"- 수명주기: 시간 제공자 종료 예정 **{config.registry.timing_shutdown_date}**"
+            " — 이후 신규 온라인 전사(1단계)는 차단된다(§11.10)\n"
+            f"- 네트워크 **{config.network_mode}** · Luna 단가 **미확인** — 금액 추정을"
+            " 만들지 않는다(0원 계산 금지). 실제 호출은 1단계(전사)·2단계(의미)"
+            " 승인이 각각 사람 기록으로만 열린다."
         )
 
     def _analysis_state_markdown(self, root: Path | None) -> str:
@@ -1117,10 +1177,11 @@ class RawWorkspaceUi:
                 " 호출은 없다."
             )
         revision = summary.revision
-        mode_label = "오프라인 재생" if revision.mode == "replay" else "실제 호출(승인)"
+        mode_label = "오프라인 재생" if revision.mode == "replay" else "실제 호출(두 단계 승인)"
+        status_label = self._REVISION_STATUS_LABELS.get(revision.status, revision.status)
         lines = [
             f"**의미 분석** — 리비전 `{revision.revision_id}` · 모드 **{mode_label}** ·"
-            f" 상태 {revision.status} · 원본 {revision.source_done}/{revision.source_total}",
+            f" 상태 **{status_label}** · 원본 {revision.source_done}/{revision.source_total}",
             "",
             "| 순번 | 원본 | 상태 | 발화 상태 | 창 | 조각 | 실행 증거 |",
             "|---|---|---|---|---|---|---|",
@@ -1128,11 +1189,21 @@ class RawWorkspaceUi:
         for result in summary.results:
             speech = self._SPEECH_LABELS.get(result.speech_status or "", "-")
             execution = self._EXECUTION_LABELS.get(result.execution_mode or "", "-")
+            status = self._SOURCE_STATUS_LABELS.get(result.status, result.status)
             lines.append(
-                f"| {result.source_order} | {result.source_name} | {result.status} |"
+                f"| {result.source_order} | {result.source_name} | {status} |"
                 f" {speech} | {result.window_count} | {result.segment_count}"
                 f" | {execution} |"
             )
+        if revision.status == "awaiting_semantic":
+            lines += [
+                "",
+                "**의미 승인 대기** — 1단계(전사)가 끝났고 Luna는 아직 한 번도 가지"
+                " 않았다. **2단계 견적(로컬·전사 후 실측)**으로 원본별 실측 지문·창·"
+                " 이미지 수를 보고, 사람이 만든 2단계 승인을 주입한 뒤 위의"
+                " 재개 대상에 1단계 작업을 골라 **실제 호출 2단계(의미) 재개**를"
+                " 누른다. 잘못된 승인은 전사도 Luna도 0송신으로 거부된다.",
+            ]
         if revision.error:
             lines += ["", f"**오류**: {revision.error}"]
         for result in summary.results[:4]:
@@ -1258,6 +1329,124 @@ class RawWorkspaceUi:
             " 붙고(다시 부르지 않는다) 실패 원본만 다시 분석한다."
         )
 
+    # ── 실제 호출(두 단계 승인) — 주입된 전송 경계가 있을 때만 움직인다 ──
+
+    def _require_live_transport(self) -> raw_service.LiveAnalysisTransport:
+        """주입된 실제 호출 재료 — 없으면 정직한 오류(화면이 만들지 않는다)."""
+        if self._live_transport is None:
+            raise gr.Error(
+                "이 서버에는 실제 호출 전송 경계가 주입되지 않았다 — 사람이 승인"
+                " 기록·전송 경계와 함께 서버를 띄워야 한다(브라우저는 만들 수 없다)."
+            )
+        return self._live_transport
+
+    def analysis_live_asr_view(
+        self, signature: str | None, selected: list[str] | None
+    ) -> tuple[str, gr.Dropdown]:
+        """실제 호출 1단계(전사) — 원본별 전사 승인이 문을 지킨다(Luna 0호출)."""
+        root = self._require_current_selection(signature)
+        transport = self._require_live_transport()
+        try:
+            handle = self.raw.start_analysis(
+                root,
+                asset_ids=self._selected_asset_ids(selected),
+                mode="live",
+                asr_approvals=transport.asr_approvals(root, self._selected_asset_ids(selected)),
+                sender=transport.sender,
+                cfg=transport.cfg,
+                on=transport.on,
+            )
+        except raw_service.RawWorkspaceError as error:
+            raise gr.Error(str(error)) from error
+        message = (
+            f"1단계(전사) 작업 `{handle.job_id}` 제출"
+            + (" (기존 활성 작업에 다시 붙음)" if handle.reattached else "")
+            + " — 전사·프레임만 남기고 의미 승인 대기에서 멈춘다(Luna 0호출)."
+            " 전사 기록이 있는 원본은 다시 부르지 않는다."
+        )
+        return (
+            message + "\n\n" + self._analysis_state_markdown(root),
+            gr.Dropdown(choices=self.resumable_analysis_choices(root)),
+        )
+
+    def analysis_semantic_estimate_view(self, signature: str | None) -> str:
+        """2단계 견적 — 1단계 기록의 실측 지문·창·이미지·비용 상태(로컬만)."""
+        root = self._require_current_selection(signature)
+        try:
+            summary = self.raw.analysis_overview(root)
+            estimates = self.raw.analysis_semantic_estimate(
+                root, summary.revision.revision_id if summary else None
+            )
+        except raw_service.RawWorkspaceError as error:
+            raise gr.Error(str(error)) from error
+        if not estimates:
+            return (
+                "**2단계 견적** — 아직 1단계(전사)가 끝난 원본이 없다. 실제 호출"
+                " 1단계를 마친 뒤 여기에 원본별 실측 지문·창·이미지 수가 나타난다."
+            )
+        lines = [
+            "**2단계(의미 Luna) 견적 — 1단계 실측 기록 기준(로컬, 호출 없음)**",
+            "",
+            "| 순번 | 원본 | 단계 | 실측 지문(앞 12자) | 창 | 이미지 | Luna 요청 |",
+            "|---|---|---|---|---|---|---|",
+        ]
+        for item in estimates:
+            phase_label = "의미(전사+이미지)" if item.phase == "semantic" else "시각(이미지만)"
+            lines.append(
+                f"| {item.source_order} | {item.source_name} | {phase_label} |"
+                f" `{item.semantic_fingerprint[:12]}…` | {item.window_count} |"
+                f" {item.image_count} | {item.luna_request_count} |"
+            )
+        lines += [
+            "",
+            f"- Luna 모델 `{estimates[0].luna_model}` · 비용 상태 **{estimates[0].price_status}**"
+            " — 미확인 단가는 금액을 만들지 않는다(0원 계산 금지).",
+            "- 2단계 승인은 이 표의 **실측 지문 전체값**을 묶는다 — 승인이 본 값과"
+            " 1단계 기록이 다르면 재개가 0송신으로 거부된다.",
+        ]
+        return "\n".join(lines)
+
+    def analysis_semantic_resume_view(
+        self, signature: str | None, job_id: str | None
+    ) -> tuple[str, gr.Dropdown]:
+        """실제 호출 2단계(의미) 재개 — 두 번째 승인이 실측 지문을 검증받는다."""
+        root = self._require_current_selection(signature)
+        transport = self._require_live_transport()
+        if not job_id:
+            raise gr.Error(
+                "재개 대상 분석 작업을 고르세요 — 의미 승인 대기 리비전의 1단계 작업이다."
+            )
+        summary = self.raw.analysis_overview(root)
+        selected: list[str] = []
+        if summary is not None:
+            selected = [
+                row.asset_id for row in summary.results if row.status not in ("unanalyzed",)
+            ]
+        try:
+            approvals: dict[str, object] = {}
+            if summary is not None:
+                approvals = dict(
+                    transport.luna_approvals(root, summary.revision.revision_id, selected)
+                )
+            handle = self.raw.resume_analysis_semantic(
+                root,
+                job_id,
+                luna_approvals=approvals,
+                client=transport.client,
+                on=transport.on,
+            )
+        except raw_service.RawWorkspaceError as error:
+            raise gr.Error(str(error)) from error
+        message = (
+            f"2단계(의미) 작업 `{handle.job_id}` 제출"
+            + (" (기존 활성 작업에 다시 붙음)" if handle.reattached else "")
+            + " — 1단계 전사 기록을 다시 검증해 재사용한다(ASR 0호출)."
+        )
+        return (
+            message + "\n\n" + self._analysis_state_markdown(root),
+            gr.Dropdown(choices=self.resumable_analysis_choices(root)),
+        )
+
     def analysis_plan_view(self, signature: str | None) -> str:
         """분석 결과를 A3 분할 계획으로 — 선택 밖·실패 원본은 전체 보존 한 조각."""
         root = self._require_current_selection(signature)
@@ -1276,19 +1465,38 @@ class RawWorkspaceUi:
         return [str(item) for item in selected]
 
     def resumable_analysis_choices(self, root: Path | None = None) -> list[tuple[str, str]]:
-        """재시도 가능한 분석 작업 — 실패·중단 상태만 골라 보인다."""
+        """재시도·2단계 재개 대상 분석 작업 — 대기 리비전의 1단계 작업도 보인다."""
         root = root if root is not None else self._snapshot_root()
         if root is None:
             return []
         resumable = {"failed", "interrupted", "paused"}
-        return [
-            (
-                f"{job.job_id} · {job.status} · {job.progress_current}/{job.progress_total}",
-                job.job_id,
+        kinds = {raw_service.ANALYSIS_JOB_KIND, raw_service.ANALYSIS_SEMANTIC_JOB_KIND}
+        awaiting_fingerprint: str | None = None
+        try:
+            summary = self.raw.analysis_overview(root)
+        except raw_service.RawWorkspaceError:
+            summary = None
+        if summary is not None and summary.revision.status == "awaiting_semantic":
+            awaiting_fingerprint = summary.revision.fingerprint
+        choices: list[tuple[str, str]] = []
+        for job in self.raw.list_jobs(root):
+            in_awaiting = (
+                awaiting_fingerprint is not None
+                and job.kind == raw_service.ANALYSIS_JOB_KIND
+                and job.input_fingerprint == awaiting_fingerprint
             )
-            for job in self.raw.list_jobs(root)
-            if job.kind == raw_service.ANALYSIS_JOB_KIND and job.status in resumable
-        ]
+            if job.kind not in kinds or not (job.status in resumable or in_awaiting):
+                continue
+            stage = "2단계" if job.kind == raw_service.ANALYSIS_SEMANTIC_JOB_KIND else "1단계"
+            suffix = " · 의미 승인 대기" if in_awaiting else ""
+            choices.append(
+                (
+                    f"{job.job_id} · {stage} · {job.status}"
+                    f" · {job.progress_current}/{job.progress_total}{suffix}",
+                    job.job_id,
+                )
+            )
+        return choices
 
     def _segment_state_markdown(self, root: Path | None) -> str:
         """분할 패널 보기 — 계획·추출 작업·게시된 조각을 DB에서 다시 읽는다."""

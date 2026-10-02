@@ -603,27 +603,39 @@ ANALYSIS_JOB_KIND = "understanding_analysis"
 ANALYSIS_REVISION_STATUSES: tuple[str, ...] = (
     "reserved",
     "analyzing",
+    "awaiting_semantic",
     "complete",
     "failed",
     "interrupted",
 )
-"""분석 리비전의 서버 소유 상태(§14.1). 원본별 결과는 따로 남는다 — 하나의
-상태 문자열로 부분 실패를 숨기지 않는다."""
+"""분석 리비전의 서버 소유 상태(§14.1). `awaiting_semantic`은 2단계 실제
+호출(A4-F1) — 1단계 전사가 끝났고 두 번째 사람 승인만 남은 대기 상태다.
+원본별 결과는 따로 남는다 — 하나의 상태 문자열로 부분 실패를 숨기지 않는다."""
 
 ANALYSIS_SOURCE_STATUSES: tuple[str, ...] = (
     "pending",
     "analyzing",
+    "transcribed",
     "analyzed",
     "cached",
     "failed",
     "unanalyzed",
 )
 """리비전 안 원본 하나의 분석 상태. `analyzed`·`cached`만 성공 증거를 실고,
+`transcribed`는 1단계(내부 ASR)만 끝난 상태다(2단계 승인 대기, A4-F1).
 `failed`는 오류를 남긴 채 재시도 대상이며 `unanalyzed`는 선택에 들지 않아
 보존만 되는 원본이다(전체 순서는 항상 전부 산다, §6.1)."""
 
 ANALYSIS_MODES: tuple[str, ...] = ("replay", "live")
 """분석 실행 모드 — 재생(replay)은 픽스처만, 실제 호출(live)은 사람 승인만."""
+
+ANALYSIS_PHASES: tuple[str, ...] = ("full", "asr", "semantic")
+"""실제 호출 분석의 단계(A4-F1). `full`은 재생의 단일 패스, `asr`는 1단계
+(전사만 — 끝나면 `awaiting_semantic`), `semantic`은 2단계(전사 기록 재사용,
+Luna만). 잘못된 승인으로 2단계를 시작하면 전사도 Luna도 0송신이다."""
+
+ANALYSIS_SEMANTIC_JOB_KIND = "understanding_semantic"
+"""2단계(의미 Luna) 분석 작업의 종류 표기 — 1단계 작업과 재결합 키가 다르다."""
 
 SEGMENTATION_BASIS_SEMANTIC = "semantic_analysis"
 """A4 분할 근거 — 받아들여진 의미 경계를 비디오 격자에 조정한 타일링."""
@@ -650,6 +662,31 @@ class AnalysisEstimate:
     frame_sample_count: int
     asr_chunk_count: int
     asr_seconds: str
+    luna_request_count: int
+    price_status: str
+    user_ceiling_total: str | None
+    note: str
+
+
+@dataclass(frozen=True, slots=True)
+class AnalysisSemanticEstimate:
+    """2단계(의미 Luna) 견적 — 1단계가 남긴 **실측** 전사 기록 위에서 잰다(A4-F1).
+
+    `semantic_fingerprint`는 1단계 기록의 실측 지문이다 — 2단계 승인이 묶는
+    바로 그 값이다(승인이 이 값을 보고 만들어졌는지의 증명). 창 수는 실측
+    창 계획의 수, 이미지 수는 뽑혀 남은 프레임 수, Luna 요청 수는 창 수다.
+    단가는 여전히 미확인 상태로만 말한다(0원 계산 금지).
+    """
+
+    asset_id: str
+    source_order: int
+    source_name: str
+    phase: str
+    """`semantic`(오디오 원본) | `visual`(무성 원본 — ASR 없음)."""
+    semantic_fingerprint: str
+    window_count: int
+    image_count: int
+    luna_model: str
     luna_request_count: int
     price_status: str
     user_ceiling_total: str | None

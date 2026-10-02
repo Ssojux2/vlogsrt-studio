@@ -610,18 +610,21 @@ def test_interrupted_job_resumes_with_same_id_and_cached_sources(
     assert statuses == ["analyzed", "analyzed"]  # 캐시 무효 없이 재개 완료
 
 
-# ── 실제 호출 문 — 유효 승인은 보내고, 잘못된 것은 0회 송신 ────────────────────
+# ── 실제 호출 문 — 두 단계 승인: 1단계(전사) → 대기 → 2단계(의미) ─────────────
 
 
 class _FakeSender:
     """전사 전송 경계 가짜 — 보낸 요청을 세고 정해진 응답을 돌려준다."""
 
-    def __init__(self) -> None:
+    def __init__(self, segments: list[dict[str, object]] | None = None) -> None:
         self.calls: list[object] = []
+        self._segments = segments if segments is not None else []
 
     def send_request(self, request, cfg, *, kind, stem, source):
         self.calls.append(request)
-        return {"segments": []}  # 합성 사인음 — 빈 골격이 정직한 답이다
+        # 실제 전사처럼 발화를 돌려준다 — 2단계 지문은 이 발화가 만든 창 계획을
+        # 묶어야 한다(빈 골격이 아니라).
+        return {"segments": list(self._segments)}
 
 
 class _FakeClient:
@@ -637,62 +640,98 @@ class _FakeClient:
         return {"output_text": json.dumps(self._body, ensure_ascii=False)}
 
 
-def _live_ready(workspace: Path, service: raw.RawWorkspaceService, media_file: Path):
-    """실제 호출 시험 준비 — online 설정·원본·플랜 지문 재료."""
-    config = service.settings(workspace)
-    service.update_settings(workspace, replace(config, network_mode="online"))
-    workflow = service.settings(workspace)
-    probe = preprocess.probe_raw_media(media_file)
-    assert probe.audio, "실제 호출 시험 원본에는 오디오가 있어야 한다"
-    scratch = workspace / "analysis" / "live-scratch"
-    scratch.mkdir(parents=True, exist_ok=True)
-    audio = analysis_workflow.stage1.select_audio(
-        media_file, scratch, source_id="probe", audio_ordinal=0
-    )
-    clock = preprocess.probe_extraction_clock(media_file, probe=probe)
-    grid = analysis_workflow.stage1.VideoGrid(
-        stream_index=clock.stream_index,
-        presentation_origin=clock.presentation_origin,
-        frame_duration=clock.frame_duration,
-        frame_count=clock.frame_count,
-    )
-    timeline = analysis_workflow.common_timeline(source_id="probe", video=grid, audio=audio)
-    settings = RawUnderstandingSettings()
-    plan = analysis_workflow.plan_common_windows(timeline, (), settings)
-    fingerprint = analysis_workflow.luna.analysis_fingerprint(
-        audio=audio,
-        plan=plan,
-        settings=settings,
-        asr_model=workflow.models.timing_model,
-        luna_model=workflow.models.luna_model,
-    )
-    return workflow, audio, fingerprint, len(plan.windows)
+def _live_online(service: raw.RawWorkspaceService, root: Path, monkeypatch) -> None:
+    """실제 호출 시험 준비 — 환경·작업공간 네트워크를 함께 연다(§14.3)."""
+    monkeypatch.setattr("vlogsrt.env.is_offline", lambda: False)
+    config = service.settings(root)
+    service.update_settings(root, replace(config, network_mode="online"))
+
+
+def _asr_approval(asset, workflow, settings, audio_stream_index: int, **overrides):
+    """1단계(전사) 승인 — 견적이 알 수 있는 값만 묶는다(A4-F1)."""
+    from vlogsrt.project.raw.analysis_approval import AsrPhaseApproval, asr_settings_fingerprint
+
+    values = {
+        "approved": True,
+        "source_sha256": asset.content_sha256 or "",
+        "audio_stream_index": audio_stream_index,
+        "chunk_budget": 1,
+        "settings_fingerprint": asr_settings_fingerprint(settings, workflow),
+        "timing_model": workflow.models.timing_model,
+        "approved_on": date.today().isoformat(),
+    }
+    values.update(overrides)
+    return AsrPhaseApproval(**values)
+
+
+def _artifact(service: raw.RawWorkspaceService, root: Path, revision_id: str, asset_id: str):
+    summary = service.analysis_overview(root, revision_id)
+    assert summary is not None
+    row = next(item for item in summary.results if item.asset_id == asset_id)
+    assert row.document_path is not None
+    return json.loads((root / row.document_path).read_text(encoding="utf-8"))
 
 
 @needs_ffmpeg
-def test_live_valid_approval_sends_and_gates_refuse_wrong_ones(
+def test_live_two_phase_asr_stops_for_semantic_then_resumes(
     workspace: Path, tmp_path: Path, stereo_offset: Path, monkeypatch
 ) -> None:
-    """유효 승인은 실제 전송이 일어나고, 잘못된 승인·종료일·환경은 0회 송신이다."""
+    """1단계는 전사만(의미 0호출)·2단계는 전사 0재호출 — 대기 상태를 사이에 둔다."""
     from vlogsrt.project.raw.understanding_luna import AnalysisBudget, OnlineAnalysisApproval
 
-    monkeypatch.setattr("vlogsrt.env.is_offline", lambda: False)
+    _live_online(raw.RawWorkspaceService(), workspace, monkeypatch)
     service = raw.RawWorkspaceService()
     _ingest_card(service, workspace, _card(tmp_path, "cardJ", {"스테레오.mov": stereo_offset}))
     service.confirm_global_source_order(workspace)
     asset = service.list_source_assets(workspace)[0]
-    original = workspace / asset.relative_path
-    workflow, probed_audio, fingerprint, window_count = _live_ready(workspace, service, original)
-    assert window_count == 1  # 6초 원본 — 창 1개
+    workflow = service.settings(workspace)
+    probe = preprocess.probe_raw_media(workspace / asset.relative_path)
+    assert probe.audio
+    settings = RawUnderstandingSettings()
 
-    def _approval(**overrides) -> OnlineAnalysisApproval:
+    # ── 1단계(전사): 실제 발화를 받는다 — 2단계 지문은 전사 **뒤**에야 안다.
+    sender = _FakeSender([{"start": 0.5, "end": 2.0, "text": "도착해서 일정 설명"}])
+    client = _FakeClient(_luna_body("window_000000"))
+    handle, record = _analyze(
+        service,
+        workspace,
+        mode="live",
+        asr_approvals={
+            asset.asset_id: _asr_approval(asset, workflow, settings, probe.audio[0].stream_index)
+        },
+        sender=sender,
+        cfg=types.SimpleNamespace(),
+    )
+    assert record.status == "succeeded", record.error
+    assert len(sender.calls) == 1  # 내부 ASR 단일 청크 — 실제 전송 1회
+    assert client.calls == []  # 1단계에는 Luna가 한 번도 가지 않는다
+    summary = service.analysis_overview(workspace)
+    assert summary is not None
+    assert summary.revision.status == "awaiting_semantic"  # 의미 승인 대기
+    row = next(item for item in summary.results if item.asset_id == asset.asset_id)
+    assert row.status == "transcribed"
+    artifact = _artifact(service, workspace, summary.revision.revision_id, asset.asset_id)
+    assert artifact["schema"] == "raw-analysis-asr-phase/v1"
+    assert artifact["asr"]["chunks"][0]["segments"]  # 실제 발화가 남았다
+    assert artifact["phase_kind"] == "semantic"
+
+    # ── 2단계 견적 — 사람이 볼 실측 바인딩(지문·창·이미지).
+    estimates = service.analysis_semantic_estimate(workspace, summary.revision.revision_id)
+    assert len(estimates) == 1
+    estimate = estimates[0]
+    assert estimate.semantic_fingerprint == artifact["semantic_fingerprint"]
+    assert estimate.window_count == 1 and estimate.image_count > 0
+    assert estimate.luna_model == workflow.models.luna_model
+    assert estimate.price_status == "unknown"  # 미확인 단가 — 0원 계산 금지
+
+    def _luna_approval(binding: dict, **overrides) -> OnlineAnalysisApproval:
         values = {
             "approved": True,
             "source_sha256": asset.content_sha256 or "",
-            "audio_stream_index": probed_audio.audio_stream_index,
-            "sample_count": probed_audio.sample_count,
-            "window_count": window_count,
-            "fingerprint": fingerprint,
+            "audio_stream_index": binding["audio"]["audio_stream_index"],
+            "sample_count": binding["audio"]["sample_count"],
+            "window_count": estimate.window_count,
+            "fingerprint": estimate.semantic_fingerprint,
             "asr_model": workflow.models.timing_model,
             "luna_model": workflow.models.luna_model,
             "budget": AnalysisBudget(max_luna_requests=1, max_asr_chunks=1),
@@ -700,84 +739,215 @@ def test_live_valid_approval_sends_and_gates_refuse_wrong_ones(
         values.update(overrides)
         return OnlineAnalysisApproval(**values)
 
-    body = _luna_body("window_000000")
-    sender = _FakeSender()
-    client = _FakeClient(body)
-    cfg = types.SimpleNamespace()
-    handle, record = _analyze(
-        service,
+    # 1단계 재시작도 전사를 다시 부르지 않는다 — 기록 재사용.
+    from vlogsrt.project.raw.jobs import JobStore
+    from vlogsrt.project.raw.workspace import RawWorkspace as _RW
+
+    JobStore(_RW.open(workspace)).update(handle.job_id, status="running")
+    service.recover_interrupted_jobs(workspace)
+    phase1_again = service.retry_analysis(
         workspace,
-        mode="live",
-        approvals={asset.asset_id: _approval()},
+        handle.job_id,
+        asr_approvals={
+            asset.asset_id: _asr_approval(asset, workflow, settings, probe.audio[0].stream_index)
+        },
         sender=sender,
-        cfg=cfg,
+        cfg=types.SimpleNamespace(),
+    )
+    replayed = _wait_terminal(service, workspace, phase1_again.job_id)
+    assert replayed.status == "succeeded", replayed.error
+    assert len(sender.calls) == 1  # 1단계 기록이 있는 원본은 ASR 없이 대기 상태로
+    again_summary = service.analysis_overview(workspace)
+    assert again_summary is not None
+    assert again_summary.revision.status == "awaiting_semantic"
+
+    # ── 잘못된 2단계 승인 — 실측 지문이 다르면 전사도 Luna도 0송신.
+    wrong_client = _FakeClient(_luna_body("window_000000"))
+    with pytest.raises(raw.AnalysisError, match="실측 지문과 다르다"):
+        service.resume_analysis_semantic(
+            workspace,
+            handle.job_id,
+            luna_approvals={asset.asset_id: _luna_approval(artifact, fingerprint="f" * 64)},
+            client=wrong_client,
+        )
+    assert wrong_client.calls == [] and len(sender.calls) == 1  # 전사 재호출도 없다
+    with pytest.raises(raw.AnalysisError, match="2단계.의미. 승인이 없는 원본"):
+        service.resume_analysis_semantic(
+            workspace, handle.job_id, luna_approvals={}, client=wrong_client
+        )
+    assert wrong_client.calls == []
+    # 잘못된 Luna 모델 승인 — 재개 문에서 바로 닫힌다(송신 0회).
+    with pytest.raises(raw.AnalysisError, match="본 Luna 모델과 설정 모델이 다르다"):
+        service.resume_analysis_semantic(
+            workspace,
+            handle.job_id,
+            luna_approvals={asset.asset_id: _luna_approval(artifact, luna_model="luna-x")},
+            client=wrong_client,
+        )
+    assert wrong_client.calls == []
+
+    # ── 2단계(의미): 두 번째 승인이 실측 지문을 묶는다 — 전사 0재호출.
+    resume = service.resume_analysis_semantic(
+        workspace,
+        handle.job_id,
+        luna_approvals={asset.asset_id: _luna_approval(artifact)},
         client=client,
     )
-    assert record.status == "succeeded", record.error
-    assert len(sender.calls) == 1  # 내부 ASR 단일 청크 — 실제 전송 1회
-    assert client.calls == [workflow.models.luna_model]  # Luna 창 1 — 실제 호출 1회
-    summary = service.analysis_overview(workspace)
-    assert summary is not None
-    assert summary.revision.mode == "live"
-    document = _document(service, workspace, summary.revision.revision_id, asset.asset_id)
+    resumed = _wait_terminal(service, workspace, resume.job_id)
+    assert resumed.status == "succeeded", resumed.error
+    assert len(sender.calls) == 1  # 전사는 1단계 기록을 재사용했다(0재호출)
+    assert client.calls == [workflow.models.luna_model]  # Luna 창 1 — 실제 호출
+    final = service.analysis_overview(workspace)
+    assert final is not None and final.revision.status == "complete"
+    done = next(item for item in final.results if item.asset_id == asset.asset_id)
+    assert done.status == "analyzed" and done.execution_mode == "online_live"
+    document = _document(service, workspace, final.revision.revision_id, asset.asset_id)
     assert document["execution_mode"] == "online_live"
+    assert document["asr"]["chunks"][0]["segments"]  # 1단계 전사가 문서에 그대로
 
-    # 잘못된 원본 승인 — 시작 문에서 막힌다(송신 0회).
-    sender2 = _FakeSender()
-    client2 = _FakeClient(body)
-    with pytest.raises(raw.AnalysisError, match="본 원본과 지금의 원본이 다르다"):
-        service.start_analysis(
-            workspace,
-            mode="live",
-            approvals={asset.asset_id: _approval(source_sha256="f" * 64)},
-            sender=sender2,
-            cfg=cfg,
-            client=client2,
-        )
-    assert sender2.calls == [] and client2.calls == []
+    # ── 재시작·재개 — 전사 기록은 다시 쓴다(캐시된 전사).
+    from vlogsrt.project.raw.analysis_store import AnalysisStore
+    from vlogsrt.project.raw.jobs import JobStore
+    from vlogsrt.project.raw.workspace import RawWorkspace as _RW
 
-    # 잘못된 Luna 모델 승인 — 시작 문에서 바로 닫힌다(송신 0회).
-    sender3 = _FakeSender()
-    client3 = _FakeClient(body)
-    with pytest.raises(raw.AnalysisError, match="본 모델과 설정 모델이 다르다"):
-        service.start_analysis(
-            workspace,
-            mode="live",
-            approvals={asset.asset_id: _approval(luna_model="gpt-6-not-luna")},
-            sender=sender3,
-            cfg=cfg,
-            client=client3,
-        )
-    assert sender3.calls == [] and client3.calls == []
-
-    # 종료일 이후 — 수명주기 문이 전송 전에 닫힌다(§11.10).
-    sender4 = _FakeSender()
-    client4 = _FakeClient(body)
-    handle4, record4 = _analyze(
-        service,
-        workspace,
-        mode="live",
-        approvals={asset.asset_id: _approval()},
-        sender=sender4,
-        cfg=cfg,
-        client=client4,
-        on=date(2027, 3, 1),
+    # 프로세스 사망 흉내 — 2단계 작업·리비전을 실행 중 표시로 되돌리고 복구(§14.1).
+    JobStore(_RW.open(workspace)).update(resume.job_id, status="running")
+    AnalysisStore(_RW.open(workspace)).update_revision(
+        summary.revision.revision_id, status="interrupted"
     )
-    assert record4.status == "succeeded", record4.error
-    assert sender4.calls == []  # whisper-1 종료 예정일 지남 — 신규 온라인 시간 작업 차단
+    assert service.recover_interrupted_jobs(workspace) == 1
+    restart_client = _FakeClient(_luna_body("window_000000"))
+    retry = service.retry_analysis(
+        workspace,
+        resume.job_id,
+        luna_approvals={asset.asset_id: _luna_approval(artifact)},
+        client=restart_client,
+    )
+    assert retry.job_id == resume.job_id  # 같은 2단계 작업 ID로 재개
+    again = _wait_terminal(service, workspace, retry.job_id)
+    assert again.status == "succeeded", again.error
+    assert len(sender.calls) == 1  # 어떤 재개도 전사를 다시 부르지 않는다
+    assert restart_client.calls == []  # 완료 원본의 Luna도 다시 사지 않는다(§14.2)
+
+
+@needs_ffmpeg
+def test_live_asr_gates_refuse_wrong_approvals_before_any_send(
+    workspace: Path, tmp_path: Path, stereo_offset: Path, monkeypatch
+) -> None:
+    """잘못된 1단계 승인·설정·종료일·환경·네트워크 — 시작 문에서 0송신으로 닫힌다."""
+    _live_online(raw.RawWorkspaceService(), workspace, monkeypatch)
+    service = raw.RawWorkspaceService()
+    _ingest_card(service, workspace, _card(tmp_path, "cardK", {"스테레오.mov": stereo_offset}))
+    service.confirm_global_source_order(workspace)
+    asset = service.list_source_assets(workspace)[0]
+    workflow = service.settings(workspace)
+    probe = preprocess.probe_raw_media(workspace / asset.relative_path)
+    assert probe.audio
+    settings = RawUnderstandingSettings()
+    stream_index = probe.audio[0].stream_index
+    sender = _FakeSender()
+    cfg = types.SimpleNamespace()
+
+    def _start(approval, **kwargs):
+        return service.start_analysis(
+            workspace,
+            mode="live",
+            asr_approvals={asset.asset_id: approval},
+            sender=sender,
+            cfg=cfg,
+            **kwargs,
+        )
+
+    # 잘못된 원본 해시.
+    with pytest.raises(raw.AnalysisError, match="본 원본과 지금의 원본이 다르다"):
+        _start(_asr_approval(asset, workflow, settings, stream_index, source_sha256="f" * 64))
+    # 잘못된 ASR 모델.
+    with pytest.raises(raw.AnalysisError, match="본 ASR 모델과 설정 모델이 다르다"):
+        _start(_asr_approval(asset, workflow, settings, stream_index, timing_model="stt-x"))
+    # 설정 드리프트 — 승인이 본 설정 지문이 아니다.
+    with pytest.raises(raw.AnalysisError, match="설정 지문과 지금의 설정 지문이 다르다"):
+        _start(
+            _asr_approval(
+                asset, workflow, RawUnderstandingSettings(window_seconds=11.0), stream_index
+            )
+        )
+    # 종료일 이후 — 수명주기 문이 어떤 전송보다 먼저 닫힌다(§11.10).
+    with pytest.raises(raw.AnalysisError, match="종료 예정일"):
+        _start(_asr_approval(asset, workflow, settings, stream_index), on=date(2027, 3, 1))
+    assert sender.calls == []  # 위의 어떤 경우도 0송신이다
 
     # 환경 오프라인 — 설정이 online이어도 문은 닫혀 있다(§14.3).
     monkeypatch.setattr("vlogsrt.env.is_offline", lambda: True)
     with pytest.raises(raw.AnalysisError, match="오프라인"):
-        service.start_analysis(
-            workspace,
-            mode="live",
-            approvals={asset.asset_id: _approval()},
-            sender=_FakeSender(),
-            cfg=cfg,
-            client=_FakeClient(body),
-        )
-    monkeypatch.undo()
+        _start(_asr_approval(asset, workflow, settings, stream_index))
+    assert sender.calls == []
+    monkeypatch.setattr("vlogsrt.env.is_offline", lambda: False)
+
+    # 네트워크 모드 offline — 승인·경계가 있어도 시작하지 못한다.
+    config = service.settings(workspace)
+    service.update_settings(workspace, replace(config, network_mode="offline"))
+    with pytest.raises(raw.AnalysisError, match="network_mode"):
+        _start(_asr_approval(asset, workflow, settings, stream_index))
+    assert sender.calls == []
+
+
+@needs_ffmpeg
+def test_live_noaudio_visual_phase_zero_asr(
+    workspace: Path, tmp_path: Path, ntsc_noaudio: Path, monkeypatch
+) -> None:
+    """무성 원본의 실제 호출 — 시각 승인만, ASR는 0회(전사 승인도 필요 없다)."""
+    from vlogsrt.project.raw.understanding_luna import AnalysisBudget, OnlineVisualAnalysisApproval
+
+    _live_online(raw.RawWorkspaceService(), workspace, monkeypatch)
+    service = raw.RawWorkspaceService()
+    _ingest_card(service, workspace, _card(tmp_path, "cardL", {"무성.mov": ntsc_noaudio}))
+    service.confirm_global_source_order(workspace)
+    asset = service.list_source_assets(workspace)[0]
+    workflow = service.settings(workspace)
+
+    sender = _FakeSender()  # 전사 전송 경계가 있어도 무성 원본은 부르지 않는다
+    handle, record = _analyze(
+        service,
+        workspace,
+        mode="live",
+        asr_approvals={},  # 무성 — 승인할 전사가 없다
+        sender=sender,
+        cfg=types.SimpleNamespace(),
+    )
+    assert record.status == "succeeded", record.error
+    assert sender.calls == []  # ASR 0송신 — 작업 자체를 지어내지 않는다(§7.3)
+    summary = service.analysis_overview(workspace)
+    assert summary is not None and summary.revision.status == "awaiting_semantic"
+    artifact = _artifact(service, workspace, summary.revision.revision_id, asset.asset_id)
+    assert artifact["phase_kind"] == "visual"
+    assert artifact["audio"]["status"] == "audio_absent"
+    assert artifact["frames"]["frames"]  # 실제 프레임 증거가 남았다
+
+    estimates = service.analysis_semantic_estimate(workspace, summary.revision.revision_id)
+    assert len(estimates) == 1 and estimates[0].phase == "visual"
+    approval = OnlineVisualAnalysisApproval(
+        approved=True,
+        source_sha256=asset.content_sha256 or "",
+        frame_count=artifact["video"]["frame_count"],
+        window_count=estimates[0].window_count,
+        fingerprint=estimates[0].semantic_fingerprint,
+        luna_model=workflow.models.luna_model,
+        budget=AnalysisBudget(max_luna_requests=1, max_asr_chunks=1),
+    )
+    client = _FakeClient(_luna_body("window_000000"))
+    resume = service.resume_analysis_semantic(
+        workspace, handle.job_id, luna_approvals={asset.asset_id: approval}, client=client
+    )
+    resumed = _wait_terminal(service, workspace, resume.job_id)
+    assert resumed.status == "succeeded", resumed.error
+    assert sender.calls == []  # 2단계에서도 ASR는 0회
+    assert client.calls == [workflow.models.luna_model]  # 시각 Luna 호출만
+    final = service.analysis_overview(workspace)
+    assert final is not None and final.revision.status == "complete"
+    document = _document(service, workspace, final.revision.revision_id, asset.asset_id)
+    assert document["audio"]["status"] == "audio_absent"  # 없는 오디오를 지어내지 않는다
+    assert document["models"]["asr"] is None
+    assert document["execution_mode"] == "online_live"
 
 
 @needs_ffmpeg
@@ -796,8 +966,12 @@ def test_live_without_approvals_or_sender_refuses_before_any_work(
         )
     config = service.settings(workspace)
     service.update_settings(workspace, replace(config, network_mode="online"))
-    with pytest.raises(raw.AnalysisError, match="승인"):
+    # 전송 경계가 없어도 닫힌다.
+    with pytest.raises(raw.AnalysisError, match="전송 경계"):
         service.start_analysis(workspace, mode="live")
+    # 경계만 있고 1단계 승인이 없어도 닫힌다 — 사람이 만든 기록만이 문을 연다.
+    with pytest.raises(raw.AnalysisError, match="승인"):
+        service.start_analysis(workspace, mode="live", sender=object(), cfg=object())
 
 
 # ── 마이그레이션 — v4 작업공간도 덧붙이기만으로 열린다 ─────────────────────────

@@ -19,11 +19,17 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, date, datetime
 from fractions import Fraction
 from pathlib import Path
+from typing import Any
 
 from vlogsrt import preprocess
 from vlogsrt.project.raw import analysis_workflow, segmentation
 from vlogsrt.project.raw import package as package_layout
 from vlogsrt.project.raw import runner as extract_runner
+from vlogsrt.project.raw.analysis_approval import (
+    AsrPhaseApproval,
+    LiveAnalysisTransport,
+    asr_settings_fingerprint,
+)
 from vlogsrt.project.raw.analysis_config import (
     RawUnderstandingSettings,
     validate_understanding_settings,
@@ -50,6 +56,8 @@ from vlogsrt.project.raw.models import (
     ACTIVE_JOB_STATUSES,
     ANALYSIS_JOB_KIND,
     ANALYSIS_MODES,
+    ANALYSIS_PHASES,
+    ANALYSIS_SEMANTIC_JOB_KIND,
     EXTRACT_PROFILES,
     INGEST_JOB_KIND,
     MEDIA_KINDS,
@@ -62,6 +70,7 @@ from vlogsrt.project.raw.models import (
     AnalysisError,
     AnalysisEstimate,
     AnalysisRevision,
+    AnalysisSemanticEstimate,
     AnalysisSourceResult,
     AnalysisSummary,
     BrowseNotAllowedError,
@@ -102,6 +111,7 @@ from vlogsrt.project.raw.source_order import propose_global_order as _propose_gl
 from vlogsrt.project.raw.understanding_luna import (
     AnalysisBudget,
     OnlineAnalysisApproval,
+    OnlineVisualAnalysisApproval,
     estimate_luna_cost,
     online_env_blocked,
 )
@@ -116,12 +126,16 @@ __all__ = [
     "ACTIVE_JOB_STATUSES",
     "ANALYSIS_JOB_KIND",
     "ANALYSIS_MODES",
+    "ANALYSIS_PHASES",
     "ANALYSIS_ROOT",
+    "ANALYSIS_SEMANTIC_JOB_KIND",
     "AnalysisError",
     "AnalysisEstimate",
     "AnalysisRevision",
+    "AnalysisSemanticEstimate",
     "AnalysisSourceResult",
     "AnalysisSummary",
+    "AsrPhaseApproval",
     "BrowseNotAllowedError",
     "ByteRange",
     "ClipArtifact",
@@ -139,6 +153,7 @@ __all__ = [
     "JobContext",
     "JobHandle",
     "JobRecord",
+    "LiveAnalysisTransport",
     "MEDIA_KINDS",
     "MediaInspect",
     "MediaNotAllowedError",
@@ -226,6 +241,25 @@ def _analysis_body(
     providers: analysis_workflow.AnalysisProviders,
 ) -> Callable[[JobContext], None]:
     """분석 작업 본문 묶기 — 리비전·선택·호출 경계를 즉시 묶는다(§14.1)."""
+
+    def body(context: JobContext) -> None:
+        analysis_workflow.run_analysis(
+            context, workspace, revision, order, assets, settings, workflow, providers
+        )
+
+    return body
+
+
+def _semantic_body(
+    workspace: RawWorkspace,
+    revision: AnalysisRevision,
+    order: GlobalOrderRevision,
+    assets: Mapping[str, SourceAsset],
+    settings: RawUnderstandingSettings,
+    workflow: RawWorkflowConfig,
+    providers: analysis_workflow.AnalysisProviders,
+) -> Callable[[JobContext], None]:
+    """2단계(의미) 작업 본문 묶기 — 같은 본문, 단계는 공급자가 이미 말한다."""
 
     def body(context: JobContext) -> None:
         analysis_workflow.run_analysis(
@@ -995,18 +1029,21 @@ class RawWorkspaceService:
         settings: RawUnderstandingSettings | None = None,
         mode: str = "replay",
         fixtures_dir: Path | None = None,
-        approvals: Mapping[str, object] | None = None,
+        asr_approvals: Mapping[str, object] | None = None,
         sender: object | None = None,
         cfg: object | None = None,
         client: object | None = None,
         on: date | None = None,
     ) -> JobHandle:
-        """의미 분석 작업을 제출한다 — 기본은 **오프라인 재생**, 실제 호출은 승인만.
+        """의미 분석 작업을 제출한다 — 기본은 **오프라인 재생**, 실제 호출은 두 단계 승인만.
 
-        `mode="live"`는 사람이 만든 원본별 `OnlineAnalysisApproval`과 전송 경계
-        (sender·cfg·client)를 전부 요구하고, 환경(`VLOGSRT_OFFLINE`)과 작업공간
-        `network_mode`가 함께 열려 있어야만 시작한다(§14.3). 전송 순간의 재검사는
-        작업 본문의 게이트가 맡는다 — 여기는 빠른 실패다.
+        재생(`mode="replay"`)은 단일 패스로 전부 재생한다. 실제 호출
+        (`mode="live"`)은 **1단계(내부 ASR)**만 시작한다: 사람이 만든 원본별
+        `AsrPhaseApproval`(출처·오디오 스트림·청크 예산·설정 지문·모델·승인
+        날짜)와 전송 경계(sender·cfg)가 전부 있어야 하고, 환경(`VLOGSRT_OFFLINE`)과
+        작업공간 `network_mode`가 함께 열려 있어야 한다(§14.3). 1단계가 끝나면
+        리비전은 `awaiting_semantic`에서 멈춘다 — Luna는
+        `resume_analysis_semantic`의 두 번째 승인 전에 가지 않는다(A4-F1).
         """
         workspace = self._workspace(root)
         if mode not in ANALYSIS_MODES:
@@ -1018,7 +1055,19 @@ class RawWorkspaceService:
         workflow = self.settings(root)
         assets = self._analysis_selection(root, order, asset_ids)
         providers = self._analysis_providers(
-            root, mode, fixtures_dir, approvals, sender, cfg, client, workflow, on, assets
+            root,
+            mode,
+            "full" if mode == "replay" else "asr",
+            fixtures_dir,
+            asr_approvals,
+            None,
+            sender,
+            cfg,
+            client,
+            workflow,
+            understanding,
+            on,
+            assets,
         )
         fingerprint = self._analysis_fingerprint(
             order.revision_id, assets, understanding, workflow, mode
@@ -1071,7 +1120,8 @@ class RawWorkspaceService:
         job_id: str,
         *,
         fixtures_dir: Path | None = None,
-        approvals: Mapping[str, object] | None = None,
+        asr_approvals: Mapping[str, object] | None = None,
+        luna_approvals: Mapping[str, object] | None = None,
         sender: object | None = None,
         cfg: object | None = None,
         client: object | None = None,
@@ -1079,13 +1129,23 @@ class RawWorkspaceService:
     ) -> JobHandle:
         """실패·중단된 분석의 명시적 재시도 — 같은 작업 ID·같은 지문으로 다시 붙는다.
 
-        선택·설정·모드는 리비전 기록에서 다시 만들고, 지문은 지금의 설정으로 다시
-        계산해 기록과 맞춘다 — 설정이 바뀌었으면 재결합이 거부된다(§14.2). 완료
-        원본은 캐시로 이어 붙으므로 다시 부르지 않고, 실패 원본만 다시 분석한다.
+        1단계 작업은 1단계로(전사 기록이 있는 원본은 ASR 없이 이어 붙는다),
+        2단계 작업은 2단계로(전사를 다시 부르지 않는다) 재시도한다. 선택·설정·
+        모드는 리비전 기록에서 다시 만들고, 지문은 지금의 설정으로 다시 계산해
+        기록과 맞춘다 — 설정이 바뀌었으면 재결합이 거부된다(§14.2).
         """
+        record = self.get_job(root, job_id)
+        if record.kind == ANALYSIS_SEMANTIC_JOB_KIND:
+            if luna_approvals is None or client is None:
+                raise AnalysisError(
+                    "2단계 재시도에는 원본별 의미 승인(luna_approvals)과 클라이언트가"
+                    " 필요하다 — 사람이 공급한다"
+                )
+            return self.resume_analysis_semantic(
+                root, job_id, luna_approvals=luna_approvals, client=client, on=on
+            )
         workspace = self._workspace(root)
         store = AnalysisStore(workspace)
-        record = self.get_job(root, job_id)
         if record.kind != ANALYSIS_JOB_KIND:
             raise AnalysisError(f"의미 분석 작업이 아니다: {job_id} ({record.kind})")
         revision = next(
@@ -1109,8 +1169,21 @@ class RawWorkspaceService:
         if not selected_ids:
             raise AnalysisError("재시도할 선택 원본이 기록에 없다 — 새 분석을 시작하세요")
         assets = self._analysis_selection(root, order, selected_ids)
+        phase = "full" if revision.mode == "replay" else "asr"
         providers = self._analysis_providers(
-            root, revision.mode, fixtures_dir, approvals, sender, cfg, client, workflow, on, assets
+            root,
+            revision.mode,
+            phase,
+            fixtures_dir,
+            asr_approvals,
+            None,
+            sender,
+            cfg,
+            client,
+            workflow,
+            understanding,
+            on,
+            assets,
         )
         fingerprint = self._analysis_fingerprint(
             order.revision_id, assets, understanding, workflow, revision.mode
@@ -1121,6 +1194,206 @@ class RawWorkspaceService:
             _analysis_body(workspace, revision, order, assets, understanding, workflow, providers),
             fingerprint,
         )
+
+    def resume_analysis_semantic(
+        self,
+        root: Path,
+        job_id: str,
+        *,
+        luna_approvals: Mapping[str, object],
+        client: object,
+        on: date | None = None,
+    ) -> JobHandle:
+        """2단계(의미 Luna) 재개 — 두 번째 사람 승인이 1단계 실측 지문을 묶는다.
+
+        `job_id`는 1단계 작업(같은 리비전을 찾는 열쇠) 또는 재시도할 2단계 작업.
+        전사는 1단계 불변 기록에서 다시 검증해 재사용한다 — ASR는 0송신이다.
+        승인이 없거나·날았거나(지문·원본·모델 어긋남) 환경이 닫혀 있으면 시작
+        전에 0송신으로 거부된다(A4-F1, §14.3).
+        """
+        workspace = self._workspace(root)
+        store = AnalysisStore(workspace)
+        record = self.get_job(root, job_id)
+        if record.kind not in (ANALYSIS_JOB_KIND, ANALYSIS_SEMANTIC_JOB_KIND):
+            raise AnalysisError(f"의미 분석 작업이 아니다: {job_id} ({record.kind})")
+        revisions = store.list_revisions()
+        if record.kind == ANALYSIS_SEMANTIC_JOB_KIND:
+            revision = next(
+                (
+                    item
+                    for item in revisions
+                    if analysis_workflow.semantic_job_fingerprint(item.revision_id)
+                    == record.input_fingerprint
+                ),
+                None,
+            )
+        else:
+            revision = next(
+                (item for item in revisions if item.fingerprint == record.input_fingerprint),
+                None,
+            )
+        if revision is None:
+            raise AnalysisError(f"작업 {job_id}의 분석 리비전을 찾지 못했다 — 새 분석을 시작하세요")
+        if revision.mode != "live":
+            raise AnalysisError(
+                f"재생 리비전({revision.revision_id})에는 2단계가 없다 — 재생은 단일 패스다"
+            )
+        if revision.status not in ("awaiting_semantic", "analyzing", "failed", "interrupted"):
+            raise AnalysisError(
+                f"2단계를 시작할 상태가 아니다({revision.status}) — 1단계가"
+                " `awaiting_semantic`에 도달해야 한다"
+            )
+        order = self._order_revision(root, revision.order_revision_id)
+        understanding = RawUnderstandingSettings(**json.loads(revision.settings_json))
+        validate_understanding_settings(understanding)
+        workflow = self.settings(root)
+        self._require_revision_models(revision, workflow)
+        rows = store.list_source_results(revision.revision_id)
+        selected_ids = [row.asset_id for row in rows if row.status != "unanalyzed"]
+        if not selected_ids:
+            raise AnalysisError("2단계로 나갈 선택 원본이 기록에 없다 — 새 분석을 시작하세요")
+        assets = self._analysis_selection(root, order, selected_ids)
+        providers = self._analysis_providers(
+            root,
+            "live",
+            "semantic",
+            None,
+            None,
+            luna_approvals,
+            None,
+            None,
+            client,
+            workflow,
+            understanding,
+            on,
+            assets,
+            semantic_revision_id=revision.revision_id,
+        )
+        fingerprint = analysis_workflow.semantic_job_fingerprint(revision.revision_id)
+        active = next(
+            (
+                job
+                for job in self.list_jobs(root)
+                if job.kind == ANALYSIS_SEMANTIC_JOB_KIND
+                and job.status in ACTIVE_JOB_STATUSES
+                and job.input_fingerprint == fingerprint
+            ),
+            None,
+        )
+        if active is not None:
+            if active.job_id == job_id and record.kind == ANALYSIS_SEMANTIC_JOB_KIND:
+                return self.resume_job(
+                    root,
+                    job_id,
+                    _semantic_body(
+                        workspace, revision, order, assets, understanding, workflow, providers
+                    ),
+                    fingerprint,
+                )
+            return JobHandle(job_id=active.job_id, reattached=True)
+        if record.kind == ANALYSIS_SEMANTIC_JOB_KIND:
+            return self.resume_job(
+                root,
+                job_id,
+                _semantic_body(
+                    workspace, revision, order, assets, understanding, workflow, providers
+                ),
+                fingerprint,
+            )
+        return self.submit_job(
+            root,
+            ANALYSIS_SEMANTIC_JOB_KIND,
+            fingerprint,
+            _semantic_body(workspace, revision, order, assets, understanding, workflow, providers),
+            total=len(order.entries),
+        )
+
+    def analysis_semantic_estimate(
+        self, root: Path, revision_id: str | None = None
+    ) -> tuple[AnalysisSemanticEstimate, ...]:
+        """2단계(의미 Luna) 견적 — 1단계 기록의 **실측** 지문·창·이미지를 그대로 말한다.
+
+        로컬 파일 읽기뿐, 호출은 전혀 없다. 사람은 이 견적의 `semantic_fingerprint`를
+        본 뒤 2단계 승인을 만든다 — 승인이 묶는 값과 실행이 잰 값이 같은지의
+        증명이 여기서 시작한다(A4-F1).
+        """
+        workspace = self._workspace(root)
+        store = AnalysisStore(workspace)
+        revisions = store.list_revisions()
+        revision = None
+        if revision_id is not None:
+            revision = next((item for item in revisions if item.revision_id == revision_id), None)
+        elif revisions:
+            revision = revisions[-1]
+        if revision is None:
+            return ()
+        models = json.loads(revision.models_json)
+        luna_model = str(models.get("luna") or "")
+        estimates: list[AnalysisSemanticEstimate] = []
+        for row in store.list_source_results(revision.revision_id):
+            if row.status != "transcribed" or not row.document_path:
+                continue
+            try:
+                binding = analysis_workflow.read_asr_phase_binding(
+                    workspace.root / row.document_path
+                )
+            except AnalysisError as error:
+                estimates.append(
+                    AnalysisSemanticEstimate(
+                        asset_id=row.asset_id,
+                        source_order=row.source_order,
+                        source_name=row.source_name,
+                        phase="semantic",
+                        semantic_fingerprint="-",
+                        window_count=0,
+                        image_count=0,
+                        luna_model=luna_model,
+                        luna_request_count=0,
+                        price_status="unknown",
+                        user_ceiling_total=None,
+                        note=f"1단계 기록을 읽지 못했다 — 1단계부터 다시 받아라: {error}",
+                    )
+                )
+                continue
+            window_count = int(binding["window_count"])
+            estimate = estimate_luna_cost(
+                window_count,
+                AnalysisBudget(max_luna_requests=max(1, window_count), max_asr_chunks=1),
+            )
+            estimates.append(
+                AnalysisSemanticEstimate(
+                    asset_id=row.asset_id,
+                    source_order=row.source_order,
+                    source_name=row.source_name,
+                    phase=str(binding["phase_kind"]),
+                    semantic_fingerprint=str(binding["semantic_fingerprint"]),
+                    window_count=window_count,
+                    image_count=int(binding["image_count"]),
+                    luna_model=luna_model,
+                    luna_request_count=estimate.request_count,
+                    price_status=estimate.price_status,
+                    user_ceiling_total=(
+                        str(estimate.user_ceiling_total)
+                        if estimate.user_ceiling_total is not None
+                        else None
+                    ),
+                    note=f"1단계 실측 지문에 묶였다 — Luna: {estimate.note}",
+                )
+            )
+        return tuple(estimates)
+
+    def _require_revision_models(
+        self, revision: AnalysisRevision, workflow: RawWorkflowConfig
+    ) -> None:
+        """2단계 재개의 모델 드리프트 검사 — 리비전이 본 모델이 지금도 설정이다."""
+        recorded = json.loads(revision.models_json)
+        if (
+            str(recorded.get("timing")) != workflow.models.timing_model
+            or str(recorded.get("luna")) != workflow.models.luna_model
+        ):
+            raise AnalysisError(
+                "작업공간 모델이 리비전이 본 모델과 다르다 — 새 1단계 승인을 받아라(§14.2)"
+            )
 
     def analysis_overview(
         self, root: Path, revision_id: str | None = None
@@ -1230,17 +1503,33 @@ class RawWorkspaceService:
         self,
         root: Path,
         mode: str,
+        phase: str,
         fixtures_dir: Path | None,
-        approvals: Mapping[str, object] | None,
+        asr_approvals: Mapping[str, object] | None,
+        luna_approvals: Mapping[str, object] | None,
         sender: object,
         cfg: object,
         client: object,
         workflow: RawWorkflowConfig,
+        understanding: RawUnderstandingSettings,
         on: date | None,
         assets: Mapping[str, SourceAsset],
+        semantic_revision_id: str | None = None,
     ) -> analysis_workflow.AnalysisProviders:
-        """작업의 호출 경계 — 재생 픽스처 또는 사람이 공급한 실제 호출 재료."""
+        """작업의 호출 경계 — 재생 픽스처 또는 단계별 사람 승인 실제 호출 재료.
+
+        실제 호출의 빠른 실패 문이다: 환경·네트워크 모드·승인의 형식과 묶은 값
+        (출처·모델·설정 지문·2단계 실측 지문)을 시작 전에 본다. 전송 순간의
+        재검사는 작업 본문의 게이트가 맡는다(§14.3). 무성 원본은 1단계 승인이
+        필요 없다 — ASR 작업 자체가 없으므로 승인할 전사가 없다(§7.3).
+        """
+        if phase not in ANALYSIS_PHASES:
+            raise AnalysisError(f"알 수 없는 분석 단계: {phase!r}")
         if mode == "replay":
+            if asr_approvals is not None or luna_approvals is not None:
+                raise AnalysisError(
+                    "오프라인 재생에는 실제 호출 승인이 필요 없다 — 승인 없이 재생한다"
+                )
             directory = fixtures_dir
             if directory is None:
                 directory = (
@@ -1258,42 +1547,185 @@ class RawWorkspaceService:
             raise AnalysisError(
                 "작업공간 network_mode가 online이 아니다 — 실제 호출 분석을 시작할 수 없다"
             )
-        if approvals is None or sender is None or cfg is None or client is None:
-            raise AnalysisError(
-                "실제 호출 분석에는 원본별 승인·전송 경계(sender·cfg)·클라이언트가"
-                " 전부 필요하다 — 사람이 공급한다(브라우저는 만들 수 없다)"
+        if phase == "asr":
+            return self._live_asr_providers(
+                root, asr_approvals, sender, cfg, workflow, understanding, on, assets
             )
-        missing = [asset_id for asset_id in assets if asset_id not in approvals]
-        if missing:
-            raise AnalysisError(f"실제 호출 승인이 없는 원본이다: {', '.join(sorted(missing)[:3])}")
-        checked: dict[str, OnlineAnalysisApproval] = {}
-        for asset_id, approval in approvals.items():
-            if not isinstance(approval, OnlineAnalysisApproval) or not approval.approved:
-                raise AnalysisError("승인 기록이 OnlineAnalysisApproval이 아니거나 미승인이다")
+        if phase == "semantic":
+            return self._live_semantic_providers(
+                root, luna_approvals, client, workflow, semantic_revision_id or "", assets
+            )
+        raise AnalysisError(
+            "승인 없는 실제 호출 전체 실행은 없다 — 1단계(전사)와 2단계(의미) 승인을"
+            " 각각 받아라(A4-F1)"
+        )
+
+    def _live_asr_providers(
+        self,
+        root: Path,
+        asr_approvals: Mapping[str, object] | None,
+        sender: object,
+        cfg: object,
+        workflow: RawWorkflowConfig,
+        understanding: RawUnderstandingSettings,
+        on: date | None,
+        assets: Mapping[str, SourceAsset],
+    ) -> analysis_workflow.AnalysisProviders:
+        """1단계(전사) 공급자 — 원본별 `AsrPhaseApproval`의 빠른 실패 문."""
+        if sender is None or cfg is None:
+            raise AnalysisError(
+                "1단계 실제 호출에는 전송 경계(sender·cfg)가 필요하다 — 사람이 공급한다"
+            )
+        if asr_approvals is None:
+            raise AnalysisError(
+                "1단계 실제 호출에는 원본별 전사 승인(asr_approvals)이 필요하다 —"
+                " 사람이 만든다(브라우저는 만들 수 없다)"
+            )
+        workspace = self._workspace(root)
+        checked: dict[str, AsrPhaseApproval] = {}
+        for asset_id, approval in asr_approvals.items():
+            if not isinstance(approval, AsrPhaseApproval) or not approval.approved:
+                raise AnalysisError("1단계 승인 기록이 AsrPhaseApproval이 아니거나 미승인이다")
             checked[asset_id] = approval
+        settings_fp = asr_settings_fingerprint(understanding, workflow)
+        from vlogsrt.project.raw.capabilities import (
+            ROLE_TIMING,
+            preflight_online_transcription,
+        )
+
         for asset_id, asset in assets.items():
-            approval = checked[asset_id]
+            probe = preprocess.probe_raw_media(workspace.root / asset.relative_path)
+            if not probe.audio:
+                continue  # 무성 원본 — 승인할 전사가 없다(ASR 작업을 만들지 않는다)
+            approval = checked.get(asset_id)
+            if approval is None:
+                raise AnalysisError(
+                    f"1단계(전사) 승인이 없는 원본이다: {asset.source_name} — 새 추정과"
+                    " 새 승인을 받아라(§14.3)"
+                )
             if approval.source_sha256 != (asset.content_sha256 or ""):
                 raise AnalysisError(
                     f"승인이 본 원본과 지금의 원본이 다르다: {asset.source_name} — 새 추정과"
                     " 새 승인을 받아라(§14.3)"
                 )
-            if approval.asr_model != workflow.models.timing_model or (
-                approval.luna_model != workflow.models.luna_model
-            ):
+            if approval.timing_model != workflow.models.timing_model:
                 raise AnalysisError(
-                    f"승인이 본 모델과 설정 모델이 다르다: {asset.source_name}"
-                    f" (ASR {approval.asr_model!r}/{workflow.models.timing_model!r},"
-                    f" Luna {approval.luna_model!r}/{workflow.models.luna_model!r})"
+                    f"승인이 본 ASR 모델과 설정 모델이 다르다: {asset.source_name}"
+                    f" ({approval.timing_model!r}/{workflow.models.timing_model!r})"
+                )
+            if approval.settings_fingerprint != settings_fp:
+                raise AnalysisError(
+                    f"승인이 본 설정 지문과 지금의 설정 지문이 다르다: {asset.source_name}"
+                    " — 새 추정과 새 승인을 받아라(§14.3)"
+                )
+            try:
+                preflight_online_transcription(workflow, on or date.today(), roles=(ROLE_TIMING,))
+            except Exception as error:  # noqa: BLE001 - 시작 문의 수명주기 실패는 AnalysisError로
+                raise AnalysisError(
+                    f"1단계 실제 호출의 수명주기 문이 닫혔다: {asset.source_name} — {error}"
+                ) from error
+        return analysis_workflow.AnalysisProviders(
+            origin="live",
+            phase="asr",
+            live_sender=sender,
+            live_cfg=cfg,
+            asr_approvals=checked,
+            on=on,
+        )
+
+    def _live_semantic_providers(
+        self,
+        root: Path,
+        luna_approvals: Mapping[str, object] | None,
+        client: object,
+        workflow: RawWorkflowConfig,
+        semantic_revision_id: str,
+        assets: Mapping[str, SourceAsset],
+    ) -> analysis_workflow.AnalysisProviders:
+        """2단계(의미) 공급자 — 승인이 1단계 기록의 실측 지문과 같은지 본다."""
+        if client is None:
+            raise AnalysisError(
+                "2단계 실제 호출에는 Responses 클라이언트가 필요하다 — 사람이 공급한다"
+            )
+        if luna_approvals is None:
+            raise AnalysisError(
+                "2단계 실제 호출에는 원본별 의미 승인(luna_approvals)이 필요하다 — 사람이"
+                " 만든다(브라우저는 만들 수 없다)"
+            )
+        workspace = self._workspace(root)
+        store = AnalysisStore(workspace)
+        for asset_id, asset in assets.items():
+            approval = luna_approvals.get(asset_id)
+            if approval is None:
+                raise AnalysisError(
+                    f"2단계(의미) 승인이 없는 원본이다: {asset.source_name} — 1단계 견적을"
+                    " 보고 새 승인을 받아라(§14.3)"
+                )
+            if not isinstance(approval, (OnlineAnalysisApproval, OnlineVisualAnalysisApproval)):
+                raise AnalysisError(
+                    f"2단계 승인 기록의 형식이 알 수 없다: {asset.source_name}"
+                    " (오디오는 OnlineAnalysisApproval, 무성은 OnlineVisualAnalysisApproval)"
+                )
+            if not approval.approved:
+                raise AnalysisError(f"미승인 2단계 승인이다: {asset.source_name}")
+            if approval.source_sha256 != (asset.content_sha256 or ""):
+                raise AnalysisError(
+                    f"승인이 본 원본과 지금의 원본이 다르다: {asset.source_name} — 새 추정과"
+                    " 새 승인을 받아라(§14.3)"
+                )
+            if approval.luna_model != workflow.models.luna_model:
+                raise AnalysisError(
+                    f"승인이 본 Luna 모델과 설정 모델이 다르다: {asset.source_name}"
+                    f" ({approval.luna_model!r}/{workflow.models.luna_model!r})"
+                )
+            if isinstance(approval, OnlineAnalysisApproval) and (
+                approval.asr_model != workflow.models.timing_model
+            ):
+                raise AnalysisError(f"승인이 본 ASR 모델과 설정 모델이 다르다: {asset.source_name}")
+            row = (
+                store.source_result(semantic_revision_id, asset_id)
+                if semantic_revision_id
+                else None
+            )
+            binding = self._semantic_binding_for(workspace, asset, row)
+            if approval.fingerprint != binding["semantic_fingerprint"]:
+                raise AnalysisError(
+                    f"승인이 본 지문이 1단계 기록의 실측 지문과 다르다: {asset.source_name}"
+                    " — 1단계 견적을 보고 새 승인을 받아라(§14.3)"
+                )
+            if approval.window_count != int(binding["window_count"]):
+                raise AnalysisError(
+                    f"승인이 본 창 수({approval.window_count})가 1단계 실측 창 수"
+                    f"({binding['window_count']})와 다르다: {asset.source_name}"
                 )
         return analysis_workflow.AnalysisProviders(
             origin="live",
-            live_sender=sender,
-            live_cfg=cfg,
+            phase="semantic",
             live_client=client,
-            approvals=checked,
-            on=on,
+            luna_approvals=dict(luna_approvals),
         )
+
+    def _semantic_binding_for(
+        self, workspace: RawWorkspace, asset: SourceAsset, row: AnalysisSourceResult | None
+    ) -> dict[str, Any]:
+        """원본 하나의 1단계 실측 바인딩 — 기록이 없으면 2단계를 시작하지 않는다.
+
+        2단계가 끝난 원본의 행 문서는 최종 문서로 바뀌므로, 1단계 기록은 같은
+        폴더의 `asr_phase.json`에서 찾는다(전사 단계 행은 문서 자체가 그것이다).
+        """
+        if row is None or row.document_path is None:
+            raise AnalysisError(
+                f"1단계 기록이 없다: {asset.source_name} — 먼저 1단계(전사) 실제 호출을 마쳐야 한다"
+            )
+        document = workspace.root / row.document_path
+        artifact = document.parent / analysis_workflow.ASR_PHASE_DOCUMENT_NAME
+        if not artifact.is_file() and document.name == analysis_workflow.ASR_PHASE_DOCUMENT_NAME:
+            artifact = document
+        if not artifact.is_file():
+            raise AnalysisError(
+                f"1단계 기록이 없다: {asset.source_name} — 먼저 1단계(전사) 실제 호출을 마쳐야 한다"
+            )
+        return analysis_workflow.read_asr_phase_binding(artifact)
 
     def _analysis_fingerprint(
         self,
