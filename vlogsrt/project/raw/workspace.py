@@ -63,15 +63,17 @@ from vlogsrt.project.raw.package import next_package_dir
 
 PROJECT_TOML_NAME = "project.toml"
 DB_NAME = "project.sqlite3"
-DB_SCHEMA_VERSION = "raw-workspace-db/4"
+DB_SCHEMA_VERSION = "raw-workspace-db/5"
 DB_SCHEMA_VERSION_V1 = "raw-workspace-db/1"
 DB_SCHEMA_VERSION_V2 = "raw-workspace-db/2"
 DB_SCHEMA_VERSION_V3 = "raw-workspace-db/3"
+DB_SCHEMA_VERSION_V4 = "raw-workspace-db/4"
 """A1이 v1을, A2가 `source_assets`·`source_order_revisions`를 더한 v2를, A2F1이
-`global_order_revisions`를 더한 v3을, A3이 분할 계획·조각·package 표를 더한 v4를
-만들었다. 덧붙이기만 한 옛 버전 열기는 한 트랜잭션으로 올리고 meta에 기록한다 —
-이미 있는 설정·미디어·작업·작업공간 신원은 그대로다. 이 프로그램이 모르는
-버전은 여전히 조용히 마이그레이션하지 않고 실패한다(코디네이터 ACK)."""
+`global_order_revisions`를 더한 v3을, A3이 분할 계획·조각·package 표를 더한 v4를,
+A4가 의미 분석 리비전·원본별 결과 표를 더한 v5를 만들었다. 덧붙이기만 한 옛
+버전 열기는 한 트랜잭션으로 올리고 meta에 기록한다 — 이미 있는 설정·미디어·
+작업·작업공간 신원은 그대로다. 이 프로그램이 모르는 버전은 여전히 조용히
+마이그레이션하지 않고 실패한다(코디네이터 ACK)."""
 WORKSPACE_ID_KEY = "workspace_id"
 """meta 표의 작업공간 신원 키 — 생성 때 한 번 정해지고 절대 바뀌지 않는다."""
 
@@ -400,8 +402,15 @@ def _insert_order_revision(
 
 
 def _apply_ingest_schema(connection: sqlite3.Connection) -> None:
-    """A2·A3 표를 (있으면 그대로 두고) 만든다 — 생성·마이그레이션이 같은 문장을 쓴다."""
-    for statement in _INGEST_SCHEMA_STATEMENTS + _A3_SCHEMA_STATEMENTS:
+    """A2·A3·A4 표를 (있으면 그대로 두고) 만든다 — 생성·마이그레이션이 같은 문장을 쓴다.
+
+    A4 문장은 `analysis_store`에서 가져온다(표와 그 문장이 한 자리에 산다). 그
+    모듈이 이 모듈을 다시 import하므로 위쪽 import가 아니라 호출 시점 import로
+    순환을 끊는다.
+    """
+    from vlogsrt.project.raw.analysis_store import ANALYSIS_SCHEMA_STATEMENTS
+
+    for statement in _INGEST_SCHEMA_STATEMENTS + _A3_SCHEMA_STATEMENTS + ANALYSIS_SCHEMA_STATEMENTS:
         connection.execute(statement)
 
 
@@ -509,7 +518,12 @@ class RawWorkspace:
         identity = cls._read_identity(root)
         workspace = cls(root, identity["name"], identity["created_at"])
         version = workspace.db_schema_version()
-        if version in (DB_SCHEMA_VERSION_V1, DB_SCHEMA_VERSION_V2, DB_SCHEMA_VERSION_V3):
+        if version in (
+            DB_SCHEMA_VERSION_V1,
+            DB_SCHEMA_VERSION_V2,
+            DB_SCHEMA_VERSION_V3,
+            DB_SCHEMA_VERSION_V4,
+        ):
             workspace._upgrade_ingest_tables()
         elif version != DB_SCHEMA_VERSION:
             raise WorkspaceVersionError(
@@ -518,7 +532,7 @@ class RawWorkspace:
         return workspace
 
     def _upgrade_ingest_tables(self) -> None:
-        """v1/v2 → 현재 열기 — 덧붙이기만 한 한 트랜잭션, 이미 있는 행은 그대로 둔다.
+        """v1~v4 → 현재 열기 — 덧붙이기만 한 한 트랜잭션, 이미 있는 행은 그대로 둔다.
 
         이미 받아들인 옛 작업공간을 버리지 않기 위한 유일한 마이그레이션이다.
         없는 표를 만들고 meta의 버전을 올리는 것 외에 아무 행도 고치지 않는다 —

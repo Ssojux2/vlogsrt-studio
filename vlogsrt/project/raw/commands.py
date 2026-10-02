@@ -218,6 +218,7 @@ def media_command(args: argparse.Namespace) -> int:
         "plan": cmd_plan,
         "extract": cmd_extract,
         "clips": cmd_clips,
+        "analyze": cmd_analyze,
     }
     return handlers[args.media_command](args)
 
@@ -304,6 +305,41 @@ def add_media_parser(sub: argparse._SubParsersAction) -> None:
     clips.add_argument("--workspace", type=Path, required=True, help="작업공간 경로")
     clips.add_argument(
         "--package", default=None, help="볼 package(예: clips/package_000001). 없으면 최근 것"
+    )
+
+    analyze = commands.add_parser(
+        "analyze",
+        help="의미 분석 견적을 인쇄하고 오프라인 재생 분석을 실행한다(유료 호출 없음)",
+    )
+    analyze.add_argument("--workspace", type=Path, required=True, help="작업공간 경로")
+    analyze.add_argument(
+        "--sources",
+        default=None,
+        nargs="+",
+        help="분석할 자산 ID(공백 구분). 없으면 확정 전체 순서 전부",
+    )
+    analyze.add_argument(
+        "--fixtures",
+        type=Path,
+        default=None,
+        help="재생 픽스처 디렉터리(asr-fixtures.json·luna-fixtures.json)."
+        " 기본은 작업공간 analysis/replay/",
+    )
+    analyze.add_argument(
+        "--estimate-only",
+        action="store_true",
+        help="견적만 인쇄하고 분석을 시작하지 않는다",
+    )
+    analyze.add_argument(
+        "--plan",
+        action="store_true",
+        help="분석이 완성되면 그 결과로 분할 계획 리비전을 만든다(로컬만)",
+    )
+    analyze.add_argument(
+        "--wait-seconds",
+        type=float,
+        default=EXTRACT_WAIT_SECONDS,
+        help="분석 작업 완료 대기 상한(초)",
     )
 
 
@@ -428,3 +464,79 @@ def _await_job(
         time.sleep(JOB_POLL_SECONDS)
     log.warn(f"작업 {job_id}가 아직 끝나지 않았다 — media clips로 확인하세요.")
     return 1
+
+
+# ── A4 — 의미 분석(오프라인 재생만, 실제 호출은 사람 승인 기록으로) ────────────
+
+
+def cmd_analyze(args: argparse.Namespace) -> int:
+    """`media analyze` — 견적 인쇄 후 오프라인 재생 분석 실행(유료 호출 없음).
+
+    어떤 플래그도 실제 호출을 켜지 않는다: 이 명령이 만드는 실행의 근원은 언제나
+    `replay`다(§14.3). 없는 픽스처는 실패로 기록될 뿐 지어내지 않는다.
+    """
+    service = _service()
+    workspace_root = Path(args.workspace)
+    try:
+        status = service.open_workspace(workspace_root)
+        estimates = service.analysis_estimate(Path(status.workspace_root), asset_ids=args.sources)
+    except raw_service.RawWorkspaceError as error:
+        log.error(str(error))
+        return 1
+    log.out("** 분석 견적(로컬 — 실제 호출 없음) — Luna 단가는 미확인이라 금액을 만들지 않는다")
+    for item in estimates:
+        audio = (
+            f"있음(청크 {item.asr_chunk_count}, {item.asr_seconds}초)" if item.has_audio else "없음"
+        )
+        log.out(
+            f"  {item.source_order:03d} {item.source_name} · 창 {item.window_count} ·"
+            f" 프레임 상한 {item.frame_sample_count} · 오디오 {audio} ·"
+            f" Luna 요청 {item.luna_request_count}"
+        )
+        if "지원 밖" in item.note:
+            log.warn(f"    {item.note}")
+    if args.estimate_only:
+        return 0
+    try:
+        handle = service.start_analysis(
+            Path(status.workspace_root),
+            asset_ids=args.sources,
+            mode="replay",
+            fixtures_dir=args.fixtures,
+        )
+    except raw_service.RawWorkspaceError as error:
+        log.error(str(error))
+        return 1
+    log.out(
+        f"오프라인 재생 분석 작업 {handle.job_id} 제출"
+        + (" (기존 활성 작업에 다시 붙음)" if handle.reattached else "")
+        + " — 없는 픽스처는 실패로 기록된다(지어내지 않는다)."
+    )
+    outcome = _await_job(service, Path(status.workspace_root), handle.job_id, args.wait_seconds)
+    summary = service.analysis_overview(Path(status.workspace_root))
+    if summary is not None:
+        revision = summary.revision
+        log.out(
+            f"분석 리비전 {revision.revision_id} · 모드 {revision.mode} · 상태"
+            f" {revision.status} · 원본 {revision.source_done}/{revision.source_total}"
+        )
+        for result in summary.results:
+            note = f" — {result.error}" if result.error else ""
+            log.out(
+                f"  {result.source_order:03d} {result.source_name} · {result.status} ·"
+                f" 발화 {result.speech_status or '-'} · 창 {result.window_count} ·"
+                f" 조각 {result.segment_count} · 증거 {result.execution_mode or '-'}{note}"
+            )
+    if outcome != 0:
+        return outcome
+    if args.plan:
+        try:
+            snapshot = service.plan_segmentation_from_analysis(Path(status.workspace_root))
+        except raw_service.RawWorkspaceError as error:
+            log.error(str(error))
+            return 1
+        log.out(
+            f"분석 결과로 분할 계획 {snapshot.revision_id} · 근거 {snapshot.basis} ·"
+            f" 조각 {len(snapshot.entries)}개 — `media extract`로 추출한다"
+        )
+    return 0

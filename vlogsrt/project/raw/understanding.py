@@ -747,6 +747,235 @@ def _require_unique_ids(
 
 
 # ─────────────────────────────────────────────────────────────
+#  공통 파일 시간축 — 증명된 비디오 전체와 선택 오디오를 함께 덮는다(A4)
+# ─────────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True, slots=True)
+class CommonFileTimeline:
+    """원본 하나의 공통 재생 시간축 — 비디오 제시 원점을 0으로 정규화한 시계다.
+
+    `plan_windows`는 선택 오디오의 PCM 범위만 덮는다 — 오디오보다 긴 영상의
+    조용한 머리·꼬리는 창 밖에 남는다. 이 시간축은 **증명된 비디오 격자 전체**와
+    **선택 오디오 전체**를 함께 `[0, extent)`로 덮는다(§7.4 — 원본 전체를
+    시간창으로 나눈다). 오디오 트랙이 없으면(`audio=None`) 비디오만의 시간축이
+    되고, 0짜리 PCM이나 없는 샘플을 지어내지 않는다(§7.3 — 오디오 부재는
+    무발화와 다른 상태다). 좌표는 전부 정확 유리수다(§13.3).
+    """
+
+    source_id: str
+    video: VideoGrid
+    audio: SelectedAudio | None
+    extent: Fraction
+    audio_start: Fraction | None
+    """선택 오디오 0번 샘플의 공통 시계 시각 — 트랙이 없으면 None."""
+
+    def audio_span(self) -> tuple[Fraction, Fraction] | None:
+        """선택 오디오의 공통 시계 범위 `[start, end)` — 트랙이 없으면 None."""
+        if self.audio is None or self.audio_start is None:
+            return None
+        return (self.audio_start, self.audio_start + self.audio.extent)
+
+    def audio_time(self, playback: Fraction) -> Fraction | None:
+        """공통 시계 → 오디오 정규화 시각. 오디오 범위 밖은 None(메우지 않는다)."""
+        span = self.audio_span()
+        if span is None or playback < span[0] or playback >= span[1]:
+            return None
+        return playback - span[0]
+
+    def frame_index(self, playback: Fraction) -> int | None:
+        """공통 시계 → 비디오 격자 프레임 번호. 격자 밖은 None.
+
+        공통 시계는 이미 비디오 제시 원점 기준이므로 원점 뺄셈은 없다 —
+        `playback / 프레임 길이`의 바닥이 곧 프레임 번호다.
+        """
+        index = math.floor(playback / self.video.frame_duration)
+        return index if 0 <= index < self.video.frame_count else None
+
+
+def common_timeline(
+    *, source_id: str, video: VideoGrid, audio: SelectedAudio | None
+) -> CommonFileTimeline:
+    """증명된 비디오 격자와 선택 오디오로 공통 시간축을 만든다.
+
+    길이는 **증명된 비디오 전체**와 **선택 오디오 전체** 중 넓은 쪽이다 — 오디오
+    꼬리가 마지막 프레임보다 길어도 분석 증거는 그 끝까지 덮는다(§7.3). 비디오
+    격자가 증명되지 않으면 공통 시간축 자체가 못 생긴다 — 못 믿는 격자 위에
+    창을 얹지 않는다.
+    """
+    if video_status_blocked(video):
+        raise AnalysisPlanningError(
+            "비디오 격자가 증명된 상태가 아니다 — 공통 시간축을 만들 수 없다"
+        )
+    audio_start: Fraction | None = None
+    extent = video.extent
+    if audio is not None:
+        audio_start = audio.pcm_sample0_file_time - video.presentation_origin
+        extent = max(extent, audio_start + audio.extent)
+    return CommonFileTimeline(
+        source_id=source_id, video=video, audio=audio, extent=extent, audio_start=audio_start
+    )
+
+
+def utterances_in_common_clock(
+    timeline: CommonFileTimeline, utterances: Sequence[UtteranceEvidence]
+) -> tuple[UtteranceEvidence, ...]:
+    """발화 증거를 공통 시계로 옮긴다 — 시각만 이동하고 틱·아이디·글자는 그대로.
+
+    오디오가 없는데 발화가 오면 조립 결함이다 — 없는 트랙의 발화를 조용히 버리는
+    길은 없다(§7.3).
+    """
+    if timeline.audio_start is None:
+        if utterances:
+            raise AnalysisPlanningError(
+                "오디오 트랙이 없는데 발화 증거가 왔다 — 증거 조립 결함이다"
+            )
+        return ()
+    shift = timeline.audio_start
+    return tuple(
+        replace(item, start=item.start + shift, end=item.end + shift) for item in utterances
+    )
+
+
+def plan_common_windows(
+    timeline: CommonFileTimeline,
+    utterances: Sequence[UtteranceEvidence],
+    settings: RawUnderstandingSettings,
+) -> WindowPlan:
+    """공통 시간축 전체를 시간창으로 나눈다 — 증거·경계 후보를 창에 배정한다.
+
+    `plan_windows`와 같은 규칙을 공통 시계에 적용한다: 창 코어는 `[0, extent)`를
+    빈틈없이 덮고, 문맥은 창 앞뒤로 설정만큼(범위 안에서) 넓히며, 겹치는 문맥의
+    같은 프레임은 같은 아이디로 공유된다(§7.4). 경계 후보의 `tick`은 **비디오
+    격자 프레임 번호**다 — 조각은 비디오 격자에서 확정되므로(A4 서비스 조정).
+    비디오 격자 밖(원점·마지막 프레임 뒤 오디오 꼬리)의 후보는 애초에 만들지
+    않는다 — 오디오 꼬리는 마지막 조각에만 속한다(§8.2).
+    """
+    _require_settings(settings)
+    width = Fraction(str(settings.window_seconds))
+    context = Fraction(str(settings.context_seconds))
+    spoken = utterances_in_common_clock(timeline, utterances)
+    windows: list[AnalysisWindow] = []
+    candidates: list[BoundaryCandidate] = []
+    for ordinal in range(_core_count(timeline.extent, width)):
+        core_start = ordinal * width
+        core_end = min(core_start + width, timeline.extent)
+        context_start = max(Fraction(0), core_start - context)
+        context_end = min(timeline.extent, core_end + context)
+        owned = _common_window_candidates(timeline, ordinal, core_start, core_end, spoken)
+        candidates.extend(owned)
+        windows.append(
+            AnalysisWindow(
+                window_id=f"window_{ordinal:06d}",
+                ordinal=ordinal,
+                core_start=core_start,
+                core_end=core_end,
+                context_start=context_start,
+                context_end=context_end,
+                frame_plans=_common_frame_plans(timeline, context_start, context_end, settings),
+                utterance_ids=_window_utterances(spoken, context_start, context_end),
+                boundary_ids=tuple(item.boundary_id for item in owned),
+            )
+        )
+    _require_unique_common_ids(windows, candidates)
+    return WindowPlan(
+        extent=timeline.extent,
+        source_id=timeline.source_id,
+        video=timeline.video,
+        video_status=VIDEO_PROVEN,
+        video_note="common-file-timeline: 비디오 전체와 선택 오디오 전체를 함께 덮는다",
+        windows=tuple(windows),
+        candidates=tuple(candidates),
+    )
+
+
+def _common_frame_plans(
+    timeline: CommonFileTimeline,
+    context_start: Fraction,
+    context_end: Fraction,
+    settings: RawUnderstandingSettings,
+) -> tuple[FramePlan, ...]:
+    """문맥 전체에 고르게 분포한 프레임 표본 — `_frame_plans`의 공통 시계 판."""
+    span = context_end - context_start
+    if span <= 0:
+        return ()
+    plans: list[FramePlan] = []
+    seen: set[int] = set()
+    requested = settings.max_images_per_window
+    for index in range(requested):
+        moment = context_start + Fraction(2 * index + 1, 2 * requested) * span
+        frame = timeline.frame_index(moment)
+        if frame is None or frame in seen:
+            continue
+        seen.add(frame)
+        plans.append(FramePlan(f"frame_{frame:08d}", frame, moment))
+    return tuple(plans)
+
+
+def _common_window_candidates(
+    timeline: CommonFileTimeline,
+    ordinal: int,
+    core_start: Fraction,
+    core_end: Fraction,
+    spoken: Sequence[UtteranceEvidence],
+) -> tuple[BoundaryCandidate, ...]:
+    """창이 소유할 경계 후보 — 발화 종료(코어 안)와 창 끝 길이 경계(공통 시계)."""
+    window_id = f"window_{ordinal:06d}"
+    owned: list[BoundaryCandidate] = []
+    for item in spoken:
+        if core_start <= item.end < core_end and item.end > item.start:
+            candidate = _common_candidate(
+                timeline, window_id, "utterance_end", item.end, f"u{item.end_sample:09d}"
+            )
+            if candidate is not None:
+                owned.append(candidate)
+    tail = _common_candidate(timeline, window_id, "window_length", core_end, f"w{ordinal:06d}")
+    if tail is not None:
+        owned.append(tail)
+    return tuple(owned)
+
+
+def _common_candidate(
+    timeline: CommonFileTimeline,
+    window_id: str,
+    kind: str,
+    position: Fraction,
+    tag: str,
+) -> BoundaryCandidate | None:
+    """공통 시계 위치의 후보 — tick은 비디오 격자 프레임 번호다.
+
+    격자 위가 아니면 **바깥(다음 프레임)으로 올린다** — 발화 종료 경계를 앞
+    조각에 온전히 남기는 쪽이다(§7.6: 대화의 완결성이 목표 길이보다 우선).
+    원점(0)·마지막 프레임 이상은 후보가 못 된다: 첫 경계는 원점이 아니고 끝
+    경계는 전체 끝이라 조각을 자르는 경계가 아니다. 같은 프레임에 후보가
+    여럿일 수 있다 — 아이디는 종류·근거 틱으로 갈라 고유하다(확정은 조정
+    계층이 접는다).
+    """
+    frame = math.ceil(position / timeline.video.frame_duration)
+    if frame <= 0 or frame >= timeline.video.frame_count:
+        return None
+    return BoundaryCandidate(
+        boundary_id=f"boundary_{tag}_{frame:08d}",
+        window_id=window_id,
+        kind=kind,
+        position=position,
+        tick=frame,
+    )
+
+
+def _require_unique_common_ids(
+    windows: Sequence[AnalysisWindow], candidates: Sequence[BoundaryCandidate]
+) -> None:
+    """공통 시계 계획의 아이디 유일성 — 틱은 같은 프레임에 후보가 겹칠 수 있다."""
+    window_ids = [window.window_id for window in windows]
+    if len(set(window_ids)) != len(window_ids):
+        raise AnalysisPlanningError("창 아이디가 중복된다 — 계획이 결정적이지 않다")
+    boundary_ids = [candidate.boundary_id for candidate in candidates]
+    if len(set(boundary_ids)) != len(boundary_ids):
+        raise AnalysisPlanningError("경계 아이디가 중복된다 — 계획이 결정적이지 않다")
+
+
+# ─────────────────────────────────────────────────────────────
 #  프레임 표본 — 주입된 추출 경계로 실제 이미지를 만든다
 # ─────────────────────────────────────────────────────────────
 
