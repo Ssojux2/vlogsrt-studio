@@ -13,6 +13,10 @@
   `audio_selection_required`다. 어느 쪽도 제공자를 부르지 않는다.
 - **승인이 실행보다 앞선다.** 오프라인 합성 실행에서도 저장된 승인이 계획의
   지문과 정확히 같아야 첫 호출이 나간다 — 어긋나면 유료 호출 0회로 거부다.
+- **포장이 문을 숨기지 않는다.** 엔진의 실전송 게이트는 받은 제공자의 겉모습을
+  보므로, 캐시 포장을 입히기 **전에** 원본 제공자를 같은 문에 세운다(루트 재검):
+  알려진 실전송 어댑터는 `network_mode=online`에서만 새 호출을 하고, 닫힌 문
+  아래에서는 저장된 응답의 재생으로만 이어진다 — 재생은 호출이 아니므로.
 - **재개는 같은 신원에서만.** 응답 캐시는 (run, 지문, 요청 ID, 오디오 해시·샘플
   경계)가 전부 같을 때만 재생하고, 나머지는 실제 제공자에게 새로 묻는다(§14.2).
   이미 동결된 실행의 재제출은 제공자를 전혀 안 부른다.
@@ -26,6 +30,7 @@ from __future__ import annotations
 
 import array
 import hashlib
+import inspect
 import secrets
 import sys
 from collections.abc import Callable, Mapping
@@ -34,8 +39,9 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from fractions import Fraction
 from pathlib import Path
+from typing import cast
 
-from vlogsrt import preprocess
+from vlogsrt import env, preprocess
 from vlogsrt.config import Config
 from vlogsrt.models import Chunk
 from vlogsrt.project.raw import capabilities
@@ -57,10 +63,13 @@ from vlogsrt.project.raw.caption_manual import (
 )
 from vlogsrt.project.raw.caption_provider import (
     AudioChunkBinding,
+    RescueTimingProvider,
     TextTranscript,
     TextTranscriptProvider,
     TimedTranscript,
     TimingProvider,
+    TransportTextProvider,
+    TransportTimingProvider,
     parse_text_response,
     parse_timing_response,
 )
@@ -69,6 +78,8 @@ from vlogsrt.project.raw.caption_workspace_types import (
     REGISTRATION_AUDIO_SELECTION_REQUIRED,
     REGISTRATION_NO_AUDIO,
     REGISTRATION_READY,
+    RESPONSE_ORIGIN_INJECTED,
+    RESPONSE_ORIGIN_LIVE,
     RUN_CANCELLED,
     RUN_FAILED,
     RUN_SUCCEEDED,
@@ -79,6 +90,7 @@ from vlogsrt.project.raw.caption_workspace_types import (
     CaptionWorkspaceError,
     ConfirmedExport,
     FinalVideoRegistration,
+    FreshSendBlockedError,
     ManualHeadConflict,
     ModelLifecycle,
     RegistrationNotFoundError,
@@ -90,7 +102,9 @@ from vlogsrt.project.raw.caption_workspace_types import (
 )
 from vlogsrt.project.raw.config import RawWorkflowConfig
 from vlogsrt.project.raw.final_caption import (
+    STATUS_PARTIAL_FAILURE,
     CaptionApproval,
+    CaptionProviderMissing,
     CaptionRunCancelled,
     CaptionRunPlan,
     FinalCaptionResult,
@@ -186,19 +200,31 @@ class CachedTimingProvider:
 
     재생은 캐시가 **들었던 그 청크**(해시·샘플 경계)에만 붙는다. 빗나가면 실제
     제공자에게 새로 묻는다 — 낡은 응답을 새 오디오에 얹는 길이 여기서 닫힌다.
+    `replays_only`일 때는 그 새 묻기 자체가 금지다: 오프라인 문이 닫힌 실행에서
+    캐시를 빗나가면 예외로 끝내고 절대 전송하지 않는다(§14.3). 방금 굳힌 행은
+    실행 안 캐시에도 남으므로, 같은 실행 안에서 같은 요청 ID가 다시 오면
+    다시 묻지 않고 재생한다.
     """
 
     def __init__(
         self,
         inner: TimingProvider,
-        cache: Mapping[str, CachedResponse],
+        cache: dict[str, CachedResponse],
         store: CaptionWorkspaceStore,
         identity: RunIdentity,
+        *,
+        replays_only: bool = False,
     ) -> None:
         self._inner = inner
         self._cache = cache
         self._store = store
         self._identity = identity
+        self._replays_only = replays_only
+        self._origin = (
+            RESPONSE_ORIGIN_LIVE
+            if isinstance(inner, TransportTimingProvider)
+            else RESPONSE_ORIGIN_INJECTED
+        )
         self.fresh_calls = 0
         self.replays = 0
 
@@ -212,6 +238,18 @@ class CachedTimingProvider:
         stem: str = "",
         source: str = "",
     ) -> TimedTranscript:
+        return self._respond(binding, chunk, settings, on, stem, source, None)
+
+    def _respond(
+        self,
+        binding: AudioChunkBinding,
+        chunk: Chunk,
+        settings: RawWorkflowConfig,
+        on: date,
+        stem: str,
+        source: str,
+        temperature: float | None,
+    ) -> TimedTranscript:
         cached = self._cache.get(binding.request_id)
         if _replay_guard(cached, binding, capabilities.ROLE_TIMING):
             assert cached is not None
@@ -224,14 +262,79 @@ class CachedTimingProvider:
                 chunk_duration=chunk.duration,
                 chunk_offset=chunk.offset,
             )
+        if self._replays_only:
+            raise FreshSendBlockedError(
+                f"재생 전용 실행인데 캐시에 없는 요청이다: {binding.request_id!r} —"
+                " 오프라인 문이 닫혀 있어 새 전송은 못 나간다(§14.3)"
+            )
         self.fresh_calls += 1
-        transcript = self._inner.timed_transcript(
+        transcript = self._ask_inner(binding, chunk, settings, on, stem, source, temperature)
+        row = _cached_of(
+            self._identity, binding, capabilities.ROLE_TIMING, transcript.response, self._origin
+        )
+        self._store.record_responses([row])
+        self._cache[binding.request_id] = row
+        return transcript
+
+    def _ask_inner(
+        self,
+        binding: AudioChunkBinding,
+        chunk: Chunk,
+        settings: RawWorkflowConfig,
+        on: date,
+        stem: str,
+        source: str,
+        temperature: float | None,
+    ) -> TimedTranscript:
+        return self._inner.timed_transcript(
             binding=binding, chunk=chunk, settings=settings, on=on, stem=stem, source=source
         )
-        self._store.record_responses(
-            [_cached_of(self._identity, binding, capabilities.ROLE_TIMING, transcript.response)]
+
+
+class TemperedCachedTimingProvider(CachedTimingProvider):
+    """온도 손잡이를 가진 원본의 포장 — 재전사 회복 온도를 그대로 넘긴다(D28).
+
+    엔진은 제공자의 `timed_transcript` 서명에 `temperature`가 있는지 보고 뜨거운
+    재전사를 걸지 결정한다. 포장이 그 서명을 지워버리면 실전송의 회복 능력이
+    조용히 사라지므로, 원본이 손잡이를 가질 때만 이 갈래를 쓴다 — 서명이 곧
+    능력의 증거다.
+    """
+
+    def timed_transcript(
+        self,
+        *,
+        binding: AudioChunkBinding,
+        chunk: Chunk,
+        settings: RawWorkflowConfig,
+        on: date,
+        stem: str = "",
+        source: str = "",
+        temperature: float | None = None,
+    ) -> TimedTranscript:
+        return self._respond(binding, chunk, settings, on, stem, source, temperature)
+
+    def _ask_inner(
+        self,
+        binding: AudioChunkBinding,
+        chunk: Chunk,
+        settings: RawWorkflowConfig,
+        on: date,
+        stem: str,
+        source: str,
+        temperature: float | None,
+    ) -> TimedTranscript:
+        rescue = cast(
+            "RescueTimingProvider", self._inner
+        )  # _wrap_timing의 서명 검사가 이 계약을 보증한다
+        return rescue.timed_transcript(
+            binding=binding,
+            chunk=chunk,
+            settings=settings,
+            on=on,
+            stem=stem,
+            source=source,
+            temperature=temperature,
         )
-        return transcript
 
 
 class CachedTextProvider:
@@ -240,14 +343,22 @@ class CachedTextProvider:
     def __init__(
         self,
         inner: TextTranscriptProvider,
-        cache: Mapping[str, CachedResponse],
+        cache: dict[str, CachedResponse],
         store: CaptionWorkspaceStore,
         identity: RunIdentity,
+        *,
+        replays_only: bool = False,
     ) -> None:
         self._inner = inner
         self._cache = cache
         self._store = store
         self._identity = identity
+        self._replays_only = replays_only
+        self._origin = (
+            RESPONSE_ORIGIN_LIVE
+            if isinstance(inner, TransportTextProvider)
+            else RESPONSE_ORIGIN_INJECTED
+        )
         self.fresh_calls = 0
         self.replays = 0
 
@@ -269,6 +380,11 @@ class CachedTextProvider:
             return parse_text_response(
                 cached.payload, binding=binding, model=settings.models.text_model
             )
+        if self._replays_only:
+            raise FreshSendBlockedError(
+                f"재생 전용 실행인데 캐시에 없는 요청이다: {binding.request_id!r} —"
+                " 오프라인 문이 닫혀 있어 새 전송은 못 나간다(§14.3)"
+            )
         self.fresh_calls += 1
         transcript = self._inner.text_transcript(
             binding=binding,
@@ -279,16 +395,18 @@ class CachedTextProvider:
             stem=stem,
             source=source,
         )
-        self._store.record_responses(
-            [_cached_of(self._identity, binding, capabilities.ROLE_TEXT, transcript.response)]
+        row = _cached_of(
+            self._identity, binding, capabilities.ROLE_TEXT, transcript.response, self._origin
         )
+        self._store.record_responses([row])
+        self._cache[binding.request_id] = row
         return transcript
 
 
 def _cached_of(
-    identity: RunIdentity, binding: AudioChunkBinding, role: str, payload: object
+    identity: RunIdentity, binding: AudioChunkBinding, role: str, payload: object, origin: str
 ) -> CachedResponse:
-    """응답 하나의 캐시 행 — 신원과 원 payload를 함께 굳힌다(§11.3)."""
+    """응답 하나의 캐시 행 — 신원·원 payload·출처를 함께 굳힌다(§11.3)."""
     document = payload if isinstance(payload, Mapping) else {}
     return CachedResponse(
         run_id=identity.run_id,
@@ -302,6 +420,7 @@ def _cached_of(
         sample_rate=binding.sample_rate,
         payload=document,
         created_at=_now(),
+        origin=origin,
     )
 
 
@@ -647,8 +766,12 @@ class CaptionWorkspace:
         require_approval(plan, _engine_approval(approval))
         if review.find_snapshot(self._review, _lookup_identity(identity)) is not None:
             return self._store.update_run(identity, status=RUN_SUCCEEDED, error=None)
+        _require_providers(timing, text)
         _report(progress, "current", 1)
-        pair = self._cached_providers(identity, timing, text)
+        replays_only = _validate_original_providers(plan, timing, text, on or _today())
+        if replays_only:
+            _require_full_cache(self._store, identity, plan)
+        pair = self._cached_providers(identity, timing, text, replays_only)
         outcome = run_final_captions(
             plan,
             on=on or _today(),
@@ -660,7 +783,7 @@ class CaptionWorkspace:
             approval=_engine_approval(approval),
         )
         _report(progress, "current", 2)
-        return self._settle(identity, outcome, plan)
+        return self._settle(identity, outcome, plan, _run_origin(timing, text))
 
     def _stored_approval(self, identity: RunIdentity) -> ApprovalRecord:
         approval = self._store.approval(identity)
@@ -672,22 +795,35 @@ class CaptionWorkspace:
         return approval
 
     def _cached_providers(
-        self, identity: RunIdentity, timing: TimingProvider, text: TextTranscriptProvider
+        self,
+        identity: RunIdentity,
+        timing: TimingProvider,
+        text: TextTranscriptProvider,
+        replays_only: bool,
     ) -> _ProviderPair:
         cache = {
             item.request_id: item
             for item in self._store.responses(identity.run_id, identity.fingerprint)
         }
         return _ProviderPair(
-            timing=CachedTimingProvider(timing, cache, self._store, identity),
-            text=CachedTextProvider(text, cache, self._store, identity),
+            timing=_wrap_timing(timing, cache, self._store, identity, replays_only),
+            text=CachedTextProvider(text, cache, self._store, identity, replays_only=replays_only),
         )
 
     def _settle(
-        self, identity: RunIdentity, outcome: FinalCaptionResult, plan: CaptionRunPlan
+        self,
+        identity: RunIdentity,
+        outcome: FinalCaptionResult,
+        plan: CaptionRunPlan,
+        origin: str,
     ) -> CaptionRunRecord:
-        """실행 결과를 정착시킨다 — 증거·초안·동결은 각자 불변 자리에."""
-        self._store.record_responses(_evidence_rows(identity, outcome))
+        """실행 결과를 정착시킨다 — 증거·초안·동결은 각자 불변 자리에.
+
+        실패한 청크가 하나라도 있으면(`partial_failure`) 초안·증거는 보존하되
+        실행 행은 실패로 남긴다 — 문구 없는 결과를 최신 반영 성공이라 부르는
+        길이 없다(§11.3).
+        """
+        self._store.record_responses(_evidence_rows(identity, outcome, origin))
         if outcome.cancellation_reason:
             return self._store.update_run(
                 identity, status=RUN_CANCELLED, cancellation_reason=outcome.cancellation_reason
@@ -695,10 +831,16 @@ class CaptionWorkspace:
         publish_caption_artifacts(self._draft_dir(identity), outcome, plan)
         snapshot = review.freeze_automatic(self._review, outcome, plan)
         review.save_revision(self._review, review.initial_revision(snapshot))
+        status = RUN_FAILED if outcome.status == STATUS_PARTIAL_FAILURE else RUN_SUCCEEDED
+        error = (
+            "partial_failure — 실패한 청크가 있는 초안이다(증거·초안은 보존했다)"
+            if status == RUN_FAILED
+            else None
+        )
         return self._store.update_run(
             identity,
-            status=RUN_SUCCEEDED,
-            error=None,
+            status=status,
+            error=error,
             draft_rel=self._draft_rel(identity),
             auto_content_sha256=snapshot.identity.auto_content_sha256,
         )
@@ -992,6 +1134,95 @@ def _report(progress: Callable[[str, int], None] | None, kind: str, value: int) 
         progress(kind, value)
 
 
+def _require_providers(timing: object, text: object) -> None:
+    """제공자가 없는 실행은 0 호출로 닫는다 — 승인의 부재가 성공이 되는 금지."""
+    if timing is None or text is None:
+        raise CaptionProviderMissing(
+            "시간·문구 제공자가 모두 주입되어야 한다 — 없는 제공자로는 호출도 계획도 없다"
+        )
+
+
+def _validate_original_providers(
+    plan: CaptionRunPlan,
+    timing: TimingProvider,
+    text: TextTranscriptProvider,
+    on: date,
+) -> bool:
+    """포장 **전에** 원본 제공자를 오프라인 문에 세운다(§14.3, 루트 재검).
+
+    엔진의 실전송 게이트는 받은 제공자의 겉모습만 본다 — 캐시 포장이 실전송
+    어댑터를 숨기면 유효한 승인으로도 닫힌 설정을 여는 길이 생긴다. 그래서
+    작업공간은 원본에 같은 문을 먼저 세운다. 환경·등록표 검사는 받아들여진
+    함수를 그대로 부른다 — 판정을 다시 쓰지 않는다.
+
+    반환값이 참이면 **재생 전용**이다: 새 전송은 못 나가고 저장된 응답의
+    재생으로만 실행이 이어진다.
+    """
+    live = isinstance(timing, TransportTimingProvider) or isinstance(text, TransportTextProvider)
+    if not live:
+        return False
+    if plan.workflow.network_mode != "online":
+        # 설정이 승인보다 앞선다 — 유효한 승인도 오프라인 설정을 못 연다(§14.3).
+        return True
+    if env.is_offline():
+        raise FreshSendBlockedError(
+            "VLOGSRT_OFFLINE이 켜져 있다 — 실전송 제공자의 새 호출은 못 나간다(§14.3)"
+        )
+    capabilities.preflight_online_transcription(
+        plan.workflow, on, roles=(capabilities.ROLE_TEXT, capabilities.ROLE_TIMING)
+    )
+    return False
+
+
+def _require_full_cache(
+    store: CaptionWorkspaceStore, identity: RunIdentity, plan: CaptionRunPlan
+) -> None:
+    """재생 전용 실행의 전제 — 확정적 요청 ID 전부가 캐시에 있어야 한다.
+
+    청크의 시간·문구 요청 ID는 계획에서 정해진다. 하나라도 없으면 새 전송이
+    필요하다는 뜻이므로 오프라인 문이 닫힌 지금은 0 호출로 거부한다. 재전사·
+    심판 ID는 여기서 모른다 — 실행 중 재생이 빗나가면 그 실행은 실패로 남는다
+    (빈 성공이 아니다).
+    """
+    cached = {row.request_id: row for row in store.responses(identity.run_id, identity.fingerprint)}
+    missing = [
+        request_id
+        for index, span in enumerate(plan.spans)
+        for request_id in (
+            f"{identity.run_id}:timing:{index:04d}",
+            f"{identity.run_id}:text:{index:04d}",
+        )
+        if request_id not in cached
+        or cached[request_id].sample_start != span.start
+        or cached[request_id].sample_end != span.end
+    ]
+    if missing:
+        raise FreshSendBlockedError(
+            f"오프라인 문이 닫혀 새 전송을 못 하는데 캐시가 부족하다 — {len(missing)}개"
+            f" 요청({missing[0]}…)이 저장되지 않았다. 저장된 응답으로는 이 실행을"
+            " 이어갈 수 없다(§14.3)"
+        )
+
+
+def _wrap_timing(
+    inner: TimingProvider,
+    cache: dict[str, CachedResponse],
+    store: CaptionWorkspaceStore,
+    identity: RunIdentity,
+    replays_only: bool,
+) -> CachedTimingProvider:
+    """원본의 온도 손잡이 보유를 포장 뒤에도 드러낸다 — 엔진 재전사 판정이 참으로 남는다."""
+    tempered = "temperature" in inspect.signature(inner.timed_transcript).parameters
+    maker = TemperedCachedTimingProvider if tempered else CachedTimingProvider
+    return maker(inner, cache, store, identity, replays_only=replays_only)
+
+
+def _run_origin(timing: TimingProvider, text: TextTranscriptProvider) -> str:
+    """이 실행의 증거 출처 — 실전송이 하나라도 끼어 있으면 실전송 실행이다."""
+    live = isinstance(timing, TransportTimingProvider) or isinstance(text, TransportTextProvider)
+    return RESPONSE_ORIGIN_LIVE if live else RESPONSE_ORIGIN_INJECTED
+
+
 def _engine_approval(record: ApprovalRecord) -> CaptionApproval:
     return CaptionApproval(
         final_video_sha256=record.identity.final_video_revision,
@@ -1015,7 +1246,9 @@ def _lookup_identity(identity: RunIdentity) -> AutoIdentity:
     )
 
 
-def _evidence_rows(identity: RunIdentity, outcome: FinalCaptionResult) -> list[CachedResponse]:
+def _evidence_rows(
+    identity: RunIdentity, outcome: FinalCaptionResult, origin: str
+) -> list[CachedResponse]:
     return [
         CachedResponse(
             run_id=identity.run_id,
@@ -1029,6 +1262,7 @@ def _evidence_rows(identity: RunIdentity, outcome: FinalCaptionResult) -> list[C
             sample_rate=evidence.sample_rate,
             payload=dict(evidence.payload),
             created_at=_now(),
+            origin=origin,
         )
         for evidence in outcome.evidence
     ]

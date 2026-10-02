@@ -33,6 +33,12 @@ RUN_SUCCEEDED = "succeeded"
 RUN_CANCELLED = "cancelled"
 RUN_FAILED = "failed"
 
+RESPONSE_ORIGIN_LIVE = "live_transport"
+"""캐시 응답이 알려진 실전송 어댑터의 실제 호출로 얻었다 — 재생해도 그 출처는 산다."""
+
+RESPONSE_ORIGIN_INJECTED = "injected_provider"
+"""캐시 응답이 주입된 제공자(가짜·오프라인)에게서 왔다 — 실전송이 아니다."""
+
 
 class CaptionWorkspaceError(RuntimeError):
     """작업공간 백엔드의 오류 — 모든 갈래의 부모."""
@@ -59,6 +65,16 @@ class ManualHeadConflict(CaptionWorkspaceError):
 
     편집·확정 호출자는 자기가 본 머리 번호를 명시해야 한다. 어긋나면 갱신 손실의
     모양이므로 조용히 병합하지 않고 다시 불러서 다시 편집하게 한다.
+    """
+
+
+class FreshSendBlockedError(CaptionWorkspaceError):
+    """오프라인 문이 닫혀 있는데 새 전송이 필요하다 — 재생으로만 이어질 수 있다(§14.3).
+
+    설정(`network_mode`)·환경(`VLOGSRT_OFFLINE`)·등록표가 승인보다 앞선다: 알려진
+    실전송 어댑터가 끼어 있으면 유효한 승인으로도 닫힌 문을 못 연다. 저장된 응답을
+    재생하는 길만 남는다 — 재생은 호출이 아니므로. 캐시까지 부족하면 이 예외로
+    0 호출에 끝난다(빈 성공이 아니다).
     """
 
 
@@ -168,7 +184,8 @@ class CachedResponse:
 
     재생 조건은 신원이 전부 같아야 한다: run·지문·요청 ID·오디오 해시·샘플
     경계·주파수. 하나라도 다르면 캐시는 못 쓴다 — 낡은 응답을 새 오디오에
-    붙이는 길이 여기서 닫힌다.
+    붙이는 길이 여기서 닫힌다. `origin`은 그 응답을 처음 얻은 출처(실전송
+    여부)다 — 첫 값이 산므로 재생을 거듭해도 출처 기록은 바뀌지 않는다.
     """
 
     run_id: str
@@ -182,6 +199,7 @@ class CachedResponse:
     sample_rate: int
     payload: Mapping[str, object]
     created_at: str
+    origin: str = RESPONSE_ORIGIN_INJECTED
 
 
 @dataclass(frozen=True, slots=True)

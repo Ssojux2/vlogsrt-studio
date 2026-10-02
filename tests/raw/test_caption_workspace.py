@@ -4,7 +4,9 @@ ffmpeg 합성 미디어(스테레오 지연 오디오·무음·다중 트랙)를
 제공자로 엔진을 돌려, 작업공간 계층이 약속한 문을 잰다: 정직한 no_audio 상태,
 재시작 재적재, 호출 없는 추정, 지문 결속 승인(어긋나면 0 호출), 동결·초안 바이트
 불변, 취소·강제 중단 뒤 캐시 재생 재개(중복 호출 0), 파형 진폭의 실측.
-유료 호출은 없다 — 제공자는 전부 가짜고 네트워크는 나가지 않는다.
+오프라인 문의 지배도 잰다 — 알려진 실전송 어댑터(FAKE 전송 기록기)를 끼우고
+닫힌 설정·환경·등록표 아래에서 새 전송이 0회로 막히는지, 저장된 응답의 재생만으로
+재개가 이어지는지. 유료 호출은 없다 — 네트워크는 나가지 않는다.
 """
 
 from __future__ import annotations
@@ -14,36 +16,59 @@ import shutil
 import subprocess
 import time
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import date
 from fractions import Fraction
+from inspect import signature
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
+from vlogsrt.config import Config
 from vlogsrt.output import parse_srt
 from vlogsrt.project.raw import capabilities
 from vlogsrt.project.raw import caption_review as review
 from vlogsrt.project.raw.caption_artifacts import parse_vtt
 from vlogsrt.project.raw.caption_config import FinalCaptionSettings
 from vlogsrt.project.raw.caption_manual import CaptionViewState, ms
-from vlogsrt.project.raw.caption_provider import parse_text_response, parse_timing_response
-from vlogsrt.project.raw.caption_workspace import CaptionWorkspace, open_caption_workspace
+from vlogsrt.project.raw.caption_provider import (
+    AudioChunkBinding,
+    TransportTextProvider,
+    TransportTimingProvider,
+    parse_text_response,
+    parse_timing_response,
+)
+from vlogsrt.project.raw.caption_workspace import (
+    CachedTextProvider,
+    CachedTimingProvider,
+    CaptionWorkspace,
+    TemperedCachedTimingProvider,
+    open_caption_workspace,
+)
 from vlogsrt.project.raw.caption_workspace_types import (
     REGISTRATION_AUDIO_SELECTION_REQUIRED,
     REGISTRATION_NO_AUDIO,
     REGISTRATION_READY,
+    RESPONSE_ORIGIN_INJECTED,
     RUN_FAILED,
+    RUN_SUCCEEDED,
     ApprovalNotFoundError,
     ApprovalRecord,
     CaptionRunRecord,
     FinalVideoRegistration,
+    FreshSendBlockedError,
     ManualHeadConflict,
     RegistrationNotReadyError,
     RunIdentity,
 )
 from vlogsrt.project.raw.config import RawWorkflowConfig
-from vlogsrt.project.raw.final_caption import CaptionApprovalMismatch, expected_approval
+from vlogsrt.project.raw.final_caption import (
+    CaptionApprovalMismatch,
+    CaptionProviderMissing,
+    expected_approval,
+)
 from vlogsrt.project.raw.final_video import FinalVideoChanged
 from vlogsrt.project.raw.jobs import JobManager
 from vlogsrt.project.raw.workspace import RawWorkspace
@@ -57,6 +82,9 @@ SETTINGS = FinalCaptionSettings(chunk_max_seconds=3.0)
 """4초 오디오를 두 청크(3초+1초)로 나누는 실행 설정 — 재개 검사의 눈금이다."""
 
 BEFORE = date(2026, 10, 2)
+
+ONLINE_WORKFLOW = replace(RawWorkflowConfig(), network_mode="online")
+"""온라인 실행 설정 — 환경·등록표 문을 여는 검사의 재료다."""
 
 
 def _run_ffmpeg(*args: str) -> None:
@@ -200,6 +228,58 @@ def plain_fakes() -> tuple[FakeTiming, FakeText]:
 def unplaced_fakes() -> tuple[FakeTiming, FakeText]:
     timing, _ = plain_fakes()
     return timing, FakeText({0: "망원동 카페에 왔어요 그리고 사진을 찍었어요", 1: "두번째 장면"})
+
+
+class CountingSender:
+    """FAKE 전송 기록기 — 알려진 실전송 어댑터 뒤에 붙여 나간 요청을 센다.
+
+    실제 네트워크는 없다. 무엇이 전송 경계까지 나갔는지만 기록한다 — 루트 오프라인
+    탐침과 같은 눈이다.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[Any] = []
+
+    def send_request(self, request: Any, cfg: Any, **kwargs: Any) -> dict[str, Any]:
+        self.calls.append(request)
+        if request.response_format == "verbose_json":
+            return {"segments": [{"text": "합성 장면", "start": 0.1, "end": 0.5}]}
+        return {"text": "합성 장면", "languages": [{"code": "ko"}]}
+
+
+def live_pair() -> tuple[CountingSender, TransportTimingProvider, TransportTextProvider]:
+    """같은 FAKE 기록기를 공유하는 실전송 어댑터 둘 — 나간 요청을 한곳에서 센다."""
+    sender = CountingSender()
+    engine = Config()
+    return sender, TransportTimingProvider(sender, engine), TransportTextProvider(sender, engine)
+
+
+class TemperedFakeTiming:
+    """온도 손잡이를 가진 시간 제공자 가짜 — 재전사 회복 온도를 기록한다(D28)."""
+
+    def __init__(self) -> None:
+        self.seen: list[tuple[str, float | None]] = []
+
+    def timed_transcript(
+        self,
+        *,
+        binding: Any,
+        chunk: Any,
+        settings: Any,
+        on: date,
+        stem: str = "",
+        source: str = "",
+        temperature: float | None = None,
+    ) -> Any:
+        self.seen.append((binding.request_id, temperature))
+        return parse_timing_response(
+            {"segments": [{"text": "회복 구간", "start": 0.1, "end": 0.4}]},
+            binding=binding,
+            model=settings.models.timing_model,
+            provider=settings.caption.timing_provider,
+            chunk_duration=chunk.duration,
+            chunk_offset=chunk.offset,
+        )
 
 
 def open_ws(tmp_path: Path) -> tuple[RawWorkspace, Path]:
@@ -833,3 +913,357 @@ def test_verify_toggle_and_view_state_leave_bytes_identical(
     off_identity = RunIdentity(reg.final_video_revision, "run-v", off_plan.fingerprint)
     assert draft_srt(ws, off_identity).read_bytes() == draft_bytes  # 검증은 바이트를 안 바꾼다
     assert ws.review_bundle(identity).snapshot.path.read_bytes() == frozen_bytes
+
+
+# ─────────────────────────────────────────────────────────────
+#  오프라인 문의 지배 — 포장 전 원본 제공자에 같은 문을 세운다(§14.3, 루트 재검)
+# ─────────────────────────────────────────────────────────────
+
+
+@needs_ffmpeg
+def test_offline_workflow_dominates_live_transport(
+    tmp_path: Path, stereo_delayed: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """닫힌 `network_mode`는 실전송보다 앞선다 — 유효한 승인도 0 전송을 못 연다."""
+    workspace, _ = open_ws(tmp_path)
+    ws = open_caption_workspace(workspace)
+    reg = ws.register_final_video(stereo_delayed, source_id="final_1")
+    plan = ws.plan(reg, "run-live", settings=SETTINGS)
+    ws.approve(plan)
+    identity = ws.identity_of(plan)
+    monkeypatch.setenv("VLOGSRT_OFFLINE", "0")  # 환경은 열려 있다 — 설정이 이긴다
+    sender, timing, text = live_pair()
+    with pytest.raises(FreshSendBlockedError):
+        ws.run_now(
+            reg,
+            "run-live",
+            timing_provider=timing,
+            text_provider=text,
+            settings=SETTINGS,
+            on=BEFORE,
+        )
+    assert sender.calls == []
+    run = ws.run_record(identity)
+    assert run is not None and run.status == RUN_FAILED and run.error
+
+
+@needs_ffmpeg
+def test_env_offline_blocks_online_live_run(
+    tmp_path: Path, stereo_delayed: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """온라인 설정이라도 환경이 오프라인이면 실전송의 새 호출은 못 나간다."""
+    workspace, _ = open_ws(tmp_path)
+    ws = open_caption_workspace(workspace)
+    reg = ws.register_final_video(stereo_delayed, source_id="final_1")
+    plan = ws.plan(reg, "run-env", settings=SETTINGS, workflow=ONLINE_WORKFLOW)
+    ws.approve(plan)
+    identity = ws.identity_of(plan)
+    monkeypatch.setenv("VLOGSRT_OFFLINE", "1")
+    sender, timing, text = live_pair()
+    with pytest.raises(FreshSendBlockedError):
+        ws.run_now(
+            reg,
+            "run-env",
+            timing_provider=timing,
+            text_provider=text,
+            settings=SETTINGS,
+            workflow=ONLINE_WORKFLOW,
+            on=BEFORE,
+        )
+    assert sender.calls == []
+    run = ws.run_record(identity)
+    assert run is not None and run.status == RUN_FAILED
+
+
+@needs_ffmpeg
+def test_live_online_run_hits_registry_gates(
+    tmp_path: Path, stereo_delayed: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """종료일 도달·미확인 모델은 실전송 호출 **전에** 닫힌다(§11.10) — 0 전송."""
+    monkeypatch.setenv("VLOGSRT_OFFLINE", "0")
+    workspace, _ = open_ws(tmp_path)
+    ws = open_caption_workspace(workspace)
+    reg = ws.register_final_video(stereo_delayed, source_id="final_1")
+    sender, timing, text = live_pair()
+
+    dated = ws.plan(reg, "run-date", settings=SETTINGS, workflow=ONLINE_WORKFLOW)
+    ws.approve(dated)
+    with pytest.raises(capabilities.TimingProviderUnavailable):
+        ws.run_now(
+            reg,
+            "run-date",
+            timing_provider=timing,
+            text_provider=text,
+            settings=SETTINGS,
+            workflow=ONLINE_WORKFLOW,
+            on=date(2027, 3, 1),  # 종료 예정일(2027-02-26) 뒤
+        )
+    assert sender.calls == []
+
+    bogus = replace(
+        ONLINE_WORKFLOW, models=replace(ONLINE_WORKFLOW.models, timing_model="whisper-2")
+    )
+    modeled = ws.plan(reg, "run-model", settings=SETTINGS, workflow=bogus)
+    ws.approve(modeled)
+    with pytest.raises(capabilities.UnverifiedModelCapability):
+        ws.run_now(
+            reg,
+            "run-model",
+            timing_provider=timing,
+            text_provider=text,
+            settings=SETTINGS,
+            workflow=bogus,
+            on=BEFORE,
+        )
+    assert sender.calls == []
+    for identity in (ws.identity_of(dated), ws.identity_of(modeled)):
+        run = ws.run_record(identity)
+        assert run is not None and run.status == RUN_FAILED
+
+
+@needs_ffmpeg
+def test_complete_replay_after_death_mid_settle(
+    tmp_path: Path, stereo_delayed: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """호출 직후 굳은 응답 전부 + 죽은 정착 — 재개는 실전송 0 새 호출로 재생만 한다."""
+    workspace, root = open_ws(tmp_path)
+    ws = open_caption_workspace(workspace)
+    reg = ws.register_final_video(stereo_delayed, source_id="final_1")
+    plan = ws.plan(reg, "run-resume", settings=SETTINGS)
+    ws.approve(plan)
+    identity = ws.identity_of(plan)
+    timing, text = unplaced_fakes()
+
+    def explode(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("정착 도중 프로세스가 죽었다")
+
+    monkeypatch.setattr("vlogsrt.project.raw.caption_workspace.publish_caption_artifacts", explode)
+    with pytest.raises(RuntimeError):
+        ws.run_now(
+            reg,
+            "run-resume",
+            timing_provider=timing,
+            text_provider=text,
+            settings=SETTINGS,
+            on=BEFORE,
+        )
+    monkeypatch.undo()
+    assert len(timing.calls) == len(text.calls) == 2  # 네 요청은 응답까지 끝났다
+    rows = ws.store.responses(identity.run_id, identity.fingerprint)
+    assert len(rows) == 4 and all(row.origin == RESPONSE_ORIGIN_INJECTED for row in rows)
+    run = ws.run_record(identity)
+    assert run is not None and run.status == RUN_FAILED  # 빈 성공이 아니다
+
+    monkeypatch.setenv("VLOGSRT_OFFLINE", "0")
+    sender, live_timing, live_text = live_pair()
+    reopened = open_caption_workspace(RawWorkspace.open(root))
+    resumed = reopened.run_now(
+        reg,
+        "run-resume",
+        timing_provider=live_timing,
+        text_provider=live_text,
+        settings=SETTINGS,
+        on=BEFORE,
+    )
+    assert resumed.status == RUN_SUCCEEDED
+    assert sender.calls == []  # 새 전송 0 — 저장된 응답의 재생뿐이다
+    assert draft_srt(reopened, identity).is_file()
+    replayed = reopened.store.responses(identity.run_id, identity.fingerprint)
+    assert len(replayed) == 4
+    # 출처는 첫 값으로 산다 — 가짜로 얻은 응답이 실전송 기록으로 둔갑하지 않는다
+    assert all(row.origin == RESPONSE_ORIGIN_INJECTED for row in replayed)
+
+
+@needs_ffmpeg
+def test_partial_cache_blocks_live_fresh_sends(
+    tmp_path: Path, stereo_delayed: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """부분 캐시 + 닫힌 오프라인 문 — 실전송 재개는 0 새 호출로 거부, 가짜 재개는 이어진다."""
+
+    def crash_after_first() -> Callable[[], None]:
+        state = {"passes": 0}
+
+        def gate() -> None:
+            state["passes"] += 1
+            if state["passes"] > 1:
+                raise RuntimeError("강제 중단 — 프로세스 사망 모양")
+
+        return gate
+
+    workspace, _ = open_ws(tmp_path)
+    ws = open_caption_workspace(workspace)
+    reg = ws.register_final_video(stereo_delayed, source_id="final_1")
+    plan = ws.plan(reg, "run-partial", settings=SETTINGS)
+    ws.approve(plan)
+    identity = ws.identity_of(plan)
+    timing, text = unplaced_fakes()
+    with pytest.raises(RuntimeError):
+        ws.run_now(
+            reg,
+            "run-partial",
+            timing_provider=timing,
+            text_provider=text,
+            settings=SETTINGS,
+            on=BEFORE,
+            gate=crash_after_first(),
+        )
+    rows = ws.store.responses(identity.run_id, identity.fingerprint)
+    assert 0 < len(rows) < 2 * len(plan.spans)  # 일부만 굳었다
+
+    monkeypatch.setenv("VLOGSRT_OFFLINE", "0")
+    sender, live_timing, live_text = live_pair()
+    with pytest.raises(FreshSendBlockedError):
+        ws.run_now(
+            reg,
+            "run-partial",
+            timing_provider=live_timing,
+            text_provider=live_text,
+            settings=SETTINGS,
+            on=BEFORE,
+        )
+    assert sender.calls == []
+
+    resumed = ws.run_now(  # 가짜 제공자 재개 — 빠진 분만 새로 묻는다
+        reg,
+        "run-partial",
+        timing_provider=timing,
+        text_provider=text,
+        settings=SETTINGS,
+        on=BEFORE,
+    )
+    assert resumed.status == RUN_SUCCEEDED
+    assert timing.calls.count("run-partial:timing:0000") == 1  # 굳은 청크는 안 물었다
+    assert timing.calls.count("run-partial:timing:0001") == 1 and len(text.calls) == 2
+
+
+@needs_ffmpeg
+def test_finished_run_and_manual_survive_shutdown_with_live_transport(
+    tmp_path: Path, stereo_delayed: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """끝난 실행은 문이 닫혀도 0 호출로 재제출되고, 수동 검토·확정은 계속 열려 있다."""
+    ws, reg, identity, run = prepared(tmp_path, stereo_delayed, fakes=plain_fakes)
+    assert run.status == RUN_SUCCEEDED
+    draft_before = draft_srt(ws, identity).read_bytes()
+    monkeypatch.setenv("VLOGSRT_OFFLINE", "0")
+    sender, live_timing, live_text = live_pair()
+    reopened = open_caption_workspace(RawWorkspace.open(ws.root))
+    again = reopened.run_now(
+        reg,
+        "run-1",
+        timing_provider=live_timing,
+        text_provider=live_text,
+        settings=SETTINGS,
+        on=BEFORE,
+    )
+    assert again.status == RUN_SUCCEEDED and sender.calls == []
+    assert draft_srt(reopened, identity).read_bytes() == draft_before
+
+    head = reopened.review_bundle(identity).head
+    assert head is not None
+    head = reopened.edit_cue_text(
+        identity, head.cues[0].cue_id, "다시 연 문구", expected_head=head.sequence
+    )
+    allow_open_warnings(reopened, identity)
+    fresh = reopened.review_bundle(identity).head
+    assert fresh is not None
+    export = reopened.confirm(
+        identity,
+        expected_head=fresh.sequence,
+        cue_ids=tuple(cue.cue_id for cue in fresh.cues),
+        note="재시작 뒤 확정",
+    )
+    assert export.export.srt.is_file()
+
+
+@needs_ffmpeg
+def test_missing_provider_fails_closed_but_finished_run_needs_none(
+    tmp_path: Path, stereo_delayed: Path
+) -> None:
+    """제공자 없는 실행은 0 호출로 닫힌다 — 끝난 실행 재제출은 제공자 없이도 0 호출이다."""
+    workspace, _ = open_ws(tmp_path)
+    ws = open_caption_workspace(workspace)
+    reg = ws.register_final_video(stereo_delayed, source_id="final_1")
+    plan = ws.plan(reg, "run-none", settings=SETTINGS)
+    ws.approve(plan)
+    identity = ws.identity_of(plan)
+    with pytest.raises(CaptionProviderMissing):
+        ws.run_now(
+            reg, "run-none", timing_provider=None, text_provider=None, settings=SETTINGS, on=BEFORE
+        )
+    run = ws.run_record(identity)
+    assert run is not None and run.status == RUN_FAILED
+    timing, text = unplaced_fakes()
+    done = ws.run_now(
+        reg,
+        "run-none",
+        timing_provider=timing,
+        text_provider=text,
+        settings=SETTINGS,
+        on=BEFORE,
+    )
+    assert done.status == RUN_SUCCEEDED
+    finished = ws.run_now(  # 동결 스냅샷이 있으면 제공자가 필요 없다
+        reg, "run-none", timing_provider=None, text_provider=None, settings=SETTINGS, on=BEFORE
+    )
+    assert finished.status == RUN_SUCCEEDED
+
+
+# ─────────────────────────────────────────────────────────────
+#  캐시 포장 — 온도 손잡이·재생 전용 거부(단위 눈)
+# ─────────────────────────────────────────────────────────────
+
+
+def test_tempered_wrapper_forwards_recovery_temperature(tmp_path: Path) -> None:
+    """온도 손잡이가 있는 원본은 포장 뒤에도 회복 온도를 받고, 응답은 재생된다(D28)."""
+    assert "temperature" in signature(TemperedCachedTimingProvider.timed_transcript).parameters
+    assert "temperature" not in signature(CachedTimingProvider.timed_transcript).parameters
+    workspace, _ = open_ws(tmp_path)
+    ws = open_caption_workspace(workspace)
+    identity = RunIdentity("r" * 64, "run-t", "f" * 64)
+    binding = AudioChunkBinding(
+        chunk_index=0,
+        audio_sha256="a" * 64,
+        sample_start=0,
+        sample_end=48000,
+        sample_rate=16000,
+        request_id="run-t:rescue:0000:r1",
+    )
+    chunk = SimpleNamespace(duration=2.0, offset=0.0, index=0)
+    inner = TemperedFakeTiming()
+    wrapped = TemperedCachedTimingProvider(inner, {}, ws.store, identity)
+    first = wrapped.timed_transcript(
+        binding=binding, chunk=chunk, settings=RawWorkflowConfig(), on=BEFORE, temperature=0.8
+    )
+    assert inner.seen == [("run-t:rescue:0000:r1", 0.8)]
+    assert first.segments
+    rows = ws.store.responses("run-t", "f" * 64)
+    assert len(rows) == 1 and rows[0].request_id == "run-t:rescue:0000:r1"
+    wrapped.timed_transcript(  # 같은 요청 — 새 호출 없이 재생
+        binding=binding, chunk=chunk, settings=RawWorkflowConfig(), on=BEFORE, temperature=0.8
+    )
+    assert wrapped.replays == 1 and len(inner.seen) == 1
+
+
+def test_replay_only_wrapper_refuses_cache_miss(tmp_path: Path) -> None:
+    """재생 전용 포장은 캐시를 빗나가면 예외로 끝난다 — 절대 원본을 부르지 않는다."""
+    workspace, _ = open_ws(tmp_path)
+    ws = open_caption_workspace(workspace)
+    identity = RunIdentity("r" * 64, "run-r", "f" * 64)
+    binding = AudioChunkBinding(
+        chunk_index=0,
+        audio_sha256="a" * 64,
+        sample_start=0,
+        sample_end=48000,
+        sample_rate=16000,
+        request_id="run-r:text:0000",
+    )
+    inner = FakeText({0: "굳지 않은 문구"})
+    wrapped = CachedTextProvider(inner, {}, ws.store, identity, replays_only=True)
+    with pytest.raises(FreshSendBlockedError):
+        wrapped.text_transcript(
+            binding=binding,
+            chunk=SimpleNamespace(duration=2.0, offset=0.0, index=0),
+            settings=RawWorkflowConfig(),
+            on=BEFORE,
+        )
+    assert inner.calls == [] and wrapped.fresh_calls == 0

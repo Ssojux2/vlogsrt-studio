@@ -108,6 +108,7 @@ CAPTION_SCHEMA_STATEMENTS: tuple[str, ...] = (
         sample_rate INTEGER NOT NULL,
         payload_json TEXT NOT NULL,
         created_at TEXT NOT NULL,
+        origin TEXT NOT NULL DEFAULT 'injected_provider',
         PRIMARY KEY (run_id, request_id)
     )
     """,
@@ -285,7 +286,7 @@ class CaptionWorkspaceStore:
             connection.executemany(
                 "INSERT OR IGNORE INTO caption_responses (run_id, fingerprint, request_id,"
                 " role, chunk_index, audio_sha256, sample_start, sample_end, sample_rate,"
-                " payload_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " payload_json, created_at, origin) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 rows,
             )
             connection.commit()
@@ -428,6 +429,7 @@ def _response_values(item: CachedResponse) -> tuple[object, ...]:
         item.sample_rate,
         canonical_json(dict(item.payload)),
         item.created_at,
+        item.origin,
     )
 
 
@@ -444,4 +446,5 @@ def _response(row: sqlite3.Row) -> CachedResponse:
         sample_rate=int(row["sample_rate"]),
         payload=_json_payload(str(row["payload_json"])),
         created_at=str(row["created_at"]),
+        origin=str(row["origin"]),
     )

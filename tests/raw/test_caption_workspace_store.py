@@ -23,6 +23,8 @@ from vlogsrt.project.raw.caption_workspace_store import (
 from vlogsrt.project.raw.caption_workspace_types import (
     REGISTRATION_NO_AUDIO,
     REGISTRATION_READY,
+    RESPONSE_ORIGIN_INJECTED,
+    RESPONSE_ORIGIN_LIVE,
     ApprovalRecord,
     CachedResponse,
     CaptionWorkspaceError,
@@ -193,10 +195,11 @@ def test_responses_first_value_survives_and_fingerprint_filters(workspace: RawWo
     store = CaptionWorkspaceStore(workspace.root)
     store.record_responses([a_response("run-1", "run-1:timing:0000")])
     other = a_response("run-1", "run-1:timing:0000")
-    other = replace(other, payload={"segments": []})
+    other = replace(other, payload={"segments": []}, origin=RESPONSE_ORIGIN_LIVE)
     store.record_responses([other])  # 같은 자리 — 첫 값이 산다
     rows = store.responses("run-1", FP)
     assert len(rows) == 1 and rows[0].payload["segments"]
+    assert rows[0].origin == RESPONSE_ORIGIN_INJECTED  # 출처도 첫 값이다
     assert store.responses("run-1", OTHER_FP) == ()  # 다른 지문은 못 본 척하지 않는다
 
 
