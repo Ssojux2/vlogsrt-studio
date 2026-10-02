@@ -592,3 +592,118 @@ class PackageError(RawWorkspaceError):
 
 class ExtractJobError(RawWorkspaceError):
     """추출 작업 오류 — 실패 조각 정보를 실은 채 작업을 실패로 남긴다."""
+
+
+# ── A4 — 의미 분석(계획 §7·§14) ──────────────────────────────────────────────
+
+
+ANALYSIS_JOB_KIND = "understanding_analysis"
+"""의미 분석 작업의 종류 표기 — 같은 지문의 활성 작업 재제출이 여기 묶인다."""
+
+ANALYSIS_REVISION_STATUSES: tuple[str, ...] = (
+    "reserved",
+    "analyzing",
+    "complete",
+    "failed",
+    "interrupted",
+)
+"""분석 리비전의 서버 소유 상태(§14.1). 원본별 결과는 따로 남는다 — 하나의
+상태 문자열로 부분 실패를 숨기지 않는다."""
+
+ANALYSIS_SOURCE_STATUSES: tuple[str, ...] = (
+    "pending",
+    "analyzing",
+    "analyzed",
+    "cached",
+    "failed",
+    "unanalyzed",
+)
+"""리비전 안 원본 하나의 분석 상태. `analyzed`·`cached`만 성공 증거를 실고,
+`failed`는 오류를 남긴 채 재시도 대상이며 `unanalyzed`는 선택에 들지 않아
+보존만 되는 원본이다(전체 순서는 항상 전부 산다, §6.1)."""
+
+ANALYSIS_MODES: tuple[str, ...] = ("replay", "live")
+"""분석 실행 모드 — 재생(replay)은 픽스처만, 실제 호출(live)은 사람 승인만."""
+
+SEGMENTATION_BASIS_SEMANTIC = "semantic_analysis"
+"""A4 분할 근거 — 받아들여진 의미 경계를 비디오 격자에 조정한 타일링."""
+
+
+@dataclass(frozen=True, slots=True)
+class AnalysisEstimate:
+    """원본 하나의 분석 견적 — 창·프레임·청크 수는 사실, 금액은 상태가 말한다.
+
+    실제 호출은 하나도 일어나지 않는다(§14.3 — 비용 표시 뒤에야 승인받는다).
+    Luna 단가는 미확인이므로 금액을 0원으로 계산하지 않고 `price_status`로
+    말한다(`unknown` | `user_supplied`).
+    """
+
+    asset_id: str
+    source_order: int
+    source_name: str
+    has_audio: bool
+    audio_stream_index: int | None
+    sample_count: int | None
+    video_frame_count: int
+    extent_seconds: str
+    window_count: int
+    frame_sample_count: int
+    asr_chunk_count: int
+    asr_seconds: str
+    luna_request_count: int
+    price_status: str
+    user_ceiling_total: str | None
+    note: str
+
+
+@dataclass(frozen=True, slots=True)
+class AnalysisRevision:
+    """의미 분석 리비전 — 불변 서버 소유 상태(§13.1 AnalysisWindow 묶음의 실행)."""
+
+    revision_id: str
+    order_revision_id: str
+    basis: str
+    mode: str
+    settings_json: str
+    models_json: str
+    fingerprint: str
+    status: str
+    source_total: int
+    source_done: int
+    error: str | None
+    created_at: str
+    updated_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class AnalysisSourceResult:
+    """리비전 안 원본 하나의 분석 결과 — 문서 경로는 상대 경로다(§9.2)."""
+
+    revision_id: str
+    asset_id: str
+    source_order: int
+    source_name: str
+    fingerprint: str
+    status: str
+    speech_status: str | None
+    execution_mode: str | None
+    document_path: str | None
+    record_path: str | None
+    window_count: int
+    segment_count: int
+    cached_from: str | None
+    error: str | None
+    created_at: str
+    updated_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class AnalysisSummary:
+    """분석 읽기 모델 — 리비전·원본별 결과·요약 읽기(화면 2의 분석 패널)."""
+
+    revision: AnalysisRevision
+    results: tuple[AnalysisSourceResult, ...]
+
+
+class AnalysisError(RawWorkspaceError):
+    """의미 분석 계층 오류의 기본형 — 이유를 사람에게 그대로 보여준다."""

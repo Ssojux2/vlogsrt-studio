@@ -15,7 +15,7 @@ import html
 import json
 import os
 import threading
-from collections.abc import Awaitable, Callable, Iterator
+from collections.abc import Awaitable, Callable, Iterator, Sequence
 from fractions import Fraction
 from pathlib import Path
 
@@ -125,12 +125,15 @@ class RawWorkspaceUi:
         self._ingest_md: gr.Markdown | None = None
         self._segment_md: gr.Markdown | None = None
         self._package_md: gr.Markdown | None = None
+        self._analysis_md: gr.Markdown | None = None
         self._media_dd: gr.Dropdown | None = None
         self._jobs_dd: gr.Dropdown | None = None
         self._devices_dd: gr.Dropdown | None = None
         self._ingest_jobs_dd: gr.Dropdown | None = None
         self._clip_dd: gr.Dropdown | None = None
         self._extract_jobs_dd: gr.Dropdown | None = None
+        self._analysis_jobs_dd: gr.Dropdown | None = None
+        self._analysis_sources_group: gr.CheckboxGroup | None = None
         self._clip_player_html: gr.HTML | None = None
         self._signature_state: gr.State | None = None
 
@@ -468,12 +471,68 @@ class RawWorkspaceUi:
 
     # ── 화면 2 — 분석 · 조각 검토 ──────────────────────────────
 
-    def _review_tab(self) -> tuple[gr.Button, gr.Button, gr.Dropdown]:
+    def _review_tab(
+        self,
+    ) -> tuple[gr.Button, gr.Button, gr.Dropdown, gr.Button]:
         with gr.Tab("2 · 분석 · 조각 검토"):
             gr.Markdown(
-                "> 이 단계는 **결정적 분할**이다 — 의미 분석(Luna) 없이 확정된 전체"
-                " 순서 위에서 각 원본의 측정된 프레임 격자로 전체를 빈틈없이 타일링한다."
-                " 유료 호출은 전혀 없다(오프라인)."
+                "> 이 단계는 두 갈래다. **의미 분석**(Luna)은 내부 전사 증거와 프레임"
+                " 표본으로 대화·장면을 요약하고 경계를 **제안**한다 — 브라우저에서는"
+                " **오프라인 재생**만 가능하고(명시적으로 준비한 합성 픽스처만 재생,"
+                " 실제 호출 아님), 실제 호출은 사람이 만든 승인 기록으로만 시작된다."
+                " **결정적 분할**은 의미 분석 없이 측정된 프레임 격자로 전체를 타일링한다"
+                " — 유료 호출은 전혀 없다."
+            )
+            # ── 의미 분석(오프라인 재생) ──────────────────────────
+            with gr.Row():
+                self._analysis_sources_group = gr.CheckboxGroup(
+                    choices=self.analysis_source_choices(),
+                    label="분석할 원본(선택) — 비우면 전체",
+                    interactive=True,
+                )
+            self._analysis_settings_md = gr.Markdown(self._analysis_settings_markdown())
+            with gr.Row():
+                estimate_button = gr.Button("분석 견적(로컬)", scale=2)
+                analysis_start = gr.Button("오프라인 재생 분석 시작", variant="primary", scale=2)
+                analysis_refresh = gr.Button("분석 상태 새로고침", scale=2)
+                analysis_plan = gr.Button("분석 결과로 분할 계획", scale=2)
+            with gr.Row():
+                self._analysis_jobs_dd = gr.Dropdown(
+                    choices=self.resumable_analysis_choices(),
+                    label="재시도할 분석 작업",
+                    interactive=True,
+                    scale=6,
+                )
+                analysis_retry = gr.Button("재시도", scale=1)
+            self._analysis_md = gr.Markdown(
+                self._analysis_state_markdown(self._snapshot_root()), elem_id="analysis-state"
+            )
+            estimate_button.click(
+                self.analysis_estimate_view,
+                [self._signature_state, self._analysis_sources_group],
+                self._analysis_md,
+            )
+            analysis_start.click(
+                self.analysis_start_view,
+                [self._signature_state, self._analysis_sources_group],
+                [self._analysis_md, self._analysis_jobs_dd],
+            )
+            analysis_refresh.click(
+                self.analysis_refresh_view,
+                self._signature_state,
+                [self._analysis_md, self._analysis_jobs_dd, self._analysis_sources_group],
+            )
+            analysis_retry.click(
+                self.analysis_retry_view,
+                [self._signature_state, self._analysis_jobs_dd],
+                self._analysis_md,
+            )
+            gr.Markdown("---")
+            # ── 결정적 분할(오프라인) ─────────────────────────────
+            gr.Markdown(
+                "> **결정적 분할** — 의미 분석 없이 확정된 전체 순서 위에서 각 원본의"
+                " 측정된 프레임 격자로 전체를 빈틈없이 타일링한다. 유료 호출은 전혀"
+                " 없다(오프라인)."
             )
             with gr.Row():
                 plan_button = gr.Button("결정적 분할 계획", variant="primary", scale=2)
@@ -579,7 +638,7 @@ class RawWorkspaceUi:
             cancel_button.click(
                 on_cancel, [self._signature_state, self._jobs_dd], [self._jobs_dd, self._jobs_md]
             )
-        return extract_button, refresh_segment, self._profile_dd
+        return extract_button, refresh_segment, self._profile_dd, analysis_plan
 
     def cancel_selected(self, signature: str | None, job_id: str | None) -> str:
         """변경 콜백의 선택 검증본보기 — 오래된 작업공간 선택은 거기서 끝난다.
@@ -611,6 +670,9 @@ class RawWorkspaceUi:
         gr.Dropdown,
         str,
         gr.Dropdown,
+        str,
+        gr.Dropdown,
+        gr.CheckboxGroup,
     ]:
         """기존 작업공간 열기 이벤트 — 서명·미디어·작업·설정까지 한 번에 갱신한다.
 
@@ -644,6 +706,9 @@ class RawWorkspaceUi:
         gr.Dropdown,
         str,
         gr.Dropdown,
+        str,
+        gr.Dropdown,
+        gr.CheckboxGroup,
     ]:
         """새 작업공간 만들기 이벤트 — 첫 생성(서명 None)에서도 같은 화면이 즉시 연결된다."""
         if not (name or "").strip():
@@ -672,12 +737,15 @@ class RawWorkspaceUi:
         gr.Dropdown,
         str,
         gr.Dropdown,
+        str,
+        gr.Dropdown,
+        gr.CheckboxGroup,
     ]:
         """작업공간 전환 뒤 화면이 받아야 하는 전체 보기(서명 포함).
 
         루트를 **한 번** 찍어 모든 조각에 통과시킨다 — 전환이 끼어들어도 이 보기가
-        두 작업공간에 걸치지 않는다(코디네이터 재결). 마지막 두 값은 가져오기
-        패널(안내·재시도 목록)이다.
+        두 작업공간에 걸치지 않는다(코디네이터 재결). 마지막 네 값은 가져오기·
+        분할·분석 패널이다.
         """
         root = self._snapshot_root()
         return (
@@ -693,6 +761,9 @@ class RawWorkspaceUi:
             gr.Dropdown(choices=self.resumable_extract_choices(root)),
             self._package_state_markdown(root),
             gr.Dropdown(choices=self.clip_choices(root)),
+            self._analysis_state_markdown(root),
+            gr.Dropdown(choices=self.resumable_analysis_choices(root)),
+            gr.CheckboxGroup(choices=self.analysis_source_choices(root)),
         )
 
     def _selection_outputs(self) -> list[object]:
@@ -709,6 +780,9 @@ class RawWorkspaceUi:
             and self._extract_jobs_dd is not None
             and self._package_md is not None
             and self._clip_dd is not None
+            and self._analysis_md is not None
+            and self._analysis_jobs_dd is not None
+            and self._analysis_sources_group is not None
             and self._signature_state is not None
         )
         return [
@@ -724,6 +798,9 @@ class RawWorkspaceUi:
             self._extract_jobs_dd,
             self._package_md,
             self._clip_dd,
+            self._analysis_md,
+            self._analysis_jobs_dd,
+            self._analysis_sources_group,
         ]
 
     def cancel_view(self, signature: str | None, job_id: str | None) -> tuple[gr.Dropdown, str]:
@@ -970,6 +1047,248 @@ class RawWorkspaceUi:
         ]
 
     # ── 화면 2 — 결정적 분할 계획·추출(오프라인) ─────────────────
+
+    # ── 화면 2 — 의미 분석(오프라인 재생 기본, 실제 호출은 승인만) ──
+
+    _SPEECH_LABELS: dict[str, str] = {
+        "speech_detected": "발화 확인",
+        "unconfirmed_empty": "빈 골격(미확인)",
+        "analysis_failed": "분석 실패",
+        "audio_absent": "오디오 없음",
+    }
+    _EXECUTION_LABELS: dict[str, str] = {
+        "offline_replay": "오프라인 재생",
+        "online_live": "실제 호출",
+        "mixed_live_and_replay": "혼합(재생+실제)",
+    }
+
+    def analysis_source_choices(self, root: Path | None = None) -> list[tuple[str, str]]:
+        """분석 선택 목록 — 확정 전체 순서의 ready 원본(순서 그대로)."""
+        root = root if root is not None else self._snapshot_root()
+        if root is None:
+            return []
+        try:
+            order = self.raw.latest_global_source_order(root)
+        except raw_service.RawWorkspaceError:
+            return []
+        if order is None:
+            return []
+        names = {asset.asset_id: asset.source_name for asset in self.raw.list_source_assets(root)}
+        return [
+            (
+                f"{entry.ordinal:03d} · {names.get(entry.asset_id, entry.asset_id)}",
+                entry.asset_id,
+            )
+            for entry in sorted(order.entries, key=lambda item: item.ordinal)
+        ]
+
+    def _analysis_settings_markdown(self, root: Path | None = None) -> str:
+        """분석 설정 요약 — 동결 기본값(15초 창·2초 문맥·8장·768)과 모델 표시."""
+        root = root if root is not None else self._snapshot_root()
+        if root is None:
+            return (
+                "분석 설정(동결 기본값): 시간창 15초 · 문맥 앞뒤 2초 · 창당 프레임 8장 ·"
+                " 긴변 768px — 작업공간을 열면 모델까지 함께 보인다."
+            )
+        config = self.raw.settings(root)
+        return (
+            f"분석 설정(동결 기본값): 시간창 15초 · 문맥 앞뒤 2초 · 창당 프레임 8장 ·"
+            f" 긴변 768px · 내부 ASR `{config.models.timing_model}`(단일 패스) ·"
+            f" 의미 판정 `{config.models.luna_model}` — 최종 자막 파이프라인은"
+            " 아니다(이 단계의 산출은 요약·태그·경계 제안뿐)"
+        )
+
+    def _analysis_state_markdown(self, root: Path | None) -> str:
+        """분석 패널 보기 — 리비전·원본별 상태·요약 읽기(요약·태그는 읽기 전용)."""
+        if root is None:
+            return (
+                "작업공간을 열면 의미 분석 상태가 여기 나타난다 — 브라우저에서는"
+                " **오프라인 재생**만 실행할 수 있다(실제 호출은 사람 승인 기록이"
+                " 필요하다)."
+            )
+        try:
+            summary = self.raw.analysis_overview(root)
+        except raw_service.RawWorkspaceError as error:
+            return f"분석 상태를 읽지 못했다: {error}"
+        if summary is None:
+            return (
+                "**의미 분석** 리비전이 없다 — **분석 견적(로컬)**을 본 뒤 **오프라인"
+                " 재생 분석 시작**을 누르면 시작된다. 견적은 로컬 조사만 하고 유료"
+                " 호출은 없다."
+            )
+        revision = summary.revision
+        mode_label = "오프라인 재생" if revision.mode == "replay" else "실제 호출(승인)"
+        lines = [
+            f"**의미 분석** — 리비전 `{revision.revision_id}` · 모드 **{mode_label}** ·"
+            f" 상태 {revision.status} · 원본 {revision.source_done}/{revision.source_total}",
+            "",
+            "| 순번 | 원본 | 상태 | 발화 상태 | 창 | 조각 | 실행 증거 |",
+            "|---|---|---|---|---|---|---|",
+        ]
+        for result in summary.results:
+            speech = self._SPEECH_LABELS.get(result.speech_status or "", "-")
+            execution = self._EXECUTION_LABELS.get(result.execution_mode or "", "-")
+            lines.append(
+                f"| {result.source_order} | {result.source_name} | {result.status} |"
+                f" {speech} | {result.window_count} | {result.segment_count}"
+                f" | {execution} |"
+            )
+        if revision.error:
+            lines += ["", f"**오류**: {revision.error}"]
+        for result in summary.results[:4]:
+            excerpt = self._annotation_excerpt(root, summary.revision.revision_id, result)
+            if excerpt:
+                lines += ["", excerpt]
+        return "\n".join(lines)
+
+    def _annotation_excerpt(
+        self, root: Path, revision_id: str, result: raw_service.AnalysisSourceResult
+    ) -> str:
+        """원본 하나의 요약·태그 읽기 — 문서의 accepted 판정 앞두어만(표시 전용)."""
+        if result.status not in ("analyzed", "cached"):
+            return ""
+        try:
+            document = self.raw.analysis_document(root, revision_id, result.asset_id)
+        except raw_service.RawWorkspaceError:
+            return ""
+        if not document:
+            return ""
+        annotations = document.get("annotations")
+        if not isinstance(annotations, list):
+            return ""
+        lines: list[str] = []
+        for item in annotations:
+            if not isinstance(item, dict) or item.get("status") != "accepted":
+                continue
+            tags = ", ".join(str(tag) for tag in item.get("scene_tags", [])[:4])
+            speech = str(item.get("speech_summary", "")).strip()
+            visual = str(item.get("visual_summary", "")).strip()
+            lines.append(
+                f"- `{result.source_name}` {item.get('window_id')}: {speech or '(발화 요약 없음)'}"
+                f" · {visual or '(장면 요약 없음)'}{(' · ' + tags) if tags else ''}"
+            )
+            if len(lines) >= 3:
+                break
+        return "\n".join([f"**{result.source_name} 요약(읽기 전용)**", *lines]) if lines else ""
+
+    def analysis_estimate_view(self, signature: str | None, selected: list[str] | None) -> str:
+        """분석 견적 이벤트 — 로컬 조사만으로 창·청크·이미지 수와 비용 상태를 보인다."""
+        root = self._require_current_selection(signature)
+        try:
+            estimates = self.raw.analysis_estimate(
+                root, asset_ids=self._selected_asset_ids(selected)
+            )
+        except raw_service.RawWorkspaceError as error:
+            raise gr.Error(str(error)) from error
+        lines = [
+            "**분석 견적(로컬 — 실제 호출 없음)**",
+            "",
+            "| 순번 | 원본 | 오디오 | 창 | 이미지(상한) | ASR 청크 | 오디오 분량(초) | Luna 요청 |",
+            "|---|---|---|---|---|---|---|---|",
+        ]
+        for item in estimates:
+            lines.append(
+                f"| {item.source_order} | {item.source_name} |"
+                f" {'있음' if item.has_audio else '없음'} | {item.window_count} |"
+                f" {item.frame_sample_count} | {item.asr_chunk_count} | {item.asr_seconds} |"
+                f" {item.luna_request_count} |"
+            )
+        first = estimates[0] if estimates else None
+        price = first.price_status if first else "unknown"
+        ceiling = first.user_ceiling_total if first else None
+        price_note = (
+            f"사용자 상한 합 {ceiling}"
+            if ceiling
+            else "Luna 단가 미확인 — 금액 추정을 만들지 않는다"
+        )
+        lines += [
+            "",
+            f"- 비용 상태: **{price}** — {price_note}(0원 계산 금지).",
+            "- 실제 호출은 이 견적을 본 사람의 승인 기록(원본별 승인·예산)과 환경"
+            " 설정이 함께 열려 있어야만 시작한다 — 브라우저에서는 만들 수 없다.",
+        ]
+        if first is not None and first.note:
+            lines.append(f"- {first.note}")
+        return "\n".join(lines)
+
+    def analysis_start_view(
+        self, signature: str | None, selected: list[str] | None
+    ) -> tuple[str, gr.Dropdown]:
+        """오프라인 재생 분석 시작 — 명시적 합성 픽스처만 재생한다(실제 호출 아님)."""
+        root = self._require_current_selection(signature)
+        try:
+            handle = self.raw.start_analysis(
+                root, asset_ids=self._selected_asset_ids(selected), mode="replay"
+            )
+        except raw_service.RawWorkspaceError as error:
+            raise gr.Error(str(error)) from error
+        message = (
+            f"분석 작업 `{handle.job_id}` 제출(오프라인 재생)"
+            + (" (기존 활성 작업에 다시 붙음)" if handle.reattached else "")
+            + " — `analysis/replay/`의 명시적 픽스처만 재생하며 없는 창·청크는"
+            " 실패로 기록된다(지어내지 않는다)."
+        )
+        return (
+            message + "\n\n" + self._analysis_state_markdown(root),
+            gr.Dropdown(choices=self.resumable_analysis_choices(root)),
+        )
+
+    def analysis_refresh_view(
+        self, signature: str | None
+    ) -> tuple[str, gr.Dropdown, gr.CheckboxGroup]:
+        """분석 새로고침 — 상태는 DB가 정본, 화면은 다시 읽기만 한다."""
+        root = self._require_current_selection(signature)
+        return (
+            self._analysis_state_markdown(root),
+            gr.Dropdown(choices=self.resumable_analysis_choices(root)),
+            gr.CheckboxGroup(choices=self.analysis_source_choices(root)),
+        )
+
+    def analysis_retry_view(self, signature: str | None, job_id: str | None) -> str:
+        """분석 재시도 이벤트 — 완료 원본은 캐시로, 실패 원본만 다시 분석한다."""
+        root = self._require_current_selection(signature)
+        if not job_id:
+            raise gr.Error("재시도할 분석 작업을 고르세요.")
+        try:
+            handle = self.raw.retry_analysis(root, job_id)
+        except raw_service.RawWorkspaceError as error:
+            raise gr.Error(str(error)) from error
+        return (
+            f"재시도 제출 — `{handle.job_id}`. 같은 지문의 완료 원본은 캐시로 이어"
+            " 붙고(다시 부르지 않는다) 실패 원본만 다시 분석한다."
+        )
+
+    def analysis_plan_view(self, signature: str | None) -> str:
+        """분석 결과를 A3 분할 계획으로 — 선택 밖·실패 원본은 전체 보존 한 조각."""
+        root = self._require_current_selection(signature)
+        try:
+            snapshot = self.raw.plan_segmentation_from_analysis(root)
+        except raw_service.RawWorkspaceError as error:
+            raise gr.Error(str(error)) from error
+        _ = snapshot  # 성공 증거는 갱신된 분할 패널 자체다
+        return self._segment_state_markdown(root)
+
+    @staticmethod
+    def _selected_asset_ids(selected: Sequence[str] | None) -> list[str] | None:
+        """체크 선택 — 비었거나 None이면 전체(서비스가 전체로 해석한다)."""
+        if not selected:
+            return None
+        return [str(item) for item in selected]
+
+    def resumable_analysis_choices(self, root: Path | None = None) -> list[tuple[str, str]]:
+        """재시도 가능한 분석 작업 — 실패·중단 상태만 골라 보인다."""
+        root = root if root is not None else self._snapshot_root()
+        if root is None:
+            return []
+        resumable = {"failed", "interrupted", "paused"}
+        return [
+            (
+                f"{job.job_id} · {job.status} · {job.progress_current}/{job.progress_total}",
+                job.job_id,
+            )
+            for job in self.raw.list_jobs(root)
+            if job.kind == raw_service.ANALYSIS_JOB_KIND and job.status in resumable
+        ]
 
     def _segment_state_markdown(self, root: Path | None) -> str:
         """분할 패널 보기 — 계획·추출 작업·게시된 조각을 DB에서 다시 읽는다."""
@@ -1234,6 +1553,9 @@ class RawWorkspaceUi:
         gr.Dropdown,
         str,
         gr.Dropdown,
+        str,
+        gr.Dropdown,
+        gr.CheckboxGroup,
     ]:
         """페이지 로드·새로고침 — 상태를 전부 서버에서 다시 읽는다.
 
@@ -1256,6 +1578,9 @@ class RawWorkspaceUi:
             gr.Dropdown(choices=self.resumable_extract_choices()),
             self._package_state_markdown(self._snapshot_root()),
             gr.Dropdown(choices=self.clip_choices()),
+            self._analysis_state_markdown(self._snapshot_root()),
+            gr.Dropdown(choices=self.resumable_analysis_choices()),
+            gr.CheckboxGroup(choices=self.analysis_source_choices()),
         )
 
     def build_blocks(self) -> gr.Blocks:
@@ -1266,7 +1591,7 @@ class RawWorkspaceUi:
             # 정본은 서버(DB)에 있고, 이 값은 새로고침마다 서버에서 다시 내려온다.
             self._signature_state = gr.State(None)
             open_button, create_button, ws_path_box, new_name_box = self._project_tab()
-            extract_button, refresh_segment, profile_dd = self._review_tab()
+            extract_button, refresh_segment, profile_dd, analysis_plan = self._review_tab()
             self._package_tab()
             self._caption_tab()
             # 추출 시작·새로고침은 3번 탭(package 패널)까지 만들어진 뒤에 묶는다.
@@ -1280,6 +1605,8 @@ class RawWorkspaceUi:
                 self._signature_state,
                 [self._segment_md, self._extract_jobs_dd, self._package_md, self._clip_dd],
             )
+            # 분석 결과 → 분할 계획: 결정적 분할 패널이 뒤에 만들어지므로 여기 묶는다.
+            analysis_plan.click(self.analysis_plan_view, self._signature_state, self._segment_md)
             # 만들기·열기는 **같은 화면**에 작업공간 전체 보기(서명·미디어·작업·설정)를
             # 바로 내린다 — 새로고침을 강제하지 않는다(루트 재현). 전환 이벤트의 출력
             # 목록은 모든 탭의 구성요소가 만들어진 뒤에야 완성되므로 여기서 묶는다.
@@ -1307,6 +1634,9 @@ class RawWorkspaceUi:
             and self._extract_jobs_dd is not None
             and self._package_md is not None
             and self._clip_dd is not None
+            and self._analysis_md is not None
+            and self._analysis_jobs_dd is not None
+            and self._analysis_sources_group is not None
             and self._signature_state is not None
         )
         return [
@@ -1324,6 +1654,9 @@ class RawWorkspaceUi:
             self._extract_jobs_dd,
             self._package_md,
             self._clip_dd,
+            self._analysis_md,
+            self._analysis_jobs_dd,
+            self._analysis_sources_group,
         ]
 
     # ── HTTP 경계 — 모든 요청에 Host/Origin 가드, 미디어는 ID로만 ──

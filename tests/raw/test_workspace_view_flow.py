@@ -78,6 +78,9 @@ def test_same_view_create_switches_the_whole_view(tmp_path: Path, local_socket: 
         extract_dd,
         package_md,
         clip_dd,
+        analysis_md,
+        analysis_dd,
+        analysis_sources,
     ) = first
     assert signature_a is not None
     assert "A" in workspace_md
@@ -85,7 +88,8 @@ def test_same_view_create_switches_the_whole_view(tmp_path: Path, local_socket: 
     assert "조사" in ingest_md  # 가져오기 패널도 같은 화면에 내려왔다(새 상태 안내)
     assert "분할" in segment_md  # A3 분할 패널도 같은 화면에 내려왔다
     assert "package" in package_md  # 편집용 폴더 패널도 같은 화면에 내려왔다
-    _ = media_dd, jobs_dd, jobs_md, ingest_dd, extract_dd, clip_dd
+    assert "의미 분석" in analysis_md  # A4 분석 패널도 같은 화면에 내려왔다
+    _ = media_dd, jobs_dd, jobs_md, ingest_dd, extract_dd, clip_dd, analysis_dd, analysis_sources
 
     second = server.create_workspace_view("B", str(tmp_path / "b"))
     assert second[1] is not None and second[1] != signature_a  # 서명이 B로 갱신

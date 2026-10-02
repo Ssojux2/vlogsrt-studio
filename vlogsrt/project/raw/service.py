@@ -10,19 +10,25 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import os
 import threading
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
-from datetime import UTC, datetime
+from dataclasses import asdict, dataclass
+from datetime import UTC, date, datetime
 from fractions import Fraction
 from pathlib import Path
 
 from vlogsrt import preprocess
+from vlogsrt.project.raw import analysis_workflow, segmentation
 from vlogsrt.project.raw import package as package_layout
 from vlogsrt.project.raw import runner as extract_runner
-from vlogsrt.project.raw import segmentation
+from vlogsrt.project.raw.analysis_config import (
+    RawUnderstandingSettings,
+    validate_understanding_settings,
+)
+from vlogsrt.project.raw.analysis_store import ANALYSIS_ROOT, AnalysisStore
 from vlogsrt.project.raw.config import (
     WORKFLOW_SCHEMA_VERSION,
     RawWorkflowConfig,
@@ -42,6 +48,8 @@ from vlogsrt.project.raw.ingest import (
 from vlogsrt.project.raw.jobs import JobContext, JobManager
 from vlogsrt.project.raw.models import (
     ACTIVE_JOB_STATUSES,
+    ANALYSIS_JOB_KIND,
+    ANALYSIS_MODES,
     EXTRACT_PROFILES,
     INGEST_JOB_KIND,
     MEDIA_KINDS,
@@ -50,6 +58,12 @@ from vlogsrt.project.raw.models import (
     SEGMENT_JOB_KIND,
     SEGMENTATION_BASIS_DETERMINISTIC,
     SEGMENTATION_BASIS_PLANNED,
+    SEGMENTATION_BASIS_SEMANTIC,
+    AnalysisError,
+    AnalysisEstimate,
+    AnalysisRevision,
+    AnalysisSourceResult,
+    AnalysisSummary,
     BrowseNotAllowedError,
     ByteRange,
     ClipArtifact,
@@ -85,6 +99,12 @@ from vlogsrt.project.raw.models import (
     WorkspaceStatus,
 )
 from vlogsrt.project.raw.source_order import propose_global_order as _propose_global_order
+from vlogsrt.project.raw.understanding_luna import (
+    AnalysisBudget,
+    OnlineAnalysisApproval,
+    estimate_luna_cost,
+    online_env_blocked,
+)
 from vlogsrt.project.raw.workspace import (
     DB_SCHEMA_VERSION,
     RawWorkspace,
@@ -94,6 +114,14 @@ from vlogsrt.project.raw.workspace import (
 __all__ = [
     # UI는 이 모듈만 가져갈 수 있다(정확 경로 예외) — 계약 오류도 여기서 다시 낸다.
     "ACTIVE_JOB_STATUSES",
+    "ANALYSIS_JOB_KIND",
+    "ANALYSIS_MODES",
+    "ANALYSIS_ROOT",
+    "AnalysisError",
+    "AnalysisEstimate",
+    "AnalysisRevision",
+    "AnalysisSourceResult",
+    "AnalysisSummary",
     "BrowseNotAllowedError",
     "ByteRange",
     "ClipArtifact",
@@ -129,6 +157,7 @@ __all__ = [
     "RawWorkspaceService",
     "ResolvedMedia",
     "SEGMENT_JOB_KIND",
+    "SEGMENTATION_BASIS_SEMANTIC",
     "SegmentCoverage",
     "SegmentPlanEntry",
     "SegmentPlanSnapshot",
@@ -185,6 +214,120 @@ def _extract_body(
         extract_runner.run_segment_extraction(context, workspace, plan, package, assets, handles)
 
     return body
+
+
+def _analysis_body(
+    workspace: RawWorkspace,
+    revision: AnalysisRevision,
+    order: GlobalOrderRevision,
+    assets: Mapping[str, SourceAsset],
+    settings: RawUnderstandingSettings,
+    workflow: RawWorkflowConfig,
+    providers: analysis_workflow.AnalysisProviders,
+) -> Callable[[JobContext], None]:
+    """분석 작업 본문 묶기 — 리비전·선택·호출 경계를 즉시 묶는다(§14.1)."""
+
+    def body(context: JobContext) -> None:
+        analysis_workflow.run_analysis(
+            context, workspace, revision, order, assets, settings, workflow, providers
+        )
+
+    return body
+
+
+def _analysis_estimate_for(
+    workspace: RawWorkspace,
+    asset: SourceAsset,
+    source_order: int,
+    settings: RawUnderstandingSettings,
+    workflow: RawWorkflowConfig,
+    window_width: Fraction,
+) -> AnalysisEstimate:
+    """원본 하나의 견적 — 창 수·청크 수는 측정값, 이미지 수는 상한, 금액은 상태.
+
+    오디오 분량은 아직 PCM을 뽑지 않았으므로 컨테이너 선언 길이로 잰다(추정임을
+    note가 말한다). 실제 실행은 이 값이 아니라 실측 원본·실측 분량으로 승인과
+    맞춰진다(§14.3).
+    """
+    path = workspace.root / asset.relative_path
+    probe = preprocess.probe_raw_media(path)
+    try:
+        clock = preprocess.probe_extraction_clock(path, probe=probe)
+    except RuntimeError as error:
+        return AnalysisEstimate(
+            asset_id=asset.asset_id,
+            source_order=source_order,
+            source_name=asset.source_name,
+            has_audio=bool(probe.audio),
+            audio_stream_index=probe.audio[0].stream_index if probe.audio else None,
+            sample_count=None,
+            video_frame_count=0,
+            extent_seconds="0",
+            window_count=0,
+            frame_sample_count=0,
+            asr_chunk_count=0,
+            asr_seconds="0",
+            luna_request_count=0,
+            price_status="unknown",
+            user_ceiling_total=None,
+            note=f"비디오 격자 조사 실패 — 분석 지원 밖이다: {error}",
+        )
+    note = "창·청크 수는 측정값, 이미지 수는 상한, 오디오 분량은 선언 길이 추정이다"
+    audio_seconds = Fraction(0)
+    if not clock.uniform_grid:
+        return AnalysisEstimate(
+            asset_id=asset.asset_id,
+            source_order=source_order,
+            source_name=asset.source_name,
+            has_audio=bool(probe.audio),
+            audio_stream_index=probe.audio[0].stream_index if probe.audio else None,
+            sample_count=None,
+            video_frame_count=clock.frame_count,
+            extent_seconds=str(clock.exact_end - clock.presentation_origin),
+            window_count=0,
+            frame_sample_count=0,
+            asr_chunk_count=0,
+            asr_seconds="0",
+            luna_request_count=0,
+            price_status="unknown",
+            user_ceiling_total=None,
+            note=f"원본이 균일 격자가 아니다(VFR) — 분석 지원 밖이다: {clock.grid_note}",
+        )
+    video_extent = clock.frame_count * clock.frame_duration
+    extent = video_extent
+    if probe.audio:
+        audio_seconds = max(Fraction(0), probe.duration)
+        extent = max(extent, audio_seconds)
+    window_count = max(1, math.ceil(extent / window_width))
+    chunk_bound = min(
+        int(float(settings.asr_chunk_max_seconds) * 16000),
+        settings.asr_chunk_max_bytes // (2 * (probe.audio[0].channels if probe.audio else 1)),
+    )
+    asr_chunks = max(1, math.ceil(audio_seconds * 16000 / chunk_bound)) if probe.audio else 0
+    estimate = estimate_luna_cost(
+        window_count,
+        AnalysisBudget(max_luna_requests=window_count, max_asr_chunks=max(1, asr_chunks)),
+    )
+    return AnalysisEstimate(
+        asset_id=asset.asset_id,
+        source_order=source_order,
+        source_name=asset.source_name,
+        has_audio=bool(probe.audio),
+        audio_stream_index=probe.audio[0].stream_index if probe.audio else None,
+        sample_count=int(audio_seconds * 16000) if probe.audio else None,
+        video_frame_count=clock.frame_count,
+        extent_seconds=str(extent),
+        window_count=window_count,
+        frame_sample_count=window_count * settings.max_images_per_window,
+        asr_chunk_count=asr_chunks,
+        asr_seconds=str(audio_seconds),
+        luna_request_count=estimate.request_count,
+        price_status=estimate.price_status,
+        user_ceiling_total=(
+            str(estimate.user_ceiling_total) if estimate.user_ceiling_total is not None else None
+        ),
+        note=f"{note}. Luna: {estimate.note}",
+    )
 
 
 BROWSE_ENTRY_LIMIT = 500
@@ -645,13 +788,16 @@ class RawWorkspaceService:
         order_revision_id: str | None = None,
         intervals: Mapping[str, Sequence[PlannedInterval]] | None = None,
         tile_seconds: Fraction = segmentation.DEFAULT_TILE_SECONDS,
+        basis: str | None = None,
     ) -> SegmentPlanSnapshot:
         """확정된 전체 순서 위에서 원본별 시계를 잰 뒤 분할 계획 리비전을 만든다.
 
         원본은 **지금 다시 검증한다**(크기·SHA-256 재독출) — 계획의 지문이 원본
         내용을 묶으므로, 검증된 적 없거나 그 사이 바뀐 원본 위에 계획을 세우지
         않는다(§14.2). 구간을 주면 그 격자로, 안 주면 균일 타일로 전체를 덮는다.
-        새 계획은 새 리비전일 뿐 옛 계획을 다시 쓰지 않는다(§6.5).
+        새 계획은 새 리비전일 뿐 옛 계획을 다시 쓰지 않는다(§6.5). `basis`는
+        구간의 출처 표기다(기본: 사람 구간/결정적 타일) — A4 의미 분석이
+        `plan_segmentation_from_analysis`로 조정 구간을 줄 때만 semantic 값을 쓴다.
         """
         workspace = self._workspace(root)
         revision = self._order_revision(root, order_revision_id)
@@ -686,7 +832,8 @@ class RawWorkspaceService:
         snapshot = SegmentPlanSnapshot(
             revision_id=new_segment_plan_revision_id(),
             order_revision_id=revision.revision_id,
-            basis=SEGMENTATION_BASIS_PLANNED if planned else SEGMENTATION_BASIS_DETERMINISTIC,
+            basis=basis
+            or (SEGMENTATION_BASIS_PLANNED if planned else SEGMENTATION_BASIS_DETERMINISTIC),
             entries=tuple(
                 sorted(entries, key=lambda item: (item.source_order, item.segment_order))
             ),
@@ -806,6 +953,405 @@ class RawWorkspaceService:
 
     def list_package_clips(self, root: Path, package_dir: str) -> tuple[ClipArtifact, ...]:
         return self._workspace(root).list_clip_artifacts(package_dir)
+
+    # ── A4 — 의미 분석(견적·실행·재개·읽기·A3 연결) ───────────
+
+    def analysis_estimate(
+        self,
+        root: Path,
+        asset_ids: Sequence[str] | None = None,
+        settings: RawUnderstandingSettings | None = None,
+    ) -> tuple[AnalysisEstimate, ...]:
+        """선택 원본의 분석 견적 — 로컬 조사만, 실제 호출은 전혀 없다(§14.3).
+
+        창·프레임·청크 수는 측정된 시계에서 잰 값이고(이미지 수는 상한),
+        Luna 단가는 미확인이라 금액을 만들지 않는다. 실제 호출은 이 견적을 본
+        사람의 승인 뒤에만 시작한다.
+        """
+        workspace = self._workspace(root)
+        order = self._order_revision(root, None)
+        understanding = settings or RawUnderstandingSettings()
+        validate_understanding_settings(understanding)
+        workflow = self.settings(root)
+        selected = self._analysis_selection(root, order, asset_ids)
+        width = Fraction(str(understanding.window_seconds))
+        estimates: list[AnalysisEstimate] = []
+        for entry in sorted(order.entries, key=lambda item: item.ordinal):
+            asset = selected.get(entry.asset_id)
+            if asset is None:
+                continue
+            estimates.append(
+                _analysis_estimate_for(
+                    workspace, asset, entry.ordinal, understanding, workflow, width
+                )
+            )
+        return tuple(estimates)
+
+    def start_analysis(
+        self,
+        root: Path,
+        *,
+        asset_ids: Sequence[str] | None = None,
+        settings: RawUnderstandingSettings | None = None,
+        mode: str = "replay",
+        fixtures_dir: Path | None = None,
+        approvals: Mapping[str, object] | None = None,
+        sender: object | None = None,
+        cfg: object | None = None,
+        client: object | None = None,
+        on: date | None = None,
+    ) -> JobHandle:
+        """의미 분석 작업을 제출한다 — 기본은 **오프라인 재생**, 실제 호출은 승인만.
+
+        `mode="live"`는 사람이 만든 원본별 `OnlineAnalysisApproval`과 전송 경계
+        (sender·cfg·client)를 전부 요구하고, 환경(`VLOGSRT_OFFLINE`)과 작업공간
+        `network_mode`가 함께 열려 있어야만 시작한다(§14.3). 전송 순간의 재검사는
+        작업 본문의 게이트가 맡는다 — 여기는 빠른 실패다.
+        """
+        workspace = self._workspace(root)
+        if mode not in ANALYSIS_MODES:
+            supported = ", ".join(ANALYSIS_MODES)
+            raise AnalysisError(f"알 수 없는 분석 모드: {mode!r} (지원: {supported})")
+        order = self._order_revision(root, None)
+        understanding = settings or RawUnderstandingSettings()
+        validate_understanding_settings(understanding)
+        workflow = self.settings(root)
+        assets = self._analysis_selection(root, order, asset_ids)
+        providers = self._analysis_providers(
+            root, mode, fixtures_dir, approvals, sender, cfg, client, workflow, on, assets
+        )
+        fingerprint = self._analysis_fingerprint(
+            order.revision_id, assets, understanding, workflow, mode
+        )
+        active = next(
+            (
+                job
+                for job in self.list_jobs(root)
+                if job.kind == ANALYSIS_JOB_KIND
+                and job.status in ACTIVE_JOB_STATUSES
+                and job.input_fingerprint == fingerprint
+            ),
+            None,
+        )
+        if active is not None:
+            # 같은 지문의 활성 분석이 있으면 그 작업에 다시 붙는다 — 리비전을
+            # 새로 만들지 않는다(예약만 남는 고아가 생기지 않게, §14.1).
+            return JobHandle(job_id=active.job_id, reattached=True)
+        revision = AnalysisRevision(
+            revision_id=analysis_workflow.new_revision_id(),
+            order_revision_id=order.revision_id,
+            basis="user_selected" if asset_ids is not None else "all_ready_sources",
+            mode=mode,
+            settings_json=json.dumps(asdict(understanding), ensure_ascii=False, sort_keys=True),
+            models_json=json.dumps(
+                {"timing": workflow.models.timing_model, "luna": workflow.models.luna_model},
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
+            fingerprint=fingerprint,
+            status="reserved",
+            source_total=len(order.entries),
+            source_done=0,
+            error=None,
+            created_at=_plan_timestamp(),
+            updated_at=_plan_timestamp(),
+        )
+        AnalysisStore(workspace).insert_revision(revision)
+        return self.submit_job(
+            root,
+            ANALYSIS_JOB_KIND,
+            fingerprint,
+            _analysis_body(workspace, revision, order, assets, understanding, workflow, providers),
+            total=len(order.entries),
+        )
+
+    def retry_analysis(
+        self,
+        root: Path,
+        job_id: str,
+        *,
+        fixtures_dir: Path | None = None,
+        approvals: Mapping[str, object] | None = None,
+        sender: object | None = None,
+        cfg: object | None = None,
+        client: object | None = None,
+        on: date | None = None,
+    ) -> JobHandle:
+        """실패·중단된 분석의 명시적 재시도 — 같은 작업 ID·같은 지문으로 다시 붙는다.
+
+        선택·설정·모드는 리비전 기록에서 다시 만들고, 지문은 지금의 설정으로 다시
+        계산해 기록과 맞춘다 — 설정이 바뀌었으면 재결합이 거부된다(§14.2). 완료
+        원본은 캐시로 이어 붙으므로 다시 부르지 않고, 실패 원본만 다시 분석한다.
+        """
+        workspace = self._workspace(root)
+        store = AnalysisStore(workspace)
+        record = self.get_job(root, job_id)
+        if record.kind != ANALYSIS_JOB_KIND:
+            raise AnalysisError(f"의미 분석 작업이 아니다: {job_id} ({record.kind})")
+        revision = next(
+            (
+                item
+                for item in store.list_revisions()
+                if item.fingerprint == record.input_fingerprint
+            ),
+            None,
+        )
+        if revision is None:
+            raise AnalysisError(
+                f"작업 {job_id}의 지문과 같은 분석 리비전을 찾지 못했다 — 새 분석을 시작하세요"
+            )
+        order = self._order_revision(root, revision.order_revision_id)
+        understanding = RawUnderstandingSettings(**json.loads(revision.settings_json))
+        validate_understanding_settings(understanding)
+        workflow = self.settings(root)
+        rows = store.list_source_results(revision.revision_id)
+        selected_ids = [row.asset_id for row in rows if row.status != "unanalyzed"]
+        if not selected_ids:
+            raise AnalysisError("재시도할 선택 원본이 기록에 없다 — 새 분석을 시작하세요")
+        assets = self._analysis_selection(root, order, selected_ids)
+        providers = self._analysis_providers(
+            root, revision.mode, fixtures_dir, approvals, sender, cfg, client, workflow, on, assets
+        )
+        fingerprint = self._analysis_fingerprint(
+            order.revision_id, assets, understanding, workflow, revision.mode
+        )
+        return self.resume_job(
+            root,
+            job_id,
+            _analysis_body(workspace, revision, order, assets, understanding, workflow, providers),
+            fingerprint,
+        )
+
+    def analysis_overview(
+        self, root: Path, revision_id: str | None = None
+    ) -> AnalysisSummary | None:
+        """분석 읽기 모델 — 리비전과 원본별 결과(상태·창 수·실행 모드·오류)."""
+        workspace = self._workspace(root)
+        store = AnalysisStore(workspace)
+        revisions = store.list_revisions()
+        revision = None
+        if revision_id is not None:
+            revision = next((item for item in revisions if item.revision_id == revision_id), None)
+        elif revisions:
+            revision = revisions[-1]
+        if revision is None:
+            return None
+        return AnalysisSummary(
+            revision=revision,
+            results=store.list_source_results(revision.revision_id),
+        )
+
+    def analysis_document(
+        self, root: Path, revision_id: str, asset_id: str
+    ) -> dict[str, object] | None:
+        """원본 하나의 첫 단계 문서(읽기 전용) — 요약·태그 읽기용, SRT는 없다."""
+        workspace = self._workspace(root)
+        row = AnalysisStore(workspace).source_result(revision_id, asset_id)
+        if row is None or row.document_path is None:
+            return None
+        path = workspace.root / row.document_path
+        try:
+            body = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as error:
+            raise AnalysisError(
+                f"분석 문서를 읽지 못했다: {row.document_path} — {error}"
+            ) from error
+        if not isinstance(body, dict):
+            raise AnalysisError(f"분석 문서가 JSON 객체가 아니다: {row.document_path}")
+        return body
+
+    def plan_segmentation_from_analysis(
+        self, root: Path, analysis_revision_id: str | None = None
+    ) -> SegmentPlanSnapshot:
+        """받아들인 분석을 A3 분할 계획으로 잇는다 — 전체 순서는 항상 전부 산다.
+
+        분석된 원본은 문서 기록의 정확한 유리수 구간이 비디오 격자 타일이 되고,
+        선택 밖·실패 원본은 **원본 전체를 한 조각으로 보존**한다(삭제·재정렬 없음,
+        §6.1·§7.6). 계획 검증·원본 재검증은 A3의 순수 계층이 다시 한다 — 이
+        함수는 새 계획 리비전을 만들 뿐 옛 계획·package는 그대로 둔다(§6.5).
+        """
+        workspace = self._workspace(root)
+        store = AnalysisStore(workspace)
+        revisions = store.list_revisions()
+        revision = None
+        if analysis_revision_id is not None:
+            revision = next(
+                (item for item in revisions if item.revision_id == analysis_revision_id), None
+            )
+        elif revisions:
+            revision = revisions[-1]
+        if revision is None:
+            raise AnalysisError("분석 리비전이 없다 — 먼저 의미 분석을 실행하세요")
+        if revision.status != "complete":
+            raise AnalysisError(
+                f"분석이 완성 상태가 아니다({revision.status}) — 완료된 리비전만 계획에 쓴다"
+            )
+        order = self._order_revision(root, revision.order_revision_id)
+        rows = {row.asset_id: row for row in store.list_source_results(revision.revision_id)}
+        intervals: dict[str, list[PlannedInterval]] = {}
+        for entry in sorted(order.entries, key=lambda item: item.ordinal):
+            row = rows.get(entry.asset_id)
+            if row is None:
+                raise AnalysisError(
+                    f"분석 결과 행이 없다: {entry.asset_id} — 분석을 다시 실행하세요"
+                )
+            intervals[entry.asset_id] = self._analysis_intervals(workspace, row, entry.asset_id)
+        return self.plan_segmentation(
+            root,
+            order_revision_id=revision.order_revision_id,
+            intervals=intervals,
+            basis=SEGMENTATION_BASIS_SEMANTIC,
+        )
+
+    # ── A4 내부 — 선택·지문·공급자·구간 조립 ────────────────────
+
+    def _analysis_selection(
+        self, root: Path, order: GlobalOrderRevision, asset_ids: Sequence[str] | None
+    ) -> dict[str, SourceAsset]:
+        """분석 선택 원본 — 전체이거나 순서 리비전 안의 명시적 부분집합이다."""
+        workspace = self._workspace(root)
+        known = {entry.asset_id for entry in order.entries}
+        if asset_ids is None:
+            chosen = sorted(known)
+        else:
+            given = [item.strip() for item in asset_ids if item.strip()]
+            unknown = [item for item in given if item not in known]
+            if unknown:
+                raise AnalysisError(
+                    f"순서 리비전에 없는 자산이다: {', '.join(unknown[:3])} —"
+                    " 확정된 전체 순서의 원본만 선택할 수 있다"
+                )
+            if not given:
+                raise AnalysisError("선택한 원본이 비었다 — 전체 또는 한 개 이상을 고르세요")
+            chosen = sorted(set(given))
+        return {asset_id: _verified_asset(workspace, asset_id) for asset_id in chosen}
+
+    def _analysis_providers(
+        self,
+        root: Path,
+        mode: str,
+        fixtures_dir: Path | None,
+        approvals: Mapping[str, object] | None,
+        sender: object,
+        cfg: object,
+        client: object,
+        workflow: RawWorkflowConfig,
+        on: date | None,
+        assets: Mapping[str, SourceAsset],
+    ) -> analysis_workflow.AnalysisProviders:
+        """작업의 호출 경계 — 재생 픽스처 또는 사람이 공급한 실제 호출 재료."""
+        if mode == "replay":
+            directory = fixtures_dir
+            if directory is None:
+                directory = (
+                    self._workspace(root).root
+                    / ANALYSIS_ROOT
+                    / analysis_workflow.REPLAY_FIXTURES_DIRNAME
+                )
+            return analysis_workflow.AnalysisProviders(
+                origin="replay", replay=analysis_workflow.load_replay_fixtures(directory)
+            )
+        blocked = online_env_blocked()
+        if blocked is not None:
+            raise AnalysisError(blocked)
+        if workflow.network_mode != "online":
+            raise AnalysisError(
+                "작업공간 network_mode가 online이 아니다 — 실제 호출 분석을 시작할 수 없다"
+            )
+        if approvals is None or sender is None or cfg is None or client is None:
+            raise AnalysisError(
+                "실제 호출 분석에는 원본별 승인·전송 경계(sender·cfg)·클라이언트가"
+                " 전부 필요하다 — 사람이 공급한다(브라우저는 만들 수 없다)"
+            )
+        missing = [asset_id for asset_id in assets if asset_id not in approvals]
+        if missing:
+            raise AnalysisError(f"실제 호출 승인이 없는 원본이다: {', '.join(sorted(missing)[:3])}")
+        checked: dict[str, OnlineAnalysisApproval] = {}
+        for asset_id, approval in approvals.items():
+            if not isinstance(approval, OnlineAnalysisApproval) or not approval.approved:
+                raise AnalysisError("승인 기록이 OnlineAnalysisApproval이 아니거나 미승인이다")
+            checked[asset_id] = approval
+        for asset_id, asset in assets.items():
+            approval = checked[asset_id]
+            if approval.source_sha256 != (asset.content_sha256 or ""):
+                raise AnalysisError(
+                    f"승인이 본 원본과 지금의 원본이 다르다: {asset.source_name} — 새 추정과"
+                    " 새 승인을 받아라(§14.3)"
+                )
+            if approval.asr_model != workflow.models.timing_model or (
+                approval.luna_model != workflow.models.luna_model
+            ):
+                raise AnalysisError(
+                    f"승인이 본 모델과 설정 모델이 다르다: {asset.source_name}"
+                    f" (ASR {approval.asr_model!r}/{workflow.models.timing_model!r},"
+                    f" Luna {approval.luna_model!r}/{workflow.models.luna_model!r})"
+                )
+        return analysis_workflow.AnalysisProviders(
+            origin="live",
+            live_sender=sender,
+            live_cfg=cfg,
+            live_client=client,
+            approvals=checked,
+            on=on,
+        )
+
+    def _analysis_fingerprint(
+        self,
+        order_revision_id: str,
+        assets: Mapping[str, SourceAsset],
+        settings: RawUnderstandingSettings,
+        workflow: RawWorkflowConfig,
+        mode: str,
+    ) -> str:
+        """분석 리비전 지문 — 순서·선택·설정·모델·모드를 묶는다(작업 재결합의 키)."""
+        payload = json.dumps(
+            {
+                "schema": "raw-analysis-revision/v1",
+                "order_revision": order_revision_id,
+                "assets": sorted(
+                    (asset_id, asset.content_sha256 or "") for asset_id, asset in assets.items()
+                ),
+                "settings": asdict(settings),
+                "models": {
+                    "timing": workflow.models.timing_model,
+                    "luna": workflow.models.luna_model,
+                },
+                "mode": mode,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def _analysis_intervals(
+        self,
+        workspace: RawWorkspace,
+        row: AnalysisSourceResult,
+        asset_id: str,
+    ) -> list[PlannedInterval]:
+        """원본 하나의 계획 구간 — 분석됨은 기록 그대로, 아니면 전체 보존 한 조각."""
+        if row.status in ("analyzed", "cached") and row.record_path is not None:
+            path = workspace.root / row.record_path
+            try:
+                record = json.loads(path.read_text(encoding="utf-8"))
+                spans = record["intervals"]
+            except (OSError, ValueError, KeyError, TypeError) as error:
+                raise AnalysisError(
+                    f"분석 기록을 읽지 못했다: {row.record_path} — {error}"
+                ) from error
+            intervals = [
+                PlannedInterval(
+                    start=Fraction(int(item["start"]["num"]), int(item["start"]["den"])),
+                    end=Fraction(int(item["end"]["num"]), int(item["end"]["den"])),
+                )
+                for item in spans
+            ]
+            if intervals:
+                return intervals
+        asset = _verified_asset(workspace, asset_id)
+        facts = _measured_source(workspace, asset)
+        playable = (facts.exact_end_pts - facts.clock.first_pts) * facts.clock.time_base
+        return [PlannedInterval(start=Fraction(0), end=playable)]
 
     # ── A3 내부 — 계획·package 짝 맞추기 ────────────────────────
 
