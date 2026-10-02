@@ -26,6 +26,10 @@ pip install -e ".[ui]"        # (선택) 웹 UI
 
 `.env`의 `VLOGSRT_OFFLINE` 기본값은 `1`이다. **아무것도 하지 않으면 API를 부르지 않는다.**
 
+> **원본 영상 브라우저 v2**(SD 카드 가져오기 → 시간순 조각 → 편집용 폴더 → 최종
+> 자막)의 실행 절차는 `docs/raw-video-workflow.md`, 수동 인수표는
+> `docs/reports/2026-10-02-raw-video-manual-acceptance.md`에 있다.
+
 ---
 
 ## 쓰기 — 웹 UI
