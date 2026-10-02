@@ -9,7 +9,7 @@
 수동 인수 절차와 미실행 항목은 `docs/reports/2026-10-02-raw-video-manual-acceptance.md`가
 마는 곳이다.
 
-## 현재 상태 (main f939478 기준)
+## 현재 상태 (main 1b7283d 기준 — 이 브랜치에 A5/A6 검토 백엔드가 더해졌다)
 
 | 단계 | 상태 | 어디서 |
 |---|---|---|
@@ -17,12 +17,14 @@
 | SD/폴더 조사·복사·검증(A2) | 실행 가능 | UI 화면 1 · `vlogsrt media import` |
 | 전체 원본 순서 확정 | 실행 가능 | UI 화면 1 버튼(전용 CLI 동사는 아직 없다) |
 | 결정적 분할 계획·추출·조각 목록(A3) | 실행 가능 | UI 화면 2 · `vlogsrt media plan/extract/clips` |
-| 조각 검토·경계 편집·VTT(A5) | **라이브러리만** — 시험 통과, 화면·CLI 대기 | `segment_review.py`·`review_projection.py` |
-| 편집용 폴더 확정·캐시 정리(A6) | **라이브러리만** — 시험 통과, 화면·CLI 대기 | `confirmed_package.py`·`cache_policy.py` |
-| 의미 분석 Luna(A4) | 미병합(f431d4a 비승인) | — |
-| 최종 자막(A7) | **라이브러리만** — 화면 4는 읽기 전용, 버튼 비활성 | `final_video.py`·`final_caption.py` 등 |
+| 의미 분석 Luna(A4) | 실행 가능 — 1b7283d에서 승인·병합(전용 CLI 동사는 없다) | UI 화면 2 분석 패널 · 서비스 계층 |
+| 조각 검토·경계 편집·VTT(A5) | **라이브러리·백엔드만** — 화면·CLI 대기 | `segment_review.py`·`review_projection.py`·`review_workspace.py` |
+| 편집용 폴더 확정·캐시 정리(A6) | **라이브러리·백엔드만** — 화면·CLI 대기 | `confirmed_package.py`·`cache_policy.py`·`review_workspace.py` |
+| 최종 자막(A7) | **라이브러리만**(A7-3 13ad043 승인·병합) — 화면 4는 읽기 전용, 버튼 비활성 | `final_video.py`·`final_caption.py`·`caption_review.py` 등 |
 
-현재 살아 있는 화면 3은 package 경로 표시·새로고침뿐이고 화면 4는 설정 요약뿐이다.
+아래 시험 수치의 702 passed는 f939478 당시의 역사 기록이고, 이 문서 개정
+시점(1b7283d + 검토 백엔드)에는 `pytest tests/raw`가 **805 passed**다. 현재
+살아 있는 화면 3은 package 경로 표시·새로고침뿐이고 화면 4는 설정 요약뿐이다.
 둘 다 정직하게 비활성 상태로 남아 있다.
 
 ## 설치
@@ -57,9 +59,10 @@ make ui                       # http://127.0.0.1:7860
 pytest tests/raw              # 합성 MP4(ffmpeg lavfi)·기록된 응답만 쓴다
 ```
 
-2026-10-02 f939478에서 702 passed(약 61초). 가져오기 중복·복사 실패 재개·경로
-검문·순서·추출 재개·검토 리비전·확정 내보내기·캐시 보호·최종 자막 직렬화까지
-이 안에 있다.
+2026-10-02 f939478에서 702 passed(약 61초, 역사 기록). 같은 날 main 1b7283d +
+검토 백엔드 시점에는 **805 passed**(약 106초). 가져오기 중복·복사 실패 재개·경로
+검문·순서·추출 재개·검토 리비전·검토 백엔드 종단·확정 내보내기·캐시 보호·최종
+자막 직렬화까지 이 안에 있다.
 
 ### 2. 진단 CLI 종단(실제 명령 흐름)
 
@@ -67,17 +70,26 @@ pytest tests/raw              # 합성 MP4(ffmpeg lavfi)·기록된 응답만 �
 돈다. 전부 로컬이고 네트워크가 없다.
 
 ```bash
-# 합성 카드 — 검은 화면 2초 MP4 두 개(촬영 시각은 mtime으로 흉내 낸다)
+mkdir -p /tmp/card   # ffmpeg는 폴더를 만들지 않는다 — 먼저 만든다
+# 합성 카드 — 검은 화면 2초 MP4 두 개. 촬영 시각은 컨테이너 creation_time에
+# 명시적인 ISO-8601(시간대 포함)으로 적는다 — mtime은 순서 근거가 아니다.
 ffmpeg -y -f lavfi -i color=black:s=64x32:r=10:d=2 -f lavfi -i anullsrc=r=8000:cl=mono \
-  -shortest -c:v libx264 -preset ultrafast -pix_fmt yuv420p -c:a aac /tmp/card/clip_a.mp4
+  -shortest -c:v libx264 -preset ultrafast -pix_fmt yuv420p -c:a aac \
+  -metadata creation_time=2026-10-02T09:00:00+00:00 /tmp/card/clip_a.mp4
 ffmpeg -y -f lavfi -i color=black:s=64x32:r=10:d=2 -f lavfi -i anullsrc=r=8000:cl=mono \
-  -shortest -c:v libx264 -preset ultrafast -pix_fmt yuv420p -c:a aac /tmp/card/clip_b.mp4
+  -shortest -c:v libx264 -preset ultrafast -pix_fmt yuv420p -c:a aac \
+  -metadata creation_time=2026-10-02T09:05:00+00:00 /tmp/card/clip_b.mp4
 
 vlogsrt media init /tmp/ws --name 문서확인
 vlogsrt media import /tmp/card --workspace /tmp/ws            # 제안만 인쇄(쓰기 없음)
 vlogsrt media import /tmp/card --workspace /tmp/ws --confirm  # 순서 확정 + 복사·검증
 vlogsrt media inspect --workspace /tmp/ws
 ```
+
+촬영 시각 계약: 조사자는 컨테이너가 선언한 `creation_time`을 **유효할 때만**
+(ISO-8601·시간대·상식 bound를 통과할 때만) 순서 근거로 쓴다. 값이 없거나 못
+미치는 실물 카드에서는 순서를 **사람이 확정 대화에서 명시적으로 확인한다**
+(`user_confirmed`) — 파일 수정 시각(mtime)으로 시간순을 메우는 길은 없다.
 
 여기서 `plan`으로 넘어가려면 **전체 원본 순서 확정**이 필요하다. 이 확정은 지금
 UI(화면 1의 `전체 원본 순서 확정` 버튼)와 서비스 계층에만 있다 — 전용 CLI 동사는
@@ -119,20 +131,25 @@ vlogsrt media clips --workspace /tmp/ws       # 조각 목록 + 전달물(clips.
 
 ## 대기 중인 통합 — 명령이 없는 단계
 
-아래는 **라이브러리와 시험은 main에 있지만** 서비스·화면·CLI로 아직 열리지
-않은 것들이다. 이 문서는 실행 가능한 명령을 만들어 적지 않는다.
+아래는 **라이브러리·백엔드와 시험은 브랜치에 있지만** 공개 서비스·화면·CLI로
+아직 열리지 않은 것들이다. 이 문서는 실행 가능한 명령을 만들어 적지 않는다.
 
 - **A5 조각 검토** — 경계 이동·분할·인접 병합·사용/제외 리비전, 검토용 VTT 투영.
   `segment_review.py`·`review_projection.py` + `tests/raw/test_segment_review.py`·
-  `test_review_projection.py`.
+  `test_review_projection.py`. 검토의 **지속 작업공간 백엔드**(초기화·stale-head
+  편집·재계획 환원·측정 VTT·확정 내보내기·관리 정리·미리보기 복원)는 이제
+  `review_workspace.py`·`review_workspace_store.py` +
+  `test_review_workspace.py`로 이 브랜치에 있다 — W1이 공개 서비스·화면으로
+  연다(작업 제출·불투명 ID 등록·Finder 열기는 W1 소유).
 - **A6 편집용 폴더 확정** — 검증된 조각을 `clips/confirmed_*`에 불변 복사(게시·
   멱등 검증), 캐시 정리(`cache/`·`previews/`만, 보호 이름 거부).
   `confirmed_package.py`·`cache_policy.py` + `test_confirmed_package.py`·
-  `test_cache_policy.py`. W1이 신원 등록·DB·Finder 열기를 연다.
-- **A4 의미 분석** — 계획 §7의 Luna 분석. f431d4a는 비승인·미병합이다.
+  `test_cache_policy.py`. 내보내기 리비전 기록은 검토 백엔드가 소유하고 W1이
+  신원 등록·중앙 DB 마이그레이션(v6)·Finder 열기를 연다.
 - **A7 최종 자막** — 최종 영상 등록→문구/시간 모델 명시적 승인→SRT.
-  `final_video.py`·`final_caption.py`·`caption_provider.py`·`caption_artifacts.py` +
-  시험. 화면 4의 `정밀 자막 생성`·`SRT 내보내기` 버튼은 `interactive=False`다.
+  `final_video.py`·`final_caption.py`·`caption_provider.py`·`caption_artifacts.py`
+  (+ 승인·병합된 `caption_review.py` 등 A7-3) + 시험. 화면 4의 `정밀 자막 생성`·
+  `SRT 내보내기` 버튼은 `interactive=False`다 — W1 통합 대기.
 
 ## 지키는 선 (이 워크플로의 안전 규칙)
 

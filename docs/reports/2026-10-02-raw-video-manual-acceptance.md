@@ -4,24 +4,27 @@
 루트의 독립 인수만 한다 — 이 초안의 어떤 항목도 사람 실기 확인을 완료로 표기하지
 않는다. 실행 가능한 절차는 `docs/raw-video-workflow.md`에 있다.
 
-## 기준선 (2026-10-02)
+## 기준선 (2026-10-02, 개정: main 1b7283d)
 
 - main **f939478**에서 루트 전체 점검: **3746 passed**, all21 invariants·Ruff·
-  format·mypy PASS (루트 기록, 이 문서는 재인용).
-- 같은 커밋에서 이번 작성 중 재확인: `pytest tests/raw` → **702 passed** (약 61초,
-  합성 미디어·오프라인, exit 0).
-- **A4 f431d4a·A7-3 13ad043은 비승인·미병합** — 아래 표의 해당 항목은 통합 대기다.
+  format·mypy PASS (루트 기록, 이 문서는 재인용 — 역사 기록).
+- 같은 날 루트 승인·병합: **A4(f431d4a)·A7-3(13ad043) → main 1b7283d**
+  (루트 재현 탐침 통과 — 실측 스테레오 오프셋·NTSC 무성, 2단계 승인 게이트,
+  검토 리비전). 화면 4는 여전히 읽기 전용이므로 아래 A7 항목의 **UI 통합은
+  PENDING** 그대로다.
+- 이 문서 작성 중 재확인: `pytest tests/raw` → f939478에서 **702 passed**, 개정
+  시점(1b7283d + 검토 백엔드)에는 **805 passed** (합성 미디어·오프라인, exit 0).
 - 화면 3(편집용 폴더)·화면 4(최종 자막)는 읽기 전용 상태이며 버튼이 비활성이다.
 
 ## 기계 현재 상태 — AI Rough Cut 플러그인 비활성
 
-사용자 요청으로 루트가 조치한 상태다. **재활성화·재설치하지 않는다.**
+사용자 요청에 따라 **루트가** 조치한 상태다. **재활성화·재설치하지 않는다.**
 
 - `pluginkit ignore com.ssojux2.vlogsrt.workflow` 적용됨.
 - 등록 복사본 다섯 벌 unregistered — 이후 `pluginkit` 조회 일치 0건(match0).
-- 호스트 앱 `/Applications/FinalCutAgent.app`은 사용자가 휴지통으로 옮겼다
-  (`FinalCutAgent-disabled-20261002-220737.app`, 2026-10-02 22:07) — 영구 삭제가
-  아니라 휴지통에 보존된 비활성 상태다.
+- 호스트 앱 `/Applications/FinalCutAgent.app`은 **루트가 사용자 지시에 따라**
+  휴지통으로 옮겼다(`FinalCutAgent-disabled-20261002-220737.app`, 2026-10-02
+  22:07) — 영구 삭제가 아니라 휴지통에 보존된 비활성 상태다.
 - **재설치·재활성화하지 않는다.** 실행 중인 Final Cut Pro는 재시작되지 않았다 —
   재시작 후 비활성 확인: PENDING_HUMAN.
 
@@ -41,7 +44,7 @@
 | 1-4 | 화면 2 — 결정적 계획·추출·재시도 | 확정 순서 위 계획 → 추출 | 전체 덮개, 중간 실패 재개 시 기존 번호·파일 보존 | PASS(자동: test_segmentation·test_segment_runner) |
 | 1-5 | 화면 2 — 조각 재생 | 조각 선택 → ID 기반 스트리밍 | 원본 루트 밖 경로·비밀 파일 거부, Range 206 | PASS(자동: test_media_access·test_access_policy) · 실브라우저 PENDING_HUMAN |
 | 1-6 | 화면 3 — 편집용 폴더 | package 상태 새로고침 | 경로 표시·복사만. 확정·선택본 내보내기 버튼 없음(정직한 비활성) | PENDING(통합: A6 라이브러리는 시험 통과) |
-| 1-7 | 화면 4 — 최종 자막 | 탭 열기 | 설정 요약만, `정밀 자막 생성`·`SRT 내보내기` 비활성 | PENDING(통합: A7-3 13ad043 비승인) |
+| 1-7 | 화면 4 — 최종 자막 | 탭 열기 | 설정 요약만, `정밀 자막 생성`·`SRT 내보내기` 비활성 | PENDING(통합: A7-3 13ad043은 1b7283d에 승인·병합 — W1 UI 연결 대기) |
 
 ### 2. 불변 복사·순서·추출·재개 (immutable copy / order / extract / resume)
 
