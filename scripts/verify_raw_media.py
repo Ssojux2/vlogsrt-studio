@@ -5,9 +5,18 @@
 규칙 7) A3 인수 검증과 현장 진단에 필요한 증거를 찍는다. 네트워크·API는 전혀
 부르지 않는다.
 
+종료 코드 — **초록이 아니면 0이 아니다**(지원 밖이 조용한 성공으로 보이면
+인수 검증이 거짓 초록이 된다):
+  0 = 모든 원본이 조사·판정 통과(및 요청한 추출 스포크까지 성공)
+  1 = 조사 실패(ffprobe·파싱)
+  2 = 추출 지원 밖(VFR·HDR·코덱·정밀도 매트릭스)
+  3 = 추출 스포크 실패(추출·검증)
+여러 원본을 넘기면 첫 0이 아닌 코드가 전체 종료 코드가 된다.
+
 사용 예:
   scripts/verify_raw_media.py 카드/영상1.mp4 카드/영상2.mov
   scripts/verify_raw_media.py --extract 1.0-2.5 원본.mp4   # 실제 추출 스포크
+  scripts/verify_raw_media.py --extract 1.0-2.5 --out /tmp/스포크 원본.mp4
 """
 
 from __future__ import annotations
@@ -78,17 +87,29 @@ def _report_probe(source: Path) -> int:
 
 
 def _report_extraction(source: Path, span: tuple[float, float], out_dir: Path) -> int:
-    clock = preprocess.probe_extraction_clock(source)
-    start, end = Fraction(str(span[0])), Fraction(str(span[1]))
-    source_range = preprocess.clock_range_covering(clock, start, end)
-    # 같은 파일명의 다른 카드 원본이 서로를 덮어쓰지 않게 해시를 이름에 싣는다(§5.2).
-    digest = _hash(source)[:12]
-    target = out_dir / f"{source.stem}.{digest}.span-{span[0]:.3f}-{span[1]:.3f}.mp4"
-    before = _hash(source)
-    result = preprocess.extract_raw_clip(
-        source, target, source_range, preprocess.RAW_SOURCE_MATCHED
-    )
-    assert _hash(source) == before, "원본이 바뀌었다 — 즉시 보고"
+    """실제 추출 스포크 — 실패는 깨끗한 보고와 0이 아닌 코드로 끝낸다(3).
+
+    추론 과정(traceback)을 증거로 내놓는 대신, 실패 이유와 원본 불변 확인
+    결과를 사람이 읽는 줄로 남긴다. 예외를 삼키지 않는다 — 줄로 보고하고
+    종료 코드로 살린다.
+    """
+    try:
+        clock = preprocess.probe_extraction_clock(source)
+        start, end = Fraction(str(span[0])), Fraction(str(span[1]))
+        source_range = preprocess.clock_range_covering(clock, start, end)
+        # 같은 파일명의 다른 카드 원본이 서로를 덮어쓰지 않게 해시를 이름에 싣는다(§5.2).
+        digest = _hash(source)[:12]
+        target = out_dir / f"{source.stem}.{digest}.span-{span[0]:.3f}-{span[1]:.3f}.mp4"
+        before = _hash(source)
+        result = preprocess.extract_raw_clip(
+            source, target, source_range, preprocess.RAW_SOURCE_MATCHED
+        )
+        if _hash(source) != before:
+            print(f"EXTRACT FAILED: 원본이 바뀌었다 — 즉시 보고: {source}")
+            return 3
+    except RuntimeError as exc:  # RawMediaUnsupported·RawClipVerificationError 포함
+        print(f"EXTRACT FAILED: {source}\n{exc}")
+        return 3
     print(
         f"clip {target.name}: {result.frame_count}프레임 fd {result.frame_duration}s "
         f"core 지역 [{result.core_local_start}, {result.core_local_end})s "
@@ -107,22 +128,35 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="초 범위를 실제로 추출해 본다(예: 1.0-2.5). 원본은 불변",
     )
+    parser.add_argument(
+        "--out",
+        type=Path,
+        default=None,
+        help="추출 스포크 출력 폴더(기본: 현재 폴더의 vlogsrt-raw-verify)",
+    )
     args = parser.parse_args(argv)
 
     print(preprocess.ffmpeg_provenance())
-    failures = 0
+    # 첫 0이 아닌 결과가 전체 종료 코드가 된다 — 지원 밖(2)도 조사 실패(1)도
+    # 추출 실패(3)도 초록으로 보이게 하지 않는다.
+    outcome = 0
+    counts = {1: 0, 2: 0, 3: 0}
     for source in args.sources:
         code = _report_probe(source)
         if code == 0 and args.extract:
             start_s, end_s = args.extract.split("-")
-            out_dir = Path.cwd() / "vlogsrt-raw-verify"
+            out_dir = args.out if args.out is not None else Path.cwd() / "vlogsrt-raw-verify"
             out_dir.mkdir(parents=True, exist_ok=True)
             code = _report_extraction(source, (float(start_s), float(end_s)), out_dir)
-        if code == 1:
-            failures += 1
-    if failures:
-        print(f"{failures}개 파일을 조사하지 못했다")
-    return 1 if failures else 0
+        if code:
+            counts[code] += 1
+            outcome = outcome or code
+    if outcome:
+        print(
+            f"요약: 조사 실패 {counts[1]}, 지원 밖 {counts[2]}, 추출 실패 {counts[3]}"
+            f" — 종료 코드 {outcome}"
+        )
+    return outcome
 
 
 if __name__ == "__main__":
