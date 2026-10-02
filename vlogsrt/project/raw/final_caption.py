@@ -42,6 +42,7 @@ from decimal import Decimal
 from difflib import SequenceMatcher
 from fractions import Fraction
 from pathlib import Path
+from typing import cast
 
 from vlogsrt import env, log, repair, retext, transcribe
 from vlogsrt.config import Config
@@ -61,6 +62,7 @@ from vlogsrt.project.raw.caption_config import (
 )
 from vlogsrt.project.raw.caption_provider import (
     AudioChunkBinding,
+    RescueTimingProvider,
     TextTranscript,
     TextTranscriptProvider,
     TimedTranscript,
@@ -91,6 +93,12 @@ from vlogsrt.transcribe import ARBITER_KIND, RESCUE_KIND, ChunkResponse, Transcr
 
 STATUS_NO_AUDIO = "no_audio"
 STATUS_CONFIRMED_NO_SPEECH = "confirmed_no_speech"
+"""사람 검토가 무발화를 확정한 뒤의 상태 — 이 엔진은 스스로 이 상태를 만들지 않는다.
+
+빈 응답 전부가 정상이라도 그것은 "아무 말이 없다"의 증명이 아니다(§11.11).
+이 계층은 빈 결과를 `review_required` + `unconfirmed_empty`로 올리고, 확정은
+A7-3의 사람 검토 절차가 내린다.
+"""
 STATUS_PARTIAL_FAILURE = "partial_failure"
 STATUS_REVIEW_REQUIRED = "review_required"
 STATUS_READY = "ready"
@@ -845,23 +853,39 @@ class _RescueTranscriber:
 
     def _rescue(self, job: TranscriptionJob, cfg: Config) -> list[ChunkResponse]:
         self.rounds += 1
+        if not self._tempered:
+            # 온도를 못 받는 제공자가 회복 요청을 기본 온도로 조용히 보내는 길은
+            # 없다(D28) — 회복 시도는 실패로 기록되고 되풀이는 접기/유지로 남는다.
+            self.state.findings.append(
+                QualityFinding(
+                    severity="error",
+                    code="rescue_temperature_unsupported",
+                    message=(
+                        f"시간 제공자가 재전사 온도 손잡이를 받지 않는다"
+                        f" ({cfg.transcribe_temperature}로 묻지 못했다) — 회복 시도를 건너뛴다"
+                    ),
+                )
+            )
+            raise CaptionRunError(
+                "시간 제공자가 temperature를 받지 않는다 — 뜨겁게 다시 묻는 재전사는 못 한다"
+            )
         responses: list[ChunkResponse] = []
         for chunk in job.chunks:
             _cancel(self.cancellation)
             request_id = f"{self.plan.run_id}:rescue:{chunk.index:04d}:r{self.rounds}"
             binding = self._binding_for(chunk, request_id)
             self.ledger.charge(_chunk_seconds(chunk), capabilities.ROLE_TIMING)
-            kwargs: dict[str, object] = {}
-            if self._tempered:
-                kwargs["temperature"] = cfg.transcribe_temperature
-            timed = self.timing.timed_transcript(
+            provider = cast(
+                RescueTimingProvider, self.timing
+            )  # _tempered 검사가 이 계약을 보증한다
+            timed = provider.timed_transcript(
                 binding=binding,
                 chunk=chunk,
                 settings=self.plan.workflow,
                 on=self.on,
                 stem=chunk.path.stem,
                 source=self.plan.video.source_id,
-                **kwargs,
+                temperature=cfg.transcribe_temperature,
             )
             self.state.evidence.append(
                 _evidence(
@@ -1247,6 +1271,8 @@ _REVIEW_CODES = frozenset(
         "overlap",
         "unmapped_text",
         "repair_excluded",
+        "rescue_temperature_unsupported",
+        "empty_run_unconfirmed",
     }
 )
 
@@ -1277,10 +1303,12 @@ def _decide_status(
         return STATUS_REVIEW_REQUIRED
     if record.rejections or record.unplaced or record.excluded:
         return STATUS_REVIEW_REQUIRED
-    if any(item.code in _REVIEW_CODES and item.severity != "error" for item in findings):
+    if any(item.code in _REVIEW_CODES for item in findings):
         return STATUS_REVIEW_REQUIRED
-    if not cues and _all_explicitly_empty(state):
-        return STATUS_CONFIRMED_NO_SPEECH
+    if not cues:
+        # 빈 응답이 모두 정상이라도 무발화의 **증명**은 아니다(§11.11) — 이 계층은
+        # confirmed_no_speech를 스스로 확정하지 않는다. 그 확정은 사람 검토(A7-3)다.
+        return STATUS_REVIEW_REQUIRED
     return STATUS_READY
 
 
@@ -1305,7 +1333,8 @@ def _speech_basis(state: _RunState, cues: tuple[CaptionCue, ...]) -> str:
     """
     if cues:
         return BASIS_CUES_PRESENT
-    return BASIS_CONFIRMED_NO_SPEECH if _all_explicitly_empty(state) else BASIS_UNCONFIRMED_EMPTY
+    # 전부 정상 응답했고 전부 비어 있어도 미확인이다 — 근거의 강도만 기록으로 남긴다.
+    return BASIS_UNCONFIRMED_EMPTY
 
 
 def _chunk_records(plan: CaptionRunPlan, state: _RunState) -> tuple[ChunkRunRecord, ...]:
@@ -1342,6 +1371,17 @@ def _assemble_result(
     record = _plan_retext(plan, state)
     cues = _build_cues(plan, state, record)
     findings = tuple(state.findings) + _quality_findings(plan, cues, record)
+    if not cues:
+        # 빈 결과는 그 자체로 검토 항목이다 — 무발화 확정은 사람 검토의 몫이다(§11.11).
+        basis = (
+            "모든 응답이 정상이고 비어 있다"
+            if _all_explicitly_empty(state)
+            else "일부 응답을 못 받았다"
+        )
+        findings = (
+            *findings,
+            QualityFinding("warn", "empty_run_unconfirmed", f"큐가 없다 — {basis}"),
+        )
     status = _decide_status(state, cancelled_reason, record, cues, findings, len(plan.spans))
     return FinalCaptionResult(
         run_id=plan.run_id,

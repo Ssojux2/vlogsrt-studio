@@ -684,15 +684,20 @@ def test_chunk_plan_and_records_cover_the_tail(tmp_path: Path) -> None:
     assert result.status == engine.STATUS_READY
 
 
-def test_confirmed_no_speech_is_distinct_from_failure(tmp_path: Path) -> None:
-    """전부 정상 응답했고 전부 비어 있으면 confirmed_no_speech — 실패가 아니다(§11.11)."""
+def test_empty_success_is_review_required_not_confirmed_no_speech(tmp_path: Path) -> None:
+    """전부 정상 응답했고 전부 비어 있어도 무발화 **확정**이 아니다(§11.11).
+
+    빈 응답 성공은 unconfirmed_empty로 검토 상태에 오른다 — confirmed_no_speech는
+    사람 검토(A7-3)가 내리는 확정이지 엔진이 스스로 만들 상태가 아니다(루트 재결).
+    """
     timing = FakeTiming({0: [], 1: [], 2: []})
     text = FakeText({0: "", 1: "", 2: ""})
     result, _, _ = two_chunk_run(tmp_path, timing=timing, text=text)
-    assert result.status == engine.STATUS_CONFIRMED_NO_SPEECH
-    assert result.speech_basis == engine.BASIS_CONFIRMED_NO_SPEECH
+    assert result.status == engine.STATUS_REVIEW_REQUIRED
+    assert result.speech_basis == engine.BASIS_UNCONFIRMED_EMPTY
     assert result.cues == ()
     assert all(record.timing_ok and record.text_ok for record in result.chunks)
+    assert any(item.code == "empty_run_unconfirmed" for item in result.findings)
 
 
 def test_empty_result_with_failures_stays_unconfirmed(tmp_path: Path) -> None:
@@ -725,6 +730,96 @@ def test_out_of_final_range_is_clipped_and_reported(tmp_path: Path) -> None:
     assert clipped.end == Fraction(4)
     assert clipped.text == "범위 밖 말"  # 글자는 사라지지 않는다(규칙 9)
     assert any(item.code == "out_of_final_range" for item in result.findings)
+    assert result.status == engine.STATUS_REVIEW_REQUIRED
+
+
+# ─────────────────────────────────────────────────────────────
+#  재전사 온도 — 라이브 전송 손잡이와 정직한 실패
+# ─────────────────────────────────────────────────────────────
+
+
+class CapturingSender:
+    """전송 경계 가짜 — 요청을 그대로 붙잡고 확인된 verbose_json을 돌려준다."""
+
+    def __init__(self) -> None:
+        self.requests: list[Any] = []
+        self.kinds: list[str] = []
+
+    def send_request(
+        self, request: Any, cfg: Any, *, kind: str, stem: str = "", source: str = ""
+    ) -> dict[str, Any]:
+        self.requests.append(request)
+        self.kinds.append(kind)
+        return {"segments": [{"text": " 안녕", "start": 0.1, "end": 0.9}]}
+
+
+def test_transport_timing_provider_passes_temperature_and_role_fields(
+    tmp_path: Path,
+) -> None:
+    """실전송 어댑터는 재전사 온도를 요청에 실는다 — 힌트·입자는 시간 역할 그대로(루트 승인 A)."""
+    from vlogsrt.models import Chunk
+    from vlogsrt.project.raw.caption_provider import (
+        TransportTimingProvider,
+        audio_chunk_binding,
+    )
+
+    sender = CapturingSender()
+    provider = TransportTimingProvider(sender=sender, cfg=Config())
+    workflow = RawWorkflowConfig()
+    wav = tmp_path / "chunk.wav"
+    wav.write_bytes(b"synthetic-wav")
+    chunk = Chunk(path=wav, offset=0.0, duration=1.0, index=0)
+    binding = audio_chunk_binding(
+        chunk, sample_start=0, sample_end=16000, sample_rate=16000, request_id="rescue-cap"
+    )
+    provider.timed_transcript(
+        binding=binding,
+        chunk=chunk,
+        settings=workflow,
+        on=BEFORE_SHUTDOWN,
+        temperature=0.8,
+    )
+    request = sender.requests[-1]
+    assert request.temperature == 0.8
+    assert request.model == workflow.models.timing_model
+    assert request.response_format == workflow.caption.timing_response_format
+    assert request.timestamp_granularities == ("segment",)
+    assert not request.prompt and not request.languages and not request.keywords  # 규칙 6
+    provider.timed_transcript(binding=binding, chunk=chunk, settings=workflow, on=BEFORE_SHUTDOWN)
+    assert sender.requests[-1].temperature is None  # 기본은 필드를 아예 안 보낸다
+
+
+class UntemperedTiming(FakeTiming):
+    """온도 손잡이가 없는 제공자 — 회복 요청을 조용히 삼키면 안 된다(루트 재결)."""
+
+    def timed_transcript(
+        self,
+        *,
+        binding: Any,
+        chunk: Any,
+        settings: RawWorkflowConfig,
+        on: date,
+        stem: str = "",
+        source: str = "",
+    ) -> Any:
+        return super().timed_transcript(
+            binding=binding, chunk=chunk, settings=settings, on=on, stem=stem, source=source
+        )
+
+
+def test_rescue_fails_honestly_without_temperature_capability(tmp_path: Path) -> None:
+    """온도를 못 받는 제공자는 재전사를 건너뛴다 — 기본 온도로 조용히 묻지 않는다(D28)."""
+    timing = UntemperedTiming(
+        {0: [*echo_segments(4), {"text": " 마지막 장면", "start": 30.0, "end": 32.0}]},
+        rescue=[{"text": " 절대 불리면 안 되는 재전사", "start": 0.2, "end": 3.0}],
+    )
+    text = FakeText({0: "안녕하세요 반갑습니다 마지막 장면"}, arbiter_text="")
+    result, fake_timing, _ = two_chunk_run(
+        tmp_path, timing=timing, text=text, run_id="run-untempered", single_chunk=True
+    )
+    assert not any(":rescue:" in call for call in fake_timing.calls)  # 회복 호출 자체가 없다
+    assert result.repairs and result.repairs[0].outcome == "kept"  # 짧은 되풀이 — 1차 그대로
+    assert any(item.code == "rescue_temperature_unsupported" for item in result.findings)
     assert result.status == engine.STATUS_REVIEW_REQUIRED
 
 

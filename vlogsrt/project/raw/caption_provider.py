@@ -451,6 +451,29 @@ class TimingProvider(Protocol):
     ) -> TimedTranscript: ...
 
 
+class RescueTimingProvider(Protocol):
+    """회복 재전사를 **뜨겁게** 묻는 제공자의 선택 계약(D28).
+
+    기본 `TimingProvider` 계약은 그대로다(A4·가짜 구현은 변하지 않는다). 이
+    계약은 온도 손잡이를 받는 구현(`TransportTimingProvider`·오프라인 가짜)만
+    위한 추가 능력이다 — 되풀이 재전사는 1차보다 뜨거운 온도로 다시 묻는데,
+    못 받는 제공자가 조용히 기본 온도로 회복 요청을 보내면 D28의 통로가 열린다.
+    재전사 어댑터는 이 계약이 확인된 제공자로만 회복을 묻는다.
+    """
+
+    def timed_transcript(
+        self,
+        *,
+        binding: AudioChunkBinding,
+        chunk: Chunk,
+        settings: RawWorkflowConfig,
+        on: date,
+        stem: str = "",
+        source: str = "",
+        temperature: float | None = None,
+    ) -> TimedTranscript: ...
+
+
 class TextTranscriptProvider(Protocol):
     """문구 경로의 주입 경계 — `TimingProvider`와 대칭이다."""
 
@@ -473,6 +496,11 @@ class TransportTimingProvider:
 
     수명주기 검사가 끝난 뒤에야 전송이 일어난다. 실패는 여기서 감추지 않고
     그대로 올라간다 — 바운드된 재시도는 전송 경계의 `_retry`가 정한다.
+
+    `temperature`는 **되풀이 재전사의 손잡이다**(D28). 기본(없음)은 필드를 아예
+    보내지 않는 것이고, 회복 시도는 엔진이 정한 더 뜨거운 값으로 이 인자를 받는다.
+    온도를 못 받는 제공자가 회복 요청을 조용히 기본 온도로 보내는 길은 어댑터
+    계층에서 막는다 — 이 클래스는 그 손잡이를 확인받은 유일한 실전송 구현이다.
     """
 
     sender: TranscriptionSender
@@ -487,9 +515,10 @@ class TransportTimingProvider:
         on: date,
         stem: str = "",
         source: str = "",
+        temperature: float | None = None,
     ) -> TimedTranscript:
         capabilities.preflight_online_transcription(settings, on, roles=(capabilities.ROLE_TIMING,))
-        request = timing_transcription_request(chunk, settings=settings)
+        request = timing_transcription_request(chunk, settings=settings, temperature=temperature)
         verify_chunk_binding(binding, chunk)
         payload = self.sender.send_request(
             request, self.cfg, kind=CAPTION_TIMING_KIND, stem=stem, source=source

@@ -49,7 +49,8 @@
 | 명령 | 결과 |
 |---|---|
 | `make check PY=/Users/ssojux2/Working/vlogsrt/.venv/bin/python` | **통과** (lint+format+types+test+invariants, exit 0) |
-| `python -m pytest -q` (풀스위트, 오프라인 픽스처) | **3620 passed**, exit 0 (기준 3572 + 신규 48) |
+| `python -m pytest -q` (풀스위트, 오프라인 픽스처 — 최초 1회) | **3620 passed**, exit 0 (기준 3572 + 신규 48) |
+| 후속 수정 뒤 표적 검사(`tests/raw/`·mypy·invariants·ruff format/check) | 전부 exit 0 — 풀스위트 재실행 없음(루트 지시) |
 | `python -m pytest tests/raw/ -q` | 통과, exit 0 |
 | `python -m mypy` (vlogsrt+ui 76파일) | no issues, exit 0 |
 | `python scripts/check_invariants.py` | **21/21 OK**, exit 0 |
@@ -57,19 +58,40 @@
 유료 API 호출 0회 — 네트워크 없음. ffmpeg는 합성 최종본 제작·실추출 시험에만
 사용(skip 표시). `.env`·API 픽스처·`golden/`·기존 패키지·리비전 미접근.
 
-## 3. 승인 대기 — 재전사 온도 (루트 질문 발송)
+## 3. 루트 승인에 따른 후속 수정 (재전사 온도·정직한 실패·빈 결과)
 
-엔진 `repair.settle`은 재전사를 1차보다 뜨겁게(0.8→1.0, D28) 묻는다. A7-1의
-`TransportTimingProvider.timed_transcript`에 `temperature` 인자가 없어 **라이브**
-재전사가 온도 없이(API 기본 0) 나갈 수 있다. 나의 어댑터는 시그니처 검사로
-온도를 받는 제공자에만 값을 넘긴다(오프라인·가짜는 무관, 계약·시험은 닫혀 있음).
-루트에 (A) `caption_provider.py`에 선택 인자 한 줄 추가 승인 여부, (B) A7-3에서
-래퍼 제공자로 해결 중 어느 쪽인지 질문했다(`orca orchestration ask`). 답변 전까지
-기존 파일은 무편집 — 이 보고 시점의 코드는 (B)를 전제로도 그대로 유효하다.
+루트가 `ask` 답변(msg_1d2bbe62a746 등 4통과 같은 내용)으로 **좁은 A안을 승인**했다
+— `caption_provider.py` 편집 + 표적 시험 허용, transcribe/config 불가:
+
+1. **`TransportTimingProvider.timed_transcript`에 선택 인자 `temperature: float | None
+   = None` 추가** — 요청 빌더(`timing_transcription_request`)가 이미 지원하는 값을
+   전송 경계로 그대로 흘린다. 기본 `TimingProvider` 프로토콜은 그대로(A4·가짜
+   무영향). 온도 손잡이를 받는 구현을 위한 선택 계약 `RescueTimingProvider`를
+   같은 파일에 정의했다. 시험: 전송 요청에 `temperature=0.8`이 실리는지, 힌트
+   칸(prompt·languages·keywords)이 시간 요청에 없는지, 기본 호출이 필드를 아예
+   안 보내는지를 가짜 전송자로 검증.
+2. **온도를 못 받는 제공자의 회복은 정직하게 실패한다** — 재전사 어댑터가
+   시그니처 확인 뒤 온도 손잡이가 없으면 `rescue_temperature_unsupported`
+   검토 항목을 남기고 회복 시도를 중단한다(기본 온도로 조용히 묻지 않는다,
+   D28). 엔진 repair가 이 실패를 되풀이 결과(kept/collapsed)로 기록한다. 시험:
+   온도 없는 가짜로 되풀이를 만들어 회복 호출 0회·검토 항목·`kept` 결과 확인.
+3. **빈 응답 성공은 무발화 확정이 아니다** — 전부 정상 응답했고 전부 비어
+   있어도 `review_required` + `unconfirmed_empty`로 올린다
+   (`empty_run_unconfirmed` 검토 항목과 함께). `confirmed_no_speech`는 사람
+   검토(A7-3)만 내릴 수 있는 상태로 상수에 문서화만 남긴다(루트 재결 반영).
+4. **오프라인 설정 아래 실전송 어댑터도 문을 지난다** — `_requires_online_gate`:
+   `network_mode=online`이거나 주입된 제공자가 `Transport*`면 환경·승인 바인딩·
+   수명주기 검사를 첫 호출 앞에서 강제한다. 시험: 죽은 전송자로 승인 없이는
+   호출 0회 확인.
+
+루트 독립 검증: `/tmp/vlogsrt-raw-A7-2-root.py`(스테레오·오프셋·같은 청크·재검증·
+검증 불변 프로브)가 정규화 골격→최종 파일 시계 기준 수정 후 **PASS**했다는
+회신을 받았다(그 파일은 수정하지 않았다).
 
 ## 4. 경계 준수
 
-- 신규 4모듈+3시험 외 기존 파일 0편집 (git diff로 확인 예정).
+- 신규 4모듈+3시험 + **루트가 승인한 `caption_provider.py` 좁은 편집 1건**(위 3-1)
+  외 기존 파일 0편집.
 - 모델 리터럴 없음(전부 `RawWorkflowConfig`/`RawModelRoles`에서), 요금 리터럴 없음
   (`capabilities.price_per_minute`), 임계값은 설정(`FinalCaptionSettings`·엔진
   `Config`)에서만 — 코드 리터럼 0 (invariant 8·18 통과).
@@ -80,6 +102,6 @@
 
 ## 5. 남은 것
 
-- 위 온도 인터페이스 루트 결정 (A/B).
+- (해결) 온도 인터페이스 — 루트가 좁은 A안 승인, 반영 완료(위 3절).
 - A7-3: 서비스·UI 통합, 검토 화면, final 게시, 수동 patch/revision, 작업관리자 연결.
 - 실계정 통합시험·요금 검증은 별도 승인 후(이번 범위 밖, NOT_RUN 명시).
