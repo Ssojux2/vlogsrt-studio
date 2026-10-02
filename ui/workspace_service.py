@@ -46,15 +46,20 @@ REVIEW_EXPORT_JOB_KIND = "review_export"
 
 _CUE_SEEK_JS = (
     "(cue) => { if (!cue) return;"
-    " const row = document.querySelector('[data-cue-id=\"' + cue + '\"]');"
     " const player = document.getElementById('caption-video');"
-    " if (player && row) { player.currentTime = Number(row.dataset.seekStart);"
+    " if (!player) return;"
+    " if (player._vlLoop) { player._vlLoop(); }"
+    " const row = document.querySelector('[data-cue-id=\"' + cue + '\"]');"
+    " if (row) { player.currentTime = Number(row.dataset.seekStart);"
     " player.play(); } }"
 )
 """큐 선택 → 재생기 이동(클라이언트 전용) — 서버 잰 시각을 큐 표의 data-*에서 읽는다.
 
 서버 왕복이 없으므로 미디어 재생성·제공자 호출이 일어나지 않는다. 시각 계산은
-서버가 미리보기 원점까지 포함해 구웠다 — 클라이언트는 읽기만 한다."""
+서버가 미리보기 원점까지 포함해 구웠다 — 클라이언트는 읽기만 한다. 큐를 새로
+고르는 것은 평범한 이동이므로 살아 있던 반복(`_vlLoop`)을 먼저 뗀다 — 묵은 반복
+손잡이가 새로 고른 큐에서 어김없이 발동하면 안 된다. 빈 선택(표시 갱신이 드롭다운을
+되돌릴 때)은 아무것도 만지지 않고 돌아간다."""
 
 
 def _parse_intervals(text: str) -> dict[str, list[raw_service.PlannedInterval]] | None:
@@ -3157,14 +3162,20 @@ class RawWorkspaceUi:
 
     def caption_cue_pick_view(
         self, signature: str | None, cue_id: str | None
-    ) -> tuple[str, str, str, str]:
+    ) -> tuple[object, object, object, object]:
         """큐 선택 → 편집 칸 채우기 — 화면이 본 큐 행의 값을 그대로 옮긴다(호출·미디어 0회).
 
         시각은 사람이 준 편집 단위(ms 정수)로 보인다 — 백엔드의 정확한 유리수를
         1000배해 자른 값이고, 저장은 여전히 `시각 조정`의 ms 검증을 지난다.
+        **빈 선택은 무동작이다**: 검토 새로고침이 드롭다운을 None으로 되돌릴 때마다
+        `.change`가 빈 값으로 오는데, 그때 편집 칸과 재생기를 그대로 두고 조용히
+        돌아간다(사용자가 고른 선택이 아니므로 오류도 아니다). 빈이 아닌 알 수
+        없는 아이디는 여전히 정직하게 거부한다.
         """
         self._require_current_selection(signature)
         target = (cue_id or "").strip().strip("`")
+        if not target:
+            return gr.update(), gr.update(), gr.update(), gr.update()
         if not self._caption_cue_rows:
             raise gr.Error("큐 목록이 없다 — 먼저 **검토 새로고침**으로 큐를 보세요.")
         row = next((item for item in self._caption_cue_rows if item.cue_id == target), None)

@@ -150,24 +150,30 @@ def cue_table_markdown(rows: Sequence[CueRowView]) -> str:
 def _cue_seek_js(start: str, end: str) -> tuple[str, str]:
     """큐 이동·반복의 인라인 실행본 — 문맥에 숫자만 들어가므로 이스케이프 대상이 없다.
 
-    반복은 `timeupdate`에서 큐 끝에서 멈춘다 — 이전 반복 손잡이는 교체 전에 뗀다.
+    실행본은 `(function(){…})()`로 **즉시 실행**된다 — 괄호를 빠뜨리면 식이 함수를
+    그냥 돌려보낼 뿐이라 클릭해도 아무 일도 일어나지 않는다(루트 브라우저 재현).
+    반복은 `timeupdate`에서 큐 끝을 넘으면 시작으로 되돌리는 **참 반복**이다 —
+    `pause` 이벤트(네이티브·수동 포함)에서 스스로 떼어지므로 정지한 뒤 다시
+    재생되지 않는다. `_vlLoop`는 살아 있는 반복을 떼는 파괴자 — 이동·재반복·처음으로는
+    먼저 이것을 불러 묵은 손잡이가 새 선택에 어김없이 발동하는 일을 막는다.
     """
     seek = (
         "(function(){var v=document.getElementById('caption-video');"
-        "if(!v){return;}v.currentTime=" + start + ";v.play();})"
+        "if(!v){return;}"
+        "if(v._vlLoop){v._vlLoop();}"
+        "v.currentTime=" + start + ";v.play();})()"
     )
     repeat = (
         "(function(){var v=document.getElementById('caption-video');if(!v){return;}"
-        "if(v._vlogsrtRepeat){v.removeEventListener('timeupdate',v._vlogsrtRepeat);}"
-        "var s="
-        + start
-        + ",e="
-        + end
-        + ";var h=function(){if(v.currentTime>=e||v.currentTime<s-0.25){v.pause();"
-        "v.removeEventListener('timeupdate',h);"
-        "if(v._vlogsrtRepeat===h){v._vlogsrtRepeat=null;}}};"
-        "v._vlogsrtRepeat=h;v.addEventListener('timeupdate',h);"
-        "v.currentTime=s;v.play();})"
+        "if(v._vlLoop){v._vlLoop();}"
+        "var s=" + start + ",e=" + end + ";"
+        "var off=function(){v.removeEventListener('timeupdate',loop);"
+        "v.removeEventListener('pause',off);v._vlLoop=null;};"
+        "var loop=function(){"
+        "if(v.currentTime>=e){v.currentTime=s;}"
+        "else if(v.currentTime<s-0.25){off();}};"
+        "v._vlLoop=off;v.addEventListener('timeupdate',loop);v.addEventListener('pause',off);"
+        "v.currentTime=s;v.play();})()"
     )
     return seek, repeat
 
@@ -240,7 +246,8 @@ def cue_table_html(
     else:
         parts.append(
             '<p style="color:#667;font-size:12px;margin:4px 0 0;">'
-            "▶ 큐 시작으로 이동 · 반복 큐 구간만 재생하고 끝에서 멈춘다 —"
+            "▶ 큐 시작으로 이동 · 반복 큐 구간을 끝에서 시작으로 되돌려 잰다"
+            "(정지·다른 선택으로 풀린다) —"
             " 미리보기 시계(선택 오디오의 잰 원점)에 맞춘 값이다.</p>"
         )
     return "".join(parts)
@@ -260,10 +267,13 @@ def caption_player_html(media_path: str, *, waveform: str, provenance: str) -> s
         ' style="width:100%;max-height:420px;background:#000;border-radius:8px;"></video>\n'
         f"  {waveform}\n"
         '  <div style="display:flex;gap:8px;margin-top:6px;">\n'
-        '    <button type="button" onclick="document.getElementById(\'caption-video\').pause()">'
+        '    <button type="button" onclick="(function(){var v='
+        "document.getElementById('caption-video');if(!v){return;}"
+        'if(v._vlLoop){v._vlLoop();}v.pause();})()">'
         "일시정지</button>\n"
         '    <button type="button" onclick="(function(){var v='
-        "document.getElementById('caption-video');if(v){v.pause();v.currentTime=0;}})()\">"
+        "document.getElementById('caption-video');if(!v){return;}"
+        'if(v._vlLoop){v._vlLoop();}v.pause();v.currentTime=0;})()">'
         "처음으로</button>\n"
         "  </div>\n"
         f'  <p style="color:#667;font-size:12px;margin:6px 0 0;">{html.escape(provenance)}</p>\n'

@@ -14,6 +14,9 @@
 - F2 표현: 선택 오디오 미리보기(두 트랙 합성·잰 원점 매핑)·큐 이동/반복 단추·
   지금 글자 칸, 표시 갱신의 0회 재생성, 정리 뒤 같은 키 재생성. 확정 내보내기는
   백엔드에서도 제출 때의 리비전 아이디에 묶인다(경합 0바이트 거부).
+- F3 단추 사건: 큐 이동·반복·일시정지·처음으로 실행본이 **즉시 실행**되고 반복은
+  큐 구간의 참 반복(정지·새 선택으로 풀린다), 빈 큐 선택은 무동작이다 — node의
+  비디오 스텁에서 실행본을 실제로 돌려 증명한다(문자열 포함 검사가 아니다).
 - DB v5→v6 승격과 저장소 스키마(출처 `origin` 열 포함)의 존재를 직접 확인한다.
 """
 
@@ -52,6 +55,11 @@ WAIT_SECONDS = 300.0
 needs_ffmpeg = pytest.mark.skipif(
     shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
     reason="ffmpeg/ffprobe가 없는 환경",
+)
+
+needs_node = pytest.mark.skipif(
+    shutil.which("node") is None,
+    reason="node가 없는 환경 — JS 실행 시험은 건너뛴다",
 )
 
 
@@ -292,6 +300,209 @@ def test_cue_table_and_review_rows_markdown() -> None:
         [{"segment_id": "s1", "source_order": 1, "start_seconds": "0"}]
     )
     assert "`s1`" in rows_md
+
+
+# ── F3 — 단추 실행본을 node 비디오 스텁에서 실제 실행(문자열 검사 아님) ────────
+
+
+_NODE_PLAYER_HARNESS = r"""
+const fs = require('fs');
+const payload = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+const checkpoints = [];
+
+// 비디오 스텁 — currentTime·paused·호출 기록과 add/removeEventListener를 갖는다.
+// tick(time)은 timeupdate를, pauseEvent()는 pause() + 'pause' 사건을 흉내 낸다.
+function fresh() {
+  const listeners = {};
+  const calls = [];
+  const player = {
+    currentTime: 0,
+    paused: true,
+    play() { calls.push('play'); player.paused = false; },
+    pause() { calls.push('pause'); player.paused = true; },
+    addEventListener(type, fn) { (listeners[type] = listeners[type] || []).push(fn); },
+    removeEventListener(type, fn) {
+      const list = listeners[type] || [];
+      const at = list.indexOf(fn);
+      if (at >= 0) { list.splice(at, 1); }
+    },
+  };
+  return {
+    player: player,
+    calls: calls,
+    run(code) { new Function('document', code)({ getElementById: () => player }); },
+    tick(time) {
+      player.currentTime = time;
+      (listeners.timeupdate || []).slice().forEach((fn) => fn());
+    },
+    pauseEvent() {
+      player.pause();
+      (listeners.pause || []).slice().forEach((fn) => fn());
+    },
+    snap() {
+      checkpoints.push({
+        t: player.currentTime,
+        paused: player.paused,
+        calls: calls.slice(),
+        loops: (listeners.timeupdate || []).length,
+      });
+    },
+  };
+}
+
+// ▶ 이동 — 5초에서 큐 시작으로.
+const seekEnv = fresh();
+seekEnv.player.currentTime = 5;
+seekEnv.run(payload.seek);
+seekEnv.snap();
+
+// 반복 — 시작에서 재생, 큐 끝을 넘으면 시작으로 되돌린다(참 반복).
+const loopEnv = fresh();
+loopEnv.run(payload.repeat);
+loopEnv.snap();
+loopEnv.tick(payload.end + 0.05);
+loopEnv.snap();
+loopEnv.tick(payload.start + 0.1);
+loopEnv.snap();
+
+// 구간 밖으로 이동하면 반복은 스스로 떼어진다.
+const outEnv = fresh();
+outEnv.run(payload.repeat);
+outEnv.tick(payload.start - 0.5);
+outEnv.snap();
+
+// ▶ 이동은 앞서던 반복을 먼저 뗀다 — 뒤의 timeupdate에 되돌림이 없다.
+const reseekEnv = fresh();
+reseekEnv.run(payload.repeat);
+reseekEnv.run(payload.seek);
+reseekEnv.snap();
+reseekEnv.tick(payload.end + 0.5);
+reseekEnv.snap();
+
+// 네이티브 pause — 반복이 떼어지고, 그 뒤 timeupdate가 와도 다시 재생하지 않는다.
+const nativeEnv = fresh();
+nativeEnv.run(payload.repeat);
+nativeEnv.pauseEvent();
+nativeEnv.snap();
+nativeEnv.tick(payload.end + 1.0);
+nativeEnv.snap();
+
+// 같은 큐를 다시 반복 — 손잡이가 쌓이지 않고 교체된다.
+const againEnv = fresh();
+againEnv.run(payload.repeat);
+againEnv.run(payload.repeat);
+againEnv.snap();
+
+// 일시정지·처음으로 단추도 반복을 뗀다(처음으로는 정지하고 0으로).
+const pauseEnv = fresh();
+pauseEnv.run(payload.repeat);
+pauseEnv.run(payload.pauseButton);
+pauseEnv.snap();
+
+const firstEnv = fresh();
+firstEnv.run(payload.repeat);
+firstEnv.run(payload.firstButton);
+firstEnv.snap();
+
+// 드롭다운 실행본 — 행 시각으로 이동하며 앞서던 반복을 뗀다.
+const ddEnv = fresh();
+ddEnv.run(payload.repeat);
+new Function('document', 'return (' + payload.dropdownJs + ')')({
+  getElementById: () => ddEnv.player,
+  querySelector: () => ({ dataset: { seekStart: String(payload.start) } }),
+})(payload.cueId);
+ddEnv.snap();
+
+// 빈 선택(None·빈 문자열)은 아무것도 만지지 않는다.
+const ddEmpty = fresh();
+ddEmpty.player.currentTime = 2.5;
+const emptyDoc = { getElementById: () => ddEmpty.player, querySelector: () => null };
+new Function('document', 'return (' + payload.dropdownJs + ')')(emptyDoc)(null);
+new Function('document', 'return (' + payload.dropdownJs + ')')(emptyDoc)('');
+ddEmpty.snap();
+
+process.stdout.write(JSON.stringify(checkpoints));
+"""
+
+
+@needs_node
+def test_caption_button_handlers_execute_against_video_stub(tmp_path: Path) -> None:
+    """F3 — 화면이 만든 onclick 실행본이 실제로 실행된다: 참 반복·손잡이 제거·빈 선택."""
+    import json as json_module
+    import re as re_module
+
+    row = ui_facade.CueRowView(
+        cue_id="a0000",
+        start_seconds="0.5",
+        end_seconds="2.5",
+        whisper_text="원문",
+        auto_text="채택 문구",
+        text="지금 글자",
+        basis="auto",
+        chars_per_second=4.0,
+    )
+    table_html = ui_facade.cue_table_html([row], seek_by_cue={"a0000": ("1.075000", "3.000000")})
+    player_html = ui_facade.caption_player_html(
+        "/media/xyz", waveform="<svg></svg>", provenance="출처 — 원본"
+    )
+    buttons = re_module.findall(
+        r'<button[^>]*\bonclick="([^"]*)"[^>]*>([^<]*)</button>',
+        table_html + player_html,
+    )
+    codes = {label.strip(): code for code, label in buttons}
+    assert {"▶", "반복", "일시정지", "처음으로"} <= set(codes)
+
+    payload = {
+        "seek": codes["▶"],
+        "repeat": codes["반복"],
+        "pauseButton": codes["일시정지"],
+        "firstButton": codes["처음으로"],
+        "dropdownJs": workspace_service._CUE_SEEK_JS,
+        "start": 1.075,
+        "end": 3.0,
+        "cueId": "a0000",
+    }
+    harness = tmp_path / "f3-harness.js"
+    harness.write_text(_NODE_PLAYER_HARNESS, encoding="utf-8")
+    payload_file = tmp_path / "f3-payload.json"
+    payload_file.write_text(json_module.dumps(payload), encoding="utf-8")
+    completed = subprocess.run(
+        ["node", str(harness), str(payload_file)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    observed = json_module.loads(completed.stdout)
+    assert len(observed) == 14
+    # ▶ 이동 — 5초에서 큐 시작(1.075)으로, 재생.
+    assert observed[0]["t"] == pytest.approx(1.075)
+    assert observed[0]["paused"] is False and observed[0]["calls"] == ["play"]
+    # 반복 — 시작에서 재생하고, 큐 끝(3.0)을 넘으면 **시작으로 되돌린다**(참 반복).
+    assert observed[1]["t"] == pytest.approx(1.075) and observed[1]["loops"] == 1
+    assert observed[2]["t"] == pytest.approx(1.075) and observed[2]["loops"] == 1
+    assert observed[3]["t"] == pytest.approx(1.175) and observed[3]["loops"] == 1
+    # 구간 밖(시작−0.5)으로 이동하면 반복 손잡이는 스스로 떼어진다.
+    assert observed[4]["loops"] == 0
+    # ▶ 이동은 앞서던 반복을 먼저 뗀다 — 이후 timeupdate에 되돌림이 없다.
+    assert observed[5]["loops"] == 0 and observed[5]["calls"].count("play") == 2
+    assert observed[6]["t"] == pytest.approx(3.5) and observed[6]["loops"] == 0
+    # 네이티브 pause — 반복이 떼어지고, 묵은 timeupdate가 와도 재생을 다시 시작하지 않는다.
+    assert observed[7]["paused"] is True and observed[7]["loops"] == 0
+    assert observed[8]["t"] == pytest.approx(4.0)
+    assert observed[8]["paused"] is True and observed[8]["calls"].count("play") == 1
+    # 같은 큐를 다시 반복해도 손잡이는 하나다(교체, 누적 아님).
+    assert observed[9]["loops"] == 1
+    # 일시정지·처음으로 단추도 반복을 뗀다(처음으로는 정지하고 0으로 돌아간다).
+    assert observed[10]["paused"] is True and observed[10]["loops"] == 0
+    assert observed[11]["t"] == 0 and observed[11]["paused"] is True
+    assert observed[11]["loops"] == 0
+    # 드롭다운 실행본 — 행 시각(data-seek-start)으로 이동하며 앞서던 반복을 뗀다.
+    assert observed[12]["t"] == pytest.approx(1.075) and observed[12]["paused"] is False
+    assert observed[12]["loops"] == 0
+    # 빈 선택(None·빈 문자열)은 재생기를 전혀 만지지 않는다.
+    assert observed[13]["t"] == pytest.approx(2.5) and observed[13]["paused"] is True
+    assert observed[13]["calls"] == [] and observed[13]["loops"] == 0
 
 
 # ── 백엔드 없는 빌드 — 정직한 오류(주입으로 시뮬레이션) ───────────────────────
@@ -898,6 +1109,11 @@ def test_caption_selected_track_presentation_real_flow(tmp_path: Path) -> None:
     shown = next(row for row in server._caption_cue_rows if row.cue_id == "a0000")
     assert (picked_id, picked_text) == ("a0000", shown.text)
     assert picked_start == str(int(clock[0] * 1000)) and picked_end == str(int(clock[1] * 1000))
+    # 빈 선택(검토 새로고침이 드롭다운을 None으로 되돌릴 때)은 무동작 — 편집 칸을
+    # 그대로 두고 오류도 내지 않는다(F3).
+    for empty in (None, ""):
+        noop = server.caption_cue_pick_view(signature, empty)
+        assert noop == (gr.update(), gr.update(), gr.update(), gr.update())
     with pytest.raises(gr.Error, match="없다"):
         server.caption_cue_pick_view(signature, "m9999")
 
