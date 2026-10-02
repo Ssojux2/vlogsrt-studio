@@ -28,7 +28,9 @@ pip install -e ".[ui]"        # (선택) 웹 UI
 
 > **원본 영상 브라우저 v2**(SD 카드 가져오기 → 시간순 조각 → 편집용 폴더 → 최종
 > 자막)의 실행 절차는 `docs/raw-video-workflow.md`, 수동 인수표는
-> `docs/reports/2026-10-02-raw-video-manual-acceptance.md`에 있다.
+> `docs/reports/2026-10-02-raw-video-manual-acceptance.md`에 있다. 네 화면 흐름이
+> 루트 실측 인수를 통과해 병합됐다 — 사람 실기 항목(개인 미디어·유료 호출)은
+> 수동 인수표를 본다.
 
 ---
 
