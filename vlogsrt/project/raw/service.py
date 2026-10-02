@@ -35,6 +35,19 @@ from vlogsrt.project.raw.analysis_config import (
     validate_understanding_settings,
 )
 from vlogsrt.project.raw.analysis_store import ANALYSIS_ROOT, AnalysisStore
+from vlogsrt.project.raw.browser_runtime import (
+    BrowserRuntimeError,
+    EnvironmentCredentials,
+    asr_estimate_digest,
+    caption_transport_providers,
+    capture_environment_credentials,
+    live_transport_for_credentials,
+    mint_asr_approvals,
+    mint_luna_approvals,
+    production_live_transport,
+    semantic_estimate_digest,
+)
+from vlogsrt.project.raw.caption_manual import ms as caption_ms
 from vlogsrt.project.raw.config import (
     WORKFLOW_SCHEMA_VERSION,
     RawWorkflowConfig,
@@ -105,7 +118,26 @@ from vlogsrt.project.raw.models import (
     SegmentPlanSnapshot,
     SourceAsset,
     SourceOrderRevision,
+    WorkspaceModuleUnavailableError,
     WorkspaceStatus,
+)
+from vlogsrt.project.raw.segment_review import (
+    boundary_edit as review_boundary_edit,
+)
+from vlogsrt.project.raw.segment_review import (
+    merge_edit as review_merge_edit,
+)
+from vlogsrt.project.raw.segment_review import (
+    note_edit as review_note_edit,
+)
+from vlogsrt.project.raw.segment_review import (
+    override_edit as review_override_edit,
+)
+from vlogsrt.project.raw.segment_review import (
+    selection_edit as review_selection_edit,
+)
+from vlogsrt.project.raw.segment_review import (
+    split_edit as review_split_edit,
 )
 from vlogsrt.project.raw.source_order import propose_global_order as _propose_global_order
 from vlogsrt.project.raw.understanding_luna import (
@@ -137,7 +169,9 @@ __all__ = [
     "AnalysisSummary",
     "AsrPhaseApproval",
     "BrowseNotAllowedError",
+    "BrowserRuntimeError",
     "ByteRange",
+    "EnvironmentCredentials",
     "ClipArtifact",
     "EXTRACT_PROFILES",
     "ExtractJobError",
@@ -180,17 +214,34 @@ __all__ = [
     "SourceAsset",
     "SourceInspection",
     "SourceOrderRevision",
+    "WorkspaceModuleUnavailableError",
     "WorkspaceStatus",
+    "asr_estimate_digest",
+    "caption_ms",
+    "caption_run_identity",
     "browse_folder",
+    "capture_environment_credentials",
+    "caption_transport_providers",
     "content_type_for",
     "ffprobe_media_inspector",
     "host_header_allowed",
+    "live_transport_for_credentials",
     "loopback_hosts",
+    "mint_asr_approvals",
+    "mint_luna_approvals",
     "mounted_device_candidates",
     "mutation_request_allowed",
     "origin_header_allowed",
     "parse_range",
+    "production_live_transport",
     "referer_header_allowed",
+    "review_boundary_edit",
+    "review_merge_edit",
+    "review_note_edit",
+    "review_override_edit",
+    "review_selection_edit",
+    "review_split_edit",
+    "semantic_estimate_digest",
 ]
 
 MEDIA_CONTENT_TYPES: dict[str, str] = {
@@ -202,6 +253,8 @@ MEDIA_CONTENT_TYPES: dict[str, str] = {
     ".mp3": "audio/mpeg",
     ".wav": "audio/wav",
     ".m4a": "audio/mp4",
+    ".srt": "application/x-subrip",
+    ".vtt": "text/vtt",
 }
 
 
@@ -900,9 +953,12 @@ class RawWorkspaceService:
     ) -> JobHandle:
         """분할 계획을 실제 조각 폴더로 추출하는 작업을 제출한다 — API 없음(§14.3).
 
-        같은 지문(계획·프로파일·핸들·도구)의 완성된 package가 있으면 다시 만들지
-        않고 알린다. 진행 중이거나 실패한 package가 있으면 그 package를 이어
-        쓴다 — 같은 작업 재개가 조각 ID·번호를 유지하는 길이다(§6.3).
+        같은 지문(**계획 리비전**·프로파일·핸들·도구)의 완성된 package가 있으면
+        다시 만들지 않고 알린다. 같은 형상의 **새 계획 리비전**(결정적 → 의미 등)은
+        새 package에서 뽑는다 — 완성 재사용 판정이 형상만 보면 새 리비전이 영영
+        시작하지 못한다(루트 브라우저 재현, §6.5). 진행 중이거나 실패한 package가
+        있으면 그 package를 이어 쓴다 — 같은 작업 재개가 조각 ID·번호를 유지하는
+        길이다(§6.3).
         """
         workspace = self._workspace(root)
         snapshot = self._plan_snapshot(root, plan_revision_id)
@@ -910,7 +966,7 @@ class RawWorkspaceService:
         assets = self._plan_assets(root, snapshot)
         handles = _validated_handles(handles_before, handles_after)
         fingerprint = extract_runner.extraction_fingerprint(
-            snapshot.fingerprint, profile.name, handles, preprocess.ffmpeg_provenance()
+            _plan_bound_material(snapshot), profile.name, handles, preprocess.ffmpeg_provenance()
         )
         package = self._reusable_or_reserved_package(
             workspace, snapshot, profile.name, handles, fingerprint
@@ -928,7 +984,8 @@ class RawWorkspaceService:
 
         계획·프로파일·핸들은 package 행에서 다시 만들고(`reconfirm_extraction`),
         지문은 **지금의 도구 버전으로 다시 계산해** 기록과 맞춘다 — 도구가 바뀌었으면
-        재결합이 거부된다(다른 도구의 출력을 같은 package에 섞지 않는다).
+        재결합이 거부된다(다른 도구의 출력을 같은 package에 섞지 않는다). 승격 전에
+        예약된 package(계획 지문만 묶은 옛 키)도 그 키로 다시 붙는다.
         """
         workspace = self._workspace(root)
         record = self.get_job(root, job_id)
@@ -941,17 +998,25 @@ class RawWorkspaceService:
                 workspace, package.package_dir
             )
             assets = self._plan_assets(root, plan)
-            fingerprint = extract_runner.extraction_fingerprint(
-                plan.fingerprint,
-                confirmed.profile_name,
-                handles,
-                preprocess.ffmpeg_provenance(),
+            provenance = preprocess.ffmpeg_provenance()
+            fresh = extract_runner.extraction_fingerprint(
+                _plan_bound_material(plan), confirmed.profile_name, handles, provenance
             )
+            if fresh != record.input_fingerprint:
+                legacy = extract_runner.extraction_fingerprint(
+                    plan.fingerprint, confirmed.profile_name, handles, provenance
+                )
+                if legacy != record.input_fingerprint:
+                    raise ExtractJobError(
+                        f"작업 {job_id}의 지문을 지금의 도구로 다시 계산하지 못했다 —"
+                        " 도구가 바뀌었으면 새 추출을 시작하세요"
+                    )
+                fresh = legacy
             return self.resume_job(
                 root,
                 job_id,
                 _extract_body(workspace, plan, confirmed, assets, handles),
-                fingerprint,
+                fresh,
             )
         raise ExtractJobError(
             f"작업 {job_id}의 지문과 같은 package를 찾지 못했다 — 계획이 지워지지"
@@ -1476,6 +1541,70 @@ class RawWorkspaceService:
             basis=SEGMENTATION_BASIS_SEMANTIC,
         )
 
+    def register_review_vtt(
+        self, root: Path, segment_id: str, package_dir: str | None = None
+    ) -> MediaRegistration | None:
+        """검토 자막(VTT)을 제공 가능한 자리에 등록한다 — 내용은 백엔드가 잰 그대로.
+
+        검토 저장소 자리(`review/`)는 브라우저 제공 대상이 아니다(§4.4). 이 함수는
+        백엔드가 **측정으로** 만든 VTT 본문을 내용 해시 이름의 `previews/review-vtt/`
+        파일로 쓰고 미디어로 등록한다 — 같은 내용은 같은 자리(멱등), 제공은 등록
+        ID로만. 발명 시각·낱낱 응답은 나가지 않는다.
+        """
+        workspace = self._workspace(root)
+        facade = self.review_workspace_facade(root)
+        result = facade.review_vtt(segment_id, package_dir)
+        text = _vtt_text_of(result)
+        if text is None:
+            return None
+        digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        relative = f"previews/review-vtt/{digest[:24]}.vtt"
+        target = workspace.root / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if not target.is_file():
+            temp = target.with_name(target.name + ".partial")
+            temp.write_text(text, encoding="utf-8")
+            os.replace(temp, target)
+        for registered in self.list_media(root, kind="preview"):
+            if registered.relative_path == relative:
+                return registered
+        return self.register_media(root, target, "preview")
+
+    # ── A5/A6·A7 백엔드 작업공간 — 공개 경계로만 내놓는다(병합 뒤 활성) ──
+
+    def review_workspace_facade(self, root: Path) -> Any:
+        """검토 작업공간 파사드(W3) — 검토 리비전·편집·측정 VTT·확정·정리의 정본.
+
+        화면은 `vlogsrt.project.raw.service`만 가져가므로 백엔드 모듈도 이 handle로
+        쓴다(계약: UI 임포트 경로 예외). 모듈이 이 빌드에 없으면 정직한 오류로
+        닫는다 — 조용한 대체·부분 동작은 없다. 사업 논리는 전부 그 모듈에 있다
+        (여기서 다시 쓰지 않는다).
+        """
+        try:
+            from vlogsrt.project.raw.review_workspace import ReviewWorkspaceFacade
+        except ImportError as error:
+            raise WorkspaceModuleUnavailableError(
+                "검토 작업공간 백엔드(review_workspace)가 이 빌드에 없다 — 병합 뒤"
+                " 활성화된다. 그 전까지 검토 화면은 안내만 보인다."
+            ) from error
+        return ReviewWorkspaceFacade(self._workspace(root).root)
+
+    def caption_workspace(self, root: Path) -> Any:
+        """자막 작업공간(W2) — 등록→추정→승인→실행→검토→확정의 정본 handle.
+
+        검토 파사드와 같은 규칙: 화면은 이 handle만 쓰고, 모듈이 없으면 정직하게
+        닫는다. 유료 호출 재료는 사람이 주입하는 제공자뿐이다(이 handle은
+        제공자를 스스로 만들지 않는다).
+        """
+        try:
+            from vlogsrt.project.raw.caption_workspace import open_caption_workspace
+        except ImportError as error:
+            raise WorkspaceModuleUnavailableError(
+                "자막 작업공간 백엔드(caption_workspace)가 이 빌드에 없다 — 병합 뒤"
+                " 활성화된다. 그 전까지 자막 화면은 안내만 보인다."
+            ) from error
+        return open_caption_workspace(self._workspace(root))
+
     # ── A4 내부 — 선택·지문·공급자·구간 조립 ────────────────────
 
     def _analysis_selection(
@@ -1927,5 +2056,61 @@ def _validated_handles(before: Fraction, after: Fraction) -> preprocess.RawClipH
     return handles
 
 
+EXTRACT_PLAN_BINDING_SCHEMA = "raw-extract-plan-binding/v1"
+"""추출 캐시 키가 계획 리비전 신원까지 묶는다는 표기(같은 형상의 새 리비전 구분)."""
+
+
+def _plan_bound_material(snapshot: SegmentPlanSnapshot) -> str:
+    """추출 캐시 키의 계획 재료 — 계획 지문에 **리비전 신원**까지 묶는다.
+
+    계획 지문(`segmentation_fingerprint`)은 순서 리비전과 형상(원본 해시·시계·
+    경계)만 묶는다 — 같은 형상의 새 계획 리비전(결정적 → 의미 등)과 같은 값을
+    낸다. 완성 package 재사용 판정이 그 값만 보면 새 리비전은 영영 시작하지
+    못한다(루트 브라우저 재현). 리비전 신원을 함께 묶으면 같은 리비전의 재추출은
+    여전히 멱등으로 막히고(§6.5), 새 리비전은 새 package에서 뽑는다 — 옛
+    package·전달물은 그대로다.
+    """
+    return json.dumps(
+        {
+            "schema": EXTRACT_PLAN_BINDING_SCHEMA,
+            "plan_revision": snapshot.revision_id,
+            "plan_fingerprint": snapshot.fingerprint,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+
+
+def caption_run_identity(revision: str, run_id: str, fingerprint: str) -> Any:
+    """자막 실행 신원 값 — 백엔드(W2)의 정의를 그대로 쓴다(여기서 다시 만들지 않는다).
+
+    화면은 이 공개 경로로만 신원을 만든다(계약: UI 임포트 경로 예외). 백엔드
+    모듈이 없는 빌드에서는 정직한 오류로 닫는다.
+    """
+    try:
+        from vlogsrt.project.raw.caption_workspace_types import RunIdentity
+    except ImportError as error:
+        raise WorkspaceModuleUnavailableError(
+            "자막 작업공간 백엔드(caption_workspace)가 이 빌드에 없다 — 병합 뒤 활성화된다."
+        ) from error
+    return RunIdentity(final_video_revision=revision, run_id=run_id, fingerprint=fingerprint)
+
+
 def _plan_timestamp() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
+
+
+def _vtt_text_of(result: object) -> str | None:
+    """검토 VTT 결과에서 본문만 꺼낸다 — 백엔드 응답 모양을 여기서만 흡수한다."""
+    for name in ("vtt_text", "vtt", "text", "body", "content"):
+        value = getattr(result, name, None)
+        if isinstance(value, str) and value.strip():
+            return value
+    if isinstance(result, tuple):
+        for item in result:
+            if isinstance(item, str) and item.strip().startswith("WEBVTT"):
+                return item
+            text = _vtt_text_of(item)
+            if text is not None:
+                return text
+    return None

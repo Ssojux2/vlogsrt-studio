@@ -25,9 +25,14 @@ MEDIA_SUFFIXES: tuple[str, ...] = (
     ".mp3",
     ".wav",
     ".m4a",
+    ".srt",
+    ".vtt",
 )
 """미디어로 등록·제공할 수 있는 확장자. 이 목록 밖(.txt·.json·.log·.toml 등)은
-종류·위치와 무관하게 등록이 거부된다 — 자격 증명·응답·기록 파일이 우회하지 못한다."""
+종류·위치와 무관하게 등록이 거부된다 — 자격 증명·응답·기록 파일이 우회하지 못한다.
+자막(.srt·.vtt)은 **검토·확정 화면이 제한 이름공간(previews/review-vtt/·
+final/captions/published/)에 내용 해시 이름으로 쓴 파일만** 등록된다 — 임의의
+텍스트 파일은 여전히 어휘·위치 검사에서 거부된다."""
 
 KIND_PREFIXES: dict[str, tuple[str, ...]] = {
     "original": ("originals/",),
@@ -168,6 +173,10 @@ class WorkspaceNotFoundError(RawWorkspaceError):
 
 class WorkspaceVersionError(RawWorkspaceError):
     """schema/version이 이 프로그램이 아는 것과 다르다 — 조용히 마이그레이션하지 않는다."""
+
+
+class WorkspaceModuleUnavailableError(RawWorkspaceError):
+    """이 빌드에는 해당 백엔드 모듈이 없다 — 병합 뒤 활성화된다(조용한 대체 없음)."""
 
 
 class WorkspaceAlreadyExistsError(RawWorkspaceError):

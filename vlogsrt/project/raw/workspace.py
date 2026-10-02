@@ -63,17 +63,22 @@ from vlogsrt.project.raw.package import next_package_dir
 
 PROJECT_TOML_NAME = "project.toml"
 DB_NAME = "project.sqlite3"
-DB_SCHEMA_VERSION = "raw-workspace-db/5"
+DB_SCHEMA_VERSION = "raw-workspace-db/6"
 DB_SCHEMA_VERSION_V1 = "raw-workspace-db/1"
 DB_SCHEMA_VERSION_V2 = "raw-workspace-db/2"
 DB_SCHEMA_VERSION_V3 = "raw-workspace-db/3"
 DB_SCHEMA_VERSION_V4 = "raw-workspace-db/4"
+DB_SCHEMA_VERSION_V5 = "raw-workspace-db/5"
 """A1이 v1을, A2가 `source_assets`·`source_order_revisions`를 더한 v2를, A2F1이
 `global_order_revisions`를 더한 v3을, A3이 분할 계획·조각·package 표를 더한 v4를,
-A4가 의미 분석 리비전·원본별 결과 표를 더한 v5를 만들었다. 덧붙이기만 한 옛
-버전 열기는 한 트랜잭션으로 올리고 meta에 기록한다 — 이미 있는 설정·미디어·
-작업·작업공간 신원은 그대로다. 이 프로그램이 모르는 버전은 여전히 조용히
-마이그레이션하지 않고 실패한다(코디네이터 ACK)."""
+A4가 의미 분석 리비전·원본별 결과 표를 더한 v5를 만들었다. v6은 검토·자막
+작업공간 저장소(W3 `review_workspace`·W2 `caption_workspace`)의 덧붙이기 표를
+중앙에서 한 트랜잭션으로 붙인다 — 두 모듈이 아직 없는 빌드에서는 그 문장들만
+건너뛰고(저장소가 처음 붙는 자리에서 스스로 `init_schema`를 돌리므로 반쪽
+스키마는 생기지 않는다). 덧붙이기만 한 옛 버전 열기는 한 트랜잭션으로 올리고
+meta에 기록한다 — 이미 있는 설정·미디어·작업·작업공간 신원은 그대로다. 이
+프로그램이 모르는 버전은 여전히 조용히 마이그레이션하지 않고 실패한다
+(코디네이터 ACK)."""
 WORKSPACE_ID_KEY = "workspace_id"
 """meta 표의 작업공간 신원 키 — 생성 때 한 번 정해지고 절대 바뀌지 않는다."""
 
@@ -402,16 +407,45 @@ def _insert_order_revision(
 
 
 def _apply_ingest_schema(connection: sqlite3.Connection) -> None:
-    """A2·A3·A4 표를 (있으면 그대로 두고) 만든다 — 생성·마이그레이션이 같은 문장을 쓴다.
+    """A2~A4·검토·자막 저장소 표를 (있으면 그대로 두고) 만든다.
 
-    A4 문장은 `analysis_store`에서 가져온다(표와 그 문장이 한 자리에 산다). 그
-    모듈이 이 모듈을 다시 import하므로 위쪽 import가 아니라 호출 시점 import로
-    순환을 끊는다.
+    생성·마이그레이션이 같은 문장을 쓴다. A4 문장은 `analysis_store`에서, v6의
+    검토·자막 문장은 각 저장소 모듈의 스키마 후크에서 가져온다(표와 문장이 한
+    자리에 산다). 그 모듈들이 이 모듈을 다시 import하므로 위쪽 import가 아니라
+    호출 시점 import로 순환을 끊는다. 저장소 모듈이 없는 빌드에서는 그 문장만
+    건너뛴다 — 저장소가 처음 붙는 자리에서 스스로 `init_schema`를 돌리므로 v6
+    작업공간이 반쪽 스키마로 남는 일은 없다.
     """
     from vlogsrt.project.raw.analysis_store import ANALYSIS_SCHEMA_STATEMENTS
 
-    for statement in _INGEST_SCHEMA_STATEMENTS + _A3_SCHEMA_STATEMENTS + ANALYSIS_SCHEMA_STATEMENTS:
+    statements: tuple[str, ...] = (
+        _INGEST_SCHEMA_STATEMENTS + _A3_SCHEMA_STATEMENTS + ANALYSIS_SCHEMA_STATEMENTS
+    )
+    for extra in _store_schema_statements():
+        statements = statements + extra
+    for statement in statements:
         connection.execute(statement)
+
+
+def _store_schema_statements() -> tuple[tuple[str, ...], ...]:
+    """검토·자막 저장소의 덧붙이기 문장 — **있는 모듈만** 가져온다.
+
+    두 백엔드(W2·W3)는 아직 병합 전일 수 있다. 없는 모듈을 강제하면 이 파일이
+    백엔드 병합을 기다리게 되므로, import 가능한 모듈의 후크만 모은다 — 전부
+    `CREATE TABLE IF NOT EXISTS`라 없는 쪽을 건너뛰어도 기존 표는 절대 바뀌지
+    않는다.
+    """
+    collected: list[tuple[str, ...]] = []
+    for module_name in ("review_workspace_store", "caption_workspace_store"):
+        try:
+            module = __import__(f"vlogsrt.project.raw.{module_name}", fromlist=[module_name])
+        except ImportError:
+            continue
+        if module_name == "review_workspace_store":
+            collected.append(tuple(module.REVIEW_WORKSPACE_SCHEMA_STATEMENTS))
+        else:
+            collected.append(tuple(module.caption_schema_sql()))
+    return tuple(collected)
 
 
 def _clip_values(clip: ClipArtifact) -> tuple[object, ...]:
@@ -523,6 +557,7 @@ class RawWorkspace:
             DB_SCHEMA_VERSION_V2,
             DB_SCHEMA_VERSION_V3,
             DB_SCHEMA_VERSION_V4,
+            DB_SCHEMA_VERSION_V5,
         ):
             workspace._upgrade_ingest_tables()
         elif version != DB_SCHEMA_VERSION:
@@ -532,7 +567,7 @@ class RawWorkspace:
         return workspace
 
     def _upgrade_ingest_tables(self) -> None:
-        """v1~v4 → 현재 열기 — 덧붙이기만 한 한 트랜잭션, 이미 있는 행은 그대로 둔다.
+        """v1~v5 → 현재 열기 — 덧붙이기만 한 한 트랜잭션, 이미 있는 행은 그대로 둔다.
 
         이미 받아들인 옛 작업공간을 버리지 않기 위한 유일한 마이그레이션이다.
         없는 표를 만들고 meta의 버전을 올리는 것 외에 아무 행도 고치지 않는다 —

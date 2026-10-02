@@ -71,5 +71,12 @@ module = [
     "fastapi.*",
     "starlette.*",
     "uvicorn.*",
+    # W2·W3 백엔드 작업공간 모듈 — 병합 전 빌드에서는 파일이 없다(공개 서비스가
+    # 늦은 import로 붙인다). 병합 뒤에는 이 목록이 무해해진다.
+    "vlogsrt.project.raw.review_workspace",
+    "vlogsrt.project.raw.review_workspace_store",
+    "vlogsrt.project.raw.caption_workspace",
+    "vlogsrt.project.raw.caption_workspace_store",
+    "vlogsrt.project.raw.caption_workspace_types",
 ]
 ignore_missing_imports = true

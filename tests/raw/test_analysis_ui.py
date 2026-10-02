@@ -62,26 +62,53 @@ def test_analysis_views_require_current_selection(server, tmp_path: Path) -> Non
         lambda: server.analysis_refresh_view(None),
         lambda: server.analysis_retry_view(None, "job_000001"),
         lambda: server.analysis_plan_view("stale-signature"),
-        lambda: server.analysis_live_asr_view("stale-signature", None),
+        lambda: server.analysis_live_estimate_view("stale-signature", None),
+        lambda: server.analysis_live_asr_view("stale-signature", None, True),
         lambda: server.analysis_semantic_estimate_view(None),
-        lambda: server.analysis_semantic_resume_view("stale-signature", "job_000001"),
+        lambda: server.analysis_semantic_resume_view("stale-signature", "job_000001", True),
+        lambda: server.settings_network_view("stale-signature", "online"),
     ):
         with pytest.raises(gr.Error):
             call()
 
 
-def test_live_analysis_buttons_refuse_without_injected_transport(server, tmp_path) -> None:
-    """주입 없는 서버의 실제 호출 단추 — 정직한 오류, 화면이 만들지 않는다(§14.3)."""
-    signature, _root = _opened(server, tmp_path)
+def test_live_production_requires_startup_environment_key(server, tmp_path, monkeypatch) -> None:
+    """시작 환경에 키가 없는 서버 — 실제 호출은 행동 가능한 오류로 닫힌다(§14.3).
+
+    생산 transport는 게이트가 `.env`를 적재하기 **전에** 찍어 둔 시작 환경 키만
+    쓴다 — 이 시험 프로세스 환경에서 키를 지운 채 서버를 만들면 .env 파일이
+    있어도 문이 열리지 않는다.
+    """
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    boot = workspace_service.RawWorkspaceUi(port=7860, state_path=tmp_path / "state.json")
+    assert boot._startup_credentials is None
+    signature, _root = _opened(boot, tmp_path)
+    # 확인란 없이는 승인 자체가 성립하지 않는다.
+    with pytest.raises(gr.Error, match="승인 확인이 필요하다"):
+        boot.analysis_live_asr_view(signature, None, False)
+    with pytest.raises(gr.Error, match="승인 확인이 필요하다"):
+        boot.analysis_semantic_resume_view(signature, "job_000001", False)
     for call in (
-        lambda: server.analysis_live_asr_view(signature, None),
-        lambda: server.analysis_semantic_resume_view(signature, "job_000001"),
+        lambda: boot.analysis_live_asr_view(signature, None, True),
+        lambda: boot.analysis_semantic_resume_view(signature, "job_000001", True),
     ):
-        with pytest.raises(gr.Error, match="주입되지 않았다"):
+        with pytest.raises(gr.Error, match="OPENAI_API_KEY"):
             call()
     # 2단계 견적은 로컬 읽기뿐 — 주입 없이도 안내로 답한다(빈 성공이 아니다).
-    estimate = server.analysis_semantic_estimate_view(signature)
+    estimate = boot.analysis_semantic_estimate_view(signature)
     assert "1단계" in estimate
+
+
+def test_startup_environment_key_opens_production_transport(tmp_path, monkeypatch) -> None:
+    """시작 환경 키가 있으면 생산 transport가 정본 경계로 만들어진다(호출 0회)."""
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-only")
+    monkeypatch.setenv("OPENAI_BASE_URL", "")
+    boot = workspace_service.RawWorkspaceUi(port=7860, state_path=tmp_path / "state.json")
+    assert boot._startup_credentials is not None
+    transport = boot._live_transport_for_action()
+    assert type(transport.sender).__name__ == "LiveTranscriber"
+    assert transport.asr_approvals == boot._production_asr_approvals
+    assert transport.luna_approvals == boot._production_luna_approvals
 
 
 def test_analysis_views_before_order_confirmed_explain_honestly(server, tmp_path: Path) -> None:
@@ -346,7 +373,7 @@ def test_browser_two_phase_live_flow_with_injected_transport(tmp_path, monkeypat
     live_server.open_workspace_view(str(root))  # 같은 작업공간을 공개 경로로 연다
 
     # 1단계(전사) — Luna 0호출로 의미 승인 대기에 멈춘다.
-    message, _ = live_server.analysis_live_asr_view(signature, None)
+    message, _ = live_server.analysis_live_asr_view(signature, None, True)
     assert "1단계" in message and "Luna 0호출" in message
     job_id = message.split("`")[1]
     deadline = time.monotonic() + 300
@@ -369,7 +396,7 @@ def test_browser_two_phase_live_flow_with_injected_transport(tmp_path, monkeypat
     # 2단계 재개 — 대기 리비전의 1단계 작업이 재개 대상 목록에 있다.
     choices = live_server.resumable_analysis_choices(root)
     assert any(job_id == value for _label, value in choices)
-    resume_message, _ = live_server.analysis_semantic_resume_view(signature, job_id)
+    resume_message, _ = live_server.analysis_semantic_resume_view(signature, job_id, True)
     assert "2단계" in resume_message and "ASR 0호출" in resume_message
     semantic_job = resume_message.split("`")[1]
     deadline = time.monotonic() + 300

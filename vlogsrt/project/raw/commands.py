@@ -15,6 +15,7 @@ import time
 from collections.abc import Callable
 from fractions import Fraction
 from pathlib import Path
+from typing import Any
 
 from vlogsrt import log
 from vlogsrt.project.raw import service as raw_service
@@ -219,6 +220,8 @@ def media_command(args: argparse.Namespace) -> int:
         "extract": cmd_extract,
         "clips": cmd_clips,
         "analyze": cmd_analyze,
+        "review": cmd_review,
+        "caption": cmd_caption,
     }
     return handlers[args.media_command](args)
 
@@ -231,7 +234,7 @@ def add_media_parser(sub: argparse._SubParsersAction) -> None:
     commands = media.add_subparsers(
         dest="media_command",
         required=True,
-        metavar="{init,import,retry,inspect,plan,extract,clips}",
+        metavar="{init,import,retry,inspect,plan,extract,clips,analyze,review,caption}",
     )
 
     init = commands.add_parser("init", help="빈 폴더에 v2 작업공간을 만든다")
@@ -341,6 +344,32 @@ def add_media_parser(sub: argparse._SubParsersAction) -> None:
         default=EXTRACT_WAIT_SECONDS,
         help="분석 작업 완료 대기 상한(초)",
     )
+
+    review = commands.add_parser(
+        "review",
+        help="조각 검토 리비전을 만들거나 인쇄한다(로컬만 — 유료 호출·미디어 재생성 없음)",
+    )
+    review.add_argument("--workspace", type=Path, required=True, help="작업공간 경로")
+    review.add_argument(
+        "--init",
+        action="store_true",
+        help="최신 계획·분석 증거에서 검토 기본 리비전을 만든다(이미 있으면 새로 만든다)",
+    )
+
+    caption = commands.add_parser(
+        "caption",
+        help="최종 영상을 등록하고 자막 실행 추정을 인쇄한다(로컬만 — 실행은 브라우저 승인 경로)",
+    )
+    caption.add_argument("--workspace", type=Path, required=True, help="작업공간 경로")
+    caption.add_argument("--path", type=Path, required=True, help="최종 영상 절대 경로")
+    caption.add_argument("--source-id", default="final_1", help="출처 ID(기본 final_1)")
+    caption.add_argument(
+        "--audio-ordinal",
+        type=int,
+        default=None,
+        help="오디오 트랙 서수(여럿일 때). 없으면 자동(첫 트랙)",
+    )
+    caption.add_argument("--run", default="run-1", help="실행 ID(기본 run-1)")
 
 
 # ── A3 — 결정적 분할 계획·추출·조각 목록 ──────────────────────────────────────
@@ -539,4 +568,84 @@ def cmd_analyze(args: argparse.Namespace) -> int:
             f"분석 결과로 분할 계획 {snapshot.revision_id} · 근거 {snapshot.basis} ·"
             f" 조각 {len(snapshot.entries)}개 — `media extract`로 추출한다"
         )
+    return 0
+
+
+# ── A5/A6·A7 — 검토·자막 진단(로컬만) ─────────────────────────────────────────
+
+
+def _row_value(source: object, name: str, default: object = "") -> Any:
+    """백엔드 값의 duck-typed 접근 — 사전·속성 어느 쪽이든(진단 인쇄용)."""
+    if isinstance(source, dict):
+        return source.get(name, default)
+    return getattr(source, name, default)
+
+
+def cmd_review(args: argparse.Namespace) -> int:
+    """`media review` — 검토 리비전 생성·인쇄(순수 조회, 유료 호출 0회).
+
+    백엔드 모듈(W3 review_workspace)이 없는 빌드에서는 정직한 오류로 끝난다 —
+    조용한 대체·빈 성공이 없다.
+    """
+    service = _service()
+    workspace_root = Path(args.workspace)
+    try:
+        status = service.open_workspace(workspace_root)
+        root = Path(status.workspace_root)
+        facade = service.review_workspace_facade(root)
+        if args.init:
+            facade.initialize_review()
+            log.out("검토 기본 리비전을 만들었다 — 최신 계획·분석 증거에서.")
+        head = facade.load_head()
+    except raw_service.RawWorkspaceError as error:
+        log.error(str(error))
+        return 1
+    if head is None:
+        log.out("검토 리비전이 없다 — --init으로 만든다.")
+        return 0
+    segments = _row_value(head, "segments", ()) or ()
+    revision_id = _row_value(head, "revision_id", "-")
+    log.out(f"검토 헤드 리비전 {revision_id} · 조각 {len(segments)}개(시간순)")
+    for segment in segments:
+        log.out(
+            f"  {_row_value(segment, 'segment_id', '-')} · 원본 순번"
+            f" {_row_value(segment, 'source_order', '-')} · 발화"
+            f" {_row_value(segment, 'speech_status', '-')} · 선택"
+            f" {_row_value(segment, 'selection', '-')}"
+        )
+    return 0
+
+
+def cmd_caption(args: argparse.Namespace) -> int:
+    """`media caption` — 최종 영상 등록·실행 추정 인쇄(로컬만).
+
+    실제 자막 실행은 브라우저 화면의 확인란 승인 경로뿐이다 — 이 명령은 등록과
+    추정(측정)까지만 한다. 백엔드(W2 caption_workspace)가 없으면 정직하게 끝난다.
+    """
+    service = _service()
+    workspace_root = Path(args.workspace)
+    path = Path(args.path).expanduser()
+    if not path.is_absolute():
+        log.error("최종 영상 경로는 절대 경로여야 한다")
+        return 1
+    try:
+        status = service.open_workspace(workspace_root)
+        root = Path(status.workspace_root)
+        workspace = service.caption_workspace(root)
+        registration = workspace.register_final_video(
+            path, source_id=args.source_id, audio_ordinal=args.audio_ordinal
+        )
+        estimate = workspace.estimate(registration, run_id=args.run)
+    except raw_service.RawWorkspaceError as error:
+        log.error(str(error))
+        return 1
+    log.out(
+        f"최종 영상 등록 리비전 {_row_value(registration, 'final_video_revision', '-')}"
+        f" · 상태 {_row_value(registration, 'status', '-')}"
+    )
+    log.out(
+        f"실행 {args.run} 추정 — 청크 {_row_value(estimate, 'chunk_count', '-')}"
+        f" · 샘플 {_row_value(estimate, 'sample_count', '-')}"
+        " · 실제 실행은 브라우저 승인 경로에서만 연다(§14.3)"
+    )
     return 0
