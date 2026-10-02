@@ -11,6 +11,9 @@
 
 - **리비전은 A5 순수 도메인의 것이다.** 이 모듈은 리비전을 만들고 저장할 뿐,
   고쳐 쓰지 않는다. 편집 종류도 여섯 종류(`segment_review.EDIT_KINDS`) 그대로다.
+- **출판은 원자적이다.** 새 리비전 행과 헤드 이동(초기 출판이면 첫 헤드·입양
+  매핑까지)은 SQLite 한 트랜잭션에서만 나간다 — 출판이 반쪽으로 끝나면 전부
+  없던 일이 되므로 고아 리비전이 다음 편집을 막지 않는다.
 - **경계 왕복은 항등이다.** 리비전 경계는 전부 프레임 격자 위의 정수 틱이므로,
   초 구간으로 바꿔 새 계획을 세우면 같은 격자가 돌아온다 — 환원 검증이 매핑의
   자격이다(어긋나면 매핑이 아니라 실패다).
@@ -62,6 +65,7 @@ from vlogsrt.project.raw.review_projection import (
     timed_utterances,
 )
 from vlogsrt.project.raw.review_workspace_store import (
+    RemappingInsert,
     ReviewWorkspaceStore,
     confirmed_destination_dir,
     new_review_export_id,
@@ -565,7 +569,12 @@ class ReviewWorkspaceFacade:
         return tuple(stale)
 
     def apply_edit(self, base_plan_id: str, edit: ReviewEdit) -> ReviewRevision:
-        """편집을 헤드에 적용해 저장한다 — 헤드가 편집 대상이 아니면 거부다(stale-head)."""
+        """편집을 헤드에 적용해 저장한다 — 리비전과 헤드 이동은 한 트랜잭션이다.
+
+        헤드가 편집 대상이 아니면 거부다(stale-head). 출판 도중 무엇이 실패해도
+        (크래시·잠금·동시 편집) 리비전과 헤드는 함께 되돌아가므로, 실패한 편집이
+        다음 편집의 자리를 막는 일은 없다.
+        """
         head = self.load_head(base_plan_id).revision
         if edit.target_revision_id != head.revision_id:
             raise StaleRevisionError(
@@ -575,18 +584,13 @@ class ReviewWorkspaceFacade:
         if edit.kind not in EDIT_KINDS:
             raise ReviewWorkspaceError(f"알 수 없는 편집 종류 {edit.kind!r}")
         edited = apply_edit(head, edit)
-        self._store.insert_revision(
+        self._store.publish_edit_revision(
             project_id=self._project_id,
             base_plan_id=base_plan_id,
             document_json=serialize_revision(edited),
             content_fingerprint=content_fingerprint(edited),
-            created_at=_now(),
-        )
-        self._store.advance_head(
-            project_id=self._project_id,
-            base_plan_id=base_plan_id,
-            expected_revision_id=head.revision_id,
-            new_revision_id=edited.revision_id,
+            expected_head_revision_id=head.revision_id,
+            new_head_revision_id=edited.revision_id,
             updated_at=_now(),
         )
         return edited
@@ -809,14 +813,7 @@ class ReviewWorkspaceFacade:
             self._adopted_clocks(old, new_snapshot),
             entries,
         )
-        self._persist_new_base(adopted)
-        self._store.insert_remapping(
-            old_revision_id=old.revision_id,
-            new_base_plan_id=new_snapshot.revision_id,
-            new_revision_id=adopted.revision_id,
-            mapping_json=mapping.as_document(),
-            created_at=_now(),
-        )
+        self._persist_new_base(adopted, mapping)
         return self._replay_metadata(new_snapshot.revision_id, old, mapping)
 
     def _adopted_clocks(
@@ -1245,16 +1242,27 @@ class ReviewWorkspaceFacade:
             size_bytes=target.stat().st_size,
         )
 
-    # ── 저장 — 불변 리비전 + 첫 헤드 ──────────────────────────────
+    # ── 저장 — 불변 리비전 + 첫 헤드는 한 트랜잭션 ────────────────
 
-    def _persist_new_base(self, revision: ReviewRevision) -> None:
-        self._store.insert_revision(
+    def _persist_new_base(
+        self, revision: ReviewRevision, mapping: ReviewPlanMapping | None = None
+    ) -> None:
+        """새 기본 계획의 첫 출판 — 리비전·첫 헤드(·입양 매핑)가 한 몸으로 들어간다."""
+        self._store.publish_initial_revision(
             project_id=self._project_id,
             base_plan_id=revision.base_plan_id,
             document_json=serialize_revision(revision),
             content_fingerprint=content_fingerprint(revision),
+            head_revision_id=revision.revision_id,
             created_at=_now(),
-        )
-        self._store.set_head_if_absent(
-            self._project_id, revision.base_plan_id, revision.revision_id, _now()
+            remapping=(
+                RemappingInsert(
+                    old_revision_id=mapping.old_revision_id,
+                    new_base_plan_id=mapping.new_plan_revision_id,
+                    new_revision_id=revision.revision_id,
+                    mapping_json=mapping.as_document(),
+                )
+                if mapping is not None
+                else None
+            ),
         )

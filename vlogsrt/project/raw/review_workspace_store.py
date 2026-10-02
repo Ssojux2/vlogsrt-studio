@@ -9,10 +9,16 @@
 
 지키는 선:
 
+- **출판은 한 트랜잭션이다.** 리비전 행과 헤드 이동(초기 출판이면 첫 헤드,
+  입양이면 매핑까지)은 `BEGIN IMMEDIATE` 한 트랜잭션에서만 생긴다 — 출판이
+  반쪽으로 끝나면(크래시·잠금) 전부 없던 일이 되므로, 리비전만 있고 헤드가
+  없는 고아가 다음 편집을 막는 일은 물리적으로 없다.
 - **리비전은 만들기만 한다.** 행의 본문(document_json)을 고치는 길은 없다 —
-  어긋난 내용 지문은 되돌리기에서 바로 실패한다.
-- **헤드는 조건부로만 움직인다.** `advance_head`은 지금 헤드가 호출자가 본
-  리비전일 때만 갱신한다 — 늦은 완성이 앞선 편집을 덮지 못한다(stale-head).
+  어긋난 내용 지문은 되돌리기에서 바로 실패한다. 실패를 감추려고 받아들인
+  리비전을 지우는 길도 없다.
+- **헤드는 조건부로만 움직인다.** CAS가 지금 헤드가 호출자가 본 리비전임을
+  확인한다 — 늦은 완성이 앞선 편집을 덮지 못하고(stale-head), 진 쪽은
+  `StaleRevisionError`로 깨끗하게 물러난다(리비전도 안 남긴다).
 - **내보내기 신원은 서버가 민다.** 사용자가 고르지 않는 불투명 `export_id`가
   `clips/confirmed_reviewexport_*` 이름공간과 한 쌍이다.
 """
@@ -22,9 +28,11 @@ from __future__ import annotations
 import json
 import secrets
 import sqlite3
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from vlogsrt.project.raw.models import RawWorkspaceError
+from vlogsrt.project.raw.segment_review import StaleRevisionError
 from vlogsrt.project.raw.workspace import DB_NAME, RawWorkspace
 
 REVIEW_STORE_SCHEMA_VERSION = "raw-review-workspace/v1"
@@ -109,6 +117,16 @@ def _now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
 
 
+@dataclass(frozen=True, slots=True)
+class RemappingInsert:
+    """입양 매핑 한 행 — 첫 출판과 같은 트랜잭션에 들어갈 값."""
+
+    old_revision_id: str
+    new_base_plan_id: str
+    new_revision_id: str
+    mapping_json: str
+
+
 class ReviewWorkspaceStore:
     """검토 리비전·헤드·매핑·내보내기의 SQL 문장 — `RawWorkspace`의 DB를 빌려 쓴다."""
 
@@ -127,39 +145,158 @@ class ReviewWorkspaceStore:
             self._schema_ready = True
         return connection
 
-    # ── 불변 리비전 ─────────────────────────────────────────────
+    # ── 출판 — 리비전과 헤드는 한 몸이다 ─────────────────────────
 
-    def insert_revision(
+    def publish_initial_revision(
         self,
         *,
         project_id: str,
         base_plan_id: str,
         document_json: str,
         content_fingerprint: str,
+        head_revision_id: str,
         created_at: str,
+        remapping: RemappingInsert | None = None,
     ) -> None:
-        """리비전 한 행 — 만들기만 한다. 같은 자리의 두 번 삽입은 실패한다."""
+        """첫 리비전 + 첫 헤드(+(입양이면) 매핑) — 한 트랜잭션, 실패면 전부 없던 일.
+
+        초기화·입양의 멱등 경계는 여기 있다: 어느 삽입이든 이미 있으면 트랜잭션
+        전체가 되돌려지므로, 반쪽 출판(리비전만 있고 헤드 없는)은 생길 수 없다.
+        """
         sequence = self._sequence_of(document_json)
+        connection = self._connect()
         try:
-            with self._connect() as connection:
-                connection.execute(
-                    "INSERT INTO review_workspace_revisions (project_id, base_plan_id,"
-                    " sequence, document_json, content_fingerprint, created_at)"
-                    " VALUES (?, ?, ?, ?, ?, ?)",
-                    (
-                        project_id,
-                        base_plan_id,
-                        sequence,
-                        document_json,
-                        content_fingerprint,
-                        created_at,
-                    ),
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                self._insert_revision_row(
+                    connection,
+                    project_id=project_id,
+                    base_plan_id=base_plan_id,
+                    sequence=sequence,
+                    document_json=document_json,
+                    content_fingerprint=content_fingerprint,
+                    created_at=created_at,
                 )
+                connection.execute(
+                    "INSERT INTO review_workspace_heads (project_id, base_plan_id,"
+                    " head_revision_id, updated_at) VALUES (?, ?, ?, ?)",
+                    (project_id, base_plan_id, head_revision_id, created_at),
+                )
+                if remapping is not None:
+                    connection.execute(
+                        "INSERT INTO review_workspace_remappings (old_revision_id,"
+                        " new_base_plan_id, new_revision_id, mapping_json, created_at)"
+                        " VALUES (?, ?, ?, ?, ?)",
+                        (
+                            remapping.old_revision_id,
+                            remapping.new_base_plan_id,
+                            remapping.new_revision_id,
+                            remapping.mapping_json,
+                            created_at,
+                        ),
+                    )
                 connection.commit()
+            except BaseException:
+                connection.rollback()
+                raise
         except sqlite3.IntegrityError as error:
             raise ReviewWorkspaceStoreError(
-                f"검토 리비전이 이미 있다: {base_plan_id}/{sequence} — 불변 행은 다시 쓰지 않는다"
+                f"이 계획의 검토(또는 입양 매핑)가 이미 있다: {base_plan_id} —"
+                " 다시 초기화하지 말고 load_head으로 여세요"
             ) from error
+        except sqlite3.DatabaseError as error:
+            raise ReviewWorkspaceStoreError(
+                f"검토 초기 출판이 실패해 되돌렸다(잠금·디스크 의심): {error}"
+            ) from error
+
+    def publish_edit_revision(
+        self,
+        *,
+        project_id: str,
+        base_plan_id: str,
+        document_json: str,
+        content_fingerprint: str,
+        expected_head_revision_id: str,
+        new_head_revision_id: str,
+        updated_at: str,
+    ) -> None:
+        """편집 리비전 + 헤드 CAS — 한 트랜잭션. 헤드가 못 움직이면 리비전도 못 남는다.
+
+        동시 편집이 그 자리를 먼저 차지했거나(Uniqueness) 헤드가 이미 옮겨갔으면
+        (CAS) 늦은 쪽은 `StaleRevisionError`로 깨끗하게 진다 — 지는 쪽의 리비전 행은
+        되돌려지므로 다음 편집이 막히는 일이 없다.
+        """
+        sequence = self._sequence_of(document_json)
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                self._insert_revision_row(
+                    connection,
+                    project_id=project_id,
+                    base_plan_id=base_plan_id,
+                    sequence=sequence,
+                    document_json=document_json,
+                    content_fingerprint=content_fingerprint,
+                    created_at=updated_at,
+                )
+                cursor = connection.execute(
+                    "UPDATE review_workspace_heads SET head_revision_id = ?, updated_at = ?"
+                    " WHERE project_id = ? AND base_plan_id = ? AND head_revision_id = ?",
+                    (
+                        new_head_revision_id,
+                        updated_at,
+                        project_id,
+                        base_plan_id,
+                        expected_head_revision_id,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise StaleRevisionError(
+                        f"stale_head: 헤드가 이미 {expected_head_revision_id!r}이(가) 아니다 —"
+                        " 화면을 다시 읽고 새 헤드로 편집하세요"
+                    )
+                connection.commit()
+            except BaseException:
+                connection.rollback()
+                raise
+        except sqlite3.IntegrityError as error:
+            raise StaleRevisionError(
+                f"동시 편집: 그 자리({base_plan_id}/{sequence})에 이미 리비전이 있다 —"
+                " 헤드를 다시 읽어 새 헤드로 편집하세요"
+            ) from error
+        except sqlite3.DatabaseError as error:
+            raise ReviewWorkspaceStoreError(
+                f"검토 편집 출판이 실패해 되돌렸다(잠금·디스크 의심): {error}"
+            ) from error
+
+    @staticmethod
+    def _insert_revision_row(
+        connection: sqlite3.Connection,
+        *,
+        project_id: str,
+        base_plan_id: str,
+        sequence: int,
+        document_json: str,
+        content_fingerprint: str,
+        created_at: str,
+    ) -> None:
+        """리비전 한 행 — 만들기만 한다. 같은 자리의 두 번 삽입은 트랜잭션째 실패한다."""
+        connection.execute(
+            "INSERT INTO review_workspace_revisions (project_id, base_plan_id,"
+            " sequence, document_json, content_fingerprint, created_at)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                project_id,
+                base_plan_id,
+                sequence,
+                document_json,
+                content_fingerprint,
+                created_at,
+            ),
+        )
+
+    # ── 불변 리비전 ─────────────────────────────────────────────
 
     def revision_document(
         self, project_id: str, base_plan_id: str, sequence: int
@@ -198,72 +335,7 @@ class ReviewWorkspaceStore:
             ).fetchone()
         return None if row is None else str(row["head_revision_id"])
 
-    def set_head_if_absent(
-        self, project_id: str, base_plan_id: str, revision_id: str, updated_at: str
-    ) -> None:
-        """첫 헤드 등록 — 이미 있으면 덮지 않고 실패한다(초기화의 멱등 경계)."""
-        try:
-            with self._connect() as connection:
-                connection.execute(
-                    "INSERT INTO review_workspace_heads (project_id, base_plan_id,"
-                    " head_revision_id, updated_at) VALUES (?, ?, ?, ?)",
-                    (project_id, base_plan_id, revision_id, updated_at),
-                )
-                connection.commit()
-        except sqlite3.IntegrityError as error:
-            raise ReviewWorkspaceStoreError(
-                f"검토 헤드가 이미 있다: {base_plan_id} — 다시 초기화하지 말고 여세요"
-            ) from error
-
-    def advance_head(
-        self,
-        *,
-        project_id: str,
-        base_plan_id: str,
-        expected_revision_id: str,
-        new_revision_id: str,
-        updated_at: str,
-    ) -> None:
-        """헤드를 옮긴다 — 지금 헤드가 `expected`일 때만(두 편집이 동시에 이길 수 없다)."""
-        with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            cursor = connection.execute(
-                "UPDATE review_workspace_heads SET head_revision_id = ?, updated_at = ?"
-                " WHERE project_id = ? AND base_plan_id = ? AND head_revision_id = ?",
-                (new_revision_id, updated_at, project_id, base_plan_id, expected_revision_id),
-            )
-            connection.commit()
-        if cursor.rowcount != 1:
-            raise ReviewWorkspaceStoreError(
-                f"stale_head: 헤드가 이미 {expected_revision_id!r}이(가) 아니다 —"
-                " 화면을 다시 읽고 새 헤드로 편집하세요"
-            )
-
     # ── 계획 재매핑 기록 ─────────────────────────────────────────
-
-    def insert_remapping(
-        self,
-        *,
-        old_revision_id: str,
-        new_base_plan_id: str,
-        new_revision_id: str,
-        mapping_json: str,
-        created_at: str,
-    ) -> None:
-        """검토→새 계획 신원 매핑 — 옛 리비전 하나가 어느 계획으로 옮겼는지의 기록."""
-        try:
-            with self._connect() as connection:
-                connection.execute(
-                    "INSERT INTO review_workspace_remappings (old_revision_id,"
-                    " new_base_plan_id, new_revision_id, mapping_json, created_at)"
-                    " VALUES (?, ?, ?, ?, ?)",
-                    (old_revision_id, new_base_plan_id, new_revision_id, mapping_json, created_at),
-                )
-                connection.commit()
-        except sqlite3.IntegrityError as error:
-            raise ReviewWorkspaceStoreError(
-                f"이미 매핑된 검토 리비전이다: {old_revision_id}"
-            ) from error
 
     def remapping(self, old_revision_id: str) -> sqlite3.Row | None:
         with self._connect() as connection:

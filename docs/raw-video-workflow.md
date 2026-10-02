@@ -17,7 +17,7 @@
 | SD/폴더 조사·복사·검증(A2) | 실행 가능 | UI 화면 1 · `vlogsrt media import` |
 | 전체 원본 순서 확정 | 실행 가능 | UI 화면 1 버튼(전용 CLI 동사는 아직 없다) |
 | 결정적 분할 계획·추출·조각 목록(A3) | 실행 가능 | UI 화면 2 · `vlogsrt media plan/extract/clips` |
-| 의미 분석 Luna(A4) | 실행 가능 — 1b7283d에서 승인·병합(전용 CLI 동사는 없다) | UI 화면 2 분석 패널 · 서비스 계층 |
+| 의미 분석 Luna(A4) | 실행 가능 — 1b7283d에서 승인·병합 | UI 화면 2 분석 패널 · `vlogsrt media analyze`(재생 전용) |
 | 조각 검토·경계 편집·VTT(A5) | **라이브러리·백엔드만** — 화면·CLI 대기 | `segment_review.py`·`review_projection.py`·`review_workspace.py` |
 | 편집용 폴더 확정·캐시 정리(A6) | **라이브러리·백엔드만** — 화면·CLI 대기 | `confirmed_package.py`·`cache_policy.py`·`review_workspace.py` |
 | 최종 자막(A7) | **라이브러리만**(A7-3 13ad043 승인·병합) — 화면 4는 읽기 전용, 버튼 비활성 | `final_video.py`·`final_caption.py`·`caption_review.py` 등 |
@@ -114,6 +114,47 @@ vlogsrt media clips --workspace /tmp/ws       # 조각 목록 + 전달물(clips.
 (초, 유리수), `--plan`(리비전 지정), `--wait-seconds`를 받는다. 결과는
 `clips/package_000001/` 아래 `NNNNNN__t…-t…__c_….mp4` 파일과 전달물로 게시된다.
 
+### 3. 오프라인 재생 분석 — `media analyze`
+
+`vlogsrt media analyze`는 견적을 인쇄하고 **재생(replay) 분석만** 돌린다 — 어떤
+플래그도 실제 호출을 켜지 않는다(전체 플래그는 위 CLI 참조). 재생 픽스처를
+작업공간 `analysis/replay/`에 두면 가져온 원본의 내용 SHA로 묶여 재생된다:
+
+```bash
+python - <<'EOF'
+import json
+from pathlib import Path
+from vlogsrt.project.raw.service import RawWorkspaceService
+service = RawWorkspaceService()
+root = Path("/tmp/ws")
+sources = {
+    asset.content_sha256: [{"start": 0.4, "end": 1.2, "text": "도착해서 일정 설명"}]
+    for asset in service.list_source_assets(root)
+}
+assert all(sources), "원본 SHA가 없다 — 가져오기 확인부터"
+fixtures = root / "analysis" / "replay"
+fixtures.mkdir(parents=True, exist_ok=True)
+(fixtures / "asr-fixtures.json").write_text(
+    json.dumps({"sources": sources}, ensure_ascii=False), encoding="utf-8"
+)
+(fixtures / "luna-fixtures.json").write_text(json.dumps(
+    {"windows": {"window_000000": {
+        "window_id": "window_000000",
+        "speech_summary": "도착해서 일정을 설명한다",
+        "visual_summary": "실내에서 걷다가 문으로 향한다",
+        "scene_tags": ["walking", "arrival"],
+        "evidence_ids": ["window_000000"],
+        "suggested_boundary_ids": [], "editing_notes": [],
+        "needs_review": False, "uncertainties": []}}},
+    ensure_ascii=False), encoding="utf-8")
+EOF
+vlogsrt media analyze --workspace /tmp/ws --estimate-only   # 견적만 인쇄(분석 시작 없음)
+vlogsrt media analyze --workspace /tmp/ws                   # 재생 분석 실행·완결 보고
+```
+
+재생할 픽스처가 없는 원본은 실패로 **기록될 뿐** 지어내지 않는다. `--plan`을
+붙이면 완성된 분석 결과로 분할 계획 리비전을 새로 만든다(로컬만).
+
 ## CLI 참조 — `vlogsrt media`
 
 | 명령 | 하는 일 |
@@ -125,6 +166,7 @@ vlogsrt media clips --workspace /tmp/ws       # 조각 목록 + 전달물(clips.
 | `plan --workspace WS [--tile-seconds S \| --intervals FILE]` | 확정된 전체 순서 위 결정적 분할 계획(로컬만) |
 | `extract --workspace WS [--plan --profile --handle-* --wait-seconds]` | 계획을 실제 조각 폴더로 추출(로컬 ffmpeg만) |
 | `clips --workspace WS [--package]` | package 조각 목록·전달물 경로 인쇄 |
+| `analyze --workspace WS [--sources ID …] [--fixtures DIR] [--estimate-only] [--plan] [--wait-seconds S]` | 분석 견적 인쇄 + **오프라인 재생 분석 실행**(유료 호출 없음). `--estimate-only`는 견적만 인쇄, `--plan`은 완성 결과로 분할 계획 리비전 생성, 재생 픽스처는 기본 `analysis/replay/` |
 
 추출 작업 재시도는 UI(화면 2 `재시도`)와 서비스 계층에 있다 — CLI `retry`는
 가져오기 전용이다.

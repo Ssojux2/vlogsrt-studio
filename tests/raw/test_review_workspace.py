@@ -13,8 +13,11 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
+import sqlite3
 import subprocess
+import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from fractions import Fraction
 from pathlib import Path
 
@@ -25,6 +28,7 @@ from vlogsrt.project.raw import review_workspace as facade_module
 from vlogsrt.project.raw import service as raw
 from vlogsrt.project.raw.models import AnalysisSourceResult, PlannedInterval
 from vlogsrt.project.raw.review_projection import BOUNDARY_REVIEW_NOTE, parse_review_vtt
+from vlogsrt.project.raw.review_workspace_store import ReviewWorkspaceStore
 from vlogsrt.project.raw.segment_review import (
     SELECTION_EXCLUDED,
     SPEECH_ANALYSIS_FAILED,
@@ -32,8 +36,13 @@ from vlogsrt.project.raw.segment_review import (
     SPEECH_DETECTED,
     SPEECH_UNCONFIRMED_EMPTY,
     StaleRevisionError,
+    apply_edit,
     boundary_edit,
+    content_fingerprint,
+    serialize_revision,
+    split_edit,
 )
+from vlogsrt.project.raw.workspace import DB_NAME
 from vlogsrt.project.timebase import milliseconds_half_up
 
 needs_ffmpeg = pytest.mark.skipif(
@@ -660,3 +669,255 @@ def test_full_flow_split_reextract_vtt_export_purge_restart(
     restored = restarted.restore_previews(new_package_dir)
     assert _sha256(root / restored[0].relative_path) == restored[0].content_sha256
     assert _tree_hashes(root, full_outcome.destination_dir) == confirmed_hashes_before
+
+
+# ── 출판 원자성 — 크래시·동시 편집·CAS·프로세스 즉사 ─────────────────────────
+
+
+def _faulted_connect(store: ReviewWorkspaceStore, marker: str, failure: BaseException):
+    """지정 SQL에서 크래시를 일으키는 저장 연결 — 루트 탐침과 같은 원리의 주입."""
+    original = store._connect
+
+    class _FaultedConnection:
+        def __init__(self, connection: sqlite3.Connection) -> None:
+            self._connection = connection
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self._connection, name)
+
+        def __enter__(self) -> _FaultedConnection:
+            self._connection.__enter__()
+            return self
+
+        def __exit__(self, *args: object) -> object:
+            return self._connection.__exit__(*args)
+
+        def execute(self, sql: str, *args: object) -> sqlite3.Cursor:
+            if sql.strip().upper().startswith(marker):
+                raise failure
+            return self._connection.execute(sql, *args)
+
+    return lambda: _FaultedConnection(original())  # type: ignore[return-value]
+
+
+def _stored_sequences(root: Path, base_plan_id: str) -> tuple[int, ...]:
+    """DB에 실제로 묻힌 리비전 sequence — 고아 없음의 직접 증거."""
+    with sqlite3.connect(root / DB_NAME) as connection:
+        rows = connection.execute(
+            "SELECT sequence FROM review_workspace_revisions WHERE base_plan_id = ?"
+            " ORDER BY sequence",
+            (base_plan_id,),
+        ).fetchall()
+    return tuple(int(row[0]) for row in rows)
+
+
+@needs_ffmpeg
+def test_edit_publication_crash_rolls_back_and_retry_unwedges(
+    tmp_path: Path, spoken_media: Path
+) -> None:
+    """헤드 CAS 출판이 크래시로 반쪽에 그쳐도 리비전은 함께 사라지고 재시도는 안 막힌다."""
+
+    class Crash(Exception):
+        pass
+
+    service, root, plan, _ = _prepared_workspace(tmp_path, spoken_media, with_analysis=False)
+    facade = facade_module.ReviewWorkspaceFacade(root)
+    revision = facade.initialize_review(plan.revision_id)
+    segment = facade.chronological(revision)[0]
+    clock = revision.clock_for(segment.source_id)
+    assert clock is not None
+
+    facade._store._connect = _faulted_connect(  # type: ignore[assignment]
+        facade._store, "UPDATE REVIEW_WORKSPACE_HEADS", Crash("헤드 출판 크래시")
+    )
+    with pytest.raises(Crash):
+        facade.split_segment(plan.revision_id, segment.segment_id, _mid_split_pts(clock, segment))
+
+    fresh = facade_module.ReviewWorkspaceFacade(root)
+    assert fresh.load_head(plan.revision_id).revision.revision_id == revision.revision_id
+    assert _stored_sequences(root, plan.revision_id) == (0,)  # 고아 sequence 1은 없다
+    other = _mid_split_pts(clock, segment) - clock.frame_ticks  # 격자 위의 다른 점
+    assert segment.start_pts < other < segment.end_pts
+    resumed = fresh.split_segment(plan.revision_id, segment.segment_id, other)
+    assert resumed.sequence == revision.sequence + 1
+    assert fresh.load_head(plan.revision_id).revision.revision_id == resumed.revision_id
+    assert _stored_sequences(root, plan.revision_id) == (0, 1)
+
+
+@needs_ffmpeg
+def test_initial_publication_crash_rolls_back(tmp_path: Path, spoken_media: Path) -> None:
+    """초기 리비전과 첫 헤드도 한 트랜잭션 — 헤드 삽입 실패면 리비전도 없던 일이 된다."""
+
+    class Crash(Exception):
+        pass
+
+    service, root, plan, _ = _prepared_workspace(tmp_path, spoken_media, with_analysis=False)
+    facade = facade_module.ReviewWorkspaceFacade(root)
+
+    facade._store._connect = _faulted_connect(  # type: ignore[assignment]
+        facade._store, "INSERT INTO REVIEW_WORKSPACE_HEADS", Crash("첫 헤드 크래시")
+    )
+    with pytest.raises(Crash):
+        facade.initialize_review(plan.revision_id)
+
+    with sqlite3.connect(root / DB_NAME) as connection:
+        revisions = connection.execute(
+            "SELECT COUNT(*) FROM review_workspace_revisions"
+        ).fetchone()[0]
+        heads = connection.execute("SELECT COUNT(*) FROM review_workspace_heads").fetchone()[0]
+    assert revisions == 0
+    assert heads == 0
+
+    fresh = facade_module.ReviewWorkspaceFacade(root)
+    revision = fresh.initialize_review(plan.revision_id)  # 재시도는 막히지 않는다
+    assert fresh.load_head().revision.revision_id == revision.revision_id
+
+
+@needs_ffmpeg
+def test_adoption_publication_crash_rolls_back(tmp_path: Path, spoken_media: Path) -> None:
+    """입양 출판(리비전+첫 헤드+매핑)도 한 트랜잭션 — 매핑 실패면 전부 없던 일이 된다."""
+
+    class Crash(Exception):
+        pass
+
+    service, root, plan, _ = _prepared_workspace(tmp_path, spoken_media, with_analysis=False)
+    facade = facade_module.ReviewWorkspaceFacade(root)
+    revision = facade.initialize_review(plan.revision_id)
+    first = facade.chronological(revision)[0]
+    clock = revision.clock_for(first.source_id)
+    assert clock is not None
+    facade.split_segment(plan.revision_id, first.segment_id, _mid_split_pts(clock, first))
+    new_snapshot, mapping = facade.plan_from_review(plan.revision_id)
+    edited = facade.load_head(plan.revision_id).revision
+
+    facade._store._connect = _faulted_connect(  # type: ignore[assignment]
+        facade._store, "INSERT INTO REVIEW_WORKSPACE_REMAPPINGS", Crash("매핑 크래시")
+    )
+    with pytest.raises(Crash):
+        facade.adopt_plan_review(new_snapshot, mapping, old_revision=edited)
+
+    fresh = facade_module.ReviewWorkspaceFacade(root)
+    assert _stored_sequences(root, new_snapshot.revision_id) == ()
+    assert fresh._store.head_revision_id(facade.project_id, new_snapshot.revision_id) is None
+
+    adopted = fresh.adopt_plan_review(new_snapshot, mapping)  # 재시도는 막히지 않는다
+    assert fresh.load_head().revision.revision_id == adopted.revision_id
+    assert fresh._store.remapping(edited.revision_id) is not None
+
+
+@needs_ffmpeg
+def test_head_cas_rejects_late_writer_without_orphan(tmp_path: Path, spoken_media: Path) -> None:
+    """CAS와 Uniqueness가 늦은 완성을 이긴다 — 진 출판은 리비전 행을 남기지 않는다."""
+    service, root, plan, _ = _prepared_workspace(tmp_path, spoken_media, with_analysis=False)
+    facade = facade_module.ReviewWorkspaceFacade(root)
+    revision = facade.initialize_review(plan.revision_id)
+    first = facade.chronological(revision)[0]
+    clock = revision.clock_for(first.source_id)
+    assert clock is not None
+    winner = facade.split_segment(plan.revision_id, first.segment_id, _mid_split_pts(clock, first))
+    child = next(segment for segment in winner.segments if segment.start_pts > first.start_pts)
+
+    # CAS — 늦은 쪽 문서의 자리(sequence 2)는 비었지만 겨냥 헤드가 옛 것이다.
+    late = apply_edit(
+        winner, split_edit(winner.revision_id, child.segment_id, _mid_split_pts(clock, child))
+    )
+    with pytest.raises(StaleRevisionError, match="stale_head"):
+        facade._store.publish_edit_revision(
+            project_id=facade.project_id,
+            base_plan_id=plan.revision_id,
+            document_json=serialize_revision(late),
+            content_fingerprint=content_fingerprint(late),
+            expected_head_revision_id=revision.revision_id,
+            new_head_revision_id=late.revision_id,
+            updated_at=NOW,
+        )
+
+    # Uniqueness — 같 자리(sequence 1)를 노린 출판도 진다(동시 편집).
+    duplicate = apply_edit(
+        revision,
+        split_edit(
+            revision.revision_id,
+            first.segment_id,
+            _mid_split_pts(clock, first) - clock.frame_ticks,
+        ),
+    )
+    with pytest.raises(StaleRevisionError, match="동시 편집"):
+        facade._store.publish_edit_revision(
+            project_id=facade.project_id,
+            base_plan_id=plan.revision_id,
+            document_json=serialize_revision(duplicate),
+            content_fingerprint=content_fingerprint(duplicate),
+            expected_head_revision_id=revision.revision_id,
+            new_head_revision_id=duplicate.revision_id,
+            updated_at=NOW,
+        )
+
+    assert _stored_sequences(root, plan.revision_id) == (0, 1)  # 이긴 쪽만 남는다
+    note = facade.set_notes(plan.revision_id, child.segment_id, "경계 다시 봄")
+    assert note.sequence == 2  # 다음 편집은 막히지 않는다
+
+
+@needs_ffmpeg
+def test_concurrent_edits_never_leave_orphans(tmp_path: Path, spoken_media: Path) -> None:
+    """동시 편집 — 성공한 수만 리비전 행이 되고, 지는 쪽은 흔적을 남기지 않는다."""
+    service, root, plan, _ = _prepared_workspace(tmp_path, spoken_media, with_analysis=False)
+    facade = facade_module.ReviewWorkspaceFacade(root)
+    revision = facade.initialize_review(plan.revision_id)
+    target = facade.chronological(revision)[1].segment_id
+
+    def writer(note: str) -> tuple[str, object]:
+        try:
+            return "ok", facade.set_notes(plan.revision_id, target, note)
+        except StaleRevisionError:
+            return "stale", None
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = list(pool.map(writer, ("첫 메모", "둘째 메모")))
+
+    wins = sum(1 for tag, _ in outcomes if tag == "ok")
+    assert wins >= 1
+    assert all(tag in ("ok", "stale") for tag, _ in outcomes)
+    assert _stored_sequences(root, plan.revision_id) == tuple(range(wins + 1))
+    assert facade.load_head(plan.revision_id).revision.sequence == wins
+
+    follow = facade.set_notes(plan.revision_id, target, "다음 메모")  # 막힘이 없다
+    assert follow.sequence == wins + 1
+
+
+@needs_ffmpeg
+def test_process_death_mid_transaction_publishes_nothing(
+    tmp_path: Path, spoken_media: Path
+) -> None:
+    """출판 트랜잭션 중간 프로세스 즉사 — 되돌아온 DB에는 반쪽 출판이 없다."""
+    service, root, plan, _ = _prepared_workspace(tmp_path, spoken_media, with_analysis=False)
+    facade = facade_module.ReviewWorkspaceFacade(root)
+    revision = facade.initialize_review(plan.revision_id)
+
+    script = (
+        "import os, sqlite3, sys\n"
+        "db, project_id, base_plan_id = sys.argv[1], sys.argv[2], sys.argv[3]\n"
+        "connection = sqlite3.connect(db)\n"
+        "connection.execute('BEGIN IMMEDIATE')\n"
+        'connection.execute("INSERT INTO review_workspace_revisions (project_id,'
+        " base_plan_id, sequence, document_json, content_fingerprint, created_at)"
+        ' VALUES (?, ?, 1, ?, ?, ?)", (project_id, base_plan_id, "{}", "dead", "now"))\n'
+        "os._exit(9)\n"
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", script, str(root / DB_NAME), facade.project_id, plan.revision_id],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 9
+
+    fresh = facade_module.ReviewWorkspaceFacade(root)
+    assert _stored_sequences(root, plan.revision_id) == (0,)  # 커밋 안 된 행은 살아남지 않는다
+    assert fresh.load_head(plan.revision_id).revision.revision_id == revision.revision_id
+    segment = fresh.chronological(revision)[0]
+    clock = revision.clock_for(segment.source_id)
+    assert clock is not None
+    resumed = fresh.split_segment(
+        plan.revision_id, segment.segment_id, _mid_split_pts(clock, segment)
+    )
+    assert resumed.sequence == 1
