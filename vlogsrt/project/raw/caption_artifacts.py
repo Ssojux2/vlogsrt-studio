@@ -12,8 +12,8 @@
 
 모든 `.srt`/`.vtt`는 **직렬화 뒤 다시 파싱해 같은지 확인하고** 게시한다(§11.7 —
 재파싱 검사 후 staging에서 원자적으로 게시). 검사를 통과하지 못하면 아무 파일도
-그 자리에 남지 않는다. 같은 리비전의 예전 실행 위에 덮어쓰는 것은 새 실행의
-기록으로 전부 바뀌는 것이다 — 부분 섞임은 없다.
+그 자리에 남지 않는다. 같은 자리에는 같은 실행(리비전·run_id·지문이 전부 같은)의
+다시 게시만 허용된다 — 다른 실행의 자리 위에 덮어쓰는 길은 없다(루트 재검).
 """
 
 from __future__ import annotations
@@ -64,10 +64,11 @@ class ArtifactVerificationError(RuntimeError):
 
 
 class ArtifactRevisionMismatch(RuntimeError):
-    """게시 directory가 다른 최종 영상 리비전의 기록이다 — 섞어 쓸 수 없다(§11.1).
+    """게시 directory가 다른 실행(렌더·run·지문)의 기록이다 — 섞어 쓸 수 없다(§11.1).
 
-    같은 자리에 예전 렌더의 응답·기록이 남은 채 새 리비전을 게시하면 두 실행의
-    증거가 한 폴더에서 서로를 인용하게 된다. 새 리비전은 새 실행 디렉터리다.
+    같은 자리에 예전 실행의 응답·기록이 남은 채 새 실행을 게시하면 두 실행의
+    증거가 한 폴더에서 서로를 인용하게 된다. 리비전·run_id·지문 중 어느 하나라도
+    다르면 새 실행 디렉터리다. 같은 실행의 다시 게시만 같은 자리에 허용된다.
     """
 
 
@@ -247,26 +248,33 @@ def _atomic_write(path: Path, payload: object) -> Path:
 
 
 def _require_revision_match(outdir: Path, result: FinalCaptionResult) -> None:
-    """같은 자리에 다른 리비전의 기록이 있으면 닫는다 — 렌더끼리 증거를 안 섞는다.
+    """같은 자리에 다른 실행의 기록이 있으면 닫는다 — 렌더·run·지문을 안 섞는다.
 
-    빈 directory는 새 실행의 자리다. trace가 있는데 리비전이 다르면 예전 렌더의
-    잔해다 — 그 위에 덮어쓰면 두 실행의 응답이 한 폴더에서 섞인다(§11.1).
+    빈 directory는 새 실행의 자리다. trace가 있는데 리비전·run_id·지문 중 하나라도
+    다르면 다른 실행의 잔해다 — 그 위에 덮어쓰면 두 실행의 응답이 한 폴더에서
+    섞인다(§11.1). 세 개가 전부 같은 다시 게시만 같은 자리에 남는다.
     """
     trace = outdir / TRACE_NAME
     if not trace.is_file():
         return
     try:
         previous = json.loads(trace.read_text(encoding="utf-8"))
-        revision = str(previous.get("final_video_revision", ""))
     except (OSError, json.JSONDecodeError):
         raise ArtifactRevisionMismatch(
             f"게시 자리의 지난 기록을 읽을 수 없다: {trace} — 새 실행 디렉터리를 써라"
         ) from None
-    if revision != result.final_video_revision:
-        raise ArtifactRevisionMismatch(
-            f"게시 자리가 다른 최종 영상 리비전의 기록이다({revision[:12]}… ≠"
-            f" {result.final_video_revision[:12]}…) — 리비전마다 새 실행 디렉터리다"
-        )
+    identity = {
+        "final_video_revision": result.final_video_revision,
+        "run_id": result.run_id,
+        "fingerprint": result.fingerprint,
+    }
+    for name, current in identity.items():
+        recorded = str(previous.get(name, ""))
+        if recorded != str(current):
+            raise ArtifactRevisionMismatch(
+                f"게시 자리가 다른 실행의 기록이다 — {name}: {recorded[:12]}… ≠"
+                f" {str(current)[:12]}… — 렌더·run·지문마다 새 실행 디렉터리다(§11.1)"
+            )
 
 
 def _atomic_write_text(path: Path, body: str) -> Path:

@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from decimal import Decimal
 from fractions import Fraction
 from pathlib import Path
@@ -216,6 +217,24 @@ def test_publish_refuses_foreign_revision_directory(tmp_path: Path) -> None:
     other = make_result(revision="b" * 64)
     with pytest.raises(ArtifactRevisionMismatch):
         publish_caption_artifacts(outdir, other, make_plan(tmp_path, revision="b" * 64))
+
+
+def test_publish_refuses_foreign_run_or_fingerprint_directory(tmp_path: Path) -> None:
+    """같은 리비전이라도 다른 run·지문의 자리에는 게시하지 않는다(루트 재검).
+
+    렌더가 같아도 실행(run)이나 지문이 다르면 다른 실행이다 — 같은 폴더에 섞이면
+    두 실행의 응답이 서로를 인용하게 된다. 같은 실행의 다시 게시만 같은 자리에
+    남는다(불변 산출물 보존).
+    """
+    outdir = tmp_path / "out"
+    result = make_result()
+    plan = make_plan(tmp_path)
+    publish_caption_artifacts(outdir, result, plan)
+    publish_caption_artifacts(outdir, result, plan)  # 같은 실행의 다시 게시는 무해하다
+    with pytest.raises(ArtifactRevisionMismatch):
+        publish_caption_artifacts(outdir, replace(result, run_id="run-2"), plan)
+    with pytest.raises(ArtifactRevisionMismatch):
+        publish_caption_artifacts(outdir, replace(result, fingerprint="e" * 64), plan)
 
 
 def test_draft_language_follows_settings(tmp_path: Path) -> None:

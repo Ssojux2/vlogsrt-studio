@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import shutil
 import subprocess
+import wave
 from dataclasses import FrozenInstanceError, replace
 from datetime import date
 from decimal import Decimal
@@ -48,6 +49,7 @@ from vlogsrt.project.raw.final_caption import (
     run_final_captions,
 )
 from vlogsrt.project.raw.final_video import (
+    FinalVideoChanged,
     FinalVideoInput,
     register_final_video,
 )
@@ -494,38 +496,45 @@ def test_offline_env_blocks_online_route(tmp_path: Path, monkeypatch: pytest.Mon
     assert timing.calls == [] and text.calls == []
 
 
-def test_live_adapter_faces_the_gate_even_under_offline_config(
+def test_live_adapter_is_rejected_under_offline_config_even_with_valid_approval(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """실전송 어댑터가 끼어 있으면 offline 설정이라도 승인·환경 문을 지난다(§14.3).
+    """실전송 어댑터는 `network_mode=online` 실행에서만 움직인다(§14.3, 루트 재검).
 
-    설정 문자열 하나가 유료 호출을 승인해서는 안 된다 — 문은 첫 호출 앞에서 닫힌다.
+    환경이 오프라인이 아니고 승인이 계획에 **정확히** 묶여 있어도 오프라인 설정
+    아래에서는 거부된다 — 설정·환경이 승인보다 앞선다. 승인 문서 하나가 설정보다
+    큰 권한을 갖는 순간 오프라인 계약이 무너진다.
     """
     from vlogsrt.project.raw.caption_provider import TransportTimingProvider
 
     class DeadSender:
-        def send_request(self, *args: Any, **kwargs: Any) -> dict[str, Any]:  # pragma: no cover
-            raise AssertionError("승인 없는 실전송 호출은 닫혀 있어야 한다")
+        def __init__(self) -> None:
+            self.calls: list[Any] = []
 
-    monkeypatch.setattr(engine.env, "is_offline", lambda: False)
+        def send_request(self, *args: Any, **kwargs: Any) -> dict[str, Any]:  # pragma: no cover
+            self.calls.append(args)
+            raise AssertionError("오프라인 설정 아래 실전송 호출은 닫혀 있어야 한다")
+
+    monkeypatch.setattr(engine.env, "is_offline", lambda: False)  # 환경은 오프라인이 아니다
     video = make_video(tmp_path)
     plan = plan_caption_run(
         video, run_id="run-live", settings=FinalCaptionSettings(chunk_max_seconds=15.0)
     )
     assert plan.workflow.network_mode == "offline"  # 설정은 여전히 오프라인이다
+    sender = DeadSender()
     fake_text = FakeText({0: "안녕", 1: "잘가", 2: "끝"})
-    with pytest.raises(CaptionApprovalMissing):
-        run_final_captions(
-            plan,
-            on=BEFORE_SHUTDOWN,
-            timing_provider=TransportTimingProvider(
-                sender=DeadSender(),
-                cfg=Config(),
-            ),
-            text_provider=fake_text,
-            workdir=tmp_path / "w",
-        )
-    assert fake_text.calls == []
+    for approval in (None, expected_approval(plan)):  # 승인이 없어도 있어도 닫힌다
+        with pytest.raises(CaptionRunError, match="network_mode=online"):
+            run_final_captions(
+                plan,
+                on=BEFORE_SHUTDOWN,
+                timing_provider=TransportTimingProvider(sender=sender, cfg=Config()),
+                text_provider=fake_text,
+                workdir=tmp_path / "w",
+                approval=approval,
+            )
+    assert sender.calls == []
+    assert fake_text.calls == []  # 호출은 0회 — 설정 문이 승인보다 앞선다
 
 
 def test_shutdown_day_blocks_new_online_timing_zero_calls(
@@ -860,6 +869,136 @@ def _plan_of(tmp_path: Path, run_id: str) -> Any:
     return plan_caption_run(
         video, run_id=run_id, settings=FinalCaptionSettings(chunk_max_seconds=15.0)
     )
+
+
+# ─────────────────────────────────────────────────────────────
+#  청크 캐시·입력 신원 — 재사용은 실제 바이트가 증명한다(루트 재검)
+# ─────────────────────────────────────────────────────────────
+
+
+class FrameCountingTiming:
+    """청크 WAV의 실제 프레임 수를 기록하는 시간 제공자 가짜(루트 캐시 재검)."""
+
+    def __init__(self) -> None:
+        self.frames: list[tuple[int, int, int]] = []
+
+    def timed_transcript(
+        self, *, binding: Any, chunk: Any, settings: Any, on: date, **kwargs: Any
+    ) -> Any:
+        with wave.open(str(chunk.path), "rb") as handle:
+            actual = handle.getnframes()
+        self.frames.append((binding.sample_start, binding.sample_end, actual))
+        return parse_timing_response(
+            {
+                "segments": [
+                    {
+                        "text": f" 장면 {chunk.index}",
+                        "start": 0.01,
+                        "end": min(0.05, chunk.duration - 0.01),
+                    }
+                ]
+            },
+            binding=binding,
+            model=settings.models.timing_model,
+            provider=settings.caption.timing_provider,
+            chunk_duration=chunk.duration,
+            chunk_offset=chunk.offset,
+        )
+
+
+def test_shared_workdir_rechunking_never_reuses_stale_wav(tmp_path: Path) -> None:
+    """같은 workdir에서 청크 폭이 바뀌면 낡은 WAV가 새 범위로 재사용되지 않는다.
+
+    파일 이름은 오디오 신원+샘플 범위로 지어지고, 재사용·새로 쓰기 할 것 없이
+    WAV 프레임 수·payload가 저장 PCM 슬라이스와 대조된다 — 색인만 같은 낡은
+    청크가 묶은 범위인 척하는 길이 없다(루트 캐시 재검).
+    """
+    video = make_video(tmp_path, seconds=4.0)  # 64000 샘플
+    shared = tmp_path / "shared-work"
+    seen: dict[float, list[tuple[int, int, int]]] = {}
+    for width in (0.8, 1.6):
+        plan = plan_caption_run(
+            video,
+            run_id=f"width-{width}",
+            settings=FinalCaptionSettings(chunk_max_seconds=width),
+        )
+        timing = FrameCountingTiming()
+        text = FakeText({index: f"장면 {index}" for index in range(len(plan.spans))})
+        result = run_final_captions(
+            plan,
+            on=BEFORE_SHUTDOWN,
+            timing_provider=timing,
+            text_provider=text,
+            workdir=shared,
+        )
+        seen[width] = timing.frames
+        assert len(result.chunks) == len(plan.spans)
+        assert all(end - start == actual for start, end, actual in timing.frames), (
+            f"폭 {width}: 묶은 샘플 범위와 실제 WAV 프레임 수가 다르다"
+        )
+    assert [end for _, end, _ in seen[0.8]] == [12800, 25600, 38400, 51200, 64000]
+    assert [(start, end) for start, end, _ in seen[1.6]] == [
+        (0, 25600),
+        (25600, 51200),
+        (51200, 64000),
+    ]
+    # 예전 폭의 청크 파일은 그대로 남는다 — 불변 산출물을 지우지 않는다
+    narrow = shared / f"caption-chunk-0000-{video.audio.pcm_sha256[:16]}-s0-e12800.wav"
+    assert narrow.is_file()
+
+
+def test_same_length_tampered_chunk_wav_is_rewritten_before_send(tmp_path: Path) -> None:
+    """같은 길이로 바뀐 청크 WAV도 재사용되지 않는다 — payload 해시가 증명한다."""
+    video = make_video(tmp_path, seconds=4.0)
+    workdir = tmp_path / "work"
+    settings = FinalCaptionSettings(chunk_max_seconds=2.0)  # [0,32000), [32000,64000)
+    text = FakeText({0: "가", 1: "나"})
+    first = FrameCountingTiming()
+    run_final_captions(
+        plan_caption_run(video, run_id="tamper-a", settings=settings),
+        on=BEFORE_SHUTDOWN,
+        timing_provider=first,
+        text_provider=text,
+        workdir=workdir,
+    )
+    wav = workdir / f"caption-chunk-0000-{video.audio.pcm_sha256[:16]}-s0-e32000.wav"
+    pristine = wav.read_bytes()
+    body = bytearray(pristine)
+    body[-4:] = b"\x01\x02\x03\x04"  # 길이는 같고 payload가 다른 바이트
+    wav.write_bytes(bytes(body))
+    second = FrameCountingTiming()
+    run_final_captions(
+        plan_caption_run(video, run_id="tamper-b", settings=settings),
+        on=BEFORE_SHUTDOWN,
+        timing_provider=second,
+        text_provider=FakeText({0: "가", 1: "나"}),
+        workdir=workdir,
+    )
+    assert all(end - start == actual for start, end, actual in second.frames)
+    assert wav.read_bytes() == pristine  # 변조분은 다시 쓰여 원본 슬라이스로 돌아온다
+
+
+def test_changed_pcm_before_execution_blocks_all_calls(tmp_path: Path) -> None:
+    """실행 직전에 PCM이 바뀌면 호출 0회로 닫힌다 — 옛 신원을 새 오디오에 못 붙인다."""
+    video = make_video(tmp_path)
+    plan = plan_caption_run(
+        video, run_id="pcm-swap", settings=FinalCaptionSettings(chunk_max_seconds=15.0)
+    )
+    pcm = video.audio.pcm_path
+    body = bytearray(pcm.read_bytes())
+    body[-2:] = b"\xff\xff"  # 같은 길이, 다른 바이트 — 크기 검사만으로는 안 잡힌다
+    pcm.write_bytes(bytes(body))
+    timing = FakeTiming({0: [], 1: [], 2: []})
+    text = FakeText({0: "x", 1: "y", 2: "z"})
+    with pytest.raises(FinalVideoChanged):
+        run_final_captions(
+            plan,
+            on=BEFORE_SHUTDOWN,
+            timing_provider=timing,
+            text_provider=text,
+            workdir=tmp_path / "w",
+        )
+    assert timing.calls == [] and text.calls == []  # 호출은 0회다
 
 
 # ─────────────────────────────────────────────────────────────

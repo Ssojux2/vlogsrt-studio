@@ -27,6 +27,7 @@ from vlogsrt.project.raw.final_video import (
     pcm_span_cutter,
     plan_caption_chunks,
     register_final_video,
+    require_audio_unchanged,
     require_unchanged,
 )
 from vlogsrt.project.raw.understanding import PCM_SAMPLE_RATE, SampleSpan
@@ -161,7 +162,10 @@ def test_pcm_span_cutter_returns_paired_exact_slices(tmp_path: Path) -> None:
     assert chunks[0].offset == pytest.approx(2.0)
     assert chunks[0].duration == pytest.approx(4.5)
     assert chunks[1].offset == pytest.approx(10.0)
-    assert all((workdir / f"repair-{index:04d}.wav").is_file() for index in (0, 1))
+    # 이름은 샘플 범위로 지어진다 — 공유 workdir에서 낡은 조각이 재사용되지 않는다
+    assert chunks[0].path == workdir / "repair-0000-s32000-e104000.wav"
+    assert chunks[1].path == workdir / "repair-0001-s160000-e208000.wav"
+    assert all(chunk.path.is_file() for chunk in chunks)
 
 
 def test_require_unchanged_detects_replaced_copy(tmp_path: Path) -> None:
@@ -171,6 +175,21 @@ def test_require_unchanged_detects_replaced_copy(tmp_path: Path) -> None:
     video.verified_copy_path.write_bytes(b"tampered")
     with pytest.raises(FinalVideoChanged):
         require_unchanged(video)
+
+
+def test_require_audio_unchanged_detects_same_length_tamper(tmp_path: Path) -> None:
+    """PCM 신원 재검사 — 같은 길이의 다른 바이트도, 크기 어긋남도 닫는다(루트 재검)."""
+    video = make_input(tmp_path)
+    require_audio_unchanged(video)
+    pcm = video.audio.pcm_path
+    body = bytearray(pcm.read_bytes())
+    body[-1] ^= 0xFF  # 길이는 같고 해시가 다르다
+    pcm.write_bytes(bytes(body))
+    with pytest.raises(FinalVideoChanged):
+        require_audio_unchanged(video)
+    pcm.write_bytes(b"short")  # 이번엔 크기가 어긋난다
+    with pytest.raises(FinalVideoChanged):
+        require_audio_unchanged(video)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -252,7 +271,14 @@ def test_register_final_video_verifies_copy_and_manifest(
     assert video.final_video_revision == hashlib.sha256(before).hexdigest()
     assert video.verified_copy_path.is_file()
     assert video.verified_copy_sha256 == video.final_video_revision
-    manifest = tmp_path / "work" / "final-video" / "final-video.json"
+    manifest = (
+        tmp_path
+        / "work"
+        / "caption-audio"
+        / f"{video.final_video_revision[:16]}-o0"
+        / "final-video.json"
+    )
+    assert video.manifest_path == manifest  # 기록은 선택 오디오 이름공간 안에 있다
     assert manifest.is_file()
     assert "final_video_revision" in manifest.read_text(encoding="utf-8")
     assert video.audio.sample_rate == PCM_SAMPLE_RATE
@@ -284,6 +310,71 @@ def test_reregistration_after_overwrite_is_a_new_revision(
 
 
 @needs_ffmpeg
+def test_reused_workdir_two_revisions_keep_old_inputs(
+    synthetic_final: Path, tmp_path: Path
+) -> None:
+    """같은 기본 workdir에 두 리비전을 등록해도 예전 입력은 산 채로 남는다(루트 재검).
+
+    파생 PCM·기록은 최종 해시+오디오 선택마다 별개 이름공간에 들어가므로 새
+    등록이 예전 렌더의 증거를 덮어쓰지 않는다 — 예전 입력은 여전히 실행 가능하다.
+    """
+    work = tmp_path / "work"
+    first = register_final_video(synthetic_final, work, source_id="final_1")
+    old_pcm_bytes = first.audio.pcm_path.read_bytes()
+    old_manifest = first.manifest_path.read_text(encoding="utf-8")
+    synthetic_final.write_bytes(synthetic_final.read_bytes() + b"-v2")  # 같은 이름의 새 렌더
+    second = register_final_video(synthetic_final, work, source_id="final_1")
+    assert second.final_video_revision != first.final_video_revision
+    assert second.audio.pcm_path != first.audio.pcm_path  # 이름공간이 갈라졌다
+    assert first.audio.pcm_path.read_bytes() == old_pcm_bytes  # 예전 PCM은 무사하다
+    assert first.manifest_path.read_text(encoding="utf-8") == old_manifest
+    require_unchanged(first)  # 예전 입력은 여전히 유효하다
+    require_audio_unchanged(first)
+
+
+@needs_ffmpeg
+def test_alternate_audio_ordinal_namespaces_are_distinct(tmp_path: Path) -> None:
+    """같은 영상의 다른 오디오 선택은 별개 PCM·기록이다 — 서로를 덮어쓰지 않는다(§11.1)."""
+    path = tmp_path / "dual.mp4"
+    _run_ffmpeg(
+        "-f",
+        "lavfi",
+        "-i",
+        "testsrc2=size=320x180:rate=25:duration=4",
+        "-f",
+        "lavfi",
+        "-i",
+        "sine=frequency=440:duration=4",
+        "-f",
+        "lavfi",
+        "-i",
+        "sine=frequency=880:duration=4",
+        "-map",
+        "0:v",
+        "-map",
+        "1:a",
+        "-map",
+        "2:a",
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        str(path),
+    )
+    work = tmp_path / "work"
+    first = register_final_video(path, work, source_id="final_1", audio_ordinal=0)
+    second = register_final_video(path, work, source_id="final_1", audio_ordinal=1)
+    assert first.audio.pcm_path != second.audio.pcm_path
+    assert first.audio.pcm_sha256 != second.audio.pcm_sha256  # 주파수가 다른 별개 트랙
+    assert first.manifest_path != second.manifest_path
+    assert first.manifest_path.is_file() and second.manifest_path.is_file()
+    require_audio_unchanged(first)  # 뒤늦은 선택이 예전 선택의 PCM을 안 건드렸다
+    require_audio_unchanged(second)
+
+
+@needs_ffmpeg
 def test_stale_verified_copy_candidate_is_rejected(synthetic_final: Path, tmp_path: Path) -> None:
     """해시가 다른 사본 후보 위에는 등록하지 않는다 — 반쪽 사본은 신원이 못 된다."""
 
@@ -294,7 +385,7 @@ def test_stale_verified_copy_candidate_is_rejected(synthetic_final: Path, tmp_pa
     stale.write_bytes(b"leftover-from-another-render")
     with pytest.raises(FinalVideoCopyFailed):
         register_final_video(synthetic_final, tmp_path / "work", source_id="final_1")
-    assert not (copy_dir / "final-video.json").exists()  # 실패는 기록을 남기지 않는다
+    assert not (tmp_path / "work" / "caption-audio").exists()  # 실패는 기록을 남기지 않는다
 
 
 @needs_ffmpeg

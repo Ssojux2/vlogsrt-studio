@@ -34,6 +34,7 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
+import wave
 from bisect import bisect_right
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -77,14 +78,16 @@ from vlogsrt.project.raw.config import (
     validate_raw_workflow_config,
 )
 from vlogsrt.project.raw.final_video import (
+    FinalVideoChanged,
     FinalVideoInput,
     caption_chunk,
     pcm_span_cutter,
     plan_caption_chunks,
+    require_audio_unchanged,
     require_unchanged,
     write_caption_chunk,
 )
-from vlogsrt.project.raw.understanding import SampleSpan
+from vlogsrt.project.raw.understanding import PCM_SAMPLE_WIDTH, SampleSpan, SelectedAudio
 from vlogsrt.transcribe import ARBITER_KIND, RESCUE_KIND, ChunkResponse, TranscriptionJob
 
 # ─────────────────────────────────────────────────────────────
@@ -545,6 +548,7 @@ class _RunState:
     repair_failure: str = ""
     settled: repair.Settled | None = None
     wav_sha256: dict[int, str] = field(default_factory=dict)
+    slice_sha256: dict[int, str] = field(default_factory=dict)
 
 
 def run_final_captions(
@@ -562,8 +566,9 @@ def run_final_captions(
 
     온라인 경로는 `network_mode="online"`일 때만 열리고, 그때는 환경 오프라인
     기본·승인 바인딩·수명주기 검사가 **첫 호출 앞에서** 전부 닫힌다. 알려진
-    실전송 어댑터가 주입된 경우에는 설정이 `offline`이라도 같은 문을 지난다 —
-    설정 문자열 하나가 유료 호출을 승인하는 일이 없어야 한다(§14.3). 검증
+    실전송 어댑터는 `network_mode`가 `online`이 아니면 승인이 아무리 정확해도
+    실행 자체가 거부된다 — 설정·환경이 승인보다 앞선다(§14.3, 루트 재검).
+    첫 호출 전에 검증 사본과 선택 PCM의 신원(크기·해시)을 다시 본다. 검증
     on/off는 문구 호출 수와 결과를 바꾸지 않는다 — 검증은 이미 받은 응답의
     표시일 뿐이다(§11.3).
     """
@@ -571,10 +576,14 @@ def run_final_captions(
         raise CaptionProviderMissing(
             "시간·문구 제공자가 모두 주입되어야 한다 — 없는 제공자로는 호출도 계획도 없다"
         )
-    online = _requires_online_gate(plan, timing_provider, text_provider)
-    if online:
+    _require_online_config_for_transport(plan, timing_provider, text_provider)
+    if plan.workflow.network_mode == "online":
         _require_online_route(plan, approval, on)
-    ledger = _Ledger(approval if online else None)
+        ledger = _Ledger(approval)
+    else:
+        ledger = _Ledger(None)
+    require_unchanged(plan.video)
+    require_audio_unchanged(plan.video)
     state = _RunState()
     workdir = workdir or plan.video.audio.pcm_path.parent
     try:
@@ -587,19 +596,22 @@ def run_final_captions(
     return _assemble_result(plan, state, cancelled_reason="")
 
 
-def _requires_online_gate(
+def _require_online_config_for_transport(
     plan: CaptionRunPlan, timing: TimingProvider, text: TextTranscriptProvider
-) -> bool:
-    """온라인 문이 필요한가 — 설정이 `online`이거나 **실전송 어댑터가 끼어 있으면** 참.
+) -> None:
+    """알려진 실전송 어댑터는 `network_mode=online` 실행에서만 움직인다(§14.3).
 
-    주입된 제공자가 실제 호출을 나르는 알려진 어댑터면 설정 문자열과 무관하게
-    승인·환경·수명주기 문을 지나야 한다 — `offline` 설정 하나가 유료 전송을
-    승인하는 길이 되면 안 된다(§14.3). 가짜·재생 제공자는 네트워크가 없으므로
-    문을 지나지 않는다.
+    설정이 `offline`인데 실전송 어댑터가 끼어 있으면 **유효한 승인이 있어도**
+    실행하지 않는다 — 설정·환경이 승인보다 앞선다. 승인 문서 하나가 설정보다
+    큰 권한을 갖는 순간 오프라인 계약이 무너진다(루트 재검). 가짜·오프라인
+    제공자는 이 문과 무관하게 오프라인 실행으로 돈다.
     """
-    if plan.workflow.network_mode == "online":
-        return True
-    return isinstance(timing, TransportTimingProvider) or isinstance(text, TransportTextProvider)
+    live = isinstance(timing, TransportTimingProvider) or isinstance(text, TransportTextProvider)
+    if live and plan.workflow.network_mode != "online":
+        raise CaptionRunError(
+            "실전송 어댑터는 network_mode=online 실행에서만 움직인다 — 현재 설정은 "
+            f"{plan.workflow.network_mode!r}다(§14.3). 유효한 승인도 오프라인 설정을 열 수 없다"
+        )
 
 
 def _require_online_route(plan: CaptionRunPlan, approval: CaptionApproval | None, on: date) -> None:
@@ -615,15 +627,78 @@ def _require_online_route(plan: CaptionRunPlan, approval: CaptionApproval | None
 
 
 def _chunk_of(plan: CaptionRunPlan, index: int, workdir: Path, state: _RunState) -> Chunk:
-    """청크 WAV를 (있으면) 그대로 쓰고 없으면 쓴다 — 두 경로가 같은 바이트를 쓴다."""
+    """청크 WAV를 계획의 범위에 맞게 확보한다 — 재사용은 실제 바이트가 증명한다.
+
+    파일 이름은 청크 번호가 아니라 **오디오 신원 + 샘플 범위**로 지어진다 — 같은
+    workdir에서 청크 폭이 바뀌면 예전 청크가 새 범위로 재사용되는 일이 없다(루트
+    재검). 재사용하든 새로 쓰든 보내기 전에 WAV 헤더(주파수·채널·폭)와 프레임
+    수·payload 해시를 저장 PCM의 그 슬라이스와 대조한다 — 같은 길이의 다른
+    바이트도 거짓 재사용이다.
+    """
     span = plan.spans[index]
     workdir.mkdir(parents=True, exist_ok=True)
-    wav = workdir / f"caption-chunk-{index:04d}.wav"
-    if not wav.is_file():
+    wav = workdir / _chunk_wav_name(plan, index)
+    expected = _expected_slice_sha256(plan, index, state)
+    if not _wav_matches_slice(wav, plan.video.audio, span, expected):
         write_caption_chunk(plan.video, span, wav)
-    if index not in state.wav_sha256:
-        state.wav_sha256[index] = _sha256(wav)
+    if not _wav_matches_slice(wav, plan.video.audio, span, expected):
+        raise CaptionRunError(
+            f"청크 {index} WAV가 저장 PCM 슬라이스 [{span.start}, {span.end})와 같지 않다 — "
+            "검증 못 한 바이트는 보내지 않는다"
+        )
+    state.wav_sha256[index] = _sha256(wav)
     return caption_chunk(plan.video, span, index, wav)
+
+
+def _chunk_wav_name(plan: CaptionRunPlan, index: int) -> str:
+    """청크 WAV 이름 — 오디오 해시와 정확한 샘플 경계로 지어 낡은 파일과 겹치지 않게."""
+    span = plan.spans[index]
+    stem = plan.video.audio.pcm_sha256[:16]
+    return f"caption-chunk-{index:04d}-{stem}-s{span.start}-e{span.end}.wav"
+
+
+def _expected_slice_sha256(plan: CaptionRunPlan, index: int, state: _RunState) -> str:
+    """저장 PCM의 그 슬라이스 해시 — 청크가 덮어야 할 바이트의 정본(실행마다 한 번)."""
+    if index not in state.slice_sha256:
+        audio = plan.video.audio
+        span = plan.spans[index]
+        frame_bytes = PCM_SAMPLE_WIDTH * audio.channels
+        digest = hashlib.sha256()
+        with audio.pcm_path.open("rb") as source:
+            source.seek(span.start * frame_bytes)
+            remaining = (span.end - span.start) * frame_bytes
+            while remaining > 0:
+                block = source.read(min(remaining, 1024 * 1024))
+                if not block:
+                    raise FinalVideoChanged(
+                        f"PCM이 계획의 슬라이스보다 짧다: {audio.pcm_path} — "
+                        f"[{span.start}, {span.end}) 중 {remaining}바이트가 없다"
+                    )
+                digest.update(block)
+                remaining -= len(block)
+        state.slice_sha256[index] = digest.hexdigest()
+    return state.slice_sha256[index]
+
+
+def _wav_matches_slice(
+    wav: Path, audio: SelectedAudio, span: SampleSpan, expected_sha: str
+) -> bool:
+    """WAV가 저장 PCM의 정확히 그 슬라이스인가 — 헤더·프레임 수·payload 해시로."""
+    frames = span.end - span.start
+    try:
+        with wave.open(str(wav), "rb") as handle:
+            if handle.getsampwidth() != PCM_SAMPLE_WIDTH:
+                return False
+            if handle.getnchannels() != audio.channels:
+                return False
+            if handle.getframerate() != audio.sample_rate:
+                return False
+            if handle.getnframes() != frames:
+                return False
+            payload = handle.readframes(frames)
+    except (wave.Error, OSError):
+        return False
+    return hashlib.sha256(payload).hexdigest() == expected_sha
 
 
 def _sha256(path: Path) -> str:

@@ -44,9 +44,10 @@ from vlogsrt.project.raw.understanding import (
 )
 
 FINAL_VIDEO_MANIFEST_NAME = "final-video.json"
-"""검증 사본 옆에 남는 신원 기록의 파일명(§11.1 — 리비전의 열쇠와 함께)."""
+"""선택 오디오 이름공간 안에 남는 신원 기록의 파일명(§11.1 — 리비전의 열쇠와 함께)."""
 
 _VERIFIED_COPY_DIR = "final-video"
+_AUDIO_DIR = "caption-audio"
 
 
 class FinalVideoError(RuntimeError):
@@ -146,7 +147,7 @@ def register_final_video(
     stream_count = preprocess.probe_audio_stream_count(source)
     ordinal = _resolve_audio_ordinal(source, stream_count, audio_ordinal)
     copy_path = _verified_copy_into(source, workdir, revision)
-    audio_workdir = workdir / "caption-audio"
+    audio_workdir = _audio_workdir(workdir, revision, ordinal)
     audio_workdir.mkdir(parents=True, exist_ok=True)
     audio = select_audio(copy_path, audio_workdir, source_id=source_id, audio_ordinal=ordinal)
     input_ = FinalVideoInput(
@@ -155,7 +156,7 @@ def register_final_video(
         original_path=source,
         verified_copy_path=copy_path,
         verified_copy_sha256=revision,
-        manifest_path=copy_path.parent / FINAL_VIDEO_MANIFEST_NAME,
+        manifest_path=audio_workdir / FINAL_VIDEO_MANIFEST_NAME,
         audio=audio,
         video_duration=preprocess.probe_duration(copy_path),
         audio_stream_count=stream_count,
@@ -182,6 +183,15 @@ def _resolve_audio_ordinal(source: Path, stream_count: int, ordinal: int | None)
     if ordinal >= stream_count:
         raise FinalVideoError(f"오디오 순번 {ordinal}이(가) 스트림 수 {stream_count}를 벗어난다")
     return ordinal
+
+
+def _audio_workdir(workdir: Path, revision: str, ordinal: int) -> Path:
+    """선택 오디오의 이름공간 — 최종 해시와 오디오 선택마다 별개 디렉터리다(§11.1).
+
+    같은 기본 workdir를 다시 써도 다른 렌더·다른 오디오 선택의 PCM·기록은 서로를
+    덮어쓰지 않는다 — 예전 입력의 사본·PCM·기록은 그대로 유효하다(루트 재검).
+    """
+    return workdir / _AUDIO_DIR / f"{revision[:16]}-o{ordinal}"
 
 
 def _verified_copy_into(source: Path, workdir: Path, revision: str) -> Path:
@@ -266,6 +276,30 @@ def require_unchanged(input_: FinalVideoInput) -> None:
     if _sha256_file(input_.verified_copy_path) != input_.final_video_revision:
         raise FinalVideoChanged(
             f"검증 사본이 등록 때와 다르다: {input_.verified_copy_path} — 리비전이 바뀌었다"
+        )
+
+
+def require_audio_unchanged(input_: FinalVideoInput) -> None:
+    """실행 직전에 선택 PCM이 여전히 등록 때의 신원인지 다시 본다(루트 재검).
+
+    검증 사본만으로는 부족하다 — 청크 WAV는 **저장 PCM**에서 잘려 나가므로 PCM이
+    바뀐 뒤 옛 `pcm_sha256`를 붙여 보내면 다른 오디오를 들었다고 기록하게 된다.
+    크기(샘플 수 × 채널 × 폭)와 해시를 함께 본다 — 같은 길이의 다른 바이트도
+    신원 어긋남이다.
+    """
+    audio = input_.audio
+    if not audio.pcm_path.is_file():
+        raise FinalVideoChanged(f"선택 오디오 PCM이 없다: {audio.pcm_path}")
+    geometry = audio.sample_count * audio.channels * PCM_SAMPLE_WIDTH
+    size = audio.pcm_path.stat().st_size
+    if size != geometry:
+        raise FinalVideoChanged(
+            f"PCM 크기가 등록 때와 다르다: {audio.pcm_path} — "
+            f"{size}/{geometry}바이트 (샘플 수·채널 어긋남)"
+        )
+    if _sha256_file(audio.pcm_path) != audio.pcm_sha256:
+        raise FinalVideoChanged(
+            f"PCM 해시가 등록 때와 다르다: {audio.pcm_path} — 낡은 오디오 신원이다"
         )
 
 
@@ -369,7 +403,8 @@ def pcm_span_cutter(
             if last <= first:
                 raise ChunkPlanningError(f"재전사 구간이 오디오 밖이다: [{start}, {end})초")
             span = SampleSpan(first, last)
-            wav = workdir / f"repair-{position:04d}.wav"
+            # 이름은 샘플 범위로 지어 공유 workdir에서 낡은 조각이 재사용되지 않게 한다
+            wav = workdir / f"repair-{position:04d}-s{span.start}-e{span.end}.wav"
             write_pcm_slice(input_.audio, span, wav)
             chunks.append(caption_chunk(input_, span, position, wav))
         return chunks
