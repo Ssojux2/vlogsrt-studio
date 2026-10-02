@@ -52,7 +52,7 @@ from vlogsrt.project.raw.final_caption import (
     run_final_captions,
 )
 from vlogsrt.project.raw.final_video import FinalVideoChanged, FinalVideoInput
-from vlogsrt.project.raw.understanding import PCM_SAMPLE_RATE, SelectedAudio
+from vlogsrt.project.raw.understanding import PCM_SAMPLE_RATE, SampleSpan, SelectedAudio
 
 BEFORE = date(2026, 10, 2)
 WRONG = "망원동 커피에 왔어요"
@@ -273,7 +273,7 @@ def test_review_edits_and_confirm_freeze_all_automatic_evidence(tmp_path: Path) 
 
 
 def test_draft_and_final_reparsed_to_same_cue_data(tmp_path: Path) -> None:
-    """초안과 final 모두 재파싱해서 큐 자료와 같다 — 밀리초 반올림까지(§11.7)."""
+    """초안과 final 모두 재파싱해서 큐 자료와 같다 — 정규화 정수 밀리초까지(§11.7)."""
     from vlogsrt.project.raw.caption_artifacts import caption_srt_text
 
     video, plan, result, *_ = drive(tmp_path)
@@ -283,22 +283,48 @@ def test_draft_and_final_reparsed_to_same_cue_data(tmp_path: Path) -> None:
     review.save_revision(store, head)
     exported = confirm(store, video, head)
 
-    def rounded(value: Fraction) -> Fraction:
-        return review._ms_of(value)
+    def serialized_ms(seconds: float) -> int:
+        return round(seconds * 1000)  # 재독기 float에서 직렬된 밀리초를 되찾는다
 
     draft_cues = parse_srt(caption_srt_text(result))
     assert len(draft_cues) == len(snap.cues)
     for parsed, cue in zip(draft_cues, snap.cues, strict=True):
         assert parsed.text == cue.text
-        assert parsed.start == float(rounded(cue.start))
+        assert serialized_ms(parsed.start) == review._ms_int(cue.start)
     final_cues = parse_srt(exported.srt.read_text(encoding="utf-8"))
-    assert [(c.start, c.end, c.text) for c in final_cues] == [
-        (float(rounded(c.start)), float(rounded(c.end)), c.text) for c in head.cues
+    assert [(serialized_ms(c.start), serialized_ms(c.end), c.text) for c in final_cues] == [
+        (review._ms_int(c.start), review._ms_int(c.end), c.text) for c in head.cues
     ]
     vtt_cues = parse_vtt(exported.vtt.read_text(encoding="utf-8"))
-    assert [(s, e, t) for s, e, t in vtt_cues] == [
-        (rounded(c.start), rounded(c.end), c.text) for c in head.cues
+    assert [(review._ms_int(s), review._ms_int(e), t) for s, e, t in vtt_cues] == [
+        (review._ms_int(c.start), review._ms_int(c.end), c.text) for c in head.cues
     ]
+
+
+def test_final_reparse_accepts_real_fractional_cue_times(tmp_path: Path) -> None:
+    """실측 유리수 시각도 final 재파싱을 통과한다 — float 합 1ulp 어긋남이 아니다.
+
+    지연 오디오 실측에서 나온 그대로의 시각(3.183류)으로 잰다: 밀리초 타임스탬프는
+    같은데 SRT 재독기의 float 합이 정확한 유리수와 1ulp 어긋나는 값이다. 예전
+    판정은 이 어긋남을 시각 차이로 오독해 게시를 막았다 — 격자(정수 밀리초)에서
+    재면 같은 시각이다.
+    """
+    store, snap, head, video = prepared(tmp_path / "w")
+    start = Fraction(796204748184223669, 281474976710656000)  # ≈2.8286875 — 실측값
+    end = Fraction(447360495016476647, 140737488355328000)  # ≈3.1786875 — 실측값
+    milliseconds = review._ms_int(start)
+    seconds, millis = divmod(milliseconds, 1000)
+    assert seconds + millis / 1000.0 != float(Fraction(milliseconds, 1000))  # 진짜 어긋남
+    edited = edit_time(head, "a0000", start=start, end=end)
+    review.save_revision(store, edited)
+    for warning in review.review_state(snap, edited).warnings:
+        edited = allow_finding(edited, warning.key, "수동 시각을 직접 확인했다")
+        review.save_revision(store, edited)
+    exported = confirm(store, video, edited)  # FinalSerializationError 없이 나온다
+    assert edited.cues[0].start == start  # 도메인 시각은 양자화 없이 그대로다
+    body = exported.srt.read_text(encoding="utf-8")
+    assert f"00:00:0{seconds},{millis:03d}" in body  # 옳은 바이트가 그대로 나간다
+    assert round(parse_srt(body)[0].start * 1000) == milliseconds
 
 
 # ─────────────────────────────────────────────────────────────
@@ -499,6 +525,41 @@ def test_second_confirm_keeps_old_final_bytes_stable(tmp_path: Path) -> None:
         confirm(store, video, head)  # 옛 머리로는 더 이상 확정 못 한다
 
 
+def test_same_render_different_pcm_selection_is_refused(tmp_path: Path) -> None:
+    """같은 렌더 해시의 다른 유효 PCM — 낡은 자동 근거 위에 확정은 없다(§11.1).
+
+    바꿔치 PCM은 제 선언(해시·기하)과 스스로 일치해서 `require_audio_unchanged`를
+    통과한다. 그래도 동결 스냅샷이 들은 선택이 아니면 거부다 — 새 선택은 새
+    실행·새 동결이다.
+    """
+    store, snap, head, video = prepared(tmp_path / "w")
+    frozen = snap.path.read_bytes()
+    first = confirm(store, video, head)
+    first_bytes = first.srt.read_bytes()
+    changed_pcm = tmp_path / "w" / "other.pcm"
+    changed_pcm.write_bytes(bytes(len(video.audio.pcm_path.read_bytes())))
+    reselected = replace(
+        video,
+        audio=replace(
+            video.audio,
+            pcm_path=changed_pcm,
+            pcm_sha256=hashlib.sha256(changed_pcm.read_bytes()).hexdigest(),
+        ),
+    )
+    for mutated in (
+        reselected,  # 같은 길이의 다른 PCM — 각자 유효하지만 동결 근거가 아니다
+        replace(video, audio=replace(video.audio, pcm_sample0_file_time=Fraction(1, 7))),
+        replace(video, audio=replace(video.audio, audio_stream_index=2)),
+        replace(video, audio=replace(video.audio, source_sha256="d" * 64)),
+        replace(video, video_duration=41.0),
+    ):
+        with pytest.raises(review.AudioBasisMismatch):
+            confirm(store, mutated, head)
+    assert snap.path.read_bytes() == frozen  # 자동 기록은 무사하다
+    assert first.srt.read_bytes() == first_bytes  # 게시된 final도 무사하다
+    assert confirm(store, video, head).srt.read_bytes() == first_bytes  # 원래 선택은 멱등
+
+
 def test_manual_changes_never_reapply_to_new_run_or_new_render(tmp_path: Path) -> None:
     """새 실행·새 렌더에는 수동 변경이 따라가지 않는다(A7-3 완료 기준)."""
     store, snap, head, video = prepared(tmp_path)
@@ -534,6 +595,29 @@ def test_same_identity_different_auto_content_is_refused(tmp_path: Path) -> None
     )
     with pytest.raises(CaptionStoreConflict):
         review.freeze_automatic(store, result_b, plan_b)
+
+
+def test_freeze_refuses_result_from_a_different_plan(tmp_path: Path) -> None:
+    """남의 계획 기하를 이 결과의 신원으로 동결하지 않는다(§11.1).
+
+    본문은 결과 신원 아래 계획의 청크·샘플 경계를 얼어 붙인다 — run_id·지문·렌더
+    해시·샘플 묶음 중 하나라도 짝이 아니면 동결 자체가 닫힌다.
+    """
+    video, plan, result, *_ = drive(tmp_path)
+    store = review.open_review_store(tmp_path / "review")
+    last = plan.spans[-1]
+    drifted_span = SampleSpan(last.start + 1, last.end)  # 같은 수, 다른 경계
+    other_render = make_video(tmp_path / "other", revision_body=b"another-render")
+    for mutated in (
+        replace(plan, run_id="wrong-plan-run"),  # 결과는 run-1, 계획은 남의 실행이다
+        replace(plan, fingerprint="e" * 64),
+        replace(plan, video=other_render),
+        replace(plan, spans=plan.spans[:-1]),  # 청크 수가 계획과 다르다
+        replace(plan, spans=(*plan.spans[:-1], drifted_span)),
+    ):
+        with pytest.raises(review.MismatchedRunBasis):
+            review.freeze_automatic(store, result, mutated)
+    assert review.freeze_automatic(store, result, plan).identity.run_id == "run-1"  # 맞는 짝
 
 
 # ─────────────────────────────────────────────────────────────

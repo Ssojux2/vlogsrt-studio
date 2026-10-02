@@ -11,9 +11,10 @@ UI·서비스 연동은 없다 — W1이 이 선 위에 얹는다.
   동결되고(§11.1), 같은 신원에 다른 바이트를 다시 못박는 길은 없다. 수동 편집과
   확정 게시는 스냅샷·A7-2 게시물을 한 바이트도 고치지 않는다.
 - **구조 경색은 허용으로 못 뚫는다.** 원본·PCM 변경, 신원 불일치, 낡은 자동
-  근거, 미처리 오디오, 무효 시각은 확정을 막는다(§11.11). 시각 문제와 미배치는
-  **명시적 감사 기록을 가진 수동 정정**으로만 풀린다. 경고 허용은 표시된 경로에만
-  붙고, 실패한 문구 모델을 성공으로 바꾸지 못한다(§11.3).
+  근거, 미처리 오디오, 무효 시각은 확정을 막는다(§11.11). 같은 렌더 해시의
+  **다른 선택 오디오**도 막는다 — 스냅샷은 선택 PCM의 정체와 기하에 함께 묶인다.
+  시각 문제와 미배치는 **명시적 감사 기록을 가진 수동 정정**으로만 풀린다.
+  경고 허용은 표시된 경로에만 붙고, 실패한 문구 모델을 성공으로 바꾸지 못한다(§11.3).
 - **빈 성공은 사람 확정이다.** 전부 정상이고 전부 비어 있는 실행은 무발화
   미확정으로 남고, 독립적인 사용자 결정이 있을 때만 final이 나온다(§11.11).
   오류가 섞인 0바이트 SRT 성공은 없다. `no_audio`는 등록 단계의 별도 상태라
@@ -142,6 +143,24 @@ class FinalSerializationError(ReviewConfirmError):
     """final SRT/VTT가 재파싱 검사를 통과하지 못한다 — 게시되지 않는다(§11.7)."""
 
 
+class AudioBasisMismatch(ReviewConfirmError):
+    """같은 렌더 해시의 다른 선택 오디오 — 동결된 자동 근거는 낡은 것이다(§11.1).
+
+    검증 사본과 PCM 파일이 제 나름의 신원과 일치해도(각각 유효해도), 동결된
+    스냅샷이 들은 것과 **같은 선택**이어야 한다. 새 PCM·새 원점·새 스트림은
+    새 실행이고 새 동결이다.
+    """
+
+
+class MismatchedRunBasis(ReviewConfirmError):
+    """결과와 계획이 한 실행이 아니다 — 동결은 같은 실행의 증거끼리만(§11.1).
+
+    스냅샷 본문은 결과의 신원 아래 계획에서 잰 기하(청크·샘플 경계)를 얼어 붙인다.
+    남의 계획 기하를 남의 신원으로 못박으면 근거가 섞인 문서가 태어난다 —
+    동결보다 먼저 닫는다.
+    """
+
+
 # ─────────────────────────────────────────────────────────────
 #  자동 스냅샷 — 실행 결과를 얼어 붙인 증거
 # ─────────────────────────────────────────────────────────────
@@ -199,7 +218,11 @@ class ReviewThresholds:
 
 @dataclass(frozen=True, slots=True)
 class AutomaticSnapshot:
-    """동결된 자동 결과 — 신원 넷에 묶이고 타이핑된 검토 자료를 함께 낸다."""
+    """동결된 자동 결과 — 신원 넷에 묶이고 타이핑된 검토 자료를 함께 낸다.
+
+    `audio_*`·`origin`·나머지 기하는 **선택 오디오의 정체**다 — 확정 때 지금
+    `FinalVideoInput`의 선택과 같은지 다시 잰다(같은 렌더 해시의 다른 PCM 거부).
+    """
 
     identity: AutoIdentity
     status: str
@@ -210,6 +233,9 @@ class AutomaticSnapshot:
     channels: int
     pcm_sha256: str
     origin: Fraction
+    audio_stream_index: int
+    audio_source_sha256: str
+    audio_stream_count: int
     spans: tuple[tuple[int, int], ...]
     chunks: tuple[ChunkGate, ...]
     thresholds: ReviewThresholds
@@ -243,7 +269,10 @@ def automatic_content(result: FinalCaptionResult, plan: CaptionRunPlan) -> dict[
     """스냅샷 본문 — 큐·골격·수리·교정·검증·항목·미대응까지 전부 값으로(§11.11).
 
     큐에는 안정 ID(`a####`)를 순서대로 붙인다 — 같은 자동 내용은 같은 ID를 낳는다.
+    본문을 짓기 **전에** 결과와 계획이 한 실행인지 잰다 — 남의 계획 기하를 이
+    결과의 신원으로 얼어 붙이는 길이 여기서 끊긴다.
     """
+    _require_matching_basis(result, plan)
     audio = plan.video.audio
     return {
         "status": result.status,
@@ -254,6 +283,9 @@ def automatic_content(result: FinalCaptionResult, plan: CaptionRunPlan) -> dict[
         "channels": audio.channels,
         "pcm_sha256": audio.pcm_sha256,
         "origin": _fraction(audio.pcm_sample0_file_time),
+        "audio_stream_index": audio.audio_stream_index,
+        "audio_source_sha256": audio.source_sha256,
+        "audio_stream_count": plan.video.audio_stream_count,
         "spans": [[span.start, span.end] for span in plan.spans],
         "thresholds": {
             "min_duration": _fraction(plan.engine.min_duration),
@@ -271,6 +303,37 @@ def automatic_content(result: FinalCaptionResult, plan: CaptionRunPlan) -> dict[
         "retext": result.retext.to_dict(),
         "verify_rows": [asdict(row) for row in result.verify_rows],
     }
+
+
+def _require_matching_basis(result: FinalCaptionResult, plan: CaptionRunPlan) -> None:
+    """결과와 계획이 한 실행인가 — 신원 셋과 청크·샘플 묶음을 잰다(§11.1).
+
+    본문은 결과의 신원 아래 계획의 기하를 얼어 붙이므로, 짝이 다르면 근거가 섞인
+    문서가 된다. run_id·지문·렌더 해시와 청크의 샘플 경계가 계획의 조각과 정확히
+    맞물려야 동결이 시작된다.
+    """
+    mismatches: list[str] = []
+    if result.run_id != plan.run_id:
+        mismatches.append(f"run_id {result.run_id!r}≠{plan.run_id!r}")
+    if result.fingerprint != plan.fingerprint:
+        mismatches.append(f"fingerprint {result.fingerprint[:12]}…≠{plan.fingerprint[:12]}…")
+    if result.final_video_revision != plan.video.final_video_revision:
+        mismatches.append("final_video_revision")
+    if len(result.chunks) != len(plan.spans):
+        mismatches.append(f"청크 수 {len(result.chunks)}≠{len(plan.spans)}")
+    else:
+        for position, (record, span) in enumerate(zip(result.chunks, plan.spans, strict=True)):
+            if record.chunk_index != position or (record.sample_start, record.sample_end) != (
+                span.start,
+                span.end,
+            ):
+                mismatches.append(f"청크 {position}의 샘플 경계")
+                break
+    if mismatches:
+        raise MismatchedRunBasis(
+            f"결과와 계획이 한 실행이 아니다: {', '.join(mismatches)} — 남의 계획 기하를"
+            " 이 결과의 신원으로 동결할 수 없다"
+        )
 
 
 def _chunks_body(result: FinalCaptionResult) -> list[dict[str, object]]:
@@ -358,6 +421,9 @@ def snapshot_from_frozen(frozen: FrozenAutomatic) -> AutomaticSnapshot:
         channels=_int(content, "channels"),
         pcm_sha256=_str(content, "pcm_sha256"),
         origin=_fraction_value(_any(content, "origin")),
+        audio_stream_index=_int(content, "audio_stream_index"),
+        audio_source_sha256=_str(content, "audio_source_sha256"),
+        audio_stream_count=_int(content, "audio_stream_count"),
         spans=_spans(content),
         chunks=tuple(
             ChunkGate(
@@ -688,7 +754,47 @@ def _require_fresh_basis(
         )
     require_unchanged(video)  # 검증 사본 SHA — 바뀌었으면 FinalVideoChanged
     require_audio_unchanged(video)  # PCM 기하·해시 — 같은 길이 변조도 닫는다
-    return snapshot_from_frozen(frozen)
+    snapshot = snapshot_from_frozen(frozen)
+    _require_audio_basis(snapshot, video)  # 같은 렌더 해시의 다른 선택도 닫는다
+    return snapshot
+
+
+def _require_audio_basis(snapshot: AutomaticSnapshot, video: FinalVideoInput) -> None:
+    """동결된 선택 오디오·영상 폭과 지금 입력이 같은가(§11.1·§11.11).
+
+    `require_audio_unchanged`는 지금 입력이 **제 선언과** 맞는지만 본다 — 선언째
+    바꿔치면 통과한다. 이 문은 얼어 붙은 자동 근거가 들은 선택 그 자체와 비교한다:
+    같은 렌더 해시의 다른 PCM·다른 원점·다른 스트림은 확정이 아니라 재실행이다.
+    """
+    audio = video.audio
+    frozen = {
+        "pcm_sha256": snapshot.pcm_sha256,
+        "sample_count": snapshot.sample_count,
+        "sample_rate": snapshot.sample_rate,
+        "channels": snapshot.channels,
+        "origin": snapshot.origin,
+        "audio_stream_index": snapshot.audio_stream_index,
+        "audio_source_sha256": snapshot.audio_source_sha256,
+        "audio_stream_count": snapshot.audio_stream_count,
+        "video_duration": snapshot.video_duration,
+    }
+    current = {
+        "pcm_sha256": audio.pcm_sha256,
+        "sample_count": audio.sample_count,
+        "sample_rate": audio.sample_rate,
+        "channels": audio.channels,
+        "origin": audio.pcm_sample0_file_time,
+        "audio_stream_index": audio.audio_stream_index,
+        "audio_source_sha256": audio.source_sha256,
+        "audio_stream_count": video.audio_stream_count,
+        "video_duration": _exact(video.video_duration),
+    }
+    changed = sorted(name for name, value in frozen.items() if current[name] != value)
+    if changed:
+        raise AudioBasisMismatch(
+            f"선택 오디오·영상 폭이 동결된 자동 근거와 다르다: {changed} — 같은 렌더"
+            " 해시의 다른 선택이다. 새 PCM에는 새 실행과 새 동결이 필요하다"
+        )
 
 
 def _require_stored_head(store: ReviewStore, head: ManualRevision) -> None:
@@ -850,10 +956,16 @@ def _final_bodies(cues: tuple[ReviewCue, ...]) -> tuple[str, str]:
 
 
 def _shell(cue: ReviewCue) -> CaptionCue:
-    """최종 직렬화용 껍데기 — 시각·글자만 실고 근거 칸은 비운다(비교용이 아니다)."""
+    """최종 직렬화용 껍데기 — 시각은 밀리초 격자로, 근거 칸은 비운다(비교용이 아니다).
+
+    SRT·VTT가 표현할 수 있는 시각은 정수 밀리초다(§11.6). 격자에 얹는 양자화는
+    이 **직렬화 경계에서만** 일어난다 — 리비전·스냅샷의 유리수 시각은 그대로다.
+    먼저 격자에 얹은 뒤 코덱에 주면 float 이중 반올림으로 1밀리초 어긋날 길이
+    아예 없다.
+    """
     return CaptionCue(
-        start=cue.start,
-        end=cue.end,
+        start=Fraction(_ms_int(cue.start), 1000),
+        end=Fraction(_ms_int(cue.end), 1000),
         text=cue.text,
         whisper_text="",
         timing_segment_ids=(),
@@ -866,24 +978,31 @@ def _shell(cue: ReviewCue) -> CaptionCue:
 
 
 def _assert_reparse(srt_body: str, vtt_body: str, cues: tuple[ReviewCue, ...]) -> None:
-    """직렬화한 final을 다시 읽어 큐 자료와 같은지 본다(§11.7·A7-3 완료 기준)."""
+    """직렬화한 final을 다시 읽어 큐 자료와 같은지 본다(§11.7·A7-3 완료 기준).
+
+    SRT 재독기는 초와 밀리초를 float **합**으로 되돌린다 — 3.183초 같은 값은
+    정확한 유리수와 1ulp 어긋난다. 그래서 판정은 형식의 격자인 **정수 밀리초**로
+    정규화해서 한다: 되읽은 float에서 직렬된 밀리초를 정확히 되찾고(코덱 합의
+    오차는 1e-9초 이하), 원본 유리수의 half-up 반올림과 같은지 본다. 오차 허용도
+    도메인 양자화도 아니다 — 격자 위에서의 정확한 일치다.
+    """
     reparsed = parse_srt(srt_body)
     if len(reparsed) != len(cues):
         raise FinalSerializationError(
             f"final SRT 재파싱이 큐 수와 다르다: {len(reparsed)} vs {len(cues)}"
         )
     for parsed, cue in zip(reparsed, cues, strict=True):
-        if parsed.text != _flat_text(cue.text) or parsed.start != float(_ms_of(cue.start)):
-            raise FinalSerializationError(
-                f"final SRT 재파싱이 큐 {cue.cue_id!r}와 같지 않다 — 게시되지 않는다"
-            )
-        if parsed.end != float(_ms_of(cue.end)):
+        if (
+            parsed.text != _flat_text(cue.text)
+            or _serialized_ms(parsed.start) != _ms_int(cue.start)
+            or _serialized_ms(parsed.end) != _ms_int(cue.end)
+        ):
             raise FinalSerializationError(
                 f"final SRT 재파싱이 큐 {cue.cue_id!r}와 같지 않다 — 게시되지 않는다"
             )
     vtt_cues = parse_vtt(vtt_body)
-    if [(start, end, text) for start, end, text in vtt_cues] != [
-        (_ms_of(cue.start), _ms_of(cue.end), _flat_text(cue.text)) for cue in cues
+    if [(_ms_int(start), _ms_int(end), text) for start, end, text in vtt_cues] != [
+        (_ms_int(cue.start), _ms_int(cue.end), _flat_text(cue.text)) for cue in cues
     ]:
         raise FinalSerializationError("final VTT 재파싱이 큐 자료와 같지 않다")
 
@@ -893,9 +1012,14 @@ def _flat_text(text: str) -> str:
     return " ".join(text.splitlines())
 
 
-def _ms_of(value: Fraction) -> Fraction:
-    """유리수를 밀리초로 반올림 — 직렬화와 같은 올림 규칙(§11.6)."""
-    return Fraction((value.numerator * 1000 + value.denominator // 2) // value.denominator, 1000)
+def _serialized_ms(seconds: float) -> int:
+    """재독기 float에서 직렬된 밀리초를 되찾는다 — 코덱 합의 오차는 1e-9초다."""
+    return round(seconds * 1000)
+
+
+def _ms_int(value: Fraction) -> int:
+    """유리수를 밀리초 정수로 반올림(half-up) — 직렬화 격자의 유일한 양자화(§11.6)."""
+    return (value.numerator * 1000 + value.denominator // 2) // value.denominator
 
 
 def _manifest_body(
@@ -1072,5 +1196,10 @@ def _fraction_value(item: object) -> Fraction:
 
 def _fraction(value: Fraction | float) -> dict[str, int]:
     """유리수의 정본 표기 — float 길이는 문자열로 한 번 유리수화 한다(§13.3)."""
-    exact = value if isinstance(value, Fraction) else Fraction(str(value))
+    exact = _exact(value)
     return {"num": exact.numerator, "den": exact.denominator}
+
+
+def _exact(value: Fraction | float) -> Fraction:
+    """float를 흔들지 않는 정확 유리수 — 같은 float는 같은 값이 된다."""
+    return value if isinstance(value, Fraction) else Fraction(str(value))

@@ -11,6 +11,8 @@
   `CaptionStoreConflict` — 같은 신원의 내용을 몰래 바꾸는 길이 없다(§11.1).
 - **경로는 닫혀 있다.** 디렉터리 이름은 검증된 성분(해시 축약·run_id)으로만
   짓는다 — run_id·응답 ID로 저장소 밖을 겨누는 통로 자체가 없다(§4.4).
+  성분이 심볼릭 링크면 **따르지 않고 거부한다** — mkdir·쓰기·읽기 어느 것도
+  링크 너머를 향하지 않는다.
 - **연쇄는 검증된다.** 수동 리비전은 부모 파일의 해시를 실어 저장되고, 읽을 때
   그 연쇄를 다시 잰다 — 끼어든 자료는 `CaptionStoreChainError`로 드러난다.
 - **모르는 스키마·타입은 못 들어온다.** 읽는 문서는 정확한 키·스키마·타입을
@@ -273,7 +275,7 @@ class ReviewStore:
             int(match.group(1))
             for match in (
                 re.fullmatch(r"rev-(\d{4})\.json", entry.name)
-                for entry in _list_dir(self.root / MANUAL_DIR / key)
+                for entry in _list_dir(self._confined(MANUAL_DIR, key))
             )
             if match
         )
@@ -307,12 +309,8 @@ class ReviewStore:
         revision: int,
     ) -> str:
         """리비전 본문 — 파일이 없으면 오류다(없음과 빈 값을 구분한다)."""
-        path = (
-            self.root
-            / MANUAL_DIR
-            / self.store_key(final_video_revision, run_id, fingerprint)
-            / require_store_component(f"rev-{revision:04d}.json", "리비전 파일 이름")
-        )
+        key = self.store_key(final_video_revision, run_id, fingerprint)
+        path = self._confined(MANUAL_DIR, key, f"rev-{revision:04d}.json")
         if not path.is_file():
             raise CaptionStoreError(f"리비전 {revision}이 없다: {path}")
         return path.read_text(encoding="utf-8")
@@ -330,40 +328,54 @@ class ReviewStore:
 
         `files` 순서가 곧 게시 순서다 — manifest를 마지막에 실으면 manifest가 보이는
         디렉터리는 완성본이다(§14.1). 어느 고리에서 거부되어도 이미 게시된 **다른**
-        확정 자료는 하나도 건드리지 않는다.
+        확정 자료는 하나도 건드리지 않는다. 자리를 만들기 **전에** 성분을 하나씩
+        짚어 심볼릭 링크를 거부한다 — 게시가 링크 너머로 새어 나가지 않는다.
         """
-        directory = self._directory(
-            FINAL_DIR, self.store_key(final_video_revision, run_id, fingerprint)
-        ).joinpath(require_store_component(token, "token"))
+        key = self.store_key(final_video_revision, run_id, fingerprint)
+        directory = self._confined(FINAL_DIR, key, require_store_component(token, "token"))
         directory.mkdir(parents=True, exist_ok=True)
         for name, body in files:
-            _write_noreplace(directory / require_store_component(name, "게시 파일 이름"), body)
+            _write_noreplace(self._confined(FINAL_DIR, key, token, name), body)
         return directory
 
     def final_dir(
         self, *, final_video_revision: str, run_id: str, fingerprint: str, token: str
     ) -> Path:
         """확정 자리의 경로 — 게시와 같은 규칙으로 짓는다(읽기용)."""
-        return self._directory(
-            FINAL_DIR, self.store_key(final_video_revision, run_id, fingerprint)
-        ) / require_store_component(token, "token")
+        key = self.store_key(final_video_revision, run_id, fingerprint)
+        directory = self._confined(FINAL_DIR, key)
+        directory.mkdir(parents=True, exist_ok=True)
+        return directory / require_store_component(token, "token")
 
     def _snapshot_path(self, final_video_revision: str, run_id: str, fingerprint: str) -> Path:
         return self._inside(
             AUTOMATIC_DIR, self.store_key(final_video_revision, run_id, fingerprint), SNAPSHOT_NAME
         )
 
-    def _directory(self, kind: str, key: str) -> Path:
-        directory = self.root / kind / key
-        directory.mkdir(parents=True, exist_ok=True)
-        return directory
-
     def _inside(self, kind: str, key: str, name: str) -> Path:
-        """root 안쪽 경로 — 성분이 전부 검증된 뒤에만 부른다."""
-        path = self._directory(kind, key) / require_store_component(name, "파일 이름")
-        if not path.resolve().is_relative_to(self.root.resolve()):
-            raise CaptionStorePathError(f"저장소 밖을 겨눈다: {path}")
-        return path
+        """root 안쪽 파일 경로 — 디렉터리를 만들기 전에 심볼릭 링크를 거부한다."""
+        directory = self._confined(kind, key)
+        directory.mkdir(parents=True, exist_ok=True)
+        return self._confined(kind, key, name)
+
+    def _confined(self, *parts: str) -> Path:
+        """root 안쪽 경로 — 성분을 하나씩 검증하고 심볼릭 링크는 따르지 않는다(§4.4).
+
+        `resolve()` 하나로 가두기를 묻는 건 위험하다 — resolve는 링크를 **따라**
+        풀어버려, 밖을 겨냥하는지 알기도 전에 디렉터리가 만들어진다. 그래서 성분을
+        앞에서부터 하나씩 짚어 링크인 순간 거부한다: mkdir·쓰기·읽기 앞에서.
+        """
+        current = self.root
+        for part in parts:
+            candidate = current / require_store_component(part, "경로 성분")
+            if candidate.is_symlink():
+                raise CaptionStorePathError(
+                    f"저장소 성분이 심볼릭 링크다 — 따르지 않는다: {candidate}"
+                )
+            current = candidate
+        if not current.resolve().is_relative_to(self.root.resolve()):
+            raise CaptionStorePathError(f"저장소 밖을 겨냥한다: {current}")
+        return current
 
 
 def _write_noreplace(path: Path, body: str) -> bool:

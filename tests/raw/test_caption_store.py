@@ -14,6 +14,9 @@ from pathlib import Path
 import pytest
 
 from vlogsrt.project.raw.caption_store import (
+    AUTOMATIC_DIR,
+    FINAL_DIR,
+    MANUAL_DIR,
     CaptionStoreChainError,
     CaptionStoreConflict,
     CaptionStoreIntegrityError,
@@ -326,3 +329,85 @@ def test_concurrent_publications_do_not_clobber(store: ReviewStore) -> None:
     for directory in dirs:
         assert (directory / "final.ko.srt").read_text(encoding="utf-8") == "shared bytes"
     assert len({d.name for d in dirs}) == 2  # 자리는 token 수만큼이다
+
+
+# ─────────────────────────────────────────────────────────────
+#  심볼릭 링크 — 따르지 않고 거부한다, 밖은 무사하다
+# ─────────────────────────────────────────────────────────────
+
+
+def test_symlinked_entries_are_refused_not_followed(store: ReviewStore, tmp_path: Path) -> None:
+    """저장소 밖을 겨냥하는 심볼릭 링크 성분 — 게시·읽기·머리 모으기가 닫는다(§4.4)."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    sentinel = outside / "keep.txt"
+    sentinel.write_text("밖은 무사하다", encoding="utf-8")
+    key = store.store_key(REV, "run-1", FP)
+    for kind, probe in (
+        (FINAL_DIR, "publish"),
+        (MANUAL_DIR, "manual"),
+        (AUTOMATIC_DIR, "automatic"),
+    ):
+        (store.root / kind).mkdir(parents=True)
+        (store.root / kind / key).symlink_to(outside, target_is_directory=True)
+        if probe == "publish":
+            with pytest.raises(CaptionStorePathError):  # mkdir 전에 성분을 짚는다
+                store.publish_final(
+                    final_video_revision=REV,
+                    run_id="run-1",
+                    fingerprint=FP,
+                    token="r0001-x",
+                    files=[("final.ko.srt", "x")],
+                )
+        elif probe == "manual":
+            with pytest.raises(CaptionStorePathError):
+                store.manual_head(
+                    final_video_revision=REV,
+                    run_id="run-1",
+                    fingerprint=FP,
+                    auto_content_sha256=AUTO,
+                )
+            with pytest.raises(CaptionStorePathError):
+                store.load_manual(
+                    final_video_revision=REV, run_id="run-1", fingerprint=FP, revision=0
+                )
+        else:
+            with pytest.raises(CaptionStorePathError):
+                store.find_automatic(final_video_revision=REV, run_id="run-1", fingerprint=FP)
+        (store.root / kind / key).unlink()
+    assert [entry.name for entry in outside.iterdir()] == ["keep.txt"]  # 밖은 무사하다
+
+    # 심볼릭 링크 자리(token)와 심볼릭 링크 파일(rev)도 같은 선에서 거부다
+    frozen_store(store)
+    final_key = store.root / FINAL_DIR / key
+    final_key.mkdir(parents=True)
+    (final_key / "r0001-x").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(CaptionStorePathError):
+        store.publish_final(
+            final_video_revision=REV,
+            run_id="run-1",
+            fingerprint=FP,
+            token="r0001-x",
+            files=[("final.ko.srt", "x")],
+        )
+    (final_key / "r0001-x").unlink()
+    store.save_manual(
+        final_video_revision=REV,
+        run_id="run-1",
+        fingerprint=FP,
+        auto_content_sha256=AUTO,
+        revision=0,
+        body=a_manual_body(0, AUTO),
+        parent_sha256=AUTO,
+    )
+    save_head(store)
+    rev_file = store.root / MANUAL_DIR / key / "rev-0001.json"
+    rev_file.unlink()
+    rev_file.symlink_to(sentinel)
+    with pytest.raises(CaptionStorePathError):
+        store.load_manual(final_video_revision=REV, run_id="run-1", fingerprint=FP, revision=1)
+    rev_file.unlink()
+    directory = store.publish_final(  # 링크를 치우면 정상 게시는 그대로 열린다
+        final_video_revision=REV, run_id="run-1", fingerprint=FP, token="r0001-ok", files=[]
+    )
+    assert directory.is_dir() and sentinel.read_text(encoding="utf-8") == "밖은 무사하다"
