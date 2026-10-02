@@ -9,11 +9,13 @@ from __future__ import annotations
 
 import array
 import json
+import math
 import re
 import shutil
 import subprocess
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime, timedelta
 from fractions import Fraction
 from pathlib import Path
 
@@ -1014,3 +1016,1232 @@ def _frame_extraction_command(
         "-flags:v", "+bitexact",
         str(destination),
     ]  # fmt: skip
+
+
+# ─────────────────────────────────────────────────────────────
+#  원본 미디어 경계 — A3 조사·프레임 정확 추출 (2026-10-02 v2 계획 §8)
+# ─────────────────────────────────────────────────────────────
+#
+# 위 계층(가져오기·A3 러너)은 이 절의 데이터 타입만 알면 된다. 의존은 한 방향이다 —
+# 이 모듈은 vlogsrt.project를 모르며 ffprobe/ffmpeg 호출도 여기(규칙 7)에만 있다.
+# 시각은 정수 PTS × time_base, 또는 정확한 `Fraction`으로만 다룬다(§8.3).
+
+_RAW_US_PER_SECOND = 1_000_000
+"""ffmpeg `-ss`/`-t` 파서의 최소 눈금(AV_TIME_BASE). 초→문자열 반올림의 근거다."""
+
+# 촬영 시각 태그를 원본 순서의 근거로 인정하는 상식 bound. 1990년 이전은 소비자
+# 디지털 카메라가 없고(1904-01-01은 mac epoch 오류의 전형), 살짝 미래는 카메라
+# 시계 오차로 본다 — 그보다 미래면 시계가 틀렸다는 뜻이라 순서 근거가 못 된다.
+_CREATION_EARLIEST = datetime(1990, 1, 1, tzinfo=UTC)
+_CREATION_FUTURE_SLACK = timedelta(hours=48)
+
+
+class RawMediaUnsupported(RuntimeError):
+    """지원 매트릭스 밖의 원본 — 이유를 말하고 죽는다. 정밀도를 몰래 낮추지 않는다."""
+
+
+class RawClipVerificationError(RuntimeError):
+    """추출물 검증 실패 — 이 파일은 게시할 수 없다(스테이징에 머문다)."""
+
+
+@dataclass(frozen=True, slots=True)
+class CreationTime:
+    """컨테이너가 적은 촬영 시각과 그 판정.
+
+    `valid`는 '순서 정렬의 근거로 쓸 수 있는가'다 — ISO-8601로 파싱되고 시간대가
+    있으며 상식 bound 안에 있어야 한다. 못 미치면 `utc`는 None이고, raw 값은
+    기록으로 그대로 남긴다(없는 값을 지어내지 않는다).
+    """
+
+    raw: str
+    valid: bool
+    utc: datetime | None
+
+
+def _parse_creation_time(raw: str) -> CreationTime:
+    if not raw:
+        return CreationTime(raw="", valid=False, utc=None)
+    try:
+        stamp = datetime.fromisoformat(raw)
+    except ValueError:
+        return CreationTime(raw=raw, valid=False, utc=None)
+    if stamp.tzinfo is None:
+        # 시간대 없는 시각은 같은 카드 안에서도 비교할 수 없다 — 순서 근거가 아니다.
+        return CreationTime(raw=raw, valid=False, utc=None)
+    utc = stamp.astimezone(UTC)
+    if utc < _CREATION_EARLIEST or utc > datetime.now(UTC) + _CREATION_FUTURE_SLACK:
+        return CreationTime(raw=raw, valid=False, utc=None)
+    return CreationTime(raw=raw, valid=True, utc=utc)
+
+
+@dataclass(frozen=True, slots=True)
+class RawAudioTrack:
+    """ffprobe가 본 오디오 스트림 하나. `stream_index`는 전역 번호다.
+
+    `start_time`·`start_pts`는 컨테이너 **선언**일 뿐 디코드 원점의 증거가 아니다
+    (AAC 프라이밍은 이 값을 음수로 만든다). 실측 패킷 증거는 `AudioPacketExtent`.
+    """
+
+    stream_index: int
+    codec_name: str
+    channels: int
+    sample_rate: int
+    time_base: Fraction
+    start_time: Fraction
+    start_pts: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class RawVideoMedia:
+    """첫 비디오 스트림의 선언 — 코덱·화면·색·회전·시계.
+
+    모르는 색 좌표는 빈 문자열 그대로다. `width`/`height`는 **저장된 기하**다 —
+    회전(90/270°)이 있으면 재생 화면은 뒤바뀐다. 시계의 실측(격자 증명)은
+    `probe_extraction_clock`의 몫이다.
+    """
+
+    stream_index: int
+    codec_name: str
+    profile: str
+    pix_fmt: str
+    bit_depth: int
+    width: int
+    height: int
+    color_primaries: str
+    color_transfer: str
+    color_matrix: str
+    color_range: str
+    rotation_degrees: int
+    time_base: Fraction
+    r_frame_rate: Fraction
+    avg_frame_rate: Fraction
+    start_pts: int
+    duration_ts: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class RawMediaProbe:
+    """가져오기가 필요로 하는 원본 조사 결과 전부 — ffprobe 한 번에서 나온다."""
+
+    source: Path
+    container: str
+    duration: Fraction
+    creation_time: CreationTime
+    video: RawVideoMedia
+    audio: tuple[RawAudioTrack, ...]
+    other_tracks: tuple[tuple[int, str], ...]
+    """첫 비디오·오디오가 아닌 스트림의 (전역 번호, codec_type). 추가 비디오
+    스트림도 여기에 남는다 — 지원 매트릭스가 이걸 본다."""
+    ffprobe_version: str
+
+
+def probe_raw_media(source: Path, *, video_ordinal: int = 0) -> RawMediaProbe:
+    """원본 하나를 ffprobe 한 번으로 조사한다 — 가져오기용 빠른 경로.
+
+    비디오 스트림이 없거나 선언이 깨져 있으면 죽는다(확장자만 믿지 않는다, §5.2).
+    값을 지어내지 않는다: 모르는 색 좌표는 빈 문자열, 없는 촬영 시각은
+    `CreationTime.valid=False`다.
+    """
+    _validate_video_ordinal(video_ordinal)
+    ffprobe = require_ffmpeg("ffprobe")
+    completed = _run(
+        [
+            ffprobe, "-v", "error",
+            "-show_entries",
+            "stream=index,codec_type,codec_name,profile,pix_fmt,width,height,"
+            "color_primaries,color_transfer,color_space,color_range,"
+            "r_frame_rate,avg_frame_rate,time_base,start_time,start_pts,duration_ts,"
+            "sample_rate,channels:stream_side_data=rotation"
+            ":format=format_name,duration:format_tags=creation_time",
+            "-of", "json",
+            str(source),
+        ]
+    )  # fmt: skip
+    return _parse_raw_probe(completed.stdout, source, video_ordinal)
+
+
+def _raw_probe_json(stdout: str, source: Path) -> dict[str, object]:
+    """ffprobe JSON 최상위 객체 — streams와 format을 함께 읽는 경로의 공통 파서."""
+    try:
+        data = json.loads(stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"ffprobe 출력이 JSON이 아닙니다: {source} ({exc})") from exc
+    if not isinstance(data, dict):
+        raise RuntimeError(f"ffprobe JSON이 객체가 아닙니다: {source} (값 {data!r})")
+    return data
+
+
+def _parse_raw_probe(stdout: str, source: Path, video_ordinal: int) -> RawMediaProbe:
+    data = _raw_probe_json(stdout, source)
+    streams = data.get("streams")
+    if not isinstance(streams, list):
+        raise RuntimeError(f"ffprobe JSON의 streams가 목록이 아닙니다: {source} (값 {streams!r})")
+    typed = [
+        (entry, _stream_codec_type(entry, source)) for entry in _stream_entries(stdout, source)
+    ]
+    videos = [entry for entry, kind in typed if kind == "video"]
+    audios = [entry for entry, kind in typed if kind == "audio"]
+    if video_ordinal >= len(videos):
+        raise RuntimeError(
+            f"비디오 스트림이 없거나 순번을 벗어났습니다: {source} (v:{video_ordinal})"
+        )
+    chosen = videos[video_ordinal]
+    others = tuple(
+        (_stream_global_index(entry, source), kind)
+        for entry, kind in typed
+        if entry is not chosen and kind != "audio"
+    )
+    fmt = data.get("format")
+    if not isinstance(fmt, dict):
+        raise RuntimeError(f"ffprobe JSON에 format이 없습니다: {source}")
+    return RawMediaProbe(
+        source=source,
+        container=_format_text(fmt, "format_name", source),
+        duration=_format_fraction(fmt, "duration", source),
+        creation_time=_parse_creation_time(_format_tag(fmt, "creation_time")),
+        video=_raw_video_media(chosen, source),
+        audio=tuple(_raw_audio_track(entry, source) for entry in audios),
+        other_tracks=others,
+        ffprobe_version=_tool_version("ffprobe"),
+    )
+
+
+def _format_text(fmt: dict[str, object], field: str, source: Path) -> str:
+    value = fmt.get(field)
+    if not isinstance(value, str) or not value:
+        raise RuntimeError(f"format {field}를 읽지 못했습니다: {source} (값 {value!r})")
+    return value
+
+
+def _format_fraction(fmt: dict[str, object], field: str, source: Path) -> Fraction:
+    value = fmt.get(field)
+    try:
+        parsed = Fraction(str(value))
+    except (TypeError, ValueError, ZeroDivisionError) as exc:
+        raise RuntimeError(f"format {field}를 읽지 못했습니다: {source} (값 {value!r})") from exc
+    if parsed <= 0:
+        raise RuntimeError(f"format {field}가 양수가 아닙니다: {source} (값 {value!r})")
+    return parsed
+
+
+def _format_tag(fmt: dict[str, object], key: str) -> str:
+    tags = fmt.get("tags")
+    if not isinstance(tags, dict):
+        return ""
+    value = tags.get(key)
+    return value if isinstance(value, str) else ""
+
+
+_PIXFMT_DEPTH = re.compile(r"(\d+)(?:le|be)?$")
+"""픽셀 형식 이름 끝의 비트 폭 — `yuv420p10le`→10, `yuv420p`→8(접미 없음)."""
+
+
+def _pix_fmt_bit_depth(pix_fmt: str) -> int:
+    """이름에서 채널당 비트 폭을 읽는다.
+
+    패킹 rgb24/rgb48의 끝수는 채널을 곱한 **픽셀** 폭이고(24=8×3), 평면 gbrp10의
+    끝수는 채널당 폭이다 — 두 가족을 갈라 읽는다. 못 읽으면 8이다(미지원 형식은
+    어차피 지원 매트릭스에서 막힌다).
+    """
+    if pix_fmt.startswith(("rgb", "bgr", "gbr")):
+        body = pix_fmt[:-2] if pix_fmt.endswith(("le", "be")) else pix_fmt
+        match = re.search(r"(\d+)$", body)
+        if match:
+            width = int(match.group(1))
+            if re.search(r"p\d+$", body):
+                return width
+            if width >= 24 and width % 3 == 0:
+                return width // 3
+        return 8
+    match = _PIXFMT_DEPTH.search(pix_fmt)
+    return int(match.group(1)) if match else 8
+
+
+def _stream_rotation(entry: dict[str, object], source: Path) -> int:
+    """display matrix 회전 — side_data가 있으면 그 값, 없으면 0이다.
+
+    회전 키가 있는데 숫자가 아니면 죽는다: 0으로 돌려주면 '회전 없음'이라는
+    거짓 선언이 된다.
+    """
+    side = entry.get("side_data_list")
+    if side is None:
+        return 0
+    if not isinstance(side, list):
+        raise RuntimeError(f"side_data_list가 목록이 아닙니다: {source} (값 {side!r})")
+    for item in side:
+        if not isinstance(item, dict) or "rotation" not in item:
+            continue
+        value = item["rotation"]
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise RuntimeError(f"회전 값을 읽지 못했습니다: {source} (값 {value!r})")
+        return int(value)
+    return 0
+
+
+def _raw_video_media(entry: dict[str, object], source: Path) -> RawVideoMedia:
+    pix_fmt = _stream_text(entry, "pix_fmt")
+    if not pix_fmt:
+        raise RuntimeError(f"비디오 pix_fmt를 읽지 못했습니다: {source}")
+    return RawVideoMedia(
+        stream_index=_stream_global_index(entry, source),
+        codec_name=_require_stream_text(entry, "codec_name", source),
+        profile=_stream_text(entry, "profile"),
+        pix_fmt=pix_fmt,
+        bit_depth=_pix_fmt_bit_depth(pix_fmt),
+        width=_stream_positive_int(entry, "width", source),
+        height=_stream_positive_int(entry, "height", source),
+        color_primaries=_stream_text(entry, "color_primaries"),
+        color_transfer=_stream_text(entry, "color_transfer"),
+        color_matrix=_stream_text(entry, "color_space"),
+        color_range=_stream_text(entry, "color_range"),
+        rotation_degrees=_stream_rotation(entry, source),
+        time_base=_stream_positive_fraction(entry, "time_base", source),
+        r_frame_rate=_stream_positive_fraction(entry, "r_frame_rate", source),
+        avg_frame_rate=_stream_positive_fraction(entry, "avg_frame_rate", source),
+        start_pts=_stream_int(entry, "start_pts", source),
+        duration_ts=_optional_stream_int(entry, "duration_ts", source),
+    )
+
+
+def _require_stream_text(entry: dict[str, object], field: str, source: Path) -> str:
+    value = _stream_text(entry, field)
+    if not value:
+        raise RuntimeError(f"스트림 {field}를 읽지 못했습니다: {source}")
+    return value
+
+
+def _raw_audio_track(entry: dict[str, object], source: Path) -> RawAudioTrack:
+    return RawAudioTrack(
+        stream_index=_stream_global_index(entry, source),
+        codec_name=_require_stream_text(entry, "codec_name", source),
+        channels=_stream_positive_int(entry, "channels", source),
+        sample_rate=_stream_positive_int(entry, "sample_rate", source),
+        time_base=_stream_positive_fraction(entry, "time_base", source),
+        start_time=_stream_fraction(entry, "start_time", source),
+        start_pts=_optional_stream_pts(entry, "start_pts", source),
+    )
+
+
+def _optional_stream_int(entry: dict[str, object], field: str, source: Path) -> int | None:
+    """선언 정수는 없을 수 있다(mkv/webm의 duration_ts 등) — 없음은 None, 깨진 값은 죽는다."""
+    value = entry.get(field)
+    if value is None or value == "N/A":
+        return None
+    parsed = _stream_int(entry, field, source)
+    if parsed <= 0:
+        raise RuntimeError(f"스트림 {field}가 양수가 아닙니다: {source} (값 {value!r})")
+    return parsed
+
+
+def _optional_stream_pts(entry: dict[str, object], field: str, source: Path) -> int | None:
+    """선언 pts는 없을 수 있다 — 없음은 None, 깨진 값은 죽는다."""
+    value = entry.get(field)
+    if value is None or value == "N/A":
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise RuntimeError(f"스트림 {field}를 읽지 못했습니다: {source} (값 {value!r})")
+    return value
+
+
+def _tool_version(tool: str) -> str:
+    completed = _run([tool, "-version"])
+    first = completed.stdout.strip().splitlines()
+    if not first:
+        raise RuntimeError(f"{tool} -version 출력이 비었습니다")
+    return first[0]
+
+
+# ─────────────────────────────────────────────────────────────
+#  추출 시계 — 정수 PTS 증거와 프레임 경계 (§8.3)
+# ─────────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True, slots=True)
+class RawVideoClock:
+    """비디오 스트림의 **측정된** 시계 — 패킷(디먹스) 증거다.
+
+    `presentation_origin`은 첫 패킷 정수 pts × time_base, `exact_end`는 마지막
+    프레임 제시의 끝이다. `uniform_grid`는 프레임 격자 증명(CFR)의 결과고,
+    증명에 실패하면 `grid_note`가 위반 내용을 그대로 싣는다 — VFR을 죽이지 않고
+    '측정된 사실'로 돌려준다(추출은 지원 매트릭스에서 VFR을 막는다).
+    이 증거는 타임스탬프 격자만 증명한다. **소스의 디코드 품질은 증명하지
+    않는다** — 디코드 검증은 추출물에 대해 `extract_raw_clip`이 한다.
+    """
+
+    stream_index: int
+    time_base: Fraction
+    first_pts: int
+    last_pts: int
+    presentation_origin: Fraction
+    frame_duration: Fraction
+    frame_count: int
+    exact_end: Fraction
+    uniform_grid: bool
+    grid_note: str
+
+
+def probe_extraction_clock(
+    source: Path, *, video_ordinal: int = 0, probe: RawMediaProbe | None = None
+) -> RawVideoClock:
+    """비디오 패킷 타임스탬프로 격자를 잰다 — 디코드하지 않는다.
+
+    격자 증명 자체는 `probe_video_grid`와 같은 함수를 쓴다. 다른 점은 실패의
+    취급뿐이다: 캡션 엔진의 증명은 CFR이 증명될 때까지 살아있는 계약이지만,
+    원본 경계는 VFR도 '측정된 사실'로 돌려줘야 가져오기가 판단을 할 수 있다.
+    """
+    _validate_video_ordinal(video_ordinal)
+    ffprobe = require_ffmpeg("ffprobe")
+    completed = _run(
+        [
+            ffprobe, "-v", "error",
+            "-select_streams", f"v:{video_ordinal}",
+            "-show_entries", "stream=index,codec_type,r_frame_rate,avg_frame_rate,time_base,"
+            "nb_frames,start_pts,duration_ts",
+            "-show_entries", "packet=pts",
+            "-of", "json",
+            str(source),
+        ]
+    )  # fmt: skip
+    entry = _selected_stream(completed.stdout, source, f"v:{video_ordinal}", "비디오", "video")
+    rate = _stream_positive_fraction(entry, "r_frame_rate", source)
+    time_base = _stream_positive_fraction(entry, "time_base", source)
+    pts = _packet_pts(completed.stdout, source)
+    clock = _measured_clock(entry, rate, time_base, pts, source)
+    if probe is not None and clock.stream_index != probe.video.stream_index:
+        raise RuntimeError(
+            f"시계의 스트림이 프로브와 다릅니다: {source} "
+            f"(시계 {clock.stream_index}, 프로브 {probe.video.stream_index}) — 순번이 어긋났다"
+        )
+    return clock
+
+
+def _measured_clock(
+    entry: dict[str, object],
+    rate: Fraction,
+    time_base: Fraction,
+    pts: list[int],
+    source: Path,
+) -> RawVideoClock:
+    frame_duration = Fraction(1) / rate
+    notes: list[str] = []
+    uniform = True
+    try:
+        _prove_uniform_grid(pts, time_base, frame_duration, source)
+    except RuntimeError as exc:
+        uniform = False
+        notes.append(str(exc))
+    try:
+        average = _stream_positive_fraction(entry, "avg_frame_rate", source)
+        _prove_declared_evidence(entry, average, pts, time_base, frame_duration, source)
+    except RuntimeError as exc:
+        # 격자가 균일해도 선언이 어긋나면 증거가 갈라진다 — VFR 판정은 바꾸지 않고
+        # 기록으로만 남긴다(선언 부재를 VFR로 오인해 정상 원본을 막지 않는다).
+        notes.append(f"선언 불일치: {exc}")
+    origin = pts[0] * time_base
+    exact_end = (
+        origin + len(pts) * frame_duration
+        if uniform
+        else _vfr_exact_end(pts, time_base, frame_duration)
+    )
+    return RawVideoClock(
+        stream_index=_stream_global_index(entry, source),
+        time_base=time_base,
+        first_pts=pts[0],
+        last_pts=pts[-1],
+        presentation_origin=origin,
+        frame_duration=frame_duration,
+        frame_count=len(pts),
+        exact_end=exact_end,
+        uniform_grid=uniform,
+        grid_note="\n".join(notes),
+    )
+
+
+def _vfr_exact_end(pts: list[int], time_base: Fraction, frame_duration: Fraction) -> Fraction:
+    """균일하지 않은 시계의 끝 — 마지막 델타로 잰 추정치임을 밝혀둔다.
+
+    VFR은 추출이 막혀 있으므로 이 값은 기록용이다. 프레임이 하나뿐이면 델타를
+    잴 수 없어 선언 프레임 길이로 추정한다.
+    """
+    if len(pts) >= 2:
+        last_delta = (pts[-1] - pts[-2]) * time_base
+    else:
+        last_delta = frame_duration
+    return pts[-1] * time_base + last_delta
+
+
+@dataclass(frozen=True, slots=True)
+class RawPtsRange:
+    """원본 좌표의 반개 구간 — `[start_pts, end_pts)` (틱).
+
+    틱은 time_base와 함께 **기록**이다. ffmpeg에 넘기는 요청은 초(Fraction)에서
+    µs 문자열로 정확히 변환되고, 실제 결과는 추출물 검증이 잰다.
+    """
+
+    time_base: Fraction
+    start_pts: int
+    end_pts: int
+
+    @property
+    def start_seconds(self) -> Fraction:
+        return self.start_pts * self.time_base
+
+    @property
+    def end_seconds(self) -> Fraction:
+        return self.end_pts * self.time_base
+
+    @property
+    def duration_seconds(self) -> Fraction:
+        return (self.end_pts - self.start_pts) * self.time_base
+
+
+def _as_fraction_seconds(value: object, label: str) -> Fraction:
+    """시각 인자는 정확한 유리수만 받는다 — float는 근사라 족쇄가 된다(§8.3)."""
+    if isinstance(value, bool) or not isinstance(value, (Fraction, int)):
+        raise RuntimeError(f"{label}는 Fraction 또는 정수여야 합니다: {value!r}")
+    return Fraction(value)
+
+
+def _snap_ticks(seconds: Fraction, time_base: Fraction, *, ceil: bool) -> int:
+    ticks = seconds / time_base
+    return math.ceil(ticks) if ceil else math.floor(ticks)
+
+
+def _validate_frame_window(first: int, after_last: int, frame_count: int) -> None:
+    for label, value in (("첫 프레임", first), ("끝 프레임(제외)", after_last)):
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise RuntimeError(f"{label}은 정수여야 합니다: {value!r}")
+    if first < 0 or after_last <= first or after_last > frame_count:
+        raise RuntimeError(
+            f"프레임 창이 잘못되었습니다: [{first}, {after_last}) / {frame_count}프레임"
+        )
+
+
+def clock_frame_range(clock: RawVideoClock, first_frame: int, after_last_frame: int) -> RawPtsRange:
+    """프레임 번호 반개 구간을 원본 PTS 범위로 — 격자 위의 정확한 유리수에서 간다."""
+    _validate_frame_window(first_frame, after_last_frame, clock.frame_count)
+    start = clock.presentation_origin + first_frame * clock.frame_duration
+    end = clock.presentation_origin + after_last_frame * clock.frame_duration
+    return RawPtsRange(
+        time_base=clock.time_base,
+        start_pts=_snap_ticks(start, clock.time_base, ceil=False),
+        end_pts=_snap_ticks(end, clock.time_base, ceil=True),
+    )
+
+
+def clock_range_covering(clock: RawVideoClock, start: Fraction, end: Fraction) -> RawPtsRange:
+    """초 범위를 **바깥으로** 덮는 프레임 경계를 고른다.
+
+    안쪽으로 스냅하면 경계 프레임이 잘리는 방향으로 내려간다 — 원본 보존(§6.1)은
+    바깥으로만 간다. 요청이 원본 프레임과 하나도 안 겹치면 죽는다(빈 조각 금지).
+    """
+    start_s = _as_fraction_seconds(start, "범위 시작")
+    end_s = _as_fraction_seconds(end, "범위 끝")
+    if end_s <= start_s:
+        raise RuntimeError(f"범위가 비거나 뒤집혔습니다: [{start_s}, {end_s})")
+    first = max(0, math.floor((start_s - clock.presentation_origin) / clock.frame_duration))
+    after = min(
+        clock.frame_count,
+        math.ceil((end_s - clock.presentation_origin) / clock.frame_duration),
+    )
+    if first >= after:
+        raise RuntimeError(
+            f"요청 범위가 원본 프레임과 닿지 않습니다: [{start_s}, {end_s}) — "
+            f"원본 [{clock.presentation_origin}, {clock.exact_end})"
+        )
+    return clock_frame_range(clock, first, after)
+
+
+@dataclass(frozen=True, slots=True)
+class AudioPacketExtent:
+    """오디오 스트림의 패킷 실측 — 원점·끝·패킷 간격(틱).
+
+    `packet_ticks`는 잰 최소 양수 간격이다(패킷 한 개의 길이). 오디오 정렬
+    허용치의 근거가 되는 값이라 하드코딩된 밀리초를 쓰지 않는다.
+    """
+
+    stream_index: int
+    time_base: Fraction
+    first_pts: int | None
+    last_pts: int | None
+    packet_count: int
+    packet_ticks: int
+
+
+def probe_audio_extents(source: Path) -> tuple[AudioPacketExtent, ...]:
+    """오디오 패킷 전체를 한 번 디먹스해 실측 원점·끝을 잰다.
+
+    원본마다 한 번만 부르고 결과를 `extract_raw_clip`에 넘겨 재사용한다. 선언
+    `start_time`과 달리 이 값은 패킷 증거다 — AAC 프라이밍의 음수 원점도 그대로
+    나온다.
+    """
+    ffprobe = require_ffmpeg("ffprobe")
+    completed = _run(
+        [
+            ffprobe, "-v", "error",
+            "-show_entries", "stream=index,codec_type,time_base:packet=stream_index,pts",
+            "-of", "json",
+            str(source),
+        ]
+    )  # fmt: skip
+    data = _raw_probe_json(completed.stdout, source)
+    streams = data.get("streams")
+    if not isinstance(streams, list):
+        raise RuntimeError(f"ffprobe JSON의 streams가 목록이 아닙니다: {source} (값 {streams!r})")
+    audio_bases: dict[int, Fraction] = {}
+    for entry in streams:
+        if isinstance(entry, dict) and entry.get("codec_type") == "audio":
+            index = _stream_global_index(entry, source)
+            audio_bases[index] = _stream_positive_fraction(entry, "time_base", source)
+    pts_by_stream = _audio_packet_pts(data.get("packets"), source)
+    return tuple(
+        _audio_extent(index, time_base, pts_by_stream.get(index, []))
+        for index, time_base in sorted(audio_bases.items())
+    )
+
+
+def _audio_packet_pts(packets: object, source: Path) -> dict[int, list[int]]:
+    if packets is None:
+        return {}
+    if not isinstance(packets, list):
+        raise RuntimeError(f"ffprobe JSON의 packets가 목록이 아닙니다: {source} (값 {packets!r})")
+    grouped: dict[int, list[int]] = {}
+    for packet in packets:
+        if not isinstance(packet, dict):
+            raise RuntimeError(f"패킷 항목이 깨졌습니다: {source} (값 {packet!r})")
+        index = packet.get("stream_index")
+        value = packet.get("pts")
+        if isinstance(index, bool) or not isinstance(index, int):
+            raise RuntimeError(f"패킷 stream_index를 읽지 못했습니다: {source} (값 {index!r})")
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise RuntimeError(f"오디오 패킷 pts를 정수로 읽지 못했습니다: {source} (값 {value!r})")
+        grouped.setdefault(index, []).append(value)
+    return grouped
+
+
+def _audio_extent(stream_index: int, time_base: Fraction, pts: Sequence[int]) -> AudioPacketExtent:
+    if not pts:
+        return AudioPacketExtent(
+            stream_index=stream_index,
+            time_base=time_base,
+            first_pts=None,
+            last_pts=None,
+            packet_count=0,
+            packet_ticks=0,
+        )
+    ordered = sorted(pts)
+    gaps = [b - a for a, b in zip(ordered, ordered[1:], strict=False) if b - a > 0]
+    return AudioPacketExtent(
+        stream_index=stream_index,
+        time_base=time_base,
+        first_pts=ordered[0],
+        last_pts=ordered[-1],
+        packet_count=len(ordered),
+        packet_ticks=min(gaps) if gaps else 0,
+    )
+
+
+# ─────────────────────────────────────────────────────────────
+#  편집용 추출 — 프레임 정확 재인코딩 (§8)
+# ─────────────────────────────────────────────────────────────
+
+# 프로파일 설정은 얼어 있다(코디네이터 재결). 바꿀 때는 계약 문서와 시험 한도를
+# 함께 고친다. crf 17/18 — 각 인코더 문서의 '시각적 무손실' 권장 등급(x265는
+# 같은 등급이 +1이다). preset medium — 품질/속도의 고정 기준점.
+_RAW_X264_ARGS = ("-preset", "medium", "-crf", "17")
+_RAW_X265_ARGS = ("-preset", "medium", "-crf", "18", "-tag:v", "hvc1")
+# prores_ks profile 3 = ProRes 422 HQ(4:2:2 10bit) — 편집 마스터용 상위 등급.
+_RAW_PRORES_ARGS = ("-profile:v", "3")
+
+_RAW_SOURCE_MATCHED_ENCODERS: Mapping[str, tuple[str, tuple[str, ...]]] = {
+    "h264": ("libx264", _RAW_X264_ARGS),
+    "hevc": ("libx265", _RAW_X265_ARGS),
+}
+
+_RAW_SUPPORTED_CODECS = frozenset(_RAW_SOURCE_MATCHED_ENCODERS)
+_RAW_SUPPORTED_PIXFMTS = frozenset({"yuv420p", "yuv420p10le"})
+# 선언된 HDR 전달 특성은 MVP 밖이다 — 실기 기기 검증 전에는 8bit/SDR로 낮추는
+# 대신 이유를 말하고 막는다(§8.2, 코디네이터 재결).
+_RAW_BLOCKED_TRANSFERS = frozenset({"smpte2084", "arib-std-b67"})
+
+
+@dataclass(frozen=True, slots=True)
+class RawTranscodeProfile:
+    """추출 프로파일 — 이름·오디오 정책·컨테이너·픽셀 형식이 얼어 있는 값이다.
+
+    `pix_fmt`이 None이면 원본 픽셀 형식을 그대로 쓴다(source_matched). 인코더
+    선택은 프로파일 이름과 원본 코덱이 함께 정한다(`_raw_encoder`).
+    """
+
+    name: str
+    audio_codec: str
+    container: str
+    pix_fmt: str | None
+    encoder_args: tuple[str, ...]
+
+
+RAW_SOURCE_MATCHED = RawTranscodeProfile(
+    name="source_matched",
+    audio_codec="copy",
+    container="mp4",
+    pix_fmt=None,
+    encoder_args=(),
+)
+"""기본 프로파일 — 원본 크기·프레임 타이밍·비트 깊이·색을 지키는 고품질 재인코딩.
+
+재압축이 일어난다는 사실이 계약의 일부다(§8.1)."""
+
+RAW_EDIT_PRORES = RawTranscodeProfile(
+    name="edit_prores",
+    audio_codec="pcm_s16le",
+    container="mov",
+    pix_fmt="yuv422p10le",
+    encoder_args=_RAW_PRORES_ARGS,
+)
+"""선택 프로파일 — MOV + ProRes 422 HQ + PCM. 4:2:0 → 4:2:2 색차 업샘플링은
+프로파일의 본질이므로 결과에 경고로 기록한다."""
+
+
+@dataclass(frozen=True, slots=True)
+class RawClipHandles:
+    """앞뒤 편집 여유분(초). 기본 0 — 본 구간끼리는 겹침도 틈도 없다(§6.5)."""
+
+    before: Fraction = Fraction(0)
+    after: Fraction = Fraction(0)
+
+
+def _assert_raw_supported(probe: RawMediaProbe, clock: RawVideoClock) -> None:
+    """지원 매트릭스 — 밖이면 이유를 말하고 죽인다. 정밀도를 낮추지 않는다."""
+    video = probe.video
+    failures: list[str] = []
+    if video.codec_name not in _RAW_SUPPORTED_CODECS:
+        failures.append(f"코덱 {video.codec_name!r} (지원: h264/hevc)")
+    if video.pix_fmt not in _RAW_SUPPORTED_PIXFMTS:
+        failures.append(
+            f"픽셀 형식 {video.pix_fmt!r} bit depth {video.bit_depth} (지원: 4:2:0 8/10bit)"
+        )
+    if video.color_transfer in _RAW_BLOCKED_TRANSFERS:
+        failures.append(f"HDR 전달 특성 {video.color_transfer!r} — 실기 검증 전 지원 밖")
+    if any(kind == "video" for _, kind in probe.other_tracks):
+        failures.append("비디오 스트림이 둘 이상이다")
+    if clock.exact_end > probe.duration + probe.video.time_base:
+        # 실측: ffmpeg의 입력 -ss는 선언 길이까지만 읽는다(1.25초 이동 pts를 만든
+        # 파일에서 90프레임 중 33프레임만 들어옴). 선언보다 먼 패킷이 있으면 그
+        # 구간이 조용히 사라지므로 추출 전에 막는다.
+        failures.append(
+            f"패킷 증거({clock.exact_end}초)가 선언 길이({probe.duration}초)를 넘는다 — "
+            "입력 탐색 창이 그 구간을 잃는다"
+        )
+    if not clock.uniform_grid:
+        failures.append(f"VFR(균일 격자 아님): {clock.grid_note}")
+    if failures:
+        raise RawMediaUnsupported(
+            f"지원하지 않는 원본입니다: {probe.source} — " + "; ".join(failures)
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class _RawMediaPlan:
+    """추출 한 번의 계획 — 매핑·지역 시각·출력 길이가 여기서 정해진다."""
+
+    media_range: RawPtsRange
+    media_first_frame: int
+    media_after_last_frame: int
+    core_first_frame: int
+    core_after_last_frame: int
+    core_local_start: Fraction
+    core_local_end: Fraction
+    out_duration: Fraction
+    mapped_audio: tuple[AudioPacketExtent, ...]
+    unmapped: tuple[tuple[int, str], ...]
+    warnings: tuple[str, ...]
+
+
+def _validate_raw_range(source_range: RawPtsRange) -> None:
+    if source_range.time_base <= 0:
+        raise RuntimeError(f"time_base가 양수가 아닙니다: {source_range.time_base}")
+    for label, value in (("start_pts", source_range.start_pts), ("end_pts", source_range.end_pts)):
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise RuntimeError(f"{label}는 정수여야 합니다: {value!r}")
+    if source_range.end_pts <= source_range.start_pts:
+        raise RuntimeError(
+            f"범위가 비거나 뒤집혔습니다: [{source_range.start_pts}, {source_range.end_pts})"
+        )
+
+
+def _plan_raw_media(
+    clock: RawVideoClock,
+    source_range: RawPtsRange,
+    handles: RawClipHandles,
+    audio_extents: Sequence[AudioPacketExtent],
+) -> _RawMediaPlan:
+    core_start = source_range.start_seconds
+    core_end = source_range.end_seconds
+    origin = clock.presentation_origin
+    before = _as_fraction_seconds(handles.before, "앞 핸들")
+    after = _as_fraction_seconds(handles.after, "뒤 핸들")
+    if before < 0 or after < 0:
+        raise RuntimeError(f"핸들은 0 이상이어야 합니다: 앞 {before}, 뒤 {after}")
+    core_first = math.floor((core_start - origin) / clock.frame_duration)
+    core_after = math.ceil((core_end - origin) / clock.frame_duration)
+    if core_first < 0 or core_after > clock.frame_count:
+        raise RuntimeError(
+            f"core 범위가 원본을 벗어났습니다: [{core_start}, {core_end})초 — "
+            f"원본 [{origin}, {clock.exact_end})초. 몰래 줄이지 않는다"
+        )
+    media_first = max(0, math.floor((core_start - before - origin) / clock.frame_duration))
+    media_after = min(
+        clock.frame_count,
+        math.ceil((core_end + after - origin) / clock.frame_duration),
+    )
+    if media_first >= media_after:
+        raise RuntimeError("핸들을 포함한 매체 범위가 비었습니다")
+    media_range = clock_frame_range(clock, media_first, media_after)
+    media_start = media_range.start_seconds
+    media_end = media_range.end_seconds
+    mapping = _map_raw_audio(audio_extents, media_start, media_end)
+    out_duration = max(media_end - media_start, mapping.audio_tail_local)
+    warnings = list(mapping.warnings)
+    if out_duration > media_end - media_start:
+        warnings.append(
+            f"영상 끝 뒤 오디오 꼬리 {out_duration - (media_end - media_start)}초를 보존한다"
+        )
+    return _RawMediaPlan(
+        media_range=media_range,
+        media_first_frame=media_first,
+        media_after_last_frame=media_after,
+        core_first_frame=core_first,
+        core_after_last_frame=core_after,
+        core_local_start=core_start - media_start,
+        core_local_end=core_end - media_start,
+        out_duration=out_duration,
+        mapped_audio=mapping.mapped,
+        unmapped=mapping.unmapped,
+        warnings=tuple(warnings),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _RawAudioMapping:
+    mapped: tuple[AudioPacketExtent, ...]
+    unmapped: tuple[tuple[int, str], ...]
+    warnings: tuple[str, ...]
+    audio_tail_local: Fraction
+
+
+def _map_raw_audio(
+    audio_extents: Sequence[AudioPacketExtent], media_start: Fraction, media_end: Fraction
+) -> _RawAudioMapping:
+    """구간 안에 패킷이 있는 오디오 트랙만 매핑한다.
+
+    패킷이 하나도 없는 트랙은 빈 스트림이 되어 컨테이너에서 사라진다 — 조용히
+    버리는 대신 unmapped로 남긴다. 영상 끝을 넘는 오디오 꼬리는 자르지 않고
+    보존한다(코디네이터 재결).
+    """
+    mapped: list[AudioPacketExtent] = []
+    unmapped: list[tuple[int, str]] = []
+    warnings: list[str] = []
+    tail = Fraction(0)
+    for extent in audio_extents:
+        if extent.first_pts is None or extent.last_pts is None:
+            unmapped.append((extent.stream_index, "패킷이 없는 오디오 스트림"))
+            continue
+        first = extent.first_pts * extent.time_base
+        last = extent.last_pts * extent.time_base
+        if first >= media_end or last <= media_start:
+            unmapped.append((extent.stream_index, "이 구간에 오디오 패킷이 없다"))
+            continue
+        mapped.append(extent)
+        packet = extent.packet_ticks * extent.time_base
+        tail = max(tail, last + packet - media_start)
+    if unmapped:
+        listed = ", ".join(f"스트림 {index}: {reason}" for index, reason in unmapped)
+        warnings.append(f"매핑하지 않은 오디오: {listed}")
+    return _RawAudioMapping(
+        mapped=tuple(mapped),
+        unmapped=tuple(unmapped),
+        warnings=tuple(warnings),
+        audio_tail_local=tail,
+    )
+
+
+def _format_us(seconds: Fraction, *, ceil: bool) -> str:
+    """정확한 유리수 초를 ffmpeg `-ss`/`-t` 의 µs 문자열로.
+
+    `-ss`는 바닥(목표보다 늦게 자르지 않는다), `-t`는 천장(끝 프레임을 잃지
+    않는다). 실제 결과는 추출물 검증이 잰다 — 이 문자열은 요청일 뿐이다.
+    """
+    us = seconds * _RAW_US_PER_SECOND
+    ticks = math.ceil(us) if ceil else math.floor(us)
+    sign = "-" if ticks < 0 else ""
+    ticks = abs(ticks)
+    return f"{sign}{ticks // _RAW_US_PER_SECOND}.{ticks % _RAW_US_PER_SECOND:06d}"
+
+
+def _raw_encoder(profile: RawTranscodeProfile, codec_name: str) -> tuple[str, tuple[str, ...]]:
+    if profile.name == "source_matched":
+        try:
+            return _RAW_SOURCE_MATCHED_ENCODERS[codec_name]
+        except KeyError:
+            raise RawMediaUnsupported(
+                f"source_matched 프로파일은 {codec_name!r}를 재인코딩하지 않는다 "
+                f"(지원: {', '.join(sorted(_RAW_SUPPORTED_CODECS))})"
+            ) from None
+    if profile.name == "edit_prores":
+        return "prores_ks", profile.encoder_args
+    raise RuntimeError(f"알 수 없는 프로파일입니다: {profile.name!r}")
+
+
+def _raw_color_args(video: RawVideoMedia) -> list[str]:
+    """선언된 색 좌표만 넘긴다 — 모르는 값은 지어내지 않고 그대로 둔다."""
+    args: list[str] = []
+    if video.color_primaries:
+        args += ["-color_primaries", video.color_primaries]
+    if video.color_transfer:
+        args += ["-color_trc", video.color_transfer]
+    if video.color_matrix:
+        args += ["-colorspace", video.color_matrix]
+    if video.color_range:
+        args += ["-color_range", video.color_range]
+    return args
+
+
+def _raw_extract_command(
+    source: Path,
+    staging_output: Path,
+    probe: RawMediaProbe,
+    profile: RawTranscodeProfile,
+    plan: _RawMediaPlan,
+) -> list[str]:
+    encoder, encoder_args = _raw_encoder(profile, probe.video.codec_name)
+    # -ss를 time_base 한 틱 일찍 잡는다: 양자화된 시계(예: 1/1000)에서 격자 시각과
+    # 실제 pts가 한 틱 어길 수 있는데, 바닥 µs만 쓰면 첫 프레임이 잘릴 수 있다.
+    # 한 틱 일찍는 이전 프레임을 되살리지 못한다(프레임 간격 ≫ 틱). 음수 -ss는
+    # ffmpeg가 '지연'으로 읽으므로 0에서 자른다.
+    seek = max(Fraction(0), plan.media_range.start_seconds - probe.video.time_base)
+    command = [
+        require_ffmpeg(), "-hide_banner", "-nostdin", "-y",
+        "-ss", _format_us(seek, ceil=False),
+        "-t", _format_us(plan.out_duration, ceil=True),
+        "-i", str(source),
+        "-map", f"0:{probe.video.stream_index}",
+    ]  # fmt: skip
+    for extent in plan.mapped_audio:
+        command += ["-map", f"0:{extent.stream_index}"]
+    pix_fmt = profile.pix_fmt if profile.pix_fmt is not None else probe.video.pix_fmt
+    frames = plan.media_after_last_frame - plan.media_first_frame
+    # 영상 프레임 창은 select로 못 박는다(§8.3 CFR). -frames:v을 쓰면 ffmpeg가 그
+    # 스트림이 끝나는 순간 출력을 마무리해 영상 뒤 오디오 꼬리가 잘리는 것을
+    # 실측했다(50프레임 + 꼬리 4.5초 → 오디오 2.0초에서 끊김). select는 필터라
+    # 입력 읽기가 -t까지 계속된다. avoid_negative_ts도 건드리지 않는다 — make_zero가
+    # 스트림마다 다른 보정을 만들어 공통 시프트(§8.3)를 깨뜨렸다(출력 elst 1초).
+    command += [
+        "-c:v", encoder, *encoder_args,
+        "-pix_fmt", pix_fmt,
+        "-vf", f"select=lt(n\\,{frames})",
+        "-fps_mode", "passthrough",
+        "-c:a", profile.audio_codec,
+    ]  # fmt: skip
+    # 색 좌표는 출력 경로 **앞**에 붙는다 — ffmpeg는 출력 URL 뒤의 인자를 무시한다.
+    return command + _raw_color_args(probe.video) + ["-f", profile.container, str(staging_output)]
+
+
+@dataclass(frozen=True, slots=True)
+class RawClipExtraction:
+    """검증을 통과한 스테이징 추출물 — 절대·지역 시각이 갈라져 기록된다.
+
+    `source_range`·`media_range`·`core_first_frame`은 **원본 절대 좌표**다.
+    `core_local_start`·`core_local_end`·`media_local_end`·`audio_local_starts`는
+    **클립 지역 시각**이다(매체 시작 = 0, 공통 기준 변환 적용). 게시는 호출자의
+    몫이다 — 이 값은 스테이징 파일의 기록일 뿐이다.
+    """
+
+    path: Path
+    profile_name: str
+    source_range: RawPtsRange
+    media_range: RawPtsRange
+    core_first_frame: int
+    core_after_last_frame: int
+    core_local_start: Fraction
+    core_local_end: Fraction
+    media_local_end: Fraction
+    frame_count: int
+    frame_duration: Fraction
+    video: RawVideoMedia
+    audio: tuple[RawAudioTrack, ...]
+    audio_local_starts: tuple[tuple[int, Fraction | None], ...]
+    rotation_applied: bool
+    unmapped_tracks: tuple[tuple[int, str], ...]
+    warnings: tuple[str, ...]
+    ffmpeg_version: str
+
+
+def extract_raw_clip(
+    source: Path,
+    staging_output: Path,
+    source_range: RawPtsRange,
+    profile: RawTranscodeProfile,
+    *,
+    handles: RawClipHandles | None = None,
+    probe: RawMediaProbe | None = None,
+    clock: RawVideoClock | None = None,
+    audio_extents: tuple[AudioPacketExtent, ...] | None = None,
+) -> RawClipExtraction:
+    """원본 구간을 프레임 정확히 재인코딩해 **스테이징에만** 쓴다(§8.4).
+
+    매체 시각은 공통 기준 변환으로 0부터 시작한다 — 영상·오디오를 따로 0으로
+    만들지 않아 상대 싱크가 산다(§8.3). 강제 30fps·8bit 강등·LUT·정규화·속도
+    변경은 없다. 검증(디먹스·격자·프레임 수·기하·색·오디오·디코드)을 통과해야
+    값을 돌려주고, 실패하면 `RawClipVerificationError`로 죽는다 — 0바이트·깨진
+    파일은 절대 성공으로 보이지 않는다.
+    """
+    _validate_raw_range(source_range)
+    media_probe = probe if probe is not None else probe_raw_media(source)
+    video_clock = clock if clock is not None else probe_extraction_clock(source, probe=media_probe)
+    extents = audio_extents if audio_extents is not None else probe_audio_extents(source)
+    clip_handles = handles if handles is not None else RawClipHandles()
+    _assert_raw_supported(media_probe, video_clock)
+    plan = _plan_raw_media(video_clock, source_range, clip_handles, extents)
+    staging_output.parent.mkdir(parents=True, exist_ok=True)
+    _run(_raw_extract_command(source, staging_output, media_probe, profile, plan))
+    out_probe, out_clock = _verify_raw_output(
+        staging_output, media_probe, video_clock, profile, plan
+    )
+    rotation_applied = media_probe.video.rotation_degrees != 0
+    warnings = plan.warnings
+    if rotation_applied:
+        warnings = warnings + (
+            f"회전 {media_probe.video.rotation_degrees}°를 물리적으로 적용했다"
+            f"(저장 기하 {media_probe.video.width}x{media_probe.video.height})",
+        )
+    if profile.name == "edit_prores" and media_probe.video.pix_fmt.startswith("yuv420"):
+        warnings = warnings + (
+            "색차 4:2:0 → 4:2:2 업샘플링(edit_prores 프로파일의 성질, 되돌릴 수 없다)",
+        )
+    log.debug(
+        f"원본 구간 추출 완료: {staging_output} "
+        f"({plan.media_after_last_frame - plan.media_first_frame}프레임, "
+        f"core 지역 [{plan.core_local_start}, {plan.core_local_end})초)"
+    )
+    return _raw_clip_result(
+        staging_output,
+        profile,
+        source_range,
+        plan,
+        out_probe,
+        out_clock,
+        rotation_applied,
+        warnings,
+    )
+
+
+def _raw_clip_result(
+    staging_output: Path,
+    profile: RawTranscodeProfile,
+    source_range: RawPtsRange,
+    plan: _RawMediaPlan,
+    out_probe: RawMediaProbe,
+    out_clock: RawVideoClock,
+    rotation_applied: bool,
+    warnings: tuple[str, ...],
+) -> RawClipExtraction:
+    return RawClipExtraction(
+        path=staging_output,
+        profile_name=profile.name,
+        source_range=source_range,
+        media_range=plan.media_range,
+        core_first_frame=plan.core_first_frame,
+        core_after_last_frame=plan.core_after_last_frame,
+        core_local_start=plan.core_local_start,
+        core_local_end=plan.core_local_end,
+        media_local_end=out_probe.duration,
+        frame_count=out_clock.frame_count,
+        frame_duration=out_clock.frame_duration,
+        video=out_probe.video,
+        audio=out_probe.audio,
+        audio_local_starts=tuple(
+            (track.stream_index, track.start_time) for track in out_probe.audio
+        ),
+        rotation_applied=rotation_applied,
+        unmapped_tracks=plan.unmapped,
+        warnings=warnings,
+        ffmpeg_version=_tool_version("ffmpeg"),
+    )
+
+
+def _verify_raw_output(
+    staging_output: Path,
+    source_probe: RawMediaProbe,
+    source_clock: RawVideoClock,
+    profile: RawTranscodeProfile,
+    plan: _RawMediaPlan,
+) -> tuple[RawMediaProbe, RawVideoClock]:
+    """추출물을 실측으로 검증한다 — 통과 못 하면 이 파일은 게시할 수 없다.
+
+    구조 검사(§8.4)다: 디먹스·격자·프레임 수·기하·픽셀 형식·색·오디오 트랙·공통
+    시프트 보존·전체 디코드. 경계 발화·싱크·색의 실기 검사는 별도이며 여기서
+    통과했다는 뜻이 아니다.
+    """
+    if not staging_output.is_file() or staging_output.stat().st_size == 0:
+        raise RawClipVerificationError(f"출력이 비었거나 없습니다: {staging_output}")
+    out_probe = probe_raw_media(staging_output)
+    out_clock = probe_extraction_clock(staging_output, probe=out_probe)
+    failures: list[str] = []
+    failures += _verify_raw_video(out_probe, out_clock, source_probe, source_clock, profile, plan)
+    failures += _verify_raw_audio(out_probe, plan)
+    failures += _verify_raw_duration(out_probe, plan)
+    if failures:
+        raise RawClipVerificationError(
+            f"추출물 검증 실패 (게시 불가): {staging_output}\n" + "\n".join(failures)
+        )
+    _verify_raw_decodes(staging_output)
+    return out_probe, out_clock
+
+
+def _verify_raw_video(
+    out_probe: RawMediaProbe,
+    out_clock: RawVideoClock,
+    source_probe: RawMediaProbe,
+    source_clock: RawVideoClock,
+    profile: RawTranscodeProfile,
+    plan: _RawMediaPlan,
+) -> list[str]:
+    video = out_probe.video
+    source = source_probe.video
+    failures: list[str] = []
+    expected_frames = plan.media_after_last_frame - plan.media_first_frame
+    if out_clock.frame_count != expected_frames:
+        failures.append(
+            f"프레임 수가 다릅니다: 기대 {expected_frames}, 출력 {out_clock.frame_count}"
+        )
+    if out_clock.frame_duration != source_clock.frame_duration:
+        failures.append(
+            f"프레임 타이밍이 바뀌었습니다: 원본 {source_clock.frame_duration}, "
+            f"출력 {out_clock.frame_duration} — 무단 fps 변환은 없다"
+        )
+    if not out_clock.uniform_grid:
+        failures.append(f"출력 격자가 균일하지 않습니다: {out_clock.grid_note}")
+    if abs(out_clock.presentation_origin) > out_clock.time_base:
+        failures.append(
+            f"출력 원점이 0이 아닙니다: {out_clock.presentation_origin}초 "
+            f"(허용 {out_clock.time_base}초)"
+        )
+    expected_width, expected_height = _expected_geometry(source)
+    if (video.width, video.height) != (expected_width, expected_height):
+        failures.append(
+            f"해상도가 다릅니다: 기대 {expected_width}x{expected_height}, "
+            f"출력 {video.width}x{video.height}"
+        )
+    # source_matched는 원본 픽셀 형식이 곧 기대값이다 — 프로파일에 끼워넣은 값을
+    # 따라가면 10bit 강등이 검증을 통과한다(실측: 변형 프로파일로 재현).
+    if profile.name == "source_matched":
+        expected_pix_fmt = source.pix_fmt
+    else:
+        expected_pix_fmt = profile.pix_fmt if profile.pix_fmt is not None else source.pix_fmt
+    if video.pix_fmt != expected_pix_fmt:
+        failures.append(
+            f"픽셀 형식이 다릅니다: 기대 {expected_pix_fmt}, 출력 {video.pix_fmt} "
+            f"(bit depth {source.bit_depth} → {video.bit_depth}) — 무단 비트 강등은 없다"
+        )
+    failures += _verify_raw_colors(video, source)
+    if video.rotation_degrees != 0:
+        failures.append(f"출력에 회전 메타데이터가 남았습니다: {video.rotation_degrees}°")
+    return failures
+
+
+def _expected_geometry(source: RawVideoMedia) -> tuple[int, int]:
+    """기대 출력 기하 — 회전 90/270°는 autorotate가 물리로 적용해 뒤바뀐다."""
+    if source.rotation_degrees % 180 != 0:
+        return source.height, source.width
+    return source.width, source.height
+
+
+def _verify_raw_colors(video: RawVideoMedia, source: RawVideoMedia) -> list[str]:
+    failures: list[str] = []
+    for label, declared, actual in (
+        ("color_primaries", source.color_primaries, video.color_primaries),
+        ("color_transfer", source.color_transfer, video.color_transfer),
+        ("color_matrix", source.color_matrix, video.color_matrix),
+        ("color_range", source.color_range, video.color_range),
+    ):
+        if declared and declared != actual:
+            failures.append(
+                f"선언된 색 좌표가 사라졌습니다: {label} 원본 {declared!r}, 출력 {actual!r}"
+            )
+    return failures
+
+
+def _verify_raw_audio(out_probe: RawMediaProbe, plan: _RawMediaPlan) -> list[str]:
+    failures: list[str] = []
+    if len(out_probe.audio) != len(plan.mapped_audio):
+        failures.append(
+            f"오디오 트랙 수가 다릅니다: 기대 {len(plan.mapped_audio)}, 출력 {len(out_probe.audio)}"
+        )
+        return failures
+    for extent, track in zip(plan.mapped_audio, out_probe.audio, strict=True):
+        source = extent.first_pts * extent.time_base if extent.first_pts is not None else None
+        if source is None:
+            failures.append(f"오디오 스트림 {extent.stream_index}: 매핑했는데 패킷 증거가 없다")
+            continue
+        expected = max(Fraction(0), source - plan.media_range.start_seconds)
+        tolerance = extent.packet_ticks * extent.time_base + extent.time_base
+        measured = track.start_time
+        if abs(measured - expected) > tolerance:
+            failures.append(
+                f"오디오 스트림 {track.stream_index}의 시작이 어긋납니다: "
+                f"기대(지역) {expected}초, 출력 {measured}초, 허용 {tolerance}초 "
+                "— 공통 기준 변환이 깨졌다"
+            )
+    return failures
+
+
+def _verify_raw_duration(out_probe: RawMediaProbe, plan: _RawMediaPlan) -> list[str]:
+    failures: list[str] = []
+    # 컨테이너 길이 선언은 스트림 time_base 눈금으로 반올림된다 — 오디오 패킷 하나와
+    # 출력 영상 틱 하나 중 큰 쪽이 '선언 반올림'의 전부다.
+    allowed_short = out_probe.video.time_base
+    for extent in plan.mapped_audio:
+        allowed_short = max(allowed_short, extent.packet_ticks * extent.time_base)
+    if out_probe.duration + allowed_short < plan.out_duration:
+        failures.append(
+            f"출력 길이가 모자랍니다: 기대 {plan.out_duration}초, 출력 {out_probe.duration}초 "
+            f"(선언 반올림 {allowed_short}초 허용) — 꼬리가 잘렸다"
+        )
+    return failures
+
+
+def _verify_raw_decodes(path: Path) -> None:
+    """출력 전체를 디코드해 본다 — 패킷 선언만으로 디코드 품질을 주장하지 않는다.
+
+    `-xerror`는 첫 오류에서 0이 아닌 종료 코드를 내므로, 0이 아닌 종료·오류
+    줄 둘 다 실패다. 실패한 파일은 게시할 수 없다.
+    """
+    ffmpeg = require_ffmpeg()
+    completed = subprocess.run(
+        [ffmpeg, "-v", "error", "-xerror", "-i", str(path), "-f", "null", "-"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0 or completed.stderr.strip():
+        tail = "\n".join(completed.stderr.strip().splitlines()[-5:])
+        raise RawClipVerificationError(
+            f"출력 디코드 검증 실패: {path} (코드 {completed.returncode})\n{tail}"
+        )
+
+
+def ffmpeg_provenance() -> str:
+    """ffmpeg/ffprobe 버전과 필요 인코더의 실측 가용성 — 보고·진단용."""
+    ffmpeg = require_ffmpeg()
+    encoders = _run([ffmpeg, "-hide_banner", "-encoders"]).stdout
+    required = ("libx264", "libx265", "prores_ks", "aac")
+    available = [name for name in required if re.search(rf"\s{name}\s", encoders)]
+    missing = [name for name in required if name not in available]
+    lines = [
+        _tool_version("ffmpeg"),
+        _tool_version("ffprobe"),
+        f"encoders: {', '.join(available) or '없음'}",
+    ]
+    if missing:
+        lines.append(f"MISSING encoders: {', '.join(missing)} — 해당 프로파일 사용 불가")
+    return "\n".join(lines)
