@@ -11,6 +11,9 @@
   캐시 정리 뒤에도 확정 바이트가 그대로다(재검증이 증명한다).
 - 자막(화면 4): 등록→추정(실측 비용)→확인란 승인→주입 가짜 제공자 실행→검토
   (머리 충돌 게이트)→수동 편집→확정 SRT/VTT 등록 제공. 재시작 뒤에도 같은 신원.
+- F2 표현: 선택 오디오 미리보기(두 트랙 합성·잰 원점 매핑)·큐 이동/반복 단추·
+  지금 글자 칸, 표시 갱신의 0회 재생성, 정리 뒤 같은 키 재생성. 확정 내보내기는
+  백엔드에서도 제출 때의 리비전 아이디에 묶인다(경합 0바이트 거부).
 - DB v5→v6 승격과 저장소 스키마(출처 `origin` 열 포함)의 존재를 직접 확인한다.
 """
 
@@ -21,6 +24,7 @@ import json
 import shutil
 import sqlite3
 import subprocess
+import tempfile
 import time
 from datetime import date
 from fractions import Fraction
@@ -256,13 +260,33 @@ def test_cue_table_and_review_rows_markdown() -> None:
         end_seconds="2.5",
         whisper_text="망원|동",
         auto_text="망원동 카페",
-        basis="auto",
+        text="손으로 고친 글자",
+        basis="manual",
         chars_per_second=4.5,
     )
     table = ui_facade.cue_table_markdown([row])
     assert "`a0000`" in table and "망원\\|동" in table and "4.5" in table
-    assert "| 시작(초) |" in table
+    assert "| 시작(초) |" in table and "지금 글자" in table
+    assert "손으로 고친 글자" in table
     assert "큐가 없다" in ui_facade.cue_table_markdown([])
+    # HTML 편집표 — 지금 글자 칸·이동·반복 단추·이스케이프까지.
+    table_html = ui_facade.cue_table_html([row], seek_by_cue={"a0000": ("1.075000", "3.000000")})
+    assert "<code>a0000</code>" in table_html and "손으로 고친 글자" in table_html
+    assert 'data-seek-start="1.075000"' in table_html
+    assert "v.currentTime=1.075000" in table_html and "v.currentTime=s" in table_html
+    assert "망원|동" in table_html
+    without_preview = ui_facade.cue_table_html([row])
+    assert "data-seek-start" not in without_preview and "미리보기가" in without_preview
+    assert "큐가 없다" in ui_facade.cue_table_html([])
+    # 큐 선택 목록 — 아이디·시각·지금 글자.
+    choices = ui_facade.caption_cue_choices([row])
+    assert choices == [("a0000 · 0.5→2.5 · 손으로 고친 글자", "a0000")]
+    # 재생기 HTML — 영상·파형·출처가 한 구성요소에 산다.
+    player = ui_facade.caption_player_html(
+        "/media/xyz", waveform=ui_facade.waveform_svg([0.3]), provenance="출처 — 원본 `f.mov`"
+    )
+    assert '<video id="caption-video"' in player and 'src="/media/xyz"' in player
+    assert 'aria-label="오디오 파형"' in player and "출처 — 원본 `f.mov`" in player
     assert "검토 리비전이 없다" in ui_facade.review_rows_markdown([])
     rows_md = ui_facade.review_rows_markdown(
         [{"segment_id": "s1", "source_order": 1, "start_seconds": "0"}]
@@ -606,9 +630,14 @@ def test_caption_screen_real_flow(tmp_path: Path) -> None:
     root = server.workspace_root()
     assert root is not None
 
-    # 등록 — 실측 상태·렌더 해시가 그대로 보인다.
-    registered = server.caption_register_view(signature, str(video), "final_1", "자동(첫 트랙)")
+    # 등록 — 실측 상태·렌더 해시가 그대로 보이고 선택 트랙 미리보기가 붙는다.
+    registered, player_html = server.caption_register_view(
+        signature, str(video), "final_1", "자동(첫 트랙)"
+    )
     assert "ready" in registered and "등록 완료" in registered
+    assert '<video id="caption-video"' in player_html
+    assert 'src="/media/' in player_html and 'aria-label="오디오 파형"' in player_html
+    assert "원본·확정 자막은 그대로다" in player_html
     with pytest.raises(gr.Error, match="최종 영상 파일이 없다"):
         server.caption_register_view(signature, str(tmp_path / "없음.mp4"), "f1", "자동(첫 트랙)")
 
@@ -630,11 +659,15 @@ def test_caption_screen_real_flow(tmp_path: Path) -> None:
     assert record.status == "succeeded", record.error
     assert timing.calls and text.calls  # 주입 가짜만 불렸다(실전송 0회)
 
-    # 검토 — 큐 행·머리 번호·파형. 원응답은 나가지 않는다.
-    review = server.caption_review_view(signature, "run-1")
-    assert "`a0000`" in review and "망원동 커피에 왔어요" in review
-    assert "검토 머리 0" in review and "<svg" in review
-    assert "미대응 말 1개" in review
+    # 검토 — 큐 편집표(HTML)·요약(Markdown). 재생기는 다시 그려지지 않는다.
+    review_md, table_html, player_update, cue_dd = server.caption_review_view(signature, "run-1")
+    assert "검토 머리 0" in review_md and "미대응 말 1개" in review_md
+    assert "<code>a0000</code>" in table_html and "망원동 커피에 왔어요" in table_html
+    assert "지금 글자" in table_html and "data-seek-start" in table_html
+    assert "<svg" not in review_md  # 파형은 안전한 HTML 구성요소에만 산다
+    assert player_update == gr.update()  # 미리보기가 그대로면 재생기 무동작(재생 머리 보존)
+    preview_media_id = server._caption_preview.registration.file_id
+    preview_stat = (root / server._caption_preview.registration.relative_path).stat()
     trace = server.caption_trace_view(signature, "run-1")
     assert "원시 모델 응답은 브라우저에 제공되지 않는다" in trace
 
@@ -667,13 +700,13 @@ def test_caption_screen_real_flow(tmp_path: Path) -> None:
     manual_ids = [cue for cue in server._caption_cue_ids if cue.startswith("m")]
     assert manual_ids
     # 표시가 짧은 경고가 열리고, 정확한 key로 허용된다.
-    review = server.caption_review_view(signature, "run-1")
-    assert "열린 경고" in review
+    review_md, _table, _player, _dd = server.caption_review_view(signature, "run-1")
+    assert "열린 경고" in review_md
     import re as re_module
 
     # 화면이 보인 경고 key 전부를 정확히 허용한다(확정 게이트가 같은 잣대로 잰다).
-    warning_keys = re_module.findall(r"`((?:cue|run):[^`]+)`", review)
-    assert warning_keys, review
+    warning_keys = re_module.findall(r"`((?:cue|run):[^`]+)`", review_md)
+    assert warning_keys, review_md
     for warning_key in warning_keys:
         server.caption_edit_view(signature, "경고 허용", "", "", "", "", "", "", warning_key)
     server.caption_edit_view(
@@ -687,8 +720,15 @@ def test_caption_screen_real_flow(tmp_path: Path) -> None:
         "0",
         "",
     )
-    resolved = server.caption_review_view(signature, "run-1")
-    assert "전부 처리되었다" in resolved
+    resolved_md, _resolved_table, _resolved_player, _resolved_dd = server.caption_review_view(
+        signature, "run-1"
+    )
+    assert "전부 처리되었다" in resolved_md
+    # 조회·편집을 거쳐도 미리보기는 다시 만들어지지 않았다(표시 갱신 0회 재생성).
+    assert server._caption_preview.registration.file_id == preview_media_id
+    assert (
+        root / server._caption_preview.registration.relative_path
+    ).stat().st_mtime_ns == preview_stat.st_mtime_ns
 
     # 확정 — 화면이 짚은 큐 전부·기대 머리와 함께 게시된다.
     with pytest.raises(gr.Error, match="확정 확인이 필요하다"):
@@ -716,8 +756,15 @@ def test_caption_screen_real_flow(tmp_path: Path) -> None:
     signature2 = _open(restarted, root)
     again = restarted.caption_estimate_view(signature2, "run-1")
     assert "실측 청크 1개" in again
-    bundle_review = restarted.caption_review_view(signature2, "run-1")
-    assert "`a0000`" in bundle_review
+    bundle_md, bundle_table, bundle_player, _bundle_dd = restarted.caption_review_view(
+        signature2, "run-1"
+    )
+    assert "a0000" in bundle_table
+    # 미리보기 파일이 살아 있으므로 재시작 뒤 검토도 ffmpeg 없이 붙는다.
+    assert restarted._caption_preview is not None
+    assert restarted._caption_preview.built is False
+    assert restarted._caption_preview.registration.file_id == preview_media_id
+    assert isinstance(bundle_player, str) and '<video id="caption-video"' in bundle_player
 
     # 다른 작업공간의 서버에서는 이 미디어 ID가 존재하지 않는다(작업공간 묶임).
     other = workspace_service.RawWorkspaceUi(port=7862, state_path=tmp_path / "s3.json")
@@ -726,6 +773,280 @@ def test_caption_screen_real_flow(tmp_path: Path) -> None:
 
     response = other.media_response(srt_id, None, want_body=False)
     assert isinstance(response, JSONResponse) and response.status_code == 404
+
+
+# ── F2 — 선택 오디오 미리보기·큐 이동/반복·지금 글자(두 트랙 합성) ────────────
+
+
+def _two_track_final_video(path: Path) -> None:
+    """오디오 트랙이 둘인 합성 최종 영상 — 둘째 트랙은 0.5초 늦게 시작한다.
+
+    `itsoffset`로 둘째 트랙의 실측 원점을 0이 아니게 만든다 — 첫 트랙을 듣는
+    그림과 구별되는, 선택 트랙 원점 매핑의 증거다.
+    """
+    _encode(
+        [
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=320x180:rate=25:duration=4",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:duration=4",
+            "-itsoffset",
+            "0.5",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=660:duration=3.5",
+            "-map",
+            "0:v",
+            "-map",
+            "1:a",
+            "-map",
+            "2:a",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-ac",
+            "1",
+            str(path),
+        ]
+    )
+
+
+@needs_ffmpeg
+def test_caption_selected_track_presentation_real_flow(tmp_path: Path) -> None:
+    """두 트랙 영상에서 서수 1 선택 — 미리보기·원점 매핑·지금 글자·정리 뒤 재생성."""
+    from vlogsrt import preprocess
+
+    video = tmp_path / "final-two.mp4"
+    _two_track_final_video(video)
+    source_sha = _sha256(video)
+    timing = FakeTiming({0: [{"text": " 둘째 트랙 인사", "start": 0.5, "end": 2.5}]})
+    text = FakeText("둘째 트랙 인사입니다")
+    server = workspace_service.RawWorkspaceUi(
+        port=7860,
+        state_path=tmp_path / "state.json",
+        caption_providers=lambda: (timing, text),
+    )
+    server.create_workspace_view("자막두트랙", str(tmp_path / "ws"))
+    signature = _open(server, tmp_path / "ws")
+    root = server.workspace_root()
+    assert root is not None
+
+    # 서수 없이 등록하면 선택 확정을 요구한다(기존 게이트 그대로 — 상태 행으로).
+    ambiguous, ambiguous_player = server.caption_register_view(
+        signature, str(video), "final_1", "자동(첫 트랙)"
+    )
+    assert "audio_selection_required" in ambiguous and "오디오 트랙이 2개다" in ambiguous
+    assert '<video id="caption-video"' not in ambiguous_player  # 미리보기도 없다
+    assert server._caption_preview is None
+
+    # 서수 1 등록 — 선택 트랙 미리보기가 만들어지고 잰 원점이 0이 아니다.
+    registered, player_html = server.caption_register_view(signature, str(video), "f1", "1")
+    assert "ready" in registered
+    assert "오디오 트랙 1" in player_html and "선택 트랙만 담는다" in player_html
+    preview = server._caption_preview
+    assert preview is not None and preview.built is True and preview.remuxed is True
+    assert 0.4 < float(preview.audio_origin) < 0.6  # 잰 원점 ≈ 0.5초(itsoffset)
+    assert preview.registration.relative_path.startswith("previews/captions/")
+    preview_path = root / preview.registration.relative_path
+    probe = preprocess.probe_raw_media(preview_path)
+    assert probe.video.codec_name == "h264" and len(probe.audio) == 1
+    assert probe.audio[0].codec_name == "aac"  # 원본의 첫 트랙은 담기지 않았다
+    # 저장 원점은 미리보기 파일 자체의 같은 파이프라인 실측과 일치한다.
+    with tempfile.TemporaryDirectory() as td:
+        measured = preprocess.extract_pcm_s16le(preview_path, Path(td) / "p.pcm", stream_index=0)
+        assert measured.pcm_sample0_file_time == preview.audio_origin
+    preview_stat = preview_path.stat()
+
+    # 실행·검토 — 큐 단추 시각은 미리보기 원점 + 큐 시각(서버가 잰 값).
+    server.caption_estimate_view(signature, "run-1")
+    assert server._caption_identity is not None
+    assert server._caption_identity["audio_ordinal"] == 1
+    note = server.caption_run_view(signature, "run-1", True)
+    record = _wait_terminal(server, root, note.split("`")[1])
+    assert record.status == "succeeded", record.error
+    review_md, table_html, player_update, cue_dd = server.caption_review_view(signature, "run-1")
+    assert player_update == gr.update()  # 표시 갱신은 재생기를 다시 그리지 않는다
+    clock = server._caption_cue_clock["a0000"]
+    # 큐 시각은 최종 영상 시계(등록 원점 포함) — 보정은 원점 차이뿐이다(코덱 복사면 0).
+    registration_row = server.raw.caption_workspace(root).registration(
+        str(server._caption_identity["revision"]), server._caption_identity["audio_ordinal"]
+    )
+    assert registration_row is not None and registration_row.origin is not None
+    shift = server._caption_preview.audio_origin - registration_row.origin
+    assert abs(float(shift)) < 0.05  # 코덱 복사 미리보기는 원본 시계를 그대로 옮긴다
+    expected_start = f"{float(shift + clock[0]):.6f}"
+    expected_end = f"{float(shift + clock[1]):.6f}"
+    assert f'data-seek-start="{expected_start}"' in table_html
+    assert f'data-seek-end="{expected_end}"' in table_html
+    assert 0.9 < float(expected_start) < 1.1  # 등록 원점(≈0.5) + 큐 시작(0.5) ≈ 1.0
+    assert "둘째 트랙 인사" in table_html  # whisper 글자
+    # 큐 선택 → 편집 칸 채우기(지금 글자·ms 시각) — 표가 보인 값과 정확히 같다.
+    assert cue_dd.choices and cue_dd.choices[0][1] == "a0000"
+    picked_id, picked_text, picked_start, picked_end = server.caption_cue_pick_view(
+        signature, "a0000"
+    )
+    shown = next(row for row in server._caption_cue_rows if row.cue_id == "a0000")
+    assert (picked_id, picked_text) == ("a0000", shown.text)
+    assert picked_start == str(int(clock[0] * 1000)) and picked_end == str(int(clock[1] * 1000))
+    with pytest.raises(gr.Error, match="없다"):
+        server.caption_cue_pick_view(signature, "m9999")
+
+    # 수동 글자 교정 — 지금 글자 칸만 바뀌고 whisper·채택 문구는 그대로 보인다.
+    server.caption_edit_view(
+        signature, "글자 교정", "a0000", "손으로 고친 둘째 트랙 말", "", "", "", "", ""
+    )
+    edited_md, edited_table, _edited_player, _edited_dd = server.caption_review_view(
+        signature, "run-1"
+    )
+    edited_row = next(row for row in server._caption_cue_rows if row.cue_id == "a0000")
+    assert edited_row.basis == "manual"
+    assert "손으로 고친 둘째 트랙 말" in edited_table
+    assert edited_row.whisper_text in edited_table  # whisper 원문은 그대로 나란히
+    assert f'data-seek-start="{expected_start}"' in edited_table
+    assert preview_path.stat().st_mtime_ns == preview_stat.st_mtime_ns  # 재생성 0회
+
+    # 확정 — 미리보기·편집 흐름이 확정 바이트를 건드리지 않는다. 미대응 말은
+    # 수동 큐로 살려 게이트를 연다(F1 흐름과 같은 계약).
+    server.caption_edit_view(signature, "새 큐 추가", "", "남은 말", "3000", "3400", "", "", "")
+    manual_id = next(cue for cue in server._caption_cue_ids if cue.startswith("m"))
+    server.caption_edit_view(signature, "미대응 해결", manual_id, "", "", "", "", "0", "")
+    review_md, table_html, _player, _dd = server.caption_review_view(signature, "run-1")
+    import re as re_module
+
+    for warning_key in re_module.findall(r"`((?:cue|run):[^`]+)`", review_md):
+        server.caption_edit_view(signature, "경고 허용", "", "", "", "", "", "", warning_key)
+    confirmed = server.caption_confirm_view(signature, "run-1", True)
+    assert "확정 완료" in confirmed
+    srt_line = next(
+        line for line in confirmed.splitlines() if "[SRT]" in line and "/media/" in line
+    )
+    srt_id = re_module.search(r"\[SRT\]\(/media/([^)]+)\)", srt_line).group(1)
+    srt_path = server.raw.resolve_media(root, srt_id).path
+    frozen_hashes = _tree_hashes(root, "final/captions")
+
+    # 캐시 정리는 미리보기를 지운다 — 다음 검토는 같은 키로 한 번 다시 만든다.
+    facade = server.raw.review_workspace_facade(root)
+    purge = facade.managed_cleanup()
+    assert purge.removed_files >= 1
+    assert not preview_path.exists()
+    review_md, table_html, rebuilt_player, _dd = server.caption_review_view(signature, "run-1")
+    assert server._caption_preview.built is True
+    assert isinstance(rebuilt_player, str) and '<video id="caption-video"' in rebuilt_player
+    assert server._caption_preview.registration.file_id == preview.registration.file_id
+    server.raw.resolve_media(root, preview.registration.file_id)  # 지문이 다시 박혔다
+    assert f'data-seek-start="{expected_start}"' in table_html
+
+    # 원본·검증 사본·확정 자막은 그대로다(미리보기 생성·재생성 어느 쪽도 못 건드린다).
+    assert _sha256(video) == source_sha
+    assert _tree_hashes(root, "final/captions") == frozen_hashes
+    assert "손으로 고친 둘째 트랙 말" in srt_path.read_text(encoding="utf-8")
+
+
+@needs_ffmpeg
+def test_caption_prores_mov_preview_transcode(tmp_path: Path) -> None:
+    """MOV·ProRes 최종 영상 — 브라우저 재생용 H264/AAC 미리보기로 변환해 제공한다."""
+    from vlogsrt import preprocess
+
+    video = tmp_path / "final-prores.mov"
+    _encode(
+        [
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=320x180:rate=25:duration=3",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:duration=3",
+            "-c:v",
+            "prores_ks",
+            "-profile:v",
+            "3",
+            "-c:a",
+            "pcm_s16le",
+            str(video),
+        ]
+    )
+    source_sha = _sha256(video)
+    server = _new_server(tmp_path)
+    signature = _open(server, tmp_path / "ws")
+    root = server.workspace_root()
+    assert root is not None
+    _registered, player_html = server.caption_register_view(
+        signature, str(video), "prores_1", "자동(첫 트랙)"
+    )
+    preview = server._caption_preview
+    assert preview is not None and preview.built is True
+    assert preview.remuxed is False  # 브라우저 밖 코덱은 변환해서 담는다
+    assert preview.video_codec == "h264" and preview.audio_codec == "aac"
+    assert any("변환했다" in warning for warning in preview.warnings)
+    probe = preprocess.probe_raw_media(root / preview.registration.relative_path)
+    assert probe.video.codec_name == "h264" and probe.video.pix_fmt == "yuv420p"
+    assert len(probe.audio) == 1 and probe.audio[0].codec_name == "aac"
+    assert 'src="/media/' in player_html and '<video id="caption-video"' in player_html
+    assert _sha256(video) == source_sha  # 원본 바이트는 그대로다
+
+
+@needs_ffmpeg
+def test_export_confirmed_binds_expected_revision_backend(
+    tmp_path: Path, spoken_media: Path
+) -> None:
+    """백엔드 경합 — 제출 때의 리비전 아이디가 아니면 확정 복사는 0바이트로 닫힌다."""
+    server = _new_server(tmp_path)
+    signature = _open(server, tmp_path / "ws")
+    root = server.workspace_root()
+    assert root is not None
+    _prepare(server, root, spoken_media, with_analysis=False)
+    server.review_initialize_view(signature)
+    server.review_refresh_view(signature)
+    facade = server.raw.review_workspace_facade(root)
+    loaded = facade.load_head()
+    revision = loaded.revision
+    package_dir = server._latest_package_dir(root)
+    assert package_dir is not None
+
+    # 제출 때 본 아이디 그대로면 성공 — 그 리비전으로 복사·기록까지 끝난다.
+    outcome = facade.export_confirmed(package_dir, expected_review_revision_id=revision.revision_id)
+    facade.verify_export(outcome.destination_dir)
+    assert (root / outcome.destination_dir).is_dir()
+
+    # 경합: 머리가 옮긴 뒤 낡은 아이디로 내보내면 복사 전에 거부된다.
+    target = revision.segments[0].segment_id
+    edited = facade.apply_edit(
+        revision.base_plan_id,
+        raw_service.review_note_edit(revision.revision_id, target, "경합 편집"),
+    )
+    exports_before = sorted(
+        path.name for path in (root / "clips").glob("confirmed_reviewexport_*") if path.is_dir()
+    )
+    with pytest.raises(raw_service.StaleRevisionError, match="다르다"):
+        facade.export_confirmed(package_dir, expected_review_revision_id=revision.revision_id)
+    exports_after = sorted(
+        path.name for path in (root / "clips").glob("confirmed_reviewexport_*") if path.is_dir()
+    )
+    assert exports_after == exports_before  # 실패한 시도는 아무 폴더도 남기지 않는다
+
+    # 새 머리 아이디로는 성공하고, 기록 행도 그 아이디를 못 박는다.
+    outcome2 = facade.export_confirmed(package_dir, expected_review_revision_id=edited.revision_id)
+    with sqlite3.connect(root / "project.sqlite3") as connection:
+        connection.row_factory = sqlite3.Row
+        rows = connection.execute(
+            "SELECT destination_dir, review_revision_id FROM confirmed_export_revisions"
+            " ORDER BY rowid"
+        ).fetchall()
+    by_dir = {str(row["destination_dir"]): str(row["review_revision_id"]) for row in rows}
+    assert by_dir[outcome.destination_dir] == revision.revision_id
+    assert by_dir[outcome2.destination_dir] == edited.revision_id
 
 
 # ── DB v6 — 저장소 스키마·v5 승격·출처 열 ───────────────────────────────────

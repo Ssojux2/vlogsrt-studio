@@ -44,6 +44,18 @@ STREAM_CHUNK_BYTES = 262144
 REVIEW_EXPORT_JOB_KIND = "review_export"
 """확정 내보내기 작업 종류 — 제출 때의 검토 리비전·선택에 묶인 본문을 가진다."""
 
+_CUE_SEEK_JS = (
+    "(cue) => { if (!cue) return;"
+    " const row = document.querySelector('[data-cue-id=\"' + cue + '\"]');"
+    " const player = document.getElementById('caption-video');"
+    " if (player && row) { player.currentTime = Number(row.dataset.seekStart);"
+    " player.play(); } }"
+)
+"""큐 선택 → 재생기 이동(클라이언트 전용) — 서버 잰 시각을 큐 표의 data-*에서 읽는다.
+
+서버 왕복이 없으므로 미디어 재생성·제공자 호출이 일어나지 않는다. 시각 계산은
+서버가 미리보기 원점까지 포함해 구웠다 — 클라이언트는 읽기만 한다."""
+
 
 def _parse_intervals(text: str) -> dict[str, list[raw_service.PlannedInterval]] | None:
     """구간 계획 입력 해석 — 각 줄 `자산ID 시작 끝`(초, 유리수). 빈 입력은 None.
@@ -168,6 +180,13 @@ class RawWorkspaceUi:
         self._caption_cue_ids: tuple[str, ...] = ()
         self._caption_unplaced: dict[int, str] = {}
         self._caption_chunk_count: int | None = None
+        # 선택 오디오 미리보기 상태 — 미디어·트랙이 바뀐 경우에만 다시 만든다.
+        # 표시 갱신(검토 새로고침·편집)은 재생기 구성요소를 그대로 둬서 재생 머리가
+        # 살아 있고, ffmpeg도 다시 돌지 않는다.
+        self._caption_preview: raw_service.CaptionPreviewMedia | None = None
+        self._caption_preview_signature: str | None = None
+        self._caption_cue_rows: tuple[ui_facade.CueRowView, ...] = ()
+        self._caption_cue_clock: dict[str, tuple[Fraction, Fraction]] = {}
         # 마지막 확정 내보내기 자리 — Finder 열기·경로 복사·정리 뒤 재검증의 대상.
         self._last_export_path: str | None = None
         self._last_export_dir: str | None = None
@@ -205,6 +224,9 @@ class RawWorkspaceUi:
         self._export_md: gr.Markdown | None = None
         self._export_path_box: gr.Textbox | None = None
         self._caption_md: gr.Markdown | None = None
+        self._caption_player_html: gr.HTML | None = None
+        self._caption_table_html: gr.HTML | None = None
+        self._caption_cue_dd: gr.Dropdown | None = None
         self._clip_player_html: gr.HTML | None = None
         self._signature_state: gr.State | None = None
 
@@ -282,6 +304,10 @@ class RawWorkspaceUi:
         self._caption_cue_ids = ()
         self._caption_unplaced = {}
         self._caption_chunk_count = None
+        self._caption_preview = None
+        self._caption_preview_signature = None
+        self._caption_cue_rows = ()
+        self._caption_cue_clock = {}
         self._last_export_path = None
         self._last_export_dir = None
 
@@ -2649,17 +2675,12 @@ class RawWorkspaceUi:
         signature_now = self._signature_for(root)
 
         def body(context: Any) -> None:
-            head_now = facade.load_head(base_plan_id).revision
-            if head_now.revision_id != displayed_revision:
-                raise raw_service.RawWorkspaceError(
-                    f"내보내기가 제출 때의 리비전 `{displayed_revision}`에 묶여 있는데"
-                    f" 지금 머리는 `{head_now.revision_id}`다 — 새로 고침 뒤 다시 내보내세요."
-                )
             outcome = facade.export_confirmed(
                 package_dir,
                 base_plan_id=base_plan_id,
                 selected_segment_ids=selected,
                 context=context,
+                expected_review_revision_id=displayed_revision,
             )
             facade.verify_export(outcome.destination_dir)
             with self._selection_lock:
@@ -2685,8 +2706,9 @@ class RawWorkspaceUi:
             "",
             "- 진행은 작업 목록 새로고침으로 본다. 완료되면 **Finder에서 열기**·"
             "**내보내기 경로 복사**가 그 자리를 가리킨다.",
-            "- 제출 뒤 검토 머리가 움직이면 이 내보내기는 실패로 끝난다 — 나중의"
-            " 머리를 몰래 내보내지 않는다.",
+            "- 제출 때의 리비전을 백엔드에 그대로 못 박았다(`expected_review_revision_id`)"
+            " — 그 사이 머리가 움직이면 이 내보내기는 실패로 끝나고, 나중의 머리를"
+            " 몰래 내보내지 않는다.",
         ]
         return "\n".join(lines), self._package_state_markdown(root)
 
@@ -2797,10 +2819,88 @@ class RawWorkspaceUi:
             )
         return registration
 
+    def _caption_player_for(
+        self, root: Path, ws: Any, registration: Any
+    ) -> tuple[raw_service.CaptionPreviewMedia, bool]:
+        """선택 오디오 미리보기 확보 — (미리보기, 이번 호출에서 만들었는가).
+
+        같은 작업공간에서 잡아 둔 미리보기가 아직 등록 행으로 살아 있으면 그대로
+        돌려준다(ffmpeg·PCM 읽기 없음 — 표시 갱신이 미리보기를 다시 만들지 않는다).
+        정리(purge) 뒤엔 서비스가 같은 키로 다시 만들고 지문을 다시 박는다.
+        """
+        signature = self._signature_for(root)
+        cached = self._caption_preview
+        if (
+            cached is not None
+            and self._caption_preview_signature == signature
+            and registration.final_video_revision == cached.source_revision
+            and registration.audio_ordinal == cached.audio_ordinal
+        ):
+            try:
+                self.raw.resolve_media(root, cached.registration.file_id)
+                return cached, False
+            except raw_service.RawWorkspaceError:
+                pass  # 정리 등으로 자리가 사라졌다 — 아래에서 다시 만든다
+        try:
+            preview = self.raw.caption_preview(root, registration)
+        except (
+            raw_service.RawWorkspaceError,
+            raw_service.CaptionWorkspaceError,
+            raw_service.FinalVideoError,
+            RuntimeError,
+        ) as error:
+            raise gr.Error(
+                f"선택 오디오 미리보기를 만들지 못했다 — {error}. 등록은 그대로다:"
+                " 자막 생성·검토는 쓸 수 있고, 재생 듣기만 이번엔 없다."
+            ) from error
+        with self._selection_lock:
+            self._caption_preview = preview
+            self._caption_preview_signature = signature
+        # 이 길(재시작 뒤 처음·미디어·트랙 변경·정리 뒤 재생성)에서는 재생기
+        # 구성요소가 아직 이 미리보기를 그린 적이 없으므로 다시 그려야 한다.
+        # ffmpeg은 서비스가 파일·기록으로 재사용 판정하므로 다시 돌지 않는다.
+        return preview, True
+
+    @staticmethod
+    def _caption_provenance_line(
+        registration: Any, preview: raw_service.CaptionPreviewMedia
+    ) -> str:
+        """재생기 출처 — 원본·선택 트랙·잰 원점·미리보기의 대응 관계를 숨기지 않는다."""
+        origin = registration.origin
+        return (
+            f"출처 — 원본 `{registration.external_source}`(렌더 sha "
+            f"{preview.source_revision[:12]}…) · 오디오 트랙 {preview.audio_ordinal}"
+            "(선택 트랙만 담는다 — 브라우저는 트랙을 못 고른다) · 자막 시계 원점 "
+            f"{ui_facade.format_seconds(origin)}초 · 미리보기 "
+            f"{'코덱 복사' if preview.remuxed else '변환'}({preview.video_codec}/"
+            f"{preview.audio_codec}, 잰 원점 {ui_facade.format_seconds(preview.audio_origin)}초"
+            f" · 잰 길이 {ui_facade.format_seconds(preview.duration)}초 · 등록 ID "
+            f"`{preview.registration.file_id}`) — 원본·확정 자막은 그대로다"
+        )
+
+    def _render_caption_player(
+        self, registration: Any, preview: raw_service.CaptionPreviewMedia, wave: Any
+    ) -> str:
+        """재생기 HTML — 미리보기 영상·파형·출처를 안전한 구성요소 값으로 조립한다."""
+        return ui_facade.caption_player_html(
+            f"/media/{preview.registration.file_id}",
+            waveform=ui_facade.waveform_svg([peak / wave.peak_scale for peak in wave.peaks]),
+            provenance=self._caption_provenance_line(registration, preview),
+        )
+
+    @staticmethod
+    def _caption_player_placeholder(note: str) -> str:
+        safe = html.escape(note)
+        return (
+            '<div id="caption-player" class="vlogsrt-caption-player">\n'
+            f'  <p style="color:#888;margin:4px 0;">{safe}</p>\n'
+            "</div>"
+        )
+
     def caption_register_view(
         self, signature: str | None, path_text: str, source_id: str, ordinal_text: str
-    ) -> str:
-        """최종 영상 등록 — 경로에서 검증 사본을 만들고 오디오 트랙을 고른다."""
+    ) -> tuple[str, str]:
+        """최종 영상 등록 — 검증 사본·오디오 선택과 함께 선택 트랙 미리보기를 만든다."""
         root = self._require_current_selection(signature)
         cleaned = (path_text or "").strip().strip("\"'")
         if not cleaned:
@@ -2832,10 +2932,21 @@ class RawWorkspaceUi:
                 " 칸에 번호(0, 1, …)를 골라 다시 등록하세요."
             ),
         }.get(registration.status, f"상태 `{registration.status}`")
-        return (
+        markdown = (
             f"**최종 영상 등록** — 리비전 `{registration.final_video_revision}` · 상태"
             f" `{registration.status}`\n\n{note}"
         )
+        if not registration.ready:
+            # 오디오가 없거나 선택이 확정되지 않았다 — 미리보기도 정직하게 없다.
+            with self._selection_lock:
+                self._caption_preview = None
+                self._caption_preview_signature = None
+            return markdown, self._caption_player_placeholder(
+                "오디오 선택이 확정되지 않아 재생할 트랙이 없다 — 트랙을 골라 다시 등록하세요."
+            )
+        preview, _built_now = self._caption_player_for(root, ws, registration)
+        wave = ws.waveform(registration, bin_seconds=0.05)
+        return markdown, self._render_caption_player(registration, preview, wave)
 
     def caption_estimate_view(self, signature: str | None, run_id: str) -> str:
         """실행 추정 — 모델·수명주기·실측 청크·경계·비용을 백엔드가 잰 값 그대로."""
@@ -2862,6 +2973,8 @@ class RawWorkspaceUi:
         self._caption_head_sequence = None
         self._caption_cue_ids = ()
         self._caption_unplaced = {}
+        self._caption_cue_rows = ()
+        self._caption_cue_clock = {}
         chunk_preview = ", ".join(
             f"[{ui_facade.format_seconds(start)}~{ui_facade.format_seconds(end)}]"
             for start, end in estimate.chunk_seconds[:4]
@@ -2941,8 +3054,16 @@ class RawWorkspaceUi:
             )
         return raw_service.caption_transport_providers(self._startup_credentials)
 
-    def caption_review_view(self, signature: str | None, run_id: str) -> str:
-        """검토 묶음 — 큐 행·경고·미대응·파형(로컬만, 원응답은 나가지 않는다)."""
+    def caption_review_view(
+        self, signature: str | None, run_id: str
+    ) -> tuple[str, str, object, gr.Dropdown]:
+        """검토 묶음 — 큐 편집표(HTML)·요약·재생기·선택 목록(로컬만, 원응답 없음).
+
+        큐 표와 파형은 `gr.Markdown`이 지워버리므로 안전한 HTML 구성요소로 나간다.
+        재생기 구성요소는 미리보기가 그대로면 **갱신하지 않는다**(`gr.update()` 무동작)
+        — 재생 머리가 살아 있고 ffmpeg도 다시 돌지 않는다. 큐 단추의 시각은 서버가
+        잰 원점 매핑(미리보기 원점 + 큐 시각) 그대로다.
+        """
         root = self._require_current_selection(signature)
         run = (run_id or "").strip() or "run-1"
         ws = self._caption_ws(root)  # 백엔드 없는 빌드 — 정직한 오류가 먼저다
@@ -2955,9 +3076,14 @@ class RawWorkspaceUi:
         registration = self._caption_registration(ws, root)
         try:
             bundle = ws.review_bundle(run_identity)
-            wave = ws.waveform(registration, bin_seconds=0.05)
         except (raw_service.RawWorkspaceError, raw_service.CaptionWorkspaceError) as error:
             raise gr.Error(str(error)) from error
+        # 미리보기 확보 — 같은 서버에서 잡아 둔 것이 살아 있으면 재생기는 무동작이다.
+        preview, render_player = self._caption_player_for(root, ws, registration)
+        player_update: object = gr.update()
+        if render_player:
+            wave = ws.waveform(registration, bin_seconds=0.05)
+            player_update = self._render_caption_player(registration, preview, wave)
         state = bundle.state
         # 화면이 본 머리 번호·큐 목록 — 편집·확정은 이 값에 묶인다(W2 머리 충돌 게이트).
         self._caption_head_sequence = state.head_revision if state.head_revision is not None else 0
@@ -2968,18 +3094,35 @@ class RawWorkspaceUi:
                 end_seconds=ui_facade.format_seconds(row.cue.end),
                 whisper_text=row.cue.whisper_text,
                 auto_text=row.cue.auto_text,
+                text=row.cue.text,
                 basis=row.cue.text_basis,
                 chars_per_second=row.chars_per_second,
             )
             for row in state.rows
         ]
         self._caption_cue_ids = tuple(row.cue_id for row in rows)
+        self._caption_cue_rows = tuple(rows)
+        self._caption_cue_clock = {
+            row.cue.cue_id: (row.cue.start, row.cue.end) for row in state.rows
+        }
         self._caption_unplaced = {view.item.index: view.item.text for view in state.unplaced}
+        # 큐 단추 시각 — 서버가 잰 값 그대로(클라이언트가 계산하지 않는다). 큐 시각은
+        # 최종 영상 시계(등록 원점 포함)이므로, 미리보기 원점과 등록 원점의 **차이만**
+        # 보정해 미리보기 시계로 옮긴다(코덱 복사면 차이가 0이어야 한다).
+        seek_by_cue: dict[str, tuple[str, str]] | None = None
+        if preview is not None and registration.origin is not None:
+            shift = preview.audio_origin - registration.origin
+            seek_by_cue = {
+                row.cue.cue_id: (
+                    f"{float(shift + row.cue.start):.6f}",
+                    f"{float(shift + row.cue.end):.6f}",
+                )
+                for row in state.rows
+            }
+        table_html = ui_facade.cue_table_html(rows, seek_by_cue)
         lines = [
             f"**자막 검토** — 실행 `{run}` · 큐 {len(rows)}개 · 검토 머리"
             f" {self._caption_head_sequence}",
-            "",
-            ui_facade.cue_table_markdown(rows),
             "",
         ]
         if not state.text_model_complete or not state.timing_model_complete:
@@ -3005,11 +3148,34 @@ class RawWorkspaceUi:
             lines.append(
                 f"미대응 {len(state.unplaced)}개 전부 처리되었다 — 확정 게이트가 열려 있다."
             )
-        lines += [
-            "",
-            ui_facade.waveform_svg([peak / wave.peak_scale for peak in wave.peaks]),
-        ]
-        return "\n".join(lines)
+        return (
+            "\n".join(lines),
+            table_html,
+            player_update,
+            gr.Dropdown(choices=ui_facade.caption_cue_choices(rows), value=None),
+        )
+
+    def caption_cue_pick_view(
+        self, signature: str | None, cue_id: str | None
+    ) -> tuple[str, str, str, str]:
+        """큐 선택 → 편집 칸 채우기 — 화면이 본 큐 행의 값을 그대로 옮긴다(호출·미디어 0회).
+
+        시각은 사람이 준 편집 단위(ms 정수)로 보인다 — 백엔드의 정확한 유리수를
+        1000배해 자른 값이고, 저장은 여전히 `시각 조정`의 ms 검증을 지난다.
+        """
+        self._require_current_selection(signature)
+        target = (cue_id or "").strip().strip("`")
+        if not self._caption_cue_rows:
+            raise gr.Error("큐 목록이 없다 — 먼저 **검토 새로고침**으로 큐를 보세요.")
+        row = next((item for item in self._caption_cue_rows if item.cue_id == target), None)
+        clock = self._caption_cue_clock.get(target)
+        if row is None or clock is None:
+            raise gr.Error(
+                f"검토 표에 큐 `{target}`이(가) 없다 — 새로고침 뒤 목록에서 다시 고르세요."
+            )
+        start_ms = str(int(clock[0] * 1000))
+        end_ms = str(int(clock[1] * 1000))
+        return target, row.text, start_ms, end_ms
 
     def _require_caption_head(self) -> int:
         """화면이 본 검토 머리 번호 — 편집·확정의 기대 머리(W2 갱신 손실 방지)."""
@@ -3030,7 +3196,7 @@ class RawWorkspaceUi:
         second_id: str,
         index_text: str,
         warning_key: str,
-    ) -> str:
+    ) -> tuple[str, str, object, gr.Dropdown]:
         """수동 편집 — 시각은 사람이 준 값만(추측 배분 없음), 저장은 백엔드가 검증한다."""
         root = self._require_current_selection(signature)
         identity = self._require_caption_identity(root)
@@ -3256,6 +3422,15 @@ class RawWorkspaceUi:
                     scale=2,
                 )
                 caption_register_button = gr.Button("최종 영상 등록", variant="primary", scale=2)
+            # 선택 오디오 재생기 — 등록(오디오 트랙 확정) 때 한 번 만들어지고, 표시
+            # 갱신으로는 다시 그려지지 않는다(재생 머리가 살아 있다).
+            self._caption_player_html = gr.HTML(
+                self._caption_player_placeholder(
+                    "최종 영상을 등록하면 선택한 오디오 트랙의 미리보기가 여기서 재생된다"
+                    " — 큐 단추가 이 시계를 짚는다."
+                ),
+                elem_id="caption-player-block",
+            )
             with gr.Row():
                 caption_run_box = gr.Textbox(
                     label="실행 ID", value="run-1", interactive=True, scale=2
@@ -3280,7 +3455,7 @@ class RawWorkspaceUi:
                 )
             gr.Markdown(
                 "> 수동 편집 — 시각은 사람이 준 값만 들어간다(추측 배분 없음)."
-                " 큐 행의 `a…`(자동)·`m…`(수동) ID를 그대로 쓴다."
+                " 큐 표에서 큐를 고르면 편집 칸이 그 행의 값으로 채워진다."
             )
             with gr.Row():
                 caption_op_dd = gr.Dropdown(
@@ -3311,11 +3486,25 @@ class RawWorkspaceUi:
                 caption_index_box = gr.Textbox(label="미대응 번호", scale=2)
                 caption_warning_box = gr.Textbox(label="경고 key", scale=2)
                 caption_edit_button = gr.Button("편집 적용", scale=2)
+            with gr.Row():
+                self._caption_cue_dd = gr.Dropdown(
+                    choices=[],
+                    label="큐 선택 — 편집 칸 채우기·이동",
+                    info="고르면 그 큐의 지금 글자·시각으로 편집 칸을 채우고 재생기를"
+                    " 큐 시작으로 옮긴다(서버 미디어 재생성 없음).",
+                    interactive=True,
+                    scale=6,
+                )
+            self._caption_table_html = gr.HTML(
+                '<p style="color:#888">큐 편집표는 검토 새로고침 뒤 여기 나타난다 —'
+                " 지금 글자 칸과 큐 이동·반복 단추까지.</p>",
+                elem_id="caption-cue-table",
+            )
             self._caption_md = gr.Markdown("_자막 상태가 여기 나타난다._", elem_id="caption-state")
             caption_register_button.click(
                 self.caption_register_view,
                 [self._signature_state, caption_path_box, caption_source_box, caption_ordinal_dd],
-                self._caption_md,
+                [self._caption_md, self._caption_player_html],
             )
             caption_estimate_button.click(
                 self.caption_estimate_view,
@@ -3330,7 +3519,12 @@ class RawWorkspaceUi:
             caption_refresh_button.click(
                 self.caption_review_view,
                 [self._signature_state, caption_run_box],
-                self._caption_md,
+                [
+                    self._caption_md,
+                    self._caption_table_html,
+                    self._caption_player_html,
+                    self._caption_cue_dd,
+                ],
             )
             caption_trace_button.click(
                 self.caption_trace_view,
@@ -3350,12 +3544,29 @@ class RawWorkspaceUi:
                     caption_index_box,
                     caption_warning_box,
                 ],
-                self._caption_md,
+                [
+                    self._caption_md,
+                    self._caption_table_html,
+                    self._caption_player_html,
+                    self._caption_cue_dd,
+                ],
             )
             caption_confirm_button.click(
                 self.caption_confirm_view,
                 [self._signature_state, caption_run_box, caption_final_confirm_box],
                 self._caption_md,
+            )
+            assert self._caption_cue_dd is not None
+            self._caption_cue_dd.change(
+                self.caption_cue_pick_view,
+                [self._signature_state, self._caption_cue_dd],
+                [caption_cue_box, caption_text_box, caption_start_box, caption_end_box],
+            )
+            self._caption_cue_dd.change(
+                None,
+                [self._caption_cue_dd],
+                None,
+                js=_CUE_SEEK_JS,
             )
 
     # ── 조립 ───────────────────────────────────────────────────

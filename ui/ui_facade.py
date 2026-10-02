@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 import html
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from fractions import Fraction
 
@@ -113,7 +113,8 @@ class CueRowView:
 
     시각은 백엔드의 정확한 유리수(초)를 `format_seconds`로 옮긴 문자열이다 —
     ms 환산에서 반올림 오차가 생기지 않는다. 사람이 주는 편집값만 ms 정수로
-    들어간다(서버 뷰에서 검증한다).
+    들어간다(서버 뷰에서 검증한다). `text`는 **지금 큐의 글자**다 — 수동 편집
+    뒤에는 채택 문구와 달라지고, 화면은 그 차이를 숨기지 않고 나란히 보여준다.
     """
 
     cue_id: str
@@ -121,27 +122,164 @@ class CueRowView:
     end_seconds: str
     whisper_text: str
     auto_text: str
+    text: str
     basis: str
     chars_per_second: float
 
 
 def cue_table_markdown(rows: Sequence[CueRowView]) -> str:
-    """큐 행 표 — whisper 골격 글자와 채택 문구를 나란히, 초당 글자수까지."""
+    """큐 행 표 — whisper 골격·채택 문구·지금 글자를 나란히, 초당 글자수까지."""
     if not rows:
         return "_큐가 없다 — 실행을 먼저 끝내거나, 빈 실행이면 무발화 결정을 남겨라._"
     lines = [
-        "| 큐 | 시작(초) | 끝(초) | whisper 글자 | 채택 문구 | 근거 | 자/초 |",
-        "|---|---|---|---|---|---|---|",
+        "| 큐 | 시작(초) | 끝(초) | whisper 글자 | 채택 문구 | 지금 글자 | 근거 | 자/초 |",
+        "|---|---|---|---|---|---|---|---|",
     ]
     for row in rows:
         whisper = row.whisper_text.replace("|", "\\|")
         auto = row.auto_text.replace("|", "\\|")
+        current = row.text.replace("|", "\\|")
         lines.append(
             f"| `{row.cue_id}` | {row.start_seconds} | {row.end_seconds}"
-            f" | {whisper or '(없음)'} | {auto or '(없음)'} | {row.basis}"
-            f" | {row.chars_per_second:.1f} |"
+            f" | {whisper or '(없음)'} | {auto or '(없음)'} | {current or '(없음)'}"
+            f" | {row.basis} | {row.chars_per_second:.1f} |"
         )
     return "\n".join(lines)
+
+
+def _cue_seek_js(start: str, end: str) -> tuple[str, str]:
+    """큐 이동·반복의 인라인 실행본 — 문맥에 숫자만 들어가므로 이스케이프 대상이 없다.
+
+    반복은 `timeupdate`에서 큐 끝에서 멈춘다 — 이전 반복 손잡이는 교체 전에 뗀다.
+    """
+    seek = (
+        "(function(){var v=document.getElementById('caption-video');"
+        "if(!v){return;}v.currentTime=" + start + ";v.play();})"
+    )
+    repeat = (
+        "(function(){var v=document.getElementById('caption-video');if(!v){return;}"
+        "if(v._vlogsrtRepeat){v.removeEventListener('timeupdate',v._vlogsrtRepeat);}"
+        "var s="
+        + start
+        + ",e="
+        + end
+        + ";var h=function(){if(v.currentTime>=e||v.currentTime<s-0.25){v.pause();"
+        "v.removeEventListener('timeupdate',h);"
+        "if(v._vlogsrtRepeat===h){v._vlogsrtRepeat=null;}}};"
+        "v._vlogsrtRepeat=h;v.addEventListener('timeupdate',h);"
+        "v.currentTime=s;v.play();})"
+    )
+    return seek, repeat
+
+
+def cue_table_html(
+    rows: Sequence[CueRowView],
+    seek_by_cue: Mapping[str, tuple[str, str]] | None = None,
+) -> str:
+    """큐 편집표의 안전한 HTML — 지금 글자 칸과 큐 이동·반복 단추까지.
+
+    `gr.Markdown`은 SVG·단추를 지워버리므로 큐 표는 이 HTML 구성요소로 나간다.
+    `seek_by_cue`는 큐 ID → (미리보기 시작 시각, 끝 시각) 문자열 — 서버가 잰
+    원점 매핑 그대로고, 없으면 단추 없이 표만 나간다(빈 성공으로 꾸미지 않는다).
+    모든 글자는 이스케이프되고, 실행본에는 숫자만 들어간다.
+    """
+    if not rows:
+        return (
+            '<p style="color:#888">큐가 없다 — 실행을 먼저 끝내거나, 빈 실행이면'
+            " 무발화 결정을 남긴다.</p>"
+        )
+    parts = [
+        '<table style="width:100%;border-collapse:collapse;font-size:13px;">',
+        "<thead><tr>"
+        '<th style="text-align:left;padding:4px 6px;">큐</th>'
+        '<th style="text-align:left;padding:4px 6px;">시작(초)</th>'
+        '<th style="text-align:left;padding:4px 6px;">끝(초)</th>'
+        '<th style="text-align:left;padding:4px 6px;">whisper 글자</th>'
+        '<th style="text-align:left;padding:4px 6px;">채택 문구</th>'
+        '<th style="text-align:left;padding:4px 6px;">지금 글자</th>'
+        '<th style="text-align:left;padding:4px 6px;">근거</th>'
+        '<th style="text-align:right;padding:4px 6px;">자/초</th>'
+        '<th style="text-align:center;padding:4px 6px;">듣기</th>'
+        "</tr></thead>",
+        "<tbody>",
+    ]
+    for row in rows:
+        seek_spec = (seek_by_cue or {}).get(row.cue_id)
+        if seek_spec is None:
+            listen = '<span style="color:#aaa">—</span>'
+        else:
+            start, end = seek_spec
+            seek_js, repeat_js = _cue_seek_js(start, end)
+            listen = (
+                f'<button type="button" data-cue-id="{html.escape(row.cue_id, quote=True)}" '
+                f'data-seek-start="{start}" data-seek-end="{end}" '
+                f'style="margin:1px;" onclick="{seek_js}">▶</button>'
+                f'<button type="button" data-cue-id="{html.escape(row.cue_id, quote=True)}" '
+                f'data-seek-start="{start}" data-seek-end="{end}" '
+                f'style="margin:1px;" onclick="{repeat_js}">반복</button>'
+            )
+        parts.append(
+            "<tr>"
+            f'<td style="padding:4px 6px;"><code>{html.escape(row.cue_id)}</code></td>'
+            f'<td style="padding:4px 6px;">{html.escape(row.start_seconds)}</td>'
+            f'<td style="padding:4px 6px;">{html.escape(row.end_seconds)}</td>'
+            f'<td style="padding:4px 6px;">{html.escape(row.whisper_text) or "(없음)"}</td>'
+            f'<td style="padding:4px 6px;">{html.escape(row.auto_text) or "(없음)"}</td>'
+            f'<td style="padding:4px 6px;">{html.escape(row.text) or "(없음)"}</td>'
+            f'<td style="padding:4px 6px;">{html.escape(row.basis)}</td>'
+            f'<td style="padding:4px 6px;text-align:right;">{row.chars_per_second:.1f}</td>'
+            f'<td style="padding:4px 6px;text-align:center;white-space:nowrap;">{listen}</td>'
+            "</tr>"
+        )
+    parts.append("</tbody></table>")
+    if seek_by_cue is None:
+        parts.append(
+            '<p style="color:#888;font-size:12px;margin:4px 0 0;">선택 오디오 미리보기가'
+            " 아직 없다 — 최종 영상 등록(오디오 트랙 확정)을 마치면 큐 단추가 켜진다.</p>"
+        )
+    else:
+        parts.append(
+            '<p style="color:#667;font-size:12px;margin:4px 0 0;">'
+            "▶ 큐 시작으로 이동 · 반복 큐 구간만 재생하고 끝에서 멈춘다 —"
+            " 미리보기 시계(선택 오디오의 잰 원점)에 맞춘 값이다.</p>"
+        )
+    return "".join(parts)
+
+
+def caption_player_html(media_path: str, *, waveform: str, provenance: str) -> str:
+    """자막 검토 재생기 — 선택 오디오 미리보기 영상·파형·출처를 한데 담는다.
+
+    `gr.HTML`로만 나간다(Markdown은 SVG를 지운다 — 루트 브라우저 재현). 영상
+    원소의 아이디 `caption-video`는 큐 표의 이동·반복 실행본이 짚는 대상이다.
+    파형은 이미 안전한 SVG 문자열(`waveform_svg`)을 받아 그대로 싣는다.
+    """
+    source = html.escape(media_path, quote=True)
+    return (
+        '<div id="caption-player" class="vlogsrt-caption-player">\n'
+        f'  <video id="caption-video" controls preload="metadata" src="{source}"'
+        ' style="width:100%;max-height:420px;background:#000;border-radius:8px;"></video>\n'
+        f"  {waveform}\n"
+        '  <div style="display:flex;gap:8px;margin-top:6px;">\n'
+        '    <button type="button" onclick="document.getElementById(\'caption-video\').pause()">'
+        "일시정지</button>\n"
+        '    <button type="button" onclick="(function(){var v='
+        "document.getElementById('caption-video');if(v){v.pause();v.currentTime=0;}})()\">"
+        "처음으로</button>\n"
+        "  </div>\n"
+        f'  <p style="color:#667;font-size:12px;margin:6px 0 0;">{html.escape(provenance)}</p>\n'
+        "</div>"
+    )
+
+
+def caption_cue_choices(rows: Sequence[CueRowView]) -> list[tuple[str, str]]:
+    """큐 선택 목록 — 아이디·시각·지금 글자 미리보기로 편집 칸을 채우는 재료."""
+    return [
+        (
+            f"{row.cue_id} · {row.start_seconds}→{row.end_seconds} · {row.text[:18] or '(없음)'}",
+            row.cue_id,
+        )
+        for row in rows
+    ]
 
 
 def review_rows_markdown(rows: Sequence[dict[str, object]]) -> str:
@@ -185,6 +323,9 @@ def vtt_timecode(total_ms: int) -> str:
 
 __all__ = [
     "CueRowView",
+    "caption_cue_choices",
+    "caption_player_html",
+    "cue_table_html",
     "cue_table_markdown",
     "format_bytes",
     "format_seconds",

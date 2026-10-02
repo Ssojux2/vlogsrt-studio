@@ -1101,9 +1101,26 @@ class ReviewWorkspaceFacade:
         base_plan_id: str | None = None,
         selected_segment_ids: frozenset[str] | None = None,
         context: JobContext | None = None,
+        expected_review_revision_id: str | None = None,
     ) -> ConfirmedExportOutcome:
-        """검토 리비전을 확정 폴더로 — 실제 바이트 복사·no-replace(전체 또는 선택)."""
+        """검토 리비전을 확정 폴더로 — 실제 바이트 복사·no-replace(전체 또는 선택).
+
+        `expected_review_revision_id`는 호출자가 **제출 때 본 리비전**이다. 주어지면
+        처음 잡은 리비전과 아이디가 같은지를 복사 전에 비교하고, 어긋나면
+        `StaleRevisionError`로 0바이트 상태로 닫는다 — 비동기 작업 본문이 제출과
+        실행 사이에 머리가 움직였는지 스스로 증명하는 장치다. 검사를 지난 뒤에는
+        이 호출이 처음 잡은 **그 리비전 객체**로 끝까지 복사·기록한다(머리를 다시
+        읽지 않는다).
+        """
         revision = self.load_head(base_plan_id).revision
+        if expected_review_revision_id is not None and (
+            revision.revision_id != expected_review_revision_id
+        ):
+            raise StaleRevisionError(
+                f"내보내기가 묶인 검토 리비전 {expected_review_revision_id!r}이(가)"
+                f" 지금 머리 {revision.revision_id!r}와 다르다 — 제출 뒤 검토가"
+                " 바뀌었다. 다시 불러서 다시 내보내야 한다"
+            )
         package = self._require_package(package_dir)
         artifacts = self._workspace.list_clip_artifacts(package.package_dir)
         assets = {

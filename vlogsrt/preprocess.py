@@ -2385,3 +2385,173 @@ def ffmpeg_provenance() -> str:
     if missing:
         lines.append(f"MISSING encoders: {', '.join(missing)} — 해당 프로파일 사용 불가")
     return "\n".join(lines)
+
+
+# ─────────────────────────────────────────────────────────────
+#  자막 검토 미리보기 — 선택 오디오 한 트랙의 브라우저 재생(F2)
+# ─────────────────────────────────────────────────────────────
+#
+# 브라우저(Chromium)는 컨테이너의 오디오 트랙을 고르지 못한다(audioTracks=null).
+# 그래서 자막 검토 화면이 **선택한 트랙만** 담은 MP4 미리보기를 만들어 듣는다 —
+# 원본(검증 사본)은 절대 손대지 않는다. ffmpeg 호출은 여기(규칙 7)에만 산다.
+
+_CAPTION_PREVIEW_VIDEO_COPY_PIXFMTS = frozenset({"yuv420p", "yuvj420p"})
+"""코덱 복사가 허용되는 픽셀 형식 — 8bit 4:2:0만 브라우저가 안정적으로 재생한다."""
+
+# 미리보기 인코딩 설정은 얼어 있다(코디네이터 재결 — 위 추출 프로파일과 같은 규율).
+# 미리보기는 납품물이 아니라 검토 보조라 crf 20을 쓴다(납품 추출 프로파일의 17과
+# 다르다). 음성은 AAC 192k — 검토 청취용 상한이지 원본 오디오 정책이 아니다.
+_CAPTION_PREVIEW_X264_ARGS = ("-preset", "medium", "-crf", "20")
+_CAPTION_PREVIEW_AUDIO_BITRATE = "192k"
+_CAPTION_PREVIEW_ORIGIN_PROBE_SECONDS = "0.2"
+"""원점 측정에 디코드하는 앞머리 길이 — 첫 프레임의 pts만 필요하다."""
+
+
+class CaptionPreviewUnsupported(RuntimeError):
+    """자막 미리보기를 만들 수 없는 입력 — 이유를 말하고 죽는다(빈 성공 금지)."""
+
+
+@dataclass(frozen=True, slots=True)
+class CaptionPreviewExtraction:
+    """선택 오디오 미리보기의 실측 — 원점은 자막 시계와 같은 잣대로 잰 값이다.
+
+    `audio_origin`은 미리보기 파일의 선택 오디오를 16 kHz s16le 파이프라인으로
+    디코드했을 때 첫 프레임의 파일 시각(`extract_pcm_s16le`과 같은 측정)이다.
+    정규화 시각 `t`(등록 원점 상대)의 재생 위치는 `audio_origin + t`고, 최종
+    영상 시계의 큐 시각에서는 등록 원점과의 **차이만** 보정하면 된다 — 같은
+    측정 방식이라 보정 항은 정확하다.
+    """
+
+    path: Path
+    remuxed: bool
+    video_codec: str
+    audio_codec: str
+    audio_stream_count: int
+    audio_origin: Fraction
+    duration: Fraction
+    source_video_codec: str
+    source_audio_codec: str
+    ffmpeg_version: str
+    warnings: tuple[str, ...]
+
+
+def _caption_preview_track(probe: RawMediaProbe, audio_stream_index: int) -> RawAudioTrack:
+    """전역 스트림 번호로 오디오 트랙을 짚는다 — 없는 번호는 죽는다."""
+    for track in probe.audio:
+        if track.stream_index == audio_stream_index:
+            return track
+    raise CaptionPreviewUnsupported(
+        f"오디오 스트림 {audio_stream_index}이(가) 이 파일에 없다: {probe.source}"
+        f" (오디오 트랙 {len(probe.audio)}개)"
+    )
+
+
+def _caption_preview_codec_args(
+    probe: RawMediaProbe, track: RawAudioTrack
+) -> tuple[list[str], tuple[str, ...], bool]:
+    """브라우저 재생 가능한 MP4를 위한 인코딩 인자 — 코덱 복사가 가능하면 복사한다.
+
+    복사 판정은 **실제 브라우저가 받아들이는 조합**만 허용한다: 영상 h264 + 8bit
+    4:2:0, 소리 aac. 하나라도 어긋나면 그 다리만 재인코딩한다(ProRes·10bit·PCM은
+    여기서 H264/AAC로 내려간다 — 원본은 그대로다).
+    """
+    video = probe.video
+    video_copy = video.codec_name == "h264" and video.pix_fmt in _CAPTION_PREVIEW_VIDEO_COPY_PIXFMTS
+    audio_copy = track.codec_name == "aac"
+    warnings: list[str] = []
+    args: list[str] = []
+    if video_copy:
+        args += ["-c:v", "copy"]
+    else:
+        args += ["-c:v", "libx264", *_CAPTION_PREVIEW_X264_ARGS, "-pix_fmt", "yuv420p"]
+        warnings.append(
+            f"영상 {video.codec_name}/{video.pix_fmt}을(를) H264 8bit로 변환했다 (원본은 그대로다)"
+        )
+    if audio_copy:
+        args += ["-c:a", "copy"]
+    else:
+        args += ["-c:a", "aac", "-b:a", _CAPTION_PREVIEW_AUDIO_BITRATE]
+        warnings.append(f"소리 {track.codec_name}을(를) AAC로 변환했다 (원본은 그대로다)")
+    return args, tuple(warnings), video_copy and audio_copy
+
+
+def _caption_preview_origin(preview: Path, channels: int) -> Fraction:
+    """미리보기 선택 오디오의 디코드 원점 — 등록 원점과 같은 16 kHz 파이프라인.
+
+    `extract_pcm_s16le`과 같은 필터열로 앞머리만 디코드해 ashowinfo의 첫 프레임
+    pts를 원점으로 쓴다. 싱크는 null이다 — pts 기록에 출력 바이트는 필요 없다.
+    """
+    ffmpeg = require_ffmpeg()
+    rate = _PCM_SAMPLE_RATE
+    filters = f"aresample={rate},aformat=sample_fmts=s16,asettb=1/{rate},ashowinfo"
+    completed = _run(
+        [
+            ffmpeg, "-hide_banner", "-loglevel", "info", "-nostdin", "-y",
+            "-copyts",
+            "-i", str(preview),
+            "-map", "0:a:0",
+            "-vn",
+            "-t", _CAPTION_PREVIEW_ORIGIN_PROBE_SECONDS,
+            "-af", filters,
+            "-f", "null", "-",
+        ]
+    )  # fmt: skip
+    frames = _converted_frames(completed.stderr, preview)
+    return _sample0_file_time(frames, rate, channels, preview)
+
+
+def extract_caption_preview(
+    source: Path, staging_output: Path, *, audio_stream_index: int
+) -> CaptionPreviewExtraction:
+    """선택 오디오 한 트랙만 담은 브라우저 재생 MP4를 **스테이징에** 만든다(F2).
+
+    매핑은 영상 첫 스트림과 지정한 오디오 스트림 하나뿐이다 — 다른 오디오 트랙은
+    미리보기에 못 들어가므로 검토자는 자막이 묶인 **그 트랙**을 듣는다. `-ss`를
+    쓰지 않아 영상·소리의 상대 싱크가 그대로 흐른다. 스테이징 안전장치(원본 별칭
+    거부·O_EXCL 임시 파일·link 게시)는 `extract_raw_clip`과 같은 것을 쓴다.
+    """
+    _validate_ordinal(audio_stream_index)
+    _assert_safe_staging(source, staging_output)
+    probe = probe_raw_media(source)
+    track = _caption_preview_track(probe, audio_stream_index)
+    codec_args, warnings, remuxed = _caption_preview_codec_args(probe, track)
+    staging_output.parent.mkdir(parents=True, exist_ok=True)
+    staged = _reserve_staging_temp(staging_output)
+    try:
+        _run(
+            [
+                require_ffmpeg(), "-hide_banner", "-nostdin", "-y",
+                "-i", str(source),
+                "-map", f"0:{probe.video.stream_index}",
+                "-map", f"0:{track.stream_index}",
+                "-dn", "-sn",
+                *codec_args,
+                "-movflags", "+faststart",
+                "-f", "mp4",
+                str(staged),
+            ]
+        )  # fmt: skip
+        origin = _caption_preview_origin(staged, track.channels)
+    except BaseException:
+        staged.unlink(missing_ok=True)
+        raise
+    out_probe = probe_raw_media(staged)
+    if len(out_probe.audio) != 1:
+        staged.unlink(missing_ok=True)
+        raise CaptionPreviewUnsupported(
+            f"미리보기에 오디오 트랙이 {len(out_probe.audio)}개다 — 선택 트랙 하나만 담겨야 한다"
+        )
+    _publish_staged_clip(staged, staging_output)
+    return CaptionPreviewExtraction(
+        path=staging_output,
+        remuxed=remuxed,
+        video_codec=out_probe.video.codec_name,
+        audio_codec=out_probe.audio[0].codec_name,
+        audio_stream_count=len(out_probe.audio),
+        audio_origin=origin,
+        duration=out_probe.duration,
+        source_video_codec=probe.video.codec_name,
+        source_audio_codec=track.codec_name,
+        ffmpeg_version=_tool_version("ffmpeg"),
+        warnings=warnings,
+    )
