@@ -10,9 +10,10 @@
   못한다(§7.5).
 - 실제 호출은 `vlogsrt/transcribe.request_luna_vision`의 승인형 경계 하나뿐이다.
   승인은 출처·설정 지문·범위·모델·예산을 묶은 `OnlineAnalysisApproval`이며
-  오프라인 설정이 항상 우선한다(§14.3). 실제 전송 응답자는 `validated_luna_responder`가
-  승인 문을 통과해 만든 **검증 문맥** 없이는 존재할 수 없다 — 미승인·미검증
-  경로가 전송에 닿는 길이 애초에 없다.
+  오프라인 설정이 항상 우선한다(§14.3). 실제 전송 응답자는 **검증 문맥**
+  없이는 존재할 수 없고, 그 문맥은 누가 만들든(공장·직접 구성·`replace`)
+  스스로 승인 문을 다시 지라 — 미승인·미검증·위조 경로가 전송에 닿는 길이
+  애초에 없다.
 
 비용은 추정만 존재한다. Luna 단가는 미확인이며 0원으로 계산하지 않는다 —
 정직한 `unknown`이거나 사용자 제공 상한일 뿐이다(§14.3).
@@ -27,6 +28,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from decimal import Decimal
 from fractions import Fraction
+from types import MappingProxyType
 from typing import Protocol
 
 from vlogsrt.project.raw.analysis_config import (
@@ -466,10 +468,10 @@ class LunaSemanticResponder:
     """실제 Luna 호출 — **검증된 실행 문맥**이 없으면 존재 자체가 불가능하다.
 
     `request_luna_vision`의 `online=True`도 사람 승인의 결과로만 온다 — 이
-    객체가 승인을 만들지 않는다. 문맥은 `validated_luna_responder`가
-    `require_online_approval`을 통과해서 만든 것만 받는다(위조·미검증 객체는
-    `AnalysisApprovalError`). 전송 순간마다 환경·설정·창 신원·페이로드 신원·
-    예약을 다시 본다 — 승인 때 열려 있어도 지금 어긋나면 안 간다.
+    객체가 승인을 만들지 않는다. 문맥은 검증을 마친 `OnlineLunaExecutionContext`
+    만 받고, 그 승인·예약 문은 문맥이 검증한 **같은 객체**여야 한다 — 같은 예산의
+    새 게이트를 몰래 끼우는 길도 닫는다. 전송 순간마다 환경·설정·창 신원·
+    페이로드 신원·예약을 다시 본다 — 승인 때 열려 있어도 지금 어긋나면 안 간다.
     """
 
     client: object
@@ -502,6 +504,14 @@ class LunaSemanticResponder:
             raise AnalysisApprovalError(
                 "검증된 실행 문맥 없이는 전송 경계를 만들 수 없다 — "
                 "validated_luna_responder로 만들어라"
+            )
+        if self.approval is not self.context.approval:
+            raise AnalysisApprovalError(
+                "응답자의 승인이 실행 문맥이 검증한 승인과 다른 객체다 — 문맥 밖 승인은 없다"
+            )
+        if self.gate is not self.context.gate:
+            raise AnalysisApprovalError(
+                "응답자의 예약 문이 실행 문맥의 예약 문과 다른 객체다 — 문맥 밖 예산은 없다"
             )
 
     def respond(self, *, window_id: str, payload: Mapping[str, object]) -> Mapping[str, object]:
@@ -795,10 +805,14 @@ def require_online_approval(
 class OnlineLunaExecutionContext:
     """검증을 마친 온라인 실행 문맥 — 전송 경계가 세워지는 유일한 근거.
 
-    승인·설정·원본·창 계획이 서로 일치함을 **만들 때 한 번** 증명하고(공장이
-    `require_online_approval`을 지나게 한다), 창마다 요청 신원(모델+페이로드
-    해시)을 얼어붙은 기록으로 남긴다. 전송 순간의 재검사는 이 기록과 실제
-    요청을 대조한다 — 문맥 없는 전송, 문맥과 다른 전송이 모두 닫힌다.
+    문맥은 **스스로** 증명한다: 지문을 자기 입력에서 다시 계산해 승인 문
+    (`require_online_approval` — 환경·설정·출처·스트림·분량·창 수·모델·예산)을
+    직접 지나고, 증거 창이 창 계획 그 자신인지 보고, 요청 신원 지도는 증거에서
+    지은 해시와 같은지만 확인한 뒤 그 값을 얼어붙은 사본(`MappingProxyType`)으로
+    남긴다. 공장을 지나지 않은 직접 구성·`dataclasses.replace` 드리프트는
+    모두 이 문에서 `AnalysisApprovalError`로 닫힌다 — 호출자가 말한 해시나
+    지문을 믿는 자리는 없다. 전송 순간의 재검사는 이 얼어붙은 기록과 실제
+    요청을 대조한다.
     """
 
     settings: RawWorkflowConfig
@@ -816,11 +830,40 @@ class OnlineLunaExecutionContext:
             raise AnalysisApprovalError("승인되지 않은 실행이다 — 검증 문맥이 만들어지지 않는다")
         if self.gate is None:
             raise AnalysisApprovalError("예약 문 없이는 검증 문맥이 만들어지지 않는다")
-        window_ids = {evidence.window.window_id for evidence in self.evidence_windows}
-        if set(self.request_sha256s) != window_ids:
+        validate_understanding_settings(self.understanding)
+        if tuple(item.window for item in self.evidence_windows) != self.plan.windows:
             raise AnalysisApprovalError(
-                "창마다 요청 신원이 있어야 한다 — 비어 있거나 남는 신원은 계약 위반이다"
+                "증거 창이 창 계획 그 자신과 다르다 — 계획 밖 창·빠진 창은 계약 위반이다"
             )
+        built_fingerprint = analysis_fingerprint(
+            audio=self.audio,
+            plan=self.plan,
+            settings=self.understanding,
+            asr_model=self.settings.models.timing_model,
+            luna_model=self.settings.models.luna_model,
+        )
+        if self.fingerprint != built_fingerprint:
+            raise AnalysisApprovalError(
+                "문맥이 말하는 지문이 실행 입력의 지문과 다르다 — 지문은 문맥이 다시 잰 값이다"
+            )
+        require_online_approval(
+            self.approval,
+            settings=self.settings,
+            audio=self.audio,
+            plan=self.plan,
+            fingerprint=built_fingerprint,
+        )
+        built_hashes = {
+            evidence.window.window_id: luna_request_sha256(
+                self.settings.models.luna_model, build_luna_payload(evidence, self.understanding)
+            )
+            for evidence in self.evidence_windows
+        }
+        if dict(self.request_sha256s) != built_hashes:
+            raise AnalysisApprovalError(
+                "요청 신원 지도가 증거에서 지은 신원과 다르다 — 문맥은 증거가 말하는 해시만 얼는다"
+            )
+        object.__setattr__(self, "request_sha256s", MappingProxyType(built_hashes))
 
 
 def validated_luna_responder(
@@ -842,9 +885,10 @@ def validated_luna_responder(
     지문은 여기서 다시 계산한다(호출자가 말하는 값이 아니라 실행 입력의
     값이다). 환경·설정·승인의 어긋남은 `AnalysisApprovalError`로 닫히고,
     예약 문은 기본으로 승인 예산의 `CountingReservationGate`다 — 문맥에
-    예약 없는 길이 없다. 창 증거는 문맥에 얼어붙으니 호출자는
-    `responder.context.evidence_windows`를 그대로 `annotate_windows`에
-    넘기면 페이로드 신원이 어긋나지 않는다.
+    예약 없는 길이 없다. 문맥은 만들어질 때 같은 검사를 스스로 다시 지나니
+    이 공장을 우회한 직접 구성도 같은 문에서 걸린다. 창 증거는 문맥에
+    얼어붙으니 호출자는 `responder.context.evidence_windows`를 그대로
+    `annotate_windows`에 넘기면 페이로드 신원이 어긋나지 않는다.
     """
     validate_understanding_settings(understanding)
     evidence_windows = window_evidence(plan, frames, utterances)

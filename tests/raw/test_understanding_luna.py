@@ -49,6 +49,7 @@ from vlogsrt.project.raw.understanding_luna import (
     document_execution_mode,
     estimate_luna_cost,
     luna_output_schema,
+    luna_request_sha256,
     parse_luna_response,
     require_online_approval,
     stage1_document,
@@ -785,6 +786,167 @@ def test_factory_denies_forged_or_drifted_contexts(
             frames=FrameSamplingResult((), ()),
             approval=granted,
         )
+
+
+def direct_context(
+    audio: SelectedAudio,
+    plan: Any,
+    utterances: list[UtteranceEvidence],
+    fingerprint: str,
+) -> luna.OnlineLunaExecutionContext:
+    """공장 없이 직접 구성하는 올바른 문맥 — 증거에서 지은 해시와 잰 지문만 넣는다."""
+    granted = matched_approval(audio, plan, fingerprint)
+    settings = online_workflow()
+    evidence = window_evidence(plan, FrameSamplingResult((), ()), utterances)
+    hashes = {
+        item.window.window_id: luna_request_sha256(
+            settings.models.luna_model, build_luna_payload(item, SETTINGS)
+        )
+        for item in evidence
+    }
+    return luna.OnlineLunaExecutionContext(
+        settings=settings,
+        understanding=SETTINGS,
+        audio=audio,
+        plan=plan,
+        approval=granted,
+        evidence_windows=evidence,
+        request_sha256s=hashes,
+        gate=CountingReservationGate(granted.budget),
+        fingerprint=fingerprint,
+    )
+
+
+def test_direct_context_construction_revalidates_every_binding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """루트 probe의 우회 경로 — 공장 없는 직접 구성은 문맥 스스로 닫는다.
+
+    잘못된 출처·스트림·분량·지문·ASR의 승인, 빈 페이로드의 임의 해시 지도,
+    거짓 지문 칸을 몰아넣어도 `AnalysisApprovalError`로 죽고 전송은 없다.
+    """
+    env_online(monkeypatch)
+    audio, plan, utterances, fingerprint = online_run(tmp_path)
+    settings = online_workflow()
+    evidence = window_evidence(plan, FrameSamplingResult((), ()), utterances)
+    window = plan.windows[0].window_id
+    forged_approval = OnlineAnalysisApproval(
+        approved=True,
+        source_sha256="wrong-source",
+        audio_stream_index=99,
+        sample_count=7,
+        window_count=1,
+        fingerprint="wrong-fingerprint",
+        asr_model="wrong-asr",
+        luna_model=settings.models.luna_model,
+        budget=AnalysisBudget(max_luna_requests=1, max_asr_chunks=1),
+    )
+    gate = CountingReservationGate(forged_approval.budget)
+    sent: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        luna, "request_luna_vision", lambda *a, **k: sent.append(k) or {"output_text": "{}"}
+    )
+    with pytest.raises(AnalysisApprovalError):
+        forged = luna.OnlineLunaExecutionContext(  # 루트 probe 그대로 — 공장 우회
+            settings,
+            SETTINGS,
+            audio,
+            plan,
+            forged_approval,
+            evidence,
+            {window: luna_request_sha256(settings.models.luna_model, {})},
+            gate,
+            "totally-unvalidated",
+        )
+        luna.LunaSemanticResponder(
+            object(), settings.models.luna_model, forged_approval, gate, context=forged
+        ).respond(window_id=window, payload={})
+    assert sent == []  # 가짜 전송조차 경계 앞에서 죽었다
+
+
+def test_replace_cannot_drift_a_validated_context(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`dataclasses.replace`로 하나라도 바꾸면 문맥의 문이 다시 닫힌다."""
+    env_online(monkeypatch)
+    audio, plan, utterances, fingerprint = online_run(tmp_path)
+    context = direct_context(audio, plan, utterances, fingerprint)
+    window = plan.windows[0].window_id
+    with pytest.raises(AnalysisApprovalError, match="지문"):
+        replace(context, fingerprint="0" * 64)
+    with pytest.raises(AnalysisApprovalError, match="지문"):
+        replace(context, audio=replace(audio, sample_count=audio.sample_count - 16000))
+    with pytest.raises(AnalysisApprovalError, match="해시"):
+        replace(context, request_sha256s={window: "0" * 64})
+    with pytest.raises(AnalysisApprovalError, match="승인되지 않은"):
+        replace(context, approval=replace(context.approval, approved=False))
+    with pytest.raises(AnalysisApprovalError, match="창 계획"):
+        replace(context, evidence_windows=())
+    with pytest.raises(AnalysisApprovalError, match="네트워크 모드"):
+        replace(context, settings=RawWorkflowConfig())  # 오프라인 설정 — 전송 순간 이전에 닫힌다
+
+
+def test_request_hash_mapping_is_frozen_against_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """요청 신원 지도는 얼어붙은 사본이다 — 문맥 밖에서 바꿀 수 없다."""
+    env_online(monkeypatch)
+    audio, plan, utterances, fingerprint = online_run(tmp_path)
+    context = direct_context(audio, plan, utterances, fingerprint)
+    window = plan.windows[0].window_id
+    frozen = context.request_sha256s
+    with pytest.raises(TypeError):
+        frozen[window] = "0" * 64  # type: ignore[index]
+    with pytest.raises(TypeError):
+        del frozen[window]  # type: ignore[arg-type]
+    assert dict(frozen)[window] == luna_request_sha256(
+        online_workflow().models.luna_model,
+        build_luna_payload(context.evidence_windows[0], SETTINGS),
+    )
+
+
+def test_responder_rejects_gate_or_approval_not_from_its_context(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """같은 예산의 새 게이트·모양이 같은 다른 승인 — 문맥이 검증한 객체가 아니면 안 된다."""
+    env_online(monkeypatch)
+    audio, plan, utterances, fingerprint = online_run(tmp_path)
+    context = direct_context(audio, plan, utterances, fingerprint)
+    model = online_workflow().models.luna_model
+    lookalike_gate = CountingReservationGate(context.approval.budget)  # 예산 이중 계산의 길
+    with pytest.raises(AnalysisApprovalError, match="예약 문"):
+        luna.LunaSemanticResponder(
+            object(), model, context.approval, lookalike_gate, context=context
+        )
+    lookalike_approval = replace(context.approval, source_sha256="c" * 64)  # 승인됐고 모델도 같다
+    with pytest.raises(AnalysisApprovalError, match="승인"):
+        luna.LunaSemanticResponder(
+            object(), model, lookalike_approval, context.gate, context=context
+        )
+
+
+def test_valid_direct_context_still_sends_bounded_fake_requests(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """올바른 직접 구성은 살아 있다 — 검증이 통과되면 전송 경계가 열린다(과잉 차단이 아니다)."""
+    env_online(monkeypatch)
+    audio, plan, utterances, fingerprint = online_run(tmp_path)
+    context = direct_context(audio, plan, utterances, fingerprint)
+    responder = luna.LunaSemanticResponder(
+        object(),
+        online_workflow().models.luna_model,
+        context.approval,
+        context.gate,
+        context=context,
+    )
+    sent: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        luna, "request_luna_vision", lambda *a, **k: sent.append(k) or {"output_text": "{}"}
+    )
+    first = context.evidence_windows[0]
+    responder.respond(window_id=first.window.window_id, payload=build_luna_payload(first, SETTINGS))
+    assert len(sent) == 1  # 문맥이 검증한 창·페이로드 그대로 — 예약 1회로 정확히 한 번
+    assert sent[0]["online"] is True
 
 
 def test_unverified_registry_still_cannot_reach_the_gate(tmp_path: Path) -> None:
