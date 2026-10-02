@@ -48,11 +48,16 @@ from vlogsrt.project.raw.browser_runtime import (
     semantic_estimate_digest,
 )
 from vlogsrt.project.raw.caption_manual import ms as caption_ms
+from vlogsrt.project.raw.caption_workspace_types import (
+    CaptionWorkspaceError,
+    ManualHeadConflict,
+)
 from vlogsrt.project.raw.config import (
     WORKFLOW_SCHEMA_VERSION,
     RawWorkflowConfig,
     validate_raw_workflow_config,
 )
+from vlogsrt.project.raw.final_video import FinalVideoError
 from vlogsrt.project.raw.ingest import (
     IngestConfirmation,
     IngestProposal,
@@ -121,6 +126,7 @@ from vlogsrt.project.raw.models import (
     WorkspaceModuleUnavailableError,
     WorkspaceStatus,
 )
+from vlogsrt.project.raw.segment_review import ReviewError, StaleRevisionError
 from vlogsrt.project.raw.segment_review import (
     boundary_edit as review_boundary_edit,
 )
@@ -148,7 +154,6 @@ from vlogsrt.project.raw.understanding_luna import (
     online_env_blocked,
 )
 from vlogsrt.project.raw.workspace import (
-    DB_SCHEMA_VERSION,
     RawWorkspace,
     new_segment_plan_revision_id,
 )
@@ -219,6 +224,11 @@ __all__ = [
     "asr_estimate_digest",
     "caption_ms",
     "caption_run_identity",
+    "CaptionWorkspaceError",
+    "FinalVideoError",
+    "ManualHeadConflict",
+    "ReviewError",
+    "StaleRevisionError",
     "browse_folder",
     "capture_environment_credentials",
     "caption_transport_providers",
@@ -638,7 +648,7 @@ class RawWorkspaceService:
             workspace_id=workspace.workspace_id(),
             name=workspace.name,
             workflow_schema_version=WORKFLOW_SCHEMA_VERSION,
-            db_schema_version=DB_SCHEMA_VERSION,
+            db_schema_version=workspace.db_schema_version(),
             network_mode=config.network_mode,
             created_at=workspace.created_at,
             media_count=workspace.media_count(),
@@ -1543,13 +1553,14 @@ class RawWorkspaceService:
 
     def register_review_vtt(
         self, root: Path, segment_id: str, package_dir: str | None = None
-    ) -> MediaRegistration | None:
+    ) -> ReviewVttRegistration | None:
         """검토 자막(VTT)을 제공 가능한 자리에 등록한다 — 내용은 백엔드가 잰 그대로.
 
         검토 저장소 자리(`review/`)는 브라우저 제공 대상이 아니다(§4.4). 이 함수는
-        백엔드가 **측정으로** 만든 VTT 본문을 내용 해시 이름의 `previews/review-vtt/`
-        파일로 쓰고 미디어로 등록한다 — 같은 내용은 같은 자리(멱등), 제공은 등록
-        ID로만. 발명 시각·낱낱 응답은 나가지 않는다.
+        백엔드가 **측정으로** 만든 VTT 본문(`ReviewVttOutput.vtt.text`)을 내용 해시
+        이름의 `previews/review-vtt/` 파일로 쓰고 미디어로 등록한다 — 같은 내용은
+        같은 자리(멱등), 제공은 등록 ID로만. 출처(`ReviewProvenance` — 원본 경로·
+        해시 대 추출 경로·해시·잰 길이)를 함께 돌려 화면이 나란히 보여 준다.
         """
         workspace = self._workspace(root)
         facade = self.review_workspace_facade(root)
@@ -1567,8 +1578,9 @@ class RawWorkspaceService:
             os.replace(temp, target)
         for registered in self.list_media(root, kind="preview"):
             if registered.relative_path == relative:
-                return registered
-        return self.register_media(root, target, "preview")
+                return ReviewVttRegistration(registered, result.provenance)
+        registration = self.register_media(root, target, "preview")
+        return ReviewVttRegistration(registration, result.provenance)
 
     # ── A5/A6·A7 백엔드 작업공간 — 공개 경계로만 내놓는다(병합 뒤 활성) ──
 
@@ -2061,14 +2073,13 @@ EXTRACT_PLAN_BINDING_SCHEMA = "raw-extract-plan-binding/v1"
 
 
 def _plan_bound_material(snapshot: SegmentPlanSnapshot) -> str:
-    """추출 캐시 키의 계획 재료 — 계획 지문에 **리비전 신원**까지 묶는다.
+    """작업·package 신원의 계획 재료 — 계획 지문에 **리비전 신원**까지 묶는다.
 
-    계획 지문(`segmentation_fingerprint`)은 순서 리비전과 형상(원본 해시·시계·
-    경계)만 묶는다 — 같은 형상의 새 계획 리비전(결정적 → 의미 등)과 같은 값을
-    낸다. 완성 package 재사용 판정이 그 값만 보면 새 리비전은 영영 시작하지
-    못한다(루트 브라우저 재현). 리비전 신원을 함께 묶으면 같은 리비전의 재추출은
-    여전히 멱등으로 막히고(§6.5), 새 리비전은 새 package에서 뽑는다 — 옛
-    package·전달물은 그대로다.
+    묶는 것은 **작업/package 지문**뿐이다: 같은 형상의 새 계획 리비전(결정적 →
+    의미 등)도 새 package에서 뽑고, 같은 리비전의 재추출은 멱등 경계로 막힌다
+    (§6.5). 조각 매체의 렌더 재사용 판정은 이 키를 쓰지 않는다 — 매체는 언제나
+    원본 SHA·core 범위·프로파일·도구 버전에서 결정되므로, 리비전이 갈라져도
+    같은 범위의 매체 계산은 여전히 같은 입력을 본다.
     """
     return json.dumps(
         {
@@ -2096,21 +2107,29 @@ def caption_run_identity(revision: str, run_id: str, fingerprint: str) -> Any:
     return RunIdentity(final_video_revision=revision, run_id=run_id, fingerprint=fingerprint)
 
 
+@dataclass(frozen=True)
+class ReviewVttRegistration:
+    """검토 VTT 등록 결과 — 등록 미디어와 출처(원본 대 추출)를 함께 돌려준다.
+
+    `provenance`는 W3 `ReviewProvenance` 그대로다(경로·SHA-256·잰 매체 길이).
+    화면은 이 값을 나란히 보여 조각이 어느 원본에서 왔는지 숨기지 않는다.
+    """
+
+    registration: MediaRegistration
+    provenance: Any
+
+
 def _plan_timestamp() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
 
 
-def _vtt_text_of(result: object) -> str | None:
-    """검토 VTT 결과에서 본문만 꺼낸다 — 백엔드 응답 모양을 여기서만 흡수한다."""
-    for name in ("vtt_text", "vtt", "text", "body", "content"):
-        value = getattr(result, name, None)
-        if isinstance(value, str) and value.strip():
-            return value
-    if isinstance(result, tuple):
-        for item in result:
-            if isinstance(item, str) and item.strip().startswith("WEBVTT"):
-                return item
-            text = _vtt_text_of(item)
-            if text is not None:
-                return text
+def _vtt_text_of(result: Any) -> str | None:
+    """검토 VTT 결과(`ReviewVttOutput`)에서 렌더 본문만 꺼낸다 — 계약 밖 모양은 못 들어온다.
+
+    백엔드의 `.vtt`는 `RenderedVtt`(본문 문자열)다. 본문이 비었으면 None —
+    조용한 빈 성공이 아니라 호출자가 안내로 답하는 자리다.
+    """
+    text = getattr(getattr(result, "vtt", None), "text", None)
+    if isinstance(text, str) and text.strip():
+        return text
     return None

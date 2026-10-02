@@ -15,7 +15,6 @@ import time
 from collections.abc import Callable
 from fractions import Fraction
 from pathlib import Path
-from typing import Any
 
 from vlogsrt import log
 from vlogsrt.project.raw import service as raw_service
@@ -574,13 +573,6 @@ def cmd_analyze(args: argparse.Namespace) -> int:
 # ── A5/A6·A7 — 검토·자막 진단(로컬만) ─────────────────────────────────────────
 
 
-def _row_value(source: object, name: str, default: object = "") -> Any:
-    """백엔드 값의 duck-typed 접근 — 사전·속성 어느 쪽이든(진단 인쇄용)."""
-    if isinstance(source, dict):
-        return source.get(name, default)
-    return getattr(source, name, default)
-
-
 def cmd_review(args: argparse.Namespace) -> int:
     """`media review` — 검토 리비전 생성·인쇄(순수 조회, 유료 호출 0회).
 
@@ -596,23 +588,21 @@ def cmd_review(args: argparse.Namespace) -> int:
         if args.init:
             facade.initialize_review()
             log.out("검토 기본 리비전을 만들었다 — 최신 계획·분석 증거에서.")
-        head = facade.load_head()
-    except raw_service.RawWorkspaceError as error:
+        loaded = facade.load_head()
+    except (raw_service.RawWorkspaceError, raw_service.ReviewError) as error:
         log.error(str(error))
         return 1
-    if head is None:
-        log.out("검토 리비전이 없다 — --init으로 만든다.")
-        return 0
-    segments = _row_value(head, "segments", ()) or ()
-    revision_id = _row_value(head, "revision_id", "-")
-    log.out(f"검토 헤드 리비전 {revision_id} · 조각 {len(segments)}개(시간순)")
-    for segment in segments:
+    revision = loaded.revision
+    log.out(f"검토 헤드 리비전 {revision.revision_id} · 조각 {len(revision.segments)}개(시간순)")
+    for segment in revision.segments:
         log.out(
-            f"  {_row_value(segment, 'segment_id', '-')} · 원본 순번"
-            f" {_row_value(segment, 'source_order', '-')} · 발화"
-            f" {_row_value(segment, 'speech_status', '-')} · 선택"
-            f" {_row_value(segment, 'selection', '-')}"
+            f"  {segment.segment_id} · 원본 순번"
+            f" {segment.source_order} · 발화"
+            f" {segment.speech_status} · 선택"
+            f" {segment.selection}"
         )
+    for source_id, reason in loaded.stale_sources:
+        log.warn(f"낡은 원본 {source_id} — {reason}")
     return 0
 
 
@@ -636,16 +626,22 @@ def cmd_caption(args: argparse.Namespace) -> int:
             path, source_id=args.source_id, audio_ordinal=args.audio_ordinal
         )
         estimate = workspace.estimate(registration, run_id=args.run)
-    except raw_service.RawWorkspaceError as error:
+    except (
+        raw_service.RawWorkspaceError,
+        raw_service.CaptionWorkspaceError,
+        raw_service.FinalVideoError,
+    ) as error:
         log.error(str(error))
         return 1
     log.out(
-        f"최종 영상 등록 리비전 {_row_value(registration, 'final_video_revision', '-')}"
-        f" · 상태 {_row_value(registration, 'status', '-')}"
+        f"최종 영상 등록 리비전 {registration.final_video_revision}"
+        f" · 상태 {registration.status}"
+        + (f" · 오디오 서수 {registration.audio_ordinal}" if registration.ready else "")
     )
     log.out(
-        f"실행 {args.run} 추정 — 청크 {_row_value(estimate, 'chunk_count', '-')}"
-        f" · 샘플 {_row_value(estimate, 'sample_count', '-')}"
+        f"실행 {args.run} 추정 — 청크 {estimate.chunk_count}"
+        f" · 샘플 {estimate.sample_count} · 문구 모델 {estimate.text_model}"
+        f" · 시간 모델 {estimate.timing_model} · 예상 비용 ${estimate.estimated_cost_usd}"
         " · 실제 실행은 브라우저 승인 경로에서만 연다(§14.3)"
     )
     return 0

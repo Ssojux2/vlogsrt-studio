@@ -48,11 +48,14 @@ def format_bytes(size: float) -> str:
     return f"{value:.1f}TB"
 
 
-def media_player_html(media_path: str, *, track_path: str | None = None) -> str:
-    """등록 미디어 ID 주소의 재생기 HTML — 자막 트랙은 선택일 뿐이다.
+def media_player_html(
+    media_path: str, *, track_path: str | None = None, caption: str | None = None
+) -> str:
+    """등록 미디어 ID 주소의 재생기 HTML — 자막 트랙·출처 표시는 선택이다.
 
     경로는 오는 값을 그대로 쓰지 않는다: 호출자(서버)가 만든 **등록 ID 주소**만
-    받고, 값은 HTML로 감싸기 전에 그대로 이스케이프한다.
+    받고, 값은 HTML로 감싸기 전에 그대로 이스케이프한다. `caption`은 재생기 아래
+    출처 한 줄(원본·추출 해시 등) — 서버가 검증한 문장만 온다.
     """
     source = html.escape(media_path, quote=True)
     track = ""
@@ -62,11 +65,16 @@ def media_player_html(media_path: str, *, track_path: str | None = None) -> str:
             f'\n    <track kind="subtitles" srclang="ko" label="검토 자막"'
             f' src="{escaped}" default></track>'
         )
+    note = (
+        f'\n<p style="color:#667; font-size:12px; margin:4px 0 0;">{html.escape(caption)}</p>'
+        if caption
+        else ""
+    )
     return (
         '<video controls preload="metadata" style="width:100%;max-height:420px;'
         ' border-radius:8px; background:#000;">\n'
         f'    <source src="{source}"></source>{track}\n'
-        "</video>"
+        f"</video>{note}"
     )
 
 
@@ -101,11 +109,16 @@ def waveform_svg(peaks: Sequence[float], *, height: int = 72) -> str:
 
 @dataclass(frozen=True)
 class CueRowView:
-    """큐 한 줄의 화면 값 — 시각은 ms 정수, 글자는 그대로."""
+    """큐 한 줄의 화면 값 — 시각은 미리 포맷한 초 표기, 글자는 그대로.
+
+    시각은 백엔드의 정확한 유리수(초)를 `format_seconds`로 옮긴 문자열이다 —
+    ms 환산에서 반올림 오차가 생기지 않는다. 사람이 주는 편집값만 ms 정수로
+    들어간다(서버 뷰에서 검증한다).
+    """
 
     cue_id: str
-    start_ms: int
-    end_ms: int
+    start_seconds: str
+    end_seconds: str
     whisper_text: str
     auto_text: str
     basis: str
@@ -117,15 +130,16 @@ def cue_table_markdown(rows: Sequence[CueRowView]) -> str:
     if not rows:
         return "_큐가 없다 — 실행을 먼저 끝내거나, 빈 실행이면 무발화 결정을 남겨라._"
     lines = [
-        "| 큐 | 시작(ms) | 끝(ms) | whisper 글자 | 채택 문구 | 근거 | 자/초 |",
+        "| 큐 | 시작(초) | 끝(초) | whisper 글자 | 채택 문구 | 근거 | 자/초 |",
         "|---|---|---|---|---|---|---|",
     ]
     for row in rows:
         whisper = row.whisper_text.replace("|", "\\|")
         auto = row.auto_text.replace("|", "\\|")
         lines.append(
-            f"| `{row.cue_id}` | {row.start_ms} | {row.end_ms} | {whisper or '(없음)'}"
-            f" | {auto or '(없음)'} | {row.basis} | {row.chars_per_second:.1f} |"
+            f"| `{row.cue_id}` | {row.start_seconds} | {row.end_seconds}"
+            f" | {whisper or '(없음)'} | {auto or '(없음)'} | {row.basis}"
+            f" | {row.chars_per_second:.1f} |"
         )
     return "\n".join(lines)
 

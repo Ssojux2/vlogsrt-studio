@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import html
 import json
 import os
@@ -39,6 +40,9 @@ MUTATION_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 """Origin/Referer 검사를 강제하는 메서드 — Gradio 변경·업로드 엔드포인트가 여기 온다."""
 
 STREAM_CHUNK_BYTES = 262144
+
+REVIEW_EXPORT_JOB_KIND = "review_export"
+"""확정 내보내기 작업 종류 — 제출 때의 검토 리비전·선택에 묶인 본문을 가진다."""
 
 
 def _parse_intervals(text: str) -> dict[str, list[raw_service.PlannedInterval]] | None:
@@ -150,16 +154,23 @@ class RawWorkspaceUi:
         # 브라우저 승인 기록 — 작업공간 서명에 묶여 산다(작업공간을 바꾸면 지운다).
         self._asr_approval_record: _AsrApprovalRecord | None = None
         self._semantic_approval_record: _SemanticApprovalRecord | None = None
-        # 검토 화면 상태 — 마지막으로 그린 헤드 리비전(변경은 그 리비전에 묶인다).
-        self._review_head_id: str | None = None
+        # 검토 화면 상태 — 마지막으로 그린 헤드 리비전과 기본 계획(편집·내보내기는
+        # 이 신원에 묶인다). 시계·조각 범위는 그 리비전의 것을 그대로 둔다.
+        self._review_revision_id: str | None = None
+        self._review_base_plan_id: str | None = None
         self._review_signature: str | None = None
-        self._review_time_bases: dict[str, Fraction] = {}
-        self._review_right_neighbor: dict[str, str | None] = {}
-        # 자막 화면 상태 — 마지막 실행 신원(등록·승인·편집·확정이 이 신원에 묶인다).
-        self._caption_identity: dict[str, str] | None = None
+        self._review_clocks: dict[str, Any] = {}
+        self._review_spans: dict[str, tuple[str, int, int]] = {}
+        # 자막 화면 상태 — 마지막 실행 신원과 검토 머리 번호(편집·확정은 이 머리에 묶인다).
+        self._caption_identity: dict[str, str | int | None] | None = None
         self._caption_signature: str | None = None
-        # 마지막 확정 내보내기 자리 — Finder 열기·경로 복사의 대상.
+        self._caption_head_sequence: int | None = None
+        self._caption_cue_ids: tuple[str, ...] = ()
+        self._caption_unplaced: dict[int, str] = {}
+        self._caption_chunk_count: int | None = None
+        # 마지막 확정 내보내기 자리 — Finder 열기·경로 복사·정리 뒤 재검증의 대상.
         self._last_export_path: str | None = None
+        self._last_export_dir: str | None = None
         # Finder 여는 경계 — 시험은 가짜를 넣는다(실제는 macOS `open -R`, 인자 검증 후).
         self._finder_opener = finder_opener
         # 최종 자막 실제 실행 제공자 주입 경계(시험·루트 가짜). 없으면 생산 transport.
@@ -260,13 +271,19 @@ class RawWorkspaceUi:
 
     def _clear_screen_state(self) -> None:
         """검토·자막·내보내기 화면 상태 초기화 — 작업공간 전환은 새 상태로 시작한다."""
-        self._review_head_id = None
+        self._review_revision_id = None
+        self._review_base_plan_id = None
         self._review_signature = None
-        self._review_time_bases = {}
-        self._review_right_neighbor = {}
+        self._review_clocks = {}
+        self._review_spans = {}
         self._caption_identity = None
         self._caption_signature = None
+        self._caption_head_sequence = None
+        self._caption_cue_ids = ()
+        self._caption_unplaced = {}
+        self._caption_chunk_count = None
         self._last_export_path = None
+        self._last_export_dir = None
 
     def _snapshot_root(self) -> Path | None:
         """선택을 **한 번에** 찍는다 — 이후 읽기는 전부 이 스냅숏을 따른다."""
@@ -2185,114 +2202,81 @@ class RawWorkspaceUi:
         except raw_service.WorkspaceModuleUnavailableError as error:
             raise gr.Error(str(error)) from error
 
-    @staticmethod
-    def _field(source: object, name: str, default: object = None) -> Any:
-        """백엔드 값의 duck-typed 접근 — 사전·속성 어느 쪽이든.
-
-        UI는 파생 계층을 import하지 않으므로(계약) 값을 형으로 묻지 않고
-        이름으로만 꺼낸다. 없는 칸은 조용히 기본값(-)으로 — 표가 거짓말을 하지
-        않는 한계 안에서 화면이 깨지지 않는다.
-        """
-        if isinstance(source, dict):
-            return source.get(name, default)
-        return getattr(source, name, default)
-
     def _review_head_and_rows(self, root: Path) -> tuple[Any, list[dict[str, object]]]:
-        """현재 헤드와 시간순 행 값 — 파사드가 준 것을 화면 값으로만 옮긴다.
+        """현재 헤드(`LoadedReview`)와 시간순 행 값 — 백엔드 형 그대로만 옮긴다.
 
-        편집에 필요한 측정(원본별 시간 엇갈비율·틱)도 여기서 한 번 잡아 서버에
-        둔다 — 경계·나누기 초 입력은 이 값으로 틱(정수 PTS)으로 바뀐다. 프레임
-        격자 밖 초는 백엔드가 거부한다(여기서 몰래 반올림해 넘기지 않는다).
+        화면이 본 리비전 신원(헤드·기본 계획)과 편집 재료(원본별 시계·조각
+        범위)를 여기서 한 번 잡아 서버에 둔다 — 경계·나누기 초 입력은 이 시계로
+        틱(정수 PTS)으로 바뀐다. 칸이 없으면 조용히 비우지 않고 오류로 밝힌다.
         """
         facade = self.raw.review_workspace_facade(root)  # 그리기 경로 — 패널이 정직한 안내로 잡는다
-        head = facade.load_head()
-        if head is None:
-            return None, []
-        segments = self._field(head, "segments", ()) or ()
-        clocks: dict[str, object] = {}
-        clock_for = self._field(head, "clock_for", None)
+        loaded = facade.load_head()
+        revision = loaded.revision
         names = {a.asset_id: a.source_name for a in self.raw.list_source_assets(root)}
+        clocks = {clock.source_id: clock for clock in revision.clocks}
         rows: list[dict[str, object]] = []
-        time_bases: dict[str, Fraction] = {}
         spans: dict[str, tuple[str, int, int]] = {}
-        for segment in segments:
-            segment_id = str(self._field(segment, "segment_id", ""))
-            asset_id = str(self._field(segment, "asset_id", ""))
-            clock = clocks.get(asset_id)
-            if clock is None and callable(clock_for):
-                clock = clock_for(asset_id)
-                clocks[asset_id] = clock
-            time_base = self._field(clock, "time_base") if clock is not None else None
-            base = (
-                time_base
-                if isinstance(time_base, Fraction)
-                else Fraction(str(time_base))
-                if time_base is not None
-                else Fraction(1)
-            )
-            time_bases[segment_id] = base
-            start_pts = int(self._field(segment, "core_start_pts", 0))
-            end_pts = int(self._field(segment, "core_end_pts", 0))
-            spans[segment_id] = (asset_id, start_pts, end_pts)
-            tags = self._field(segment, "visual_tags", ()) or ()
+        for segment in revision.segments:
+            clock = clocks.get(segment.source_id)
+            if clock is None:
+                raise gr.Error(
+                    f"검토 리비전에 원본 {segment.source_id}의 시계가 없다 — 저장소가 깨졌다"
+                )
+            spans[segment.segment_id] = (segment.source_id, segment.start_pts, segment.end_pts)
             rows.append(
                 {
-                    "segment_id": segment_id,
-                    "source_order": self._field(segment, "source_order", ""),
-                    "source_name": names.get(asset_id, asset_id),
-                    "start_seconds": ui_facade.format_seconds(Fraction(start_pts) * base),
-                    "end_seconds": ui_facade.format_seconds(Fraction(end_pts) * base),
-                    "speech_status": self._field(segment, "speech_status", ""),
-                    "selection": self._field(segment, "selection", ""),
-                    "recommendation": self._field(segment, "recommendation", ""),
-                    "visual_tags": ", ".join(str(tag) for tag in tags),
-                    "notes": self._field(segment, "notes", ""),
+                    "segment_id": segment.segment_id,
+                    "source_order": segment.source_order,
+                    "source_name": names.get(segment.source_id, segment.source_id),
+                    "start_seconds": ui_facade.format_seconds(
+                        Fraction(segment.start_pts - clock.origin_pts) * clock.time_base
+                    ),
+                    "end_seconds": ui_facade.format_seconds(
+                        Fraction(segment.end_pts - clock.origin_pts) * clock.time_base
+                    ),
+                    "speech_status": segment.speech_status,
+                    "selection": segment.selection,
+                    "recommendation": segment.override_recommendation or segment.recommendation,
+                    "visual_tags": ", ".join(segment.visual_tags),
+                    "notes": segment.notes,
                 }
             )
-        self._review_time_bases = time_bases
-        self._review_right_neighbor = {
-            segment_id: (
-                next(
-                    (
-                        other
-                        for other, (asset, start, _) in spans.items()
-                        if other != segment_id
-                        and asset == spans[segment_id][0]
-                        and start == spans[segment_id][2]
-                    ),
-                    None,
-                )
-            )
-            for segment_id in spans
-        }
-        return head, rows
+        self._review_clocks = clocks
+        self._review_spans = spans
+        self._review_revision_id = revision.revision_id
+        self._review_base_plan_id = revision.base_plan_id
+        self._review_signature = self._signature_for(root)
+        return loaded, rows
 
     def _review_panel_markdown(self, root: Path, extra: str = "") -> str:
         """검토 패널 — 헤드 리비전·시간순 행 표·안내.
 
-        패널은 **그리는 시점**(화면 조립 포함)에도 불러지므로 백엔드가 없는
-        빌드에서는 오류를 던지지 않고 안내 문구로 그린다 — 단추를 누른 행동
-        경로는 여전히 정직한 오류로 닫힌다.
+        패널은 **그리는 시점**(화면 조립 포함)에도 불러지므로 백엔드가 없거나
+        리비전이 없으면 오류를 던지지 않고 안내 문구로 그린다 — 단추를 누른
+        행동 경로는 여전히 정직한 오류로 닫힌다.
         """
+        suffix = f"\n\n{extra}" if extra else ""
         try:
-            head, rows = self._review_head_and_rows(root)
+            loaded, rows = self._review_head_and_rows(root)
         except raw_service.WorkspaceModuleUnavailableError as error:
-            note = f"**검토 백엔드 없음** — {error}"
-            return note + (f"\n\n{extra}" if extra else "")
-        if head is None:
-            return (
-                "**검토 리비전이 없다** — 추출 계획이 있는 뒤 **검토 시작**을 누르면"
-                " 계획·분석 증거에서 시간순 검토 기본 리비전이 만들어진다."
-                + (f"\n\n{extra}" if extra else "")
-            )
-        self._review_head_id = str(self._field(head, "revision_id", ""))
-        self._review_signature = self._signature_for(root)
+            return f"**검토 백엔드 없음** — {error}{suffix}"
+        except (raw_service.RawWorkspaceError, raw_service.ReviewError) as error:
+            return f"검토 상태를 읽지 못했다 — {error}{suffix}"
+        revision = loaded.revision
         lines = [
-            f"**검토** — 헤드 리비전 `{self._review_head_id}` · 조각 {len(rows)}개"
-            " — 편집은 이 리비전에 묶인다(그 사이 바뀌면 거부된다).",
-            "",
-            ui_facade.review_rows_markdown(rows),
+            f"**검토** — 헤드 리비전 `{revision.revision_id}` · 기본 계획"
+            f" `{revision.base_plan_id}` · 조각 {len(rows)}개 — 편집은 이 리비전에"
+            " 묶인다(그 사이 바뀌면 거부된다).",
         ]
+        if loaded.stale_sources:
+            lines += [
+                "",
+                "**낡은 원본** — "
+                + ", ".join(
+                    f"`{source_id}` {reason}" for source_id, reason in loaded.stale_sources
+                ),
+            ]
+        lines += ["", ui_facade.review_rows_markdown(rows)]
         if extra:
             lines += ["", extra]
         return "\n".join(lines)
@@ -2303,7 +2287,7 @@ class RawWorkspaceUi:
         facade = self._review_facade(root)
         try:
             facade.initialize_review()
-        except raw_service.RawWorkspaceError as error:
+        except (raw_service.RawWorkspaceError, raw_service.ReviewError) as error:
             raise gr.Error(str(error)) from error
         return self._review_panel_markdown(root, "검토 기본 리비전을 만들었다.")
 
@@ -2315,29 +2299,26 @@ class RawWorkspaceUi:
     def review_filter_view(self, signature: str | None, query: str, tags_text: str) -> str:
         """검색·태그 조회 — 순수 조회이며 원본 헤드는 그대로다."""
         root = self._require_current_selection(signature)
-        self._review_facade(root)  # 행동 경로 — 백엔드 없는 빌드는 정직한 오류로 닫는다
-        head, rows = self._review_head_and_rows(root)
-        if head is None:
-            return self._review_panel_markdown(root)
+        facade = self._review_facade(root)  # 행동 경로 — 백엔드 없는 빌드는 정직한 오류로 닫는다
+        try:
+            loaded, rows = self._review_head_and_rows(root)
+        except (raw_service.RawWorkspaceError, raw_service.ReviewError) as error:
+            raise gr.Error(str(error)) from error
         query_text = (query or "").strip()
         tags = tuple(t.strip() for t in (tags_text or "").split(",") if t.strip())
         try:
-            facade = self._review_facade(root)
-            filtered = facade.filter(query=query_text or None, tags=tags or None)
-        except raw_service.RawWorkspaceError as error:
+            matched_segments = facade.filter(
+                loaded.revision, query=query_text or None, tags=tags or ()
+            )
+        except raw_service.ReviewError as error:
             raise gr.Error(str(error)) from error
-        kept = {
-            str(self._field(item, "segment_id", ""))
-            for item in (self._field(filtered, "segments", ()) or ())
-        }
+        kept = {segment.segment_id for segment in matched_segments}
         matched = [row for row in rows if row["segment_id"] in kept]
         tag_note = ", ".join(tags) or "(없음)"
         note = f"조회 `{query_text or '(전체)'}` · 태그 `{tag_note}` — {len(matched)}개"
-        self._review_head_id = str(self._field(head, "revision_id", ""))
-        self._review_signature = self._signature_for(root)
         return "\n".join(
             [
-                f"**검토** — 헤드 리비전 `{self._review_head_id}`",
+                f"**검토** — 헤드 리비전 `{self._review_revision_id}`",
                 "",
                 ui_facade.review_rows_markdown(matched),
                 "",
@@ -2350,13 +2331,20 @@ class RawWorkspaceUi:
         facade = self._review_facade(root)  # 백엔드 없는 빌드 — 정직한 오류가 먼저다
         if self._review_signature != self._signature_for(root):
             raise gr.Error("검토 기록이 다른 작업공간의 것이다 — 새로고침 뒤 다시 시도하세요.")
-        if not self._review_head_id:
+        if not self._review_revision_id or not self._review_base_plan_id:
             raise gr.Error("검토 리비전이 없다 — 먼저 **검토 시작**을 누르세요.")
         try:
-            facade.apply(build(self._review_head_id), self._review_head_id)
-        except raw_service.RawWorkspaceError as error:
+            edited = facade.apply_edit(self._review_base_plan_id, build(self._review_revision_id))
+        except raw_service.StaleRevisionError as error:
+            raise gr.Error(
+                f"편집이 늦었다 — 화면이 본 리비전 뒤에 다른 편집이 먼저 갔다({error})."
+                " **검토 새로고침** 뒤 다시 편집하세요."
+            ) from error
+        except (raw_service.RawWorkspaceError, raw_service.ReviewError) as error:
             raise gr.Error(str(error)) from error
-        return self._review_panel_markdown(root, f"{label}을 적용했다.")
+        return self._review_panel_markdown(
+            root, f"**{label}** 편집을 적용했다 — 새 리비전 `{edited.revision_id}`."
+        )
 
     def _require_segment_id(self, segment_id: str | None) -> str:
         cleaned = (segment_id or "").strip().strip("`")
@@ -2364,12 +2352,36 @@ class RawWorkspaceUi:
             raise gr.Error("조각 ID를 적으세요 — 검토 표의 `segment_…` 값 그대로.")
         return cleaned
 
-    def _review_pts(self, segment_id: str, seconds: Fraction, what: str) -> int:
-        """초를 틱(정수 PTS)으로 — 원본 시간 엇갈비율로 환산한 값 그대로."""
-        base = getattr(self, "_review_time_bases", {}).get(segment_id)
-        if base is None:
-            raise gr.Error("조각의 시간 엇갈비율을 모른다 — 새로고침 뒤 다시 시도하세요.")
-        return int(Fraction(seconds) / base)
+    def _review_span(self, segment_id: str) -> tuple[str, int, int]:
+        """화면이 본 리비전의 조각 범위 — (원본, 시작 틱, 끝 틱)."""
+        span = self._review_spans.get(segment_id)
+        if span is None:
+            raise gr.Error(
+                f"검토 표에 조각 `{segment_id}`이(가) 없다 — 새로고침 뒤 다시 시도하세요."
+            )
+        return span
+
+    def _review_pts(self, source_id: str, seconds: Fraction, what: str) -> int:
+        """초를 틱(정수 PTS)으로 — 원본 시계의 프레임 격자 위 점만 통과시킨다.
+
+        몰래 반올림하지 않는다: 격자 밖 초는 이유(프레임 간격)와 함께 거부한다.
+        백엔드의 격자 검사(`_require_frame_point`)와 같은 판정을 입력 자리에서
+        미리 보여주는 것뿐이다.
+        """
+        clock = self._review_clocks.get(source_id)
+        if clock is None:
+            raise gr.Error(f"원본 {source_id}의 시계를 모른다 — 검토 새로고침 뒤 다시 시도하세요.")
+        ticks = seconds / clock.time_base
+        if ticks < 0:
+            raise gr.Error(f"{what}이 음수다 — 0 이상의 초를 적으세요.")
+        if ticks.denominator != 1 or int(ticks) % clock.frame_ticks != 0:
+            frame_seconds = Fraction(clock.frame_ticks) * clock.time_base
+            raise gr.Error(
+                f"{what}({ui_facade.format_seconds(seconds)}초)가 프레임 격자 위가 아니다"
+                f" — 이 원본은 {ui_facade.format_seconds(frame_seconds)}초 간격 격자다"
+                "(정수 배수 초로 적으세요)."
+            )
+        return clock.origin_pts + int(ticks)
 
     def review_note_view(self, signature: str | None, segment_id: str, note: str) -> str:
         """메모 저장 — 메타데이터 편집(재추출 대상은 늘 없다)."""
@@ -2378,7 +2390,7 @@ class RawWorkspaceUi:
         return self._apply_review_edit(
             root,
             lambda head: raw_service.review_note_edit(head, target, note or ""),
-            "메모",
+            "메모 저장",
         )
 
     def review_selection_view(self, signature: str | None, segment_id: str, choice: str) -> str:
@@ -2389,7 +2401,7 @@ class RawWorkspaceUi:
         return self._apply_review_edit(
             root,
             lambda head: raw_service.review_selection_edit(head, target, value),
-            f"{choice} 표시",
+            "선택 표시(" + choice + ")",
         )
 
     def review_boundary_view(
@@ -2404,15 +2416,23 @@ class RawWorkspaceUi:
             raise gr.Error(str(error)) from error
 
         def build(head: str) -> Any:
-            neighbor = self._review_right_neighbor.get(target)
+            source_id, _start, end = self._review_span(target)
+            neighbor = next(
+                (
+                    other
+                    for other, (asset, start, _other_end) in self._review_spans.items()
+                    if other != target and asset == source_id and start == end
+                ),
+                None,
+            )
             if neighbor is None:
                 raise gr.Error(
                     f"이 조각의 오른쪽 이웃이 없다 — 마지막 조각의 경계는 옮길 수 없다: {target}"
                 )
-            pts = self._review_pts(target, seconds, "경계")
+            pts = self._review_pts(source_id, seconds, "경계 초")
             return raw_service.review_boundary_edit(head, target, neighbor, pts)
 
-        return self._apply_review_edit(root, build, "경계")
+        return self._apply_review_edit(root, build, "경계 조정")
 
     def review_split_view(self, signature: str | None, segment_id: str, seconds_text: str) -> str:
         """조각 나누기 — 자를 자리(초)만 정한다(구간을 고르지 않는다)."""
@@ -2422,13 +2442,13 @@ class RawWorkspaceUi:
             seconds = ui_facade.parse_seconds(seconds_text, what="나눌 초")
         except ValueError as error:
             raise gr.Error(str(error)) from error
-        return self._apply_review_edit(
-            root,
-            lambda head: raw_service.review_split_edit(
-                head, target, self._review_pts(target, seconds, "나눌 자리")
-            ),
-            "나누기",
-        )
+
+        def build(head: str) -> Any:
+            source_id, _start, _end = self._review_span(target)
+            pts = self._review_pts(source_id, seconds, "나눌 자리")
+            return raw_service.review_split_edit(head, target, pts)
+
+        return self._apply_review_edit(root, build, "나누기")
 
     def review_merge_view(self, signature: str | None, left_id: str, right_id: str) -> str:
         """이웃 합치기 — 맞닿은 같은 원본 조각만(백엔드가 검증)."""
@@ -2438,32 +2458,59 @@ class RawWorkspaceUi:
         return self._apply_review_edit(
             root,
             lambda head: raw_service.review_merge_edit(head, left, right),
-            "합치기",
+            "이웃 합치기",
         )
 
     def review_reextract_view(self, signature: str | None) -> str:
-        """다시 뽑을 조각 — 경계 편집만 나열하고 메타데이터 편집은 늘 0개다."""
+        """다시 뽑을 조각 — 경계 편집(계획과 달라진 core)과 낡은 매체를 나열한다.
+
+        경계 판정은 **기본 계획의 core 범위**와 지금 리비전을 직접 비교한다 —
+        재시작 뒤에도 같은 판정이고, 메타데이터 편집(메모·선택·권고)은 늘 0개다.
+        매체 판정은 백엔드 `stale_media`(게시 artifact의 core·해시 대조) 그대로다.
+        """
         root = self._require_current_selection(signature)
         facade = self._review_facade(root)
-        head = facade.load_head()
-        if head is None:
+        if self._review_signature != self._signature_for(root):
+            raise gr.Error("검토 기록이 다른 작업공간의 것이다 — 새로고침 뒤 다시 시도하세요.")
+        if not self._review_revision_id or not self._review_base_plan_id:
             raise gr.Error("검토 리비전이 없다 — 먼저 **검토 시작**을 누르세요.")
         try:
-            stale = facade.reextract_ids(head, head)
-            media = facade.stale_media(
-                self._field(head, "base_plan_id"), self._latest_package_dir(root)
-            )
-        except raw_service.RawWorkspaceError as error:
+            loaded = facade.load_head(self._review_base_plan_id)
+            plan = self.raw.segment_plan_revision(root, self._review_base_plan_id)
+        except (raw_service.RawWorkspaceError, raw_service.ReviewError) as error:
             raise gr.Error(str(error)) from error
-        stale_ids = sorted(str(item) for item in stale)
-        media_ids = sorted(str(self._field(item, "segment_id", item)) for item in media)
+        revision = loaded.revision
+        if revision.revision_id != self._review_revision_id:
+            raise gr.Error("검토 헤드가 화면이 본 뒤 바뀌었다 — **검토 새로고침** 뒤 다시 보세요.")
+        plan_ranges = {
+            (entry.asset_id, entry.core_start_pts, entry.core_end_pts) for entry in plan.entries
+        }
+        boundary_changed = sorted(
+            segment.segment_id
+            for segment in revision.segments
+            if (segment.source_id, segment.start_pts, segment.end_pts) not in plan_ranges
+        )
+        package_dir = self._latest_package_dir(root)
+        media_stale = (
+            facade.stale_media(package_dir, self._review_base_plan_id)
+            if package_dir is not None
+            else ()
+        )
         lines = [
             "**다시 뽑을 조각** — 낡은 core는 새 추출로만 갱신된다(재추출 없이 확정되지 않는다).",
             "",
-            f"- 경계 편집으로 바뀐 조각: {len(stale_ids)}개"
-            + (f" — {', '.join(f'`{i}`' for i in stale_ids[:8])}" if stale_ids else ""),
-            f"- 게시 조각이 없거나 core가 어긋난 것: {len(media_ids)}개"
-            + (f" — {', '.join(f'`{i}`' for i in media_ids[:8])}" if media_ids else ""),
+            f"- 계획과 달라진 경계를 가진 조각: {len(boundary_changed)}개"
+            + (
+                f" — {', '.join(f'`{item}`' for item in boundary_changed[:8])}"
+                if boundary_changed
+                else ""
+            ),
+            f"- 게시 매체가 없거나 core·해시가 어긋난 것: {len(media_stale)}개"
+            + (
+                f" — {', '.join(f'`{item.segment_id}`({item.reason})' for item in media_stale[:4])}"
+                if media_stale
+                else ""
+            ),
             "",
             "메타데이터 편집(메모·선택·권고)은 재추출 대상을 만들지 않는다 — 0개가 정상이다.",
             "**검토 계획 반영**으로 새 계획 리비전을 만들고 추출하면 낡은 core가 갱신된다.",
@@ -2478,22 +2525,26 @@ class RawWorkspaceUi:
         return summary.package.package_dir
 
     def review_plan_view(self, signature: str | None) -> str:
-        """검토 계획 반영 — 편집된 덮개로 새 A3 계획을 만들고 검토 헤드를 옮긴다."""
+        """검토 계획 반영 — 편집된 덮개로 새 A3 계획을 만들고 검토를 그 위로 옮긴다."""
         root = self._require_current_selection(signature)
         facade = self._review_facade(root)
-        head = facade.load_head()
-        if head is None:
+        if not self._review_revision_id or not self._review_base_plan_id:
             raise gr.Error("검토 리비전이 없다 — 먼저 **검토 시작**을 누르세요.")
-        base_plan_id = self._field(head, "base_plan_id")
         try:
-            mapping = facade.plan_from_review(base_plan_id)
-            facade.adopt_plan_review(mapping)
-        except raw_service.RawWorkspaceError as error:
+            snapshot, mapping = facade.plan_from_review(self._review_base_plan_id)
+            adopted = facade.adopt_plan_review(snapshot, mapping)
+        except (raw_service.RawWorkspaceError, raw_service.ReviewError) as error:
             raise gr.Error(str(error)) from error
-        new_plan = self._field(mapping, "new_plan_revision_id", "새 계획")
+        # 새 기본 계획의 검토 상태(시계·범위·리비전)를 화면이 곧바로 쓰게 갱신한다.
+        try:
+            self._review_head_and_rows(root)
+        except (raw_service.RawWorkspaceError, raw_service.ReviewError) as error:
+            raise gr.Error(str(error)) from error
+        _ = adopted
         extra = (
-            f"검토 편집을 새 계획 리비전 `{new_plan}`로 옮겼다 — 아래 **조각 추출 시작**으로"
-            " 뽑는다(같은 형상의 새 리비전도 새 package에 뽑힌다)."
+            f"검토 편집을 새 계획 리비전 `{mapping.new_plan_revision_id}`로 옮겼다"
+            f" (매핑 쌍 {len(mapping.pairs)}개) — 아래 **조각 추출 시작**으로 뽑는다"
+            "(새 리비전은 같은 형상이라도 새 package에 뽑히고 옛 package는 불변이다)."
         )
         return self._segment_state_markdown(root) + "\n\n" + extra
 
@@ -2505,20 +2556,34 @@ class RawWorkspaceUi:
         if not clip_file_id:
             return self._player_html(None)
         track_path = None
+        caption = None
         if want_vtt:
             segment_id = self._segment_id_for_clip(root, clip_file_id)
             if segment_id is None:
                 raise gr.Error("이 클립의 검토 자막을 못 찾았다 — 검토 리비전을 먼저 만드세요.")
+            package_dir = self._latest_package_dir(root)
+            if package_dir is None:
+                raise gr.Error("게시된 package가 없다 — 먼저 조각 추출을 끝내세요.")
             try:
-                registration = self.raw.register_review_vtt(
-                    root, segment_id, self._latest_package_dir(root)
-                )
-            except raw_service.WorkspaceModuleUnavailableError as error:
+                registration = self.raw.register_review_vtt(root, segment_id, package_dir)
+            except (
+                raw_service.RawWorkspaceError,
+                raw_service.ReviewError,
+                raw_service.WorkspaceModuleUnavailableError,
+            ) as error:
                 raise gr.Error(str(error)) from error
             if registration is None:
                 raise gr.Error("검토 자막이 비었다 — 측정된 발화가 없다(빈 성공이 아니다).")
-            track_path = f"/media/{registration.file_id}"
-        return ui_facade.media_player_html(f"/media/{clip_file_id}", track_path=track_path)
+            track_path = f"/media/{registration.registration.file_id}"
+            prov = registration.provenance
+            caption = (
+                f"출처 — 원본 `{prov.source_original_relative_path}`"
+                f"(sha {prov.source_sha256[:12]}…) · 추출 `{prov.extracted_preview_relative_path}`"
+                f"(sha {prov.extracted_sha256[:12]}…, 잰 길이 {prov.measured_media_duration}초)"
+            )
+        return ui_facade.media_player_html(
+            f"/media/{clip_file_id}", track_path=track_path, caption=caption
+        )
 
     def _segment_id_for_clip(self, root: Path, clip_file_id: str) -> str | None:
         """재생 중인 클립의 조각 ID — 등록 미디어 → 조각 표에서 짝짓는다."""
@@ -2539,41 +2604,89 @@ class RawWorkspaceUi:
     def review_export_view(
         self, signature: str | None, selected_text: str, confirm: bool
     ) -> tuple[str, str]:
-        """확정 내보내기 — 서버 소유 내보내기 ID로 불변 폴더를 만든다(확인란 필수)."""
+        """확정 내보내기 작업 제출 — **제출 때의 검토 리비전·선택**에 묶인다.
+
+        본문은 제출 순간 화면이 본 리비전과 선택을 폐쇄로 갖고, 실행 때 머리가
+        그대로인지 다시 검증한다 — 그 사이 다른 편집이 머리를 옮겼으면 실패로
+        끝나고, 나중의 머리를 몰래 내보내지 않는다. 복사 자체는 W3
+        `export_confirmed`(실제 바이트·no-replace)가 하고, 뒤이어 `verify_export`로
+        게시 검증까지 본문 안에서 마친다.
+        """
         root = self._require_current_selection(signature)
         if not confirm:
             raise gr.Error(
                 "내보내기 확인이 필요하다 — 대상과 선택을 다시 보고 확인란을 체크하세요."
             )
         facade = self._review_facade(root)  # 백엔드 없는 빌드 — 정직한 오류가 먼저다
+        if self._review_signature != self._signature_for(root):
+            raise gr.Error("검토 기록이 다른 작업공간의 것이다 — 새로고침 뒤 다시 시도하세요.")
+        if not self._review_revision_id or not self._review_base_plan_id:
+            raise gr.Error("검토 리비전이 없다 — 먼저 **검토 시작**을 누르세요.")
         package_dir = self._latest_package_dir(root)
         if package_dir is None:
             raise gr.Error("게시된 package가 없다 — 먼저 조각 추출을 끝내세요.")
-        head = facade.load_head()
-        if head is None:
-            raise gr.Error("검토 리비전이 없다 — 먼저 **검토 시작**을 누르세요.")
-        selected = [
-            item.strip().strip("`") for item in (selected_text or "").split(",") if item.strip()
-        ] or None
         try:
-            report = facade.export(
-                str(self._field(head, "revision_id", "")),
-                package_dir,
-                selected=selected,
-            )
-        except raw_service.RawWorkspaceError as error:
+            current = facade.load_head(self._review_base_plan_id).revision
+        except (raw_service.RawWorkspaceError, raw_service.ReviewError) as error:
             raise gr.Error(str(error)) from error
-        export_id = str(self._field(report, "export_id", "confirmed"))
-        destination = str(self._field(report, "destination_dir", f"clips/{export_id}"))
-        self._last_export_path = str(root / destination)
-        clip_count = self._field(report, "clip_count", None)
+        if current.revision_id != self._review_revision_id:
+            raise gr.Error(
+                f"검토 헤드가 화면이 본 뒤 바뀌었다(`{self._review_revision_id}` →"
+                f" `{current.revision_id}`) — **검토 새로고침** 뒤 다시 내보내세요."
+            )
+        known = {segment.segment_id for segment in current.segments}
+        selected_names = [
+            item.strip().strip("`") for item in (selected_text or "").split(",") if item.strip()
+        ]
+        unknown = [item for item in selected_names if item not in known]
+        if unknown:
+            raise gr.Error(
+                f"검토 표에 없는 조각이 있다: {', '.join(unknown[:3])} — ID를 다시 확인하세요."
+            )
+        selected = frozenset(selected_names) or None
+        base_plan_id = self._review_base_plan_id
+        displayed_revision = self._review_revision_id
+        signature_now = self._signature_for(root)
+
+        def body(context: Any) -> None:
+            head_now = facade.load_head(base_plan_id).revision
+            if head_now.revision_id != displayed_revision:
+                raise raw_service.RawWorkspaceError(
+                    f"내보내기가 제출 때의 리비전 `{displayed_revision}`에 묶여 있는데"
+                    f" 지금 머리는 `{head_now.revision_id}`다 — 새로 고침 뒤 다시 내보내세요."
+                )
+            outcome = facade.export_confirmed(
+                package_dir,
+                base_plan_id=base_plan_id,
+                selected_segment_ids=selected,
+                context=context,
+            )
+            facade.verify_export(outcome.destination_dir)
+            with self._selection_lock:
+                if self._root == root and self._signature_for(root) == signature_now:
+                    self._last_export_path = str(root / outcome.destination_dir)
+                    self._last_export_dir = outcome.destination_dir
+
+        fingerprint = hashlib.sha256(
+            "|".join(
+                (
+                    base_plan_id,
+                    displayed_revision,
+                    package_dir,
+                    ",".join(sorted(selected)) if selected else "*",
+                )
+            ).encode("utf-8")
+        ).hexdigest()
+        total = len(selected) if selected is not None else len(current.segments)
+        handle = self.raw.submit_job(root, REVIEW_EXPORT_JOB_KIND, fingerprint, body, total=total)
         lines = [
-            f"**확정 내보내기 완료** — 내보내기 ID `{export_id}`",
+            f"**확정 내보내기 작업 `{handle.job_id}` 제출** — 리비전 `{displayed_revision}`에"
+            " 묶었다" + (f" · 선택 {len(selected)}개" if selected is not None else " · 전체"),
             "",
-            f"- 폴더: `{destination}` (읽기전용 동결 — 덮어쓰는 길이 없다)",
-            f"- 조각: {clip_count if clip_count is not None else '전체'}"
-            + (" (선택본)" if selected else " (전체)"),
-            "- 아래 **Finder에서 열기**·**경로 복사**로 같은 자리를 연다.",
+            "- 진행은 작업 목록 새로고침으로 본다. 완료되면 **Finder에서 열기**·"
+            "**내보내기 경로 복사**가 그 자리를 가리킨다.",
+            "- 제출 뒤 검토 머리가 움직이면 이 내보내기는 실패로 끝난다 — 나중의"
+            " 머리를 몰래 내보내지 않는다.",
         ]
         return "\n".join(lines), self._package_state_markdown(root)
 
@@ -2582,7 +2695,7 @@ class RawWorkspaceUi:
         root = self._require_current_selection(signature)
         target_text = self._last_export_path
         if not target_text:
-            raise gr.Error("마지막 내보내기가 없다 — 먼저 내보내기를 끝내세요.")
+            raise gr.Error("마지막 내보내기가 없다 — 내보내기 작업이 끝난 뒤 누르세요.")
         target = Path(target_text)
         root_resolved = root.expanduser().resolve()
         if not target.is_absolute():
@@ -2611,7 +2724,7 @@ class RawWorkspaceUi:
         """경로 복사용 텍스트 — 마지막 내보내기 자리를 그대로 보여준다."""
         self._require_current_selection(signature)
         if not self._last_export_path:
-            raise gr.Error("마지막 내보내기가 없다 — 먼저 내보내기를 끝내세요.")
+            raise gr.Error("마지막 내보내기가 없다 — 내보내기 작업이 끝난 뒤 누르세요.")
         return self._last_export_path
 
     def review_cleanup_view(self, signature: str | None, confirm: bool) -> str:
@@ -2624,18 +2737,27 @@ class RawWorkspaceUi:
             result = facade.managed_cleanup()
         except raw_service.RawWorkspaceError as error:
             raise gr.Error(str(error)) from error
-        freed = self._field(result, "freed_bytes", None)
-        purged = self._field(result, "purged_paths", None) or self._field(result, "purged", ())
-        refused = self._field(result, "refused", ()) or ()
         lines = [
             "**캐시 정리 완료** — `cache/`·`previews/`만 대상이다.",
             "",
-            f"- 정리한 항목: {len(purged)}개",
-            f"- 보호 거부(원본·확정·분석·자막 등): {len(refused)}개"
-            + (f" — 예: {self._field(refused[0], 'relative_path', refused[0])}" if refused else ""),
+            f"- 지운 파일 {result.removed_files}개 · 돌려받은 용량"
+            f" {ui_facade.format_bytes(result.removed_bytes)}",
+            f"- 보호 거부(원본·확정·분석·자막 등): {len(result.refused)}개"
+            + (
+                f" — 예 `{result.refused[0].relative_path}`({result.refused[0].reason})"
+                if result.refused
+                else ""
+            ),
         ]
-        if freed is not None:
-            lines.append(f"- 돌려받은 용량: {ui_facade.format_bytes(int(freed))}")
+        if self._last_export_dir:
+            try:
+                facade.verify_export(self._last_export_dir)
+                lines.append(
+                    f"- 확정 내보내기 `{self._last_export_dir}` 정리 뒤 재검증 **통과**"
+                    " — 바이트가 그대로다(불변)."
+                )
+            except (raw_service.RawWorkspaceError, raw_service.ReviewError) as error:
+                lines.append(f"- 확정 내보내기 재검증 실패: {error}")
         lines.append("- 확정 내보내기(`clips/confirmed_*`)는 정리 대상이 아니다 — 불변이다.")
         return "\n".join(lines)
 
@@ -2648,11 +2770,32 @@ class RawWorkspaceUi:
         except raw_service.WorkspaceModuleUnavailableError as error:
             raise gr.Error(str(error)) from error
 
-    def _require_caption_identity(self, root: Path) -> dict[str, str]:
+    def _require_caption_identity(self, root: Path) -> dict[str, str | int | None]:
         """마지막으로 그린 실행 신원 — 등록·승인·편집·확정이 전부 이 신원에 묶인다."""
         if self._caption_identity is None or self._caption_signature != self._signature_for(root):
-            raise gr.Error("실행 신원이 없다 — 먼저 최종 영상을 등록하고 실행을 만드세요.")
+            raise gr.Error("실행 신원이 없다 — 먼저 최종 영상을 등록하고 추정을 보여주세요.")
         return self._caption_identity
+
+    def _caption_run_identity(self, identity: dict[str, str | int | None]) -> Any:
+        """신원 사전 → W2 `RunIdentity` — 공개 서비스 경로로만 만든다."""
+        return raw_service.caption_run_identity(
+            str(identity["revision"]), str(identity["run_id"]), str(identity["fingerprint"])
+        )
+
+    def _caption_registration(self, ws: Any, root: Path) -> Any:
+        """신원의 등록 행 — (렌더 해시, 오디오 서수)로 저장소에서 다시 찾는다.
+
+        재시작 뒤에도 같은 행이 돌아온다(등록표가 정본). 못 찾으면 조용히 새로
+        만들지 않고 정직하게 닫는다.
+        """
+        identity = self._require_caption_identity(root)
+        registration = ws.registration(str(identity["revision"]), identity["audio_ordinal"])
+        if registration is None:
+            raise gr.Error(
+                f"등록 행을 찾지 못했다 — 렌더 {str(identity['revision'])[:12]}… · 오디오"
+                f" 서수 {identity['audio_ordinal']}. 다시 등록·추정하세요."
+            )
+        return registration
 
     def caption_register_view(
         self, signature: str | None, path_text: str, source_id: str, ordinal_text: str
@@ -2675,65 +2818,78 @@ class RawWorkspaceUi:
         ws = self._caption_ws(root)
         try:
             registration = ws.register_final_video(path, source_id=sid, audio_ordinal=ordinal)
-        except raw_service.RawWorkspaceError as error:
+        except (
+            raw_service.RawWorkspaceError,
+            raw_service.CaptionWorkspaceError,
+            raw_service.FinalVideoError,
+        ) as error:
             raise gr.Error(str(error)) from error
-        status = str(self._field(registration, "status", ""))
-        revision = str(self._field(registration, "final_video_revision", ""))
         note = {
             "ready": "등록 완료 — 아래 실행 ID로 추정·실행한다.",
             "no_audio": "**오디오가 없다** — 무발화가 아니라 별개 상태다. 실행·추정은 닫혀 있다.",
             "audio_selection_required": (
-                "**오디오 트랙이 여럿이다** — 오디오 서수 칸에 트랙 번호(0, 1, …)를"
-                " 골라 다시 등록하세요."
+                f"**오디오 트랙이 {registration.audio_stream_count}개다** — 오디오 트랙"
+                " 칸에 번호(0, 1, …)를 골라 다시 등록하세요."
             ),
-        }.get(status, f"상태 `{status}`")
-        return f"**최종 영상 등록** — 리비전 `{revision}` · 상태 `{status}`\n\n{note}"
+        }.get(registration.status, f"상태 `{registration.status}`")
+        return (
+            f"**최종 영상 등록** — 리비전 `{registration.final_video_revision}` · 상태"
+            f" `{registration.status}`\n\n{note}"
+        )
 
     def caption_estimate_view(self, signature: str | None, run_id: str) -> str:
-        """실행 추정 — 모델·수명주기·실측 청크·비용 상태(로컬만, 호출 0회)."""
+        """실행 추정 — 모델·수명주기·실측 청크·경계·비용을 백엔드가 잰 값 그대로."""
         root = self._require_current_selection(signature)
         run = (run_id or "").strip() or "run-1"
         ws = self._caption_ws(root)
-        registration = self._latest_caption_registration(ws)
-        if registration is None:
-            raise gr.Error("등록된 최종 영상이 없다 — 먼저 등록하세요.")
+        ready = [item for item in ws.registrations() if item.ready]
+        if not ready:
+            raise gr.Error("준비된 등록이 없다 — 먼저 최종 영상 등록(오디오 선택 확정)을 끝내세요.")
+        registration = ready[-1]
         try:
             estimate = ws.estimate(registration, run_id=run)
-            plan = ws.plan(registration, run_id=run)
-        except raw_service.RawWorkspaceError as error:
+        except (raw_service.RawWorkspaceError, raw_service.CaptionWorkspaceError) as error:
             raise gr.Error(str(error)) from error
-        fingerprint = str(self._field(plan, "fingerprint", ""))
         self._caption_identity = {
-            "revision": str(self._field(registration, "final_video_revision", "")),
+            "revision": registration.final_video_revision,
             "run_id": run,
-            "fingerprint": fingerprint,
+            "fingerprint": estimate.identity.fingerprint,
+            "audio_ordinal": registration.audio_ordinal,
         }
         self._caption_signature = self._signature_for(root)
-        config = self.raw.settings(root)
-        chunks = self._field(estimate, "chunk_count", self._field(plan, "chunk_count", "-"))
-        samples = self._field(estimate, "sample_count", "-")
+        self._caption_chunk_count = estimate.chunk_count
+        # 새 실행 신원 — 검토 머리·큐 목록은 이 실행의 것으로 다시 만든다.
+        self._caption_head_sequence = None
+        self._caption_cue_ids = ()
+        self._caption_unplaced = {}
+        chunk_preview = ", ".join(
+            f"[{ui_facade.format_seconds(start)}~{ui_facade.format_seconds(end)}]"
+            for start, end in estimate.chunk_seconds[:4]
+        )
+        lifecycle_lines = [
+            f"  - `{item.model_id}`({item.role}) — 종료 예정 {item.shutdown_date or '없음'}"
+            for item in estimate.lifecycle
+        ]
         lines = [
-            f"**자막 실행 추정** — 실행 `{run}` · 실행 지문 `{fingerprint[:12]}…`",
+            f"**자막 실행 추정** — 실행 `{run}` · 실행 지문"
+            f" `{estimate.identity.fingerprint[:12]}…`",
             "",
-            f"- 시간 모델 `{config.models.timing_model}` · 문구 모델"
-            f" `{config.models.text_model}` · 힌트는 문구 모델에만 간다(규칙 6)",
-            f"- 수명주기: 시간 제공자 종료 예정 **{config.registry.timing_shutdown_date}**",
-            f"- 실측 청크 {chunks}개 · 샘플 {samples}",
-            "- 비용 상태 **미확인 단가는 금액을 만들지 않는다** — 실제 호출은 아래"
-            " 확인란 승인 뒤에만 시작된다.",
+            f"- 문구 모델 `{estimate.text_model}` · 시간 모델 `{estimate.timing_model}`"
+            " — 힌트·keywords는 문구 모델에만 간다(규칙 6)",
+            f"- 실측 청크 {estimate.chunk_count}개 · 샘플 {estimate.sample_count:,}"
+            f" ({estimate.sample_rate:,}Hz {estimate.channels}채널 · 원점"
+            f" {ui_facade.format_seconds(estimate.origin)}초)",
+            f"- 청크 경계(정규화 축): {chunk_preview or '(없음)'}"
+            + (" …" if len(estimate.chunk_seconds) > 4 else ""),
+            f"- 예상 비용 **${estimate.estimated_cost_usd}** · 상한 예약"
+            f" ${estimate.reserved_cost_usd} — 백엔드가 잰 값 그대로(지어내지 않는다).",
+            "- 수명주기(등록표 확인 값):",
+            *lifecycle_lines,
             "",
             "아래 확인란을 체크하고 **자막 생성 실행**을 누르면 이 지문에 묶인 승인이"
             " 서버에 남는다.",
         ]
         return "\n".join(lines)
-
-    def _latest_caption_registration(self, ws: Any) -> Any:
-        """마지막 등록 — 백엔드 목록이 주는 것을 그대로(여기서 다시 만들지 않는다)."""
-        listing = self._field(ws, "registrations", None)
-        if listing is None or callable(listing):
-            return None
-        items = list(listing)
-        return items[-1] if items else None
 
     def caption_run_view(self, signature: str | None, run_id: str, confirm: bool) -> str:
         """자막 생성 실행 — 화면이 본 지문에 묶인 승인 뒤에만 제공자를 만든다."""
@@ -2748,22 +2904,23 @@ class RawWorkspaceUi:
                 f"승인된 실행(`{identity['run_id']}`)과 요청 실행(`{run}`)이 다르다 —"
                 " 추정을 다시 보고 승인하세요."
             )
-        registration = self._latest_caption_registration(ws)
-        if registration is None:
-            raise gr.Error("등록된 최종 영상이 없다 — 먼저 등록하세요.")
+        registration = self._caption_registration(ws, root)
+        if not registration.ready:
+            raise gr.Error("등록이 준비되지 않았다 — 오디오 선택을 확정하고 다시 추정하세요.")
         try:
             plan = ws.plan(registration, run_id=run)
             ws.approve(plan, note="브라우저 화면 확인란 승인")
             timing, text = self._caption_providers_for_action()
             body = ws.run_body(registration, run, timing_provider=timing, text_provider=text)
-        except raw_service.RawWorkspaceError as error:
+        except (raw_service.RawWorkspaceError, raw_service.CaptionWorkspaceError) as error:
             raise gr.Error(str(error)) from error
+        total = self._caption_chunk_count or 1
         handle = self.raw.submit_job(
             root,
             "caption_run",
-            identity["fingerprint"],
+            str(identity["fingerprint"]),
             body,
-            total=max(1, int(self._field(plan, "chunk_count", 1) or 1)),
+            total=max(1, total),
         )
         return (
             f"자막 실행 작업 `{handle.job_id}` 제출"
@@ -2790,66 +2947,77 @@ class RawWorkspaceUi:
         run = (run_id or "").strip() or "run-1"
         ws = self._caption_ws(root)  # 백엔드 없는 빌드 — 정직한 오류가 먼저다
         identity = self._require_caption_identity(root)
-        registration = self._latest_caption_registration(ws)
-        _identity = raw_service.caption_run_identity(**identity)
+        if identity["run_id"] != run:
+            raise gr.Error(
+                f"화면이 본 실행은 `{identity['run_id']}`다 — 그 실행의 검토부터 여세요."
+            )
+        run_identity = self._caption_run_identity(identity)
+        registration = self._caption_registration(ws, root)
         try:
-            bundle = ws.review_bundle(identity["revision"], run, identity["fingerprint"])
+            bundle = ws.review_bundle(run_identity)
             wave = ws.waveform(registration, bin_seconds=0.05)
-        except raw_service.RawWorkspaceError as error:
+        except (raw_service.RawWorkspaceError, raw_service.CaptionWorkspaceError) as error:
             raise gr.Error(str(error)) from error
-        rows = self._cue_rows(bundle)
-        warnings = self._field(bundle, "warnings", ()) or ()
-        unplaced = self._field(bundle, "unplaced", ()) or ()
-        peaks = self._field(wave, "peaks", ()) or ()
+        state = bundle.state
+        # 화면이 본 머리 번호·큐 목록 — 편집·확정은 이 값에 묶인다(W2 머리 충돌 게이트).
+        self._caption_head_sequence = state.head_revision if state.head_revision is not None else 0
+        rows = [
+            ui_facade.CueRowView(
+                cue_id=row.cue.cue_id,
+                start_seconds=ui_facade.format_seconds(row.cue.start),
+                end_seconds=ui_facade.format_seconds(row.cue.end),
+                whisper_text=row.cue.whisper_text,
+                auto_text=row.cue.auto_text,
+                basis=row.cue.text_basis,
+                chars_per_second=row.chars_per_second,
+            )
+            for row in state.rows
+        ]
+        self._caption_cue_ids = tuple(row.cue_id for row in rows)
+        self._caption_unplaced = {view.item.index: view.item.text for view in state.unplaced}
         lines = [
-            f"**자막 검토** — 실행 `{run}` · 큐 {len(rows)}개",
+            f"**자막 검토** — 실행 `{run}` · 큐 {len(rows)}개 · 검토 머리"
+            f" {self._caption_head_sequence}",
             "",
             ui_facade.cue_table_markdown(rows),
             "",
         ]
-        if warnings:
+        if not state.text_model_complete or not state.timing_model_complete:
             lines.append(
-                f"열린 경고 {len(warnings)}개 — 아래 편집 칸으로 `경고 허용`을 남긴다:"
-                f" 예 `{self._field(warnings[0], 'key', warnings[0])}`"
+                "- **실패한 청크가 있는 초안이다** — 문구/시간 일부 청크가 비었다"
+                "(증거·초안은 보존되었다). 편집으로 메우거나 다시 실행하세요."
+            )
+        if state.warnings:
+            shown = ", ".join(f"`{item.key}`" for item in state.warnings[:5])
+            lines.append(
+                f"열린 경고 {len(state.warnings)}개 — 편집 칸 `경고 허용`로 남긴다: {shown}"
             )
         else:
             lines.append("열린 경고가 없다.")
-        if unplaced:
-            first = unplaced[0]
+        unresolved = [view for view in state.unplaced if view.resolution is None]
+        if unresolved:
+            first = unresolved[0]
             lines.append(
-                f"미대응 말 {len(unplaced)}개 — 아래 편집 칸으로 `미대응 해결`을 남긴다:"
-                f" 0번 예시 `{str(self._field(first, 'text', ''))[:24]}…`"
+                f"미대응 말 {len(unresolved)}개(전체 {len(state.unplaced)}개 중) — 편집 칸"
+                f" `미대응 해결`로 남긴다: {first.item.index}번 `{first.item.text[:24]}…`"
             )
-        lines += ["", ui_facade.waveform_svg(list(peaks))]
+        elif state.unplaced:
+            lines.append(
+                f"미대응 {len(state.unplaced)}개 전부 처리되었다 — 확정 게이트가 열려 있다."
+            )
+        lines += [
+            "",
+            ui_facade.waveform_svg([peak / wave.peak_scale for peak in wave.peaks]),
+        ]
         return "\n".join(lines)
 
-    def _cue_rows(self, bundle: Any) -> list[ui_facade.CueRowView]:
-        """큐 행 값 — whisper 골격 글자와 채택 문구를 나란히(초당 글자 수까지)."""
-        cues = self._field(bundle, "cues", ()) or self._field(bundle, "rows", ()) or ()
-        rows: list[ui_facade.CueRowView] = []
-        for cue in cues:
-            start = self._field(cue, "start", None)
-            end = self._field(cue, "end", None)
-            start_ms = int(float(Fraction(str(start)) * 1000)) if start is not None else 0
-            end_ms = int(float(Fraction(str(end)) * 1000)) if end is not None else 0
-            whisper = str(
-                self._field(cue, "whisper_text", self._field(cue, "timing_text", "")) or ""
+    def _require_caption_head(self) -> int:
+        """화면이 본 검토 머리 번호 — 편집·확정의 기대 머리(W2 갱신 손실 방지)."""
+        if self._caption_head_sequence is None:
+            raise gr.Error(
+                "검토 머리를 모른다 — 먼저 **검토 새로고침**으로 화면이 본 머리를 만드세요."
             )
-            auto = str(self._field(cue, "auto_text", self._field(cue, "text", "")) or "")
-            basis = str(self._field(cue, "text_basis", self._field(cue, "basis", "-")) or "-")
-            duration = max((end_ms - start_ms) / 1000.0, 0.001)
-            rows.append(
-                ui_facade.CueRowView(
-                    cue_id=str(self._field(cue, "cue_id", "")),
-                    start_ms=start_ms,
-                    end_ms=end_ms,
-                    whisper_text=whisper,
-                    auto_text=auto,
-                    basis=basis,
-                    chars_per_second=len(auto) / duration,
-                )
-            )
-        return rows
+        return self._caption_head_sequence
 
     def caption_edit_view(
         self,
@@ -2867,7 +3035,8 @@ class RawWorkspaceUi:
         root = self._require_current_selection(signature)
         identity = self._require_caption_identity(root)
         ws = self._caption_ws(root)
-        _identity = raw_service.caption_run_identity(**identity)
+        run_identity = self._caption_run_identity(identity)
+        expected = self._require_caption_head()
 
         def _int_field(value: str, what: str) -> int:
             cleaned = (value or "").strip()
@@ -2883,68 +3052,121 @@ class RawWorkspaceUi:
             if operation == "글자 교정":
                 if not target or not text.strip():
                     raise gr.Error("큐 ID와 새 글자를 모두 적으세요.")
-                ws.edit_cue_text(_identity, target, text.strip())
+                edited = ws.edit_cue_text(
+                    run_identity, target, text.strip(), expected_head=expected
+                )
             elif operation == "시각 조정":
-                ws.edit_cue_time(
-                    _identity,
+                if not target:
+                    raise gr.Error("큐 ID를 적으세요.")
+                edited = ws.edit_cue_time(
+                    run_identity,
                     target,
                     start=raw_service.caption_ms(_int_field(start_ms, "시작 ms")),
                     end=raw_service.caption_ms(_int_field(end_ms, "끝 ms")),
+                    expected_head=expected,
                 )
             elif operation == "큐 나누기":
+                if not target or "|" not in (text or ""):
+                    raise gr.Error("큐 ID와 나눌 글자(`앞|뒤`)를 적으세요.")
                 at = raw_service.caption_ms(_int_field(start_ms, "나눌 시각 ms"))
                 left, right = (text or "").split("|", 1)
-                ws.split_cue(_identity, target, at, left.strip(), right.strip())
+                edited = ws.split_cue(
+                    run_identity, target, at, left.strip(), right.strip(), expected_head=expected
+                )
             elif operation == "큐 합치기":
                 other = (second_id or "").strip().strip("`")
                 if not target or not other:
                     raise gr.Error("맞닿은 두 큐 ID를 적으세요.")
-                ws.merge_cues(_identity, target, other)
+                edited = ws.merge_cues(run_identity, target, other, expected_head=expected)
             elif operation == "새 큐 추가":
-                ws.add_manual_cue(
-                    _identity,
+                if not text.strip():
+                    raise gr.Error("새 큐 글자를 적으세요.")
+                edited = ws.add_manual_cue(
+                    run_identity,
                     raw_service.caption_ms(_int_field(start_ms, "시작 ms")),
                     raw_service.caption_ms(_int_field(end_ms, "끝 ms")),
                     text.strip(),
                     note="미대응 말을 수동 시각으로 살렸다",
+                    expected_head=expected,
                 )
             elif operation == "경고 허용":
                 key = (warning_key or "").strip()
                 if not key:
                     raise gr.Error("허용할 경고 key를 적으세요.")
-                ws.allow_warning(_identity, key, "브라우저에서 봤다")
+                edited = ws.allow_warning(
+                    run_identity, key, "브라우저에서 봤다", expected_head=expected
+                )
             elif operation == "미대응 해결":
-                ws.resolve_unplaced_item(
-                    _identity,
-                    _int_field(index_text, "미대응 번호"),
+                index = _int_field(index_text, "미대응 번호")
+                item_text = text.strip() or self._caption_unplaced.get(index)
+                if item_text is None:
+                    raise gr.Error(
+                        f"미대응 {index}번의 글자를 모른다 — 검토 새로고침 뒤 글자칸에"
+                        " 그대로 적어주세요."
+                    )
+                edited = ws.resolve_unplaced_item(
+                    run_identity,
+                    index,
+                    item_text,
                     placed_cue_id=target or None,
+                    expected_head=expected,
                 )
             elif operation == "무발화 기록":
-                ws.record_no_speech(_identity, note=text.strip())
+                edited = ws.record_no_speech(
+                    run_identity, note=text.strip(), expected_head=expected
+                )
             else:
                 raise gr.Error(f"모르는 편집 종류다: {operation!r}")
-        except raw_service.RawWorkspaceError as error:
+        except raw_service.ManualHeadConflict as error:
+            raise gr.Error(
+                f"편집이 늦었다 — 앞선 편집 위에 덮지 못한다({error}). **검토 새로고침**"
+                " 뒤 다시 편집하세요."
+            ) from error
+        except (raw_service.RawWorkspaceError, raw_service.CaptionWorkspaceError) as error:
             raise gr.Error(str(error)) from error
-        return self.caption_review_view(signature, identity["run_id"])
+        self._caption_head_sequence = edited.sequence
+        return self.caption_review_view(signature, str(identity["run_id"]))
 
     def caption_confirm_view(self, signature: str | None, run_id: str, confirm: bool) -> str:
-        """확정 — 전체 큐 명시 확인 뒤에만 final 게시가 열린다(게이트는 백엔드)."""
+        """확정 — 화면이 짚은 큐 전부·기대 머리와 함께 final 게시를 연다(게이트는 백엔드)."""
         root = self._require_current_selection(signature)
         run = (run_id or "").strip() or "run-1"
         if not confirm:
             raise gr.Error("확정 확인이 필요하다 — 전 큐를 검토했는지 보고 확인란을 체크하세요.")
         ws = self._caption_ws(root)  # 백엔드 없는 빌드 — 정직한 오류가 먼저다
         identity = self._require_caption_identity(root)
-        _identity = raw_service.caption_run_identity(**identity)
+        if identity["run_id"] != run:
+            raise gr.Error(
+                f"승인된 실행(`{identity['run_id']}`)과 요청 실행(`{run}`)이 다르다 —"
+                " 검토를 다시 여세요."
+            )
+        expected = self._require_caption_head()
+        cue_ids = self._caption_cue_ids
+        if not cue_ids:
+            raise gr.Error("확인할 큐 목록이 없다 — 먼저 **검토 새로고침**으로 큐를 보세요.")
         try:
-            exported = ws.confirm(_identity, note="브라우저 화면 전 큐 검토 확인")
-        except raw_service.RawWorkspaceError as error:
+            exported = ws.confirm(
+                self._caption_run_identity(identity),
+                expected_head=expected,
+                cue_ids=cue_ids,
+                note="브라우저 화면 전 큐 검토 확인",
+            )
+        except raw_service.ManualHeadConflict as error:
+            raise gr.Error(
+                f"확정이 늦었다 — 검토 머리가 바뀌었다({error}). **검토 새로고침** 뒤"
+                " 다시 확인하세요."
+            ) from error
+        except (raw_service.RawWorkspaceError, raw_service.CaptionWorkspaceError) as error:
             raise gr.Error(str(error)) from error
         links = self._register_final_subtitles(root, exported)
         lines = [
-            f"**자막 확정 완료** — 실행 `{run}`",
+            f"**자막 확정 완료** — 실행 `{run}` · 검토 머리 {expected} · 큐"
+            f" {len(cue_ids)}개 명시 확인",
             "",
             "- 확정 게이트(미해결 미대응·미허용 경고·시각 무효)를 전부 지났다.",
+            f"- 내보내기 지문 `{exported.export.export_sha256[:12]}…` · SRT sha"
+            f" `{exported.export.srt_sha256[:12]}…` · VTT sha"
+            f" `{exported.export.vtt_sha256[:12]}…`",
         ]
         if links:
             lines += [
@@ -2955,32 +3177,28 @@ class RawWorkspaceUi:
         return "\n".join(lines)
 
     def _register_final_subtitles(self, root: Path, exported: Any) -> list[tuple[str, str]]:
-        """확정 SRT·VTT를 제공 가능한 자리로 등록해 내려받기 링크를 만든다."""
-        final = self._field(exported, "final_export", exported)
-        candidates: list[tuple[str, Path]] = []
-        for name in ("srt_path", "vtt_path"):
-            value = self._field(final, name, None)
-            if value:
-                candidates.append(("SRT" if name == "srt_path" else "VTT", Path(str(value))))
-        if not candidates:
-            directory = self._field(final, "final_dir", None)
-            if directory:
-                base = Path(str(directory))
-                for suffix, label in ((".ko.srt", "SRT"), (".ko.vtt", "VTT")):
-                    path = base / f"final{suffix}"
-                    if path.is_file():
-                        candidates.append((label, path))
+        """확정 SRT·VTT를 내용 해시 봉인 이름으로 등록해 내려받기 링크를 만든다.
+
+        검토 저장소의 final 자리(`review/captions/final/…`)는 브라우저 제공 대상이
+        아니다(§4.4). 여기는 그 바이트를 `final/captions/published/<내용sha24>.srt|.vtt`
+        검증 사본으로 옮겨 등록한다 — 같은 내용은 같은 자리(멱등), 제공은 등록
+        ID로만 한다.
+        """
+        final = exported.export
         links: list[tuple[str, str]] = []
-        for label, path in candidates:
-            if not path.is_file():
+        for label, source_path in (("SRT", final.srt), ("VTT", final.vtt)):
+            if not source_path or not Path(source_path).is_file():
                 continue
-            target = root / "final" / "captions" / "published" / path.name
+            source = Path(source_path)
+            digest = hashlib.sha256(source.read_bytes()).hexdigest()
+            target = root / "final" / "captions" / "published" / f"{digest[:24]}{source.suffix}"
             target.parent.mkdir(parents=True, exist_ok=True)
             if not target.is_file():
-                shutil.copyfile(path, target)
+                shutil.copyfile(source, target)
             registered = None
+            relative = target.relative_to(root).as_posix()
             for item in self.raw.list_media(root, kind="artifact"):
-                if item.relative_path == str(target.relative_to(root)):
+                if item.relative_path == relative:
                     registered = item
                     break
             if registered is None:
@@ -2995,17 +3213,17 @@ class RawWorkspaceUi:
         ws = self._caption_ws(root)  # 백엔드 없는 빌드 — 정직한 오류가 먼저다
         identity = self._require_caption_identity(root)
         try:
-            bundle = ws.review_bundle(identity["revision"], run, identity["fingerprint"])
-        except raw_service.RawWorkspaceError as error:
+            bundle = ws.review_bundle(self._caption_run_identity(identity))
+        except (raw_service.RawWorkspaceError, raw_service.CaptionWorkspaceError) as error:
             raise gr.Error(str(error)) from error
-        rows = self._cue_rows(bundle)
-        warnings = self._field(bundle, "warnings", ()) or ()
-        unplaced = self._field(bundle, "unplaced", ()) or ()
-        resolved = sum(1 for row in rows if row.basis == "manual")
+        state = bundle.state
+        resolved = sum(1 for row in state.rows if row.cue.text_basis == "manual")
         lines = [
-            f"**실행 개요** — 실행 `{run}` · 큐 {len(rows)}개(수동 {resolved}개 포함)",
+            f"**실행 개요** — 실행 `{run}` · 큐 {len(state.rows)}개(수동 {resolved}개 포함)",
             "",
-            f"- 열린 경고 {len(warnings)}개 · 미대응 {len(unplaced)}개",
+            f"- 열린 경고 {len(state.warnings)}개 · 미대응 {len(state.unplaced)}개",
+            f"- 청크 게이트 — 시간 완료 {state.timing_model_complete} · 문구 완료"
+            f" {state.text_model_complete} (실패 상태를 숨기지 않는다)",
             "- 원시 모델 응답은 브라우저에 제공되지 않는다 — 검토 저장소의 비제공 자리에"
             " 불변으로 남을 뿐이다.",
             "- 재구문 분석(재파싱)은 새 리비전에서만 — 낡은 확정 바이트는 다시 쓰지 않는다.",

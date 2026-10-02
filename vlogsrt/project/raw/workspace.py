@@ -444,7 +444,10 @@ def _store_schema_statements() -> tuple[tuple[str, ...], ...]:
         if module_name == "review_workspace_store":
             collected.append(tuple(module.REVIEW_WORKSPACE_SCHEMA_STATEMENTS))
         else:
-            collected.append(tuple(module.caption_schema_sql()))
+            # `caption_schema_sql()`은 여러 문장을 ';'로 이은 **한 덩어리 문자열**이다 —
+            # 문장 tuple은 `CAPTION_SCHEMA_STATEMENTS`가 정본이다(문자열을 tuple()로
+            # 감싸면 글자별로 쪼개진다).
+            collected.append(tuple(module.CAPTION_SCHEMA_STATEMENTS))
     return tuple(collected)
 
 
