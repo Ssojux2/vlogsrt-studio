@@ -31,10 +31,13 @@ from vlogsrt.project.raw.review_projection import (
 from vlogsrt.project.raw.segment_review import (
     DISPLAY_VIDEO_ONLY,
     DISPLAY_VIDEO_WITH_TRANSCRIPT,
+    SELECTION_INCLUDED,
     SPEECH_ANALYSIS_FAILED,
     SPEECH_AUDIO_ABSENT,
     SPEECH_DETECTED,
     SPEECH_UNCONFIRMED_EMPTY,
+    ReviewRevision,
+    ReviewSegment,
     ReviewViewState,
     SourceClock,
     initial_revision,
@@ -156,11 +159,11 @@ def test_media_start_maps_to_local_time_exactly():
 def test_delayed_pcm_and_av_offset_project_through_one_bridge():
     # PCM이 2초 늦게 시작: 정규화 축 0초가 파일 2초다.
     timed = timed_utterances((utterance("u1", 0.5, 1.5, "인사"),), Fraction(2))
-    # 파일축 0초가 원본 PTS 1초에 앉아 있다고 잰 다리 하나로 잇는다.
-    bridge = ProjectionClock(TB_NUM, TB_DEN, Fraction(SECOND))
-    result = project(revision_with_speech(), timed, window=clip(3, 5), clock_=bridge)
+    # 파일축 0초가 원본 PTS 8초에 앉아 있다고 잰 다리 하나로 잇는다.
+    bridge = ProjectionClock(TB_NUM, TB_DEN, Fraction(8 * SECOND))
+    result = project(revision_with_speech(), timed, window=clip(10, 22), clock_=bridge)
     (cue,) = result.cues
-    # 파일 2.5~3.5초 → 원본 3.5~4.5초 → 클립 국소 0.5~1.5초.
+    # 파일 2.5~3.5초 → 원본 10.5~11.5초 → 클립 국소 0.5~1.5초.
     assert (cue.start, cue.end) == (Fraction(1, 2), Fraction(3, 2))
     assert cue.utterance_id == "u1"
 
@@ -258,6 +261,174 @@ def test_projection_contract_refusals():
             (),
             ProjectionClock(1, 60000, Fraction(0)),
         )
+
+
+# ─────────────────────────────────────────────────────────────
+#  실측 물리 길이와 낡은 클립 — A5F1
+# ─────────────────────────────────────────────────────────────
+
+
+def clock_video3() -> SourceClock:
+    """실측 허가 미디어의 원본 — 영상 3초(75틱 @1/25), 소리는 더 길게 잴 수 있다."""
+    return make_source_clock("source_v", "sha-v", 1, 25, 0, 75, Fraction(1, 25))
+
+
+def entry_v(segment_id, start_pts, end_pts, status):
+    return PlanEntry(
+        segment_id,
+        start_pts,
+        end_pts,
+        status,
+        asset_id="source_v",
+        time_base_num=1,
+        time_base_den=25,
+    )
+
+
+def revision_single_v():
+    """한 조각이 원본 전체(0~75틱)인 리비전 — 마지막 클립 시나리오의 최소형."""
+    return initial_revision(
+        "proj", "plan-1", (clock_video3(),), (entry_v("v1", 0, 75, SPEECH_DETECTED),)
+    )
+
+
+def revision_split_v():
+    """두 조각(0~40·40~75틱) — v1은 마지막 프레임에 닿지 않는다."""
+    return initial_revision(
+        "proj",
+        "plan-1",
+        (clock_video3(),),
+        (entry_v("v1", 0, 40, SPEECH_AUDIO_ABSENT), entry_v("v2", 40, 75, SPEECH_DETECTED)),
+    )
+
+
+def project_v(revision, segment_id, window, utterances):
+    return project_review_vtt(
+        revision, segment_id, window, utterances, ProjectionClock(1, 25, Fraction(0)), language="ko"
+    )
+
+
+def test_measured_duration_preserves_audio_tail_beyond_last_frame():
+    timed = timed_utterances(
+        (utterance("t1", 3.5, 4, "마지막 인사"), utterance("t2", 4.5, 6, "꼬리까지")),
+        Fraction(0),
+    )
+    window = ClipWindow("clip_v", "source_v", 0, 75, Fraction(5))
+    result = project_v(revision_single_v(), "v1", window, timed)
+    cues = {cue.utterance_id: cue for cue in result.cues}
+    # 영상은 3초에서 끝나지만 잰 물리 창은 5초 — 3.5~4초 발화가 큐로 산다.
+    assert (cues["t1"].start, cues["t1"].end) == (Fraction(7, 2), Fraction(4))
+    assert cues["t1"].boundary_clipped is False
+    # 잘리는 기준도 잰 창이다: 5초를 넘는 큐만 잘리고 표시된다.
+    assert (cues["t2"].start, cues["t2"].end) == (Fraction(9, 2), Fraction(5))
+    assert cues["t2"].boundary_clipped is True
+    assert BOUNDARY_REVIEW_NOTE in result.status_notes
+    # 측정이 없으면 옛대로 영상 길이가 창이다 — 같은 발화를 담지 못한다.
+    legacy = project_v(revision_single_v(), "v1", ClipWindow("clip_v", "source_v", 0, 75), timed)
+    assert legacy.cues == ()
+
+
+def test_final_clip_with_handle_and_measured_tail_projects():
+    timed = timed_utterances((utterance("t1", 2, 2.5, "핸들 뒤"),), Fraction(0))
+    # v2 클립: 앞 핸들 30~40틱 — 창 [30,75], 영상 1.8초 + 잰 소리꼬리로 5초.
+    window = ClipWindow("c2", "source_v", 30, 75, Fraction(5))
+    result = project_v(revision_split_v(), "v2", window, timed)
+    (cue,) = result.cues
+    # 파일 2.0~2.5초 → 클립 시작 1.2초를 빼면 국소 0.8~1.3초.
+    assert (cue.start, cue.end) == (Fraction(4, 5), Fraction(13, 10))
+    assert cue.boundary_clipped is False
+
+
+def test_nonfinal_clip_cannot_claim_measured_extension():
+    revision = revision_split_v()
+    # v1 창 [0,40]: 영상 1.6초인데 2초를 주장 — 마지막 프레임(75틱)에 닿지 않았다.
+    window = ClipWindow("c1", "source_v", 0, 40, Fraction(2))
+    with pytest.raises(ProjectionError, match="마지막 영상 프레임"):
+        project_v(revision, "v1", window, ())
+    # 마찬가지로 넓은 원본의 중간 창도 임의 연장은 못 한다.
+    middle = ClipWindow("c", "source_a", 8 * SECOND, 24 * SECOND, Fraction(20))
+    with pytest.raises(ProjectionError, match="마지막 영상 프레임"):
+        project(revision_with_speech(), (), window=middle)
+
+
+def test_measured_duration_validation_refusals():
+    whole = {
+        "clip_id": "clip_v",
+        "source_id": "source_v",
+        "media_start_pts": 0,
+        "media_end_pts": 75,
+    }
+    for bad in (5, 5.0, True, "5", float("inf"), Fraction(0), Fraction(-1)):
+        with pytest.raises(ProjectionError, match="Fraction|양수"):
+            project_v(
+                revision_single_v(), "v1", ClipWindow(**whole, measured_media_duration=bad), ()
+            )
+    # 잰 길이가 영상 범위보다 짧으면 실측과 창이 어긋난 것이다.
+    with pytest.raises(ProjectionError, match="짧다"):
+        project_v(
+            revision_single_v(), "v1", ClipWindow(**whole, measured_media_duration=Fraction(1)), ()
+        )
+    # 창 좌표의 격자 검사는 측정 유무와 무관하게 그대로다.
+    with pytest.raises(ProjectionError, match="격자·범위 밖"):
+        project(
+            revision_with_speech(),
+            (),
+            window=ClipWindow("c", "source_a", SECOND + 1, 22 * SECOND, Fraction(12)),
+        )
+
+
+def test_measured_equal_to_video_matches_default_bytes():
+    revision = revision_with_speech()
+    timed = timed_utterances((utterance("u1", 11, 12, "같은 문장"),), Fraction(0))
+    default = project(revision, timed)  # clip(10,22), 측정 없음
+    measured_same = project_review_vtt(
+        revision,
+        "a2",
+        ClipWindow("clip_a2", "source_a", 10 * SECOND, 22 * SECOND, Fraction(12)),
+        timed,
+        projection_clock(),
+    )
+    assert serialize_review_vtt(measured_same) == serialize_review_vtt(default)
+    # 마지막 클립에서 영상 길이와 같게 잰 경우도 바이트가 같다.
+    final_default = ClipWindow("f", "source_a", 10 * SECOND, 40 * SECOND)
+    final_measured = ClipWindow("f", "source_a", 10 * SECOND, 40 * SECOND, Fraction(30))
+    assert serialize_review_vtt(project(revision, timed, window=final_default)) == (
+        serialize_review_vtt(project(revision, timed, window=final_measured))
+    )
+
+
+def test_stale_clip_missing_core_is_refused_and_handles_remain():
+    revision = revision_with_speech()
+    timed = timed_utterances((utterance("u1", 11, 12, "경계 재조정 뒤"),), Fraction(0))
+    # 같은 원본이어도 core를 덮지 못하는 창은 낡은 미디어다.
+    with pytest.raises(ProjectionError, match="stale_media"):
+        project(revision, timed, window=ClipWindow("old", "source_a", 12 * SECOND, 22 * SECOND))
+    with pytest.raises(ProjectionError, match="stale_media"):
+        project(revision, timed, window=ClipWindow("old", "source_a", 10 * SECOND, 20 * SECOND))
+    # 핸들(core보다 넓은 창)은 그대로 유효하다.
+    handled = project(revision, timed, window=ClipWindow("h", "source_a", 8 * SECOND, 24 * SECOND))
+    (cue,) = handled.cues
+    assert (cue.start, cue.end) == (Fraction(3), Fraction(4))
+
+
+def test_missing_source_clock_is_refused():
+    orphan = ReviewSegment(
+        segment_id="a2",
+        source_id="source_a",
+        source_order=0,
+        segment_order=0,
+        start_pts=10 * SECOND,
+        end_pts=22 * SECOND,
+        speech_status=SPEECH_DETECTED,
+        visual_tags=(),
+        recommendation="normal",
+        override_recommendation=None,
+        selection=SELECTION_INCLUDED,
+        notes="",
+    )
+    revision = ReviewRevision("proj", "plan-1", 0, (), (orphan,), None, None)
+    with pytest.raises(ProjectionError, match="시계가 리비전에 없다"):
+        project(revision, (), window=clip(10, 22))
 
 
 # ─────────────────────────────────────────────────────────────

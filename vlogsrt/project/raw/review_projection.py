@@ -14,6 +14,10 @@
   없고, 없는 이유(`unavailable`·`failure`·`noaudio`·`unconfirmed_empty`)가
   서로 다른 기록으로 남는다(§7.3). 경계에 걸린 큐는 클립 안으로 잘리고
   '경계 전사 확인' 표시가 남는다 — 문장을 고쳐 쓰지 않는다.
+- **창의 길이도 잰 사실만 따른다.** 기본은 영상 범위가 곧 창 길이지만, 물리
+  미디어를 잰 길이(`ClipWindow.measured_media_duration`)를 명시하면 그 값이
+  창이 된다 — 소리 트랙이 영상 마지막 프레임 뒤로 더 남은 마지막 클립의
+  소리꼬리를, 원본 시계에 가짜 프레임을 만들지 않고 담는다.
 - **검토용일 뿐이다.** 최종 자막 파이프라인·API·ffmpeg·파일 쓰기는 없다.
   표시 모드 토글과 아무 상관이 없다(§10.3).
 """
@@ -122,12 +126,18 @@ class ProjectionClock:
 
 @dataclass(frozen=True, slots=True)
 class ClipWindow:
-    """투영의 창 — 실제로 뽑힌 클립의 원본 좌표 범위(핸들이면 core보다 넓다, §6.5)."""
+    """투영의 창 — 실제로 뽑힌 클립의 원본 좌표 범위(핸들이면 core보다 넓다, §6.5).
+
+    `measured_media_duration`은 뽑힌 물리 미디어의 잰 길이(클립 국소 초, 정확
+    유리수)다. 소리 트랙이 영상 마지막 프레임 뒤로 더 남는 마지막 클립에서만
+    영상 범위보다 길어질 수 있다 — 잰 사실을 창에만 싣고 원본 시계는 그대로다.
+    """
 
     clip_id: str
     source_id: str
     media_start_pts: int
     media_end_pts: int
+    measured_media_duration: Fraction | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -178,7 +188,7 @@ def project_review_vtt(
             f"투영 시계 timebase {clock.time_base_num}/{clock.time_base_den}가 원본 "
             f"{source_clock.time_base_num}/{source_clock.time_base_den}와 다르다"
         )
-    _require_clip_window(source_clock, clip)
+    _require_clip_window(source_clock, clip, segment)
     if segment.speech_status != SPEECH_DETECTED:
         return ReviewVttResult(
             segment_id=segment.segment_id,
@@ -212,7 +222,9 @@ def _require_source_clock(
     return source_clock
 
 
-def _require_clip_window(source_clock: SourceClock, clip: ClipWindow) -> None:
+def _require_clip_window(
+    source_clock: SourceClock, clip: ClipWindow, segment: ReviewSegment
+) -> None:
     if clip.media_start_pts >= clip.media_end_pts:
         raise ProjectionError(
             f"클립 {clip.clip_id!r}: media 범위가 뒤집혔다 "
@@ -223,6 +235,44 @@ def _require_clip_window(source_clock: SourceClock, clip: ClipWindow) -> None:
             raise ProjectionError(
                 f"클립 {clip.clip_id!r}: {pts}가 원본 {source_clock.source_id!r}의 격자·범위 밖이다"
             )
+    _require_core_contained(clip, segment)
+    _require_measured_duration(source_clock, clip)
+
+
+def _require_core_contained(clip: ClipWindow, segment: ReviewSegment) -> None:
+    """같은 원본이라도 core를 덮지 못하는 창은 낡은 미디어다 — 속여 쓰지 않는다."""
+    if clip.media_start_pts > segment.start_pts or clip.media_end_pts < segment.end_pts:
+        window = f"[{clip.media_start_pts}, {clip.media_end_pts}]"
+        core = f"[{segment.start_pts}, {segment.end_pts}]"
+        raise ProjectionError(
+            f"stale_media: 클립 {clip.clip_id!r} 창 {window}가 조각 "
+            f"{segment.segment_id!r} core {core}를 덮지 않는다"
+        )
+
+
+def _require_measured_duration(source_clock: SourceClock, clip: ClipWindow) -> None:
+    """잰 물리 길이의 정당성 — 유한·양수 유리수, 영상 범위 이상, 꼬리는 마지막 클립만."""
+    measured = clip.measured_media_duration
+    if measured is None:
+        return
+    if not isinstance(measured, Fraction):
+        raise ProjectionError(
+            f"클립 {clip.clip_id!r}: measured_media_duration은 유한한 정확 유리수 "
+            f"Fraction이어야 한다: {measured!r}"
+        )
+    if measured <= 0:
+        raise ProjectionError(f"클립 {clip.clip_id!r}: 잰 미디어 길이는 양수여야 한다: {measured}")
+    video_duration = Fraction(clip.media_end_pts - clip.media_start_pts) * source_clock.time_base
+    if measured < video_duration:
+        raise ProjectionError(
+            f"클립 {clip.clip_id!r}: 잰 길이 {measured}초가 영상 범위 {video_duration}초보다 "
+            f"짧다 — 실측과 창이 어긋난다"
+        )
+    if measured > video_duration and clip.media_end_pts != source_clock.end_pts:
+        raise ProjectionError(
+            f"클립 {clip.clip_id!r}: 원본 {source_clock.source_id!r} 마지막 영상 프레임까지 "
+            f"닿지 않은 클립은 소리꼬리로 길어질 수 없다"
+        )
 
 
 def _project_cues(
@@ -234,7 +284,7 @@ def _project_cues(
 ) -> ReviewVttResult:
     """감지된 발화의 클립 국소 큐 — 자르기는 창 경계에서만, 글자는 못 고친다."""
     offset = (clock.file_zero_pts - Fraction(clip.media_start_pts)) * clock.time_base
-    duration = Fraction(clip.media_end_pts - clip.media_start_pts) * clock.time_base
+    duration = _clip_local_duration(clip, clock.time_base)
     cues: list[ReviewVttCue] = []
     notes: list[str] = []
     for item in sorted(utterances, key=lambda unit: (unit.start_file, unit.utterance_id)):
@@ -255,6 +305,13 @@ def _project_cues(
         cues=tuple(cues),
         status_notes=tuple(notes),
     )
+
+
+def _clip_local_duration(clip: ClipWindow, time_base: Fraction) -> Fraction:
+    """창의 국소 길이 — 잰 값이 있으면 그것이 물리 창, 없으면 영상 범위(옛 호환)."""
+    if clip.measured_media_duration is not None:
+        return clip.measured_media_duration
+    return Fraction(clip.media_end_pts - clip.media_start_pts) * time_base
 
 
 def _clip_utterance(
