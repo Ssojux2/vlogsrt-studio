@@ -65,12 +65,27 @@ def test_same_view_create_switches_the_whole_view(tmp_path: Path, local_socket: 
     server.build_blocks()  # 실제 배선 — 만들기·열기 출력에 서명 state가 들어가 있다
 
     first = server.create_workspace_view("A", str(tmp_path / "a"))
-    workspace_md, signature_a, media_dd, jobs_dd, jobs_md, settings_md, ingest_md, ingest_dd = first
+    (
+        workspace_md,
+        signature_a,
+        media_dd,
+        jobs_dd,
+        jobs_md,
+        settings_md,
+        ingest_md,
+        ingest_dd,
+        segment_md,
+        extract_dd,
+        package_md,
+        clip_dd,
+    ) = first
     assert signature_a is not None
     assert "A" in workspace_md
     assert "자막 프리셋" in settings_md  # 설정 요약도 같은 화면에 내려왔다(빈 안내 아님)
     assert "조사" in ingest_md  # 가져오기 패널도 같은 화면에 내려왔다(새 상태 안내)
-    _ = media_dd, jobs_dd, jobs_md, ingest_dd
+    assert "분할" in segment_md  # A3 분할 패널도 같은 화면에 내려왔다
+    assert "package" in package_md  # 편집용 폴더 패널도 같은 화면에 내려왔다
+    _ = media_dd, jobs_dd, jobs_md, ingest_dd, extract_dd, clip_dd
 
     second = server.create_workspace_view("B", str(tmp_path / "b"))
     assert second[1] is not None and second[1] != signature_a  # 서명이 B로 갱신

@@ -28,6 +28,9 @@ from vlogsrt import preprocess
 from vlogsrt.project.raw import source_order
 from vlogsrt.project.raw.jobs import JobCancelledError, JobContext
 from vlogsrt.project.raw.models import (
+    CAPTURE_STATUS_INVALID,
+    CAPTURE_STATUS_UNINSPECTED,
+    CAPTURE_STATUS_VALID,
     MEDIA_SUFFIXES,
     ORDER_BASIS_USER_CONFIRMED,
     IngestCopyError,
@@ -110,9 +113,11 @@ class InspectionError(IngestError):
 class SourceInspection:
     """실제 미디어 조사로만 채우는 값 — 모르면 `None` 그대로다(추측 금지).
 
-    `capture_time`은 신뢰할 촬영 시각 근거다. A2의 ffprobe 조사자는 이 값을
-    알려주지 않으므로 항상 `None`(미조사)이다 — 더 풍부한 메타데이터가
-    묶이면 이 계약 그대로 값을 채운다(코디네이터 ACK).
+    `capture_time`은 신뢰할 촬영 시각 근거다. `capture_time_status`는 그 근거의
+    상태다 — `valid`일 때만 값이 있고 순서 정렬에 쓴다. `invalid`는 컨테이너가
+    적은 무언가가 있었으나 파싱·시간대·상식 bound를 못 넘었다는 뜻이고,
+    `uninspected`는 아예 묻지 않은 것이다. 어느 쪽도 mtime으로 메워지지
+    않는다(§6.2).
     """
 
     duration_seconds: float | None
@@ -120,6 +125,7 @@ class SourceInspection:
     height: int | None
     audio_streams: int | None
     capture_time: str | None
+    capture_time_status: str = CAPTURE_STATUS_UNINSPECTED
 
 
 MediaInspect = Callable[[Path], SourceInspection]
@@ -127,19 +133,32 @@ MediaInspect = Callable[[Path], SourceInspection]
 
 
 def ffprobe_media_inspector(path: Path) -> SourceInspection:
-    """실제 조사자 — ffprobe를 `vlogsrt.preprocess` 공개 함수로만 만난다.
+    """실제 조사자 — `probe_raw_media` 한 번으로 길이·기하·오디오·촬영 시각을 묶는다.
 
-    비디오 스트림이 없거나 깨진 파일은 `RuntimeError`로 죽는다(preprocess 계약).
-    그 예외를 스캔이 `InspectionError` 사유로 바꿔 기록한다.
+    촬영 시각은 컨테이너 선언을 파싱해 **유효할 때만** 묶는다(ISO-8601·시간대·
+    상식 bound — preprocess의 `CreationTime` 판정). 못 미치면 값은 버리고
+    `invalid`로 남긴다 — 있는데 못 믿는 것과 아예 없는 것을 갈라 기록한다.
+    비디오 스트림이 없거나 깨진 파일은 `RuntimeError`로 죽고(preprocess 계약),
+    스캔이 `InspectionError` 사유로 바꿔 기록한다.
     """
-    duration = preprocess.probe_duration(path)
-    summary = preprocess.probe_media_summary(path)
+    probe = preprocess.probe_raw_media(path)
+    creation = probe.creation_time
+    if creation.valid and creation.utc is not None:
+        status = CAPTURE_STATUS_VALID
+        capture_time: str | None = creation.utc.isoformat()
+    elif creation.raw:
+        status = CAPTURE_STATUS_INVALID
+        capture_time = None
+    else:
+        status = CAPTURE_STATUS_UNINSPECTED
+        capture_time = None
     return SourceInspection(
-        duration_seconds=duration,
-        width=summary.width,
-        height=summary.height,
-        audio_streams=summary.audio_streams,
-        capture_time=None,  # ffprobe는 신뢰할 촬영 시각을 주지 않는다 — 미조사로 남긴다
+        duration_seconds=float(probe.duration),
+        width=probe.video.width,
+        height=probe.video.height,
+        audio_streams=len(probe.audio),
+        capture_time=capture_time,
+        capture_time_status=status,
     )
 
 

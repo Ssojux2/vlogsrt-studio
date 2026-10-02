@@ -16,7 +16,7 @@ import pytest
 from vlogsrt.project.raw import ingest
 from vlogsrt.project.raw import service as raw
 from vlogsrt.project.raw.models import GlobalOrderError, WorkspaceVersionError
-from vlogsrt.project.raw.workspace import DB_NAME
+from vlogsrt.project.raw.workspace import DB_NAME, DB_SCHEMA_VERSION
 
 TERMINAL = frozenset({"succeeded", "failed", "cancelled"})
 
@@ -156,8 +156,8 @@ def test_global_order_without_ready_assets_is_an_error(workspace: Path) -> None:
         service.confirm_global_source_order(workspace)
 
 
-def test_v2_workspace_upgrades_to_v3(workspace: Path, tmp_path: Path) -> None:
-    """받아들인 v2(A2) 작업공간도 열린다 — 전체 순서 표만 덧붙고 데이터는 그대로."""
+def test_v2_workspace_upgrades_to_current(workspace: Path, tmp_path: Path) -> None:
+    """받아들인 v2(A2) 작업공간도 열린다 — A3 표까지 덧붙고 데이터는 그대로."""
     service = raw.RawWorkspaceService()
     _import(service, workspace, _card(tmp_path, "card-a", {"a1.mp4": b"1"}))
     (asset,) = service.list_source_assets(workspace)
@@ -170,7 +170,7 @@ def test_v2_workspace_upgrades_to_v3(workspace: Path, tmp_path: Path) -> None:
 
     restarted = raw.RawWorkspaceService()  # 재시작 — 디스크의 v2를 연다
     status = restarted.open_workspace(workspace)
-    assert status.db_schema_version == "raw-workspace-db/3"
+    assert status.db_schema_version == DB_SCHEMA_VERSION
     assert restarted.list_source_assets(workspace)[0].status == "ready"
     revision = restarted.confirm_global_source_order(workspace)
     assert [entry.asset_id for entry in revision.entries] == [asset.asset_id]

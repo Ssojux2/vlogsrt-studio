@@ -9,6 +9,7 @@ DB가 자산·작업 상태의 정본이고, 내부 경로는 **작업공간 루
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import secrets
@@ -23,6 +24,7 @@ from pathlib import Path
 
 import tomli_w
 
+from vlogsrt.project.raw import segmentation
 from vlogsrt.project.raw.config import (
     WORKFLOW_SCHEMA_VERSION,
     RawWorkflowConfig,
@@ -35,6 +37,7 @@ from vlogsrt.project.raw.models import (
     MEDIA_STATUS_READY,
     MEDIA_SUFFIXES,
     SERVABLE_MEDIA_STATUSES,
+    ClipArtifact,
     GlobalOrderEntry,
     GlobalOrderRevision,
     MediaNotAllowedError,
@@ -42,7 +45,12 @@ from vlogsrt.project.raw.models import (
     MediaNotReadyError,
     MediaRegistration,
     MediaTargetChangedError,
+    PackageError,
+    PackageRevision,
+    PlanNotFoundError,
     RawWorkspaceError,
+    SegmentCoverage,
+    SegmentPlanSnapshot,
     SourceAsset,
     SourceAssetDraft,
     SourceOrderEntry,
@@ -51,17 +59,19 @@ from vlogsrt.project.raw.models import (
     WorkspaceNotFoundError,
     WorkspaceVersionError,
 )
+from vlogsrt.project.raw.package import next_package_dir
 
 PROJECT_TOML_NAME = "project.toml"
 DB_NAME = "project.sqlite3"
-DB_SCHEMA_VERSION = "raw-workspace-db/3"
+DB_SCHEMA_VERSION = "raw-workspace-db/4"
 DB_SCHEMA_VERSION_V1 = "raw-workspace-db/1"
 DB_SCHEMA_VERSION_V2 = "raw-workspace-db/2"
+DB_SCHEMA_VERSION_V3 = "raw-workspace-db/3"
 """A1이 v1을, A2가 `source_assets`·`source_order_revisions`를 더한 v2를, A2F1이
-`global_order_revisions`를 더한 v3을 만들었다. 덧붙이기만 한 옛 버전 열기는 한
-트랜잭션으로 올리고 meta에 기록한다 — 이미 있는 설정·미디어·작업·작업공간
-신원은 그대로다. 이 프로그램이 모르는 버전은 여전히 조용히 마이그레이션하지
-않고 실패한다(코디네이터 ACK)."""
+`global_order_revisions`를 더한 v3을, A3이 분할 계획·조각·package 표를 더한 v4를
+만들었다. 덧붙이기만 한 옛 버전 열기는 한 트랜잭션으로 올리고 meta에 기록한다 —
+이미 있는 설정·미디어·작업·작업공간 신원은 그대로다. 이 프로그램이 모르는
+버전은 여전히 조용히 마이그레이션하지 않고 실패한다(코디네이터 ACK)."""
 WORKSPACE_ID_KEY = "workspace_id"
 """meta 표의 작업공간 신원 키 — 생성 때 한 번 정해지고 절대 바뀌지 않는다."""
 
@@ -79,6 +89,23 @@ def new_order_revision_id() -> str:
 def new_global_order_revision_id() -> str:
     """전체 순서 리비전의 전역 유일 불투명 ID — 배치 순서와 표기를 갈라 놓는다."""
     return f"gorder_{secrets.token_hex(8)}"
+
+
+def new_segment_plan_revision_id() -> str:
+    """분할 계획 리비전의 전역 유일 불투명 ID — 한 번 만들어지면 불변이다."""
+    return f"splan_{secrets.token_hex(8)}"
+
+
+def new_clip_id(entry_digest: str, package_dir: str, job_fingerprint: str) -> str:
+    """조각의 전역 유일 ID — 조각 지문 **+ package 신원**에서 나온다.
+
+    같은 계획을 다른 package(다른 프로파일·핸들)로 추출하면 조각 지문만으로는
+    같은 ID가 나와 PRIMARY KEY가 부딪힌다(루트 재현: 같은 계획 MP4→MOV). ID는
+    package_dir·작업 지문(계획+프로파일+핸들+도구)까지 묶는다 — 같은 package
+    재개에서는 지문이 그대로라 ID도 그대로다(§6.3).
+    """
+    digest = hashlib.sha256(f"{package_dir}|{job_fingerprint}|{entry_digest}".encode()).hexdigest()
+    return f"clip_{digest[:20]}"
 
 
 def new_media_file_id() -> str:
@@ -192,11 +219,74 @@ _INGEST_SCHEMA_STATEMENTS: tuple[str, ...] = (
     )
     """,
 )
+
+_A3_SCHEMA_STATEMENTS: tuple[str, ...] = (
+    """
+    CREATE TABLE IF NOT EXISTS segment_plan_revisions (
+        revision_id TEXT PRIMARY KEY,
+        order_revision_id TEXT NOT NULL,
+        basis TEXT NOT NULL,
+        entries_json TEXT NOT NULL,
+        coverage_json TEXT NOT NULL,
+        fingerprint TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS package_revisions (
+        package_dir TEXT PRIMARY KEY,
+        plan_revision_id TEXT NOT NULL,
+        order_revision_id TEXT NOT NULL,
+        profile_name TEXT NOT NULL,
+        handles_before TEXT NOT NULL,
+        handles_after TEXT NOT NULL,
+        job_fingerprint TEXT NOT NULL,
+        status TEXT NOT NULL,
+        clip_total INTEGER NOT NULL,
+        clip_published INTEGER NOT NULL DEFAULT 0,
+        error TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS clip_artifacts (
+        clip_id TEXT PRIMARY KEY,
+        package_dir TEXT NOT NULL,
+        segment_id TEXT NOT NULL,
+        asset_id TEXT NOT NULL,
+        source_order INTEGER NOT NULL,
+        segment_order INTEGER NOT NULL,
+        profile_name TEXT NOT NULL,
+        relative_path TEXT NOT NULL,
+        status TEXT NOT NULL,
+        content_sha256 TEXT,
+        size_bytes INTEGER,
+        file_id TEXT,
+        time_base_num INTEGER NOT NULL,
+        time_base_den INTEGER NOT NULL,
+        core_start_pts INTEGER NOT NULL,
+        core_end_pts INTEGER NOT NULL,
+        media_start_pts INTEGER NOT NULL,
+        media_end_pts INTEGER NOT NULL,
+        core_local_start TEXT NOT NULL,
+        core_local_end TEXT NOT NULL,
+        media_local_duration TEXT NOT NULL,
+        frame_count INTEGER,
+        error TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_clip_artifacts_package"
+    " ON clip_artifacts (package_dir, source_order, segment_order)",
+)
 """A2·A2F1이 더한 표 — 가져오기 자산의 출처·검증 상태, 배치 불변 순서 리비전,
-배치를 넘는 전체 불변 순서 리비전(§13.1). `entries_json`은 각각
-[{asset_id, ordinal, basis_note}]·[{asset_id, ordinal, batch_dir}] 배열의
-정렬된 JSON이다. 문장 목록로 두는 이유는 하나의 트랜잭션 안에서 실행하기
-위해서다 — `executescript`는 먼저 commit하므로 마이그레이션의 원자성을 깬다."""
+배치를 넘는 전체 불변 순서 리비전(§13.1). A3가 분할 계획 리비전(불변)·package
+기록(예약이 곧 경합 경계)·조각 행(서버 소유 추출 상태)을 더했다. `entries_json`은
+[{asset_id, ordinal, basis_note}]·[{asset_id, ordinal, batch_dir}] 배열의 정렬된
+JSON이다. 문장 목록로 두는 이유는 하나의 트랜잭션 안에서 실행하기 위해서다 —
+`executescript`는 먼저 commit하므로 마이그레이션의 원자성을 깬다."""
 
 
 def _now() -> str:
@@ -310,9 +400,40 @@ def _insert_order_revision(
 
 
 def _apply_ingest_schema(connection: sqlite3.Connection) -> None:
-    """A2 표를 (있으면 그대로 두고) 만든다 — 생성·마이그레이션이 같은 문장을 쓴다."""
-    for statement in _INGEST_SCHEMA_STATEMENTS:
+    """A2·A3 표를 (있으면 그대로 두고) 만든다 — 생성·마이그레이션이 같은 문장을 쓴다."""
+    for statement in _INGEST_SCHEMA_STATEMENTS + _A3_SCHEMA_STATEMENTS:
         connection.execute(statement)
+
+
+def _clip_values(clip: ClipArtifact) -> tuple[object, ...]:
+    """조각 한 행의 SQL 매개변수 — 신원은 계획에서, 상태는 서버에서 온 그대로."""
+    return (
+        clip.clip_id,
+        clip.package_dir,
+        clip.segment_id,
+        clip.asset_id,
+        clip.source_order,
+        clip.segment_order,
+        clip.profile_name,
+        clip.relative_path,
+        clip.status,
+        clip.content_sha256,
+        clip.size_bytes,
+        clip.file_id,
+        clip.time_base_num,
+        clip.time_base_den,
+        clip.core_start_pts,
+        clip.core_end_pts,
+        clip.media_start_pts,
+        clip.media_end_pts,
+        clip.core_local_start,
+        clip.core_local_end,
+        clip.media_local_duration,
+        clip.frame_count,
+        clip.error,
+        clip.created_at,
+        clip.updated_at,
+    )
 
 
 def _write_project_toml(root: Path, name: str, created_at: str) -> None:
@@ -388,7 +509,7 @@ class RawWorkspace:
         identity = cls._read_identity(root)
         workspace = cls(root, identity["name"], identity["created_at"])
         version = workspace.db_schema_version()
-        if version in (DB_SCHEMA_VERSION_V1, DB_SCHEMA_VERSION_V2):
+        if version in (DB_SCHEMA_VERSION_V1, DB_SCHEMA_VERSION_V2, DB_SCHEMA_VERSION_V3):
             workspace._upgrade_ingest_tables()
         elif version != DB_SCHEMA_VERSION:
             raise WorkspaceVersionError(
@@ -693,6 +814,10 @@ class RawWorkspace:
         """ID → (실제 경로, 크기, 상태). 등록 때의 지문과 어긋나면 거부한다.
 
         바뀐 대상을 조용히 다시 제공하지 않는다 — 다시 등록하라고 알린다(§4.4).
+        지문은 size·mtime이다: inode는 같은 파일이 디스크를 옮기면 변하므로(§9.2
+        — 작업공간은 통째로 옮겨도 다시 열려야 한다) 여기에 넣지 않는다. 내용
+        검증은 계층마다 따로 산다 — 원본은 가져오기·계획의 SHA-256, 조각은 게시
+        때 찍은 해시의 재검증이다.
         """
         row = self._media_row(file_id)
         if str(row["status"]) not in SERVABLE_MEDIA_STATUSES:
@@ -702,10 +827,8 @@ class RawWorkspace:
         if not target.exists():
             raise MediaNotFoundError(f"등록된 파일이 없다: {file_id}")
         probed = target.lstat()
-        fingerprint_changed = (
-            probed.st_size != int(row["size_bytes"])
-            or probed.st_mtime_ns != int(row["mtime_ns"])
-            or probed.st_ino != int(row["inode"])
+        fingerprint_changed = probed.st_size != int(row["size_bytes"]) or probed.st_mtime_ns != int(
+            row["mtime_ns"]
         )
         if fingerprint_changed or not self._free_of_symlinks(target):
             raise MediaTargetChangedError(
@@ -1002,3 +1125,316 @@ class RawWorkspace:
             created_at=str(row["created_at"]),
             updated_at=str(row["updated_at"]),
         )
+
+    # ── A3 — 분할 계획 리비전(불변) ─────────────────────────────
+
+    def insert_segment_plan_revision(self, snapshot: SegmentPlanSnapshot) -> None:
+        """분할 계획 리비전 한 행 — 만들기만 한다. 고치는 길은 없다(§6.5).
+
+        조각·덮음 증명은 값 그대로 JSON으로 묻는다(§9.2 — DB는 위치와 지문).
+        같은 리비전 ID의 두 번 삽입은 어김없이 실패한다.
+        """
+        with self.connect() as connection:
+            connection.execute(
+                "INSERT INTO segment_plan_revisions (revision_id, order_revision_id, basis,"
+                " entries_json, coverage_json, fingerprint, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    snapshot.revision_id,
+                    snapshot.order_revision_id,
+                    snapshot.basis,
+                    segmentation.snapshot_to_json(snapshot.entries),
+                    json.dumps(
+                        [asdict(item) for item in snapshot.coverage],
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    ),
+                    snapshot.fingerprint,
+                    snapshot.created_at,
+                ),
+            )
+            connection.commit()
+
+    def segment_plan_revision(self, revision_id: str) -> SegmentPlanSnapshot:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM segment_plan_revisions WHERE revision_id = ?", (revision_id,)
+            ).fetchone()
+        if row is None:
+            raise PlanNotFoundError(f"없는 분할 계획 리비전: {revision_id}")
+        return SegmentPlanSnapshot(
+            revision_id=str(row["revision_id"]),
+            order_revision_id=str(row["order_revision_id"]),
+            basis=str(row["basis"]),
+            entries=segmentation.snapshot_from_json(str(row["entries_json"])),
+            coverage=tuple(
+                SegmentCoverage(**entry) for entry in json.loads(str(row["coverage_json"]))
+            ),
+            fingerprint=str(row["fingerprint"]),
+            created_at=str(row["created_at"]),
+        )
+
+    def list_segment_plan_revisions(self) -> tuple[SegmentPlanSnapshot, ...]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT revision_id FROM segment_plan_revisions ORDER BY rowid"
+            ).fetchall()
+        snapshots = [self.segment_plan_revision(str(row[0])) for row in rows]
+        return tuple(snapshots)
+
+    # ── A3 — package 예약·갱신(경합 경계) ────────────────────────
+
+    def reserve_package(
+        self,
+        *,
+        plan_revision_id: str,
+        order_revision_id: str,
+        profile_name: str,
+        handles_before: str,
+        handles_after: str,
+        job_fingerprint: str,
+        clip_total: int,
+    ) -> PackageRevision:
+        """package 디렉터리를 한 트랜잭션으로 예약한다 — 같은 자리는 두 벌이 안 생긴다.
+
+        다음 번호를 읽고 삽입하는 사이를 `BEGIN IMMEDIATE`로 막는다: 동시에 온 두
+        추출이 같은 `package_000001`을 받지 않는다. 이미 있는 package_dir(재시도)은
+        같은 계획·같은 지문일 때 그 행을 그대로 돌려준다 — 어긋나면 예약 실패다.
+        """
+        now = _now()
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            existing_dirs = [
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT package_dir FROM package_revisions ORDER BY package_dir"
+                ).fetchall()
+            ]
+            package_dir = next_package_dir(existing_dirs)
+            try:
+                connection.execute(
+                    "INSERT INTO package_revisions (package_dir, plan_revision_id,"
+                    " order_revision_id, profile_name, handles_before, handles_after,"
+                    " job_fingerprint, status, clip_total, clip_published, created_at,"
+                    " updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'reserved', ?, 0, ?, ?)",
+                    (
+                        package_dir,
+                        plan_revision_id,
+                        order_revision_id,
+                        profile_name,
+                        handles_before,
+                        handles_after,
+                        job_fingerprint,
+                        clip_total,
+                        now,
+                        now,
+                    ),
+                )
+                connection.commit()
+            except sqlite3.IntegrityError:
+                connection.rollback()
+                raise PackageError(
+                    "package 예약이 경합에 걸렸다 — 잠시 뒤 다시 시도하거나 진행 중"
+                    " 작업 상태를 확인하세요"
+                ) from None
+        return self.package_revision(package_dir)  # type: ignore[return-value]
+
+    def update_package(self, package_dir: str, **changes: object) -> PackageRevision:
+        """package 행의 서버 소유 상태 갱신 — 상태·게시 수·오류만 고친다."""
+        allowed = {"status", "clip_published", "error"}
+        illegal = set(changes) - allowed
+        if illegal:
+            raise RawWorkspaceError(f"package의 이 필드는 못 고친다: {sorted(illegal)}")
+        columns = ", ".join(f"{name} = ?" for name in changes)
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            cursor = connection.execute(
+                f"UPDATE package_revisions SET {columns}, updated_at = ? WHERE package_dir = ?",
+                (*changes.values(), _now(), package_dir),
+            )
+            connection.commit()
+        if cursor.rowcount != 1:
+            raise PackageError(f"없는 package: {package_dir}")
+        revision = self.package_revision(package_dir)
+        assert revision is not None
+        return revision
+
+    def package_revision(self, package_dir: str) -> PackageRevision | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM package_revisions WHERE package_dir = ?", (package_dir,)
+            ).fetchone()
+        return None if row is None else self._package_revision(row)
+
+    def list_package_revisions(self) -> tuple[PackageRevision, ...]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT package_dir FROM package_revisions ORDER BY package_dir"
+            ).fetchall()
+        revisions = [self.package_revision(str(row[0])) for row in rows]
+        return tuple(revision for revision in revisions if revision is not None)
+
+    @staticmethod
+    def _package_revision(row: sqlite3.Row) -> PackageRevision:
+        return PackageRevision(
+            package_dir=str(row["package_dir"]),
+            plan_revision_id=str(row["plan_revision_id"]),
+            order_revision_id=str(row["order_revision_id"]),
+            profile_name=str(row["profile_name"]),
+            handles_before=str(row["handles_before"]),
+            handles_after=str(row["handles_after"]),
+            job_fingerprint=str(row["job_fingerprint"]),
+            status=str(row["status"]),
+            clip_total=int(row["clip_total"]),
+            clip_published=int(row["clip_published"]),
+            error=None if row["error"] is None else str(row["error"]),
+            created_at=str(row["created_at"]),
+            updated_at=str(row["updated_at"]),
+        )
+
+    # ── A3 — 조각 행(서버 소유 추출 상태) ────────────────────────
+
+    def ensure_clip_row(self, clip: ClipArtifact) -> ClipArtifact:
+        """조각 행을 (있으면 그대로 두고) 만든다 — 재개가 같은 ID·번호를 유지하는 길.
+
+        clip_id는 계획 지문에서 유도되므로, 같은 계획을 다시 실행해도 같은 행에
+        붙는다. 이미 있는 행의 신원 필드가 어긋나면 조용히 덮어쓰지 않고 실패한다.
+        """
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT clip_id FROM clip_artifacts WHERE clip_id = ?", (clip.clip_id,)
+            ).fetchone()
+            if row is None:
+                connection.execute(
+                    "INSERT INTO clip_artifacts (clip_id, package_dir, segment_id, asset_id,"
+                    " source_order, segment_order, profile_name, relative_path, status,"
+                    " content_sha256, size_bytes, file_id, time_base_num, time_base_den,"
+                    " core_start_pts, core_end_pts, media_start_pts, media_end_pts,"
+                    " core_local_start, core_local_end, media_local_duration, frame_count,"
+                    " error, created_at, updated_at)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,"
+                    " ?, ?, ?, ?, ?)",
+                    _clip_values(clip),
+                )
+                connection.commit()
+                return clip
+            connection.rollback()
+        existing = self.clip_artifact(clip.clip_id)
+        identity = (
+            existing.package_dir,
+            existing.segment_id,
+            existing.asset_id,
+            existing.source_order,
+            existing.segment_order,
+            existing.profile_name,
+            existing.relative_path,
+            existing.time_base_num,
+            existing.time_base_den,
+            existing.core_start_pts,
+            existing.core_end_pts,
+        )
+        given = (
+            clip.package_dir,
+            clip.segment_id,
+            clip.asset_id,
+            clip.source_order,
+            clip.segment_order,
+            clip.profile_name,
+            clip.relative_path,
+            clip.time_base_num,
+            clip.time_base_den,
+            clip.core_start_pts,
+            clip.core_end_pts,
+        )
+        if identity != given:
+            raise PackageError(
+                f"조각 {clip.clip_id}의 신원이 기록과 다르다 — 같은 ID로 다른 조각을 붙일 수 없다"
+            )
+        return existing
+
+    def update_clip_artifact(self, clip_id: str, **changes: object) -> ClipArtifact:
+        """조각 행의 추출 상태 갱신 — 해시·등록·상태·오류만 고친다. 계획 신원 불변."""
+        allowed = {
+            "status",
+            "content_sha256",
+            "size_bytes",
+            "file_id",
+            "media_start_pts",
+            "media_end_pts",
+            "core_local_start",
+            "core_local_end",
+            "media_local_duration",
+            "frame_count",
+            "error",
+        }
+        illegal = set(changes) - allowed
+        if illegal:
+            raise RawWorkspaceError(f"조각의 이 필드는 못 고친다: {sorted(illegal)}")
+        columns = ", ".join(f"{name} = ?" for name in changes)
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            cursor = connection.execute(
+                f"UPDATE clip_artifacts SET {columns}, updated_at = ? WHERE clip_id = ?",
+                (*changes.values(), _now(), clip_id),
+            )
+            connection.commit()
+        if cursor.rowcount != 1:
+            raise PackageError(f"없는 조각: {clip_id}")
+        return self.clip_artifact(clip_id)
+
+    def clip_artifact(self, clip_id: str) -> ClipArtifact:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM clip_artifacts WHERE clip_id = ?", (clip_id,)
+            ).fetchone()
+        if row is None:
+            raise PackageError(f"없는 조각: {clip_id}")
+        return self._clip_artifact(row)
+
+    def list_clip_artifacts(self, package_dir: str) -> tuple[ClipArtifact, ...]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM clip_artifacts WHERE package_dir = ?"
+                " ORDER BY source_order, segment_order, clip_id",
+                (package_dir,),
+            ).fetchall()
+        return tuple(self._clip_artifact(row) for row in rows)
+
+    @staticmethod
+    def _clip_artifact(row: sqlite3.Row) -> ClipArtifact:
+        return ClipArtifact(
+            clip_id=str(row["clip_id"]),
+            package_dir=str(row["package_dir"]),
+            segment_id=str(row["segment_id"]),
+            asset_id=str(row["asset_id"]),
+            source_order=int(row["source_order"]),
+            segment_order=int(row["segment_order"]),
+            profile_name=str(row["profile_name"]),
+            relative_path=str(row["relative_path"]),
+            status=str(row["status"]),
+            content_sha256=None if row["content_sha256"] is None else str(row["content_sha256"]),
+            size_bytes=None if row["size_bytes"] is None else int(row["size_bytes"]),
+            file_id=None if row["file_id"] is None else str(row["file_id"]),
+            time_base_num=int(row["time_base_num"]),
+            time_base_den=int(row["time_base_den"]),
+            core_start_pts=int(row["core_start_pts"]),
+            core_end_pts=int(row["core_end_pts"]),
+            media_start_pts=int(row["media_start_pts"]),
+            media_end_pts=int(row["media_end_pts"]),
+            core_local_start=str(row["core_local_start"]),
+            core_local_end=str(row["core_local_end"]),
+            media_local_duration=str(row["media_local_duration"]),
+            frame_count=None if row["frame_count"] is None else int(row["frame_count"]),
+            error=None if row["error"] is None else str(row["error"]),
+            created_at=str(row["created_at"]),
+            updated_at=str(row["updated_at"]),
+        )
+
+    def media_registration_by_path(self, relative_path: str) -> MediaRegistration | None:
+        """그 상대 경로의 등록 행 — 재개가 같은 file_id를 유지하는지 보는 길."""
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM media_files WHERE relative_path = ?", (relative_path,)
+            ).fetchone()
+        return None if row is None else self._registration(row)

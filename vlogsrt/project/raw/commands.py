@@ -1,10 +1,11 @@
-"""`vlogsrt media` — A2 가져오기의 진단·자동화 CLI(계획 §15.2).
+"""`vlogsrt media` — A2 가져오기·A3 분할 추출의 진단·자동화 CLI(계획 §15.2).
 
 브라우저가 기본 실행 경로다. 이 명령은 시험·진단·자동화용이며, 공개 서비스
 (`vlogsrt.project.raw.service`)만을 부른다 — 이 계층이 네트워크를 아는 길은
-없다. `import --confirm`이 승인하는 것은 **로컬 복사뿐**이다: 어떤 플래그도
-유료 호출·온라인 분석을 켜지 않는다(코디네이터 ACK). 이 모듈은 `cli.py`를
-import하지 못한다(계약 §1) — 조립은 `vlogsrt/project/commands.py`가 맡는다.
+없다. `import --confirm`이 승인하는 것은 **로컬 복사뿐**이고, `extract`가 하는
+일도 로컬 ffmpeg 추출뿐이다: 어떤 플래그도 유료 호출·온라인 분석을 켜지
+않는다(코디네이터 ACK). 이 모듈은 `cli.py`를 import하지 못한다(계약 §1) —
+조립은 `vlogsrt/project/commands.py`가 맡는다.
 """
 
 from __future__ import annotations
@@ -12,16 +13,22 @@ from __future__ import annotations
 import argparse
 import time
 from collections.abc import Callable
+from fractions import Fraction
 from pathlib import Path
 
 from vlogsrt import log
 from vlogsrt.project.raw import service as raw_service
+from vlogsrt.project.raw.models import PlannedInterval
+from vlogsrt.project.raw.segmentation import DEFAULT_TILE_SECONDS
 
 JOB_WAIT_SECONDS = 600.0
-"""복사 작업 완료 대기 상한 — 진단 명령이 무한히 묶여 있지 않게 한다."""
+"""복사·추출 작업 완료 대기 상한 — 진단 명령이 무한히 묶여 있지 않게 한다."""
 
 JOB_POLL_SECONDS = 0.2
 """작업 상태 확인 간격 — DB 갱신을 얻어맞지 않게 짧게 쉰다."""
+
+EXTRACT_WAIT_SECONDS = 3600.0
+"""추출 작업 대기 상한 — 조각 수만큼 ffmpeg이 도는 시간을 담는다."""
 
 _TERMINAL_STATUSES = frozenset({"succeeded", "failed", "cancelled"})
 
@@ -144,9 +151,10 @@ def _print_proposal(proposal: raw_service.IngestProposal) -> None:
             if inspection.duration_seconds is None
             else f"{inspection.duration_seconds:.1f}초"
         )
+        capture = _capture_note(inspection)
         log.out(
             f"{index:3d}. {candidate.source_relative_path} · "
-            f"{_human_bytes(candidate.size_bytes)} · {duration} · 촬영 시각 미조사"
+            f"{_human_bytes(candidate.size_bytes)} · {duration} · 촬영 시각 {capture}"
         )
     for item in proposal.scan.rejected:
         log.warn(f"제외: {item.source_relative_path} — {item.reason}")
@@ -156,6 +164,15 @@ def _print_proposal(proposal: raw_service.IngestProposal) -> None:
         f"공간: 필요 {_human_bytes(space.required_bytes)}(여유 포함) / "
         f"남은 {_human_bytes(space.free_bytes)} → {verdict}"
     )
+
+
+def _capture_note(inspection: raw_service.SourceInspection) -> str:
+    """촬영 시각 표기 — 유효하면 시각, 무효면 '무효', 아니면 '미조사'(§6.2)."""
+    if inspection.capture_time is not None:
+        return inspection.capture_time
+    if inspection.capture_time_status == "invalid":
+        return "무효(선언이 있으나 못 믿는다)"
+    return "미조사"
 
 
 def _await_ingest_job(service: raw_service.RawWorkspaceService, root: Path, job_id: str) -> int:
@@ -198,6 +215,9 @@ def media_command(args: argparse.Namespace) -> int:
         "import": cmd_import,
         "retry": cmd_retry,
         "inspect": cmd_inspect,
+        "plan": cmd_plan,
+        "extract": cmd_extract,
+        "clips": cmd_clips,
     }
     return handlers[args.media_command](args)
 
@@ -205,10 +225,12 @@ def media_command(args: argparse.Namespace) -> int:
 def add_media_parser(sub: argparse._SubParsersAction) -> None:
     """`vlogsrt media` 하위 명령 정의 — 조립은 이 함수 하나로 끝난다."""
     media = sub.add_parser(
-        "media", help="원본 영상 브라우저 v2 — 작업공간·가져오기 진단 (로컬만, 네트워크 없음)"
+        "media", help="원본 영상 브라우저 v2 — 작업공간·가져오기·분할 추출 진단 (로컬만)"
     )
     commands = media.add_subparsers(
-        dest="media_command", required=True, metavar="{init,import,retry,inspect}"
+        dest="media_command",
+        required=True,
+        metavar="{init,import,retry,inspect,plan,extract,clips}",
     )
 
     init = commands.add_parser("init", help="빈 폴더에 v2 작업공간을 만든다")
@@ -235,3 +257,174 @@ def add_media_parser(sub: argparse._SubParsersAction) -> None:
     inspect.add_argument(
         "--batch", default=None, help="볼 배치(예: import_000001). 없으면 최근 배치"
     )
+
+    plan = commands.add_parser(
+        "plan", help="확정된 전체 순서 위에서 결정적 분할 계획을 만든다(로컬만)"
+    )
+    plan.add_argument("--workspace", type=Path, required=True, help="작업공간 경로")
+    plan.add_argument(
+        "--tile-seconds",
+        type=Fraction,
+        default=None,
+        help="균일 타일 길이(초, 정확한 유리수). 기본은 설정 값이다",
+    )
+    plan.add_argument(
+        "--intervals",
+        default=None,
+        help="사람이 정한 구간 파일 — 각 줄: 자산ID 시작 끝(초, 유리수). 전체를 덮아야 한다",
+    )
+
+    extract = commands.add_parser(
+        "extract", help="분할 계획을 실제 조각 폴더로 추출한다(로컬 ffmpeg만, 유료 호출 없음)"
+    )
+    extract.add_argument("--workspace", type=Path, required=True, help="작업공간 경로")
+    extract.add_argument(
+        "--plan", default=None, help="추출할 분할 계획 리비전 ID. 없으면 최근 계획"
+    )
+    extract.add_argument(
+        "--profile",
+        choices=raw_service.EXTRACT_PROFILES,
+        default="source_matched",
+        help="추출 프로파일(§8.1)",
+    )
+    extract.add_argument(
+        "--handle-before", type=Fraction, default=Fraction(0), help="앞 편집 여유분(초)"
+    )
+    extract.add_argument(
+        "--handle-after", type=Fraction, default=Fraction(0), help="뒤 편집 여유분(초)"
+    )
+    extract.add_argument(
+        "--wait-seconds",
+        type=float,
+        default=EXTRACT_WAIT_SECONDS,
+        help="작업 완료 대기 상한(초)",
+    )
+
+    clips = commands.add_parser("clips", help="package의 조각 목록·전달물 경로를 인쇄한다")
+    clips.add_argument("--workspace", type=Path, required=True, help="작업공간 경로")
+    clips.add_argument(
+        "--package", default=None, help="볼 package(예: clips/package_000001). 없으면 최근 것"
+    )
+
+
+# ── A3 — 결정적 분할 계획·추출·조각 목록 ──────────────────────────────────────
+
+
+def cmd_plan(args: argparse.Namespace) -> int:
+    """`media plan` — 확정 전체 순서 위에서 분할 계획 리비전을 만들어 인쇄한다."""
+    service = _service()
+    try:
+        status = service.open_workspace(Path(args.workspace))
+        root = Path(status.workspace_root)
+        intervals = _read_intervals(args.intervals)
+        snapshot = service.plan_segmentation(
+            root,
+            tile_seconds=args.tile_seconds or DEFAULT_TILE_SECONDS,
+            intervals=intervals,
+        )
+    except raw_service.RawWorkspaceError as error:
+        log.error(str(error))
+        return 1
+    log.out(
+        f"분할 계획 — 리비전 {snapshot.revision_id} · 순서 리비전"
+        f" {snapshot.order_revision_id} · 조각 {len(snapshot.entries)}개 · 지문"
+        f" {snapshot.fingerprint[:12]}…"
+    )
+    for proof in snapshot.coverage:
+        seconds = Fraction(proof.last_core_end_pts - proof.first_core_start_pts, 1) / Fraction(
+            proof.time_base_num, proof.time_base_den
+        )
+        log.out(
+            f"  원본 순번 {proof.source_order}: 조각 {proof.segment_count}개 ·"
+            f" {proof.source_frame_count}프레임 · 덮음 {seconds}초"
+        )
+    for entry in snapshot.entries:
+        log.out(
+            f"  {entry.source_order}/{entry.segment_order:03d} · {entry.segment_id}"
+            f" · pts [{entry.core_start_pts}, {entry.core_end_pts})"
+        )
+    return 0
+
+
+def _read_intervals(path_text: str | None) -> dict[str, list[PlannedInterval]] | None:
+    """구간 파일 읽기 — 각 줄이 `자산ID 시작 끝`이다. 없으면 None(균일 타일)."""
+    if not path_text:
+        return None
+    intervals: dict[str, list[PlannedInterval]] = {}
+    for line in Path(path_text).read_text(encoding="utf-8").splitlines():
+        text = line.strip()
+        if not text or text.startswith("#"):
+            continue
+        asset_id, start_text, end_text = text.split()
+        spans = intervals.setdefault(asset_id, [])
+        spans.append(PlannedInterval(start=Fraction(start_text), end=Fraction(end_text)))
+    return intervals
+
+
+def cmd_extract(args: argparse.Namespace) -> int:
+    """`media extract` — 계획을 실제 조각 폴더로 추출하는 작업을 제출하고 기다린다."""
+    service = _service()
+    try:
+        status = service.open_workspace(Path(args.workspace))
+        root = Path(status.workspace_root)
+        handle = service.start_segment_extraction(
+            root,
+            plan_revision_id=args.plan,
+            profile_name=args.profile,
+            handles_before=args.handle_before,
+            handles_after=args.handle_after,
+        )
+    except raw_service.RawWorkspaceError as error:
+        log.error(str(error))
+        return 1
+    note = " (기존 작업에 다시 붙음)" if handle.reattached else ""
+    log.out(f"추출 작업 제출 — {handle.job_id}{note}")
+    return _await_job(service, root, handle.job_id, args.wait_seconds)
+
+
+def cmd_clips(args: argparse.Namespace) -> int:
+    """`media clips` — package 상태·조각 목록·전달물 경로를 인쇄한다."""
+    service = _service()
+    try:
+        status = service.open_workspace(Path(args.workspace))
+        summary = service.package_overview(Path(status.workspace_root), args.package)
+    except raw_service.RawWorkspaceError as error:
+        log.error(str(error))
+        return 1
+    if summary is None:
+        log.out("package가 없다 — 분할 계획과 추출을 먼저 실행하세요.")
+        return 0
+    package = summary.package
+    log.out(
+        f"package {package.package_dir} · 상태 {package.status} · 게시"
+        f" {package.clip_published}/{package.clip_total} · 프로파일 {package.profile_name}"
+    )
+    for clip in summary.clips:
+        note = f" — {clip.error}" if clip.error else ""
+        log.out(
+            f"  {clip.source_order}/{clip.segment_order:03d} · {clip.clip_id} ·"
+            f" {clip.relative_path} · {clip.status}{note}"
+        )
+    for manifest in summary.manifest_relative_paths:
+        log.out(f"  전달물: {manifest}")
+    if package.error:
+        log.error(f"package 오류: {package.error}")
+    return 0 if package.complete else 1
+
+
+def _await_job(
+    service: raw_service.RawWorkspaceService, root: Path, job_id: str, wait_seconds: float
+) -> int:
+    """작업이 끝날 때까지 기다린다 — 추출 진단도 완결 보고가 몫이다."""
+    deadline = time.monotonic() + wait_seconds
+    while time.monotonic() < deadline:
+        record = service.get_job(root, job_id)
+        if record.status in _TERMINAL_STATUSES:
+            log.out(
+                f"작업 {job_id} {record.status} {record.progress_current}/"
+                f"{record.progress_total}" + (f" — {record.error}" if record.error else "")
+            )
+            return 0 if record.status == "succeeded" else 1
+        time.sleep(JOB_POLL_SECONDS)
+    log.warn(f"작업 {job_id}가 아직 끝나지 않았다 — media clips로 확인하세요.")
+    return 1
