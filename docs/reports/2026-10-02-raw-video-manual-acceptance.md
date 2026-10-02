@@ -10,7 +10,6 @@
 - `PASS(자동)` — 승인 커밋의 시험이나 루트 탐침(합성 미디어)이 증명.
 - `PASS(자동 브라우저)` — 루트가 합성·가드 루프백 서버에서 **실제 브라우저**로
   잰 자동 실측. 사람 실기와 다르고, 사람 항목을 대신하지 않는다.
-- `PENDING(통합)` — 코드는 있으나 서비스·UI·CLI가 아직 열지 않음.
 - `PENDING_HUMAN` — 사람 실기 필요. `NOT_RUN` — 실행하지 않았다.
 
 ## 기준선 (2026-10-03 개정, main 9ce8598)
@@ -31,8 +30,9 @@
   실측 브라우저 최종 인수를 **통과**했다(허용된 합성 흐름, 아래 1-10). 표적
   시험(9·19·149·14건) 통과. 증거: `/tmp/vlogsrt-raw-A8-{browser-review,
   browser-caption-final,final-caption}.png`, `/tmp/vlogsrt-raw-A8-F3-browser-server.log`.
-- 병합 main의 전체 `make check`은 루트가 집행 중이다(`/tmp/vlogsrt-raw-final-main-check.log`)
-  — 전체 수치·exit는 루트 송신값으로 이 문서에 기록한다.
+- 병합 main 9ce8598 전체 `make check` **exit 0**(루트 집행): **3909 passed in
+  206.67s**, Ruff format 224파일, mypy 96파일 무이슈, invariant 통과("All checks
+  passed"). 출처: `/tmp/vlogsrt-raw-final-main-check.log`.
 
 ## 기계 현재 상태 — AI Rough Cut 플러그인 비활성
 
@@ -80,7 +80,7 @@
 | 한국어·공백·Unicode 경로, 심볼릭 링크·루프 이탈 차단 | test_ingest_scan | PASS(자동) |
 | 추출 재개 — 누락 성공 없음, 기존 번호·파일 보존 | test_segment_runner | PASS(자동) |
 | 검토 출판 원자성 — 크래시·동시 편집·CAS·프로세스 즉사에 고아 리비전 없음, 재시도 안 막힘 | test_review_workspace(출판 원자성 6건) | PASS(자동 — 313f24d+648b5d2, 루트 16 시험·실측 탐침 동일) |
-| 확정 내보내기 — 실제 바이트 복사(하드링크 아님), 게시 후 옛 package 무변경 | test_confirmed_package·test_review_workspace 종단 | PASS(자동) · Finder 실사용 PENDING(통합) |
+| 확정 내보내기 — 실제 바이트 복사(하드링크 아님), 게시 후 옛 package 무변경 | test_confirmed_package·test_review_workspace 종단 | PASS(자동) · Finder 실사용 PENDING_HUMAN |
 | 실물 SD 카드에서 같은 흐름 | — | PENDING_HUMAN |
 
 ### 3. A/V 오프셋·무오디오·꼬리 (A/V offset / noaudio / tail)
@@ -93,7 +93,7 @@
 | 최종 영상 오디오 — 청크·샘플 범위 증명, 오프라인 설정의 실전송 거부 | test_final_video·test_final_caption_run·test_caption_provider | PASS(자동) |
 | 두 오디오 트랙 실측 — 캡션 작업공간 등록·실행·확정 | 루트 실측 탐침(캡션 백엔드 cd16d80 승인 기록) | PASS(자동 — 실측 합성 2트랙) |
 | 늦게 시작하는 오디오·압축 지연 실측(개인 원본) | — | PENDING_HUMAN(개인 원본 필요) |
-| 최종 영상 기준 A/V 싱크(시작·중간·끝) | — | PENDING(통합 후) PENDING_HUMAN |
+| 최종 영상 기준 A/V 싱크(시작·중간·끝) | — | PENDING_HUMAN |
 
 ### 4. 캐시 보호 (cache protection)
 
@@ -131,7 +131,7 @@
   완료로 센다.
 - `PASS(자동 브라우저)`는 루트가 잰 자동 실측이다 — 사람 실기 항목을 대신하지
   않는다(실청취·개인 미디어·유료 품질은 사람 항목 그대로다).
-- 병합 main(9ce8598)의 전체 `make check` 수치는 루트 송신값이 도착한 뒤 이
-  문서에 기록한다 — 그 전에 이 문서를 완결로 표시하지 않는다.
+- 전체 점검 수치·exit는 루트 집행 기록(`/tmp/vlogsrt-raw-final-main-check.log`)의
+  요약 줄에서 그대로 인용한다 — 재실행으로 갈지 않는다.
 - 유료 호출이 필요한 항목은 별도 비용 승인 전에 NOT_RUN을 유지한다.
 - 루트 독립 인수가 최종 판정이다 — 작업자 보고는 보조 자료다.
