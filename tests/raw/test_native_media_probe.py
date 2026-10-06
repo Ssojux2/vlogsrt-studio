@@ -375,6 +375,7 @@ def _matrix_probe(**video_overrides: object) -> preprocess.RawMediaProbe:
         source=Path("matrix.mp4"),
         container="mov,mp4",
         duration=Fraction(2),
+        format_start=Fraction(0),
         creation_time=preprocess.CreationTime(raw="", valid=False, utc=None),
         video=video,
         audio=(),
@@ -402,6 +403,23 @@ def _matrix_clock(**overrides: object) -> preprocess.RawVideoClock:
 
 def test_supported_matrix_accepts_the_normal_camera_shape() -> None:
     preprocess._assert_raw_supported(_matrix_probe(), _matrix_clock())  # 죽지 않는다
+
+
+def test_support_guard_uses_the_declared_window_in_absolute_coordinates() -> None:
+    """선언 창은 절대 좌표다 — 시작 2초·길이 24/5초·패킷 끝 34/5초는 정상(통과).
+
+    길이(구간)와 절대 끝을 바꿔 비교하면 이 정상 파일이 막힌다(A3 실측 재현).
+    창을 1틱 넘는 패킷 증거는 여전히 막는다 — fail-closed는 그대로다.
+    """
+    probe = replace(_matrix_probe(), duration=Fraction(24, 5), format_start=Fraction(2))
+    clock = _matrix_clock(presentation_origin=Fraction(2), exact_end=Fraction(34, 5))
+    preprocess._assert_raw_supported(probe, clock)  # 창 [2, 34/5] — 정확히 붙는다
+    beyond = _matrix_clock(
+        presentation_origin=Fraction(2),
+        exact_end=Fraction(34, 5) + Fraction(3, 50),
+    )
+    with pytest.raises(preprocess.RawMediaUnsupported, match="선언 창"):
+        preprocess._assert_raw_supported(probe, beyond)
 
 
 @pytest.mark.parametrize(
@@ -435,8 +453,9 @@ def test_extra_video_stream_and_vfr_are_refused() -> None:
 
 
 def test_packet_evidence_beyond_declared_duration_is_refused() -> None:
-    # 선언 길이보다 먼 패킷은 입력 탐색 창이 잃는다 — 실측 근거의 실패 사례다.
-    with pytest.raises(preprocess.RawMediaUnsupported, match="선언 길이"):
+    # 선언 창(start_time+duration)보다 먼 패킷은 입력 탐색 창이 잃는다 — 실측
+    # 근거의 실패 사례다(0 시작 파일에서 창 끝 = 길이와 같다).
+    with pytest.raises(preprocess.RawMediaUnsupported, match="선언 창"):
         preprocess._assert_raw_supported(_matrix_probe(), _matrix_clock(exact_end=Fraction(3)))
 
 

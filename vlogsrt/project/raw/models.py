@@ -25,6 +25,7 @@ MEDIA_SUFFIXES: tuple[str, ...] = (
     ".mp3",
     ".wav",
     ".m4a",
+    ".jpg",
     ".srt",
     ".vtt",
 )
@@ -32,7 +33,9 @@ MEDIA_SUFFIXES: tuple[str, ...] = (
 종류·위치와 무관하게 등록이 거부된다 — 자격 증명·응답·기록 파일이 우회하지 못한다.
 자막(.srt·.vtt)은 **검토·확정 화면이 제한 이름공간(previews/review-vtt/·
 final/captions/published/)에 내용 해시 이름으로 쓴 파일만** 등록된다 — 임의의
-텍스트 파일은 여전히 어휘·위치 검사에서 거부된다."""
+텍스트 파일은 여전히 어휘·위치 검사에서 거부된다. 썸네일(.jpg)도 같은 규율이다:
+영상 검토 화면이 `previews/visual/` 아래에 쓴 파일만 등록되며, 등록 자체는
+서비스 경로를 통해서만 일어난다."""
 
 KIND_PREFIXES: dict[str, tuple[str, ...]] = {
     "original": ("originals/",),
@@ -380,6 +383,9 @@ CAPTURE_STATUS_VALID = "valid"
 
 SEGMENT_JOB_KIND = "segment_extract"
 """분할 추출 작업의 종류 표기 — 같은 지문의 활성 작업 재제출이 여기 묶인다."""
+
+VISUAL_PREPARE_JOB_KIND = "visual_prepare"
+"""영상 검토 미리보기 준비 작업의 종류 표기 — 한 페이지의 없는 항목만 순서대로 만든다."""
 
 SEGMENTATION_BASIS_DETERMINISTIC = "deterministic_tiling"
 """A3 기본 분할 근거 — 의미 분석 없이 전체 재생 구간을 격자 위에 빈틈없이 타일링."""

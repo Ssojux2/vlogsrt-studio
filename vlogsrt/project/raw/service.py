@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from vlogsrt import preprocess
-from vlogsrt.project.raw import analysis_workflow, segmentation
+from vlogsrt.project.raw import analysis_workflow, segmentation, visual_review
 from vlogsrt.project.raw import package as package_layout
 from vlogsrt.project.raw import runner as extract_runner
 from vlogsrt.project.raw.analysis_approval import (
@@ -85,6 +85,7 @@ from vlogsrt.project.raw.models import (
     SEGMENTATION_BASIS_DETERMINISTIC,
     SEGMENTATION_BASIS_PLANNED,
     SEGMENTATION_BASIS_SEMANTIC,
+    VISUAL_PREPARE_JOB_KIND,
     AnalysisError,
     AnalysisEstimate,
     AnalysisRevision,
@@ -126,7 +127,7 @@ from vlogsrt.project.raw.models import (
     WorkspaceModuleUnavailableError,
     WorkspaceStatus,
 )
-from vlogsrt.project.raw.segment_review import ReviewError, StaleRevisionError
+from vlogsrt.project.raw.segment_review import ReviewError, ReviewRevision, StaleRevisionError
 from vlogsrt.project.raw.segment_review import (
     boundary_edit as review_boundary_edit,
 )
@@ -152,6 +153,18 @@ from vlogsrt.project.raw.understanding_luna import (
     OnlineVisualAnalysisApproval,
     estimate_luna_cost,
     online_env_blocked,
+)
+from vlogsrt.project.raw.visual_review import (  # 공개 경계 재수출(계약: UI는 이 모듈만 가져간다)
+    VISUAL_PAGE_SIZE,
+    VisualAudioTrack,
+    VisualReviewError,
+    VisualReviewOverview,
+    VisualSegmentCard,
+    VisualSelectedSegment,
+    VisualSnapProposal,
+    VisualSourcePreview,
+    middle_frame_index,
+    snapped_frame_index,
 )
 from vlogsrt.project.raw.workspace import (
     RawWorkspace,
@@ -219,6 +232,15 @@ __all__ = [
     "SourceAsset",
     "SourceInspection",
     "SourceOrderRevision",
+    "VISUAL_PAGE_SIZE",
+    "VISUAL_PREPARE_JOB_KIND",
+    "VisualAudioTrack",
+    "VisualReviewError",
+    "VisualReviewOverview",
+    "VisualSegmentCard",
+    "VisualSelectedSegment",
+    "VisualSnapProposal",
+    "VisualSourcePreview",
     "WorkspaceModuleUnavailableError",
     "WorkspaceStatus",
     "asr_estimate_digest",
@@ -253,6 +275,8 @@ __all__ = [
     "review_selection_edit",
     "review_split_edit",
     "semantic_estimate_digest",
+    "middle_frame_index",
+    "snapped_frame_index",
 ]
 
 MEDIA_CONTENT_TYPES: dict[str, str] = {
@@ -264,6 +288,7 @@ MEDIA_CONTENT_TYPES: dict[str, str] = {
     ".mp3": "audio/mpeg",
     ".wav": "audio/wav",
     ".m4a": "audio/mp4",
+    ".jpg": "image/jpeg",
     ".srt": "application/x-subrip",
     ".vtt": "text/vtt",
 }
@@ -328,6 +353,30 @@ def _semantic_body(
     def body(context: JobContext) -> None:
         analysis_workflow.run_analysis(
             context, workspace, revision, order, assets, settings, workflow, providers
+        )
+
+    return body
+
+
+def _visual_prepare_body(
+    workspace: RawWorkspace,
+    facade: Any,
+    base_plan_id: str,
+    page: int,
+    audio_selections: Mapping[str, int | None],
+    expected_revision_id: str | None,
+) -> Callable[[JobContext], None]:
+    """영상 검토 미리보기 준비 본문 묶기 — 페이지·소리 선택·리비전 묶음을 즉시 묶는다(V1F1)."""
+
+    def body(context: JobContext) -> None:
+        visual_review.run_page_preparation(
+            context,
+            workspace,
+            facade,
+            base_plan_id=base_plan_id,
+            page=page,
+            audio_selections=audio_selections,
+            expected_revision_id=expected_revision_id,
         )
 
     return body
@@ -1735,6 +1784,218 @@ class RawWorkspaceService:
                     )
                 return registered
         return self.register_media(root, target, "preview")
+
+    # ── V1 — 영상 우선 검토(질의·미리보기 준비·리비전 묶음 편집) ──
+
+    def visual_review_query(
+        self,
+        root: Path,
+        *,
+        base_plan_id: str | None = None,
+        selected_segment_id: str | None = None,
+        page: int = 1,
+        expected_revision_id: str | None = None,
+        audio_selections: Mapping[str, int | None] | None = None,
+    ) -> visual_review.VisualReviewOverview:
+        """영상 검토 질의 — 미디어 생성·제공자 호출이 전혀 없다(읽기만 한다).
+
+        검토 헤드의 조각·시계·간격·가운데 프레임·등록 ID와 미리보기 상태를 값으로
+        돌려준다. 채우는 것은 `start_visual_page_preparation`의 몫이다 — 이 호출이
+        파일을 쓰거나 ffmpeg을 돌리는 일은 없다. `expected_revision_id`를 주면 지금
+        머리와 다를 때 `StaleRevisionError`로 거부한다(화면이 본 것이 낡았음을 아는
+        길; 생략하면 언제나 최신). `audio_selections`는 원본별 명시적 소리 서수다 —
+        준 원본은 그 선택의 미리보기 기록만 보고, 생략한 원본은 가장 최근 기록을
+        본다. 원본의 트랙 목록(`sources[].audio_tracks`)은 준비가 남긴 기록에서 온다.
+        """
+        workspace = self._workspace(root)
+        facade = self.review_workspace_facade(root)
+        active = tuple(
+            job
+            for job in self.list_jobs(root)
+            if job.kind == VISUAL_PREPARE_JOB_KIND and job.status in ACTIVE_JOB_STATUSES
+        )
+        return visual_review.query_overview(
+            workspace,
+            facade,
+            base_plan_id=base_plan_id,
+            selected_segment_id=selected_segment_id,
+            page=page,
+            active_jobs=active,
+            expected_revision_id=expected_revision_id,
+            audio_selections=audio_selections,
+        )
+
+    def start_visual_page_preparation(
+        self,
+        root: Path,
+        *,
+        base_plan_id: str | None = None,
+        page: int = 1,
+        audio_selections: Mapping[str, int | None] | None = None,
+        expected_revision_id: str | None = None,
+    ) -> JobHandle:
+        """요청 페이지의 미리보기를 채우는 작업을 제출한다 — 없는 항목만 순서대로.
+
+        같은 (기본 계획, 페이지, 소리 선택)의 활성 작업이 있으면 그 작업에 다시
+        붙는다(재클릭·새로고침 중복 방지, §14.1). 작업 본문은 원본 전체 브라우저
+        MP4와 그 페이지의 썸네일을 `previews/visual/`에 만든다 — 원본·package는
+        읽기만 한다.
+
+        `audio_selections`는 원본별 **명시적** 소리 선택이다: 키에 없는 원본은 기본
+        (첫 트랙, 없으면 침묵), 값 `None`은 명시적 침묵(트랙이 있어도 영상만),
+        서수(0 이상 정수)는 그 트랙만. 형이 틀린 값은 제출 순간에 거부하고, 트랙
+        수 밖의 서수는 작업이 조사해 실패로 닫는다 — 어느 쪽도 첫 트랙으로 조용히
+        환원하지 않는다. 선택은 작업 지문·캐시 짝에 묶인다(서수마다 별개 미리보기).
+        `expected_revision_id`를 주면 제출 전에 머리와 맞는지 보고, 작업이 실행되는
+        순간에도 다시 본다 — 그새 머리가 앞서 갔으면 실패로 닫지 새 기하를 몰래
+        다시 해석하지 않는다.
+        """
+        workspace = self._workspace(root)
+        facade = self.review_workspace_facade(root)
+        head = facade.load_head(base_plan_id).revision
+        visual_review.require_head_revision(head, expected_revision_id)
+        resolved_base = head.base_plan_id
+        selections = visual_review.validated_audio_selections(audio_selections)
+        fingerprint = visual_review.preparation_fingerprint(
+            resolved_base, page, visual_review.audio_selection_material(selections)
+        )
+        return self.submit_job(
+            root,
+            VISUAL_PREPARE_JOB_KIND,
+            fingerprint,
+            _visual_prepare_body(
+                workspace, facade, resolved_base, page, selections, expected_revision_id
+            ),
+            total=visual_review.VISUAL_PAGE_SIZE,
+        )
+
+    # ── V1 편집 제안 — 저장보다 앞서고 아무 것도 쓰지 않는다 ──────
+
+    def visual_snap_proposal(
+        self,
+        root: Path,
+        *,
+        base_plan_id: str | None = None,
+        expected_revision_id: str,
+        segment_id: str,
+        desired_pts: Fraction | int,
+    ) -> visual_review.VisualSnapProposal:
+        """분할 점의 읽기 전용 제안 — 서버가 잰 스냅(동률 앞장)과 판정만 돌려준다.
+
+        `expected_revision_id`는 화면이 보여주는 리비전이다 — 머리가 앞서 갔으면
+        조각이 살아남았더라도 `StaleRevisionError`(유효 저장 토큰은 새로 고침한
+        리비전의 제안에서만 나온다). `desired_pts`는 서브틱 유리수까지 정확히 받는다
+        (int·Fraction; float·무한·NaN은 거부). 저장을 원하면 돌려온
+        `head_revision_id`를 `expected_revision_id`로, `snap_pts`를 분할 점으로 쓰면
+        된다. 이 호출은 리비전·파일·작업 어느 것도 바꾸지 않는다(코디네이터 계약 —
+        제안이 저장에 앞선다).
+        """
+        return visual_review.snap_proposal(
+            self.review_workspace_facade(root),
+            base_plan_id=base_plan_id,
+            expected_revision_id=expected_revision_id,
+            segment_id=segment_id,
+            desired_pts=desired_pts,
+        )
+
+    def visual_boundary_proposal(
+        self,
+        root: Path,
+        *,
+        base_plan_id: str | None = None,
+        expected_revision_id: str,
+        left_segment_id: str,
+        right_segment_id: str,
+        desired_pts: Fraction | int,
+    ) -> visual_review.VisualSnapProposal:
+        """경계 이동의 읽기 전용 제안 — 맞닿음·길이 0 판정까지 미리 보여준다.
+
+        묶음·정확 유리수 계약은 `visual_snap_proposal`과 같다.
+        """
+        return visual_review.boundary_proposal(
+            self.review_workspace_facade(root),
+            base_plan_id=base_plan_id,
+            expected_revision_id=expected_revision_id,
+            left_segment_id=left_segment_id,
+            right_segment_id=right_segment_id,
+            desired_pts=desired_pts,
+        )
+
+    # ── V1 편집 — 화면이 준 리비전에 묶인다(stale 거부) ──────────
+
+    def visual_split_segment(
+        self,
+        root: Path,
+        *,
+        base_plan_id: str,
+        expected_revision_id: str,
+        segment_id: str,
+        split_pts: int,
+    ) -> ReviewRevision:
+        """조각을 둘로 나눈다 — 길이 0이 되는 자리는 거부, 출판은 파사드 트랜잭션."""
+        return visual_review.split_segment(
+            self.review_workspace_facade(root),
+            base_plan_id=base_plan_id,
+            expected_revision_id=expected_revision_id,
+            segment_id=segment_id,
+            split_pts=split_pts,
+        )
+
+    def visual_adjust_boundary(
+        self,
+        root: Path,
+        *,
+        base_plan_id: str,
+        expected_revision_id: str,
+        left_segment_id: str,
+        right_segment_id: str,
+        boundary_pts: int,
+    ) -> ReviewRevision:
+        """맞닿은 두 조각의 경계를 옮긴다 — 안 닿은 짝·길이 0 이동은 거부다."""
+        return visual_review.adjust_boundary(
+            self.review_workspace_facade(root),
+            base_plan_id=base_plan_id,
+            expected_revision_id=expected_revision_id,
+            left_segment_id=left_segment_id,
+            right_segment_id=right_segment_id,
+            boundary_pts=boundary_pts,
+        )
+
+    def visual_merge_segments(
+        self,
+        root: Path,
+        *,
+        base_plan_id: str,
+        expected_revision_id: str,
+        first_segment_id: str,
+        second_segment_id: str,
+    ) -> ReviewRevision:
+        """같은 원본의 맞닿은 두 조각을 합친다 — 건너뛴 짝은 거부다."""
+        return visual_review.merge_segments(
+            self.review_workspace_facade(root),
+            base_plan_id=base_plan_id,
+            expected_revision_id=expected_revision_id,
+            first_segment_id=first_segment_id,
+            second_segment_id=second_segment_id,
+        )
+
+    def visual_set_selection(
+        self,
+        root: Path,
+        *,
+        base_plan_id: str,
+        expected_revision_id: str,
+        segment_id: str,
+        selection: str,
+    ) -> ReviewRevision:
+        """사용/제외 표시를 바꾼다 — 조각은 지워지지 않는다(§6.4)."""
+        return visual_review.set_selection(
+            self.review_workspace_facade(root),
+            base_plan_id=base_plan_id,
+            expected_revision_id=expected_revision_id,
+            segment_id=segment_id,
+            selection=selection,
+        )
 
     # ── A5/A6·A7 백엔드 작업공간 — 공개 경계로만 내놓는다(병합 뒤 활성) ──
 

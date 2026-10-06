@@ -264,6 +264,94 @@ def delayed_video(media: Path) -> Path:
 
 
 @pytest.fixture(scope="session")
+def shifted_dual(media: Path) -> Path:
+    """모든 스트림이 2초부터 — 컨테이너 **선언 시작**(format start_time)이 0이 아니다.
+
+    `delayed_video`는 소리가 0부터라 선언 시작이 0이다 — 상대·절대 탐색이 같다.
+    이 원본은 선언 시작 자체가 1.978667초(AAC 프라이밍)라 절대 -ss와 선언 창
+    좌표가 갈리는 자리다(A3 실측 재현: 기본 -ss는 절대 2.3992초를 상대로 읽어
+    100프레임 자리에 60프레임을 냈다).
+    """
+    path = media / "shifted_dual.mp4"
+    _encode(
+        [
+            "-itsoffset",
+            "2.0",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=320x180:rate=25:duration=4.8",
+            "-itsoffset",
+            "2.0",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:sample_rate=48000:duration=4.8",
+            "-map",
+            "0:v",
+            "-map",
+            "1:a",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "128k",
+            "-shortest",
+            str(path),
+        ]
+    )
+    return path
+
+
+@pytest.fixture(scope="session")
+def leading_audio(media: Path) -> Path:
+    """소리가 영상보다 먼저 시작한다(영상 2초·소리 1.5초) — 선언 시작도 0이 아니다.
+
+    선언 창은 1.478667+3.521333=5초, 패킷 끝도 5초 — 정상 파일이다. 정착
+    기준선은 이 값을 길이(3.521333초)와 바꿔 비교해 거짓으로 막았다(A3 실측).
+    """
+    path = media / "leading_audio.mp4"
+    _encode(
+        [
+            "-itsoffset",
+            "2.0",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=320x180:rate=25:duration=3",
+            "-itsoffset",
+            "1.5",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:sample_rate=48000:duration=3.5",
+            "-map",
+            "0:v",
+            "-map",
+            "1:a",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "128k",
+            "-shortest",
+            str(path),
+        ]
+    )
+    return path
+
+
+@pytest.fixture(scope="session")
 def multi_audio(media: Path) -> Path:
     """오디오 트랙 둘(AAC 48k + MP3 44.1k) — 하나도 못 잃는다."""
     path = media / "multi_audio.mp4"
@@ -580,6 +668,71 @@ def test_nonzero_video_pts_stays_absolute_in_the_record(
     assert result.frame_count == 150
     # 오디오는 영상보다 2초 앞서 흐르던 트랙 — 클립 안에서도 0부터 흐른다(공통 시프트).
     assert result.audio_local_starts[0][1] == Fraction(0)
+
+
+@needs_ffmpeg
+def test_all_streams_shifted_source_extracts_by_absolute_seek(
+    shifted_dual: Path, tmp_path: Path
+) -> None:
+    """선언 시작 1.978667초 원본 — 절대 2.3992초(프레임 10)부터 100프레임.
+
+    기본 입력 -ss는 선언 시작을 0으로 두고 더해 4.3992초로 읽는다(A3 실측:
+    60프레임). 절대 좌표 -ss는 프레임 10을 첫 장으로 데려온다 — 첫 장 화소가
+    원본 프레임 10이고 이웃(11)과 구분된다. 프레임 0부터의 창도 온전하다.
+    """
+    probe = probe_raw_media(shifted_dual)
+    clock = probe_extraction_clock(shifted_dual, probe=probe)
+    assert clock.presentation_origin == 2  # 영상 원점이 0이 아니다(절대 시계)
+    assert probe.format_start > 1  # 컨테이너 선언 시작도 0이 아니다(AAC 프라이밍)
+
+    result = extract_raw_clip(
+        shifted_dual,
+        tmp_path / "shifted-a.mp4",
+        clock_frame_range(clock, 10, 110),
+        RAW_SOURCE_MATCHED,
+    )
+    assert result.frame_count == 100
+    assert result.media_range.start_seconds == (
+        clock.presentation_origin + 10 * clock.frame_duration
+    )
+    output_frame = _frame_gray(result.path, 0)
+    wanted = _frame_gray(shifted_dual, 10)
+    neighbor = _frame_gray(shifted_dual, 11)
+    assert _mean_abs_diff(wanted, output_frame) < _REENCODE_LUMA_TOLERANCE
+    assert _mean_abs_diff(neighbor, output_frame) > _NEIGHBOR_LUMA_GAP
+
+    from_start = extract_raw_clip(
+        shifted_dual,
+        tmp_path / "shifted-b.mp4",
+        clock_frame_range(clock, 0, 50),
+        RAW_SOURCE_MATCHED,
+    )
+    assert from_start.frame_count == 50  # 절대 -ss 0(한 틱 일찍)도 첫 프레임부터
+
+
+@needs_ffmpeg
+def test_audio_earlier_source_extracts_mid_window(leading_audio: Path, tmp_path: Path) -> None:
+    """선행 소리 원본(영상 2초·소리 1.5초)의 프레임 10..60 — 50프레임이 온전히.
+
+    정착 기준선에서는 좌표 착오로 문이 닫혔다(패킷 끝 5초 > 선언 길이
+    3.521333초 — RawMediaUnsupported). 선언 창을 절대로 재면 5초까지다.
+    """
+    probe = probe_raw_media(leading_audio)
+    assert probe.format_start < 2  # 소리 선언이 영상보다 앞선다
+    clock = probe_extraction_clock(leading_audio, probe=probe)
+    result = extract_raw_clip(
+        leading_audio,
+        tmp_path / "leading-a.mp4",
+        clock_frame_range(clock, 10, 60),
+        RAW_SOURCE_MATCHED,
+    )
+    assert result.frame_count == 50
+    assert result.audio_local_starts[0][1] == Fraction(0)  # 이미 흐르던 소리 — 0부터
+    output_frame = _frame_gray(result.path, 0)
+    wanted = _frame_gray(leading_audio, 10)
+    neighbor = _frame_gray(leading_audio, 11)
+    assert _mean_abs_diff(wanted, output_frame) < _REENCODE_LUMA_TOLERANCE
+    assert _mean_abs_diff(neighbor, output_frame) > _NEIGHBOR_LUMA_GAP
 
 
 @needs_ffmpeg

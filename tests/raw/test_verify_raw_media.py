@@ -75,6 +75,7 @@ def _probe(**video_overrides: object) -> RawMediaProbe:
         source=Path("synthetic.mp4"),
         container="mov,mp4",
         duration=Fraction(10),
+        format_start=Fraction(0),
         creation_time=CreationTime(raw="", valid=False, utc=None),
         video=_video(**video_overrides),
         audio=(

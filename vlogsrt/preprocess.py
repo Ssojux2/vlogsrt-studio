@@ -1136,6 +1136,14 @@ class RawMediaProbe:
     source: Path
     container: str
     duration: Fraction
+    format_start: Fraction
+    """format start_time 선언 — 컨테이너 시각표의 시작(절대 좌표 재료).
+
+    선언 창은 `format_start + duration`까지다(절대 끝). 시작이 0이 아닌
+    컨테이너에서 길이(구간)와 절대 끝을 바꿔 비교하면 정상 파일을 거짓으로
+    막는다(A3 실측). 없는 선언("N/A")은 0 — 창이 좁아질 뿐 열리지는 않는다.
+    """
+
     creation_time: CreationTime
     video: RawVideoMedia
     audio: tuple[RawAudioTrack, ...]
@@ -1162,7 +1170,7 @@ def probe_raw_media(source: Path, *, video_ordinal: int = 0) -> RawMediaProbe:
             "color_primaries,color_transfer,color_space,color_range,"
             "r_frame_rate,avg_frame_rate,time_base,start_time,start_pts,duration_ts,"
             "sample_rate,channels:stream_side_data=rotation"
-            ":format=format_name,duration:format_tags=creation_time",
+            ":format=format_name,duration,start_time:format_tags=creation_time",
             "-of", "json",
             str(source),
         ]
@@ -1208,6 +1216,7 @@ def _parse_raw_probe(stdout: str, source: Path, video_ordinal: int) -> RawMediaP
         source=source,
         container=_format_text(fmt, "format_name", source),
         duration=_format_fraction(fmt, "duration", source),
+        format_start=_format_start_seconds(fmt, source),
         creation_time=_parse_creation_time(_format_tag(fmt, "creation_time")),
         video=_raw_video_media(chosen, source),
         audio=tuple(_raw_audio_track(entry, source) for entry in audios),
@@ -1232,6 +1241,23 @@ def _format_fraction(fmt: dict[str, object], field: str, source: Path) -> Fracti
     if parsed <= 0:
         raise RuntimeError(f"format {field}가 양수가 아닙니다: {source} (값 {value!r})")
     return parsed
+
+
+def _format_start_seconds(fmt: dict[str, object], source: Path) -> Fraction:
+    """format start_time 선언 — 없는 선언은 0(fail-closed), 부서진 선언은 죽인다.
+
+    ffprobe는 값이 없는 컨테이너에 "N/A"를 적는다. 0으로 두면 지원 경계의
+    선언 창이 좁아질 뿐이다(길이와 절대 끝이 우연히 같아지는 0 시작 파일의
+    기존 행동). 숫자로 못 읽는 값은 부서진 선언이다 — 0으로 돌려주면 없는
+    창을 지어내므로 조사 단계에서 죽인다.
+    """
+    value = fmt.get("start_time")
+    if value is None or (isinstance(value, str) and value.strip().lower() in ("", "n/a")):
+        return Fraction(0)
+    try:
+        return Fraction(str(value))
+    except (TypeError, ValueError, ZeroDivisionError) as exc:
+        raise RuntimeError(f"format start_time를 읽지 못했습니다: {source} (값 {value!r})") from exc
 
 
 def _format_tag(fmt: dict[str, object], key: str) -> str:
@@ -1734,13 +1760,16 @@ def _assert_raw_supported(probe: RawMediaProbe, clock: RawVideoClock) -> None:
         failures.append(f"HDR 전달 특성 {video.color_transfer!r} — 실기 검증 전 지원 밖")
     if any(kind == "video" for _, kind in probe.other_tracks):
         failures.append("비디오 스트림이 둘 이상이다")
-    if clock.exact_end > probe.duration + probe.video.time_base:
-        # 실측: ffmpeg의 입력 -ss는 선언 길이까지만 읽는다(1.25초 이동 pts를 만든
-        # 파일에서 90프레임 중 33프레임만 들어옴). 선언보다 먼 패킷이 있으면 그
-        # 구간이 조용히 사라지므로 추출 전에 막는다.
+    declared_end = probe.format_start + probe.duration
+    if clock.exact_end > declared_end + probe.video.time_base:
+        # 실측: ffmpeg의 입력 -ss(절대 좌표)는 선언 창(start_time+duration)까지만
+        # 읽는다(1.25초 이동 pts를 만든 파일에서 90프레임 중 33프레임만 들어옴).
+        # 선언 창보다 먼 패킷이 있으면 그 구간이 조용히 사라지므로 추출 전에 막는다.
+        # 창은 절대 좌표로 재었다 — 시작 2초·길이 4.8초·패킷 끝 6.8초의 정상 파일을
+        # 길이(구간)와 절대 끝을 바꿔 비교해 거짓으로 막아선 안 된다(A3 실측).
         failures.append(
-            f"패킷 증거({clock.exact_end}초)가 선언 길이({probe.duration}초)를 넘는다 — "
-            "입력 탐색 창이 그 구간을 잃는다"
+            f"패킷 증거({clock.exact_end}초)가 선언 창("
+            f"{probe.format_start}~{declared_end}초)을 넘는다 — 입력 탐색 창이 그 구간을 잃는다"
         )
     if not clock.uniform_grid:
         failures.append(f"VFR(균일 격자 아님): {clock.grid_note}")
@@ -2020,6 +2049,12 @@ def _raw_extract_command(
     # 있으면 EEXIST라 경합에서도 아무것도 덮어쓰지 않는다.
     command = [
         require_ffmpeg(), "-hide_banner", "-nostdin", "-y",
+        # -ss의 값은 절대 좌표(원본 시계의 제시 PTS)다. ffmpeg 입력 -ss의 기본
+        # 해석은 선언 시작(format start_time)을 0으로 두고 더하는 것이라, 시작이
+        # 0이 아닌 컨테이너에서는 그만큼 늦은 자리를 찾는다(실측: 시작 2초 원본의
+        # 절대 2.399초 점이 4.399초로 읽혀 100프레임 자리에 60프레임). -seek_timestamp 1
+        # 이 -ss를 파일의 절대 타임스탬프 축에 묶는다(A3 실측 재현).
+        "-seek_timestamp", "1",
         "-ss", _format_us(seek, ceil=False),
         "-t", _format_us(plan.out_duration, ceil=True),
         "-i", str(source),
@@ -2552,6 +2587,140 @@ def extract_caption_preview(
         duration=out_probe.duration,
         source_video_codec=probe.video.codec_name,
         source_audio_codec=track.codec_name,
+        ffmpeg_version=_tool_version("ffmpeg"),
+        warnings=warnings,
+    )
+
+
+# ─────────────────────────────────────────────────────────────
+#  영상 우선 검토 미리보기 — 원본 전체의 브라우저 재생 MP4 (V1)
+# ─────────────────────────────────────────────────────────────
+#
+# 자막 미리보기(F2)와 같은 인코딩 규율이지만 입력이 다르다: 검토 화면은 **원본
+# 전체**를 탐색 가능하게 띄운다(§4.3 — 조각 미리보기가 아니라 원본 직접 제공의
+# 제한된 경로). `-ss`/`-t`를 쓰지 않으므로 원본 시각과 미리보기 시각의 대응은
+# 원점 이동 하나뿐이다. 침묵(오디오 트랙 없음)도, 여러 오디오 트랙 중 **선택한
+# 하나**만 담은 것도 다 지원한다 — 어느 쪽이든 영상·소리 이외의 것은 못 들어간다.
+
+
+class VisualPreviewUnsupported(RuntimeError):
+    """영상 검토 미리보기를 만들 수 없는 입력 — 이유를 말하고 죽는다(빈 성공 금지)."""
+
+
+@dataclass(frozen=True, slots=True)
+class VisualPreviewExtraction:
+    """원본 전체 미리보기의 실측 — 화면 기하·회전·시각 원점까지 남긴다.
+
+    `rotation_degrees`는 **출력** 파일의 회전 선언이다. 코덱 복사는 원본의 display
+    matrix를 그대로 옮기고, 재인코딩은 ffmpeg이 회전을 물리적으로 구운다 — 어느
+    쪽이든 재생 화면의 가로세로비·방향은 원본과 같다(§8.2). `video_origin`은
+    **출력 영상의 잰 제시 원점**(첫 패킷 PTS × time_base)이다 — `-ss`를 쓰지
+    않아도 ffmpeg이 입력의 선언 시작(format start_time)만큼 전체를 당기므로(-copyts
+    아님) 이 값이 원본 국소 시각에서 브라우저 시각으로 가는 이동이고, 원점이 0이라고
+    가정하지 않고 잰 그대로 돌려준다(코디네이터 계약). `audio_origin`은 출력
+    오디오의 제시 원점 선언(트랙이 없으면 None) — **증거** 값이다. 브라우저 매핑은
+    소리 원점 뺄셈이 아니라 `video_origin` 하나로 정한다(늦은 트랙·침묵 선택에서
+    뺄셈은 0을 거짓으로 내놓았다, A3 실측). 이 계층은 잰 값만 실고, 더하고 빼는
+    것은 검토 계층의 계약이다.
+    """
+
+    path: Path
+    remuxed: bool
+    video_codec: str
+    audio_codec: str | None
+    audio_stream_count: int
+    duration: Fraction
+    video_origin: Fraction
+    audio_origin: Fraction | None
+    width: int
+    height: int
+    rotation_degrees: int
+    source_video_codec: str
+    source_audio_codec: str | None
+    ffmpeg_version: str
+    warnings: tuple[str, ...]
+
+
+def _visual_preview_args(
+    probe: RawMediaProbe, track: RawAudioTrack | None
+) -> tuple[list[str], tuple[str, ...], bool]:
+    """브라우저 재생 인코딩 인자 — 자막 미리보기와 같은 판정, 침묵은 영상만 지나간다."""
+    video = probe.video
+    video_copy = video.codec_name == "h264" and video.pix_fmt in _CAPTION_PREVIEW_VIDEO_COPY_PIXFMTS
+    warnings: list[str] = []
+    args: list[str] = []
+    if video_copy:
+        args += ["-c:v", "copy"]
+    else:
+        args += ["-c:v", "libx264", *_CAPTION_PREVIEW_X264_ARGS, "-pix_fmt", "yuv420p"]
+        warnings.append(
+            f"영상 {video.codec_name}/{video.pix_fmt}을(를) H264 8bit로 변환했다 (원본은 그대로다)"
+        )
+    if track is None:
+        return args, tuple(warnings), video_copy
+    if track.codec_name == "aac":
+        args += ["-c:a", "copy"]
+    else:
+        args += ["-c:a", "aac", "-b:a", _CAPTION_PREVIEW_AUDIO_BITRATE]
+        warnings.append(f"소리 {track.codec_name}을(를) AAC로 변환했다 (원본은 그대로다)")
+    return args, tuple(warnings), video_copy and track.codec_name == "aac"
+
+
+def extract_visual_review_preview(
+    source: Path, staging_output: Path, *, audio_stream_index: int | None
+) -> VisualPreviewExtraction:
+    """원본 전체를 브라우저 재생 MP4로 **스테이징에** 만든다 — 침묵·선택 트랙 한 개.
+
+    매핑은 영상 첫 스트림과 (고르면) 지정한 오디오 스트림 하나뿐이다. `-ss`를 쓰지
+    않아 원본 시각이 그대로 흐른다. 크기·회전을 바꾸는 필터는 하나도 없다 —
+    재인코딩할 때 ffmpeg의 기본 autorotate가 방향을 지킨다. 스테이징 안전장치는
+    `extract_raw_clip`·`extract_caption_preview`과 같은 것을 쓴다.
+    """
+    _assert_safe_staging(source, staging_output)
+    probe = probe_raw_media(source)
+    track = (
+        None if audio_stream_index is None else _caption_preview_track(probe, audio_stream_index)
+    )
+    codec_args, warnings, remuxed = _visual_preview_args(probe, track)
+    staging_output.parent.mkdir(parents=True, exist_ok=True)
+    staged = _reserve_staging_temp(staging_output)
+    try:
+        command = [
+            require_ffmpeg(), "-hide_banner", "-nostdin", "-y",
+            "-i", str(source),
+            "-map", f"0:{probe.video.stream_index}",
+        ]  # fmt: skip
+        if track is not None:
+            command += ["-map", f"0:{track.stream_index}"]
+        command += ["-dn", "-sn", *codec_args, "-movflags", "+faststart", "-f", "mp4", str(staged)]
+        _run(command)
+    except BaseException:
+        staged.unlink(missing_ok=True)
+        raise
+    out_probe = probe_raw_media(staged)
+    expected_audio = 0 if track is None else 1
+    if len(out_probe.audio) != expected_audio:
+        staged.unlink(missing_ok=True)
+        raise VisualPreviewUnsupported(
+            f"미리보기에 오디오 트랙이 {len(out_probe.audio)}개다 — "
+            f"선택({None if track is None else track.stream_index})과 같아야 한다"
+        )
+    out_clock = probe_extraction_clock(staged, probe=out_probe)
+    _publish_staged_clip(staged, staging_output)
+    return VisualPreviewExtraction(
+        path=staging_output,
+        remuxed=remuxed,
+        video_codec=out_probe.video.codec_name,
+        audio_codec=out_probe.audio[0].codec_name if out_probe.audio else None,
+        audio_stream_count=len(out_probe.audio),
+        duration=out_probe.duration,
+        video_origin=out_clock.presentation_origin,
+        audio_origin=out_probe.audio[0].start_time if out_probe.audio else None,
+        width=out_probe.video.width,
+        height=out_probe.video.height,
+        rotation_degrees=out_probe.video.rotation_degrees,
+        source_video_codec=probe.video.codec_name,
+        source_audio_codec=None if track is None else track.codec_name,
         ffmpeg_version=_tool_version("ffmpeg"),
         warnings=warnings,
     )
