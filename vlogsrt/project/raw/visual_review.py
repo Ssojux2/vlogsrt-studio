@@ -430,7 +430,10 @@ def validated_audio_selections(
 
 
 def _now() -> str:
-    return datetime.now(UTC).isoformat(timespec="seconds")
+    # 마이크로초까지 찍는다 — 초 해상도면 같은 초 안에 만든 두 기록(트록 전환 등)의
+    # '가장 최근' 판정이 동률이 되어 선택 질의가 비결정적으로 갈린다(V2 작업대가
+    # 이 최근 기록 표시에 기대므로 계약상 결정적이어야 한다).
+    return datetime.now(UTC).isoformat(timespec="microseconds")
 
 
 def _page_of(position: int) -> int:

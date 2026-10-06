@@ -81,6 +81,9 @@ def test_same_view_create_switches_the_whole_view(tmp_path: Path, local_socket: 
         analysis_md,
         analysis_dd,
         analysis_sources,
+        visual_shell,
+        visual_workbench,
+        caption_workbench,
     ) = first
     assert signature_a is not None
     assert "A" in workspace_md
@@ -94,6 +97,11 @@ def test_same_view_create_switches_the_whole_view(tmp_path: Path, local_socket: 
     second = server.create_workspace_view("B", str(tmp_path / "b"))
     assert second[1] is not None and second[1] != signature_a  # 서명이 B로 갱신
     assert "B" in second[0]
+    # V2 작업대 세 값도 같은 전환에 함께 내려온다 — 전환 이벤트가 실제로 다시
+    # 그린다(영상 언로드·새 epoch는 전용 시험이 잰다).
+    assert 'id="visual-video"' in second[-3] and isinstance(second[-2], str)
+    assert isinstance(second[-1], str) and 'id="caption-workbench"' in second[-1]
+    _ = visual_shell, visual_workbench, caption_workbench
 
     # 같은 화면의 서명으로 방금 만든 B의 작업 취소 — 바로 통과해야 한다
     job_id = _blocked_job(server, tmp_path / "b", "fp-b")

@@ -11,13 +11,15 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import html
 import json
 import os
 import shutil
 import threading
-from collections.abc import Awaitable, Callable, Iterator, Sequence
+import uuid
+from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from fractions import Fraction
 from pathlib import Path
@@ -132,11 +134,14 @@ class _SemanticApprovalRecord:
     digest: str
 
 
-CSS = """
+CSS = (
+    """
 #exec-log textarea { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
 #folder-listing { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
 footer { display: none !important; }
 """
+    + ui_facade.WORKBENCH_CSS
+)
 
 
 def default_state_path() -> Path:
@@ -195,6 +200,9 @@ class RawWorkspaceUi:
         # 마지막 확정 내보내기 자리 — Finder 열기·경로 복사·정리 뒤 재검증의 대상.
         self._last_export_path: str | None = None
         self._last_export_dir: str | None = None
+        # 자막 작업대의 확정 조건 표시 — 검토 상태를 다시 읽을 때마다 갱신한다.
+        self._caption_warnings_open: int = 0
+        self._caption_unplaced_open: int = 0
         # Finder 여는 경계 — 시험은 가짜를 넣는다(실제는 macOS `open -R`, 인자 검증 후).
         self._finder_opener = finder_opener
         # 최종 자막 실제 실행 제공자 주입 경계(시험·루트 가짜). 없으면 생산 transport.
@@ -233,7 +241,31 @@ class RawWorkspaceUi:
         self._caption_table_html: gr.HTML | None = None
         self._caption_cue_dd: gr.Dropdown | None = None
         self._clip_player_html: gr.HTML | None = None
+        # V2 작업대 구성요소 — 영상(껍데기·본문)과 자막(본문). 껍데기는 작업공간
+        # 전환 때만 다시 그려 영상이 언로드되고, 본문은 서버 함수 응답마다 값이
+        # 갈아지며 `watch`로 다시 묶인다(재생 머리는 본문 밖에 살아 있다).
+        self._visual_player_block: gr.HTML | None = None
+        self._visual_workbench_block: gr.HTML | None = None
+        self._caption_workbench_block: gr.HTML | None = None
+        # 작업대 수명 토큰 — 작업공간 전환마다 `_clear_screen_state`에서 다시
+        # 파진다(서버 인스턴스 수명과도 묶인다: 재시작하면 새 값). 편집·제안·
+        # 준비·자막 저장/확정은 화면이 보낸 토큰이 지금 것과 같아야 한다.
+        self._visual_lifetime_token = uuid.uuid4().hex
+        self._caption_lifetime_token = uuid.uuid4().hex
         self._signature_state: gr.State | None = None
+        # 고급(기존) 패널의 클라이언트 문맥 상태 — 화면이 마지막으로 본 수명 토큰과
+        # 검토 리비전/자막 머리. 편집·계획·재추출·내보내기·자막 수동 편집·확정의
+        # 실제 배선은 이 값을 실어 오고, 서버는 지금 값과 같을 때만 적용한다
+        # (다른 클라이언트가 머리를 옮긴 옛 사건·A→B→A 옛 사건 거부, A6 실측).
+        # 전역 토큰은 새로 만들지 않는다 — 작업대 수명 토큰을 그대로 재사용한다.
+        self._edit_context_state: gr.State | None = None
+        self._review_head_state: gr.State | None = None
+        self._caption_context_state: gr.State | None = None
+        self._caption_head_state: gr.State | None = None
+        # 실제 배선 증명 — 시험이 잡는 대상(이름 → (inputs, outputs)).
+        self._advanced_wirings: dict[str, tuple[list[object], list[object]]] = {}
+        # 배선에 실제로 묶인 핸들러 — 시험이 옛 문맥 사건을 실제 배선 경로로 잰다.
+        self._advanced_handlers: dict[str, Callable[..., Any]] = {}
 
     # ── 서버 상태 — 새로고침·재시작을 건넌다 ───────────────────
 
@@ -297,7 +329,13 @@ class RawWorkspaceUi:
             self._write_state(root)
 
     def _clear_screen_state(self) -> None:
-        """검토·자막·내보내기 화면 상태 초기화 — 작업공간 전환은 새 상태로 시작한다."""
+        """검토·자막·내보내기 화면 상태 초기화 — 작업공간 전환은 새 상태로 시작한다.
+
+        작업대 **수명 토큰**도 여기서만 다시 파진다(작업공간 열기·만들기·같은
+        프로젝트 재오픈 전부). 서명이 결정적이라 A→B→A에서 같아지는 것과 달리
+        토큰은 무작위라 옛 화면의 편집·제안·준비 사건이 되살아 적용되지 않는다.
+        보통의 새로고침·편집 재그림은 이 메서드를 거치지 않아 토큰이 그대로다.
+        """
         self._review_revision_id = None
         self._review_base_plan_id = None
         self._review_signature = None
@@ -313,8 +351,12 @@ class RawWorkspaceUi:
         self._caption_preview_signature = None
         self._caption_cue_rows = ()
         self._caption_cue_clock = {}
+        self._caption_warnings_open = 0
+        self._caption_unplaced_open = 0
         self._last_export_path = None
         self._last_export_dir = None
+        self._visual_lifetime_token = uuid.uuid4().hex
+        self._caption_lifetime_token = uuid.uuid4().hex
 
     def _snapshot_root(self) -> Path | None:
         """선택을 **한 번에** 찍는다 — 이후 읽기는 전부 이 스냅숏을 따른다."""
@@ -364,6 +406,93 @@ class RawWorkspaceUi:
     def workspace_root(self) -> Path | None:
         """지금 열린 작업공간 루트 — 없으면 None. 화면 어디서나 이것만 믿는다."""
         return self._snapshot_root()
+
+    def _require_visual_context(self, nonce: str | None, shown_revision: str | None) -> None:
+        """고급 검토 편집의 클라이언트 문맥 검증 — 수명 토큰(ABA) + 화면이 본 리비전.
+
+        기존 그라디오 단추는 서명+ID만 실어, 늦은 사건이 서버의 공용 화면 상태
+        (머리)를 몰래 따라갔다(A6 실측: 다른 클라이언트가 저장해 머리가 옮겨도 옛
+        머리 사건이 적용되고, A→B→A 뒤 옛 사건이 그대로 들어갔다). 검증은 적용보다
+        앞서고, 값이 다르면 그 자리에서 거부한다 — 어떤 상태도 바꾸지 않는다.
+        """
+        if not nonce or nonce != self._visual_lifetime_token:
+            raise gr.Error("검토 화면 수명 토큰이 늦었다 — 화면을 새로고침한 뒤 다시 시도하세요.")
+        if shown_revision != self._review_revision_id:
+            raise gr.Error(
+                "편집이 늦었다 — 화면이 본 검토 리비전과 서버 머리가 다르다."
+                " **검토 새로고침** 뒤 다시 시도하세요."
+            )
+
+    def _require_caption_context(self, nonce: str | None, shown_head: object) -> None:
+        """자막 수동 편집·확정의 클라이언트 문맥 검증 — 수명 토큰 + 화면이 본 머리."""
+        if not nonce or nonce != self._caption_lifetime_token:
+            raise gr.Error("자막 화면 수명 토큰이 늦었다 — 화면을 새로고침한 뒤 다시 시도하세요.")
+        try:
+            head = None if shown_head is None else int(str(shown_head))
+        except (TypeError, ValueError):
+            head = -1
+        if head != self._caption_head_sequence:
+            raise gr.Error(
+                "편집이 늦었다 — 화면이 본 머리와 서버 머리가 다르다."
+                " **검토 새로고침** 뒤 다시 시도하세요."
+            )
+
+    def _review_panel_call(
+        self, fn: Callable[..., Any], *, gated: bool
+    ) -> Callable[..., tuple[Any, ...]]:
+        """검토 패널 단추의 실제 배선 핸들러 — 문맥(토큰·화면이 본 리비전)을 주고받는다.
+
+        gated=True(편집·계획 반영·재추출·내보내기 계열)은 문맥 검증을 **먼저**
+        한다: 옛 토큰(작업공간 전환·재시작)·옛 머리(다른 클라이언트 편집) 사건은
+        여기서 거부되고 원본 뷰 함수에 닿지 않는다. gated=False(시작·새로고침·
+        조회)는 검증 없이 새 문맥만 내려 늦은 화면의 회복 길을 연다. 뷰 함수
+        자체는 직접 호출 호환(시험·스크립트)을 위해 서명을 그대로 둔다.
+        """
+
+        def handler(
+            nonce: str | None, shown_revision: str | None, signature: str | None, *args: object
+        ) -> tuple[Any, ...]:
+            if gated:
+                self._require_visual_context(nonce, shown_revision)
+            result = fn(signature, *args)
+            tail: tuple[Any, ...] = (self._review_revision_id, self._visual_lifetime_token)
+            return (*result, *tail) if isinstance(result, tuple) else (result, *tail)
+
+        return handler
+
+    def _wire_review_button(
+        self,
+        name: str,
+        button: gr.Button,
+        fn: Callable[..., Any],
+        boxes: list[object],
+        *,
+        gated: bool,
+        outputs: list[object] | None = None,
+    ) -> None:
+        """검토 계열 단추 배선 — 문맥 상태를 입력·출력에 함께 단다.
+
+        입력의 앞두 값(토큰·화면이 본 리비전)은 사건이 일어난 순간의 클라이언트
+        소유 값이다 — 늦은 큐 사건은 옛 값을 실어 온다. `_advanced_wirings`에
+        실제 inputs/outputs을 남겨 시험이 배선 자체를 잰다.
+        """
+        assert self._edit_context_state is not None
+        assert self._review_head_state is not None
+        inputs = [
+            self._edit_context_state,
+            self._review_head_state,
+            self._signature_state,
+            *boxes,
+        ]
+        targets = [
+            *(outputs if outputs is not None else [self._review_md]),
+            self._review_head_state,
+            self._edit_context_state,
+        ]
+        handler = self._review_panel_call(fn, gated=gated)
+        button.click(handler, inputs, targets)
+        self._advanced_wirings[name] = (inputs, targets)
+        self._advanced_handlers[name] = handler
 
     # ── 화면용 포맷 — 상태는 매번 서버에서 다시 읽는다 ───────────
 
@@ -600,327 +729,376 @@ class RawWorkspaceUi:
         self,
     ) -> tuple[gr.Button, gr.Button, gr.Dropdown, gr.Button]:
         with gr.Tab("2 · 분석 · 조각 검토"):
-            gr.Markdown(
-                "> 이 단계는 두 갈래다. **의미 분석**(Luna)은 내부 전사 증거와 프레임"
-                " 표본으로 대화·장면을 요약하고 경계를 **제안**한다 — 브라우저에서는"
-                " **오프라인 재생**만 가능하고(명시적으로 준비한 합성 픽스처만 재생,"
-                " 실제 호출 아님), 실제 호출은 사람이 만든 승인 기록으로만 시작된다."
-                " **결정적 분할**은 의미 분석 없이 측정된 프레임 격자로 전체를 타일링한다"
-                " — 유료 호출은 전혀 없다."
-            )
-            # ── 의미 분석(오프라인 재생) ──────────────────────────
-            with gr.Row():
-                self._analysis_sources_group = gr.CheckboxGroup(
-                    choices=self.analysis_source_choices(),
-                    label="분석할 원본(선택) — 비우면 전체",
-                    interactive=True,
+            # ── V2 영상 작업대 — 3단 무대(왼쪽 목록 · 가운데 재생기+렠 · 오른쪽 패널).
+            # 두 구성요소가 같은 `#visual-stage` 격자에 들어가고, 껍데기·본문의
+            # 중간 껍데기는 display:contents로 펴져 세 칸이 한 눈에 짝을 이룬다.
+            # 영상 원소는 여전히 별도 구성요소(껍데기)라 같은 원본을 다시 고르는
+            # 동안 재생이 이어진다(F1a·F1b).
+            shell, workbench = self.visual_workbench_render(self._snapshot_root())
+            with gr.Row(elem_id="visual-stage"):
+                self._visual_player_block = gr.HTML(
+                    shell,
+                    elem_id="visual-player-block",
+                    elem_classes=["vl-stage-cell"],
                 )
-            self._analysis_settings_md = gr.Markdown(self._analysis_settings_markdown())
-            with gr.Row():
-                estimate_button = gr.Button("분석 견적(로컬)", scale=2)
-                analysis_start = gr.Button("오프라인 재생 분석 시작", variant="primary", scale=2)
-                analysis_refresh = gr.Button("분석 상태 새로고침", scale=2)
-                analysis_plan = gr.Button("분석 결과로 분할 계획", scale=2)
-            # ── 실제 호출(두 단계 승인) — 견적 표 + 확인란으로 승인한다 ──
-            gr.Markdown(
-                "> **실제 호출은 두 단계다.** 1단계 견적 → 전사 승인(확인란) →"
-                " 전사·프레임 기록 → **의미 승인 대기** → 2단계 견적 → Luna 승인"
-                "(확인란) → 완료. 승인은 화면이 잰 견적 표를 서버가 간직하는 것으로"
-                " 남는다 — 키는 브라우저 서버를 띄운 환경에서만 오고 화면은"
-                " 자격증명을 찾지 않는다(§14.3)."
-            )
-            with gr.Row():
-                live_estimate_button = gr.Button("실제 호출 1단계 견적(승인용)", scale=2)
-                asr_confirm_box = gr.Checkbox(
-                    label="위 1단계 견적 그대로 전사를 승인한다",
-                    value=False,
-                    interactive=True,
-                    scale=3,
+                self._visual_workbench_block = gr.HTML(
+                    workbench,
+                    elem_id="visual-workbench-block",
+                    elem_classes=["vl-stage-cell"],
+                    js_on_load=ui_facade.VISUAL_BOOTSTRAP_JS,
+                    server_functions=self._visual_server_functions(),
                 )
-                live_asr_button = gr.Button(
-                    "실제 호출 1단계(전사) 시작", variant="primary", scale=2
+            with gr.Accordion(
+                "고급 — 의미 분석 · 수동 조각 검토 · 결정적 분할(기존 화면)", open=False
+            ):
+                extract_button, refresh_segment, profile_dd, analysis_plan = (
+                    self._review_advanced_tab()
                 )
-            with gr.Row():
-                semantic_estimate_button = gr.Button("2단계 견적(로컬·전사 후 실측)", scale=2)
-                semantic_confirm_box = gr.Checkbox(
-                    label="위 2단계 견적의 실측 지문으로 Luna 호출을 승인한다",
-                    value=False,
-                    interactive=True,
-                    scale=3,
-                )
-                semantic_resume_button = gr.Button(
-                    "실제 호출 2단계(의미) 재개", variant="primary", scale=2
-                )
-            with gr.Row():
-                self._network_dd = gr.Dropdown(
-                    choices=["offline", "online"],
-                    value=self._current_network_mode(),
-                    label="작업공간 네트워크 모드(설정)",
-                    interactive=True,
-                    scale=2,
-                )
-                network_apply = gr.Button("네트워크 모드 적용", scale=1)
-            with gr.Row():
-                self._analysis_jobs_dd = gr.Dropdown(
-                    choices=self.resumable_analysis_choices(),
-                    label="재시도·2단계 재개 대상 분석 작업",
-                    interactive=True,
-                    scale=6,
-                )
-                analysis_retry = gr.Button("재시도", scale=1)
-            self._analysis_md = gr.Markdown(
-                self._analysis_state_markdown(self._snapshot_root()), elem_id="analysis-state"
-            )
-            estimate_button.click(
-                self.analysis_estimate_view,
-                [self._signature_state, self._analysis_sources_group],
-                self._analysis_md,
-            )
-            analysis_start.click(
-                self.analysis_start_view,
-                [self._signature_state, self._analysis_sources_group],
-                [self._analysis_md, self._analysis_jobs_dd],
-            )
-            analysis_refresh.click(
-                self.analysis_refresh_view,
-                self._signature_state,
-                [self._analysis_md, self._analysis_jobs_dd, self._analysis_sources_group],
-            )
-            analysis_retry.click(
-                self.analysis_retry_view,
-                [self._signature_state, self._analysis_jobs_dd],
-                self._analysis_md,
-            )
-            live_estimate_button.click(
-                self.analysis_live_estimate_view,
-                [self._signature_state, self._analysis_sources_group],
-                self._analysis_md,
-            )
-            live_asr_button.click(
-                self.analysis_live_asr_view,
-                [self._signature_state, self._analysis_sources_group, asr_confirm_box],
-                [self._analysis_md, self._analysis_jobs_dd],
-            )
-            semantic_estimate_button.click(
-                self.analysis_semantic_estimate_view,
-                self._signature_state,
-                self._analysis_md,
-            )
-            semantic_resume_button.click(
-                self.analysis_semantic_resume_view,
-                [self._signature_state, self._analysis_jobs_dd, semantic_confirm_box],
-                [self._analysis_md, self._analysis_jobs_dd],
-            )
-            network_apply.click(
-                self.settings_network_view,
-                [self._signature_state, self._network_dd],
-                self._analysis_settings_md,
-            )
-            gr.Markdown("---")
-            # ── 조각 검토(W3 백엔드) — 순수 편집·조회, 재추출은 계획으로 ──
-            gr.Markdown(
-                "> **조각 검토** — 추출 계획 위에 시간순 검토 리비전이 산다. 편집은"
-                " 화면이 본 헤드 리비전에 묶이고, 경계를 고치면 그 조각은 새 추출로만"
-                " 갱신된다(메타데이터 편집은 재추출을 만들지 않는다). 유료 호출·"
-                " 미디어 재생성은 전혀 없다."
-            )
-            with gr.Row():
-                review_init_button = gr.Button("검토 시작", variant="primary", scale=2)
-                review_refresh_button = gr.Button("검토 새로고침", scale=2)
-                review_reextract_button = gr.Button("다시 뽑을 조각", scale=2)
-                review_plan_button = gr.Button("검토 계획 반영", scale=2)
-            with gr.Row():
-                review_query_box = gr.Textbox(label="검색(원본·메모)", scale=3)
-                review_tags_box = gr.Textbox(label="태그(쉼표)", scale=3)
-                review_filter_button = gr.Button("조회", scale=1)
-            with gr.Row():
-                review_segment_box = gr.Textbox(label="조각 ID", scale=3)
-                review_note_box = gr.Textbox(label="메모", scale=4)
-                review_note_button = gr.Button("메모 저장", scale=1)
-            with gr.Row():
-                review_selection_dd = gr.Dropdown(
-                    choices=["사용", "제외"], value="사용", label="선택 표시", scale=1
-                )
-                review_selection_button = gr.Button("선택 적용", scale=1)
-                review_boundary_box = gr.Textbox(label="경계 초", scale=2)
-                review_boundary_button = gr.Button("경계 조정", scale=1)
-            with gr.Row():
-                review_split_box = gr.Textbox(label="나눌 초", scale=2)
-                review_split_button = gr.Button("나누기", scale=1)
-                review_merge_left_box = gr.Textbox(label="왼쪽 조각 ID", scale=3)
-                review_merge_right_box = gr.Textbox(label="오른쪽 조각 ID", scale=3)
-                review_merge_button = gr.Button("이웃 합치기", scale=1)
-            _review_root = self._snapshot_root()
-            self._review_md = gr.Markdown(
-                self._review_panel_markdown(_review_root)
-                if _review_root is not None
-                else "_검토 상태가 여기 나타난다 — 검토 시작으로 만든다._",
-                elem_id="review-state",
-            )
-            review_init_button.click(
-                self.review_initialize_view, self._signature_state, self._review_md
-            )
-            review_refresh_button.click(
-                self.review_refresh_view, self._signature_state, self._review_md
-            )
-            review_reextract_button.click(
-                self.review_reextract_view, self._signature_state, self._review_md
-            )
-            review_plan_button.click(self.review_plan_view, self._signature_state, self._review_md)
-            review_filter_button.click(
-                self.review_filter_view,
-                [self._signature_state, review_query_box, review_tags_box],
-                self._review_md,
-            )
-            review_note_button.click(
-                self.review_note_view,
-                [self._signature_state, review_segment_box, review_note_box],
-                self._review_md,
-            )
-            review_selection_button.click(
-                self.review_selection_view,
-                [self._signature_state, review_segment_box, review_selection_dd],
-                self._review_md,
-            )
-            review_boundary_button.click(
-                self.review_boundary_view,
-                [self._signature_state, review_segment_box, review_boundary_box],
-                self._review_md,
-            )
-            review_split_button.click(
-                self.review_split_view,
-                [self._signature_state, review_segment_box, review_split_box],
-                self._review_md,
-            )
-            review_merge_button.click(
-                self.review_merge_view,
-                [self._signature_state, review_merge_left_box, review_merge_right_box],
-                self._review_md,
-            )
-            gr.Markdown("---")
-            # ── 결정적 분할(오프라인) ─────────────────────────────
-            gr.Markdown(
-                "> **결정적 분할** — 의미 분석 없이 확정된 전체 순서 위에서 각 원본의"
-                " 측정된 프레임 격자로 전체를 빈틈없이 타일링한다. 유료 호출은 전혀"
-                " 없다(오프라인)."
-            )
-            with gr.Row():
-                plan_button = gr.Button("결정적 분할 계획", variant="primary", scale=2)
-                extract_button = gr.Button("조각 추출 시작", scale=2)
-                refresh_segment = gr.Button("진행 상태 새로고침", scale=2)
-            with gr.Row():
-                self._profile_dd = gr.Dropdown(
-                    choices=[(name, name) for name in raw_service.EXTRACT_PROFILES],
-                    value="source_matched",
-                    label="추출 프로파일",
-                    interactive=True,
-                    scale=2,
-                )
-                intervals_box = gr.Textbox(
-                    label="구간 계획(선택)",
-                    info="각 줄: `자산ID 시작 끝`(초). 전체를 빈틈없이 덮아야 한다."
-                    " 비우면 균일 타일(기본 30초)로 전체를 덮는다.",
-                    placeholder="source_ab12 0 2.5\nsource_ab12 2.5 6",
-                    scale=4,
-                )
-            with gr.Row():
-                self._extract_jobs_dd = gr.Dropdown(
-                    choices=self.resumable_extract_choices(),
-                    label="재시도할 추출 작업",
-                    interactive=True,
-                    scale=6,
-                )
-                retry_extract = gr.Button("재시도", scale=1)
-            self._segment_md = gr.Markdown(
-                self._segment_state_markdown(self._snapshot_root()), elem_id="segment-state"
-            )
-            plan_button.click(
-                self.segment_plan_view,
-                [self._signature_state, intervals_box],
-                self._segment_md,
-            )
-            retry_extract.click(
-                self.segment_retry_view,
-                [self._signature_state, self._extract_jobs_dd],
-                self._segment_md,
-            )
-            gr.Markdown("---")
-            with gr.Row():
-                self._clip_dd = gr.Dropdown(
-                    choices=self.clip_choices(),
-                    label="게시된 조각(재생)",
-                    interactive=True,
-                    scale=6,
-                )
-                refresh_media = gr.Button("조각 목록 새로고침", scale=1)
-            self._clip_player_html = gr.HTML(self._player_html(None))
-            with gr.Row():
-                clip_vtt_box = gr.Checkbox(
-                    label="검토 자막(VTT) 함께 재생 — 측정된 발화 자막",
-                    value=False,
-                    interactive=True,
-                    scale=4,
-                )
-                clip_vtt_button = gr.Button("자막 토글 적용", scale=1)
-                clip_vtt_button.click(
-                    self.review_vtt_toggle_view,
-                    [self._signature_state, self._clip_dd, clip_vtt_box],
-                    self._clip_player_html,
-                )
-            with gr.Row():
-                self._media_dd = gr.Dropdown(
-                    choices=self.media_choices(),
-                    label="등록된 미디어 전체",
-                    interactive=True,
-                    scale=6,
-                )
-                refresh_all_media = gr.Button("미디어 목록 새로고침", scale=1)
-            media_player = gr.HTML(self._player_html(None))
+        return extract_button, refresh_segment, profile_dd, analysis_plan
 
-            def on_clip_pick(file_id: str | None) -> str:
-                return self._player_html(file_id)
-
-            def on_refresh_clips() -> gr.Dropdown:
-                return gr.Dropdown(choices=self.clip_choices())
-
-            def on_media_pick(file_id: str | None) -> str:
-                return self._player_html(file_id)
-
-            def on_refresh_media() -> gr.Dropdown:
-                return gr.Dropdown(choices=self.media_choices())
-
-            assert self._clip_dd is not None and self._clip_player_html is not None
-            self._clip_dd.change(on_clip_pick, self._clip_dd, self._clip_player_html)
-            refresh_media.click(on_refresh_clips, None, self._clip_dd)
-            assert self._media_dd is not None
-            self._media_dd.change(on_media_pick, self._media_dd, media_player)
-            refresh_all_media.click(on_refresh_media, None, self._media_dd)
-            with gr.Row():
-                self._jobs_dd = gr.Dropdown(
-                    choices=self.active_job_choices(),
-                    label="진행 중 작업",
-                    interactive=True,
-                    scale=6,
-                )
-                refresh_jobs = gr.Button("작업 목록 새로고침", scale=1)
-                cancel_button = gr.Button("선택 작업 취소", scale=1)
-            self._jobs_md = gr.Markdown(self.jobs_markdown(), elem_id="exec-log")
-
-            def on_refresh_jobs() -> tuple[gr.Dropdown, str]:
-                return gr.Dropdown(choices=self.active_job_choices()), self.jobs_markdown()
-
-            def on_cancel(signature: str | None, job_id: str | None) -> tuple[gr.Dropdown, str]:
-                return self.cancel_view(signature, job_id)
-
-            assert (
-                self._media_dd is not None
-                and self._jobs_dd is not None
-                and self._signature_state is not None
+    def _review_advanced_tab(
+        self,
+    ) -> tuple[gr.Button, gr.Button, gr.Dropdown, gr.Button]:
+        """2번 탭의 고급 패널 — 의미 분석·수동 조각 검토·결정적 분할(기존 흐름)."""
+        gr.Markdown(
+            "> 이 단계는 두 갈래다. **의미 분석**(Luna)은 내부 전사 증거와 프레임"
+            " 표본으로 대화·장면을 요약하고 경계를 **제안**한다 — 브라우저에서는"
+            " **오프라인 재생**만 가능하고(명시적으로 준비한 합성 픽스처만 재생,"
+            " 실제 호출 아님), 실제 호출은 사람이 만든 승인 기록으로만 시작된다."
+            " **결정적 분할**은 의미 분석 없이 측정된 프레임 격자로 전체를 타일링한다"
+            " — 유료 호출은 전혀 없다."
+        )
+        # ── 의미 분석(오프라인 재생) ──────────────────────────
+        with gr.Row():
+            self._analysis_sources_group = gr.CheckboxGroup(
+                choices=self.analysis_source_choices(),
+                label="분석할 원본(선택) — 비우면 전체",
+                interactive=True,
             )
-            refresh_jobs.click(on_refresh_jobs, None, [self._jobs_dd, self._jobs_md])
-            cancel_button.click(
-                on_cancel, [self._signature_state, self._jobs_dd], [self._jobs_dd, self._jobs_md]
+        self._analysis_settings_md = gr.Markdown(self._analysis_settings_markdown())
+        with gr.Row():
+            estimate_button = gr.Button("분석 견적(로컬)", scale=2)
+            analysis_start = gr.Button("오프라인 재생 분석 시작", variant="primary", scale=2)
+            analysis_refresh = gr.Button("분석 상태 새로고침", scale=2)
+            analysis_plan = gr.Button("분석 결과로 분할 계획", scale=2)
+        # ── 실제 호출(두 단계 승인) — 견적 표 + 확인란으로 승인한다 ──
+        gr.Markdown(
+            "> **실제 호출은 두 단계다.** 1단계 견적 → 전사 승인(확인란) →"
+            " 전사·프레임 기록 → **의미 승인 대기** → 2단계 견적 → Luna 승인"
+            "(확인란) → 완료. 승인은 화면이 잰 견적 표를 서버가 간직하는 것으로"
+            " 남는다 — 키는 브라우저 서버를 띄운 환경에서만 오고 화면은"
+            " 자격증명을 찾지 않는다(§14.3)."
+        )
+        with gr.Row():
+            live_estimate_button = gr.Button("실제 호출 1단계 견적(승인용)", scale=2)
+            asr_confirm_box = gr.Checkbox(
+                label="위 1단계 견적 그대로 전사를 승인한다",
+                value=False,
+                interactive=True,
+                scale=3,
             )
+            live_asr_button = gr.Button("실제 호출 1단계(전사) 시작", variant="primary", scale=2)
+        with gr.Row():
+            semantic_estimate_button = gr.Button("2단계 견적(로컬·전사 후 실측)", scale=2)
+            semantic_confirm_box = gr.Checkbox(
+                label="위 2단계 견적의 실측 지문으로 Luna 호출을 승인한다",
+                value=False,
+                interactive=True,
+                scale=3,
+            )
+            semantic_resume_button = gr.Button(
+                "실제 호출 2단계(의미) 재개", variant="primary", scale=2
+            )
+        with gr.Row():
+            self._network_dd = gr.Dropdown(
+                choices=["offline", "online"],
+                value=self._current_network_mode(),
+                label="작업공간 네트워크 모드(설정)",
+                interactive=True,
+                scale=2,
+            )
+            network_apply = gr.Button("네트워크 모드 적용", scale=1)
+        with gr.Row():
+            self._analysis_jobs_dd = gr.Dropdown(
+                choices=self.resumable_analysis_choices(),
+                label="재시도·2단계 재개 대상 분석 작업",
+                interactive=True,
+                scale=6,
+            )
+            analysis_retry = gr.Button("재시도", scale=1)
+        self._analysis_md = gr.Markdown(
+            self._analysis_state_markdown(self._snapshot_root()), elem_id="analysis-state"
+        )
+        estimate_button.click(
+            self.analysis_estimate_view,
+            [self._signature_state, self._analysis_sources_group],
+            self._analysis_md,
+        )
+        analysis_start.click(
+            self.analysis_start_view,
+            [self._signature_state, self._analysis_sources_group],
+            [self._analysis_md, self._analysis_jobs_dd],
+        )
+        analysis_refresh.click(
+            self.analysis_refresh_view,
+            self._signature_state,
+            [self._analysis_md, self._analysis_jobs_dd, self._analysis_sources_group],
+        )
+        analysis_retry.click(
+            self.analysis_retry_view,
+            [self._signature_state, self._analysis_jobs_dd],
+            self._analysis_md,
+        )
+        live_estimate_button.click(
+            self.analysis_live_estimate_view,
+            [self._signature_state, self._analysis_sources_group],
+            self._analysis_md,
+        )
+        live_asr_button.click(
+            self.analysis_live_asr_view,
+            [self._signature_state, self._analysis_sources_group, asr_confirm_box],
+            [self._analysis_md, self._analysis_jobs_dd],
+        )
+        semantic_estimate_button.click(
+            self.analysis_semantic_estimate_view,
+            self._signature_state,
+            self._analysis_md,
+        )
+        semantic_resume_button.click(
+            self.analysis_semantic_resume_view,
+            [self._signature_state, self._analysis_jobs_dd, semantic_confirm_box],
+            [self._analysis_md, self._analysis_jobs_dd],
+        )
+        network_apply.click(
+            self.settings_network_view,
+            [self._signature_state, self._network_dd],
+            self._analysis_settings_md,
+        )
+        gr.Markdown("---")
+        # ── 조각 검토(W3 백엔드) — 순수 편집·조회, 재추출은 계획으로 ──
+        gr.Markdown(
+            "> **조각 검토** — 추출 계획 위에 시간순 검토 리비전이 산다. 편집은"
+            " 화면이 본 헤드 리비전에 묶이고, 경계를 고치면 그 조각은 새 추출로만"
+            " 갱신된다(메타데이터 편집은 재추출을 만들지 않는다). 유료 호출·"
+            " 미디어 재생성은 전혀 없다."
+        )
+        with gr.Row():
+            review_init_button = gr.Button("검토 시작", variant="primary", scale=2)
+            review_refresh_button = gr.Button("검토 새로고침", scale=2)
+            review_reextract_button = gr.Button("다시 뽑을 조각", scale=2)
+            review_plan_button = gr.Button("검토 계획 반영", scale=2)
+        with gr.Row():
+            review_query_box = gr.Textbox(label="검색(원본·메모)", scale=3)
+            review_tags_box = gr.Textbox(label="태그(쉼표)", scale=3)
+            review_filter_button = gr.Button("조회", scale=1)
+        with gr.Row():
+            review_segment_box = gr.Textbox(label="조각 ID", scale=3)
+            review_note_box = gr.Textbox(label="메모", scale=4)
+            review_note_button = gr.Button("메모 저장", scale=1)
+        with gr.Row():
+            review_selection_dd = gr.Dropdown(
+                choices=["사용", "제외"], value="사용", label="선택 표시", scale=1
+            )
+            review_selection_button = gr.Button("선택 적용", scale=1)
+            review_boundary_box = gr.Textbox(label="경계 초", scale=2)
+            review_boundary_button = gr.Button("경계 조정", scale=1)
+        with gr.Row():
+            review_split_box = gr.Textbox(label="나눌 초", scale=2)
+            review_split_button = gr.Button("나누기", scale=1)
+            review_merge_left_box = gr.Textbox(label="왼쪽 조각 ID", scale=3)
+            review_merge_right_box = gr.Textbox(label="오른쪽 조각 ID", scale=3)
+            review_merge_button = gr.Button("이웃 합치기", scale=1)
+        _review_root = self._snapshot_root()
+        self._review_md = gr.Markdown(
+            self._review_panel_markdown(_review_root)
+            if _review_root is not None
+            else "_검토 상태가 여기 나타난다 — 검토 시작으로 만든다._",
+            elem_id="review-state",
+        )
+        # 문맥 상태를 단다 — 시작·새로고침·조회는 검증 없이 새 문맥을 내리고(회복
+        # 길), 편집·계획 반영·재추출은 옛 문맥 사건을 배선 핸들러에서 거부한다.
+        self._wire_review_button(
+            "review-initialize",
+            review_init_button,
+            self.review_initialize_view,
+            [],
+            gated=False,
+        )
+        self._wire_review_button(
+            "review-refresh", review_refresh_button, self.review_refresh_view, [], gated=False
+        )
+        self._wire_review_button(
+            "review-reextract", review_reextract_button, self.review_reextract_view, [], gated=True
+        )
+        self._wire_review_button(
+            "review-plan", review_plan_button, self.review_plan_view, [], gated=True
+        )
+        self._wire_review_button(
+            "review-filter",
+            review_filter_button,
+            self.review_filter_view,
+            [review_query_box, review_tags_box],
+            gated=False,
+        )
+        self._wire_review_button(
+            "review-note",
+            review_note_button,
+            self.review_note_view,
+            [review_segment_box, review_note_box],
+            gated=True,
+        )
+        self._wire_review_button(
+            "review-selection",
+            review_selection_button,
+            self.review_selection_view,
+            [review_segment_box, review_selection_dd],
+            gated=True,
+        )
+        self._wire_review_button(
+            "review-boundary",
+            review_boundary_button,
+            self.review_boundary_view,
+            [review_segment_box, review_boundary_box],
+            gated=True,
+        )
+        self._wire_review_button(
+            "review-split",
+            review_split_button,
+            self.review_split_view,
+            [review_segment_box, review_split_box],
+            gated=True,
+        )
+        self._wire_review_button(
+            "review-merge",
+            review_merge_button,
+            self.review_merge_view,
+            [review_merge_left_box, review_merge_right_box],
+            gated=True,
+        )
+        gr.Markdown("---")
+        # ── 결정적 분할(오프라인) ─────────────────────────────
+        gr.Markdown(
+            "> **결정적 분할** — 의미 분석 없이 확정된 전체 순서 위에서 각 원본의"
+            " 측정된 프레임 격자로 전체를 빈틈없이 타일링한다. 유료 호출은 전혀"
+            " 없다(오프라인)."
+        )
+        with gr.Row():
+            plan_button = gr.Button("결정적 분할 계획", variant="primary", scale=2)
+            extract_button = gr.Button("조각 추출 시작", scale=2)
+            refresh_segment = gr.Button("진행 상태 새로고침", scale=2)
+        with gr.Row():
+            self._profile_dd = gr.Dropdown(
+                choices=[(name, name) for name in raw_service.EXTRACT_PROFILES],
+                value="source_matched",
+                label="추출 프로파일",
+                interactive=True,
+                scale=2,
+            )
+            intervals_box = gr.Textbox(
+                label="구간 계획(선택)",
+                info="각 줄: `자산ID 시작 끝`(초). 전체를 빈틈없이 덮아야 한다."
+                " 비우면 균일 타일(기본 30초)로 전체를 덮는다.",
+                placeholder="source_ab12 0 2.5\nsource_ab12 2.5 6",
+                scale=4,
+            )
+        with gr.Row():
+            self._extract_jobs_dd = gr.Dropdown(
+                choices=self.resumable_extract_choices(),
+                label="재시도할 추출 작업",
+                interactive=True,
+                scale=6,
+            )
+            retry_extract = gr.Button("재시도", scale=1)
+        self._segment_md = gr.Markdown(
+            self._segment_state_markdown(self._snapshot_root()), elem_id="segment-state"
+        )
+        plan_button.click(
+            self.segment_plan_view,
+            [self._signature_state, intervals_box],
+            self._segment_md,
+        )
+        retry_extract.click(
+            self.segment_retry_view,
+            [self._signature_state, self._extract_jobs_dd],
+            self._segment_md,
+        )
+        gr.Markdown("---")
+        with gr.Row():
+            self._clip_dd = gr.Dropdown(
+                choices=self.clip_choices(),
+                label="게시된 조각(재생)",
+                interactive=True,
+                scale=6,
+            )
+            refresh_media = gr.Button("조각 목록 새로고침", scale=1)
+        self._clip_player_html = gr.HTML(self._player_html(None))
+        with gr.Row():
+            clip_vtt_box = gr.Checkbox(
+                label="검토 자막(VTT) 함께 재생 — 측정된 발화 자막",
+                value=False,
+                interactive=True,
+                scale=4,
+            )
+            clip_vtt_button = gr.Button("자막 토글 적용", scale=1)
+            clip_vtt_button.click(
+                self.review_vtt_toggle_view,
+                [self._signature_state, self._clip_dd, clip_vtt_box],
+                self._clip_player_html,
+            )
+        with gr.Row():
+            self._media_dd = gr.Dropdown(
+                choices=self.media_choices(),
+                label="등록된 미디어 전체",
+                interactive=True,
+                scale=6,
+            )
+            refresh_all_media = gr.Button("미디어 목록 새로고침", scale=1)
+        media_player = gr.HTML(self._player_html(None))
+
+        def on_clip_pick(file_id: str | None) -> str:
+            return self._player_html(file_id)
+
+        def on_refresh_clips() -> gr.Dropdown:
+            return gr.Dropdown(choices=self.clip_choices())
+
+        def on_media_pick(file_id: str | None) -> str:
+            return self._player_html(file_id)
+
+        def on_refresh_media() -> gr.Dropdown:
+            return gr.Dropdown(choices=self.media_choices())
+
+        assert self._clip_dd is not None and self._clip_player_html is not None
+        self._clip_dd.change(on_clip_pick, self._clip_dd, self._clip_player_html)
+        refresh_media.click(on_refresh_clips, None, self._clip_dd)
+        assert self._media_dd is not None
+        self._media_dd.change(on_media_pick, self._media_dd, media_player)
+        refresh_all_media.click(on_refresh_media, None, self._media_dd)
+        with gr.Row():
+            self._jobs_dd = gr.Dropdown(
+                choices=self.active_job_choices(),
+                label="진행 중 작업",
+                interactive=True,
+                scale=6,
+            )
+            refresh_jobs = gr.Button("작업 목록 새로고침", scale=1)
+            cancel_button = gr.Button("선택 작업 취소", scale=1)
+        self._jobs_md = gr.Markdown(self.jobs_markdown(), elem_id="exec-log")
+
+        def on_refresh_jobs() -> tuple[gr.Dropdown, str]:
+            return gr.Dropdown(choices=self.active_job_choices()), self.jobs_markdown()
+
+        def on_cancel(signature: str | None, job_id: str | None) -> tuple[gr.Dropdown, str]:
+            return self.cancel_view(signature, job_id)
+
+        assert (
+            self._media_dd is not None
+            and self._jobs_dd is not None
+            and self._signature_state is not None
+        )
+        refresh_jobs.click(on_refresh_jobs, None, [self._jobs_dd, self._jobs_md])
+        cancel_button.click(
+            on_cancel, [self._signature_state, self._jobs_dd], [self._jobs_dd, self._jobs_md]
+        )
         return extract_button, refresh_segment, self._profile_dd, analysis_plan
 
     def cancel_selected(self, signature: str | None, job_id: str | None) -> str:
@@ -956,6 +1134,9 @@ class RawWorkspaceUi:
         str,
         gr.Dropdown,
         gr.CheckboxGroup,
+        str,
+        str,
+        str,
     ]:
         """기존 작업공간 열기 이벤트 — 서명·미디어·작업·설정까지 한 번에 갱신한다.
 
@@ -992,6 +1173,9 @@ class RawWorkspaceUi:
         str,
         gr.Dropdown,
         gr.CheckboxGroup,
+        str,
+        str,
+        str,
     ]:
         """새 작업공간 만들기 이벤트 — 첫 생성(서명 None)에서도 같은 화면이 즉시 연결된다."""
         if not (name or "").strip():
@@ -1023,6 +1207,9 @@ class RawWorkspaceUi:
         str,
         gr.Dropdown,
         gr.CheckboxGroup,
+        str,
+        str,
+        str,
     ]:
         """작업공간 전환 뒤 화면이 받아야 하는 전체 보기(서명 포함).
 
@@ -1047,7 +1234,30 @@ class RawWorkspaceUi:
             self._analysis_state_markdown(root),
             gr.Dropdown(choices=self.resumable_analysis_choices(root)),
             gr.CheckboxGroup(choices=self.analysis_source_choices(root)),
+            *self._workbench_view_values(root),
         )
+
+    def _workbench_view_values(self, root: Path | None) -> tuple[str, str, str]:
+        """작업대 세 값(영상 껍데기·영상 본문·자막 본문) — 전환·새로고침 출력용.
+
+        작업공간 전환마다 껍데기가 다시 그려져 영상이 능동적으로 언로드되고,
+        본문 값의 epoch가 새로 파져 묵은 클라이언트 응답이 전부 버려진다.
+        """
+        shell, workbench = self.visual_workbench_render(root)
+        return shell, workbench, self.caption_workbench_value(root)
+
+    def _workbench_outputs(self) -> list[object]:
+        """작업대 세 구성요소 — 만들어진 뒤에만 부른다(조립 순서 주의)."""
+        assert (
+            self._visual_player_block is not None
+            and self._visual_workbench_block is not None
+            and self._caption_workbench_block is not None
+        )
+        return [
+            self._visual_player_block,
+            self._visual_workbench_block,
+            self._caption_workbench_block,
+        ]
 
     def _selection_outputs(self) -> list[object]:
         """만들기·열기 이벤트의 출력 대상 — `workspace_view_values`와 짝이다."""
@@ -1084,12 +1294,697 @@ class RawWorkspaceUi:
             self._analysis_md,
             self._analysis_jobs_dd,
             self._analysis_sources_group,
+            *self._workbench_outputs(),
         ]
 
     def cancel_view(self, signature: str | None, job_id: str | None) -> tuple[gr.Dropdown, str]:
         """취소 이벤트 — 안내 문장과 함께 진행 중 작업 목록도 다시 내린다."""
         message = self.cancel_selected(signature, job_id)
         return gr.Dropdown(choices=self.active_job_choices()), message
+
+    # ── V2 영상 작업대 — 공개 질의만 조립, 편집은 화면이 본 리비전에 묶인다 ──
+
+    def _visual_source_names(self, root: Path) -> dict[str, str]:
+        """사람이 읽는 원본 이름 — 공개 목록(자산)에서만 온다(조사 없음)."""
+        try:
+            return {
+                asset.asset_id: asset.source_name for asset in self.raw.list_source_assets(root)
+            }
+        except raw_service.RawWorkspaceError:
+            return {}
+
+    def _visual_plan_ranges(self, root: Path, base_plan_id: str) -> set[tuple[str, int, int]]:
+        """기본 계획의 core 범위 — 재추출 판정(영상 갱신 필요 표시)의 재료."""
+        try:
+            plan = self.raw.segment_plan_revision(root, base_plan_id)
+        except raw_service.RawWorkspaceError:
+            return set()
+        return {
+            (entry.asset_id, entry.core_start_pts, entry.core_end_pts) for entry in plan.entries
+        }
+
+    def _visual_chronological(self, root: Path, base_plan_id: str | None) -> tuple[Any, Any]:
+        """(리비전, 시간순 조각) — 전체 원본 레일·선호 선택 계산의 공개 읽기."""
+        facade = self.raw.review_workspace_facade(root)
+        loaded = facade.load_head(base_plan_id)
+        return loaded.revision, facade.chronological(loaded.revision)
+
+    def _visual_preferred_id(
+        self,
+        root: Path,
+        *,
+        playhead: Fraction | None,
+        source_id: str | None,
+        fallback_id: str | None,
+    ) -> tuple[str | None, int | None]:
+        """편집 뒤 유지할 선택 — 재생 머리가 속한 조각(시작<=t<끝), 없으면 옛 선택.
+
+        전체 목록(페이지 경계를 넘는 이웃 포함)에서 고른다 — 질의 한 페이지만으로는
+        왼쪽 이웃·전체 원본 레일을 알 수 없다. 리비전이 없으면 (None, None).
+        """
+        try:
+            revision, ordered = self._visual_chronological(root, None)
+        except (raw_service.RawWorkspaceError, raw_service.ReviewError):
+            return None, None
+        clocks = {clock.source_id: clock for clock in revision.clocks}
+        if playhead is not None and source_id:
+            clock = clocks.get(source_id)
+            if clock is not None:
+                for position, segment in enumerate(ordered):
+                    if segment.source_id != source_id:
+                        continue
+                    start = Fraction(segment.start_pts - clock.origin_pts) * clock.time_base
+                    end = Fraction(segment.end_pts - clock.origin_pts) * clock.time_base
+                    if start <= playhead < end:
+                        return segment.segment_id, position
+        if fallback_id:
+            for position, segment in enumerate(ordered):
+                if segment.segment_id == fallback_id:
+                    return fallback_id, position
+        return None, None
+
+    def _visual_mapped_refresh_id(
+        self, root: Path, selected_id: str | None, old_plan: str | None
+    ) -> str | None:
+        """옛 계획의 선택 ID를 지금 머리의 같은 core 조각으로 — 재주조 방어(읽기 전용).
+
+        재계획 뒤 같은 ID 문자열이 **다른 구간**에 재주조될 수 있다(실측: 대기 중
+        재계획과 경합한 새로고침이 재주조된 앞조각을 골랐다). 검증 매핑의 불변
+        (옛↔새 같은 core)으로 공개 검토 역사에서 옛 선택의 조각을 읽어 지금 머리의
+        같은 core 조각을 찾는다. 요청이 같은 계획을 보고 있으면 그대로 돌려주고
+        (같은 계획 안의 로컬 선택 보존), 옛 계획을 못 찾거나 core가 사라졌으면
+        옛 ID를 믿지 않는다 — 서버 기본 선택이 낫다.
+        """
+        if not selected_id or not old_plan:
+            return selected_id
+        facade = self.raw.review_workspace_facade(root)
+        try:
+            current = facade.load_head().revision
+            if current.base_plan_id == old_plan:
+                return selected_id
+            old = facade.load_head(old_plan).revision
+        except (raw_service.RawWorkspaceError, raw_service.ReviewError):
+            return None
+        old_segment = next((seg for seg in old.segments if seg.segment_id == selected_id), None)
+        if old_segment is None:
+            return selected_id
+        match = next(
+            (
+                seg
+                for seg in current.segments
+                if seg.source_id == old_segment.source_id
+                and seg.start_pts == old_segment.start_pts
+                and seg.end_pts == old_segment.end_pts
+            ),
+            None,
+        )
+        return match.segment_id if match is not None else None
+
+    def visual_workbench_render(
+        self,
+        root: Path | None,
+        *,
+        page: int = 1,
+        preferred_selected_id: str | None = None,
+        playhead_sec: Fraction | None = None,
+        source_id: str | None = None,
+    ) -> tuple[str, str]:
+        """영상 작업대 (껍데기, 본문) — 질의·읽기만으로 만든다(미디어 생성 0).
+
+        값은 전부 공개 서비스에서 온다: 조각·시계·미리보기는 `visual_review_query`,
+        사람 이름은 자산 목록, 전체 원본 레일은 검토 파사드의 현재 머리(질의와
+        **같은 리비전인지 비교**해 섞인 순간을 잡는다). 페이지가 닿는 **모든 원본**의
+        미리보기 값(주소·상태·잰 원점·트랙·전체 레일)을 실는다 — 클라이언트가 카드를
+        골라 원본을 바꿀 때도 서버 없이 재생기·렠·트랙을 갈아끼울 수 있게(F1b).
+        선택·탐색 계산은 클라이언트 실행본이 이 값을 가지고 한다.
+        """
+        if root is None:
+            note = "작업공간이 열려 있지 않다 — 1번 탭에서 만들거나 여세요."
+            return (
+                ui_facade.visual_player_shell_html(None, note),
+                ui_facade.visual_workbench_html({"empty": note}),
+            )
+        safe_page = max(1, page)
+        preferred_id, preferred_pos = self._visual_preferred_id(
+            root,
+            playhead=playhead_sec,
+            source_id=source_id,
+            fallback_id=preferred_selected_id,
+        )
+        # 재생 머리 유지 재그림(편집 뒤)만 머리가 속한 조각의 페이지를 따라간다.
+        # 그 외(명시적 새로고침·페이지 넘김)는 **요청 페이지가 이긴다** — 선택
+        # 조각이 1번 페이지에 남아 있다고 페이지 넘김이 묶여 되돌아가지 않는다.
+        query_page = safe_page
+        if playhead_sec is not None and preferred_pos is not None:
+            query_page = preferred_pos // raw_service.VISUAL_PAGE_SIZE + 1
+        try:
+            overview = self._visual_query(root, query_page, preferred_id)
+        except (raw_service.RawWorkspaceError, raw_service.ReviewError) as error:
+            note = f"영상 검토를 열지 못했다 — {error}"
+            return (
+                ui_facade.visual_player_shell_html(None, note),
+                ui_facade.visual_workbench_html({"empty": note}),
+            )
+        names = self._visual_source_names(root)
+        plan_ranges = self._visual_plan_ranges(root, overview.base_plan_id)
+        # 전체 원본 레일·분석 태그 — 질의와 같은 리비전인지 비교해 한 번만 공개 읽는다.
+        revision: Any = None
+        ordered: Any = None
+        if overview.sources:
+            try:
+                revision, ordered = self._visual_chronological(root, overview.base_plan_id)
+            except (raw_service.RawWorkspaceError, raw_service.ReviewError) as error:
+                note = f"검토 머리를 다시 읽지 못했다 — {error}"
+                return (
+                    ui_facade.visual_player_shell_html(None, note),
+                    ui_facade.visual_workbench_html({"empty": note}),
+                )
+            if revision.revision_id != overview.revision_id:
+                note = "검토 머리가 그 사이 바뀌었다 — 새로고침으로 다시 받으세요."
+                return (
+                    ui_facade.visual_player_shell_html(None, note),
+                    ui_facade.visual_workbench_html({"empty": note}),
+                )
+        tags_by_segment: dict[str, tuple[str, ...]] = (
+            {seg.segment_id: seg.visual_tags for seg in ordered} if ordered is not None else {}
+        )
+        # 원본별 미리보기 값 — 페이지(과 선택 조각)가 닿는 원본 전부를 실는다.
+        sources_model: dict[str, dict[str, object]] = {}
+        needs_plan = False
+        if revision is not None and ordered is not None:
+            segments_by_source: dict[str, list[Any]] = {}
+            for segment in ordered:
+                segments_by_source.setdefault(segment.source_id, []).append(segment)
+            for preview in overview.sources:
+                clock = revision.clock_for(preview.source_id)
+                if clock is None:
+                    raise gr.Error(f"원본 {preview.source_id!r}의 시계가 리비전에 없다")
+                duration = Fraction(clock.end_pts - clock.origin_pts) * clock.time_base
+                frame_sec = Fraction(clock.frame_ticks) * clock.time_base
+                intervals: list[dict[str, object]] = []
+                for segment in segments_by_source.get(preview.source_id, []):
+                    start = Fraction(segment.start_pts - clock.origin_pts) * clock.time_base
+                    end = Fraction(segment.end_pts - clock.origin_pts) * clock.time_base
+                    needs = (
+                        segment.source_id,
+                        segment.start_pts,
+                        segment.end_pts,
+                    ) not in plan_ranges
+                    needs_plan = needs_plan or needs
+                    intervals.append(
+                        {
+                            "id": segment.segment_id,
+                            "start": str(start),
+                            "end": str(end),
+                            "sel": segment.selection,
+                            "needsExtract": needs,
+                        }
+                    )
+                sources_model[preview.source_id] = {
+                    "src": (
+                        f"/media/{preview.registered_file_id}"
+                        if preview.registered_file_id and preview.state == "ready"
+                        else None
+                    ),
+                    "state": preview.state,
+                    "origin": preview.browser_origin_seconds or "0",
+                    "duration": preview.duration_seconds,
+                    "sourceId": preview.source_id,
+                    "sourceName": names.get(preview.source_id, preview.source_id),
+                    "audioOrdinal": preview.audio_ordinal,
+                    "tracks": [
+                        {
+                            "ordinal": track.ordinal,
+                            "label": (
+                                f"트랙 {track.ordinal} · {track.codec_name}"
+                                + (f" {track.sample_rate}Hz" if track.sample_rate else "")
+                            ),
+                        }
+                        for track in preview.audio_tracks
+                    ],
+                    "error": preview.error,
+                    "rail": {
+                        "duration": str(duration),
+                        "frameSec": str(frame_sec),
+                        "intervals": intervals,
+                    },
+                }
+        base_index = (overview.page - 1) * raw_service.VISUAL_PAGE_SIZE
+
+        def _card_values(seg_card: Any, order: int) -> dict[str, object]:
+            time_base = Fraction(seg_card.clock.time_base_num, seg_card.clock.time_base_den)
+            origin = seg_card.clock.origin_pts
+            start = Fraction(seg_card.start_pts - origin) * time_base
+            end = Fraction(seg_card.end_pts - origin) * time_base
+            return {
+                "id": seg_card.segment_id,
+                "sourceId": seg_card.source_id,
+                "sourceName": names.get(seg_card.source_id, seg_card.source_id),
+                "order": order,
+                "start": str(start),
+                "end": str(end),
+                "dur": str(end - start),
+                "sel": seg_card.selection,
+                "rec": seg_card.recommendation,
+                "speech": seg_card.speech_status,
+                "tags": list(tags_by_segment.get(seg_card.segment_id, ())),
+                "note": seg_card.notes,
+                "thumb": {
+                    "state": seg_card.thumb_state,
+                    "src": (
+                        f"/media/{seg_card.thumb_registered_file_id}"
+                        if seg_card.thumb_registered_file_id
+                        else None
+                    ),
+                },
+                "neighbor": (
+                    seg_card.right_neighbor.segment_id if seg_card.right_neighbor else None
+                ),
+                "needsExtract": (
+                    seg_card.source_id,
+                    seg_card.start_pts,
+                    seg_card.end_pts,
+                )
+                not in plan_ranges,
+            }
+
+        cards = [
+            _card_values(card, base_index + offset) for offset, card in enumerate(overview.segments)
+        ]
+        selected = overview.selected
+        selected_card: dict[str, object] | None = None
+        selected_order = 0
+        if selected is not None and ordered is not None:
+            selected_order = next(
+                (
+                    position
+                    for position, seg in enumerate(ordered)
+                    if seg.segment_id == selected.segment_id
+                ),
+                0,
+            )
+            selected_card = _card_values(selected, selected_order)
+        model: dict[str, object] = {
+            "epoch": uuid.uuid4().hex,
+            "token": self._visual_lifetime_token,
+            "signature": self._signature_for(root),
+            "basePlanId": overview.base_plan_id,
+            "revisionId": overview.revision_id,
+            "page": overview.page,
+            "pageCount": overview.page_count,
+            "total": overview.total_segments,
+            "selectedId": selected.segment_id if selected else None,
+            "selectedSourceId": selected.source_id if selected else None,
+            "selectedCard": selected_card,
+            "sources": sources_model,
+            "cards": cards,
+            "activeJobs": list(overview.active_preparation_jobs),
+            "staleSources": [list(pair) for pair in overview.stale_sources],
+            "needsPlan": needs_plan,
+            "packageDir": self._latest_package_dir(root),
+        }
+        shell_src = None
+        if selected is not None:
+            src_value = sources_model.get(selected.source_id, {}).get("src")
+            shell_src = src_value if isinstance(src_value, str) else None
+        shell = ui_facade.visual_player_shell_html(
+            shell_src,
+            "선택 조각의 원본 전체 미리보기 — 시간 렠·재생 머리는 작업대가 채운다.",
+        )
+        return shell, ui_facade.visual_workbench_html(model)
+
+    def _visual_query(self, root: Path, page: int, selected_segment_id: str | None) -> Any:
+        """질의 한 번 — 선택 조각이 리비전에 없으면(나누기 뒤 옛 ID) 선택 없이 다시."""
+        try:
+            return self.raw.visual_review_query(
+                root, page=page, selected_segment_id=selected_segment_id
+            )
+        except raw_service.RawWorkspaceError:
+            if selected_segment_id is None:
+                raise
+            return self.raw.visual_review_query(root, page=page)
+
+    # ── V2 서버 함수 — gradio 공개 경계(component_server)로만 간다 ──
+
+    @staticmethod
+    def _serve_error(error: object) -> str:
+        if isinstance(error, gr.Error):
+            message = getattr(error, "message", None)
+            return str(message) if message else str(error)
+        return str(error)
+
+    @staticmethod
+    def _serve_str(payload: Mapping[str, object], key: str) -> str:
+        value = payload.get(key)
+        return value.strip() if isinstance(value, str) else ""
+
+    @staticmethod
+    def _serve_int(payload: Mapping[str, object], key: str, default: int) -> int:
+        value = payload.get(key)
+        if isinstance(value, bool):
+            raise gr.Error(f"{key}이 정수가 아니다: {value!r}")
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str) and value.strip().lstrip("-").isdigit():
+            return int(value.strip())
+        return default
+
+    @staticmethod
+    def _serve_fraction(payload: Mapping[str, object], key: str) -> Fraction:
+        """정확한 유리수 입력 — 문자열(`1001/30000`)·정수만, float는 십진 표기로 잡는다."""
+        value = payload.get(key)
+        if isinstance(value, bool) or value is None:
+            raise gr.Error(f"{key}이 정확한 숫자가 아니다: {value!r}")
+        if isinstance(value, int):
+            return Fraction(value)
+        if isinstance(value, float):
+            return Fraction(str(value))
+        if isinstance(value, str):
+            try:
+                return Fraction(value.strip())
+            except (ValueError, ZeroDivisionError) as error:
+                raise gr.Error(f"{key}이 유리수가 아니다: {value!r}") from error
+        raise gr.Error(f"{key}이 정확한 숫자가 아니다: {value!r}")
+
+    def _require_workbench_token(
+        self, payload: Mapping[str, object], current: str | None, what: str
+    ) -> None:
+        """작업대 수명 토큰 검증 — 화면이 보낸 토큰이 지금 작업공간 것과 같아야 한다.
+
+        서명은 결정적이라 A→B→A에서 같아지지만 토큰은 작업공간을 여는 순간마다
+        새로 파지므로, 첫 A 시절의 편집·제안·준비 사건이 되돌아온 A에서 통과되지
+        않는다(F1c). 리비전(CAS)·자막 머리 검사보다 **앞서** 판정한다 — 옛 사건에
+        새 머리의 저장 토큰을 몰래 붙이는 길도 함께 닫힌다.
+        """
+        shown = self._serve_str(payload, "token")
+        if not current or shown != current:
+            raise gr.Error(
+                f"{what} 수명 토큰이 늦었다 — 작업공간이 다시 열렸다. 화면을 새로 고침해"
+                " 지금 보기를 다시 받은 뒤 시도하세요(머리가 같아도 옛 사건은 거부된다)."
+            )
+
+    def visual_workbench_action(self, payload: Mapping[str, object], kind: str) -> dict:
+        """작업대 서버 함수의 본문 — 어떤 예외도 500이 아니라 값으로 돌아간다.
+
+        모든 변경은 화면이 보낸 서명·수명 토큰·리비전에 묶인다(전역 최신 대체
+        금지). 응답의 `echoEpoch`는 요청이 만들어진 화면의 epoch 그대로 — 클라이언트는
+        지금 문서의 epoch와 다르면 적용하지 않는다(A→B→A 뒤 늦은 응답 버림).
+        """
+        epoch_value = payload.get("epoch")
+        echo = epoch_value if isinstance(epoch_value, str) else ""
+
+        def fail(error: object) -> dict[str, object]:
+            return {"ok": False, "error": self._serve_error(error)}
+
+        try:
+            root = self._require_current_selection(self._serve_str(payload, "signature") or None)
+        except gr.Error as error:
+            return fail(error)
+        try:
+            if kind in ("prepare", "propose", "apply", "replan"):
+                # 질의(refresh)는 열어 둔다 — 서버 재시작 뒤 화면이 스스로 회복하는 길.
+                self._require_workbench_token(payload, self._visual_lifetime_token, "영상 작업대")
+            if kind == "refresh":
+                page = self._serve_int(payload, "page", 1)
+                preferred = self._serve_str(payload, "selectedId") or None
+                # 대기 중 재계획과 경합한 새로고침은 옛 계획의 선택 ID를 실고 온다 —
+                # 새 계획에서 같은 ID가 다른 구간에 재주조됐을 수 있으니 옛 계획의
+                # core로 지금 머리의 의미 조각을 찾는다(읽기 전용, 페이지 계약 유지).
+                preferred = self._visual_mapped_refresh_id(
+                    root, preferred, self._serve_str(payload, "basePlanId") or None
+                )
+                if preferred is None:
+                    preferred, _pos = self._visual_preferred_id(
+                        root, playhead=None, source_id=None, fallback_id=None
+                    )
+                shell_unused, workbench = self.visual_workbench_render(
+                    root, page=page, preferred_selected_id=preferred
+                )
+                return {
+                    "ok": True,
+                    "echoEpoch": echo,
+                    "html": workbench,
+                    "videoSrc": None,
+                    "message": "",
+                }
+            if kind == "prepare":
+                selections = self._visual_audio_selections(payload)
+                page = self._serve_int(payload, "page", 1)
+                handle = self.raw.start_visual_page_preparation(
+                    root, page=page, audio_selections=selections or None
+                )
+                preferred = self._serve_str(payload, "selectedId") or None
+                _shell, workbench = self.visual_workbench_render(
+                    root, page=page, preferred_selected_id=preferred
+                )
+                return {
+                    "ok": True,
+                    "echoEpoch": echo,
+                    "html": workbench,
+                    "videoSrc": None,
+                    "message": (
+                        f"준비 작업 `{handle.job_id}` 제출 — 없는 항목만 만든다."
+                        " 끝나면 새로고침으로 확인하세요."
+                    ),
+                }
+            if kind == "propose":
+                return self._visual_propose(root, payload, echo)
+            if kind == "apply":
+                return self._visual_apply(root, payload, echo)
+            if kind == "replan":
+                return self._visual_replan(root, payload, echo)
+            return fail(f"모르는 작업대 요청이다: {kind!r}")
+        except (gr.Error, RuntimeError, ValueError) as error:
+            # RawWorkspaceError·ReviewError·Caption 계열 오류는 모두 RuntimeError
+            # 집안이다 — 서버 함수는 500이 아니라 값으로 닫는다(gradio 전송 계약).
+            return fail(error)
+
+    def _visual_audio_selections(self, payload: Mapping[str, object]) -> dict[str, int | None]:
+        """소리 선택 해석 — 서수는 정수, `None`은 명시적 침묵, 그 밖은 거부."""
+        raw = payload.get("audioSelections")
+        if not isinstance(raw, Mapping):
+            return {}
+        selections: dict[str, int | None] = {}
+        for key, value in raw.items():
+            source_id = str(key)
+            if value is None:
+                selections[source_id] = None
+            elif isinstance(value, bool) or not isinstance(value, (int, str)):
+                raise gr.Error(f"소리 서수가 정수가 아니다: {value!r}")
+            elif isinstance(value, str):
+                if not value.strip().lstrip("-").isdigit():
+                    raise gr.Error(f"소리 서수가 정수가 아니다: {value!r}")
+                selections[source_id] = int(value.strip())
+            else:
+                selections[source_id] = value
+        return selections
+
+    def _visual_propose(self, root: Path, payload: Mapping[str, object], echo: str) -> dict:
+        """스냅 제안 — 저장보다 앞서고 아무 것도 쓰지 않는다(읽기 전용)."""
+        revision_id = self._serve_str(payload, "revisionId")
+        base_plan = self._serve_str(payload, "basePlanId")
+        if not revision_id or not base_plan:
+            raise gr.Error("화면 값이 부족하다 — 새로고침 뒤 다시 시도하세요.")
+        op = self._serve_str(payload, "op")
+        desired = self._serve_fraction(payload, "desiredSec")
+        revision, _ordered = self._visual_chronological(root, base_plan)
+        if op == "split":
+            segment_id = self._serve_str(payload, "segmentId")
+            segment = next((seg for seg in revision.segments if seg.segment_id == segment_id), None)
+            if segment is None:
+                raise gr.Error(f"조각 {segment_id!r}이(가) 리비전에 없다 — 새로고침하세요.")
+            clock = revision.clock_for(segment.source_id)
+            if clock is None:
+                raise gr.Error(f"원본 {segment.source_id!r}의 시계가 없다")
+            desired_pts = clock.origin_pts + desired / clock.time_base
+            proposal = self.raw.visual_snap_proposal(
+                root,
+                base_plan_id=base_plan,
+                expected_revision_id=revision_id,
+                segment_id=segment_id,
+                desired_pts=desired_pts,
+            )
+        elif op == "boundary":
+            left_id = self._serve_str(payload, "leftId")
+            right_id = self._serve_str(payload, "rightId")
+            left = next((seg for seg in revision.segments if seg.segment_id == left_id), None)
+            if left is None:
+                raise gr.Error(f"조각 {left_id!r}이(가) 리비전에 없다 — 새로고침하세요.")
+            clock = revision.clock_for(left.source_id)
+            if clock is None:
+                raise gr.Error(f"원본 {left.source_id!r}의 시계가 없다")
+            desired_pts = clock.origin_pts + desired / clock.time_base
+            proposal = self.raw.visual_boundary_proposal(
+                root,
+                base_plan_id=base_plan,
+                expected_revision_id=revision_id,
+                left_segment_id=left_id,
+                right_segment_id=right_id,
+                desired_pts=desired_pts,
+            )
+        else:
+            raise gr.Error(f"모르는 제안 종류다: {op!r}")
+        frame = Fraction(proposal.snap_pts - clock.origin_pts, clock.frame_ticks)
+        return {
+            "ok": True,
+            "echoEpoch": echo,
+            "valid": proposal.valid,
+            "reason": proposal.reason,
+            "snapSeconds": proposal.snap_seconds,
+            "snapPts": proposal.snap_pts,
+            "frame": frame.numerator if frame.denominator == 1 else None,
+            "headRevisionId": proposal.head_revision_id,
+        }
+
+    def _visual_apply(self, root: Path, payload: Mapping[str, object], echo: str) -> dict:
+        """실제 저장 — 화면이 본 리비전(CAS)에 묶이고, 성공은 새 리비전으로 그린다."""
+        revision_id = self._serve_str(payload, "revisionId")
+        base_plan = self._serve_str(payload, "basePlanId")
+        if not revision_id or not base_plan:
+            raise gr.Error("화면 값이 부족하다 — 새로고침 뒤 다시 시도하세요.")
+        op = self._serve_str(payload, "op")
+        page = self._serve_int(payload, "page", 1)
+        playhead = None
+        if self._serve_str(payload, "playheadSec"):
+            playhead = self._serve_fraction(payload, "playheadSec")
+        source_id = self._serve_str(payload, "sourceId") or None
+        selected_id = self._serve_str(payload, "selectedId") or None
+        if op == "selection":
+            choice = self._serve_str(payload, "selection")
+            if choice not in ("included", "excluded"):
+                raise gr.Error(f"선택 표시가 알 수 없다: {choice!r}")
+            edited = self.raw.visual_set_selection(
+                root,
+                base_plan_id=base_plan,
+                expected_revision_id=revision_id,
+                segment_id=self._serve_str(payload, "segmentId"),
+                selection=choice,
+            )
+        elif op == "split":
+            edited = self.raw.visual_split_segment(
+                root,
+                base_plan_id=base_plan,
+                expected_revision_id=revision_id,
+                segment_id=self._serve_str(payload, "segmentId"),
+                split_pts=self._serve_int(payload, "splitPts", 0),
+            )
+        elif op == "boundary":
+            edited = self.raw.visual_adjust_boundary(
+                root,
+                base_plan_id=base_plan,
+                expected_revision_id=revision_id,
+                left_segment_id=self._serve_str(payload, "leftId"),
+                right_segment_id=self._serve_str(payload, "rightId"),
+                boundary_pts=self._serve_int(payload, "boundaryPts", 0),
+            )
+        elif op == "merge":
+            edited = self.raw.visual_merge_segments(
+                root,
+                base_plan_id=base_plan,
+                expected_revision_id=revision_id,
+                first_segment_id=self._serve_str(payload, "firstId"),
+                second_segment_id=self._serve_str(payload, "secondId"),
+            )
+        elif op == "note":
+            facade = self.raw.review_workspace_facade(root)
+            edited = facade.apply_edit(
+                base_plan,
+                raw_service.review_note_edit(
+                    revision_id,
+                    self._serve_str(payload, "segmentId"),
+                    self._serve_str(payload, "note"),
+                ),
+            )
+        else:
+            raise gr.Error(f"모르는 편집 종류다: {op!r}")
+        self._refresh_review_panel_state(root)
+        _shell, workbench = self.visual_workbench_render(
+            root,
+            page=page,
+            preferred_selected_id=selected_id,
+            playhead_sec=playhead,
+            source_id=source_id,
+        )
+        return {
+            "ok": True,
+            "echoEpoch": echo,
+            "html": workbench,
+            "videoSrc": None,
+            "message": f"적용했다 — 새 검토 리비전 `{edited.revision_id}`.",
+        }
+
+    def _visual_replan(self, root: Path, payload: Mapping[str, object], echo: str) -> dict:
+        """계획 반영 + 재추출 — 화면이 본 리비전에서만, 새 package에 뽑는다."""
+        revision_id = self._serve_str(payload, "revisionId")
+        base_plan = self._serve_str(payload, "basePlanId")
+        if not revision_id or not base_plan:
+            raise gr.Error("화면 값이 부족하다 — 새로고침 뒤 다시 시도하세요.")
+        facade = self.raw.review_workspace_facade(root)
+        head = facade.load_head(base_plan).revision
+        if head.revision_id != revision_id:
+            raise gr.Error("화면이 본 리비전 뒤에 다른 편집이 먼저 갔다 — 새로고침 뒤 다시 하세요.")
+        snapshot, mapping = facade.plan_from_review(base_plan)
+        facade.adopt_plan_review(snapshot, mapping)
+        self._refresh_review_panel_state(root)
+        handle = self.raw.start_segment_extraction(root)
+        selected_id = self._serve_str(payload, "selectedId") or None
+        playhead = None
+        if self._serve_str(payload, "playheadSec"):
+            playhead = self._serve_fraction(payload, "playheadSec")
+        # 계획 세대가 바뀌면 옛 선택 ID가 **다른 구간**에 재주조될 수 있다(실측:
+        # 재계획 뒤 같은 ID 문자열이 다른 조각에 붙어 하이라이트가 재생 머리 밖
+        # 구간을 가리켰다). 검증된 매핑(옛↔새 같은 core)으로 옛 선택의 의미 뒤
+        # 조각을 찾고, 재생 머리·원본도 함께 실어 보존 규칙(머리가 속한 조각이
+        # 이긴다)을 그대로 쓰게 한다.
+        source_id = self._serve_str(payload, "sourceId") or None
+        if selected_id:
+            for pair in mapping.pairs:
+                if pair.old_segment_id == selected_id:
+                    selected_id = pair.new_segment_id
+                    source_id = pair.source_id
+                    break
+        _shell, workbench = self.visual_workbench_render(
+            root,
+            page=1,
+            preferred_selected_id=selected_id,
+            playhead_sec=playhead,
+            source_id=source_id,
+        )
+        return {
+            "ok": True,
+            "echoEpoch": echo,
+            "html": workbench,
+            "videoSrc": None,
+            "message": (
+                f"새 계획 리비전 `{mapping.new_plan_revision_id}` · 추출 작업"
+                f" `{handle.job_id}` 시작 — 새 package에 뽑히고 옛 package는 불변이다."
+            ),
+        }
+
+    def _refresh_review_panel_state(self, root: Path) -> None:
+        """고급(기존) 검토 패널의 화면 상태를 새 머리로 맞춘다 — 최선 노력."""
+        with contextlib.suppress(raw_service.RawWorkspaceError, raw_service.ReviewError, gr.Error):
+            self._review_head_and_rows(root)
+
+    def _visual_server_functions(self) -> list[Callable[[dict[str, object]], dict[str, object]]]:
+        """영상 작업대의 서버 함수 — 클라이언트 `server.vl_*`로 직접 불린다."""
+
+        def vl_refresh(payload: dict[str, object]) -> dict[str, object]:
+            return self.visual_workbench_action(payload, "refresh")
+
+        def vl_prepare(payload: dict[str, object]) -> dict[str, object]:
+            return self.visual_workbench_action(payload, "prepare")
+
+        def vl_propose(payload: dict[str, object]) -> dict[str, object]:
+            return self.visual_workbench_action(payload, "propose")
+
+        def vl_apply(payload: dict[str, object]) -> dict[str, object]:
+            return self.visual_workbench_action(payload, "apply")
+
+        def vl_replan(payload: dict[str, object]) -> dict[str, object]:
+            return self.visual_workbench_action(payload, "replan")
+
+        return [vl_refresh, vl_prepare, vl_propose, vl_apply, vl_replan]
 
     # ── 화면 1 — SD/폴더 가져오기(조사 → 순서 확인 → 복사·검증) ──
 
@@ -2203,25 +3098,37 @@ class RawWorkspaceUi:
                 interactive=True,
             )
             self._export_md = gr.Markdown("_내보내기 결과가 여기 나타난다._")
-            export_button.click(
+            self._wire_review_button(
+                "review-export",
+                export_button,
                 self.review_export_view,
-                [self._signature_state, export_selected_box, export_confirm_box],
-                [self._export_md, self._package_md],
+                [export_selected_box, export_confirm_box],
+                gated=True,
+                outputs=[self._export_md, self._package_md],
             )
-            finder_open_button.click(
+            self._wire_review_button(
+                "review-export-open",
+                finder_open_button,
                 self.review_export_open_view,
-                self._signature_state,
-                self._export_md,
+                [],
+                gated=True,
+                outputs=[self._export_md],
             )
-            copy_path_button.click(
+            self._wire_review_button(
+                "review-export-copy",
+                copy_path_button,
                 self.review_export_copy_view,
-                self._signature_state,
-                self._export_path_box,
+                [],
+                gated=True,
+                outputs=[self._export_path_box],
             )
-            cleanup_button.click(
+            self._wire_review_button(
+                "review-cleanup",
+                cleanup_button,
                 self.review_cleanup_view,
-                [self._signature_state, cleanup_confirm_box],
-                self._export_md,
+                [cleanup_confirm_box],
+                gated=True,
+                outputs=[self._export_md],
             )
 
     # ── 화면 2·3 — 검토 작업공간(W3 백엔드) — 정본은 파사드(DB)에 있다 ──
@@ -2886,8 +3793,12 @@ class RawWorkspaceUi:
     def _render_caption_player(
         self, registration: Any, preview: raw_service.CaptionPreviewMedia, wave: Any
     ) -> str:
-        """재생기 HTML — 미리보기 영상·파형·출처를 안전한 구성요소 값으로 조립한다."""
-        return ui_facade.caption_player_html(
+        """재생기 HTML — 미리보기 영상·파형·재생 오버레이·출처를 안전하게 조립한다.
+
+        V2부터 오버레이(`#caption-overlay`)와 토글 단추가 붙는다 — 오버레이 문구는
+        작업대 실행본이 `timeupdate`에서 textContent로만 바꾼다(재생기 재렌더링 없음).
+        """
+        return ui_facade.caption_overlay_player_html(
             f"/media/{preview.registration.file_id}",
             waveform=ui_facade.waveform_svg([peak / wave.peak_scale for peak in wave.peaks]),
             provenance=self._caption_provenance_line(registration, preview),
@@ -2980,6 +3891,8 @@ class RawWorkspaceUi:
         self._caption_unplaced = {}
         self._caption_cue_rows = ()
         self._caption_cue_clock = {}
+        self._caption_warnings_open = 0
+        self._caption_unplaced_open = 0
         chunk_preview = ", ".join(
             f"[{ui_facade.format_seconds(start)}~{ui_facade.format_seconds(end)}]"
             for start, end in estimate.chunk_seconds[:4]
@@ -3111,6 +4024,8 @@ class RawWorkspaceUi:
             row.cue.cue_id: (row.cue.start, row.cue.end) for row in state.rows
         }
         self._caption_unplaced = {view.item.index: view.item.text for view in state.unplaced}
+        self._caption_warnings_open = len(state.warnings)
+        self._caption_unplaced_open = sum(1 for view in state.unplaced if view.resolution is None)
         # 큐 단추 시각 — 서버가 잰 값 그대로(클라이언트가 계산하지 않는다). 큐 시각은
         # 최종 영상 시계(등록 원점 포함)이므로, 미리보기 원점과 등록 원점의 **차이만**
         # 보정해 미리보기 시계로 옮긴다(코덱 복사면 차이가 0이어야 한다).
@@ -3187,6 +4102,256 @@ class RawWorkspaceUi:
         start_ms = str(int(clock[0] * 1000))
         end_ms = str(int(clock[1] * 1000))
         return target, row.text, start_ms, end_ms
+
+    # ── V2 자막 작업대 — 큐 목록·클라이언트 편집기(명시적 저장·확정만 서버) ──
+
+    def _caption_reload_bundle(self, root: Path) -> None:
+        """검토 머리를 다시 읽어 화면 상태를 갱신한다 — 작업대 저장 뒤 같은 눈으로.
+
+        `caption_review_view`가 그리는 것과 같은 상태(머리 번호·큐 행·시계·미대응·
+        경고)를 서버에 다시 묻는다 — 재생기 구성요소는 건드리지 않는다.
+        """
+        identity = self._require_caption_identity(root)
+        ws = self._caption_ws(root)
+        run_identity = self._caption_run_identity(identity)
+        bundle = ws.review_bundle(run_identity)
+        state = bundle.state
+        self._caption_head_sequence = state.head_revision if state.head_revision is not None else 0
+        rows = [
+            ui_facade.CueRowView(
+                cue_id=row.cue.cue_id,
+                start_seconds=ui_facade.format_seconds(row.cue.start),
+                end_seconds=ui_facade.format_seconds(row.cue.end),
+                whisper_text=row.cue.whisper_text,
+                auto_text=row.cue.auto_text,
+                text=row.cue.text,
+                basis=row.cue.text_basis,
+                chars_per_second=row.chars_per_second,
+            )
+            for row in state.rows
+        ]
+        self._caption_cue_ids = tuple(row.cue_id for row in rows)
+        self._caption_cue_rows = tuple(rows)
+        self._caption_cue_clock = {
+            row.cue.cue_id: (row.cue.start, row.cue.end) for row in state.rows
+        }
+        self._caption_unplaced = {view.item.index: view.item.text for view in state.unplaced}
+        self._caption_warnings_open = len(state.warnings)
+        self._caption_unplaced_open = sum(1 for view in state.unplaced if view.resolution is None)
+
+    def caption_workbench_value(self, root: Path | None) -> str:
+        """자막 작업대 값(본문+상세) — 서버가 가진 검토 상태에서 조립(생성 0).
+
+        큐 행의 이동·오버레이 시각은 `caption_review_view`와 같은 잰 매핑(미리보기
+        원점 − 등록 원점 보정) 그대로다 — 클라이언트는 이 값만 읽는다.
+        """
+        note = "최종 영상을 등록하고 실행·검토를 거치면 큐 목록이 여기 나타난다."
+        if root is None or self._caption_identity is None:
+            return ui_facade.caption_workbench_html(
+                {"empty": note}
+            ) + ui_facade.caption_workbench_details_html({"empty": ""})
+        signature = self._signature_for(root)
+        if self._caption_signature != signature:
+            return ui_facade.caption_workbench_html(
+                {"empty": note}
+            ) + ui_facade.caption_workbench_details_html({"empty": ""})
+        seek_by_cue = self._caption_seek_mapping(root)
+        cues = []
+        details = []
+        for row in self._caption_cue_rows:
+            clock = self._caption_cue_clock.get(row.cue_id)
+            seek_pair = seek_by_cue.get(row.cue_id) if seek_by_cue else None
+            # ms 환산은 정확히 — 이진 부동 잔여를 int()로 잘라 1200→1199로
+            # 흐르는 왕복 드리프트를 막는다(A5 실측).
+            start_ms = str(ui_facade.fraction_ms(clock[0])) if clock else ""
+            end_ms = str(ui_facade.fraction_ms(clock[1])) if clock else ""
+            cues.append(
+                {
+                    "id": row.cue_id,
+                    "startMs": start_ms,
+                    "endMs": end_ms,
+                    "text": row.text,
+                    "basis": row.basis,
+                    "seek": seek_pair[0] if seek_pair else "",
+                    "endSeek": seek_pair[1] if seek_pair else "",
+                }
+            )
+            details.append(
+                {
+                    "id": row.cue_id,
+                    "startMs": start_ms,
+                    "endMs": end_ms,
+                    "whisper": row.whisper_text,
+                    "auto": row.auto_text,
+                    "now": row.text,
+                    "basis": row.basis,
+                }
+            )
+        open_items: list[str] = []
+        if self._caption_warnings_open:
+            open_items.append(f"열린 경고 {self._caption_warnings_open}개")
+        if self._caption_unplaced_open:
+            open_items.append(f"미처리 미대응 {self._caption_unplaced_open}개")
+        identity = self._caption_identity or {}
+        preview_line = ""
+        preview = self._caption_preview
+        if preview is not None:
+            preview_line = (
+                f"실행 {identity.get('run_id')} · 검토 머리 {self._caption_head_sequence}"
+                f" · 미리보기 `{preview.registration.file_id}`"
+                f"(선택 트랙 {preview.audio_ordinal}, 잰 원점"
+                f" {ui_facade.format_seconds(preview.audio_origin)}초)"
+            )
+        model: dict[str, object] = {
+            "epoch": uuid.uuid4().hex,
+            "token": self._caption_lifetime_token,
+            "signature": signature,
+            "runId": str(identity.get("run_id") or "run-1"),
+            "head": self._caption_head_sequence,
+            "cues": cues,
+            "canConfirm": bool(cues) and not open_items,
+            "blockReason": " · ".join(open_items),
+            "provenance": preview_line,
+            "details": details,
+        }
+        return ui_facade.caption_workbench_html(model) + ui_facade.caption_workbench_details_html(
+            model
+        )
+
+    def _caption_seek_mapping(self, root: Path) -> dict[str, tuple[str, str]] | None:
+        """큐→미리보기 이동 매핑 — 등록 원점과 미리보기 원점의 차이만 보정한다."""
+        preview = self._caption_preview
+        if preview is None:
+            return None
+        try:
+            ws = self._caption_ws(root)
+            registration = self._caption_registration(ws, root)
+        except (gr.Error, raw_service.RawWorkspaceError, raw_service.CaptionWorkspaceError):
+            return None
+        if registration.origin is None:
+            return None
+        shift = preview.audio_origin - registration.origin
+        return {
+            cue_id: (
+                f"{float(shift + clock[0]):.6f}",
+                f"{float(shift + clock[1]):.6f}",
+            )
+            for cue_id, clock in self._caption_cue_clock.items()
+        }
+
+    def caption_workbench_action(self, payload: Mapping[str, object], kind: str) -> dict:
+        """자막 작업대 서버 함수 본문 — 저장·확정만 서버에 가고 나머지는 클라이언트다.
+
+        저장은 화면이 보낸 수명 토큰과 검토 머리 번호에 묶인다(W2 갱신 손실 방지,
+        A→B→A 옛 사건 거부). 응답의 `html`은 작업대 본문+상세 값 — `props.value`로
+        갈아끼워도 재생기는 다시 그려지지 않으므로 재생이 이어진다.
+        """
+        epoch_value = payload.get("epoch")
+        echo = epoch_value if isinstance(epoch_value, str) else ""
+
+        def fail(error: object) -> dict[str, object]:
+            return {"ok": False, "error": self._serve_error(error)}
+
+        try:
+            root = self._require_current_selection(self._serve_str(payload, "signature") or None)
+        except gr.Error as error:
+            return fail(error)
+        try:
+            if kind in ("save", "confirm"):
+                self._require_workbench_token(payload, self._caption_lifetime_token, "자막 작업대")
+            if kind == "save":
+                return self._caption_wb_save(root, payload, echo)
+            if kind == "confirm":
+                return self._caption_wb_confirm(root, payload, echo)
+            return fail(f"모르는 작업대 요청이다: {kind!r}")
+        except (gr.Error, RuntimeError, ValueError) as error:
+            # 수동 편집 오류(ManualEditError 등)까지 값으로 닫는다 — 500 금지.
+            return fail(error)
+
+    def _caption_wb_save(self, root: Path, payload: Mapping[str, object], echo: str) -> dict:
+        identity = self._require_caption_identity(root)
+        ws = self._caption_ws(root)
+        run_identity = self._caption_run_identity(identity)
+        expected = self._serve_int(payload, "head", -1)
+        shown = self._require_caption_head()
+        if expected != shown:
+            raise gr.Error(
+                f"편집이 늦었다 — 화면이 본 머리({expected})가 서버 머리({shown})와 다르다."
+                " 검토 새로고침 뒤 다시 저장하세요."
+            )
+        cue_id = self._serve_str(payload, "cueId").strip("`")
+        if not cue_id:
+            raise gr.Error("큐를 먼저 목록에서 고르세요.")
+        op = self._serve_str(payload, "op")
+        text = self._serve_str(payload, "text").strip()
+        if op == "text":
+            if not text:
+                raise gr.Error("글자를 적으세요 — 지울 수 없다(수동 확정은 확정 단계다).")
+            ws.edit_cue_text(run_identity, cue_id, text, expected_head=shown)
+        elif op == "time":
+            start_ms = self._serve_int(payload, "startMs", -1)
+            end_ms = self._serve_int(payload, "endMs", -1)
+            ws.edit_cue_time(
+                run_identity,
+                cue_id,
+                start=raw_service.caption_ms(start_ms),
+                end=raw_service.caption_ms(end_ms),
+                expected_head=shown,
+            )
+        else:
+            raise gr.Error(f"모르는 저장 종류다: {op!r}")
+        self._caption_reload_bundle(root)
+        return {
+            "ok": True,
+            "echoEpoch": echo,
+            "html": self.caption_workbench_value(root),
+            "videoSrc": None,
+            "message": f"저장했다 — 큐 `{cue_id}`. 오버레이·목록이 갱신되고 재생은 이어진다.",
+        }
+
+    def _caption_wb_confirm(self, root: Path, payload: Mapping[str, object], echo: str) -> dict:
+        """확정 게시 — 화면이 보낸 머리 번호에 묶인다(늦은 확정 거부, A5 실측).
+
+        확정은 게시다 — 저장보다 더 엄격해야 한다: 화면이 본 머리가 서버 머리와
+        다르면(그 사이 저장이 하나라도 앞서갔으면) **거부**하고 검토 새로고침을
+        요청한다. 묵은 머리 번호로 최신 머리를 확정 게시하는 길은 없다.
+        """
+        identity = self._require_caption_identity(root)
+        expected = self._serve_int(payload, "head", -1)
+        shown = self._require_caption_head()
+        if expected != shown:
+            raise gr.Error(
+                f"확정이 늦었다 — 화면이 본 머리({expected})가 서버 머리({shown})와"
+                " 다르다. 검토 새로고침 뒤 다시 확정하세요."
+            )
+        # 확정 게시 — 작업대 흐름은 사람 문장 + 구조화된 내려받기(등록 미디어 ID
+        # 로만)를 받는다. 원문 마크다운(지문·해시 포함)은 기존 고급 패널 흐름이
+        # 그대로 쓴다(_caption_publish 공유, 이중 게시 없음).
+        _legacy_note, links = self._caption_publish(
+            self._serve_str(payload, "signature") or None,
+            str(identity.get("run_id") or "run-1"),
+            True,
+        )
+        self._caption_reload_bundle(root)
+        return {
+            "ok": True,
+            "echoEpoch": echo,
+            "html": self.caption_workbench_value(root),
+            "videoSrc": None,
+            "message": f"확정 게시 완료 — 검토 머리 {expected}. 내려받기는 아래 링크로.",
+            "downloads": [{"label": label, "href": href} for label, href in links],
+        }
+
+    def _caption_server_functions(self) -> list[Callable[[dict[str, object]], dict[str, object]]]:
+        """자막 작업대의 서버 함수 — 클라이언트 `server.cap_*`로 직접 불린다."""
+
+        def cap_save(payload: dict[str, object]) -> dict[str, object]:
+            return self.caption_workbench_action(payload, "save")
+
+        def cap_confirm(payload: dict[str, object]) -> dict[str, object]:
+            return self.caption_workbench_action(payload, "confirm")
+
+        return [cap_save, cap_confirm]
 
     def _require_caption_head(self) -> int:
         """화면이 본 검토 머리 번호 — 편집·확정의 기대 머리(W2 갱신 손실 방지)."""
@@ -3306,6 +4471,18 @@ class RawWorkspaceUi:
 
     def caption_confirm_view(self, signature: str | None, run_id: str, confirm: bool) -> str:
         """확정 — 화면이 짚은 큐 전부·기대 머리와 함께 final 게시를 연다(게이트는 백엔드)."""
+        note, _links = self._caption_publish(signature, run_id, confirm)
+        return note
+
+    def _caption_publish(
+        self, signature: str | None, run_id: str, confirm: bool
+    ) -> tuple[str, list[tuple[str, str]]]:
+        """확정 게시 공용 본문 — (원문 마크다운, 등록 미디어 링크)를 돌려준다.
+
+        게시는 한 번만 일어난다: 고급 패널(caption_confirm_view)과 작업대
+        서버 함수(_caption_wb_confirm)가 이 본문을 공유한다. 링크는 등록된
+        미디어 ID(`/media/<id>`)로만 — 임의 경로·사용자 글자는 안 간다.
+        """
         root = self._require_current_selection(signature)
         run = (run_id or "").strip() or "run-1"
         if not confirm:
@@ -3351,7 +4528,7 @@ class RawWorkspaceUi:
                 *(f"  - [{label}]({path}) — `{path}`" for label, path in links),
             ]
         lines.append("- 낡은 확정 바이트는 다시 쓰지 않는다 — 다시 내려면 재구문 분석부터.")
-        return "\n".join(lines)
+        return "\n".join(lines), links
 
     def _register_final_subtitles(self, root: Path, exported: Any) -> list[tuple[str, str]]:
         """확정 SRT·VTT를 내용 해시 봉인 이름으로 등록해 내려받기 링크를 만든다.
@@ -3407,52 +4584,147 @@ class RawWorkspaceUi:
         ]
         return "\n".join(lines)
 
+    def _caption_context_tail(self) -> tuple[str, int | None]:
+        """자막 문맥 꼬리 — 지금 수명 토큰과 화면이 볼 머리(배선 출력용)."""
+        return self._caption_lifetime_token, self._caption_head_sequence
+
+    def _on_caption_register(
+        self, signature: str | None, path_text: str, source_id: str, ordinal: str
+    ) -> tuple[str, str, str, str, int | None]:
+        """최종 영상 등록의 실제 배선 — 등록 뒤 화면 문맥(토큰·머리)을 내린다."""
+        markdown, player = self.caption_register_view(signature, path_text, source_id, ordinal)
+        return (
+            markdown,
+            player,
+            self.caption_workbench_value(self._snapshot_root()),
+            *self._caption_context_tail(),
+        )
+
+    def _on_caption_refresh(
+        self, signature: str | None, run_id: str
+    ) -> tuple[str, str, object, gr.Dropdown, str, str, int | None]:
+        """검토 새로고침의 실제 배선 — 새 머리·토큰을 클라이언트 문맥으로 내린다."""
+        markdown, table, player, cue_dd = self.caption_review_view(signature, run_id)
+        return (
+            markdown,
+            table,
+            player,
+            cue_dd,
+            self.caption_workbench_value(self._snapshot_root()),
+            *self._caption_context_tail(),
+        )
+
+    def _on_caption_edit(
+        self,
+        nonce: str | None,
+        shown_head: object,
+        signature: str | None,
+        operation: str,
+        cue_id: str,
+        text: str,
+        start_ms: str,
+        end_ms: str,
+        second_id: str,
+        index_text: str,
+        warning_key: str,
+    ) -> tuple[str, str, object, gr.Dropdown, str, str, int | None]:
+        """수동 편집의 실제 배선 — 문맥 검증이 먼저다(뷰 함수 서명은 그대로).
+
+        옛 토큰(작업공간 전환·재시작)·옛 머리(다른 클라이언트 편집) 사건은
+        `caption_edit_view`에 닿기 전에 거부된다 — 어떤 큐·머리도 바뀌지 않는다.
+        """
+        self._require_caption_context(nonce, shown_head)
+        markdown, table, player, cue_dd = self.caption_edit_view(
+            signature, operation, cue_id, text, start_ms, end_ms, second_id, index_text, warning_key
+        )
+        return (
+            markdown,
+            table,
+            player,
+            cue_dd,
+            self.caption_workbench_value(self._snapshot_root()),
+            *self._caption_context_tail(),
+        )
+
+    def _on_caption_confirm(
+        self,
+        nonce: str | None,
+        shown_head: object,
+        signature: str | None,
+        run_id: str,
+        confirm: bool,
+    ) -> tuple[str, str, str, int | None]:
+        """확정 게시의 실제 배선 — 문맥 검증이 먼저다(옛 머리 확정 길 차단)."""
+        self._require_caption_context(nonce, shown_head)
+        markdown = self.caption_confirm_view(signature, run_id, confirm)
+        return (
+            markdown,
+            self.caption_workbench_value(self._snapshot_root()),
+            *self._caption_context_tail(),
+        )
+
     def _caption_tab(self) -> None:
         with gr.Tab("4 · 최종 영상 · 자막"):
-            self._settings_md = gr.Markdown(self.settings_markdown())
-            gr.Markdown(
-                "> **최종 영상 자막** — 등록(검증 사본·오디오 트랙 선택) → 추정"
-                "(모델·수명주기·실측 청크) → 확인란 승인 → 실행 작업 → 검토(큐 행·"
-                "파형·미대응) → 수동 편집 → 확정 게시. 실제 호출은 승인된 실행에서만"
-                " 열리고, 키는 서버를 띄운 환경에서만 온다(§14.3)."
-            )
-            with gr.Row():
-                caption_path_box = gr.Textbox(
-                    label="최종 영상 절대 경로",
-                    placeholder="/Users/…/final.mp4",
-                    scale=4,
+            # ── 접힌 세팅 — 설정 안내·등록·실행(기존 흐름)은 무대 위 한 줄로 접는다.
+            # 1440x900에서 재생기·편집기·주 저장/확정 단추가 문서 스크롤 없이
+            # 먼저 들어온다(ROOT 실측: 재생기 top 536 · 저장 1287 → 무대 재배치).
+            with gr.Accordion("설정 · 등록 · 실행 — 최종 영상 세팅(기존)", open=False):
+                self._settings_md = gr.Markdown(self.settings_markdown())
+                gr.Markdown(
+                    "> **최종 영상 자막** — 등록(검증 사본·오디오 트랙 선택) → 추정"
+                    "(모델·수명주기·실측 청크) → 확인란 승인 → 실행 작업 → 검토(큐 행·"
+                    "파형·미대응) → 수동 편집 → 확정 게시. 실제 호출은 승인된 실행에서만"
+                    " 열리고, 키는 서버를 띄운 환경에서만 온다(§14.3)."
                 )
-                caption_source_box = gr.Textbox(
-                    label="출처 ID(선택)", placeholder="final_1", scale=2
+                with gr.Row():
+                    caption_path_box = gr.Textbox(
+                        label="최종 영상 절대 경로",
+                        placeholder="/Users/…/final.mp4",
+                        scale=4,
+                    )
+                    caption_source_box = gr.Textbox(
+                        label="출처 ID(선택)", placeholder="final_1", scale=2
+                    )
+                    caption_ordinal_dd = gr.Dropdown(
+                        choices=["자동(첫 트랙)", "0", "1", "2"],
+                        value="자동(첫 트랙)",
+                        label="오디오 트랙(여럿일 때 번호로)",
+                        interactive=True,
+                        scale=2,
+                    )
+                    caption_register_button = gr.Button(
+                        "최종 영상 등록", variant="primary", scale=2
+                    )
+                with gr.Row():
+                    caption_run_box = gr.Textbox(
+                        label="실행 ID", value="run-1", interactive=True, scale=2
+                    )
+                    caption_estimate_button = gr.Button("실행 추정(로컬)", scale=2)
+                    caption_confirm_box = gr.Checkbox(
+                        label="위 추정 지문 그대로 자막 생성을 승인한다",
+                        interactive=True,
+                        scale=3,
+                    )
+                    caption_run_button = gr.Button("자막 생성 실행", variant="primary", scale=2)
+            # ── 자막 무대 — 왼쪽 재생기(영상·파형·이동) · 오른쪽 큐 목록+편집기.
+            # 두 구성요소가 같은 `#caption-stage` 격자에 들어가고, 주 저장·확정
+            # 단추는 오른쪽 칸 편집기 안에 있어 900px 안에 도달한다.
+            with gr.Row(elem_id="caption-stage"):
+                self._caption_player_html = gr.HTML(
+                    self._caption_player_placeholder(
+                        "최종 영상을 등록하면 선택한 오디오 트랙의 미리보기가 여기서 재생된다"
+                        " — 큐 단추가 이 시계를 짚는다."
+                    ),
+                    elem_id="caption-player-block",
+                    elem_classes=["vl-stage-cell"],
                 )
-                caption_ordinal_dd = gr.Dropdown(
-                    choices=["자동(첫 트랙)", "0", "1", "2"],
-                    value="자동(첫 트랙)",
-                    label="오디오 트랙(여럿일 때 번호로)",
-                    interactive=True,
-                    scale=2,
+                self._caption_workbench_block = gr.HTML(
+                    self.caption_workbench_value(self._snapshot_root()),
+                    elem_id="caption-workbench-block",
+                    elem_classes=["vl-stage-cell"],
+                    js_on_load=ui_facade.CAPTION_BOOTSTRAP_JS,
+                    server_functions=self._caption_server_functions(),
                 )
-                caption_register_button = gr.Button("최종 영상 등록", variant="primary", scale=2)
-            # 선택 오디오 재생기 — 등록(오디오 트랙 확정) 때 한 번 만들어지고, 표시
-            # 갱신으로는 다시 그려지지 않는다(재생 머리가 살아 있다).
-            self._caption_player_html = gr.HTML(
-                self._caption_player_placeholder(
-                    "최종 영상을 등록하면 선택한 오디오 트랙의 미리보기가 여기서 재생된다"
-                    " — 큐 단추가 이 시계를 짚는다."
-                ),
-                elem_id="caption-player-block",
-            )
-            with gr.Row():
-                caption_run_box = gr.Textbox(
-                    label="실행 ID", value="run-1", interactive=True, scale=2
-                )
-                caption_estimate_button = gr.Button("실행 추정(로컬)", scale=2)
-                caption_confirm_box = gr.Checkbox(
-                    label="위 추정 지문 그대로 자막 생성을 승인한다",
-                    interactive=True,
-                    scale=3,
-                )
-                caption_run_button = gr.Button("자막 생성 실행", variant="primary", scale=2)
             with gr.Row():
                 caption_refresh_button = gr.Button("검토 새로고침", scale=2)
                 caption_trace_button = gr.Button("실행 개요(원응답 없음)", scale=2)
@@ -3464,59 +4736,83 @@ class RawWorkspaceUi:
                 caption_confirm_button = gr.Button(
                     "확정 · SRT/VTT 게시", variant="primary", scale=2
                 )
-            gr.Markdown(
-                "> 수동 편집 — 시각은 사람이 준 값만 들어간다(추측 배분 없음)."
-                " 큐 표에서 큐를 고르면 편집 칸이 그 행의 값으로 채워진다."
-            )
-            with gr.Row():
-                caption_op_dd = gr.Dropdown(
-                    choices=[
-                        "글자 교정",
-                        "시각 조정",
-                        "큐 나누기",
-                        "큐 합치기",
-                        "새 큐 추가",
-                        "경고 허용",
-                        "미대응 해결",
-                        "무발화 기록",
-                    ],
-                    value="글자 교정",
-                    label="편집 종류",
-                    interactive=True,
-                    scale=2,
+            with gr.Accordion("고급 — 수동 편집 칸·전체 큐 표(기존)", open=False):
+                gr.Markdown(
+                    "> 수동 편집 — 시각은 사람이 준 값만 들어간다(추측 배분 없음)."
+                    " 큐 표에서 큐를 고르면 편집 칸이 그 행의 값으로 채워진다."
                 )
-                caption_cue_box = gr.Textbox(label="큐 ID", scale=2)
-                caption_text_box = gr.Textbox(
-                    label="글자(나누기는 `앞|뒤`)",
-                    scale=3,
+                with gr.Row():
+                    caption_op_dd = gr.Dropdown(
+                        choices=[
+                            "글자 교정",
+                            "시각 조정",
+                            "큐 나누기",
+                            "큐 합치기",
+                            "새 큐 추가",
+                            "경고 허용",
+                            "미대응 해결",
+                            "무발화 기록",
+                        ],
+                        value="글자 교정",
+                        label="편집 종류",
+                        interactive=True,
+                        scale=2,
+                    )
+                    caption_cue_box = gr.Textbox(label="큐 ID", scale=2)
+                    caption_text_box = gr.Textbox(
+                        label="글자(나누기는 `앞|뒤`)",
+                        scale=3,
+                    )
+                    caption_start_box = gr.Textbox(label="시작 ms", scale=1)
+                    caption_end_box = gr.Textbox(label="끝 ms", scale=1)
+                with gr.Row():
+                    caption_second_box = gr.Textbox(label="짝 큐 ID(합치기)", scale=2)
+                    caption_index_box = gr.Textbox(label="미대응 번호", scale=2)
+                    caption_warning_box = gr.Textbox(label="경고 key", scale=2)
+                    caption_edit_button = gr.Button("편집 적용", scale=2)
+                with gr.Row():
+                    self._caption_cue_dd = gr.Dropdown(
+                        choices=[],
+                        label="큐 선택 — 편집 칸 채우기·이동",
+                        info="고르면 그 큐의 지금 글자·시각으로 편집 칸을 채우고 재생기를"
+                        " 큐 시작으로 옮긴다(서버 미디어 재생성 없음).",
+                        interactive=True,
+                        scale=6,
+                    )
+                self._caption_table_html = gr.HTML(
+                    '<p style="color:#888">큐 편집표는 검토 새로고침 뒤 여기 나타난다 —'
+                    " 지금 글자 칸과 큐 이동·반복 단추까지.</p>",
+                    elem_id="caption-cue-table",
                 )
-                caption_start_box = gr.Textbox(label="시작 ms", scale=1)
-                caption_end_box = gr.Textbox(label="끝 ms", scale=1)
-            with gr.Row():
-                caption_second_box = gr.Textbox(label="짝 큐 ID(합치기)", scale=2)
-                caption_index_box = gr.Textbox(label="미대응 번호", scale=2)
-                caption_warning_box = gr.Textbox(label="경고 key", scale=2)
-                caption_edit_button = gr.Button("편집 적용", scale=2)
-            with gr.Row():
-                self._caption_cue_dd = gr.Dropdown(
-                    choices=[],
-                    label="큐 선택 — 편집 칸 채우기·이동",
-                    info="고르면 그 큐의 지금 글자·시각으로 편집 칸을 채우고 재생기를"
-                    " 큐 시작으로 옮긴다(서버 미디어 재생성 없음).",
-                    interactive=True,
-                    scale=6,
+            # 등록 기록(64자리 지문 등)은 접힌 상세로 — 기본 흐름에는 재생기·작업대만.
+            with gr.Accordion("자막 상세 — 등록·실행 기록", open=False):
+                self._caption_md = gr.Markdown(
+                    "_자막 상태가 여기 나타난다._", elem_id="caption-state"
                 )
-            self._caption_table_html = gr.HTML(
-                '<p style="color:#888">큐 편집표는 검토 새로고침 뒤 여기 나타난다 —'
-                " 지금 글자 칸과 큐 이동·반복 단추까지.</p>",
-                elem_id="caption-cue-table",
-            )
-            self._caption_md = gr.Markdown("_자막 상태가 여기 나타난다._", elem_id="caption-state")
+
+            # 문맥(수명 토큰·화면이 본 머리)을 주고받는다 — 등록·새로고침은 새
+            # 문맥을 내리고, 수동 편집·확정은 옛 문맥 사건을 거부한다.
+            caption_register_inputs = [
+                self._signature_state,
+                caption_path_box,
+                caption_source_box,
+                caption_ordinal_dd,
+            ]
+            caption_register_outputs = [
+                self._caption_md,
+                self._caption_player_html,
+                self._caption_workbench_block,
+                self._caption_context_state,
+                self._caption_head_state,
+            ]
             caption_register_button.click(
-                self.caption_register_view,
-                [self._signature_state, caption_path_box, caption_source_box, caption_ordinal_dd],
-                [self._caption_md, self._caption_player_html],
+                self._on_caption_register, caption_register_inputs, caption_register_outputs
             )
+            self._advanced_wirings["caption-register"] = (
+                caption_register_inputs,
+                caption_register_outputs,
+            )
+            self._advanced_handlers["caption-register"] = self._on_caption_register
             caption_estimate_button.click(
                 self.caption_estimate_view,
                 [self._signature_state, caption_run_box],
@@ -3527,46 +4823,73 @@ class RawWorkspaceUi:
                 [self._signature_state, caption_run_box, caption_confirm_box],
                 self._caption_md,
             )
+
+            caption_refresh_inputs = [self._signature_state, caption_run_box]
+            caption_refresh_outputs = [
+                self._caption_md,
+                self._caption_table_html,
+                self._caption_player_html,
+                self._caption_cue_dd,
+                self._caption_workbench_block,
+                self._caption_context_state,
+                self._caption_head_state,
+            ]
             caption_refresh_button.click(
-                self.caption_review_view,
-                [self._signature_state, caption_run_box],
-                [
-                    self._caption_md,
-                    self._caption_table_html,
-                    self._caption_player_html,
-                    self._caption_cue_dd,
-                ],
+                self._on_caption_refresh, caption_refresh_inputs, caption_refresh_outputs
             )
+            self._advanced_wirings["caption-refresh"] = (
+                caption_refresh_inputs,
+                caption_refresh_outputs,
+            )
+            self._advanced_handlers["caption-refresh"] = self._on_caption_refresh
             caption_trace_button.click(
                 self.caption_trace_view,
                 [self._signature_state, caption_run_box],
                 self._caption_md,
             )
+
+            caption_edit_inputs = [
+                self._caption_context_state,
+                self._caption_head_state,
+                self._signature_state,
+                caption_op_dd,
+                caption_cue_box,
+                caption_text_box,
+                caption_start_box,
+                caption_end_box,
+                caption_second_box,
+                caption_index_box,
+                caption_warning_box,
+            ]
             caption_edit_button.click(
-                self.caption_edit_view,
-                [
-                    self._signature_state,
-                    caption_op_dd,
-                    caption_cue_box,
-                    caption_text_box,
-                    caption_start_box,
-                    caption_end_box,
-                    caption_second_box,
-                    caption_index_box,
-                    caption_warning_box,
-                ],
-                [
-                    self._caption_md,
-                    self._caption_table_html,
-                    self._caption_player_html,
-                    self._caption_cue_dd,
-                ],
+                self._on_caption_edit,
+                caption_edit_inputs,
+                caption_refresh_outputs,
             )
-            caption_confirm_button.click(
-                self.caption_confirm_view,
-                [self._signature_state, caption_run_box, caption_final_confirm_box],
+            self._advanced_wirings["caption-edit"] = (caption_edit_inputs, caption_refresh_outputs)
+            self._advanced_handlers["caption-edit"] = self._on_caption_edit
+
+            caption_confirm_inputs = [
+                self._caption_context_state,
+                self._caption_head_state,
+                self._signature_state,
+                caption_run_box,
+                caption_final_confirm_box,
+            ]
+            caption_confirm_outputs = [
                 self._caption_md,
+                self._caption_workbench_block,
+                self._caption_context_state,
+                self._caption_head_state,
+            ]
+            caption_confirm_button.click(
+                self._on_caption_confirm, caption_confirm_inputs, caption_confirm_outputs
             )
+            self._advanced_wirings["caption-confirm"] = (
+                caption_confirm_inputs,
+                caption_confirm_outputs,
+            )
+            self._advanced_handlers["caption-confirm"] = self._on_caption_confirm
             assert self._caption_cue_dd is not None
             self._caption_cue_dd.change(
                 self.caption_cue_pick_view,
@@ -3602,6 +4925,9 @@ class RawWorkspaceUi:
         str,
         gr.Dropdown,
         gr.CheckboxGroup,
+        str,
+        str,
+        str,
     ]:
         """페이지 로드·새로고침 — 상태를 전부 서버에서 다시 읽는다.
 
@@ -3627,6 +4953,7 @@ class RawWorkspaceUi:
             self._analysis_state_markdown(self._snapshot_root()),
             gr.Dropdown(choices=self.resumable_analysis_choices()),
             gr.CheckboxGroup(choices=self.analysis_source_choices()),
+            *self._workbench_view_values(self._snapshot_root()),
         )
 
     def build_blocks(self) -> gr.Blocks:
@@ -3636,6 +4963,12 @@ class RawWorkspaceUi:
             # 화면이 마지막으로 본 작업공간 신원 — 선택의 최신 증명에만 쓴다.
             # 정본은 서버(DB)에 있고, 이 값은 새로고침마다 서버에서 다시 내려온다.
             self._signature_state = gr.State(None)
+            # 고급 패널 문맥 상태 — 실제 배선이 주고받는 클라이언트 소유 값(세션별).
+            # 편집 계열 콜백은 사건 순간의 이 값과 서버의 지금 값을 비교한다.
+            self._edit_context_state = gr.State(None)
+            self._review_head_state = gr.State(None)
+            self._caption_context_state = gr.State(None)
+            self._caption_head_state = gr.State(None)
             open_button, create_button, ws_path_box, new_name_box = self._project_tab()
             extract_button, refresh_segment, profile_dd, analysis_plan = self._review_tab()
             self._package_tab()
@@ -3703,6 +5036,7 @@ class RawWorkspaceUi:
             self._analysis_md,
             self._analysis_jobs_dd,
             self._analysis_sources_group,
+            *self._workbench_outputs(),
         ]
 
     # ── HTTP 경계 — 모든 요청에 Host/Origin 가드, 미디어는 ID로만 ──

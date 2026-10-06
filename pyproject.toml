@@ -15,7 +15,10 @@ vlogsrt = "vlogsrt.cli:main"
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "ruff>=0.6", "mypy>=1.11"]
 # 웹 UI는 선택 사항이다. 핵심 파이프라인은 여전히 의존성 3개로 돈다(불변 규칙 7).
-ui = ["gradio>=6.0"]
+# V2 작업대는 gradio 공개 HTML 계약을 쓴다 — js_on_load `watch`(6.10.0, PR #12988)과
+# `server_functions`(6.25.0, PR #12929, 설치된 공식 CHANGELOG.md에서 확인). 가장 오래된
+# 검증 충분 버전 = 6.25. 새 의존성은 없다(그라디오 버전 하한만 올렸다).
+ui = ["gradio>=6.25"]
 # 파생 계층(vlogsrt/project/) 전용 런타임. 레거시 vlogsrt/*.py·ui/** 에서는
 # import 자체가 금지다 — docs/PROJECT_CONTRACTS.md, scripts/check_invariants.py가 지킨다.
 project = ["numpy>=2.0", "onnxruntime>=1.19"]
