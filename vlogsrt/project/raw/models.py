@@ -616,6 +616,7 @@ ANALYSIS_JOB_KIND = "understanding_analysis"
 """의미 분석 작업의 종류 표기 — 같은 지문의 활성 작업 재제출이 여기 묶인다."""
 
 ANALYSIS_REVISION_STATUSES: tuple[str, ...] = (
+    "partial",
     "reserved",
     "analyzing",
     "awaiting_semantic",
@@ -628,6 +629,7 @@ ANALYSIS_REVISION_STATUSES: tuple[str, ...] = (
 원본별 결과는 따로 남는다 — 하나의 상태 문자열로 부분 실패를 숨기지 않는다."""
 
 ANALYSIS_SOURCE_STATUSES: tuple[str, ...] = (
+    "partial",
     "pending",
     "analyzing",
     "transcribed",

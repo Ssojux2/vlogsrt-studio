@@ -39,7 +39,9 @@ from vlogsrt.project.raw.browser_runtime import (
     BrowserRuntimeError,
     EnvironmentCredentials,
     asr_estimate_digest,
+    browser_network_mode,
     caption_transport_providers,
+    capture_browser_credentials,
     capture_environment_credentials,
     live_transport_for_credentials,
     mint_asr_approvals,
@@ -56,6 +58,23 @@ from vlogsrt.project.raw.config import (
     WORKFLOW_SCHEMA_VERSION,
     RawWorkflowConfig,
     validate_raw_workflow_config,
+)
+from vlogsrt.project.raw.fcp import (
+    FCP_ROLE_ORIGINAL,
+    FCP_ROLE_PROXY,
+    FCP_ROLES,
+    FcpBrokenLink,
+    FcpLibraryError,
+    FcpLibraryScan,
+    FcpLogicalClip,
+    FcpMediaFile,
+    is_fcp_library,
+)
+from vlogsrt.project.raw.fcp import (
+    managed_workspace_root as fcp_managed_workspace_root,
+)
+from vlogsrt.project.raw.fcp import (
+    scan_fcp_library as fcp_scan_fcp_library,
 )
 from vlogsrt.project.raw.final_video import FinalVideoError
 from vlogsrt.project.raw.ingest import (
@@ -123,8 +142,11 @@ from vlogsrt.project.raw.models import (
     SegmentPlanEntry,
     SegmentPlanSnapshot,
     SourceAsset,
+    SourceNestingError,
     SourceOrderRevision,
+    WorkspaceAlreadyExistsError,
     WorkspaceModuleUnavailableError,
+    WorkspaceNotFoundError,
     WorkspaceStatus,
 )
 from vlogsrt.project.raw.segment_review import ReviewError, ReviewRevision, StaleRevisionError
@@ -167,6 +189,8 @@ from vlogsrt.project.raw.visual_review import (  # 공개 경계 재수출(계�
     snapped_frame_index,
 )
 from vlogsrt.project.raw.workspace import (
+    DB_NAME,
+    PROJECT_TOML_NAME,
     RawWorkspace,
     new_segment_plan_revision_id,
 )
@@ -190,6 +214,14 @@ __all__ = [
     "BrowserRuntimeError",
     "ByteRange",
     "EnvironmentCredentials",
+    "FCP_ROLE_ORIGINAL",
+    "FCP_ROLE_PROXY",
+    "FCP_ROLES",
+    "FcpBrokenLink",
+    "FcpLibraryError",
+    "FcpLibraryScan",
+    "FcpLogicalClip",
+    "FcpMediaFile",
     "ClipArtifact",
     "EXTRACT_PROFILES",
     "ExtractJobError",
@@ -231,6 +263,7 @@ __all__ = [
     "SegmentationError",
     "SourceAsset",
     "SourceInspection",
+    "SourceNestingError",
     "SourceOrderRevision",
     "VISUAL_PAGE_SIZE",
     "VISUAL_PREPARE_JOB_KIND",
@@ -254,10 +287,13 @@ __all__ = [
     "StaleRevisionError",
     "browse_folder",
     "capture_environment_credentials",
+    "capture_browser_credentials",
+    "browser_network_mode",
     "caption_transport_providers",
     "content_type_for",
     "ffprobe_media_inspector",
     "host_header_allowed",
+    "is_fcp_library",
     "live_transport_for_credentials",
     "loopback_hosts",
     "mint_asr_approvals",
@@ -332,9 +368,12 @@ def _analysis_body(
     """분석 작업 본문 묶기 — 리비전·선택·호출 경계를 즉시 묶는다(§14.1)."""
 
     def body(context: JobContext) -> None:
-        analysis_workflow.run_analysis(
-            context, workspace, revision, order, assets, settings, workflow, providers
-        )
+        from vlogsrt.project.raw import request_log
+
+        with request_log.scope(workspace, context.job_id, live=providers.is_live()):
+            analysis_workflow.run_analysis(
+                context, workspace, revision, order, assets, settings, workflow, providers
+            )
 
     return body
 
@@ -351,9 +390,12 @@ def _semantic_body(
     """2단계(의미) 작업 본문 묶기 — 같은 본문, 단계는 공급자가 이미 말한다."""
 
     def body(context: JobContext) -> None:
-        analysis_workflow.run_analysis(
-            context, workspace, revision, order, assets, settings, workflow, providers
-        )
+        from vlogsrt.project.raw import request_log
+
+        with request_log.scope(workspace, context.job_id, live=providers.is_live()):
+            analysis_workflow.run_analysis(
+                context, workspace, revision, order, assets, settings, workflow, providers
+            )
 
     return body
 
@@ -396,7 +438,7 @@ def _analysis_estimate_for(
     note가 말한다). 실제 실행은 이 값이 아니라 실측 원본·실측 분량으로 승인과
     맞춰진다(§14.3).
     """
-    path = workspace.root / asset.relative_path
+    path = workspace.source_media_path(asset)
     probe = preprocess.probe_raw_media(path)
     try:
         clock = preprocess.probe_extraction_clock(path, probe=probe)
@@ -656,6 +698,7 @@ class RawWorkspaceService:
         self._lock = threading.RLock()  # _jobs가 _workspace를 안에서 다시 지난다
         self._workspaces: dict[Path, RawWorkspace] = {}
         self._job_managers: dict[Path, JobManager] = {}
+        self._waiting_children: dict[tuple[Path, str], str] = {}
 
     def _workspace(self, root: Path) -> RawWorkspace:
         key = root.expanduser().resolve()
@@ -753,7 +796,13 @@ class RawWorkspaceService:
         return self._jobs(root).submit(kind, input_fingerprint, run, total)
 
     def cancel_job(self, root: Path, job_id: str) -> JobRecord:
-        return self._jobs(root).cancel(job_id)
+        key = root.expanduser().resolve()
+        with self._lock:
+            record = self._jobs(key).cancel(job_id)
+            child_id = self._waiting_children.get((key, job_id))
+            if child_id:
+                self.cancel_job(key, child_id)
+            return record
 
     def get_job(self, root: Path, job_id: str) -> JobRecord:
         return self._jobs(root).get(job_id)
@@ -787,6 +836,425 @@ class RawWorkspaceService:
 
     # ── A2 — SD/폴더 가져오기·원본 순서 ───────────────────────
 
+    def selected_asset_ids(self, root: Path, paths: Sequence[str]) -> tuple[str, ...]:
+        selected = set(paths)
+        return tuple(
+            asset.asset_id
+            for asset in self.list_source_assets(root)
+            if asset.status == "ready"
+            and str(Path(asset.source_root) / asset.source_relative_path) in selected
+        )
+
+    def save_selection_state(
+        self, root: Path, state: dict[str, Any], *, selected: bool = True
+    ) -> None:
+        from vlogsrt.project.raw.selection_analysis import save_state
+
+        save_state(self, root, state, selected=selected)
+
+    def load_selection_state(self, root: Path) -> dict[str, Any]:
+        from vlogsrt.project.raw.selection_analysis import load_state
+
+        return load_state(self, root)
+
+    def load_selection_states(self, root: Path) -> tuple[dict[str, Any], ...]:
+        from vlogsrt.project.raw.selection_analysis import load_states
+
+        return load_states(self, root)
+
+    def selection_completion(self, root: Path, revision_id: str) -> tuple[str, str | None]:
+        from vlogsrt.project.raw.selection_analysis import completion, completion_error
+
+        return completion(self, root, revision_id), completion_error(self, root, revision_id)
+
+    def source_transcript(self, root: Path, asset_id: str) -> dict | None:
+        from vlogsrt.project.raw.source_transcript import load
+
+        return load(self._workspace(root), asset_id)
+
+    def analysis_frame_progress(
+        self, root: Path, revision_id: str | None, asset_ids: tuple[str, ...]
+    ) -> int:
+        if not revision_id:
+            return 0
+        workspace = self._workspace(root)
+        return sum(
+            len(
+                list(
+                    (
+                        workspace.root
+                        / "analysis"
+                        / revision_id
+                        / analysis_workflow._source_folder(row.source_order, row.asset_id)
+                        / "frames"
+                    ).glob("*.jpg")
+                )
+            )
+            for row in AnalysisStore(workspace).list_source_results(revision_id)
+            if row.asset_id in asset_ids
+        )
+
+    def source_repeat_candidates(self, root: Path, asset_id: str) -> list[dict]:
+        from vlogsrt.project.raw.source_transcript import cross_source_candidates
+
+        return cross_source_candidates(self._workspace(root), asset_id)
+
+    def source_media_references(self, root: Path, asset_id: str) -> dict | None:
+        from vlogsrt.project.raw.media_refs import load
+
+        return load(self._workspace(root), asset_id)
+
+    def edit_source_transcript(
+        self, root: Path, asset_id: str, revision: str, **fields: Any
+    ) -> dict:
+        from vlogsrt.project.raw.source_transcript import edit
+
+        self._workspace(root).source_asset(asset_id)
+        return edit(self._workspace(root), asset_id, revision, **fields)
+
+    def relink_source_original(self, root: Path, asset_id: str, path: Path) -> dict:
+        from vlogsrt.project.raw.media_refs import relink_original
+
+        self._workspace(root).source_asset(asset_id)
+        return relink_original(self._workspace(root), asset_id, path)
+
+    def selection_quote(self, root: Path, asset_ids: tuple[str, ...]) -> Any:
+        from vlogsrt.project.raw.selection_analysis import quote
+
+        return quote(self, root, asset_ids)
+
+    def cached_selection_analysis(self, root: Path, asset_ids: tuple[str, ...]) -> str | None:
+        from vlogsrt.project.raw.selection_analysis import cached_revision
+
+        return cached_revision(self, root, asset_ids)
+
+    def run_selection_analysis(
+        self,
+        root: Path,
+        quote: Any,
+        transport: Any,
+        context: Any,
+        report: Callable[[str, str | None], None],
+    ) -> str:
+        from vlogsrt.project.raw.selection_analysis import execute
+
+        return execute(self, root, quote, transport, context, report)
+
+    def publish_selection_review(self, root: Path, revision_id: str, context: Any) -> str:
+        from vlogsrt.project.raw.selection_analysis import publish_review
+
+        return publish_review(self, root, revision_id, context)
+
+    def selection_suitability(
+        self, root: Path, revision_id: str, asset_ids: tuple[str, ...]
+    ) -> dict[str, list[dict]]:
+        from vlogsrt.project.raw.suitability import spans
+
+        summary = self.analysis_overview(root, revision_id)
+        result: dict[str, list[dict]] = {}
+        if summary is None:
+            return result
+        for row in summary.results:
+            if row.asset_id not in asset_ids:
+                continue
+            from vlogsrt.project.raw.analysis_workflow import ANALYSIS_DOCUMENT_NAME, _source_folder
+
+            directory = (
+                self._workspace(root).root
+                / "analysis"
+                / revision_id
+                / _source_folder(row.source_order, row.asset_id)
+            )
+            document = (
+                self._workspace(root).root / row.document_path
+                if row.document_path
+                else directory / ANALYSIS_DOCUMENT_NAME
+            )
+            partial = directory / "suitability_progress.json"
+            path = partial if partial.is_file() else document
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                if path == partial and payload.get("analysis_revision_id") != revision_id:
+                    continue
+                result[row.asset_id] = spans(payload, completed_only=True)
+            except (OSError, ValueError, KeyError, TypeError):
+                continue
+        return result
+
+    def start_reference_import(
+        self,
+        root: Path,
+        proposal: IngestProposal,
+        *,
+        prepare_preview: bool = True,
+        fcp_scan: Any = None,
+    ) -> JobHandle:
+        from vlogsrt.project.raw.reference_ingest import register_references
+
+        workspace = self._workspace(root)
+        fingerprint = hashlib.sha256(
+            repr(
+                [
+                    (c.source_root, c.source_relative_path, c.size_bytes, c.mtime_ns, c.inode)
+                    for c in proposal.order
+                ]
+            ).encode()
+        ).hexdigest()
+
+        def body(context: JobContext) -> None:
+            register_references(workspace, proposal, context)
+            if fcp_scan is not None:
+                from vlogsrt.project.raw.media_refs import bind_library
+
+                paths = tuple(
+                    str(Path(i.source_root) / i.source_relative_path) for i in proposal.order
+                )
+                bind_library(workspace, fcp_scan, self.selected_asset_ids(root, paths))
+            self.ensure_source_order(root)
+            if prepare_preview:
+                self.wait_child_job(root, self.start_source_preview(root), context)
+
+        return self.submit_job(root, "reference_import", fingerprint, body)
+
+    def ensure_source_order(self, root: Path) -> None:
+        ready = {a.asset_id for a in self.list_source_assets(root) if a.status == "ready"}
+        current = self.latest_global_source_order(root)
+        if current is None or {entry.asset_id for entry in current.entries} != ready:
+            self.confirm_global_source_order(root)
+
+    def start_source_preview(self, root: Path, asset_ids: tuple[str, ...] = ()) -> JobHandle:
+        """Preparing source playback is local and does not require paid analysis."""
+        order = self.latest_global_source_order(root)
+        if order is None:
+            raise RawWorkspaceError("원본 확인이 끝난 뒤 미리보기를 준비합니다")
+
+        def body(context: JobContext) -> None:
+            facade = self.review_workspace_facade(root)
+            try:
+                head = facade.load_head().revision
+                plan = self.segment_plan_revision(root, head.base_plan_id)
+                matches = plan.order_revision_id == order.revision_id
+            except RawWorkspaceError:
+                matches = False
+            if not matches:
+                # One initial source card per video. Auto cleanup later supplies
+                # analysis boundaries; existing edited sources remain authoritative.
+                plan = self.plan_segmentation(root, tile_seconds=Fraction(10**12))
+                head = facade.initialize_review(plan.revision_id)
+            for page in range(
+                1, (len(head.segments) + VISUAL_PAGE_SIZE - 1) // VISUAL_PAGE_SIZE + 1
+            ):
+                context.check_cancel()
+
+                def prepare_page(ctx: JobContext, page: int = page) -> None:
+                    visual_review.run_page_preparation(
+                        ctx,
+                        self._workspace(root),
+                        facade,
+                        base_plan_id=head.base_plan_id,
+                        page=page,
+                        asset_ids=asset_ids,
+                    )
+
+                self.wait_child_job(
+                    root,
+                    self.submit_job(
+                        root,
+                        "visual_prepare",
+                        f"{head.base_plan_id}:{page}:{asset_ids}",
+                        prepare_page,
+                    ),
+                    context,
+                )
+
+        return self.submit_job(root, "source_preview", order.revision_id + repr(asset_ids), body)
+
+    def remember_fcp_library(self, root: Path, library: Path) -> None:
+        with self._workspace(root).connect() as connection:
+            connection.execute(
+                "INSERT INTO meta(key,value) VALUES('fcp_library_source',?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (str(library),),
+            )
+            connection.commit()
+
+    def remembered_fcp_library(self, root: Path) -> Path | None:
+        with self._workspace(root).connect() as connection:
+            row = connection.execute(
+                "SELECT value FROM meta WHERE key='fcp_library_source'"
+            ).fetchone()
+        if row:
+            return Path(str(row[0]))
+        # Earlier copied-library projects have no remembered-library metadata.
+        # Their recorded source roots identify the library without scanning media.
+        roots = {
+            Path(asset.source_root)
+            for asset in self.list_source_assets(root)
+            if Path(asset.source_root).suffix.lower() == ".fcpbundle"
+        }
+        return next(iter(roots)) if len(roots) == 1 else None
+
+    def import_selected_video(self, root: Path, source: Path) -> JobHandle:
+        from vlogsrt.project.raw.ingest import scan_selected_source
+
+        proposal = scan_selected_source(source, self._workspace(root).root)
+        confirmation = self.confirm_ingest(root, proposal)
+        return self.start_ingest_copy(root, confirmation)
+
+    def wait_child_job(
+        self, root: Path, handle: JobHandle | JobRecord, context: JobContext
+    ) -> None:
+        import time
+
+        from vlogsrt.project.raw.jobs import JobCancelledError
+
+        # Lightweight test contexts and a few recovery callers only expose
+        # ``check_cancel``.  The child still must be cancelled immediately;
+        # the registry entry is an optional optimization for parent job IDs.
+        parent_job_id = getattr(context, "job_id", None)
+        key = (root.expanduser().resolve(), str(parent_job_id)) if parent_job_id else None
+        if key is not None:
+            with self._lock:
+                self._waiting_children[key] = handle.job_id
+        try:
+            while True:
+                try:
+                    context.check_cancel()
+                except JobCancelledError:
+                    self.cancel_job(root, handle.job_id)
+                    raise
+                row = self.get_job(root, handle.job_id)
+                context.set_total(max(row.progress_total, 1))
+                context.set_progress(row.progress_current)
+                if row.status == "succeeded":
+                    return
+                if row.status in ("failed", "interrupted", "cancelled", "paused"):
+                    raise RawWorkspaceError(row.error or f"작업 {row.status}")
+                time.sleep(0.2)
+        finally:
+            if key is not None:
+                with self._lock:
+                    self._waiting_children.pop(key, None)
+
+    def start_cleanup(self, root: Path) -> JobHandle:
+        summary = self.analysis_overview(root)
+        if summary is None or summary.revision.status != "complete":
+            raise RawWorkspaceError("분석이 끝난 뒤 자동 정리를 시작하세요")
+        revision_id = summary.revision.revision_id
+        initialized = any(
+            job.kind == "automatic_cleanup"
+            and job.input_fingerprint == revision_id
+            and job.status == "succeeded"
+            for job in self.list_jobs(root)
+        )
+
+        def body(context: JobContext) -> None:
+            context.check_cancel()
+            facade = self.review_workspace_facade(root)
+            try:
+                head = facade.load_head().revision
+                current_plan = self.segment_plan_revision(root, head.base_plan_id)
+                if (
+                    not initialized
+                    or current_plan.order_revision_id != summary.revision.order_revision_id
+                ):
+                    plan = self.plan_segmentation_from_analysis(root, revision_id)
+                    head = facade.initialize_review(plan.revision_id, revision_id)
+            except RawWorkspaceError:
+                plan = self.plan_segmentation_from_analysis(root, revision_id)
+                head = facade.initialize_review(plan.revision_id, revision_id)
+            # Existing user edits are authoritative; materialize their current geometry.
+            package = self.package_overview(root)
+            snapshot = self.segment_plan_revision(root, head.base_plan_id)
+            geometry = {(s.segment_id, s.start_pts, s.end_pts) for s in head.segments}
+            planned = {(s.segment_id, s.core_start_pts, s.core_end_pts) for s in snapshot.entries}
+            if geometry != planned or (
+                package is not None and facade.stale_media(package.package.package_dir)
+            ):
+                plan, mapping = facade.plan_from_review(head.base_plan_id)
+                head = facade.adopt_plan_review(plan, mapping, old_revision=head)
+            if not (
+                package is not None
+                and package.package.complete
+                and package.package.plan_revision_id == head.base_plan_id
+                and not facade.stale_media(package.package.package_dir)
+            ):
+                self.wait_child_job(
+                    root, self.start_segment_extraction(root, head.base_plan_id), context
+                )
+            context.check_cancel()
+            for page in range(
+                1, (len(head.segments) + VISUAL_PAGE_SIZE - 1) // VISUAL_PAGE_SIZE + 1
+            ):
+                context.check_cancel()
+                self.wait_child_job(
+                    root,
+                    self.start_visual_page_preparation(
+                        root, base_plan_id=head.base_plan_id, page=page
+                    ),
+                    context,
+                )
+
+        return self.submit_job(root, "automatic_cleanup", revision_id, body)
+
+    def materialize_review(self, root: Path, context: JobContext, expected_revision: str) -> str:
+        from vlogsrt.project.raw.media_refs import resolve
+
+        for asset in self.list_source_assets(root):
+            if asset.status == "ready":
+                resolve(self._workspace(root), asset, "export")
+        facade = self.review_workspace_facade(root)
+        head = facade.load_head().revision
+        if head.revision_id != expected_revision:
+            raise RawWorkspaceError("검토가 바뀌었습니다. 현재 결과에서 다시 보내세요")
+        plan = self.segment_plan_revision(root, head.base_plan_id)
+        geometry = {(s.segment_id, s.start_pts, s.end_pts) for s in head.segments}
+        if geometry != {(s.segment_id, s.core_start_pts, s.core_end_pts) for s in plan.entries}:
+            plan, mapping = facade.plan_from_review(head.base_plan_id)
+            head = facade.adopt_plan_review(plan, mapping, old_revision=head)
+        package = self.package_overview(root)
+        if not (
+            package
+            and package.package.complete
+            and package.package.plan_revision_id == head.base_plan_id
+            and not facade.stale_media(package.package.package_dir)
+        ):
+            self.wait_child_job(
+                root, self.start_segment_extraction(root, head.base_plan_id), context
+            )
+        return head.revision_id
+
+    def export_final_cut(
+        self,
+        root: Path,
+        context: JobContext | None = None,
+        expected_review_revision_id: str | None = None,
+    ) -> tuple[str, str]:
+        from vlogsrt.project.raw.final_cut_handoff import build_handoff
+
+        facade = self.review_workspace_facade(root)
+        head = facade.load_head().revision
+        if (
+            expected_review_revision_id is not None
+            and head.revision_id != expected_review_revision_id
+        ):
+            raise RawWorkspaceError("검토가 바뀌었습니다. 결과 확인 후 다시 내보내세요")
+        if not any(s.selection == "included" for s in head.segments):
+            raise RawWorkspaceError("사용할 컷이 하나도 없습니다")
+        package = self.package_overview(root)
+        if package is None:
+            raise RawWorkspaceError("조각 추출을 먼저 완료하세요")
+        if facade.stale_media(package.package.package_dir):
+            raise RawWorkspaceError("경계가 바뀌었습니다. 자동 정리로 편집 구간을 갱신하세요")
+        outcome = facade.export_confirmed(
+            package.package.package_dir,
+            base_plan_id=head.base_plan_id,
+            expected_review_revision_id=head.revision_id,
+            context=context,
+        )
+        xml = build_handoff(root, outcome.destination_dir)
+        return outcome.destination_dir, str(xml)
+
     def scan_sources(
         self,
         root: Path,
@@ -796,6 +1264,50 @@ class RawWorkspaceService:
         """원본 폴더를 발견·조사해 제안을 만든다 — 읽기만 한다(§5.1의 확인 단계 전)."""
         workspace = self._workspace(root)
         return scan_sources(source_root, workspace.root, inspect)
+
+    def managed_fcp_workspace(self, library: Path) -> tuple[WorkspaceStatus, bool]:
+        """FCP 라이브러리의 관리 작업공간 — 라이브러리 밖 안정 자리를 만들거나 이어 연다.
+
+        같은 라이브러리는 언제나 같은 자리(`<이름>-vlogsrt`)를 얻는다. 자리에 정본
+        작업공간이 있으면 그대로 열고(만들지 않는다), 아무것도 없으면 만든다. 자리에
+        작업공간 아닌 것이 있으면 명시적으로 실패한다 — 조용히 덮지 않는다.
+        """
+        resolved = library.expanduser().resolve()
+        root = fcp_managed_workspace_root(resolved)
+        has_identity = (root / PROJECT_TOML_NAME).is_file() or (root / DB_NAME).is_file()
+        if has_identity:
+            try:
+                return self.open_workspace(root), False
+            except WorkspaceNotFoundError as error:
+                raise FcpLibraryError(
+                    f"관리 작업공간 자리({root})가 이미 있지만 v2 작업공간이 아니다 — {error}"
+                ) from error
+        try:
+            return self.create_workspace(root, resolved.stem), True
+        except WorkspaceAlreadyExistsError as error:
+            raise FcpLibraryError(
+                f"관리 작업공간 자리({root})에 이미 다른 내용이 있다 — 비우거나 옮긴 뒤"
+                " 다시 시도하세요"
+            ) from error
+
+    def scan_fcp_library(
+        self,
+        root: Path,
+        library: Path,
+        inspect: MediaInspect = ffprobe_media_inspector,
+        role: str = FCP_ROLE_ORIGINAL,
+        *,
+        originals_only: bool = False,
+    ) -> FcpLibraryScan:
+        """FCP 라이브러리를 발견·조사해 제안을 만든다 — 라이브러리는 읽기만 한다.
+
+        확정·복사는 일반 SD/폴더와 같은 A2 파이프라인으로 흐른다(원본·프록시 중복은
+        논리 클립으로 미리 묶여 있다).
+        """
+        workspace = self._workspace(root)
+        return fcp_scan_fcp_library(
+            library, workspace.root, inspect, role, originals_only=originals_only
+        )
 
     def confirm_ingest(self, root: Path, proposal: IngestProposal) -> IngestConfirmation:
         """사람의 명시적 확인을 받은 제안만 확정한다 — 배치·자산·불변 순서 리비전."""
@@ -1195,7 +1707,7 @@ class RawWorkspaceService:
             assets,
         )
         fingerprint = self._analysis_fingerprint(
-            order.revision_id, assets, understanding, workflow, mode
+            order.revision_id, assets, understanding, workflow, mode, root=root
         )
         active = next(
             (
@@ -1230,7 +1742,18 @@ class RawWorkspaceService:
             created_at=_plan_timestamp(),
             updated_at=_plan_timestamp(),
         )
-        AnalysisStore(workspace).insert_revision(revision)
+        previous = next(
+            (
+                r
+                for r in reversed(AnalysisStore(workspace).list_revisions())
+                if r.fingerprint == fingerprint
+            ),
+            None,
+        )
+        if previous is not None:
+            revision = previous
+        else:
+            AnalysisStore(workspace).insert_revision(revision)
         return self.submit_job(
             root,
             ANALYSIS_JOB_KIND,
@@ -1311,7 +1834,7 @@ class RawWorkspaceService:
             assets,
         )
         fingerprint = self._analysis_fingerprint(
-            order.revision_id, assets, understanding, workflow, revision.mode
+            order.revision_id, assets, understanding, workflow, revision.mode, root=root
         )
         return self.resume_job(
             root,
@@ -1363,7 +1886,14 @@ class RawWorkspaceService:
             raise AnalysisError(
                 f"재생 리비전({revision.revision_id})에는 2단계가 없다 — 재생은 단일 패스다"
             )
-        if revision.status not in ("awaiting_semantic", "analyzing", "failed", "interrupted"):
+        if revision.status not in (
+            "awaiting_semantic",
+            "analyzing",
+            "failed",
+            "interrupted",
+            "partial",
+            "complete",
+        ):
             raise AnalysisError(
                 f"2단계를 시작할 상태가 아니다({revision.status}) — 1단계가"
                 " `awaiting_semantic`에 도달해야 한다"
@@ -1559,7 +2089,11 @@ class RawWorkspaceService:
         return body
 
     def plan_segmentation_from_analysis(
-        self, root: Path, analysis_revision_id: str | None = None
+        self,
+        root: Path,
+        analysis_revision_id: str | None = None,
+        *,
+        use_current_order: bool = False,
     ) -> SegmentPlanSnapshot:
         """받아들인 분석을 A3 분할 계획으로 잇는다 — 전체 순서는 항상 전부 산다.
 
@@ -1580,16 +2114,18 @@ class RawWorkspaceService:
             revision = revisions[-1]
         if revision is None:
             raise AnalysisError("분석 리비전이 없다 — 먼저 의미 분석을 실행하세요")
-        if revision.status != "complete":
+        if revision.status not in ("complete", "partial", "failed"):
             raise AnalysisError(
                 f"분석이 완성 상태가 아니다({revision.status}) — 완료된 리비전만 계획에 쓴다"
             )
-        order = self._order_revision(root, revision.order_revision_id)
+        order = self._order_revision(
+            root, None if use_current_order else revision.order_revision_id
+        )
         rows = {row.asset_id: row for row in store.list_source_results(revision.revision_id)}
         intervals: dict[str, list[PlannedInterval]] = {}
         for entry in sorted(order.entries, key=lambda item: item.ordinal):
             row = rows.get(entry.asset_id)
-            if row is None:
+            if row is None and not use_current_order:
                 raise AnalysisError(
                     f"분석 결과 행이 없다: {entry.asset_id} — 분석을 다시 실행하세요"
                 )
@@ -1796,6 +2332,8 @@ class RawWorkspaceService:
         page: int = 1,
         expected_revision_id: str | None = None,
         audio_selections: Mapping[str, int | None] | None = None,
+        include_all_sources: bool = False,
+        selection_filter: str = "all",
     ) -> visual_review.VisualReviewOverview:
         """영상 검토 질의 — 미디어 생성·제공자 호출이 전혀 없다(읽기만 한다).
 
@@ -1823,6 +2361,8 @@ class RawWorkspaceService:
             active_jobs=active,
             expected_revision_id=expected_revision_id,
             audio_selections=audio_selections,
+            include_all_sources=include_all_sources,
+            selection_filter=selection_filter,
         )
 
     def start_visual_page_preparation(
@@ -2150,7 +2690,7 @@ class RawWorkspaceService:
         )
 
         for asset_id, asset in assets.items():
-            probe = preprocess.probe_raw_media(workspace.root / asset.relative_path)
+            probe = preprocess.probe_raw_media(workspace.source_media_path(asset))
             if not probe.audio:
                 continue  # 무성 원본 — 승인할 전사가 없다(ASR 작업을 만들지 않는다)
             approval = checked.get(asset_id)
@@ -2211,6 +2751,11 @@ class RawWorkspaceService:
         workspace = self._workspace(root)
         store = AnalysisStore(workspace)
         for asset_id, asset in assets.items():
+            prior = store.source_result(semantic_revision_id, asset_id)
+            if analysis_workflow._complete_source_current(workspace, asset, prior):
+                continue  # completed source makes no paid request on this retry
+            if prior is not None and prior.status == "failed" and not prior.document_path:
+                continue  # preparation failure remains a failed source; others may proceed
             approval = luna_approvals.get(asset_id)
             if approval is None:
                 raise AnalysisError(
@@ -2290,8 +2835,23 @@ class RawWorkspaceService:
         settings: RawUnderstandingSettings,
         workflow: RawWorkflowConfig,
         mode: str,
+        *,
+        root: Path | None = None,
     ) -> str:
         """분석 리비전 지문 — 순서·선택·설정·모델·모드를 묶는다(작업 재결합의 키)."""
+        from vlogsrt.project.raw import media_refs, source_transcript
+
+        bindings = (
+            {
+                asset_id: [
+                    source_transcript.fingerprint(self._workspace(root), asset_id),
+                    media_refs.fingerprint(self._workspace(root), asset_id),
+                ]
+                for asset_id in assets
+            }
+            if root is not None
+            else {}
+        )
         payload = json.dumps(
             {
                 "schema": "raw-analysis-revision/v1",
@@ -2305,6 +2865,7 @@ class RawWorkspaceService:
                     "luna": workflow.models.luna_model,
                 },
                 "mode": mode,
+                "source_bindings": bindings,
             },
             ensure_ascii=False,
             sort_keys=True,
@@ -2314,14 +2875,24 @@ class RawWorkspaceService:
     def _analysis_intervals(
         self,
         workspace: RawWorkspace,
-        row: AnalysisSourceResult,
+        row: AnalysisSourceResult | None,
         asset_id: str,
     ) -> list[PlannedInterval]:
         """원본 하나의 계획 구간 — 분석됨은 기록 그대로, 아니면 전체 보존 한 조각."""
-        if row.status in ("analyzed", "cached") and row.record_path is not None:
+        if (
+            row is not None
+            and row.status in ("analyzed", "cached", "partial")
+            and row.record_path is not None
+        ):
             path = workspace.root / row.record_path
             try:
                 record = json.loads(path.read_text(encoding="utf-8"))
+                from vlogsrt.project.raw.auto_cleanup import saved_decisions
+
+                if row.document_path:
+                    record["auto_decisions"] = saved_decisions(
+                        workspace.root / row.document_path, record, asset_id, row.revision_id
+                    )
                 spans = record["intervals"]
             except (OSError, ValueError, KeyError, TypeError) as error:
                 raise AnalysisError(
@@ -2335,7 +2906,43 @@ class RawWorkspaceService:
                 for item in spans
             ]
             if intervals:
-                return intervals
+                # Snap deletion edges inward; speech handles must never shrink.
+                import math
+
+                frame = (
+                    Fraction(
+                        **{
+                            "numerator": record["timeline"]["video"]["frame_duration"]["num"],
+                            "denominator": record["timeline"]["video"]["frame_duration"]["den"],
+                        }
+                    )
+                    if record.get("auto_decisions")
+                    else Fraction(1)
+                )
+                cuts = {point for span in intervals for point in (span.start, span.end)}
+                if row.document_path:
+                    from vlogsrt.project.raw.suitability import safe_window_edges
+
+                    document = json.loads(
+                        (workspace.root / row.document_path).read_text(encoding="utf-8")
+                    )
+                    cuts.update(
+                        point
+                        for point in safe_window_edges(document)
+                        if intervals[0].start < point < intervals[-1].end
+                    )
+                for decision in record.get("auto_decisions", []):
+                    start = Fraction(decision["start"]["num"], decision["start"]["den"])
+                    end = Fraction(decision["end"]["num"], decision["end"]["den"])
+                    a, b = math.ceil(start / frame) * frame, math.floor(end / frame) * frame
+                    if a < b:
+                        cuts.update((a, b))
+                ordered = sorted(cuts)
+                return [
+                    PlannedInterval(start=a, end=b)
+                    for a, b in zip(ordered, ordered[1:], strict=False)
+                ]
+
         asset = _verified_asset(workspace, asset_id)
         facts = _measured_source(workspace, asset)
         playable = (facts.exact_end_pts - facts.clock.first_pts) * facts.clock.time_base
@@ -2417,7 +3024,7 @@ def _verified_asset(workspace: RawWorkspace, asset_id: str) -> SourceAsset:
             f"원본이 검증 준비 상태가 아니다: {asset.source_relative_path}"
             f" ({asset.status}) — 가져오기(복사·검증)를 먼저 끝내세요"
         )
-    path = workspace.root / asset.relative_path
+    path = workspace.source_media_path(asset)
     probed = path.stat()
     if probed.st_size != asset.size_bytes:
         raise SegmentationError(
@@ -2449,7 +3056,7 @@ class _MeasuredSource:
 
 
 def _measured_source(workspace: RawWorkspace, asset: SourceAsset) -> _MeasuredSource:
-    path = workspace.root / asset.relative_path
+    path = workspace.source_media_path(asset)
     probe = preprocess.probe_raw_media(path)
     clock = preprocess.probe_extraction_clock(path, probe=probe)
     if not clock.uniform_grid:

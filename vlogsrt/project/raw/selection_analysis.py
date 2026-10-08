@@ -1,0 +1,271 @@
+"""One bounded selection approval covers STT and Luna; completed caches need no calls."""
+
+from __future__ import annotations
+
+import json
+from collections.abc import Callable
+from dataclasses import asdict, dataclass, replace
+from pathlib import Path
+from typing import Any
+
+from vlogsrt.project.raw import browser_runtime
+from vlogsrt.project.raw.analysis_config import RawUnderstandingSettings
+from vlogsrt.project.raw.analysis_store import AnalysisStore
+from vlogsrt.project.raw.config import RawWorkflowConfig
+from vlogsrt.project.raw.models import AnalysisEstimate, RawWorkspaceError
+
+
+@dataclass(frozen=True)
+class SelectionQuote:
+    asset_ids: tuple[str, ...]
+    estimates: tuple[AnalysisEstimate, ...]
+    digest: str
+    workflow: RawWorkflowConfig
+    approved: bool = False
+
+
+def quote(service: Any, root: Path, asset_ids: tuple[str, ...]) -> SelectionQuote:
+    estimates = tuple(service.analysis_estimate(root, asset_ids))
+    import hashlib
+
+    from vlogsrt.project.raw import media_refs, source_transcript
+
+    bindings = [
+        (
+            a,
+            media_refs.fingerprint(service._workspace(root), a),
+            source_transcript.fingerprint(service._workspace(root), a),
+        )
+        for a in asset_ids
+    ]
+    digest = hashlib.sha256(
+        (browser_runtime.asr_estimate_digest(estimates) + json.dumps(bindings)).encode()
+    ).hexdigest()
+    return SelectionQuote(asset_ids, estimates, digest, service.settings(root))
+
+
+def cached_revision(service: Any, root: Path, asset_ids: tuple[str, ...]) -> str | None:
+    settings = asdict(RawUnderstandingSettings())
+    workflow = service.settings(root)
+    models = {"timing": workflow.models.timing_model, "luna": workflow.models.luna_model}
+    workspace = service._workspace(root)
+    order = service.latest_global_source_order(root)
+    if order is None:
+        return None
+    assets = {a.asset_id: a for a in service.list_source_assets(root) if a.asset_id in asset_ids}
+    from vlogsrt.project.raw.analysis_workflow import _require_source_unchanged
+
+    try:
+        for asset in assets.values():
+            _require_source_unchanged(workspace.source_media_path(asset), asset)
+    except (OSError, RawWorkspaceError):
+        return None
+    expected = service._analysis_fingerprint(
+        order.revision_id, assets, RawUnderstandingSettings(), workflow, "live", root=root
+    )
+    store = AnalysisStore(workspace)
+    for revision in reversed(store.list_revisions()):
+        if (
+            revision.status != "complete"
+            or revision.fingerprint != expected
+            or json.loads(revision.settings_json) != settings
+            or json.loads(revision.models_json) != models
+        ):
+            continue
+        rows = {row.asset_id: row for row in store.list_source_results(revision.revision_id)}
+        if all(a in rows and rows[a].status in ("analyzed", "cached") for a in asset_ids):
+            reusable = True
+            for asset_id in asset_ids:
+                row = rows[asset_id]
+                if not row.document_path:
+                    reusable = False
+                    break
+                try:
+                    document = json.loads((root / row.document_path).read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    reusable = False
+                    break
+                from vlogsrt.project.raw.media_refs import fingerprint
+
+                if document.get("media_fingerprint", "original-only/v1") != fingerprint(
+                    workspace, asset_id
+                ):
+                    reusable = False
+                    break
+                if any(a.get("status") != "accepted" for a in document.get("annotations", [])):
+                    reusable = False
+                    break
+            if reusable:
+                return revision.revision_id
+    return None
+
+
+def execute(
+    service: Any,
+    root: Path,
+    approved: SelectionQuote,
+    transport: Any,
+    context: Any,
+    report: Callable[[str, str | None], None],
+) -> str:
+    if not approved.approved:
+        raise RawWorkspaceError("선택 영상의 전사·Luna 분석 승인이 필요합니다")
+    current = quote(service, root, approved.asset_ids)
+    if current.digest != approved.digest or current.workflow != approved.workflow:
+        raise RawWorkspaceError("선택 영상이나 설정이 바뀌었습니다. 현재 범위를 다시 확인하세요")
+    context.check_cancel()
+    browser_runtime.prepare_approved_browser_network()
+    service.update_settings(root, replace(approved.workflow, network_mode="online"))
+    asr = browser_runtime.mint_asr_approvals(service, root, approved.asset_ids, on=transport.on)
+    first = service.start_analysis(
+        root,
+        asset_ids=approved.asset_ids,
+        mode="live",
+        asr_approvals=asr,
+        sender=transport.sender,
+        cfg=transport.cfg,
+        on=transport.on,
+    )
+    job = service.get_job(root, first.job_id)
+    revisions = AnalysisStore(service._workspace(root)).list_revisions()
+    revision = next(r for r in reversed(revisions) if r.fingerprint == job.input_fingerprint)
+    report("전사·장면 준비", revision.revision_id)
+    service.wait_child_job(root, first, context)
+    context.check_cancel()
+    estimates = service.analysis_semantic_estimate(root, revision.revision_id)
+    limits = {e.asset_id: max(1, e.luna_request_count) for e in approved.estimates}
+    for estimate in estimates:
+        if estimate.asset_id in limits and estimate.luna_request_count > limits[estimate.asset_id]:
+            raise RawWorkspaceError(
+                "실측 분석량이 승인한 요청 상한을 넘었습니다. 새 범위를 확인하세요"
+            )
+    luna = browser_runtime.mint_luna_approvals(
+        service,
+        root,
+        revision.revision_id,
+        tuple(e.asset_id for e in estimates if e.asset_id in approved.asset_ids),
+        on=transport.on,
+    )
+    report("Luna 추천 구간 분석", revision.revision_id)
+    second = service.resume_analysis_semantic(
+        root, first.job_id, luna_approvals=luna, client=transport.client, on=transport.on
+    )
+    service.wait_child_job(root, second, context)
+    context.check_cancel()
+    return revision.revision_id
+
+
+def publish_review(service: Any, root: Path, revision_id: str, context: Any) -> str:
+    context.check_cancel()
+    plan = service.plan_segmentation_from_analysis(root, revision_id, use_current_order=True)
+    facade = service.review_workspace_facade(root)
+    rows = AnalysisStore(service._workspace(root)).list_source_results(revision_id)
+    analyzed = {row.asset_id for row in rows if row.status != "unanalyzed"}
+    review = facade.initialize_review(
+        plan.revision_id,
+        revision_id,
+        preserve_source_ids=tuple(c.asset_id for c in plan.coverage if c.asset_id not in analyzed),
+    )
+    # Recommendations become visible immediately. Extraction belongs to export,
+    # and source playback was already prepared when the video was selected.
+    context.check_cancel()
+    return review.revision_id
+
+
+_PERSISTED_FIELDS = (
+    "token",
+    "paths",
+    "asset_ids",
+    "stage",
+    "revision",
+    "job_id",
+    "preview_job_id",
+    "review_job_id",
+    "error",
+    "connection_required",
+    "view_source_id",
+)
+
+
+def save_state(service: Any, root: Path, state: dict[str, Any], *, selected: bool = True) -> None:
+    payload = {key: state[key] for key in _PERSISTED_FIELDS if key in state}
+    with service._workspace(root).connect() as connection:
+        encoded = json.dumps(payload, ensure_ascii=False)
+        keys = ["selection_task:" + str(state["token"])]
+        if selected:
+            keys.append("selection_analysis_state")
+        for key in keys:
+            connection.execute(
+                "INSERT INTO meta(key,value) VALUES(?,?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (key, encoded),
+            )
+        connection.commit()
+
+
+def _restored(service: Any, root: Path, payload: str) -> dict[str, Any]:
+    state = json.loads(payload)
+    state.update(
+        root=root, paths=tuple(state.get("paths", ())), asset_ids=tuple(state.get("asset_ids", ()))
+    )
+    jobs = {j.job_id: j for j in service.list_jobs(root, limit=1000)}
+    job = jobs.get(state.get("job_id"))
+    if state.get("stage") not in (
+        "추천 구간 준비 완료",
+        "부분 완료 · 확인 필요",
+        "분석 확인 필요",
+        "취소됨",
+        "자막 변경 · 갱신 필요",
+    ) and (job is None or job.status not in ("queued", "running")):
+        state["stage"] = (
+            "취소됨" if job and job.status == "cancelled" else "중단 · 재시도 승인 필요"
+        )
+    return state
+
+
+def load_state(service: Any, root: Path) -> dict[str, Any]:
+    with service._workspace(root).connect() as connection:
+        row = connection.execute(
+            "SELECT value FROM meta WHERE key='selection_analysis_state'"
+        ).fetchone()
+    return _restored(service, root, row[0]) if row else {}
+
+
+def load_states(service: Any, root: Path) -> tuple[dict[str, Any], ...]:
+    with service._workspace(root).connect() as connection:
+        rows = connection.execute(
+            "SELECT value FROM meta WHERE key LIKE 'selection_task:%' ORDER BY rowid"
+        ).fetchall()
+    return tuple(_restored(service, root, row[0]) for row in rows)
+
+
+def completion(service: Any, root: Path, revision_id: str) -> str:
+    revision = next(
+        r
+        for r in AnalysisStore(service._workspace(root)).list_revisions()
+        if r.revision_id == revision_id
+    )
+    if revision.status == "complete":
+        return "추천 구간 준비 완료"
+    return "분석 확인 필요" if revision.status == "failed" else "부분 완료 · 확인 필요"
+
+
+def completion_error(service: Any, root: Path, revision_id: str) -> str | None:
+    errors = []
+    for row in AnalysisStore(service._workspace(root)).list_source_results(revision_id):
+        if row.error:
+            errors.append(row.error)
+        if row.document_path:
+            try:
+                document = json.loads((root / row.document_path).read_text(encoding="utf-8"))
+                errors.extend(
+                    a["defect"] for a in document.get("annotations", []) if a.get("defect")
+                )
+                errors.extend(
+                    c["failure"]
+                    for c in document.get("asr", {}).get("chunks", [])
+                    if c.get("failure")
+                )
+            except (OSError, ValueError):
+                pass
+    return " · ".join(dict.fromkeys(errors))[:600] or None

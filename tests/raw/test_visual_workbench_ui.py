@@ -528,7 +528,7 @@ checkpoints.push({ case: 'wire-render',
     env.panel.innerHTML.includes('01-landscape.mp4'),
   panelHuman: env.panel.innerHTML.includes('빈 실행(미확인)') &&
     env.panel.innerHTML.includes('사용 권고'),
-  panelTags: env.panel.innerHTML.includes('분석 태그') &&
+  panelTags: env.panel.innerHTML.includes('분석 근거') &&
     env.panel.innerHTML.includes('실내'),
   provenanceInDetails: env.panel.innerHTML.includes('G3') &&
     env.panel.innerHTML.includes('<details'),
@@ -2439,7 +2439,16 @@ def test_visual_server_functions_bind_client_revision(tmp_path: Path) -> None:
     _, workbench = server.visual_workbench_render(root)
     model = _model_of(workbench)
     fns = {fn.__name__: fn for fn in server._visual_server_functions()}
-    assert list(fns) == ["vl_refresh", "vl_prepare", "vl_propose", "vl_apply", "vl_replan"]
+    assert list(fns) == [
+        "vl_refresh",
+        "vl_prepare",
+        "vl_propose",
+        "vl_apply",
+        "vl_replan",
+        "vl_select_source",
+        "vl_source_caption",
+        "vl_relink_original",
+    ]
     signature = model["signature"]
     base = model["basePlanId"]
     first = model["cards"][0]
@@ -2798,7 +2807,7 @@ def test_visual_replan_and_epoch_distinct_across_switches(tmp_path: Path) -> Non
     b_workbench = server.visual_workbench_render(server.workspace_root())[1]
     assert "data-vl-empty" in b_workbench  # B에는 검토 리비전이 없다 — 빈 성공 아님
     reopened = server.open_workspace_view(str(root))
-    a_epoch = _model_of(reopened[-2])["epoch"]
+    a_epoch = _model_of(reopened[-5])["epoch"]  # 영상 작업대 본문(-2는 출처 표시 칸)
     again_epoch = _model_of(server.visual_workbench_render(root)[1])["epoch"]
     assert len({first_epoch, a_epoch, again_epoch}) == 3  # 매 그림마다 고유
     assert server.current_signature() == signature_before  # 같은 프로젝트 재오픈
@@ -3232,16 +3241,20 @@ def test_stage_layout_declared_dom_and_css() -> None:
         assert f'id="{anchor_id}"' in workbench, anchor_id
     assert workbench.index("vl-thumbs") < workbench.index("vl-panel")
     css = ui_facade.WORKBENCH_CSS
-    assert 'grid-template-areas: "thumbs player panel" "foot foot foot"' in css
+    assert (
+        'grid-template-areas: "thumbs player panel" "timeline timeline timeline" "foot foot foot"'
+        in css
+    )
     assert "#vl-thumbs { grid-area: thumbs; }" in css
-    assert "#visual-player { grid-area: player; }" in css
-    assert "#vl-panel { grid-area: panel; }" in css
+    assert "#visual-preview { grid-area: player;" in css
+    assert "#visual-timeline { grid-area:timeline;" in css
+    assert "#vl-panel { grid-area: panel; max-height:" in css
     assert "#visual-footnote" not in css and "#vl-footnote { grid-area: foot; }" in css
     assert "#visual-stage .vl-stage-cell { display: contents; }" in css
     assert "#visual-workbench:not([data-vl-empty]) { display: contents; }" in css
     # 모바일(≤860px) — 격자 영역 순서가 재생기를 맨 먼저 보낸다.
     mobile = css.index("@media (max-width: 860px)")
-    assert css.index('"player" "thumbs" "panel" "foot"', mobile) > mobile
+    assert css.index('"player" "thumbs" "panel" "timeline" "foot"', mobile) > mobile
     assert "grid-template-columns: minmax(0, 1fr)" in css[mobile:]
     # 무채색은 테마 토큰 — 본점(강조) 색은 그대로 하나다.
     for token in (
@@ -3695,7 +3708,7 @@ def test_visual_token_lifetime_rejects_old_aba(tmp_path: Path) -> None:
     # A→B→A — 서명은 같아도 토큰은 다시 파진다.
     server.create_workspace_view("B", str(tmp_path / "ws-b"))
     reopened = server.open_workspace_view(str(root))
-    model_a2 = _model_of(reopened[-2])
+    model_a2 = _model_of(reopened[-5])  # 영상 작업대 본문(뒤에 경로 표시 칸 세 개가 붙는다)
     assert model_a2["signature"] == model["signature"]  # 결정적 서명 — 같다
     assert model_a2["token"] != token_a1  # 수명 토큰 — 다르다
 
@@ -3868,8 +3881,10 @@ def test_blocks_wire_workbench_outputs(tmp_path: Path, local_socket: None) -> No
     assert server._signature_state in server._load_outputs()
     values = server.workspace_view_values()
     assert len(values) == len(outputs)
-    assert 'id="visual-workbench"' in values[-2]
-    assert 'id="caption-workbench"' in values[-1]
+    # 보기 꼬리: …·영상 작업대 본문(-5)·자막 작업대 본문(-4)·경로 표시 세 칸(-3~-1).
+    assert 'id="visual-workbench"' in values[-5]
+    assert 'id="caption-workbench"' in values[-4]
+    assert values[-2] == "" and values[-1] == ""  # 일반 작업공간 — 출처·최종 영상 표시는 비다
     # 3단 무대 — 껍데기·본문 두 구성요소가 같은 `#visual-stage` Row 안에 있고
     # 각자 vl-stage-cell 껍데기 계약을 단다(F1a: display:contents 대상).
     player_block = server._visual_player_block
@@ -3898,7 +3913,16 @@ def test_blocks_wire_workbench_outputs(tmp_path: Path, local_socket: None) -> No
     # 서버 함수가 구성요소에 실제로 붙어 있다(공개 server_functions 경계).
     assert server._visual_workbench_block.server_fns
     names = [fn.__name__ for fn in server._visual_workbench_block.server_fns]
-    assert names == ["vl_refresh", "vl_prepare", "vl_propose", "vl_apply", "vl_replan"]
+    assert names == [
+        "vl_refresh",
+        "vl_prepare",
+        "vl_propose",
+        "vl_apply",
+        "vl_replan",
+        "vl_select_source",
+        "vl_source_caption",
+        "vl_relink_original",
+    ]
     cap_names = [fn.__name__ for fn in server._caption_workbench_block.server_fns]
     assert cap_names == ["cap_save", "cap_confirm"]
     # 고급(기존) 패널 문맥 상태 — 네 gr.State가 만들어지고 실제 배선이 문맥

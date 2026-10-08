@@ -32,6 +32,7 @@ import gradio as gr  # noqa: E402
 from fastapi import FastAPI, Request  # noqa: E402
 from fastapi.responses import JSONResponse, Response, StreamingResponse  # noqa: E402
 
+from ui import chooser as ui_chooser  # noqa: E402
 from ui import ui_facade  # noqa: E402
 from vlogsrt.project.raw import service as raw_service  # noqa: E402
 
@@ -139,9 +140,62 @@ CSS = (
 #exec-log textarea { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
 #folder-listing { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
 footer { display: none !important; }
+.gradio-container { background:#202124!important; color:#f1f3f4!important;
+ --body-background-fill:#202124; --block-background-fill:#292b2f;
+ --body-text-color:#f1f3f4; --body-text-color-subdued:#b6bec6;
+ --block-border-color:#41464c; --border-color-primary:#555e66;
+ --button-secondary-background-fill:#343a40; --button-secondary-text-color:#f1f3f4;
+ font-family:-apple-system,BlinkMacSystemFont,"Apple SD Gothic Neo",sans-serif; }
+ .gradio-container input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
+ .gradio-container textarea, .gradio-container select {
+ background:#30343a!important; color:#f1f3f4!important; border-color:#555e66!important; }
+.gradio-container input::placeholder, .gradio-container textarea::placeholder {
+ color:#aeb9c4!important; }
+.gradio-container .label-wrap, .gradio-container .label-wrap span { color:#e4e9ed!important; }
+.gradio-container button.primary { background:#20b9ae!important; color:#062e2b!important; }
+.vl-thumb-sel,.vl-int-sel { outline:2px solid #36d5c6!important; }
+.vl-badge-warn { color:#ffbd8c!important; }
+/* Gradio light-theme toasts keep their own pale background; pair both colors. */
+.gradio-container .toast-body {
+ background:#fff!important; color:#17212b!important; border:1px solid #74818b!important;
+}
+.gradio-container .toast-body * { color:#17212b!important; }
+.gradio-container .toast-body.error { border-left:4px solid #b42318!important; }
+#quick-status { background:#292b2f; color:#f1f3f4; border:1px solid #555e66;
+ padding:10px 12px; border-radius:6px; }
+#quick-status p, #quick-status strong { color:#f1f3f4!important; }
+#quick-api-panel { border:1px solid #74818b; }
+
+
 """
     + ui_facade.WORKBENCH_CSS
 )
+
+
+WorkspaceView = tuple[
+    str,  # 작업공간 머리글
+    str | None,  # 서명(선택 검증 토큰)
+    gr.Dropdown,  # 등록 미디어
+    gr.Dropdown,  # 진행 중 작업
+    str,  # 작업 로그
+    str,  # 설정 요약
+    str,  # 가져오기 패널
+    gr.Dropdown,  # 재시도할 가져오기 작업
+    str,  # 분할 패널
+    gr.Dropdown,  # 재시도할 추출 작업
+    str,  # package 패널
+    gr.Dropdown,  # 게시된 조각
+    str,  # 분석 패널
+    gr.Dropdown,  # 재시도·재개 대상 분석 작업
+    gr.CheckboxGroup,  # 분석 원본 선택
+    str,  # 영상 작업대 껍데기
+    str,  # 영상 작업대 본문
+    str,  # 자막 작업대 본문
+    str,  # 작업공간 경로 표시(읽기전용 — 선택기로만 정해진다)
+    str,  # 원본 폴더 표시(읽기전용 — 전환마다 비운다: 낡은 출처가 남지 않는다)
+    str,  # 최종 영상 경로 표시(읽기전용 — 전환마다 비운다)
+]
+"""작업공간 만들기·열기 이벤트가 한 번에 내리는 전체 보기 — `_selection_outputs`와 짝이다."""
 
 
 def default_state_path() -> Path:
@@ -161,18 +215,22 @@ class RawWorkspaceUi:
         live: raw_service.LiveAnalysisTransport | None = None,
         finder_opener: Callable[[Path], None] | None = None,
         caption_providers: Callable[[], tuple[object, object]] | None = None,
+        path_chooser: ui_chooser.PathChooser | None = None,
     ) -> None:
         self.port = port
         self.raw = raw_service.RawWorkspaceService()
         self.state_path = state_path if state_path is not None else default_state_path()
         self._inspector = inspector  # None이면 서비스 기본(ffprobe). 시험은 가짜 조사자를 넣는다.
-        # 실제 호출 재료는 두 길이다. 사람이 주입한 transport(시험·루트 가짜
-        # 브라우저)가 우선이고, 없으면 **승인된 행동에서 늦게 만드는** 생산
-        # transport(브라우저_runtime)가 그 갭을 채운다. 생산 쪽 키는 **서버를
-        # 띄운 환경**에서만 온다 — 게이트가 `.env`를 적재하기 전에 여기서 한 번
-        # 찍어 둔다(이때 없던 키는 이후 어떤 적재로도 문을 열지 못한다).
+        # 네이티브 경로 선택기 — 화면은 직접 입력 경로를 받지 않는다. 시험은 가짜를 넣는다.
+        self._path_chooser = path_chooser or ui_chooser.applescript_path_chooser
+        # 네이티브 대화상자는 한 번에 하나 — 서버 자물쇠가 보장한다(화면 단추의 공유
+        # 동시성 묶음과 짝이다. 종류가 달라도 대화상자가 겹치지 않는다).
+        self._chooser_lock = threading.Lock()
+        # Explicit test transports remain injectable. Normal startup loads .env
+        # through the app loader and keeps credentials only in process memory.
+        # Client construction and paid requests still require the selected-scope approval.
         self._live_transport = live
-        self._startup_credentials = raw_service.capture_environment_credentials()
+        self._startup_credentials = raw_service.capture_browser_credentials()
         # 브라우저 승인 기록 — 작업공간 서명에 묶여 산다(작업공간을 바꾸면 지운다).
         self._asr_approval_record: _AsrApprovalRecord | None = None
         self._semantic_approval_record: _SemanticApprovalRecord | None = None
@@ -200,6 +258,9 @@ class RawWorkspaceUi:
         # 마지막 확정 내보내기 자리 — Finder 열기·경로 복사·정리 뒤 재검증의 대상.
         self._last_export_path: str | None = None
         self._last_export_dir: str | None = None
+        self._capcut_xml: dict[str, str] = {}
+        self._capcut_quote_phase: dict[str, str] = {}
+        self._capcut_render_key: tuple | None = None
         # 자막 작업대의 확정 조건 표시 — 검토 상태를 다시 읽을 때마다 갱신한다.
         self._caption_warnings_open: int = 0
         self._caption_unplaced_open: int = 0
@@ -209,12 +270,28 @@ class RawWorkspaceUi:
         self._caption_providers = caption_providers
         self._root: Path | None = None
         self._selection_lock = threading.Lock()
+        self._quick: dict[str, Any] = {}
+        self._quick_tasks: dict[str, dict[str, Any]] = {}
+        self._retired_quick_tokens: set[str] = set()
+        self._analysis_slot = threading.Semaphore(1)
+        self._analysis_queue: list[str] = []
+        self._library_quotes: dict[Path, Any] = {}
+        self._library_cached_ids: dict[Path, set[str]] = {}
+        self._review_publish_lock = threading.Lock()
+        self._selection_auto_approval: Callable[[Any], bool] | None = None
         self._last_listing: raw_service.FolderListing | None = None
         # 가져오기 화면 상태 — 조사 제안과 확정은 **현재 작업공간 서명에 묶여**
         # 산다. 작업공간을 바꾸는 순간 함께 지운다(새 상태로 시작한다).
         self._ingest_proposal: raw_service.IngestProposal | None = None
         self._ingest_signature: str | None = None
         self._ingest_confirmation: raw_service.IngestConfirmation | None = None
+        # FCP 라이브러리 가져오기 상태 — 열린 라이브러리·논리 클립 조사·역할 선택.
+        # 일반 SD/폴더 조사와 같은 제안 칸을 쓰되, 라이브러리 사실은 여기 남는다.
+        self._fcp_library: Path | None = None
+        self._fcp_scan: raw_service.FcpLibraryScan | None = None
+        self._fcp_signature: str | None = None
+        self._fcp_error: str | None = None
+        self._fcp_role: str = raw_service.FCP_ROLE_ORIGINAL
         # 화면 구성요소 참조 — 만들어지기 전에는 None(조립은 build_blocks에서 끝난다).
         self._workspace_md: gr.Markdown | None = None
         self._settings_md: gr.Markdown | None = None
@@ -236,6 +313,18 @@ class RawWorkspaceUi:
         self._review_md: gr.Markdown | None = None
         self._export_md: gr.Markdown | None = None
         self._export_path_box: gr.Textbox | None = None
+        # 읽기전용 경로 표시 칸들 — 사람이 직접 적는 경로 입력은 없다(선택기만).
+        self._ws_path_box: gr.Textbox | None = None
+        self._source_box: gr.Textbox | None = None
+        self._caption_path_box: gr.Textbox | None = None
+        self._project_name_box: gr.Textbox | None = None
+        self._fcp_role_dd: gr.Dropdown | None = None
+        # 선택기·조사 단추 참조 — 배선 증명은 실제 Blocks 의존성(app.config)이 한다.
+        self._open_button: gr.Button | None = None
+        self._create_button: gr.Button | None = None
+        self._browse_button: gr.Button | None = None
+        self._scan_button: gr.Button | None = None
+        self._caption_pick_button: gr.Button | None = None
         self._caption_md: gr.Markdown | None = None
         self._caption_player_html: gr.HTML | None = None
         self._caption_table_html: gr.HTML | None = None
@@ -283,9 +372,18 @@ class RawWorkspaceUi:
         root = Path(status.workspace_root)
         self._set_root(root)
         recovered = self.raw.recover_interrupted_jobs(root)
+        self._quick = self.raw.load_selection_state(root)
+        if (
+            self._quick.get("asset_ids")
+            and "VLOGSRT_OFFLINE" in str(self._quick.get("error", ""))
+            and raw_service.browser_network_mode() == "online"
+        ):
+            # Rebuild the failed selection's local quote, never its paid phase.
+            self._start_quick(root, (), asset_ids=tuple(self._quick["asset_ids"]), retry=True)
         note = f"작업공간 {status.name}({status.workspace_root})을 다시 열었다."
         if recovered:
             note += f" 서버 종료로 중단된 작업 {recovered}건을 재개 가능 상태로 돌렸다."
+        self._prepare_library_quote(root)
         return note
 
     def _read_state(self) -> dict[str, str]:
@@ -312,6 +410,10 @@ class RawWorkspaceUi:
             self._ingest_proposal = None
             self._ingest_signature = None
             self._ingest_confirmation = None
+            self._fcp_library = None
+            self._fcp_scan = None
+            self._fcp_signature = None
+            self._fcp_error = None
             self._asr_approval_record = None
             self._semantic_approval_record = None
             self._clear_screen_state()
@@ -322,11 +424,17 @@ class RawWorkspaceUi:
             self._ingest_proposal = None
             self._ingest_signature = None
             self._ingest_confirmation = None
+            self._fcp_library = None
+            self._fcp_scan = None
+            self._fcp_signature = None
+            self._fcp_error = None
             self._asr_approval_record = None
             self._semantic_approval_record = None
             self._clear_screen_state()
         if root is not None:
             self._write_state(root)
+            self._quick = self.raw.load_selection_state(root)
+            self._prepare_library_quote(root)
 
     def _clear_screen_state(self) -> None:
         """검토·자막·내보내기 화면 상태 초기화 — 작업공간 전환은 새 상태로 시작한다.
@@ -336,6 +444,7 @@ class RawWorkspaceUi:
         토큰은 무작위라 옛 화면의 편집·제안·준비 사건이 되살아 적용되지 않는다.
         보통의 새로고침·편집 재그림은 이 메서드를 거치지 않아 토큰이 그대로다.
         """
+        self._quick = {}
         self._review_revision_id = None
         self._review_base_plan_id = None
         self._review_signature = None
@@ -600,7 +709,10 @@ class RawWorkspaceUi:
     @staticmethod
     def _listing_markdown(listing: raw_service.FolderListing | None) -> str:
         if listing is None:
-            return "폴더 경로를 넣고 **폴더 찾아보기**를 누르면 한 층만 나열한다(내용 읽지 않음)."
+            return (
+                "**폴더 찾아보기(선택기)** 또는 마운트된 장치 후보로 고르면 한 층만 나열한다"
+                "(내용 읽지 않음)."
+            )
         lines = [f"**{listing.path}**", ""]
         if listing.parent:
             lines.append(f"· 상위 `{listing.parent}`")
@@ -613,122 +725,1062 @@ class RawWorkspaceUi:
 
     # ── 화면 1 — 프로젝트 · 가져오기 ───────────────────────────
 
-    def _project_tab(self) -> tuple[gr.Button, gr.Button, gr.Textbox, gr.Textbox]:
-        """1번 탭 조립 — 전환 단추·입력 칸을 돌려준다(배선은 build_blocks에서)."""
-        with gr.Tab("1 · 프로젝트 · 가져오기"):
-            self._workspace_md = gr.Markdown(self.workspace_markdown())
+    def _project_tab(self) -> tuple[gr.Button, gr.Button]:
+        """1번 탭 조립 — 전환 단추를 돌려준다(배선은 build_blocks에서).
+
+        경로는 **선택기로만** 정해진다 — 경로 칸은 전부 읽기전용 표시다. 사람이
+        직접 적는 경로 입력은 이 화면에 없다(브라우저는 경로를 몰라도 된다).
+        """
+        with gr.Accordion(
+            "프로젝트 · 라이브러리 가져오기", open=False, elem_id="project-tools"
+        ) as self._project_tools:
+            self._workspace_md = gr.Markdown(self.workspace_markdown(), visible=False)
             with gr.Row():
-                ws_path_box = gr.Textbox(
-                    label="작업공간 경로",
-                    info="기존 작업공간 폴더를 가리킵니다. 업로드하지 않습니다.",
-                    placeholder="/Volumes/WORK/VlogProject",
+                self._ws_path_box = gr.Textbox(
+                    label="작업공간 경로(표시)",
+                    info="선택기로 고른 자리를 보여줄 뿐 직접 적을 수 없다.",
+                    placeholder="아래 단추로 폴더 또는 Final Cut 라이브러리를 고르세요",
                     scale=6,
+                    interactive=False,
                 )
-                open_button = gr.Button("기존 프로젝트 열기", scale=1)
+                open_button = gr.Button("프로젝트 열기", scale=2)
             with gr.Row():
-                new_name_box = gr.Textbox(
+                self._project_name_box = gr.Textbox(
                     label="새 프로젝트 이름",
                     placeholder="제주 3일 브이로그",
                     scale=6,
                 )
-                create_button = gr.Button("새 프로젝트 만들기", variant="primary", scale=1)
-
-            gr.Markdown("---")
+                create_button = gr.Button("새 프로젝트", scale=2)
+                self._fcp_primary_button = gr.Button("Final Cut 라이브러리에서 가져오기", scale=3)
             with gr.Row():
-                source_box = gr.Textbox(
-                    label="원본 폴더(SD 카드)",
-                    info="가져올 원본이 있는 폴더. 아래 조사 → 원본 순서 확인 → 복사 및 검증이"
-                    " 이 탭에서 바로 이어진다.",
-                    placeholder="/Volumes/SDCARD/DCIM",
+                self._direct_project_path = gr.Textbox(
+                    label="선택 창이 안 뜨면 경로 붙여넣기",
+                    placeholder="/프로젝트/폴더 또는 /라이브러리.fcpbundle",
                     scale=6,
                 )
-                browse_button = gr.Button("폴더 찾아보기", scale=1)
-            self._devices_dd = gr.Dropdown(
-                choices=self.device_choices(),
-                label="마운트된 장치 후보",
-                info="후보를 보여줄 뿐, 누르기 전에는 아무 것도 조사하지 않는다.",
-                interactive=True,
+                self._direct_project_open = gr.Button("경로로 열기", scale=2)
+            self._fcp_originals_group = gr.CheckboxGroup(
+                label="가져올 오리지널 영상", choices=[], interactive=True, visible=False
             )
-            self._listing_md = gr.Markdown(self._listing_markdown(None), elem_id="folder-listing")
+            self._fcp_primary_info = gr.Markdown(visible=False)
+            self._fcp_primary_import = gr.Button(
+                "선택한 오리지널 연결", visible=False, variant="primary"
+            )
 
-            def on_browse(path_text: str) -> tuple[str, str]:
-                try:
-                    listing = raw_service.browse_folder(path_text or "")
-                except raw_service.BrowseNotAllowedError as error:
-                    raise gr.Error(str(error)) from error
-                self._last_listing = listing
-                return self._listing_markdown(listing), listing.path
-
-            def on_device(device_path: str) -> tuple[str, str]:
-                if not device_path:
-                    raise gr.Error("장치 후보를 하나 고르세요.")
-                return on_browse(device_path)
-
-            def on_devices_refresh() -> gr.Dropdown:
-                return gr.Dropdown(choices=self.device_choices())
-
-            browse_button.click(on_browse, source_box, [self._listing_md, source_box])
-            self._devices_dd.select(on_device, self._devices_dd, [self._listing_md, source_box])
-
-            # ── 가져오기 — 조사 → 순서 확인(명시적) → 복사·검증 → 새로고침/재시도 ──
-            gr.Markdown("---")
-            with gr.Row():
-                scan_button = gr.Button("조사 (가져올 영상 확인)", scale=2)
-                confirm_button = gr.Button("원본 순서 확인", variant="primary", scale=2)
-                copy_button = gr.Button("복사 및 검증", scale=2)
-                refresh_ingest = gr.Button("진행 상태 새로고침", scale=2)
-            with gr.Row():
-                self._ingest_jobs_dd = gr.Dropdown(
-                    choices=self.resumable_ingest_choices(),
-                    label="재시도할 가져오기 작업",
+            with gr.Accordion("폴더 · SD · Final Cut 가져오기", open=False):
+                gr.Markdown("---")
+                with gr.Row():
+                    self._source_box = gr.Textbox(
+                        label="원본 폴더(SD 카드) — 선택기 표시",
+                        info="가져올 원본이 있는 폴더. 선택기로 고른 뒤 조사 → 원본 순서 확인 →"
+                        " 복사 및 검증이 이 탭에서 바로 이어진다.",
+                        placeholder="폴더 찾아보기 또는 마운트된 장치 후보로 고르세요",
+                        scale=6,
+                        interactive=False,
+                    )
+                    browse_button = gr.Button("폴더 찾아보기(선택기)", scale=2)
+                self._devices_dd = gr.Dropdown(
+                    choices=self.device_choices(),
+                    label="마운트된 장치 후보",
+                    info="후보를 보여줄 뿐, 누르기 전에는 아무 것도 조사하지 않는다.",
                     interactive=True,
-                    scale=6,
                 )
-                retry_button = gr.Button("재시도", scale=1)
-            self._ingest_md = gr.Markdown(self._ingest_state_markdown(self._snapshot_root()))
-            scan_button.click(
-                self.ingest_scan_view, [self._signature_state, source_box], self._ingest_md
-            )
-            confirm_button.click(self.ingest_confirm_view, self._signature_state, self._ingest_md)
-            copy_button.click(
-                self.ingest_copy_view,
-                self._signature_state,
-                [self._ingest_md, self._ingest_jobs_dd],
-            )
-            refresh_ingest.click(
-                self.ingest_refresh_view,
-                self._signature_state,
-                [self._workspace_md, self._ingest_md, self._ingest_jobs_dd],
-            )
-            retry_button.click(
-                self.ingest_retry_view,
-                [self._signature_state, self._ingest_jobs_dd],
-                self._ingest_md,
-            )
+                self._listing_md = gr.Markdown(
+                    self._listing_markdown(None), elem_id="folder-listing"
+                )
 
-            # ── 전체 원본 순서 — 가져온 배치를 넘어 사람이 명시적으로 확정 ──
-            with gr.Row():
-                global_order_box = gr.Textbox(
-                    label="전체 원본 순서(선택)",
-                    info="비우면 제안(배치 순서·배치 안 확정 순번) 그대로다. "
-                    "직접 정하려면 ready 원본의 자산 ID를 줄/쉼표로 모두 나열한다.",
-                    placeholder="source_…, source_… (모든 ready 원본)",
-                    scale=6,
+                def on_browse(path_text: str) -> tuple[str, str]:
+                    try:
+                        listing = raw_service.browse_folder(path_text or "")
+                    except raw_service.BrowseNotAllowedError as error:
+                        raise gr.Error(str(error)) from error
+                    self._last_listing = listing
+                    return self._listing_markdown(listing), listing.path
+
+                def on_device(device_path: str) -> tuple[str, str]:
+                    if not device_path:
+                        raise gr.Error("장치 후보를 하나 고르세요.")
+                    return on_browse(device_path)
+
+                self._browse_button = browse_button
+                browse_button.click(
+                    self.source_folder_chooser_view,
+                    None,
+                    [self._listing_md, self._source_box],
+                    api_name=False,
+                    concurrency_limit=1,
+                    concurrency_id=ui_chooser.CHOOSER_CONCURRENCY_ID,
                 )
-                global_confirm_button = gr.Button("전체 원본 순서 확정", scale=1)
-            global_confirm_button.click(
-                self.ingest_global_confirm_view,
-                [self._signature_state, global_order_box],
-                self._ingest_md,
-            )
-        return open_button, create_button, ws_path_box, new_name_box
+                self._devices_dd.select(
+                    on_device, self._devices_dd, [self._listing_md, self._source_box]
+                )
+
+                # ── 가져오기 — 조사 → 순서 확인(명시적) → 복사·검증 → 새로고침/재시도 ──
+                gr.Markdown("---")
+                with gr.Row():
+                    scan_button = gr.Button("조사 (가져올 영상 확인)", scale=2)
+                    confirm_button = gr.Button("원본 순서 확인", variant="primary", scale=2)
+                    copy_button = gr.Button("복사 및 검증", scale=2)
+                    refresh_ingest = gr.Button("진행 상태 새로고침", scale=2)
+                self._fcp_role_dd = gr.Dropdown(
+                    choices=[
+                        ("원본(Original Media)", raw_service.FCP_ROLE_ORIGINAL),
+                        ("프록시(Proxy Media)", raw_service.FCP_ROLE_PROXY),
+                    ],
+                    value=raw_service.FCP_ROLE_ORIGINAL,
+                    label="FCP 원본 역할 — 원본·프록시가 같은 클립이면 시간순 작업에는 이 역할만",
+                    info="다른 역할 파일도 라이브러리에 그대로 남는다(읽기만 한다). 바꾸고 다시"
+                    " 조사하면 제안이 해당 역할로 다시 만들어진다.",
+                    interactive=True,
+                )
+                with gr.Row():
+                    self._ingest_jobs_dd = gr.Dropdown(
+                        choices=self.resumable_ingest_choices(),
+                        label="재시도할 가져오기 작업",
+                        interactive=True,
+                        scale=6,
+                    )
+                    retry_button = gr.Button("재시도", scale=1)
+                self._ingest_md = gr.Markdown(self._ingest_state_markdown(self._snapshot_root()))
+                self._scan_button = scan_button
+                scan_button.click(
+                    self.ingest_scan_view,
+                    [self._signature_state, self._source_box, self._fcp_role_dd],
+                    self._ingest_md,
+                )
+                confirm_button.click(
+                    self.ingest_confirm_view, self._signature_state, self._ingest_md
+                )
+                copy_button.click(
+                    self.ingest_copy_view,
+                    self._signature_state,
+                    [self._ingest_md, self._ingest_jobs_dd],
+                )
+                refresh_ingest.click(
+                    self.ingest_refresh_view,
+                    self._signature_state,
+                    [self._workspace_md, self._ingest_md, self._ingest_jobs_dd],
+                )
+                retry_button.click(
+                    self.ingest_retry_view,
+                    [self._signature_state, self._ingest_jobs_dd],
+                    self._ingest_md,
+                )
+
+                # ── 전체 원본 순서 — 가져온 배치를 넘어 사람이 명시적으로 확정 ──
+                with gr.Row():
+                    global_order_box = gr.Textbox(
+                        label="전체 원본 순서(선택)",
+                        info="비우면 제안(배치 순서·배치 안 확정 순번) 그대로다. "
+                        "직접 정하려면 ready 원본의 자산 ID를 줄/쉼표로 모두 나열한다.",
+                        placeholder="source_…, source_… (모든 ready 원본)",
+                        scale=6,
+                    )
+                    global_confirm_button = gr.Button("전체 원본 순서 확정", scale=1)
+                global_confirm_button.click(
+                    self.ingest_global_confirm_view,
+                    [self._signature_state, global_order_box],
+                    self._ingest_md,
+                )
+        # 선택기 단추 참조 — 배선 증명은 실제 Blocks 의존성으로 한다(별도 장부 없음).
+        self._open_button = open_button
+        self._create_button = create_button
+        return open_button, create_button
 
     # ── 화면 2 — 분석 · 조각 검토 ──────────────────────────────
+
+    def _capcut_result(self, root: Path, message: str) -> tuple[str, str, str]:
+        self._refresh_review_panel_state(root)
+        return message, *self.visual_workbench_render(root)
+
+    def capcut_fcp_panel_view(self) -> tuple:
+        root = self._snapshot_root()
+        if self._fcp_scan is None and root is not None:
+            library = self.raw.remembered_fcp_library(root)
+            if library is not None:
+                try:
+                    self._scan_fcp_view(
+                        root, library, raw_service.FCP_ROLE_ORIGINAL, originals_only=False
+                    )
+                except gr.Error as error:
+                    return (
+                        gr.CheckboxGroup(choices=[], value=[], visible=False),
+                        gr.Markdown(f"원본 라이브러리 연결을 확인하세요: {error}", visible=True),
+                        gr.Button(visible=False),
+                    )
+        scan = self._fcp_scan
+        if scan is None or self._fcp_signature != self.current_signature():
+            return (
+                gr.CheckboxGroup(choices=[], value=[], visible=False),
+                gr.Markdown(visible=False),
+                gr.Button(visible=False),
+            )
+        original_paths = {file.media_path for file, _ in scan.selected}
+        choices = [
+            (item.source_relative_path, str(index))
+            for index, item in enumerate(scan.proposal.order)
+            if str(Path(item.source_root) / item.source_relative_path) in original_paths
+        ]
+        message = (
+            f"**{Path(scan.library_root).name}** · 클립 {len(choices)}개 · "
+            "원본·프록시 위치를 함께 연결하고 대응 여부를 검증합니다. 영상은 복사하지 않습니다."
+        )
+        if scan.broken:
+            message += "\n\n확인 필요 · " + "\n\n".join(
+                f"{b.linked_from}: {b.reason}" for b in scan.broken
+            )
+        proxy_only = sum(c.original is None for c in scan.clips)
+        if proxy_only:
+            message += f"\n\n프록시 단독 {proxy_only}개 · 검토 가능, 원본 출력 전 재연결 필요."
+        imported = (
+            {
+                str(Path(asset.source_root) / asset.source_relative_path)
+                for asset in self.raw.list_source_assets(root)
+                if asset.status == "ready"
+            }
+            if root
+            else set()
+        )
+        selected = [
+            value
+            for _, value in choices
+            if not imported
+            or str(
+                Path(scan.proposal.order[int(value)].source_root)
+                / scan.proposal.order[int(value)].source_relative_path
+            )
+            in imported
+        ]
+        return (
+            gr.CheckboxGroup(choices=choices, value=selected, visible=True),
+            gr.Markdown(message, visible=True),
+            gr.Button(visible=bool(choices)),
+        )
+
+    def direct_project_open_view(self, path_text: str) -> tuple:
+        path = Path((path_text or "").strip().strip("\"'")).expanduser()
+        if not path.is_absolute():
+            raise gr.Error("프로젝트 폴더 또는 .fcpbundle의 전체 경로를 붙여넣으세요")
+        if raw_service.is_fcp_library(path):
+            values = self.open_fcp_library_view(path, originals_only=False)
+        else:
+            values = self.open_workspace_view(str(path))
+        return (*values, *self.capcut_fcp_panel_view())
+
+    def capcut_fcp_choose_view(self) -> tuple:
+        chosen = self._pick_path(ui_chooser.WORKSPACE_KIND)
+        if chosen is None:
+            raise gr.Error("라이브러리 선택을 취소했습니다")
+        library = Path(chosen).expanduser()
+        if not raw_service.is_fcp_library(library):
+            raise gr.Error("Final Cut 라이브러리(.fcpbundle)를 선택하세요")
+        values = self.open_fcp_library_view(library, originals_only=False)
+        if self._fcp_scan is not None and self._fcp_scan.proposal.order:
+            self.capcut_fcp_import_view(
+                self.current_signature(),
+                [str(i) for i in range(len(self._fcp_scan.proposal.order))],
+            )
+        return (*values, *self.capcut_fcp_panel_view())
+
+    def _cancel_quick(self) -> None:
+        previous = self._quick
+        for key in ("job_id", "preview_job_id", "review_job_id"):
+            if previous.get(key) and previous.get("root"):
+                with contextlib.suppress(raw_service.RawWorkspaceError):
+                    self.raw.cancel_job(previous["root"], previous[key])
+
+    def _load_quick_tasks(self, root: Path) -> None:
+        for state in self.raw.load_selection_states(root):
+            if (
+                state.get("token") not in self._quick_tasks
+                and state.get("token") not in self._retired_quick_tokens
+            ):
+                self._quick_tasks[state["token"]] = state
+        if self._quick.get("root") == root and self._quick.get("token"):
+            self._quick_tasks.setdefault(self._quick["token"], self._quick)
+
+    def _task_for(
+        self, root: Path, asset_ids: tuple[str, ...], paths: tuple[str, ...] = ()
+    ) -> dict | None:
+        self._load_quick_tasks(root)
+        for state in reversed(list(self._quick_tasks.values())):
+            if state.get("root") == root and (
+                asset_ids
+                and set(asset_ids) <= set(state.get("asset_ids", ()))
+                or not asset_ids
+                and paths
+                and paths == tuple(state.get("paths", ()))
+            ):
+                return state
+        return None
+
+    def _activate_quick(self, state: dict, source_id: str | None = None) -> None:
+        with self._selection_lock:
+            self._quick = state
+            self._quick_tasks[state["token"]] = state
+            if source_id:
+                state["view_source_id"] = source_id
+            self._visual_lifetime_token = uuid.uuid4().hex
+            self._capcut_render_key = None
+            self.raw.save_selection_state(state["root"], state)
+
+    def _quick_update(self, expected_token: str, **values: Any) -> bool:
+        with self._selection_lock:
+            state = self._quick_tasks.get(expected_token)
+            if state is None and self._quick.get("token") == expected_token:
+                state = self._quick
+                self._quick_tasks[expected_token] = state
+            if state is None or state.get("token") != expected_token:
+                return False
+            state.update(values)
+            if state["token"] != expected_token:
+                self._retired_quick_tokens.add(expected_token)
+                self._quick_tasks.pop(expected_token, None)
+                self._quick_tasks[state["token"]] = state
+            if state.get("root"):
+                self.raw.save_selection_state(
+                    state["root"],
+                    state,
+                    selected=self._quick is state and self._root == state["root"],
+                )
+            return True
+
+    def _quick_assert_current(self, root: Path, token: str, context: Any) -> None:
+        # A task is invalidated only by an explicit cancel/replacement, never navigation.
+        state = self._quick_tasks.get(token)
+        if state is None or state.get("root") != root or state.get("token") != token:
+            self.raw.cancel_job(root, context.job_id)
+        context.check_cancel()
+
+    def _start_quick(
+        self,
+        root: Path,
+        paths: tuple[str, ...],
+        dependency: Any = None,
+        asset_ids: tuple[str, ...] = (),
+        retry: bool = False,
+        approved_quote: Any = None,
+        activate: bool = True,
+    ) -> None:
+        existing = self._task_for(root, asset_ids, paths)
+        if (
+            approved_quote is not None
+            and existing is not None
+            and existing.get("stage")
+            not in ("분석 대기", "분석 시작", "전사·장면 준비", "Luna 추천 구간 분석")
+            and tuple(existing.get("asset_ids", ())) != asset_ids
+        ):
+            existing = None
+        if existing is not None:
+            active = existing.get("stage") in (
+                "영상 준비",
+                "분석 대기",
+                "분석 시작",
+                "전사·장면 준비",
+                "Luna 추천 구간 분석",
+            )
+            if (not retry and approved_quote is None) or active:
+                if not activate:
+                    return
+                self._activate_quick(existing, asset_ids[0] if asset_ids else None)
+                if asset_ids:
+                    self.raw.start_source_preview(root, asset_ids=(asset_ids[0],))
+                if existing.get("revision") and existing.get("stage") in (
+                    "추천 구간 준비 완료",
+                    "부분 완료 · 확인 필요",
+                ):
+                    view_token = self._visual_lifetime_token
+
+                    def show_cached(context: Any) -> None:
+                        with self._review_publish_lock:
+                            if (
+                                view_token == self._visual_lifetime_token
+                                and self._snapshot_root() == root
+                            ):
+                                self.raw.publish_selection_review(
+                                    root, existing["revision"], context
+                                )
+
+                    handle = self.raw.submit_job(root, "selection_review", view_token, show_cached)
+                    self._quick_update(existing["token"], review_job_id=handle.job_id)
+                return
+        token = uuid.uuid4().hex
+        state = {
+            "root": root,
+            "token": token,
+            "paths": paths,
+            "asset_ids": asset_ids,
+            "stage": "영상 준비",
+            "revision": None,
+            "quote": None,
+        }
+        if activate:
+            self._activate_quick(state, asset_ids[0] if asset_ids else None)
+        else:
+            self._quick_tasks[token] = state
+            self.raw.save_selection_state(root, state, selected=False)
+
+        if approved_quote is not None:
+            with self._selection_lock:
+                self._analysis_queue.append(token)
+
+        def prepare(context: Any) -> None:
+            try:
+                if dependency is not None:
+                    self.raw.wait_child_job(root, dependency, context)
+                self._quick_assert_current(root, token, context)
+                self.raw.ensure_source_order(root)
+                ids = asset_ids or self.raw.selected_asset_ids(root, paths)
+                if not ids:
+                    raise raw_service.RawWorkspaceError("선택 영상의 준비가 끝나지 않았습니다")
+                self._quick_update(token, asset_ids=ids)
+                if activate:
+                    preview_id = str(state.get("view_source_id") or ids[0])
+                    preview = self.raw.start_source_preview(root, asset_ids=(preview_id,))
+                    self._quick_update(token, preview_job_id=preview.job_id)
+                cached = self.raw.cached_selection_analysis(root, ids)
+                if cached:
+                    self._quick_update(token, stage="저장된 Luna 결과", revision=cached)
+                    with self._review_publish_lock:
+                        if self._quick.get("token") == token and self._snapshot_root() == root:
+                            self.raw.publish_selection_review(root, cached, context)
+                    self._library_cached_ids.setdefault(root, set()).update(ids)
+                    self._quick_update(token, stage="추천 구간 준비 완료")
+                    return
+                quote = approved_quote or self.raw.selection_quote(root, ids)
+                if set(ids) == set(self._library_ids(root)):
+                    self._library_quotes[root] = quote
+                self._quick_assert_current(root, token, context)
+                self._quick_update(token, quote=quote, stage="승인 대기")
+                if approved_quote is not None or (
+                    self._selection_auto_approval is not None
+                    and self._selection_auto_approval(quote)
+                ):
+                    self._run_quick(root, token, replace(quote, approved=True), context)
+            except Exception as error:
+                self._quick_update(token, stage="분석 확인 필요", error=str(error))
+                raise
+            finally:
+                with self._selection_lock:
+                    if token in self._analysis_queue:
+                        self._analysis_queue.remove(token)
+
+        handle = self.raw.submit_job(root, "selection_analysis", token, prepare)
+        self._quick_update(token, job_id=handle.job_id)
+
+    def _run_quick(self, root: Path, token: str, quote: Any, context: Any) -> None:
+        import time
+
+        self._quick_update(token, stage="분석 대기")
+        with self._selection_lock:
+            if token not in self._analysis_queue:
+                self._analysis_queue.append(token)
+        acquired = False
+        try:
+            while not acquired:
+                self._quick_assert_current(root, token, context)
+                with self._selection_lock:
+                    first = bool(self._analysis_queue) and self._analysis_queue[0] == token
+                if first:
+                    acquired = self._analysis_slot.acquire(blocking=False)
+                if not acquired:
+                    time.sleep(0.05)
+            self._execute_quick(root, token, quote, context)
+        finally:
+            with self._selection_lock:
+                if token in self._analysis_queue:
+                    self._analysis_queue.remove(token)
+            if acquired:
+                self._analysis_slot.release()
+
+    def _execute_quick(self, root: Path, token: str, quote: Any, context: Any) -> None:
+        self._quick_assert_current(root, token, context)
+        transport = self._live_transport_for_action()
+
+        def report(stage: str, revision: str | None) -> None:
+            self._quick_assert_current(root, token, context)
+            self._quick_update(token, stage=stage, revision=revision)
+
+        revision = self.raw.run_selection_analysis(root, quote, transport, context, report)
+        self._quick_assert_current(root, token, context)
+        with self._review_publish_lock:
+            if self._quick.get("token") == token and self._snapshot_root() == root:
+                self.raw.publish_selection_review(root, revision, context)
+        self._quick_assert_current(root, token, context)
+        stage, error = self.raw.selection_completion(root, revision)
+        if stage == "추천 구간 준비 완료":
+            self._library_cached_ids.setdefault(root, set()).update(quote.asset_ids)
+        self._quick_update(token, stage=stage, revision=revision, error=error)
+
+    def _library_ids(self, root: Path) -> tuple[str, ...]:
+        ready = {a.asset_id for a in self.raw.list_source_assets(root) if a.status == "ready"}
+        order = self.raw.latest_global_source_order(root)
+        return tuple(e.asset_id for e in order.entries if e.asset_id in ready) if order else ()
+
+    def _prepare_library_quote(self, root: Path) -> None:
+        ids = self._library_ids(root)
+        if not ids:
+            return
+
+        def prepare(context: Any) -> None:
+            context.check_cancel()
+            quote = self.raw.selection_quote(root, ids)
+            tasks = self._task_views(root)
+            cached = {
+                source_id
+                for source_id in ids
+                if tasks.get(source_id, {}).get("stage") == "추천 구간 준비 완료"
+                and self.raw.cached_selection_analysis(root, (source_id,))
+            }
+            context.check_cancel()
+            self._library_cached_ids[root] = cached
+            self._library_quotes[root] = quote
+
+        self.raw.submit_job(root, "library_quote", repr(ids), prepare)
+
+    def library_analysis_summary(self) -> str:
+        root = self._snapshot_root()
+        quote = self._library_quotes.get(root) if root else None
+        if root is None or quote is None:
+            return "라이브러리를 불러오면 분석 범위와 요청 상한을 안내합니다."
+        cached = self._library_cached_ids.get(root, set()).intersection(quote.asset_ids)
+        pending = [e for e in quote.estimates if e.asset_id not in cached]
+        asr = sum(e.asr_chunk_count for e in pending)
+        luna = sum(e.luna_request_count for e in pending)
+        return (
+            f"분석 대상 {len(pending)}개 · 저장 결과 {len(cached)}개 재사용 · "
+            f"전사 최대 {asr}회 + 영상 분석 최대 {luna}회. 승인하면 두 단계가 이어집니다."
+        )
+
+    def library_analysis_button(self) -> Any:
+        root = self._snapshot_root()
+        quote = self._library_quotes.get(root) if root else None
+        tasks = self._task_views(root) if root else {}
+        active = any(
+            t.get("stage") in ("분석 대기", "분석 시작", "전사·장면 준비", "Luna 추천 구간 분석")
+            for t in tasks.values()
+        )
+        complete = quote is not None and all(
+            tasks.get(a, {}).get("stage") == "추천 구간 준비 완료" for a in quote.asset_ids
+        )
+        label = "분석 진행 중" if active else "분석 완료" if complete else "자막·영상 분석 승인"
+        return gr.Button(
+            value=label, visible=True, interactive=bool(quote) and not active and not complete
+        )
+
+    def library_analysis_view(self, signature: str | None, api_key: str | None = "") -> tuple:
+        root = self._require_current_selection(signature)
+        ids = self._library_ids(root)
+        quote = self._library_quotes.get(root)
+        if not ids or quote is None or tuple(quote.asset_ids) != ids:
+            self._prepare_library_quote(root)
+            return (
+                "분석 범위를 준비하고 있습니다. 표시된 범위를 확인한 뒤 분석을 시작하세요.",
+                gr.Accordion(open=False),
+                gr.Textbox(value=""),
+            )
+        fresh = self.raw.selection_quote(root, ids)
+        if fresh.digest != quote.digest or fresh.workflow != quote.workflow:
+            self._library_quotes[root] = fresh
+            return (
+                "영상이나 자막이 바뀌었습니다. 갱신된 분석 범위를 확인하고 다시 승인하세요.",
+                gr.Accordion(open=False),
+                gr.Textbox(value=""),
+            )
+        key = (api_key or "").strip()
+        if key:
+            self._startup_credentials = raw_service.EnvironmentCredentials(
+                key, self._startup_credentials.base_url if self._startup_credentials else None
+            )
+        if self._startup_credentials is None and self._live_transport is None:
+            if self._quick.get("token"):
+                self._quick_update(self._quick["token"], connection_required=True)
+            return (
+                "API 연결에 키를 입력한 뒤 표시된 범위를 승인하세요.",
+                gr.Accordion(open=True),
+                gr.Textbox(value="", autofocus=True),
+            )
+        # This gesture approves the displayed aggregate ceiling; each worker
+        # receives only its source's freshly checked quote and never auto-expands it.
+        cached = self._library_cached_ids.get(root, set()).intersection(ids)
+        invalid = {
+            source_id
+            for source_id in cached
+            if not self.raw.cached_selection_analysis(root, (source_id,))
+        }
+        if invalid:
+            self._library_cached_ids[root].difference_update(invalid)
+            self._prepare_library_quote(root)
+            return (
+                "저장 결과의 입력이 바뀌었습니다. 갱신된 범위를 확인하세요.",
+                gr.Accordion(open=False),
+                gr.Textbox(value=""),
+            )
+        self.raw.update_settings(root, replace(quote.workflow, network_mode="online"))
+        children = [
+            replace(self.raw.selection_quote(root, (source_id,)), approved=True)
+            for source_id in ids
+            if source_id not in cached
+        ]
+        checked = self.raw.selection_quote(root, ids)
+        if checked.digest != fresh.digest or checked.workflow != replace(
+            fresh.workflow, network_mode="online"
+        ):
+            self._library_quotes[root] = checked
+            return (
+                "입력이 바뀌었습니다. 갱신된 범위를 확인하고 다시 승인하세요.",
+                gr.Accordion(open=False),
+                gr.Textbox(value=""),
+            )
+        selected = self._quick.get("view_source_id") or (self._quick.get("asset_ids") or ids)[0]
+        for child in children:
+            self._start_quick(
+                root, (), asset_ids=child.asset_ids, approved_quote=child, activate=False
+            )
+        active = self._task_for(root, (selected,))
+        if active:
+            self._activate_quick(active, selected)
+        self._library_quotes[root] = self.raw.selection_quote(root, ids)
+        return (
+            "승인한 영상들을 백그라운드에서 순서대로 분석합니다. "
+            "다른 영상을 살펴봐도 계속 진행됩니다.",
+            gr.Accordion(open=False),
+            gr.Textbox(value=""),
+        )
+
+    def quick_approve_view(self, signature: str | None, api_key: str | None = "") -> str:
+        root = self._require_current_selection(signature)
+        state = self._quick
+        if (
+            state.get("root") != root
+            or state.get("stage") != "승인 대기"
+            or state.get("quote") is None
+        ):
+            raise gr.Error("영상을 선택하면 필요한 분석 범위가 먼저 표시됩니다")
+        key = (api_key or "").strip()
+        if key:
+            self._startup_credentials = raw_service.EnvironmentCredentials(
+                key, self._startup_credentials.base_url if self._startup_credentials else None
+            )
+        if self._startup_credentials is None and self._live_transport is None:
+            self._quick_update(
+                state["token"],
+                connection_required=True,
+                error="OpenAI API 키가 입력되지 않아 분석을 시작하지 않았습니다.",
+            )
+            return self._quick_status()
+        token = state["token"]
+        approved = replace(state["quote"], approved=True)
+        self._quick_update(token, stage="분석 시작", error=None, connection_required=False)
+
+        def execute(context: Any) -> None:
+            try:
+                self._run_quick(root, token, approved, context)
+            except Exception as error:
+                self._quick_update(token, stage="분석 확인 필요", error=str(error))
+                raise
+
+        handle = self.raw.submit_job(root, "selection_analysis", token + ":approved", execute)
+        self._quick_update(token, job_id=handle.job_id)
+        return "선택한 영상의 Luna 분석을 시작했습니다. 추천 구간이 타임라인 위에 표시됩니다."
+
+    def quick_approve_panel_view(
+        self, signature: str | None, api_key: str | None = ""
+    ) -> tuple[str, gr.Accordion, gr.Textbox]:
+        message = self.quick_approve_view(signature, api_key)
+        needs_key = bool(self._quick.get("connection_required"))
+        return (message, gr.Accordion(open=needs_key), gr.Textbox(value="", autofocus=needs_key))
+
+    def quick_source_view(self, signature: str | None, source_id: str) -> tuple[str, str, str]:
+        root = self._require_current_selection(signature)
+        if source_id not in {
+            a.asset_id for a in self.raw.list_source_assets(root) if a.status == "ready"
+        }:
+            raise gr.Error("현재 프로젝트의 영상을 선택하세요")
+        if self._quick.get("view_source_id") != source_id:
+            self._start_quick(root, (), asset_ids=(source_id,))
+        return self._capcut_result(root, self._quick_status())
+
+    def _quick_status(self) -> str:
+        state = self._quick
+        if not state:
+            return "영상을 선택하면 미리보기와 Luna 추천 분석이 이어집니다."
+        stage = str(state.get("stage", "영상 준비"))
+        if state.get("connection_required"):
+            return (
+                "**연결 설정 필요 · 아직 분석하지 않았습니다**\n\n"
+                "아래 **API 연결**에 OpenAI API 키를 입력한 뒤 **Luna 분석 시작**을 다시 누르세요. "
+                "영상과 승인 범위는 그대로 유지됩니다."
+            )
+        if state.get("error"):
+            return f"**{stage}** · {state['error']} · 원본은 유지됩니다."
+        quote = state.get("quote")
+        if stage == "전사·장면 준비" and state.get("root"):
+            transcripts = [
+                self.raw.source_transcript(state["root"], source_id)
+                for source_id in state.get("asset_ids", ())
+            ]
+            if transcripts and all(t is not None for t in transcripts):
+                count = sum(len(t["utterances"]) for t in transcripts if t is not None)
+                prepared = self.raw.analysis_frame_progress(
+                    state["root"], state.get("revision"), tuple(state.get("asset_ids", ()))
+                )
+                maximum = sum(e.frame_sample_count for e in quote.estimates) if quote else 0
+                return (
+                    f"**원본 자막 {count}개 표시 · 영상 프레임 준비 중 "
+                    f"({prepared}/최대 {maximum})**\n\n"
+                    "시간 자막을 먼저 확인할 수 있습니다. "
+                    "이어서 같은 자막과 영상 프레임을 Luna가 함께 분석합니다."
+                )
+        if stage == "승인 대기" and quote is not None:
+            requests = sum(max(1, e.luna_request_count) for e in quote.estimates)
+            chunks = sum(e.asr_chunk_count for e in quote.estimates)
+            duration = sum(float(Fraction(e.asr_seconds)) for e in quote.estimates)
+            return (
+                f"**Luna 분석 준비 완료** · 선택 영상 {len(quote.asset_ids)}개\n\n"
+                f"전사 최대 {chunks}요청({duration:.0f}초) + Luna 최대 {requests}요청. "
+                "실제 비용은 사용한 오디오·토큰에 따라 정해집니다.\n\n"
+                "아래에서 한 번 승인하면 전사·장면 분석·추천 표시가 자동으로 이어집니다."
+            )
+        return f"**{stage}** · 추천은 청록색, 확인이 필요한 구간은 주황색으로 표시됩니다."
+
+    def capcut_fcp_import_view(
+        self, signature: str | None, selected: list[str] | None
+    ) -> tuple[str, str, str]:
+        root = self._require_current_selection(signature)
+        scan = self._fcp_scan
+        if scan is None or self._fcp_signature != signature or not selected:
+            raise gr.Error("현재 라이브러리에서 가져올 오리지널을 선택하세요")
+        original_paths = {file.media_path for file, _ in scan.selected}
+        choices = {
+            str(index): item
+            for index, item in enumerate(scan.proposal.order)
+            if str(Path(item.source_root) / item.source_relative_path) in original_paths
+        }
+        if not set(selected) <= choices.keys():
+            raise gr.Error("라이브러리 목록이 바뀌었습니다. 다시 선택하세요")
+        picked = tuple(item for key, item in choices.items() if key in selected)
+        proposal = replace(
+            scan.proposal, order=picked, scan=replace(scan.proposal.scan, candidates=picked)
+        )
+        dependency = self.raw.start_reference_import(
+            root, proposal, prepare_preview=False, fcp_scan=scan
+        )
+        paths = tuple(str(Path(item.source_root) / item.source_relative_path) for item in picked)
+        self._start_quick(root, paths, dependency)
+        return self._capcut_result(root, self._quick_status())
+
+    def capcut_choose_view(self, signature: str | None) -> tuple[str, str, str]:
+        root = self._snapshot_root()
+        if root is not None:
+            self._require_current_selection(signature)
+        chosen = self._pick_path(ui_chooser.VIDEO_KIND)
+        if chosen is None:
+            if root is None:
+                raise gr.Error("영상 선택을 취소했습니다")
+            return self._capcut_result(root, "영상 선택을 취소했습니다.")
+        if root is None:
+            project = Path(chosen).parent / (Path(chosen).stem + "-vlogsrt")
+            if project.exists():
+                self.raw.open_workspace(project)
+            else:
+                self.raw.create_workspace(project, Path(chosen).stem)
+            self._remember(project)
+            root = project
+        else:
+            self._require_current_selection(signature)
+        child = self.raw.import_selected_video(root, Path(chosen))
+        path = str(Path(chosen).parent.resolve() / Path(chosen).name)
+        self._start_quick(root, (path,), child)
+        return self._capcut_result(root, self._quick_status())
+
+    def capcut_auto_view(self, signature: str | None, approve: bool) -> tuple[str, str, str]:
+        root = self._require_current_selection(signature)
+        summary = self.raw.analysis_overview(root)
+        order = self.raw.latest_global_source_order(root)
+        if summary and order and summary.revision.order_revision_id != order.revision_id:
+            summary = None
+        if summary is not None and summary.revision.status == "complete":
+            self.raw.start_cleanup(root)
+            return self._capcut_result(root, "자동 정리 중 · 컷 판정과 미리보기를 준비합니다.")
+        phase = "semantic" if summary and summary.revision.status == "awaiting_semantic" else "asr"
+        token = str(signature)
+        if not approve or self._capcut_quote_phase.get(token) != phase:
+            note = (
+                self.analysis_semantic_estimate_view(signature)
+                if phase == "semantic"
+                else self.analysis_live_estimate_view(signature, None)
+            )
+            self._capcut_quote_phase[token] = phase
+            return self._capcut_result(
+                root, note + "\n\n비용·범위를 확인한 뒤 승인하고 자동 정리를 누르세요."
+            )
+        if phase == "asr":
+            note, _ = self.analysis_live_asr_view(signature, None, True)
+        else:
+            assert summary is not None
+            choices = self.resumable_analysis_choices(root)
+            if not choices:
+                raise gr.Error("재개할 분석이 없습니다")
+            note, _ = self.analysis_semantic_resume_view(signature, choices[0][1], True)
+
+            def finish(context: Any) -> None:
+                # The semantic job is separately durable and owns provider calls.
+                jobs = [
+                    j
+                    for j in self.raw.list_jobs(root)
+                    if j.kind == raw_service.ANALYSIS_SEMANTIC_JOB_KIND
+                ]
+                if not jobs:
+                    raise RuntimeError("의미 분석 작업을 찾을 수 없습니다")
+                self.raw.wait_child_job(root, jobs[0], context)
+                self.raw.wait_child_job(root, self.raw.start_cleanup(root), context)
+
+            self.raw.submit_job(root, "cleanup_pipeline", summary.revision.revision_id, finish)
+        self._capcut_quote_phase.pop(token, None)
+        return self._capcut_result(root, note)
+
+    def capcut_preview_view(self, signature: str | None) -> str:
+        root = self._require_current_selection(signature)
+        self.raw.ensure_source_order(root)
+        self.raw.start_source_preview(root)
+        return "원본 미리보기를 준비합니다. 분석 승인은 필요하지 않습니다."
+
+    def capcut_refresh_view(self, signature: str | None) -> tuple[str, str, str]:
+        root = self._require_current_selection(signature)
+        return self._capcut_result(root, self._capcut_progress(root))
+
+    def _capcut_progress(self, root: Path) -> str:
+        names = {
+            "selection_analysis": "Luna 분석",
+            "automatic_cleanup": "자동 정리",
+            "selected_video_import": "영상 가져오기",
+            "reference_import": "원본 연결 · 복사 없음",
+            "source_preview": "원본 미리보기",
+            "cleanup_pipeline": "영상 정리",
+            "capcut_export": "Final Cut 전달",
+            "segment_extract": "컷 준비",
+            "visual_prepare": "미리보기 준비",
+            "understanding": "영상 분석",
+            "understanding_semantic": "의미 분석",
+        }
+        jobs = self.raw.list_jobs(root, limit=8)
+        labels = {
+            "succeeded": "완료",
+            "failed": "실패",
+            "running": "진행 중",
+            "queued": "대기",
+            "cancelled": "취소됨",
+            "paused": "중단",
+            "interrupted": "중단",
+        }
+        lines = [
+            f"{names.get(j.kind, '작업')} · {labels.get(j.status, j.status)} · "
+            f"{j.progress_current}/{j.progress_total}" + (f" · {j.error}" if j.error else "")
+            for j in jobs[:4]
+        ]
+        summary = self.raw.analysis_overview(root)
+        if summary and summary.revision.status == "awaiting_semantic":
+            lines.insert(0, "전사 완료 · 자동 정리를 눌러 다음 단계 비용을 확인하세요.")
+        return "\n\n".join(lines) or "영상을 선택하고 자동 정리를 시작하세요."
+
+    def _task_views(self, root: Path) -> dict[str, dict]:
+        self._load_quick_tasks(root)
+        result = {}
+        for task in list(self._quick_tasks.values()):
+            if task.get("root") == root:
+                for source_id in task.get("asset_ids", ()):
+                    result[source_id] = task
+        return result
+
+    def capcut_status_view(self, signature: str | None) -> Any:
+        """Lightweight progress never waits behind a full workbench/media redraw."""
+        if not signature or signature != self._signature_for(self._snapshot_root()):
+            return gr.skip()
+        root = self._snapshot_root()
+        if root is None:
+            return gr.skip()
+        export = next(
+            (j for j in self.raw.list_jobs(root, limit=10) if j.kind == "capcut_export"), None
+        )
+        if export and export.status in ("queued", "running"):
+            return "**Final Cut 출력 준비 중** · 선택한 컷을 원본 기준으로 저장합니다."
+        message = self._quick_status()
+        if export and export.status == "succeeded" and self._capcut_xml.get(str(signature)):
+            message += "\n\n**출력 완료** · 전달 메뉴에서 Final Cut으로 열 수 있습니다."
+        others = {
+            task["token"]
+            for task in self._task_views(root).values()
+            if task.get("token") != self._quick.get("token")
+            and task.get("stage")
+            in ("분석 대기", "분석 시작", "전사·장면 준비", "Luna 추천 구간 분석")
+        }
+        if others:
+            message += f"\n\n다른 영상의 백그라운드 분석 {len(others)}개가 계속 진행됩니다."
+        return message
+
+    def capcut_tick_view(self, signature: str | None) -> tuple:
+        if not signature or signature != self._signature_for(self._snapshot_root()):
+            return gr.skip(), gr.skip(), gr.skip()
+        root = self._require_current_selection(signature)
+        view_token = self._visual_lifetime_token
+        if not self._quick:
+            self._quick = self.raw.load_selection_state(root)
+        self._load_quick_tasks(root)
+        jobs = self.raw.list_jobs(root, limit=8)
+        transcript_revisions = tuple(
+            (asset_id, (self.raw.source_transcript(root, asset_id) or {}).get("revision"))
+            for asset_id in self._quick.get("asset_ids", ())
+        )
+        key = (
+            signature,
+            transcript_revisions,
+            tuple((j.job_id, j.status, j.progress_current) for j in jobs),
+            self._quick.get("stage"),
+            self._quick.get("revision"),
+        )
+        if key == self._capcut_render_key and self._quick.get("stage") != "Luna 추천 구간 분석":
+            return (
+                self._quick_status() if self._quick else self._capcut_progress(root),
+                gr.skip(),
+                gr.skip(),
+            )
+        self._capcut_render_key = key
+        message, _shell, workbench = self._capcut_result(
+            root, self._quick_status() if self._quick else self._capcut_progress(root)
+        )
+        if view_token != self._visual_lifetime_token or root != self._snapshot_root():
+            return gr.skip(), gr.skip(), gr.skip()
+        return message, gr.skip(), workbench
+
+    def capcut_edit_view(self, signature: str | None, action: str) -> tuple[str, str, str]:
+        root = self._require_current_selection(signature)
+        facade = self._review_facade(root)
+        if action == "undo":
+            facade.undo()
+        else:
+            facade.restore_automatic()
+        return self._capcut_result(root, "검토 변경을 저장했습니다.")
+
+    def capcut_cancel_view(self, signature: str | None) -> str:
+        root = self._require_current_selection(signature)
+        if self._quick.get("root") != root:
+            return "취소할 선택 분석 작업이 없습니다."
+        self._cancel_quick()
+        if self._quick:
+            self._quick_update(
+                self._quick["token"], token=uuid.uuid4().hex, stage="취소됨", error=None
+            )
+        return "취소를 요청했습니다. 완료된 결과는 보존됩니다."
+
+    def capcut_retry_view(self, signature: str | None) -> str:
+        root = self._require_current_selection(signature)
+        if self._quick.get("root") == root and self._quick.get("asset_ids"):
+            self._start_quick(root, (), asset_ids=tuple(self._quick["asset_ids"]), retry=True)
+            return "선택 영상의 실패·누락 단계를 확인합니다. 표시된 범위를 승인하면 재개합니다."
+        for job in self.raw.list_jobs(root):
+            if job.status not in ("failed", "interrupted", "paused"):
+                continue
+            if job.kind in (raw_service.ANALYSIS_JOB_KIND, raw_service.ANALYSIS_SEMANTIC_JOB_KIND):
+                return self.analysis_retry_view(signature, job.job_id)
+            if job.kind == "reference_import":
+                if self._fcp_scan is None:
+                    raise gr.Error("라이브러리를 다시 열어 원본 연결 상태를 확인하세요")
+                self.raw.start_reference_import(root, self._fcp_scan.proposal)
+                return "원본 참조를 다시 확인하고 미리보기를 준비합니다."
+            if job.kind == "source_preview":
+                self.raw.start_source_preview(root)
+                return "원본 미리보기를 다시 준비합니다."
+            if job.kind == "ingest_copy":
+                self.raw.retry_ingest_copy(root, job.job_id)
+                return "실패한 영상 가져오기를 다시 시작했습니다."
+            if job.kind == raw_service.SEGMENT_JOB_KIND:
+                child = self.raw.retry_segment_extraction(root, job.job_id)
+                summary = self.raw.analysis_overview(root)
+
+                def finish(context: Any, child: Any = child) -> None:
+                    self.raw.wait_child_job(root, child, context)
+                    head = self._review_facade(root).load_head().revision
+                    for page in range(
+                        1,
+                        (len(head.segments) + raw_service.VISUAL_PAGE_SIZE - 1)
+                        // raw_service.VISUAL_PAGE_SIZE
+                        + 1,
+                    ):
+                        self.raw.wait_child_job(
+                            root,
+                            self.raw.start_visual_page_preparation(
+                                root, base_plan_id=head.base_plan_id, page=page
+                            ),
+                            context,
+                        )
+
+                self.raw.submit_job(
+                    root,
+                    "automatic_cleanup",
+                    summary.revision.revision_id if summary else child.job_id,
+                    finish,
+                )
+                return "실패한 컷만 다시 준비하고 미리보기를 갱신합니다."
+            if job.kind == "capcut_export":
+                return self.capcut_handoff_view(signature)
+        self.raw.start_cleanup(root)
+        return "정리 작업을 다시 시작했습니다. 완료된 컷은 재사용합니다."
+
+    def capcut_handoff_view(self, signature: str | None) -> str:
+        root = self._require_current_selection(signature)
+        head = self._review_facade(root).load_head().revision
+
+        def body(context: Any) -> None:
+            ready_revision = self.raw.materialize_review(root, context, head.revision_id)
+            destination, xml = self.raw.export_final_cut(
+                root, context, expected_review_revision_id=ready_revision
+            )
+            with self._selection_lock:
+                if self._root == root and self._signature_for(root) == signature:
+                    self._last_export_dir = destination
+                    self._last_export_path = str(root / destination)
+                    self._capcut_xml[str(signature)] = xml
+
+        self.raw.submit_job(root, "capcut_export", head.revision_id, body)
+        return (
+            "사용할 컷의 패키지와 FCPXML을 생성·검증합니다. 완료 후 Final Cut에서 열기를 누르세요."
+        )
+
+    def capcut_open_view(self, signature: str | None) -> str:
+        import subprocess
+
+        root = self._require_current_selection(signature)
+        xml = self._capcut_xml.get(str(signature))
+        if not xml or not Path(xml).is_file() or root not in Path(xml).parents:
+            raise gr.Error("검증된 FCPXML을 먼저 생성하세요")
+        result = subprocess.run(
+            ["/usr/bin/open", "-a", "Final Cut Pro", xml], capture_output=True, text=True
+        )
+        if result.returncode:
+            raise gr.Error(
+                "FCPXML은 생성됐지만 Final Cut을 열지 못했습니다: " + result.stderr[:200]
+            )
+        return "Final Cut에 열기를 요청했습니다. 앱 안에서 가져오기 결과를 확인하세요."
 
     def _review_tab(
         self,
     ) -> tuple[gr.Button, gr.Button, gr.Dropdown, gr.Button]:
-        with gr.Tab("2 · 분석 · 조각 검토"):
+        with gr.Tab("영상 정리"):
+            with gr.Row():
+                choose = gr.Button("영상 선택", visible=False)
+                self._quick_library_button = gr.Button("라이브러리 불러오기")
+                cancel = gr.Button("선택 분석 취소", scale=0)
+                automatic = gr.Button("자동 정리", visible=False)
+                quick_approve = gr.Button(
+                    "자막·영상 분석 승인", visible=True, interactive=False, variant="primary"
+                )
+                handoff = gr.Button("선택한 컷 Final Cut으로 출력")
+            library_summary = gr.Markdown(
+                self.library_analysis_summary(), elem_id="library-analysis-scope"
+            )
+            self._capcut_status = gr.Markdown(visible=False)
+            self._capcut_progress_md = gr.Markdown(self._quick_status(), elem_id="quick-status")
             # ── V2 영상 작업대 — 3단 무대(왼쪽 목록 · 가운데 재생기+렠 · 오른쪽 패널).
             # 두 구성요소가 같은 `#visual-stage` 격자에 들어가고, 껍데기·본문의
             # 중간 껍데기는 display:contents로 펴져 세 칸이 한 눈에 짝을 이룬다.
@@ -749,11 +1801,113 @@ class RawWorkspaceUi:
                     server_functions=self._visual_server_functions(),
                 )
             with gr.Accordion(
-                "고급 — 의미 분석 · 수동 조각 검토 · 결정적 분할(기존 화면)", open=False
-            ):
+                "API 연결 · 처음 한 번", open=False, elem_id="quick-api-panel"
+            ) as quick_api_panel:
+                quick_api_key = gr.Textbox(
+                    label="OpenAI API 키 (이 실행에서만 사용)",
+                    type="password",
+                    value="",
+                    elem_id="quick-api-key",
+                )
+            with gr.Accordion("분석 실행 설정", open=False, visible=False):
+                primary_network = gr.Dropdown(
+                    choices=["offline", "online"],
+                    value=self._current_network_mode(),
+                    label="네트워크",
+                    interactive=True,
+                )
+                primary_network.change(
+                    self.settings_network_view,
+                    [self._signature_state, primary_network],
+                    self._capcut_status,
+                )
+            approval = gr.Checkbox(
+                label="표시된 단계의 비용·범위를 확인하고 실행을 승인합니다",
+                value=False,
+                visible=False,
+            )
+            with gr.Accordion("복원 · 전달 · 고급 조작", open=False), gr.Row():
+                restore = gr.Button("자동 제외 전체 복원")
+                undo = gr.Button("실행 취소")
+                refresh = gr.Button("결과 확인")
+                preview = gr.Button("원본 미리보기 준비")
+                retry = gr.Button("실패 구간 재시도")
+                open_fcp = gr.Button("Final Cut에서 열기")
+                open_folder = gr.Button("폴더 열기")
+            outputs = [self._capcut_status, self._visual_player_block, self._visual_workbench_block]
+            choose.click(
+                self.capcut_choose_view,
+                self._signature_state,
+                outputs,
+                api_name=False,
+                concurrency_id=ui_chooser.CHOOSER_CONCURRENCY_ID,
+                concurrency_limit=1,
+            ).then(self.current_signature, None, self._signature_state).then(
+                self._ws_path_display, None, self._ws_path_box
+            )
+            quick_approve.click(
+                self.library_analysis_view,
+                [self._signature_state, quick_api_key],
+                [self._capcut_progress_md, quick_api_panel, quick_api_key],
+            ).then(
+                fn=None,
+                js="""() => {
+                const status = document.getElementById('quick-status');
+                if (status?.textContent.includes('연결 설정 필요')) {
+                    requestAnimationFrame(() =>
+                        document.querySelector('#quick-api-key input')?.focus());
+                }
+            }""",
+            )
+            gr.Timer(1).tick(
+                self.library_analysis_button,
+                None,
+                quick_approve,
+                show_progress="hidden",
+            )
+            gr.Timer(1).tick(
+                self.library_analysis_summary,
+                None,
+                library_summary,
+                queue=False,
+                show_progress="hidden",
+            )
+            automatic.click(self.capcut_auto_view, [self._signature_state, approval], outputs).then(
+                lambda: False, None, approval
+            )
+            handoff.click(self.capcut_handoff_view, self._signature_state, self._capcut_status)
+            restore.click(
+                lambda sig: self.capcut_edit_view(sig, "restore"), self._signature_state, outputs
+            )
+            undo.click(
+                lambda sig: self.capcut_edit_view(sig, "undo"), self._signature_state, outputs
+            )
+            refresh.click(self.capcut_refresh_view, self._signature_state, outputs)
+            preview.click(self.capcut_preview_view, self._signature_state, self._capcut_status)
+            cancel.click(self.capcut_cancel_view, self._signature_state, self._capcut_status)
+            retry.click(self.capcut_retry_view, self._signature_state, self._capcut_status)
+            open_fcp.click(self.capcut_open_view, self._signature_state, self._capcut_status)
+            open_folder.click(
+                self.review_export_open_view, self._signature_state, self._capcut_status
+            )
+            gr.Timer(1).tick(
+                self.capcut_status_view,
+                self._signature_state,
+                self._capcut_progress_md,
+                queue=False,
+                show_progress="hidden",
+            )
+            gr.Timer(2).tick(
+                self.capcut_tick_view,
+                self._signature_state,
+                [self._capcut_status, self._visual_player_block, self._visual_workbench_block],
+                show_progress="hidden",
+            )
+            with gr.Accordion("고급 편집 도구", open=False):
                 extract_button, refresh_segment, profile_dd, analysis_plan = (
                     self._review_advanced_tab()
                 )
+            self._package_tab()
         return extract_button, refresh_segment, profile_dd, analysis_plan
 
     def _review_advanced_tab(
@@ -1116,28 +2270,139 @@ class RawWorkspaceUi:
 
     # ── 같은 화면의 작업공간 전환 — 전체 보기를 바로 내린다 ─────
 
-    def open_workspace_view(
-        self, path_text: str
-    ) -> tuple[
-        str,
-        str | None,
-        gr.Dropdown,
-        gr.Dropdown,
-        str,
-        str,
-        str,
-        gr.Dropdown,
-        str,
-        gr.Dropdown,
-        str,
-        gr.Dropdown,
-        str,
-        gr.Dropdown,
-        gr.CheckboxGroup,
-        str,
-        str,
-        str,
-    ]:
+    def _pick_path(self, kind: str) -> str | None:
+        """네이티브 경로 선택기 — 한 번에 하나의 대화상자만 뜬다(자물쇠).
+
+        취소(None)는 그대로 돌려오고 오류만 화면 오류로 옮긴다.
+        """
+        with self._chooser_lock:
+            try:
+                return self._path_chooser(kind)
+            except ui_chooser.ChooserError as error:
+                raise gr.Error(str(error)) from error
+
+    def open_project_chooser_view(self) -> WorkspaceView:
+        """기존 프로젝트 열기 — 파일시스템 선택기로만 경로가 들어온다(직접 입력 없음).
+
+        폴더를 고르면 작업공간으로 열고, `.fcpbundle`을 고르면 라이브러리 밖 관리
+        작업공간을 만들어 이벤트 미디어를 조사해 싣는다. 취소는 어떤 상태도 바꾸지
+        않는다 — 지금 작업공간이 그대로다.
+        """
+        chosen = self._pick_path(ui_chooser.WORKSPACE_KIND)
+        if chosen is None:
+            raise gr.Error("취소 — 지금 작업공간을 그대로 둔다.")
+        path = Path(chosen).expanduser()
+        if raw_service.is_fcp_library(path):
+            return self.open_fcp_library_view(path)
+        if path.is_dir():
+            return self.open_workspace_view(str(path))
+        raise gr.Error(
+            "폴더 또는 Final Cut 라이브러리(.fcpbundle)를 고르세요 — 파일 하나는 작업공간이 아니다."
+        )
+
+    def create_project_chooser_view(self, name: str) -> WorkspaceView:
+        """새 프로젝트 만들기 — 이름만 적고 자리는 선택기로 고른다(경로 직접 입력 없음)."""
+        if not (name or "").strip():
+            raise gr.Error("새 프로젝트 이름을 입력하세요.")
+        chosen = self._pick_path(ui_chooser.FOLDER_KIND)
+        if chosen is None:
+            raise gr.Error("취소 — 지금 작업공간을 그대로 둔다.")
+        return self.create_workspace_view(name, chosen)
+
+    def open_fcp_library_view(
+        self, library: Path, *, originals_only: bool = False
+    ) -> WorkspaceView:
+        """FCP 라이브러리 열기 — 라이브러리 밖 관리 작업공간을 만들거나 이어 열고 미디어를 싣는다.
+
+        라이브러리는 읽기만 한다. 작업공간은 같은 라이브러리에 대해 언제나 같은
+        sibling 자리다(안정 경로). 조사 결과는 일반 SD/폴더와 같은 가져오기 패널로
+        흐른다 — 확정·복사는 같은 A2 파이프라인이다. 조사가 실패해도 열기는 완결이다:
+        실패 사유가 가져오기 패널에 정직하게 남는다(조용한 빈 성공이 아니다).
+        """
+        try:
+            status, _created = self.raw.managed_fcp_workspace(library)
+        except raw_service.RawWorkspaceError as error:
+            raise gr.Error(str(error)) from error
+        root = Path(status.workspace_root)
+        self._remember(root)
+        resolved = library.expanduser().resolve()
+        with self._selection_lock:
+            self._fcp_library = resolved
+        try:
+            self._scan_fcp_view(
+                root,
+                resolved,
+                raw_service.FCP_ROLE_ORIGINAL if originals_only else self._fcp_role,
+                originals_only=originals_only,
+            )
+        except gr.Error as error:
+            self._store_fcp_error(root, error)
+        return self.workspace_view_values()
+
+    def _store_fcp_error(self, root: Path, error: gr.Error) -> None:
+        """FCP 조사 실패 기록 — 화면 오류 문장을 가져오기 패널 자리에 그대로 남긴다."""
+        with self._selection_lock:
+            self._ingest_proposal = None
+            self._ingest_signature = None
+            self._ingest_confirmation = None
+            self._fcp_scan = None
+            self._fcp_error = self._serve_error(error)
+            self._fcp_signature = self._signature_for(root)
+
+    def _current_fcp_library(self, signature: str | None) -> Path | None:
+        """이 작업공간 서명에 묶인 FCP 라이브러리 — 없으면(다른 작업공간의 것이면) None."""
+        with self._selection_lock:
+            if self._fcp_library is not None and self._fcp_signature == signature:
+                return self._fcp_library
+            return None
+
+    def _scan_fcp_view(
+        self, root: Path, library: Path, role: str, *, originals_only: bool = False
+    ) -> str:
+        """FCP 라이브러리 조사 — 현재 작업공간 서명에 묶어 제안과 라이브러리 사실을 남긴다."""
+        try:
+            scan = self.raw.scan_fcp_library(
+                root,
+                library,
+                self._inspector or raw_service.ffprobe_media_inspector,
+                role,
+                originals_only=originals_only,
+            )
+        except raw_service.RawWorkspaceError as error:
+            raise gr.Error(str(error)) from error
+        self.raw.remember_fcp_library(root, library)
+        signature = self._signature_for(root)
+        with self._selection_lock:
+            self._ingest_proposal = scan.proposal
+            self._ingest_signature = signature
+            self._ingest_confirmation = None
+            self._fcp_library = library.expanduser().resolve()
+            self._fcp_scan = scan
+            self._fcp_signature = signature
+            self._fcp_error = None
+            self._fcp_role = role
+        return self._ingest_state_markdown(root)
+
+    def source_folder_chooser_view(self) -> tuple[str, str]:
+        """SD/원본 폴더 선택 — 선택기로만 고른다. 취소면 지금 표시를 그대로 둔다."""
+        chosen = self._pick_path(ui_chooser.FOLDER_KIND)
+        if chosen is None:
+            raise gr.Error("취소 — 원본 폴더 표시를 그대로 둔다.")
+        try:
+            listing = raw_service.browse_folder(chosen)
+        except raw_service.BrowseNotAllowedError as error:
+            raise gr.Error(str(error)) from error
+        self._last_listing = listing
+        return self._listing_markdown(listing), listing.path
+
+    def final_video_chooser_view(self) -> str:
+        """최종 영상 선택 — 선택기로만 고른다. 취소면 지금 표시를 그대로 둔다."""
+        chosen = self._pick_path(ui_chooser.VIDEO_KIND)
+        if chosen is None:
+            raise gr.Error("취소 — 최종 영상 표시를 그대로 둔다.")
+        return chosen
+
+    def open_workspace_view(self, path_text: str) -> WorkspaceView:
         """기존 작업공간 열기 이벤트 — 서명·미디어·작업·설정까지 한 번에 갱신한다.
 
         새로고침 없이 같은 화면에서 프로젝트를 바꿀 수 있어야 한다(루트 재현:
@@ -1155,33 +2420,12 @@ class RawWorkspaceUi:
         self._remember(Path(status.workspace_root))
         return self.workspace_view_values()
 
-    def create_workspace_view(
-        self, name: str, path_text: str
-    ) -> tuple[
-        str,
-        str | None,
-        gr.Dropdown,
-        gr.Dropdown,
-        str,
-        str,
-        str,
-        gr.Dropdown,
-        str,
-        gr.Dropdown,
-        str,
-        gr.Dropdown,
-        str,
-        gr.Dropdown,
-        gr.CheckboxGroup,
-        str,
-        str,
-        str,
-    ]:
+    def create_workspace_view(self, name: str, path_text: str) -> WorkspaceView:
         """새 작업공간 만들기 이벤트 — 첫 생성(서명 None)에서도 같은 화면이 즉시 연결된다."""
         if not (name or "").strip():
             raise gr.Error("새 프로젝트 이름을 입력하세요.")
         if not (path_text or "").strip():
-            raise gr.Error("작업공간으로 쓸 빈 폴더 경로를 입력하세요.")
+            raise gr.Error("작업공간으로 쓸 빈 폴더 경로를 선택기로 고르세요.")
         try:
             status = self.raw.create_workspace(Path(path_text), name)
         except raw_service.RawWorkspaceError as error:
@@ -1189,33 +2433,15 @@ class RawWorkspaceUi:
         self._remember(Path(status.workspace_root))
         return self.workspace_view_values()
 
-    def workspace_view_values(
-        self,
-    ) -> tuple[
-        str,
-        str | None,
-        gr.Dropdown,
-        gr.Dropdown,
-        str,
-        str,
-        str,
-        gr.Dropdown,
-        str,
-        gr.Dropdown,
-        str,
-        gr.Dropdown,
-        str,
-        gr.Dropdown,
-        gr.CheckboxGroup,
-        str,
-        str,
-        str,
-    ]:
+    def workspace_view_values(self) -> WorkspaceView:
         """작업공간 전환 뒤 화면이 받아야 하는 전체 보기(서명 포함).
 
         루트를 **한 번** 찍어 모든 조각에 통과시킨다 — 전환이 끼어들어도 이 보기가
-        두 작업공간에 걸치지 않는다(코디네이터 재결). 마지막 네 값은 가져오기·
-        분할·분석 패널이다.
+        두 작업공간에 걸치지 않는다(코디네이터 재결). 마지막 세 값은 읽기전용 경로
+        표시 칸이다(선택기로만 경로가 정해진다). 출처 표시는 이 작업공간이 FCP
+        라이브러리에서 왔으면 그 경로를 보이고, 일반 전환이면 비운다 — 출처 선택은
+        작업공간마다 새로 시작한다(낡은 출처가 다음 프로젝트에 남지 않는다).
+        최종 영상 표시는 전환마다 비운다.
         """
         root = self._snapshot_root()
         return (
@@ -1235,7 +2461,22 @@ class RawWorkspaceUi:
             gr.Dropdown(choices=self.resumable_analysis_choices(root)),
             gr.CheckboxGroup(choices=self.analysis_source_choices(root)),
             *self._workbench_view_values(root),
+            str(root) if root is not None else "",
+            self._fcp_source_display(root),
+            "",
         )
+
+    def _fcp_source_display(self, root: Path | None) -> str:
+        """읽기전용 출처 표시 — 이 작업공간이 FCP 라이브러리에서 왔으면 그 경로.
+
+        조사 단추가 이 표시를 입력으로 읽으므로, 라이브러리를 열면 그 경로가
+        보여야 역할을 바꿔 다시 조사할 수 있다. 일반 작업공간 전환이면 FCP 사실이
+        이미 지워져 있어 비운다(낡은 출처가 남지 않는다).
+        """
+        if root is None:
+            return ""
+        library = self._current_fcp_library(self._signature_for(root))
+        return str(library) if library is not None else ""
 
     def _workbench_view_values(self, root: Path | None) -> tuple[str, str, str]:
         """작업대 세 값(영상 껍데기·영상 본문·자막 본문) — 전환·새로고침 출력용.
@@ -1277,6 +2518,9 @@ class RawWorkspaceUi:
             and self._analysis_jobs_dd is not None
             and self._analysis_sources_group is not None
             and self._signature_state is not None
+            and self._ws_path_box is not None
+            and self._source_box is not None
+            and self._caption_path_box is not None
         )
         return [
             self._workspace_md,
@@ -1295,6 +2539,9 @@ class RawWorkspaceUi:
             self._analysis_jobs_dd,
             self._analysis_sources_group,
             *self._workbench_outputs(),
+            self._ws_path_box,
+            self._source_box,
+            self._caption_path_box,
         ]
 
     def cancel_view(self, signature: str | None, job_id: str | None) -> tuple[gr.Dropdown, str]:
@@ -1408,6 +2655,7 @@ class RawWorkspaceUi:
         preferred_selected_id: str | None = None,
         playhead_sec: Fraction | None = None,
         source_id: str | None = None,
+        selection_filter: str = "all",
     ) -> tuple[str, str]:
         """영상 작업대 (껍데기, 본문) — 질의·읽기만으로 만든다(미디어 생성 0).
 
@@ -1424,6 +2672,22 @@ class RawWorkspaceUi:
                 ui_facade.visual_player_shell_html(None, note),
                 ui_facade.visual_workbench_html({"empty": note}),
             )
+        quick = self._quick if self._quick.get("root") == root else {}
+        if quick.get("stage") == "영상 준비" and not quick.get("asset_ids"):
+            note = "선택한 영상을 준비하고 있습니다. 이전 영상의 결과는 표시하지 않습니다."
+            return ui_facade.visual_player_shell_html(None, note), ui_facade.visual_workbench_html(
+                {"empty": note}
+            )
+        if quick.get("asset_ids") and source_id is None:
+            source_id = quick.get("view_source_id") or quick["asset_ids"][0]
+            try:
+                _head, _ordered = self._visual_chronological(root, None)
+                preferred_selected_id = next(
+                    (segment.segment_id for segment in _ordered if segment.source_id == source_id),
+                    preferred_selected_id,
+                )
+            except (raw_service.RawWorkspaceError, raw_service.ReviewError):
+                pass
         safe_page = max(1, page)
         preferred_id, preferred_pos = self._visual_preferred_id(
             root,
@@ -1438,7 +2702,7 @@ class RawWorkspaceUi:
         if playhead_sec is not None and preferred_pos is not None:
             query_page = preferred_pos // raw_service.VISUAL_PAGE_SIZE + 1
         try:
-            overview = self._visual_query(root, query_page, preferred_id)
+            overview = self._visual_query(root, query_page, preferred_id, selection_filter)
         except (raw_service.RawWorkspaceError, raw_service.ReviewError) as error:
             note = f"영상 검토를 열지 못했다 — {error}"
             return (
@@ -1475,7 +2739,8 @@ class RawWorkspaceUi:
             segments_by_source: dict[str, list[Any]] = {}
             for segment in ordered:
                 segments_by_source.setdefault(segment.source_id, []).append(segment)
-            for preview in overview.sources:
+            source_order = {segment.source_id: segment.source_order for segment in ordered}
+            for preview in sorted(overview.sources, key=lambda item: source_order[item.source_id]):
                 clock = revision.clock_for(preview.source_id)
                 if clock is None:
                     raise gr.Error(f"원본 {preview.source_id!r}의 시계가 리비전에 없다")
@@ -1497,6 +2762,7 @@ class RawWorkspaceUi:
                             "start": str(start),
                             "end": str(end),
                             "sel": segment.selection,
+                            "rec": segment.recommendation,
                             "needsExtract": needs,
                         }
                     )
@@ -1584,12 +2850,83 @@ class RawWorkspaceUi:
                 0,
             )
             selected_card = _card_values(selected, selected_order)
+        task_views = self._task_views(root)
+        for sid, source in sources_model.items():
+            task = task_views.get(sid, {})
+            if task.get("revision"):
+                rows = self.raw.selection_suitability(root, task["revision"], (sid,)).get(sid, [])
+                source["suggestions"] = [
+                    {
+                        "start": str(Fraction(row["start"]["num"], row["start"]["den"])),
+                        "end": str(Fraction(row["end"]["num"], row["end"]["den"])),
+                        "rec": row["recommendation"],
+                        "reason": row["reason"],
+                    }
+                    for row in rows
+                ]
+            source["analysisState"] = task.get("stage", "분석 대기")
+        for sid, source in sources_model.items():
+            transcript = self.raw.source_transcript(root, sid)
+            if transcript:
+                source["transcriptRevision"] = transcript["revision"]
+                source["crossSourceCandidates"] = self.raw.source_repeat_candidates(root, sid)
+                source["subtitles"] = [
+                    {
+                        "id": u["utterance_id"],
+                        "text": u["text"],
+                        "start": str(Fraction(u["start"]["num"], u["start"]["den"])),
+                        "end": str(Fraction(u["end"]["num"], u["end"]["den"])),
+                    }
+                    for u in transcript["utterances"]
+                ]
+                source["transcriptDirty"] = bool(
+                    transcript["sequence"]
+                    and quick.get("stage") in ("자막 변경 · 갱신 필요", "승인 대기")
+                )
+            refs = self.raw.source_media_references(root, sid)
+            if refs:
+                source["mediaStatus"] = refs["validation"]["reason"]
+                source["originalMissing"] = refs["original"] is None
+            source.setdefault("analysisState", "영상을 선택하면 Luna 분석을 시작합니다")
+        media_cards = []
+        for sid, source in sources_model.items():
+            rail_data = source.get("rail")
+            if not isinstance(rail_data, dict):
+                continue
+            representative = next((card for card in cards if card["sourceId"] == sid), None)
+            intervals_for_source = rail_data["intervals"]
+            if representative is None and intervals_for_source:
+                first = intervals_for_source[0]
+                representative = {
+                    "id": first["id"],
+                    "sourceId": sid,
+                    "sourceName": source["sourceName"],
+                    "start": first["start"],
+                    "end": first["end"],
+                    "sel": first["sel"],
+                    "rec": "normal",
+                    "speech": "unconfirmed_empty",
+                    "thumb": {"state": "missing", "src": None},
+                    "order": 0,
+                    "needsExtract": False,
+                }
+            if representative is not None:
+                media_cards.append(
+                    {
+                        **representative,
+                        "media": True,
+                        "start": "0",
+                        "end": rail_data["duration"],
+                        "dur": rail_data["duration"],
+                    }
+                )
         model: dict[str, object] = {
             "epoch": uuid.uuid4().hex,
             "token": self._visual_lifetime_token,
             "signature": self._signature_for(root),
             "basePlanId": overview.base_plan_id,
             "revisionId": overview.revision_id,
+            "filter": selection_filter,
             "page": overview.page,
             "pageCount": overview.page_count,
             "total": overview.total_segments,
@@ -1597,7 +2934,10 @@ class RawWorkspaceUi:
             "selectedSourceId": selected.source_id if selected else None,
             "selectedCard": selected_card,
             "sources": sources_model,
+            "selectionToken": quick.get("token", ""),
+            "autoAnalyzeSelection": True,
             "cards": cards,
+            "mediaCards": media_cards,
             "activeJobs": list(overview.active_preparation_jobs),
             "staleSources": [list(pair) for pair in overview.stale_sources],
             "needsPlan": needs_plan,
@@ -1613,16 +2953,24 @@ class RawWorkspaceUi:
         )
         return shell, ui_facade.visual_workbench_html(model)
 
-    def _visual_query(self, root: Path, page: int, selected_segment_id: str | None) -> Any:
+    def _visual_query(
+        self, root: Path, page: int, selected_segment_id: str | None, selection_filter: str = "all"
+    ) -> Any:
         """질의 한 번 — 선택 조각이 리비전에 없으면(나누기 뒤 옛 ID) 선택 없이 다시."""
         try:
             return self.raw.visual_review_query(
-                root, page=page, selected_segment_id=selected_segment_id
+                root,
+                page=page,
+                selected_segment_id=selected_segment_id,
+                include_all_sources=True,
+                selection_filter=selection_filter,
             )
         except raw_service.RawWorkspaceError:
             if selected_segment_id is None:
                 raise
-            return self.raw.visual_review_query(root, page=page)
+            return self.raw.visual_review_query(
+                root, page=page, include_all_sources=True, selection_filter=selection_filter
+            )
 
     # ── V2 서버 함수 — gradio 공개 경계(component_server)로만 간다 ──
 
@@ -1701,9 +3049,72 @@ class RawWorkspaceUi:
         except gr.Error as error:
             return fail(error)
         try:
-            if kind in ("prepare", "propose", "apply", "replan"):
+            if kind in (
+                "prepare",
+                "propose",
+                "apply",
+                "replan",
+                "select-source",
+                "source-caption",
+                "relink-original",
+            ):
                 # 질의(refresh)는 열어 둔다 — 서버 재시작 뒤 화면이 스스로 회복하는 길.
                 self._require_workbench_token(payload, self._visual_lifetime_token, "영상 작업대")
+            if kind in ("source-caption", "relink-original"):
+                source_id = self._serve_str(payload, "sourceId")
+                if kind == "source-caption":
+                    self.raw.edit_source_transcript(
+                        root,
+                        source_id,
+                        self._serve_str(payload, "transcriptRevision"),
+                        action=self._serve_str(payload, "action"),
+                        utterance_id=self._serve_str(payload, "utteranceId"),
+                        text=self._serve_str(payload, "text"),
+                        start=self._serve_str(payload, "start") or None,
+                        end=self._serve_str(payload, "end") or None,
+                        split_at=self._serve_str(payload, "splitAt") or None,
+                        right_text=self._serve_str(payload, "rightText") or None,
+                    )
+                    self._cancel_quick()
+                    if self._quick:
+                        self._quick_update(
+                            self._quick["token"],
+                            stage="자막 변경 · 갱신 필요",
+                            token=uuid.uuid4().hex,
+                            quote=None,
+                            error=None,
+                        )
+                    self._prepare_library_quote(root)
+                    message = (
+                        "원본 자막을 저장했습니다. 재시도로 변경된 근거 구간만 갱신하세요. "
+                        "수동 컷은 유지됩니다."
+                    )
+                else:
+                    self.raw.relink_source_original(
+                        root,
+                        source_id,
+                        Path(self._serve_str(payload, "path")).expanduser().resolve(),
+                    )
+                    message = "원본과 프록시의 대응을 확인하고 재연결했습니다."
+                _shell, workbench = self.visual_workbench_render(root)
+                return {
+                    "ok": True,
+                    "echoEpoch": echo,
+                    "html": workbench,
+                    "videoSrc": None,
+                    "message": message,
+                }
+            if kind == "select-source":
+                message, _shell, workbench = self.quick_source_view(
+                    self._serve_str(payload, "signature"), self._serve_str(payload, "sourceId")
+                )
+                return {
+                    "ok": True,
+                    "echoEpoch": echo,
+                    "html": workbench,
+                    "videoSrc": None,
+                    "message": message,
+                }
             if kind == "refresh":
                 page = self._serve_int(payload, "page", 1)
                 preferred = self._serve_str(payload, "selectedId") or None
@@ -1718,7 +3129,10 @@ class RawWorkspaceUi:
                         root, playhead=None, source_id=None, fallback_id=None
                     )
                 shell_unused, workbench = self.visual_workbench_render(
-                    root, page=page, preferred_selected_id=preferred
+                    root,
+                    page=page,
+                    preferred_selected_id=preferred,
+                    selection_filter=self._serve_str(payload, "filter") or "all",
                 )
                 return {
                     "ok": True,
@@ -1735,7 +3149,10 @@ class RawWorkspaceUi:
                 )
                 preferred = self._serve_str(payload, "selectedId") or None
                 _shell, workbench = self.visual_workbench_render(
-                    root, page=page, preferred_selected_id=preferred
+                    root,
+                    page=page,
+                    preferred_selected_id=preferred,
+                    selection_filter=self._serve_str(payload, "filter") or "all",
                 )
                 return {
                     "ok": True,
@@ -1904,6 +3321,7 @@ class RawWorkspaceUi:
             preferred_selected_id=selected_id,
             playhead_sec=playhead,
             source_id=source_id,
+            selection_filter=self._serve_str(payload, "filter") or "all",
         )
         return {
             "ok": True,
@@ -1949,6 +3367,7 @@ class RawWorkspaceUi:
             preferred_selected_id=selected_id,
             playhead_sec=playhead,
             source_id=source_id,
+            selection_filter=self._serve_str(payload, "filter") or "all",
         )
         return {
             "ok": True,
@@ -1984,7 +3403,25 @@ class RawWorkspaceUi:
         def vl_replan(payload: dict[str, object]) -> dict[str, object]:
             return self.visual_workbench_action(payload, "replan")
 
-        return [vl_refresh, vl_prepare, vl_propose, vl_apply, vl_replan]
+        def vl_select_source(payload: dict[str, object]) -> dict[str, object]:
+            return self.visual_workbench_action(payload, "select-source")
+
+        def vl_source_caption(payload: dict[str, object]) -> dict[str, object]:
+            return self.visual_workbench_action(payload, "source-caption")
+
+        def vl_relink_original(payload: dict[str, object]) -> dict[str, object]:
+            return self.visual_workbench_action(payload, "relink-original")
+
+        return [
+            vl_refresh,
+            vl_prepare,
+            vl_propose,
+            vl_apply,
+            vl_replan,
+            vl_select_source,
+            vl_source_caption,
+            vl_relink_original,
+        ]
 
     # ── 화면 1 — SD/폴더 가져오기(조사 → 순서 확인 → 복사·검증) ──
 
@@ -2047,10 +3484,23 @@ class RawWorkspaceUi:
     def _ingest_state_markdown(self, root: Path | None) -> str:
         """가져오기 패널 전체 보기 — 제안·확정·복사 진행을 한눈에(상태는 DB에서)."""
         proposal = None
+        fcp_scan = None
+        fcp_error: str | None = None
         with self._selection_lock:
-            if root is not None and self._ingest_signature == self._signature_for(root):
-                proposal = self._ingest_proposal
+            if root is not None:
+                signature = self._signature_for(root)
+                if self._ingest_signature == signature:
+                    proposal = self._ingest_proposal
+                # FCP 사실은 조사 제안 서명과 별개로 이 작업공간에 묶여 있다 —
+                # 조사가 실패해도(제안 서명 None) 라이브러리 사실·실패 사유가 보인다.
+                if self._fcp_signature == signature:
+                    fcp_scan = self._fcp_scan
+                    fcp_error = self._fcp_error
         base = self._proposal_markdown(proposal)
+        if fcp_scan is not None:
+            base = self._fcp_scan_markdown(fcp_scan) + "\n\n" + base
+        elif fcp_error is not None:
+            base = f"**FCP 라이브러리 조사 실패** — {fcp_error}\n\n" + base
         if root is None:
             return base
         assets, revision, jobs = self.raw.ingest_overview(root)
@@ -2131,15 +3581,30 @@ class RawWorkspaceUi:
         _ = revision
         return self._ingest_state_markdown(root)
 
-    def ingest_scan_view(self, signature: str | None, source_text: str) -> str:
-        """조사 이벤트 — 읽기만 한다. 제안은 현재 작업공간 서명에 묶어 보관한다."""
+    def ingest_scan_view(
+        self, signature: str | None, source_text: str, role: str | None = None
+    ) -> str:
+        """조사 이벤트 — 읽기만 한다. 제안은 현재 작업공간 서명에 묶어 보관한다.
+
+        경로가 `.fcpbundle`이면 FCP 라이브러리 조사로 흐른다 — 원본·프록시 중복은
+        논리 클립으로 묶이고 역할 선택이 제안을 정한다. 그 외 폴더는 일반 SD/폴더
+        조사 그대로다.
+        """
         root = self._require_current_selection(signature)
         text = (source_text or "").strip()
         if not text:
-            raise gr.Error("원본 폴더(SD 카드) 경로를 입력하세요.")
+            # 출처 표시가 비어 있어도 이 작업공간이 FCP 라이브러리에서 왔으면 그것으로
+            # 다시 조사한다 — 역할을 바꿔 누르는 길이 빈 입력 거절로 막히지 않는다.
+            library = self._current_fcp_library(signature)
+            if library is None:
+                raise gr.Error("원본 폴더를 선택기로 고르세요 — 폴더 찾아보기 또는 장치 후보.")
+            return self._scan_fcp_view(root, library, role or self._fcp_role)
+        path = Path(text).expanduser()
+        if raw_service.is_fcp_library(path):
+            return self._scan_fcp_view(root, path, role or self._fcp_role)
         try:
             proposal = self.raw.scan_sources(
-                root, Path(text), self._inspector or raw_service.ffprobe_media_inspector
+                root, path, self._inspector or raw_service.ffprobe_media_inspector
             )
         except raw_service.RawWorkspaceError as error:
             raise gr.Error(str(error)) from error
@@ -2150,6 +3615,27 @@ class RawWorkspaceUi:
             self._ingest_signature = self._signature_for(root)
             self._ingest_confirmation = None
         return self._ingest_state_markdown(root)
+
+    def _fcp_scan_markdown(self, scan: raw_service.FcpLibraryScan) -> str:
+        """FCP 라이브러리 조사 보기 — 논리 클립·역할·끊어진 링크를 숨기지 않고 적는다."""
+        lines = [
+            f"**FCP 라이브러리** `{scan.library_root}` — 라이브러리는 읽기만 하고,"
+            " 라이브러리 **밖** 관리 작업공간에서 가져온다.",
+            f"- 이벤트 {len(scan.events)}개({', '.join(scan.events) or '없음'}) ·"
+            f" 논리 클립 {len(scan.clips)}개 · 시간순 작업 역할 **{scan.role}**",
+            "- 같은 클립의 원본·프록시는 한 클립으로 묶였다 — 시간순 작업에는 선택"
+            " 역할만 들어가고, 다른 역할 파일은 라이브러리에 그대로 있다(지우지 않는다).",
+        ]
+        fallback = [note for _file, note in scan.selected if note]
+        if fallback:
+            lines.append(f"- 역할 대체 {len(fallback)}건: {' · '.join(sorted(set(fallback))[:3])}")
+        broken = scan.broken
+        if broken:
+            lines += ["", f"**끊어졌거나 가져올 수 없는 링크 {len(broken)}건**"]
+            lines += [f"- `{item.linked_from}` — {item.reason}" for item in broken[:8]]
+            if len(broken) > 8:
+                lines.append(f"- … 외 {len(broken) - 8}건")
+        return "\n".join(lines)
 
     def _require_ingest_proposal(self, root: Path) -> raw_service.IngestProposal:
         """이 작업공간을 위해 조사한 제안 — 없으면(또는 다른 작업공간의 것이면) 안내한다."""
@@ -3055,7 +4541,7 @@ class RawWorkspaceUi:
     # ── 화면 3 · 화면 4 — 편집용 폴더 · 최종 자막 ────────────────
 
     def _package_tab(self) -> None:
-        with gr.Tab("3 · 편집용 폴더"):
+        with gr.Accordion("고급 · 클립 패키지", open=False):
             self._package_md = gr.Markdown(self._package_state_markdown(self._snapshot_root()))
             self._package_path_box = gr.Textbox(
                 label="편집용 폴더 절대 경로(복사용)",
@@ -3840,8 +5326,22 @@ class RawWorkspaceUi:
             raw_service.FinalVideoError,
         ) as error:
             raise gr.Error(str(error)) from error
+        ws.select_registration(registration)
+        identity = self._caption_identity
+        if identity is None or (identity.get("revision"), identity.get("audio_ordinal")) != (
+            registration.final_video_revision,
+            registration.audio_ordinal,
+        ):
+            self._caption_identity = None
+            self._caption_signature = None
+            self._caption_head_sequence = None
+            self._caption_cue_ids = ()
+            self._caption_cue_rows = ()
+            self._caption_cue_clock = {}
+            self._caption_unplaced = {}
+            self._caption_lifetime_token = uuid.uuid4().hex
         note = {
-            "ready": "등록 완료 — 아래 실행 ID로 추정·실행한다.",
+            "ready": "등록 완료 — 이 최종 영상을 기준으로 자막을 생성합니다.",
             "no_audio": "**오디오가 없다** — 무발화가 아니라 별개 상태다. 실행·추정은 닫혀 있다.",
             "audio_selection_required": (
                 f"**오디오 트랙이 {registration.audio_stream_count}개다** — 오디오 트랙"
@@ -3869,10 +5369,9 @@ class RawWorkspaceUi:
         root = self._require_current_selection(signature)
         run = (run_id or "").strip() or "run-1"
         ws = self._caption_ws(root)
-        ready = [item for item in ws.registrations() if item.ready]
-        if not ready:
+        registration = ws.active_registration()
+        if registration is None or not registration.ready:
             raise gr.Error("준비된 등록이 없다 — 먼저 최종 영상 등록(오디오 선택 확정)을 끝내세요.")
-        registration = ready[-1]
         try:
             estimate = ws.estimate(registration, run_id=run)
         except (raw_service.RawWorkspaceError, raw_service.CaptionWorkspaceError) as error:
@@ -4663,13 +6162,31 @@ class RawWorkspaceUi:
             *self._caption_context_tail(),
         )
 
+    @staticmethod
+    def caption_public_status(markdown: str) -> str:
+        """Keep cost, progress, errors and download links at the execution controls."""
+        import re
+
+        lines = [line for line in markdown.splitlines() if line.strip()]
+        shown = [
+            line
+            for index, line in enumerate(lines)
+            if index == 0
+            or any(
+                word in line
+                for word in ("비용", "청크", "실패", "경고", "완료", "SRT", "VTT", "승인")
+            )
+        ]
+        return re.sub(r"`[^`]*`", "", "\n\n".join(shown))
+
     def _caption_tab(self) -> None:
-        with gr.Tab("4 · 최종 영상 · 자막"):
+        with gr.Tab("자막", visible=False):
             # ── 접힌 세팅 — 설정 안내·등록·실행(기존 흐름)은 무대 위 한 줄로 접는다.
             # 1440x900에서 재생기·편집기·주 저장/확정 단추가 문서 스크롤 없이
             # 먼저 들어온다(ROOT 실측: 재생기 top 536 · 저장 1287 → 무대 재배치).
-            with gr.Accordion("설정 · 등록 · 실행 — 최종 영상 세팅(기존)", open=False):
-                self._settings_md = gr.Markdown(self.settings_markdown())
+            with gr.Accordion("최종 영상 선택 · 자막 생성", open=True):
+                with gr.Accordion("비용 · 모델 설정", open=False):
+                    self._settings_md = gr.Markdown(self.settings_markdown())
                 gr.Markdown(
                     "> **최종 영상 자막** — 등록(검증 사본·오디오 트랙 선택) → 추정"
                     "(모델·수명주기·실측 청크) → 확인란 승인 → 실행 작업 → 검토(큐 행·"
@@ -4677,13 +6194,16 @@ class RawWorkspaceUi:
                     " 열리고, 키는 서버를 띄운 환경에서만 온다(§14.3)."
                 )
                 with gr.Row():
-                    caption_path_box = gr.Textbox(
-                        label="최종 영상 절대 경로",
-                        placeholder="/Users/…/final.mp4",
+                    self._caption_path_box = gr.Textbox(
+                        label="최종 영상 절대 경로 — 선택기 표시",
+                        placeholder="최종 영상 고르기(선택기)로 고르세요",
                         scale=4,
+                        interactive=False,
                     )
+                    caption_pick_button = gr.Button("최종 영상 고르기(선택기)", scale=2)
+                with gr.Row():
                     caption_source_box = gr.Textbox(
-                        label="출처 ID(선택)", placeholder="final_1", scale=2
+                        label="출처 ID(선택)", placeholder="final_1", scale=2, visible=False
                     )
                     caption_ordinal_dd = gr.Dropdown(
                         choices=["자동(첫 트랙)", "0", "1", "2"],
@@ -4695,9 +6215,12 @@ class RawWorkspaceUi:
                     caption_register_button = gr.Button(
                         "최종 영상 등록", variant="primary", scale=2
                     )
+                caption_public_status = gr.Markdown(
+                    "최종 영상을 등록하면 비용과 진행 상태가 표시됩니다."
+                )
                 with gr.Row():
                     caption_run_box = gr.Textbox(
-                        label="실행 ID", value="run-1", interactive=True, scale=2
+                        label="실행 ID", value="run-1", interactive=False, scale=2, visible=False
                     )
                     caption_estimate_button = gr.Button("실행 추정(로컬)", scale=2)
                     caption_confirm_box = gr.Checkbox(
@@ -4790,11 +6313,25 @@ class RawWorkspaceUi:
                     "_자막 상태가 여기 나타난다._", elem_id="caption-state"
                 )
 
+            self._caption_md.change(
+                self.caption_public_status, self._caption_md, caption_public_status
+            )
+
             # 문맥(수명 토큰·화면이 본 머리)을 주고받는다 — 등록·새로고침은 새
             # 문맥을 내리고, 수동 편집·확정은 옛 문맥 사건을 거부한다.
+            assert self._caption_path_box is not None
+            self._caption_pick_button = caption_pick_button
+            caption_pick_button.click(
+                self.final_video_chooser_view,
+                None,
+                [self._caption_path_box],
+                api_name=False,
+                concurrency_limit=1,
+                concurrency_id=ui_chooser.CHOOSER_CONCURRENCY_ID,
+            )
             caption_register_inputs = [
                 self._signature_state,
-                caption_path_box,
+                self._caption_path_box,
                 caption_source_box,
                 caption_ordinal_dd,
             ]
@@ -4928,6 +6465,9 @@ class RawWorkspaceUi:
         str,
         str,
         str,
+        str,
+        str,
+        str,
     ]:
         """페이지 로드·새로고침 — 상태를 전부 서버에서 다시 읽는다.
 
@@ -4954,12 +6494,22 @@ class RawWorkspaceUi:
             gr.Dropdown(choices=self.resumable_analysis_choices()),
             gr.CheckboxGroup(choices=self.analysis_source_choices()),
             *self._workbench_view_values(self._snapshot_root()),
+            self._ws_path_display(),
+            "",
+            "",
         )
 
     def build_blocks(self) -> gr.Blocks:
         # theme·css는 gradio 6부터 launch/마운트 쪽 인자다(Blocks 생성자에 넣으면 경고).
         with gr.Blocks(title="vlogsrt 원본 브라우저") as app:
-            gr.Markdown("### vlogsrt 원본 브라우저 · 원본 → 조각 → 편집 → 자막")
+            gr.Markdown("### vlogsrt · Final Cut 컷 정리")
+            gr.Markdown("라이브러리 불러오기 → 자막·영상 분석 → 사용할 컷 선택 → Final Cut 출력")
+            gr.Markdown(
+                "**온라인 모드** · 선택한 영상의 범위를 승인한 뒤 유료 분석을 실행합니다."
+                if raw_service.browser_network_mode() == "online"
+                else "**오프라인 모드** · 이 실행에서는 유료 분석을 차단합니다.",
+                elem_id="app-analysis-mode",
+            )
             # 화면이 마지막으로 본 작업공간 신원 — 선택의 최신 증명에만 쓴다.
             # 정본은 서버(DB)에 있고, 이 값은 새로고침마다 서버에서 다시 내려온다.
             self._signature_state = gr.State(None)
@@ -4969,9 +6519,8 @@ class RawWorkspaceUi:
             self._review_head_state = gr.State(None)
             self._caption_context_state = gr.State(None)
             self._caption_head_state = gr.State(None)
-            open_button, create_button, ws_path_box, new_name_box = self._project_tab()
+            open_button, create_button = self._project_tab()
             extract_button, refresh_segment, profile_dd, analysis_plan = self._review_tab()
-            self._package_tab()
             self._caption_tab()
             # 추출 시작·새로고침은 3번 탭(package 패널)까지 만들어진 뒤에 묶는다.
             extract_button.click(
@@ -4989,14 +6538,72 @@ class RawWorkspaceUi:
             # 만들기·열기는 **같은 화면**에 작업공간 전체 보기(서명·미디어·작업·설정)를
             # 바로 내린다 — 새로고침을 강제하지 않는다(루트 재현). 전환 이벤트의 출력
             # 목록은 모든 탭의 구성요소가 만들어진 뒤에야 완성되므로 여기서 묶는다.
-            open_button.click(self.open_workspace_view, ws_path_box, self._selection_outputs())
-            create_button.click(
-                self.create_workspace_view,
-                [new_name_box, ws_path_box],
-                self._selection_outputs(),
+            # 경로는 선택기에서만 온다 — 열기는 폴더/`.fcpbundle`을 스스로 가르고,
+            # 만들기는 이름만 받아 자리를 선택기로 얻는다. 선택기 단추는 대화상자가
+            # 겹치지 않게 공유 동시성 묶음에 넣고 API 노출은 만들지 않는다(화면 전용).
+            selection_outputs = self._selection_outputs()
+            fcp_outputs = [
+                self._fcp_originals_group,
+                self._fcp_primary_info,
+                self._fcp_primary_import,
+            ]
+            self._direct_project_open.click(
+                self.direct_project_open_view,
+                self._direct_project_path,
+                [*selection_outputs, *fcp_outputs],
             )
-            app.load(self.refresh_outputs, None, self._load_outputs())
+            self._quick_library_button.click(
+                self.capcut_fcp_choose_view,
+                None,
+                [*selection_outputs, *fcp_outputs],
+                api_name=False,
+                concurrency_limit=1,
+                concurrency_id=ui_chooser.CHOOSER_CONCURRENCY_ID,
+            ).then(lambda: gr.update(open=False), None, self._project_tools)
+            self._fcp_primary_button.click(
+                self.capcut_fcp_choose_view,
+                None,
+                [*selection_outputs, *fcp_outputs],
+                api_name=False,
+                concurrency_limit=1,
+                concurrency_id=ui_chooser.CHOOSER_CONCURRENCY_ID,
+            )
+            self._fcp_primary_import.click(
+                self.capcut_fcp_import_view,
+                [self._signature_state, self._fcp_originals_group],
+                [self._capcut_status, self._visual_player_block, self._visual_workbench_block],
+                js="""(signature, selected) => {
+                    const button = document.querySelector('#project-tools > button.label-wrap');
+                    if (button && button.classList.contains('open')) button.click();
+                    return [signature, selected];
+                }""",
+            )
+            open_button.click(
+                self.open_project_chooser_view,
+                None,
+                selection_outputs,
+                api_name=False,
+                concurrency_limit=1,
+                concurrency_id=ui_chooser.CHOOSER_CONCURRENCY_ID,
+            ).then(self.capcut_fcp_panel_view, None, fcp_outputs)
+            assert self._project_name_box is not None
+            create_button.click(
+                self.create_project_chooser_view,
+                [self._project_name_box],
+                selection_outputs,
+                api_name=False,
+                concurrency_limit=1,
+                concurrency_id=ui_chooser.CHOOSER_CONCURRENCY_ID,
+            ).then(self.capcut_fcp_panel_view, None, fcp_outputs)
+            app.load(self.refresh_outputs, None, self._load_outputs()).then(
+                self.capcut_fcp_panel_view, None, fcp_outputs
+            )
         return app
+
+    def _ws_path_display(self) -> str:
+        """읽기전용 경로 표시 칸의 값 — 지금 열린 작업공간 자리(선택기로만 정해진다)."""
+        root = self._snapshot_root()
+        return str(root) if root is not None else ""
 
     def _load_outputs(self) -> list[object]:
         assert (
@@ -5017,6 +6624,9 @@ class RawWorkspaceUi:
             and self._analysis_jobs_dd is not None
             and self._analysis_sources_group is not None
             and self._signature_state is not None
+            and self._ws_path_box is not None
+            and self._source_box is not None
+            and self._caption_path_box is not None
         )
         return [
             self._workspace_md,
@@ -5037,6 +6647,9 @@ class RawWorkspaceUi:
             self._analysis_jobs_dd,
             self._analysis_sources_group,
             *self._workbench_outputs(),
+            self._ws_path_box,
+            self._source_box,
+            self._caption_path_box,
         ]
 
     # ── HTTP 경계 — 모든 요청에 Host/Origin 가드, 미디어는 ID로만 ──

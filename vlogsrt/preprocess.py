@@ -15,15 +15,19 @@ import re
 import secrets
 import shutil
 import subprocess
-from collections.abc import Mapping, Sequence
+import tempfile
+import time
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from fractions import Fraction
 from pathlib import Path
+from typing import Any
 
 from . import cutpoints, log
 from .config import Config
 from .models import Chunk, Span
+from .task_runtime import cancellation_active, check_cancel
 
 REPAIR_DIR = "repair"  # 재전사 조각은 따로 둔다. 1차 조각을 덮어쓰면 안 된다
 
@@ -50,9 +54,45 @@ def require_ffmpeg(tool: str = "ffmpeg") -> str:
     return path
 
 
+def run_process(
+    command: list[str], *, on_poll: Callable[[], None] | None = None, **kwargs: Any
+) -> subprocess.CompletedProcess:
+    if not cancellation_active() and on_poll is None:
+        return subprocess.run(command, **kwargs)
+    check_cancel()
+    timeout = kwargs.pop("timeout", 1800.0)
+    kwargs.pop("check", None)
+    if kwargs.pop("capture_output", False):
+        kwargs.update(stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    process = subprocess.Popen(command, **kwargs)
+    deadline = time.monotonic() + timeout
+    try:
+        while True:
+            check_cancel()
+            if time.monotonic() >= deadline:
+                raise subprocess.TimeoutExpired(command, timeout)
+            try:
+                stdout, stderr = process.communicate(timeout=0.15)
+                if on_poll is not None:
+                    on_poll()
+                return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+            except subprocess.TimeoutExpired:
+                if on_poll is not None:
+                    on_poll()
+                continue
+    except BaseException:
+        process.terminate()
+        try:
+            process.communicate(timeout=1)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.communicate()
+        raise
+
+
 def _run(command: list[str]) -> subprocess.CompletedProcess[str]:
     try:
-        completed = subprocess.run(command, capture_output=True, text=True, check=False)
+        completed = run_process(command, capture_output=True, text=True, check=False)
     except OSError as exc:
         raise RuntimeError(f"명령 실행 실패: {command[0]} ({exc})") from exc
     if completed.returncode != 0:
@@ -92,7 +132,7 @@ def _run_probe(command: list[str]) -> str:
     안 된다** — '스트림 0개·무음'은 지원되는 상태지 실패의 위장이 아니다.
     """
     try:
-        completed = subprocess.run(
+        completed = run_process(
             command,
             capture_output=True,
             text=True,
@@ -559,7 +599,7 @@ def amplitudes(path: Path, start: float, length: float, cfg: Config) -> list[flo
         "-t", f"{max(0.0, length):.6f}",
         "-f", "s16le", "-ac", "1", "-ar", str(cfg.cut_probe_rate), "-",
     ]  # fmt: skip
-    completed = subprocess.run(command, capture_output=True, check=False)
+    completed = run_process(command, capture_output=True, check=False)
     if completed.returncode != 0:
         raise RuntimeError(f"진폭을 읽지 못했습니다: {path} (코드 {completed.returncode})")
 
@@ -992,6 +1032,99 @@ def extract_frame_index(
         raise RuntimeError(f"프레임 이미지가 남지 않았습니다: {destination}")
     log.debug(f"프레임 추출 완료: {destination} (스트림 {stream_index}, 프레임 {frame_index})")
     return destination
+
+
+def extract_frame_indices(
+    source: Path,
+    stream_index: int,
+    frame_indices: Sequence[int],
+    directory: Path,
+    *,
+    long_edge: int,
+    on_frame: Callable[[int, Path], None] | None = None,
+) -> dict[int, Path]:
+    """Decode once in presentation order and publish only completed JPEGs.
+
+    Source decode indices remain exact; no approximate timestamp seeking is used.
+    image2 atomic_writing prevents progress polling from publishing partial files.
+    Completed frames survive cancellation, while the private staging area is removed.
+    """
+    _require_index(stream_index, "스트림 번호")
+    for index in frame_indices:
+        _require_index(index, "프레임 번호")
+    if isinstance(long_edge, bool) or not isinstance(long_edge, int) or long_edge <= 0:
+        raise RuntimeError("long_edge는 양수 정수여야 합니다")
+    indices = sorted(set(frame_indices))
+    if not indices:
+        return {}
+    directory.mkdir(parents=True, exist_ok=True)
+    published: dict[int, Path] = {}
+    with tempfile.TemporaryDirectory(prefix=".frame-batch-", dir=directory) as temporary:
+        staging = Path(temporary)
+
+        def publish_ready() -> None:
+            check_cancel()
+            while len(published) < len(indices):
+                ordinal = len(published)
+                staged = staging / f"{ordinal:08d}.jpg"
+                if not staged.is_file():
+                    break
+                index = indices[ordinal]
+                target = directory / f"frame_{index:08d}.jpg"
+                os.replace(staged, target)
+                published[index] = target
+                if on_frame is not None:
+                    on_frame(index, target)
+                check_cancel()
+
+        select = "+".join(f"eq(n\\,{index})" for index in indices)
+        command = [
+            require_ffmpeg(),
+            "-hide_banner",
+            "-nostdin",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
+            str(source),
+            "-map",
+            f"0:{stream_index}",
+            "-vf",
+            "select=" + select + "," + _long_edge_scale(long_edge),
+            "-fps_mode",
+            "passthrough",
+            "-frames:v",
+            str(len(indices)),
+            "-q:v",
+            str(_JPEG_QUALITY),
+            "-pix_fmt",
+            _JPEG_PIXFMT,
+            "-fflags",
+            "+bitexact",
+            "-flags:v",
+            "+bitexact",
+            "-f",
+            "image2",
+            "-start_number",
+            "0",
+            "-atomic_writing",
+            "1",
+            str(staging / "%08d.jpg"),
+        ]
+        completed = run_process(
+            command,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=1800.0,
+            on_poll=publish_ready,
+        )
+        if completed.returncode:
+            raise RuntimeError("프레임 묶음 추출 실패: " + completed.stderr[-500:])
+        publish_ready()
+        if len(published) != len(indices):
+            raise RuntimeError(f"프레임 묶음이 완전하지 않습니다: {len(published)}/{len(indices)}")
+    return published
 
 
 def _frame_extraction_command(
@@ -2392,7 +2525,7 @@ def _verify_raw_decodes(path: Path) -> None:
     줄 둘 다 실패다. 실패한 파일은 게시할 수 없다.
     """
     ffmpeg = require_ffmpeg()
-    completed = subprocess.run(
+    completed = run_process(
         [ffmpeg, "-v", "error", "-xerror", "-i", str(path), "-f", "null", "-"],
         capture_output=True,
         text=True,
@@ -2724,3 +2857,67 @@ def extract_visual_review_preview(
         ffmpeg_version=_tool_version("ffmpeg"),
         warnings=warnings,
     )
+
+
+def correspondence_samples(
+    path: Path, seconds: Sequence[Fraction], *, audio: bool = False
+) -> tuple[bytes, ...]:
+    """Small decoded samples for explicit original/proxy correspondence checks."""
+    samples = []
+    ffmpeg = require_ffmpeg()
+    for second in seconds:
+        command = [ffmpeg, "-v", "error", "-ss", str(float(second)), "-i", str(path)]
+        if audio:
+            command += [
+                "-map",
+                "0:a:0",
+                "-t",
+                "0.25",
+                "-ac",
+                "1",
+                "-ar",
+                "8000",
+                "-f",
+                "s16le",
+                "-",
+            ]
+        else:
+            command += [
+                "-map",
+                "0:v:0",
+                "-frames:v",
+                "1",
+                "-vf",
+                "scale=32:32,format=gray",
+                "-f",
+                "rawvideo",
+                "-",
+            ]
+        result = run_process(command, capture_output=True, check=False, timeout=30)
+        if result.returncode or not result.stdout:
+            raise RuntimeError("대응 표본을 추출하지 못했습니다")
+        samples.append(result.stdout)
+    return tuple(samples)
+
+
+def verified_scene_times(path: Path) -> tuple[Fraction, ...]:
+    """Decoded adjacent-frame cuts; low resolution is sufficient for cut evidence."""
+    result = _run(
+        [
+            require_ffmpeg(),
+            "-hide_banner",
+            "-loglevel",
+            "info",
+            "-i",
+            str(path),
+            "-an",
+            "-vf",
+            "scale=160:-2,select=gt(scene\\,0.35),showinfo",
+            "-fps_mode",
+            "vfr",
+            "-f",
+            "null",
+            "-",
+        ]
+    )
+    return tuple(Fraction(value) for value in re.findall(r"pts_time:([0-9.]+)", result.stderr))

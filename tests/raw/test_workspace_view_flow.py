@@ -84,9 +84,14 @@ def test_same_view_create_switches_the_whole_view(tmp_path: Path, local_socket: 
         visual_shell,
         visual_workbench,
         caption_workbench,
+        ws_display,
+        source_display,
+        caption_display,
     ) = first
     assert signature_a is not None
     assert "A" in workspace_md
+    assert ws_display == str(tmp_path / "a")  # 읽기전용 경로 표시도 함께 내려왔다
+    assert source_display == "" and caption_display == ""  # 출처 표시는 새 상태로 시작
     assert "자막 프리셋" in settings_md  # 설정 요약도 같은 화면에 내려왔다(빈 안내 아님)
     assert "조사" in ingest_md  # 가져오기 패널도 같은 화면에 내려왔다(새 상태 안내)
     assert "분할" in segment_md  # A3 분할 패널도 같은 화면에 내려왔다
@@ -97,10 +102,12 @@ def test_same_view_create_switches_the_whole_view(tmp_path: Path, local_socket: 
     second = server.create_workspace_view("B", str(tmp_path / "b"))
     assert second[1] is not None and second[1] != signature_a  # 서명이 B로 갱신
     assert "B" in second[0]
+    assert second[-3] == str(tmp_path / "b")  # 경로 표시도 B 자리를 가리킨다
+    assert second[-2] == "" and second[-1] == ""  # 낡은 출처 표시는 남지 않는다
     # V2 작업대 세 값도 같은 전환에 함께 내려온다 — 전환 이벤트가 실제로 다시
-    # 그린다(영상 언로드·새 epoch는 전용 시험이 잰다).
-    assert 'id="visual-video"' in second[-3] and isinstance(second[-2], str)
-    assert isinstance(second[-1], str) and 'id="caption-workbench"' in second[-1]
+    # 그린다(영상 언로드·새 epoch는 전용 시험에서 잰다).
+    assert 'id="visual-video"' in second[-6] and isinstance(second[-5], str)
+    assert isinstance(second[-4], str) and 'id="caption-workbench"' in second[-4]
     _ = visual_shell, visual_workbench, caption_workbench
 
     # 같은 화면의 서명으로 방금 만든 B의 작업 취소 — 바로 통과해야 한다

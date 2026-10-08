@@ -35,6 +35,9 @@ from ui import service as legacy_service  # noqa: E402
 
 @pytest.fixture(autouse=True)
 def synthetic_ui_state(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    from ui.instance import UiInstance
+
+    monkeypatch.setattr(ui_app, "UiInstance", lambda project, port: UiInstance(tmp_path, port))
     state = tmp_path / "ui-state.json"
     monkeypatch.setenv("VLOGSRT_RAW_UI_STATE", str(state))
     return state
@@ -76,15 +79,21 @@ def _patch_launch(monkeypatch: pytest.MonkeyPatch, chosen_port: int) -> dict[str
     return {"killed": killed, "launched": launched}
 
 
-def test_the_entrypoint_never_kills_another_ui(monkeypatch: pytest.MonkeyPatch) -> None:
-    """포트가 차 있어도 죽이지 않고 옆 포트로 띄운다 — 작업 소유 서버 보존."""
-    world = _patch_launch(monkeypatch, chosen_port=7861)
-    code = ui_app.main(["--port", "7860", "--no-browser"])
-    assert code == 0
-    assert world["killed"] == []  # 자동 종료 경로는 아예 없다
-    assert world["launched"]["host"] == "127.0.0.1"
-    assert world["launched"]["port"] == 7861  # 비켜 간 포트
-    assert _StubUi.built[-1]["port"] == 7861
+def test_the_entrypoint_refuses_an_occupied_port_without_killing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    world = _patch_launch(monkeypatch, chosen_port=7860)
+    attempts_seen = []
+
+    def occupied(preferred: int, attempts: int = 20):
+        attempts_seen.append(attempts)
+        raise legacy_service.UiError("busy")
+
+    monkeypatch.setattr(legacy_service, "pick_port", occupied)
+    assert ui_app.main(["--port", "7860", "--no-browser"]) == 1
+    assert attempts_seen == [1]
+    assert world["killed"] == []
+    assert world["launched"] == {}
 
 
 def test_the_entrypoint_uses_the_preferred_port_when_free(
@@ -99,3 +108,46 @@ def test_the_entrypoint_uses_the_preferred_port_when_free(
 def test_share_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_launch(monkeypatch, chosen_port=7860)
     assert ui_app.main(["--share"]) == 1
+
+
+def test_shutting_down_instance_does_not_report_reuse_success(monkeypatch, tmp_path):
+    from ui.instance import UiInstance
+
+    world = _patch_launch(monkeypatch, chosen_port=7860)
+    with UiInstance(tmp_path, 7860):
+        monkeypatch.setattr(UiInstance, "wait_until_listening", lambda self: False)
+        assert ui_app.main(["--no-browser"]) == 1
+    assert world["launched"] == {}
+    assert world["killed"] == []
+
+
+@pytest.mark.parametrize(
+    "arguments,expected", [([], "0"), (["--online"], "0"), (["--offline"], "1")]
+)
+def test_normal_launcher_mode_precedes_dotenv_without_changing_file(
+    monkeypatch, synthetic_dotenv, arguments, expected
+):
+    import os
+
+    from vlogsrt import env
+
+    world = _patch_launch(monkeypatch, chosen_port=7860)
+    dotenv = synthetic_dotenv
+    dotenv.write_text("VLOGSRT_OFFLINE=1\nOPENAI_API_KEY=sk-test-only\n")
+    before = dotenv.read_bytes()
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-only")
+    modes = []
+    original_init = _StubUi.__init__
+
+    def capture(self, port):
+        env.load_env(dotenv)  # normal loader; the startup override must win
+        modes.append(os.environ["VLOGSRT_OFFLINE"])
+        original_init(self, port)
+
+    monkeypatch.setattr(_StubUi, "__init__", capture)
+    monkeypatch.setenv("VLOGSRT_OFFLINE", "1")
+    assert ui_app.main([*arguments, "--no-browser"]) == 0
+    assert modes == [expected]
+    assert dotenv.read_bytes() == before
+    assert world["launched"]["port"] == 7860
+    assert world["killed"] == []

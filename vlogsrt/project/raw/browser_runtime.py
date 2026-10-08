@@ -4,9 +4,9 @@
 실행(`ui.app`)은 아무것도 주입받지 않으므로 그대로는 실제 호출 단추가 전부
 정직한 오류로 끝난다 — 이 모듈이 그 갭을 **사람이 승인한 행동 안에서만** 채운다:
 
-- 자격증명은 **서버 환경만** 본다(`os.environ` 직접 읽기). `.env` 로더
-  (`vlogsrt.env`)를 절대 지나지 않는다 — 파일을 열지 않고, 값이나 자리를
-  화면·로그에도 내보내지 않는다(§14.3).
+- 일반 앱 시작은 정본 `.env` 로더로 설정을 준비하고 자격증명을 메모리에만
+  보관한다. 테스트의 명시적 환경 Mapping은 파일 로더를 거치지 않는다.
+  자격증명 값은 화면·로그·프로젝트 기록에 내보내지 않는다.
 - 전송 경계는 이미 받아들인 정본뿐이다: 내부 ASR는 `LiveTranscriber`
   (`vlogsrt/transcribe`, API 호출의 유일한 곳), Luna는 `create_vision_client`.
   모델 대체는 없다 — 설정 모델 그대로고 실패는 그대로 올라간다.
@@ -78,6 +78,29 @@ def capture_environment_credentials(
         return None
     base_url = (source.get(STT_BASE_URL_ENV) or "").strip() or None
     return EnvironmentCredentials(api_key=key, base_url=base_url)
+
+
+def capture_browser_credentials() -> EnvironmentCredentials | None:
+    """Normal browser startup uses the same opaque dotenv loader as the CLI."""
+    from vlogsrt import env
+
+    env.ensure_loaded()
+    return capture_environment_credentials()
+
+
+def browser_network_mode() -> str:
+    """Effective process mode, without inspecting or returning credential values."""
+    from vlogsrt import env
+
+    return "offline" if env.is_offline() else "online"
+
+
+def prepare_approved_browser_network() -> None:
+    """Approval enables the absent browser default; explicit offline stays authoritative."""
+    from vlogsrt import env
+
+    env.ensure_loaded()
+    os.environ.setdefault("VLOGSRT_OFFLINE", "0")
 
 
 def _require_environment_credentials(

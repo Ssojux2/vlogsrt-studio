@@ -249,6 +249,27 @@ def scan_sources(
     )
 
 
+def scan_selected_source(
+    source: Path, workspace_root: Path, inspect: MediaInspect = ffprobe_media_inspector
+) -> IngestProposal:
+    """Inspect only the chosen video; never walk neighbouring user files."""
+    if (
+        any(_pruned_name(part) for part in source.parts)
+        or source.suffix.lower() not in MEDIA_SUFFIXES
+    ):
+        raise IngestError("지원하지 않는 영상 경로입니다")
+    root = source.parent.expanduser().resolve()
+    if root.is_relative_to(workspace_root.expanduser().resolve()):
+        raise SourceNestingError("작업공간 안의 영상을 다시 가져올 수 없습니다")
+    candidates: list[SourceCandidate] = []
+    rejected: list[RejectedSource] = []
+    _consider_entry(root / source.name, source.name, root, inspect, candidates, rejected)
+    scan = SourceScan(str(root), tuple(candidates), tuple(rejected))
+    if not candidates:
+        raise IngestError("영상 선택 실패: " + "; ".join(r.reason for r in rejected))
+    return IngestProposal(scan, tuple(candidates), space_estimate(workspace_root, scan.total_bytes))
+
+
 def _safe_source_root(source_root: Path, workspace_root: Path) -> Path:
     """가져오기 원본 루트 검사 — 없는 곳·파일·작업공간과의 포함 관계를 끊는다.
 

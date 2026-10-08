@@ -275,8 +275,12 @@ def _selected_segments(
         missing = ", ".join(sorted(selected - known))
         raise ConfirmedExportError(f"검토 리비전에 없는 조각을 확정하려 한다: {missing}")
     chosen = [
-        segment for segment in review.segments if selected is None or segment.segment_id in selected
+        segment
+        for segment in review.segments
+        if segment.selection == "included" and (selected is None or segment.segment_id in selected)
     ]
+    if not chosen:
+        raise ConfirmedExportError("사용할 컷이 하나도 없다 — 컷을 복원한 뒤 내보내세요")
     return tuple(sorted(chosen, key=lambda s: (s.source_order, s.start_pts, s.segment_order)))
 
 

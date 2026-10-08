@@ -381,20 +381,35 @@ def visual_player_shell_html(video_src: str | None, note: str) -> str:
     src_attr = f' src="{safe_src}" data-vl-src="{safe_src}"' if video_src else ""
     safe_note = html.escape(note)
     return (
-        '<div id="visual-player" class="vl-player">\n'
-        '  <video id="visual-video" controls preload="metadata"'
-        f'{src_attr} aria-label="원본 전체 미리보기 재생기" style="width:100%;'
-        "max-height:44vh;min-height:180px;background:#000;border-radius:8px;"
-        'object-fit:contain;"></video>\n'
-        f'  <p id="visual-note" class="vl-note">{safe_note}</p>\n'
-        '  <div id="visual-rail" class="vl-rail" role="group"'
-        ' aria-label="원본 시간 레일 — 클릭은 이동, 모서리 손잡이는 경계 초안"></div>\n'
-        '  <div class="vl-transport">\n'
-        '    <button type="button" id="vl-repeat" class="vl-btn">선택 반복</button>\n'
-        '    <button type="button" id="vl-pause" class="vl-btn">정지</button>\n'
-        '    <span id="vl-clock" class="vl-clock" aria-live="off">0.000</span>\n'
-        "  </div>\n"
-        "</div>"
+        '<div id="visual-player" class="vl-player">'
+        '<section id="visual-preview" aria-label="선택 영상 미리보기">'
+        '<div class="vl-video-surface">'
+        '<video id="visual-video" controls preload="metadata"'
+        f'{src_attr} aria-label="원본 전체 미리보기 재생기"></video>'
+        '<div id="visual-source-caption" class="vl-source-overlay"'
+        ' aria-live="off" hidden></div></div>'
+        '<button type="button" id="vl-current-caption" class="vl-current-caption" disabled'
+        ' aria-label="현재 원본 자막 수정">재생하면 원본 자막이 여기에 표시됩니다.</button>'
+        f'<p id="visual-note" class="vl-note">{safe_note}</p></section>'
+        '<section id="visual-timeline" aria-label="추천 구간과 영상 타임라인">'
+        '<div class="vl-transport">'
+        '<strong>타임라인</strong><span class="vl-legend">'
+        '<span class="vl-good">● 추천</span> · 사용 가능 · '
+        '<span class="vl-review">● 확인 필요</span></span>'
+        '<button type="button" id="vl-source-caption-toggle" class="vl-btn"'
+        ' aria-pressed="true">재생 자막</button>'
+        '<button type="button" id="vl-timeline-mode" class="vl-btn">원본 타임라인</button>'
+        '<button type="button" id="vl-kept-play" class="vl-btn">사용할 컷 연속 재생</button>'
+        '<button type="button" id="vl-zoom-in" class="vl-btn"'
+        ' aria-label="타임라인 확대">＋</button>'
+        '<button type="button" id="vl-zoom-out" class="vl-btn"'
+        ' aria-label="타임라인 축소">−</button>'
+        '<button type="button" id="vl-repeat" class="vl-btn">선택 반복</button>'
+        '<button type="button" id="vl-pause" class="vl-btn">정지</button>'
+        '<span id="vl-clock" class="vl-clock" aria-live="off">0.000</span></div>'
+        '<div id="visual-rail" class="vl-rail" role="group" '
+        'aria-label="추천 트랙은 영상 트랙 위에 있습니다. 클릭하면 해당 시각으로 이동합니다"></div>'
+        "</section></div>"
     )
 
 
@@ -556,7 +571,7 @@ WORKBENCH_CSS = """
 #visual-stage {
   display: grid;
   grid-template-columns: minmax(200px, 300px) minmax(0, 1fr) minmax(260px, 400px);
-  grid-template-areas: "thumbs player panel" "foot foot foot";
+  grid-template-areas: "thumbs player panel" "timeline timeline timeline" "foot foot foot";
   gap: 12px; align-items: start; margin-top: 4px;
 }
 #visual-stage .vl-stage-cell { display: contents; }
@@ -569,8 +584,46 @@ WORKBENCH_CSS = """
 #visual-workbench:not([data-vl-empty]) { display: contents; }
 #visual-workbench[data-vl-empty] { grid-column: 1 / -1; }
 #vl-thumbs { grid-area: thumbs; }
-#visual-player { grid-area: player; }
-#vl-panel { grid-area: panel; }
+#visual-player { display: contents; }
+#visual-preview { grid-area: player; min-width:0; }
+#visual-preview video { width:100%; height:300px; background:#08090b; object-fit:contain; }
+.vl-video-surface { position:relative; }
+#visual-video::cue { color:#fff; background:rgba(0,0,0,.78); font-size:20px; }
+.vl-source-overlay { position:absolute; bottom:44px; left:50%; transform:translateX(-50%);
+ max-width:90%; padding:5px 10px; border-radius:4px; text-align:center; white-space:pre-wrap;
+ background:rgba(0,0,0,.78); color:#fff; font-size:20px; line-height:1.4; pointer-events:none; }
+.vl-source-overlay[hidden] { display:none; }
+#visual-timeline { grid-area:timeline; min-width:0; overflow-x:auto; padding-top:8px; }
+#visual-stage { grid-template-columns:minmax(190px,250px) minmax(0,1fr) minmax(220px,290px); }
+#visual-stage .vl-thumbs { display:grid; grid-template-columns:repeat(2,minmax(0,1fr));
+ max-height:324px; align-content:start; gap:8px; padding:8px; }
+#visual-stage .vl-thumbs>.vl-row,#visual-stage .vl-pager { grid-column:1/-1; }
+#visual-stage .vl-thumb { flex-direction:column; padding:5px; align-items:stretch; }
+#visual-stage .vl-thumb img,#visual-stage .vl-thumb-missing {
+ width:100%; height:75px; object-fit:cover; }
+#visual-stage .vl-thumb-name { max-width:115px; }
+.vl-legend { flex:1; color:#b8c3ca; font-size:12px; }
+.vl-good { color:#49d8c7; } .vl-review { color:#edbd74; }
+.vl-ruler { position:absolute;inset:0 0 auto;height:22px;border-bottom:1px solid #41464c; }
+.vl-ruler span { position:absolute;font-size:10px;color:#b1b9c1;transform:translateX(-50%); }
+.vl-recommendation { position:absolute;top:30px;height:26px;border:0;border-radius:3px;
+ background:#4c6871;color:white;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;
+ font-size:11px;min-width:3px;text-align:left;padding:3px 7px; }
+.vl-recommendation.recommended { background:#177e73;color:#e9fffb;border-top:2px solid #48d7c7; }
+.vl-recommendation.review_required {
+ background:#745638;color:#ffe8c4;border-top:2px solid #edbd74; }
+.vl-rec-pending { position:absolute;top:32px;left:10px;color:#aab5be;font-size:12px; }
+.vl-source-caption { position:absolute;top:166px;height:26px;border:0;border-radius:3px;
+  background:#36598a;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis; }
+.vl-source-caption-editor { border:1px solid #36598a;padding:10px; }
+.vl-audio-strip { position:absolute;top:134px;left:0;right:0;height:28px;padding:5px 8px;
+ background:#193749;color:#bad8e8;font-size:11px;box-sizing:border-box; }
+.vl-int span { background:#172a32b0;padding:2px 6px;font-size:10px;color:#f2fbff; }
+.vl-marker-reason { padding:10px;background:#223d3a;border-left:3px solid #43caba; }
+#quick-status p { margin:3px 0;font-size:13px; }
+.gradio-container { max-width:none!important; }
+
+#vl-panel { grid-area: panel; max-height:324px; overflow-y:auto; box-sizing:border-box; }
 #vl-footnote { grid-area: foot; }
 /* 자막 무대 — 왼쪽 재생기(영상·파형·이동) · 오른쪽 큐 목록+편집기(주 저장·확정).
    세팅·등록·실행은 무대 위 접힌 아코디언으로, 1440x900에서 주 조작이
@@ -586,14 +639,16 @@ WORKBENCH_CSS = """
 #caption-player { grid-area: player; }
 #caption-workbench { grid-area: cues; }
 .vl-rail {
-  position: relative; height: 44px; border-radius: 8px; margin-top: 6px;
+  position: relative; height: 202px; border-radius: 6px; margin-top: 6px;
   touch-action: none; cursor: pointer; overflow: visible;
   background: var(--block-background-fill, #edf1f5);
   border: 1px solid var(--block-border-color, transparent);
 }
 .vl-int {
-  position: absolute; top: 8px; height: 28px; border: none; border-radius: 4px;
+  position: absolute; top: 68px; height: 56px; border:1px solid #697d85; border-radius:4px;
+  background-size:auto 100%;background-repeat:repeat-x;
   background: var(--border-color-primary, #c8d4de); min-width: 2px; padding: 0;
+  background-size:auto 100%;background-repeat:repeat-x;
 }
 .vl-int-sel {
   outline: 2px solid #2f6db3; outline-offset: 1px;
@@ -750,7 +805,7 @@ WORKBENCH_CSS = """
 @media (max-width: 860px) {
   #visual-stage {
     grid-template-columns: minmax(0, 1fr);
-    grid-template-areas: "player" "thumbs" "panel" "foot";
+    grid-template-areas: "player" "thumbs" "panel" "timeline" "foot";
   }
   #caption-stage {
     grid-template-columns: minmax(0, 1fr);
@@ -759,6 +814,35 @@ WORKBENCH_CSS = """
   .vl-thumbs { max-height: 40vh; }
   .cap-cues { max-height: 28vh; }
 }
+/* Library review: video and current sentence dominate the workspace. */
+#visual-stage { grid-template-columns:180px minmax(0,1fr) 270px; gap:10px; }
+#visual-preview video { height:clamp(360px,52vh,620px); }
+#visual-stage .vl-thumbs { grid-template-columns:1fr; max-height:64vh; }
+#visual-stage .vl-thumb { flex-direction:row; gap:6px; }
+#visual-stage .vl-thumb img,#visual-stage .vl-thumb-missing { width:64px;height:46px; }
+#visual-stage .vl-thumb-name { max-width:88px; }
+#vl-panel { max-height:64vh;overflow:auto; }
+#visual-video::cue,.vl-source-overlay { font-size:clamp(20px,1.8vw,28px); }
+.vl-current-caption { width:100%;min-height:48px;padding:8px 12px;margin-top:6px;
+ color:#f5f7f8;background:#292e34;border:1px solid #54616b;border-radius:5px;
+ font-size:20px;line-height:1.45;text-align:center;white-space:pre-wrap;cursor:pointer; }
+.vl-current-caption:disabled { color:#b7c2cb;font-size:14px;cursor:default; }
+#vl-panel [data-vl-act="toggle-sel"] { flex:1 1 100%;font-size:15px;padding:9px; }
+#library-analysis-scope p,#app-analysis-mode p { font-size:12px;margin:2px 0; }
+#quick-status { padding:6px 10px; }
+@media(max-width:1050px) {
+ #visual-stage { grid-template-columns:150px minmax(0,1fr);grid-template-areas:
+  "thumbs player" "thumbs panel" "timeline timeline" "foot foot"; }
+ #vl-panel { max-height:260px; }
+ #visual-preview video { height:clamp(300px,48vh,540px); }
+}
+@media(max-width:680px) {
+ #visual-stage { grid-template-columns:minmax(0,1fr);grid-template-areas:
+  "player" "panel" "timeline" "thumbs" "foot"; }
+ #visual-preview video { height:clamp(230px,45vh,420px); }
+ #visual-stage .vl-thumbs { grid-template-columns:repeat(2,minmax(0,1fr));max-height:180px; }
+}
+
 """
 _CLIENT_LIB_BODY = r"""
 var VL = window.__vlLib;
@@ -864,6 +948,7 @@ def _workbench_state(component_id: str, state_key: str) -> str:
         // 사건의 신원은 **이 배선이 잡은 모델**(클로저)에서 온다 — 지금 문서의
         // 값으로 바꿔 다시 찍지 않는다. 재렌더 뒤 남아 있는 옛 클로저 사건은
         // 옛 epoch로 나가 응답이 조용히 버려진다(화면 효과 0, A5 실측).
+        payload.filter = state.filter || "all";
         payload.epoch = model ? model.epoch : modelEpoch();
         if (model) {{
           payload.signature = model.signature;
@@ -950,7 +1035,12 @@ VISUAL_BOOTSTRAP_JS = (
       // 다시 묶는다(아래 wireCommitted 참조).
       root.__vlVisualWiredModel = rawModel;
       var firstWire = state.epoch !== model.epoch;
+      if (state.selectionToken !== model.selectionToken) {
+        state.selectedId = null; state.marker = null;
+        state.selectionToken = model.selectionToken;
+      }
       state.model = model;
+      state.filter = model.filter || "all";
       state.epoch = model.epoch;
       if (firstWire) { state.draft = null; }
       // 배선 세대 — 이 클로저의 사건은 이 배선이 살아 있는 동안만 유효하다.
@@ -982,6 +1072,7 @@ VISUAL_BOOTSTRAP_JS = (
       function videoEl() { return doc.getElementById("visual-video"); }
       function sourceInfo(id) { return (model.sources || {})[id] || null; }
       function curSourceId() {
+        if (state.keptPlaying && state.playingSource) { return state.playingSource; }
         var card = selectedCard();
         if (card) { return card.sourceId; }
         return model.selectedSourceId || null;
@@ -993,23 +1084,132 @@ VISUAL_BOOTSTRAP_JS = (
       }
       function railOf() {
         var s = curSource();
-        return s ? s.rail : null;
+        if (!s || !s.rail || state.timelineMode !== "result") { return s ? s.rail : null; }
+        var at = [0, 1];
+        var intervals = s.rail.intervals.filter(function(i) {
+          return i.sel !== "excluded";
+        }).map(function(i) {
+          var next = Object.assign({}, i);
+          next.sourceStart = i.start; next.sourceEnd = i.end;
+          next.start = VL.str(at); at = VL.add(at, VL.sub(ratOf(i.end), ratOf(i.start)));
+          next.end = VL.str(at); return next;
+        });
+        return Object.assign({}, s.rail, { intervals: intervals, duration: VL.str(at) });
+      }
+      function sourceTime(t) {
+        if (state.timelineMode !== "result") { return t; }
+        var rail = railOf();
+        for (var i = 0; rail && i < rail.intervals.length; i += 1) {
+          var row = rail.intervals[i];
+          if (VL.cmp(t, ratOf(row.end)) <= 0) {
+            return VL.add(ratOf(row.sourceStart), VL.sub(t, ratOf(row.start)));
+          }
+        }
+        return t;
+      }
+      function displayTime(t) {
+        if (state.timelineMode !== "result") { return t; }
+        var rail = railOf();
+        for (var i = 0; rail && i < rail.intervals.length; i += 1) {
+          var row = rail.intervals[i];
+          if (VL.cmp(t, ratOf(row.sourceStart)) < 0) { return ratOf(row.start); }
+          if (VL.cmp(t, ratOf(row.sourceEnd)) <= 0) {
+            return VL.add(ratOf(row.start), VL.sub(t, ratOf(row.sourceStart)));
+          }
+        }
+        return rail ? ratOf(rail.duration) : t;
       }
       function localOf(t) { return VL.sub([Math.round(t * 1e6), 1000000], originRat()); }
       function playheadLocal() {
         var v = videoEl();
         return v ? localOf(v.currentTime) : null;
       }
+      function clearSourceCaptions(v) {
+        var overlay = doc.getElementById('visual-source-caption');
+        if (overlay) { overlay.textContent = ''; overlay.hidden = true; }
+        var current = doc.getElementById('vl-current-caption');
+        if (current) {
+          current.textContent = '재생하면 원본 자막이 여기에 표시됩니다.';
+          current.disabled = true;
+        }
+        if (v && v._vlSourceTrack) {
+          v._vlSourceTrack.mode = 'hidden';
+          while (v._vlSourceTrack.cues && v._vlSourceTrack.cues.length) {
+            v._vlSourceTrack.removeCue(v._vlSourceTrack.cues[0]);
+          }
+          v._vlSourceTrack.mode = 'disabled'; v._vlSourceTrackKey = null;
+        }
+      }
+      function paintSourceCaptions() {
+        if (staleWire()) { return; }
+        var v = videoEl(), info = curSource();
+        var overlay = doc.getElementById('visual-source-caption');
+        if (!v || !info || !info.src || v.getAttribute('data-vl-src') !== info.src) {
+          clearSourceCaptions(v); return;
+        }
+        var cues = info.subtitles || [];
+        var enabled = state.sourceCaptionEnabled !== false;
+        var sourceSecond = VL.toFloat(localOf(v.currentTime));
+        var activeCues = cues.filter(function(cue) {
+          return VL.toFloat(ratOf(cue.start)) <= sourceSecond &&
+            sourceSecond < VL.toFloat(ratOf(cue.end));
+        });
+        var current = doc.getElementById('vl-current-caption');
+        if (current) {
+          current.textContent = activeCues.length ? activeCues.map(function(c) {
+            return String(c.text || '');
+          }).join('\n') : '발화 구간에서 원본 자막을 확인할 수 있습니다.';
+          current.disabled = !activeCues.length;
+        }
+        if (typeof v.addTextTrack === 'function' && typeof W.VTTCue === 'function') {
+          if (!v._vlSourceTrack) {
+            v._vlSourceTrack = v.addTextTrack('subtitles','원본 자막','ko');
+          }
+          var key = curSourceId() + ':' + info.origin + ':' +
+            (info.transcriptRevision || JSON.stringify(cues));
+          if (key !== v._vlSourceTrackKey) {
+            clearSourceCaptions(v);
+            if (current) {
+              current.textContent = activeCues.map(function(c) {
+                return String(c.text || '');
+              }).join('\n');
+              current.disabled = !activeCues.length;
+            }
+            cues.forEach(function(cue) {
+              var start = VL.toFloat(VL.add(ratOf(cue.start), originRat()));
+              var end = VL.toFloat(VL.add(ratOf(cue.end), originRat()));
+              if (isFinite(start) && isFinite(end) && start >= 0 && end > start) {
+                var nativeCue = new W.VTTCue(start,end,String(cue.text || '')
+                  .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'));
+                nativeCue.line = -2; nativeCue.position = 50;
+                nativeCue.size = 90; nativeCue.align = 'center';
+                v._vlSourceTrack.addCue(nativeCue);
+              }
+            });
+            v._vlSourceTrackKey = key;
+          }
+          v._vlSourceTrack.mode = enabled ? 'showing' : 'disabled';
+          if (overlay) { overlay.textContent = ''; overlay.hidden = true; }
+          return;
+        }
+        if (!overlay) { return; }
+        var local = VL.toFloat(localOf(v.currentTime));
+        var text = enabled && v.readyState !== 0 ? cues.filter(function(cue) {
+          return VL.toFloat(ratOf(cue.start)) <= local && local < VL.toFloat(ratOf(cue.end));
+        }).map(function(cue) { return String(cue.text || ''); }).join('\n') : '';
+        overlay.textContent = text; overlay.hidden = !text;
+      }
       function seekTo(local) {
         var v = videoEl();
         var target = VL.add(local, originRat());
         if (!v || !target) { return; }
         v.currentTime = VL.toFloat(target);
-        paintPlayhead();
+        paintPlayhead(); paintSourceCaptions();
       }
       function findCard(id) {
-        for (var i = 0; i < (model.cards || []).length; i += 1) {
-          if (model.cards[i].id === id) { return model.cards[i]; }
+        var allCards = (model.cards || []).concat(model.mediaCards || []);
+        for (var i = 0; i < allCards.length; i += 1) {
+          if (allCards[i].id === id) { return allCards[i]; }
         }
         return null;
       }
@@ -1040,6 +1240,7 @@ VISUAL_BOOTSTRAP_JS = (
       }
       function stopLoop() { state.loop = null; }
       function unloadVideo(v) {
+        clearSourceCaptions(v);
         stopLoop();
         v.pause();
         v.removeAttribute("src");
@@ -1049,6 +1250,7 @@ VISUAL_BOOTSTRAP_JS = (
       function applySource(info, v) {
         var have = v.getAttribute("data-vl-src") || "";
         if (have !== info.src) {
+          clearSourceCaptions(v);
           stopLoop();
           v.pause();
           v.setAttribute("data-vl-src", info.src);
@@ -1069,17 +1271,30 @@ VISUAL_BOOTSTRAP_JS = (
           return;
         }
         applySource(info, v);
+        paintSourceCaptions();
         say("원본 " + info.sourceName + " · 미리보기 " + stateLabel(info.state));
       }
 
       function renderThumbs() {
         var mount = doc.getElementById("vl-thumbs");
         if (!mount) { return; }
-        var rows = [];
+        var rows = ['<div class="vl-row" role="group" aria-label="컷 필터">'];
+        [["all","전체"],["included","사용할 컷"],
+         ["excluded","제외된 컷"],["review","확인 필요"]].forEach(function(f) {
+          rows.push('<button type="button" class="vl-btn" data-vl-act="filter-' + f[0] +
+            '" aria-pressed="' + ((state.filter || "all") === f[0]) + '">' + f[1] + '</button>');
+        });
+        rows.push('</div>');
         var sel = selectedId();
-        for (var i = 0; i < (model.cards || []).length; i += 1) {
-          var c = model.cards[i];
-          var cls = "vl-thumb" + (c.id === sel ? " vl-thumb-sel" : "") +
+        var shownCards = model.mediaCards || model.cards || [];
+        for (var i = 0; i < shownCards.length; i += 1) {
+          var c = shownCards[i];
+          if (state.filter === "included" && c.sel !== "included") { continue; }
+          if (state.filter === "excluded" && c.sel !== "excluded") { continue; }
+          if (state.filter === "review" && c.rec !== "review_required" &&
+              c.speech !== "analysis_failed") { continue; }
+          var cls = "vl-thumb" +
+            (c.id === sel || (c.media && c.sourceId === curSourceId()) ? " vl-thumb-sel" : "") +
             (c.sel === "excluded" ? " vl-thumb-ex" : "");
           var art = c.thumb && c.thumb.state === "ready" && c.thumb.src
             ? '<img src="' + esc(c.thumb.src) + '" alt="조각 대표 프레임">'
@@ -1091,13 +1306,18 @@ VISUAL_BOOTSTRAP_JS = (
               esc(c.id) + '" role="option"' +
             ' aria-selected="' + (c.id === sel ? "true" : "false") + '">' + art +
             '<span class="vl-thumb-meta"><span class="vl-thumb-name">' +
-              esc(c.sourceName) + " " + (c.order + 1) + "번</span>" +
+              esc(c.sourceName) + (c.media ? "" : " " + (c.order + 1) + "번") + "</span>" +
             '<span class="vl-thumb-sub">' + VL.fmt(ratOf(c.start)) + "~" + VL.fmt(ratOf(c.end)) +
             "초 · " + VL.fmt(ratOf(c.dur)) + '초</span><span class="vl-thumb-sub">' +
             (c.sel === "excluded" ? '<span class="vl-badge vl-badge-warn">제외</span>' :
               '<span class="vl-badge">사용</span>') +
+            (c.rec === "review_required" ?
+              ' <span class="vl-badge vl-badge-warn">확인 필요</span>' : "") +
             (c.needsExtract ? ' <span class="vl-badge vl-badge-warn">영상 갱신 필요</span>' : "") +
             (speech ? ' <span class="vl-badge">' + esc(speech) + "</span>" : "") +
+            ((model.sources[c.sourceId] || {}).analysisState ?
+              ' <span class="vl-badge">' +
+              esc(model.sources[c.sourceId].analysisState) + '</span>' : '') +
             "</span></span></button>"
           );
         }
@@ -1129,23 +1349,67 @@ VISUAL_BOOTSTRAP_JS = (
         if (!dur || dur[0] <= 0) { mount.innerHTML = ""; return; }
         var sel = selectedId();
         var at = railIndex(sel);
-        var html = [];
+        var html = ['<div class="vl-ruler">'];
+        for (var tickIndex = 0; tickIndex <= 10; tickIndex += 1) {
+          var seconds = VL.toFloat(dur) * tickIndex / 10;
+          var label = Math.floor(seconds / 60) + ':' +
+            String(Math.floor(seconds % 60)).padStart(2,'0');
+          html.push('<span style="left:' + (tickIndex * 10) + '%">' + label + '</span>');
+        }
+        html.push('</div>');
+        var info = curSource();
+        var suggestions = (info && info.suggestions) || [];
+        if (!suggestions.length) {
+          html.push('<div class="vl-rec-pending">' +
+            esc(info && info.analysisState || 'Luna 분석 대기') + '</div>');
+        }
+        suggestions.forEach(function(row,index) {
+          var a = displayTime(ratOf(row.start)), b = displayTime(ratOf(row.end));
+          if (!a || !b || VL.cmp(a,b) >= 0) { return; }
+          var name = row.rec === 'recommended' ? '추천' :
+            row.rec === 'review_required' ? '확인 필요' : '사용 가능';
+          html.push('<button type="button" class="vl-recommendation ' + esc(row.rec) +
+            '" data-vl-recommendation="' + index + '" style="left:' + VL.pct(a,dur).toFixed(3) +
+            '%;width:' + Math.max(.4,VL.pct(VL.sub(b,a),dur)).toFixed(3) +
+            '%" aria-label="' + esc(name + ' ' + row.start + '초~' + row.end + '초 ' + row.reason) +
+            '" title="' + esc(row.reason) + '">' + name + '</button>');
+        });
+        ((info && info.subtitles) || []).forEach(function(cue,index) {
+          var a = displayTime(ratOf(cue.start)), b = displayTime(ratOf(cue.end));
+          if (!a || !b || VL.cmp(a,b) >= 0) { return; }
+          html.push('<button type="button" class="vl-source-caption" data-vl-source-cue="' + index +
+            '" style="left:' + VL.pct(a,dur).toFixed(3) + '%;width:' +
+            Math.max(.6,VL.pct(VL.sub(b,a),dur)).toFixed(3) + '%" title="' +
+            esc(cue.text) + '">' + esc(cue.text) + '</button>');
+        });
+        html.push('<div class="vl-audio-strip">' +
+          (info && info.tracks && info.tracks.length ? '원본 오디오' : '오디오 없음') + '</div>');
         for (var i = 0; i < rail.intervals.length; i += 1) {
           var it = rail.intervals[i];
           var cls = "vl-int" + (it.id === sel ? " vl-int-sel" : "") +
             (it.sel === "excluded" ? " vl-int-ex" : "") + (it.needsExtract ? " vl-int-needs" : "");
+          var frameCard = findCard(it.id);
+          var thumb = frameCard && frameCard.thumb && frameCard.thumb.src;
+          if (!thumb) {
+            var sourceCard = (model.cards || []).find(function(c) {
+              return c.sourceId === curSourceId() && c.thumb && c.thumb.src;
+            });
+            thumb = sourceCard && sourceCard.thumb.src;
+          }
           html.push('<button type="button" class="' + cls +
             '" data-vl-interval="' + esc(it.id) + '"' +
-            ' style="left:' + VL.pct(ratOf(it.start), dur).toFixed(3) + "%;width:" +
+            ' style="' + (thumb ? "background-image:url('" + esc(thumb) + "');" : "") +
+            'left:' + VL.pct(ratOf(it.start), dur).toFixed(3) + "%;width:" +
             Math.max(0.4, VL.pct(VL.sub(ratOf(it.end), ratOf(it.start)), dur)).toFixed(3) + '%"' +
             ' aria-label="조각 ' + VL.fmt(ratOf(it.start)) +
-              "초~" + VL.fmt(ratOf(it.end)) + '초 — 클릭·Enter로 그 시각으로 이동"></button>');
+              "초~" + VL.fmt(ratOf(it.end)) + '초 — 클릭·Enter로 그 시각으로 이동">' +
+              '<span>' + esc(info && info.sourceName || '영상') + '</span></button>');
         }
         var leftPair = at > 0 && ratOf(rail.intervals[at - 1].end) &&
           VL.cmp(ratOf(rail.intervals[at - 1].end), ratOf(rail.intervals[at].start)) === 0;
         var rightPair = at >= 0 && at + 1 < rail.intervals.length &&
           VL.cmp(ratOf(rail.intervals[at + 1].start), ratOf(rail.intervals[at].end)) === 0;
-        if (at >= 0) {
+        if (at >= 0 && state.timelineMode !== "result") {
           html.push('<button type="button" class="vl-handle" data-vl-handle="left"' +
             (leftPair ? "" : " disabled") +
             ' aria-label="왼쪽 경계 손잡이 — 화살표로 초안, Enter로 스냅 제안"' +
@@ -1176,6 +1440,58 @@ VISUAL_BOOTSTRAP_JS = (
         }
         var info = curSource();
         var html = [];
+        if (state.marker && state.marker.sourceId === curSourceId()) {
+          html.push('<div class="vl-marker-reason"><strong>' + esc(state.marker.label) +
+            '</strong><p>' + esc(state.marker.reason) + '</p><small>' +
+            esc(VL.fmt(ratOf(state.marker.start)) + '초 ~ ' +
+              VL.fmt(ratOf(state.marker.end)) + '초') + '</small></div>');
+        }
+        if (info && info.mediaStatus) {
+          html.push('<p class="vl-kv">' + esc(info.mediaStatus) + '</p>');
+          if (info.originalMissing) {
+            html.push('<label>원본 경로<input id="vl-original-path" class="vl-input"></label>' +
+              '<button type="button" class="vl-btn" data-vl-act="relink-original">' +
+            '원본 재연결</button>');
+          }
+        }
+        ((info && info.crossSourceCandidates) || []).forEach(function(candidate) {
+          html.push('<p class="vl-kv">다른 원본의 중복 후보 · ' +
+            esc(candidate.other_source + ': ' + candidate.text) + ' · 자동 제외하지 않음</p>');
+        });
+        if (info && info.transcriptDirty) {
+          html.push('<p class="vl-kv">자막 변경 · 분석 갱신 필요</p>');
+        }
+        if (info && info.subtitles && info.subtitles.length) {
+          html.push('<details class="vl-details"><summary>원본 자막 목록</summary>');
+          info.subtitles.forEach(function(u) {
+            html.push('<button type="button" class="vl-btn" data-vl-act="source-pick" ' +
+              'data-vl-cue-id="' + esc(u.id) + '">' +
+              esc(VL.fmt(ratOf(u.start)) + '초 · ' + u.text) + '</button>');
+          });
+          html.push('</details>');
+        }
+        var cue = info && (info.subtitles || []).find(function(u) {
+          return state.sourceCue && state.sourceCue.sourceId === curSourceId() &&
+            u.id === state.sourceCue.id;
+        });
+        if (cue) {
+          html.push('<fieldset class="vl-source-caption-editor"><legend>원본 자막 수정</legend>' +
+            '<label>문구<textarea id="vl-source-text" class="vl-input">' +
+            esc(cue.text) + '</textarea></label>' +
+            '<label>시작(초)<input id="vl-source-start" class="vl-input" value="' +
+            VL.fmt(ratOf(cue.start)) + '"></label>' +
+            '<label>끝(초)<input id="vl-source-end" class="vl-input" value="' +
+            VL.fmt(ratOf(cue.end)) + '"></label>' +
+            '<button type="button" class="vl-btn" data-vl-act="source-edit">저장</button>' +
+            '<label>분할 뒤 문구<textarea id="vl-source-right" class="vl-input">' +
+            '</textarea></label>' +
+            '<button type="button" class="vl-btn" data-vl-act="source-split">' +
+            '현재 위치에서 자막 분할</button>' +
+            '<button type="button" class="vl-btn" data-vl-act="source-merge">' +
+            '다음 자막과 병합</button>' +
+            '<small>컷 검토용 원본 시간입니다. ' +
+            '최종 SRT는 최종 영상에서 생성합니다.</small></fieldset>');
+        }
         html.push('<p class="vl-kv"><strong>' + esc(card.sourceName) + "</strong> · " +
           VL.fmt(ratOf(card.start)) + "~" + VL.fmt(ratOf(card.end)) +
             "초 (" + VL.fmt(ratOf(card.dur)) + "초)</p>");
@@ -1184,10 +1500,20 @@ VISUAL_BOOTSTRAP_JS = (
         html.push('<p class="vl-kv">상태 ' + (card.sel === "excluded" ? "제외" : "사용") +
           (speech ? " · 발화 " + esc(speech) : "") +
           (rec ? " · 권고 " + esc(rec) : "") + "</p>");
+        var automaticAt = (card.note || "").indexOf("자동 제외: ");
+        if (automaticAt >= 0) {
+          try {
+            var automatic = JSON.parse(card.note.slice(automaticAt + "자동 제외: ".length));
+            var reasons = {internal_silence:"긴 무음", retake_overlap:"완전한 반복 테이크 확인",
+              ng_with_followup:"NG 뒤 완전한 테이크 확인"};
+            html.push('<p class="vl-kv">자동 판정 이유 · ' +
+              esc(reasons[automatic.reason] || automatic.reason) + '</p>');
+          } catch (error) { /* Historical/manual notes remain readable below. */ }
+        }
         var tags = card.tags || [];
         if (tags.length) {
-          html.push('<p class="vl-kv">분석 태그 ' +
-            tags.map(function (t) { return esc(t); }).join(" · ") + "</p>");
+          html.push('<details class="vl-details"><summary>분석 근거</summary><p class="vl-kv">' +
+            tags.map(function (t) { return esc(t); }).join(" · ") + "</p></details>");
         }
         if (card.needsExtract) {
           html.push('<p class="vl-kv"><span class="vl-badge vl-badge-warn">영상 갱신 필요</span>' +
@@ -1214,9 +1540,10 @@ VISUAL_BOOTSTRAP_JS = (
             '<select id="vl-track" class="vl-input vl-input-narrow">' +
             opts.join("") + "</select></label></div>");
         }
-        html.push('<div class="vl-row">' +
-          '<button type="button" class="vl-btn" data-vl-act="prepare">미리보기 준비</button>' +
-          '<button type="button" class="vl-btn" data-vl-act="refresh">새로고침</button></div>');
+        html.push('<details class="vl-details"><summary>재생 설정</summary><div class="vl-row">' +
+          '<button type="button" class="vl-btn" data-vl-act="prepare">미리보기 다시 준비</button>' +
+          '<button type="button" class="vl-btn" data-vl-act="refresh">' +
+          '새로고침</button></div></details>');
         html.push('<div class="vl-row">' +
           '<button type="button" class="vl-btn" data-vl-act="toggle-sel">' +
           (card.sel === "excluded" ? "사용으로 표시" : "제외로 표시") + "</button>" +
@@ -1311,7 +1638,7 @@ VISUAL_BOOTSTRAP_JS = (
         if (mark && rail) {
           var dur = ratOf(rail.duration);
           if (dur && local) {
-            var pct = VL.toFloat(VL.div(local, dur)) * 100;
+            var pct = VL.toFloat(VL.div(displayTime(local), dur)) * 100;
             mark.style.left = Math.max(0, Math.min(100, pct)).toFixed(3) + "%";
           }
         }
@@ -1325,7 +1652,34 @@ VISUAL_BOOTSTRAP_JS = (
           var startB = VL.toFloat(VL.add(state.loop.start, originRat()));
           if (v.currentTime >= endB) { v.currentTime = startB; }
         }
-        paintPlayhead();
+        if (state.keptPlaying && v && (!v.paused || v.ended)) {
+          var info = curSource();
+          var local = VL.toFloat(localOf(v.currentTime));
+          var kept = info && info.rail ? info.rail.intervals.filter(function(i) {
+            return i.sel !== "excluded";
+          }) : [];
+          var next = kept.find(function(i) { return VL.toFloat(ratOf(i.end)) > local + 0.015; });
+          if (next && local < VL.toFloat(ratOf(next.start))) { seekTo(ratOf(next.start)); }
+          if (!next) {
+            var ids = Object.keys(model.sources || {});
+            var idx = ids.indexOf(curSourceId());
+            var target = null;
+            for (var k = idx + 1; k < ids.length && !target; k += 1) {
+              var candidate = model.sources[ids[k]];
+              var first = candidate.rail && candidate.rail.intervals.find(function(i) {
+                return i.sel !== "excluded";
+              });
+              if (candidate.src && first) {
+                target = { info: candidate, id: ids[k], first: first };
+              }
+            }
+            if (target) {
+              state.playingSource = target.id; applySource(target.info, v);
+              seekTo(ratOf(target.first.start)); v.play(); renderRail();
+            } else { state.keptPlaying = false; v.pause(); }
+          }
+        }
+        paintPlayhead(); paintSourceCaptions();
       }
       var v0 = videoEl();
       var vPrev = W.__vlVisualVideoEl;
@@ -1335,6 +1689,11 @@ VISUAL_BOOTSTRAP_JS = (
         // 여기서 정지·청취 해제·주소 제거까지 한다(옛 반복도 함께 지운다).
         if (vPrev._vlTick) { vPrev.removeEventListener("timeupdate", vPrev._vlTick); }
         if (vPrev._vlLoopOff) { vPrev.removeEventListener("pause", vPrev._vlLoopOff); }
+        ['seeking','seeked','pause','ratechange','loadedmetadata','emptied']
+          .forEach(function(event) {
+          if (vPrev._vlCaptionSync) { vPrev.removeEventListener(event,vPrev._vlCaptionSync); }
+        });
+        clearSourceCaptions(vPrev);
         stopLoop();
         try {
           vPrev.pause();
@@ -1351,7 +1710,15 @@ VISUAL_BOOTSTRAP_JS = (
         v0._vlTick = tick;
         v0._vlLoopOff = stopLoop;
         v0.addEventListener("timeupdate", tick);
+        if (v0._vlEnded) { v0.removeEventListener("ended", v0._vlEnded); }
+        v0._vlEnded = tick; v0.addEventListener("ended", tick);
         v0.addEventListener("pause", stopLoop);
+        ['seeking','seeked','pause','ratechange','loadedmetadata','emptied']
+          .forEach(function(event) {
+          if (v0._vlCaptionSync) { v0.removeEventListener(event,v0._vlCaptionSync); }
+          v0.addEventListener(event,paintSourceCaptions);
+        });
+        v0._vlCaptionSync = paintSourceCaptions;
       }
 
       function railRect() {
@@ -1475,6 +1842,37 @@ VISUAL_BOOTSTRAP_JS = (
       function railClick(ev) {
         if (staleWire()) { return; }
         if (!ev || !ev.target || !ev.target.getAttribute) { return; }
+        var cueIndex = ev.target.getAttribute("data-vl-source-cue");
+        if (cueIndex !== null) {
+          var cueInfo = curSource();
+          var cue = cueInfo && (cueInfo.subtitles || [])[Number(cueIndex)];
+          if (cue) {
+            state.sourceCue = {sourceId:curSourceId(), id:cue.id};
+            state.marker = {sourceId:curSourceId(), label:'원본 자막',
+              reason:cue.text, start:cue.start, end:cue.end};
+            seekTo(ratOf(cue.start)); renderPanel();
+          }
+          return;
+        }
+        var suggestionIndex = ev.target.getAttribute("data-vl-recommendation");
+        if (suggestionIndex !== null) {
+          var info = curSource();
+          var row = info && (info.suggestions || [])[Number(suggestionIndex)];
+          if (row) {
+            var selectedInterval = info.rail.intervals.find(function(it) {
+              return VL.cmp(ratOf(it.start),ratOf(row.start)) <= 0 &&
+                VL.cmp(ratOf(it.end),ratOf(row.start)) > 0;
+            });
+            if (selectedInterval && findCard(selectedInterval.id)) {
+              state.selectedId = selectedInterval.id; state.selectedPlan = model.basePlanId;
+            }
+            state.marker = Object.assign({sourceId:curSourceId(), label:
+              row.rec === 'recommended' ? '추천 구간' :
+              row.rec === 'review_required' ? '확인 필요' : '사용 가능'}, row);
+            seekTo(ratOf(row.start)); renderPanel();
+          }
+          return;
+        }
         if (ev.target.getAttribute("data-vl-handle")) { return; }
         // 렠 클릭은 **이동 전용**이다 — 칠한 조각을 눌러도 선택이 바뀌지 않고
         // 포인터가 가리키는 시각으로 간다(A5 실측: 조각 시작 선택+이동은 위반).
@@ -1490,9 +1888,10 @@ VISUAL_BOOTSTRAP_JS = (
           var at = intervalId ? railIndex(intervalId) : -1;
           if (at >= 0) { sec = ratOf(rail.intervals[at].start); }
         }
-        if (sec) { seekTo(sec); }
+        if (sec) { seekTo(sourceTime(sec)); }
       }
       function selectCard(id, seek) {
+        state.keptPlaying = false;
         var card = findCard(id);
         if (!card) { return; }
         state.selectedId = id;
@@ -1547,9 +1946,51 @@ VISUAL_BOOTSTRAP_JS = (
         }
         if (!node || node === root || !node.getAttribute) { return; }
         var cardId = node.getAttribute("data-vl-card");
-        if (cardId) { selectCard(cardId, true); return; }
+        if (cardId) {
+          var chosen = findCard(cardId); selectCard(cardId, true);
+          if (chosen && model.autoAnalyzeSelection && state.requestedSource !== chosen.sourceId) {
+            state.requestedSource = chosen.sourceId;
+            call('vl_select_source', {sourceId:chosen.sourceId, selectedId:cardId});
+          }
+          return;
+        }
         var act = node.getAttribute("data-vl-act");
         if (!act) { return; }
+        if (act === 'relink-original') {
+          call('vl_relink_original',
+            {sourceId:curSourceId(), path:doc.getElementById('vl-original-path').value});
+          return;
+        }
+        if (act === 'source-pick') {
+          var info = curSource();
+          var picked = info && (info.subtitles || []).find(function(u) {
+            return u.id === node.getAttribute('data-vl-cue-id');
+          });
+          if (picked) {
+            state.sourceCue = {sourceId:curSourceId(),id:picked.id};
+            state.marker = {sourceId:curSourceId(),label:'원본 자막',
+              reason:picked.text,start:picked.start,end:picked.end};
+            seekTo(ratOf(picked.start)); renderPanel();
+          }
+          return;
+        }
+        if (act.indexOf('source-') === 0) {
+          var info = curSource();
+          if (!info || !state.sourceCue) { return; }
+          call('vl_source_caption',
+            {sourceId:curSourceId(),
+            transcriptRevision:info.transcriptRevision,
+            utteranceId:state.sourceCue.id, action:act.slice(7),
+            text:doc.getElementById('vl-source-text').value,
+            start:doc.getElementById('vl-source-start').value,
+            end:doc.getElementById('vl-source-end').value,
+            splitAt:VL.str(playheadLocal()), rightText:doc.getElementById('vl-source-right').value},
+            '원본 자막을 저장하는 중…'); return;
+        }
+        if (act.indexOf("filter-") === 0) {
+          state.filter = act.slice(7);
+          call("vl_refresh", {page: 1, filter: state.filter}); return;
+        }
         var card = selectedCard();
         // 질의·페이징도 화면이 보던 문맥(계획·원본·재생 머리)을 실은 채 나간다 —
         // 재계획이 대기 중일 때 옛 계획의 선택 ID가 새 계획에서 다른 구간에
@@ -1675,13 +2116,70 @@ VISUAL_BOOTSTRAP_JS = (
         if (pauseBtn._vlPause) { pauseBtn.removeEventListener("click", pauseBtn._vlPause); }
         pauseBtn._vlPause = function () {
           if (staleWire()) { return; }
-          stopLoop();
+          stopLoop(); state.keptPlaying = false;
           var v = videoEl();
           if (v) { v.pause(); }
         };
         pauseBtn.addEventListener("click", pauseBtn._vlPause);
       }
 
+      function bindControl(id, action) {
+        var el = doc.getElementById(id);
+        if (!el) { return; }
+        if (el._vlControl) { el.removeEventListener("click", el._vlControl); }
+        el._vlControl = function() { if (!staleWire()) { action(el); } };
+        el.addEventListener("click", el._vlControl);
+      }
+      bindControl('vl-current-caption', function() {
+        var info = curSource(), second = VL.toFloat(playheadLocal());
+        var cue = info && (info.subtitles || []).find(function(c) {
+          return VL.toFloat(ratOf(c.start)) <= second && second < VL.toFloat(ratOf(c.end));
+        });
+        if (cue) {
+          var v = videoEl(); if (v) { v.pause(); }
+          state.sourceCue = {sourceId:curSourceId(),id:cue.id};
+          renderPanel();
+        }
+      });
+      bindControl('vl-source-caption-toggle', function(el) {
+        state.sourceCaptionEnabled = state.sourceCaptionEnabled === false;
+        el.setAttribute('aria-pressed',state.sourceCaptionEnabled ? 'true' : 'false');
+        paintSourceCaptions();
+      });
+      bindControl("vl-timeline-mode", function(el) {
+        state.timelineMode = state.timelineMode === "result" ? "original" : "result";
+        el.textContent = state.timelineMode === "result" ? "정리 결과 타임라인" : "원본 타임라인";
+        state.draft = null; renderRail(); paintPlayhead();
+      });
+      bindControl("vl-kept-play", function() {
+        state.loop = null; state.playingSource = curSourceId(); state.keptPlaying = true;
+        var info = curSource();
+        var first = info && info.rail && info.rail.intervals.find(function(i) {
+          return i.sel !== "excluded";
+        });
+        if (first) { seekTo(ratOf(first.start)); var v = videoEl(); if (v) { v.play(); } }
+        else { msg("이 원본에서 사용할 컷이 없습니다."); }
+      });
+      function zoom(amount) {
+        state.zoom = Math.max(1, Math.min(8, (state.zoom || 1) + amount));
+        var el = doc.getElementById("visual-rail");
+        if (el) {
+          el.style.width = (state.zoom * 100) + "%";
+          el.parentElement.style.overflowX = "auto";
+        }
+      }
+      bindControl("vl-zoom-in", function() { zoom(1); });
+      bindControl("vl-zoom-out", function() { zoom(-1); });
+      if (state.marker && state.selectedPlan !== model.basePlanId) {
+        var markerSource = sourceInfo(state.marker.sourceId);
+        var matching = markerSource && markerSource.rail.intervals.find(function(it) {
+          return VL.cmp(ratOf(it.start),ratOf(state.marker.start)) <= 0 &&
+            VL.cmp(ratOf(it.end),ratOf(state.marker.start)) > 0;
+        });
+        if (matching && findCard(matching.id)) {
+          state.selectedId = matching.id; state.selectedPlan = model.basePlanId;
+        }
+      }
       syncVideo();
       renderThumbs();
       renderRail();
@@ -1725,6 +2223,19 @@ VISUAL_BOOTSTRAP_JS = (
     if (v) {
       if (v._vlTick) { v.removeEventListener("timeupdate", v._vlTick); }
       if (v._vlLoopOff) { v.removeEventListener("pause", v._vlLoopOff); }
+      if (v._vlEnded) { v.removeEventListener("ended", v._vlEnded); }
+      ['seeking','seeked','pause','ratechange','loadedmetadata','emptied'].forEach(function(event) {
+        if (v._vlCaptionSync) { v.removeEventListener(event,v._vlCaptionSync); }
+      });
+      if (v._vlSourceTrack) {
+        v._vlSourceTrack.mode = 'hidden';
+        while (v._vlSourceTrack.cues && v._vlSourceTrack.cues.length) {
+          v._vlSourceTrack.removeCue(v._vlSourceTrack.cues[0]);
+        }
+        v._vlSourceTrack.mode = 'disabled'; v._vlSourceTrackKey = null;
+      }
+      var caption = d.getElementById('visual-source-caption');
+      if (caption) { caption.textContent = ''; caption.hidden = true; }
       try {
         v.pause();
         v.removeAttribute("src");

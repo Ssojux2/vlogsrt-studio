@@ -378,9 +378,15 @@ class _SdkFake:
         self.responses_calls: list[dict[str, object]] = []
 
     def __call__(
-        self, *, api_key: str, base_url: str | None = None, max_retries: int = -1
+        self,
+        *,
+        api_key: str,
+        base_url: str | None = None,
+        max_retries: int = -1,
+        timeout: float | None = None,
     ) -> _SdkFake:
         assert max_retries == 0, "SDK 내부 재시도는 관찰 경계를 우회한다"
+        assert timeout is not None and timeout > 0, "멈춘 요청이 작업을 붙잡지 않는다"
         return self
 
     @property

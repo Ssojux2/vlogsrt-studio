@@ -1195,11 +1195,13 @@ def test_vision_client_takes_explicit_key_and_base_url(
             "api_key": "vision-key",
             "base_url": "https://vision.example/api",
             "max_retries": 0,
+            "timeout": 60.0,
         },
         {
             "api_key": "vision-key",
             "base_url": "https://api.openai.com/v1",
             "max_retries": 0,
+            "timeout": 60.0,
         },
     ]
 
@@ -1224,6 +1226,7 @@ def test_vision_client_ignores_the_environment_and_legacy_helpers(
             "api_key": "vision-key",
             "base_url": "https://api.openai.com/v1",
             "max_retries": 0,
+            "timeout": 60.0,
         }
     ]
 

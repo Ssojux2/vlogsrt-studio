@@ -68,9 +68,15 @@ class SourceEvidence:
     """원본 하나의 실행 시점 증거 — 조사·시계·오디오 실측을 한 번만 얻는다."""
 
     def __init__(self, workspace: RawWorkspace, asset: SourceAsset) -> None:
-        path = workspace.root / asset.relative_path
+        from vlogsrt.project.raw.media_refs import load, resolve
+
+        path = resolve(workspace, asset, "export")
+        refs = load(workspace, asset.asset_id)
+        expected_size = (
+            refs["original"]["size"] if refs and refs.get("original") else asset.size_bytes
+        )
         probed = path.stat()
-        if probed.st_size != asset.size_bytes:
+        if probed.st_size != expected_size:
             raise ExtractJobError(
                 f"원본 크기가 계획 때와 다르다: {asset.source_relative_path}"
                 f" ({asset.size_bytes} → {probed.st_size}B) — 다시 계획하세요"
@@ -246,6 +252,7 @@ def _process_one(
             audio_extents=facts.audio_extents,
         )
     except JobCancelledError:
+        _fail(workspace, package, clip, "추출 취소됨 · 다시 준비 가능")
         raise
     except Exception as error:  # noqa: BLE001 - 조각 단위 실패는 기록하고 멈춘다
         _fail(workspace, package, clip, f"{type(error).__name__}: {error}")

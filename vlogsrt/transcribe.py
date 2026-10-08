@@ -464,6 +464,11 @@ def _responses_attempt_meta(model: str, payload: Mapping[str, object]) -> Reques
     )
 
 
+# A stalled HTTP read must surface as a failed attempt instead of pinning a job
+# forever; retries stay in `_retry`, so this bounds one attempt only.
+SDK_TIMEOUT_SECONDS = 60.0
+
+
 @dataclass(frozen=True, slots=True)
 class LiveTranscriber:
     """실제 OpenAI 호출. `record`와 `--online`에서만 만들어진다.
@@ -490,8 +495,13 @@ class LiveTranscriber:
         # SDK 기본 재시도(2, 설치된 3.8.0 실측)는 `_retry`의 게이트를 우회하는 숨은
         # 재호출이다 — 재시도는 게이트를 지나는 `_retry`에서만 일어난다.
         if self.base_url:
-            return openai.OpenAI(api_key=self.api_key, base_url=self.base_url, max_retries=0)
-        return openai.OpenAI(api_key=self.api_key, max_retries=0)
+            return openai.OpenAI(
+                api_key=self.api_key,
+                base_url=self.base_url,
+                max_retries=0,
+                timeout=SDK_TIMEOUT_SECONDS,
+            )
+        return openai.OpenAI(api_key=self.api_key, max_retries=0, timeout=SDK_TIMEOUT_SECONDS)
 
     def _gate(self) -> None:
         """매 API 시도 직전 취소 확인 — 취소 뒤 새 조각·재시도·재요청이 없다."""
@@ -955,8 +965,15 @@ def create_vision_client(*, api_key: str, base_url: str | None) -> Any:
     import openai  # 지연 import — openai를 얻는 유일한 파일이다(불변 규칙 5)
 
     if base_url:
-        return openai.OpenAI(api_key=api_key, base_url=base_url, max_retries=0)
-    return openai.OpenAI(api_key=api_key, base_url=_PUBLIC_OPENAI_BASE_URL, max_retries=0)
+        return openai.OpenAI(
+            api_key=api_key, base_url=base_url, max_retries=0, timeout=SDK_TIMEOUT_SECONDS
+        )
+    return openai.OpenAI(
+        api_key=api_key,
+        base_url=_PUBLIC_OPENAI_BASE_URL,
+        max_retries=0,
+        timeout=SDK_TIMEOUT_SECONDS,
+    )
 
 
 def request_vision(

@@ -88,7 +88,7 @@ def test_scan_requires_workspace_and_real_folder(
     with pytest.raises(gr.Error, match="작업공간이 열려 있지 않다"):
         server.ingest_scan_view(None, "/tmp")
     signature, _ = _opened(server, tmp_path)
-    with pytest.raises(gr.Error, match="경로를 입력"):
+    with pytest.raises(gr.Error, match="선택기로 고르세요"):
         server.ingest_scan_view(signature, "  ")
 
 

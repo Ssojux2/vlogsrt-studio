@@ -871,6 +871,10 @@ class RawWorkspace:
         검증은 계층마다 따로 산다 — 원본은 가져오기·계획의 SHA-256, 조각은 게시
         때 찍은 해시의 재검증이다.
         """
+        if file_id.startswith("proxy_"):
+            from vlogsrt.project.raw.media_refs import resolve_direct
+
+            return resolve_direct(self, file_id)
         row = self._media_row(file_id)
         if str(row["status"]) not in SERVABLE_MEDIA_STATUSES:
             raise MediaNotReadyError(f"아직 준비되지 않은 미디어다: {file_id}")
@@ -931,6 +935,60 @@ class RawWorkspace:
             _, _, tail = str(row[0]).rpartition("_")
             number = int(tail) + 1 if tail.isdigit() else 1
         return f"import_{number:06d}"
+
+    def mark_source_reference(self, asset_id: str) -> None:
+        """Mark an explicit external original; never copy, move or write its bytes."""
+        asset = self.source_asset(asset_id)
+        path = self._reference_target(asset)
+        with self.connect() as connection:
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS source_references ("
+                "asset_id TEXT PRIMARY KEY, absolute_path TEXT NOT NULL)"
+            )
+            connection.execute(
+                "INSERT OR IGNORE INTO source_references VALUES (?, ?)", (asset_id, str(path))
+            )
+            connection.commit()
+
+    def source_reference_path(self, asset_id: str) -> str | None:
+        with self.connect() as connection:
+            exists = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='source_references'"
+            ).fetchone()
+            if exists is None:
+                return None
+            row = connection.execute(
+                "SELECT absolute_path FROM source_references WHERE asset_id=?", (asset_id,)
+            ).fetchone()
+        return str(row[0]) if row is not None else None
+
+    def source_media_path(self, asset: SourceAsset) -> Path:
+        """Resolve copied and explicitly referenced originals through one checked boundary."""
+        referenced = self.source_reference_path(asset.asset_id)
+        if referenced is None:
+            return self.root / asset.relative_path
+        expected = Path(asset.source_root) / asset.source_relative_path
+        if str(expected) != referenced:
+            raise RawWorkspaceError(f"원본 참조 기록이 맞지 않습니다: {asset.source_name}")
+        try:
+            path = self._reference_target(asset)
+        except (OSError, RawWorkspaceError) as error:
+            raise RawWorkspaceError(
+                f"원본 연결을 확인하세요: {asset.source_name} · {error}"
+            ) from error
+        return path
+
+    @staticmethod
+    def _reference_target(asset: SourceAsset) -> Path:
+        from vlogsrt.project.raw.fcp import _resolve_path_safely
+        from vlogsrt.project.raw.ingest import _source_stat
+
+        expected = Path(asset.source_root) / asset.source_relative_path
+        target, reason, facts = _resolve_path_safely(expected)
+        if reason or facts is None or target != expected:
+            raise RawWorkspaceError(reason or "원본 경로의 연결 대상이 바뀌었습니다")
+        _source_stat(target, asset)
+        return target
 
     def source_asset(self, asset_id: str) -> SourceAsset:
         with self.connect() as connection:

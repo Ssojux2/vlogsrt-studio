@@ -21,6 +21,7 @@ from vlogsrt.project.raw.models import (
     RawWorkspaceError,
 )
 from vlogsrt.project.raw.workspace import DB_NAME, RawWorkspace
+from vlogsrt.task_runtime import cancellation_scope
 
 
 class JobCancelledError(Exception):
@@ -286,7 +287,8 @@ class JobManager:
         self._store.update(job_id, status="running")
         context = JobContext(job_id, self._workspace)
         try:
-            execution.run(context)
+            with cancellation_scope(context.check_cancel):
+                execution.run(context)
             final = "cancelled" if self._store.get(job_id).cancellation_requested else "succeeded"
             if final == "succeeded":
                 self._store.update(job_id, status="succeeded", error=None)

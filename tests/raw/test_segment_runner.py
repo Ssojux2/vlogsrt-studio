@@ -713,7 +713,10 @@ def test_cancel_between_clips_preserves_published_and_resumes(
         summary = service.package_overview(workspace)
         assert summary is not None
         assert summary.package.status == "interrupted"
-        assert [clip.status for clip in summary.clips] == ["published", "published"]
+        assert [clip.status for clip in summary.clips] == [
+            "published",
+            "failed",
+        ]  # active ffmpeg cancelled
 
         # 취소된 작업은 재개 대상이 아니다 — 같은 지문의 새 시작이 package를 이어 쓴다.
         handle2, record2 = _extract(service, workspace)
@@ -724,7 +727,7 @@ def test_cancel_between_clips_preserves_published_and_resumes(
     assert resumed is not None and resumed.package.complete
     assert resumed.package.package_dir == summary.package.package_dir  # 같은 package
     assert [clip.segment_order for clip in resumed.clips] == [1, 2, 3]
-    assert len(calls) == 3  # 게시물 두 개는 재추출 없이 재검증만 지났다(새 호출 1)
+    assert len(calls) == 4  # 완료된 첫 조각 재사용; 취소된 둘째와 누락된 셋째만 추출
 
 
 # ── 옛 package·계획 불변 — 새 추출은 새 package(§6.5) ─────────────────────────

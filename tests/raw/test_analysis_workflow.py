@@ -381,12 +381,14 @@ def test_audio_tail_beyond_last_frame_belongs_to_last_clip(
     asset = service.list_source_assets(workspace)[0]
     _write_fixtures(
         workspace / "analysis" / "replay",
-        asr_sources={asset.content_sha256 or "": []},  # 선언된 무발화(추측이 아니다)
+        asr_sources={
+            asset.content_sha256 or "": [{"start": 0.5, "end": 2.0, "text": "완전한 문장입니다."}]
+        },
         luna_windows={
-            "window_000000": _luna_body(
-                "window_000000", suggestions=("boundary_w000000_00000050",)
+            "window_000000": _luna_body("window_000000"),
+            "window_000001": _luna_body(
+                "window_000001", suggestions=("boundary_u000032000_00000050",)
             ),
-            "window_000001": _luna_body("window_000001"),
             "window_000002": _luna_body("window_000002"),
             "window_000003": _luna_body("window_000003"),
         },
@@ -413,7 +415,7 @@ def test_audio_tail_beyond_last_frame_belongs_to_last_clip(
     package = service.package_overview(workspace)
     assert package is not None
     clips = sorted(package.clips, key=lambda c: c.segment_order)
-    assert len(clips) == 2  # 받아들인 길이 경계(2초) 하나 — 꼬리 경계는 없다
+    assert len(clips) == 2  # 검증된 발화 종료(2초) 하나 — 임의 길이·꼬리 경계는 없다
     internal = Fraction(clips[0].media_local_duration)
     last_clip = Fraction(clips[-1].media_local_duration)
     assert internal < Fraction("2.2")  # 내부 클립은 매체 끝에서 닫힌다
@@ -607,7 +609,7 @@ def test_interrupted_job_resumes_with_same_id_and_cached_sources(
     summary = restarted.analysis_overview(workspace)
     assert summary is not None
     statuses = sorted(r.status for r in summary.results)
-    assert statuses == ["analyzed", "analyzed"]  # 캐시 무효 없이 재개 완료
+    assert statuses == ["cached", "cached"]  # 완료 원본의 캐시 재사용을 표시한다
 
 
 # ── 실제 호출 문 — 두 단계 승인: 1단계(전사) → 대기 → 2단계(의미) ─────────────

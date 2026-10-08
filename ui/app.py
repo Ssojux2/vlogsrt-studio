@@ -11,11 +11,14 @@
 from __future__ import annotations
 
 import argparse
+import os
 import webbrowser
+from pathlib import Path
 
 import uvicorn
 
 from ui import service, workspace_service
+from ui.instance import UiInstance
 from vlogsrt import log
 
 
@@ -25,38 +28,64 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--share", action="store_true", help="이전 버전 호환 인자 — 이 UI는 로컬 전용이다"
     )
+    network = parser.add_mutually_exclusive_group()
+    network.add_argument(
+        "--online",
+        dest="online",
+        action="store_true",
+        help="온라인 분석 허용(기본값, 영상별 승인은 별도)",
+    )
+    network.add_argument(
+        "--offline",
+        dest="online",
+        action="store_false",
+        help="이 앱 실행의 유료 API 호출 차단",
+    )
+    parser.set_defaults(online=True)
     parser.add_argument("--no-browser", action="store_true", help="브라우저를 열지 않는다")
     args = parser.parse_args(argv)
     if args.share:
         log.error("이 UI는 로컬 전용이다 — 외부 공유(share)는 제공하지 않는다.")
         return 1
+    # The interactive app defaults to paid-enabled mode; each selected scope still
+    # needs approval. Set before dotenv loading so stale file defaults cannot win.
+    os.environ["VLOGSRT_OFFLINE"] = "0" if args.online else "1"
 
-    # 이전 단일 화면 UI는 같은 포트의 옛 서버를 정리했지만, 이 서버는 작업의
-    # 정본을 소유한다 — **다른 실행 중인 UI를 건드리지 않는다**(코디네이터 재결).
-    # 포트가 차 있으면 옆으로 비켜 나가고 알림만 남긴다.
-    try:
-        port = service.pick_port(args.port)
-    except service.UiError as exc:
-        log.error(str(exc))
-        return 1
-    if port != args.port:
-        log.warn(f"{args.port} 포트를 이미 쓰고 있습니다 — 다른 UI가 실행 중일 수 있습니다.")
-        log.warn("그 서버가 진행 중 작업을 소유할 수 있으니 종료하지 마세요.")
-        log.warn(f"이번에는 {port} 으로 띄웁니다. 아래 주소를 여세요.")
-
-    server = workspace_service.RawWorkspaceUi(port=port)
-    log.info(server.startup())
-    app = server.build_fastapi()
-
-    log.out(f"\nvlogsrt 원본 브라우저  →  http://127.0.0.1:{port}")
-    log.out("멈추려면 Ctrl+C\n")
-    if not args.no_browser:
-        webbrowser.open(f"http://127.0.0.1:{port}")
-    try:
-        uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")
-    except KeyboardInterrupt:
-        log.info("종료")
-    return 0
+    with UiInstance(Path(__file__).resolve().parent.parent, args.port) as instance:
+        url = f"http://127.0.0.1:{instance.port}"
+        if not instance.owned:
+            if not instance.wait_until_listening():
+                log.error(
+                    "기존 서버가 시작 또는 종료 중이며 아직 연결할 수 없습니다. "
+                    "잠시 뒤 다시 실행하세요. 다른 포트에는 실행하지 않았습니다."
+                )
+                return 1
+            log.out(f"이미 실행 중인 vlogsrt를 엽니다: {url}")
+            if not args.no_browser:
+                webbrowser.open(url)
+            return 0
+        try:
+            # A foreign/old process on the requested port must not silently create
+            # another UI on a different port. No process is killed by the launcher.
+            port = service.pick_port(args.port, attempts=1)
+        except service.UiError:
+            log.error(
+                f"{args.port} 포트가 사용 중입니다. 기존 서버를 확인하세요. "
+                "새 서버를 다른 포트에 자동 실행하지 않았습니다."
+            )
+            return 1
+        server = workspace_service.RawWorkspaceUi(port=port)
+        log.info(server.startup())
+        app = server.build_fastapi()
+        log.out(f"\nvlogsrt 원본 브라우저  →  {url}")
+        log.out("멈추려면 Ctrl+C\n")
+        if not args.no_browser:
+            webbrowser.open(url)
+        try:
+            uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")
+        except KeyboardInterrupt:
+            log.info("종료")
+        return 0
 
 
 if __name__ == "__main__":

@@ -29,7 +29,7 @@ import json
 import math
 import os
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from datetime import date as date_type
 from fractions import Fraction
@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from vlogsrt import log, preprocess
+from vlogsrt.project.raw import media_refs, source_transcript
 from vlogsrt.project.raw import understanding as stage1
 from vlogsrt.project.raw import understanding_luna as luna
 from vlogsrt.project.raw.analysis_approval import (
@@ -65,6 +66,7 @@ from vlogsrt.project.raw.models import (
     AnalysisSourceResult,
     GlobalOrderRevision,
     PlannedInterval,
+    RawWorkspaceError,
     SourceAsset,
 )
 from vlogsrt.project.raw.understanding import (
@@ -440,6 +442,8 @@ def source_input_fingerprint(
     audio: SelectedAudio | None,
     settings: RawUnderstandingSettings,
     workflow: RawWorkflowConfig,
+    media_fingerprint: str = "original-only/v1",
+    transcript_fingerprint: str = "asr-original/v1",
 ) -> str:
     """원본 하나의 분석 입력 지문 — 결과에 영향을 주는 입력만 묶는다.
 
@@ -449,6 +453,8 @@ def source_input_fingerprint(
     """
     parts = [
         INPUT_FINGERPRINT_SCHEMA,
+        media_fingerprint,
+        transcript_fingerprint,
         UNDERSTANDING_SCHEMA_VERSION,
         source_sha256,
         str(video.stream_index),
@@ -769,12 +775,25 @@ def run_analysis(
     except Exception as error:  # noqa: BLE001 - 실행 전체를 멈추는 실패는 기록하고 올린다
         store.update_revision(revision.revision_id, status="failed", error=str(error)[:480])
         raise
-    final = "complete"
+    rows = [
+        row for row in store.list_source_results(revision.revision_id) if row.asset_id in assets
+    ]
+    good = sum(row.status in ("analyzed", "cached") for row in rows)
+    bad = any(row.status not in ("analyzed", "cached") for row in rows)
+    final = (
+        "complete"
+        if not bad and len(rows) == len(assets)
+        else ("partial" if good or any(row.status == "partial" for row in rows) else "failed")
+    )
     if providers.phase == "asr":
-        rows = store.list_source_results(revision.revision_id)
-        if any(row.status == "transcribed" for row in rows):
+        latest = store.list_source_results(revision.revision_id)
+        if any(row.status == "transcribed" for row in latest):
             final = "awaiting_semantic"
-    store.update_revision(revision.revision_id, status=final, error=None)
+    store.update_revision(
+        revision.revision_id,
+        status=final,
+        error="일부 분석 구간을 확인하고 재시도하세요" if final in ("partial", "failed") else None,
+    )
 
 
 def _record_unanalyzed(
@@ -796,6 +815,36 @@ def _record_unanalyzed(
     )
 
 
+def _complete_source_current(
+    workspace: RawWorkspace, asset: SourceAsset, result: AnalysisSourceResult | None
+) -> bool:
+    if result is None or result.status not in ("analyzed", "cached") or not result.document_path:
+        return False
+    try:
+        document = json.loads((workspace.root / result.document_path).read_text(encoding="utf-8"))
+        _require_source_unchanged(workspace.source_media_path(asset), asset)
+        return document.get("media_fingerprint", "original-only/v1") == media_refs.fingerprint(
+            workspace, asset.asset_id
+        ) and document.get(
+            "transcript_fingerprint", "asr-original/v1"
+        ) == source_transcript.fingerprint(workspace, asset.asset_id)
+    except (OSError, ValueError, RawWorkspaceError):
+        return False
+
+
+def _phase_reusable(path: Path) -> bool:
+    if not path.is_file():
+        return False
+    try:
+        artifact = _read_asr_phase_artifact(path)
+        if any(c.get("failure") for c in artifact.get("asr", {}).get("chunks", [])):
+            return False
+        frames = _frames_from_artifact(artifact, path.parent / "frames")
+        return not frames.failures
+    except (AnalysisError, OSError, ValueError):
+        return False
+
+
 def _analyze_one(
     context: JobContext,
     workspace: RawWorkspace,
@@ -809,10 +858,23 @@ def _analyze_one(
 ) -> AnalysisSourceResult:
     """원본 하나의 분석 — 실패는 이 원본의 기록이지 전체 실패가 아니다."""
     existing = store.source_result(revision.revision_id, asset.asset_id)
-    if existing is not None and existing.status in ("analyzed", "cached"):
-        # 같은 리비전의 재개가 이미 성공한 원본을 다시 부르지 않는다(§14.2) —
-        # 유료 2단계 재시도가 완료 창을 다시 사지 않게 하는 문이다.
-        return existing
+    if (
+        providers.phase == "semantic"
+        and existing is not None
+        and existing.status == "failed"
+        and not existing.document_path
+    ):
+        return existing  # retain the actual preparation error while healthy sources continue
+    if _complete_source_current(workspace, asset, existing):
+        assert existing is not None
+        return store.upsert_source_result(
+            replace(
+                existing,
+                status="cached",
+                cached_from=existing.cached_from or existing.revision_id,
+                updated_at=_now(),
+            )
+        )
     _upsert(
         store,
         revision,
@@ -860,7 +922,7 @@ def _analyze_source(
     providers: AnalysisProviders,
 ) -> AnalysisSourceResult:
     """원본 하나의 분석 본체 — 조사→증거→판정→조정→문서까지."""
-    path = workspace.root / asset.relative_path
+    path = workspace.source_media_path(asset)
     _require_source_unchanged(path, asset)
     probe = preprocess.probe_raw_media(path)
     clock = preprocess.probe_extraction_clock(path, probe=probe)
@@ -908,6 +970,8 @@ def _analyze_source(
         audio=audio,
         settings=settings,
         workflow=workflow,
+        media_fingerprint=media_refs.fingerprint(workspace, asset.asset_id),
+        transcript_fingerprint=source_transcript.fingerprint(workspace, asset.asset_id),
     )
     cached = _reusable_cache(store, workspace, input_fp, asset.content_sha256 or "")
     if cached is not None:
@@ -971,16 +1035,28 @@ def _analyze_source(
             on=providers.on or datetime.now(UTC).date(),
             request_id=f"{revision.revision_id}:{asset.asset_id}",
             workdir=source_dir,
+            cache_dir=workspace.root / "cache" / "source-asr" / asset.asset_id,
         )
         utterances = stage1.utterance_evidence(audio, asr_evidence)
-    plan = plan_common_windows(timeline, utterances, settings)
+    common_spoken = utterances_in_common_clock(timeline, utterances)
+    source_transcript.seed(
+        workspace,
+        asset.asset_id,
+        stage1.utterances_json(common_spoken),
+        timeline.extent,
+        asset.content_sha256 or "",
+    )
+    edited = source_transcript.spoken(workspace, asset.asset_id, common_spoken)
+    offset = timeline.audio_start or Fraction(0)
+    utterances = tuple(replace(u, start=u.start - offset, end=u.end - offset) for u in edited)
+    plan = _scene_plan(workspace, asset, plan_common_windows(timeline, utterances, settings))
     spoken = utterances_in_common_clock(timeline, utterances)
     context.check_cancel()
     frames = stage1.sample_frames(
         plan,
         directory=source_dir / "frames",
         settings=settings,
-        sampler=stage1.PreprocessFrameSampler(path),
+        sampler=media_refs.frame_sampler(workspace, asset),
     )
     return _finish_source(
         context,
@@ -1030,7 +1106,7 @@ def _asr_phase_source(
     있으면 다시 부르지 않는다 — 재시작·재개는 전사를 재사용한다(A4-F1).
     """
     artifact_path = source_dir / ASR_PHASE_DOCUMENT_NAME
-    if artifact_path.is_file():
+    if _phase_reusable(artifact_path):
         artifact = _read_asr_phase_artifact(artifact_path)
         if str(artifact.get("input_fingerprint")) != input_fp:
             raise AnalysisError(
@@ -1064,15 +1140,27 @@ def _asr_phase_source(
             on=providers.on or datetime.now(UTC).date(),
             request_id=f"{revision.revision_id}:{asset.asset_id}",
             workdir=source_dir,
+            cache_dir=workspace.root / "cache" / "source-asr" / asset.asset_id,
         )
         utterances = stage1.utterance_evidence(audio, asr_evidence)
-    plan = plan_common_windows(timeline, utterances, settings)
+    common_spoken = utterances_in_common_clock(timeline, utterances)
+    source_transcript.seed(
+        workspace,
+        asset.asset_id,
+        stage1.utterances_json(common_spoken),
+        timeline.extent,
+        asset.content_sha256 or "",
+    )
+    edited = source_transcript.spoken(workspace, asset.asset_id, common_spoken)
+    offset = timeline.audio_start or Fraction(0)
+    utterances = tuple(replace(u, start=u.start - offset, end=u.end - offset) for u in edited)
+    plan = _scene_plan(workspace, asset, plan_common_windows(timeline, utterances, settings))
     context.check_cancel()
     frames = stage1.sample_frames(
         plan,
         directory=source_dir / "frames",
         settings=settings,
-        sampler=stage1.PreprocessFrameSampler(path),
+        sampler=media_refs.frame_sampler(workspace, asset),
     )
     semantic_fp = _semantic_fingerprint(asset, grid, audio, plan, settings, workflow)
     _write_json_atomic(
@@ -1085,6 +1173,7 @@ def _asr_phase_source(
             "source_name": asset.source_name,
             "source_sha256": asset.content_sha256 or "",
             "input_fingerprint": input_fp,
+            "transcript_fingerprint": source_transcript.fingerprint(workspace, asset.asset_id),
             "mode": providers.origin,
             "phase_kind": "semantic" if audio is not None else "visual",
             "video": {
@@ -1163,6 +1252,10 @@ def _semantic_phase_source(
             f"1단계 기록이 본 원본과 지금의 원본이 다르다: {asset.source_name} — 다시 가져오세요"
         )
     _require_artifact_grid(artifact, grid)
+    if artifact.get("transcript_fingerprint", "asr-original/v1") != source_transcript.fingerprint(
+        workspace, asset.asset_id
+    ):
+        raise AnalysisError("원본 자막이 바뀌었습니다. 갱신 범위를 다시 승인하세요")
     audio = _audio_from_artifact(artifact, source_dir, path, asset)
     utterances = _utterances_from_artifact(artifact)
     timeline = common_timeline(source_id=asset.asset_id, video=grid, audio=audio)
@@ -1172,6 +1265,8 @@ def _semantic_phase_source(
         audio=audio,
         settings=settings,
         workflow=workflow,
+        media_fingerprint=media_refs.fingerprint(workspace, asset.asset_id),
+        transcript_fingerprint=source_transcript.fingerprint(workspace, asset.asset_id),
     )
     if input_fp != str(artifact.get("input_fingerprint")):
         raise AnalysisError(
@@ -1196,7 +1291,18 @@ def _semantic_phase_source(
             segment_count=cached.segment_count,
             cached_from=cached.cached_from or cached.revision_id,
         )
-    plan = plan_common_windows(timeline, utterances, settings)
+    common_spoken = utterances_in_common_clock(timeline, utterances)
+    source_transcript.seed(
+        workspace,
+        asset.asset_id,
+        stage1.utterances_json(common_spoken),
+        timeline.extent,
+        asset.content_sha256 or "",
+    )
+    edited = source_transcript.spoken(workspace, asset.asset_id, common_spoken)
+    offset = timeline.audio_start or Fraction(0)
+    utterances = tuple(replace(u, start=u.start - offset, end=u.end - offset) for u in edited)
+    plan = _scene_plan(workspace, asset, plan_common_windows(timeline, utterances, settings))
     spoken = utterances_in_common_clock(timeline, utterances)
     frames = _frames_from_artifact(artifact, source_dir / "frames")
     semantic_fp = _semantic_fingerprint(asset, grid, audio, plan, settings, workflow)
@@ -1254,6 +1360,63 @@ def _finish_source(
 ) -> AnalysisSourceResult:
     """판정→조정→문서 기록까지의 공통 꼬리 — 재생 전체·2단계가 같은 길을 쓴다."""
     evidence_windows = luna.window_evidence(plan, frames, spoken)
+
+    def publish_progress(rows: Sequence[Any]) -> None:
+        context.check_cancel()
+        for annotation in rows:
+            if annotation.status == "accepted":
+                _write_json_atomic(
+                    cache_dir / (annotation.request_sha256 + ".json"),
+                    luna.annotation_json(annotation),
+                )
+        _write_json_atomic(
+            source_dir / "suitability_progress.json",
+            {
+                "analysis_revision_id": revision.revision_id,
+                "source_id": asset.asset_id,
+                "windows": stage1.window_plan_json(plan),
+                "utterances": stage1.utterances_json(spoken),
+                "recommendation_boundaries": _recommendation_boundaries(plan, spoken),
+                "annotations": [luna.annotation_json(row) for row in rows],
+            },
+        )
+
+    cache_settings = hashlib.sha256(
+        json.dumps(
+            {
+                "settings": asdict(settings),
+                "models": asdict(workflow.models),
+                "media": media_refs.fingerprint(workspace, asset.asset_id),
+                "source": asset.content_sha256,
+            },
+            sort_keys=True,
+        ).encode()
+    ).hexdigest()
+    cache_dir = workspace.root / "cache" / "source-luna" / asset.asset_id / cache_settings
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cached_annotations = {}
+    for evidence in evidence_windows:
+        digest = luna.luna_request_sha256(
+            workflow.models.luna_model, luna.build_luna_payload(evidence, settings)
+        )
+        candidate = cache_dir / (digest + ".json")
+        if candidate.is_file():
+            try:
+                annotation = SemanticAnnotation(**json.loads(candidate.read_text(encoding="utf-8")))
+                cached_annotations[annotation.window_id] = annotation
+            except (ValueError, TypeError, OSError):
+                pass
+    progress_path = source_dir / "suitability_progress.json"
+    if progress_path.is_file():
+        try:
+            for item in json.loads(progress_path.read_text(encoding="utf-8")).get(
+                "annotations", []
+            ):
+                row = SemanticAnnotation(**item)
+                if row.status == "accepted":
+                    cached_annotations[row.window_id] = row
+        except (ValueError, TypeError, OSError):
+            pass
     annotations = luna.annotate_windows(
         evidence_windows,
         _luna_responder_for(
@@ -1262,27 +1425,53 @@ def _finish_source(
         settings=settings,
         model=workflow.models.luna_model,
         origin=providers.origin,
+        on_annotations=publish_progress,
+        cached=cached_annotations,
     )
-    verdicts = luna.verdicts_from_annotations(annotations)
-    if audio is None:
-        proposal = stage1.audio_absent_proposal(grid, reason="오디오 트랙이 없다")
-        reconciliation = SourceReconciliation(
-            proposal=proposal,
-            intervals=tuple(
-                PlannedInterval(start=segment.start, end=segment.end)
-                for segment in proposal.segments
-            ),
-            dropped_boundary_ids=(),
-            review_reasons=tuple(proposal.review_reasons),
+    references = media_refs.load(workspace, asset.asset_id)
+    if references and references["validation"]["status"] in ("verified", "proxy_only"):
+        annotations = tuple(
+            replace(
+                a,
+                needs_review=True,
+                uncertainties=(*a.uncertainties, "프록시 화질 판단은 원본 확인 필요"),
+            )
+            if any(
+                term in a.suitability_reason for term in ("초점", "선명", "흐릿", "focus", "sharp")
+            )
+            else a
+            for a in annotations
         )
-    else:
-        assert asr_evidence is not None
-        reconciliation = reconcile_to_video_lattice(
-            timeline,
-            plan,
-            verdicts,
-            spoken,
-            [chunk for chunk in asr_evidence.chunks if not chunk.succeeded],
+    verdicts = luna.verdicts_from_annotations(annotations)
+    verdicts = {
+        key: replace(
+            verdict,
+            suggested_boundary_ids=tuple(
+                identifier
+                for identifier in verdict.suggested_boundary_ids
+                if (boundary := plan.boundary(identifier)) is not None
+                and boundary.kind != "window_length"
+            ),
+        )
+        for key, verdict in verdicts.items()
+    }
+    reconciliation = reconcile_to_video_lattice(
+        timeline,
+        plan,
+        verdicts,
+        spoken,
+        [chunk for chunk in asr_evidence.chunks if not chunk.succeeded] if asr_evidence else (),
+    )
+    if audio is None:
+        reconciliation = replace(
+            reconciliation,
+            proposal=replace(
+                reconciliation.proposal,
+                segments=tuple(
+                    replace(segment, speech_status=stage1.SPEECH_AUDIO_ABSENT)
+                    for segment in reconciliation.proposal.segments
+                ),
+            ),
         )
     execution_mode = document_execution_mode(annotations)
     document = _stage1_document(
@@ -1297,6 +1486,18 @@ def _finish_source(
         workflow=workflow,
         input_fingerprint=input_fp,
     )
+    from vlogsrt.project.raw.auto_cleanup import decisions
+
+    automatic = decisions(
+        document,
+        source_id=asset.asset_id,
+        revision_id=revision.revision_id,
+        pcm_path=audio.pcm_path if audio is not None else None,
+        audio_start=timeline.audio_start or Fraction(0),
+    )
+    document["recommendation_boundaries"] = _recommendation_boundaries(plan, spoken)
+    document["transcript_fingerprint"] = source_transcript.fingerprint(workspace, asset.asset_id)
+    document["media_fingerprint"] = media_refs.fingerprint(workspace, asset.asset_id)
     document_path = source_dir / ANALYSIS_DOCUMENT_NAME
     stage1.write_stage1_document(document_path, document)
     record_path = source_dir / ANALYSIS_RECORD_NAME
@@ -1332,6 +1533,7 @@ def _finish_source(
                 {"start": _fraction_json(interval.start), "end": _fraction_json(interval.end)}
                 for interval in reconciliation.intervals
             ],
+            "auto_decisions": [item.document() for item in automatic],
             "segments": [segment.segment_id for segment in reconciliation.proposal.segments],
             "dropped_boundary_ids": list(reconciliation.dropped_boundary_ids),
             "review_reasons": list(reconciliation.review_reasons),
@@ -1345,7 +1547,15 @@ def _finish_source(
         source_order=source_order,
         source_name=asset.source_name,
         fingerprint=input_fp,
-        status="analyzed",
+        status=(
+            "analyzed"
+            if all(a.status == "accepted" for a in annotations)
+            and (asr_evidence is None or all(c.succeeded for c in asr_evidence.chunks))
+            and not frames.failures
+            else "partial"
+            if any(a.status == "accepted" for a in annotations)
+            else "failed"
+        ),
         speech_status=_aggregate_speech_status(reconciliation.proposal, audio is None),
         execution_mode=execution_mode,
         document_path=str(document_path.relative_to(workspace.root)),
@@ -1923,3 +2133,65 @@ __all__ = [
     "semantic_job_fingerprint",
     "source_input_fingerprint",
 ]
+
+
+def _scene_plan(workspace: RawWorkspace, asset: SourceAsset, plan: WindowPlan) -> WindowPlan:
+    """Cache decoded cuts and attach only measured boundaries, retaining request image ceilings."""
+    assert plan.video is not None
+    digest = hashlib.sha256(
+        (
+            str(asset.content_sha256)
+            + media_refs.fingerprint(workspace, asset.asset_id)
+            + "scene/v1"
+        ).encode()
+    ).hexdigest()
+    cache = workspace.root / "cache" / (digest + "-scenes.json")
+    if cache.is_file():
+        times = tuple(Fraction(t) for t in json.loads(cache.read_text(encoding="utf-8"))["times"])
+    else:
+        times = preprocess.verified_scene_times(media_refs.resolve(workspace, asset, "frames"))
+        _write_json_atomic(cache, {"times": [str(t) for t in times]})
+    candidates = list(plan.candidates)
+    windows = []
+    for window in plan.windows:
+        owned = []
+        frames = list(window.frame_plans)
+        for moment in times:
+            point = moment - plan.video.presentation_origin
+            frame = round(point / plan.video.frame_duration)
+            if window.core_start <= point < window.core_end and 0 < frame < plan.video.frame_count:
+                owned.append(
+                    BoundaryCandidate(
+                        f"scene_{frame:08d}",
+                        window.window_id,
+                        "verified_scene",
+                        frame * plan.video.frame_duration,
+                        frame,
+                    )
+                )
+                for index in (frame - 1, frame):
+                    replacement = stage1.FramePlan(
+                        f"frame_{index:08d}", index, index * plan.video.frame_duration
+                    )
+                    if frames and all(f.frame_index != index for f in frames):
+                        nearest = min(
+                            range(len(frames)), key=lambda i: abs(frames[i].frame_index - index)
+                        )
+                        frames[nearest] = replacement
+        candidates.extend(owned)
+        windows.append(
+            replace(
+                window,
+                boundary_ids=window.boundary_ids + tuple(c.boundary_id for c in owned),
+                frame_plans=tuple(sorted(frames, key=lambda f: f.frame_index)),
+            )
+        )
+    return replace(plan, windows=tuple(windows), candidates=tuple(candidates))
+
+
+def _recommendation_boundaries(plan: WindowPlan, spoken: Sequence[UtteranceEvidence]) -> list[dict]:
+    points = {Fraction(0), plan.extent}
+    points.update(c.position for c in plan.candidates if c.kind == "verified_scene")
+    for utterance in spoken:
+        points.update((max(Fraction(0), utterance.start), min(plan.extent, utterance.end)))
+    return [_fraction_json(point) for point in sorted(points) if 0 <= point <= plan.extent]

@@ -677,6 +677,13 @@ def _source_preview_state(
     relative = _preview_relative(key)
     registration = _registration_for(workspace, relative)
     mp4_exists = (workspace.root / relative).is_file()
+    direct_file_id = record.get("direct_file_id")
+    if isinstance(direct_file_id, str):
+        try:
+            workspace.resolve_media_file(direct_file_id)
+            mp4_exists = True
+        except RawWorkspaceError:
+            mp4_exists = False
     declared = _record_str(record, "state")
     if declared == "ready" and mp4_exists:
         state = "ready"
@@ -698,7 +705,13 @@ def _source_preview_state(
         audio_ordinal=_record_int(record, "audio_ordinal"),
         audio_stream_index=_record_int(record, "audio_stream_index"),
         video_stream_index=_record_int(record, "video_stream_index"),
-        registered_file_id=registration.file_id if registration is not None else None,
+        registered_file_id=(
+            str(direct_file_id)
+            if direct_file_id and mp4_exists
+            else registration.file_id
+            if registration is not None
+            else None
+        ),
         relative_path=relative.as_posix(),
         duration_seconds=_record_str(record, "duration"),
         browser_origin_seconds=_record_str(record, "video_origin_seconds"),
@@ -725,6 +738,8 @@ def query_overview(
     active_jobs: Sequence[JobRecord] = (),
     expected_revision_id: str | None = None,
     audio_selections: Mapping[str, int | None] | None = None,
+    include_all_sources: bool = False,
+    selection_filter: str = "all",
 ) -> VisualReviewOverview:
     """검토 헤드 위의 영상 검토 질의 — 미디어 생성·제공자 호출이 전혀 없다.
 
@@ -750,9 +765,31 @@ def query_overview(
     )
     fingerprints = {job.input_fingerprint for job in active}
     purged = _visual_traces_purged(workspace)
-    page_count = max(1, math.ceil(len(ordered) / VISUAL_PAGE_SIZE))
+    if selection_filter not in ("all", "included", "excluded", "review"):
+        raise VisualReviewError("알 수 없는 컷 필터입니다")
+    matching = [
+        index
+        for index, segment in enumerate(ordered)
+        if selection_filter == "all"
+        or segment.selection == selection_filter
+        or (
+            selection_filter == "review"
+            and (
+                segment.recommendation == "review_required"
+                or segment.speech_status == "analysis_failed"
+            )
+        )
+    ]
+    page_count = max(1, math.ceil(len(matching) / VISUAL_PAGE_SIZE))
     start = (page - 1) * VISUAL_PAGE_SIZE
-    page_segments = ordered[start : start + VISUAL_PAGE_SIZE]
+    positions = matching[start : start + VISUAL_PAGE_SIZE]
+    page_segments = tuple(ordered[index] for index in positions)
+    if (
+        selected_segment_id
+        and any(s.segment_id == selected_segment_id for s in ordered)
+        and not any(ordered[index].segment_id == selected_segment_id for index in matching)
+    ):
+        selected_segment_id = None
     chosen_id = selected_segment_id or (page_segments[0].segment_id if page_segments else None)
     chosen_position = None
     if chosen_id is not None:
@@ -764,7 +801,7 @@ def query_overview(
             raise VisualReviewError(
                 f"리비전 {revision.revision_id!r}에 선택 조각 {chosen_id!r}이(가) 없다"
             )
-    touched = {segment.source_id for segment in page_segments}
+    touched = {segment.source_id for segment in (ordered if include_all_sources else page_segments)}
     if chosen_position is not None:
         touched.add(ordered[chosen_position].source_id)
     selections = validated_audio_selections(audio_selections)
@@ -781,7 +818,6 @@ def query_overview(
         )
         for source_id in sorted(touched)
     }
-    positions = range(start, start + len(page_segments))
     cards = tuple(
         _segment_card(workspace, revision, ordered, position, fingerprints, purged, previews)
         for position in positions
@@ -799,7 +835,7 @@ def query_overview(
         stale_sources=loaded.stale_sources,
         page=page,
         page_count=page_count,
-        total_segments=len(ordered),
+        total_segments=len(matching),
         segments=cards,
         selected=selected,
         sources=tuple(previews[source_id] for source_id in sorted(previews)),
@@ -1007,6 +1043,7 @@ def run_page_preparation(
     page: int = 1,
     audio_selections: Mapping[str, int | None] | None = None,
     expected_revision_id: str | None = None,
+    asset_ids: tuple[str, ...] = (),
 ) -> None:
     """요청 페이지의 미리보기를 채운다 — 원본 전체 MP4와 썸네일, 없는 것만 순서대로.
 
@@ -1028,6 +1065,8 @@ def run_page_preparation(
     ordered = chronological(revision)
     start = (page - 1) * VISUAL_PAGE_SIZE
     page_segments = ordered[start : start + VISUAL_PAGE_SIZE]
+    if asset_ids:
+        page_segments = tuple(s for s in page_segments if s.source_id in asset_ids)
     if not page_segments:
         return
     context.set_total(len(page_segments))
@@ -1075,8 +1114,11 @@ def _select_source(
     """
     clock = _required_clock(revision, source_id)
     asset = workspace.source_asset(source_id)
-    path = workspace.root / asset.relative_path
+    path = workspace.source_media_path(asset)
     _verify_source_unchanged(asset, path)
+    from vlogsrt.project.raw.media_refs import resolve
+
+    path = resolve(workspace, asset, "preview")
     probe = preprocess.probe_raw_media(path)
     _write_inventory(workspace, source_id, clock.source_sha256, probe.audio)
     if not explicit:
@@ -1209,11 +1251,33 @@ def _ensure_full_source_preview(
     가진다. 게시 경합에서 지면(이미 있다) 이긴 쪽 파일을 그대로 쓴다 — 어느 순간에도
     최종 이름의 파일이 지워지는 일이 없으므로 준비끼리 서로를 깨뜨릴 수 없다.
     """
-    key = preview_media_key(selection.source_sha256, selection.audio_ordinal)
+    from vlogsrt.project.raw import media_refs
+
+    media_fingerprint = media_refs.fingerprint(workspace, selection.source_id)
+    key = preview_media_key(selection.source_sha256 + media_fingerprint, selection.audio_ordinal)
     relative = _preview_relative(key)
     record_path = workspace.root / _preview_record_relative(key)
     target = workspace.root / relative
     record = _read_record(record_path)
+    refs = media_refs.load(workspace, selection.source_id)
+    probe = preprocess.probe_raw_media(selection.path)
+    if (
+        refs
+        and refs["validation"]["status"] in ("verified", "proxy_only")
+        and selection.path == Path(refs["proxy"]["path"])
+        and selection.path.suffix.lower() in (".mp4", ".m4v")
+        and probe.video.codec_name == "h264"
+        and len(probe.audio) <= 1
+        and all(a.codec_name == "aac" for a in probe.audio)
+        and (not probe.audio or selection.audio_ordinal == 0)
+    ):
+        direct = media_refs.register_direct(workspace, selection.source_id, selection.path)
+        payload = _source_record_payload(
+            selection, key, "ready", None, _measure_preview(selection.path)
+        )
+        payload.update(direct_file_id=direct, media_fingerprint=media_fingerprint)
+        _write_record(record_path, payload)
+        return
     if target.is_file():
         if record is None or record.get("state") != "ready":
             _write_record(

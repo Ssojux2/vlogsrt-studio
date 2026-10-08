@@ -19,7 +19,7 @@ from dataclasses import dataclass
 UNDERSTANDING_SCHEMA_VERSION = "raw-understanding/v1"
 """첫 단계 기록(analysis_transcript.json)의 namespace(계획 §13.1·§15.1)."""
 
-DEFAULT_PROMPT_REVISION = "raw-understanding-v1"
+DEFAULT_PROMPT_REVISION = "raw-suitability-v2"
 """Luna 안내문의 리비전 — 캐시 지문과 승인에 함께 실린다(§14.2)."""
 
 MAX_ASR_CHUNK_SECONDS = 180.0

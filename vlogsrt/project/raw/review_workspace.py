@@ -31,7 +31,7 @@ import hashlib
 import json
 import math
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from fractions import Fraction
 from pathlib import Path
@@ -365,6 +365,8 @@ class ReviewWorkspaceFacade:
         self,
         plan_revision_id: str | None = None,
         analysis_revision_id: str | None = None,
+        *,
+        preserve_source_ids: tuple[str, ...] = (),
     ) -> ReviewRevision:
         """확정 분할 계획을 검토 기본 리비전으로 — 원본은 지금 다시 검증·재측정한다.
 
@@ -385,8 +387,214 @@ class ReviewWorkspaceFacade:
         )
         entries = [_PlanReviewEntry(entry, statuses[entry.asset_id]) for entry in snapshot.entries]
         revision = initial_revision(self._project_id, snapshot.revision_id, clocks, entries)
+        revision = self._automatic_selections(revision, analysis_revision_id)
+        if preserve_source_ids and self._store.list_base_plan_ids(self._project_id):
+            prior = self.load_head().revision
+            retained = {
+                source_id
+                for source_id in preserve_source_ids
+                if prior.clock_for(source_id) == revision.clock_for(source_id)
+                and revision.clock_for(source_id) is not None
+            }
+            orders = {segment.source_id: segment.source_order for segment in revision.segments}
+            segments = [
+                segment for segment in revision.segments if segment.source_id not in retained
+            ]
+            segments.extend(
+                replace(segment, source_order=orders[segment.source_id])
+                for segment in prior.segments
+                if segment.source_id in retained
+            )
+            revision = replace(
+                revision,
+                segments=tuple(
+                    sorted(segments, key=lambda segment: (segment.source_order, segment.start_pts))
+                ),
+            )
         self._persist_new_base(revision)
         return revision
+
+    def _automatic_selections(
+        self, revision: ReviewRevision, analysis_revision_id: str | None
+    ) -> ReviewRevision:
+        store = AnalysisStore(self._workspace)
+        analysis = self._analysis_revision(store, analysis_revision_id)
+        if analysis is None:
+            return revision
+        rows = {row.asset_id: row for row in store.list_source_results(analysis.revision_id)}
+        segments = []
+        for segment in revision.segments:
+            row = rows.get(segment.source_id)
+            clock = revision.clock_for(segment.source_id)
+            assert clock is not None
+            start = (segment.start_pts - clock.origin_pts) * clock.time_base
+            end = (segment.end_pts - clock.origin_pts) * clock.time_base
+            if (
+                row is None
+                or row.status not in ("analyzed", "cached", "partial")
+                or not row.record_path
+            ):
+                segments.append(
+                    replace(
+                        segment,
+                        recommendation="review_required",
+                        notes="확인 필요: 분석 미완료 또는 실패",
+                    )
+                )
+                continue
+            record = self._read_json(row.record_path, "자동 정리 근거")
+            from vlogsrt.project.raw.auto_cleanup import saved_decisions
+
+            automatic_record = dict(record)
+            if row.document_path:
+                automatic_record["auto_decisions"] = saved_decisions(
+                    self.root / row.document_path,
+                    automatic_record,
+                    segment.source_id,
+                    row.revision_id,
+                )
+            candidates = [
+                _require_mapping(d, "auto_decisions[]")
+                for d in _require_list(automatic_record.get("auto_decisions", []), "auto_decisions")
+            ]
+            match = next(
+                (
+                    d
+                    for d in candidates
+                    if _fraction_from_json(d["start"], "start") <= start
+                    and _fraction_from_json(d["end"], "end") >= end
+                ),
+                None,
+            )
+            if match is not None:
+                provenance = {
+                    **match,
+                    "source_id": segment.source_id,
+                    "source_sha256": clock.source_sha256,
+                    "analysis_revision_id": analysis.revision_id,
+                    "segment_id": segment.segment_id,
+                }
+                segment = replace(
+                    segment,
+                    selection="excluded",
+                    notes="자동 제외: "
+                    + json.dumps(provenance, ensure_ascii=False, sort_keys=True),
+                )
+            elif record.get("review_reasons") or segment.speech_status == SPEECH_ANALYSIS_FAILED:
+                segment = replace(
+                    segment,
+                    recommendation="review_required",
+                    notes="확인 필요: "
+                    + "; ".join(
+                        str(r)
+                        for r in _require_list(record.get("review_reasons", []), "review_reasons")
+                    ),
+                )
+            segments.append(segment)
+        # Re-analysis never overwrites a source that has already been manually edited.
+        prior_bases = self._store.list_base_plan_ids(self._project_id)
+        if prior_bases:
+            prior = self.load_head(prior_bases[-1]).revision
+            if prior.sequence > 0:
+                old_clocks = {c.source_id: c for c in prior.clocks}
+                retained = {
+                    c.source_id for c in revision.clocks if old_clocks.get(c.source_id) == c
+                }
+                source_orders = {s.source_id: s.source_order for s in segments}
+                segments = [s for s in segments if s.source_id not in retained] + [
+                    replace(s, source_order=source_orders[s.source_id])
+                    for s in prior.segments
+                    if s.source_id in retained
+                ]
+                segments.sort(key=lambda s: (s.source_order, s.start_pts))
+        from vlogsrt.project.raw.suitability import grade
+
+        documents = {}
+        graded = []
+        for segment in segments:
+            row = rows.get(segment.source_id)
+            if (
+                row is not None
+                and row.status in ("analyzed", "cached", "partial")
+                and row.document_path
+            ):
+                if segment.source_id not in documents:
+                    documents[segment.source_id] = dict(
+                        self._read_json(row.document_path, "Luna 평가")
+                    )
+                clock = revision.clock_for(segment.source_id)
+                assert clock is not None
+                recommendation, reason = grade(
+                    documents[segment.source_id],
+                    (segment.start_pts - clock.origin_pts) * clock.time_base,
+                    (segment.end_pts - clock.origin_pts) * clock.time_base,
+                )
+                tags = tuple(t for t in segment.visual_tags if not t.startswith("Luna 평가: "))
+                segment = replace(
+                    segment,
+                    recommendation=recommendation,
+                    visual_tags=(*tags, "Luna 평가: " + reason),
+                )
+            graded.append(segment)
+        return replace(revision, segments=tuple(graded))
+
+    def _publish_snapshot(
+        self, head: ReviewRevision, segments: tuple[ReviewSegment, ...], label: str
+    ) -> ReviewRevision:
+        edited = replace(
+            head,
+            sequence=head.sequence + 1,
+            segments=segments,
+            parent_revision_id=head.revision_id,
+            edit=note_edit(head.revision_id, head.segments[0].segment_id, label),
+        )
+        # Round-trip through domain validation before the atomic compare-and-swap.
+        edited = parse_revision(serialize_revision(edited))
+        self._store.publish_edit_revision(
+            project_id=self._project_id,
+            base_plan_id=head.base_plan_id,
+            document_json=serialize_revision(edited),
+            content_fingerprint=content_fingerprint(edited),
+            expected_head_revision_id=head.revision_id,
+            new_head_revision_id=edited.revision_id,
+            updated_at=_now(),
+        )
+        return edited
+
+    def undo(self, base_plan_id: str | None = None) -> ReviewRevision:
+        head = self.load_head(base_plan_id).revision
+        cursor = head
+        if head.edit and head.edit.notes and head.edit.notes.startswith("undo:"):
+            document, _ = self._store.revision_document(
+                self._project_id, head.base_plan_id, int(head.edit.notes.split(":", 1)[1])
+            )
+            cursor = parse_revision(document)
+        if cursor.parent_revision_id is None:
+            raise ReviewWorkspaceError("실행 취소할 편집이 없습니다")
+        sequence = self._sequence_of_revision_id(cursor.parent_revision_id)
+        document, _ = self._store.revision_document(self._project_id, head.base_plan_id, sequence)
+        return self._publish_snapshot(head, parse_revision(document).segments, f"undo:{sequence}")
+
+    def restore_automatic(self, base_plan_id: str | None = None) -> ReviewRevision:
+        head = self.load_head(base_plan_id).revision
+        manually_selected: set[str] = set()
+        cursor = head
+        while cursor.parent_revision_id is not None:
+            if cursor.edit and cursor.edit.kind == "selection":
+                manually_selected.update(cursor.edit.segment_ids)
+            document, _ = self._store.revision_document(
+                self._project_id,
+                head.base_plan_id,
+                self._sequence_of_revision_id(cursor.parent_revision_id),
+            )
+            cursor = parse_revision(document)
+        segments = tuple(
+            replace(s, selection="included")
+            if s.notes.startswith("자동 제외: ") and s.segment_id not in manually_selected
+            else s
+            for s in head.segments
+        )
+        return self._publish_snapshot(head, segments, "자동 제외 전체 복원")
 
     def _snapshot(self, plan_revision_id: str | None) -> SegmentPlanSnapshot:
         if plan_revision_id is not None:
@@ -400,7 +608,7 @@ class ReviewWorkspaceFacade:
         """원본을 지금 다시 검증·재측정해 시계를 만든다 — 계획 기록과 어긋나면 거부."""
         asset = self._workspace.source_asset(coverage.asset_id)
         self._verify_source_unchanged(asset)
-        path = self._workspace.root / asset.relative_path
+        path = self._workspace.source_media_path(asset)
         probe = preprocess.probe_raw_media(path)
         clock = preprocess.probe_extraction_clock(path, probe=probe)
         if not clock.uniform_grid:
@@ -448,7 +656,7 @@ class ReviewWorkspaceFacade:
             raise ReviewWorkspaceError(
                 f"원본이 검증 준비 상태가 아니다: {asset.source_relative_path} ({asset.status})"
             )
-        path = self._workspace.root / asset.relative_path
+        path = self._workspace.source_media_path(asset)
         probed = path.stat()
         if probed.st_size != asset.size_bytes:
             raise ReviewWorkspaceError(
@@ -499,7 +707,7 @@ class ReviewWorkspaceFacade:
             return SPEECH_UNCONFIRMED_EMPTY
         if row.status == "failed":
             return SPEECH_ANALYSIS_FAILED
-        if row.status in ("analyzed", "cached"):
+        if row.status in ("analyzed", "cached", "partial"):
             return (
                 row.speech_status
                 if row.speech_status in SPEECH_STATUSES
@@ -561,7 +769,11 @@ class ReviewWorkspaceFacade:
             except RawWorkspaceError:
                 stale.append((clock.source_id, "자산 기록이 없다"))
                 continue
-            path = self._workspace.root / asset.relative_path
+            try:
+                path = self._workspace.source_media_path(asset)
+            except RawWorkspaceError as error:
+                stale.append((clock.source_id, str(error)))
+                continue
             if not path.is_file():
                 stale.append((clock.source_id, "원본 파일이 없다"))
             elif path.stat().st_size != asset.size_bytes:
@@ -584,6 +796,17 @@ class ReviewWorkspaceFacade:
         if edit.kind not in EDIT_KINDS:
             raise ReviewWorkspaceError(f"알 수 없는 편집 종류 {edit.kind!r}")
         edited = apply_edit(head, edit)
+        if edit.kind == "selection":
+            edited = replace(
+                edited,
+                segments=tuple(
+                    replace(segment, notes="수동 선택 · " + segment.notes)
+                    if segment.segment_id in edit.segment_ids
+                    and segment.notes.startswith("자동 제외: ")
+                    else segment
+                    for segment in edited.segments
+                ),
+            )
         self._store.publish_edit_revision(
             project_id=self._project_id,
             base_plan_id=base_plan_id,
@@ -939,7 +1162,9 @@ class ReviewWorkspaceFacade:
             segment_id=segment.segment_id,
             clip_id=artifact.clip_id,
             source_id=segment.source_id,
-            source_original_relative_path=asset.relative_path,
+            source_original_relative_path=(
+                self._workspace.source_reference_path(asset.asset_id) or asset.relative_path
+            ),
             source_sha256=asset.content_sha256 or "",
             extracted_preview_relative_path=artifact.relative_path,
             extracted_sha256=artifact.content_sha256,
@@ -956,7 +1181,7 @@ class ReviewWorkspaceFacade:
         row = self._latest_evidence_row(source_id)
         if row is None:
             return ()
-        if row.status in ("analyzed", "cached"):
+        if row.status in ("analyzed", "cached", "partial"):
             return self._analyzed_evidence(row)
         if row.status == "transcribed":
             return self._transcribed_evidence(row)

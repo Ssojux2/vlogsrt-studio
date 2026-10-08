@@ -291,7 +291,9 @@ def test_annotate_windows_records_failures_per_window(tmp_path: Path) -> None:
         luna.ANNOTATION_FAILED,
         luna.ANNOTATION_ACCEPTED,
     ]
-    assert "TimeoutError" in annotations[0].defect
+    assert annotations[0].error_code == "timeout"
+    assert annotations[0].response_uncertain
+    assert "시간 초과" in annotations[0].defect
 
 
 def test_replay_responder_demands_a_known_window(tmp_path: Path) -> None:

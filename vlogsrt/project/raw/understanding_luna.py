@@ -27,10 +27,12 @@ import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from decimal import Decimal
+from difflib import SequenceMatcher
 from fractions import Fraction
 from types import MappingProxyType
 from typing import Protocol
 
+from vlogsrt.project.raw import request_log
 from vlogsrt.project.raw.analysis_config import (
     UNDERSTANDING_SCHEMA_VERSION,
     RawUnderstandingSettings,
@@ -54,6 +56,7 @@ from vlogsrt.project.raw.understanding import (
     WindowVerdict,
     stage1_evidence_document,
 )
+from vlogsrt.task_runtime import check_cancel, provider_error
 from vlogsrt.transcribe import RequestObserver, request_luna_vision
 
 LUNA_OUTPUT_SCHEMA_NAME = "raw_understanding_window_v1"
@@ -101,6 +104,8 @@ LUNA_OUTPUT_FIELDS: tuple[str, ...] = (
     "editing_notes",
     "needs_review",
     "uncertainties",
+    "suitability",
+    "suitability_reason",
 )
 """출력 칸 전부 — schema 빌더와 결함 검사가 같은 목록을 쓴다."""
 
@@ -121,6 +126,8 @@ def luna_output_schema() -> dict[str, object]:
         "editing_notes": {"type": "array", "items": {"type": "string"}},
         "needs_review": {"type": "boolean"},
         "uncertainties": {"type": "array", "items": {"type": "string"}},
+        "suitability": {"type": "string", "enum": ["recommended", "usable", "review"]},
+        "suitability_reason": {"type": "string"},
     }
     return {
         "type": "object",
@@ -178,11 +185,7 @@ def window_evidence(
             frames=tuple(
                 by_id[item.frame_id] for item in window.frame_plans if item.frame_id in by_id
             ),
-            utterances=tuple(
-                by_utterance[utterance_id]
-                for utterance_id in window.utterance_ids
-                if utterance_id in by_utterance
-            ),
+            utterances=_related_utterances(window.utterance_ids, by_utterance),
             candidates=tuple(candidates_by_window.get(window.window_id, ())),
         )
         for window in plan.windows
@@ -262,6 +265,19 @@ def _instruction(evidence: WindowEvidence) -> str:
             "- 증거에 없는 말·장면을 지어내지 마라. 빈 확인은 '확인 안 됨'으로만 다뤄라.",
             "- 경계는 발화·이어지는 동작을 자르지 않는 쪽만 제안하라. 모호하면 제안하지 마라.",
             "- 영상을 지우거나 순서를 바꾸는 명령은 없다. 요약·태그·메모·경계 제안만 있다.",
+            "- suitability는 이 코어 구간을 편집에 쓸 가치: recommended(좋은 구간),"
+            " usable(사용 가능), review(확인 필요)다.",
+            "- 풍경·행동·현장 분위기도 좋은 영상이다. 말이 없다는 이유로 낮게 평가하지 마라.",
+            "- 구도·흔들림·초점·노출·고유 사건·장면 맥락을 프레임 증거로 판단하고"
+            " 구체적인 한국어 이유를 suitability_reason에 써라.",
+            "- 장면이 모호하거나 프레임이 부족하면 review다."
+            " recommended에는 실제 frame evidence_ids를 포함하라.",
+            "- 완전한 발화 문장과 풍경을 보여 주는 구간은 보존한다. 무발화는 삭제 근거가 아니다.",
+            "- 정지 프레임만으로 움직임·흔들림을 확정하지 마라."
+            " 프록시 압축으로 초점이 불분명하면 확인 필요다.",
+            "- NG·중복은 같은 원본의 완전한 대체 테이크와 증거 ID가 확인될 때만 후보로 표시한다.",
+            "- 다른 원본 사이 중복은 후보만 제시한다."
+            " 임의의 정밀 시각이나 장면 경계를 만들지 마라.",
             "- 출력은 지정된 JSON schema 하나다.",
         ]
     )
@@ -308,6 +324,11 @@ class SemanticAnnotation:
     uncertainties: tuple[str, ...] = ()
     needs_review: bool = False
     defect: str = ""
+    error_code: str = ""
+    response_uncertain: bool = False
+    suitability_evaluated: bool = False
+    suitability: str = "review"
+    suitability_reason: str = "사용성 평가가 없는 이전 분석입니다"
 
 
 def parse_luna_response(
@@ -360,6 +381,11 @@ def parse_luna_response(
         editing_notes=tuple(body["editing_notes"]),
         uncertainties=tuple(body["uncertainties"]),
         needs_review=bool(body["needs_review"]),
+        suitability_evaluated="suitability" in body,
+        suitability=str(body.get("suitability", "review")),
+        suitability_reason=str(
+            body.get("suitability_reason", "사용성 평가가 없는 이전 분석입니다")
+        ),
     )
 
 
@@ -391,9 +417,26 @@ def _annotation_defect(parsed: object, evidence: WindowEvidence) -> str:
     unknown = sorted(set(parsed) - set(LUNA_OUTPUT_FIELDS))
     if unknown:
         return f"schema에 없는 칸이 있다: {', '.join(unknown)}"
-    missing = sorted(key for key in LUNA_OUTPUT_FIELDS if key not in parsed)
+    legacy_required = [
+        key for key in LUNA_OUTPUT_FIELDS if key not in ("suitability", "suitability_reason")
+    ]
+    missing = sorted(key for key in legacy_required if key not in parsed)
     if missing:
         return f"필수 칸이 비었다: {', '.join(missing)}"
+    if "suitability" in parsed:
+        if parsed["suitability"] not in ("recommended", "usable", "review"):
+            return "suitability 값이 허용 범위 밖이다"
+        if (
+            not isinstance(parsed.get("suitability_reason"), str)
+            or not parsed["suitability_reason"].strip()
+        ):
+            return "suitability_reason이 비었다"
+        if not isinstance(parsed.get("evidence_ids"), list):
+            return "evidence_ids가 배열이 아니다"
+        if parsed["suitability"] == "recommended" and not any(
+            frame.frame_id in parsed.get("evidence_ids", []) for frame in evidence.frames
+        ):
+            return "추천 판정에 프레임 근거가 없다"
     if parsed["window_id"] != evidence.window.window_id:
         return (
             f"window_id가 이 창이 아니다: {parsed['window_id']!r}"
@@ -555,6 +598,8 @@ def annotate_windows(
     settings: RawUnderstandingSettings,
     model: str,
     origin: str,
+    on_annotations: Callable[[Sequence[SemanticAnnotation]], None] | None = None,
+    cached: Mapping[str, SemanticAnnotation] | None = None,
 ) -> tuple[SemanticAnnotation, ...]:
     """창마다 판정을 얻는다 — 호출 실패는 그 창의 failed 판정이다.
 
@@ -568,11 +613,31 @@ def annotate_windows(
         )
     annotations: list[SemanticAnnotation] = []
     for evidence in evidence_windows:
+        check_cancel()
         payload = build_luna_payload(evidence, settings)
         request_sha256 = luna_request_sha256(model, payload)
+        prior = (cached or {}).get(evidence.window.window_id)
+        if (
+            prior is not None
+            and prior.status == ANNOTATION_ACCEPTED
+            and prior.request_sha256 == request_sha256
+            and prior.prompt_revision == settings.prompt_revision
+            and prior.luna_model == model
+            and prior.origin == origin
+        ):
+            annotations.append(prior)
+            if on_annotations is not None:
+                on_annotations(tuple(annotations))
+            continue
+        attempt = request_log.begin("luna", request_sha256)
         try:
             response = responder.respond(window_id=evidence.window.window_id, payload=payload)
+            request_log.finish(attempt, received=True)
         except Exception as exc:
+            request_log.finish(
+                attempt, received=not provider_error(exc)[2], note=provider_error(exc)[0]
+            )
+            check_cancel()
             annotations.append(
                 SemanticAnnotation(
                     window_id=evidence.window.window_id,
@@ -582,9 +647,13 @@ def annotate_windows(
                     prompt_revision=settings.prompt_revision,
                     origin=origin,
                     needs_review=True,
-                    defect=f"{type(exc).__name__}: {exc}",
+                    defect=provider_error(exc)[1],
+                    error_code=provider_error(exc)[0],
+                    response_uncertain=provider_error(exc)[2],
                 )
             )
+            if on_annotations is not None:
+                on_annotations(tuple(annotations))
             continue
         annotations.append(
             parse_luna_response(
@@ -596,6 +665,8 @@ def annotate_windows(
                 prompt_revision=settings.prompt_revision,
             )
         )
+        if on_annotations is not None:
+            on_annotations(tuple(annotations))
     return tuple(annotations)
 
 
@@ -1316,6 +1387,11 @@ def annotation_json(annotation: SemanticAnnotation) -> dict[str, object]:
         "uncertainties": list(annotation.uncertainties),
         "needs_review": annotation.needs_review,
         "defect": annotation.defect,
+        "error_code": annotation.error_code,
+        "response_uncertain": annotation.response_uncertain,
+        "suitability_evaluated": annotation.suitability_evaluated,
+        "suitability": annotation.suitability,
+        "suitability_reason": annotation.suitability_reason,
     }
 
 
@@ -1378,3 +1454,20 @@ def stage1_document(
         fingerprint=fingerprint,
         execution_mode=document_execution_mode(annotations),
     )
+
+
+def _related_utterances(
+    ids: Sequence[str], all_utterances: Mapping[str, UtteranceEvidence]
+) -> tuple[UtteranceEvidence, ...]:
+    local = [all_utterances[key] for key in ids if key in all_utterances]
+    related = [
+        u
+        for key, u in all_utterances.items()
+        if key not in ids
+        and any(
+            len(a.text.strip()) >= 8
+            and SequenceMatcher(None, a.text, u.text, autojunk=False).ratio() >= 0.85
+            for a in local
+        )
+    ]
+    return tuple(sorted([*local, *related[:6]], key=lambda u: u.start))

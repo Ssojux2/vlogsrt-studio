@@ -25,7 +25,7 @@ import math
 import os
 import wave
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import date
 from fractions import Fraction
 from pathlib import Path
@@ -34,12 +34,14 @@ from typing import Protocol
 from vlogsrt import log
 from vlogsrt.models import Chunk
 from vlogsrt.preprocess import VideoStreamInfo, extract_frame_index, extract_pcm_s16le
+from vlogsrt.project.raw import request_log
 from vlogsrt.project.raw.analysis_config import (
     RawUnderstandingSettings,
     validate_understanding_settings,
 )
 from vlogsrt.project.raw.caption_provider import TimingProvider, audio_chunk_binding
 from vlogsrt.project.raw.config import RawWorkflowConfig
+from vlogsrt.task_runtime import check_cancel, provider_error
 
 PCM_SAMPLE_RATE = 16000
 """`extract_pcm_s16le`의 고정 계약 주파수 — 이 층의 PCM 좌표는 전부 이 시계다."""
@@ -189,6 +191,7 @@ def _require_coverage(spans: Sequence[SampleSpan], sample_count: int) -> None:
         raise AnalysisPlanningError("청크 계획이 비었다 — 오디오가 없다")
     cursor = 0
     for position, span in enumerate(spans):
+        check_cancel()
         if span.start != cursor or span.end <= span.start:
             raise AnalysisPlanningError(
                 f"청크 {position}이 커버리지를 어긴다: [{span.start}, {span.end}),"
@@ -245,6 +248,7 @@ def transcribe_selected_audio(
     on: date,
     request_id: str,
     workdir: Path,
+    cache_dir: Path | None = None,
 ) -> AsrEvidence:
     """계획된 청크를 순서대로 내부 전사한다 — 주입된 시간 제공자를 통해서만.
 
@@ -258,6 +262,7 @@ def transcribe_selected_audio(
     _require_settings(understanding)
     outcomes: list[AsrChunkOutcome] = []
     for position, span in enumerate(spans):
+        check_cancel()
         outcomes.append(
             _transcribe_span(
                 audio,
@@ -268,6 +273,7 @@ def transcribe_selected_audio(
                 on=on,
                 request_id=request_id,
                 workdir=workdir,
+                cache_dir=cache_dir,
             )
         )
     return AsrEvidence(request_id=request_id, sample_rate=audio.sample_rate, chunks=tuple(outcomes))
@@ -283,6 +289,7 @@ def _transcribe_span(
     on: date,
     request_id: str,
     workdir: Path,
+    cache_dir: Path | None = None,
 ) -> AsrChunkOutcome:
     """청크 하나를 전사한다 — 실패는 이 청크의 기록으로 담아 올라간다."""
     wav_path = workdir / f"asr-chunk-{position:04d}.wav"
@@ -294,6 +301,31 @@ def _transcribe_span(
         index=position,
     )
     chunk_request_id = f"{request_id}:chunk-{position:04d}"
+    cache_path = workdir / f"asr-chunk-{position:04d}.json"
+    fingerprint = hashlib.sha256(
+        json.dumps(
+            {
+                "wav": _sha256_file(wav_path),
+                "provider_origin": type(provider).__name__,
+                "model": settings.models.timing_model,
+                "settings": asdict(settings),
+                "start": span.start,
+                "end": span.end,
+            },
+            sort_keys=True,
+            default=str,
+        ).encode()
+    ).hexdigest()
+    if cache_dir is not None:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        cache_path = cache_dir / (fingerprint + ".json")
+    if cache_path.is_file():
+        try:
+            cache = json.loads(cache_path.read_text(encoding="utf-8"))
+            if cache.get("fingerprint") == fingerprint and not cache["outcome"].get("failure"):
+                return AsrChunkOutcome(**cache["outcome"])
+        except (ValueError, KeyError, TypeError):
+            pass
     try:
         binding = audio_chunk_binding(
             chunk,
@@ -302,6 +334,7 @@ def _transcribe_span(
             sample_rate=audio.sample_rate,
             request_id=chunk_request_id,
         )
+        attempt = request_log.begin("asr", fingerprint)
         timed = provider.timed_transcript(
             binding=binding,
             chunk=chunk,
@@ -310,11 +343,18 @@ def _transcribe_span(
             stem=wav_path.stem,
             source=audio.source_id,
         )
+        request_log.finish(attempt, received=True)
         segments = tuple((seg.start, seg.end, seg.text) for seg in timed.segments)
     except Exception as exc:  # 청크 하나의 실패 — 전체 실행의 실패가 아니다(§7.3)
+        request_log.finish(
+            locals().get("attempt"),
+            received=not provider_error(exc)[2],
+            note=provider_error(exc)[0],
+        )
+        check_cancel()
         log.debug(f"내부 전사 청크 {position} 실패: {exc}")
         return _failed_outcome(span, position, chunk_request_id, wav_path, exc)
-    return AsrChunkOutcome(
+    outcome = AsrChunkOutcome(
         chunk_index=position,
         sample_start=span.start,
         sample_end=span.end,
@@ -322,6 +362,13 @@ def _transcribe_span(
         request_id=chunk_request_id,
         transcript=segments,
     )
+    temp = cache_path.with_suffix(".tmp")
+    temp.write_text(
+        json.dumps({"fingerprint": fingerprint, "outcome": asdict(outcome)}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    temp.replace(cache_path)
+    return outcome
 
 
 def _failed_outcome(
@@ -339,7 +386,7 @@ def _failed_outcome(
         wav_sha256=_sha256_file(wav_path),
         request_id=chunk_request_id,
         transcript=(),
-        failure=f"{type(exc).__name__}: {exc}",
+        failure=provider_error(exc)[1],
     )
 
 
@@ -1054,7 +1101,18 @@ def sample_frames(
     )
     frames: list[FrameEvidence] = []
     failures: list[FrameExtractionFailure] = []
+    prepare = getattr(sampler, "prepare", None)
+    if prepare is not None:
+        try:
+            prepare(
+                frame_indices=tuple(index for index, _ in ordered),
+                directory=directory,
+                long_edge=settings.image_long_edge,
+            )
+        except Exception:
+            check_cancel()  # cancellation propagates; otherwise retain completed frame cache
     for _, item in ordered:
+        check_cancel()
         destination = directory / f"{item.frame_id}.jpg"
         try:
             path = sampler.sample(
@@ -1065,6 +1123,7 @@ def sample_frames(
             )
             digest = _sha256_file(path)
         except Exception as exc:
+            check_cancel()
             failures.append(FrameExtractionFailure(item.frame_id, f"{type(exc).__name__}: {exc}"))
             continue
         frames.append(

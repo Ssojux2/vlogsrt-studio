@@ -642,7 +642,7 @@ def test_full_flow_split_reextract_vtt_export_purge_restart(
     assert len(list(selected_media.iterdir())) == selected_outcome.report.clip_count
 
     full_outcome = facade.export_confirmed(new_package_dir)
-    assert full_outcome.report.clip_count == len(adopted.segments)
+    assert full_outcome.report.clip_count == len(adopted.segments) - 1
     full_dir = root / full_outcome.destination_dir
 
     preview = facade.restore_previews(new_package_dir)
@@ -658,7 +658,9 @@ def test_full_flow_split_reextract_vtt_export_purge_restart(
     # 확정·옛 package는 정리 뒤에도 바이트 그대로 — 재검증이 그걸 증명한다.
     assert _tree_hashes(root, full_outcome.destination_dir) == confirmed_hashes_before
     assert _tree_hashes(root, "clips/package_000001") == old_package_hashes
-    assert facade.verify_export(full_outcome.destination_dir).clip_count == len(adopted.segments)
+    assert (
+        facade.verify_export(full_outcome.destination_dir).clip_count == len(adopted.segments) - 1
+    )
 
     # 재시작 — 새 파사드 인스턴스가 같은 헤드·같은 확정 기록을 읽는다.
     restarted = facade_module.ReviewWorkspaceFacade(root)

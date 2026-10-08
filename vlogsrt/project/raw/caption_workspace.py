@@ -31,8 +31,11 @@ from __future__ import annotations
 import array
 import hashlib
 import inspect
+import json
+import os
 import secrets
 import sys
+import tempfile
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
@@ -536,6 +539,37 @@ class CaptionWorkspace:
         self, final_video_revision: str, audio_ordinal: int | None = None
     ) -> FinalVideoRegistration | None:
         return self._store.registration(final_video_revision, audio_ordinal)
+
+    def select_registration(self, registration: FinalVideoRegistration) -> None:
+        """Persist the selected final render independently of historical caption runs."""
+        if self.registration(registration.final_video_revision, registration.audio_ordinal) is None:
+            raise RegistrationNotReadyError("등록되지 않은 최종 영상입니다")
+        target = self.root / "final" / "active_video.json"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        fd, temporary = tempfile.mkstemp(prefix=".active-video-", dir=target.parent)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(
+                    {
+                        "revision": registration.final_video_revision,
+                        "audio_ordinal": registration.audio_ordinal,
+                    },
+                    handle,
+                )
+            os.replace(temporary, target)
+        finally:
+            Path(temporary).unlink(missing_ok=True)
+
+    def active_registration(self) -> FinalVideoRegistration | None:
+        target = self.root / "final" / "active_video.json"
+        if not target.exists():
+            rows = self.registrations()
+            return rows[-1] if rows else None
+        try:
+            selected = json.loads(target.read_text(encoding="utf-8"))
+            return self.registration(selected["revision"], selected["audio_ordinal"])
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            raise RegistrationNotReadyError("최종 영상 선택 기록을 읽을 수 없습니다") from error
 
     def registrations(self) -> tuple[FinalVideoRegistration, ...]:
         return self._store.registrations()

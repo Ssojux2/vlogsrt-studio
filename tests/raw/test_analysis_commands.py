@@ -167,7 +167,7 @@ def test_analyze_reports_failures_honestly(tmp_path: Path, capsys) -> None:
     args = _parser().parse_args(["media", "analyze", "--workspace", str(workspace)])
     assert media.media_command(args) == 0
     out = capsys.readouterr().out
-    assert "analyzed" in out  # 원본은 기록으로 완성된다(실패 창과 함께)
+    assert "failed" in out  # 모든 분석 창의 실패를 완료로 숨기지 않는다
     service = media._service()
     service.open_workspace(workspace)
     summary = service.analysis_overview(workspace)
