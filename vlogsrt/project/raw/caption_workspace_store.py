@@ -20,7 +20,8 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from fractions import Fraction
 from pathlib import Path
@@ -34,7 +35,7 @@ from vlogsrt.project.raw.caption_workspace_types import (
     FinalVideoRegistration,
     RunIdentity,
 )
-from vlogsrt.project.raw.workspace import DB_NAME
+from vlogsrt.project.raw.workspace import DB_NAME, db_session
 
 CAPTION_SCHEMA_STATEMENTS: tuple[str, ...] = (
     """
@@ -153,11 +154,10 @@ class CaptionWorkspaceStore:
         with self._connect() as connection:
             init_schema(connection)
 
-    def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self._db_path, timeout=10.0)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA busy_timeout = 10000")
-        return connection
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        with db_session(self._db_path) as connection:
+            yield connection
 
     # ── 등록 ────────────────────────────────────────────────────
 

@@ -10,18 +10,25 @@ from __future__ import annotations
 
 import sqlite3
 import threading
-from collections.abc import Callable
+import time
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
+from vlogsrt import log
 from vlogsrt.project.raw.models import (
     ACTIVE_JOB_STATUSES,
     JobHandle,
     JobRecord,
     RawWorkspaceError,
 )
-from vlogsrt.project.raw.workspace import DB_NAME, RawWorkspace
+from vlogsrt.project.raw.workspace import DB_NAME, RawWorkspace, db_session, open_db
 from vlogsrt.task_runtime import cancellation_scope
+
+FINAL_STATE_ATTEMPTS = 3
+FINAL_STATE_RETRY_SECONDS = 0.5
+"""끝 상태 기록의 재시도 — 잠금·fd 고갈 같은 일시 오류가 스레드를 죽이지 않게."""
 
 
 class JobCancelledError(Exception):
@@ -66,7 +73,7 @@ class JobStore:
     ) -> tuple[JobRecord, bool]:
         """한 트랜잭션에서 (활성 작업 찾기 → 없으면 삽입) — 동시 제출이 두 벌을 못 만든다."""
         placeholders = ", ".join("?" for _ in ACTIVE_JOB_STATUSES)
-        connection = self._connect()
+        connection = open_db(self._workspace.root / DB_NAME)
         try:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
@@ -179,11 +186,10 @@ class JobStore:
             )
             connection.commit()
 
-    def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self._workspace.root / DB_NAME, timeout=10.0)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA busy_timeout = 10000")
-        return connection
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        with db_session(self._workspace.root / DB_NAME) as connection:
+            yield connection
 
     @staticmethod
     def _values(record: JobRecord) -> tuple[object, ...]:
@@ -278,29 +284,67 @@ class JobManager:
     def _execute(self, job_id: str) -> None:
         with self._lock:
             execution = self._executions.get(job_id)
-        if execution is None:
-            self._store.update(job_id, status="failed", error="작업 본문을 찾지 못했다")
-            return
-        if self._store.get(job_id).status not in ("queued", "running"):
-            self._store.update(job_id, status="cancelled")
-            return
-        self._store.update(job_id, status="running")
-        context = JobContext(job_id, self._workspace)
         try:
+            if execution is None:
+                self._settle(job_id, status="failed", error="작업 본문을 찾지 못했다")
+                return
+            if self._store.get(job_id).status not in ("queued", "running"):
+                self._settle(job_id, status="cancelled")
+                return
+            self._store.update(job_id, status="running")
+            context = JobContext(job_id, self._workspace)
             with cancellation_scope(context.check_cancel):
                 execution.run(context)
-            final = "cancelled" if self._store.get(job_id).cancellation_requested else "succeeded"
-            if final == "succeeded":
-                self._store.update(job_id, status="succeeded", error=None)
+            if self._cancellation_after_success(job_id):
+                self._settle(job_id, status="cancelled")
             else:
-                self._store.update(job_id, status="cancelled")
+                self._settle(job_id, status="succeeded", error=None)
         except JobCancelledError:
-            self._store.update(job_id, status="cancelled")
+            self._settle(job_id, status="cancelled")
         except Exception as error:  # noqa: BLE001 - 오류 본문을 상태로 남긴다
-            self._store.update(job_id, status="failed", error=str(error)[:500])
+            self._settle(job_id, status="failed", error=str(error)[:500])
         finally:
             with self._lock:
                 self._executions.pop(job_id, None)
+
+    def _settle(self, job_id: str, **changes: object) -> None:
+        """끝 상태를 남긴다 — 끝내 못 남기면 스레드를 죽이지 않고 기록만 한다.
+
+        일시 오류(OperationalError)만 같은 한도로 다시 시도한다. 그 밖의 sqlite
+        오류는 다시 물어도 같은 답이 나올 것이므로 바로 기록한다. 어느 쪽이든
+        상태는 running으로 남고, 서버 시작 복구(`recover_interrupted`)가 재개
+        가능한 interrupted로 돌린다.
+        """
+        for attempt in range(1, FINAL_STATE_ATTEMPTS + 1):
+            try:
+                self._store.update(job_id, **changes)
+                return
+            except sqlite3.Error as error:
+                transient = isinstance(error, sqlite3.OperationalError)
+                if not transient or attempt == FINAL_STATE_ATTEMPTS:
+                    log.error(
+                        f"작업 {job_id}의 끝 상태({changes.get('status')})를 DB에 남기지 못했다: "
+                        f"{error} — 다음 서버 시작 때 interrupted로 복구된다"
+                    )
+                    return
+                time.sleep(FINAL_STATE_RETRY_SECONDS)
+
+    def _cancellation_after_success(self, job_id: str) -> bool:
+        """성공한 본문 뒤의 취소 확인 — 이 읽기가 죽어도 성공을 실패로 뒤집지 않는다.
+
+        `_settle`과 같은 한도로 다시 읽고, 끝내 못 읽으면 취소 없음으로 친다 —
+        읽기 실패를 본문 실패로 섞으면 성공이 실패로 뒤집힌다.
+        """
+        for attempt in range(1, FINAL_STATE_ATTEMPTS + 1):
+            try:
+                return self._store.get(job_id).cancellation_requested
+            except sqlite3.Error as error:
+                transient = isinstance(error, sqlite3.OperationalError)
+                if not transient or attempt == FINAL_STATE_ATTEMPTS:
+                    log.error(f"작업 {job_id}의 취소 요청을 읽지 못해 성공으로 남긴다: {error}")
+                    return False
+                time.sleep(FINAL_STATE_RETRY_SECONDS)
+        return False
 
     def cancel(self, job_id: str) -> JobRecord:
         return self._store.request_cancel(job_id)

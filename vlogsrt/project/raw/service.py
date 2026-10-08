@@ -519,6 +519,29 @@ def _analysis_estimate_for(
     )
 
 
+CHILD_JOB_POLL_SECONDS = 0.2
+"""부모 작업이 자식 작업 상태를 다시 읽는 간격."""
+
+
+@dataclass
+class _MirroredProgress:
+    """부모에 옮겨 적은 자식 진행의 마지막 값 — 다음 폴링과 비교하는 기준."""
+
+    total: int | None = None
+    current: int | None = None
+
+
+def _mirror_child_progress(row: JobRecord, context: JobContext, mirror: _MirroredProgress) -> None:
+    """폴링마다 DB를 연다 — 자식 진행이 바뀐 것만 부모에 다시 적는다."""
+    total = max(row.progress_total, 1)
+    if total != mirror.total:
+        context.set_total(total)
+        mirror.total = total
+    if row.progress_current != mirror.current:
+        context.set_progress(row.progress_current)
+        mirror.current = row.progress_current
+
+
 BROWSE_ENTRY_LIMIT = 500
 """한 번의 명시적 탐색이 보여주는 최대 항목 수 — 재귀 스캔이 아닌 한 층이다(§4.2)."""
 
@@ -1175,6 +1198,7 @@ class RawWorkspaceService:
         if key is not None:
             with self._lock:
                 self._waiting_children[key] = handle.job_id
+        mirror = _MirroredProgress()
         try:
             while True:
                 try:
@@ -1183,13 +1207,12 @@ class RawWorkspaceService:
                     self.cancel_job(root, handle.job_id)
                     raise
                 row = self.get_job(root, handle.job_id)
-                context.set_total(max(row.progress_total, 1))
-                context.set_progress(row.progress_current)
+                _mirror_child_progress(row, context, mirror)
                 if row.status == "succeeded":
                     return
                 if row.status in ("failed", "interrupted", "cancelled", "paused"):
                     raise RawWorkspaceError(row.error or f"작업 {row.status}")
-                time.sleep(0.2)
+                time.sleep(CHILD_JOB_POLL_SECONDS)
         finally:
             if key is not None:
                 with self._lock:

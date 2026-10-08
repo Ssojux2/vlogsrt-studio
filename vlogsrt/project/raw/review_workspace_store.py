@@ -28,12 +28,14 @@ from __future__ import annotations
 import json
 import secrets
 import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from vlogsrt.project.raw.models import RawWorkspaceError
 from vlogsrt.project.raw.segment_review import StaleRevisionError
-from vlogsrt.project.raw.workspace import DB_NAME, RawWorkspace
+from vlogsrt.project.raw.workspace import DB_NAME, RawWorkspace, open_db
 
 REVIEW_STORE_SCHEMA_VERSION = "raw-review-workspace/v1"
 """검토 작업공간 표의 스키마 이름 — v6 마이그레이션이 meta에 기록할 값."""
@@ -134,15 +136,28 @@ class ReviewWorkspaceStore:
         self._workspace = workspace
         self._schema_ready = False
 
+    @contextmanager
+    def _session(self) -> Iterator[sqlite3.Connection]:
+        """`db_session`과 같은 커밋·롤백·닫기 — 스키마 준비가 연결 안에 끼어 있어 따로 둔다."""
+        connection = self._connect()
+        try:
+            with connection:
+                yield connection
+        finally:
+            connection.close()
+
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self._workspace.root / DB_NAME, timeout=10.0)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA busy_timeout = 10000")
-        if not self._schema_ready:
-            # 덧붙이기만 한다 — 이미 있는 v5 DB의 어떤 행도 고치지 않는다.
-            init_review_schema(connection)
-            connection.commit()
-            self._schema_ready = True
+        connection = open_db(self._workspace.root / DB_NAME)
+        try:
+            if not self._schema_ready:
+                # 덧붙이기만 한다 — 이미 있는 v5 DB의 어떤 행도 고치지 않는다.
+                init_review_schema(connection)
+                connection.commit()
+                self._schema_ready = True
+        except BaseException:
+            # 스키마 준비가 죽은 연결을 흘리면 fd가 새는 길이 된다 — 닫고 다시 던진다.
+            connection.close()
+            raise
         return connection
 
     # ── 출판 — 리비전과 헤드는 한 몸이다 ─────────────────────────
@@ -208,6 +223,8 @@ class ReviewWorkspaceStore:
             raise ReviewWorkspaceStoreError(
                 f"검토 초기 출판이 실패해 되돌렸다(잠금·디스크 의심): {error}"
             ) from error
+        finally:
+            connection.close()
 
     def publish_edit_revision(
         self,
@@ -269,6 +286,8 @@ class ReviewWorkspaceStore:
             raise ReviewWorkspaceStoreError(
                 f"검토 편집 출판이 실패해 되돌렸다(잠금·디스크 의심): {error}"
             ) from error
+        finally:
+            connection.close()
 
     @staticmethod
     def _insert_revision_row(
@@ -302,7 +321,7 @@ class ReviewWorkspaceStore:
         self, project_id: str, base_plan_id: str, sequence: int
     ) -> tuple[str, str]:
         """리비전 본문과 기록된 지문 — 되돌리기에서 다시 잰 지문과 비교할 쌍."""
-        with self._connect() as connection:
+        with self._session() as connection:
             row = connection.execute(
                 "SELECT document_json, content_fingerprint FROM review_workspace_revisions"
                 " WHERE project_id = ? AND base_plan_id = ? AND sequence = ?",
@@ -316,7 +335,7 @@ class ReviewWorkspaceStore:
 
     def list_base_plan_ids(self, project_id: str) -> tuple[str, ...]:
         """리비전이 있는 기본 계획 — 만들어진 순서 그대로."""
-        with self._connect() as connection:
+        with self._session() as connection:
             rows = connection.execute(
                 "SELECT DISTINCT base_plan_id FROM review_workspace_revisions"
                 " WHERE project_id = ? ORDER BY rowid",
@@ -327,7 +346,7 @@ class ReviewWorkspaceStore:
     # ── 헤드 — 조건부 갱신이 stale-head 가드다 ──────────────────
 
     def head_revision_id(self, project_id: str, base_plan_id: str) -> str | None:
-        with self._connect() as connection:
+        with self._session() as connection:
             row = connection.execute(
                 "SELECT head_revision_id FROM review_workspace_heads"
                 " WHERE project_id = ? AND base_plan_id = ?",
@@ -338,7 +357,7 @@ class ReviewWorkspaceStore:
     # ── 계획 재매핑 기록 ─────────────────────────────────────────
 
     def remapping(self, old_revision_id: str) -> sqlite3.Row | None:
-        with self._connect() as connection:
+        with self._session() as connection:
             return connection.execute(
                 "SELECT * FROM review_workspace_remappings WHERE old_revision_id = ?",
                 (old_revision_id,),
@@ -363,7 +382,7 @@ class ReviewWorkspaceStore:
     ) -> None:
         """내보내기 한 벌의 기록 — 같은 신원의 두 번 삽입은 실패한다."""
         try:
-            with self._connect() as connection:
+            with self._session() as connection:
                 connection.execute(
                     "INSERT INTO confirmed_export_revisions (export_id, destination_dir,"
                     " project_id, base_plan_id, review_revision_id, review_fingerprint,"
@@ -390,7 +409,7 @@ class ReviewWorkspaceStore:
             ) from error
 
     def list_export_revisions(self, project_id: str) -> tuple[sqlite3.Row, ...]:
-        with self._connect() as connection:
+        with self._session() as connection:
             return tuple(
                 connection.execute(
                     "SELECT * FROM confirmed_export_revisions WHERE project_id = ? ORDER BY rowid",

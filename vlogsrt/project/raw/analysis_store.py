@@ -11,7 +11,8 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 
 from vlogsrt.project.raw.models import (
     ANALYSIS_SOURCE_STATUSES,
@@ -19,7 +20,7 @@ from vlogsrt.project.raw.models import (
     AnalysisRevision,
     AnalysisSourceResult,
 )
-from vlogsrt.project.raw.workspace import DB_NAME, RawWorkspace
+from vlogsrt.project.raw.workspace import DB_NAME, RawWorkspace, db_session
 
 ANALYSIS_ROOT = "analysis"
 """분석 증거의 뿌리 디렉터리 — 브라우저 제공 대상이 아니다(§4.4)."""
@@ -89,11 +90,10 @@ class AnalysisStore:
     def __init__(self, workspace: RawWorkspace) -> None:
         self._workspace = workspace
 
-    def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self._workspace.root / DB_NAME, timeout=10.0)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA busy_timeout = 10000")
-        return connection
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        with db_session(self._workspace.root / DB_NAME) as connection:
+            yield connection
 
     # ── 리비전 ─────────────────────────────────────────────────
 

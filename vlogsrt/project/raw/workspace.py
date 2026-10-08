@@ -83,6 +83,35 @@ WORKSPACE_ID_KEY = "workspace_id"
 """meta 표의 작업공간 신원 키 — 생성 때 한 번 정해지고 절대 바뀌지 않는다."""
 
 
+def open_db(path: Path) -> sqlite3.Connection:
+    """작업공간 DB 연결 하나 — 닫는 것은 호출자 몫이다(`db_session`을 먼저 쓴다)."""
+    connection = sqlite3.connect(path, timeout=10.0)
+    try:
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA busy_timeout = 10000")
+    except BaseException:
+        # 준비 문장이 죽은 연결을 흘리면 fd가 새는 길이 된다 — 닫고 다시 던진다.
+        connection.close()
+        raise
+    return connection
+
+
+@contextmanager
+def db_session(path: Path) -> Iterator[sqlite3.Connection]:
+    """`with sqlite3.connect()`와 같은 커밋·롤백에 **닫기**를 더한다.
+
+    sqlite3의 `with`는 닫지 않고, 연결은 문장 캐시와 순환 참조라 GC가 돌 때까지
+    fd를 쥔다. 폴링하는 작업 여럿이 그 사이 fd 256을 다 써서 작업 스레드가
+    `unable to open database file`로 줄줄이 죽었다.
+    """
+    connection = open_db(path)
+    try:
+        with connection:
+            yield connection
+    finally:
+        connection.close()
+
+
 def new_source_asset_id() -> str:
     """가져오기 자산의 전역 유일 불투명 ID — 미디어 ID와 같은 규칙(128비트)."""
     return f"source_{secrets.token_hex(8)}"
@@ -643,9 +672,7 @@ class RawWorkspace:
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
-        connection = sqlite3.connect(self.root / DB_NAME, timeout=10.0)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA busy_timeout = 10000")
+        connection = open_db(self.root / DB_NAME)
         try:
             yield connection
         finally:

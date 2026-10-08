@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import gc
+import os
 import sqlite3
 import threading
 import time
@@ -14,10 +16,14 @@ from pathlib import Path
 
 import pytest
 
+from vlogsrt.project.raw import jobs as jobs_module
 from vlogsrt.project.raw import service as raw
-from vlogsrt.project.raw.jobs import JobCancelledError, JobContext
-from vlogsrt.project.raw.models import RawWorkspaceError
-from vlogsrt.project.raw.workspace import DB_NAME
+from vlogsrt.project.raw.analysis_store import AnalysisStore
+from vlogsrt.project.raw.caption_workspace_store import CaptionWorkspaceStore
+from vlogsrt.project.raw.jobs import JobCancelledError, JobContext, JobStore
+from vlogsrt.project.raw.models import JobRecord, RawWorkspaceError
+from vlogsrt.project.raw.review_workspace_store import ReviewWorkspaceStore
+from vlogsrt.project.raw.workspace import DB_NAME, RawWorkspace
 
 TypePredicate = Callable[[], bool]
 
@@ -351,3 +357,301 @@ def test_resume_requires_a_nonempty_fingerprint(workspace: Path) -> None:
         with pytest.raises(RawWorkspaceError, match="지문이 필요하다"):
             service.resume_job(workspace, job_id, lambda context: None, empty)
     assert service.get_job(workspace, job_id).status == "interrupted"
+
+
+def _open_descriptors() -> int:
+    return len(os.listdir("/dev/fd"))
+
+
+def _without_cyclic_gc(calls: Callable[[], None], rounds: int = 200) -> int:
+    """sqlite3 연결은 순환 참조라 GC가 돌기 전엔 안 닫힌다 — GC를 멈추고 fd 증가를 잰다."""
+    calls()  # 스키마 준비 같은 첫 호출의 일회성 fd를 기준선에서 뺀다
+    gc.collect()
+    gc.disable()
+    try:
+        before = _open_descriptors()
+        for _ in range(rounds):
+            calls()
+        return _open_descriptors() - before
+    finally:
+        gc.enable()
+        gc.collect()
+
+
+def test_job_store_closes_every_connection(workspace: Path) -> None:
+    """실측: 연결이 GC에 기대 닫히면 폴링 부모 여럿이 fd 256을 다 써서
+    `unable to open database file`로 작업 스레드가 줄줄이 죽었다."""
+    service = raw.RawWorkspaceService()
+    handle = service.submit_job(workspace, "probe", "fp-fd", lambda context: None)
+    assert wait_until(lambda: service.get_job(workspace, handle.job_id).status == "succeeded")
+    store = JobStore(RawWorkspace.open(workspace))
+
+    def calls() -> None:
+        store.get(handle.job_id)
+        store.cancellation_requested(handle.job_id)
+        store.update(handle.job_id, progress_total=1)
+        store.advance(handle.job_id)
+        store.list_jobs()
+
+    # 새는 회귀는 라운드마다 호출 수만큼 fd를 늘린다(200라운드면 수백 개). 남은
+    # 데몬 스레드가 연결을 몇 개 쥐고 있을 수 있어 상한은 그만큼 여유를 둔다.
+    rounds = 200
+    assert _without_cyclic_gc(calls, rounds=rounds) < rounds // 4
+
+
+def test_other_workspace_stores_close_every_connection(workspace: Path) -> None:
+    opened = RawWorkspace.open(workspace)
+    analysis = AnalysisStore(opened)
+    review = ReviewWorkspaceStore(opened)
+    caption = CaptionWorkspaceStore(opened.root)
+
+    def calls() -> None:
+        analysis.list_revisions()
+        review.list_base_plan_ids("no-project")
+        caption.registrations()
+
+    rounds = 200
+    assert _without_cyclic_gc(calls, rounds=rounds) < rounds // 4
+
+
+def test_store_connection_keeps_commit_and_rollback_semantics(workspace: Path) -> None:
+    store = JobStore(RawWorkspace.open(workspace))
+    with store._connect() as connection:
+        connection.execute("INSERT INTO meta(key, value) VALUES('probe-commit', 'kept')")
+    with pytest.raises(RuntimeError), store._connect() as connection:
+        connection.execute("INSERT INTO meta(key, value) VALUES('probe-rollback', 'lost')")
+        raise RuntimeError("본문 실패")
+    with sqlite3.connect(workspace / DB_NAME) as check:
+        keys = {row[0] for row in check.execute("SELECT key FROM meta WHERE key LIKE 'probe-%'")}
+    assert keys == {"probe-commit"}
+
+
+def test_an_unrecordable_failure_is_logged_not_raised_from_the_thread(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """실패 상태조차 못 남기면 스레드가 중첩 트레이스백으로 죽었다 — 기록하고 끝낸다.
+
+    작업은 running으로 남고, 서버 시작 복구가 interrupted로 돌린다.
+    """
+    thread_errors: list[BaseException | None] = []
+    monkeypatch.setattr(threading, "excepthook", lambda args: thread_errors.append(args.exc_value))
+    logged: list[str] = []
+    monkeypatch.setattr(jobs_module.log, "error", logged.append)
+    monkeypatch.setattr(jobs_module, "FINAL_STATE_RETRY_SECONDS", 0.0)
+    original = JobStore.update
+
+    def failing_update(self: JobStore, job_id: str, **changes: object) -> None:
+        if changes.get("status") == "failed":
+            raise sqlite3.OperationalError("unable to open database file")
+        original(self, job_id, **changes)
+
+    monkeypatch.setattr(JobStore, "update", failing_update)
+
+    def run(context: JobContext) -> None:
+        raise sqlite3.OperationalError("unable to open database file")
+
+    service = raw.RawWorkspaceService()
+    handle = service.submit_job(workspace, "probe", "fp-unrecordable", run)
+    assert wait_until(lambda: bool(logged))
+    assert handle.job_id in logged[0]
+    assert thread_errors == []
+    assert service.get_job(workspace, handle.job_id).status == "running"
+
+
+def test_a_transient_store_error_still_records_the_final_state(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(jobs_module, "FINAL_STATE_RETRY_SECONDS", 0.0)
+    original = JobStore.update
+    failures = iter([True])
+
+    def flaky_update(self: JobStore, job_id: str, **changes: object) -> None:
+        if changes.get("status") == "failed" and next(failures, False):
+            raise sqlite3.OperationalError("database is locked")
+        original(self, job_id, **changes)
+
+    monkeypatch.setattr(JobStore, "update", flaky_update)
+
+    def run(context: JobContext) -> None:
+        raise RuntimeError("합성 오류")
+
+    service = raw.RawWorkspaceService()
+    handle = service.submit_job(workspace, "probe", "fp-flaky", run)
+    assert wait_until(lambda: service.get_job(workspace, handle.job_id).status == "failed")
+    assert "합성 오류" in (service.get_job(workspace, handle.job_id).error or "")
+
+
+def _job_status(workspace: Path, job_id: str) -> tuple[str, str | None]:
+    """저장 계층을 우회한 직접 읽기 — 스토어 메서드가 흉내로 갈린 시험의 판정 보기."""
+    with sqlite3.connect(workspace / DB_NAME) as connection:
+        row = connection.execute(
+            "SELECT status, error FROM jobs WHERE job_id = ?", (job_id,)
+        ).fetchone()
+    assert row is not None
+    return str(row[0]), None if row[1] is None else str(row[1])
+
+
+@pytest.mark.parametrize("stage", ["status_read", "running_write"])
+def test_a_pre_body_store_failure_is_settled_and_the_execution_entry_is_popped(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, stage: str
+) -> None:
+    """본문 앞의 저장 호출(status 읽기·running 기록)이 죽어도 스레드는 죽지 않는다.
+
+    그 전에는 try 밖이라 스레드가 죽어 작업이 queued에 묶인 채 남고 실행 항목도
+    못 치웠다 — 이제 실패로 기록하고 항목을 치운다.
+    """
+    thread_errors: list[BaseException | None] = []
+    monkeypatch.setattr(threading, "excepthook", lambda args: thread_errors.append(args.exc_value))
+    original_get, original_update = JobStore.get, JobStore.update
+
+    def failing_get(self: JobStore, job_id: str) -> JobRecord:
+        if stage == "status_read":
+            raise sqlite3.OperationalError("unable to open database file")
+        return original_get(self, job_id)
+
+    def failing_update(self: JobStore, job_id: str, **changes: object) -> None:
+        if stage == "running_write" and changes.get("status") == "running":
+            raise sqlite3.OperationalError("unable to open database file")
+        original_update(self, job_id, **changes)
+
+    monkeypatch.setattr(JobStore, "get", failing_get)
+    monkeypatch.setattr(JobStore, "update", failing_update)
+
+    service = raw.RawWorkspaceService()
+    handle = service.submit_job(workspace, "probe", f"fp-pre-body-{stage}", lambda context: None)
+    assert wait_until(lambda: _job_status(workspace, handle.job_id)[0] == "failed")
+    _, error = _job_status(workspace, handle.job_id)
+    assert "unable to open database file" in (error or "")
+    assert thread_errors == []
+    assert wait_until(lambda: not service._jobs(workspace)._executions)
+
+
+def test_a_non_operational_settle_error_is_logged_not_retried(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """OperationalError가 아닌 sqlite 오류는 다시 물어도 같은 답이다 — 기록하고 끝낸다."""
+    thread_errors: list[BaseException | None] = []
+    monkeypatch.setattr(threading, "excepthook", lambda args: thread_errors.append(args.exc_value))
+    logged: list[str] = []
+    monkeypatch.setattr(jobs_module.log, "error", logged.append)
+    original = JobStore.update
+    update_statuses: list[object] = []
+
+    def malformed_update(self: JobStore, job_id: str, **changes: object) -> None:
+        update_statuses.append(changes.get("status"))
+        if changes.get("status") == "failed":
+            raise sqlite3.DatabaseError("database disk image is malformed")
+        original(self, job_id, **changes)
+
+    monkeypatch.setattr(JobStore, "update", malformed_update)
+
+    def run(context: JobContext) -> None:
+        raise RuntimeError("합성 오류")
+
+    service = raw.RawWorkspaceService()
+    handle = service.submit_job(workspace, "probe", "fp-malformed", run)
+    assert wait_until(lambda: bool(logged))
+    assert handle.job_id in logged[0]
+    assert thread_errors == []
+    assert update_statuses == ["running", "failed"]  # 재시도하지 않고 바로 기록했다
+    assert _job_status(workspace, handle.job_id)[0] == "running"
+
+
+def test_a_failed_cancel_read_after_success_still_succeeds(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """성공한 본문 뒤의 취소 확인 읽기가 끝내 죽으면 — 성공을 실패로 뒤집지 않는다."""
+    thread_errors: list[BaseException | None] = []
+    monkeypatch.setattr(threading, "excepthook", lambda args: thread_errors.append(args.exc_value))
+    logged: list[str] = []
+    monkeypatch.setattr(jobs_module.log, "error", logged.append)
+    monkeypatch.setattr(jobs_module, "FINAL_STATE_RETRY_SECONDS", 0.0)
+    body_done = threading.Event()
+    original = JobStore.get
+
+    def failing_get(self: JobStore, job_id: str) -> JobRecord:
+        if body_done.is_set():
+            raise sqlite3.OperationalError("database is locked")
+        return original(self, job_id)
+
+    monkeypatch.setattr(JobStore, "get", failing_get)
+
+    def run(context: JobContext) -> None:
+        body_done.set()
+
+    service = raw.RawWorkspaceService()
+    handle = service.submit_job(workspace, "probe", "fp-cancel-read", run)
+    assert wait_until(lambda: _job_status(workspace, handle.job_id)[0] == "succeeded")
+    assert thread_errors == []
+    assert logged and handle.job_id in logged[0]
+
+
+def test_a_cancel_request_survives_a_transient_cancel_read(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """취소 확인 읽기가 한 번 일시 실패하면 다시 읽는다 — 취소는 그대로 지켜진다."""
+    monkeypatch.setattr(jobs_module, "FINAL_STATE_RETRY_SECONDS", 0.0)
+    gate = threading.Event()
+    body_done = threading.Event()
+    original = JobStore.get
+    failures = iter([True])
+
+    def flaky_get(self: JobStore, job_id: str) -> JobRecord:
+        if body_done.is_set() and next(failures, False):
+            raise sqlite3.OperationalError("database is locked")
+        return original(self, job_id)
+
+    monkeypatch.setattr(JobStore, "get", flaky_get)
+
+    def run(context: JobContext) -> None:
+        context.set_total(1)
+        context.advance()
+        gate.wait(timeout=10)
+        body_done.set()
+
+    service = raw.RawWorkspaceService()
+    handle = service.submit_job(workspace, "probe", "fp-cancel-flaky", run, total=1)
+    assert wait_until(lambda: _job_status(workspace, handle.job_id)[0] == "running")
+    requested = service.cancel_job(workspace, handle.job_id)
+    assert requested.cancellation_requested
+    gate.set()
+    assert wait_until(lambda: _job_status(workspace, handle.job_id)[0] == "cancelled")
+
+
+class _CountingContext:
+    def __init__(self) -> None:
+        self.job_id = "parent"
+        self.writes: list[tuple[str, int]] = []
+        self.polls = 0
+
+    def check_cancel(self) -> None:
+        self.polls += 1
+
+    def set_total(self, total: int) -> None:
+        self.writes.append(("total", total))
+
+    def set_progress(self, current: int) -> None:
+        self.writes.append(("progress", current))
+
+
+def test_waiting_on_a_child_writes_progress_only_when_it_changes(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """부모의 폴링은 매 0.2초 DB를 연다 — 바뀌지 않은 진행을 다시 쓰지 않는다."""
+    monkeypatch.setattr(raw, "CHILD_JOB_POLL_SECONDS", 0.0)
+    gate = threading.Event()
+    service = raw.RawWorkspaceService()
+    child = service.submit_job(workspace, "probe", "fp-child", _stepping_job(2, gate))
+    context = _CountingContext()
+    waiter = threading.Thread(
+        target=service.wait_child_job, args=(workspace, child, context), daemon=True
+    )
+    waiter.start()
+    assert wait_until(lambda: context.polls > 20)
+    gate.set()
+    waiter.join(timeout=5)
+    assert not waiter.is_alive()
+    for kind in ("total", "progress"):
+        values = [value for name, value in context.writes if name == kind]
+        assert all(a != b for a, b in zip(values, values[1:], strict=False))
+    assert len(context.writes) <= 6 < context.polls

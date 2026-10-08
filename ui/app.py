@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import resource
 import webbrowser
 from pathlib import Path
 
@@ -20,6 +21,25 @@ import uvicorn
 from ui import service, workspace_service
 from ui.instance import UiInstance
 from vlogsrt import log
+
+OPEN_FILE_SOFT_LIMIT = 4096
+"""Finder·터미널에서 띄우면 macOS 기본 soft 한도 256을 물려받는다 — 작업 여럿이
+ffmpeg·DB·소켓을 함께 쥐면 모자란다."""
+
+
+def _raise_open_file_limit() -> None:
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    target = (
+        OPEN_FILE_SOFT_LIMIT if hard == resource.RLIM_INFINITY else min(OPEN_FILE_SOFT_LIMIT, hard)
+    )
+    if soft == resource.RLIM_INFINITY or soft >= target:
+        return
+    try:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
+    except (ValueError, OSError) as error:
+        log.warn(f"열린 파일 한도를 {soft}에서 올리지 못했다: {error}")
+        return
+    log.info(f"열린 파일 한도 {soft} → {target}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -74,6 +94,7 @@ def main(argv: list[str] | None = None) -> int:
                 "새 서버를 다른 포트에 자동 실행하지 않았습니다."
             )
             return 1
+        _raise_open_file_limit()
         server = workspace_service.RawWorkspaceUi(port=port)
         log.info(server.startup())
         app = server.build_fastapi()
