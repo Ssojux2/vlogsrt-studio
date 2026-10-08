@@ -282,3 +282,39 @@ def test_cancelled_selection_stays_cancelled_after_inflight_response(tmp_path, m
     wait_until(lambda: server.raw.get_job(server.workspace_root(), job_id).status == "cancelled")
     assert server._quick["stage"] == "취소됨"
     assert load_state(server.raw, server.workspace_root())["stage"] == "취소됨"
+
+
+def test_window_without_extracted_frames_is_not_sent_and_retry_pays_once(tmp_path, monkeypatch):
+    """프레임 묶음이 통째로 실패하면 Luna는 한 번도 불리지 않는다 — 재시도가 그 창만 부른다."""
+    from vlogsrt import preprocess
+
+    source = tmp_path / "frames_missing.mov"
+    _make_media(source, audio=True, seconds="32")
+    server, sender, client = make_server(tmp_path, monkeypatch, source)
+
+    real_batch = preprocess.extract_frame_indices
+
+    def broken_batch(*args, **kwargs):
+        raise RuntimeError("synthetic: Cannot allocate memory")
+
+    monkeypatch.setattr(preprocess, "extract_frame_indices", broken_batch)
+    server.capcut_choose_view(server.current_signature())
+    wait_until(lambda: server._quick.get("stage") in ("부분 완료 · 확인 필요", "분석 확인 필요"))
+    root = server.workspace_root()
+    store = AnalysisStore(server.raw._workspace(root))
+    revision = server._quick["revision"]
+    (row,) = store.list_source_results(revision)
+    assert row.status == "failed", row
+    assert (root / row.document_path).is_file()
+    assert row.window_count > 1
+    assert len(sender.calls) == 1 and not client.calls
+    with server.raw._workspace(root).connect() as db:
+        stages = [r["stage"] for r in db.execute("SELECT stage FROM analysis_requests")]
+    assert "luna" not in stages  # 부르지 않은 창은 영수증도 없다
+
+    monkeypatch.setattr(preprocess, "extract_frame_indices", real_batch)
+    server.capcut_retry_view(server.current_signature())
+    wait_until(lambda: server._quick.get("stage") in ("추천 구간 준비 완료", "분석 확인 필요"))
+    assert server._quick["stage"] == "추천 구간 준비 완료", server._quick
+    assert len(client.calls) == row.window_count
+    assert len(sender.calls) == 1  # 전사는 성공 캐시에서 온다

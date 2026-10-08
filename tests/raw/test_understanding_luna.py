@@ -296,6 +296,60 @@ def test_annotate_windows_records_failures_per_window(tmp_path: Path) -> None:
     assert "시간 초과" in annotations[0].defect
 
 
+NORMAL_WINDOW_REQUEST_SHA256 = "48eac75d44e2a91dbe4199c9e85c4621d49e5e16b8cb342cffc0a2baceb97324"
+"""`make_evidence` 창(프레임 2장)의 요청 신원 — 7f74338에서 잰 값.
+
+바뀌면 저장된 판정이 전부 다시 청구된다 — 프레임 누락 처리는 이 값을 건드리지 못한다.
+"""
+
+
+def test_annotate_windows_skips_window_whose_planned_frames_all_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """계획된 프레임이 한 장도 없는 창은 부르지 않고 failed로 남는다 — 오디오만인 창은 간다."""
+    normal = make_evidence(tmp_path)
+    assert normal.frames and normal.window.frame_plans
+    assert luna_request_sha256("luna-role", build_luna_payload(normal, SETTINGS)) == (
+        NORMAL_WINDOW_REQUEST_SHA256
+    )
+    missing = replace(normal, frames=())
+    audio_only = replace(
+        normal,
+        window=replace(normal.window, ordinal=1, window_id="window_000001", frame_plans=()),
+        frames=(),
+    )
+    asked: list[str] = []
+    begun: list[str] = []
+    real_begin = luna.request_log.begin
+
+    def record_begin(stage: str, fingerprint: str, **kwargs: Any) -> Any:
+        begun.append(fingerprint)
+        return real_begin(stage, fingerprint, **kwargs)
+
+    class Recording:
+        def respond(self, *, window_id: str, payload: Any) -> Any:
+            asked.append(window_id)
+            return respond(accepted_body(audio_only))
+
+    monkeypatch.setattr(luna.request_log, "begin", record_begin)
+    annotations = annotate_windows(
+        (missing, audio_only), Recording(), settings=SETTINGS, model="luna-role", origin="live"
+    )
+    assert asked == ["window_000001"]
+    skipped, sent = annotations
+    assert skipped.window_id == missing.window.window_id
+    assert skipped.status == luna.ANNOTATION_FAILED
+    assert skipped.error_code == luna.ERROR_FRAMES_MISSING == "frames_missing"
+    assert skipped.needs_review and skipped.defect
+    assert not skipped.response_uncertain
+    assert skipped.request_sha256 == luna_request_sha256(
+        "luna-role", build_luna_payload(missing, SETTINGS)
+    )
+    assert not cacheable(skipped)
+    assert sent.status == luna.ANNOTATION_ACCEPTED
+    assert begun == [sent.request_sha256]  # 건너뛴 창은 영수증 행도 없다
+
+
 def test_replay_responder_demands_a_known_window(tmp_path: Path) -> None:
     """재생 응답자는 창 아이디를 안다 — 모르는 창은 실행 설정 결함으로 닫는다."""
     evidence = make_evidence(tmp_path)

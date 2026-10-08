@@ -66,6 +66,9 @@ ANNOTATION_ACCEPTED = "accepted"
 ANNOTATION_REJECTED = "rejected"
 ANNOTATION_FAILED = "failed"
 
+ERROR_FRAMES_MISSING = "frames_missing"
+"""계획된 프레임이 전부 추출에 실패한 창 — Luna를 부르지 않고 실패 판정으로 기록한다."""
+
 ORIGIN_LIVE = "live"
 ORIGIN_REPLAY = "replay"
 LIVE_ORIGINS = frozenset({ORIGIN_LIVE, EXECUTION_MODE_LIVE})
@@ -617,57 +620,118 @@ def annotate_windows(
         payload = build_luna_payload(evidence, settings)
         request_sha256 = luna_request_sha256(model, payload)
         prior = (cached or {}).get(evidence.window.window_id)
-        if (
-            prior is not None
-            and prior.status == ANNOTATION_ACCEPTED
-            and prior.request_sha256 == request_sha256
-            and prior.prompt_revision == settings.prompt_revision
-            and prior.luna_model == model
-            and prior.origin == origin
+        if prior is not None and _reusable(
+            prior, request_sha256, settings=settings, model=model, origin=origin
         ):
-            annotations.append(prior)
-            if on_annotations is not None:
-                on_annotations(tuple(annotations))
-            continue
-        attempt = request_log.begin("luna", request_sha256)
-        try:
-            response = responder.respond(window_id=evidence.window.window_id, payload=payload)
-            request_log.finish(attempt, received=True)
-        except Exception as exc:
-            request_log.finish(
-                attempt, received=not provider_error(exc)[2], note=provider_error(exc)[0]
+            annotation = prior
+        elif evidence.window.frame_plans and not evidence.frames:
+            annotation = _frames_missing(
+                evidence, request_sha256, settings=settings, model=model, origin=origin
             )
-            check_cancel()
-            annotations.append(
-                SemanticAnnotation(
-                    window_id=evidence.window.window_id,
-                    status=ANNOTATION_FAILED,
-                    request_sha256=request_sha256,
-                    luna_model=model,
-                    prompt_revision=settings.prompt_revision,
-                    origin=origin,
-                    needs_review=True,
-                    defect=provider_error(exc)[1],
-                    error_code=provider_error(exc)[0],
-                    response_uncertain=provider_error(exc)[2],
-                )
-            )
-            if on_annotations is not None:
-                on_annotations(tuple(annotations))
-            continue
-        annotations.append(
-            parse_luna_response(
-                response,
-                evidence=evidence,
+        else:
+            annotation = _ask_luna(
+                evidence,
+                payload,
+                request_sha256,
+                responder,
+                settings=settings,
                 model=model,
-                request_sha256=request_sha256,
                 origin=origin,
-                prompt_revision=settings.prompt_revision,
             )
-        )
+        annotations.append(annotation)
         if on_annotations is not None:
             on_annotations(tuple(annotations))
     return tuple(annotations)
+
+
+def _reusable(
+    prior: SemanticAnnotation,
+    request_sha256: str,
+    *,
+    settings: RawUnderstandingSettings,
+    model: str,
+    origin: str,
+) -> bool:
+    """저장된 판정을 그대로 쓸 수 있는가 — 같은 요청 신원의 accepted만 다시 청구하지 않는다."""
+    return (
+        prior.status == ANNOTATION_ACCEPTED
+        and prior.request_sha256 == request_sha256
+        and prior.prompt_revision == settings.prompt_revision
+        and prior.luna_model == model
+        and prior.origin == origin
+    )
+
+
+def _frames_missing(
+    evidence: WindowEvidence,
+    request_sha256: str,
+    *,
+    settings: RawUnderstandingSettings,
+    model: str,
+    origin: str,
+) -> SemanticAnnotation:
+    """계획된 프레임이 한 장도 없는 창의 실패 판정 — 호출도 영수증 행도 없다.
+
+    이미지 없는 호출은 돈만 내고 '확인 안 됨'을 받는다(실측: 131창, 13만 토큰).
+    기록은 남기고(D23) 호출은 하지 않는다. 재시도가 1단계에서 프레임을 다시 뽑으면
+    요청 신원이 달라져 이 기록은 재사용되지 않는다 — 애초에 accepted가 아니라 캐시에도
+    들지 않는다.
+    """
+    return SemanticAnnotation(
+        window_id=evidence.window.window_id,
+        status=ANNOTATION_FAILED,
+        request_sha256=request_sha256,
+        luna_model=model,
+        prompt_revision=settings.prompt_revision,
+        origin=origin,
+        needs_review=True,
+        defect=(
+            "계획된 프레임 증거가 전부 추출에 실패해 Luna를 부르지 않았습니다 — "
+            "1단계를 다시 받으세요"
+        ),
+        error_code=ERROR_FRAMES_MISSING,
+    )
+
+
+def _ask_luna(
+    evidence: WindowEvidence,
+    payload: Mapping[str, object],
+    request_sha256: str,
+    responder: SemanticResponder,
+    *,
+    settings: RawUnderstandingSettings,
+    model: str,
+    origin: str,
+) -> SemanticAnnotation:
+    """창 하나를 실제로 묻는다 — 영수증을 먼저 열고, 실패는 그 창의 failed 판정이다."""
+    attempt = request_log.begin("luna", request_sha256)
+    try:
+        response = responder.respond(window_id=evidence.window.window_id, payload=payload)
+        request_log.finish(attempt, received=True)
+    except Exception as exc:
+        code, message, uncertain = provider_error(exc)
+        request_log.finish(attempt, received=not uncertain, note=code)
+        check_cancel()
+        return SemanticAnnotation(
+            window_id=evidence.window.window_id,
+            status=ANNOTATION_FAILED,
+            request_sha256=request_sha256,
+            luna_model=model,
+            prompt_revision=settings.prompt_revision,
+            origin=origin,
+            needs_review=True,
+            defect=message,
+            error_code=code,
+            response_uncertain=uncertain,
+        )
+    return parse_luna_response(
+        response,
+        evidence=evidence,
+        model=model,
+        request_sha256=request_sha256,
+        origin=origin,
+        prompt_revision=settings.prompt_revision,
+    )
 
 
 def verdicts_from_annotations(

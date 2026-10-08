@@ -1021,6 +1021,35 @@ def _long_edge_scale(long_edge: int) -> str:
     )
 
 
+_SELECT_CHAIN_MAX_TERMS = 50
+"""`select` 식 한 사슬(`a+b+…`)에 두는 항의 상한 — ffmpeg 식 파서의 재귀 깊이 한도다.
+
+libavutil/eval.c는 깊이 100(`Parser.stack_index`)이 바닥나면 AVERROR(ENOMEM)
+("Cannot allocate memory")로 필터 초기화에서 죽는다. ffmpeg 9.0.1 실측: 평평한 `+` 사슬
+100항 통과·101항 실패, 64×64 lavfi 입력에서도 같다 — 디코드 메모리가 아니다. 괄호 묶음의
+깊이는 바깥 사슬 위치 + 안쪽 사슬 길이이므로 반씩 쪼개 묶으면 잎 길이 + log2(묶음 수)다.
+50이면 2만 항(약 10시간 분량)까지 실측 통과한다. 외부 도구의 상수라 `_RAW_US_PER_SECOND`처럼
+여기 산다 — `RawUnderstandingSettings`에 넣으면 입력 지문이 바뀌어 저장된 분석이 다시 청구된다.
+"""
+
+
+def _select_frames_expression(indices: Sequence[int]) -> str:
+    """정렬된 프레임 번호를 고르는 select 식 — 균형 잡힌 괄호 나무로 파서 깊이를 묶는다.
+
+    항의 집합과 평가 결과는 평평한 사슬과 같다(디코드 번호 `n`만 본다). 50항 이하는
+    평평한 그대로라 기존 호출의 식 문자열도 바뀌지 않는다.
+    """
+    terms = [f"eq(n\\,{index})" for index in indices]
+
+    def build(chunk: list[str]) -> str:
+        if len(chunk) <= _SELECT_CHAIN_MAX_TERMS:
+            return "+".join(chunk)
+        half = len(chunk) // 2
+        return f"({build(chunk[:half])})+({build(chunk[half:])})"
+
+    return build(terms)
+
+
 def extract_frame_index(
     source: Path,
     stream_index: int,
@@ -1066,6 +1095,8 @@ def extract_frame_indices(
     Source decode indices remain exact; no approximate timestamp seeking is used.
     image2 atomic_writing prevents progress polling from publishing partial files.
     Completed frames survive cancellation, while the private staging area is removed.
+    select 식은 균형 잡힌 괄호 나무다 — 평평한 `+` 사슬은 101항에서 ffmpeg 식 파서가
+    깊이 한도로 죽는다(`_SELECT_CHAIN_MAX_TERMS`).
     """
     _require_index(stream_index, "스트림 번호")
     for index in frame_indices:
@@ -1095,7 +1126,7 @@ def extract_frame_indices(
                     on_frame(index, target)
                 check_cancel()
 
-        select = "+".join(f"eq(n\\,{index})" for index in indices)
+        select = _select_frames_expression(indices)
         command = [
             require_ffmpeg(),
             "-hide_banner",

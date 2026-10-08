@@ -1,15 +1,27 @@
+"""프레임 묶음 추출 — 정확·중복 제거·취소·캐시, 그리고 select 식의 파서 깊이 한도.
+
+평평한 `eq(n,a)+eq(n,b)+…` 사슬은 101항에서 libavutil 식 파서의 깊이(100)를 넘겨
+"Cannot allocate memory"로 필터 초기화에서 죽었다. 실측 실패는 112~504 프레임이었다.
+"""
+
 from __future__ import annotations
 
+import re
 import sys
 import threading
+from pathlib import Path
+from typing import Any
 
 import pytest
 
 from tests.raw.test_browser_runtime import _make_media
 from vlogsrt import preprocess
+from vlogsrt.preprocess import extract_frame_index, extract_frame_indices
 from vlogsrt.project.raw.jobs import JobCancelledError
 from vlogsrt.project.raw.media_refs import _FrameSampler
 from vlogsrt.task_runtime import cancellation_scope
+
+LONG_EDGE = 160
 
 
 def test_batch_is_exact_and_deduplicates_with_single_decode(tmp_path, monkeypatch):
@@ -194,3 +206,70 @@ def test_cancel_during_batch_resumes_without_second_stt_call(tmp_path, monkeypat
     assert len(sender.calls) == 1 and len(client.calls) == 1
     assert len(requests) == 2 and first_frame[0] not in requests[1]
     assert len(requests[1]) == len(requests[0]) - 1
+
+
+def test_batch_over_one_hundred_frames_is_one_decode_and_byte_identical(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """150 프레임도 디코드 한 번 — 각 장은 단일 추출과 바이트가 같다."""
+    source = tmp_path / "clip.mp4"
+    _make_media(source, audio=False, seconds="6")  # 25fps × 6초 = 150 프레임
+    commands: list[list[str]] = []
+    real_run_process = preprocess.run_process
+
+    def spy(command: list[str], *args: Any, **kwargs: Any) -> Any:
+        commands.append(list(command))
+        return real_run_process(command, *args, **kwargs)
+
+    monkeypatch.setattr(preprocess, "run_process", spy)
+    published = extract_frame_indices(
+        source, 0, list(range(150)), tmp_path / "batch", long_edge=LONG_EDGE
+    )
+    monkeypatch.setattr(preprocess, "run_process", real_run_process)
+
+    assert len(commands) == 1
+    assert commands[0].count("-i") == 1
+    assert sorted(published) == list(range(150))
+    assert all(path.is_file() for path in published.values())
+    for index in (0, 101, 149):
+        single = extract_frame_index(
+            source, 0, index, tmp_path / "single" / f"{index}.jpg", long_edge=LONG_EDGE
+        )
+        assert published[index].read_bytes() == single.read_bytes(), index
+
+
+def _chain_lengths_by_depth(expression: str) -> list[int]:
+    """괄호 깊이가 같은 연속 구간마다 `+`로 이어진 항의 수를 센다.
+
+    `eq(n\\,k)`의 괄호는 함수 호출이라 사슬 깊이에 넣지 않는다 — 묶음 괄호만 센다.
+    """
+    flattened = re.sub(r"eq\(n\\,\d+\)", "T", expression)
+    assert set(flattened) <= {"T", "+", "(", ")"}, flattened
+    runs: list[int] = []
+    stack: list[int] = [0]
+    for char in flattened:
+        if char == "(":
+            stack.append(0)
+        elif char == ")":
+            runs.append(stack.pop())
+            stack[-1] += 1  # 닫힌 묶음은 바깥 사슬의 한 항이다
+        elif char == "T":
+            stack[-1] += 1
+    runs.append(stack.pop())
+    assert not stack
+    return runs
+
+
+def test_select_expression_bounds_chain_depth() -> None:
+    """짧은 목록은 평평한 그대로, 긴 목록은 사슬마다 상한 이하의 항으로 묶인다."""
+    # 모듈 속성으로 찾는다 — 없으면 이 테스트만 실패하고 묶음 테스트는 따로 돈다
+    expression_of = preprocess._select_frames_expression
+    limit = preprocess._SELECT_CHAIN_MAX_TERMS
+    assert expression_of(range(3)) == "eq(n\\,0)+eq(n\\,1)+eq(n\\,2)"
+    for count in (51, 101, 2000):
+        expression = expression_of(range(count))
+        runs = _chain_lengths_by_depth(expression)
+        assert max(runs) <= limit, (count, max(runs))
+        found = [int(item) for item in re.findall(r"eq\(n\\,(\d+)\)", expression)]
+        assert sorted(found) == list(range(count))
+        assert len(found) == count

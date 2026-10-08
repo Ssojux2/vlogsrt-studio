@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import replace
 from datetime import date
@@ -191,6 +192,24 @@ def _visual_plan(frame_count: int = 90) -> stage1.WindowPlan:
     return stage1.plan_common_windows(timeline, (), RawUnderstandingSettings())
 
 
+def _planned_frames(plan: stage1.WindowPlan, directory: Path) -> stage1.FrameSamplingResult:
+    """계획된 프레임을 전부 뽑힌 것으로 — 프레임 없는 창은 Luna로 가지 않는다(frames_missing)."""
+    frames = []
+    for item in {p.frame_id: p for w in plan.windows for p in w.frame_plans}.values():
+        path = directory / f"{item.frame_id}.jpg"
+        path.write_bytes(b"\xff\xd8fakejpeg")
+        frames.append(
+            stage1.FrameEvidence(
+                frame_id=item.frame_id,
+                frame_index=item.frame_index,
+                image_path=path,
+                image_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+                file_time=Fraction(item.frame_index, 25),
+            )
+        )
+    return stage1.FrameSamplingResult(tuple(frames), ())
+
+
 def test_visual_fingerprint_is_not_audio_fingerprint() -> None:
     """같은 원본·창 계획이어도 시각 지문과 오디오 지문은 다른 값이다."""
     settings = RawUnderstandingSettings()
@@ -291,7 +310,9 @@ def test_require_online_visual_approval_checks_every_binding(monkeypatch) -> Non
         _require(_approval())
 
 
-def test_visual_responder_needs_validated_context_and_exact_payload(monkeypatch) -> None:
+def test_visual_responder_needs_validated_context_and_exact_payload(
+    monkeypatch, tmp_path: Path
+) -> None:
     """시각 전송 경계 — 검증 문맥 없이는 못 만들고, 페이로드가 어긋나면 안 간다."""
     monkeypatch.setattr("vlogsrt.env.is_offline", lambda: False)
     workflow = _online_workflow()
@@ -348,7 +369,7 @@ def test_visual_responder_needs_validated_context_and_exact_payload(monkeypatch)
         source_sha256="a" * 64,
         video=video,
         plan=plan,
-        frames=stage1.FrameSamplingResult((), ()),
+        frames=_planned_frames(plan, tmp_path),
         approval=approval,
     )
     annotations = luna.annotate_windows(
