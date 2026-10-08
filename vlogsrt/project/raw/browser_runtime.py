@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any
 
 from vlogsrt.config import Config
+from vlogsrt.project.raw import request_usage
 from vlogsrt.project.raw.analysis_approval import (
     AsrPhaseApproval,
     LiveAnalysisTransport,
@@ -130,7 +131,11 @@ def live_transport_for_credentials(
     뒤에야 시작된다(§14.3).
     """
     return LiveAnalysisTransport(
-        sender=LiveTranscriber(api_key=credentials.api_key, base_url=credentials.base_url),
+        sender=LiveTranscriber(
+            api_key=credentials.api_key,
+            base_url=credentials.base_url,
+            observer=request_usage.observer(),
+        ),
         cfg=Config(),
         client=create_vision_client(api_key=credentials.api_key, base_url=credentials.base_url),
         asr_approvals=asr_approvals,
@@ -175,7 +180,11 @@ def caption_transport_providers(
         TransportTimingProvider,
     )
 
-    sender = LiveTranscriber(api_key=credentials.api_key, base_url=credentials.base_url)
+    sender = LiveTranscriber(
+        api_key=credentials.api_key,
+        base_url=credentials.base_url,
+        observer=request_usage.observer(),
+    )
     cfg = Config()
     return (
         TransportTimingProvider(sender=sender, cfg=cfg),

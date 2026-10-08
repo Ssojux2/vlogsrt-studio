@@ -1186,6 +1186,7 @@ class VisualLunaSemanticResponder:
     approval: OnlineVisualAnalysisApproval
     gate: ReservationGate
     context: OnlineVisualLunaExecutionContext
+    observer: RequestObserver | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.approval, OnlineVisualAnalysisApproval):
@@ -1233,6 +1234,7 @@ class VisualLunaSemanticResponder:
             model=self.model,
             payload=payload,
             online=True,
+            observer=self.observer,
         )
 
 
@@ -1247,6 +1249,7 @@ def validated_visual_luna_responder(
     frames: FrameSamplingResult,
     approval: OnlineVisualAnalysisApproval,
     gate: ReservationGate | None = None,
+    observer: RequestObserver | None = None,
 ) -> VisualLunaSemanticResponder:
     """무성 원본의 검증된 온라인 실행 응답자 — 시각 승인 문을 통과해서만 존재한다.
 
@@ -1298,6 +1301,7 @@ def validated_visual_luna_responder(
         approval=approval,
         gate=bounded_gate,
         context=context,
+        observer=observer,
     )
 
 

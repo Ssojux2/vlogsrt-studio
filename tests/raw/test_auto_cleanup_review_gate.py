@@ -295,3 +295,23 @@ def test_ui_shows_pending_count_refuses_handoff_and_confirms_in_one_click(tmp_pa
     assert "미검토" not in message
     assert ReviewWorkspaceFacade(root).unreviewed_auto_exclusion_count() == 0
     assert "확인할 자동 제외가 없습니다" in server.capcut_confirm_auto_view(signature)[0]
+
+
+def test_confirm_button_sits_next_to_the_handoff_button_outside_any_accordion(
+    tmp_path: Path, local_socket: None
+):
+    """출력 거부 문구가 '자동 제외 확인'을 누르라고 하므로 접힌 서랍 안에 있으면 안 된다."""
+    pytest.importorskip("gradio", reason="웹 UI extra(gradio)가 없다", exc_type=ImportError)
+    import gradio as gr
+
+    from ui.workspace_service import RawWorkspaceUi
+
+    app = RawWorkspaceUi(state_path=tmp_path / "ui-state.json").build_blocks()
+    buttons = {block.value: block for block in app.blocks.values() if isinstance(block, gr.Button)}
+    confirm = buttons["자동 제외 확인"]
+    handoff = buttons["선택한 컷 Final Cut으로 출력"]
+    assert confirm.parent is handoff.parent
+    node = confirm.parent
+    while node is not None:
+        assert not isinstance(node, gr.Accordion)
+        node = getattr(node, "parent", None)

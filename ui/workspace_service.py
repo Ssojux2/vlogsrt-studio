@@ -1415,6 +1415,18 @@ class RawWorkspaceUi:
         return self._capcut_result(root, self._quick_status())
 
     def _quick_status(self) -> str:
+        text = self._quick_status_text()
+        line = self._usage_line()
+        return f"{text}\n\n{line}" if line else text
+
+    def _usage_line(self) -> str:
+        """Measured usage of this selection's analysis — empty until a paid attempt exists."""
+        root, revision = self._quick.get("root"), self._quick.get("revision")
+        if root is None or revision is None:
+            return ""
+        return self.raw.analysis_usage_line(root, revision)
+
+    def _quick_status_text(self) -> str:
         state = self._quick
         if not state:
             return "영상을 선택하면 미리보기와 Luna 추천 분석이 이어집니다."
@@ -1807,6 +1819,8 @@ class RawWorkspaceUi:
                     "자막·영상 분석 승인", visible=True, interactive=False, variant="primary"
                 )
                 handoff = gr.Button("선택한 컷 Final Cut으로 출력")
+                # 출력 거부 문구가 이 단추를 누르라고 말한다 — 접힌 서랍에 두지 않는다.
+                confirm_auto = gr.Button("자동 제외 확인")
             library_summary = gr.Markdown(
                 self.library_analysis_summary(), elem_id="library-analysis-scope"
             )
@@ -1858,7 +1872,6 @@ class RawWorkspaceUi:
                 visible=False,
             )
             with gr.Accordion("복원 · 전달 · 고급 조작", open=False), gr.Row():
-                confirm_auto = gr.Button("자동 제외 확인")
                 restore = gr.Button("자동 제외 전체 복원")
                 undo = gr.Button("실행 취소")
                 refresh = gr.Button("결과 확인")
@@ -5474,7 +5487,12 @@ class RawWorkspaceUi:
             plan = ws.plan(registration, run_id=run)
             ws.approve(plan, note="브라우저 화면 확인란 승인")
             timing, text = self._caption_providers_for_action()
-            body = ws.run_body(registration, run, timing_provider=timing, text_provider=text)
+            body = self.raw.with_request_receipts(
+                root,
+                ws.run_body(registration, run, timing_provider=timing, text_provider=text),
+                timing,
+                text,
+            )
         except (raw_service.RawWorkspaceError, raw_service.CaptionWorkspaceError) as error:
             raise gr.Error(str(error)) from error
         total = self._caption_chunk_count or 1

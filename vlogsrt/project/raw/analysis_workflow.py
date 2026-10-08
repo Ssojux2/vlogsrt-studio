@@ -37,7 +37,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from vlogsrt import log, preprocess
-from vlogsrt.project.raw import media_refs, source_transcript
+from vlogsrt.project.raw import media_refs, request_usage, source_transcript
 from vlogsrt.project.raw import understanding as stage1
 from vlogsrt.project.raw import understanding_luna as luna
 from vlogsrt.project.raw.analysis_approval import (
@@ -1653,6 +1653,7 @@ def _luna_responder_for(
             utterances=spoken,
             frames=frames,
             approval=approval,
+            observer=request_usage.observer(),
         )
     if not isinstance(approval, OnlineVisualAnalysisApproval):
         raise AnalysisApprovalError(
@@ -1667,6 +1668,7 @@ def _luna_responder_for(
         plan=plan,
         frames=frames,
         approval=approval,
+        observer=request_usage.observer(),
     )
 
 

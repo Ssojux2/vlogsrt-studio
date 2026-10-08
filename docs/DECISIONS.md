@@ -2575,3 +2575,44 @@ Final Cut 출력** 네 단계다.
 
 **남은 것은 실기다**: 출력 XML을 실제 Final Cut이 가져오는지, 원본 relink가 되는지는
 확인하지 못했다(V3). 확인 전까지 이 경로의 인수는 합성 데이터 기준이다.
+
+---
+
+## D46 — 브라우저 흐름의 유료 시도는 실측 사용량과 계산 비용을 영수증에 남긴다 (2026-10-08)
+
+**문제**: 브라우저 흐름의 유료 시도는 `analysis_requests`(단계·지문·상태·메모)에만 남았다.
+사용자는 견적을 승인할 수 있었지만 실제로 얼마를 썼는지는 어디서도 볼 수 없었다.
+레거시 `vlogsrt/project/`의 요청 회계(`request_accounting`)는 이미 응답 사용량을 읽고
+값을 매기고 있었는데 브라우저 경로는 그 관찰 이음매를 쓰지 않았다.
+
+**결정**: 라이브 전송 경계(`LiveTranscriber`, Luna 응답자)에 `request_usage.UsageObserver`를
+단다(`transcribe.RequestObserver` 의미 그대로 — 관찰자가 던지면 `ObserverFailure`이고
+삼키지 않는다). 요청 전송·재시도·승인 문·캐시·오프라인 동작은 바뀌지 않는다.
+
+- **남기는 것**(시도 한 행): `model`, `billed_seconds`(전사 응답이 말한 초 — `usage`의
+  `type == "duration"` 또는 응답의 `duration`; 없으면 NULL이다. **조각 길이로 지어내지
+  않는다**), `input_tokens`·`output_tokens`, `cost_usd`(십진 문자열), `unpriced_reason`,
+  `pricing_revision`. 해석과 단가식은 `request_accounting`의 것을 그대로 쓴다
+  (`measure_response_usage`).
+- **비용은 계산값이다**: 2026-09-21 공개 가격 스냅샷(`pricing.official_pricing_snapshot`)으로
+  계산한 수치이지 공급자의 청구서가 아니다. 청구서와 어긋날 수 있다.
+- **가격을 못 매기면 0원이 아니다**: 사용량이 없거나(`missing_usage`), 토큰만 온 전사
+  (`token_only_audio_usage`), 스냅샷에 없는 모델(`unknown_model`)은 `cost_usd`가 NULL이고
+  이유가 남는다. 앱의 기본 Luna 모델(`RawModelRoles.luna_model`)은 스냅샷의 Luna 모델과
+  이름이 달라 **지금은 Luna 행이 토큰만 남고 가격 미정**이다. 가격 표에 그 모델을 올리는
+  것은 별도 결정이다.
+- **불확실한 시도는 값을 매기지 않는다**: 응답을 못 받은 시도(`response_uncertain`)는
+  청구됐을 수 있으므로 건수로만 센다.
+- **최종 자막 경로**는 `begin`을 부르지 않으므로 관찰자가 호출 하나당 행 하나를 직접 연다
+  (`authorize`에서 불확실로 열고 `on_response`·`on_error`에서 닫는다). 실행 본문은
+  `service.with_request_receipts`가 영수증 범위로 감싼다.
+- **스키마**: 기존 작업공간의 표에 `ALTER TABLE ... ADD COLUMN`을 가드로 한다(멱등). 옛 행은
+  그대로 읽히고 비용이 없으니 "가격 미정"으로 센다.
+- **요약**: `service.job_usage_summary(root, job_id)`·`analysis_usage_summary(root, revision_id)`가
+  시도 수·수신·불확실·청구 초·토큰·가격 매긴 합계·가격 미정 수를 준다. 화면의 분석 상태에
+  한 줄이 붙는다(`실사용 $… · 전사 N초 · Luna 입력/출력 … 토큰 (불확실 N건·가격 미정 N건)`).
+
+**못 한 것**: ① 브라우저 승인은 **요청 수**(ASR 조각·Luna 요청)로 상한을 묶고 금액 상한은
+저장하지 않는다 — 그래서 요약의 `ceiling_usd`는 호출자가 주지 않으면 비어 있고 화면에도
+승인 상한 문구가 뜨지 않는다. ② 원본 영상 단위 요약은 하지 않았다 — 영수증 행이 원본을
+알지 못한다(작업과 지문만 안다).

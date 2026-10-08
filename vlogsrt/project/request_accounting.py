@@ -572,6 +572,94 @@ def luna_cost_text(input_tokens: int, output_tokens: int, pricing: PricingSnapsh
     )
 
 
+@dataclass(frozen=True, slots=True)
+class MeasuredUsage:
+    """응답 하나의 실측 사용량과 스냅샷으로 **계산한** 비용 — 공급자의 청구서가 아니다.
+
+    가격을 못 매기면 `cost_usd`는 None이고 `unpriced_reason`이 이유다. 0원으로 바꾸는
+    길은 없다. 초는 응답이 말한 값뿐이고 조각 길이로 지어내지 않는다.
+    """
+
+    model: str
+    pricing_revision: str
+    billed_seconds: str | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    cost_usd: str | None = None
+    unpriced_reason: str | None = None
+
+
+def measure_response_usage(meta: Any, response: object, pricing: PricingSnapshot) -> MeasuredUsage:
+    """관찰자가 본 원 SDK 응답 → 실측 사용량. 원장 확정과 같은 해석·같은 단가식이다."""
+    operation = getattr(meta, "operation", "")
+    model = str(getattr(meta, "model", ""))
+    if operation == _TRANSCRIPTION_OPERATION:
+        return _measure_audio(model, response, pricing)
+    if operation == _RESPONSES_OPERATION:
+        return _measure_luna(model, response, pricing)
+    return MeasuredUsage(model, pricing.snapshot_revision, unpriced_reason="unsupported_operation")
+
+
+def _measure_audio(model: str, response: object, pricing: PricingSnapshot) -> MeasuredUsage:
+    metering, evidence = parse_audio_metering(response)
+    mapping = _as_mapping(response)
+    tokens = _usage_tokens(_field(response, mapping, "usage"))
+    if metering is None:
+        reason = evidence.reason_code if evidence is not None else "missing_usage"
+        return MeasuredUsage(
+            model,
+            pricing.snapshot_revision,
+            input_tokens=tokens[0],
+            output_tokens=tokens[1],
+            unpriced_reason=reason,
+        )
+    seconds = _decimal_text(_fraction_decimal(metering.seconds))
+    try:
+        rate = audio_per_minute_rate(model, pricing)
+    except AccountingError:
+        return MeasuredUsage(
+            model,
+            pricing.snapshot_revision,
+            billed_seconds=seconds,
+            input_tokens=tokens[0],
+            output_tokens=tokens[1],
+            unpriced_reason="unknown_model",
+        )
+    return MeasuredUsage(
+        model,
+        pricing.snapshot_revision,
+        billed_seconds=seconds,
+        input_tokens=tokens[0],
+        output_tokens=tokens[1],
+        cost_usd=audio_cost_text(metering.seconds, rate),
+    )
+
+
+def _measure_luna(model: str, response: object, pricing: PricingSnapshot) -> MeasuredUsage:
+    metering, evidence = parse_luna_metering(response)
+    if metering is None:
+        return MeasuredUsage(
+            model,
+            pricing.snapshot_revision,
+            input_tokens=evidence.input_tokens if evidence else None,
+            output_tokens=evidence.output_tokens if evidence else None,
+            unpriced_reason=evidence.reason_code if evidence else "missing_usage",
+        )
+    priced = model == pricing.luna_model
+    return MeasuredUsage(
+        model,
+        pricing.snapshot_revision,
+        input_tokens=metering.input_tokens,
+        output_tokens=metering.output_tokens,
+        cost_usd=(
+            luna_cost_text(metering.input_tokens, metering.output_tokens, pricing)
+            if priced
+            else None
+        ),
+        unpriced_reason=None if priced else "unknown_model",
+    )
+
+
 def is_budget_denial(exc: BaseException) -> bool:
     """원인 사슬에서 예산 거부를 찾는다 — 관찰 경계는 예외를 한 번 감싸 올린다."""
     cursor: BaseException | None = exc

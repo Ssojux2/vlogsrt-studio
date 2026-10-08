@@ -918,6 +918,65 @@ class RawWorkspaceService:
         self._workspace(root).source_asset(asset_id)
         return relink_original(self._workspace(root), asset_id, path)
 
+    def job_usage_summary(self, root: Path, job_id: str) -> Any:
+        """Measured usage and computed cost of one job's paid attempts (W-7)."""
+        from vlogsrt.project.raw import request_usage
+
+        return request_usage.summarize(self._workspace(root), (job_id,))
+
+    def analysis_usage_summary(self, root: Path, revision_id: str | None = None) -> Any:
+        """Usage of the jobs that ran one analysis revision (both phases); all jobs when None."""
+        from vlogsrt.project.raw import request_usage
+
+        workspace = self._workspace(root)
+        if revision_id is None:
+            return request_usage.summarize(workspace)
+        revision = AnalysisStore(workspace).revision(revision_id)
+        if revision is None:
+            return request_usage.summarize(workspace, ())
+        fingerprints = (
+            (ANALYSIS_JOB_KIND, revision.fingerprint),
+            (
+                ANALYSIS_SEMANTIC_JOB_KIND,
+                analysis_workflow.semantic_job_fingerprint(revision_id),
+            ),
+        )
+        with workspace.connect() as db:
+            ids = tuple(
+                str(row[0])
+                for kind, fingerprint in fingerprints
+                for row in db.execute(
+                    "SELECT job_id FROM jobs WHERE kind=? AND input_fingerprint=?",
+                    (kind, fingerprint),
+                )
+            )
+        return request_usage.summarize(workspace, ids)
+
+    def analysis_usage_line(self, root: Path, revision_id: str) -> str:
+        """The one-line status text for a revision's usage; empty before any paid attempt."""
+        from vlogsrt.project.raw import request_usage
+
+        return request_usage.format_usage_line(self.analysis_usage_summary(root, revision_id))
+
+    def with_request_receipts(self, root: Path, body: Any, timing: object, text: object) -> Any:
+        """Open the receipt scope around a final-caption run when its providers are live."""
+        from vlogsrt.project.raw import request_log
+        from vlogsrt.project.raw.caption_provider import (
+            TransportTextProvider,
+            TransportTimingProvider,
+        )
+
+        live = isinstance(timing, TransportTimingProvider) or isinstance(
+            text, TransportTextProvider
+        )
+        workspace = self._workspace(root)
+
+        def scoped(context: JobContext) -> None:
+            with request_log.scope(workspace, context.job_id, live=live):
+                body(context)
+
+        return scoped
+
     def selection_quote(self, root: Path, asset_ids: tuple[str, ...]) -> Any:
         from vlogsrt.project.raw.selection_analysis import quote
 
