@@ -88,7 +88,7 @@ from vlogsrt.project.raw.ingest import (
     run_ingest_copy,
     scan_sources,
 )
-from vlogsrt.project.raw.jobs import JobContext, JobManager
+from vlogsrt.project.raw.jobs import JobCancelledError, JobContext, JobManager
 from vlogsrt.project.raw.models import (
     ACTIVE_JOB_STATUSES,
     ANALYSIS_JOB_KIND,
@@ -234,6 +234,7 @@ __all__ = [
     "IngestConfirmation",
     "IngestError",
     "IngestProposal",
+    "JobCancelledError",
     "JobContext",
     "JobHandle",
     "JobRecord",
@@ -1005,6 +1006,11 @@ class RawWorkspaceService:
 
         return quote(self, root, asset_ids)
 
+    def selection_rebound_quote(self, root: Path, measured: Any, asset_ids: tuple[str, ...]) -> Any:
+        from vlogsrt.project.raw.selection_analysis import rebound_quote
+
+        return rebound_quote(self, root, measured, asset_ids)
+
     def cached_selection_analysis(self, root: Path, asset_ids: tuple[str, ...]) -> str | None:
         from vlogsrt.project.raw.selection_analysis import cached_revision
 
@@ -1187,8 +1193,6 @@ class RawWorkspaceService:
         self, root: Path, handle: JobHandle | JobRecord, context: JobContext
     ) -> None:
         import time
-
-        from vlogsrt.project.raw.jobs import JobCancelledError
 
         # Lightweight test contexts and a few recovery callers only expose
         # ``check_cancel``.  The child still must be cancelled immediately;

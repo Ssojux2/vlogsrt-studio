@@ -25,7 +25,35 @@ class SelectionQuote:
 
 
 def quote(service: Any, root: Path, asset_ids: tuple[str, ...]) -> SelectionQuote:
-    estimates = tuple(service.analysis_estimate(root, asset_ids))
+    return _assemble_quote(
+        service, root, asset_ids, tuple(service.analysis_estimate(root, asset_ids))
+    )
+
+
+def rebound_quote(
+    service: Any, root: Path, measured: SelectionQuote, asset_ids: tuple[str, ...]
+) -> SelectionQuote:
+    """이미 잰 견적의 측정값으로 영상 일부(또는 전부)의 견적을 다시 묶는다 — ffprobe 없음.
+
+    측정값 한 줄은 영상 하나의 것이라 다른 영상에 의존하지 않는다. 결속 지문(미디어
+    참조·원본 자막)과 설정은 지금 값을 다시 읽으므로, 전부를 다시 묶어 같은 digest가
+    나오면 측정 뒤로 결속이 바뀌지 않았다는 뜻이다. 측정값 자체의 변화는 실행 문
+    (`execute`)이 유료 호출 전에 영상마다 다시 재어 잡는다.
+    """
+    wanted = set(asset_ids)
+    estimates = tuple(e for e in measured.estimates if e.asset_id in wanted)
+    missing = wanted - {e.asset_id for e in estimates}
+    if missing:
+        raise RawWorkspaceError(f"측정한 견적에 없는 영상입니다: {sorted(missing)}")
+    return _assemble_quote(service, root, asset_ids, estimates)
+
+
+def _assemble_quote(
+    service: Any,
+    root: Path,
+    asset_ids: tuple[str, ...],
+    estimates: tuple[AnalysisEstimate, ...],
+) -> SelectionQuote:
     import hashlib
 
     from vlogsrt.project.raw import media_refs, source_transcript

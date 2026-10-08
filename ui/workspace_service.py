@@ -47,6 +47,59 @@ STREAM_CHUNK_BYTES = 262144
 REVIEW_EXPORT_JOB_KIND = "review_export"
 """확정 내보내기 작업 종류 — 제출 때의 검토 리비전·선택에 묶인 본문을 가진다."""
 
+LIBRARY_APPROVAL_JOB_KIND = "library_approval"
+"""라이브러리 일괄 승인 작업 — 승인한 견적의 digest에 묶여 같은 승인이 두 번 돌지 않는다."""
+
+# 분석이 실제로 돌고 있다고 보는 단계 — 이 동안 일괄 승인 버튼은 다시 누를 수 없다.
+ACTIVE_ANALYSIS_STAGES = ("분석 대기", "분석 시작", "전사·장면 준비", "Luna 추천 구간 분석")
+# 영상 클릭이 다시 시작하지 않고 그대로 이어 붙는 단계 — 준비 중인 작업을 두 번 띄우지 않는다.
+# 승인된 실행은 이것이 아니라 ACTIVE_ANALYSIS_STAGES만 보고, 미승인 준비는 대신한다.
+BUSY_QUICK_STAGES = ("영상 준비", *ACTIVE_ANALYSIS_STAGES)
+# 승인은 받았지만 아직 실제 분석에 들어가지 않은 단계 — 시작 알림은 이 단계를 지나면 물러난다.
+PENDING_ANALYSIS_STAGES = ("영상 준비", "승인 대기", "분석 대기", "분석 시작")
+NOTICE_ACCEPTED = "accepted"
+NOTICE_DONE = "done"
+NOTICE_PREPARING = "preparing"
+NOTICE_CHANGED = "changed"
+NOTICE_RECHECK = "recheck"
+NOTICE_STALE = "stale"
+NOTICE_KEY = "key"
+NOTICE_FAILED = "failed"
+NOTICE_INTERRUPTED = "interrupted"
+NOTICE_TEXT = {
+    NOTICE_ACCEPTED: "**승인 접수** · 분석 범위를 확인하고 있습니다. "
+    "끝나면 영상별 분석이 이어집니다.",
+    NOTICE_DONE: "승인한 영상들을 백그라운드에서 순서대로 분석합니다. "
+    "다른 영상을 살펴봐도 계속 진행됩니다.",
+    NOTICE_PREPARING: "분석 범위를 준비하고 있습니다. 표시된 범위를 확인한 뒤 분석을 시작하세요.",
+    NOTICE_CHANGED: "영상이나 자막이 바뀌었습니다. 아무것도 시작하지 않았습니다. "
+    "갱신된 분석 범위를 확인하고 다시 승인하세요.",
+    NOTICE_RECHECK: "입력이 바뀌었습니다. 아무것도 시작하지 않았습니다. "
+    "갱신된 범위를 확인하고 다시 승인하세요.",
+    NOTICE_STALE: "저장 결과의 입력이 바뀌었습니다. 갱신된 범위를 확인하세요.",
+    NOTICE_KEY: "**연결 설정 필요 · 아직 분석하지 않았습니다**\n\n"
+    "API 연결에 키를 입력한 뒤 표시된 범위를 승인하세요.",
+    NOTICE_INTERRUPTED: "**중단된 승인 작업이 남아 있습니다 · 아무것도 시작하지 않았습니다**\n\n"
+    "이전 실행에서 끝나지 못한 같은 승인이 기록에 남아 있습니다. "
+    "앱을 다시 시작하면 중단된 승인을 복구한 뒤 다시 승인할 수 있습니다.",
+}
+QUICK_APPROVED_TEXT = (
+    "선택한 영상의 Luna 분석을 시작했습니다. 추천 구간이 타임라인 위에 표시됩니다."
+)
+
+
+@dataclass(frozen=True)
+class _ApprovalNotice:
+    """승인 클릭의 답 — 1초 타이머가 상태 칸을 다시 그려도 이 기록에서 다시 나온다."""
+
+    kind: str
+    text: str
+    # 알림을 낸 순간의 묶음 견적 — 견적이 바뀌면 낡은 알림은 물러난다.
+    quote_key: tuple[str, Any] | None
+    # 시작 알림이 지켜보는 작업 — 하나라도 실제 분석에 들어가면 그 단계 표시에 자리를 넘긴다.
+    watch: frozenset[str] = frozenset()
+
+
 _CUE_SEEK_JS = (
     "(cue) => { if (!cue) return;"
     " const player = document.getElementById('caption-video');"
@@ -277,6 +330,11 @@ class RawWorkspaceUi:
         self._analysis_queue: list[str] = []
         self._library_quotes: dict[Path, Any] = {}
         self._library_cached_ids: dict[Path, set[str]] = {}
+        # 승인 클릭의 답은 1초 타이머가 상태 칸을 다시 쓰므로 상태 쪽에 남겨야 보인다.
+        self._approval_notice: dict[Path, _ApprovalNotice] = {}
+        self._approval_jobs: dict[Path, str] = {}
+        # 활성 확인과 제출을 한 덩어리로 묶어 연타가 두 번 제출하지 못하게 한다.
+        self._approval_lock = threading.Lock()
         self._review_publish_lock = threading.Lock()
         self._selection_auto_approval: Callable[[Any], bool] | None = None
         self._last_listing: raw_service.FolderListing | None = None
@@ -1003,14 +1061,23 @@ class RawWorkspaceUi:
                     self.raw.cancel_job(previous["root"], previous[key])
 
     def _load_quick_tasks(self, root: Path) -> None:
-        for state in self.raw.load_selection_states(root):
+        stored = self.raw.load_selection_states(root)
+        # 은퇴 확인과 등록을 은퇴와 같은 잠금 안에서 해야 막 은퇴한 작업이 되살아나지 않는다.
+        with self._selection_lock:
+            for state in stored:
+                if (
+                    state.get("token") not in self._quick_tasks
+                    and state.get("token") not in self._retired_quick_tokens
+                ):
+                    self._quick_tasks[state["token"]] = state
+            token = self._quick.get("token")
+            # 은퇴한 작업을 보고 있는 화면이 그것을 되살리지 못하게 한다.
             if (
-                state.get("token") not in self._quick_tasks
-                and state.get("token") not in self._retired_quick_tokens
+                self._quick.get("root") == root
+                and token
+                and token not in self._retired_quick_tokens
             ):
-                self._quick_tasks[state["token"]] = state
-        if self._quick.get("root") == root and self._quick.get("token"):
-            self._quick_tasks.setdefault(self._quick["token"], self._quick)
+                self._quick_tasks.setdefault(token, self._quick)
 
     def _task_for(
         self, root: Path, asset_ids: tuple[str, ...], paths: tuple[str, ...] = ()
@@ -1035,12 +1102,17 @@ class RawWorkspaceUi:
                 state["view_source_id"] = source_id
             self._visual_lifetime_token = uuid.uuid4().hex
             self._capcut_render_key = None
+            self._drop_settled_notice(state["root"])
             self.raw.save_selection_state(state["root"], state)
 
     def _quick_update(self, expected_token: str, **values: Any) -> bool:
         with self._selection_lock:
             state = self._quick_tasks.get(expected_token)
-            if state is None and self._quick.get("token") == expected_token:
+            if (
+                state is None
+                and self._quick.get("token") == expected_token
+                and expected_token not in self._retired_quick_tokens
+            ):
                 state = self._quick
                 self._quick_tasks[expected_token] = state
             if state is None or state.get("token") != expected_token:
@@ -1065,6 +1137,33 @@ class RawWorkspaceUi:
             self.raw.cancel_job(root, context.job_id)
         context.check_cancel()
 
+    def _existing_quick(
+        self, root: Path, paths: tuple[str, ...], asset_ids: tuple[str, ...], approved_quote: Any
+    ) -> dict | None:
+        """이어 붙을 기존 작업 — 승인된 실행은 실제 분석 중인 작업에만 이어 붙는다."""
+        existing = self._task_for(root, asset_ids, paths)
+        if approved_quote is None or existing is None:
+            return existing
+        with self._selection_lock:
+            # 단계 확인과 은퇴를 한 잠금 안에서 해야, 그 사이 분석 단계로 넘어간 작업을
+            # 은퇴시키지 않는다(단계 변경도 같은 잠금 아래 `_quick_update`가 한다).
+            if existing.get("stage") in ACTIVE_ANALYSIS_STAGES:
+                return existing
+            superseded = tuple(existing.get("asset_ids", ())) == asset_ids
+            if superseded:
+                self._retire_quick_locked(existing)
+        if superseded and existing.get("job_id"):
+            self.raw.cancel_job(root, existing["job_id"])
+        return None
+
+    def _retire_quick_locked(self, state: dict) -> None:
+        # 승인된 실행이 같은 영상의 미승인 준비를 대신한다. 옛 토큰을 지워 두면 그 준비
+        # 작업은 다음 `_quick_assert_current`에서 스스로 취소되고, 승인 대기로 남아 다시
+        # 승인되거나 자동 승인으로 한 번 더 과금되지 않는다.
+        token = state["token"]
+        self._retired_quick_tokens.add(token)
+        self._quick_tasks.pop(token, None)
+
     def _start_quick(
         self,
         root: Path,
@@ -1075,23 +1174,9 @@ class RawWorkspaceUi:
         approved_quote: Any = None,
         activate: bool = True,
     ) -> None:
-        existing = self._task_for(root, asset_ids, paths)
-        if (
-            approved_quote is not None
-            and existing is not None
-            and existing.get("stage")
-            not in ("분석 대기", "분석 시작", "전사·장면 준비", "Luna 추천 구간 분석")
-            and tuple(existing.get("asset_ids", ())) != asset_ids
-        ):
-            existing = None
+        existing = self._existing_quick(root, paths, asset_ids, approved_quote)
         if existing is not None:
-            active = existing.get("stage") in (
-                "영상 준비",
-                "분석 대기",
-                "분석 시작",
-                "전사·장면 준비",
-                "Luna 추천 구간 분석",
-            )
+            active = existing.get("stage") in BUSY_QUICK_STAGES
             if (not retry and approved_quote is None) or active:
                 if not activate:
                     return
@@ -1269,9 +1354,8 @@ class RawWorkspaceUi:
         root = self._snapshot_root()
         quote = self._library_quotes.get(root) if root else None
         tasks = self._task_views(root) if root else {}
-        active = any(
-            t.get("stage") in ("분석 대기", "분석 시작", "전사·장면 준비", "Luna 추천 구간 분석")
-            for t in tasks.values()
+        active = (root is not None and self._approval_active(root)) or any(
+            t.get("stage") in ACTIVE_ANALYSIS_STAGES for t in tasks.values()
         )
         complete = quote is not None and all(
             tasks.get(a, {}).get("stage") == "추천 구간 준비 완료" for a in quote.asset_ids
@@ -1281,25 +1365,77 @@ class RawWorkspaceUi:
             value=label, visible=True, interactive=bool(quote) and not active and not complete
         )
 
+    def _set_approval_notice(
+        self,
+        root: Path,
+        kind: str,
+        text: str | None = None,
+        watch: frozenset[str] = frozenset(),
+    ) -> None:
+        quote = self._library_quotes.get(root)
+        self._approval_notice[root] = _ApprovalNotice(
+            kind=kind,
+            text=text or NOTICE_TEXT[kind],
+            quote_key=None if quote is None else (quote.digest, quote.workflow),
+            watch=watch,
+        )
+
+    def _drop_notice(self, root: Path, held: _ApprovalNotice) -> None:
+        # 그 사이 새 알림이 들어왔으면 그것은 지우지 않는다.
+        if self._approval_notice.get(root) is held:
+            self._approval_notice.pop(root, None)
+
+    def _drop_settled_notice(self, root: Path) -> None:
+        # 접수 알림은 승인 작업이 결과로 바꿀 때까지 남는다 — 화면 전환이 지우지 않는다.
+        held = self._approval_notice.get(root)
+        if held is not None and held.kind != NOTICE_ACCEPTED:
+            self._drop_notice(root, held)
+
+    def _approval_active(self, root: Path) -> bool:
+        job_id = self._approval_jobs.get(root)
+        if job_id is None:
+            return False
+        if self.raw.get_job(root, job_id).status in raw_service.ACTIVE_JOB_STATUSES:
+            return True
+        self._approval_jobs.pop(root, None)
+        return False
+
+    def _live_notice(self, root: Path | None) -> _ApprovalNotice | None:
+        held = self._approval_notice.get(root) if root else None
+        if root is None or held is None:
+            return None
+        if held.kind == NOTICE_ACCEPTED:
+            with self._approval_lock:
+                # 본문이 돌기 전에 끝난 작업(시작 전 취소)은 접수 알림을 스스로 걷지 못한다.
+                if not self._approval_active(root):
+                    self._drop_notice(root, held)
+            return self._approval_notice.get(root)
+        quote = self._library_quotes.get(root)
+        quote_key = None if quote is None else (quote.digest, quote.workflow)
+        started = held.kind == NOTICE_DONE and any(
+            self._quick_tasks.get(token, {}).get("stage") not in PENDING_ANALYSIS_STAGES
+            for token in held.watch
+        )
+        if quote_key != held.quote_key or started:
+            self._drop_notice(root, held)
+            return None
+        return held
+
+    def _library_reply(self, root: Path, kind: str, open_panel: bool = False) -> tuple:
+        self._set_approval_notice(root, kind)
+        return (
+            self._quick_status(),
+            gr.Accordion(open=open_panel),
+            gr.Textbox(value="", autofocus=open_panel),
+        )
+
     def library_analysis_view(self, signature: str | None, api_key: str | None = "") -> tuple:
         root = self._require_current_selection(signature)
         ids = self._library_ids(root)
         quote = self._library_quotes.get(root)
         if not ids or quote is None or tuple(quote.asset_ids) != ids:
             self._prepare_library_quote(root)
-            return (
-                "분석 범위를 준비하고 있습니다. 표시된 범위를 확인한 뒤 분석을 시작하세요.",
-                gr.Accordion(open=False),
-                gr.Textbox(value=""),
-            )
-        fresh = self.raw.selection_quote(root, ids)
-        if fresh.digest != quote.digest or fresh.workflow != quote.workflow:
-            self._library_quotes[root] = fresh
-            return (
-                "영상이나 자막이 바뀌었습니다. 갱신된 분석 범위를 확인하고 다시 승인하세요.",
-                gr.Accordion(open=False),
-                gr.Textbox(value=""),
-            )
+            return self._library_reply(root, NOTICE_PREPARING)
         key = (api_key or "").strip()
         if key:
             self._startup_credentials = raw_service.EnvironmentCredentials(
@@ -1308,43 +1444,83 @@ class RawWorkspaceUi:
         if self._startup_credentials is None and self._live_transport is None:
             if self._quick.get("token"):
                 self._quick_update(self._quick["token"], connection_required=True)
-            return (
-                "API 연결에 키를 입력한 뒤 표시된 범위를 승인하세요.",
-                gr.Accordion(open=True),
-                gr.Textbox(value="", autofocus=True),
-            )
-        # This gesture approves the displayed aggregate ceiling; each worker
-        # receives only its source's freshly checked quote and never auto-expands it.
+            return self._library_reply(root, NOTICE_KEY, open_panel=True)
+        # 새 견적 확인(영상마다 ffprobe)은 수십 초 걸린다 — 클릭은 접수만 하고 돌아온다.
+        self._submit_library_approval(root, ids, quote)
+        return (self._quick_status(), gr.Accordion(open=False), gr.Textbox(value=""))
+
+    def _submit_library_approval(self, root: Path, ids: tuple[str, ...], quote: Any) -> None:
+        def approve(context: Any) -> None:
+            try:
+                self._approve_library(root, ids, quote, context)
+            except raw_service.JobCancelledError:
+                # 사용자가 취소한 것은 실패가 아니다 — 접수 알림만 걷고 취소로 끝낸다.
+                self._drop_accepted_notice(root)
+                raise
+            except Exception as error:
+                self._set_approval_notice(
+                    root, NOTICE_FAILED, f"승인한 분석을 시작하지 못했습니다: {error}"
+                )
+                raise
+
+        with self._approval_lock:
+            if self._approval_active(root):
+                return
+            # 접수 알림을 제출 전에 남겨야 본문이 낸 결과 알림을 덮어쓰지 않는다.
+            self._set_approval_notice(root, NOTICE_ACCEPTED)
+            handle = self.raw.submit_job(root, LIBRARY_APPROVAL_JOB_KIND, quote.digest, approve)
+            if handle.reattached and handle.job_id not in self._approval_jobs.values():
+                # 죽은 서버가 남긴 running 기록에 붙었다 — 본문이 없어 끝나지 않으므로 진행
+                # 중으로 기록하면 접수 알림과 잠긴 버튼이 재시작 전까지 남는다.
+                self._set_approval_notice(root, NOTICE_INTERRUPTED)
+                return
+            self._approval_jobs[root] = handle.job_id
+
+    def _drop_accepted_notice(self, root: Path) -> None:
+        held = self._approval_notice.get(root)
+        if held is not None and held.kind == NOTICE_ACCEPTED:
+            self._drop_notice(root, held)
+
+    def _approve_library(self, root: Path, ids: tuple[str, ...], quote: Any, context: Any) -> None:
+        context.check_cancel()
+        # 비용 문: 화면에 표시된 견적(digest·workflow)만 승인한다. 다르면 아무것도 시작하지 않는다.
+        fresh = self.raw.selection_quote(root, ids)
+        if fresh.digest != quote.digest or fresh.workflow != quote.workflow:
+            self._library_quotes[root] = fresh
+            self._set_approval_notice(root, NOTICE_CHANGED)
+            return
         cached = self._library_cached_ids.get(root, set()).intersection(ids)
-        invalid = {
-            source_id
-            for source_id in cached
-            if not self.raw.cached_selection_analysis(root, (source_id,))
-        }
+        invalid = {s for s in cached if not self.raw.cached_selection_analysis(root, (s,))}
         if invalid:
             self._library_cached_ids[root].difference_update(invalid)
             self._prepare_library_quote(root)
-            return (
-                "저장 결과의 입력이 바뀌었습니다. 갱신된 범위를 확인하세요.",
-                gr.Accordion(open=False),
-                gr.Textbox(value=""),
-            )
-        self.raw.update_settings(root, replace(quote.workflow, network_mode="online"))
+            self._set_approval_notice(root, NOTICE_STALE)
+            return
+        context.check_cancel()
+        online = replace(fresh.workflow, network_mode="online")
+        self.raw.update_settings(root, online)
+        # 견적의 측정값(영상마다 ffprobe)은 network_mode에 의존하지 않는다 — 전체를 다시
+        # 재지 않고 방금 잰 측정값에 지금의 결속 지문·설정만 다시 묶는다. 영상별 견적을
+        # 먼저 묶고 전체를 나중에 묶어야, 영상별 견적이 본 결속이 승인한 것과 같다는
+        # 것이 확인된다. 그 뒤의 변화는 실행 문(`selection_analysis.execute`)이 유료 호출
+        # 전에 영상마다 다시 재어 이 digest와 맞추므로 문이 약해지지 않는다.
         children = [
-            replace(self.raw.selection_quote(root, (source_id,)), approved=True)
+            replace(self.raw.selection_rebound_quote(root, fresh, (source_id,)), approved=True)
             for source_id in ids
             if source_id not in cached
         ]
-        checked = self.raw.selection_quote(root, ids)
-        if checked.digest != fresh.digest or checked.workflow != replace(
-            fresh.workflow, network_mode="online"
+        checked = self.raw.selection_rebound_quote(root, fresh, ids)
+        if checked.digest != quote.digest or any(
+            q.workflow != online for q in (checked, *children)
         ):
             self._library_quotes[root] = checked
-            return (
-                "입력이 바뀌었습니다. 갱신된 범위를 확인하고 다시 승인하세요.",
-                gr.Accordion(open=False),
-                gr.Textbox(value=""),
-            )
+            self._set_approval_notice(root, NOTICE_RECHECK)
+            return
+        watch = self._fan_out_library(root, ids, children)
+        self._library_quotes[root] = checked
+        self._set_approval_notice(root, NOTICE_DONE, watch=watch)
+
+    def _fan_out_library(self, root: Path, ids: tuple[str, ...], children: list) -> frozenset[str]:
         selected = self._quick.get("view_source_id") or (self._quick.get("asset_ids") or ids)[0]
         for child in children:
             self._start_quick(
@@ -1353,13 +1529,8 @@ class RawWorkspaceUi:
         active = self._task_for(root, (selected,))
         if active:
             self._activate_quick(active, selected)
-        self._library_quotes[root] = self.raw.selection_quote(root, ids)
-        return (
-            "승인한 영상들을 백그라운드에서 순서대로 분석합니다. "
-            "다른 영상을 살펴봐도 계속 진행됩니다.",
-            gr.Accordion(open=False),
-            gr.Textbox(value=""),
-        )
+        started = (self._task_for(root, child.asset_ids) for child in children)
+        return frozenset(task["token"] for task in started if task is not None)
 
     def quick_approve_view(self, signature: str | None, api_key: str | None = "") -> str:
         root = self._require_current_selection(signature)
@@ -1395,7 +1566,8 @@ class RawWorkspaceUi:
 
         handle = self.raw.submit_job(root, "selection_analysis", token + ":approved", execute)
         self._quick_update(token, job_id=handle.job_id)
-        return "선택한 영상의 Luna 분석을 시작했습니다. 추천 구간이 타임라인 위에 표시됩니다."
+        self._set_approval_notice(root, NOTICE_DONE, QUICK_APPROVED_TEXT, watch=frozenset({token}))
+        return self._quick_status()
 
     def quick_approve_panel_view(
         self, signature: str | None, api_key: str | None = ""
@@ -1415,7 +1587,14 @@ class RawWorkspaceUi:
         return self._capcut_result(root, self._quick_status())
 
     def _quick_status(self) -> str:
-        text = self._quick_status_text()
+        held = self._live_notice(self._snapshot_root())
+        if held is None:
+            text = self._quick_status_text()
+        elif held.kind == NOTICE_DONE:
+            # 시작 알림은 진행 표시를 가리지 않고 그 위에 얹힌다.
+            text = f"{held.text}\n\n{self._quick_status_text()}"
+        else:
+            text = held.text
         line = self._usage_line()
         return f"{text}\n\n{line}" if line else text
 
@@ -1637,8 +1816,7 @@ class RawWorkspaceUi:
             task["token"]
             for task in self._task_views(root).values()
             if task.get("token") != self._quick.get("token")
-            and task.get("stage")
-            in ("분석 대기", "분석 시작", "전사·장면 준비", "Luna 추천 구간 분석")
+            and task.get("stage") in ACTIVE_ANALYSIS_STAGES
         }
         if others:
             message += f"\n\n다른 영상의 백그라운드 분석 {len(others)}개가 계속 진행됩니다."
