@@ -26,7 +26,7 @@ import pytest
 from vlogsrt import preprocess
 from vlogsrt.project.raw import service as raw_service
 from vlogsrt.project.raw import visual_review
-from vlogsrt.project.raw.models import MediaNotFoundError, PlannedInterval
+from vlogsrt.project.raw.models import JobRecord, MediaNotFoundError, PlannedInterval
 from vlogsrt.project.raw.review_workspace import ReviewWorkspaceFacade
 from vlogsrt.project.raw.segment_review import (
     SELECTION_EXCLUDED,
@@ -1636,3 +1636,143 @@ def test_concurrent_preparation_keeps_cache_consistent(
     assert len(preview_files) == 1  # 원본 전체 미리보기도 하나
     probe = preprocess.probe_raw_media(preview_files[0])
     assert probe.video.codec_name == "h264"
+
+
+def _preview_record(
+    workspace: RawWorkspace, key: str, state: str, built_at: str, *, with_file: bool
+) -> None:
+    visual_review._write_record(
+        workspace.root / visual_review._preview_record_relative(key),
+        {
+            "schema": visual_review.VISUAL_PREVIEW_RECIPE,
+            "key": key,
+            "source_sha256": "a" * 64,
+            "audio_ordinal": 0,
+            "state": state,
+            "built_at": built_at,
+        },
+    )
+    if with_file:
+        target = workspace.root / visual_review._preview_relative(key)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"mp4")
+
+
+def test_ready_preview_beats_newer_interrupted_preparing_record(tmp_path: Path) -> None:
+    """재인코딩이 끊겨 작업 없는 'preparing'이 최신이어도 재생 가능한 완성본이 이긴다."""
+    workspace = RawWorkspace.create(tmp_path / "ws", "w")
+    _preview_record(workspace, "ready0", "ready", "2026-10-01T00:00:00", with_file=True)
+    _preview_record(workspace, "later0", "preparing", "2026-10-02T00:00:00", with_file=False)
+    preview = visual_review._source_preview_state(workspace, "s1", "a" * 64, (), (0,))
+    assert preview.state == "ready"
+    assert preview.relative_path == visual_review._preview_relative("ready0").as_posix()
+
+
+def test_other_audio_ready_preview_never_substitutes(tmp_path: Path) -> None:
+    workspace = RawWorkspace.create(tmp_path / "ws", "w")
+    _preview_record(workspace, "ready0", "ready", "2026-10-01T00:00:00", with_file=True)
+    preview = visual_review._source_preview_state(workspace, "s1", "a" * 64, (), (1,))
+    assert preview.state == "missing"
+
+
+def _active_prepare_job(job_id: str = "job-1") -> JobRecord:
+    """활성 `visual_prepare` 작업 하나 — 'preparing' 기록을 뒷받침하는 증거."""
+    return JobRecord(
+        job_id=job_id,
+        kind="visual_prepare",
+        input_fingerprint="fp",
+        status="running",
+        progress_current=0,
+        progress_total=1,
+        error=None,
+        cancellation_requested=False,
+        created_at="2026-10-02T00:00:00",
+        updated_at="2026-10-02T00:00:00",
+    )
+
+
+@pytest.mark.parametrize("newer_state", ["preparing", "failed"])
+def test_ready_preview_beats_newer_active_preparing_or_failed_record(
+    tmp_path: Path, newer_state: str
+) -> None:
+    """활성 작업이 받치는 'preparing'이나 'failed'가 최신이어도 재생 가능한 완성본이 이긴다.
+
+    같은 선택의 재인코딩은 사람이 보는 화면과 무관하다 — 진행 중·실패한 시도가
+    이미 있는 재생 파일을 가리면 플레이어가 아무것도 못 받는다(실측 증상).
+    """
+    workspace = RawWorkspace.create(tmp_path / "ws", "w")
+    _preview_record(workspace, "ready0", "ready", "2026-10-01T00:00:00", with_file=True)
+    _preview_record(workspace, "later0", newer_state, "2026-10-02T00:00:00", with_file=False)
+    active = (_active_prepare_job(),)
+    preview = visual_review._source_preview_state(workspace, "s1", "a" * 64, active, (0,))
+    assert preview.state == "ready"
+    assert preview.relative_path == visual_review._preview_relative("ready0").as_posix()
+
+
+def test_newest_record_wins_when_no_candidate_is_ready(tmp_path: Path) -> None:
+    """완성본이 하나도 없으면 가장 최근 기록의 상태가 그대로 보인다 — 진행·실패를 숨기지 않는다."""
+    workspace = RawWorkspace.create(tmp_path / "ws", "w")
+    _preview_record(workspace, "fail0", "failed", "2026-10-01T00:00:00", with_file=False)
+    _preview_record(workspace, "prep0", "preparing", "2026-10-02T00:00:00", with_file=False)
+    active = (_active_prepare_job(),)
+    preview = visual_review._source_preview_state(workspace, "s1", "a" * 64, active, (0,))
+    assert preview.state == "preparing"
+    assert preview.relative_path == visual_review._preview_relative("prep0").as_posix()
+
+
+@needs_ffmpeg
+def test_legacy_key_preview_is_aliased_instead_of_reencoded(
+    service: raw_service.RawWorkspaceService,
+    workspace_root: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """지문 없는 옛 키의 완성본이 있으면 정본 키로 link만 하고 인코더를 부르지 않는다."""
+    card = tmp_path / "card"
+    card.mkdir()
+    _voiced_media(card / "발화.mp4", "3")
+    base = _review_ready(service, workspace_root, card, ONE_SECOND_TILE)
+    source = service.visual_review_query(workspace_root, base_plan_id=base).sources[0]
+    legacy_key = visual_review.preview_media_key(source.source_sha256, 0)
+    legacy = workspace_root / visual_review._preview_relative(legacy_key)
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    _voiced_media(legacy, "3")
+    canonical_key = visual_review.preview_media_key(
+        source.source_sha256 + visual_review.ORIGINAL_ONLY_FINGERPRINT, 0
+    )
+    canonical = workspace_root / visual_review._preview_relative(canonical_key)
+    assert canonical_key != legacy_key and not canonical.exists()
+    monkeypatch.setattr(preprocess, "extract_visual_review_preview", _forbidden)
+
+    _, record = _prepared_page(service, workspace_root, base, page=1)
+    assert record.status == "succeeded", record.error
+    assert canonical.is_file() and canonical.samefile(legacy)
+    preview = service.visual_review_query(workspace_root, base_plan_id=base).sources[0]
+    assert preview.state == "ready"
+    assert preview.relative_path == visual_review._preview_relative(canonical_key).as_posix()
+    assert preview.registered_file_id is not None
+
+
+def test_legacy_alias_never_applies_to_non_canonical_fingerprint(tmp_path: Path) -> None:
+    """프록시 등 원본 바이트가 아닌 입력(비정본 지문)에는 옛 키 완성본을 절대 잇지 않는다."""
+    workspace = RawWorkspace.create(tmp_path / "ws", "w")
+    selection = visual_review._SourceSelection(
+        source_id="s1",
+        source_sha256="a" * 64,
+        path=tmp_path / "proxy.mp4",
+        video_stream_index=0,
+        audio_ordinal=0,
+        audio_stream_index=1,
+    )
+    legacy = workspace.root / visual_review._preview_relative(
+        visual_review._legacy_preview_key(selection)
+    )
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    legacy.write_bytes(b"mp4")
+    target = workspace.root / visual_review._preview_relative("canonical0")
+    visual_review._alias_legacy_preview(workspace, selection, "proxy-record-hash", target)
+    assert not target.exists()
+    visual_review._alias_legacy_preview(
+        workspace, selection, visual_review.ORIGINAL_ONLY_FINGERPRINT, target
+    )
+    assert target.is_file() and target.samefile(legacy)

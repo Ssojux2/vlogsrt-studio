@@ -2859,6 +2859,118 @@ def extract_visual_review_preview(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class AnalysisProxyBuild:
+    """분석 프록시 한 번의 실측 — 격자는 만든 파일에서 다시 쟀다(원본과의 비교는 호출자 몫)."""
+
+    path: Path
+    width: int
+    height: int
+    frame_count: int
+    frame_duration: Fraction
+    presentation_origin: Fraction
+
+
+def even_scaled_edge(edge: int, scale: float) -> int:
+    """한 변에 배율을 곱해 짝수로 **내린다** — H.264 4:2:0이 홀수 변을 못 담는다.
+
+    ffmpeg 필터(`trunc(변*배율/2)*2`)와 같은 식이다. 호출자가 만들어질 크기를 미리 알아
+    파일을 열기 전에 기대와 대조할 수 있다.
+    """
+    return max(2, int(edge * scale / 2) * 2)
+
+
+def _analysis_proxy_command(
+    source: Path,
+    staged: Path,
+    stream_index: int,
+    *,
+    scale: float,
+    video_codec: str,
+    preset: str,
+    crf: int,
+    gop: int,
+    pix_fmt: str,
+) -> list[str]:
+    """영상만, 배율만 줄이고 시각은 그대로 — 입력 `-copyts`·패스스루·B프레임 없음이 격자를 지킨다.
+
+    B프레임이 있으면 mp4 먹서가 첫 PTS를 당겨 원점이 어긋난다. `-copyts`가 입력 시각을
+    출력으로 그대로 넘기고, 패스스루는 프레임을 버리거나 복제하지 않으며, 인코더 시간
+    단위를 입력(`demux`)에 맞추지 않으면 원점이 프레임 길이의 배수로 반올림된다.
+    """
+    edge = "max(2,trunc({side}*{scale}/2)*2)"
+    shrink = "scale=w='{w}':h='{h}'".format(
+        w=edge.format(side="iw", scale=repr(scale)), h=edge.format(side="ih", scale=repr(scale))
+    )
+    return [
+        require_ffmpeg(), "-hide_banner", "-nostdin", "-loglevel", "error", "-y",
+        "-copyts", "-i", str(source),
+        "-map", f"0:{stream_index}",
+        "-an", "-sn", "-dn",
+        "-vf", shrink,
+        "-fps_mode", "passthrough", "-enc_time_base", "demux",
+        "-c:v", video_codec, "-preset", preset, "-crf", str(crf),
+        "-g", str(gop), "-bf", "0", "-pix_fmt", pix_fmt,
+        "-movflags", "+faststart", "-f", "mp4", str(staged),
+    ]  # fmt: skip
+
+
+def build_analysis_proxy(
+    source: Path,
+    staging_output: Path,
+    *,
+    scale: float,
+    video_codec: str,
+    preset: str,
+    crf: int,
+    gop: int,
+    pix_fmt: str,
+) -> AnalysisProxyBuild:
+    """원본을 한 번 읽어 저해상도 분석 프록시를 **스테이징에** 만들고 원자 게시한다.
+
+    프레임 한 장마다 4K 스트림을 앞에서부터 디코드하는 비용을 이 한 번으로 바꾼다. 실측값만
+    돌려준다 — 원본과의 대조는 호출자(`media_refs`)가 짝 검증으로 한다. 취소는 `_run`이 듣는다.
+    """
+    _assert_safe_staging(source, staging_output)
+    probe = probe_raw_media(source)
+    staging_output.parent.mkdir(parents=True, exist_ok=True)
+    staged = _reserve_staging_temp(staging_output)
+    try:
+        _run(
+            _analysis_proxy_command(
+                source,
+                staged,
+                probe.video.stream_index,
+                scale=scale,
+                video_codec=video_codec,
+                preset=preset,
+                crf=crf,
+                gop=gop,
+                pix_fmt=pix_fmt,
+            )
+        )
+        measured = _measure_proxy(staged)
+    except BaseException:
+        staged.unlink(missing_ok=True)
+        raise
+    _publish_staged_clip(staged, staging_output)
+    return replace(measured, path=staging_output)
+
+
+def _measure_proxy(staged: Path) -> AnalysisProxyBuild:
+    """스테이징 파일에서 크기·격자를 다시 잰다 — 게시 경로는 호출자가 바꿔 끼운다."""
+    out_probe = probe_raw_media(staged)
+    clock = probe_extraction_clock(staged, probe=out_probe)
+    return AnalysisProxyBuild(
+        path=staged,
+        width=out_probe.video.width,
+        height=out_probe.video.height,
+        frame_count=clock.frame_count,
+        frame_duration=clock.frame_duration,
+        presentation_origin=clock.presentation_origin,
+    )
+
+
 def correspondence_samples(
     path: Path, seconds: Sequence[Fraction], *, audio: bool = False
 ) -> tuple[bytes, ...]:

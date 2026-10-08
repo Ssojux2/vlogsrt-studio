@@ -85,9 +85,9 @@ def cached_revision(service: Any, root: Path, asset_ids: tuple[str, ...]) -> str
                 except (OSError, ValueError):
                     reusable = False
                     break
-                from vlogsrt.project.raw.media_refs import fingerprint
+                from vlogsrt.project.raw.media_refs import ORIGINAL_ONLY_FINGERPRINT, fingerprint
 
-                if document.get("media_fingerprint", "original-only/v1") != fingerprint(
+                if document.get("media_fingerprint", ORIGINAL_ONLY_FINGERPRINT) != fingerprint(
                     workspace, asset_id
                 ):
                     reusable = False

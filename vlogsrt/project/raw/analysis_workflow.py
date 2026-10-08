@@ -442,7 +442,7 @@ def source_input_fingerprint(
     audio: SelectedAudio | None,
     settings: RawUnderstandingSettings,
     workflow: RawWorkflowConfig,
-    media_fingerprint: str = "original-only/v1",
+    media_fingerprint: str = media_refs.ORIGINAL_ONLY_FINGERPRINT,
     transcript_fingerprint: str = "asr-original/v1",
 ) -> str:
     """원본 하나의 분석 입력 지문 — 결과에 영향을 주는 입력만 묶는다.
@@ -823,9 +823,8 @@ def _complete_source_current(
     try:
         document = json.loads((workspace.root / result.document_path).read_text(encoding="utf-8"))
         _require_source_unchanged(workspace.source_media_path(asset), asset)
-        return document.get("media_fingerprint", "original-only/v1") == media_refs.fingerprint(
-            workspace, asset.asset_id
-        ) and document.get(
+        stored = document.get("media_fingerprint", media_refs.ORIGINAL_ONLY_FINGERPRINT)
+        return stored == media_refs.fingerprint(workspace, asset.asset_id) and document.get(
             "transcript_fingerprint", "asr-original/v1"
         ) == source_transcript.fingerprint(workspace, asset.asset_id)
     except (OSError, ValueError, RawWorkspaceError):
@@ -1058,6 +1057,7 @@ def _analyze_source(
         settings=settings,
         sampler=media_refs.frame_sampler(workspace, asset),
     )
+    frame_source = media_refs.frames_fingerprint(workspace, asset.asset_id)
     return _finish_source(
         context,
         workspace,
@@ -1078,6 +1078,7 @@ def _analyze_source(
         frames=frames,
         input_fp=input_fp,
         source_dir=source_dir,
+        frame_source=frame_source,
     )
 
 
@@ -1163,6 +1164,8 @@ def _asr_phase_source(
         sampler=media_refs.frame_sampler(workspace, asset),
     )
     semantic_fp = _semantic_fingerprint(asset, grid, audio, plan, settings, workflow)
+    # 2단계가 장면 컷을 같은 출처에서 다시 재도록 남긴다 — 출처가 바뀌면 실측 지문이 어긋난다.
+    frame_source = media_refs.frames_fingerprint(workspace, asset.asset_id)
     _write_json_atomic(
         artifact_path,
         {
@@ -1195,6 +1198,7 @@ def _asr_phase_source(
             "utterances": stage1.utterances_json(utterances),
             "windows": stage1.window_plan_json(plan),
             "frames": stage1.frame_sampling_json(frames),
+            "frame_source": frame_source,
             "semantic_fingerprint": semantic_fp,
             "window_count": len(plan.windows),
             "image_count": len(frames.frames),
@@ -1302,7 +1306,10 @@ def _semantic_phase_source(
     edited = source_transcript.spoken(workspace, asset.asset_id, common_spoken)
     offset = timeline.audio_start or Fraction(0)
     utterances = tuple(replace(u, start=u.start - offset, end=u.end - offset) for u in edited)
-    plan = _scene_plan(workspace, asset, plan_common_windows(timeline, utterances, settings))
+    frame_source = _stage1_frame_source(workspace, asset, artifact)
+    plan = _scene_plan(
+        workspace, asset, plan_common_windows(timeline, utterances, settings), frame_source
+    )
     spoken = utterances_in_common_clock(timeline, utterances)
     frames = _frames_from_artifact(artifact, source_dir / "frames")
     semantic_fp = _semantic_fingerprint(asset, grid, audio, plan, settings, workflow)
@@ -1333,6 +1340,7 @@ def _semantic_phase_source(
         frames=frames,
         input_fp=input_fp,
         source_dir=source_dir,
+        frame_source=frame_source,
     )
 
 
@@ -1357,6 +1365,7 @@ def _finish_source(
     frames: FrameSamplingResult,
     input_fp: str,
     source_dir: Path,
+    frame_source: str,
 ) -> AnalysisSourceResult:
     """판정→조정→문서 기록까지의 공통 꼬리 — 재생 전체·2단계가 같은 길을 쓴다."""
     evidence_windows = luna.window_evidence(plan, frames, spoken)
@@ -1498,6 +1507,8 @@ def _finish_source(
     document["recommendation_boundaries"] = _recommendation_boundaries(plan, spoken)
     document["transcript_fingerprint"] = source_transcript.fingerprint(workspace, asset.asset_id)
     document["media_fingerprint"] = media_refs.fingerprint(workspace, asset.asset_id)
+    # 감사용 출처 기록일 뿐이다 — 재사용·견적이 이 값을 읽으면 프록시 이전 분석이 다시 청구된다.
+    document["frame_source"] = frame_source
     document_path = source_dir / ANALYSIS_DOCUMENT_NAME
     stage1.write_stage1_document(document_path, document)
     record_path = source_dir / ANALYSIS_RECORD_NAME
@@ -2137,22 +2148,48 @@ __all__ = [
 ]
 
 
-def _scene_plan(workspace: RawWorkspace, asset: SourceAsset, plan: WindowPlan) -> WindowPlan:
+def _stage1_frame_source(
+    workspace: RawWorkspace, asset: SourceAsset, artifact: Mapping[str, object]
+) -> str:
+    """1단계가 디코드한 출처 — 기록이 없으면 분석 프록시 이전 1단계라 원본(또는 FCP 프록시)이다."""
+    return str(artifact.get("frame_source") or media_refs.fingerprint(workspace, asset.asset_id))
+
+
+def _scene_cache(workspace: RawWorkspace, asset: SourceAsset, frame_source: str) -> Path:
+    digest = hashlib.sha256(
+        (str(asset.content_sha256) + frame_source + "scene/v1").encode()
+    ).hexdigest()
+    return workspace.root / "cache" / (digest + "-scenes.json")
+
+
+def _scene_times(
+    workspace: RawWorkspace, asset: SourceAsset, frame_source: str | None
+) -> tuple[Fraction, ...]:
+    """디코드 출처마다 따로 캐시한 장면 컷 — 기록된 출처가 있으면 그 출처를 따른다.
+
+    2단계는 1단계가 잰 출처를 넘긴다. 캐시가 있으면 프록시를 만들러 가지도 않는다.
+    """
+    if frame_source is not None and _scene_cache(workspace, asset, frame_source).is_file():
+        cache = _scene_cache(workspace, asset, frame_source)
+    else:
+        decode_source, actual = media_refs.frames_decode_source(workspace, asset, frame_source)
+        cache = _scene_cache(workspace, asset, actual)
+        if not cache.is_file():
+            times = preprocess.verified_scene_times(decode_source)
+            _write_json_atomic(cache, {"times": [str(t) for t in times]})
+            return times
+    return tuple(Fraction(t) for t in json.loads(cache.read_text(encoding="utf-8"))["times"])
+
+
+def _scene_plan(
+    workspace: RawWorkspace,
+    asset: SourceAsset,
+    plan: WindowPlan,
+    frame_source: str | None = None,
+) -> WindowPlan:
     """Cache decoded cuts and attach only measured boundaries, retaining request image ceilings."""
     assert plan.video is not None
-    digest = hashlib.sha256(
-        (
-            str(asset.content_sha256)
-            + media_refs.fingerprint(workspace, asset.asset_id)
-            + "scene/v1"
-        ).encode()
-    ).hexdigest()
-    cache = workspace.root / "cache" / (digest + "-scenes.json")
-    if cache.is_file():
-        times = tuple(Fraction(t) for t in json.loads(cache.read_text(encoding="utf-8"))["times"])
-    else:
-        times = preprocess.verified_scene_times(media_refs.resolve(workspace, asset, "frames"))
-        _write_json_atomic(cache, {"times": [str(t) for t in times]})
+    times = _scene_times(workspace, asset, frame_source)
     candidates = list(plan.candidates)
     windows = []
     for window in plan.windows:

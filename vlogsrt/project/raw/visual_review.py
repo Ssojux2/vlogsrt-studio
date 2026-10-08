@@ -50,6 +50,7 @@ from pathlib import Path
 
 from vlogsrt import preprocess
 from vlogsrt.project.raw.jobs import JobContext
+from vlogsrt.project.raw.media_refs import ORIGINAL_ONLY_FINGERPRINT
 from vlogsrt.project.raw.models import (
     ACTIVE_JOB_STATUSES,
     VISUAL_PREPARE_JOB_KIND,
@@ -596,21 +597,42 @@ def _thumb_state(
     return "missing", registration
 
 
-def _latest_source_record(
+def _record_mp4_exists(workspace: RawWorkspace, key: str, record: dict[str, object]) -> bool:
+    """기록이 가리키는 재생 파일이 지금 있는가 — 직접 등록(프록시)이면 등록 ID로 본다."""
+    direct_file_id = record.get("direct_file_id")
+    if isinstance(direct_file_id, str):
+        try:
+            workspace.resolve_media_file(direct_file_id)
+        except RawWorkspaceError:
+            return False
+        return True
+    return (workspace.root / _preview_relative(key)).is_file()
+
+
+def _derive_record_state(
+    workspace: RawWorkspace, key: str, record: dict[str, object], active: Sequence[JobRecord]
+) -> str:
+    """기록 하나의 상태 — 선언한 상태를 파일·활성 작업이 뒷받침할 때만 믿는다."""
+    declared = _record_str(record, "state")
+    if declared == "ready" and _record_mp4_exists(workspace, key, record):
+        return "ready"
+    if declared == "failed":
+        return "failed"
+    if declared == "preparing" and any(job.kind == VISUAL_PREPARE_JOB_KIND for job in active):
+        return "preparing"
+    return "stale"
+
+
+def _source_candidates(
     workspace: RawWorkspace,
     source_sha256: str,
-    selected_audio: tuple[int | None, ...] | None = None,
-) -> tuple[str, dict[str, object]] | None:
-    """이 원본의 원본 전체 미리보기 기록 — (키, 기록) 또는 None.
-
-    `selected_audio`가 None이면(선택을 안 준 질의) 가장 최근(`built_at`) 기록이
-    지금의 선택이다. 짝이 들어오면 **그 서수와 정확히 같은** 기록만 본다 — 방금
-    다른 서수를 만들었다 해도 그것을 바꿔치기하지 않는다(선택은 캐시 짝을 묶는다).
-    """
+    selected_audio: tuple[int | None, ...] | None,
+) -> list[tuple[str, dict[str, object]]]:
+    """이 원본(과 소리 선택)의 미리보기 기록 전부 — 최근(`built_at`) 순."""
     directory = workspace.root / VISUAL_PREVIEW_ROOT
     if not directory.is_dir():
-        return None
-    best: tuple[str, dict[str, object]] | None = None
+        return []
+    candidates: list[tuple[str, dict[str, object]]] = []
     for record_path in sorted(directory.glob("*.json")):
         record = _read_record(record_path)
         if record is None or record.get("source_sha256") != source_sha256:
@@ -625,11 +647,34 @@ def _latest_source_record(
             and _record_int(record, "audio_ordinal") not in selected_audio
         ):
             continue
-        if best is None or (_record_str(record, "built_at") or "") > (
-            _record_str(best[1], "built_at") or ""
-        ):
-            best = (key, record)
-    return best
+        candidates.append((key, record))
+    candidates.sort(key=lambda item: _record_str(item[1], "built_at") or "", reverse=True)
+    return candidates
+
+
+def _latest_source_record(
+    workspace: RawWorkspace,
+    source_sha256: str,
+    selected_audio: tuple[int | None, ...] | None = None,
+    active: Sequence[JobRecord] = (),
+) -> tuple[str, dict[str, object]] | None:
+    """이 원본의 원본 전체 미리보기 기록 — (키, 기록) 또는 None.
+
+    `selected_audio`가 None이면(선택을 안 준 질의) 가장 최근(`built_at`) 기록이
+    지금의 선택이다. 짝이 들어오면 **그 서수와 정확히 같은** 기록만 본다 — 방금
+    다른 서수를 만들었다 해도 그것을 바꿔치기하지 않는다(선택은 캐시 짝을 묶는다).
+    같은 후보 안에서는 **재생 가능한 완성본이 언제나 이긴다** — 다른 키로 다시
+    시작한 인코딩(진행 중·실패·끊김)이 이미 멀쩡한 미리보기를 가리면 플레이어가
+    아무것도 못 받는다(실측 증상). 완성본이 하나도 없을 때만 가장 최근 기록의
+    상태(preparing·failed·stale)가 그대로 보인다.
+    """
+    candidates = _source_candidates(workspace, source_sha256, selected_audio)
+    if not candidates:
+        return None
+    return next(
+        (c for c in candidates if _derive_record_state(workspace, *c, active) == "ready"),
+        candidates[0],
+    )
 
 
 def _source_preview_state(
@@ -646,7 +691,7 @@ def _source_preview_state(
     가장 최근 기록(V1 기본 질의)을 본다.
     """
     audio_tracks = _read_inventory(workspace, source_sha256)
-    found = _latest_source_record(workspace, source_sha256, selected_audio)
+    found = _latest_source_record(workspace, source_sha256, selected_audio, active)
     if found is None:
         if selected_audio is not None:
             state = "missing"  # 이 선택은 한 번도 만들지 않았다 — 다른 선택의 흔적과 무관
@@ -676,23 +721,9 @@ def _source_preview_state(
     key, record = found
     relative = _preview_relative(key)
     registration = _registration_for(workspace, relative)
-    mp4_exists = (workspace.root / relative).is_file()
+    mp4_exists = _record_mp4_exists(workspace, key, record)
     direct_file_id = record.get("direct_file_id")
-    if isinstance(direct_file_id, str):
-        try:
-            workspace.resolve_media_file(direct_file_id)
-            mp4_exists = True
-        except RawWorkspaceError:
-            mp4_exists = False
-    declared = _record_str(record, "state")
-    if declared == "ready" and mp4_exists:
-        state = "ready"
-    elif declared == "failed":
-        state = "failed"
-    elif declared == "preparing" and any(job.kind == VISUAL_PREPARE_JOB_KIND for job in active):
-        state = "preparing"
-    else:
-        state = "stale"
+    state = _derive_record_state(workspace, key, record, active)
     remuxed = record.get("remuxed")
     # 매핑 원점은 증거(video_origin_seconds)에서 다시 잓는다 — F1까지의 기록이
     # browser_origin_seconds를 소리 원점 뺄셈으로 적어 늦은 트랙·침묵 선택에서
@@ -1240,6 +1271,39 @@ def _publish(staged: Path, target: Path) -> None:
         staged.unlink(missing_ok=True)
 
 
+def _legacy_preview_key(selection: _SourceSelection) -> str:
+    """지문이 키에 들어가기 전(69fc88c)의 원본 전체 미리보기 키 — 원본 해시·서수만.
+
+    그 시절 키는 `preview_media_key(source_sha256, audio_ordinal)`이었고, 입력은 언제나
+    자산의 해시 검증된 바이트 그 자체였다. 조리법(`VISUAL_PREVIEW_RECIPE`)은 그대로이니
+    그 키의 완성본은 지금의 정본 지문(`original-only/v1`) 키와 **같은 입력의 같은 결과**다.
+    """
+    return preview_media_key(selection.source_sha256, selection.audio_ordinal)
+
+
+def _alias_legacy_preview(
+    workspace: RawWorkspace, selection: _SourceSelection, media_fingerprint: str, target: Path
+) -> None:
+    """옛 키의 완성본을 정본 키 이름으로 잇는다 — 입력이 원본 바이트 그대로일 때만.
+
+    라이브러리 가져오기가 모든 클립에 미디어 연결 기록을 남기며 키가 바뀌어, 이미
+    만든 4K 미리보기가 있는데도 다시 인코딩을 시작했다(실측 7건). 지문이 정본이면
+    입력이 자산의 바이트 그 자체라 옛 완성본이 곧 정본의 결과다 — 프록시(비정본
+    지문)는 다른 입력이니 절대 잇지 않는다. 게시는 기존 게시와 같은 link 한 번이고,
+    경합에서 지면(이미 있다) 이긴 쪽 파일이 곧 결과다.
+    """
+    if media_fingerprint != ORIGINAL_ONLY_FINGERPRINT:
+        return
+    legacy = workspace.root / _preview_relative(_legacy_preview_key(selection))
+    if not legacy.is_file():
+        return
+    target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.link(legacy, target)
+    except FileExistsError:
+        return  # 동시 준비가 같은 키를 먼저 게시했다 — 그 파일이 곧 결과다
+
+
 def _ensure_full_source_preview(
     workspace: RawWorkspace, selection: _SourceSelection, failures: list[str]
 ) -> None:
@@ -1278,6 +1342,8 @@ def _ensure_full_source_preview(
         payload.update(direct_file_id=direct, media_fingerprint=media_fingerprint)
         _write_record(record_path, payload)
         return
+    if not target.is_file():
+        _alias_legacy_preview(workspace, selection, media_fingerprint, target)
     if target.is_file():
         if record is None or record.get("state") != "ready":
             _write_record(

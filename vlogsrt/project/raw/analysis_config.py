@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from fractions import Fraction
 
 UNDERSTANDING_SCHEMA_VERSION = "raw-understanding/v1"
 """첫 단계 기록(analysis_transcript.json)의 namespace(계획 §13.1·§15.1)."""
@@ -100,6 +101,55 @@ def understanding_settings_problems(settings: RawUnderstandingSettings) -> list[
         )
     return problems
 
+
+ANALYSIS_PROXY_VERSION = "analysis-proxy/v1"
+"""분석 프록시 조리법의 버전 — 인코더 인자를 바꾸면 올려서 낡은 프록시·프레임 캐시를 버린다."""
+
+
+@dataclass(frozen=True)
+class AnalysisProxyRecipe:
+    """프록시 없는 원본을 분석할 때 한 번 만드는 저해상도 프록시의 조리법(2026-10-08 사용자 지시).
+
+    4K HEVC에서 프레임 한 장을 뽑으려면 `select=eq(n,…)`가 스트림 앞에서부터 디코드한다 —
+    그 비용을 한 번의 변환으로 바꾼다. 프레임 격자(개수·프레임 길이·원점)는 그대로 두고
+    크기만 `scale` 배로 줄인다. Luna로 가는 그림은 여전히 `image_long_edge` 이하다 —
+    이 설정은 디코드 속도의 것이지 비용의 것이 아니다. `gop`은 짧을수록 한 장 추출이 싸다.
+    외부 근거 없는 조정 대상(`cut_*`처럼)이다.
+    """
+
+    version: str = ANALYSIS_PROXY_VERSION
+    scale: float = 0.25
+    video_codec: str = "libx264"
+    preset: str = "veryfast"
+    crf: int = 28
+    gop: int = 12
+    pix_fmt: str = "yuv420p"
+
+    def tag(self) -> str:
+        """프레임 증거가 이 프록시에서 왔음을 지문에 싣는 이름 — 조리법 전체가 담긴다."""
+        return (
+            f"{self.version}/scale={self.scale:g}/{self.video_codec}"
+            f"/{self.preset}/crf{self.crf}/g{self.gop}/{self.pix_fmt}"
+        )
+
+
+ANALYSIS_PROXY = AnalysisProxyRecipe()
+"""지금 쓰는 분석 프록시 조리법 — 모든 호출 지점이 이 하나를 읽는다."""
+
+PAIR_VIDEO_SAMPLE_SIZE = 1024
+"""대응 프레임 표본 한 장의 바이트 수 — `correspondence_samples`의 32×32 회색 한 장."""
+
+PAIR_VIDEO_MAX_ERROR = 10
+"""원본·프록시 대응 표본의 평균 절대 차 상한(0–255 회색). 넘으면 같은 프레임이 아니다."""
+
+PAIR_SHIFT_MARGIN = 0.1
+"""이웃 프레임이 제자리보다 이만큼 더 가까우면 시간이 밀린 짝으로 본다."""
+
+PAIR_AUDIO_MIN_CORRELATION = 0.98
+"""원본·프록시 대응 소리 표본의 최소 상관 — 못 미치면 같은 소리가 아니다."""
+
+PAIR_AUDIO_TAIL_SECONDS = Fraction(1, 4)
+"""소리 표본을 뽑는 마지막 지점이 끝에서 떨어지는 거리 — 표본이 파일 밖으로 나가지 않게."""
 
 PCM_FULL_SCALE = 32768
 """16비트 PCM의 풀스케일 — dBFS를 표본값으로 바꾸는 기준(분석 PCM은 s16le)."""
