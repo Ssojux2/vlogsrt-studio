@@ -1,13 +1,11 @@
 # Agent working policy
 
-## User-directed delegation
+## User-directed execution
 
-- Delegate work with substantial implementation volume, repetitive edits, or bulk analysis to `claude-glm`.
-- Assess difficulty on every conversation turn. Easy status, checkpoint, compact-management, and mechanical work uses GPT-6 Luna `max` when supported; the user's explicit max preference overrides generic low-effort guidance. Use GPT-6 Sol `high` for complex plans, debugging, and independent acceptance. Keep substantial product/test implementation on `claude-glm`. Use GPT-6 Astra `high`/`xhigh` only for hard, exceptional root-cause work after evidence-based attempts fail; normal routing is Luna/Sol. Verify the actual runtime model and effort; delegation changes the worker model only, not the root model. Record the selection reason and any fallback.
-- Claude-GLM is the product-code and implementation-test writer. Use the configured wrapper `claude-glm --model 'glm-5.3[1m]' --effort <task-appropriate-effort> --permission-mode auto`; do not silently substitute plain Claude or another model. Choose supported Claude-GLM effort at a task boundary according to implementation difficulty. Keep substantial implementation on Claude-GLM and independent acceptance with Sol. Do not interrupt an active task just to change model or effort.
-- Large read-only investigations or document drafts may also be assigned to Claude-GLM. Sol verifies the evidence and owns the final plan and acceptance decision. Do not delegate away the independent tests required by the user.
-- Break substantial changes into bounded tasks. Use Orca's actual Run/Task/Dispatch lifecycle. Keep one product-code writer at a time unless independence and file ownership are explicit.
-- Use High Agency's outcome, bounded scope, evidence, and targeted verification principles. Have Claude-GLM read the applicable skill before a fresh task; verify actual use instead of treating message delivery as acknowledgment.
+- Latest user instruction (2026-10-07): GPT-6 Astra performs all planning, product code, implementation tests, debugging, and acceptance verification. This supersedes the historical Claude-GLM / Sol / Luna split.
+- Use GPT-6 Astra `high` or `xhigh` according to difficulty. Verify requested runtime model and effort where exposed; distinguish requested settings from served-model attestation. Do not silently substitute another model. Delegation changes only the worker model, not the root model.
+- Work as one Astra writer, in bounded tasks, and verify implementation in a separate acceptance pass. No additional model workers are required. Existing unrelated sessions remain untouched.
+- Use High Agency's outcome, bounded scope, evidence, and targeted verification principles. Read the applicable skill before a fresh task and record actual use.
 
 ## Checkpoints and reporting
 
