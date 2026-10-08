@@ -69,7 +69,7 @@ NOTICE_INTERRUPTED = "interrupted"
 NOTICE_TEXT = {
     NOTICE_ACCEPTED: "**승인 접수** · 분석 범위를 확인하고 있습니다. "
     "끝나면 영상별 분석이 이어집니다.",
-    NOTICE_DONE: "승인한 영상들을 백그라운드에서 순서대로 분석합니다. "
+    NOTICE_DONE: "승인한 영상들을 백그라운드에서 여러 개씩 동시에 분석합니다. "
     "다른 영상을 살펴봐도 계속 진행됩니다.",
     NOTICE_PREPARING: "분석 범위를 준비하고 있습니다. 표시된 범위를 확인한 뒤 분석을 시작하세요.",
     NOTICE_CHANGED: "영상이나 자막이 바뀌었습니다. 아무것도 시작하지 않았습니다. "
@@ -83,6 +83,9 @@ NOTICE_TEXT = {
     "이전 실행에서 끝나지 못한 같은 승인이 기록에 남아 있습니다. "
     "앱을 다시 시작하면 중단된 승인을 복구한 뒤 다시 승인할 수 있습니다.",
 }
+LIBRARY_APPROVE_LABEL = "전체 영상 분석 승인"
+# 승인된 분석이 입장 차례를 다시 확인하는 간격 — 취소도 이 간격 안에 알아챈다.
+ANALYSIS_ADMISSION_POLL_SECONDS = 0.05
 QUICK_APPROVED_TEXT = (
     "선택한 영상의 Luna 분석을 시작했습니다. 추천 구간이 타임라인 위에 표시됩니다."
 )
@@ -269,6 +272,7 @@ class RawWorkspaceUi:
         finder_opener: Callable[[Path], None] | None = None,
         caption_providers: Callable[[], tuple[object, object]] | None = None,
         path_chooser: ui_chooser.PathChooser | None = None,
+        parallel_analysis_limit: int | None = None,
     ) -> None:
         self.port = port
         self.raw = raw_service.RawWorkspaceService()
@@ -326,8 +330,19 @@ class RawWorkspaceUi:
         self._quick: dict[str, Any] = {}
         self._quick_tasks: dict[str, dict[str, Any]] = {}
         self._retired_quick_tokens: set[str] = set()
-        self._analysis_slot = threading.Semaphore(1)
+        # 승인된 분석의 입장 — 대기열 머리부터, 동시에 도는 수가 한도 안일 때만 들어간다(D49).
+        # 대기열은 일괄 승인이 띄운 순서(전역 원본 순서)라 늦게 승인한 영상이 앞지르지 못한다.
         self._analysis_queue: list[str] = []
+        self._analysis_active: set[str] = set()
+        # 0을 기본값으로 바꿔 삼키지 않는다 — 잘못된 한도는 검사에서 바로 거부된다.
+        self._analysis_limit = (
+            raw_service.ANALYSIS_CONCURRENCY.parallel_analysis_limit
+            if parallel_analysis_limit is None
+            else parallel_analysis_limit
+        )
+        raw_service.validate_analysis_concurrency(
+            raw_service.RawAnalysisConcurrency(self._analysis_limit)
+        )
         self._library_quotes: dict[Path, Any] = {}
         self._library_cached_ids: dict[Path, set[str]] = {}
         # 승인 클릭의 답은 1초 타이머가 상태 칸을 다시 쓰므로 상태 쪽에 남겨야 보인다.
@@ -1054,11 +1069,13 @@ class RawWorkspaceUi:
         return (*values, *self.capcut_fcp_panel_view())
 
     def _cancel_quick(self) -> None:
-        previous = self._quick
+        self._cancel_task(self._quick)
+
+    def _cancel_task(self, task: dict) -> None:
         for key in ("job_id", "preview_job_id", "review_job_id"):
-            if previous.get(key) and previous.get("root"):
+            if task.get(key) and task.get("root"):
                 with contextlib.suppress(raw_service.RawWorkspaceError):
-                    self.raw.cancel_job(previous["root"], previous[key])
+                    self.raw.cancel_job(task["root"], task[key])
 
     def _load_quick_tasks(self, root: Path) -> None:
         stored = self.raw.load_selection_states(root)
@@ -1242,7 +1259,8 @@ class RawWorkspaceUi:
                     with self._review_publish_lock:
                         if self._quick.get("token") == token and self._snapshot_root() == root:
                             self.raw.publish_selection_review(root, cached, context)
-                    self._library_cached_ids.setdefault(root, set()).update(ids)
+                    with self._selection_lock:
+                        self._library_cached_ids.setdefault(root, set()).update(ids)
                     self._quick_update(token, stage="추천 구간 준비 완료")
                     return
                 quote = approved_quote or self.raw.selection_quote(root, ids)
@@ -1263,33 +1281,51 @@ class RawWorkspaceUi:
                     if token in self._analysis_queue:
                         self._analysis_queue.remove(token)
 
-        handle = self.raw.submit_job(root, "selection_analysis", token, prepare)
+        self._submit_selection(root, token, prepare)
+
+    def _submit_selection(self, root: Path, token: str, prepare: Callable[[Any], None]) -> None:
+        try:
+            handle = self.raw.submit_job(root, "selection_analysis", token, prepare)
+        except Exception:
+            # 본문이 돌지 않으면 그 finally도 돌지 않는다 — 줄 머리에 남은 토큰이 뒤의 모든
+            # 영상의 입장을 영원히 막는다. 줄에서 빼고 오류는 그대로 올린다.
+            with self._selection_lock:
+                if token in self._analysis_queue:
+                    self._analysis_queue.remove(token)
+            raise
         self._quick_update(token, job_id=handle.job_id)
+
+    def _admit_analysis(self, token: str) -> bool:
+        # 머리 확인·한도 확인·이동을 한 잠금 안에서 해야 두 작업이 같은 빈자리에 들어가지 못한다.
+        with self._selection_lock:
+            queue = self._analysis_queue
+            if not queue or queue[0] != token:
+                return False
+            if len(self._analysis_active) >= self._analysis_limit:
+                return False
+            queue.pop(0)
+            self._analysis_active.add(token)
+            return True
 
     def _run_quick(self, root: Path, token: str, quote: Any, context: Any) -> None:
         import time
 
         self._quick_update(token, stage="분석 대기")
         with self._selection_lock:
-            if token not in self._analysis_queue:
+            if token not in self._analysis_queue and token not in self._analysis_active:
                 self._analysis_queue.append(token)
-        acquired = False
         try:
-            while not acquired:
+            # 취소·은퇴한 머리는 `_quick_assert_current`가 던지고 finally가 대기열에서 뺀다 —
+            # 뒤의 작업이 막힌 머리 뒤에 영원히 서 있지 않는다.
+            while not self._admit_analysis(token):
                 self._quick_assert_current(root, token, context)
-                with self._selection_lock:
-                    first = bool(self._analysis_queue) and self._analysis_queue[0] == token
-                if first:
-                    acquired = self._analysis_slot.acquire(blocking=False)
-                if not acquired:
-                    time.sleep(0.05)
+                time.sleep(ANALYSIS_ADMISSION_POLL_SECONDS)
             self._execute_quick(root, token, quote, context)
         finally:
             with self._selection_lock:
                 if token in self._analysis_queue:
                     self._analysis_queue.remove(token)
-            if acquired:
-                self._analysis_slot.release()
+                self._analysis_active.discard(token)
 
     def _execute_quick(self, root: Path, token: str, quote: Any, context: Any) -> None:
         self._quick_assert_current(root, token, context)
@@ -1307,7 +1343,9 @@ class RawWorkspaceUi:
         self._quick_assert_current(root, token, context)
         stage, error = self.raw.selection_completion(root, revision)
         if stage == "추천 구간 준비 완료":
-            self._library_cached_ids.setdefault(root, set()).update(quote.asset_ids)
+            # 동시에 끝나는 영상들이 같은 집합을 고친다 — 잠금 없이 고치면 한쪽이 사라질 수 있다.
+            with self._selection_lock:
+                self._library_cached_ids.setdefault(root, set()).update(quote.asset_ids)
         self._quick_update(token, stage=stage, revision=revision, error=error)
 
     def _library_ids(self, root: Path) -> tuple[str, ...]:
@@ -1348,6 +1386,7 @@ class RawWorkspaceUi:
         return (
             f"분석 대상 {len(pending)}개 · 저장 결과 {len(cached)}개 재사용 · "
             f"전사 최대 {asr}회 + 영상 분석 최대 {luna}회. 승인하면 두 단계가 이어집니다."
+            f" 최대 {self._analysis_limit}개를 동시에 분석합니다."
         )
 
     def library_analysis_button(self) -> Any:
@@ -1360,7 +1399,7 @@ class RawWorkspaceUi:
         complete = quote is not None and all(
             tasks.get(a, {}).get("stage") == "추천 구간 준비 완료" for a in quote.asset_ids
         )
-        label = "분석 진행 중" if active else "분석 완료" if complete else "자막·영상 분석 승인"
+        label = "분석 진행 중" if active else "분석 완료" if complete else LIBRARY_APPROVE_LABEL
         return gr.Button(
             value=label, visible=True, interactive=bool(quote) and not active and not complete
         )
@@ -1516,13 +1555,17 @@ class RawWorkspaceUi:
             self._library_quotes[root] = checked
             self._set_approval_notice(root, NOTICE_RECHECK)
             return
-        watch = self._fan_out_library(root, ids, children)
+        watch = self._fan_out_library(root, ids, children, context)
         self._library_quotes[root] = checked
         self._set_approval_notice(root, NOTICE_DONE, watch=watch)
 
-    def _fan_out_library(self, root: Path, ids: tuple[str, ...], children: list) -> frozenset[str]:
+    def _fan_out_library(
+        self, root: Path, ids: tuple[str, ...], children: list, context: Any
+    ) -> frozenset[str]:
         selected = self._quick.get("view_source_id") or (self._quick.get("asset_ids") or ids)[0]
         for child in children:
+            # 전체 분석 취소가 띄우는 도중에 와도 그다음 영상부터는 띄우지 않는다.
+            context.check_cancel()
             self._start_quick(
                 root, (), asset_ids=child.asset_ids, approved_quote=child, activate=False
             )
@@ -1797,6 +1840,22 @@ class RawWorkspaceUi:
                     result[source_id] = task
         return result
 
+    def _library_progress(
+        self, root: Path, tasks: dict[str, dict]
+    ) -> tuple[int, int, int, int] | None:
+        """일괄 분석의 (동시 분석 중, 대기, 완료, 전체) — 돌거나 기다리는 영상이 없으면 None."""
+        with self._selection_lock:
+            active, queue = set(self._analysis_active), list(self._analysis_queue)
+            roots = {t: self._quick_tasks.get(t, {}).get("root") for t in (*active, *queue)}
+        running = sum(1 for token in active if roots[token] == root)
+        waiting = sum(1 for token in queue if roots[token] == root)
+        if not running + waiting:
+            return None
+        quote = self._library_quotes.get(root)
+        ids = tuple(quote.asset_ids) if quote is not None else tuple(tasks)
+        done = sum(1 for a in ids if tasks.get(a, {}).get("stage") == "추천 구간 준비 완료")
+        return running, waiting, done, len(ids)
+
     def capcut_status_view(self, signature: str | None) -> Any:
         """Lightweight progress never waits behind a full workbench/media redraw."""
         if not signature or signature != self._signature_for(self._snapshot_root()):
@@ -1810,11 +1869,19 @@ class RawWorkspaceUi:
         if export and export.status in ("queued", "running"):
             return "**Final Cut 출력 준비 중** · 선택한 컷을 원본 기준으로 저장합니다."
         message = self._quick_status()
+        # 1초마다 도는 줄이다 — 작업 기록은 한 번만 읽어 진행 수와 다른 영상 수가 함께 쓴다.
+        tasks = self._task_views(root)
+        progress = self._library_progress(root, tasks)
+        if progress is not None:
+            running, waiting, done, total = progress
+            message = (
+                f"**{running}개 동시 분석 중 · 대기 {waiting} · 완료 {done}/{total}**\n\n{message}"
+            )
         if export and export.status == "succeeded" and self._capcut_xml.get(str(signature)):
             message += "\n\n**출력 완료** · 전달 메뉴에서 Final Cut으로 열 수 있습니다."
         others = {
             task["token"]
-            for task in self._task_views(root).values()
+            for task in tasks.values()
             if task.get("token") != self._quick.get("token")
             and task.get("stage") in ACTIVE_ANALYSIS_STAGES
         }
@@ -1888,6 +1955,30 @@ class RawWorkspaceUi:
                 self._quick["token"], token=uuid.uuid4().hex, stage="취소됨", error=None
             )
         return "취소를 요청했습니다. 완료된 결과는 보존됩니다."
+
+    def capcut_cancel_all_view(self, signature: str | None) -> str:
+        """승인 확인과 돌거나 기다리는 모든 영상 분석을 멈춘다 — 끝난 결과는 그대로 남는다."""
+        root = self._require_current_selection(signature)
+        # 확인 중인 승인부터 멈춰야 그 뒤에 새 영상 분석이 더 띄워지지 않는다.
+        if self._approval_active(root):
+            self.raw.cancel_job(root, self._approval_jobs[root])
+        tasks = {task["token"]: task for task in self._task_views(root).values()}
+        for token, task in tasks.items():
+            if self._task_running(root, task):
+                self._cancel_task(task)
+                self._quick_update(token, token=uuid.uuid4().hex, stage="취소됨", error=None)
+        return "전체 분석 취소를 요청했습니다. 완료된 결과는 보존됩니다."
+
+    def _task_running(self, root: Path, task: dict) -> bool:
+        if task.get("stage") in BUSY_QUICK_STAGES:
+            return True
+        # 승인된 실행도 `승인 대기`를 잠깐 지나 `분석 대기`로 간다 — 그 순간도 놓치지 않는다.
+        job_id = task.get("job_id")
+        return (
+            task.get("stage") == "승인 대기"
+            and job_id is not None
+            and self.raw.get_job(root, job_id).status in raw_service.ACTIVE_JOB_STATUSES
+        )
 
     def capcut_retry_view(self, signature: str | None) -> str:
         root = self._require_current_selection(signature)
@@ -1993,8 +2084,9 @@ class RawWorkspaceUi:
                 self._quick_library_button = gr.Button("라이브러리 불러오기")
                 cancel = gr.Button("선택 분석 취소", scale=0)
                 automatic = gr.Button("자동 정리", visible=False)
+                cancel_all = gr.Button("전체 분석 취소", scale=0)
                 quick_approve = gr.Button(
-                    "자막·영상 분석 승인", visible=True, interactive=False, variant="primary"
+                    LIBRARY_APPROVE_LABEL, visible=True, interactive=False, variant="primary"
                 )
                 handoff = gr.Button("선택한 컷 Final Cut으로 출력")
                 # 출력 거부 문구가 이 단추를 누르라고 말한다 — 접힌 서랍에 두지 않는다.
@@ -2109,6 +2201,9 @@ class RawWorkspaceUi:
             refresh.click(self.capcut_refresh_view, self._signature_state, outputs)
             preview.click(self.capcut_preview_view, self._signature_state, self._capcut_status)
             cancel.click(self.capcut_cancel_view, self._signature_state, self._capcut_status)
+            cancel_all.click(
+                self.capcut_cancel_all_view, self._signature_state, self._capcut_status
+            )
             retry.click(self.capcut_retry_view, self._signature_state, self._capcut_status)
             open_fcp.click(self.capcut_open_view, self._signature_state, self._capcut_status)
             open_folder.click(

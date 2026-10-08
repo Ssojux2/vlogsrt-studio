@@ -62,7 +62,9 @@ def wait_until(check, timeout=45):
     raise AssertionError("condition did not settle")
 
 
-def make_server(tmp_path: Path, monkeypatch, source: Path, client=None):
+def make_server(
+    tmp_path: Path, monkeypatch, source: Path, client=None, parallel_analysis_limit=None
+):
     monkeypatch.setattr("vlogsrt.env.is_offline", lambda: False)
     sender = _CountingSender([{"start": 0.5, "end": 1.5, "text": "합성 영상입니다."}])
     client = client or SuitabilityClient()
@@ -76,6 +78,7 @@ def make_server(tmp_path: Path, monkeypatch, source: Path, client=None):
             asr_approvals=lambda *a: {},
             luna_approvals=lambda *a: {},
         ),
+        parallel_analysis_limit=parallel_analysis_limit,
     )
     server.create_workspace_view("선택 자동 분석", str(tmp_path / "workspace"))
     server._selection_auto_approval = lambda quote: True

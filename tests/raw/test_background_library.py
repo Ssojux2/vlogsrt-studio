@@ -5,16 +5,25 @@ from tests.raw.test_review_workspace import _wait_terminal
 from tests.raw.test_selection_analysis import SuitabilityClient, make_server, wait_until
 from ui.workspace_service import RawWorkspaceUi
 
+EXTRA_FIRST_SECONDS = 4
 
-def setup_library(tmp_path, monkeypatch):
+
+def setup_library(tmp_path, monkeypatch, extra=(), parallel_analysis_limit=None):
     a, b = tmp_path / "a.mov", tmp_path / "b.mov"
     _make_media(a, audio=True, seconds="32")
     _make_media(b, audio=True, seconds="3")
+    others = tuple(tmp_path / name for name in extra)
+    # 길이를 서로 다르게 — 같은 합성 영상이면 의미 분석 캐시가 영상 사이에 재사용돼 호출 수가
+    # 실행 순서(직렬·동시)에 따라 달라진다. 모두 한 전사 조각·한 Luna 창 안이다.
+    for offset, other in enumerate(others):
+        _make_media(other, audio=True, seconds=str(EXTRA_FIRST_SECONDS + offset))
     client = SuitabilityClient(pause_second=True)
-    ui, sender, client = make_server(tmp_path, monkeypatch, a, client)
+    ui, sender, client = make_server(
+        tmp_path, monkeypatch, a, client, parallel_analysis_limit=parallel_analysis_limit
+    )
     ui._selection_auto_approval = None
     root = ui.workspace_root()
-    for source in (a, b):
+    for source in (a, b, *others):
         h = ui.raw.import_selected_video(root, source)
         assert _wait_terminal(ui.raw, root, h.job_id).status == "succeeded"
     ui.raw.ensure_source_order(root)
@@ -29,7 +38,8 @@ def setup_library(tmp_path, monkeypatch):
 def test_one_library_approval_queues_sources_and_navigation_preserves_results(
     tmp_path, monkeypatch
 ):
-    ui, sender, client, root, ids = setup_library(tmp_path, monkeypatch)
+    # 직렬 의미(한 번에 하나)를 재는 시험 — 동시 한도를 1로 고정한다(D49).
+    ui, sender, client, root, ids = setup_library(tmp_path, monkeypatch, parallel_analysis_limit=1)
     assert len(ui._library_quotes[root].asset_ids) == 2
     assert not sender.calls and not client.calls
     ui.library_analysis_view(ui.current_signature())
@@ -72,7 +82,7 @@ def test_one_library_approval_queues_sources_and_navigation_preserves_results(
 
 
 def test_cancel_queued_selected_source_keeps_other_source_running(tmp_path, monkeypatch):
-    ui, sender, client, root, ids = setup_library(tmp_path, monkeypatch)
+    ui, sender, client, root, ids = setup_library(tmp_path, monkeypatch, parallel_analysis_limit=1)
     ui.library_analysis_view(ui.current_signature())
     assert client.second_entered.wait(20)
     a_task = ui._task_for(root, (ids["a.mov"],))

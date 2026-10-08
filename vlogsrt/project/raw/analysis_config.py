@@ -196,3 +196,30 @@ def validate_auto_cleanup_settings(settings: RawAutoCleanupSettings) -> None:
             problems.append(f"무음 피크는 0 dBFS 이하여야 한다: {settings.silence_peak_dbfs!r}")
     if problems:
         raise ValueError("자동 정리 설정이 계약을 어긴다: " + "; ".join(problems))
+
+
+@dataclass(frozen=True)
+class RawAnalysisConcurrency:
+    """라이브러리 일괄 분석이 한 번에 돌리는 영상 수 — 외부 근거 없는 조정 대상(D49).
+
+    1단계(분석 프록시·전사·프레임)는 CPU를 쓰고 실측 영상당 149–298초, 2단계(Luna)는 네트워크를
+    기다리며 50–173초다. 셋이면 한 영상의 Luna 대기 동안 다른 영상의 1단계가 돌아 두 단계가
+    겹치고, 4K 디코드 메모리와 분당 요청 한도에 여유가 남는다. 1이면 예전 직렬과 바이트까지 같다.
+    `RawWorkflowConfig`에 두지 않는다 — 거기 들어가면 저장된 견적의 workflow·digest가 바뀐다.
+    동시에 도는 수만 바꾸므로 영상마다의 승인·호출 수(비용)는 이 값과 무관하다.
+    """
+
+    parallel_analysis_limit: int = 3
+
+
+ANALYSIS_CONCURRENCY = RawAnalysisConcurrency()
+"""지금 쓰는 동시 분석 한도 — 작업대는 주입이 없으면 이 하나를 읽는다."""
+
+
+def validate_analysis_concurrency(settings: RawAnalysisConcurrency) -> None:
+    """값역 검사 — bool은 int 서브클래스지만 개수가 될 수 없다."""
+    value = settings.parallel_analysis_limit
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"동시 분석 한도는 정수여야 한다: {value!r}")
+    if value < 1:
+        raise ValueError(f"동시 분석 한도는 1 이상이어야 한다: {value!r}")

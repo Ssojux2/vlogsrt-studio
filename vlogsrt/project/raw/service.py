@@ -31,7 +31,10 @@ from vlogsrt.project.raw.analysis_approval import (
     asr_settings_fingerprint,
 )
 from vlogsrt.project.raw.analysis_config import (
+    ANALYSIS_CONCURRENCY,
+    RawAnalysisConcurrency,
     RawUnderstandingSettings,
+    validate_analysis_concurrency,
     validate_understanding_settings,
 )
 from vlogsrt.project.raw.analysis_store import ANALYSIS_ROOT, AnalysisStore
@@ -198,6 +201,7 @@ from vlogsrt.project.raw.workspace import (
 __all__ = [
     # UI는 이 모듈만 가져갈 수 있다(정확 경로 예외) — 계약 오류도 여기서 다시 낸다.
     "ACTIVE_JOB_STATUSES",
+    "ANALYSIS_CONCURRENCY",
     "ANALYSIS_JOB_KIND",
     "ANALYSIS_MODES",
     "ANALYSIS_PHASES",
@@ -253,6 +257,7 @@ __all__ = [
     "PlannedInterval",
     "PlanNotFoundError",
     "RangeNotSatisfiableError",
+    "RawAnalysisConcurrency",
     "RawWorkspaceError",
     "RawWorkspaceService",
     "ResolvedMedia",
@@ -278,6 +283,7 @@ __all__ = [
     "WorkspaceModuleUnavailableError",
     "WorkspaceStatus",
     "asr_estimate_digest",
+    "validate_analysis_concurrency",
     "caption_ms",
     "caption_run_identity",
     "CaptionPreviewMedia",

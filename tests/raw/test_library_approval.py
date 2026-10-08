@@ -174,7 +174,7 @@ def test_binding_change_after_measurement_starts_nothing(tmp_path, monkeypatch):
 def test_started_notice_stays_over_progress_until_analysis_begins(tmp_path, monkeypatch):
     ui, sender, client, root, ids = setup_library(tmp_path, monkeypatch)
     client.resume.set()
-    assert ui._analysis_slot.acquire(timeout=1)
+    limit, ui._analysis_limit = ui._analysis_limit, 0
     signature = ui.current_signature()
     try:
         ui.library_analysis_view(signature)
@@ -183,7 +183,7 @@ def test_started_notice_stays_over_progress_until_analysis_begins(tmp_path, monk
             assert STARTED in ui.capcut_status_view(signature)
             time.sleep(TICK_SECONDS)
     finally:
-        ui._analysis_slot.release()
+        ui._analysis_limit = limit
     wait_until(lambda: len(sender.calls) == 2 and len(client.calls) == 4)
     assert STARTED not in ui.capcut_status_view(signature)
 
@@ -191,7 +191,7 @@ def test_started_notice_stays_over_progress_until_analysis_begins(tmp_path, monk
 def test_single_video_approval_reply_survives_the_status_timer(tmp_path, monkeypatch):
     ui, sender, client, root, ids = setup_library(tmp_path, monkeypatch)
     client.resume.set()
-    assert ui._analysis_slot.acquire(timeout=1)
+    limit, ui._analysis_limit = ui._analysis_limit, 0
     signature = ui.current_signature()
     try:
         reply = ui.quick_approve_view(signature, None)
@@ -200,7 +200,7 @@ def test_single_video_approval_reply_survives_the_status_timer(tmp_path, monkeyp
             assert QUICK_STARTED in ui.capcut_status_view(signature)
             time.sleep(TICK_SECONDS)
     finally:
-        ui._analysis_slot.release()
+        ui._analysis_limit = limit
     wait_until(lambda: ui._quick.get("stage") == "추천 구간 준비 완료")
     assert QUICK_STARTED not in ui.capcut_status_view(signature)
 
