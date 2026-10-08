@@ -84,6 +84,11 @@ NOTICE_TEXT = {
     "앱을 다시 시작하면 중단된 승인을 복구한 뒤 다시 승인할 수 있습니다.",
 }
 LIBRARY_APPROVE_LABEL = "전체 영상 분석 승인"
+
+RETIER_LABEL = "등급 다시 계산(무료)"
+TIER_PENDING_NOTE = "등급 계산 중(무료)"
+"""저장된 증거로 3단 등급만 다시 매기는 단추 — 유료 호출이 없다는 것을 이름에 싣는다(D51)."""
+
 # 화면 맞춤(D50) — 머리글은 한 줄, 정리 탭은 CSS가 간격을 좁힐 범위 이름을 단다.
 APP_HEADER_ID = "app-header"
 REVIEW_TAB_ID = "review-tab"
@@ -972,6 +977,9 @@ class RawWorkspaceUi:
     # ── 화면 2 — 분석 · 조각 검토 ──────────────────────────────
 
     def _capcut_result(self, root: Path, message: str) -> tuple[str, str, str]:
+        migrated = self._maybe_migrate_tiers(root)
+        if migrated:
+            message += "\n\n" + migrated
         self._refresh_review_panel_state(root)
         pending = self._unreviewed_auto_count(root)
         if pending:
@@ -980,6 +988,27 @@ class RawWorkspaceUi:
                 " 없습니다. 제외를 유지하려면 '자동 제외 확인'을 누르세요."
             )
         return message, *self.visual_workbench_render(root)
+
+    def _maybe_migrate_tiers(self, root: Path) -> str | None:
+        """앱 열기·새로고침 때 옛 등급판 머리를 옮긴다(Q8) — 증거가 있을 때만, 무료.
+
+        검토 머리가 아직 없으면 옮길 것도 없다(정상 상태라 안내하지 않는다).
+        """
+        try:
+            if not self.raw.tier_migration_needed(root):
+                return None
+            return self.raw.refresh_tiers(root)
+        except (raw_service.RawWorkspaceError, raw_service.ReviewError):
+            return None
+
+    def capcut_retier_view(self, signature: str | None) -> tuple[str, str, str]:
+        """「등급 다시 계산(무료)」 — 저장된 증거로 등급만 다시 매긴다(유료 호출 0회, D51)."""
+        root = self._require_current_selection(signature)
+        try:
+            message = self.raw.refresh_tiers(root)
+        except (raw_service.RawWorkspaceError, raw_service.ReviewError) as error:
+            raise gr.Error(str(error)) from error
+        return self._capcut_result(root, message)
 
     def _unreviewed_auto_count(self, root: Path) -> int:
         """사람이 아직 보지 않은 자동 제외 수 — 검토 머리가 없으면 셀 것이 없다."""
@@ -2100,6 +2129,7 @@ class RawWorkspaceUi:
                 handoff = gr.Button("선택한 컷 Final Cut으로 출력")
                 # 출력 거부 문구가 이 단추를 누르라고 말한다 — 접힌 서랍에 두지 않는다.
                 confirm_auto = gr.Button("자동 제외 확인")
+                retier = gr.Button(RETIER_LABEL, scale=0)
             # 범위 요약과 진행 상태를 한 줄에 — 무대가 쓸 세로 공간을 아낀다(D50).
             with gr.Row():
                 library_summary = gr.Markdown(
@@ -2203,6 +2233,7 @@ class RawWorkspaceUi:
             )
             handoff.click(self.capcut_handoff_view, self._signature_state, self._capcut_status)
             confirm_auto.click(self.capcut_confirm_auto_view, self._signature_state, outputs)
+            retier.click(self.capcut_retier_view, self._signature_state, outputs)
             restore.click(
                 lambda sig: self.capcut_edit_view(sig, "restore"), self._signature_state, outputs
             )
@@ -2748,6 +2779,7 @@ class RawWorkspaceUi:
         except raw_service.RawWorkspaceError as error:
             raise gr.Error(str(error)) from error
         self._remember(Path(status.workspace_root))
+        self._maybe_migrate_tiers(Path(status.workspace_root))
         return self.workspace_view_values()
 
     def create_workspace_view(self, name: str, path_text: str) -> WorkspaceView:
@@ -3142,6 +3174,10 @@ class RawWorkspaceUi:
                 "dur": str(end - start),
                 "sel": seg_card.selection,
                 "rec": seg_card.recommendation,
+                "tier": self._card_tier(tags_by_segment.get(seg_card.segment_id, ())),
+                "autoPending": seg_card.selection == "excluded"
+                and raw_service.AUTO_EXCLUDED_UNREVIEWED_TAG
+                in tags_by_segment.get(seg_card.segment_id, ()),
                 "speech": seg_card.speech_status,
                 "tags": list(tags_by_segment.get(seg_card.segment_id, ())),
                 "note": seg_card.notes,
@@ -3181,20 +3217,22 @@ class RawWorkspaceUi:
             )
             selected_card = _card_values(selected, selected_order)
         task_views = self._task_views(root)
+        red_unmaterialized = 0
+        tier_pending: set[str] = set()
         for sid, source in sources_model.items():
             task = task_views.get(sid, {})
-            if task.get("revision"):
-                rows = self.raw.selection_suitability(root, task["revision"], (sid,)).get(sid, [])
-                source["suggestions"] = [
-                    {
-                        "start": str(Fraction(row["start"]["num"], row["start"]["den"])),
-                        "end": str(Fraction(row["end"]["num"], row["end"]["den"])),
-                        "rec": row["recommendation"],
-                        "reason": row["reason"],
-                    }
-                    for row in rows
-                ]
             source["analysisState"] = task.get("stage", "분석 대기")
+            if task.get("revision"):
+                rows = self.raw.selection_suitability(
+                    root, task["revision"], (sid,), pending=tier_pending
+                ).get(sid, [])
+                source["suggestions"] = [self._suggestion_row(row) for row in rows]
+                red_unmaterialized += self._unmaterialized_red_count(source)
+        if tier_pending:
+            # 첫 측정은 수십 초다 — 그리기는 기다리지 않고 작업에 맡긴다(끝나면 틱이 다시 그린다).
+            failure = self.raw.start_tier_reports(root)
+            for sid in tier_pending:
+                sources_model[sid]["analysisState"] = failure or TIER_PENDING_NOTE
         for sid, source in sources_model.items():
             transcript = self.raw.source_transcript(root, sid)
             if transcript:
@@ -3272,6 +3310,13 @@ class RawWorkspaceUi:
             "staleSources": [list(pair) for pair in overview.stale_sources],
             "needsPlan": needs_plan,
             "packageDir": self._latest_package_dir(root),
+            "redPending": sum(
+                1
+                for seg in ordered or ()
+                if seg.selection == "excluded"
+                and raw_service.AUTO_EXCLUDED_UNREVIEWED_TAG in seg.visual_tags
+            ),
+            "redUnmaterialized": red_unmaterialized,
         }
         shell_src = None
         if selected is not None:
@@ -3282,6 +3327,58 @@ class RawWorkspaceUi:
             "선택 조각의 원본 전체 미리보기 — 시간 렠·재생 머리는 작업대가 채운다.",
         )
         return shell, ui_facade.visual_workbench_html(model)
+
+    @staticmethod
+    def _suggestion_row(row: Mapping[str, Any]) -> dict[str, object]:
+        """등급 구간 하나의 화면 값 — 자막·영상 판정을 따로 싣는다(W-11, D51)."""
+        audio = row.get("audio") or {}
+        video = row.get("video") or {}
+        density = audio.get("density") or {"num": 0, "den": 1}
+        return {
+            "start": str(Fraction(row["start"]["num"], row["start"]["den"])),
+            "end": str(Fraction(row["end"]["num"], row["end"]["den"])),
+            "tier": row.get("tier", "yellow"),
+            "hold": bool(row.get("hold")),
+            "rec": row["recommendation"],
+            "rule": row.get("rule", ""),
+            "reason": row["reason"],
+            "redReason": row.get("red_reason"),
+            "audio": {
+                "status": audio.get("status", ""),
+                "label": audio.get("label", ""),
+                "reason": audio.get("reason", ""),
+                "density": str(Fraction(density["num"], density["den"])),
+            },
+            "video": {
+                "status": video.get("status", ""),
+                "label": video.get("label", ""),
+                "reason": video.get("reason", ""),
+                "evidence": list(video.get("evidence", [])),
+            },
+        }
+
+    @staticmethod
+    def _unmaterialized_red_count(source: Mapping[str, Any]) -> int:
+        """조각 경계로 아직 떨어지지 않은 제외 제안 수 — 프레임 안쪽으로 붙인 끝을 본다."""
+        rail = source.get("rail")
+        if not isinstance(rail, Mapping):
+            return 0
+        edges = {Fraction(it[key]) for it in rail["intervals"] for key in ("start", "end")}
+        ranges = [
+            (Fraction(row["start"]), Fraction(row["end"]))
+            for row in source.get("suggestions", [])
+            if row["tier"] == "red"
+        ]
+        return raw_service.unmaterialized_red(ranges, edges, Fraction(rail["frameSec"]))
+
+    @staticmethod
+    def _card_tier(tags: Sequence[str]) -> str:
+        """카드의 등급 — 검토 조각의 `등급:` 태그에서 읽는다(없으면 빈 값)."""
+        names = {label: tier for tier, label in raw_service.TIER_LABELS.items()}
+        for tag in tags:
+            if tag.startswith(raw_service.TIER_TAG_PREFIX):
+                return names.get(tag.removeprefix(raw_service.TIER_TAG_PREFIX), "")
+        return ""
 
     def _visual_query(
         self, root: Path, page: int, selected_segment_id: str | None, selection_filter: str = "all"

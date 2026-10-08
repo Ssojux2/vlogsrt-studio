@@ -1661,3 +1661,41 @@ def test_edit_layer_tolerates_a_missing_module(
 def test_the_real_edit_module_passes_the_removal_layer_check() -> None:
     """진짜 edit.py는 이 검사를 통과한다 — 허용목록이 실제 코드와 함께 산다."""
     assert check_invariants.check_edit_layer_ignores_audio() == []
+
+
+# ── D51: 3단 등급은 순수 계층이다 ─────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "import subprocess",
+        "import openai",
+        "from vlogsrt.project.raw import service",
+        "from vlogsrt.project.raw.service import RawWorkspaceService",
+        "from vlogsrt.project.raw.review_workspace import ReviewWorkspaceFacade",
+        "from vlogsrt.project.raw import understanding_luna",
+        "from vlogsrt import preprocess",
+        "BODY = Path('x').read_text()",
+        "with open('x') as handle:\n    pass",
+    ],
+)
+def test_tiering_is_pure(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, statement: str) -> None:
+    clean = (
+        "from fractions import Fraction\n"
+        "from vlogsrt.project.raw.analysis_config import TIER_SETTINGS\n"
+        "from vlogsrt.project.raw.suitability import rational\n"
+    )
+    target = "vlogsrt/project/raw/tiering.py"
+    _fake_source_tree(monkeypatch, tmp_path, {target: clean})
+    assert check_invariants.check_tiering_stays_pure() == []
+    (tmp_path / target).write_text(clean + statement + "\n", encoding="utf-8")
+    assert check_invariants.check_tiering_stays_pure()
+    (tmp_path / target).unlink()
+    assert check_invariants.check_tiering_stays_pure() == [
+        "vlogsrt/project/raw/tiering.py: 3단 등급 계층이 사라졌다 (D51)"
+    ]
+
+
+def test_real_tiering_module_passes_the_purity_check() -> None:
+    assert check_invariants.check_tiering_stays_pure() == []

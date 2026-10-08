@@ -68,6 +68,7 @@ from vlogsrt.project.raw.segment_review import (
     StaleRevisionError,
     boundary_edit,
     chronological,
+    is_unreviewed_auto_exclusion,
     merge_edit,
     selection_edit,
     split_edit,
@@ -806,7 +807,8 @@ def query_overview(
         or (
             selection_filter == "review"
             and (
-                segment.recommendation == "review_required"
+                is_unreviewed_auto_exclusion(segment)
+                or segment.recommendation == "review_required"
                 or segment.speech_status == "analysis_failed"
             )
         )

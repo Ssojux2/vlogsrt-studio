@@ -526,7 +526,7 @@ checkpoints.push({ case: 'wire-render',
   playhead: env.rail.innerHTML.includes('vl-playhead'),
   panel: env.panel.innerHTML.includes('메모') &&
     env.panel.innerHTML.includes('01-landscape.mp4'),
-  panelHuman: env.panel.innerHTML.includes('빈 실행(미확인)') &&
+  panelHuman: env.panel.innerHTML.includes('발화 없음(미측정)') &&
     env.panel.innerHTML.includes('사용 권고'),
   panelTags: env.panel.innerHTML.includes('분석 근거') &&
     env.panel.innerHTML.includes('실내'),
@@ -3511,6 +3511,185 @@ def test_global_shortcuts_execute_on_visible_video(tmp_path: Path) -> None:
     assert report["noVideo"] is True
     assert report["playFailed"] == "재생할 수 없다: NotAllowedError"
     assert report["hiddenTouched"] == 0
+
+
+def test_legend_names_three_tiers_with_pattern_cue() -> None:
+    """범례는 3단 등급과 색 아닌 표지(빗금·점선)를 함께 말한다(D51)."""
+    shell = ui_facade.visual_player_shell_html(None, "안내")
+    legend = shell.split('class="vl-legend"', 1)[1].split("</span></span>", 1)[0]
+    for word in ("■ 추천", "■ 보통", "▨ 제외 제안", "□ 판정 보류"):
+        assert word in legend, word
+    assert "vl-good" not in legend and "vl-review" not in legend
+    css = ui_facade.WORKBENCH_CSS
+    assert ".vl-good" in css and ".vl-review" in css  # 옛 표기는 남되 범례에서는 빠진다
+    assert ".vl-recommendation.green{background:#1f6f46;border-top:2px solid #6fe3a5}" in css
+    assert ".vl-recommendation.yellow{background:#6f5f1a;border-top:2px solid #ffd760}" in css
+    assert "repeating-linear-gradient(135deg,#7a2d2d 0 6px,#561c1c 6px 12px)" in css
+    assert ".vl-recommendation.yellow.hold{border-top-style:dotted}" in css
+    assert "top:var(--vl-rec-top); height:var(--vl-rec-h)" in css  # W-10 렠 좌표 그대로
+
+
+_TIER_SCRIPT = r"""
+// ── 3단 등급(D51) — 렠 막대·패널 표지·검토 대기 필터 ─────────────────────
+const quiet = { status: 'quiet_silence', label: '무음(측정)',
+  reason: '발화 없음 · 무음 -64.0 dBFS ≤ -35 dBFS', density: '0' };
+function tierModel(filter) {
+  const m = visualModel();
+  m.filter = filter;
+  m.redUnmaterialized = 1;
+  m.redPending = 1;
+  m.sources.srcA.suggestions = [
+    { start: '0', end: '1', tier: 'green', hold: false, rec: 'recommended', rule: 'both-good',
+      reason: 'r0', redReason: null,
+      audio: { status: 'speech_dense', label: '발화 많음', reason: '발화가 구간의 80%를 덮는다',
+        density: '4/5' },
+      video: { status: 'good', label: '좋음', reason: '계곡이 선명하다', evidence: [] } },
+    { start: '1', end: '2', tier: 'yellow', hold: true, rec: 'review_required',
+      rule: 'video-unknown', reason: 'r1', redReason: null,
+      audio: { status: 'speech_sparse', label: '발화 적음', reason: '발화가 구간의 10%뿐이다',
+        density: '1/10' },
+      video: { status: 'no_frames', label: '프레임 없음',
+        reason: '프레임 증거 없음 · 재분석 전까지 판정 보류', evidence: [] } },
+    { start: '21/10', end: '29/10', tier: 'red', hold: false, rec: 'normal', rule: 'A-quiet',
+      reason: 'r2', redReason: 'tier_silence', audio: quiet,
+      video: { status: 'usable', label: '사용 가능', reason: '구도가 조금 기울었다',
+        evidence: [] } },
+  ];
+  m.cards[0].tier = 'green';
+  m.cards[1].tier = 'yellow';
+  Object.assign(m.cards[2], { tier: 'red', autoPending: true,
+    tags: ['자동 제외 · 미검토', '등급: 제외 제안', '자막: 발화 없음 · 무음', '영상: 구도'],
+    note: '자동 제외: {"reason": "tier_silence"}' });
+  return m;
+}
+// 새 화면 — 앞선 사례가 남긴 각주 문구가 없을 때 경계 안내가 각주에 선다.
+if (windowScope.__vlVisualWorkbenchState) { windowScope.__vlVisualWorkbenchState.lastMsg = ''; }
+const envTier = visualEnv({
+  vl_apply: () => ({ ok: true, echoEpoch: 'epoch-1', message: '저장했다' }),
+}, tierModel('all'));
+const footnoteAtOpen = envTier.registry['vl-footnote'].textContent;
+const railHtml = envTier.rail.innerHTML;
+const bars = railHtml.split('<button').filter((b) => b.includes('vl-recommendation'));
+envTier.rail._listeners.click.slice().forEach((fn) => fn({ target: {
+  getAttribute: (k) => (k === 'data-vl-recommendation' ? '2' : null) } }));
+const panelHtml = envTier.panel.innerHTML;
+envTier.click({ getAttribute: (k) => (k === 'data-vl-act' ? 'red-confirm' : null) });
+await new Promise((resolve) => setTimeout(resolve, 0));
+const confirmCall = envTier.serverCalls[0];
+envTier.click({ getAttribute: (k) => (k === 'data-vl-act' ? 'red-revert' : null) });
+await new Promise((resolve) => setTimeout(resolve, 0));
+const revertCall = envTier.serverCalls[1];
+const envReview = visualEnv({}, tierModel('review'));
+// 빨강 조각이 다른 페이지에 있으면 선택이 바뀌지 않는다 — 단추도 호출도 없어야 한다.
+const offPage = tierModel('all');
+offPage.cards = offPage.cards.filter((c) => c.id !== 'segA3');
+const envOff = visualEnv({
+  vl_apply: () => ({ ok: true, echoEpoch: 'epoch-1', message: '저장했다' }),
+}, offPage);
+envOff.rail._listeners.click.slice().forEach((fn) => fn({ target: {
+  getAttribute: (k) => (k === 'data-vl-recommendation' ? '2' : null) } }));
+const offPanel = envOff.panel.innerHTML;
+envOff.click({ getAttribute: (k) => (k === 'data-vl-act' ? 'red-confirm' : null) });
+envOff.click({ getAttribute: (k) => (k === 'data-vl-act' ? 'red-revert' : null) });
+await new Promise((resolve) => setTimeout(resolve, 0));
+checkpoints.push({ case: 'tiers',
+  bars,
+  panel: panelHtml,
+  selectedAfterMarker: envTier.panel.innerHTML.includes('2~3초'),
+  confirm: confirmCall && { name: confirmCall.name, op: confirmCall.payload.op,
+    selection: confirmCall.payload.selection, segmentId: confirmCall.payload.segmentId },
+  revert: revertCall && { selection: revertCall.payload.selection,
+    segmentId: revertCall.payload.segmentId },
+  thumbsAll: envTier.thumbs.innerHTML,
+  thumbsReview: envReview.thumbs.innerHTML,
+  footnote: footnoteAtOpen,
+  offPage: { panel: offPanel, calls: envOff.serverCalls.length } });
+"""
+
+
+def _run_tier_harness(tmp_path: Path) -> dict[str, Any]:
+    harness = tmp_path / "tiers.js"
+    harness.write_text(
+        _NODE_HARNESS.replace(
+            "process.stdout.write(JSON.stringify(checkpoints));",
+            _TIER_SCRIPT + "\nprocess.stdout.write(JSON.stringify(checkpoints));",
+        ),
+        encoding="utf-8",
+    )
+    payload = tmp_path / "payload.json"
+    payload.write_text(
+        json.dumps(
+            {"visual": ui_facade.VISUAL_BOOTSTRAP_JS, "caption": ui_facade.CAPTION_BOOTSTRAP_JS}
+        ),
+        encoding="utf-8",
+    )
+    completed = subprocess.run(
+        ["node", str(harness), str(payload)], capture_output=True, text=True, timeout=20
+    )
+    assert completed.returncode == 0, completed.stderr[-2500:]
+    return next(row for row in json.loads(completed.stdout) if row.get("case") == "tiers")
+
+
+@needs_node
+def test_rail_renders_tier_classes_glyphs_and_aria_labels(tmp_path: Path) -> None:
+    report = _run_tier_harness(tmp_path)
+    green, hold, red = report["bars"]
+    assert 'class="vl-recommendation recommended green"' in green
+    assert 'data-vl-tier="green"' in green and ">★ 추천</button>" in green
+    assert 'aria-label="추천 0초~1초 · 자막: 발화가 구간의 80%를 덮는다' in green
+    assert 'class="vl-recommendation review_required yellow hold"' in hold
+    assert ">? 보류</button>" in hold and 'aria-label="판정 보류 ' in hold
+    assert 'class="vl-recommendation normal red"' in red and 'data-vl-tier="red"' in red
+    assert ">✕ 제외 제안</button>" in red and 'aria-label="제외 제안 21/10초~29/10초' in red
+    assert (
+        'title="자막: 발화 없음 · 무음 -64.0 dBFS ≤ -35 dBFS · 영상: 구도가 조금 기울었다"' in red
+    )
+    assert "--vl-rec" not in red  # 세로 좌표는 CSS 변수(W-10) 몫이다 — 실행본은 left·width만
+
+
+@needs_node
+def test_panel_shows_subtitle_and_video_reasons_for_marker(tmp_path: Path) -> None:
+    report = _run_tier_harness(tmp_path)
+    panel = report["panel"]
+    assert '<div class="vl-marker-reason red"><strong>제외 제안</strong>' in panel
+    assert "자막 · 무음(측정): 발화 없음 · 무음 -64.0 dBFS ≤ -35 dBFS" in panel
+    assert "영상 · 사용 가능: 구도가 조금 기울었다" in panel
+    assert "규칙 A-quiet" in panel
+    assert 'data-vl-act="red-confirm">제외 유지(확인)</button>' in panel
+    assert 'data-vl-act="red-revert">사용으로 되돌리기</button>' in panel
+    # 빨강 끝은 프레임 안쪽으로 붙어 있다 — 가운데(2.5초)로 찾은 조각이 확인 대상이다.
+    assert report["confirm"] == {
+        "name": "vl_apply",
+        "op": "selection",
+        "selection": "excluded",
+        "segmentId": "segA3",
+    }
+    assert report["revert"] == {"selection": "included", "segmentId": "segA3"}
+    assert "상태 제외 · 등급 제외 제안 · 자막 발화 없음 · 무음 · 영상 구도" in panel
+    assert "제외 제안 1개" in panel
+    assert report["footnote"].startswith("제외 제안 1개가 현재 조각 경계와 맞지 않습니다")
+
+
+@needs_node
+def test_red_buttons_never_target_an_off_page_selection(tmp_path: Path) -> None:
+    """빨강 조각이 이 페이지에 없으면 옛 선택을 겨냥하는 확인 단추를 내지 않는다(D35)."""
+    off = _run_tier_harness(tmp_path)["offPage"]
+    assert "자막 · 무음(측정)" in off["panel"]  # 판정 설명은 그대로 보인다
+    assert "red-confirm" not in off["panel"] and "red-revert" not in off["panel"]
+    assert off["calls"] == 0
+
+
+@needs_node
+def test_review_filter_includes_pending_red_cards(tmp_path: Path) -> None:
+    report = _run_tier_harness(tmp_path)
+    everything, review = report["thumbsAll"], report["thumbsReview"]
+    assert ">검토 대기</button>" in everything and "확인 필요</button>" not in everything
+    assert 'vl-badge-green" data-vl-tier="green">추천</span>' in everything
+    assert 'data-vl-tier="yellow">보통</span>' in everything
+    assert 'vl-badge-red" data-vl-tier="red">제외 제안</span>' in everything
+    assert 'data-vl-card="segA3"' in review  # 미검토 자동 제외
+    assert 'data-vl-card="segA1"' not in review  # 추천·사용 조각은 대기가 아니다
+    assert "발화 없음(미측정)" in everything and "빈 실행" not in everything
 
 
 @needs_ffmpeg

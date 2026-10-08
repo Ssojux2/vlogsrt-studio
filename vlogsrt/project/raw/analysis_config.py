@@ -203,6 +203,92 @@ def validate_auto_cleanup_settings(settings: RawAutoCleanupSettings) -> None:
 
 
 @dataclass(frozen=True)
+class RawTierSettings:
+    """3단 등급의 조정값 — 외부 근거 없는 조정 대상(D51). 분석 지문에 넣지 않는다.
+
+    `RawUnderstandingSettings`·`RawWorkflowConfig`에 두면 Luna 요청 sha·리비전 지문·승인
+    digest가 바뀌어 저장된 판정 183창을 다시 사게 된다. 등급은 저장된 증거 위의 결정적
+    재계산이므로 이 값은 등급 보고서(`tier_report.json`)에만 실린다.
+
+    `black_luma_max`·`blur_min`은 실측 보정값이다(D51): 저장 프레임 415장의 YAVG 최소 36.5,
+    blurdetect 3.62–6.47이 전부 Luna 추천·사용 가능 창이었다. 흐림은 결함 표본이 없어
+    가를 수 없으므로 `blur_min = 0`(끔)이다.
+    """
+
+    tier_version: str = "raw-tier/v1"
+    silence_min_seconds: float = 5.0
+    silence_rms_dbfs: float = -35.0
+    speech_handle_seconds: float = 0.3
+    min_span_seconds: float = 1.0
+    speech_density_green: float = 0.35
+    black_luma_max: float = 20.0
+    black_frame_fraction: float = 0.75
+    blur_min: float = 0.0
+    blur_frame_fraction: float = 0.75
+
+
+TIER_SETTINGS = RawTierSettings()
+"""지금 쓰는 등급 조정값 — 등급 계산은 주입이 없으면 이 하나를 읽는다."""
+
+LUMA_FULL_SCALE = 255.0
+"""8비트 루마의 최댓값 — 검은 화면 기준(YAVG)의 값역 상한."""
+
+
+def validate_tier_settings(settings: RawTierSettings) -> None:
+    """값역 검사 — 어긋나면 ValueError로 전부 보고한다. NaN은 비교를 무력화하므로 먼저 본다."""
+    problems = tier_settings_problems(settings)
+    if problems:
+        raise ValueError("등급 설정이 계약을 어긴다: " + "; ".join(problems))
+
+
+def tier_settings_problems(settings: RawTierSettings) -> list[str]:
+    numbers = {
+        "무음 길이": settings.silence_min_seconds,
+        "무음 RMS": settings.silence_rms_dbfs,
+        "발화 여유": settings.speech_handle_seconds,
+        "최소 구간": settings.min_span_seconds,
+        "발화 밀도": settings.speech_density_green,
+        "검은 화면 루마": settings.black_luma_max,
+        "검은 화면 비율": settings.black_frame_fraction,
+        "흐림 기준": settings.blur_min,
+        "흐림 비율": settings.blur_frame_fraction,
+    }
+    problems = [
+        f"{name}은 유한한 실수여야 한다: {value!r}"
+        for name, value in numbers.items()
+        if isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+    ]
+    if not isinstance(settings.tier_version, str) or not settings.tier_version.strip():
+        problems.append(f"등급판 이름이 비었다: {settings.tier_version!r}")
+    return problems or _tier_range_problems(settings)
+
+
+def _tier_range_problems(settings: RawTierSettings) -> list[str]:
+    problems: list[str] = []
+    if not 0 < settings.min_span_seconds <= settings.silence_min_seconds:
+        problems.append("0 < 최소 구간 ≤ 무음 길이여야 한다")
+    if not 0 <= 2 * settings.speech_handle_seconds < settings.silence_min_seconds:
+        problems.append("발화 여유 양쪽이 무음 길이를 다 먹는다 — 무음 구간이 남지 않는다")
+    if not -100 <= settings.silence_rms_dbfs <= 0:
+        problems.append(f"무음 RMS는 -100–0 dBFS여야 한다: {settings.silence_rms_dbfs!r}")
+    if not 0 < settings.speech_density_green <= 1:
+        problems.append(f"발화 밀도는 (0, 1]이어야 한다: {settings.speech_density_green!r}")
+    for name, value in (
+        ("검은 화면 비율", settings.black_frame_fraction),
+        ("흐림 비율", settings.blur_frame_fraction),
+    ):
+        if not 0 < value <= 1:
+            problems.append(f"{name}은 (0, 1]이어야 한다: {value!r}")
+    if not 0 <= settings.black_luma_max <= LUMA_FULL_SCALE:
+        problems.append(f"검은 화면 루마는 0–255여야 한다: {settings.black_luma_max!r}")
+    if settings.blur_min < 0:
+        problems.append(f"흐림 기준은 0(끔) 이상이어야 한다: {settings.blur_min!r}")
+    return problems
+
+
+@dataclass(frozen=True)
 class RawAnalysisConcurrency:
     """라이브러리 일괄 분석이 한 번에 돌리는 영상 수 — 외부 근거 없는 조정 대상(D49).
 

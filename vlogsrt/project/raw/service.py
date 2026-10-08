@@ -22,7 +22,13 @@ from pathlib import Path
 from typing import Any
 
 from vlogsrt import preprocess
-from vlogsrt.project.raw import analysis_workflow, segmentation, visual_review
+from vlogsrt.project.raw import (
+    analysis_workflow,
+    segmentation,
+    tier_inputs,
+    tiering,
+    visual_review,
+)
 from vlogsrt.project.raw import package as package_layout
 from vlogsrt.project.raw import runner as extract_runner
 from vlogsrt.project.raw.analysis_approval import (
@@ -152,7 +158,12 @@ from vlogsrt.project.raw.models import (
     WorkspaceNotFoundError,
     WorkspaceStatus,
 )
-from vlogsrt.project.raw.segment_review import ReviewError, ReviewRevision, StaleRevisionError
+from vlogsrt.project.raw.segment_review import (
+    AUTO_EXCLUDED_UNREVIEWED_TAG,
+    ReviewError,
+    ReviewRevision,
+    StaleRevisionError,
+)
 from vlogsrt.project.raw.segment_review import (
     boundary_edit as review_boundary_edit,
 )
@@ -271,6 +282,12 @@ __all__ = [
     "SourceInspection",
     "SourceNestingError",
     "SourceOrderRevision",
+    "TIER_LABELS",
+    "TIER_MIGRATION_JOB_KIND",
+    "TIER_REPORT_JOB_KIND",
+    "TIER_SETTINGS",
+    "TIER_TAG_PREFIX",
+    "AUTO_EXCLUDED_UNREVIEWED_TAG",
     "VISUAL_PAGE_SIZE",
     "VISUAL_PREPARE_JOB_KIND",
     "VisualAudioTrack",
@@ -319,8 +336,27 @@ __all__ = [
     "review_split_edit",
     "semantic_estimate_digest",
     "middle_frame_index",
+    "red_ranges",
+    "report_from_document",
     "snapped_frame_index",
+    "unmaterialized_red",
 ]
+
+TIER_MIGRATION_JOB_KIND = "tier_migration"
+"""등급판 옮기기 작업 — 저장된 증거로 계획·검토 머리만 새로 세운다(유료 호출 0회, D51)."""
+
+TIER_REPORT_JOB_KIND = "tier_reports"
+"""등급 보고서 계산 작업 — 저장 PCM·프레임만 잰다(유료 호출 0회, D51)."""
+
+TIER_REPORT_FINGERPRINT = "tier-reports/"
+TIER_EVIDENCE_STATUSES = ("analyzed", "cached", "partial")
+
+TIER_SETTINGS = tiering.TIER_SETTINGS
+TIER_TAG_PREFIX = tiering.TIER_TAG_PREFIX
+TIER_LABELS = tiering.TIER_LABELS
+unmaterialized_red = tiering.unmaterialized_red
+red_ranges = tiering.red_ranges
+report_from_document = tiering.report_from_document
 
 MEDIA_CONTENT_TYPES: dict[str, str] = {
     ".mp4": "video/mp4",
@@ -1040,40 +1076,103 @@ class RawWorkspaceService:
         return publish_review(self, root, revision_id, context)
 
     def selection_suitability(
-        self, root: Path, revision_id: str, asset_ids: tuple[str, ...]
+        self,
+        root: Path,
+        revision_id: str,
+        asset_ids: tuple[str, ...],
+        *,
+        pending: set[str] | None = None,
     ) -> dict[str, list[dict]]:
-        from vlogsrt.project.raw.suitability import spans
+        """원본별 3단 등급 구간(W-11, D51) — 옛 `recommendation` 칸도 함께 싣는다.
 
+        화면 그리기에서 불리므로 **재지 않는다** — 보관된 등급 보고서만 읽는다. 완성 문서가
+        있는데 보고서가 아직 없으면 그 원본을 `pending`에 넣고 비운다(백그라운드 작업이 잰다).
+        증거를 읽지 못한 원본은 이 화면에서 빠진다(예전과 같다) — 분석 기록 자체는 그대로다.
+        """
         summary = self.analysis_overview(root, revision_id)
         result: dict[str, list[dict]] = {}
         if summary is None:
             return result
+        workspace_root = self._workspace(root).root
         for row in summary.results:
             if row.asset_id not in asset_ids:
                 continue
-            from vlogsrt.project.raw.analysis_workflow import ANALYSIS_DOCUMENT_NAME, _source_folder
-
-            directory = (
-                self._workspace(root).root
-                / "analysis"
-                / revision_id
-                / _source_folder(row.source_order, row.asset_id)
-            )
-            document = (
-                self._workspace(root).root / row.document_path
-                if row.document_path
-                else directory / ANALYSIS_DOCUMENT_NAME
-            )
-            partial = directory / "suitability_progress.json"
-            path = partial if partial.is_file() else document
             try:
-                payload = json.loads(path.read_text(encoding="utf-8"))
-                if path == partial and payload.get("analysis_revision_id") != revision_id:
-                    continue
-                result[row.asset_id] = spans(payload, completed_only=True)
+                report = self._tier_report_for_row(workspace_root, row, compute=False)
             except (OSError, ValueError, KeyError, TypeError):
                 continue
+            if report is not None:
+                result[row.asset_id] = [span.document() for span in report.spans]
+            elif pending is not None and _tier_paths(workspace_root, row)[1].is_file():
+                pending.add(row.asset_id)
         return result
+
+    def tier_report(self, root: Path, revision_id: str, asset_id: str) -> Any:
+        """원본 하나의 3단 등급 보고서 — 저장된 증거만 읽는다(유료 호출 0회, D51).
+
+        완성 문서가 있으면 PCM 공백·프레임 화질까지 재서 곁파일에 보관하고, Luna가 도는
+        동안이면 진행 문서로 소리 쪽 빨강 없이 계산한다. 분석이 없으면 None이다.
+        """
+        workspace = self._workspace(root)
+        row = AnalysisStore(workspace).source_result(revision_id, asset_id)
+        return None if row is None else self._tier_report_for_row(workspace.root, row)
+
+    def _tier_report_for_row(
+        self, workspace_root: Path, row: AnalysisSourceResult, *, compute: bool = True
+    ) -> tiering.TierReport | None:
+        directory, document = _tier_paths(workspace_root, row)
+        if document.is_file():
+            return tier_inputs.tier_report(
+                document,
+                audio_start=_record_audio_start(workspace_root, row),
+                compute=compute,
+            )
+        progress = directory / "suitability_progress.json"
+        if not progress.is_file():
+            return None
+        payload = json.loads(progress.read_text(encoding="utf-8"))
+        if payload.get("analysis_revision_id") != row.revision_id:
+            return None
+        return tier_inputs.progress_report(payload)
+
+    def start_tier_reports(self, root: Path) -> str | None:
+        """등급 보고서를 백그라운드에서 잰다 — 화면은 기다리지 않는다(D51).
+
+        같은 판의 계산이 이미 실패했으면 다시 걸지 않고 그 이유를 돌려준다(그리기마다
+        실패 작업이 쌓이지 않게). 다시 시도는 「등급 다시 계산(무료)」이다.
+        """
+        fingerprint = TIER_REPORT_FINGERPRINT + TIER_SETTINGS.tier_version
+        latest = next(
+            (
+                job
+                for job in self.list_jobs(root)
+                if job.kind == TIER_REPORT_JOB_KIND and job.input_fingerprint == fingerprint
+            ),
+            None,
+        )
+        if latest is not None and latest.status == "failed":
+            return f"등급 계산 실패: {latest.error}"
+
+        def body(context: JobContext) -> None:
+            self._compute_tier_reports(root, context)
+
+        self.submit_job(root, TIER_REPORT_JOB_KIND, fingerprint, body)
+        return None
+
+    def _compute_tier_reports(self, root: Path, context: JobContext) -> None:
+        """판정 증거가 있는 모든 결과 행의 등급 보고서를 재고 곁파일로 남긴다(무료)."""
+        workspace = self._workspace(root)
+        store = AnalysisStore(workspace)
+        seen: set[str] = set()
+        for revision in store.list_revisions():
+            for row in store.list_source_results(revision.revision_id):
+                if row.status not in TIER_EVIDENCE_STATUSES or not row.document_path:
+                    continue
+                if row.document_path in seen:
+                    continue
+                seen.add(row.document_path)
+                context.check_cancel()
+                self._tier_report_for_row(workspace.root, row, compute=True)
 
     def start_reference_import(
         self,
@@ -1243,18 +1342,9 @@ class RawWorkspaceService:
         def body(context: JobContext) -> None:
             context.check_cancel()
             facade = self.review_workspace_facade(root)
-            try:
-                head = facade.load_head().revision
-                current_plan = self.segment_plan_revision(root, head.base_plan_id)
-                if (
-                    not initialized
-                    or current_plan.order_revision_id != summary.revision.order_revision_id
-                ):
-                    plan = self.plan_segmentation_from_analysis(root, revision_id)
-                    head = facade.initialize_review(plan.revision_id, revision_id)
-            except RawWorkspaceError:
-                plan = self.plan_segmentation_from_analysis(root, revision_id)
-                head = facade.initialize_review(plan.revision_id, revision_id)
+            # 등급 보고서를 먼저 잰다 — 화면은 재지 않고 이 곁파일만 읽는다(D51).
+            self._compute_tier_reports(root, context)
+            head = self._cleanup_head(root, facade, summary.revision, initialized=initialized)
             # Existing user edits are authoritative; materialize their current geometry.
             package = self.package_overview(root)
             snapshot = self.segment_plan_revision(root, head.base_plan_id)
@@ -1288,6 +1378,96 @@ class RawWorkspaceService:
                 )
 
         return self.submit_job(root, "automatic_cleanup", revision_id, body)
+
+    def _cleanup_head(
+        self, root: Path, facade: Any, analysis: AnalysisRevision, *, initialized: bool
+    ) -> ReviewRevision:
+        """자동 정리가 이어 쓸 검토 머리 — 새 분석이면 다시 세우고, 옛 등급판이면 옮긴다."""
+        revision_id = analysis.revision_id
+        try:
+            head = facade.load_head().revision
+            current_plan = self.segment_plan_revision(root, head.base_plan_id)
+        except RawWorkspaceError:
+            plan = self.plan_segmentation_from_analysis(root, revision_id)
+            return facade.initialize_review(plan.revision_id, revision_id)
+        if not initialized or current_plan.order_revision_id != analysis.order_revision_id:
+            plan = self.plan_segmentation_from_analysis(root, revision_id)
+            return facade.initialize_review(plan.revision_id, revision_id)
+        if facade.has_tier_marker(head):
+            return head
+        # 옛 등급판 머리(D51) — 손대지 않았으면 빨강을 조각으로 떨어뜨리고, 손댔거나 사람
+        # 결정이 실려 왔으면 등급만 다시 단다(확인한 제외는 확인된 채, 미검토는 미검토인 채).
+        if facade.is_untouched(head):
+            return self._migrate_unedited_head(root, facade)
+        return facade.retier(head.base_plan_id)
+
+    def _migrate_unedited_head(self, root: Path, facade: Any) -> ReviewRevision:
+        """손대지 않은 머리를 새 등급판으로 — 원본마다 가장 최근 판정 증거로 다시 계획한다.
+
+        원본별로 다른 분석 리비전(선택 분석의 실제 모양)을 한 계획에 모은다. 판정 증거가
+        없는 원본은 옛 머리의 조각을 그대로 둔다. 유료 호출은 없다(저장된 증거만 읽는다).
+        """
+        rows = facade.tier_evidence_rows()
+        plan = self.plan_segmentation_from_evidence(root, rows)
+        missing = tuple(c.asset_id for c in plan.coverage if c.asset_id not in rows)
+        return facade.initialize_review(
+            plan.revision_id, evidence_rows=rows, preserve_source_ids=missing
+        )
+
+    def plan_segmentation_from_evidence(
+        self, root: Path, rows: Mapping[str, AnalysisSourceResult]
+    ) -> SegmentPlanSnapshot:
+        """원본마다 주어진 분석 결과 행으로 계획한다 — 행이 없는 원본은 전체 한 조각이다."""
+        workspace = self._workspace(root)
+        order = self._order_revision(root, None)
+        intervals = {
+            entry.asset_id: self._analysis_intervals(
+                workspace, rows.get(entry.asset_id), entry.asset_id
+            )
+            for entry in sorted(order.entries, key=lambda item: item.ordinal)
+        }
+        return self.plan_segmentation(
+            root,
+            order_revision_id=order.revision_id,
+            intervals=intervals,
+            basis=SEGMENTATION_BASIS_SEMANTIC,
+        )
+
+    def refresh_tiers(self, root: Path) -> str:
+        """「등급 다시 계산(무료)」과 앱 열기 — 저장된 증거로만 다시 매긴다(D51, Q8).
+
+        보고서를 먼저 잰 뒤, **작업 안에서** 지금 머리를 다시 읽어 정한다 — 손대지 않은 옛
+        머리(사람 결정이 실려 오지도 않은)는 빨강을 조각으로 떨어뜨리는 새 계획을 세우고, 그
+        밖에는 등급과 태그만 다시 단다. 처음엔 PCM·프레임을 재느라 수십 초가 걸릴 수 있어
+        화면을 붙잡지 않도록 백그라운드로 돈다(같은 머리에 대한 작업은 하나로 합쳐진다).
+        """
+        facade = self.review_workspace_facade(root)
+        head = facade.load_head().revision
+        if not facade.tier_evidence_rows():
+            return "등급을 매길 분석 결과가 없습니다."
+
+        def body(context: JobContext) -> None:
+            self._compute_tier_reports(root, context)
+            context.check_cancel()
+            current = facade.load_head().revision
+            if not facade.has_tier_marker(current) and facade.is_untouched(current):
+                self._migrate_unedited_head(root, facade)
+            else:
+                facade.retier(current.base_plan_id)
+
+        self.submit_job(root, TIER_MIGRATION_JOB_KIND, head.revision_id, body)
+        if not facade.has_tier_marker(head) and head.sequence == 0:
+            return (
+                "새 등급판을 적용합니다(무료) — 손대지 않은 검토면 제외 제안 구간을"
+                " 조각으로 나눕니다."
+            )
+        return "등급을 다시 계산합니다(무료) — 사용/제외 선택은 그대로입니다."
+
+    def tier_migration_needed(self, root: Path) -> bool:
+        """앱 열기 때 옮길 머리인가 — 판정 증거가 있는데 등급판 표지가 없다."""
+        facade = self.review_workspace_facade(root)
+        head = facade.load_head().revision
+        return not facade.has_tier_marker(head) and bool(facade.tier_evidence_rows())
 
     def materialize_review(self, root: Path, context: JobContext, expected_revision: str) -> str:
         from vlogsrt.project.raw.media_refs import resolve
@@ -2978,69 +3158,78 @@ class RawWorkspaceService:
             and row.status in ("analyzed", "cached", "partial")
             and row.record_path is not None
         ):
-            path = workspace.root / row.record_path
-            try:
-                record = json.loads(path.read_text(encoding="utf-8"))
-                from vlogsrt.project.raw.auto_cleanup import saved_decisions
-
-                if row.document_path:
-                    record["auto_decisions"] = saved_decisions(
-                        workspace.root / row.document_path, record, asset_id, row.revision_id
-                    )
-                spans = record["intervals"]
-            except (OSError, ValueError, KeyError, TypeError) as error:
-                raise AnalysisError(
-                    f"분석 기록을 읽지 못했다: {row.record_path} — {error}"
-                ) from error
-            intervals = [
-                PlannedInterval(
-                    start=Fraction(int(item["start"]["num"]), int(item["start"]["den"])),
-                    end=Fraction(int(item["end"]["num"]), int(item["end"]["den"])),
-                )
-                for item in spans
-            ]
-            if intervals:
-                # Snap deletion edges inward; speech handles must never shrink.
-                import math
-
-                frame = (
-                    Fraction(
-                        **{
-                            "numerator": record["timeline"]["video"]["frame_duration"]["num"],
-                            "denominator": record["timeline"]["video"]["frame_duration"]["den"],
-                        }
-                    )
-                    if record.get("auto_decisions")
-                    else Fraction(1)
-                )
-                cuts = {point for span in intervals for point in (span.start, span.end)}
-                if row.document_path:
-                    from vlogsrt.project.raw.suitability import safe_window_edges
-
-                    document = json.loads(
-                        (workspace.root / row.document_path).read_text(encoding="utf-8")
-                    )
-                    cuts.update(
-                        point
-                        for point in safe_window_edges(document)
-                        if intervals[0].start < point < intervals[-1].end
-                    )
-                for decision in record.get("auto_decisions", []):
-                    start = Fraction(decision["start"]["num"], decision["start"]["den"])
-                    end = Fraction(decision["end"]["num"], decision["end"]["den"])
-                    a, b = math.ceil(start / frame) * frame, math.floor(end / frame) * frame
-                    if a < b:
-                        cuts.update((a, b))
-                ordered = sorted(cuts)
-                return [
-                    PlannedInterval(start=a, end=b)
-                    for a, b in zip(ordered, ordered[1:], strict=False)
-                ]
-
+            recorded = self._recorded_intervals(workspace, row, asset_id)
+            if recorded:
+                return recorded
         asset = _verified_asset(workspace, asset_id)
         facts = _measured_source(workspace, asset)
         playable = (facts.exact_end_pts - facts.clock.first_pts) * facts.clock.time_base
         return [PlannedInterval(start=Fraction(0), end=playable)]
+
+    def _recorded_intervals(
+        self, workspace: RawWorkspace, row: AnalysisSourceResult, asset_id: str
+    ) -> list[PlannedInterval]:
+        """기록 구간 위에 자를 자리를 더한다 — 안전한 창 가장자리, 자동 제외·빨강 등급 후보.
+
+        제거 후보의 가장자리는 프레임 안쪽으로 붙인다(시작 올림·끝 내림) — 발화 여유가
+        줄지 않는다. 녹색·노랑의 가장자리는 자를 자리가 아니다(D51).
+        """
+        assert row.record_path is not None
+        try:
+            record = json.loads((workspace.root / row.record_path).read_text(encoding="utf-8"))
+            from vlogsrt.project.raw.auto_cleanup import saved_decisions
+
+            if row.document_path:
+                record["auto_decisions"] = saved_decisions(
+                    workspace.root / row.document_path, record, asset_id, row.revision_id
+                )
+            spans = record["intervals"]
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            raise AnalysisError(f"분석 기록을 읽지 못했다: {row.record_path} — {error}") from error
+        intervals = [
+            PlannedInterval(start=_json_fraction(item["start"]), end=_json_fraction(item["end"]))
+            for item in spans
+        ]
+        if not intervals:
+            return []
+        cuts = {point for span in intervals for point in (span.start, span.end)}
+        cuts.update(self._safe_window_cuts(workspace, row, intervals))
+        cuts.update(self._removal_cuts(workspace, row, record))
+        ordered = sorted(cuts)
+        return [PlannedInterval(start=a, end=b) for a, b in zip(ordered, ordered[1:], strict=False)]
+
+    @staticmethod
+    def _safe_window_cuts(
+        workspace: RawWorkspace, row: AnalysisSourceResult, intervals: list[PlannedInterval]
+    ) -> set[Fraction]:
+        if not row.document_path:
+            return set()
+        from vlogsrt.project.raw.suitability import safe_window_edges
+
+        document = json.loads((workspace.root / row.document_path).read_text(encoding="utf-8"))
+        return {
+            point
+            for point in safe_window_edges(document)
+            if intervals[0].start < point < intervals[-1].end
+        }
+
+    def _removal_cuts(
+        self, workspace: RawWorkspace, row: AnalysisSourceResult, record: Mapping[str, Any]
+    ) -> set[Fraction]:
+        decisions = list(record.get("auto_decisions", []))
+        report = self._tier_report_for_row(workspace.root, row) if row.document_path else None
+        if report is not None:
+            decisions.extend(tiering.red_decisions(report))
+        if not decisions:
+            return set()
+        frame = _json_fraction(record["timeline"]["video"]["frame_duration"])
+        cuts: set[Fraction] = set()
+        for decision in decisions:
+            start, end = _json_fraction(decision["start"]), _json_fraction(decision["end"])
+            a, b = math.ceil(start / frame) * frame, math.floor(end / frame) * frame
+            if a < b:
+                cuts.update((a, b))
+        return cuts
 
     # ── A3 내부 — 계획·package 짝 맞추기 ────────────────────────
 
@@ -3104,6 +3293,37 @@ class RawWorkspaceService:
             job_fingerprint=fingerprint,
             clip_total=len(snapshot.entries),
         )
+
+
+def _json_fraction(value: Mapping[str, Any]) -> Fraction:
+    return Fraction(int(value["num"]), int(value["den"]))
+
+
+def _tier_paths(workspace_root: Path, row: AnalysisSourceResult) -> tuple[Path, Path]:
+    """결과 행의 증거 폴더와 완성 문서 — 캐시된 행은 다른 리비전 폴더의 문서를 가리킨다."""
+    from vlogsrt.project.raw.analysis_workflow import ANALYSIS_DOCUMENT_NAME, _source_folder
+
+    directory = (
+        workspace_root
+        / ANALYSIS_ROOT
+        / row.revision_id
+        / _source_folder(row.source_order, row.asset_id)
+    )
+    document = (
+        workspace_root / row.document_path
+        if row.document_path
+        else directory / ANALYSIS_DOCUMENT_NAME
+    )
+    return directory, document
+
+
+def _record_audio_start(workspace_root: Path, row: AnalysisSourceResult) -> Fraction:
+    """PCM 표본 0의 공통 시계 위치 — 기록이 없으면 0(파일 시각과 같다고 본다)."""
+    if row.record_path is None:
+        return Fraction(0)
+    record = json.loads((workspace_root / row.record_path).read_text(encoding="utf-8"))
+    start = record.get("timeline", {}).get("audio", {}).get("common_start")
+    return _json_fraction(start) if start else Fraction(0)
 
 
 def _verified_asset(workspace: RawWorkspace, asset_id: str) -> SourceAsset:

@@ -393,9 +393,11 @@ def visual_player_shell_html(video_src: str | None, note: str) -> str:
         f'<p id="visual-note" class="vl-note">{safe_note}</p></section>'
         '<section id="visual-timeline" aria-label="추천 구간과 영상 타임라인">'
         '<div class="vl-transport">'
-        '<strong>타임라인</strong><span class="vl-legend">'
-        '<span class="vl-good">● 추천</span> · 사용 가능 · '
-        '<span class="vl-review">● 확인 필요</span></span>'
+        '<strong>타임라인</strong><span class="vl-legend" aria-label="등급 범례">'
+        '<span class="vl-tier-key green">■ 추천</span> · '
+        '<span class="vl-tier-key yellow">■ 보통</span> · '
+        '<span class="vl-tier-key red">▨ 제외 제안</span> · '
+        '<span class="vl-tier-key hold">□ 판정 보류</span></span>'
         '<button type="button" id="vl-source-caption-toggle" class="vl-btn"'
         ' aria-pressed="true">재생 자막</button>'
         '<button type="button" id="vl-timeline-mode" class="vl-btn">원본 타임라인</button>'
@@ -693,6 +695,18 @@ WORKBENCH_CSS = """
 .vl-recommendation.recommended { background:#177e73;color:#e9fffb;border-top:2px solid #48d7c7; }
 .vl-recommendation.review_required {
  background:#745638;color:#ffe8c4;border-top:2px solid #edbd74; }
+/* 3단 등급(D51) — 색만으로 가르지 않는다: 빗금(빨강)·점선(보류)·글자 표지가 함께 간다. */
+.vl-recommendation.green{background:#1f6f46;border-top:2px solid #6fe3a5}
+.vl-recommendation.yellow{background:#6f5f1a;border-top:2px solid #ffd760}
+.vl-recommendation.red{background:repeating-linear-gradient(135deg,#7a2d2d 0 6px,#561c1c 6px 12px);
+ border-top:2px solid #ff8a80}
+.vl-recommendation.yellow.hold{border-top-style:dotted}
+.vl-tier-key.green{color:#6fe3a5} .vl-tier-key.yellow{color:#ffd760}
+.vl-tier-key.red{color:#ff8a80} .vl-tier-key.hold{color:#b8c3ca}
+.vl-badge-green{border-color:#6fe3a5;color:#6fe3a5}
+.vl-badge-red{border-color:#ff8a80;color:#ff8a80}
+.vl-marker-reason.red{background:#3a2222;border-left-color:#ff8a80}
+.vl-marker-reason.yellow{background:#36311a;border-left-color:#ffd760}
 .vl-rec-pending { position:absolute; top:calc(var(--vl-rec-top) + 1px); left:10px;
  color:#aab5be; font-size:12px; }
 /* 그라디오 button{font:inherit}이 16px·22.4px 줄과 큰 단추 여백을 물려 22px 칸에서
@@ -1277,12 +1291,40 @@ VISUAL_BOOTSTRAP_JS = (
           stale: "낡음", missing: "아직 없음" })[s] || s;
       }
       function speechLabel(s) {
-        return ({ speech_detected: "발화 있음", unconfirmed_empty: "빈 실행(미확인)",
+        return ({ speech_detected: "발화 있음", unconfirmed_empty: "발화 없음(미측정)",
           audio_absent: "소리 없음", analysis_failed: "분석 실패" })[s] || "";
       }
       function recLabel(r) {
         return ({ recommended: "사용 권고", normal: "보통",
           review_required: "검토 필요" })[r] || "";
+      }
+      // 3단 등급(D51) — 글자 표지는 색과 별개로 등급을 말한다(색약·흑백에서도 읽힌다).
+      function tierWord(tier, hold) {
+        if (tier === "yellow" && hold) { return "판정 보류"; }
+        return ({ green: "추천", yellow: "보통", red: "제외 제안" })[tier] || "";
+      }
+      function tierGlyph(tier, hold) {
+        if (tier === "yellow" && hold) { return "? 보류"; }
+        return ({ green: "★ 추천", yellow: "보통", red: "✕ 제외 제안" })[tier] || "";
+      }
+      function tierOf(row) {
+        return row.tier || (row.rec === "recommended" ? "green" : "yellow");
+      }
+      function tierDetail(row) {
+        if (!row.audio || !row.video) { return row.reason || ""; }
+        return "자막: " + (row.audio.reason || row.audio.label || "") +
+          " · 영상: " + (row.video.reason || row.video.label || "");
+      }
+      function tagText(card, prefix) {
+        var hit = (card.tags || []).find(function(t) { return t.indexOf(prefix) === 0; });
+        return hit ? hit.slice(prefix.length) : "";
+      }
+      function intervalAt(info, row) {
+        // 빨강 끝은 프레임 안쪽으로 붙어 있다 — 시작점이 아니라 가운데로 조각을 찾는다.
+        var mid = VL.mul(VL.add(ratOf(row.start), ratOf(row.end)), VL.parse("1/2"));
+        return info && info.rail && info.rail.intervals.find(function(it) {
+          return VL.cmp(ratOf(it.start), mid) <= 0 && VL.cmp(ratOf(it.end), mid) > 0;
+        });
       }
       function stopLoop() { state.loop = null; }
       function unloadVideo(v) {
@@ -1328,7 +1370,7 @@ VISUAL_BOOTSTRAP_JS = (
         if (!mount) { return; }
         var rows = ['<div class="vl-row" role="group" aria-label="컷 필터">'];
         [["all","전체"],["included","사용할 컷"],
-         ["excluded","제외된 컷"],["review","확인 필요"]].forEach(function(f) {
+         ["excluded","제외된 컷"],["review","검토 대기"]].forEach(function(f) {
           rows.push('<button type="button" class="vl-btn" data-vl-act="filter-' + f[0] +
             '" aria-pressed="' + ((state.filter || "all") === f[0]) + '">' + f[1] + '</button>');
         });
@@ -1339,7 +1381,7 @@ VISUAL_BOOTSTRAP_JS = (
           var c = shownCards[i];
           if (state.filter === "included" && c.sel !== "included") { continue; }
           if (state.filter === "excluded" && c.sel !== "excluded") { continue; }
-          if (state.filter === "review" && c.rec !== "review_required" &&
+          if (state.filter === "review" && !c.autoPending && c.rec !== "review_required" &&
               c.speech !== "analysis_failed") { continue; }
           var cls = "vl-thumb" +
             (c.id === sel || (c.media && c.sourceId === curSourceId()) ? " vl-thumb-sel" : "") +
@@ -1359,7 +1401,13 @@ VISUAL_BOOTSTRAP_JS = (
             "초 · " + VL.fmt(ratOf(c.dur)) + '초</span><span class="vl-thumb-sub">' +
             (c.sel === "excluded" ? '<span class="vl-badge vl-badge-warn">제외</span>' :
               '<span class="vl-badge">사용</span>') +
-            (c.rec === "review_required" ?
+            (c.autoPending ?
+              ' <span class="vl-badge vl-badge-red" data-vl-tier="red">제외 제안</span>' :
+              c.tier === "green" ?
+              ' <span class="vl-badge vl-badge-green" data-vl-tier="green">추천</span>' :
+              c.tier === "yellow" ?
+              ' <span class="vl-badge" data-vl-tier="yellow">보통</span>' : "") +
+            (c.rec === "review_required" || c.speech === "analysis_failed" ?
               ' <span class="vl-badge vl-badge-warn">확인 필요</span>' : "") +
             (c.needsExtract ? ' <span class="vl-badge vl-badge-warn">영상 갱신 필요</span>' : "") +
             (speech ? ' <span class="vl-badge">' + esc(speech) + "</span>" : "") +
@@ -1414,13 +1462,15 @@ VISUAL_BOOTSTRAP_JS = (
         suggestions.forEach(function(row,index) {
           var a = displayTime(ratOf(row.start)), b = displayTime(ratOf(row.end));
           if (!a || !b || VL.cmp(a,b) >= 0) { return; }
-          var name = row.rec === 'recommended' ? '추천' :
-            row.rec === 'review_required' ? '확인 필요' : '사용 가능';
-          html.push('<button type="button" class="vl-recommendation ' + esc(row.rec) +
-            '" data-vl-recommendation="' + index + '" style="left:' + VL.pct(a,dur).toFixed(3) +
+          var tier = tierOf(row);
+          var detail = tierDetail(row);
+          html.push('<button type="button" class="vl-recommendation ' + esc(row.rec) + ' ' +
+            esc(tier) + (row.hold ? ' hold' : '') + '" data-vl-recommendation="' + index +
+            '" data-vl-tier="' + esc(tier) + '" style="left:' + VL.pct(a,dur).toFixed(3) +
             '%;width:' + Math.max(.4,VL.pct(VL.sub(b,a),dur)).toFixed(3) +
-            '%" aria-label="' + esc(name + ' ' + row.start + '초~' + row.end + '초 ' + row.reason) +
-            '" title="' + esc(row.reason) + '">' + name + '</button>');
+            '%" aria-label="' + esc(tierWord(tier, row.hold) + ' ' + row.start + '초~' +
+              row.end + '초 · ' + detail) +
+            '" title="' + esc(detail) + '">' + esc(tierGlyph(tier, row.hold)) + '</button>');
         });
         ((info && info.subtitles) || []).forEach(function(cue,index) {
           var a = displayTime(ratOf(cue.start)), b = displayTime(ratOf(cue.end));
@@ -1477,6 +1527,31 @@ VISUAL_BOOTSTRAP_JS = (
         mount.innerHTML = html.join("");
       }
 
+      function markerBlock(mk, card) {
+        // 자막과 영상은 따로 판정한다(D51) — 패널은 두 판정과 그 규칙을 함께 보인다.
+        var out = ['<div class="vl-marker-reason ' + esc(mk.tier || "") + '"><strong>' +
+          esc(mk.label) + '</strong>'];
+        if (mk.audio && mk.video) {
+          out.push('<p class="vl-kv">자막 · ' + esc(mk.audio.label) + ': ' +
+            esc(mk.audio.reason) + '</p><p class="vl-kv">영상 · ' + esc(mk.video.label) +
+            ': ' + esc(mk.video.reason) + '</p><p class="vl-kv">규칙 ' + esc(mk.rule) + '</p>');
+        } else {
+          out.push('<p>' + esc(mk.reason) + '</p>');
+        }
+        out.push('<small>' + esc(VL.fmt(ratOf(mk.start)) + '초 ~ ' +
+          VL.fmt(ratOf(mk.end)) + '초') + '</small>');
+        if (mk.tier === "red" && mk.segmentId && card && card.id === mk.segmentId) {
+          out.push('<div class="vl-row">' +
+            '<button type="button" class="vl-btn" data-vl-act="red-confirm">' +
+            '제외 유지(확인)</button>' +
+            '<button type="button" class="vl-btn" data-vl-act="red-revert">' +
+            '사용으로 되돌리기</button>' +
+            '</div>');
+        }
+        out.push('</div>');
+        return out.join("");
+      }
+
       function renderPanel() {
         var mount = doc.getElementById("vl-panel");
         if (!mount) { return; }
@@ -1489,10 +1564,11 @@ VISUAL_BOOTSTRAP_JS = (
         var info = curSource();
         var html = [];
         if (state.marker && state.marker.sourceId === curSourceId()) {
-          html.push('<div class="vl-marker-reason"><strong>' + esc(state.marker.label) +
-            '</strong><p>' + esc(state.marker.reason) + '</p><small>' +
-            esc(VL.fmt(ratOf(state.marker.start)) + '초 ~ ' +
-              VL.fmt(ratOf(state.marker.end)) + '초') + '</small></div>');
+          html.push(markerBlock(state.marker, card));
+        }
+        if (model.redUnmaterialized > 0) {
+          html.push('<p class="vl-kv"><span class="vl-badge vl-badge-red">제외 제안 ' +
+            model.redUnmaterialized + '개</span> 현재 조각 경계와 맞지 않습니다.</p>');
         }
         if (info && info.mediaStatus) {
           html.push('<p class="vl-kv">' + esc(info.mediaStatus) + '</p>');
@@ -1545,15 +1621,22 @@ VISUAL_BOOTSTRAP_JS = (
             "초 (" + VL.fmt(ratOf(card.dur)) + "초)</p>");
         var speech = speechLabel(card.speech);
         var rec = recLabel(card.rec);
+        var grade = card.autoPending ? "제외 제안" : tierWord(card.tier || "", false);
+        var subtitleWhy = tagText(card, "자막: ") || speech;
+        var videoWhy = tagText(card, "영상: ");
         html.push('<p class="vl-kv">상태 ' + (card.sel === "excluded" ? "제외" : "사용") +
-          (speech ? " · 발화 " + esc(speech) : "") +
-          (rec ? " · 권고 " + esc(rec) : "") + "</p>");
+          (grade ? " · 등급 " + esc(grade) : "") +
+          (subtitleWhy ? " · 자막 " + esc(subtitleWhy) : "") +
+          (videoWhy ? " · 영상 " + esc(videoWhy) : "") + "</p>");
+        html.push('<p class="vl-kv">' + (speech ? "발화 " + esc(speech) : "") +
+          (speech && rec ? " · " : "") + (rec ? "권고 " + esc(rec) : "") + "</p>");
         var automaticAt = (card.note || "").indexOf("자동 제외: ");
         if (automaticAt >= 0) {
           try {
             var automatic = JSON.parse(card.note.slice(automaticAt + "자동 제외: ".length));
             var reasons = {internal_silence:"긴 무음", retake_overlap:"완전한 반복 테이크 확인",
-              ng_with_followup:"NG 뒤 완전한 테이크 확인"};
+              ng_with_followup:"NG 뒤 완전한 테이크 확인",
+              tier_silence:"자막 무음(측정)", tier_video_defect:"영상 결함(측정)"};
             html.push('<p class="vl-kv">자동 판정 이유 · ' +
               esc(reasons[automatic.reason] || automatic.reason) + '</p>');
           } catch (error) { /* Historical/manual notes remain readable below. */ }
@@ -1907,16 +1990,15 @@ VISUAL_BOOTSTRAP_JS = (
           var info = curSource();
           var row = info && (info.suggestions || [])[Number(suggestionIndex)];
           if (row) {
-            var selectedInterval = info.rail.intervals.find(function(it) {
-              return VL.cmp(ratOf(it.start),ratOf(row.start)) <= 0 &&
-                VL.cmp(ratOf(it.end),ratOf(row.start)) > 0;
-            });
+            var selectedInterval = intervalAt(info, row);
             if (selectedInterval && findCard(selectedInterval.id)) {
               state.selectedId = selectedInterval.id; state.selectedPlan = model.basePlanId;
             }
+            // 제외 확인 단추가 겨냥할 조각 — 이 페이지에 없으면 선택이 바뀌지 않으므로
+            // 단추가 옛 선택을 겨냥하지 않도록 조각 ID를 표지에 묶어 둔다.
             state.marker = Object.assign({sourceId:curSourceId(), label:
-              row.rec === 'recommended' ? '추천 구간' :
-              row.rec === 'review_required' ? '확인 필요' : '사용 가능'}, row);
+              tierWord(tierOf(row), row.hold) || recLabel(row.rec),
+              segmentId: selectedInterval ? selectedInterval.id : null}, row);
             seekTo(ratOf(row.start)); renderPanel();
           }
           return;
@@ -2064,6 +2146,20 @@ VISUAL_BOOTSTRAP_JS = (
           }
           call("vl_prepare", { page: model.page, selectedId: selectedId(), audioSelections: sel },
             "미리보기를 준비한다 — 없는 항목만 만든다…");
+          return;
+        }
+        if (act === "red-confirm" || act === "red-revert") {
+          // 이 조각만 사람이 확인한다 — 선택 편집이 미검토 표지를 걷는다(D35). 표지가
+          // 묶은 조각이 지금 선택과 다르면(다른 페이지) 아무것도 보내지 않는다.
+          var mark = state.marker;
+          if (!mark || !mark.segmentId || !card || card.id !== mark.segmentId) { return; }
+          call("vl_apply", {
+            op: "selection", segmentId: mark.segmentId,
+            selection: act === "red-confirm" ? "excluded" : "included",
+            revisionId: model.revisionId, basePlanId: model.basePlanId,
+            page: model.page, sourceId: curSourceId(),
+            selectedId: card.id, playheadSec: VL.str(playheadLocal()),
+          });
           return;
         }
         if (act === "toggle-sel" && card) {
@@ -2220,10 +2316,7 @@ VISUAL_BOOTSTRAP_JS = (
       bindControl("vl-zoom-out", function() { zoom(-1); });
       if (state.marker && state.selectedPlan !== model.basePlanId) {
         var markerSource = sourceInfo(state.marker.sourceId);
-        var matching = markerSource && markerSource.rail.intervals.find(function(it) {
-          return VL.cmp(ratOf(it.start),ratOf(state.marker.start)) <= 0 &&
-            VL.cmp(ratOf(it.end),ratOf(state.marker.start)) > 0;
-        });
+        var matching = intervalAt(markerSource, state.marker);
         if (matching && findCard(matching.id)) {
           state.selectedId = matching.id; state.selectedPlan = model.basePlanId;
         }
@@ -2234,6 +2327,10 @@ VISUAL_BOOTSTRAP_JS = (
       renderPanel();
       paintPlayhead();
       if (state.lastMsg) { msg(state.lastMsg); }
+      else if (model.redUnmaterialized > 0) {
+        msg("제외 제안 " + model.redUnmaterialized + "개가 현재 조각 경계와 맞지 않습니다 — " +
+          "「자동 정리」로 경계를 갱신하거나 직접 나누어 제외하세요.");
+      }
     };
   }
   // 커밋 뒤 재배선 — 설치된 그라디오(6.29) 실측 세 가지를 다 다룬다:

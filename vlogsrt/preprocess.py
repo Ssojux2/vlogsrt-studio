@@ -3093,3 +3093,56 @@ def verified_scene_times(path: Path) -> tuple[Fraction, ...]:
         ]
     )
     return tuple(Fraction(value) for value in re.findall(r"pts_time:([0-9.]+)", result.stderr))
+
+
+@dataclass(frozen=True)
+class FrameQuality:
+    """저장 프레임 한 장의 로컬 화질 — 평균 루마(YAVG, 0–255)와 blurdetect 흐림 값."""
+
+    path: Path
+    yavg: float
+    blur: float | None
+
+
+_SIGNALSTATS_YAVG = re.compile(r"lavfi\.signalstats\.YAVG=([0-9.]+)")
+_BLURDETECT_VALUE = re.compile(r"lavfi\.blur=([0-9.]+)")
+
+
+def parse_frame_quality(path: Path, stderr: str) -> FrameQuality:
+    """`metadata=print`가 찍은 줄에서 YAVG·흐림을 읽는다 — YAVG가 없으면 측정 실패다."""
+    luma = _SIGNALSTATS_YAVG.search(stderr)
+    if luma is None:
+        raise RuntimeError(f"화질 측정에 YAVG가 없다: {path.name}")
+    blur = _BLURDETECT_VALUE.search(stderr)
+    return FrameQuality(path, float(luma.group(1)), float(blur.group(1)) if blur else None)
+
+
+def frame_quality_stats(paths: Sequence[Path]) -> tuple[FrameQuality, ...]:
+    """이미 저장된 분석 프레임(JPEG)의 검은 화면·흐림 측정 — 원본을 다시 디코드하지 않는다.
+
+    `metadata=print`는 info 수준으로 찍으므로 로그 수준을 info로 둔다. 흔들림은 정지 화면에서
+    잴 수 없다(D51).
+    """
+    ffmpeg = require_ffmpeg()
+    return tuple(
+        parse_frame_quality(
+            path,
+            _run(
+                [
+                    ffmpeg,
+                    "-hide_banner",
+                    "-nostats",
+                    "-loglevel",
+                    "info",
+                    "-i",
+                    str(path),
+                    "-vf",
+                    "signalstats,blurdetect,metadata=print",
+                    "-f",
+                    "null",
+                    "-",
+                ]
+            ).stderr,
+        )
+        for path in paths
+    )

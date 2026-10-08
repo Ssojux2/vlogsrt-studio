@@ -468,6 +468,14 @@ RETEXT_MUST_NOT_IMPORT = (
     "openai", "subprocess",
 )  # fmt: skip
 
+# 3단 등급은 **저장된 증거 위의 결정적 재계산**이다(D51). 프로세스·제공자·서비스·검토 저장소를
+# 알면 같은 증거가 다른 등급을 낳거나 등급 계산이 유료 호출로 번진다. 파일 읽기는 곁 모듈
+# (`tier_inputs.py`)의 몫이다.
+TIERING_MUST_NOT_IMPORT = (
+    "subprocess", "openai", "service", "review_workspace", "understanding_luna", "preprocess",
+)  # fmt: skip
+TIERING_FILE_IO = re.compile(r"\.(open|read_text|read_bytes|write_text|write_bytes)\(|\bopen\(")
+
 # 조판 이후 계층이 되풀이 판정을 알면, 판정이 파이프라인 아래로 새어나간다(D27).
 DOWNSTREAM_MUST_NOT_IMPORT = {
     "refine.py": ("repair", "repetition"),
@@ -565,6 +573,27 @@ def check_retext_stays_pure() -> list[str]:
         f"retext.py: {name}을 import한다 — 교정 계획이 순수 함수가 아니게 된다 (D37)"
         for name in _imports(path.read_text(encoding="utf-8"), RETEXT_MUST_NOT_IMPORT)
     ]
+
+
+def check_tiering_stays_pure() -> list[str]:
+    """D51 — `tiering.py`는 증거 문서와 잰 값을 **값으로** 받아 등급만 돌려준다.
+
+    파일이 사라지면 조용히 통과하지 않는다 — 등급 권한이 어디로 옮겨 갔는지 모르게 된다.
+    """
+    path = PROJECT_PACKAGE / "raw" / "tiering.py"
+    if not path.exists():
+        return ["vlogsrt/project/raw/tiering.py: 3단 등급 계층이 사라졌다 (D51)"]
+    body = path.read_text(encoding="utf-8")
+    failures = [
+        f"tiering.py: {name}을 import한다 — 등급 판정이 순수 함수가 아니게 된다 (D51)"
+        for name in _imports(body, TIERING_MUST_NOT_IMPORT)
+    ]
+    failures += [
+        f"tiering.py:{number}: 파일을 직접 읽거나 쓴다 — 입출력은 tier_inputs.py의 몫이다 (D51)"
+        for number, line in enumerate(body.splitlines(), start=1)
+        if TIERING_FILE_IO.search(line)
+    ]
+    return failures
 
 
 def check_edit_layer_ignores_audio() -> list[str]:
@@ -1142,6 +1171,7 @@ CHECKS = (
     ("검증은 출력을 못 건드린다", check_verify_cannot_touch_output),
     ("재전사는 전사 단계에 머문다", check_repair_stays_upstream),
     ("글자 교정은 순수하다", check_retext_stays_pure),
+    ("3단 등급은 순수하다", check_tiering_stays_pure),
     ("신뢰도 메타 보존", check_confidence_meta_survives),
     ("전사 호출 1개", check_one_transcription_call),
     ("모델 이름 비하드코딩", check_no_hardcoded_model),

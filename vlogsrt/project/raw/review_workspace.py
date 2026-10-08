@@ -38,7 +38,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from vlogsrt import preprocess
-from vlogsrt.project.raw import cache_policy
+from vlogsrt.project.raw import cache_policy, tiering
 from vlogsrt.project.raw import confirmed_package as confirmed
 from vlogsrt.project.raw.analysis_store import AnalysisStore
 from vlogsrt.project.raw.jobs import JobContext
@@ -343,6 +343,50 @@ def _base_plan_slug(revision: ReviewRevision) -> str:
     return safe
 
 
+MANUAL_SELECTION_PREFIX = "수동 선택 · "
+"""자동 제외 근거가 남은 조각을 사람이 사용/제외로 고른 표지 — `apply_edit`이 단다."""
+
+_MACHINE_NOTE_PREFIXES = ("자동 제외: ", "확인 필요: ")
+"""조립이 쓰는 메모 머리 — 그 밖의 비지 않은 메모는 사람이 쓴 것이다."""
+
+_EVIDENCE_STATUSES = ("analyzed", "cached", "partial")
+"""판정 증거가 있는 분석 결과 상태 — 부분 완료도 창마다의 판정은 남아 있다."""
+
+
+def _segment_seconds(revision: ReviewRevision, segment: ReviewSegment) -> tuple[Fraction, Fraction]:
+    """조각의 공통 시계 초 — 분석 문서의 축(비디오 원점 0)과 같다."""
+    clock = revision.clock_for(segment.source_id)
+    assert clock is not None
+    return (
+        (segment.start_pts - clock.origin_pts) * clock.time_base,
+        (segment.end_pts - clock.origin_pts) * clock.time_base,
+    )
+
+
+def _auto_excluded(
+    segment: ReviewSegment,
+    revision: ReviewRevision,
+    row: AnalysisSourceResult,
+    match: Mapping[str, object],
+) -> ReviewSegment:
+    """자동 제외 후보에 든 조각 — 미검토 표지와 근거를 함께 단다(D35)."""
+    clock = revision.clock_for(segment.source_id)
+    assert clock is not None
+    provenance = {
+        **match,
+        "source_id": segment.source_id,
+        "source_sha256": clock.source_sha256,
+        "analysis_revision_id": row.revision_id,
+        "segment_id": segment.segment_id,
+    }
+    return replace(
+        segment,
+        selection="excluded",
+        visual_tags=(*confirm_tags(segment.visual_tags), AUTO_EXCLUDED_UNREVIEWED_TAG),
+        notes="자동 제외: " + json.dumps(provenance, ensure_ascii=False, sort_keys=True),
+    )
+
+
 # ── 파사드 ────────────────────────────────────────────────────────────────────
 
 
@@ -381,6 +425,7 @@ class ReviewWorkspaceFacade:
         analysis_revision_id: str | None = None,
         *,
         preserve_source_ids: tuple[str, ...] = (),
+        evidence_rows: Mapping[str, AnalysisSourceResult] | None = None,
     ) -> ReviewRevision:
         """확정 분할 계획을 검토 기본 리비전으로 — 원본은 지금 다시 검증·재측정한다.
 
@@ -401,7 +446,7 @@ class ReviewWorkspaceFacade:
         )
         entries = [_PlanReviewEntry(entry, statuses[entry.asset_id]) for entry in snapshot.entries]
         revision = initial_revision(self._project_id, snapshot.revision_id, clocks, entries)
-        revision = self._automatic_selections(revision, analysis_revision_id)
+        revision = self._automatic_selections(revision, analysis_revision_id, evidence_rows)
         if preserve_source_ids and self._store.list_base_plan_ids(self._project_id):
             prior = self.load_head().revision
             retained = {
@@ -429,129 +474,228 @@ class ReviewWorkspaceFacade:
         return revision
 
     def _automatic_selections(
-        self, revision: ReviewRevision, analysis_revision_id: str | None
+        self,
+        revision: ReviewRevision,
+        analysis_revision_id: str | None,
+        evidence_rows: Mapping[str, AnalysisSourceResult] | None = None,
     ) -> ReviewRevision:
-        store = AnalysisStore(self._workspace)
-        analysis = self._analysis_revision(store, analysis_revision_id)
-        if analysis is None:
-            return revision
-        rows = {row.asset_id: row for row in store.list_source_results(analysis.revision_id)}
-        segments = []
-        for segment in revision.segments:
-            row = rows.get(segment.source_id)
-            clock = revision.clock_for(segment.source_id)
-            assert clock is not None
-            start = (segment.start_pts - clock.origin_pts) * clock.time_base
-            end = (segment.end_pts - clock.origin_pts) * clock.time_base
-            if (
-                row is None
-                or row.status not in ("analyzed", "cached", "partial")
-                or not row.record_path
-            ):
-                segments.append(
-                    replace(
-                        segment,
-                        recommendation="review_required",
-                        notes="확인 필요: 분석 미완료 또는 실패",
-                    )
-                )
-                continue
-            record = self._read_json(row.record_path, "자동 정리 근거")
-            from vlogsrt.project.raw.auto_cleanup import saved_decisions
+        """분석 증거로 자동 제외 후보를 붙이고 3단 등급을 매긴다(D35·D51).
 
-            automatic_record = dict(record)
-            if row.document_path:
-                automatic_record["auto_decisions"] = saved_decisions(
-                    self.root / row.document_path,
-                    automatic_record,
-                    segment.source_id,
-                    row.revision_id,
-                )
-            candidates = [
-                _require_mapping(d, "auto_decisions[]")
-                for d in _require_list(automatic_record.get("auto_decisions", []), "auto_decisions")
-            ]
-            match = next(
-                (
-                    d
-                    for d in candidates
-                    if _fraction_from_json(d["start"], "start") <= start
-                    and _fraction_from_json(d["end"], "end") >= end
-                ),
-                None,
+        `evidence_rows`는 원본마다 다른 분석 리비전의 결과 행이다(등급판 옮기기). 없으면
+        분석 리비전 하나의 행을 쓴다.
+        """
+        if evidence_rows is None:
+            store = AnalysisStore(self._workspace)
+            analysis = self._analysis_revision(store, analysis_revision_id)
+            if analysis is None:
+                return revision
+            rows = {row.asset_id: row for row in store.list_source_results(analysis.revision_id)}
+        else:
+            rows = dict(evidence_rows)
+        reports: dict[str, tiering.TierReport | None] = {}
+        segments = [
+            self._automatic_exclusion(segment, revision, rows.get(segment.source_id), reports)
+            for segment in revision.segments
+        ]
+        segments = self._keep_edited_sources(revision, segments)
+        graded = tuple(self._graded(segment, revision, rows, reports) for segment in segments)
+        return replace(revision, segments=graded)
+
+    def _tier_for(
+        self, row: AnalysisSourceResult, reports: dict[str, tiering.TierReport | None]
+    ) -> tiering.TierReport | None:
+        """원본의 등급 보고서 — 한 번의 조립 안에서는 한 번만 읽는다."""
+        if row.asset_id not in reports:
+            reports[row.asset_id] = self._service.tier_report(
+                self.root, row.revision_id, row.asset_id
             )
-            if match is not None:
-                provenance = {
-                    **match,
-                    "source_id": segment.source_id,
-                    "source_sha256": clock.source_sha256,
-                    "analysis_revision_id": analysis.revision_id,
-                    "segment_id": segment.segment_id,
-                }
-                segment = replace(
-                    segment,
-                    selection="excluded",
-                    visual_tags=(*confirm_tags(segment.visual_tags), AUTO_EXCLUDED_UNREVIEWED_TAG),
-                    notes="자동 제외: "
-                    + json.dumps(provenance, ensure_ascii=False, sort_keys=True),
-                )
-            elif record.get("review_reasons") or segment.speech_status == SPEECH_ANALYSIS_FAILED:
-                segment = replace(
-                    segment,
-                    recommendation="review_required",
-                    notes="확인 필요: "
-                    + "; ".join(
-                        str(r)
-                        for r in _require_list(record.get("review_reasons", []), "review_reasons")
-                    ),
-                )
-            segments.append(segment)
-        # Re-analysis never overwrites a source that has already been manually edited.
-        prior_bases = self._store.list_base_plan_ids(self._project_id)
-        if prior_bases:
-            prior = self.load_head(prior_bases[-1]).revision
-            if prior.sequence > 0:
-                old_clocks = {c.source_id: c for c in prior.clocks}
-                retained = {
-                    c.source_id for c in revision.clocks if old_clocks.get(c.source_id) == c
-                }
-                source_orders = {s.source_id: s.source_order for s in segments}
-                segments = [s for s in segments if s.source_id not in retained] + [
-                    replace(s, source_order=source_orders[s.source_id])
-                    for s in prior.segments
-                    if s.source_id in retained
-                ]
-                segments.sort(key=lambda s: (s.source_order, s.start_pts))
-        from vlogsrt.project.raw.suitability import grade
+        return reports[row.asset_id]
 
-        documents = {}
-        graded = []
-        for segment in segments:
-            row = rows.get(segment.source_id)
+    def _removal_candidates(
+        self,
+        row: AnalysisSourceResult,
+        record: Mapping[str, object],
+        reports: dict[str, tiering.TierReport | None],
+    ) -> list[Mapping[str, object]]:
+        """저장된 자동 정리 판정 + 빨강 등급 제안 — 둘 다 같은 미검토 제외로 간다."""
+        from vlogsrt.project.raw.auto_cleanup import saved_decisions
+
+        automatic = dict(record)
+        if row.document_path:
+            automatic["auto_decisions"] = saved_decisions(
+                self.root / row.document_path, automatic, row.asset_id, row.revision_id
+            )
+        candidates = [
+            _require_mapping(d, "auto_decisions[]")
+            for d in _require_list(automatic.get("auto_decisions", []), "auto_decisions")
+        ]
+        report = self._tier_for(row, reports) if row.document_path else None
+        return candidates + (tiering.red_decisions(report) if report is not None else [])
+
+    def _automatic_exclusion(
+        self,
+        segment: ReviewSegment,
+        revision: ReviewRevision,
+        row: AnalysisSourceResult | None,
+        reports: dict[str, tiering.TierReport | None],
+    ) -> ReviewSegment:
+        if row is None or row.status not in _EVIDENCE_STATUSES or not row.record_path:
+            return replace(
+                segment,
+                recommendation="review_required",
+                notes="확인 필요: 분석 미완료 또는 실패",
+            )
+        start, end = _segment_seconds(revision, segment)
+        record = self._read_json(row.record_path, "자동 정리 근거")
+        match = next(
+            (
+                d
+                for d in self._removal_candidates(row, record, reports)
+                if _fraction_from_json(d["start"], "start") <= start
+                and _fraction_from_json(d["end"], "end") >= end
+            ),
+            None,
+        )
+        if match is not None:
+            return _auto_excluded(segment, revision, row, match)
+        if record.get("review_reasons") or segment.speech_status == SPEECH_ANALYSIS_FAILED:
+            reasons = _require_list(record.get("review_reasons", []), "review_reasons")
+            return replace(
+                segment,
+                recommendation="review_required",
+                notes="확인 필요: " + "; ".join(str(r) for r in reasons),
+            )
+        return segment
+
+    def _keep_edited_sources(
+        self, revision: ReviewRevision, segments: list[ReviewSegment]
+    ) -> list[ReviewSegment]:
+        """재분석은 사람이 이미 편집한 원본을 덮어쓰지 않는다."""
+        prior_bases = self._store.list_base_plan_ids(self._project_id)
+        if not prior_bases:
+            return segments
+        prior = self.load_head(prior_bases[-1]).revision
+        if prior.sequence == 0:
+            return segments
+        old_clocks = {c.source_id: c for c in prior.clocks}
+        retained = {c.source_id for c in revision.clocks if old_clocks.get(c.source_id) == c}
+        source_orders = {s.source_id: s.source_order for s in segments}
+        kept = [s for s in segments if s.source_id not in retained] + [
+            replace(s, source_order=source_orders[s.source_id])
+            for s in prior.segments
+            if s.source_id in retained
+        ]
+        return sorted(kept, key=lambda s: (s.source_order, s.start_pts))
+
+    def _graded(
+        self,
+        segment: ReviewSegment,
+        revision: ReviewRevision,
+        rows: Mapping[str, AnalysisSourceResult],
+        reports: dict[str, tiering.TierReport | None],
+    ) -> ReviewSegment:
+        """3단 등급 — 조각을 덮는 등급 구간에서 권고와 태그를 읽는다(D51)."""
+        row = rows.get(segment.source_id)
+        if row is None or row.status not in _EVIDENCE_STATUSES or not row.document_path:
+            return segment
+        report = self._tier_for(row, reports)
+        if report is None:
+            return segment
+        start, end = _segment_seconds(revision, segment)
+        recommendation, tags = tiering.segment_grade(report, start, end)
+        return replace(
+            segment,
+            recommendation=recommendation,
+            visual_tags=(*tiering.strip_grade_tags(segment.visual_tags), *tags),
+        )
+
+    # ── 등급판 옮기기(W-11, D51) ──────────────────────────────────
+
+    def tier_evidence_rows(self) -> dict[str, AnalysisSourceResult]:
+        """원본마다 가장 최근의 판정 증거 행 — 원본별로 다른 분석 리비전일 수 있다."""
+        store = AnalysisStore(self._workspace)
+        rows: dict[str, AnalysisSourceResult] = {}
+        for revision in reversed(store.list_revisions()):
+            for row in store.list_source_results(revision.revision_id):
+                if (
+                    row.asset_id not in rows
+                    and row.status in _EVIDENCE_STATUSES
+                    and row.document_path
+                    and row.record_path
+                ):
+                    rows[row.asset_id] = row
+        return rows
+
+    @staticmethod
+    def has_human_decisions(revision: ReviewRevision) -> bool:
+        """사람이 내린 결정이 실린 머리인가 — sequence 0이어도 옛 머리에서 실려 올 수 있다.
+
+        `initialize_review(preserve_source_ids=…)`와 재분석의 원본 보존은 옛 머리의 편집된
+        조각을 새 기본 리비전(sequence 0)에 옮긴다. 그런 머리를 증거로 다시 세우면 사람의
+        제외·확인·메모·덮기가 사라진다(D35) — 그래서 sequence가 아니라 조각의 표지를 본다.
+        """
+        for segment in revision.segments:
+            notes = segment.notes
             if (
-                row is not None
-                and row.status in ("analyzed", "cached", "partial")
-                and row.document_path
+                segment.override_recommendation is not None
+                or notes.startswith(MANUAL_SELECTION_PREFIX)
+                or (notes and not notes.startswith(_MACHINE_NOTE_PREFIXES))
+                or (
+                    segment.selection == SELECTION_EXCLUDED
+                    and AUTO_EXCLUDED_UNREVIEWED_TAG not in segment.visual_tags
+                )
+                # 「자동 제외 전체 복원」은 근거 메모를 남긴 채 사용으로 되돌린다.
+                or (segment.selection != SELECTION_EXCLUDED and notes.startswith("자동 제외: "))
             ):
-                if segment.source_id not in documents:
-                    documents[segment.source_id] = dict(
-                        self._read_json(row.document_path, "Luna 평가")
-                    )
-                clock = revision.clock_for(segment.source_id)
-                assert clock is not None
-                recommendation, reason = grade(
-                    documents[segment.source_id],
-                    (segment.start_pts - clock.origin_pts) * clock.time_base,
-                    (segment.end_pts - clock.origin_pts) * clock.time_base,
-                )
-                tags = tuple(t for t in segment.visual_tags if not t.startswith("Luna 평가: "))
-                segment = replace(
-                    segment,
-                    recommendation=recommendation,
-                    visual_tags=(*tags, "Luna 평가: " + reason),
-                )
-            graded.append(segment)
-        return replace(revision, segments=tuple(graded))
+                return True
+        return False
+
+    def _geometry_edited(self, revision: ReviewRevision) -> bool:
+        """어느 계획에도 없는 경계의 조각이 있는가 — 나누기·합치기·경계 이동의 흔적이다."""
+        planned = {
+            (entry.segment_id, entry.core_start_pts, entry.core_end_pts)
+            for plan in self._service.list_segment_plan_revisions(self.root)
+            for entry in plan.entries
+        }
+        return any(
+            (segment.segment_id, segment.start_pts, segment.end_pts) not in planned
+            for segment in revision.segments
+        )
+
+    def is_untouched(self, revision: ReviewRevision) -> bool:
+        """증거로 다시 세워도 잃을 것이 없는 머리 — 편집도, 실려 온 사람 결정도 없다."""
+        return (
+            revision.sequence == 0
+            and not self.has_human_decisions(revision)
+            and not self._geometry_edited(revision)
+        )
+
+    @staticmethod
+    def has_tier_marker(revision: ReviewRevision) -> bool:
+        """지금 등급판으로 매긴 조각이 하나라도 있으면 옮긴 머리다."""
+        marker = tiering.tier_marker()
+        return any(marker in segment.visual_tags for segment in revision.segments)
+
+    def retier(self, base_plan_id: str | None = None) -> ReviewRevision:
+        """권고와 등급 태그만 다시 매긴다 — 선택·메모·덮기·경계는 그대로(D51, Q8).
+
+        사람이 등급을 덮은 조각은 권고도 그대로 두고 태그만 새로 단다. 바뀐 것이 없으면
+        리비전을 만들지 않는다.
+        """
+        head = self.load_head(base_plan_id).revision
+        rows = self.tier_evidence_rows()
+        reports: dict[str, tiering.TierReport | None] = {}
+        segments = []
+        for segment in head.segments:
+            graded = self._graded(segment, head, rows, reports)
+            if segment.override_recommendation is not None:
+                graded = replace(graded, recommendation=segment.recommendation)
+            segments.append(graded)
+        if tuple(segments) == head.segments:
+            return head
+        return self._publish_snapshot(
+            head, tuple(segments), "등급 재계산 " + tiering.TIER_SETTINGS.tier_version
+        )
 
     def _publish_snapshot(
         self, head: ReviewRevision, segments: tuple[ReviewSegment, ...], label: str
@@ -837,7 +981,7 @@ class ReviewWorkspaceFacade:
             edited = replace(
                 edited,
                 segments=tuple(
-                    replace(segment, notes="수동 선택 · " + segment.notes)
+                    replace(segment, notes=MANUAL_SELECTION_PREFIX + segment.notes)
                     if segment.segment_id in edit.segment_ids
                     and segment.notes.startswith("자동 제외: ")
                     else segment
@@ -1072,6 +1216,13 @@ class ReviewWorkspaceFacade:
             new_snapshot.revision_id,
             self._adopted_clocks(old, new_snapshot),
             entries,
+        )
+        # 입양은 경계만 옮긴다 — 등급은 저장된 증거로 새 조각마다 다시 매긴다(D51).
+        rows = self.tier_evidence_rows()
+        reports: dict[str, tiering.TierReport | None] = {}
+        adopted = replace(
+            adopted,
+            segments=tuple(self._graded(s, adopted, rows, reports) for s in adopted.segments),
         )
         self._persist_new_base(adopted, mapping)
         return self._replay_metadata(new_snapshot.revision_id, old, mapping)

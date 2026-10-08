@@ -99,12 +99,17 @@ def test_selection_runs_both_providers_and_publishes_progress_and_recommendation
         root = server.workspace_root()
         progress = server.raw.selection_suitability(root, state["revision"], state["asset_ids"])
         ranges = progress[state["asset_ids"][0]]
+        # 3단 등급(D51) — Luna가 도는 동안은 소리를 재지 않아 빨강이 없고, 판정 전 창은 보류다.
+        # 발화 끝(1.5초)+여유 0.3초까지가 발화 구역이다(발화 하나하나로는 자르지 않는다).
         assert len(ranges) == 3
-        assert ranges[0]["end"] == {"num": 1, "den": 2}
-        assert ranges[1]["end"] == {"num": 3, "den": 2}
+        assert ranges[0]["end"] == {"num": 9, "den": 5}
+        assert (ranges[0]["tier"], ranges[0]["recommendation"]) == ("green", "recommended")
+        assert ranges[1]["end"] == {"num": 15, "den": 1}
+        assert (ranges[1]["tier"], ranges[1]["audio"]["status"]) == ("yellow", "unmeasured")
         assert ranges[2]["recommendation"] == "review_required"
-        assert ranges[2]["evaluated"] is False
-        assert progress[state["asset_ids"][0]][0]["recommendation"] == "recommended"
+        assert (ranges[2]["tier"], ranges[2]["hold"]) == ("yellow", True)
+        assert ranges[2]["video"]["status"] == "unanalyzed"
+        assert all(r["tier"] != "red" for r in ranges)
     finally:
         client.resume.set()
     wait_until(lambda: server._quick.get("stage") in ("추천 구간 준비 완료", "분석 확인 필요"))
@@ -117,7 +122,13 @@ def test_selection_runs_both_providers_and_publishes_progress_and_recommendation
         for call in client.calls
     )
     head = server.raw.review_workspace_facade(root).load_head().revision
-    assert {s.recommendation for s in head.segments} == {"review_required"}
+    # 3단 등급(D51): Luna의 확인 메모가 더는 전부를 '검토 필요'로 끌어내리지 않는다.
+    # 원본 하나가 한 조각이다 — 녹색(창 0의 발화)과 노랑(나머지)이 섞여 '보통'이다.
+    assert [
+        (s.recommendation, [t for t in s.visual_tags if t.startswith("등급: ")])
+        for s in head.segments
+    ] == [("normal", ["등급: 보통"])]
+    assert all("등급판 raw-tier/v1" in s.visual_tags for s in head.segments)
     assert all(s.selection == "included" for s in head.segments)  # no scenic deletion
     assert not list(
         (root / "clips").glob("package_*")
