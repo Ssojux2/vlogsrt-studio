@@ -84,6 +84,15 @@ NOTICE_TEXT = {
     "앱을 다시 시작하면 중단된 승인을 복구한 뒤 다시 승인할 수 있습니다.",
 }
 LIBRARY_APPROVE_LABEL = "전체 영상 분석 승인"
+# 화면 맞춤(D50) — 머리글은 한 줄, 정리 탭은 CSS가 간격을 좁힐 범위 이름을 단다.
+APP_HEADER_ID = "app-header"
+REVIEW_TAB_ID = "review-tab"
+APP_HEADER_TEXT = (
+    "**vlogsrt · Final Cut 컷 정리** · "
+    "라이브러리 불러오기 → 자막·영상 분석 → 사용할 컷 선택 → Final Cut 출력 · {mode_note}"
+)
+ONLINE_MODE_NOTE = "온라인 모드 · 범위 승인 뒤 유료 분석"
+OFFLINE_MODE_NOTE = "오프라인 모드 · 유료 분석 차단"
 # 승인된 분석이 입장 차례를 다시 확인하는 간격 — 취소도 이 간격 안에 알아챈다.
 ANALYSIS_ADMISSION_POLL_SECONDS = 0.05
 QUICK_APPROVED_TEXT = (
@@ -2078,7 +2087,7 @@ class RawWorkspaceUi:
     def _review_tab(
         self,
     ) -> tuple[gr.Button, gr.Button, gr.Dropdown, gr.Button]:
-        with gr.Tab("영상 정리"):
+        with gr.Tab("영상 정리", elem_id=REVIEW_TAB_ID):
             with gr.Row():
                 choose = gr.Button("영상 선택", visible=False)
                 self._quick_library_button = gr.Button("라이브러리 불러오기")
@@ -2091,11 +2100,13 @@ class RawWorkspaceUi:
                 handoff = gr.Button("선택한 컷 Final Cut으로 출력")
                 # 출력 거부 문구가 이 단추를 누르라고 말한다 — 접힌 서랍에 두지 않는다.
                 confirm_auto = gr.Button("자동 제외 확인")
-            library_summary = gr.Markdown(
-                self.library_analysis_summary(), elem_id="library-analysis-scope"
-            )
+            # 범위 요약과 진행 상태를 한 줄에 — 무대가 쓸 세로 공간을 아낀다(D50).
+            with gr.Row():
+                library_summary = gr.Markdown(
+                    self.library_analysis_summary(), elem_id="library-analysis-scope"
+                )
+                self._capcut_progress_md = gr.Markdown(self._quick_status(), elem_id="quick-status")
             self._capcut_status = gr.Markdown(visible=False)
-            self._capcut_progress_md = gr.Markdown(self._quick_status(), elem_id="quick-status")
             # ── V2 영상 작업대 — 3단 무대(왼쪽 목록 · 가운데 재생기+렠 · 오른쪽 패널).
             # 두 구성요소가 같은 `#visual-stage` 격자에 들어가고, 껍데기·본문의
             # 중간 껍데기는 display:contents로 펴져 세 칸이 한 눈에 짝을 이룬다.
@@ -6825,15 +6836,15 @@ class RawWorkspaceUi:
 
     def build_blocks(self) -> gr.Blocks:
         # theme·css는 gradio 6부터 launch/마운트 쪽 인자다(Blocks 생성자에 넣으면 경고).
-        with gr.Blocks(title="vlogsrt 원본 브라우저") as app:
-            gr.Markdown("### vlogsrt · Final Cut 컷 정리")
-            gr.Markdown("라이브러리 불러오기 → 자막·영상 분석 → 사용할 컷 선택 → Final Cut 출력")
-            gr.Markdown(
-                "**온라인 모드** · 선택한 영상의 범위를 승인한 뒤 유료 분석을 실행합니다."
+        # fill_width — 그라디오 .fillable 폭 상한은 CSS로 풀리지 않는다(D50 실측).
+        with gr.Blocks(title="vlogsrt 원본 브라우저", fill_width=True) as app:
+            # 세 줄 머리글이 재생기·타임라인을 화면 밖으로 밀었다 — 한 줄로 합친다(D50).
+            mode_note = (
+                ONLINE_MODE_NOTE
                 if raw_service.browser_network_mode() == "online"
-                else "**오프라인 모드** · 이 실행에서는 유료 분석을 차단합니다.",
-                elem_id="app-analysis-mode",
+                else OFFLINE_MODE_NOTE
             )
+            gr.Markdown(APP_HEADER_TEXT.format(mode_note=mode_note), elem_id=APP_HEADER_ID)
             # 화면이 마지막으로 본 작업공간 신원 — 선택의 최신 증명에만 쓴다.
             # 정본은 서버(DB)에 있고, 이 값은 새로고침마다 서버에서 다시 내려온다.
             self._signature_state = gr.State(None)

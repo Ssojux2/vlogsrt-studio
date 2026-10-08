@@ -567,12 +567,27 @@ WORKBENCH_CSS = """
 }
 /* 3단 무대 — 왼쪽 시간순 목록 · 가운데 큰 재생기+시간 렠 · 오른쪽 선택 패널.
    구성요소 껍데기(vl-stage-cell)와 본문 뿌리는 display:contents로 격자에
-   참여한다 — 1440x900에서 주 조작이 문서 스크롤 없이 한눈에 들어온다. */
+   참여한다. 무대 치수는 여기 한 곳 — 흩어진 재선언이 마지막에 이겨 목록 칸이
+   180px로 묶이고 재생기·타임라인이 화면 아래로 밀리던 결함(D50).
+   --vl-stage-top은 실행본(__vlFitStage)이 실측해 덮어쓴다 — 머리글·아코디언
+   높이는 CSS가 모르므로 무대 높이를 화면에서 무대 위쪽을 뺀 값으로 맞춘다. */
 #visual-stage {
+  --vl-stage-top: 320px;
+  /* 바닥값 = 타임라인 렠 칸(≈200) + 각주·간격(≈30) + 자막 줄·안내(≈60) + 최소 영상(≈110).
+     560이면 800px 높이 창(무대 위쪽 279–335px 실측)에서 렠이 6–62px 잘렸다(D50). */
+  --vl-stage-min-h: 400px;
+  --vl-list-col: minmax(240px, 300px);
+  --vl-panel-col: minmax(240px, 300px);
+  --vl-stage-gap: 10px;
+  --vl-thumb-art-w: 64px; --vl-thumb-art-h: 46px;
+  --vl-name-lines: 2;
+  --vl-scrollbar: #555e66 #292b2f;
   display: grid;
-  grid-template-columns: minmax(200px, 300px) minmax(0, 1fr) minmax(260px, 400px);
+  grid-template-columns: var(--vl-list-col) minmax(0, 1fr) var(--vl-panel-col);
+  grid-template-rows: minmax(0, 1fr) auto auto;
   grid-template-areas: "thumbs player panel" "timeline timeline timeline" "foot foot foot";
-  gap: 12px; align-items: start; margin-top: 4px;
+  height: max(var(--vl-stage-min-h), calc(100vh - var(--vl-stage-top)));
+  gap: var(--vl-stage-gap); align-items: stretch; margin-top: 4px; min-width: 0;
 }
 #visual-stage .vl-stage-cell { display: contents; }
 /* 그라디오 실측(ROOT 1440x900): 구성요소 껍데기(.vl-stage-cell) 안에 네이티브
@@ -584,47 +599,115 @@ WORKBENCH_CSS = """
 #visual-workbench:not([data-vl-empty]) { display: contents; }
 #visual-workbench[data-vl-empty] { grid-column: 1 / -1; }
 #vl-thumbs { grid-area: thumbs; }
+/* 카드 열은 minmax(0,1fr) — 그냥 1fr(=minmax(auto,1fr))이면 카드 최소 폭 아래로
+   줄지 못해 목록 안에 가로 스크롤이 생긴다. 스크롤바 색을 주지 않으면 어두운
+   테마에서 흰 띠로 남는다. */
+#visual-stage .vl-thumbs {
+  display: grid; grid-template-columns: minmax(0, 1fr); align-content: start;
+  gap: 6px; padding: 8px;
+  max-height: 100%; min-height: 0; overflow: hidden auto; scrollbar-color: var(--vl-scrollbar);
+  border-radius: 8px; border: 1px solid var(--block-border-color, #e3e8ee);
+  background: var(--block-background-fill, transparent);
+}
+#visual-stage .vl-thumbs > .vl-row, #visual-stage .vl-pager { grid-column: 1 / -1; }
+/* 테두리·배경은 클래스 단계에 둔다 — 선택(.vl-thumb-sel) 강조가 무대 범위
+   선택자에 덮이지 않는다. 배치만 무대 범위에서 정한다. */
+.vl-thumb {
+  display: flex; border-radius: 8px; text-align: left; cursor: pointer;
+  border: 1px solid var(--block-border-color, #e3e8ee);
+  background: var(--block-background-fill, #fff);
+  color: var(--body-text-color, #223);
+}
+.vl-thumb-sel { border-color: #2f6db3; box-shadow: 0 0 0 1px #2f6db3; }
+.vl-thumb-ex { opacity: 0.55; }
+#visual-stage .vl-thumb {
+  min-width: 0; width: 100%; flex-direction: row; gap: 6px; padding: 5px; align-items: center; }
+.vl-thumb img { background: #000; border-radius: 4px; }
+.vl-thumb-missing {
+  border-radius: 4px; background: var(--block-background-fill, #eef1f4);
+  color: var(--body-text-color-subdued, #889); font-size: 10px;
+  display: flex; align-items: center; justify-content: center;
+}
+#visual-stage .vl-thumb img, #visual-stage .vl-thumb-missing {
+  width: var(--vl-thumb-art-w); height: var(--vl-thumb-art-h); object-fit: cover; flex: none; }
+#visual-stage .vl-thumb-meta {
+  display: flex; flex-direction: column; gap: 2px; flex: 1 1 auto; min-width: 0; }
+/* 긴 파일 이름은 두 줄까지 보이고 말줄임 — 전체 이름은 카드 title 말풍선(D50). */
+#visual-stage .vl-thumb-name {
+  font-size: 13px; color: var(--body-text-color, #223);
+  max-width: none; white-space: normal; overflow-wrap: anywhere; line-height: 1.25;
+  display: -webkit-box; -webkit-line-clamp: var(--vl-name-lines); -webkit-box-orient: vertical;
+  overflow: hidden; }
+.vl-thumb-sub {
+  display: flex; flex-wrap: wrap; gap: 3px; align-items: center; min-width: 0;
+  font-size: 11px; color: var(--body-text-color-subdued, #778);
+  font-variant-numeric: tabular-nums;
+}
+/* 배지는 줄 안에서 쪼개지지 않고 통째로 다음 줄로 넘어간다 — 잘림 없음. */
+.vl-badge {
+  display: inline-block; font-size: 10px; padding: 1px 6px; border-radius: 8px;
+  background: var(--block-background-fill, #eef1f4);
+  color: var(--body-text-color-subdued, #556);
+  border: 1px solid var(--block-border-color, transparent); white-space: nowrap;
+}
+.vl-badge-warn { background: rgba(179, 69, 47, 0.14); color: #b3452f; }
 #visual-player { display: contents; }
-#visual-preview { grid-area: player; min-width:0; }
-#visual-preview video { width:100%; height:300px; background:#08090b; object-fit:contain; }
-.vl-video-surface { position:relative; }
+#visual-preview { grid-area: player; min-width: 0; min-height: 0;
+  display: flex; flex-direction: column; }
+.vl-video-surface { position: relative; flex: 1 1 auto; min-height: 0; display: flex; }
+#visual-preview video {
+  width: 100%; height: auto; flex: 1 1 auto; min-height: 0;
+  background: #08090b; object-fit: contain; }
+.vl-current-caption, #visual-note { flex: none; }
+#visual-note, .vl-footnote { overflow-wrap: anywhere; }
+#vl-panel { grid-area: panel; max-height: 100%; min-height: 0; overflow: hidden auto;
+  box-sizing: border-box; scrollbar-color: var(--vl-scrollbar); }
+#visual-timeline { grid-area:timeline; min-width:0; overflow-x:auto; padding-top:4px; }
+#vl-footnote { grid-area: foot; }
+/* 재생기 아래 두 줄의 여백 — 계약 시험이 위 격자 선언을 글자 그대로 본다. */
+#vl-footnote, #visual-note { margin: 2px 0 0; }
+/* 폭 상한은 Blocks(fill_width=True)가 푼다 — 여기는 가로 넘침만 막는다. */
+.gradio-container, .gradio-container .app { min-width: 0; max-width: 100vw; }
+/* 정리 탭 세로 예산(D50) — 그라디오 .row > * 의 min-width 160·flex 1이 단추 라벨을
+   두 줄로 접어 64px를 먹었다. 단추는 제 글자 폭만큼만 차지한다. 실측 DOM:
+   div#review-tab.tabitem > div.column > div.row > button. */
+#review-tab .column { gap: 6px; }
+#review-tab > .column > .row > button { flex: 0 1 auto; min-width: 0; padding: 6px 12px; }
+#quick-status { padding: 2px 8px; }
+#quick-status p { margin: 1px 0; font-size: 12px; }
+#library-analysis-scope p { margin: 0; }
 #visual-video::cue { color:#fff; background:rgba(0,0,0,.78); font-size:20px; }
 .vl-source-overlay { position:absolute; bottom:44px; left:50%; transform:translateX(-50%);
  max-width:90%; padding:5px 10px; border-radius:4px; text-align:center; white-space:pre-wrap;
  background:rgba(0,0,0,.78); color:#fff; font-size:20px; line-height:1.4; pointer-events:none; }
 .vl-source-overlay[hidden] { display:none; }
-#visual-timeline { grid-area:timeline; min-width:0; overflow-x:auto; padding-top:8px; }
-#visual-stage { grid-template-columns:minmax(190px,250px) minmax(0,1fr) minmax(220px,290px); }
-#visual-stage .vl-thumbs { display:grid; grid-template-columns:repeat(2,minmax(0,1fr));
- max-height:324px; align-content:start; gap:8px; padding:8px; }
-#visual-stage .vl-thumbs>.vl-row,#visual-stage .vl-pager { grid-column:1/-1; }
-#visual-stage .vl-thumb { flex-direction:column; padding:5px; align-items:stretch; }
-#visual-stage .vl-thumb img,#visual-stage .vl-thumb-missing {
- width:100%; height:75px; object-fit:cover; }
-#visual-stage .vl-thumb-name { max-width:115px; }
 .vl-legend { flex:1; color:#b8c3ca; font-size:12px; }
 .vl-good { color:#49d8c7; } .vl-review { color:#edbd74; }
-.vl-ruler { position:absolute;inset:0 0 auto;height:22px;border-bottom:1px solid #41464c; }
+.vl-ruler { position:absolute; inset:0 0 auto; height:var(--vl-ruler-h);
+ border-bottom:1px solid #41464c; }
 .vl-ruler span { position:absolute;font-size:10px;color:#b1b9c1;transform:translateX(-50%); }
-.vl-recommendation { position:absolute;top:30px;height:26px;border:0;border-radius:3px;
+.vl-recommendation { position:absolute; top:var(--vl-rec-top); height:var(--vl-rec-h);
+ border:0;border-radius:3px;
  background:#4c6871;color:white;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;
- font-size:11px;min-width:3px;text-align:left;padding:3px 7px; }
+ font-size:11px;min-width:3px;text-align:left;padding:1px 6px; }
 .vl-recommendation.recommended { background:#177e73;color:#e9fffb;border-top:2px solid #48d7c7; }
 .vl-recommendation.review_required {
  background:#745638;color:#ffe8c4;border-top:2px solid #edbd74; }
-.vl-rec-pending { position:absolute;top:32px;left:10px;color:#aab5be;font-size:12px; }
-.vl-source-caption { position:absolute;top:166px;height:26px;border:0;border-radius:3px;
+.vl-rec-pending { position:absolute; top:calc(var(--vl-rec-top) + 1px); left:10px;
+ color:#aab5be; font-size:12px; }
+/* 그라디오 button{font:inherit}이 16px·22.4px 줄과 큰 단추 여백을 물려 22px 칸에서
+   글자가 6px 잘렸다(D50 실측) — 이 층만 제 글자 크기·줄 높이·여백을 정한다. */
+.vl-source-caption { position:absolute; top:var(--vl-cue-top); height:var(--vl-cue-h);
+  font-size:12px; line-height:1.3; padding:0 6px;
+  border:0;border-radius:3px;
   background:#36598a;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis; }
 .vl-source-caption-editor { border:1px solid #36598a;padding:10px; }
-.vl-audio-strip { position:absolute;top:134px;left:0;right:0;height:28px;padding:5px 8px;
+.vl-audio-strip { position:absolute; top:var(--vl-audio-top); left:0; right:0;
+ height:var(--vl-audio-h); padding:3px 8px;
  background:#193749;color:#bad8e8;font-size:11px;box-sizing:border-box; }
 .vl-int span { background:#172a32b0;padding:2px 6px;font-size:10px;color:#f2fbff; }
 .vl-marker-reason { padding:10px;background:#223d3a;border-left:3px solid #43caba; }
-#quick-status p { margin:3px 0;font-size:13px; }
-.gradio-container { max-width:none!important; }
 
-#vl-panel { grid-area: panel; max-height:324px; overflow-y:auto; box-sizing:border-box; }
-#vl-footnote { grid-area: foot; }
 /* 자막 무대 — 왼쪽 재생기(영상·파형·이동) · 오른쪽 큐 목록+편집기(주 저장·확정).
    세팅·등록·실행은 무대 위 접힌 아코디언으로, 1440x900에서 주 조작이
    문서 스크롤 없이 먼저 들어온다(ROOT 실측 재배치). */
@@ -638,14 +721,22 @@ WORKBENCH_CSS = """
 #caption-stage .html-container { display: contents !important; }
 #caption-player { grid-area: player; }
 #caption-workbench { grid-area: cues; }
+/* 렠 층 좌표는 여기 한 곳(D50) — 202px 렠이 800–900px 창에서 재생기를 130–250px로 눌렀다.
+   실행본은 층의 left·width만 정하고 세로 좌표는 CSS만 안다. */
 .vl-rail {
-  position: relative; height: 202px; border-radius: 6px; margin-top: 6px;
+  --vl-rail-h: 150px; --vl-ruler-h: 16px;
+  --vl-rec-top: 20px; --vl-rec-h: 20px;
+  --vl-int-top: 44px; --vl-int-h: 40px; --vl-handle-h: 28px;
+  --vl-audio-top: 88px; --vl-audio-h: 22px;
+  --vl-cue-top: 114px; --vl-cue-h: 22px;
+  position: relative; height: var(--vl-rail-h); border-radius: 6px; margin-top: 4px;
   touch-action: none; cursor: pointer; overflow: visible;
   background: var(--block-background-fill, #edf1f5);
   border: 1px solid var(--block-border-color, transparent);
 }
 .vl-int {
-  position: absolute; top: 68px; height: 56px; border:1px solid #697d85; border-radius:4px;
+  position: absolute; top: var(--vl-int-top); height: var(--vl-int-h);
+  border:1px solid #697d85; border-radius:4px;
   background-size:auto 100%;background-repeat:repeat-x;
   background: var(--border-color-primary, #c8d4de); min-width: 2px; padding: 0;
   background-size:auto 100%;background-repeat:repeat-x;
@@ -661,7 +752,7 @@ WORKBENCH_CSS = """
   background: #b3452f; pointer-events: none;
 }
 .vl-handle {
-  position: absolute; top: 2px; width: 12px; height: 40px; border-radius: 6px;
+  position: absolute; top: 2px; width: 12px; height: var(--vl-handle-h); border-radius: 6px;
   background: #2f6db3; cursor: ew-resize; border: none; padding: 0; z-index: 2;
 }
 .vl-handle:focus-visible { outline: 2px solid #17406b; }
@@ -672,53 +763,11 @@ WORKBENCH_CSS = """
   position: absolute; top: -4px; bottom: -4px; width: 2px;
   background: #d98324; pointer-events: none; z-index: 3;
 }
-.vl-transport {
-  display: flex; gap: 8px; align-items: center; margin-top: 6px; flex-wrap: wrap;
-}
+.vl-transport { display:flex; gap:8px; align-items:center; margin-top:2px; flex-wrap:wrap; }
 .vl-clock {
   font-variant-numeric: tabular-nums;
   color: var(--body-text-color, #445); font-size: 13px;
 }
-.vl-thumbs {
-  max-height: 56vh; overflow-y: auto; display: flex; flex-direction: column; gap: 6px;
-  padding: 2px; border-radius: 8px;
-  border: 1px solid var(--block-border-color, #e3e8ee);
-  background: var(--block-background-fill, transparent);
-}
-.vl-thumb {
-  display: flex; gap: 8px; align-items: center; border-radius: 8px; padding: 4px;
-  border: 1px solid var(--block-border-color, #e3e8ee);
-  background: var(--block-background-fill, #fff); cursor: pointer; text-align: left;
-  color: var(--body-text-color, #223);
-}
-.vl-thumb-sel { border-color: #2f6db3; box-shadow: 0 0 0 1px #2f6db3; }
-.vl-thumb-ex { opacity: 0.55; }
-.vl-thumb img {
-  width: 64px; height: 36px; object-fit: contain;
-  background: #000; border-radius: 4px; flex: none;
-}
-.vl-thumb-missing {
-  width: 64px; height: 36px; border-radius: 4px; flex: none;
-  background: var(--block-background-fill, #eef1f4);
-  color: var(--body-text-color-subdued, #889); font-size: 10px;
-  display: flex; align-items: center; justify-content: center;
-}
-.vl-thumb-meta { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-.vl-thumb-name {
-  font-size: 13px; color: var(--body-text-color, #223);
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 180px;
-}
-.vl-thumb-sub {
-  font-size: 11px; color: var(--body-text-color-subdued, #778);
-  font-variant-numeric: tabular-nums;
-}
-.vl-badge {
-  display: inline-block; font-size: 10px; padding: 1px 6px; border-radius: 8px;
-  background: var(--block-background-fill, #eef1f4);
-  color: var(--body-text-color-subdued, #556);
-  border: 1px solid var(--block-border-color, transparent);
-}
-.vl-badge-warn { background: rgba(179, 69, 47, 0.14); color: #b3452f; }
 .vl-panel {
   border: 1px solid var(--block-border-color, #e3e8ee); border-radius: 8px;
   padding: 10px; min-width: 0;
@@ -800,47 +849,30 @@ WORKBENCH_CSS = """
   color: var(--body-text-color-subdued, #667); min-width: 0;
 }
 .cap-editor-fields label:first-child { flex: 1 1 220px; }
-/* 좁은 화면(390px 등) — 격자 영역 순서가 재생기를 맨 처음 보내고 가로 넘침은
-   없다(minmax(0,1fr) 단일 칸). */
-@media (max-width: 860px) {
-  #visual-stage {
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-areas: "player" "thumbs" "panel" "timeline" "foot";
-  }
-  #caption-stage {
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-areas: "player" "cues";
-  }
-  .vl-thumbs { max-height: 40vh; }
-  .cap-cues { max-height: 28vh; }
-}
-/* Library review: video and current sentence dominate the workspace. */
-#visual-stage { grid-template-columns:180px minmax(0,1fr) 270px; gap:10px; }
-#visual-preview video { height:clamp(360px,52vh,620px); }
-#visual-stage .vl-thumbs { grid-template-columns:1fr; max-height:64vh; }
-#visual-stage .vl-thumb { flex-direction:row; gap:6px; }
-#visual-stage .vl-thumb img,#visual-stage .vl-thumb-missing { width:64px;height:46px; }
-#visual-stage .vl-thumb-name { max-width:88px; }
-#vl-panel { max-height:64vh;overflow:auto; }
 #visual-video::cue,.vl-source-overlay { font-size:clamp(20px,1.8vw,28px); }
-.vl-current-caption { width:100%;min-height:48px;padding:8px 12px;margin-top:6px;
- color:#f5f7f8;background:#292e34;border:1px solid #54616b;border-radius:5px;
- font-size:20px;line-height:1.45;text-align:center;white-space:pre-wrap;cursor:pointer; }
+.vl-current-caption { width:100%; min-height:36px; padding:5px 10px; margin-top:4px;
+ color:#f5f7f8; background:#292e34; border:1px solid #54616b; border-radius:5px;
+ font-size:18px; line-height:1.3; text-align:center; white-space:pre-wrap; cursor:pointer; }
 .vl-current-caption:disabled { color:#b7c2cb;font-size:14px;cursor:default; }
 #vl-panel [data-vl-act="toggle-sel"] { flex:1 1 100%;font-size:15px;padding:9px; }
-#library-analysis-scope p,#app-analysis-mode p { font-size:12px;margin:2px 0; }
-#quick-status { padding:6px 10px; }
-@media(max-width:1050px) {
- #visual-stage { grid-template-columns:150px minmax(0,1fr);grid-template-areas:
-  "thumbs player" "thumbs panel" "timeline timeline" "foot foot"; }
- #vl-panel { max-height:260px; }
- #visual-preview video { height:clamp(300px,48vh,540px); }
+#app-header p { font-size:12px;margin:2px 0; }
+/* 반응형 — 넓은 쪽(1050) 다음 좁은 쪽(860) 순서여야 좁은 규칙이 이긴다(D50:
+   예전엔 860 뒤에 무대 재선언이 와서 860 규칙이 죽어 있었다). 좁은 화면은 무대
+   높이를 화면에 묶지 않고 문서 스크롤에 맡긴다. 390px 등에서 격자 영역 순서가
+   재생기를 맨 처음 보내고 가로 넘침은 없다(minmax(0,1fr) 단일 칸). */
+@media (max-width: 1050px) {
+  #visual-stage { height: auto; grid-template-columns: minmax(150px, 200px) minmax(0, 1fr);
+    grid-template-areas: "thumbs player" "thumbs panel" "timeline timeline" "foot foot"; }
+  #visual-stage .vl-thumbs, #vl-panel { max-height: 64vh; }
+  #visual-preview video { flex: none; height: clamp(300px, 48vh, 540px); }
 }
-@media(max-width:680px) {
- #visual-stage { grid-template-columns:minmax(0,1fr);grid-template-areas:
-  "player" "panel" "timeline" "thumbs" "foot"; }
- #visual-preview video { height:clamp(230px,45vh,420px); }
- #visual-stage .vl-thumbs { grid-template-columns:repeat(2,minmax(0,1fr));max-height:180px; }
+@media (max-width: 860px) {
+  #visual-stage { grid-template-columns: minmax(0, 1fr);
+    grid-template-areas: "player" "thumbs" "panel" "timeline" "foot"; }
+  #caption-stage { grid-template-columns: minmax(0, 1fr); grid-template-areas: "player" "cues"; }
+  #visual-stage .vl-thumbs { grid-template-columns: repeat(2, minmax(0, 1fr)); max-height: 40vh; }
+  #visual-preview video { height: clamp(230px, 45vh, 420px); }
+  .cap-cues { max-height: 28vh; }
 }
 
 """
@@ -1017,6 +1049,20 @@ VISUAL_BOOTSTRAP_JS = (
     + r"""
 (function () {
   var W = window;
+  // 전역 단축키 상수(D50) — 함수 안에 숫자를 두지 않는다. ←/→는 렠 손잡이의
+  // 프레임 이동 몫이라 전역 표에 넣지 않는다. 글자 키는 ev.code로 견준다 —
+  // 한글 입력기에서는 ev.key가 자모('ㅏ')로 오기 때문이다.
+  var VL_SEEK_SECONDS = 5;
+  var VL_FALLBACK_FRAME_SECONDS = 1 / 30;
+  // 입력기 조합 중 keydown은 keyCode 229로 온다(isComposing을 안 싣는 브라우저 대비).
+  var VL_IME_PROCESS_KEYCODE = 229;
+  var VL_EDITABLE = 'input, textarea, select, [contenteditable=""], ' +
+    '[contenteditable="true"], [role="textbox"]';
+  // 보이는 첫 영상 하나만 조작한다 — 숨은 탭의 영상은 offsetParent가 null이다.
+  var VL_SHORTCUT_VIDEOS = [["visual-video", "vl-footnote"], ["caption-video", "cap-msg"]];
+  var VL_SHORTCUT_ACTIONS = { "Space": "toggle", "KeyK": "toggle", "KeyJ": "back",
+    "KeyL": "forward", "Comma": "frameBack", "Period": "frameForward" };
+  var VL_PLAY_FAILED_TEXT = "재생할 수 없다: ";
   if (!W.__vlWireVisual) {
     W.__vlWireVisual = function (root, doc) {
 """
@@ -1256,6 +1302,8 @@ VISUAL_BOOTSTRAP_JS = (
           v.setAttribute("data-vl-src", info.src);
           v.src = info.src;
         }
+        // 전역 단축키(쉼표·마침표)가 클로저 없이 이 원본의 한 프레임 길이를 읽는다.
+        v._vlFrameSec = info.rail && info.rail.frameSec ? VL.toFloat(ratOf(info.rail.frameSec)) : 0;
       }
       function syncVideo() {
         var v = videoEl();
@@ -1303,7 +1351,7 @@ VISUAL_BOOTSTRAP_JS = (
           var speech = speechLabel(c.speech);
           rows.push(
             '<button type="button" class="' + cls + '" data-vl-card="' +
-              esc(c.id) + '" role="option"' +
+              esc(c.id) + '" role="option"' + ' title="' + esc(c.sourceName) + '"' +
             ' aria-selected="' + (c.id === sel ? "true" : "false") + '">' + art +
             '<span class="vl-thumb-meta"><span class="vl-thumb-name">' +
               esc(c.sourceName) + (c.media ? "" : " " + (c.order + 1) + "번") + "</span>" +
@@ -2283,6 +2331,97 @@ VISUAL_BOOTSTRAP_JS = (
     element.__vlVisualObserver = new Observer(function () { wireCommitted(); });
     element.__vlVisualObserver.observe(element, { childList: true, subtree: true,
       attributes: true, attributeFilter: ["data-vl-model"] });
+  }
+  if (!W.__vlStageFitBound && typeof W.addEventListener === "function") {
+    W.__vlStageFitBound = true;
+    // 머리글·아코디언 높이는 CSS가 모른다 — 무대의 문서 상단을 재서 CSS 변수로 넘긴다.
+    W.__vlFitStage = function () {
+      var stage = document.getElementById("visual-stage");
+      // 숨은 탭에서 재면 위쪽이 0이라 한 프레임 동안 무대가 화면 전체로 번쩍인다.
+      if (!stage || !stage.getBoundingClientRect || stage.offsetParent === null) { return; }
+      var next = Math.round(stage.getBoundingClientRect().top + (W.scrollY || 0)) + "px";
+      if (stage.style.getPropertyValue("--vl-stage-top") !== next) {
+        stage.style.setProperty("--vl-stage-top", next);
+      }
+    };
+    W.addEventListener("resize", W.__vlFitStage);
+    var stageEl = document.getElementById("visual-stage");
+    if (W.ResizeObserver && stageEl && stageEl.parentElement) {
+      new W.ResizeObserver(function () { W.__vlFitStage(); }).observe(stageEl.parentElement);
+    }
+    W.__vlFitStage();
+  }
+  // 전역 단축키(D50) — 문서에 한 번만 묶고 DOM은 사건 순간에 찾는다(작업대가
+  // 다시 그려져도 옛 원소를 붙잡지 않는다). 렠 손잡이의 railKey가 먼저 처리해
+  // preventDefault한 키는 건드리지 않는다.
+  if (!W.__vlGlobalKeysBound && typeof document.addEventListener === "function") {
+    W.__vlGlobalKeysBound = true;
+    W.__vlShortcutVideo = function () {
+      for (var i = 0; i < VL_SHORTCUT_VIDEOS.length; i += 1) {
+        var v = document.getElementById(VL_SHORTCUT_VIDEOS[i][0]);
+        if (v && v.offsetParent !== null) { return { video: v, noteId: VL_SHORTCUT_VIDEOS[i][1] }; }
+      }
+      return null;
+    };
+    W.__vlShortcutBlocked = function (ev) {
+      if (!ev || ev.isComposing || ev.keyCode === VL_IME_PROCESS_KEYCODE || ev.repeat) {
+        return true;
+      }
+      if (ev.defaultPrevented || ev.metaKey || ev.ctrlKey || ev.altKey || ev.shiftKey) {
+        return true;
+      }
+      var t = ev.target;
+      return !!(t && (t.isContentEditable ||
+        (typeof t.closest === "function" && t.closest(VL_EDITABLE))));
+    };
+    W.__vlShortcutAction = function (ev) {
+      if (W.__vlShortcutBlocked(ev)) { return null; }
+      var code = ev.key === " " ? "Space" : ev.code;
+      return Object.prototype.hasOwnProperty.call(VL_SHORTCUT_ACTIONS, code)
+        ? VL_SHORTCUT_ACTIONS[code] : null;
+    };
+    // 재생 거부(자동 재생 정책·소스 없음)는 삼키지 않고 그 화면의 각주에 드러낸다.
+    W.__vlTogglePlay = function (target) {
+      var v = target.video;
+      if (!v.paused && !v.ended) { v.pause(); return; }
+      var started = v.play();
+      if (started && typeof started.then === "function") {
+        started.then(null, function (err) {
+          var note = document.getElementById(target.noteId);
+          if (note) { note.textContent = VL_PLAY_FAILED_TEXT + (err && err.name ? err.name : err); }
+        });
+      }
+    };
+    W.__vlStepFrame = function (v, direction) {
+      var frame = v._vlFrameSec > 0 ? v._vlFrameSec : VL_FALLBACK_FRAME_SECONDS;
+      v.pause();
+      W.__vlSeekBy(v, direction * frame);
+    };
+    W.__vlSeekBy = function (v, delta) {
+      var end = v.duration > 0 && isFinite(v.duration) ? v.duration : Infinity;
+      v.currentTime = Math.min(end, Math.max(0, (v.currentTime || 0) + delta));
+    };
+    W.__vlShortcutRun = {
+      toggle: function (target) { W.__vlTogglePlay(target); },
+      back: function (target) { W.__vlSeekBy(target.video, -VL_SEEK_SECONDS); },
+      forward: function (target) { W.__vlSeekBy(target.video, VL_SEEK_SECONDS); },
+      frameBack: function (target) { W.__vlStepFrame(target.video, -1); },
+      frameForward: function (target) { W.__vlStepFrame(target.video, 1); }
+    };
+    W.__vlShortcutKey = function (ev) {
+      var action = W.__vlShortcutAction(ev);
+      var target = action ? W.__vlShortcutVideo() : null;
+      if (!target) { return; }
+      ev.preventDefault();
+      W.__vlShortcutRun[action](target);
+    };
+    // 초점 단추는 스페이스 keyup에서 눌린다 — 영상 토글이 이기도록 그 기본 동작을 막는다(Q1).
+    W.__vlShortcutKeyUp = function (ev) {
+      var space = ev && (ev.code === "Space" || ev.key === " ");
+      if (space && W.__vlShortcutAction(ev) && W.__vlShortcutVideo()) { ev.preventDefault(); }
+    };
+    document.addEventListener("keydown", W.__vlShortcutKey);
+    document.addEventListener("keyup", W.__vlShortcutKeyUp);
   }
   if (!W.__vlVisualWatchBound) {
     W.__vlVisualWatchBound = true;

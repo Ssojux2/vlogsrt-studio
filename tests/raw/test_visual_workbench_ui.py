@@ -3293,6 +3293,226 @@ def test_stage_layout_declared_dom_and_css() -> None:
     assert 'data-vl-src="/media/x"' in shell
 
 
+def _css_rule_body(css: str, selector: str) -> str:
+    """선택자 하나로 시작하는 첫 규칙의 본문 — 같은 선택자의 흩어진 재선언을 잡는다."""
+    start = css.index(selector + " {")
+    return css[start : css.index("}", start)]
+
+
+def test_stage_layout_has_no_fixed_list_width_or_inner_overflow() -> None:
+    """무대는 화면 높이에 맞고, 목록 칸은 고정 폭·안쪽 가로 넘침이 없다(D50).
+
+    180px 고정 칸 + `1fr`(= minmax(auto,1fr)) 카드 열이 카드 최소 폭 아래로 줄지
+    못해 목록 안에 가로 스크롤이 생겼고, 이름은 88px에서 잘렸다. 흩어진 재선언이
+    마지막에 이기던 구조라 치수는 한 블록에만 둔다.
+    """
+    css = ui_facade.WORKBENCH_CSS
+    assert "grid-template-columns: var(--vl-list-col) minmax(0, 1fr) var(--vl-panel-col);" in css
+    assert "height: max(var(--vl-stage-min-h), calc(100vh - var(--vl-stage-top)));" in css
+    assert "grid-template-columns: minmax(0, 1fr); align-content: start" in css
+    for stale in (
+        "max-width:88px",
+        "max-width:115px",
+        "max-width: 180px",
+        "grid-template-columns:1fr",
+        "max-width:none!important",
+        "180px minmax(0,1fr) 270px",
+        "@media(max-width:680px)",
+    ):
+        assert stale not in css, stale
+    # 같은 무대 선택자는 한 번만 선언된다 — 뒤 선언이 앞을 덮던 구조의 재발 방지.
+    flat = re.sub(r"/\*.*?\*/", "", css, flags=re.S)
+    media_at = flat.index("@media")
+    for selector in ("#visual-stage {", "#vl-panel {", "#visual-preview video {"):
+        assert flat[:media_at].count(selector) == 1, selector
+    assert "scrollbar-color: var(--vl-scrollbar)" in css
+    # 세로 예산 — 단추 줄은 한 줄, 렠은 층 좌표 변수로 150px(1280x800 재생기 130→252px).
+    assert "#review-tab > .column > .row > button { flex: 0 1 auto; min-width: 0;" in css
+    assert "height: var(--vl-rail-h)" in _css_rule_body(css, ".vl-rail")
+    for stale in (
+        "height: 202px",
+        "top: 68px",
+        "top:134px",
+        "top:166px",
+        "#quick-status p { margin:3px 0",
+        "#quick-status { padding:6px 10px; }",
+    ):
+        assert stale not in css, stale
+    assert "white-space: nowrap" in _css_rule_body(css, ".vl-badge")
+    assert "-webkit-line-clamp: var(--vl-name-lines)" in css
+    wide = css.index("@media (max-width: 1050px)")
+    assert wide < css.index("@media (max-width: 860px)")
+    # 긴 이름은 두 줄에서 줄이고, 전체 이름은 카드 title 말풍선이 보인다.
+    assert "' title=\"' + esc(c.sourceName) + '\"'" in ui_facade.VISUAL_BOOTSTRAP_JS
+
+
+def test_global_shortcuts_declared_once() -> None:
+    """전역 단축키·무대 맞춤은 한 번만 묶이고 입력·조합·반복·수정키를 피한다(D50)."""
+    js = ui_facade.VISUAL_BOOTSTRAP_JS
+    assert js.count("W.__vlGlobalKeysBound = true") == 1
+    assert 'document.addEventListener("keydown", W.__vlShortcutKey)' in js
+    assert 'document.addEventListener("keyup", W.__vlShortcutKeyUp)' in js
+    assert 'typeof document.addEventListener === "function"' in js
+    for guard in (
+        "isComposing",
+        "keyCode === VL_IME_PROCESS_KEYCODE",
+        "VL_IME_PROCESS_KEYCODE = 229",
+        "ev.repeat",
+        "metaKey",
+        "ctrlKey",
+        "altKey",
+        "shiftKey",
+        "defaultPrevented",
+        "contenteditable",
+        "textarea",
+        "offsetParent",
+        "preventDefault",
+    ):
+        assert guard in js, guard
+    for code in ('"Space"', '"KeyK"', '"KeyJ"', '"KeyL"', '"Comma"', '"Period"'):
+        assert code in js, code
+    assert "VL_SEEK_SECONDS = 5" in js and "VL_FALLBACK_FRAME_SECONDS = 1 / 30" in js
+    # ←/→는 렠 손잡이 몫이다 — 전역 표에 없다.
+    assert '"ArrowLeft"' not in js.split("VL_SHORTCUT_ACTIONS = ", 1)[1].split("};", 1)[0]
+    assert "__vlGlobalKeysBound" not in ui_facade.CAPTION_BOOTSTRAP_JS
+    assert js.count("W.__vlStageFitBound = true") == 1
+    assert "--vl-stage-top" in js
+
+
+_SHORTCUT_SCRIPT = r"""
+// ── 전역 단축키·무대 맞춤 (D50) — 문서 청취자는 한 번만, DOM은 사건 순간에 찾는다.
+const keyListeners = {};
+const winListeners = {};
+windowScope.addEventListener = (t, fn) => { (winListeners[t] = winListeners[t] || []).push(fn); };
+windowScope.scrollY = 30;
+const stageProps = {};
+const stage = { parentElement: null,
+  getBoundingClientRect() { return { top: 250, left: 0, width: 1000 }; },
+  style: { getPropertyValue(k) { return stageProps[k] || ''; },
+    setProperty(k, v) { stageProps[k] = v; } } };
+const vis = { id: 'visual-video', offsetParent: {}, paused: true, ended: false, played: 0,
+  currentTime: 10, duration: 100,
+  play() { this.paused = false; this.played += 1; return Promise.resolve(); },
+  pause() { this.paused = true; } };
+const hid = { id: 'caption-video', offsetParent: null, paused: true, touched: 0,
+  play() { this.touched += 1; throw new Error('hidden'); }, pause() { this.touched += 1; } };
+const foot = el({ id: 'vl-footnote' });
+const reg = { 'visual-video': vis, 'caption-video': hid, 'vl-footnote': foot,
+  'visual-stage': stage };
+const keyEl = el({ id: 'visual-workbench-block' });
+keyEl._doc = { getElementById(id) { return reg[id] || null; },
+  addEventListener(t, fn) { (keyListeners[t] = keyListeners[t] || []).push(fn); },
+  createElement() { return el({}); } };
+runEntrypoint(bootstraps.visual, keyEl, { value: '' }, {});
+runEntrypoint(bootstraps.visual, keyEl, { value: '' }, {});
+const body = { closest() { return null; } };
+const textarea = { closest(sel) { return sel.includes('textarea') ? this : null; } };
+function fire(type, code, extra) {
+  const ev = Object.assign({ code: code, key: code === 'Space' ? ' ' : code, target: body,
+    isComposing: false, keyCode: 0, repeat: false, metaKey: false, ctrlKey: false,
+    altKey: false, shiftKey: false, defaultPrevented: false, prevented: 0 }, extra || {});
+  ev.preventDefault = function () { this.prevented += 1; this.defaultPrevented = true; };
+  (keyListeners[type] || []).forEach((fn) => fn(ev));
+  return ev;
+}
+const near = (a, b) => Math.abs(a - b) < 1e-9;
+const bound = { keydown: (keyListeners.keydown || []).length,
+  keyup: (keyListeners.keyup || []).length, resize: (winListeners.resize || []).length,
+  stageTop: stageProps['--vl-stage-top'] };
+const sp1 = fire('keydown', 'Space');
+const played = { paused: vis.paused, played: vis.played, prevented: sp1.prevented };
+const up1 = fire('keyup', 'Space');
+const sp2 = fire('keydown', 'Space');
+const paused = { paused: vis.paused, prevented: sp2.prevented };
+const kToggle = fire('keydown', 'KeyK', { key: 'ㅏ' });
+const kPlayed = !vis.paused && kToggle.prevented === 1;
+vis.pause();
+vis.currentTime = 10; fire('keydown', 'KeyJ'); const j = vis.currentTime;
+vis.currentTime = 3; fire('keydown', 'KeyJ'); const jClamp = vis.currentTime;
+vis.currentTime = 10; fire('keydown', 'KeyL'); const l = vis.currentTime;
+vis.currentTime = 97; fire('keydown', 'KeyL'); const lClamp = vis.currentTime;
+vis.currentTime = 10; vis.paused = false; fire('keydown', 'Period');
+const period = { t: vis.currentTime, paused: vis.paused };
+vis._vlFrameSec = 0.04; vis.currentTime = 10; fire('keydown', 'Comma');
+const comma = vis.currentTime;
+vis._vlFrameSec = undefined;
+const before = () => JSON.stringify([vis.paused, vis.currentTime, vis.played]);
+const blockedCases = [
+  ['keydown', 'Space', { target: textarea }],
+  ['keydown', 'Space', { isComposing: true }],
+  ['keydown', 'KeyK', { keyCode: 229, key: 'Process' }],
+  ['keydown', 'Space', { repeat: true }],
+  ['keydown', 'KeyJ', { metaKey: true }],
+  ['keydown', 'KeyL', { ctrlKey: true }],
+  ['keydown', 'Period', { shiftKey: true }],
+  ['keydown', 'Space', { defaultPrevented: true }],
+  ['keydown', 'KeyA', {}],
+  ['keydown', 'ArrowLeft', {}],
+  ['keyup', 'Space', { target: textarea }],
+];
+const blocked = blockedCases.map(([type, code, extra]) => {
+  const was = before();
+  const ev = fire(type, code, extra);
+  return was === before() && ev.prevented === 0;
+});
+vis.offsetParent = null;
+const noVideo = fire('keydown', 'Space');
+const noVideoUp = fire('keyup', 'Space');
+vis.offsetParent = {};
+vis.paused = true;
+vis.play = function () { this.played += 1; return Promise.reject({ name: 'NotAllowedError' }); };
+fire('keydown', 'Space');
+await new Promise((resolve) => setTimeout(resolve, 0));
+checkpoints.push({ case: 'global-shortcuts', bound, played,
+  upPrevented: up1.prevented === 1, paused, kPlayed,
+  seek: near(j, 5) && near(jClamp, 0) && near(l, 15) && near(lClamp, 100),
+  frame: near(period.t, 10 + 1 / 30) && period.paused && near(comma, 9.96),
+  blocked, noVideo: noVideo.prevented === 0 && noVideoUp.prevented === 0,
+  playFailed: foot.textContent, hiddenTouched: hid.touched });
+"""
+
+
+@needs_node
+def test_global_shortcuts_execute_on_visible_video(tmp_path: Path) -> None:
+    """스페이스·K 재생 토글, J/L ±5초, 쉼표·마침표 한 프레임 — 보이는 영상에만(D50).
+
+    입력 칸·IME 조합·반복·수정키·이미 처리된 사건·무관한 키는 아무것도 바꾸지
+    않는다. 숨은 탭의 자막 영상은 건드리지 않고, 재생 거부는 각주에 드러난다.
+    """
+    harness = tmp_path / "shortcuts.js"
+    harness.write_text(
+        _NODE_HARNESS.replace(
+            "process.stdout.write(JSON.stringify(checkpoints));",
+            _SHORTCUT_SCRIPT + "\nprocess.stdout.write(JSON.stringify(checkpoints));",
+        ),
+        encoding="utf-8",
+    )
+    payload = tmp_path / "payload.json"
+    payload.write_text(
+        json.dumps(
+            {"visual": ui_facade.VISUAL_BOOTSTRAP_JS, "caption": ui_facade.CAPTION_BOOTSTRAP_JS}
+        ),
+        encoding="utf-8",
+    )
+    completed = subprocess.run(
+        ["node", str(harness), str(payload)], capture_output=True, text=True, timeout=20
+    )
+    assert completed.returncode == 0, completed.stderr[-2500:]
+    report = next(
+        row for row in json.loads(completed.stdout) if row.get("case") == "global-shortcuts"
+    )
+    assert report["bound"] == {"keydown": 1, "keyup": 1, "resize": 1, "stageTop": "280px"}
+    assert report["played"] == {"paused": False, "played": 1, "prevented": 1}
+    assert report["upPrevented"] is True  # 초점 단추가 스페이스로 눌리지 않는다(Q1)
+    assert report["paused"] == {"paused": True, "prevented": 1}
+    assert report["kPlayed"] is True  # 한글 입력기에서도 ev.code로 K를 안다
+    assert report["seek"] is True and report["frame"] is True
+    assert report["blocked"] == [True] * 11, report["blocked"]
+    assert report["noVideo"] is True
+    assert report["playFailed"] == "재생할 수 없다: NotAllowedError"
+    assert report["hiddenTouched"] == 0
+
+
 @needs_ffmpeg
 def test_visual_two_source_model_binds_per_card_preview(tmp_path: Path) -> None:
     """원본 A/B(서로 다른 잰 원점) — 모델이 원본별 미리보기·렠·트랙을 실는다(F1b).
@@ -3873,7 +4093,15 @@ def test_caption_token_rejects_old_aba(tmp_path: Path) -> None:
 def test_blocks_wire_workbench_outputs(tmp_path: Path, local_socket: None) -> None:
     """조립 뒤 전환·페이지 로드 출력에 작업대 세 구성요소가 포함된다."""
     server = _new_server(tmp_path)
-    server.build_blocks()
+    # 그라디오 .fillable 폭 상한은 CSS가 아니라 fill_width로 푼다(D50).
+    blocks = server.build_blocks()
+    assert blocks.fill_width is True
+    by_id = [getattr(block, "elem_id", None) for block in blocks.blocks.values()]
+    assert by_id.count(workspace_service.APP_HEADER_ID) == 1  # 세 줄 머리글이 한 줄로
+    assert workspace_service.REVIEW_TAB_ID in by_id and "app-analysis-mode" not in by_id
+    progress_row = server._capcut_progress_md.parent
+    assert isinstance(progress_row, gr.Row)
+    assert server._capcut_status.parent is not progress_row  # 숨은 상태는 줄 밖에 둔다
     outputs = server._selection_outputs()
     assert server._visual_player_block in outputs
     assert server._visual_workbench_block in outputs
