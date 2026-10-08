@@ -99,3 +99,50 @@ def understanding_settings_problems(settings: RawUnderstandingSettings) -> list[
             f"프롬프트 리비전은 비지 않은 문자열이어야 한다: {settings.prompt_revision!r}"
         )
     return problems
+
+
+PCM_FULL_SCALE = 32768
+"""16비트 PCM의 풀스케일 — dBFS를 표본값으로 바꾸는 기준(분석 PCM은 s16le)."""
+
+
+@dataclass(frozen=True)
+class RawAutoCleanupSettings:
+    """자동 정리의 내부 무음 판정 값 — `cut_*`·`repair_*`처럼 외부 근거 없는 조정 대상(D45).
+
+    `silence_peak_dbfs`는 표본값으로 `int(32768 * 10 ** (dbfs / 20))`다 — 기본 -50 dBFS는
+    103(≈ 103.6의 내림)이라 예전 리터럴과 같은 판정이다. 이 설정은 분석 입력 지문에
+    들어가지 않는다: 이미 저장된 `auto_decisions`는 그대로 쓰이고, 값은 새로 계산하는
+    판정과 옛 기록의 재계산에만 닿는다.
+    """
+
+    silence_seconds: float = 2.0
+    speech_handle_seconds: float = 0.3
+    silence_peak_dbfs: float = -50.0
+
+    def peak_sample_limit(self) -> int:
+        return int(PCM_FULL_SCALE * 10 ** (self.silence_peak_dbfs / 20))
+
+
+def validate_auto_cleanup_settings(settings: RawAutoCleanupSettings) -> None:
+    """값역 검사 — NaN은 비교를 무력화하므로 유한성부터 본다."""
+    problems: list[str] = []
+    for name, value in (
+        ("공백 기준", settings.silence_seconds),
+        ("발화 여유", settings.speech_handle_seconds),
+        ("무음 피크", settings.silence_peak_dbfs),
+    ):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            problems.append(f"{name}은 실수여야 한다: {value!r}")
+        elif not math.isfinite(float(value)):
+            problems.append(f"{name}이 유한하지 않다: {value!r}")
+    if not problems:
+        if settings.silence_seconds <= 0:
+            problems.append(f"공백 기준은 양수여야 한다: {settings.silence_seconds!r}")
+        if settings.speech_handle_seconds < 0:
+            problems.append(f"발화 여유는 0 이상이어야 한다: {settings.speech_handle_seconds!r}")
+        if 2 * settings.speech_handle_seconds >= settings.silence_seconds:
+            problems.append("발화 여유 양쪽이 공백 기준을 다 먹는다 — 지울 구간이 남지 않는다")
+        if settings.silence_peak_dbfs > 0:
+            problems.append(f"무음 피크는 0 dBFS 이하여야 한다: {settings.silence_peak_dbfs!r}")
+    if problems:
+        raise ValueError("자동 정리 설정이 계약을 어긴다: " + "; ".join(problems))

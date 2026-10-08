@@ -71,6 +71,7 @@ from vlogsrt.project.raw.review_workspace_store import (
     new_review_export_id,
 )
 from vlogsrt.project.raw.segment_review import (
+    AUTO_EXCLUDED_UNREVIEWED_TAG,
     EDIT_KINDS,
     SELECTION_EXCLUDED,
     SPEECH_ANALYSIS_FAILED,
@@ -86,9 +87,11 @@ from vlogsrt.project.raw.segment_review import (
     apply_edit,
     boundary_edit,
     chronological,
+    confirm_tags,
     content_fingerprint,
     filter_segments,
     initial_revision,
+    is_unreviewed_auto_exclusion,
     make_source_clock,
     merge_edit,
     note_edit,
@@ -98,6 +101,7 @@ from vlogsrt.project.raw.segment_review import (
     selection_edit,
     serialize_revision,
     split_edit,
+    unreviewed_auto_exclusions,
 )
 from vlogsrt.project.raw.workspace import RawWorkspace
 
@@ -263,6 +267,16 @@ class _UtteranceItem:
     start: Fraction
     end: Fraction
     evidence_id: str
+
+
+def require_automatic_exclusions_reviewed(revision: ReviewRevision) -> None:
+    """출력 관문 — 사람이 보지 않은 자동 제외가 있으면 영상에서 지우지 않고 멈춘다(D35)."""
+    pending = unreviewed_auto_exclusions(revision)
+    if pending:
+        raise ReviewWorkspaceError(
+            f"자동 제외 {len(pending)}개를 먼저 확인하세요 — 제외를 유지하려면 "
+            "'자동 제외 확인'을, 되살리려면 해당 컷을 사용으로 바꾸세요"
+        )
 
 
 def _now() -> str:
@@ -477,6 +491,7 @@ class ReviewWorkspaceFacade:
                 segment = replace(
                     segment,
                     selection="excluded",
+                    visual_tags=(*confirm_tags(segment.visual_tags), AUTO_EXCLUDED_UNREVIEWED_TAG),
                     notes="자동 제외: "
                     + json.dumps(provenance, ensure_ascii=False, sort_keys=True),
                 )
@@ -589,12 +604,34 @@ class ReviewWorkspaceFacade:
             )
             cursor = parse_revision(document)
         segments = tuple(
-            replace(s, selection="included")
+            replace(s, selection="included", visual_tags=confirm_tags(s.visual_tags))
             if s.notes.startswith("자동 제외: ") and s.segment_id not in manually_selected
             else s
             for s in head.segments
         )
         return self._publish_snapshot(head, segments, "자동 제외 전체 복원")
+
+    def confirm_automatic_exclusions(self, base_plan_id: str | None = None) -> ReviewRevision:
+        """미검토 자동 제외를 모두 확인한다 — 제외는 그대로 두고 표지만 거둔다(D35).
+
+        사람이 누른 이 한 번이 새 리비전이다. 확인할 것이 없으면 리비전을 만들지 않는다.
+        """
+        head = self.load_head(base_plan_id).revision
+        if not unreviewed_auto_exclusions(head):
+            return head
+        segments = tuple(
+            replace(s, visual_tags=confirm_tags(s.visual_tags))
+            if is_unreviewed_auto_exclusion(s)
+            else s
+            for s in head.segments
+        )
+        return self._publish_snapshot(head, segments, "자동 제외 확인")
+
+    def unreviewed_auto_exclusion_count(self, base_plan_id: str | None = None) -> int:
+        return len(unreviewed_auto_exclusions(self.load_head(base_plan_id).revision))
+
+    def require_automatic_exclusions_reviewed(self, base_plan_id: str | None = None) -> None:
+        require_automatic_exclusions_reviewed(self.load_head(base_plan_id).revision)
 
     def _snapshot(self, plan_revision_id: str | None) -> SegmentPlanSnapshot:
         if plan_revision_id is not None:
@@ -1078,7 +1115,21 @@ class ReviewWorkspaceFacade:
                 )
             if old_segment.notes:
                 revision = self.set_notes(new_base_plan_id, segment_id, old_segment.notes)
-        return revision
+        # 선택 편집을 되풀이하면 표지가 지워지므로, 사람이 보지 않은 것은 따로 되돌려 놓는다.
+        carried = {
+            new_ids[old_segment.segment_id]
+            for old_segment in old.segments
+            if is_unreviewed_auto_exclusion(old_segment)
+        }
+        if not carried:
+            return revision
+        segments = tuple(
+            replace(s, visual_tags=(*confirm_tags(s.visual_tags), AUTO_EXCLUDED_UNREVIEWED_TAG))
+            if s.segment_id in carried and s.selection == SELECTION_EXCLUDED
+            else s
+            for s in revision.segments
+        )
+        return self._publish_snapshot(revision, segments, "자동 제외 미검토 유지")
 
     # ── 측정 VTT — 저장된 발화 + 잰 매체 길이 ────────────────────
 
@@ -1346,6 +1397,7 @@ class ReviewWorkspaceFacade:
                 f" 지금 머리 {revision.revision_id!r}와 다르다 — 제출 뒤 검토가"
                 " 바뀌었다. 다시 불러서 다시 내보내야 한다"
             )
+        require_automatic_exclusions_reviewed(revision)
         package = self._require_package(package_dir)
         artifacts = self._workspace.list_clip_artifacts(package.package_dir)
         assets = {

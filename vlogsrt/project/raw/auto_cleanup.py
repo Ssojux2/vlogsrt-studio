@@ -9,6 +9,10 @@ from decimal import Decimal
 from fractions import Fraction
 from pathlib import Path
 
+from vlogsrt.project.raw.analysis_config import (
+    RawAutoCleanupSettings,
+    validate_auto_cleanup_settings,
+)
 from vlogsrt.project.workflow_analysis import (
     AnalysisSettings,
     TranscriptEvidence,
@@ -17,8 +21,6 @@ from vlogsrt.project.workflow_analysis import (
 from vlogsrt.project.workflow_protocol import RationalRange
 
 VERSION = "raw-auto-cleanup/v1"
-SILENCE_SECONDS = Fraction(2)
-SPEECH_HANDLE = Fraction(3, 10)
 
 
 @dataclass(frozen=True)
@@ -49,12 +51,18 @@ def decisions(
     revision_id: str,
     pcm_path: Path | None = None,
     audio_start: Fraction = Fraction(0),
+    settings: RawAutoCleanupSettings | None = None,
 ) -> tuple[Decision, ...]:
     """Successful dialogue evidence plus complete followup or measured quiet is required.
 
     Times are common-video clock seconds. Scene/action/ambient windows, failed ASR,
     uncertain annotations and unconfirmed complete takes are conservatively retained.
     """
+    cleanup = settings or RawAutoCleanupSettings()
+    validate_auto_cleanup_settings(cleanup)
+    # str() keeps 0.3 as exactly 3/10 instead of the float's binary neighbour.
+    silence_seconds = Fraction(str(cleanup.silence_seconds))
+    speech_handle = Fraction(str(cleanup.speech_handle_seconds))
     asr = document.get("asr", {}).get("chunks", [])
     if not asr or any(row.get("failure") for row in asr):
         return ()
@@ -136,9 +144,9 @@ def decisions(
             return tuple(result)
         for left, right in zip(spoken, spoken[1:], strict=False):
             a, b = fraction(left["end"]), fraction(right["start"])
-            if b - a < SILENCE_SECONDS or not safe(a, b):
+            if b - a < silence_seconds or not safe(a, b):
                 continue
-            start, end = a + SPEECH_HANDLE, b - SPEECH_HANDLE
+            start, end = a + speech_handle, b - speech_handle
             first, last = int((start - audio_start) * rate), int((end - audio_start) * rate)
             if first < 0 or last <= first:
                 continue
@@ -151,15 +159,15 @@ def decisions(
             samples.frombytes(raw)
             if sys.byteorder != "little":
                 samples.byteswap()
-            if samples and max(abs(x) for x in samples) <= 103:  # -50 dBFS peak
+            if samples and max(abs(x) for x in samples) <= cleanup.peak_sample_limit():
                 result.append(
                     Decision(
                         start,
                         end,
                         "internal_silence",
                         (
-                            "pcm:peak<=-50dBFS",
-                            f"speech_handle:{SPEECH_HANDLE}",
+                            f"pcm:peak<={cleanup.silence_peak_dbfs:g}dBFS",
+                            f"speech_handle:{speech_handle}",
                             f"between:{left['utterance_id']}:{right['utterance_id']}",
                         ),
                     )
@@ -168,7 +176,11 @@ def decisions(
 
 
 def saved_decisions(
-    document_path: Path, record: dict, source_id: str, revision_id: str
+    document_path: Path,
+    record: dict,
+    source_id: str,
+    revision_id: str,
+    settings: RawAutoCleanupSettings | None = None,
 ) -> list[dict]:
     """Read old successful caches without rewriting them or sending new requests."""
     import json
@@ -185,5 +197,6 @@ def saved_decisions(
             revision_id=revision_id,
             pcm_path=document_path.parent / "analysis.pcm",
             audio_start=fraction(common_start) if common_start else Fraction(0),
+            settings=settings,
         )
     ]

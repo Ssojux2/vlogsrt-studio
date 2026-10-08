@@ -14,7 +14,7 @@ import pytest
 
 from tests.raw.test_review_workspace import _wait_terminal, _write_replay_fixtures
 from vlogsrt.project.raw.review_workspace import ReviewWorkspaceFacade
-from vlogsrt.project.raw.service import RawWorkspaceService
+from vlogsrt.project.raw.service import RawWorkspaceError, RawWorkspaceService
 from vlogsrt.project.timebase import parse_fcpx_time
 
 
@@ -117,6 +117,10 @@ def test_synthetic_cleanup_restore_restart_and_final_cut(tmp_path: Path):
     )
     handle_result = _wait_terminal(service, root, handles.job_id)
     assert handle_result.status == "succeeded", handle_result.error
+    # D35: automatic exclusions nobody has looked at must not leave the video silently.
+    with pytest.raises(RawWorkspaceError, match=f"자동 제외 {len(excluded)}개"):
+        service.export_final_cut(root)
+    facade.confirm_automatic_exclusions()
     destination, xml_path = service.export_final_cut(root)
     xml = ET.parse(xml_path)
     manifest = json.loads((root / destination / "confirmed_manifest.json").read_text())

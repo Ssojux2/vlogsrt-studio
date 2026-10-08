@@ -40,6 +40,14 @@ REVIEW_REQUIRED = "review_required"
 RECOMMENDATIONS: tuple[str, ...] = (RECOMMENDED, "normal", REVIEW_REQUIRED)
 """기본 분할이 붙이는 의미 등급 — 정렬·서식 근거가 아니라 검토 상태다."""
 
+AUTO_EXCLUDED_UNREVIEWED_TAG = "자동 제외 · 미검토"
+"""자동 정리가 제외했고 사람이 아직 보지 않은 조각의 표지(D35).
+
+`visual_tags`에 실리므로 분할·병합·경계 이동·재분석이 그대로 나른다(병합은 합집합이라
+미검토 쪽이 이긴다). 지우는 길은 둘뿐이다 — 그 조각의 명시적 선택 편집, 또는 퍼사드의
+"자동 제외 확인". 메모 편집·등급 덮기·출력은 못 지운다.
+"""
+
 SPEECH_DETECTED = "speech_detected"
 SPEECH_UNCONFIRMED_EMPTY = "unconfirmed_empty"
 SPEECH_ANALYSIS_FAILED = "analysis_failed"
@@ -775,7 +783,11 @@ def _apply_metadata(revision: ReviewRevision, edit: ReviewEdit) -> tuple[ReviewS
     if edit.kind == "selection":
         if edit.selection not in SELECTIONS:
             raise ReviewEditError(f"알 수 없는 선택 {edit.selection!r}")
-        updated = replace(segment, selection=edit.selection)
+        updated = replace(
+            segment,
+            selection=edit.selection,
+            visual_tags=confirm_tags(segment.visual_tags),
+        )
     elif edit.kind == "override":
         if edit.override is not None and edit.override not in RECOMMENDATIONS:
             raise ReviewEditError(f"알 수 없는 덮기 등급 {edit.override!r}")
@@ -785,6 +797,24 @@ def _apply_metadata(revision: ReviewRevision, edit: ReviewEdit) -> tuple[ReviewS
     return tuple(
         updated if existing.segment_id == segment_id else existing for existing in revision.segments
     )
+
+
+def confirm_tags(tags: tuple[str, ...]) -> tuple[str, ...]:
+    """미검토 표지만 뺀다 — 사람이 그 조각의 사용/제외를 확정했다는 기록이다."""
+    return tuple(tag for tag in tags if tag != AUTO_EXCLUDED_UNREVIEWED_TAG)
+
+
+def is_unreviewed_auto_exclusion(segment: ReviewSegment) -> bool:
+    """제외된 채 표지가 남은 조각 — 포함된 조각은 영상에서 아무것도 지우지 않는다."""
+    return (
+        segment.selection == SELECTION_EXCLUDED
+        and AUTO_EXCLUDED_UNREVIEWED_TAG in segment.visual_tags
+    )
+
+
+def unreviewed_auto_exclusions(revision: ReviewRevision) -> tuple[ReviewSegment, ...]:
+    """사람이 아직 확인하지 않은 자동 제외 — 이게 있으면 출력은 닫힌다(D35)."""
+    return tuple(s for s in chronological(revision) if is_unreviewed_auto_exclusion(s))
 
 
 def split_segment(revision: ReviewRevision, segment_id: str, split_pts: int) -> ReviewRevision:

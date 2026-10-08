@@ -2553,10 +2553,25 @@ Final Cut 출력** 네 단계다.
 - Workflow Extension·플러그인은 되살리지 않는다(2026-10-02 사용자 지시 — 재설치 금지).
 
 **지켜야 할 선**: 자동 정리(`raw/auto_cleanup.py`)의 제외 판정은 **사람이 사용/제외를
-확정하기 전까지 미검토**여야 한다(D35). 지금 출력(`service.export_final_cut`)은 현재 검토
-리비전에서 `selection == "included"`인 조각을 싣는다 — 자동 제외를 사람이 실제로 봤는지는
-아직 증명하지 않는다. **열린 감사 항목**이다(TASKS W-5). `auto_cleanup.py`의
-`SILENCE_SECONDS` 같은 모듈 상수도 규칙 8에 따라 설정으로 옮길 대상이다.
+확정하기 전까지 미검토**여야 한다(D35). 출력(`service.export_final_cut`)은 현재 검토
+리비전에서 `selection == "included"`인 조각을 싣는다.
+
+**W-5 닫음 (2026-10-08)**: 자동 제외 조각은 `visual_tags`에 `AUTO_EXCLUDED_UNREVIEWED_TAG`
+(`자동 제외 · 미검토`)를 달고 만들어진다 — 스키마를 안 바꾸는 기계 판독 표지이고,
+출처 JSON은 `notes`에 그대로 있다. (`recommendation`은 조립 끝에서 Luna 등급으로 다시
+쓰이고 UI 색 구분에 쓰여 표지 자리로 맞지 않았다.) 표지는 사람 손으로만 지워진다:
+그 조각의 명시적 선택 편집, 또는 퍼사드의 **자동 제외 확인**(제외 유지·새 리비전).
+재분석·재조립·분할·병합·계획 입양(`_replay_metadata`)은 못 지운다 — 입양은 선택 편집을
+되풀이해 표지를 지우므로 미검토였던 것만 따로 되돌려 놓는다. 미검토가 하나라도 있으면
+`export_final_cut`과 `ReviewWorkspaceFacade.export_confirmed`가 `자동 제외 N개를 먼저
+확인하세요`로 거부한다. UI는 개수·**자동 제외 확인** 버튼·거부 메시지를 보인다.
+
+**설정 (규칙 8)**: `auto_cleanup.py`의 상수 셋은 `analysis_config.RawAutoCleanupSettings`
+(`silence_seconds=2.0`·`speech_handle_seconds=0.3`·`silence_peak_dbfs=-50.0`)로 옮겼다.
+표본 한계는 `int(32768 * 10 ** (dbfs / 20))` = 103으로 이전 리터럴과 판정이 같다
+(`VERSION`은 그대로). 이 값들은 `cut_*`처럼 **외부 근거가 없는 조정 대상**이다.
+분석 입력 지문에는 넣지 않았다(기본 지문·캐시 보존) — 값을 바꿔도 이미 저장된
+`auto_decisions`는 재계산되지 않고, 새 분석과 옛 기록 재계산에만 닿는다.
 
 **남은 것은 실기다**: 출력 XML을 실제 Final Cut이 가져오는지, 원본 relink가 되는지는
 확인하지 못했다(V3). 확인 전까지 이 경로의 인수는 합성 데이터 기준이다.

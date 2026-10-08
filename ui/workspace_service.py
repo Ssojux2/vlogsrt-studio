@@ -891,7 +891,20 @@ class RawWorkspaceUi:
 
     def _capcut_result(self, root: Path, message: str) -> tuple[str, str, str]:
         self._refresh_review_panel_state(root)
+        pending = self._unreviewed_auto_count(root)
+        if pending:
+            message += (
+                f"\n\n**자동 제외 {pending}개 미검토** · 확인하기 전에는 Final Cut으로 출력할 수"
+                " 없습니다. 제외를 유지하려면 '자동 제외 확인'을 누르세요."
+            )
         return message, *self.visual_workbench_render(root)
+
+    def _unreviewed_auto_count(self, root: Path) -> int:
+        """사람이 아직 보지 않은 자동 제외 수 — 검토 머리가 없으면 셀 것이 없다."""
+        try:
+            return self._review_facade(root).unreviewed_auto_exclusion_count()
+        except (raw_service.RawWorkspaceError, raw_service.ReviewError):
+            return 0
 
     def capcut_fcp_panel_view(self) -> tuple:
         root = self._snapshot_root()
@@ -1662,6 +1675,19 @@ class RawWorkspaceUi:
             facade.restore_automatic()
         return self._capcut_result(root, "검토 변경을 저장했습니다.")
 
+    def capcut_confirm_auto_view(self, signature: str | None) -> tuple[str, str, str]:
+        """미검토 자동 제외를 한 번에 확인한다 — 제외는 유지되고 새 리비전이 남는다(D35)."""
+        root = self._require_current_selection(signature)
+        facade = self._review_facade(root)
+        before = facade.unreviewed_auto_exclusion_count()
+        facade.confirm_automatic_exclusions()
+        message = (
+            f"자동 제외 {before}개를 확인했습니다. 제외는 그대로 유지됩니다."
+            if before
+            else "확인할 자동 제외가 없습니다."
+        )
+        return self._capcut_result(root, message)
+
     def capcut_cancel_view(self, signature: str | None) -> str:
         root = self._require_current_selection(signature)
         if self._quick.get("root") != root:
@@ -1729,7 +1755,12 @@ class RawWorkspaceUi:
 
     def capcut_handoff_view(self, signature: str | None) -> str:
         root = self._require_current_selection(signature)
-        head = self._review_facade(root).load_head().revision
+        facade = self._review_facade(root)
+        head = facade.load_head().revision
+        try:
+            facade.require_automatic_exclusions_reviewed()
+        except raw_service.RawWorkspaceError as error:
+            raise gr.Error(str(error)) from error
 
         def body(context: Any) -> None:
             ready_revision = self.raw.materialize_review(root, context, head.revision_id)
@@ -1827,6 +1858,7 @@ class RawWorkspaceUi:
                 visible=False,
             )
             with gr.Accordion("복원 · 전달 · 고급 조작", open=False), gr.Row():
+                confirm_auto = gr.Button("자동 제외 확인")
                 restore = gr.Button("자동 제외 전체 복원")
                 undo = gr.Button("실행 취소")
                 refresh = gr.Button("결과 확인")
@@ -1876,6 +1908,7 @@ class RawWorkspaceUi:
                 lambda: False, None, approval
             )
             handoff.click(self.capcut_handoff_view, self._signature_state, self._capcut_status)
+            confirm_auto.click(self.capcut_confirm_auto_view, self._signature_state, outputs)
             restore.click(
                 lambda sig: self.capcut_edit_view(sig, "restore"), self._signature_state, outputs
             )

@@ -1231,6 +1231,7 @@ class RawWorkspaceService:
         expected_review_revision_id: str | None = None,
     ) -> tuple[str, str]:
         from vlogsrt.project.raw.final_cut_handoff import build_handoff
+        from vlogsrt.project.raw.review_workspace import require_automatic_exclusions_reviewed
 
         facade = self.review_workspace_facade(root)
         head = facade.load_head().revision
@@ -1239,6 +1240,7 @@ class RawWorkspaceService:
             and head.revision_id != expected_review_revision_id
         ):
             raise RawWorkspaceError("검토가 바뀌었습니다. 결과 확인 후 다시 내보내세요")
+        require_automatic_exclusions_reviewed(head)
         if not any(s.selection == "included" for s in head.segments):
             raise RawWorkspaceError("사용할 컷이 하나도 없습니다")
         package = self.package_overview(root)
