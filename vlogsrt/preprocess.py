@@ -443,6 +443,9 @@ def _stream_positive_int(entry: dict[str, object], field: str, source: Path) -> 
 # pts는 asettb가 정한 1/rate 단위의 정수라 곧 샘플 번호다. 토큰 경계를 못 박는다 —
 # `pts:1.5`·`pts:1/2`를 `1`로 슬쩍 읽으면 원점이 소리 없이 틀어진다.
 _ASHOWINFO_HEADER = re.compile(r"\[Parsed_ashowinfo_\d+ [^\]]*\]")
+_ASHOWINFO_INDEX = re.compile(r"(?<!\S)n:(\d+)(?!\S)")
+# 번호 값이 망가진 줄(`n:1.5`)은 조각이 아니라 거절할 기록이다 — 있는지만 따로 본다.
+_ASHOWINFO_INDEX_KEY = re.compile(r"(?<!\S)n:")
 _ASHOWINFO_PTS = re.compile(r"(?<!\S)pts:(-?\d+)(?!\S)")
 _ASHOWINFO_CHANNELS = re.compile(r"(?<!\S)channels:(\d+)(?!\S)")
 _ASHOWINFO_RATE = re.compile(r"(?<!\S)rate:(\d+)(?!\S)")
@@ -451,6 +454,7 @@ _ASHOWINFO_SAMPLES = re.compile(r"(?<!\S)nb_samples:(\d+)(?!\S)")
 
 @dataclass(frozen=True, slots=True)
 class _ConvertedFrame:
+    index: int
     pts: int
     channels: int
     rate: int
@@ -480,7 +484,7 @@ def extract_pcm_s16le(
     filters = f"aresample={sample_rate},aformat=sample_fmts=s16,asettb=1/{sample_rate},ashowinfo"
     completed = _run(
         [
-            ffmpeg, "-hide_banner", "-loglevel", "info", "-nostdin", "-y",
+            ffmpeg, "-hide_banner", "-loglevel", "info", "-nostats", "-nostdin", "-y",
             "-copyts",
             "-i", str(source),
             "-map", f"0:{stream.stream_index}",
@@ -512,19 +516,16 @@ def extract_pcm_s16le(
 def _converted_frames(stderr: str, source: Path) -> list[_ConvertedFrame]:
     frames: list[_ConvertedFrame] = []
     for line in stderr.splitlines():
-        if not _ASHOWINFO_HEADER.search(line):
+        # ashowinfo는 한 프레임을 av_log 여러 번에 나눠 찍는다. 그 사이에 다른 스레드의 줄이
+        # 끼면 꼬리가 새 접두어를 달고 다시 찍히는데, 그 조각엔 `n:`이 없다. 조각을 건너뛰어도
+        # 기록이 실제로 빠졌다면 아래 번호 연속성 검사가 드러낸다.
+        if not _ASHOWINFO_HEADER.search(line) or not _ASHOWINFO_INDEX_KEY.search(line):
             continue
-        frame = _ConvertedFrame(
-            pts=_frame_field(_ASHOWINFO_PTS, "pts", line, source),
-            channels=_frame_field(_ASHOWINFO_CHANNELS, "channels", line, source),
-            rate=_frame_field(_ASHOWINFO_RATE, "rate", line, source),
-            samples=_frame_field(_ASHOWINFO_SAMPLES, "nb_samples", line, source),
-        )
-        # pts는 음수여도 된다(원점이 0보다 앞선다). 나머지는 양수여야 시계다.
-        if frame.channels <= 0 or frame.rate <= 0 or frame.samples <= 0:
+        frame = _converted_frame(line, source)
+        if frame.index != len(frames):
             raise RuntimeError(
-                f"ashowinfo 값이 양수가 아닙니다: {source} "
-                f"(channels {frame.channels}, rate {frame.rate}, nb_samples {frame.samples})"
+                f"ashowinfo 프레임 번호가 이어지지 않습니다: {source} "
+                f"(기대 n:{len(frames)}, 기록 n:{frame.index})"
             )
         frames.append(frame)
     if not frames:
@@ -532,6 +533,23 @@ def _converted_frames(stderr: str, source: Path) -> list[_ConvertedFrame]:
             f"변환된 프레임 기록(ashowinfo)이 없습니다: {source} — 원점을 잴 수 없다"
         )
     return frames
+
+
+def _converted_frame(line: str, source: Path) -> _ConvertedFrame:
+    frame = _ConvertedFrame(
+        index=_frame_field(_ASHOWINFO_INDEX, "n", line, source),
+        pts=_frame_field(_ASHOWINFO_PTS, "pts", line, source),
+        channels=_frame_field(_ASHOWINFO_CHANNELS, "channels", line, source),
+        rate=_frame_field(_ASHOWINFO_RATE, "rate", line, source),
+        samples=_frame_field(_ASHOWINFO_SAMPLES, "nb_samples", line, source),
+    )
+    # pts는 음수여도 된다(원점이 0보다 앞선다). 나머지는 양수여야 시계다.
+    if frame.channels <= 0 or frame.rate <= 0 or frame.samples <= 0:
+        raise RuntimeError(
+            f"ashowinfo 값이 양수가 아닙니다: {source} "
+            f"(channels {frame.channels}, rate {frame.rate}, nb_samples {frame.samples})"
+        )
+    return frame
 
 
 def _frame_field(pattern: re.Pattern[str], field: str, line: str, source: Path) -> int:
@@ -2654,7 +2672,7 @@ def _caption_preview_origin(preview: Path, channels: int) -> Fraction:
     filters = f"aresample={rate},aformat=sample_fmts=s16,asettb=1/{rate},ashowinfo"
     completed = _run(
         [
-            ffmpeg, "-hide_banner", "-loglevel", "info", "-nostdin", "-y",
+            ffmpeg, "-hide_banner", "-loglevel", "info", "-nostats", "-nostdin", "-y",
             "-copyts",
             "-i", str(preview),
             "-map", "0:a:0",
@@ -2971,10 +2989,20 @@ def _measure_proxy(staged: Path) -> AnalysisProxyBuild:
     )
 
 
+# 32×32로 줄인 뒤 루마(Y) 평면만 그대로 꺼낸다 — 한 장 1024바이트.
+_CORRESPONDENCE_VIDEO_FILTER = "scale=32:32,format=yuv420p,extractplanes=y"
+
+
 def correspondence_samples(
     path: Path, seconds: Sequence[Fraction], *, audio: bool = False
 ) -> tuple[bytes, ...]:
-    """Small decoded samples for explicit original/proxy correspondence checks."""
+    """Small decoded samples for explicit original/proxy correspondence checks.
+
+    영상 표본은 32×32 루마 평면이다. 회색(`format=gray`)은 swscale이 전범위로 환산하고
+    그 양이 축소 경로(4K→32와 960→32)마다 달라 원본·프록시가 다른 눈금으로 재졌다(실측
+    기울기 1.36 vs 1.17, 같은 프레임의 오차 바닥 5–11). 루마 평면은 환산 없이 그대로
+    복사된다(실측 0.2–1.3).
+    """
     samples = []
     ffmpeg = require_ffmpeg()
     for second in seconds:
@@ -3000,7 +3028,7 @@ def correspondence_samples(
                 "-frames:v",
                 "1",
                 "-vf",
-                "scale=32:32,format=gray",
+                _CORRESPONDENCE_VIDEO_FILTER,
                 "-f",
                 "rawvideo",
                 "-",
@@ -3020,6 +3048,7 @@ def verified_scene_times(path: Path) -> tuple[Fraction, ...]:
             "-hide_banner",
             "-loglevel",
             "info",
+            "-nostats",
             "-i",
             str(path),
             "-an",

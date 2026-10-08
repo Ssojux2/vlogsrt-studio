@@ -600,7 +600,7 @@ def test_extraction_command_preserves_the_measured_clock(
     extract_pcm_s16le(tmp_path / "in.mp4", tmp_path / "out.pcm", stream_index=1)
 
     assert commands[-1] == [
-        "ffmpeg", "-hide_banner", "-loglevel", "info", "-nostdin", "-y",
+        "ffmpeg", "-hide_banner", "-loglevel", "info", "-nostats", "-nostdin", "-y",
         "-copyts",
         "-i", str(tmp_path / "in.mp4"),
         "-map", "0:5",
@@ -721,6 +721,51 @@ def test_extraction_rejects_nonpositive_converted_fields(
     """채널·주파수·프레임 길이가 0이면 시계가 아니다 — pts만 음수를 허용한다."""
     _fake_ffmpeg_ffprobe(monkeypatch, _probe_json(), line, 0)
     with pytest.raises(RuntimeError, match="양수"):
+        extract_pcm_s16le(tmp_path / "in.mov", tmp_path / "out.pcm", stream_index=0)
+
+
+# 실측 꼴: ffmpeg 진행 통계 줄(`\r`로 끝난다)이 ashowinfo 한 프레임의 av_log 호출 사이에
+# 끼어, 꼬리(`D3780D5D ]`)가 새 접두어를 달고 다시 찍혔다. 사이 문자가 `\r`이든 `\n`이든
+# `splitlines()`가 나누는 자리만 다를 뿐 조각은 `n:` 없는 줄로 남는다.
+_STATS_LINE = "size=    1792KiB time=00:00:00.00 bitrate=N/A speed=   0x elapsed=0:00:00.50    "
+_SPLIT_HEAD = (
+    "[Parsed_ashowinfo_3 @ 0x1] n:1 pts:1024 pts_time:0.064 fmt:s16 channels:2 chlayout:stereo "
+    "rate:16000 nb_samples:1024 checksum:D3780D5D plane_checksums: [ "
+)
+_SPLIT_TAIL = "[Parsed_ashowinfo_3 @ 0x1] D3780D5D ]"
+
+
+@pytest.mark.parametrize(
+    "split",
+    [
+        _SPLIT_HEAD + _STATS_LINE + "\r" + _SPLIT_TAIL,
+        _SPLIT_HEAD + "\n" + _STATS_LINE + "\r" + _SPLIT_TAIL,
+        _SPLIT_HEAD + "\n" + _STATS_LINE + "\n" + _SPLIT_TAIL,
+    ],
+    ids=["stats-joined-by-cr", "stats-own-line-cr", "stats-own-line-lf"],
+)
+def test_extraction_ignores_ashowinfo_fragments_split_by_another_log_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, split: str
+) -> None:
+    """다른 스레드의 줄이 한 프레임 기록을 갈라도 조각은 프레임이 아니다 — 원점·길이는 그대로."""
+    stderr = "\n".join([_ashowinfo(0, 0, nb=1024), split, _ashowinfo(2, 2048, nb=1024)])
+    _fake_ffmpeg_ffprobe(monkeypatch, _probe_json(start_time="0"), stderr, 3 * 1024 * 2 * 2)
+    extraction = extract_pcm_s16le(tmp_path / "in.mov", tmp_path / "out.pcm", stream_index=0)
+
+    assert extraction.sample_count == 3072
+    assert extraction.pcm_sample0_file_time == 0
+
+
+def test_extraction_fails_when_a_frame_record_is_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """조각을 건너뛰는 대가로 프레임 번호가 이어지는지 본다 — 빠진 기록은 시계 증거가 아니다.
+
+    pts와 파일 길이는 두 프레임으로 맞아 떨어지게 둔다. 그래도 n:1이 없으면 거절한다.
+    """
+    stderr = "\n".join([_ashowinfo(0, 0, nb=1024), _ashowinfo(2, 1024, nb=1024)])
+    _fake_ffmpeg_ffprobe(monkeypatch, _probe_json(start_time="0"), stderr, 2 * 1024 * 2 * 2)
+    with pytest.raises(RuntimeError, match="이어지지"):
         extract_pcm_s16le(tmp_path / "in.mov", tmp_path / "out.pcm", stream_index=0)
 
 

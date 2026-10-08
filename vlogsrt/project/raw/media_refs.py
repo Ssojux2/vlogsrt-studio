@@ -433,9 +433,11 @@ def _ready(directory: Path, recipe: AnalysisProxyRecipe) -> bool:
     return bool(state and state.get("state") == "ready" and _proxy_intact(directory, state))
 
 
-def _fall_back(directory: Path, reason: str) -> None:
+def _fall_back(directory: Path, original: Path, reason: str) -> None:
     _FAILED[str(directory)] = reason
-    log.warn(f"분석 프록시를 쓰지 않고 원본으로 분석합니다(느릴 수 있음): {reason}")
+    log.warn(
+        f"분석 프록시를 쓰지 않고 원본으로 분석합니다(느릴 수 있음): {original.name} — {reason}"
+    )
 
 
 def validate_analysis_proxy(original: Path, proxy: Path) -> PairValidation:
@@ -560,7 +562,7 @@ def ensure_analysis_proxy(workspace: Any, asset: Any, original: Path) -> Path | 
         _clear_leftover(directory, recipe)
         ok, reason = _build_and_verify(directory, original, recipe)
         if not ok:
-            _fall_back(directory, reason)
+            _fall_back(directory, original, reason)
             return None
         stat = (directory / _PROXY_FILE).stat()
         _write_proxy_state(

@@ -20,7 +20,11 @@ from tests.raw.test_media_refs import transcode
 from tests.raw.test_review_workspace import _wait_terminal
 from vlogsrt import log, preprocess
 from vlogsrt.project.raw import analysis_workflow, media_refs, source_transcript
-from vlogsrt.project.raw.analysis_config import ANALYSIS_PROXY, RawUnderstandingSettings
+from vlogsrt.project.raw.analysis_config import (
+    ANALYSIS_PROXY,
+    PAIR_VIDEO_SAMPLE_SIZE,
+    RawUnderstandingSettings,
+)
 from vlogsrt.project.raw.analysis_store import AnalysisStore
 from vlogsrt.project.raw.jobs import JobCancelledError
 from vlogsrt.project.raw.models import AnalysisRevision, AnalysisSourceResult
@@ -434,6 +438,59 @@ def test_proxy_shifted_by_exactly_one_frame_is_rejected(imported, tmp_path):
     assert media_refs.validate_analysis_proxy(original, plain).status == "verified"
     delayed = media_refs.validate_analysis_proxy(advanced, plain)
     assert delayed.status == "rejected" and "이동" in delayed.reason
+
+
+def test_correspondence_samples_are_the_luma_plane_without_range_conversion(tmp_path):
+    """대응 표본은 32×32로 줄인 **루마 평면 그대로**다 — 회색 환산(`format=gray`)이 끼지 않는다.
+
+    회색은 swscale이 전범위로 늘리고 그 양이 축소 경로마다 달라, 원본·프록시를 다른 눈금으로
+    잰다(이 합성 원본에서도 평균 절대 차 8.14). 루마 평면이면 같은 디코드와 바이트가 같다.
+    """
+    path = tmp_path / "clip.mov"
+    _make_original(path)
+    second = Fraction(1001, 30000) * 10
+    reference = subprocess.run(
+        [
+            "ffmpeg", "-v", "error", "-ss", str(float(second)), "-i", str(path),
+            "-map", "0:v:0", "-frames:v", "1", "-vf", "scale=32:32", "-pix_fmt", "yuv420p",
+            "-f", "rawvideo", "-",
+        ],
+        check=True,
+        capture_output=True,
+    ).stdout[:PAIR_VIDEO_SAMPLE_SIZE]  # fmt: skip
+    assert len(reference) == PAIR_VIDEO_SAMPLE_SIZE
+    assert preprocess.correspondence_samples(path, (second,)) == (reference,)
+
+
+# 4K 10비트 원본과 그 25% 프록시가 같은 프레임에서 내는 표본 오차의 상한.
+# 실측: 회색 표본 8.63 → 루마 표본 0.11. 상한 10 근처의 바닥이 사라졌는지를 본다.
+_TEN_BIT_PAIR_MAX_ERROR = 2.0
+
+
+def test_ten_bit_4k_original_verifies_against_its_analysis_proxy(tmp_path):
+    """실측 꼴(DJI 4K 10비트 bt709)의 원본·프록시 짝이 우연이 아니라 넉넉히 통과한다."""
+    original = tmp_path / "dji.mov"
+    subprocess.run(
+        [
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+            "-f", "lavfi", "-i", "testsrc2=size=3840x2160:rate=30000/1001:duration=2",
+            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "18", "-bf", "0",
+            "-pix_fmt", "yuv420p10le",
+            "-x264-params", "colorprim=bt709:transfer=bt709:colormatrix=bt709",
+            str(original),
+        ],
+        check=True,
+        capture_output=True,
+    )  # fmt: skip
+    proxy = tmp_path / "proxy.mp4"
+    recipe = ANALYSIS_PROXY
+    preprocess.build_analysis_proxy(
+        original, proxy, scale=recipe.scale, video_codec=recipe.video_codec,
+        preset=recipe.preset, crf=recipe.crf, gop=recipe.gop, pix_fmt=recipe.pix_fmt,
+    )  # fmt: skip
+    verdict = media_refs.validate_analysis_proxy(original, proxy)
+    assert verdict.status == "verified", verdict.reason
+    assert verdict.max_frame_error < _TEN_BIT_PAIR_MAX_ERROR
 
 
 def test_built_proxy_is_reused_and_a_damaged_one_is_rebuilt(imported, monkeypatch):
