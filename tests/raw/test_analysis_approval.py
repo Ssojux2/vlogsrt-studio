@@ -86,13 +86,19 @@ def _audio() -> stage1.SelectedAudio:
 
 
 def test_asr_settings_fingerprint_binds_settings_and_models() -> None:
-    """설정 지문은 같은 입력에 같고, 설정·모델이 바뀌면 다르다(§14.2)."""
+    """설정 지문은 같은 입력에 같고, 설정·전사 모델이 바뀌면 다르다(§14.2).
+
+    의미 분석 모델은 묶지 않는다 — 전사는 그 모델을 듣지 않는다(D54에 적은, 기대값을 바꾼 시험).
+    """
     workflow = _online_workflow()
     settings = RawUnderstandingSettings()
     same = asr_settings_fingerprint(settings, workflow)
     assert same == asr_settings_fingerprint(RawUnderstandingSettings(), workflow)
     assert same != asr_settings_fingerprint(RawUnderstandingSettings(window_seconds=11.0), workflow)
     assert same != asr_settings_fingerprint(
+        settings, replace(workflow, models=replace(workflow.models, timing_model="whisper-2"))
+    )
+    assert same == asr_settings_fingerprint(
         settings, replace(workflow, models=replace(workflow.models, luna_model="luna-2"))
     )
 

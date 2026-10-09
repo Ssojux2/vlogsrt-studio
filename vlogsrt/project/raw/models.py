@@ -664,7 +664,7 @@ class AnalysisEstimate:
 
     실제 호출은 하나도 일어나지 않는다(§14.3 — 비용 표시 뒤에야 승인받는다).
     Luna 단가는 미확인이므로 금액을 0원으로 계산하지 않고 `price_status`로
-    말한다(`unknown` | `user_supplied`).
+    말한다(`unknown` | `user_supplied`). Claude는 `official_snapshot`과 보수적 상한이다(D54).
     """
 
     asset_id: str

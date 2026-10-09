@@ -18,6 +18,11 @@ from tests.raw.test_final_caption_run import make_video
 from tests.raw.test_understanding import BEFORE_SHUTDOWN, SETTINGS, FakeTimingProvider, make_audio
 from vlogsrt.config import Config
 from vlogsrt.project.raw import final_caption
+from vlogsrt.project.raw.analysis_approval import ASR_APPROVAL_SCHEMA, asr_settings_fingerprint
+from vlogsrt.project.raw.analysis_config import (
+    UNDERSTANDING_SCHEMA_VERSION,
+    RawUnderstandingSettings,
+)
 from vlogsrt.project.raw.caption_config import FinalCaptionSettings
 from vlogsrt.project.raw.config import RawWorkflowConfig, raw_workflow_config_to_json
 from vlogsrt.project.raw.understanding import SampleSpan, transcribe_selected_audio
@@ -124,3 +129,39 @@ def test_the_final_caption_fingerprint_ignores_the_analysis_model(tmp_path: Path
         video, SPANS, settings, claude(workflow), engine
     )
     assert switched == default
+
+
+def pre_w14_asr_settings_fingerprint(
+    settings: RawUnderstandingSettings, workflow: RawWorkflowConfig
+) -> str:
+    """W-14 이전 `asr_settings_fingerprint`의 조립 그대로 — 의미 분석 모델이 끝에 묶였다."""
+    parts = [
+        ASR_APPROVAL_SCHEMA,
+        UNDERSTANDING_SCHEMA_VERSION,
+        str(settings.window_seconds),
+        str(settings.context_seconds),
+        str(settings.max_images_per_window),
+        str(settings.image_long_edge),
+        str(settings.prompt_revision),
+        str(settings.asr_chunk_max_seconds),
+        str(settings.asr_chunk_max_bytes),
+        workflow.models.timing_model,
+        workflow.models.luna_model,
+    ]
+    return hashlib.sha256("\0".join(parts).encode("utf-8")).hexdigest()
+
+
+def test_the_asr_approval_fingerprint_ignores_the_analysis_model() -> None:
+    """전사 승인은 전사만 묶는다 — 모델을 바꿔도 1단계 승인·전사 지문이 그대로다."""
+    understanding, workflow = RawUnderstandingSettings(), RawWorkflowConfig()
+    default = asr_settings_fingerprint(understanding, workflow)
+    assert default == pre_w14_asr_settings_fingerprint(understanding, workflow)
+    assert asr_settings_fingerprint(understanding, claude(workflow)) == default
+
+
+def test_the_asr_approval_fingerprint_still_binds_the_transcription_settings() -> None:
+    """고정은 의미 분석 모델 하나뿐이다 — 전사 설정이 바뀌면 지문도 바뀐다."""
+    workflow = claude(RawWorkflowConfig())
+    default = asr_settings_fingerprint(RawUnderstandingSettings(), workflow)
+    shorter = replace(RawUnderstandingSettings(), asr_chunk_max_seconds=60.0)
+    assert asr_settings_fingerprint(shorter, workflow) != default

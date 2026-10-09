@@ -21,6 +21,7 @@ import threading
 import uuid
 from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
+from decimal import ROUND_CEILING, Decimal
 from fractions import Fraction
 from pathlib import Path
 from typing import Any
@@ -67,6 +68,7 @@ NOTICE_STALE = "stale"
 NOTICE_KEY = "key"
 NOTICE_FAILED = "failed"
 NOTICE_INTERRUPTED = "interrupted"
+NOTICE_UNSEEN = "unseen"
 NOTICE_TEXT = {
     NOTICE_ACCEPTED: "**승인 접수** · 분석 범위를 확인하고 있습니다. "
     "끝나면 영상별 분석이 이어집니다.",
@@ -80,6 +82,9 @@ NOTICE_TEXT = {
     NOTICE_STALE: "저장 결과의 입력이 바뀌었습니다. 갱신된 범위를 확인하세요.",
     NOTICE_KEY: "**연결 설정 필요 · 아직 분석하지 않았습니다**\n\n"
     "API 연결에 키를 입력한 뒤 표시된 범위를 승인하세요.",
+    NOTICE_UNSEEN: "**새 견적을 확인하세요** · 화면에 보인 범위·비용이 지금 견적과 다릅니다"
+    "(분석 모델이 바뀌었을 수 있습니다). 아무것도 시작하지 않았습니다. "
+    "갱신된 견적을 확인한 뒤 다시 승인하세요.",
     NOTICE_INTERRUPTED: "**중단된 승인 작업이 남아 있습니다 · 아무것도 시작하지 않았습니다**\n\n"
     "이전 실행에서 끝나지 못한 같은 승인이 기록에 남아 있습니다. "
     "앱을 다시 시작하면 중단된 승인을 복구한 뒤 다시 승인할 수 있습니다.",
@@ -113,6 +118,26 @@ ANALYSIS_ADMISSION_POLL_SECONDS = 0.05
 QUICK_APPROVED_TEXT = (
     "선택한 영상의 Luna 분석을 시작했습니다. 추천 구간이 타임라인 위에 표시됩니다."
 )
+# 영상 분석 모델(D54) — 끝난 단계는 그 분석의 모델이 지금 설정과 같을 때만 끝났다고 보인다.
+FINISHED_QUICK_STAGES = ("추천 구간 준비 완료", "부분 완료 · 확인 필요")
+MODEL_CHANGED_STAGE = "분석 모델 바뀜 · 다시 승인 필요"
+"""다른 분석 모델로 끝난(또는 견적한) 작업의 표시 — 저장된 단계는 그대로라 되돌리면 다시 끝난다."""
+MODEL_CHANGED_CACHED_STAGE = "분석 모델 바뀜 · 저장된 결과 있음"
+"""지금 모델로 끝난 저장 분석이 있을 때 — 가벼운 확인이라 무료를 약속하지 않는다.
+
+영상을 고르면 `cached_selection_analysis`가 원본 재해시·결속 지문까지 보고, 맞으면 호출 0회로
+다시 쓴다. 맞지 않으면 새 견적과 승인으로 간다."""
+MODEL_BUSY_JOB_KINDS = (
+    raw_service.ANALYSIS_JOB_KIND,
+    raw_service.ANALYSIS_SEMANTIC_JOB_KIND,
+    LIBRARY_APPROVAL_JOB_KIND,
+)
+"""이 작업이 도는 동안에는 분석 모델을 바꾸지 않는다 — 견적·승인이 본 모델과 실행 모델이 갈린다."""
+CLAUDE_KEY_MISSING_TEXT = (
+    "{label} 분석에는 `{env}`가 필요합니다. `.env`에 키를 넣고 앱을 다시 띄우거나, "
+    "API 연결에서 영상 분석 모델을 바꾸세요. 유료 호출은 시작하지 않았습니다."
+)
+CENT = Decimal("0.01")
 
 
 @dataclass(frozen=True)
@@ -301,6 +326,52 @@ def open_in_final_cut(path: Path) -> None:
         )
 
 
+def _quote_model(quote: Any) -> str | None:
+    """견적이 본 의미 분석 모델 — 워크플로가 없는 견적(옛 모양)은 모른다."""
+    workflow = getattr(quote, "workflow", None)
+    return None if workflow is None else str(workflow.models.luna_model)
+
+
+def _semantic_quote_terms(model: str | None, estimates: Sequence[Any]) -> tuple[str, str]:
+    """견적 문구의 (모델 이름, 비용 상한 꼬리) — Luna는 W-14 이전 문구 그대로다(D54).
+
+    Claude 상한은 공식 단가 스냅샷의 보수적 합계를 센트 단위로 올려 말한다 — 청구서가 아니다.
+    """
+    claude = raw_service.ANALYSIS_PROVIDER_ANTHROPIC
+    if model is None or raw_service.analysis_provider(model) != claude:
+        return "Luna", ""
+    ceilings = [Decimal(e.ceiling_usd) for e in estimates if e.ceiling_usd is not None]
+    total = sum(ceilings, Decimal(0)).quantize(CENT, rounding=ROUND_CEILING)
+    return raw_service.analysis_model_label(model), f" · Claude 비용 상한 ${total} (보수적)"
+
+
+def _claude_price_suffix(model: str) -> str:
+    """설정 요약의 의미 분석 줄 꼬리 — Claude만 단가를 붙인다(Luna 줄은 그대로)."""
+    if raw_service.analysis_provider(model) != raw_service.ANALYSIS_PROVIDER_ANTHROPIC:
+        return ""
+    return f" — {_analysis_price_text(model)}"
+
+
+def _cost_note(model: str, luna_text: str) -> str:
+    """금액 문구 — Luna는 주어진 W-14 이전 문구 그대로, Claude는 공식 단가 한 줄."""
+    if raw_service.analysis_provider(model) != raw_service.ANALYSIS_PROVIDER_ANTHROPIC:
+        return luna_text
+    return _analysis_price_text(model)
+
+
+def _analysis_price_text(model: str) -> str:
+    """의미 분석 단가 한 줄 — Claude는 공식 확인값, Luna는 미확인(0원 계산 금지)."""
+    if raw_service.analysis_provider(model) != raw_service.ANALYSIS_PROVIDER_ANTHROPIC:
+        return "Luna 단가 **미확인** — 금액 추정을 만들지 않는다(0원 계산 금지)"
+    profile = raw_service.claude_profile(model)
+    return (
+        f"{profile.label} 공식 단가({profile.pricing_checked_at.isoformat()}) 입력"
+        f" ${profile.input_per_mtok} · 출력 ${profile.output_per_mtok} / 100만 토큰"
+        f" · effort {profile.effort} · 출력 한도 {profile.max_output_tokens} 토큰"
+        " — 견적은 창마다 보수적 상한이다"
+    )
+
+
 def _finalcut_sent_text(sent: dict[str, Any]) -> str:
     """마지막 보내기의 결과 한 단락 — 성공 요약 또는 이름을 댄 거부 사유(쉬운 말)."""
     if "error" in sent:
@@ -325,6 +396,10 @@ def _finalcut_sent_text(sent: dict[str, Any]) -> str:
 
 class RawWorkspaceUi:
     """작업공간 브라우저 서버 하나 — 상태 파일·Gradio 화면·HTTP 경계를 소유한다."""
+
+    # 시작 환경에서 찍은 키(`_capture_startup_credentials`) — 메모리에만 있고 화면에 값이 없다.
+    _startup_credentials: raw_service.EnvironmentCredentials | None
+    _startup_claude: raw_service.ClaudeCredentials | None
 
     def __init__(
         self,
@@ -351,7 +426,7 @@ class RawWorkspaceUi:
         # through the app loader and keeps credentials only in process memory.
         # Client construction and paid requests still require the selected-scope approval.
         self._live_transport = live
-        self._startup_credentials = raw_service.capture_browser_credentials()
+        self._capture_startup_credentials()
         # 브라우저 승인 기록 — 작업공간 서명에 묶여 산다(작업공간을 바꾸면 지운다).
         self._asr_approval_record: _AsrApprovalRecord | None = None
         self._semantic_approval_record: _SemanticApprovalRecord | None = None
@@ -821,7 +896,8 @@ class RawWorkspaceUi:
             f"(응답 `{config.caption.text_response_format}`)",
             f"- 시간 제공자 `{config.models.timing_model}` via `{config.caption.timing_provider}`"
             " (과도기)",
-            f"- 의미 분석 `{config.models.luna_model}`",
+            f"- 의미 분석 `{config.models.luna_model}`"
+            + _claude_price_suffix(config.models.luna_model),
             f"- 공식 확인일 {registry.docs_checked_at} · 계정 접근 "
             f"`{registry.account_access_status}` · 실기 시험 `{registry.integration_test_status}`",
             f"- 시간 제공자 종료 예정 **{registry.timing_shutdown_date}** — 이후 신규 온라인"
@@ -1243,6 +1319,8 @@ class RawWorkspaceUi:
     ) -> dict | None:
         """이어 붙을 기존 작업 — 승인된 실행은 실제 분석 중인 작업에만 이어 붙는다."""
         existing = self._task_for(root, asset_ids, paths)
+        if existing is not None and approved_quote is None and self._model_stale(root, existing):
+            return None  # 다른 분석 모델의 결과·견적 — 지금 모델로 새로 견적한다(D54)
         if approved_quote is None or existing is None:
             return existing
         with self._selection_lock:
@@ -1453,10 +1531,13 @@ class RawWorkspaceUi:
                 and self.raw.cached_selection_analysis(root, (source_id,))
             }
             context.check_cancel()
+            if not self._quote_current(root, quote, "라이브러리"):
+                return
             self._library_cached_ids[root] = cached
             self._library_quotes[root] = quote
 
-        self.raw.submit_job(root, "library_quote", repr(ids), prepare)
+        model = self.raw.settings(root).models.luna_model
+        self.raw.submit_job(root, "library_quote", repr((ids, model)), prepare)
 
     def library_analysis_summary(self) -> str:
         root = self._snapshot_root()
@@ -1467,10 +1548,12 @@ class RawWorkspaceUi:
         pending = [e for e in quote.estimates if e.asset_id not in cached]
         asr = sum(e.asr_chunk_count for e in pending)
         luna = sum(e.luna_request_count for e in pending)
+        label, ceiling = _semantic_quote_terms(_quote_model(quote), pending)
+        model = "" if label == "Luna" else f"({label})"
         return (
             f"분석 대상 {len(pending)}개 · 저장 결과 {len(cached)}개 재사용 · "
-            f"전사 최대 {asr}회 + 영상 분석 최대 {luna}회. 승인하면 두 단계가 이어집니다."
-            f" 최대 {self._analysis_limit}개를 동시에 분석합니다."
+            f"전사 최대 {asr}회 + 영상 분석{model} 최대 {luna}회{ceiling}. 승인하면 두 단계가"
+            f" 이어집니다. 최대 {self._analysis_limit}개를 동시에 분석합니다."
         )
 
     def library_analysis_button(self) -> Any:
@@ -1480,8 +1563,11 @@ class RawWorkspaceUi:
         active = (root is not None and self._approval_active(root)) or any(
             t.get("stage") in ACTIVE_ANALYSIS_STAGES for t in tasks.values()
         )
-        complete = quote is not None and all(
-            tasks.get(a, {}).get("stage") == "추천 구간 준비 완료" for a in quote.asset_ids
+        cached = self._library_cached_ids.get(root, set()) if root else set()
+        complete = (
+            quote is not None
+            and set(quote.asset_ids) <= cached
+            and all(tasks.get(a, {}).get("stage") == "추천 구간 준비 완료" for a in quote.asset_ids)
         )
         label = "분석 진행 중" if active else "분석 완료" if complete else LIBRARY_APPROVE_LABEL
         return gr.Button(
@@ -1552,13 +1638,22 @@ class RawWorkspaceUi:
             gr.Textbox(value="", autofocus=open_panel),
         )
 
-    def library_analysis_view(self, signature: str | None, api_key: str | None = "") -> tuple:
+    def library_analysis_view(
+        self, signature: str | None, api_key: str | None = "", shown_summary: str | None = None
+    ) -> tuple:
+        """일괄 승인 — 화면이 함께 보낸 요약(범위·상한)이 지금 견적과 같을 때만 접수한다(D54)."""
         root = self._require_current_selection(signature)
         ids = self._library_ids(root)
         quote = self._library_quotes.get(root)
         if not ids or quote is None or tuple(quote.asset_ids) != ids:
             self._prepare_library_quote(root)
             return self._library_reply(root, NOTICE_PREPARING)
+        summary = self.library_analysis_summary()
+        if shown_summary is not None and shown_summary != summary:
+            # 거절 알림이 확인할 견적(범위·상한)을 직접 싣는다 — 상태 칸이 그것을 가리지 않는다.
+            notice = f"{NOTICE_TEXT[NOTICE_UNSEEN]}\n\n{summary}"
+            self._set_approval_notice(root, NOTICE_UNSEEN, notice)
+            return (self._quick_status(), gr.Accordion(open=False), gr.Textbox(value=""))
         key = (api_key or "").strip()
         if key:
             self._startup_credentials = raw_service.EnvironmentCredentials(
@@ -1568,6 +1663,13 @@ class RawWorkspaceUi:
             if self._quick.get("token"):
                 self._quick_update(self._quick["token"], connection_required=True)
             return self._library_reply(root, NOTICE_KEY, open_panel=True)
+        if self._quick.get("connection_required"):  # 키가 생겼다 — 연결 안내가 견적을 가리지 않게
+            self._quick_update(self._quick["token"], connection_required=False)
+        problem = self._claude_key_problem(root)
+        if problem is not None:
+            notice = f"**연결 설정 필요 · 아직 분석하지 않았습니다**\n\n{problem}"
+            self._set_approval_notice(root, NOTICE_KEY, notice)
+            return (self._quick_status(), gr.Accordion(open=True), gr.Textbox(value=""))
         # 새 견적 확인(영상마다 ffprobe)은 수십 초 걸린다 — 클릭은 접수만 하고 돌아온다.
         self._submit_library_approval(root, ids, quote)
         return (self._quick_status(), gr.Accordion(open=False), gr.Textbox(value=""))
@@ -1680,6 +1782,9 @@ class RawWorkspaceUi:
                 error="OpenAI API 키가 입력되지 않아 분석을 시작하지 않았습니다.",
             )
             return self._quick_status()
+        blocked = self._quick_approval_blocker(root, state)
+        if blocked is not None:
+            return blocked
         token = state["token"]
         approved = replace(state["quote"], approved=True)
         self._quick_update(token, stage="분석 시작", error=None, connection_required=False)
@@ -1736,7 +1841,7 @@ class RawWorkspaceUi:
         state = self._quick
         if not state:
             return "영상을 선택하면 미리보기와 Luna 추천 분석이 이어집니다."
-        stage = str(state.get("stage", "영상 준비"))
+        stage = self._shown_stage(state.get("root"), state, "영상 준비")
         if state.get("connection_required"):
             return (
                 "**연결 설정 필요 · 아직 분석하지 않았습니다**\n\n"
@@ -1764,16 +1869,102 @@ class RawWorkspaceUi:
                     "이어서 같은 자막과 영상 프레임을 Luna가 함께 분석합니다."
                 )
         if stage == "승인 대기" and quote is not None:
-            requests = sum(max(1, e.luna_request_count) for e in quote.estimates)
-            chunks = sum(e.asr_chunk_count for e in quote.estimates)
-            duration = sum(float(Fraction(e.asr_seconds)) for e in quote.estimates)
-            return (
-                f"**Luna 분석 준비 완료** · 선택 영상 {len(quote.asset_ids)}개\n\n"
-                f"전사 최대 {chunks}요청({duration:.0f}초) + Luna 최대 {requests}요청. "
-                "실제 비용은 사용한 오디오·토큰에 따라 정해집니다.\n\n"
-                "아래에서 한 번 승인하면 전사·장면 분석·추천 표시가 자동으로 이어집니다."
-            )
+            return self._approval_ready_text(quote)
         return f"**{stage}** · 추천은 청록색, 확인이 필요한 구간은 주황색으로 표시됩니다."
+
+    @staticmethod
+    def _approval_ready_text(quote: Any) -> str:
+        """승인 대기 견적 — 모델 이름과(Claude면) 보수적 비용 상한을 말한다(D54)."""
+        requests = sum(max(1, e.luna_request_count) for e in quote.estimates)
+        chunks = sum(e.asr_chunk_count for e in quote.estimates)
+        duration = sum(float(Fraction(e.asr_seconds)) for e in quote.estimates)
+        label, ceiling = _semantic_quote_terms(_quote_model(quote), quote.estimates)
+        return (
+            f"**{label} 분석 준비 완료** · 선택 영상 {len(quote.asset_ids)}개\n\n"
+            f"전사 최대 {chunks}요청({duration:.0f}초) + {label} 최대 {requests}요청{ceiling}. "
+            "실제 비용은 사용한 오디오·토큰에 따라 정해집니다.\n\n"
+            "아래에서 한 번 승인하면 전사·장면 분석·추천 표시가 자동으로 이어집니다."
+        )
+
+    # ── 영상 분석 모델(D54) — 작업공간 설정에 산다 ─────────────────────────
+
+    def _model_stale(self, root: Path | None, task: Mapping[str, Any]) -> bool:
+        """다른 분석 모델로 끝난(또는 견적한) 작업인가 — 끝났다고 보이지 않게 한다.
+
+        읽기만 한다: 저장된 단계는 그대로라 모델을 되돌리면 다시 끝난 작업이다.
+        """
+        if root is None:
+            return False
+        if task.get("stage") in FINISHED_QUICK_STAGES and task.get("revision"):
+            return not self.raw.revision_matches_settings(root, str(task["revision"]))
+        workflow = getattr(task.get("quote"), "workflow", None)
+        if task.get("stage") != "승인 대기" or workflow is None:
+            return False
+        return bool(workflow.models != self.raw.settings(root).models)
+
+    def _shown_stage(self, root: Path | None, task: Mapping[str, Any], default: str) -> str:
+        """화면에 보일 단계 — 다른 모델의 결과는 끝났다고 말하지 않는다.
+
+        지금 모델로 끝난 저장 분석이 있으면 그 말만 한다 — 다시 쓸 수 있는지는 고를 때 정해진다.
+        """
+        if not self._model_stale(root, task):
+            return str(task.get("stage", default))
+        assert root is not None  # 오래됨은 작업공간이 있을 때만 판정된다
+        ids = tuple(task.get("asset_ids", ()))
+        if ids and self.raw.stored_analysis_for_settings(root, ids) is not None:
+            return MODEL_CHANGED_CACHED_STAGE
+        return MODEL_CHANGED_STAGE
+
+    def _quick_approval_blocker(self, root: Path, state: dict[str, Any]) -> str | None:
+        """승인 클릭을 막을 까닭 — 다른 모델의 견적, 화면에 아직 안 나간 견적, Claude 키 없음.
+
+        클릭은 화면에 나간 견적에만 묶인다(D54): 다시 낸 견적은 이 거절 답이 상한째 직접 싣고
+        나가며, 표시는 그 답 하나로만 셈한다(타이머 그리기는 건너뛰거나 다른 탭일 수 있다). 상태
+        칸을 붙잡은 알림·연결 안내가 견적을 가려도 이 답은 견적을 보여 주므로 다음 클릭이 그것을
+        승인한다 — 갇히지 않는다. 여기 왔으면 OpenAI 키는 있다: 연결 안내를 걷는다.
+        """
+        if state.get("connection_required"):
+            self._quick_update(state["token"], connection_required=False)
+        if self._model_stale(root, state):
+            self._requote_selected(root)
+            return (
+                f"{NOTICE_TEXT[NOTICE_UNSEEN]}\n\n**{MODEL_CHANGED_STAGE}** · 지금 분석 모델로"
+                " 견적을 다시 내고 있습니다. 잠시 뒤 다시 누르면 새 견적을 보여 드립니다."
+            )
+        if state.get("quote_unseen") is not None:
+            self._quick_update(state["token"], quote_unseen=None)  # 이 답이 견적을 화면에 낸다
+            return f"{NOTICE_TEXT[NOTICE_UNSEEN]}\n\n{self._approval_ready_text(state['quote'])}"
+        problem = self._claude_key_problem(root)
+        if problem is not None:
+            self._quick_update(state["token"], error=problem)
+            return self._quick_status()
+        return None
+
+    def _quote_current(self, root: Path, quote: Any, what: str) -> bool:
+        """완성된 견적이 지금 설정으로 잰 것인가 — 늦게 끝난 옛 견적은 새 견적을 덮지 않는다."""
+        if quote.workflow == self.raw.settings(root):
+            return True
+        log.debug(
+            f"{what} 견적을 버렸다 — 재는 사이 설정이 바뀌었다({quote.workflow.models.luna_model})"
+        )
+        return False
+
+    def _claude_key_problem(self, root: Path) -> str | None:
+        """Claude를 골랐는데 키가 없으면 그 말 — 전사를 사기 전에, 작업을 띄우기 전에 닫는다."""
+        model = self.raw.settings(root).models.luna_model
+        if raw_service.analysis_provider(model) != raw_service.ANALYSIS_PROVIDER_ANTHROPIC:
+            return None
+        if self._live_transport is not None:
+            try:
+                self._live_transport.semantic_client(model)
+            except raw_service.AnalysisApprovalError as error:
+                return str(error)
+            return None
+        if self._startup_claude is not None:
+            return None
+        return CLAUDE_KEY_MISSING_TEXT.format(
+            label=raw_service.analysis_model_label(model), env=raw_service.ANALYSIS_CLAUDE_KEY_ENV
+        )
 
     def capcut_fcp_import_view(
         self, signature: str | None, selected: list[str] | None
@@ -2196,6 +2387,46 @@ class RawWorkspaceUi:
     def _system_finalcut_open(path: Path) -> None:
         open_in_final_cut(path)
 
+    def _capture_startup_credentials(self) -> None:
+        """시작 환경의 키를 한 번 찍어 메모리에만 둔다 — OpenAI(전사·Luna)와 Claude(D54).
+
+        값은 화면·로그에 나오지 않는다. 이 화면은 Claude 키를 입력받지 않는다(`.env`에서만).
+        """
+        self._startup_credentials = raw_service.capture_browser_credentials()
+        self._startup_claude = raw_service.capture_claude_credentials()
+
+    def _quick_api_panel(self) -> tuple[gr.Accordion, gr.Textbox]:
+        """「API 연결 · 처음 한 번」 — OpenAI 키 칸, 영상 분석 모델(D54)과 키 상태 한 줄."""
+        with gr.Accordion(
+            "API 연결 · 처음 한 번", open=False, elem_id="quick-api-panel"
+        ) as quick_api_panel:
+            quick_api_key = gr.Textbox(
+                label="OpenAI API 키 (이 실행에서만 사용)",
+                type="password",
+                value="",
+                elem_id="quick-api-key",
+            )
+            analysis_model = gr.Dropdown(
+                choices=self.analysis_model_choices(),
+                value=self._current_analysis_model(),
+                label="영상 분석 모델",
+                interactive=True,
+                elem_id="analysis-model",
+            )
+            analysis_model_md = gr.Markdown(
+                self.analysis_model_status(), elem_id="analysis-model-status"
+            )
+        # 사람이 고를 때만 저장한다(`input`) — 패널을 열 때 맞추는 값 갱신은 저장하지 않는다.
+        analysis_model.input(
+            self.settings_analysis_model_view,
+            [self._signature_state, analysis_model],
+            [analysis_model_md, analysis_model],
+        )
+        quick_api_panel.expand(
+            self.analysis_model_controls, None, [analysis_model, analysis_model_md]
+        )
+        return quick_api_panel, quick_api_key
+
     def _review_tab(
         self,
     ) -> tuple[gr.Button, gr.Button, gr.Dropdown, gr.Button]:
@@ -2238,15 +2469,7 @@ class RawWorkspaceUi:
                     js_on_load=ui_facade.VISUAL_BOOTSTRAP_JS,
                     server_functions=self._visual_server_functions(),
                 )
-            with gr.Accordion(
-                "API 연결 · 처음 한 번", open=False, elem_id="quick-api-panel"
-            ) as quick_api_panel:
-                quick_api_key = gr.Textbox(
-                    label="OpenAI API 키 (이 실행에서만 사용)",
-                    type="password",
-                    value="",
-                    elem_id="quick-api-key",
-                )
+            quick_api_panel, quick_api_key = self._quick_api_panel()
             with gr.Accordion("분석 실행 설정", open=False, visible=False):
                 primary_network = gr.Dropdown(
                     choices=["offline", "online"],
@@ -2284,7 +2507,7 @@ class RawWorkspaceUi:
             )
             quick_approve.click(
                 self.library_analysis_view,
-                [self._signature_state, quick_api_key],
+                [self._signature_state, quick_api_key, library_summary],
                 [self._capcut_progress_md, quick_api_panel, quick_api_key],
             ).then(
                 fn=None,
@@ -3299,7 +3522,7 @@ class RawWorkspaceUi:
         red_unmaterialized = 0
         for sid, source in sources_model.items():
             task = task_views.get(sid, {})
-            source["analysisState"] = task.get("stage", "분석 대기")
+            source["analysisState"] = self._shown_stage(root, task, "분석 대기")
             if task.get("revision"):
                 rows = self.raw.selection_suitability(root, task["revision"], (sid,)).get(sid, [])
                 source["suggestions"] = [self._suggestion_row(row) for row in rows]
@@ -4310,9 +4533,9 @@ class RawWorkspaceUi:
             " 아니다(이 단계의 산출은 요약·태그·경계 제안뿐)\n\n"
             f"- 수명주기: 시간 제공자 종료 예정 **{config.registry.timing_shutdown_date}**"
             " — 이후 신규 온라인 전사(1단계)는 차단된다(§11.10)\n"
-            f"- 네트워크 **{config.network_mode}** · Luna 단가 **미확인** — 금액 추정을"
-            " 만들지 않는다(0원 계산 금지). 실제 호출은 1단계(전사)·2단계(의미)"
-            " 승인이 각각 사람 기록으로만 열린다."
+            f"- 네트워크 **{config.network_mode}** · "
+            + _analysis_price_text(config.models.luna_model)
+            + ". 실제 호출은 1단계(전사)·2단계(의미) 승인이 각각 사람 기록으로만 열린다."
         )
 
     def _current_network_mode(self) -> str:
@@ -4543,6 +4766,7 @@ class RawWorkspaceUi:
             self._startup_credentials,
             asr_approvals=self._production_asr_approvals,
             luna_approvals=self._production_luna_approvals,
+            claude=self._startup_claude,
         )
 
     # ── 생산 승인 공급자 — 서버가 간직한 견적 기록에서 주조한다 ──
@@ -4645,9 +4869,11 @@ class RawWorkspaceUi:
             " 2단계 승인이 다시 묶는다.",
             f"- 수명주기: 시간 제공자 종료 예정 **{workflow.registry.timing_shutdown_date}**"
             " — 이후 신규 1단계는 차단된다(§11.10).",
-            f"- 작업공간 네트워크 **{workflow.network_mode}** · Luna 단가 **미확인**"
-            " — 금액 추정을 만들지 않는다. 환경 `VLOGSRT_OFFLINE`은 설정과 무관하게"
-            " 문을 닫는다(시작 게이트가 판정한다).",
+            f"- 작업공간 네트워크 **{workflow.network_mode}** · "
+            + _cost_note(
+                workflow.models.luna_model, "Luna 단가 **미확인** — 금액 추정을 만들지 않는다"
+            )
+            + ". 환경 `VLOGSRT_OFFLINE`은 설정과 무관하게 문을 닫는다(시작 게이트가 판정한다).",
             f"- 견적 지문 `{digest[:12]}…` — 이 표를 본 뒤 확인란을 체크하고"
             " **실제 호출 1단계(전사) 시작**을 누르면 승인으로 남는다. 그 사이"
             " 원본·설정이 바뀌면 시작이 0송신으로 거부된다.",
@@ -4734,10 +4960,13 @@ class RawWorkspaceUi:
             digest=digest,
         )
         lines = self._semantic_estimate_table(root, estimates)
+        model = estimates[0].luna_model
         lines += [
             "",
-            f"- Luna 모델 `{estimates[0].luna_model}` · 비용 상태 **{estimates[0].price_status}**"
-            " — 미확인 단가는 금액을 만들지 않는다(0원 계산 금지).",
+            f"- Luna 모델 `{model}` · 비용 상태 **{estimates[0].price_status}** — "
+            + _cost_note(model, "미확인 단가는 금액을 만들지 않는다(0원 계산 금지)")
+            + _semantic_quote_terms(model, estimates)[1]
+            + ".",
             "- 2단계 승인은 이 표의 **실측 지문 전체값**을 묶는다 — 이 표를 본 뒤"
             " 확인란을 체크하고 재개하면 승인으로 남는다. 승인이 본 값과 1단계"
             " 기록이 다르면 재개가 0송신으로 거부된다.",
@@ -4793,7 +5022,7 @@ class RawWorkspaceUi:
                 root,
                 job_id,
                 luna_approvals=approvals,
-                client=transport.client,
+                client=self._semantic_client_for(root, transport),
                 on=transport.on,
             )
         except raw_service.RawWorkspaceError as error:
@@ -4807,6 +5036,117 @@ class RawWorkspaceUi:
             message + "\n\n" + self._analysis_state_markdown(root),
             gr.Dropdown(choices=self.resumable_analysis_choices(root)),
         )
+
+    def _semantic_client_for(self, root: Path, transport: Any) -> object:
+        """지금 설정의 의미 분석 모델에 맞는 클라이언트 — 키가 없으면 호출 전에 닫는다(D54)."""
+        try:
+            return transport.semantic_client(self.raw.settings(root).models.luna_model)
+        except raw_service.AnalysisApprovalError as error:
+            raise gr.Error(str(error)) from error
+
+    def analysis_model_choices(self) -> list[tuple[str, str]]:
+        """「영상 분석 모델」 칸의 선택지 — 기본(gpt-6-luna)이 맨 앞이다."""
+        return [
+            (raw_service.analysis_model_label(model), model)
+            for model in raw_service.ANALYSIS_MODEL_CHOICES
+        ]
+
+    def _model_dropdown(self, model: str) -> Any:
+        return gr.Dropdown(choices=self.analysis_model_choices(), value=model)
+
+    def _current_analysis_model(self) -> str:
+        root = self._snapshot_root()
+        if root is None:
+            return raw_service.ANALYSIS_MODEL_CHOICES[0]
+        try:
+            return self.raw.settings(root).models.luna_model
+        except raw_service.RawWorkspaceError:
+            return raw_service.ANALYSIS_MODEL_CHOICES[0]
+
+    def analysis_model_status(self, root: Path | None = None) -> str:
+        """모델·키 상태 한 줄 — 키는 이름만 말하고 값은 어디에도 싣지 않는다."""
+        root = root if root is not None else self._snapshot_root()
+        env = raw_service.ANALYSIS_CLAUDE_KEY_ENV
+        key = (
+            f"Claude 키(`{env}`) 확인됨 — 값은 표시하지 않습니다."
+            if self._startup_claude is not None
+            else f"Claude 키(`{env}`) 없음 — Claude를 쓰려면 `.env`에 넣고 앱을 다시 띄우세요."
+        )
+        if root is None:
+            return key
+        model = self.raw.settings(root).models.luna_model
+        label = raw_service.analysis_model_label(model)
+        return f"영상 분석 모델 **{label}** · {_analysis_price_text(model)}\n\n{key}"
+
+    def analysis_model_controls(self) -> tuple[Any, str]:
+        """패널을 열 때 칸과 상태를 지금 작업공간 설정으로 맞춘다."""
+        return self._model_dropdown(self._current_analysis_model()), self.analysis_model_status()
+
+    def settings_analysis_model_view(
+        self, signature: str | None, model: str | None
+    ) -> tuple[str, Any]:
+        """영상 분석 모델 바꾸기(D54) — 로컬 설정만. 분석·승인 확인이 도는 동안에는 바꾸지 않는다.
+
+        바꾸면 라이브러리 캐시를 비우고 견적을 다시 낸다(읽기만). 검토 머리·영상 순서·분석
+        기록은 건드리지 않는다 — 사람의 검토 편집이 아니다(D53).
+        """
+        root = self._require_current_selection(signature)
+        if model not in raw_service.ANALYSIS_MODEL_CHOICES:
+            raise gr.Error(f"고를 수 없는 영상 분석 모델입니다: {model!r}")
+        config = self.raw.settings(root)
+        if model == config.models.luna_model:
+            return self.analysis_model_status(root), self._model_dropdown(model)
+        if self._analysis_busy(root):
+            refused = (
+                "**바꾸지 않았습니다** · 분석이나 승인 확인이 진행 중입니다 — 끝나거나 취소한 뒤에"
+                " 영상 분석 모델을 바꾸세요."
+            )
+            current = config.models.luna_model
+            return f"{refused}\n\n{self.analysis_model_status(root)}", self._model_dropdown(current)
+        try:
+            models = replace(config.models, luna_model=model)
+            self.raw.update_settings(root, replace(config, models=models))
+        except (raw_service.RawWorkspaceError, ValueError) as error:
+            raise gr.Error(str(error)) from error
+        self._after_model_change(root)
+        return self.analysis_model_status(root), self._model_dropdown(model)
+
+    def _analysis_busy(self, root: Path) -> bool:
+        """분석·승인 확인이 도는가 — 이 동안 모델이 바뀌면 견적이 본 모델과 실행이 갈린다."""
+        if self._approval_active(root) or self.raw.active_jobs(root, MODEL_BUSY_JOB_KINDS):
+            return True
+        with self._selection_lock:
+            tasks = [t for t in self._quick_tasks.values() if t.get("root") == root]
+        return any(task.get("stage") in ACTIVE_ANALYSIS_STAGES for task in tasks)
+
+    def _after_model_change(self, root: Path) -> None:
+        """모델이 바뀐 뒤 — 라이브러리 캐시를 비우고, 견적(로컬 측정)만 다시 낸다."""
+        with self._selection_lock:
+            self._library_cached_ids.pop(root, None)
+            self._library_quotes.pop(root, None)
+            self._capcut_render_key = None  # 작업대의 영상별 단계 표시를 다시 그린다
+        self._prepare_library_quote(root)
+        self._requote_selected(root)
+
+    def _requote_selected(self, root: Path) -> None:
+        """선택한 영상의 승인 대기 견적을 지금 설정으로 다시 낸다(로컬 측정만).
+
+        새 견적은 화면에 나가기 전에는 승인되지 않는다(`quote_unseen`). 재는 사이 설정이 또
+        바뀌었으면 버린다 — 늦게 끝난 옛 견적이 새 견적을 덮지 않는다.
+        """
+        state = self._quick
+        if state.get("root") != root or state.get("stage") != "승인 대기":
+            return
+        token, ids = str(state["token"]), tuple(state.get("asset_ids", ()))
+        model = self.raw.settings(root).models.luna_model
+
+        def requote(context: Any) -> None:
+            context.check_cancel()
+            quote = self.raw.selection_quote(root, ids)
+            if self._quote_current(root, quote, "선택 영상"):
+                self._quick_update(token, quote=quote, error=None, quote_unseen=quote.digest)
+
+        self.raw.submit_job(root, "selection_quote", f"{token}:{model}", requote)
 
     def settings_network_view(self, signature: str | None, mode: str | None) -> str:
         """작업공간 네트워크 모드 변경 — 환경 스위치는 우회할 수 없다(§14.3)."""

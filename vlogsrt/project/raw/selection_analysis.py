@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass, replace
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -12,7 +13,11 @@ from vlogsrt.project.raw import browser_runtime
 from vlogsrt.project.raw.analysis_config import RawUnderstandingSettings
 from vlogsrt.project.raw.analysis_store import AnalysisStore
 from vlogsrt.project.raw.config import RawWorkflowConfig
-from vlogsrt.project.raw.models import AnalysisEstimate, RawWorkspaceError
+from vlogsrt.project.raw.models import (
+    AnalysisEstimate,
+    AnalysisSemanticEstimate,
+    RawWorkspaceError,
+)
 
 
 @dataclass(frozen=True)
@@ -167,6 +172,8 @@ def execute(
     current = quote(service, root, approved.asset_ids)
     if current.digest != approved.digest or current.workflow != approved.workflow:
         raise RawWorkspaceError("선택 영상이나 설정이 바뀌었습니다. 현재 범위를 다시 확인하세요")
+    # 의미 분석 클라이언트를 먼저 받는다 — 키가 없으면 전사도 사기 전에 닫힌다(D54).
+    client = transport.semantic_client(approved.workflow.models.luna_model)
     context.check_cancel()
     browser_runtime.prepare_approved_browser_network()
     service.update_settings(root, replace(approved.workflow, network_mode="online"))
@@ -187,12 +194,7 @@ def execute(
     service.wait_child_job(root, first, context)
     context.check_cancel()
     estimates = service.analysis_semantic_estimate(root, revision.revision_id)
-    limits = {e.asset_id: max(1, e.luna_request_count) for e in approved.estimates}
-    for estimate in estimates:
-        if estimate.asset_id in limits and estimate.luna_request_count > limits[estimate.asset_id]:
-            raise RawWorkspaceError(
-                "실측 분석량이 승인한 요청 상한을 넘었습니다. 새 범위를 확인하세요"
-            )
+    _require_within_approval(approved.estimates, estimates)
     luna = browser_runtime.mint_luna_approvals(
         service,
         root,
@@ -202,11 +204,37 @@ def execute(
     )
     report("Luna 추천 구간 분석", revision.revision_id)
     second = service.resume_analysis_semantic(
-        root, first.job_id, luna_approvals=luna, client=transport.client, on=transport.on
+        root, first.job_id, luna_approvals=luna, client=client, on=transport.on
     )
     service.wait_child_job(root, second, context)
     context.check_cancel()
     return revision.revision_id
+
+
+def _require_within_approval(
+    approved: Sequence[AnalysisEstimate], measured: Sequence[AnalysisSemanticEstimate]
+) -> None:
+    """전사 뒤 실측이 승인 범위 안인가 — 요청 수, 그리고 (Claude면) 비용 상한(D54).
+
+    사람이 본 금액보다 큰 상한으로는 2단계 승인을 만들지 않는다. 상한이 없는 견적(Luna)은
+    지금처럼 요청 수만 본다.
+    """
+    quoted = {e.asset_id: e for e in approved}
+    for estimate in measured:
+        seen = quoted.get(estimate.asset_id)
+        if seen is None:
+            continue
+        if estimate.luna_request_count > max(1, seen.luna_request_count):
+            raise RawWorkspaceError(
+                "실측 분석량이 승인한 요청 상한을 넘었습니다. 새 범위를 확인하세요"
+            )
+        if seen.ceiling_usd is not None and (
+            estimate.ceiling_usd is None
+            or Decimal(estimate.ceiling_usd) > Decimal(seen.ceiling_usd)
+        ):
+            raise RawWorkspaceError(
+                "실측 분석 비용 상한이 승인한 상한을 넘었습니다. 새 범위를 확인하세요"
+            )
 
 
 def publish_review(service: Any, root: Path, revision_id: str, context: Any) -> str:

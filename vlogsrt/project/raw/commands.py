@@ -391,6 +391,11 @@ def add_media_parser(sub: argparse._SubParsersAction) -> None:
         help="오디오 트랙 서수(여럿일 때). 없으면 자동(첫 트랙)",
     )
     caption.add_argument("--run", default="run-1", help="실행 ID(기본 run-1)")
+    _add_workspace_parsers(commands)
+
+
+def _add_workspace_parsers(commands: argparse._SubParsersAction) -> None:
+    """작업공간 하나만 받는 명령들 — Final Cut 전체 타임라인(D56)과 분석 모델 설정(D54)."""
     _add_finalcut_parser(commands)
     _add_settings_parser(commands)
 

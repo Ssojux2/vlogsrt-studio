@@ -407,7 +407,8 @@ def test_a_validated_claude_responder_sends_through_the_messages_boundary(
         frames=FrameSamplingResult((), ()),
         approval=approval,
     )
-    by_id = {item.window.window_id: item for item in responder.context.evidence_windows}
+    windows = responder.context.evidence_windows
+    by_id = {item.window.window_id: item for item in windows}
     sent: list[dict[str, Any]] = []
 
     def fake_claude(client: Any, **kwargs: Any) -> dict[str, Any]:
@@ -422,11 +423,7 @@ def test_a_validated_claude_responder_sends_through_the_messages_boundary(
     monkeypatch.setattr(luna, "request_claude_messages", fake_claude)
     monkeypatch.setattr(luna, "request_luna_vision", no_luna)
     annotations = annotate_windows(
-        responder.context.evidence_windows,
-        responder,
-        settings=SETTINGS,
-        model=CLAUDE,
-        origin="live",
+        windows, responder, settings=SETTINGS, model=CLAUDE, origin="live"
     )
     assert all(item.status == luna.ANNOTATION_ACCEPTED for item in annotations)
     assert all(item.luna_model == CLAUDE for item in annotations)

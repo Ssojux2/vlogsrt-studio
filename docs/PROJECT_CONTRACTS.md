@@ -78,6 +78,15 @@ openai import의 허용 지점은 **정확 경로 `vlogsrt/transcribe.py` 하나
 전송이 필요해도 직접 import하지 않는다; `vlogsrt/transcribe.py` 안에 좁은 전송을
 더하는 방향만 있다.
 
+Claude Messages API(D54)는 SDK 없이 표준 라이브러리로 부른다. 네트워크 모듈
+(`urllib.request`·`urllib.error`·`http.client`·`socket`·`ssl`, 별칭과 `from urllib import
+request` 포함)의 허용 지점은 **정확 경로 `vlogsrt/anthropic_messages.py` 하나**이고, 그
+모듈을 import할 수 있는 파일은 **정확 경로 `vlogsrt/transcribe.py` 하나**다(승인 문·관찰·
+취소가 그 안에 있다). `urllib.parse`는 네트워크가 아니라 어디서나 쓴다. `anthropic`·
+`httpx`·`requests`·`urllib3`·`aiohttp`는 어디서도 import하지 않는다. 예외는 로컬 브라우저
+서버의 두 정확 경로뿐이고 각자 모듈 하나만 쓴다 — `ui/instance.py`는 `urllib.request`,
+`ui/service.py`는 `socket`(`UI_NETWORK_ALLOWLIST`).
+
 ## 5. subprocess — 정확히 두 파일
 
 | 정확 경로 | 부를 수 있는 것 |
@@ -142,6 +151,9 @@ openai import의 허용 지점은 **정확 경로 `vlogsrt/transcribe.py` 하나
 있다(2026-10-02 계획 §3.2·§15.1 — 모델 리터럴은 허용된 설정 경로에만 둔다).
 중첩 경로의 같은 이름 파일(`vlogsrt/project/tuning/config.py`,
 `vlogsrt/project/tuning/raw/config.py` 등)도 예외를 물려받지 못한다.
+**Claude 의미 분석 모델 리터럴(`claude-*`)도 정확 경로 `vlogsrt/project/raw/config.py`
+하나**에만 있을 수 있다(D54) — 등록표(`CLAUDE_ANALYSIS_PROFILES`)가 단가와 함께 모델
+이름을 정하고, 다른 파일은 그 등록표와 `ANALYSIS_MODEL_CHOICES`를 거쳐서만 이름을 얻는다.
 
 **공급자를 바꿔도 접두사 목록은 좁히지 않는다.** 2026-09-13에 기본 비전 공급자가
 z.ai(`glm-5.3-flash`)에서 Google(`gemini-3.8-flash`)로 바뀌었지만 `glm-*`은 금지

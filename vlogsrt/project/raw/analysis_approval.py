@@ -34,6 +34,7 @@ from vlogsrt.project.raw.config import (
     RawWorkflowConfig,
     analysis_model_label,
     analysis_provider,
+    transcription_identity_view,
     validate_raw_workflow_config,
 )
 from vlogsrt.project.raw.understanding_luna import AnalysisApprovalError, online_env_blocked
@@ -77,9 +78,12 @@ def asr_settings_fingerprint(
 
     원본 해시·실측 격자는 승인 레코드의 다른 칸이 묶으므로 여기 없다. 같은 설정·
     같은 모델이면 같은 값이 나온다 — 승인은 이 값으로 설정 드리프트를 잡는다.
+    의미 분석 모델은 전사 전용 보기(`transcription_identity_view`)로 고정한다(D54) —
+    전사는 그 모델을 듣지 않고, 기본 설정의 지문은 W-14 이전과 같다.
     """
     validate_understanding_settings(settings)
     validate_raw_workflow_config(workflow)
+    workflow = transcription_identity_view(workflow)
     parts = [
         ASR_APPROVAL_SCHEMA,
         UNDERSTANDING_SCHEMA_VERSION,

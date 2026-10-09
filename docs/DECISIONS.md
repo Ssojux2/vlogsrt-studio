@@ -3315,6 +3315,179 @@ JSON 345개만 복사해 스크래치패드에서 고친 코드의 정리 고리
 
 ---
 
+## D54 — 영상 분석(Luna 역할)에 Claude Opus 5.5를 고를 수 있다. 표준 라이브러리로 부르고, 모델을 바꿔도 전사는 그대로다 (2026-10-09, W-14)
+
+**문제**: 사용자 지시(2026-10-09) — 영상 분석에 Claude Opus 5.5를 고를 수 있게 하라. 그 역할은 지금
+`gpt-6-luna`가 맡는 `models.luna_model`이다(무성 원본의 시각 판정도 같은 역할·같은 응답자다). gpt-6-luna는
+기본으로 남는다. whisper·gpt-transcribe는 그대로다 — Claude는 오디오를 받지 않는다. 키는 `.env`의
+`ANTHROPIC_API_KEY`이고 에이전트는 그 파일을 읽지 않는다(실행 때 `env.ensure_loaded`가 읽는다).
+
+계획 단계에서 함정 둘이 나왔다.
+
+1. **모델만 바꿔도 whisper를 다시 산다.** 내부 ASR 청크 캐시 열쇠(`understanding._transcribe_span`)는 워크플로
+   설정 전체의 `asdict`를, 최종 자막 지문(`final_caption.caption_settings_fingerprint`)은 설정 JSON 전체를,
+   1단계 승인 지문(`asr_settings_fingerprint`)은 `luna_model`을 묶었다. 캐시가 빗나가면 whisper를 다시
+   사고(온도 0.6 — 글자가 달라질 수 있다), 원본 자막이 새 sequence가 되어 전사 지문이 흔들리고, 되돌려도
+   Luna 분석이 낡는다.
+2. **설정에 칸을 더하면 기존 작업공간이 안 열린다.** `_config_from_mapping`은 엄격하고, 설정 전체를 묶는
+   지문이 전부 흔들린다. 그래서 `RawWorkflowConfig`·`RawModelRoles`·`RawPricingSnapshot`·
+   `RawUnderstandingSettings`에는 칸을 더하지 않았다.
+
+**결정 — 전송**:
+
+- Messages API `POST {base}/v1/messages`, `anthropic-version: 2023-06-01`, 모델 `claude-opus-5-5`. 표준
+  라이브러리 `urllib`로 부른다(새 `vlogsrt/anthropic_messages.py`). `anthropic` SDK는 쓰지 않는다(규칙 10).
+  OpenAI 호환 층도 쓰지 않는다 — chat-completions뿐이고 `response_format`·`strict`를 무시하며 프롬프트
+  캐시·토큰 세부가 비고, 문서가 스스로 "not production-ready"라 한다(오늘의 Luna 호출은 Responses API다).
+- 승인 문·관찰·취소는 `transcribe.request_claude_messages`가 진다 — `request_luna_vision`과 같은 모양이다
+  (`online=True` 없이는 닫힘, 페이로드에 `model`이 있으면 승인 전에 TypeError, `RequestAttemptMeta`의
+  `operation="messages.create"`). HTTP 한 번은 `anthropic_messages.post_messages` 하나다.
+- 재시도·스트리밍이 없다. 429·529·시간 초과는 실패 창으로 남고 사람이 「실패 구간 재시도」를 누른다(Luna
+  경계의 `max_retries=0`과 같은 판단). 리다이렉트는 따르지 않는다. https만 쓴다 — 클라이언트를 만들 때와
+  키를 얹기 직전에 두 번 검사하고, opener에는 https·프록시·리다이렉트 거절·오류 처리기만 단다. 프록시
+  처리기는 둔다: OpenAI 경로(httpx)처럼 환경·시스템 프록시를 따라야 프록시만 열린 망에서 전사만 사 놓고
+  Claude가 매번 실패하는 일이 없다. https는 CONNECT 터널이라 키는 원 호스트와의 TLS 안에만 있다.
+- 키는 repr·오류 문면에 남지 않는다(`field(repr=False)`, 공급자 메시지는 `env.redact_secrets`를 지나
+  200자까지).
+- 오류 분류(`task_runtime.provider_error`): 529·overloaded → `overloaded`(「API 과부하 · 잠시 뒤 실패
+  구간을 다시 시도하세요」), 402 → 결제, 413 → 요청 형식. 예외 클래스 이름이 timeout·connection을
+  담는 것은 분류가 이름으로 가르기 때문이다.
+
+**결정 — 구조화 출력과 Opus 5.5의 제약**:
+
+- `output_config.format = {"type": "json_schema", "schema": luna_output_schema()}` — GA, 베타 헤더가 없다.
+  지금 schema가 그대로 맞는다(전부 필수, `additionalProperties: false`, 문자열 enum·문자열 배열).
+- `thinking`·`tools`·`temperature`를 싣지 않는다. Opus 5.5는 적응형 생각을 끌 수 없고(`disabled`는
+  400), 강제 도구 호출·프리필도 400이다. 생각은 출력으로 청구되고 `max_tokens` 안에 든다. effort는
+  `medium`(기본값), `max_tokens = 8192`.
+- `stop_reason == "end_turn"`일 때만 판정으로 받는다. `max_tokens`·`refusal`도 청구되지만 schema를
+  지킨다는 보장이 없다 — 거부 판정으로 이유를 남긴다. `text` 블록만 읽고 생각 블록은 버린다.
+  `suitability`의 대소문자는 enum과 대소문자 무시로 맞으면 소문자로 모은다.
+- 프레임은 `{"type":"text","text":"<frame_id>:"}` + base64 JPEG 블록씩, 안내문(`_instruction`)은 맨
+  뒤 — Luna와 같은 증거·같은 안내문·같은 schema다. Luna 페이로드와 요청 sha는 바이트까지 그대로다.
+
+**결정 — 프로파일·단가·상한**:
+
+- `raw/config.py`의 동결 `RawClaudeAnalysisProfile`(등록표 `CLAUDE_ANALYSIS_PROFILES`)이 설정 **밖**에
+  산다. 작업공간은 `models.luna_model`에 모델 이름만 저장한다. 고를 수 있는 값은
+  `ANALYSIS_MODEL_CHOICES = (gpt-6-luna, claude-opus-5-5)`이고 기본(맨 앞)은 바꾸지 않았다 — 고르지
+  않은 작업공간의 모델이 조용히 바뀌지 않는다(Claude가 더 비싸다). 등록되지 않은 `claude-*`와 문구·시간
+  역할의 Claude는 설정 검사가 거부한다.
+- 단가(2026-10-09 공식 가격표 https://platform.claude.com/docs/en/about-claude/pricing): 입력 $4 · 출력
+  $20 · 캐시 쓰기 5분 $5 · 1시간 $8 · 캐시 읽기 $0.20 / 100만 토큰(배치 $2/$10은 기록만). 계정 접근
+  `unverified`, 실기 시험 `not_run`.
+- 표준 단가는 하나다. 요청에 `inference_geo: "global"`을 명시한다 — 빠지면 작업공간 기본값을 따르고,
+  US로 옮겨진 조직은 모든 범주가 1.1배다. `service_tier`는 싣지 않는다(Opus 5.5에는 우선 등급이 없고,
+  `standard_only`를 받는지 문서로 확인되지 않았다). 응답 `usage.inference_geo`·`service_tier`가 표준
+  값이 아니면 영수증은 가격 미정이다.
+- 영수증(`claude_cost.measure_claude_usage`): 입력·출력과 캐시 5분·1시간·읽기를 각자 단가로 센다. 캐시
+  생성에 5분/1시간 분해가 없으면 1시간 값으로 센다(보수적). 저장하는 입력 토큰은 입력 범주 전부의 합이다.
+  사용량이 없거나, 모르는 모델이거나, 응답 `model`이 요청과 다르면 가격 미정이다(0원이 아니다). 영수증에
+  `provider_request_id`(응답 `request-id`) 칸을 더했다(멱등 `ALTER`, Claude만 채운다).
+- 창 하나의 보수적 상한 C = [(텍스트 여유 12000 + schema 801바이트 + 부대 여유 2000 + 8장 × 784) × $4 +
+  8192 × $20] / 100만 = 21,073 입력 $0.084292 + 8,192 출력 $0.16384 = **$0.248132**. 10분 영상(40창)은
+  상한 약 $9.93이고 실제는 $2–3.5쯤으로 본다. 이미지 토큰은 ⌈w/28⌉×⌈h/28⌉이다(vision 문서 — 4.7 이후
+  고해상도 등급은 긴 변 2576px·장당 4784 토큰까지). 768px 프레임은 줄지 않아 장당 784 이하다(16:9
+  768×432는 448). 실제 페이로드는 JPEG SOF가 말하는 크기로 센다.
+- **가정**: 텍스트 토큰 수 ≤ UTF-8 바이트 수. 문서화된 값이 아니다 — 첫 사람 실행의 영수증이 확인한다.
+  가격 문서는 Opus 5.5 토크나이저가 같은 글에 토큰을 더 쓴다(최대 약 30%)고 적는다. 한국어 바이트
+  여유가 그것까지 덮는지도 첫 영수증이 말한다.
+- 상한이 지나가는 길: 1단계 견적·화면 문구·견적 지문(`asr_estimate_digest`)에 실린다(Claude만 — Luna
+  견적의 칸·지문은 W-14 이전과 같다). 2단계 승인 예산은 `AnalysisBudget(luna_price_status=
+  "official_snapshot", request_ceiling_usd=C)`다. 실행 문맥은 실제 페이로드마다 상한을 다시 재서, 하나라도
+  C를 넘으면 그 원본은 아무것도 보내지 않는다. 전사 뒤 실측 견적의 요청 수나 상한 합이 승인 때보다 크면
+  2단계 승인을 만들지 않는다(`selection_analysis._require_within_approval`). 요청 수 문과 함께 총액은
+  C × 승인한 창 수를 넘지 않는다.
+
+**결정 — 전사 신원은 모델과 무관하다**:
+
+- `TRANSCRIPTION_IDENTITY_LUNA_MODEL = "gpt-6-luna"` + `transcription_identity_view(cfg)` — 전사 전용
+  열쇠(ASR 청크 캐시, 최종 자막 지문, 1단계 승인 지문)는 의미 분석 모델을 이 값으로 못 박은 설정을 본다.
+  기본 설정의 열쇠는 W-14 이전과 바이트까지 같다. 기본값이 바뀌어도 이 값은 움직이지 않는다.
+- 의미 분석 쪽 지문(분석 입력 지문·창 캐시·요청 sha·리비전 `models_json`)은 모델을 그대로 묶는다 — 모델
+  사이 재사용은 없다. 그래서 Claude로 바꿔 다시 분석하면 전사는 0회이고, 되돌리면 옛 Luna 리비전이 호출
+  0회로 다시 쓰인다(원본 자막 sequence·전사 지문·ASR 캐시 불변).
+
+**결정 — 키와 화면**:
+
+- `ANTHROPIC_API_KEY`는 `.env`에만 있다 — 화면에 입력 칸이 없다. 앱 시작 때 `env.ensure_loaded`를 지난
+  환경에서 한 번 찍어(`capture_claude_credentials`) 메모리에만 둔다. 값은 repr·화면·로그·오류에 없고
+  화면은 「확인됨/없음」과 변수 이름만 말한다. 비전 역할의 환경 이름으로 재사용할 수 없다. OpenAI 키는
+  여전히 필요하다(전사).
+- `LiveAnalysisTransport.semantic_client(model)`가 모델에 맞는 클라이언트를 준다. Claude인데 키가 없으면
+  한 번 승인 길(선택 영상·라이브러리 일괄)은 **전사(1단계)도 사기 전에** 닫는다 — `selection_analysis.execute`가
+  `start_analysis`보다 먼저 부르고, 화면은 승인 단추에서 미리 막아 작업을 띄우지 않는다. 고급 탭의
+  「실제 호출 1단계(전사) 시작」은 따로 승인받는 전사 단계라 키 없이도 전사를 산다(전사 캐시에 남는다).
+  그 뒤 2단계 재개가 `semantic_client`에서 Claude 호출 전에 닫힌다. 응답자는 공급자와 클라이언트 종류를
+  맞춰 본다.
+- 고르는 곳: 작업대 「API 연결 · 처음 한 번」의 「영상 분석 모델」 칸과 모델·키 상태 한 줄, CLI
+  `vlogsrt media settings --workspace W [--analysis-model M]`(로컬 설정만). 분석이나 승인 확인이 도는
+  동안에는 바꾸지 않는다. 바꾸면 라이브러리 캐시를 비우고 견적을 다시 낸다(로컬 측정만).
+- 견적 문구는 모델 이름과 「Claude 비용 상한 $X (보수적)」을 말한다(센트로 올린다). 다른 모델로 끝난
+  분석은 「분석 모델 바뀜 · 다시 승인 필요」로 보이고 「분석 완료」가 되지 않는다. 지금 모델로 끝난 저장
+  분석이 있으면 「분석 모델 바뀜 · 저장된 결과 있음」으로 보인다. 이 문구는 초마다 그리는 가벼운 확인
+  (모델·설정·원본 행)이라 무료를 약속하지 않는다 — 영상을 고르면 `cached_selection_analysis`가 원본
+  재해시·결속 지문(편집한 자막·미디어 참조)·판정 수락까지 보고, 맞으면 호출 0회로 다시 쓰고 아니면 새
+  견적과 승인으로 간다. 저장된 단계는 그대로라 되돌리면 다시 끝난 분석이다.
+- **승인은 화면에 나간 견적에만 묶인다.** 모델을 바꾸면 선택 영상의 승인 대기 견적을 다시 낸다. 다시
+  낸 견적의 첫 승인 클릭은 한 번 거절되고(「새 견적을 확인하세요」), 그 거절 답이 견적을 상한째 **직접**
+  싣는다 — 다음 클릭이 그것을 승인한다. 표시는 그 답 하나로만 센다: 타이머가 그린 상태 칸은 건너뛰었을
+  수도(작업대 수명 토큰이 바뀐 틱), 다른 탭일 수도 있어서 표시로 치지 않는다. 그래서 상태 칸을 붙잡은
+  연결 안내·라이브러리 알림이 견적을 가려도 승인이 갇히지 않는다. 승인 문에 OpenAI 키가 있으면 연결
+  안내(`connection_required`)를 걷는다. 견적의 모델이 지금 설정과 다르면 다시 내라고 하고 거절한다.
+  라이브러리 일괄 승인 클릭은 화면에 보인 요약(범위·상한) 문구를 함께 보내고, 서버의 지금 요약과 다르면
+  거절한다 — 거절 알림이 확인할 요약을 직접 싣는다. 재는 사이 설정이 바뀌어 늦게 끝난 옛 설정의
+  견적(라이브러리·선택 영상)은 버린다 — 새 견적을 덮지 않는다.
+- 모델을 바꾸는 것은 사람의 검토 편집이 아니다 — 검토 머리·영상 순서·분석 기록을 건드리지 않고, 다시
+  세우기나 순서 맞춤을 부르지 않는다(D53). 등급(D52)은 문서의 판정 칸만 읽으므로 Claude 판정도 같은
+  규칙으로 같은 등급이 된다. Final Cut 보내기(D56)는 원본마다 가장 최근의 판정 증거를 쓴다 — 모델을
+  바꾸는 것만으로는 그 입력이 움직이지 않는다.
+- **판정 증거는 고른 모델이 아니라 가장 최근에 끝난 분석을 따른다.** 검토 증거(`tier_evidence_rows`),
+  등급 제안, Final Cut 태그는 지금 설정의 모델과 무관하게 원본마다 가장 최근에 끝난 분석에서 온다. 설정만
+  바꾸는 것이 다시 등급을 매기거나 검토 머리를 옮기면 안 되기 때문이다(D53 — 모델 전환은 사람의 편집이
+  아니다). 그래서 Luna → Claude → Luna로 되돌린 뒤에는 작업대가 다시 쓰는 Luna 결과를 보여 주는 동안
+  보내기의 판정 입력은 가장 최근의 Claude 분석일 수 있다. 다른 길(고른 모델의 가장 최근 분석을 따르기)은
+  사용자 결정을 기다린다(`TASKS.md` W-14b).
+
+**불변식**(`check_invariants.py`): 네트워크 모듈(`urllib.request`·`urllib.error`·`http.client`·`socket`·
+`ssl` — 별칭과 `from urllib import request` 포함)은 정확 경로 `vlogsrt/anthropic_messages.py`에서만
+(`urllib.parse`는 어디서나). 예외는 로컬 브라우저 서버의 두 파일뿐이고 각자 정해진 모듈 하나만 쓴다 —
+`ui/instance.py`는 `urllib.request`(이미 뜬 앱이 듣는지 루프백으로 확인), `ui/service.py`는 `socket`(빈 포트
+찾기)이다(`UI_NETWORK_ALLOWLIST`, 정확 경로). `anthropic_messages`는 정확 경로 `vlogsrt/transcribe.py`만 import한다. 금지
+import에 `anthropic`·`httpx`·`requests`·`urllib3`·`aiohttp`를 더했다. `claude-*` 리터럴은
+`vlogsrt/project/raw/config.py`에만 있다. 등급·글자 교정·편집 계층은 `anthropic_messages`를 모른다.
+
+**바뀌지 않는 것**: whisper·gpt-transcribe 경로, 기본 모델, Luna 페이로드·요청 sha·견적·지문(바이트까지),
+「Luna 추천 구간 분석」 같은 단계 이름(작업 상태의 열쇠라 바꾸지 않았다).
+
+**기대값을 바꾼 시험 한 건**: `tests/raw/test_analysis_approval.py::test_asr_settings_fingerprint_binds_settings_and_models`는
+의미 분석 모델(`luna-2`)이 바뀌면 1단계 승인 지문도 바뀐다고 기대했다(A4-F1). 그 지문을 전사 신원 보기로
+옮긴 것이 이 결정이므로 그 줄은 "같다"로 바꾸고, 대신 전사 모델(`timing_model`)이 바뀌면 다르다는 줄을
+더했다. 설정이 바뀌면 다르다는 줄은 그대로다. 기본 설정의 지문은 W-14 이전 조립과 같다
+(`tests/raw/test_transcription_identity.py`).
+
+**알려진 가장자리·한계**:
+
+- 전사 신원 고정은 `luna_model`을 `gpt-6-luna`로 못 박는다. 기본값도 Claude도 아닌 의미 분석 모델(예: 손으로
+  적은 `luna-2`)을 저장한 작업공간은 W-14 전의 ASR 캐시 열쇠가 그 이름을 묶었으므로, 그 작업공간에서는
+  whisper를 한 번 다시 살 수 있다. 화면·CLI가 고를 수 있는 값은 두 개뿐이라 고친 코드는 없다.
+- CLI `media settings`의 진행 중 확인은 분석 작업(`understanding_analysis`·`understanding_semantic`)만 본다 —
+  다른 프로세스의 화면이 들고 있는 승인 확인·선택 영상 작업은 모른다. 화면의 설정 변경과 견적·실행
+  사이의 경합도 남는다. 둘 다 닫히는 쪽으로 실패한다: 실행 문(`selection_analysis.execute`)이 견적의
+  지문·설정을 다시 재서 다르면 아무것도 보내지 않는다.
+- 「화면에 나간 견적」은 거절 답을 돌려준 순간으로 센다. 그 답이 화면에 닿지 못하면(전송 중 끊김·창을
+  닫음) 못 본 견적을 본 것으로 셈한다. 다음 클릭은 그 답을 받았어야 할 창에서 오므로 창이 좁고, 고치지
+  않았다. 라이브러리 거절 알림은 다른 알림처럼 견적이 바뀌거나 새 승인이 들어올 때까지 상태 칸에 남는다.
+
+**못 한 것**: 실제 Claude 호출은 한 번도 하지 않았다 — 사람만 한다. 첫 실행에서 응답 `usage.inference_geo`
+와 응답 `model`의 메아리, 영수증 금액 대 콘솔 청구를 본다. 배치 API·프롬프트 캐시·`count_tokens`·빠른
+모드는 쓰지 않는다(값은 기록만). 화면·CLI의 단계 이름은 여전히 "Luna"다. 브라우저 gpt-6-luna 영수증은
+여전히 가격 미정이다(W-8). 옛 FCP 경로의 Luna(`gpt-5.6-luna`, `workflow_analysis.py`)와 Gemini 비전
+역할은 범위 밖이다.
+
+
+---
+
 ## D55 — 자막 시각은 재서 **표시만** 한다. 원본 경로 1차 전사의 두 결함을 고친다 (2026-10-09, W-15)
 
 **문제**: 사용자 신고 "몇몇 영상은 SRT 자막 시각이 완전히 어긋나 있다." 사용자 결정 — 검사해서 경고만

@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from vlogsrt import log, preprocess
+from vlogsrt.env import ANALYSIS_CLAUDE_KEY_ENV
 from vlogsrt.project.raw import (
     analysis_workflow,
     segmentation,
@@ -46,11 +47,13 @@ from vlogsrt.project.raw.analysis_config import (
 from vlogsrt.project.raw.analysis_store import ANALYSIS_ROOT, AnalysisStore
 from vlogsrt.project.raw.browser_runtime import (
     BrowserRuntimeError,
+    ClaudeCredentials,
     EnvironmentCredentials,
     asr_estimate_digest,
     browser_network_mode,
     caption_transport_providers,
     capture_browser_credentials,
+    capture_claude_credentials,
     capture_environment_credentials,
     live_transport_for_credentials,
     mint_asr_approvals,
@@ -64,8 +67,13 @@ from vlogsrt.project.raw.caption_workspace_types import (
     ManualHeadConflict,
 )
 from vlogsrt.project.raw.config import (
+    ANALYSIS_MODEL_CHOICES,
+    ANALYSIS_PROVIDER_ANTHROPIC,
     WORKFLOW_SCHEMA_VERSION,
     RawWorkflowConfig,
+    analysis_model_label,
+    analysis_provider,
+    claude_profile,
     validate_raw_workflow_config,
 )
 from vlogsrt.project.raw.fcp import (
@@ -184,11 +192,12 @@ from vlogsrt.project.raw.segment_review import (
 )
 from vlogsrt.project.raw.source_order import propose_global_order as _propose_global_order
 from vlogsrt.project.raw.understanding_luna import (
-    AnalysisBudget,
+    AnalysisApprovalError,
     OnlineAnalysisApproval,
     OnlineVisualAnalysisApproval,
     estimate_luna_cost,
     online_env_blocked,
+    semantic_analysis_budget,
 )
 from vlogsrt.project.raw.visual_review import (  # 공개 경계 재수출(계약: UI는 이 모듈만 가져간다)
     VISUAL_PAGE_SIZE,
@@ -214,12 +223,16 @@ from vlogsrt.project.raw.workspace import (
 __all__ = [
     # UI는 이 모듈만 가져갈 수 있다(정확 경로 예외) — 계약 오류도 여기서 다시 낸다.
     "ACTIVE_JOB_STATUSES",
+    "ANALYSIS_CLAUDE_KEY_ENV",
     "ANALYSIS_CONCURRENCY",
     "ANALYSIS_JOB_KIND",
+    "ANALYSIS_MODEL_CHOICES",
     "ANALYSIS_MODES",
     "ANALYSIS_PHASES",
+    "ANALYSIS_PROVIDER_ANTHROPIC",
     "ANALYSIS_ROOT",
     "ANALYSIS_SEMANTIC_JOB_KIND",
+    "AnalysisApprovalError",
     "AnalysisError",
     "AnalysisEstimate",
     "AnalysisRevision",
@@ -230,6 +243,7 @@ __all__ = [
     "BrowseNotAllowedError",
     "BrowserRuntimeError",
     "ByteRange",
+    "ClaudeCredentials",
     "EnvironmentCredentials",
     "FCP_ROLE_ORIGINAL",
     "FCP_ROLE_PROXY",
@@ -301,6 +315,8 @@ __all__ = [
     "VisualSourcePreview",
     "WorkspaceModuleUnavailableError",
     "WorkspaceStatus",
+    "analysis_model_label",
+    "analysis_provider",
     "asr_estimate_digest",
     "validate_analysis_concurrency",
     "caption_ms",
@@ -314,6 +330,8 @@ __all__ = [
     "browse_folder",
     "capture_environment_credentials",
     "capture_browser_credentials",
+    "capture_claude_credentials",
+    "claude_profile",
     "browser_network_mode",
     "caption_transport_providers",
     "content_type_for",
@@ -543,10 +561,6 @@ def _analysis_estimate_for(
         settings.asr_chunk_max_bytes // (2 * (probe.audio[0].channels if probe.audio else 1)),
     )
     asr_chunks = max(1, math.ceil(audio_seconds * 16000 / chunk_bound)) if probe.audio else 0
-    estimate = estimate_luna_cost(
-        window_count,
-        AnalysisBudget(max_luna_requests=window_count, max_asr_chunks=max(1, asr_chunks)),
-    )
     return AnalysisEstimate(
         asset_id=asset.asset_id,
         source_order=source_order,
@@ -560,13 +574,63 @@ def _analysis_estimate_for(
         frame_sample_count=window_count * settings.max_images_per_window,
         asr_chunk_count=asr_chunks,
         asr_seconds=str(audio_seconds),
-        luna_request_count=estimate.request_count,
-        price_status=estimate.price_status,
-        user_ceiling_total=(
-            str(estimate.user_ceiling_total) if estimate.user_ceiling_total is not None else None
-        ),
-        note=f"{note}. Luna: {estimate.note}",
+        **_estimate_cost_fields(workflow, settings, window_count, asr_chunks, note),
     )
+
+
+def _estimate_cost_fields(
+    workflow: RawWorkflowConfig,
+    settings: RawUnderstandingSettings,
+    window_count: int,
+    asr_chunks: int,
+    note: str,
+) -> dict[str, Any]:
+    """1단계 견적의 금액 칸 — Claude는 공식 단가의 보수적 상한, Luna는 단가 미확인(D54).
+
+    상한은 견적 지문(`asr_estimate_digest`)에 들어간다 — 사람이 본 금액이 승인에 묶인다.
+    Luna 견적의 칸·문구는 W-14 이전과 같다.
+    """
+    model = workflow.models.luna_model
+    budget = semantic_analysis_budget(
+        model, settings, max_luna_requests=window_count, max_asr_chunks=max(1, asr_chunks)
+    )
+    estimate = estimate_luna_cost(window_count, budget)
+    return {
+        "luna_request_count": estimate.request_count,
+        "price_status": estimate.price_status,
+        "user_ceiling_total": _decimal_text(estimate.user_ceiling_total),
+        "ceiling_usd": _decimal_text(estimate.ceiling_total),
+        "note": f"{note}. {_semantic_cost_label(model)}: {estimate.note}",
+    }
+
+
+def _semantic_cost_fields(
+    model: str, settings: RawUnderstandingSettings, window_count: int
+) -> dict[str, Any]:
+    """2단계 견적의 금액 칸 — 요청 하나의 상한은 승인 예산이 그대로 묶는 값이다(D54)."""
+    budget = semantic_analysis_budget(
+        model, settings, max_luna_requests=max(1, window_count), max_asr_chunks=1
+    )
+    estimate = estimate_luna_cost(window_count, budget)
+    return {
+        "luna_request_count": estimate.request_count,
+        "price_status": estimate.price_status,
+        "user_ceiling_total": _decimal_text(estimate.user_ceiling_total),
+        "request_ceiling_usd": _decimal_text(budget.request_ceiling_usd),
+        "ceiling_usd": _decimal_text(estimate.ceiling_total),
+        "note": f"1단계 실측 지문에 묶였다 — {_semantic_cost_label(model)}: {estimate.note}",
+    }
+
+
+def _semantic_cost_label(model: str) -> str:
+    """견적 문구의 모델 이름 — Luna는 W-14 이전 문구 그대로 'Luna'다."""
+    if analysis_provider(model) == ANALYSIS_PROVIDER_ANTHROPIC:
+        return analysis_model_label(model)
+    return "Luna"
+
+
+def _decimal_text(value: Any) -> str | None:
+    return None if value is None else str(value)
 
 
 CHILD_JOB_POLL_SECONDS = 0.2
@@ -2405,8 +2469,8 @@ class RawWorkspaceService:
         """선택 원본의 분석 견적 — 로컬 조사만, 실제 호출은 전혀 없다(§14.3).
 
         창·프레임·청크 수는 측정된 시계에서 잰 값이고(이미지 수는 상한),
-        Luna 단가는 미확인이라 금액을 만들지 않는다. 실제 호출은 이 견적을 본
-        사람의 승인 뒤에만 시작한다.
+        Luna 단가는 미확인이라 금액을 만들지 않는다(Claude는 공식 단가의 보수적
+        상한, D54). 실제 호출은 이 견적을 본 사람의 승인 뒤에만 시작한다.
         """
         workspace = self._workspace(root)
         order = self._order_revision(root, None)
@@ -2794,6 +2858,7 @@ class RawWorkspaceService:
             return ()
         models = json.loads(revision.models_json)
         luna_model = str(models.get("luna") or "")
+        understanding = RawUnderstandingSettings(**json.loads(revision.settings_json))
         estimates: list[AnalysisSemanticEstimate] = []
         for row in store.list_source_results(revision.revision_id):
             if row.status != "transcribed" or not row.document_path:
@@ -2821,10 +2886,6 @@ class RawWorkspaceService:
                 )
                 continue
             window_count = int(binding["window_count"])
-            estimate = estimate_luna_cost(
-                window_count,
-                AnalysisBudget(max_luna_requests=max(1, window_count), max_asr_chunks=1),
-            )
             estimates.append(
                 AnalysisSemanticEstimate(
                     asset_id=row.asset_id,
@@ -2835,17 +2896,44 @@ class RawWorkspaceService:
                     window_count=window_count,
                     image_count=int(binding["image_count"]),
                     luna_model=luna_model,
-                    luna_request_count=estimate.request_count,
-                    price_status=estimate.price_status,
-                    user_ceiling_total=(
-                        str(estimate.user_ceiling_total)
-                        if estimate.user_ceiling_total is not None
-                        else None
-                    ),
-                    note=f"1단계 실측 지문에 묶였다 — Luna: {estimate.note}",
+                    **_semantic_cost_fields(luna_model, understanding, window_count),
                 )
             )
         return tuple(estimates)
+
+    def revision_matches_settings(self, root: Path, revision_id: str) -> bool:
+        """분석 리비전이 지금 설정의 모델로 만든 것인가(D54) — 읽기만 한다.
+
+        의미 분석 모델을 바꾸면 다른 모델로 끝난 분석은 끝났다고 보이지 않아야 한다(되돌리면
+        다시 맞는다). 없는 리비전은 맞지 않는다.
+        """
+        revision = AnalysisStore(self._workspace(root)).revision(revision_id)
+        if revision is None:
+            return False
+        models = self.settings(root).models
+        recorded = json.loads(revision.models_json)
+        return recorded == {"timing": models.timing_model, "luna": models.luna_model}
+
+    def stored_analysis_for_settings(self, root: Path, asset_ids: Sequence[str]) -> str | None:
+        """지금 설정의 모델로 끝난 저장 분석이 그 원본들을 덮는가 — 화면 문구용 가벼운 확인(D54).
+
+        원본 재해시·지문 대조는 하지 않는다(초마다 그리는 문구라서). 실제 재사용은 영상을
+        고를 때 `cached_selection_analysis`가 전부 확인한다 — 이 답만으로 호출을 건너뛰지 않는다.
+        """
+        store = AnalysisStore(self._workspace(root))
+        models = self.settings(root).models
+        expected = {"timing": models.timing_model, "luna": models.luna_model}
+        default = asdict(RawUnderstandingSettings())
+        wanted = set(asset_ids)
+        for revision in reversed(store.list_revisions()):
+            if revision.status != "complete" or json.loads(revision.models_json) != expected:
+                continue
+            if json.loads(revision.settings_json) != default:
+                continue
+            rows = store.list_source_results(revision.revision_id)
+            if wanted <= {row.asset_id for row in rows if row.status in ("analyzed", "cached")}:
+                return revision.revision_id
+        return None
 
     def _require_revision_models(
         self, revision: AnalysisRevision, workflow: RawWorkflowConfig
