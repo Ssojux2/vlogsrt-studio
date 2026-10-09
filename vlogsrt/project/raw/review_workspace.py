@@ -31,6 +31,7 @@ import hashlib
 import json
 import math
 import threading
+from collections import Counter
 from collections.abc import Mapping, Sequence, Set
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -364,7 +365,10 @@ CARRIED_DECISIONS_LABEL = "사람 결정 이어받음"
 다음 게시·순서 맞춤이 다시 세우며 지운다.
 """
 
-_MACHINE_EDIT_LABELS = ("등급 재계산 ", "자동 제외 미검토 유지")
+_UNREVIEWED_KEPT_LABEL = "자동 제외 미검토 유지"
+"""입양이 되풀이 끝에 미검토 표지를 되돌려 놓는 스냅숏 — 옛 입양의 되풀이 창 마지막 편집이다."""
+
+_MACHINE_EDIT_LABELS = ("등급 재계산 ", _UNREVIEWED_KEPT_LABEL)
 """기계가 단 스냅숏 이름 — 등급 다시 달기·미검토 표지 되돌리기. 그 밖의 편집은 사람 손이다."""
 
 _HUMAN_SNAPSHOT_LABELS = ("자동 제외 확인", "자동 제외 전체 복원")
@@ -524,6 +528,75 @@ def _edit_sources(
     sources = {s.source_id for s in parent.segments if s.segment_id in edit.segment_ids}
     found_ids = {s.segment_id for s in parent.segments if s.segment_id in edit.segment_ids}
     return sources if found_ids == set(edit.segment_ids) else everything
+
+
+@dataclass(frozen=True, slots=True)
+class _LegacyReplay:
+    """표지 없는 옛 입양(D53 이전 앱)의 되풀이 창 — 끝 순번·옛 머리·창에 있어야 할 편집.
+
+    끝 순번 0은 확인할 창이 없다는 뜻이다 — 되풀이가 비었거나, 다시 셀 수 없는 입양(매핑 밖 조각·
+    리비전보다 긴 창)이거나, 창 확인이 어긋났다. 어느 쪽이든 편집을 모두 사람 편집으로 걷고 맨 앞
+    (순번 0)에서 옛 머리로 넘어간다.
+    """
+
+    end: int
+    old_revision_id: str
+    expected: Counter[tuple[str, str, str]]
+    snapshot: bool
+    new_ids: frozenset[str]
+
+
+_REPLAY_FIELDS = {"selection": "selection", "override": "override", "note": "notes"}
+"""되풀이가 쓰는 편집 종류와 그 값이 실린 칸 — 제외 선택·등급 덮기·메모."""
+
+
+def _expected_replay(
+    old: ReviewRevision, new_ids: Mapping[str, str]
+) -> Counter[tuple[str, str, str]] | None:
+    """옛 머리를 되풀이한 입양이 남겼을 편집 — (종류, 새 조각, 값)마다 몇 번. 매핑 밖이면 None."""
+    expected: Counter[tuple[str, str, str]] = Counter()
+    for s in old.segments:
+        new_id = new_ids.get(s.segment_id)
+        if new_id is None:
+            return None
+        if s.selection == SELECTION_EXCLUDED:
+            expected["selection", new_id, s.selection] += 1
+        if s.override_recommendation is not None:
+            expected["override", new_id, s.override_recommendation] += 1
+        if s.notes:
+            expected["note", new_id, s.notes] += 1
+    return expected
+
+
+def _replay_key(edit_json: str | None) -> tuple[str, str, str] | None:
+    """편집 하나를 (종류, 조각, 값)으로 — 조각 하나짜리 선택·덮기·메모가 아니면 None."""
+    if edit_json is None:
+        return None
+    edit = json.loads(edit_json)
+    kind = edit.get("kind")
+    field = _REPLAY_FIELDS.get(kind) if isinstance(kind, str) else None
+    ids = edit.get("segment_ids")
+    value = None if field is None else edit.get(field)
+    if not isinstance(ids, list) or len(ids) != 1 or not isinstance(value, str):
+        return None
+    return str(kind), str(ids[0]), value
+
+
+def _replay_window_matches(edits: Sequence[str | None], legacy: _LegacyReplay) -> bool:
+    """창 안의 편집이 옛 머리의 되풀이 그대로인가 — 종류·조각·값·개수와 끝의 미검토 스냅숏까지.
+
+    끼어든 사람 편집(기계 메모 머리를 단 메모 포함)은 매핑에 없는 값이거나 개수를 어긋나게 한다.
+    """
+    if len(edits) != legacy.end:
+        return False
+    keys = [_replay_key(edit) for edit in edits]
+    if legacy.snapshot:
+        last = keys.pop() if keys else None
+        if last is None or last[0] != "note" or last[1] not in legacy.new_ids:
+            return False
+        if last[2] != _UNREVIEWED_KEPT_LABEL:
+            return False
+    return None not in keys and Counter(keys) == legacy.expected
 
 
 def _auto_excluded(
@@ -922,9 +995,13 @@ class ReviewWorkspaceFacade:
         found: set[str] = set()
         cursor, legacy = revision, self._legacy_replay(revision)
         while True:
-            if legacy is not None and cursor.sequence <= legacy[0]:
-                # 표지 없는 옛 입양의 되풀이 — 옛 머리의 기록으로 건너뛴다(재귀 없이).
-                old = self._revision_by_id(legacy[1])
+            if legacy is not None and cursor.sequence <= legacy.end:
+                if legacy.end and not self._replay_matches(cursor.base_plan_id, legacy):
+                    # 확인 못 한 창은 건너뛰지 않는다 — 되풀이까지 걷고 맨 앞에서 옛 머리로 간다.
+                    legacy = replace(legacy, end=0)
+                    continue
+                # 확인한 옛 입양의 되풀이 — 옛 머리의 기록으로 건너뛴다(재귀 없이).
+                old = self._revision_by_id(legacy.old_revision_id)
                 if old is None:
                     return present, True
                 cursor, legacy = old, self._legacy_replay(old)
@@ -943,23 +1020,36 @@ class ReviewWorkspaceFacade:
                 found |= _edit_sources(cursor.edit, label, parent, cursor)
             cursor = parent
 
-    def _legacy_replay(self, revision: ReviewRevision) -> tuple[int, str] | None:
-        """표지 없는 옛 입양(D53 이전 앱)의 (되풀이 끝 순번, 옛 머리) — 입양 기록으로 다시 센다.
+    def _legacy_replay(self, revision: ReviewRevision) -> _LegacyReplay | None:
+        """표지 없는 옛 입양(D53 이전 앱)의 되풀이 창 — 입양 기록과 옛 머리로 다시 센다.
 
         입양은 옛 조각마다 제외 선택·덮기·메모를 한 편집씩 다시 적고, 미검토 제외가 있었으면 표지를
-        되돌리는 스냅숏 하나를 더한다. 그 길이가 이 리비전을 넘으면 되풀이가 끊긴 것이라 안 쓴다.
+        되돌리는 스냅숏 하나를 더한다. 창을 개수로만 믿지 않는다 — 건너뛰기 전에 `_replay_matches`가
+        편집 하나하나를 확인한다. 옛 머리가 없으면 None(건너뛸 곳이 없다 — 모두 걷는다).
         """
-        old_id = self._store.adopted_from(revision.base_plan_id)
-        old = self._revision_by_id(old_id)
-        if old_id is None or old is None:
+        record = self._store.adoption(revision.base_plan_id)
+        old = None if record is None else self._revision_by_id(record[0])
+        if record is None or old is None:
             return None
-        end = sum(
-            int(s.selection == SELECTION_EXCLUDED)
-            + int(s.override_recommendation is not None)
-            + int(bool(s.notes))
-            for s in old.segments
-        ) + int(any(is_unreviewed_auto_exclusion(s) for s in old.segments))
-        return (end, old_id) if end <= revision.sequence else None
+        new_ids = {
+            str(pair["old_segment_id"]): str(pair["new_segment_id"])
+            for pair in json.loads(record[1])["pairs"]
+        }
+        expected = _expected_replay(old, new_ids)
+        snapshot = any(is_unreviewed_auto_exclusion(s) for s in old.segments)
+        end = -1 if expected is None else sum(expected.values()) + int(snapshot)
+        return _LegacyReplay(
+            end=end if 0 <= end <= revision.sequence else 0,
+            old_revision_id=record[0],
+            expected=expected or Counter(),
+            snapshot=snapshot,
+            new_ids=frozenset(new_ids.values()),
+        )
+
+    def _replay_matches(self, base_plan_id: str, legacy: _LegacyReplay) -> bool:
+        """옛 입양의 창 안 편집이 모두 되풀이인가 — 하나라도 다르면 그 기본은 다시 셀 수 없다."""
+        edits = self._store.edit_documents(self._project_id, base_plan_id, legacy.end)
+        return _replay_window_matches(edits, legacy)
 
     def _undo_target(self, revision: ReviewRevision, label: str) -> ReviewRevision | None:
         """`undo:N` 스냅숏이 되돌린 리비전 N — 같은 기본의 더 앞 리비전일 때만(아니면 None)."""
@@ -1085,8 +1175,10 @@ class ReviewWorkspaceFacade:
         cursor = head
         legacy = self._legacy_replay(head)
         while cursor.parent_revision_id is not None:
-            if legacy is not None and cursor.sequence <= legacy[0]:
-                break  # 표지 없는 옛 입양의 되풀이도 사람 선택이 아니다
+            if legacy is not None and 0 < cursor.sequence <= legacy.end:
+                if self._replay_matches(head.base_plan_id, legacy):
+                    break  # 확인한 옛 입양의 되풀이는 사람 선택이 아니다
+                legacy = None  # 확인 못 한 창 — 그 선택까지 사람 선택으로 셈해 제외를 남긴다
             label = (cursor.edit.notes or "") if cursor.edit and cursor.edit.kind == "note" else ""
             # 입양 표지 앞은 입양의 되풀이다 — 사람 선택은 `수동 선택 · ` 메모로 이미 실려 와 복원이
             # 건너뛴다. 되풀이의 선택 편집까지 사람 선택으로 셈하면 복원이 아무것도 하지 않는다.
@@ -1669,7 +1761,7 @@ class ReviewWorkspaceFacade:
             else s
             for s in revision.segments
         )
-        return self._publish_snapshot(revision, segments, "자동 제외 미검토 유지")
+        return self._publish_snapshot(revision, segments, _UNREVIEWED_KEPT_LABEL)
 
     # ── 측정 VTT — 저장된 발화 + 잰 매체 길이 ────────────────────
 

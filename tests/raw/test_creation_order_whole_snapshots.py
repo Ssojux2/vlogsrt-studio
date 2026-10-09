@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from tests.raw import test_creation_order as co
+from tests.raw.test_creation_order_legacy import old_build_adopt
 from tests.raw.test_review_workspace import _mid_split_pts, _wait_terminal, _write_replay_fixtures
 from vlogsrt.project.raw import review_workspace as review_module
 from vlogsrt.project.raw import tiering
@@ -229,29 +230,23 @@ def test_a_marker_less_legacy_adoption_counts_only_real_decisions(
     되풀이 편집(선택·메모를 다시 적은 것)은 사람 손이 아니다: 입양 기록으로 되풀이 길이를 다시 세어
     옛 머리로 건너뛴다. 사람이 확인한 제외가 있는 영상만 손댄 영상이다(예전 걸음은 되풀이를 사람
     편집으로 셈해 거의 모든 영상을 붙잡았다 — 실데이터 18개 중 16개, 실제 결정은 8개).
+    옛 앱 그대로 되풀이 뒤에 아무 리비전도 쓰지 않는다 — 머리가 곧 되풀이의 마지막 편집이라, 창을
+    개수로 셌든 내용으로 확인했든 꼬리의 기계 스냅숏이 차이를 가려 주지 않는다.
     """
     service, root = co.reverse_imported_project(tmp_path, human=False)
     facade = ReviewWorkspaceFacade(root)
     two = co._ids(service, root)["DJI_0002.mov"]
     confirmed = facade.confirm_automatic_exclusions()  # 사람이 0002의 빨강을 확인했다
-    plan, mapping = facade.plan_from_review(confirmed.base_plan_id)
-    with monkeypatch.context() as patch:  # 그때 앱은 입양 표지를 쓰지 않았다
-        patch.setattr(
-            review_module, "_marker_label", lambda kind, prior, sources: "등급 재계산 (옛 빌드)"
-        )
-        adopted = facade.adopt_plan_review(plan, mapping, old_revision=confirmed)
+    adopted = old_build_adopt(facade, confirmed, monkeypatch)
     assert adopted.sequence > 1
+    assert adopted.edit is not None and adopted.edit.notes.startswith("자동 제외: ")  # 끝 되풀이
     assert facade.human_source_ids(adopted) == frozenset({two})
     (tmp_path / "second").mkdir()
     untouched = co.reverse_imported_project(tmp_path / "second", human=False)
     other = ReviewWorkspaceFacade(untouched[1])
     head = other.load_head().revision
-    plan, mapping = other.plan_from_review(head.base_plan_id)
-    with monkeypatch.context() as patch:
-        patch.setattr(
-            review_module, "_marker_label", lambda kind, prior, sources: "등급 재계산 (옛 빌드)"
-        )
-        replayed = other.adopt_plan_review(plan, mapping, old_revision=head)
+    replayed = old_build_adopt(other, head, monkeypatch)
     assert replayed.sequence > 1  # 미검토 제외·근거 메모를 편집으로 다시 적었다
+    assert replayed.edit is not None and replayed.edit.notes == "자동 제외 미검토 유지"
     assert other.human_source_ids(replayed) == frozenset()
     assert other.is_untouched(replayed)

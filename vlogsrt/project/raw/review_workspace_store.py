@@ -363,15 +363,33 @@ class ReviewWorkspaceStore:
                 (old_revision_id,),
             ).fetchone()
 
-    def adopted_from(self, new_base_plan_id: str) -> str | None:
-        """그 기본 계획을 입양으로 세웠으면 옛 머리 리비전 — 입양이 아니면 None."""
+    def adoption(self, new_base_plan_id: str) -> tuple[str, str] | None:
+        """그 기본 계획을 입양으로 세웠으면 (옛 머리 리비전, 매핑 JSON) — 입양이 아니면 None."""
         with self._session() as connection:
             row = connection.execute(
-                "SELECT old_revision_id FROM review_workspace_remappings"
+                "SELECT old_revision_id, mapping_json FROM review_workspace_remappings"
                 " WHERE new_base_plan_id = ? ORDER BY rowid DESC LIMIT 1",
                 (new_base_plan_id,),
             ).fetchone()
-        return None if row is None else str(row["old_revision_id"])
+        return None if row is None else (str(row["old_revision_id"]), str(row["mapping_json"]))
+
+    def edit_documents(
+        self, project_id: str, base_plan_id: str, last_sequence: int
+    ) -> tuple[str | None, ...]:
+        """순번 1..last 리비전의 편집 JSON만 순번 차례로 — 리비전 문서 전체를 풀지 않는다.
+
+        표지 없는 옛 입양의 되풀이 창을 편집 하나하나 확인하는 데 쓴다(D53). 빠진 순번이 있으면
+        그만큼 짧게 돌아온다 — 호출자가 길이로 안다.
+        """
+        with self._session() as connection:
+            rows = connection.execute(
+                "SELECT json_extract(document_json, '$.edit') AS edit_json"
+                " FROM review_workspace_revisions"
+                " WHERE project_id = ? AND base_plan_id = ? AND sequence BETWEEN 1 AND ?"
+                " ORDER BY sequence",
+                (project_id, base_plan_id, last_sequence),
+            ).fetchall()
+        return tuple(None if row["edit_json"] is None else str(row["edit_json"]) for row in rows)
 
     # ── 내보내기 리비전 — 서버 소유 이름공간의 기록 ──────────────
 
