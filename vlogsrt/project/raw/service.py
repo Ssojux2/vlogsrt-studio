@@ -21,7 +21,7 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
-from vlogsrt import preprocess
+from vlogsrt import log, preprocess
 from vlogsrt.project.raw import (
     analysis_workflow,
     segmentation,
@@ -202,6 +202,8 @@ from vlogsrt.project.raw.visual_review import (  # 공개 경계 재수출(계�
     snapped_frame_index,
 )
 from vlogsrt.project.raw.workspace import (
+    CAPTURE_BASIS_KEY,
+    CAPTURE_TIME_BASIS,
     DB_NAME,
     PROJECT_TOML_NAME,
     RawWorkspace,
@@ -282,9 +284,9 @@ __all__ = [
     "SourceNestingError",
     "SourceOrderRevision",
     "TIER_LABELS",
-    "TIER_MIGRATION_JOB_KIND",
     "TIER_SETTINGS",
     "TIER_TAG_PREFIX",
+    "UPKEEP_JOB_KIND",
     "AUTO_EXCLUDED_UNREVIEWED_TAG",
     "VISUAL_PAGE_SIZE",
     "VISUAL_PREPARE_JOB_KIND",
@@ -339,8 +341,13 @@ __all__ = [
     "unmaterialized_red",
 ]
 
-TIER_MIGRATION_JOB_KIND = "tier_migration"
-"""등급판 옮기기 작업 — 저장된 증거로 계획·검토 머리만 새로 세운다(유료 호출 0회, D51·D52)."""
+UPKEEP_JOB_KIND = "workspace_upkeep"
+"""앱 열기·화면 갱신의 정리 작업 하나 — 촬영 시각·영상 순서·등급판·검토 순서(D52·D53)."""
+
+UPKEEP_CAPTURE = "촬영 시각"
+UPKEEP_ORDER = "영상 순서"
+UPKEEP_TIERS = "등급판"
+UPKEEP_ALIGN = "검토 순서"
 
 TIER_SETTINGS = tiering.TIER_SETTINGS
 TIER_TAG_PREFIX = tiering.TIER_TAG_PREFIX
@@ -755,8 +762,14 @@ class RawWorkspaceService:
         self._workspaces: dict[Path, RawWorkspace] = {}
         self._job_managers: dict[Path, JobManager] = {}
         self._waiting_children: dict[tuple[Path, str], str] = {}
-        # 이번 앱 실행에서 등급판 옮기기를 건 머리 — 실패한 머리를 실행마다 한 번만 다시 건다.
-        self._tier_migration_tries: set[tuple[Path, str]] = set()
+        # 앱 열기 정리(등급판 옮기기 포함)는 (작업공간, 할 일, 그 상태)를 이번 실행에서 한 번만
+        # 건다 — 실패한 일을 화면 갱신마다 다시 걸지 않고, 앱을 다시 열면 한 번 더 건다(D52·D53).
+        self._upkeep_tries: set[tuple[Path, str, str]] = set()
+        # 정리 작업은 작업공간마다 한 번에 하나다 — 확인과 제출을 한 자물쇠 안에서 한다.
+        self._upkeep_lock = threading.Lock()
+        # 순서 확정·되채움 쓰기·검토 순서 맞춤이 동시에 불려도 같은 일을 두 번 하지 않는다.
+        self._order_lock = threading.Lock()
+        self._align_lock = threading.Lock()
 
     def _workspace(self, root: Path) -> RawWorkspace:
         key = root.expanduser().resolve()
@@ -895,12 +908,12 @@ class RawWorkspaceService:
     # ── A2 — SD/폴더 가져오기·원본 순서 ───────────────────────
 
     def selected_asset_ids(self, root: Path, paths: Sequence[str]) -> tuple[str, ...]:
+        """고른 경로의 ready 원본 — 촬영 시각 순(D53)이라 분석 줄도 화면 순서를 따른다."""
         selected = set(paths)
         return tuple(
             asset.asset_id
-            for asset in self.list_source_assets(root)
-            if asset.status == "ready"
-            and str(Path(asset.source_root) / asset.source_relative_path) in selected
+            for asset in self.global_order_proposal(root)
+            if str(Path(asset.source_root) / asset.source_relative_path) in selected
         )
 
     def save_selection_state(
@@ -1156,11 +1169,21 @@ class RawWorkspaceService:
 
         return self.submit_job(root, "reference_import", fingerprint, body)
 
-    def ensure_source_order(self, root: Path) -> None:
-        ready = {a.asset_id for a in self.list_source_assets(root) if a.status == "ready"}
-        current = self.latest_global_source_order(root)
-        if current is None or {entry.asset_id for entry in current.entries} != ready:
+    def ensure_source_order(self, root: Path) -> bool:
+        """전체 순서를 제안(촬영 시각 순)에 맞춘다 — 순서가 다를 때만 새 리비전. 바꿨으면 True.
+
+        예전엔 원본 묶음(집합)만 비교해 손으로 정한 순서가 살아남았다. "언제나 만든 시각 순"이
+        사용자 지시라 이제 순서까지 맞춘다(D53). 비교와 확정을 한 자물쇠 안에서 해 동시에 불려도
+        같은 순서의 리비전이 둘 생기지 않는다(같은 순서인데 리비전이 다르면 검토 머리를 괜히
+        다시 옮긴다).
+        """
+        with self._order_lock:
+            proposal = tuple(asset.asset_id for asset in self.global_order_proposal(root))
+            current = self.latest_global_source_order(root)
+            if current is not None and _order_ids(current) == proposal:
+                return False
             self.confirm_global_source_order(root)
+            return True
 
     def start_source_preview(self, root: Path, asset_ids: tuple[str, ...] = ()) -> JobHandle:
         """Preparing source playback is local and does not require paid analysis."""
@@ -1170,44 +1193,60 @@ class RawWorkspaceService:
 
         def body(context: JobContext) -> None:
             facade = self.review_workspace_facade(root)
-            try:
-                head = facade.load_head().revision
-                plan = self.segment_plan_revision(root, head.base_plan_id)
-                matches = plan.order_revision_id == order.revision_id
-            except RawWorkspaceError:
-                matches = False
-            if not matches:
-                # One initial source card per video. Auto cleanup later supplies
-                # analysis boundaries; existing edited sources remain authoritative.
-                plan = self.plan_segmentation(root, tile_seconds=Fraction(10**12))
-                head = facade.initialize_review(plan.revision_id)
-            for page in range(
-                1, (len(head.segments) + VISUAL_PAGE_SIZE - 1) // VISUAL_PAGE_SIZE + 1
-            ):
-                context.check_cancel()
-
-                def prepare_page(ctx: JobContext, page: int = page) -> None:
-                    visual_review.run_page_preparation(
-                        ctx,
-                        self._workspace(root),
-                        facade,
-                        base_plan_id=head.base_plan_id,
-                        page=page,
-                        asset_ids=asset_ids,
-                    )
-
-                self.wait_child_job(
-                    root,
-                    self.submit_job(
-                        root,
-                        "visual_prepare",
-                        f"{head.base_plan_id}:{page}:{asset_ids}",
-                        prepare_page,
-                    ),
-                    context,
-                )
+            head = self._preview_head(root, facade)
+            self._prepare_preview_pages(root, facade, head, asset_ids, context)
 
         return self.submit_job(root, "source_preview", order.revision_id + repr(asset_ids), body)
+
+    def _preview_head(self, root: Path, facade: Any) -> ReviewRevision:
+        """미리보기가 쓸 검토 머리 — 같은 영상 묶음이면 머리를 다시 깔지 않는다(D53).
+
+        순서만 바뀐 머리는 사람 결정을 들고 옮긴다. 옮기기가 미뤄져도(그 사이 편집) 머리는 그대로
+        두고 다음 갱신이 맞춘다 — 원본마다 한 장으로 다시 까는 것은 머리가 없거나 영상이 새로
+        들거나 빠졌을 때뿐이다.
+        """
+        self.align_review_order(root)
+        head = _review_head(facade)
+        latest = self.latest_global_source_order(root)
+        if head is not None and latest is not None and _same_sources(head, latest):
+            return head
+        # 새로 든 영상만 한 장으로 깐다 — 이미 있던 영상(시계가 같은)은 사람 손이 닿았든 아니든
+        # 그 조각·미검토 제안을 그대로 둔다(D53: 가져오기가 손대지 않은 영상의 분석을 지우지 않게).
+        plan = self.plan_segmentation(root, tile_seconds=Fraction(10**12))
+        kept = tuple(clock.source_id for clock in head.clocks) if head is not None else ()
+        revision: ReviewRevision = facade.initialize_review(
+            plan.revision_id, preserve_source_ids=kept
+        )
+        return revision
+
+    def _prepare_preview_pages(
+        self,
+        root: Path,
+        facade: Any,
+        head: ReviewRevision,
+        asset_ids: tuple[str, ...],
+        context: JobContext,
+    ) -> None:
+        for page in range(1, (len(head.segments) + VISUAL_PAGE_SIZE - 1) // VISUAL_PAGE_SIZE + 1):
+            context.check_cancel()
+
+            def prepare_page(ctx: JobContext, page: int = page) -> None:
+                visual_review.run_page_preparation(
+                    ctx,
+                    self._workspace(root),
+                    facade,
+                    base_plan_id=head.base_plan_id,
+                    page=page,
+                    asset_ids=asset_ids,
+                )
+
+            self.wait_child_job(
+                root,
+                self.submit_job(
+                    root, "visual_prepare", f"{head.base_plan_id}:{page}:{asset_ids}", prepare_page
+                ),
+                context,
+            )
 
     def remember_fcp_library(self, root: Path, library: Path) -> None:
         with self._workspace(root).connect() as connection:
@@ -1327,37 +1366,63 @@ class RawWorkspaceService:
     def _cleanup_head(
         self, root: Path, facade: Any, analysis: AnalysisRevision, *, initialized: bool
     ) -> ReviewRevision:
-        """자동 정리가 이어 쓸 검토 머리 — 새 분석이면 다시 세우고, 옛 등급판이면 옮긴다."""
+        """자동 정리가 이어 쓸 검토 머리 — 새 분석이면 다시 세우고, 옛 등급판이면 옮긴다.
+
+        순서만 바뀐 머리(D53)는 다시 세우지 않는다 — 먼저 새 순서로 옮기고, 머리는 그 **뒤에**
+        읽는다(다른 작업이 먼저 옮겼어도 옛 머리를 들고 다시 세우지 않게). 다시 세울 때도 분석
+        당시가 아니라 지금 순서(촬영 시각 순) 위에 세운다.
+        """
         revision_id = analysis.revision_id
-        try:
-            head = facade.load_head().revision
-            current_plan = self.segment_plan_revision(root, head.base_plan_id)
-        except RawWorkspaceError:
-            plan = self.plan_segmentation_from_analysis(root, revision_id)
-            return facade.initialize_review(plan.revision_id, revision_id)
-        if not initialized or current_plan.order_revision_id != analysis.order_revision_id:
-            plan = self.plan_segmentation_from_analysis(root, revision_id)
-            return facade.initialize_review(plan.revision_id, revision_id)
-        if facade.has_tier_marker(head):
+        if initialized:
+            self.align_review_order(root)
+        head = _review_head(facade)
+        latest = self._order_revision(root, None)
+        if (
+            head is None
+            or not initialized
+            or self.segment_plan_revision(root, head.base_plan_id).order_revision_id
+            != latest.revision_id
+        ):
+            plan = self.plan_segmentation_from_analysis(root, revision_id, use_current_order=True)
+            # 이 분석이 다루지 않은 영상은 지금 조각·제안을 그대로 둔다(분석 게시와 같은 규칙).
+            return facade.initialize_review(
+                plan.revision_id,
+                revision_id,
+                preserve_source_ids=self.unanalyzed_sources(root, plan, revision_id),
+            )
+        if not facade.needs_tier_migration(head):
             return head
         # 옛 등급판 머리(D51) — 손대지 않았으면 빨강을 조각으로 떨어뜨리고, 손댔거나 사람
         # 결정이 실려 왔으면 등급만 다시 단다(확인한 제외는 확인된 채, 미검토는 미검토인 채).
         if facade.is_untouched(head):
-            return self._migrate_unedited_head(root, facade)
+            rebuilt = self._migrate_unedited_head(root, facade, head)
+            return rebuilt if rebuilt is not None else facade.load_head().revision
         return facade.retier(head.base_plan_id)
 
-    def _migrate_unedited_head(self, root: Path, facade: Any) -> ReviewRevision:
+    def _migrate_unedited_head(
+        self, root: Path, facade: Any, head: ReviewRevision
+    ) -> ReviewRevision | None:
         """손대지 않은 머리를 새 등급판으로 — 원본마다 가장 최근 판정 증거로 다시 계획한다.
 
         원본별로 다른 분석 리비전(선택 분석의 실제 모양)을 한 계획에 모은다. 판정 증거가
         없는 원본은 옛 머리의 조각을 그대로 둔다. 유료 호출은 없다(저장된 증거만 읽는다).
+        다시 계획은 원본을 다시 해시해 길다 — 그 사이 머리가 바뀌었으면(새 분석 게시·편집) 읽어
+        둔 `head`를 기준으로 세운 것을 덮지 않고, 경고하고 None을 돌려준다(다음 갱신이 다시 본다).
         """
         rows = facade.tier_evidence_rows()
         plan = self.plan_segmentation_from_evidence(root, rows)
         missing = tuple(c.asset_id for c in plan.coverage if c.asset_id not in rows)
-        return facade.initialize_review(
-            plan.revision_id, evidence_rows=rows, preserve_source_ids=missing
-        )
+        try:
+            revision: ReviewRevision = facade.initialize_review(
+                plan.revision_id,
+                evidence_rows=rows,
+                preserve_source_ids=missing,
+                expected_head=head.revision_id,
+            )
+        except StaleRevisionError as error:
+            log.warn(f"검토가 그 사이 바뀌어 다시 세우기를 다음 갱신으로 미룬다 — {error}")
+            return None
+        return revision
 
     def plan_segmentation_from_evidence(
         self, root: Path, rows: Mapping[str, AnalysisSourceResult]
@@ -1378,64 +1443,250 @@ class RawWorkspaceService:
             basis=SEGMENTATION_BASIS_SEMANTIC,
         )
 
-    def migrate_tiers(self, root: Path) -> str | None:
-        """앱 열기·새로고침 — 옛 등급판 머리를 지금 판으로 옮긴다(D51 Q8·D52). 없으면 None.
+    def unanalyzed_sources(
+        self, root: Path, plan: SegmentPlanSnapshot, revision_id: str
+    ) -> tuple[str, ...]:
+        """그 분석 리비전이 다루지 않은 영상 — 다시 세울 때 지금 조각을 그대로 둘 영상이다."""
+        rows = AnalysisStore(self._workspace(root)).list_source_results(revision_id)
+        analyzed = {row.asset_id for row in rows if row.status != "unanalyzed"}
+        return tuple(c.asset_id for c in plan.coverage if c.asset_id not in analyzed)
 
-        저장된 AI 판정과 생성 자막만 읽는다(유료 호출 0회). 손대지 않은 머리를 다시 세우는
-        재계획은 원본을 다시 해시하므로 화면을 붙잡지 않게 백그라운드로 돌고, **작업 안에서**
-        머리를 다시 읽어 정한다(같은 머리에 대한 작업은 하나로 합쳐진다).
+    def _migrate_head_tiers(self, root: Path, facade: Any) -> None:
+        """지금 머리를 다시 읽어 옮긴다 — 손대지 않았으면 증거로 다시 세우고, 아니면 등급만 단다.
+
+        표지가 있어도 옛 판 제안이 실려 있으면 옮긴다(D53 실데이터 — 옛 머리 입양이 v1 제안을
+        v2 표지와 함께 되살렸다). 손대지 않았는지는 내용으로 본다(`is_untouched`).
         """
-        facade = self.review_workspace_facade(root)
-        head = facade.load_head().revision
-        if facade.has_tier_marker(head) or not facade.tier_evidence_rows():
+        current = facade.load_head().revision
+        if not facade.needs_tier_migration(current):
+            return
+        if facade.is_untouched(current):
+            self._migrate_unedited_head(root, facade, current)
+        else:
+            facade.retier(current.base_plan_id)
+
+    # ── 앱 열기 정리(D52·D53) — 고리 하나, 한 번에 작업 하나 ─────────
+
+    def start_upkeep(self, root: Path) -> str | None:
+        """앱 열기·화면 갱신의 정리 고리 — 작업공간을 지금 판으로 맞추는 작업 하나를 건다.
+
+        할 일은 넷이다: 촬영 시각 되채움 → 전체 순서(촬영 시각 순) → 등급판 옮기기 → 검토
+        머리 순서 맞춤. 유료 호출이 없고 원본을 다시 해시할 수 있어 백그라운드로 돈다. 할 일이
+        없으면 None. 정리 작업이 이미 돌고 있으면 걸지 않고 하는 일만 알린다 — 작업이 스스로
+        바꾼 상태로 할 일 열쇠가 달라져도 두 번째 작업이 겹쳐 돌지 않는다(실데이터: 두 작업이 같은
+        재계획을 두 번 썼다). 같은 할 일은 이번 앱 실행에서 한 번만 건다 — 실패했으면 다시 걸지
+        않고 그 이유를 돌려주며, 앱을 다시 열면 한 번 더 시도한다.
+        """
+        pending = self._upkeep_pending(root)
+        if not pending:
             return None
-        failure = self._tier_migration_failure(root, head.revision_id)
-        if failure is not None:
-            return failure
+        with self._upkeep_lock:
+            latest = self.latest_job(root, UPKEEP_JOB_KIND)
+            if latest is not None and latest.status in ACTIVE_JOB_STATUSES:
+                return self._upkeep_message(root, pending)
+            if not self._claim_upkeep(root, pending):
+                return _upkeep_failure_note(latest)
+            fingerprint = hashlib.sha256(
+                json.dumps(sorted(pending.items()), ensure_ascii=False).encode("utf-8")
+            ).hexdigest()
 
-        def body(context: JobContext) -> None:
-            context.check_cancel()
-            current = facade.load_head().revision
-            if facade.has_tier_marker(current):
-                return
-            if facade.is_untouched(current):
-                self._migrate_unedited_head(root, facade)
-            else:
-                facade.retier(current.base_plan_id)
+            def body(context: JobContext) -> None:
+                self._run_upkeep(root, context)
 
-        self.submit_job(root, TIER_MIGRATION_JOB_KIND, head.revision_id, body)
-        if facade.is_untouched(head):
-            return (
-                "등급 기준이 AI 판정 + 자막으로 바뀌어 검토를 다시 세웁니다 — 손대지 않은"
-                " 검토라 제외 제안 구간을 조각으로 나눕니다."
-            )
-        return (
-            "등급 기준이 AI 판정 + 자막으로 바뀌어 등급 표시만 다시 답니다 — 사람이 정한"
-            " 사용/제외는 그대로이고, 근거가 사라진 옛 제외 제안은 사용으로 되돌립니다."
-        )
+            self.submit_job(root, UPKEEP_JOB_KIND, fingerprint, body)
+        return self._upkeep_message(root, pending)
 
-    def _tier_migration_failure(self, root: Path, head_revision_id: str) -> str | None:
-        """이번 앱 실행에서 이미 걸었다가 실패한 머리면 그 이유 — 아니면 None(한 번 더 건다).
+    def latest_job(self, root: Path, kind: str) -> JobRecord | None:
+        """그 종류의 가장 최근 작업 — 최근 몇 개의 창이 아니라 종류로 찾는다."""
+        return self._jobs(root).latest_of_kind(kind)
 
-        실패 기록은 머리에 묶여 영구히 남는다. 같은 실행 안에서는 화면 갱신마다 다시 걸지 않고,
-        앱을 다시 열면 한 번 더 시도한다 — 원본 볼륨이 잠깐 빠진 것 같은 일시 원인이 영구 차단이
-        되어 사람이 손대는 순간 조용히 '등급만 다시 달기'로 내려앉지 않게.
+    def _upkeep_pending(self, root: Path) -> dict[str, str]:
+        """할 일 → 그 상태의 열쇠(같은 열쇠는 같은 일이다). 읽기만 한다.
+
+        전체 순서의 첫 확정은 여기서 하지 않는다 — 가져오기·영상 선택의 몫이다. 이미 있는
+        순서가 제안(촬영 시각 순)과 다를 때만 맞춘다.
         """
-        latest = next(
-            (
-                job
-                for job in self.list_jobs(root)
-                if job.kind == TIER_MIGRATION_JOB_KIND and job.input_fingerprint == head_revision_id
-            ),
-            None,
-        )
-        key = (root.expanduser().resolve(), head_revision_id)
+        workspace = self._workspace(root)
+        ready = self.global_order_proposal(root)
+        pending: dict[str, str] = {}
+        if ready and workspace.meta_value(CAPTURE_BASIS_KEY) != CAPTURE_TIME_BASIS:
+            pending[UPKEEP_CAPTURE] = CAPTURE_TIME_BASIS
+        order = workspace.latest_global_order_revision()
+        proposal = tuple(asset.asset_id for asset in ready)
+        if order is not None and _order_ids(order) != proposal:
+            pending[UPKEEP_ORDER] = ",".join(proposal)
+        facade = self.review_workspace_facade(root)
+        head = _review_head(facade)
+        if head is None:
+            return pending
+        if facade.needs_tier_migration(head) and facade.tier_evidence_rows():
+            pending[UPKEEP_TIERS] = _tier_state(facade, head)
+        if order is not None and self._reorder_pending(root, head, order):
+            pending[UPKEEP_ALIGN] = f"{head.revision_id}>{order.revision_id}"
+        return pending
+
+    def _claim_upkeep(self, root: Path, pending: Mapping[str, str]) -> bool:
+        """이번 실행에서 아직 걸지 않은 할 일이 있으면 건 것으로 적고 True."""
+        key = root.expanduser().resolve()
+        claims = {(key, step, state) for step, state in pending.items()}
         with self._lock:
-            tried = key in self._tier_migration_tries
-            self._tier_migration_tries.add(key)
-        if tried and latest is not None and latest.status == "failed":
-            return f"등급판 옮기기 실패: {latest.error}"
-        return None
+            fresh = claims - self._upkeep_tries
+            self._upkeep_tries.update(fresh)
+        return bool(fresh)
+
+    def _upkeep_message(self, root: Path, pending: Mapping[str, str]) -> str:
+        """하는 일을 사람 말로 — 어느 단계도 사람이 정한 사용/제외·메모를 바꾸지 않는다."""
+        lines: list[str] = []
+        if {UPKEEP_CAPTURE, UPKEEP_ORDER, UPKEEP_ALIGN} & set(pending):
+            lines.append(
+                "영상을 촬영 시각 순으로 맞춥니다 — 원본의 촬영 날짜를 다시 읽고, 사람이 정한"
+                " 사용/제외·메모는 그대로입니다. 분석 승인은 다시 받지 않습니다."
+            )
+        if UPKEEP_TIERS in pending:
+            facade = self.review_workspace_facade(root)
+            lines.append(_tier_migration_message(facade.is_untouched(facade.load_head().revision)))
+        return "\n\n".join(lines)
+
+    def _run_upkeep(self, root: Path, context: JobContext) -> None:
+        """정리 본문 — 단계마다 실패를 경고로 남기고, 안전한 다음 단계는 계속 돈다.
+
+        촬영 시각을 다 못 읽어도 기록된 시각으로 정렬은 한다(순서 바꿈은 사람 결정을 잃지
+        않는다). 등급판 옮기기가 실패하면 검토 순서 맞춤은 미룬다 — 옛 머리를 먼저 옮기면 그
+        옛 제안을 새 기본에 실어 나른다(D52·D53). 실패가 있으면 끝에 모아 작업을 실패로 남긴다
+        — 안내와 다음 실행의 재시도가 그것을 읽는다.
+        """
+        steps: tuple[tuple[str, Callable[[Path], object]], ...] = (
+            (UPKEEP_CAPTURE, self._capture_step),
+            (UPKEEP_ORDER, self._order_step),
+            (UPKEEP_TIERS, self._tier_step),
+            (UPKEEP_ALIGN, self.align_review_order),
+        )
+        failures: dict[str, str] = {}
+        for step, run in steps:
+            context.check_cancel()
+            if step == UPKEEP_ALIGN and UPKEEP_TIERS in failures:
+                if self._align_pending(root):
+                    failures[step] = "등급판 옮기기가 실패해 다음 열기로 미뤘다"
+                    log.warn(f"작업공간 정리 — {step}: {failures[step]}")
+                continue
+            try:
+                run(root)
+            except (RuntimeError, OSError, ValueError) as error:
+                log.warn(f"작업공간 정리 — {step} 실패: {error}")
+                failures[step] = str(error)
+        if failures:
+            raise RawWorkspaceError(" · ".join(f"{step}: {why}" for step, why in failures.items()))
+
+    def _capture_step(self, root: Path) -> None:
+        missing = self.refresh_capture_times(root)
+        if missing:
+            raise RawWorkspaceError(
+                f"촬영 시각을 읽지 못한 원본 {len(missing)}개({', '.join(missing[:3])}) — 원본"
+                " 볼륨을 확인하세요. 기록된 시각으로 정렬했습니다"
+            )
+
+    def _order_step(self, root: Path) -> None:
+        # 첫 확정은 가져오기·영상 선택의 몫이다 — 정리는 이미 있는 순서만 맞춘다.
+        if self.latest_global_source_order(root) is not None:
+            self.ensure_source_order(root)
+
+    def _tier_step(self, root: Path) -> None:
+        facade = self.review_workspace_facade(root)
+        if _review_head(facade) is not None and facade.tier_evidence_rows():
+            self._migrate_head_tiers(root, facade)
+
+    def refresh_capture_times(
+        self, root: Path, probe: Callable[[Path], preprocess.CreationTime] | None = None
+    ) -> tuple[str, ...]:
+        """ready 원본의 촬영 시각을 지금 규칙(애플 촬영 날짜 먼저)으로 다시 읽는다(D53).
+
+        컨테이너 태그만 읽는다(디코딩·유료 호출 없음). 전부 읽은 뒤 바뀐 값만 한 트랜잭션으로
+        쓰고, 전부 읽었을 때만 같은 트랜잭션에서 근거 판 표지를 남긴다 — 쓰는 동안 순서 확정을
+        막아 반쯤 고친 시각으로 순서가 서지 않는다. 못 읽은 원본(볼륨이 빠졌다)은 경고하고
+        기록값을 둔 채 이름을 돌려준다. 표지가 이미 있으면 아무것도 읽지 않는다.
+        """
+        workspace = self._workspace(root)
+        if workspace.meta_value(CAPTURE_BASIS_KEY) == CAPTURE_TIME_BASIS:
+            return ()
+        changes, missing = self._probed_capture_times(root, probe or preprocess.probe_creation_time)
+        with self._order_lock:
+            workspace.record_capture_times(changes, basis=None if missing else CAPTURE_TIME_BASIS)
+        return missing
+
+    def _probed_capture_times(
+        self, root: Path, read: Callable[[Path], preprocess.CreationTime]
+    ) -> tuple[dict[str, str | None], tuple[str, ...]]:
+        """원본마다 태그를 읽어 바뀐 값만 모은다 — 쓰지 않는다. 못 읽은 원본은 경고와 이름."""
+        workspace = self._workspace(root)
+        changes: dict[str, str | None] = {}
+        missing: list[str] = []
+        for asset in self.global_order_proposal(root):
+            try:
+                creation = read(workspace.source_media_path(asset))
+            except (RuntimeError, OSError) as error:
+                log.warn(
+                    f"촬영 시각을 다시 읽지 못했다: {asset.source_name} — {error}"
+                    " (기록된 값으로 정렬한다)"
+                )
+                missing.append(asset.source_name)
+                continue
+            utc = creation.utc if creation.valid else None
+            measured = utc.isoformat() if utc is not None else None
+            if measured != asset.capture_time:
+                changes[asset.asset_id] = measured
+        return changes, tuple(missing)
+
+    def align_review_order(self, root: Path) -> bool:
+        """검토 머리를 최신 전체 순서 위로 옮긴다 — 순서만 바뀐 경우에만(D53). 옮겼으면 True.
+
+        원본 묶음이 다르면(새 영상) 이 길이 아니다. 잃을 사람 결정이 없는 머리는 저장 증거로 새
+        순서 위에 다시 세운다 — 기계 제안을 편집 수백 번으로 되풀이해 '손댄 머리'로 만들지 않는다.
+        사람 결정이 있으면 입양한다(선택·메모·덮기·미검토 표지를 공식 편집으로 다시 적용). 원본을
+        다시 해시하는 동안 머리가 바뀌었으면(편집·다른 작업의 새 기본) 입양이 거절되고, 경고하고
+        미룬다 — 옛 머리로 덮지 않는다. 분석 승인도 유료 호출도 없다.
+        """
+        with self._align_lock:
+            order = self.latest_global_source_order(root)
+            facade = self.review_workspace_facade(root)
+            head = _review_head(facade)
+            if order is None or head is None or not self._reorder_pending(root, head, order):
+                return False
+            if facade.is_untouched(head):
+                return self._migrate_unedited_head(root, facade, head) is not None
+            plan, mapping = facade.plan_from_review(
+                head.base_plan_id, order_revision_id=order.revision_id
+            )
+            try:
+                facade.adopt_plan_review(plan, mapping, old_revision=head)
+            except StaleRevisionError as error:
+                log.warn(f"검토가 그 사이 바뀌어 검토 순서 맞춤을 다음 갱신으로 미룬다 — {error}")
+                return False
+            return True
+
+    def _align_pending(self, root: Path) -> bool:
+        order = self.latest_global_source_order(root)
+        head = _review_head(self.review_workspace_facade(root))
+        return order is not None and head is not None and self._reorder_pending(root, head, order)
+
+    def _reorder_pending(
+        self, root: Path, head: ReviewRevision, order: GlobalOrderRevision
+    ) -> bool:
+        """순서만 바뀐 머리인가 — 계획의 순서가 최신이 아니고 원본 묶음은 같다."""
+        plan = self.segment_plan_revision(root, head.base_plan_id)
+        if plan.order_revision_id == order.revision_id:
+            return False
+        return _same_sources(head, order)
+
+    def order_covers_same_sources(self, root: Path, order_revision_id: str) -> bool:
+        """그 전체 순서가 지금 순서와 같은 원본 묶음인가 — 순서만 다르면 같은 묶음이다(D53).
+
+        분석은 원본마다의 것이라 순서가 바뀌어도 낡지 않는다 — 다시 승인받지 않는다.
+        """
+        latest = self.latest_global_source_order(root)
+        if latest is None:
+            return False
+        recorded = self._order_revision(root, order_revision_id)
+        return set(_order_ids(recorded)) == set(_order_ids(latest))
 
     def materialize_review(self, root: Path, context: JobContext, expected_revision: str) -> str:
         from vlogsrt.project.raw.media_refs import resolve
@@ -1594,7 +1845,11 @@ class RawWorkspaceService:
     def ingest_overview(
         self, root: Path, batch_dir: str | None = None
     ) -> tuple[tuple[SourceAsset, ...], SourceOrderRevision | None, tuple[JobRecord, ...]]:
-        """가져오기 읽기 모델 — 자산(확정 순번순)·순서 리비전·가져오기 작업 최근 순."""
+        """가져오기 읽기 모델 — 자산·순서 리비전·가져오기 작업 최근 순.
+
+        배치를 고르지 않으면 자산은 촬영 시각 순이다(D53 — 화면 어디서나 같은 순서). 배치를
+        고르면 그 배치의 확정 순번순이다(가져오기 기록).
+        """
         workspace = self._workspace(root)
         assets = workspace.list_source_assets(batch_dir)
         revision = None
@@ -1603,7 +1858,7 @@ class RawWorkspaceService:
         elif batch_dir is not None:
             revision = workspace.order_revision(batch_dir)
         jobs = tuple(job for job in self.list_jobs(root) if job.kind == INGEST_JOB_KIND)
-        return assets, revision, jobs
+        return (assets if batch_dir else _propose_global_order(assets)), revision, jobs
 
     def list_source_assets(
         self, root: Path, batch_dir: str | None = None
@@ -1616,7 +1871,7 @@ class RawWorkspaceService:
     # ── A2F1 — 배치를 넘는 전체 순서 확정(A3 소비 계약) ────────
 
     def global_order_proposal(self, root: Path) -> tuple[SourceAsset, ...]:
-        """전체 순서 제안 — 현재 ready 원본을 배치 연대순·배치 안 확정 순번으로."""
+        """전체 순서 제안 — 현재 ready 원본을 촬영 시각 순으로, 모르면 맨 뒤에 자연 경로 순(D53)."""
         ready = [
             asset for asset in self._workspace(root).list_source_assets() if asset.status == "ready"
         ]
@@ -1627,7 +1882,7 @@ class RawWorkspaceService:
     ) -> GlobalOrderRevision:
         """현재 선택(ready) 원본 전부의 전체 순서를 확정한다 — 불변 리비전.
 
-        순서를 주지 않으면 제안(배치 연대순·배치 안 확정 순번) 그대로다. 주면
+        순서를 주지 않으면 제안(촬영 시각 순, D53) 그대로다. 주면
         **지금 ready인 원본 전부**를 빠짐없이, 겹침 없이, 알맞은 ID로 담아야 한다 —
         모르는 ID·ready 아님·빠진 원본은 확정을 만들지 않고 알린다. 확정은 새
         리비전을 만들 뿐: 옛 스냅숏은 다시 쓰지 않고, 배치 안 리비전도 건드리지
@@ -2346,20 +2601,7 @@ class RawWorkspaceService:
         """
         workspace = self._workspace(root)
         store = AnalysisStore(workspace)
-        revisions = store.list_revisions()
-        revision = None
-        if analysis_revision_id is not None:
-            revision = next(
-                (item for item in revisions if item.revision_id == analysis_revision_id), None
-            )
-        elif revisions:
-            revision = revisions[-1]
-        if revision is None:
-            raise AnalysisError("분석 리비전이 없다 — 먼저 의미 분석을 실행하세요")
-        if revision.status not in ("complete", "partial", "failed"):
-            raise AnalysisError(
-                f"분석이 완성 상태가 아니다({revision.status}) — 완료된 리비전만 계획에 쓴다"
-            )
+        revision = _finished_analysis(store, analysis_revision_id)
         order = self._order_revision(
             root, None if use_current_order else revision.order_revision_id
         )
@@ -2372,9 +2614,11 @@ class RawWorkspaceService:
                     f"분석 결과 행이 없다: {entry.asset_id} — 분석을 다시 실행하세요"
                 )
             intervals[entry.asset_id] = self._analysis_intervals(workspace, row, entry.asset_id)
+        # 지금 순서를 쓰라고 했으면 계획도 그 순서 위에 선다 — 분석 당시 순서에 세우면 촬영 시각
+        # 순으로 맞춘 머리가 옛 순서로 되돌아간다(D53).
         return self.plan_segmentation(
             root,
-            order_revision_id=revision.order_revision_id,
+            order_revision_id=order.revision_id,
             intervals=intervals,
             basis=SEGMENTATION_BASIS_SEMANTIC,
         )
@@ -3079,21 +3323,15 @@ class RawWorkspaceService:
         mode: str,
         *,
         root: Path | None = None,
+        bindings: Mapping[str, list[str]] | None = None,
     ) -> str:
-        """분석 리비전 지문 — 순서·선택·설정·모델·모드를 묶는다(작업 재결합의 키)."""
-        from vlogsrt.project.raw import media_refs, source_transcript
+        """분석 리비전 지문 — 순서·선택·설정·모델·모드를 묶는다(작업 재결합의 키).
 
-        bindings = (
-            {
-                asset_id: [
-                    source_transcript.fingerprint(self._workspace(root), asset_id),
-                    media_refs.fingerprint(self._workspace(root), asset_id),
-                ]
-                for asset_id in assets
-            }
-            if root is not None
-            else {}
-        )
+        `bindings`(원본별 자막·미디어 참조 지문)를 미리 잰 값으로 주면 다시 읽지 않는다 — 순서
+        리비전마다 지문을 견줄 때 원본 결속은 한 번만 읽는다(D53).
+        """
+        if bindings is None:
+            bindings = self.source_bindings(root, assets) if root is not None else {}
         payload = json.dumps(
             {
                 "schema": "raw-analysis-revision/v1",
@@ -3113,6 +3351,21 @@ class RawWorkspaceService:
             sort_keys=True,
         )
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def source_bindings(
+        self, root: Path, assets: Mapping[str, SourceAsset]
+    ) -> dict[str, list[str]]:
+        """원본별 결속 지문 — 고친 자막·미디어 참조가 분석 지문을 바꾼다."""
+        from vlogsrt.project.raw import media_refs, source_transcript
+
+        workspace = self._workspace(root)
+        return {
+            asset_id: [
+                source_transcript.fingerprint(workspace, asset_id),
+                media_refs.fingerprint(workspace, asset_id),
+            ]
+            for asset_id in assets
+        }
 
     def _analysis_intervals(
         self,
@@ -3261,6 +3514,70 @@ class RawWorkspaceService:
             job_fingerprint=fingerprint,
             clip_total=len(snapshot.entries),
         )
+
+
+def _order_ids(revision: GlobalOrderRevision) -> tuple[str, ...]:
+    """전체 순서 리비전의 원본 순서 — 확정 순번대로."""
+    return tuple(entry.asset_id for entry in sorted(revision.entries, key=lambda e: e.ordinal))
+
+
+def _review_head(facade: Any) -> ReviewRevision | None:
+    """검토 머리 — 아직 하나도 없으면 None(정상 상태다). 깨진 저장소는 그대로 오류다."""
+    return facade.load_head().revision if facade.has_review() else None
+
+
+def _finished_analysis(store: AnalysisStore, revision_id: str | None) -> AnalysisRevision:
+    """계획에 쓸 분석 리비전 — 주면 그것, 아니면 가장 최근. 끝난 리비전만 받는다."""
+    revisions = store.list_revisions()
+    revision = None
+    if revision_id is not None:
+        revision = next((item for item in revisions if item.revision_id == revision_id), None)
+    elif revisions:
+        revision = revisions[-1]
+    if revision is None:
+        raise AnalysisError("분석 리비전이 없다 — 먼저 의미 분석을 실행하세요")
+    if revision.status not in ("complete", "partial", "failed"):
+        raise AnalysisError(
+            f"분석이 완성 상태가 아니다({revision.status}) — 완료된 리비전만 계획에 쓴다"
+        )
+    return revision
+
+
+def _tier_state(facade: Any, head: ReviewRevision) -> str:
+    """등급판 옮기기의 할 일 열쇠 — 판·표지·옛 제안 자리로만 만든다(머리 리비전이 아니라).
+
+    다시 세우면 머리 리비전이 늘 바뀐다 — 그것을 열쇠로 쓰면 옮겨도 남는 것이 있을 때 앱을
+    열 때마다가 아니라 화면 갱신마다 다시 세우기(원본 재해시)가 되풀이된다. 같은 것이 남으면
+    같은 열쇠라 이번 실행에서는 다시 걸지 않는다.
+    """
+    spans = json.dumps(facade.stale_tier_proposal_spans(head))
+    digest = hashlib.sha256(spans.encode("utf-8")).hexdigest()[:16]
+    return f"{TIER_SETTINGS.tier_version}|표지 {facade.has_tier_marker(head)}|옛 제안 {digest}"
+
+
+def _same_sources(head: ReviewRevision, order: GlobalOrderRevision) -> bool:
+    """검토 머리와 전체 순서가 같은 영상 묶음인가 — 순서만 다를 수 있다."""
+    return {clock.source_id for clock in head.clocks} == set(_order_ids(order))
+
+
+def _upkeep_failure_note(latest: JobRecord | None) -> str | None:
+    """이미 건 할 일의 마지막 결과 — 실패했으면 그 이유, 아니면 None."""
+    if latest is not None and latest.status == "failed":
+        return f"작업공간 정리 실패: {latest.error} — 앱을 다시 열면 한 번 더 시도합니다."
+    return None
+
+
+def _tier_migration_message(untouched: bool) -> str:
+    """등급판 옮기기 안내 — 손대지 않은 머리는 다시 세우고, 손댄 머리는 등급만 다시 단다."""
+    if untouched:
+        return (
+            "등급 기준이 AI 판정 + 자막으로 바뀌어 검토를 다시 세웁니다 — 손대지 않은"
+            " 검토라 제외 제안 구간을 조각으로 나눕니다."
+        )
+    return (
+        "등급 기준이 AI 판정 + 자막으로 바뀌어 등급 표시만 다시 답니다 — 사람이 정한"
+        " 사용/제외는 그대로이고, 근거가 사라진 옛 제외 제안은 사용으로 되돌립니다."
+    )
 
 
 def _json_fraction(value: Mapping[str, Any]) -> Fraction:

@@ -363,6 +363,16 @@ class ReviewWorkspaceStore:
                 (old_revision_id,),
             ).fetchone()
 
+    def adopted_from(self, new_base_plan_id: str) -> str | None:
+        """그 기본 계획을 입양으로 세웠으면 옛 머리 리비전 — 입양이 아니면 None."""
+        with self._session() as connection:
+            row = connection.execute(
+                "SELECT old_revision_id FROM review_workspace_remappings"
+                " WHERE new_base_plan_id = ? ORDER BY rowid DESC LIMIT 1",
+                (new_base_plan_id,),
+            ).fetchone()
+        return None if row is None else str(row["old_revision_id"])
+
     # ── 내보내기 리비전 — 서버 소유 이름공간의 기록 ──────────────
 
     def insert_export_revision(

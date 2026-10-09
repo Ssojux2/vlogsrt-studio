@@ -564,7 +564,10 @@ def test_cache_reuses_success_only_and_errors_retry(
     assert fourth is not None
     statuses = {r.source_name: r.status for r in fourth.results}
     assert statuses == {"스테레오.mov": "failed", "무성.mov": "analyzed"}
-    assert "주입된 PCM 실패" in (fourth.results[0].error or "")
+    # 이름으로 고른다 — D53 이후 촬영 시각 모르는 원본은 배치가 아니라 파일 이름 순이라
+    # 두 번째 배치의 무성.mov가 앞에 선다(예전엔 results[0]이 첫 배치의 스테레오였다).
+    failed = next(r for r in fourth.results if r.source_name == "스테레오.mov")
+    assert "주입된 PCM 실패" in (failed.error or "")
     monkeypatch.setattr(analysis_workflow.stage1, "select_audio", real_select)
     _analyze(service, workspace, settings=virgin)
     fifth = service.analysis_overview(workspace)

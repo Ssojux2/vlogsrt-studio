@@ -25,11 +25,14 @@ def _asset(
     asset_id: str,
     relative: str,
     capture_time: str | None = None,
+    *,
+    batch_dir: str = "import_000001",
+    ordinal: int = 0,
 ) -> SourceAsset:
     return SourceAsset(
         asset_id=asset_id,
-        batch_dir="import_000001",
-        relative_path=f"originals/import_000001/{relative}",
+        batch_dir=batch_dir,
+        relative_path=f"originals/{batch_dir}/{relative}",
         status="pending",
         size_bytes=10,
         source_root="/tmp/card",
@@ -45,7 +48,7 @@ def _asset(
         error=None,
         source_mtime_ns=1,
         source_inode=1,
-        ordinal=0,
+        ordinal=ordinal,
         created_at="2026-10-02T00:00:00+00:00",
         updated_at="2026-10-02T00:00:00+00:00",
     )
@@ -82,6 +85,56 @@ def test_propose_order_known_capture_times_come_first() -> None:
     ]
     ordered = source_order.propose_order(candidates)
     assert [item.asset_id for item in ordered] == ["earlier", "later", "unknown"]
+
+
+def test_global_order_follows_capture_time_across_batches() -> None:
+    """D53 — 배치(가져온 순서)를 넘어 촬영 시각 오래된 것부터다.
+
+    실측 모양: 0009–0025를 먼저 가져오고 가장 먼저 찍은 0008을 두 번째 배치로 가져왔다.
+    예전 규칙(배치 연대순)은 0008을 맨 뒤에 두었다.
+    """
+    assets = [
+        _asset("s0009", "DJI_0009.MOV", "2026-08-11T03:51:58+00:00", ordinal=1),
+        _asset("s0010", "DJI_0010.MOV", "2026-08-11T03:53:50+00:00", ordinal=2),
+        _asset(
+            "s0008",
+            "DJI_0008.MOV",
+            "2026-08-11T03:50:46+00:00",
+            batch_dir="import_000002",
+            ordinal=1,
+        ),
+    ]
+    ordered = source_order.propose_global_order(assets)
+    assert [asset.asset_id for asset in ordered] == ["s0008", "s0009", "s0010"]
+
+
+def test_global_order_puts_unknown_capture_times_last_in_natural_path_order() -> None:
+    """촬영 시각을 모르면 맨 뒤 — 그 안은 배치와 무관하게 자연 경로 순이다(D53)."""
+    assets = [
+        _asset("u10", "DJI_0010.MP4", batch_dir="import_000001", ordinal=1),
+        _asset("known", "Z_9999.MP4", "2026-10-02T09:00:00+00:00", batch_dir="import_000003"),
+        _asset("u2", "DJI_0002.MP4", batch_dir="import_000002", ordinal=1),
+        _asset("u1", "DJI_0001.MP4", batch_dir="import_000004", ordinal=1),
+    ]
+    ordered = source_order.propose_global_order(assets)
+    assert [asset.asset_id for asset in ordered] == ["known", "u1", "u2", "u10"]
+
+
+def test_global_order_tiebreak_is_deterministic() -> None:
+    """같은 시각·같은 경로는 배치 자연 순 → 확정 순번 → 자산 ID로 갈린다 — 입력 순서와 무관."""
+    import itertools
+
+    same = "2026-10-02T09:00:00+00:00"
+    assets = [
+        _asset("source_b", "a.mov", same, batch_dir="import_000010", ordinal=1),
+        _asset("source_a", "a.mov", same, batch_dir="import_000002", ordinal=2),
+        _asset("source_c", "a.mov", same, batch_dir="import_000002", ordinal=1),
+        _asset("source_e", "a.mov", same, batch_dir="import_000002", ordinal=1),
+    ]
+    expected = ["source_c", "source_e", "source_a", "source_b"]
+    for permutation in itertools.permutations(assets):
+        ordered = source_order.propose_global_order(permutation)
+        assert [asset.asset_id for asset in ordered] == expected
 
 
 def test_basis_note_distinguishes_uninspected_from_known() -> None:

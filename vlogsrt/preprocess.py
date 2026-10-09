@@ -1250,6 +1250,15 @@ class CreationTime:
     utc: datetime | None
 
 
+_CREATION_TAGS = ("com.apple.quicktime.creationdate", "creation_time")
+"""촬영 시각 태그 — 앞의 것이 이긴다(D53).
+
+FCP는 가져온 원본을 다시 감싸며 컨테이너 `creation_time`을 **가져온 시각**으로 덮는다.
+촬영 시각은 애플 키 `com.apple.quicktime.creationdate`에만 남는다(실측: DJI 파일명의 촬영
+시각과 일치) — 그래서 애플 키를 먼저 읽고, 없거나 못 믿을 때만 `creation_time`을 쓴다.
+"""
+
+
 def _parse_creation_time(raw: str) -> CreationTime:
     if not raw:
         return CreationTime(raw="", valid=False, utc=None)
@@ -1264,6 +1273,32 @@ def _parse_creation_time(raw: str) -> CreationTime:
     if utc < _CREATION_EARLIEST or utc > datetime.now(UTC) + _CREATION_FUTURE_SLACK:
         return CreationTime(raw=raw, valid=False, utc=None)
     return CreationTime(raw=raw, valid=True, utc=utc)
+
+
+def _creation_from_tags(fmt: dict[str, object]) -> CreationTime:
+    """태그 순서대로 처음 유효한 촬영 시각 — 하나도 없으면 처음 보인 원값을 무효로 남긴다."""
+    first_raw = ""
+    for key in _CREATION_TAGS:
+        verdict = _parse_creation_time(_format_tag(fmt, key))
+        if verdict.valid:
+            return verdict
+        first_raw = first_raw or verdict.raw
+    return CreationTime(raw=first_raw, valid=False, utc=None)
+
+
+def probe_creation_time(source: Path) -> CreationTime:
+    """원본 하나의 촬영 시각만 읽는다 — 컨테이너 태그뿐이라 디코딩이 없다(D53 되채움)."""
+    ffprobe = require_ffmpeg("ffprobe")
+    completed = _run(
+        [
+            ffprobe, "-v", "error",
+            "-show_entries", "format_tags=" + ",".join(_CREATION_TAGS),
+            "-of", "json",
+            str(source),
+        ]
+    )  # fmt: skip
+    fmt = _raw_probe_json(completed.stdout, source).get("format")
+    return _creation_from_tags(fmt if isinstance(fmt, dict) else {})
 
 
 @dataclass(frozen=True, slots=True)
@@ -1352,7 +1387,7 @@ def probe_raw_media(source: Path, *, video_ordinal: int = 0) -> RawMediaProbe:
             "color_primaries,color_transfer,color_space,color_range,"
             "r_frame_rate,avg_frame_rate,time_base,start_time,start_pts,duration_ts,"
             "sample_rate,channels:stream_side_data=rotation"
-            ":format=format_name,duration,start_time:format_tags=creation_time",
+            ":format=format_name,duration,start_time:format_tags=" + ",".join(_CREATION_TAGS),
             "-of", "json",
             str(source),
         ]
@@ -1399,7 +1434,7 @@ def _parse_raw_probe(stdout: str, source: Path, video_ordinal: int) -> RawMediaP
         container=_format_text(fmt, "format_name", source),
         duration=_format_fraction(fmt, "duration", source),
         format_start=_format_start_seconds(fmt, source),
-        creation_time=_parse_creation_time(_format_tag(fmt, "creation_time")),
+        creation_time=_creation_from_tags(fmt),
         video=_raw_video_media(chosen, source),
         audio=tuple(_raw_audio_track(entry, source) for entry in audios),
         other_tracks=others,

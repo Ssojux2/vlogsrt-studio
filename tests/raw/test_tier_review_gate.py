@@ -25,7 +25,7 @@ from vlogsrt.project.raw.segment_review import (
     AUTO_EXCLUDED_UNREVIEWED_TAG,
     unreviewed_auto_exclusions,
 )
-from vlogsrt.project.raw.service import RawWorkspaceError, RawWorkspaceService
+from vlogsrt.project.raw.service import UPKEEP_JOB_KIND, RawWorkspaceError, RawWorkspaceService
 
 needs_ffmpeg = pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg required")
 
@@ -223,7 +223,7 @@ def test_cleanup_on_unedited_head_materializes_red_on_edited_head_only_relabels(
     assert migrated.base_plan_id != legacy.base_plan_id
     assert [_seconds(migrated, s) for s in unreviewed_auto_exclusions(migrated)] == [RED]
     assert ReviewWorkspaceFacade.has_tier_marker(migrated)
-    assert service.migrate_tiers(root) is None  # 정리가 이미 옮겼다 — 앱 열기에 할 일이 없다
+    assert service.start_upkeep(root) is None  # 정리가 이미 옮겼다 — 앱 열기에 할 일이 없다
 
     # 사람이 손댄 옛 머리는 경계를 그대로 두고 등급만 다시 단다.
     legacy = _legacy_head(service, root, monkeypatch)
@@ -252,23 +252,28 @@ def test_cleanup_on_unedited_head_materializes_red_on_edited_head_only_relabels(
     )
 
 
+def _upkeep_job(service: RawWorkspaceService, root: Path):
+    """앱 열기 정리 작업 — 등급판 옮기기는 그 한 단계다(D53이 고리 하나로 모았다)."""
+    return next(j for j in service.list_jobs(root) if j.kind == UPKEEP_JOB_KIND)
+
+
 @needs_ffmpeg
-def test_migrate_tiers_rebuilds_unedited_head_in_background(
+def test_upkeep_rebuilds_unedited_head_in_background(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     service, root = tier_project(tmp_path, suitability="usable")
     legacy = _legacy_head(service, root, monkeypatch)
-    message = service.migrate_tiers(root)
+    message = service.start_upkeep(root)
     assert message is not None and "AI 판정 + 자막" in message and "다시 세웁니다" in message
     assert "무료" not in message
-    job = next(j for j in service.list_jobs(root) if j.kind == "tier_migration")
+    job = _upkeep_job(service, root)
     assert _wait_terminal(service, root, job.job_id).status == "succeeded"
     migrated = ReviewWorkspaceFacade(root).load_head().revision
     assert migrated.base_plan_id != legacy.base_plan_id
     assert len(unreviewed_auto_exclusions(migrated)) == 1
     # 이미 지금 판이면 옮길 것이 없다 — 작업도 리비전도 없다.
     jobs = len(service.list_jobs(root))
-    assert service.migrate_tiers(root) is None
+    assert service.start_upkeep(root) is None
     assert len(service.list_jobs(root)) == jobs
     assert ReviewWorkspaceFacade(root).load_head().revision == migrated
 
@@ -285,12 +290,14 @@ def test_failed_migration_is_reported_not_resubmitted(
         raise RawWorkspaceError("합성 재계획 실패")
 
     monkeypatch.setattr(service, "_migrate_unedited_head", broken)
-    assert service.migrate_tiers(root) is not None
-    job = next(j for j in service.list_jobs(root) if j.kind == "tier_migration")
+    assert service.start_upkeep(root) is not None
+    job = _upkeep_job(service, root)
     assert _wait_terminal(service, root, job.job_id).status == "failed"
     jobs = len(service.list_jobs(root))
     for _ in range(3):  # 화면 결과 갱신마다 불려도 같은 앱 실행 안에서는 다시 걸지 않는다
-        assert service.migrate_tiers(root) == "등급판 옮기기 실패: 합성 재계획 실패"
+        message = service.start_upkeep(root) or ""
+        assert message.startswith("작업공간 정리 실패:")
+        assert "등급판: 합성 재계획 실패" in message
     assert len(service.list_jobs(root)) == jobs
     assert ReviewWorkspaceFacade(root).load_head().revision == legacy
 
@@ -309,34 +316,32 @@ def test_failed_migration_is_retried_once_by_a_new_app_session(
 
     with monkeypatch.context() as patch:
         patch.setattr(service, "_migrate_unedited_head", broken)
-        assert service.migrate_tiers(root) is not None
-        job = next(j for j in service.list_jobs(root) if j.kind == "tier_migration")
+        assert service.start_upkeep(root) is not None
+        job = _upkeep_job(service, root)
         assert _wait_terminal(service, root, job.job_id).status == "failed"
-    assert service.migrate_tiers(root) == "등급판 옮기기 실패: 원본 볼륨이 빠졌다"
+    assert "등급판: 원본 볼륨이 빠졌다" in (service.start_upkeep(root) or "")
     reopened = RawWorkspaceService()
-    message = reopened.migrate_tiers(root)
+    message = reopened.start_upkeep(root)
     assert message is not None and "다시 세웁니다" in message
-    retry = next(j for j in reopened.list_jobs(root) if j.kind == "tier_migration")
+    retry = _upkeep_job(reopened, root)
     assert retry.job_id != job.job_id
     assert _wait_terminal(reopened, root, retry.job_id).status == "succeeded"
     migrated = ReviewWorkspaceFacade(root).load_head().revision
     assert migrated.base_plan_id != legacy.base_plan_id
     assert ReviewWorkspaceFacade.has_tier_marker(migrated)
-    assert reopened.migrate_tiers(root) is None
+    assert reopened.start_upkeep(root) is None
 
 
 @needs_ffmpeg
-def test_migrate_tiers_on_touched_head_only_relabels(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
+def test_upkeep_on_touched_head_only_relabels(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     service, root = tier_project(tmp_path, suitability="usable")
     legacy = _legacy_head(service, root, monkeypatch)
     facade = ReviewWorkspaceFacade(root)
     touched = facade.set_notes(legacy.base_plan_id, legacy.segments[0].segment_id, "사람 메모")
-    message = service.migrate_tiers(root)
+    message = service.start_upkeep(root)
     assert message is not None and "등급 표시만 다시 답니다" in message
     assert "사람이 정한 사용/제외는 그대로" in message and "무료" not in message
-    job = next(j for j in service.list_jobs(root) if j.kind == "tier_migration")
+    job = _upkeep_job(service, root)
     assert _wait_terminal(service, root, job.job_id).status == "succeeded"
     relabeled = facade.load_head().revision
     assert relabeled.base_plan_id == touched.base_plan_id
@@ -344,7 +349,7 @@ def test_migrate_tiers_on_touched_head_only_relabels(
     assert [(s.start_pts, s.end_pts, s.selection, s.notes) for s in relabeled.segments] == [
         (s.start_pts, s.end_pts, s.selection, s.notes) for s in touched.segments
     ]
-    assert service.migrate_tiers(root) is None
+    assert service.start_upkeep(root) is None
 
 
 @needs_ffmpeg
@@ -424,7 +429,11 @@ def _carried_human_head(service: RawWorkspaceService, root: Path, monkeypatch: p
     carried = facade.initialize_review(
         service.plan_segmentation_from_analysis(root).revision_id, preserve_source_ids=(source,)
     )
-    assert carried.sequence == 0 and not ReviewWorkspaceFacade.has_tier_marker(carried)
+    # D53: 사람 결정을 이어받은 새 기본은 그 기록(이어받음 표지)을 sequence 1에 남긴다 — 내용만으로
+    # 모르는 사람 손(통째 합친 경계·기계 메모 머리를 단 메모)을 다음 게시가 지우지 않게.
+    assert carried.sequence == 1 and carried.edit is not None
+    assert carried.edit.notes.startswith("사람 결정 이어받음 ← ")
+    assert not ReviewWorkspaceFacade.has_tier_marker(carried)
     assert ReviewWorkspaceFacade.has_human_decisions(carried)
     assert not facade.is_untouched(carried)
     excluded = [s for s in carried.segments if s.selection == "excluded"]
@@ -441,8 +450,8 @@ def test_carried_human_decisions_survive_tier_migration(
     service, root = tier_project(tmp_path, suitability="usable")
     carried = _carried_human_head(service, root, monkeypatch)
     if trigger == "migrate":
-        assert service.migrate_tiers(root) is not None
-        for job in [j for j in service.list_jobs(root) if j.kind == "tier_migration"]:
+        assert service.start_upkeep(root) is not None
+        for job in [j for j in service.list_jobs(root) if j.kind == UPKEEP_JOB_KIND]:
             assert _wait_terminal(service, root, job.job_id).status == "succeeded"
     else:
         finished = _wait_terminal(service, root, service.start_cleanup(root).job_id)
@@ -570,9 +579,9 @@ def test_touched_head_message_names_released_stale_proposals(
     other = next(s for s in legacy.segments if _seconds(legacy, s) != stale)
     touched = facade.set_notes(legacy.base_plan_id, other.segment_id, "사람 메모")
     assert {_seconds(touched, s): s.selection for s in touched.segments}[stale] == "excluded"
-    message = service.migrate_tiers(root)
+    message = service.start_upkeep(root)
     assert message is not None and "근거가 사라진 옛 제외 제안은 사용으로 되돌립니다" in message
-    job = next(j for j in service.list_jobs(root) if j.kind == "tier_migration")
+    job = _upkeep_job(service, root)
     assert _wait_terminal(service, root, job.job_id).status == "succeeded"
     head = facade.load_head().revision
     assert {_seconds(head, s): s.selection for s in head.segments}[stale] == "included"
@@ -615,9 +624,8 @@ def test_hand_edited_proposal_note_is_left_for_a_person(
     warnings: list[str] = []
     monkeypatch.setattr(log, "warn", warnings.append)
     if trigger == "migrate":
-        assert service.migrate_tiers(root) is not None
-        job = next(j for j in service.list_jobs(root) if j.kind == "tier_migration")
-        finished = _wait_terminal(service, root, job.job_id)
+        assert service.start_upkeep(root) is not None
+        finished = _wait_terminal(service, root, _upkeep_job(service, root).job_id)
     else:
         finished = _wait_terminal(service, root, service.start_cleanup(root).job_id)
     assert finished.status == "succeeded", finished.error
@@ -629,6 +637,6 @@ def test_hand_edited_proposal_note_is_left_for_a_person(
         assert AUTO_EXCLUDED_UNREVIEWED_TAG in segment.visual_tags
     assert len([w for w in warnings if "자동 제외 근거" in w]) >= 2
     if trigger == "migrate":
-        assert service.migrate_tiers(root) is None
+        assert service.start_upkeep(root) is None
         finished = _wait_terminal(service, root, service.start_cleanup(root).job_id)
         assert finished.status == "succeeded", finished.error

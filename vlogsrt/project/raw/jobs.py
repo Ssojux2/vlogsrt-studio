@@ -123,6 +123,15 @@ class JobStore:
             ).fetchall()
         return tuple(self._record(row) for row in rows)
 
+    def latest_of_kind(self, kind: str) -> JobRecord | None:
+        """그 종류의 가장 최근 작업 — 최근 몇 개의 창이 아니라 종류로 찾는다."""
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM jobs WHERE kind = ? ORDER BY created_at DESC, job_id DESC LIMIT 1",
+                (kind,),
+            ).fetchone()
+        return None if row is None else self._record(row)
+
     def cancellation_requested(self, job_id: str) -> bool:
         return self.get(job_id).cancellation_requested
 
@@ -354,6 +363,9 @@ class JobManager:
 
     def list_jobs(self, limit: int = 50) -> tuple[JobRecord, ...]:
         return self._store.list_jobs(limit)
+
+    def latest_of_kind(self, kind: str) -> JobRecord | None:
+        return self._store.latest_of_kind(kind)
 
     def recover_interrupted(self) -> int:
         return self._store.recover_interrupted()

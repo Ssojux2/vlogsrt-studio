@@ -17,6 +17,10 @@ import pytest
 
 from vlogsrt import preprocess
 
+APPLE_DATE = "com.apple.quicktime.creationdate"
+FCP_INGEST = "2026-08-14T10:38:34.000000Z"  # FCP가 다시 감싸며 덮은 컨테이너 creation_time
+SHOT = "2026-08-11T03:50:46Z"  # 같은 파일의 애플 촬영 날짜(D53 실측 DJI_…_0008)
+
 
 def _video_entry(**overrides: object) -> dict[str, object]:
     entry: dict[str, object] = {
@@ -62,9 +66,12 @@ def _probe_json(
     *,
     duration: str = "2.000000",
     creation_time: str | None = None,
+    apple_creation_date: str | None = None,
 ) -> str:
     streams = streams if streams is not None else [_video_entry(), _audio_entry()]
     tags = {"creation_time": creation_time} if creation_time else {}
+    if apple_creation_date is not None:
+        tags[APPLE_DATE] = apple_creation_date
     return json.dumps(
         {
             "streams": streams,
@@ -145,6 +152,97 @@ def test_creation_time_rejects_naive_and_future_stamps() -> None:
     assert preprocess._parse_creation_time("1985-01-01T00:00:00+00:00").valid is False
     soon = (datetime.now(tz=UTC) + timedelta(hours=1)).isoformat()
     assert preprocess._parse_creation_time(soon).valid is True
+
+
+def _utc(stamp: str) -> datetime:
+    return datetime.fromisoformat(stamp).astimezone(UTC)
+
+
+def test_apple_creation_date_wins_over_fcp_ingest_creation_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """FCP가 덮은 `creation_time`(가져온 시각)보다 애플 촬영 날짜가 이긴다(D53)."""
+    _fake_ffprobe(monkeypatch, _probe_json(creation_time=FCP_INGEST, apple_creation_date=SHOT))
+    probe = preprocess.probe_raw_media(tmp_path / "DJI_20260811125046_0008_D.mov")
+    assert probe.creation_time.valid
+    assert probe.creation_time.raw == SHOT
+    assert probe.creation_time.utc == _utc(SHOT)
+
+
+@pytest.mark.parametrize("apple", [None, "", "not-a-date", "2026-08-11T03:50:46", "1985-01-01Z"])
+def test_creation_time_is_the_fallback_when_apple_date_is_missing_or_invalid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, apple: str | None
+) -> None:
+    """애플 키가 없거나 못 믿으면(시간대 없음·상식 밖) 컨테이너 `creation_time`을 쓴다."""
+    _fake_ffprobe(monkeypatch, _probe_json(creation_time=FCP_INGEST, apple_creation_date=apple))
+    probe = preprocess.probe_raw_media(tmp_path / "camera.mov")
+    assert probe.creation_time.valid
+    assert probe.creation_time.utc == _utc(FCP_INGEST)
+
+
+def test_apple_date_with_basic_offset_parses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """아이폰은 `+0900`(콜론 없는 시간대)으로 적는다 — 그대로 읽혀 UTC로 맞춰진다."""
+    _fake_ffprobe(monkeypatch, _probe_json(apple_creation_date="2026-08-11T12:50:46+0900"))
+    probe = preprocess.probe_raw_media(tmp_path / "IMG_0001.MOV")
+    assert probe.creation_time.valid
+    assert probe.creation_time.utc == _utc(SHOT)
+
+
+def test_unusable_tags_keep_the_first_raw_value_as_invalid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """둘 다 못 믿으면 무효다 — 지어내지 않고 처음 보인 원값을 기록으로 남긴다."""
+    _fake_ffprobe(
+        monkeypatch,
+        _probe_json(creation_time="1971-01-01T00:00:00Z", apple_creation_date="not-a-date"),
+    )
+    verdict = preprocess.probe_raw_media(tmp_path / "broken.mov").creation_time
+    assert (verdict.valid, verdict.utc, verdict.raw) == (False, None, "not-a-date")
+    _fake_ffprobe(monkeypatch, _probe_json(creation_time="1971-01-01T00:00:00Z"))
+    verdict = preprocess.probe_raw_media(tmp_path / "old.mov").creation_time
+    assert (verdict.valid, verdict.raw) == (False, "1971-01-01T00:00:00Z")
+
+
+def _recording_ffprobe(monkeypatch: pytest.MonkeyPatch, stdout: str) -> list[list[str]]:
+    calls: list[list[str]] = []
+
+    def run(command: list[str]) -> object:
+        if "-version" in command:
+            return _Done("ffprobe version 9.0.1-test\nconfiguration: --flags\n")
+        calls.append(command)
+        return _Done(stdout)
+
+    monkeypatch.setattr(preprocess, "_run", run)
+    monkeypatch.setattr(preprocess, "require_ffmpeg", lambda tool="ffmpeg": tool)
+    return calls
+
+
+def test_probe_creation_time_asks_only_for_both_tags(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """되채움용 조사는 태그 둘만 묻는다 — 스트림·디코딩 없음, 애플 키가 먼저다."""
+    body = json.dumps({"format": {"tags": {"creation_time": FCP_INGEST, APPLE_DATE: SHOT}}})
+    calls = _recording_ffprobe(monkeypatch, body)
+    verdict = preprocess.probe_creation_time(tmp_path / "a.mov")
+    assert verdict.valid and verdict.utc == _utc(SHOT)
+    (command,) = calls
+    spec = command[command.index("-show_entries") + 1]
+    assert spec == f"format_tags={APPLE_DATE},creation_time"
+    assert command[-1] == str(tmp_path / "a.mov")
+    _recording_ffprobe(monkeypatch, json.dumps({"format": {}}))
+    assert preprocess.probe_creation_time(tmp_path / "bare.mov").valid is False
+
+
+def test_probe_raw_media_requests_both_creation_tags(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = _recording_ffprobe(monkeypatch, _probe_json(apple_creation_date=SHOT))
+    preprocess.probe_raw_media(tmp_path / "card.mov")
+    spec = next(c for c in calls if "-show_entries" in c)
+    entries = spec[spec.index("-show_entries") + 1]
+    assert entries.endswith(f":format_tags={APPLE_DATE},creation_time")
 
 
 def test_unknown_colors_stay_empty_instead_of_being_invented(

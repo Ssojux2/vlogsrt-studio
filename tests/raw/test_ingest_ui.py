@@ -213,7 +213,12 @@ def test_retry_view_reports_submission(
 def test_global_order_confirm_view_flow(
     server: workspace_service.RawWorkspaceUi, tmp_path: Path, card: Path
 ) -> None:
-    """전체 원본 순서 확정 — 배치를 넘어 명시적으로, 배치 안 순서는 그대로."""
+    """전체 원본 순서 확정 — 언제나 촬영 시각 순(D53), 배치 안 순서는 그대로.
+
+    D53 이전에는 이 화면이 손으로 적은 순서(역순)를 그대로 확정했다 — 사용자 지시
+    "영상은 언제나 만든 시각 순"으로 그 칸을 없앴다. 모르는 ID 검증은 서비스 시험
+    (`test_global_order_rejects_incomplete_or_unknown_inputs`)이 그대로 지킨다.
+    """
     signature, root = _opened(server, tmp_path)
     server.ingest_scan_view(signature, str(card))
     server.ingest_confirm_view(signature)
@@ -236,29 +241,28 @@ def test_global_order_confirm_view_flow(
     assert _wait_terminal(server, root, latest_job[0].job_id).status == "succeeded"
     _ = view_b
 
-    # 빈 입력 = 제안(배치 순서·배치 안 확정 순번) 확정
-    confirmed = server.ingest_global_confirm_view(signature, "")
+    # 확정 = 제안(촬영 시각 순 — 여기선 모두 미조사라 배치를 넘는 파일 번호 순, D53)
+    confirmed = server.ingest_global_confirm_view(signature)
     assert "전체 원본 순서" in confirmed and "gorder_" in confirmed
     first_revision = server.raw.latest_global_source_order(root)
-    batch_revisions_before = server.raw.list_order_revisions(root)
-
-    # 명시적 역순 확정 — 새 리비전, 배치 안 리비전은 그대로
     ready = server.raw.global_order_proposal(root)
-    reversed_text = ", ".join(asset.asset_id for asset in reversed(ready))
-    reversed_markdown = server.ingest_global_confirm_view(signature, reversed_text)
-    assert "리비전 총 2개" in reversed_markdown
+    assert [asset.source_name for asset in ready] == ["B1.MP4", "DJI_0002.MP4", "DJI_0010.MP4"]
+    assert [entry.asset_id for entry in first_revision.entries] == [a.asset_id for a in ready]
+    batch_revisions_before = server.raw.list_order_revisions(root)
+    # 같은 순서면 다시 눌러도 새 리비전이 없다.
+    assert "리비전 총 1개" in server.ingest_global_confirm_view(signature)
+
+    # D53 — 손으로 정한 순서는 더 이상 살아남지 않는다(예전엔 역순 입력이 그대로 확정됐다).
+    # 옛 작업공간에 남은 손 순서를 서비스로 심고, 단추가 촬영 시각 순으로 되돌리는지 본다.
+    server.raw.confirm_global_source_order(root, [asset.asset_id for asset in reversed(ready)])
+    resorted = server.ingest_global_confirm_view(signature)
+    assert "리비전 총 3개" in resorted
     latest = server.raw.latest_global_source_order(root)
     assert latest.revision_id != first_revision.revision_id
-    assert [entry.asset_id for entry in latest.entries] == [
-        asset.asset_id for asset in reversed(ready)
-    ]
+    assert [entry.asset_id for entry in latest.entries] == [asset.asset_id for asset in ready]
     assert server.raw.list_order_revisions(root) == batch_revisions_before
-
-    # 모르는 ID는 안내로 막힌다 — 조용한 성공이 아니다
-    with pytest.raises(gr.Error, match="모르는 자산 ID"):
-        server.ingest_global_confirm_view(signature, "source_nope")
 
     # 오래된 서명은 역시 거부
     server.create_workspace_view("C", str(tmp_path / "ws-c"))
     with pytest.raises(gr.Error, match="바뀌었다"):
-        server.ingest_global_confirm_view(signature, "")
+        server.ingest_global_confirm_view(signature)

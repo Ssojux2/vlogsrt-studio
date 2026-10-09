@@ -16,7 +16,7 @@ import secrets
 import sqlite3
 import stat as stat_module
 import tomllib
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import UTC, datetime
@@ -81,6 +81,16 @@ meta에 기록한다 — 이미 있는 설정·미디어·작업·작업공간 �
 (코디네이터 ACK)."""
 WORKSPACE_ID_KEY = "workspace_id"
 """meta 표의 작업공간 신원 키 — 생성 때 한 번 정해지고 절대 바뀌지 않는다."""
+
+CAPTURE_BASIS_KEY = "capture_time_basis"
+"""meta 표의 촬영 시각 근거 판 — 그 판의 규칙으로 ready 원본을 전부 읽었을 때만 남는다(D53)."""
+
+CAPTURE_TIME_BASIS = "creationdate-first/v1"
+"""애플 촬영 날짜(`com.apple.quicktime.creationdate`)를 먼저, 없으면 컨테이너 `creation_time`.
+
+이 표지가 없는 작업공간(D53 이전)의 `capture_time`은 FCP가 덮은 가져온 시각일 수 있다 —
+앱 열기의 정리 작업이 원본 태그를 다시 읽어 고친 뒤에 남긴다.
+"""
 
 
 def open_db(path: Path) -> sqlite3.Connection:
@@ -564,6 +574,11 @@ class RawWorkspace:
                 "INSERT INTO meta (key, value) VALUES (?, ?)",
                 (WORKSPACE_ID_KEY, new_workspace_id()),
             )
+            # 새 작업공간의 가져오기는 처음부터 지금 규칙으로 읽는다 — 되채울 것이 없다(D53).
+            connection.execute(
+                "INSERT INTO meta (key, value) VALUES (?, ?)",
+                (CAPTURE_BASIS_KEY, CAPTURE_TIME_BASIS),
+            )
             connection.execute(
                 "INSERT INTO settings (key, value, updated_at) VALUES ('workflow', ?, ?)",
                 (raw_workflow_config_to_json(RawWorkflowConfig()), created_at),
@@ -667,6 +682,11 @@ class RawWorkspace:
                 ).fetchone()
         assert row is not None
         return str(row[0])
+
+    def meta_value(self, key: str) -> str | None:
+        with self.connect() as connection:
+            row = connection.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+        return None if row is None else str(row[0])
 
     # ── 연결 ───────────────────────────────────────────────────
 
@@ -1072,6 +1092,35 @@ class RawWorkspace:
         if cursor.rowcount != 1:
             raise RawWorkspaceError(f"없는 자산 ID: {asset_id}")
         return self.source_asset(asset_id)
+
+    def record_capture_times(
+        self, changes: Mapping[str, str | None], *, basis: str | None = None
+    ) -> None:
+        """촬영 시각 근거만 고친다 — 잰 근거의 정정이지 출처 신원이 아니다(D53).
+
+        같은 원본 태그를 지금 규칙(애플 촬영 날짜 우선)으로 다시 읽은 값이다. 전부 한
+        트랜잭션이다 — 반쯤 고친 시각으로 순서가 확정되지 않게, 없는 자산이 섞이면 아무것도
+        쓰지 않는다. `basis`를 주면 같은 트랜잭션에서 근거 판 표지를 남긴다. 배치 안 순서
+        리비전의 근거 문장은 불변 기록이라 그대로 둔다 — 전체 순서는 새 리비전이 맡는다.
+        """
+        updated_at = _now()
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            for asset_id, capture_time in changes.items():
+                cursor = connection.execute(
+                    "UPDATE source_assets SET capture_time = ?, updated_at = ? WHERE asset_id = ?",
+                    (capture_time, updated_at, asset_id),
+                )
+                if cursor.rowcount != 1:
+                    connection.rollback()
+                    raise RawWorkspaceError(f"없는 자산 ID: {asset_id}")
+            if basis is not None:
+                connection.execute(
+                    "INSERT INTO meta (key, value) VALUES (?, ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    (CAPTURE_BASIS_KEY, basis),
+                )
+            connection.commit()
 
     def _refuse_hash_removal(self, asset_id: str, changes: dict[str, object]) -> None:
         """검증 이력 표식 보호 — 기록된 해시를 지우거나 바꾸는 갱신은 거절한다."""

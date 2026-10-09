@@ -72,13 +72,31 @@ def _assemble_quote(
     return SelectionQuote(asset_ids, estimates, digest, service.settings(root))
 
 
-def cached_revision(service: Any, root: Path, asset_ids: tuple[str, ...]) -> str | None:
-    settings = asdict(RawUnderstandingSettings())
+def _order_free_fingerprints(service: Any, root: Path, assets: dict[str, Any]) -> set[str]:
+    """그 원본들의 분석 지문 — 어느 전체 순서 리비전 아래에서 잰 것이든 받는다(D53).
+
+    원본마다의 분석 내용은 순서와 무관하다. 순서만 바뀌었다고(촬영 시각 순 맞춤·새 영상
+    가져오기) 끝난 분석을 버리면 같은 영상에 다시 승인과 유료 호출을 요구하게 된다.
+    """
     workflow = service.settings(root)
-    models = {"timing": workflow.models.timing_model, "luna": workflow.models.luna_model}
+    bindings = service.source_bindings(root, assets)
+    return {
+        service._analysis_fingerprint(
+            order.revision_id,
+            assets,
+            RawUnderstandingSettings(),
+            workflow,
+            "live",
+            root=root,
+            bindings=bindings,
+        )
+        for order in service.list_global_source_orders(root)
+    }
+
+
+def cached_revision(service: Any, root: Path, asset_ids: tuple[str, ...]) -> str | None:
     workspace = service._workspace(root)
-    order = service.latest_global_source_order(root)
-    if order is None:
+    if service.latest_global_source_order(root) is None:
         return None
     assets = {a.asset_id: a for a in service.list_source_assets(root) if a.asset_id in asset_ids}
     from vlogsrt.project.raw.analysis_workflow import _require_source_unchanged
@@ -88,44 +106,52 @@ def cached_revision(service: Any, root: Path, asset_ids: tuple[str, ...]) -> str
             _require_source_unchanged(workspace.source_media_path(asset), asset)
     except (OSError, RawWorkspaceError):
         return None
-    expected = service._analysis_fingerprint(
-        order.revision_id, assets, RawUnderstandingSettings(), workflow, "live", root=root
-    )
+    expected = _order_free_fingerprints(service, root, assets)
+    workflow = service.settings(root)
     store = AnalysisStore(workspace)
     for revision in reversed(store.list_revisions()):
-        if (
-            revision.status != "complete"
-            or revision.fingerprint != expected
-            or json.loads(revision.settings_json) != settings
-            or json.loads(revision.models_json) != models
+        if _same_analysis(revision, expected, workflow) and _documents_reusable(
+            service, root, store, revision.revision_id, asset_ids
         ):
-            continue
-        rows = {row.asset_id: row for row in store.list_source_results(revision.revision_id)}
-        if all(a in rows and rows[a].status in ("analyzed", "cached") for a in asset_ids):
-            reusable = True
-            for asset_id in asset_ids:
-                row = rows[asset_id]
-                if not row.document_path:
-                    reusable = False
-                    break
-                try:
-                    document = json.loads((root / row.document_path).read_text(encoding="utf-8"))
-                except (OSError, ValueError):
-                    reusable = False
-                    break
-                from vlogsrt.project.raw.media_refs import ORIGINAL_ONLY_FINGERPRINT, fingerprint
-
-                if document.get("media_fingerprint", ORIGINAL_ONLY_FINGERPRINT) != fingerprint(
-                    workspace, asset_id
-                ):
-                    reusable = False
-                    break
-                if any(a.get("status") != "accepted" for a in document.get("annotations", [])):
-                    reusable = False
-                    break
-            if reusable:
-                return revision.revision_id
+            return revision.revision_id
     return None
+
+
+def _same_analysis(revision: Any, expected: set[str], workflow: RawWorkflowConfig) -> bool:
+    """끝났고, 지문(어느 순서 리비전이든)·설정·모델이 지금과 같은 분석 리비전인가."""
+    models = {"timing": workflow.models.timing_model, "luna": workflow.models.luna_model}
+    return (
+        revision.status == "complete"
+        and revision.fingerprint in expected
+        and json.loads(revision.settings_json) == asdict(RawUnderstandingSettings())
+        and json.loads(revision.models_json) == models
+    )
+
+
+def _documents_reusable(
+    service: Any, root: Path, store: AnalysisStore, revision_id: str, asset_ids: tuple[str, ...]
+) -> bool:
+    rows = {row.asset_id: row for row in store.list_source_results(revision_id)}
+    if not all(a in rows and rows[a].status in ("analyzed", "cached") for a in asset_ids):
+        return False
+    return all(_document_reusable(service, root, rows[asset_id]) for asset_id in asset_ids)
+
+
+def _document_reusable(service: Any, root: Path, row: Any) -> bool:
+    """완성 문서가 읽히고, 미디어 결속이 지금과 같고, 창 판정이 모두 받아들여졌는가."""
+    if not row.document_path:
+        return False
+    try:
+        document = json.loads((root / row.document_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    from vlogsrt.project.raw.media_refs import ORIGINAL_ONLY_FINGERPRINT, fingerprint
+
+    if document.get("media_fingerprint", ORIGINAL_ONLY_FINGERPRINT) != fingerprint(
+        service._workspace(root), row.asset_id
+    ):
+        return False
+    return all(a.get("status") == "accepted" for a in document.get("annotations", []))
 
 
 def execute(
@@ -187,12 +213,10 @@ def publish_review(service: Any, root: Path, revision_id: str, context: Any) -> 
     context.check_cancel()
     plan = service.plan_segmentation_from_analysis(root, revision_id, use_current_order=True)
     facade = service.review_workspace_facade(root)
-    rows = AnalysisStore(service._workspace(root)).list_source_results(revision_id)
-    analyzed = {row.asset_id for row in rows if row.status != "unanalyzed"}
     review = facade.initialize_review(
         plan.revision_id,
         revision_id,
-        preserve_source_ids=tuple(c.asset_id for c in plan.coverage if c.asset_id not in analyzed),
+        preserve_source_ids=service.unanalyzed_sources(root, plan, revision_id),
     )
     # Recommendations become visible immediately. Extraction belongs to export,
     # and source playback was already prepared when the video was selected.

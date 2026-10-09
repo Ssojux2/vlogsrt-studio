@@ -151,7 +151,7 @@ def test_browser_flow_plan_extract_refresh_and_playback(
             break
         time.sleep(0.02)
     assert server.raw.get_job(root, handle.job_id).status == "succeeded"
-    server.ingest_global_confirm_view(signature, "")
+    server.ingest_global_confirm_view(signature)
 
     markdown = server.segment_plan_view(signature, "")
     assert "분할 계획" in markdown

@@ -34,6 +34,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse  # noqa:
 
 from ui import chooser as ui_chooser  # noqa: E402
 from ui import ui_facade  # noqa: E402
+from vlogsrt import log  # noqa: E402
 from vlogsrt.project.raw import service as raw_service  # noqa: E402
 
 STATE_ENV = "VLOGSRT_RAW_UI_STATE"
@@ -84,6 +85,9 @@ NOTICE_TEXT = {
     "앱을 다시 시작하면 중단된 승인을 복구한 뒤 다시 승인할 수 있습니다.",
 }
 LIBRARY_APPROVE_LABEL = "전체 영상 분석 승인"
+
+GLOBAL_ORDER_CONFIRM_LABEL = "전체 원본 순서 확정(촬영 시각 순)"
+"""영상은 언제나 만든 시각 순이다(D53) — 순서를 손으로 적는 칸 대신 이 단추 하나다."""
 
 # 화면 맞춤(D50) — 머리글은 한 줄, 정리 탭은 CSS가 간격을 좁힐 범위 이름을 단다.
 APP_HEADER_ID = "app-header"
@@ -950,20 +954,10 @@ class RawWorkspaceUi:
                     self._ingest_md,
                 )
 
-                # ── 전체 원본 순서 — 가져온 배치를 넘어 사람이 명시적으로 확정 ──
-                with gr.Row():
-                    global_order_box = gr.Textbox(
-                        label="전체 원본 순서(선택)",
-                        info="비우면 제안(배치 순서·배치 안 확정 순번) 그대로다. "
-                        "직접 정하려면 ready 원본의 자산 ID를 줄/쉼표로 모두 나열한다.",
-                        placeholder="source_…, source_… (모든 ready 원본)",
-                        scale=6,
-                    )
-                    global_confirm_button = gr.Button("전체 원본 순서 확정", scale=1)
+                # ── 전체 원본 순서 — 언제나 촬영 시각 순(D53). 손으로 정하는 칸은 없다 ──
+                global_confirm_button = gr.Button(GLOBAL_ORDER_CONFIRM_LABEL)
                 global_confirm_button.click(
-                    self.ingest_global_confirm_view,
-                    [self._signature_state, global_order_box],
-                    self._ingest_md,
+                    self.ingest_global_confirm_view, self._signature_state, self._ingest_md
                 )
         # 선택기 단추 참조 — 배선 증명은 실제 Blocks 의존성으로 한다(별도 장부 없음).
         self._open_button = open_button
@@ -973,9 +967,9 @@ class RawWorkspaceUi:
     # ── 화면 2 — 분석 · 조각 검토 ──────────────────────────────
 
     def _capcut_result(self, root: Path, message: str) -> tuple[str, str, str]:
-        migrated = self._maybe_migrate_tiers(root)
-        if migrated:
-            message += "\n\n" + migrated
+        upkeep = self._maybe_upkeep(root)
+        if upkeep:
+            message += "\n\n" + upkeep
         self._refresh_review_panel_state(root)
         pending = self._unreviewed_auto_count(root)
         if pending:
@@ -985,14 +979,16 @@ class RawWorkspaceUi:
             )
         return message, *self.visual_workbench_render(root)
 
-    def _maybe_migrate_tiers(self, root: Path) -> str | None:
-        """앱 열기·새로고침 때 옛 등급판 머리를 옮긴다(D51 Q8·D52) — AI 판정과 자막만 읽는다.
+    def _maybe_upkeep(self, root: Path) -> str | None:
+        """앱 열기·새로고침의 정리 고리 하나(D52·D53) — 촬영 시각 순서와 등급판을 맞춘다.
 
-        검토 머리가 아직 없으면 옮길 것도 없다(정상 상태라 안내하지 않는다).
+        검토 머리가 아직 없는 것은 서비스가 정상 상태로 다룬다. 여기까지 올라온 오류는 진짜
+        문제라 경고로 남긴다 — 화면 그리기는 막지 않는다.
         """
         try:
-            return self.raw.migrate_tiers(root)
-        except (raw_service.RawWorkspaceError, raw_service.ReviewError):
+            return self.raw.start_upkeep(root)
+        except (raw_service.RawWorkspaceError, raw_service.ReviewError) as error:
+            log.warn(f"작업공간 정리를 걸지 못했다: {error}")
             return None
 
     def _unreviewed_auto_count(self, root: Path) -> int:
@@ -1766,10 +1762,7 @@ class RawWorkspaceUi:
 
     def capcut_auto_view(self, signature: str | None, approve: bool) -> tuple[str, str, str]:
         root = self._require_current_selection(signature)
-        summary = self.raw.analysis_overview(root)
-        order = self.raw.latest_global_source_order(root)
-        if summary and order and summary.revision.order_revision_id != order.revision_id:
-            summary = None
+        summary = self._current_analysis(root)
         if summary is not None and summary.revision.status == "complete":
             self.raw.start_cleanup(root)
             return self._capcut_result(root, "자동 정리 중 · 컷 판정과 미리보기를 준비합니다.")
@@ -1789,26 +1782,39 @@ class RawWorkspaceUi:
             note, _ = self.analysis_live_asr_view(signature, None, True)
         else:
             assert summary is not None
-            choices = self.resumable_analysis_choices(root)
-            if not choices:
-                raise gr.Error("재개할 분석이 없습니다")
-            note, _ = self.analysis_semantic_resume_view(signature, choices[0][1], True)
-
-            def finish(context: Any) -> None:
-                # The semantic job is separately durable and owns provider calls.
-                jobs = [
-                    j
-                    for j in self.raw.list_jobs(root)
-                    if j.kind == raw_service.ANALYSIS_SEMANTIC_JOB_KIND
-                ]
-                if not jobs:
-                    raise RuntimeError("의미 분석 작업을 찾을 수 없습니다")
-                self.raw.wait_child_job(root, jobs[0], context)
-                self.raw.wait_child_job(root, self.raw.start_cleanup(root), context)
-
-            self.raw.submit_job(root, "cleanup_pipeline", summary.revision.revision_id, finish)
+            note = self._resume_semantic_then_cleanup(root, signature, summary)
         self._capcut_quote_phase.pop(token, None)
         return self._capcut_result(root, note)
+
+    def _current_analysis(self, root: Path) -> Any:
+        """지금 영상 묶음의 분석 — 순서만 바뀐 것(촬영 시각 순 맞춤)은 낡게 보지 않는다(D53)."""
+        summary = self.raw.analysis_overview(root)
+        if summary and not self.raw.order_covers_same_sources(
+            root, summary.revision.order_revision_id
+        ):
+            return None
+        return summary
+
+    def _resume_semantic_then_cleanup(self, root: Path, signature: str | None, summary: Any) -> str:
+        choices = self.resumable_analysis_choices(root)
+        if not choices:
+            raise gr.Error("재개할 분석이 없습니다")
+        note, _ = self.analysis_semantic_resume_view(signature, choices[0][1], True)
+
+        def finish(context: Any) -> None:
+            # The semantic job is separately durable and owns provider calls.
+            jobs = [
+                j
+                for j in self.raw.list_jobs(root)
+                if j.kind == raw_service.ANALYSIS_SEMANTIC_JOB_KIND
+            ]
+            if not jobs:
+                raise RuntimeError("의미 분석 작업을 찾을 수 없습니다")
+            self.raw.wait_child_job(root, jobs[0], context)
+            self.raw.wait_child_job(root, self.raw.start_cleanup(root), context)
+
+        self.raw.submit_job(root, "cleanup_pipeline", summary.revision.revision_id, finish)
+        return note
 
     def capcut_preview_view(self, signature: str | None) -> str:
         root = self._require_current_selection(signature)
@@ -2762,7 +2768,7 @@ class RawWorkspaceUi:
         except raw_service.RawWorkspaceError as error:
             raise gr.Error(str(error)) from error
         self._remember(Path(status.workspace_root))
-        self._maybe_migrate_tiers(Path(status.workspace_root))
+        self._maybe_upkeep(Path(status.workspace_root))
         return self.workspace_view_values()
 
     def create_workspace_view(self, name: str, path_text: str) -> WorkspaceView:
@@ -3905,26 +3911,10 @@ class RawWorkspaceUi:
             base = f"**FCP 라이브러리 조사 실패** — {fcp_error}\n\n" + base
         if root is None:
             return base
-        assets, revision, jobs = self.raw.ingest_overview(root)
+        assets, _revision, jobs = self.raw.ingest_overview(root)
         if not assets:
             return base
-        lines = [
-            base,
-            "",
-            f"**확정 순서** — 배치 `{revision.batch_dir if revision else '?'}`"
-            f" · 근거 {revision.basis if revision else '?'}"
-            f" · 리비전 `{revision.revision_id if revision else '?'}`",
-            "",
-        ]
-        lines += ["| 순번 | 파일 | 상태 | 크기 | 비고 |", "|---|---|---|---|---|"]
-        for asset in assets:
-            note = "중복(같은 내용 먼저 검증본 있음)" if asset.duplicate_of else ""
-            if asset.error:
-                note = asset.error
-            lines.append(
-                f"| {asset.ordinal} | `{asset.source_relative_path}` | {asset.status} | "
-                f"{self._human_bytes(asset.size_bytes)} | {note} |"
-            )
+        lines = [base, "", *self._asset_order_table(assets)]
         if jobs:
             lines += ["", "**가져오기 작업**"]
             lines += [
@@ -3934,8 +3924,28 @@ class RawWorkspaceUi:
             ]
         return "\n".join(lines) + self._global_order_markdown(root)
 
+    def _asset_order_table(self, assets: Sequence[Any]) -> list[str]:
+        """가져온 영상 표 — 촬영 시각 순(D53). 가져온 배치·순번은 가져오기 기록 칸으로만 남는다."""
+        lines = [
+            "**확정 순서 — 촬영 시각 순**(D53 · 모르는 영상은 맨 뒤에 파일 번호 순) — 가져온"
+            " 배치·순번은 가져오기 기록 칸에만 남는다",
+            "",
+            "| 순서 | 파일 | 촬영 시각 | 상태 | 크기 | 가져오기 기록 | 비고 |",
+            "|---|---|---|---|---|---|---|",
+        ]
+        for position, asset in enumerate(assets, start=1):
+            note = "중복(같은 내용 먼저 검증본 있음)" if asset.duplicate_of else ""
+            if asset.error:
+                note = asset.error
+            lines.append(
+                f"| {position} | `{asset.source_relative_path}` | {asset.capture_time or '미조사'}"
+                f" | {asset.status} | {self._human_bytes(asset.size_bytes)} |"
+                f" {asset.batch_dir} #{asset.ordinal} | {note} |"
+            )
+        return lines
+
     def _global_order_markdown(self, root: Path) -> str:
-        """전체 원본 순서 보기 — 배치를 넘는 확정 기록(옛 리비전은 다시 쓰지 않는다)."""
+        """전체 원본 순서 보기 — 촬영 시각 순 확정 기록(옛 리비전은 다시 쓰지 않는다, D53)."""
         revision = self.raw.latest_global_source_order(root)
         proposal = self.raw.global_order_proposal(root)
         if revision is None:
@@ -3946,8 +3956,8 @@ class RawWorkspaceUi:
                 for index, asset in enumerate(proposal, start=1)
             )
             return (
-                "\n\n**전체 원본 순서** — 아직 확정하지 않았다. 제안(배치 순서·배치 안"
-                f" 확정 순번): {names}"
+                "\n\n**전체 원본 순서** — 아직 확정하지 않았다. 제안(촬영 시각 순 — 모르는"
+                f" 영상은 맨 뒤에 파일 번호 순): {names}"
             )
         entries = "\n".join(
             f"- {entry.ordinal}. `{entry.asset_id}` (배치 {entry.batch_dir})"
@@ -3956,31 +3966,22 @@ class RawWorkspaceUi:
         return (
             f"\n\n**전체 원본 순서** — 리비전 `{revision.revision_id}` · 근거 "
             f"{revision.basis} · 확정 {revision.created_at}\n{entries}\n"
-            f"(리비전 총 {len(self.raw.list_global_source_orders(root))}개 — 순서를 바꾸면"
-            " 새 리비전이 쌓이고, 배치 안 확정 순서·옛 스냅숏은 그대로다.)"
+            f"(리비전 총 {len(self.raw.list_global_source_orders(root))}개 — 촬영 시각이 바뀌거나"
+            " 영상이 늘면 새 리비전이 쌓이고, 배치 안 확정 순서·옛 스냅숏은 그대로다.)"
         )
 
-    def ingest_global_confirm_view(self, signature: str | None, order_text: str) -> str:
-        """전체 원본 순서 확정 이벤트 — 배치를 넘는 순서를 사람이 명시적으로 못 박는다.
+    def ingest_global_confirm_view(self, signature: str | None) -> str:
+        """전체 원본 순서 확정 이벤트 — 언제나 촬영 시각 순이다(D53).
 
-        빈 입력은 제안(배치 순서·배치 안 확정 순번) 확정이다. 이 확정은 새 전체
-        리비전을 만들 뿐 — 배치 안 순서나 옛 리비전을 조용히 다시 섞지 않는다.
+        순서를 손으로 적는 칸은 없앴다 — "영상은 언제나 만든 시각 순"이 사용자 지시다.
+        이미 같은 순서면 새 리비전을 만들지 않는다. 배치 안 순서·옛 리비전은 그대로다.
         """
         root = self._require_current_selection(signature)
-        asset_ids: list[str] | None = None
-        text = (order_text or "").strip()
-        if text:
-            asset_ids = [
-                chunk.strip()
-                for chunk in text.replace(",", "\n").replace(";", "\n").splitlines()
-                if chunk.strip()
-            ]
         try:
-            revision = self.raw.confirm_global_source_order(root, asset_ids)
+            self.raw.ensure_source_order(root)
         except raw_service.RawWorkspaceError as error:
             raise gr.Error(str(error)) from error
         # 성공 증거는 갱신된 패널 자체다 — 새 리비전 번호와 항목이 거기 나타난다.
-        _ = revision
         return self._ingest_state_markdown(root)
 
     def ingest_scan_view(
@@ -4221,24 +4222,8 @@ class RawWorkspaceUi:
                 " 호출은 없다."
             )
         revision = summary.revision
-        mode_label = "오프라인 재생" if revision.mode == "replay" else "실제 호출(두 단계 승인)"
-        status_label = self._REVISION_STATUS_LABELS.get(revision.status, revision.status)
-        lines = [
-            f"**의미 분석** — 리비전 `{revision.revision_id}` · 모드 **{mode_label}** ·"
-            f" 상태 **{status_label}** · 원본 {revision.source_done}/{revision.source_total}",
-            "",
-            "| 순번 | 원본 | 상태 | 발화 상태 | 창 | 조각 | 실행 증거 |",
-            "|---|---|---|---|---|---|---|",
-        ]
-        for result in summary.results:
-            speech = self._SPEECH_LABELS.get(result.speech_status or "", "-")
-            execution = self._EXECUTION_LABELS.get(result.execution_mode or "", "-")
-            status = self._SOURCE_STATUS_LABELS.get(result.status, result.status)
-            lines.append(
-                f"| {result.source_order} | {result.source_name} | {status} |"
-                f" {speech} | {result.window_count} | {result.segment_count}"
-                f" | {execution} |"
-            )
+        results = self._in_current_order(root, summary.results)
+        lines = self._analysis_results_table(revision, results)
         if revision.status == "awaiting_semantic":
             lines += [
                 "",
@@ -4250,11 +4235,53 @@ class RawWorkspaceUi:
             ]
         if revision.error:
             lines += ["", f"**오류**: {revision.error}"]
-        for result in summary.results[:4]:
+        for _position, result in results[:4]:
             excerpt = self._annotation_excerpt(root, summary.revision.revision_id, result)
             if excerpt:
                 lines += ["", excerpt]
         return "\n".join(lines)
+
+    def _analysis_results_table(
+        self, revision: Any, results: Sequence[tuple[int, Any]]
+    ) -> list[str]:
+        """분석 리비전 머리말과 원본별 줄 — 줄은 지금 순서(촬영 시각 순)다."""
+        mode_label = "오프라인 재생" if revision.mode == "replay" else "실제 호출(두 단계 승인)"
+        status_label = self._REVISION_STATUS_LABELS.get(revision.status, revision.status)
+        lines = [
+            f"**의미 분석** — 리비전 `{revision.revision_id}` · 모드 **{mode_label}** ·"
+            f" 상태 **{status_label}** · 원본 {revision.source_done}/{revision.source_total}",
+            "",
+            "| 순번 | 원본 | 상태 | 발화 상태 | 창 | 조각 | 실행 증거 |",
+            "|---|---|---|---|---|---|---|",
+        ]
+        for position, result in results:
+            speech = self._SPEECH_LABELS.get(result.speech_status or "", "-")
+            execution = self._EXECUTION_LABELS.get(result.execution_mode or "", "-")
+            status = self._SOURCE_STATUS_LABELS.get(result.status, result.status)
+            lines.append(
+                f"| {position} | {result.source_name} | {status} |"
+                f" {speech} | {result.window_count} | {result.segment_count}"
+                f" | {execution} |"
+            )
+        return lines
+
+    def _in_current_order(self, root: Path, items: Sequence[Any]) -> list[tuple[int, Any]]:
+        """원본별 표 줄을 지금 전체 순서(촬영 시각 순, D53)로 — (지금 순번, 항목).
+
+        분석 표의 순번은 분석 당시 순서라 촬영 시각 순으로 맞춘 뒤에는 어긋난다. 지금 순서에 없는
+        원본(빠진 영상)은 뒤에 옛 순번으로 남는다.
+        """
+        order = self.raw.latest_global_source_order(root)
+        position = {entry.asset_id: entry.ordinal for entry in order.entries} if order else {}
+        ranked = sorted(
+            items,
+            key=lambda item: (
+                item.asset_id not in position,
+                position.get(item.asset_id, item.source_order),
+                item.source_order,
+            ),
+        )
+        return [(position.get(item.asset_id, item.source_order), item) for item in ranked]
 
     def _annotation_excerpt(
         self, root: Path, revision_id: str, result: raw_service.AnalysisSourceResult
@@ -4301,9 +4328,9 @@ class RawWorkspaceUi:
             "| 순번 | 원본 | 오디오 | 창 | 이미지(상한) | ASR 청크 | 오디오 분량(초) | Luna 요청 |",
             "|---|---|---|---|---|---|---|---|",
         ]
-        for item in estimates:
+        for position, item in self._in_current_order(root, estimates):
             lines.append(
-                f"| {item.source_order} | {item.source_name} |"
+                f"| {position} | {item.source_name} |"
                 f" {'있음' if item.has_audio else '없음'} | {item.window_count} |"
                 f" {item.frame_sample_count} | {item.asr_chunk_count} | {item.asr_seconds} |"
                 f" {item.luna_request_count} |"
@@ -4489,21 +4516,7 @@ class RawWorkspaceUi:
             estimates=tuple(estimates),
             digest=digest,
         )
-        lines = [
-            "**실제 호출 1단계(전사) 견적 — 승인이 묶는 값(로컬 측정, 호출 없음)**",
-            "",
-            "| 순번 | 원본 | 출처 해시(앞 12자) | 오디오 | 스트림 | 청크 예산 | 창 |",
-            "|---|---|---|---|---|---|---|",
-        ]
-        for item in estimates:
-            asset = assets.get(item.asset_id)
-            sha = (asset.content_sha256 or "") if asset is not None else ""
-            audio = "있음" if item.has_audio else "없음(전사 없음)"
-            stream = str(item.audio_stream_index) if item.audio_stream_index is not None else "-"
-            lines.append(
-                f"| {item.source_order} | {item.source_name} | `{sha[:12]}…` | {audio}"
-                f" | {stream} | {max(1, item.asr_chunk_count)} | {item.window_count} |"
-            )
+        lines = self._asr_estimate_table(root, estimates, assets)
         lines += [
             "",
             f"- 내부 ASR `{workflow.models.timing_model}` · 창 계획은 1단계가 잰 뒤"
@@ -4518,6 +4531,27 @@ class RawWorkspaceUi:
             " 원본·설정이 바뀌면 시작이 0송신으로 거부된다.",
         ]
         return "\n".join(lines)
+
+    def _asr_estimate_table(
+        self, root: Path, estimates: Sequence[Any], assets: Mapping[str, Any]
+    ) -> list[str]:
+        """1단계 견적 표 — 원본 줄은 지금 순서(촬영 시각 순, D53)다."""
+        lines = [
+            "**실제 호출 1단계(전사) 견적 — 승인이 묶는 값(로컬 측정, 호출 없음)**",
+            "",
+            "| 순번 | 원본 | 출처 해시(앞 12자) | 오디오 | 스트림 | 청크 예산 | 창 |",
+            "|---|---|---|---|---|---|---|",
+        ]
+        for position, item in self._in_current_order(root, estimates):
+            asset = assets.get(item.asset_id)
+            sha = (asset.content_sha256 or "") if asset is not None else ""
+            audio = "있음" if item.has_audio else "없음(전사 없음)"
+            stream = str(item.audio_stream_index) if item.audio_stream_index is not None else "-"
+            lines.append(
+                f"| {position} | {item.source_name} | `{sha[:12]}…` | {audio}"
+                f" | {stream} | {max(1, item.asr_chunk_count)} | {item.window_count} |"
+            )
+        return lines
 
     def analysis_live_asr_view(
         self, signature: str | None, selected: list[str] | None, confirm: bool
@@ -4577,19 +4611,7 @@ class RawWorkspaceUi:
             estimates=tuple(estimates),
             digest=digest,
         )
-        lines = [
-            "**2단계(의미 Luna) 견적 — 1단계 실측 기록 기준(로컬, 호출 없음)**",
-            "",
-            "| 순번 | 원본 | 단계 | 실측 지문(앞 12자) | 창 | 이미지 | Luna 요청 |",
-            "|---|---|---|---|---|---|---|",
-        ]
-        for item in estimates:
-            phase_label = "의미(전사+이미지)" if item.phase == "semantic" else "시각(이미지만)"
-            lines.append(
-                f"| {item.source_order} | {item.source_name} | {phase_label} |"
-                f" `{item.semantic_fingerprint[:12]}…` | {item.window_count} |"
-                f" {item.image_count} | {item.luna_request_count} |"
-            )
+        lines = self._semantic_estimate_table(root, estimates)
         lines += [
             "",
             f"- Luna 모델 `{estimates[0].luna_model}` · 비용 상태 **{estimates[0].price_status}**"
@@ -4600,6 +4622,23 @@ class RawWorkspaceUi:
             f"- 견적 지문 `{digest[:12]}…`",
         ]
         return "\n".join(lines)
+
+    def _semantic_estimate_table(self, root: Path, estimates: Sequence[Any]) -> list[str]:
+        """2단계 견적 표 — 원본 줄은 지금 순서(촬영 시각 순, D53)다."""
+        lines = [
+            "**2단계(의미 Luna) 견적 — 1단계 실측 기록 기준(로컬, 호출 없음)**",
+            "",
+            "| 순번 | 원본 | 단계 | 실측 지문(앞 12자) | 창 | 이미지 | Luna 요청 |",
+            "|---|---|---|---|---|---|---|",
+        ]
+        for position, item in self._in_current_order(root, estimates):
+            phase_label = "의미(전사+이미지)" if item.phase == "semantic" else "시각(이미지만)"
+            lines.append(
+                f"| {position} | {item.source_name} | {phase_label} |"
+                f" `{item.semantic_fingerprint[:12]}…` | {item.window_count} |"
+                f" {item.image_count} | {item.luna_request_count} |"
+            )
+        return lines
 
     def analysis_semantic_resume_view(
         self, signature: str | None, job_id: str | None, confirm: bool

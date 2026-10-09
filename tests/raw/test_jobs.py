@@ -92,6 +92,20 @@ def test_progress_is_durable_while_running(workspace: Path) -> None:
     assert wait_until(lambda: service.get_job(workspace, handle.job_id).status == "succeeded")
 
 
+def test_latest_of_kind_finds_a_job_beyond_any_recency_window(workspace: Path) -> None:
+    """종류로 찾는다 — 그 뒤로 다른 작업이 수백 개 쌓여도 마지막 그 종류 작업이 보인다(D53)."""
+    service = raw.RawWorkspaceService()
+    manager = service._jobs(workspace)
+    assert manager.latest_of_kind("workspace_upkeep") is None
+    first = service.submit_job(workspace, "workspace_upkeep", "fp-a", lambda context: None)
+    assert wait_until(lambda: service.get_job(workspace, first.job_id).status == "succeeded")
+    for index in range(60):
+        service.submit_job(workspace, "probe", f"fp-{index}", lambda context: None)
+    assert first.job_id not in {job.job_id for job in service.list_jobs(workspace)}
+    found = manager.latest_of_kind("workspace_upkeep")
+    assert found is not None and found.job_id == first.job_id
+
+
 def test_the_same_active_job_reattaches_instead_of_duplicating(workspace: Path) -> None:
     """같은 (종류, 지문)의 활성 작업이 있으면 다시 붙는다 — 두 번 실행하지 않는다."""
     service = raw.RawWorkspaceService()

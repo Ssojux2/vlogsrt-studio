@@ -30,7 +30,8 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from collections.abc import Mapping, Sequence
+import threading
+from collections.abc import Mapping, Sequence, Set
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from fractions import Fraction
@@ -352,6 +353,45 @@ _AUTO_NOTE_PREFIX = "자동 제외: "
 _MACHINE_NOTE_PREFIXES = (_AUTO_NOTE_PREFIX, "확인 필요: ")
 """조립이 쓰는 메모 머리 — 그 밖의 비지 않은 메모는 사람이 쓴 것이다."""
 
+ADOPTION_REPLAY_LABEL = "입양 결정 다시 적용"
+"""입양이 옛 머리의 결정을 다 다시 적은 자리 — 그 뒤의 편집만 이 기본에서 새로 생긴 것이다(D53)."""
+
+CARRIED_DECISIONS_LABEL = "사람 결정 이어받음"
+"""새 기본이 옛 머리에서 사람이 손댄 원본을 이어받은 자리 — `← 옛 머리 · 원본,…`로 적는다(D53).
+
+게시는 새 기본(sequence 0)을 세우며 그 원본들의 조각을 옮겨 온다. 기록이 없으면 내용만으로는
+사람 손인지 모르는 결정(통째 합친 경계·기계 메모 머리를 단 사람 메모)이 '손대지 않음'으로 읽혀
+다음 게시·순서 맞춤이 다시 세우며 지운다.
+"""
+
+_MACHINE_EDIT_LABELS = ("등급 재계산 ", "자동 제외 미검토 유지")
+"""기계가 단 스냅숏 이름 — 등급 다시 달기·미검토 표지 되돌리기. 그 밖의 편집은 사람 손이다."""
+
+_HUMAN_SNAPSHOT_LABELS = ("자동 제외 확인", "자동 제외 전체 복원")
+"""머리 전체에 걸치는 사람 스냅숏 — 앞 리비전과 견주어 실제로 바뀐 영상만 사람 손이다(D53)."""
+
+_UNDO_PREFIX = "undo:"
+"""되돌리기 스냅숏 `undo:N` — 그 리비전의 내용은 리비전 N과 같다(사이의 편집은 남은 것이 없다)."""
+
+
+_MARKER_LABELS = (ADOPTION_REPLAY_LABEL, CARRIED_DECISIONS_LABEL)
+
+
+def _marker_label(kind: str, prior: ReviewRevision, sources: Set[str]) -> str:
+    """요약 표지 — `종류 ← 옛 머리 · 사람 손이 닿은 원본,…`. 그 앞의 기록을 이 한 줄이 대신한다."""
+    return f"{kind} ← {prior.revision_id} · {','.join(sorted(sources))}"
+
+
+def _marker_sources(label: str) -> tuple[bool, frozenset[str] | None]:
+    """요약 표지인가, 그렇다면 적힌 원본 — 원본 목록이 없는 표지는 None(모든 원본으로 본다)."""
+    if not label.startswith(tuple(kind + " ← " for kind in _MARKER_LABELS)):
+        return False, None
+    _prior, sep, sources = label.split(" ← ", 1)[1].partition(" · ")
+    if not sep:
+        return True, None
+    return True, frozenset(source for source in sources.split(",") if source)
+
+
 _EVIDENCE_STATUSES = ("analyzed", "cached", "partial")
 """판정 증거가 있는 분석 결과 상태 — 부분 완료도 창마다의 판정은 남아 있다."""
 
@@ -382,6 +422,22 @@ def _auto_provenance(notes: str) -> Mapping[str, object] | None:
     return provenance if isinstance(provenance, Mapping) else None
 
 
+def _stale_tier_proposal(segment: ReviewSegment) -> bool | None:
+    """옛 등급판이 낸, 지금 등급으로는 빨강이 아닌 미검토 제외 제안인가 — 근거를 못 읽으면 None.
+
+    판단만 한다(경고 없음) — 화면 갱신마다 불리는 정리 고리의 '할 일' 계산도 이것을 쓴다.
+    """
+    if not is_unreviewed_auto_exclusion(segment) or _RED_GRADE_TAG in segment.visual_tags:
+        return False
+    if not segment.notes.startswith(_AUTO_NOTE_PREFIX):
+        return False
+    provenance = _auto_provenance(segment.notes)
+    if provenance is None:
+        return None
+    stale = provenance.get("version") != tiering.TIER_SETTINGS.tier_version
+    return provenance.get("reason") in tiering.TIER_RED_REASONS and stale
+
+
 def _release_stale_tier_proposal(segment: ReviewSegment) -> ReviewSegment:
     """옛 등급판이 낸 미검토 제외 제안을 푼다 — 지금 등급이 빨강이 아닐 때만(D52).
 
@@ -390,23 +446,84 @@ def _release_stale_tier_proposal(segment: ReviewSegment) -> ReviewSegment:
     지운다 — 남기면 「자동 제외 전체 복원」과 같은 사람 결정으로 읽힌다. 근거 메모를 사람이
     고쳤으면 풀지 않는다 — 지우면 사람이 쓴 말이 사라지므로 미검토 제외로 남겨 경고한다.
     """
-    if not is_unreviewed_auto_exclusion(segment) or _RED_GRADE_TAG in segment.visual_tags:
-        return segment
-    if not segment.notes.startswith(_AUTO_NOTE_PREFIX):
-        return segment
-    provenance = _auto_provenance(segment.notes)
-    if provenance is None:
+    stale = _stale_tier_proposal(segment)
+    if stale is None:
         log.warn(
             f"{segment.segment_id}: 자동 제외 근거 메모를 읽을 수 없다(사람이 고친 메모) — "
             "옛 등급판 제안을 풀지 않고 미검토 제외로 둔다"
         )
         return segment
-    stale = provenance.get("version") != tiering.TIER_SETTINGS.tier_version
-    if provenance.get("reason") not in tiering.TIER_RED_REASONS or not stale:
+    if not stale:
         return segment
     return replace(
         segment, selection="included", visual_tags=confirm_tags(segment.visual_tags), notes=""
     )
+
+
+_WRITE_LOCKS: dict[Path, threading.RLock] = {}
+_WRITE_LOCKS_GUARD = threading.Lock()
+
+
+def review_write_lock(root: Path) -> threading.RLock:
+    """검토 머리를 쓰는 모든 길(편집·새 기본 출판·입양)의 작업공간별 자물쇠(D53).
+
+    순서 맞춤·등급판 옮기기는 원본을 다시 해시하느라 길고, 입양은 결정을 편집으로 다시 적는다
+    (실데이터 137번·약 14초). 그 사이 끼어든 편집·출판이 옛 기본에 내려앉아 새 머리에서 조용히
+    사라지지 않게, 쓰기는 이 자물쇠 안에서 '지금 최신인가'를 확인한 뒤에만 한다. 한 프로세스
+    안의 자물쇠다 — 같은 스레드의 되들어옴(입양 → 되풀이 편집)은 허용한다.
+    """
+    key = root.expanduser().resolve()
+    with _WRITE_LOCKS_GUARD:
+        return _WRITE_LOCKS.setdefault(key, threading.RLock())
+
+
+def _human_segment(segment: ReviewSegment) -> bool:
+    """조각 내용에 사람 결정이 실렸는가 — 덮기·사람 메모·확인한 제외·복원·깨진 근거 메모."""
+    notes = segment.notes
+    return (
+        segment.override_recommendation is not None
+        or notes.startswith(MANUAL_SELECTION_PREFIX)
+        or (bool(notes) and not notes.startswith(_MACHINE_NOTE_PREFIXES))
+        # 미리 채워진 근거 메모에 사람이 덧붙이면 JSON이 깨진다 — 사람이 쓴 메모다.
+        or (notes.startswith(_AUTO_NOTE_PREFIX) and _auto_provenance(notes) is None)
+        or (
+            segment.selection == SELECTION_EXCLUDED
+            and AUTO_EXCLUDED_UNREVIEWED_TAG not in segment.visual_tags
+        )
+        # 「자동 제외 전체 복원」은 근거 메모를 남긴 채 사용으로 되돌린다.
+        or (segment.selection != SELECTION_EXCLUDED and notes.startswith(_AUTO_NOTE_PREFIX))
+    )
+
+
+def _segment_states(revision: ReviewRevision) -> dict[str, tuple[tuple[object, ...], ...]]:
+    """영상마다 조각의 (경계, 선택, 메모, 덮기, 태그) — 두 리비전의 영상별 차이를 견준다."""
+    states: dict[str, list[tuple[object, ...]]] = {}
+    for s in sorted(revision.segments, key=lambda s: (s.source_id, s.start_pts)):
+        states.setdefault(s.source_id, []).append(
+            (s.start_pts, s.end_pts, s.selection, s.notes, s.override_recommendation, s.visual_tags)
+        )
+    return {source: tuple(rows) for source, rows in states.items()}
+
+
+def _edit_sources(
+    edit: ReviewEdit, label: str, parent: ReviewRevision, revision: ReviewRevision
+) -> set[str]:
+    """사람 편집 하나가 닿은 원본 — 머리 전체 스냅숏은 앞 리비전과 실제로 다른 영상만이다.
+
+    「자동 제외 확인」 한 번이 모든 영상을 영원히 '손댄 영상'으로 만들면, 다음 분석 게시가 손대지
+    않은 영상의 새 조각·제안을 내보이지 못한다. 조각을 못 찾는 편집은 모든 원본이다.
+    """
+    if label.startswith(_HUMAN_SNAPSHOT_LABELS):
+        before, after = _segment_states(parent), _segment_states(revision)
+        return {
+            source
+            for source in before.keys() | after.keys()
+            if before.get(source) != after.get(source)
+        }
+    everything = {clock.source_id for clock in parent.clocks}
+    sources = {s.source_id for s in parent.segments if s.segment_id in edit.segment_ids}
+    found_ids = {s.segment_id for s in parent.segments if s.segment_id in edit.segment_ids}
+    return sources if found_ids == set(edit.segment_ids) else everything
 
 
 def _auto_excluded(
@@ -472,6 +589,7 @@ class ReviewWorkspaceFacade:
         *,
         preserve_source_ids: tuple[str, ...] = (),
         evidence_rows: Mapping[str, AnalysisSourceResult] | None = None,
+        expected_head: str | None = None,
     ) -> ReviewRevision:
         """확정 분할 계획을 검토 기본 리비전으로 — 원본은 지금 다시 검증·재측정한다.
 
@@ -492,49 +610,107 @@ class ReviewWorkspaceFacade:
         )
         entries = [_PlanReviewEntry(entry, statuses[entry.asset_id]) for entry in snapshot.entries]
         revision = initial_revision(self._project_id, snapshot.revision_id, clocks, entries)
-        revision = self._automatic_selections(revision, analysis_revision_id, evidence_rows)
-        if preserve_source_ids and self._store.list_base_plan_ids(self._project_id):
-            prior = self.load_head().revision
-            retained = {
-                source_id
-                for source_id in preserve_source_ids
-                if prior.clock_for(source_id) == revision.clock_for(source_id)
-                and revision.clock_for(source_id) is not None
-            }
-            orders = {segment.source_id: segment.source_order for segment in revision.segments}
-            segments = [
-                segment for segment in revision.segments if segment.source_id not in retained
-            ]
-            segments.extend(
-                replace(segment, source_order=orders[segment.source_id])
-                for segment in prior.segments
-                if segment.source_id in retained
+        return self._publish_new_base(
+            revision, analysis_revision_id, evidence_rows, preserve_source_ids, expected_head
+        )
+
+    def _publish_new_base(
+        self,
+        revision: ReviewRevision,
+        analysis_revision_id: str | None,
+        evidence_rows: Mapping[str, AnalysisSourceResult] | None,
+        preserve_source_ids: tuple[str, ...],
+        expected_head: str | None,
+    ) -> ReviewRevision:
+        """옛 머리를 읽어 사람 결정을 넘겨받는 데서 출판까지 한 자물쇠 안(D53).
+
+        그 사이 편집이 옛 기본에 내려앉아 조용히 사라지지 않게. `expected_head`를 주면 옛 머리가
+        그것이 아닐 때 거절한다 — 오래 걸린 다시 세우기가 그 사이 나온 새 머리를 덮지 않게.
+        사람이 손댄 원본을 이어받았으면 그 기록을 스냅숏으로 남긴다(`CARRIED_DECISIONS_LABEL`).
+        """
+        with self._write_lock():
+            prior = self.load_head().revision if self.has_review() else None
+            if expected_head is not None and (prior is None or prior.revision_id != expected_head):
+                raise StaleRevisionError(
+                    f"다시 세우는 동안 검토가 바뀌었다 — 읽은 머리 {expected_head}, 지금 머리"
+                    f" {prior.revision_id if prior else '없음'}"
+                )
+            human = self.human_source_ids(prior) if prior is not None else frozenset()
+            revision, carried = self._automatic_selections(
+                revision, analysis_revision_id, evidence_rows, prior, human
             )
-            revision = replace(
-                revision,
-                segments=tuple(
-                    sorted(segments, key=lambda segment: (segment.source_order, segment.start_pts))
-                ),
-            )
-        self._persist_new_base(revision)
+            if preserve_source_ids and prior is not None:
+                revision, preserved = self._preserved_sources(revision, preserve_source_ids, prior)
+                carried = carried | (preserved & human)
+            self._persist_new_base(revision)
+            if prior is not None and carried:
+                revision = self._publish_snapshot_locked(
+                    revision,
+                    revision.segments,
+                    _marker_label(CARRIED_DECISIONS_LABEL, prior, carried),
+                )
         return revision
+
+    def _preserved_sources(
+        self, revision: ReviewRevision, preserve_source_ids: tuple[str, ...], prior: ReviewRevision
+    ) -> tuple[ReviewRevision, frozenset[str]]:
+        """보존할 원본은 옛 머리의 조각을 그대로 — 순서만 새 계획의 것. 보존한 원본도 준다."""
+        retained = {
+            source_id
+            for source_id in preserve_source_ids
+            if prior.clock_for(source_id) == revision.clock_for(source_id)
+            and revision.clock_for(source_id) is not None
+        }
+        orders = {segment.source_id: segment.source_order for segment in revision.segments}
+        segments = [segment for segment in revision.segments if segment.source_id not in retained]
+        # 지금 판정 증거가 없어 옛 조각을 들고 오는 원본도 옛 판 제안은 거둔다(D52·D53) — 근거가
+        # 사라진 기계 제안이 출력을 막고, 머리를 늘 '옮길 머리'로 남겨 다시 세우기를 되풀이시킨다.
+        segments.extend(
+            _release_stale_tier_proposal(replace(segment, source_order=orders[segment.source_id]))
+            for segment in prior.segments
+            if segment.source_id in retained
+        )
+        ordered = sorted(segments, key=lambda segment: (segment.source_order, segment.start_pts))
+        return replace(revision, segments=tuple(ordered)), frozenset(retained)
+
+    def _write_lock(self) -> threading.RLock:
+        return review_write_lock(self.root)
+
+    def _require_latest_base(self, base_plan_id: str) -> None:
+        """쓰기는 최신 기본에만 — 옛 기본에 쓰면 새 머리에서 조용히 사라진다(D53).
+
+        순서 맞춤·다시 세우기가 새 기본을 낸 뒤 옛 화면이 보낸 편집은 시끄럽게 거절된다.
+        """
+        latest = self._latest_base_plan()
+        if base_plan_id != latest:
+            raise StaleRevisionError(
+                f"검토가 새 계획 {latest}로 옮겨졌다(순서 맞춤·다시 세우기) — 새로고침 뒤 다시"
+                f" 하세요 (보낸 계획 {base_plan_id})"
+            )
 
     def _automatic_selections(
         self,
         revision: ReviewRevision,
         analysis_revision_id: str | None,
-        evidence_rows: Mapping[str, AnalysisSourceResult] | None = None,
-    ) -> ReviewRevision:
+        evidence_rows: Mapping[str, AnalysisSourceResult] | None,
+        prior: ReviewRevision | None,
+        human: frozenset[str],
+    ) -> tuple[ReviewRevision, frozenset[str]]:
         """분석 증거로 자동 제외 후보를 붙이고 3단 등급을 매긴다(D35·D51).
 
         `evidence_rows`는 원본마다 다른 분석 리비전의 결과 행이다(등급판 옮기기). 없으면
-        분석 리비전 하나의 행을 쓴다.
+        분석 리비전 하나의 행을 쓴다. 옛 머리(`prior`)에서 사람이 손댄 원본(`human`)은 그
+        조각을 이어받는다 — 이어받은 원본을 함께 돌려준다.
         """
         if evidence_rows is None:
             store = AnalysisStore(self._workspace)
             analysis = self._analysis_revision(store, analysis_revision_id)
             if analysis is None:
-                return revision
+                # 분석 전에도 사람 손(미리보기 카드 빼기·메모)은 이어받는다 — 버리지 않는다.
+                kept_segments, kept = self._keep_edited_sources(
+                    revision, list(revision.segments), prior, human
+                )
+                return replace(revision, segments=tuple(kept_segments)), kept
             rows = {row.asset_id: row for row in store.list_source_results(analysis.revision_id)}
         else:
             rows = dict(evidence_rows)
@@ -543,9 +719,9 @@ class ReviewWorkspaceFacade:
             self._automatic_exclusion(segment, revision, rows.get(segment.source_id), reports)
             for segment in revision.segments
         ]
-        segments = self._keep_edited_sources(revision, segments)
+        segments, kept = self._keep_edited_sources(revision, segments, prior, human)
         graded = tuple(self._graded(segment, revision, rows, reports) for segment in segments)
-        return replace(revision, segments=graded)
+        return replace(revision, segments=graded), kept
 
     def _tier_for(
         self, row: AnalysisSourceResult, reports: dict[str, tiering.TierReport | None]
@@ -614,24 +790,33 @@ class ReviewWorkspaceFacade:
         return segment
 
     def _keep_edited_sources(
-        self, revision: ReviewRevision, segments: list[ReviewSegment]
-    ) -> list[ReviewSegment]:
-        """재분석은 사람이 이미 편집한 원본을 덮어쓰지 않는다."""
-        prior_bases = self._store.list_base_plan_ids(self._project_id)
-        if not prior_bases:
-            return segments
-        prior = self.load_head(prior_bases[-1]).revision
-        if prior.sequence == 0:
-            return segments
+        self,
+        revision: ReviewRevision,
+        segments: list[ReviewSegment],
+        prior: ReviewRevision | None,
+        human: frozenset[str],
+    ) -> tuple[list[ReviewSegment], frozenset[str]]:
+        """재분석은 사람이 이미 편집한 원본을 덮어쓰지 않는다 — 그 원본만 이어받는다(D53).
+
+        sequence가 아니라 원본마다의 사람 손으로 본다 — 이어받은 새 기본(sequence 0)도 사람 결정을
+        싣고 있고, 기계가 다시 적은 편집뿐인 머리는 아무것도 붙잡지 않는다. 사람이 손대지 않은
+        원본은 새 분석 결과로 선다(영상을 바꿔 고를 때 그 영상의 추천이 보이게).
+        """
+        if prior is None or not human:
+            return segments, frozenset()
         old_clocks = {c.source_id: c for c in prior.clocks}
-        retained = {c.source_id for c in revision.clocks if old_clocks.get(c.source_id) == c}
+        retained = {
+            c.source_id
+            for c in revision.clocks
+            if c.source_id in human and old_clocks.get(c.source_id) == c
+        }
         source_orders = {s.source_id: s.source_order for s in segments}
         kept = [s for s in segments if s.source_id not in retained] + [
             replace(s, source_order=source_orders[s.source_id])
             for s in prior.segments
             if s.source_id in retained
         ]
-        return sorted(kept, key=lambda s: (s.source_order, s.start_pts))
+        return sorted(kept, key=lambda s: (s.source_order, s.start_pts)), frozenset(retained)
 
     def _graded(
         self,
@@ -674,47 +859,150 @@ class ReviewWorkspaceFacade:
 
     @staticmethod
     def has_human_decisions(revision: ReviewRevision) -> bool:
-        """사람이 내린 결정이 실린 머리인가 — sequence 0이어도 옛 머리에서 실려 올 수 있다.
+        """사람이 내린 결정이 조각 내용에 실린 머리인가 — sequence 0이어도 옛 머리에서 실려 온다.
 
         `initialize_review(preserve_source_ids=…)`와 재분석의 원본 보존은 옛 머리의 편집된
-        조각을 새 기본 리비전(sequence 0)에 옮긴다. 그런 머리를 증거로 다시 세우면 사람의
-        제외·확인·메모·덮기가 사라진다(D35) — 그래서 sequence가 아니라 조각의 표지를 본다.
+        조각을 새 기본 리비전(sequence 0)에 옮긴다. 내용만 본다 — 경계·기록까지 보는 판정은
+        `human_source_ids`다.
         """
-        for segment in revision.segments:
-            notes = segment.notes
-            if (
-                segment.override_recommendation is not None
-                or notes.startswith(MANUAL_SELECTION_PREFIX)
-                or (notes and not notes.startswith(_MACHINE_NOTE_PREFIXES))
-                or (
-                    segment.selection == SELECTION_EXCLUDED
-                    and AUTO_EXCLUDED_UNREVIEWED_TAG not in segment.visual_tags
-                )
-                # 「자동 제외 전체 복원」은 근거 메모를 남긴 채 사용으로 되돌린다.
-                or (segment.selection != SELECTION_EXCLUDED and notes.startswith(_AUTO_NOTE_PREFIX))
-            ):
-                return True
-        return False
+        return any(_human_segment(segment) for segment in revision.segments)
 
-    def _geometry_edited(self, revision: ReviewRevision) -> bool:
-        """어느 계획에도 없는 경계의 조각이 있는가 — 나누기·합치기·경계 이동의 흔적이다."""
-        planned = {
-            (entry.segment_id, entry.core_start_pts, entry.core_end_pts)
-            for plan in self._service.list_segment_plan_revisions(self.root)
-            for entry in plan.entries
-        }
-        return any(
-            (segment.segment_id, segment.start_pts, segment.end_pts) not in planned
-            for segment in revision.segments
-        )
+    def human_source_ids(self, revision: ReviewRevision) -> frozenset[str]:
+        """사람 손이 닿은 원본 — 내용·경계·편집 기록으로 원본마다 본다(D53).
+
+        내용: 사람 결정 표지·깨진 근거 메모. 경계: 기계가 세운 계획(의미 분석·결정적 타일)의
+        (원본, 경계) 밖 — 입양은 사람이 나눈 경계도 사람 구간 계획(`planned`)에 옮기므로 그것과는
+        견주지 않는다. 기록: 미리 채워진 메모 칸에 덧붙인 사람 메모·통째 합친 경계처럼 내용으로는
+        모르는 손은 편집 기록이 말한다(`_history_sources`).
+        """
+        present = {clock.source_id for clock in revision.clocks}
+        found = {s.source_id for s in revision.segments if _human_segment(s)}
+        history, summarized = self._history_sources(revision)
+        found |= history
+        if not summarized:
+            found |= self._unplanned_geometry_sources(revision)
+        return frozenset(found & present)
 
     def is_untouched(self, revision: ReviewRevision) -> bool:
-        """증거로 다시 세워도 잃을 것이 없는 머리 — 편집도, 실려 온 사람 결정도 없다."""
-        return (
-            revision.sequence == 0
-            and not self.has_human_decisions(revision)
-            and not self._geometry_edited(revision)
+        """증거로 다시 세워도 잃을 것이 없는 머리 — 어느 원본에도 사람 손이 없다.
+
+        sequence가 아니라 내용·경계·기록으로 본다(D53) — 입양은 기계 제안을 편집으로 다시 적어
+        sequence를 올리고(실데이터 136), 게시는 사람 결정을 이어받은 새 기본을 sequence 0으로 낸다.
+        """
+        return not self.human_source_ids(revision)
+
+    def _unplanned_geometry_sources(self, revision: ReviewRevision) -> set[str]:
+        """기계 계획 어디에도 없는 경계의 원본 — 요약 표지가 없는 머리만 모든 계획을 훑는다.
+
+        요약 표지(입양·이어받음)는 쓴 순간 그 앞의 사람 경계까지 원본 목록으로 적어 두었다. 표지가
+        없는 머리(사람 구간 계획 위 머리·D53 이전 코드가 표지 없이 이어받은 분할)는 경계를 기계 계획
+        전부와 견주어야 사람 경계를 찾는다(실데이터 약 12 ms).
+        """
+        machine = {
+            (entry.asset_id, entry.core_start_pts, entry.core_end_pts)
+            for plan in self._service.list_segment_plan_revisions(self.root)
+            if plan.basis != SEGMENTATION_BASIS_PLANNED
+            for entry in plan.entries
+        }
+        return {
+            s.source_id
+            for s in revision.segments
+            if (s.source_id, s.start_pts, s.end_pts) not in machine
+        }
+
+    def _history_sources(self, revision: ReviewRevision) -> tuple[set[str], bool]:
+        """편집 기록을 거꾸로 걸어 사람 손이 닿은 원본을 모은다 — (원본, 요약됐나).
+
+        가장 가까운 요약 표지(입양·이어받음)에서 멈춘다 — 표지는 쓴 순간 그 앞의 사람 손을 원본
+        목록으로 적어 두었다. 그래서 걸음은 이 기본에서 표지 뒤에 생긴 편집만큼이고, 게시가 몇 번
+        이어져도 길어지지 않는다(재귀 없음). 되돌리기 `undo:N`은 리비전 N으로 건너뛴다 — 사이의
+        편집은 남은 것이 없다. 기계 스냅숏은 지나고, 기록이 끊기면 모두 사람 손이다(요약된 셈).
+        """
+        present = {clock.source_id for clock in revision.clocks}
+        found: set[str] = set()
+        cursor, legacy = revision, self._legacy_replay(revision)
+        while True:
+            if legacy is not None and cursor.sequence <= legacy[0]:
+                # 표지 없는 옛 입양의 되풀이 — 옛 머리의 기록으로 건너뛴다(재귀 없이).
+                old = self._revision_by_id(legacy[1])
+                if old is None:
+                    return present, True
+                cursor, legacy = old, self._legacy_replay(old)
+                continue
+            if cursor.edit is None or found >= present:
+                return found, found >= present
+            label = (cursor.edit.notes or "") if cursor.edit.kind == "note" else ""
+            is_marker, summarized = _marker_sources(label)
+            if is_marker:
+                return found | (present if summarized is None else set(summarized)), True
+            restored = self._undo_target(cursor, label)
+            parent = restored or self._revision_by_id(cursor.parent_revision_id)
+            if parent is None:
+                return present, True
+            if restored is None and not label.startswith(_MACHINE_EDIT_LABELS):
+                found |= _edit_sources(cursor.edit, label, parent, cursor)
+            cursor = parent
+
+    def _legacy_replay(self, revision: ReviewRevision) -> tuple[int, str] | None:
+        """표지 없는 옛 입양(D53 이전 앱)의 (되풀이 끝 순번, 옛 머리) — 입양 기록으로 다시 센다.
+
+        입양은 옛 조각마다 제외 선택·덮기·메모를 한 편집씩 다시 적고, 미검토 제외가 있었으면 표지를
+        되돌리는 스냅숏 하나를 더한다. 그 길이가 이 리비전을 넘으면 되풀이가 끊긴 것이라 안 쓴다.
+        """
+        old_id = self._store.adopted_from(revision.base_plan_id)
+        old = self._revision_by_id(old_id)
+        if old_id is None or old is None:
+            return None
+        end = sum(
+            int(s.selection == SELECTION_EXCLUDED)
+            + int(s.override_recommendation is not None)
+            + int(bool(s.notes))
+            for s in old.segments
+        ) + int(any(is_unreviewed_auto_exclusion(s) for s in old.segments))
+        return (end, old_id) if end <= revision.sequence else None
+
+    def _undo_target(self, revision: ReviewRevision, label: str) -> ReviewRevision | None:
+        """`undo:N` 스냅숏이 되돌린 리비전 N — 같은 기본의 더 앞 리비전일 때만(아니면 None)."""
+        if not label.startswith(_UNDO_PREFIX):
+            return None
+        sequence = label.removeprefix(_UNDO_PREFIX)
+        if not sequence.isdigit() or int(sequence) >= revision.sequence:
+            return None
+        return self._revision_by_id(
+            f"{self._project_id}/{revision.base_plan_id}/{int(sequence):06d}"
         )
+
+    def _revision_by_id(self, revision_id: str | None) -> ReviewRevision | None:
+        """`프로젝트/기본 계획/순번` 리비전 하나 — 없으면 None(기록이 끊겼으면 사람 손으로 본다)."""
+        if revision_id is None or revision_id.count("/") < 2:
+            return None
+        _project, base_plan_id, _sequence = revision_id.rsplit("/", 2)
+        try:
+            document, _ = self._store.revision_document(
+                self._project_id, base_plan_id, self._sequence_of_revision_id(revision_id)
+            )
+        except RawWorkspaceError:
+            return None
+        return parse_revision(document)
+
+    @staticmethod
+    def stale_tier_proposal_spans(revision: ReviewRevision) -> tuple[tuple[str, int, int], ...]:
+        """옛 등급판이 낸, 지금은 빨강이 아닌 미검토 제외의 (원본, 경계)(D53 실데이터 모양)."""
+        return tuple(
+            sorted(
+                (segment.source_id, segment.start_pts, segment.end_pts)
+                for segment in revision.segments
+                if _stale_tier_proposal(segment)
+            )
+        )
+
+    @classmethod
+    def has_stale_tier_proposals(cls, revision: ReviewRevision) -> bool:
+        return bool(cls.stale_tier_proposal_spans(revision))
+
+    def needs_tier_migration(self, revision: ReviewRevision) -> bool:
+        """등급판을 옮길 머리인가 — 지금 판 표지가 없거나, 표지가 있어도 옛 판 제안이 실려 있다."""
+        return not self.has_tier_marker(revision) or self.has_stale_tier_proposals(revision)
 
     @staticmethod
     def has_tier_marker(revision: ReviewRevision) -> bool:
@@ -747,6 +1035,13 @@ class ReviewWorkspaceFacade:
     def _publish_snapshot(
         self, head: ReviewRevision, segments: tuple[ReviewSegment, ...], label: str
     ) -> ReviewRevision:
+        with self._write_lock():
+            self._require_latest_base(head.base_plan_id)
+            return self._publish_snapshot_locked(head, segments, label)
+
+    def _publish_snapshot_locked(
+        self, head: ReviewRevision, segments: tuple[ReviewSegment, ...], label: str
+    ) -> ReviewRevision:
         edited = replace(
             head,
             sequence=head.sequence + 1,
@@ -775,7 +1070,10 @@ class ReviewWorkspaceFacade:
                 self._project_id, head.base_plan_id, int(head.edit.notes.split(":", 1)[1])
             )
             cursor = parse_revision(document)
-        if cursor.parent_revision_id is None:
+        marker = (cursor.edit.notes or "") if cursor.edit and cursor.edit.kind == "note" else ""
+        # 요약 표지(입양·이어받음)는 이 기본의 출발점이다 — 되돌릴 사람 편집이 아니다. 넘어가면
+        # 그 앞의 되풀이까지 되돌려 이어받은 결정이 사라지고, 사람 손의 요약도 끊긴다(D53).
+        if cursor.parent_revision_id is None or _marker_sources(marker)[0]:
             raise ReviewWorkspaceError("실행 취소할 편집이 없습니다")
         sequence = self._sequence_of_revision_id(cursor.parent_revision_id)
         document, _ = self._store.revision_document(self._project_id, head.base_plan_id, sequence)
@@ -785,7 +1083,15 @@ class ReviewWorkspaceFacade:
         head = self.load_head(base_plan_id).revision
         manually_selected: set[str] = set()
         cursor = head
+        legacy = self._legacy_replay(head)
         while cursor.parent_revision_id is not None:
+            if legacy is not None and cursor.sequence <= legacy[0]:
+                break  # 표지 없는 옛 입양의 되풀이도 사람 선택이 아니다
+            label = (cursor.edit.notes or "") if cursor.edit and cursor.edit.kind == "note" else ""
+            # 입양 표지 앞은 입양의 되풀이다 — 사람 선택은 `수동 선택 · ` 메모로 이미 실려 와 복원이
+            # 건너뛴다. 되풀이의 선택 편집까지 사람 선택으로 셈하면 복원이 아무것도 하지 않는다.
+            if label.startswith(ADOPTION_REPLAY_LABEL + " ← "):
+                break
             if cursor.edit and cursor.edit.kind == "selection":
                 manually_selected.update(cursor.edit.segment_ids)
             document, _ = self._store.revision_document(
@@ -952,6 +1258,10 @@ class ReviewWorkspaceFacade:
 
     # ── 다시 열기·편집 ────────────────────────────────────────────
 
+    def has_review(self) -> bool:
+        """검토 리비전이 하나라도 있는가 — 없는 것은 오류가 아니라 아직 시작 전이다."""
+        return bool(self._store.list_base_plan_ids(self._project_id))
+
     def load_head(self, base_plan_id: str | None = None) -> LoadedReview:
         """저장된 헤드를 되돌린다 — 내용 지문을 다시 잰다(깨진 행은 못 지난다)."""
         base = base_plan_id or self._latest_base_plan()
@@ -1011,10 +1321,16 @@ class ReviewWorkspaceFacade:
     def apply_edit(self, base_plan_id: str, edit: ReviewEdit) -> ReviewRevision:
         """편집을 헤드에 적용해 저장한다 — 리비전과 헤드 이동은 한 트랜잭션이다.
 
-        헤드가 편집 대상이 아니면 거부다(stale-head). 출판 도중 무엇이 실패해도
-        (크래시·잠금·동시 편집) 리비전과 헤드는 함께 되돌아가므로, 실패한 편집이
-        다음 편집의 자리를 막는 일은 없다.
+        헤드가 편집 대상이 아니면 거부다(stale-head). 최신 기본이 아니어도 거부다 — 입양·다시
+        세우기가 도는 동안 온 편집은 그것이 끝날 때까지 기다렸다가 시끄럽게 거절된다(D53).
+        출판 도중 무엇이 실패해도(크래시·잠금·동시 편집) 리비전과 헤드는 함께 되돌아가므로,
+        실패한 편집이 다음 편집의 자리를 막는 일은 없다.
         """
+        with self._write_lock():
+            self._require_latest_base(base_plan_id)
+            return self._apply_edit_locked(base_plan_id, edit)
+
+    def _apply_edit_locked(self, base_plan_id: str, edit: ReviewEdit) -> ReviewRevision:
         head = self.load_head(base_plan_id).revision
         if edit.target_revision_id != head.revision_id:
             raise StaleRevisionError(
@@ -1164,9 +1480,13 @@ class ReviewWorkspaceFacade:
     # ── 편집 덮개 → 새 A3 계획 ───────────────────────────────────
 
     def plan_from_review(
-        self, base_plan_id: str | None = None
+        self, base_plan_id: str | None = None, *, order_revision_id: str | None = None
     ) -> tuple[SegmentPlanSnapshot, ReviewPlanMapping]:
-        """편집된 덮개를 새 분할 계획으로 — 경계 왕복이 항등임을 검증하고 매핑을 남긴다."""
+        """편집된 덮개를 새 분할 계획으로 — 경계 왕복이 항등임을 검증하고 매핑을 남긴다.
+
+        `order_revision_id`를 주면 그 전체 순서 위에 세운다 — 순서만 바뀐 머리를 옮길 때다(D53).
+        매핑은 (원본, 경계)로 맞추므로 순서와 무관하다.
+        """
         revision = self.load_head(base_plan_id).revision
         snapshot = self._snapshot(revision.base_plan_id)
         intervals: dict[str, list[PlannedInterval]] = {}
@@ -1183,7 +1503,7 @@ class ReviewWorkspaceFacade:
             ]
         new_snapshot = self._service.plan_segmentation(
             self.root,
-            order_revision_id=snapshot.order_revision_id,
+            order_revision_id=order_revision_id or snapshot.order_revision_id,
             intervals=intervals,
             basis=SEGMENTATION_BASIS_PLANNED,
         )
@@ -1244,8 +1564,25 @@ class ReviewWorkspaceFacade:
         새 계획의 조각 ID가 곧 리비전의 조각 ID다(확정 내보내기의 `stale_core`
         가드와 artifact 조회가 이 신원으로 맞는다). 사용자의 선택·등급 덮기·메모는
         옛 리비전에서 **공식적인 편집 기록으로** 다시 적용된다 — 몰래 옮기지 않는다.
+        옛 리비전이 지금 최신 머리가 아니면 거부한다 — 그 사이 나온 새 기본·편집을 옛 머리로
+        덮어 조용히 지우지 않는다(D53). 입양 내내 쓰기 자물쇠를 쥐어 편집은 기다렸다 거절된다.
         """
-        old = old_revision if old_revision is not None else self.load_head().revision
+        with self._write_lock():
+            latest = self.load_head().revision
+            old = old_revision if old_revision is not None else latest
+            if latest.revision_id != old.revision_id:
+                raise StaleRevisionError(
+                    f"입양할 머리 {old.revision_id}가 지금 최신 머리 {latest.revision_id}가"
+                    " 아니다 — 그 사이 검토가 바뀌었다"
+                )
+            return self._adopt_locked(new_snapshot, mapping, old)
+
+    def _adopt_locked(
+        self,
+        new_snapshot: SegmentPlanSnapshot,
+        mapping: ReviewPlanMapping,
+        old: ReviewRevision,
+    ) -> ReviewRevision:
         if mapping.old_revision_id != old.revision_id:
             raise ReviewWorkspaceError(
                 f"매핑이 {mapping.old_revision_id!r}용인데 검토 리비전은 {old.revision_id!r}다"
@@ -1272,7 +1609,12 @@ class ReviewWorkspaceFacade:
             segments=tuple(self._graded(s, adopted, rows, reports) for s in adopted.segments),
         )
         self._persist_new_base(adopted, mapping)
-        return self._replay_metadata(new_snapshot.revision_id, old, mapping)
+        human = self.human_source_ids(old)
+        replayed = self._replay_metadata(new_snapshot.revision_id, old, mapping)
+        # 되풀이가 끝난 자리에 옛 머리의 사람 손을 요약해 둔다 — 이 뒤의 편집만 새로 생긴 손이다.
+        return self._publish_snapshot_locked(
+            replayed, replayed.segments, _marker_label(ADOPTION_REPLAY_LABEL, old, human)
+        )
 
     def _adopted_clocks(
         self, old: ReviewRevision, new_snapshot: SegmentPlanSnapshot

@@ -93,16 +93,22 @@ def propose_order(candidates: Sequence[SourceAsset]) -> tuple[SourceAsset, ...]:
 
 
 def propose_global_order(assets: Sequence[SourceAsset]) -> tuple[SourceAsset, ...]:
-    """배치를 넘는 제안 순서 — 가져온 배치 연대순, 배치 안은 확정 순번 그대로.
+    """배치를 넘는 제안 순서 — 촬영 시각 오래된 것부터, 모르면 맨 뒤에 자연 경로 순(D53).
 
-    배치 사이를 임의로 다시 섞지 않는다(§6.5). 사용자가 배치를 건너 뛰어 놓고
-    싶으면 확정 때 명시적인 순서를 주면 된다 — 이 함수는 조용한 재배열을 하지
-    않는다. 배치 안 순서는 각 배치의 `SourceOrderRevision`이 이미 확정한 것이다.
+    "영상은 언제나 만든 시각 순"이 사용자 지시다(2026-10-09) — 가져온 배치 순서를
+    앞세우던 §6.5의 배치 사이 규칙을 작업대에서는 이것이 대신한다. 먼저 찍은 영상을
+    나중에 가져와도 맨 앞에 선다. 같은 시각·같은 경로는 배치 자연 순 → 확정 순번 →
+    자산 ID로 갈라 언제나 같은 답을 낸다. 확정은 여전히 새 불변 리비전이다.
     """
     return tuple(
         sorted(
             assets,
-            key=lambda asset: (natural_key(asset.batch_dir), asset.ordinal, asset.asset_id),
+            key=lambda asset: (
+                *order_key(asset.capture_time, asset.source_relative_path),
+                natural_key(asset.batch_dir),
+                asset.ordinal,
+                asset.asset_id,
+            ),
         )
     )
 

@@ -17,7 +17,10 @@ from pathlib import Path
 
 import pytest
 
+from vlogsrt import preprocess
 from vlogsrt.project.raw import ingest
+
+APPLE_DATE = "com.apple.quicktime.creationdate"
 
 needs_ffmpeg = pytest.mark.skipif(
     shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
@@ -25,12 +28,15 @@ needs_ffmpeg = pytest.mark.skipif(
 )
 
 
-def _encode(path: Path, creation_time: str | None) -> Path:
+def _encode(path: Path, creation_time: str | None, apple_date: str | None = None) -> Path:
     args = [
         "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
         "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=25:duration=1",
         "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
     ]  # fmt: skip
+    if apple_date is not None:
+        # 애플 키는 mdta 키 목록에만 들어간다 — FCP·아이폰이 쓰는 자리와 같다.
+        args += ["-movflags", "use_metadata_tags", "-metadata", f"{APPLE_DATE}={apple_date}"]
     if creation_time is not None:
         args += ["-metadata", f"creation_time={creation_time}"]
     args.append(str(path))
@@ -119,3 +125,44 @@ def test_order_follows_valid_capture_times(tmp_path: Path, media: Path) -> None:
     assert ordered == ["DJI_0001.MOV", "DJI_0002.MOV"]
     notes = [candidate.inspection.capture_time_status for candidate in proposal.order]
     assert notes == ["valid", "valid"]
+
+
+@needs_ffmpeg
+def test_apple_creation_date_is_read_from_a_real_container(media: Path) -> None:
+    """실제 MOV의 애플 촬영 날짜(`+0900`)가 조사·되채움 양쪽에서 읽힌다(D53).
+
+    ffmpeg은 `use_metadata_tags`일 때 `creation_time`을 mvhd와 키 목록에 겹쳐 적어
+    `A;B`로 읽힌다(못 믿는 값) — 애플 키가 앞서므로 그 겹침은 촬영 시각을 가리지 못한다.
+    둘 다 유효할 때의 우선순위는 `test_native_media_probe`가 직접 잰다.
+    """
+    shot = _encode(
+        media / "IMG_0001.MOV", "2026-08-14T10:38:34Z", apple_date="2026-08-11T12:50:46+0900"
+    )
+    inspection = ingest.ffprobe_media_inspector(shot)
+    assert inspection.capture_time_status == "valid"
+    assert inspection.capture_time == "2026-08-11T03:50:46+00:00"
+    verdict = preprocess.probe_creation_time(shot)
+    assert verdict.valid and verdict.utc is not None
+    assert verdict.utc.isoformat() == "2026-08-11T03:50:46+00:00"
+
+
+@needs_ffmpeg
+def test_container_creation_time_still_works_without_apple_date(media: Path) -> None:
+    """애플 키가 없는 카메라는 예전 그대로 컨테이너 `creation_time`이 근거다."""
+    plain = _encode(media / "DJI_0001.MOV", "2026-09-01T10:00:00Z")
+    verdict = preprocess.probe_creation_time(plain)
+    assert verdict.valid and verdict.utc is not None
+    assert verdict.utc.isoformat() == "2026-09-01T10:00:00+00:00"
+    assert preprocess.probe_creation_time(_encode(media / "bare.MOV", None)).valid is False
+
+
+@needs_ffmpeg
+def test_scan_order_follows_apple_shot_dates(tmp_path: Path) -> None:
+    """파일 번호·컨테이너 시각이 거꾸로여도 애플 촬영 날짜가 순서를 정한다(D53)."""
+    card = tmp_path / "card"
+    card.mkdir()
+    (tmp_path / "ws").mkdir()
+    _encode(card / "A_0001.MOV", None, apple_date="2026-08-11T15:00:00+0900")
+    _encode(card / "A_0002.MOV", None, apple_date="2026-08-11T09:00:00+0900")
+    proposal = ingest.scan_sources(card, tmp_path / "ws")
+    assert [candidate.source_name for candidate in proposal.order] == ["A_0002.MOV", "A_0001.MOV"]
