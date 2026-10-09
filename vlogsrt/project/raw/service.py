@@ -1715,6 +1715,16 @@ class RawWorkspaceService:
             )
         return head.revision_id
 
+    def export_finalcut_timeline(self, root: Path, context: JobContext | None = None) -> Path:
+        """불러온 원본 전부를 태그 달린 타임라인 하나로 — 새 FCPXML 경로를 돌려준다(D56).
+
+        모으고 대조하고 쓰는 일은 `finalcut_export`가 한다. 지우지 않으므로 미검토 자동
+        제외 관문이 없고, Final Cut은 열지 않는다(여는 것은 화면의 몫이다).
+        """
+        from vlogsrt.project.raw import finalcut_export
+
+        return finalcut_export.export(self, root, context).fcpxml
+
     def export_final_cut(
         self,
         root: Path,

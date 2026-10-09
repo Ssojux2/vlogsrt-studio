@@ -26,28 +26,35 @@ LOCK_INFO = ".lock-info"
 
 NTSC = Fraction(1001, 30000)
 
+NSNULL = object()
+"""값 자리의 `NSNull` 인스턴스 — 실물 12.3 백업(제주 day1·day3)의 `videoFormatName`이 이 모양이다.
+리더가 역참조하면 `{'$class': UID(n)}` 사전이 된다(문자열이 아니다)."""
+
 
 def archived(record: dict[str, object]) -> bytes:
     """평범한 사전 하나를 NSKeyedArchiver bplist 블롭으로 조립한다.
 
     키·값은 전부 리프(문자열·정수·불린)로만 쓴다 — 리더는 한 겹 역참조면 충분하다.
+    값이 `NSNULL`이면 그 자리에 NSNull 클래스를 가리키는 객체를 둔다.
     """
     count = len(record)
+    dictionary_class = 2 + 2 * count
     root = {
         "NS.keys": [plistlib.UID(2 + 2 * index) for index in range(count)],
         "NS.objects": [plistlib.UID(3 + 2 * index) for index in range(count)],
-        "$class": plistlib.UID(2 + 2 * count),
+        "$class": plistlib.UID(dictionary_class),
     }
     objects: list[object] = ["$null", root]
     for key, value in record.items():
         objects.append(key)
-        objects.append(value)
+        objects.append({"$class": plistlib.UID(dictionary_class + 1)} if value is NSNULL else value)
     objects.append(
         {
             "$classname": "NSMutableDictionary",
             "$classes": ["NSMutableDictionary", "NSDictionary", "NSObject"],
         }
     )
+    objects.append({"$classname": "NSNull", "$classes": ["NSNull", "NSObject"]})
     return plistlib.dumps(
         {
             "$version": 100000,
@@ -117,7 +124,8 @@ class MediaSpec:
     name: str
     frames: int = 100
     frame_duration: str = "1001/30000"
-    format: str = "FFVideoFormat3840x2160p2997"
+    format: object = "FFVideoFormat3840x2160p2997"
+    """`NSNULL`이면 실물 백업의 깨진 기록처럼 `videoFormatName`이 NSNull이다."""
     has_video: bool = True
     has_audio: bool = True
     audio_rate: int | None = 48000

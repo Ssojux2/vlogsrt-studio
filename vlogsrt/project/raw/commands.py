@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import time
 from collections.abc import Callable
 from fractions import Fraction
@@ -221,6 +222,7 @@ def media_command(args: argparse.Namespace) -> int:
         "analyze": cmd_analyze,
         "review": cmd_review,
         "caption": cmd_caption,
+        "finalcut": cmd_finalcut,
     }
     return handlers[args.media_command](args)
 
@@ -233,7 +235,7 @@ def add_media_parser(sub: argparse._SubParsersAction) -> None:
     commands = media.add_subparsers(
         dest="media_command",
         required=True,
-        metavar="{init,import,retry,inspect,plan,extract,clips,analyze,review,caption}",
+        metavar="{init,import,retry,inspect,plan,extract,clips,analyze,review,caption,finalcut}",
     )
 
     init = commands.add_parser("init", help="빈 폴더에 v2 작업공간을 만든다")
@@ -369,6 +371,16 @@ def add_media_parser(sub: argparse._SubParsersAction) -> None:
         help="오디오 트랙 서수(여럿일 때). 없으면 자동(첫 트랙)",
     )
     caption.add_argument("--run", default="run-1", help="실행 ID(기본 run-1)")
+    _add_finalcut_parser(commands)
+
+
+def _add_finalcut_parser(commands: argparse._SubParsersAction) -> None:
+    finalcut = commands.add_parser(
+        "finalcut",
+        help="불러온 원본 전부를 태그 달린 Final Cut 타임라인 하나로 쓴다"
+        "(로컬만 — Final Cut은 열지 않는다)",
+    )
+    finalcut.add_argument("--workspace", type=Path, required=True, help="작업공간 경로")
 
 
 # ── A3 — 결정적 분할 계획·추출·조각 목록 ──────────────────────────────────────
@@ -644,4 +656,34 @@ def cmd_caption(args: argparse.Namespace) -> int:
         f" · 시간 모델 {estimate.timing_model} · 예상 비용 ${estimate.estimated_cost_usd}"
         " · 실제 실행은 브라우저 승인 경로에서만 연다(§14.3)"
     )
+    return 0
+
+
+def cmd_finalcut(args: argparse.Namespace) -> int:
+    """`media finalcut` — 전체 타임라인 FCPXML과 리포트를 새로 쓴다(D56, 로컬만).
+
+    쓰기만 한다: Final Cut을 열지 않는다(여는 것은 브라우저 화면의 몫이다). 원본을 다시
+    해시하거나 복사하지 않으며, 바뀐 원본은 이름을 대고 거부한다.
+    """
+    service = _service()
+    try:
+        status = service.open_workspace(Path(args.workspace))
+        path = service.export_finalcut_timeline(Path(status.workspace_root))
+    except raw_service.RawWorkspaceError as error:
+        log.error(str(error))
+        return 1
+    report = json.loads(path.with_suffix(".json").read_text(encoding="utf-8"))
+    counts = report["counts"]
+    captions = counts["captions"]
+    log.out(f"Final Cut 타임라인을 썼다: {path}")
+    log.out(f"리포트: {path.with_suffix('.json')}")
+    log.out(
+        f"원본 {counts['sources']}개(분석 {counts['analysed']})"
+        f" · 스파인 클립 {counts['spine_clips']}개"
+        f" · 꺼진 클립 {counts['disabled_clips']}개"
+        f" · 미검토 제외 제안 {counts['unreviewed_clips']}개"
+        f" · 캡션 {captions['placed']}개(조각 {captions['pieces']})"
+    )
+    for row in report["not_exported"]:
+        log.out(f"넣지 않은 원본: {row['name'] or row['asset_id']} — {row['reason']}")
     return 0

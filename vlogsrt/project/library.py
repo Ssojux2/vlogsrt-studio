@@ -26,7 +26,7 @@ from __future__ import annotations
 import plistlib
 import re
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Mapping
 from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
@@ -130,10 +130,32 @@ class LibraryTimeline:
 # ─── 여는 자리 ───────────────────────────────────────────────────────────
 
 
-def _rows(database: Path, types: tuple[str, ...]) -> Iterator[tuple[str, bytes]]:
-    """`immutable=1`로 열어 (타입, 블롭)을 흘린다 — 잠금도 저널도 건드리지 않는다."""
+class LibraryBusy(UnsupportedProject):
+    """Final Cut이 라이브러리를 저장하는 중이다 — 롤백 저널이 데이터베이스 옆에 있다.
+
+    `immutable=1`은 저널을 보지 않으므로 그 사이에 읽으면 반쯤 쓴 쪽을 읽을 수 있다. 기다렸다
+    다시 읽는 것은 사람의 몫이다 — 여기서 되풀이해 기다리지 않는다.
+    """
+
+
+JOURNAL_SUFFIX = "-journal"
+
+
+def _require_quiet(database: Path) -> None:
+    if database.with_name(database.name + JOURNAL_SUFFIX).exists():
+        raise LibraryBusy(
+            str(database), "Final Cut이 라이브러리를 저장하는 중이다 — 잠시 뒤 다시 시도하세요"
+        )
+
+
+def _rows(database: Path, types: tuple[str, ...]) -> list[tuple[str, bytes]]:
+    """`immutable=1`로 열어 (타입, 블롭)을 모은다 — 잠금도 저널도 건드리지 않는다.
+
+    읽기 앞뒤로 롤백 저널을 본다: 그 사이에 Final Cut이 쓰기 시작했으면 읽은 것을 믿지 않는다.
+    """
     if not database.is_file():
         raise UnsupportedProject(str(database), "라이브러리 데이터베이스가 없다")
+    _require_quiet(database)
     placeholders = ",".join("?" for _ in types)
     query = (
         "select c.ZTYPE, m.ZDICTIONARYDATA from ZCOLLECTION c"
@@ -142,14 +164,16 @@ def _rows(database: Path, types: tuple[str, ...]) -> Iterator[tuple[str, bytes]]
     )
     connection = sqlite3.connect(f"file:{database}?immutable=1", uri=True)
     try:
-        for kind, blob in connection.execute(query, types):
-            if not isinstance(blob, bytes):
-                raise UnsupportedProject(str(database), f"{kind} 항목이 블롭이 아니다")
-            yield kind, blob
+        rows = connection.execute(query, types).fetchall()
     except sqlite3.DatabaseError as error:
         raise UnsupportedProject(str(database), f"데이터베이스를 읽지 못했다: {error}") from error
     finally:
         connection.close()
+    _require_quiet(database)
+    for kind, blob in rows:
+        if not isinstance(blob, bytes):
+            raise UnsupportedProject(str(database), f"{kind} 항목이 블롭이 아니다")
+    return [(str(kind), blob) for kind, blob in rows]
 
 
 def _unarchive(blob: bytes, where: str) -> dict[str, object]:
@@ -182,14 +206,14 @@ def _unarchive(blob: bytes, where: str) -> dict[str, object]:
     return root
 
 
-def _text(record: dict[str, object], key: str, where: str) -> str:
+def _text(record: Mapping[str, object], key: str, where: str) -> str:
     value = record.get(key)
     if not isinstance(value, str) or not value:
         raise UnsupportedProject(where, f"{key}를 문자열로 읽지 못했다: {value!r}")
     return value
 
 
-def _fraction(record: dict[str, object], key: str, where: str) -> Fraction:
+def _fraction(record: Mapping[str, object], key: str, where: str) -> Fraction:
     value = record.get(key)
     if not isinstance(value, str):
         raise UnsupportedProject(where, f"{key}를 시각 문자열로 읽지 못했다: {value!r}")
@@ -261,41 +285,85 @@ def _catalog_version(bundle: Path) -> str:
 # ─── 이벤트의 영상 ───────────────────────────────────────────────────────
 
 
-def read_event_media(event: LibraryEvent) -> tuple[LibraryMedia, ...]:
-    """이벤트가 가진 영상 목록. 이름 오름차순 — 그 순서가 곧 타임라인 순서가 된다.
+@dataclass(frozen=True, slots=True)
+class EventIndex:
+    """이벤트의 원본 파일 ↔ 내용 신원 색인 — 행마다 따로 읽는다.
 
-    `FFMediaRep`(파일)과 `FFMIORADAsset`(시계·포맷)은 서로 다른 객체라 내용 신원으로
-    잇는다 — rep의 `md5Seed`와 asset의 `mediaIdentifier`가 같은 값이다.
+    깨진 행 하나가 이벤트 전체를 막지 않게 하려는 것이다(실물: 12.3 백업의 day1·day3에는
+    `videoFormatName`이 NSNull인 기록이 있다). 읽지 못한 행은 `problems`로 돌려주고, 자산
+    기록은 아직 풀지 않은 채 들고 있다 — 쓰려는 기록 하나만 `media`가 엄격하게 푼다.
     """
+
+    event: LibraryEvent
+    originals: Mapping[str, Path]
+    proxies: Mapping[str, Path]
+    assets: Mapping[str, Mapping[str, object]]
+    problems: tuple[UnsupportedProject, ...]
+
+    def media(self, identity: str) -> LibraryMedia:
+        """신원 하나의 선언 — 모르는 구조·빠진 키는 그대로 거부한다(기본값 없음)."""
+        where = f"{self.event.path / EVENT_DB}:FFMIORADAsset"
+        record = self.assets.get(identity)
+        if record is None:
+            raise UnsupportedProject(where, f"자산 {identity}의 FFMIORADAsset 기록이 없다")
+        return _media(identity, record, self.originals, self.proxies, where)
+
+
+def index_event(event: LibraryEvent) -> EventIndex:
+    """이벤트의 원본 ↔ 신원 색인 — 데이터베이스를 못 읽으면 거부, 행이 깨지면 problems."""
     database = event.path / EVENT_DB
     originals: dict[str, Path] = {}
     proxies: dict[str, Path] = {}
-    assets: dict[str, dict[str, object]] = {}
+    assets: dict[str, Mapping[str, object]] = {}
+    problems: list[UnsupportedProject] = []
     for kind, blob in _rows(database, ("FFMediaRep", "FFMIORADAsset")):
         where = f"{database}:{kind}"
-        record = _unarchive(blob, where)
-        if kind == "FFMediaRep":
-            identity = _text(record, "md5Seed", where)
-            relative = _text(record, "projectRelativePath", where)
-            rep_type = _text(record, "repType", where)
-            if rep_type == "originalMediaRep":
-                originals[identity] = event.path / relative
-            elif rep_type == "proxyMediaRep":
-                proxies[identity] = event.path / relative
-            continue
-        assets[_text(record, "mediaIdentifier", where)] = record
-    media = [
-        _media(identity, record, originals, proxies, f"{database}:FFMIORADAsset")
-        for identity, record in assets.items()
-    ]
+        try:
+            record = _unarchive(blob, where)
+            if kind == "FFMediaRep":
+                _place_rep(record, where, event, originals, proxies)
+            else:
+                assets[_text(record, "mediaIdentifier", where)] = record
+        except UnsupportedProject as error:
+            problems.append(error)
+    return EventIndex(event, originals, proxies, assets, tuple(problems))
+
+
+def _place_rep(
+    record: Mapping[str, object],
+    where: str,
+    event: LibraryEvent,
+    originals: dict[str, Path],
+    proxies: dict[str, Path],
+) -> None:
+    identity = _text(record, "md5Seed", where)
+    relative = _text(record, "projectRelativePath", where)
+    rep_type = _text(record, "repType", where)
+    if rep_type == "originalMediaRep":
+        originals[identity] = event.path / relative
+    elif rep_type == "proxyMediaRep":
+        proxies[identity] = event.path / relative
+
+
+def read_event_media(event: LibraryEvent) -> tuple[LibraryMedia, ...]:
+    """이벤트가 가진 영상 목록 — 행 하나라도 깨지면 거부한다(엄격). 이름 오름차순.
+
+    `FFMediaRep`(파일)과 `FFMIORADAsset`(시계·포맷)은 서로 다른 객체라 내용 신원으로
+    잇는다 — rep의 `md5Seed`와 asset의 `mediaIdentifier`가 같은 값이다. 깨진 행을 건너뛰고
+    읽어야 하는 쪽은 `index_event`를 쓴다.
+    """
+    index = index_event(event)
+    if index.problems:
+        raise index.problems[0]
+    media = [index.media(identity) for identity in index.assets]
     return tuple(sorted(media, key=lambda item: item.name))
 
 
 def _media(
     identity: str,
-    record: dict[str, object],
-    originals: dict[str, Path],
-    proxies: dict[str, Path],
+    record: Mapping[str, object],
+    originals: Mapping[str, Path],
+    proxies: Mapping[str, Path],
     where: str,
 ) -> LibraryMedia:
     original = originals.get(identity)
@@ -324,7 +392,7 @@ def _media(
     )
 
 
-def _media_start(record: dict[str, object], where: str) -> Fraction:
+def _media_start(record: Mapping[str, object], where: str) -> Fraction:
     """`mediaRange` 시작 — 길이가 선언 길이와 다르면 어느 쪽이 맞는지 모르니 거부한다."""
     start, length = record_range(record, where)
     declared = _fraction(record, "durationForOfflineProvider", where)
@@ -335,7 +403,7 @@ def _media_start(record: dict[str, object], where: str) -> Fraction:
     return start
 
 
-def _drop_frame(record: dict[str, object], where: str) -> bool:
+def _drop_frame(record: Mapping[str, object], where: str) -> bool:
     """실물은 정수 1이다. 0/1 밖의 값이나 빠진 키를 False로 읽으면 표시가 조용히 바뀐다."""
     value = record.get("timecodeDisplayDropFrame")
     if isinstance(value, bool) or value in (0, 1):
@@ -381,7 +449,7 @@ def read_project_timeline(project: LibraryProject) -> LibraryTimeline:
     )
 
 
-def record_range(record: dict[str, object], where: str) -> tuple[Fraction, Fraction]:
+def record_range(record: Mapping[str, object], where: str) -> tuple[Fraction, Fraction]:
     value = record.get("mediaRange")
     if not isinstance(value, str):
         raise UnsupportedProject(where, f"mediaRange를 읽지 못했다: {value!r}")

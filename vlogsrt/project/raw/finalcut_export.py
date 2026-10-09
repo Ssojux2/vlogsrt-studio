@@ -1,0 +1,755 @@
+"""불러온 원본 전부를 Final Cut 타임라인 하나로 보낸다 — 모으고, 대조하고, 쓰는 계층(D56).
+
+문서를 짜는 일은 순수 빌더(`finalcut_timeline`)가 하고, 여기서는 그 입력을 작업공간·원본·
+라이브러리에서 **읽어 모으고**, 서로 대조하고, 결과를 `review/finalcut/`에 새 파일로 쓴다.
+
+지키는 선:
+
+- **원본 바이트를 다시 읽지 않는다.** 원본을 열거나 다시 해시하거나 복사하지 않는다(29GB) —
+  저장된 `content_sha256`끼리 대조하고, 크기·mtime·inode로 바뀌지 않았음만 확인한다. 검토
+  머리가 덮는 원본은 그 머리의 시계(내용 해시에 묶여 있다)를 쓰고 ffprobe로 머리 정보와
+  타임코드만 읽는다. 머리가 덮지 않는 원본만 패킷 목록을 훑어 프레임 격자를 잰다 — 이때는
+  ffprobe가 파일을 끝까지 읽는다. 원본은 Final Cut 라이브러리의 것으로 남는다.
+- **지우지 않으니 관문이 없다.** 미검토 자동 제외도 켠 채 보낸다(D35는 잘라내는 확정
+  내보내기의 관문이다). 끄는 것은 사람이 확정한 제외뿐이다.
+- **조용히 바꾸지 않는다.** 원본이 바뀌었거나, 검토 시계·라이브러리 선언·타임코드가 지금
+  측정과 어긋나면 그 파일 이름을 대고 전체를 거부한다. 라이브러리에서 온 원본에 해시 uid를
+  지어 붙이는 대체 경로는 없다 — 그러면 Final Cut이 같은 미디어를 둘로 본다. 보낼 원본과
+  무관한 라이브러리 기록이 깨진 것은 거부하지 않고 리포트에 경고로 남긴다.
+- **덮어쓰지 않는다.** 매번 새 이름이고, 작업공간마다 한 번에 하나만 쓴다(폴더 잠금). 숨은
+  초안(`.vlogsrt_….partial`)에 쓰고 fsync한 뒤 검증을 통과한 것만 링크로 제 이름을 얻는다.
+  검증에 실패한 문서는 `.invalid.xml`로만 남는다 — 끝난 것처럼 보이지 않는다.
+
+**읽는 쪽 규칙**: 보내기 하나는 `vlogsrt_<UTC>.fcpxml`이 **있을 때만** 끝난 것이다. 리포트
+(`.json`)는 `.fcpxml`보다 먼저 제 이름을 얻으므로, `.fcpxml` 없는 리포트는 중간에 죽은 시도다.
+숨은 `.partial` 초안은 다음 보내기가 치운다.
+"""
+
+from __future__ import annotations
+
+import fcntl
+import itertools
+import json
+import os
+import re
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from fractions import Fraction
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+from vlogsrt import log, preprocess
+from vlogsrt.project import library
+from vlogsrt.project.models import UnsupportedProject
+from vlogsrt.project.raw import finalcut_timeline as timeline
+from vlogsrt.project.raw import media_refs
+from vlogsrt.project.raw.models import AnalysisSourceResult, RawWorkspaceError, SourceAsset
+from vlogsrt.project.raw.segment_review import (
+    SELECTION_EXCLUDED,
+    ReviewRevision,
+    SourceClock,
+    is_unreviewed_auto_exclusion,
+)
+from vlogsrt.project.raw.source_transcript import rational
+from vlogsrt.project.timebase import timecode_frames
+from vlogsrt.project.xml_validation import (
+    XmlValidation,
+    XmlValidationUnavailable,
+    validate_xml,
+)
+
+if TYPE_CHECKING:
+    from vlogsrt.project.raw.jobs import JobContext
+    from vlogsrt.project.raw.service import RawWorkspaceService
+    from vlogsrt.project.raw.workspace import RawWorkspace
+
+INSTALLED_DTD = Path(
+    "/Applications/Final Cut Pro.app/Contents/Frameworks/Interchange.framework"
+    "/Versions/A/Resources/FCPXMLv1_14.dtd"
+)
+"""이 기기 Final Cut Pro가 가진 FCPXML 1.14 DTD — 있으면 반드시 이것으로 검증한다."""
+
+EXPORT_FOLDER = Path("review") / "finalcut"
+REPORT_SCHEMA = "vlogsrt-finalcut-export/v1"
+_FCPXML_SUFFIX = ".fcpxml"
+_REPORT_SUFFIX = ".json"
+_INVALID_SUFFIX = ".invalid.xml"
+_DRAFT_SUFFIX = ".partial"
+_BUNDLE_SUFFIX = ".fcpbundle"
+_DRAFT_NAME = re.compile(r"\.vlogsrt_[0-9]{8}T[0-9]{6}Z(?:_[0-9]+)?\.(?:fcpxml|json)\.partial")
+"""이 계층이 만드는 숨은 초안의 이름 — 치울 수 있는 것은 이 꼴뿐이다."""
+_NEW_FILE = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+_FILE_MODE = 0o644
+
+
+class FinalCutExportError(RawWorkspaceError):
+    """보내지 않았다 — 어느 원본·라이브러리의 무엇이 문제인지 이름으로 말한다."""
+
+
+@dataclass(frozen=True, slots=True)
+class ExportOutcome:
+    fcpxml: Path
+    report: Path
+    counts: dict[str, object]
+
+
+@dataclass(frozen=True, slots=True)
+class _Gathered:
+    """원본 하나에서 모은 것 — 빌더 입력과 리포트 한 줄."""
+
+    source: timeline.SourceInput
+    facts: dict[str, object]
+    from_library: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _Timecode:
+    frames: int
+    drop_frame: bool
+    label: preprocess.SourceTimecode | None
+
+
+@dataclass(frozen=True, slots=True)
+class _Grid:
+    """원본의 프레임 격자 — 검토 머리의 시계에서, 머리 밖이면 패킷 측정에서."""
+
+    frame_duration: Fraction
+    frame_count: int
+
+
+def _refuse(asset: SourceAsset, reason: str) -> FinalCutExportError:
+    return FinalCutExportError(f"{asset.source_name}: {reason}")
+
+
+def _where(error: UnsupportedProject) -> str:
+    return f"{error.location}: {error.reason}"
+
+
+# ── 라이브러리 — 읽기만, immutable ─────────────────────────────────────────
+
+
+def _owning_bundle(path: Path) -> Path | None:
+    return next((parent for parent in path.parents if parent.suffix == _BUNDLE_SUFFIX), None)
+
+
+_Entry = tuple[library.EventIndex, str]
+
+
+class _LibraryShelf:
+    """작업공간이 기억한 라이브러리의 원본 ↔ 신원 색인 — 처음 쓸 때 한 번 읽는다.
+
+    색인은 너그럽게, 기록은 엄격하게: 모든 이벤트의 원본 파일 ↔ 신원 행을 읽되 깨진 행은
+    건너뛰고, 자산 기록은 보낼 원본과 맞는 것만 엄격하게 푼다(실물 12.3 백업의 day1·day3에는
+    `videoFormatName`이 NSNull인 기록이 있다 — 그 하나가 모든 보내기를 막으면 안 된다). Final
+    Cut의 "제자리에 두기"는 `Original Media`에 바깥 원본을 가리키는 링크만 두고 작업공간은 바깥
+    경로를 기록하므로, 라이브러리 안 경로와 링크 대상 둘 다로 찾는다.
+    """
+
+    def __init__(self, bundle: Path | None) -> None:
+        self.bundle = bundle.resolve() if bundle is not None else None
+        self.catalog: library.LibraryCatalog | None = None
+        self._indexes: list[library.EventIndex] | None = None
+        self._by_path: dict[Path, list[_Entry]] = {}
+        self._by_target: dict[Path, list[_Entry]] = {}
+        self._unreadable: list[str] = []
+        self._used: set[str] = set()
+
+    def media_for(self, asset: SourceAsset, path: Path) -> library.LibraryMedia | None:
+        """라이브러리 원본이면 그 선언, 아니면 None — 확인할 수 없으면 거부한다."""
+        owner = _owning_bundle(path)
+        if owner is not None and (self.bundle is None or owner.resolve() != self.bundle):
+            raise _refuse(
+                asset, f"기억한 라이브러리({self.bundle}) 밖의 라이브러리 원본이다: {owner}"
+            )
+        if self.bundle is None or (owner is None and not self.bundle.is_dir()):
+            return None
+        self._index()
+        hits = self._by_path.get(path) or self._by_target.get(path.resolve(), [])
+        if len({identity for _, identity in hits}) > 1:
+            raise _refuse(asset, f"{self.bundle.name}에 이 원본이 여러 신원으로 있다")
+        if not hits:
+            self._require_outside(asset, owner)
+            return None
+        index, identity = hits[0]
+        self._used.add(identity)
+        try:
+            return index.media(identity)
+        except UnsupportedProject as error:
+            raise _refuse(
+                asset,
+                f"{self.bundle.name} 라이브러리의 이 원본 기록을 읽지 못했다 — {_where(error)}",
+            ) from error
+
+    def _require_outside(self, asset: SourceAsset, owner: Path | None) -> None:
+        """기록에 없으면 라이브러리 밖 원본이다 — 단, 라이브러리 안이거나 색인이 덜 읽혔으면
+        그렇다고 말할 수 없으니 거부한다."""
+        assert self.bundle is not None
+        if owner is not None:
+            raise _refuse(
+                asset,
+                f"{self.bundle.name} 기록에 이 원본이 없다 — 라이브러리 원본에 해시 신원을"
+                " 지어 붙이지 않는다",
+            )
+        if self._unreadable or any(index.problems for index in self._indexes or ()):
+            raise _refuse(
+                asset,
+                f"{self.bundle.name}의 기록 일부를 읽지 못해 이 원본이 라이브러리 미디어인지"
+                " 확인할 수 없다",
+            )
+
+    def _index(self) -> None:
+        if self._indexes is not None:
+            return
+        assert self.bundle is not None
+        try:
+            self.catalog = library.read_catalog(self.bundle)
+        except UnsupportedProject as error:
+            raise FinalCutExportError(
+                f"{self.bundle.name} 라이브러리를 읽지 못했다 — {_where(error)}"
+            ) from error
+        indexes: list[library.EventIndex] = []
+        for event in self.catalog.events:
+            try:
+                indexes.append(library.index_event(event))
+            except library.LibraryBusy as error:
+                raise FinalCutExportError(f"{self.bundle.name}: {error.reason}") from error
+            except UnsupportedProject as error:
+                self._unreadable.append(_where(error))
+        self._indexes = indexes
+        for index in indexes:
+            for identity, original in index.originals.items():
+                self._by_path.setdefault(original, []).append((index, identity))
+                self._by_target.setdefault(original.resolve(), []).append((index, identity))
+
+    def warnings(self) -> list[str]:
+        """보낼 원본과 무관해서 거부하지 않은 라이브러리 기록 문제 — 리포트에 남긴다."""
+        found = list(self._unreadable)
+        for index in self._indexes or ():
+            found += [_where(problem) for problem in index.problems]
+            for identity in index.assets:
+                if identity in self._used:
+                    continue
+                try:
+                    index.media(identity)
+                except UnsupportedProject as error:
+                    found.append(f"{_where(error)} ({identity})")
+        return found
+
+    def facts(self) -> dict[str, object] | None:
+        if self.bundle is None or self.catalog is None:
+            return None
+        return {
+            "bundle": str(self.bundle),
+            "catalog_version": self.catalog.catalog_version,
+            "locked": self.catalog.locked,
+            "events": len(self._indexes or ()),
+            "warnings": self.warnings(),
+        }
+
+
+# ── 원본 하나 ────────────────────────────────────────────────────────────
+
+
+def _snapshot(path: Path) -> tuple[int, int, int]:
+    facts = path.stat()
+    return facts.st_size, facts.st_mtime_ns, facts.st_ino
+
+
+def _export_path(workspace: RawWorkspace, asset: SourceAsset) -> tuple[Path, tuple[int, int, int]]:
+    """원본 경로와 지금의 stat — 저장된 해시끼리, 그리고 stat으로만 바뀌지 않았음을 본다."""
+    if asset.content_sha256 is None:
+        raise _refuse(asset, "검증된 내용 해시가 없다 — 가져오기를 먼저 끝내세요")
+    try:
+        path = media_refs.resolve(workspace, asset, "export")
+        record = media_refs.load(workspace, asset.asset_id)
+        copied = workspace.source_reference_path(asset.asset_id) is None
+        before = _snapshot(path)
+    except (RawWorkspaceError, OSError) as error:
+        raise _refuse(asset, f"원본이 가져올 때와 다르거나 없다 — {error}") from error
+    linked = (record or {}).get("original")
+    if linked and linked.get("sha256") != asset.content_sha256:
+        raise _refuse(asset, "연결된 원본의 기록 해시가 가져온 원본과 다르다 — 다시 연결하세요")
+    if copied and not linked and before[0] != asset.size_bytes:
+        raise _refuse(asset, f"원본 크기가 가져올 때와 다르다 ({asset.size_bytes} → {before[0]}B)")
+    return path, before
+
+
+def _require_unchanged(asset: SourceAsset, path: Path, before: tuple[int, int, int]) -> None:
+    """잰 것과 보낼 것이 같은 파일이어야 한다 — 재는 사이에 바뀌었으면 거부한다."""
+    try:
+        after = _snapshot(path)
+    except OSError as error:
+        raise _refuse(asset, f"재는 사이에 원본이 사라졌다 — {error}") from error
+    if after != before:
+        raise _refuse(asset, f"재는 사이에 원본이 바뀌었다(크기·mtime·inode {before} → {after})")
+
+
+def _probe(
+    asset: SourceAsset, path: Path, review: SourceClock | None
+) -> tuple[preprocess.RawMediaProbe, _Grid, _Timecode]:
+    """머리 정보·격자·타임코드 — ffprobe 실패는 이름을 댄 거부다."""
+    try:
+        probe = preprocess.probe_raw_media(path)
+        if review is not None:
+            grid = _review_grid(asset, review, probe)
+        else:
+            grid = _measured_grid(asset, preprocess.probe_extraction_clock(path, probe=probe))
+        label = preprocess.probe_timecode(path)
+    except FinalCutExportError:
+        raise
+    except RuntimeError as error:
+        raise _refuse(asset, f"원본을 ffprobe로 읽지 못했다 — {error}") from error
+    return probe, grid, _timecode(asset, label, grid.frame_duration)
+
+
+def _measured_grid(asset: SourceAsset, clock: preprocess.RawVideoClock) -> _Grid:
+    """검토 머리 밖 원본의 격자 — 패킷을 훑어 잰 것만 믿는다. VFR은 프레임 수가 길이가 아니다."""
+    if not clock.uniform_grid:
+        raise _refuse(asset, f"프레임 격자가 균일하지 않다(VFR) — {clock.grid_note}")
+    return _Grid(clock.frame_duration, clock.frame_count)
+
+
+def _review_grid(asset: SourceAsset, review: SourceClock, probe: preprocess.RawMediaProbe) -> _Grid:
+    """검토 머리의 시계 — 내용 해시에 묶여 있고 stat이 같으면 원본을 다시 훑지 않는다.
+
+    머리의 0프레임이 원본 첫 프레임이다(머리를 세울 때 첫 패킷 pts를 원점으로 쟀다). 지금
+    선언과의 대조는 값싼 머리 정보로만 한다: 스트림 timebase와 프레임 레이트.
+    """
+    if review.source_sha256 != asset.content_sha256:
+        raise _refuse(asset, "검토 머리가 다른 원본 내용에 묶여 있다 — 검토를 다시 세우세요")
+    frames = Fraction(review.end_pts - review.origin_pts, review.frame_ticks)
+    duration = review.frame_ticks * review.time_base
+    declared = (probe.video.time_base, 1 / probe.video.r_frame_rate)
+    if frames.denominator != 1 or (review.time_base, duration) != declared:
+        raise _refuse(
+            asset,
+            f"검토 시계(timebase·프레임 길이) {(review.time_base, duration)}가 지금 원본 선언"
+            f" {declared}과 다르다 — 검토를 다시 세우세요",
+        )
+    return _Grid(duration, frames.numerator)
+
+
+def _timecode(
+    asset: SourceAsset, label: preprocess.SourceTimecode | None, frame_duration: Fraction
+) -> _Timecode:
+    """시작 타임코드 → 영상 프레임 수. 트랙 레이트가 영상과 다르면 프레임 수가 틀린다 — 거부."""
+    if label is None:
+        return _Timecode(0, False, None)
+    if 1 / label.rate != frame_duration:
+        raise _refuse(
+            asset,
+            f"타임코드 레이트 {label.rate}fps가 영상 프레임 레이트 {1 / frame_duration}fps와"
+            " 다르다 — 클립 시작을 정할 수 없다",
+        )
+    try:
+        frames, drop = timecode_frames(label.text, label.rate)
+    except ValueError as error:
+        raise _refuse(asset, f"시작 타임코드를 읽지 못했다 — {error}") from error
+    return _Timecode(frames, drop, label)
+
+
+def _check_library(
+    asset: SourceAsset, declared: library.LibraryMedia, grid: _Grid, code: _Timecode
+) -> None:
+    """라이브러리 선언은 증명이 아니다 — 프레임 길이·수·시작이 같아야 그 신원을 쓴다."""
+    try:
+        observed = (declared.frame_duration, declared.frame_count, declared.start_frame)
+    except UnsupportedProject as error:
+        raise _refuse(asset, f"라이브러리 선언이 프레임 격자 밖이다 — {error.reason}") from error
+    measured = (grid.frame_duration, grid.frame_count, code.frames)
+    if observed != measured:
+        raise _refuse(
+            asset,
+            "라이브러리 선언(프레임 길이·프레임 수·시작 프레임)"
+            f" {observed}이 지금 측정 {measured}과 다르다",
+        )
+    if code.label is not None and declared.drop_frame != code.drop_frame:
+        raise _refuse(asset, "라이브러리의 드롭프레임 표시가 원본 타임코드와 다르다")
+
+
+def _review_segments(
+    asset: SourceAsset, head: ReviewRevision | None, review: SourceClock | None
+) -> tuple[timeline.SegmentState, ...] | None:
+    """검토 머리의 조각 → 프레임 구간(원점 0)."""
+    if head is None or review is None:
+        return None
+    rows = sorted(
+        (s for s in head.segments if s.source_id == asset.asset_id), key=lambda s: s.start_pts
+    )
+    return tuple(
+        timeline.SegmentState(
+            start_frame=_frame(asset, review, row.start_pts),
+            end_frame=_frame(asset, review, row.end_pts),
+            excluded=row.selection == SELECTION_EXCLUDED,
+            unreviewed=is_unreviewed_auto_exclusion(row),
+        )
+        for row in rows
+    )
+
+
+def _frame(asset: SourceAsset, review: SourceClock, pts: int) -> int:
+    frames, remainder = divmod(pts - review.origin_pts, review.frame_ticks)
+    if remainder:
+        raise _refuse(asset, f"검토 경계 pts {pts}가 프레임 격자 밖이다")
+    return frames
+
+
+def _cues(
+    service: RawWorkspaceService, root: Path, asset: SourceAsset
+) -> tuple[timeline.Cue, ...] | None:
+    """사람이 고친 최신 원본 자막 — 다른 원본 내용에 묶인 자막은 쓰지 않고 거부한다."""
+    document = service.source_transcript(root, asset.asset_id)
+    if document is None:
+        return None
+    if document.get("source_sha256") != asset.content_sha256:
+        raise _refuse(asset, "원본 자막이 다른 원본 내용에 묶여 있다")
+    return tuple(
+        timeline.Cue(rational(row["start"]), rational(row["end"]), str(row["text"]))
+        for row in document.get("utterances", [])
+    )
+
+
+def _display_geometry(video: preprocess.RawVideoMedia) -> tuple[int, int]:
+    """재생 화면의 크기 — 90°·270° 회전이면 저장된 가로·세로가 뒤바뀐다."""
+    if video.rotation_degrees % 180:
+        return video.height, video.width
+    return video.width, video.height
+
+
+@dataclass(frozen=True, slots=True)
+class _Scope:
+    """한 번의 보내기가 모든 원본에 같이 쓰는 재료."""
+
+    service: RawWorkspaceService
+    root: Path
+    workspace: RawWorkspace
+    head: ReviewRevision | None
+    evidence: Mapping[str, AnalysisSourceResult]
+    shelf: _LibraryShelf
+
+
+def _gather(scope: _Scope, asset: SourceAsset) -> _Gathered:
+    path, before = _export_path(scope.workspace, asset)
+    review = scope.head.clock_for(asset.asset_id) if scope.head is not None else None
+    probe, grid, code = _probe(asset, path, review)
+    _require_unchanged(asset, path, before)
+    declared = scope.shelf.media_for(asset, path)
+    if declared is not None:
+        _check_library(asset, declared, grid, code)
+    row = scope.evidence.get(asset.asset_id)
+    report = scope.service.tier_report(scope.root, row.revision_id, asset.asset_id) if row else None
+    source = timeline.SourceInput(
+        media=_media(asset, path, probe, grid, code, declared),
+        segments=_review_segments(asset, scope.head, review),
+        report=report,
+        cues=_cues(scope.service, scope.root, asset),
+    )
+    facts = _source_facts(asset, source, code, row if report is not None else None)
+    return _Gathered(source, facts, from_library=declared is not None)
+
+
+def _media(
+    asset: SourceAsset,
+    path: Path,
+    probe: preprocess.RawMediaProbe,
+    grid: _Grid,
+    code: _Timecode,
+    declared: library.LibraryMedia | None,
+) -> timeline.SourceMedia:
+    video = probe.video
+    width, height = _display_geometry(video)
+    audio = probe.audio[0] if probe.audio else None
+    assert asset.content_sha256 is not None  # _export_path가 확인했다
+    return timeline.SourceMedia(
+        source_id=asset.asset_id,
+        name=declared.name if declared is not None else path.stem,
+        path=path,
+        content_sha256=asset.content_sha256,
+        media_identifier=declared.media_identifier if declared is not None else None,
+        frame_duration=grid.frame_duration,
+        frame_count=grid.frame_count,
+        timecode_frames=code.frames,
+        drop_frame=_drop_frame(code, declared),
+        width=width,
+        height=height,
+        color=(video.color_primaries, video.color_transfer, video.color_matrix),
+        audio_channels=audio.channels if audio is not None else None,
+        audio_rate=audio.sample_rate if audio is not None else None,
+    )
+
+
+def _drop_frame(code: _Timecode, declared: library.LibraryMedia | None) -> bool:
+    """타임코드가 있으면 그 표기(`;`)가, 없으면 라이브러리의 표시 설정이 정한다."""
+    if code.label is not None or declared is None:
+        return code.drop_frame
+    return declared.drop_frame
+
+
+def _source_facts(
+    asset: SourceAsset,
+    source: timeline.SourceInput,
+    code: _Timecode,
+    row: AnalysisSourceResult | None,
+) -> dict[str, object]:
+    media = source.media
+    label = code.label
+    return {
+        "asset_id": asset.asset_id,
+        "name": media.name,
+        "path": str(media.path),
+        "content_sha256": media.content_sha256,
+        "size_bytes": asset.size_bytes,
+        "uid": timeline.asset_identity(media)[0],
+        "timecode": None if label is None else {"text": label.text, "rate": str(label.rate)},
+        "frames": media.frame_count,
+        "segments": None if source.segments is None else len(source.segments),
+        "analysis_revision": None if row is None else row.revision_id,
+        "captions": source.cues is not None,
+    }
+
+
+# ── 모으기 ───────────────────────────────────────────────────────────────
+
+
+def _load_head(facade: Any, assets: tuple[SourceAsset, ...]) -> ReviewRevision | None:
+    """검토 머리 — 보낼 원본이 낡았다고 판정되면 그 파일 이름을 대고 거부한다."""
+    if not facade.has_review():
+        return None
+    loaded = facade.load_head()
+    names = {asset.asset_id: asset.source_name for asset in assets}
+    stale = [f"{names[source]}: {why}" for source, why in loaded.stale_sources if source in names]
+    if stale:
+        raise FinalCutExportError("검토 머리의 원본이 낡았다 — " + " · ".join(stale))
+    revision: ReviewRevision = loaded.revision
+    return revision
+
+
+def _not_exported(
+    service: RawWorkspaceService, root: Path, head: ReviewRevision | None, exported: set[str]
+) -> list[dict[str, str]]:
+    """타임라인에 오르지 못한 것 — 조용히 빠지지 않게 리포트와 경고로 남긴다."""
+    rows = [
+        {"asset_id": a.asset_id, "name": a.source_name, "reason": f"상태 {a.status}"}
+        for a in service.list_source_assets(root)
+        if a.asset_id not in exported
+    ]
+    known = {row["asset_id"] for row in rows} | exported
+    rows += [
+        {"asset_id": clock.source_id, "name": "", "reason": "검토 머리에만 있다"}
+        for clock in (head.clocks if head is not None else ())
+        if clock.source_id not in known
+    ]
+    for row in rows:
+        log.warn(
+            f"Final Cut 타임라인에 넣지 않았다: {row['name'] or row['asset_id']} — {row['reason']}"
+        )
+    return rows
+
+
+def _gather_all(
+    scope: _Scope, assets: tuple[SourceAsset, ...], context: JobContext | None
+) -> list[_Gathered]:
+    """원본마다 모은다 — 문제는 끝까지 다 모아 한 번에 이름을 대고 거부한다."""
+    gathered: list[_Gathered] = []
+    problems: list[str] = []
+    if context is not None:
+        context.set_total(len(assets))
+    for asset in assets:
+        if context is not None:
+            context.check_cancel()
+        try:
+            gathered.append(_gather(scope, asset))
+        except FinalCutExportError as error:
+            problems.append(str(error))
+        if context is not None:
+            context.advance()
+    if problems:
+        raise FinalCutExportError(
+            f"Final Cut으로 보내지 않았다 — 원본 {len(problems)}개: " + " / ".join(problems)
+        )
+    return gathered
+
+
+# ── 쓰기 ─────────────────────────────────────────────────────────────────
+
+
+@contextmanager
+def _exclusive(folder: Path) -> Iterator[None]:
+    """작업공간마다 보내기는 한 번에 하나 — 폴더 잠금(flock)이고, 기다리지 않는다."""
+    descriptor = os.open(folder, os.O_RDONLY)
+    try:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise FinalCutExportError(
+                "이 작업공간에서 다른 Final Cut 보내기가 진행 중이다 — 끝난 뒤 다시 보내세요"
+            ) from error
+        yield
+    finally:
+        os.close(descriptor)
+
+
+def _sweep_drafts(folder: Path) -> None:
+    """지난 시도가 남긴 숨은 초안만 지운다 — 잠금 안이므로 지금 쓰는 초안은 없다."""
+    for entry in folder.iterdir():
+        if _DRAFT_NAME.fullmatch(entry.name) and not entry.is_symlink() and entry.is_file():
+            entry.unlink()
+
+
+def _sync_folder(folder: Path) -> None:
+    descriptor = os.open(folder, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _write(descriptor: int, payload: bytes) -> None:
+    with os.fdopen(descriptor, "wb") as stream:
+        stream.write(payload)
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
+def _taken(folder: Path, stem: str) -> bool:
+    names = (_FCPXML_SUFFIX, _REPORT_SUFFIX, _INVALID_SUFFIX)
+    return any((folder / f"{stem}{suffix}").exists() for suffix in names)
+
+
+def _reserve(folder: Path, moment: datetime) -> tuple[str, Path]:
+    """새 이름 하나를 잡는다 — 숨은 초안을 O_EXCL로 만들고, 그 사이 이름이 생겼으면 다음 번호."""
+    base = f"vlogsrt_{moment.astimezone(UTC):%Y%m%dT%H%M%SZ}"
+    for attempt in itertools.count(1):
+        stem = base if attempt == 1 else f"{base}_{attempt}"
+        if _taken(folder, stem):
+            continue
+        draft = folder / f".{stem}{_FCPXML_SUFFIX}{_DRAFT_SUFFIX}"
+        try:
+            os.close(os.open(draft, _NEW_FILE, _FILE_MODE))
+        except FileExistsError:
+            continue
+        if _taken(folder, stem):
+            draft.unlink()
+            continue
+        return stem, draft
+    raise AssertionError("unreachable")
+
+
+def _settle(draft: Path, final: Path) -> None:
+    """초안을 제 이름으로 — 링크는 대상이 있으면 실패하므로 덮어쓰지 않는다."""
+    try:
+        os.link(draft, final)
+    except FileExistsError as error:
+        draft.unlink()
+        raise FinalCutExportError(f"{final.name}이 이미 있다 — 덮어쓰지 않는다") from error
+    draft.unlink()
+    _sync_folder(final.parent)
+
+
+def _validate(draft: Path, dtd_path: Path) -> XmlValidation:
+    try:
+        return validate_xml(draft, dtd_path=dtd_path if dtd_path.is_file() else None)
+    except XmlValidationUnavailable as error:
+        draft.unlink(missing_ok=True)
+        raise FinalCutExportError(f"FCPXML을 검증할 수 없어 보내지 않는다 — {error}") from error
+
+
+def _reject(folder: Path, stem: str, draft: Path, validation: XmlValidation) -> None:
+    kept = folder / f"{stem}{_INVALID_SUFFIX}"
+    _settle(draft, kept)
+    raise FinalCutExportError(
+        "FCPXML이 Final Cut DTD를 통과하지 못해 보내지 않는다 — "
+        + " · ".join(validation.diagnostics)
+        + f" (검사한 문서: {kept})"
+    )
+
+
+def _publish(
+    folder: Path, payload: bytes, report: dict[str, object], moment: datetime, dtd_path: Path
+) -> ExportOutcome:
+    """초안 → fsync → 검증 → 리포트 → `.fcpxml` 순서로 제 이름을 준다(읽는 쪽 규칙 참고)."""
+    _sweep_drafts(folder)
+    stem, draft = _reserve(folder, moment)
+    _write(os.open(draft, os.O_WRONLY | os.O_TRUNC), payload)
+    validation = _validate(draft, dtd_path)
+    if not validation.valid:
+        _reject(folder, stem, draft, validation)
+    fcpxml = folder / f"{stem}{_FCPXML_SUFFIX}"
+    report = {**report, "fcpxml": fcpxml.name, "validation": _validation(validation, dtd_path)}
+    report_path = folder / f"{stem}{_REPORT_SUFFIX}"
+    report_draft = folder / f".{stem}{_REPORT_SUFFIX}{_DRAFT_SUFFIX}"
+    encoded = json.dumps(report, ensure_ascii=False, indent=2).encode("utf-8")
+    _write(os.open(report_draft, _NEW_FILE, _FILE_MODE), encoded)
+    _settle(report_draft, report_path)
+    _settle(draft, fcpxml)
+    counts = report["counts"]
+    assert isinstance(counts, dict)
+    return ExportOutcome(fcpxml=fcpxml, report=report_path, counts=counts)
+
+
+def _validation(validation: XmlValidation, dtd_path: Path) -> dict[str, object]:
+    return {
+        "valid": validation.valid,
+        "dtd_checked": validation.dtd_checked,
+        "dtd": str(dtd_path) if validation.dtd_checked else None,
+    }
+
+
+# ── 입구 ─────────────────────────────────────────────────────────────────
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
+def export(
+    service: RawWorkspaceService,
+    root: Path,
+    context: JobContext | None = None,
+    *,
+    now: Callable[[], datetime] = _utc_now,
+    dtd_path: Path = INSTALLED_DTD,
+) -> ExportOutcome:
+    """작업공간의 ready 원본 전부(촬영 순) → 새 FCPXML + 리포트. Final Cut은 열지 않는다."""
+    facade = service.review_workspace_facade(root)
+    workspace: RawWorkspace = facade.workspace
+    folder = workspace.root / EXPORT_FOLDER
+    folder.mkdir(parents=True, exist_ok=True)
+    with _exclusive(folder):
+        moment = now()
+        assets = service.global_order_proposal(root)
+        if not assets:
+            raise FinalCutExportError("보낼 원본이 없다 — 가져오기를 먼저 끝내세요")
+        head = _load_head(facade, assets)
+        shelf = _LibraryShelf(service.remembered_fcp_library(root))
+        scope = _Scope(service, workspace.root, workspace, head, facade.tier_evidence_rows(), shelf)
+        gathered = _gather_all(scope, assets, context)
+        document = _document(gathered, workspace, moment, shelf)
+        exported = {asset.asset_id for asset in assets}
+        report: dict[str, object] = {
+            "schema": REPORT_SCHEMA,
+            "created_at": moment.astimezone(UTC).isoformat(),
+            "title": document.title,
+            "library": shelf.facts(),
+            "review_head": None if head is None else head.revision_id,
+            "sources": [item.facts for item in gathered],
+            "not_exported": _not_exported(service, root, head, exported),
+            "counts": timeline.document_counts(document),
+        }
+        return _publish(folder, timeline.render(document), report, moment, dtd_path)
+
+
+def _document(
+    gathered: list[_Gathered], workspace: RawWorkspace, moment: datetime, shelf: _LibraryShelf
+) -> timeline.TimelineDocument:
+    bundle = shelf.bundle if any(item.from_library for item in gathered) else None
+    try:
+        return timeline.plan(
+            [item.source for item in gathered],
+            title=timeline.export_title(workspace.name, moment.astimezone()),
+            library_bundle=bundle,
+        )
+    except timeline.FinalCutTimelineError as error:
+        raise FinalCutExportError(f"Final Cut 타임라인을 짜지 못했다 — {error}") from error

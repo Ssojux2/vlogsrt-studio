@@ -1757,3 +1757,55 @@ def test_finalcut_timeline_is_pure(
 
 def test_real_finalcut_timeline_module_passes_the_purity_check() -> None:
     assert check_invariants.check_finalcut_timeline_stays_pure() == []
+
+
+# ── D56: Final Cut 보내기는 원본을 복사·재해시하지 않는다 ──────────────────
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "import shutil",
+        "import hashlib",
+        "import subprocess",
+        "from vlogsrt.project.raw import confirmed_package",
+        "from vlogsrt.project.raw.confirmed_package import verify_confirmed_export",
+        "from vlogsrt.project.raw import final_cut_handoff",
+        "from vlogsrt.project.clips import probe_clips",
+        "from vlogsrt.project.media import sha256_file",
+        "DIGEST = review_workspace._sha256_file(path)",
+        "FACTS = media_refs._facts(path)",
+        "ASSET = service._verified_asset(workspace, asset_id)",
+        "CLIPS = clips_module.probe_clips(paths)",
+        "OUTCOME = facade.export_confirmed(package)",
+        "os.replace(draft, final)",
+        "os.rename(draft, final)",
+        "draft.replace(final)",
+        "draft.rename(final)",
+    ],
+)
+def test_finalcut_export_never_copies_or_rehashes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, statement: str
+) -> None:
+    clean = (
+        "import json\n"
+        "import os\n"
+        "from vlogsrt import preprocess\n"
+        "from vlogsrt.project import library\n"
+        "from vlogsrt.project.raw import finalcut_timeline, media_refs\n"
+        "PATH = media_refs.resolve(workspace, asset, 'export')\n"
+        "os.link(draft, final)\n"
+    )
+    target = "vlogsrt/project/raw/finalcut_export.py"
+    _fake_source_tree(monkeypatch, tmp_path, {target: clean})
+    assert check_invariants.check_finalcut_export_never_copies() == []
+    (tmp_path / target).write_text(clean + statement + "\n", encoding="utf-8")
+    assert check_invariants.check_finalcut_export_never_copies()
+    (tmp_path / target).unlink()
+    assert check_invariants.check_finalcut_export_never_copies() == [
+        "vlogsrt/project/raw/finalcut_export.py: Final Cut 보내기 계층이 사라졌다 (D56)"
+    ]
+
+
+def test_real_finalcut_export_module_passes_the_no_copy_check() -> None:
+    assert check_invariants.check_finalcut_export_never_copies() == []

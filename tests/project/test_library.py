@@ -16,6 +16,7 @@ import pytest
 from library_fixtures import (
     CATALOG_VERSION,
     EVENT_DB,
+    NSNULL,
     ClipSpec,
     MediaSpec,
     ProjectSpec,
@@ -319,3 +320,61 @@ def test_media_start_off_the_frame_grid_is_rejected(tmp_path: Path) -> None:
     with pytest.raises(UnsupportedProject) as caught:
         _ = media.start_frame
     assert "프레임 격자" in caught.value.reason
+
+
+# ─── W-16 B: 관대한 색인 · 기록 하나만 엄격하게 · 저장 중인 라이브러리 ───────────
+
+
+def test_index_reads_past_an_unrelated_broken_record_and_parses_one_record_strictly(
+    tmp_path: Path,
+) -> None:
+    """실물 제주 백업: day1·day3의 `videoFormatName`이 NSNull이라 이벤트 통째 읽기는 거부된다.
+
+    보내기는 원본 ↔ 신원 색인만 전부 읽고, 보낼 원본의 기록 하나만 엄격하게 푼다.
+    """
+    good, broken = _media("good"), _media("broken", format=NSNULL)
+    bundle = make_bundle(tmp_path, media={"clips": (good, broken)})
+    event = _catalog_event(bundle, "clips")
+    with pytest.raises(UnsupportedProject, match="videoFormatName"):
+        library.read_event_media(event)  # 엄격한 통째 읽기는 그대로다
+    index = library.index_event(event)
+    assert index.problems == ()
+    assert index.originals[good.identity] == bundle / "clips" / "Original Media" / "good.mov"
+    assert set(index.assets) == {good.identity, broken.identity}
+    media = index.media(good.identity)
+    assert (media.name, media.media_start, media.drop_frame) == ("good", Fraction(0), True)
+    with pytest.raises(UnsupportedProject) as caught:
+        index.media(broken.identity)
+    assert "videoFormatName" in caught.value.reason
+    with pytest.raises(UnsupportedProject, match="기록이 없다"):
+        index.media("0" * 32)
+
+
+def test_index_keeps_unreadable_rows_as_problems_not_failures(tmp_path: Path) -> None:
+    bundle = make_bundle(tmp_path, media={"clips": (_media("a"),)})
+    event = _catalog_event(bundle, "clips")
+    rows = _rows_of(event.path / EVENT_DB)
+    write_database(event.path / EVENT_DB, [*rows, ("FFMIORADAsset", b"\x00 broken")])
+    index = library.index_event(event)
+    assert set(index.assets) == {_media("a").identity}
+    (problem,) = index.problems
+    assert "binary plist" in problem.reason
+    with pytest.raises(UnsupportedProject, match="binary plist"):
+        library.read_event_media(event)
+
+
+@pytest.mark.parametrize("database", ["clips/" + EVENT_DB, "CurrentVersion.flexolibrary"])
+def test_a_library_being_saved_is_refused_not_read(tmp_path: Path, database: str) -> None:
+    """롤백 저널이 있으면 Final Cut이 쓰는 중이다 — immutable 읽기가 반쯤 쓴 쪽을 볼 수 있다."""
+    bundle = make_bundle(tmp_path, media={"clips": (_media("a"),)})
+    event = library.LibraryEvent(name="clips", path=bundle / "clips")
+    journal = bundle / f"{database}-journal"
+    journal.write_bytes(b"")
+    with pytest.raises(library.LibraryBusy) as caught:
+        if database.startswith("clips/"):
+            library.index_event(event)
+        else:
+            library.read_catalog(bundle)
+    assert "저장하는 중" in caught.value.reason
+    journal.unlink()
+    assert library.index_event(event).assets
