@@ -1883,6 +1883,7 @@ def _asr_from_artifact(artifact: Mapping[str, object]) -> AsrEvidence:
                 request_id=str(item["request_id"]),
                 transcript=transcript,
                 failure=str(item.get("failure") or ""),
+                clamped_segments=tuple(int(at) for at in item.get("clamped_segments", [])),
             )
         )
     return AsrEvidence(

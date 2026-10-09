@@ -13,6 +13,7 @@ import pytest
 
 from tests.raw.test_browser_runtime import _CountingSender, _make_media
 from ui.workspace_service import RawWorkspaceUi
+from vlogsrt.config import Config
 from vlogsrt.project.raw.analysis_approval import LiveAnalysisTransport
 from vlogsrt.project.raw.config import RawModelRoles
 from vlogsrt.project.raw.segment_review import unreviewed_auto_exclusions
@@ -79,7 +80,7 @@ def make_server(
         path_chooser=lambda kind: str(source),
         live=LiveAnalysisTransport(
             sender=sender,
-            cfg=SimpleNamespace(),
+            cfg=Config(),
             client=client,
             asr_approvals=lambda *a: {},
             luna_approvals=lambda *a: {},

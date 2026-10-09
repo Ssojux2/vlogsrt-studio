@@ -101,6 +101,7 @@ def edit(
     if index is None:
         raise RawWorkspaceError("현재 원본 자막을 선택하세요")
     row = rows[index]
+    changed_ids = {utterance_id}
     old_start, old_end = rational(row["start"]), rational(row["end"])
     changed_start, changed_end = old_start, old_end
     if action == "edit":
@@ -128,6 +129,7 @@ def edit(
         )
         row.update(end=encoded(at), text=text, end_sample=right["start_sample"])
         rows.insert(index + 1, right)
+        changed_ids.add(right["utterance_id"])
     elif action == "merge":
         if index + 1 >= len(rows):
             raise RawWorkspaceError("합칠 다음 자막이 없습니다")
@@ -137,13 +139,7 @@ def edit(
         changed_end = rational(right["end"])
     else:
         raise RawWorkspaceError("알 수 없는 자막 편집입니다")
-    duration = rational(current["duration"])
-    for position, cue in enumerate(rows):
-        a, b = rational(cue["start"]), rational(cue["end"])
-        if not 0 <= a < b <= duration or not str(cue["text"]).strip():
-            raise RawWorkspaceError("자막 문구와 원본 안의 시작·끝 시각을 확인하세요")
-        if position and a < rational(rows[position - 1]["end"]):
-            raise RawWorkspaceError("자막 시각이 앞 자막과 겹칩니다")
+    _validate_rows(rows, rational(current["duration"]), changed_ids)
     payload = dict(
         current,
         sequence=current["sequence"] + 1,
@@ -173,6 +169,31 @@ def edit(
         )
         db.commit()
     return payload
+
+
+def _seconds(value: Fraction) -> str:
+    """작업대 편집 칸과 같은 표기(`VL.fmt` — 소수 셋째 자리)로 초를 쓴다."""
+    return f"{float(value):.3f}"
+
+
+def _validate_rows(rows: list[dict], duration: Fraction, changed_ids: set[str]) -> None:
+    """범위·겹침은 모든 줄에, `start < end`와 빈 문구 금지는 이번 편집이 만들거나 바꾼 줄에만.
+
+    전사가 심은 길이 0 줄(D55 — 28.44=28.44 · 청크 끝으로 닫힌 180/180)은 글자째 남는다(규칙 9).
+    그 줄 하나 때문에 다른 줄을 못 고치면 안 된다 — 손대지 않은 줄은 `start ≤ end`면 된다.
+    """
+    for position, cue in enumerate(rows):
+        a, b = rational(cue["start"]), rational(cue["end"])
+        changed = cue["utterance_id"] in changed_ids
+        valid = (a < b and bool(str(cue["text"]).strip())) if changed else a <= b
+        if not (a >= 0 and b <= duration and valid):
+            raise RawWorkspaceError(
+                f"{position + 1}번 자막({_seconds(a)}~{_seconds(b)}초)의 문구와 원본 안의"
+                " 시작·끝 시각을 확인하세요"
+                + (" — 바꾸는 자막은 끝이 시작보다 뒤여야 합니다" if changed and a >= b else "")
+            )
+        if position and a < rational(rows[position - 1]["end"]):
+            raise RawWorkspaceError(f"{position + 1}번 자막 시각이 앞 자막과 겹칩니다")
 
 
 def spoken(workspace: Any, asset_id: str, fallback: Any) -> tuple:

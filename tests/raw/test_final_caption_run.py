@@ -795,7 +795,8 @@ def test_transport_timing_provider_passes_temperature_and_role_fields(
     assert request.timestamp_granularities == ("segment",)
     assert not request.prompt and not request.languages and not request.keywords  # 규칙 6
     provider.timed_transcript(binding=binding, chunk=chunk, settings=workflow, on=BEFORE_SHUTDOWN)
-    assert sender.requests[-1].temperature is None  # 기본은 필드를 아예 안 보낸다
+    # 기본은 엔진 1차 온도다 — 필드를 빼면 API 기본 0으로 들린다(D28·D55 버그 1)
+    assert sender.requests[-1].temperature == Config().transcribe_temperature
 
 
 class UntemperedTiming(FakeTiming):

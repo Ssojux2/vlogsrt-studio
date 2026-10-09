@@ -33,6 +33,7 @@ pytest.importorskip(
 import gradio as gr  # noqa: E402
 
 from ui import workspace_service  # noqa: E402
+from vlogsrt.config import Config  # noqa: E402
 from vlogsrt.project.raw import browser_runtime  # noqa: E402
 from vlogsrt.project.raw import service as raw_service  # noqa: E402
 
@@ -289,7 +290,7 @@ def test_browser_production_flow_fake_sends(tmp_path: Path, monkeypatch) -> None
     client = _CountingClient()
     server._live_transport = LiveAnalysisTransport(
         sender=sender,
-        cfg=types.SimpleNamespace(),
+        cfg=Config(),
         client=client,
         asr_approvals=server._production_asr_approvals,
         luna_approvals=server._production_luna_approvals,
@@ -347,7 +348,7 @@ def test_browser_production_refusals_are_zero_send(tmp_path: Path, monkeypatch) 
     client = _CountingClient()
     server._live_transport = LiveAnalysisTransport(
         sender=sender,
-        cfg=types.SimpleNamespace(),
+        cfg=Config(),
         client=client,
         asr_approvals=server._production_asr_approvals,
         luna_approvals=server._production_luna_approvals,
@@ -383,7 +384,7 @@ def test_browser_production_refusals_are_zero_send(tmp_path: Path, monkeypatch) 
     stale_transport = server._live_transport
     server._live_transport = LiveAnalysisTransport(
         sender=sender,
-        cfg=types.SimpleNamespace(),
+        cfg=Config(),
         client=client,
         asr_approvals=server._production_asr_approvals,
         luna_approvals=server._production_luna_approvals,

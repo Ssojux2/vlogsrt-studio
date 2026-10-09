@@ -385,6 +385,143 @@ def _coerce_decimal(key: str, value: object, source: str) -> Decimal:
     )
 
 
+# ─────────────────────────────────────────────────────────────
+#  자막 시각 확인(D55) — 표시 전용 판정의 기준
+# ─────────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True, slots=True)
+class SyncCheckSettings:
+    """자막 시각 확인의 판정 기준 — **외부 근거 없음**, 실측 13개 영상으로 고른 조정 대상(D55).
+
+    `ProjectConfig`·`RawWorkflowConfig`·`RawUnderstandingSettings`의 칸이 **아니다** —
+    어느 분석·전사·자막 지문이나 캐시 열쇠에도 들어가지 않는다. 확인은 표시만 하므로
+    기준을 바꿔도 다시 살 것이 없다(D47의 교훈: 사전째 해시하는 열쇠에 칸을 얹으면 이미
+    받은 결과가 모두 낡는다). 기준의 지문은 보고서 파일 이름에만 실린다.
+
+    실측(원본 18개 · Silero v6.2.1 · 문턱 0.35)의 여유는 얇다 — 초록 최소 Pτ .75 대
+    노랑 최대 .70, 초록 최대 '이른 시작' .11 대 나쁜 쪽 최소 .27(D55 표).
+    """
+
+    version: str = "sync-check/v1"
+    # 측정 창 — 발화·자막 칸을 이만큼 늘려 '가까이 있다'를 잰다(Pτ·Rτ의 τ).
+    speech_reach_seconds: Fraction = Fraction(1, 2)
+    # 자막 하나 둘레 이 안에서 말소리를 하나도 못 찾으면 '말소리를 못 찾음'.
+    no_speech_reach_seconds: Fraction = Fraction(1)
+    # 시각 어긋남을 찾아보는 폭(±). 끝에 걸린 최고점은 '잴 수 없음'이다.
+    shift_search_seconds: Fraction = Fraction(10)
+    # 잴 수 있는 최소 재료 — 이보다 적으면 '측정 불가'(초록이 아니다).
+    min_cues: int = 3
+    min_speech_seconds: Fraction = Fraction(3)
+    # 어긋남 추정을 믿는 문 — 최고점의 z와 0초 대비 이득.
+    offset_min_peak_z: float = 2.0
+    offset_min_gain: Fraction = Fraction(5, 100)
+    # 머리·가운데·꼬리 — 구간마다 따로 잰 어긋남의 폭이 '점점 밀림'이다.
+    segments: int = 3
+    # 말보다 이만큼 넘게 먼저 뜨고, 그 말이 자막 끝 + 이만큼 안에서 시작하면 '이른 시작'.
+    early_lead_seconds: Fraction = Fraction(1)
+    early_onset_reach_seconds: Fraction = Fraction(3)
+    # 판정 — 빨강(어긋남).
+    red_offset_seconds: Fraction = Fraction(7, 10)
+    red_precision_below: Fraction = Fraction(45, 100)
+    red_recall_below: Fraction = Fraction(60, 100)
+    red_early_at_least: Fraction = Fraction(30, 100)
+    red_no_speech_at_least: Fraction = Fraction(30, 100)
+    # 판정 — 노랑(확인).
+    amber_precision_below: Fraction = Fraction(72, 100)
+    amber_recall_below: Fraction = Fraction(75, 100)
+    amber_early_at_least: Fraction = Fraction(20, 100)
+    amber_no_speech_at_least: Fraction = Fraction(20, 100)
+    amber_drift_seconds: Fraction = Fraction(1)
+    # 표시 전용 지문 — 정수 초 길이(이 오차 안)·붙은 시각. 판정에 쓰지 않는다.
+    whole_second_tolerance_seconds: Fraction = Fraction(1, 1000)
+    # 저장 PCM ↔ 원본 표본 대조(D32 값): 창 수·길이·포락선 칸·찾는 폭·허용 지연·상관 하한.
+    spot_windows: int = 3
+    spot_window_seconds: Fraction = Fraction(20)
+    spot_envelope_seconds: Fraction = Fraction(1, 100)
+    spot_search_seconds: Fraction = Fraction(1)
+    spot_max_lag_seconds: Fraction = Fraction(1, 10)
+    spot_min_correlation: float = 0.95
+    # 원점 — 이보다 작으면 0으로 본다 · SRT의 어긋남이 원점과 이만큼 안이면 '오디오 원점 기준 SRT'.
+    origin_negligible_seconds: Fraction = Fraction(1, 100)
+    origin_match_seconds: Fraction = Fraction(1, 10)
+
+
+SYNC_CHECK_SETTINGS = SyncCheckSettings()
+
+
+def validate_sync_check_settings(settings: SyncCheckSettings) -> None:
+    """값역·순서 검사 — 어긋나면 ProjectConfigError로 전부 보고한다."""
+    problems = [*_sync_range_problems(settings), *_sync_order_problems(settings)]
+    if problems:
+        raise ProjectConfigError("자막 시각 확인 설정이 계약을 어긴다: " + "; ".join(problems))
+
+
+def _sync_range_problems(settings: SyncCheckSettings) -> list[str]:
+    positives: dict[str, Fraction | float] = {
+        "speech_reach_seconds": settings.speech_reach_seconds,
+        "no_speech_reach_seconds": settings.no_speech_reach_seconds,
+        "shift_search_seconds": settings.shift_search_seconds,
+        "min_speech_seconds": settings.min_speech_seconds,
+        "early_lead_seconds": settings.early_lead_seconds,
+        "red_offset_seconds": settings.red_offset_seconds,
+        "amber_drift_seconds": settings.amber_drift_seconds,
+        "spot_window_seconds": settings.spot_window_seconds,
+        "spot_envelope_seconds": settings.spot_envelope_seconds,
+        "spot_search_seconds": settings.spot_search_seconds,
+        "offset_min_peak_z": settings.offset_min_peak_z,
+    }
+    problems = [
+        f"{name}는 양수여야 한다: {value}" for name, value in positives.items() if value <= 0
+    ]
+    counts = {"min_cues": settings.min_cues, "segments": settings.segments}
+    counts["spot_windows"] = settings.spot_windows
+    problems += [f"{name}는 1 이상 정수여야 한다" for name, value in counts.items() if value < 1]
+    shares = {
+        name: getattr(settings, name)
+        for name in (
+            "offset_min_gain",
+            "red_precision_below",
+            "red_recall_below",
+            "red_early_at_least",
+            "red_no_speech_at_least",
+            "amber_precision_below",
+            "amber_recall_below",
+            "amber_early_at_least",
+            "amber_no_speech_at_least",
+            "spot_min_correlation",
+        )
+    }
+    problems += [f"{name}는 0~1이어야 한다: {v}" for name, v in shares.items() if not 0 <= v <= 1]
+    return problems
+
+
+def _sync_order_problems(settings: SyncCheckSettings) -> list[str]:
+    """빨강은 노랑보다 엄해야 한다 — 거꾸로면 노랑 없이 빨강이 먼저 뜬다."""
+    pairs = (
+        ("Pτ", settings.red_precision_below, settings.amber_precision_below),
+        ("Rτ", settings.red_recall_below, settings.amber_recall_below),
+    )
+    problems = [f"빨강 {name} 문턱이 노랑보다 높다" for name, red, amber in pairs if red > amber]
+    shares = (
+        ("이른 시작", settings.red_early_at_least, settings.amber_early_at_least),
+        ("말소리 못 찾음", settings.red_no_speech_at_least, settings.amber_no_speech_at_least),
+    )
+    problems += [f"빨강 {name} 문턱이 노랑보다 낮다" for name, red, amber in shares if red < amber]
+    if settings.spot_max_lag_seconds >= settings.spot_search_seconds:
+        problems.append("표본 대조의 허용 지연이 찾는 폭보다 크다 — 어긋남을 못 본다")
+    if settings.speech_reach_seconds >= settings.shift_search_seconds:
+        problems.append("측정 창이 어긋남 찾는 폭보다 넓다")
+    return problems
+
+
+def sync_check_settings_sha256(settings: SyncCheckSettings) -> str:
+    """기준의 지문 — 보고서 파일 이름에만 쓴다(어느 분석 지문에도 들어가지 않는다)."""
+    payload = {field.name: _serialize(getattr(settings, field.name)) for field in fields(settings)}
+    body = json.dumps(payload, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+
 # 키 하나, 해석기 하나. 여기 없는 키는 전부 거부한다 — 조용히 넘기는 순간
 # 오타가 기본값으로 둔갑한다.
 _FIELD_PARSERS: dict[str, Callable[[str, object, str], Any]] = {

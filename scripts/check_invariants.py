@@ -697,6 +697,153 @@ def check_finalcut_export_never_copies() -> list[str]:
     return failures
 
 
+# 자막 시각 확인(D55)은 **표시만** 한다 — 순수 계산은 프로세스·모델·전사·조판을 모르고, 결과는
+# 등급·자동 정리·선택·출력·분할로 흘러가지 않으며, 기준은 어느 분석·전사·자막 지문에도 없다.
+SYNC_CHECK_MUST_NOT_IMPORT = (
+    "subprocess", "openai", "numpy", "onnxruntime", "preprocess", "output", "refine", "repair",
+    "transcribe", "service", "sync_report", "source_transcript",
+)  # fmt: skip
+SYNC_CHECK_IMPORTERS = (
+    "vlogsrt/project/raw/sync_report.py",
+    "vlogsrt/project/raw/service.py",
+    "vlogsrt/project/raw/commands.py",
+    "vlogsrt/project/commands.py",
+)
+SYNC_REPORT_IMPORTERS = (
+    "vlogsrt/project/raw/service.py",
+    "vlogsrt/project/raw/commands.py",
+    "vlogsrt/project/commands.py",
+)
+SYNC_REPORT_MUST_NOT_IMPORT = (
+    "output", "refine", "repair", "caption_artifacts", "caption_review", "final_caption",
+    "finalcut_export", "finalcut_timeline", "tiering", "auto_cleanup", "segmentation",
+    "selection_analysis",
+)  # fmt: skip
+# SQL 쓰기 문장의 모양 — 대소문자 무관. `dict.update(`·`replace(...)`는 SQL이 아니라 걸리지 않는다.
+SYNC_WRITES_SQL = re.compile(
+    r"\b(INSERT\s+(OR\s+\w+\s+)?INTO|UPDATE\s+\w+\s+SET|DELETE\s+FROM|REPLACE\s+INTO)\b",
+    re.IGNORECASE,
+)
+# sync_report가 원본 자막에서 가져올 수 있는 것 — 이름으로 가져온 읽기 함수뿐(모듈 객체는 안 된다).
+SYNC_TRANSCRIPT_READS = ("load",)
+# 이 파일들은 분석·전사·자막의 지문·캐시 열쇠를 만든다 — 확인 기준을 알면 기준을 바꿀 때마다
+# 이미 받은 결과가 낡는다(D47).
+SYNC_FREE_FINGERPRINT_PATHS = (
+    "vlogsrt/project/config.py:ProjectConfig",
+    "vlogsrt/project/raw/config.py",
+    "vlogsrt/project/raw/analysis_config.py",
+    "vlogsrt/project/raw/analysis_approval.py",
+    "vlogsrt/project/raw/analysis_workflow.py",
+    "vlogsrt/project/raw/understanding.py",
+    "vlogsrt/project/raw/final_caption.py",
+    "vlogsrt/project/raw/caption_workspace.py",
+)
+SYNC_NAMES = re.compile(r"SyncCheckSettings|SYNC_CHECK_SETTINGS|sync_check|sync_report")
+
+
+def check_sync_check_stays_pure() -> list[str]:
+    """D55 — `sync_check.py`는 큐·말소리 칸을 **값으로** 받아 판정만 돌려준다(입출력 없음)."""
+    path = PROJECT_PACKAGE / "sync_check.py"
+    if not path.exists():
+        return ["vlogsrt/project/sync_check.py: 자막 시각 확인 계층이 사라졌다 (D55)"]
+    body = path.read_text(encoding="utf-8")
+    failures = [
+        f"sync_check.py: {name}을 import한다 — 시각 확인이 순수 함수가 아니게 된다 (D55)"
+        for name in _imports(body, SYNC_CHECK_MUST_NOT_IMPORT)
+    ]
+    failures += [
+        f"sync_check.py:{number}: 파일을 직접 읽거나 쓴다 — 입출력은 sync_report.py의 몫이다 (D55)"
+        for number, line in enumerate(body.splitlines(), start=1)
+        if TIERING_FILE_IO.search(line)
+    ]
+    return failures
+
+
+def check_sync_check_only_displays() -> list[str]:
+    """D55 — 확인 결과는 정해진 곳에서만 읽히고, 자막·전사·지문을 쓰지 않는다."""
+    failures: list[str] = []
+    for path in _project_sources():
+        rel = _rel(path)
+        imported = _imported_names(path.read_text(encoding="utf-8"))
+        if (
+            "sync_check" in imported
+            and rel not in SYNC_CHECK_IMPORTERS
+            and rel != _rel(PROJECT_PACKAGE / "sync_check.py")
+        ):
+            failures.append(f"{rel}: sync_check를 import한다 — 판정이 표시 밖으로 샌다 (D55)")
+        if "sync_report" in imported and rel not in SYNC_REPORT_IMPORTERS:
+            failures.append(f"{rel}: sync_report를 import한다 — 판정이 표시 밖으로 샌다 (D55)")
+    failures += _sync_report_failures()
+    failures += _sync_fingerprint_failures()
+    return failures
+
+
+def _sync_report_failures() -> list[str]:
+    path = PROJECT_PACKAGE / "raw" / "sync_report.py"
+    if not path.exists():
+        return ["vlogsrt/project/raw/sync_report.py: 자막 시각 확인 보고서 계층이 사라졌다 (D55)"]
+    body = path.read_text(encoding="utf-8")
+    failures = [
+        f"sync_report.py: {name}을 import한다 — 확인이 자막·출력 계층을 안다 (D55)"
+        for name in _imports(body, SYNC_REPORT_MUST_NOT_IMPORT)
+    ]
+    failures += _sync_transcript_import_failures(ast.parse(body))
+    failures += [
+        f"sync_report.py:{number}: DB에 쓰는 SQL이 있다 — 확인은 보고서 파일만 쓴다 (D55)"
+        for number, line in enumerate(body.splitlines(), start=1)
+        if SYNC_WRITES_SQL.search(line)
+    ]
+    return failures
+
+
+def _sync_transcript_import_failures(tree: ast.Module) -> list[str]:
+    """원본 자막은 이름으로 가져온 읽기 함수로만 — 모듈 객체를 쥐면 `.edit()`·`.seed()`가 열린다."""
+    failures: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            failures += [
+                f"sync_report.py:{node.lineno}: source_transcript 모듈을 들여온다 — "
+                "읽기 함수만 이름으로 가져온다 (D55)"
+                for alias in node.names
+                if alias.name.split(".")[-1] == "source_transcript"
+            ]
+        elif isinstance(node, ast.ImportFrom):
+            from_transcript = (node.module or "").split(".")[-1] == "source_transcript"
+            failures += [
+                f"sync_report.py:{node.lineno}: source_transcript"
+                f"{'.' + alias.name if from_transcript else ''}를 가져온다 — "
+                f"읽기({', '.join(SYNC_TRANSCRIPT_READS)})만 허용이다 (D55)"
+                for alias in node.names
+                if (from_transcript and alias.name not in SYNC_TRANSCRIPT_READS)
+                or (not from_transcript and alias.name == "source_transcript")
+            ]
+    return failures
+
+
+def _sync_fingerprint_failures() -> list[str]:
+    failures: list[str] = []
+    for entry in SYNC_FREE_FINGERPRINT_PATHS:
+        rel, _, class_name = entry.partition(":")
+        path = ROOT / rel
+        if not path.exists():
+            continue
+        body = path.read_text(encoding="utf-8")
+        if class_name:
+            body = _class_source(body, class_name)
+        if SYNC_NAMES.search(body):
+            failures.append(
+                f"{entry}: 자막 시각 확인 기준을 안다 — 지문·캐시 열쇠 밖이어야 한다 (D55)"
+            )
+    return failures
+
+
+def _class_source(body: str, class_name: str) -> str:
+    for node in ast.walk(ast.parse(body)):
+        if isinstance(node, ast.ClassDef) and node.name == class_name:
+            return ast.get_source_segment(body, node) or ""
+    return ""
+
+
 def check_edit_layer_ignores_audio() -> list[str]:
     """규칙 4·9 — 제거 계층(edit.py·export.py)은 오디오·전사·판정 계층을 import하지 못한다.
 
@@ -1273,6 +1420,8 @@ CHECKS = (
     ("재전사는 전사 단계에 머문다", check_repair_stays_upstream),
     ("글자 교정은 순수하다", check_retext_stays_pure),
     ("3단 등급은 순수하다", check_tiering_stays_pure),
+    ("자막 시각 확인은 순수하다", check_sync_check_stays_pure),
+    ("자막 시각 확인은 표시만 한다", check_sync_check_only_displays),
     ("Final Cut 타임라인 빌더는 순수하다", check_finalcut_timeline_stays_pure),
     ("Final Cut 보내기는 원본을 복사·재해시하지 않는다", check_finalcut_export_never_copies),
     ("옛 선택한 컷 Final Cut 출력은 되살리지 않는다", check_old_finalcut_path_stays_dead),

@@ -471,6 +471,31 @@ def check_srt_coverage(srt: Path, duration: float) -> Check:
     return Check("SRT 시간 커버리지", covered / duration >= 0.5, detail)
 
 
+def check_speech_sync(video: Path | None, srt: Path) -> Check:
+    """SRT 큐를 원본의 **말소리**(Silero VAD)와 대조한다(D55) — 진폭 포락선이 아니다.
+
+    제품의 자막 시각 확인(`sync_report.measure_srt`)을 그대로 쓴다. 디코드·VAD 칸은 끝나면
+    지워지는 임시 폴더에만 쓰고 SRT는 읽기만 한다. VAD extra가 없거나 잴 재료가 모자라면
+    SKIP이다 — 통과가 아니다(D32). 빨강만 실패로 세고 노랑은 상세에 남긴다.
+    """
+    name = "말소리 대조 (VAD)"
+    if video is None or not video.is_file():
+        return skip(name, "원본 영상 경로를 모른다(trace.source 없음)")
+    if not srt.is_file():
+        return skip(name, f"{srt} 없음")
+    import tempfile
+
+    from vlogsrt.project.raw import sync_report
+
+    with tempfile.TemporaryDirectory(prefix="verify-sync-") as scratch:
+        document = sync_report.measure_srt(video, srt, scratch=Path(scratch))
+    verdict = str(document["verdict"])
+    reasons = " / ".join(item["text"] for item in document["reasons"]) or "이유 없음"
+    if verdict == "skip":
+        return skip(name, reasons)
+    return Check(name, verdict != "red", f"{verdict.upper()} — {reasons}")
+
+
 # ── 조립 ─────────────────────────────────────────────────────
 
 
@@ -553,6 +578,7 @@ def _run_checks(found: Located, stem: str, meta: dict, outdir: Path) -> list[Che
         check_glue(spine, marks, source),
         check_cue_lag(found.trace),
         check_srt_coverage(outdir / "output.srt", duration),
+        check_speech_sync(found.video, outdir / "output.srt"),
     ]
 
 

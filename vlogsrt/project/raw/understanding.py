@@ -223,6 +223,8 @@ class AsrChunkOutcome:
     request_id: str
     transcript: tuple[tuple[float, float, str], ...]
     failure: str = ""
+    # 청크 끝을 관용 안에서 넘어 끝에 맞춘 세그먼트 위치(D55) — 화면이 「N줄을 맞춤」으로 보인다.
+    clamped_segments: tuple[int, ...] = ()
 
     @property
     def succeeded(self) -> bool:
@@ -345,6 +347,7 @@ def _transcribe_span(
         )
         request_log.finish(attempt, received=True)
         segments = tuple((seg.start, seg.end, seg.text) for seg in timed.segments)
+        clamped = _clamped_of(timed.clamped_segments, position)
     except Exception as exc:  # 청크 하나의 실패 — 전체 실행의 실패가 아니다(§7.3)
         request_log.finish(
             locals().get("attempt"),
@@ -352,7 +355,7 @@ def _transcribe_span(
             note=provider_error(exc)[0],
         )
         check_cancel()
-        log.debug(f"내부 전사 청크 {position} 실패: {exc}")
+        log.warn(f"내부 전사 청크 {position} 실패 — 이 구간에는 자막이 없다: {exc}")
         return _failed_outcome(span, position, chunk_request_id, wav_path, exc)
     outcome = AsrChunkOutcome(
         chunk_index=position,
@@ -361,14 +364,39 @@ def _transcribe_span(
         wav_sha256=_sha256_file(wav_path),
         request_id=chunk_request_id,
         transcript=segments,
+        clamped_segments=clamped,
     )
     temp = cache_path.with_suffix(".tmp")
     temp.write_text(
-        json.dumps({"fingerprint": fingerprint, "outcome": asdict(outcome)}, ensure_ascii=False),
+        json.dumps(
+            {"fingerprint": fingerprint, "outcome": _cached_outcome(outcome)}, ensure_ascii=False
+        ),
         encoding="utf-8",
     )
     temp.replace(cache_path)
     return outcome
+
+
+def _cached_outcome(outcome: AsrChunkOutcome) -> dict[str, object]:
+    """캐시 항목 — 맞춘 줄이 없으면 그 칸을 싣지 않는다(W-15 이전 모양 그대로, D55).
+
+    W-15 이전 빌드는 모르는 칸이 있으면 `AsrChunkOutcome(**…)`에서 TypeError를 내고 캐시를
+    놓친 것으로 쳐 유료 전사를 다시 보낸다 — 넘침이 없는 항목은 바이트까지 예전과 같아야 한다.
+    """
+    body = asdict(outcome)
+    if not outcome.clamped_segments:
+        del body["clamped_segments"]
+    return body
+
+
+def _clamped_of(clamped: Sequence[int], position: int) -> tuple[int, ...]:
+    """청크 끝에 맞춘 세그먼트 위치 — 있으면 경고로 알린다(D55, 조용한 손질은 없다)."""
+    if clamped:
+        log.warn(
+            f"내부 전사 청크 {position}: {len(clamped)}줄을 청크 끝에 맞췄다 — 청크는 버리지"
+            " 않는다 (D55)"
+        )
+    return tuple(clamped)
 
 
 def _failed_outcome(
@@ -1411,22 +1439,26 @@ def asr_evidence_json(evidence: AsrEvidence) -> dict[str, object]:
     return {
         "request_id": evidence.request_id,
         "sample_rate": evidence.sample_rate,
-        "chunks": [
-            {
-                "chunk_index": chunk.chunk_index,
-                "sample_start": chunk.sample_start,
-                "sample_end": chunk.sample_end,
-                "wav_sha256": chunk.wav_sha256,
-                "request_id": chunk.request_id,
-                "segments": [
-                    {"start": start, "end": end, "text": text}
-                    for start, end, text in chunk.transcript
-                ],
-                "failure": chunk.failure,
-            }
-            for chunk in evidence.chunks
-        ],
+        "chunks": [_asr_chunk_json(chunk) for chunk in evidence.chunks],
     }
+
+
+def _asr_chunk_json(chunk: AsrChunkOutcome) -> dict[str, object]:
+    """청크 하나 — 끝에 맞춘 줄이 있을 때만 그 칸을 싣는다(없으면 예전 기록과 바이트가 같다)."""
+    body: dict[str, object] = {
+        "chunk_index": chunk.chunk_index,
+        "sample_start": chunk.sample_start,
+        "sample_end": chunk.sample_end,
+        "wav_sha256": chunk.wav_sha256,
+        "request_id": chunk.request_id,
+        "segments": [
+            {"start": start, "end": end, "text": text} for start, end, text in chunk.transcript
+        ],
+        "failure": chunk.failure,
+    }
+    if chunk.clamped_segments:
+        body["clamped_segments"] = list(chunk.clamped_segments)
+    return body
 
 
 def utterances_json(utterances: Sequence[UtteranceEvidence]) -> list[dict[str, object]]:

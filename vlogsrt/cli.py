@@ -119,7 +119,21 @@ def _add_project_command(sub: argparse._SubParsersAction) -> None:
     project_commands = project.add_subparsers(
         dest="project_command",
         required=True,
-        metavar="{receive,inspect,analyze,review,roughcut,caption,caption-estimate,caption-run}",
+        metavar=(
+            "{receive,inspect,analyze,review,roughcut,caption,caption-estimate,caption-run,"
+            "sync-check}"
+        ),
+    )
+    sync = project_commands.add_parser(
+        "sync-check",
+        help="SRT 자막 시각을 원본 말소리와 대조해 표시만 한다 (무료 로컬 VAD · SRT는 안 바뀐다)",
+    )
+    sync.add_argument("--media", type=Path, required=True, help="원본 영상")
+    sync.add_argument("--srt", type=Path, required=True, help="확인할 SRT (읽기만 한다)")
+    sync.add_argument("--audio-ordinal", type=int, default=0, help="오디오 트랙 순번(기본 0)")
+    sync.add_argument("--json", action="store_true", help="보고서 JSON을 그대로 인쇄")
+    sync.add_argument(
+        "--no-write", action="store_true", help="곁파일 <srt>.sync.json도 쓰지 않는다"
     )
     run = project_commands.add_parser(
         "run",

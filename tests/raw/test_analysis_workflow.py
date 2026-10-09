@@ -30,6 +30,7 @@ from pathlib import Path
 import pytest
 
 from vlogsrt import preprocess
+from vlogsrt.config import Config
 from vlogsrt.project.raw import analysis_workflow
 from vlogsrt.project.raw import service as raw
 from vlogsrt.project.raw.analysis_config import RawUnderstandingSettings
@@ -596,6 +597,11 @@ def test_interrupted_job_resumes_with_same_id_and_cached_sources(
     )
     handle, record = _analyze(service, workspace)
     assert record.status == "succeeded", record.error
+    # 분석 뒤 걸리는 자막 시각 확인(D55, 무료 백그라운드)이 끝나길 기다린다 — 아래 복구는
+    # 분석 작업 하나만 실행 중으로 되돌린다.
+    sync = service.latest_job(workspace, raw.SYNC_CHECK_JOB_KIND)
+    if sync is not None:
+        _wait_terminal(service, workspace, sync.job_id)
 
     # 프로세스 사망 흉내 — 실행 중 표시로 되돌리고 새 서버가 복구한다(§14.1).
     from vlogsrt.project.raw.jobs import JobStore
@@ -705,7 +711,7 @@ def test_live_two_phase_asr_stops_for_semantic_then_resumes(
             asset.asset_id: _asr_approval(asset, workflow, settings, probe.audio[0].stream_index)
         },
         sender=sender,
-        cfg=types.SimpleNamespace(),
+        cfg=Config(),
     )
     assert record.status == "succeeded", record.error
     assert len(sender.calls) == 1  # 내부 ASR 단일 청크 — 실제 전송 1회
@@ -757,7 +763,7 @@ def test_live_two_phase_asr_stops_for_semantic_then_resumes(
             asset.asset_id: _asr_approval(asset, workflow, settings, probe.audio[0].stream_index)
         },
         sender=sender,
-        cfg=types.SimpleNamespace(),
+        cfg=Config(),
     )
     replayed = _wait_terminal(service, workspace, phase1_again.job_id)
     assert replayed.status == "succeeded", replayed.error
@@ -851,7 +857,7 @@ def test_live_asr_gates_refuse_wrong_approvals_before_any_send(
     settings = RawUnderstandingSettings()
     stream_index = probe.audio[0].stream_index
     sender = _FakeSender()
-    cfg = types.SimpleNamespace()
+    cfg = Config()
 
     def _start(approval, **kwargs):
         return service.start_analysis(
@@ -917,7 +923,7 @@ def test_live_noaudio_visual_phase_zero_asr(
         mode="live",
         asr_approvals={},  # 무성 — 승인할 전사가 없다
         sender=sender,
-        cfg=types.SimpleNamespace(),
+        cfg=Config(),
     )
     assert record.status == "succeeded", record.error
     assert sender.calls == []  # ASR 0송신 — 작업 자체를 지어내지 않는다(§7.3)

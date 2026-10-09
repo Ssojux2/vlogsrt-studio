@@ -382,5 +382,10 @@ class JobManager:
     def active_of_kinds(self, kinds: Collection[str]) -> tuple[JobRecord, ...]:
         return self._store.active_of_kinds(kinds)
 
+    def is_executing(self, job_id: str) -> bool:
+        """이 관리자가 그 작업의 본문을 아직 쥐고 있는가 — 끝 상태를 정산할 때까지 참이다."""
+        with self._lock:
+            return job_id in self._executions
+
     def recover_interrupted(self) -> int:
         return self._store.recover_interrupted()

@@ -735,9 +735,24 @@ def _ask_timing(
     request_id: str,
     ledger: _Ledger,
 ) -> TimedTranscript:
-    """청크 하나를 시간 제공자에게 묻는다 — 예약·신원·전송이 한 덩어리다."""
+    """청크 하나를 시간 제공자에게 묻는다 — 예약·신원·전송이 한 덩어리다.
+
+    온도 손잡이가 있는 제공자에게는 승인 지문이 얼린 엔진 1차 온도를 그대로 보낸다
+    (D28·D55 — 예전엔 지문에만 0.6이 적히고 요청에는 빠져 API 기본 0으로 들렸다).
+    """
     ledger.charge(_span_seconds(plan, index), capabilities.ROLE_TIMING)
     binding = _binding(plan, index, chunk, request_id)
+    if "temperature" in inspect.signature(provider.timed_transcript).parameters:
+        tempered = cast(RescueTimingProvider, provider)  # 서명 검사가 이 계약을 보증한다
+        return tempered.timed_transcript(
+            binding=binding,
+            chunk=chunk,
+            settings=plan.workflow,
+            on=on,
+            stem=chunk.path.stem,
+            source=plan.video.source_id,
+            temperature=plan.engine.transcribe_temperature,
+        )
     return provider.timed_transcript(
         binding=binding,
         chunk=chunk,
@@ -770,6 +785,7 @@ def _timing_pass(
         state.evidence.append(
             _evidence(request_id, capabilities.ROLE_TIMING, index, timed.binding, timed.response)
         )
+        _note_kept_overrun(state, index, timed)
         state.timing[index] = _TimingOutcome(
             index=index,
             span=plan.spans[index],
@@ -778,6 +794,26 @@ def _timing_pass(
             transcript=timed,
             failure="",
         )
+
+
+def _note_kept_overrun(state: _RunState, index: int, timed: TimedTranscript) -> None:
+    """청크 끝을 넘은 세그먼트 — 이 경로는 원 응답의 whisper 시각을 그대로 쓴다(D55).
+
+    해석기는 청크를 버리지 않았을 뿐이고 엔진 골격은 원 응답에서 선다 — 넘친 끝은 청크 끝으로
+    닫히지 않는다. 그 사실을 검토 항목으로 남긴다(조용한 손질도, 조용한 그대로도 없다).
+    """
+    if not timed.clamped_segments:
+        return
+    state.findings.append(
+        QualityFinding(
+            severity="warn",
+            code="timing_overrun_kept",
+            message=(
+                f"청크 {index}: 세그먼트 {len(timed.clamped_segments)}개의 끝이 청크 길이를 넘었다"
+                " — 청크는 버리지 않고 whisper 시각 그대로 썼다 (D55)"
+            ),
+        )
+    )
 
 
 def _ask_text(
@@ -1250,7 +1286,7 @@ def _cue_findings(plan: CaptionRunPlan, cue: CaptionCue) -> list[QualityFinding]
         found.append(
             QualityFinding("warn", "short_display", f"표시가 짧다: {duration:.2f}초", seg_id=seg_id)
         )
-    cps = len(cue.text) / duration if duration > 0 else float("inf")
+    cps = len(cue.text) / duration if duration > 0 else 0.0  # 길이 0은 위 항목이 말한다
     if cps > plan.settings.reading_speed_max_cps:
         found.append(
             QualityFinding(

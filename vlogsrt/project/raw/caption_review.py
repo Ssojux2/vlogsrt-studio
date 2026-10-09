@@ -643,7 +643,7 @@ def _cue_warnings(cue: ReviewCue, snapshot: AutomaticSnapshot) -> list[WarningIt
         found.append(_warn(cue, "out_of_final_range", "큐가 최종 영상 범위를 벗어났다"))
     if duration < snapshot.thresholds.min_duration:
         found.append(_warn(cue, "short_display", f"표시가 짧다: {float(duration):.2f}초"))
-    if _cps(cue) > snapshot.thresholds.reading_speed_max_cps:
+    if duration > 0 and _cps(cue) > snapshot.thresholds.reading_speed_max_cps:
         found.append(_warn(cue, "reading_speed", f"읽기 속도가 빠르다: {_cps(cue):.1f}자/초"))
     return found
 

@@ -14,7 +14,8 @@ import json
 import math
 import os
 import threading
-from collections.abc import Callable, Collection, Mapping, Sequence
+import uuid
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from datetime import UTC, date, datetime
 from fractions import Fraction
@@ -287,6 +288,7 @@ __all__ = [
     "TIER_SETTINGS",
     "TIER_TAG_PREFIX",
     "UPKEEP_JOB_KIND",
+    "SYNC_CHECK_JOB_KIND",
     "AUTO_EXCLUDED_UNREVIEWED_TAG",
     "VISUAL_PAGE_SIZE",
     "VISUAL_PREPARE_JOB_KIND",
@@ -343,6 +345,13 @@ __all__ = [
 
 UPKEEP_JOB_KIND = "workspace_upkeep"
 """앱 열기·화면 갱신의 정리 작업 하나 — 촬영 시각·영상 순서·등급판·검토 순서(D52·D53)."""
+
+SYNC_CHECK_JOB_KIND = "subtitle_sync_check"
+"""자막 시각 확인 작업(D55) — 무료 로컬 VAD로 원본 자막과 말소리를 대조해 **표시만** 한다.
+자막·전사·SRT·지문을 쓰지 않고 등급·자동 정리·선택·출력·분할에 들어가지 않는다."""
+
+SYNC_ALL_SOURCES = "*"
+"""'걸지 못함' 표지의 자리 — 원본을 모르는 실패(앱 열기 고리가 재료조차 못 읽음)는 전체에."""
 
 UPKEEP_CAPTURE = "촬영 시각"
 UPKEEP_ORDER = "영상 순서"
@@ -404,16 +413,25 @@ def _analysis_body(
     settings: RawUnderstandingSettings,
     workflow: RawWorkflowConfig,
     providers: analysis_workflow.AnalysisProviders,
+    after: Callable[[], None] | None = None,
 ) -> Callable[[JobContext], None]:
-    """분석 작업 본문 묶기 — 리비전·선택·호출 경계를 즉시 묶는다(§14.1)."""
+    """분석 작업 본문 묶기 — 리비전·선택·호출 경계를 즉시 묶는다(§14.1).
+
+    `after`는 본문이 끝난 뒤(성공·실패 모두) 한 번 부른다 — 원본 자막이 새로 심겼을 수
+    있으니 자막 시각 확인(D55, 무료)을 거는 고리다.
+    """
 
     def body(context: JobContext) -> None:
         from vlogsrt.project.raw import request_log
 
-        with request_log.scope(workspace, context.job_id, live=providers.is_live()):
-            analysis_workflow.run_analysis(
-                context, workspace, revision, order, assets, settings, workflow, providers
-            )
+        try:
+            with request_log.scope(workspace, context.job_id, live=providers.is_live()):
+                analysis_workflow.run_analysis(
+                    context, workspace, revision, order, assets, settings, workflow, providers
+                )
+        finally:
+            if after is not None:
+                after()
 
     return body
 
@@ -426,18 +444,10 @@ def _semantic_body(
     settings: RawUnderstandingSettings,
     workflow: RawWorkflowConfig,
     providers: analysis_workflow.AnalysisProviders,
+    after: Callable[[], None] | None = None,
 ) -> Callable[[JobContext], None]:
     """2단계(의미) 작업 본문 묶기 — 같은 본문, 단계는 공급자가 이미 말한다."""
-
-    def body(context: JobContext) -> None:
-        from vlogsrt.project.raw import request_log
-
-        with request_log.scope(workspace, context.job_id, live=providers.is_live()):
-            analysis_workflow.run_analysis(
-                context, workspace, revision, order, assets, settings, workflow, providers
-            )
-
-    return body
+    return _analysis_body(workspace, revision, order, assets, settings, workflow, providers, after)
 
 
 def _visual_prepare_body(
@@ -765,6 +775,14 @@ class RawWorkspaceService:
         # 앱 열기 정리(등급판 옮기기 포함)는 (작업공간, 할 일, 그 상태)를 이번 실행에서 한 번만
         # 건다 — 실패한 일을 화면 갱신마다 다시 걸지 않고, 앱을 다시 열면 한 번 더 건다(D52·D53).
         self._upkeep_tries: set[tuple[Path, str, str]] = set()
+        # 자막 시각 확인도 (작업공간, 원본, 재료 열쇠)마다 이번 실행에서 한 번만 건다(D55).
+        self._sync_tries: set[tuple[Path, str, str]] = set()
+        # 확인 작업은 작업공간마다 한 번에 하나다 — 도는 동안 온 요청은 (원본 → 다시 재기)로 합친다.
+        self._sync_lock = threading.Lock()
+        self._sync_running: dict[Path, str] = {}
+        self._sync_waiting: dict[Path, dict[str, bool]] = {}
+        # 확인을 걸지 못한 원본(작업공간 → 원본 또는 SYNC_ALL_SOURCES → 이유) — 화면의 회색 표지.
+        self._sync_failures: dict[Path, dict[str, str]] = {}
         # 정리 작업은 작업공간마다 한 번에 하나다 — 확인과 제출을 한 자물쇠 안에서 한다.
         self._upkeep_lock = threading.Lock()
         # 순서 확정·되채움 쓰기·검토 순서 맞춤이 동시에 불려도 같은 일을 두 번 하지 않는다.
@@ -985,7 +1003,9 @@ class RawWorkspaceService:
         from vlogsrt.project.raw.source_transcript import edit
 
         self._workspace(root).source_asset(asset_id)
-        return edit(self._workspace(root), asset_id, revision, **fields)
+        edited = edit(self._workspace(root), asset_id, revision, **fields)
+        self._queue_sync_checks(root, (asset_id,))  # 자막이 바뀌었다 — 시각 확인을 다시(D55)
+        return edited
 
     def relink_source_original(self, root: Path, asset_id: str, path: Path) -> dict:
         from vlogsrt.project.raw.media_refs import relink_original
@@ -1599,6 +1619,236 @@ class RawWorkspaceService:
         if _review_head(facade) is not None and facade.tier_evidence_rows():
             self._migrate_head_tiers(root, facade)
 
+    # ── 자막 시각 확인(D55) — 표시 전용, 무료 로컬 VAD ─────────────
+
+    def start_sync_checks(
+        self, root: Path, source_ids: Sequence[str] | None = None, *, force: bool = False
+    ) -> JobHandle | None:
+        """원본 자막 시각을 말소리와 대조하는 작업 하나 — 잴 것이 없으면 None.
+
+        보고서가 없거나 재료(자막 리비전·1단계 PCM·기준)가 바뀐 원본만 잰다. `force`면 고른
+        원본 전부를 다시 잰다(화면의 「다시 재기」 — VAD 칸·표본 대조는 캐시에서 온다).
+        유료 호출 0 · 자막·전사·SRT·지문은 쓰지 않는다(규칙 4·5의 대응).
+
+        이 서비스의 확인 작업이 아직 본문을 돌고 있으면 새로 만들지 않고 요청을 거기에 합친다.
+        작업 지문에는 요청마다 새 값이 섞인다 — DB에 같은 지문의 활성 줄(끝나 정산을 기다리는
+        작업, 정산을 못 하고 running으로 남은 줄)이 있어도 거기에 붙어 요청이 버려지지 않는다.
+        다른 인스턴스와 겹쳐 한 번 더 재는 일은 해롭지 않다(표시 전용).
+        """
+        from vlogsrt.project.raw import sync_report
+
+        workspace = self._workspace(root)
+        pending = sync_report.pending_sources(workspace, source_ids=source_ids, force=force)
+        if not pending:
+            return None
+        key = root.expanduser().resolve()
+        with self._sync_lock:
+            merged = self._merge_into_running(key, root, pending, force)
+            handle = merged or self.submit_job(
+                root,
+                SYNC_CHECK_JOB_KIND,
+                _sync_fingerprint(pending),
+                self._sync_body(key, workspace, tuple(sorted(pending))),
+                total=len(pending),
+            )
+            if merged is None:
+                self._sync_running[key] = handle.job_id
+        self._clear_sync_failures(key, pending)
+        return handle
+
+    def _merge_into_running(
+        self, key: Path, root: Path, pending: Mapping[str, str], force: bool
+    ) -> JobHandle | None:
+        """이 서비스의 확인 작업이 아직 본문을 돌면 요청을 합친다 — 본문이 사라진 칸은 비운다."""
+        running = self._sync_running.get(key)
+        if running is None:
+            return None
+        if not self._jobs(root).is_executing(running):
+            del self._sync_running[key]  # 본문이 없는 칸이 확인을 막지 못한다
+            self._sync_waiting.pop(key, None)
+            return None
+        waiting = self._sync_waiting.setdefault(key, {})
+        for source_id in pending:
+            waiting[source_id] = waiting.get(source_id, False) or force
+        return JobHandle(job_id=running, reattached=True)
+
+    def _sync_body(
+        self, key: Path, workspace: RawWorkspace, ids: tuple[str, ...]
+    ) -> Callable[[JobContext], None]:
+        """확인 작업 본문 — 처음 고른 원본을 재고, 도는 동안 합쳐진 요청을 이어서 잰다.
+
+        진행 총수는 합쳐진 만큼 늘어난다(18/18에서 1/1로 되돌아가지 않는다).
+        """
+        from vlogsrt.project.raw import sync_report
+
+        def body(context: JobContext) -> None:
+            done = 0
+            try:
+                batch: tuple[str, ...] | None = ids
+                while batch is not None:
+                    if batch:
+                        sync_report.run_checks(context, workspace, batch, done=done)
+                        done += len(batch)
+                    batch = self._next_sync_batch(key, workspace)
+            finally:
+                self._release_sync_slot(key, context.job_id)
+
+        return body
+
+    def _release_sync_slot(self, key: Path, job_id: str) -> None:
+        """본문이 예외로 끝났을 때만 남는 칸을 비운다 — 합쳐 둔 요청은 경고로 알린다."""
+        with self._sync_lock:
+            if self._sync_running.get(key) != job_id:
+                return
+            del self._sync_running[key]
+            dropped = self._sync_waiting.pop(key, {})
+        if dropped:
+            log.warn(
+                f"자막 시각 확인 작업이 멈춰 합쳐진 요청 {len(dropped)}개를 재지 못했다 — 다음 앱"
+                " 열기나 「다시 재기」가 다시 잰다"
+            )
+
+    def _next_sync_batch(self, key: Path, workspace: RawWorkspace) -> tuple[str, ...] | None:
+        """도는 동안 합쳐진 요청 — 없으면 None, 이미 지금 것이면 빈 묶음.
+
+        '합쳐진 요청 없음'과 '칸 비움'을 한 자물쇠 안에서 함께 정한다. 그 뒤에 온 요청은 칸이
+        비었으니 새 작업이 된다(정산 전 DB가 아직 running이어도 — 지문이 요청마다 달라 붙지 않는다).
+        """
+        from vlogsrt.project.raw import sync_report
+
+        with self._sync_lock:
+            waiting = self._sync_waiting.pop(key, {})
+            if not waiting:
+                self._sync_running.pop(key, None)
+                return None
+        forced = tuple(source_id for source_id, force in waiting.items() if force)
+        normal = tuple(source_id for source_id, force in waiting.items() if not force)
+        pending = {
+            **(sync_report.pending_sources(workspace, source_ids=normal) if normal else {}),
+            **(
+                sync_report.pending_sources(workspace, source_ids=forced, force=True)
+                if forced
+                else {}
+            ),
+        }
+        return tuple(sorted(pending))
+
+    def sync_report(self, root: Path, source_id: str) -> dict[str, Any] | None:
+        """원본 하나의 자막 시각 판정 문서 — `verdict`는 red·amber·green·skip. 읽기만 한다.
+
+        Final Cut 출력(W-16)이 「자막 시각 확인 필요」 키워드를 달 때 읽는 값이다(`verdict ==
+        "red"`). 지금 자막 리비전의 보고서가 아직 없으면 가장 최근 보고서를 `stale: True`로,
+        보고서가 하나도 없으면 None을 돌려준다.
+        """
+        from vlogsrt.project.raw import sync_report
+
+        return sync_report.current_report(self._workspace(root), source_id)
+
+    def measure_sync_checks(
+        self, root: Path, source_ids: Sequence[str] | None = None, *, write: bool = True
+    ) -> list[dict[str, Any]]:
+        """CLI(`media sync-check`)용 — 작업 없이 그 자리에서 잰다. `write=False`면 작업공간에
+        아무것도 쓰지 않는다. 유료 호출 0."""
+        from vlogsrt.project.raw import sync_report
+
+        return sync_report.measure_workspace(self._workspace(root), source_ids, write=write)
+
+    def sync_check_view(self, root: Path, source_id: str) -> dict[str, Any] | None:
+        """작업대 표지·패널의 값 — 측정 불가·걸지 못함은 회색이다(결코 초록이 아니다)."""
+        from vlogsrt.project.raw import sync_report
+
+        key = root.expanduser().resolve()
+        with self._lock:
+            failures = self._sync_failures.get(key, {})
+            failure = failures.get(source_id) or failures.get(SYNC_ALL_SOURCES)
+        latest = self.latest_job(root, SYNC_CHECK_JOB_KIND)
+        running = latest is not None and latest.status in ACTIVE_JOB_STATUSES
+        if failure is not None:
+            return sync_report.failure_view(failure, running=running)
+        return sync_report.view_of(self.sync_report(root, source_id), running=running)
+
+    def record_sync_failure(
+        self, root: Path, source_ids: Sequence[str] | None, error: BaseException
+    ) -> bool:
+        """확인을 걸지 못한 원본을 화면의 회색 표지로 남긴다 — 원본을 모르면 작업공간 전체.
+
+        콘솔 경고만으로 끝나지 않게 하는 자리다(CLAUDE.md: 로그만 찍고 넘어가지 않는다). 이유가
+        새로우면 True — 1초 틱마다 같은 경고를 되풀이하지 않게 부른 쪽이 고른다. 확인 작업이
+        다시 걸리면(「다시 재기」·다음 고리) 지워진다.
+        """
+        key = root.expanduser().resolve()
+        reason = f"{type(error).__name__}: {error}"
+        targets = tuple(source_ids) if source_ids is not None else (SYNC_ALL_SOURCES,)
+        with self._lock:
+            failures = self._sync_failures.setdefault(key, {})
+            fresh = any(failures.get(target) != reason for target in targets)
+            failures.update(dict.fromkeys(targets, reason))
+        return fresh
+
+    def _clear_sync_failures(self, key: Path, source_ids: Iterable[str]) -> None:
+        """확인이 다시 걸렸다 — 그 원본과 작업공간 전체의 '걸지 못함' 표지를 지운다."""
+        with self._lock:
+            failures = self._sync_failures.get(key, {})
+            for target in (*source_ids, SYNC_ALL_SOURCES):
+                failures.pop(target, None)
+
+    def _note_sync_failure(
+        self, root: Path, source_ids: Sequence[str] | None, error: BaseException, *, repeat: bool
+    ) -> None:
+        """'걸지 못함'을 표지로 남기고 경고한다 — `repeat`이 아니면 새 이유일 때만 경고한다."""
+        if self.record_sync_failure(root, source_ids, error) or repeat:
+            log.warn(
+                f"자막 시각 확인을 걸지 못했다({type(error).__name__}: {error}) — 원래 작업은"
+                " 그대로다. 화면에 회색 표지로 남고 「다시 재기」로 다시 건다"
+            )
+
+    def start_sync_upkeep(self, root: Path) -> str | None:
+        """앱 열기 고리 — 보고서가 없거나 낡은 원본을 (원본, 재료)마다 실행당 한 번 잰다.
+
+        걸지 못하면 회색 표지로 남기고 None — 1초 틱마다 같은 경고를 되풀이하지 않는다.
+        """
+        from vlogsrt.project.raw import sync_report
+
+        key = root.expanduser().resolve()
+        try:
+            pending = sync_report.pending_sources(self._workspace(root))
+        except Exception as error:  # noqa: BLE001 - 표시 전용 고리는 화면을 막지 못한다
+            self._note_sync_failure(root, None, error, repeat=False)
+            return None
+        self._clear_sync_failures(key, ())
+        with self._lock:
+            fresh = sorted(
+                sid for sid, state in pending.items() if (key, sid, state) not in self._sync_tries
+            )
+            self._sync_tries.update((key, sid, pending[sid]) for sid in fresh)
+        if not fresh:
+            return None
+        try:
+            handle = self.start_sync_checks(root, tuple(fresh))
+        except Exception as error:  # noqa: BLE001 - 표시 전용 고리는 화면을 막지 못한다
+            self._note_sync_failure(root, fresh, error, repeat=False)
+            return None
+        if handle is None:
+            return None
+        return f"자막 시각 확인 {len(fresh)}개를 백그라운드에서 잽니다(무료 · 표시만 합니다)."
+
+    def _queue_sync_checks(self, root: Path, source_ids: Sequence[str]) -> None:
+        """분석·자막 수정 뒤의 고리 — 부른 쪽의 결과를 **절대** 바꾸지 않는다(D55).
+
+        표시 전용 확인을 거는 일이 실패했다고 성공한 분석이 실패가 되거나 저장된 편집이
+        오류로 보이면 안 된다. 그래서 이 경계는 어떤 오류든 받는다 — 그리고 삼키지 않는다:
+        이유를 경고로 남기고, 그 원본에 '걸지 못함' 회색 표지를 세운다(「다시 재기」가 다시 건다).
+        """
+        try:
+            self.start_sync_checks(root, source_ids)
+        except Exception as error:  # noqa: BLE001 - 표시 전용 고리는 부른 쪽 결과를 못 바꾼다
+            self._note_sync_failure(root, source_ids, error, repeat=True)
+
+    def _sync_after(self, root: Path, assets: Mapping[str, SourceAsset]) -> Callable[[], None]:
+        """분석 작업이 끝난 뒤의 고리 — 새로 심긴 원본 자막의 시각 확인을 건다(D55)."""
+        ids = tuple(assets)
+        return lambda: self._queue_sync_checks(root, ids)
+
     def refresh_capture_times(
         self, root: Path, probe: Callable[[Path], preprocess.CreationTime] | None = None
     ) -> tuple[str, ...]:
@@ -2209,7 +2459,16 @@ class RawWorkspaceService:
             root,
             ANALYSIS_JOB_KIND,
             fingerprint,
-            _analysis_body(workspace, revision, order, assets, understanding, workflow, providers),
+            _analysis_body(
+                workspace,
+                revision,
+                order,
+                assets,
+                understanding,
+                workflow,
+                providers,
+                self._sync_after(root, assets),
+            ),
             total=len(order.entries),
         )
 
@@ -2290,7 +2549,16 @@ class RawWorkspaceService:
         return self.resume_job(
             root,
             job_id,
-            _analysis_body(workspace, revision, order, assets, understanding, workflow, providers),
+            _analysis_body(
+                workspace,
+                revision,
+                order,
+                assets,
+                understanding,
+                workflow,
+                providers,
+                self._sync_after(root, assets),
+            ),
             fingerprint,
         )
 
@@ -2392,7 +2660,14 @@ class RawWorkspaceService:
                     root,
                     job_id,
                     _semantic_body(
-                        workspace, revision, order, assets, understanding, workflow, providers
+                        workspace,
+                        revision,
+                        order,
+                        assets,
+                        understanding,
+                        workflow,
+                        providers,
+                        self._sync_after(root, assets),
                     ),
                     fingerprint,
                 )
@@ -2402,7 +2677,14 @@ class RawWorkspaceService:
                 root,
                 job_id,
                 _semantic_body(
-                    workspace, revision, order, assets, understanding, workflow, providers
+                    workspace,
+                    revision,
+                    order,
+                    assets,
+                    understanding,
+                    workflow,
+                    providers,
+                    self._sync_after(root, assets),
                 ),
                 fingerprint,
             )
@@ -2410,7 +2692,16 @@ class RawWorkspaceService:
             root,
             ANALYSIS_SEMANTIC_JOB_KIND,
             fingerprint,
-            _semantic_body(workspace, revision, order, assets, understanding, workflow, providers),
+            _semantic_body(
+                workspace,
+                revision,
+                order,
+                assets,
+                understanding,
+                workflow,
+                providers,
+                self._sync_after(root, assets),
+            ),
             total=len(order.entries),
         )
 
@@ -3468,6 +3759,12 @@ class RawWorkspaceService:
             job_fingerprint=fingerprint,
             clip_total=len(snapshot.entries),
         )
+
+
+def _sync_fingerprint(pending: Mapping[str, str]) -> str:
+    """요청마다 다른 지문 — 끝나 정산을 기다리는 작업이나 running으로 남은 줄에 붙지 않게(D55)."""
+    body = json.dumps([sorted(pending.items()), uuid.uuid4().hex], ensure_ascii=False)
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()
 
 
 def _order_ids(revision: GlobalOrderRevision) -> tuple[str, ...]:

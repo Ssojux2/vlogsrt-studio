@@ -1016,6 +1016,9 @@ class RawWorkspaceUi:
         upkeep = self._maybe_upkeep(root)
         if upkeep:
             message += "\n\n" + upkeep
+        sync_note = self._maybe_sync_upkeep(root)
+        if sync_note:
+            message += "\n\n" + sync_note
         self._refresh_review_panel_state(root)
         pending = self._unreviewed_auto_count(root)
         if pending:
@@ -1035,6 +1038,15 @@ class RawWorkspaceUi:
             return self.raw.start_upkeep(root)
         except (raw_service.RawWorkspaceError, raw_service.ReviewError) as error:
             log.warn(f"작업공간 정리를 걸지 못했다: {error}")
+            return None
+
+    def _maybe_sync_upkeep(self, root: Path) -> str | None:
+        """앱 열기의 자막 시각 확인(D55) — 보고서가 없거나 낡은 원본만, 이번 실행에서 한 번."""
+        try:
+            return self.raw.start_sync_upkeep(root)
+        except Exception as error:  # noqa: BLE001 - 표시 전용 고리는 화면 그리기를 못 막는다
+            if self.raw.record_sync_failure(root, None, error):  # 회색 표지 — 로그만이 아니다
+                log.warn(f"자막 시각 확인을 걸지 못했다({type(error).__name__}: {error})")
             return None
 
     def _unreviewed_auto_count(self, root: Path) -> int:
@@ -3302,6 +3314,9 @@ class RawWorkspaceUi:
                     transcript["sequence"]
                     and quick.get("stage") in ("자막 변경 · 갱신 필요", "승인 대기")
                 )
+                sync_view = self.raw.sync_check_view(root, sid)  # 자막 시각 확인 — 표시만(D55)
+                if sync_view is not None:
+                    source["syncCheck"] = sync_view
             refs = self.raw.source_media_references(root, sid)
             if refs:
                 source["mediaStatus"] = refs["validation"]["reason"]
@@ -3535,9 +3550,12 @@ class RawWorkspaceUi:
                 "select-source",
                 "source-caption",
                 "relink-original",
+                "sync-recheck",
             ):
                 # 질의(refresh)는 열어 둔다 — 서버 재시작 뒤 화면이 스스로 회복하는 길.
                 self._require_workbench_token(payload, self._visual_lifetime_token, "영상 작업대")
+            if kind == "sync-recheck":
+                return self._visual_sync_recheck(root, payload, echo)
             if kind in ("source-caption", "relink-original"):
                 source_id = self._serve_str(payload, "sourceId")
                 if kind == "source-caption":
@@ -3858,6 +3876,23 @@ class RawWorkspaceUi:
             ),
         }
 
+    def _visual_sync_recheck(self, root: Path, payload: Mapping[str, object], echo: str) -> dict:
+        """「다시 재기」 — 원본 하나의 자막 시각을 무료로 다시 잰다. 자막·컷은 그대로다(D55)."""
+        source_id = self._serve_str(payload, "sourceId")
+        handle = self.raw.start_sync_checks(root, (source_id,), force=True)
+        _shell, workbench = self.visual_workbench_render(root, source_id=source_id or None)
+        return {
+            "ok": True,
+            "echoEpoch": echo,
+            "html": workbench,
+            "videoSrc": None,
+            "message": (
+                "자막 시각을 다시 잽니다(무료 · 표시만 합니다)."
+                if handle is not None
+                else "잴 원본 자막이 없습니다."
+            ),
+        }
+
     def _refresh_review_panel_state(self, root: Path) -> None:
         """고급(기존) 검토 패널의 화면 상태를 새 머리로 맞춘다 — 최선 노력."""
         with contextlib.suppress(raw_service.RawWorkspaceError, raw_service.ReviewError, gr.Error):
@@ -3899,7 +3934,16 @@ class RawWorkspaceUi:
             vl_select_source,
             vl_source_caption,
             vl_relink_original,
+            self._vl_sync_recheck_function(),
         ]
+
+    def _vl_sync_recheck_function(self) -> Callable[[dict[str, object]], dict[str, object]]:
+        """자막 시각 「다시 재기」(D55) — 다른 작업대 함수와 같은 토큰 문을 지난다."""
+
+        def vl_sync_recheck(payload: dict[str, object]) -> dict[str, object]:
+            return self.visual_workbench_action(payload, "sync-recheck")
+
+        return vl_sync_recheck
 
     # ── 화면 1 — SD/폴더 가져오기(조사 → 순서 확인 → 복사·검증) ──
 

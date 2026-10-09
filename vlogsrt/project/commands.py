@@ -499,6 +499,7 @@ def project_command(args: argparse.Namespace) -> int:
         "caption": _project_caption,
         "caption-estimate": _project_caption_estimate,
         "caption-run": _project_caption_run,
+        "sync-check": _project_sync_check,
     }
     try:
         return handlers[args.project_command](args)
@@ -511,6 +512,33 @@ def project_command(args: argparse.Namespace) -> int:
         # 지우고, 지움 자체가 무너지면 정해진 글로 닫는다(원문 폭기 금지, S2A-2).
         log.error(_sanitize_cli_failure(args, str(exc)))
         return 2
+
+
+def _project_sync_check(args: argparse.Namespace) -> int:
+    """`project sync-check` — SRT 자막 시각을 원본 말소리와 대조해 표시만 한다(D55).
+
+    SRT·원본은 읽기만 하고, 디코드한 PCM·VAD 칸은 끝나면 지워지는 임시 폴더에 둔다. 남는
+    것은 SRT 옆 곁파일 `<srt>.sync.json` 하나뿐이고 `--no-write`면 그것도 없다. 유료 호출 0.
+    """
+    import tempfile
+
+    from vlogsrt.project import sync_check
+    from vlogsrt.project.raw import sync_report
+
+    media = args.media.expanduser().resolve()
+    srt = args.srt.expanduser().resolve()
+    with tempfile.TemporaryDirectory(prefix="vlogsrt-sync-") as scratch:
+        document = sync_report.measure_srt(
+            media, srt, scratch=Path(scratch), audio_ordinal=args.audio_ordinal
+        )
+    if args.json:
+        sys.stdout.write(sync_check.report_json(document) + "\n")
+    else:
+        for line in sync_report.summary_lines(document):
+            log.out(line)
+    if not args.no_write:
+        log.info(f"곁파일: {sync_report.write_sidecar(srt, document)}")
+    return 0
 
 
 def _project_receive(args: argparse.Namespace) -> int:

@@ -31,6 +31,7 @@ pytest.importorskip(
 import gradio as gr  # noqa: E402
 
 from ui import workspace_service  # noqa: E402
+from vlogsrt.config import Config  # noqa: E402
 
 needs_ffmpeg = pytest.mark.skipif(
     shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
@@ -320,7 +321,7 @@ def test_browser_two_phase_live_flow_with_injected_transport(tmp_path, monkeypat
 
     sender = _CountingSender([{"start": 0.5, "end": 2.0, "text": "도착해서 일정 설명"}])
     client = _CountingClient("window_000000")
-    cfg = type("C", (), {})()
+    cfg = Config()  # 실전송 어댑터가 엔진 1차 온도를 읽는다(D55)
 
     def asr_approvals(ws_root: Path, selected):
         from vlogsrt.project.raw.analysis_approval import AsrPhaseApproval

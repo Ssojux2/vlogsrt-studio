@@ -354,3 +354,38 @@ def test_best_lag_does_not_reward_a_shorter_comparison() -> None:
 def test_probe_window_gives_up_where_it_cannot_search_both_ways() -> None:
     """오디오 끝에 걸린 창은 없는 소리와 비교하게 된다. 짐작 대신 건너뛴다."""
     assert vt._probe_window(Path("a.mp3"), 100.0, Path("c.mp3"), 99.0, 0.0, 30.0) is None
+
+
+# ── D55: 말소리 대조 — 빨강만 실패, 측정 불가는 SKIP(통과가 아니다) ──────────
+
+
+def test_speech_sync_skips_without_a_video_or_srt(tmp_path: Path) -> None:
+    srt = tmp_path / "output.srt"
+    assert vt.check_speech_sync(None, srt).label == "SKIP"
+    video = tmp_path / "video.mov"
+    video.write_bytes(b"x")
+    assert vt.check_speech_sync(video, srt).label == "SKIP"
+
+
+@pytest.mark.parametrize(
+    ("verdict", "label"),
+    [("red", "FAIL"), ("amber", "OK  "), ("green", "OK  "), ("skip", "SKIP")],
+)
+def test_speech_sync_maps_the_product_verdict(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, verdict: str, label: str
+) -> None:
+    from vlogsrt.project.raw import sync_report
+
+    video = tmp_path / "video.mov"
+    video.write_bytes(b"x")
+    srt = tmp_path / "output.srt"
+    srt.write_text("1\n00:00:01,000 --> 00:00:02,000\n안녕\n", encoding="utf-8")
+    before = srt.read_bytes()
+
+    def measured(*_: object, **__: object) -> dict[str, object]:
+        return {"verdict": verdict, "reasons": [{"text": "이유"}]}
+
+    monkeypatch.setattr(sync_report, "measure_srt", measured)
+    check = vt.check_speech_sync(video, srt)
+    assert check.label == label
+    assert srt.read_bytes() == before  # SRT는 읽기만 한다

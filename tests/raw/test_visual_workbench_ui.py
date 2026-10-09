@@ -2448,6 +2448,7 @@ def test_visual_server_functions_bind_client_revision(tmp_path: Path) -> None:
         "vl_select_source",
         "vl_source_caption",
         "vl_relink_original",
+        "vl_sync_recheck",  # 자막 시각 「다시 재기」(D55)
     ]
     signature = model["signature"]
     base = model["basePlanId"]
@@ -4342,6 +4343,7 @@ def test_blocks_wire_workbench_outputs(tmp_path: Path, local_socket: None) -> No
         "vl_select_source",
         "vl_source_caption",
         "vl_relink_original",
+        "vl_sync_recheck",  # 자막 시각 「다시 재기」(D55)
     ]
     cap_names = [fn.__name__ for fn in server._caption_workbench_block.server_fns]
     assert cap_names == ["cap_save", "cap_confirm"]

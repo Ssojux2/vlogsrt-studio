@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import html
 import json
+import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from fractions import Fraction
@@ -142,6 +143,11 @@ class CueRowView:
     chars_per_second: float
 
 
+def _cps_text(value: float) -> str:
+    """초당 글자 수 — 길이 0 큐(재지 못함)는 `inf`가 아니라 `—`로 보인다."""
+    return f"{value:.1f}" if math.isfinite(value) else "—"
+
+
 def cue_table_markdown(rows: Sequence[CueRowView]) -> str:
     """큐 행 표 — whisper 골격·채택 문구·지금 글자를 나란히, 초당 글자수까지."""
     if not rows:
@@ -157,7 +163,7 @@ def cue_table_markdown(rows: Sequence[CueRowView]) -> str:
         lines.append(
             f"| `{row.cue_id}` | {row.start_seconds} | {row.end_seconds}"
             f" | {whisper or '(없음)'} | {auto or '(없음)'} | {current or '(없음)'}"
-            f" | {row.basis} | {row.chars_per_second:.1f} |"
+            f" | {row.basis} | {_cps_text(row.chars_per_second)} |"
         )
     return "\n".join(lines)
 
@@ -248,7 +254,8 @@ def cue_table_html(
             f'<td style="padding:4px 6px;">{html.escape(row.auto_text) or "(없음)"}</td>'
             f'<td style="padding:4px 6px;">{html.escape(row.text) or "(없음)"}</td>'
             f'<td style="padding:4px 6px;">{html.escape(row.basis)}</td>'
-            f'<td style="padding:4px 6px;text-align:right;">{row.chars_per_second:.1f}</td>'
+            f'<td style="padding:4px 6px;text-align:right;">'
+            f"{_cps_text(row.chars_per_second)}</td>"
             f'<td style="padding:4px 6px;text-align:center;white-space:nowrap;">{listen}</td>'
             "</tr>"
         )
@@ -705,6 +712,7 @@ WORKBENCH_CSS = """
 .vl-tier-key.red{color:#ff8a80} .vl-tier-key.hold{color:#b8c3ca}
 .vl-badge-green{border-color:#6fe3a5;color:#6fe3a5}
 .vl-badge-red{border-color:#ff8a80;color:#ff8a80}
+.vl-badge-amber{border-color:#ffd760;color:#ffd760}
 .vl-marker-reason.red{background:#3a2222;border-left-color:#ff8a80}
 .vl-marker-reason.yellow{background:#36311a;border-left-color:#ffd760}
 .vl-rec-pending { position:absolute; top:calc(var(--vl-rec-top) + 1px); left:10px;
@@ -1298,6 +1306,42 @@ VISUAL_BOOTSTRAP_JS = (
         return ({ recommended: "사용 권고", normal: "보통",
           review_required: "검토 필요" })[r] || "";
       }
+      // 자막 시각 확인(D55) — 표시만 한다. 측정 불가는 회색이다(결코 초록이 아니다).
+      function syncBadge(info) {
+        var sync = info && info.syncCheck;
+        if (!sync) { return ""; }
+        var tone = ({ red: " vl-badge-red", amber: " vl-badge-amber",
+          green: " vl-badge-green" })[sync.tone] || "";
+        return ' <span class="vl-badge' + tone + '" data-vl-sync="' + esc(sync.level) + '">' +
+          esc(sync.label) + (sync.stale ? " (낡음)" : "") + "</span>";
+      }
+      function syncFlagWord(flag) {
+        return ({ no_speech: "말소리를 못 찾음 (측정 한계일 수 있음)",
+          early: "말보다 먼저 뜸" })[flag] || flag;
+      }
+      function syncPanel(info) {
+        var sync = info && info.syncCheck;
+        if (!sync) { return ""; }
+        var open = sync.level === "red" || sync.level === "amber";
+        var out = ['<details class="vl-details" data-vl-sync-panel="1"' + (open ? " open" : "") +
+          "><summary>자막 시각 확인" + syncBadge(info) + "</summary>"];
+        (sync.reasons || []).forEach(function(text) {
+          out.push('<p class="vl-kv">' + esc(text) + "</p>");
+        });
+        (sync.cues || []).forEach(function(cue) {
+          out.push('<button type="button" class="vl-btn" data-vl-act="source-pick" ' +
+            'data-vl-cue-id="' + esc(cue.id) + '">' + esc(VL.fmt(ratOf(cue.start)) + "초 · " +
+            cue.text + " · " + (cue.flags || []).map(syncFlagWord).join(" · ")) + "</button>");
+        });
+        (sync.checks || []).forEach(function(check) {
+          out.push('<p class="vl-kv"><small>' + esc("[" + String(check.status).toUpperCase() +
+            "] " + check.name + " — " + check.detail) + "</small></p>");
+        });
+        out.push('<button type="button" class="vl-btn" data-vl-act="sync-recheck">' +
+          "다시 재기(무료)</button><small>표시만 합니다 — 자막과 컷은 바뀌지 않습니다." +
+          "</small></details>");
+        return out.join("");
+      }
       // 3단 등급(D51) — 글자 표지는 색과 별개로 등급을 말한다(색약·흑백에서도 읽힌다).
       function tierWord(tier, hold) {
         if (tier === "yellow" && hold) { return "판정 보류"; }
@@ -1414,6 +1458,7 @@ VISUAL_BOOTSTRAP_JS = (
             ((model.sources[c.sourceId] || {}).analysisState ?
               ' <span class="vl-badge">' +
               esc(model.sources[c.sourceId].analysisState) + '</span>' : '') +
+            (c.media ? syncBadge(model.sources[c.sourceId]) : "") +
             "</span></span></button>"
           );
         }
@@ -1578,6 +1623,7 @@ VISUAL_BOOTSTRAP_JS = (
             '원본 재연결</button>');
           }
         }
+        html.push(syncPanel(info));
         ((info && info.crossSourceCandidates) || []).forEach(function(candidate) {
           html.push('<p class="vl-kv">다른 원본의 중복 후보 · ' +
             esc(candidate.other_source + ': ' + candidate.text) + ' · 자동 제외하지 않음</p>');
@@ -2090,6 +2136,10 @@ VISUAL_BOOTSTRAP_JS = (
         if (act === 'relink-original') {
           call('vl_relink_original',
             {sourceId:curSourceId(), path:doc.getElementById('vl-original-path').value});
+          return;
+        }
+        if (act === 'sync-recheck') {
+          call('vl_sync_recheck', {sourceId:curSourceId()}, '자막 시각을 다시 재는 중(무료)…');
           return;
         }
         if (act === 'source-pick') {

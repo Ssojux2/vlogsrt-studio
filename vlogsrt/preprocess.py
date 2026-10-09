@@ -591,6 +591,66 @@ def extract_pcm_s16le(
     )
 
 
+def pcm_window_s16le(
+    source: Path,
+    *,
+    stream_index: int,
+    start: Fraction,
+    seconds: Fraction,
+    sample_rate: int = _PCM_SAMPLE_RATE,
+    channels: int,
+) -> bytes:
+    """원본 오디오의 한 창을 s16le 바이트로 **표준출력에** 디코드한다 — 파일을 쓰지 않는다.
+
+    자막 시각 확인(D55)의 표본 대조용 — 저장 PCM이 원본과 같은 소리를 같은 자리에 담는지
+    창 몇 개로만 본다. `stream_index`는 ffprobe 전역 번호, `start`는 파일 시각(원점과 같은
+    시계)이고 입력 `-ss`는 컨테이너 시작 시각 기준이라 그 값을 빼서 넘긴다. 변환 사슬은
+    `extract_pcm_s16le`과 같다 — 원점을 재지 않으니 정렬은 호출자가 지연 탐색으로 본다.
+    """
+    if sample_rate != _PCM_SAMPLE_RATE or channels < 1 or seconds <= 0:
+        raise RuntimeError(
+            f"창 디코드 인자가 계약 밖이다: 주파수 {sample_rate}, 채널 {channels}, 길이 {seconds}"
+        )
+    seek = max(Fraction(0), start - _container_start_time(source))
+    ffmpeg = require_ffmpeg()
+    command = [
+        ffmpeg, "-v", "error", "-nostdin",
+        "-ss", f"{float(seek):.6f}",
+        "-i", str(source),
+        "-map", f"0:{stream_index}",
+        "-vn",
+        "-t", f"{float(seconds):.6f}",
+        "-af", f"aresample={sample_rate},aformat=sample_fmts=s16",
+        "-ac", str(channels),
+        "-c:a", "pcm_s16le",
+        "-f", "s16le", "-",
+    ]  # fmt: skip
+    completed = run_process(command, capture_output=True, check=False)
+    if completed.returncode != 0:
+        tail = completed.stderr.decode("utf-8", "replace").strip().splitlines()[-3:]
+        raise RuntimeError(f"창 디코드 실패: {source} ({' / '.join(tail)})")
+    raw: bytes = completed.stdout
+    return raw
+
+
+def _container_start_time(source: Path) -> Fraction:
+    """컨테이너 시작 시각 — 없으면 0. 입력 `-ss`가 이 값에 더해진다(ffmpeg 규약)."""
+    ffprobe = require_ffmpeg("ffprobe")
+    completed = _run(
+        [
+            ffprobe, "-v", "error",
+            "-show_entries", "format=start_time",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            str(source),
+        ]
+    )  # fmt: skip
+    raw = completed.stdout.strip()
+    try:
+        return Fraction(raw) if raw and raw != "N/A" else Fraction(0)
+    except ValueError as exc:
+        raise RuntimeError(f"컨테이너 시작 시각을 읽지 못했습니다: {source} ({raw!r})") from exc
+
+
 def _converted_frames(stderr: str, source: Path) -> list[_ConvertedFrame]:
     frames: list[_ConvertedFrame] = []
     for line in stderr.splitlines():

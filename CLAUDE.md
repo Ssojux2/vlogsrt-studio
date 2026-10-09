@@ -44,7 +44,10 @@
 판정해 합쳐 매긴다(D51·D52) — 로컬 신호 측정(소리 크기·화면 밝기)은 없고, 읽을 때마다 다시
 계산해 어디에도 보관하지 않는다. 빨강(자막 없는 긴 공백인데 Luna가 풍경으로 보지 않은 화면)은
 미검토 자동 제외 **제안**일 뿐이고 분석 지문에 들어가지 않는다 — Final Cut으로는 켠 채
-`제외 제안(미검토)` 키워드로만 간다(D56). 영상은 **언제나 촬영 시각 순**이다
+`제외 제안(미검토)` 키워드로만 간다(D56). **자막 시각 확인**(D55,
+`vlogsrt/project/sync_check.py`)은 원본 자막을 무료 로컬 VAD 말소리와 대조해 **표시만** 한다 — 자막·지문을
+쓰지 않고 등급·자동 정리·선택·분할에 들어가지 않으며, Final Cut으로는 지금 리비전의 **빨강** 보고서인
+영상에 `자막 시각 확인 필요` 키워드로만 간다(자막은 그대로 싣는다, D55·D56). 영상은 **언제나 촬영 시각 순**이다
 (D53) — 애플 촬영 날짜(`com.apple.quicktime.creationdate`)가 컨테이너 `creation_time`(FCP가 덮은
 가져온 시각)보다 먼저고, 순서만 바뀌면 검토 머리를 사람 결정째 옮길 뿐 다시 세우거나 재승인하지 않는다.
 
@@ -253,6 +256,8 @@ vlogsrt run <video> --offline             # 픽스처 기반 전체 파이프라
 | `loop_min_chars = 2` | 실측. 메아리와 낱자의 **경계선**이다(D29). 77분 회차에서 이 선이 오검출 0을 만든다 — `2글자 이하`로 넓히면 `'대박'·'와'·'오빠'` 같은 진짜 발화가 걸린다 |
 | `polish_*` (6개) | 외부 근거 없음. `cut_*`·`verify_*`·`repair_*`와 같은 조정 대상(D30) |
 | `retext_*` (5개) | **잠정.** 현재 설정으로 녹화한 실데이터가 없어 교체를 덜 하는 쪽으로 골랐다. 같은 조정 대상(D37) |
+| `chunk_end_overrun_seconds = 2.0` (`TimingResponseTolerance`) | 외부 근거 없음. 실측 whisper 청크 끝 넘침 최대 1.0초 + 여유 1.0초. 이하면 청크 끝으로 닫고 `WARN`, 넘으면 거부(D55 — 규칙 1·3의 좁은 예외). `RawWorkflowConfig` 밖이다 |
+| `sync_*` (`SyncCheckSettings`) | 외부 근거 없는 조정 대상. 자막 시각 확인(D55)의 판정 기준 — 실측 13개 영상으로 골랐고 여유가 얇다(Pτ 초록 최소 .75 대 노랑 최대 .70). **표시만 하므로** 어느 지문·캐시 열쇠에도 넣지 않는다 |
 | `tier_*` (`RawTierSettings`, 5개) | 외부 근거 없는 조정 대상. 자막 공백 5초 · 발화 쪽 여유 0.3초 · 발화 밀도 0.35 · 최소 구간 1초(D51). 로컬 측정 기준(RMS·루마·흐림)은 측정 계층과 함께 지웠다(D52). 분석 지문에 넣지 않는다 |
 
 **압축률은 창 안에서만 재라.** 통째로 재면 길이 검사가 된다 — 정상 발화도 길어지기만
@@ -261,7 +266,7 @@ vlogsrt run <video> --offline             # 픽스처 기반 전체 파이프라
 zlib 헤더에 눌린다(`'F '` 10회=1.58 · 15회=2.42 · 20회=3.00). 되풀이의 심각도가 아니라
 글자 수가 판정을 정하게 된다. 그건 낱자 신호가 할 일이다(D29).
 
-`cut_*`·`verify_*`·`repair_*`·`polish_*`·`retext_*` 값은 외부 근거가 없다. 회차별 조정 대상이므로 위 금지의
+`cut_*`·`verify_*`·`repair_*`·`polish_*`·`retext_*`·`sync_*` 값은 외부 근거가 없다. 회차별 조정 대상이므로 위 금지의
 예외지만, 바꿨으면 왜 바꿨는지 `docs/DECISIONS.md`에 남긴다.
 
 ### 테스트 우선
@@ -290,13 +295,15 @@ vlogsrt run <video> --no-repair   # 되풀이 재전사를 끈다 (되풀이가 
 vlogsrt run <video> --no-polish   # 조판 정리를 끈다 (온점이 그대로 나온다)
 vlogsrt redo out/trace.json       # 조판만 재실행 (API 없음. 기록된 교정 매핑을 다시 얹는다)
 vlogsrt probe <video>             # 길이·조각 수 확인 (API 없음)
+vlogsrt project sync-check --media <video> --srt <srt>   # SRT 시각을 말소리와 대조 (표시만, 곁파일 하나)
+vlogsrt media sync-check --workspace <ws> [--no-write]   # 작업대 원본 자막의 시각 판정 (표시만)
 
 # 평가·싱크 게이트
 vlogsrt eval out/output.srt golden/ep01.srt
 make eval               # 골든셋 전체 → docs/DASHBOARD.md 갱신
 make verify STEM=<stem> # 시각 대조 (파이프라인 밖의 유일한 자동 게이트)
                         #   길이 · 청크 정렬(머리·가운데·꼬리) · 전역 시프트 ·
-                        #   시각 붙음(조각 안 위치별) · SRT 커버리지
+                        #   시각 붙음(조각 안 위치별) · SRT 커버리지 · 말소리 대조(VAD, D55)
                         #   **`SKIP`은 통과가 아니다** — 그 검사는 아무것도 안 봤다(D32)
 
 # 픽스처 (사람만 실행)
@@ -349,7 +356,7 @@ vlogsrt record golden/ep01.mp4          # 실제 API 호출. 유료.
 - **`VLOGSRT_OFFLINE=0` 설정 또는 `--online` 사용**
 - 실제 API 호출 (`vlogsrt record`는 사람만)
 - 새 의존성 추가
-- 임계값·기대값 수정 (`cut_*`·`verify_*`·`repair_*`·`polish_*`·`retext_*`는 예외 — 근거를 남길 것)
+- 임계값·기대값 수정 (`cut_*`·`verify_*`·`repair_*`·`polish_*`·`retext_*`·`sync_*`는 예외 — 근거를 남길 것)
 - **`chunk_max_seconds`를 올리는 것** (D26 실측 — 38분 조각에서 영상의 41.4%가 되풀이)
 - **`transcribe_temperature`를 0.5 이하로 내리는 것** (D28 — 되풀이가 번지는 통로가 열린다)
 - **짧은 되풀이를 접는 것** (규칙 9 — 실제 발화일 수 있다)

@@ -383,11 +383,11 @@ def test_parse_text_response_keeps_empty_text(tmp_path: Path) -> None:
         {"segments": [{"text": "a", "start": 0.0}]},
         {"segments": [{"text": "a", "start": 0.0, "end": float("nan")}]},
         {"segments": [{"text": "a", "start": True, "end": 1.0}]},
-        # §11.11 — 음수·뒤집힘·길이 0·소유 범위 밖은 고쳐 쓰지 않고 실패다(루트 리뷰)
+        # §11.11 — 음수·뒤집힘·소유 범위 밖은 고쳐 쓰지 않고 실패다(루트 리뷰). 길이 0과
+        # 관용(2초) 안의 넘침은 D55부터 실패가 아니다 — tests/raw/test_timing_fixes.py
         {"segments": [{"text": "음수", "start": -0.5, "end": 1.0}]},
         {"segments": [{"text": "뒤집힘", "start": 4.0, "end": 3.0}]},
-        {"segments": [{"text": "길이 0", "start": 1.0, "end": 1.0}]},
-        {"segments": [{"text": "범위 밖", "start": 0.0, "end": 12.5}]},
+        {"segments": [{"text": "범위 밖", "start": 0.0, "end": 14.5}]},
         {"text": "시각 없는 덩어리"},  # json 문구 응답을 시간 응답으로 끼우는 경우
     ],
 )

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 import time
 from collections.abc import Callable
 from fractions import Fraction
@@ -223,6 +224,7 @@ def media_command(args: argparse.Namespace) -> int:
         "review": cmd_review,
         "caption": cmd_caption,
         "finalcut": cmd_finalcut,
+        "sync-check": cmd_sync_check,
     }
     return handlers[args.media_command](args)
 
@@ -235,7 +237,10 @@ def add_media_parser(sub: argparse._SubParsersAction) -> None:
     commands = media.add_subparsers(
         dest="media_command",
         required=True,
-        metavar="{init,import,retry,inspect,plan,extract,clips,analyze,review,caption,finalcut}",
+        metavar=(
+            "{init,import,retry,inspect,plan,extract,clips,analyze,review,caption,finalcut,"
+            "sync-check}"
+        ),
     )
 
     init = commands.add_parser("init", help="빈 폴더에 v2 작업공간을 만든다")
@@ -381,6 +386,38 @@ def _add_finalcut_parser(commands: argparse._SubParsersAction) -> None:
         "(로컬만 — Final Cut은 열지 않는다)",
     )
     finalcut.add_argument("--workspace", type=Path, required=True, help="작업공간 경로")
+
+    sync = commands.add_parser(
+        "sync-check",
+        help="원본 자막 시각을 말소리와 대조해 표시만 한다(D55 — 무료 로컬 VAD · 자막은 안 바뀐다)",
+    )
+    sync.add_argument("--workspace", type=Path, required=True, help="작업공간 경로")
+    sync.add_argument(
+        "--source", action="append", default=[], help="잴 원본 ID(여러 번). 없으면 전부"
+    )
+    sync.add_argument("--json", action="store_true", help="보고서 JSON을 그대로 인쇄")
+    sync.add_argument(
+        "--no-write", action="store_true", help="작업공간에 보고서·캐시를 하나도 쓰지 않는다"
+    )
+
+
+def cmd_sync_check(args: argparse.Namespace) -> int:
+    """`media sync-check` — 원본 자막의 시각 판정을 인쇄한다(표시만, 유료 호출 0)."""
+    from vlogsrt.project import sync_check
+    from vlogsrt.project.raw import sync_report
+
+    documents = _service().measure_sync_checks(
+        args.workspace, tuple(args.source) or None, write=not args.no_write
+    )
+    if args.json:
+        sys.stdout.write(sync_check.report_json({"reports": documents}) + "\n")
+        return 0
+    for document in documents:
+        for line in sync_report.summary_lines(document):
+            log.out(line)
+    if not documents:
+        log.warn("잴 원본 자막이 없다 — 분석이 끝난 원본만 잰다")
+    return 0
 
 
 # ── A3 — 결정적 분할 계획·추출·조각 목록 ──────────────────────────────────────

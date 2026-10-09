@@ -105,3 +105,76 @@ def test_caption_edit_reanalyzes_affected_window_only_and_preserves_cuts(tmp_pat
     ]
     _, html = server.visual_workbench_render(root)
     assert "subtitles" in html and "수정된 완전한 문장" in html
+
+
+def _zero_length_doc(tmp_path):
+    """길이 0 줄이 낀 원본 자막 — D55 버그 3의 수정이 심는 모양(28.44=28.44, 180/180)."""
+    from fractions import Fraction
+
+    from vlogsrt.project.raw import service as raw
+
+    root = tmp_path / "ws"
+    service = raw.RawWorkspaceService()
+    service.create_workspace(root, "길이 영")
+    workspace = service._workspace(root)
+
+    def row(ident, start, end, text):
+        return {
+            "utterance_id": ident,
+            "text": text,
+            "start": captions.encoded(Fraction(start)),
+            "end": captions.encoded(Fraction(end)),
+        }
+
+    rows = [
+        row("u0", "1", "2", "앞 문장"),
+        row("u1", "28.44", "28.44", "길이 영"),
+        row("u2", "30", "32", "뒤 문장"),
+    ]
+    doc = captions.seed(workspace, "src", rows, Fraction(40), "a" * 64)
+    return workspace, doc
+
+
+def test_a_zero_length_row_does_not_lock_the_other_rows(tmp_path):
+    """길이 0 줄이 있어도 다른 줄의 수정·분할·병합은 된다 — 손대지 않은 줄은 a ≤ b면 된다."""
+    workspace, doc = _zero_length_doc(tmp_path)
+    edited = captions.edit(
+        workspace, "src", doc["revision"], action="edit", utterance_id="u2", text="고친 뒷말"
+    )
+    split = captions.edit(
+        workspace,
+        "src",
+        edited["revision"],
+        action="split",
+        utterance_id="u0",
+        split_at="1.5",
+        text="앞",
+        right_text="문장",
+    )
+    merged = captions.edit(
+        workspace,
+        "src",
+        split["revision"],
+        action="merge",
+        utterance_id=split["utterances"][0]["utterance_id"],
+    )
+    assert [u["text"] for u in merged["utterances"]] == ["앞 문장", "길이 영", "고친 뒷말"]
+    zero = next(u for u in merged["utterances"] if u["utterance_id"] == "u1")
+    assert zero["start"] == zero["end"]  # 길이 0 줄은 그대로 남는다(규칙 9)
+
+
+def test_editing_the_zero_length_row_must_give_it_a_length(tmp_path):
+    """바꾸는 줄은 여전히 start < end여야 한다 — 그대로 길이 0이면 그 줄을 짚어 거절한다."""
+    workspace, doc = _zero_length_doc(tmp_path)
+    with pytest.raises(RawWorkspaceError, match=r"2번 자막\(28\.440~28\.440초\).*시각"):
+        captions.edit(
+            workspace, "src", doc["revision"], action="edit", utterance_id="u1", text="말"
+        )
+    fixed = captions.edit(
+        workspace, "src", doc["revision"], action="edit", utterance_id="u1", end="29"
+    )
+    assert captions.rational(fixed["utterances"][1]["end"]) == 29
+    with pytest.raises(RawWorkspaceError, match="겹칩니다"):
+        captions.edit(
+            workspace, "src", fixed["revision"], action="edit", utterance_id="u0", end="29"
+        )

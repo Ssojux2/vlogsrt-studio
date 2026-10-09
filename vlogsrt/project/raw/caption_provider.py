@@ -22,10 +22,11 @@ from datetime import date
 from pathlib import Path
 from typing import Protocol, TypeGuard
 
+from vlogsrt import log
 from vlogsrt.config import Config
 from vlogsrt.models import Chunk
 from vlogsrt.project.raw import capabilities
-from vlogsrt.project.raw.config import RawWorkflowConfig
+from vlogsrt.project.raw.config import TIMING_RESPONSE_TOLERANCE, RawWorkflowConfig
 from vlogsrt.transcribe import (
     CAPTION_TEXT_KIND,
     CAPTION_TIMING_KIND,
@@ -165,7 +166,8 @@ class TimedSegment:
     """시간 제공자 세그먼트 하나 — 시각은 제공자 좌표 그대로다.
 
     청크 오프셋·최종 영상 원점의 환산은 소비 계층의 산술이고 여기서 하지
-    않는다(§11.6). 시각은 `0 ≤ start < end ≤ 청크 길이`로 검사를 마친 값이다.
+    않는다(§11.6). 시각은 `0 ≤ start ≤ end ≤ 청크 길이`로 검사를 마친 값이다 —
+    길이 0은 글자째 남고, 청크 끝을 관용 안에서 넘은 시각은 청크 끝으로 닫혀 온다(D55).
     """
 
     index: int
@@ -191,6 +193,8 @@ class TimedTranscript:
     chunk_offset: float
     time_unit: str = TIMED_TIME_UNIT
     response: Mapping[str, object] | None = None
+    # 청크 끝으로 닫은 세그먼트의 위치(D55) — 원 응답은 `response`에 그대로 있다.
+    clamped_segments: tuple[int, ...] = ()
 
     @property
     def unconfirmed_empty(self) -> bool:
@@ -286,14 +290,15 @@ def parse_timing_response(
     provider: str,
     chunk_duration: float,
     chunk_offset: float = 0.0,
+    overrun_tolerance: float = TIMING_RESPONSE_TOLERANCE.chunk_end_overrun_seconds,
 ) -> TimedTranscript:
     """시간 응답을 `TimedTranscript`로 — 세그먼트가 없으면 그대로 없다고 남긴다.
 
-    `segments`가 아예 없는 응답은 계약 위반이다. 시각은 청크가 소유한 범위
-    안에서 `0 ≤ start < end ≤ chunk_duration`을 지켜야 한다(§11.11 — 음수
-    없음·start<end·범위 안). 어긋난 시각을 몰래 접거나 메우지 않는다 —
-    cue를 지어내는 길을 여는 순간 가짜 SRT가 돌아온다. 시각을 고치는 것도
-    추측이므로 여기서는 하지 않는다.
+    `segments`가 없는 응답은 계약 위반이다. 시각은 `0 ≤ start ≤ end ≤ chunk_duration`
+    (§11.11)이고 어긋난 시각을 몰래 메우지 않는다 — cue를 지어내면 가짜 SRT가 돌아온다.
+    예외 하나(D55): 청크 끝을 `overrun_tolerance` 이하로 넘은 시각은 **청크 끝으로 닫고**
+    경고한다 — 그 하나로 청크째 버리면 말이 조용히 사라진다(규칙 9, 실측 4/38). 길이 0은
+    글자째 남는다. 원 응답은 `response`에 그대로 남는다.
     """
     if not isinstance(payload, Mapping):
         raise MalformedCaptionResponse(f"시간 응답이 JSON 객체가 아니다: {type(payload).__name__}")
@@ -305,12 +310,8 @@ def parse_timing_response(
         raise MalformedCaptionResponse(
             f"시간 응답에 segments가 없다 — 받은 필드: {sorted(payload)}"
         )
-    records = payload["segments"]
-    if not isinstance(records, list):
-        raise MalformedCaptionResponse(f"segments가 리스트가 아니다: {type(records).__name__}")
-    segments = tuple(
-        _timed_segment(record, position, binding.request_id, chunk_duration)
-        for position, record in enumerate(records)
+    segments, clamped = _timed_segments(
+        payload["segments"], binding.request_id, chunk_duration, overrun_tolerance
     )
     return TimedTranscript(
         binding=binding,
@@ -319,17 +320,38 @@ def parse_timing_response(
         segments=segments,
         chunk_offset=chunk_offset,
         response=payload,
+        clamped_segments=clamped,
     )
 
 
+def _timed_segments(
+    records: object, request_id: str, chunk_duration: float, tolerance: float
+) -> tuple[tuple[TimedSegment, ...], tuple[int, ...]]:
+    """세그먼트 전부와 청크 끝으로 닫힌 위치(D55) — 하나라도 꼴이 어긋나면 실패한다."""
+    if not isinstance(records, list):
+        raise MalformedCaptionResponse(f"segments가 리스트가 아니다: {type(records).__name__}")
+    if not _finite_number(tolerance) or tolerance < 0:
+        raise MalformedCaptionResponse(f"넘침 관용이 유한한 0 이상이 아니다: {tolerance!r}")
+    segments = tuple(
+        _timed_segment(record, position, request_id, chunk_duration, tolerance)
+        for position, record in enumerate(records)
+    )
+    clamped = tuple(
+        segment.index
+        for segment, record in zip(segments, records, strict=True)
+        if isinstance(record, Mapping) and segment.end != float(record["end"])
+    )
+    return segments, clamped
+
+
 def _timed_segment(
-    record: object, position: int, request_id: str, chunk_duration: float
+    record: object, position: int, request_id: str, chunk_duration: float, tolerance: float
 ) -> TimedSegment:
     """세그먼트 하나의 형태 검사 — 시각·글자가 없으면 지어내지 않고 실패한다.
 
-    소유한 청크 범위를 벗어나거나 뒤집힌 시각은 고쳐 쓰지 않고 실패로 돌린다
-    (루트 리뷰) — 이 층의 계약은 §11.11이고, 뒤집힌 시각을 접어 살리는 것은
-    엔진 골격(규칙 9)의 규율이다.
+    음수·뒤집힌 시각, 청크 끝을 관용 밖으로 넘은 시각은 고쳐 쓰지 않고 실패로
+    돌린다(루트 리뷰·§11.11). 길이 0은 지나가고, 관용 안의 넘침은 청크 끝으로
+    닫힌다(D55 — `_close_at_chunk_end`).
     """
     where = f"세그먼트 {position}"
     if not isinstance(record, Mapping):
@@ -342,22 +364,44 @@ def _timed_segment(
         raise MalformedCaptionResponse(
             f"{where}의 시각이 유한 숫자가 아니다: start={start!r}, end={end!r}"
         )
-    if float(start) < 0 or not float(start) < float(end):
+    if float(start) < 0 or float(start) > float(end):
         raise MalformedCaptionResponse(
-            f"{where}의 시각이 0 ≤ start < end를 어긴다: start={start!r}, end={end!r}"
+            f"{where}의 시각이 0 ≤ start ≤ end를 어긴다: start={start!r}, end={end!r}"
         )
-    if float(end) > chunk_duration:
-        raise MalformedCaptionResponse(
-            f"{where}의 끝({end!r})이 청크 길이({chunk_duration!r})를 벗어난다 — "
-            "소유하지 않은 시각이다"
-        )
+    closed_start, closed_end = _close_at_chunk_end(
+        where, float(start), float(end), chunk_duration, tolerance
+    )
     return TimedSegment(
         index=position,
-        start=float(start),
-        end=float(end),
+        start=closed_start,
+        end=closed_end,
         text=text,
         evidence_id=f"{request_id}:{position}",
     )
+
+
+def _close_at_chunk_end(
+    where: str, start: float, end: float, chunk_duration: float, tolerance: float
+) -> tuple[float, float]:
+    """청크 끝을 관용 안에서 넘은 시각만 청크 끝으로 닫는다 — 시각에 가하는 유일한 손질.
+
+    오디오가 끝난 자리 너머의 시각은 들은 소리가 없으니 청크 끝이 유일한 사실이다.
+    관용 밖은 소유하지 않은 시각이라 실패다. 닫았으면 반드시 경고를 남긴다(규칙 9 —
+    조용한 손질은 없다).
+    """
+    over = end - chunk_duration
+    if over <= 0:
+        return start, end
+    if over > tolerance:
+        raise MalformedCaptionResponse(
+            f"{where}의 끝({end!r})이 청크 길이({chunk_duration!r})를 관용({tolerance}초) 밖으로"
+            " 벗어난다 — 소유하지 않은 시각이다"
+        )
+    log.warn(
+        f"{where}의 끝 {end!r}초가 청크 길이 {chunk_duration!r}초를 {over:.3f}초 넘었다 — 청크는"
+        " 버리지 않는다. 해석 시각은 청크 끝으로 닫고 원 응답은 그대로 둔다 (D55)"
+    )
+    return min(start, chunk_duration), chunk_duration
 
 
 def _text_features(prompt: str, settings: RawWorkflowConfig) -> tuple[str, ...]:
@@ -408,7 +452,8 @@ def timing_transcription_request(
 
     힌트 인자가 아예 없으므로 문구 설정의 languages·keywords가 넘어올 길이
     없다. `temperature`는 되풀이 대응의 손잡이(D28)로 호출자가 값을 정한다 —
-    기본은 필드를 아예 보내지 않는 것이다.
+    `None`이면 필드가 빠진다. 실전송 어댑터는 `None`을 받지 않고 엔진 1차 온도를
+    채워 부른다(D55).
     """
     contract, models = settings.caption, settings.models
     capabilities.confirm_request_combo(
@@ -497,10 +542,12 @@ class TransportTimingProvider:
     수명주기 검사가 끝난 뒤에야 전송이 일어난다. 실패는 여기서 감추지 않고
     그대로 올라간다 — 바운드된 재시도는 전송 경계의 `_retry`가 정한다.
 
-    `temperature`는 **되풀이 재전사의 손잡이다**(D28). 기본(없음)은 필드를 아예
-    보내지 않는 것이고, 회복 시도는 엔진이 정한 더 뜨거운 값으로 이 인자를 받는다.
-    온도를 못 받는 제공자가 회복 요청을 조용히 기본 온도로 보내는 길은 어댑터
-    계층에서 막는다 — 이 클래스는 그 손잡이를 확인받은 유일한 실전송 구현이다.
+    `temperature`는 **되풀이 대응의 손잡이다**(D28). 없으면 엔진 설정의 1차 온도
+    (`cfg.transcribe_temperature`, 0.6)를 보낸다 — 예전엔 필드를 빼서 API 기본 0으로
+    들렸고, 그 온도에서 whisper의 창 간 조건이 끊기지 않는다(D55 버그 1). 회복 시도는
+    엔진이 정한 더 뜨거운 값으로 이 인자를 받는다. 온도를 못 받는 제공자가 회복 요청을
+    조용히 기본 온도로 보내는 길은 어댑터 계층에서 막는다 — 이 클래스는 그 손잡이를
+    확인받은 유일한 실전송 구현이다.
     """
 
     sender: TranscriptionSender
@@ -518,7 +565,8 @@ class TransportTimingProvider:
         temperature: float | None = None,
     ) -> TimedTranscript:
         capabilities.preflight_online_transcription(settings, on, roles=(capabilities.ROLE_TIMING,))
-        request = timing_transcription_request(chunk, settings=settings, temperature=temperature)
+        sent = self.cfg.transcribe_temperature if temperature is None else temperature
+        request = timing_transcription_request(chunk, settings=settings, temperature=sent)
         verify_chunk_binding(binding, chunk)
         payload = self.sender.send_request(
             request, self.cfg, kind=CAPTION_TIMING_KIND, stem=stem, source=source

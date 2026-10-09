@@ -141,6 +141,26 @@ class RawCaptionContract:
 
 
 @dataclass(frozen=True)
+class TimingResponseTolerance:
+    """시간 응답 해석의 관용 — 청크 끝을 살짝 넘은 세그먼트를 청크 끝으로 닫는 폭(D55).
+
+    **외부 근거 없음.** 실측(2026-10-09, 원본 18개·청크 38개) whisper-1 넘침은 1.0초
+    (181.0/180.0) · 0.068초(39.0/38.932) · 0.06초(180.06/180.0)였다 — 예전엔 그 하나가
+    청크 전체를 버려 4/38 청크가 조용히 비었다(규칙 9). 2.0초는 실측 최대에 1.0초 여유다.
+    이 폭 밖의 넘침은 여전히 소유하지 않은 시각이라 거부한다. 닫는 것은 시각을 지어내는
+    것이 아니라 오디오가 끝난 자리로 자르는 것뿐이다(D55 — 규칙 1·3의 좁은 예외).
+
+    `RawWorkflowConfig`의 칸이 **아니다** — 내부 전사 캐시 열쇠가 그 사전을 통째로
+    해시하므로, 칸이 되면 이미 받은 전사가 모두 낡는다(D47의 교훈).
+    """
+
+    chunk_end_overrun_seconds: float = 2.0
+
+
+TIMING_RESPONSE_TOLERANCE = TimingResponseTolerance()
+
+
+@dataclass(frozen=True)
 class RawWorkflowConfig:
     """v2 원본 워크플로의 최상위 설정 — 기본은 오프라인이다(계획 §14.3)."""
 

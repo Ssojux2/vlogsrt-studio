@@ -1845,3 +1845,120 @@ def test_old_selected_cuts_finalcut_path_stays_dead(
 
 def test_real_tree_has_no_old_finalcut_path() -> None:
     assert check_invariants.check_old_finalcut_path_stays_dead() == []
+
+
+# ── D55: 자막 시각 확인은 순수하고, 표시만 한다 ─────────────────────────────────
+
+SYNC_CLEAN = (
+    "from fractions import Fraction\nfrom vlogsrt.project.config import SyncCheckSettings\n"
+)
+SYNC_REPORT_CLEAN = (
+    "from vlogsrt import preprocess\n"
+    "from vlogsrt.project import sync_check\n"
+    "from vlogsrt.project.raw.source_transcript import load\n"
+)
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "import subprocess",
+        "import numpy",
+        "import onnxruntime",
+        "from vlogsrt import preprocess",
+        "from vlogsrt import output",
+        "from vlogsrt import transcribe",
+        "from vlogsrt.project.raw import service",
+        "BODY = Path('x').read_text()",
+        "with open('x') as handle:\n    pass",
+    ],
+)
+def test_sync_check_is_pure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, statement: str
+) -> None:
+    target = "vlogsrt/project/sync_check.py"
+    _fake_source_tree(monkeypatch, tmp_path, {target: SYNC_CLEAN})
+    assert check_invariants.check_sync_check_stays_pure() == []
+    (tmp_path / target).write_text(SYNC_CLEAN + statement + "\n", encoding="utf-8")
+    assert check_invariants.check_sync_check_stays_pure()
+    (tmp_path / target).unlink()
+    assert check_invariants.check_sync_check_stays_pure() == [
+        "vlogsrt/project/sync_check.py: 자막 시각 확인 계층이 사라졌다 (D55)"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("planted", "body"),
+    [
+        ("vlogsrt/project/raw/tiering.py", "from vlogsrt.project.raw import sync_report\n"),
+        ("vlogsrt/project/raw/auto_cleanup.py", "from vlogsrt.project import sync_check\n"),
+        ("vlogsrt/project/raw/finalcut_timeline.py", "from vlogsrt.project import sync_check\n"),
+        ("vlogsrt/project/raw/finalcut_export.py", "from vlogsrt.project.raw import sync_report\n"),
+        (
+            "vlogsrt/project/raw/sync_report.py",
+            SYNC_REPORT_CLEAN + "from vlogsrt.project.raw import finalcut_export\n",
+        ),
+        (
+            "vlogsrt/project/raw/config.py",
+            "class RawWorkflowConfig:\n    sync: SyncCheckSettings = SyncCheckSettings()\n",
+        ),
+        ("vlogsrt/project/raw/understanding.py", "KEY = SYNC_CHECK_SETTINGS\n"),
+        (
+            "vlogsrt/project/raw/sync_report.py",
+            SYNC_REPORT_CLEAN + "from vlogsrt.project.raw.source_transcript import seed\n",
+        ),
+        (
+            "vlogsrt/project/raw/sync_report.py",
+            SYNC_REPORT_CLEAN + "SQL = 'INSERT INTO source_transcripts VALUES (?)'\n",
+        ),
+        ("vlogsrt/project/raw/sync_report.py", SYNC_REPORT_CLEAN + "from vlogsrt import output\n"),
+        # 검증자 재검(D55): 모듈 객체를 들여와 `.edit()`을 부르는 길 · 소문자 SQL
+        (
+            "vlogsrt/project/raw/sync_report.py",
+            SYNC_REPORT_CLEAN
+            + "from vlogsrt.project.raw import source_transcript\n"
+            + "source_transcript.edit(None, 'a', 'r', action='edit', utterance_id='u')\n",
+        ),
+        (
+            "vlogsrt/project/raw/sync_report.py",
+            SYNC_REPORT_CLEAN + "import vlogsrt.project.raw.source_transcript\n",
+        ),
+        (
+            "vlogsrt/project/raw/sync_report.py",
+            SYNC_REPORT_CLEAN + "SQL = 'insert into source_transcripts values (?)'\n",
+        ),
+        (
+            "vlogsrt/project/raw/sync_report.py",
+            SYNC_REPORT_CLEAN + "SQL = 'update source_transcripts set payload = ?'\n",
+        ),
+    ],
+)
+def test_sync_results_stay_on_screen(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, planted: str, body: str
+) -> None:
+    clean = {
+        "vlogsrt/project/sync_check.py": SYNC_CLEAN,
+        "vlogsrt/project/raw/sync_report.py": SYNC_REPORT_CLEAN,
+        "vlogsrt/project/raw/service.py": "from vlogsrt.project.raw import sync_report\n",
+        "vlogsrt/project/config.py": "class ProjectConfig:\n    schema_version: int = 1\n",
+    }
+    _fake_source_tree(monkeypatch, tmp_path, clean)
+    assert check_invariants.check_sync_check_only_displays() == []
+    (tmp_path / planted).parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / planted).write_text(body, encoding="utf-8")
+    assert check_invariants.check_sync_check_only_displays()
+
+
+def test_real_tree_keeps_the_sync_check_on_screen() -> None:
+    assert check_invariants.check_sync_check_stays_pure() == []
+    assert check_invariants.check_sync_check_only_displays() == []
+
+
+def test_sync_report_may_use_python_replace_and_update() -> None:
+    """SQL 검사는 대소문자를 가리지 않지만 `dict.update`·`replace(...)`는 SQL이 아니다."""
+    pattern = check_invariants.SYNC_WRITES_SQL
+    assert pattern.search("insert into source_transcripts values (?)")
+    assert pattern.search("DELETE FROM jobs")
+    assert not pattern.search("payload.update(stale=True)")
+    assert not pattern.search("cue = replace(cue, start=start)")
+    assert not pattern.search("os.replace(temporary, path)")
