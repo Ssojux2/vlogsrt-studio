@@ -117,26 +117,32 @@ def test_synthetic_cleanup_restore_restart_and_final_cut(tmp_path: Path):
     )
     handle_result = _wait_terminal(service, root, handles.job_id)
     assert handle_result.status == "succeeded", handle_result.error
-    # D35: automatic exclusions nobody has looked at must not leave the video silently.
+    # D35: the cutting export still refuses automatic exclusions nobody has looked at.
+    package_dir = service.package_overview(root).package.package_dir
     with pytest.raises(RawWorkspaceError, match=f"자동 제외 {len(excluded)}개"):
-        service.export_final_cut(root)
+        facade.export_confirmed(package_dir)
+    # D56: the Final Cut timeline removes nothing, so it has no gate — every segment is sent,
+    # unreviewed exclusions stay enabled and only carry a keyword.
+    total = sum((s.end_pts - s.start_pts) * clock.time_base for s in head.segments)
+    pending_xml = ET.parse(service.export_finalcut_timeline(root))
+    assert parse_fcpx_time(pending_xml.find(".//sequence").attrib["duration"]) == total
+    assert not [c for c in pending_xml.findall(".//spine/asset-clip") if c.get("enabled") == "0"]
     facade.confirm_automatic_exclusions()
-    destination, xml_path = service.export_final_cut(root)
-    xml = ET.parse(xml_path)
-    manifest = json.loads((root / destination / "confirmed_manifest.json").read_text())
+    outcome = facade.export_confirmed(package_dir)
+    manifest = json.loads((root / outcome.destination_dir / "confirmed_manifest.json").read_text())
     assert len(manifest["clips"]) == sum(s.selection == "included" for s in head.segments)
     assert not {s.segment_id for s in excluded}.intersection(
         c["segment_id"] for c in manifest["clips"]
     )
-    expected = sum(
-        (s.end_pts - s.start_pts) * clock.time_base
-        for s in head.segments
-        if s.selection == "included"
+    xml = ET.parse(service.export_finalcut_timeline(root))
+    clips = xml.findall(".//spine/asset-clip")
+    disabled = [c for c in clips if c.get("enabled") == "0"]
+    assert len(disabled) == len(excluded)
+    assert sum(parse_fcpx_time(c.attrib["duration"]) for c in disabled) == sum(
+        (s.end_pts - s.start_pts) * clock.time_base for s in excluded
     )
-    assert parse_fcpx_time(xml.find(".//sequence").attrib["duration"]) == expected
-    assert any(
-        parse_fcpx_time(item.attrib["start"]) > 0 for item in xml.findall(".//spine/asset-clip")
-    )
+    assert parse_fcpx_time(xml.find(".//sequence").attrib["duration"]) == total
+    assert any(parse_fcpx_time(item.attrib["start"]) > 0 for item in clips)
     restored = facade.restore_automatic()
     assert all(s.selection == "included" for s in restored.segments)
     reopened = ReviewWorkspaceFacade(root)

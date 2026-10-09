@@ -17,6 +17,7 @@ import json
 import shutil
 import sqlite3
 import subprocess
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import pytest
@@ -241,32 +242,28 @@ def test_reopen_backfills_shot_times_and_moves_the_head_without_losing_decisions
 
 @needs_ffmpeg
 def test_export_after_reorder_follows_shot_time(tmp_path: Path):
-    """Final Cut으로 넘기는 확정 매니페스트도 촬영 시각 순이다(재추출은 로컬, 유료 호출 없음).
+    """Final Cut으로 보내는 전체 타임라인도 촬영 시각 순이다(유료 호출 없음, D53·D56).
 
-    순서를 옮긴 머리는 새 계획 위라 옛 조각 파일이 낡는다 — 화면의 출력 단추와 같은 길
-    (`materialize_review` → `export_final_cut`)이 다시 뽑아 내보낸다.
+    옛 길은 순서를 옮긴 머리의 조각 파일을 다시 뽑아(`materialize`) 확정 패키지로 냈다. 지금
+    보내기는 원본을 그대로 참조해 조각을 뽑지 않는다 — 작업이 하나도 생기지 않는다.
     """
     service, root = reverse_imported_project(tmp_path)
     reopened = RawWorkspaceService()
     assert "촬영 시각 순" in (reopened.start_upkeep(root) or "")
     assert _wait_upkeep(reopened, root).status == "succeeded"
     head = ReviewWorkspaceFacade(root).confirm_automatic_exclusions()
-    exported: dict[str, tuple[str, str]] = {}
-
-    def body(context) -> None:
-        ready = reopened.materialize_review(root, context, head.revision_id)
-        exported["final_cut"] = reopened.export_final_cut(
-            root, context, expected_review_revision_id=ready
-        )
-
-    job = reopened.submit_job(root, "capcut_export", head.revision_id, body)
-    finished = _wait_terminal(reopened, root, job.job_id)
-    assert finished.status == "succeeded", finished.error
-    destination, _xml = exported["final_cut"]
-    manifest = json.loads((root / destination / "confirmed_manifest.json").read_text())
-    clips = sorted(manifest["clips"], key=lambda clip: clip["export_index"])
-    assert list(dict.fromkeys(clip["source_filename"] for clip in clips)) == SHOT_ORDER
-    assert manifest["order_revision_id"] == reopened.latest_global_source_order(root).revision_id
+    jobs = {job.job_id for job in reopened.list_jobs(root)}
+    path = reopened.export_finalcut_timeline(root)
+    report = json.loads(path.with_suffix(".json").read_text(encoding="utf-8"))
+    assert [Path(row["path"]).name for row in report["sources"]] == SHOT_ORDER
+    assert report["review_head"] == head.revision_id
+    document = ET.parse(path).getroot()
+    assets = {asset.get("id"): asset.get("name") for asset in document.iter("asset")}
+    spine = document.find("./library/event/project/sequence/spine")
+    assert spine is not None
+    order = [f"{assets[clip.get('ref')]}.mov" for clip in spine]
+    assert list(dict.fromkeys(order)) == SHOT_ORDER
+    assert {job.job_id for job in reopened.list_jobs(root)} == jobs  # 다시 뽑지 않는다
 
 
 @needs_ffmpeg

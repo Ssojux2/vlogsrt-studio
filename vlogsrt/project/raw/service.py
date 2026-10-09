@@ -14,7 +14,7 @@ import json
 import math
 import os
 import threading
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from datetime import UTC, date, datetime
 from fractions import Fraction
@@ -881,6 +881,10 @@ class RawWorkspaceService:
     def list_jobs(self, root: Path, limit: int = 50) -> tuple[JobRecord, ...]:
         return self._jobs(root).list_jobs(limit)
 
+    def active_jobs(self, root: Path, kinds: Collection[str]) -> tuple[JobRecord, ...]:
+        """그 종류의 활성 작업 전부 — 목록 창(최근 50개) 밖의 오래된 작업도 놓치지 않는다."""
+        return self._jobs(root).active_of_kinds(kinds)
+
     def resume_job(
         self,
         root: Path,
@@ -1688,33 +1692,6 @@ class RawWorkspaceService:
         recorded = self._order_revision(root, order_revision_id)
         return set(_order_ids(recorded)) == set(_order_ids(latest))
 
-    def materialize_review(self, root: Path, context: JobContext, expected_revision: str) -> str:
-        from vlogsrt.project.raw.media_refs import resolve
-
-        for asset in self.list_source_assets(root):
-            if asset.status == "ready":
-                resolve(self._workspace(root), asset, "export")
-        facade = self.review_workspace_facade(root)
-        head = facade.load_head().revision
-        if head.revision_id != expected_revision:
-            raise RawWorkspaceError("검토가 바뀌었습니다. 현재 결과에서 다시 보내세요")
-        plan = self.segment_plan_revision(root, head.base_plan_id)
-        geometry = {(s.segment_id, s.start_pts, s.end_pts) for s in head.segments}
-        if geometry != {(s.segment_id, s.core_start_pts, s.core_end_pts) for s in plan.entries}:
-            plan, mapping = facade.plan_from_review(head.base_plan_id)
-            head = facade.adopt_plan_review(plan, mapping, old_revision=head)
-        package = self.package_overview(root)
-        if not (
-            package
-            and package.package.complete
-            and package.package.plan_revision_id == head.base_plan_id
-            and not facade.stale_media(package.package.package_dir)
-        ):
-            self.wait_child_job(
-                root, self.start_segment_extraction(root, head.base_plan_id), context
-            )
-        return head.revision_id
-
     def export_finalcut_timeline(self, root: Path, context: JobContext | None = None) -> Path:
         """불러온 원본 전부를 태그 달린 타임라인 하나로 — 새 FCPXML 경로를 돌려준다(D56).
 
@@ -1724,39 +1701,6 @@ class RawWorkspaceService:
         from vlogsrt.project.raw import finalcut_export
 
         return finalcut_export.export(self, root, context).fcpxml
-
-    def export_final_cut(
-        self,
-        root: Path,
-        context: JobContext | None = None,
-        expected_review_revision_id: str | None = None,
-    ) -> tuple[str, str]:
-        from vlogsrt.project.raw.final_cut_handoff import build_handoff
-        from vlogsrt.project.raw.review_workspace import require_automatic_exclusions_reviewed
-
-        facade = self.review_workspace_facade(root)
-        head = facade.load_head().revision
-        if (
-            expected_review_revision_id is not None
-            and head.revision_id != expected_review_revision_id
-        ):
-            raise RawWorkspaceError("검토가 바뀌었습니다. 결과 확인 후 다시 내보내세요")
-        require_automatic_exclusions_reviewed(head)
-        if not any(s.selection == "included" for s in head.segments):
-            raise RawWorkspaceError("사용할 컷이 하나도 없습니다")
-        package = self.package_overview(root)
-        if package is None:
-            raise RawWorkspaceError("조각 추출을 먼저 완료하세요")
-        if facade.stale_media(package.package.package_dir):
-            raise RawWorkspaceError("경계가 바뀌었습니다. 자동 정리로 편집 구간을 갱신하세요")
-        outcome = facade.export_confirmed(
-            package.package.package_dir,
-            base_plan_id=head.base_plan_id,
-            expected_review_revision_id=head.revision_id,
-            context=context,
-        )
-        xml = build_handoff(root, outcome.destination_dir)
-        return outcome.destination_dir, str(xml)
 
     def scan_sources(
         self,

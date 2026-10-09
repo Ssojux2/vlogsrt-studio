@@ -813,7 +813,7 @@ def is_unreviewed_auto_exclusion(segment: ReviewSegment) -> bool:
 
 
 def unreviewed_auto_exclusions(revision: ReviewRevision) -> tuple[ReviewSegment, ...]:
-    """사람이 아직 확인하지 않은 자동 제외 — 이게 있으면 출력은 닫힌다(D35)."""
+    """사람이 아직 확인하지 않은 자동 제외 — 있으면 잘라 내는 확정 내보내기가 닫힌다(D35·D56)."""
     return tuple(s for s in chronological(revision) if is_unreviewed_auto_exclusion(s))
 
 

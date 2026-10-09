@@ -144,7 +144,9 @@ JOURNAL_SUFFIX = "-journal"
 def _require_quiet(database: Path) -> None:
     if database.with_name(database.name + JOURNAL_SUFFIX).exists():
         raise LibraryBusy(
-            str(database), "Final Cut이 라이브러리를 저장하는 중이다 — 잠시 뒤 다시 시도하세요"
+            str(database),
+            "Final Cut이 라이브러리를 저장하는 중이다 — 잠시 뒤 다시 시도하세요. 계속되면"
+            " Final Cut에서 라이브러리를 닫았다 다시 열어 저장을 끝낸 뒤 보내세요",
         )
 
 

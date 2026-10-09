@@ -1770,7 +1770,7 @@ def test_real_finalcut_timeline_module_passes_the_purity_check() -> None:
         "import subprocess",
         "from vlogsrt.project.raw import confirmed_package",
         "from vlogsrt.project.raw.confirmed_package import verify_confirmed_export",
-        "from vlogsrt.project.raw import final_cut_handoff",
+        "from vlogsrt.project.raw import " + "final_cut" + "_handoff",  # 지운 옛 출력 계층
         "from vlogsrt.project.clips import probe_clips",
         "from vlogsrt.project.media import sha256_file",
         "DIGEST = review_workspace._sha256_file(path)",
@@ -1809,3 +1809,39 @@ def test_finalcut_export_never_copies_or_rehashes(
 
 def test_real_finalcut_export_module_passes_the_no_copy_check() -> None:
     assert check_invariants.check_finalcut_export_never_copies() == []
+
+
+# ── D56: 옛 「선택한 컷」 출력 길은 되살리지 않는다 ─────────────────────────
+# 이름은 조각을 이어 만든다 — 저장소 전체 grep 인수(옛 이름 0건)가 이 시험 자신에 걸리지 않게.
+_OLD_EXPORT = "export_" + "final_cut"
+_OLD_MATERIALIZE = "materialize" + "_review"
+_OLD_OPEN = "capcut" + "_open_view"
+_OLD_MODULE = "final_cut" + "_handoff"
+
+
+@pytest.mark.parametrize(
+    ("relative", "body"),
+    [
+        ("vlogsrt/project/raw/service.py", f"def {_OLD_EXPORT}(self):\n    pass\n"),
+        ("vlogsrt/project/raw/service.py", f"X = service.{_OLD_MATERIALIZE}(root)\n"),
+        ("ui/workspace_service.py", f"def {_OLD_OPEN}(self):\n    pass\n"),
+        (f"vlogsrt/project/raw/{_OLD_MODULE}.py", "X = 1\n"),
+    ],
+)
+def test_old_selected_cuts_finalcut_path_stays_dead(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, relative: str, body: str
+) -> None:
+    clean = {
+        "vlogsrt/project/raw/service.py": "def export_finalcut_timeline(self):\n    pass\n",
+        "ui/workspace_service.py": "def finalcut_send_view(self):\n    pass\n",
+    }
+    _fake_source_tree(monkeypatch, tmp_path, clean)
+    assert check_invariants.check_old_finalcut_path_stays_dead() == []
+    target = tmp_path / relative
+    target.write_text(body, encoding="utf-8")
+    failures = check_invariants.check_old_finalcut_path_stays_dead()
+    assert failures and all("D56" in failure for failure in failures)
+
+
+def test_real_tree_has_no_old_finalcut_path() -> None:
+    assert check_invariants.check_old_finalcut_path_stays_dead() == []

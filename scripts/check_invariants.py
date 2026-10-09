@@ -651,6 +651,31 @@ def check_finalcut_timeline_stays_pure() -> list[str]:
     return failures
 
 
+# D56이 대신한 옛 「선택한 컷 Final Cut으로 출력」 길 — 확정 패키지를 뽑고(materialize) 그 옆에
+# XML을 썼다. 지금 보내기는 원본 전체를 지우지 않고 보낸다. 옛 이름이 돌아오면 미검토 관문이
+# 걸린 두 갈래 출력이 다시 생긴다.
+OLD_FINALCUT_MODULE = "project/raw/final_cut_handoff.py"
+OLD_FINALCUT_NAMES = re.compile(
+    r"\b(export_final_cut|materialize_review|capcut_handoff_view|capcut_open_view)\b"
+)
+
+
+def check_old_finalcut_path_stays_dead() -> list[str]:
+    """D56 — 옛 출력 모듈·이름이 `vlogsrt`·`ui`에 돌아오지 않는다."""
+    failures = []
+    if (PACKAGE / OLD_FINALCUT_MODULE).exists():
+        failures.append(
+            f"vlogsrt/{OLD_FINALCUT_MODULE}: 지운 옛 Final Cut 출력 모듈이 돌아왔다 (D56)"
+        )
+    for path in sorted([*PACKAGE.rglob("*.py"), *UI_DIR.rglob("*.py")]):
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+            if OLD_FINALCUT_NAMES.search(line):
+                failures.append(
+                    f"{_rel(path)}:{number}: 옛 「선택한 컷」 Final Cut 출력 이름이 돌아왔다 (D56)"
+                )
+    return failures
+
+
 def check_finalcut_export_never_copies() -> list[str]:
     """D56 — `finalcut_export.py`는 원본을 복사·재해시하지 않고, 쓴 파일을 덮어쓰지 않는다.
 
@@ -1250,6 +1275,7 @@ CHECKS = (
     ("3단 등급은 순수하다", check_tiering_stays_pure),
     ("Final Cut 타임라인 빌더는 순수하다", check_finalcut_timeline_stays_pure),
     ("Final Cut 보내기는 원본을 복사·재해시하지 않는다", check_finalcut_export_never_copies),
+    ("옛 선택한 컷 Final Cut 출력은 되살리지 않는다", check_old_finalcut_path_stays_dead),
     ("신뢰도 메타 보존", check_confidence_meta_survives),
     ("전사 호출 1개", check_one_transcription_call),
     ("모델 이름 비하드코딩", check_no_hardcoded_model),

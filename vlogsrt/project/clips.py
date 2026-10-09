@@ -151,12 +151,7 @@ def _color_space(summary: preprocess.MediaSummary, where: str) -> str:
     return space
 
 
-def synthesize_fcpxml(
-    clips: Sequence[ClipProbe],
-    *,
-    project_name: str,
-    ranges: Sequence[tuple[int, int]] | None = None,
-) -> bytes:
+def synthesize_fcpxml(clips: Sequence[ClipProbe], *, project_name: str) -> bytes:
     """클립 실측값을 FCPXML 1.14 바이트로. 같은 입력이면 **같은 바이트**가 나온다.
 
     순수 함수다 — 파일을 읽지도 ffmpeg를 부르지도 않는다. 시각은 전부 프레임
@@ -167,21 +162,7 @@ def synthesize_fcpxml(
         raise UnsupportedProject("(입력 없음)", "합성할 클립이 하나도 없다")
     _require_uniform(clips)
     first = clips[0]
-    spans = tuple(ranges) if ranges is not None else tuple((0, c.frame_count) for c in clips)
-    if len(spans) != len(clips):
-        raise UnsupportedProject(project_name, "클립과 사용 구간 개수가 다르다")
-    for clip, (start, length) in zip(clips, spans, strict=True):
-        if (
-            type(start) is not int
-            or type(length) is not int
-            or start < 0
-            or length <= 0
-            or start + length > clip.frame_count
-        ):
-            raise UnsupportedProject(
-                str(clip.path), "사용 구간이 실제 미디어 프레임 범위를 벗어났다"
-            )
-    total_frames = sum(length for _, length in spans)
+    total_frames = sum(clip.frame_count for clip in clips)
     lines: list[str] = [
         '<?xml version="1.0" encoding="UTF-8"?>',
         "<!DOCTYPE fcpxml>",
@@ -200,11 +181,8 @@ def synthesize_fcpxml(
     lines.append("                    <spine>")
     offset_frames = 0
     for index, clip in enumerate(clips):
-        start, length = spans[index]
-        lines.append(
-            f"                        {_clip_element(clip, index, offset_frames, start, length)}"
-        )
-        offset_frames += length
+        lines.append(f"                        {_clip_element(clip, index, offset_frames)}")
+        offset_frames += clip.frame_count
     lines.append("                    </spine>")
     lines.append("                </sequence>")
     lines.append("            </project>")
@@ -300,20 +278,13 @@ def _sequence_open(clip: ClipProbe, total_frames: int) -> str:
     )
 
 
-def _clip_element(
-    clip: ClipProbe,
-    index: int,
-    offset_frames: int,
-    start_frame: int = 0,
-    duration_frames: int | None = None,
-) -> str:
+def _clip_element(clip: ClipProbe, index: int, offset_frames: int) -> str:
     role = ' audioRole="dialogue"' if clip.has_audio else ""
-    frames = clip.frame_count if duration_frames is None else duration_frames
     return (
         f'<asset-clip ref="{_asset_id(index)}"'
         f' offset="{_time(offset_frames, clip.frame_duration)}"'
-        f' name="{_attr(clip.path.stem)}" start="{_time(start_frame, clip.frame_duration)}"'
-        f' duration="{_time(frames, clip.frame_duration)}"'
+        f' name="{_attr(clip.path.stem)}" start="0s"'
+        f' duration="{_time(clip.frame_count, clip.frame_duration)}"'
         f' format="{_FORMAT_ID}" tcFormat="NDF"{role}/>'
     )
 

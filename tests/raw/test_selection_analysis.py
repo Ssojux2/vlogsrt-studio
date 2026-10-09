@@ -9,7 +9,6 @@ from fractions import Fraction
 from pathlib import Path
 from types import SimpleNamespace
 
-import gradio as gr
 import pytest
 
 from tests.raw.test_browser_runtime import _CountingSender, _make_media
@@ -186,7 +185,6 @@ def test_analysis_completion_proposes_red_as_unreviewed_exclusion_and_export_wai
     '추천'(풍경 → 노랑), 창 1은 '검토', 창 2는 '사용 가능'으로 본다 — 15–32초가 제외 제안이 되고,
     사람이 확인하기 전에는 Final Cut 출력이 열리지 않는다(D35·D52). 유료 호출 0회(가짜 제공자).
     """
-    from tests.raw.test_review_workspace import _wait_terminal
 
     source = tmp_path / "long.mov"
     _make_media_with_full_audio(source, 32)
@@ -217,19 +215,51 @@ def test_analysis_completion_proposes_red_as_unreviewed_exclusion_and_export_wai
         assert provenance["analysis_revision_id"] == server._quick["revision"]
     kept = [s for s in head.segments if s not in pending]
     assert [(seconds(s), s.selection) for s in kept] == [((0, 15), "included")]
-    # 출력 관문 — 사람이 보기 전에는 영상에서 아무것도 지우지 않는다.
-    with pytest.raises(gr.Error, match="자동 제외 2개를 먼저 확인"):
-        server.capcut_handoff_view(server.current_signature())
+    # 잘라 내는 확정 내보내기의 관문 — 사람이 보기 전에는 영상에서 아무것도 지우지 않는다(D35).
+    # 관문은 패키지를 보기 전에 선다(이 흐름은 아직 조각을 뽑지 않았다).
     with pytest.raises(RawWorkspaceError, match="자동 제외 2개를 먼저 확인"):
-        server.raw.export_final_cut(root)
-    assert not [j for j in server.raw.list_jobs(root) if j.kind == "capcut_export"]
+        facade.export_confirmed("clips/package_never_built")
+    # Final Cut 보내기는 지우지 않으므로 막지 않는다 — 미검토 빨강은 켠 채 키워드로 간다(D56).
+    opened: list[Path] = []
+    server._finalcut_opener = opened.append  # 시험은 실제 Final Cut을 열지 않는다
+    sent = _send(server, root)
+    assert [_state(sent, seconds(s)[0]) for s in pending] == [
+        (None, ["제외 제안", "제외 제안(미검토)"])
+    ] * 2
+    assert _state(sent, seconds(kept[0])[0])[0] is None
     facade.confirm_automatic_exclusions()
-    server.capcut_handoff_view(server.current_signature())
-    job = next(j for j in server.raw.list_jobs(root) if j.kind == "capcut_export")
+    confirmed = _send(server, root)
+    assert [_state(confirmed, seconds(s)[0])[0] for s in pending] == ["0", "0"]
+    assert all("제외 확정" in _state(confirmed, seconds(s)[0])[1] for s in pending)
+    assert _state(confirmed, seconds(kept[0])[0])[0] is None
+    assert opened == [sent, confirmed]
+
+
+def _send(server, root: Path) -> Path:
+    from tests.raw.test_review_workspace import _wait_terminal
+
+    before = {j.job_id for j in server.raw.list_jobs(root)}
+    server.finalcut_send_view(server.current_signature())
+    (job,) = [
+        j
+        for j in server.raw.list_jobs(root)
+        if j.kind == "finalcut_send" and j.job_id not in before
+    ]
     finished = _wait_terminal(server.raw, root, job.job_id)
     assert finished.status == "succeeded", finished.error
-    manifest = json.loads((root / server._last_export_dir / "confirmed_manifest.json").read_text())
-    assert [c["segment_id"] for c in manifest["clips"]] == [kept[0].segment_id]
+    return Path(server._finalcut_sent[str(server.current_signature())]["path"])
+
+
+def _state(xml_path: Path, start: Fraction) -> tuple[str | None, list[str]]:
+    """그 시각에 시작하는 스파인 클립의 (enabled, 키워드) — 시작 타임코드 없는 합성 원본 하나."""
+    import xml.etree.ElementTree as ET
+
+    spine = ET.parse(xml_path).getroot().find("./library/event/project/sequence/spine")
+    assert spine is not None
+    for clip in spine:
+        if Fraction(clip.attrib["start"].removesuffix("s")) == start:
+            return clip.get("enabled"), [k.get("value") for k in clip.findall("keyword")]
+    raise AssertionError(f"{start}초에 시작하는 클립이 없다")
 
 
 def test_unapproved_selection_prepares_preview_but_never_calls_providers(tmp_path, monkeypatch):

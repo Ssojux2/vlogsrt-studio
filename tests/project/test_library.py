@@ -376,5 +376,6 @@ def test_a_library_being_saved_is_refused_not_read(tmp_path: Path, database: str
         else:
             library.read_catalog(bundle)
     assert "저장하는 중" in caught.value.reason
+    assert "닫았다 다시" in caught.value.reason  # 계속되면 무엇을 할지까지 말한다
     journal.unlink()
     assert library.index_event(event).assets

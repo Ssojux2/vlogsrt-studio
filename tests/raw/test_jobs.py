@@ -669,3 +669,22 @@ def test_waiting_on_a_child_writes_progress_only_when_it_changes(
         values = [value for name, value in context.writes if name == kind]
         assert all(a != b for a, b in zip(values, values[1:], strict=False))
     assert len(context.writes) <= 6 < context.polls
+
+
+def test_cancellation_of_a_parent_propagates_to_the_waited_child(monkeypatch):
+    """부모 작업이 취소되면 기다리던 자식도 취소된다(옛 test_capcut_export에서 옮김)."""
+    from types import SimpleNamespace
+
+    service = raw.RawWorkspaceService()
+    cancelled = []
+    monkeypatch.setattr(service, "cancel_job", lambda root, job_id: cancelled.append(job_id))
+
+    class CancelledContext:
+        def check_cancel(self):
+            raise JobCancelledError("parent")
+
+    with pytest.raises(JobCancelledError):
+        service.wait_child_job(
+            Path("/synthetic"), SimpleNamespace(job_id="child"), CancelledContext()
+        )
+    assert cancelled == ["child"]

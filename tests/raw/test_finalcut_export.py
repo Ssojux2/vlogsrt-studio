@@ -481,7 +481,10 @@ def test_unrelated_broken_library_record_does_not_block_the_export(tmp_path: Pat
     asset = _parsed(path).find("./resources/asset")
     assert asset is not None and asset.attrib["uid"] == spec.identity
     warnings = _report(path)["library"]["warnings"]
-    assert any("videoFormatName" in line and broken.identity in line for line in warnings)
+    assert any(
+        "videoFormatName" in line and broken.identity in line and "other" in line
+        for line in warnings
+    )  # 표시 이름까지 — 사람이 Final Cut에서 그 클립을 찾을 수 있다
 
 
 def test_broken_record_of_an_exported_original_is_refused_by_name(tmp_path: Path):
@@ -727,3 +730,131 @@ def test_reserve_moves_on_when_a_name_appears_while_reserving(
     assert draft.name == f".{stem}.fcpxml.partial" and draft.exists()
     assert rival.read_bytes() == b"rival"
     assert not (folder / ".vlogsrt_20261009T120000Z.fcpxml.partial").exists()
+
+
+# ─── W-16 C — 가져오는 중 · 잠금 없는 파일 시스템 · 머리 정보 프레임 수 ─────
+
+
+def test_export_waits_for_a_running_import(tmp_path: Path):
+    """가져오기가 도는 동안의 원본 목록은 아직 끝나지 않았다 — 반쪽 타임라인을 보내지 않는다."""
+    from vlogsrt.project.raw.jobs import JobStore
+    from vlogsrt.project.raw.workspace import RawWorkspace
+
+    service, root = _plain_project(tmp_path)
+    running, _ = JobStore(RawWorkspace.open(root)).insert_deduplicated("ingest_copy", "card", 0)
+    with pytest.raises(finalcut_export.FinalCutExportError, match="가져오기") as caught:
+        service.export_finalcut_timeline(root)
+    assert running.job_id in str(caught.value)
+    assert _export_files(root) == []
+
+
+def test_a_folder_without_file_locks_is_a_named_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    service, root = _plain_project(tmp_path)
+
+    def no_locks(descriptor: int, operation: int) -> None:
+        raise OSError(45, "Operation not supported")
+
+    monkeypatch.setattr(fcntl, "flock", no_locks)
+    with pytest.raises(finalcut_export.FinalCutExportError, match="잠금"):
+        service.export_finalcut_timeline(root)
+
+
+def test_head_frame_count_must_match_the_header(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    service, root = tier_project(tmp_path)
+    real = preprocess.probe_raw_media
+
+    def shorter(path: Path, **kwargs: Any) -> Any:
+        probe = real(path, **kwargs)
+        assert probe.video.duration_ts is not None
+        video = dataclasses.replace(probe.video, duration_ts=probe.video.duration_ts - 1)
+        return dataclasses.replace(probe, video=video)
+
+    monkeypatch.setattr(preprocess, "probe_raw_media", shorter)
+    with pytest.raises(finalcut_export.FinalCutExportError) as caught:
+        service.export_finalcut_timeline(root)
+    assert "프레임 수" in str(caught.value)
+    _edit_list_refusal(str(caught.value), "tier.mov")  # 머리를 다시 세워도 같은 시계를 잰다
+
+
+# ─── W-16 C 2차 — 편집 목록(edit list)이 있는 원본 · 오래 남은 가져오기 작업 ───────
+
+
+def _trim_copy(source: Path, target: Path) -> Path:
+    """스트림 복사로 앞을 자른 파일 — 첫 패킷이 0보다 앞이고 머리 정보 길이가 패킷보다 짧다."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    result = subprocess.run(
+        ["ffmpeg", "-v", "error", "-y", "-ss", "0.5", "-i", str(source), "-c", "copy", str(target)],
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    return target
+
+
+def _edit_list_refusal(message: str, name: str) -> None:
+    assert name in message and "편집 목록" in message and "다시 저장" in message
+    assert "검토를 다시 세우세요" not in message  # 다시 세워도 같은 시계를 잰다
+
+
+def test_edit_list_source_outside_the_head_is_refused_with_resave_advice(tmp_path: Path):
+    source = _trim_copy(
+        _encode(tmp_path / "full.mov", seconds="3"), tmp_path / "card" / "cut_copy.mov"
+    )
+    service = RawWorkspaceService()
+    root = tmp_path / "project"
+    service.create_workspace(root, "편집 목록")
+    handle = service.import_selected_video(root, source)
+    assert _wait_terminal(service, root, handle.job_id).status == "succeeded"
+    with pytest.raises(finalcut_export.FinalCutExportError) as caught:
+        service.export_finalcut_timeline(root)
+    _edit_list_refusal(str(caught.value), "cut_copy.mov")
+    assert _export_files(root) == []
+
+
+def test_edit_list_source_inside_the_head_is_refused_with_resave_advice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """검토 머리의 원점이 0보다 앞이면 머리를 세울 때 이미 편집 목록을 쟀던 것이다."""
+    service, root = tier_project(tmp_path)
+    real = ReviewWorkspaceFacade.load_head
+
+    def pre_rolled(self: ReviewWorkspaceFacade, *args: Any, **kwargs: Any) -> Any:
+        loaded = real(self, *args, **kwargs)
+        shift = loaded.revision.clocks[0].frame_ticks * 12
+        clocks = tuple(
+            dataclasses.replace(c, origin_pts=c.origin_pts - shift, end_pts=c.end_pts - shift)
+            for c in loaded.revision.clocks
+        )
+        segments = tuple(
+            dataclasses.replace(s, start_pts=s.start_pts - shift, end_pts=s.end_pts - shift)
+            for s in loaded.revision.segments
+        )
+        revision = dataclasses.replace(loaded.revision, clocks=clocks, segments=segments)
+        return dataclasses.replace(loaded, revision=revision)
+
+    monkeypatch.setattr(ReviewWorkspaceFacade, "load_head", pre_rolled)
+    with pytest.raises(finalcut_export.FinalCutExportError) as caught:
+        service.export_finalcut_timeline(root)
+    _edit_list_refusal(str(caught.value), "tier.mov")
+
+
+def test_an_old_running_import_behind_newer_jobs_still_blocks_and_says_how_to_clear(
+    tmp_path: Path,
+):
+    from vlogsrt.project.raw.jobs import JobStore
+    from vlogsrt.project.raw.workspace import RawWorkspace
+
+    service, root = _plain_project(tmp_path)
+    store = JobStore(RawWorkspace.open(root))
+    stuck, _ = store.insert_deduplicated("reference_import", "stuck", 0)
+    store.update(stuck.job_id, status="running")
+    for index in range(55):  # 최근 50개 창 밖으로 밀어낸다
+        newer, _ = store.insert_deduplicated("source_preview", f"newer-{index}", 0)
+        store.update(newer.job_id, status="succeeded")
+    with pytest.raises(finalcut_export.FinalCutExportError) as caught:
+        service.export_finalcut_timeline(root)
+    message = str(caught.value)
+    assert stuck.job_id in message and stuck.created_at in message
+    assert "가져오기" in message and "앱을 다시 시작" in message
+    assert _export_files(root) == []

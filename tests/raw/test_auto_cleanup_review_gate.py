@@ -1,4 +1,6 @@
-"""자동 제외는 사람이 보기 전까지 미검토다 — 출력은 그 상태로 나가지 못한다(D35·W-5).
+"""자동 제외는 사람이 보기 전까지 미검토다 — 잘라 내는 확정 내보내기는 그 상태로 나가지
+못한다(D35·W-5). Final Cut 전체 타임라인은 지우지 않으므로 관문이 없고, 미검토 제외를 켠 채
+키워드로만 보낸다 — 사람이 확인하면 그때부터 꺼진 채 간다(D56).
 
 순수 층(도메인 편집·설정)은 손으로 만든 리비전으로, 통합 층(조립·재분석·출력 관문)은
 `test_capcut_flow`와 같은 합성 ffmpeg 미디어로 잰다. 유료 호출 0회.
@@ -9,6 +11,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import xml.etree.ElementTree as ET
 from dataclasses import replace
 from fractions import Fraction
 from pathlib import Path
@@ -191,8 +194,17 @@ def _synthetic_project(tmp_path: Path) -> tuple[RawWorkspaceService, Path]:
     return service, root
 
 
+def _disabled(xml_path: Path) -> int:
+    clips = ET.parse(xml_path).findall(".//spine/asset-clip")
+    return sum(clip.get("enabled") == "0" for clip in clips)
+
+
+def _package(service: RawWorkspaceService, root: Path) -> str:
+    return service.package_overview(root).package.package_dir
+
+
 @needs_ffmpeg
-def test_materialization_marks_exclusions_and_the_gate_holds_until_bulk_confirm(tmp_path: Path):
+def test_materialization_marks_exclusions_and_only_the_cutting_export_is_gated(tmp_path: Path):
     service, root = _synthetic_project(tmp_path)
     facade = ReviewWorkspaceFacade(root)
     head = facade.load_head().revision
@@ -203,16 +215,17 @@ def test_materialization_marks_exclusions_and_the_gate_holds_until_bulk_confirm(
         s.segment_id for s in excluded
     }
     with pytest.raises(RawWorkspaceError, match=f"자동 제외 {len(excluded)}개를 먼저 확인"):
-        service.export_final_cut(root)
+        facade.export_confirmed(_package(service, root))
+    assert _disabled(service.export_finalcut_timeline(root)) == 0  # 보내기는 막지 않는다
     confirmed = facade.confirm_automatic_exclusions()
     assert confirmed.sequence == head.sequence + 1
     assert unreviewed_auto_exclusions(confirmed) == ()
     assert [s.selection for s in confirmed.segments] == [s.selection for s in head.segments]
     assert [s.notes for s in confirmed.segments] == [s.notes for s in head.segments]
-    destination, xml = service.export_final_cut(root)
-    manifest = json.loads((root / destination / "confirmed_manifest.json").read_text())
+    outcome = facade.export_confirmed(_package(service, root))
+    manifest = json.loads((root / outcome.destination_dir / "confirmed_manifest.json").read_text())
     assert not {s.segment_id for s in excluded} & {c["segment_id"] for c in manifest["clips"]}
-    assert Path(xml).is_file()
+    assert _disabled(service.export_finalcut_timeline(root)) == len(excluded)
     assert (
         facade.confirm_automatic_exclusions() == confirmed
     )  # 할 일이 없으면 리비전을 만들지 않는다
@@ -229,7 +242,7 @@ def test_explicit_include_clears_one_segment_and_other_stays_gated(tmp_path: Pat
         s.segment_id for s in rest
     }
     with pytest.raises(RawWorkspaceError, match=f"자동 제외 {len(rest)}개를 먼저 확인"):
-        service.export_final_cut(root)
+        facade.export_confirmed(_package(service, root))
     manual = _segment(changed, first.segment_id)
     assert manual.selection == "included" and manual.notes.startswith("수동 선택 · ")
 
@@ -246,7 +259,7 @@ def test_reanalysis_neither_clears_a_pending_marker_nor_undoes_a_confirmation(tm
     again = facade.initialize_review(plan.revision_id)
     assert {s.segment_id for s in unreviewed_auto_exclusions(again)} == pending
     with pytest.raises(RawWorkspaceError, match="먼저 확인"):
-        service.export_final_cut(root)
+        facade.export_confirmed(_package(service, root))
     confirmed = facade.confirm_automatic_exclusions(plan.revision_id)
     replan = service.plan_segmentation_from_analysis(root)
     retained = facade.initialize_review(replan.revision_id)
@@ -271,25 +284,29 @@ def test_plan_adoption_replay_keeps_pending_exclusions_pending(tmp_path: Path):
         new_ids[s.segment_id] for s in pending
     }
     with pytest.raises(RawWorkspaceError, match="먼저 확인"):
-        service.export_final_cut(root)
+        facade.export_confirmed(_package(service, root))
 
 
 @needs_ffmpeg
-def test_ui_shows_pending_count_refuses_handoff_and_confirms_in_one_click(tmp_path: Path):
+def test_ui_shows_pending_count_sends_without_a_gate_and_confirms_in_one_click(tmp_path: Path):
     pytest.importorskip("gradio", reason="웹 UI extra(gradio)가 없다", exc_type=ImportError)
-    import gradio as gr
 
-    from ui.workspace_service import RawWorkspaceUi
+    from ui.workspace_service import FINALCUT_SEND_JOB_KIND, RawWorkspaceUi
 
-    _, root = _synthetic_project(tmp_path)
-    server = RawWorkspaceUi(state_path=tmp_path / "ui-state.json")
+    service, root = _synthetic_project(tmp_path)
+    opened: list[Path] = []
+    server = RawWorkspaceUi(state_path=tmp_path / "ui-state.json", finalcut_opener=opened.append)
     signature = server.open_workspace_view(str(root))[1]
     pending = ReviewWorkspaceFacade(root).unreviewed_auto_exclusion_count()
     assert pending >= 2
-    with pytest.raises(gr.Error, match=f"자동 제외 {pending}개를 먼저 확인"):
-        server.capcut_handoff_view(signature)
+    server.finalcut_send_view(signature)  # 미검토가 있어도 보낸다 — 켠 채 키워드로(D56)
+    job = next(j for j in server.raw.list_jobs(root) if j.kind == FINALCUT_SEND_JOB_KIND)
+    assert _wait_terminal(service, root, job.job_id).status == "succeeded"
+    (sent,) = opened
+    assert _disabled(sent) == 0
     message, _shell, _workbench = server.capcut_refresh_view(signature)
     assert f"자동 제외 {pending}개 미검토" in message
+    assert "켠 채" in message and "자동 제외 확인" in message
     message, _shell, _workbench = server.capcut_confirm_auto_view(signature)
     assert f"자동 제외 {pending}개를 확인했습니다" in message
     assert "미검토" not in message
@@ -297,10 +314,10 @@ def test_ui_shows_pending_count_refuses_handoff_and_confirms_in_one_click(tmp_pa
     assert "확인할 자동 제외가 없습니다" in server.capcut_confirm_auto_view(signature)[0]
 
 
-def test_confirm_button_sits_next_to_the_handoff_button_outside_any_accordion(
+def test_confirm_button_sits_next_to_the_send_button_outside_any_accordion(
     tmp_path: Path, local_socket: None
 ):
-    """출력 거부 문구가 '자동 제외 확인'을 누르라고 하므로 접힌 서랍 안에 있으면 안 된다."""
+    """미검토 안내가 '자동 제외 확인'(끈 채 보내기)을 누르라고 하므로 접힌 서랍 안에 두지 않는다."""
     pytest.importorskip("gradio", reason="웹 UI extra(gradio)가 없다", exc_type=ImportError)
     import gradio as gr
 
@@ -309,7 +326,7 @@ def test_confirm_button_sits_next_to_the_handoff_button_outside_any_accordion(
     app = RawWorkspaceUi(state_path=tmp_path / "ui-state.json").build_blocks()
     buttons = {block.value: block for block in app.blocks.values() if isinstance(block, gr.Button)}
     confirm = buttons["자동 제외 확인"]
-    handoff = buttons["선택한 컷 Final Cut으로 출력"]
+    handoff = buttons["Final Cut으로 보내기"]
     assert confirm.parent is handoff.parent
     node = confirm.parent
     while node is not None:

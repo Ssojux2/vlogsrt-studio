@@ -45,7 +45,12 @@ from vlogsrt.project import library
 from vlogsrt.project.models import UnsupportedProject
 from vlogsrt.project.raw import finalcut_timeline as timeline
 from vlogsrt.project.raw import media_refs
-from vlogsrt.project.raw.models import AnalysisSourceResult, RawWorkspaceError, SourceAsset
+from vlogsrt.project.raw.models import (
+    INGEST_JOB_KIND,
+    AnalysisSourceResult,
+    RawWorkspaceError,
+    SourceAsset,
+)
 from vlogsrt.project.raw.segment_review import (
     SELECTION_EXCLUDED,
     ReviewRevision,
@@ -80,6 +85,8 @@ _DRAFT_SUFFIX = ".partial"
 _BUNDLE_SUFFIX = ".fcpbundle"
 _DRAFT_NAME = re.compile(r"\.vlogsrt_[0-9]{8}T[0-9]{6}Z(?:_[0-9]+)?\.(?:fcpxml|json)\.partial")
 """이 계층이 만드는 숨은 초안의 이름 — 치울 수 있는 것은 이 꼴뿐이다."""
+_IMPORT_JOB_KINDS = frozenset({INGEST_JOB_KIND, "reference_import"})
+"""원본 목록을 바꾸는 작업 — 복사 가져오기와 라이브러리 참조 가져오기."""
 _NEW_FILE = os.O_WRONLY | os.O_CREAT | os.O_EXCL
 _FILE_MODE = 0o644
 
@@ -234,7 +241,8 @@ class _LibraryShelf:
                 try:
                     index.media(identity)
                 except UnsupportedProject as error:
-                    found.append(f"{_where(error)} ({identity})")
+                    name = index.assets[identity].get("displayName")
+                    found.append(f"{_where(error)} ({name or '이름 없음'} · {identity})")
         return found
 
     def facts(self) -> dict[str, object] | None:
@@ -295,7 +303,8 @@ def _probe(
         if review is not None:
             grid = _review_grid(asset, review, probe)
         else:
-            grid = _measured_grid(asset, preprocess.probe_extraction_clock(path, probe=probe))
+            clock = preprocess.probe_extraction_clock(path, probe=probe)
+            grid = _measured_grid(asset, clock, probe)
         label = preprocess.probe_timecode(path)
     except FinalCutExportError:
         raise
@@ -304,11 +313,41 @@ def _probe(
     return probe, grid, _timecode(asset, label, grid.frame_duration)
 
 
-def _measured_grid(asset: SourceAsset, clock: preprocess.RawVideoClock) -> _Grid:
+def _measured_grid(
+    asset: SourceAsset, clock: preprocess.RawVideoClock, probe: preprocess.RawMediaProbe
+) -> _Grid:
     """검토 머리 밖 원본의 격자 — 패킷을 훑어 잰 것만 믿는다. VFR은 프레임 수가 길이가 아니다."""
     if not clock.uniform_grid:
         raise _refuse(asset, f"프레임 격자가 균일하지 않다(VFR) — {clock.grid_note}")
+    _require_plain_timeline(asset, clock.first_pts, clock.frame_count, clock.frame_duration, probe)
     return _Grid(clock.frame_duration, clock.frame_count)
+
+
+def _require_plain_timeline(
+    asset: SourceAsset,
+    origin_pts: int,
+    frames: int,
+    frame_duration: Fraction,
+    probe: preprocess.RawMediaProbe,
+) -> None:
+    """편집 목록(edit list)이 없는 파일이어야 한다 — 패킷 격자와 Final Cut이 보는 길이가 같다.
+
+    스트림 복사로 자른 파일은 첫 프레임이 0보다 앞에 있고 머리 정보의 길이가 실제 프레임보다
+    짧다. Final Cut은 머리 정보 쪽(0부터·짧은 길이)으로 보므로 그대로 보내면 모든 컷이 그만큼
+    밀린다. 검토를 다시 세워도 같은 시계를 재므로 고칠 곳은 파일이다.
+    """
+    video = probe.video
+    stated = video.duration_ts
+    header = None if stated is None else Fraction(stated) * video.time_base / frame_duration
+    if origin_pts >= 0 and (header is None or header == frames):
+        return
+    raise _refuse(
+        asset,
+        f"편집 목록(edit list)이 있는 파일이다 — 첫 프레임이 {origin_pts * video.time_base}초,"
+        f" 실제 프레임 수 {frames}, 머리 정보의 프레임 수 {header}. Final Cut은 머리 정보 쪽으로"
+        " 보므로 그대로 보내면 컷이 어긋난다. 그 파일을 완전히 다시 인코딩하거나 편집 목록 없이"
+        " 다시 저장(re-wrap)한 뒤 다시 불러오세요",
+    )
 
 
 def _review_grid(asset: SourceAsset, review: SourceClock, probe: preprocess.RawMediaProbe) -> _Grid:
@@ -319,7 +358,8 @@ def _review_grid(asset: SourceAsset, review: SourceClock, probe: preprocess.RawM
     """
     if review.source_sha256 != asset.content_sha256:
         raise _refuse(asset, "검토 머리가 다른 원본 내용에 묶여 있다 — 검토를 다시 세우세요")
-    frames = Fraction(review.end_pts - review.origin_pts, review.frame_ticks)
+    ticks = review.end_pts - review.origin_pts
+    frames = Fraction(ticks, review.frame_ticks)
     duration = review.frame_ticks * review.time_base
     declared = (probe.video.time_base, 1 / probe.video.r_frame_rate)
     if frames.denominator != 1 or (review.time_base, duration) != declared:
@@ -328,6 +368,7 @@ def _review_grid(asset: SourceAsset, review: SourceClock, probe: preprocess.RawM
             f"검토 시계(timebase·프레임 길이) {(review.time_base, duration)}가 지금 원본 선언"
             f" {declared}과 다르다 — 검토를 다시 세우세요",
         )
+    _require_plain_timeline(asset, review.origin_pts, frames.numerator, duration, probe)
     return _Grid(duration, frames.numerator)
 
 
@@ -526,6 +567,22 @@ def _load_head(facade: Any, assets: tuple[SourceAsset, ...]) -> ReviewRevision |
     return revision
 
 
+def _require_no_import(service: RawWorkspaceService, root: Path) -> None:
+    """가져오기가 도는 동안의 원본 목록은 아직 끝나지 않았다 — 반쪽 타임라인을 보내지 않는다.
+
+    작업 기록이 진행 중인 채 남는 일도 있다(앱이 꺼졌다 켜졌는데 그 작업공간이 복구되지 않음).
+    오래됐다고 지어 넘기지 않는다 — 어느 작업인지·언제 시작했는지와 푸는 길을 말한다.
+    """
+    running = service.active_jobs(root, _IMPORT_JOB_KINDS)
+    if running:
+        listed = ", ".join(f"{job.job_id}({job.kind}, {job.created_at} 시작)" for job in running)
+        raise FinalCutExportError(
+            f"영상 가져오기 작업이 아직 진행 중으로 기록돼 있다: {listed} — 끝난 뒤 다시 보내세요."
+            " 가져오기가 실제로 돌고 있지 않은데 이 안내가 계속되면, 앱을 다시 시작하면 중단된"
+            " 작업 기록이 정리된다"
+        )
+
+
 def _not_exported(
     service: RawWorkspaceService, root: Path, head: ReviewRevision | None, exported: set[str]
 ) -> list[dict[str, str]]:
@@ -585,6 +642,11 @@ def _exclusive(folder: Path) -> Iterator[None]:
         except BlockingIOError as error:
             raise FinalCutExportError(
                 "이 작업공간에서 다른 Final Cut 보내기가 진행 중이다 — 끝난 뒤 다시 보내세요"
+            ) from error
+        except OSError as error:
+            raise FinalCutExportError(
+                f"{folder}에 파일 잠금을 걸 수 없다(네트워크 드라이브 등) — 작업공간을 이 Mac의"
+                f" 디스크에 두고 다시 보내세요 ({error})"
             ) from error
         yield
     finally:
@@ -719,6 +781,7 @@ def export(
     folder.mkdir(parents=True, exist_ok=True)
     with _exclusive(folder):
         moment = now()
+        _require_no_import(service, root)
         assets = service.global_order_proposal(root)
         if not assets:
             raise FinalCutExportError("보낼 원본이 없다 — 가져오기를 먼저 끝내세요")

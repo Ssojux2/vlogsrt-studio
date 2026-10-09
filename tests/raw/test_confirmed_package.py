@@ -580,3 +580,18 @@ def test_confirmed_media_survives_cache_purge_and_workspace_move(tmp_path: Path)
     foreign.mkdir()
     assert confirmed.clean_abandoned_staging(moved, "confirmed_000001") == 1
     assert not mine.exists() and foreign.exists()
+
+
+def test_export_filters_excluded_even_with_explicit_selection():
+    """확정 내보내기는 제외된 조각을 명시 선택으로도 싣지 못한다(옛 test_capcut_export에서 옮김)."""
+    review = make_review()
+    review = replace(
+        review, segments=(replace(review.segments[0], selection="excluded"), *review.segments[1:])
+    )
+    assert [c.segment_id for c in build_request(review=review).clips] == ["seg_a2", "seg_b1"]
+    with pytest.raises(confirmed.ConfirmedExportError, match="사용할 컷"):
+        build_request(review=review, selected=frozenset({"seg_a1"}))
+    restored = replace(
+        review, segments=(replace(review.segments[0], selection="included"), *review.segments[1:])
+    )
+    assert len(build_request(review=restored).clips) == 3

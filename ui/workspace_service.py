@@ -94,7 +94,17 @@ APP_HEADER_ID = "app-header"
 REVIEW_TAB_ID = "review-tab"
 APP_HEADER_TEXT = (
     "**vlogsrt · Final Cut 컷 정리** · "
-    "라이브러리 불러오기 → 자막·영상 분석 → 사용할 컷 선택 → Final Cut 출력 · {mode_note}"
+    "라이브러리 불러오기 → 자막·영상 분석 → 사용할 컷 선택 → Final Cut으로 보내기 · {mode_note}"
+)
+FINALCUT_SEND_LABEL = "Final Cut으로 보내기"
+"""원본 전체를 태그 달린 타임라인 하나로 쓰고 Final Cut에 건넨다(D56) — 옛 두 단계를 대신한다."""
+FINALCUT_SEND_JOB_KIND = "finalcut_send"
+OLD_SELECTED_CUTS_JOB_KIND = "capcut_export"
+"""D56 이전 「선택한 컷」 출력 작업 — 기록에만 남는다. 다시 걸지 않는다."""
+FINALCUT_VFR_NOTE = (
+    "가변 프레임(VFR) 영상이 있습니다 — 아이폰 영상에 흔합니다. 프레임마다 간격이 달라 컷 경계와"
+    " 시작 시각을 프레임 단위로 맞출 수 없어 보내지 않았습니다. 그 영상을 일정한 프레임(예: 30fps)"
+    "으로 다시 저장해 불러온 뒤 다시 보내세요."
 )
 ONLINE_MODE_NOTE = "온라인 모드 · 범위 승인 뒤 유료 분석"
 OFFLINE_MODE_NOTE = "오프라인 모드 · 유료 분석 차단"
@@ -274,6 +284,38 @@ def default_state_path() -> Path:
     return Path(override) if override else Path.cwd() / ".vlogsrt-ui-state.json"
 
 
+def open_in_final_cut(path: Path) -> None:
+    """실제 Final Cut 열기 — macOS `open -a "Final Cut Pro"`, 인자는 리스트로 주입 없이 넘긴다.
+
+    Final Cut이 문서를 받는 순간 사용자의 라이브러리로 가져오기가 일어난다 — 시험·탐침은 이
+    자리에 닿지 않는다(가짜 opener를 넣고, `tests/conftest.py`가 막는다).
+    """
+    import subprocess
+
+    result = subprocess.run(
+        ["/usr/bin/open", "-a", "Final Cut Pro", str(path)], capture_output=True, text=True
+    )
+    if result.returncode:
+        raise raw_service.RawWorkspaceError(
+            "FCPXML은 만들었지만 Final Cut을 열지 못했습니다: " + result.stderr[:200]
+        )
+
+
+def _finalcut_sent_text(sent: dict[str, Any]) -> str:
+    """마지막 보내기의 결과 한 단락 — 성공 요약 또는 이름을 댄 거부 사유(쉬운 말)."""
+    if "error" in sent:
+        text = f"**Final Cut으로 보내지 못했습니다** · {sent['error']}"
+        return text + ("\n\n" + FINALCUT_VFR_NOTE if "VFR" in sent["error"] else "")
+    counts = sent["counts"]
+    return (
+        f"**Final Cut으로 보냈습니다** · 원본 {counts['sources']}개"
+        f" · 스파인 클립 {counts['spine_clips']}개 · 꺼진 클립 {counts['disabled_clips']}개"
+        f" · 미검토 제외 제안 {counts['unreviewed_clips']}개"
+        f" · 넣지 않은 원본 {sent['not_exported']}개 · `{Path(sent['path']).name}`"
+        "\n\nFinal Cut에서 새 이벤트·프로젝트로 가져왔는지 확인하세요."
+    )
+
+
 class RawWorkspaceUi:
     """작업공간 브라우저 서버 하나 — 상태 파일·Gradio 화면·HTTP 경계를 소유한다."""
 
@@ -284,6 +326,7 @@ class RawWorkspaceUi:
         inspector: raw_service.MediaInspect | None = None,
         live: raw_service.LiveAnalysisTransport | None = None,
         finder_opener: Callable[[Path], None] | None = None,
+        finalcut_opener: Callable[[Path], None] | None = None,
         caption_providers: Callable[[], tuple[object, object]] | None = None,
         path_chooser: ui_chooser.PathChooser | None = None,
         parallel_analysis_limit: int | None = None,
@@ -329,7 +372,8 @@ class RawWorkspaceUi:
         # 마지막 확정 내보내기 자리 — Finder 열기·경로 복사·정리 뒤 재검증의 대상.
         self._last_export_path: str | None = None
         self._last_export_dir: str | None = None
-        self._capcut_xml: dict[str, str] = {}
+        # 마지막 「Final Cut으로 보내기」 결과 — 작업공간 서명마다(성공 요약 또는 거부 사유).
+        self._finalcut_sent: dict[str, dict[str, Any]] = {}
         self._capcut_quote_phase: dict[str, str] = {}
         self._capcut_render_key: tuple | None = None
         # 자막 작업대의 확정 조건 표시 — 검토 상태를 다시 읽을 때마다 갱신한다.
@@ -337,6 +381,8 @@ class RawWorkspaceUi:
         self._caption_unplaced_open: int = 0
         # Finder 여는 경계 — 시험은 가짜를 넣는다(실제는 macOS `open -R`, 인자 검증 후).
         self._finder_opener = finder_opener
+        # Final Cut 여는 경계 — 시험은 가짜를 넣는다(실제는 macOS `open -a "Final Cut Pro"`).
+        self._finalcut_opener = finalcut_opener
         # 최종 자막 실제 실행 제공자 주입 경계(시험·루트 가짜). 없으면 생산 transport.
         self._caption_providers = caption_providers
         self._root: Path | None = None
@@ -974,8 +1020,8 @@ class RawWorkspaceUi:
         pending = self._unreviewed_auto_count(root)
         if pending:
             message += (
-                f"\n\n**자동 제외 {pending}개 미검토** · 확인하기 전에는 Final Cut으로 출력할 수"
-                " 없습니다. 제외를 유지하려면 '자동 제외 확인'을 누르세요."
+                f"\n\n**자동 제외 {pending}개 미검토** · Final Cut에는 켠 채 '제외 제안(미검토)'"
+                " 태그로 갑니다. 끈 채 보내려면 '자동 제외 확인'을 누르세요."
             )
         return message, *self.visual_workbench_render(root)
 
@@ -1834,7 +1880,8 @@ class RawWorkspaceUi:
             "reference_import": "원본 연결 · 복사 없음",
             "source_preview": "원본 미리보기",
             "cleanup_pipeline": "영상 정리",
-            "capcut_export": "Final Cut 전달",
+            OLD_SELECTED_CUTS_JOB_KIND: "Final Cut 전달(옛 방식)",
+            FINALCUT_SEND_JOB_KIND: "Final Cut 보내기",
             "segment_extract": "컷 준비",
             "visual_prepare": "미리보기 준비",
             "understanding": "영상 분석",
@@ -1893,10 +1940,11 @@ class RawWorkspaceUi:
         if root is None:
             return gr.skip()
         export = next(
-            (j for j in self.raw.list_jobs(root, limit=10) if j.kind == "capcut_export"), None
+            (j for j in self.raw.list_jobs(root, limit=10) if j.kind == FINALCUT_SEND_JOB_KIND),
+            None,
         )
         if export and export.status in ("queued", "running"):
-            return "**Final Cut 출력 준비 중** · 선택한 컷을 원본 기준으로 저장합니다."
+            return "**Final Cut으로 보내는 중** · 원본 전체를 촬영 시각 순 타임라인 하나로 씁니다."
         message = self._quick_status()
         # 1초마다 도는 줄이다 — 작업 기록은 한 번만 읽어 진행 수와 다른 영상 수가 함께 쓴다.
         tasks = self._task_views(root)
@@ -1906,8 +1954,9 @@ class RawWorkspaceUi:
             message = (
                 f"**{running}개 동시 분석 중 · 대기 {waiting} · 완료 {done}/{total}**\n\n{message}"
             )
-        if export and export.status == "succeeded" and self._capcut_xml.get(str(signature)):
-            message += "\n\n**출력 완료** · 전달 메뉴에서 Final Cut으로 열 수 있습니다."
+        sent = self._finalcut_sent.get(str(signature))
+        if export and export.status in ("succeeded", "failed") and sent:
+            message += "\n\n" + _finalcut_sent_text(sent)
         others = {
             task["token"]
             for task in tasks.values()
@@ -2015,94 +2064,117 @@ class RawWorkspaceUi:
             self._start_quick(root, (), asset_ids=tuple(self._quick["asset_ids"]), retry=True)
             return "선택 영상의 실패·누락 단계를 확인합니다. 표시된 범위를 승인하면 재개합니다."
         for job in self.raw.list_jobs(root):
-            if job.status not in ("failed", "interrupted", "paused"):
-                continue
-            if job.kind in (raw_service.ANALYSIS_JOB_KIND, raw_service.ANALYSIS_SEMANTIC_JOB_KIND):
-                return self.analysis_retry_view(signature, job.job_id)
-            if job.kind == "reference_import":
-                if self._fcp_scan is None:
-                    raise gr.Error("라이브러리를 다시 열어 원본 연결 상태를 확인하세요")
-                self.raw.start_reference_import(root, self._fcp_scan.proposal)
-                return "원본 참조를 다시 확인하고 미리보기를 준비합니다."
-            if job.kind == "source_preview":
-                self.raw.start_source_preview(root)
-                return "원본 미리보기를 다시 준비합니다."
-            if job.kind == "ingest_copy":
-                self.raw.retry_ingest_copy(root, job.job_id)
-                return "실패한 영상 가져오기를 다시 시작했습니다."
-            if job.kind == raw_service.SEGMENT_JOB_KIND:
-                child = self.raw.retry_segment_extraction(root, job.job_id)
-                summary = self.raw.analysis_overview(root)
-
-                def finish(context: Any, child: Any = child) -> None:
-                    self.raw.wait_child_job(root, child, context)
-                    head = self._review_facade(root).load_head().revision
-                    for page in range(
-                        1,
-                        (len(head.segments) + raw_service.VISUAL_PAGE_SIZE - 1)
-                        // raw_service.VISUAL_PAGE_SIZE
-                        + 1,
-                    ):
-                        self.raw.wait_child_job(
-                            root,
-                            self.raw.start_visual_page_preparation(
-                                root, base_plan_id=head.base_plan_id, page=page
-                            ),
-                            context,
-                        )
-
-                self.raw.submit_job(
-                    root,
-                    "automatic_cleanup",
-                    summary.revision.revision_id if summary else child.job_id,
-                    finish,
-                )
-                return "실패한 컷만 다시 준비하고 미리보기를 갱신합니다."
-            if job.kind == "capcut_export":
-                return self.capcut_handoff_view(signature)
+            if job.status in ("failed", "interrupted", "paused"):
+                message = self._retry_job(signature, root, job)
+                if message is not None:
+                    return message
         self.raw.start_cleanup(root)
         return "정리 작업을 다시 시작했습니다. 완료된 컷은 재사용합니다."
 
-    def capcut_handoff_view(self, signature: str | None) -> str:
+    def _retry_job(self, signature: str | None, root: Path, job: Any) -> str | None:
+        """실패한 작업 하나를 다시 건다 — 모르는 종류면 None(다음 작업을 본다)."""
+        if job.kind in (raw_service.ANALYSIS_JOB_KIND, raw_service.ANALYSIS_SEMANTIC_JOB_KIND):
+            return self.analysis_retry_view(signature, job.job_id)
+        if job.kind == "reference_import":
+            if self._fcp_scan is None:
+                raise gr.Error("라이브러리를 다시 열어 원본 연결 상태를 확인하세요")
+            self.raw.start_reference_import(root, self._fcp_scan.proposal)
+            return "원본 참조를 다시 확인하고 미리보기를 준비합니다."
+        if job.kind == "source_preview":
+            self.raw.start_source_preview(root)
+            return "원본 미리보기를 다시 준비합니다."
+        if job.kind == "ingest_copy":
+            self.raw.retry_ingest_copy(root, job.job_id)
+            return "실패한 영상 가져오기를 다시 시작했습니다."
+        if job.kind == raw_service.SEGMENT_JOB_KIND:
+            return self._retry_segments(root, job)
+        if job.kind == FINALCUT_SEND_JOB_KIND:
+            return self.finalcut_send_view(signature)
+        if job.kind == OLD_SELECTED_CUTS_JOB_KIND:
+            # 옛 출력의 재시도가 전체 타임라인을 몰래 보내고 Final Cut을 열면 안 된다.
+            return (
+                "옛 「선택한 컷」 출력 작업은 다시 하지 않습니다 — 원본 전체를 보내려면"
+                " 「Final Cut으로 보내기」를 누르세요."
+            )
+        return None
+
+    def _retry_segments(self, root: Path, job: Any) -> str:
+        child = self.raw.retry_segment_extraction(root, job.job_id)
+        summary = self.raw.analysis_overview(root)
+
+        def finish(context: Any, child: Any = child) -> None:
+            self.raw.wait_child_job(root, child, context)
+            head = self._review_facade(root).load_head().revision
+            pages = (len(head.segments) + raw_service.VISUAL_PAGE_SIZE - 1) // (
+                raw_service.VISUAL_PAGE_SIZE
+            )
+            for page in range(1, pages + 1):
+                self.raw.wait_child_job(
+                    root,
+                    self.raw.start_visual_page_preparation(
+                        root, base_plan_id=head.base_plan_id, page=page
+                    ),
+                    context,
+                )
+
+        self.raw.submit_job(
+            root,
+            "automatic_cleanup",
+            summary.revision.revision_id if summary else child.job_id,
+            finish,
+        )
+        return "실패한 컷만 다시 준비하고 미리보기를 갱신합니다."
+
+    def finalcut_send_view(self, signature: str | None) -> str:
+        """「Final Cut으로 보내기」 — 원본 전체를 태그 달린 타임라인 하나로 쓰고 Final Cut에 건넨다.
+
+        아무것도 지우지 않으므로 미검토 자동 제외가 있어도 막지 않는다(켠 채 키워드로 간다, D56).
+        쓰기·DTD 검증은 서비스가 하고, 여는 것은 주입된 opener다(시험은 가짜).
+        """
         root = self._require_current_selection(signature)
-        facade = self._review_facade(root)
-        head = facade.load_head().revision
-        try:
-            facade.require_automatic_exclusions_reviewed()
-        except raw_service.RawWorkspaceError as error:
-            raise gr.Error(str(error)) from error
+        opener = self._finalcut_opener or self._system_finalcut_open
 
         def body(context: Any) -> None:
-            ready_revision = self.raw.materialize_review(root, context, head.revision_id)
-            destination, xml = self.raw.export_final_cut(
-                root, context, expected_review_revision_id=ready_revision
-            )
-            with self._selection_lock:
-                if self._root == root and self._signature_for(root) == signature:
-                    self._last_export_dir = destination
-                    self._last_export_path = str(root / destination)
-                    self._capcut_xml[str(signature)] = xml
+            # 어떤 예외든 사유를 적고 다시 던진다 — 실패한 작업이 「보냈습니다」로 보이면 안 된다.
+            try:
+                path = self.raw.export_finalcut_timeline(root, context)
+                report = json.loads(path.with_suffix(".json").read_text(encoding="utf-8"))
+            except Exception as error:
+                self._remember_finalcut(root, signature, {"error": str(error)})
+                raise
+            sent = {
+                "path": str(path),
+                "counts": report["counts"],
+                "not_exported": len(report["not_exported"]),
+            }
+            self._remember_finalcut(root, signature, sent)
+            try:
+                opener(path)
+            except Exception as error:
+                # 쓴 것은 남는다 — 쓴 파일 이름과 함께 실패로 바꿔 적는다.
+                failed = {"error": f"{path.name}은 썼지만 Final Cut을 열지 못했습니다 — {error}"}
+                self._remember_finalcut(root, signature, failed)
+                raise
 
-        self.raw.submit_job(root, "capcut_export", head.revision_id, body)
+        with self._selection_lock:
+            self._finalcut_sent.pop(str(signature), None)
+        self.raw.submit_job(root, FINALCUT_SEND_JOB_KIND, FINALCUT_SEND_JOB_KIND, body)
         return (
-            "사용할 컷의 패키지와 FCPXML을 생성·검증합니다. 완료 후 Final Cut에서 열기를 누르세요."
+            "원본 전체를 촬영 시각 순 타임라인 하나로 만들어 Final Cut으로 보냅니다 — 지우는 것은"
+            " 없고, 사람이 확인한 제외만 끈 채로 갑니다."
         )
 
-    def capcut_open_view(self, signature: str | None) -> str:
-        import subprocess
+    def _remember_finalcut(self, root: Path, signature: str | None, sent: dict[str, Any]) -> None:
+        with self._selection_lock:
+            if self._root == root and self._signature_for(root) == signature:
+                self._finalcut_sent[str(signature)] = sent
+                if "path" in sent:
+                    # 「폴더 열기」가 보낸 폴더를 가리킨다 — 확정 내보내기 기록은 건드리지 않는다.
+                    self._last_export_path = str(Path(sent["path"]).parent)
 
-        root = self._require_current_selection(signature)
-        xml = self._capcut_xml.get(str(signature))
-        if not xml or not Path(xml).is_file() or root not in Path(xml).parents:
-            raise gr.Error("검증된 FCPXML을 먼저 생성하세요")
-        result = subprocess.run(
-            ["/usr/bin/open", "-a", "Final Cut Pro", xml], capture_output=True, text=True
-        )
-        if result.returncode:
-            raise gr.Error(
-                "FCPXML은 생성됐지만 Final Cut을 열지 못했습니다: " + result.stderr[:200]
-            )
-        return "Final Cut에 열기를 요청했습니다. 앱 안에서 가져오기 결과를 확인하세요."
+    @staticmethod
+    def _system_finalcut_open(path: Path) -> None:
+        open_in_final_cut(path)
 
     def _review_tab(
         self,
@@ -2117,8 +2189,8 @@ class RawWorkspaceUi:
                 quick_approve = gr.Button(
                     LIBRARY_APPROVE_LABEL, visible=True, interactive=False, variant="primary"
                 )
-                handoff = gr.Button("선택한 컷 Final Cut으로 출력")
-                # 출력 거부 문구가 이 단추를 누르라고 말한다 — 접힌 서랍에 두지 않는다.
+                handoff = gr.Button(FINALCUT_SEND_LABEL)
+                # 미검토 안내가 이 단추를 누르라고 말한다(끈 채 보내기) — 접힌 서랍에 두지 않는다.
                 confirm_auto = gr.Button("자동 제외 확인")
             # 범위 요약과 진행 상태를 한 줄에 — 무대가 쓸 세로 공간을 아낀다(D50).
             with gr.Row():
@@ -2178,7 +2250,6 @@ class RawWorkspaceUi:
                 refresh = gr.Button("결과 확인")
                 preview = gr.Button("원본 미리보기 준비")
                 retry = gr.Button("실패 구간 재시도")
-                open_fcp = gr.Button("Final Cut에서 열기")
                 open_folder = gr.Button("폴더 열기")
             outputs = [self._capcut_status, self._visual_player_block, self._visual_workbench_block]
             choose.click(
@@ -2221,7 +2292,7 @@ class RawWorkspaceUi:
             automatic.click(self.capcut_auto_view, [self._signature_state, approval], outputs).then(
                 lambda: False, None, approval
             )
-            handoff.click(self.capcut_handoff_view, self._signature_state, self._capcut_status)
+            handoff.click(self.finalcut_send_view, self._signature_state, self._capcut_status)
             confirm_auto.click(self.capcut_confirm_auto_view, self._signature_state, outputs)
             restore.click(
                 lambda sig: self.capcut_edit_view(sig, "restore"), self._signature_state, outputs
@@ -2236,7 +2307,6 @@ class RawWorkspaceUi:
                 self.capcut_cancel_all_view, self._signature_state, self._capcut_status
             )
             retry.click(self.capcut_retry_view, self._signature_state, self._capcut_status)
-            open_fcp.click(self.capcut_open_view, self._signature_state, self._capcut_status)
             open_folder.click(
                 self.review_export_open_view, self._signature_state, self._capcut_status
             )

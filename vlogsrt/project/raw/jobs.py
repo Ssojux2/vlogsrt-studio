@@ -11,7 +11,7 @@ from __future__ import annotations
 import sqlite3
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Collection, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -120,6 +120,18 @@ class JobStore:
             rows = connection.execute(
                 "SELECT * FROM jobs ORDER BY created_at DESC, job_id DESC LIMIT ?",
                 (limit,),
+            ).fetchall()
+        return tuple(self._record(row) for row in rows)
+
+    def active_of_kinds(self, kinds: Collection[str]) -> tuple[JobRecord, ...]:
+        """그 종류의 활성 작업 전부 — 최근 몇 개의 창이 아니라 상태로 찾는다(오래된 것이 먼저)."""
+        kind_marks = ", ".join("?" for _ in kinds)
+        status_marks = ", ".join("?" for _ in ACTIVE_JOB_STATUSES)
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"SELECT * FROM jobs WHERE kind IN ({kind_marks}) AND status IN ({status_marks})"
+                " ORDER BY created_at, job_id",
+                (*kinds, *ACTIVE_JOB_STATUSES),
             ).fetchall()
         return tuple(self._record(row) for row in rows)
 
@@ -366,6 +378,9 @@ class JobManager:
 
     def latest_of_kind(self, kind: str) -> JobRecord | None:
         return self._store.latest_of_kind(kind)
+
+    def active_of_kinds(self, kinds: Collection[str]) -> tuple[JobRecord, ...]:
+        return self._store.active_of_kinds(kinds)
 
     def recover_interrupted(self) -> int:
         return self._store.recover_interrupted()

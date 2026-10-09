@@ -8,7 +8,9 @@ dotenv 보호도 여기서 시작한다 — 수집·수입 시각(conftest 수�
 
 from __future__ import annotations
 
+import os
 import socket
+import subprocess
 from pathlib import Path
 
 from tests._dotenv_guard import install as install_dotenv_guard
@@ -43,6 +45,50 @@ def block_network(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(socket, "socket", guard)
     monkeypatch.setattr(socket, "create_connection", guard)
+
+
+_FINAL_CUT_APP = "Final Cut Pro"
+
+
+def _refuse_final_cut_argv(args) -> None:
+    words = [args] if isinstance(args, (str, bytes, os.PathLike)) else list(args)
+    for word in words:
+        if isinstance(word, (str, bytes, os.PathLike)) and _FINAL_CUT_APP in os.fsdecode(word):
+            raise AssertionError(
+                f"시험이 {_FINAL_CUT_APP}을 실행하려 했다 — 가짜 opener를 넣어라: {args!r}"
+            )
+
+
+class _GuardedPopen(subprocess.Popen):
+    """'Final Cut Pro'를 실은 프로세스는 띄우기 전에 멈춘다 — `subprocess.run`도 이 길을 지난다."""
+
+    def __init__(self, args, *rest, **kwargs) -> None:
+        _refuse_final_cut_argv(args)
+        super().__init__(args, *rest, **kwargs)
+
+
+@pytest.fixture(autouse=True)
+def never_open_final_cut(monkeypatch: pytest.MonkeyPatch) -> None:
+    """시험은 실제 Final Cut을 열지 못한다 — 열면 사용자의 진짜 라이브러리로 가져온다(D56).
+
+    「Final Cut으로 보내기」를 부르는 시험은 가짜 opener를 넣어야 한다. 넣지 않으면 실제 열기
+    자리(메서드·모듈 함수)에서 멈추고, 그 밖의 길로 "Final Cut Pro"를 실행하려 해도 프로세스를
+    띄우기 전에 멈춘다. 웹 UI extra(gradio)가 없는 환경에는 앞의 두 자리가 없다.
+    """
+    monkeypatch.setattr(subprocess, "Popen", _GuardedPopen)
+    try:
+        from ui import workspace_service
+    except ImportError:
+        return
+
+    def refuse(path: Path) -> None:
+        raise AssertionError(f"시험이 실제 Final Cut을 열려 했다 — 가짜 opener를 넣어라: {path}")
+
+    refuse.__wrapped__ = workspace_service.open_in_final_cut  # 원래 함수 — argv 시험만 쓴다
+    monkeypatch.setattr(workspace_service, "open_in_final_cut", refuse)
+    monkeypatch.setattr(
+        workspace_service.RawWorkspaceUi, "_system_finalcut_open", staticmethod(refuse)
+    )
 
 
 @pytest.fixture(autouse=True)
