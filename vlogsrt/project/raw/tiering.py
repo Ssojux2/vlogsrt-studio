@@ -8,8 +8,9 @@ AI 판정(Luna 창의 `annotations[]`·프레임 유무)과 생성 자막(`utter
 지키는 선:
 
 - **빨강은 제안이다.** 자막 없는 긴 공백인데 Luna가 그 화면을 풍경(`recommended`)으로 보지 않은
-  자리만 빨강이 된다. 빨강은 자동 제외 후보로만 쓰이고, 사람이 확인하기 전에는 출력이 닫힌다
-  (D35, 규칙 9). 발화가 있는 구간은 빨강이 되지 않는다.
+  자리만 빨강이 된다. 빨강은 자동 제외 후보로만 쓰이고, 사람이 확인하기 전에는 어디서도 빠지지
+  않는다 — 잘라내는 확정 내보내기는 그때까지 닫히고, Final Cut 타임라인에는 켠 채
+  `제외 제안(미검토)` 키워드로만 간다(D35·D56, 규칙 9). 발화가 있는 구간은 빨강이 되지 않는다.
 - **모름은 결함이 아니다.** 프레임이 없거나 판정이 실패했거나 아직 없으면 노랑 + 판정 보류다.
   전사 실패 구간은 절대 무음이 아니고, 자막이 아직 없으면(진행 문서) 공백도 아니다.
 - **구간은 빈틈없이 덮는다.** 보고서의 구간은 `[0, extent]`를 겹침·틈 없이 타일한다.
@@ -103,6 +104,8 @@ VIDEO_LABELS = {
     VIDEO_UNANALYZED: "판정 전",
 }
 TIER_LABELS = {TIER_GREEN: "추천", TIER_YELLOW: "보통", TIER_RED: "제외 제안"}
+HOLD_LABEL = "판정 보류"
+"""근거가 없어 노랑인 조각의 이름(화면의 점선 노랑) — Final Cut 키워드로 나간다(D56)."""
 
 TIER_TAG_PREFIX = "등급: "
 AUDIO_TAG_PREFIX = "자막: "
@@ -826,23 +829,47 @@ def _significant_spans(report: TierReport, start: Fraction, end: Fraction) -> li
     return significant or sorted(touching, key=overlap)[-1:]
 
 
+def _segment_tier(report: TierReport, start: Fraction, end: Fraction) -> tuple[list[TierSpan], str]:
+    """검토 조각 하나가 볼 구간과 그 등급 — `segment_grade`와 `segment_keyword`의 한 규칙.
+
+    `min_span_seconds`보다 짧게 겹친 구간은 보지 않는다 — 빨강 끝을 프레임 안쪽으로 붙이면
+    이웃 조각에 0.02초짜리 빨강 자투리가 남는데, 그것이 녹색 조각을 보통으로 끌어내리면 안
+    된다. 조각이 그보다 짧거나 넉넉히 겹친 구간이 없으면 가장 많이 겹친 구간 하나로 본다.
+    전부 녹색이어야 녹색, 전부 빨강이어야 빨강이고 나머지는 노랑이다.
+    """
+    rows = _significant_spans(report, start, end)
+    tiers = {span.tier for span in rows}
+    if rows and tiers == {TIER_GREEN}:
+        return rows, TIER_GREEN
+    return rows, TIER_RED if tiers == {TIER_RED} else TIER_YELLOW
+
+
+def segment_keyword(report: TierReport, start: Fraction, end: Fraction) -> str:
+    """검토 조각 하나의 Final Cut 키워드 — 추천·보통·제외 제안·판정 보류(D56).
+
+    등급은 `segment_grade`와 같은 규칙에서 온다. 노랑 가운데 볼 구간이 **전부** 보류이거나
+    볼 구간이 아예 없으면 판정 보류다 — 판정된 구간이 하나라도 섞이면 보통이다(녹색·빨강이
+    '전부'일 때만 그 등급인 것과 같은 모양이다).
+    """
+    rows, tier = _segment_tier(report, start, end)
+    if tier == TIER_YELLOW and all(span.hold for span in rows):
+        return HOLD_LABEL
+    return TIER_LABELS[tier]
+
+
 def segment_grade(
     report: TierReport, start: Fraction, end: Fraction
 ) -> tuple[str, tuple[str, ...]]:
     """검토 조각 하나의 권고와 등급 태그 — 권고는 닫힌 집합(recommended/normal/review_required).
 
-    `min_span_seconds`보다 짧게 겹친 구간은 보지 않는다 — 빨강 끝을 프레임 안쪽으로 붙이면
-    이웃 조각에 0.02초짜리 빨강 자투리가 남는데, 그것이 녹색 조각을 보통으로 끌어내리면 안
-    된다. 조각이 그보다 짧거나 넉넉히 겹친 구간이 없으면 가장 많이 겹친 구간 하나로 본다.
+    볼 구간과 등급은 `_segment_tier`가 정한다(`segment_keyword`와 한 규칙).
     """
-    rows = _significant_spans(report, start, end)
-    tiers = {span.tier for span in rows}
-    if rows and tiers == {TIER_GREEN}:
-        recommendation, tier = "recommended", TIER_GREEN
+    rows, tier = _segment_tier(report, start, end)
+    if tier == TIER_GREEN:
+        recommendation = "recommended"
     else:
         unknown = any(span.recommendation == "review_required" for span in rows)
         recommendation = "review_required" if unknown or not rows else "normal"
-        tier = TIER_RED if tiers == {TIER_RED} else TIER_YELLOW
     audio = _join_reasons(*(span.audio.reason for span in rows)) or "분석 없음"
     video = _join_reasons(*(span.video.reason for span in rows)) or "분석 없음"
     return recommendation, (

@@ -45,6 +45,18 @@ _MS_PER_SECOND = 1000
 _MS_PER_MINUTE = 60_000
 _MS_PER_HOUR = 3_600_000
 
+# SMPTE 타임코드 `HH:MM:SS:FF`(NDF) / `HH:MM:SS;FF`(DF, ffprobe 표기). 자리 수가 다르거나
+# 다른 구분자는 받지 않는다 — 느슨하게 읽으면 다른 시각이 조용히 통과한다. `\d`는 전각·
+# 아라비아-인도 숫자까지 받으므로 ASCII 숫자만 쓴다.
+_TIMECODE_PATTERN = re.compile(r"([0-9]{2}):([0-9]{2}):([0-9]{2})([:;])([0-9]{2})")
+_DROP_SEPARATOR = ";"
+# SMPTE 12M의 단위 사실(조정 임계값이 아니다): 하루 24시간, 시·분 60, 그리고 드롭프레임은
+# 29.97에서 매 분 2라벨·59.94에서 4라벨을 건너뛰되 10분마다는 건너뛰지 않는다.
+_HOURS_PER_DAY = 24
+_SIXTY = 60
+_DROP_EXEMPT_EVERY_MINUTES = 10
+_DROP_LABELS_PER_MINUTE = {Fraction(1001, 30000): 2, Fraction(1001, 60000): 4}
+
 
 @dataclass(frozen=True, slots=True)
 class FrameInterval:
@@ -124,6 +136,38 @@ def interval_outward(
         start_frame=frame_floor(start, frame_duration, anchor),
         end_frame=frame_ceil(end, frame_duration, anchor),
     )
+
+
+def timecode_frames(text: str, rate: Fraction) -> tuple[int, bool]:
+    """시작 타임코드 라벨 → 0시부터의 프레임 수와 드롭프레임 여부.
+
+    Final Cut은 원본 클립의 시작을 이 프레임 수 × 프레임 길이로 둔다(실측 0008
+    `12:56:29;10` @29.97 → 1396282 → `1397678282/30000s`). `rate`는 초당 프레임
+    (`30000/1001`)이고 지원 프레임 길이여야 한다. 드롭프레임은 `;` 구분자로만 알며
+    29.97·59.94에서만 성립한다. 존재하지 않는 라벨(드롭된 `;00`·`;01`)은 거부한다.
+    """
+    match = _TIMECODE_PATTERN.fullmatch(text)
+    if match is None:
+        raise ValueError(f"타임코드 형식이 아니다(HH:MM:SS:FF 또는 HH:MM:SS;FF): {text!r}")
+    if rate <= 0:
+        raise ValueError(f"타임코드 레이트가 양수가 아니다: {rate}")
+    frame_duration = require_supported_frame_duration(1 / rate)
+    nominal = round(rate)
+    hours, minutes, seconds, frames = (int(match.group(index)) for index in (1, 2, 3, 5))
+    if hours >= _HOURS_PER_DAY or minutes >= _SIXTY or seconds >= _SIXTY or frames >= nominal:
+        raise ValueError(f"타임코드 자리 값이 범위를 벗어났다 ({nominal}fps): {text!r}")
+    total_minutes = hours * _SIXTY + minutes
+    labels = (total_minutes * _SIXTY + seconds) * nominal + frames
+    if match.group(4) != _DROP_SEPARATOR:
+        return labels, False
+    dropped = _DROP_LABELS_PER_MINUTE.get(frame_duration)
+    if dropped is None:
+        raise ValueError(f"드롭프레임은 29.97·59.94에서만 성립한다({rate}fps): {text!r}")
+    exempt = minutes % _DROP_EXEMPT_EVERY_MINUTES == 0
+    if seconds == 0 and frames < dropped and not exempt:
+        raise ValueError(f"드롭프레임이 건너뛰는 라벨이다(존재하지 않는 프레임): {text!r}")
+    skipped = dropped * (total_minutes - total_minutes // _DROP_EXEMPT_EVERY_MINUTES)
+    return labels - skipped, True
 
 
 def milliseconds_half_up(value: Fraction) -> int:

@@ -395,6 +395,31 @@ def test_segment_grade_maps_to_closed_recommendation_set():
     assert tiering.strip_grade_tags(("Luna 평가: x", *green[1], "실내")) == ("실내",)
 
 
+def test_segment_keyword_names_the_same_tier_as_segment_grade():
+    """Final Cut 키워드(W-16)는 검토 조각 등급과 한 규칙이다 — 둘이 갈라질 수 없다."""
+    result = report()
+    assert tiering.HOLD_LABEL == "판정 보류"
+    assert tiering.segment_keyword(result, F(1), F(14)) == "추천"
+    assert tiering.segment_keyword(result, F(16), F(25)) == "제외 제안"
+    assert tiering.segment_keyword(result, F(10), F(20)) == "보통"
+    # 45–60초는 전사 실패(보류)뿐이다 — 노랑이지만 근거가 없어 보통이 아니다.
+    assert tiering.segment_keyword(result, F(46), F(50)) == "판정 보류"
+    # 보류와 판정된 노랑이 섞이면 판정이 있는 쪽이다 — 전부 보류일 때만 보류다.
+    assert tiering.segment_keyword(result, F(42), F(50)) == "보통"
+    tier_word = {f"등급: {label}": label for label in tiering.TIER_LABELS.values()}
+    for a in range(0, 60, 3):
+        for b in range(a + 1, 61, 7):
+            keyword = tiering.segment_keyword(result, F(a), F(b))
+            grade = tier_word[tiering.segment_grade(result, F(a), F(b))[1][0]]
+            assert keyword == grade or (keyword, grade) == (tiering.HOLD_LABEL, "보통")
+
+
+def test_segment_keyword_without_any_span_is_hold():
+    empty = tiering.classify({"windows": {"extent": {"num": 0, "den": 1}}})
+    assert tiering.segment_keyword(empty, F(0), F(1)) == tiering.HOLD_LABEL
+    assert tiering.segment_grade(empty, F(0), F(1))[0] == "review_required"
+
+
 def test_unmaterialized_red_counts_spans_without_frame_edges():
     ranges = tiering.red_ranges(report())
     frame = F(1, 25)

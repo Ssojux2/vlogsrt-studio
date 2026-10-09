@@ -1635,3 +1635,190 @@ def _image_size(path: Path) -> tuple[int, int]:
     )  # fmt: skip
     first, second = completed.stdout.split()
     return int(first), int(second)
+
+
+# ─────────────────────────────────────────────────────────────
+#  시작 타임코드 (W-16, D56) — Final Cut 클립 시작의 재료
+# ─────────────────────────────────────────────────────────────
+
+
+def _timecode_probe(
+    monkeypatch: pytest.MonkeyPatch, streams: list[dict], format_tags: dict | None = None
+) -> list[list[str]]:
+    commands: list[list[str]] = []
+
+    def run_probe(command: list[str]) -> str:
+        commands.append(command)
+        document: dict[str, object] = {"streams": streams}
+        if format_tags is not None:
+            document["format"] = {"tags": format_tags}
+        return json.dumps(document)
+
+    monkeypatch.setattr(preprocess, "_run_probe", run_probe)
+    monkeypatch.setattr(preprocess, "require_ffmpeg", lambda tool="ffmpeg": tool)
+    return commands
+
+
+def test_probe_timecode_prefers_the_tmcd_track_in_one_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    commands = _timecode_probe(
+        monkeypatch,
+        [
+            {"codec_type": "video", "codec_tag_string": "hvc1", "avg_frame_rate": "30000/1001",
+             "tags": {"timecode": "01:00:00;00"}},
+            {"codec_type": "data", "codec_tag_string": "tmcd", "avg_frame_rate": "30000/1001",
+             "tags": {"timecode": "12:56:29;10"}},
+            {"codec_type": "audio", "codec_tag_string": "mp4a", "avg_frame_rate": "0/0"},
+        ],
+    )  # fmt: skip
+    found = preprocess.probe_timecode(tmp_path / "a.mov")
+    assert found == preprocess.SourceTimecode("12:56:29;10", Fraction(30000, 1001))
+    assert len(commands) == 1 and commands[0][0] == "ffprobe"
+
+
+def test_probe_timecode_takes_video_rate_when_tmcd_rate_is_unknown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _timecode_probe(
+        monkeypatch,
+        [
+            {"codec_type": "video", "codec_tag_string": "avc1", "avg_frame_rate": "25/1"},
+            {"codec_type": "data", "codec_tag_string": "tmcd", "avg_frame_rate": "0/0",
+             "tags": {"timecode": "10:00:00:00"}},
+        ],
+    )  # fmt: skip
+    found = preprocess.probe_timecode(tmp_path / "a.mov")
+    assert found == preprocess.SourceTimecode("10:00:00:00", Fraction(25))
+
+
+def test_probe_timecode_reads_a_video_stream_tag_without_tmcd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _timecode_probe(
+        monkeypatch,
+        [
+            {"codec_type": "video", "avg_frame_rate": "24000/1001",
+             "tags": {"timecode": "00:00:01:00"}},
+        ],
+    )  # fmt: skip
+    found = preprocess.probe_timecode(tmp_path / "a.mov")
+    assert found == preprocess.SourceTimecode("00:00:01:00", Fraction(24000, 1001))
+
+
+def test_probe_timecode_without_any_timecode_is_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _timecode_probe(monkeypatch, [{"codec_type": "video", "avg_frame_rate": "30/1", "tags": {}}])
+    assert preprocess.probe_timecode(tmp_path / "a.mov") is None
+
+
+def test_probe_timecode_without_a_known_rate_fails_loudly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _timecode_probe(
+        monkeypatch,
+        [
+            {"codec_type": "data", "codec_tag_string": "tmcd", "avg_frame_rate": "0/0",
+             "tags": {"timecode": "10:00:00:00"}},
+        ],
+    )  # fmt: skip
+    with pytest.raises(RuntimeError, match="레이트"):
+        preprocess.probe_timecode(tmp_path / "a.mov")
+
+
+def _encode_mov(target: Path, *extra: str) -> Path:
+    subprocess.run(
+        [
+            "ffmpeg", "-hide_banner", "-nostdin", "-y",
+            "-f", "lavfi", "-i", "testsrc=size=64x36:rate=30000/1001:duration=0.5",
+            "-c:v", "mpeg4", *extra,
+            str(target),
+        ],
+        capture_output=True,
+        check=True,
+    )  # fmt: skip
+    return target
+
+
+@needs_ffmpeg
+def test_probe_timecode_reads_a_real_drop_frame_track(tmp_path: Path) -> None:
+    media = _encode_mov(tmp_path / "tc.mov", "-timecode", "12:56:29;10")
+    found = preprocess.probe_timecode(media)
+    assert found == preprocess.SourceTimecode("12:56:29;10", Fraction(30000, 1001))
+
+
+@needs_ffmpeg
+def test_probe_timecode_of_a_real_file_without_timecode_is_none(tmp_path: Path) -> None:
+    assert preprocess.probe_timecode(_encode_mov(tmp_path / "plain.mov")) is None
+
+
+def test_probe_timecode_reads_a_container_only_upper_case_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """MKV·MXF: ffmpeg 9는 타임코드를 컨테이너에만 `TIMECODE`로 적는다 — 한 번의 호출에서 읽는다."""
+    commands = _timecode_probe(
+        monkeypatch,
+        [{"codec_type": "video", "avg_frame_rate": "25/1", "tags": {"ENCODER": "x"}}],
+        format_tags={"TIMECODE": "10:00:00:00"},
+    )
+    found = preprocess.probe_timecode(tmp_path / "a.mkv")
+    assert found == preprocess.SourceTimecode("10:00:00:00", Fraction(25))
+    (command,) = commands
+    assert "format_tags=timecode" in command[command.index("-show_entries") + 1]
+
+
+def test_probe_timecode_matches_an_upper_case_stream_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _timecode_probe(
+        monkeypatch,
+        [{"codec_type": "video", "avg_frame_rate": "50/1", "tags": {"TIMECODE": "01:02:03:04"}}],
+        format_tags={"timecode": "09:00:00:00"},
+    )
+    found = preprocess.probe_timecode(tmp_path / "a.mkv")
+    assert found == preprocess.SourceTimecode("01:02:03:04", Fraction(50))  # 스트림이 먼저다
+
+
+@pytest.mark.parametrize("value", ["", "  ", 7, ["10:00:00:00"]])
+def test_reported_but_unreadable_timecode_fails_naming_the_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, value: object
+) -> None:
+    """타임코드가 보였는데 None을 돌려주면 클립 시작이 조용히 0이 된다 — 죽는다."""
+    _timecode_probe(
+        monkeypatch,
+        [{"codec_type": "video", "avg_frame_rate": "25/1"}],
+        format_tags={"Timecode": value},
+    )
+    with pytest.raises(RuntimeError, match="broken.mkv"):
+        preprocess.probe_timecode(tmp_path / "broken.mkv")
+
+
+def test_container_timecode_without_any_video_rate_fails_naming_the_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _timecode_probe(
+        monkeypatch,
+        [{"codec_type": "video", "avg_frame_rate": "0/0"}],
+        format_tags={"TIMECODE": "10:00:00:00"},
+    )
+    with pytest.raises(RuntimeError, match="레이트.*norate.mxf|norate.mxf.*레이트"):
+        preprocess.probe_timecode(tmp_path / "norate.mxf")
+
+
+@needs_ffmpeg
+def test_probe_timecode_reads_a_real_matroska_container_timecode(tmp_path: Path) -> None:
+    media = tmp_path / "tc.mkv"
+    subprocess.run(
+        [
+            "ffmpeg", "-hide_banner", "-nostdin", "-y",
+            "-f", "lavfi", "-i", "testsrc=size=64x36:rate=25:duration=0.4",
+            "-c:v", "mpeg4", "-timecode", "10:00:00:00",
+            str(media),
+        ],
+        capture_output=True,
+        check=True,
+    )  # fmt: skip
+    assert preprocess.probe_timecode(media) == preprocess.SourceTimecode(
+        "10:00:00:00", Fraction(25)
+    )

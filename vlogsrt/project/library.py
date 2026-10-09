@@ -13,10 +13,12 @@ untouched", 2026-09-13 "FCP 라이브러리 DB는 계속 안 건드린다", 2026
 만드는 일은 FCPXML의 `import-options`로 Final Cut에게 맡긴다(D43). 여는 방식도
 `immutable=1`이라 잠금도 저널도 건드리지 않는다.
 
-**근거의 한계**: 스키마는 비공개다. 실측 대상은 Final Cut Pro **12.3**
-(`CurrentVersion.plist`의 catalogVersion `1193`) 하나뿐이다. 모르는 구조·빠진 키는
-조용한 기본값 대신 `UnsupportedProject`로 거부한다 — 라이브러리가 바뀌면 읽기가
-막히는 편이 틀린 값을 흘리는 것보다 낫다.
+**근거의 한계**: 스키마는 비공개다. 실측 대상은 라이브러리 하나를 Final Cut Pro
+**12.3**(`CurrentVersion.plist`의 catalogVersion `1193`)과 **12.4**(`1195; 12.4`)에서
+읽은 것뿐이다. 12.4에서도 이 모듈이 읽는 키는 그대로였고, W-16은 클립 시작
+(`mediaRange` 시작 = 타임코드 프레임 × 프레임 길이)과 `timecodeDisplayDropFrame`을
+더 읽는다. 모르는 구조·빠진 키는 조용한 기본값 대신 `UnsupportedProject`로
+거부한다 — 라이브러리가 바뀌면 읽기가 막히는 편이 틀린 값을 흘리는 것보다 낫다.
 """
 
 from __future__ import annotations
@@ -81,15 +83,27 @@ class LibraryMedia:
     has_audio: bool
     audio_rate: int | None
     audio_channels: int | None
+    media_start: Fraction
+    """클립 시작(`mediaRange` 시작) — 실물 DJI 원본은 타임코드 프레임 × 프레임 길이다."""
+    drop_frame: bool
+    """타임코드를 드롭프레임으로 표시한다(`timecodeDisplayDropFrame`)."""
 
     @property
     def frame_count(self) -> int:
         """선언 길이를 프레임으로. 격자에 떨어지지 않으면 선언이 깨진 것이다."""
-        frames = self.duration / self.frame_duration
+        return self._frames(self.duration, "선언 길이")
+
+    @property
+    def start_frame(self) -> int:
+        """클립 시작을 프레임으로 — 시작 타임코드에서 잰 프레임 수와 대조할 값이다."""
+        return self._frames(self.media_start, "클립 시작")
+
+    def _frames(self, value: Fraction, label: str) -> int:
+        frames = value / self.frame_duration
         if frames.denominator != 1:
             raise UnsupportedProject(
                 str(self.original),
-                f"선언 길이가 프레임 격자에 떨어지지 않는다: {self.duration}초 / "
+                f"{label}이 프레임 격자에 떨어지지 않는다: {value}초 / "
                 f"{self.frame_duration}초 = {frames}",
             )
         return int(frames)
@@ -191,10 +205,14 @@ def parse_range(value: str, where: str) -> tuple[Fraction, Fraction]:
     if match is None:
         raise UnsupportedProject(where, f"구간 표기가 아니다: {value!r}")
     start_n, start_d, length_n, length_d = match.groups()
-    return (
-        Fraction(int(start_n), int(start_d) if start_d else 1),
-        Fraction(int(length_n), int(length_d) if length_d else 1),
-    )
+    try:
+        return (
+            Fraction(int(start_n), int(start_d) if start_d else 1),
+            Fraction(int(length_n), int(length_d) if length_d else 1),
+        )
+    except ZeroDivisionError as error:
+        # 정규식은 분모 자리에 0도 받는다 — 거기서 죽으면 거부가 아니라 사고다.
+        raise UnsupportedProject(where, f"구간의 분모가 0이다: {value!r}") from error
 
 
 # ─── 카탈로그 ────────────────────────────────────────────────────────────
@@ -301,7 +319,28 @@ def _media(
         audio_channels=(
             int(audio_channels) if has_audio and isinstance(audio_channels, int) else None
         ),
+        media_start=_media_start(record, where),
+        drop_frame=_drop_frame(record, where),
     )
+
+
+def _media_start(record: dict[str, object], where: str) -> Fraction:
+    """`mediaRange` 시작 — 길이가 선언 길이와 다르면 어느 쪽이 맞는지 모르니 거부한다."""
+    start, length = record_range(record, where)
+    declared = _fraction(record, "durationForOfflineProvider", where)
+    if length != declared:
+        raise UnsupportedProject(
+            where, f"mediaRange 길이 {length}초가 선언 길이 {declared}초와 다르다"
+        )
+    return start
+
+
+def _drop_frame(record: dict[str, object], where: str) -> bool:
+    """실물은 정수 1이다. 0/1 밖의 값이나 빠진 키를 False로 읽으면 표시가 조용히 바뀐다."""
+    value = record.get("timecodeDisplayDropFrame")
+    if isinstance(value, bool) or value in (0, 1):
+        return bool(value)
+    raise UnsupportedProject(where, f"timecodeDisplayDropFrame을 읽지 못했다: {value!r}")
 
 
 # ─── 프로젝트 타임라인 (검증용) ──────────────────────────────────────────

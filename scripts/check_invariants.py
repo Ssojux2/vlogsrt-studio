@@ -476,6 +476,21 @@ TIERING_MUST_NOT_IMPORT = (
 )  # fmt: skip
 TIERING_FILE_IO = re.compile(r"\.(open|read_text|read_bytes|write_text|write_bytes)\(|\bopen\(")
 
+# Final Cut 타임라인 빌더는 **값만 받아 바이트를 돌려주는 순수 함수**다(D56). 원본·라이브러리·
+# 검토 저장소·ffprobe를 알면 같은 계획이 디스크 상태에 따라 다른 문서를 낳고, 확정 패키지를
+# 알면 지우지 않는 보내기가 잘라내는 내보내기의 관문에 다시 묶인다. `clips`·`media`는 그
+# 자체가 ffprobe·내용 해시 경계를 끌고 오므로 함께 막는다 — 철자 표는 `fcp_tables`에서 읽는다.
+# 모으고 쓰는 일은 내보내기 계층(`finalcut_export.py`)의 몫이다.
+FINALCUT_TIMELINE_MUST_NOT_IMPORT = (
+    "subprocess", "openai", "os", "shutil", "tempfile", "sqlite3", "service",
+    "review_workspace", "preprocess", "confirmed_package", "library", "media_refs", "clips",
+    "media",
+)  # fmt: skip
+FINALCUT_TIMELINE_FILE_IO = re.compile(
+    r"\.(open|read_text|read_bytes|write_text|write_bytes|write|exists|is_file|is_dir|stat"
+    r"|lstat|resolve|iterdir|glob|rglob|unlink|mkdir|touch|rename)\(|\bopen\("
+)
+
 # 조판 이후 계층이 되풀이 판정을 알면, 판정이 파이프라인 아래로 새어나간다(D27).
 DOWNSTREAM_MUST_NOT_IMPORT = {
     "refine.py": ("repair", "repetition"),
@@ -592,6 +607,30 @@ def check_tiering_stays_pure() -> list[str]:
         f"tiering.py:{number}: 파일을 직접 읽거나 쓴다 — 입출력은 service.py의 몫이다 (D51)"
         for number, line in enumerate(body.splitlines(), start=1)
         if TIERING_FILE_IO.search(line)
+    ]
+    return failures
+
+
+def check_finalcut_timeline_stays_pure() -> list[str]:
+    """D56 — `finalcut_timeline.py`는 원본 사실·조각 상태·등급·자막을 **값으로** 받아 문서만 낸다.
+
+    파일이 사라지면 조용히 통과하지 않는다 — 문서를 짜는 권한이 어디로 옮겨 갔는지 모르게 된다.
+    """
+    path = PROJECT_PACKAGE / "raw" / "finalcut_timeline.py"
+    if not path.exists():
+        return [
+            "vlogsrt/project/raw/finalcut_timeline.py: Final Cut 타임라인 빌더가 사라졌다 (D56)"
+        ]
+    body = path.read_text(encoding="utf-8")
+    failures = [
+        f"finalcut_timeline.py: {name}을 import한다 — 타임라인 빌더가 순수 함수가 아니게 된다 (D56)"
+        for name in _imports(body, FINALCUT_TIMELINE_MUST_NOT_IMPORT)
+    ]
+    failures += [
+        f"finalcut_timeline.py:{number}: 파일을 직접 읽거나 쓴다 — 입출력은 내보내기 계층의 몫이다"
+        " (D56)"
+        for number, line in enumerate(body.splitlines(), start=1)
+        if FINALCUT_TIMELINE_FILE_IO.search(line)
     ]
     return failures
 
@@ -1172,6 +1211,7 @@ CHECKS = (
     ("재전사는 전사 단계에 머문다", check_repair_stays_upstream),
     ("글자 교정은 순수하다", check_retext_stays_pure),
     ("3단 등급은 순수하다", check_tiering_stays_pure),
+    ("Final Cut 타임라인 빌더는 순수하다", check_finalcut_timeline_stays_pure),
     ("신뢰도 메타 보존", check_confidence_meta_survives),
     ("전사 호출 1개", check_one_transcription_call),
     ("모델 이름 비하드코딩", check_no_hardcoded_model),

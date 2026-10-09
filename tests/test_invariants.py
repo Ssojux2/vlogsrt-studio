@@ -1699,3 +1699,61 @@ def test_tiering_is_pure(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, statem
 
 def test_real_tiering_module_passes_the_purity_check() -> None:
     assert check_invariants.check_tiering_stays_pure() == []
+
+
+# ── D56: Final Cut 타임라인 빌더는 순수 계층이다 ──────────────────────────
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "import subprocess",
+        "import openai",
+        "import os",
+        "import shutil",
+        "import sqlite3",
+        "from vlogsrt import preprocess",
+        "from vlogsrt.preprocess import probe_timecode",
+        "from vlogsrt.project.raw import service",
+        "from vlogsrt.project.raw.review_workspace import ReviewWorkspaceFacade",
+        "from vlogsrt.project.raw import confirmed_package",
+        "from vlogsrt.project.raw.confirmed_package import export_confirmed",
+        "from vlogsrt.project import library",
+        "from vlogsrt.project.raw import media_refs",
+        "from vlogsrt.project import clips",
+        "from vlogsrt.project.clips import FRAME_RATE_TAGS",
+        "from vlogsrt.project.media import sha256_file",
+        "BODY = Path('x').read_bytes()",
+        "Path('x').write_bytes(b'')",
+        "tree.write('x.fcpxml')",
+        "FOUND = Path('x').exists()",
+        "FACTS = Path('x').stat()",
+        "with open('x') as handle:\n    pass",
+    ],
+)
+def test_finalcut_timeline_is_pure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, statement: str
+) -> None:
+    clean = (
+        "import xml.etree.ElementTree as ET\n"
+        "from fractions import Fraction\n"
+        "from pathlib import Path\n"
+        "from vlogsrt.project.fcp_tables import FRAME_RATE_TAGS\n"
+        "from vlogsrt.project.raw.tiering import segment_keyword\n"
+        "from vlogsrt.project.timebase import frame_nearest\n"
+        "TEXT = 'a\\r\\n'.replace('\\r\\n', '\\n')\n"
+        "URI = Path('/x').as_uri()\n"
+    )
+    target = "vlogsrt/project/raw/finalcut_timeline.py"
+    _fake_source_tree(monkeypatch, tmp_path, {target: clean})
+    assert check_invariants.check_finalcut_timeline_stays_pure() == []
+    (tmp_path / target).write_text(clean + statement + "\n", encoding="utf-8")
+    assert check_invariants.check_finalcut_timeline_stays_pure()
+    (tmp_path / target).unlink()
+    assert check_invariants.check_finalcut_timeline_stays_pure() == [
+        "vlogsrt/project/raw/finalcut_timeline.py: Final Cut 타임라인 빌더가 사라졌다 (D56)"
+    ]
+
+
+def test_real_finalcut_timeline_module_passes_the_purity_check() -> None:
+    assert check_invariants.check_finalcut_timeline_stays_pure() == []

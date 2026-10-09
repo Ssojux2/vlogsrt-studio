@@ -29,6 +29,7 @@ from fractions import Fraction
 from pathlib import Path
 
 from .. import preprocess
+from .fcp_tables import AUDIO_LAYOUTS, AUDIO_RATE_TAGS, COLOR_SPACES, FRAME_RATE_TAGS
 from .media import sha256_file
 from .models import UnsupportedProject
 from .timebase import require_supported_frame_duration
@@ -43,33 +44,6 @@ DEFAULT_EVENT_NAME = "vlogsrt"
 
 _FORMAT_ID = "r0"
 """합성 문서의 유일한 format id — 클립이 균일하므로 하나면 족하다."""
-
-# FCPXML `format@name`의 프레임 레이트 꼬리표. Final Cut이 쓰는 철자 그대로다 —
-# 29.97은 `2997`, 23.976은 `2398`이다.
-_FRAME_RATE_TAGS: dict[Fraction, str] = {
-    Fraction(1001, 24000): "2398",
-    Fraction(1, 24): "24",
-    Fraction(1, 25): "25",
-    Fraction(1001, 30000): "2997",
-    Fraction(1, 30): "30",
-    Fraction(1, 50): "50",
-    Fraction(1001, 60000): "5994",
-    Fraction(1, 60): "60",
-}
-
-# (primaries, transfer, matrix) → FCPXML `colorSpace` 철자. ffprobe가 부르는 이름과
-# Final Cut이 적는 이름이 달라서 표로 잇는다. 표에 없으면 **거부한다** — 색 좌표를
-# 기본값으로 밀어 넣으면 그 추측이 타임라인 선언이 된다.
-_COLOR_SPACES: dict[tuple[str, str, str], str] = {
-    ("bt709", "bt709", "bt709"): "1-1-1 (Rec. 709)",
-    ("smpte170m", "bt709", "smpte170m"): "6-1-6 (Rec. 601 (NTSC))",
-    ("bt470bg", "bt709", "bt470bg"): "5-1-6 (Rec. 601 (PAL))",
-    ("bt2020", "arib-std-b67", "bt2020nc"): "9-18-9 (Rec. 2020 HLG)",
-    ("bt2020", "smpte2084", "bt2020nc"): "9-16-9 (Rec. 2020 PQ)",
-}
-
-_AUDIO_LAYOUTS: dict[int, str] = {1: "mono", 2: "stereo"}
-_AUDIO_RATE_TAGS: dict[int, str] = {44100: "44.1k", 48000: "48k"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,7 +141,7 @@ def _probe_one(path: Path) -> ClipProbe:
 
 def _color_space(summary: preprocess.MediaSummary, where: str) -> str:
     key = (summary.color_primaries, summary.color_transfer, summary.color_matrix)
-    space = _COLOR_SPACES.get(key)
+    space = COLOR_SPACES.get(key)
     if space is None:
         raise UnsupportedProject(
             where,
@@ -268,14 +242,14 @@ def _require_same(
 
 
 def _require_audio_declarations(clip: ClipProbe) -> None:
-    if clip.audio_channels not in _AUDIO_LAYOUTS:
-        supported = ", ".join(str(value) for value in sorted(_AUDIO_LAYOUTS))
+    if clip.audio_channels not in AUDIO_LAYOUTS:
+        supported = ", ".join(str(value) for value in sorted(AUDIO_LAYOUTS))
         raise UnsupportedProject(
             str(clip.path),
             f"지원하지 않는 오디오 채널 수다: {clip.audio_channels} — 지원: {supported}",
         )
-    if clip.audio_rate not in _AUDIO_RATE_TAGS:
-        supported = ", ".join(str(value) for value in sorted(_AUDIO_RATE_TAGS))
+    if clip.audio_rate not in AUDIO_RATE_TAGS:
+        supported = ", ".join(str(value) for value in sorted(AUDIO_RATE_TAGS))
         raise UnsupportedProject(
             str(clip.path),
             f"지원하지 않는 오디오 샘플레이트다: {clip.audio_rate} — 지원: {supported}",
@@ -283,7 +257,7 @@ def _require_audio_declarations(clip: ClipProbe) -> None:
 
 
 def _format_element(clip: ClipProbe) -> str:
-    tag = _FRAME_RATE_TAGS[clip.frame_duration]
+    tag = FRAME_RATE_TAGS[clip.frame_duration]
     name = f"FFVideoFormat{clip.width}x{clip.height}p{tag}"
     return (
         f'<format id="{_FORMAT_ID}" name="{name}"'
@@ -316,8 +290,8 @@ def _asset_lines(clip: ClipProbe, asset_id: str) -> list[str]:
 def _sequence_open(clip: ClipProbe, total_frames: int) -> str:
     audio = ""
     if clip.has_audio:
-        layout = _AUDIO_LAYOUTS[_require_int(clip.audio_channels)]
-        rate = _AUDIO_RATE_TAGS[_require_int(clip.audio_rate)]
+        layout = AUDIO_LAYOUTS[_require_int(clip.audio_channels)]
+        rate = AUDIO_RATE_TAGS[_require_int(clip.audio_rate)]
         audio = f' audioLayout="{layout}" audioRate="{rate}"'
     return (
         f'<sequence format="{_FORMAT_ID}"'

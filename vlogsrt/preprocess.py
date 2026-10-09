@@ -352,6 +352,84 @@ def probe_media_summary(source: Path) -> MediaSummary:
     )
 
 
+@dataclass(frozen=True, slots=True)
+class SourceTimecode:
+    """원본의 시작 타임코드 라벨과 그 레이트(초당 프레임) — 해석은 `project.timebase`가 한다.
+
+    Final Cut은 이 라벨로 클립 시작을 정한다(DJI 원본 실측: `12:56:29;10` → 클립 시작
+    `1397678282/30000s`). 이 모듈은 `vlogsrt.project`를 모르므로 라벨을 그대로 돌려준다.
+    """
+
+    text: str
+    rate: Fraction
+
+
+_TIMECODE_TRACK_TAG = "tmcd"
+"""QuickTime 타임코드 트랙의 codec tag — Final Cut이 시작을 읽는 곳이 이 트랙이다."""
+
+
+def probe_timecode(source: Path) -> SourceTimecode | None:
+    """시작 타임코드를 ffprobe 한 번으로 읽는다 — 어디에도 없을 때만 None(그때 시작은 0이다).
+
+    `tmcd` 트랙 → 비디오 스트림 → 다른 스트림 → 컨테이너(format) 태그 순서로 본다. MKV·MXF는
+    ffmpeg가 컨테이너에만 `TIMECODE`로 적으므로 키는 대소문자를 가리지 않는다. 레이트는 라벨을
+    준 스트림의 `avg_frame_rate`이고, 모르면(`0/0`·컨테이너 태그) 첫 비디오 스트림의 것을 쓴다.
+    ffprobe가 타임코드를 보여 줬는데 None을 돌려주면 클립 시작이 0으로 조용히 바뀐다 — 라벨이나
+    레이트를 못 읽으면 파일 이름을 대고 죽는다.
+    """
+    ffprobe = require_ffmpeg("ffprobe")
+    stdout = _run_probe(
+        [
+            ffprobe, "-v", "error",
+            "-show_entries", "stream=index,codec_type,codec_tag_string,avg_frame_rate"
+            ":stream_tags=timecode:format_tags=timecode",
+            "-of", "json",
+            str(source),
+        ]
+    )  # fmt: skip
+    streams = _stream_entries(stdout, source)
+    container = _raw_probe_json(stdout, source).get("format")
+    labelled = sorted((e for e in streams if _timecode_value(e) is not None), key=_timecode_rank)
+    if isinstance(container, dict) and _timecode_value(container) is not None:
+        labelled.append(container)
+    if not labelled:
+        return None
+    text = _timecode_value(labelled[0])
+    if not isinstance(text, str) or not text.strip():
+        raise RuntimeError(f"타임코드 태그를 읽지 못했습니다: {source} (값 {text!r})")
+    videos = [entry for entry in streams if entry.get("codec_type") == "video"]
+    rates = [_known_rate(entry) for entry in (labelled[0], *videos)]
+    rate = next((value for value in rates if value is not None), None)
+    if rate is None:
+        raise RuntimeError(f"타임코드 레이트를 읽지 못했습니다: {source} (라벨 {text!r})")
+    return SourceTimecode(text=text, rate=rate)
+
+
+def _timecode_value(entry: dict[str, object]) -> object | None:
+    """태그 사전에서 `timecode` 키의 값 — 대소문자를 가리지 않는다. 키가 없을 때만 None."""
+    tags = entry.get("tags")
+    if not isinstance(tags, dict):
+        return None
+    return next((value for key, value in tags.items() if str(key).lower() == "timecode"), None)
+
+
+def _timecode_rank(entry: dict[str, object]) -> int:
+    """라벨을 읽을 스트림의 우선순위 — Final Cut이 읽는 `tmcd` 트랙이 먼저다."""
+    if entry.get("codec_tag_string") == _TIMECODE_TRACK_TAG:
+        return 0
+    return 1 if entry.get("codec_type") == "video" else 2
+
+
+def _known_rate(entry: dict[str, object]) -> Fraction | None:
+    """`avg_frame_rate`가 양의 분수면 그 값, `0/0`·없음·깨짐이면 None(모름)."""
+    value = entry.get("avg_frame_rate")
+    try:
+        rate = Fraction(str(value))
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None
+    return rate if rate > 0 else None
+
+
 def _stream_entries(stdout: str, source: Path) -> list[dict[str, object]]:
     """ffprobe JSON의 streams 목록 — 항목이 아닌 것이 섞이면 죽는다."""
     try:
