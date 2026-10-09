@@ -307,13 +307,20 @@ def _finalcut_sent_text(sent: dict[str, Any]) -> str:
         text = f"**Final Cut으로 보내지 못했습니다** · {sent['error']}"
         return text + ("\n\n" + FINALCUT_VFR_NOTE if "VFR" in sent["error"] else "")
     counts = sent["counts"]
-    return (
+    text = (
         f"**Final Cut으로 보냈습니다** · 원본 {counts['sources']}개"
         f" · 스파인 클립 {counts['spine_clips']}개 · 꺼진 클립 {counts['disabled_clips']}개"
         f" · 미검토 제외 제안 {counts['unreviewed_clips']}개"
         f" · 넣지 않은 원본 {sent['not_exported']}개 · `{Path(sent['path']).name}`"
         "\n\nFinal Cut에서 새 이벤트·프로젝트로 가져왔는지 확인하세요."
     )
+    if sent.get("caption_timing_error"):
+        # 표지는 표시 전용이라 보내기를 막지 않았다 — 그래도 키워드가 빠진 이유는 보인다.
+        text += (
+            "\n\n`자막 시각 확인 필요` 키워드는 달지 못해 키워드 없이 보냈습니다"
+            f" — {sent['caption_timing_error']} (로그 참고)"
+        )
+    return text
 
 
 class RawWorkspaceUi:
@@ -2158,6 +2165,7 @@ class RawWorkspaceUi:
                 "path": str(path),
                 "counts": report["counts"],
                 "not_exported": len(report["not_exported"]),
+                "caption_timing_error": report.get("sync_check", {}).get("error"),
             }
             self._remember_finalcut(root, signature, sent)
             try:

@@ -34,6 +34,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 TERMINAL = frozenset({"succeeded", "failed", "cancelled"})
+REAL_SESSION_FACTORY = sync_report.default_session_factory
 
 
 def wait(service: raw.RawWorkspaceService, root: Path, job_id: str) -> Any:
@@ -534,3 +535,128 @@ def test_an_upkeep_failure_is_shown_once_and_retried_by_recheck(
     wait_sync(service, root)
     view = service.sync_check_view(root, source_id)
     assert view is not None and view["label"] != FAILED_LABEL
+
+
+def test_a_failed_check_job_greys_only_the_sources_it_left_unmeasured(
+    analyzed: tuple[Any, Path, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """작업 본문이 원본별 측정 밖에서 터지면(보고서 쓰기 등) 잴 차례였던 원본은 회색 표지가 된다 —
+    콘솔과 작업 기록에만 남으면 화면은 아무 일 없었던 것처럼 보인다."""
+    service, root, source_id = analyzed
+
+    def broken(*_: Any, **__: Any) -> Any:
+        raise OSError("디스크가 가득 찼다")
+
+    shutil.rmtree(root / sync_report.SYNC_CACHE / "reports")
+    real_write = sync_report.write_report
+    monkeypatch.setattr(sync_report, "write_report", broken)
+    warnings: list[str] = []
+    monkeypatch.setattr(raw.log, "warn", warnings.append)
+    service.start_sync_checks(root, (source_id,), force=True)
+    latest = service.latest_job(root, raw.SYNC_CHECK_JOB_KIND)
+    assert latest is not None and wait(service, root, latest.job_id).status == "failed"
+    view = service.sync_check_view(root, source_id)
+    assert view is not None and (view["label"], view["tone"]) == (FAILED_LABEL, "grey")
+    assert any("디스크가 가득 찼다" in reason for reason in view["reasons"])
+    assert [line for line in warnings if "디스크가 가득 찼다" in line]
+    monkeypatch.setattr(sync_report, "write_report", real_write)
+    assert service.start_sync_checks(root, (source_id,), force=True) is not None  # 「다시 재기」
+    wait_sync(service, root)
+    view = service.sync_check_view(root, source_id)
+    assert view is not None and view["label"] != FAILED_LABEL
+
+
+# ── 앱이 끝날 때 — 새 VAD 창·세션을 거절하고, 거절은 보고서로 남기지 않는다 ──────────
+# (종료 abort의 원인은 onnxruntime 원격 측정 업로더였다 — tests/project/test_vad_runtime.py.
+#  이 문은 그 위의 방어선일 뿐이다, D55.)
+
+
+def test_vad_gate_refuses_new_windows_at_exit_and_waits_for_running_ones() -> None:
+    gate = sync_report._VadGate()
+    started, release = threading.Event(), threading.Event()
+
+    def hold() -> None:
+        with gate.held():
+            started.set()
+            release.wait(5)
+
+    worker = threading.Thread(target=hold)
+    worker.start()
+    assert started.wait(5)
+    closer = threading.Thread(target=gate.close, args=(5.0,))
+    closer.start()
+    time.sleep(0.05)
+    assert closer.is_alive()  # 돌던 창이 끝나기를 기다린다
+    release.set()
+    closer.join(5)
+    worker.join(5)
+    assert not closer.is_alive()
+    with pytest.raises(sync_report.SyncShutdown, match="끝나는 중"), gate.held():
+        pass
+
+
+def _close_gate(monkeypatch: pytest.MonkeyPatch) -> None:
+    closed = sync_report._VadGate()
+    closed.close(0.0)
+    monkeypatch.setattr(sync_report, "_VAD_GATE", closed)
+
+
+def _reports_under(root: Path) -> list[Path]:
+    return sorted((root / sync_report.SYNC_CACHE).rglob("reports/**/*.json"))
+
+
+def test_a_window_refused_at_exit_leaves_no_report_and_the_next_run_remeasures(
+    analyzed: tuple[Any, Path, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """종료 때 거절된 측정은 측정 불가가 아니다 — 회색 보고서를 남기면 다음 실행이 '지금
+    것'으로 믿고 다시 재지 않는다. 아무것도 쓰지 않고, 다음 앱 열기가 다시 잰다."""
+    service, root, source_id = analyzed
+    _close_gate(monkeypatch)
+    shutil.rmtree(root / sync_report.SYNC_CACHE)
+    service.start_sync_checks(root, (source_id,), force=True)
+    wait_sync(service, root)
+    assert _reports_under(root) == []
+    assert service.sync_report(root, source_id) is None
+    assert source_id in sync_report.pending_sources(service._workspace(root))
+    monkeypatch.setattr(sync_report, "_VAD_GATE", sync_report._VadGate())
+    reopened = raw.RawWorkspaceService()  # 다음 앱 실행
+    assert reopened.start_sync_upkeep(root) is not None
+    wait_sync(reopened, root)
+    report = reopened.sync_report(root, source_id)
+    assert report is not None and report["verdict"] != sync_check.LEVEL_SKIP
+
+
+def test_a_session_refused_at_exit_leaves_no_report(
+    analyzed: tuple[Any, Path, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, root, source_id = analyzed
+    made: list[object] = []
+    monkeypatch.setattr(sync_report, "default_session_factory", REAL_SESSION_FACTORY)
+    monkeypatch.setattr(sync_report, "_SESSIONS", {})
+    monkeypatch.setattr(sync_report, "create_cpu_session", made.append)
+    monkeypatch.setattr(sync_report, "bundled_artifact", lambda project: "artifact")
+    _close_gate(monkeypatch)
+    shutil.rmtree(root / sync_report.SYNC_CACHE)
+    service.start_sync_checks(root, (source_id,), force=True)
+    wait_sync(service, root)
+    assert made == []  # 끝나는 중에는 세션을 만들지 않는다
+    assert _reports_under(root) == []
+    with pytest.raises(sync_report.SyncShutdown):
+        sync_report.default_session_factory(ProjectConfig())()
+
+
+def test_vad_session_is_made_once_per_process_and_kept(monkeypatch: pytest.MonkeyPatch) -> None:
+    """작업 스레드가 세션을 만들고 버리지 않는다 — 소멸이 앱 종료와 겹치지 않게 모듈이 쥔다."""
+    made: list[object] = []
+
+    def create(_artifact: Any) -> object:
+        made.append(object())
+        return made[-1]
+
+    monkeypatch.setattr(sync_report, "_SESSIONS", {})
+    monkeypatch.setattr(sync_report, "create_cpu_session", create)
+    monkeypatch.setattr(sync_report, "bundled_artifact", lambda project: "artifact")
+    project = ProjectConfig()
+    first = sync_report.default_session_factory(project)()
+    second = sync_report.default_session_factory(project)()
+    assert first is second and len(made) == 1

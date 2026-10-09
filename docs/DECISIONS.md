@@ -3390,8 +3390,7 @@ start_time 0), 저장 PCM·ASR 청크 WAV 38개와 새 디코드(지연 0.00·�
   간다 · 「다시 재기(무료)」). CLI `vlogsrt media sync-check --workspace WS [--source ID…] [--json] [--no-write]`,
   `vlogsrt project sync-check --media VIDEO --srt FILE [--audio-ordinal N] [--json] [--no-write]`(SRT는
   읽기만 · 디코드는 지워지는 임시 폴더). `make verify`에 "말소리 대조 (VAD)" 검사 — 빨강만 실패, VAD
-  extra가 없으면 SKIP. W-16의 「자막 시각 확인 필요」 키워드는 `service.sync_report(root, source_id)
-  ["verdict"] == "red"`를 읽는다(나중에 들어오는 쪽이 몇 줄로 잇는다).
+  extra가 없으면 SKIP. Final Cut 보내기(W-16·D56)의 「자막 시각 확인 필요」 키워드는 아래 '키워드 배선'.
 
 **결정 — 버그 1(온도)**: `TransportTimingProvider`는 온도를 받지 않으면 `cfg.transcribe_temperature`(0.6)를
 보낸다(분석 내부 전사의 승인 공급자 경로가 이것을 지난다). 최종 자막 1차는 승인 지문이 얼린
@@ -3497,6 +3496,66 @@ chunk_end_overrun_seconds`(2.0초, `raw/config.py` — `RawWorkflowConfig` 밖, 
 - 기준(2.0초 관용 · `min_cues = 3` · 얇은 여유)은 바꾸지 않았다. 실데이터 표는 그대로다(작업공간에 새 파일 0).
 - **남은 불변식 빈틈(받아들임)**: 여러 줄로 나눈 SQL 문자열(`"INSERT\n INTO"` 이어 붙이기)과 `importlib`로 모듈을
   끌어오는 길은 `sync_report` 검사가 못 본다 — 정규식·AST 검사의 한계이고, 리뷰가 지킨다.
+
+**키워드 배선(2026-10-10, W-16 위에 올리며)**: 사용자 결정 — W-15가 짚은 영상은 자막을 그대로 싣고
+`자막 시각 확인 필요`(`finalcut_timeline.KEYWORD_CAPTION_TIMING`) 키워드를 단다. 나중에 들어온 W-15가 잇는다.
+
+- **규칙: 지금 빨강만.** 지금이란 보고서의 자막 리비전·1단계 PCM·기준이 지금과 같다는 뜻이다(확인 작업의
+  `is_current` 그대로 — `service.sync_report(root, id, strict=True)`). 낡음·없음·측정 불가·초록·노랑은 달지
+  않는다. 보내기 보고서 JSON에 `sync_check` 칸(`rule: current_red_only` · `flagged`·`amber`·`green`·`skip`·
+  `stale`·`missing`)을 남겨 편집자가 왜 안 달렸는지 본다.
+- **읽기만.** 보내기는 확인 작업을 걸지도 재지도 않는다 — 저장된 보고서만 읽는다(시험이 측정 함수를 막고 본다).
+- **층**: `service.export_finalcut_timeline`이 `caption_timing_flags`로 표지를 만들어 **값으로**
+  `finalcut_export.export(caption_timing=…)` → 순수 `finalcut_timeline.plan(caption_timing=…)`에 넘긴다.
+  `finalcut_export`·`finalcut_timeline`은 확인 계층을 모른다(불변식: `sync_report`는 그 둘을 못 들이고,
+  그 둘도 `sync_report`를 못 들인다).
+- **자리**: 그 원본의 모든 타임라인 클립에 등급 키워드 바로 옆, 브라우저 클립(있으면)에는 원본 전체 범위로,
+  쓰였으면 키워드 컬렉션 하나. 쉼표 없는 값이다. 캡션은 그대로 실린다. 걸린 원본이 없으면 문서는 W-16과
+  바이트까지 같다(여섯 문서의 지문을 못 박았다). 보내지 않는 원본을 가리키는 표지는 거부한다.
+- **실데이터(읽기 전용 사본 — `mode=ro` 백업 · JSON 504개 복사 · 원본은 심볼릭 링크로 읽기만 · 보고서는
+  `verify_sync_workspace.py --scratch <사본>/cache/sync-check`로)**: 원본 18 · 스파인 클립 132 · 꺼짐 24 ·
+  캡션 884 — W-16 기준선 그대로. 키워드는 0011(5/5 클립)·0018(1/1, 분석 전이라 브라우저 클립 없음)·
+  0019(1/1)·0021(3/3)·0023(10/10)·0024(33/33) — 클립 53개, 브라우저 클립 5개. 노랑 0013·0017·0022·0025,
+  초록 0009·0010·0015·0016·0020, 측정 불가 0008·0012·0014, 낡음·없음 0. 설치 DTD(1.14) 통과. 실제 작업공간·
+  라이브러리에 새 파일 0.
+- **합치며 드러난 것 — 앱이 끝날 때의 abort (원인 정정)**: 시험 묶음이나 실제 Silero 세션을 쓴 프로세스가
+  가끔 끝나는 순간 `libc++abi … recursive_mutex lock failed`로 abort했다. 처음엔 "확인 작업(데몬 스레드)이
+  onnxruntime 추론 안에 있는 채로 C++ 정적 소멸이 돌아서"라고 적고 문·세션 하나로 고쳤다고 했는데 **틀렸다**.
+  검증이 짚은 원인은 우리 스레드가 아니라 **onnxruntime 내장 원격 측정**이다 — 공식 빌드는 기본으로 켜져 있고
+  (설치본 `Privacy.md`), macOS에서는 1DS SDK 업로더가 네이티브 스레드(`OneDS_HTTP`/`OneDS_Task`, curl)로
+  `https://mobile.events.data.microsoft.com/OneCollector/1.0`에 보낸다. `exit()`가 소멸시킨 뮤텍스를 그
+  업로더가 잡으려다 죽는다. "고친 뒤 5번 연속 정상 종료"도 증거가 아니었다 — 간헐이라 문이 있든 없든 0/5였다.
+  - **처치 — 세션을 만드는 단 한 곳(`vad.runtime`)에서 원격 측정을 끈다.** `_load_onnxruntime`이 import **전에**
+    `ORT_DISABLE_TELEMETRY=1`을 넣고(`setdefault` — 사람이 이미 정한 값은 덮지 않는다), `_create_cpu_session`이
+    세션을 만들기 전에 `onnxruntime.disable_telemetry_events()`를 부른다(`getattr` — 그 API가 없는 런타임은
+    지나가고, 있는데 실패하면 세션을 열지 않는다). 시험은 가짜 onnxruntime로 순서(끄기 → 세션)와 import
+    시점의 환경 변수를 본다.
+  - **설치본 1.30.0에서 찾은 스위치(문서·docstring·바이너리 문자열만, 네트워크 없이)**: ① 환경 변수
+    `ORT_DISABLE_TELEMETRY=1` — "ONNX Runtime이 초기화되기 전에" 넣어야 하고 "업로더·이벤트·영구 기기 식별자를
+    프로세스 수명 내내 만들지 않는다"(Privacy.md, 비Windows; 바이너리에 그 이름이 있다). ② Python API
+    `disable_telemetry_events()` / `enable_telemetry_events()` — docstring "Disables platform-specific telemetry
+    collection", Privacy.md는 "비필수 이벤트"만 막고 "API를 부르기 전에 최소 초기화 이벤트가 이미 나갔을 수
+    있다"고 한다. ③ `SessionOptions`에는 원격 측정 칸이 없다. ④ 빌드 때 `--no_telemetry`(우리 몫이 아니다).
+    그래서 ①·② 둘 다 쓴다. onnxruntime를 끌어오는 곳은 이 모듈뿐이다(불변식) — 같은 프로세스의 다른 코드가
+    먼저 끌어오면 ①은 늦고 ②만 남는다.
+  - **문(`_VadGate`)과 프로세스당 세션 하나는 방어선으로만 남긴다.** 끝나는 순간부터 새 창·새 세션을 거절하고
+    돌던 창이 끝나기를 잠깐 기다리며, 세션을 원본마다 만들고 버리지 않는다. abort를 없앤다는 증거는 없다.
+    문이 거절한 측정은 **보고서를 남기지 않는다**(`SyncShutdown`) — 예전엔 회색 보고서로 남아 다음 실행이 지금
+    리비전의 것으로 믿고 다시 재지 않았다. 이제는 아무것도 쓰지 않으니 다음 앱 열기가 다시 잰다.
+  - **증명하지 못한 것 — 사람이 확인한다**: 나가는 연결이 실제로 0인지. 에이전트는 연결을 일으킬 수 있는 진짜
+    세션을 띄우지 않았고, 시험의 소켓 막기(`tests/conftest.py`)는 Python 소켓만 볼 뿐 네이티브 curl은 못 본다.
+    앱으로 영상 하나의 자막 시각 확인을 돌리는 동안 `nettop -p <pid>`(또는 LuLu·Little Snitch)로
+    `mobile.events.data.microsoft.com` 연결이 없는지, 끝낼 때 abort가 없는지 본다. 이 고침 전에 돌린 실데이터
+    확인(진짜 세션)은 원격 측정이 켜진 채였다.
+- **보내기는 표지 실패에 막히지 않는다**: `caption_timing_flags`가 터지면(보고서가 깨졌거나 DB를 못 읽거나)
+  키워드 없이 보내고, 보고서 `sync_check` 칸에 `error`(`<예외 이름>: <메시지>`)만 남긴다 — 재지 못한 것을
+  빈 `flagged` 목록으로 꾸미지 않는다. 경고를 남기고, 화면의 보내기 결과에 "키워드는 달지 못해 키워드 없이
+  보냈습니다 — <이유>"를 보인다.
+- **확인 작업 본문이 터지면 회색 표지**: 원본별 측정(`_measured`, 측정 불가 보고서로 접힌다) 밖에서 본문이
+  터지면(보고서 쓰기·DB 등) 그 묶음과 합쳐 둔 요청 중 **지금 보고서가 없는 원본만** `자막 시각 확인을 걸지
+  못함 (로그 참고)` 표지가 된다 — 이미 잰 원본은 제 보고서를 그대로 보인다. 「다시 재기」가 지운다.
+- **화면 고리**: W-16 C단계가 바꾼 것은 보내기 단추와 미검토 안내 문구이고 `_capcut_result`(1초 틱·검토 동작이
+  지나는 공용 그리기)는 그대로 살아 있다 — 앱 열기 확인 고리는 그 자리에 그대로 둔다.
 
 ---
 
@@ -3604,5 +3663,5 @@ Final Cut 라이브러리의 것으로 남고, `src`는 신원이 맞지 않을 
 
 **남은 것은 실기(V3, 사람만)다**: 실제 Final Cut이 새 이벤트·프로젝트로 가져오는지, 중복 미디어·
 누락 아이콘이 없는지, 키워드·즐겨찾기·캡션이 보이는지는 `docs/FCP_MANUAL_ACCEPTANCE.md`의
-「전체 타임라인 보내기」로 확인한다. W-15의 `자막 시각 확인 필요` 키워드는 상수만 있고 아직 잇지
-않았다(W-15와 합칠 때 잇는다).
+「전체 타임라인 보내기」로 확인한다. W-15의 `자막 시각 확인 필요` 키워드는 W-15를 이 위에 올리며
+이었다 — 규칙은 **지금 빨강만**이다(D55 '키워드 배선').

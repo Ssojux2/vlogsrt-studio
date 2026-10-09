@@ -91,6 +91,18 @@ _NEW_FILE = os.O_WRONLY | os.O_CREAT | os.O_EXCL
 _FILE_MODE = 0o644
 
 
+@dataclass(frozen=True, slots=True)
+class CaptionTimingFlags:
+    """자막 시각 확인(D55)의 몫 — 키워드를 달 원본과, 왜 나머지는 안 달았는지(보고서 칸).
+
+    서비스가 저장된 보고서를 **읽기만** 해서 만든다 — 이 계층은 확인 계층을 모르고(표시 전용
+    불변식), 재지도 않는다. `flagged`만 문서에 들어가고 `section`은 보고서 JSON의 `sync_check`다.
+    """
+
+    flagged: frozenset[str]
+    section: Mapping[str, object]
+
+
 class FinalCutExportError(RawWorkspaceError):
     """보내지 않았다 — 어느 원본·라이브러리의 무엇이 문제인지 이름으로 말한다."""
 
@@ -773,8 +785,9 @@ def export(
     *,
     now: Callable[[], datetime] = _utc_now,
     dtd_path: Path = INSTALLED_DTD,
+    caption_timing: CaptionTimingFlags | None = None,
 ) -> ExportOutcome:
-    """작업공간의 ready 원본 전부(촬영 순) → 새 FCPXML + 리포트. Final Cut은 열지 않는다."""
+    """ready 원본 전부(촬영 순) → 새 FCPXML + 리포트. Final Cut은 열지 않는다(D55 표지는 값으로)."""
     facade = service.review_workspace_facade(root)
     workspace: RawWorkspace = facade.workspace
     folder = workspace.root / EXPORT_FOLDER
@@ -789,7 +802,7 @@ def export(
         shelf = _LibraryShelf(service.remembered_fcp_library(root))
         scope = _Scope(service, workspace.root, workspace, head, facade.tier_evidence_rows(), shelf)
         gathered = _gather_all(scope, assets, context)
-        document = _document(gathered, workspace, moment, shelf)
+        document = _document(gathered, workspace, moment, shelf, caption_timing)
         exported = {asset.asset_id for asset in assets}
         report: dict[str, object] = {
             "schema": REPORT_SCHEMA,
@@ -800,19 +813,27 @@ def export(
             "sources": [item.facts for item in gathered],
             "not_exported": _not_exported(service, root, head, exported),
             "counts": timeline.document_counts(document),
+            **({} if caption_timing is None else {"sync_check": dict(caption_timing.section)}),
         }
         return _publish(folder, timeline.render(document), report, moment, dtd_path)
 
 
 def _document(
-    gathered: list[_Gathered], workspace: RawWorkspace, moment: datetime, shelf: _LibraryShelf
+    gathered: list[_Gathered],
+    workspace: RawWorkspace,
+    moment: datetime,
+    shelf: _LibraryShelf,
+    caption_timing: CaptionTimingFlags | None = None,
 ) -> timeline.TimelineDocument:
+    """모은 것 → 문서. 자막 시각 확인(D55)이 걸린 원본에는 빌더가 키워드를 단다."""
     bundle = shelf.bundle if any(item.from_library for item in gathered) else None
+    flagged = frozenset() if caption_timing is None else caption_timing.flagged
     try:
         return timeline.plan(
             [item.source for item in gathered],
             title=timeline.export_title(workspace.name, moment.astimezone()),
             library_bundle=bundle,
+            caption_timing=flagged,
         )
     except timeline.FinalCutTimelineError as error:
         raise FinalCutExportError(f"Final Cut 타임라인을 짜지 못했다 — {error}") from error

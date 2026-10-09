@@ -11,13 +11,16 @@
 
 from __future__ import annotations
 
+import atexit
 import hashlib
 import json
 import os
 import re
 import tempfile
+import threading
 import uuid
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from fractions import Fraction
 from pathlib import Path
@@ -67,6 +70,15 @@ class SyncUnavailable(Exception):
         super().__init__(reason.text)
         self.reason = reason
         self.checks = tuple(checks)
+
+
+class SyncShutdown(Exception):
+    """앱이 끝나는 중이라 VAD를 거절했다 — 잰 것이 없으니 보고서를 **쓰지 않는다**.
+
+    측정 불가(`SyncUnavailable`)와 다르다. 회색 보고서를 남기면 다음 실행이 그것을 지금
+    리비전의 보고서로 믿고 다시 재지 않는다. 아무것도 남기지 않으면 다음 앱 열기가 다시 잰다.
+    `_measured`가 잡는 RuntimeError 계열이 아니어야 오류 보고서로 바뀌지 않는다.
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -528,14 +540,84 @@ def vad_key(project: ProjectConfig) -> str:
     return hashlib.sha256(json.dumps(body, sort_keys=True).encode("utf-8")).hexdigest()
 
 
+SHUTDOWN_WAIT_SECONDS = 5.0
+"""앱이 끝날 때 돌던 VAD 창을 기다리는 상한 — 판정 기준이 아니라 운영 상수다(창 하나는 수 ms)."""
+
+
+class _VadGate:
+    """앱(인터프리터)이 끝날 때 VAD를 멈추고, 돌던 창이 끝나기를 잠깐 기다린다 — 방어선일 뿐이다.
+
+    실측 종료 abort(`recursive_mutex lock failed`)의 원인은 이 스레드가 아니라 onnxruntime 내장
+    원격 측정(1DS 업로더)이었고, 그것은 세션을 만드는 쪽에서 끈다(`vad.runtime`, D55). 이 문은
+    그와 별개로 확인 작업(데몬 스레드)이 인터프리터 종료 뒤에도 네이티브 추론을 붙잡고 있지 않게
+    한다. 끝나는 순간부터 새 창·새 세션은 `SyncShutdown`으로 거절하고(보고서를 남기지 않는다),
+    이미 돌던 창은 끝나게 둔다. 이것만으로 abort가 사라진다는 증거는 없다.
+    """
+
+    def __init__(self) -> None:
+        self._condition = threading.Condition()
+        self._busy = 0
+        self._closing = False
+
+    @contextmanager
+    def held(self) -> Iterator[None]:
+        with self._condition:
+            if self._closing:
+                raise SyncShutdown("앱이 끝나는 중이다 — 자막 시각 측정을 멈춘다")
+            self._busy += 1
+        try:
+            yield
+        finally:
+            with self._condition:
+                self._busy -= 1
+                self._condition.notify_all()
+
+    @property
+    def closing(self) -> bool:
+        with self._condition:
+            return self._closing
+
+    def close(self, wait_seconds: float) -> None:
+        with self._condition:
+            self._closing = True
+            self._condition.wait_for(lambda: self._busy == 0, timeout=wait_seconds)
+
+
+_VAD_GATE = _VadGate()
+atexit.register(lambda: _VAD_GATE.close(SHUTDOWN_WAIT_SECONDS))
+
+
+class _GatedSession:
+    """세션의 `run`을 문 안에서만 부른다 — 계약(onnx `run`)은 그대로 넘긴다."""
+
+    def __init__(self, inner: object) -> None:
+        self._inner: Any = inner
+
+    def run(self, names: Any, feeds: Any) -> Any:
+        with _VAD_GATE.held():
+            return self._inner.run(names, feeds)
+
+
+_SESSIONS: dict[str, object] = {}
+_SESSIONS_LOCK = threading.Lock()
+
+
 def default_session_factory(project: ProjectConfig) -> Callable[[], object]:
-    """세션을 한 번만 만든다 — 런타임이 없으면 `VadUnavailable`이 측정 불가가 된다."""
-    made: list[object] = []
+    """VAD 세션 — 프로세스에 하나(VAD 열쇠마다)를 만들어 끝까지 둔다.
+
+    원본마다 세션을 새로 만들 까닭이 없고(모델·설정이 같다), 작업 스레드가 세션을 만들고
+    버리지 않으면 그 C++ 소멸이 앱 종료와 겹칠 여지도 줄어든다 — 방어선이지 실측 abort의
+    원인 처치가 아니다(그건 `vad.runtime`의 원격 측정 끄기, D55). 런타임이 없으면
+    `VadUnavailable`이 측정 불가가 되고, 앱이 끝나는 중이면 `SyncShutdown`이다.
+    """
+    key = vad_key(project)
 
     def factory() -> object:
-        if not made:
-            made.append(create_cpu_session(bundled_artifact(project)))
-        return made[0]
+        with _SESSIONS_LOCK:
+            if key not in _SESSIONS:
+                with _VAD_GATE.held():
+                    _SESSIONS[key] = create_cpu_session(bundled_artifact(project))
+            return _SESSIONS[key]
 
     return factory
 
@@ -584,7 +666,7 @@ def _infer_runs(
     frame_count: int,
 ) -> tuple[tuple[int, int], ...]:
     try:
-        session = session_factory()
+        session = _GatedSession(session_factory())
     except VadUnavailable as error:
         text = f"VAD 런타임이 없어 잴 수 없음 (선택 extra `project`) — {error}"
         raise SyncUnavailable(Reason("vad_unavailable", sync_check.LEVEL_SKIP, text)) from error
@@ -601,6 +683,9 @@ def _infer_runs(
         sample_count=choice.sample_count,
     )
     result = infer_vad(reference, source_id, project, session)
+    if result.status != "success" and _VAD_GATE.closing:
+        # infer_vad는 창 오류를 결과로 접는다 — 문이 닫힌 탓이면 측정 불가가 아니다.
+        raise SyncShutdown(f"앱이 끝나는 중이라 VAD를 멈췄다 — {result.error}")
     if result.status != "success":
         text = f"VAD가 실패해 잴 수 없음 — {result.error}"
         raise SyncUnavailable(Reason("vad_failed", sync_check.LEVEL_SKIP, text))
@@ -1040,7 +1125,9 @@ def run_checks(
 ) -> None:
     """작업 본문 — 원본마다 재고 보고서만 쓴다. 한 원본의 실패는 측정 불가 보고서로 남는다.
 
-    `done`은 같은 작업이 앞서 잰 수다 — 합쳐진 묶음의 진행은 거기서 이어진다.
+    `done`은 같은 작업이 앞서 잰 수다 — 합쳐진 묶음의 진행은 거기서 이어진다. 앱이 끝나는
+    중이라 VAD가 거절되면(`SyncShutdown`) 그 원본부터 아무것도 쓰지 않고 멈춘다 — 보고서가
+    없으니 다음 앱 열기가 다시 잰다.
     """
     project = project or ProjectConfig()
     factory = session_factory or default_session_factory(project)
@@ -1050,9 +1137,13 @@ def run_checks(
         context.check_cancel()
         source = gather_source(workspace, workspace.source_asset(source_id))
         if source is not None:
-            write_report(
-                cache_root, _measured(source, cache_root, settings, project, factory), settings
-            )
+            try:
+                document = _measured(source, cache_root, settings, project, factory)
+            except SyncShutdown as stopping:
+                left = len(source_ids) - (position - done)
+                log.info(f"자막 시각 확인 — {stopping} (남은 {left}개는 다음 앱 열기가 잰다)")
+                return
+            write_report(cache_root, document, settings)
         context.set_progress(position + 1)
 
 
@@ -1103,9 +1194,17 @@ def measure_workspace(
 
 
 def current_report(
-    workspace: Any, source_id: str, settings: SyncCheckSettings = SYNC_CHECK_SETTINGS
+    workspace: Any,
+    source_id: str,
+    settings: SyncCheckSettings = SYNC_CHECK_SETTINGS,
+    *,
+    strict: bool = False,
 ) -> dict[str, Any] | None:
-    """지금 원본 자막 리비전의 보고서 — 없으면 가장 최근 것을 `stale`로. 읽기만 한다."""
+    """지금 원본 자막 리비전의 보고서 — 없으면 가장 최근 것을 `stale`로. 읽기만 한다.
+
+    `strict`면 1단계 PCM·기준까지 `is_current`로 대조한다(화면 표지는 가벼운 길을 쓴다 —
+    1초 틱마다 1단계 기록을 열지 않게).
+    """
     from vlogsrt.project.raw.source_transcript import load
 
     transcript = load(workspace, source_id)
@@ -1113,6 +1212,9 @@ def current_report(
         return None
     cache_root = workspace.root / SYNC_CACHE
     exact = load_report(report_path(cache_root, source_id, str(transcript["revision"]), settings))
+    if exact is not None and strict:
+        source = gather_source(workspace, workspace.source_asset(source_id))
+        return {**exact, "stale": not is_current(exact, source, settings) if source else True}
     if exact is not None:
         return {**exact, "stale": False}
     older = latest_report(cache_root, source_id)

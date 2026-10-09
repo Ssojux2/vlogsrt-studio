@@ -92,6 +92,27 @@ def test_refusal_names_the_file_and_explains_vfr_in_plain_korean(
     assert len(opened) == 1
 
 
+def test_a_caption_timing_lookup_failure_still_sends_and_says_why(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """`자막 시각 확인 필요` 표지는 표시 전용이다 — 못 만들어도 보내기는 막지 않고, 키워드 없이
+    보냈다는 것과 그 이유를 결과에 보인다(조용히 빠지지 않는다)."""
+
+    def broken(*_: Any, **__: Any) -> Any:
+        raise ValueError("보고서가 깨졌다")
+
+    opened: list[Path] = []
+    server, signature, root = _server(tmp_path, opened)
+    monkeypatch.setattr(server.raw, "caption_timing_flags", broken)
+    server.finalcut_send_view(signature)
+    finished = _send_job(server, root)
+    assert finished.status == "succeeded", finished.error
+    assert len(opened) == 1
+    status = str(server.capcut_status_view(signature))
+    assert "Final Cut으로 보냈습니다" in status
+    assert "자막 시각 확인 필요" in status and "ValueError: 보고서가 깨졌다" in status
+
+
 def test_a_failed_open_is_reported_with_the_written_file(tmp_path: Path):
     """쓰기는 끝났는데 Final Cut이 열리지 않았다 — 성공처럼 보이지 않고, 쓴 파일 이름을 댄다."""
     from vlogsrt.project.raw.service import RawWorkspaceError

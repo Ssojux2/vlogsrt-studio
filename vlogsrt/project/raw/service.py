@@ -1683,17 +1683,42 @@ class RawWorkspaceService:
 
         def body(context: JobContext) -> None:
             done = 0
+            batch: tuple[str, ...] | None = ids
             try:
-                batch: tuple[str, ...] | None = ids
                 while batch is not None:
                     if batch:
                         sync_report.run_checks(context, workspace, batch, done=done)
                         done += len(batch)
                     batch = self._next_sync_batch(key, workspace)
+            except JobCancelledError:
+                raise
+            except Exception as error:
+                self._grey_unmeasured(key, workspace, batch or (), error)
+                raise
             finally:
                 self._release_sync_slot(key, context.job_id)
 
         return body
+
+    def _grey_unmeasured(
+        self, key: Path, workspace: RawWorkspace, batch: Sequence[str], error: BaseException
+    ) -> None:
+        """작업 본문이 터졌다 — 잴 차례였던(묶음·합쳐 둔) 원본 중 지금 보고서가 없는 것만 회색으로.
+
+        이미 잰 원본은 제 보고서가 있으니 덮지 않는다. 그것조차 가리지 못하면 묶음 전체를 회색으로
+        둔다 — 작업 기록·콘솔에만 남고 화면은 멀쩡해 보이는 일이 없게.
+        """
+        from vlogsrt.project.raw import sync_report
+
+        with self._sync_lock:
+            candidates = (*batch, *self._sync_waiting.get(key, {}))
+        try:
+            unmeasured = sorted(sync_report.pending_sources(workspace, source_ids=candidates))
+        except Exception as lookup:  # noqa: BLE001 - 표지를 남기는 길이 또 터져도 표지는 남긴다
+            log.warn(f"자막 시각 확인 — 못 잰 원본을 못 가려 묶음 전체를 회색으로 둔다: {lookup}")
+            unmeasured = sorted(set(candidates))
+        if unmeasured:
+            self._note_sync_failure(key, unmeasured, error, repeat=True)
 
     def _release_sync_slot(self, key: Path, job_id: str) -> None:
         """본문이 예외로 끝났을 때만 남는 칸을 비운다 — 합쳐 둔 요청은 경고로 알린다."""
@@ -1733,16 +1758,18 @@ class RawWorkspaceService:
         }
         return tuple(sorted(pending))
 
-    def sync_report(self, root: Path, source_id: str) -> dict[str, Any] | None:
+    def sync_report(
+        self, root: Path, source_id: str, *, strict: bool = False
+    ) -> dict[str, Any] | None:
         """원본 하나의 자막 시각 판정 문서 — `verdict`는 red·amber·green·skip. 읽기만 한다.
 
-        Final Cut 출력(W-16)이 「자막 시각 확인 필요」 키워드를 달 때 읽는 값이다(`verdict ==
-        "red"`). 지금 자막 리비전의 보고서가 아직 없으면 가장 최근 보고서를 `stale: True`로,
-        보고서가 하나도 없으면 None을 돌려준다.
+        지금 자막 리비전의 보고서가 아직 없으면 가장 최근 보고서를 `stale: True`로, 보고서가
+        하나도 없으면 None을 돌려준다. `strict`면 1단계 PCM까지 대조해 낡음을 정한다(확인 작업의
+        `is_current` 그대로) — Final Cut 키워드는 이 값으로만 단다(`caption_timing_flags`).
         """
         from vlogsrt.project.raw import sync_report
 
-        return sync_report.current_report(self._workspace(root), source_id)
+        return sync_report.current_report(self._workspace(root), source_id, strict=strict)
 
     def measure_sync_checks(
         self, root: Path, source_ids: Sequence[str] | None = None, *, write: bool = True
@@ -1950,7 +1977,48 @@ class RawWorkspaceService:
         """
         from vlogsrt.project.raw import finalcut_export
 
-        return finalcut_export.export(self, root, context).fcpxml
+        flags = self._caption_timing_flags_or_reason(root)
+        return finalcut_export.export(self, root, context, caption_timing=flags).fcpxml
+
+    def _caption_timing_flags_or_reason(self, root: Path) -> Any:
+        """표지는 표시 전용이다 — 못 만들면 키워드 없이 보내고, 이유를 보고서 칸과 로그에 남긴다.
+
+        빈 표지로 꾸미지 않는다: 칸에는 `error`만 있고 `flagged` 같은 목록은 없다(재지 못한
+        것을 '걸린 것 없음'으로 읽히게 두지 않는다). 화면은 그 `error`를 보내기 결과에 보인다.
+        """
+        from vlogsrt.project.raw import finalcut_export, finalcut_timeline
+
+        try:
+            return self.caption_timing_flags(root)
+        except Exception as error:  # noqa: BLE001 - 표시 전용 키워드가 보내기를 막지 못한다
+            reason = f"{type(error).__name__}: {error}"
+            log.warn(f"자막 시각 확인 키워드를 달지 못해 키워드 없이 보낸다 — {reason}")
+            section = {
+                "rule": "current_red_only",
+                "keyword": finalcut_timeline.KEYWORD_CAPTION_TIMING,
+                "error": reason,
+            }
+            return finalcut_export.CaptionTimingFlags(flagged=frozenset(), section=section)
+
+    def caption_timing_flags(self, root: Path) -> Any:
+        """Final Cut 보내기의 `자막 시각 확인 필요` 표지 — **지금 빨강** 보고서인 원본만(D55·D56).
+
+        지금이란 보고서의 자막 리비전·1단계 PCM·기준이 지금과 같다는 뜻이다(확인 작업의 낡음
+        규칙 그대로). 낡았거나 없거나 측정 불가·초록·노랑은 달지 않고 보고서 칸에 이름을 남긴다.
+        저장된 보고서를 읽기만 한다 — 보내기가 확인 작업을 걸거나 재는 일은 없다.
+        """
+        from vlogsrt.project.raw import finalcut_export, finalcut_timeline
+
+        buckets: dict[str, list[dict[str, str]]] = {name: [] for name in _SYNC_EXPORT_BUCKETS}
+        for asset in self.global_order_proposal(root):
+            document = self.sync_report(root, asset.asset_id, strict=True)
+            buckets[_sync_export_bucket(document)].append(
+                {"source_id": asset.asset_id, "name": asset.source_name}
+            )
+        flagged = frozenset(row["source_id"] for row in buckets["flagged"])
+        keyword = finalcut_timeline.KEYWORD_CAPTION_TIMING
+        section = {"rule": "current_red_only", "keyword": keyword, **buckets}
+        return finalcut_export.CaptionTimingFlags(flagged=flagged, section=section)
 
     def scan_sources(
         self,
@@ -3759,6 +3827,19 @@ class RawWorkspaceService:
             job_fingerprint=fingerprint,
             clip_total=len(snapshot.entries),
         )
+
+
+_SYNC_EXPORT_BUCKETS = ("flagged", "amber", "green", "skip", "stale", "missing")
+
+
+def _sync_export_bucket(document: Mapping[str, Any] | None) -> str:
+    """보내기 표지의 칸 — 지금 빨강만 `flagged`, 나머지는 왜 안 달았는지의 이름이다."""
+    if document is None:
+        return "missing"
+    if document.get("stale"):
+        return "stale"
+    verdict = str(document.get("verdict"))
+    return {"red": "flagged", "amber": "amber", "green": "green"}.get(verdict, "skip")
 
 
 def _sync_fingerprint(pending: Mapping[str, str]) -> str:

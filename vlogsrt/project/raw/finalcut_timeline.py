@@ -228,6 +228,8 @@ class SourcePlan:
     captions: tuple[CaptionPiece, ...]
     caption_counts: CaptionCounts | None
     browser: tuple[BrowserRange, ...] | None
+    caption_timing: bool = False
+    """자막 시각 확인(D55)이 지금 빨강이라고 한 원본 — 모든 클립과 브라우저 클립에 키워드만 단다."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -445,11 +447,21 @@ def _cut_pieces(cue: Cue, start: int, end: int, clips: Sequence[ClipPlan]) -> li
     ]
 
 
-def plan_source(source: SourceInput) -> SourcePlan:
-    """원본 하나의 계획 — 클립·캡션·브라우저 범위."""
+def _with_caption_timing(clips: tuple[ClipPlan, ...]) -> tuple[ClipPlan, ...]:
+    """등급 키워드 바로 옆에 `자막 시각 확인 필요` — 자막·켜짐은 그대로다(D55·D56)."""
+    return tuple(
+        replace(clip, keywords=(clip.keywords[0], KEYWORD_CAPTION_TIMING, *clip.keywords[1:]))
+        for clip in clips
+    )
+
+
+def plan_source(source: SourceInput, *, caption_timing: bool = False) -> SourcePlan:
+    """원본 하나의 계획 — 클립·캡션·브라우저 범위. `caption_timing`이면 자막 시각 키워드를 단다."""
     media = source.media
     _require_media(media)
     clips = timeline_clips(source)
+    if caption_timing:
+        clips = _with_caption_timing(clips)
     captions: tuple[CaptionPiece, ...] = ()
     counts: CaptionCounts | None = None
     if source.cues is not None:
@@ -466,6 +478,7 @@ def plan_source(source: SourceInput) -> SourcePlan:
         captions=captions,
         caption_counts=counts,
         browser=None if report is None else browser_ranges(report, media),
+        caption_timing=caption_timing,
     )
 
 
@@ -521,16 +534,31 @@ def _sequence_audio(plans: Sequence[SourcePlan]) -> tuple[int, int] | None:
 
 
 def plan(
-    sources: Sequence[SourceInput], *, title: str, library_bundle: Path | None
+    sources: Sequence[SourceInput],
+    *,
+    title: str,
+    library_bundle: Path | None,
+    caption_timing: frozenset[str] = frozenset(),
 ) -> TimelineDocument:
-    """원본 전부(주어진 촬영 순서 그대로) → 타임라인 문서. 원본 순서를 바꾸지 않는다."""
+    """원본 전부(주어진 촬영 순서 그대로) → 타임라인 문서. 원본 순서를 바꾸지 않는다.
+
+    `caption_timing`은 자막 시각 확인(D55)이 **지금 빨강**이라고 한 원본 ID다 — 고르는 일은
+    내보내기 계층(서비스)이 저장된 보고서를 읽어 하고, 여기는 값으로 받아 키워드만 단다.
+    비어 있으면 문서는 W-16과 바이트까지 같다.
+    """
     if not sources:
         raise FinalCutTimelineError("보낼 원본이 하나도 없다")
+    unknown = sorted(caption_timing - {source.media.source_id for source in sources})
+    if unknown:
+        raise FinalCutTimelineError(f"자막 시각 확인 표지가 보내지 않는 원본을 가리킨다: {unknown}")
     if not title.strip() or _XML_FORBIDDEN.search(title):
         raise FinalCutTimelineError(f"이벤트·프로젝트 이름을 쓸 수 없다: {title!r}")
     if library_bundle is not None and not library_bundle.is_absolute():
         raise FinalCutTimelineError(f"라이브러리 경로가 절대 경로가 아니다: {library_bundle}")
-    plans = tuple(plan_source(source) for source in sources)
+    plans = tuple(
+        plan_source(source, caption_timing=source.media.source_id in caption_timing)
+        for source in sources
+    )
     _require_one_rate(plans)
     formats = _formats(plans)
     ids = _format_ids(formats)
@@ -684,6 +712,8 @@ def _browser_clip(parent: ET.Element, ids: tuple[str, str], plan: SourcePlan) ->
     rows = plan.browser or ()
     for row in rows:
         _range_element(clip, "keyword", media, row.start_frame, row.end_frame, row.keyword)
+    if plan.caption_timing:
+        _range_element(clip, "keyword", media, 0, media.frame_count, KEYWORD_CAPTION_TIMING)
     for row in rows:
         if row.favorite:
             _range_element(clip, "rating", media, row.start_frame, row.end_frame, RATING_FAVORITE)
@@ -753,7 +783,9 @@ def _event(library: ET.Element, document: TimelineDocument, ids: list[tuple[str,
         if plan.browser is not None:
             _browser_clip(event, pair, plan)
             used.update(row.keyword for row in plan.browser)
-    for keyword in _TIER_KEYWORDS:
+    if any(plan.caption_timing and plan.browser is not None for plan in document.sources):
+        used.add(KEYWORD_CAPTION_TIMING)
+    for keyword in (*_TIER_KEYWORDS, KEYWORD_CAPTION_TIMING):
         if keyword in used:
             ET.SubElement(event, "keyword-collection", {"name": keyword})
     project = ET.SubElement(event, "project", {"name": document.title})

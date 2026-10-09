@@ -398,6 +398,103 @@ def test_session_pins_single_threads_and_exactly_cpu_provider(
     assert created[0]["providers"] == ["CPUExecutionProvider"]
 
 
+# ─── onnxruntime 원격 측정 끄기 (D55) ──────────────────────────────────
+# 공식 빌드는 원격 측정이 기본으로 켜져 있고, macOS에서는 내장 1DS 업로더가 네이티브
+# 스레드로 Microsoft에 보낸다. 앱이 끝날 때 그 업로더가 아직 돌면 C++ 정적 소멸과
+# 엇갈려 프로세스가 abort했다. 두 스위치를 다 쓴다 — 환경 변수는 업로더 자체를
+# 만들지 않게 하고(초기화 전에만 듣는다), API는 그 뒤의 비필수 이벤트를 막는다.
+
+_TELEMETRY_ENV = "ORT_DISABLE_TELEMETRY"
+
+
+def _clear_telemetry_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """환경 변수를 비우되, 코드가 넣은 값까지 시험 뒤에 되돌린다."""
+    monkeypatch.setenv(_TELEMETRY_ENV, "placeholder")
+    monkeypatch.delenv(_TELEMETRY_ENV)
+
+
+def test_session_turns_ort_telemetry_off_before_the_session_exists(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vlogsrt.project.vad.runtime import bundled_artifact, create_cpu_session
+
+    _install_fake_runtime(monkeypatch)
+    module = sys.modules["onnxruntime"]
+    order: list[str] = []
+    real_session = module.InferenceSession
+
+    class _RecordingSession(real_session):  # type: ignore[misc, valid-type]
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            order.append("session")
+            super().__init__(*args, **kwargs)
+
+    module.disable_telemetry_events = lambda: order.append("disable")  # type: ignore[attr-defined]
+    module.InferenceSession = _RecordingSession  # type: ignore[attr-defined]
+    create_cpu_session(bundled_artifact(ProjectConfig()))
+    assert order == ["disable", "session"]
+
+
+def test_telemetry_env_switch_is_set_before_onnxruntime_is_imported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import importlib.abc
+    import importlib.util
+
+    from vlogsrt.project.vad.runtime import bundled_artifact, create_cpu_session
+
+    _install_fake_runtime(monkeypatch)
+    template = sys.modules["onnxruntime"]
+    monkeypatch.delitem(sys.modules, "onnxruntime")
+    _clear_telemetry_env(monkeypatch)
+    seen_at_import: list[str | None] = []
+
+    class _Loader(importlib.abc.Loader):
+        def create_module(self, spec: Any) -> None:
+            return None
+
+        def exec_module(self, module: types.ModuleType) -> None:
+            seen_at_import.append(os.environ.get(_TELEMETRY_ENV))
+            module.SessionOptions = template.SessionOptions  # type: ignore[attr-defined]
+            module.InferenceSession = template.InferenceSession  # type: ignore[attr-defined]
+
+    class _Finder(importlib.abc.MetaPathFinder):
+        def find_spec(self, fullname: str, path: Any, target: Any = None) -> Any:
+            if fullname != "onnxruntime":
+                return None
+            return importlib.util.spec_from_loader(fullname, _Loader())
+
+    monkeypatch.setattr(sys, "meta_path", [_Finder(), *sys.meta_path])
+    create_cpu_session(bundled_artifact(ProjectConfig()))
+    assert seen_at_import == ["1"]
+
+
+def test_an_explicit_telemetry_env_choice_is_left_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vlogsrt.project.vad.runtime import bundled_artifact, create_cpu_session
+
+    _install_fake_runtime(monkeypatch)
+    monkeypatch.setenv(_TELEMETRY_ENV, "0")
+    create_cpu_session(bundled_artifact(ProjectConfig()))
+    assert os.environ[_TELEMETRY_ENV] == "0"
+
+
+def test_a_failing_telemetry_switch_fails_closed_before_any_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vlogsrt.project.vad.runtime import VadUnavailable, bundled_artifact, create_cpu_session
+
+    created = _install_fake_runtime(monkeypatch)
+
+    def _broken() -> None:
+        raise RuntimeError("telemetry provider missing")
+
+    sys.modules["onnxruntime"].disable_telemetry_events = _broken  # type: ignore[attr-defined]
+    with pytest.raises(VadUnavailable, match="원격 측정"):
+        create_cpu_session(bundled_artifact(ProjectConfig()))
+    assert created == []
+
+
 def test_runtime_that_adds_a_provider_fails_closed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
