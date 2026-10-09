@@ -40,7 +40,7 @@ from vlogsrt.project.raw.analysis_config import (
     validate_understanding_settings,
 )
 from vlogsrt.project.raw.caption_provider import TimingProvider, audio_chunk_binding
-from vlogsrt.project.raw.config import RawWorkflowConfig
+from vlogsrt.project.raw.config import RawWorkflowConfig, transcription_identity_view
 from vlogsrt.task_runtime import check_cancel, provider_error
 
 PCM_SAMPLE_RATE = 16000
@@ -310,7 +310,7 @@ def _transcribe_span(
                 "wav": _sha256_file(wav_path),
                 "provider_origin": type(provider).__name__,
                 "model": settings.models.timing_model,
-                "settings": asdict(settings),
+                "settings": asdict(transcription_identity_view(settings)),  # D54 — 분석 모델 고정
                 "start": span.start,
                 "end": span.end,
             },

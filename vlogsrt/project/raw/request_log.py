@@ -29,6 +29,7 @@ _USAGE_COLUMNS = (
     ("cost_usd", "TEXT"),
     ("unpriced_reason", "TEXT"),
     ("pricing_revision", "TEXT"),
+    ("provider_request_id", "TEXT"),
 )
 """Usage columns appended to the original table; existing workspaces gain them in place."""
 
@@ -118,14 +119,15 @@ def record_usage(usage: MeasuredUsage, identifier: str | None = None) -> None:
         return
     with sink[0].connect() as db:
         prior = db.execute(
-            "SELECT model,billed_seconds,input_tokens,output_tokens,cost_usd,unpriced_reason "
-            "FROM analysis_requests WHERE id=?",
+            "SELECT model,billed_seconds,input_tokens,output_tokens,cost_usd,unpriced_reason,"
+            "provider_request_id FROM analysis_requests WHERE id=?",
             (target,),
         ).fetchone()
         merged = usage if prior is None or prior[0] is None else _merged(prior, usage)
         db.execute(
             "UPDATE analysis_requests SET model=?,billed_seconds=?,input_tokens=?,"
-            "output_tokens=?,cost_usd=?,unpriced_reason=?,pricing_revision=? WHERE id=?",
+            "output_tokens=?,cost_usd=?,unpriced_reason=?,pricing_revision=?,"
+            "provider_request_id=? WHERE id=?",
             (
                 merged.model,
                 merged.billed_seconds,
@@ -134,6 +136,7 @@ def record_usage(usage: MeasuredUsage, identifier: str | None = None) -> None:
                 merged.cost_usd,
                 merged.unpriced_reason,
                 merged.pricing_revision,
+                merged.provider_request_id,
                 target,
             ),
         )
@@ -159,4 +162,5 @@ def _merged(prior: Any, usage: MeasuredUsage) -> MeasuredUsage:
         output_tokens=add_int(prior["output_tokens"], usage.output_tokens),
         cost_usd=add_text(prior["cost_usd"], usage.cost_usd) if priced else None,
         unpriced_reason=None if priced else usage.unpriced_reason or prior["unpriced_reason"],
+        provider_request_id=usage.provider_request_id or prior["provider_request_id"],
     )

@@ -23,12 +23,19 @@ from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
+from vlogsrt.env import ANALYSIS_CLAUDE_KEY_ENV
 from vlogsrt.project.raw.analysis_config import (
     UNDERSTANDING_SCHEMA_VERSION,
     RawUnderstandingSettings,
     validate_understanding_settings,
 )
-from vlogsrt.project.raw.config import RawWorkflowConfig, validate_raw_workflow_config
+from vlogsrt.project.raw.config import (
+    ANALYSIS_PROVIDER_ANTHROPIC,
+    RawWorkflowConfig,
+    analysis_model_label,
+    analysis_provider,
+    validate_raw_workflow_config,
+)
 from vlogsrt.project.raw.understanding_luna import AnalysisApprovalError, online_env_blocked
 
 ASR_APPROVAL_SCHEMA = "raw-analysis-asr-approval/v1"
@@ -155,6 +162,23 @@ class LiveAnalysisTransport:
     asr_approvals: Callable[[Path, Sequence[str] | None], Mapping[str, AsrPhaseApproval]]
     luna_approvals: Callable[[Path, str, Sequence[str]], Mapping[str, object]]
     on: date | None = None
+    claude_client: object | None = None
+    """Claude 의미 분석 클라이언트(D54) — `ANTHROPIC_API_KEY`가 있을 때만 만들어진다."""
+
+    def semantic_client(self, model: str) -> object:
+        """의미 분석 모델에 맞는 클라이언트 — 없으면 유료 호출이 시작되기 **전에** 닫는다.
+
+        Claude 모델인데 키가 없으면 전사(1단계)조차 시작하지 않는다 — 전사를 사 놓고
+        의미 분석에서 막히는 길을 남기지 않는다.
+        """
+        if analysis_provider(model) != ANALYSIS_PROVIDER_ANTHROPIC:
+            return self.client
+        if self.claude_client is None:
+            raise AnalysisApprovalError(
+                f"{analysis_model_label(model)} 분석에는 {ANALYSIS_CLAUDE_KEY_ENV}가 필요하다 — "
+                ".env에 키를 넣고 앱을 다시 띄우세요. 유료 호출은 시작하지 않았다"
+            )
+        return self.claude_client
 
 
 __all__ = [

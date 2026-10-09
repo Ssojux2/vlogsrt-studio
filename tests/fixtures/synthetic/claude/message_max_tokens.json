@@ -1,0 +1,14 @@
+{
+  "id": "msg_synthetic_max_tokens",
+  "type": "message",
+  "role": "assistant",
+  "model": "claude-opus-5-5",
+  "content": [
+    {"type": "thinking", "thinking": "", "signature": "synthetic-signature"},
+    {"type": "text", "text": "{\"window_id\":\"window_00"}
+  ],
+  "stop_reason": "max_tokens",
+  "stop_sequence": null,
+  "stop_details": null,
+  "usage": {"input_tokens": 5000, "output_tokens": 8192}
+}

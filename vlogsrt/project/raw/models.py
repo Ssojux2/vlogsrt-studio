@@ -683,6 +683,8 @@ class AnalysisEstimate:
     price_status: str
     user_ceiling_total: str | None
     note: str
+    ceiling_usd: str | None = None
+    """공식 단가 스냅샷의 보수적 상한 합(D54, Claude만) — 없으면 견적 지문에도 없다."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -708,6 +710,10 @@ class AnalysisSemanticEstimate:
     price_status: str
     user_ceiling_total: str | None
     note: str
+    request_ceiling_usd: str | None = None
+    """요청 하나의 공식 단가 상한(D54, Claude만) — 2단계 승인 예산이 이 값을 묶는다."""
+    ceiling_usd: str | None = None
+    """창 수 × 요청 상한 — 화면이 보여 주는 보수적 합계(Claude만)."""
 
 
 @dataclass(frozen=True, slots=True)

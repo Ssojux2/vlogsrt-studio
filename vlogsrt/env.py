@@ -160,6 +160,11 @@ def api_key_source() -> str:
     return f"{env_file}" if env_file else "셸 환경변수"
 
 
+def has_anthropic_api_key() -> bool:
+    """Claude 의미 분석 키가 있는지만 알려준다(D54). **값은 절대 돌려주지 않는다.**"""
+    return bool(get(ANALYSIS_CLAUDE_KEY_ENV).strip())
+
+
 def require_api_key(force: bool = False) -> str:
     """실제 호출 직전에만 부른다. 오프라인이면 거부한다.
 
@@ -207,6 +212,9 @@ EXECUTION_SENSITIVE_ENV_NAMES = frozenset(
 PROTECTED_ENV_PREFIXES = ("PYTHON", "DYLD_", "LD_", "VLOGSRT_")
 # STT 계약이 이미 쓰는 이름 — 비전 역할이 물려받으면 한 키가 양쪽을 다 연다.
 STT_ROLE_ENV_NAMES = frozenset({"OPENAI_API_KEY", "OPENAI_BASE_URL"})
+# Claude 의미 분석 키의 이름(D54) — 값은 `.env`에서 실행 시각에만 읽힌다. 비전 역할이 이
+# 이름을 물려받으면 한 키가 두 공급자를 연다.
+ANALYSIS_CLAUDE_KEY_ENV = "ANTHROPIC_API_KEY"
 
 # 적재에 성공한 마지막 역할 이름 — 설정 해석이 실패해도 가림이 두 값을 알게
 # 하는 근원이다(아래 redact_secrets 참조).
@@ -229,6 +237,11 @@ def validate_role_env_names(vision_key_name: str, vision_url_name: str) -> None:
         if name in STT_ROLE_ENV_NAMES:
             raise RuntimeError(
                 f"비전 {label} 이름이 STT 자격증명 이름을 재사용한다: {name!r} — "
+                "비전 공급자는 별도 환경변수여야 한다"
+            )
+        if name == ANALYSIS_CLAUDE_KEY_ENV:
+            raise RuntimeError(
+                f"비전 {label} 이름이 Claude 분석 키 이름을 재사용한다: {name!r} — "
                 "비전 공급자는 별도 환경변수여야 한다"
             )
         if name in EXECUTION_SENSITIVE_ENV_NAMES:
@@ -276,9 +289,9 @@ def apply_role_credentials(
 
 
 def _managed_secret_values() -> tuple[str, ...]:
-    """가림이 알아야 하는 관리 값 — 엔진 STT 키와 적재된(또는 기본) 비전 키."""
+    """가림이 알아야 하는 관리 값 — 엔진 STT 키, 적재된(또는 기본) 비전 키, Claude 분석 키."""
     vision_name = _applied_vision_key_name or VISION_ROLE_DEFAULT_KEY_ENV
-    names = (STT_ROLE_KEY_ENV, vision_name)
+    names = (STT_ROLE_KEY_ENV, vision_name, ANALYSIS_CLAUDE_KEY_ENV)
     return tuple(value for value in (os.environ.get(name) for name in names) if value)
 
 
@@ -298,7 +311,7 @@ REDACTED_MARK = "∙∙∙"
 def redact_secrets(text: str, secrets: tuple[str, ...] = ()) -> str:
     """자격 증명 값을 문면에서 지운다 — 지속·인쇄 표면 앞의 마지막 문이다(S2A-2).
 
-    기본은 관리 값 둘(엔진 STT 키와 비전 키)의 현재 값이고, 다른 값은
+    기본은 관리 값 셋(엔진 STT 키·비전 키·Claude 분석 키)의 현재 값이고, 다른 값은
     `secrets`로 넣는다. **이름을 대체하지 않는다** — 값만 지운다. 값은 절대
     만들어 내지 않는다: 문면에 없으면 문장은 그대로 둬서 진단을 죽이지
     않는다. 빈 값은 아무것도 지우지 않는다. 후보는 값 그대로 **와** 소비자가

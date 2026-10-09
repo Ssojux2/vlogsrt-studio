@@ -1,7 +1,9 @@
 """유일한 네트워크 경계(불변 규칙 5).
 
 다른 모듈은 전부 순수 함수다. `openai`를 import하는 파일은 이 파일뿐이며,
-그것도 실제 호출 직전에 지연 import한다.
+그것도 실제 호출 직전에 지연 import한다. Claude Messages(D54)는 HTTP 전송만
+`anthropic_messages.py`에 살고, 그 파일을 import하는 곳도 이 파일뿐이다 — 승인 문·
+관찰·취소는 여기 있다.
 """
 
 from __future__ import annotations
@@ -244,6 +246,9 @@ TRANSCRIPTION_OPERATION = "audio.transcriptions"
 RESPONSES_OPERATION = "responses.create"
 """Responses SDK 연산 — `client.responses.create` 한 번."""
 
+MESSAGES_OPERATION = "messages.create"
+"""Claude Messages API 연산 — `POST /v1/messages` 한 번(D54)."""
+
 _REDACTED_OPTION_KEYS = frozenset({"api_key", "extra_headers"})
 """메타의 인자 사본에 아예 담지 않는 자격 칸 — 나가는 요청에서 걷어내는 게 아니라
 비추지 않는 것뿐이다(요건 2)."""
@@ -450,15 +455,17 @@ def _audio_attempt_meta(
     )
 
 
-def _responses_attempt_meta(model: str, payload: Mapping[str, object]) -> RequestAttemptMeta:
-    """Responses 호출의 관찰 메타. 페이로드는 방어적 깊은 사본이다.
+def _responses_attempt_meta(
+    model: str, payload: Mapping[str, object], operation: str = RESPONSES_OPERATION
+) -> RequestAttemptMeta:
+    """Responses·Messages 호출의 관찰 메타. 페이로드는 방어적 깊은 사본이다.
 
     창·블록 같은 사업 신원은 페이로드 안에 있고 그 해석은 호출자 소유다 — 여기는
     실려 나가는 값 자체만 비춘다.
     """
     return RequestAttemptMeta(
         attempt_id=uuid4().hex,
-        operation=RESPONSES_OPERATION,
+        operation=operation,
         model=model,
         options=_snapshot_options({"model": model, **dict(payload)}),
     )
@@ -481,10 +488,10 @@ class LiveTranscriber:
 
     `observer`는 실제 SDK 호출 하나하나를 겉에서 보는 선택 경계다(S2B-2a). 맨 뒤에
     붙었으니 위치 인자 호출자는 그대로다. 기본 None은 하위 호환 — 관찰자가 없으면
-    지금과 완전히 같이 움직인다.
+    지금과 완전히 같이 움직인다. 키는 repr에 나오지 않는다.
     """
 
-    api_key: str
+    api_key: str = field(repr=False)
     base_url: str | None = None
     cancellation: Callable[[], None] | None = None
     observer: RequestObserver | None = None
@@ -1050,6 +1057,91 @@ def request_luna_vision(
 
 def _responses_create(client: Any, model: str, payload: Mapping[str, object]) -> Any:
     return client.responses.create(model=model, **dict(payload))
+
+
+# ─────────────────────────────────────────────────────────────
+#  Claude Messages 경계(D54) — HTTP 전송은 `anthropic_messages`, 문은 여기
+# ─────────────────────────────────────────────────────────────
+
+
+def create_claude_client(
+    *, api_key: str, base_url: str, api_version: str, timeout_seconds: float
+) -> Any:
+    """Claude 의미 분석 클라이언트 — 값은 받은 것만 쓴다(환경·파일을 스스로 읽지 않는다).
+
+    만드는 것만으로는 아무 호출도 없다. 전송 모듈은 지연 import한다 — 네트워크 모듈을
+    얻는 파일은 그 하나이고, 그 파일을 얻는 파일은 이 파일 하나다.
+    """
+    from . import anthropic_messages
+
+    return anthropic_messages.ClaudeMessagesClient(
+        api_key=api_key,
+        base_url=base_url,
+        api_version=api_version,
+        timeout_seconds=timeout_seconds,
+    )
+
+
+def is_claude_client(candidate: object) -> bool:
+    """Claude 클라이언트인가 — 응답자가 공급자와 클라이언트 종류를 맞춰 보는 자리다."""
+    from . import anthropic_messages
+
+    return isinstance(candidate, anthropic_messages.ClaudeMessagesClient)
+
+
+def request_claude_messages(
+    client: Any,
+    *,
+    model: str,
+    payload: Mapping[str, object],
+    online: bool = False,
+    observer: RequestObserver | None = None,
+    cancellation: Callable[[], None] | None = None,
+) -> dict[str, Any]:
+    """승인형 의미 분석의 Claude Messages 경계 — `request_luna_vision`과 같은 문이다.
+
+    명시적 승인에서 온 ``online=True`` 없이는 클라이언트를 만지지 않는다. 지역 요청
+    결함(모델 재정의·Claude가 아닌 클라이언트)은 승인(유료 예약)을 쓰기 **전에** 닫는다.
+    재시도는 없다 — 429·529·시간 초과는 명시적 실패 기록이다.
+    """
+    _require_claude_request(client, payload, online=online)
+
+    def send(_prepared: Any) -> Any:
+        return _messages_create(client, model, payload)
+
+    if observer is None:
+        if cancellation is not None:
+            cancellation()
+        return _messages_create(client, model, payload)
+    reply: dict[str, Any] = _observed_call(
+        _AttemptWatch(observer=observer),
+        partial(_responses_attempt_meta, model, payload, MESSAGES_OPERATION),
+        send,
+        gate=cancellation,
+    )()
+    return reply
+
+
+def _require_claude_request(client: Any, payload: Mapping[str, object], *, online: bool) -> None:
+    """승인 문과 지역 요청 결함 — 관찰자 승인(유료 예약)보다 먼저 닫는다."""
+    if not online:
+        raise RuntimeError(
+            "Claude 의미 분석 호출은 명시적 online=True 없이는 닫혀 있다 — "
+            "AnalysisAuthorization 승인이 필요하다"
+        )
+    if "model" in payload:
+        raise TypeError(
+            f"payload가 model을 다시 정의한다({payload['model']!r}) — "
+            "모델의 정본은 함수 인자 하나뿐이다"
+        )
+    if not is_claude_client(client):
+        raise TypeError(f"Claude 클라이언트가 아니다: {type(client).__name__}")
+
+
+def _messages_create(client: Any, model: str, payload: Mapping[str, object]) -> dict[str, Any]:
+    from . import anthropic_messages
+
+    return anthropic_messages.post_messages(client, {"model": model, **dict(payload)})
 
 
 class VisionResponder(Protocol):

@@ -8,7 +8,8 @@
   필수 아이디 누락·제공되지 않은 아이디·범위 이탈·JSON 오류·API 실패는 검증
   오류로 처리되고 — 그 어떤 경로도 영상 삭제·자막 지어내기 권한을 얻지
   못한다(§7.5).
-- 실제 호출은 `vlogsrt/transcribe.request_luna_vision`의 승인형 경계 하나뿐이다.
+- 실제 호출은 `vlogsrt/transcribe`의 승인형 경계뿐이다 — Luna는 `request_luna_vision`,
+  같은 역할을 맡는 Claude Opus 5.5(D54)는 `request_claude_messages`.
   승인은 출처·설정 지문·범위·모델·예산을 묶은 `OnlineAnalysisApproval`이며
   오프라인 설정이 항상 우선한다(§14.3). 실제 전송 응답자는 **검증 문맥**
   없이는 존재할 수 없고, 그 문맥은 누가 만들든(공장·직접 구성·`replace`)
@@ -16,7 +17,9 @@
   애초에 없다.
 
 비용은 추정만 존재한다. Luna 단가는 미확인이며 0원으로 계산하지 않는다 —
-정직한 `unknown`이거나 사용자 제공 상한일 뿐이다(§14.3).
+정직한 `unknown`이거나 사용자 제공 상한일 뿐이다(§14.3). Claude는 공식 가격표
+스냅샷의 보수적 상한(`official_snapshot`)을 가지고, 실행 문맥은 실제 페이로드마다
+그 상한을 다시 재서 넘으면 아무 것도 보내지 않는다(D54).
 """
 
 from __future__ import annotations
@@ -30,7 +33,7 @@ from decimal import Decimal
 from difflib import SequenceMatcher
 from fractions import Fraction
 from types import MappingProxyType
-from typing import Protocol
+from typing import Any, Protocol
 
 from vlogsrt.project.raw import request_log
 from vlogsrt.project.raw.analysis_config import (
@@ -38,7 +41,15 @@ from vlogsrt.project.raw.analysis_config import (
     RawUnderstandingSettings,
     validate_understanding_settings,
 )
-from vlogsrt.project.raw.config import RawWorkflowConfig, validate_raw_workflow_config
+from vlogsrt.project.raw.claude_cost import payload_bound, window_ceiling_usd
+from vlogsrt.project.raw.config import (
+    ANALYSIS_PROVIDER_ANTHROPIC,
+    RawClaudeAnalysisProfile,
+    RawWorkflowConfig,
+    analysis_provider,
+    claude_profile,
+    validate_raw_workflow_config,
+)
 from vlogsrt.project.raw.understanding import (
     EXECUTION_MODE_LIVE,
     EXECUTION_MODE_MIXED,
@@ -57,7 +68,12 @@ from vlogsrt.project.raw.understanding import (
     stage1_evidence_document,
 )
 from vlogsrt.task_runtime import check_cancel, provider_error
-from vlogsrt.transcribe import RequestObserver, request_luna_vision
+from vlogsrt.transcribe import (
+    RequestObserver,
+    is_claude_client,
+    request_claude_messages,
+    request_luna_vision,
+)
 
 LUNA_OUTPUT_SCHEMA_NAME = "raw_understanding_window_v1"
 """출력 JSON schema의 이름 — 지문과 승인에 함께 실린다."""
@@ -78,6 +94,11 @@ REPLAY_ORIGINS = frozenset({ORIGIN_REPLAY, EXECUTION_MODE_REPLAY})
 
 PRICE_UNKNOWN = "unknown"
 PRICE_USER_SUPPLIED = "user_supplied"
+PRICE_OFFICIAL = "official_snapshot"
+"""공식 가격표 스냅샷으로 잰 보수적 상한(D54) — Claude만이 이 상태를 가진다."""
+
+CLAUDE_STOP_ACCEPTED = "end_turn"
+"""Claude 판정을 받아 주는 유일한 멈춤 이유 — 나머지는 잘렸거나 거절됐다."""
 
 
 class LunaEvidenceError(RuntimeError):
@@ -111,6 +132,9 @@ LUNA_OUTPUT_FIELDS: tuple[str, ...] = (
     "suitability_reason",
 )
 """출력 칸 전부 — schema 빌더와 결함 검사가 같은 목록을 쓴다."""
+
+SUITABILITY_VALUES = ("recommended", "usable", "review")
+"""사용성 판정의 허용 값 — schema의 enum과 같다."""
 
 
 def luna_output_schema() -> dict[str, object]:
@@ -233,9 +257,69 @@ def build_luna_payload(
 
 def _image_data_url(frame: FrameEvidence) -> str:
     """프레임 한 장을 data URL로 — 파일을 그대로 보내지 않고 증거 바이트만."""
-    return "data:image/jpeg;base64," + base64.b64encode(frame.image_path.read_bytes()).decode(
-        "ascii"
-    )
+    return "data:image/jpeg;base64," + _image_base64(frame)
+
+
+def _image_base64(frame: FrameEvidence) -> str:
+    return base64.b64encode(frame.image_path.read_bytes()).decode("ascii")
+
+
+def build_claude_payload(
+    evidence: WindowEvidence,
+    settings: RawUnderstandingSettings,
+    profile: RawClaudeAnalysisProfile,
+) -> dict[str, object]:
+    """창 증거를 Claude Messages 본문으로(D54) — Luna와 같은 증거·같은 안내문·같은 schema.
+
+    프레임마다 아이디 이름표와 base64 JPEG를 먼저 싣고 안내문을 맨 뒤에 둔다 — 그림을
+    먼저 보고 글을 읽는 순서다. 출력 강제는 `output_config.format`의 json_schema다.
+    `thinking`·`tools`·`temperature`는 싣지 않는다: Opus 5.5는 생각을 끌 수 없고(400),
+    강제 도구 호출·프리필도 400이다. `model`은 전송 경계의 인자 하나뿐이다. 지역은 표준
+    단가 값을 명시한다 — 빠지면 작업공간 기본값(US로 이전된 조직은 1.1배)을 따른다.
+    `service_tier`는 싣지 않는다 — Opus 5.5에는 우선 등급이 없다.
+    """
+    content: list[dict[str, object]] = []
+    for frame in evidence.frames:
+        content.append({"type": "text", "text": f"{frame.frame_id}:"})
+        content.append(
+            {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": "image/jpeg",
+                    "data": _image_base64(frame),
+                },
+            }
+        )
+    content.append({"type": "text", "text": _instruction(evidence)})
+    return {
+        "max_tokens": profile.max_output_tokens,
+        "messages": [{"role": "user", "content": content}],
+        "output_config": {
+            "effort": profile.effort,
+            "format": {"type": "json_schema", "schema": luna_output_schema()},
+        },
+        "inference_geo": profile.inference_geo,
+    }
+
+
+def build_semantic_payload(
+    evidence: WindowEvidence, settings: RawUnderstandingSettings, model: str
+) -> dict[str, object]:
+    """의미 분석 모델의 공급자에 맞는 본문 — Luna는 `build_luna_payload` 그대로다.
+
+    Luna 경로의 요청 신원(`luna_request_sha256`)은 W-14 이전과 한 바이트도 다르지 않다 —
+    판정 캐시가 그 해시로 열린다.
+    """
+    if analysis_provider(model) == ANALYSIS_PROVIDER_ANTHROPIC:
+        return build_claude_payload(evidence, settings, claude_profile(model))
+    return build_luna_payload(evidence, settings)
+
+
+def luna_output_schema_bytes() -> int:
+    """출력 schema의 압축 JSON 바이트 — Claude 전송이 실제로 보내는 직렬화 그대로다."""
+    compact = json.dumps(luna_output_schema(), ensure_ascii=False, separators=(",", ":"))
+    return len(compact.encode("utf-8"))
 
 
 def _instruction(evidence: WindowEvidence) -> str:
@@ -347,28 +431,89 @@ def parse_luna_response(
 
     필수 키·타입·아이디 소속을 전부 본 뒤에야 accepted가 나온다. 검증 오류는
     예외가 아니라 `rejected` 판정이다 — 창 하나의 실패가 전체 분석을 끄지 않고,
-    그 창은 보수적 유지로 흘러간다(§7.6).
+    그 창은 보수적 유지로 흘러간다(§7.6). 응답의 모양은 모델의 공급자가 정한다 —
+    Claude는 Messages 본문, 나머지는 Responses의 `output_text`다.
     """
-    text = response.get("output_text") if isinstance(response, Mapping) else None
-    if not isinstance(text, str) or not text.strip():
-        return _rejected(
-            evidence,
-            model,
-            request_sha256,
-            origin,
-            prompt_revision,
-            "output_text가 없다 — 판정 본문이 비었다",
-        )
+    claude = analysis_provider(model) == ANALYSIS_PROVIDER_ANTHROPIC
+    text, missing = _claude_text(response) if claude else _responses_text(response)
+    if text is None:
+        return _rejected(evidence, model, request_sha256, origin, prompt_revision, missing)
     try:
         parsed = json.loads(text)
     except ValueError as exc:
         return _rejected(
             evidence, model, request_sha256, origin, prompt_revision, f"JSON이 아니다: {exc}"
         )
+    if claude:
+        parsed = _lowercase_suitability(parsed)
     defect = _annotation_defect(parsed, evidence)
     if defect:
         return _rejected(evidence, model, request_sha256, origin, prompt_revision, defect)
-    body = parsed
+    return _accepted(parsed, evidence, model, request_sha256, origin, prompt_revision)
+
+
+def _responses_text(response: Mapping[str, object]) -> tuple[str | None, str]:
+    """Responses 응답의 판정 본문 — W-14 이전과 같은 문, 같은 결함 문구다."""
+    text = response.get("output_text") if isinstance(response, Mapping) else None
+    if not isinstance(text, str) or not text.strip():
+        return None, "output_text가 없다 — 판정 본문이 비었다"
+    return text, ""
+
+
+def _claude_text(response: Mapping[str, object]) -> tuple[str | None, str]:
+    """Claude Messages 응답의 판정 본문 — end_turn의 text 블록만, 생각 블록은 버린다.
+
+    `max_tokens`(출력 한도에 닿아 잘림)·`refusal`(안전 분류기의 거절)은 청구됐어도
+    schema를 지킨다는 보장이 없다 — 판정으로 받지 않고 이유를 그대로 남긴다.
+    """
+    if not isinstance(response, Mapping):
+        return None, "Claude 응답이 JSON 객체가 아니다"
+    stop = response.get("stop_reason")
+    if stop == "max_tokens":
+        return None, "Claude 판정이 출력 한도(max_tokens)에 닿아 잘렸다 — 판정 본문을 믿을 수 없다"
+    if stop == "refusal":
+        return None, _refusal_defect(response.get("stop_details"))
+    if stop != CLAUDE_STOP_ACCEPTED:
+        return None, f"Claude 응답이 끝나지 않았다(stop_reason={stop!r}) — 판정으로 받지 않는다"
+    content = response.get("content")
+    if not isinstance(content, list):
+        return None, "Claude 응답에 content 배열이 없다 — 판정 본문이 비었다"
+    text = "".join(
+        str(block.get("text", ""))
+        for block in content
+        if isinstance(block, Mapping) and block.get("type") == "text"
+    )
+    if not text.strip():
+        return None, "Claude 응답에 text 블록이 없다 — 판정 본문이 비었다"
+    return text, ""
+
+
+def _refusal_defect(details: object) -> str:
+    """거절의 결함 문구 — 공급자가 준 범주만 싣는다(설명문은 되뇌지 않는다)."""
+    category = details.get("category") if isinstance(details, Mapping) else None
+    named = f", 범주 {category}" if isinstance(category, str) and category else ""
+    return f"Claude가 이 창의 판정을 거절했다(stop_reason=refusal{named})"
+
+
+def _lowercase_suitability(parsed: Any) -> Any:
+    """Claude가 enum 대소문자를 달리 쓰면 소문자로 맞춘다 — 허용 값과 같을 때만."""
+    if not isinstance(parsed, dict) or not isinstance(parsed.get("suitability"), str):
+        return parsed
+    lowered = parsed["suitability"].lower()
+    if lowered in SUITABILITY_VALUES:
+        return {**parsed, "suitability": lowered}
+    return parsed
+
+
+def _accepted(
+    body: Mapping[str, Any],
+    evidence: WindowEvidence,
+    model: str,
+    request_sha256: str,
+    origin: str,
+    prompt_revision: str,
+) -> SemanticAnnotation:
+    """결함 검사를 지난 본문의 accepted 판정 — 칸은 검사가 이미 보증했다."""
     return SemanticAnnotation(
         window_id=evidence.window.window_id,
         status=ANNOTATION_ACCEPTED,
@@ -560,6 +705,7 @@ class LunaSemanticResponder:
             raise AnalysisApprovalError(
                 "응답자의 예약 문이 실행 문맥의 예약 문과 다른 객체다 — 문맥 밖 예산은 없다"
             )
+        _require_client_kind(self.client, self.model)
 
     def respond(self, *, window_id: str, payload: Mapping[str, object]) -> Mapping[str, object]:
         blocked = online_env_blocked()  # 이중 문 — 승인 때 열려도 지금 닫혀 있으면 안 간다
@@ -584,14 +730,37 @@ class LunaSemanticResponder:
         gate = self.gate
         assert gate is not None  # 위와 같다
         gate.reserve(count=1, key=window_id)
-        return request_luna_vision(
+        return _send_semantic(
             self.client,
-            model=self.model,
-            payload=payload,
-            online=True,
+            self.model,
+            payload,
             observer=self.observer,
             cancellation=self.cancellation,
         )
+
+
+def _require_client_kind(client: object, model: str) -> None:
+    """클라이언트 종류가 모델의 공급자와 맞아야 한다(D54) — 어긋나면 응답자가 서지 않는다.
+
+    Claude 모델에 OpenAI 클라이언트가 붙으면 전송 경계가 TypeError로 닫히지만, 그건 예약을
+    쓴 뒤다. 여기서 먼저 닫아 유료 예약이 어긋난 조합으로 나가는 길을 없앤다.
+    """
+    claude = analysis_provider(model) == ANALYSIS_PROVIDER_ANTHROPIC
+    if claude != is_claude_client(client):
+        wanted = "Claude Messages" if claude else "OpenAI Responses"
+        raise AnalysisApprovalError(
+            f"의미 분석 모델({model!r})에는 {wanted} 클라이언트가 필요하다 — "
+            f"받은 클라이언트: {type(client).__name__}"
+        )
+
+
+def _send_semantic(
+    client: object, model: str, payload: Mapping[str, object], **gates: Any
+) -> Mapping[str, object]:
+    """공급자에 맞는 전송 경계 — 이름은 부르는 순간에 찾는다(시험이 모듈 경계에서 가로챈다)."""
+    if analysis_provider(model) == ANALYSIS_PROVIDER_ANTHROPIC:
+        return request_claude_messages(client, model=model, payload=payload, online=True, **gates)
+    return request_luna_vision(client, model=model, payload=payload, online=True, **gates)
 
 
 def annotate_windows(
@@ -617,7 +786,7 @@ def annotate_windows(
     annotations: list[SemanticAnnotation] = []
     for evidence in evidence_windows:
         check_cancel()
-        payload = build_luna_payload(evidence, settings)
+        payload = build_semantic_payload(evidence, settings, model)
         request_sha256 = luna_request_sha256(model, payload)
         prior = (cached or {}).get(evidence.window.window_id)
         if prior is not None and _reusable(
@@ -769,21 +938,28 @@ class AnalysisBudget:
     luna_price_status: str = PRICE_UNKNOWN
     luna_user_ceiling_per_request: Decimal | None = None
     currency: str = "USD"
+    request_ceiling_usd: Decimal | None = None
+    """공식 단가 스냅샷의 요청 하나 상한(D54) — `official_snapshot`일 때만, 그때는 반드시."""
 
     def __post_init__(self) -> None:
         if isinstance(self.max_luna_requests, bool) or self.max_luna_requests < 1:
             raise ValueError(f"Luna 요청 한도는 1 이상 정수다: {self.max_luna_requests!r}")
         if isinstance(self.max_asr_chunks, bool) or self.max_asr_chunks < 1:
             raise ValueError(f"ASR 청크 한도는 1 이상 정수다: {self.max_asr_chunks!r}")
-        if self.luna_price_status not in {PRICE_UNKNOWN, PRICE_USER_SUPPLIED}:
+        if self.luna_price_status not in {PRICE_UNKNOWN, PRICE_USER_SUPPLIED, PRICE_OFFICIAL}:
             raise ValueError(f"알 수 없는 단가 상태다: {self.luna_price_status!r}")
-        if self.luna_price_status == PRICE_USER_SUPPLIED:
-            if not isinstance(self.luna_user_ceiling_per_request, Decimal):
-                raise ValueError("사용자 상한은 Decimal이어야 한다")
-            if not self.luna_user_ceiling_per_request.is_finite() or (
-                self.luna_user_ceiling_per_request <= 0
-            ):
-                raise ValueError("사용자 상한은 유한한 양수여야 한다")
+        user_supplied = self.luna_price_status == PRICE_USER_SUPPLIED
+        if user_supplied and not _positive_decimal(self.luna_user_ceiling_per_request):
+            raise ValueError("사용자 상한은 유한한 양의 Decimal이어야 한다")
+        official = self.luna_price_status == PRICE_OFFICIAL
+        if official and not _positive_decimal(self.request_ceiling_usd):
+            raise ValueError("공식 단가 상한은 유한한 양의 Decimal이어야 한다 — 0원 계산 금지")
+        if not official and self.request_ceiling_usd is not None:
+            raise ValueError("요청 상한은 공식 단가 스냅샷에만 있다 — 다른 상태에 붙이지 마라")
+
+
+def _positive_decimal(value: object) -> bool:
+    return isinstance(value, Decimal) and value.is_finite() and value > 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -798,10 +974,20 @@ class LunaCostEstimate:
     price_status: str
     user_ceiling_total: Decimal | None
     note: str
+    ceiling_total: Decimal | None = None
+    """공식 단가 스냅샷의 보수적 상한 합(D54) — 청구서가 아니라 승인 한도다."""
 
 
 def estimate_luna_cost(window_count: int, budget: AnalysisBudget) -> LunaCostEstimate:
     """창 수로 비용 추정을 만든다 — 미확인 단가는 금액을 만들지 않는다."""
+    if budget.luna_price_status == PRICE_OFFICIAL and budget.request_ceiling_usd is not None:
+        return LunaCostEstimate(
+            request_count=window_count,
+            price_status=PRICE_OFFICIAL,
+            user_ceiling_total=None,
+            note="공식 단가 스냅샷 기준 보수적 상한 — 청구서가 아니다",
+            ceiling_total=budget.request_ceiling_usd * window_count,
+        )
     per_request = budget.luna_user_ceiling_per_request
     if budget.luna_price_status == PRICE_USER_SUPPLIED and isinstance(per_request, Decimal):
         return LunaCostEstimate(
@@ -815,6 +1001,31 @@ def estimate_luna_cost(window_count: int, budget: AnalysisBudget) -> LunaCostEst
         price_status=PRICE_UNKNOWN,
         user_ceiling_total=None,
         note="Luna 단가 미확인 — 금액 추정을 만들지 않는다(0원 계산 금지)",
+    )
+
+
+def semantic_analysis_budget(
+    model: str,
+    settings: RawUnderstandingSettings,
+    *,
+    max_luna_requests: int,
+    max_asr_chunks: int,
+) -> AnalysisBudget:
+    """의미 분석 모델의 예산 — Claude는 공식 단가 상한, Luna는 지금처럼 단가 미확인.
+
+    Claude 상한은 창 하나의 보수적 금액이다(`claude_cost.window_ceiling_usd`). 실행 문맥은
+    실제 페이로드마다 다시 재서 이 상한을 넘는 창이 하나라도 있으면 아무 것도 보내지 않는다.
+    """
+    if analysis_provider(model) != ANALYSIS_PROVIDER_ANTHROPIC:
+        return AnalysisBudget(max_luna_requests=max_luna_requests, max_asr_chunks=max_asr_chunks)
+    ceiling = window_ceiling_usd(
+        claude_profile(model), settings, schema_bytes=luna_output_schema_bytes()
+    )
+    return AnalysisBudget(
+        max_luna_requests=max_luna_requests,
+        max_asr_chunks=max_asr_chunks,
+        luna_price_status=PRICE_OFFICIAL,
+        request_ceiling_usd=ceiling,
     )
 
 
@@ -1041,6 +1252,53 @@ def require_online_approval(
         raise AnalysisApprovalError("승인 예산의 Luna 요청 한도를 창 수가 넘는다")
 
 
+def _semantic_request_hashes(
+    model: str,
+    understanding: RawUnderstandingSettings,
+    evidence_windows: Sequence[WindowEvidence],
+) -> dict[str, str]:
+    """창마다 요청 신원 — 모델의 공급자에 맞는 본문을 지어 해시한다(Luna는 W-14 이전 그대로)."""
+    return {
+        evidence.window.window_id: luna_request_sha256(
+            model, build_semantic_payload(evidence, understanding, model)
+        )
+        for evidence in evidence_windows
+    }
+
+
+def _require_claude_ceiling(
+    model: str,
+    understanding: RawUnderstandingSettings,
+    evidence_windows: Sequence[WindowEvidence],
+    budget: AnalysisBudget,
+) -> None:
+    """Claude 실행은 공식 단가 예산과 그 상한 아래의 페이로드로만 선다(D54).
+
+    실제 페이로드마다 보수적 상한을 다시 잰다 — 승인 상한을 넘는 창이 하나라도 있으면
+    문맥이 서지 않고 그 원본은 0송신이다. 요청 수 게이트와 함께, 실행 비용은 승인 상한 ×
+    승인 요청 수를 넘지 못한다. Luna는 이 문을 지나지 않는다(단가 미확인 그대로).
+    """
+    if analysis_provider(model) != ANALYSIS_PROVIDER_ANTHROPIC:
+        return
+    ceiling = budget.request_ceiling_usd
+    if budget.luna_price_status != PRICE_OFFICIAL or ceiling is None:
+        raise AnalysisApprovalError(
+            "Claude 실행에는 공식 단가 상한이 묶인 승인이 필요하다 — 새 견적과 승인을 받아라"
+        )
+    profile = claude_profile(model)
+    for evidence in evidence_windows:
+        payload = build_semantic_payload(evidence, understanding, model)
+        try:
+            bound = payload_bound(payload, profile)
+        except ValueError as error:
+            raise AnalysisApprovalError(f"Claude 페이로드의 상한을 잴 수 없다: {error}") from error
+        if bound.usd > ceiling:
+            raise AnalysisApprovalError(
+                f"{evidence.window.window_id}의 보수적 상한 ${bound.usd}이 승인 상한 ${ceiling}을"
+                " 넘는다 — 이 원본은 아무 것도 보내지 않는다"
+            )
+
+
 @dataclass(frozen=True, slots=True)
 class OnlineLunaExecutionContext:
     """검증을 마친 온라인 실행 문맥 — 전송 경계가 세워지는 유일한 근거.
@@ -1093,12 +1351,11 @@ class OnlineLunaExecutionContext:
             plan=self.plan,
             fingerprint=built_fingerprint,
         )
-        built_hashes = {
-            evidence.window.window_id: luna_request_sha256(
-                self.settings.models.luna_model, build_luna_payload(evidence, self.understanding)
-            )
-            for evidence in self.evidence_windows
-        }
+        model = self.settings.models.luna_model
+        _require_claude_ceiling(
+            model, self.understanding, self.evidence_windows, self.approval.budget
+        )
+        built_hashes = _semantic_request_hashes(model, self.understanding, self.evidence_windows)
         if dict(self.request_sha256s) != built_hashes:
             raise AnalysisApprovalError(
                 "요청 신원 지도가 증거에서 지은 신원과 다르다 — 문맥은 증거가 말하는 해시만 얼는다"
@@ -1143,12 +1400,9 @@ def validated_luna_responder(
         approval, settings=settings, audio=audio, plan=plan, fingerprint=fingerprint
     )
     bounded_gate = gate if gate is not None else CountingReservationGate(approval.budget)
-    request_sha256s = {
-        evidence.window.window_id: luna_request_sha256(
-            settings.models.luna_model, build_luna_payload(evidence, understanding)
-        )
-        for evidence in evidence_windows
-    }
+    request_sha256s = _semantic_request_hashes(
+        settings.models.luna_model, understanding, evidence_windows
+    )
     context = OnlineLunaExecutionContext(
         settings=settings,
         understanding=understanding,
@@ -1223,12 +1477,11 @@ class OnlineVisualLunaExecutionContext:
             plan=self.plan,
             fingerprint=built_fingerprint,
         )
-        built_hashes = {
-            evidence.window.window_id: luna_request_sha256(
-                self.settings.models.luna_model, build_luna_payload(evidence, self.understanding)
-            )
-            for evidence in self.evidence_windows
-        }
+        model = self.settings.models.luna_model
+        _require_claude_ceiling(
+            model, self.understanding, self.evidence_windows, self.approval.budget
+        )
+        built_hashes = _semantic_request_hashes(model, self.understanding, self.evidence_windows)
         if dict(self.request_sha256s) != built_hashes:
             raise AnalysisApprovalError(
                 "요청 신원 지도가 증거에서 지은 신원과 다르다 — 문맥은 증거가 말하는 해시만 얼는다"
@@ -1274,6 +1527,7 @@ class VisualLunaSemanticResponder:
             raise AnalysisApprovalError(
                 "응답자의 예약 문이 실행 문맥의 예약 문과 다른 객체다 — 문맥 밖 예산은 없다"
             )
+        _require_client_kind(self.client, self.model)
 
     def respond(self, *, window_id: str, payload: Mapping[str, object]) -> Mapping[str, object]:
         blocked = online_env_blocked()
@@ -1293,13 +1547,7 @@ class VisualLunaSemanticResponder:
                 "바뀐 증거·위조 페이로드로는 보낼 수 없다"
             )
         self.gate.reserve(count=1, key=window_id)
-        return request_luna_vision(
-            self.client,
-            model=self.model,
-            payload=payload,
-            online=True,
-            observer=self.observer,
-        )
+        return _send_semantic(self.client, self.model, payload, observer=self.observer)
 
 
 def validated_visual_luna_responder(
@@ -1341,12 +1589,9 @@ def validated_visual_luna_responder(
         fingerprint=fingerprint,
     )
     bounded_gate = gate if gate is not None else CountingReservationGate(approval.budget)
-    request_sha256s = {
-        evidence.window.window_id: luna_request_sha256(
-            settings.models.luna_model, build_luna_payload(evidence, understanding)
-        )
-        for evidence in evidence_windows
-    }
+    request_sha256s = _semantic_request_hashes(
+        settings.models.luna_model, understanding, evidence_windows
+    )
     context = OnlineVisualLunaExecutionContext(
         settings=settings,
         understanding=understanding,

@@ -36,12 +36,24 @@ BANNED_IMPORTS = (
     "jamo", "konlpy", "pysrt", "ffmpeg", "pydantic", "dotenv", "regex", "numpy", "onnxruntime",
     # UI는 ui/ 에만 산다. 핵심 패키지가 gradio를 끌어오면 규칙 7이 무너진다.
     "gradio",
+    # Claude는 표준 라이브러리 urllib로 부른다(D54) — SDK·HTTP 클라이언트 의존성은 없다.
+    "anthropic", "httpx", "requests", "urllib3", "aiohttp",
 )  # fmt: skip
 ALLOWED_DEPENDENCIES = {"openai", "tomli-w", "rich"}
 
 # 예외는 전부 **정확 상대 경로**로 판정한다. 파일 이름으로 판정하면 같은 이름의
 # 파일이 예외를 물려받는다 — `vlogsrt/project/transcribe.py`가 openai를 얻는 식이다.
 OPENAI_BOUNDARY_PATH = "vlogsrt/transcribe.py"
+# 네트워크 모듈을 import할 수 있는 유일한 파일(D54) — Claude Messages의 HTTP 전송.
+# `urllib.parse`는 네트워크가 아니라 문자열 해석이라 어디서나 쓴다.
+NETWORK_BOUNDARY_PATH = "vlogsrt/anthropic_messages.py"
+NETWORK_MODULES = ("urllib.request", "urllib.error", "http.client", "socket", "ssl")
+# ui/의 로컬 브라우저 서버는 파일마다 정해진 네트워크 모듈 하나만 쓴다(정확 경로) —
+# 인스턴스 확인(루프백 HTTP)과 빈 포트 찾기. 같은 파일의 다른 모듈은 허용하지 않는다.
+UI_NETWORK_ALLOWLIST = {"ui/instance.py": "urllib.request", "ui/service.py": "socket"}
+# 그 전송 파일을 import할 수 있는 유일한 파일 — 승인 문·관찰·취소를 건너뛰는 길이 없다.
+CLAUDE_TRANSPORT_MODULE = "anthropic_messages"
+CLAUDE_TRANSPORT_ENTRY_PATH = "vlogsrt/transcribe.py"
 SUBPROCESS_BOUNDARY_PATHS = ("vlogsrt/preprocess.py", "vlogsrt/project/xml_validation.py")
 
 # 제거 계층(규칙 4·9) — P6는 이 프로젝트에서 처음으로 구간을 실제 제거하는 계층이다.
@@ -63,7 +75,7 @@ EDIT_BANNED_IMPORTS = (
     "vlogsrt.project.vad.inference", "vlogsrt.project.vad.runtime",
     "vlogsrt.project.vision.sampling",
     "vlogsrt.repetition", "vlogsrt.repair", "vlogsrt.refine",
-    "vlogsrt.output", "vlogsrt.layout",
+    "vlogsrt.output", "vlogsrt.layout", "vlogsrt.anthropic_messages",
 )  # fmt: skip
 EDIT_SAMPLE_TYPE_MODULE = "vlogsrt.project.vision.sampling"
 EDIT_SAMPLE_TYPE = "FrameSampleRequest"
@@ -84,6 +96,8 @@ RAW_MODEL_LITERAL_PATHS = ("vlogsrt/project/raw/config.py",)
 ENGINE_MODEL_LITERAL = re.compile(r"[\"'](whisper-1|gpt-[\w.-]*transcribe[\w.-]*)[\"']")
 PROJECT_MODEL_LITERAL = re.compile(r"[\"'](?:glm|gemini)-[\w.-]+[\"']")
 RAW_MODEL_LITERAL = re.compile(r"[\"']gpt-6-luna[\w.-]*[\"']")
+# Claude 모델 이름(D54)도 raw 설정 경로 하나에만 산다 — 등록표가 단가와 함께 정한다.
+CLAUDE_MODEL_LITERAL = re.compile(r"[\"']claude-[\w.-]+[\"']")
 # 레거시가 project를 import할 수 있는 유일한 진입점 — 문서화된 CLI 조립 지점.
 # 예외도 정확히 `project.commands` 모듈로 좁다: CLI는 명령 묶음만 조립한다(재조정).
 CLI_COMPOSITION_ENTRYPOINT = "vlogsrt/cli.py"
@@ -145,6 +159,154 @@ def check_openai_boundary() -> list[str]:
         for lineno, name in _import_roots(path.read_text(encoding="utf-8")):
             if name == "openai":
                 failures.append(f"{rel}:{lineno} openai import는 transcribe.py에만")
+    return failures
+
+
+def _network_root(name: str) -> str | None:
+    """점 이름이 속한 네트워크 모듈 — `socket.socket`은 `socket`, 아니면 None."""
+    return next(
+        (root for root in NETWORK_MODULES if name == root or name.startswith(root + ".")), None
+    )
+
+
+def _static_import_names(tree: ast.Module) -> list[tuple[int, str]]:
+    """정적 import의 (줄번호, 점 이름) — `from urllib import request`는 `urllib.request`로."""
+    rows: list[tuple[int, str]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            rows.extend((node.lineno, alias.name) for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            rows.append((node.lineno, node.module))
+            rows.extend((node.lineno, f"{node.module}.{alias.name}") for alias in node.names)
+    return rows
+
+
+def _dynamic_import_names(tree: ast.Module) -> list[tuple[int, str]]:
+    """문자열 상수로 부르는 import — `importlib.import_module("…")`·`__import__("…")`.
+
+    `from importlib import import_module as im`처럼 별명으로 묶은 이름도 같은 호출이다.
+    상수가 아닌 인자(f-string·변수)는 판정하지 않는다 — 정적으로 이름을 알 수 없다.
+    """
+    importers = {"import_module", "__import__"} | {
+        alias.asname
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module == "importlib"
+        for alias in node.names
+        if alias.name == "import_module" and alias.asname
+    }
+    rows: list[tuple[int, str]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not node.args:
+            continue
+        func = node.func
+        # 속성 호출(`importlib.import_module`·`builtins.__import__`)은 이름 그대로, 맨 이름
+        # 호출은 별명까지 본다 — 별명은 그 파일이 importlib에서 묶은 것뿐이다.
+        called = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+        target = getattr(node.args[0], "value", None)
+        if called in importers and isinstance(target, str):
+            rows.append((node.lineno, target))
+    return rows
+
+
+def _package_attribute_names(tree: ast.Module) -> list[tuple[int, str]]:
+    """맨 패키지 import 뒤의 하위 모듈 접근 — `import urllib` 다음 `urllib.request.…`.
+
+    `import urllib.parse`도 이름 `urllib`을 묶는다 — 그 뒤의 `urllib.request`는 같은 우회다.
+    """
+    bound: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.asname is None:
+                    bound[alias.name.split(".")[0]] = alias.name.split(".")[0]
+                elif "." not in alias.name:
+                    bound[alias.asname] = alias.name
+    return [
+        (node.lineno, f"{bound[node.value.id]}.{node.attr}")
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id in bound
+    ]
+
+
+def _network_imports(body: str) -> list[tuple[int, str]]:
+    """네트워크 모듈 사용 (줄번호, 모듈) — 정적·문자열 상수 import·패키지 속성 접근 전부.
+
+    한 파일에서 같은 모듈은 처음 한 번만 센다.
+    """
+    tree = ast.parse(body)
+    names = [
+        *_static_import_names(tree),
+        *_dynamic_import_names(tree),
+        *_package_attribute_names(tree),
+    ]
+    seen: dict[str, int] = {}
+    for lineno, name in sorted(names):
+        root = _network_root(name)
+        if root is not None:
+            seen.setdefault(root, lineno)
+    return sorted((lineno, root) for root, lineno in seen.items())
+
+
+def check_network_boundary() -> list[str]:
+    """규칙 7(D54) — 네트워크 모듈은 정확 경로 하나에서만. 같은 이름의 다른 경로는 안 된다.
+
+    ui/도 검사한다 — 로컬 브라우저 서버의 두 파일만 각자 정해진 모듈 하나를 쓴다
+    (`UI_NETWORK_ALLOWLIST`, 정확 경로). 일괄 면제는 없다.
+    """
+    failures = []
+    for path in _sources() + sorted(UI_DIR.rglob("*.py")):
+        rel = _rel(path)
+        if rel == NETWORK_BOUNDARY_PATH:
+            continue
+        allowed = UI_NETWORK_ALLOWLIST.get(rel)
+        failures.extend(
+            f"{rel}:{lineno} 네트워크 모듈 {name}은 {NETWORK_BOUNDARY_PATH}에만"
+            for lineno, name in _network_imports(path.read_text(encoding="utf-8"))
+            if name != allowed
+        )
+    return failures
+
+
+def _imports_claude_transport(body: str) -> list[int]:
+    """전송 파일에 닿는 줄 — 절대·상대·모듈 핸들·하위 이름·문자열 상수·패키지 속성 전부.
+
+    패키지 속성(`vlogsrt.anthropic_messages`)은 누가 한 번 import한 뒤에는 실제로 닿는다 —
+    어떤 객체의 속성으로든 그 이름을 부르면 잡는다.
+    """
+    tree = ast.parse(body)
+    lines: list[int] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            parts = [part for alias in node.names for part in alias.name.split(".")]
+        elif isinstance(node, ast.ImportFrom):
+            parts = [*(node.module or "").split("."), *(alias.name for alias in node.names)]
+        elif isinstance(node, ast.Attribute):
+            parts = [node.attr]
+        else:
+            continue
+        if CLAUDE_TRANSPORT_MODULE in parts:
+            lines.append(node.lineno)
+    lines.extend(
+        lineno
+        for lineno, name in _dynamic_import_names(tree)
+        if CLAUDE_TRANSPORT_MODULE in name.split(".")
+    )
+    return sorted(lines)
+
+
+def check_claude_transport_entry() -> list[str]:
+    """규칙 7(D54) — Claude HTTP 전송은 transcribe.py만 안다. 승인 문을 건너뛰는 길이 없다."""
+    failures = []
+    for path in _sources() + sorted(UI_DIR.rglob("*.py")):
+        rel = _rel(path)
+        if rel in (CLAUDE_TRANSPORT_ENTRY_PATH, NETWORK_BOUNDARY_PATH):
+            continue
+        failures.extend(
+            f"{rel}:{lineno} {CLAUDE_TRANSPORT_MODULE}는 {CLAUDE_TRANSPORT_ENTRY_PATH}만 import한다"
+            for lineno in _imports_claude_transport(path.read_text(encoding="utf-8"))
+        )
     return failures
 
 
@@ -465,7 +627,7 @@ REPAIR_MUST_NOT_IMPORT = ("refine", "output", "layout", "polish", "verify")
 # 교체 판정이 다른 계층의 행동에 기대게 된다 — 입력은 값으로만 받는다.
 RETEXT_MUST_NOT_IMPORT = (
     "transcribe", "preprocess", "verify", "refine", "output", "layout", "repair", "polish",
-    "openai", "subprocess",
+    "openai", "subprocess", "anthropic_messages",
 )  # fmt: skip
 
 # 3단 등급은 **저장된 분석 문서(AI 판정 + 생성 자막) 위의 결정적 재계산**이다(D51·D52).
@@ -473,6 +635,7 @@ RETEXT_MUST_NOT_IMPORT = (
 # 호출이나 로컬 측정으로 번진다. 문서 읽기는 `service.py`의 몫이다.
 TIERING_MUST_NOT_IMPORT = (
     "subprocess", "openai", "service", "review_workspace", "understanding_luna", "preprocess",
+    "anthropic_messages",
 )  # fmt: skip
 TIERING_FILE_IO = re.compile(r"\.(open|read_text|read_bytes|write_text|write_bytes)\(|\bopen\(")
 
@@ -958,7 +1121,9 @@ def check_pure_layer() -> list[str]:
     `cutpoints.py`가 ffmpeg를 직접 부르기 시작하면 진폭을 지어내며 시험할 수 없게 된다.
     """
     failures = []
-    forbidden = re.compile(r"^\s*(?:import|from)\s+(openai|subprocess|shutil)\b")
+    forbidden = re.compile(
+        r"^\s*(?:import|from)\s+(openai|subprocess|shutil|urllib|http|socket|ssl)\b"
+    )
     for name in PURE_MODULES:
         path = PACKAGE / name
         if not path.exists():
@@ -1390,13 +1555,18 @@ def check_no_hardcoded_model() -> list[str]:
     failures = []
     for path in _sources():
         rel = _rel(path)
-        patterns = (ENGINE_MODEL_LITERAL, PROJECT_MODEL_LITERAL, RAW_MODEL_LITERAL)
+        patterns = (
+            ENGINE_MODEL_LITERAL,
+            PROJECT_MODEL_LITERAL,
+            RAW_MODEL_LITERAL,
+            CLAUDE_MODEL_LITERAL,
+        )
         if rel in RAW_MODEL_LITERAL_PATHS:
             patterns = (PROJECT_MODEL_LITERAL,)
         elif rel in PROJECT_MODEL_LITERAL_PATHS:
-            patterns = (RAW_MODEL_LITERAL,)
+            patterns = (RAW_MODEL_LITERAL, CLAUDE_MODEL_LITERAL)
         elif rel in MODEL_LITERAL_PATHS:
-            patterns = (PROJECT_MODEL_LITERAL, RAW_MODEL_LITERAL)
+            patterns = (PROJECT_MODEL_LITERAL, RAW_MODEL_LITERAL, CLAUDE_MODEL_LITERAL)
         for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
             if any(pattern.search(line) for pattern in patterns):
                 failures.append(f"{rel}:{number} 모델 이름이 코드에 박혀 있다")
@@ -1405,6 +1575,8 @@ def check_no_hardcoded_model() -> list[str]:
 
 CHECKS = (
     ("openai 경계", check_openai_boundary),
+    ("네트워크 모듈 경계", check_network_boundary),
+    ("Claude 전송은 transcribe만 안다", check_claude_transport_entry),
     ("ffmpeg 경계", check_ffmpeg_boundary),
     ("순수 계층", check_pure_layer),
     ("시각 유도 계층 부활 금지", check_time_deriving_layers_stay_buried),

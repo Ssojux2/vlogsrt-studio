@@ -1405,9 +1405,8 @@ def _finish_source(
     cache_dir.mkdir(parents=True, exist_ok=True)
     cached_annotations = {}
     for evidence in evidence_windows:
-        digest = luna.luna_request_sha256(
-            workflow.models.luna_model, luna.build_luna_payload(evidence, settings)
-        )
+        payload = luna.build_semantic_payload(evidence, settings, workflow.models.luna_model)
+        digest = luna.luna_request_sha256(workflow.models.luna_model, payload)
         candidate = cache_dir / (digest + ".json")
         if candidate.is_file():
             try:

@@ -1575,3 +1575,192 @@ def test_transport_observer_sees_kind_and_sanitized_options(
     assert "api_key" not in meta.options
     assert payload == {"segments": []}
     assert len(responses) == 1
+
+
+# ─────────────────────────────────────────────────────────────
+#  Claude Messages 경계(D54) — Luna 경계와 같은 문·관찰·취소
+# ─────────────────────────────────────────────────────────────
+
+
+CLAUDE_PAYLOAD = {
+    "max_tokens": 16,
+    "messages": [{"role": "user", "content": [{"type": "text", "text": "안녕"}]}],
+}
+
+
+class _ClaudeReply:
+    status = 200
+    headers = {"request-id": "req_synthetic"}
+
+    def read(self) -> bytes:
+        return json.dumps({"type": "message", "stop_reason": "end_turn", "content": []}).encode()
+
+    def __enter__(self) -> _ClaudeReply:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+
+class _ClaudeOpener:
+    """Claude 클라이언트의 전송 자리 — 보낸 본문을 기록하고 정해진 응답을 돌려준다."""
+
+    def __init__(self) -> None:
+        self.bodies: list[dict[str, Any]] = []
+
+    def __call__(self, request: Any, timeout: float) -> _ClaudeReply:
+        self.bodies.append(json.loads(request.data))
+        return _ClaudeReply()
+
+
+def _claude_client(opener: _ClaudeOpener) -> Any:
+    from vlogsrt.anthropic_messages import ClaudeMessagesClient
+
+    return ClaudeMessagesClient(
+        api_key="sk-ant-synthetic",
+        base_url="https://api.anthropic.com",
+        api_version="2023-06-01",
+        timeout_seconds=30.0,
+        opener=opener,
+    )
+
+
+class _ClaudeLedger:
+    def __init__(self, trace: list[str]) -> None:
+        self.trace = trace
+        self.metas: list[Any] = []
+        self.responses: list[Any] = []
+
+    def authorize(self, meta: Any) -> str:
+        self.trace.append("authorize")
+        self.metas.append(meta)
+        return "ticket"
+
+    def on_response(self, ticket: object, meta: Any, response: Any) -> None:
+        self.trace.append("response")
+        self.responses.append(response)
+
+    def on_error(self, ticket: object, meta: Any, error: Exception) -> None:
+        self.trace.append("error")
+
+
+def test_claude_messages_are_closed_without_explicit_online() -> None:
+    from vlogsrt.transcribe import request_claude_messages
+
+    opener = _ClaudeOpener()
+    with pytest.raises(RuntimeError, match="online=True"):
+        request_claude_messages(
+            _claude_client(opener), model="claude-opus-5-5", payload=CLAUDE_PAYLOAD
+        )
+    with pytest.raises(RuntimeError, match="online=True"):
+        request_claude_messages(
+            _claude_client(opener), model="claude-opus-5-5", payload=CLAUDE_PAYLOAD, online=False
+        )
+    assert opener.bodies == []
+
+
+def test_claude_payload_redefining_model_fails_before_authorization() -> None:
+    from vlogsrt.transcribe import request_claude_messages
+
+    opener = _ClaudeOpener()
+    ledger = _ClaudeLedger([])
+    with pytest.raises(TypeError, match="model"):
+        request_claude_messages(
+            _claude_client(opener),
+            model="claude-opus-5-5",
+            payload={**CLAUDE_PAYLOAD, "model": "other"},
+            online=True,
+            observer=ledger,
+        )
+    assert ledger.metas == [] and opener.bodies == []
+
+
+def test_a_non_claude_client_fails_before_authorization() -> None:
+    from vlogsrt.transcribe import request_claude_messages
+
+    ledger = _ClaudeLedger([])
+    with pytest.raises(TypeError, match="Claude"):
+        request_claude_messages(
+            object(), model="claude-opus-5-5", payload=CLAUDE_PAYLOAD, online=True, observer=ledger
+        )
+    assert ledger.metas == []
+
+
+def test_claude_observer_hooks_fire_with_the_messages_operation() -> None:
+    from vlogsrt.transcribe import MESSAGES_OPERATION, request_claude_messages
+
+    trace: list[str] = []
+    opener = _ClaudeOpener()
+    ledger = _ClaudeLedger(trace)
+    reply = request_claude_messages(
+        _claude_client(opener),
+        model="claude-opus-5-5",
+        payload=CLAUDE_PAYLOAD,
+        online=True,
+        observer=ledger,
+    )
+    assert trace == ["authorize", "response"]
+    (meta,) = ledger.metas
+    assert meta.operation == MESSAGES_OPERATION == "messages.create"
+    assert meta.model == "claude-opus-5-5"
+    assert meta.options["max_tokens"] == 16
+    assert opener.bodies == [{"model": "claude-opus-5-5", **CLAUDE_PAYLOAD}]
+    assert ledger.responses == [reply]
+    assert reply["request_id"] == "req_synthetic"
+
+
+def test_claude_cancellation_gates_the_send() -> None:
+    from vlogsrt.transcribe import request_claude_messages
+
+    class Stop(BaseException):
+        pass
+
+    def gate() -> None:
+        raise Stop
+
+    opener = _ClaudeOpener()
+    ledger = _ClaudeLedger([])
+    with pytest.raises(Stop):
+        request_claude_messages(
+            _claude_client(opener),
+            model="claude-opus-5-5",
+            payload=CLAUDE_PAYLOAD,
+            online=True,
+            observer=ledger,
+            cancellation=gate,
+        )
+    with pytest.raises(Stop):  # 관찰자 없는 길도 전송 전에 멈춘다
+        request_claude_messages(
+            _claude_client(opener),
+            model="claude-opus-5-5",
+            payload=CLAUDE_PAYLOAD,
+            online=True,
+            cancellation=gate,
+        )
+    assert opener.bodies == [] and ledger.metas == []
+
+
+def test_the_live_transcriber_never_prints_its_key() -> None:
+    live = LiveTranscriber(api_key="sk-synthetic-stt-key", base_url="https://example.test/v1")
+    assert "sk-synthetic-stt-key" not in repr(live)
+    assert "sk-synthetic-stt-key" not in str(live)
+    assert live.api_key == "sk-synthetic-stt-key"  # 값은 그대로 쓰인다 — 보이지 않을 뿐
+
+
+def test_create_claude_client_takes_only_given_values() -> None:
+    from vlogsrt.transcribe import create_claude_client, is_claude_client
+
+    client = create_claude_client(
+        api_key="sk-ant-synthetic",
+        base_url="https://api.anthropic.com",
+        api_version="2023-06-01",
+        timeout_seconds=300.0,
+    )
+    assert is_claude_client(client)
+    assert not is_claude_client(object())
+    assert (client.base_url, client.api_version, client.timeout_seconds) == (
+        "https://api.anthropic.com",
+        "2023-06-01",
+        300.0,
+    )
+    assert "sk-ant-synthetic" not in repr(client)

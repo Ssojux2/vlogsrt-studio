@@ -451,3 +451,143 @@ def test_accepted_saved_settings_json_still_round_trips() -> None:
     config = raw_workflow_config_from_json(ACCEPTED_SETTINGS_JSON)
     assert config == RawWorkflowConfig()
     assert raw_workflow_config_to_json(config) == ACCEPTED_SETTINGS_JSON
+
+
+# ─────────────────────────────────────────────────────────────
+#  W-14 / D54 — Claude Opus 5.5를 의미 분석 역할로 고를 수 있다
+# ─────────────────────────────────────────────────────────────
+
+
+def _claude_config() -> RawWorkflowConfig:
+    return RawWorkflowConfig(
+        models=replace(RawWorkflowConfig().models, luna_model="claude-opus-5-5")
+    )
+
+
+def test_the_claude_profile_carries_the_documented_snapshot() -> None:
+    """2026-10-09 공식 가격표·API 버전·엔드포인트 그대로다 — 단가는 0으로 두지 않는다."""
+    from vlogsrt.project.raw.config import CLAUDE_ANALYSIS_PROFILES, claude_profile
+
+    profile = claude_profile("claude-opus-5-5")
+    assert CLAUDE_ANALYSIS_PROFILES["claude-opus-5-5"] is profile
+    assert profile.label == "Claude Opus 5.5"
+    assert profile.api_base_url == "https://api.anthropic.com"
+    assert profile.api_version == "2023-06-01"
+    assert profile.timeout_seconds == 300.0
+    assert (profile.effort, profile.max_output_tokens) == ("medium", 8192)
+    # 표준 단가 지역을 요청에 못 박는다 — US 전용(1.1배)은 고르지 않는다. 등급은 싣지 않는다
+    assert profile.inference_geo == "global"
+    assert not hasattr(profile, "service_tier")
+    assert profile.pricing_checked_at == date(2026, 10, 9)
+    assert profile.pricing_revision == "anthropic-claude-opus-5-5-2026-10-09"
+    assert (profile.input_per_mtok, profile.output_per_mtok) == (Decimal("4"), Decimal("20"))
+    assert profile.cache_write_5m_per_mtok == Decimal("5")
+    assert profile.cache_write_1h_per_mtok == Decimal("8")
+    assert profile.cache_read_per_mtok == Decimal("0.20")
+    assert (profile.batch_input_per_mtok, profile.batch_output_per_mtok) == (
+        Decimal("2"),
+        Decimal("10"),
+    )
+    assert (profile.image_patch_pixels, profile.image_max_visual_tokens) == (28, 4784)
+    assert (profile.quote_text_tokens_per_window, profile.quote_overhead_tokens) == (12000, 2000)
+    assert profile.account_access_status == "unverified"
+    assert profile.integration_test_status == "not_run"
+    assert any("pricing" in url for url in profile.source_urls)
+    assert all(url.startswith("https://platform.claude.com/") for url in profile.source_urls)
+
+
+def test_the_registered_profile_passes_its_own_check() -> None:
+    from vlogsrt.project.raw.config import claude_profile, claude_profile_problems
+
+    assert claude_profile_problems(claude_profile("claude-opus-5-5")) == []
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "fragment"),
+    [
+        ("input_per_mtok", Decimal("0"), "input_per_mtok"),
+        ("output_per_mtok", Decimal("-1"), "output_per_mtok"),
+        ("cache_write_5m_per_mtok", Decimal("NaN"), "cache_write_5m_per_mtok"),
+        ("cache_write_1h_per_mtok", Decimal("Infinity"), "cache_write_1h_per_mtok"),
+        ("cache_read_per_mtok", Decimal("0"), "cache_read_per_mtok"),
+        ("batch_input_per_mtok", Decimal("0"), "batch_input_per_mtok"),
+        ("effort", "turbo", "effort"),
+        ("max_output_tokens", 0, "max_output_tokens"),
+        ("max_output_tokens", 128001, "max_output_tokens"),
+        ("api_base_url", "http://api.anthropic.com", "https"),
+        ("api_version", " ", "api_version"),
+        ("timeout_seconds", 0.0, "timeout"),
+        ("inference_geo", "us", "inference_geo"),
+    ],
+)
+def test_profile_problems_catch_unpriced_or_malformed_values(
+    field: str, value: object, fragment: str
+) -> None:
+    from vlogsrt.project.raw.config import claude_profile, claude_profile_problems
+
+    broken = replace(claude_profile("claude-opus-5-5"), **{field: value})
+    problems = claude_profile_problems(broken)
+    assert problems and any(fragment in problem for problem in problems), problems
+
+
+def test_provider_resolution_and_choices() -> None:
+    from vlogsrt.project.raw.config import (
+        ANALYSIS_MODEL_CHOICES,
+        ANALYSIS_PROVIDER_ANTHROPIC,
+        ANALYSIS_PROVIDER_OPENAI,
+        analysis_model_label,
+        analysis_provider,
+        claude_profile,
+    )
+
+    assert ANALYSIS_MODEL_CHOICES == ("gpt-6-luna", "claude-opus-5-5")
+    assert analysis_provider("gpt-6-luna") == ANALYSIS_PROVIDER_OPENAI == "openai"
+    assert analysis_provider("claude-opus-5-5") == ANALYSIS_PROVIDER_ANTHROPIC == "anthropic"
+    assert analysis_model_label("claude-opus-5-5") == "Claude Opus 5.5"
+    assert analysis_model_label("gpt-6-luna") == "gpt-6-luna"
+    with pytest.raises(ValueError, match="등록되지 않은"):
+        claude_profile("claude-unknown-9")
+
+
+def test_a_registered_claude_analysis_model_validates_and_roundtrips() -> None:
+    config = _claude_config()
+    validate_raw_workflow_config(config)
+    assert raw_workflow_config_from_json(raw_workflow_config_to_json(config)) == config
+
+
+@pytest.mark.parametrize(
+    ("role", "value", "fragment"),
+    [
+        ("luna_model", "claude-unknown-9", "등록되지 않은 Claude"),
+        ("text_model", "claude-opus-5-5", "오디오"),
+        ("timing_model", "claude-opus-5-5", "오디오"),
+    ],
+)
+def test_claude_outside_its_registered_analysis_role_is_rejected(
+    role: str, value: str, fragment: str
+) -> None:
+    broken = RawWorkflowConfig(models=replace(RawWorkflowConfig().models, **{role: value}))
+    with pytest.raises(ValueError, match=fragment):
+        validate_raw_workflow_config(broken)
+
+
+def test_the_default_workflow_json_is_byte_identical_with_no_new_keys() -> None:
+    """W-14는 RawWorkflowConfig에 칸을 더하지 않는다 — 저장된 작업공간이 그대로 열린다."""
+    payload = raw_workflow_config_to_json(RawWorkflowConfig())
+    assert payload == ACCEPTED_SETTINGS_JSON
+    assert "claude" not in payload.lower() and "anthropic" not in payload.lower()
+
+
+def test_transcription_identity_view_pins_the_analysis_model() -> None:
+    """전사 전용 열쇠는 의미 분석 모델과 무관하다 — 모델을 바꿔도 whisper를 다시 사지 않는다."""
+    from vlogsrt.project.raw.config import (
+        TRANSCRIPTION_IDENTITY_LUNA_MODEL,
+        transcription_identity_view,
+    )
+
+    default = RawWorkflowConfig()
+    assert TRANSCRIPTION_IDENTITY_LUNA_MODEL == "gpt-6-luna"
+    assert transcription_identity_view(default) == default
+    assert transcription_identity_view(_claude_config()) == default
+    online = replace(_claude_config(), network_mode="online")
+    assert transcription_identity_view(online) == replace(default, network_mode="online")

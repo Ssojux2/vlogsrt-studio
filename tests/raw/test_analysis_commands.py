@@ -178,3 +178,95 @@ def test_analyze_reports_failures_honestly(tmp_path: Path, capsys) -> None:
     assert document is not None
     assert document["annotations"][0]["status"] == "failed"  # 재생 없음 — 실패 판정
     assert document["execution_mode"] == "offline_replay"
+
+
+# ── W-14 / D54 — `media settings`: 의미 분석 모델을 고른다(로컬 설정만) ──────────
+
+
+CLAUDE = "claude-opus-5-5"
+
+
+def _settings_args(workspace: Path, *extra: str) -> argparse.Namespace:
+    return _parser().parse_args(["media", "settings", "--workspace", str(workspace), *extra])
+
+
+def _init(workspace: Path) -> None:
+    init = _parser().parse_args(["media", "init", str(workspace), "--name", "제주"])
+    assert media.media_command(init) == 0
+
+
+def test_media_settings_prints_and_switches_the_analysis_model(tmp_path: Path, capsys) -> None:
+    workspace = tmp_path / "ws"
+    _init(workspace)
+    service = media._service()
+    service.open_workspace(workspace)
+    before = service.settings(workspace)
+    capsys.readouterr()
+
+    assert media.media_command(_settings_args(workspace)) == 0
+    out = " ".join(capsys.readouterr().out.split())  # rich가 좁은 폭에서 줄을 접는다
+    assert "gpt-6-luna" in out and "단가 미확인" in out
+    assert service.settings(workspace) == before  # 인쇄만 — 아무 것도 바꾸지 않는다
+
+    assert media.media_command(_settings_args(workspace, "--analysis-model", CLAUDE)) == 0
+    out = " ".join(capsys.readouterr().out.split())
+    assert "Claude Opus 5.5" in out and "$4" in out and "$20" in out
+    assert "ANTHROPIC_API_KEY" in out  # 키는 이름만 — 값은 어디에도 없다
+    switched = service.settings(workspace)
+    assert switched.models.luna_model == CLAUDE
+    assert switched.models.timing_model == before.models.timing_model
+    assert switched.network_mode == before.network_mode
+
+    assert media.media_command(_settings_args(workspace, "--analysis-model", "gpt-6-luna")) == 0
+    assert service.settings(workspace) == before
+
+
+def test_media_settings_rejects_an_unregistered_model(tmp_path: Path) -> None:
+    with pytest.raises(SystemExit):
+        _settings_args(tmp_path / "ws", "--analysis-model", "claude-unknown-9")
+
+
+def test_media_settings_refuses_a_switch_during_an_active_analysis(
+    tmp_path: Path, capsys, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vlogsrt.project.raw import service as raw_service
+    from vlogsrt.project.raw.models import ANALYSIS_JOB_KIND, JobRecord
+
+    workspace = tmp_path / "ws"
+    _init(workspace)
+    running = JobRecord(
+        job_id="job_000001",
+        kind=ANALYSIS_JOB_KIND,
+        input_fingerprint="f" * 64,
+        status="running",
+        progress_current=0,
+        progress_total=1,
+        error=None,
+        cancellation_requested=False,
+        created_at="2026-10-09T00:00:00Z",
+        updated_at="2026-10-09T00:00:00Z",
+    )
+    monkeypatch.setattr(
+        raw_service.RawWorkspaceService, "list_jobs", lambda self, root, limit=50: (running,)
+    )
+    assert media.media_command(_settings_args(workspace, "--analysis-model", CLAUDE)) == 1
+    assert "분석" in capsys.readouterr().err
+    service = media._service()
+    service.open_workspace(workspace)
+    assert service.settings(workspace).models.luna_model == "gpt-6-luna"
+
+
+@needs_ffmpeg
+def test_the_analyze_estimate_names_the_selected_model(tmp_path: Path, capsys) -> None:
+    workspace = tmp_path / "ws"
+    _init(workspace)
+    _ingest(tmp_path, workspace)
+    assert media.media_command(_settings_args(workspace, "--analysis-model", CLAUDE)) == 0
+    capsys.readouterr()
+    args = _parser().parse_args(
+        ["media", "analyze", "--workspace", str(workspace), "--estimate-only"]
+    )
+    assert media.media_command(args) == 0
+    out = " ".join(capsys.readouterr().out.split())  # rich가 좁은 폭에서 줄을 접는다
+    assert "Claude Opus 5.5 요청 1" in out
+    assert "Luna 단가는 미확인" not in out

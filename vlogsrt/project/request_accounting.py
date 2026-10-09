@@ -587,6 +587,8 @@ class MeasuredUsage:
     output_tokens: int | None = None
     cost_usd: str | None = None
     unpriced_reason: str | None = None
+    provider_request_id: str | None = None
+    """공급자가 준 요청 신원(Claude `request-id` 헤더, D54). OpenAI 경로는 비워 둔다."""
 
 
 def measure_response_usage(meta: Any, response: object, pricing: PricingSnapshot) -> MeasuredUsage:

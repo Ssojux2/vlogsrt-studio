@@ -430,3 +430,233 @@ def test_final_caption_run_gets_receipts_only_when_its_providers_are_live(monkey
         types.SimpleNamespace(job_id="job_fixture")
     )
     assert service.job_usage_summary(root, "job_fixture").attempts == 0
+
+
+# ─────────────────────────────────────────────────────────────
+#  W-14 / D54 — Claude 영수증: 공식 단가로 계산하고, 못 매기면 가격 미정이다
+# ─────────────────────────────────────────────────────────────
+
+
+CLAUDE = "claude-opus-5-5"
+
+
+class _ClaudeReply:
+    def __init__(self, body: dict[str, Any], request_id: str) -> None:
+        self.status = 200
+        self.headers = {"request-id": request_id}
+        self._body = body
+
+    def read(self) -> bytes:
+        import json
+
+        return json.dumps(self._body).encode()
+
+    def __enter__(self) -> _ClaudeReply:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+
+def _claude_send(body: dict[str, Any], request_id: str = "req_synthetic_usage") -> None:
+    from vlogsrt.anthropic_messages import ClaudeMessagesClient
+    from vlogsrt.transcribe import request_claude_messages
+
+    client = ClaudeMessagesClient(
+        api_key="sk-ant-synthetic",
+        base_url="https://api.anthropic.com",
+        api_version="2023-06-01",
+        timeout_seconds=30.0,
+        opener=lambda request, timeout: _ClaudeReply(body, request_id),
+    )
+    request_claude_messages(
+        client,
+        model=CLAUDE,
+        payload={"max_tokens": 16, "messages": []},
+        online=True,
+        observer=request_usage.observer(),
+    )
+
+
+def _claude_body(usage: dict[str, Any] | None, model: str = CLAUDE) -> dict[str, Any]:
+    body: dict[str, Any] = {"type": "message", "model": model, "stop_reason": "end_turn"}
+    if usage is not None:
+        body["usage"] = usage
+    return body
+
+
+def test_claude_tokens_are_priced_at_the_official_snapshot(tmp_path):
+    workspace = _workspace(tmp_path)
+    with request_log.scope(workspace, "job-1", live=True):
+        _claude_send(_claude_body({"input_tokens": 5000, "output_tokens": 1200}))
+    (row,) = _rows(workspace)
+    assert (row["stage"], row["status"], row["model"]) == ("luna", "response_received", CLAUDE)
+    assert (row["input_tokens"], row["output_tokens"]) == (5000, 1200)
+    assert Decimal(row["cost_usd"]) == Decimal("0.044")  # (5000×$4 + 1200×$20) / 1,000,000
+    assert row["unpriced_reason"] is None
+    assert row["pricing_revision"] == "anthropic-claude-opus-5-5-2026-10-09"
+    assert row["provider_request_id"] == "req_synthetic_usage"
+
+
+def test_claude_cache_tokens_are_priced_at_their_own_rates():
+    from vlogsrt.project.raw.claude_cost import measure_claude_usage
+
+    meta = types.SimpleNamespace(model=CLAUDE, operation="messages.create")
+    usage = {
+        "input_tokens": 1000,
+        "output_tokens": 100,
+        "cache_creation_input_tokens": 3000,
+        "cache_creation": {"ephemeral_5m_input_tokens": 1000, "ephemeral_1h_input_tokens": 2000},
+        "cache_read_input_tokens": 4000,
+    }
+    measured = measure_claude_usage(meta, _claude_body(usage))
+    # 1000×$4 + 1000×$5 + 2000×$8 + 4000×$0.20 + 100×$20 = $0.0278
+    assert Decimal(measured.cost_usd or "nan") == Decimal("0.0278")
+    assert measured.input_tokens == 8000  # 모든 입력 범주의 합 — 캐시도 입력이다
+    assert measured.output_tokens == 100
+
+    plain = {"input_tokens": 0, "output_tokens": 0, "cache_creation_input_tokens": 1000}
+    conservative = measure_claude_usage(meta, _claude_body(plain))
+    assert Decimal(conservative.cost_usd or "nan") == Decimal("0.008")  # 분해가 없으면 1시간 값
+
+
+@pytest.mark.parametrize(
+    ("body", "model", "reason"),
+    [
+        ({"type": "message", "model": CLAUDE}, CLAUDE, "missing_or_invalid_usage"),
+        (
+            _claude_body({"input_tokens": -1, "output_tokens": 2}),
+            CLAUDE,
+            "missing_or_invalid_usage",
+        ),
+        (
+            _claude_body({"input_tokens": "5", "output_tokens": 2}),
+            CLAUDE,
+            "missing_or_invalid_usage",
+        ),
+        (
+            _claude_body({"input_tokens": 5, "output_tokens": 2}, model="claude-opus-5"),
+            CLAUDE,
+            "model_mismatch",
+        ),
+        (
+            _claude_body({"input_tokens": 5, "output_tokens": 2}),
+            "claude-unknown-9",
+            "unknown_model",
+        ),
+        (  # bool은 int의 하위형이지만 토큰 수가 아니다
+            _claude_body({"input_tokens": True, "output_tokens": 2}),
+            CLAUDE,
+            "missing_or_invalid_usage",
+        ),
+        (
+            _claude_body({"input_tokens": 5, "output_tokens": 2, "cache_read_input_tokens": False}),
+            CLAUDE,
+            "missing_or_invalid_usage",
+        ),
+        (  # TTL 분해가 생성 합보다 크다 — 어느 쪽을 믿을지 모른다
+            _claude_body(
+                {
+                    "input_tokens": 1,
+                    "output_tokens": 1,
+                    "cache_creation_input_tokens": 5,
+                    "cache_creation": {"ephemeral_5m_input_tokens": 9},
+                }
+            ),
+            CLAUDE,
+            "missing_or_invalid_usage",
+        ),
+        (
+            _claude_body({"input_tokens": 1, "output_tokens": 1, "cache_creation": 3}),
+            CLAUDE,
+            "missing_or_invalid_usage",
+        ),
+    ],
+)
+def test_claude_usage_that_cannot_be_priced_is_unpriced_never_zero(body, model, reason):
+    from vlogsrt.project.raw.claude_cost import measure_claude_usage
+
+    meta = types.SimpleNamespace(model=model, operation="messages.create")
+    measured = measure_claude_usage(meta, body)
+    assert measured.cost_usd is None
+    assert measured.unpriced_reason == reason
+
+
+@pytest.mark.parametrize(
+    ("extra", "reason"),
+    [
+        ({"inference_geo": "us"}, "nonstandard_inference_geo"),  # US 전용은 1.1배 단가다
+        ({"inference_geo": "eu"}, "nonstandard_inference_geo"),
+        ({"service_tier": "priority"}, "nonstandard_service_tier"),
+        ({"service_tier": "batch"}, "nonstandard_service_tier"),
+        ({"inference_geo": "global", "service_tier": "priority"}, "nonstandard_service_tier"),
+    ],
+)
+def test_claude_usage_outside_the_standard_rate_is_unpriced_not_underpriced(extra, reason):
+    """1M 입력을 US 전용으로 받으면 실제는 $4.40이다 — 표준 $4로 적지 않고 가격 미정으로 둔다."""
+    from vlogsrt.project.raw.claude_cost import measure_claude_usage
+
+    meta = types.SimpleNamespace(model=CLAUDE, operation="messages.create")
+    usage = {"input_tokens": 1_000_000, "output_tokens": 0, **extra}
+    measured = measure_claude_usage(meta, _claude_body(usage))
+    assert measured.cost_usd is None
+    assert measured.unpriced_reason == reason
+    assert measured.input_tokens == 1_000_000  # 토큰은 남긴다
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [{}, {"inference_geo": "global"}, {"service_tier": "standard"}, {"inference_geo": None}],
+)
+def test_claude_usage_at_the_standard_rate_is_priced(extra):
+    from vlogsrt.project.raw.claude_cost import measure_claude_usage
+
+    meta = types.SimpleNamespace(model=CLAUDE, operation="messages.create")
+    usage = {"input_tokens": 5000, "output_tokens": 1200, **extra}
+    measured = measure_claude_usage(meta, _claude_body(usage))
+    assert Decimal(measured.cost_usd or "nan") == Decimal("0.044")
+    assert measured.unpriced_reason is None
+
+
+def test_a_claude_model_mismatch_keeps_the_tokens(tmp_path):
+    workspace = _workspace(tmp_path)
+    with request_log.scope(workspace, "job-1", live=True):
+        _claude_send(_claude_body({"input_tokens": 40, "output_tokens": 2}, model="claude-opus-5"))
+    (row,) = _rows(workspace)
+    assert (row["input_tokens"], row["output_tokens"]) == (40, 2)
+    assert row["cost_usd"] is None and row["unpriced_reason"] == "model_mismatch"
+
+
+def test_the_request_id_column_is_added_once_and_luna_rows_leave_it_empty(tmp_path):
+    workspace = _workspace(tmp_path)
+    reply = {"output_text": "{}", "usage": {"input_tokens": 1000, "output_tokens": 500}}
+    for _ in range(2):  # 두 번 열어도 같다 — 멱등이다
+        with request_log.scope(workspace, "job-1", live=True):
+            pass
+    with request_log.scope(workspace, "job-1", live=True):
+        request_luna_vision(
+            _FakeResponsesClient(reply),
+            model=LUNA_MODEL,
+            payload={"input": []},
+            online=True,
+            observer=request_usage.observer(),
+        )
+    with workspace.connect() as db:
+        columns = [r["name"] for r in db.execute("PRAGMA table_info(analysis_requests)")]
+    assert columns.count("provider_request_id") == 1
+    (row,) = _rows(workspace)
+    assert row["provider_request_id"] is None
+    assert Decimal(row["cost_usd"]) == Decimal("0.0008")  # Luna 계산은 그대로다
+
+
+def test_a_second_claude_response_on_one_attempt_adds_up(tmp_path):
+    workspace = _workspace(tmp_path)
+    usage = {"input_tokens": 5000, "output_tokens": 1200}
+    with request_log.scope(workspace, "job-1", live=True):
+        attempt = request_log.begin("luna", "sha")
+        _claude_send(_claude_body(usage), "req_first")
+        _claude_send(_claude_body(usage), "req_second")
+        request_log.finish(attempt, received=True)
+    (row,) = _rows(workspace)
+    assert Decimal(row["cost_usd"]) == Decimal("0.088")
+    assert row["provider_request_id"] == "req_second"

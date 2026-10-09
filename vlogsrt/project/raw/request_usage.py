@@ -2,7 +2,8 @@
 
 `UsageObserver` is the `RequestObserver` the live senders carry. It only writes receipts:
 it never changes a request, a retry, an approval gate or a cache. Cost comes from the
-2026-09-21 pricing snapshot — it is a computation, not the provider's invoice. An attempt
+2026-09-21 pricing snapshot (Claude: the registered 2026-10-09 profile, D54) — it is a
+computation, not the provider's invoice. An attempt
 whose response never arrived stays uncertain and is not priced (it may have been billed).
 A recorder failure is not swallowed: `transcribe.py` raises it as `ObserverFailure`.
 """
@@ -17,10 +18,14 @@ from typing import Any
 
 from vlogsrt.project.pricing import official_pricing_snapshot
 from vlogsrt.project.raw import request_log
-from vlogsrt.project.request_accounting import measure_response_usage
+from vlogsrt.project.raw.claude_cost import measure_claude_usage
+from vlogsrt.project.request_accounting import MeasuredUsage, measure_response_usage
 from vlogsrt.project.workflow_protocol import PricingSnapshot
 from vlogsrt.task_runtime import provider_error
-from vlogsrt.transcribe import RESPONSES_OPERATION
+from vlogsrt.transcribe import MESSAGES_OPERATION, RESPONSES_OPERATION
+
+_SEMANTIC_OPERATIONS = frozenset({RESPONSES_OPERATION, MESSAGES_OPERATION})
+"""의미 분석 단계의 연산 — Luna(Responses)와 Claude(Messages, D54)가 같은 `luna` 단계다."""
 
 _CHUNK = 500
 """Bound for one SQL `IN (...)` list — SQLite caps bound variables."""
@@ -41,15 +46,21 @@ class UsageObserver:
         """Open a receipt only when no caller did — the caption path never calls `begin`."""
         if not request_log.recording() or request_log.open_attempt() is not None:
             return None
-        stage = "luna" if meta.operation == RESPONSES_OPERATION else (meta.kind or "asr")
+        stage = "luna" if meta.operation in _SEMANTIC_OPERATIONS else (meta.kind or "asr")
         return request_log.begin(stage, meta.attempt_id, bind=False)
 
     def on_response(self, ticket: str | None, meta: Any, response: object) -> None:
         if not request_log.recording():
             return
-        pricing = self.pricing if self.pricing is not None else _official_pricing()
-        request_log.record_usage(measure_response_usage(meta, response, pricing), ticket)
+        request_log.record_usage(self._measure(meta, response), ticket)
         request_log.finish(ticket, received=True)
+
+    def _measure(self, meta: Any, response: object) -> MeasuredUsage:
+        """Claude는 등록된 프로파일의 공식 단가로, 나머지는 OpenAI 가격 스냅샷으로 잰다."""
+        if meta.operation == MESSAGES_OPERATION:
+            return measure_claude_usage(meta, response)
+        pricing = self.pricing if self.pricing is not None else _official_pricing()
+        return measure_response_usage(meta, response, pricing)
 
     def on_error(self, ticket: str | None, meta: Any, error: Exception) -> None:
         """Finish only receipts this observer opened; `begin` callers finish their own."""

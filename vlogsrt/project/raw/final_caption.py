@@ -75,6 +75,7 @@ from vlogsrt.project.raw.caption_provider import (
 from vlogsrt.project.raw.config import (
     RawWorkflowConfig,
     raw_workflow_config_to_json,
+    transcription_identity_view,
     validate_raw_workflow_config,
 )
 from vlogsrt.project.raw.final_video import (
@@ -276,7 +277,8 @@ def caption_settings_fingerprint(
         "languages": list(workflow.caption.languages),
         "keywords": list(workflow.caption.keywords),
         "registry_revision": workflow.registry.revision,
-        "workflow": json.loads(raw_workflow_config_to_json(workflow)),
+        # 자막은 의미 분석 모델을 듣지 않는다 — 그 모델이 바뀌어도 같은 실행이다(D54)
+        "workflow": json.loads(raw_workflow_config_to_json(transcription_identity_view(workflow))),
         "engine_thresholds": _engine_threshold_snapshot(engine),
     }
     body = json.dumps(payload, ensure_ascii=False, sort_keys=True, allow_nan=False)

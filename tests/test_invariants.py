@@ -1962,3 +1962,254 @@ def test_sync_report_may_use_python_replace_and_update() -> None:
     assert not pattern.search("payload.update(stale=True)")
     assert not pattern.search("cue = replace(cue, start=start)")
     assert not pattern.search("os.replace(temporary, path)")
+
+
+# ── D54: 네트워크 모듈은 한 파일, 그 파일은 transcribe.py만 안다 ────────────
+
+
+_NETWORK_FILE = "vlogsrt/anthropic_messages.py"
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "import urllib.request",
+        "import urllib.request as fetch",
+        "import urllib.error",
+        "from urllib import request",
+        "from urllib import request as fetch",
+        "from urllib.request import urlopen",
+        "from urllib.error import URLError",
+        "import http.client",
+        "from http import client",
+        "from http.client import HTTPSConnection",
+        "import socket",
+        "import socket as raw",
+        "from socket import create_connection",
+        "import ssl",
+        "from ssl import create_default_context",
+    ],
+)
+def test_network_modules_fail_outside_the_exact_transport_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, statement: str
+) -> None:
+    """이름이 같은 다른 경로도 예외를 물려받지 못한다 — 판정은 정확 경로다."""
+    _fake_source_tree(
+        monkeypatch,
+        tmp_path,
+        {
+            _NETWORK_FILE: statement + "\n",
+            "vlogsrt/gadget.py": statement + "\n",
+            "vlogsrt/project/anthropic_messages.py": statement + "\n",
+        },
+    )
+    failures = check_invariants.check_network_boundary()
+    assert len(failures) == 2, failures
+    assert any("vlogsrt/gadget.py" in failure for failure in failures)
+    assert any("vlogsrt/project/anthropic_messages.py" in failure for failure in failures)
+
+
+def test_url_parsing_is_not_a_network_import(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _fake_source_tree(
+        monkeypatch,
+        tmp_path,
+        {
+            "vlogsrt/gadget.py": (
+                "import urllib.parse\nfrom urllib.parse import urlsplit\nfrom urllib import parse\n"
+            )
+        },
+    )
+    assert check_invariants.check_network_boundary() == []
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "from vlogsrt import anthropic_messages",
+        "from . import anthropic_messages",
+        "import vlogsrt.anthropic_messages",
+        "from vlogsrt.anthropic_messages import post_messages",
+        "from .anthropic_messages import post_messages",
+        "from ... import anthropic_messages",
+    ],
+)
+def test_only_transcribe_may_import_the_claude_transport(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, statement: str
+) -> None:
+    """승인 문·관찰·취소를 건너뛰는 길은 없다 — 전송 파일을 아는 것은 transcribe.py뿐이다."""
+    _fake_source_tree(
+        monkeypatch,
+        tmp_path,
+        {
+            "vlogsrt/transcribe.py": statement + "\n",
+            "vlogsrt/project/raw/understanding_luna.py": statement + "\n",
+            "ui/workspace_service.py": statement + "\n",
+        },
+    )
+    failures = check_invariants.check_claude_transport_entry()
+    assert len(failures) == 2, failures
+    assert any("understanding_luna.py" in failure for failure in failures)
+    assert any("ui/workspace_service.py" in failure for failure in failures)
+
+
+@pytest.mark.parametrize("name", ["anthropic", "httpx", "requests", "urllib3", "aiohttp"])
+def test_http_client_libraries_are_banned_everywhere(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, name: str
+) -> None:
+    """Claude는 표준 라이브러리로 부른다 — SDK·HTTP 클라이언트 의존성은 금지다(규칙 10)."""
+    _fake_source_tree(
+        monkeypatch,
+        tmp_path,
+        {
+            "vlogsrt/transcribe.py": f"import {name}\n",
+            "vlogsrt/project/a.py": f"from {name} import x\n",
+        },
+    )
+    failures = check_invariants.check_banned_imports()
+    assert len(failures) == 2, failures
+    assert all(name in failure for failure in failures)
+
+
+def test_claude_model_literals_live_only_in_the_exact_raw_config(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _fake_source_tree(
+        monkeypatch,
+        tmp_path,
+        {
+            "vlogsrt/project/raw/config.py": 'CLAUDE = "claude-opus-5-5"\n',
+            "vlogsrt/config.py": 'CLAUDE = "claude-opus-5-5"\n',
+            "vlogsrt/project/config.py": "CLAUDE = 'claude-sonnet-5-5'\n",
+            "vlogsrt/project/raw/understanding_luna.py": 'MODEL = "claude-opus-5-5"\n',
+        },
+    )
+    failures = check_invariants.check_no_hardcoded_model()
+    assert len(failures) == 3, failures
+    assert not any("vlogsrt/project/raw/config.py" in failure for failure in failures)
+
+
+@pytest.mark.parametrize(
+    ("target", "check_name"),
+    [
+        ("vlogsrt/retext.py", "check_retext_stays_pure"),
+        ("vlogsrt/project/raw/tiering.py", "check_tiering_stays_pure"),
+        ("vlogsrt/project/edit.py", "check_edit_layer_ignores_audio"),
+    ],
+)
+def test_pure_layers_cannot_reach_the_claude_transport(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, target: str, check_name: str
+) -> None:
+    _fake_source_tree(monkeypatch, tmp_path, {target: "from vlogsrt import anthropic_messages\n"})
+    assert getattr(check_invariants, check_name)()
+
+
+@pytest.mark.parametrize("statement", ["import socket", "from urllib import request", "import ssl"])
+def test_the_pure_cut_layer_cannot_import_network_modules(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, statement: str
+) -> None:
+    files = {f"vlogsrt/{name}": "" for name in check_invariants.PURE_MODULES}
+    files["vlogsrt/cutpoints.py"] = statement + "\n"
+    _fake_source_tree(monkeypatch, tmp_path, files)
+    assert check_invariants.check_pure_layer()
+
+
+def test_the_real_tree_passes_the_network_checks() -> None:
+    assert check_invariants.check_network_boundary() == []
+    assert check_invariants.check_claude_transport_entry() == []
+    assert check_invariants.check_no_hardcoded_model() == []
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "import importlib\nmodule = importlib.import_module('urllib.request')\n",
+        "import importlib as il\nmodule = il.import_module('socket')\n",
+        "from importlib import import_module\nmodule = import_module('ssl')\n",
+        "from importlib import import_module as im\nmodule = im('socket')\n",
+        "raw = __import__('socket')\n",
+        "client = __import__('http.client')\n",
+        "import urllib\nurllib.request.urlopen('https://x.example')\n",
+        "import urllib\nurllib.error.URLError('x')\n",
+        "import http\nhttp.client.HTTPSConnection('x.example')\n",
+        "import urllib.parse\nurllib.request.urlopen('https://x.example')\n",
+        "import urllib as u\nu.request.urlopen('https://x.example')\n",
+    ],
+)
+def test_dynamic_and_attribute_network_imports_are_caught(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, body: str
+) -> None:
+    """지연·속성 우회 — 문자열 상수로 부르는 import와 맨 패키지 import 뒤의 하위 모듈 접근."""
+    _fake_source_tree(monkeypatch, tmp_path, {"vlogsrt/gadget.py": body, _NETWORK_FILE: body})
+    failures = check_invariants.check_network_boundary()
+    assert failures and all("vlogsrt/gadget.py" in failure for failure in failures), failures
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "import urllib\nurllib.parse.quote('x')\n",
+        "import http\nstatus = http.HTTPStatus.OK\n",
+        "import importlib\nmodule = importlib.import_module('json')\n",
+        "name = 'socket'\nmodule = __import__(name)\n",  # 상수가 아니면 판정하지 않는다
+        "module = __import__(f'vlogsrt.project.raw.{name}')\n",
+    ],
+)
+def test_harmless_dynamic_or_attribute_forms_pass(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, body: str
+) -> None:
+    _fake_source_tree(monkeypatch, tmp_path, {"vlogsrt/gadget.py": body})
+    assert check_invariants.check_network_boundary() == []
+    assert check_invariants.check_claude_transport_entry() == []
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "import importlib\nimportlib.import_module('vlogsrt.anthropic_messages')\n",
+        "from importlib import import_module\nimport_module('.anthropic_messages', 'vlogsrt')\n",
+        "from importlib import import_module as im\nim('vlogsrt.anthropic_messages')\n",
+        "__import__('vlogsrt.anthropic_messages')\n",
+        # 패키지 속성 — 누군가 한 번 import한 뒤라면 `vlogsrt.anthropic_messages`로 닿는다
+        "import vlogsrt\nvlogsrt.anthropic_messages.post_messages(client, {})\n",
+        "import vlogsrt as v\nsend = v.anthropic_messages.post_messages\n",
+    ],
+)
+def test_dynamic_imports_of_the_claude_transport_are_caught(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, body: str
+) -> None:
+    _fake_source_tree(
+        monkeypatch,
+        tmp_path,
+        {"vlogsrt/transcribe.py": body, "vlogsrt/project/raw/understanding_luna.py": body},
+    )
+    failures = check_invariants.check_claude_transport_entry()
+    assert len(failures) == 1, failures
+    assert "understanding_luna.py" in failures[0]
+
+
+@pytest.mark.parametrize(
+    ("rel", "statement", "allowed"),
+    [
+        ("ui/instance.py", "import urllib.request", True),
+        ("ui/instance.py", "from urllib.request import urlopen", True),
+        ("ui/instance.py", "import socket", False),
+        ("ui/instance.py", "import ssl", False),
+        ("ui/service.py", "import socket", True),
+        ("ui/service.py", "import urllib.request", False),
+        ("ui/service.py", "import http.client", False),
+        ("ui/app.py", "import socket", False),
+        ("ui/deep/instance.py", "import urllib.request", False),  # 정확 경로만
+    ],
+)
+def test_ui_network_imports_follow_an_exact_allowlist(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, rel: str, statement: str, allowed: bool
+) -> None:
+    """ui/의 로컬 서버 코드는 파일마다 정해진 모듈 하나만 — 일괄 면제가 아니다."""
+    _fake_source_tree(monkeypatch, tmp_path, {rel: statement + "\n"})
+    failures = check_invariants.check_network_boundary()
+    if allowed:
+        assert failures == []
+    else:
+        assert len(failures) == 1 and rel in failures[0], failures

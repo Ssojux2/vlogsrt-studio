@@ -14,13 +14,27 @@ import argparse
 import json
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
+from dataclasses import replace
 from fractions import Fraction
 from pathlib import Path
 
 from vlogsrt import log
+from vlogsrt.env import ANALYSIS_CLAUDE_KEY_ENV
 from vlogsrt.project.raw import service as raw_service
-from vlogsrt.project.raw.models import PlannedInterval
+from vlogsrt.project.raw.config import (
+    ANALYSIS_MODEL_CHOICES,
+    ANALYSIS_PROVIDER_ANTHROPIC,
+    analysis_model_label,
+    analysis_provider,
+    claude_profile,
+)
+from vlogsrt.project.raw.models import (
+    ANALYSIS_JOB_KIND,
+    ANALYSIS_SEMANTIC_JOB_KIND,
+    AnalysisEstimate,
+    PlannedInterval,
+)
 from vlogsrt.project.raw.segmentation import DEFAULT_TILE_SECONDS
 
 JOB_WAIT_SECONDS = 600.0
@@ -225,6 +239,7 @@ def media_command(args: argparse.Namespace) -> int:
         "caption": cmd_caption,
         "finalcut": cmd_finalcut,
         "sync-check": cmd_sync_check,
+        "settings": cmd_settings,
     }
     return handlers[args.media_command](args)
 
@@ -239,7 +254,7 @@ def add_media_parser(sub: argparse._SubParsersAction) -> None:
         required=True,
         metavar=(
             "{init,import,retry,inspect,plan,extract,clips,analyze,review,caption,finalcut,"
-            "sync-check}"
+            "sync-check,settings}"
         ),
     )
 
@@ -377,6 +392,7 @@ def add_media_parser(sub: argparse._SubParsersAction) -> None:
     )
     caption.add_argument("--run", default="run-1", help="실행 ID(기본 run-1)")
     _add_finalcut_parser(commands)
+    _add_settings_parser(commands)
 
 
 def _add_finalcut_parser(commands: argparse._SubParsersAction) -> None:
@@ -418,6 +434,71 @@ def cmd_sync_check(args: argparse.Namespace) -> int:
     if not documents:
         log.warn("잴 원본 자막이 없다 — 분석이 끝난 원본만 잰다")
     return 0
+
+
+def _add_settings_parser(commands: argparse._SubParsersAction) -> None:
+    """`media settings` — 의미 분석 모델을 인쇄하고 고른다(D54). 로컬 설정만 바꾼다."""
+    settings = commands.add_parser(
+        "settings", help="의미 분석 모델을 인쇄하고 고른다(로컬 설정만 — 유료 호출 없음)"
+    )
+    settings.add_argument("--workspace", type=Path, required=True, help="작업공간 경로")
+    settings.add_argument(
+        "--analysis-model",
+        choices=ANALYSIS_MODEL_CHOICES,
+        default=None,
+        help="의미 분석 모델. 없으면 지금 설정을 인쇄만 한다",
+    )
+
+
+# ── W-14 — 의미 분석 모델 선택(로컬 설정만) ───────────────────────────────────
+
+
+def cmd_settings(args: argparse.Namespace) -> int:
+    """`media settings` — 의미 분석 모델을 인쇄하고, 주면 바꾼다(유료 호출 없음).
+
+    분석이 도는 동안에는 바꾸지 않는다 — 견적·승인이 본 모델과 실행 모델이 갈린다.
+    기본(gpt-6-luna)은 그대로다: 고르지 않은 작업공간의 모델이 조용히 바뀌지 않는다.
+    """
+    service = _service()
+    try:
+        status = service.open_workspace(Path(args.workspace))
+        root = Path(status.workspace_root)
+        workflow = service.settings(root)
+        if args.analysis_model is not None and args.analysis_model != workflow.models.luna_model:
+            if _analysis_active(service, root):
+                log.error("분석이 진행 중이다 — 끝나거나 취소된 뒤에 의미 분석 모델을 바꾸세요")
+                return 1
+            models = replace(workflow.models, luna_model=args.analysis_model)
+            workflow = replace(workflow, models=models)
+            service.update_settings(root, workflow)
+    except (raw_service.RawWorkspaceError, ValueError) as error:
+        log.error(str(error))
+        return 1
+    for line in _analysis_model_lines(workflow.models.luna_model):
+        log.out(line)
+    return 0
+
+
+def _analysis_active(service: raw_service.RawWorkspaceService, root: Path) -> bool:
+    return any(
+        job.kind in (ANALYSIS_JOB_KIND, ANALYSIS_SEMANTIC_JOB_KIND)
+        and job.status not in _TERMINAL_STATUSES
+        for job in service.list_jobs(root)
+    )
+
+
+def _analysis_model_lines(model: str) -> list[str]:
+    """의미 분석 모델의 설명 — 키는 이름만 말하고 값은 어디에도 싣지 않는다."""
+    label = analysis_model_label(model)
+    if analysis_provider(model) != ANALYSIS_PROVIDER_ANTHROPIC:
+        return [f"의미 분석 모델: {label} — 단가 미확인(금액 추정 없음, 0원 계산 금지)"]
+    profile = claude_profile(model)
+    return [
+        f"의미 분석 모델: {label} ({model}) — 공급자 Anthropic, 키 {ANALYSIS_CLAUDE_KEY_ENV}(.env)",
+        f"  공식 단가({profile.pricing_checked_at.isoformat()}): 입력 ${profile.input_per_mtok}"
+        f" · 출력 ${profile.output_per_mtok} / 100만 토큰 — 견적은 창당 보수적 상한이다",
+        f"  effort {profile.effort} · 출력 한도 {profile.max_output_tokens} 토큰",
+    ]
 
 
 # ── A3 — 결정적 분할 계획·추출·조각 목록 ──────────────────────────────────────
@@ -557,21 +638,11 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     try:
         status = service.open_workspace(workspace_root)
         estimates = service.analysis_estimate(Path(status.workspace_root), asset_ids=args.sources)
+        model = service.settings(Path(status.workspace_root)).models.luna_model
     except raw_service.RawWorkspaceError as error:
         log.error(str(error))
         return 1
-    log.out("** 분석 견적(로컬 — 실제 호출 없음) — Luna 단가는 미확인이라 금액을 만들지 않는다")
-    for item in estimates:
-        audio = (
-            f"있음(청크 {item.asr_chunk_count}, {item.asr_seconds}초)" if item.has_audio else "없음"
-        )
-        log.out(
-            f"  {item.source_order:03d} {item.source_name} · 창 {item.window_count} ·"
-            f" 프레임 상한 {item.frame_sample_count} · 오디오 {audio} ·"
-            f" Luna 요청 {item.luna_request_count}"
-        )
-        if "지원 밖" in item.note:
-            log.warn(f"    {item.note}")
+    _print_analysis_estimates(estimates, model)
     if args.estimate_only:
         return 0
     try:
@@ -617,6 +688,31 @@ def cmd_analyze(args: argparse.Namespace) -> int:
             f" 조각 {len(snapshot.entries)}개 — `media extract`로 추출한다"
         )
     return 0
+
+
+def _print_analysis_estimates(estimates: Sequence[AnalysisEstimate], model: str) -> None:
+    """견적 표 — 의미 분석 모델의 이름으로 요청 수를 말한다(Luna 문구는 W-14 이전 그대로)."""
+    if analysis_provider(model) == ANALYSIS_PROVIDER_ANTHROPIC:
+        label = analysis_model_label(model)
+        log.out(
+            f"** 분석 견적(로컬 — 실제 호출 없음) — 의미 분석 {label}:"
+            " 공식 단가 스냅샷 기준 보수적 상한(청구서가 아니다)"
+        )
+    else:
+        label = "Luna"
+        log.out("** 분석 견적(로컬 — 실제 호출 없음) — Luna 단가는 미확인이라 금액을 만들지 않는다")
+    for item in estimates:
+        audio = (
+            f"있음(청크 {item.asr_chunk_count}, {item.asr_seconds}초)" if item.has_audio else "없음"
+        )
+        ceiling = f" · 상한 ${item.ceiling_usd}" if item.ceiling_usd is not None else ""
+        log.out(
+            f"  {item.source_order:03d} {item.source_name} · 창 {item.window_count} ·"
+            f" 프레임 상한 {item.frame_sample_count} · 오디오 {audio} ·"
+            f" {label} 요청 {item.luna_request_count}{ceiling}"
+        )
+        if "지원 밖" in item.note:
+            log.warn(f"    {item.note}")
 
 
 # ── A5/A6·A7 — 검토·자막 진단(로컬만) ─────────────────────────────────────────

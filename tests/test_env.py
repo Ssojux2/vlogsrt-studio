@@ -439,3 +439,40 @@ def test_redact_secrets_knows_the_managed_vision_value_without_config(
     assert "synthetic-engine-key" not in text
     assert "synthetic-vision-key" not in text
     assert redact_secrets("ffprobe not found") == "ffprobe not found"
+
+
+# ─────────────────────────────────────────────────────────────
+#  Claude 분석 키(D54) — 값은 가리고, 이름은 다른 역할이 물려받지 못한다
+# ─────────────────────────────────────────────────────────────
+
+
+def test_redact_secrets_knows_the_claude_analysis_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    from vlogsrt.env import ANALYSIS_CLAUDE_KEY_ENV, redact_secrets
+
+    assert ANALYSIS_CLAUDE_KEY_ENV == "ANTHROPIC_API_KEY"
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-synthetic-claude-key")
+    text = redact_secrets("upstream said sk-ant-synthetic-claude-key was wrong")
+    assert "sk-ant-synthetic-claude-key" not in text
+
+
+def test_has_anthropic_api_key_is_a_bool_never_the_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    from vlogsrt.env import has_anthropic_api_key
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-synthetic")
+    assert has_anthropic_api_key() is True
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "  ")
+    assert has_anthropic_api_key() is False
+    monkeypatch.delenv("ANTHROPIC_API_KEY")
+    assert has_anthropic_api_key() is False
+
+
+@pytest.mark.parametrize(
+    ("key_name", "url_name"),
+    [("ANTHROPIC_API_KEY", "MY_URL"), ("MY_KEY", "ANTHROPIC_API_KEY")],
+)
+def test_vision_roles_cannot_reuse_the_claude_key_name(key_name: str, url_name: str) -> None:
+    """비전 역할이 Claude 키 이름을 쓰면 한 키가 두 공급자를 연다 — 배정 전에 닫는다."""
+    from vlogsrt.env import validate_role_env_names
+
+    with pytest.raises(RuntimeError, match="ANTHROPIC_API_KEY"):
+        validate_role_env_names(key_name, url_name)

@@ -8,7 +8,8 @@
   보관한다. 테스트의 명시적 환경 Mapping은 파일 로더를 거치지 않는다.
   자격증명 값은 화면·로그·프로젝트 기록에 내보내지 않는다.
 - 전송 경계는 이미 받아들인 정본뿐이다: 내부 ASR는 `LiveTranscriber`
-  (`vlogsrt/transcribe`, API 호출의 유일한 곳), Luna는 `create_vision_client`.
+  (`vlogsrt/transcribe`, API 호출의 유일한 곳), Luna는 `create_vision_client`,
+  Claude 의미 분석(D54)은 `create_claude_client`(`ANTHROPIC_API_KEY`가 있을 때만).
   모델 대체는 없다 — 설정 모델 그대로고 실패는 그대로 올라간다.
 - 승인은 **화면이 잰 견적 그대로**에서 만든다(mint). 사람이 보지 않은 값을
   묶는 길이 없고, 만든 뒤에도 게이트(`require_live_asr_approval`·
@@ -25,12 +26,14 @@ import hashlib
 import json
 import os
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
 from vlogsrt.config import Config
+from vlogsrt.env import ANALYSIS_CLAUDE_KEY_ENV
 from vlogsrt.project.raw import request_usage
 from vlogsrt.project.raw.analysis_approval import (
     AsrPhaseApproval,
@@ -38,8 +41,13 @@ from vlogsrt.project.raw.analysis_approval import (
     asr_settings_fingerprint,
 )
 from vlogsrt.project.raw.analysis_config import RawUnderstandingSettings
+from vlogsrt.project.raw.config import (
+    ANALYSIS_PROVIDER_ANTHROPIC,
+    CLAUDE_ANALYSIS_PROFILE,
+    analysis_provider,
+)
 from vlogsrt.project.raw.models import AnalysisEstimate, AnalysisSemanticEstimate
-from vlogsrt.transcribe import LiveTranscriber, create_vision_client
+from vlogsrt.transcribe import LiveTranscriber, create_claude_client, create_vision_client
 
 STT_KEY_ENV = "OPENAI_API_KEY"
 """STT·Luna가 함께 쓰는 서버 환경 키 이름 — 값은 화면·로그에 절대 나오지 않는다."""
@@ -59,7 +67,7 @@ class BrowserRuntimeError(RuntimeError):
 class EnvironmentCredentials:
     """서버 **시작 환경**에서 찍은 자격증명 — 값은 화면·로그에 절대 나오지 않는다."""
 
-    api_key: str
+    api_key: str = field(repr=False)
     base_url: str | None
 
 
@@ -87,6 +95,30 @@ def capture_browser_credentials() -> EnvironmentCredentials | None:
 
     env.ensure_loaded()
     return capture_environment_credentials()
+
+
+@dataclass(frozen=True, slots=True)
+class ClaudeCredentials:
+    """Claude 의미 분석 키(D54) — 메모리에만 있고 repr·화면·로그에 나오지 않는다."""
+
+    api_key: str = field(repr=False)
+
+
+def capture_claude_credentials(
+    environ: Mapping[str, str] | None = None,
+) -> ClaudeCredentials | None:
+    """`ANTHROPIC_API_KEY`를 한 번 찍는다 — OpenAI 키를 빌리지 않는다(공급자마다 제 키).
+
+    환경을 주지 않으면 정본 `.env` 로더를 지난 프로세스 환경을 본다(키는 사람이 `.env`에
+    넣는다). 명시적 Mapping은 로더를 거치지 않는다 — 시험과 단일 명령 흐름의 길이다.
+    """
+    if environ is None:
+        from vlogsrt import env
+
+        env.ensure_loaded()
+    source: Mapping[str, str] = os.environ if environ is None else environ
+    key = (source.get(ANALYSIS_CLAUDE_KEY_ENV) or "").strip()
+    return ClaudeCredentials(api_key=key) if key else None
 
 
 def browser_network_mode() -> str:
@@ -123,12 +155,14 @@ def live_transport_for_credentials(
     asr_approvals: Any,
     luna_approvals: Any,
     on: date | None = None,
+    claude: ClaudeCredentials | None = None,
 ) -> LiveAnalysisTransport:
     """찍아 둔 자격증명으로 생산 transport를 만든다 — 정본 전송 경계만 쓴다.
 
     이 함수를 부르는 것만으로는 아무 호출도 일어나지 않는다(클라이언트 생성은
     SDK 객체일 뿐이다). 첫 전송은 승인 공급자가 돌려준 승인을 게이트가 검증한
-    뒤에야 시작된다(§14.3).
+    뒤에야 시작된다(§14.3). Claude 키가 있으면 Claude 클라이언트도 만든다 —
+    엔드포인트·버전·시간 한도는 등록된 프로파일 값이다(D54).
     """
     return LiveAnalysisTransport(
         sender=LiveTranscriber(
@@ -141,6 +175,17 @@ def live_transport_for_credentials(
         asr_approvals=asr_approvals,
         luna_approvals=luna_approvals,
         on=on,
+        claude_client=None if claude is None else _claude_client(claude),
+    )
+
+
+def _claude_client(claude: ClaudeCredentials) -> object:
+    profile = CLAUDE_ANALYSIS_PROFILE
+    return create_claude_client(
+        api_key=claude.api_key,
+        base_url=profile.api_base_url,
+        api_version=profile.api_version,
+        timeout_seconds=profile.timeout_seconds,
     )
 
 
@@ -162,6 +207,7 @@ def production_live_transport(
         asr_approvals=asr_approvals,
         luna_approvals=luna_approvals,
         on=on,
+        claude=capture_claude_credentials(os.environ if environ is None else environ),
     )
 
 
@@ -201,7 +247,8 @@ def asr_estimate_digest(estimates: Sequence[AnalysisEstimate]) -> str:
     """1단계 견적 표의 지문 — 사람이 본 값과 시작 때의 값이 같은지의 기준.
 
     표시 전용 문구(note)는 빼고, 승인이 묶는 측정값(출처·스트림·청크·창·모델
-    회신 수)만 묶는다 — 문구만 바뀌었다고 승인을 다시 받게 하지 않는다.
+    회신 수)만 묶는다 — 문구만 바뀌었다고 승인을 다시 받게 하지 않는다. 비용
+    상한은 **있을 때만** 덧붙인다(D54) — Luna 견적의 지문은 W-14 이전과 같다.
     """
     rows = sorted(
         (
@@ -214,6 +261,7 @@ def asr_estimate_digest(estimates: Sequence[AnalysisEstimate]) -> str:
             item.window_count,
             item.asr_chunk_count,
             item.luna_request_count,
+            *_present(item.ceiling_usd),
         )
         for item in estimates
     )
@@ -222,7 +270,7 @@ def asr_estimate_digest(estimates: Sequence[AnalysisEstimate]) -> str:
 
 
 def semantic_estimate_digest(estimates: Sequence[AnalysisSemanticEstimate]) -> str:
-    """2단계 견적 표의 지문 — 실측 지문·창·이미지·단계를 묶는다."""
+    """2단계 견적 표의 지문 — 실측 지문·창·이미지·단계를 묶는다(상한은 있을 때만)."""
     rows = sorted(
         (
             item.asset_id,
@@ -233,11 +281,18 @@ def semantic_estimate_digest(estimates: Sequence[AnalysisSemanticEstimate]) -> s
             item.window_count,
             item.image_count,
             item.luna_request_count,
+            *_present(item.request_ceiling_usd),
+            *_present(item.ceiling_usd),
         )
         for item in estimates
     )
     body = json.dumps(rows, ensure_ascii=False, sort_keys=True)
     return hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+
+def _present(value: str | None) -> tuple[str, ...]:
+    """값이 있을 때만 칸을 더한다 — 없는 칸이 지문에 `null`로 끼어들지 않게(D54)."""
+    return () if value is None else (value,)
 
 
 def mint_asr_approvals(
@@ -306,6 +361,29 @@ def _phase_artifact_for(service: Any, root: Path, revision_id: str, asset_id: st
     return body
 
 
+def _semantic_budget(model: str, estimate: AnalysisSemanticEstimate) -> Any:
+    """2단계 승인의 예산 — Claude는 견적이 잰 공식 단가 상한을 그대로 묶는다(D54).
+
+    상한 없는 Claude 견적으로는 승인을 만들지 않는다 — 사람이 금액을 보지 않은 승인이
+    된다. Luna는 지금처럼 단가 미확인 예산이다.
+    """
+    from vlogsrt.project.raw.understanding_luna import PRICE_OFFICIAL, AnalysisBudget
+
+    requests = max(1, estimate.window_count)
+    if analysis_provider(model) != ANALYSIS_PROVIDER_ANTHROPIC:
+        return AnalysisBudget(max_luna_requests=requests, max_asr_chunks=1)
+    if estimate.request_ceiling_usd is None:
+        raise BrowserRuntimeError(
+            f"Claude 2단계 견적에 비용 상한이 없다: {estimate.source_name} — 견적을 다시 받으세요"
+        )
+    return AnalysisBudget(
+        max_luna_requests=requests,
+        max_asr_chunks=1,
+        luna_price_status=PRICE_OFFICIAL,
+        request_ceiling_usd=Decimal(estimate.request_ceiling_usd),
+    )
+
+
 def mint_luna_approvals(
     service: Any,
     root: Path,
@@ -321,7 +399,6 @@ def mint_luna_approvals(
     지어내지 않는다(A4-F1). 창 수·지문은 견적 표가 실측한 값 그대로다.
     """
     from vlogsrt.project.raw.understanding_luna import (
-        AnalysisBudget,
         OnlineAnalysisApproval,
         OnlineVisualAnalysisApproval,
     )
@@ -336,7 +413,7 @@ def mint_luna_approvals(
             raise BrowserRuntimeError(
                 f"2단계 견적이 없는 원본이다: {asset_id} — 1단계(전사)가 끝나야 한다"
             )
-        budget = AnalysisBudget(max_luna_requests=max(1, estimate.window_count), max_asr_chunks=1)
+        budget = _semantic_budget(workflow.models.luna_model, estimate)
         artifact = _phase_artifact_for(service, root, revision_id, asset_id)
         audio = artifact.get("audio")
         if isinstance(audio, dict) and audio.get("status") != "audio_absent":
@@ -369,11 +446,13 @@ def mint_luna_approvals(
 
 __all__ = [
     "BrowserRuntimeError",
+    "ClaudeCredentials",
     "EnvironmentCredentials",
     "STT_BASE_URL_ENV",
     "STT_KEY_ENV",
     "asr_estimate_digest",
     "caption_transport_providers",
+    "capture_claude_credentials",
     "capture_environment_credentials",
     "live_transport_for_credentials",
     "mint_asr_approvals",

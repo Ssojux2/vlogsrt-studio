@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import subprocess
@@ -143,6 +144,218 @@ def test_estimate_digests_bind_measurements_not_notes() -> None:
     assert browser_runtime.semantic_estimate_digest(
         left
     ) != browser_runtime.semantic_estimate_digest((semantic(window_count=2),))
+
+
+# ── W-14 / D54 — Claude 키·클라이언트·공식 단가 승인(유료 호출 없음) ──────────────
+
+
+CLAUDE = "claude-opus-5-5"
+
+
+def test_environment_credentials_never_print_the_key() -> None:
+    credentials = browser_runtime.EnvironmentCredentials(
+        api_key="sk-synthetic-openai-key", base_url="https://example.test/v1"
+    )
+    assert "sk-synthetic-openai-key" not in repr(credentials)
+    assert "sk-synthetic-openai-key" not in str(credentials)
+    assert "https://example.test/v1" in repr(credentials)  # 키가 아닌 칸은 그대로 보인다
+
+
+def test_claude_credentials_are_captured_trimmed_and_never_printed() -> None:
+    captured = browser_runtime.capture_claude_credentials({"ANTHROPIC_API_KEY": "  sk-ant-x  "})
+    assert captured is not None and captured.api_key == "sk-ant-x"
+    assert "sk-ant-x" not in repr(captured) and "sk-ant-x" not in str(captured)
+    assert browser_runtime.capture_claude_credentials({}) is None
+    assert browser_runtime.capture_claude_credentials({"ANTHROPIC_API_KEY": "  "}) is None
+    only_openai = {"OPENAI_API_KEY": "sk-test-only"}
+    assert browser_runtime.capture_claude_credentials(only_openai) is None  # 키를 빌리지 않는다
+
+
+def test_the_transport_carries_a_claude_client_only_with_a_claude_key() -> None:
+    from vlogsrt.project.raw.config import claude_profile
+    from vlogsrt.project.raw.understanding_luna import AnalysisApprovalError
+    from vlogsrt.transcribe import is_claude_client
+
+    credentials = browser_runtime.EnvironmentCredentials(api_key="sk-test-only", base_url=None)
+    plain = browser_runtime.live_transport_for_credentials(
+        credentials, asr_approvals=lambda *a: {}, luna_approvals=lambda *a: {}
+    )
+    assert plain.claude_client is None
+    assert plain.semantic_client("gpt-6-luna") is plain.client
+    with pytest.raises(AnalysisApprovalError, match="ANTHROPIC_API_KEY") as info:
+        plain.semantic_client(CLAUDE)
+    assert ".env" in str(info.value)
+
+    keyed = browser_runtime.live_transport_for_credentials(
+        credentials,
+        asr_approvals=lambda *a: {},
+        luna_approvals=lambda *a: {},
+        claude=browser_runtime.ClaudeCredentials(api_key="sk-ant-x"),
+    )
+    client = keyed.semantic_client(CLAUDE)
+    assert is_claude_client(client) and client is keyed.claude_client
+    profile = claude_profile(CLAUDE)
+    assert (client.base_url, client.api_version, client.timeout_seconds) == (
+        profile.api_base_url,
+        profile.api_version,
+        profile.timeout_seconds,
+    )
+    assert keyed.semantic_client("gpt-6-luna") is keyed.client  # Luna는 OpenAI 클라이언트 그대로
+    assert "sk-ant-x" not in repr(keyed)
+
+
+def test_production_transport_picks_up_a_claude_key_from_its_environ() -> None:
+    transport = browser_runtime.production_live_transport(
+        asr_approvals=lambda *a: {},
+        luna_approvals=lambda *a: {},
+        environ={"OPENAI_API_KEY": "sk-test-only", "ANTHROPIC_API_KEY": "sk-ant-x"},
+    )
+    assert transport.claude_client is not None
+
+
+def _old_asr_digest(estimates) -> str:
+    """W-14 이전 `asr_estimate_digest` 그대로 — 기본(Luna) 견적의 지문이 바뀌지 않는다."""
+    rows = sorted(
+        (
+            item.asset_id,
+            item.source_order,
+            item.source_name,
+            bool(item.has_audio),
+            item.audio_stream_index,
+            item.sample_count,
+            item.window_count,
+            item.asr_chunk_count,
+            item.luna_request_count,
+        )
+        for item in estimates
+    )
+    body = json.dumps(rows, ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+
+def _old_semantic_digest(estimates) -> str:
+    rows = sorted(
+        (
+            item.asset_id,
+            item.source_order,
+            item.source_name,
+            item.phase,
+            item.semantic_fingerprint,
+            item.window_count,
+            item.image_count,
+            item.luna_request_count,
+        )
+        for item in estimates
+    )
+    body = json.dumps(rows, ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+
+def _estimates():
+    from vlogsrt.project.raw.models import AnalysisEstimate, AnalysisSemanticEstimate
+
+    asr = AnalysisEstimate(
+        asset_id="a1",
+        source_order=1,
+        source_name="제주.mov",
+        has_audio=True,
+        audio_stream_index=1,
+        sample_count=96000,
+        video_frame_count=150,
+        extent_seconds="6",
+        window_count=1,
+        frame_sample_count=8,
+        asr_chunk_count=1,
+        asr_seconds="6",
+        luna_request_count=1,
+        price_status="unknown",
+        user_ceiling_total=None,
+        note="문구",
+    )
+    semantic = AnalysisSemanticEstimate(
+        asset_id="a1",
+        source_order=1,
+        source_name="제주.mov",
+        phase="semantic",
+        semantic_fingerprint="f" * 64,
+        window_count=1,
+        image_count=8,
+        luna_model="gpt-6-luna",
+        luna_request_count=1,
+        price_status="unknown",
+        user_ceiling_total=None,
+        note="문구",
+    )
+    return asr, semantic
+
+
+def test_luna_estimate_digests_are_byte_identical_and_a_ceiling_changes_them() -> None:
+    asr, semantic = _estimates()
+    assert asr.ceiling_usd is None
+    assert (semantic.request_ceiling_usd, semantic.ceiling_usd) == (None, None)
+    assert browser_runtime.asr_estimate_digest((asr,)) == _old_asr_digest((asr,))
+    assert browser_runtime.semantic_estimate_digest((semantic,)) == _old_semantic_digest(
+        (semantic,)
+    )
+    priced_asr = replace(asr, ceiling_usd="0.248132")
+    priced = replace(semantic, request_ceiling_usd="0.248132", ceiling_usd="0.248132")
+    assert browser_runtime.asr_estimate_digest((priced_asr,)) != _old_asr_digest((asr,))
+    assert browser_runtime.semantic_estimate_digest((priced,)) != _old_semantic_digest((semantic,))
+
+
+class _MintService:
+    """`mint_luna_approvals`가 보는 서비스 표면만 — 설정·2단계 견적·1단계 기록."""
+
+    def __init__(self, model: str, request_ceiling_usd: str | None) -> None:
+        from vlogsrt.project.raw.config import RawWorkflowConfig
+
+        workflow = RawWorkflowConfig()
+        self.workflow = replace(workflow, models=replace(workflow.models, luna_model=model))
+        _asr, semantic = _estimates()
+        self.estimate = replace(
+            semantic,
+            luna_model=model,
+            window_count=3,
+            luna_request_count=3,
+            request_ceiling_usd=request_ceiling_usd,
+        )
+
+    def settings(self, root):
+        return self.workflow
+
+    def analysis_semantic_estimate(self, root, revision_id):
+        return (self.estimate,)
+
+    def analysis_document(self, root, revision_id, asset_id):
+        from vlogsrt.project.raw.analysis_workflow import ASR_PHASE_SCHEMA
+
+        audio = {"source_sha256": "a" * 64, "audio_stream_index": 1, "sample_count": 96000}
+        return {"schema": ASR_PHASE_SCHEMA, "audio": audio}
+
+
+def test_minted_claude_approvals_carry_the_official_ceiling(tmp_path: Path) -> None:
+    from decimal import Decimal
+
+    from vlogsrt.project.raw.understanding_luna import PRICE_OFFICIAL, PRICE_UNKNOWN
+
+    service = _MintService(CLAUDE, "0.248132")
+    (approval,) = browser_runtime.mint_luna_approvals(service, tmp_path, "rev", ["a1"]).values()
+    assert approval.luna_model == CLAUDE
+    assert approval.budget.luna_price_status == PRICE_OFFICIAL
+    assert approval.budget.request_ceiling_usd == Decimal("0.248132")
+    assert approval.budget.max_luna_requests == 3
+
+    luna_service = _MintService("gpt-6-luna", None)
+    (luna_approval,) = browser_runtime.mint_luna_approvals(
+        luna_service, tmp_path, "rev", ["a1"]
+    ).values()
+    assert luna_approval.budget.luna_price_status == PRICE_UNKNOWN
+    assert luna_approval.budget.request_ceiling_usd is None
+
+
+def test_a_claude_estimate_without_a_ceiling_mints_nothing(tmp_path: Path) -> None:
+    with pytest.raises(browser_runtime.BrowserRuntimeError, match="상한"):
+        browser_runtime.mint_luna_approvals(_MintService(CLAUDE, None), tmp_path, "rev", ["a1"])
 
 
 # ── 브라우저 생산 흐름 — 가짜 전송 경계로 끝까지(승인은 화면이 주조한다) ────────

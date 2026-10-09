@@ -5,18 +5,23 @@
 네트워크 호출·ffmpeg 실행·파일 쓰기를 하지 않는다.
 
 모델 리터럴은 이 파일에만 있을 수 있다(`scripts/check_invariants.py` §7 —
-gpt-6-luna는 정확히 이 경로, whisper-1·gpt-transcribe는 config 경로 셋 중 하나).
-2026-10-02 공식 문서 확인값이며 계정 접근·유료 호출은 시험하지 않았다(§11.9).
+gpt-6-luna·claude-*는 정확히 이 경로, whisper-1·gpt-transcribe는 config 경로 셋 중 하나).
+2026-10-02 공식 문서 확인값이며 계정 접근·유료 호출은 시험하지 않았다(§11.9). Claude
+의미 분석 프로파일(D54)은 2026-10-09 공식 가격표 확인값이다.
 """
 
 from __future__ import annotations
 
 import json
+import math
 import unicodedata
-from dataclasses import dataclass, fields, is_dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, fields, is_dataclass, replace
 from datetime import date
 from decimal import Decimal, InvalidOperation
+from types import MappingProxyType
 from typing import TypeVar, cast
+from urllib.parse import urlsplit
 
 _T = TypeVar("_T")
 
@@ -173,6 +178,184 @@ class RawWorkflowConfig:
     require_explicit_authorization: bool = True
 
 
+# ─────────────────────────────────────────────────────────────
+#  의미 분석 모델 공급자(D54) — Luna 역할을 Claude Opus 5.5가 맡을 수 있다
+# ─────────────────────────────────────────────────────────────
+
+ANALYSIS_PROVIDER_OPENAI = "openai"
+ANALYSIS_PROVIDER_ANTHROPIC = "anthropic"
+
+CLAUDE_MODEL_PREFIX = "claude-"
+"""Claude 모델 이름의 접두어 — 공급자 판정의 유일한 근거다. 등록되지 않은 이름은 설정이 거부한다."""
+
+CLAUDE_EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
+"""Opus 5.5가 받는 `output_config.effort` 값 — 문서 확인값(2026-10-09)."""
+
+CLAUDE_MAX_OUTPUT_TOKENS_LIMIT = 128_000
+"""Opus 5.5의 출력 상한 — `max_tokens`는 이보다 클 수 없다."""
+
+PRICE_TOKEN_UNIT = Decimal(1_000_000)
+"""단가의 단위 — 100만 토큰당 USD."""
+
+CLAUDE_STANDARD_INFERENCE_GEO = "global"
+"""표준 단가의 추론 지역(데이터 상주 문서, 2026-10-09) — `us`는 모든 토큰 범주가 1.1배다.
+
+요청에 빠지면 작업공간의 `default_inference_geo`가 쓰인다(US로 자동 이전된 조직이 있다).
+명시적으로 보내면 US로 묶인 작업공간은 청구 전에 4xx로 닫힌다."""
+
+CLAUDE_STANDARD_USAGE_GEOS = ("global",)
+"""응답 `usage.inference_geo`가 표준 단가인 값 — 없으면(None)도 표준으로 본다."""
+
+CLAUDE_STANDARD_USAGE_TIERS = ("standard",)
+"""응답 `usage.service_tier`가 표준 단가인 값 — 없으면(None)도 표준으로 본다.
+
+요청에는 `service_tier`를 싣지 않는다 — Opus 5.5에는 우선 등급이 없어 아무 일도 하지
+않고, `standard_only`를 받아 주는지 문서로 확인되지 않는다(400 위험). 응답 쪽 검사만 둔다."""
+
+TRANSCRIPTION_IDENTITY_LUNA_MODEL = "gpt-6-luna"
+"""전사 전용 열쇠에 고정해 두는 의미 분석 모델(D54).
+
+내부 전사 캐시·최종 자막 지문은 설정 전체를 묶는다. 의미 분석 모델이 그 안에서 움직이면
+모델을 바꾸는 것만으로 whisper를 다시 사게 된다 — 전사는 그 모델을 듣지 않는다. 기존
+작업공간의 열쇠가 그대로이도록 W-14 이전의 기본값으로 못 박는다. 기본값이 바뀌어도
+이 값은 움직이지 않는다.
+"""
+
+
+@dataclass(frozen=True)
+class RawClaudeAnalysisProfile:
+    """Claude 의미 분석의 동결 프로파일 — RawWorkflowConfig **밖**에 산다(D54).
+
+    설정에 칸을 더하면 엄격한 왕복(`_config_from_mapping`)이 기존 작업공간을 못 열고,
+    설정 전체를 묶는 지문이 전부 흔들린다. 그래서 작업공간은 모델 이름만 저장하고
+    단가·엔드포인트·출력 한도는 이 등록표가 정한다.
+
+    단가는 2026-10-09 공식 가격표 확인값이다 — 0원으로 두지 마라. 계정 접근·유료
+    호출은 시험하지 않았다(사람만 한다). `effort`·`max_output_tokens`·`quote_*`는 외부
+    근거 없는 조정 대상이다. 이미지 토큰은 ⌈w/28⌉×⌈h/28⌉, 이미지당 4784가 상한이다.
+    """
+
+    model: str = "claude-opus-5-5"
+    label: str = "Claude Opus 5.5"
+    api_base_url: str = "https://api.anthropic.com"
+    api_version: str = "2023-06-01"
+    timeout_seconds: float = 300.0
+    effort: str = "medium"
+    max_output_tokens: int = 8192
+    inference_geo: str = CLAUDE_STANDARD_INFERENCE_GEO
+    pricing_checked_at: date = date(2026, 10, 9)
+    pricing_revision: str = "anthropic-claude-opus-5-5-2026-10-09"
+    currency: str = "USD"
+    input_per_mtok: Decimal = Decimal("4")
+    output_per_mtok: Decimal = Decimal("20")
+    cache_write_5m_per_mtok: Decimal = Decimal("5")
+    cache_write_1h_per_mtok: Decimal = Decimal("8")
+    cache_read_per_mtok: Decimal = Decimal("0.20")
+    batch_input_per_mtok: Decimal = Decimal("2")
+    batch_output_per_mtok: Decimal = Decimal("10")
+    image_patch_pixels: int = 28
+    image_max_visual_tokens: int = 4784
+    quote_text_tokens_per_window: int = 12000
+    quote_overhead_tokens: int = 2000
+    account_access_status: str = "unverified"
+    integration_test_status: str = "not_run"
+    source_urls: tuple[str, ...] = (
+        "https://platform.claude.com/docs/en/about-claude/pricing",
+        "https://platform.claude.com/docs/en/build-with-claude/vision",
+        "https://platform.claude.com/docs/en/build-with-claude/structured-outputs",
+        "https://platform.claude.com/docs/en/api/errors",
+        "https://platform.claude.com/docs/en/api/versioning",
+    )
+
+
+CLAUDE_ANALYSIS_PROFILE = RawClaudeAnalysisProfile()
+"""지금 등록된 유일한 Claude 프로파일 — 클라이언트(엔드포인트·버전·시간 한도)의 근원이다."""
+
+CLAUDE_ANALYSIS_PROFILES: Mapping[str, RawClaudeAnalysisProfile] = MappingProxyType(
+    {CLAUDE_ANALYSIS_PROFILE.model: CLAUDE_ANALYSIS_PROFILE}
+)
+"""모델 이름 → 프로파일(읽기 전용). 여기 없는 `claude-*`는 설정이 거부한다."""
+
+ANALYSIS_MODEL_CHOICES: tuple[str, ...] = (
+    RawModelRoles().luna_model,
+    *CLAUDE_ANALYSIS_PROFILES,
+)
+"""고를 수 있는 의미 분석 모델 — 기본(gpt-6-luna)이 맨 앞이다. 기본은 바꾸지 않는다."""
+
+
+def analysis_provider(model: str) -> str:
+    """의미 분석 모델의 공급자 — Claude 접두어면 anthropic, 아니면 지금처럼 openai."""
+    if model.startswith(CLAUDE_MODEL_PREFIX):
+        return ANALYSIS_PROVIDER_ANTHROPIC
+    return ANALYSIS_PROVIDER_OPENAI
+
+
+def claude_profile(model: str) -> RawClaudeAnalysisProfile:
+    """등록된 Claude 프로파일 — 없는 이름은 조용히 다른 프로파일로 대체하지 않는다."""
+    try:
+        return CLAUDE_ANALYSIS_PROFILES[model]
+    except KeyError as error:
+        raise ValueError(f"등록되지 않은 Claude 모델이다: {model!r}") from error
+
+
+def analysis_model_label(model: str) -> str:
+    """화면·CLI에 쓰는 이름 — Claude는 등록표의 이름, 나머지는 모델 이름 그대로."""
+    if analysis_provider(model) == ANALYSIS_PROVIDER_ANTHROPIC:
+        return claude_profile(model).label
+    return model
+
+
+def transcription_identity_view(config: RawWorkflowConfig) -> RawWorkflowConfig:
+    """전사 전용 열쇠가 보는 설정 — 의미 분석 모델만 고정값으로 바꾼다(D54)."""
+    if config.models.luna_model == TRANSCRIPTION_IDENTITY_LUNA_MODEL:
+        return config
+    pinned = replace(config.models, luna_model=TRANSCRIPTION_IDENTITY_LUNA_MODEL)
+    return replace(config, models=pinned)
+
+
+def claude_profile_problems(profile: RawClaudeAnalysisProfile) -> list[str]:
+    """프로파일의 자기 일관성 — 단가는 유한한 양수, 한도·엔드포인트는 쓸 수 있는 값."""
+    problems = [
+        f"{name}이(가) 유한한 양수가 아니다 — 미확인 단가를 무료로 두지 마라"
+        for name in (
+            "input_per_mtok",
+            "output_per_mtok",
+            "cache_write_5m_per_mtok",
+            "cache_write_1h_per_mtok",
+            "cache_read_per_mtok",
+            "batch_input_per_mtok",
+            "batch_output_per_mtok",
+        )
+        if not _positive_decimal(getattr(profile, name))
+    ]
+    if profile.effort not in CLAUDE_EFFORT_LEVELS:
+        problems.append(f"effort가 허용 값이 아니다: {profile.effort!r}")
+    if profile.inference_geo != CLAUDE_STANDARD_INFERENCE_GEO:
+        problems.append("inference_geo는 표준 단가 지역(global)이어야 한다 — US 전용은 1.1배다")
+    if not 1 <= profile.max_output_tokens <= CLAUDE_MAX_OUTPUT_TOKENS_LIMIT:
+        problems.append(f"max_output_tokens는 1~{CLAUDE_MAX_OUTPUT_TOKENS_LIMIT}이어야 한다")
+    if not _https_url(profile.api_base_url):
+        problems.append("api_base_url은 호스트가 있는 https URL이어야 한다")
+    if not profile.api_version.strip():
+        problems.append("api_version이 비어 있다")
+    if not math.isfinite(profile.timeout_seconds) or profile.timeout_seconds <= 0:
+        problems.append("timeout_seconds는 유한한 양수여야 한다")
+    if min(profile.image_patch_pixels, profile.image_max_visual_tokens) < 1:
+        problems.append("이미지 토큰 계산값은 1 이상이어야 한다")
+    if min(profile.quote_text_tokens_per_window, profile.quote_overhead_tokens) < 0:
+        problems.append("견적 여유 토큰은 음수일 수 없다")
+    return problems
+
+
+def _positive_decimal(value: object) -> bool:
+    return isinstance(value, Decimal) and value.is_finite() and value > 0
+
+
+def _https_url(url: str) -> bool:
+    parts = urlsplit(url)
+    return parts.scheme == "https" and bool(parts.netloc)
+
+
 def validate_raw_workflow_config(config: RawWorkflowConfig) -> None:
     """동결 설정의 자기 일관성을 검사한다 — 어긋나면 ValueError로 전부 보고한다.
 
@@ -214,6 +397,19 @@ def role_problems(models: RawModelRoles) -> list[str]:
     ]
     if models.text_model.strip() and models.text_model == models.timing_model:
         problems.append("문구 모델과 시간 모델이 같다 — 시각 없는 문구에 가짜 시각이 붙는다")
+    problems += [
+        f"{role} 모델에 Claude를 쓸 수 없다 — Claude는 오디오를 받지 않는다: {model!r}"
+        for role, model in (("문구", models.text_model), ("시간", models.timing_model))
+        if analysis_provider(model) == ANALYSIS_PROVIDER_ANTHROPIC
+    ]
+    if analysis_provider(models.luna_model) == ANALYSIS_PROVIDER_ANTHROPIC:
+        profile = CLAUDE_ANALYSIS_PROFILES.get(models.luna_model)
+        if profile is None:
+            problems.append(
+                f"의미 분석 모델이 등록되지 않은 Claude 모델이다: {models.luna_model!r}"
+            )
+        else:
+            problems += claude_profile_problems(profile)
     return problems
 
 
