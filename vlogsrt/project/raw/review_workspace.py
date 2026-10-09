@@ -37,7 +37,7 @@ from fractions import Fraction
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from vlogsrt import preprocess
+from vlogsrt import log, preprocess
 from vlogsrt.project.raw import cache_policy, tiering
 from vlogsrt.project.raw import confirmed_package as confirmed
 from vlogsrt.project.raw.analysis_store import AnalysisStore
@@ -346,7 +346,10 @@ def _base_plan_slug(revision: ReviewRevision) -> str:
 MANUAL_SELECTION_PREFIX = "수동 선택 · "
 """자동 제외 근거가 남은 조각을 사람이 사용/제외로 고른 표지 — `apply_edit`이 단다."""
 
-_MACHINE_NOTE_PREFIXES = ("자동 제외: ", "확인 필요: ")
+_AUTO_NOTE_PREFIX = "자동 제외: "
+"""자동 제외 근거 메모의 머리 — 뒤에 근거 JSON이 붙는다(작업대도 이 머리로 찾는다)."""
+
+_MACHINE_NOTE_PREFIXES = (_AUTO_NOTE_PREFIX, "확인 필요: ")
 """조립이 쓰는 메모 머리 — 그 밖의 비지 않은 메모는 사람이 쓴 것이다."""
 
 _EVIDENCE_STATUSES = ("analyzed", "cached", "partial")
@@ -360,6 +363,49 @@ def _segment_seconds(revision: ReviewRevision, segment: ReviewSegment) -> tuple[
     return (
         (segment.start_pts - clock.origin_pts) * clock.time_base,
         (segment.end_pts - clock.origin_pts) * clock.time_base,
+    )
+
+
+_RED_GRADE_TAG = tiering.TIER_TAG_PREFIX + tiering.TIER_LABELS[tiering.TIER_RED]
+
+
+def _auto_provenance(notes: str) -> Mapping[str, object] | None:
+    """근거 메모의 JSON 객체 — 사람이 메모 칸에서 말을 덧붙였거나 바꿨으면 None이다.
+
+    작업대 메모 칸은 이 근거로 미리 채워져 있어 덧붙인 말이 JSON을 깬다. 깨진 메모는 계약
+    위반이 아니라 사람의 흔적이므로 예외로 옮기기·정리를 멈추지 않는다.
+    """
+    try:
+        provenance = json.loads(notes.removeprefix(_AUTO_NOTE_PREFIX))
+    except ValueError:
+        return None
+    return provenance if isinstance(provenance, Mapping) else None
+
+
+def _release_stale_tier_proposal(segment: ReviewSegment) -> ReviewSegment:
+    """옛 등급판이 낸 미검토 제외 제안을 푼다 — 지금 등급이 빨강이 아닐 때만(D52).
+
+    기준이 바뀌어 근거가 사라진 제안이 사람의 확인을 기다리며 출력을 막으면 안 된다.
+    사람이 확인한 제외·자동 정리의 제안·지금 판의 제안은 건드리지 않는다. 근거 메모도
+    지운다 — 남기면 「자동 제외 전체 복원」과 같은 사람 결정으로 읽힌다. 근거 메모를 사람이
+    고쳤으면 풀지 않는다 — 지우면 사람이 쓴 말이 사라지므로 미검토 제외로 남겨 경고한다.
+    """
+    if not is_unreviewed_auto_exclusion(segment) or _RED_GRADE_TAG in segment.visual_tags:
+        return segment
+    if not segment.notes.startswith(_AUTO_NOTE_PREFIX):
+        return segment
+    provenance = _auto_provenance(segment.notes)
+    if provenance is None:
+        log.warn(
+            f"{segment.segment_id}: 자동 제외 근거 메모를 읽을 수 없다(사람이 고친 메모) — "
+            "옛 등급판 제안을 풀지 않고 미검토 제외로 둔다"
+        )
+        return segment
+    stale = provenance.get("version") != tiering.TIER_SETTINGS.tier_version
+    if provenance.get("reason") not in tiering.TIER_RED_REASONS or not stale:
+        return segment
+    return replace(
+        segment, selection="included", visual_tags=confirm_tags(segment.visual_tags), notes=""
     )
 
 
@@ -383,7 +429,7 @@ def _auto_excluded(
         segment,
         selection="excluded",
         visual_tags=(*confirm_tags(segment.visual_tags), AUTO_EXCLUDED_UNREVIEWED_TAG),
-        notes="자동 제외: " + json.dumps(provenance, ensure_ascii=False, sort_keys=True),
+        notes=_AUTO_NOTE_PREFIX + json.dumps(provenance, ensure_ascii=False, sort_keys=True),
     )
 
 
@@ -645,7 +691,7 @@ class ReviewWorkspaceFacade:
                     and AUTO_EXCLUDED_UNREVIEWED_TAG not in segment.visual_tags
                 )
                 # 「자동 제외 전체 복원」은 근거 메모를 남긴 채 사용으로 되돌린다.
-                or (segment.selection != SELECTION_EXCLUDED and notes.startswith("자동 제외: "))
+                or (segment.selection != SELECTION_EXCLUDED and notes.startswith(_AUTO_NOTE_PREFIX))
             ):
                 return True
         return False
@@ -677,10 +723,11 @@ class ReviewWorkspaceFacade:
         return any(marker in segment.visual_tags for segment in revision.segments)
 
     def retier(self, base_plan_id: str | None = None) -> ReviewRevision:
-        """권고와 등급 태그만 다시 매긴다 — 선택·메모·덮기·경계는 그대로(D51, Q8).
+        """권고와 등급 태그를 다시 매긴다 — 사람이 정한 선택·메모·덮기와 경계는 그대로(D51, Q8).
 
-        사람이 등급을 덮은 조각은 권고도 그대로 두고 태그만 새로 단다. 바뀐 것이 없으면
-        리비전을 만들지 않는다.
+        사람이 등급을 덮은 조각은 권고도 그대로 두고 태그만 새로 단다. 예외 하나: 옛 등급판이 낸
+        미검토 제외 제안은 지금 등급이 빨강이 아니면 사용으로 되돌린다(D52 — 사람이 아직 정하지
+        않은 기계 제안이다). 바뀐 것이 없으면 리비전을 만들지 않는다.
         """
         head = self.load_head(base_plan_id).revision
         rows = self.tier_evidence_rows()
@@ -690,7 +737,7 @@ class ReviewWorkspaceFacade:
             graded = self._graded(segment, head, rows, reports)
             if segment.override_recommendation is not None:
                 graded = replace(graded, recommendation=segment.recommendation)
-            segments.append(graded)
+            segments.append(_release_stale_tier_proposal(graded))
         if tuple(segments) == head.segments:
             return head
         return self._publish_snapshot(
@@ -749,7 +796,7 @@ class ReviewWorkspaceFacade:
             cursor = parse_revision(document)
         segments = tuple(
             replace(s, selection="included", visual_tags=confirm_tags(s.visual_tags))
-            if s.notes.startswith("자동 제외: ") and s.segment_id not in manually_selected
+            if s.notes.startswith(_AUTO_NOTE_PREFIX) and s.segment_id not in manually_selected
             else s
             for s in head.segments
         )
@@ -983,7 +1030,7 @@ class ReviewWorkspaceFacade:
                 segments=tuple(
                     replace(segment, notes=MANUAL_SELECTION_PREFIX + segment.notes)
                     if segment.segment_id in edit.segment_ids
-                    and segment.notes.startswith("자동 제외: ")
+                    and segment.notes.startswith(_AUTO_NOTE_PREFIX)
                     else segment
                     for segment in edited.segments
                 ),

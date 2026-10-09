@@ -25,7 +25,6 @@ from vlogsrt import preprocess
 from vlogsrt.project.raw import (
     analysis_workflow,
     segmentation,
-    tier_inputs,
     tiering,
     visual_review,
 )
@@ -284,7 +283,6 @@ __all__ = [
     "SourceOrderRevision",
     "TIER_LABELS",
     "TIER_MIGRATION_JOB_KIND",
-    "TIER_REPORT_JOB_KIND",
     "TIER_SETTINGS",
     "TIER_TAG_PREFIX",
     "AUTO_EXCLUDED_UNREVIEWED_TAG",
@@ -337,26 +335,18 @@ __all__ = [
     "semantic_estimate_digest",
     "middle_frame_index",
     "red_ranges",
-    "report_from_document",
     "snapped_frame_index",
     "unmaterialized_red",
 ]
 
 TIER_MIGRATION_JOB_KIND = "tier_migration"
-"""등급판 옮기기 작업 — 저장된 증거로 계획·검토 머리만 새로 세운다(유료 호출 0회, D51)."""
-
-TIER_REPORT_JOB_KIND = "tier_reports"
-"""등급 보고서 계산 작업 — 저장 PCM·프레임만 잰다(유료 호출 0회, D51)."""
-
-TIER_REPORT_FINGERPRINT = "tier-reports/"
-TIER_EVIDENCE_STATUSES = ("analyzed", "cached", "partial")
+"""등급판 옮기기 작업 — 저장된 증거로 계획·검토 머리만 새로 세운다(유료 호출 0회, D51·D52)."""
 
 TIER_SETTINGS = tiering.TIER_SETTINGS
 TIER_TAG_PREFIX = tiering.TIER_TAG_PREFIX
 TIER_LABELS = tiering.TIER_LABELS
 unmaterialized_red = tiering.unmaterialized_red
 red_ranges = tiering.red_ranges
-report_from_document = tiering.report_from_document
 
 MEDIA_CONTENT_TYPES: dict[str, str] = {
     ".mp4": "video/mp4",
@@ -765,6 +755,8 @@ class RawWorkspaceService:
         self._workspaces: dict[Path, RawWorkspace] = {}
         self._job_managers: dict[Path, JobManager] = {}
         self._waiting_children: dict[tuple[Path, str], str] = {}
+        # 이번 앱 실행에서 등급판 옮기기를 건 머리 — 실패한 머리를 실행마다 한 번만 다시 건다.
+        self._tier_migration_tries: set[tuple[Path, str]] = set()
 
     def _workspace(self, root: Path) -> RawWorkspace:
         key = root.expanduser().resolve()
@@ -1076,18 +1068,13 @@ class RawWorkspaceService:
         return publish_review(self, root, revision_id, context)
 
     def selection_suitability(
-        self,
-        root: Path,
-        revision_id: str,
-        asset_ids: tuple[str, ...],
-        *,
-        pending: set[str] | None = None,
+        self, root: Path, revision_id: str, asset_ids: tuple[str, ...]
     ) -> dict[str, list[dict]]:
-        """원본별 3단 등급 구간(W-11, D51) — 옛 `recommendation` 칸도 함께 싣는다.
+        """원본별 3단 등급 구간(W-11·W-12, D51·D52) — 옛 `recommendation` 칸도 함께 싣는다.
 
-        화면 그리기에서 불리므로 **재지 않는다** — 보관된 등급 보고서만 읽는다. 완성 문서가
-        있는데 보고서가 아직 없으면 그 원본을 `pending`에 넣고 비운다(백그라운드 작업이 잰다).
-        증거를 읽지 못한 원본은 이 화면에서 빠진다(예전과 같다) — 분석 기록 자체는 그대로다.
+        저장된 분석 문서(AI 판정 + 생성 자막)에서 그 자리에서 계산한다 — 로컬 측정도 보관본도
+        백그라운드 작업도 없다(원본 하나에 수 ms). 증거를 읽지 못한 원본은 이 화면에서
+        빠진다(예전과 같다) — 분석 기록 자체는 그대로다.
         """
         summary = self.analysis_overview(root, revision_id)
         result: dict[str, list[dict]] = {}
@@ -1098,34 +1085,33 @@ class RawWorkspaceService:
             if row.asset_id not in asset_ids:
                 continue
             try:
-                report = self._tier_report_for_row(workspace_root, row, compute=False)
+                report = self._tier_report_for_row(workspace_root, row)
             except (OSError, ValueError, KeyError, TypeError):
                 continue
             if report is not None:
                 result[row.asset_id] = [span.document() for span in report.spans]
-            elif pending is not None and _tier_paths(workspace_root, row)[1].is_file():
-                pending.add(row.asset_id)
         return result
 
     def tier_report(self, root: Path, revision_id: str, asset_id: str) -> Any:
-        """원본 하나의 3단 등급 보고서 — 저장된 증거만 읽는다(유료 호출 0회, D51).
+        """원본 하나의 3단 등급 보고서 — 저장된 분석 문서만 읽는다(유료 호출 0회, D51·D52).
 
-        완성 문서가 있으면 PCM 공백·프레임 화질까지 재서 곁파일에 보관하고, Luna가 도는
-        동안이면 진행 문서로 소리 쪽 빨강 없이 계산한다. 분석이 없으면 None이다.
+        완성 문서가 있으면 그 문서로, Luna가 도는 동안이면 진행 문서로(자막 칸이 아직 없어
+        빨강 없이) 계산한다. 분석이 없으면 None이다. 아무것도 쓰지 않는다.
         """
         workspace = self._workspace(root)
         row = AnalysisStore(workspace).source_result(revision_id, asset_id)
         return None if row is None else self._tier_report_for_row(workspace.root, row)
 
     def _tier_report_for_row(
-        self, workspace_root: Path, row: AnalysisSourceResult, *, compute: bool = True
+        self, workspace_root: Path, row: AnalysisSourceResult
     ) -> tiering.TierReport | None:
         directory, document = _tier_paths(workspace_root, row)
         if document.is_file():
-            return tier_inputs.tier_report(
-                document,
+            body = document.read_bytes()
+            return tiering.classify(
+                json.loads(body),
                 audio_start=_record_audio_start(workspace_root, row),
-                compute=compute,
+                document_sha256=hashlib.sha256(body).hexdigest(),
             )
         progress = directory / "suitability_progress.json"
         if not progress.is_file():
@@ -1133,46 +1119,7 @@ class RawWorkspaceService:
         payload = json.loads(progress.read_text(encoding="utf-8"))
         if payload.get("analysis_revision_id") != row.revision_id:
             return None
-        return tier_inputs.progress_report(payload)
-
-    def start_tier_reports(self, root: Path) -> str | None:
-        """등급 보고서를 백그라운드에서 잰다 — 화면은 기다리지 않는다(D51).
-
-        같은 판의 계산이 이미 실패했으면 다시 걸지 않고 그 이유를 돌려준다(그리기마다
-        실패 작업이 쌓이지 않게). 다시 시도는 「등급 다시 계산(무료)」이다.
-        """
-        fingerprint = TIER_REPORT_FINGERPRINT + TIER_SETTINGS.tier_version
-        latest = next(
-            (
-                job
-                for job in self.list_jobs(root)
-                if job.kind == TIER_REPORT_JOB_KIND and job.input_fingerprint == fingerprint
-            ),
-            None,
-        )
-        if latest is not None and latest.status == "failed":
-            return f"등급 계산 실패: {latest.error}"
-
-        def body(context: JobContext) -> None:
-            self._compute_tier_reports(root, context)
-
-        self.submit_job(root, TIER_REPORT_JOB_KIND, fingerprint, body)
-        return None
-
-    def _compute_tier_reports(self, root: Path, context: JobContext) -> None:
-        """판정 증거가 있는 모든 결과 행의 등급 보고서를 재고 곁파일로 남긴다(무료)."""
-        workspace = self._workspace(root)
-        store = AnalysisStore(workspace)
-        seen: set[str] = set()
-        for revision in store.list_revisions():
-            for row in store.list_source_results(revision.revision_id):
-                if row.status not in TIER_EVIDENCE_STATUSES or not row.document_path:
-                    continue
-                if row.document_path in seen:
-                    continue
-                seen.add(row.document_path)
-                context.check_cancel()
-                self._tier_report_for_row(workspace.root, row, compute=True)
+        return tiering.classify(payload)
 
     def start_reference_import(
         self,
@@ -1342,8 +1289,6 @@ class RawWorkspaceService:
         def body(context: JobContext) -> None:
             context.check_cancel()
             facade = self.review_workspace_facade(root)
-            # 등급 보고서를 먼저 잰다 — 화면은 재지 않고 이 곁파일만 읽는다(D51).
-            self._compute_tier_reports(root, context)
             head = self._cleanup_head(root, facade, summary.revision, initialized=initialized)
             # Existing user edits are authoritative; materialize their current geometry.
             package = self.package_overview(root)
@@ -1433,41 +1378,64 @@ class RawWorkspaceService:
             basis=SEGMENTATION_BASIS_SEMANTIC,
         )
 
-    def refresh_tiers(self, root: Path) -> str:
-        """「등급 다시 계산(무료)」과 앱 열기 — 저장된 증거로만 다시 매긴다(D51, Q8).
+    def migrate_tiers(self, root: Path) -> str | None:
+        """앱 열기·새로고침 — 옛 등급판 머리를 지금 판으로 옮긴다(D51 Q8·D52). 없으면 None.
 
-        보고서를 먼저 잰 뒤, **작업 안에서** 지금 머리를 다시 읽어 정한다 — 손대지 않은 옛
-        머리(사람 결정이 실려 오지도 않은)는 빨강을 조각으로 떨어뜨리는 새 계획을 세우고, 그
-        밖에는 등급과 태그만 다시 단다. 처음엔 PCM·프레임을 재느라 수십 초가 걸릴 수 있어
-        화면을 붙잡지 않도록 백그라운드로 돈다(같은 머리에 대한 작업은 하나로 합쳐진다).
+        저장된 AI 판정과 생성 자막만 읽는다(유료 호출 0회). 손대지 않은 머리를 다시 세우는
+        재계획은 원본을 다시 해시하므로 화면을 붙잡지 않게 백그라운드로 돌고, **작업 안에서**
+        머리를 다시 읽어 정한다(같은 머리에 대한 작업은 하나로 합쳐진다).
         """
         facade = self.review_workspace_facade(root)
         head = facade.load_head().revision
-        if not facade.tier_evidence_rows():
-            return "등급을 매길 분석 결과가 없습니다."
+        if facade.has_tier_marker(head) or not facade.tier_evidence_rows():
+            return None
+        failure = self._tier_migration_failure(root, head.revision_id)
+        if failure is not None:
+            return failure
 
         def body(context: JobContext) -> None:
-            self._compute_tier_reports(root, context)
             context.check_cancel()
             current = facade.load_head().revision
-            if not facade.has_tier_marker(current) and facade.is_untouched(current):
+            if facade.has_tier_marker(current):
+                return
+            if facade.is_untouched(current):
                 self._migrate_unedited_head(root, facade)
             else:
                 facade.retier(current.base_plan_id)
 
         self.submit_job(root, TIER_MIGRATION_JOB_KIND, head.revision_id, body)
-        if not facade.has_tier_marker(head) and head.sequence == 0:
+        if facade.is_untouched(head):
             return (
-                "새 등급판을 적용합니다(무료) — 손대지 않은 검토면 제외 제안 구간을"
-                " 조각으로 나눕니다."
+                "등급 기준이 AI 판정 + 자막으로 바뀌어 검토를 다시 세웁니다 — 손대지 않은"
+                " 검토라 제외 제안 구간을 조각으로 나눕니다."
             )
-        return "등급을 다시 계산합니다(무료) — 사용/제외 선택은 그대로입니다."
+        return (
+            "등급 기준이 AI 판정 + 자막으로 바뀌어 등급 표시만 다시 답니다 — 사람이 정한"
+            " 사용/제외는 그대로이고, 근거가 사라진 옛 제외 제안은 사용으로 되돌립니다."
+        )
 
-    def tier_migration_needed(self, root: Path) -> bool:
-        """앱 열기 때 옮길 머리인가 — 판정 증거가 있는데 등급판 표지가 없다."""
-        facade = self.review_workspace_facade(root)
-        head = facade.load_head().revision
-        return not facade.has_tier_marker(head) and bool(facade.tier_evidence_rows())
+    def _tier_migration_failure(self, root: Path, head_revision_id: str) -> str | None:
+        """이번 앱 실행에서 이미 걸었다가 실패한 머리면 그 이유 — 아니면 None(한 번 더 건다).
+
+        실패 기록은 머리에 묶여 영구히 남는다. 같은 실행 안에서는 화면 갱신마다 다시 걸지 않고,
+        앱을 다시 열면 한 번 더 시도한다 — 원본 볼륨이 잠깐 빠진 것 같은 일시 원인이 영구 차단이
+        되어 사람이 손대는 순간 조용히 '등급만 다시 달기'로 내려앉지 않게.
+        """
+        latest = next(
+            (
+                job
+                for job in self.list_jobs(root)
+                if job.kind == TIER_MIGRATION_JOB_KIND and job.input_fingerprint == head_revision_id
+            ),
+            None,
+        )
+        key = (root.expanduser().resolve(), head_revision_id)
+        with self._lock:
+            tried = key in self._tier_migration_tries
+            self._tier_migration_tries.add(key)
+        if tried and latest is not None and latest.status == "failed":
+            return f"등급판 옮기기 실패: {latest.error}"
+        return None
 
     def materialize_review(self, root: Path, context: JobContext, expected_revision: str) -> str:
         from vlogsrt.project.raw.media_refs import resolve

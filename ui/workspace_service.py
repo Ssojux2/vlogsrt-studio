@@ -85,10 +85,6 @@ NOTICE_TEXT = {
 }
 LIBRARY_APPROVE_LABEL = "전체 영상 분석 승인"
 
-RETIER_LABEL = "등급 다시 계산(무료)"
-TIER_PENDING_NOTE = "등급 계산 중(무료)"
-"""저장된 증거로 3단 등급만 다시 매기는 단추 — 유료 호출이 없다는 것을 이름에 싣는다(D51)."""
-
 # 화면 맞춤(D50) — 머리글은 한 줄, 정리 탭은 CSS가 간격을 좁힐 범위 이름을 단다.
 APP_HEADER_ID = "app-header"
 REVIEW_TAB_ID = "review-tab"
@@ -990,25 +986,14 @@ class RawWorkspaceUi:
         return message, *self.visual_workbench_render(root)
 
     def _maybe_migrate_tiers(self, root: Path) -> str | None:
-        """앱 열기·새로고침 때 옛 등급판 머리를 옮긴다(Q8) — 증거가 있을 때만, 무료.
+        """앱 열기·새로고침 때 옛 등급판 머리를 옮긴다(D51 Q8·D52) — AI 판정과 자막만 읽는다.
 
         검토 머리가 아직 없으면 옮길 것도 없다(정상 상태라 안내하지 않는다).
         """
         try:
-            if not self.raw.tier_migration_needed(root):
-                return None
-            return self.raw.refresh_tiers(root)
+            return self.raw.migrate_tiers(root)
         except (raw_service.RawWorkspaceError, raw_service.ReviewError):
             return None
-
-    def capcut_retier_view(self, signature: str | None) -> tuple[str, str, str]:
-        """「등급 다시 계산(무료)」 — 저장된 증거로 등급만 다시 매긴다(유료 호출 0회, D51)."""
-        root = self._require_current_selection(signature)
-        try:
-            message = self.raw.refresh_tiers(root)
-        except (raw_service.RawWorkspaceError, raw_service.ReviewError) as error:
-            raise gr.Error(str(error)) from error
-        return self._capcut_result(root, message)
 
     def _unreviewed_auto_count(self, root: Path) -> int:
         """사람이 아직 보지 않은 자동 제외 수 — 검토 머리가 없으면 셀 것이 없다."""
@@ -2129,7 +2114,6 @@ class RawWorkspaceUi:
                 handoff = gr.Button("선택한 컷 Final Cut으로 출력")
                 # 출력 거부 문구가 이 단추를 누르라고 말한다 — 접힌 서랍에 두지 않는다.
                 confirm_auto = gr.Button("자동 제외 확인")
-                retier = gr.Button(RETIER_LABEL, scale=0)
             # 범위 요약과 진행 상태를 한 줄에 — 무대가 쓸 세로 공간을 아낀다(D50).
             with gr.Row():
                 library_summary = gr.Markdown(
@@ -2233,7 +2217,6 @@ class RawWorkspaceUi:
             )
             handoff.click(self.capcut_handoff_view, self._signature_state, self._capcut_status)
             confirm_auto.click(self.capcut_confirm_auto_view, self._signature_state, outputs)
-            retier.click(self.capcut_retier_view, self._signature_state, outputs)
             restore.click(
                 lambda sig: self.capcut_edit_view(sig, "restore"), self._signature_state, outputs
             )
@@ -3218,21 +3201,13 @@ class RawWorkspaceUi:
             selected_card = _card_values(selected, selected_order)
         task_views = self._task_views(root)
         red_unmaterialized = 0
-        tier_pending: set[str] = set()
         for sid, source in sources_model.items():
             task = task_views.get(sid, {})
             source["analysisState"] = task.get("stage", "분석 대기")
             if task.get("revision"):
-                rows = self.raw.selection_suitability(
-                    root, task["revision"], (sid,), pending=tier_pending
-                ).get(sid, [])
+                rows = self.raw.selection_suitability(root, task["revision"], (sid,)).get(sid, [])
                 source["suggestions"] = [self._suggestion_row(row) for row in rows]
                 red_unmaterialized += self._unmaterialized_red_count(source)
-        if tier_pending:
-            # 첫 측정은 수십 초다 — 그리기는 기다리지 않고 작업에 맡긴다(끝나면 틱이 다시 그린다).
-            failure = self.raw.start_tier_reports(root)
-            for sid in tier_pending:
-                sources_model[sid]["analysisState"] = failure or TIER_PENDING_NOTE
         for sid, source in sources_model.items():
             transcript = self.raw.source_transcript(root, sid)
             if transcript:

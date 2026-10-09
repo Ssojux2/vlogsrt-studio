@@ -1,15 +1,17 @@
-"""3단 등급 — 자막(소리)과 영상을 **따로** 판정한 뒤 표 하나로 합친다(W-11, D51).
+"""3단 등급 — 자막과 영상을 **따로** 판정한 뒤 표 하나로 합친다(W-11·W-12, D51·D52).
 
-순수 함수만 산다: 프로세스·DB·서비스·파일 읽기가 없다. 입력은 저장된 증거 문서와,
-호출자가 미리 잰 값(공백 RMS·프레임 화질)이다. 같은 입력이면 같은 보고서가 나온다 —
+순수 함수만 산다: 프로세스·DB·서비스·파일 읽기가 없다. 입력은 저장된 분석 문서 하나뿐이다 —
+AI 판정(Luna 창의 `annotations[]`·프레임 유무)과 생성 자막(`utterances[]`·ASR 청크 실패·오디오
+트랙 유무). 소리 크기나 화면 밝기를 로컬에서 재지 않는다(D52). 같은 문서면 같은 보고서가 나온다 —
 유료 호출 0회로 언제든 다시 계산한다(분석 지문에 들어가지 않는다).
 
 지키는 선:
 
-- **빨강은 제안이다.** 측정된 무음과 측정된 영상 결함만 빨강이 된다. 빨강은 자동 제외
-  후보로만 쓰이고, 사람이 확인하기 전에는 출력이 닫힌다(D35, 규칙 9).
-- **모름은 결함이 아니다.** 프레임이 없거나(추출 실패) 판정이 실패했거나 아직 없으면
-  노랑 + 판정 보류다. 전사 실패 구간은 절대 무음이 아니다.
+- **빨강은 제안이다.** 자막 없는 긴 공백인데 Luna가 그 화면을 풍경(`recommended`)으로 보지 않은
+  자리만 빨강이 된다. 빨강은 자동 제외 후보로만 쓰이고, 사람이 확인하기 전에는 출력이 닫힌다
+  (D35, 규칙 9). 발화가 있는 구간은 빨강이 되지 않는다.
+- **모름은 결함이 아니다.** 프레임이 없거나 판정이 실패했거나 아직 없으면 노랑 + 판정 보류다.
+  전사 실패 구간은 절대 무음이 아니고, 자막이 아직 없으면(진행 문서) 공백도 아니다.
 - **구간은 빈틈없이 덮는다.** 보고서의 구간은 `[0, extent]`를 겹침·틈 없이 타일한다.
 """
 
@@ -35,31 +37,30 @@ TIER_GREEN = "green"
 TIERS = (TIER_GREEN, TIER_YELLOW, TIER_RED)
 
 RED_SILENCE = "tier_silence"
-RED_VIDEO_DEFECT = "tier_video_defect"
+LEGACY_RED_REASONS = ("tier_video_defect",)
+"""옛 등급판(D51)만 냈던 빨강 이유 — 지금은 만들지 않고, 낡은 제안을 풀 때만 알아본다(D52)."""
+TIER_RED_REASONS = (RED_SILENCE, *LEGACY_RED_REASONS)
 
 AUDIO_SPEECH_DENSE = "speech_dense"
 AUDIO_SPEECH_SPARSE = "speech_sparse"
-AUDIO_AMBIENT = "ambient_no_speech"
-AUDIO_QUIET = "quiet_silence"
+AUDIO_SILENT = "subtitle_silence"
 AUDIO_UNCONFIRMED = "unconfirmed_empty"
 AUDIO_FAILED = "analysis_failed"
 AUDIO_ABSENT = "audio_absent"
-AUDIO_UNMEASURED = "unmeasured"
+AUDIO_PENDING = "subtitle_pending"
 AUDIO_STATUSES = (
     AUDIO_SPEECH_DENSE,
     AUDIO_SPEECH_SPARSE,
-    AUDIO_AMBIENT,
-    AUDIO_QUIET,
+    AUDIO_SILENT,
     AUDIO_UNCONFIRMED,
     AUDIO_FAILED,
     AUDIO_ABSENT,
-    AUDIO_UNMEASURED,
+    AUDIO_PENDING,
 )
 
 VIDEO_GOOD = "good"
 VIDEO_USABLE = "usable"
 VIDEO_FLAGGED = "flagged"
-VIDEO_DEFECT = "defect"
 VIDEO_NO_FRAMES = "no_frames"
 VIDEO_FAILED = "failed"
 VIDEO_UNANALYZED = "unanalyzed"
@@ -70,27 +71,33 @@ VIDEO_STATUSES = (
     VIDEO_UNANALYZED,
     VIDEO_NO_FRAMES,
     VIDEO_FAILED,
-    VIDEO_DEFECT,
 )
 """심각도 오름차순 — 한 구간에 창이 여럿이면 가장 나쁜 쪽이 이긴다."""
 
 VIDEO_UNKNOWN = frozenset({VIDEO_NO_FRAMES, VIDEO_FAILED, VIDEO_UNANALYZED})
 
+_SHORT_RED_RULE = "red-too-short"
+"""빨강 이웃이 없어 노랑으로 내린 짧은 빨강의 규칙 이름 — 보통은 이웃에 흡수되어 보이지 않는다."""
+
+_SILENCE_RED_VIDEO = frozenset({VIDEO_USABLE, VIDEO_FLAGGED})
+"""자막 없는 긴 공백이 빨강이 되는 영상 판정 — Luna가 그 화면을 풍경(`recommended`)으로 보지
+않았다. `usable`을 넣을지는 조정 대상이다(D52 — 실데이터에서 두 변형을 함께 쟀다). 이 값이나
+판정·합치기 규칙을 바꾸면 `tier_version`을 올린다 — 올리지 않으면 이미 매긴 검토 머리가 옛
+등급 그대로 남는다(옮기기는 등급판 표지로만 낡음을 안다)."""
+
 AUDIO_LABELS = {
     AUDIO_SPEECH_DENSE: "발화 많음",
     AUDIO_SPEECH_SPARSE: "발화 적음",
-    AUDIO_AMBIENT: "현장음",
-    AUDIO_QUIET: "무음(측정)",
-    AUDIO_UNCONFIRMED: "발화 없음(미측정)",
+    AUDIO_SILENT: "자막 없음(긴 공백)",
+    AUDIO_UNCONFIRMED: "발화 없음",
     AUDIO_FAILED: "전사 실패",
     AUDIO_ABSENT: "소리 없음",
-    AUDIO_UNMEASURED: "측정 전",
+    AUDIO_PENDING: "자막 전",
 }
 VIDEO_LABELS = {
     VIDEO_GOOD: "좋음",
     VIDEO_USABLE: "사용 가능",
     VIDEO_FLAGGED: "확인 권고",
-    VIDEO_DEFECT: "결함(측정)",
     VIDEO_NO_FRAMES: "프레임 없음",
     VIDEO_FAILED: "판정 실패",
     VIDEO_UNANALYZED: "판정 전",
@@ -137,11 +144,10 @@ def _rational_json(value: Fraction) -> dict[str, int]:
 
 @dataclass(frozen=True)
 class AudioJudgment:
-    """자막(소리) 쪽 판정 — 밀도는 발화가 덮은 길이 ÷ 구간 길이다."""
+    """자막 쪽 판정 — 밀도는 발화가 덮은 길이 ÷ 구간 길이다."""
 
     status: str
     density: Fraction
-    rms_dbfs: float | None
     reason: str
     evidence: tuple[str, ...]
 
@@ -151,14 +157,13 @@ class AudioJudgment:
             "label": AUDIO_LABELS[self.status],
             "reason": self.reason,
             "density": _rational_json(self.density),
-            "rms_dbfs": self.rms_dbfs,
             "evidence": list(self.evidence),
         }
 
 
 @dataclass(frozen=True)
 class VideoJudgment:
-    """영상 쪽 판정 — Luna의 구조화된 칸과 로컬 화질 측정에서만 온다."""
+    """영상 쪽 판정 — Luna의 구조화된 칸과 프레임 유무에서만 온다."""
 
     status: str
     reason: str
@@ -255,17 +260,20 @@ class _Window:
 
 @dataclass(frozen=True)
 class SourceEvidence:
-    """원본 하나의 판정 재료 — 문서를 한 번만 읽어 정리한 값이다."""
+    """원본 하나의 판정 재료 — 문서를 한 번만 읽어 정리한 값이다.
+
+    `audio_state`는 `present`(자막 칸이 있다) · `absent`(오디오 트랙 없음) · `unknown`(진행
+    문서처럼 자막 칸이 아직 없다)이다. `silent`는 무음 후보인 긴 자막 공백이다.
+    """
 
     extent: Fraction
     audio_state: str
     speech: tuple[tuple[Fraction, Fraction, str], ...]
     failed: tuple[tuple[Fraction, Fraction, str], ...]
-    gaps: Mapping[tuple[Fraction, Fraction], float] | None
+    silent: tuple[tuple[Fraction, Fraction], ...]
     windows: tuple[_Window, ...]
     frames_known: bool
     present_frames: frozenset[str]
-    local_video: Mapping[str, Mapping[str, float]]
     settings: RawTierSettings
 
 
@@ -363,23 +371,20 @@ def _windows(document: Mapping[str, Any]) -> tuple[_Window, ...]:
 def evidence_of(
     document: Mapping[str, Any],
     *,
-    gap_levels: Mapping[tuple[Fraction, Fraction], float] | None,
-    local_video: Mapping[str, Mapping[str, float]] | None = None,
     settings: RawTierSettings = TIER_SETTINGS,
     audio_start: Fraction = Fraction(0),
 ) -> SourceEvidence:
-    """판정 재료를 한 번에 정리한다 — `gap_levels=None`은 '소리를 재지 않았다'이다."""
+    """판정 재료를 한 번에 정리한다 — 저장된 문서 밖의 값은 받지 않는다(D52)."""
     frames_known, present = _frames(document)
     return SourceEvidence(
         extent=extent_of(document),
         audio_state=_audio_state(document),
         speech=_spoken(document),
         failed=failed_chunks(document, audio_start=audio_start),
-        gaps=None if gap_levels is None else dict(gap_levels),
+        silent=silent_gaps(document, settings, audio_start=audio_start),
         windows=_windows(document),
         frames_known=frames_known,
         present_frames=present,
-        local_video=dict(local_video or {}),
         settings=settings,
     )
 
@@ -428,13 +433,17 @@ def speech_gaps(
     return tuple(gaps)
 
 
-def quiet_gap_candidates(
+def silent_gaps(
     document: Mapping[str, Any],
     settings: RawTierSettings = TIER_SETTINGS,
     *,
     audio_start: Fraction = Fraction(0),
 ) -> tuple[tuple[Fraction, Fraction], ...]:
-    """PCM으로 잴 공백 — 소리가 있고, 실패 청크에 닿지 않는 긴 공백만이다."""
+    """무음 후보 — 자막 칸이 있고, 실패 청크에 닿지 않는 긴 자막 공백만이다.
+
+    자막이 아직 없거나(진행 문서) 오디오 트랙이 없으면 후보가 없다. 전사가 실패한 자리는
+    자막이 없어도 말이 있었을 수 있다 — 공백으로 치지 않는다.
+    """
     if _audio_state(document) != "present":
         return ()
     failed = failed_chunks(document, audio_start=audio_start)
@@ -464,11 +473,10 @@ def atomic_boundaries(
     document: Mapping[str, Any],
     settings: RawTierSettings = TIER_SETTINGS,
     *,
-    gap_levels: Mapping[tuple[Fraction, Fraction], float] | None = None,
     audio_start: Fraction = Fraction(0),
 ) -> tuple[Fraction, ...]:
     """구간을 자를 자리 — 긴 공백의 가장자리(발화 끝·시작 ± 여유)·창 중심·검증 장면·
-    잰 공백·실패 청크 가장자리.
+    실패 청크 가장자리.
 
     발화 하나하나의 끝은 자르지 않는다 — 자르면 모든 원자 구간의 밀도가 0 아니면 1이 되어
     '띄엄띄엄 말한 구역'을 알아볼 수 없다. 저장된 `recommendation_boundaries`도 쓰지
@@ -477,7 +485,7 @@ def atomic_boundaries(
     extent = extent_of(document)
     points = {Fraction(0), extent}
     gaps = speech_gaps(document, settings, audio_start=audio_start)
-    points.update(p for gap in (*gaps, *(gap_levels or {})) for p in gap)
+    points.update(p for gap in gaps for p in gap)
     points.update(p for w in _windows(document) for p in (w.start, w.end))
     points.update(
         p
@@ -494,26 +502,22 @@ def atomic_boundaries(
     return tuple(sorted(p for p in points if 0 <= p <= extent))
 
 
-# ── 자막(소리) 판정 ───────────────────────────────────────────────────────
+# ── 자막 판정 ─────────────────────────────────────────────────────────────
 
 
 def _percent(value: Fraction) -> int:
     return round(value * 100)
 
 
-def _audio_reason(
-    status: str, density: Fraction, rms: float | None, settings: RawTierSettings
-) -> str:
-    level = "" if rms is None else f" {rms:.1f} dBFS"
+def _audio_reason(status: str, density: Fraction, settings: RawTierSettings) -> str:
     return {
         AUDIO_SPEECH_DENSE: f"발화가 구간의 {_percent(density)}%를 덮는다",
         AUDIO_SPEECH_SPARSE: f"발화가 구간의 {_percent(density)}%뿐이다",
-        AUDIO_AMBIENT: f"발화 없음 · 현장음{level}",
-        AUDIO_QUIET: f"발화 없음 · 무음{level} ≤ {settings.silence_rms_dbfs:g} dBFS",
-        AUDIO_UNCONFIRMED: "발화 없음 · 소리 미측정",
+        AUDIO_SILENT: f"발화 없음 · 자막 없는 공백 {settings.silence_min_seconds:g}초 이상",
+        AUDIO_UNCONFIRMED: "발화 없음 · 무음 후보 아님(짧은 공백·전사 실패 근처·소리 범위 밖)",
         AUDIO_FAILED: "전사 실패 구간 — 무음으로 보지 않는다",
         AUDIO_ABSENT: "오디오 트랙이 없다",
-        AUDIO_UNMEASURED: "소리를 아직 재지 않았다(분석 중)",
+        AUDIO_PENDING: "자막을 아직 만들지 않았다(분석 중)",
     }[status]
 
 
@@ -522,12 +526,9 @@ def _audio(
     settings: RawTierSettings,
     *,
     density: Fraction = Fraction(0),
-    rms: float | None = None,
     evidence: tuple[str, ...] = (),
 ) -> AudioJudgment:
-    return AudioJudgment(
-        status, density, rms, _audio_reason(status, density, rms, settings), evidence
-    )
+    return AudioJudgment(status, density, _audio_reason(status, density, settings), evidence)
 
 
 def _speech_cover(
@@ -540,7 +541,7 @@ def _speech_cover(
 
 
 def judge_audio(evidence: SourceEvidence, start: Fraction, end: Fraction) -> AudioJudgment:
-    """구간 하나의 소리 판정 — 순서가 곧 우선순위다(부재 → 실패 → 발화 → 잰 공백)."""
+    """구간 하나의 자막 판정 — 순서가 곧 우선순위다(부재 → 실패 → 발화 → 자막 전 → 공백)."""
     settings = evidence.settings
     if evidence.audio_state == "absent":
         return _audio(AUDIO_ABSENT, settings)
@@ -553,25 +554,11 @@ def judge_audio(evidence: SourceEvidence, start: Fraction, end: Fraction) -> Aud
         dense = density >= Fraction(str(settings.speech_density_green))
         status = AUDIO_SPEECH_DENSE if dense else AUDIO_SPEECH_SPARSE
         return _audio(status, settings, density=density, evidence=ids)
-    if evidence.audio_state != "present" or evidence.gaps is None:
-        return _audio(AUDIO_UNMEASURED, settings)
-    return _gap_judgment(evidence, start, end)
-
-
-def _gap_judgment(evidence: SourceEvidence, start: Fraction, end: Fraction) -> AudioJudgment:
-    settings = evidence.settings
-    shortest = Fraction(str(settings.silence_min_seconds)) - 2 * Fraction(
-        str(settings.speech_handle_seconds)
-    )
-    for (a, b), rms in sorted((evidence.gaps or {}).items()):
+    if evidence.audio_state != "present":
+        return _audio(AUDIO_PENDING, settings)
+    for a, b in evidence.silent:
         if a <= start and end <= b:
-            quiet = rms <= settings.silence_rms_dbfs and b - a >= shortest
-            return _audio(
-                AUDIO_QUIET if quiet else AUDIO_AMBIENT,
-                settings,
-                rms=rms,
-                evidence=(f"gap:{a}-{b}", f"pcm:rms={rms:.1f}dBFS"),
-            )
+            return _audio(AUDIO_SILENT, settings, evidence=(f"subtitle_gap:{a}-{b}",))
     return _audio(AUDIO_UNCONFIRMED, settings)
 
 
@@ -580,24 +567,6 @@ def _gap_judgment(evidence: SourceEvidence, start: Fraction, end: Fraction) -> A
 
 def _video(status: str, reason: str, evidence: tuple[str, ...], window: str) -> VideoJudgment:
     return VideoJudgment(status, reason, evidence, (window,))
-
-
-def _local_defect(
-    evidence: SourceEvidence, frames: Sequence[str]
-) -> tuple[str, tuple[str, ...]] | None:
-    """저장 프레임의 로컬 측정 — 검은 화면·흐림이 창의 일정 비율 이상일 때만 결함이다."""
-    settings = evidence.settings
-    measured = [(f, evidence.local_video[f]) for f in frames if f in evidence.local_video]
-    if not measured:
-        return None
-    black = [f for f, row in measured if float(row["yavg"]) <= settings.black_luma_max]
-    if Fraction(len(black), len(measured)) >= Fraction(str(settings.black_frame_fraction)):
-        return f"검은 화면 {len(black)}/{len(measured)}장", tuple(f"black:{f}" for f in black)
-    if settings.blur_min > 0:
-        blurry = [f for f, row in measured if float(row.get("blur", 0.0)) >= settings.blur_min]
-        if Fraction(len(blurry), len(measured)) >= Fraction(str(settings.blur_frame_fraction)):
-            return f"흐림 {len(blurry)}/{len(measured)}장", tuple(f"blur:{f}" for f in blurry)
-    return None
 
 
 def _luna_notes(annotation: Mapping[str, Any], partial: bool) -> str:
@@ -632,9 +601,6 @@ def _window_judgment(evidence: SourceEvidence, window: _Window) -> VideoJudgment
         if not frames:
             reason = "프레임 증거 없음 · 재분석 전까지 판정 보류"
             return _video(VIDEO_NO_FRAMES, reason, (f"window:{wid}",), wid)
-    defect = _local_defect(evidence, frames)
-    if defect is not None:
-        return _video(VIDEO_DEFECT, defect[0], defect[1], wid)
     status = {"recommended": VIDEO_GOOD, "usable": VIDEO_USABLE}.get(
         str(row.get("suitability")), VIDEO_FLAGGED
     )
@@ -657,11 +623,13 @@ def judge_video(evidence: SourceEvidence, start: Fraction, end: Fraction) -> Vid
 
 
 def combine(audio: AudioJudgment, video: VideoJudgment) -> tuple[str, str, str | None]:
-    """두 판정 → (등급, 규칙, 빨강 이유). 영상 결함이 무음보다 먼저다(둘 다면 영상)."""
-    if video.status == VIDEO_DEFECT:
-        return TIER_RED, "V-defect", RED_VIDEO_DEFECT
-    if audio.status == AUDIO_QUIET:
-        return TIER_RED, "A-quiet", RED_SILENCE
+    """두 판정 → (등급, 규칙, 빨강 이유).
+
+    빨강은 자막 없는 긴 공백 × Luna가 풍경으로 보지 않은 화면뿐이다. 풍경으로 본 화면이면
+    말이 없어도 노랑이고(풍경 컷), Luna 판정이 없으면 보류다 — AI 근거 없이는 빨강이 없다.
+    """
+    if audio.status == AUDIO_SILENT and video.status in _SILENCE_RED_VIDEO:
+        return TIER_RED, "silent-not-scenery", RED_SILENCE
     if video.status == VIDEO_GOOD and audio.status == AUDIO_SPEECH_DENSE:
         return TIER_GREEN, "both-good", None
     if video.status == VIDEO_GOOD and audio.status == AUDIO_ABSENT:
@@ -676,9 +644,9 @@ def _yellow_rule(audio: str, video: str) -> str:
         return "video-unknown"
     by_audio = {
         AUDIO_SPEECH_SPARSE: "speech-sparse",
-        AUDIO_AMBIENT: "scenery-no-speech",
+        AUDIO_SILENT: "scenery-no-speech",
         AUDIO_UNCONFIRMED: "speech-unconfirmed",
-        AUDIO_UNMEASURED: "audio-unmeasured",
+        AUDIO_PENDING: "audio-pending",
     }
     return by_audio.get(audio, f"video-{video}")
 
@@ -704,16 +672,13 @@ def _grow(host: TierSpan, other: TierSpan, settings: RawTierSettings, *, absorb:
     first, second = sorted((host, other), key=lambda span: span.start)
     left, right = host.end - host.start, other.end - other.start
     density = (host.audio.density * left + other.audio.density * right) / (left + right)
-    levels = [v for v in (host.audio.rms_dbfs, other.audio.rms_dbfs) if v is not None]
-    rms = max(levels) if levels else None
     audio_evidence = (
         host.audio.evidence if absorb else _dedupe(first.audio.evidence, second.audio.evidence)
     )
     audio = AudioJudgment(
         host.audio.status,
         density,
-        rms,
-        _audio_reason(host.audio.status, density, rms, settings),
+        _audio_reason(host.audio.status, density, settings),
         audio_evidence,
     )
     video = VideoJudgment(
@@ -748,7 +713,19 @@ def _host_index(spans: Sequence[TierSpan], index: int) -> int | None:
     return None
 
 
+def _demoted(span: TierSpan) -> TierSpan:
+    """붙을 빨강 이웃이 없는 짧은 빨강을 노랑으로 내린다(D52) — 대개 다음 바퀴에 이웃이 먹지만,
+    짧은 노랑을 먼저 먹어 자라면 이 규칙 이름을 단 노랑으로 남는다. 어느 쪽이든 제안은 아니다.
+    """
+    return replace(span, tier=TIER_YELLOW, rule=_SHORT_RED_RULE, red_reason=None)
+
+
 def _absorb(spans: Sequence[TierSpan], settings: RawTierSettings) -> list[TierSpan]:
+    """`min_span_seconds`보다 짧은 조각을 이웃에 붙인다 — 빨강은 빨강에만, 비빨강은 비빨강에만.
+
+    빨강 이웃이 없는 짧은 빨강은 제안하지 않는다(D52): 긴 공백이 Luna 창 경계를 1초 못 되게
+    넘어 생긴 자투리가 사람의 확인을 기다리며 출력을 막으면 안 된다. 빨강은 자라지 않는다.
+    """
     minimum = Fraction(str(settings.min_span_seconds))
     items = list(spans)
     changed = True
@@ -758,10 +735,13 @@ def _absorb(spans: Sequence[TierSpan], settings: RawTierSettings) -> list[TierSp
             if span.end - span.start >= minimum:
                 continue
             host = _host_index(items, index)
-            if host is None:
+            if host is None and span.tier == TIER_RED:
+                items[index] = _demoted(span)
+            elif host is None:
                 continue
-            items[min(index, host)] = _grow(items[host], span, settings, absorb=True)
-            del items[max(index, host)]
+            else:
+                items[min(index, host)] = _grow(items[host], span, settings, absorb=True)
+                del items[max(index, host)]
             changed = True
             break
     return items
@@ -786,22 +766,17 @@ def _document_sha256(document: Mapping[str, Any]) -> str:
 def classify(
     document: Mapping[str, Any],
     *,
-    gap_levels: Mapping[tuple[Fraction, Fraction], float] | None,
-    local_video: Mapping[str, Mapping[str, float]] | None = None,
     settings: RawTierSettings = TIER_SETTINGS,
     audio_start: Fraction = Fraction(0),
     document_sha256: str | None = None,
 ) -> TierReport:
-    """저장된 증거 → 등급 보고서. 결정적이고 설정을 함께 싣는다."""
+    """저장된 분석 문서 → 등급 보고서. 결정적이고 설정을 함께 싣는다.
+
+    로컬 측정(공백 RMS·프레임 화질)은 받지 않는다 — AI 판정과 생성 자막만이 재료다(D52).
+    """
     validate_tier_settings(settings)
-    evidence = evidence_of(
-        document,
-        gap_levels=gap_levels,
-        local_video=local_video,
-        settings=settings,
-        audio_start=audio_start,
-    )
-    points = atomic_boundaries(document, settings, gap_levels=gap_levels, audio_start=audio_start)
+    evidence = evidence_of(document, settings=settings, audio_start=audio_start)
+    points = atomic_boundaries(document, settings, audio_start=audio_start)
     spans = [_span(evidence, a, b) for a, b in zip(points, points[1:], strict=False)]
     spans = _merge(_absorb(_merge(spans, settings), settings), settings)
     _require_tiling(spans, evidence.extent)
@@ -893,48 +868,3 @@ def unmaterialized_red(
         if first < last and not (first in edges and last in edges):
             count += 1
     return count
-
-
-# ── 보고서 문서 왕복 ───────────────────────────────────────────────────────
-
-
-def _audio_from(row: Mapping[str, Any]) -> AudioJudgment:
-    rms = row.get("rms_dbfs")
-    return AudioJudgment(
-        str(row["status"]),
-        rational(row["density"]),
-        None if rms is None else float(rms),
-        str(row["reason"]),
-        tuple(str(e) for e in row.get("evidence", []) or []),
-    )
-
-
-def _video_from(row: Mapping[str, Any]) -> VideoJudgment:
-    return VideoJudgment(
-        str(row["status"]),
-        str(row["reason"]),
-        tuple(str(e) for e in row.get("evidence", []) or []),
-        tuple(str(w) for w in row.get("windows", []) or []),
-    )
-
-
-def report_from_document(body: Mapping[str, Any]) -> TierReport:
-    """보관한 보고서(`tier_report.json`)를 값으로 — 모양이 어긋나면 KeyError·TypeError다."""
-    spans = tuple(
-        TierSpan(
-            start=rational(row["start"]),
-            end=rational(row["end"]),
-            tier=str(row["tier"]),
-            rule=str(row["rule"]),
-            audio=_audio_from(row["audio"]),
-            video=_video_from(row["video"]),
-            red_reason=None if row.get("red_reason") is None else str(row["red_reason"]),
-        )
-        for row in body["spans"]
-    )
-    return TierReport(
-        tier_version=str(body["tier_version"]),
-        settings=RawTierSettings(**body["settings"]),
-        document_sha256=str(body["document_sha256"]),
-        spans=spans,
-    )

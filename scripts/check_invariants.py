@@ -468,9 +468,9 @@ RETEXT_MUST_NOT_IMPORT = (
     "openai", "subprocess",
 )  # fmt: skip
 
-# 3단 등급은 **저장된 증거 위의 결정적 재계산**이다(D51). 프로세스·제공자·서비스·검토 저장소를
-# 알면 같은 증거가 다른 등급을 낳거나 등급 계산이 유료 호출로 번진다. 파일 읽기는 곁 모듈
-# (`tier_inputs.py`)의 몫이다.
+# 3단 등급은 **저장된 분석 문서(AI 판정 + 생성 자막) 위의 결정적 재계산**이다(D51·D52).
+# 프로세스·제공자·서비스·검토 저장소를 알면 같은 증거가 다른 등급을 낳거나 등급 계산이 유료
+# 호출이나 로컬 측정으로 번진다. 문서 읽기는 `service.py`의 몫이다.
 TIERING_MUST_NOT_IMPORT = (
     "subprocess", "openai", "service", "review_workspace", "understanding_luna", "preprocess",
 )  # fmt: skip
@@ -576,7 +576,7 @@ def check_retext_stays_pure() -> list[str]:
 
 
 def check_tiering_stays_pure() -> list[str]:
-    """D51 — `tiering.py`는 증거 문서와 잰 값을 **값으로** 받아 등급만 돌려준다.
+    """D51·D52 — `tiering.py`는 증거 문서를 **값으로** 받아 등급만 돌려준다.
 
     파일이 사라지면 조용히 통과하지 않는다 — 등급 권한이 어디로 옮겨 갔는지 모르게 된다.
     """
@@ -589,7 +589,7 @@ def check_tiering_stays_pure() -> list[str]:
         for name in _imports(body, TIERING_MUST_NOT_IMPORT)
     ]
     failures += [
-        f"tiering.py:{number}: 파일을 직접 읽거나 쓴다 — 입출력은 tier_inputs.py의 몫이다 (D51)"
+        f"tiering.py:{number}: 파일을 직접 읽거나 쓴다 — 입출력은 service.py의 몫이다 (D51)"
         for number, line in enumerate(body.splitlines(), start=1)
         if TIERING_FILE_IO.search(line)
     ]

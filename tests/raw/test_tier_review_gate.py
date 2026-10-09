@@ -1,9 +1,10 @@
 """빨강 등급은 미검토 자동 제외로만 들어간다 — 사람이 보기 전까지 출력은 닫힌다(W-11, D51, D35).
 
-합성 미디어(15초 · 소리는 디지털 무음)에 재생 분석을 돌린다. 발화는 0.5–1.5·2–3·11–12·
-12.5–13.5초, 3→11초가 8초짜리 공백이다 — 발화 쪽 0.3초를 남긴 3.3–10.7초가 측정 무음이라
-빨강이 되고, 프레임 격자(1/25초) 안쪽으로 붙인 3.32–10.68초 조각이 자동 제외 후보가 된다.
-Luna는 저장 프레임 하나를 근거로 '추천'을 낸다 — 발화 구역은 녹색이다. 유료 호출 0회.
+합성 미디어(15초 · 창 하나)에 재생 분석을 돌린다. 발화는 0.5–1.5·2–3·11–12·12.5–13.5초,
+3→11초가 8초짜리 자막 공백이다 — 발화 쪽 0.3초를 남긴 3.3–10.7초가 자막 없는 긴 공백이다(D52).
+Luna가 그 창을 '사용 가능'(`suitability="usable"`)으로 보면 풍경이 아니므로 빨강이 되고, 프레임
+격자(1/25초) 안쪽으로 붙인 3.32–10.68초 조각이 자동 제외 후보가 된다. '추천'으로 보면 풍경이라
+노랑이다(제외 제안 없음). Luna는 저장 프레임 하나를 근거로 낸다. 유료 호출 0회.
 """
 
 from __future__ import annotations
@@ -48,8 +49,10 @@ def _encode(source: Path) -> None:
     assert result.returncode == 0, result.stderr
 
 
-def analyzed_tier_project(tmp_path: Path) -> tuple[RawWorkspaceService, Path]:
-    """가져오기 → 순서 → 재생 분석까지 — 검토 머리는 아직 없다."""
+def analyzed_tier_project(
+    tmp_path: Path, suitability: str = "recommended"
+) -> tuple[RawWorkspaceService, Path]:
+    """가져오기 → 순서 → 재생 분석까지 — 검토 머리는 아직 없다. 창 하나의 Luna 판정을 고른다."""
     source = tmp_path / "tier.mov"
     _encode(source)
     service = RawWorkspaceService()
@@ -73,7 +76,7 @@ def analyzed_tier_project(tmp_path: Path) -> tuple[RawWorkspaceService, Path]:
     luna_path = root / "analysis/replay/luna-fixtures.json"
     fixtures = json.loads(luna_path.read_text())
     fixtures["windows"]["window_000000"].update(
-        suitability="recommended",
+        suitability=suitability,
         suitability_reason="계곡과 인물이 선명하다",
         evidence_ids=[FIRST_FRAME],
         uncertainties=["원거리 인물 식별 불확실"],
@@ -84,9 +87,11 @@ def analyzed_tier_project(tmp_path: Path) -> tuple[RawWorkspaceService, Path]:
     return service, root
 
 
-def tier_project(tmp_path: Path) -> tuple[RawWorkspaceService, Path]:
+def tier_project(
+    tmp_path: Path, suitability: str = "recommended"
+) -> tuple[RawWorkspaceService, Path]:
     """분석 뒤 자동 정리까지 — 검토 머리가 새 등급판으로 선다."""
-    service, root = analyzed_tier_project(tmp_path)
+    service, root = analyzed_tier_project(tmp_path, suitability)
     cleanup = service.start_cleanup(root)
     finished = _wait_terminal(service, root, cleanup.job_id)
     assert finished.status == "succeeded", finished.error
@@ -119,7 +124,7 @@ def _legacy_head(service: RawWorkspaceService, root: Path, monkeypatch: pytest.M
 def test_red_silence_becomes_unreviewed_auto_exclusion_and_export_refuses_until_confirm(
     tmp_path: Path,
 ):
-    service, root = tier_project(tmp_path)
+    service, root = tier_project(tmp_path, suitability="usable")
     facade = ReviewWorkspaceFacade(root)
     head = facade.load_head().revision
     pending = unreviewed_auto_exclusions(head)
@@ -127,9 +132,15 @@ def test_red_silence_becomes_unreviewed_auto_exclusion_and_export_refuses_until_
     (segment,) = pending
     provenance = json.loads(segment.notes.removeprefix("자동 제외: "))
     assert provenance["reason"] == tiering.RED_SILENCE
-    assert provenance["version"] == "raw-tier/v1"
-    assert "audio:quiet_silence" in provenance["evidence"]
+    assert provenance["version"] == "raw-tier/v2"
+    assert provenance["evidence"][:3] == [
+        "tier:silent-not-scenery",
+        "audio:subtitle_silence",
+        "video:usable",
+    ]
+    assert not any(e.startswith("pcm:") for e in provenance["evidence"])
     assert "등급: 제외 제안" in segment.visual_tags
+    assert "등급판 raw-tier/v2" in segment.visual_tags
     with pytest.raises(RawWorkspaceError, match="자동 제외 1개를 먼저 확인"):
         service.export_final_cut(root)
     confirmed = facade.confirm_automatic_exclusions()
@@ -142,25 +153,28 @@ def test_red_silence_becomes_unreviewed_auto_exclusion_and_export_refuses_until_
 
 @needs_ffmpeg
 def test_green_and_yellow_never_change_selection(tmp_path: Path):
+    """Luna가 그 화면을 '추천'으로 보면 자막 없는 공백은 풍경이다 — 노랑, 제외 제안 없음(D52)."""
     service, root = tier_project(tmp_path)
     head = ReviewWorkspaceFacade(root).load_head().revision
     rows = service.selection_suitability(
         root, service.analysis_overview(root).revision.revision_id, (head.segments[0].source_id,)
     )[head.segments[0].source_id]
-    assert [row["tier"] for row in rows] == ["green", "red", "green"]
+    assert [(row["tier"], row["rule"]) for row in rows] == [
+        ("green", "both-good"),
+        ("yellow", "scenery-no-speech"),
+        ("green", "both-good"),
+    ]
     assert rows[0]["audio"]["status"] == "speech_dense"
     assert rows[0]["video"]["status"] == "good"
     assert "확인 메모: 원거리 인물 식별 불확실" in rows[0]["video"]["reason"]
+    assert (rows[1]["audio"]["status"], rows[1]["red_reason"]) == ("subtitle_silence", None)
+    assert unreviewed_auto_exclusions(head) == ()
     for segment in head.segments:
-        start, end = _seconds(head, segment)
-        inside_red = RED[0] <= start and end <= RED[1]
-        assert (segment.selection == "excluded") == inside_red
+        assert segment.selection == "included"
         assert tiering.tier_marker() in segment.visual_tags
-        if not inside_red:
-            assert segment.recommendation == "recommended"
-            assert "등급: 추천" in segment.visual_tags
-            assert AUTO_EXCLUDED_UNREVIEWED_TAG not in segment.visual_tags
-            assert not segment.notes.startswith("자동 제외")
+        assert AUTO_EXCLUDED_UNREVIEWED_TAG not in segment.visual_tags
+        assert not segment.notes.startswith("자동 제외")
+        assert "등급: 제외 제안" not in segment.visual_tags
 
 
 @needs_ffmpeg
@@ -176,7 +190,7 @@ def test_retier_keeps_manual_selection_override_and_notes(
     edited = facade.set_notes(edited.base_plan_id, first.segment_id, "사람 메모")
     retiered = facade.retier(edited.base_plan_id)
     assert retiered.sequence == edited.sequence + 1
-    assert retiered.edit is not None and retiered.edit.notes == "등급 재계산 raw-tier/v1"
+    assert retiered.edit is not None and retiered.edit.notes == "등급 재계산 raw-tier/v2"
     for before, after in zip(edited.segments, retiered.segments, strict=True):
         assert (before.segment_id, before.start_pts, before.end_pts) == (
             after.segment_id,
@@ -199,16 +213,17 @@ def test_retier_keeps_manual_selection_override_and_notes(
 def test_cleanup_on_unedited_head_materializes_red_on_edited_head_only_relabels(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    service, root = tier_project(tmp_path)
+    service, root = tier_project(tmp_path, suitability="usable")
     facade = ReviewWorkspaceFacade(root)
     legacy = _legacy_head(service, root, monkeypatch)
-    assert service.tier_migration_needed(root)
+    assert facade.load_head().revision == legacy  # 옮길 머리(표지 없음)가 지금 머리다
     finished = _wait_terminal(service, root, service.start_cleanup(root).job_id)
     assert finished.status == "succeeded", finished.error
     migrated = facade.load_head().revision
     assert migrated.base_plan_id != legacy.base_plan_id
     assert [_seconds(migrated, s) for s in unreviewed_auto_exclusions(migrated)] == [RED]
-    assert not service.tier_migration_needed(root)
+    assert ReviewWorkspaceFacade.has_tier_marker(migrated)
+    assert service.migrate_tiers(root) is None  # 정리가 이미 옮겼다 — 앱 열기에 할 일이 없다
 
     # 사람이 손댄 옛 머리는 경계를 그대로 두고 등급만 다시 단다.
     legacy = _legacy_head(service, root, monkeypatch)
@@ -238,28 +253,103 @@ def test_cleanup_on_unedited_head_materializes_red_on_edited_head_only_relabels(
 
 
 @needs_ffmpeg
-def test_refresh_tiers_migrates_unedited_head_in_background(
+def test_migrate_tiers_rebuilds_unedited_head_in_background(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    service, root = tier_project(tmp_path)
+    service, root = tier_project(tmp_path, suitability="usable")
     legacy = _legacy_head(service, root, monkeypatch)
-    message = service.refresh_tiers(root)
-    assert "새 등급판을 적용합니다" in message
+    message = service.migrate_tiers(root)
+    assert message is not None and "AI 판정 + 자막" in message and "다시 세웁니다" in message
+    assert "무료" not in message
     job = next(j for j in service.list_jobs(root) if j.kind == "tier_migration")
     assert _wait_terminal(service, root, job.job_id).status == "succeeded"
     migrated = ReviewWorkspaceFacade(root).load_head().revision
     assert migrated.base_plan_id != legacy.base_plan_id
     assert len(unreviewed_auto_exclusions(migrated)) == 1
-    # 이미 새 판이면 등급만 다시 계산한다 — 바뀐 것이 없으니 리비전도 없다.
-    assert "등급을 다시 계산합니다" in service.refresh_tiers(root)
-    again = [j for j in service.list_jobs(root) if j.kind == "tier_migration"]
-    assert all(_wait_terminal(service, root, j.job_id).status == "succeeded" for j in again)
+    # 이미 지금 판이면 옮길 것이 없다 — 작업도 리비전도 없다.
+    jobs = len(service.list_jobs(root))
+    assert service.migrate_tiers(root) is None
+    assert len(service.list_jobs(root)) == jobs
     assert ReviewWorkspaceFacade(root).load_head().revision == migrated
 
 
 @needs_ffmpeg
+def test_failed_migration_is_reported_not_resubmitted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """같은 머리에서 옮기기가 실패했으면 다시 걸지 않고 그 이유를 안내한다 — 조용히 쌓지 않는다."""
+    service, root = tier_project(tmp_path, suitability="usable")
+    legacy = _legacy_head(service, root, monkeypatch)
+
+    def broken(*args, **kwargs):
+        raise RawWorkspaceError("합성 재계획 실패")
+
+    monkeypatch.setattr(service, "_migrate_unedited_head", broken)
+    assert service.migrate_tiers(root) is not None
+    job = next(j for j in service.list_jobs(root) if j.kind == "tier_migration")
+    assert _wait_terminal(service, root, job.job_id).status == "failed"
+    jobs = len(service.list_jobs(root))
+    for _ in range(3):  # 화면 결과 갱신마다 불려도 같은 앱 실행 안에서는 다시 걸지 않는다
+        assert service.migrate_tiers(root) == "등급판 옮기기 실패: 합성 재계획 실패"
+    assert len(service.list_jobs(root)) == jobs
+    assert ReviewWorkspaceFacade(root).load_head().revision == legacy
+
+
+@needs_ffmpeg
+def test_failed_migration_is_retried_once_by_a_new_app_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """실패 기록은 머리에 묶여 남지만, 앱을 다시 열면(새 서비스) 한 번 더 시도한다 — 원본 볼륨이
+    잠깐 빠졌던 것 같은 일시 원인이 영구 차단이 되지 않게."""
+    service, root = tier_project(tmp_path, suitability="usable")
+    legacy = _legacy_head(service, root, monkeypatch)
+
+    def broken(*args, **kwargs):
+        raise RawWorkspaceError("원본 볼륨이 빠졌다")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(service, "_migrate_unedited_head", broken)
+        assert service.migrate_tiers(root) is not None
+        job = next(j for j in service.list_jobs(root) if j.kind == "tier_migration")
+        assert _wait_terminal(service, root, job.job_id).status == "failed"
+    assert service.migrate_tiers(root) == "등급판 옮기기 실패: 원본 볼륨이 빠졌다"
+    reopened = RawWorkspaceService()
+    message = reopened.migrate_tiers(root)
+    assert message is not None and "다시 세웁니다" in message
+    retry = next(j for j in reopened.list_jobs(root) if j.kind == "tier_migration")
+    assert retry.job_id != job.job_id
+    assert _wait_terminal(reopened, root, retry.job_id).status == "succeeded"
+    migrated = ReviewWorkspaceFacade(root).load_head().revision
+    assert migrated.base_plan_id != legacy.base_plan_id
+    assert ReviewWorkspaceFacade.has_tier_marker(migrated)
+    assert reopened.migrate_tiers(root) is None
+
+
+@needs_ffmpeg
+def test_migrate_tiers_on_touched_head_only_relabels(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    service, root = tier_project(tmp_path, suitability="usable")
+    legacy = _legacy_head(service, root, monkeypatch)
+    facade = ReviewWorkspaceFacade(root)
+    touched = facade.set_notes(legacy.base_plan_id, legacy.segments[0].segment_id, "사람 메모")
+    message = service.migrate_tiers(root)
+    assert message is not None and "등급 표시만 다시 답니다" in message
+    assert "사람이 정한 사용/제외는 그대로" in message and "무료" not in message
+    job = next(j for j in service.list_jobs(root) if j.kind == "tier_migration")
+    assert _wait_terminal(service, root, job.job_id).status == "succeeded"
+    relabeled = facade.load_head().revision
+    assert relabeled.base_plan_id == touched.base_plan_id
+    assert ReviewWorkspaceFacade.has_tier_marker(relabeled)
+    assert [(s.start_pts, s.end_pts, s.selection, s.notes) for s in relabeled.segments] == [
+        (s.start_pts, s.end_pts, s.selection, s.notes) for s in touched.segments
+    ]
+    assert service.migrate_tiers(root) is None
+
+
+@needs_ffmpeg
 def test_replan_adoption_keeps_tier_red_pending(tmp_path: Path):
-    service, root = tier_project(tmp_path)
+    service, root = tier_project(tmp_path, suitability="usable")
     facade = ReviewWorkspaceFacade(root)
     head = facade.load_head().revision
     pending = unreviewed_auto_exclusions(head)
@@ -288,27 +378,31 @@ def test_workbench_model_carries_tiers_and_pending_counts(tmp_path: Path):
     from tests.raw.test_visual_workbench_ui import _model_of
     from ui.workspace_service import RawWorkspaceUi
 
-    _, root = tier_project(tmp_path)
+    _, root = tier_project(tmp_path, suitability="usable")
     server = RawWorkspaceUi(state_path=tmp_path / "ui-state.json")
     server.open_workspace_view(str(root))
     model = _model_of(server.visual_workbench_render(root)[1])
     by_tier = {card["tier"]: card for card in model["cards"]}
-    assert set(by_tier) == {"green", "red"}
+    assert set(by_tier) == {"yellow", "red"}
     assert by_tier["red"]["autoPending"] is True and by_tier["red"]["sel"] == "excluded"
-    assert by_tier["green"]["autoPending"] is False
+    assert by_tier["yellow"]["autoPending"] is False
     assert model["redPending"] == 1 and model["redUnmaterialized"] == 0
 
 
-def test_retier_button_sits_in_the_review_row(tmp_path: Path, local_socket: None):
+def test_no_free_retier_button_or_pending_note(tmp_path: Path, local_socket: None):
+    """D52 — 「등급 다시 계산(무료)」 단추와 "등급 계산 중(무료)" 안내는 지워졌다."""
     pytest.importorskip("gradio", reason="웹 UI extra(gradio)가 없다", exc_type=ImportError)
     import gradio as gr
 
-    from ui.workspace_service import RETIER_LABEL, RawWorkspaceUi
+    import ui.workspace_service as workspace_ui
 
-    app = RawWorkspaceUi(state_path=tmp_path / "ui-state.json").build_blocks()
-    buttons = {block.value: block for block in app.blocks.values() if isinstance(block, gr.Button)}
-    assert RETIER_LABEL == "등급 다시 계산(무료)"
-    assert buttons[RETIER_LABEL].parent is buttons["자동 제외 확인"].parent
+    app = workspace_ui.RawWorkspaceUi(state_path=tmp_path / "ui-state.json").build_blocks()
+    labels = [str(block.value) for block in app.blocks.values() if isinstance(block, gr.Button)]
+    assert "자동 제외 확인" in labels
+    assert not [label for label in labels if "등급 다시 계산" in label or "무료" in label]
+    for name in ("RETIER_LABEL", "TIER_PENDING_NOTE"):
+        assert not hasattr(workspace_ui, name), name
+    assert not hasattr(workspace_ui.RawWorkspaceUi, "capcut_retier_view")
 
 
 def _carried_human_head(service: RawWorkspaceService, root: Path, monkeypatch: pytest.MonkeyPatch):
@@ -339,15 +433,15 @@ def _carried_human_head(service: RawWorkspaceService, root: Path, monkeypatch: p
 
 
 @needs_ffmpeg
-@pytest.mark.parametrize("trigger", ["refresh", "cleanup"])
+@pytest.mark.parametrize("trigger", ["migrate", "cleanup"])
 def test_carried_human_decisions_survive_tier_migration(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, trigger: str
 ):
     """sequence 0이어도 사람 결정이 실린 머리는 다시 세우지 않고 등급만 단다(D35)."""
-    service, root = tier_project(tmp_path)
+    service, root = tier_project(tmp_path, suitability="usable")
     carried = _carried_human_head(service, root, monkeypatch)
-    if trigger == "refresh":
-        service.refresh_tiers(root)
+    if trigger == "migrate":
+        assert service.migrate_tiers(root) is not None
         for job in [j for j in service.list_jobs(root) if j.kind == "tier_migration"]:
             assert _wait_terminal(service, root, job.job_id).status == "succeeded"
     else:
@@ -389,3 +483,152 @@ def test_human_decision_markers_cover_every_kind_of_edit():
     )
     assert not any(ReviewWorkspaceFacade.has_human_decisions(r) for r in machine)
     assert all(ReviewWorkspaceFacade.has_human_decisions(r) for r in human)
+
+
+def _proposal(start: Fraction, end: Fraction, reason: str, version: str | None) -> dict:
+    row: dict[str, object] = {
+        "start": {"num": start.numerator, "den": start.denominator},
+        "end": {"num": end.numerator, "den": end.denominator},
+        "reason": reason,
+        "evidence": [f"synthetic:{reason}"],
+    }
+    if version is not None:
+        row["version"] = version
+    return row
+
+
+@needs_ffmpeg
+def test_retier_releases_stale_tier_proposals_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """D52 — 옛 등급판의 미검토 빨강 제안은 지금 등급이 빨강이 아니면 풀린다. 그 밖은 그대로다.
+
+    Luna '사용 가능' 창이라 3.3–10.7초는 지금도 빨강이다. 옛 판(v1) 제안 다섯 자리를 심는다:
+    지금도 빨강인 자리(유지) · 사람이 확인한 자리(유지) · 지금 판 표지의 자리(유지) · 옛 영상
+    결함 이유의 노랑 자리(풀림) · 자동 정리(`internal_silence`) 자리(유지).
+    """
+    service, root = tier_project(tmp_path, suitability="usable")
+    facade = ReviewWorkspaceFacade(root)
+    still_red = (Fraction(83, 25), Fraction(7))
+    confirmed = (Fraction(7), Fraction(267, 25))
+    current = (Fraction(267, 25), Fraction(12))
+    stale = (Fraction(12), Fraction(69, 5))
+    cleanup = (Fraction(69, 5), Fraction(15))
+    planted = [
+        _proposal(*still_red, tiering.RED_SILENCE, "raw-tier/v1"),
+        _proposal(*confirmed, tiering.RED_SILENCE, "raw-tier/v1"),
+        _proposal(*current, tiering.RED_SILENCE, tiering.TIER_SETTINGS.tier_version),
+        _proposal(*stale, "tier_video_defect", "raw-tier/v1"),
+        _proposal(*cleanup, "internal_silence", None),
+    ]
+    with monkeypatch.context() as patch:
+        patch.setattr(tiering, "red_decisions", lambda report: planted)
+        patch.setattr(
+            tiering, "segment_grade", lambda report, a, b: ("normal", ("Luna 평가: 옛 등급",))
+        )
+        plan = service.plan_segmentation_from_analysis(root)
+        legacy = facade.initialize_review(plan.revision_id)
+    spans = {_seconds(legacy, s): s for s in legacy.segments}
+    assert {still_red, confirmed, current, stale, cleanup} <= set(spans)
+    assert len(unreviewed_auto_exclusions(legacy)) == 5
+    touched = facade.set_selection(
+        legacy.base_plan_id, spans[confirmed].segment_id, "excluded"
+    )  # 사람이 확인한 제외 — 미검토 표지가 빠진다
+    retiered = facade.retier(touched.base_plan_id)
+    after = {_seconds(retiered, s): s for s in retiered.segments}
+    released = after[stale]
+    assert released.selection == "included" and released.notes == ""
+    assert AUTO_EXCLUDED_UNREVIEWED_TAG not in released.visual_tags
+    assert "등급: 보통" in released.visual_tags
+    assert {_seconds(retiered, s) for s in unreviewed_auto_exclusions(retiered)} == {
+        still_red,
+        current,
+        cleanup,
+    }
+    for kept in (still_red, confirmed, current, cleanup):
+        before = {_seconds(touched, s): s for s in touched.segments}[kept]
+        assert (after[kept].selection, after[kept].notes) == (before.selection, before.notes)
+    assert after[confirmed].selection == "excluded"
+    assert after[confirmed].notes.startswith("수동 선택 · 자동 제외: ")
+    assert "등급: 제외 제안" in after[still_red].visual_tags
+    assert facade.retier(retiered.base_plan_id) == retiered  # 다시 해도 바뀌는 것이 없다
+
+
+@needs_ffmpeg
+def test_touched_head_message_names_released_stale_proposals(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """손댄 머리의 안내는 실제로 일어나는 일을 말한다 — 근거 없어진 옛 제안은 사용으로 돌아간다."""
+    service, root = tier_project(tmp_path, suitability="usable")
+    facade = ReviewWorkspaceFacade(root)
+    stale = (Fraction(12), Fraction(69, 5))
+    planted = [_proposal(*stale, tiering.RED_SILENCE, "raw-tier/v1")]
+    with monkeypatch.context() as patch:
+        patch.setattr(tiering, "red_decisions", lambda report: planted)
+        patch.setattr(
+            tiering, "segment_grade", lambda report, a, b: ("normal", ("Luna 평가: 옛 등급",))
+        )
+        legacy = facade.initialize_review(service.plan_segmentation_from_analysis(root).revision_id)
+    other = next(s for s in legacy.segments if _seconds(legacy, s) != stale)
+    touched = facade.set_notes(legacy.base_plan_id, other.segment_id, "사람 메모")
+    assert {_seconds(touched, s): s.selection for s in touched.segments}[stale] == "excluded"
+    message = service.migrate_tiers(root)
+    assert message is not None and "근거가 사라진 옛 제외 제안은 사용으로 되돌립니다" in message
+    job = next(j for j in service.list_jobs(root) if j.kind == "tier_migration")
+    assert _wait_terminal(service, root, job.job_id).status == "succeeded"
+    head = facade.load_head().revision
+    assert {_seconds(head, s): s.selection for s in head.segments}[stale] == "included"
+    assert unreviewed_auto_exclusions(head) == ()
+    assert next(s for s in head.segments if s.segment_id == other.segment_id).notes == "사람 메모"
+
+
+@needs_ffmpeg
+@pytest.mark.parametrize("trigger", ["migrate", "cleanup"])
+def test_hand_edited_proposal_note_is_left_for_a_person(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, trigger: str
+):
+    """근거 메모를 사람이 고친 옛 제안은 풀지 않는다 — 옮기기·정리는 멈추지 않고 경고만 남긴다.
+
+    작업대 메모 칸은 자동 제외 근거로 미리 채워져 있어, 뒤에 말을 덧붙이면 JSON이 깨진다.
+    메모를 지우며 풀면 사람이 쓴 말이 사라진다 — 미검토 제외로 남겨 사람이 정하게 한다.
+    """
+    from vlogsrt import log
+
+    service, root = tier_project(tmp_path, suitability="usable")
+    facade = ReviewWorkspaceFacade(root)
+    appended, listed = (Fraction(12), Fraction(69, 5)), (Fraction(69, 5), Fraction(15))
+    planted = [
+        _proposal(*appended, tiering.RED_SILENCE, "raw-tier/v1"),
+        _proposal(*listed, tiering.RED_SILENCE, "raw-tier/v1"),
+    ]
+    with monkeypatch.context() as patch:
+        patch.setattr(tiering, "red_decisions", lambda report: planted)
+        patch.setattr(
+            tiering, "segment_grade", lambda report, a, b: ("normal", ("Luna 평가: 옛 등급",))
+        )
+        legacy = facade.initialize_review(service.plan_segmentation_from_analysis(root).revision_id)
+    spans = {_seconds(legacy, s): s for s in legacy.segments}
+    head = facade.set_notes(
+        legacy.base_plan_id, spans[appended].segment_id, spans[appended].notes + " 나중에 확인"
+    )
+    head = facade.set_notes(head.base_plan_id, spans[listed].segment_id, "자동 제외: [1, 2]")
+    edited = {_seconds(head, s): (s.selection, s.notes) for s in head.segments}
+    assert len(unreviewed_auto_exclusions(head)) == 2
+    warnings: list[str] = []
+    monkeypatch.setattr(log, "warn", warnings.append)
+    if trigger == "migrate":
+        assert service.migrate_tiers(root) is not None
+        job = next(j for j in service.list_jobs(root) if j.kind == "tier_migration")
+        finished = _wait_terminal(service, root, job.job_id)
+    else:
+        finished = _wait_terminal(service, root, service.start_cleanup(root).job_id)
+    assert finished.status == "succeeded", finished.error
+    after = facade.load_head().revision
+    assert ReviewWorkspaceFacade.has_tier_marker(after)
+    for span in (appended, listed):
+        segment = next(s for s in after.segments if _seconds(after, s) == span)
+        assert (segment.selection, segment.notes) == edited[span]
+        assert AUTO_EXCLUDED_UNREVIEWED_TAG in segment.visual_tags
+    assert len([w for w in warnings if "자동 제외 근거" in w]) >= 2
+    if trigger == "migrate":
+        assert service.migrate_tiers(root) is None
+        finished = _wait_terminal(service, root, service.start_cleanup(root).job_id)
+        assert finished.status == "succeeded", finished.error

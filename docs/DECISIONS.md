@@ -2989,3 +2989,119 @@ YAVG(0–255)와 흐림을 재 `frames/quality.json`에 둔다(이미지 해시�
 **위험**: 실제 1440×900 화면의 빗금·점선 대비는 사람 눈 확인이 남았다. 흐림 기준은 결함 표본이
 생기면 다시 보정한다. 계획 밖(따로 다룬다): 프레임 추출 실패(`c0876ce`가 select 식 깊이 한도로 밝혀 고쳤다 — 이미 저장된 다섯 원본은 재분석 전까지 판정 보류다), `preprocess.verified_scene_times`의
 0.35 하드코딩, `auto_cleanup.safe()`의 장면 태그 관문, `safe_window_edges`의 0.03초 자투리.
+
+**D52가 고쳤다(2026-10-09)**: 사용자 정정으로 등급은 AI 판정과 생성 자막만으로 매긴다. 위의 RMS·검은
+화면·흐림 측정, `tier_inputs.py`와 곁파일, `tier_reports` 작업, 「등급 다시 계산(무료)」은 지워졌다.
+지금의 판정·합치기·옮기기는 D52를 보라.
+
+## D52 — 등급은 AI 판정과 생성 자막만으로 매긴다. 로컬 측정("무료" 계산)은 지웠다 (2026-10-09)
+
+**문제**: 사용자 정정 "등급 계산을 무료로 만들라는 뜻이 아니었다. AI가 탐지한 정보와 생성된 자막의
+정보를 합치라는 뜻이었다. 무료 계산은 지워라." D51은 '유료 호출 0'을 지키려고 로컬 신호 측정을 등급의
+재료로 들였다 — 저장 PCM의 공백 RMS(−35 dBFS)와 저장 프레임 JPEG의 YAVG·흐림(ffmpeg
+`signalstats,blurdetect`). 그 측정이 곁파일(`tier_report.json`·`frames/quality.json`), 백그라운드
+작업(`tier_reports`), 화면 안내("등급 계산 중(무료)"), 단추(「등급 다시 계산(무료)」)를 낳았다. 실데이터의
+빨강 18구간 199.4초는 전부 RMS 측정 무음이었고, 전부 프레임이 없어 Luna가 화면을 못 본 원본 5개에
+있었다 — AI가 본 것이 아니라 로컬 측정이 낸 빨강이었다.
+
+**결정**: 재료는 저장된 분석 문서 하나뿐이다 — AI 판정(Luna 창의 `suitability`·`status`·`error_code`·
+프레임 유무)과 생성 자막(`utterances[]`·ASR 청크 실패·오디오 트랙 유무). PCM·프레임 그림·ffmpeg를
+읽지 않는다. `tiering.classify`는 측정 입력을 받지 않는다(`gap_levels`·`local_video`를 주면 TypeError).
+
+- **자막 쪽**(순서가 우선순위): 오디오 트랙 없음 → `audio_absent` · 실패 청크에 닿음 → `analysis_failed`
+  · 발화 밀도 ≥ 0.35 → `speech_dense`, 그 아래 → `speech_sparse` · 자막 칸이 아직 없음(Luna 진행 문서)
+  → `subtitle_pending`(옛 `unmeasured`) · 긴 자막 공백 안(5초 이상, 발화 쪽 0.3초 여유, 소리가 있는
+  범위, 실패 청크에 닿지 않음 — 옛 `quiet_gap_candidates`를 `silent_gaps`로) → `subtitle_silence` · 그
+  밖의 발화 없음 → `unconfirmed_empty`("발화 없음", 무음 후보 아님). RMS로 가르던 `quiet_silence`·
+  `ambient_no_speech`는 없다.
+- **영상 쪽**: D51에서 `defect`(로컬 검은 화면/흐림)만 뺐다 — `good`·`usable`·`flagged`·모름
+  (`no_frames`·`failed`·`unanalyzed`).
+- **합치기**(G 추천 · Y 보통 · R 제외 제안):
+
+  | 자막 \ 영상 | good | usable | flagged | 모름 |
+  |---|---|---|---|---|
+  | speech_dense | G `both-good` | Y | Y | Y 보류 `video-unknown` |
+  | speech_sparse | Y | Y | Y | Y 보류 |
+  | subtitle_silence | Y `scenery-no-speech` | R `silent-not-scenery` | R `silent-not-scenery` | Y 보류 |
+  | unconfirmed_empty | Y | Y | Y | Y 보류 |
+  | analysis_failed | Y 보류 `audio-failed` | Y 보류 | Y 보류 | Y 보류 |
+  | audio_absent | G `video-only-good` | Y | Y | Y 보류 |
+  | subtitle_pending | Y `audio-pending` | Y | Y | Y 보류 |
+
+  빨강 이유는 `tier_silence` 하나다(근거 `tier:silent-not-scenery`·`audio:subtitle_silence`·`video:…`·
+  `subtitle_gap:a-b`·`window:…` — 옛 근거 JSON도 그대로 읽힌다). 말 없는 풍경(Luna `recommended`)은
+  지우자는 제안이 아니라 노랑이다. 발화 구간은 빨강이 되지 않고(규칙 9·D35), AI 근거가 없으면(모름)
+  빨강이 아니라 보류다. 소비(`red_decisions`·`segment_grade`)는 D51 그대로다.
+- **짧은 빨강은 제안하지 않는다**: 구간 다듬기는 D51 그대로(같은 키 합치기 · 1초 미만 조각 흡수 · 빨강과
+  비빨강은 서로 먹지 못함)이되, 붙을 빨강 이웃이 없는 1초(`min_span_seconds`) 미만 빨강은 노랑으로
+  내리고(규칙 `red-too-short`) 다음 바퀴에 비빨강 이웃이 흡수한다. 긴 공백이 Luna 창 경계를 1초 못 되게
+  넘어 생긴 자투리(실데이터 000009 44.56–45.00초 · 000014 89.30–90.00초)가 미검토 제외가 되어 출력을
+  막으면 안 된다. 빨강은 자라지 않는다 — 빨강 이웃이 있는 짧은 빨강만 그 빨강에 붙는다.
+- **규칙을 바꾸면 판을 올린다**: `_SILENCE_RED_VIDEO`·합치기 표·판정 순서·`RawTierSettings` 값 중 무엇을
+  바꾸든 `tier_version`을 올린다. 옮기기는 검토 조각의 `등급판` 표지로만 낡음을 알기 때문에, 올리지 않으면
+  이미 매긴 머리가 옛 등급 그대로 남는다.
+- **그릴 때 바로 계산, 보관 없음**: `service._tier_report_for_row`가 완성 문서(Luna가 도는 동안이면 진행
+  문서)를 읽어 `tiering.classify(…, document_sha256=…)`를 부른다. 실데이터 16개 원본 전부 36 ms(원본당
+  약 2 ms)라 캐시·곁파일·백그라운드 작업이 지킬 비용이 없다 — 화면은 기다리는 원본 없이 바로 그린다
+  (메모하지 않는다). 검토 머리의 등급 태그·권고·미검토 제외는 예전 자리(분석 완료 `publish_review`의
+  `initialize_review`, 계획 입양, 옮기기)에서만 쓴다. 유료 호출 0. `RawTierSettings`는 여전히
+  `RawUnderstandingSettings`·`RawWorkflowConfig` 밖이라 분석 지문·승인 digest에 닿지 않는다.
+- **옮기기**: `tier_version`을 `raw-tier/v2`로 올렸다. v1 표지뿐인 머리는 `has_tier_marker`가 거짓이 되어
+  앱 열기와 화면 결과 갱신(`_capcut_result`)에서 `migrate_tiers`가 `tier_migration` 백그라운드 작업을
+  건다(재계획이 원본을 다시 해시하므로 화면 스레드 밖). 손대지 않은 머리는 증거로 다시 세우고(옛 RMS
+  빨강 조각은 사라지고 새 빨강이 조각으로 떨어진다), 손댄 머리는 `retier`로 등급 표시만 다시 단다
+  (안내: "사람이 정한 사용/제외는 그대로이고, 근거가 사라진 옛 제외 제안은 사용으로 되돌립니다").
+  옮길 것이 없으면 `None`(안내 없음). 실패 기록은 머리에 묶여 남는다 — 같은 앱 실행 안에서는 화면
+  갱신마다 다시 걸지 않고 실패 이유를 안내하며, 앱을 다시 열면(새 서비스 인스턴스) 한 번 더 시도한다.
+  원본 볼륨이 잠깐 빠진 것 같은 일시 원인이 영구 차단이 되어, 사람이 손대는 순간 조용히 '등급만 다시
+  달기'로 내려앉지 않게 한다.
+- **옛 판 제안 풀기**: `retier`는 미검토 자동 제외 중 근거의 `reason`이 등급 이유(`tier_silence`·옛
+  `tier_video_defect`)이고 `version`이 지금 판이 아니며 새 등급이 빨강이 아닌 조각을 사용으로 되돌리고
+  미검토 표지와 근거 메모를 지운다(메모를 남기면 「자동 제외 전체 복원」 같은 사람 결정으로 읽힌다).
+  사람이 확인한 제외, 자동 정리(`internal_silence` 등)의 제안, 지금 판의 제안, 새 등급도 빨강인 옛
+  제안은 그대로다. 근거가 사라진 제안이 사람 확인을 기다리며 출력을 막지 않게 한다. 근거 메모를 사람이
+  고쳤으면(작업대 메모 칸은 근거로 미리 채워져 있어 덧붙인 말이 JSON을 깬다 · 객체가 아닌 JSON) 풀지
+  않는다 — 풀면 메모가 지워져 사람이 쓴 말이 사라진다. 그 조각은 미검토 제외로 남고 `log.warn`이 뜨며,
+  옮기기·자동 정리는 멈추지 않는다.
+  W-5의 "표지는 사람 손으로만 지워진다"의 **좁은 예외**다 — 기계가 표지를 지우는 방향은 제외→사용
+  하나뿐이고 옛 판 등급 제안에만 닿으므로, 무엇도 잘리지 않아 D35·규칙 9는 그대로다.
+- **지운 것**: `tier_inputs.py`(PCM RMS · 프레임 화질 곁파일 · 보고서 곁파일), `preprocess`의
+  `FrameQuality`·`parse_frame_quality`·`frame_quality_stats`(D51 이전과 바이트까지 같아졌다),
+  `tiering.report_from_document`, `RawTierSettings`의 `silence_rms_dbfs`·`black_luma_max`·
+  `black_frame_fraction`·`blur_min`·`blur_frame_fraction`과 `LUMA_FULL_SCALE`, 서비스의
+  `TIER_REPORT_JOB_KIND`·`start_tier_reports`·`_compute_tier_reports`(자동 정리 작업 안의 호출 포함)·
+  `refresh_tiers`, `selection_suitability(pending=…)`, UI의 「등급 다시 계산(무료)」 단추와
+  "등급 계산 중(무료)" 안내. 디스크에 남은 옛 `tier_report.json`·`frames/quality.json`은 읽지도
+  지우지도 않는다. 측정 기준 다섯 개를 지운 것은 사용자 지시에 따른 사양 변경이지 임계값 조정이 아니다
+  — 남은 값(공백 5초 · 여유 0.3초 · 밀도 0.35 · 최소 구간 1초)은 그대로다.
+
+**실측**(읽기 전용 — 실제 작업공간 `260810_wangbang-vlogsrt`의 JSON만 읽어 메모리 안에서 계산 · 원본마다
+가장 최근 분석 기록 · 16개 원본 · 2,608.8초):
+
+| | 녹색 | 노랑 | 빨강 |
+|---|---|---|---|
+| v1(D51 보관 보고서) | 20구간 295.5초(11.3%) | 145구간 2,114.0초(81.0%) | 18구간 199.4초(7.6%) — 전부 RMS 무음, 프레임 없는 원본 5개 |
+| **v2 기본**(공백 × `usable`·`review` = 빨강) | 20구간 296.2초(11.4%) | 155구간 2,269.7초(87.0%) — 보류 2,009.6초(영상 모름 1,575.1 · 전사 실패 434.5) | **7구간 42.9초(1.6%)** — 원본 000002·000006·000013·000014, `usable` 6 · `review` 1 |
+| v2 변형(공백 × `review`만 빨강) | 20구간 295.5초 | 161구간 2,307.1초 | 1구간 6.3초(000013) |
+
+- v1 빨강 18구간 199.4초(000005 2 · 000012 4 · 000015 3 · 000016 8 · 000017 1)는 v2에서 전부 노랑 판정
+  보류(`video-unknown`)다 — 프레임이 없어 Luna가 화면을 못 본 자리를 소리만으로 지우자고 하지 않는다.
+- 노랑 안에 풍경(`scenery-no-speech`, 자막 없는 공백 × Luna `recommended`) 166.1초가 새로 보인다.
+- Luna 판정은 D51과 같다 — 프레임 있는 창 52개 중 `recommended` 40 · `usable` 11 · `review` 1, 프레임
+  없는 창 131개는 전부 `review`.
+- 1초 미만 빨강 자투리 2개(000009 0.44초 · 000014 0.70초)는 노랑으로 내려 이웃에 흡수됐다 — 내리기
+  전에는 빨강 9구간 44.1초였다. 남은 빨강은 전부 4.4초 이상이고, 내린 뒤 홀로 남은 `red-too-short`는 0개다.
+- **기본 변형(모호점 1)**: `usable`도 빨강이다(`tiering._SILENCE_RED_VIDEO`). `usable`은 "쓸 수는 있다"이지
+  "풍경으로 추천"이 아니고, 빨강은 사람이 확인해야 출력이 바뀌는 제안일 뿐이다. 제안이 많다고 판단되면
+  이 상수에서 `usable`을 빼면 변형이 된다(실데이터 빨강 1구간).
+
+**위험**:
+- AI의 화면 결함 신호가 없다. Luna 응답에는 결함 칸(검은 화면·흔들림)이 없어 발화가 있는 구간은 Luna
+  `review`여도 노랑이다(발화는 지우자고 하지 않는다). 결함 신호가 필요하면 Luna 안내문을 바꿔야 하고 그건
+  유료 재분석이다 — 범위 밖.
+- 분석 뒤에 고친 자막은 재분석 전까지 등급에 들어가지 않는다(문서의 `utterances[]`는 분석 때 자막이다).
+- 짧은 빨강 내리기는 빨강 이웃이 없을 때만이다 — 서로 다른 영상 판정(`usable`·`review`)의 빨강이 맞닿아
+  합이 1초 미만이면 함께 내려간다. 그보다 긴 빨강은 창 경계에 걸쳐도 그대로 제안된다.
+- 소리 트랙이 끝난 뒤의 자리(소리 없는 꼬리)는 자막 공백이 아니라 `unconfirmed_empty`다 — D51과 같은 선.
+- 자동 정리의 PCM 봉우리 무음(`internal_silence`, W-5 · `RawAutoCleanupSettings`)은 별개 계층이라 건드리지
+  않았다.

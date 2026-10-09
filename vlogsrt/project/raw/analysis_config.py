@@ -204,34 +204,27 @@ def validate_auto_cleanup_settings(settings: RawAutoCleanupSettings) -> None:
 
 @dataclass(frozen=True)
 class RawTierSettings:
-    """3단 등급의 조정값 — 외부 근거 없는 조정 대상(D51). 분석 지문에 넣지 않는다.
+    """3단 등급의 조정값 — 외부 근거 없는 조정 대상(D51·D52). 분석 지문에 넣지 않는다.
 
     `RawUnderstandingSettings`·`RawWorkflowConfig`에 두면 Luna 요청 sha·리비전 지문·승인
-    digest가 바뀌어 저장된 판정 183창을 다시 사게 된다. 등급은 저장된 증거 위의 결정적
-    재계산이므로 이 값은 등급 보고서(`tier_report.json`)에만 실린다.
+    digest가 바뀌어 저장된 판정 183창을 다시 사게 된다. 등급은 저장된 분석 문서(AI 판정 +
+    생성 자막) 위의 결정적 재계산이라 읽을 때마다 다시 계산하고 어디에도 보관하지 않는다 —
+    이 값은 검토 조각의 `등급판` 표지(`tier_version`)로만 남는다.
 
-    `black_luma_max`·`blur_min`은 실측 보정값이다(D51): 저장 프레임 415장의 YAVG 최소 36.5,
-    blurdetect 3.62–6.47이 전부 Luna 추천·사용 가능 창이었다. 흐림은 결함 표본이 없어
-    가를 수 없으므로 `blur_min = 0`(끔)이다.
+    로컬 측정 값(공백 RMS·검은 화면 루마·흐림)은 사용자 지시로 지웠다(D52) — 측정 계층이
+    없어졌으므로 기준도 없다. 남은 값은 D51 그대로다. 값이나 `tiering.py`의 규칙을 바꾸면
+    `tier_version`을 올린다 — 옮기기는 이 표지로만 낡은 검토 머리를 안다.
     """
 
-    tier_version: str = "raw-tier/v1"
+    tier_version: str = "raw-tier/v2"
     silence_min_seconds: float = 5.0
-    silence_rms_dbfs: float = -35.0
     speech_handle_seconds: float = 0.3
     min_span_seconds: float = 1.0
     speech_density_green: float = 0.35
-    black_luma_max: float = 20.0
-    black_frame_fraction: float = 0.75
-    blur_min: float = 0.0
-    blur_frame_fraction: float = 0.75
 
 
 TIER_SETTINGS = RawTierSettings()
 """지금 쓰는 등급 조정값 — 등급 계산은 주입이 없으면 이 하나를 읽는다."""
-
-LUMA_FULL_SCALE = 255.0
-"""8비트 루마의 최댓값 — 검은 화면 기준(YAVG)의 값역 상한."""
 
 
 def validate_tier_settings(settings: RawTierSettings) -> None:
@@ -243,15 +236,10 @@ def validate_tier_settings(settings: RawTierSettings) -> None:
 
 def tier_settings_problems(settings: RawTierSettings) -> list[str]:
     numbers = {
-        "무음 길이": settings.silence_min_seconds,
-        "무음 RMS": settings.silence_rms_dbfs,
+        "공백 길이": settings.silence_min_seconds,
         "발화 여유": settings.speech_handle_seconds,
         "최소 구간": settings.min_span_seconds,
         "발화 밀도": settings.speech_density_green,
-        "검은 화면 루마": settings.black_luma_max,
-        "검은 화면 비율": settings.black_frame_fraction,
-        "흐림 기준": settings.blur_min,
-        "흐림 비율": settings.blur_frame_fraction,
     }
     problems = [
         f"{name}은 유한한 실수여야 한다: {value!r}"
@@ -268,23 +256,11 @@ def tier_settings_problems(settings: RawTierSettings) -> list[str]:
 def _tier_range_problems(settings: RawTierSettings) -> list[str]:
     problems: list[str] = []
     if not 0 < settings.min_span_seconds <= settings.silence_min_seconds:
-        problems.append("0 < 최소 구간 ≤ 무음 길이여야 한다")
+        problems.append("0 < 최소 구간 ≤ 공백 길이여야 한다")
     if not 0 <= 2 * settings.speech_handle_seconds < settings.silence_min_seconds:
-        problems.append("발화 여유 양쪽이 무음 길이를 다 먹는다 — 무음 구간이 남지 않는다")
-    if not -100 <= settings.silence_rms_dbfs <= 0:
-        problems.append(f"무음 RMS는 -100–0 dBFS여야 한다: {settings.silence_rms_dbfs!r}")
+        problems.append("발화 여유 양쪽이 공백 길이를 다 먹는다 — 무음 구간이 남지 않는다")
     if not 0 < settings.speech_density_green <= 1:
         problems.append(f"발화 밀도는 (0, 1]이어야 한다: {settings.speech_density_green!r}")
-    for name, value in (
-        ("검은 화면 비율", settings.black_frame_fraction),
-        ("흐림 비율", settings.blur_frame_fraction),
-    ):
-        if not 0 < value <= 1:
-            problems.append(f"{name}은 (0, 1]이어야 한다: {value!r}")
-    if not 0 <= settings.black_luma_max <= LUMA_FULL_SCALE:
-        problems.append(f"검은 화면 루마는 0–255여야 한다: {settings.black_luma_max!r}")
-    if settings.blur_min < 0:
-        problems.append(f"흐림 기준은 0(끔) 이상이어야 한다: {settings.blur_min!r}")
     return problems
 
 

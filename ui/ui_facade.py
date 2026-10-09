@@ -1636,7 +1636,8 @@ VISUAL_BOOTSTRAP_JS = (
             var automatic = JSON.parse(card.note.slice(automaticAt + "자동 제외: ".length));
             var reasons = {internal_silence:"긴 무음", retake_overlap:"완전한 반복 테이크 확인",
               ng_with_followup:"NG 뒤 완전한 테이크 확인",
-              tier_silence:"자막 무음(측정)", tier_video_defect:"영상 결함(측정)"};
+              tier_silence:"자막 없음 · AI가 풍경으로 보지 않음",
+              tier_video_defect:"영상 결함(옛 등급판)"};
             html.push('<p class="vl-kv">자동 판정 이유 · ' +
               esc(reasons[automatic.reason] || automatic.reason) + '</p>');
           } catch (error) { /* Historical/manual notes remain readable below. */ }

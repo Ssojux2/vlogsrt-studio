@@ -3530,9 +3530,9 @@ def test_legend_names_three_tiers_with_pattern_cue() -> None:
 
 
 _TIER_SCRIPT = r"""
-// ── 3단 등급(D51) — 렠 막대·패널 표지·검토 대기 필터 ─────────────────────
-const quiet = { status: 'quiet_silence', label: '무음(측정)',
-  reason: '발화 없음 · 무음 -64.0 dBFS ≤ -35 dBFS', density: '0' };
+// ── 3단 등급(D51·D52) — 렠 막대·패널 표지·검토 대기 필터 ─────────────────
+const silent = { status: 'subtitle_silence', label: '자막 없음(긴 공백)',
+  reason: '발화 없음 · 자막 없는 공백 5초 이상', density: '0' };
 function tierModel(filter) {
   const m = visualModel();
   m.filter = filter;
@@ -3550,15 +3550,16 @@ function tierModel(filter) {
         density: '1/10' },
       video: { status: 'no_frames', label: '프레임 없음',
         reason: '프레임 증거 없음 · 재분석 전까지 판정 보류', evidence: [] } },
-    { start: '21/10', end: '29/10', tier: 'red', hold: false, rec: 'normal', rule: 'A-quiet',
-      reason: 'r2', redReason: 'tier_silence', audio: quiet,
+    { start: '21/10', end: '29/10', tier: 'red', hold: false, rec: 'normal',
+      rule: 'silent-not-scenery', reason: 'r2', redReason: 'tier_silence', audio: silent,
       video: { status: 'usable', label: '사용 가능', reason: '구도가 조금 기울었다',
         evidence: [] } },
   ];
   m.cards[0].tier = 'green';
   m.cards[1].tier = 'yellow';
   Object.assign(m.cards[2], { tier: 'red', autoPending: true,
-    tags: ['자동 제외 · 미검토', '등급: 제외 제안', '자막: 발화 없음 · 무음', '영상: 구도'],
+    tags: ['자동 제외 · 미검토', '등급: 제외 제안', '자막: 발화 없음 · 자막 없는 공백',
+      '영상: 구도'],
     note: '자동 제외: {"reason": "tier_silence"}' });
   return m;
 }
@@ -3589,6 +3590,13 @@ const envOff = visualEnv({
 envOff.rail._listeners.click.slice().forEach((fn) => fn({ target: {
   getAttribute: (k) => (k === 'data-vl-recommendation' ? '2' : null) } }));
 const offPanel = envOff.panel.innerHTML;
+// 옛 등급판(D51)의 영상 결함 제안이 아직 남아 있으면 날 코드 대신 이름을 보인다(D52).
+const legacy = tierModel('all');
+legacy.cards[2].note = '자동 제외: {"reason": "tier_video_defect"}';
+const envLegacy = visualEnv({}, legacy);
+envLegacy.rail._listeners.click.slice().forEach((fn) => fn({ target: {
+  getAttribute: (k) => (k === 'data-vl-recommendation' ? '2' : null) } }));
+const legacyPanel = envLegacy.panel.innerHTML;
 envOff.click({ getAttribute: (k) => (k === 'data-vl-act' ? 'red-confirm' : null) });
 envOff.click({ getAttribute: (k) => (k === 'data-vl-act' ? 'red-revert' : null) });
 await new Promise((resolve) => setTimeout(resolve, 0));
@@ -3603,7 +3611,8 @@ checkpoints.push({ case: 'tiers',
   thumbsAll: envTier.thumbs.innerHTML,
   thumbsReview: envReview.thumbs.innerHTML,
   footnote: footnoteAtOpen,
-  offPage: { panel: offPanel, calls: envOff.serverCalls.length } });
+  offPage: { panel: offPanel, calls: envOff.serverCalls.length },
+  legacyPanel });
 """
 
 
@@ -3641,9 +3650,7 @@ def test_rail_renders_tier_classes_glyphs_and_aria_labels(tmp_path: Path) -> Non
     assert ">? 보류</button>" in hold and 'aria-label="판정 보류 ' in hold
     assert 'class="vl-recommendation normal red"' in red and 'data-vl-tier="red"' in red
     assert ">✕ 제외 제안</button>" in red and 'aria-label="제외 제안 21/10초~29/10초' in red
-    assert (
-        'title="자막: 발화 없음 · 무음 -64.0 dBFS ≤ -35 dBFS · 영상: 구도가 조금 기울었다"' in red
-    )
+    assert 'title="자막: 발화 없음 · 자막 없는 공백 5초 이상 · 영상: 구도가 조금 기울었다"' in red
     assert "--vl-rec" not in red  # 세로 좌표는 CSS 변수(W-10) 몫이다 — 실행본은 left·width만
 
 
@@ -3652,9 +3659,9 @@ def test_panel_shows_subtitle_and_video_reasons_for_marker(tmp_path: Path) -> No
     report = _run_tier_harness(tmp_path)
     panel = report["panel"]
     assert '<div class="vl-marker-reason red"><strong>제외 제안</strong>' in panel
-    assert "자막 · 무음(측정): 발화 없음 · 무음 -64.0 dBFS ≤ -35 dBFS" in panel
+    assert "자막 · 자막 없음(긴 공백): 발화 없음 · 자막 없는 공백 5초 이상" in panel
     assert "영상 · 사용 가능: 구도가 조금 기울었다" in panel
-    assert "규칙 A-quiet" in panel
+    assert "규칙 silent-not-scenery" in panel
     assert 'data-vl-act="red-confirm">제외 유지(확인)</button>' in panel
     assert 'data-vl-act="red-revert">사용으로 되돌리기</button>' in panel
     # 빨강 끝은 프레임 안쪽으로 붙어 있다 — 가운데(2.5초)로 찾은 조각이 확인 대상이다.
@@ -3665,7 +3672,13 @@ def test_panel_shows_subtitle_and_video_reasons_for_marker(tmp_path: Path) -> No
         "segmentId": "segA3",
     }
     assert report["revert"] == {"selection": "included", "segmentId": "segA3"}
-    assert "상태 제외 · 등급 제외 제안 · 자막 발화 없음 · 무음 · 영상 구도" in panel
+    assert "상태 제외 · 등급 제외 제안 · 자막 발화 없음 · 자막 없는 공백 · 영상 구도" in panel
+    # 자동 제외 이유는 측정이 아니라 AI 판정 + 자막에서 왔다고 말한다(D52).
+    assert "자동 판정 이유 · 자막 없음 · AI가 풍경으로 보지 않음" in panel
+    assert "(측정)" not in panel
+    legacy = report["legacyPanel"]
+    assert "자동 판정 이유 · 영상 결함(옛 등급판)" in legacy
+    assert "자동 판정 이유 · tier_video_defect" not in legacy  # 메모 칸의 근거 원문은 그대로다
     assert "제외 제안 1개" in panel
     assert report["footnote"].startswith("제외 제안 1개가 현재 조각 경계와 맞지 않습니다")
 
@@ -3674,7 +3687,7 @@ def test_panel_shows_subtitle_and_video_reasons_for_marker(tmp_path: Path) -> No
 def test_red_buttons_never_target_an_off_page_selection(tmp_path: Path) -> None:
     """빨강 조각이 이 페이지에 없으면 옛 선택을 겨냥하는 확인 단추를 내지 않는다(D35)."""
     off = _run_tier_harness(tmp_path)["offPage"]
-    assert "자막 · 무음(측정)" in off["panel"]  # 판정 설명은 그대로 보인다
+    assert "자막 · 자막 없음(긴 공백)" in off["panel"]  # 판정 설명은 그대로 보인다
     assert "red-confirm" not in off["panel"] and "red-revert" not in off["panel"]
     assert off["calls"] == 0
 
