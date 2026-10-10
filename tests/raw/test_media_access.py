@@ -257,7 +257,7 @@ def test_stale_selection_cannot_cancel_into_another_workspace(
     signature_a = server.current_signature()
     server._remember(tmp_path / "b")
 
-    with pytest.raises(gr.Error, match="바뀌었다"):
+    with pytest.raises(gr.Error, match="바뀌었습니다"):
         server.cancel_selected(signature_a, handle.job_id)
     record = server.raw.get_job(root_a, handle.job_id)
     assert not record.cancellation_requested  # 오래된 선택은 아무 효과도 없었다

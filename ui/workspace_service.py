@@ -121,13 +121,28 @@ FINALCUT_VFR_NOTE = (
     " 시작 시각을 프레임 단위로 맞출 수 없어 보내지 않았습니다. 그 영상을 일정한 프레임(예: 30fps)"
     "으로 다시 저장해 불러온 뒤 다시 보내세요."
 )
-ONLINE_MODE_NOTE = "온라인 모드 · 범위 승인 뒤 유료 분석"
-OFFLINE_MODE_NOTE = "오프라인 모드 · 유료 분석 차단"
+ONLINE_MODE_NOTE = "온라인 · 분석 승인 뒤 유료"
+OFFLINE_MODE_NOTE = "오프라인 · 유료 분석 꺼짐"
 # 승인된 분석이 입장 차례를 다시 확인하는 간격 — 취소도 이 간격 안에 알아챈다.
 ANALYSIS_ADMISSION_POLL_SECONDS = 0.05
-QUICK_APPROVED_TEXT = (
-    "선택한 영상의 Luna 분석을 시작했습니다. 추천 구간이 타임라인 위에 표시됩니다."
-)
+QUICK_APPROVED_TEXT = "선택한 영상의 분석을 시작했습니다. 추천 구간이 타임라인 위에 표시됩니다."
+"""시작 알림 — 모델 이름은 돈·모델 고르기 자리에만 쓴다(Claude를 골랐는데 'Luna'라 하지 않는다)."""
+UNREVIEWED_KEYWORD = "제외 제안(미검토)"
+"""보낸 파일의 미검토 제외 제안에 붙는 Final Cut 키워드 이름 — `finalcut_timeline`의
+`KEYWORD_UNREVIEWED`와 같다(시험)."""
+NO_WORKSPACE_TEXT = "작업공간이 열려 있지 않습니다. Final Cut 라이브러리를 먼저 불러오세요."
+CONFIRM_ALL_SOURCE_LABEL = "남은 제외 제안 모두 제외 유지"
+"""제안 대기열의 「남은 M개 모두 제외 유지」가 누르는 숨은 단추 — 옛 「자동 제외 확인」의 처리기
+그대로다(같은 서비스 호출, D57 C). 화면에 보이는 단추는 대기열 안에 있다."""
+STAGE_LABELS = {"Luna 추천 구간 분석": "추천 구간 분석 중", "저장된 Luna 결과": "저장된 분석 결과"}
+"""저장된 단계 이름 가운데 모델 별명을 단 것의 화면 이름 — 단계 값은 기록·비교에 그대로 쓴다."""
+APPROVAL_TOASTS = {
+    NOTICE_ACCEPTED: ("info", "분석 승인을 접수했습니다."),
+    NOTICE_PREPARING: ("warning", "견적을 준비하고 있습니다. 견적이 보이면 다시 승인하세요."),
+    NOTICE_KEY: ("warning", "연결 설정이 필요합니다. 아직 분석하지 않았습니다."),
+    NOTICE_UNSEEN: ("warning", "새 견적을 확인하세요. 아무것도 시작하지 않았습니다."),
+}
+"""일괄 승인 클릭의 알림 — 접수는 알림, 거절은 주의다. 거절 문구 전문은 견적 칸 전문 칸에 있다."""
 # 영상 분석 모델(D54) — 끝난 단계는 그 분석의 모델이 지금 설정과 같을 때만 끝났다고 보인다.
 FINISHED_QUICK_STAGES = ("추천 구간 준비 완료", "부분 완료 · 확인 필요")
 MODEL_CHANGED_STAGE = "분석 모델 바뀜 · 다시 승인 필요"
@@ -275,6 +290,11 @@ body, .gradio-container {
 .gradio-container .toast-body.warning { --toast-color: var(--vl-warn) !important; }
 .gradio-container .toast-body.success { --toast-color: var(--vl-success) !important; }
 .gradio-container .toast-body.info { --toast-color: var(--vl-accent-ink) !important; }
+/* 알림은 오른쪽 아래에 쌓인다(W-17 C) — 그라디오 기본(오른쪽 위)은 넓은 화면의 견적 칸 위에
+   떠서, 덮인 견적을 거절하는 승인 앞 단계(APPROVE_GUARD_JS)가 알림이 사라질 때까지 승인을
+   막았다(탐침 실측: 알림 뒤의 승인 클릭이 「새 견적을 확인하세요」). 상태 줄 위에 선다. */
+body .toast-wrap {
+ top: auto !important; bottom: calc(var(--vl-statusline-h) + 16px) !important; }
 #quick-status { background: var(--vl-surface); color: var(--vl-ink);
  border: 1px solid var(--vl-line); padding:10px 12px; border-radius:6px; }
 #quick-status p, #quick-status strong { color: var(--vl-ink); }
@@ -389,6 +409,50 @@ def open_in_final_cut(path: Path) -> None:
         )
 
 
+def _toast(level: str, message: str) -> None:
+    """알림 하나 — 완료는 `gr.Info`, 막힌 동작은 `gr.Warning`(머리 글자는 한글, D57 C).
+
+    경고 거르개를 만지지 않는다 — 처리기는 일꾼 스레드에서 돌고, 거르개를 잠시 바꾸는 문맥
+    관리자는 스레드 안전하지 않다. 그라디오 사건 밖(시험)에서 그라디오가 흘리는 경고는 그대로 둔다.
+    """
+    show = gr.Info if level == "info" else gr.Warning
+    show(message, title=ui_facade.TOAST_TITLES[level])
+
+
+SEND_FAILURE_REASONS = (
+    ("가져오기 작업이 아직 진행 중", "영상 가져오기가 아직 진행 중입니다. 끝난 뒤 다시 보내세요."),
+    ("다른 Final Cut 보내기가 진행 중", "다른 보내기가 진행 중입니다. 끝난 뒤 다시 보내세요."),
+    ("VFR", "가변 프레임(VFR) 영상이 있습니다. 일정한 프레임으로 다시 저장해 불러오세요."),
+    ("원본이 낡았다", "검토한 뒤 원본 영상이 바뀌었습니다. 새로고침한 뒤 다시 보내세요."),
+    ("보낼 원본이 없다", "보낼 영상이 없습니다. 가져오기를 먼저 끝내세요."),
+    ("Final Cut을 열지 못했습니다", "타임라인 XML은 만들었지만 Final Cut을 열지 못했습니다."),
+    ("파일 잠금", "작업공간 폴더를 잠글 수 없습니다. 작업공간을 이 Mac의 디스크에 두세요."),
+    ("DTD", "타임라인 XML이 Final Cut 검사를 통과하지 못했습니다."),
+)
+"""보내기 거부 사유 → 알림 한 줄. 서비스 문구는 작업 ID·날 열거값(`ingest_copy`)을 싣는다 — 그
+전문은 상태 줄과 「기록」에 그대로 있고, 알림은 쉬운 말 한 줄이다(D57 C 고침)."""
+
+
+def _send_failure_text(error: str) -> str:
+    """보내기 실패 알림 — 알려진 사유는 쉬운 말로, 모르는 사유는 「기록」을 가리킨다."""
+    reason = next((text for needle, text in SEND_FAILURE_REASONS if needle in error), "")
+    return " ".join(
+        part
+        for part in ("Final Cut으로 보내지 못했습니다.", reason, "전체 내용은 「기록」에 있습니다.")
+        if part
+    )
+
+
+def _stage_label(stage: str) -> str:
+    """단계의 화면 이름 — 모델 별명을 단 옛 단계 이름만 바꿔 보인다(값은 그대로 비교에 쓴다)."""
+    return STAGE_LABELS.get(stage, stage)
+
+
+def _error(message: str) -> gr.Error:
+    """실패 알림으로 던질 오류 — 머리 글자는 한글이고, 알림이 말하는 실패라 추적은 찍지 않는다."""
+    return gr.Error(message, title=ui_facade.TOAST_TITLES["error"], print_exception=False)
+
+
 def _quote_model(quote: Any) -> str | None:
     """견적이 본 의미 분석 모델 — 워크플로가 없는 견적(옛 모양)은 모른다."""
     workflow = getattr(quote, "workflow", None)
@@ -441,12 +505,20 @@ def _finalcut_sent_text(sent: dict[str, Any]) -> str:
         text = f"**Final Cut으로 보내지 못했습니다** · {sent['error']}"
         return text + ("\n\n" + FINALCUT_VFR_NOTE if "VFR" in sent["error"] else "")
     counts = sent["counts"]
+    # 보낸 파일 하나의 사실로 말한다 — 「… 미검토 제외 제안 N개 …」 나열은 활동 칸에 남아 0개 남은
+    # 대기열 곁에서 지금의 수처럼 읽혔다(D57 C 고침 4).
+    unreviewed = counts["unreviewed_clips"]
     text = (
-        f"**Final Cut으로 보냈습니다** · 원본 {counts['sources']}개"
-        f" · 스파인 클립 {counts['spine_clips']}개 · 꺼진 클립 {counts['disabled_clips']}개"
-        f" · 미검토 제외 제안 {counts['unreviewed_clips']}개"
-        f" · 넣지 않은 원본 {sent['not_exported']}개 · `{Path(sent['path']).name}`"
-        "\n\nFinal Cut에서 새 이벤트·프로젝트로 가져왔는지 확인하세요."
+        f"**Final Cut으로 보냈습니다** · 보낸 파일 `{Path(sent['path']).name}`: 원본"
+        f" {counts['sources']}개 · 타임라인 클립 {counts['spine_clips']}개 · 꺼진 클립"
+        f" {counts['disabled_clips']}개 · 넣지 않은 원본 {sent['not_exported']}개."
+        + (
+            f" 보낸 파일에는 미검토 제외 제안 {unreviewed}개를 「{UNREVIEWED_KEYWORD}」 키워드로"
+            " 달았습니다."
+            if unreviewed
+            else ""
+        )
+        + "\n\nFinal Cut에서 새 이벤트·프로젝트로 가져왔는지 확인하세요."
     )
     if sent.get("caption_timing_error"):
         # 표지는 표시 전용이라 보내기를 막지 않았다 — 그래도 키워드가 빠진 이유는 보인다.
@@ -517,8 +589,8 @@ class RawWorkspaceUi:
         # 마지막 확정 내보내기 자리 — Finder 열기·경로 복사·정리 뒤 재검증의 대상.
         self._last_export_path: str | None = None
         self._last_export_dir: str | None = None
-        # 마지막 「Final Cut으로 보내기」 결과 — 작업공간 서명마다(성공 요약 또는 거부 사유).
-        self._finalcut_sent: dict[str, dict[str, Any]] = {}
+        # 마지막 보내기 결과와 그것을 알림으로 알렸는가 — 작업공간 서명마다(`_send_memory`).
+        self._finalcut_sent, self._finalcut_announced = self._send_memory()
         self._project_names: dict[Path, str] = {}  # 머리줄 이름 캐시(`_project_name`)
         self._capcut_quote_phase: dict[str, str] = {}
         self._capcut_render_key: tuple | None = None
@@ -754,7 +826,7 @@ class RawWorkspaceUi:
     def _require_root(self) -> Path:
         root = self._snapshot_root()
         if root is None:
-            raise gr.Error("작업공간이 열려 있지 않다 — 1번 탭에서 만들거나 여세요.")
+            raise gr.Error(NO_WORKSPACE_TEXT)
         return root
 
     def _signature_for(self, root: Path | None) -> str | None:
@@ -783,12 +855,10 @@ class RawWorkspaceUi:
         """
         root = self._snapshot_root()
         if root is None:
-            raise gr.Error("작업공간이 열려 있지 않다 — 1번 탭에서 만들거나 여세요.")
+            raise gr.Error(NO_WORKSPACE_TEXT)
         current = self._signature_for(root)
         if signature is None or signature != current:
-            raise gr.Error(
-                "선택한 작업공간이 이미 바뀌었다 — 화면을 새로고침한 뒤 다시 시도하세요."
-            )
+            raise gr.Error("선택한 작업공간이 바뀌었습니다. 화면을 새로고침한 뒤 다시 시도하세요.")
         return root
 
     def workspace_root(self) -> Path | None:
@@ -887,9 +957,9 @@ class RawWorkspaceUi:
     def workspace_markdown(self, root: Path | None = None) -> str:
         root = root if root is not None else self._snapshot_root()
         if root is None:
+            # 이 글은 왼쪽 서랍(프로젝트 도구)에 그 단추들과 함께 보인다 — 옛 「1번 탭」은 없다.
             return (
-                "열린 작업공간이 없다 — 1번 탭에서 **새 프로젝트 만들기** 또는 "
-                "**기존 프로젝트 열기**."
+                "열린 작업공간이 없습니다. 「새 프로젝트」로 만들거나 「프로젝트 열기」로 여세요."
             )
         try:
             status = self.raw.workspace_status(root)
@@ -1019,8 +1089,8 @@ class RawWorkspaceUi:
             with gr.Row():
                 self._ws_path_box = gr.Textbox(
                     label="작업공간 경로(표시)",
-                    info="선택기로 고른 자리를 보여줄 뿐 직접 적을 수 없다.",
-                    placeholder="아래 단추로 폴더 또는 Final Cut 라이브러리를 고르세요",
+                    info="선택기로 고른 자리를 보여 줍니다. 직접 적을 수는 없습니다.",
+                    placeholder="「프로젝트 열기」로 폴더나 라이브러리를 고르세요",
                     scale=6,
                     interactive=False,
                 )
@@ -1053,8 +1123,8 @@ class RawWorkspaceUi:
                 with gr.Row():
                     self._source_box = gr.Textbox(
                         label="원본 폴더(SD 카드) — 선택기 표시",
-                        info="가져올 원본이 있는 폴더. 선택기로 고른 뒤 조사 → 원본 순서 확인 →"
-                        " 복사 및 검증이 이 탭에서 바로 이어진다.",
+                        info="가져올 원본이 있는 폴더입니다. 선택기로 고른 뒤 조사 → 원본 순서"
+                        " 확인 → 복사 및 검증이 이 서랍에서 바로 이어집니다.",
                         placeholder="폴더 찾아보기 또는 마운트된 장치 후보로 고르세요",
                         scale=6,
                         interactive=False,
@@ -1063,7 +1133,7 @@ class RawWorkspaceUi:
                 self._devices_dd = gr.Dropdown(
                     choices=self.device_choices(),
                     label="마운트된 장치 후보",
-                    info="후보를 보여줄 뿐, 누르기 전에는 아무 것도 조사하지 않는다.",
+                    info="후보를 보여 줍니다. 고르기 전에는 아무것도 조사하지 않습니다.",
                     interactive=True,
                 )
                 self._listing_md = gr.Markdown(
@@ -1161,6 +1231,12 @@ class RawWorkspaceUi:
     # ── 화면 2 — 분석 · 조각 검토 ──────────────────────────────
 
     def _capcut_result(self, root: Path, message: str) -> tuple[str, str, str]:
+        """명령 답 + 다시 그린 작업대 — 답에는 제외 제안 수를 싣지 않는다(D57 C 고침 3).
+
+        미검토 수는 정보일 뿐 보내기를 막지 않는다(D56). 그 수와 「켠 채 … 키워드」 안내는 그릴
+        때마다 다시 세는 대기열(`model.queue`)이 싣는다. 답에 실은 수는 그 순간의 값이라, 활동 칸·
+        상태 줄 각주에 남아 확인·실행 취소 뒤의 대기열과 어긋났다.
+        """
         upkeep = self._maybe_upkeep(root)
         if upkeep:
             message += "\n\n" + upkeep
@@ -1168,12 +1244,6 @@ class RawWorkspaceUi:
         if sync_note:
             message += "\n\n" + sync_note
         self._refresh_review_panel_state(root)
-        pending = self._unreviewed_auto_count(root)
-        if pending:
-            message += (
-                f"\n\n**자동 제외 {pending}개 미검토** · Final Cut에는 켠 채 '제외 제안(미검토)'"
-                " 태그로 갑니다. 끈 채 보내려면 '자동 제외 확인'을 누르세요."
-            )
         return message, *self.visual_workbench_render(root)
 
     def _maybe_upkeep(self, root: Path) -> str | None:
@@ -1710,7 +1780,21 @@ class RawWorkspaceUi:
     def library_analysis_view(
         self, signature: str | None, api_key: str | None = "", shown_summary: str | None = None
     ) -> tuple:
-        """일괄 승인 — 화면이 함께 보낸 요약(범위·상한)이 지금 견적과 같을 때만 접수한다(D54)."""
+        """일괄 승인 — 화면이 함께 보낸 요약(범위·상한)이 지금 견적과 같을 때만 접수한다(D54).
+
+        답의 알림 종류로 알림 한 줄을 띄운다(접수는 알림, 거절은 주의) — 결합은 그대로다(D57 C).
+        """
+        reply = self._library_analysis(signature, api_key, shown_summary)
+        root = self._snapshot_root()
+        held = self._approval_notice.get(root) if root is not None else None
+        toast = APPROVAL_TOASTS.get(held.kind) if held is not None else None
+        if toast is not None:
+            _toast(*toast)
+        return reply
+
+    def _library_analysis(
+        self, signature: str | None, api_key: str | None, shown_summary: str | None
+    ) -> tuple:
         root = self._require_current_selection(signature)
         ids = self._library_ids(root)
         quote = self._library_quotes.get(root)
@@ -1909,13 +1993,14 @@ class RawWorkspaceUi:
     def _quick_status_text(self) -> str:
         state = self._quick
         if not state:
-            return "영상을 선택하면 미리보기와 Luna 추천 분석이 이어집니다."
-        stage = self._shown_stage(state.get("root"), state, "영상 준비")
+            return "영상을 고르면 미리보기를 준비합니다. 분석은 견적을 확인한 뒤 승인하세요."
+        stage = _stage_label(self._shown_stage(state.get("root"), state, "영상 준비"))
         if state.get("connection_required"):
+            # 「API 연결 열기」는 이 글을 실은 활동 칸에 함께 보인다(설정 서랍의 API 연결을 연다).
             return (
                 "**연결 설정 필요 · 아직 분석하지 않았습니다**\n\n"
-                "아래 **API 연결**에 OpenAI API 키를 입력한 뒤 **Luna 분석 시작**을 다시 누르세요. "
-                "영상과 승인 범위는 그대로 유지됩니다."
+                f"「API 연결 열기」로 OpenAI API 키를 넣은 뒤 「{LIBRARY_APPROVE_LABEL}」을 다시"
+                " 누르세요. 영상과 승인 범위는 그대로 유지됩니다."
             )
         if state.get("error"):
             return f"**{stage}** · {state['error']} · 원본은 유지됩니다."
@@ -1935,7 +2020,7 @@ class RawWorkspaceUi:
                     f"**원본 자막 {count}개 표시 · 영상 프레임 준비 중 "
                     f"({prepared}/최대 {maximum})**\n\n"
                     "시간 자막을 먼저 확인할 수 있습니다. "
-                    "이어서 같은 자막과 영상 프레임을 Luna가 함께 분석합니다."
+                    "이어서 같은 자막과 영상 프레임을 함께 분석합니다."
                 )
         if stage == "승인 대기" and quote is not None:
             return self._approval_ready_text(quote)
@@ -1953,7 +2038,8 @@ class RawWorkspaceUi:
             f"**{label} 분석 준비 완료** · 선택 영상 {len(quote.asset_ids)}개\n\n"
             f"전사 최대 {chunks}요청({duration:.0f}초) + {label} 최대 {requests}요청{ceiling}. "
             "실제 비용은 사용한 오디오·토큰에 따라 정해집니다.\n\n"
-            "아래에서 한 번 승인하면 전사·장면 분석·추천 표시가 자동으로 이어집니다."
+            f"「{LIBRARY_APPROVE_LABEL}」으로 한 번 승인하면 전사·장면 분석·추천 표시가"
+            " 자동으로 이어집니다."
         )
 
     # ── 영상 분석 모델(D54) — 작업공간 설정에 산다 ─────────────────────────
@@ -2154,7 +2240,7 @@ class RawWorkspaceUi:
 
     def _capcut_progress(self, root: Path) -> str:
         names = {
-            "selection_analysis": "Luna 분석",
+            "selection_analysis": "영상 분석",
             "automatic_cleanup": "자동 정리",
             "selected_video_import": "영상 가져오기",
             "reference_import": "원본 연결 · 복사 없음",
@@ -2184,8 +2270,10 @@ class RawWorkspaceUi:
         ]
         summary = self.raw.analysis_overview(root)
         if summary and summary.revision.status == "awaiting_semantic":
-            lines.insert(0, "전사 완료 · 자동 정리를 눌러 다음 단계 비용을 확인하세요.")
-        return "\n\n".join(lines) or "영상을 선택하고 자동 정리를 시작하세요."
+            lines.insert(
+                0, "전사가 끝났습니다. 다음 단계(영상 분석)는 견적을 확인한 뒤 승인하세요."
+            )
+        return "\n\n".join(lines) or "영상을 고르면 분석 범위와 견적이 표시됩니다."
 
     def _task_views(self, root: Path) -> dict[str, dict]:
         self._load_quick_tasks(root)
@@ -2282,37 +2370,55 @@ class RawWorkspaceUi:
         return message, gr.skip(), workbench
 
     def capcut_edit_view(self, signature: str | None, action: str) -> tuple[str, str, str]:
+        """실행 취소 · 「자동 제외 전체 복원」 — 되돌릴 것이 없으면 막힌 동작으로 알린다."""
         root = self._require_current_selection(signature)
         facade = self._review_facade(root)
-        if action == "undo":
-            facade.undo()
-        else:
-            facade.restore_automatic()
-        return self._capcut_result(root, "검토 변경을 저장했습니다.")
+        try:
+            if action == "undo":
+                facade.undo()
+                message = "마지막 편집을 되돌렸습니다."
+            else:
+                facade.restore_automatic()
+                message = "자동 제외를 모두 복원했습니다. 사람이 고른 제외는 그대로입니다."
+        except raw_service.RawWorkspaceError as error:
+            message = str(error)
+            _toast("warning", message)
+            return self._capcut_result(root, message)
+        _toast("info", message)
+        return self._capcut_result(root, message)
 
     def capcut_confirm_auto_view(self, signature: str | None) -> tuple[str, str, str]:
-        """미검토 자동 제외를 한 번에 확인한다 — 제외는 유지되고 새 리비전이 남는다(D35)."""
+        """남은 제외 제안을 한 번에 확인한다 — 제외는 유지되고 새 리비전이 남는다(D35).
+
+        제안 대기열의 「남은 M개 모두 제외 유지」가 부른다 — 옛 명령 줄 「자동 제외 확인」과 같은
+        처리기·같은 서비스 호출이다(바뀐 영상만 사람 손, 실행 취소·전체 복원 그대로, D53·D57 C).
+        """
         root = self._require_current_selection(signature)
         facade = self._review_facade(root)
         before = facade.unreviewed_auto_exclusion_count()
         facade.confirm_automatic_exclusions()
-        message = (
-            f"자동 제외 {before}개를 확인했습니다. 제외는 그대로 유지됩니다."
-            if before
-            else "확인할 자동 제외가 없습니다."
-        )
+        if before:
+            message = f"제외 제안 {before}개를 확인했습니다. 제외는 그대로 유지됩니다."
+            _toast("info", message)
+        else:
+            message = "확인할 제외 제안이 없습니다."
+            _toast("warning", message)
         return self._capcut_result(root, message)
 
     def capcut_cancel_view(self, signature: str | None) -> str:
         root = self._require_current_selection(signature)
         if self._quick.get("root") != root:
-            return "취소할 선택 분석 작업이 없습니다."
+            message = "취소할 선택 분석 작업이 없습니다."
+            _toast("warning", message)
+            return message
         self._cancel_quick()
         if self._quick:
             self._quick_update(
                 self._quick["token"], token=uuid.uuid4().hex, stage="취소됨", error=None
             )
-        return "취소를 요청했습니다. 완료된 결과는 보존됩니다."
+        message = "취소를 요청했습니다. 완료된 결과는 보존됩니다."
+        _toast("info", message)
+        return message
 
     def capcut_cancel_all_view(self, signature: str | None) -> str:
         """승인 확인과 돌거나 기다리는 모든 영상 분석을 멈춘다 — 끝난 결과는 그대로 남는다."""
@@ -2325,7 +2431,9 @@ class RawWorkspaceUi:
             if self._task_running(root, task):
                 self._cancel_task(task)
                 self._quick_update(token, token=uuid.uuid4().hex, stage="취소됨", error=None)
-        return "전체 분석 취소를 요청했습니다. 완료된 결과는 보존됩니다."
+        message = "전체 분석 취소를 요청했습니다. 완료된 결과는 보존됩니다."
+        _toast("info", message)
+        return message
 
     def _task_running(self, root: Path, task: dict) -> bool:
         if task.get("stage") in BUSY_QUICK_STAGES:
@@ -2445,6 +2553,12 @@ class RawWorkspaceUi:
             " 없고, 사람이 확인한 제외만 끈 채로 갑니다."
         )
 
+    @staticmethod
+    def _send_memory() -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+        """(마지막 보내기 결과, 알림으로 알린 결과) — 작업공간 서명마다. 같은 결과 객체는 한 번만
+        알린다(`finalcut_toast_view`, D57 C)."""
+        return {}, {}
+
     def _remember_finalcut(self, root: Path, signature: str | None, sent: dict[str, Any]) -> None:
         with self._selection_lock:
             if self._root == root and self._signature_for(root) == signature:
@@ -2452,6 +2566,38 @@ class RawWorkspaceUi:
                 if "path" in sent:
                     # 「폴더 열기」가 보낸 폴더를 가리킨다 — 확정 내보내기 기록은 건드리지 않는다.
                     self._last_export_path = str(Path(sent["path"]).parent)
+
+    def finalcut_toast_view(self, signature: str | None) -> None:
+        """끝난 보내기를 한 번 알린다 — 성공은 알림, 실패는 오류(작업이 뒤에서 끝나 2초 틱이 본다).
+
+        결과 전문은 상태 줄(활동 칸)이 이미 싣는다 — 알림은 머리 한 줄이다(D57 C, HandoffStep).
+        """
+        sent = self._finished_send(signature)
+        if sent is None:
+            return
+        if "path" in sent:
+            sources, clips = sent["counts"]["sources"], sent["counts"]["spine_clips"]
+            _toast("info", f"Final Cut으로 보냈습니다. 원본 {sources}개 · 클립 {clips}개.")
+            return
+        raise _error(_send_failure_text(str(sent["error"])))
+
+    def _finished_send(self, signature: str | None) -> dict[str, Any] | None:
+        """아직 알리지 않은 마지막 보내기 결과 — 그 보내기 작업이 끝났을 때만, 결과마다 한 번."""
+        root = self._snapshot_root()
+        if not signature or root is None or signature != self._signature_for(root):
+            return None
+        export = next(
+            (j for j in self.raw.list_jobs(root, limit=10) if j.kind == FINALCUT_SEND_JOB_KIND),
+            None,
+        )
+        if export is None or export.status not in ("succeeded", "failed"):
+            return None
+        with self._selection_lock:
+            sent = self._finalcut_sent.get(signature)
+            if sent is None or self._finalcut_announced.get(signature) is sent:
+                return None
+            self._finalcut_announced[signature] = sent
+        return sent
 
     @staticmethod
     def _system_finalcut_open(path: Path) -> None:
@@ -2536,8 +2682,11 @@ class RawWorkspaceUi:
             self._cancel_button = gr.Button("선택 분석 취소", scale=0)
             self._cancel_all_button = gr.Button("전체 분석 취소", scale=0, variant="stop")
             self._handoff_button = gr.Button(FINALCUT_SEND_LABEL)
-            # 미검토 안내가 이 단추를 누르라고 말한다(끈 채 보내기) — 서랍에 두지 않는다.
-            self._confirm_auto_button = gr.Button("자동 제외 확인")
+            # 일괄 확인의 원천 — 화면의 단추는 제외 제안 대기열의 「남은 M개 모두 제외 유지」이고,
+            # 그것이 이 숨은 단추를 누른다(옛 「자동 제외 확인」의 처리기·입출력 그대로, D57 C).
+            self._confirm_auto_button = gr.Button(
+                CONFIRM_ALL_SOURCE_LABEL, visible="hidden", elem_id=ui_facade.CONFIRM_ALL_SOURCE_ID
+            )
             gr.HTML(
                 ui_facade.activity_html(),
                 elem_id="vl-activity-block",
@@ -2664,7 +2813,7 @@ class RawWorkspaceUi:
         self._wire_review_timers(outputs)
 
     def _wire_review_timers(self, outputs: list[Any]) -> None:
-        """1·2초 타이머 — 승인 단추 이름, 견적 문구, 상태 줄, 작업대 다시 그리기(옛 그대로)."""
+        """1·2초 타이머 — 승인 단추 이름, 견적 문구, 상태 줄, 작업대 다시 그리기, 보내기 알림."""
         gr.Timer(1).tick(
             self.library_analysis_button,
             None,
@@ -2697,6 +2846,10 @@ class RawWorkspaceUi:
             self._signature_state,
             outputs,
             show_progress="hidden",
+        )
+        # 보내기는 뒤에서 끝난다 — 끝난 결과를 알림으로 한 번(알림은 대기열을 지나야 뜬다).
+        gr.Timer(2).tick(
+            self.finalcut_toast_view, self._signature_state, None, show_progress="hidden"
         )
 
     def _settings_drawer(self) -> tuple[gr.Button, gr.Button, gr.Dropdown, gr.Button]:
@@ -2905,7 +3058,7 @@ class RawWorkspaceUi:
             review_filter_button = gr.Button("조회", scale=1)
         with gr.Row():
             review_segment_box = gr.Textbox(label="조각 ID", scale=3)
-            review_note_box = gr.Textbox(label="메모", scale=4)
+            review_note_box = gr.Textbox(label="메모", scale=4, lines=2)  # 여러 줄(D57 C 고침 4)
             review_note_button = gr.Button("메모 저장", scale=1)
         with gr.Row():
             review_selection_dd = gr.Dropdown(
@@ -3526,7 +3679,7 @@ class RawWorkspaceUi:
         선택·탐색 계산은 클라이언트 실행본이 이 값을 가지고 한다.
         """
         if root is None:
-            note = "작업공간이 열려 있지 않다 — 1번 탭에서 만들거나 여세요."
+            note = "Final Cut 라이브러리를 불러오세요."
             return (
                 ui_facade.visual_player_shell_html(None, note),
                 self._workbench_html(None, {"empty": note}),
@@ -3563,7 +3716,7 @@ class RawWorkspaceUi:
         try:
             overview = self._visual_query(root, query_page, preferred_id, selection_filter)
         except (raw_service.RawWorkspaceError, raw_service.ReviewError) as error:
-            note = f"영상 검토를 열지 못했다 — {error}"
+            note = f"영상 검토를 열지 못했습니다. {error}"
             return (
                 ui_facade.visual_player_shell_html(None, note),
                 self._workbench_html(root, {"empty": note}),
@@ -3577,13 +3730,13 @@ class RawWorkspaceUi:
             try:
                 revision, ordered = self._visual_chronological(root, overview.base_plan_id)
             except (raw_service.RawWorkspaceError, raw_service.ReviewError) as error:
-                note = f"검토 머리를 다시 읽지 못했다 — {error}"
+                note = f"검토 상태를 다시 읽지 못했습니다. {error}"
                 return (
                     ui_facade.visual_player_shell_html(None, note),
                     self._workbench_html(root, {"empty": note}),
                 )
             if revision.revision_id != overview.revision_id:
-                note = "검토 머리가 그 사이 바뀌었다 — 새로고침으로 다시 받으세요."
+                note = "검토 내용이 그 사이 바뀌었습니다. 새로고침하세요."
                 return (
                     ui_facade.visual_player_shell_html(None, note),
                     self._workbench_html(root, {"empty": note}),
@@ -3677,7 +3830,7 @@ class RawWorkspaceUi:
                 in tags_by_segment.get(seg_card.segment_id, ()),
                 "speech": seg_card.speech_status,
                 "tags": list(tags_by_segment.get(seg_card.segment_id, ())),
-                "note": seg_card.notes,
+                **self._memo_fields(seg_card.notes),
                 "thumb": {
                     "state": seg_card.thumb_state,
                     "src": (
@@ -3715,10 +3868,8 @@ class RawWorkspaceUi:
             selected_card = _card_values(selected, selected_order)
         task_views = self._task_views(root)
         pending_ids = self._pending_cut_ids(ordered)
-        red_unmaterialized = sum(
+        for sid, source in sources_model.items():
             self._annotate_tiers(root, sid, source, task_views.get(sid, {}), pending_ids)
-            for sid, source in sources_model.items()
-        )
         for sid, source in sources_model.items():
             transcript = self.raw.source_transcript(root, sid)
             if transcript:
@@ -3744,7 +3895,7 @@ class RawWorkspaceUi:
             if refs:
                 source["mediaStatus"] = refs["validation"]["reason"]
                 source["originalMissing"] = refs["original"] is None
-            source.setdefault("analysisState", "영상을 선택하면 Luna 분석을 시작합니다")
+            source.setdefault("analysisState", "분석 전")
         media_cards = []
         for sid, source in sources_model.items():
             rail_data = source.get("rail")
@@ -3799,8 +3950,7 @@ class RawWorkspaceUi:
             "staleSources": [list(pair) for pair in overview.stale_sources],
             "needsPlan": needs_plan,
             "packageDir": self._latest_package_dir(root),
-            "redPending": len(pending_ids),
-            "redUnmaterialized": red_unmaterialized,
+            **self._proposal_fields(sources_model, ordered, pending_ids),
         }
         shell_src = None
         if selected is not None:
@@ -3808,7 +3958,7 @@ class RawWorkspaceUi:
             shell_src = src_value if isinstance(src_value, str) else None
         shell = ui_facade.visual_player_shell_html(
             shell_src,
-            "선택 조각의 원본 전체 미리보기 — 시간 렠·재생 머리는 작업대가 채운다.",
+            "선택한 컷이 있는 영상 전체를 재생합니다.",
         )
         analysed = sum(
             s["analysisState"] == FINISHED_QUICK_STAGES[0] for s in sources_model.values()
@@ -3847,18 +3997,30 @@ class RawWorkspaceUi:
         }
 
     @staticmethod
-    def _unmaterialized_red_count(source: Mapping[str, Any]) -> int:
-        """조각 경계로 아직 떨어지지 않은 제외 제안 수 — 프레임 안쪽으로 붙인 끝을 본다."""
-        rail = source.get("rail")
-        if not isinstance(rail, Mapping):
-            return 0
-        edges = {Fraction(it[key]) for it in rail["intervals"] for key in ("start", "end")}
-        ranges = [
-            (Fraction(row["start"]), Fraction(row["end"]))
-            for row in source.get("suggestions", [])
-            if row["tier"] == "red"
-        ]
-        return raw_service.unmaterialized_red(ranges, edges, Fraction(rail["frameSec"]))
+    def _memo_fields(notes: str) -> dict[str, object]:
+        """카드의 메모 — 사람 메모(`note`, 메모 칸)와 기계 근거(`machine`, 「분석 근거」).
+
+        메모 칸은 사람의 말만 보이고 고친다(D52·D57 C 고침 2). 기계 근거는 날 JSON 대신 이유
+        이름과 구간으로 싣고, 실행본이 접힌 「분석 근거」에 쉬운 말로 보인다.
+        """
+        parts = raw_service.split_review_notes(notes)
+        machine = [RawWorkspaceUi._machine_note_row(line) for line in parts.machine]
+        return {"note": parts.human, "machine": machine}
+
+    @staticmethod
+    def _machine_note_row(line: str) -> dict[str, str]:
+        """기계 줄 하나 — 자동 제외 근거(이유·구간 초)거나 확인 필요(사유 글)."""
+        auto = raw_service.review_auto_note_line(line)
+        if auto is None:
+            return {"kind": "review", "text": line.removeprefix(raw_service.REVIEW_NOTE_PREFIX)}
+        row = {"kind": "auto", "reason": str(auto.provenance.get("reason", ""))}
+        for key in ("start", "end"):
+            value = auto.provenance.get(key)
+            if isinstance(value, Mapping) and isinstance(value.get("num"), int):
+                den = value.get("den")
+                if isinstance(den, int) and den > 0:
+                    row[key] = str(Fraction(value["num"], den))
+        return row
 
     @staticmethod
     def _pending_cut_ids(ordered: Any) -> set[str]:
@@ -3877,28 +4039,31 @@ class RawWorkspaceUi:
         source: dict[str, Any],
         task: Mapping[str, Any],
         pending_ids: set[str],
-    ) -> int:
-        """원본 하나에 분석 상태·카드 배지·등급 구간(열린 빨강 표시)을 싣는다.
+    ) -> None:
+        """원본 하나에 분석 상태·카드 배지·등급 구간(열린 빨강·경계와 맞지 않는 빨강 표시)을 싣는다.
 
-        돌려주는 값은 컷 경계로 아직 떨어지지 않은 제외 제안 수다(작업대 각주의 재료).
+        경계와 맞지 않는 빨강의 수는 대기열이 그 표시(`loose`)로 한 번 센다(`_proposal_queue`).
         """
         source["analysisState"] = self._shown_stage(root, task, "분석 대기")
+        source["analysisLabel"] = _stage_label(str(source["analysisState"]))
         badge = self._analysis_badge(task, str(source["analysisState"]))
         if badge is not None:
             source["analysisBadge"] = badge
         if not task.get("revision"):
-            return 0
+            return
         rows = self.raw.selection_suitability(root, task["revision"], (source_id,))
         source["suggestions"] = [self._suggestion_row(row) for row in rows.get(source_id, [])]
         self._mark_open_reds(source, pending_ids)
-        return self._unmaterialized_red_count(source)
 
     @staticmethod
     def _mark_open_reds(source: dict[str, Any], pending_ids: set[str]) -> None:
-        """빨강 구간마다 아직 결정을 기다리는지(`open`) — 카드의 띠와 ✕ 수가 같은 판정을 쓴다.
+        """빨강 구간마다 결정을 기다리는지(`open`)와 컷 경계와 맞지 않는지(`loose`).
 
-        컷 경계로 떨어지지 않은 제안은 결정할 컷이 아직 없으니 열린 채로 둔다. 떨어진 제안은
-        가운데를 덮는 컷에 미검토 표지가 남아 있을 때만 열려 있다(확인·되돌림이 표지를 걷는다).
+        빨강은 그 가운데를 덮는 컷을 따른다 — 그 컷에 미검토 표지가 남았을 때만 열려 있다(확인·
+        되돌림이 표지를 걷는다). 경계와 맞지 않는 빨강도 같다(D57 C 고침 1): 옛 규칙은 그것을 늘
+        열림으로 셌는데, 그 컷을 사용으로 되돌리든 제외로 확인하든 닫히지 않았고(화면 어디에도 닫는
+        동작이 없었다) 보내기에도 아무 효과가 없다 — `제외 제안(미검토)` 키워드는 미검토 컷에만
+        달리고, 그 구간은 덮는 컷의 결정을 따른다. 따로 정하려면 나누기로 컷을 만든다.
         """
         rail = source.get("rail")
         if not isinstance(rail, Mapping):
@@ -3910,13 +4075,100 @@ class RawWorkspaceUi:
             if row["tier"] != "red":
                 continue
             start, end = Fraction(row["start"]), Fraction(row["end"])
-            middle = (start + end) / 2
-            cut = next(
-                (it for it in intervals if Fraction(it["start"]) <= middle < Fraction(it["end"])),
-                None,
-            )
-            loose = raw_service.unmaterialized_red([(start, end)], edges, frame) > 0
-            row["open"] = loose or (cut is not None and cut["id"] in pending_ids)
+            cut = RawWorkspaceUi._cut_at_middle(intervals, start, end)
+            row["loose"] = raw_service.unmaterialized_red([(start, end)], edges, frame) > 0
+            row["open"] = cut is not None and cut["id"] in pending_ids
+
+    @staticmethod
+    def _cut_at_middle(
+        intervals: Sequence[Mapping[str, Any]], start: Fraction, end: Fraction
+    ) -> Mapping[str, Any] | None:
+        """구간의 가운데를 덮는 컷 — 빨강 끝은 프레임 안쪽으로 붙어 있어 가운데로 찾는다."""
+        middle = (start + end) / 2
+        return next(
+            (it for it in intervals if Fraction(it["start"]) <= middle < Fraction(it["end"])),
+            None,
+        )
+
+    @staticmethod
+    def _proposal_fields(
+        sources: Mapping[str, Mapping[str, Any]], ordered: Any, pending_ids: set[str]
+    ) -> dict[str, Any]:
+        """작업대 값의 제외 제안 칸 셋 — 머리줄 수 · 경계와 맞지 않는 빨강 수 · 대기열.
+
+        경계와 맞지 않는 빨강 수는 대기열이 한 번 센 값을 각주(`redUnmaterialized`)도 그대로 쓴다.
+        """
+        queue = RawWorkspaceUi._proposal_queue(sources, ordered or (), pending_ids)
+        return {"redPending": len(pending_ids), "redUnmaterialized": queue["loose"], "queue": queue}
+
+    @staticmethod
+    def _proposal_queue(
+        sources: Mapping[str, Mapping[str, Any]], ordered: Sequence[Any], pending_ids: set[str]
+    ) -> dict[str, Any]:
+        """제외 제안 대기열 — 그릴 때마다 검토 머리와 등급 증거에서 다시 센다(보관하지 않는다).
+
+        한 줄은 **미검토 표지가 남은 컷 하나**다(M = K) — 일괄 확인이 확인하는 것, 머리줄 수,
+        보내기가 `제외 제안(미검토)` 키워드를 다는 것과 같은 집합이다. 순서는 검토 머리의 시간
+        순(영상 촬영 시각 순 → 영상 안 시각, D53)이다. 총수 N은 그 위에 이미 결정한 제안 — 자동
+        제외 근거 메모가 남은 컷 — 을 더한다: 확인·사용으로 되돌림·전체 복원·실행 취소는 그 메모를
+        지우지 않으므로 결정해도 N이 줄지 않는다(나누기·합치기는 컷 수를 바꾸니 N도 바뀐다). 컷
+        경계와 맞지 않는 빨강은 줄이 아니다(`_mark_open_reds`) — 그 수는 `loose`로, 그것이 있는
+        영상은 `looseSources`로 따로 싣는다(안내 줄이 영상 이름을 댄다).
+
+        근거 메모는 자동 정리가 쓴 모양 그대로일 때만 센다(`review_has_auto_note`, D57 C 고침 2) —
+        사람이 메모 칸에 「자동 제외: 」를 적어도 N은 늘지 않는다.
+        """
+        items = [
+            RawWorkspaceUi._queue_item(seg, sources.get(seg.source_id, {}))
+            for seg in ordered
+            if seg.segment_id in pending_ids
+        ]
+        total = sum(
+            1
+            for seg in ordered
+            if seg.segment_id in pending_ids or raw_service.review_has_auto_note(seg.notes)
+        )
+        loose = RawWorkspaceUi._loose_sources(sources)
+        return {
+            "total": total,
+            "open": len(items),
+            "confirmable": len(pending_ids),
+            "loose": sum(row["count"] for row in loose),
+            "looseSources": loose,
+            "order": list(sources),
+            "items": items,
+        }
+
+    @staticmethod
+    def _loose_sources(sources: Mapping[str, Mapping[str, Any]]) -> list[dict[str, Any]]:
+        """경계와 맞지 않는 빨강이 있는 영상과 그 수 — 작업대에 넣은(촬영 시각) 순서."""
+        found = []
+        for source_id, source in sources.items():
+            count = sum(1 for row in source.get("suggestions", []) if row.get("loose"))
+            if count:
+                name = source.get("sourceName", source_id)
+                found.append({"sourceId": source_id, "sourceName": name, "count": count})
+        return found
+
+    @staticmethod
+    def _queue_item(segment: Any, source: Mapping[str, Any]) -> dict[str, Any]:
+        """대기열 한 줄 — 컷 범위와(있으면) 그 컷의 빨강 구간. 표지·되감기는 실행본이 짓는다."""
+        rail = source.get("rail")
+        intervals = rail["intervals"] if isinstance(rail, Mapping) else []
+        cuts = [it for it in intervals if it["id"] == segment.segment_id]
+        item: dict[str, Any] = {
+            "sourceId": segment.source_id,
+            "sourceName": source.get("sourceName", segment.source_id),
+            "segmentId": segment.segment_id,
+            "start": cuts[0]["start"] if cuts else "0",
+            "end": cuts[0]["end"] if cuts else "0",
+        }
+        reds = [row for row in source.get("suggestions", []) if row.get("tier") == "red"]
+        for row in reds if cuts else []:
+            if RawWorkspaceUi._cut_at_middle(cuts, Fraction(row["start"]), Fraction(row["end"])):
+                item.update(redStart=row["start"], redEnd=row["end"])
+                break
+        return item
 
     @staticmethod
     def _analysis_badge(task: Mapping[str, Any], stage: str) -> dict[str, str] | None:
@@ -3931,7 +4183,7 @@ class RawWorkspaceUi:
             tone = ""
         else:
             tone = "warn"
-        return {"label": stage, "tone": tone}
+        return {"label": _stage_label(stage), "tone": tone}
 
     def _project_name(self, root: Path) -> str:
         """머리줄의 프로젝트 이름 — 처음 한 번만 읽는다(이름은 만들 때 정해진다)."""
@@ -4097,8 +4349,9 @@ class RawWorkspaceUi:
         shown = self._serve_str(payload, "token")
         if not current or shown != current:
             raise gr.Error(
-                f"{what} 수명 토큰이 늦었다 — 작업공간이 다시 열렸다. 화면을 새로 고침해"
-                " 지금 보기를 다시 받은 뒤 시도하세요(머리가 같아도 옛 사건은 거부된다)."
+                f"{what} 화면의 수명 토큰이 지났습니다 — 작업공간이 다시 열렸습니다. 화면을"
+                " 새로고침한 뒤 다시 시도하세요(검토 내용이 같아도 지난 화면의 동작은 받지"
+                " 않습니다)."
             )
 
     def visual_workbench_action(self, payload: Mapping[str, object], kind: str) -> dict:
@@ -4189,31 +4442,7 @@ class RawWorkspaceUi:
                     "message": message,
                 }
             if kind == "refresh":
-                page = self._serve_int(payload, "page", 1)
-                preferred = self._serve_str(payload, "selectedId") or None
-                # 대기 중 재계획과 경합한 새로고침은 옛 계획의 선택 ID를 실고 온다 —
-                # 새 계획에서 같은 ID가 다른 구간에 재주조됐을 수 있으니 옛 계획의
-                # core로 지금 머리의 의미 조각을 찾는다(읽기 전용, 페이지 계약 유지).
-                preferred = self._visual_mapped_refresh_id(
-                    root, preferred, self._serve_str(payload, "basePlanId") or None
-                )
-                if preferred is None:
-                    preferred, _pos = self._visual_preferred_id(
-                        root, playhead=None, source_id=None, fallback_id=None
-                    )
-                shell_unused, workbench = self.visual_workbench_render(
-                    root,
-                    page=page,
-                    preferred_selected_id=preferred,
-                    selection_filter=self._serve_str(payload, "filter") or "all",
-                )
-                return {
-                    "ok": True,
-                    "echoEpoch": echo,
-                    "html": workbench,
-                    "videoSrc": None,
-                    "message": "",
-                }
+                return self._visual_refresh(root, payload, echo)
             if kind == "prepare":
                 selections = self._visual_audio_selections(payload)
                 page = self._serve_int(payload, "page", 1)
@@ -4233,8 +4462,8 @@ class RawWorkspaceUi:
                     "html": workbench,
                     "videoSrc": None,
                     "message": (
-                        f"준비 작업 `{handle.job_id}` 제출 — 없는 항목만 만든다."
-                        " 끝나면 새로고침으로 확인하세요."
+                        f"미리보기 준비 작업 `{handle.job_id}`을 시작했습니다. 없는 것만"
+                        " 만듭니다. 끝나면 새로고침하세요."
                     ),
                 }
             if kind == "propose":
@@ -4248,6 +4477,67 @@ class RawWorkspaceUi:
             # RawWorkspaceError·ReviewError·Caption 계열 오류는 모두 RuntimeError
             # 집안이다 — 서버 함수는 500이 아니라 값으로 닫는다(gradio 전송 계약).
             return fail(error)
+
+    def _visual_refresh(self, root: Path, payload: Mapping[str, object], echo: str) -> dict:
+        """질의 — 화면이 보던 쪽·선택으로 다시 그린다. `focusId`면 대기열 「다음」의 초점이다."""
+        page = self._serve_int(payload, "page", 1)
+        selection_filter = self._serve_str(payload, "filter") or "all"
+        if self._serve_str(payload, "focusId"):
+            return self._visual_focus(root, payload, echo)
+        # 대기 중 재계획과 경합한 새로고침은 옛 계획의 선택 ID를 실고 온다 — 새 계획에서 같은 ID가
+        # 다른 구간에 재주조됐을 수 있으니 옛 계획의 core로 지금 머리의 의미 조각을 찾는다
+        # (읽기 전용, 페이지 계약 유지).
+        preferred = self._visual_mapped_refresh_id(
+            root,
+            self._serve_str(payload, "selectedId") or None,
+            self._serve_str(payload, "basePlanId") or None,
+        )
+        if preferred is None:
+            preferred, _pos = self._visual_preferred_id(
+                root, playhead=None, source_id=None, fallback_id=None
+            )
+        _shell, workbench = self.visual_workbench_render(
+            root, page=page, preferred_selected_id=preferred, selection_filter=selection_filter
+        )
+        return {"ok": True, "echoEpoch": echo, "html": workbench, "videoSrc": None, "message": ""}
+
+    def _visual_focus(self, root: Path, payload: Mapping[str, object], echo: str) -> dict:
+        """「다음」의 초점 — 화면이 본 계획의 컷 ID를 지금 머리의 같은 컷으로 옮겨 그 컷을 고른다.
+
+        카드를 누른 것처럼 영상을 바꾸지만 분석 선택·견적 준비는 하지 않는다(제외 제안이 있는
+        영상은 이미 분석이 끝났다). 그 컷이 지금 머리에 없으면(그사이 나뉘거나 합쳐졌다) 다른 컷으로
+        몰래 다시 그리지 않고 값 없이 알린다 — 화면은 보던 그대로다(D57 C 고침).
+        """
+        focus = self._visual_mapped_refresh_id(
+            root,
+            self._serve_str(payload, "focusId"),
+            self._serve_str(payload, "basePlanId") or None,
+        )
+        try:
+            _revision, ordered = self._visual_chronological(root, None)
+        except (raw_service.RawWorkspaceError, raw_service.ReviewError):
+            ordered = ()
+        if focus is None or not any(seg.segment_id == focus for seg in ordered):
+            note = (
+                "고른 제외 제안이 그사이 바뀌었습니다(나누기·합치기·다시 계획)."
+                " 대기열의 「다음」을 다시 누르세요."
+            )
+            return {"ok": True, "echoEpoch": echo, "message": note, "focusStale": True}
+        _shell, workbench = self.visual_workbench_render(
+            root,
+            page=self._serve_int(payload, "page", 1),
+            preferred_selected_id=focus,
+            source_id=self._serve_str(payload, "sourceId") or None,
+            selection_filter=self._serve_str(payload, "filter") or "all",
+        )
+        return {
+            "ok": True,
+            "echoEpoch": echo,
+            "html": workbench,
+            "videoSrc": None,
+            "message": "",
+            "focusStale": False,
+        }
 
     def _visual_audio_selections(self, payload: Mapping[str, object]) -> dict[str, int | None]:
         """소리 선택 해석 — 서수는 정수, `None`은 명시적 침묵, 그 밖은 거부."""
@@ -4274,7 +4564,7 @@ class RawWorkspaceUi:
         revision_id = self._serve_str(payload, "revisionId")
         base_plan = self._serve_str(payload, "basePlanId")
         if not revision_id or not base_plan:
-            raise gr.Error("화면 값이 부족하다 — 새로고침 뒤 다시 시도하세요.")
+            raise gr.Error("화면 값이 부족합니다. 새로고침한 뒤 다시 시도하세요.")
         op = self._serve_str(payload, "op")
         desired = self._serve_fraction(payload, "desiredSec")
         revision, _ordered = self._visual_chronological(root, base_plan)
@@ -4282,7 +4572,7 @@ class RawWorkspaceUi:
             segment_id = self._serve_str(payload, "segmentId")
             segment = next((seg for seg in revision.segments if seg.segment_id == segment_id), None)
             if segment is None:
-                raise gr.Error(f"조각 {segment_id!r}이(가) 리비전에 없다 — 새로고침하세요.")
+                raise gr.Error(f"컷 {segment_id!r}이(가) 검토 내용에 없습니다. 새로고침하세요.")
             clock = revision.clock_for(segment.source_id)
             if clock is None:
                 raise gr.Error(f"원본 {segment.source_id!r}의 시계가 없다")
@@ -4299,7 +4589,7 @@ class RawWorkspaceUi:
             right_id = self._serve_str(payload, "rightId")
             left = next((seg for seg in revision.segments if seg.segment_id == left_id), None)
             if left is None:
-                raise gr.Error(f"조각 {left_id!r}이(가) 리비전에 없다 — 새로고침하세요.")
+                raise gr.Error(f"컷 {left_id!r}이(가) 검토 내용에 없습니다. 새로고침하세요.")
             clock = revision.clock_for(left.source_id)
             if clock is None:
                 raise gr.Error(f"원본 {left.source_id!r}의 시계가 없다")
@@ -4331,7 +4621,7 @@ class RawWorkspaceUi:
         revision_id = self._serve_str(payload, "revisionId")
         base_plan = self._serve_str(payload, "basePlanId")
         if not revision_id or not base_plan:
-            raise gr.Error("화면 값이 부족하다 — 새로고침 뒤 다시 시도하세요.")
+            raise gr.Error("화면 값이 부족합니다. 새로고침한 뒤 다시 시도하세요.")
         op = self._serve_str(payload, "op")
         page = self._serve_int(payload, "page", 1)
         playhead = None
@@ -4376,14 +4666,12 @@ class RawWorkspaceUi:
                 second_segment_id=self._serve_str(payload, "secondId"),
             )
         elif op == "note":
-            facade = self.raw.review_workspace_facade(root)
-            edited = facade.apply_edit(
-                base_plan,
-                raw_service.review_note_edit(
-                    revision_id,
-                    self._serve_str(payload, "segmentId"),
-                    self._serve_str(payload, "note"),
-                ),
+            segment_id = self._serve_str(payload, "segmentId")
+            memo = self._composed_memo(
+                root, base_plan, segment_id, self._serve_str(payload, "note")
+            )
+            edited = self.raw.review_workspace_facade(root).apply_edit(
+                base_plan, raw_service.review_note_edit(revision_id, segment_id, memo)
             )
         else:
             raise gr.Error(f"모르는 편집 종류다: {op!r}")
@@ -4401,19 +4689,30 @@ class RawWorkspaceUi:
             "echoEpoch": echo,
             "html": workbench,
             "videoSrc": None,
-            "message": f"적용했다 — 새 검토 리비전 `{edited.revision_id}`.",
+            "message": f"저장했습니다. 새 검토 리비전이 생겼습니다. `{edited.revision_id}`",
         }
+
+    def _composed_memo(self, root: Path, base_plan: str, segment_id: str, memo: str) -> str:
+        """사람 메모만 갈아 끼운 메모 — 기계 줄(자동 제외 근거·확인 필요)은 글자 그대로 둔다.
+
+        메모 칸은 사람 메모만 보인다(`_memo_fields`). 옛 칸은 날 근거로 미리 채워져, 칸을 비우면
+        근거가 지워지고 결정한 제안 수 N이 줄었다(D57 C 고침 2). 화면이 본 리비전이 머리가 아니면
+        편집이 어차피 거절된다(stale) — 여기서는 머리의 메모를 읽을 뿐이다.
+        """
+        head = self.raw.review_workspace_facade(root).load_head(base_plan).revision
+        current = next((s.notes for s in head.segments if s.segment_id == segment_id), "")
+        return raw_service.compose_review_notes(current, memo)
 
     def _visual_replan(self, root: Path, payload: Mapping[str, object], echo: str) -> dict:
         """계획 반영 + 재추출 — 화면이 본 리비전에서만, 새 package에 뽑는다."""
         revision_id = self._serve_str(payload, "revisionId")
         base_plan = self._serve_str(payload, "basePlanId")
         if not revision_id or not base_plan:
-            raise gr.Error("화면 값이 부족하다 — 새로고침 뒤 다시 시도하세요.")
+            raise gr.Error("화면 값이 부족합니다. 새로고침한 뒤 다시 시도하세요.")
         facade = self.raw.review_workspace_facade(root)
         head = facade.load_head(base_plan).revision
         if head.revision_id != revision_id:
-            raise gr.Error("화면이 본 리비전 뒤에 다른 편집이 먼저 갔다 — 새로고침 뒤 다시 하세요.")
+            raise gr.Error("화면이 본 뒤에 다른 편집이 먼저 저장됐습니다. 새로고침하세요.")
         snapshot, mapping = facade.plan_from_review(base_plan)
         facade.adopt_plan_review(snapshot, mapping)
         self._refresh_review_panel_state(root)
@@ -4448,8 +4747,8 @@ class RawWorkspaceUi:
             "html": workbench,
             "videoSrc": None,
             "message": (
-                f"새 계획 리비전 `{mapping.new_plan_revision_id}` · 추출 작업"
-                f" `{handle.job_id}` 시작 — 새 package에 뽑히고 옛 package는 불변이다."
+                f"편집을 새 계획 리비전 `{mapping.new_plan_revision_id}`으로 옮기고 컷 추출"
+                f"(작업 `{handle.job_id}`)을 시작했습니다. 옛 컷 묶음은 그대로입니다."
             ),
         }
 
@@ -6062,7 +6361,11 @@ class RawWorkspaceUi:
         target = self._require_segment_id(segment_id)
         return self._apply_review_edit(
             root,
-            lambda head: raw_service.review_note_edit(head, target, note or ""),
+            lambda head: raw_service.review_note_edit(
+                head,
+                target,
+                self._composed_memo(root, str(self._review_base_plan_id), target, note or ""),
+            ),
             "메모 저장",
         )
 

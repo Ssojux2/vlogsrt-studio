@@ -416,7 +416,8 @@ def test_no_free_retier_button_or_pending_note(tmp_path: Path, local_socket: Non
 
     app = workspace_ui.RawWorkspaceUi(state_path=tmp_path / "ui-state.json").build_blocks()
     labels = [str(block.value) for block in app.blocks.values() if isinstance(block, gr.Button)]
-    assert "자동 제외 확인" in labels
+    # 일괄 확인 단추는 남는다 — 이름은 W-17 C의 대기열 원천(옛 「자동 제외 확인」 처리기 그대로).
+    assert workspace_ui.CONFIRM_ALL_SOURCE_LABEL in labels
     assert not [label for label in labels if "등급 다시 계산" in label or "무료" in label]
     for name in ("RETIER_LABEL", "TIER_PENDING_NOTE"):
         assert not hasattr(workspace_ui, name), name

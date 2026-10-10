@@ -126,7 +126,7 @@ def test_a_truly_stale_other_tab_is_still_refused(tmp_path: Path, local_socket: 
     stale_signature = first[1]
     server.create_workspace_view("B", str(tmp_path / "b"))
     job_id = _blocked_job(server, tmp_path / "b", "fp-b")
-    with pytest.raises(gr.Error, match="바뀌었다"):
+    with pytest.raises(gr.Error, match="바뀌었습니다"):
         server.cancel_selected(stale_signature, job_id)
     assert not server.raw.get_job(tmp_path / "b", job_id).cancellation_requested
 

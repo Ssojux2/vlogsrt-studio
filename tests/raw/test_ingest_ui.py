@@ -85,7 +85,7 @@ def test_scan_requires_workspace_and_real_folder(
     server: workspace_service.RawWorkspaceUi, tmp_path: Path
 ) -> None:
     """열린 작업공간 없이·빈 경로로는 의미 있는 오류가 난다 — 조용한 성공이 아니다."""
-    with pytest.raises(gr.Error, match="작업공간이 열려 있지 않다"):
+    with pytest.raises(gr.Error, match="작업공간이 열려 있지 않습니다"):
         server.ingest_scan_view(None, "/tmp")
     signature, _ = _opened(server, tmp_path)
     with pytest.raises(gr.Error, match="선택기로 고르세요"):
@@ -114,13 +114,13 @@ def test_stale_signature_is_refused_on_every_ingest_step(
     signature_a, _ = _opened(server, tmp_path)
     stale = signature_a
     server.create_workspace_view("B", str(tmp_path / "ws-b"))
-    with pytest.raises(gr.Error, match="바뀌었다"):
+    with pytest.raises(gr.Error, match="바뀌었습니다"):
         server.ingest_scan_view(stale, str(card))
-    with pytest.raises(gr.Error, match="바뀌었다"):
+    with pytest.raises(gr.Error, match="바뀌었습니다"):
         server.ingest_confirm_view(stale)
-    with pytest.raises(gr.Error, match="바뀌었다"):
+    with pytest.raises(gr.Error, match="바뀌었습니다"):
         server.ingest_copy_view(stale)
-    with pytest.raises(gr.Error, match="바뀌었다"):
+    with pytest.raises(gr.Error, match="바뀌었습니다"):
         server.ingest_retry_view(stale, "job_000001")
 
 
@@ -264,5 +264,5 @@ def test_global_order_confirm_view_flow(
 
     # 오래된 서명은 역시 거부
     server.create_workspace_view("C", str(tmp_path / "ws-c"))
-    with pytest.raises(gr.Error, match="바뀌었다"):
+    with pytest.raises(gr.Error, match="바뀌었습니다"):
         server.ingest_global_confirm_view(signature)

@@ -27,6 +27,7 @@ import gradio as gr  # noqa: E402
 
 from ui import design_tokens, ui_facade, workspace_service  # noqa: E402
 from ui.workspace_service import (  # noqa: E402
+    CONFIRM_ALL_SOURCE_LABEL,
     FINALCUT_SEND_LABEL,
     LIBRARY_APPROVE_LABEL,
     OFFLINE_MODE_NOTE,
@@ -42,7 +43,7 @@ ACTION_LABELS = (
     "선택 분석 취소",
     "전체 분석 취소",
     FINALCUT_SEND_LABEL,
-    "자동 제외 확인",
+    CONFIRM_ALL_SOURCE_LABEL,  # 대기열 단추가 누르는 숨은 원천(옛 「자동 제외 확인」, D57 C)
     "자동 제외 전체 복원",
     "실행 취소",
     "결과 확인",
@@ -169,7 +170,7 @@ def test_blocks_place_top_bar_command_bar_and_stage(tmp_path: Path, local_socket
         "선택 분석 취소",
         "전체 분석 취소",
         FINALCUT_SEND_LABEL,
-        "자동 제외 확인",
+        CONFIRM_ALL_SOURCE_LABEL,  # 숨은 원천 — 화면의 단추는 제외 제안 대기열 안이다(D57 C)
     ):
         assert buttons[label].parent is bar, label
     in_bar = [b for b in app.blocks.values() if isinstance(b, gr.Button) and b.parent is bar]
@@ -341,8 +342,11 @@ def test_new_shell_text_pairs_hold_contrast(side: int) -> None:
 # ── 카드 · 패널 — 파이썬 쪽 값 ────────────────────────────────────────────────
 
 
-def test_red_spans_stay_open_until_a_person_decides() -> None:
-    """빨강 구간의 `open` — 미검토 표지가 남은 컷이거나 컷 경계로 떨어지지 않았으면 열려 있다."""
+def test_a_red_span_is_open_only_while_its_covering_cut_is_unreviewed() -> None:
+    """빨강 구간의 `open` — 그 가운데를 덮는 컷에 미검토 표지가 남았을 때만 열려 있다(D57 C).
+
+    컷 경계와 맞지 않는지는 `loose`가 따로 말한다 — 경계와 맞지 않아도 덮는 컷이 미검토면 열려 있다.
+    """
     source: dict[str, Any] = {
         "rail": {
             "duration": "9",
@@ -354,15 +358,20 @@ def test_red_spans_stay_open_until_a_person_decides() -> None:
             ],
         },
         "suggestions": [
-            {"start": "0", "end": "3", "tier": "red"},  # 미검토 컷
-            {"start": "3", "end": "6", "tier": "red"},  # 사람이 결정한 컷
-            {"start": "61/10", "end": "77/10", "tier": "red"},  # 컷 경계와 맞지 않음
+            {"start": "0", "end": "3", "tier": "red"},  # 덮는 컷 a — 미검토
+            {"start": "3", "end": "6", "tier": "red"},  # 덮는 컷 b — 미검토 아님
+            {"start": "61/10", "end": "77/10", "tier": "red"},  # 컷 c 안 · 경계와 맞지 않음
             {"start": "77/10", "end": "9", "tier": "green"},
         ],
     }
     RawWorkspaceUi._mark_open_reds(source, {"a"})
     opened = [row.get("open") for row in source["suggestions"]]
-    assert opened == [True, False, True, None]
+    # 경계와 맞지 않는 빨강은 그 가운데를 덮는 컷 c를 따른다 — c가 미검토가 아니니 열려 있지
+    # 않다. 옛 규칙('경계와 맞지 않으면 늘 열림')은 화면 어디서도 닫을 수 없었다(D57 C).
+    assert opened == [True, False, False, None]
+    assert [row.get("loose") for row in source["suggestions"]] == [False, False, True, None]
+    RawWorkspaceUi._mark_open_reds(source, {"a", "c"})  # 덮는 컷 c가 미검토면 열려 있다
+    assert [row.get("open") for row in source["suggestions"]] == [True, False, True, None]
 
 
 def test_card_badge_is_one_analysis_state_only_when_it_needs_attention() -> None:
@@ -571,7 +580,7 @@ def test_shell_script_runs_the_activity_area_the_drawers_and_the_scrim(tmp_path:
     assert out["sameReplyLogged"] == 3  # 누른 만큼 남는다
     assert out["statusAfterSameReply"] == 3  # 응답과 같은 상태 줄은 두 번 적지 않는다
     assert out["replyAfterSameStatus"] == {"entries": 4, "kind": "reply"}  # 반대 순서도 한 번
-    assert out["keyButton"] is False  # 키가 없다는 알림이면 「키 입력」이 보인다
+    assert out["keyButton"] is False  # 키가 없다는 알림이면 「API 연결 열기」가 보인다
     assert out["capped"] == 20  # 기록은 최근 20개
     assert out["scrimBefore"] is True  # 막은 처음부터 있고 서랍이 닫혀 있으면 숨는다
     assert out["leftOpen"] == {"open": True, "clicks": 1, "focused": 1, "scrim": False}

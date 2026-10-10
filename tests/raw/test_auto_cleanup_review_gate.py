@@ -304,31 +304,56 @@ def test_ui_shows_pending_count_sends_without_a_gate_and_confirms_in_one_click(t
     assert _wait_terminal(service, root, job.job_id).status == "succeeded"
     (sent,) = opened
     assert _disabled(sent) == 0
-    message, _shell, _workbench = server.capcut_refresh_view(signature)
-    assert f"자동 제외 {pending}개 미검토" in message
-    assert "켠 채" in message and "자동 제외 확인" in message
+    message, _shell, workbench = server.capcut_refresh_view(signature)
+    # 수와 '켠 채' 안내는 그릴 때마다 다시 세는 제외 제안 대기열이 싣는다(W-17 C 고침 3) — 답에
+    # 실은 수는 그 순간의 값이라 확인·실행 취소 뒤 화면에 남아 대기열과 어긋났다.
+    from tests.raw.test_visual_workbench_ui import _model_of
+
+    queue = _model_of(workbench)["queue"]
+    assert queue["open"] == queue["confirmable"] == pending
+    assert "미검토 제외 제안" not in message
     message, _shell, _workbench = server.capcut_confirm_auto_view(signature)
-    assert f"자동 제외 {pending}개를 확인했습니다" in message
+    assert f"제외 제안 {pending}개를 확인했습니다" in message
     assert "미검토" not in message
     assert ReviewWorkspaceFacade(root).unreviewed_auto_exclusion_count() == 0
-    assert "확인할 자동 제외가 없습니다" in server.capcut_confirm_auto_view(signature)[0]
+    assert "확인할 제외 제안이 없습니다" in server.capcut_confirm_auto_view(signature)[0]
 
 
-def test_confirm_button_sits_next_to_the_send_button_outside_any_accordion(
+def test_confirm_source_sits_next_to_the_send_button_with_the_old_handler(
     tmp_path: Path, local_socket: None
 ):
-    """미검토 안내가 '자동 제외 확인'(끈 채 보내기)을 누르라고 하므로 접힌 서랍 안에 두지 않는다."""
+    """일괄 확인(끈 채 보내기)은 접힌 서랍 안에 두지 않는다 — 옛 처리기를 단 원천 단추
+    (`vl-queue-confirm-src`)는 보내기 단추 곁 명령 줄에 숨어 있다. node 없이도 늘 돈다."""
     pytest.importorskip("gradio", reason="웹 UI extra(gradio)가 없다", exc_type=ImportError)
     import gradio as gr
 
-    from ui.workspace_service import RawWorkspaceUi
+    from ui import ui_facade
+    from ui.workspace_service import CONFIRM_ALL_SOURCE_LABEL, RawWorkspaceUi
 
-    app = RawWorkspaceUi(state_path=tmp_path / "ui-state.json").build_blocks()
+    server = RawWorkspaceUi(state_path=tmp_path / "ui-state.json")
+    app = server.build_blocks()
     buttons = {block.value: block for block in app.blocks.values() if isinstance(block, gr.Button)}
-    confirm = buttons["자동 제외 확인"]
+    source = buttons[CONFIRM_ALL_SOURCE_LABEL]
+    assert source.elem_id == ui_facade.CONFIRM_ALL_SOURCE_ID == "vl-queue-confirm-src"
+    assert source.visible == "hidden"
+    (dep,) = [d for d in app.config["dependencies"] if d["targets"] == [(source._id, "click")]]
+    assert app.fns[dep["id"]].fn == server.capcut_confirm_auto_view  # 옛 처리기 그대로
     handoff = buttons["Final Cut으로 보내기"]
-    assert confirm.parent is handoff.parent
-    node = confirm.parent
+    assert source.parent is handoff.parent
+    node = source.parent
     while node is not None:
-        assert not isinstance(node, gr.Accordion)
+        assert not isinstance(node, (gr.Accordion, gr.Sidebar))
         node = getattr(node, "parent", None)
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node가 없는 환경")
+def test_the_visible_queue_button_presses_the_hidden_source(tmp_path: Path) -> None:
+    """화면에 **보이는** 단추는 제외 제안 대기열의 「남은 M개 모두 제외 유지」다(W-17 C) — 누르면
+    원천 단추가 눌리고 서버 함수는 부르지 않는다. 실행본을 돌려야 하므로 node가 있어야 한다."""
+    pytest.importorskip("gradio", reason="웹 UI extra(gradio)가 없다", exc_type=ImportError)
+    from tests.raw.test_proposal_queue import _run_queue_harness
+
+    report = _run_queue_harness(tmp_path)
+    visible = 'data-vl-act="queue-confirm">남은 2개 모두 제외 유지</button>'
+    assert visible in report["queuePanel"]  # 대기열에 그려진, 보이는 단추
+    assert report["bulk"] == {"clicks": 1, "calls": 0}  # 누르면 원천 단추가 눌린다

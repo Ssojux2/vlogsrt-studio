@@ -524,7 +524,10 @@ checkpoints.push({ case: 'wire-render',
     env.panel.innerHTML.includes('발화 없음(미측정)'),
   excludedBadge: env.thumbs.innerHTML.includes('제외'),
   needsBadge: env.thumbs.innerHTML.includes('영상 갱신 필요'),
-  pager: env.thumbs.innerHTML.includes('페이지 1/1'),
+  // 목록 머리(D57 C) — 옛 쪽수 줄(페이지 1/1 · 조각 N개) 대신 영상 수와 촬영 시각 순. 쪽 넘김은
+  // 한 쪽을 넘을 때만 보인다.
+  pager: env.thumbs.innerHTML.includes('<b>컷 6개</b> · 촬영 시각 순') &&
+    !env.thumbs.innerHTML.includes('vl-pager'),
   rail: env.rail.innerHTML.includes('data-vl-interval="segA1"') &&
     env.rail.innerHTML.includes('data-vl-handle="left"'),
   playhead: env.rail.innerHTML.includes('vl-playhead'),
@@ -547,7 +550,8 @@ checkpoints.push({ case: 'wire-render',
 const envSpeech = visualEnv({});
 envSpeech.click({ getAttribute: (k) => (k === 'data-vl-card' ? 'segA2' : null) });
 checkpoints.push({ case: 'speech-label',
-  human: envSpeech.panel.innerHTML.includes('발화 발화 있음') });
+  human: envSpeech.panel.innerHTML.includes('<p class="vl-kv">발화 있음 · ') &&
+    !envSpeech.panel.innerHTML.includes('발화 발화') });
 windowScope.__vlVisualWorkbenchState.selectedId = null;
 windowScope.__vlVisualWorkbenchState.selectedPlan = null;
 
@@ -1636,8 +1640,9 @@ envProposeErr.root._listeners.click.slice().forEach((fn) => fn({
   target: { getAttribute: (k) => (k === 'data-vl-act' ? 'split' : null) } }));
 await new Promise((resolve) => setTimeout(resolve, 0));
 checkpoints.push({ case: 'fresh-failure-diagnostics-preserved',
-  nullShown: freshNullFoot === '빈 응답이다' && freshNullLastMsg === '빈 응답이다',
-  rejectShown: envFreshFail.registry['vl-footnote'].textContent === '서버 오류 — 거부 사유',
+  nullShown: freshNullFoot === '서버 응답이 비어 있습니다.' &&
+    freshNullLastMsg === '서버 응답이 비어 있습니다.',
+  rejectShown: envFreshFail.registry['vl-footnote'].textContent === '서버 오류입니다. 거부 사유',
   serverErrorShown: envFreshErr.registry['vl-footnote'].textContent.includes('편집이 늦었다'),
   notStuckSending:
     envFreshErr.registry['vl-footnote'].textContent.includes('보내는 중') === false });
@@ -1692,8 +1697,8 @@ await new Promise((resolve) => setTimeout(resolve, 0));
 capFreshFail.held[1].deferred.reject(new Error('자막 거부 사유'));
 await new Promise((resolve) => setTimeout(resolve, 0));
 checkpoints.push({ case: 'fresh-failure-diagnostics-preserved-caption',
-  nullShown: capFreshNullMsg === '빈 응답이다',
-  rejectShown: capFreshFail.msg.textContent === '서버 오류 — 자막 거부 사유' });
+  nullShown: capFreshNullMsg === '서버 응답이 비어 있습니다.',
+  rejectShown: capFreshFail.msg.textContent === '서버 오류입니다. 자막 거부 사유' });
 // 자막 — 실제 생산자 오류(빈 글자 저장)도 echo 없이 그대로 보인다(저장 중 잔류 없음).
 const capFreshServerErr = captionEnv({
   cap_save: () => ({ ok: false,
@@ -2471,7 +2476,7 @@ def test_visual_server_functions_bind_client_revision(tmp_path: Path) -> None:
 
     # 잘못된 서명 — 화면이 속한 작업공간이 아니면 거부(500 아님).
     refused = fns["vl_refresh"]({"epoch": "e", "signature": "다른작업공간", "page": 1})
-    assert refused["ok"] is False and "바뀌었다" in refused["error"]
+    assert refused["ok"] is False and "바뀌었습니다" in refused["error"]
 
     # 제안 — 서브틱 유리수 `12/25`초가 프레임 12(정확히 격자 위)로 스냅.
     proposal = fns["vl_propose"](
@@ -2801,7 +2806,9 @@ def test_visual_replan_and_epoch_distinct_across_switches(tmp_path: Path) -> Non
             "page": 1,
         }
     )
-    assert stale["ok"] is False and ("다르다" in stale["error"] or "먼저 갔다" in stale["error"])
+    assert stale["ok"] is False and (
+        "다르다" in stale["error"] or "먼저 저장됐습니다" in stale["error"]
+    )
     # 토큰이 늦으면 리비전과 무관하게 거부(작업공간을 다시 연 옛 사건).
     stale_token = fns["vl_replan"](
         {
@@ -3164,7 +3171,7 @@ def test_caption_workbench_save_and_gates(tmp_path: Path) -> None:
             "endMs": "",
         }
     )
-    assert bad_sig["ok"] is False and "바뀌었다" in bad_sig["error"]
+    assert bad_sig["ok"] is False and "바뀌었습니다" in bad_sig["error"]
 
     # ms 환산은 정확히 — 이진 부동 잔여가 1200을 1199로 자르지 않는다(A5 실측).
     assert ui_facade.fraction_ms(Fraction(1.2)) == 1200  # 이진 부동에서 온 값
@@ -3530,7 +3537,7 @@ def test_global_shortcuts_execute_on_visible_video(tmp_path: Path) -> None:
     assert report["seek"] is True and report["frame"] is True
     assert report["blocked"] == [True] * 11, report["blocked"]
     assert report["noVideo"] is True
-    assert report["playFailed"] == "재생할 수 없다: NotAllowedError"
+    assert report["playFailed"] == "재생할 수 없습니다: NotAllowedError"
     assert report["hiddenTouched"] == 0
 
 
@@ -3563,6 +3570,10 @@ function tierModel(filter) {
   m.filter = filter;
   m.redUnmaterialized = 1;
   m.redPending = 1;
+  // 서버가 늘 싣는 제외 제안 대기열(W-17 C) — 미검토 컷 segA3 하나. 카드의 ✕ 수는 이 줄 수다.
+  m.queue = { total: 1, open: 1, confirmable: 1, loose: 1, order: ['srcA', 'srcB', 'srcC'],
+    items: [{ sourceId: 'srcA', sourceName: '01-landscape.mp4', segmentId: 'segA3',
+      start: '2', end: '3', redStart: '21/10', redEnd: '29/10' }] };
   m.sources.srcA.suggestions = [
     { start: '0', end: '1', tier: 'green', hold: false, rec: 'recommended', rule: 'both-good',
       reason: 'r0', redReason: null,
@@ -3585,7 +3596,7 @@ function tierModel(filter) {
   Object.assign(m.cards[2], { tier: 'red', autoPending: true,
     tags: ['자동 제외 · 미검토', '등급: 제외 제안', '자막: 발화 없음 · 자막 없는 공백',
       '영상: 구도'],
-    note: '자동 제외: {"reason": "tier_silence"}' });
+    note: '', machine: [{ kind: 'auto', reason: 'tier_silence', start: '21/10', end: '29/10' }] });
   return m;
 }
 // 새 화면 — 앞선 사례가 남긴 각주 문구가 없을 때 경계 안내가 각주에 선다.
@@ -3617,7 +3628,7 @@ envOff.rail._listeners.click.slice().forEach((fn) => fn({ target: {
 const offPanel = envOff.panel.innerHTML;
 // 옛 등급판(D51)의 영상 결함 제안이 아직 남아 있으면 날 코드 대신 이름을 보인다(D52).
 const legacy = tierModel('all');
-legacy.cards[2].note = '자동 제외: {"reason": "tier_video_defect"}';
+legacy.cards[2].machine = [{ kind: 'auto', reason: 'tier_video_defect' }];
 const envLegacy = visualEnv({}, legacy);
 envLegacy.rail._listeners.click.slice().forEach((fn) => fn({ target: {
   getAttribute: (k) => (k === 'data-vl-recommendation' ? '2' : null) } }));
@@ -3670,11 +3681,11 @@ def test_rail_renders_tier_classes_glyphs_and_aria_labels(tmp_path: Path) -> Non
     green, hold, red = report["bars"]
     assert 'class="vl-recommendation recommended green"' in green
     assert 'data-vl-tier="green"' in green and ">★ 추천</button>" in green
-    assert 'aria-label="추천 0초~1초 · 자막: 발화가 구간의 80%를 덮는다' in green
+    assert 'aria-label="추천 0.0초~1.0초 · 자막: 발화가 구간의 80%를 덮는다' in green
     assert 'class="vl-recommendation review_required yellow hold"' in hold
     assert ">? 보류</button>" in hold and 'aria-label="판정 보류 ' in hold
     assert 'class="vl-recommendation normal red"' in red and 'data-vl-tier="red"' in red
-    assert ">✕ 제외 제안</button>" in red and 'aria-label="제외 제안 21/10초~29/10초' in red
+    assert ">✕ 제외 제안</button>" in red and 'aria-label="제외 제안 2.1초~2.9초' in red
     assert 'title="자막: 발화 없음 · 자막 없는 공백 5초 이상 · 영상: 구도가 조금 기울었다"' in red
     assert "--vl-rec" not in red  # 세로 좌표는 CSS 변수(W-10) 몫이다 — 실행본은 left·width만
 
@@ -3686,7 +3697,7 @@ def test_panel_shows_subtitle_and_video_reasons_for_marker(tmp_path: Path) -> No
     assert '<div class="vl-marker-reason red"><strong>제외 제안</strong>' in panel
     assert "자막 · 자막 없음(긴 공백): 발화 없음 · 자막 없는 공백 5초 이상" in panel
     assert "영상 · 사용 가능: 구도가 조금 기울었다" in panel
-    assert "규칙 silent-not-scenery" in panel
+    assert "판정 규칙 <code>silent-not-scenery</code>" in panel  # 규칙 ID는 접힌 상세에만
     assert 'data-vl-act="red-confirm">제외 유지(확인)</button>' in panel
     assert 'data-vl-act="red-revert">사용으로 되돌리기</button>' in panel
     # 빨강 끝은 프레임 안쪽으로 붙어 있다 — 가운데(2.5초)로 찾은 조각이 확인 대상이다.
@@ -3703,9 +3714,9 @@ def test_panel_shows_subtitle_and_video_reasons_for_marker(tmp_path: Path) -> No
     assert "(측정)" not in panel
     legacy = report["legacyPanel"]
     assert "자동 판정 이유 · 영상 결함(옛 등급판)" in legacy
-    assert "자동 판정 이유 · tier_video_defect" not in legacy  # 메모 칸의 근거 원문은 그대로다
+    assert "tier_video_defect" not in legacy  # 날 이유 코드는 어디에도(메모 칸 포함) 없다
     assert "제외 제안 1개" in panel
-    assert report["footnote"].startswith("제외 제안 1개가 현재 조각 경계와 맞지 않습니다")
+    assert report["footnote"].startswith("제외 제안 1개가 컷 경계와 맞지 않아 그 구간을 덮는 컷의")
 
 
 @needs_node
@@ -3721,7 +3732,7 @@ def test_red_buttons_never_target_an_off_page_selection(tmp_path: Path) -> None:
 def test_review_filter_includes_pending_red_cards(tmp_path: Path) -> None:
     report = _run_tier_harness(tmp_path)
     everything, review = report["thumbsAll"], report["thumbsReview"]
-    assert ">검토 대기</button>" in everything and "확인 필요</button>" not in everything
+    assert ">제외 제안</button>" in everything and "확인 필요</button>" not in everything
     # 카드는 영상 전체 요약이다(D57 B) — 첫 구간 하나의 등급 배지 대신 ✕·?·★ 수와 길이대로의 띠.
     assert '<span class="vl-cnt r">✕ 1</span>' in everything  # 결정을 기다리는 제외 제안
     assert '<span class="vl-cnt h">? 1</span>' in everything  # 판정 보류

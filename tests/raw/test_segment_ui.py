@@ -61,7 +61,7 @@ def test_segment_views_require_current_selection(server, tmp_path: Path) -> None
         lambda: server.segment_retry_view(None, "job_000001"),
         lambda: server.package_refresh_view(None),
     ):
-        with pytest.raises(gr.Error, match="작업공간이 열려 있지 않다|바뀌었다"):
+        with pytest.raises(gr.Error, match="작업공간이 열려 있지 않습니다|바뀌었습니다"):
             call()
 
 

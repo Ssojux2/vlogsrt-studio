@@ -799,19 +799,14 @@ def query_overview(
     purged = _visual_traces_purged(workspace)
     if selection_filter not in ("all", "included", "excluded", "review"):
         raise VisualReviewError("알 수 없는 컷 필터입니다")
+    # 「제외 제안」 보기(키는 옛 이름 review) — 결정을 기다리는 제외 제안만이다(W-17 C, D57).
+    # 옛 「검토 대기」는 '검토 필요' 권고·전사 실패 컷도 실었다 — 보류는 결정할 것이 아니다.
     matching = [
         index
         for index, segment in enumerate(ordered)
         if selection_filter == "all"
         or segment.selection == selection_filter
-        or (
-            selection_filter == "review"
-            and (
-                is_unreviewed_auto_exclusion(segment)
-                or segment.recommendation == "review_required"
-                or segment.speech_status == "analysis_failed"
-            )
-        )
+        or (selection_filter == "review" and is_unreviewed_auto_exclusion(segment))
     ]
     page_count = max(1, math.ceil(len(matching) / VISUAL_PAGE_SIZE))
     start = (page - 1) * VISUAL_PAGE_SIZE

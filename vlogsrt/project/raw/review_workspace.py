@@ -57,6 +57,11 @@ from vlogsrt.project.raw.models import (
     SegmentPlanSnapshot,
     SourceAsset,
 )
+from vlogsrt.project.raw.review_notes import (
+    AUTO_NOTE_PREFIX,
+    MANUAL_SELECTION_PREFIX,
+    REVIEW_NOTE_PREFIX,
+)
 from vlogsrt.project.raw.review_projection import (
     ClipWindow,
     ProjectionClock,
@@ -349,13 +354,10 @@ def _base_plan_slug(revision: ReviewRevision) -> str:
     return safe
 
 
-MANUAL_SELECTION_PREFIX = "수동 선택 · "
-"""자동 제외 근거가 남은 조각을 사람이 사용/제외로 고른 표지 — `apply_edit`이 단다."""
+_AUTO_NOTE_PREFIX = AUTO_NOTE_PREFIX
+"""자동 제외 근거 메모의 머리 — 정의는 `review_notes` 한 곳이다(작업대도 같은 것을 읽는다)."""
 
-_AUTO_NOTE_PREFIX = "자동 제외: "
-"""자동 제외 근거 메모의 머리 — 뒤에 근거 JSON이 붙는다(작업대도 이 머리로 찾는다)."""
-
-_MACHINE_NOTE_PREFIXES = (_AUTO_NOTE_PREFIX, "확인 필요: ")
+_MACHINE_NOTE_PREFIXES = (_AUTO_NOTE_PREFIX, REVIEW_NOTE_PREFIX)
 """조립이 쓰는 메모 머리 — 그 밖의 비지 않은 메모는 사람이 쓴 것이다."""
 
 ADOPTION_REPLAY_LABEL = "입양 결정 다시 적용"
@@ -420,8 +422,10 @@ _RED_GRADE_TAG = tiering.TIER_TAG_PREFIX + tiering.TIER_LABELS[tiering.TIER_RED]
 def _auto_provenance(notes: str) -> Mapping[str, object] | None:
     """근거 메모의 JSON 객체 — 사람이 메모 칸에서 말을 덧붙였거나 바꿨으면 None이다.
 
-    작업대 메모 칸은 이 근거로 미리 채워져 있어 덧붙인 말이 JSON을 깬다. 깨진 메모는 계약
-    위반이 아니라 사람의 흔적이므로 예외로 옮기기·정리를 멈추지 않는다.
+    옛 작업대 메모 칸은 이 근거로 미리 채워져 있어 덧붙인 말이 JSON을 깼다. 지금 작업대는 사람
+    메모를 근거 줄 뒤에 줄바꿈으로 잇는다(`review_notes.compose_review_notes`) — 그것도 메모
+    전체로는 JSON이 아니다. 깨진 메모는 계약 위반이 아니라 사람의 흔적이므로 예외로 옮기기·정리를
+    멈추지 않는다(근거 줄 자체는 `review_notes.auto_note_line`이 줄마다 읽는다).
     """
     try:
         provenance = json.loads(notes.removeprefix(_AUTO_NOTE_PREFIX))
@@ -492,7 +496,7 @@ def _human_segment(segment: ReviewSegment) -> bool:
         segment.override_recommendation is not None
         or notes.startswith(MANUAL_SELECTION_PREFIX)
         or (bool(notes) and not notes.startswith(_MACHINE_NOTE_PREFIXES))
-        # 미리 채워진 근거 메모에 사람이 덧붙이면 JSON이 깨진다 — 사람이 쓴 메모다.
+        # 근거 메모에 사람 말이 붙으면(옛 미리 채운 칸·지금의 다음 줄) JSON이 깨진다 — 사람 메모다.
         or (notes.startswith(_AUTO_NOTE_PREFIX) and _auto_provenance(notes) is None)
         or (
             segment.selection == SELECTION_EXCLUDED
@@ -842,7 +846,7 @@ class ReviewWorkspaceFacade:
             return replace(
                 segment,
                 recommendation="review_required",
-                notes="확인 필요: 분석 미완료 또는 실패",
+                notes=REVIEW_NOTE_PREFIX + "분석 미완료 또는 실패",
             )
         start, end = _segment_seconds(revision, segment)
         record = self._read_json(row.record_path, "자동 정리 근거")
@@ -862,7 +866,7 @@ class ReviewWorkspaceFacade:
             return replace(
                 segment,
                 recommendation="review_required",
-                notes="확인 필요: " + "; ".join(str(r) for r in reasons),
+                notes=REVIEW_NOTE_PREFIX + "; ".join(str(r) for r in reasons),
             )
         return segment
 

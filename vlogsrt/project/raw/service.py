@@ -166,6 +166,17 @@ from vlogsrt.project.raw.models import (
     WorkspaceNotFoundError,
     WorkspaceStatus,
 )
+from vlogsrt.project.raw.review_notes import (
+    REVIEW_NOTE_PREFIX,
+    compose_review_notes,
+    split_review_notes,
+)
+from vlogsrt.project.raw.review_notes import (
+    auto_note_line as review_auto_note_line,
+)
+from vlogsrt.project.raw.review_notes import (
+    has_auto_note as review_has_auto_note,
+)
 from vlogsrt.project.raw.segment_review import (
     AUTO_EXCLUDED_UNREVIEWED_TAG,
     ReviewError,
@@ -325,6 +336,7 @@ __all__ = [
     "CaptionWorkspaceError",
     "FinalVideoError",
     "ManualHeadConflict",
+    "REVIEW_NOTE_PREFIX",
     "ReviewError",
     "StaleRevisionError",
     "browse_folder",
@@ -348,12 +360,16 @@ __all__ = [
     "parse_range",
     "production_live_transport",
     "referer_header_allowed",
+    "compose_review_notes",
+    "review_auto_note_line",
     "review_boundary_edit",
+    "review_has_auto_note",
     "review_merge_edit",
     "review_note_edit",
     "review_override_edit",
     "review_selection_edit",
     "review_split_edit",
+    "split_review_notes",
     "semantic_estimate_digest",
     "middle_frame_index",
     "red_ranges",
