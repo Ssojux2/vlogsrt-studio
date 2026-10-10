@@ -517,7 +517,11 @@ const env = visualEnv({});
 checkpoints.push({ case: 'wire-render',
   thumbs: env.thumbs.innerHTML.includes('data-vl-card="segA1"') &&
     env.thumbs.innerHTML.includes('01-landscape.mp4'),
-  humanSpeech: env.thumbs.innerHTML.includes('발화 있음'),
+  // 카드는 영상 요약(띠·수·배지 하나)이다 — 발화 상태는 패널이 사람 말로 보인다(D57 B).
+  // 날 열거값(speech_detected 등)은 어디에도 새지 않는다.
+  humanSpeech: !env.thumbs.innerHTML.includes('speech_detected') &&
+    !env.thumbs.innerHTML.includes('unconfirmed_empty') &&
+    env.panel.innerHTML.includes('발화 없음(미측정)'),
   excludedBadge: env.thumbs.innerHTML.includes('제외'),
   needsBadge: env.thumbs.innerHTML.includes('영상 갱신 필요'),
   pager: env.thumbs.innerHTML.includes('페이지 1/1'),
@@ -536,6 +540,16 @@ checkpoints.push({ case: 'wire-render',
     env.panel.innerHTML.includes('plan-1'),
   videoSrc: env.vid.video.src === '/media/preview-a',
   srcSetOnce: env.vid.calls.srcSets.length === 1 });
+
+// 발화 상태의 사람 말 — 카드는 발화를 싣지 않으므로(D57 B) speech_detected 컷을 고르면
+// 패널의 상태 줄이 「발화 있음」을 보인다(날 값은 접힌 식별자 상세에만). 뒤 사례는 선택이
+// 빈 상태에서 시작한다.
+const envSpeech = visualEnv({});
+envSpeech.click({ getAttribute: (k) => (k === 'data-vl-card' ? 'segA2' : null) });
+checkpoints.push({ case: 'speech-label',
+  human: envSpeech.panel.innerHTML.includes('발화 발화 있음') });
+windowScope.__vlVisualWorkbenchState.selectedId = null;
+windowScope.__vlVisualWorkbenchState.selectedPlan = null;
 
 // 저장 RPC — 실제 진입점이 심은 서버 전역으로 정확히 한 번 간다(A5 재현).
 const envRPC = visualEnv({
@@ -2112,6 +2126,7 @@ def test_client_bootstraps_execute_real_interactions(tmp_path: Path) -> None:
     holds("wire-render", "panelDetails")
     holds("wire-render", "videoSrc")
     holds("wire-render", "srcSetOnce")
+    holds("speech-label", "human")
     holds("rpc-real-entrypoint", "calledOnce")
     holds("rpc-real-entrypoint", "noteCarried")
     holds("rpc-real-entrypoint", "signatureCarried")
@@ -3242,20 +3257,24 @@ def test_stage_layout_declared_dom_and_css() -> None:
         assert f'id="{anchor_id}"' in workbench, anchor_id
     assert workbench.index("vl-thumbs") < workbench.index("vl-panel")
     css = ui_facade.WORKBENCH_CSS
+    # 목록은 무대 높이 전체, 타임라인은 재생기와 패널 아래를 함께 덮는다(D57 B). 패널 열 위의
+    # 한 칸(quote)은 승인 단추가 묶는 분석 견적이다.
     assert (
-        'grid-template-areas: "thumbs player panel" "timeline timeline timeline" "foot foot foot"'
+        '"thumbs player quote" "thumbs player panel" "thumbs timeline timeline" "foot foot foot"'
         in css
     )
     assert "#vl-thumbs { grid-area: thumbs; }" in css
     assert "#visual-preview { grid-area: player;" in css
     assert "#visual-timeline { grid-area:timeline;" in css
     assert "#vl-panel { grid-area: panel; max-height:" in css
-    assert "#visual-footnote" not in css and "#vl-footnote { grid-area: foot; }" in css
+    # 각주는 상태 줄(단축키 안내와 한 줄) 안에 있다 — 격자 칸은 상태 줄이 차지한다(D57 B).
+    assert "#visual-footnote" not in css and "#vl-statusline { grid-area: foot; }" in css
     assert "#visual-stage .vl-stage-cell { display: contents; }" in css
     assert "#visual-workbench:not([data-vl-empty]) { display: contents; }" in css
-    # 모바일(≤860px) — 격자 영역 순서가 재생기를 맨 먼저 보낸다.
+    # 좁은 화면(≤860px) — 견적 칸(승인할 때만)이 명령 줄 바로 아래, 그다음 재생기·타임라인이
+    # 먼저, 목록·패널·상태 줄(사용자 결정 6 · D57 B).
     mobile = css.index("@media (max-width: 860px)")
-    assert css.index('"player" "thumbs" "panel" "timeline" "foot"', mobile) > mobile
+    assert css.index('"quote" "player" "timeline" "thumbs" "panel" "foot"', mobile) > mobile
     assert "grid-template-columns: minmax(0, 1fr)" in css[mobile:]
     # 색은 작업대 토큰(D57) — 밝은·어두운 두 벌이 같은 이름을 쓴다. 본점(강조)은 하나다.
     for token in (
@@ -3703,12 +3722,16 @@ def test_review_filter_includes_pending_red_cards(tmp_path: Path) -> None:
     report = _run_tier_harness(tmp_path)
     everything, review = report["thumbsAll"], report["thumbsReview"]
     assert ">검토 대기</button>" in everything and "확인 필요</button>" not in everything
-    assert 'vl-badge-green" data-vl-tier="green">추천</span>' in everything
-    assert 'data-vl-tier="yellow">보통</span>' in everything
-    assert 'vl-badge-red" data-vl-tier="red">제외 제안</span>' in everything
+    # 카드는 영상 전체 요약이다(D57 B) — 첫 구간 하나의 등급 배지 대신 ✕·?·★ 수와 길이대로의 띠.
+    assert '<span class="vl-cnt r">✕ 1</span>' in everything  # 결정을 기다리는 제외 제안
+    assert '<span class="vl-cnt h">? 1</span>' in everything  # 판정 보류
+    assert '<span class="vl-cnt g">★ 1</span>' in everything  # 추천
+    for span in ('<i class="g" style="flex:1.000">', '<i class="h" style="flex:1.000">'):
+        assert span in everything, span
+    assert '<i class="r" style="flex:0.800">' in everything  # 빨강은 빗금 칸, 길이 그대로
     assert 'data-vl-card="segA3"' in review  # 미검토 자동 제외
     assert 'data-vl-card="segA1"' not in review  # 추천·사용 조각은 대기가 아니다
-    assert "발화 없음(미측정)" in everything and "빈 실행" not in everything
+    assert "unconfirmed_empty" not in everything and "빈 실행" not in everything
 
 
 @needs_ffmpeg

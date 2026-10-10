@@ -4,6 +4,8 @@ import json
 import os
 import threading
 
+import pytest
+
 from tests.raw.test_browser_runtime import _make_media
 from tests.raw.test_selection_analysis import make_server, wait_until
 from vlogsrt.project.raw import analysis_workflow, browser_runtime
@@ -19,7 +21,11 @@ def test_browser_loads_dotenv_opaquely_and_keeps_explicit_offline(monkeypatch):
         os.environ.setdefault("OPENAI_API_KEY", "sk-test-only")
 
     monkeypatch.setattr(env, "ensure_loaded", load)
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    # 가짜 키가 이 시험 밖으로 새지 않게 키를 monkeypatch에 먼저 올려 둔다 — 처음에 키가 없으면
+    # delenv(raising=False)는 되돌릴 기록을 남기지 않아, 아래 setdefault로 들어간 가짜 키가
+    # 세션 끝까지 남았다(뒤 시험의 서버가 그 키를 찍었다).
+    monkeypatch.setenv("OPENAI_API_KEY", "registered-for-undo")
+    monkeypatch.delenv("OPENAI_API_KEY")
     monkeypatch.delenv("VLOGSRT_OFFLINE", raising=False)
     credentials = browser_runtime.capture_browser_credentials()
     assert credentials and credentials.api_key == "sk-test-only"
@@ -29,6 +35,17 @@ def test_browser_loads_dotenv_opaquely_and_keeps_explicit_offline(monkeypatch):
     monkeypatch.setenv("VLOGSRT_OFFLINE", "1")
     browser_runtime.prepare_approved_browser_network()
     assert os.environ["VLOGSRT_OFFLINE"] == "1"
+
+
+def test_the_dotenv_test_leaves_no_fake_key_behind(monkeypatch):
+    """키가 없던 세션에서 위 시험을 돌리고 그 시험의 되돌리기를 마치면 키가 다시 없다."""
+    # 이 시험 자신도 처음 상태로 돌아가게 같은 방식으로 올려 둔 뒤, 키가 없는 세션을 흉내 낸다.
+    monkeypatch.setenv("OPENAI_API_KEY", "registered-for-undo")
+    monkeypatch.delenv("OPENAI_API_KEY")
+    with pytest.MonkeyPatch.context() as inner:
+        test_browser_loads_dotenv_opaquely_and_keeps_explicit_offline(inner)
+        assert os.environ.get("OPENAI_API_KEY") == "sk-test-only"  # 시험 안에서는 있다
+    assert "OPENAI_API_KEY" not in os.environ
 
 
 def test_source_captions_visible_before_frames_and_luna(tmp_path, monkeypatch):

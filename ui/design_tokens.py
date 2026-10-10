@@ -100,6 +100,11 @@ SCALAR_TOKENS: dict[str, str] = {
     "radius-xs": "2px",
     "radius-sm": "4px",
     "radius-md": "6px",
+    # 껍데기 치수(W-17 B, 디자인 tokens.json `layout`) — 머리줄 · 명령 줄 · 상태 줄 · 조작 높이.
+    "topbar-h": "44px",
+    "commandbar-h": "48px",
+    "statusline-h": "24px",
+    "control-h": "32px",
     "font-sans": ", ".join(FONT_SANS_STACK),
     "font-mono": ", ".join(FONT_MONO_STACK),
 }

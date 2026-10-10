@@ -10,6 +10,7 @@ from __future__ import annotations
 import html
 import json
 import math
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from fractions import Fraction
@@ -367,6 +368,518 @@ def vtt_timecode(total_ms: int) -> str:
 # 같은 원본을 다시 고르는 동안 재생 머리가 사라지지 않는다.
 
 
+# ── 작업대 껍데기(W-17 B, D57) — 머리줄 · 명령 줄 활동 칸 · 서랍 머리 · 상태 줄 ─────────────
+#
+# 머리줄의 흐름 단계는 **보고만** 한다(누르는 곳이 아니다). 수는 서버가 작업대를 그릴 때마다
+# 재서 작업대 값의 속성으로 싣고, 실행본이 그 값을 머리줄에 옮긴다 — 머리줄을 위한 타이머를
+# 따로 두지 않는다.
+
+FLOW_STEP_LABELS = ("불러오기", "분석 승인", "검토", "Final Cut")
+PROJECT_EMPTY_LABEL = "프로젝트 없음"
+SHORTCUT_SEEK_SECONDS = 5
+"""J/L이 옮기는 초 — 실행본의 `VL_SEEK_SECONDS`와 같은 값이다(시험이 둘을 맞춰 본다)."""
+
+_CHECK_SVG = (
+    '<svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2"'
+    ' stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+    '<path d="M2.5 6.2l2.3 2.3 4.7-5"/></svg>'
+)
+_KEYS_SVG = (
+    '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"'
+    ' stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+    '<rect x="1.75" y="4" width="12.5" height="8" rx="1.5"/>'
+    '<path d="M4.5 7h.01M7 7h.01M9.5 7h.01M12 7h.01M5 9.5h6"/></svg>'
+)
+_SETTINGS_SVG = (
+    '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"'
+    ' stroke-linecap="round" aria-hidden="true"><path d="M2.5 4.5h7M12.5 4.5h1M2.5 11.5h1'
+    'M6.5 11.5h7"/><circle cx="11" cy="4.5" r="1.5"/><circle cx="5" cy="11.5" r="1.5"/></svg>'
+)
+_CHEVRON_SVG = (
+    '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"'
+    ' stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+    '<path d="M4 6l4 4 4-4"/></svg>'
+)
+# 단축키 표 — D50이 정한 키만 싣는다(없는 키는 보이지 않는다).
+SHORTCUT_SHEET: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("Space", "K"), "재생 / 정지"),
+    (("J", "L"), f"{SHORTCUT_SEEK_SECONDS}초 뒤로 / 앞으로"),
+    ((",", "."), "정지하고 한 프레임 뒤로 / 앞으로"),
+    (("←", "→"), "경계 손잡이에 초점이 있을 때 한 프레임씩 옮기기"),
+    (("Enter",), "경계 초안을 프레임에 맞추기"),
+)
+SHORTCUT_HINT: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("Space",), "재생"),
+    (("J", "L"), f"±{SHORTCUT_SEEK_SECONDS}초"),
+    ((",", "."), "한 프레임"),
+)
+
+
+@dataclass(frozen=True)
+class FlowCounts:
+    """머리줄 흐름 단계의 살아 있는 수 — 작업대를 그릴 때마다 서버가 잰다."""
+
+    imported: int = 0
+    analysed: int = 0
+    proposals: int = 0
+    sent: bool = False
+
+
+@dataclass(frozen=True)
+class FlowStep:
+    number: int
+    label: str
+    state: str
+    """`done` · `cur` · `todo` — 지금 단계는 끝나지 않은 첫 단계다."""
+    sub: str
+    alert: bool
+    """미검토 제외 제안이 남았다 — 정보일 뿐 보내기를 막지 않는다(D56)."""
+
+
+def flow_steps(counts: FlowCounts) -> tuple[FlowStep, ...]:
+    """네 단계의 상태와 수 — 보고만 한다. 「검토」의 제외 제안 수는 관문이 아니다(D56)."""
+    total = counts.imported
+    done = (total > 0, total > 0 and counts.analysed >= total, counts.sent, counts.sent)
+    subs = (
+        f"{total}개" if total else "",
+        f"{counts.analysed}/{total}" if total else "",
+        f"제외 제안 {counts.proposals}" if counts.proposals else "",
+        "보냄" if counts.sent else "",
+    )
+    current = next((index for index, finished in enumerate(done) if not finished), None)
+    return tuple(
+        FlowStep(
+            number=index + 1,
+            label=label,
+            state="done" if done[index] else "cur" if index == current else "todo",
+            sub=subs[index],
+            alert=index == 2 and counts.proposals > 0,
+        )
+        for index, label in enumerate(FLOW_STEP_LABELS)
+    )
+
+
+def flow_steps_html(steps: Sequence[FlowStep]) -> str:
+    """흐름 단계 표지 — 끝난 단계는 확인 표, 지금 단계는 `aria-current`, 글자는 전부 이스케이프."""
+    parts = []
+    for step in steps:
+        title = step.label + (f" · {step.sub}" if step.sub else "")
+        mark = _CHECK_SVG + '<span class="vl-sr">완료</span>' if step.state == "done" else ""
+        number = "" if step.state == "done" else str(step.number)
+        current = ' aria-current="step"' if step.state == "cur" else ""
+        sub_class = "sub r" if step.alert else "sub"
+        sub = f'<span class="{sub_class}">{html.escape(step.sub)}</span>' if step.sub else ""
+        parts.append(
+            f'<span class="vl-step {step.state}" data-vl-step="{step.number}"{current}'
+            f' title="{html.escape(title, quote=True)}"><span class="no">{mark}{number}</span>'
+            f'<span class="lbl">{html.escape(step.label)}</span>{sub}</span>'
+        )
+    return '<span class="vl-step-sep" aria-hidden="true"></span>'.join(parts)
+
+
+def _kbd_html(keys: Sequence[str]) -> str:
+    return "".join(f'<kbd class="vl-kbd">{html.escape(key)}</kbd>' for key in keys)
+
+
+def keysheet_html() -> str:
+    """「단축키」 판 — 머리줄·상태 줄의 단추가 같은 판 하나를 연다(`?` 키로는 열지 않는다)."""
+    rows = "".join(
+        f"<dt>{_kbd_html(keys)}</dt><dd>{html.escape(meaning)}</dd>"
+        for keys, meaning in SHORTCUT_SHEET
+    )
+    return (
+        '<div id="vl-keysheet" class="vl-keysheet-pop" role="dialog" aria-label="단축키" hidden>'
+        f'<dl class="vl-keysheet">{rows}</dl>'
+        '<p class="vl-keysheet-note">입력 칸에 글을 쓰는 중에는 단축키가 동작하지 않습니다.</p>'
+        "</div>"
+    )
+
+
+def topbar_html(*, online: bool, mode_note: str, project: str, flow: str) -> str:
+    """머리줄(44px) — 이름 · 프로젝트(왼쪽 서랍) · 흐름 단계 · 연결 방식 · 단축키 · 설정.
+
+    연결 방식은 돈이 나갈 수 있음을 말하므로 온라인이면 경고 모양이다(뒤꼬리 글이 아니다).
+    `flow`는 `flow_steps_html`이 지은(이스케이프된) 조각이다.
+    """
+    mode = "online" if online else "offline"
+    return (
+        '<header class="vl-topbar">'
+        '<span class="vl-wordmark">vlogsrt</span>'
+        '<button type="button" id="vl-project" class="vl-projbtn" data-vl-drawer="project-tools"'
+        ' aria-controls="project-tools" title="프로젝트 · 라이브러리 가져오기">'
+        f'<span id="vl-project-name">{html.escape(project or PROJECT_EMPTY_LABEL)}</span>'
+        f"{_CHEVRON_SVG}</button>"
+        f'<nav id="vl-flow" class="vl-steps" aria-label="작업 단계">{flow}</nav>'
+        '<span class="vl-grow"></span>'
+        f'<span class="vl-mode {mode}" data-vl-mode="{mode}"><span class="vl-dot"'
+        f' aria-hidden="true"></span>{html.escape(mode_note)}</span>'
+        '<button type="button" class="vl-btn vl-btn-ghost vl-btn-sm" data-vl-keys-open'
+        f' aria-controls="vl-keysheet" aria-expanded="false">{_KEYS_SVG}'
+        '<span class="vl-btn-label">단축키</span></button>'
+        '<button type="button" id="vl-settings-open" class="vl-btn vl-btn-ghost vl-btn-sm"'
+        ' data-vl-drawer="settings-drawer" aria-controls="settings-drawer">'
+        f'{_SETTINGS_SVG}<span class="vl-btn-label">설정</span></button>'
+        f"{keysheet_html()}</header>"
+    )
+
+
+def drawer_head_html(title: str, drawer_id: str) -> str:
+    """서랍 머리 — 서랍은 화면 높이 전체를 덮으므로 닫는 단추를 서랍 안에 둔다."""
+    return (
+        '<div class="vl-drawer-head">'
+        f"<strong>{html.escape(title)}</strong>"
+        '<button type="button" class="vl-btn vl-btn-ghost vl-btn-sm"'
+        f' data-vl-drawer-close="{html.escape(drawer_id, quote=True)}">닫기</button></div>'
+    )
+
+
+def activity_html() -> str:
+    """명령 줄의 활동 칸(32px 고정) — 한 줄 말줄임, 전체 글은 「기록」 판과 `title`에 있다.
+
+    내용은 실행본(`ACTIVITY_JS`)이 채운다: 1초 상태 줄(`#quick-status`)의 변화와 단추 응답
+    (`ACTIVITY_REPLY_JS`). 글 길이가 칸 높이를 바꾸지 않으므로 무대가 밀리지 않는다.
+    """
+    return (
+        '<div id="vl-activity" class="vl-activity" data-vl-kind="status">'
+        '<span class="vl-dot" aria-hidden="true"></span>'
+        '<span id="vl-activity-msg" class="msg" role="status" aria-live="polite"></span>'
+        '<button type="button" id="vl-activity-key" class="vl-btn vl-btn-sm" hidden>'
+        "키 입력</button>"
+        '<button type="button" id="vl-activity-log-open" class="vl-btn vl-btn-ghost vl-btn-sm"'
+        ' aria-controls="vl-activity-log" aria-expanded="false">기록</button>'
+        '<div id="vl-activity-log" class="vl-activity-log" role="log" aria-label="최근 활동"'
+        ' hidden><p id="vl-activity-usage" class="vl-activity-usage" hidden></p>'
+        '<p class="vl-activity-empty">아직 기록이 없습니다.</p><ol></ol></div>'
+        "</div>"
+    )
+
+
+def statusline_html() -> str:
+    """무대 아래 상태 줄(24px) — 왼쪽은 작업대 각주(`#vl-footnote`), 오른쪽은 단축키 안내.
+
+    각주는 실행본이 `textContent`로 갈아 쓰므로 안내는 각주 **밖**의 형제에 둔다.
+    """
+    hints = "".join(
+        f"<span>{_kbd_html(keys)} {html.escape(meaning)}</span>" for keys, meaning in SHORTCUT_HINT
+    )
+    return (
+        '<div id="vl-statusline" class="vl-statusline">'
+        '<p id="vl-footnote" class="vl-footnote" role="status"></p>'
+        f'<span class="vl-keys">{hints}<button type="button" class="vl-btn vl-btn-ghost'
+        ' vl-btn-sm" data-vl-keys-open aria-controls="vl-keysheet">단축키</button></span></div>'
+    )
+
+
+ACTIVITY_REPLY_JS = (
+    "(reply) => { if (window.__vlActivity) { window.__vlActivity.reply(reply); } return []; }"
+)
+"""단추 사건이 끝나면 그 응답 칸의 값을 활동 칸으로 — 서버를 다시 부르지 않는다."""
+
+KEY_NOTICE_JS = """() => {
+    const status = document.getElementById('quick-status');
+    if (status?.textContent.includes('연결 설정 필요')) {
+        // 응답이 「API 연결」을 이미 펼쳤다 — 서랍만 열고 키 칸에 초점을 둔다.
+        if (window.__vlActivity) { window.__vlActivity.openKey(false); }
+        else {
+            requestAnimationFrame(() => document.querySelector('#quick-api-key input')?.focus());
+        }
+    }
+}"""
+"""승인 클릭이 '연결 설정 필요'로 끝나면 오른쪽 서랍을 열고 키 칸에 초점을 둔다(W-17 B)."""
+
+_MARKDOWN_PUNCTUATION = re.compile(r"([!-/:-@\[-`{-~])")
+
+
+def literal_markdown(text: str) -> str:
+    """글 그대로 그려지는 마크다운 — ASCII 문장부호를 모두 백슬래시로 escape한다(CommonMark).
+
+    견적 칸의 값은 승인 클릭이 함께 보내는 문구라(D54) 그려진 글이 원문과 같아야 앞 단계의 글
+    대조가 선다 — `2~3분`이 `23분`으로, `_x_`가 기울임으로 바뀌면 승인이 영영 막힌다. 앞 단계
+    (`APPROVE_GUARD_JS`)가 같은 규칙으로 되풀어 원문을 보낸다.
+    """
+    return _MARKDOWN_PUNCTUATION.sub(r"\\\1", text)
+
+
+APPROVE_GUARD_JS = r"""(signature, apiKey, shownQuote) => {
+  // 승인은 사람이 지금 보는 견적에만 묶인다(D54). 견적 칸이 서랍·판에 덮였거나 화면 밖이거나
+  // 칸 안에서 잘렸거나 그려진 글이 보낼 문구와 다르면 빈 견적을 보내 서버가 「새 견적을
+  // 확인하세요」로 거절하게 하고 견적을 보이게 한다 — 다음 클릭이 그것을 승인한다.
+  const quote = document.getElementById('library-analysis-scope');
+  // 읽고 재는 것은 그려진 마크다운 노드뿐이다 — 감싼 칸에는 그라디오 상태 표시가 형제로 있어
+  // 1초 틱마다 '0.1s' 같은 글이 잠깐 섞인다. 노드를 못 찾으면 닫힌 쪽(거절 길)이다.
+  const md = quote && quote.querySelector ? quote.querySelector('[data-testid="markdown"]') : null;
+  const drawerOpen = !!document.querySelector('#project-tools.open, #settings-drawer.open');
+  const inside = (r) => r.width >= 1 && r.height >= 1 && r.top >= 0 && r.left >= 0 &&
+    r.bottom <= window.innerHeight && r.right <= window.innerWidth;
+  const uncovered = (el, r) => [[r.left + r.width / 2, r.top + r.height / 2],
+    [r.left + 2, r.top + 2], [r.right - 2, r.top + 2], [r.left + 2, r.bottom - 2],
+    [r.right - 2, r.bottom - 2]].every(([x, y]) => {
+    const hit = document.elementFromPoint(x, y);
+    return !!hit && el.contains(hit);
+  });
+  // 칸의 값은 문장부호를 escape한 마크다운(`literal_markdown`)이다 — 되풀면 견적 원문이고, 그려진
+  // 글도 그 원문이다. 빈칸만 한 칸으로 맞춰 비교하고, 서버에는 되푼 원문을 보낸다(대조는 그대로).
+  const sent = String(shownQuote || '').replace(/\\([!-\/:-@\[-`{-~])/g, '$1');
+  const flat = (s) => String(s || '').replace(/\s+/g, ' ').trim();
+  let seen = !!md && !drawerOpen;
+  if (seen) {
+    const style = window.getComputedStyle(md);
+    const box = md.getBoundingClientRect();
+    seen = style.display !== 'none' && style.visibility === 'visible' && inside(box) &&
+      uncovered(md, box) && md.scrollHeight <= md.clientHeight + 1 &&
+      flat(md.textContent) !== '' && flat(md.textContent) === flat(sent);
+  }
+  if (seen) { return [signature, apiKey, sent]; }
+  if (window.__vlDrawer) {
+    ['project-tools', 'settings-drawer'].forEach((id) => window.__vlDrawer(id, false));
+  } else {
+    document.querySelectorAll('#project-tools.open > .toggle-button, ' +
+      '#settings-drawer.open > .toggle-button').forEach((button) => button.click());
+  }
+  if (window.__vlClosePopovers) { window.__vlClosePopovers(null); }
+  if (quote && quote.scrollIntoView) { quote.scrollIntoView({ block: 'nearest' }); }
+  return [signature, apiKey, ''];
+}"""
+"""일괄 승인 클릭의 앞 단계 — 견적 칸이 정말 보일 때만 그 문구를 보낸다(덮였으면 빈 문구)."""
+
+SHELL_JS = r"""
+(function () {
+  var W = window;
+  // 서랍·막·판(단축키·활동 기록)·활동 칸 — 문서에 한 번만 묶고, 원소는 사건 순간에 찾는다.
+  var DRAWERS = ["project-tools", "settings-drawer"];
+  var POPOVERS = { "vl-keysheet": "[data-vl-keys-open]",
+    "vl-activity-log": "#vl-activity-log-open" };
+  var LOG_LIMIT = 20;
+  var STATUS_ID = "quick-status";
+  // 실사용 줄(「실사용 $…」)의 원천 — 기록 판 맨 위에 고정해 말줄임 없이 다 보인다(D46).
+  var USAGE_ID = "vl-usage-src";
+  var SCRIM_ID = "vl-scrim";
+  var KEY_NOTICE = "연결 설정 필요";
+  var WATCH_MS = 1000;
+  // 단추 응답은 그 사건이 갈아 쓴 상태 줄보다 늦게 온다 — 이 안의 같은 글은 한 번만 적는다.
+  var MERGE_MS = 3000;
+  // Esc는 입력 칸·펼친 고르기 칸의 몫이다 — 거기서 누른 Esc가 서랍을 닫지 않는다.
+  // 펼침 표시만으로 고르지 않는다: 단축키·기록 여닫이 단추도 판을 열면 펼침이 되어
+  // 방금 누른 그 단추 위의 Esc가 판을 닫지 못했다.
+  var ESC_OWNERS = 'input, textarea, select, [contenteditable=""], [contenteditable="true"], ' +
+    '[role="textbox"], [role="combobox"][aria-expanded="true"], [role="listbox"]';
+  if (W.__vlShellBound) { return; }
+  W.__vlShellBound = true;
+  function byId(id) { return document.getElementById(id); }
+  function drawerOpen(id) { var d = byId(id); return !!d && d.classList.contains("open"); }
+  // 막 — 서랍이 열려 있는 동안 나머지 화면(승인 단추 포함)은 누르지 못한다. 누르면 서랍만 닫힌다.
+  function scrim() {
+    var s = byId(SCRIM_ID);
+    if (!s && document.body) {
+      s = document.createElement("div");
+      s.id = SCRIM_ID; s.className = "vl-scrim"; s.hidden = true;
+      s.setAttribute("aria-hidden", "true");
+      document.body.appendChild(s);
+    }
+    return s;
+  }
+  W.__vlSyncDrawers = function () {
+    var open = DRAWERS.some(drawerOpen);
+    var s = scrim();
+    if (s) { s.hidden = !open; }
+    if (open) { closePopovers(null); }
+    return open;
+  };
+  // 서랍 — 그라디오 Sidebar의 여닫이 단추를 대신 누른다(그 단추는 CSS가 감춘다).
+  W.__vlDrawer = function (id, open) {
+    var drawer = byId(id);
+    if (!drawer) { return false; }
+    var isOpen = drawer.classList.contains("open");
+    var want = open === undefined ? !isOpen : !!open;
+    if (want) {
+      DRAWERS.forEach(function (other) { if (other !== id) { W.__vlDrawer(other, false); } });
+    }
+    if (want !== isOpen) {
+      var toggle = drawer.querySelector(":scope > .toggle-button");
+      if (toggle) { toggle.click(); }
+    }
+    W.__vlSyncDrawers();
+    requestAnimationFrame(function () {
+      W.__vlSyncDrawers();
+      var close = want ? drawer.querySelector("[data-vl-drawer-close]") : null;
+      if (close) { close.focus(); }
+    });
+    return want;
+  };
+  // 서버가 서랍을 여닫아도(라이브러리 불러오기 뒤 닫기 등) 막이 따라간다.
+  var watched = {};
+  function watchDrawers() {
+    DRAWERS.forEach(function (id) {
+      var d = byId(id);
+      if (!d || watched[id] === d) { return; }
+      watched[id] = d;
+      new MutationObserver(W.__vlSyncDrawers).observe(d,
+        { attributes: true, attributeFilter: ["class"] });
+      W.__vlSyncDrawers();
+    });
+  }
+  function setPopover(id, open) {
+    var box = byId(id);
+    if (!box) { return; }
+    box.hidden = !open;
+    document.querySelectorAll(POPOVERS[id]).forEach(function (opener) {
+      opener.setAttribute("aria-expanded", open ? "true" : "false");
+    });
+    if (open && id === "vl-activity-log" && W.__vlActivity) { W.__vlActivity.paintLog(); }
+  }
+  function closePopovers(except) {
+    var closed = false;
+    Object.keys(POPOVERS).forEach(function (id) {
+      var box = byId(id);
+      if (box && !box.hidden && id !== except) { setPopover(id, false); closed = true; }
+    });
+    return closed;
+  }
+  W.__vlClosePopovers = closePopovers;
+  function pad(n) { return String(n).padStart(2, "0"); }
+  var A = W.__vlActivity = { entries: [], statusText: null, statusEl: null, observer: null };
+  // 마크다운 응답을 한 줄로 — 문단은 ' · '로 잇고, 걷는 것은 굵게 표지(**)와
+  // [글](주소)의 주소뿐이다.
+  // 밑줄 두 개·역따옴표는 식별자의 일부일 수 있어 그대로 둔다(글자를 바꾸지 않는다).
+  A.plain = function (markdown) {
+    return String(markdown || "")
+      .replace(/\[([^\]\n]+)\]\((?:[^()\s]|\([^()\s]*\))+\)/g, "$1")
+      .replace(/\*\*/g, "").split(/\n\s*\n/).map(function (part) {
+        return part.replace(/\s+/g, " ").trim();
+      }).filter(Boolean).join(" · ");
+  };
+  A.domText = function (el) {
+    var blocks = el.querySelectorAll("p, li, h1, h2, h3, h4");
+    var parts = Array.prototype.map.call(blocks, function (b) {
+      return b.textContent.replace(/\s+/g, " ").trim();
+    }).filter(Boolean);
+    return parts.length ? parts.join(" · ") : el.textContent.replace(/\s+/g, " ").trim();
+  };
+  A.paintLog = function () {
+    var box = byId("vl-activity-log");
+    if (!box) { return; }
+    var list = box.querySelector("ol");
+    var empty = box.querySelector(".vl-activity-empty");
+    if (empty) { empty.hidden = A.entries.length > 0; }
+    if (!list) { return; }
+    list.textContent = "";
+    A.entries.forEach(function (entry) {
+      var row = document.createElement("li");
+      row.setAttribute("data-vl-kind", entry.kind);
+      var time = document.createElement("time");
+      time.textContent = entry.time;
+      var text = document.createElement("span");
+      text.textContent = entry.text;
+      row.appendChild(time); row.appendChild(text); list.appendChild(row);
+    });
+  };
+  // 한 줄 칸 — 글이 길어도 높이는 그대로(말줄임), 전체 글은 title과 기록 판에 있다.
+  // 견적을 실은 승인 거절은 견적 칸(#vl-quote-note)이, 실사용 줄은 기록 판 고정 줄이 다 보인다.
+  A.show = function (text, kind) {
+    var msg = byId("vl-activity-msg"), box = byId("vl-activity");
+    if (!text || !msg || !box) { return; }
+    msg.textContent = text; msg.title = text;
+    box.setAttribute("data-vl-kind", kind);
+    var key = byId("vl-activity-key");
+    if (key) { key.hidden = text.indexOf(KEY_NOTICE) < 0; }
+    var now = new Date();
+    A.entries.unshift({ time: pad(now.getHours()) + ":" + pad(now.getMinutes()) + ":" +
+      pad(now.getSeconds()), text: text, kind: kind, at: now.getTime() });
+    if (A.entries.length > LOG_LIMIT) { A.entries.length = LOG_LIMIT; }
+    var log = byId("vl-activity-log");
+    if (log && !log.hidden) { A.paintLog(); }
+  };
+  // 단추 응답 — 같은 글이라도 누른 만큼 기록한다. 1초 다시 그리기는 이것을 지우지 않는다.
+  // 같은 사건이 방금 갈아 쓴 상태 줄(같은 글)은 이 응답 하나로 바꿔 적는다.
+  A.reply = function (markdown) {
+    var text = A.plain(markdown);
+    var latest = A.entries[0];
+    if (latest && latest.kind === "status" && latest.text === text &&
+        Date.now() - latest.at < MERGE_MS) {
+      A.entries.shift();
+    }
+    A.show(text, "reply");
+  };
+  // 1초 상태 줄 — 글이 **바뀔 때만** 칸을 갈아 쓴다. 방금 기록한 응답과 같은 글이면
+  // 다시 적지 않는다.
+  A.readStatus = function () {
+    var el = A.statusEl;
+    if (!el) { return; }
+    var text = A.domText(el);
+    if (text === A.statusText) { return; }
+    A.statusText = text;
+    var latest = A.entries[0];
+    if (latest && latest.kind === "reply" && latest.text === text) { return; }
+    A.show(text, "status");
+  };
+  A.watchStatus = function () {
+    var el = byId(STATUS_ID);
+    if (!el || el === A.statusEl) { return; }
+    if (A.observer) { A.observer.disconnect(); }
+    A.statusEl = el;
+    A.observer = new MutationObserver(A.readStatus);
+    A.observer.observe(el, { childList: true, subtree: true, characterData: true });
+    A.readStatus();
+  };
+  // 실사용 줄 — 글이 바뀔 때만 고정 줄을 갈아 쓴다. 기록 항목은 늘리지 않는다.
+  A.readUsage = function () {
+    var src = byId(USAGE_ID), row = byId("vl-activity-usage");
+    if (!row) { return; }
+    var text = src ? A.domText(src) : "";
+    if (text === A.usageText) { return; }
+    A.usageText = text;
+    row.textContent = text; row.title = text; row.hidden = !text;
+  };
+  // 키가 없다는 알림 — 오른쪽 서랍을 열고 「API 연결」을 펼쳐 키 칸에 초점을 둔다.
+  A.openKey = function (expand) {
+    W.__vlDrawer("settings-drawer", true);
+    var label = document.querySelector("#quick-api-panel > button.label-wrap");
+    if (expand !== false && label && !label.classList.contains("open")) { label.click(); }
+    requestAnimationFrame(function () {
+      var input = document.querySelector("#quick-api-key input");
+      if (input) { input.focus(); }
+    });
+  };
+  function watch() { A.watchStatus(); A.readUsage(); watchDrawers(); }
+  W.setInterval(watch, WATCH_MS);
+  watch();
+  document.addEventListener("click", function (ev) {
+    var t = ev.target && ev.target.closest ? ev.target : null;
+    if (!t) { return; }
+    if (t.id === SCRIM_ID) { DRAWERS.forEach(function (id) { W.__vlDrawer(id, false); }); return; }
+    var drawer = t.closest("[data-vl-drawer]");
+    if (drawer) { W.__vlDrawer(drawer.getAttribute("data-vl-drawer")); return; }
+    var closer = t.closest("[data-vl-drawer-close]");
+    if (closer) { W.__vlDrawer(closer.getAttribute("data-vl-drawer-close"), false); return; }
+    var keys = t.closest("[data-vl-keys-open]");
+    var log = t.closest("#vl-activity-log-open");
+    var target = keys ? "vl-keysheet" : log ? "vl-activity-log" : null;
+    if (target) {
+      var box = byId(target);
+      closePopovers(target);
+      setPopover(target, !!box && box.hidden);
+      return;
+    }
+    if (t.closest("#vl-activity-key")) { A.openKey(true); return; }
+    if (!t.closest("#vl-keysheet, #vl-activity-log")) { closePopovers(null); }
+  });
+  // Esc — 떠 있는 판부터, 없으면 서랍을 닫는다(재생 단축키 표에는 없는 키다).
+  document.addEventListener("keydown", function (ev) {
+    if (ev.key !== "Escape" || ev.isComposing) { return; }
+    var t = ev.target;
+    if (t && typeof t.closest === "function" && t.closest(ESC_OWNERS)) { return; }
+    if (closePopovers(null)) { return; }
+    DRAWERS.forEach(function (id) { W.__vlDrawer(id, false); });
+  });
+})();
+"""
+"""머리줄의 실행본 — 서랍 여닫이와 막 · 단축키 판 · 활동 칸(1초 상태 줄 관찰 + 단추 응답 기록).
+
+활동 칸의 원천은 둘이다: 1초 상태 줄(`#quick-status`)은 글이 바뀔 때만, 단추 응답은
+`ACTIVITY_REPLY_JS`가 사건이 끝날 때마다. 기록은 화면(탭) 메모리에만 최근 것부터 남는다.
+"""
+
+
 def _model_attribute(model: Mapping[str, object]) -> str:
     """작업대 상태를 뿌리 칸의 data 속성에 안전히 싣는다 — <script>는 쓰지 않는다.
 
@@ -427,30 +940,46 @@ def visual_player_shell_html(video_src: str | None, note: str) -> str:
     )
 
 
-def visual_workbench_html(model: Mapping[str, object]) -> str:
+def _flow_attributes(project: str | None, flow: FlowCounts | None) -> str:
+    """머리줄로 옮길 값 — 프로젝트 이름과 흐름 단계 조각(이스케이프된 HTML)을 속성에 싣는다."""
+    if flow is None:
+        return ""
+    steps = html.escape(flow_steps_html(flow_steps(flow)), quote=True)
+    name = html.escape(project or PROJECT_EMPTY_LABEL, quote=True)
+    return f' data-vl-flow="{steps}" data-vl-project="{name}"'
+
+
+def visual_workbench_html(
+    model: Mapping[str, object],
+    *,
+    project: str | None = None,
+    flow: FlowCounts | None = None,
+) -> str:
     """영상 작업대 본문 — 조각 목록·선택 패널의 빈 그릇과 상태 JSON.
 
     그릇을 채우는 건 이 파일의 클라이언트 실행본(`VISUAL_BOOTSTRAP_JS`)이다.
     서버는 여기까지: 값은 전부 공개 질의가 준 것, 사람이 읽는 글자는 전부
     이스케이프되어 있다(모델 안 글자는 클라이언트가 textContent로만 싣는다).
-    목록·패널·각주는 **한 격자의 세 칸**으로 펼쳐진다 — 뿌리는
+    목록·패널·상태 줄은 **한 격자의 칸**으로 펼쳐진다 — 뿌리는
     `display:contents`로 무대(`#visual-stage`) 격자에 그대로 참여하고, 재생기
     껍데기(가운데 칸)는 별도 구성요소라 같은 원본을 다시 고르는 동안 재생이
-    이어진다(모바일 ≤860px에서는 격자 영역 순서로 재생기가 맨 먼저 온다).
+    이어진다(좁은 화면 ≤860px에서는 격자 영역 순서로 재생기·타임라인이 먼저 온다).
+    `flow`가 있으면 머리줄의 흐름 단계·프로젝트 이름을 속성으로 싣는다(자리표시 포함).
     """
+    flow_attrs = _flow_attributes(project, flow)
     placeholder = model.get("empty")
     if isinstance(placeholder, str) and placeholder:
         return (
-            '<div id="visual-workbench" class="vl-workbench" data-vl-empty="1">'
+            f'<div id="visual-workbench" class="vl-workbench" data-vl-empty="1"{flow_attrs}>'
             f'<p class="vl-note">{html.escape(placeholder)}</p></div>'
         )
     return (
         '<div id="visual-workbench" class="vl-workbench"'
-        f' data-vl-model="{_model_attribute(model)}">\n'
+        f' data-vl-model="{_model_attribute(model)}"{flow_attrs}>\n'
         '  <div id="vl-thumbs" class="vl-thumbs" role="listbox"'
         ' aria-label="조각 목록(시간순, 페이지 간 24개)"></div>\n'
         '  <div id="vl-panel" class="vl-panel" aria-live="polite"></div>\n'
-        '  <p id="vl-footnote" class="vl-footnote" role="status"></p>\n'
+        f"  {statusline_html()}\n"
         "</div>"
     )
 
@@ -573,7 +1102,184 @@ def caption_workbench_details_html(model: Mapping[str, object]) -> str:
     )
 
 
-WORKBENCH_CSS = """
+_SHELL_CSS = """
+/* ── 껍데기(W-17 B, D57) — 머리줄 44 · 명령 줄 48 · 무대(나머지). 바깥 여백은 16px 하나. ── */
+.gradio-container .main.fillable { padding: 0 16px; }
+.gradio-container main.contain > .column { gap: 0; }
+/* 그라디오 HTML 구성요소의 안쪽 칸은 블록 여백 변수(10·12px)를 단다 — 껍데기 칸에서는
+   그 변수를 0으로 둔다(안쪽 포장을 범용으로 덮어쓰지 않는다). 떠 있는 판이 밖으로 나오게
+   넘침은 보인다. */
+#app-header, #vl-activity-block, .vl-drawer-head-block { --block-padding: 0px; }
+#app-header { padding: 0; overflow: visible; z-index: 20; }
+/* 탭이 하나뿐이면 탭 막대를 감춘다 — 숨은 「자막」 탭은 그대로라 보이게 되면 막대도 돌아온다. */
+.gradio-container .tabs:has(> .tabitem#review-tab) > .tab-wrapper:not(:has(button + button)) {
+  display: none; }
+.vl-topbar {
+  position: relative; display: flex; align-items: center; gap: 14px; min-width: 0;
+  height: var(--vl-topbar-h); border-bottom: 1px solid var(--vl-line); color: var(--vl-ink);
+  font-size: 13px; line-height: 18px;
+}
+.vl-wordmark { flex: none; font: 600 16px/22px var(--vl-font-sans); letter-spacing: -0.01em; }
+.vl-projbtn {
+  display: inline-flex; align-items: center; gap: 6px; min-width: 0; max-width: 240px; height: 28px;
+  padding: 0 8px; border: 1px solid transparent; border-radius: 4px; background: transparent;
+  color: var(--vl-ink-muted); font: 500 13px/18px var(--vl-font-sans); cursor: pointer;
+}
+.vl-projbtn:hover { background: var(--vl-surface-hover); color: var(--vl-ink); }
+.vl-projbtn > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vl-topbar svg, .vl-btn svg { width: 14px; height: 14px; flex: none; }
+.vl-grow { flex: 1 1 auto; min-width: 0; }
+.vl-steps { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.vl-step {
+  display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px 0 6px;
+  border-radius: 4px; color: var(--vl-ink-muted); white-space: nowrap;
+  font: 500 13px/18px var(--vl-font-sans);
+}
+.vl-step .no {
+  display: inline-grid; place-items: center; box-sizing: border-box; width: 18px; height: 18px;
+  border: 1px solid currentColor; border-radius: 50%; font: 600 11px/1 var(--vl-font-mono);
+}
+.vl-step .no svg { width: 11px; height: 11px; }
+.vl-step.done .no { border-color: var(--vl-success); background: var(--vl-success);
+  color: var(--vl-bg); }
+/* 지금 단계 — 떠 있는 바탕 + 선 + accent-ink 번호(본점 채움은 주 단추·손잡이·선택한 컷뿐). */
+.vl-step.cur { color: var(--vl-ink); background: var(--vl-surface-raised);
+  box-shadow: inset 0 0 0 1px var(--vl-line-strong); }
+.vl-step.cur .no { border-color: var(--vl-accent-ink); color: var(--vl-accent-ink); }
+.vl-step .sub { font: 500 11px/14px var(--vl-font-mono); color: var(--vl-ink-muted); }
+.vl-step .sub.r { color: var(--vl-tier-red-ink); }
+.vl-step-sep { flex: none; width: 12px; height: 1px; background: var(--vl-line-strong); }
+.vl-sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%);
+  white-space: nowrap; }
+/* 연결 방식 — 온라인은 돈이 나갈 수 있으니 경고 바탕, 오프라인은 무채색. */
+.vl-mode {
+  display: inline-flex; flex: none; align-items: center; gap: 6px; height: 24px; padding: 0 8px;
+  border: 1px solid var(--vl-warn); border-radius: 4px; background: var(--vl-warn-soft);
+  color: var(--vl-ink); font: 500 12px/16px var(--vl-font-sans); white-space: nowrap;
+}
+.vl-mode .vl-dot { background: var(--vl-warn); }
+.vl-mode.offline { border-color: var(--vl-line-strong); background: var(--vl-surface-raised); }
+.vl-mode.offline .vl-dot { background: var(--vl-ink-faint); }
+.vl-dot {
+  flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--vl-ink-faint); }
+.vl-btn-sm {
+  display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px;
+  font-size: 12px; line-height: 16px; white-space: nowrap; }
+.vl-btn[hidden] { display: none; }
+.vl-btn-ghost { border-color: transparent; background: transparent; color: var(--vl-ink-muted); }
+.vl-btn-ghost:hover:not(:disabled) { background: var(--vl-surface-hover); color: var(--vl-ink); }
+.vl-btn-danger { border-color: var(--vl-tier-red-ink); color: var(--vl-tier-red-ink); }
+/* 떠 있는 판 — 단축키 표와 활동 기록. 무대 위에 겹칠 뿐 무대를 밀지 않는다. */
+.vl-keysheet-pop, .vl-activity-log {
+  position: absolute; top: calc(100% + 6px); right: 0; z-index: 60; box-sizing: border-box;
+  background: var(--vl-surface-raised); border: 1px solid var(--vl-line-strong);
+  border-radius: 6px; box-shadow: var(--vl-shadow-pop); color: var(--vl-ink);
+}
+.vl-keysheet-pop[hidden], .vl-activity-log[hidden], .vl-activity-empty[hidden] { display: none; }
+.vl-keysheet-pop { width: min(440px, calc(100vw - 32px)); padding: 16px; }
+.vl-keysheet {
+  display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px 14px; align-items: center;
+  margin: 0; font-size: 13px; line-height: 18px; }
+.vl-keysheet dt { display: flex; justify-content: flex-end; gap: 3px; margin: 0; }
+.vl-keysheet dd { margin: 0; color: var(--vl-ink); }
+.vl-keysheet-note { margin: 12px 0 0; font-size: 12px; line-height: 16px;
+  color: var(--vl-ink-muted); }
+/* 명령 줄(48px) — 단추는 32px, 나머지는 활동 칸. 글 길이는 높이를 바꾸지 않는다. */
+#vl-command-bar {
+  display: flex; flex-wrap: nowrap; align-items: center; gap: 8px; height: var(--vl-commandbar-h);
+  padding: 0; min-width: 0; }
+#review-tab > .column > #vl-command-bar > button {
+  flex: none; height: var(--vl-control-h); padding: 0 12px; white-space: nowrap; }
+#vl-command-bar > #quick-status { display: none; }
+#vl-command-bar > #vl-usage-src { display: none; }
+#vl-activity-block { flex: 1 1 0; min-width: 120px; padding: 0; overflow: visible; }
+.vl-activity {
+  position: relative; display: flex; align-items: center; gap: 10px; box-sizing: border-box;
+  height: var(--vl-control-h); min-width: 0; padding: 0 4px 0 10px;
+  border: 1px solid var(--vl-line); border-radius: 4px; background: var(--vl-surface);
+  color: var(--vl-ink); font-size: 13px; line-height: 18px;
+}
+.vl-activity .msg {
+  flex: 1 1 auto; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.vl-activity[data-vl-kind="reply"] > .vl-dot { background: var(--vl-accent-ink); }
+.vl-activity .vl-btn-sm { height: 24px; }
+.vl-activity-log { width: min(560px, calc(100vw - 32px)); max-height: min(60vh, 480px);
+  overflow: auto; padding: 4px 0; }
+.vl-activity-empty { margin: 8px 12px; font-size: 12px; color: var(--vl-ink-muted); }
+/* 실사용 줄 — 기록 판 맨 위 고정 줄. 재생기 위에 서지 않고 여기서 여러 줄로 다 보인다. */
+.vl-activity-usage {
+  margin: 0; padding: 6px 12px 8px; border-bottom: 1px solid var(--vl-line); font-size: 12px;
+  line-height: 16px; color: var(--vl-ink); white-space: normal; overflow-wrap: anywhere; }
+.vl-activity-usage[hidden] { display: none; }
+.vl-activity-log ol { list-style: none; margin: 0; padding: 0; }
+.vl-activity-log li {
+  display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 10px; margin: 0;
+  padding: 6px 12px; border-top: 1px solid var(--vl-line); font-size: 12px; line-height: 16px; }
+.vl-activity-log li:first-child { border-top: 0; }
+.vl-activity-log time { font-family: var(--vl-font-mono); color: var(--vl-ink-muted); }
+/* 서랍 — 그라디오 Sidebar는 열리면 부모에 여백을 줘 무대를 옆으로 민다(폭이 바뀌면 영상이
+   다시 맞춰진다). 여기서는 무대 위에 겹치기만 한다. 여닫이는 머리줄 단추와 서랍 머리의
+   「닫기」(그리고 Esc)가 한다 — 그라디오의 가장자리 단추는 감춘다. 움직임은 없다. */
+.sidebar-parent, .sidebar-parent:has(.sidebar.open) {
+  padding-left: 0 !important; padding-right: 0 !important; }
+#project-tools, #settings-drawer {
+  background: var(--vl-surface); transition: none !important; }
+#project-tools { border-right: 1px solid var(--vl-line); }
+#settings-drawer { border-left: 1px solid var(--vl-line); }
+#project-tools.open, #settings-drawer.open { box-shadow: var(--vl-shadow-pop); }
+#project-tools > .toggle-button, #settings-drawer > .toggle-button { display: none; }
+#project-tools > .sidebar-content, #settings-drawer > .sidebar-content { padding: 12px 16px 24px; }
+.vl-drawer-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding-bottom: 8px; border-bottom: 1px solid var(--vl-line); font-size: 14px; }
+/* 막 — 서랍이 열려 있는 동안 나머지 화면 전체(머리줄·승인 단추 포함)를 덮는다. 서랍(1000) 바로
+   아래 층이고, 누르면 서랍만 닫힌다 — 덮인 견적으로 승인 단추가 눌리지 않는다. */
+.vl-scrim {
+  position: fixed; inset: 0; z-index: 999;
+  background: color-mix(in srgb, var(--vl-bg) 55%, transparent); }
+.vl-scrim[hidden] { display: none; }
+/* 견적 칸(#vl-quote) — 분석 견적 문구와 그 아래의 전문 칸. 넓은 화면은 패널 열 위, 1050px
+   이하는 명령 줄 바로 아래(재생기 앞). 견적 문구는 승인할 견적이 없으면(승인 단추가 꺼져
+   있으면) 숨는다. 전문 칸(#vl-quote-note)은 견적·금액을 실은 살아 있는 승인 알림(거절)만
+   말줄임 없이 여러 줄로 다 보이고, 그런 알림이 없으면 숨는다(실사용 줄은 기록 판 고정 줄).
+   칸은 제 격자 칸 안에서 자란다. */
+#vl-quote { grid-area: quote; min-width: 0; gap: 8px; }
+#library-analysis-scope, #vl-quote-note {
+  min-width: 0; padding: 8px 10px; border-radius: 6px;
+  font-size: 12px; line-height: 16px; white-space: normal; overflow-wrap: anywhere; }
+#library-analysis-scope {
+  border: 1px solid var(--vl-line-strong); background: var(--vl-surface-raised); }
+#vl-quote-note { border: 1px solid var(--vl-warn); background: var(--vl-warn-soft); }
+#vl-quote-note p { margin: 0 0 4px; }
+#vl-quote-note p:last-child { margin-bottom: 0; }
+#review-tab:has(#library-approve:disabled) #library-analysis-scope { display: none; }
+@media (min-width: 1051px) {
+  #review-tab:has(#library-approve:disabled) #visual-stage:not(:has(#vl-quote-note)) .vl-panel {
+    grid-row: 1 / 3; }
+}
+/* 패널(D57 B) — 머리 · 결정 · 판정 · 알림 · 편집 · 접힌 상세. 결정 상자는 빗금 띠를 이고 선다. */
+/* 패널 칸은 줄어들지 않는다 — 넘치면 패널 안에서 스크롤한다(결정 상자가 눌려 잘리지 않게). */
+#vl-panel > * { flex: none; }
+#vl-panel > .vl-row, #vl-panel > .vl-details, #vl-panel > p { margin-top: 0; margin-bottom: 0; }
+.vl-panel-head { font-size: 13px; line-height: 18px; overflow-wrap: anywhere; }
+.vl-decision {
+  overflow: hidden; border: 1px solid var(--vl-tier-red-ink); border-radius: 6px;
+  background: var(--vl-surface-raised); }
+.vl-decision::before { content: ""; display: block; height: 6px; background:
+  repeating-linear-gradient(135deg, var(--vl-tier-red) 0 6px, var(--vl-tier-red-deep) 6px 12px); }
+.vl-decision > .vl-marker-reason {
+  padding: 10px 12px 0; border: 0; border-radius: 0; background: transparent; }
+.vl-decision > .vl-marker-reason > strong { font-size: 14px; }
+.vl-decision-state { color: var(--vl-tier-red-ink); font-weight: 600; }
+.vl-actions-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 10px 12px 12px; }
+.vl-field { display: flex; flex-direction: column; gap: 4px; }
+.vl-memo { flex-wrap: nowrap; }
+.vl-memo > .vl-input { flex: 1 1 auto; min-width: 0; }
+"""
+"""머리줄·명령 줄·활동 칸·서랍·견적 칸·패널 결정 상자 — 색은 토큰만 부른다."""
+
+WORKBENCH_CSS = (
+    """
 /* V2F1 작업대 — 색은 작업대 토큰(`--vl-*`, ui/design_tokens.py)만 부른다. 밝은·어두운 두 벌이
    같은 이름을 쓰므로 여기에는 테마 분기가 없다. 본점 채움(--vl-accent)은 주 단추·경계 손잡이·
    선택한 컷 셋뿐이고, 글자·선의 강조는 --vl-accent-ink다(D57). */
@@ -581,29 +1287,33 @@ WORKBENCH_CSS = """
 .vl-note {
   color: var(--vl-ink-muted); font-size: 12px; margin: 4px 0 0;
 }
-/* 3단 무대 — 왼쪽 시간순 목록 · 가운데 큰 재생기+시간 렠 · 오른쪽 선택 패널.
+/* 무대(W-17 B, D57) — 목록은 무대 높이 전체, 타임라인은 재생기와 패널 아래를 함께 덮는다:
+   "thumbs player panel" "thumbs timeline timeline" "foot foot foot". 패널 열 위의 한 칸(quote)은
+   분석 견적이다 — 승인 단추가 묶는 문구라 말줄임 없이 보이되 무대 위쪽을 밀지 않는다(승인할
+   견적이 없으면 숨고 패널이 그 자리를 쓴다).
    구성요소 껍데기(vl-stage-cell)와 본문 뿌리는 display:contents로 격자에
    참여한다. 무대 치수는 여기 한 곳 — 흩어진 재선언이 마지막에 이겨 목록 칸이
    180px로 묶이고 재생기·타임라인이 화면 아래로 밀리던 결함(D50).
-   --vl-stage-top은 실행본(__vlFitStage)이 실측해 덮어쓴다 — 머리글·아코디언
-   높이는 CSS가 모르므로 무대 높이를 화면에서 무대 위쪽을 뺀 값으로 맞춘다. */
+   --vl-stage-top은 실행본(__vlFitStage)이 실측해 덮어쓴다 — 머리줄·명령 줄 높이는
+   CSS가 모르므로 무대 높이를 화면에서 무대 위쪽을 뺀 값으로 맞춘다. */
 #visual-stage {
   --vl-stage-top: 320px;
   /* 바닥값 = 타임라인 렠 칸(≈200) + 각주·간격(≈30) + 자막 줄·안내(≈60) + 최소 영상(≈110).
      560이면 800px 높이 창(무대 위쪽 279–335px 실측)에서 렠이 6–62px 잘렸다(D50). */
   --vl-stage-min-h: 400px;
-  --vl-list-col: minmax(240px, 300px);
-  --vl-panel-col: minmax(240px, 300px);
-  --vl-stage-gap: 10px;
-  --vl-thumb-art-w: 64px; --vl-thumb-art-h: 46px;
+  --vl-list-col: minmax(240px, 280px);
+  --vl-panel-col: minmax(280px, 320px);
+  --vl-stage-gap: 8px;
+  --vl-thumb-art-w: 64px; --vl-thumb-art-h: 36px;
   --vl-name-lines: 2;
   --vl-scrollbar: var(--vl-line-strong) var(--vl-surface);
   display: grid;
   grid-template-columns: var(--vl-list-col) minmax(0, 1fr) var(--vl-panel-col);
-  grid-template-rows: minmax(0, 1fr) auto auto;
-  grid-template-areas: "thumbs player panel" "timeline timeline timeline" "foot foot foot";
+  grid-template-rows: auto minmax(0, 1fr) auto var(--vl-statusline-h);
+  grid-template-areas:
+    "thumbs player quote" "thumbs player panel" "thumbs timeline timeline" "foot foot foot";
   height: max(var(--vl-stage-min-h), calc(100vh - var(--vl-stage-top)));
-  gap: var(--vl-stage-gap); align-items: stretch; margin-top: 4px; min-width: 0;
+  gap: var(--vl-stage-gap); align-items: stretch; margin-top: 0; min-width: 0;
 }
 #visual-stage .vl-stage-cell { display: contents; }
 /* 그라디오 실측(ROOT 1440x900): 구성요소 껍데기(.vl-stage-cell) 안에 네이티브
@@ -626,6 +1336,22 @@ WORKBENCH_CSS = """
   background: var(--vl-surface);
 }
 #visual-stage .vl-thumbs > .vl-row, #visual-stage .vl-pager { grid-column: 1 / -1; }
+/* 필터는 한 줄짜리 묶음 단추 — 300px 열에서 네 번째 단추가 둘째 줄로 떨어지던 자리. */
+#visual-stage .vl-thumbs > .vl-row {
+  margin: 0; gap: 0; flex-wrap: nowrap; overflow: hidden;
+  border: 1px solid var(--vl-line-strong); border-radius: 4px; background: var(--vl-surface-raised);
+}
+#visual-stage .vl-thumbs > .vl-row > .vl-btn {
+  flex: 1 1 auto; min-width: 0; height: 28px; padding: 0 6px; border: 0; border-radius: 0;
+  border-left: 1px solid var(--vl-line-strong); background: transparent;
+  color: var(--vl-ink-muted); font-size: 12px; white-space: nowrap;
+}
+#visual-stage .vl-thumbs > .vl-row > .vl-btn:first-child { border-left: 0; }
+#visual-stage .vl-thumbs > .vl-row > .vl-btn[aria-pressed="true"] {
+  background: var(--vl-accent-soft); color: var(--vl-ink);
+  box-shadow: inset 0 -2px 0 var(--vl-accent-ink);
+}
+.vl-cards { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; min-width: 0; }
 /* 테두리·배경은 클래스 단계에 둔다 — 선택(.vl-thumb-sel) 강조가 무대 범위
    선택자에 덮이지 않는다. 배치만 무대 범위에서 정한다. */
 .vl-thumb {
@@ -640,30 +1366,66 @@ WORKBENCH_CSS = """
   border-color: var(--vl-accent-ink); background: var(--vl-accent-soft);
   box-shadow: inset 0 0 0 1px var(--vl-accent-ink);
 }
-.vl-thumb-ex { opacity: 0.55; }
+/* 영상 전체가 제외일 때만 흐리게 — 그림과 이름만(띠·수는 그대로 읽힌다). */
+.vl-thumb-ex .vl-thumb-art, .vl-thumb-ex .vl-thumb-name { opacity: 0.55; }
+/* 카드(D57 B) — 그림 64×36(길이를 얹는다) · 이름 두 줄 · 수와 배지 한 줄 · 영상 전체 띠. */
 #visual-stage .vl-thumb {
-  min-width: 0; width: 100%; flex-direction: row; gap: 6px; padding: 5px; align-items: center; }
-.vl-thumb img { background: var(--vl-video-well); border-radius: 4px; }
-.vl-thumb-missing {
-  border-radius: 4px; background: var(--vl-surface-sunken);
-  color: var(--vl-ink-muted); font-size: 11px;
-  display: flex; align-items: center; justify-content: center;
+  display: grid; grid-template-columns: var(--vl-thumb-art-w) minmax(0, 1fr);
+  column-gap: 8px; row-gap: 6px; align-items: start;
+  min-width: 0; width: 100%; padding: 8px; font: inherit; }
+.vl-thumb-art {
+  position: relative; display: block; overflow: hidden; border-radius: 4px;
+  width: var(--vl-thumb-art-w); height: var(--vl-thumb-art-h); background: var(--vl-surface-sunken);
 }
-#visual-stage .vl-thumb img, #visual-stage .vl-thumb-missing {
-  width: var(--vl-thumb-art-w); height: var(--vl-thumb-art-h); object-fit: cover; flex: none; }
-#visual-stage .vl-thumb-meta {
-  display: flex; flex-direction: column; gap: 2px; flex: 1 1 auto; min-width: 0; }
+.vl-thumb-art img {
+  display: block; width: 100%; height: 100%; object-fit: cover; background: var(--vl-video-well); }
+.vl-thumb-art .dur {
+  position: absolute; right: 2px; bottom: 2px; padding: 0 3px; border-radius: 2px;
+  background: var(--vl-video-overlay); color: var(--vl-on-video-overlay);
+  font: 500 11px/13px var(--vl-font-mono); font-variant-numeric: tabular-nums;
+}
+.vl-thumb-missing {
+  display: flex; align-items: center; justify-content: center; width: 100%; height: 100%;
+  color: var(--vl-ink-muted); font-size: 11px; line-height: 13px;
+}
 /* 긴 파일 이름은 두 줄까지 보이고 말줄임 — 전체 이름은 카드 title 말풍선(D50). */
 #visual-stage .vl-thumb-name {
   font-size: 13px; font-weight: 500; color: var(--vl-ink);
-  max-width: none; white-space: normal; overflow-wrap: anywhere; line-height: 1.25;
+  max-width: none; white-space: normal; overflow-wrap: anywhere; line-height: 18px;
   display: -webkit-box; -webkit-line-clamp: var(--vl-name-lines); -webkit-box-orient: vertical;
   overflow: hidden; }
 .vl-thumb-sub {
-  display: flex; flex-wrap: wrap; gap: 3px; align-items: center; min-width: 0;
-  font-size: 11px; color: var(--vl-ink-muted);
+  grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 3px; align-items: center;
+  min-width: 0; font-size: 11px; color: var(--vl-ink-muted);
   font-variant-numeric: tabular-nums;
 }
+#visual-stage .vl-thumb-meta {
+  grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center;
+  justify-content: space-between; gap: 4px 8px; min-width: 0; min-height: 18px; }
+.vl-cnts {
+  display: inline-flex; gap: 8px; white-space: nowrap;
+  font: 500 11px/14px var(--vl-font-mono); font-variant-numeric: tabular-nums;
+}
+.vl-cnt.r { color: var(--vl-tier-red-ink); }
+.vl-cnt.h { color: var(--vl-tier-yellow-ink); }
+.vl-cnt.g { color: var(--vl-tier-green-ink); }
+/* 0은 흐린 글자 — ink-faint는 선택 카드(accent-soft) 위 3.9:1이라 ink-muted다. */
+.vl-cnt.z { color: var(--vl-ink-muted); }
+/* 영상 전체 띠 — 등급마다 길이대로. 빨강은 빗금, 보류는 점선 결, 분석 전은 선 색. 결정이 끝난
+   제외 제안은 반쯤 흐려 아직 열린 제안이 눈에 띈다. */
+.vl-mbar {
+  grid-column: 1 / -1; display: flex; gap: 1px; height: 6px; overflow: hidden;
+  border-radius: 2px; background: var(--vl-surface-sunken);
+}
+.vl-mbar i { display: block; height: 100%; min-width: 1px; }
+.vl-mbar .g { background: var(--vl-tier-green); }
+.vl-mbar .y { background: var(--vl-tier-yellow); }
+.vl-mbar .r { background: repeating-linear-gradient(135deg,
+  var(--vl-tier-red-ink) 0 2px, var(--vl-tier-red-deep) 2px 4px); }
+.vl-mbar .r.done { opacity: 0.5; }
+.vl-mbar .h { background:
+  repeating-linear-gradient(90deg, var(--vl-tier-yellow-ink) 0 2px, transparent 2px 4px); }
+.vl-mbar .n { background: var(--vl-line); }
 /* 배지는 줄 안에서 쪼개지지 않고 통째로 다음 줄로 넘어간다 — 잘림 없음. 알약 모양은
    쓰지 않는다(6px보다 둥근 것 없음), 글자는 11px가 바닥이다. */
 .vl-badge {
@@ -674,6 +1436,10 @@ WORKBENCH_CSS = """
   border: 1px solid var(--vl-line-strong); white-space: nowrap;
 }
 .vl-badge-warn { border-color: var(--vl-warn); color: var(--vl-warn); }
+/* 카드 배지 하나(D57 B) — 분석 상태는 상태 색(돌고 있음 · 경고 · 실패), 기다림은 무채색. */
+.vl-badge[data-vl-badge="run"] { border-color: var(--vl-accent-ink); color: var(--vl-accent-ink); }
+.vl-badge[data-vl-badge="warn"] { border-color: var(--vl-warn); color: var(--vl-warn); }
+.vl-badge[data-vl-badge="err"] { border-color: var(--vl-danger); color: var(--vl-danger); }
 #visual-player { display: contents; }
 #visual-preview { grid-area: player; min-width: 0; min-height: 0;
   display: flex; flex-direction: column; }
@@ -685,21 +1451,40 @@ WORKBENCH_CSS = """
 .vl-current-caption, #visual-note { flex: none; }
 #visual-note, .vl-footnote { overflow-wrap: anywhere; }
 #vl-panel { grid-area: panel; max-height: 100%; min-height: 0; overflow: hidden auto;
-  box-sizing: border-box; scrollbar-color: var(--vl-scrollbar); }
+  box-sizing: border-box; scrollbar-color: var(--vl-scrollbar);
+  display: flex; flex-direction: column; gap: 8px; }
 #visual-timeline { grid-area:timeline; min-width:0; overflow-x:auto; padding-top:4px;
   scrollbar-color: var(--vl-scrollbar); }
-#vl-footnote { grid-area: foot; }
-/* 재생기 아래 두 줄의 여백 — 계약 시험이 위 격자 선언을 글자 그대로 본다. */
-#vl-footnote, #visual-note { margin: 2px 0 0; }
+/* 상태 줄(24px) — 왼쪽 각주는 한 줄 말줄임(전체 글은 title), 오른쪽은 단축키 안내. */
+#vl-statusline { grid-area: foot; }
+.vl-statusline {
+  display: flex; align-items: center; justify-content: space-between; gap: 16px;
+  min-width: 0; height: var(--vl-statusline-h); overflow: hidden;
+}
+#vl-footnote {
+  flex: 1 1 auto; min-width: 0; margin: 0; font-size: 12px; line-height: 16px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#visual-note { margin: 2px 0 0; }
+.vl-keys {
+  display: inline-flex; flex: none; align-items: center; gap: 12px; white-space: nowrap;
+  font-size: 12px; line-height: 16px; color: var(--vl-ink-muted);
+}
+.vl-keys > span { display: inline-flex; align-items: center; gap: 3px; }
+.vl-keys > .vl-btn-sm { height: 20px; padding: 0 6px; }
+.vl-kbd {
+  display: inline-flex; align-items: center; justify-content: center; box-sizing: border-box;
+  min-width: 20px; height: 18px; padding: 0 4px; margin: 0;
+  border: 1px solid var(--vl-line-strong); border-bottom-width: 2px; border-radius: 2px;
+  background: var(--vl-surface-raised); color: var(--vl-ink);
+  font: 500 11px/14px var(--vl-font-mono); box-shadow: none;
+}
 /* 폭 상한은 Blocks(fill_width=True)가 푼다 — 여기는 가로 넘침만 막는다. */
 .gradio-container, .gradio-container .app { min-width: 0; max-width: 100vw; }
 /* 정리 탭 세로 예산(D50) — 그라디오 .row > * 의 min-width 160·flex 1이 단추 라벨을
    두 줄로 접어 64px를 먹었다. 단추는 제 글자 폭만큼만 차지한다. 실측 DOM:
-   div#review-tab.tabitem > div.column > div.row > button. */
+   div#review-tab.tabitem > div.column > div.row > button(명령 줄, W-17 B). */
 #review-tab .column { gap: 6px; }
 #review-tab > .column > .row > button { flex: 0 1 auto; min-width: 0; padding: 6px 12px; }
-#quick-status { padding: 2px 8px; }
-#quick-status p { margin: 1px 0; font-size: 12px; }
 #library-analysis-scope p { margin: 0; }
 #visual-video::cue {
   color: var(--vl-on-video-overlay); background: var(--vl-video-overlay); font-size:20px; }
@@ -708,7 +1493,8 @@ WORKBENCH_CSS = """
  background: var(--vl-video-overlay); color: var(--vl-on-video-overlay);
  font-size:20px; line-height:1.4; pointer-events:none; }
 .vl-source-overlay[hidden] { display:none; }
-.vl-legend { flex:1; color: var(--vl-ink-muted); font-size:12px; }
+/* 범례는 한 덩어리로 줄을 넘긴다 — 좁은 타임라인에서 글자마다 접히지 않는다. */
+.vl-legend { flex: 1 0 auto; color: var(--vl-ink-muted); font-size:12px; white-space: nowrap; }
 .vl-ruler { position:absolute; inset:0 0 auto; height:var(--vl-ruler-h);
  border-bottom:1px solid var(--vl-line); }
 /* 눈금 글자 — 첫 글자는 왼쪽, 끝 글자는 오른쪽에 붙여 양 끝이 잘리지 않는다. */
@@ -894,9 +1680,10 @@ WORKBENCH_CSS = """
   margin: 6px 0 0; min-height: 1em;
 }
 .vl-pager {
-  display: flex; gap: 8px; align-items: center; justify-content: center;
+  display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: center;
   padding: 6px 0 2px; font-size: 12px; color: var(--vl-ink-muted);
 }
+.vl-pager > .vl-btn { white-space: nowrap; }
 .cap-overlay {
   min-height: 1.7em; margin-top: 4px; padding: 4px 10px; font-size: 15px;
   background: var(--vl-surface); border-radius: 6px;
@@ -936,28 +1723,51 @@ WORKBENCH_CSS = """
  border-radius:4px; font-size:18px; line-height:1.3; text-align:center; white-space:pre-wrap;
  cursor:pointer; }
 .vl-current-caption:disabled { color: var(--vl-ink-muted); font-size:14px; cursor:default; }
-#vl-panel [data-vl-act="toggle-sel"] { flex:1 1 100%;font-size:15px;padding:9px; }
-#app-header p { font-size:12px;margin:2px 0; }
+#vl-panel [data-vl-act="toggle-sel"] { flex: 1 1 100%; }
+"""
+    + _SHELL_CSS
+    + """
 /* 반응형 — 넓은 쪽(1050) 다음 좁은 쪽(860) 순서여야 좁은 규칙이 이긴다(D50:
    예전엔 860 뒤에 무대 재선언이 와서 860 규칙이 죽어 있었다). 좁은 화면은 무대
-   높이를 화면에 묶지 않고 문서 스크롤에 맡긴다. 390px 등에서 격자 영역 순서가
-   재생기를 맨 처음 보내고 가로 넘침은 없다(minmax(0,1fr) 단일 칸). */
+   높이를 화면에 묶지 않고 문서 스크롤에 맡긴다.
+   두 분기점 모두 견적 칸이 명령 줄 바로 아래(재생기 앞)다 — 승인 단추를 누르는 자리에서
+   견적이 함께 보인다(옛 배치와 같다). 승인할 견적·전문이 없으면 그 줄은 비어 높이가 없다.
+   ≤1050: 두 열 — 목록이 왼쪽 열 전체, 타임라인은 재생기 바로 아래(사용자 결정 6). 목록은
+   크기 봉쇄(contain: size)로 행 높이를 부풀리지 않고 제 칸 안에서 스크롤한다.
+   ≤860: 한 열 — (견적) · 재생기 · 타임라인 · 목록(가로 띠) · 패널 · 상태 줄(사용자 결정 6). */
 @media (max-width: 1050px) {
-  #visual-stage { height: auto; grid-template-columns: minmax(150px, 200px) minmax(0, 1fr);
-    grid-template-areas: "thumbs player" "thumbs panel" "timeline timeline" "foot foot"; }
-  #visual-stage .vl-thumbs, #vl-panel { max-height: 64vh; }
+  #visual-stage { height: auto; grid-template-columns: minmax(180px, 220px) minmax(0, 1fr);
+    grid-template-rows: none;
+    grid-template-areas: "quote quote" "thumbs player" "thumbs timeline" "thumbs panel"
+      "foot foot"; }
+  #visual-stage .vl-thumbs { max-height: none; contain: size; }
+  #vl-panel { max-height: 64vh; }
   #visual-preview video { flex: none; height: clamp(300px, 48vh, 540px); }
+  #vl-command-bar { flex-wrap: wrap; height: auto; padding: 8px 0; }
 }
 @media (max-width: 860px) {
   #visual-stage { grid-template-columns: minmax(0, 1fr);
-    grid-template-areas: "player" "thumbs" "panel" "timeline" "foot"; }
+    grid-template-areas: "quote" "player" "timeline" "thumbs" "panel" "foot"; }
   #caption-stage { grid-template-columns: minmax(0, 1fr); grid-template-areas: "player" "cues"; }
-  #visual-stage .vl-thumbs { grid-template-columns: repeat(2, minmax(0, 1fr)); max-height: 40vh; }
+  #visual-stage .vl-thumbs { max-height: none; overflow: visible; contain: none; }
+  #visual-stage .vl-cards {
+    display: flex; overflow: auto hidden; padding-bottom: 4px;
+    scrollbar-color: var(--vl-scrollbar); }
+  #visual-stage .vl-cards > .vl-thumb { flex: none; width: 236px; }
   #visual-preview video { height: clamp(230px, 45vh, 420px); }
   .cap-cues { max-height: 28vh; }
+  .vl-topbar { flex-wrap: wrap; height: auto; min-height: var(--vl-topbar-h); padding: 6px 0;
+    gap: 6px 8px; }
+  .vl-step-sep { display: none; }
+  .vl-step:not(.cur) .lbl, .vl-step:not(.cur) .sub { display: none; }
+  .vl-topbar .vl-btn-label { position: absolute; width: 1px; height: 1px; overflow: hidden;
+    clip-path: inset(50%); white-space: nowrap; }
+  #vl-activity-block { flex: 1 1 100%; order: 3; }
+  .vl-statusline .vl-keys > span { display: none; }
 }
 
 """
+)
 _CLIENT_LIB_BODY = r"""
 var VL = window.__vlLib;
 if (!VL) {
@@ -1140,6 +1950,9 @@ VISUAL_BOOTSTRAP_JS = (
   var VL_IME_PROCESS_KEYCODE = 229;
   var VL_EDITABLE = 'input, textarea, select, [contenteditable=""], ' +
     '[contenteditable="true"], [role="textbox"]';
+  // 열린 서랍 안에 초점이 있으면 재생 단축키를 쓰지 않는다 — 서랍을 열면 「닫기」에 초점이 가는데,
+  // 거기서 누른 스페이스가 막 뒤의 영상을 틀면 안 된다(W-17 B).
+  var VL_OPEN_DRAWER = ".sidebar.open";
   // 보이는 첫 영상 하나만 조작한다 — 숨은 탭의 영상은 offsetParent가 null이다.
   var VL_SHORTCUT_VIDEOS = [["visual-video", "vl-footnote"], ["caption-video", "cap-msg"]];
   var VL_SHORTCUT_ACTIONS = { "Space": "toggle", "KeyK": "toggle", "KeyJ": "back",
@@ -1183,9 +1996,11 @@ VISUAL_BOOTSTRAP_JS = (
       }
 
       function msg(text) {
+        // 상태 줄은 한 줄(24px)이다 — 마크다운 굵게 표지는 걷고, 잘린 글 전체는 title에 둔다.
+        var line = String(text || "").replace(/\*\*/g, "");
         var el = doc.getElementById("vl-footnote");
-        if (el) { el.textContent = text || ""; }
-        state.lastMsg = text || "";
+        if (el) { el.textContent = line; el.title = line; }
+        state.lastMsg = line;
       }
       function say(text) {
         var el = doc.getElementById("visual-note");
@@ -1469,6 +2284,79 @@ VISUAL_BOOTSTRAP_JS = (
         say("원본 " + info.sourceName + " · 미리보기 " + stateLabel(info.state));
       }
 
+      // 카드는 영상 전체를 요약한다(D57 B) — 첫 구간 하나로 카드의 등급을 정하지 않는다.
+      function durLabel(value) {
+        var seconds = Math.max(0, Math.round(VL.toFloat(ratOf(value)) || 0));
+        return Math.floor(seconds / 60) + ":" + String(seconds % 60).padStart(2, "0");
+      }
+      function spanClass(row) {
+        var tier = tierOf(row);
+        if (tier === "yellow" && row.hold) { return "h"; }
+        if (tier === "red") { return row.open === false ? "r done" : "r"; }
+        return tier === "green" ? "g" : "y";
+      }
+      // 길이대로 잇는 띠 — 판정이 없는 자리(분석 전)는 회색 칸으로 채운다.
+      function cardSpans(info) {
+        var rail = info && info.rail;
+        var total = rail ? VL.toFloat(ratOf(rail.duration)) || 0 : 0;
+        var rows = ((info && info.suggestions) || []).slice().sort(function (a, b) {
+          return VL.toFloat(ratOf(a.start)) - VL.toFloat(ratOf(b.start));
+        });
+        var out = [], cursor = 0;
+        rows.forEach(function (row) {
+          var a = VL.toFloat(ratOf(row.start)), b = VL.toFloat(ratOf(row.end));
+          if (!(b > a)) { return; }
+          if (a > cursor) { out.push(["n", a - cursor]); }
+          out.push([spanClass(row), b - a]);
+          cursor = Math.max(cursor, b);
+        });
+        if (total > cursor) { out.push(["n", total - cursor]); }
+        if (!out.length) { out.push(["n", 1]); }
+        return out.map(function (part) {
+          return '<i class="' + part[0] + '" style="flex:' + part[1].toFixed(3) + '"></i>';
+        }).join("");
+      }
+      // 수는 ✕(아직 결정을 기다리는 제외 제안만) · ?(판정 보류) · ★(추천) 순서다.
+      function cardCounts(info) {
+        var rows = (info && info.suggestions) || [];
+        if (!rows.length) { return ""; }
+        var red = rows.filter(function (r) { return spanClass(r) === "r"; }).length;
+        var hold = rows.filter(function (r) { return spanClass(r) === "h"; }).length;
+        var green = rows.filter(function (r) { return spanClass(r) === "g"; }).length;
+        function cnt(cls, glyph, n) {
+          return '<span class="vl-cnt ' + (n ? cls : "z") + '">' + glyph + " " + n + "</span>";
+        }
+        return '<span class="vl-cnts" aria-label="' + esc("결정을 기다리는 제외 제안 " + red +
+          "개 · 판정 보류 " + hold + "개 · 추천 " + green + "개") + '">' + cnt("r", "✕", red) +
+          cnt("h", "?", hold) + cnt("g", "★", green) + "</span>";
+      }
+      // 배지는 하나뿐, 눈을 불러야 할 때만 — 자막 시각 확인(D55)이 있으면 그것이 배지다.
+      function cardBadge(c, info) {
+        var sync = c.media ? syncBadge(info) : "";
+        if (sync) { return sync; }
+        var badge = info && info.analysisBadge;
+        if (badge && badge.label) {
+          return ' <span class="vl-badge" data-vl-badge="' + esc(badge.tone) + '">' +
+            esc(badge.label) + "</span>";
+        }
+        if (info && info.originalMissing) {
+          return ' <span class="vl-badge" data-vl-badge="warn">원본 연결 필요</span>';
+        }
+        return c.needsExtract ? ' <span class="vl-badge vl-badge-warn">영상 갱신 필요</span>' : "";
+      }
+      function cardArt(c) {
+        var art = c.thumb && c.thumb.state === "ready" && c.thumb.src
+          ? '<img src="' + esc(c.thumb.src) + '" alt="조각 대표 프레임">'
+          : '<span class="vl-thumb-missing">' + esc(c.thumb &&
+            c.thumb.state ? stateLabel(c.thumb.state) : "없음") + "</span>";
+        return '<span class="vl-thumb-art">' + art + '<span class="dur">' + durLabel(c.dur) +
+          "</span></span>";
+      }
+      function cardExcluded(c, info) {
+        if (!c.media) { return c.sel === "excluded"; }
+        var cuts = info && info.rail ? info.rail.intervals : [];
+        return cuts.length > 0 && cuts.every(function (it) { return it.sel === "excluded"; });
+      }
       function renderThumbs() {
         var mount = doc.getElementById("vl-thumbs");
         if (!mount) { return; }
@@ -1478,7 +2366,7 @@ VISUAL_BOOTSTRAP_JS = (
           rows.push('<button type="button" class="vl-btn" data-vl-act="filter-' + f[0] +
             '" aria-pressed="' + ((state.filter || "all") === f[0]) + '">' + f[1] + '</button>');
         });
-        rows.push('</div>');
+        rows.push('</div><div class="vl-cards">');
         var sel = selectedId();
         var shownCards = model.mediaCards || model.cards || [];
         for (var i = 0; i < shownCards.length; i += 1) {
@@ -1487,41 +2375,23 @@ VISUAL_BOOTSTRAP_JS = (
           if (state.filter === "excluded" && c.sel !== "excluded") { continue; }
           if (state.filter === "review" && !c.autoPending && c.rec !== "review_required" &&
               c.speech !== "analysis_failed") { continue; }
+          var info = (model.sources || {})[c.sourceId] || null;
           var cls = "vl-thumb" +
             (c.id === sel || (c.media && c.sourceId === curSourceId()) ? " vl-thumb-sel" : "") +
-            (c.sel === "excluded" ? " vl-thumb-ex" : "");
-          var art = c.thumb && c.thumb.state === "ready" && c.thumb.src
-            ? '<img src="' + esc(c.thumb.src) + '" alt="조각 대표 프레임">'
-            : '<span class="vl-thumb-missing">' + esc(c.thumb &&
-              c.thumb.state ? stateLabel(c.thumb.state) : "없음") + "</span>";
-          var speech = speechLabel(c.speech);
+            (cardExcluded(c, info) ? " vl-thumb-ex" : "");
           rows.push(
             '<button type="button" class="' + cls + '" data-vl-card="' +
               esc(c.id) + '" role="option"' + ' title="' + esc(c.sourceName) + '"' +
-            ' aria-selected="' + (c.id === sel ? "true" : "false") + '">' + art +
-            '<span class="vl-thumb-meta"><span class="vl-thumb-name">' +
+            ' aria-selected="' + (c.id === sel ? "true" : "false") + '">' + cardArt(c) +
+            '<span class="vl-thumb-name">' +
               esc(c.sourceName) + (c.media ? "" : " " + (c.order + 1) + "번") + "</span>" +
-            '<span class="vl-thumb-sub">' + VL.fmt(ratOf(c.start)) + "~" + VL.fmt(ratOf(c.end)) +
-            "초 · " + VL.fmt(ratOf(c.dur)) + '초</span><span class="vl-thumb-sub">' +
-            (c.sel === "excluded" ? '<span class="vl-badge vl-badge-warn">제외</span>' :
-              '<span class="vl-badge">사용</span>') +
-            (c.autoPending ?
-              ' <span class="vl-badge vl-badge-red" data-vl-tier="red">제외 제안</span>' :
-              c.tier === "green" ?
-              ' <span class="vl-badge vl-badge-green" data-vl-tier="green">추천</span>' :
-              c.tier === "yellow" ?
-              ' <span class="vl-badge" data-vl-tier="yellow">보통</span>' : "") +
-            (c.rec === "review_required" || c.speech === "analysis_failed" ?
-              ' <span class="vl-badge vl-badge-warn">확인 필요</span>' : "") +
-            (c.needsExtract ? ' <span class="vl-badge vl-badge-warn">영상 갱신 필요</span>' : "") +
-            (speech ? ' <span class="vl-badge">' + esc(speech) + "</span>" : "") +
-            ((model.sources[c.sourceId] || {}).analysisState ?
-              ' <span class="vl-badge">' +
-              esc(model.sources[c.sourceId].analysisState) + '</span>' : '') +
-            (c.media ? syncBadge(model.sources[c.sourceId]) : "") +
-            "</span></span></button>"
+            (c.media ? "" : '<span class="vl-thumb-sub">' + VL.fmt(ratOf(c.start)) + "~" +
+              VL.fmt(ratOf(c.end)) + "초 · " + VL.fmt(ratOf(c.dur)) + "초</span>") +
+            '<span class="vl-thumb-meta">' + cardCounts(info) + cardBadge(c, info) + "</span>" +
+            '<span class="vl-mbar" aria-hidden="true">' + cardSpans(info) + "</span></button>"
           );
         }
+        rows.push("</div>");
         var pager = '<div class="vl-pager">' +
           '<button type="button" class="vl-btn" data-vl-act="page-prev"' +
           (model.page <= 1 ? " disabled" : "") + '>이전</button><span>페이지 ' +
@@ -1632,109 +2502,78 @@ VISUAL_BOOTSTRAP_JS = (
         mount.innerHTML = html.join("");
       }
 
-      function markerBlock(mk, card) {
+      function markerBlock(mk, card, pendingWord) {
         // 자막과 영상은 따로 판정한다(D51) — 패널은 두 판정과 그 규칙을 함께 보인다.
         var out = ['<div class="vl-marker-reason ' + esc(mk.tier || "") + '"><strong>' +
-          esc(mk.label) + '</strong>'];
+          esc(mk.label) + '</strong>' +
+          (pendingWord ? '<span class="vl-decision-state"> · 미검토</span>' : "")];
         if (mk.audio && mk.video) {
           out.push('<p class="vl-kv">자막 · ' + esc(mk.audio.label) + ': ' +
             esc(mk.audio.reason) + '</p><p class="vl-kv">영상 · ' + esc(mk.video.label) +
             ': ' + esc(mk.video.reason) + '</p><p class="vl-kv">규칙 ' + esc(mk.rule) + '</p>');
-        } else {
+        } else if (mk.reason) {
           out.push('<p>' + esc(mk.reason) + '</p>');
         }
-        out.push('<small>' + esc(VL.fmt(ratOf(mk.start)) + '초 ~ ' +
-          VL.fmt(ratOf(mk.end)) + '초') + '</small>');
-        if (mk.tier === "red" && mk.segmentId && card && card.id === mk.segmentId) {
-          out.push('<div class="vl-row">' +
-            '<button type="button" class="vl-btn" data-vl-act="red-confirm">' +
-            '제외 유지(확인)</button>' +
-            '<button type="button" class="vl-btn" data-vl-act="red-revert">' +
-            '사용으로 되돌리기</button>' +
-            '</div>');
+        if (mk.start !== undefined && mk.end !== undefined) {
+          out.push('<small>' + esc(VL.fmt(ratOf(mk.start)) + '초 ~ ' +
+            VL.fmt(ratOf(mk.end)) + '초') + '</small>');
         }
         out.push('</div>');
         return out.join("");
       }
-
-      function renderPanel() {
-        var mount = doc.getElementById("vl-panel");
-        if (!mount) { return; }
-        var card = selectedCard();
-        if (!card) {
-          mount.innerHTML =
-            '<p class="vl-note">조각이 없다 — 분할 계획을 만들고 검토를 시작하면 나타난다.</p>';
-          return;
-        }
-        var info = curSource();
-        var html = [];
-        if (state.marker && state.marker.sourceId === curSourceId()) {
-          html.push(markerBlock(state.marker, card));
-        }
-        if (model.redUnmaterialized > 0) {
-          html.push('<p class="vl-kv"><span class="vl-badge vl-badge-red">제외 제안 ' +
-            model.redUnmaterialized + '개</span> 현재 조각 경계와 맞지 않습니다.</p>');
-        }
-        if (info && info.mediaStatus) {
-          html.push('<p class="vl-kv">' + esc(info.mediaStatus) + '</p>');
-          if (info.originalMissing) {
-            html.push('<label>원본 경로<input id="vl-original-path" class="vl-input"></label>' +
-              '<button type="button" class="vl-btn" data-vl-act="relink-original">' +
-            '원본 재연결</button>');
-          }
-        }
-        html.push(syncPanel(info));
-        ((info && info.crossSourceCandidates) || []).forEach(function(candidate) {
-          html.push('<p class="vl-kv">다른 원본의 중복 후보 · ' +
-            esc(candidate.other_source + ': ' + candidate.text) + ' · 자동 제외하지 않음</p>');
-        });
-        if (info && info.transcriptDirty) {
-          html.push('<p class="vl-kv">자막 변경 · 분석 갱신 필요</p>');
-        }
-        if (info && info.subtitles && info.subtitles.length) {
-          html.push('<details class="vl-details"><summary>원본 자막 목록</summary>');
-          info.subtitles.forEach(function(u) {
-            html.push('<button type="button" class="vl-btn" data-vl-act="source-pick" ' +
-              'data-vl-cue-id="' + esc(u.id) + '">' +
-              esc(VL.fmt(ratOf(u.start)) + '초 · ' + u.text) + '</button>');
-          });
-          html.push('</details>');
-        }
-        var cue = info && (info.subtitles || []).find(function(u) {
-          return state.sourceCue && state.sourceCue.sourceId === curSourceId() &&
-            u.id === state.sourceCue.id;
-        });
-        if (cue) {
-          html.push('<fieldset class="vl-source-caption-editor"><legend>원본 자막 수정</legend>' +
-            '<label>문구<textarea id="vl-source-text" class="vl-input">' +
-            esc(cue.text) + '</textarea></label>' +
-            '<label>시작(초)<input id="vl-source-start" class="vl-input" value="' +
-            VL.fmt(ratOf(cue.start)) + '"></label>' +
-            '<label>끝(초)<input id="vl-source-end" class="vl-input" value="' +
-            VL.fmt(ratOf(cue.end)) + '"></label>' +
-            '<button type="button" class="vl-btn" data-vl-act="source-edit">저장</button>' +
-            '<label>분할 뒤 문구<textarea id="vl-source-right" class="vl-input">' +
-            '</textarea></label>' +
-            '<button type="button" class="vl-btn" data-vl-act="source-split">' +
-            '현재 위치에서 자막 분할</button>' +
-            '<button type="button" class="vl-btn" data-vl-act="source-merge">' +
-            '다음 자막과 병합</button>' +
-            '<small>컷 검토용 원본 시간입니다. ' +
-            '최종 SRT는 최종 영상에서 생성합니다.</small></fieldset>');
-        }
-        html.push('<p class="vl-kv"><strong>' + esc(card.sourceName) + "</strong> · " +
-          VL.fmt(ratOf(card.start)) + "~" + VL.fmt(ratOf(card.end)) +
-            "초 (" + VL.fmt(ratOf(card.dur)) + "초)</p>");
+      // 결정 상자는 지금 선택한 컷 하나만 겨냥한다 — 미검토 제외 제안이거나 빨강 막대가 이 컷을
+      // 짚었을 때. 막대를 누르든 카드·컷을 고르든 같은 상자다. 다른 페이지의 조각은 겨냥하지
+      // 않는다(D35).
+      function redMarkerOf(card) {
+        var mark = state.marker;
+        return card && mark && mark.tier === "red" && mark.segmentId === card.id &&
+          mark.sourceId === curSourceId() ? mark : null;
+      }
+      function decisionTarget(card) {
+        return card && (card.autoPending || redMarkerOf(card)) ? card.id : null;
+      }
+      function redRowFor(info, card) {
+        var mid = VL.mul(VL.add(ratOf(card.start), ratOf(card.end)), VL.parse("1/2"));
+        return ((info && info.suggestions) || []).find(function (row) {
+          return tierOf(row) === "red" && VL.cmp(ratOf(row.start), mid) <= 0 &&
+            VL.cmp(ratOf(row.end), mid) > 0;
+        }) || null;
+      }
+      function decisionBlock(card, info) {
+        var row = redMarkerOf(card) || redRowFor(info, card);
+        var mk = Object.assign({ label: tierWord("red", false) }, row || {}, { tier: "red" });
+        return '<section class="vl-decision" aria-label="제외 제안 결정">' +
+          markerBlock(mk, card, !!card.autoPending) + '<div class="vl-actions-2">' +
+          '<button type="button" class="vl-btn vl-btn-danger" data-vl-act="red-confirm">' +
+          '제외 유지(확인)</button>' +
+          '<button type="button" class="vl-btn" data-vl-act="red-revert">' +
+          '사용으로 되돌리기</button></div></section>';
+      }
+      // 패널을 다시 그려도 사람이 펼쳐 둔 접힌 상세는 펼친 채로 둔다.
+      function openedDetails(mount) {
+        var opened = {};
+        if (typeof mount.querySelectorAll !== "function") { return opened; }
+        Array.prototype.forEach.call(mount.querySelectorAll("details[data-vl-keep]"),
+          function (d) { if (d.open) { opened[d.getAttribute("data-vl-keep")] = true; } });
+        return opened;
+      }
+      function details(opened, key, summary, body) {
+        return '<details class="vl-details" data-vl-keep="' + key + '"' +
+          (opened[key] ? " open" : "") + "><summary>" + summary + "</summary>" + body +
+          "</details>";
+      }
+      function cardStatusLines(card) {
+        var out = [];
         var speech = speechLabel(card.speech);
         var rec = recLabel(card.rec);
         var grade = card.autoPending ? "제외 제안" : tierWord(card.tier || "", false);
         var subtitleWhy = tagText(card, "자막: ") || speech;
         var videoWhy = tagText(card, "영상: ");
-        html.push('<p class="vl-kv">상태 ' + (card.sel === "excluded" ? "제외" : "사용") +
+        out.push('<p class="vl-kv">상태 ' + (card.sel === "excluded" ? "제외" : "사용") +
           (grade ? " · 등급 " + esc(grade) : "") +
           (subtitleWhy ? " · 자막 " + esc(subtitleWhy) : "") +
           (videoWhy ? " · 영상 " + esc(videoWhy) : "") + "</p>");
-        html.push('<p class="vl-kv">' + (speech ? "발화 " + esc(speech) : "") +
+        out.push('<p class="vl-kv">' + (speech ? "발화 " + esc(speech) : "") +
           (speech && rec ? " · " : "") + (rec ? "권고 " + esc(rec) : "") + "</p>");
         var automaticAt = (card.note || "").indexOf("자동 제외: ");
         if (automaticAt >= 0) {
@@ -1744,24 +2583,122 @@ VISUAL_BOOTSTRAP_JS = (
               ng_with_followup:"NG 뒤 완전한 테이크 확인",
               tier_silence:"자막 없음 · AI가 풍경으로 보지 않음",
               tier_video_defect:"영상 결함(옛 등급판)"};
-            html.push('<p class="vl-kv">자동 판정 이유 · ' +
+            out.push('<p class="vl-kv">자동 판정 이유 · ' +
               esc(reasons[automatic.reason] || automatic.reason) + '</p>');
           } catch (error) { /* Historical/manual notes remain readable below. */ }
         }
-        var tags = card.tags || [];
-        if (tags.length) {
-          html.push('<details class="vl-details"><summary>분석 근거</summary><p class="vl-kv">' +
-            tags.map(function (t) { return esc(t); }).join(" · ") + "</p></details>");
+        return out.join("");
+      }
+      function panelNotices(card, info) {
+        var out = [];
+        if (model.redUnmaterialized > 0) {
+          out.push('<p class="vl-kv"><span class="vl-badge vl-badge-red">제외 제안 ' +
+            model.redUnmaterialized + '개</span> 현재 조각 경계와 맞지 않습니다.</p>');
+        }
+        if (info && info.mediaStatus) {
+          out.push('<p class="vl-kv">' + esc(info.mediaStatus) + '</p>');
+          if (info.originalMissing) {
+            out.push('<label>원본 경로<input id="vl-original-path" class="vl-input"></label>' +
+              '<button type="button" class="vl-btn" data-vl-act="relink-original">' +
+            '원본 재연결</button>');
+          }
+        }
+        out.push(syncPanel(info));
+        ((info && info.crossSourceCandidates) || []).forEach(function(candidate) {
+          out.push('<p class="vl-kv">다른 원본의 중복 후보 · ' +
+            esc(candidate.other_source + ': ' + candidate.text) + ' · 자동 제외하지 않음</p>');
+        });
+        if (info && info.transcriptDirty) {
+          out.push('<p class="vl-kv">자막 변경 · 분석 갱신 필요</p>');
         }
         if (card.needsExtract) {
-          html.push('<p class="vl-kv"><span class="vl-badge vl-badge-warn">영상 갱신 필요</span>' +
+          out.push('<p class="vl-kv"><span class="vl-badge vl-badge-warn">영상 갱신 필요</span>' +
             " 경계가 계획과 달라 새 추출로만 갱신된다.</p>");
         }
         if (info && !info.src) {
-          html.push('<p class="vl-kv"><span class="vl-badge vl-badge-warn">미리보기 ' +
+          out.push('<p class="vl-kv"><span class="vl-badge vl-badge-warn">미리보기 ' +
             stateLabel(info.state) + "</span>" +
             (info.error ? " " + esc(info.error) : " 아래 단추로 준비한다.") + "</p>");
         }
+        return out.join("");
+      }
+      function captionEditor(info) {
+        var cue = info && (info.subtitles || []).find(function(u) {
+          return state.sourceCue && state.sourceCue.sourceId === curSourceId() &&
+            u.id === state.sourceCue.id;
+        });
+        if (!cue) { return ""; }
+        return '<fieldset class="vl-source-caption-editor"><legend>원본 자막 수정</legend>' +
+          '<label>문구<textarea id="vl-source-text" class="vl-input">' +
+          esc(cue.text) + '</textarea></label>' +
+          '<label>시작(초)<input id="vl-source-start" class="vl-input" value="' +
+          VL.fmt(ratOf(cue.start)) + '"></label>' +
+          '<label>끝(초)<input id="vl-source-end" class="vl-input" value="' +
+          VL.fmt(ratOf(cue.end)) + '"></label>' +
+          '<button type="button" class="vl-btn" data-vl-act="source-edit">저장</button>' +
+          '<label>분할 뒤 문구<textarea id="vl-source-right" class="vl-input">' +
+          '</textarea></label>' +
+          '<button type="button" class="vl-btn" data-vl-act="source-split">' +
+          '현재 위치에서 자막 분할</button>' +
+          '<button type="button" class="vl-btn" data-vl-act="source-merge">' +
+          '다음 자막과 병합</button>' +
+          '<small>컷 검토용 원본 시간입니다. ' +
+          '최종 SRT는 최종 영상에서 생성합니다.</small></fieldset>';
+      }
+      function draftBox() {
+        if (!state.draft || state.draft.epoch !== model.epoch) { return ""; }
+        var d = state.draft;
+        var out = ['<div class="vl-draft"><p class="vl-kv">' +
+          (d.kind === "split"
+            ? "나누기 초안 — " + VL.fmt(d.sec) + "초 자리에서 둘로 나눈다."
+            : "경계 초안 — " + (d.side === "left" ? "왼쪽" :
+              "오른쪽") + " 경계를 " + VL.fmt(d.sec) + "초로 옮긴다.") +
+          "</p>"];
+        if (d.pending) {
+          out.push('<p class="vl-kv">서버가 스냅 시각을 계산하는 중…</p>');
+        } else if (d.proposal && d.proposal.valid) {
+          // 보이는 줄은 사람 시각(초 소수 셋째) — 정확한 유리수·프레임은 접힌
+          // 상세가 싣는다(요청 payload는 제안의 정확값 그대로).
+          out.push('<p class="vl-kv">확정 시각 <strong>' +
+            VL.fmt(ratOf(d.proposal.snapSeconds)) + "초</strong> (프레임 " +
+              d.proposal.frame + ", 동률이면 앞 프레임) — 저장하면 새 리비전이 생긴다.</p>");
+          out.push('<details class="vl-details"><summary>스냅 정확값</summary>' +
+            '<p class="vl-kv">정확 시각 <code>' + esc(d.proposal.snapSeconds) +
+            "</code>초 · 프레임 <code>" + d.proposal.frame + "</code></p></details>");
+          out.push('<div class="vl-row">' +
+            '<button type="button" class="vl-btn vl-btn-primary" data-vl-act="apply-draft">' +
+            (d.kind === "split" ? "나누기 적용" : "경계 적용") + '</button>' +
+            '<button type="button" class="vl-btn" data-vl-act="cancel-draft">' +
+            "취소</button></div>");
+        } else {
+          // 기본 줄은 사람 시각으로만 — 서버 판정의 원문(PTS 등)은 접힌 상세가
+          // 그대로 싣는다(빈 성공 꾸미기 없음, 원문 보존).
+          out.push('<p class="vl-kv">적용 불가 — ' + VL.fmt(d.sec) + "초 자리에서는 " +
+            (d.kind === "split" ? "나눌 수" : "경계를 옮길 수") + " 없다.</p>");
+          out.push('<details class="vl-details"><summary>서버 판정 사유</summary>' +
+            '<p class="vl-kv"><code>' +
+            esc((d.proposal && (d.proposal.reason || d.proposal.error)) || "사유 없음") +
+            "</code></p></details>");
+          out.push('<div class="vl-row">' +
+            '<button type="button" class="vl-btn" data-vl-act="cancel-draft">' +
+            "취소</button></div>");
+        }
+        out.push("</div>");
+        return out.join("");
+      }
+      function editRow(card) {
+        return '<div class="vl-row vl-edit">' +
+          '<button type="button" class="vl-btn" data-vl-act="split">현재 위치에서 나누기</button>' +
+          '<button type="button" class="vl-btn" data-vl-act="merge"' +
+            (card.neighbor ? "" : " disabled") + ">오른쪽 조각과 합치기</button>" +
+          (model.needsPlan
+            ? '<button type="button" class="vl-btn vl-btn-primary" data-vl-act="replan">' +
+              "계획 반영 · 재추출</button>"
+            : "") +
+          "</div>";
+      }
+      function playbackSettings(info) {
+        var body = "";
         if (info && info.tracks && info.tracks.length) {
           var opts = [];
           var current = info.audioOrdinal === null || info.audioOrdinal === undefined
@@ -1774,72 +2711,15 @@ VISUAL_BOOTSTRAP_JS = (
           }
           opts.push('<option value="silence"' + (current === "silence" ?
             " selected" : "") + ">침묵(영상만)</option>");
-          html.push('<div class="vl-row"><label class="vl-kv">소리 트랙' +
-            '<select id="vl-track" class="vl-input vl-input-narrow">' +
-            opts.join("") + "</select></label></div>");
+          body += '<label class="vl-kv vl-field">소리 트랙' +
+            '<select id="vl-track" class="vl-input">' + opts.join("") + "</select></label>";
         }
-        html.push('<details class="vl-details"><summary>재생 설정</summary><div class="vl-row">' +
+        return body + '<div class="vl-row">' +
           '<button type="button" class="vl-btn" data-vl-act="prepare">미리보기 다시 준비</button>' +
-          '<button type="button" class="vl-btn" data-vl-act="refresh">' +
-          '새로고침</button></div></details>');
-        html.push('<div class="vl-row">' +
-          '<button type="button" class="vl-btn" data-vl-act="toggle-sel">' +
-          (card.sel === "excluded" ? "사용으로 표시" : "제외로 표시") + "</button>" +
-          '<button type="button" class="vl-btn" data-vl-act="split">현재 위치에서 나누기</button>' +
-          '<button type="button" class="vl-btn" data-vl-act="merge"' +
-            (card.neighbor ? "" : " disabled") + ">오른쪽 조각과 합치기</button>" +
-          (model.needsPlan
-            ? '<button type="button" class="vl-btn vl-btn-primary" data-vl-act="replan">' +
-              "계획 반영 · 재추출</button>"
-            : "") +
-          "</div>");
-        html.push('<div class="vl-row"><label class="vl-kv" style="flex:1 1 240px">메모' +
-          '<input type="text" id="vl-note-input" class="vl-input" value="' +
-            esc(card.note) + '"></label>' +
-          '<button type="button" class="vl-btn" data-vl-act="save-note">메모 저장</button></div>');
-        if (state.draft && state.draft.epoch === model.epoch) {
-          var d = state.draft;
-          html.push('<div class="vl-draft"><p class="vl-kv">' +
-            (d.kind === "split"
-              ? "나누기 초안 — " + VL.fmt(d.sec) + "초 자리에서 둘로 나눈다."
-              : "경계 초안 — " + (d.side === "left" ? "왼쪽" :
-                "오른쪽") + " 경계를 " + VL.fmt(d.sec) + "초로 옮긴다.") +
-            "</p>");
-          if (d.pending) {
-            html.push('<p class="vl-kv">서버가 스냅 시각을 계산하는 중…</p>');
-          } else if (d.proposal && d.proposal.valid) {
-            // 보이는 줄은 사람 시각(초 소수 셋째) — 정확한 유리수·프레임은 접힌
-            // 상세가 싣는다(요청 payload는 제안의 정확값 그대로).
-            html.push('<p class="vl-kv">확정 시각 <strong>' +
-              VL.fmt(ratOf(d.proposal.snapSeconds)) + "초</strong> (프레임 " +
-                d.proposal.frame + ", 동률이면 앞 프레임) — 저장하면 새 리비전이 생긴다.</p>");
-            html.push('<details class="vl-details"><summary>스냅 정확값</summary>' +
-              '<p class="vl-kv">정확 시각 <code>' + esc(d.proposal.snapSeconds) +
-              "</code>초 · 프레임 <code>" + d.proposal.frame + "</code></p></details>");
-            html.push('<div class="vl-row">' +
-              '<button type="button" class="vl-btn vl-btn-primary" data-vl-act="apply-draft">' +
-              (d.kind === "split" ? "나누기 적용" : "경계 적용") + '</button>' +
-              '<button type="button" class="vl-btn" data-vl-act="cancel-draft">' +
-              "취소</button></div>");
-          } else {
-            // 기본 줄은 사람 시각으로만 — 서버 판정의 원문(PTS 등)은 접힌 상세가
-            // 그대로 싣는다(빈 성공 꾸미기 없음, 원문 보존).
-            html.push('<p class="vl-kv">적용 불가 — ' + VL.fmt(d.sec) + "초 자리에서는 " +
-              (d.kind === "split" ? "나눌 수" : "경계를 옮길 수") + " 없다.</p>");
-            html.push('<details class="vl-details"><summary>서버 판정 사유</summary>' +
-              '<p class="vl-kv"><code>' +
-              esc((d.proposal && (d.proposal.reason || d.proposal.error)) || "사유 없음") +
-              "</code></p></details>");
-            html.push('<div class="vl-row">' +
-              '<button type="button" class="vl-btn" data-vl-act="cancel-draft">' +
-              "취소</button></div>");
-          }
-          html.push("</div>");
-        }
-        // 상세 — 구현 출처(원점 공식)·원값 상태·식별자는 접힌 채로만 나간다.
-        html.push('<details class="vl-details">' +
-          '<summary>상세 — 식별자·리비전·시계·준비 상태</summary>' +
-          '<p class="vl-kv">조각 <code>' + esc(card.id) +
+          '<button type="button" class="vl-btn" data-vl-act="refresh">새로고침</button></div>';
+      }
+      function identityDetails(card, info) {
+        return '<p class="vl-kv">조각 <code>' + esc(card.id) +
             "</code> · 원본 <code>" + esc(card.sourceId) + "</code></p>" +
           '<p class="vl-kv">검토 리비전 <code>' + esc(model.revisionId) +
             "</code> · 기본 계획 <code>" +
@@ -1861,8 +2741,65 @@ VISUAL_BOOTSTRAP_JS = (
           (model.staleSources && model.staleSources.length
             ? '<p class="vl-kv">낡은 원본 ' + model.staleSources.length +
               "개 — 원본이 검토 뒤 바뀌었다.</p>"
-            : "") +
-          "</details>");
+            : "");
+      }
+      function folded(card, info, opened) {
+        // 접힌 상세 — 사람의 메모는 기계 근거(분석 근거)와 따로 둔다(D52).
+        var out = [];
+        if (info && info.subtitles && info.subtitles.length) {
+          out.push(details(opened, "cues", "원본 자막 목록", info.subtitles.map(function (u) {
+            return '<button type="button" class="vl-btn" data-vl-act="source-pick" ' +
+              'data-vl-cue-id="' + esc(u.id) + '">' +
+              esc(VL.fmt(ratOf(u.start)) + '초 · ' + u.text) + '</button>';
+          }).join("")));
+        }
+        var tags = card.tags || [];
+        if (tags.length) {
+          out.push(details(opened, "evidence", "분석 근거", '<p class="vl-kv">' +
+            tags.map(function (t) { return esc(t); }).join(" · ") + "</p>"));
+        }
+        out.push(details(opened, "memo", "메모", '<div class="vl-row vl-memo">' +
+          '<input type="text" id="vl-note-input" class="vl-input" aria-label="메모" value="' +
+          esc(card.note) + '"><button type="button" class="vl-btn" data-vl-act="save-note">' +
+          "메모 저장</button></div>"));
+        out.push(details(opened, "play", "재생 설정", playbackSettings(info)));
+        out.push(details(opened, "ids", "상세 — 식별자·리비전·시계·준비 상태",
+          identityDetails(card, info)));
+        return out.join("");
+      }
+      // 패널 순서는 고정이다(D57 B): 머리 · 결정 · 판정 · 알림 · 편집 · 접힌 상세.
+      function renderPanel() {
+        var mount = doc.getElementById("vl-panel");
+        if (!mount) { return; }
+        var card = selectedCard();
+        if (!card) {
+          mount.innerHTML =
+            '<p class="vl-note">조각이 없다 — 분할 계획을 만들고 검토를 시작하면 나타난다.</p>';
+          return;
+        }
+        var info = curSource();
+        var opened = openedDetails(mount);
+        var html = ['<p class="vl-kv vl-panel-head"><strong>' + esc(card.sourceName) +
+          "</strong> · " + VL.fmt(ratOf(card.start)) + "~" + VL.fmt(ratOf(card.end)) +
+          "초 (" + VL.fmt(ratOf(card.dur)) + "초)</p>"];
+        var decided = decisionTarget(card);
+        if (decided) {
+          html.push(decisionBlock(card, info));
+        } else {
+          html.push('<div class="vl-row vl-decide">' +
+            '<button type="button" class="vl-btn" data-vl-act="toggle-sel">' +
+            (card.sel === "excluded" ? "사용으로 표시" : "제외로 표시") + "</button></div>");
+        }
+        if (state.marker && state.marker.sourceId === curSourceId() &&
+            !(decided && redMarkerOf(card))) {
+          html.push(markerBlock(state.marker, card, false));
+        }
+        html.push(captionEditor(info));
+        html.push(cardStatusLines(card));
+        html.push(panelNotices(card, info));
+        html.push(editRow(card));
+        html.push(draftBox());
+        html.push(folded(card, info, opened));
         mount.innerHTML = html.join("");
       }
 
@@ -2260,12 +3197,13 @@ VISUAL_BOOTSTRAP_JS = (
           return;
         }
         if (act === "red-confirm" || act === "red-revert") {
-          // 이 조각만 사람이 확인한다 — 선택 편집이 미검토 표지를 걷는다(D35). 표지가
-          // 묶은 조각이 지금 선택과 다르면(다른 페이지) 아무것도 보내지 않는다.
-          var mark = state.marker;
-          if (!mark || !mark.segmentId || !card || card.id !== mark.segmentId) { return; }
+          // 이 조각만 사람이 확인한다 — 선택 편집이 미검토 표지를 걷는다(D35). 결정 상자가
+          // 겨냥한 컷(지금 선택)이 아니면 — 빨강 막대가 다른 페이지 조각을 짚었으면 —
+          // 아무것도 보내지 않는다. 막대·카드·컷 어디로 왔든 같은 상자·같은 호출이다.
+          var decided = decisionTarget(card);
+          if (!decided) { return; }
           call("vl_apply", {
-            op: "selection", segmentId: mark.segmentId,
+            op: "selection", segmentId: decided,
             selection: act === "red-confirm" ? "excluded" : "included",
             revisionId: model.revisionId, basePlanId: model.basePlanId,
             page: model.page, sourceId: curSourceId(),
@@ -2503,10 +3441,24 @@ VISUAL_BOOTSTRAP_JS = (
     }
     W.__vlVisualVideoEl = null;
   };
+  // 머리줄 흐름 단계·프로젝트 이름 — 작업대 값이 실어 온 것을 옮긴다(자리표시 값도 싣는다).
+  // 단계 조각은 서버가 이스케이프해 지은 HTML이고, 이름은 textContent로만 넣는다.
+  var paintFlow = function (fresh) {
+    var d = W.__vlVisualDoc || document;
+    var steps = fresh.getAttribute("data-vl-flow");
+    var nav = d.getElementById("vl-flow");
+    if (steps !== null && nav && nav.__vlFlow !== steps) {
+      nav.innerHTML = steps; nav.__vlFlow = steps;
+    }
+    var project = fresh.getAttribute("data-vl-project");
+    var name = d.getElementById("vl-project-name");
+    if (project !== null && name && name.textContent !== project) { name.textContent = project; }
+  };
   var wireCommitted = function () {
     var d = W.__vlVisualDoc || document;
     var fresh = d.getElementById("visual-workbench");
     if (!fresh || !fresh.getAttribute) { return; }
+    paintFlow(fresh);
     var raw = fresh.getAttribute("data-vl-model");
     if (!raw) {
       // 반복 통보는 무동작(같은 빈 세대 표식) — 관찰자 루프 없음.
@@ -2578,9 +3530,14 @@ VISUAL_BOOTSTRAP_JS = (
       if (ev.defaultPrevented || ev.metaKey || ev.ctrlKey || ev.altKey || ev.shiftKey) {
         return true;
       }
+      // 서랍이 열려 있으면 막 뒤의 영상을 움직이지 않는다 — 초점이 막 뒤(승인 단추 등)에
+      // 남아 있어도 마찬가지다.
+      if (typeof document.querySelector === "function" && document.querySelector(VL_OPEN_DRAWER)) {
+        return true;
+      }
       var t = ev.target;
-      return !!(t && (t.isContentEditable ||
-        (typeof t.closest === "function" && t.closest(VL_EDITABLE))));
+      return !!(t && (t.isContentEditable || (typeof t.closest === "function" &&
+        (t.closest(VL_EDITABLE) || t.closest(VL_OPEN_DRAWER)))));
     };
     W.__vlShortcutAction = function (ev) {
       if (W.__vlShortcutBlocked(ev)) { return null; }
@@ -2637,7 +3594,9 @@ VISUAL_BOOTSTRAP_JS = (
   }
   W.__vlVisualWorkbenchProps = props;
   W.__vlVisualWorkbenchServer = server;
-  W.__vlWireVisual(document.getElementById("visual-workbench"), document);
+  var firstRoot = document.getElementById("visual-workbench");
+  if (firstRoot && firstRoot.getAttribute) { paintFlow(firstRoot); }
+  W.__vlWireVisual(firstRoot, document);
 })();
 """
 )

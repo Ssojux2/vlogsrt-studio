@@ -65,6 +65,8 @@ ACTIVE_ANALYSIS_STAGES = ("분석 대기", "분석 시작", "전사·장면 준�
 BUSY_QUICK_STAGES = ("영상 준비", *ACTIVE_ANALYSIS_STAGES)
 # 승인은 받았지만 아직 실제 분석에 들어가지 않은 단계 — 시작 알림은 이 단계를 지나면 물러난다.
 PENDING_ANALYSIS_STAGES = ("영상 준비", "승인 대기", "분석 대기", "분석 시작")
+# 카드 배지의 색 — 기다림·취소는 알림일 뿐 경고가 아니다(W-17 B, 나머지 확인 단계는 경고 색).
+QUIET_BADGE_STAGES = ("승인 대기", "취소됨")
 NOTICE_ACCEPTED = "accepted"
 NOTICE_DONE = "done"
 NOTICE_PREPARING = "preparing"
@@ -95,18 +97,20 @@ NOTICE_TEXT = {
     "이전 실행에서 끝나지 못한 같은 승인이 기록에 남아 있습니다. "
     "앱을 다시 시작하면 중단된 승인을 복구한 뒤 다시 승인할 수 있습니다.",
 }
+QUOTE_NOTICE_KINDS = frozenset({NOTICE_UNSEEN})
+"""견적을 직접 싣는 승인 거절 — 견적 칸 아래 전문 칸은 이것과 금액을 실은 승인 답만 싣는다.
+
+실사용 줄(「실사용 $…」)은 유료 실행 뒤 상태 줄에 늘 붙어 있어 금액만으로 고르면 칸이 걷히지
+않고 1050px 이하에서 재생기를 밀어낸다(W-17 B 2차) — 실사용 줄은 기록 판의 고정 줄로 간다.
+"""
 LIBRARY_APPROVE_LABEL = "전체 영상 분석 승인"
 
 GLOBAL_ORDER_CONFIRM_LABEL = "전체 원본 순서 확정(촬영 시각 순)"
 """영상은 언제나 만든 시각 순이다(D53) — 순서를 손으로 적는 칸 대신 이 단추 하나다."""
 
-# 화면 맞춤(D50) — 머리글은 한 줄, 정리 탭은 CSS가 간격을 좁힐 범위 이름을 단다.
+# 화면 맞춤(D50) — 머리줄(W-17 B의 44px 줄)과 정리 탭은 CSS가 범위로 쓰는 이름을 단다.
 APP_HEADER_ID = "app-header"
 REVIEW_TAB_ID = "review-tab"
-APP_HEADER_TEXT = (
-    "**vlogsrt · Final Cut 컷 정리** · "
-    "라이브러리 불러오기 → 자막·영상 분석 → 사용할 컷 선택 → Final Cut으로 보내기 · {mode_note}"
-)
 FINALCUT_SEND_LABEL = "Final Cut으로 보내기"
 """원본 전체를 태그 달린 타임라인 하나로 쓰고 Final Cut에 건넨다(D56) — 옛 두 단계를 대신한다."""
 FINALCUT_SEND_JOB_KIND = "finalcut_send"
@@ -515,6 +519,7 @@ class RawWorkspaceUi:
         self._last_export_dir: str | None = None
         # 마지막 「Final Cut으로 보내기」 결과 — 작업공간 서명마다(성공 요약 또는 거부 사유).
         self._finalcut_sent: dict[str, dict[str, Any]] = {}
+        self._project_names: dict[Path, str] = {}  # 머리줄 이름 캐시(`_project_name`)
         self._capcut_quote_phase: dict[str, str] = {}
         self._capcut_render_key: tuple | None = None
         # 자막 작업대의 확정 조건 표시 — 검토 상태를 다시 읽을 때마다 갱신한다.
@@ -1002,14 +1007,14 @@ class RawWorkspaceUi:
     # ── 화면 1 — 프로젝트 · 가져오기 ───────────────────────────
 
     def _project_tab(self) -> tuple[gr.Button, gr.Button]:
-        """1번 탭 조립 — 전환 단추를 돌려준다(배선은 build_blocks에서).
+        """프로젝트 · 가져오기 도구 — 왼쪽 서랍(무대 위에 겹친다). 전환 단추를 돌려준다.
 
-        경로는 **선택기로만** 정해진다 — 경로 칸은 전부 읽기전용 표시다. 사람이
-        직접 적는 경로 입력은 이 화면에 없다(브라우저는 경로를 몰라도 된다).
+        경로는 **선택기로만** 정해진다 — 경로 칸은 전부 읽기전용 표시다(직접 입력 없음).
         """
-        with gr.Accordion(
-            "프로젝트 · 라이브러리 가져오기", open=False, elem_id="project-tools"
+        with gr.Sidebar(
+            open=False, position="left", width=440, elem_id="project-tools"
         ) as self._project_tools:
+            self._drawer_head("프로젝트 · 라이브러리 가져오기", "project-tools")
             self._workspace_md = gr.Markdown(self.workspace_markdown(), visible=False)
             with gr.Row():
                 self._ws_path_box = gr.Textbox(
@@ -1615,6 +1620,10 @@ class RawWorkspaceUi:
             f"전사 최대 {asr}회 + 영상 분석{model} 최대 {luna}회{ceiling}. 승인하면 두 단계가"
             f" 이어집니다. 최대 {self._analysis_limit}개를 동시에 분석합니다."
         )
+
+    def library_analysis_summary_markdown(self) -> str:
+        """견적 칸의 값 — 원문을 글 그대로 그려지게 escape한 마크다운(대조는 원문으로 한다)."""
+        return ui_facade.literal_markdown(self.library_analysis_summary())
 
     def library_analysis_button(self) -> Any:
         root = self._snapshot_root()
@@ -2488,48 +2497,212 @@ class RawWorkspaceUi:
         )
         return quick_api_panel, quick_api_key
 
-    def _review_tab(
-        self,
-    ) -> tuple[gr.Button, gr.Button, gr.Dropdown, gr.Button]:
+    def _review_tab(self) -> None:
+        """정리 탭 — 명령 줄(단추 + 활동 칸) · 무대. 서랍에 든 도구는 `_settings_drawer`가 짓는다.
+
+        한 줄짜리 탭 막대는 CSS가 감춘다(보이는 탭이 하나뿐일 때만). 숨은 「자막」 탭은 그대로다.
+        """
         with gr.Tab("영상 정리", elem_id=REVIEW_TAB_ID):
-            with gr.Row():
-                choose = gr.Button("영상 선택", visible=False)
-                self._quick_library_button = gr.Button("라이브러리 불러오기")
-                cancel = gr.Button("선택 분석 취소", scale=0)
-                automatic = gr.Button("자동 정리", visible=False)
-                cancel_all = gr.Button("전체 분석 취소", scale=0)
-                quick_approve = gr.Button(
-                    LIBRARY_APPROVE_LABEL, visible=True, interactive=False, variant="primary"
-                )
-                handoff = gr.Button(FINALCUT_SEND_LABEL)
-                # 미검토 안내가 이 단추를 누르라고 말한다(끈 채 보내기) — 접힌 서랍에 두지 않는다.
-                confirm_auto = gr.Button("자동 제외 확인")
-            # 범위 요약과 진행 상태를 한 줄에 — 무대가 쓸 세로 공간을 아낀다(D50).
-            with gr.Row():
-                library_summary = gr.Markdown(
-                    self.library_analysis_summary(), elem_id="library-analysis-scope"
-                )
-                self._capcut_progress_md = gr.Markdown(self._quick_status(), elem_id="quick-status")
+            self._command_bar()
+            # 단추 응답이 실리는 칸 — 그 값은 활동 칸이 받아 보인다(ACTIVITY_REPLY_JS).
             self._capcut_status = gr.Markdown(visible=False)
-            # ── V2 영상 작업대 — 3단 무대(왼쪽 목록 · 가운데 재생기+렠 · 오른쪽 패널).
-            # 두 구성요소가 같은 `#visual-stage` 격자에 들어가고, 껍데기·본문의
-            # 중간 껍데기는 display:contents로 펴져 세 칸이 한 눈에 짝을 이룬다.
-            # 영상 원소는 여전히 별도 구성요소(껍데기)라 같은 원본을 다시 고르는
-            # 동안 재생이 이어진다(F1a·F1b).
-            shell, workbench = self.visual_workbench_render(self._snapshot_root())
-            with gr.Row(elem_id="visual-stage"):
-                self._visual_player_block = gr.HTML(
-                    shell,
-                    elem_id="visual-player-block",
-                    elem_classes=["vl-stage-cell"],
+            self._review_stage()
+            # 「자동 정리」(숨은 단추)의 승인 확인란 — 보이지 않는다(옛 흐름 그대로).
+            self._capcut_approval = gr.Checkbox(
+                label="표시된 단계의 비용·범위를 확인하고 실행을 승인합니다",
+                value=False,
+                visible=False,
+            )
+            # 타이머는 옛 자리(정리 탭 안) 그대로 — 배선만 함수로 나눴다.
+            self._wire_command_bar()
+
+    def _command_bar(self) -> None:
+        """명령 줄(48px) — 왼쪽은 단계의 단추(주 단추 하나), 나머지는 높이가 고정된 활동 칸.
+
+        취소 단추는 늘 보이고 늘 누를 수 있다 — 돌고 있는지 알리는 믿을 만한 신호가 폴링에 없어서,
+        끄면 도는 작업을 못 멈출 수 있다(누르면 '취소할 … 없습니다'가 활동 칸에 뜬다).
+        """
+        with gr.Row(elem_id="vl-command-bar"):
+            self._choose_button = gr.Button("영상 선택", visible=False)
+            self._quick_library_button = gr.Button("라이브러리 불러오기")
+            self._automatic_button = gr.Button("자동 정리", visible=False)
+            self._library_approve_button = gr.Button(
+                LIBRARY_APPROVE_LABEL,
+                visible=True,
+                interactive=False,
+                variant="primary",
+                elem_id="library-approve",
+            )
+            self._cancel_button = gr.Button("선택 분석 취소", scale=0)
+            self._cancel_all_button = gr.Button("전체 분석 취소", scale=0, variant="stop")
+            self._handoff_button = gr.Button(FINALCUT_SEND_LABEL)
+            # 미검토 안내가 이 단추를 누르라고 말한다(끈 채 보내기) — 서랍에 두지 않는다.
+            self._confirm_auto_button = gr.Button("자동 제외 확인")
+            gr.HTML(
+                ui_facade.activity_html(),
+                elem_id="vl-activity-block",
+                js_on_load=None,
+                apply_default_css=False,
+            )
+            # 1초 상태 줄 — 화면에는 활동 칸이 보이고, 이 칸은 그 원천이다(CSS로 숨긴다).
+            self._capcut_progress_md = gr.Markdown(self._quick_status(), elem_id="quick-status")
+            # 실사용 줄만 따로 — 기록 판 맨 위 고정 줄의 원천이다(CSS로 숨긴다).
+            self._usage_md = gr.Markdown(self.usage_line_markdown(), elem_id="vl-usage-src")
+
+    def _review_stage(self) -> None:
+        """V2 영상 작업대 — 목록 · 재생기 · 패널 · 타임라인 · 상태 줄, 그리고 분석 견적 한 칸.
+
+        두 구성요소가 같은 `#visual-stage` 격자에 들어가고, 껍데기·본문의 중간 껍데기는
+        display:contents로 펴진다. 영상 원소는 별도 구성요소(껍데기)라 같은 원본을 다시 고르는
+        동안 재생이 이어진다(F1a·F1b). 견적 칸(넓은 화면은 패널 열 위, 1050px 이하는 명령 줄
+        바로 아래)은 승인 단추가 묶는 문구와 그 아래 전문(견적을 실은 승인 거절)을 말줄임 없이
+        싣는다.
+        """
+        shell, workbench = self.visual_workbench_render(self._snapshot_root())
+        with gr.Row(elem_id="visual-stage"):
+            self._visual_player_block = gr.HTML(
+                shell,
+                elem_id="visual-player-block",
+                elem_classes=["vl-stage-cell"],
+            )
+            self._visual_workbench_block = gr.HTML(
+                workbench,
+                elem_id="visual-workbench-block",
+                elem_classes=["vl-stage-cell"],
+                js_on_load=ui_facade.VISUAL_BOOTSTRAP_JS,
+                server_functions=self._visual_server_functions(),
+            )
+            note = self.quote_note_markdown()
+            with gr.Column(elem_id="vl-quote", min_width=0):
+                # 값은 글 그대로 그려지는 마크다운(문장부호 escape)이고 LaTeX도 끈다 — 그려진 글이
+                # 견적 원문과 같아야 승인 앞 단계의 글 대조가 선다.
+                self._library_summary_md = gr.Markdown(
+                    self.library_analysis_summary_markdown(),
+                    elem_id="library-analysis-scope",
+                    latex_delimiters=[],
                 )
-                self._visual_workbench_block = gr.HTML(
-                    workbench,
-                    elem_id="visual-workbench-block",
-                    elem_classes=["vl-stage-cell"],
-                    js_on_load=ui_facade.VISUAL_BOOTSTRAP_JS,
-                    server_functions=self._visual_server_functions(),
-                )
+                self._quote_note_md = gr.Markdown(note, elem_id="vl-quote-note", visible=bool(note))
+
+    def quote_note_markdown(self) -> str:
+        """견적 칸 아래의 전문 — 살아 있는 승인 답 가운데 견적·금액을 실은 것만, 말줄임 없이.
+
+        활동 칸은 한 줄이라 거절 문구가 실은 견적·상한($)이 잘린다(D54: 거절 답이 견적을 직접
+        싣는다). 싣는 것은 알림 자신의 글뿐이다(상태 줄·실사용 줄은 싣지 않는다):
+        「새 견적을 확인하세요」 거절(`QUOTE_NOTICE_KINDS`)과 금액($)을 실은 다른 승인 답.
+        걷히는 때: 다음 승인 클릭이 견적 대조를 지나 새 알림(키 필요·접수…)으로 바뀌거나, 견적이
+        바뀌어 알림이 물러날 때(`_live_notice`), 화면이 바뀌어 알림이 걷힐 때.
+        """
+        held = self._live_notice(self._snapshot_root())
+        if held is None or held.kind in (NOTICE_ACCEPTED, NOTICE_DONE):
+            return ""
+        if held.kind in QUOTE_NOTICE_KINDS or "$" in held.text:
+            return held.text
+        return ""
+
+    def usage_line_markdown(self) -> str:
+        """실사용 줄만 — 기록 판 고정 줄의 원천(유료 실행 전에는 비어 있다, D46)."""
+        return self._usage_line()
+
+    def _quote_signature_current(self, signature: str | None) -> bool:
+        return bool(signature) and signature == self._signature_for(self._snapshot_root())
+
+    def quote_note_view(self, signature: str | None) -> Any:
+        """승인 답 — 전문 칸을 다시 그린다(글이 없으면 칸을 숨긴다)."""
+        if not self._quote_signature_current(signature):
+            return gr.skip()
+        text = self.quote_note_markdown()
+        return gr.Markdown(value=text, visible=bool(text))
+
+    def quote_cells_view(self, signature: str | None) -> tuple[Any, Any]:
+        """1초 타이머 — 전문 칸과 실사용 원천을 함께 다시 그린다(다른 화면의 틱은 건너뛴다)."""
+        if not self._quote_signature_current(signature):
+            return gr.skip(), gr.skip()
+        return self.quote_note_view(signature), self.usage_line_markdown()
+
+    def _report_activity(self, event: Any, reply: Any) -> None:
+        """단추 응답을 활동 칸으로 — 응답이 실린 구성요소 값을 실행본이 받는다(서버 호출 0회).
+
+        2초 타이머가 같은 숨은 칸을 다시 쓰므로 칸을 지켜보지 않고, 단추 사건이 끝날 때만 옮긴다.
+        """
+        event.success(
+            None,
+            reply,
+            None,
+            js=ui_facade.ACTIVITY_REPLY_JS,
+            queue=False,
+            show_progress="hidden",
+        )
+
+    def _wire_command_bar(self) -> None:
+        """명령 줄 단추 배선 — 처리기·입출력은 옛 단추 줄 그대로, 응답만 활동 칸으로 옮긴다."""
+        status = self._capcut_status
+        outputs = [status, self._visual_player_block, self._visual_workbench_block]
+        chosen = self._choose_button.click(
+            self.capcut_choose_view,
+            self._signature_state,
+            outputs,
+            api_name=False,
+            concurrency_id=ui_chooser.CHOOSER_CONCURRENCY_ID,
+            concurrency_limit=1,
+        )
+        chosen.then(self.current_signature, None, self._signature_state).then(
+            self._ws_path_display, None, self._ws_path_box
+        )
+        self._report_activity(chosen, status)
+        automatic = self._automatic_button.click(
+            self.capcut_auto_view, [self._signature_state, self._capcut_approval], outputs
+        )
+        automatic.then(lambda: False, None, self._capcut_approval)
+        self._report_activity(automatic, status)
+        for button, handler, target in (
+            (self._handoff_button, self.finalcut_send_view, status),
+            (self._confirm_auto_button, self.capcut_confirm_auto_view, outputs),
+            (self._cancel_button, self.capcut_cancel_view, status),
+            (self._cancel_all_button, self.capcut_cancel_all_view, status),
+        ):
+            self._report_activity(button.click(handler, self._signature_state, target), status)
+        self._wire_review_timers(outputs)
+
+    def _wire_review_timers(self, outputs: list[Any]) -> None:
+        """1·2초 타이머 — 승인 단추 이름, 견적 문구, 상태 줄, 작업대 다시 그리기(옛 그대로)."""
+        gr.Timer(1).tick(
+            self.library_analysis_button,
+            None,
+            self._library_approve_button,
+            show_progress="hidden",
+        )
+        gr.Timer(1).tick(
+            self.library_analysis_summary_markdown,
+            None,
+            self._library_summary_md,
+            queue=False,
+            show_progress="hidden",
+        )
+        gr.Timer(1).tick(
+            self.capcut_status_view,
+            self._signature_state,
+            self._capcut_progress_md,
+            queue=False,
+            show_progress="hidden",
+        )
+        gr.Timer(1).tick(
+            self.quote_cells_view,
+            self._signature_state,
+            [self._quote_note_md, self._usage_md],
+            queue=False,
+            show_progress="hidden",
+        )
+        gr.Timer(2).tick(
+            self.capcut_tick_view,
+            self._signature_state,
+            outputs,
+            show_progress="hidden",
+        )
+
+    def _settings_drawer(self) -> tuple[gr.Button, gr.Button, gr.Dropdown, gr.Button]:
+        """오른쪽 서랍 — API 연결 · 복원 · 고급 도구. 무대 위에 겹칠 뿐 무대를 밀지 않는다."""
+        with gr.Sidebar(open=False, position="right", width=560, elem_id="settings-drawer"):
+            self._drawer_head("설정 · 고급 도구", "settings-drawer")
             quick_api_panel, quick_api_key = self._quick_api_panel()
             with gr.Accordion("분석 실행 설정", open=False, visible=False):
                 primary_network = gr.Dropdown(
@@ -2538,101 +2711,62 @@ class RawWorkspaceUi:
                     label="네트워크",
                     interactive=True,
                 )
-                primary_network.change(
-                    self.settings_network_view,
-                    [self._signature_state, primary_network],
-                    self._capcut_status,
-                )
-            approval = gr.Checkbox(
-                label="표시된 단계의 비용·범위를 확인하고 실행을 승인합니다",
-                value=False,
-                visible=False,
+            network = primary_network.change(
+                self.settings_network_view,
+                [self._signature_state, primary_network],
+                self._capcut_status,
             )
-            with gr.Accordion("복원 · 전달 · 고급 조작", open=False), gr.Row():
-                restore = gr.Button("자동 제외 전체 복원")
-                undo = gr.Button("실행 취소")
-                refresh = gr.Button("결과 확인")
-                preview = gr.Button("원본 미리보기 준비")
-                retry = gr.Button("실패 구간 재시도")
-                open_folder = gr.Button("폴더 열기")
-            outputs = [self._capcut_status, self._visual_player_block, self._visual_workbench_block]
-            choose.click(
-                self.capcut_choose_view,
-                self._signature_state,
-                outputs,
-                api_name=False,
-                concurrency_id=ui_chooser.CHOOSER_CONCURRENCY_ID,
-                concurrency_limit=1,
-            ).then(self.current_signature, None, self._signature_state).then(
-                self._ws_path_display, None, self._ws_path_box
-            )
-            quick_approve.click(
-                self.library_analysis_view,
-                [self._signature_state, quick_api_key, library_summary],
-                [self._capcut_progress_md, quick_api_panel, quick_api_key],
-            ).then(
-                fn=None,
-                js="""() => {
-                const status = document.getElementById('quick-status');
-                if (status?.textContent.includes('연결 설정 필요')) {
-                    requestAnimationFrame(() =>
-                        document.querySelector('#quick-api-key input')?.focus());
-                }
-            }""",
-            )
-            gr.Timer(1).tick(
-                self.library_analysis_button,
-                None,
-                quick_approve,
-                show_progress="hidden",
-            )
-            gr.Timer(1).tick(
-                self.library_analysis_summary,
-                None,
-                library_summary,
-                queue=False,
-                show_progress="hidden",
-            )
-            automatic.click(self.capcut_auto_view, [self._signature_state, approval], outputs).then(
-                lambda: False, None, approval
-            )
-            handoff.click(self.finalcut_send_view, self._signature_state, self._capcut_status)
-            confirm_auto.click(self.capcut_confirm_auto_view, self._signature_state, outputs)
-            restore.click(
-                lambda sig: self.capcut_edit_view(sig, "restore"), self._signature_state, outputs
-            )
-            undo.click(
-                lambda sig: self.capcut_edit_view(sig, "undo"), self._signature_state, outputs
-            )
-            refresh.click(self.capcut_refresh_view, self._signature_state, outputs)
-            preview.click(self.capcut_preview_view, self._signature_state, self._capcut_status)
-            cancel.click(self.capcut_cancel_view, self._signature_state, self._capcut_status)
-            cancel_all.click(
-                self.capcut_cancel_all_view, self._signature_state, self._capcut_status
-            )
-            retry.click(self.capcut_retry_view, self._signature_state, self._capcut_status)
-            open_folder.click(
-                self.review_export_open_view, self._signature_state, self._capcut_status
-            )
-            gr.Timer(1).tick(
-                self.capcut_status_view,
-                self._signature_state,
-                self._capcut_progress_md,
-                queue=False,
-                show_progress="hidden",
-            )
-            gr.Timer(2).tick(
-                self.capcut_tick_view,
-                self._signature_state,
-                [self._capcut_status, self._visual_player_block, self._visual_workbench_block],
-                show_progress="hidden",
-            )
+            self._report_activity(network, self._capcut_status)
+            self._restore_tools()
             with gr.Accordion("고급 편집 도구", open=False):
-                extract_button, refresh_segment, profile_dd, analysis_plan = (
-                    self._review_advanced_tab()
-                )
+                advanced = self._review_advanced_tab()
             self._package_tab()
-        return extract_button, refresh_segment, profile_dd, analysis_plan
+        self._wire_library_approval(quick_api_panel, quick_api_key)
+        return advanced
+
+    def _restore_tools(self) -> None:
+        """「복원 · 전달 · 고급 조작」 — 서랍 안에서는 펼친 채 둔다(열면 바로 단추가 보인다)."""
+        status = self._capcut_status
+        outputs = [status, self._visual_player_block, self._visual_workbench_block]
+        with gr.Accordion("복원 · 전달 · 고급 조작", open=True), gr.Row():
+            restore = gr.Button("자동 제외 전체 복원")
+            undo = gr.Button("실행 취소")
+            refresh = gr.Button("결과 확인")
+            preview = gr.Button("원본 미리보기 준비")
+            retry = gr.Button("실패 구간 재시도")
+            open_folder = gr.Button("폴더 열기")
+        for button, handler, target in (
+            (restore, lambda sig: self.capcut_edit_view(sig, "restore"), outputs),
+            (undo, lambda sig: self.capcut_edit_view(sig, "undo"), outputs),
+            (refresh, self.capcut_refresh_view, outputs),
+            (preview, self.capcut_preview_view, status),
+            (retry, self.capcut_retry_view, status),
+            (open_folder, self.review_export_open_view, status),
+        ):
+            self._report_activity(button.click(handler, self._signature_state, target), status)
+
+    def _wire_library_approval(self, quick_api_panel: gr.Accordion, quick_api_key: Any) -> None:
+        """일괄 승인 — 화면에 **정말 보이는** 견적 문구만 함께 보낸다(D54).
+
+        앞 단계(`APPROVE_GUARD_JS`)가 견적 칸이 서랍·판에 덮였거나 화면 밖이면 빈 문구를 보내
+        서버의 기존 대조가 「새 견적을 확인하세요」로 거절한다(서버 결합은 그대로). 답은 견적 칸
+        전문에 바로 다시 그린다. 키가 없으면 서랍을 연다.
+        """
+        approved = self._library_approve_button.click(
+            self.library_analysis_view,
+            [self._signature_state, quick_api_key, self._library_summary_md],
+            [self._capcut_progress_md, quick_api_panel, quick_api_key],
+            js=ui_facade.APPROVE_GUARD_JS,
+        )
+        approved.then(fn=None, js=ui_facade.KEY_NOTICE_JS)
+        self._report_activity(approved, self._capcut_progress_md)
+        approved.success(
+            self.quote_note_view,
+            self._signature_state,
+            self._quote_note_md,
+            queue=False,
+            show_progress="hidden",
+        )
 
     def _review_advanced_tab(
         self,
@@ -3395,13 +3529,13 @@ class RawWorkspaceUi:
             note = "작업공간이 열려 있지 않다 — 1번 탭에서 만들거나 여세요."
             return (
                 ui_facade.visual_player_shell_html(None, note),
-                ui_facade.visual_workbench_html({"empty": note}),
+                self._workbench_html(None, {"empty": note}),
             )
         quick = self._quick if self._quick.get("root") == root else {}
         if quick.get("stage") == "영상 준비" and not quick.get("asset_ids"):
             note = "선택한 영상을 준비하고 있습니다. 이전 영상의 결과는 표시하지 않습니다."
-            return ui_facade.visual_player_shell_html(None, note), ui_facade.visual_workbench_html(
-                {"empty": note}
+            return ui_facade.visual_player_shell_html(None, note), self._workbench_html(
+                root, {"empty": note}
             )
         if quick.get("asset_ids") and source_id is None:
             source_id = quick.get("view_source_id") or quick["asset_ids"][0]
@@ -3432,7 +3566,7 @@ class RawWorkspaceUi:
             note = f"영상 검토를 열지 못했다 — {error}"
             return (
                 ui_facade.visual_player_shell_html(None, note),
-                ui_facade.visual_workbench_html({"empty": note}),
+                self._workbench_html(root, {"empty": note}),
             )
         names = self._visual_source_names(root)
         plan_ranges = self._visual_plan_ranges(root, overview.base_plan_id)
@@ -3446,13 +3580,13 @@ class RawWorkspaceUi:
                 note = f"검토 머리를 다시 읽지 못했다 — {error}"
                 return (
                     ui_facade.visual_player_shell_html(None, note),
-                    ui_facade.visual_workbench_html({"empty": note}),
+                    self._workbench_html(root, {"empty": note}),
                 )
             if revision.revision_id != overview.revision_id:
                 note = "검토 머리가 그 사이 바뀌었다 — 새로고침으로 다시 받으세요."
                 return (
                     ui_facade.visual_player_shell_html(None, note),
-                    ui_facade.visual_workbench_html({"empty": note}),
+                    self._workbench_html(root, {"empty": note}),
                 )
         tags_by_segment: dict[str, tuple[str, ...]] = (
             {seg.segment_id: seg.visual_tags for seg in ordered} if ordered is not None else {}
@@ -3580,14 +3714,11 @@ class RawWorkspaceUi:
             )
             selected_card = _card_values(selected, selected_order)
         task_views = self._task_views(root)
-        red_unmaterialized = 0
-        for sid, source in sources_model.items():
-            task = task_views.get(sid, {})
-            source["analysisState"] = self._shown_stage(root, task, "분석 대기")
-            if task.get("revision"):
-                rows = self.raw.selection_suitability(root, task["revision"], (sid,)).get(sid, [])
-                source["suggestions"] = [self._suggestion_row(row) for row in rows]
-                red_unmaterialized += self._unmaterialized_red_count(source)
+        pending_ids = self._pending_cut_ids(ordered)
+        red_unmaterialized = sum(
+            self._annotate_tiers(root, sid, source, task_views.get(sid, {}), pending_ids)
+            for sid, source in sources_model.items()
+        )
         for sid, source in sources_model.items():
             transcript = self.raw.source_transcript(root, sid)
             if transcript:
@@ -3668,12 +3799,7 @@ class RawWorkspaceUi:
             "staleSources": [list(pair) for pair in overview.stale_sources],
             "needsPlan": needs_plan,
             "packageDir": self._latest_package_dir(root),
-            "redPending": sum(
-                1
-                for seg in ordered or ()
-                if seg.selection == "excluded"
-                and raw_service.AUTO_EXCLUDED_UNREVIEWED_TAG in seg.visual_tags
-            ),
+            "redPending": len(pending_ids),
             "redUnmaterialized": red_unmaterialized,
         }
         shell_src = None
@@ -3684,7 +3810,12 @@ class RawWorkspaceUi:
             shell_src,
             "선택 조각의 원본 전체 미리보기 — 시간 렠·재생 머리는 작업대가 채운다.",
         )
-        return shell, ui_facade.visual_workbench_html(model)
+        analysed = sum(
+            s["analysisState"] == FINISHED_QUICK_STAGES[0] for s in sources_model.values()
+        )
+        return shell, self._workbench_html(
+            root, model, analysed=analysed, proposals=len(pending_ids)
+        )
 
     @staticmethod
     def _suggestion_row(row: Mapping[str, Any]) -> dict[str, object]:
@@ -3728,6 +3859,160 @@ class RawWorkspaceUi:
             if row["tier"] == "red"
         ]
         return raw_service.unmaterialized_red(ranges, edges, Fraction(rail["frameSec"]))
+
+    @staticmethod
+    def _pending_cut_ids(ordered: Any) -> set[str]:
+        """미검토 표지가 남은 제외 컷 — 머리줄의 제외 제안 수와 카드의 열린 빨강이 같이 쓴다."""
+        return {
+            seg.segment_id
+            for seg in ordered or ()
+            if seg.selection == "excluded"
+            and raw_service.AUTO_EXCLUDED_UNREVIEWED_TAG in seg.visual_tags
+        }
+
+    def _annotate_tiers(
+        self,
+        root: Path,
+        source_id: str,
+        source: dict[str, Any],
+        task: Mapping[str, Any],
+        pending_ids: set[str],
+    ) -> int:
+        """원본 하나에 분석 상태·카드 배지·등급 구간(열린 빨강 표시)을 싣는다.
+
+        돌려주는 값은 컷 경계로 아직 떨어지지 않은 제외 제안 수다(작업대 각주의 재료).
+        """
+        source["analysisState"] = self._shown_stage(root, task, "분석 대기")
+        badge = self._analysis_badge(task, str(source["analysisState"]))
+        if badge is not None:
+            source["analysisBadge"] = badge
+        if not task.get("revision"):
+            return 0
+        rows = self.raw.selection_suitability(root, task["revision"], (source_id,))
+        source["suggestions"] = [self._suggestion_row(row) for row in rows.get(source_id, [])]
+        self._mark_open_reds(source, pending_ids)
+        return self._unmaterialized_red_count(source)
+
+    @staticmethod
+    def _mark_open_reds(source: dict[str, Any], pending_ids: set[str]) -> None:
+        """빨강 구간마다 아직 결정을 기다리는지(`open`) — 카드의 띠와 ✕ 수가 같은 판정을 쓴다.
+
+        컷 경계로 떨어지지 않은 제안은 결정할 컷이 아직 없으니 열린 채로 둔다. 떨어진 제안은
+        가운데를 덮는 컷에 미검토 표지가 남아 있을 때만 열려 있다(확인·되돌림이 표지를 걷는다).
+        """
+        rail = source.get("rail")
+        if not isinstance(rail, Mapping):
+            return
+        intervals = rail["intervals"]
+        edges = {Fraction(it[key]) for it in intervals for key in ("start", "end")}
+        frame = Fraction(rail["frameSec"])
+        for row in source.get("suggestions", []):
+            if row["tier"] != "red":
+                continue
+            start, end = Fraction(row["start"]), Fraction(row["end"])
+            middle = (start + end) / 2
+            cut = next(
+                (it for it in intervals if Fraction(it["start"]) <= middle < Fraction(it["end"])),
+                None,
+            )
+            loose = raw_service.unmaterialized_red([(start, end)], edges, frame) > 0
+            row["open"] = loose or (cut is not None and cut["id"] in pending_ids)
+
+    @staticmethod
+    def _analysis_badge(task: Mapping[str, Any], stage: str) -> dict[str, str] | None:
+        """카드 배지 하나 — 분석 상태가 눈을 불러야 할 때만. 끝난 분석·작업 없는 영상은 없다."""
+        if not task or stage == FINISHED_QUICK_STAGES[0]:
+            return None
+        if task.get("error"):
+            tone = "err"
+        elif stage in BUSY_QUICK_STAGES:
+            tone = "run"
+        elif stage in QUIET_BADGE_STAGES:
+            tone = ""
+        else:
+            tone = "warn"
+        return {"label": stage, "tone": tone}
+
+    def _project_name(self, root: Path) -> str:
+        """머리줄의 프로젝트 이름 — 처음 한 번만 읽는다(이름은 만들 때 정해진다)."""
+        name = self._project_names.get(root)
+        if name is None:
+            try:
+                name = self.raw.workspace_status(root).name or root.name
+            except raw_service.RawWorkspaceError:
+                return root.name
+            self._project_names[root] = name
+        return name
+
+    def _flow_counts(
+        self, root: Path, *, analysed: int | None = None, proposals: int | None = None
+    ) -> ui_facade.FlowCounts:
+        """머리줄 흐름 단계의 수 — 불러온 영상 · 지금 모델로 분석이 끝난 영상 · 미검토 제안 · 보냄.
+
+        작업대가 이미 잰 값(분석 끝·미검토 수)은 그대로 받고, 자리표시 화면에서만 다시 잰다.
+        """
+        try:
+            ready = [a.asset_id for a in self.raw.list_source_assets(root) if a.status == "ready"]
+        except raw_service.RawWorkspaceError:
+            ready = []
+        if analysed is None:
+            tasks = self._task_views(root)
+            analysed = sum(
+                1
+                for asset_id in ready
+                if self._shown_stage(root, tasks.get(asset_id, {}), "") == FINISHED_QUICK_STAGES[0]
+            )
+        if proposals is None:
+            proposals = self._unreviewed_auto_count(root)
+        sent = "path" in self._finalcut_sent.get(str(self._signature_for(root)), {})
+        return ui_facade.FlowCounts(
+            imported=len(ready), analysed=analysed, proposals=proposals, sent=sent
+        )
+
+    def _workbench_html(
+        self,
+        root: Path | None,
+        model: Mapping[str, object],
+        *,
+        analysed: int | None = None,
+        proposals: int | None = None,
+    ) -> str:
+        """작업대 본문 값 — 머리줄로 옮길 흐름 단계·프로젝트 이름을 함께 싣는다(W-17 B)."""
+        if root is None:
+            return ui_facade.visual_workbench_html(model, flow=ui_facade.FlowCounts())
+        counts = self._flow_counts(root, analysed=analysed, proposals=proposals)
+        return ui_facade.visual_workbench_html(model, project=self._project_name(root), flow=counts)
+
+    def _top_bar(self) -> gr.HTML:
+        """머리줄 구성요소 — 서랍·단축키 판·활동 칸의 실행본(SHELL_JS)을 함께 싣는다."""
+        return gr.HTML(
+            self._topbar_value(),
+            elem_id=APP_HEADER_ID,
+            js_on_load=ui_facade.SHELL_JS,
+            apply_default_css=False,
+        )
+
+    @staticmethod
+    def _drawer_head(title: str, drawer_id: str) -> gr.HTML:
+        """서랍 머리(제목 + 닫기) — 그라디오 기본 클릭 실행본·기본 글꼴 판은 싣지 않는다."""
+        return gr.HTML(
+            ui_facade.drawer_head_html(title, drawer_id),
+            elem_classes=["vl-drawer-head-block"],
+            js_on_load=None,
+            apply_default_css=False,
+        )
+
+    def _topbar_value(self) -> str:
+        """머리줄의 첫 값 — 이후의 수는 작업대 값이 실어 와 실행본이 갈아 넣는다."""
+        online = raw_service.browser_network_mode() == "online"
+        root = self._snapshot_root()
+        counts = self._flow_counts(root) if root is not None else ui_facade.FlowCounts()
+        return ui_facade.topbar_html(
+            online=online,
+            mode_note=ONLINE_MODE_NOTE if online else OFFLINE_MODE_NOTE,
+            project=self._project_name(root) if root is not None else "",
+            flow=ui_facade.flow_steps_html(ui_facade.flow_steps(counts)),
+        )
 
     @staticmethod
     def _card_tier(tags: Sequence[str]) -> str:
@@ -7473,13 +7758,9 @@ class RawWorkspaceUi:
         # theme·css는 gradio 6부터 launch/마운트 쪽 인자다(Blocks 생성자에 넣으면 경고).
         # fill_width — 그라디오 .fillable 폭 상한은 CSS로 풀리지 않는다(D50 실측).
         with gr.Blocks(title="vlogsrt 원본 브라우저", fill_width=True) as app:
-            # 세 줄 머리글이 재생기·타임라인을 화면 밖으로 밀었다 — 한 줄로 합친다(D50).
-            mode_note = (
-                ONLINE_MODE_NOTE
-                if raw_service.browser_network_mode() == "online"
-                else OFFLINE_MODE_NOTE
-            )
-            gr.Markdown(APP_HEADER_TEXT.format(mode_note=mode_note), elem_id=APP_HEADER_ID)
+            # 머리줄(44px, W-17 B) — 이름·프로젝트·흐름 단계·연결 방식·단축키·설정. 흐름 단계의
+            # 수는 작업대 값이 실어 오고 실행본이 옮긴다(머리줄만을 위한 타이머는 없다).
+            self._top_bar()
             # 화면이 마지막으로 본 작업공간 신원 — 선택의 최신 증명에만 쓴다.
             # 정본은 서버(DB)에 있고, 이 값은 새로고침마다 서버에서 다시 내려온다.
             self._signature_state = gr.State(None)
@@ -7490,8 +7771,10 @@ class RawWorkspaceUi:
             self._caption_context_state = gr.State(None)
             self._caption_head_state = gr.State(None)
             open_button, create_button = self._project_tab()
-            extract_button, refresh_segment, profile_dd, analysis_plan = self._review_tab()
+            self._review_tab()
             self._caption_tab()
+            # 오른쪽 서랍은 탭 뒤에 짓는다 — 두 탭 사이에 끼면 탭 묶음이 둘로 갈린다.
+            extract_button, refresh_segment, profile_dd, analysis_plan = self._settings_drawer()
             # 추출 시작·새로고침은 3번 탭(package 패널)까지 만들어진 뒤에 묶는다.
             extract_button.click(
                 self.segment_extract_view,
@@ -7538,16 +7821,17 @@ class RawWorkspaceUi:
                 concurrency_limit=1,
                 concurrency_id=ui_chooser.CHOOSER_CONCURRENCY_ID,
             )
-            self._fcp_primary_import.click(
+            # 연결하면 서랍을 닫아 무대를 보인다 — 예전 아코디언을 접던 자리(W-17 B).
+            imported = self._fcp_primary_import.click(
                 self.capcut_fcp_import_view,
                 [self._signature_state, self._fcp_originals_group],
                 [self._capcut_status, self._visual_player_block, self._visual_workbench_block],
                 js="""(signature, selected) => {
-                    const button = document.querySelector('#project-tools > button.label-wrap');
-                    if (button && button.classList.contains('open')) button.click();
+                    if (window.__vlDrawer) { window.__vlDrawer('project-tools', false); }
                     return [signature, selected];
                 }""",
             )
+            self._report_activity(imported, self._capcut_status)
             open_button.click(
                 self.open_project_chooser_view,
                 None,
