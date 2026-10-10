@@ -3257,17 +3257,18 @@ def test_stage_layout_declared_dom_and_css() -> None:
     mobile = css.index("@media (max-width: 860px)")
     assert css.index('"player" "thumbs" "panel" "timeline" "foot"', mobile) > mobile
     assert "grid-template-columns: minmax(0, 1fr)" in css[mobile:]
-    # 무채색은 테마 토큰 — 본점(강조) 색은 그대로 하나다.
+    # 색은 작업대 토큰(D57) — 밝은·어두운 두 벌이 같은 이름을 쓴다. 본점(강조)은 하나다.
     for token in (
-        "--body-text-color",
-        "--body-text-color-subdued",
-        "--block-background-fill",
-        "--block-border-color",
-        "--button-secondary-background-fill",
-        "--input-background-fill",
+        "--vl-ink",
+        "--vl-ink-muted",
+        "--vl-surface",
+        "--vl-surface-raised",
+        "--vl-line",
+        "--vl-line-strong",
     ):
         assert f"var({token}" in css, token
-    assert css.count("#2f6db3") >= 3  # 강조(선택·손잡이·주 단추) — 본점은 하나
+    assert "#2f6db3" not in css  # 본점은 토큰 한 곳(design_tokens)에서만 값이 정해진다
+    assert css.count("var(--vl-accent)") >= 3  # 강조(선택한 컷·손잡이·주 단추)
     # 자막 무대 — 재생기와 큐 목록+편집기가 나란히, 좁은 화면에서도 재생기 먼저.
     assert 'grid-template-areas: "player cues"' in css
     assert "#caption-stage .vl-stage-cell { display: contents; }" in css
@@ -3522,11 +3523,15 @@ def test_legend_names_three_tiers_with_pattern_cue() -> None:
         assert word in legend, word
     assert "vl-good" not in legend and "vl-review" not in legend
     css = ui_facade.WORKBENCH_CSS
-    assert ".vl-good" in css and ".vl-review" in css  # 옛 표기는 남되 범례에서는 빠진다
-    assert ".vl-recommendation.green{background:#1f6f46;border-top:2px solid #6fe3a5}" in css
-    assert ".vl-recommendation.yellow{background:#6f5f1a;border-top:2px solid #ffd760}" in css
-    assert "repeating-linear-gradient(135deg,#7a2d2d 0 6px,#561c1c 6px 12px)" in css
-    assert ".vl-recommendation.yellow.hold{border-top-style:dotted}" in css
+    assert ".vl-good" not in css and ".vl-review" not in css  # 옛 청록·주황 표기는 지웠다(D57)
+    # 색은 토큰(D57), 표지는 그대로 — 빨강은 빗금, 보류는 속 빈 점선 테두리.
+    assert ".vl-recommendation.green { background: var(--vl-tier-green);" in css
+    assert ".vl-recommendation.yellow { background: var(--vl-tier-yellow);" in css
+    assert (
+        "repeating-linear-gradient(135deg, var(--vl-tier-red) 0 6px, "
+        "var(--vl-tier-red-deep) 6px 12px)" in css
+    )
+    assert "border: 2px dotted var(--vl-tier-yellow-ink);" in css
     assert "top:var(--vl-rec-top); height:var(--vl-rec-h)" in css  # W-10 렠 좌표 그대로
 
 

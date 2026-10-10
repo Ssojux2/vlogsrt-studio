@@ -2872,6 +2872,8 @@ CPU는 놀고, 1단계가 도는 동안 네트워크는 논다.
 잰다). 무대 바닥값 400px보다 낮은 창에서는 문서가 스크롤되고, 1050px 이하 2단 배치는 무대
 높이를 화면에 묶지 않으므로(Q5 유지) 1000×800에서 타임라인이 첫 화면 아래(844px)에서 시작한다.
 
+**이후(D57)**: 렠 층 좌표(등급 20/22 · 컷 46/36 · 오디오 86/20 · 자막 110/22)·손잡이 자리·색·글꼴은 D57(W-17 A단계)이 바꿨다. 무대 격자 영역은 D57의 B단계가 다시 정한다.
+
 ## D51 — 추천은 3단이다: 자막과 영상을 따로 판정한 뒤 표 하나로 합친다 (2026-10-08)
 
 **문제**: 사용자 지시 "자막에서 무음 구간과 문제 있는 영상 구간은 제외 대상으로 빨강, 보통은
@@ -3838,3 +3840,156 @@ Final Cut 라이브러리의 것으로 남고, `src`는 신원이 맞지 않을 
 누락 아이콘이 없는지, 키워드·즐겨찾기·캡션이 보이는지는 `docs/FCP_MANUAL_ACCEPTANCE.md`의
 「전체 타임라인 보내기」로 확인한다. W-15의 `자막 시각 확인 필요` 키워드는 W-15를 이 위에 올리며
 이었다 — 규칙은 **지금 빨강만**이다(D55 '키워드 배선').
+
+---
+
+## D57 — 작업대 재디자인: 테마는 OS를 따르고, 색은 토큰 두 벌, 글꼴은 앱이 직접 낸다 (2026-10-10, W-17 A단계)
+
+**문제**: 작업대는 밝은 `gr.themes.Soft()` 위에 어두운 껍질 CSS를 덧바른 것이었다. OS가 밝은 모드여도
+언제나 어두웠고, 껍질이 덮지 못한 자리에서 Soft가 샜다 — 연보라 이름표, 흰 드롭다운, 흰 바탕 위 흰
+글자라 안 보이는 인라인 코드(리비전·작업 ID가 흰 막대로 보였다), 흰 hover, 남색 탭. 강조색은 셋(청록
+`#20b9ae` 주 단추, 청록 `#36d5c6` 선택 테두리 `!important`, 파랑 `#2f6db3`)이었고 알림은 어두운 화면 위
+흰 카드였다. 한글은 시스템 글꼴(Apple SD Gothic Neo)로만 그려졌다(Soft의 Montserrat는 그라디오가 묶어
+싣는 `LocalFont`라 원격 요청은 없었다 — 기준 커밋 실측 0). 2026-10-09 디자인 시스템(토큰·컴포넌트
+10종)과 캔버스(대지 10장)가 새 모습을 정했고, 사용자가 2026-10-10에 아래 일곱 가지를 결정했다.
+
+**사용자 결정(2026-10-10) — 목업과 다르면 이쪽이 이긴다**:
+
+1. 테마는 **OS의 밝은/어두운 설정을 따른다**(어둡게 강제하지 않는다). 두 테마는 동등하다.
+2. 글꼴은 **앱에 묶어 싣는다** — IBM Plex Sans KR(400/500/600) + IBM Plex Mono(400/500), woff2,
+   OFL-1.1. 실행 중 CDN 없음. 없으면 `Apple SD Gothic Neo` → 시스템 글꼴.
+3. 필터 「검토 대기」 → 「제외 제안」(미검토 제외 제안만 보인다). — C단계
+4. 승인 단추는 **지금 그대로**다. 「이 영상만 승인」을 더하지 않고, 기존 승인 단추의 이름·범위도 바꾸지
+   않는다(모양만 바꿀 수 있다).
+5. 일괄 확인은 **제안 대기열** 안에 산다 — 「제외 제안 N개 중 M개 남음」, 「다음」, 「남은 M개 모두 제외
+   유지」. 명령 줄의 「자동 제외 확인」을 대신하고, 뜻은 지금의 「자동 제외 확인」과 **정확히** 같다(W-13
+   규칙·실행 취소·「전체 복원」 그대로, 같은 서비스 호출). — C단계
+6. 좁은 화면(≤860px)은 **영상과 타임라인이 먼저**다: `"player" "timeline" "thumbs" "panel" "foot"`.
+   1050px 2단은 2단 그대로, 타임라인이 재생기 바로 아래에 보인다. — B단계
+7. **가격 표시를 더하지 않는다.** gpt-6-luna 가격을 찾거나 넣지 않고, 모델 선택지·승인 단추에 달러가
+   없다. 기존 견적 문구(D46 `가격 미정`, W-14 「Claude 비용 상한 $X (보수적)」)는 그대로다.
+
+**목업이 틀린 곳 — 제품 규칙이 이긴다**: 디자인 README의 "제외 제안이 미검토인 동안 보내기를 막는다"와
+Confirm 대지의 꺼진 보내기 단추는 D56과 어긋난다. 「Final Cut으로 보내기」는 미검토 제안으로 **막히지
+않는다**(태그만 단다). 미검토 수는 정보로만 보인다. 가져오기 작업(`ingest_copy`·`reference_import`) 중
+거부는 그대로다(D56).
+
+**결정 — A단계(시각 바탕, 배치는 옮기지 않는다)**:
+
+- **테마 모드**: `gr.themes.Soft()`를 `workbench_theme()`(`gr.themes.Base`)로 바꿨다. 그라디오 6.29는
+  `__theme` 질의가 없으면 `system` 모드로 `prefers-color-scheme`을 보고 `body`에 `.dark`를 달거나 떼며,
+  OS 설정이 바뀌면 그 자리에서 따라간다(탐침 실측: 열린 화면에서 밝음↔어둠 전환이 다시 그리지 않고
+  바뀐다). 앱은 `__theme`을 붙이지 않고 `.dark`를 손대는 코드도 없다 — 시험이 `ui/` 전체에서 `__theme`·
+  `theme_mode`·`classList.add('dark')`가 없음을 본다.
+- **토큰**: 색 값은 `ui/design_tokens.py` 한 곳에만 산다(표준 라이브러리만, 순수). 디자인 tokens.json의
+  37색에 영상 위 띠 두 색(`video-overlay` `#000000c7`·`on-video-overlay`)을 더해 (밝은, 어두운) 짝으로
+  둔다. CSS 사용자 속성은 `--vl-` 머리를 붙인다 — 맨 이름 중 `--accent`·`--success`·`--danger`·
+  `--radius-*`·`--font-mono`를 그라디오 번들이 이미 쓴다(실측 23·3·3·144·41회). 밝은 값은 `:root`에 한 번,
+  어두운 값은 `:root.dark, :root .dark, :root:has(> body.dark)`에 한 번 선언한다(그라디오 테마와 같은
+  선택자 + 문서 뿌리의 스크롤바·`color-scheme`). 밝은 값을 `.gradio-container`에 다시 선언하지 않는다 —
+  body의 `.dark` 값이 상속에서 가려진다. `video-well`은 두 테마 모두 `#050607`이다.
+- **그라디오 테마도 같은 표에서**: `GRADIO_THEME_COLORS`(그라디오 변수 → 토큰)가 `*_dark` 짝을 준다.
+  `set()`이 어두운 인자를 받지 않는 `color_accent`는 속성으로 단다(테마 CSS가 `*_dark` 속성을 전부 어두운
+  블록에 쓴다). 그라디오의 `--color-accent`는 주로 **글자·선**(선택한 탭 글자, 초점선, 로더)이라
+  `accent-ink`로 준다 — `#2f6db3` 글자는 어두운 바탕에서 3.4:1이다(실측: 탭 글자 9.3:1 어둠·6.2:1 밝음).
+  채움은 따로 `accent`다(주 단추·체크박스 선택·슬라이더). 둥글기 6px 이하, 그림자는 떠 있는 것만
+  (`shadow-pop`), 조작 테두리 1px `line-strong`(Base 기본 0px), 단추 라벨 13px/500, 전이 없음. 중립 색조
+  (`neutral_*`)도 회색 토큰 11개로 이어 덮지 못한 구석이 같은 계열에 머문다.
+- **글꼴**: 글꼴은 이름(문자열)만 테마에 준다 → 그라디오가 제 `LocalFont` 글꼴표를 따로 싣지 않는다.
+  `@font-face` 다섯 개(`font-display: swap`)가 `/vl-fonts/<파일>`을 가리킨다. 이 경로는 고정 다섯 파일의
+  **허용 목록 라우트**다(`design_tokens.font_path` — 이름이 글자 그대로 같을 때만, 경로 입력 없음,
+  `font/woff2`, 한 주 캐시). 그라디오 `set_static_paths`·`allowed_paths`는 쓰지 않는다 — 가드가
+  `/gradio_api/file=`을 닫아 두었고(§4.4), 고정 자산 다섯 개에 파일 경로 공개를 열 이유가 없다. Host
+  가드는 그대로 지난다(시험: 외부 Host 403, README·OFL·`..%2F`는 404).
+- **출처(ui/static/fonts/README.md에 해시)**: jsDelivr의 IBM 공식 npm 꾸러미, 정확한 판 —
+  `@ibm/plex-sans-kr@1.1.0`(2024-11-11) `fonts/complete/woff2/hinted/IBMPlexSansKR-{Regular,Medium,SemiBold}.woff2`
+  (438,540 · 439,816 · 434,484바이트), `@ibm/plex-mono@2.5.0`(2026-06-11) `fonts/complete/woff2/IBMPlexMono-{Regular,Medium}.woff2`
+  (49,248 · 50,400바이트). 합계 1,412,488바이트(1.35 MiB) — 한글 파일 하나가 0.44 MB라 나눔(subset)은
+  만들지 않았다. 각 파일을 빈 임시 폴더에 받아 `wOF2` 표지를 확인한 뒤 옮겼다. npm 설치는 하지 않았다
+  (꾸러미의 `postinstall` 원격 측정은 돌지 않는다). 라이선스 원문은 `OFL.txt`(두 꾸러미 `LICENSE.txt`가
+  바이트까지 같다). 파이썬 의존성이 아니다(규칙 10).
+- **사람이 쓴 CSS의 색은 토큰으로만**: 옛 껍질(`CSS`)은 `BASE_CSS`(바탕·초점·알림·상태 줄)로 바뀌었고,
+  `WORKBENCH_CSS`·`BASE_CSS`·파이썬이 짓는 인라인 style(재생기·파형·큐 표·안내 문장)에는 색 글자가 하나도
+  없다 — 시험이 `ui/*.py`를 줄마다 훑는다(`design_tokens.py`만 예외). 옛 표기 `.vl-good`·`.vl-review`·
+  `.vl-recommendation.recommended/.review_required`와 청록·남색 덮어쓰기(`#20b9ae`·`#36d5c6`·`#43caba`·
+  `!important` 선택 테두리)는 지웠다.
+- **등급 표지(디자인 README Tiers)**: 추천 = `tier-green` 채움 + `on-tier-green` 글자 + 위 2px
+  `tier-green-ink`, 보통 = `tier-yellow`, 제외 제안 = 135° 빗금(`tier-red`/`tier-red-deep` 6px) + 단단한
+  1px `tier-red-ink` 가장자리, 판정 보류 = **속 빈 점선 테두리**(`2px dotted tier-yellow-ink`, 채움 없음 —
+  옛 노랑 채움 + 점선 윗변은 버렸다. 디자인의 1.5px는 Chromium이 1px로 그려 점이 흐려서 2px다). 글자 표지 ★ · ✕ · ?와 범례 낱말은 그대로다. 세 채움은 밝기 단이
+  다르다(어둠: 초록>노랑>빨강, 밝음: 노랑>초록>빨강 — 시험). 카드 배지의 등급 색은 `*-ink`, 자막 시각
+  확인(D55) 배지는 상태라 `danger`·`warn`·`success`다.
+- **본점 채움은 셋뿐**: `--vl-accent`(`#2f6db3`)는 `.vl-btn-primary`·`.vl-handle`·`.vl-int-sel`(선택한 컷
+  덮개 28%) 규칙에만 나온다(시험이 규칙 집합으로 잰다). 선택 카드·눌린 토글은 `accent-soft` 바탕 +
+  `accent-ink` 선 + 밑줄 2px(`aria-pressed`가 이제 보인다 — 옛 화면은 눌린 필터가 안 보였다).
+- **렠 좌표**: 등급 20/22 · 컷 46/36 · 오디오 86/20 · 자막 110/22, 렠 150px 그대로(층 사이 4px). 손잡이는
+  눈금자 위(top 2px)가 아니라 선택한 컷 띠 안 가운데로 내렸다(`calc(int-top + (int-h − handle-h)/2)`) —
+  위치만 바뀌었고 끌기·←/→·Enter 동작은 그대로다. 독립 검증 뒤 이 자리로 유지하기로 했다(2026-10-10).
+  눈금 글자는 Mono 11px, 첫 글자는 왼쪽·끝 글자는 오른쪽에 붙여 양끝이 잘리지 않는다. 재생 머리는 양옆
+  1px `playhead-casing`. 글자 바닥 11px(배지·눈금·컷 이름표 10→11px, 패널 `.vl-kv small` 9.6→11px — 시험이
+  사람이 쓴 CSS의 모든 `font-size`를 잰다), 6px보다 둥근 것 없음(배지 알약 → 2px).
+- **초점·스크롤바·알림**: 초점 고리는 `outline: 2px solid accent-ink; outline-offset: 2px`다 — 디자인의
+  box-shadow 고리와 같은 모양(땅 2px 틈 + 2px)이지만 등급 막대·선택 카드의 안쪽 그림자 테두리를 덮지
+  않는다. 스크롤바는 `scrollbar-color: line-strong surface` + 테마별 `color-scheme`. 알림(`gr.Error` 등)은
+  두 테마 모두 `surface-raised` + `shadow-pop`, 종류는 테두리·아이콘 색(`danger`·`warn`·`success`·
+  `accent-ink`)이다 — 그라디오 알림 CSS가 늦게 실려 같은 특정성에서 이기므로 `!important`로 묶었다.
+  그라디오 prose가 `#e1e1e1`로 박아 둔 가로줄·표 선(`.prose hr/th/td`)은 `line` 토큰으로 덮는다(어두운
+  테마에서 밝은 줄로 남았다).
+- **문구 하나 삭제**: 진행 상태 기본 문장의 꼬리 「추천은 청록색, 확인이 필요한 구간은 주황색으로
+  표시됩니다.」를 지웠다 — 그 색은 이제 없고, 디자인 README대로 범례가 뜻을 말한다. 기본 문장은 단계
+  이름(`**{stage}**`)만 남는다(나머지 문구 정리는 C단계).
+- **글꼴 바이트 고정**: `.gitattributes`에 `*.woff2 binary`·`ui/static/fonts/OFL.txt -text`를 더했다. OFL
+  원문은 꾸러미가 CRLF로 싣는데 저장소 기본 `* text=auto eol=lf`가 LF로 바꾸면 README의 sha256이 체크아웃
+  뒤에 어긋난다. 증거: `git hash-object --path=…/OFL.txt`(필터 적용)와 `--no-filters`가 같은 blob
+  `c35c4c6…`, 옛 규칙이면 `01497cc…`. woff2 다섯 개도 필터 전후 blob이 같다. 글꼴 라우트는 미디어
+  라우트처럼 HEAD에도 답한다.
+- **대비**: 토큰 짝을 두 테마 모두 잰다(시험). 글자 4.5:1 — ink·ink-muted(bg·surface·raised·hover·
+  sunken), ink-faint(surface·raised), accent-ink, on-accent, on-tier-*, tier-*-ink(bg·surface·raised·
+  sunken), success·warn·danger(제 바탕 포함), on-caption-chip, 영상 띠 위 흰 글자(최악 합성). 배지 글자가
+  놓이는 선택 카드(`accent-soft`)·hover 카드(`surface-hover`) 위에서도 `success`·`warn`·`danger`·
+  `tier-*-ink`를 잰다 — 밝은 `success` `#1d7a48`이 선택 카드 위 4.34:1이라(검증 실측) 밝은 쪽만 tokens.json보다
+  한 단 어두운 `#1b7444`로 바꿨다(가장 낮은 짝 `surface-sunken` 4.62:1). 표지 3:1 —
+  line-strong, 렠 위 accent·accent-ink·draft·playhead, 보류 점선. 재생 머리는 머리 또는 casing 중 하나가
+  모든 등급 채움 위에서 3:1이다.
+
+**다시 디자인하지 않은 것(A단계)**: 배치(머리글·명령 줄·서랍·격자 영역·카드·대기열·문구)는 그대로다 —
+B·C단계. 숨은 「자막」 탭과 고급 패널의 속은 토큰만 입었다(인라인 색 → 토큰). `__vlFitStage`·전역 단축키
+(D50)·`display:contents` 칸 우회는 손대지 않았다. 유료 동작·견적·승인 결합·W-14 재견적 규칙은 그대로다.
+
+**실측(오프라인 탐침, 127.0.0.1:7993, 합성 작업공간 3개 영상, 헤드리스 Chromium)**: 글꼴 다섯 개 모두
+`/vl-fonts/…` 200, `document.fonts` 다섯 개 `loaded`, `document.fonts.check('13px "IBM Plex Sans KR"','한글')`
+참, 7993 밖으로 나간 요청 0. 같은 작업공간·같은 상태(상태 줄 한 줄)에서 기준 커밋 `04e9dae`와 대조:
+
+| 창 | 무대 위쪽 | 영상(전 → 후) | 타임라인 아래끝 | 각주 아래끝 | 가로 스크롤 |
+|---|---|---|---|---|---|
+| 1440×900 | 255 → 254 | 741×336 → 741×352 | 876 | 900 | 없음 |
+| 1280×800 | 255 → 254 | 581×236 → 581×252 | 776 | 800 | 없음 |
+
+밝음·어둠 값이 같다. 단추 줄 36 → 34px(라벨 13px/500 + 1px 테두리), 타임라인 칸 209 → 194px(이동
+줄 단추가 낮아졌다). 1000·860·390px 모두 가로 스크롤 없음(좁은 순서는 아직 옛것 — B단계). 열린
+아코디언 전부에서 Soft 값(`#6366f1`·`#e0e7ff`·`#f3f4f6`) 계산 색 0개. 상태 줄이 1~3줄로 무대를 미는
+문제(255↔277)는 그대로다 — B단계의 고정 높이 활동 영역이 고친다.
+
+**시험 수정(글자 값 자체가 이번 재디자인이 바꾼 것만, 행동 단언은 그대로)**:
+
+- `tests/raw/test_visual_workbench_ui.py::test_stage_layout_declared_dom_and_css` — 무채색이 그라디오
+  변수(`var(--body-text-color` 등 여섯)를 따른다는 단언을 작업대 토큰(`var(--vl-ink` 등 여섯)으로,
+  `css.count("#2f6db3") >= 3`을 "`#2f6db3` 글자는 CSS에 없고 `var(--vl-accent)`가 셋 이상"으로 바꿨다.
+  색이 토큰으로 옮겨 값은 `design_tokens.py` 한 곳에만 있다. 격자·`display:contents`·모바일 순서 단언은
+  그대로다.
+- `test_legend_names_three_tiers_with_pattern_cue` — "옛 `.vl-good`·`.vl-review`는 CSS에 남는다"를
+  "지웠다"로 뒤집었다(계획: 옛 클래스 삭제). 등급 hex 선언 세 줄을 토큰 선언으로, 보류의
+  `border-top-style:dotted`를 속 빈 점선 테두리(`border: 2px dotted var(--vl-tier-yellow-ink)`)로 바꿨다.
+  범례 낱말·빗금 존재·렠 좌표 변수 단언은 그대로다.
+- 진행 상태 기본 문장의 「청록·주황」 꼬리를 고정한 시험은 없었다(지운 문장에 맞춰 고친 시험 없음).
+- 새 시험 `tests/raw/test_workbench_theme.py`(19개) — 테마가 토큰·`*_dark` 짝으로 지어짐, 어둠 강제 없음,
+  마운트가 그 테마·CSS를 싣고 `allowed_paths=None`, 토큰이 두 테마에 한 번씩, 두 테마 대비(선택·hover
+  카드 위 배지 글자 포함), 등급 밝기 단, 색 글자 탐지기 자체(값 자리만 — `#add`·`#fade` 아이디는 놓아준다),
+  사람이 쓴 CSS·인라인 style에 색 글자 0, 모든 `var(--vl-*)`가 선언됨, 등급 막대, 범례·글자 표지·옛 표기
+  삭제, 본점 채움 셋, 렠 좌표, 초점·스크롤바·알림, prose 선·글자 바닥 11px, `@font-face` ↔ 파일·README
+  해시, 앱이 다섯 글꼴만 낸다(GET·HEAD).
+
+**위험·남은 것**: `color_accent_dark`를 속성으로 다는 우회는 그라디오가 `set()`에 그 인자를 더하면
+필요 없어진다(시험이 지금 없음을 단언해 바뀌면 알린다). `::cue`의 `var()`는 Chromium에서 상속으로 풀리지만
+사람 눈 확인이 남았다(헤드리스에서 자막 트랙 그리기를 보지 못했다). 그라디오 알림 제목 `Error`는 영어
+그대로다(C단계 문구). 실브라우저 두 테마 확인 🧑.

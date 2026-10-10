@@ -14,3 +14,8 @@
 # 읽는 파일이 아니라 `parse_srt`가 파싱하는 정답지이고, 그 함수가 `\r\n`을 먼저
 # 지운다(`output._normalize_newlines`). 비교가 바이트로 가는 곳은 없다.
 * text=auto eol=lf
+
+# 묶음 글꼴(D57)은 받은 바이트 그대로 둔다 — README의 sha256이 체크아웃 뒤에도 맞아야 한다.
+# OFL 원문은 꾸러미가 CRLF로 싣는다. 위 `eol=lf`가 고치면 해시가 어긋난다.
+*.woff2 binary
+ui/static/fonts/OFL.txt -text

@@ -82,13 +82,14 @@ def media_player_html(
             f' src="{escaped}" default></track>'
         )
     note = (
-        f'\n<p style="color:#667; font-size:12px; margin:4px 0 0;">{html.escape(caption)}</p>'
+        f'\n<p style="color:var(--vl-ink-muted); font-size:12px; margin:4px 0 0;">'
+        f"{html.escape(caption)}</p>"
         if caption
         else ""
     )
     return (
         '<video controls preload="metadata" style="width:100%;max-height:420px;'
-        ' border-radius:8px; background:#000;">\n'
+        ' border-radius:6px; background:var(--vl-video-well);">\n'
         f'    <source src="{source}"></source>{track}\n'
         f"</video>{note}"
     )
@@ -102,7 +103,7 @@ def waveform_svg(peaks: Sequence[float], *, height: int = 72) -> str:
     """
     values = [max(0.0, min(1.0, float(value))) for value in peaks]
     if not values:
-        return '<p style="color:#888">파형 데이터가 없다</p>'
+        return '<p style="color:var(--vl-ink-muted)">파형 데이터가 없다</p>'
     width = max(1, len(values) * 3)
     mid = height / 2
     bars: list[str] = []
@@ -111,13 +112,14 @@ def waveform_svg(peaks: Sequence[float], *, height: int = 72) -> str:
         top = mid - bar
         bars.append(
             f'<rect x="{index * 3}" y="{top:.1f}" width="2" height="{bar * 2:.1f}"'
-            ' fill="#4a7a96"></rect>'
+            ' fill="currentColor"></rect>'
         )
     return (
         f'<svg viewBox="0 0 {width} {height}" preserveAspectRatio="none"'
-        f' style="width:100%;height:{height}px; background:#f4f6f8;'
-        ' border-radius:6px;" role="img" aria-label="오디오 파형">\n'
-        f'  <line x1="0" y1="{mid}" x2="{width}" y2="{mid}" stroke="#c8d2da"></line>\n'
+        f' style="width:100%;height:{height}px; background:var(--vl-surface-sunken);'
+        ' color:var(--vl-accent-ink); border-radius:6px;" role="img" aria-label="오디오 파형">\n'
+        f'  <line x1="0" y1="{mid}" x2="{width}" y2="{mid}"'
+        ' style="stroke:var(--vl-line-strong)"></line>\n'
         + "\n".join(f"  {bar}" for bar in bars)
         + "\n</svg>"
     )
@@ -212,7 +214,7 @@ def cue_table_html(
     """
     if not rows:
         return (
-            '<p style="color:#888">큐가 없다 — 실행을 먼저 끝내거나, 빈 실행이면'
+            '<p style="color:var(--vl-ink-muted)">큐가 없다 — 실행을 먼저 끝내거나, 빈 실행이면'
             " 무발화 결정을 남긴다.</p>"
         )
     parts = [
@@ -233,7 +235,7 @@ def cue_table_html(
     for row in rows:
         seek_spec = (seek_by_cue or {}).get(row.cue_id)
         if seek_spec is None:
-            listen = '<span style="color:#aaa">—</span>'
+            listen = '<span style="color:var(--vl-ink-faint)">—</span>'
         else:
             start, end = seek_spec
             seek_js, repeat_js = _cue_seek_js(start, end)
@@ -262,12 +264,13 @@ def cue_table_html(
     parts.append("</tbody></table>")
     if seek_by_cue is None:
         parts.append(
-            '<p style="color:#888;font-size:12px;margin:4px 0 0;">선택 오디오 미리보기가'
-            " 아직 없다 — 최종 영상 등록(오디오 트랙 확정)을 마치면 큐 단추가 켜진다.</p>"
+            '<p style="color:var(--vl-ink-muted);font-size:12px;margin:4px 0 0;">'
+            "선택 오디오 미리보기가 아직 없다 — 최종 영상 등록(오디오 트랙 확정)을 마치면"
+            " 큐 단추가 켜진다.</p>"
         )
     else:
         parts.append(
-            '<p style="color:#667;font-size:12px;margin:4px 0 0;">'
+            '<p style="color:var(--vl-ink-muted);font-size:12px;margin:4px 0 0;">'
             "▶ 큐 시작으로 이동 · 반복 큐 구간을 끝에서 시작으로 되돌려 잰다"
             "(정지·다른 선택으로 풀린다) —"
             " 미리보기 시계(선택 오디오의 잰 원점)에 맞춘 값이다.</p>"
@@ -286,7 +289,8 @@ def caption_player_html(media_path: str, *, waveform: str, provenance: str) -> s
     return (
         '<div id="caption-player" class="vlogsrt-caption-player">\n'
         f'  <video id="caption-video" controls preload="metadata" src="{source}"'
-        ' style="width:100%;max-height:420px;background:#000;border-radius:8px;"></video>\n'
+        ' style="width:100%;max-height:420px;background:var(--vl-video-well);'
+        'border-radius:6px;"></video>\n'
         f"  {waveform}\n"
         '  <div style="display:flex;gap:8px;margin-top:6px;">\n'
         '    <button type="button" onclick="(function(){var v='
@@ -298,7 +302,8 @@ def caption_player_html(media_path: str, *, waveform: str, provenance: str) -> s
         'if(v._vlLoop){v._vlLoop();}v.pause();v.currentTime=0;})()">'
         "처음으로</button>\n"
         "  </div>\n"
-        f'  <p style="color:#667;font-size:12px;margin:6px 0 0;">{html.escape(provenance)}</p>\n'
+        '  <p style="color:var(--vl-ink-muted);font-size:12px;margin:6px 0 0;">'
+        f"{html.escape(provenance)}</p>\n"
         "</div>"
     )
 
@@ -463,7 +468,7 @@ def caption_overlay_player_html(media_path: str, *, waveform: str, provenance: s
         '<div id="caption-player" class="vlogsrt-caption-player">\n'
         f'  <video id="caption-video" controls preload="metadata" src="{source}"'
         ' aria-label="선택 오디오 미리보기 재생기" style="width:100%;max-height:42vh;'
-        'background:#000;border-radius:8px;object-fit:contain;"></video>\n'
+        'background:var(--vl-video-well);border-radius:6px;object-fit:contain;"></video>\n'
         '  <div id="caption-overlay" class="cap-overlay cap-overlay-on"'
         ' aria-live="off"></div>\n'
         f"  {waveform}\n"
@@ -569,10 +574,12 @@ def caption_workbench_details_html(model: Mapping[str, object]) -> str:
 
 
 WORKBENCH_CSS = """
-/* V2F1 작업대 — 무채색은 그라디오 테마 토큰을 따르고 본점(선택 강조)은 하나다. */
+/* V2F1 작업대 — 색은 작업대 토큰(`--vl-*`, ui/design_tokens.py)만 부른다. 밝은·어두운 두 벌이
+   같은 이름을 쓰므로 여기에는 테마 분기가 없다. 본점 채움(--vl-accent)은 주 단추·경계 손잡이·
+   선택한 컷 셋뿐이고, 글자·선의 강조는 --vl-accent-ink다(D57). */
 #visual-player, #visual-workbench, #caption-workbench { max-width: 100%; }
 .vl-note {
-  color: var(--body-text-color-subdued, #667); font-size: 12px; margin: 4px 0 0;
+  color: var(--vl-ink-muted); font-size: 12px; margin: 4px 0 0;
 }
 /* 3단 무대 — 왼쪽 시간순 목록 · 가운데 큰 재생기+시간 렠 · 오른쪽 선택 패널.
    구성요소 껍데기(vl-stage-cell)와 본문 뿌리는 display:contents로 격자에
@@ -590,7 +597,7 @@ WORKBENCH_CSS = """
   --vl-stage-gap: 10px;
   --vl-thumb-art-w: 64px; --vl-thumb-art-h: 46px;
   --vl-name-lines: 2;
-  --vl-scrollbar: #555e66 #292b2f;
+  --vl-scrollbar: var(--vl-line-strong) var(--vl-surface);
   display: grid;
   grid-template-columns: var(--vl-list-col) minmax(0, 1fr) var(--vl-panel-col);
   grid-template-rows: minmax(0, 1fr) auto auto;
@@ -615,26 +622,31 @@ WORKBENCH_CSS = """
   display: grid; grid-template-columns: minmax(0, 1fr); align-content: start;
   gap: 6px; padding: 8px;
   max-height: 100%; min-height: 0; overflow: hidden auto; scrollbar-color: var(--vl-scrollbar);
-  border-radius: 8px; border: 1px solid var(--block-border-color, #e3e8ee);
-  background: var(--block-background-fill, transparent);
+  border-radius: 6px; border: 1px solid var(--vl-line);
+  background: var(--vl-surface);
 }
 #visual-stage .vl-thumbs > .vl-row, #visual-stage .vl-pager { grid-column: 1 / -1; }
 /* 테두리·배경은 클래스 단계에 둔다 — 선택(.vl-thumb-sel) 강조가 무대 범위
    선택자에 덮이지 않는다. 배치만 무대 범위에서 정한다. */
 .vl-thumb {
-  display: flex; border-radius: 8px; text-align: left; cursor: pointer;
-  border: 1px solid var(--block-border-color, #e3e8ee);
-  background: var(--block-background-fill, #fff);
-  color: var(--body-text-color, #223);
+  display: flex; border-radius: 6px; text-align: left; cursor: pointer;
+  border: 1px solid var(--vl-line);
+  background: var(--vl-surface-raised);
+  color: var(--vl-ink);
 }
-.vl-thumb-sel { border-color: #2f6db3; box-shadow: 0 0 0 1px #2f6db3; }
+.vl-thumb:hover { background: var(--vl-surface-hover); }
+/* 선택은 색 하나가 아니라 셋 — 옅은 강조 바탕 · accent-ink 테두리 · 안쪽 1px 선. */
+.vl-thumb-sel, .vl-thumb-sel:hover {
+  border-color: var(--vl-accent-ink); background: var(--vl-accent-soft);
+  box-shadow: inset 0 0 0 1px var(--vl-accent-ink);
+}
 .vl-thumb-ex { opacity: 0.55; }
 #visual-stage .vl-thumb {
   min-width: 0; width: 100%; flex-direction: row; gap: 6px; padding: 5px; align-items: center; }
-.vl-thumb img { background: #000; border-radius: 4px; }
+.vl-thumb img { background: var(--vl-video-well); border-radius: 4px; }
 .vl-thumb-missing {
-  border-radius: 4px; background: var(--block-background-fill, #eef1f4);
-  color: var(--body-text-color-subdued, #889); font-size: 10px;
+  border-radius: 4px; background: var(--vl-surface-sunken);
+  color: var(--vl-ink-muted); font-size: 11px;
   display: flex; align-items: center; justify-content: center;
 }
 #visual-stage .vl-thumb img, #visual-stage .vl-thumb-missing {
@@ -643,35 +655,39 @@ WORKBENCH_CSS = """
   display: flex; flex-direction: column; gap: 2px; flex: 1 1 auto; min-width: 0; }
 /* 긴 파일 이름은 두 줄까지 보이고 말줄임 — 전체 이름은 카드 title 말풍선(D50). */
 #visual-stage .vl-thumb-name {
-  font-size: 13px; color: var(--body-text-color, #223);
+  font-size: 13px; font-weight: 500; color: var(--vl-ink);
   max-width: none; white-space: normal; overflow-wrap: anywhere; line-height: 1.25;
   display: -webkit-box; -webkit-line-clamp: var(--vl-name-lines); -webkit-box-orient: vertical;
   overflow: hidden; }
 .vl-thumb-sub {
   display: flex; flex-wrap: wrap; gap: 3px; align-items: center; min-width: 0;
-  font-size: 11px; color: var(--body-text-color-subdued, #778);
+  font-size: 11px; color: var(--vl-ink-muted);
   font-variant-numeric: tabular-nums;
 }
-/* 배지는 줄 안에서 쪼개지지 않고 통째로 다음 줄로 넘어간다 — 잘림 없음. */
+/* 배지는 줄 안에서 쪼개지지 않고 통째로 다음 줄로 넘어간다 — 잘림 없음. 알약 모양은
+   쓰지 않는다(6px보다 둥근 것 없음), 글자는 11px가 바닥이다. */
 .vl-badge {
-  display: inline-block; font-size: 10px; padding: 1px 6px; border-radius: 8px;
-  background: var(--block-background-fill, #eef1f4);
-  color: var(--body-text-color-subdued, #556);
-  border: 1px solid var(--block-border-color, transparent); white-space: nowrap;
+  display: inline-block; font-size: 11px; font-weight: 500; line-height: 14px;
+  padding: 1px 6px; border-radius: 2px;
+  background: transparent;
+  color: var(--vl-ink-muted);
+  border: 1px solid var(--vl-line-strong); white-space: nowrap;
 }
-.vl-badge-warn { background: rgba(179, 69, 47, 0.14); color: #b3452f; }
+.vl-badge-warn { border-color: var(--vl-warn); color: var(--vl-warn); }
 #visual-player { display: contents; }
 #visual-preview { grid-area: player; min-width: 0; min-height: 0;
   display: flex; flex-direction: column; }
 .vl-video-surface { position: relative; flex: 1 1 auto; min-height: 0; display: flex; }
+/* 영상은 두 테마 모두 어두운 우물 위에 놓인다 — 밝은 바탕에 영상을 띄우지 않는다. */
 #visual-preview video {
   width: 100%; height: auto; flex: 1 1 auto; min-height: 0;
-  background: #08090b; object-fit: contain; }
+  background: var(--vl-video-well); object-fit: contain; }
 .vl-current-caption, #visual-note { flex: none; }
 #visual-note, .vl-footnote { overflow-wrap: anywhere; }
 #vl-panel { grid-area: panel; max-height: 100%; min-height: 0; overflow: hidden auto;
   box-sizing: border-box; scrollbar-color: var(--vl-scrollbar); }
-#visual-timeline { grid-area:timeline; min-width:0; overflow-x:auto; padding-top:4px; }
+#visual-timeline { grid-area:timeline; min-width:0; overflow-x:auto; padding-top:4px;
+  scrollbar-color: var(--vl-scrollbar); }
 #vl-footnote { grid-area: foot; }
 /* 재생기 아래 두 줄의 여백 — 계약 시험이 위 격자 선언을 글자 그대로 본다. */
 #vl-footnote, #visual-note { margin: 2px 0 0; }
@@ -685,50 +701,73 @@ WORKBENCH_CSS = """
 #quick-status { padding: 2px 8px; }
 #quick-status p { margin: 1px 0; font-size: 12px; }
 #library-analysis-scope p { margin: 0; }
-#visual-video::cue { color:#fff; background:rgba(0,0,0,.78); font-size:20px; }
+#visual-video::cue {
+  color: var(--vl-on-video-overlay); background: var(--vl-video-overlay); font-size:20px; }
 .vl-source-overlay { position:absolute; bottom:44px; left:50%; transform:translateX(-50%);
  max-width:90%; padding:5px 10px; border-radius:4px; text-align:center; white-space:pre-wrap;
- background:rgba(0,0,0,.78); color:#fff; font-size:20px; line-height:1.4; pointer-events:none; }
+ background: var(--vl-video-overlay); color: var(--vl-on-video-overlay);
+ font-size:20px; line-height:1.4; pointer-events:none; }
 .vl-source-overlay[hidden] { display:none; }
-.vl-legend { flex:1; color:#b8c3ca; font-size:12px; }
-.vl-good { color:#49d8c7; } .vl-review { color:#edbd74; }
+.vl-legend { flex:1; color: var(--vl-ink-muted); font-size:12px; }
 .vl-ruler { position:absolute; inset:0 0 auto; height:var(--vl-ruler-h);
- border-bottom:1px solid #41464c; }
-.vl-ruler span { position:absolute;font-size:10px;color:#b1b9c1;transform:translateX(-50%); }
+ border-bottom:1px solid var(--vl-line); }
+/* 눈금 글자 — 첫 글자는 왼쪽, 끝 글자는 오른쪽에 붙여 양 끝이 잘리지 않는다. */
+.vl-ruler span { position:absolute; font: 500 11px/15px var(--vl-font-mono);
+ color: var(--vl-ink-muted); transform:translateX(-50%); white-space:nowrap; }
+.vl-ruler span:first-child { transform:none; padding-left:3px; }
+.vl-ruler span:last-child { transform:translateX(-100%); padding-right:3px; }
 .vl-recommendation { position:absolute; top:var(--vl-rec-top); height:var(--vl-rec-h);
- border:0;border-radius:3px;
- background:#4c6871;color:white;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;
- font-size:11px;min-width:3px;text-align:left;padding:1px 6px; }
-.vl-recommendation.recommended { background:#177e73;color:#e9fffb;border-top:2px solid #48d7c7; }
-.vl-recommendation.review_required {
- background:#745638;color:#ffe8c4;border-top:2px solid #edbd74; }
-/* 3단 등급(D51) — 색만으로 가르지 않는다: 빗금(빨강)·점선(보류)·글자 표지가 함께 간다. */
-.vl-recommendation.green{background:#1f6f46;border-top:2px solid #6fe3a5}
-.vl-recommendation.yellow{background:#6f5f1a;border-top:2px solid #ffd760}
-.vl-recommendation.red{background:repeating-linear-gradient(135deg,#7a2d2d 0 6px,#561c1c 6px 12px);
- border-top:2px solid #ff8a80}
-.vl-recommendation.yellow.hold{border-top-style:dotted}
-.vl-tier-key.green{color:#6fe3a5} .vl-tier-key.yellow{color:#ffd760}
-.vl-tier-key.red{color:#ff8a80} .vl-tier-key.hold{color:#b8c3ca}
-.vl-badge-green{border-color:#6fe3a5;color:#6fe3a5}
-.vl-badge-red{border-color:#ff8a80;color:#ff8a80}
-.vl-badge-amber{border-color:#ffd760;color:#ffd760}
-.vl-marker-reason.red{background:#3a2222;border-left-color:#ff8a80}
-.vl-marker-reason.yellow{background:#36311a;border-left-color:#ffd760}
+ border:0; border-radius:2px; box-sizing:border-box;
+ background: var(--vl-surface-raised); color: var(--vl-ink);
+ overflow:hidden; white-space:nowrap; text-overflow:ellipsis;
+ font-size:11px; font-weight:500; min-width:3px; text-align:left; padding:1px 6px; }
+/* 3단 등급(D51) — 색만으로 가르지 않는다: 빗금(빨강)·속 빈 점선 테두리(보류)·글자 표지가
+   함께 간다. 세 채움은 밝기 단도 다르다(흑백에서도 갈린다 — 디자인 README Tiers). */
+.vl-recommendation.green { background: var(--vl-tier-green); color: var(--vl-on-tier-green);
+ box-shadow: inset 0 2px 0 var(--vl-tier-green-ink); }
+.vl-recommendation.yellow { background: var(--vl-tier-yellow); color: var(--vl-on-tier-yellow);
+ box-shadow: inset 0 2px 0 var(--vl-tier-yellow-ink); }
+.vl-recommendation.red { background:
+  repeating-linear-gradient(135deg, var(--vl-tier-red) 0 6px, var(--vl-tier-red-deep) 6px 12px);
+ color: var(--vl-on-tier-red);
+ box-shadow: inset 0 0 0 1px var(--vl-tier-red-ink), inset 0 2px 0 var(--vl-tier-red-ink); }
+/* 판정 보류는 결함이 아니라 AI 근거가 없는 자리다 — 채우지 않고 점선 테두리만. 2px인 까닭:
+   Chromium은 1.5px 점선을 1px로 그려 점이 흐려진다(W-17 검증 실측). */
+.vl-recommendation.yellow.hold { background: transparent; color: var(--vl-tier-yellow-ink);
+ border: 2px dotted var(--vl-tier-yellow-ink); box-shadow: none; }
+.vl-tier-key.green { color: var(--vl-tier-green-ink); }
+.vl-tier-key.yellow { color: var(--vl-tier-yellow-ink); }
+.vl-tier-key.red { color: var(--vl-tier-red-ink); }
+.vl-tier-key.hold { color: var(--vl-tier-yellow-ink); }
+.vl-badge-green { border-color: var(--vl-tier-green-ink); color: var(--vl-tier-green-ink); }
+.vl-badge-red { border-color: var(--vl-tier-red-ink); color: var(--vl-tier-red-ink); }
+.vl-badge-amber { border-color: var(--vl-warn); color: var(--vl-warn); }
+/* 자막 시각 확인(D55)은 등급이 아니라 상태다 — 상태 색을 쓴다(등급 색은 등급에만). */
+.vl-badge[data-vl-sync].vl-badge-red { border-color: var(--vl-danger); color: var(--vl-danger); }
+.vl-badge[data-vl-sync].vl-badge-green {
+  border-color: var(--vl-success); color: var(--vl-success); }
+.vl-marker-reason { padding:10px; border-radius:4px; background: var(--vl-surface-raised);
+ border: 1px solid var(--vl-line); border-left: 3px solid var(--vl-line-strong); }
+.vl-marker-reason.green { border-left-color: var(--vl-tier-green-ink); }
+.vl-marker-reason.yellow { border-left-color: var(--vl-tier-yellow-ink); }
+.vl-marker-reason.red { border-left-color: var(--vl-tier-red-ink); }
+.vl-marker-reason.red > strong { color: var(--vl-tier-red-ink); }
 .vl-rec-pending { position:absolute; top:calc(var(--vl-rec-top) + 1px); left:10px;
- color:#aab5be; font-size:12px; }
+ color: var(--vl-ink-muted); font-size:12px; }
 /* 그라디오 button{font:inherit}이 16px·22.4px 줄과 큰 단추 여백을 물려 22px 칸에서
    글자가 6px 잘렸다(D50 실측) — 이 층만 제 글자 크기·줄 높이·여백을 정한다. */
 .vl-source-caption { position:absolute; top:var(--vl-cue-top); height:var(--vl-cue-h);
   font-size:12px; line-height:1.3; padding:0 6px;
-  border:0;border-radius:3px;
-  background:#36598a;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis; }
-.vl-source-caption-editor { border:1px solid #36598a;padding:10px; }
+  border:0; border-radius:2px;
+  background: var(--vl-caption-chip); color: var(--vl-on-caption-chip);
+  white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.vl-source-caption-editor { border:1px solid var(--vl-line-strong); padding:10px; }
 .vl-audio-strip { position:absolute; top:var(--vl-audio-top); left:0; right:0;
- height:var(--vl-audio-h); padding:3px 8px;
- background:#193749;color:#bad8e8;font-size:11px;box-sizing:border-box; }
-.vl-int span { background:#172a32b0;padding:2px 6px;font-size:10px;color:#f2fbff; }
-.vl-marker-reason { padding:10px;background:#223d3a;border-left:3px solid #43caba; }
+ height:var(--vl-audio-h); padding:3px 8px; line-height:14px;
+ background: var(--vl-surface); color: var(--vl-ink-muted); font-size:11px; box-sizing:border-box; }
+/* 컷 띠의 이름표는 썸네일 그림 위에 얹힌다 — 영상 위 띠와 같은 어두운 바탕(두 테마 같음). */
+.vl-int span { background: var(--vl-video-overlay); color: var(--vl-on-video-overlay);
+ padding:2px 6px; font-size:11px; }
 
 /* 자막 무대 — 왼쪽 재생기(영상·파형·이동) · 오른쪽 큐 목록+편집기(주 저장·확정).
    세팅·등록·실행은 무대 위 접힌 아코디언으로, 1440x900에서 주 조작이
@@ -744,138 +783,159 @@ WORKBENCH_CSS = """
 #caption-player { grid-area: player; }
 #caption-workbench { grid-area: cues; }
 /* 렠 층 좌표는 여기 한 곳(D50) — 202px 렠이 800–900px 창에서 재생기를 130–250px로 눌렀다.
-   실행본은 층의 left·width만 정하고 세로 좌표는 CSS만 안다. */
+   실행본은 층의 left·width만 정하고 세로 좌표는 CSS만 안다. 층 사이는 4px씩 띄운다
+   (등급 20+22 · 컷 46+36 · 오디오 86+20 · 자막 110+22 — 디자인 Timeline, D57). */
 .vl-rail {
   --vl-rail-h: 150px; --vl-ruler-h: 16px;
-  --vl-rec-top: 20px; --vl-rec-h: 20px;
-  --vl-int-top: 44px; --vl-int-h: 40px; --vl-handle-h: 28px;
-  --vl-audio-top: 88px; --vl-audio-h: 22px;
-  --vl-cue-top: 114px; --vl-cue-h: 22px;
-  position: relative; height: var(--vl-rail-h); border-radius: 6px; margin-top: 4px;
+  --vl-rec-top: 20px; --vl-rec-h: 22px;
+  --vl-int-top: 46px; --vl-int-h: 36px; --vl-handle-h: 28px;
+  --vl-audio-top: 86px; --vl-audio-h: 20px;
+  --vl-cue-top: 110px; --vl-cue-h: 22px;
+  position: relative; height: var(--vl-rail-h); border-radius: 4px; margin-top: 4px;
   touch-action: none; cursor: pointer; overflow: visible;
-  background: var(--block-background-fill, #edf1f5);
-  border: 1px solid var(--block-border-color, transparent);
+  background: var(--vl-surface-sunken);
+  border: 1px solid var(--vl-line);
 }
 .vl-int {
   position: absolute; top: var(--vl-int-top); height: var(--vl-int-h);
-  border:1px solid #697d85; border-radius:4px;
-  background-size:auto 100%;background-repeat:repeat-x;
-  background: var(--border-color-primary, #c8d4de); min-width: 2px; padding: 0;
-  background-size:auto 100%;background-repeat:repeat-x;
+  border: 1px solid var(--vl-line-strong); border-radius: 2px;
+  background-color: var(--vl-surface-raised); background-size: auto 100%;
+  background-repeat: repeat-x; min-width: 2px; padding: 0;
 }
+/* 선택한 컷 — accent-ink 바깥선 + 본점 옅은 덮개. 안쪽 그림자는 썸네일 그림 위에 그려진다. */
 .vl-int-sel {
-  outline: 2px solid #2f6db3; outline-offset: 1px;
-  background: rgba(47, 109, 179, 0.28);
+  outline: 2px solid var(--vl-accent-ink); outline-offset: 1px;
+  background-color: var(--vl-accent-soft);
+  box-shadow: inset 0 0 0 100vmax color-mix(in srgb, var(--vl-accent) 28%, transparent);
 }
 .vl-int-ex { opacity: 0.45; }
-.vl-int-needs { border-bottom: 3px solid #b3452f; }
+.vl-int-needs { border-bottom: 3px solid var(--vl-warn); }
+/* 재생 머리는 양옆 1px 테두리(casing)와 함께 — 어느 등급 막대 위에서도 읽힌다. */
 .vl-playhead {
   position: absolute; top: 0; bottom: 0; width: 2px;
-  background: #b3452f; pointer-events: none;
+  background: var(--vl-playhead); pointer-events: none;
+  box-shadow: -1px 0 0 var(--vl-playhead-casing), 1px 0 0 var(--vl-playhead-casing);
 }
+/* 손잡이는 선택한 컷 띠 안 가운데에 선다 — 눈금자·등급 막대를 가리지 않는다. */
 .vl-handle {
-  position: absolute; top: 2px; width: 12px; height: var(--vl-handle-h); border-radius: 6px;
-  background: #2f6db3; cursor: ew-resize; border: none; padding: 0; z-index: 2;
+  position: absolute;
+  top: calc(var(--vl-int-top) + (var(--vl-int-h) - var(--vl-handle-h)) / 2);
+  width: 12px; height: var(--vl-handle-h); border-radius: 2px; box-sizing: border-box;
+  background: var(--vl-accent); border: 1px solid var(--vl-on-accent);
+  cursor: ew-resize; padding: 0; z-index: 2;
 }
-.vl-handle:focus-visible { outline: 2px solid #17406b; }
+.vl-handle:focus-visible { outline: 2px solid var(--vl-accent-ink); outline-offset: 2px; }
 .vl-handle:disabled {
-  background: var(--border-color-primary, #b9c2cb); cursor: default;
+  background: var(--vl-line-strong); cursor: default;
 }
 .vl-draftmark {
   position: absolute; top: -4px; bottom: -4px; width: 2px;
-  background: #d98324; pointer-events: none; z-index: 3;
+  background: var(--vl-draft); pointer-events: none; z-index: 3;
 }
 .vl-transport { display:flex; gap:8px; align-items:center; margin-top:2px; flex-wrap:wrap; }
 .vl-clock {
-  font-variant-numeric: tabular-nums;
-  color: var(--body-text-color, #445); font-size: 13px;
+  font-family: var(--vl-font-mono); font-variant-numeric: tabular-nums; font-weight: 500;
+  color: var(--vl-ink); font-size: 13px;
 }
 .vl-panel {
-  border: 1px solid var(--block-border-color, #e3e8ee); border-radius: 8px;
+  border: 1px solid var(--vl-line); border-radius: 6px;
   padding: 10px; min-width: 0;
-  background: var(--block-background-fill, transparent);
+  background: var(--vl-surface);
 }
 .vl-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 8px; }
 .vl-btn {
-  border: 1px solid var(--border-color-primary, #c9d3dc);
-  background: var(--button-secondary-background-fill, #fff);
-  color: var(--button-secondary-text-color, #233);
-  border-radius: 6px; padding: 5px 12px; font-size: 13px; cursor: pointer;
+  border: 1px solid var(--vl-line-strong);
+  background: var(--vl-surface-raised);
+  color: var(--vl-ink);
+  border-radius: 4px; padding: 5px 12px; font-size: 13px; font-weight: 500; cursor: pointer;
 }
-.vl-btn:hover:not(:disabled) {
-  background: var(--button-secondary-background-fill-hover, #f2f6fa);
+.vl-btn:hover:not(:disabled) { background: var(--vl-surface-hover); }
+/* 눌린 토글 — 옅은 강조 바탕 · ink 글자 · accent-ink 밑줄 2px(색 하나에 기대지 않는다). */
+.vl-btn[aria-pressed="true"], .vl-btn[aria-pressed="true"]:hover:not(:disabled) {
+  background: var(--vl-accent-soft); border-color: var(--vl-accent-ink); color: var(--vl-ink);
+  box-shadow: inset 0 -2px 0 var(--vl-accent-ink);
 }
-.vl-btn:disabled { color: var(--body-text-color-subdued, #9aa); cursor: default; }
-.vl-btn-primary { background: #2f6db3; border-color: #2f6db3; color: #fff; }
-.vl-btn-primary:hover:not(:disabled) { background: #27599a; }
+.vl-btn:disabled {
+  background: var(--vl-surface); border-color: var(--vl-line); color: var(--vl-ink-faint);
+  box-shadow: none; cursor: default;
+}
+.vl-btn-primary { background: var(--vl-accent); border-color: var(--vl-accent);
+  color: var(--vl-on-accent); }
+.vl-btn-primary:hover:not(:disabled) {
+  background: var(--vl-accent-hover); border-color: var(--vl-accent-hover); }
 .vl-input {
-  border: 1px solid var(--input-border-color, #c9d3dc); border-radius: 6px;
+  border: 1px solid var(--vl-line-strong); border-radius: 4px;
   padding: 4px 8px; font-size: 13px; width: 100%; box-sizing: border-box;
-  background: var(--input-background-fill, #fff);
-  color: var(--body-text-color, #233);
+  background: var(--vl-surface-raised);
+  color: var(--vl-ink);
 }
+.vl-input::placeholder { color: var(--vl-ink-faint); }
 .vl-input-narrow { width: 9ch; }
 .vl-kv {
-  font-size: 12px; color: var(--body-text-color, #556); margin: 2px 0;
+  font-size: 12px; color: var(--vl-ink); margin: 2px 0;
   font-variant-numeric: tabular-nums;
 }
+/* <small>은 기본 `smaller`라 12px 안에서 9.6px가 된다 — 글자 바닥 11px에 묶는다. */
+.vl-kv small { font-size: 11px; }
 .vl-draft {
-  border: 1px dashed #d98324; border-radius: 8px; padding: 8px; margin-top: 8px;
-  background: rgba(217, 131, 36, 0.08);
+  border: 1px dashed var(--vl-draft); border-radius: 6px; padding: 8px; margin-top: 8px;
+  background: var(--vl-surface-raised);
 }
 .vl-details { margin-top: 8px; font-size: 12px; }
-.vl-details summary { cursor: pointer; color: var(--body-text-color-subdued, #556); }
+.vl-details summary { cursor: pointer; color: var(--vl-ink-muted); }
 .vl-table { width: 100%; border-collapse: collapse; font-size: 12px; }
 .vl-th, .vl-td {
   text-align: left; padding: 3px 6px;
-  border-bottom: 1px solid var(--block-border-color, #edf1f5); vertical-align: top;
+  border-bottom: 1px solid var(--vl-line); vertical-align: top;
 }
-.vl-th { color: var(--body-text-color-subdued, #667); }
+.vl-th { color: var(--vl-ink-muted); }
 .vl-footnote {
-  color: var(--body-text-color, #445); font-size: 12px;
+  color: var(--vl-ink); font-size: 12px;
   margin: 6px 0 0; min-height: 1em;
 }
 .vl-pager {
   display: flex; gap: 8px; align-items: center; justify-content: center;
-  padding: 6px 0 2px; font-size: 12px; color: var(--body-text-color-subdued, #556);
+  padding: 6px 0 2px; font-size: 12px; color: var(--vl-ink-muted);
 }
 .cap-overlay {
   min-height: 1.7em; margin-top: 4px; padding: 4px 10px; font-size: 15px;
-  background: var(--block-background-fill, #f4f7fa); border-radius: 6px;
-  color: var(--body-text-color, #223);
-  border: 1px solid var(--block-border-color, transparent);
+  background: var(--vl-surface); border-radius: 6px;
+  color: var(--vl-ink);
+  border: 1px solid var(--vl-line);
 }
 .cap-overlay:not(.cap-overlay-on) { display: none; }
 .cap-cues {
   max-height: 34vh; overflow-y: auto; display: flex; flex-direction: column; gap: 4px;
-  margin-top: 8px; border-radius: 8px; padding: 6px;
-  border: 1px solid var(--block-border-color, #e3e8ee);
+  margin-top: 8px; border-radius: 6px; padding: 6px;
+  border: 1px solid var(--vl-line);
 }
 .cap-row {
   display: flex; gap: 8px; border: none; background: none; padding: 4px 6px;
-  border-radius: 6px; cursor: pointer; text-align: left; align-items: baseline;
-  width: 100%; color: var(--body-text-color, #223);
+  border-radius: 4px; cursor: pointer; text-align: left; align-items: baseline;
+  width: 100%; color: var(--vl-ink);
 }
-.cap-row:hover { background: var(--block-background-fill, #f2f6fa); }
-.cap-row-sel { background: rgba(47, 109, 179, 0.16); }
+.cap-row:hover { background: var(--vl-surface-hover); }
+.cap-row-sel { background: var(--vl-accent-soft); }
 .cap-row-time {
-  flex: none; font-size: 11px; color: var(--body-text-color-subdued, #778);
-  font-variant-numeric: tabular-nums; width: 12ch;
+  flex: none; font-size: 11px; color: var(--vl-ink-muted);
+  font-family: var(--vl-font-mono); font-variant-numeric: tabular-nums; width: 12ch;
 }
-.cap-row-text { font-size: 14px; color: var(--body-text-color, #223); }
-.cap-row-manual .cap-row-text::after { content: " ·수동"; color: #977; font-size: 11px; }
+.cap-row-text { font-size: 14px; color: var(--vl-ink); }
+.cap-row-manual .cap-row-text::after {
+  content: " ·수동"; color: var(--vl-ink-muted); font-size: 11px; }
 .cap-editor { margin-top: 8px; }
 .cap-editor-fields { display: flex; gap: 8px; flex-wrap: wrap; }
 .cap-editor-fields label {
   display: flex; flex-direction: column; gap: 2px; font-size: 11px;
-  color: var(--body-text-color-subdued, #667); min-width: 0;
+  color: var(--vl-ink-muted); min-width: 0;
 }
 .cap-editor-fields label:first-child { flex: 1 1 220px; }
 #visual-video::cue,.vl-source-overlay { font-size:clamp(20px,1.8vw,28px); }
 .vl-current-caption { width:100%; min-height:36px; padding:5px 10px; margin-top:4px;
- color:#f5f7f8; background:#292e34; border:1px solid #54616b; border-radius:5px;
- font-size:18px; line-height:1.3; text-align:center; white-space:pre-wrap; cursor:pointer; }
-.vl-current-caption:disabled { color:#b7c2cb;font-size:14px;cursor:default; }
+ color: var(--vl-ink); background: var(--vl-surface); border:1px solid var(--vl-line);
+ border-radius:4px; font-size:18px; line-height:1.3; text-align:center; white-space:pre-wrap;
+ cursor:pointer; }
+.vl-current-caption:disabled { color: var(--vl-ink-muted); font-size:14px; cursor:default; }
 #vl-panel [data-vl-act="toggle-sel"] { flex:1 1 100%;font-size:15px;padding:9px; }
 #app-header p { font-size:12px;margin:2px 0; }
 /* 반응형 — 넓은 쪽(1050) 다음 좁은 쪽(860) 순서여야 좁은 규칙이 이긴다(D50:

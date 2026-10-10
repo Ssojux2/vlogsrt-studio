@@ -14,6 +14,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import html
+import inspect
 import json
 import os
 import shutil
@@ -31,10 +32,15 @@ os.environ.setdefault("GRADIO_ANALYTICS_ENABLED", "False")
 
 import gradio as gr  # noqa: E402
 from fastapi import FastAPI, Request  # noqa: E402
-from fastapi.responses import JSONResponse, Response, StreamingResponse  # noqa: E402
+from fastapi.responses import (  # noqa: E402
+    FileResponse,
+    JSONResponse,
+    Response,
+    StreamingResponse,
+)
 
 from ui import chooser as ui_chooser  # noqa: E402
-from ui import ui_facade  # noqa: E402
+from ui import design_tokens, ui_facade  # noqa: E402
 from vlogsrt import log  # noqa: E402
 from vlogsrt.project.raw import service as raw_service  # noqa: E402
 
@@ -240,41 +246,94 @@ class _SemanticApprovalRecord:
     digest: str
 
 
-CSS = (
-    """
-#exec-log textarea { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
-#folder-listing { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
+BASE_CSS = """
+/* 작업대 바탕(W-17, D57) — 색은 `ui/design_tokens.py`의 `--vl-*`만 부른다. 테마는 OS를
+   따른다: 그라디오가 body에 `.dark`를 달거나 떼면 토큰이 통째로 바뀐다. 강제하지 않는다. */
 footer { display: none !important; }
-.gradio-container { background:#202124!important; color:#f1f3f4!important;
- --body-background-fill:#202124; --block-background-fill:#292b2f;
- --body-text-color:#f1f3f4; --body-text-color-subdued:#b6bec6;
- --block-border-color:#41464c; --border-color-primary:#555e66;
- --button-secondary-background-fill:#343a40; --button-secondary-text-color:#f1f3f4;
- font-family:-apple-system,BlinkMacSystemFont,"Apple SD Gothic Neo",sans-serif; }
- .gradio-container input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
- .gradio-container textarea, .gradio-container select {
- background:#30343a!important; color:#f1f3f4!important; border-color:#555e66!important; }
-.gradio-container input::placeholder, .gradio-container textarea::placeholder {
- color:#aeb9c4!important; }
-.gradio-container .label-wrap, .gradio-container .label-wrap span { color:#e4e9ed!important; }
-.gradio-container button.primary { background:#20b9ae!important; color:#062e2b!important; }
-.vl-thumb-sel,.vl-int-sel { outline:2px solid #36d5c6!important; }
-.vl-badge-warn { color:#ffbd8c!important; }
-/* Gradio light-theme toasts keep their own pale background; pair both colors. */
-.gradio-container .toast-body {
- background:#fff!important; color:#17212b!important; border:1px solid #74818b!important;
+body, .gradio-container {
+ background: var(--vl-bg); color: var(--vl-ink); font-family: var(--vl-font-sans);
+ scrollbar-color: var(--vl-line-strong) var(--vl-surface);
 }
-.gradio-container .toast-body * { color:#17212b!important; }
-.gradio-container .toast-body.error { border-left:4px solid #b42318!important; }
-#quick-status { background:#292b2f; color:#f1f3f4; border:1px solid #555e66;
- padding:10px 12px; border-radius:6px; }
-#quick-status p, #quick-status strong { color:#f1f3f4!important; }
-#quick-api-panel { border:1px solid #74818b; }
-
-
+#exec-log, #folder-listing { font-family: var(--vl-font-mono); font-size: 13px; }
+/* 초점 고리 — 땅 2px 틈 + accent-ink 2px. 그림자가 아니라 outline이라 등급 막대·선택 카드의
+   안쪽 테두리(box-shadow)를 덮어쓰지 않는다. */
+.gradio-container :focus-visible { outline: 2px solid var(--vl-accent-ink); outline-offset: 2px; }
+/* 알림은 두 테마 모두 떠 있는 판(surface-raised + shadow-pop) — 어두운 화면 위 흰 카드 없음.
+   종류는 테두리·아이콘 색(--toast-color)으로 가른다. 그라디오 알림 CSS는 늦게 실려 같은
+   특정성이면 이기므로 !important로 묶는다. */
+.gradio-container .toast-body {
+ background: var(--vl-surface-raised) !important; color: var(--vl-ink) !important;
+ border: 1px solid var(--toast-color, var(--vl-line-strong)) !important;
+ box-shadow: var(--vl-shadow-pop) !important;
+}
+.gradio-container .toast-body .toast-message-text { color: var(--vl-ink) !important; }
+.gradio-container .toast-body.error { --toast-color: var(--vl-danger) !important; }
+.gradio-container .toast-body.warning { --toast-color: var(--vl-warn) !important; }
+.gradio-container .toast-body.success { --toast-color: var(--vl-success) !important; }
+.gradio-container .toast-body.info { --toast-color: var(--vl-accent-ink) !important; }
+#quick-status { background: var(--vl-surface); color: var(--vl-ink);
+ border: 1px solid var(--vl-line); padding:10px 12px; border-radius:6px; }
+#quick-status p, #quick-status strong { color: var(--vl-ink); }
+#quick-api-panel { border: 1px solid var(--vl-line-strong); }
+/* 그라디오 prose의 가로줄·표 선은 #e1e1e1로 박혀 어두운 테마에서 밝은 줄로 남는다 — 같은
+   특정성이면 늦게 실린 쪽이 이기므로 body를 붙여 한 단 높인다. */
+body .gradio-container .prose hr { border-top-color: var(--vl-line); }
+body .gradio-container .prose th, body .gradio-container .prose td {
+ border-bottom-color: var(--vl-line); }
 """
-    + ui_facade.WORKBENCH_CSS
-)
+"""그라디오 표면(바탕·초점·알림·상태 줄)의 사람이 쓴 규칙 — 색 값은 토큰 선언에만 있다."""
+
+CSS = design_tokens.font_face_css() + design_tokens.token_css() + BASE_CSS + ui_facade.WORKBENCH_CSS
+"""마운트에 싣는 전체 CSS — 글꼴 · 토큰(밝은·어두운) · 바탕 · 작업대 순서."""
+
+FONT_CACHE_SECONDS = 604800
+"""묶음 글꼴은 판을 바꿀 때만 바뀐다 — 한 주 캐시로 다시 받지 않게 한다(파일 이름에 판이 없다)."""
+
+
+def workbench_theme() -> gr.themes.Base:
+    """디자인 토큰으로 지은 그라디오 테마 — 밝은 값과 `*_dark` 짝을 한 표에서 얻는다(D57).
+
+    Soft 테마 위에 어두운 껍질을 덧바르던 방식은 OS 설정을 무시했고 연보라 이름표·흰
+    드롭다운·안 보이는 인라인 코드가 새었다. 글꼴은 이름(문자열)만 준다 — 그라디오가 제
+    `LocalFont` 글꼴표를 따로 싣지 않고, 묶음 글꼴은 `CSS`의 @font-face가 앱 경로에서 싣는다.
+    """
+    theme = gr.themes.Base(
+        primary_hue=gr.themes.colors.blue,
+        secondary_hue=gr.themes.colors.blue,
+        neutral_hue=gr.themes.Color(*design_tokens.neutral_ramp(), name="vlogsrt"),
+        radius_size=gr.themes.sizes.radius_md,
+        font=list(design_tokens.FONT_SANS_STACK),
+        font_mono=list(design_tokens.FONT_MONO_STACK),
+    )
+    accepted = set(inspect.signature(theme.set).parameters)
+    values: dict[str, str] = {}
+    unlisted_dark: dict[str, str] = {}
+    for name, (light, dark) in design_tokens.gradio_theme_pairs().items():
+        values[name] = light
+        if f"{name}_dark" in accepted:
+            values[f"{name}_dark"] = dark
+        elif dark != light:
+            unlisted_dark[f"{name}_dark"] = dark
+    theme.set(**values)
+    # `set()`에 어두운 인자가 없는 변수(color_accent)도 있다 — 테마 CSS는 `*_dark` 속성을
+    # 전부 어두운 블록에 쓰므로 속성으로 단다. 안 달면 어두운 화면에 밝은 값이 샌다.
+    for name, dark in unlisted_dark.items():
+        setattr(theme, name, dark)
+    return theme
+
+
+def font_response(file_name: str) -> Response:
+    """묶음 글꼴 하나 — 이름이 허용 목록과 글자 그대로 같을 때만 낸다. 경로는 오지 않는다."""
+    path = design_tokens.font_path(file_name)
+    if path is None or not path.is_file():
+        return JSONResponse(
+            {"detail": "없는 글꼴이다 — 묶음 글꼴 다섯 개만 제공된다"}, status_code=404
+        )
+    return FileResponse(
+        path,
+        media_type="font/woff2",
+        headers={"Cache-Control": f"public, max-age={FONT_CACHE_SECONDS}"},
+    )
 
 
 WorkspaceView = tuple[
@@ -913,13 +972,14 @@ class RawWorkspaceUi:
     def _player_html(file_id: str | None) -> str:
         if not file_id:
             return (
-                '<p style="color:#888">등록된 미디어를 고르면 여기서 재생된다 — 원본은 등록된'
+                '<p style="color:var(--vl-ink-muted)">'
+                "등록된 미디어를 고르면 여기서 재생된다 — 원본은 등록된"
                 " ID로만, 이 서버를 벗어나지 않고 제공된다.</p>"
             )
         safe = html.escape(file_id, quote=True)
         return (
             f'<video controls preload="metadata" style="width:100%;max-height:480px;'
-            f'background:#000" src="/media/{safe}"></video>'
+            f'background:var(--vl-video-well)" src="/media/{safe}"></video>'
         )
 
     @staticmethod
@@ -1870,7 +1930,8 @@ class RawWorkspaceUi:
                 )
         if stage == "승인 대기" and quote is not None:
             return self._approval_ready_text(quote)
-        return f"**{stage}** · 추천은 청록색, 확인이 필요한 구간은 주황색으로 표시됩니다."
+        # 등급 색의 뜻은 타임라인 범례가 말한다 — 옛 「청록·주황」 안내는 지금 색과 달라 지웠다.
+        return f"**{stage}**"
 
     @staticmethod
     def _approval_ready_text(quote: Any) -> str:
@@ -6198,7 +6259,7 @@ class RawWorkspaceUi:
         safe = html.escape(note)
         return (
             '<div id="caption-player" class="vlogsrt-caption-player">\n'
-            f'  <p style="color:#888;margin:4px 0;">{safe}</p>\n'
+            f'  <p style="color:var(--vl-ink-muted);margin:4px 0;">{safe}</p>\n'
             "</div>"
         )
 
@@ -7211,7 +7272,8 @@ class RawWorkspaceUi:
                         scale=6,
                     )
                 self._caption_table_html = gr.HTML(
-                    '<p style="color:#888">큐 편집표는 검토 새로고침 뒤 여기 나타난다 —'
+                    '<p style="color:var(--vl-ink-muted)">'
+                    "큐 편집표는 검토 새로고침 뒤 여기 나타난다 —"
                     " 지금 글자 칸과 큐 이동·반복 단추까지.</p>",
                     elem_id="caption-cue-table",
                 )
@@ -7568,6 +7630,7 @@ class RawWorkspaceUi:
         )
         self._add_guard_middleware(app)
         self._add_media_routes(app)
+        self._add_font_routes(app)
         if mount_blocks:
             # loopback 고정·share 없음·allowed_paths 없음(§4.4) — 이 마운트가 유일한
             # 화면 경로다. gradio의 파일 제공은 자기 임시 캐시로 한정된다.
@@ -7580,7 +7643,7 @@ class RawWorkspaceUi:
                 allowed_paths=None,
                 blocked_paths=None,
                 ssr_mode=False,
-                theme=gr.themes.Soft(),
+                theme=workbench_theme(),
                 css=CSS,
             )
         return app
@@ -7621,6 +7684,16 @@ class RawWorkspaceUi:
         @app.head("/media/{file_id}")
         def head_media(file_id: str, request: Request) -> Response:
             return self.media_response(file_id, request.headers.get("range"), want_body=False)
+
+    @staticmethod
+    def _add_font_routes(app: FastAPI) -> None:
+        @app.get(design_tokens.FONT_ROUTE + "/{file_name}")
+        def get_font(file_name: str) -> Response:
+            return font_response(file_name)
+
+        @app.head(design_tokens.FONT_ROUTE + "/{file_name}")
+        def head_font(file_name: str) -> Response:
+            return font_response(file_name)
 
     def media_response(self, file_id: str, range_header: str | None, want_body: bool) -> Response:
         """등록된 미디어 하나를 제공한다 — 경로는 오지 않고 ID만 온다(§4.3·§4.4)."""
