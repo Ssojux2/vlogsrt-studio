@@ -38,7 +38,7 @@ from typing import Any, Protocol
 
 from vlogsrt import log, preprocess
 from vlogsrt.project.raw import asr_epoch as asr_epoch_store
-from vlogsrt.project.raw import media_refs, request_usage, source_transcript
+from vlogsrt.project.raw import glossary, media_refs, request_usage, source_text, source_transcript
 from vlogsrt.project.raw import understanding as stage1
 from vlogsrt.project.raw import understanding_luna as luna
 from vlogsrt.project.raw.analysis_approval import (
@@ -57,10 +57,11 @@ from vlogsrt.project.raw.analysis_store import (
 )
 from vlogsrt.project.raw.caption_provider import (
     TimingProvider,
+    TransportTextProvider,
     TransportTimingProvider,
     parse_timing_response,
 )
-from vlogsrt.project.raw.config import RawWorkflowConfig
+from vlogsrt.project.raw.config import SOURCE_TEXT_SETTINGS, RawWorkflowConfig
 from vlogsrt.project.raw.jobs import JobCancelledError, JobContext
 from vlogsrt.project.raw.models import (
     AnalysisError,
@@ -157,6 +158,10 @@ class ReplayFixtures:
     sources: Mapping[str, tuple[tuple[float, float, str], ...]] = field(default_factory=dict)
     chunks: Mapping[str, tuple[tuple[float, float, str], ...]] = field(default_factory=dict)
     windows: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
+    # 1단계 글자 경로(D59 19c)의 선언 — `text-fixtures.json`이 없으면 None(글자 경로는 묻지 않는다).
+    # `text_chunks`는 WAV sha → 글자, `text_sources`는 원본 sha → {청크 번호: 글자}다.
+    text_chunks: Mapping[str, str] | None = None
+    text_sources: Mapping[str, Mapping[int, str]] = field(default_factory=dict)
 
     @classmethod
     def empty(cls) -> ReplayFixtures:
@@ -175,9 +180,20 @@ class ReplayFixtures:
         declared = self.sources.get(source_sha256)
         return ReplayAsrProvider(declared=declared, exact=self.chunks)
 
+    def text_for(self, source_sha256: str) -> source_text.ReplayTextProvider | None:
+        """원본 하나의 글자 재생자 — 글자 픽스처 파일이 없으면 None(글자 경로는 묻지 않는다).
+
+        파일이 있는데 그 청크의 선언이 없으면 그 청크는 글자 경로 실패로 남는다(지어내지 않는다).
+        """
+        if self.text_chunks is None:
+            return None
+        return source_text.ReplayTextProvider(
+            exact=self.text_chunks, declared=self.text_sources.get(source_sha256)
+        )
+
 
 def load_replay_fixtures(directory: Path) -> ReplayFixtures:
-    """픽스처 디렉터리를 읽는다 — `asr-fixtures.json`·`luna-fixtures.json`.
+    """픽스처 디렉터리를 읽는다 — `asr-fixtures.json`·`luna-fixtures.json`·`text-fixtures.json`.
 
     디렉터리가 없으면 빈 묶음이다(재생은 실패로 기록된다 — 조용한 빈 성공이
     아니다). 어느 파일도 강제하지 않는다: 있는 것만 재생에 들어간다.
@@ -204,7 +220,42 @@ def load_replay_fixtures(directory: Path) -> ReplayFixtures:
         windows = {
             str(key): value for key, value in _mapping_field(payload, "windows", luna_path).items()
         }
-    return ReplayFixtures(sources=sources, chunks=chunks, windows=windows)
+    text_chunks, text_sources = _load_text_fixtures(directory / "text-fixtures.json")
+    return ReplayFixtures(
+        sources=sources,
+        chunks=chunks,
+        windows=windows,
+        text_chunks=text_chunks,
+        text_sources=text_sources,
+    )
+
+
+def _load_text_fixtures(
+    path: Path,
+) -> tuple[Mapping[str, str] | None, Mapping[str, Mapping[int, str]]]:
+    """1단계 글자 경로 재생 선언(D59 19c) — `{"chunks": {WAV sha: 글자}, "sources": {원본 sha:
+    {청크 번호: 글자}}}`. 파일이 없으면 (None, {}) — 재생 글자 경로는 묻지 않는다."""
+    if not path.is_file():
+        return None, {}
+    payload = _read_json(path)
+    chunks = {
+        str(sha): _fixture_text(value, path)
+        for sha, value in _mapping_field(payload, "chunks", path).items()
+    }
+    sources: dict[str, Mapping[int, str]] = {}
+    for sha, declared in _mapping_field(payload, "sources", path).items():
+        if not isinstance(declared, Mapping):
+            raise ReplayFixtureError(f"글자 선언이 객체가 아니다: {path} ({sha})")
+        sources[str(sha)] = {
+            int(index): _fixture_text(text, path) for index, text in declared.items()
+        }
+    return chunks, sources
+
+
+def _fixture_text(value: object, path: Path) -> str:
+    if not isinstance(value, str):
+        raise ReplayFixtureError(f"글자 선언은 문자열이어야 한다: {path} ({value!r})")
+    return value
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -1021,23 +1072,7 @@ def _analyze_source(
     input_fp, epoch = _current_input(workspace, asset, grid, audio, settings, workflow)
     cached = _reusable_cache(store, workspace, input_fp, asset.content_sha256 or "")
     if cached is not None:
-        log.out(f"의미 분석 캐시 재사용: {asset.source_name} ({input_fp[:12]}…)")
-        return _upsert(
-            store,
-            revision,
-            asset_id=asset.asset_id,
-            source_order=source_order,
-            source_name=asset.source_name,
-            fingerprint=input_fp,
-            status="cached",
-            speech_status=cached.speech_status,
-            execution_mode=cached.execution_mode,
-            document_path=cached.document_path,
-            record_path=cached.record_path,
-            window_count=cached.window_count,
-            segment_count=cached.segment_count,
-            cached_from=cached.cached_from or cached.revision_id,
-        )
+        return _upsert_cached(store, revision, source_order, asset, input_fp, cached, "")
 
     if providers.phase == "asr":
         return _asr_phase_source(
@@ -1067,7 +1102,7 @@ def _analyze_source(
             "승인 없는 실제 호출 전체 실행은 없다 — 1단계(전사)와 2단계(의미) 승인을"
             " 각각 받아라(A4-F1)"
         )
-    asr_evidence, utterances = _transcribe_source(
+    asr_evidence, utterances, _text_record = _transcribe_source(
         context,
         workspace,
         revision,
@@ -1080,7 +1115,9 @@ def _analyze_source(
         source_dir=source_dir,
         asr_epoch=epoch,
     )
-    utterances = _seed_transcript(workspace, asset, timeline, utterances)
+    utterances, input_fp = _seed_stage1(
+        workspace, asset, timeline, utterances, settings, workflow, input_fp, epoch
+    )
     plan = _scene_plan(workspace, asset, plan_common_windows(timeline, utterances, settings))
     spoken = utterances_in_common_clock(timeline, utterances)
     context.check_cancel()
@@ -1115,6 +1152,35 @@ def _analyze_source(
     )
 
 
+def _upsert_cached(
+    store: AnalysisStore,
+    revision: AnalysisRevision,
+    source_order: int,
+    asset: SourceAsset,
+    input_fp: str,
+    cached: AnalysisSourceResult,
+    stage_label: str,
+) -> AnalysisSourceResult:
+    """같은 입력 지문의 끝난 분석을 이 리비전의 캐시 행으로 잇는다(1단계 앞·2단계 앞 공용)."""
+    log.out(f"의미 분석 캐시 재사용{stage_label}: {asset.source_name} ({input_fp[:12]}…)")
+    return _upsert(
+        store,
+        revision,
+        asset_id=asset.asset_id,
+        source_order=source_order,
+        source_name=asset.source_name,
+        fingerprint=input_fp,
+        status="cached",
+        speech_status=cached.speech_status,
+        execution_mode=cached.execution_mode,
+        document_path=cached.document_path,
+        record_path=cached.record_path,
+        window_count=cached.window_count,
+        segment_count=cached.segment_count,
+        cached_from=cached.cached_from or cached.revision_id,
+    )
+
+
 def _seed_transcript(
     workspace: RawWorkspace,
     asset: SourceAsset,
@@ -1135,6 +1201,48 @@ def _seed_transcript(
     return tuple(replace(u, start=u.start - offset, end=u.end - offset) for u in edited)
 
 
+def _seed_stage1(
+    workspace: RawWorkspace,
+    asset: SourceAsset,
+    timeline: CommonFileTimeline,
+    utterances: tuple[UtteranceEvidence, ...],
+    settings: RawUnderstandingSettings,
+    workflow: RawWorkflowConfig,
+    input_fp: str,
+    asr_epoch: int,
+) -> tuple[tuple[UtteranceEvidence, ...], str]:
+    """1단계의 원본 자막 심기 — 글자 경로가 자막 지문을 바꿨으면 그 지문으로 입력 지문을 다시 잰다.
+
+    두 번째 귀의 글자가 실리면 원본 자막 지문이 `asr-original/v1`에서 발화 해시로 바뀐다(D59 19c).
+    입력 지문은 전사 **전에** 쟀으므로, 그대로 두면 2단계가 지금 지문으로 다시 재 대조할 때 1단계
+    기록과 갈린다. 다시 재는 것은 자막 지문 하나다 — 다시 듣기 차례·미디어 결속은 전사를 시작할
+    때의 값 그대로여야 한다. 그래서 지금 값으로 **심기 전 지문**을 다시 재어 처음 입력 지문이
+    그대로 나올 때만(그사이 차례·미디어·사람 편집 어느 것도 움직이지 않았다) 새 자막 지문으로
+    바꾼다. 무엇이든 움직였으면 처음 값 그대로 두어 2단계가 지금 값으로 다시 재 대조해 닫는다(19b와
+    같은 선). 심기가 지문을 바꾸지 않았으면(사람이 고친 자막·whisper 글자 그대로) 처음 값 그대로다.
+    """
+    before = source_transcript.fingerprint(workspace, asset.asset_id)
+    seeded = _seed_transcript(workspace, asset, timeline, utterances)
+    after = source_transcript.fingerprint(workspace, asset.asset_id)
+    if after == before:
+        return seeded, input_fp
+    media = media_refs.fingerprint(workspace, asset.asset_id)
+
+    def measured(transcript: str) -> str:
+        return source_input_fingerprint(
+            source_sha256=asset.content_sha256 or "",
+            video=timeline.video,
+            audio=timeline.audio,
+            settings=settings,
+            workflow=workflow,
+            media_fingerprint=media,
+            transcript_fingerprint=transcript,
+            asr_epoch=asr_epoch,
+        )
+
+    return seeded, measured(after) if measured(before) == input_fp else input_fp
+
+
 def _transcribe_source(
     context: JobContext,
     workspace: RawWorkspace,
@@ -1148,32 +1256,101 @@ def _transcribe_source(
     grid: VideoGrid,
     source_dir: Path,
     asr_epoch: int = 0,
-) -> tuple[AsrEvidence | None, tuple[UtteranceEvidence, ...]]:
+) -> tuple[AsrEvidence | None, tuple[UtteranceEvidence, ...], dict[str, object] | None]:
     """1단계 전사 — 끝나자마자 결과를 `asr_outcome.json`으로 남긴다(실패 청크 포함, D59).
 
-    무성 원본은 '오디오 없음'만 남긴다. 기록은 자막을 심기 전에 쓴다(`_record_transcription`)."""
+    whisper 뒤에 같은 청크 WAV로 글자 경로(D59 19c)를 돌려 게이트를 통과한 글자만 얹는다 — 그
+    기록은 `asr_text`로 따로 남는다(`asr.chunks`에는 들어가지 않는다). 무성 원본은 '오디오 없음'만
+    남긴다. 기록은 자막을 심기 전에 쓴다(`_record_transcription`)."""
     asr_evidence: AsrEvidence | None = None
     utterances: tuple[UtteranceEvidence, ...] = ()
+    text_record: dict[str, object] | None = None
     if audio is not None:
         context.check_cancel()
-        asr_provider = _asr_provider_for(providers, workflow, settings, audio, asset.asset_id)
-        spans = stage1.plan_audio_chunks(audio, settings)
-        asr_evidence = stage1.transcribe_selected_audio(
-            audio,
-            spans,
-            settings=workflow,
-            understanding=settings,
-            provider=asr_provider,
-            on=providers.on or datetime.now(UTC).date(),
-            request_id=f"{revision.revision_id}:{asset.asset_id}",
-            workdir=source_dir,
-            cache_dir=workspace.root / "cache" / "source-asr" / asset.asset_id,
-            asr_epoch=asr_epoch,
+        asr_evidence, utterances, text_record = _hear_source(
+            workspace, revision, asset, settings, workflow, providers, audio, source_dir, asr_epoch
         )
-        utterances = stage1.utterance_evidence(audio, asr_evidence)
-    outcome = _asr_outcome_document(revision, asset, grid, audio, asr_evidence)
+    outcome = _asr_outcome_document(revision, asset, grid, audio, asr_evidence, text_record)
     _record_transcription(workspace, asset, source_dir, outcome, asr_evidence, asr_epoch)
-    return asr_evidence, utterances
+    return asr_evidence, utterances, text_record
+
+
+def _hear_source(
+    workspace: RawWorkspace,
+    revision: AnalysisRevision,
+    asset: SourceAsset,
+    settings: RawUnderstandingSettings,
+    workflow: RawWorkflowConfig,
+    providers: AnalysisProviders,
+    audio: SelectedAudio,
+    source_dir: Path,
+    asr_epoch: int,
+) -> tuple[AsrEvidence, tuple[UtteranceEvidence, ...], dict[str, object]]:
+    """whisper로 시각과 글자를 듣고, 같은 청크 WAV를 두 번째 귀에 한 번 더 묻는다(D59 19c)."""
+    asr_provider = _asr_provider_for(providers, workflow, settings, audio, asset.asset_id)
+    spans = stage1.plan_audio_chunks(audio, settings)
+    evidence = stage1.transcribe_selected_audio(
+        audio,
+        spans,
+        settings=workflow,
+        understanding=settings,
+        provider=asr_provider,
+        on=providers.on or datetime.now(UTC).date(),
+        request_id=f"{revision.revision_id}:{asset.asset_id}",
+        workdir=source_dir,
+        cache_dir=workspace.root / "cache" / "source-asr" / asset.asset_id,
+        asr_epoch=asr_epoch,
+    )
+    utterances, record = _cross_check_text(
+        workspace, revision, asset, settings, workflow, providers, audio, evidence, source_dir
+    )
+    return evidence, utterances, record
+
+
+def _cross_check_text(
+    workspace: RawWorkspace,
+    revision: AnalysisRevision,
+    asset: SourceAsset,
+    settings: RawUnderstandingSettings,
+    workflow: RawWorkflowConfig,
+    providers: AnalysisProviders,
+    audio: SelectedAudio,
+    evidence: AsrEvidence,
+    source_dir: Path,
+) -> tuple[tuple[UtteranceEvidence, ...], dict[str, object]]:
+    """1단계 글자 경로(D59 19c) — whisper가 들은 같은 WAV를 두 번째 귀에 묻고 게이트로 얹는다.
+
+    용어집은 이 요청에만 실린다(규칙 6 — whisper 요청에는 힌트 칸이 없다). 제공자가 없으면(19d 전
+    온라인·글자 픽스처 없는 재생) 아무것도 보내지 않고 캐시에 있는 답만 쓴다."""
+    request = source_text.TextPassRequest(
+        settings=SOURCE_TEXT_SETTINGS,
+        glossary=glossary.current(workspace).terms,
+        workflow=workflow,
+        on=providers.on or datetime.now(UTC).date(),
+        request_id=f"{revision.revision_id}:{asset.asset_id}",
+        workdir=source_dir,
+        cache_dir=workspace.root / "cache" / source_text.TEXT_CACHE_DIRNAME / asset.asset_id,
+        origin=providers.origin,
+    )
+    provider = _text_provider_for(providers, workflow, settings, audio, asset.asset_id)
+    outcomes = source_text.run_text_pass(audio, evidence, request, provider)
+    utterances = stage1.utterance_evidence(audio, evidence)
+    result = source_text.apply_text_pass(
+        utterances, outcomes, request, audio.sample_rate, _seeded_rows(workspace, asset)
+    )
+    return result.utterances, result.record
+
+
+def _seeded_rows(workspace: RawWorkspace, asset: SourceAsset) -> list[dict]:
+    """지금 심긴 **고치지 않은** 원본 자막의 줄 — 글자 답이 없는 청크가 이어 갈 증거(19c 검증).
+
+    고친 자막은 심기가 덮지 않으므로 필요 없고, 다른 원본의 자막이면 심기가 거절한다."""
+    document = source_transcript.load(workspace, asset.asset_id)
+    if document is None or source_transcript.human_edited(document):
+        return []
+    if document["source_sha256"] != (asset.content_sha256 or ""):
+        return []
+    return list(document["utterances"])
 
 
 def _record_transcription(
@@ -1199,26 +1376,42 @@ def _asr_outcome_document(
     grid: VideoGrid,
     audio: SelectedAudio | None,
     asr_evidence: AsrEvidence | None,
+    text_record: dict[str, object] | None = None,
 ) -> dict[str, object]:
-    """`asr_phase.json`의 오디오·전사 칸과 같은 모양 — 읽는 쪽이 한 가지 모양만 알면 된다."""
+    """`asr_phase.json`의 오디오·전사 칸과 같은 모양 — 읽는 쪽이 한 가지 모양만 알면 된다.
+
+    글자 경로 기록(D59 19c)은 `asr_text`로 따로 싣는다 — `asr.chunks`에 섞으면 글자 실패가 전사
+    실패로 읽혀 whisper를 다시 산다."""
     return {
+        **_text_section(text_record),
         "schema": ASR_OUTCOME_SCHEMA,
         "analysis_revision_id": revision.revision_id,
         "asset_id": asset.asset_id,
         "source_sha256": asset.content_sha256 or "",
         "video": {"presentation_origin": _fraction_json(grid.presentation_origin)},
-        "audio": (
-            {"status": stage1.SPEECH_AUDIO_ABSENT}
-            if audio is None
-            else stage1.selected_audio_json(audio)
-        ),
-        "asr": (
-            {"status": stage1.SPEECH_AUDIO_ABSENT, "request_id": None, "chunks": []}
-            if asr_evidence is None
-            else stage1.asr_evidence_json(asr_evidence)
-        ),
+        "audio": _audio_section(audio),
+        "asr": _asr_section(asr_evidence),
         "created_at": _now(),
     }
+
+
+def _audio_section(audio: SelectedAudio | None) -> dict[str, object]:
+    """1단계 기록들의 오디오 칸 — 무성 원본은 '오디오 없음'뿐이다."""
+    if audio is None:
+        return {"status": stage1.SPEECH_AUDIO_ABSENT}
+    return stage1.selected_audio_json(audio)
+
+
+def _asr_section(asr_evidence: AsrEvidence | None) -> dict[str, object]:
+    """1단계 기록들의 whisper 칸 — 실패 청크도 그대로 싣는다."""
+    if asr_evidence is None:
+        return {"status": stage1.SPEECH_AUDIO_ABSENT, "request_id": None, "chunks": []}
+    return stage1.asr_evidence_json(asr_evidence)
+
+
+def _text_section(text_record: dict[str, object] | None) -> dict[str, object]:
+    """글자 경로 칸(D59 19c) — `asr.chunks`와 따로 둔다. 무성 원본에는 칸이 없다."""
+    return {} if text_record is None else {"asr_text": text_record}
 
 
 def _asr_phase_source(
@@ -1266,7 +1459,7 @@ def _asr_phase_source(
             document_path=str(artifact_path.relative_to(workspace.root)),
             window_count=int(artifact.get("window_count") or 0),
         )
-    asr_evidence, utterances = _transcribe_source(
+    asr_evidence, utterances, text_record = _transcribe_source(
         context,
         workspace,
         revision,
@@ -1279,7 +1472,9 @@ def _asr_phase_source(
         source_dir=source_dir,
         asr_epoch=asr_epoch,
     )
-    utterances = _seed_transcript(workspace, asset, timeline, utterances)
+    utterances, input_fp = _seed_stage1(
+        workspace, asset, timeline, utterances, settings, workflow, input_fp, asr_epoch
+    )
     plan = _scene_plan(workspace, asset, plan_common_windows(timeline, utterances, settings))
     context.check_cancel()
     frames = stage1.sample_frames(
@@ -1310,16 +1505,9 @@ def _asr_phase_source(
                 "frame_duration": _fraction_json(grid.frame_duration),
                 "frame_count": grid.frame_count,
             },
-            "audio": (
-                {"status": stage1.SPEECH_AUDIO_ABSENT}
-                if audio is None
-                else stage1.selected_audio_json(audio)
-            ),
-            "asr": (
-                {"status": stage1.SPEECH_AUDIO_ABSENT, "request_id": None, "chunks": []}
-                if asr_evidence is None
-                else stage1.asr_evidence_json(asr_evidence)
-            ),
+            "audio": _audio_section(audio),
+            "asr": _asr_section(asr_evidence),
+            **_text_section(text_record),
             "utterances": stage1.utterances_json(utterances),
             "windows": stage1.window_plan_json(plan),
             "frames": stage1.frame_sampling_json(frames),
@@ -1395,23 +1583,7 @@ def _semantic_phase_source(
         )
     cached = _reusable_cache(store, workspace, input_fp, asset.content_sha256 or "")
     if cached is not None:
-        log.out(f"의미 분석 캐시 재사용(2단계): {asset.source_name} ({input_fp[:12]}…)")
-        return _upsert(
-            store,
-            revision,
-            asset_id=asset.asset_id,
-            source_order=source_order,
-            source_name=asset.source_name,
-            fingerprint=input_fp,
-            status="cached",
-            speech_status=cached.speech_status,
-            execution_mode=cached.execution_mode,
-            document_path=cached.document_path,
-            record_path=cached.record_path,
-            window_count=cached.window_count,
-            segment_count=cached.segment_count,
-            cached_from=cached.cached_from or cached.revision_id,
-        )
+        return _upsert_cached(store, revision, source_order, asset, input_fp, cached, "(2단계)")
     utterances = _seed_transcript(workspace, asset, timeline, utterances)
     frame_source = _stage1_frame_source(workspace, asset, artifact)
     plan = _scene_plan(
@@ -1727,6 +1899,47 @@ def _asr_provider_for(
     )
 
 
+def _text_provider_for(
+    providers: AnalysisProviders,
+    workflow: RawWorkflowConfig,
+    settings: RawUnderstandingSettings,
+    audio: SelectedAudio,
+    asset_id: str,
+) -> source_text.SourceTextProvider | None:
+    """1단계 글자 경로의 제공자 — 재생 선언이거나, 승인이 글자 모델을 묶은 실제 전송이다(D59 19c).
+
+    승인이 글자 모델을 묶지 않았으면 실제 전송은 만들지 않는다(`_approved_text_model`) — 19c의
+    온라인 1단계는 글자 요청을 한 번도 보내지 않고, 캐시에 있는 답만 쓴다."""
+    if not providers.is_live():
+        return None if providers.replay is None else providers.replay.text_for(audio.source_sha256)
+    approval = (providers.asr_approvals or {}).get(asset_id)
+    model = _approved_text_model(approval)
+    if approval is None or model is None:
+        return None
+    sender, cfg = providers.live_sender, providers.live_cfg
+    if sender is None or cfg is None:
+        raise AnalysisApprovalError(
+            "실제 호출에는 전송 경계(sender)와 엔진 설정(cfg)이 필요하다 — 사람이 공급한다"
+        )
+    return source_text.ApprovedPhaseTextProvider(
+        inner=TransportTextProvider(sender=sender, cfg=cfg),  # type: ignore[arg-type]
+        workflow=workflow,
+        understanding=settings,
+        audio=audio,
+        approval=approval,
+        approved_model=model,
+        gate=CountingAsrGate(limit=approval.chunk_budget),
+    )
+
+
+def _approved_text_model(approval: AsrPhaseApproval | None) -> str | None:
+    """1단계 승인이 묶은 글자 모델 — 19c의 `AsrPhaseApproval`에는 그 칸이 없다(`approval` 미사용).
+
+    19d가 승인에 `text_model`을 더하고 견적에 글자 비용을 실을 때까지 언제나 None이다. 그래서
+    승인 없이 유료 글자 요청이 나가는 길은 없다 — 견적·승인이 그 비용을 아직 보이지 않는다."""
+    return None
+
+
 def _luna_responder_for(
     providers: AnalysisProviders,
     workflow: RawWorkflowConfig,
@@ -1961,6 +2174,7 @@ def _utterances_from_artifact(artifact: Mapping[str, object]) -> tuple[Utterance
                 start_sample=int(item["start_sample"]),
                 end_sample=int(item["end_sample"]),
                 evidence_id=str(item["evidence_id"]),
+                **stage1.utterance_text_evidence(item),
             )
         )
     return tuple(utterances)

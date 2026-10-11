@@ -296,7 +296,7 @@ def _transcribe_span(
     asr_epoch: int = 0,
 ) -> AsrChunkOutcome:
     """청크 하나를 전사한다 — 실패는 이 청크의 기록으로 담아 올라간다."""
-    wav_path = workdir / f"asr-chunk-{position:04d}.wav"
+    wav_path = chunk_wav_path(workdir, position)
     write_pcm_slice(audio, span, wav_path)
     chunk = Chunk(
         path=wav_path,
@@ -366,6 +366,11 @@ def _transcribe_span(
     )
     temp.replace(cache_path)
     return outcome
+
+
+def chunk_wav_path(workdir: Path, position: int) -> Path:
+    """청크 WAV의 자리 — 1단계 글자 경로(D59 19c)가 whisper와 **같은 WAV**를 다시 쓴다."""
+    return workdir / f"asr-chunk-{position:04d}.wav"
 
 
 def asr_chunk_key(
@@ -492,6 +497,23 @@ class UtteranceEvidence:
     start_sample: int
     end_sample: int
     evidence_id: str
+    # 1단계 글자 경로(D59 19c)의 증거 — 두 번째 귀의 답을 받은 청크의 발화에만 넷이 함께 실린다.
+    # 없으면(None) 기록 모양이 19c 이전 그대로다. 시각·아이디·순서는 여기서 바뀌지 않는다.
+    whisper_text: str | None = None
+    text_source: str | None = None
+    retext_reason: str | None = None
+    alt_text: str | None = None
+
+
+TEXT_EVIDENCE_FIELDS = ("whisper_text", "text_source", "retext_reason", "alt_text")
+"""발화 기록의 글자 증거 칸 — `text_source`가 있을 때만 넷이 함께 실린다(D59 19c)."""
+
+
+def utterance_text_evidence(raw: Mapping[str, object]) -> dict[str, str]:
+    """기록에서 글자 증거를 다시 읽는다 — `text_source`가 없으면 빈 사전(19c 이전 기록)."""
+    if "text_source" not in raw:
+        return {}
+    return {name: str(raw.get(name) or "") for name in TEXT_EVIDENCE_FIELDS}
 
 
 def utterance_evidence(
@@ -1481,20 +1503,30 @@ def _asr_chunk_json(chunk: AsrChunkOutcome) -> dict[str, object]:
 
 def utterances_json(utterances: Sequence[UtteranceEvidence]) -> list[dict[str, object]]:
     """발화 증거의 JSON — 틱과 유리수 시각을 함께 실운다."""
-    return [
-        {
-            "utterance_id": item.utterance_id,
-            "chunk_index": item.chunk_index,
-            "position": item.position,
-            "text": item.text,
-            "start": fraction_json(item.start),
-            "end": fraction_json(item.end),
-            "start_sample": item.start_sample,
-            "end_sample": item.end_sample,
-            "evidence_id": item.evidence_id,
-        }
-        for item in utterances
-    ]
+    return [_utterance_json(item) for item in utterances]
+
+
+def _utterance_json(item: UtteranceEvidence) -> dict[str, object]:
+    """발화 하나 — 글자 증거는 있을 때만 싣는다(없으면 19c 이전 기록과 바이트가 같다)."""
+    body: dict[str, object] = {
+        "utterance_id": item.utterance_id,
+        "chunk_index": item.chunk_index,
+        "position": item.position,
+        "text": item.text,
+        "start": fraction_json(item.start),
+        "end": fraction_json(item.end),
+        "start_sample": item.start_sample,
+        "end_sample": item.end_sample,
+        "evidence_id": item.evidence_id,
+    }
+    if item.text_source is not None:
+        body.update(
+            whisper_text=item.text if item.whisper_text is None else item.whisper_text,
+            text_source=item.text_source,
+            retext_reason=item.retext_reason or "",
+            alt_text=item.alt_text or "",
+        )
+    return body
 
 
 def window_plan_json(plan: WindowPlan) -> dict[str, object]:

@@ -404,13 +404,14 @@ def _close_at_chunk_end(
     return min(start, chunk_duration), chunk_duration
 
 
-def _text_features(prompt: str, settings: RawWorkflowConfig) -> tuple[str, ...]:
+def _text_features(
+    prompt: str, languages: tuple[str, ...], keywords: tuple[str, ...]
+) -> tuple[str, ...]:
     """요청에 실제로 실리는 힌트만 확인 받는다 — 빈 힌트는 필드째 빠진다(§11.4)."""
-    contract = settings.caption
     features = [capabilities.FEATURE_JSON]
-    if contract.languages:
+    if languages:
         features.append(capabilities.FEATURE_LANGUAGES)
-    if contract.keywords:
+    if keywords:
         features.append(capabilities.FEATURE_KEYWORDS)
     if prompt:
         features.append(capabilities.FEATURE_PROMPT)
@@ -418,7 +419,12 @@ def _text_features(prompt: str, settings: RawWorkflowConfig) -> tuple[str, ...]:
 
 
 def text_transcription_request(
-    chunk: Chunk, *, settings: RawWorkflowConfig, prompt: str = ""
+    chunk: Chunk,
+    *,
+    settings: RawWorkflowConfig,
+    prompt: str = "",
+    keywords: tuple[str, ...] | None = None,
+    languages: tuple[str, ...] | None = None,
 ) -> AudioTranscriptionRequest:
     """문구 경로 요청 — 확인된 힌트는 languages·keywords·prompt 뿐이다(§11.4).
 
@@ -427,20 +433,26 @@ def text_transcription_request(
     logprobs는 이 요청에 칸 자체가 없다. 입자 칸(timestamp_granularities)은
     시간 계약의 것이므로 여기서 읽지도 않는다 — 문구 요청에 입자를 얹는
     무단 조합은 전송 경계(입자는 verbose_json과만 짝한다)와 등록표가 닫는다.
+
+    `keywords`·`languages`는 **이 요청 하나에만** 실리는 힌트다(D59 19c — 1단계 글자 경로의
+    용어집·언어). `None`이면 지금처럼 자막 계약의 값을 쓴다 — 최종 자막 요청은 바이트까지
+    그대로다. 시간 요청에는 이 인자가 없다(규칙 6).
     """
     contract, models = settings.caption, settings.models
+    sent_languages = contract.languages if languages is None else languages
+    sent_keywords = contract.keywords if keywords is None else keywords
     capabilities.confirm_request_combo(
         role=capabilities.ROLE_TEXT,
         model=models.text_model,
         response_format=contract.text_response_format,
-        features=_text_features(prompt, settings),
+        features=_text_features(prompt, sent_languages, sent_keywords),
     )
     return AudioTranscriptionRequest(
         chunk=chunk,
         model=models.text_model,
         response_format=contract.text_response_format,
-        languages=contract.languages,
-        keywords=contract.keywords,
+        languages=sent_languages,
+        keywords=sent_keywords,
         prompt=prompt,
     )
 
@@ -583,7 +595,11 @@ class TransportTimingProvider:
 
 @dataclass(frozen=True, slots=True)
 class TransportTextProvider:
-    """확인된 문구 어댑터 — 공개 전송 경계를 통해서만 부른다."""
+    """확인된 문구 어댑터 — 공개 전송 경계를 통해서만 부른다.
+
+    `keywords`·`languages`는 요청 하나에만 실리는 힌트다(1단계 글자 경로, D59 19c). 주지 않으면
+    자막 계약의 값 그대로다 — 최종 자막 경로(`TextTranscriptProvider`)는 그 인자를 모른다.
+    """
 
     sender: TranscriptionSender
     cfg: Config
@@ -598,9 +614,13 @@ class TransportTextProvider:
         prompt: str = "",
         stem: str = "",
         source: str = "",
+        keywords: tuple[str, ...] | None = None,
+        languages: tuple[str, ...] | None = None,
     ) -> TextTranscript:
         capabilities.preflight_online_transcription(settings, on, roles=(capabilities.ROLE_TEXT,))
-        request = text_transcription_request(chunk, settings=settings, prompt=prompt)
+        request = text_transcription_request(
+            chunk, settings=settings, prompt=prompt, keywords=keywords, languages=languages
+        )
         verify_chunk_binding(binding, chunk)
         payload = self.sender.send_request(
             request, self.cfg, kind=CAPTION_TEXT_KIND, stem=stem, source=source

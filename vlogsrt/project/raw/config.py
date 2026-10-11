@@ -170,6 +170,53 @@ class TimingResponseTolerance:
 TIMING_RESPONSE_TOLERANCE = TimingResponseTolerance()
 
 
+SOURCE_TEXT_PROMPT = "한국어 여행 브이로그. 반말·구어체·추임새를 들린 그대로 적어 주세요."
+"""1단계 글자 경로(gpt-transcribe)에만 가는 고정 문맥(D59 19c) — 앞 조각 글자는 싣지 않는다.
+
+whisper에는 가지 않는다(규칙 6·D16 — whisper는 이 글을 직전 자막으로 읽고 이어 쓴다). 두 번째
+귀에게는 문체를 알려 반말·추임새를 표준어로 고쳐 쓰지 않게 하는 것이 목적이다. **외부 근거 없는
+조정 대상**이다 — 바꾸면 글자 캐시 열쇠가 바뀌어 그 글자를 다시 산다(whisper는 그대로다)."""
+
+
+@dataclass(frozen=True)
+class SourceTextSettings:
+    """1단계 글자 경로의 동결 설정(D59 19c) — `RawWorkflowConfig`의 칸이 **아니다**.
+
+    설정에 칸을 더하면 엄격한 왕복(`_config_from_mapping`)이 기존 작업공간을 못 열고, 내부
+    whisper 청크 열쇠가 `asdict(RawWorkflowConfig)`를 통째로 해시하므로 이미 산 전사가 모두
+    낡는다(D47·D55의 교훈). 그래서 글자 경로의 모델·언어·문맥은 여기 있고, 글자 캐시 열쇠
+    (`source_text.text_chunk_key`)에만 실린다. 모델은 확인된 문구 역할 모델이다 — 다른 값은
+    `source_text_problems`가 거부한다(조용한 모델 교체 없음).
+    """
+
+    schema: str = "raw-source-asr-text/v1"
+    model: str = RawModelRoles().text_model
+    languages: tuple[str, ...] = ("ko",)
+    prompt: str = SOURCE_TEXT_PROMPT
+
+
+SOURCE_TEXT_SETTINGS = SourceTextSettings()
+
+
+def source_text_problems(settings: SourceTextSettings) -> list[str]:
+    """글자 경로 설정의 자기 일관성 — 확인된 문구 모델·비지 않은 언어·제어문자 없는 문맥."""
+    problems: list[str] = []
+    if settings.schema != SourceTextSettings().schema:
+        problems.append(f"글자 경로 schema는 {SourceTextSettings().schema}여야 한다")
+    if settings.model != RawModelRoles().text_model:
+        problems.append(
+            f"글자 경로 모델은 확인된 문구 모델({RawModelRoles().text_model})이어야 한다"
+        )
+    if not settings.languages:
+        problems.append("글자 경로의 예상 언어가 비었다")
+    problems += hint_problems("글자 경로 예상 언어", settings.languages)
+    if not settings.prompt.strip():
+        problems.append("글자 경로 문맥이 비었다")
+    elif any(unicodedata.category(char).startswith("C") for char in settings.prompt):
+        problems.append("글자 경로 문맥에 줄바꿈·제어문자가 있다")
+    return problems
+
+
 @dataclass(frozen=True)
 class RawWorkflowConfig:
     """v2 원본 워크플로의 최상위 설정 — 기본은 오프라인이다(계획 §14.3)."""

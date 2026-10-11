@@ -5050,7 +5050,7 @@ Claude API 참고 문서의 「JSON Schema Limitations」 표로 확인 — 실�
 ## D59 — 원본 자막 복구·정확도 (2026-10-11, W-19)
 
 W-19는 원본 자막(작업대 1단계 전사)에서 빠진 것을 되찾고 정확도를 높이는 묶음이다(계획: 세션 19a–19h).
-이 항목은 세션마다 늘어난다. 지금은 **19a·19b**가 적혀 있다.
+이 항목은 세션마다 늘어난다. 지금은 **19a·19b·19c**가 적혀 있다.
 
 ### 19a-1. D47 보강 — 시간 초과는 원본으로 물러난다
 
@@ -5403,3 +5403,197 @@ CSS 숨김, JS 칸, 틱 입력에 칸 값) · 범위 저장·다시 열기·틱 
 다시 승인하면 모든 대상 영상이 1단계를 다시 지난다 — 산 것은 없지만(1단계 기록·청크 캐시) PCM 추출은 로컬에서 다시 돈다.
 전사가 끝난 영상을 「전사만」 견적에서 빼는 일은 하지 않았다(견적 문구의 「전사 최대 K회」는 상한이다). 영상 하나만
 승인하는 단추는 만들지 않았다(D57 결정 4) — 다시 듣기도 라이브러리 승인 하나로 간다.
+
+### 19c-1. 용어집 — 두 번째 귀에게만, 설정 밖에
+
+**결정**: 프로젝트 용어집(`vlogsrt/project/raw/glossary.py`)은 작업공간 DB의 작은 표 `project_glossary(sequence, terms,
+created_at)`에 리비전으로 **덧붙이기만** 하고 마지막 리비전이 이긴다. 읽기는 표를 만들지 않고(19b `asr_epoch`와 같은 모양),
+빈 용어집을 처음 저장해도 표를 만들지 않으며, 지금과 같은 내용을 저장하면 새 리비전이 생기지 않는다.
+
+- 파싱은 `vlogsrt.keywords.parse_keywords` 그대로다 — 한 줄에 하나, 빈 줄은 버리고 `#` 뒤는 메모다. 그 뒤 검사하고(아래)
+  처음 순서대로 중복을 뺀다(`dedupe`).
+- gpt-transcribe `keywords`에 `<`·`>`·줄바꿈·제어문자(유니코드 C 범주)가 든 용어가 **하나라도** 있으면 저장하지 않는다 —
+  그 줄만 조용히 빼지 않는다(「용어집을 저장하지 않았습니다 — 「…」에 쓸 수 없는 글자(<, >, 줄바꿈·제어문자)가 있습니다. 그
+  줄을 고쳐 주세요.」). 보내기 직전(`source_text.run_text_pass`)에도 저장된 용어를 다시 본다.
+- 지문 `glossary_sha` = sha256(`["raw-glossary/v1", 용어들]`) — 요청에 그 순서로 실리므로 순서까지 묶는다.
+- **왜 설정 밖인가**: `RawCaptionContract.keywords`는 `RawWorkflowConfig` 안이다. 내부 whisper 청크 열쇠
+  (`understanding.asr_chunk_key`)가 그 설정을 통째로 해시하므로(D47·D55의 교훈) 용어 하나를 고치는 것만으로 모든 원본의
+  whisper를 다시 사고 최종 자막 지문까지 흔들린다. 그리고 whisper에는 힌트가 가면 안 된다(규칙 6·D16). 그래서 용어집은 글자
+  캐시 열쇠에 `glossary_sha`로만 실린다. 시험이 용어집을 저장해도 whisper 열쇠가 그대로임을 본다.
+- 서비스 `glossary(root)`·`save_glossary(root, text)`(무료). 화면의 「용어집(고유명사, 한 줄에 하나)」 칸은 19e가 단다
+  (지금은 서비스 문까지만).
+
+### 19c-2. 글자 설정과 요청 — 힌트는 요청 하나에만
+
+- **`SourceTextSettings`**(`raw/config.py`, frozen, `RawWorkflowConfig`의 칸이 **아니다** — 엄격한 왕복과 whisper 열쇠 때문):
+  schema `raw-source-asr-text/v1` · 모델 = 확인된 문구 역할 모델(`RawModelRoles().text_model`, gpt-transcribe) · `languages
+  = ("ko",)` · 고정 문맥 `SOURCE_TEXT_PROMPT` = 「한국어 여행 브이로그. 반말·구어체·추임새를 들린 그대로 적어 주세요.」(앞
+  조각 글자는 싣지 않는다). `source_text_problems`가 다른 모델·빈 언어·줄바꿈 든 문맥을 거부한다. 문맥은 **외부 근거 없는
+  조정 대상**이다 — 바꾸면 글자 캐시 열쇠가 바뀌어 글자만 다시 산다(whisper는 그대로).
+- **등록표**: 문구 역할은 이미 `json` + `languages` + `keywords` + `prompt`가 확인돼 있다(2026-10-02 등록, `capabilities.py`).
+  새로 등록할 것이 없다 — 시험이 1단계 조합을 확인하고, 같은 칸을 시간 역할(whisper)에는 거부함을 본다.
+- **요청**: `text_transcription_request(…, keywords=None, languages=None)`. 이 요청 하나에만 실리고, `None`이면 지금처럼 자막
+  계약의 값이다 — 최종 자막 요청은 바이트까지 그대로다(시험이 19c 이전 조립의 요청·전송 칸과 대조, 계약 keywords가 있는
+  경우 포함). `TransportTextProvider.text_transcript`도 같은 선택 인자를 받고, 최종 자막의 `TextTranscriptProvider` 계약은
+  그대로다. 1단계는 새 계약 `source_text.SourceTextProvider`(용어집·언어를 받는다)를 쓴다.
+- **시간 요청에는 힌트 칸이 없다**(규칙 6): `timing_transcription_request`에는 그 인자 자체가 없다. 새 불변식이 그것을 못
+  박는다(아래 19c-7).
+
+### 19c-3. 1단계 흐름 — 같은 WAV, 따로 캐시, 따로 기록
+
+- `_transcribe_source` → `_hear_source`: whisper(청크 캐시 그대로) → **같은 청크 WAV**(`understanding.chunk_wav_path`, 해시를
+  whisper 기록의 `wav_sha256`과 대조 — 다르면 묻지 않는다)로 `source_text.run_text_pass` → `apply_text_pass` → 그다음
+  `asr_outcome.json` 기록 → 원본 자막 심기. whisper가 실패한 청크는 묻지 않는다(`timing_failed` — 글자를 둘 시각이 없다).
+- **캐시** `cache/source-asr-text/<원본>/<열쇠>.json`, 열쇠 = sha256({schema, **출처(`live`·`replay`)**, WAV sha, 모델, 언어,
+  문맥, 용어집 sha, 표본 시작·끝}). 출처는 whisper 열쇠가 제공자 이름을 싣는 것과 같은 이유다 — 재생 픽스처의 답이 같은 자리에
+  캐시되면 나중의 실제(온라인) 실행이 그것을 gpt-transcribe 글자로 읽어 얹고 지문까지 바꾼다(검증 지적 1, 시험: 재생이 캐시한
+  답을 온라인 실행은 읽지 않는다). 다시 듣기 차례(19b)는 싣지 않는다 — 차례는 whisper 온도 문제이고 같은 WAV·같은 요청의
+  글자와 무관하다. **성공만** 캐시한다. 읽지 못한 항목은 WARN하고 없는 것으로 친다.
+- **요청 기록**: `analysis_requests.stage = "asr-text"`(whisper의 `asr`와 따로 센다). 예약 문도 따로다.
+- **청크 상태**: `received`(캐시 포함) · `unavailable`(실패 — WARN, 캐시하지 않음, whisper 글자 그대로) · `not_requested`(묻는
+  문이 없고 캐시에도 없다) · `timing_failed`. 전체 상태: `applied` · `partial` · `unavailable` · `not_requested`.
+- **기록**: `asr_phase.json`·`asr_outcome.json`의 **`asr_text`** 칸(schema·모델·언어·문맥·용어집 sha·용어 수·상태·바꾼 줄·
+  그대로 둔 줄·청크별{상태·캐시·오류·받은 글자·유사도·조각 게이트·통과·거절}·사이 글자). `asr.chunks`에는 넣지 않는다 —
+  그래서 1단계 기록 재사용(`_phase_reusable`)이 글자 실패 때문에 whisper를 다시 사지 않는다(시험). 무성 원본에는 칸이 없다.
+- **재생**: `analysis/replay/text-fixtures.json` — `chunks`(WAV sha → 글자)와 `sources`(원본 sha → {청크 번호: 글자}). 파일이
+  없으면 글자 경로는 묻지 않는다(기존 재생 그대로). 파일이 있는데 그 청크의 선언이 없으면 `unavailable` + WARN이다(지어내지
+  않는다). 재생도 실제 요청과 같은 조합 확인(`text_transcription_request`)을 지난다.
+
+### 19c-4. 얹기 — D37 게이트를 1단계로 넓힌다
+
+- **청크마다 따로** `retext.plan(그 청크의 whisper 세그먼트, [ChunkText 하나], 청크 끝, repairs=(), Config())`. 세그먼트 id는
+  청크 안 위치, 시각은 PCM 정규화 초다(retext는 조각 배정에만 읽는다). 여러 청크를 한꺼번에 넘기면 retext가 시작 시각으로
+  청크를 고르는데(`bisect`), 청크 끝으로 닫힌 세그먼트(D55의 180/180)는 시작이 다음 청크 오프셋과 같아 다음 청크로 넘어가고,
+  제 청크의 그 글자는 사이 글자가 된다 — 시험이 그 자리(10.0/10.0)를 본다. 1단계에는 재전사가 없으므로 되풀이 제외도 없다.
+- **게이트 값** = 엔진 `Config()` 기본 그대로(D37, 잠정 — 교체를 덜 하는 쪽): `retext_segment_match_floor 0.5` ·
+  `retext_length_ratio_max 1.5` · `retext_length_ratio_min 0.67` · `retext_length_slack_chars 3` ·
+  `retext_chunk_similarity_floor 0.5`. 값은 하나도 바꾸지 않았다.
+- **발화 증거 넷**(`UtteranceEvidence`의 선택 칸 — 기록에는 `text_source`가 있을 때만 넷이 함께 실린다):
+  - `whisper_text` — 언제나 whisper 글자.
+  - `text_source` — `whisper` 또는 문구 모델 이름(값은 설정에서 온다 — 코드에 모델 리터럴이 없다).
+  - `retext_reason` — `accepted`(바꿨다) · `agreed`(통과했지만 앞뒤 공백 말고 같은 글자 — whisper 글자 그대로) · retext 거절
+    사유(`chunk_similarity`·`no_whisper_letters`·`empty`·`too_long`·`too_short`·`match`) · `undecided`(계획에 판정 없음).
+  - `alt_text` — 거절된 후보(19e 「다른 귀」가 보일 글자). 바꾼 줄은 빈 칸이다(다른 쪽 글자는 `whisper_text`).
+- 답이 없는 청크(실패·묻지 않음·whisper 실패)의 발화에는 증거 칸이 **없다** — 19c 이전 바이트 그대로다.
+- **이어 가기(검증 지적 3)**: 단, 지금 심긴 고치지 않은 원본 자막에 **같은 whisper 답**(아이디·청크·위치·표본·증거 아이디·
+  whisper 글자가 모두 같다)에 얹힌 글자 증거가 있으면 그 줄은 그대로 이어 간다(`_carry_previous`, 기록 `carried`). 용어집을
+  바꿔 글자 열쇠가 달라진 다음 1단계가 더 나은 전사를 조용히 whisper 글자로 되돌리던 길을 막는다 — 심기는 아무것도 바꾸지
+  않는다. whisper 답이 달라 이을 수 없는 교차 확인 줄(다시 듣기)은 whisper 글자로 심고 WARN한다(「다시 교차 확인하세요」,
+  기록 `dropped_cross_checked`).
+- **사이 글자**는 `asr_text.unplaced[]`({청크 번호, 글자, 글자 수, 앞 발화 아이디, 뒤 발화 아이디})와 WARN으로만 남는다. 어느
+  발화에도 붙이지 않는다(규칙 1).
+- **시각·아이디·순서·수는 그대로**: `_require_same_skeleton`이 심기 전에 막는다(규칙 5). 시험이 교정 전후 뼈대를 대조한다.
+- **멱등**: `source_transcript.spoken`·`_utterances_from_artifact`가 증거를 함께 돌려주므로 2단계의 다시 심기(1단계 기록의
+  발화로 심는다)가 같은 줄을 만든다 — 같은 whisper 캐시와 같은 글자 캐시면 심기는 아무것도 바꾸지 않는다(시험: 단위·
+  재생 재실행·온라인 2단계 뒤 sequence 그대로).
+- **사람 편집**(`source_transcript.edit`, 동작은 그대로 네 도움 함수로 나눴다): 글자를 바꾼 수정 → `text_source = manual`(시각만
+  바꾸면 그대로) · 분할 → 양쪽이 증거를 복사하고 `manual`(양쪽 글자를 사람이 준다 — `caption_manual` 분할과 같은 선) · 병합 →
+  `whisper_text`·`alt_text`를 잇고, 출처가 같으면 그 출처·다르면 `mixed`·글자를 주면 `manual`, 사유는 `+`로 잇는다. 증거가
+  없는 옛 줄은 편집해도 칸이 생기지 않는다. 고친 자막은 심기가 덮지 않는다(기존 규칙 그대로, 시험).
+
+### 19c-5. 원본 자막 지문 — 교차 확인된 전사는 낡은 분석과 갈린다
+
+- `source_transcript.fingerprint`: 사람이 고쳤거나(`human_edited`, 19b) **`text_source`가 `whisper`가 아닌 줄이 하나라도
+  있으면**(`cross_checked`) 발화를 해시한다. 아니면 `asr-original/v1` — 19c 이전 문서와, 글자 경로가 돌았어도 바꾼 줄이 없는
+  문서(전부 `agreed`·거절)는 그대로다(시험).
+- **1단계 안에서 지문이 바뀐다** → `_seed_stage1`: 심기 앞뒤 지문이 다르면 입력 지문을 새 자막 지문으로 다시 잰다. 그러지
+  않으면 같은 리비전의 2단계가 지금 지문으로 다시 재 대조해 「설정·원본이 1단계 기록과 다르다」로 닫힌다. 다시 재는 것은 자막
+  지문 **하나뿐**이다(검증 지적 2): 지금 값(미디어 결속·시작 때의 다시 듣기 차례)으로 **심기 전 지문**을 다시 재어 처음 입력
+  지문이 그대로 나올 때만 바꾼다. 그사이 미디어 결속·사람 편집 어느 것이든 움직였으면 처음 값 그대로 두어 2단계가 지금 값으로
+  다시 재 대조해 닫는다 — 19c 이전과 같은 선(시험: 미디어가 움직이면 다시 재지 않는다). 시험: 캐시에 있던 글자가 온라인에서
+  얹힌 「전사 + 영상 분석」 한 승인이 끝까지 가고, 분석 문서의 자막 지문이 지금 지문과 같으며, 영상 분석 요청에 바뀐 글자가
+  실린다. 심기가 지문을 바꾸지 않았으면(그사이 사람이 고쳤다·whisper 글자 그대로·이어 가기) 처음 값 그대로다.
+- **알려진 한계(19d)**: 리비전 결속·견적 digest는 실행 **전**의 자막 지문으로 묶인다. 한 실행 안에서 글자가 지문을 바꾸면 끝난
+  리비전의 지문이 지금 결속과 달라 `cached_selection_analysis`가 그 분석을 찾지 못한다 — 다음 견적이 그 영상을 다시 분석
+  대상으로 센다(다시 돌아도 whisper·글자·창 판정 캐시가 맞아 유료 호출은 없다). 19c 온라인에서는 글자 요청이 없어 이 일이
+  생기지 않는다 — 온라인이 얹을 수 있는 글자는 **실제 실행이 산(출처 `live`) 캐시뿐**이고 19d 전에는 없다(재생 답은 출처가
+  다른 열쇠라 온라인이 읽지 않는다). 19d가 지킬 것은 아래 「19d가 지켜야 할 것」.
+
+### 19c-6. 19d 전에는 온라인 글자 요청이 0회다
+
+- `_text_provider_for`: 재생이면 재생 선언, 실제 호출이면 **승인이 글자 모델을 묶어야만** `ApprovedPhaseTextProvider`(안쪽은
+  `TransportTextProvider`)를 만든다. `_approved_text_model`은 19c에서 언제나 None이다 — `AsrPhaseApproval`에 그 칸이 없고,
+  견적·승인이 글자 비용을 아직 보이지 않는다. 그래서 사람이 보지 않은 유료 글자 요청이 나가는 길이 없다.
+- 캐시는 읽는다(무료) — 같은 whisper·글자 캐시는 같은 발화를 낳으므로 온라인 다시 심기가 흔들리지 않는다.
+- 시험: 용어집이 있어도 온라인 「전사만」이 whisper 요청 둘만 보낸다(힌트 칸 비어 있음) · `asr_text.status = not_requested` ·
+  글자 캐시 0 · `asr-text` 요청 기록 0 · 자막 지문 `asr-original/v1`.
+- `ApprovedPhaseTextProvider`는 청크마다 승인 문을 다시 지난다 — 1단계 승인(`require_live_asr_approval`: 환경·online·출처·
+  설정 지문·수명주기) · 설정 online · 승인한 글자 모델 = 설정 모델 · 스트림 · 범위 · 예약(whisper와 따로) — 단위 시험(19d가
+  배선한다).
+- 용어집을 바꾸면 글자 열쇠가 바뀐다. 다음 1단계는 그 청크의 답이 없지만, 같은 whisper 답에 이미 얹힌 글자는 이어 간다(19c-4
+  이어 가기) — 되돌리지 않는다. 새 용어집으로 다시 묻는 것은 19d의 승인이 한다.
+
+### 19c-7. 불변식
+
+- **「요청 빌더의 칸은 갈라져 있다」**(`check_caption_request_lanes`): `timing_transcription_request`의 매개변수·안쪽 호출
+  키워드 인자에 `languages`·`keywords`·`prompt`가 없고, `text_transcription_request`에는 `timestamp_granularities`가 없다
+  (AST). 빌더가 사라지면 통과하지 않는다.
+- **「용어집은 설정 밖, DB만 안다」**(`check_glossary_stays_local`): `glossary.py`는 전송·프로세스·전사·설정·서비스를 import하지
+  못하고 파일을 직접 읽거나 쓰지 못한다. `RawWorkflowConfig`·`RawCaptionContract`의 칸 이름은 **고정 목록**
+  (`CONFIG_PINNED_FIELDS`, AST로 데이터클래스 칸을 센다)과 같아야 한다 — 이름 무늬로 못 잡는 칸(`hints` 같은)도 막힌다(검증
+  지적 4). 그리고 두 클래스 본문에 `glossary`·`SourceTextSettings`·`SOURCE_TEXT`가 나타나면(기본값에 싣는 경우) 실패한다.
+- `retext`의 제한은 「retext가 무엇을 import하나」(`RETEXT_MUST_NOT_IMPORT`)뿐이고 누가 retext를 import하나의 허용 목록은
+  없다(`final_caption`이 이미 쓴다). 그래서 넓힌 것이 없다 — `source_text.py`는 계획만 받아 쓴다.
+
+### 19c 정리(동작 그대로)
+
+40줄 규칙 때문에 손댄 함수를 줄였다: 1·2단계 앞의 같은 캐시 행 잇기를 `_upsert_cached`로, 두 1단계 기록의 오디오·whisper·글자
+칸을 `_audio_section`·`_asr_section`·`_text_section`으로, whisper·글자 듣기를 `_hear_source`로, 자막 편집을 `_edit_row`·
+`_split_row`·`_merge_rows`·`_store_edit`로 뺐다. 줄 수: `_analyze_source` 149→135 · `_asr_phase_source` 120→115 ·
+`_semantic_phase_source` 106→90 · `_transcribe_source` 39→30 · `source_transcript.edit` 89→40.
+
+### 19c 시험
+
+`tests/raw/test_source_text.py`(요청 모양 — 모델·json·문맥·용어집·언어, 시각 칸·온도 없음, 같은 WAV · 등록표 조합 ·
+최종 자막 요청 19c 이전과 같음 · 설정 밖 · `<` 든 용어는 보내기 전에 닫힘 · 게이트 통과·거절·`agreed`·증거 · 사이 글자는
+기록만 · 청크 끝 10.0/10.0 세그먼트는 제 청크 · 글자 실패는 whisper 글자·WARN·캐시 없음·whisper 기록 성공 그대로 · 글자
+실패가 1단계 기록 재사용을 막지 않음(대조군: whisper 실패는 막음) · whisper 실패 청크는 묻지 않음 · 열쇠 재료 · 제공자 없으면
+0송신·바이트 그대로 · 캐시만으로 같은 결과·심기 멱등·증거 왕복 · 재생 답은 온라인이 읽지 않음 · 용어집을 바꿔도 이어 가기·
+whisper가 달라지면 WARN · 입력 지문은 자막만 움직였을 때만 다시 잼 · 1단계 기록 왕복 · 19c 온라인은 승인이 있어도 글자 제공자
+없음 · 승인 문(열림·예산·모델·online·범위·오프라인) · 재생 선언 · 깨진 캐시는 WARN과 없는 것),
+`tests/raw/test_glossary.py`(파싱 · 쓸 수 없는 글자는 통째로 거절 · 리비전 덧붙이기·마지막이 이김·다시 열기·빈 저장은 표 없음 ·
+서비스 · sha · whisper 열쇠 무관), `tests/raw/test_text_evidence.py`(지문: 옛 문서·바꾼 줄 없음은 `asr-original/v1`, 한 줄이면
+해시 · 고친 자막은 심기가 덮지 않음 · 시각만 고치면 출처 그대로 · 분할·병합 증거 · 옛 줄은 칸이 생기지 않음),
+`tests/raw/test_source_text_flow.py`(ffmpeg 합성 — 온라인 「전사만」 글자 요청 0 · 캐시 글자가 온라인에서 얹히고 같은 리비전
+2단계가 받아들임 · 재생 전체 실행·재실행 캐시·다른 창 설정에도 심기 멱등 · 글자 실패는 전사 실패가 아님),
+`tests/test_invariants.py`(두 새 검사의 가짜 트리·진짜 트리).
+
+**실데이터(읽기 전용 — DB를 `mode=ro`로 열고 앞뒤 sha256·mtime이 같음을 확인)**: 원본 18개의 최신 원본 자막 모두 증거 칸 0줄 ·
+고치지 않음 — 지문 규칙이 19c 이전과 18/18 같다(`asr-original/v1` 그대로). 그래서 19c는 기존 분석 결속·견적을 하나도 낡게 하지
+않는다. 그 작업공간에는 `cache/source-asr-text`가 없으므로 다음 1단계도 글자 경로는 `not_requested`이고 심기는 바이트 그대로다.
+
+**바꾼 기대값**: 없다. 시험 대역 하나 — `tests/raw/test_analysis_workflow.py`의 `_CountingFixtures`(재생 묶음 감싸개)에
+`text_for`(감싼 묶음 그대로 돌려줌)를 더했다. 재생 묶음에 새 메서드가 생겨 대역이 그것을 몰랐다. 단언은 그대로다.
+
+**사람이 할 일**: 없다(19c는 유료 호출을 더하지 않는다). 19d(승인·견적)·19e(화면) 뒤에 용어집을 넣고 「다른 귀로 교차
+확인」을 누른다.
+
+**검증 뒤 고침(2026-10-12, 독립 검증 APPROVE WITH NITS)**:
+
+1. (중간) **재생 답이 실제 글자로 읽히던 캐시** — 글자 캐시 열쇠에 출처가 없어 재생 픽스처의 답이 같은 자리에 캐시되면 나중의
+   온라인 실행이 그것을 gpt-transcribe 글자로 얹고 지문을 바꿨다. 열쇠에 출처(`live`·`replay`, `TextPassRequest.origin` ←
+   `AnalysisProviders.origin`)를 싣는다 — whisper 열쇠가 제공자 이름을 싣는 것과 같다. 기록 `asr_text.origin`. 시험:
+   `test_replay_answers_are_never_read_by_a_live_run`.
+2. (낮음) **`_seed_stage1`이 미디어 결속을 심을 때 다시 읽었다** — 그사이 미디어가 움직이면 2단계가 19c 이전엔 닫았을 자리를
+   지나갔다. 이제 지금 값으로 심기 전 지문을 다시 재어 처음 입력 지문과 같을 때만 자막 지문을 바꾼다. 시험:
+   `test_stage1_rekeys_the_input_only_when_nothing_but_the_transcript_moved`.
+3. (사소) **용어집을 바꾸면 교차 확인된 글자가 조용히 whisper로 돌아갔다** — 같은 whisper 답이면 이어 간다, 아니면 WARN(19c-4).
+   시험: `test_a_glossary_change_keeps_already_cross_checked_lines_instead_of_reverting`.
+4. (사소) **설정 칸 검사가 이름 무늬뿐이었다** — 두 설정 클래스의 칸 이름을 고정했다(19c-7). 시험: 가짜 트리에서 `hints` 칸·
+   `glossary` 칸·기본값의 `SOURCE_TEXT_*`.
+
+### 19d가 지켜야 할 것(19c 검증이 남긴 요구 — 19c에서는 구현하지 않았다)
+
+- **(a) 결속**: 글자 경로를 리비전 결속·견적 digest에 접는다. 한 실행 안에서 글자가 자막 지문을 바꿔도 다음 견적이 그 영상을
+  분석 안 됨으로 세지 않아야 한다(검증 탐침 `t/test_v_quote.py` — 지금은 셈이 다시 잡힌다, 19c-5 알려진 한계).
+- **(b) 견적**: 「다른 귀로 교차 확인」 견적은 글자 요청 비용(분 × 0.0045)만이 아니라, 끝난 분석에 글자를 다시 심어 자막 지문이
+  바뀌면서 생기는 **영상 분석(Claude Sonnet 5.5 등) 재분석 비용**까지 함께 보여야 한다 — 바뀐 글자를 듣는 창만 새로 판정되지만
+  그 상한을 사람이 보고 승인해야 한다.
+- **(c) 접힌 글자만 다른 교체**: 공백·부호만 다른 교체(예: `' 망원동 카페에 왔어요'` → `'망원동 카페에 왔어요.'`)는 지금
+  `accepted`라 지문을 바꾼다. 권고: 접은 글자(`strip_for_compare`와 같은 규칙)가 같으면 `agreed`로 보고 whisper 글자를 둔다 —
+  지문은 글자가 실제로 바뀔 때만 바뀌게. 그러면 부호만 고친 교차 확인이 끝난 분석을 낡게 하지 않는다. 19d에서 정한다.
+- **(d) 이어 간 행의 출처**: 이어 간 행(19c-4)은 글자가 재생·실제 중 어디서 왔는지 행에 적지 않고 `_same_whisper`도 출처를
+  비교하지 않는다. 실제 흐름에서는 whisper 열쇠·`evidence_id`가 출처를 갈라 일어나지 않지만(재검증 탐침), 19d가 행에
+  출처를 적어 방어를 겹친다.
+- **(e) 보고 수**: `asr_text.replaced`가 이번 실행에서 바꾼 것과 이어 간 `accepted` 행을 함께 센다 — 보고만의 일이다.
+  19d가 이어 간 수를 따로 센다.

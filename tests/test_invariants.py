@@ -2230,3 +2230,124 @@ def test_ui_network_imports_follow_an_exact_allowlist(
         assert failures == []
     else:
         assert len(failures) == 1 and rel in failures[0], failures
+
+
+# ── D59 19c: 요청 빌더의 칸 — whisper에는 힌트가, 글자에는 시각 입자가 없다 ──────────
+
+CAPTION_PROVIDER = "vlogsrt/project/raw/caption_provider.py"
+CLEAN_BUILDERS = (
+    "def timing_transcription_request(chunk, *, settings, temperature=None):\n"
+    "    return Request(\n"
+    "        chunk=chunk, timestamp_granularities=('segment',), temperature=temperature)\n"
+    "\n"
+    "def text_transcription_request(\n"
+    "        chunk, *, settings, prompt='', keywords=None, languages=None):\n"
+    "    return Request(chunk=chunk, prompt=prompt, keywords=keywords, languages=languages)\n"
+)
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        ("settings, temperature=None)", "settings, temperature=None, prompt='')"),
+        ("temperature=temperature)", "temperature=temperature, keywords=('왕방',))"),
+        ("temperature=temperature)", "temperature=temperature, languages=('ko',))"),
+        ("languages=languages)\n", "languages=languages, timestamp_granularities=('segment',))\n"),
+        (", languages=None):", ", languages=None, timestamp_granularities=()):"),
+    ],
+)
+def test_request_builders_keep_their_lanes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, old: str, new: str
+) -> None:
+    _fake_source_tree(monkeypatch, tmp_path, {CAPTION_PROVIDER: CLEAN_BUILDERS})
+    assert check_invariants.check_caption_request_lanes() == []
+    (tmp_path / CAPTION_PROVIDER).write_text(CLEAN_BUILDERS.replace(old, new), encoding="utf-8")
+    failures = check_invariants.check_caption_request_lanes()
+    assert len(failures) == 1, failures
+    (tmp_path / CAPTION_PROVIDER).write_text("def other():\n    pass\n", encoding="utf-8")
+    assert len(check_invariants.check_caption_request_lanes()) == 2  # 빌더가 사라져도 통과 없음
+
+
+def test_the_real_request_builders_keep_their_lanes() -> None:
+    assert check_invariants.check_caption_request_lanes() == []
+
+
+# ── D59 19c: 용어집은 DB만 알고, 설정은 용어집·글자 경로를 모른다 ─────────────────
+
+GLOSSARY = "vlogsrt/project/raw/glossary.py"
+RAW_CONFIG = "vlogsrt/project/raw/config.py"
+CLEAN_GLOSSARY = (
+    "from vlogsrt.keywords import dedupe, parse_keywords\n"
+    "from vlogsrt.project.raw.models import RawWorkspaceError\n"
+)
+
+
+def _config_class(name: str) -> str:
+    fields = check_invariants.CONFIG_PINNED_FIELDS[name]
+    return f"class {name}:\n" + "".join(f"    {field}: object = None\n" for field in fields) + "\n"
+
+
+CLEAN_CONFIG = (
+    _config_class("RawCaptionContract")
+    + _config_class("RawWorkflowConfig")
+    + "class SourceTextSettings:\n    prompt: str = ''\n"
+)
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "import subprocess",
+        "import openai",
+        "from vlogsrt import transcribe",
+        "from vlogsrt.project.raw import caption_provider",
+        "from vlogsrt.project.raw.understanding import asr_chunk_key",
+        "from vlogsrt.project.raw.config import RawWorkflowConfig",
+        "from vlogsrt.project.raw import service",
+        "BODY = Path('terms.txt').read_text()",
+    ],
+)
+def test_the_glossary_layer_knows_only_the_workspace_db(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, statement: str
+) -> None:
+    _fake_source_tree(monkeypatch, tmp_path, {GLOSSARY: CLEAN_GLOSSARY, RAW_CONFIG: CLEAN_CONFIG})
+    assert check_invariants.check_glossary_stays_local() == []
+    (tmp_path / GLOSSARY).write_text(CLEAN_GLOSSARY + statement + "\n", encoding="utf-8")
+    assert check_invariants.check_glossary_stays_local()
+    (tmp_path / GLOSSARY).unlink()
+    assert check_invariants.check_glossary_stays_local() == [
+        "vlogsrt/project/raw/glossary.py: 용어집 계층이 사라졌다 (D59 19c)"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "count"),
+    [
+        # 이름 무늬와 고정 칸 둘 다에 걸린다
+        (
+            "    keywords: object = None\n",
+            "    keywords: object = None\n    glossary: tuple = ()\n",
+            2,
+        ),
+        # 이름 무늬로는 못 잡는 칸 — 고정 칸 목록이 잡는다
+        (
+            "    require_explicit_authorization: object = None\n",
+            "    require_explicit_authorization: object = None\n    hints: tuple = ()\n",
+            1,
+        ),
+        # 칸은 그대로인데 기본값이 글자 경로를 싣는다 — 이름 무늬가 잡는다
+        ("    keywords: object = None\n", "    keywords: object = SOURCE_TEXT_TERMS\n", 1),
+    ],
+)
+def test_the_workflow_config_never_carries_the_glossary_or_text_lane(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, old: str, new: str, count: int
+) -> None:
+    _fake_source_tree(monkeypatch, tmp_path, {GLOSSARY: CLEAN_GLOSSARY, RAW_CONFIG: CLEAN_CONFIG})
+    assert check_invariants.check_glossary_stays_local() == []
+    (tmp_path / RAW_CONFIG).write_text(CLEAN_CONFIG.replace(old, new), encoding="utf-8")
+    failures = check_invariants.check_glossary_stays_local()
+    assert len(failures) == count and all("whisper 열쇠" in f for f in failures), failures
+
+
+def test_the_real_glossary_and_config_pass() -> None:
+    assert check_invariants.check_glossary_stays_local() == []

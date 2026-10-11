@@ -769,6 +769,136 @@ def check_retext_stays_pure() -> list[str]:
     ]
 
 
+# 요청 빌더의 칸(D59 19c) — whisper(시간) 요청에는 힌트가, 글자 요청에는 시각 입자가 실리지 않는다.
+# 1단계 글자 경로가 용어집·고정 문맥을 요청마다 싣게 되면서 그 길이 whisper 쪽으로 새지 않게 막는다.
+REQUEST_LANES = (
+    (
+        "timing_transcription_request",
+        ("languages", "keywords", "prompt"),
+        "whisper 요청에 힌트가 실린다 (규칙 6, D16)",
+    ),
+    (
+        "text_transcription_request",
+        ("timestamp_granularities",),
+        "글자 요청에 시각 입자가 실린다 — 글자에는 시각이 없다 (규칙 1, D59 19c)",
+    ),
+)
+
+# 용어집은 작업공간 DB 하나만 안다(D59 19c) — 전송·프로세스·전사·설정을 알면 용어 하나가 whisper
+# 열쇠나 요청 경계로 번진다. 설정(`RawWorkflowConfig`·`RawCaptionContract`)도 용어집·글자 경로를
+# 모른다 — 내부 whisper 청크 열쇠가 그 설정 전체를 해시한다.
+GLOSSARY_MUST_NOT_IMPORT = (
+    "subprocess", "openai", "transcribe", "preprocess", "anthropic_messages", "caption_provider",
+    "understanding", "analysis_workflow", "source_text", "config", "service",
+)  # fmt: skip
+CONFIG_TEXT_LANE_NAMES = re.compile(r"glossary|SourceTextSettings|SOURCE_TEXT")
+# 두 설정 클래스의 칸은 이름까지 고정이다 — 칸을 하나 더하면 엄격한 왕복이 기존 작업공간을 못 열고
+# whisper 열쇠가 바뀐다. 칸 이름이 무엇이든(이름 무늬로 못 잡는 `hints` 같은 칸도) 여기서 막힌다.
+CONFIG_PINNED_FIELDS = {
+    "RawWorkflowConfig": (
+        "workflow_schema_version", "models", "caption", "registry", "pricing", "network_mode",
+        "require_explicit_authorization",
+    ),
+    "RawCaptionContract": (
+        "schema_version", "profile", "timing_provider", "languages", "keywords",
+        "text_response_format", "timing_response_format", "timestamp_granularities",
+        "allow_silent_model_fallback", "allow_guessed_timestamps",
+    ),
+}  # fmt: skip
+
+
+def check_caption_request_lanes() -> list[str]:
+    """규칙 1·6 — 시간 요청 빌더에는 힌트 칸이, 글자 요청 빌더에는 시각 입자 칸이 없다.
+
+    매개변수와 빌더 안의 키워드 인자를 함께 본다. 빌더가 사라지면 조용히 통과하지 않는다.
+    """
+    path = PROJECT_PACKAGE / "raw" / "caption_provider.py"
+    if not path.exists():
+        return ["vlogsrt/project/raw/caption_provider.py: 요청 빌더가 사라졌다 (규칙 6)"]
+    functions = {
+        node.name: node
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
+        if isinstance(node, ast.FunctionDef)
+    }
+    failures: list[str] = []
+    for name, banned, why in REQUEST_LANES:
+        node = functions.get(name)
+        if node is None:
+            failures.append(f"caption_provider.py: {name}을 찾지 못했다 — 검사가 무력해졌다")
+            continue
+        used = _lane_fields(node)
+        failures += [
+            f"caption_provider.py:{name}: {field} — {why}" for field in banned if field in used
+        ]
+    return failures
+
+
+def _lane_fields(node: ast.FunctionDef) -> set[str]:
+    """빌더의 매개변수 이름과, 빌더 안 호출의 키워드 인자 이름."""
+    params = {arg.arg for arg in (*node.args.args, *node.args.kwonlyargs)}
+    keywords = {
+        keyword.arg
+        for call in ast.walk(node)
+        if isinstance(call, ast.Call)
+        for keyword in call.keywords
+        if keyword.arg
+    }
+    return params | keywords
+
+
+def check_glossary_stays_local() -> list[str]:
+    """D59 19c — 용어집은 작업공간 DB만 알고, 설정은 용어집·글자 경로를 모른다."""
+    failures: list[str] = []
+    path = PROJECT_PACKAGE / "raw" / "glossary.py"
+    if not path.exists():
+        failures.append("vlogsrt/project/raw/glossary.py: 용어집 계층이 사라졌다 (D59 19c)")
+    else:
+        body = path.read_text(encoding="utf-8")
+        failures += [
+            f"glossary.py: {name}을 import한다 — 용어집이 전송·전사·설정으로 번진다 (D59 19c)"
+            for name in _imports(body, GLOSSARY_MUST_NOT_IMPORT)
+        ]
+        failures += [
+            f"glossary.py:{number}: 파일을 직접 읽거나 쓴다 — 용어집은 작업공간 DB만 쓴다"
+            for number, line in enumerate(body.splitlines(), start=1)
+            if TIERING_FILE_IO.search(line)
+        ]
+    config = PROJECT_PACKAGE / "raw" / "config.py"
+    if config.exists():
+        failures += _config_lane_failures(config.read_text(encoding="utf-8"))
+    return failures
+
+
+def _config_lane_failures(body: str) -> list[str]:
+    """설정 클래스 둘 — 칸 이름이 고정 목록 그대로이고, 본문에 용어집·글자 경로가 없다."""
+    failures: list[str] = []
+    for name, pinned in CONFIG_PINNED_FIELDS.items():
+        fields = _class_fields(body, name)
+        if fields != pinned:
+            failures.append(
+                f"raw/config.py:{name}의 칸이 고정 목록과 다르다 {list(fields)} — 용어집·글자"
+                " 경로는 설정 밖이다. whisper 열쇠가 그 설정을 통째로 해시한다 (D59 19c)"
+            )
+        if CONFIG_TEXT_LANE_NAMES.search(_class_source(body, name)):
+            failures.append(
+                f"raw/config.py:{name}에 용어집·글자 경로가 실렸다 — whisper 열쇠가 그 설정을"
+                " 통째로 해시한다 (D59 19c)"
+            )
+    return failures
+
+
+def _class_fields(body: str, class_name: str) -> tuple[str, ...]:
+    """클래스 본문의 타입 붙은 칸 이름 — 정의 순서대로(데이터클래스 칸)."""
+    for node in ast.walk(ast.parse(body)):
+        if isinstance(node, ast.ClassDef) and node.name == class_name:
+            return tuple(
+                item.target.id
+                for item in node.body
+                if isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name)
+            )
+    return ()
+
+
 def check_tiering_stays_pure() -> list[str]:
     """D51·D52 — `tiering.py`는 증거 문서를 **값으로** 받아 등급만 돌려준다.
 
@@ -1582,6 +1712,8 @@ CHECKS = (
     ("순수 계층", check_pure_layer),
     ("시각 유도 계층 부활 금지", check_time_deriving_layers_stay_buried),
     ("whisper에 prompt 금지", check_no_prompt_to_whisper),
+    ("요청 빌더의 칸은 갈라져 있다", check_caption_request_lanes),
+    ("용어집은 설정 밖, DB만 안다", check_glossary_stays_local),
     ("autojunk=False", check_autojunk),
     ("금지 의존성", check_banned_imports),
     ("의존성 3개", check_dependencies),

@@ -497,6 +497,10 @@ class _CountingFixtures:
 
         return _Counting()
 
+    def text_for(self, source_sha256: str):
+        """1단계 글자 경로 재생자(D59 19c) — 감싼 묶음 그대로(글자 픽스처가 없으면 None)."""
+        return self._base.text_for(source_sha256)
+
     def luna_responder(self):
         base = self._base.luna_responder()
         outer = self

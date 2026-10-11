@@ -1238,6 +1238,21 @@ class RawWorkspaceService:
             connection.commit()
         return mode
 
+    def glossary(self, root: Path) -> Any:
+        """프로젝트 용어집(D59 19c) — 마지막 리비전. 읽기만 한다(표를 만들지 않는다)."""
+        from vlogsrt.project.raw import glossary
+
+        return glossary.current(self._workspace(root))
+
+    def save_glossary(self, root: Path, text: str) -> Any:
+        """용어집을 새 리비전으로 저장한다(무료) — 1단계 글자 경로의 keywords로만 간다.
+
+        whisper·설정·견적에는 들어가지 않는다. 쓸 수 없는 글자가 있으면 저장하지 않는다.
+        """
+        from vlogsrt.project.raw import glossary
+
+        return glossary.save(self._workspace(root), text)
+
     def asr_epoch_state(self, root: Path, asset_id: str) -> Any:
         """원본의 다시 듣기 차례(D59 19b) — 읽기만 한다(표를 만들지 않는다)."""
         from vlogsrt.project.raw import asr_epoch
