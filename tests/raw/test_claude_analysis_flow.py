@@ -4,6 +4,10 @@
 산다: 의미 분석 모델을 바꿔도 전사 캐시·원본 자막·전사 지문이 그대로이고, 되돌리면 옛 Luna 분석이
 호출 0회로 다시 쓰인다. Claude 영수증은 공식 단가로 값이 매겨진다. 같은 판정이면 Claude 문서도 Luna
 문서와 똑같은 3단 등급을 낸다(D52 — 등급은 문서 모양만 읽고 모델 이름을 보지 않는다).
+
+W-18(D58)부터 새 작업공간의 기본은 Claude Sonnet 5.5다. Luna → Claude 전환을 보는 시험은 W-18
+이전에 만든 작업공간처럼 Luna로 시작한다(`make_server(model=LUNA)`). 기본 그대로 연 작업공간은
+고르지 않아도 Sonnet 5.5로 분석하고 Sonnet 단가로 값이 매겨진다.
 """
 
 from __future__ import annotations
@@ -31,14 +35,19 @@ from vlogsrt.project.raw.analysis_approval import LiveAnalysisTransport
 from vlogsrt.project.raw.analysis_config import RawUnderstandingSettings
 from vlogsrt.project.raw.analysis_store import AnalysisStore
 from vlogsrt.project.raw.claude_cost import window_ceiling_usd
-from vlogsrt.project.raw.config import CLAUDE_ANALYSIS_PROFILE, RawModelRoles
+from vlogsrt.project.raw.config import (
+    CLAUDE_ANALYSIS_PROFILES,
+    OPENAI_LUNA_MODEL,
+    claude_profile,
+)
 from vlogsrt.project.raw.service import RawWorkspaceError
 from vlogsrt.project.raw.understanding_luna import luna_output_schema_bytes
 
 needs_ffmpeg = pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg required")
 
 CLAUDE = "claude-opus-5-5"
-LUNA = RawModelRoles().luna_model
+SONNET = "claude-sonnet-5-5"
+LUNA = OPENAI_LUNA_MODEL
 DONE = "추천 구간 준비 완료"
 SETTLED = (DONE, "분석 확인 필요", "부분 완료 · 확인 필요")
 USAGE = {
@@ -47,7 +56,8 @@ USAGE = {
     "cache_creation_input_tokens": 0,
     "cache_read_input_tokens": 0,
 }
-"""가짜 Claude 응답의 사용량 — 공식 단가로 (5000×$4 + 1200×$20)/100만 = $0.044."""
+"""가짜 Claude 응답의 사용량 — Opus 공식 단가로 (5000×$4 + 1200×$20)/100만 = $0.044,
+Sonnet 공식 단가로 (5000×$2 + 1200×$10)/100만 = $0.022."""
 
 
 def judgment(text: str) -> dict[str, Any]:
@@ -121,7 +131,7 @@ class ClaudeOpener:
             "id": f"msg_flow_{len(self.calls)}",
             "type": "message",
             "role": "assistant",
-            "model": CLAUDE,
+            "model": body["model"],  # 응답은 요청한 모델을 되울린다
             "content": [
                 {"type": "thinking", "thinking": "", "signature": "synthetic"},
                 {"type": "text", "text": json.dumps(judgment(text), ensure_ascii=False)},
@@ -133,14 +143,22 @@ class ClaudeOpener:
         return _Reply(reply, f"req_flow_{len(self.calls)}")
 
 
-def claude_client(opener: ClaudeOpener) -> ClaudeMessagesClient:
+def claude_client(opener: ClaudeOpener, model: str = CLAUDE) -> ClaudeMessagesClient:
+    profile = claude_profile(model)
     return ClaudeMessagesClient(
         api_key="sk-ant-synthetic-flow",
-        base_url=CLAUDE_ANALYSIS_PROFILE.api_base_url,
-        api_version=CLAUDE_ANALYSIS_PROFILE.api_version,
-        timeout_seconds=CLAUDE_ANALYSIS_PROFILE.timeout_seconds,
+        base_url=profile.api_base_url,
+        api_version=profile.api_version,
+        timeout_seconds=profile.timeout_seconds,
         opener=opener,
     )
+
+
+def claude_clients(opener: ClaudeOpener | None) -> dict[str, ClaudeMessagesClient]:
+    """등록된 Claude 모델마다 그 프로파일로 만든 클라이언트 — 생산 transport와 같은 모양."""
+    if opener is None:
+        return {}
+    return {model: claude_client(opener, model) for model in CLAUDE_ANALYSIS_PROFILES}
 
 
 def make_server(
@@ -150,7 +168,13 @@ def make_server(
     *,
     opener: ClaudeOpener | None,
     auto_approve: bool = True,
+    model: str | None = LUNA,
 ) -> tuple[RawWorkspaceUi, _CountingSender, LunaClient]:
+    """가짜 전송의 작업대 — `model`이 있으면 그 모델로 저장된 기존 작업공간처럼 시작한다.
+
+    기본은 W-18 이전에 만든 Luna 작업공간이다. `model=None`은 새 작업공간의 기본(Sonnet 5.5)
+    그대로다.
+    """
     monkeypatch.setattr("vlogsrt.env.is_offline", lambda: False)
     sender = _CountingSender([{"start": 0.5, "end": 1.5, "text": "합성 영상입니다."}])
     luna = LunaClient()
@@ -163,10 +187,15 @@ def make_server(
             client=luna,
             asr_approvals=lambda *a: {},
             luna_approvals=lambda *a: {},
-            claude_client=None if opener is None else claude_client(opener),
+            claude_clients=claude_clients(opener),
         ),
     )
     server.create_workspace_view("Claude 분석 흐름", str(tmp_path / "workspace"))
+    if model is not None:
+        root = server.workspace_root()
+        workflow = server.raw.settings(root)
+        models = replace(workflow.models, luna_model=model)
+        server.raw.update_settings(root, replace(workflow, models=models))
     server._selection_auto_approval = (lambda quote: True) if auto_approve else None
     return server, sender, luna
 
@@ -222,9 +251,44 @@ def test_a_claude_selection_buys_asr_once_and_prices_every_claude_call(
     # 승인한 견적은 공식 단가의 보수적 상한을 실었고, 실제 금액은 그 안이다.
     (quoted,) = state["quote"].estimates
     per_window = window_ceiling_usd(
-        CLAUDE_ANALYSIS_PROFILE,
+        claude_profile(CLAUDE),
         RawUnderstandingSettings(),
         schema_bytes=luna_output_schema_bytes(),
+    )
+    assert Decimal(quoted.ceiling_usd) == per_window * quoted.window_count
+    assert sum(Decimal(row["cost_usd"]) for row in rows) <= Decimal(quoted.ceiling_usd)
+
+
+@needs_ffmpeg
+def test_a_new_workspace_analyzes_with_sonnet_without_choosing_and_prices_at_sonnet_rates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """W-18(D58) — 새 작업공간은 고르지 않아도 Sonnet 5.5로 판정하고 Sonnet 단가로 값을 매긴다."""
+    source = tmp_path / "scene.mov"
+    _make_media(source, audio=True, seconds="32")
+    opener = ClaudeOpener()
+    server, sender, luna = make_server(tmp_path, monkeypatch, source, opener=opener, model=None)
+    root = server.workspace_root()
+    assert server.raw.settings(root).models.luna_model == SONNET
+    server.capcut_choose_view(server.current_signature())
+    state = settle(server)
+    assert state["stage"] == DONE, state
+    assert (len(sender.calls), len(luna.calls), len(opener.calls)) == (1, 0, 3)
+    for request, body in opener.calls:
+        assert request.full_url == "https://api.anthropic.com/v1/messages"
+        assert body["model"] == SONNET and body["max_tokens"] == 12000
+        assert body["output_config"]["effort"] == "medium"
+        assert not {"thinking", "tools", "tool_choice", "temperature", "top_p", "top_k"} & set(body)
+    revision = AnalysisStore(server.raw._workspace(root)).revision(state["revision"])
+    assert revision is not None and json.loads(revision.models_json)["luna"] == SONNET
+    with sqlite3.connect(root / "project.sqlite3") as db:
+        db.row_factory = sqlite3.Row
+        rows = list(db.execute("SELECT * FROM analysis_requests WHERE model=?", (SONNET,)))
+    assert len(rows) == 3 and all(row["unpriced_reason"] is None for row in rows)
+    assert all(Decimal(row["cost_usd"]) == Decimal("0.022") for row in rows)
+    (quoted,) = state["quote"].estimates
+    per_window = window_ceiling_usd(
+        claude_profile(SONNET), RawUnderstandingSettings(), schema_bytes=luna_output_schema_bytes()
     )
     assert Decimal(quoted.ceiling_usd) == per_window * quoted.window_count
     assert sum(Decimal(row["cost_usd"]) for row in rows) <= Decimal(quoted.ceiling_usd)

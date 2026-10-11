@@ -30,6 +30,7 @@ pytest.importorskip(
 
 import gradio as gr  # noqa: E402
 
+from tests.raw.test_selection_analysis import keep_luna  # noqa: E402
 from ui import workspace_service  # noqa: E402
 from vlogsrt.config import Config  # noqa: E402
 
@@ -174,6 +175,7 @@ def _make_media(path: Path, seconds: str = "6") -> None:
 def test_browser_replay_analysis_flow_to_segment_plan(server, tmp_path: Path) -> None:
     """견적 → 재생 분석 → 상태·요약 읽기 → 분석 결과로 분할 계획까지(§12 화면 2)."""
     signature, root = _opened(server, tmp_path)
+    keep_luna(server)  # Luna 재생 픽스처 — W-18 이전 작업공간처럼 gpt-6-luna를 저장한다(D58)
     card = tmp_path / "card" / "DCIM"
     _make_media(card / "제주.mov")
     proposal = server.raw.scan_sources(root, tmp_path / "card")
@@ -301,6 +303,7 @@ def test_browser_two_phase_live_flow_with_injected_transport(tmp_path, monkeypat
     server = workspace_service.RawWorkspaceUi(port=7860, state_path=tmp_path / "state.json")
     view = server.create_workspace_view("제주", str(tmp_path / "ws"))
     signature, root = view[1], Path(view[0].split("`")[1])
+    keep_luna(server)  # OpenAI 가짜 Luna 클라이언트 — 기존 Luna 작업공간에서 출발한다(D58)
     card = tmp_path / "card" / "DCIM"
     _make_media(card / "제주.mov")
     proposal = server.raw.scan_sources(root, tmp_path / "card")

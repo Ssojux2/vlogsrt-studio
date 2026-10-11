@@ -28,7 +28,7 @@ from tests.raw.test_understanding_luna import (
     online_workflow,
 )
 from vlogsrt.project.raw import understanding_luna as luna
-from vlogsrt.project.raw.config import RawWorkflowConfig, claude_profile
+from vlogsrt.project.raw.config import OPENAI_LUNA_MODEL, RawWorkflowConfig, claude_profile
 from vlogsrt.project.raw.understanding import FrameEvidence, FrameSamplingResult
 from vlogsrt.project.raw.understanding_luna import (
     AnalysisApprovalError,
@@ -50,7 +50,7 @@ from vlogsrt.project.raw.understanding_luna import (
 from vlogsrt.transcribe import create_claude_client
 
 CLAUDE = "claude-opus-5-5"
-LUNA = RawWorkflowConfig().models.luna_model
+LUNA = OPENAI_LUNA_MODEL  # W-18(D58) 전에는 기본값이었다 — 이 파일은 Luna 경로를 그대로 본다
 FIXTURES = Path(__file__).parent.parent / "fixtures" / "synthetic" / "claude"
 PRE_W14_LUNA_SHA = "909bc2363f7b6217379bbde2b4a3db2e89e53c2314ccb743a7b7471d3e563c13"
 """W-14 이전 코드가 `make_evidence`의 창에 대해 낸 Luna 요청 신원 — 바뀌면 캐시가 깨진다."""

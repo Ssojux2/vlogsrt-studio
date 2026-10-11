@@ -18,6 +18,7 @@ from vlogsrt.project.raw.config import (
     CAPTION_SCHEMA_VERSION,
     TIMING_PROVIDER_WHISPER_VERBOSE_JSON,
     WORKFLOW_SCHEMA_VERSION,
+    RawModelRoles,
     RawWorkflowConfig,
     raw_workflow_config_from_json,
     raw_workflow_config_to_json,
@@ -30,7 +31,8 @@ def test_defaults_match_the_2026_10_02_plan() -> None:
     config = RawWorkflowConfig()
     assert config.models.text_model == "gpt-transcribe"
     assert config.models.timing_model == "whisper-1"
-    assert config.models.luna_model == "gpt-6-luna"
+    # W-18(D58): 새 작업공간의 의미 분석 기본은 Claude Sonnet 5.5다 — 나머지는 2026-10-02 그대로
+    assert config.models.luna_model == "claude-sonnet-5-5"
     assert config.registry.revision == "openai-caption-2026-10-02-v1"
     assert config.registry.docs_checked_at == date(2026, 10, 2)
     assert config.registry.account_access_status == "unverified"
@@ -447,9 +449,15 @@ ACCEPTED_SETTINGS_JSON = """{
 
 
 def test_accepted_saved_settings_json_still_round_trips() -> None:
-    """수락된 저장 설정은 A7-1 이후에도 그대로 열린다 — JSON 호환이 깨지면 여기서 먼저 울린다."""
+    """수락된 저장 설정은 A7-1 이후에도 그대로 열린다 — JSON 호환이 깨지면 여기서 먼저 울린다.
+
+    W-18(D58) 뒤로 이 글자는 "지금의 기본"이 아니라 "이미 있는 작업공간이 저장한 W-18 이전의
+    기본"이다. 그래서 새 기본(Sonnet 5.5)과 같지 않고, 저장된 gpt-6-luna 그대로 열려야 한다.
+    """
     config = raw_workflow_config_from_json(ACCEPTED_SETTINGS_JSON)
-    assert config == RawWorkflowConfig()
+    pre_w18 = replace(RawWorkflowConfig(), models=replace(RawModelRoles(), luna_model="gpt-6-luna"))
+    assert config == pre_w18
+    assert config.models.luna_model == "gpt-6-luna"
     assert raw_workflow_config_to_json(config) == ACCEPTED_SETTINGS_JSON
 
 
@@ -540,7 +548,8 @@ def test_provider_resolution_and_choices() -> None:
         claude_profile,
     )
 
-    assert ANALYSIS_MODEL_CHOICES == ("gpt-6-luna", "claude-opus-5-5")
+    # W-18(D58): 기본(Sonnet 5.5)이 맨 앞, Opus 5.5와 gpt-6-luna도 그대로 고를 수 있다
+    assert ANALYSIS_MODEL_CHOICES == ("claude-sonnet-5-5", "claude-opus-5-5", "gpt-6-luna")
     assert analysis_provider("gpt-6-luna") == ANALYSIS_PROVIDER_OPENAI == "openai"
     assert analysis_provider("claude-opus-5-5") == ANALYSIS_PROVIDER_ANTHROPIC == "anthropic"
     assert analysis_model_label("claude-opus-5-5") == "Claude Opus 5.5"
@@ -572,10 +581,16 @@ def test_claude_outside_its_registered_analysis_role_is_rejected(
 
 
 def test_the_default_workflow_json_is_byte_identical_with_no_new_keys() -> None:
-    """W-14는 RawWorkflowConfig에 칸을 더하지 않는다 — 저장된 작업공간이 그대로 열린다."""
+    """W-14·W-18은 RawWorkflowConfig에 칸을 더하지 않는다 — 저장된 작업공간이 그대로 열린다.
+
+    W-18(D58)이 바꾼 것은 새 작업공간의 의미 분석 모델 값 하나뿐이다 — 칸·순서·나머지 값은
+    수락된 저장 설정과 바이트까지 같다. 단가·엔드포인트는 설정 밖 프로파일에 산다.
+    """
     payload = raw_workflow_config_to_json(RawWorkflowConfig())
-    assert payload == ACCEPTED_SETTINGS_JSON
-    assert "claude" not in payload.lower() and "anthropic" not in payload.lower()
+    luna_line = '"luna_model": "gpt-6-luna"'
+    assert ACCEPTED_SETTINGS_JSON.count(luna_line) == 1
+    assert payload == ACCEPTED_SETTINGS_JSON.replace(luna_line, '"luna_model": "claude-sonnet-5-5"')
+    assert "anthropic" not in payload.lower()
 
 
 def test_transcription_identity_view_pins_the_analysis_model() -> None:
@@ -585,9 +600,11 @@ def test_transcription_identity_view_pins_the_analysis_model() -> None:
         transcription_identity_view,
     )
 
-    default = RawWorkflowConfig()
+    # W-18(D58): 기본이 Sonnet 5.5가 돼도 고정값은 W-14 이전의 기본(저장된 gpt-6-luna) 그대로다
+    pinned = raw_workflow_config_from_json(ACCEPTED_SETTINGS_JSON)
     assert TRANSCRIPTION_IDENTITY_LUNA_MODEL == "gpt-6-luna"
-    assert transcription_identity_view(default) == default
-    assert transcription_identity_view(_claude_config()) == default
+    assert transcription_identity_view(pinned) is pinned
+    assert transcription_identity_view(RawWorkflowConfig()) == pinned
+    assert transcription_identity_view(_claude_config()) == pinned
     online = replace(_claude_config(), network_mode="online")
-    assert transcription_identity_view(online) == replace(default, network_mode="online")
+    assert transcription_identity_view(online) == replace(pinned, network_mode="online")

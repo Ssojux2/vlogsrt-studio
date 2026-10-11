@@ -1550,10 +1550,11 @@ def check_no_hardcoded_model() -> list[str]:
     (whisper-1·gpt-*transcribe*)을 놓아도 되지만 glm·gemini는 금지다.
     `vlogsrt/project/config.py`는 셋 다 놓아도 되나 raw 전용 리터럴(gpt-6-luna)은
     금지다. gpt-6-luna는 정확히 `vlogsrt/project/raw/config.py`에만 있을 수 있다
-    (2026-10-02 계획 §3.2 — 모델 리터럴은 허용된 설정 경로에만 둔다).
+    (2026-10-02 계획 §3.2 — 모델 리터럴은 허용된 설정 경로에만 둔다). 작업대(`ui/`)도
+    본다 — 화면이 모델 이름을 박으면 기본 모델(D58)을 바꿀 때 두 곳이 갈린다.
     """
     failures = []
-    for path in _sources():
+    for path in _sources() + sorted(UI_DIR.rglob("*.py")):
         rel = _rel(path)
         patterns = (
             ENGINE_MODEL_LITERAL,

@@ -5,6 +5,9 @@
 보수적 비용 상한을 말하고, 다른 모델로 끝난 분석은 끝났다고 보이지 않는다. 키는 이름만 말하고 값은
 어디에도 싣지 않는다. 모델을 바꾸는 것은 사람의 검토 편집이 아니다 — 검토 머리·영상 순서가
 움직이지 않는다(D53).
+
+W-18(D58)부터 새 작업공간의 기본은 Claude Sonnet 5.5이고 칸 맨 앞에 「(기본)」으로 보인다. Luna에서
+출발하는 시험은 W-18 이전에 만든 작업공간처럼 Luna를 저장한 채 연다(`bare_server`·`make_server`).
 """
 
 from __future__ import annotations
@@ -23,6 +26,7 @@ from tests.raw.test_claude_analysis_flow import (
     CLAUDE,
     DONE,
     LUNA,
+    SONNET,
     ClaudeOpener,
     choose_model,
     make_server,
@@ -38,9 +42,16 @@ needs_ffmpeg = pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg req
 SECRET = "sk-ant-synthetic-never-shown"
 
 
-def bare_server(tmp_path: Path) -> RawWorkspaceUi:
+def bare_server(tmp_path: Path, model: str | None = LUNA) -> RawWorkspaceUi:
+    """빈 작업대 — `model`이 있으면 그 모델을 저장한 기존 작업공간처럼, None이면 새 기본 그대로."""
     server = RawWorkspaceUi(state_path=tmp_path / "ui-state.json")
     server.create_workspace_view("분석 모델", str(tmp_path / "workspace"))
+    if model is not None:
+        root = server.workspace_root()
+        workflow = server.raw.settings(root)
+        server.raw.update_settings(
+            root, replace(workflow, models=replace(workflow.models, luna_model=model))
+        )
     return server
 
 
@@ -50,15 +61,117 @@ def model_of(server: RawWorkspaceUi) -> str:
 
 def test_the_dropdown_switches_the_workspace_model_and_back(tmp_path: Path) -> None:
     server = bare_server(tmp_path)
+    # W-18(D58): 기본(Sonnet 5.5)이 맨 앞에 「(기본)」으로, Opus 5.5·gpt-6-luna는 그대로 고른다
     assert server.analysis_model_choices() == [
-        (LUNA, LUNA),
+        ("Claude Sonnet 5.5 (기본)", SONNET),
         ("Claude Opus 5.5", CLAUDE),
+        (LUNA, LUNA),
     ]
     status, dropdown = server.settings_analysis_model_view(server.current_signature(), CLAUDE)
     assert model_of(server) == CLAUDE and dropdown.value == CLAUDE
     assert "Claude Opus 5.5" in status
     status, dropdown = server.settings_analysis_model_view(server.current_signature(), LUNA)
     assert model_of(server) == LUNA and dropdown.value == LUNA
+
+
+def test_a_new_workspace_shows_sonnet_as_the_default_without_a_price(tmp_path: Path) -> None:
+    """새 작업공간은 Sonnet 5.5로 시작한다 — 「(기본)」은 선택지에만, 달러는 선택지에 없다(D57)."""
+    server = bare_server(tmp_path, model=None)
+    assert model_of(server) == SONNET
+    dropdown, status = server.analysis_model_controls()
+    assert dropdown.value == SONNET
+    labels = [label for label, _ in server.analysis_model_choices()]
+    assert labels[0] == "Claude Sonnet 5.5 (기본)"
+    assert sum("(기본)" in label for label in labels) == 1
+    assert not any("$" in label for label in labels)
+    assert "Claude Sonnet 5.5" in status and "(기본)" not in status
+    # 상태 줄도 달러·토큰 용어 없이 단가 상태만 말한다 — 금액은 견적이 말한다(D57 결정 7, D58)
+    assert "공식 단가 확인됨" in status and "견적에서 보여 드립니다" in status
+    assert not any(word in status for word in PRICE_WORDS), status
+    status, dropdown = server.settings_analysis_model_view(server.current_signature(), LUNA)
+    assert model_of(server) == LUNA and dropdown.value == LUNA
+
+
+PRICE_WORDS = ("$", "100만 토큰", "effort", "출력 한도", "입력 $", "출력 $")
+"""화면(설정 요약·분석 설정 줄·모델 상태 줄)에 나오면 안 되는 단가·토큰 용어(D57 결정 7)."""
+
+
+@pytest.mark.parametrize("model", list(raw_service.ANALYSIS_MODEL_CHOICES))
+def test_no_screen_text_outside_quotes_shows_a_unit_price(tmp_path: Path, model: str) -> None:
+    """모든 모델에서 상태 줄·설정 요약·분석 설정 줄에 달러·토큰 용어가 없다 — 금액은 견적만."""
+    server = bare_server(tmp_path, model=model)
+    root = server.workspace_root()
+    texts = (
+        server.analysis_model_status(),
+        server.settings_markdown(root),
+        server._analysis_settings_markdown(root),
+    )
+    for text in texts:
+        assert not any(word in text for word in PRICE_WORDS), text
+    claude = raw_service.analysis_provider(model) == raw_service.ANALYSIS_PROVIDER_ANTHROPIC
+    expected = "공식 단가 확인됨" if claude else "단가 **미확인**"
+    assert all(expected in text for text in (texts[0], texts[2]))
+
+
+def test_switching_workspaces_refreshes_the_model_chooser(tmp_path: Path) -> None:
+    """작업공간을 바꾸면 칸도 그 작업공간의 모델을 보인다 — Luna 작업공간이 Sonnet으로 안 보인다."""
+    server = bare_server(tmp_path)  # Luna를 저장한 기존 작업공간
+    luna_root = server.workspace_root()
+    server.create_workspace_view("새 작업공간", str(tmp_path / "fresh"))
+    dropdown, status = server.analysis_model_controls()
+    assert dropdown.value == SONNET and "Claude Sonnet 5.5" in status
+    server.open_workspace_view(str(luna_root))
+    dropdown, status = server.analysis_model_controls()
+    assert dropdown.value == LUNA and "gpt-6-luna" in status
+    assert server.raw.settings(luna_root).models.luna_model == LUNA  # 맞추기만 하고 저장하지 않는다
+
+
+def test_every_workspace_change_rewires_the_model_chooser(
+    tmp_path: Path, local_socket: None
+) -> None:
+    """실제 Blocks — 열기·만들기·라이브러리·직접 열기·영상 고르기·앱 열기 뒤에 칸·상태를 맞춘다."""
+    server = bare_server(tmp_path)
+    app = server.build_blocks()
+    fns = app.fns
+    by_id = {getattr(block, "elem_id", None): block for block in app.blocks.values()}
+    targets = {by_id["analysis-model"]._id, by_id["analysis-model-status"]._id}
+
+    def root_name(fn: object) -> str:
+        while getattr(fn, "trigger_after", None) is not None:
+            fn = fns[fn.trigger_after]  # type: ignore[attr-defined]
+        return fn.fn.__name__  # type: ignore[attr-defined]
+
+    refreshers = [
+        f for f in fns.values() if getattr(f.fn, "__name__", "") == "analysis_model_controls"
+    ]
+    assert all({block._id for block in f.outputs} == targets for f in refreshers)
+    roots = [root_name(f) for f in refreshers if f.trigger_after is not None]
+    assert sorted(roots) == sorted(
+        [
+            "direct_project_open_view",
+            "capcut_fcp_choose_view",
+            "capcut_fcp_choose_view",
+            "open_project_chooser_view",
+            "create_project_chooser_view",
+            "refresh_outputs",
+            "capcut_choose_view",
+        ]
+    )
+    assert not any(
+        getattr(f.fn, "__name__", "") == "settings_analysis_model_view"
+        and f.trigger_after is not None
+        for f in fns.values()
+    )  # 저장은 사람의 `input`뿐
+
+
+def test_an_existing_luna_workspace_is_not_moved_to_the_new_default(tmp_path: Path) -> None:
+    """Luna를 저장한 작업공간은 다시 열어도 Luna다 — 칸만 열어서는 저장하지 않는다."""
+    server = bare_server(tmp_path)
+    dropdown, _ = server.analysis_model_controls()
+    assert dropdown.value == LUNA and model_of(server) == LUNA
+    reopened = RawWorkspaceUi(state_path=tmp_path / "ui-state-2.json")
+    reopened.raw.open_workspace(server.workspace_root())
+    assert reopened.raw.settings(server.workspace_root()).models.luna_model == LUNA
 
 
 @pytest.mark.parametrize("model", ["claude-opus-9", "gpt-5", "", None])
@@ -131,7 +244,8 @@ def test_the_api_panel_carries_the_model_dropdown_and_never_the_key(
     by_id = {getattr(block, "elem_id", None): block for block in app.blocks.values()}
     dropdown, status = by_id["analysis-model"], by_id["analysis-model-status"]
     assert isinstance(dropdown, gr.Dropdown) and dropdown.label == "영상 분석 모델"
-    assert [value for _, value in dropdown.choices] == [LUNA, CLAUDE] and dropdown.value == LUNA
+    assert [value for _, value in dropdown.choices] == [SONNET, CLAUDE, LUNA]
+    assert dropdown.value == LUNA  # 저장된 모델 그대로 — 기본으로 옮기지 않는다
     assert dropdown.parent.parent is by_id["quick-api-panel"]  # gradio가 입력 칸을 Form으로 감싼다
     assert "확인됨" in str(status.value)
     triggers = [
@@ -160,8 +274,9 @@ def test_settings_summaries_show_official_claude_prices_only_for_claude(tmp_path
     assert "$4" not in luna_settings and "Luna 단가 **미확인**" in luna_analysis
     choose_model(server, CLAUDE)
     for text in (server.settings_markdown(root), server._analysis_settings_markdown(root)):
-        assert "Claude Opus 5.5" in text and "2026-10-09" in text
-        assert "입력 $4" in text and "출력 $20" in text
+        # D58: 단가(달러)는 견적에서만 — 설정 화면은 단가 상태만 말한다(D57 결정 7)
+        assert "Claude Opus 5.5" in text and "공식 단가 확인됨" in text
+        assert "$" not in text
     choose_model(server, LUNA)
     assert server.settings_markdown(root) == luna_settings
     assert server._analysis_settings_markdown(root) == luna_analysis

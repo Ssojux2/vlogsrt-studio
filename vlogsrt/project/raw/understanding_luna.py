@@ -273,10 +273,12 @@ def build_claude_payload(
 
     프레임마다 아이디 이름표와 base64 JPEG를 먼저 싣고 안내문을 맨 뒤에 둔다 — 그림을
     먼저 보고 글을 읽는 순서다. 출력 강제는 `output_config.format`의 json_schema다.
-    `thinking`·`tools`·`temperature`는 싣지 않는다: Opus 5.5는 생각을 끌 수 없고(400),
-    강제 도구 호출·프리필도 400이다. `model`은 전송 경계의 인자 하나뿐이다. 지역은 표준
-    단가 값을 명시한다 — 빠지면 작업공간 기본값(US로 이전된 조직은 1.1배)을 따른다.
-    `service_tier`는 싣지 않는다 — Opus 5.5에는 우선 등급이 없다.
+    `thinking`·`tools`·`tool_choice`·`temperature`는 싣지 않는다: Opus 5.5는 생각을 끌 수
+    없고(400), 강제 도구 호출·프리필도 400이다. Sonnet 5.5(D58)도 `thinking: disabled`·
+    기본값이 아닌 temperature·top_p·top_k·강제 `tool_choice`가 400이다 — 같은 본문이 두
+    모델에 그대로 맞고, 모델마다 다른 것은 프로파일의 출력 한도·effort뿐이다. `model`은 전송
+    경계의 인자 하나뿐이다. 지역은 표준 단가 값을 명시한다 — 빠지면 작업공간 기본값(US로
+    이전된 조직은 1.1배)을 따른다. `service_tier`는 싣지 않는다 — Opus 5.5에는 우선 등급이 없다.
     """
     content: list[dict[str, object]] = []
     for frame in evidence.frames:
@@ -462,6 +464,9 @@ def _responses_text(response: Mapping[str, object]) -> tuple[str | None, str]:
 
 def _claude_text(response: Mapping[str, object]) -> tuple[str | None, str]:
     """Claude Messages 응답의 판정 본문 — end_turn의 text 블록만, 생각 블록은 버린다.
+
+    적응형 생각(Opus 5.5는 늘 켜짐, Sonnet 5.5는 기본 켜짐)은 text 앞에 `thinking`·
+    `redacted_thinking` 블록을 낸다 — 판정이 아니므로 읽지 않는다.
 
     `max_tokens`(출력 한도에 닿아 잘림)·`refusal`(안전 분류기의 거절)은 청구됐어도
     schema를 지킨다는 보장이 없다 — 판정으로 받지 않고 이유를 그대로 남긴다.

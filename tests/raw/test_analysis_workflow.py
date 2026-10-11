@@ -34,6 +34,7 @@ from vlogsrt.config import Config
 from vlogsrt.project.raw import analysis_workflow
 from vlogsrt.project.raw import service as raw
 from vlogsrt.project.raw.analysis_config import RawUnderstandingSettings
+from vlogsrt.project.raw.config import OPENAI_LUNA_MODEL
 from vlogsrt.project.raw.workspace import DB_NAME, DB_SCHEMA_VERSION, RawWorkspace
 
 needs_ffmpeg = pytest.mark.skipif(
@@ -212,8 +213,17 @@ def audio_tail(media: Path) -> Path:
 
 @pytest.fixture
 def workspace(tmp_path: Path) -> Path:
+    """Luna 재생·실행을 보는 작업공간 — W-18(D58) 이전에 만든 것처럼 gpt-6-luna를 저장해 둔다.
+
+    새 작업공간의 기본은 Claude Sonnet 5.5다. 이 파일의 재생 픽스처·가짜 클라이언트는 Luna(OpenAI)
+    응답 모양이므로 모델을 명시한다 — 단언은 W-18 전과 같다.
+    """
     root = tmp_path / "VlogProject"
-    raw.RawWorkspaceService().create_workspace(root, "제주")
+    service = raw.RawWorkspaceService()
+    service.create_workspace(root, "제주")
+    config = service.settings(root)
+    models = replace(config.models, luna_model=OPENAI_LUNA_MODEL)
+    service.update_settings(root, replace(config, models=models))
     return root
 
 

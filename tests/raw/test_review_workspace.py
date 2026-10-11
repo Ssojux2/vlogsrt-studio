@@ -18,6 +18,7 @@ import subprocess
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from fractions import Fraction
 from pathlib import Path
 
@@ -26,6 +27,7 @@ import pytest
 from vlogsrt import preprocess
 from vlogsrt.project.raw import review_workspace as facade_module
 from vlogsrt.project.raw import service as raw
+from vlogsrt.project.raw.config import OPENAI_LUNA_MODEL
 from vlogsrt.project.raw.models import AnalysisSourceResult, PlannedInterval
 from vlogsrt.project.raw.review_projection import BOUNDARY_REVIEW_NOTE, parse_review_vtt
 from vlogsrt.project.raw.review_workspace_store import ReviewWorkspaceStore
@@ -42,7 +44,7 @@ from vlogsrt.project.raw.segment_review import (
     serialize_revision,
     split_edit,
 )
-from vlogsrt.project.raw.workspace import DB_NAME
+from vlogsrt.project.raw.workspace import DB_NAME, RawWorkspace
 from vlogsrt.project.timebase import milliseconds_half_up
 
 needs_ffmpeg = pytest.mark.skipif(
@@ -171,7 +173,24 @@ def _luna_body(window_id: str) -> dict[str, object]:
     }
 
 
+def keep_luna_workspace(root: Path) -> None:
+    """작업공간에 gpt-6-luna를 저장한다 — W-18(D58) 이전에 만든 작업공간과 같은 출발점이다."""
+    workspace = RawWorkspace.open(root)
+    workflow = workspace.load_workflow()
+    models = replace(workflow.models, luna_model=OPENAI_LUNA_MODEL)
+    workspace.save_workflow(replace(workflow, models=models))
+
+
 def _write_replay_fixtures(root: Path, asr_sources: dict[str, list[dict[str, object]]]) -> None:
+    """Luna 응답 모양의 재생 픽스처를 쓰고, **작업공간의 의미 분석 모델도 gpt-6-luna로 바꾼다.**
+
+    부작용을 숨기지 않으려고 여기 적는다(D58): 이 함수는 픽스처만 쓰지 않는다 — 부르는 순간
+    `root` 작업공간의 저장 설정이 gpt-6-luna가 된다(`keep_luna_workspace`). 새 작업공간의 기본은
+    Claude Sonnet 5.5이고 Claude 재생은 Messages 응답 모양을 읽으므로, 이 Luna 판정 본문으로는
+    창이 실패한다 — 그래서 W-18 이전 작업공간과 같은 출발점(Luna 저장)을 만든다. Sonnet으로
+    재생하려면 이 함수를 쓰지 말고 Messages 모양 픽스처를 따로 써야 한다.
+    """
+    keep_luna_workspace(root)
     fixtures = root / "analysis" / "replay"
     fixtures.mkdir(parents=True, exist_ok=True)
     (fixtures / "asr-fixtures.json").write_text(

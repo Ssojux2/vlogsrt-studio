@@ -40,7 +40,7 @@
 **Final Cut 플러그인(Workflow Extension)은 2026-10-02 사용자 지시로 제거됐다 — 되살리지
 마라.** 계획 정본은 `docs/plans/2026-10-02-raw-video-browser-v2.md` + D44·D45, 보드는
 `TASKS.md`의 W 시리즈. 작업대의 3단 등급(추천·보통·제외 제안)은 순수 계층
-`vlogsrt/project/raw/tiering.py`가 **AI 분석 판정(Luna — 또는 Claude Opus 5.5, 작업공간 설정, D54)과 생성 자막만으로** 자막과 영상을 따로
+`vlogsrt/project/raw/tiering.py`가 **AI 분석 판정(작업공간 설정 — 새 작업공간의 기본은 Claude Sonnet 5.5(D58), Claude Opus 5.5·gpt-6-luna(Luna)도 고를 수 있다, D54)과 생성 자막만으로** 자막과 영상을 따로
 판정해 합쳐 매긴다(D51·D52) — 로컬 신호 측정(소리 크기·화면 밝기)은 없고, 읽을 때마다 다시
 계산해 어디에도 보관하지 않는다. 빨강(자막 없는 긴 공백인데 Luna가 풍경으로 보지 않은 화면)은
 미검토 자동 제외 **제안**일 뿐이고 분석 지문에 들어가지 않는다 — Final Cut으로는 켠 채
@@ -267,8 +267,9 @@ vlogsrt run <video> --offline             # 픽스처 기반 전체 파이프라
 | `sync_*` (`SyncCheckSettings`) | 외부 근거 없는 조정 대상. 자막 시각 확인(D55)의 판정 기준 — 실측 13개 영상으로 골랐고 여유가 얇다(Pτ 초록 최소 .75 대 노랑 최대 .70). **표시만 하므로** 어느 지문·캐시 열쇠에도 넣지 않는다 |
 | `tier_*` (`RawTierSettings`, 5개) | 외부 근거 없는 조정 대상. 자막 공백 5초 · 발화 쪽 여유 0.3초 · 발화 밀도 0.35 · 최소 구간 1초(D51). 로컬 측정 기준(RMS·루마·흐림)은 측정 계층과 함께 지웠다(D52). 분석 지문에 넣지 않는다 |
 | Claude Opus 5.5 단가 (`RawClaudeAnalysisProfile`) | 2026-10-09 공식 가격표(https://platform.claude.com/docs/en/about-claude/pricing) — 입력 $4 · 출력 $20 · 캐시 쓰기 5분 $5 · 1시간 $8 · 읽기 $0.20 / 100만 토큰, `inference_geo=global`(D54). **0으로 두지 마라** — 못 매기면 가격 미정이다 |
-| `effort`·`max_output_tokens`·`quote_*` (Claude 프로파일) | 외부 근거 없는 조정 대상(D54). medium · 8192 · 창당 텍스트 여유 12000 + 부대 여유 2000 토큰 |
-| 이미지 토큰 ⌈w/28⌉×⌈h/28⌉, 장당 4784 상한 (Claude) | Claude vision 문서(D54). 768px 프레임은 줄지 않아 장당 784 이하 — 창당 상한 $0.248의 재료다 |
+| Claude Sonnet 5.5 단가 (`RawClaudeAnalysisProfile`, 의미 분석 기본) | 2026-10-11 공식 가격표(https://platform.claude.com/docs/en/about-claude/pricing) — 입력 $2 · 출력 $10 · 캐시 쓰기 5분 $2.50 · 1시간 $4 · 읽기 $0.10 · 배치 $1/$5 / 100만 토큰, `inference_geo=global`(D58). **0으로 두지 마라** — 못 매기면 가격 미정이다 |
+| `effort`·`max_output_tokens`·`quote_*` (Claude 프로파일) | 외부 근거 없는 조정 대상(D54·D58). Opus 5.5 medium · 8192 · Sonnet 5.5 medium · 12000(적응형 생각 토큰도 이 안에 든다) · 창당 텍스트 여유 12000 + 부대 여유 2000 토큰 |
+| 이미지 토큰 ⌈w/28⌉×⌈h/28⌉, 장당 4784 상한 (Claude) | Claude vision 문서(D54) — 고해상도 등급(Claude 4.7 이후, Sonnet 5.5도 같다, D58). 768px 프레임은 줄지 않아 장당 784 이하 — 창당 상한 Opus $0.248 · Sonnet 약 $0.162의 재료다 |
 
 **압축률은 창 안에서만 재라.** 통째로 재면 길이 검사가 된다 — 정상 발화도 길어지기만
 하면 임계값을 넘어서, 되살린 구간을 접어버린다(D27이 그 버그를 잡았다).

@@ -9,7 +9,8 @@
   자격증명 값은 화면·로그·프로젝트 기록에 내보내지 않는다.
 - 전송 경계는 이미 받아들인 정본뿐이다: 내부 ASR는 `LiveTranscriber`
   (`vlogsrt/transcribe`, API 호출의 유일한 곳), Luna는 `create_vision_client`,
-  Claude 의미 분석(D54)은 `create_claude_client`(`ANTHROPIC_API_KEY`가 있을 때만).
+  Claude 의미 분석(D54·D58)은 `create_claude_client`(`ANTHROPIC_API_KEY`가 있을 때만,
+  등록된 모델마다 그 프로파일로).
   모델 대체는 없다 — 설정 모델 그대로고 실패는 그대로 올라간다.
 - 승인은 **화면이 잰 견적 그대로**에서 만든다(mint). 사람이 보지 않은 값을
   묶는 길이 없고, 만든 뒤에도 게이트(`require_live_asr_approval`·
@@ -43,7 +44,8 @@ from vlogsrt.project.raw.analysis_approval import (
 from vlogsrt.project.raw.analysis_config import RawUnderstandingSettings
 from vlogsrt.project.raw.config import (
     ANALYSIS_PROVIDER_ANTHROPIC,
-    CLAUDE_ANALYSIS_PROFILE,
+    CLAUDE_ANALYSIS_PROFILES,
+    RawClaudeAnalysisProfile,
     analysis_provider,
 )
 from vlogsrt.project.raw.models import AnalysisEstimate, AnalysisSemanticEstimate
@@ -161,8 +163,8 @@ def live_transport_for_credentials(
 
     이 함수를 부르는 것만으로는 아무 호출도 일어나지 않는다(클라이언트 생성은
     SDK 객체일 뿐이다). 첫 전송은 승인 공급자가 돌려준 승인을 게이트가 검증한
-    뒤에야 시작된다(§14.3). Claude 키가 있으면 Claude 클라이언트도 만든다 —
-    엔드포인트·버전·시간 한도는 등록된 프로파일 값이다(D54).
+    뒤에야 시작된다(§14.3). Claude 키가 있으면 등록된 Claude 모델마다 클라이언트를
+    만든다 — 엔드포인트·버전·시간 한도는 **그 모델의** 프로파일 값이다(D54·D58).
     """
     return LiveAnalysisTransport(
         sender=LiveTranscriber(
@@ -175,12 +177,19 @@ def live_transport_for_credentials(
         asr_approvals=asr_approvals,
         luna_approvals=luna_approvals,
         on=on,
-        claude_client=None if claude is None else _claude_client(claude),
+        claude_clients={} if claude is None else _claude_clients(claude),
     )
 
 
-def _claude_client(claude: ClaudeCredentials) -> object:
-    profile = CLAUDE_ANALYSIS_PROFILE
+def _claude_clients(claude: ClaudeCredentials) -> dict[str, object]:
+    """등록된 Claude 모델 → 그 프로파일로 만든 클라이언트. 만들기만 하고 보내지 않는다."""
+    return {
+        model: _claude_client(claude, profile)
+        for model, profile in CLAUDE_ANALYSIS_PROFILES.items()
+    }
+
+
+def _claude_client(claude: ClaudeCredentials, profile: RawClaudeAnalysisProfile) -> object:
     return create_claude_client(
         api_key=claude.api_key,
         base_url=profile.api_base_url,

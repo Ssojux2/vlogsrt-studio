@@ -20,7 +20,7 @@ import pytest
 from vlogsrt.project.raw import understanding as stage1
 from vlogsrt.project.raw import understanding_luna as luna
 from vlogsrt.project.raw.analysis_config import RawUnderstandingSettings
-from vlogsrt.project.raw.config import RawModelRoles, RawWorkflowConfig
+from vlogsrt.project.raw.config import OPENAI_LUNA_MODEL, RawModelRoles, RawWorkflowConfig
 from vlogsrt.project.raw.understanding import (
     AsrEvidence,
     FrameEvidence,
@@ -59,6 +59,8 @@ from vlogsrt.project.raw.understanding_luna import (
 )
 
 SETTINGS = RawUnderstandingSettings()
+LUNA_WORKFLOW = RawWorkflowConfig(models=replace(RawModelRoles(), luna_model=OPENAI_LUNA_MODEL))
+"""Luna(OpenAI) 경로의 설정 — W-18(D58) 전의 기본값 그대로다. 이 파일은 Luna 문을 시험한다."""
 
 
 def make_audio(tmp_path: Path, *, seconds: float = 20.0) -> SelectedAudio:
@@ -457,8 +459,8 @@ def approval(tmp_path: Path, *, fingerprint: str, windows: int = 2) -> OnlineAna
             sample_count=audio.sample_count,
             window_count=len(plan.windows),
             fingerprint=fingerprint,
-            asr_model=RawWorkflowConfig().models.timing_model,
-            luna_model=RawWorkflowConfig().models.luna_model,
+            asr_model=LUNA_WORKFLOW.models.timing_model,
+            luna_model=LUNA_WORKFLOW.models.luna_model,
             budget=AnalysisBudget(max_luna_requests=windows, max_asr_chunks=9),
         ),
         audio,
@@ -467,7 +469,7 @@ def approval(tmp_path: Path, *, fingerprint: str, windows: int = 2) -> OnlineAna
 
 
 def online_workflow() -> RawWorkflowConfig:
-    return replace(RawWorkflowConfig(), network_mode="online")
+    return replace(LUNA_WORKFLOW, network_mode="online")
 
 
 def env_online(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -482,7 +484,7 @@ def test_offline_config_blocks_even_an_approved_run(tmp_path: Path) -> None:
     granted, _, _ = approval(tmp_path, fingerprint="f" * 64)
     with pytest.raises(AnalysisApprovalError, match="닫혀 있다"):
         require_online_approval(
-            granted, settings=RawWorkflowConfig(), audio=audio, plan=plan, fingerprint="f" * 64
+            granted, settings=LUNA_WORKFLOW, audio=audio, plan=plan, fingerprint="f" * 64
         )
 
 
@@ -632,8 +634,8 @@ def matched_approval(
         sample_count=audio.sample_count,
         window_count=len(plan.windows),
         fingerprint=fingerprint,
-        asr_model=RawWorkflowConfig().models.timing_model,
-        luna_model=RawWorkflowConfig().models.luna_model,
+        asr_model=LUNA_WORKFLOW.models.timing_model,
+        luna_model=LUNA_WORKFLOW.models.luna_model,
         budget=AnalysisBudget(max_luna_requests=len(plan.windows), max_asr_chunks=9),
     )
 
@@ -830,7 +832,7 @@ def test_factory_denies_forged_or_drifted_contexts(
     elif tamper == "budget":
         granted = replace(granted, budget=AnalysisBudget(max_luna_requests=1, max_asr_chunks=9))
     else:
-        settings = RawWorkflowConfig()  # 오프라인 설정 — 공장이 닫는다
+        settings = LUNA_WORKFLOW  # 오프라인 설정 — 공장이 닫는다
     with pytest.raises(AnalysisApprovalError):
         validated_luna_responder(
             client=object(),
@@ -939,7 +941,7 @@ def test_replace_cannot_drift_a_validated_context(
     with pytest.raises(AnalysisApprovalError, match="창 계획"):
         replace(context, evidence_windows=())
     with pytest.raises(AnalysisApprovalError, match="네트워크 모드"):
-        replace(context, settings=RawWorkflowConfig())  # 오프라인 설정 — 전송 순간 이전에 닫힌다
+        replace(context, settings=LUNA_WORKFLOW)  # 오프라인 설정 — 전송 순간 이전에 닫힌다
 
 
 def test_request_hash_mapping_is_frozen_against_mutation(
@@ -1141,9 +1143,7 @@ def test_stage1_document_mode_comes_from_execution_evidence(tmp_path: Path) -> N
         document(workflow=online_workflow(), annotations=())["execution_mode"] == "offline_replay"
     )
     # 실제 호출 판정만 live다 — 설정이 offline로 바뀌어도 증거가 이긴다
-    live = document(
-        workflow=RawWorkflowConfig(), annotations=(annotation_of("window_000000", "live"),)
-    )
+    live = document(workflow=LUNA_WORKFLOW, annotations=(annotation_of("window_000000", "live"),))
     assert live["execution_mode"] == "online_live"
     # 섞인 실행은 섞였다고 말한다 — 재생을 live로 묻는 길은 없다
     mixed = document(
@@ -1154,7 +1154,7 @@ def test_stage1_document_mode_comes_from_execution_evidence(tmp_path: Path) -> N
         ),
     )
     assert mixed["execution_mode"] == "mixed_live_and_replay"
-    assert live["models"]["asr"] == RawWorkflowConfig().models.timing_model
+    assert live["models"]["asr"] == LUNA_WORKFLOW.models.timing_model
 
 
 def test_unknown_annotation_origin_cannot_reach_the_document(tmp_path: Path) -> None:

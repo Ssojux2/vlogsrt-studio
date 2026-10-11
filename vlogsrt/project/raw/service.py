@@ -69,6 +69,7 @@ from vlogsrt.project.raw.caption_workspace_types import (
 from vlogsrt.project.raw.config import (
     ANALYSIS_MODEL_CHOICES,
     ANALYSIS_PROVIDER_ANTHROPIC,
+    DEFAULT_ANALYSIS_MODEL,
     WORKFLOW_SCHEMA_VERSION,
     RawWorkflowConfig,
     analysis_model_label,
@@ -255,6 +256,7 @@ __all__ = [
     "BrowserRuntimeError",
     "ByteRange",
     "ClaudeCredentials",
+    "DEFAULT_ANALYSIS_MODEL",
     "EnvironmentCredentials",
     "FCP_ROLE_ORIGINAL",
     "FCP_ROLE_PROXY",

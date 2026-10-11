@@ -2090,6 +2090,23 @@ def test_claude_model_literals_live_only_in_the_exact_raw_config(
     assert not any("vlogsrt/project/raw/config.py" in failure for failure in failures)
 
 
+def test_the_workbench_cannot_hardcode_a_model_name_either(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """기본 모델(D58)은 설정 한 곳에서 온다 — 작업대가 이름을 박으면 두 곳이 갈린다."""
+    _fake_source_tree(
+        monkeypatch,
+        tmp_path,
+        {
+            "vlogsrt/project/raw/config.py": 'SONNET = "claude-sonnet-5-5"\n',
+            "ui/workspace_service.py": 'DEFAULT = "claude-sonnet-5-5"\nLUNA = "gpt-6-luna"\n',
+        },
+    )
+    failures = check_invariants.check_no_hardcoded_model()
+    assert len(failures) == 2, failures
+    assert all("ui/workspace_service.py" in failure for failure in failures)
+
+
 @pytest.mark.parametrize(
     ("target", "check_name"),
     [

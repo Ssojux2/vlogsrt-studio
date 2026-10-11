@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 
@@ -31,6 +31,7 @@ from vlogsrt.project.raw.analysis_config import (
 )
 from vlogsrt.project.raw.config import (
     ANALYSIS_PROVIDER_ANTHROPIC,
+    CLAUDE_ANALYSIS_PROFILES,
     RawWorkflowConfig,
     analysis_model_label,
     analysis_provider,
@@ -166,23 +167,32 @@ class LiveAnalysisTransport:
     asr_approvals: Callable[[Path, Sequence[str] | None], Mapping[str, AsrPhaseApproval]]
     luna_approvals: Callable[[Path, str, Sequence[str]], Mapping[str, object]]
     on: date | None = None
-    claude_client: object | None = None
-    """Claude 의미 분석 클라이언트(D54) — `ANTHROPIC_API_KEY`가 있을 때만 만들어진다."""
+    claude_clients: Mapping[str, object] = field(default_factory=dict)
+    """Claude 모델 → 그 모델의 프로파일로 만든 클라이언트(D54·D58).
+
+    `ANTHROPIC_API_KEY`가 있을 때만 채워진다. 엔드포인트·버전·시간 한도가 모델마다 다를 수
+    있으므로 클라이언트 하나를 모든 Claude 모델에 돌려 쓰지 않는다."""
 
     def semantic_client(self, model: str) -> object:
         """의미 분석 모델에 맞는 클라이언트 — 없으면 유료 호출이 시작되기 **전에** 닫는다.
 
         Claude 모델인데 키가 없으면 전사(1단계)조차 시작하지 않는다 — 전사를 사 놓고
-        의미 분석에서 막히는 길을 남기지 않는다.
+        의미 분석에서 막히는 길을 남기지 않는다. 등록되지 않은 Claude 이름은 다른 모델의
+        클라이언트로 대신하지 않는다.
         """
         if analysis_provider(model) != ANALYSIS_PROVIDER_ANTHROPIC:
             return self.client
-        if self.claude_client is None:
+        if model not in CLAUDE_ANALYSIS_PROFILES:
             raise AnalysisApprovalError(
-                f"{analysis_model_label(model)} 분석에는 {ANALYSIS_CLAUDE_KEY_ENV}가 필요하다 — "
-                ".env에 키를 넣고 앱을 다시 띄우세요. 유료 호출은 시작하지 않았다"
+                f"등록되지 않은 Claude 모델입니다: {model!r} — 유료 호출은 시작하지 않았습니다"
             )
-        return self.claude_client
+        client = self.claude_clients.get(model)
+        if client is None:
+            raise AnalysisApprovalError(
+                f"{analysis_model_label(model)} 분석에는 {ANALYSIS_CLAUDE_KEY_ENV}가 필요합니다 — "
+                ".env에 키를 넣고 앱을 다시 띄우세요. 유료 호출은 시작하지 않았습니다"
+            )
+        return client
 
 
 __all__ = [

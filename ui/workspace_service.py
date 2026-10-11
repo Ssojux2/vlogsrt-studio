@@ -162,6 +162,8 @@ CLAUDE_KEY_MISSING_TEXT = (
     "{label} 분석에는 `{env}`가 필요합니다. `.env`에 키를 넣고 앱을 다시 띄우거나, "
     "API 연결에서 영상 분석 모델을 바꾸세요. 유료 호출은 시작하지 않았습니다."
 )
+DEFAULT_MODEL_MARK = " (기본)"
+"""「영상 분석 모델」 칸에서 새 작업공간의 기본 모델(D58)에만 붙는 표시."""
 CENT = Decimal("0.01")
 
 
@@ -472,24 +474,45 @@ def _semantic_quote_terms(model: str | None, estimates: Sequence[Any]) -> tuple[
     return raw_service.analysis_model_label(model), f" · Claude 비용 상한 ${total} (보수적)"
 
 
+def _analysis_model_choice_label(model: str) -> str:
+    """선택지 이름 — 기본 모델에만 「(기본)」을 붙인다."""
+    label = raw_service.analysis_model_label(model)
+    return f"{label}{DEFAULT_MODEL_MARK}" if model == raw_service.DEFAULT_ANALYSIS_MODEL else label
+
+
 def _claude_price_suffix(model: str) -> str:
-    """설정 요약의 의미 분석 줄 꼬리 — Claude만 단가를 붙인다(Luna 줄은 그대로)."""
+    """설정 요약의 의미 분석 줄 꼬리 — Claude만 단가 상태를 붙인다(Luna 줄은 그대로)."""
     if raw_service.analysis_provider(model) != raw_service.ANALYSIS_PROVIDER_ANTHROPIC:
         return ""
-    return f" — {_analysis_price_text(model)}"
+    return f" — {_analysis_price_status(model)}"
+
+
+def _price_status_note(model: str) -> str:
+    """화면의 단가 상태 — 달러·토큰 용어 없이 말한다(D57 결정 7, D58). 금액은 견적만 말한다."""
+    if raw_service.analysis_provider(model) != raw_service.ANALYSIS_PROVIDER_ANTHROPIC:
+        return "단가 **미확인** — 금액 추정을 만들지 않습니다(0원으로 계산하지 않습니다)"
+    return "공식 단가 확인됨 — 금액은 견적에서 보여 드립니다"
+
+
+def _analysis_price_status(model: str) -> str:
+    """모델 이름을 붙인 단가 상태 한 줄 — 설정 요약·분석 설정 줄에 쓴다."""
+    if raw_service.analysis_provider(model) != raw_service.ANALYSIS_PROVIDER_ANTHROPIC:
+        return f"Luna {_price_status_note(model)}"
+    return f"{raw_service.analysis_model_label(model)} · {_price_status_note(model)}"
 
 
 def _cost_note(model: str, luna_text: str) -> str:
-    """금액 문구 — Luna는 주어진 W-14 이전 문구 그대로, Claude는 공식 단가 한 줄."""
+    """견적 금액 문구 — Luna는 주어진 W-14 이전 문구 그대로, Claude는 공식 단가 한 줄.
+
+    견적·승인 자리의 문구라 D54 그대로다 — 설정·상태 줄은 `_analysis_price_status`를 쓴다.
+    """
     if raw_service.analysis_provider(model) != raw_service.ANALYSIS_PROVIDER_ANTHROPIC:
         return luna_text
-    return _analysis_price_text(model)
+    return _quote_unit_price_text(model)
 
 
-def _analysis_price_text(model: str) -> str:
-    """의미 분석 단가 한 줄 — Claude는 공식 확인값, Luna는 미확인(0원 계산 금지)."""
-    if raw_service.analysis_provider(model) != raw_service.ANALYSIS_PROVIDER_ANTHROPIC:
-        return "Luna 단가 **미확인** — 금액 추정을 만들지 않는다(0원 계산 금지)"
+def _quote_unit_price_text(model: str) -> str:
+    """견적 안의 Claude 공식 단가 한 줄(D54) — 견적 문구 밖에서는 쓰지 않는다(D57 결정 7)."""
     profile = raw_service.claude_profile(model)
     return (
         f"{profile.label} 공식 단가({profile.pricing_checked_at.isoformat()}) 입력"
@@ -670,6 +693,10 @@ class RawWorkspaceUi:
         self._caption_path_box: gr.Textbox | None = None
         self._project_name_box: gr.Textbox | None = None
         self._fcp_role_dd: gr.Dropdown | None = None
+        # 「영상 분석 모델」 칸과 상태 줄 — 작업공간이 바뀔 때마다 그 작업공간의 저장값으로 맞춘다.
+        self._analysis_model_dd: gr.Dropdown | None = None
+        self._analysis_model_md: gr.Markdown | None = None
+        self._choose_event: Any = None
         # 선택기·조사 단추 참조 — 배선 증명은 실제 Blocks 의존성(app.config)이 한다.
         self._open_button: gr.Button | None = None
         self._create_button: gr.Button | None = None
@@ -2632,6 +2659,7 @@ class RawWorkspaceUi:
             analysis_model_md = gr.Markdown(
                 self.analysis_model_status(), elem_id="analysis-model-status"
             )
+        self._analysis_model_dd, self._analysis_model_md = analysis_model, analysis_model_md
         # 사람이 고를 때만 저장한다(`input`) — 패널을 열 때 맞추는 값 갱신은 저장하지 않는다.
         analysis_model.input(
             self.settings_analysis_model_view,
@@ -2797,6 +2825,7 @@ class RawWorkspaceUi:
         chosen.then(self.current_signature, None, self._signature_state).then(
             self._ws_path_display, None, self._ws_path_box
         )
+        self._choose_event = chosen  # 영상을 고르며 작업공간을 열 수 있다 — 모델 칸도 맞춘다
         self._report_activity(chosen, status)
         automatic = self._automatic_button.click(
             self.capcut_auto_view, [self._signature_state, self._capcut_approval], outputs
@@ -5179,7 +5208,7 @@ class RawWorkspaceUi:
             f"- 수명주기: 시간 제공자 종료 예정 **{config.registry.timing_shutdown_date}**"
             " — 이후 신규 온라인 전사(1단계)는 차단된다(§11.10)\n"
             f"- 네트워크 **{config.network_mode}** · "
-            + _analysis_price_text(config.models.luna_model)
+            + _analysis_price_status(config.models.luna_model)
             + ". 실제 호출은 1단계(전사)·2단계(의미) 승인이 각각 사람 기록으로만 열린다."
         )
 
@@ -5690,9 +5719,13 @@ class RawWorkspaceUi:
             raise gr.Error(str(error)) from error
 
     def analysis_model_choices(self) -> list[tuple[str, str]]:
-        """「영상 분석 모델」 칸의 선택지 — 기본(gpt-6-luna)이 맨 앞이다."""
+        """「영상 분석 모델」 칸의 선택지 — 기본(Claude Sonnet 5.5, D58)이 맨 앞이다.
+
+        「(기본)」 표시는 이 칸에만 붙는다 — 견적·상태 줄의 모델 이름은 그대로다. 기본은 새
+        작업공간의 값일 뿐이라 기존 작업공간의 저장된 모델을 옮기지 않는다. 달러는 싣지 않는다(D57).
+        """
         return [
-            (raw_service.analysis_model_label(model), model)
+            (_analysis_model_choice_label(model), model)
             for model in raw_service.ANALYSIS_MODEL_CHOICES
         ]
 
@@ -5702,11 +5735,11 @@ class RawWorkspaceUi:
     def _current_analysis_model(self) -> str:
         root = self._snapshot_root()
         if root is None:
-            return raw_service.ANALYSIS_MODEL_CHOICES[0]
+            return raw_service.DEFAULT_ANALYSIS_MODEL
         try:
             return self.raw.settings(root).models.luna_model
         except raw_service.RawWorkspaceError:
-            return raw_service.ANALYSIS_MODEL_CHOICES[0]
+            return raw_service.DEFAULT_ANALYSIS_MODEL
 
     def analysis_model_status(self, root: Path | None = None) -> str:
         """모델·키 상태 한 줄 — 키는 이름만 말하고 값은 어디에도 싣지 않는다."""
@@ -5721,7 +5754,7 @@ class RawWorkspaceUi:
             return key
         model = self.raw.settings(root).models.luna_model
         label = raw_service.analysis_model_label(model)
-        return f"영상 분석 모델 **{label}** · {_analysis_price_text(model)}\n\n{key}"
+        return f"영상 분석 모델 **{label}** · {_price_status_note(model)}\n\n{key}"
 
     def analysis_model_controls(self) -> tuple[Any, str]:
         """패널을 열 때 칸과 상태를 지금 작업공간 설정으로 맞춘다."""
@@ -8103,20 +8136,21 @@ class RawWorkspaceUi:
                 self._fcp_primary_info,
                 self._fcp_primary_import,
             ]
-            self._direct_project_open.click(
+            direct_opened = self._direct_project_open.click(
                 self.direct_project_open_view,
                 self._direct_project_path,
                 [*selection_outputs, *fcp_outputs],
             )
-            self._quick_library_button.click(
+            library_opened = self._quick_library_button.click(
                 self.capcut_fcp_choose_view,
                 None,
                 [*selection_outputs, *fcp_outputs],
                 api_name=False,
                 concurrency_limit=1,
                 concurrency_id=ui_chooser.CHOOSER_CONCURRENCY_ID,
-            ).then(lambda: gr.update(open=False), None, self._project_tools)
-            self._fcp_primary_button.click(
+            )
+            library_opened.then(lambda: gr.update(open=False), None, self._project_tools)
+            primary_opened = self._fcp_primary_button.click(
                 self.capcut_fcp_choose_view,
                 None,
                 [*selection_outputs, *fcp_outputs],
@@ -8135,27 +8169,52 @@ class RawWorkspaceUi:
                 }""",
             )
             self._report_activity(imported, self._capcut_status)
-            open_button.click(
+            opened = open_button.click(
                 self.open_project_chooser_view,
                 None,
                 selection_outputs,
                 api_name=False,
                 concurrency_limit=1,
                 concurrency_id=ui_chooser.CHOOSER_CONCURRENCY_ID,
-            ).then(self.capcut_fcp_panel_view, None, fcp_outputs)
+            )
+            opened.then(self.capcut_fcp_panel_view, None, fcp_outputs)
             assert self._project_name_box is not None
-            create_button.click(
+            created = create_button.click(
                 self.create_project_chooser_view,
                 [self._project_name_box],
                 selection_outputs,
                 api_name=False,
                 concurrency_limit=1,
                 concurrency_id=ui_chooser.CHOOSER_CONCURRENCY_ID,
-            ).then(self.capcut_fcp_panel_view, None, fcp_outputs)
-            app.load(self.refresh_outputs, None, self._load_outputs()).then(
-                self.capcut_fcp_panel_view, None, fcp_outputs
+            )
+            created.then(self.capcut_fcp_panel_view, None, fcp_outputs)
+            loaded = app.load(self.refresh_outputs, None, self._load_outputs())
+            loaded.then(self.capcut_fcp_panel_view, None, fcp_outputs)
+            self._wire_model_refresh(
+                (
+                    direct_opened,
+                    library_opened,
+                    primary_opened,
+                    opened,
+                    created,
+                    loaded,
+                    self._choose_event,
+                )
             )
         return app
+
+    def _wire_model_refresh(self, events: Sequence[Any]) -> None:
+        """작업공간을 열거나 만들거나 바꾸는 사건마다 「영상 분석 모델」 칸·상태 줄을 다시 맞춘다.
+
+        패널을 펼칠 때만 맞추면, 다른 작업공간으로 옮긴 뒤 접힌 칸이 옛 값(예: 새 기본 Sonnet
+        5.5)을 붙든 채 남는다(D58). 값 갱신은 저장하지 않는다 — 저장은 사람이 고를 때(`input`)
+        뿐이다.
+        """
+        assert self._analysis_model_dd is not None and self._analysis_model_md is not None
+        targets = [self._analysis_model_dd, self._analysis_model_md]
+        for event in events:
+            assert event is not None
+            event.then(self.analysis_model_controls, None, targets)
 
     def _ws_path_display(self) -> str:
         """읽기전용 경로 표시 칸의 값 — 지금 열린 작업공간 자리(선택기로만 정해진다)."""

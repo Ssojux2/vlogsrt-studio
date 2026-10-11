@@ -3375,6 +3375,10 @@ JSON 345개만 복사해 스크래치패드에서 고친 코드의 정리 고리
   `ANALYSIS_MODEL_CHOICES = (gpt-6-luna, claude-opus-5-5)`이고 기본(맨 앞)은 바꾸지 않았다 — 고르지
   않은 작업공간의 모델이 조용히 바뀌지 않는다(Claude가 더 비싸다). 등록되지 않은 `claude-*`와 문구·시간
   역할의 Claude는 설정 검사가 거부한다.
+  - *2026-10-11 덧붙임(D58)*: 이 「기본은 바꾸지 않았다」는 W-14 당시의 결정이다. 사용자 지시로 **새
+    작업공간의** 기본이 Claude Sonnet 5.5가 됐고 선택지는 (claude-sonnet-5-5, claude-opus-5-5, gpt-6-luna)다.
+    고르지 않은 **기존** 작업공간의 모델이 조용히 바뀌지 않는다는 뜻은 그대로 지킨다 — 저장된 설정을
+    엄격하게 읽고 빈 칸을 기본으로 메우지 않는다.
 - 단가(2026-10-09 공식 가격표 https://platform.claude.com/docs/en/about-claude/pricing): 입력 $4 · 출력
   $20 · 캐시 쓰기 5분 $5 · 1시간 $8 · 캐시 읽기 $0.20 / 100만 토큰(배치 $2/$10은 기록만). 계정 접근
   `unverified`, 실기 시험 `not_run`.
@@ -3460,7 +3464,8 @@ import에 `anthropic`·`httpx`·`requests`·`urllib3`·`aiohttp`를 더했다. `
 `vlogsrt/project/raw/config.py`에만 있다. 등급·글자 교정·편집 계층은 `anthropic_messages`를 모른다.
 
 **바뀌지 않는 것**: whisper·gpt-transcribe 경로, 기본 모델, Luna 페이로드·요청 sha·견적·지문(바이트까지),
-「Luna 추천 구간 분석」 같은 단계 이름(작업 상태의 열쇠라 바꾸지 않았다).
+「Luna 추천 구간 분석」 같은 단계 이름(작업 상태의 열쇠라 바꾸지 않았다). (*2026-10-11 덧붙임*: 「기본 모델」은
+D58에서 새 작업공간에 한해 Claude Sonnet 5.5로 바뀌었다. 나머지는 그대로다.)
 
 **기대값을 바꾼 시험 한 건**: `tests/raw/test_analysis_approval.py::test_asr_settings_fingerprint_binds_settings_and_models`는
 의미 분석 모델(`luna-2`)이 바뀌면 1단계 승인 지문도 바뀐다고 기대했다(A4-F1). 그 지문을 전사 신원 보기로
@@ -4726,3 +4731,186 @@ B단계 표와 같은 값이다(두 테마 같음, 잘린 글 0). 「다음」 �
 , .」 Enter 「둘째 줄」을 쳤다: Enter가 저장하지 않고, 재생 단축키 글자가 영상을 움직이지 않음(멈춤·시각 그대로)
 → 저장값 = 기계 줄 + `\n첫 줄 k j l , .\n둘째 줄`. 기하(14줄 메모, 1280×800·390×844 × 밝은·어두운)는 위와
 같다. 승인 앞 단계 20번 모두 통과(두 모델 · 두 폭 · 특수 글자 견적). 작업 메모 `w17c/round4/`.
+
+
+---
+
+## D58 — 영상 프레임 추천 평가 모델을 Claude Sonnet 5.5로: 새 작업공간의 기본만 바꾸고, 전사 열쇠와 기존 작업공간은 그대로다 (2026-10-11, W-18 세션 18a)
+
+**문제**: 사용자 지시(2026-10-11) — 「영상 프레임 추천 평가에 luna를 사용하지말고 sonnet 을 사용하도록
+수정해줘」. 영상 프레임 추천 평가는 의미 분석 역할(`models.luna_model`, D54)이다 — 창마다 프레임과 전사를
+보고 `suitability`(recommended·usable·review)를 판정하고, 그 판정이 3단 등급(D51·D52)의 영상 쪽 입력이다.
+W-14까지의 기본은 gpt-6-luna였고 Claude Opus 5.5를 고를 수 있었다(D54).
+
+**공식 확인(2026-10-11 열람 — 계정 접근·유료 호출은 시험하지 않았다)**:
+
+- 모델 `claude-sonnet-5-5`(2026-09-28 출시) · 컨텍스트 1M · 동기 Messages 출력 최대 128K · 적응형 생각이
+  기본으로 켜져 있다 · Claude API의 effort 기본은 `high` · effort 다섯 단계(low·medium·high·xhigh·max)를
+  모두 받는다 — https://platform.claude.com/docs/en/models/sonnet-5-5/overview ,
+  https://platform.claude.com/docs/en/build-with-claude/effort
+- 400을 내는 요청: `thinking: {"type": "disabled"}`(이 모델은 대신 `between_tools`), 기본값이 아닌
+  `temperature`·`top_p`·`top_k`, `tool_choice`의 `any`·`tool` —
+  https://platform.claude.com/docs/en/models/sonnet-5-5/whats-new-sonnet-5-5 , 위 overview.
+- 생각 토큰은 내용이 돌아오지 않아도 `max_tokens` 안에 든다 — effort 문서(Sonnet 5.5 절).
+- 단가(100만 토큰당 USD): 입력 $2 · 캐시 쓰기 5분 $2.50 · 1시간 $4 · 캐시 읽기 $0.10(입력의 0.05배) · 출력
+  $10 · 배치 입력 $1 · 배치 출력 $5. Claude 4.6 이후 모델은 `inference_geo: "us"`가 모든 범주 1.1배이고
+  `global`(기본)이 표준 단가다 — Sonnet 5.5도 여기에 든다. 1M 전체가 표준 단가다(장문 할증 없음) —
+  https://platform.claude.com/docs/en/about-claude/pricing
+- 이미지: 고해상도 등급은 "Claude 4.7 and later models"(긴 변 2576px · 장당 4784 시각 토큰), 28×28 조각
+  ⌈w/28⌉×⌈h/28⌉ — Opus 5.5와 같다 — https://platform.claude.com/docs/en/build-with-claude/vision
+
+**결정 — 프로파일**(`raw/config.py`의 `CLAUDE_SONNET_ANALYSIS_PROFILE`, 설정 **밖**):
+
+- 위 단가 일곱 개, `pricing_checked_at = 2026-10-11`, `pricing_revision =
+  "anthropic-claude-sonnet-5-5-2026-10-11"`, 이미지 28/4784, 엔드포인트·API 버전·시간 한도는 Opus 5.5와 같다
+  (`https://api.anthropic.com` · `2023-06-01` · 300초), `inference_geo = global`, 계정 접근 `unverified` ·
+  실기 시험 `not_run`.
+- `effort = "medium"`을 명시한다 — 이 모델의 API 기본(`high`)보다 한 단계 낮다. 창 하나의 판정에 긴 추론이
+  필요 없고 비용·지연이 줄어든다. **외부 근거 없는 조정 대상**이다.
+- `max_output_tokens = 12000` — 적응형 생각이 기본으로 켜져 있고 그 토큰도 한도 안이라 Opus의 8192보다
+  여유를 둔다. **외부 근거 없는 조정 대상**이다. 한도에 닿으면 `max_tokens` 거부 판정으로 남는다(D54).
+- 창 하나의 보수적 상한 C = [(텍스트 여유 12000 + schema 801바이트 + 부대 여유 2000 + 8장 × 784) × $2 +
+  12000 × $10] / 100만 = 21,073 입력 $0.042146 + 12,000 출력 $0.12 = **$0.162146**(Opus $0.248132의 65%).
+- Opus 5.5 프로파일(`CLAUDE_OPUS_ANALYSIS_PROFILE`)은 값 그대로다. `CLAUDE_EFFORT_LEVELS`·
+  `CLAUDE_MAX_OUTPUT_TOKENS_LIMIT`(128K)는 두 모델이 같은 값이라 공용 표로 두고 설명만 고쳤다 — 등록된 모든
+  프로파일이 `claude_profile_problems`를 지나는지 시험이 본다. 갈리는 날이 오면 프로파일 칸으로 옮긴다.
+
+**결정 — 기본과 선택지**:
+
+- `RawModelRoles.luna_model`의 기본 = `claude-sonnet-5-5`(칸 이름은 저장 형식이라 그대로다). 이름 붙인 값
+  `DEFAULT_ANALYSIS_MODEL`, OpenAI 쪽 이름 `OPENAI_LUNA_MODEL = "gpt-6-luna"`.
+- `ANALYSIS_MODEL_CHOICES = (claude-sonnet-5-5, claude-opus-5-5, gpt-6-luna)` — 기본이 맨 앞이고 나머지는
+  등록표 순서 뒤에 Luna다. 셋 다 계속 고를 수 있다. CLI `media settings --analysis-model`도 같다.
+- 「API 연결」의 「영상 분석 모델」 칸은 「Claude Sonnet 5.5 (기본)」을 맨 앞에 보인다. 「(기본)」은 이 칸에만
+  붙고(견적·상태 줄의 모델 이름은 그대로) 선택지에 달러가 없다(D57 결정 7). 작업공간이 없을 때 칸이 보이는
+  값도 기본이다.
+- **화면의 단가 줄을 지웠다(D54의 화면 단가 한 줄을 거둔다).** 이유는 D57 결정 7 — 사용자 결정 「가격표시는
+  제외」. D54는 「API 연결」의 모델 상태 줄, 설정 요약의 의미 분석 줄, 분석 설정 줄에 Claude 공식 단가(입력·출력
+  $/100만 토큰 · effort · 출력 한도)를 보였다. 기본이 Claude가 되면 새 작업공간마다 그 줄이 보이므로 모든 모델에서
+  지웠다. 대신 존댓말 한 줄만 말한다 — Claude는 「{모델} · 공식 단가 확인됨 — 금액은 견적에서 보여 드립니다」,
+  단가 미확인 모델은 「Luna 단가 **미확인** — 금액 추정을 만들지 않습니다(0원으로 계산하지 않습니다)」.
+  **견적·승인 문구는 그대로다** — 고급 탭의 1·2단계 견적 줄(`_cost_note`, 공식 단가 한 줄 포함)·「Claude 비용
+  상한 $X (보수적)」·`APPROVE_GUARD_JS`·견적 지문과 서버의 승인 묶음은 한 글자도 바꾸지 않았다. CLI
+  `media settings`의 단가 인쇄도 그대로다(작업대 화면이 아니다).
+- **작업공간을 바꾸면 칸도 바뀐다.** 「영상 분석 모델」 칸과 상태 줄은 「API 연결」을 펼칠 때만 다시 맞췄다 — 그래서
+  새 작업공간(Sonnet)을 연 뒤 Luna 작업공간으로 옮기면 접힌 칸이 「Claude Sonnet 5.5 (기본)」을 고른 채 남을 수
+  있었다. 이제 열기·만들기·라이브러리 열기(두 단추)·직접 열기·영상 고르기(작업공간을 만들 수 있다)·앱 열기 뒤에
+  `analysis_model_controls`가 칸과 상태 줄을 그 작업공간의 저장값으로 맞춘다(`_wire_model_refresh`). 맞추기만
+  하고 저장하지 않는다 — 저장은 여전히 사람이 고를 때(`input`)뿐이다.
+
+**결정 — 기존 작업공간은 사람이 고를 때만 옮긴다**:
+
+- 작업공간은 `settings` 표의 `workflow` 값 하나에 설정 전체를 저장한다(모델 이름 포함, D54). 읽는 길
+  (`RawWorkspace.load_workflow` → `raw_workflow_config_from_json` → `_config_from_mapping`)은 엄격하다 — 빠진
+  칸은 `KeyError`로 거부하고 기본값으로 메우지 않는다. 작업공간 설정으로 저장되는 기본 설정
+  (`RawWorkflowConfig()`)은 새 작업공간을 만들 때(`RawWorkspace.create`) 하나뿐이다.
+- 기본값이 새는 곳이 하나 남는다: 최종 자막 계획 `final_caption.plan`은 워크플로를 받지 않으면 기본 설정을 쓰고,
+  화면·CLI의 자막 견적·실행(`ui/workspace_service.py`의 `ws.plan(…)`, `commands.py`의 자막 견적)은 작업공간
+  설정을 넘기지 않는다. 그 계획의 워크플로는 `caption_artifacts._provider_body`가 `provider_snapshot.json`에
+  적으므로, Luna 작업공간의 자막 실행 기록에도 의미 분석 모델이 `claude-sonnet-5-5`로 적힌다(W-18 전에는
+  `gpt-6-luna`였다 — 같은 이유로 작업공간 값과 어긋날 수 있었다). **열쇠는 영향이 없다** — 자막 실행 지문은 전사
+  신원 보기(`transcription_identity_view`)를 묶으므로 모델과 무관하고, 자막은 의미 분석 모델을 부르지 않는다.
+  계획(18a)이 최종 자막 경로를 바꾸지 않기로 했으므로 고치지 않았다 — 자막 계획에 작업공간 설정을 넘기는 일은
+  후속이다(`TASKS.md` W-18).
+- 그래서 W-18 이전에 만든 작업공간(gpt-6-luna 저장)은 그대로 gpt-6-luna로 열린다. 이것을 자동으로 옮기지
+  않는 이유: 분석 입력 지문·창 캐시·요청 sha·리비전 `models_json`은 모델을 묶는다(D54) — 모델이 바뀌는 순간
+  모든 원본이 「분석 모델 바뀜 · 다시 승인 필요」가 되고 다시 분석은 유료다(창당 상한 약 $0.16). 사람이
+  모르는 사이에 견적이 바뀌면 안 된다. 옮기려면 「영상 분석 모델」에서 고른다.
+
+**결정 — 전사 열쇠는 움직이지 않는다**:
+
+- `TRANSCRIPTION_IDENTITY_LUNA_MODEL = "gpt-6-luna"`는 글자 그대로다(`OPENAI_LUNA_MODEL`을 가리키게 하지도
+  않았다 — 그 이름이 바뀌어도 열쇠는 그대로여야 한다). whisper 청크 캐시 열쇠(`understanding._transcribe_span`)·
+  최종 자막 지문·1단계 승인 지문은 `transcription_identity_view`로 의미 분석 모델을 이 값으로 바꾼 설정을 본다.
+- 그러므로 새 기본 설정의 열쇠는 W-18 이전 기본 설정의 열쇠와 바이트까지 같다. 증명은
+  `tests/raw/test_transcription_identity.py` — 기대값을 지금의 기본값이 아니라 A0/A1에서 수락된 저장 설정 글자
+  (`ACCEPTED_SETTINGS_JSON`, gpt-6-luna)에서 W-14 이전 조립 함수로 다시 계산한다. 옛 Luna 작업공간이 사 둔
+  전사를 새 Sonnet 기본 설정이 전송 0회로 다시 쓴다.
+
+**결정 — 클라이언트는 고른 모델의 프로파일로**:
+
+- `LiveAnalysisTransport.claude_client`(하나)를 `claude_clients`(모델 → 클라이언트)로 바꿨다.
+  `browser_runtime._claude_clients`가 Claude 키가 있을 때 등록된 Claude 모델마다 **그 모델의** 프로파일의
+  엔드포인트·버전·시간 한도로 클라이언트를 만든다(만들기만 — 호출 0). `semantic_client(model)`은 등록되지 않은
+  `claude-*`를 다른 모델의 클라이언트로 대신하지 않고 유료 호출 전에 닫는다. 키가 없으면 D54처럼 전사 전에
+  닫는다 — 새 기본이 Claude이므로 새 작업공간은 `ANTHROPIC_API_KEY` 없이 분석을 시작하지 않는다(OpenAI 키도
+  전사에 여전히 필요하다).
+- 단가·상한·영수증은 이미 모델을 따랐다(`claude_profile(model)` · `CLAUDE_ANALYSIS_PROFILES.get(model)` —
+  `claude_cost`·`understanding_luna`·`service`·`browser_runtime`·`ui`). 하나뿐이던 `CLAUDE_ANALYSIS_PROFILE`은
+  지웠다 — 남겨 두면 다시 "유일한 프로파일"로 쓰일 자리가 된다.
+- 본문(`build_claude_payload`)은 바꾸지 않았다 — `max_tokens`·`messages`·`output_config{effort, format:
+  json_schema}`·`inference_geo`뿐이고 thinking·temperature·top_p·top_k·tools·tool_choice·service_tier·model이 없다.
+  Sonnet 5.5가 400을 내는 칸이 하나도 없다. 두 모델의 본문 차이는 `max_tokens`뿐이다. 판정은 `stop_reason =
+  end_turn`의 text 블록만 읽고 `thinking`·`redacted_thinking` 블록을 버린다(`_claude_text` — 코드는 그대로,
+  생각 블록에 미끼 판정을 넣은 시험을 더했다).
+
+**불변식**: `check_no_hardcoded_model`이 `ui/`의 .py도 본다(작업대가 모델 이름을 박으면 기본을 바꿀 때 두
+곳이 갈린다). `claude-sonnet-5-5` 리터럴은 `vlogsrt/project/raw/config.py`에만 있다(시험이 vlogsrt·ui·scripts를
+훑는다).
+
+**바꾼 기대값과 사유**(값을 단언하던 줄만 — 각 줄에 시험 주석도 달았다):
+
+- `tests/raw/test_raw_config.py::test_defaults_match_the_2026_10_02_plan`(:33) — `luna_model`
+  `"gpt-6-luna"` → `"claude-sonnet-5-5"`: 이 결정이 새 작업공간의 기본을 바꿨다. 나머지 2026-10-02 값은 그대로다.
+- `…::test_accepted_saved_settings_json_still_round_trips` — `config == RawWorkflowConfig()` → 기본에
+  `luna_model="gpt-6-luna"`만 넣은 설정과 같다: 수락된 저장 글자는 이제 "지금의 기본"이 아니라 "W-18 이전
+  작업공간이 저장한 기본"이다. 그대로 열리고 바이트까지 왕복한다는 단언은 그대로다.
+- `…::test_provider_resolution_and_choices`(:543) — `(gpt-6-luna, claude-opus-5-5)` →
+  `(claude-sonnet-5-5, claude-opus-5-5, gpt-6-luna)`: 기본이 맨 앞이라는 규칙은 같고 기본과 등록표가 바뀌었다.
+- `…::test_the_default_workflow_json_is_byte_identical_with_no_new_keys` — 기본 JSON == 수락된 글자 →
+  수락된 글자에서 `"luna_model"` 한 줄의 값만 바꾼 글자와 같다. `"claude" not in` 단언을 뺐다(이제 값에
+  있다) — `"anthropic" not in`과 "칸을 더하지 않았다"는 그대로다.
+- `…::test_transcription_identity_view_pins_the_analysis_model` — `view(기본) == 기본` →
+  `view(기본) == 수락된 저장 설정`: 기본이 더는 고정값과 같지 않다. 고정값 `"gpt-6-luna"` 단언은 그대로다.
+- `tests/raw/test_transcription_identity.py`의 세 시험(청크 열쇠 · 최종 자막 지문 · 1단계 승인 지문) —
+  W-14 이전 조립 함수에 넣는 설정을 `RawWorkflowConfig()`에서 수락된 저장 설정(`PRE_W18_DEFAULT`)으로 바꿨다.
+  기대 열쇠 값은 한 바이트도 바뀌지 않는다 — "지금 기본의 열쇠 = 바뀌기 전 기본의 열쇠"를 증명하려면 바뀌기
+  전 기본을 따로 지어야 한다.
+- `tests/raw/test_analysis_commands.py::test_media_settings_prints_and_switches_the_analysis_model` — 새
+  작업공간의 인쇄 「gpt-6-luna · 단가 미확인」 → 「Claude Sonnet 5.5 · $2 · $10」, 되돌림 목표 gpt-6-luna →
+  Sonnet 5.5(그 사이에 gpt-6-luna로 바꾸는 단계를 더해 Luna도 그대로 고를 수 있음을 본다).
+- `…::test_media_settings_refuses_a_switch_during_an_active_analysis`(:256) — 거절 뒤 모델 `"gpt-6-luna"` →
+  `"claude-sonnet-5-5"`: "거절하면 새 작업공간의 모델이 그대로다"라는 같은 단언이다.
+- `tests/raw/test_analysis_model_ui.py::test_the_dropdown_switches_the_workspace_model_and_back` — 선택지
+  `[(gpt-6-luna), (Claude Opus 5.5)]` → `[(Claude Sonnet 5.5 (기본)), (Claude Opus 5.5), (gpt-6-luna)]`.
+- `…::test_the_api_panel_carries_the_model_dropdown_and_never_the_key` — 칸의 값 순서 `[LUNA, CLAUDE]` →
+  `[SONNET, CLAUDE, LUNA]`(고른 값은 저장된 Luna 그대로).
+- `tests/raw/test_browser_runtime.py`의 두 시험 — `transport.claude_client` → `transport.claude_clients[모델]`
+  (모양만 바뀌었다. 키가 없으면 비어 있고, 프로파일 값을 쓰고, 키 값이 repr에 없다는 단언은 그대로).
+- `tests/raw/test_analysis_model_ui.py::test_settings_summaries_show_official_claude_prices_only_for_claude` —
+  Opus를 고른 설정 요약·분석 설정 줄이 「2026-10-09 · 입력 $4 · 출력 $20」을 말한다 → 「Claude Opus 5.5 · 공식
+  단가 확인됨」이고 `$`가 없다: 화면 단가 줄을 지웠다(D57 결정 7). Luna로 되돌리면 글자가 처음과 같다는 단언은
+  그대로다.
+
+**기대값이 아니라 출발점을 바꾼 시험**: Luna(OpenAI) 경로를 보는 시험은 "기본값이 곧 Luna"였기 때문에
+`RawWorkflowConfig()`나 새 작업공간을 그대로 썼다. 그 경로는 기본이 바뀌어도 살아 있어야 하므로 이제 Luna를
+**명시**한다 — W-18 이전에 만든 작업공간과 같은 출발점이다. 단언·기대 해시(`PRE_W14_LUNA_SHA` 등)는 그대로다:
+`LUNA_WORKFLOW`(`test_understanding_luna.py`), `LUNA = OPENAI_LUNA_MODEL`(`test_claude_payload.py`),
+`_online_workflow`(`test_analysis_approval.py`), `keep_luna`(`test_selection_analysis.py` — `test_analysis_ui.py`의
+두 흐름도 쓴다), `keep_luna_workspace` + `_write_replay_fixtures`(`test_review_workspace.py` — Luna 재생 픽스처를
+쓰는 등급·검토·순서·보내기 시험 열다섯 파일(이 파일 포함)이 이 하나로 출발한다. **주의: 이 함수는 픽스처를 쓰는
+것만이 아니라 부르는 순간 그 작업공간의 저장 모델을 gpt-6-luna로 바꾼다** — 함수 설명에 적었다. Sonnet 재생
+시험은 이 함수를 쓰면 안 된다), `workspace` 고정물(`test_analysis_workflow.py`),
+`make_server(model=LUNA)`·`claude_clients`·응답 모델 메아리(`test_claude_analysis_flow.py`), `bare_server`
+(`test_analysis_model_ui.py`), `_as_luna`(`test_analysis_commands.py`의 견적·재생 두 시험),
+`test_browser_runtime.py::test_browser_production_flow_fake_sends`, `test_understanding_media_smoke.py`.
+
+**더한 시험**: `tests/raw/test_sonnet_analysis_model.py`(프로파일 스냅숏 · Opus 불변 · 등록된 모든 프로파일의
+한도 · 창당 상한 $0.162146 · 기본과 선택지 · 새 작업공간 = Sonnet · 기존 Luna 저장 설정 = Luna · 빠진 칸은 거부 ·
+Sonnet 본문에 400 칸 없음 · 생각·가린 생각 블록 뒤의 text만 판정 · 판정 없는 생각뿐 응답은 거부 · 모델마다
+그 프로파일의 클라이언트 · 키 없으면 전사 전에 닫힘 · 리터럴 위치), `test_claude_analysis_flow.py`(고르지 않은 새
+작업공간의 선택 분석이 Sonnet으로 3창, 요청마다 $0.022, 견적 상한 = 창당 상한 × 창 수),
+`test_analysis_commands.py`(새 작업공간 견적이 「Claude Sonnet 5.5 요청 1」), `test_analysis_model_ui.py`(새
+작업공간 칸 「(기본)」 하나·선택지와 상태 줄에 달러·토큰 용어 없음 · 고를 수 있는 모든 모델에서 상태 줄·설정
+요약·분석 설정 줄에 `$`·「100만 토큰」·effort·「출력 한도」가 없음 · 작업공간을 바꾸면 칸이 그 작업공간의 모델을
+보이고 저장하지 않음 · 실제 Blocks에서 일곱 가지 작업공간 사건 뒤에 칸·상태가 맞춰짐 · 기존 Luna 작업공간은
+다시 열어도 Luna), `test_transcription_identity.py`
+(옛 Luna 작업공간이 산 전사를 새 기본이 재구매 0회로 쓴다), `tests/test_invariants.py`(작업대의 모델 리터럴).
+
+**18b로 넘긴 것**: 지시문의 `recommended` 기준, schema `visual_issues`, `DEFAULT_PROMPT_REVISION` 올림과 그에 따른
+요청 해시 기대값 변경.
+
+**못 한 것·사람 몫**: 실제 Sonnet 호출은 0회다. 첫 사람 실행에서 응답 `model`의 메아리, `usage.inference_geo`,
+영수증 금액 대 콘솔 청구, 생각 토큰 실측(12000 한도에 닿는 창이 있는지 — 닿으면 `max_tokens` 거부 판정)을
+본다. 기존 작업공간을 Sonnet으로 옮기려면 「API 연결」의 「영상 분석 모델」에서 고른다 — 그 뒤 분석은 새
+견적·승인(유료)이다. 화면·CLI의 단계 이름은 여전히 "Luna"다(작업 상태의 열쇠, D54).

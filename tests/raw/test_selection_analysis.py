@@ -5,6 +5,7 @@ import re
 import subprocess
 import threading
 import time
+from dataclasses import replace
 from fractions import Fraction
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,7 +16,7 @@ from tests.raw.test_browser_runtime import _CountingSender, _make_media
 from ui.workspace_service import RawWorkspaceUi
 from vlogsrt.config import Config
 from vlogsrt.project.raw.analysis_approval import LiveAnalysisTransport
-from vlogsrt.project.raw.config import RawModelRoles
+from vlogsrt.project.raw.config import OPENAI_LUNA_MODEL
 from vlogsrt.project.raw.segment_review import unreviewed_auto_exclusions
 from vlogsrt.project.raw.service import RawWorkspaceError
 
@@ -69,6 +70,18 @@ def wait_until(check, timeout=45):
     raise AssertionError("condition did not settle")
 
 
+def keep_luna(server: RawWorkspaceUi) -> None:
+    """W-18(D58) 이전에 만든 작업공간처럼 — 의미 분석 모델로 gpt-6-luna를 저장해 둔다.
+
+    새 작업공간의 기본은 Claude Sonnet 5.5다. OpenAI 가짜 클라이언트로 Luna 흐름을 보는 시험은
+    Luna를 저장한 기존 작업공간에서 출발한다(그 작업공간은 조용히 Sonnet으로 옮겨 가지 않는다).
+    """
+    root = server.workspace_root()
+    workflow = server.raw.settings(root)
+    models = replace(workflow.models, luna_model=OPENAI_LUNA_MODEL)
+    server.raw.update_settings(root, replace(workflow, models=models))
+
+
 def make_server(
     tmp_path: Path, monkeypatch, source: Path, client=None, parallel_analysis_limit=None
 ):
@@ -88,6 +101,7 @@ def make_server(
         parallel_analysis_limit=parallel_analysis_limit,
     )
     server.create_workspace_view("선택 자동 분석", str(tmp_path / "workspace"))
+    keep_luna(server)
     server._selection_auto_approval = lambda quote: True
     return server, sender, client
 
@@ -123,7 +137,7 @@ def test_selection_runs_both_providers_and_publishes_progress_and_recommendation
     assert server._quick["stage"] == "추천 구간 준비 완료", server._quick
     assert len(sender.calls) == 1
     assert len(client.calls) == 3
-    assert all(call["model"] == RawModelRoles().luna_model for call in client.calls)
+    assert all(call["model"] == OPENAI_LUNA_MODEL for call in client.calls)
     assert all(
         any(c["type"] == "input_image" for m in call["input"] for c in m["content"])
         for call in client.calls

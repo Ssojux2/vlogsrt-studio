@@ -30,7 +30,7 @@ from vlogsrt.project.raw.analysis_approval import (
     require_live_asr_approval,
 )
 from vlogsrt.project.raw.analysis_config import RawUnderstandingSettings
-from vlogsrt.project.raw.config import RawWorkflowConfig
+from vlogsrt.project.raw.config import OPENAI_LUNA_MODEL, RawModelRoles, RawWorkflowConfig
 from vlogsrt.project.raw.understanding_luna import (
     AnalysisApprovalError,
     AnalysisBudget,
@@ -40,7 +40,13 @@ from vlogsrt.project.raw.understanding_luna import (
 
 
 def _online_workflow() -> RawWorkflowConfig:
-    return replace(RawWorkflowConfig(), network_mode="online")
+    """Luna(OpenAI) 경로의 온라인 설정 — W-18(D58) 전에는 기본값이 곧 이 모델이었다.
+
+    이 파일의 2단계 시험은 OpenAI 가짜 클라이언트로 Luna 문을 지난다. 새 기본(Sonnet 5.5)은
+    Claude 문(공식 단가 상한이 묶인 승인)을 요구하므로 모델을 명시해 같은 경로를 계속 본다.
+    """
+    luna = replace(RawModelRoles(), luna_model=OPENAI_LUNA_MODEL)
+    return replace(RawWorkflowConfig(), models=luna, network_mode="online")
 
 
 def _asr_approval(workflow: RawWorkflowConfig, **overrides) -> AsrPhaseApproval:

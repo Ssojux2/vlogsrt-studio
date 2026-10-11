@@ -2,6 +2,10 @@
 
 실제 ffmpeg 합성 미디어로 init → import → analyze의 흐름을 돈다. 어떤 플래그도
 유료 호출을 켜지 않는다 — 실행의 근원은 언제나 `replay`다(§14.3).
+
+W-18(D58)부터 `media init`이 만드는 새 작업공간의 의미 분석 기본은 Claude Sonnet 5.5다. Luna
+재생·견적을 보는 시험은 W-18 이전 작업공간처럼 `media settings --analysis-model gpt-6-luna`로
+Luna를 저장한 뒤에 돈다(`_as_luna`).
 """
 
 from __future__ import annotations
@@ -29,6 +33,11 @@ def _parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
     project_commands.add_media_parser(sub)
     return parser
+
+
+def _as_luna(workspace: Path) -> None:
+    """W-18 이전에 만든 작업공간처럼 — 의미 분석 모델로 gpt-6-luna를 저장해 둔다."""
+    assert media.media_command(_settings_args(workspace, "--analysis-model", LUNA)) == 0
 
 
 def _make_mov(path: Path, seconds: str = "5") -> None:
@@ -94,7 +103,9 @@ def test_analyze_estimate_only_prints_without_running(tmp_path: Path, capsys) ->
     workspace = tmp_path / "ws"
     init = _parser().parse_args(["media", "init", str(workspace), "--name", "제주"])
     assert media.media_command(init) == 0
+    _as_luna(workspace)
     _ingest(tmp_path, workspace)
+    capsys.readouterr()
     args = _parser().parse_args(
         ["media", "analyze", "--workspace", str(workspace), "--estimate-only"]
     )
@@ -112,6 +123,7 @@ def test_analyze_replay_runs_and_plans(tmp_path: Path, capsys) -> None:
     workspace = tmp_path / "ws"
     init = _parser().parse_args(["media", "init", str(workspace), "--name", "제주"])
     assert media.media_command(init) == 0
+    _as_luna(workspace)
     stereo_sha = _ingest(tmp_path, workspace)
     fixtures = tmp_path / "fixtures"
     fixtures.mkdir()
@@ -184,6 +196,8 @@ def test_analyze_reports_failures_honestly(tmp_path: Path, capsys) -> None:
 
 
 CLAUDE = "claude-opus-5-5"
+SONNET = "claude-sonnet-5-5"
+LUNA = "gpt-6-luna"
 
 
 def _settings_args(workspace: Path, *extra: str) -> argparse.Namespace:
@@ -205,7 +219,10 @@ def test_media_settings_prints_and_switches_the_analysis_model(tmp_path: Path, c
 
     assert media.media_command(_settings_args(workspace)) == 0
     out = " ".join(capsys.readouterr().out.split())  # rich가 좁은 폭에서 줄을 접는다
-    assert "gpt-6-luna" in out and "단가 미확인" in out
+    # W-18(D58): 새 작업공간은 Claude Sonnet 5.5로 시작한다 — 공식 단가 한 줄이 함께 나온다
+    assert before.models.luna_model == SONNET
+    assert "Claude Sonnet 5.5" in out and "$2" in out and "$10" in out
+    assert "단가 미확인" not in out
     assert service.settings(workspace) == before  # 인쇄만 — 아무 것도 바꾸지 않는다
 
     assert media.media_command(_settings_args(workspace, "--analysis-model", CLAUDE)) == 0
@@ -217,7 +234,12 @@ def test_media_settings_prints_and_switches_the_analysis_model(tmp_path: Path, c
     assert switched.models.timing_model == before.models.timing_model
     assert switched.network_mode == before.network_mode
 
-    assert media.media_command(_settings_args(workspace, "--analysis-model", "gpt-6-luna")) == 0
+    assert media.media_command(_settings_args(workspace, "--analysis-model", LUNA)) == 0
+    out = " ".join(capsys.readouterr().out.split())
+    assert "gpt-6-luna" in out and "단가 미확인" in out  # Luna도 그대로 고를 수 있다
+    assert service.settings(workspace).models.luna_model == LUNA
+
+    assert media.media_command(_settings_args(workspace, "--analysis-model", SONNET)) == 0
     assert service.settings(workspace) == before
 
 
@@ -253,7 +275,8 @@ def test_media_settings_refuses_a_switch_during_an_active_analysis(
     assert "분석" in capsys.readouterr().err
     service = media._service()
     service.open_workspace(workspace)
-    assert service.settings(workspace).models.luna_model == "gpt-6-luna"
+    # W-18(D58): 새 작업공간의 모델(Sonnet 5.5)이 거절 뒤에도 그대로다
+    assert service.settings(workspace).models.luna_model == SONNET
 
 
 @needs_ffmpeg
@@ -269,4 +292,20 @@ def test_the_analyze_estimate_names_the_selected_model(tmp_path: Path, capsys) -
     assert media.media_command(args) == 0
     out = " ".join(capsys.readouterr().out.split())  # rich가 좁은 폭에서 줄을 접는다
     assert "Claude Opus 5.5 요청 1" in out
+    assert "Luna 단가는 미확인" not in out
+
+
+@needs_ffmpeg
+def test_a_new_workspace_estimate_names_sonnet_without_choosing(tmp_path: Path, capsys) -> None:
+    """W-18(D58) — 고르지 않은 새 작업공간의 견적은 Sonnet 5.5의 요청과 공식 단가 상한을 말한다."""
+    workspace = tmp_path / "ws"
+    _init(workspace)
+    _ingest(tmp_path, workspace)
+    capsys.readouterr()
+    args = _parser().parse_args(
+        ["media", "analyze", "--workspace", str(workspace), "--estimate-only"]
+    )
+    assert media.media_command(args) == 0
+    out = " ".join(capsys.readouterr().out.split())  # rich가 좁은 폭에서 줄을 접는다
+    assert "Claude Sonnet 5.5 요청 1" in out
     assert "Luna 단가는 미확인" not in out

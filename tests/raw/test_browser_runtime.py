@@ -37,6 +37,7 @@ from ui import workspace_service  # noqa: E402
 from vlogsrt.config import Config  # noqa: E402
 from vlogsrt.project.raw import browser_runtime  # noqa: E402
 from vlogsrt.project.raw import service as raw_service  # noqa: E402
+from vlogsrt.project.raw.config import OPENAI_LUNA_MODEL  # noqa: E402
 
 needs_ffmpeg = pytest.mark.skipif(
     shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
@@ -180,7 +181,7 @@ def test_the_transport_carries_a_claude_client_only_with_a_claude_key() -> None:
     plain = browser_runtime.live_transport_for_credentials(
         credentials, asr_approvals=lambda *a: {}, luna_approvals=lambda *a: {}
     )
-    assert plain.claude_client is None
+    assert plain.claude_clients == {}
     assert plain.semantic_client("gpt-6-luna") is plain.client
     with pytest.raises(AnalysisApprovalError, match="ANTHROPIC_API_KEY") as info:
         plain.semantic_client(CLAUDE)
@@ -193,7 +194,7 @@ def test_the_transport_carries_a_claude_client_only_with_a_claude_key() -> None:
         claude=browser_runtime.ClaudeCredentials(api_key="sk-ant-x"),
     )
     client = keyed.semantic_client(CLAUDE)
-    assert is_claude_client(client) and client is keyed.claude_client
+    assert is_claude_client(client) and client is keyed.claude_clients[CLAUDE]
     profile = claude_profile(CLAUDE)
     assert (client.base_url, client.api_version, client.timeout_seconds) == (
         profile.api_base_url,
@@ -205,12 +206,14 @@ def test_the_transport_carries_a_claude_client_only_with_a_claude_key() -> None:
 
 
 def test_production_transport_picks_up_a_claude_key_from_its_environ() -> None:
+    from vlogsrt.project.raw.config import CLAUDE_ANALYSIS_PROFILES
+
     transport = browser_runtime.production_live_transport(
         asr_approvals=lambda *a: {},
         luna_approvals=lambda *a: {},
         environ={"OPENAI_API_KEY": "sk-test-only", "ANTHROPIC_API_KEY": "sk-ant-x"},
     )
-    assert transport.claude_client is not None
+    assert set(transport.claude_clients) == set(CLAUDE_ANALYSIS_PROFILES)
 
 
 def _old_asr_digest(estimates) -> str:
@@ -480,7 +483,9 @@ def test_browser_production_flow_fake_sends(tmp_path: Path, monkeypatch) -> None
     _make_media(card / "무성.mov", audio=False, seconds="3.5")
     root = _prepare_workspace(server, tmp_path, tmp_path / "card")
     config = server.raw.settings(root)
-    server.raw.update_settings(root, replace(config, network_mode="online"))
+    # OpenAI 가짜 Luna 클라이언트 — W-18(D58) 이전 작업공간처럼 gpt-6-luna를 저장해 둔다
+    luna = replace(config.models, luna_model=OPENAI_LUNA_MODEL)
+    server.raw.update_settings(root, replace(config, models=luna, network_mode="online"))
     assets = {a.source_name: a for a in server.raw.list_source_assets(root)}
 
     # 1단계 견적(승인용) — 측정값 표가 서버에 기록으로 남는다.

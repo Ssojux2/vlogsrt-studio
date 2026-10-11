@@ -7,7 +7,8 @@
 모델 리터럴은 이 파일에만 있을 수 있다(`scripts/check_invariants.py` §7 —
 gpt-6-luna·claude-*는 정확히 이 경로, whisper-1·gpt-transcribe는 config 경로 셋 중 하나).
 2026-10-02 공식 문서 확인값이며 계정 접근·유료 호출은 시험하지 않았다(§11.9). Claude
-의미 분석 프로파일(D54)은 2026-10-09 공식 가격표 확인값이다.
+의미 분석 프로파일은 공식 문서 확인값이다 — Opus 5.5는 2026-10-09(D54), Sonnet 5.5는
+2026-10-11(D58).
 """
 
 from __future__ import annotations
@@ -60,11 +61,15 @@ class RawModelRoles:
     문구 모델은 시각 없는 문자열만, 시간 모델은 세그먼트 골격만, Luna 모델은
     프레임·전사 증거의 의미 해석만 맡는다. 한 모델이 두 역할을 겹치는 순간
     "시각 없는 문구에 가짜 시각"이 생긴다 — 검증이 그 조합을 막는다.
+
+    의미 분석(`luna_model` — 칸 이름은 저장 형식이라 그대로다)의 기본은 Claude Sonnet
+    5.5다(D58). 이 값은 **새 작업공간**에만 쓰인다 — 기존 작업공간은 저장된 모델을 엄격하게
+    읽고 빠진 칸을 기본으로 메우지 않으므로, 다시 분석(유료)할 모델은 사람이 고른다.
     """
 
     text_model: str = "gpt-transcribe"
     timing_model: str = "whisper-1"
-    luna_model: str = "gpt-6-luna"
+    luna_model: str = "claude-sonnet-5-5"
 
 
 @dataclass(frozen=True)
@@ -179,20 +184,28 @@ class RawWorkflowConfig:
 
 
 # ─────────────────────────────────────────────────────────────
-#  의미 분석 모델 공급자(D54) — Luna 역할을 Claude Opus 5.5가 맡을 수 있다
+#  의미 분석 모델 공급자(D54·D58) — Luna 역할을 Claude가 맡는다(기본 Sonnet 5.5)
 # ─────────────────────────────────────────────────────────────
 
 ANALYSIS_PROVIDER_OPENAI = "openai"
 ANALYSIS_PROVIDER_ANTHROPIC = "anthropic"
 
+OPENAI_LUNA_MODEL = "gpt-6-luna"
+"""OpenAI 쪽 의미 분석 모델(Luna) — W-18 이전의 기본이고, 지금도 고를 수 있다(D58)."""
+
 CLAUDE_MODEL_PREFIX = "claude-"
 """Claude 모델 이름의 접두어 — 공급자 판정의 유일한 근거다. 등록되지 않은 이름은 설정이 거부한다."""
 
 CLAUDE_EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
-"""Opus 5.5가 받는 `output_config.effort` 값 — 문서 확인값(2026-10-09)."""
+"""등록된 Claude 모델이 모두 받는 `output_config.effort` 값.
+
+Opus 5.5(2026-10-09)·Sonnet 5.5(2026-10-11) 둘 다 다섯 단계 전부다(effort 문서). 모델마다
+갈리는 날이 오면 이 공용 표가 아니라 프로파일 칸으로 옮긴다 — 지금은 같은 값이다."""
 
 CLAUDE_MAX_OUTPUT_TOKENS_LIMIT = 128_000
-"""Opus 5.5의 출력 상한 — `max_tokens`는 이보다 클 수 없다."""
+"""등록된 Claude 모델의 동기 Messages 출력 상한 — Opus 5.5·Sonnet 5.5 모두 128K(모델 문서).
+
+`max_tokens`는 이보다 클 수 없다. 적응형 생각 토큰도 이 안에 든다."""
 
 PRICE_TOKEN_UNIT = Decimal(1_000_000)
 """단가의 단위 — 100만 토큰당 USD."""
@@ -210,7 +223,8 @@ CLAUDE_STANDARD_USAGE_TIERS = ("standard",)
 """응답 `usage.service_tier`가 표준 단가인 값 — 없으면(None)도 표준으로 본다.
 
 요청에는 `service_tier`를 싣지 않는다 — Opus 5.5에는 우선 등급이 없어 아무 일도 하지
-않고, `standard_only`를 받아 주는지 문서로 확인되지 않는다(400 위험). 응답 쪽 검사만 둔다."""
+않고, `standard_only`를 받아 주는지 문서로 확인되지 않는다(400 위험). Sonnet 5.5도 같은
+이유로 싣지 않는다. 응답 쪽 검사만 둔다."""
 
 TRANSCRIPTION_IDENTITY_LUNA_MODEL = "gpt-6-luna"
 """전사 전용 열쇠에 고정해 두는 의미 분석 모델(D54).
@@ -218,7 +232,8 @@ TRANSCRIPTION_IDENTITY_LUNA_MODEL = "gpt-6-luna"
 내부 전사 캐시·최종 자막 지문은 설정 전체를 묶는다. 의미 분석 모델이 그 안에서 움직이면
 모델을 바꾸는 것만으로 whisper를 다시 사게 된다 — 전사는 그 모델을 듣지 않는다. 기존
 작업공간의 열쇠가 그대로이도록 W-14 이전의 기본값으로 못 박는다. 기본값이 바뀌어도
-이 값은 움직이지 않는다.
+이 값은 움직이지 않는다 — 기본이 Sonnet 5.5가 된 뒤에도(D58) 글자 그대로 둔다.
+`OPENAI_LUNA_MODEL`을 가리키지 않는 것도 그래서다: 그 값이 바뀌어도 열쇠는 그대로여야 한다.
 """
 
 
@@ -230,9 +245,10 @@ class RawClaudeAnalysisProfile:
     설정 전체를 묶는 지문이 전부 흔들린다. 그래서 작업공간은 모델 이름만 저장하고
     단가·엔드포인트·출력 한도는 이 등록표가 정한다.
 
-    단가는 2026-10-09 공식 가격표 확인값이다 — 0원으로 두지 마라. 계정 접근·유료
-    호출은 시험하지 않았다(사람만 한다). `effort`·`max_output_tokens`·`quote_*`는 외부
-    근거 없는 조정 대상이다. 이미지 토큰은 ⌈w/28⌉×⌈h/28⌉, 이미지당 4784가 상한이다.
+    칸의 기본값은 Claude Opus 5.5의 2026-10-09 공식 가격표 확인값이다(D54). 다른 모델은
+    아래 등록표에서 자기 값으로 덮는다(Sonnet 5.5 — D58). 단가는 0원으로 두지 마라. 계정
+    접근·유료 호출은 시험하지 않았다(사람만 한다). `effort`·`max_output_tokens`·`quote_*`는
+    외부 근거 없는 조정 대상이다. 이미지 토큰은 ⌈w/28⌉×⌈h/28⌉, 이미지당 4784가 상한이다.
     """
 
     model: str = "claude-opus-5-5"
@@ -268,19 +284,68 @@ class RawClaudeAnalysisProfile:
     )
 
 
-CLAUDE_ANALYSIS_PROFILE = RawClaudeAnalysisProfile()
-"""지금 등록된 유일한 Claude 프로파일 — 클라이언트(엔드포인트·버전·시간 한도)의 근원이다."""
+CLAUDE_OPUS_ANALYSIS_PROFILE = RawClaudeAnalysisProfile()
+"""Claude Opus 5.5 — D54의 프로파일 그대로다(값은 바꾸지 않았다)."""
+
+CLAUDE_SONNET_ANALYSIS_PROFILE = RawClaudeAnalysisProfile(
+    model="claude-sonnet-5-5",
+    label="Claude Sonnet 5.5",
+    max_output_tokens=12000,
+    pricing_checked_at=date(2026, 10, 11),
+    pricing_revision="anthropic-claude-sonnet-5-5-2026-10-11",
+    input_per_mtok=Decimal("2"),
+    output_per_mtok=Decimal("10"),
+    cache_write_5m_per_mtok=Decimal("2.50"),
+    cache_write_1h_per_mtok=Decimal("4"),
+    cache_read_per_mtok=Decimal("0.10"),
+    batch_input_per_mtok=Decimal("1"),
+    batch_output_per_mtok=Decimal("5"),
+    source_urls=(
+        "https://platform.claude.com/docs/en/about-claude/pricing",
+        "https://platform.claude.com/docs/en/models/sonnet-5-5/overview",
+        "https://platform.claude.com/docs/en/models/sonnet-5-5/whats-new-sonnet-5-5",
+        "https://platform.claude.com/docs/en/build-with-claude/vision",
+        "https://platform.claude.com/docs/en/build-with-claude/effort",
+        "https://platform.claude.com/docs/en/build-with-claude/structured-outputs",
+    ),
+)
+"""Claude Sonnet 5.5 — 영상 프레임 추천 평가의 기본 모델(D58, 2026-10-11 공식 문서 확인값).
+
+단가($/100만 토큰): 입력 2 · 출력 10 · 캐시 쓰기 5분 2.50 · 1시간 4 · 읽기 0.10 · 배치 1/5.
+이미지는 고해상도 등급(Claude 4.7 이후 — 28px 조각, 장당 4784)이라 Opus 5.5와 같다. 지역은
+표준(global) — US 전용은 1.1배다. 엔드포인트·버전·시간 한도는 Opus 5.5와 같다.
+
+적응형 생각이 기본으로 켜져 있고 생각 토큰도 `max_tokens` 안에 든다(effort 문서). 그래서
+출력 한도를 Opus의 8192보다 넉넉한 12000으로 둔다 — **외부 근거 없는 조정 대상**이다. effort는
+`medium`을 명시한다(이 모델의 API 기본은 `high`다). 창당 보수적 상한은 약 $0.16이다.
+`thinking: disabled`·기본값이 아닌 temperature·강제 `tool_choice`는 400이라 본문에 싣지 않는다.
+"""
 
 CLAUDE_ANALYSIS_PROFILES: Mapping[str, RawClaudeAnalysisProfile] = MappingProxyType(
-    {CLAUDE_ANALYSIS_PROFILE.model: CLAUDE_ANALYSIS_PROFILE}
+    {
+        CLAUDE_SONNET_ANALYSIS_PROFILE.model: CLAUDE_SONNET_ANALYSIS_PROFILE,
+        CLAUDE_OPUS_ANALYSIS_PROFILE.model: CLAUDE_OPUS_ANALYSIS_PROFILE,
+    }
 )
-"""모델 이름 → 프로파일(읽기 전용). 여기 없는 `claude-*`는 설정이 거부한다."""
+"""모델 이름 → 프로파일(읽기 전용). 여기 없는 `claude-*`는 설정이 거부한다.
+
+클라이언트(엔드포인트·버전·시간 한도)·단가·상한은 언제나 고른 모델의 프로파일에서 온다."""
+
+DEFAULT_ANALYSIS_MODEL: str = RawModelRoles().luna_model
+"""새 작업공간의 의미 분석 모델 — Claude Sonnet 5.5(D58). 기존 작업공간은 저장된 값을 쓴다."""
 
 ANALYSIS_MODEL_CHOICES: tuple[str, ...] = (
-    RawModelRoles().luna_model,
-    *CLAUDE_ANALYSIS_PROFILES,
+    DEFAULT_ANALYSIS_MODEL,
+    *(
+        model
+        for model in (*CLAUDE_ANALYSIS_PROFILES, OPENAI_LUNA_MODEL)
+        if model != DEFAULT_ANALYSIS_MODEL
+    ),
 )
-"""고를 수 있는 의미 분석 모델 — 기본(gpt-6-luna)이 맨 앞이다. 기본은 바꾸지 않는다."""
+"""고를 수 있는 의미 분석 모델 — 기본(Sonnet 5.5)이 맨 앞, 그다음 Opus 5.5, gpt-6-luna.
+
+기본이 바뀐 것은 새 작업공간뿐이다(D58) — 고르지 않은 기존 작업공간의 모델은 조용히 바뀌지
+않는다(다시 분석하면 유료다)."""
 
 
 def analysis_provider(model: str) -> str:

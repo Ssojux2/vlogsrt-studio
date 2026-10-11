@@ -5,6 +5,11 @@
 글자가 달라질 수 있다) 전사 지문이 흔들려 Luna 분석까지 낡는다. 전사 전용 열쇠는
 `transcription_identity_view`로 의미 분석 모델을 고정한다 — 기본 설정의 열쇠는 W-14
 이전과 한 바이트도 다르지 않다.
+
+W-18(D58)에서 새 작업공간의 기본 모델이 Claude Sonnet 5.5가 됐다. 그래서 "W-14 이전 조립"에
+넣는 설정은 지금의 기본값이 아니라 **바뀌기 전의 기본 설정** — A0/A1에서 수락된 저장 설정
+글자 그대로(`ACCEPTED_SETTINGS_JSON`, gpt-6-luna) — 이다. 기본이 바뀐 뒤의 열쇠가 그 값과
+바이트까지 같다는 것이 이 파일의 증명이다.
 """
 
 from __future__ import annotations
@@ -15,6 +20,7 @@ from dataclasses import asdict, replace
 from pathlib import Path
 
 from tests.raw.test_final_caption_run import make_video
+from tests.raw.test_raw_config import ACCEPTED_SETTINGS_JSON
 from tests.raw.test_understanding import BEFORE_SHUTDOWN, SETTINGS, FakeTimingProvider, make_audio
 from vlogsrt.config import Config
 from vlogsrt.project.raw import final_caption
@@ -24,11 +30,17 @@ from vlogsrt.project.raw.analysis_config import (
     RawUnderstandingSettings,
 )
 from vlogsrt.project.raw.caption_config import FinalCaptionSettings
-from vlogsrt.project.raw.config import RawWorkflowConfig, raw_workflow_config_to_json
+from vlogsrt.project.raw.config import (
+    RawWorkflowConfig,
+    raw_workflow_config_from_json,
+    raw_workflow_config_to_json,
+)
 from vlogsrt.project.raw.understanding import SampleSpan, transcribe_selected_audio
 
 CLAUDE = "claude-opus-5-5"
 SPANS = (SampleSpan(0, 160000), SampleSpan(160000, 320000))
+PRE_W18_DEFAULT = raw_workflow_config_from_json(ACCEPTED_SETTINGS_JSON)
+"""W-18 이전의 기본 설정 — 의미 분석 모델이 gpt-6-luna다. 이미 있는 작업공간이 저장한 값이다."""
 
 
 def claude(config: RawWorkflowConfig) -> RawWorkflowConfig:
@@ -72,13 +84,29 @@ def run(tmp_path: Path, settings: RawWorkflowConfig, cache: Path) -> FakeTimingP
 
 
 def test_the_default_asr_chunk_key_is_the_pre_w14_key(tmp_path: Path) -> None:
+    """기본이 Sonnet 5.5가 돼도(D58) 기본 설정의 청크 열쇠는 W-14 이전의 기본 열쇠 그대로다."""
+    assert PRE_W18_DEFAULT.models.luna_model == "gpt-6-luna"
+    assert RawWorkflowConfig().models.luna_model != PRE_W18_DEFAULT.models.luna_model
     cache = tmp_path / "asr-cache"
     run(tmp_path, RawWorkflowConfig(), cache)
     expected = {
-        pre_w14_chunk_key(tmp_path / f"asr-chunk-{position:04d}.wav", span, RawWorkflowConfig())
+        pre_w14_chunk_key(tmp_path / f"asr-chunk-{position:04d}.wav", span, PRE_W18_DEFAULT)
         for position, span in enumerate(SPANS)
     }
     assert {path.stem for path in cache.glob("*.json")} == expected
+
+
+def test_an_existing_luna_workspace_and_a_new_sonnet_one_share_the_transcription(
+    tmp_path: Path,
+) -> None:
+    """옛 작업공간(gpt-6-luna)이 사 둔 전사를 새 기본(Sonnet 5.5)이 그대로 쓴다 — 재구매 0회."""
+    cache = tmp_path / "asr-cache"
+    first = run(tmp_path, PRE_W18_DEFAULT, cache)
+    assert len(first.seen) == len(SPANS)
+    keys = sorted(path.name for path in cache.glob("*.json"))
+    second = run(tmp_path, RawWorkflowConfig(), cache)
+    assert second.seen == []
+    assert sorted(path.name for path in cache.glob("*.json")) == keys
 
 
 def test_a_claude_run_after_a_luna_run_buys_no_transcription(tmp_path: Path) -> None:
@@ -124,7 +152,7 @@ def test_the_final_caption_fingerprint_ignores_the_analysis_model(tmp_path: Path
     video = make_video(tmp_path)
     settings, engine, workflow = FinalCaptionSettings(), Config(), RawWorkflowConfig()
     default = final_caption.caption_settings_fingerprint(video, SPANS, settings, workflow, engine)
-    assert default == pre_w14_caption_fingerprint(video, SPANS, settings, workflow, engine)
+    assert default == pre_w14_caption_fingerprint(video, SPANS, settings, PRE_W18_DEFAULT, engine)
     switched = final_caption.caption_settings_fingerprint(
         video, SPANS, settings, claude(workflow), engine
     )
@@ -155,7 +183,8 @@ def test_the_asr_approval_fingerprint_ignores_the_analysis_model() -> None:
     """전사 승인은 전사만 묶는다 — 모델을 바꿔도 1단계 승인·전사 지문이 그대로다."""
     understanding, workflow = RawUnderstandingSettings(), RawWorkflowConfig()
     default = asr_settings_fingerprint(understanding, workflow)
-    assert default == pre_w14_asr_settings_fingerprint(understanding, workflow)
+    assert default == pre_w14_asr_settings_fingerprint(understanding, PRE_W18_DEFAULT)
+    assert asr_settings_fingerprint(understanding, PRE_W18_DEFAULT) == default
     assert asr_settings_fingerprint(understanding, claude(workflow)) == default
 
 

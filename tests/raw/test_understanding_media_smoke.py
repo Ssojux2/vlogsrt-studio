@@ -23,7 +23,7 @@ from vlogsrt.project.raw import understanding as stage1
 from vlogsrt.project.raw import understanding_luna as luna
 from vlogsrt.project.raw.analysis_config import RawUnderstandingSettings
 from vlogsrt.project.raw.caption_provider import parse_timing_response
-from vlogsrt.project.raw.config import RawWorkflowConfig
+from vlogsrt.project.raw.config import OPENAI_LUNA_MODEL, RawModelRoles, RawWorkflowConfig
 from vlogsrt.project.raw.understanding import (
     PreprocessFrameSampler,
     plan_audio_chunks,
@@ -104,7 +104,8 @@ class ReplayingTimingProvider:
 def test_stage1_runs_on_real_synthetic_media(synthetic_clip: Path, tmp_path: Path) -> None:
     """실제 추출→전사→시간창→프레임→판정→분할→문서까지 한 번에 돈다."""
     settings = RawUnderstandingSettings()
-    workflow = RawWorkflowConfig()
+    # Luna(OpenAI) 응답 모양의 재생 — W-18(D58) 전에는 기본값이 곧 이 모델이었다
+    workflow = RawWorkflowConfig(models=RawModelRoles(luna_model=OPENAI_LUNA_MODEL))
     workdir = tmp_path / "work"
     workdir.mkdir()
 
