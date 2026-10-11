@@ -71,9 +71,18 @@ def seed(
     return saved
 
 
+def human_edited(document: dict) -> bool:
+    """사람이 고친 원본 자막인가 — `edited` 칸이 없는 옛 문서는 둘째 리비전부터 고친 것으로 본다.
+
+    지문과 「다시 듣기」 거절(D59 19b)이 같은 규칙을 쓴다 — 고친 자막을 덮을 수 있는 쪽으로 읽지
+    않는다.
+    """
+    return bool(document.get("edited", document["sequence"] > 0))
+
+
 def fingerprint(workspace: Any, asset_id: str) -> str:
     document = load(workspace, asset_id)
-    if not document or not document.get("edited", document["sequence"] > 0):
+    if not document or not human_edited(document):
         return "asr-original/v1"
     return hashlib.sha256(
         json.dumps(document["utterances"], sort_keys=True, ensure_ascii=False).encode()

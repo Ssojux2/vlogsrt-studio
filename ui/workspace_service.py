@@ -66,7 +66,13 @@ BUSY_QUICK_STAGES = ("영상 준비", *ACTIVE_ANALYSIS_STAGES)
 # 승인은 받았지만 아직 실제 분석에 들어가지 않은 단계 — 시작 알림은 이 단계를 지나면 물러난다.
 PENDING_ANALYSIS_STAGES = ("영상 준비", "승인 대기", "분석 대기", "분석 시작")
 # 카드 배지의 색 — 기다림·취소는 알림일 뿐 경고가 아니다(W-17 B, 나머지 확인 단계는 경고 색).
-QUIET_BADGE_STAGES = ("승인 대기", "취소됨")
+# 「전사만」이 끝나 분석을 기다리는 영상·다시 듣기를 기다리는 영상도 승인을 기다릴 뿐이다(D59 19b).
+QUIET_BADGE_STAGES = (
+    "승인 대기",
+    "취소됨",
+    raw_service.TRANSCRIBED_STAGE,
+    raw_service.RELISTEN_STAGE,
+)
 NOTICE_ACCEPTED = "accepted"
 NOTICE_DONE = "done"
 NOTICE_PREPARING = "preparing"
@@ -104,6 +110,58 @@ QUOTE_NOTICE_KINDS = frozenset({NOTICE_UNSEEN})
 않고 1050px 이하에서 재생기를 밀어낸다(W-17 B 2차) — 실사용 줄은 기록 판의 고정 줄로 간다.
 """
 LIBRARY_APPROVE_LABEL = "전체 영상 분석 승인"
+APPROVAL_MODE_ID = "vl-approval-mode"
+APPROVAL_MODE_LABEL = "승인 범위"
+APPROVAL_MODE_CHOICES = [
+    ("전사 + 영상 분석", raw_service.SELECTION_MODE_FULL),
+    ("전사만", raw_service.SELECTION_MODE_TRANSCRIBE),
+]
+"""승인 단추가 무엇을 승인하는지(D59 19b) — 단추의 이름·범위는 그대로다(D57 결정 4). 「전사만」은
+1단계(전사·원본 자막·장면·프레임)만 돌고 영상 분석 앞에서 멈춘다. 고른 값은 견적 문구에 실리고
+그 문구가 승인 클릭과 함께 간다 — 보이는 범위만 승인된다."""
+RELISTEN_EXPLANATION = (
+    "이 영상을 처음부터 다시 듣습니다 — 기존 전사는 온도 설정 오류로 받은 것이라 되풀이가 많을 수"
+    " 있습니다."
+)
+RELISTEN_DONE_TEXT = (
+    f"{RELISTEN_EXPLANATION} 승인 범위를 「전사만」으로 바꿨습니다. 견적을 확인한 뒤"
+    f" 「{LIBRARY_APPROVE_LABEL}」을 누르면 시작합니다 — 다른 영상의 이미 받은 전사는 다시 사지"
+    " 않습니다."
+)
+RELISTEN_PENDING_TEXT = (
+    f"이 영상은 이미 다시 듣기를 기다리고 있습니다. 견적을 확인한 뒤 「{LIBRARY_APPROVE_LABEL}」을"
+    " 누르면 시작합니다."
+)
+RELISTEN_BUSY_TEXT = "이 영상의 분석이 진행 중입니다. 끝난 뒤 다시 눌러 주세요."
+WORKBENCH_TOKEN_ACTIONS = (
+    "prepare",
+    "propose",
+    "apply",
+    "replan",
+    "select-source",
+    "source-caption",
+    "relink-original",
+    "sync-recheck",
+    "relisten",
+)
+"""작업대 수명 토큰을 요구하는 동작 — 바꾸는 동작 전부다(질의 `refresh`만 열려 있다, F1c)."""
+STAGE_NOTES = {
+    raw_service.TRANSCRIBED_STAGE: (
+        "전사와 원본 자막 준비가 끝났습니다. 추천 판정은 아직 없습니다 — 승인 범위를"
+        f" 「전사 + 영상 분석」으로 바꾸고 「{LIBRARY_APPROVE_LABEL}」을 누르면 영상 분석만 이어서"
+        " 합니다(이미 받은 전사는 다시 사지 않습니다)."
+    ),
+    raw_service.RELISTEN_STAGE: (
+        f"다시 듣기를 기다리고 있습니다. 견적을 확인한 뒤 「{LIBRARY_APPROVE_LABEL}」을 누르면"
+        " 처음부터 다시 듣습니다."
+    ),
+}
+"""「전사만」(D59 19b)이 남기는 두 기다림 단계의 안내 — 무엇을 눌러야 이어지는지 말한다."""
+RETRY_TRANSCRIBE_TEXT = (
+    "이전 분석 기준의 실패 구간은 이어서 재시도할 수 없어 「전사만」 새 분석으로 다시 묻습니다."
+    f" 승인 범위를 「전사만」으로 바꿨습니다. 견적을 확인한 뒤 「{LIBRARY_APPROVE_LABEL}」을"
+    " 누르세요 — 이미 받은 전사 조각은 다시 사지 않고 실패한 조각만 다시 묻습니다."
+)
 
 GLOBAL_ORDER_CONFIRM_LABEL = "전체 원본 순서 확정(촬영 시각 순)"
 """영상은 언제나 만든 시각 순이다(D53) — 순서를 손으로 적는 칸 대신 이 단추 하나다."""
@@ -459,6 +517,24 @@ def _quote_model(quote: Any) -> str | None:
     """견적이 본 의미 분석 모델 — 워크플로가 없는 견적(옛 모양)은 모른다."""
     workflow = getattr(quote, "workflow", None)
     return None if workflow is None else str(workflow.models.luna_model)
+
+
+def _quote_mode(quote: Any) -> str:
+    """견적의 승인 범위 — 범위 칸이 없는 견적(옛 모양)은 전체다(D59 19b)."""
+    return str(getattr(quote, "mode", raw_service.SELECTION_MODE_FULL))
+
+
+def _transcribe_only(quote: Any) -> bool:
+    return _quote_mode(quote) == raw_service.SELECTION_MODE_TRANSCRIBE
+
+
+def _transcribe_only_summary(pending: int, cached: int, chunks: int, limit: int) -> str:
+    """「전사만」 견적 문구 — 범위가 전사뿐임을 먼저 말한다. 금액은 싣지 않는다(D57 결정 7)."""
+    return (
+        f"전사만 · 대상 영상 {pending}개 · 저장 결과 {cached}개 재사용 · 전사 최대 {chunks}회. "
+        "영상 분석은 하지 않습니다 — 이미 받은 전사 조각은 다시 사지 않고, 실패한 조각과 다시"
+        f" 듣기를 고른 영상, 처음 듣는 영상만 새로 듣습니다. 최대 {limit}개를 동시에 처리합니다."
+    )
 
 
 def _semantic_quote_terms(model: str | None, estimates: Sequence[Any]) -> tuple[str, str]:
@@ -1661,7 +1737,7 @@ class RawWorkspaceUi:
                         self._library_cached_ids.setdefault(root, set()).update(ids)
                     self._quick_update(token, stage="추천 구간 준비 완료")
                     return
-                quote = approved_quote or self.raw.selection_quote(root, ids)
+                quote = approved_quote or self._scoped(root, self.raw.selection_quote(root, ids))
                 if set(ids) == set(self._library_ids(root)):
                     self._library_quotes[root] = quote
                 self._quick_assert_current(root, token, context)
@@ -1735,9 +1811,12 @@ class RawWorkspaceUi:
 
         revision = self.raw.run_selection_analysis(root, quote, transport, context, report)
         self._quick_assert_current(root, token, context)
-        with self._review_publish_lock:
-            if self._quick.get("token") == token and self._snapshot_root() == root:
-                self.raw.publish_selection_review(root, revision, context)
+        # 「전사만」은 영상 분석 앞에서 멈춘다 — 판정이 없으니 검토를 새로 세우지 않는다(D59 19b).
+        # 지금 검토(이전 분석의 등급·사람 결정)는 그대로 남는다.
+        if not _transcribe_only(quote):
+            with self._review_publish_lock:
+                if self._quick.get("token") == token and self._snapshot_root() == root:
+                    self.raw.publish_selection_review(root, revision, context)
         self._quick_assert_current(root, token, context)
         stage, error = self.raw.selection_completion(root, revision)
         if stage == "추천 구간 준비 완료":
@@ -1758,7 +1837,7 @@ class RawWorkspaceUi:
 
         def prepare(context: Any) -> None:
             context.check_cancel()
-            quote = self.raw.selection_quote(root, ids)
+            measured = self.raw.selection_quote(root, ids)
             tasks = self._task_views(root)
             cached = {
                 source_id
@@ -1767,10 +1846,11 @@ class RawWorkspaceUi:
                 and self.raw.cached_selection_analysis(root, (source_id,))
             }
             context.check_cancel()
-            if not self._quote_current(root, quote, "라이브러리"):
+            if not self._quote_current(root, measured, "라이브러리"):
                 return
             self._library_cached_ids[root] = cached
-            self._library_quotes[root] = quote
+            # 범위는 끝난 순간의 것으로 묶는다 — 재는 사이 범위를 바꿨어도 지금 범위의 견적이 선다.
+            self._library_quotes[root] = self._scoped(root, measured)
 
         model = self.raw.settings(root).models.luna_model
         self.raw.submit_job(root, "library_quote", repr((ids, model)), prepare)
@@ -1780,9 +1860,15 @@ class RawWorkspaceUi:
         quote = self._library_quotes.get(root) if root else None
         if root is None or quote is None:
             return "라이브러리를 불러오면 분석 범위와 요청 상한을 안내합니다."
+        return self._library_summary_for(root, quote)
+
+    def _library_summary_for(self, root: Path, quote: Any) -> str:
+        """견적 하나의 문구 — 승인 클릭은 대조한 바로 그 견적을 접수한다(다시 읽지 않는다)."""
         cached = self._library_cached_ids.get(root, set()).intersection(quote.asset_ids)
         pending = [e for e in quote.estimates if e.asset_id not in cached]
         asr = sum(e.asr_chunk_count for e in pending)
+        if _transcribe_only(quote):
+            return _transcribe_only_summary(len(pending), len(cached), asr, self._analysis_limit)
         luna = sum(e.luna_request_count for e in pending)
         label, ceiling = _semantic_quote_terms(_quote_model(quote), pending)
         model = "" if label == "Luna" else f"({label})"
@@ -1791,6 +1877,58 @@ class RawWorkspaceUi:
             f"전사 최대 {asr}회 + 영상 분석{model} 최대 {luna}회{ceiling}. 승인하면 두 단계가"
             f" 이어집니다. 최대 {self._analysis_limit}개를 동시에 분석합니다."
         )
+
+    # ── 승인 범위(전체 · 「전사만」, D59 19b) — 작업공간 meta에 산다 ─────────────────
+
+    def _approval_mode(self, root: Path) -> str:
+        """작업공간 meta가 정본이다 — 사본을 두지 않는다(다른 탭·다른 서버가 바꿔도 맞는다)."""
+        return str(self.raw.approval_mode(root))
+
+    def _set_approval_mode(self, root: Path, mode: str) -> None:
+        self.raw.set_approval_mode(root, mode)
+
+    def _scoped(self, root: Path, quote: Any, mode: str | None = None) -> Any:
+        """견적을 그 범위(주지 않으면 지금 고른 범위)로 다시 묶는다 — 측정 그대로(ffprobe 없음)."""
+        target = mode or self._approval_mode(root)
+        if _quote_mode(quote) == target:
+            return quote
+        return self.raw.selection_rebound_quote(root, quote, tuple(quote.asset_ids), target)
+
+    def _rescope_quotes(self, root: Path) -> None:
+        """지금 범위로 라이브러리 견적과 고른 영상의 승인 대기 견적을 다시 묶는다."""
+        quote = self._library_quotes.get(root)
+        if quote is not None:
+            self._library_quotes[root] = self._scoped(root, quote)
+        state = self._quick
+        held = state.get("quote")
+        if state.get("root") == root and state.get("stage") == "승인 대기" and held is not None:
+            self._quick_update(state["token"], quote=self._scoped(root, held))
+
+    def approval_mode_value(self) -> str:
+        """「승인 범위」 칸의 처음 값 — 화면을 열 때마다 지금 작업공간의 값으로 다시 잰다."""
+        root = self._snapshot_root()
+        return self._approval_mode(root) if root else raw_service.SELECTION_MODE_FULL
+
+    def approval_mode_view(self, signature: str | None, mode: str) -> Any:
+        """사람이 승인 범위를 골랐다 — 저장하고 견적을 그 범위로 다시 묶는다(호출 0회)."""
+        root = self._require_current_selection(signature)
+        if mode not in raw_service.SELECTION_MODES:
+            raise _error("알 수 없는 승인 범위입니다. 다시 골라 주세요.")
+        self._set_approval_mode(root, mode)
+        self._rescope_quotes(root)
+        return self.library_analysis_summary_markdown()
+
+    def approval_mode_tick(self, signature: str | None, shown: str | None) -> Any:
+        """1초 틱 — 그 탭의 칸이 보이는 값(`shown`)이 저장된 범위와 다르면 칸을 맞춘다.
+
+        다른 탭·다시 듣기·재시도·작업공간 바꿈이 범위를 바꿔도 탭마다 제 칸을 고친다 — 칸의 이름이
+        견적 문구(승인되는 범위)와 어긋난 채 남지 않는다. 같으면 보내지 않는다(누름을 덮지 않게).
+        """
+        root = self._snapshot_root()
+        if not self._quote_signature_current(signature) or root is None:
+            return gr.skip()
+        mode = self._approval_mode(root)
+        return gr.skip() if shown == mode else gr.Radio(value=mode)
 
     def library_analysis_summary_markdown(self) -> str:
         """견적 칸의 값 — 원문을 글 그대로 그려지게 escape한 마크다운(대조는 원문으로 한다)."""
@@ -1902,11 +2040,9 @@ class RawWorkspaceUi:
         if not ids or quote is None or tuple(quote.asset_ids) != ids:
             self._prepare_library_quote(root)
             return self._library_reply(root, NOTICE_PREPARING)
-        summary = self.library_analysis_summary()
-        if shown_summary is not None and shown_summary != summary:
-            # 거절 알림이 확인할 견적(범위·상한)을 직접 싣는다 — 상태 칸이 그것을 가리지 않는다.
-            notice = f"{NOTICE_TEXT[NOTICE_UNSEEN]}\n\n{summary}"
-            self._set_approval_notice(root, NOTICE_UNSEEN, notice)
+        # 대조한 바로 그 견적을 접수한다 — 다시 읽으면 그 사이 범위 칸이 다시 묶은 견적이 들어온다.
+        quote = self._library_quote_seen(root, quote, shown_summary)
+        if quote is None:
             return (self._quick_status(), gr.Accordion(open=False), gr.Textbox(value=""))
         key = (api_key or "").strip()
         if key:
@@ -1919,7 +2055,8 @@ class RawWorkspaceUi:
             return self._library_reply(root, NOTICE_KEY, open_panel=True)
         if self._quick.get("connection_required"):  # 키가 생겼다 — 연결 안내가 견적을 가리지 않게
             self._quick_update(self._quick["token"], connection_required=False)
-        problem = self._claude_key_problem(root)
+        # 「전사만」은 영상 분석 모델을 부르지 않는다 — Claude 키가 없어도 된다(D59 19b).
+        problem = None if _transcribe_only(quote) else self._claude_key_problem(root)
         if problem is not None:
             notice = f"**연결 설정 필요 · 아직 분석하지 않았습니다**\n\n{problem}"
             self._set_approval_notice(root, NOTICE_KEY, notice)
@@ -1927,6 +2064,27 @@ class RawWorkspaceUi:
         # 새 견적 확인(영상마다 ffprobe)은 수십 초 걸린다 — 클릭은 접수만 하고 돌아온다.
         self._submit_library_approval(root, ids, quote)
         return (self._quick_status(), gr.Accordion(open=False), gr.Textbox(value=""))
+
+    def _library_quote_seen(self, root: Path, quote: Any, shown_summary: str | None) -> Any:
+        """화면에 보인 견적이면 **대조한 그 견적**을, 아니면 None(거절)을 돌려준다.
+
+        고른 범위와 다른 범위의 견적이면(범위를 바꾸는 사이에 견적이 다시 섰다) 지금 범위로 다시
+        묶고 거절한다. 거절 알림은 확인할 견적(범위·상한)을 직접 싣는다 — 상태 칸이 그것을 가리지
+        않는다.
+        """
+        if _quote_mode(quote) != self._approval_mode(root):
+            quote = self._library_quotes[root] = self._scoped(root, quote)
+            shown_summary = ""  # 이 클릭이 본 견적은 지금 범위의 것이 아니다
+        # 칸이 그리는 문구(놓인 견적)와 대조한다 — 그 사이 바뀌었으면 잡은 견적의 문구로.
+        held = self._library_quotes.get(root) is quote
+        summary = (
+            self.library_analysis_summary() if held else self._library_summary_for(root, quote)
+        )
+        if shown_summary is None or shown_summary == summary:
+            return quote
+        notice = f"{NOTICE_TEXT[NOTICE_UNSEEN]}\n\n{summary}"
+        self._set_approval_notice(root, NOTICE_UNSEEN, notice)
+        return None
 
     def _submit_library_approval(self, root: Path, ids: tuple[str, ...], quote: Any) -> None:
         def approve(context: Any) -> None:
@@ -1963,7 +2121,8 @@ class RawWorkspaceUi:
     def _approve_library(self, root: Path, ids: tuple[str, ...], quote: Any, context: Any) -> None:
         context.check_cancel()
         # 비용 문: 화면에 표시된 견적(digest·workflow)만 승인한다. 다르면 아무것도 시작하지 않는다.
-        fresh = self.raw.selection_quote(root, ids)
+        # 승인한 범위로 다시 잰다 — 범위는 digest에 접혀 있다(D59 19b).
+        fresh = self._scoped(root, self.raw.selection_quote(root, ids), _quote_mode(quote))
         if fresh.digest != quote.digest or fresh.workflow != quote.workflow:
             self._library_quotes[root] = fresh
             self._set_approval_notice(root, NOTICE_CHANGED)
@@ -2106,34 +2265,58 @@ class RawWorkspaceUi:
         if state.get("error"):
             return f"**{stage}** · {state['error']} · 원본은 유지됩니다."
         quote = state.get("quote")
-        if stage == "전사·장면 준비" and state.get("root"):
-            transcripts = [
-                self.raw.source_transcript(state["root"], source_id)
-                for source_id in state.get("asset_ids", ())
-            ]
-            if transcripts and all(t is not None for t in transcripts):
-                count = sum(len(t["utterances"]) for t in transcripts if t is not None)
-                prepared = self.raw.analysis_frame_progress(
-                    state["root"], state.get("revision"), tuple(state.get("asset_ids", ()))
-                )
-                maximum = sum(e.frame_sample_count for e in quote.estimates) if quote else 0
-                return (
-                    f"**원본 자막 {count}개 표시 · 영상 프레임 준비 중 "
-                    f"({prepared}/최대 {maximum})**\n\n"
-                    "시간 자막을 먼저 확인할 수 있습니다. "
-                    "이어서 같은 자막과 영상 프레임을 함께 분석합니다."
-                )
+        preparing = self._preparing_text(state, quote) if stage == "전사·장면 준비" else None
+        if preparing is not None:
+            return preparing
         if stage == "승인 대기" and quote is not None:
             return self._approval_ready_text(quote)
+        if stage in STAGE_NOTES:
+            return f"**{stage}**\n\n{STAGE_NOTES[stage]}"
         # 등급 색의 뜻은 타임라인 범례가 말한다 — 옛 「청록·주황」 안내는 지금 색과 달라 지웠다.
         return f"**{stage}**"
 
+    def _preparing_text(self, state: Mapping[str, Any], quote: Any) -> str | None:
+        """전사·장면 준비 중 — 원본 자막이 심겼으면 그 수와 프레임 진행을 말한다(없으면 None)."""
+        if not state.get("root"):
+            return None
+        transcripts = [
+            self.raw.source_transcript(state["root"], source_id)
+            for source_id in state.get("asset_ids", ())
+        ]
+        if not transcripts or any(t is None for t in transcripts):
+            return None
+        count = sum(len(t["utterances"]) for t in transcripts if t is not None)
+        prepared = self.raw.analysis_frame_progress(
+            state["root"], state.get("revision"), tuple(state.get("asset_ids", ()))
+        )
+        maximum = sum(e.frame_sample_count for e in quote.estimates) if quote else 0
+        after = (
+            "「전사만」이라 영상 분석 앞에서 멈춥니다."
+            if _transcribe_only(quote)
+            else "이어서 같은 자막과 영상 프레임을 함께 분석합니다."
+        )
+        return (
+            f"**원본 자막 {count}개 표시 · 영상 프레임 준비 중 "
+            f"({prepared}/최대 {maximum})**\n\n"
+            f"시간 자막을 먼저 확인할 수 있습니다. {after}"
+        )
+
     @staticmethod
     def _approval_ready_text(quote: Any) -> str:
-        """승인 대기 견적 — 모델 이름과(Claude면) 보수적 비용 상한을 말한다(D54)."""
-        requests = sum(max(1, e.luna_request_count) for e in quote.estimates)
+        """승인 대기 견적 — 모델 이름과(Claude면) 보수적 비용 상한을 말한다(D54).
+
+        「전사만」 견적은 전사만 말한다 — 영상 분석 모델·상한은 싣지 않는다(D59 19b)."""
         chunks = sum(e.asr_chunk_count for e in quote.estimates)
         duration = sum(float(Fraction(e.asr_seconds)) for e in quote.estimates)
+        if _transcribe_only(quote):
+            return (
+                f"**전사만 준비 완료** · 선택 영상 {len(quote.asset_ids)}개\n\n"
+                f"전사 최대 {chunks}요청({duration:.0f}초). 영상 분석은 하지 않습니다 — 이미"
+                " 받은 전사 조각은 다시 사지 않습니다.\n\n"
+                f"「{LIBRARY_APPROVE_LABEL}」으로 승인하면 전사·원본 자막·장면 준비까지 하고"
+                " 영상 분석 앞에서 멈춥니다."
+            )
+        requests = sum(max(1, e.luna_request_count) for e in quote.estimates)
         label, ceiling = _semantic_quote_terms(_quote_model(quote), quote.estimates)
         return (
             f"**{label} 분석 준비 완료** · 선택 영상 {len(quote.asset_ids)}개\n\n"
@@ -2191,6 +2374,8 @@ class RawWorkspaceUi:
         if state.get("quote_unseen") is not None:
             self._quick_update(state["token"], quote_unseen=None)  # 이 답이 견적을 화면에 낸다
             return f"{NOTICE_TEXT[NOTICE_UNSEEN]}\n\n{self._approval_ready_text(state['quote'])}"
+        if _transcribe_only(state.get("quote")):
+            return None  # 「전사만」은 영상 분석 모델을 부르지 않는다 — Claude 키 불필요(D59 19b)
         problem = self._claude_key_problem(root)
         if problem is not None:
             self._quick_update(state["token"], error=problem)
@@ -2398,7 +2583,9 @@ class RawWorkspaceUi:
             return None
         quote = self._library_quotes.get(root)
         ids = tuple(quote.asset_ids) if quote is not None else tuple(tasks)
-        done = sum(1 for a in ids if tasks.get(a, {}).get("stage") == "추천 구간 준비 완료")
+        # 「전사만」 실행은 분석 대기에서 끝난다 — 그것도 이번 실행으로는 끝난 영상이다(D59 19b).
+        finished = ("추천 구간 준비 완료", raw_service.TRANSCRIBED_STAGE)
+        done = sum(1 for a in ids if tasks.get(a, {}).get("stage") in finished)
         return running, waiting, done, len(ids)
 
     def capcut_status_view(self, signature: str | None) -> Any:
@@ -2550,10 +2737,24 @@ class RawWorkspaceUi:
     def capcut_retry_view(self, signature: str | None) -> str:
         root = self._require_current_selection(signature)
         if self._quick.get("root") == root and self._quick.get("asset_ids"):
+            revision = self._quick.get("revision")
+            old = bool(revision) and self.raw.analysis_revision_on_old_prompt(root, str(revision))
+            if old:
+                # 이전 기준의 리비전은 이어서 재시도하지 않는다(D58) — 「전사만」 새 분석으로 실패
+                # 조각만 다시 묻는다(이미 받은 조각은 캐시, D59 19b).
+                self._set_approval_mode(root, raw_service.SELECTION_MODE_TRANSCRIBE)
             self._start_quick(root, (), asset_ids=tuple(self._quick["asset_ids"]), retry=True)
+            if old:
+                self._refresh_library_quote(root)
+                return RETRY_TRANSCRIBE_TEXT
             return "선택 영상의 실패·누락 단계를 확인합니다. 표시된 범위를 승인하면 재개합니다."
+        stale = self.raw.analysis_jobs_on_old_prompt(root)
         for job in self.raw.list_jobs(root):
             if job.status in ("failed", "interrupted", "paused"):
+                if job.job_id in stale:
+                    self._set_approval_mode(root, raw_service.SELECTION_MODE_TRANSCRIBE)
+                    self._refresh_library_quote(root)
+                    return RETRY_TRANSCRIBE_TEXT
                 message = self._retry_job(signature, root, job)
                 if message is not None:
                     return message
@@ -2826,6 +3027,7 @@ class RawWorkspaceUi:
             )
             note = self.quote_note_markdown()
             with gr.Column(elem_id="vl-quote", min_width=0):
+                self._approval_mode_radio = self._approval_mode_cell()
                 # 값은 글 그대로 그려지는 마크다운(문장부호 escape)이고 LaTeX도 끈다 — 그려진 글이
                 # 견적 원문과 같아야 승인 앞 단계의 글 대조가 선다.
                 self._library_summary_md = gr.Markdown(
@@ -2834,6 +3036,20 @@ class RawWorkspaceUi:
                     latex_delimiters=[],
                 )
                 self._quote_note_md = gr.Markdown(note, elem_id="vl-quote-note", visible=bool(note))
+
+    def _approval_mode_cell(self) -> gr.Radio:
+        """승인 범위(D59 19b) — 견적 문구 바로 위의 두 갈래.
+
+        고른 범위는 견적 문구에 실리고 그 문구가 승인 클릭과 함께 가므로, 범위를 바꾸면 보이는
+        견적이 바뀐 뒤에야 승인된다. 처음 값은 화면을 열 때마다 그 작업공간의 저장값이다.
+        """
+        return gr.Radio(
+            choices=APPROVAL_MODE_CHOICES,
+            value=self.approval_mode_value,
+            label=APPROVAL_MODE_LABEL,
+            interactive=True,
+            elem_id=APPROVAL_MODE_ID,
+        )
 
     def quote_note_markdown(self) -> str:
         """견적 칸 아래의 전문 — 살아 있는 승인 답 가운데 견적·금액을 실은 것만, 말줄임 없이.
@@ -2915,6 +3131,36 @@ class RawWorkspaceUi:
         ):
             self._report_activity(button.click(handler, self._signature_state, target), status)
         self._wire_review_timers(outputs)
+        self._wire_approval_mode()
+
+    def _wire_approval_mode(self) -> None:
+        """「승인 범위」 — 사람이 고르면(`input`) 저장하고 견적 문구를 바로 다시 그린다.
+
+        다른 곳(다른 탭·다시 듣기·실패 구간 재시도·작업공간 바꿈)이 범위를 바꾸면 1초 틱이 그 탭의
+        칸 값과 저장값을 견줘 다를 때만 칸을 맞춘다. 승인 클릭의 결합(보이는 견적 문구)은 그대로다.
+        """
+        radio = self._approval_mode_radio  # 무대(`_review_stage`)가 먼저 만든다
+        chosen = radio.input(
+            self.approval_mode_view,
+            [self._signature_state, radio],
+            self._library_summary_md,
+            queue=False,
+            show_progress="hidden",
+        )
+        chosen.then(
+            self.quote_note_view,
+            self._signature_state,
+            self._quote_note_md,
+            queue=False,
+            show_progress="hidden",
+        )
+        gr.Timer(1).tick(
+            self.approval_mode_tick,
+            [self._signature_state, radio],
+            radio,
+            queue=False,
+            show_progress="hidden",
+        )
 
     def _wire_review_timers(self, outputs: list[Any]) -> None:
         """1·2초 타이머 — 승인 단추 이름, 견적 문구, 상태 줄, 작업대 다시 그리기, 보내기 알림."""
@@ -3975,26 +4221,7 @@ class RawWorkspaceUi:
         for sid, source in sources_model.items():
             self._annotate_tiers(root, sid, source, task_views.get(sid, {}), pending_ids)
         for sid, source in sources_model.items():
-            transcript = self.raw.source_transcript(root, sid)
-            if transcript:
-                source["transcriptRevision"] = transcript["revision"]
-                source["crossSourceCandidates"] = self.raw.source_repeat_candidates(root, sid)
-                source["subtitles"] = [
-                    {
-                        "id": u["utterance_id"],
-                        "text": u["text"],
-                        "start": str(Fraction(u["start"]["num"], u["start"]["den"])),
-                        "end": str(Fraction(u["end"]["num"], u["end"]["den"])),
-                    }
-                    for u in transcript["utterances"]
-                ]
-                source["transcriptDirty"] = bool(
-                    transcript["sequence"]
-                    and quick.get("stage") in ("자막 변경 · 갱신 필요", "승인 대기")
-                )
-                sync_view = self.raw.sync_check_view(root, sid)  # 자막 시각 확인 — 표시만(D55)
-                if sync_view is not None:
-                    source["syncCheck"] = sync_view
+            self._annotate_transcript(root, sid, source, quick)
             refs = self.raw.source_media_references(root, sid)
             if refs:
                 source["mediaStatus"] = refs["validation"]["reason"]
@@ -4476,20 +4703,12 @@ class RawWorkspaceUi:
         except gr.Error as error:
             return fail(error)
         try:
-            if kind in (
-                "prepare",
-                "propose",
-                "apply",
-                "replan",
-                "select-source",
-                "source-caption",
-                "relink-original",
-                "sync-recheck",
-            ):
+            if kind in WORKBENCH_TOKEN_ACTIONS:
                 # 질의(refresh)는 열어 둔다 — 서버 재시작 뒤 화면이 스스로 회복하는 길.
                 self._require_workbench_token(payload, self._visual_lifetime_token, "영상 작업대")
-            if kind == "sync-recheck":
-                return self._visual_sync_recheck(root, payload, echo)
+            single = {"sync-recheck": self._visual_sync_recheck, "relisten": self._visual_relisten}
+            if kind in single:
+                return single[kind](root, payload, echo)
             if kind in ("source-caption", "relink-original"):
                 source_id = self._serve_str(payload, "sourceId")
                 if kind == "source-caption":
@@ -4856,6 +5075,80 @@ class RawWorkspaceUi:
             ),
         }
 
+    def _annotate_transcript(
+        self, root: Path, sid: str, source: dict[str, Any], quick: Mapping[str, Any]
+    ) -> None:
+        """원본 하나의 원본 자막 칸 — 큐 · 중복 후보 · 갱신 필요 · 시각 확인 · 다시 듣기(D59)."""
+        transcript = self.raw.source_transcript(root, sid)
+        if not transcript:
+            return
+        source["transcriptRevision"] = transcript["revision"]
+        source["crossSourceCandidates"] = self.raw.source_repeat_candidates(root, sid)
+        source["subtitles"] = [
+            {
+                "id": u["utterance_id"],
+                "text": u["text"],
+                "start": str(Fraction(u["start"]["num"], u["start"]["den"])),
+                "end": str(Fraction(u["end"]["num"], u["end"]["den"])),
+            }
+            for u in transcript["utterances"]
+        ]
+        source["transcriptDirty"] = bool(
+            transcript["sequence"] and quick.get("stage") in ("자막 변경 · 갱신 필요", "승인 대기")
+        )
+        sync_view = self.raw.sync_check_view(root, sid)  # 자막 시각 확인 — 표시만(D55)
+        if sync_view is not None:
+            source["syncCheck"] = sync_view
+        source["relisten"] = self._relisten_view(root, sid, transcript)
+
+    def _relisten_view(
+        self, root: Path, source_id: str, transcript: Mapping[str, Any]
+    ) -> dict[str, object]:
+        """「다시 듣기」 칸의 상태(D59 19b) — 기다리는 중 · 사람이 고친 자막 · 다시 들은 전사."""
+        epoch = self.raw.asr_epoch_state(root, source_id)
+        return {
+            "pending": bool(epoch.pending),
+            "edited": self.raw.transcript_human_edited(transcript),
+            "heard": bool(epoch.epoch and not epoch.pending),
+            "explanation": RELISTEN_EXPLANATION,
+        }
+
+    def _visual_relisten(self, root: Path, payload: Mapping[str, object], echo: str) -> dict:
+        """「다시 듣기」 — 그 영상의 차례를 올리고 승인 범위를 「전사만」으로 둔다(무료, D59 19b).
+
+        유료 전사는 여기서 일어나지 않는다 — 견적을 확인하고 승인해야 시작한다(D44). 분석이
+        도는 영상은 받지 않는다. 사람이 고친 자막은 덮지 않는다(서비스가 거절한다).
+        """
+        source_id = self._serve_str(payload, "sourceId")
+        task = self._task_for(root, (source_id,))
+        if task is not None and self._task_running(root, task):
+            raise gr.Error(RELISTEN_BUSY_TEXT)
+        before = self.raw.asr_epoch_state(root, source_id)
+        self.raw.relisten_source(root, source_id)
+        self._set_approval_mode(root, raw_service.SELECTION_MODE_TRANSCRIBE)
+        self._library_cached_ids.get(root, set()).discard(source_id)
+        if task is not None:
+            self._quick_update(task["token"], stage=raw_service.RELISTEN_STAGE, quote=None)
+        self._refresh_library_quote(root)
+        _shell, workbench = self.visual_workbench_render(root, source_id=source_id or None)
+        return {
+            "ok": True,
+            "echoEpoch": echo,
+            "html": workbench,
+            "videoSrc": None,
+            "message": RELISTEN_PENDING_TEXT if before.pending else RELISTEN_DONE_TEXT,
+        }
+
+    def _refresh_library_quote(self, root: Path) -> None:
+        """결속(자막·다시 듣기 차례)이 바뀐 뒤 — 잰 견적이 있으면 다시 묶고(빠름), 없으면 잰다."""
+        quote = self._library_quotes.get(root)
+        if quote is not None and tuple(quote.asset_ids) == self._library_ids(root):
+            self._library_quotes[root] = self.raw.selection_rebound_quote(
+                root, quote, tuple(quote.asset_ids), self._approval_mode(root)
+            )
+            return
+        self._prepare_library_quote(root)
+
     def _visual_sync_recheck(self, root: Path, payload: Mapping[str, object], echo: str) -> dict:
         """「다시 재기」 — 원본 하나의 자막 시각을 무료로 다시 잰다. 자막·컷은 그대로다(D55)."""
         source_id = self._serve_str(payload, "sourceId")
@@ -4915,6 +5208,7 @@ class RawWorkspaceUi:
             vl_source_caption,
             vl_relink_original,
             self._vl_sync_recheck_function(),
+            self._vl_relisten_function(),
         ]
 
     def _vl_sync_recheck_function(self) -> Callable[[dict[str, object]], dict[str, object]]:
@@ -4924,6 +5218,14 @@ class RawWorkspaceUi:
             return self.visual_workbench_action(payload, "sync-recheck")
 
         return vl_sync_recheck
+
+    def _vl_relisten_function(self) -> Callable[[dict[str, object]], dict[str, object]]:
+        """「다시 듣기」(D59 19b) — 다른 작업대 함수와 같은 토큰 문을 지난다. 유료 호출 0회."""
+
+        def vl_relisten(payload: dict[str, object]) -> dict[str, object]:
+            return self.visual_workbench_action(payload, "relisten")
+
+        return vl_relisten
 
     # ── 화면 1 — SD/폴더 가져오기(조사 → 순서 확인 → 복사·검증) ──
 
@@ -5895,7 +6197,7 @@ class RawWorkspaceUi:
 
         def requote(context: Any) -> None:
             context.check_cancel()
-            quote = self.raw.selection_quote(root, ids)
+            quote = self._scoped(root, self.raw.selection_quote(root, ids))
             if self._quote_current(root, quote, "선택 영상"):
                 self._quick_update(token, quote=quote, error=None, quote_unseen=quote.digest)
 

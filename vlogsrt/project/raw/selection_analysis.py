@@ -19,6 +19,16 @@ from vlogsrt.project.raw.models import (
     RawWorkspaceError,
 )
 
+MODE_FULL = "full"
+"""전사 + 영상 분석 — 승인 하나로 두 단계가 이어진다(지금까지의 흐름 그대로)."""
+MODE_TRANSCRIBE = "transcribe_only"
+"""「전사만」(D59 19b) — 1단계(전사·원본 자막·장면·프레임)만 돌고 영상 분석 앞에서 멈춘다."""
+MODES = (MODE_FULL, MODE_TRANSCRIBE)
+TRANSCRIBED_STAGE = "전사 완료 · 분석 대기"
+"""「전사만」이 끝난 영상의 단계 — 영상 분석(추천 판정)은 아직 승인하지 않았다."""
+RELISTEN_STAGE = "다시 듣기 대기 · 승인 필요"
+"""「다시 듣기」를 고른 영상의 단계 — 견적을 확인하고 승인해야 다시 듣는다(유료)."""
+
 
 @dataclass(frozen=True)
 class SelectionQuote:
@@ -27,30 +37,39 @@ class SelectionQuote:
     digest: str
     workflow: RawWorkflowConfig
     approved: bool = False
+    mode: str = MODE_FULL
+    """승인 범위 — digest에 접혀 있어 「전사만」 승인을 전체 실행으로(또는 거꾸로) 쓸 수 없다."""
 
 
-def quote(service: Any, root: Path, asset_ids: tuple[str, ...]) -> SelectionQuote:
+def quote(
+    service: Any, root: Path, asset_ids: tuple[str, ...], mode: str = MODE_FULL
+) -> SelectionQuote:
     return _assemble_quote(
-        service, root, asset_ids, tuple(service.analysis_estimate(root, asset_ids))
+        service, root, asset_ids, tuple(service.analysis_estimate(root, asset_ids)), mode
     )
 
 
 def rebound_quote(
-    service: Any, root: Path, measured: SelectionQuote, asset_ids: tuple[str, ...]
+    service: Any,
+    root: Path,
+    measured: SelectionQuote,
+    asset_ids: tuple[str, ...],
+    mode: str | None = None,
 ) -> SelectionQuote:
     """이미 잰 견적의 측정값으로 영상 일부(또는 전부)의 견적을 다시 묶는다 — ffprobe 없음.
 
     측정값 한 줄은 영상 하나의 것이라 다른 영상에 의존하지 않는다. 결속 지문(미디어
-    참조·원본 자막)과 설정은 지금 값을 다시 읽으므로, 전부를 다시 묶어 같은 digest가
-    나오면 측정 뒤로 결속이 바뀌지 않았다는 뜻이다. 측정값 자체의 변화는 실행 문
-    (`execute`)이 유료 호출 전에 영상마다 다시 재어 잡는다.
+    참조·원본 자막·다시 듣기 차례)과 설정은 지금 값을 다시 읽으므로, 전부를 다시 묶어 같은
+    digest가 나오면 측정 뒤로 결속이 바뀌지 않았다는 뜻이다. 측정값 자체의 변화는 실행 문
+    (`execute`)이 유료 호출 전에 영상마다 다시 재어 잡는다. 범위(`mode`)를 주지 않으면 잰
+    견적의 범위 그대로다 — 범위만 바꿔 묶는 데도 쓴다(측정은 범위와 무관하다).
     """
     wanted = set(asset_ids)
     estimates = tuple(e for e in measured.estimates if e.asset_id in wanted)
     missing = wanted - {e.asset_id for e in estimates}
     if missing:
         raise RawWorkspaceError(f"측정한 견적에 없는 영상입니다: {sorted(missing)}")
-    return _assemble_quote(service, root, asset_ids, estimates)
+    return _assemble_quote(service, root, asset_ids, estimates, mode or measured.mode)
 
 
 def _assemble_quote(
@@ -58,23 +77,37 @@ def _assemble_quote(
     root: Path,
     asset_ids: tuple[str, ...],
     estimates: tuple[AnalysisEstimate, ...],
+    mode: str = MODE_FULL,
 ) -> SelectionQuote:
+    """견적 묶음 — 측정값·원본별 결속·범위를 digest 하나로 접는다.
+
+    전체 범위·차례 0의 digest는 19b 이전 바이트 그대로다: 다시 듣기 차례는 0이 아닐 때만
+    결속 줄의 넷째 칸이 되고, 범위는 「전사만」일 때만 끝에 붙는다(D59 19b).
+    """
     import hashlib
 
-    from vlogsrt.project.raw import media_refs, source_transcript
+    if mode not in MODES:
+        raise RawWorkspaceError(f"알 수 없는 승인 범위입니다: {mode!r}")
+    payload = browser_runtime.asr_estimate_digest(estimates) + json.dumps(
+        [_quote_binding(service._workspace(root), a) for a in asset_ids]
+    )
+    if mode != MODE_FULL:
+        payload += "\0mode=" + mode
+    digest = hashlib.sha256(payload.encode()).hexdigest()
+    return SelectionQuote(asset_ids, estimates, digest, service.settings(root), mode=mode)
 
-    bindings = [
-        (
-            a,
-            media_refs.fingerprint(service._workspace(root), a),
-            source_transcript.fingerprint(service._workspace(root), a),
-        )
-        for a in asset_ids
-    ]
-    digest = hashlib.sha256(
-        (browser_runtime.asr_estimate_digest(estimates) + json.dumps(bindings)).encode()
-    ).hexdigest()
-    return SelectionQuote(asset_ids, estimates, digest, service.settings(root))
+
+def _quote_binding(workspace: Any, asset_id: str) -> tuple[str, ...]:
+    """원본 하나의 견적 결속 — 미디어 참조·원본 자막, 그리고 0이 아닌 다시 듣기 차례."""
+    from vlogsrt.project.raw import asr_epoch, media_refs, source_transcript
+
+    row = (
+        asset_id,
+        media_refs.fingerprint(workspace, asset_id),
+        source_transcript.fingerprint(workspace, asset_id),
+    )
+    tag = asr_epoch.binding_tag(asr_epoch.current(workspace, asset_id))
+    return row if tag is None else (*row, tag)
 
 
 def _order_free_fingerprints(service: Any, root: Path, assets: dict[str, Any]) -> set[str]:
@@ -167,14 +200,38 @@ def execute(
     context: Any,
     report: Callable[[str, str | None], None],
 ) -> str:
+    """승인한 견적대로 실행한다 — 전체면 두 단계, 「전사만」이면 1단계만(D59 19b).
+
+    견적은 승인한 범위로 다시 재어 digest를 맞춘다 — 범위가 digest에 접혀 있으므로 범위만 바꾼
+    승인은 여기서 0송신으로 닫힌다. 「전사만」은 의미 분석 클라이언트를 받지 않는다(Claude 키가
+    없어도 된다)."""
     if not approved.approved:
         raise RawWorkspaceError("선택 영상의 전사·Luna 분석 승인이 필요합니다")
-    current = quote(service, root, approved.asset_ids)
+    current = quote(service, root, approved.asset_ids, approved.mode)
     if current.digest != approved.digest or current.workflow != approved.workflow:
         raise RawWorkspaceError("선택 영상이나 설정이 바뀌었습니다. 현재 범위를 다시 확인하세요")
+    transcribe_only = approved.mode == MODE_TRANSCRIBE
     # 의미 분석 클라이언트를 먼저 받는다 — 키가 없으면 전사도 사기 전에 닫힌다(D54).
-    client = transport.semantic_client(approved.workflow.models.luna_model)
+    client = (
+        None if transcribe_only else transport.semantic_client(approved.workflow.models.luna_model)
+    )
     context.check_cancel()
+    first, revision_id = _run_transcription(service, root, approved, transport, context, report)
+    if transcribe_only:
+        return revision_id
+    _run_semantic(service, root, approved, transport, context, report, first, revision_id, client)
+    return revision_id
+
+
+def _run_transcription(
+    service: Any,
+    root: Path,
+    approved: SelectionQuote,
+    transport: Any,
+    context: Any,
+    report: Callable[[str, str | None], None],
+) -> tuple[Any, str]:
+    """1단계 — 전사 승인을 만들고 전사·원본 자막·장면·프레임을 기다린다(의미 분석 0회)."""
     browser_runtime.prepare_approved_browser_network()
     service.update_settings(root, replace(approved.workflow, network_mode="online"))
     asr = browser_runtime.mint_asr_approvals(service, root, approved.asset_ids, on=transport.on)
@@ -193,22 +250,36 @@ def execute(
     report("전사·장면 준비", revision.revision_id)
     service.wait_child_job(root, first, context)
     context.check_cancel()
-    estimates = service.analysis_semantic_estimate(root, revision.revision_id)
+    return first, revision.revision_id
+
+
+def _run_semantic(
+    service: Any,
+    root: Path,
+    approved: SelectionQuote,
+    transport: Any,
+    context: Any,
+    report: Callable[[str, str | None], None],
+    first: Any,
+    revision_id: str,
+    client: object,
+) -> None:
+    """2단계 — 실측이 승인 안이면 의미 승인을 만들고 영상 분석을 기다린다."""
+    estimates = service.analysis_semantic_estimate(root, revision_id)
     _require_within_approval(approved.estimates, estimates)
     luna = browser_runtime.mint_luna_approvals(
         service,
         root,
-        revision.revision_id,
+        revision_id,
         tuple(e.asset_id for e in estimates if e.asset_id in approved.asset_ids),
         on=transport.on,
     )
-    report("Luna 추천 구간 분석", revision.revision_id)
+    report("Luna 추천 구간 분석", revision_id)
     second = service.resume_analysis_semantic(
         root, first.job_id, luna_approvals=luna, client=client, on=transport.on
     )
     service.wait_child_job(root, second, context)
     context.check_cancel()
-    return revision.revision_id
 
 
 def _require_within_approval(
@@ -296,6 +367,8 @@ def _restored(service: Any, root: Path, payload: str) -> dict[str, Any]:
         "분석 확인 필요",
         "취소됨",
         "자막 변경 · 갱신 필요",
+        TRANSCRIBED_STAGE,
+        RELISTEN_STAGE,
     ) and (job is None or job.status not in ("queued", "running")):
         state["stage"] = (
             "취소됨" if job and job.status == "cancelled" else "중단 · 재시도 승인 필요"
@@ -327,6 +400,8 @@ def completion(service: Any, root: Path, revision_id: str) -> str:
     )
     if revision.status == "complete":
         return "추천 구간 준비 완료"
+    if revision.status == "awaiting_semantic":
+        return TRANSCRIBED_STAGE  # 「전사만」이 끝났다 — 영상 분석은 승인 전이다(D59 19b)
     return "분석 확인 필요" if revision.status == "failed" else "부분 완료 · 확인 필요"
 
 

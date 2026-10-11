@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from vlogsrt import log, preprocess
+from vlogsrt.project.raw import asr_epoch as asr_epoch_store
 from vlogsrt.project.raw import media_refs, request_usage, source_transcript
 from vlogsrt.project.raw import understanding as stage1
 from vlogsrt.project.raw import understanding_luna as luna
@@ -456,12 +457,14 @@ def source_input_fingerprint(
     workflow: RawWorkflowConfig,
     media_fingerprint: str = media_refs.ORIGINAL_ONLY_FINGERPRINT,
     transcript_fingerprint: str = "asr-original/v1",
+    asr_epoch: int = 0,
 ) -> str:
     """원본 하나의 분석 입력 지문 — 결과에 영향을 주는 입력만 묶는다.
 
     출처 내용 해시·비디오 격자(원점·프레임 길이·프레임 수)·오디오 신원(스트림·
     분량·원점)·분석 설정(창·문맥·표본 수·긴변·프롬프트 리비전·청크 상한)·모델.
     하나라도 바뀌면 **그 원본의 캐시만** 무효가 된다. 표시 전용 값은 오지 않는다.
+    다시 듣기 차례는 `_input_digest`(D59 19b).
     """
     parts = [
         INPUT_FINGERPRINT_SCHEMA,
@@ -473,15 +476,7 @@ def source_input_fingerprint(
         _fraction_text(video.presentation_origin),
         _fraction_text(video.frame_duration),
         str(video.frame_count),
-        "-"
-        if audio is None
-        else "|".join(
-            [
-                str(audio.audio_stream_index),
-                f"{audio.sample_rate}/{audio.channels}/{audio.sample_count}",
-                _fraction_text(audio.pcm_sample0_file_time),
-            ]
-        ),
+        _audio_identity_text(audio),
         "|".join(
             [
                 str(settings.window_seconds),
@@ -496,7 +491,55 @@ def source_input_fingerprint(
         workflow.models.timing_model,
         workflow.models.luna_model,
     ]
-    return hashlib.sha256("\0".join(parts).encode("utf-8")).hexdigest()
+    return _input_digest(parts, asr_epoch)
+
+
+def _current_input(
+    workspace: RawWorkspace,
+    asset: SourceAsset,
+    grid: VideoGrid,
+    audio: SelectedAudio | None,
+    settings: RawUnderstandingSettings,
+    workflow: RawWorkflowConfig,
+) -> tuple[str, int]:
+    """원본의 지금 입력 지문과 다시 듣기 차례 — 차례는 한 번 읽어 지문과 청크 열쇠가 함께 본다.
+
+    미디어 참조·원본 자막 지문도 지금 값이다(D59 19b — 1단계와 2단계가 같은 조립을 쓴다)."""
+    epoch = asr_epoch_store.current(workspace, asset.asset_id)
+    fingerprint = source_input_fingerprint(
+        source_sha256=asset.content_sha256 or "",
+        video=grid,
+        audio=audio,
+        settings=settings,
+        workflow=workflow,
+        media_fingerprint=media_refs.fingerprint(workspace, asset.asset_id),
+        transcript_fingerprint=source_transcript.fingerprint(workspace, asset.asset_id),
+        asr_epoch=epoch,
+    )
+    return fingerprint, epoch
+
+
+def _audio_identity_text(audio: SelectedAudio | None) -> str:
+    """입력 지문의 오디오 칸 — 스트림·분량·원점(무성 원본은 `-`)."""
+    if audio is None:
+        return "-"
+    return "|".join(
+        [
+            str(audio.audio_stream_index),
+            f"{audio.sample_rate}/{audio.channels}/{audio.sample_count}",
+            _fraction_text(audio.pcm_sample0_file_time),
+        ]
+    )
+
+
+def _input_digest(parts: list[str], asr_epoch: int) -> str:
+    """입력 지문의 해시 — 다시 듣기 차례(D59 19b)는 0이 아닐 때만 맨 끝에 붙는다.
+
+    0이면 지문은 19b 이전 바이트 그대로이고, 차례가 오른 원본은 옛 분석 결과를 캐시로 다시
+    쓰지 않는다."""
+    tag = asr_epoch_store.binding_tag(asr_epoch)
+    body = "\0".join(parts if tag is None else [*parts, tag])
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()
 
 
 def _fraction_text(value: Fraction) -> str:
@@ -975,15 +1018,7 @@ def _analyze_source(
     if probe.audio:
         audio = stage1.select_audio(path, source_dir, source_id=asset.asset_id, audio_ordinal=0)
     timeline = common_timeline(source_id=asset.asset_id, video=grid, audio=audio)
-    input_fp = source_input_fingerprint(
-        source_sha256=asset.content_sha256 or "",
-        video=grid,
-        audio=audio,
-        settings=settings,
-        workflow=workflow,
-        media_fingerprint=media_refs.fingerprint(workspace, asset.asset_id),
-        transcript_fingerprint=source_transcript.fingerprint(workspace, asset.asset_id),
-    )
+    input_fp, epoch = _current_input(workspace, asset, grid, audio, settings, workflow)
     cached = _reusable_cache(store, workspace, input_fp, asset.content_sha256 or "")
     if cached is not None:
         log.out(f"의미 분석 캐시 재사용: {asset.source_name} ({input_fp[:12]}…)")
@@ -1021,6 +1056,7 @@ def _analyze_source(
             audio=audio,
             timeline=timeline,
             input_fp=input_fp,
+            asr_epoch=epoch,
         )
     if providers.phase == "semantic":
         raise AnalysisError(
@@ -1042,18 +1078,9 @@ def _analyze_source(
         audio=audio,
         grid=grid,
         source_dir=source_dir,
+        asr_epoch=epoch,
     )
-    common_spoken = utterances_in_common_clock(timeline, utterances)
-    source_transcript.seed(
-        workspace,
-        asset.asset_id,
-        stage1.utterances_json(common_spoken),
-        timeline.extent,
-        asset.content_sha256 or "",
-    )
-    edited = source_transcript.spoken(workspace, asset.asset_id, common_spoken)
-    offset = timeline.audio_start or Fraction(0)
-    utterances = tuple(replace(u, start=u.start - offset, end=u.end - offset) for u in edited)
+    utterances = _seed_transcript(workspace, asset, timeline, utterances)
     plan = _scene_plan(workspace, asset, plan_common_windows(timeline, utterances, settings))
     spoken = utterances_in_common_clock(timeline, utterances)
     context.check_cancel()
@@ -1088,6 +1115,26 @@ def _analyze_source(
     )
 
 
+def _seed_transcript(
+    workspace: RawWorkspace,
+    asset: SourceAsset,
+    timeline: CommonFileTimeline,
+    utterances: tuple[UtteranceEvidence, ...],
+) -> tuple[UtteranceEvidence, ...]:
+    """전사를 원본 자막으로 심고(고친 자막은 덮지 않는다) 지금 원본 자막을 PCM 시계로 돌려준다."""
+    common_spoken = utterances_in_common_clock(timeline, utterances)
+    source_transcript.seed(
+        workspace,
+        asset.asset_id,
+        stage1.utterances_json(common_spoken),
+        timeline.extent,
+        asset.content_sha256 or "",
+    )
+    edited = source_transcript.spoken(workspace, asset.asset_id, common_spoken)
+    offset = timeline.audio_start or Fraction(0)
+    return tuple(replace(u, start=u.start - offset, end=u.end - offset) for u in edited)
+
+
 def _transcribe_source(
     context: JobContext,
     workspace: RawWorkspace,
@@ -1100,11 +1147,11 @@ def _transcribe_source(
     audio: SelectedAudio | None,
     grid: VideoGrid,
     source_dir: Path,
+    asr_epoch: int = 0,
 ) -> tuple[AsrEvidence | None, tuple[UtteranceEvidence, ...]]:
     """1단계 전사 — 끝나자마자 결과를 `asr_outcome.json`으로 남긴다(실패 청크 포함, D59).
 
-    무성 원본은 '오디오 없음'만 남긴다. 기록은 자막을 심기 전에 쓴다 — 뒤 단계가 죽어도 심긴
-    자막의 빈 구간이 전사 실패인지 알 수 있어야 한다(규칙 9: 조용한 손실 없음)."""
+    무성 원본은 '오디오 없음'만 남긴다. 기록은 자막을 심기 전에 쓴다(`_record_transcription`)."""
     asr_evidence: AsrEvidence | None = None
     utterances: tuple[UtteranceEvidence, ...] = ()
     if audio is not None:
@@ -1121,13 +1168,29 @@ def _transcribe_source(
             request_id=f"{revision.revision_id}:{asset.asset_id}",
             workdir=source_dir,
             cache_dir=workspace.root / "cache" / "source-asr" / asset.asset_id,
+            asr_epoch=asr_epoch,
         )
         utterances = stage1.utterance_evidence(audio, asr_evidence)
-    _write_json_atomic(
-        source_dir / ASR_OUTCOME_DOCUMENT_NAME,
-        _asr_outcome_document(revision, asset, grid, audio, asr_evidence),
-    )
+    outcome = _asr_outcome_document(revision, asset, grid, audio, asr_evidence)
+    _record_transcription(workspace, asset, source_dir, outcome, asr_evidence, asr_epoch)
     return asr_evidence, utterances
+
+
+def _record_transcription(
+    workspace: RawWorkspace,
+    asset: SourceAsset,
+    source_dir: Path,
+    outcome: dict[str, object],
+    asr_evidence: AsrEvidence | None,
+    asr_epoch: int,
+) -> None:
+    """전사 직후 기록 — 뒤 단계가 죽어도 심긴 자막의 빈 구간이 전사 실패인지 알 수 있다(규칙 9).
+
+    다시 듣기 차례(D59 19b)를 실패 청크 없이 끝까지 들었으면 그 차례를 들은 것으로 적는다 —
+    실패가 남았으면 다음 실행이 같은 차례로 실패 청크만 다시 묻는다(성공 청크는 캐시)."""
+    _write_json_atomic(source_dir / ASR_OUTCOME_DOCUMENT_NAME, outcome)
+    if asr_evidence is not None and all(c.succeeded for c in asr_evidence.chunks):
+        asr_epoch_store.mark_heard(workspace, asset.asset_id, asr_epoch)
 
 
 def _asr_outcome_document(
@@ -1175,6 +1238,7 @@ def _asr_phase_source(
     audio: SelectedAudio | None,
     timeline: CommonFileTimeline,
     input_fp: str,
+    asr_epoch: int = 0,
 ) -> AnalysisSourceResult:
     """1단계(내부 ASR) — 전사·창·프레임을 남기고 **의미 승인 앞에서 멈춘다**.
 
@@ -1213,18 +1277,9 @@ def _asr_phase_source(
         audio=audio,
         grid=grid,
         source_dir=source_dir,
+        asr_epoch=asr_epoch,
     )
-    common_spoken = utterances_in_common_clock(timeline, utterances)
-    source_transcript.seed(
-        workspace,
-        asset.asset_id,
-        stage1.utterances_json(common_spoken),
-        timeline.extent,
-        asset.content_sha256 or "",
-    )
-    edited = source_transcript.spoken(workspace, asset.asset_id, common_spoken)
-    offset = timeline.audio_start or Fraction(0)
-    utterances = tuple(replace(u, start=u.start - offset, end=u.end - offset) for u in edited)
+    utterances = _seed_transcript(workspace, asset, timeline, utterances)
     plan = _scene_plan(workspace, asset, plan_common_windows(timeline, utterances, settings))
     context.check_cancel()
     frames = stage1.sample_frames(
@@ -1333,15 +1388,7 @@ def _semantic_phase_source(
     audio = _audio_from_artifact(artifact, source_dir, path, asset)
     utterances = _utterances_from_artifact(artifact)
     timeline = common_timeline(source_id=asset.asset_id, video=grid, audio=audio)
-    input_fp = source_input_fingerprint(
-        source_sha256=asset.content_sha256 or "",
-        video=grid,
-        audio=audio,
-        settings=settings,
-        workflow=workflow,
-        media_fingerprint=media_refs.fingerprint(workspace, asset.asset_id),
-        transcript_fingerprint=source_transcript.fingerprint(workspace, asset.asset_id),
-    )
+    input_fp, _epoch = _current_input(workspace, asset, grid, audio, settings, workflow)
     if input_fp != str(artifact.get("input_fingerprint")):
         raise AnalysisError(
             f"설정·원본이 1단계 기록과 다르다: {asset.source_name} — 새 1단계 승인을 받아라"
@@ -1365,17 +1412,7 @@ def _semantic_phase_source(
             segment_count=cached.segment_count,
             cached_from=cached.cached_from or cached.revision_id,
         )
-    common_spoken = utterances_in_common_clock(timeline, utterances)
-    source_transcript.seed(
-        workspace,
-        asset.asset_id,
-        stage1.utterances_json(common_spoken),
-        timeline.extent,
-        asset.content_sha256 or "",
-    )
-    edited = source_transcript.spoken(workspace, asset.asset_id, common_spoken)
-    offset = timeline.audio_start or Fraction(0)
-    utterances = tuple(replace(u, start=u.start - offset, end=u.end - offset) for u in edited)
+    utterances = _seed_transcript(workspace, asset, timeline, utterances)
     frame_source = _stage1_frame_source(workspace, asset, artifact)
     plan = _scene_plan(
         workspace, asset, plan_common_windows(timeline, utterances, settings), frame_source

@@ -251,6 +251,7 @@ def transcribe_selected_audio(
     request_id: str,
     workdir: Path,
     cache_dir: Path | None = None,
+    asr_epoch: int = 0,
 ) -> AsrEvidence:
     """계획된 청크를 순서대로 내부 전사한다 — 주입된 시간 제공자를 통해서만.
 
@@ -258,8 +259,7 @@ def transcribe_selected_audio(
     `audio_chunk_binding`이 샘플 범위·해시·요청 신원을 묶는다. 제공자 안에서
     공유 수명주기 문(`capabilities.preflight_online_transcription`)이 먼저
     돈다 — 종료일·미확인 조합은 청크 실패로 기록되지 조용한 빈 성공이 되지
-    않는다. 한 청크의 실패는 다음 청크를 멈추지 않는다(§7.3: 실패 구간을
-    별도로 기록한다).
+    않는다. 한 청크의 실패는 다음 청크를 멈추지 않는다(§7.3). 다시 듣기 차례는 `asr_chunk_key`.
     """
     _require_settings(understanding)
     outcomes: list[AsrChunkOutcome] = []
@@ -276,6 +276,7 @@ def transcribe_selected_audio(
                 request_id=request_id,
                 workdir=workdir,
                 cache_dir=cache_dir,
+                asr_epoch=asr_epoch,
             )
         )
     return AsrEvidence(request_id=request_id, sample_rate=audio.sample_rate, chunks=tuple(outcomes))
@@ -292,6 +293,7 @@ def _transcribe_span(
     request_id: str,
     workdir: Path,
     cache_dir: Path | None = None,
+    asr_epoch: int = 0,
 ) -> AsrChunkOutcome:
     """청크 하나를 전사한다 — 실패는 이 청크의 기록으로 담아 올라간다."""
     wav_path = workdir / f"asr-chunk-{position:04d}.wav"
@@ -304,20 +306,9 @@ def _transcribe_span(
     )
     chunk_request_id = f"{request_id}:chunk-{position:04d}"
     cache_path = workdir / f"asr-chunk-{position:04d}.json"
-    fingerprint = hashlib.sha256(
-        json.dumps(
-            {
-                "wav": _sha256_file(wav_path),
-                "provider_origin": type(provider).__name__,
-                "model": settings.models.timing_model,
-                "settings": asdict(transcription_identity_view(settings)),  # D54 — 분석 모델 고정
-                "start": span.start,
-                "end": span.end,
-            },
-            sort_keys=True,
-            default=str,
-        ).encode()
-    ).hexdigest()
+    fingerprint = asr_chunk_key(
+        _sha256_file(wav_path), type(provider).__name__, settings, span, asr_epoch
+    )
     if cache_dir is not None:
         cache_dir.mkdir(parents=True, exist_ok=True)
         cache_path = cache_dir / (fingerprint + ".json")
@@ -375,6 +366,33 @@ def _transcribe_span(
     )
     temp.replace(cache_path)
     return outcome
+
+
+def asr_chunk_key(
+    wav_sha256: str,
+    provider_origin: str,
+    settings: RawWorkflowConfig,
+    span: SampleSpan,
+    asr_epoch: int = 0,
+) -> str:
+    """내부 전사 청크 캐시 열쇠 — WAV·제공자·모델·전사 보기 설정·범위, 그리고 다시 듣기 차례.
+
+    차례는 **0이 아닐 때만** 실린다(D59 19b) — 0이면 열쇠는 W-14 이후의 바이트 그대로라 이미 산
+    전사를 그대로 쓴다. 차례가 오르면 그 원본의 청크만 열쇠가 바뀌어 새로 산다.
+    """
+    if isinstance(asr_epoch, bool) or not isinstance(asr_epoch, int) or asr_epoch < 0:
+        raise AnalysisPlanningError(f"다시 듣기 차례는 0 이상의 정수다: {asr_epoch!r}")
+    identity: dict[str, object] = {
+        "wav": wav_sha256,
+        "provider_origin": provider_origin,
+        "model": settings.models.timing_model,
+        "settings": asdict(transcription_identity_view(settings)),  # D54 — 분석 모델 고정
+        "start": span.start,
+        "end": span.end,
+    }
+    if asr_epoch:
+        identity["asr_epoch"] = asr_epoch
+    return hashlib.sha256(json.dumps(identity, sort_keys=True, default=str).encode()).hexdigest()
 
 
 def _cached_outcome(outcome: AsrChunkOutcome) -> dict[str, object]:

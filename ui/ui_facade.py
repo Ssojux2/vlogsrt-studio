@@ -1323,6 +1323,13 @@ _SHELL_CSS = """
 #vl-quote-note p { margin: 0 0 4px; }
 #vl-quote-note p:last-child { margin-bottom: 0; }
 #review-tab:has(#library-approve:disabled) #library-analysis-scope { display: none; }
+/* 승인 범위(D59 19b) — 견적 문구 바로 위의 두 갈래(전사 + 영상 분석 · 전사만). 승인할 견적이
+   없으면 견적 문구와 함께 숨는다(그때 패널이 그 줄까지 올라온다). */
+#vl-approval-mode {
+  min-width: 0; padding: 6px 10px; border-radius: 6px;
+  border: 1px solid var(--vl-line); background: var(--vl-surface-raised); }
+#vl-approval-mode .wrap { gap: 4px 12px; }
+#review-tab:has(#library-approve:disabled) #vl-approval-mode { display: none; }
 @media (min-width: 1051px) {
   #review-tab:has(#library-approve:disabled) #visual-stage:not(:has(#vl-quote-note)) .vl-panel {
     grid-row: 1 / 3; }
@@ -2389,6 +2396,32 @@ VISUAL_BOOTSTRAP_JS = (
           "</small></details>");
         return out.join("");
       }
+      // 다시 듣기(D59 19b) — 누르면 차례만 오르고(무료) 승인 범위가 「전사만」이 된다. 유료 전사는
+      // 견적을 확인하고 승인해야 시작한다. 사람이 고친 자막은 덮지 않는다(단추가 없다).
+      function relistenPanel(info) {
+        var re = info && info.relisten;
+        if (!re) { return ""; }
+        var red = info.syncCheck && info.syncCheck.level === "red";
+        var out = ['<details class="vl-details" data-vl-relisten="1"' +
+          (red || re.pending ? " open" : "") + "><summary>다시 듣기" +
+          (re.pending ? ' <span class="vl-badge">승인 대기</span>' : "") + "</summary>"];
+        out.push('<p class="vl-kv">' + esc(re.explanation) + "</p>");
+        if (re.edited) {
+          out.push('<p class="vl-kv">직접 고친 자막이 있어 다시 듣지 않습니다 — 고친 자막을' +
+            " 덮어쓰지 않습니다.</p></details>");
+          return out.join("");
+        }
+        if (re.pending) {
+          out.push('<p class="vl-kv">다시 듣기를 기다리고 있습니다 — 견적을 확인하고 승인하면' +
+            " 시작합니다.</p></details>");
+          return out.join("");
+        }
+        if (re.heard) { out.push('<p class="vl-kv">다시 들은 전사입니다.</p>'); }
+        out.push('<button type="button" class="vl-btn" data-vl-act="relisten">다시 듣기</button>' +
+          "<small>누르면 승인 범위가 「전사만」으로 바뀝니다. 견적을 확인하고 승인해야" +
+          " 시작합니다.</small></details>");
+        return out.join("");
+      }
       // 3단 등급(D51) — 글자 표지는 색과 별개로 등급을 말한다(색약·흑백에서도 읽힌다).
       function tierWord(tier, hold) {
         if (tier === "yellow" && hold) { return "판정 보류"; }
@@ -2992,6 +3025,7 @@ VISUAL_BOOTSTRAP_JS = (
           }
         }
         out.push(syncPanel(info));
+        out.push(relistenPanel(info));
         ((info && info.crossSourceCandidates) || []).forEach(function(candidate) {
           out.push('<p class="vl-kv">다른 원본의 중복 후보 · ' +
             esc(candidate.other_source + ': ' + candidate.text) +
@@ -3558,6 +3592,10 @@ VISUAL_BOOTSTRAP_JS = (
         }
         if (act === 'sync-recheck') {
           call('vl_sync_recheck', {sourceId:curSourceId()}, '자막 시각을 다시 재는 중(무료)…');
+          return;
+        }
+        if (act === 'relisten') {
+          call('vl_relisten', {sourceId:curSourceId()}, '다시 듣기를 준비하는 중(무료)…');
           return;
         }
         if (act === 'source-pick') {

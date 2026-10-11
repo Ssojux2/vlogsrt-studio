@@ -27,6 +27,7 @@ from vlogsrt.env import ANALYSIS_CLAUDE_KEY_ENV
 from vlogsrt.project.raw import (
     analysis_workflow,
     segmentation,
+    selection_analysis,
     tiering,
     visual_review,
 )
@@ -317,6 +318,11 @@ __all__ = [
     "TIER_TAG_PREFIX",
     "UPKEEP_JOB_KIND",
     "SYNC_CHECK_JOB_KIND",
+    "SELECTION_MODE_FULL",
+    "SELECTION_MODE_TRANSCRIBE",
+    "SELECTION_MODES",
+    "TRANSCRIBED_STAGE",
+    "RELISTEN_STAGE",
     "AUTO_EXCLUDED_UNREVIEWED_TAG",
     "VISUAL_PAGE_SIZE",
     "VISUAL_PREPARE_JOB_KIND",
@@ -396,6 +402,37 @@ OLD_PROMPT_REFUSAL = (
 )
 """이전 안내문 리비전으로 시작한 분석을 이으려 할 때의 거절 문구(D58 18b) — 내부 리비전 이름은
 싣지 않는다(D57)."""
+
+SELECTION_MODE_FULL = selection_analysis.MODE_FULL
+SELECTION_MODE_TRANSCRIBE = selection_analysis.MODE_TRANSCRIBE
+SELECTION_MODES = selection_analysis.MODES
+TRANSCRIBED_STAGE = selection_analysis.TRANSCRIBED_STAGE
+RELISTEN_STAGE = selection_analysis.RELISTEN_STAGE
+APPROVAL_MODE_META_KEY = "selection_approval_mode"
+"""작업대의 승인 범위(전체 · 「전사만」, D59 19b) — 사람이 고른 값이 앱을 다시 열어도 남는다."""
+RELISTEN_EDITED_REFUSAL = (
+    "이 영상의 원본 자막에는 직접 고친 내용이 있어 다시 듣지 않습니다 — 고친 자막을 덮어쓰지"
+    " 않습니다. 유료 호출은 시작하지 않았습니다."
+)
+RELISTEN_UNTRANSCRIBED_REFUSAL = (
+    "이 영상은 아직 전사하지 않았습니다 — 분석을 승인하면 처음부터 듣습니다."
+)
+RELISTEN_SILENT_REFUSAL = (
+    "이 영상에는 소리가 없어 다시 들을 것이 없습니다 — 끝난 영상 분석은 그대로 둡니다."
+)
+RELISTEN_MEDIA_MISSING_REFUSAL = (
+    "원본 파일을 읽지 못했습니다 — 원본 연결을 확인하세요. 아무것도 바꾸지 않았습니다."
+)
+
+
+def _source_has_audio(path: Path) -> bool:
+    """다시 듣기 전 소리 확인(ffprobe 한 번) — 원본을 못 읽으면 경로 없는 존댓말로 거절한다."""
+    try:
+        return bool(preprocess.probe_raw_media(path).audio)
+    except (OSError, RuntimeError) as error:
+        log.warn(f"다시 듣기: 원본을 읽지 못했다 — {type(error).__name__}")
+        raise RawWorkspaceError(RELISTEN_MEDIA_MISSING_REFUSAL) from error
+
 
 UPKEEP_CAPTURE = "촬영 시각"
 UPKEEP_ORDER = "영상 순서"
@@ -1090,10 +1127,14 @@ class RawWorkspaceService:
     def edit_source_transcript(
         self, root: Path, asset_id: str, revision: str, **fields: Any
     ) -> dict:
+        from vlogsrt.project.raw import asr_epoch
         from vlogsrt.project.raw.source_transcript import edit
 
         self._workspace(root).source_asset(asset_id)
         edited = edit(self._workspace(root), asset_id, revision, **fields)
+        # 고친 자막은 다시 들은 전사가 덮지 않는다 — 기다리던 다시 듣기는 돈만 드니 거둔다(D59 19b).
+        if asr_epoch.withdraw(self._workspace(root), asset_id):
+            log.out(f"원본 자막을 고쳐 기다리던 다시 듣기를 거뒀습니다: {asset_id}")
         self._queue_sync_checks(root, (asset_id,))  # 자막이 바뀌었다 — 시각 확인을 다시(D55)
         return edited
 
@@ -1162,15 +1203,82 @@ class RawWorkspaceService:
 
         return scoped
 
-    def selection_quote(self, root: Path, asset_ids: tuple[str, ...]) -> Any:
+    def selection_quote(
+        self, root: Path, asset_ids: tuple[str, ...], mode: str = SELECTION_MODE_FULL
+    ) -> Any:
         from vlogsrt.project.raw.selection_analysis import quote
 
-        return quote(self, root, asset_ids)
+        return quote(self, root, asset_ids, mode)
 
-    def selection_rebound_quote(self, root: Path, measured: Any, asset_ids: tuple[str, ...]) -> Any:
+    def selection_rebound_quote(
+        self, root: Path, measured: Any, asset_ids: tuple[str, ...], mode: str | None = None
+    ) -> Any:
         from vlogsrt.project.raw.selection_analysis import rebound_quote
 
-        return rebound_quote(self, root, measured, asset_ids)
+        return rebound_quote(self, root, measured, asset_ids, mode)
+
+    def approval_mode(self, root: Path) -> str:
+        """작업대의 승인 범위 — 고른 적이 없거나 모르는 값이면 전체(지금까지의 흐름)다."""
+        with self._workspace(root).connect() as connection:
+            row = connection.execute(
+                "SELECT value FROM meta WHERE key=?", (APPROVAL_MODE_META_KEY,)
+            ).fetchone()
+        mode = str(row[0]) if row else SELECTION_MODE_FULL
+        return mode if mode in SELECTION_MODES else SELECTION_MODE_FULL
+
+    def set_approval_mode(self, root: Path, mode: str) -> str:
+        if mode not in SELECTION_MODES:
+            raise RawWorkspaceError(f"알 수 없는 승인 범위입니다: {mode!r}")
+        with self._workspace(root).connect() as connection:
+            connection.execute(
+                "INSERT INTO meta(key,value) VALUES(?,?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (APPROVAL_MODE_META_KEY, mode),
+            )
+            connection.commit()
+        return mode
+
+    def asr_epoch_state(self, root: Path, asset_id: str) -> Any:
+        """원본의 다시 듣기 차례(D59 19b) — 읽기만 한다(표를 만들지 않는다)."""
+        from vlogsrt.project.raw import asr_epoch
+
+        return asr_epoch.state(self._workspace(root), asset_id)
+
+    def relisten_source(self, root: Path, asset_id: str) -> Any:
+        """「다시 듣기」 — 원본의 차례를 올린다(무료). 유료 전사는 승인한 실행만 한다(D44).
+
+        사람이 고친 원본 자막은 덮지 않는다: 고친 자막이 있으면 거절한다(seed는 고친 자막을
+        건드리지 않으므로 다시 들어도 돈만 든다 — 판정은 지문과 같은 규칙 `human_edited`). 전사한
+        적이 없는 원본도 거절한다 — 첫 분석이 이미 고친 온도로 듣는다. 소리가 없는 원본도 거절한다
+        — 들을 것이 없어 차례가 끝나지 않고, 끝난 영상 분석만 낡게 만든다(ffprobe 한 번). 이미
+        기다리는 중이면 차례를 또 올리지 않는다.
+        """
+        from vlogsrt.project.raw import asr_epoch, source_transcript
+
+        workspace = self._workspace(root)
+        asset = workspace.source_asset(asset_id)
+        document = source_transcript.load(workspace, asset_id)
+        if document is None:
+            raise RawWorkspaceError(RELISTEN_UNTRANSCRIBED_REFUSAL)
+        if source_transcript.human_edited(document):
+            raise RawWorkspaceError(RELISTEN_EDITED_REFUSAL)
+        if not _source_has_audio(workspace.source_media_path(asset)):
+            raise RawWorkspaceError(RELISTEN_SILENT_REFUSAL)
+        return asr_epoch.bump(workspace, asset_id)
+
+    @staticmethod
+    def transcript_human_edited(document: Mapping[str, Any]) -> bool:
+        """원본 자막 문서가 사람이 고친 것인가 — 지문·다시 듣기 거절과 같은 규칙(D59 19b)."""
+        from vlogsrt.project.raw.source_transcript import human_edited
+
+        return human_edited(dict(document))
+
+    def analysis_revision_on_old_prompt(self, root: Path, revision_id: str) -> bool:
+        """이전 분석 기준(안내문 리비전)으로 시작한 분석 리비전인가(D58 18b) — 없으면 False."""
+        revision = AnalysisStore(self._workspace(root)).revision(revision_id)
+        if revision is None:
+            return False
+        return not _current_prompt(json.loads(revision.settings_json).get("prompt_revision"))
 
     def cached_selection_analysis(self, root: Path, asset_ids: tuple[str, ...]) -> str | None:
         from vlogsrt.project.raw.selection_analysis import cached_revision
@@ -1232,6 +1340,10 @@ class RawWorkspaceService:
     def _tier_report_for_row(
         self, workspace_root: Path, row: AnalysisSourceResult
     ) -> tiering.TierReport | None:
+        if row.status == "transcribed":
+            # 1단계만 끝난 행(「전사만」 · 영상 분석 승인 전, D59 19b) — 판정이 없다. 행의 문서는
+            # 1단계 기록(`asr_phase.json`)이라 등급 문서로 읽지 않는다.
+            return None
         directory, document = _tier_paths(workspace_root, row)
         if document.is_file():
             body = document.read_bytes()
@@ -3834,17 +3946,23 @@ class RawWorkspaceService:
     def source_bindings(
         self, root: Path, assets: Mapping[str, SourceAsset]
     ) -> dict[str, list[str]]:
-        """원본별 결속 지문 — 고친 자막·미디어 참조가 분석 지문을 바꾼다."""
-        from vlogsrt.project.raw import media_refs, source_transcript
+        """원본별 결속 지문 — 고친 자막·미디어 참조·다시 듣기 차례가 분석 지문을 바꾼다.
+
+        다시 듣기 차례(D59 19b)는 0이 아닐 때만 셋째 칸으로 붙는다 — 0이면 결속은 예전 두 칸
+        그대로라 끝난 분석의 지문이 바뀌지 않는다.
+        """
+        from vlogsrt.project.raw import asr_epoch, media_refs, source_transcript
 
         workspace = self._workspace(root)
-        return {
-            asset_id: [
+        bindings: dict[str, list[str]] = {}
+        for asset_id in assets:
+            row = [
                 source_transcript.fingerprint(workspace, asset_id),
                 media_refs.fingerprint(workspace, asset_id),
             ]
-            for asset_id in assets
-        }
+            tag = asr_epoch.binding_tag(asr_epoch.current(workspace, asset_id))
+            bindings[asset_id] = row if tag is None else [*row, tag]
+        return bindings
 
     def _analysis_intervals(
         self,
