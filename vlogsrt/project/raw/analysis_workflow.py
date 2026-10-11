@@ -45,6 +45,7 @@ from vlogsrt.project.raw.analysis_approval import (
     require_live_asr_approval,
 )
 from vlogsrt.project.raw.analysis_config import (
+    ANALYSIS_PROXY_LIMITS,
     UNDERSTANDING_SCHEMA_VERSION,
     RawUnderstandingSettings,
 )
@@ -114,6 +115,17 @@ ASR_PHASE_DOCUMENT_NAME = "asr_phase.json"
 
 ASR_PHASE_SCHEMA = "raw-analysis-asr-phase/v1"
 """1단계 기록의 schema — 2단계 재개가 이 값으로 기록 모양을 검증한다."""
+
+ASR_OUTCOME_DOCUMENT_NAME = "asr_outcome.json"
+"""전사가 끝나자마자 남기는 기록(D59) — 오디오 신원과 청크마다의 결과(실패 청크 포함).
+
+원본 자막은 전사 직후 심긴다. 그 뒤 장면 컷·프레임 단계가 죽으면(분석 프록시 시간 초과·앱
+종료) 1단계 기록(`asr_phase.json`·`analysis_transcript.json`)은 남지 않는데 자막은 남는다 —
+실측 0018: 자막에 1260–1359초가 비었는데 그것이 전사 실패라는 기록이 어디에도 없었다. 이 문서는
+재사용·승인·지문 어디에도 읽히지 않는다(재사용 신호는 여전히 `asr_phase.json`이다).
+"""
+
+ASR_OUTCOME_SCHEMA = "raw-analysis-asr-outcome/v1"
 
 REPLAY_FIXTURES_DIRNAME = "replay"
 """작업공간 안 재생 픽스처의 관습 자리 — `analysis/replay/`."""
@@ -1019,24 +1031,18 @@ def _analyze_source(
             "승인 없는 실제 호출 전체 실행은 없다 — 1단계(전사)와 2단계(의미) 승인을"
             " 각각 받아라(A4-F1)"
         )
-    asr_evidence: AsrEvidence | None = None
-    utterances: tuple[UtteranceEvidence, ...] = ()
-    if audio is not None:
-        context.check_cancel()
-        asr_provider = _asr_provider_for(providers, workflow, settings, audio, asset.asset_id)
-        spans = stage1.plan_audio_chunks(audio, settings)
-        asr_evidence = stage1.transcribe_selected_audio(
-            audio,
-            spans,
-            settings=workflow,
-            understanding=settings,
-            provider=asr_provider,
-            on=providers.on or datetime.now(UTC).date(),
-            request_id=f"{revision.revision_id}:{asset.asset_id}",
-            workdir=source_dir,
-            cache_dir=workspace.root / "cache" / "source-asr" / asset.asset_id,
-        )
-        utterances = stage1.utterance_evidence(audio, asr_evidence)
+    asr_evidence, utterances = _transcribe_source(
+        context,
+        workspace,
+        revision,
+        asset,
+        settings,
+        workflow,
+        providers,
+        audio=audio,
+        grid=grid,
+        source_dir=source_dir,
+    )
     common_spoken = utterances_in_common_clock(timeline, utterances)
     source_transcript.seed(
         workspace,
@@ -1080,6 +1086,76 @@ def _analyze_source(
         source_dir=source_dir,
         frame_source=frame_source,
     )
+
+
+def _transcribe_source(
+    context: JobContext,
+    workspace: RawWorkspace,
+    revision: AnalysisRevision,
+    asset: SourceAsset,
+    settings: RawUnderstandingSettings,
+    workflow: RawWorkflowConfig,
+    providers: AnalysisProviders,
+    *,
+    audio: SelectedAudio | None,
+    grid: VideoGrid,
+    source_dir: Path,
+) -> tuple[AsrEvidence | None, tuple[UtteranceEvidence, ...]]:
+    """1단계 전사 — 끝나자마자 결과를 `asr_outcome.json`으로 남긴다(실패 청크 포함, D59).
+
+    무성 원본은 '오디오 없음'만 남긴다. 기록은 자막을 심기 전에 쓴다 — 뒤 단계가 죽어도 심긴
+    자막의 빈 구간이 전사 실패인지 알 수 있어야 한다(규칙 9: 조용한 손실 없음)."""
+    asr_evidence: AsrEvidence | None = None
+    utterances: tuple[UtteranceEvidence, ...] = ()
+    if audio is not None:
+        context.check_cancel()
+        asr_provider = _asr_provider_for(providers, workflow, settings, audio, asset.asset_id)
+        spans = stage1.plan_audio_chunks(audio, settings)
+        asr_evidence = stage1.transcribe_selected_audio(
+            audio,
+            spans,
+            settings=workflow,
+            understanding=settings,
+            provider=asr_provider,
+            on=providers.on or datetime.now(UTC).date(),
+            request_id=f"{revision.revision_id}:{asset.asset_id}",
+            workdir=source_dir,
+            cache_dir=workspace.root / "cache" / "source-asr" / asset.asset_id,
+        )
+        utterances = stage1.utterance_evidence(audio, asr_evidence)
+    _write_json_atomic(
+        source_dir / ASR_OUTCOME_DOCUMENT_NAME,
+        _asr_outcome_document(revision, asset, grid, audio, asr_evidence),
+    )
+    return asr_evidence, utterances
+
+
+def _asr_outcome_document(
+    revision: AnalysisRevision,
+    asset: SourceAsset,
+    grid: VideoGrid,
+    audio: SelectedAudio | None,
+    asr_evidence: AsrEvidence | None,
+) -> dict[str, object]:
+    """`asr_phase.json`의 오디오·전사 칸과 같은 모양 — 읽는 쪽이 한 가지 모양만 알면 된다."""
+    return {
+        "schema": ASR_OUTCOME_SCHEMA,
+        "analysis_revision_id": revision.revision_id,
+        "asset_id": asset.asset_id,
+        "source_sha256": asset.content_sha256 or "",
+        "video": {"presentation_origin": _fraction_json(grid.presentation_origin)},
+        "audio": (
+            {"status": stage1.SPEECH_AUDIO_ABSENT}
+            if audio is None
+            else stage1.selected_audio_json(audio)
+        ),
+        "asr": (
+            {"status": stage1.SPEECH_AUDIO_ABSENT, "request_id": None, "chunks": []}
+            if asr_evidence is None
+            else stage1.asr_evidence_json(asr_evidence)
+        ),
+        "created_at": _now(),
+    }
 
 
 def _asr_phase_source(
@@ -1126,24 +1202,18 @@ def _asr_phase_source(
             document_path=str(artifact_path.relative_to(workspace.root)),
             window_count=int(artifact.get("window_count") or 0),
         )
-    asr_evidence: AsrEvidence | None = None
-    utterances: tuple[UtteranceEvidence, ...] = ()
-    if audio is not None:
-        context.check_cancel()
-        asr_provider = _asr_provider_for(providers, workflow, settings, audio, asset.asset_id)
-        spans = stage1.plan_audio_chunks(audio, settings)
-        asr_evidence = stage1.transcribe_selected_audio(
-            audio,
-            spans,
-            settings=workflow,
-            understanding=settings,
-            provider=asr_provider,
-            on=providers.on or datetime.now(UTC).date(),
-            request_id=f"{revision.revision_id}:{asset.asset_id}",
-            workdir=source_dir,
-            cache_dir=workspace.root / "cache" / "source-asr" / asset.asset_id,
-        )
-        utterances = stage1.utterance_evidence(audio, asr_evidence)
+    asr_evidence, utterances = _transcribe_source(
+        context,
+        workspace,
+        revision,
+        asset,
+        settings,
+        workflow,
+        providers,
+        audio=audio,
+        grid=grid,
+        source_dir=source_dir,
+    )
     common_spoken = utterances_in_common_clock(timeline, utterances)
     source_transcript.seed(
         workspace,
@@ -2124,6 +2194,8 @@ __all__ = [
     "ANALYSIS_DOCUMENT_NAME",
     "ANALYSIS_RECORD_NAME",
     "ANALYSIS_ROOT",
+    "ASR_OUTCOME_DOCUMENT_NAME",
+    "ASR_OUTCOME_SCHEMA",
     "ASR_PHASE_DOCUMENT_NAME",
     "ASR_PHASE_SCHEMA",
     "REPLAY_FIXTURES_DIRNAME",
@@ -2175,7 +2247,8 @@ def _scene_times(
         decode_source, actual = media_refs.frames_decode_source(workspace, asset, frame_source)
         cache = _scene_cache(workspace, asset, actual)
         if not cache.is_file():
-            times = preprocess.verified_scene_times(decode_source)
+            limit = ANALYSIS_PROXY_LIMITS.frame_batch_timeout(asset.duration_seconds)
+            times = preprocess.verified_scene_times(decode_source, timeout_seconds=limit)
             _write_json_atomic(cache, {"times": [str(t) for t in times]})
             return times
     return tuple(Fraction(t) for t in json.loads(cache.read_text(encoding="utf-8"))["times"])

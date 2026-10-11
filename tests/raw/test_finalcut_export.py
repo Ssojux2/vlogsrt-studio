@@ -23,6 +23,7 @@ import os
 import shutil
 import subprocess
 import xml.etree.ElementTree as ET
+from datetime import UTC, datetime
 from fractions import Fraction
 from pathlib import Path
 from typing import Any
@@ -41,7 +42,7 @@ from tests.raw.test_tier_review_gate import RED, tier_project
 from vlogsrt import preprocess
 from vlogsrt.project import media
 from vlogsrt.project.raw import commands as media_commands
-from vlogsrt.project.raw import finalcut_export, media_refs, review_workspace
+from vlogsrt.project.raw import finalcut_export, media_refs, review_workspace, source_transcript
 from vlogsrt.project.raw import service as raw_service
 from vlogsrt.project.raw.review_workspace import ReviewWorkspaceFacade
 from vlogsrt.project.raw.service import RawWorkspaceService
@@ -858,3 +859,104 @@ def test_an_old_running_import_behind_newer_jobs_still_blocks_and_says_how_to_cl
     assert stuck.job_id in message and stuck.created_at in message
     assert "가져오기" in message and "앱을 다시 시작" in message
     assert _export_files(root) == []
+
+
+# ─── D59 — 리포트는 실은 자막을 정직하게 센다 ─────────────────────────────────
+
+
+def _later_stage1_with_a_failed_chunk(root: Path, asset: Any) -> None:
+    """뒤의 실행이 전사 직후에 죽었다 — 더 최근 1단계 기록에 실패 청크(1–2초)가 있다(0018 꼴)."""
+    folder = root / "analysis" / "anal_later" / f"000099_{asset.asset_id}"
+    folder.mkdir(parents=True)
+    body = {
+        "schema": "raw-analysis-asr-outcome/v1",
+        "source_sha256": asset.content_sha256,
+        "created_at": "2999-01-01T00:00:00+00:00",
+        "video": {"presentation_origin": {"num": 0, "den": 1}},
+        "audio": {
+            "pcm_sha256": "0" * 64,
+            "audio_stream_index": 1,
+            "sample_rate": 16000,
+            "channels": 2,
+            "sample_count": 16000 * 15,
+            "pcm_sample0_file_time": {"num": 0, "den": 1},
+        },
+        "asr": {
+            "chunks": [
+                {"chunk_index": 0, "sample_start": 0, "sample_end": 16000, "failure": ""},
+                {
+                    "chunk_index": 1,
+                    "sample_start": 16000,
+                    "sample_end": 32000,
+                    "failure": "connection: 끊김",
+                },
+            ]
+        },
+    }
+    (folder / "asr_outcome.json").write_text(json.dumps(body), encoding="utf-8")
+
+
+def test_report_counts_the_captions_it_sent_and_names_the_failed_spans(tmp_path: Path):
+    service, root = tier_project(tmp_path, suitability="usable")
+    (asset,) = service.list_source_assets(root)
+    report = _report(service.export_finalcut_timeline(root))
+    (row,) = report["sources"]
+    assert (row["captions"], row["caption_count"], row["caption_gaps"]) == (True, 4, [])
+    assert report["counts"]["sources_with_empty_captions"] == []
+    assert report["sync_check"]["running"] is False
+    _later_stage1_with_a_failed_chunk(root, asset)
+    (row,) = _report(service.export_finalcut_timeline(root))["sources"]
+    assert row["caption_gaps"] == [{"start": "1/1", "end": "2/1", "reason": "connection: 끊김"}]
+
+
+def test_a_source_whose_transcript_has_no_cues_is_reported_without_captions(tmp_path: Path):
+    """0008 꼴 — 원본 자막 문서는 있지만 큐가 0개다. 예전 리포트는 `captions: true`라고 했다."""
+    service, root = _plain_project(tmp_path)
+    (asset,) = service.list_source_assets(root)
+    workspace = service._workspace(root)
+    source_transcript.seed(workspace, asset.asset_id, [], F(2), asset.content_sha256 or "")
+    path = service.export_finalcut_timeline(root)
+    report = _report(path)
+    (row,) = report["sources"]
+    assert (row["captions"], row["caption_count"]) == (False, 0)
+    # 자막의 두 「없음」을 따로 센다 — 문서가 없음(빌더) · 문서는 있고 큐가 0개(D59).
+    assert report["counts"]["sources_without_captions"] == []
+    assert report["counts"]["sources_with_empty_captions"] == ["plain"]
+    assert row["caption_gaps"] is None  # 1단계 기록이 없다 — '없음'이 아니라 '모름'
+    assert _parsed(path).findall(".//caption") == []
+
+
+def test_caption_facts_never_change_the_document_bytes(tmp_path: Path):
+    """D56 — 같은 입력이면 문서는 바이트까지 같다. 새 칸은 리포트에만 실린다(D59).
+
+    빌더 쪽 증명은 `test_finalcut_caption_timing.W16_DOCUMENT_SHA256`이 그대로 지킨다.
+    """
+    service, root = tier_project(tmp_path, suitability="usable")
+    (asset,) = service.list_source_assets(root)
+    moment = datetime(2026, 10, 11, 0, 17, 44, tzinfo=UTC)
+    flags = service.caption_timing_flags(root)
+    plain = finalcut_export.export(service, root, now=lambda: moment, caption_timing=flags)
+    gaps = {asset.asset_id: [{"start": "1/1", "end": "2/1", "reason": "x"}]}
+    noted = finalcut_export.export(
+        service, root, now=lambda: moment, caption_timing=flags, caption_gaps=gaps
+    )
+    assert plain.fcpxml != noted.fcpxml
+    assert plain.fcpxml.read_bytes() == noted.fcpxml.read_bytes()
+    assert _report(plain.fcpxml)["sources"][0]["caption_gaps"] is None
+    assert _report(noted.fcpxml)["sources"][0]["caption_gaps"] == gaps[asset.asset_id]
+
+
+def test_a_running_timing_check_is_recorded_so_the_screen_can_say_so(tmp_path: Path):
+    """실측 09:17:44 보내기는 확인 작업이 보고서를 쓰는 도중이었다 — 그 사실이 리포트에 남는다."""
+    from vlogsrt.project.raw.jobs import JobStore
+    from vlogsrt.project.raw.workspace import RawWorkspace
+
+    service, root = tier_project(tmp_path, suitability="usable")
+    latest = service.latest_job(root, raw_service.SYNC_CHECK_JOB_KIND)
+    if latest is not None:
+        _wait_terminal(service, root, latest.job_id)
+    store = JobStore(RawWorkspace.open(root))
+    record, _ = store.insert_deduplicated(raw_service.SYNC_CHECK_JOB_KIND, "still-measuring", 0)
+    store.update(record.job_id, status="running")
+    section = _report(service.export_finalcut_timeline(root))["sync_check"]
+    assert section["running"] is True

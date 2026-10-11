@@ -266,6 +266,7 @@ vlogsrt run <video> --offline             # 픽스처 기반 전체 파이프라
 | `chunk_end_overrun_seconds = 2.0` (`TimingResponseTolerance`) | 외부 근거 없음. 실측 whisper 청크 끝 넘침 최대 1.0초 + 여유 1.0초. 이하면 청크 끝으로 닫고 `WARN`, 넘으면 거부(D55 — 규칙 1·3의 좁은 예외). `RawWorkflowConfig` 밖이다 |
 | `sync_*` (`SyncCheckSettings`) | 외부 근거 없는 조정 대상. 자막 시각 확인(D55)의 판정 기준 — 실측 13개 영상으로 골랐고 여유가 얇다(Pτ 초록 최소 .75 대 노랑 최대 .70). **표시만 하므로** 어느 지문·캐시 열쇠에도 넣지 않는다 |
 | `tier_*` (`RawTierSettings`, 5개) | 외부 근거 없는 조정 대상. 자막 공백 5초 · 발화 쪽 여유 0.3초 · 발화 밀도 0.35 · 최소 구간 1초(D51). 로컬 측정 기준(RMS·루마·흐림)은 측정 계층과 함께 지웠다(D52). 분석 지문에 넣지 않는다 |
+| `AnalysisProxyLimits` (바닥 1800초 · 배율 6, 분석 프록시와 프레임 묶음·장면 컷에 한 쌍씩) | 외부 근거 없는 조정 대상(D59). 한도 = max(바닥, 배율 × 원본 길이). 실측 0016(545초)·0018(1359초)의 분석 프록시가 분석 셋 동시 실행(D49)에서 고정 1800초를 넘겨 원본 전체의 분석이 실패했다 — 이제 넘기면 `ProcessTimeout`이고 분석 프록시는 원본으로 물러난다(D47). 조리법 tag·분석 지문·캐시 열쇠 밖이다 |
 | Claude Opus 5.5 단가 (`RawClaudeAnalysisProfile`) | 2026-10-09 공식 가격표(https://platform.claude.com/docs/en/about-claude/pricing) — 입력 $4 · 출력 $20 · 캐시 쓰기 5분 $5 · 1시간 $8 · 읽기 $0.20 / 100만 토큰, `inference_geo=global`(D54). **0으로 두지 마라** — 못 매기면 가격 미정이다 |
 | Claude Sonnet 5.5 단가 (`RawClaudeAnalysisProfile`, 의미 분석 기본) | 2026-10-11 공식 가격표(https://platform.claude.com/docs/en/about-claude/pricing) — 입력 $2 · 출력 $10 · 캐시 쓰기 5분 $2.50 · 1시간 $4 · 읽기 $0.10 · 배치 $1/$5 / 100만 토큰, `inference_geo=global`(D58). **0으로 두지 마라** — 못 매기면 가격 미정이다 |
 | `effort`·`max_output_tokens`·`quote_*` (Claude 프로파일) | 외부 근거 없는 조정 대상(D54·D58). Opus 5.5 medium · 8192 · Sonnet 5.5 medium · 12000(적응형 생각 토큰도 이 안에 든다) · 창당 텍스트 여유 12000 + 부대 여유 2000 토큰 |

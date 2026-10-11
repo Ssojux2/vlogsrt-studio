@@ -17,11 +17,13 @@ import pytest
 from tests.raw.test_browser_runtime import _make_media
 from vlogsrt import preprocess
 from vlogsrt.preprocess import extract_frame_index, extract_frame_indices
+from vlogsrt.project.raw.analysis_config import ANALYSIS_PROXY_LIMITS
 from vlogsrt.project.raw.jobs import JobCancelledError
 from vlogsrt.project.raw.media_refs import _FrameSampler
 from vlogsrt.task_runtime import cancellation_scope
 
 LONG_EDGE = 160
+TIMEOUT = ANALYSIS_PROXY_LIMITS.frame_batch_timeout(None)  # 길이를 모르면 바닥(D59)
 
 
 def test_batch_is_exact_and_deduplicates_with_single_decode(tmp_path, monkeypatch):
@@ -48,6 +50,7 @@ def test_batch_is_exact_and_deduplicates_with_single_decode(tmp_path, monkeypatc
         [74, 7, 31, 7, 0],
         tmp_path / "batch",
         long_edge=160,
+        timeout_seconds=TIMEOUT,
         on_frame=lambda i, p: ready.append((i, p.read_bytes())),
     )
     assert len(calls) == 1 and calls[0].count("-i") == 1
@@ -60,7 +63,7 @@ def test_batch_is_exact_and_deduplicates_with_single_decode(tmp_path, monkeypatc
 def test_batch_cache_reuses_success_and_only_requests_missing(tmp_path, monkeypatch):
     source = tmp_path / "frames.mov"
     _make_media(source, audio=False, seconds="3")
-    sampler = _FrameSampler(source, 0, tmp_path / "cache")
+    sampler = _FrameSampler(source, 0, tmp_path / "cache", TIMEOUT)
     a, b = tmp_path / "a", tmp_path / "b"
     a.mkdir()
     b.mkdir()
@@ -96,7 +99,13 @@ def test_batch_cancel_keeps_completed_frames_without_partial_publication(tmp_pat
 
     with cancellation_scope(check), pytest.raises(JobCancelledError):
         preprocess.extract_frame_indices(
-            source, 0, list(range(75)), tmp_path / "frames", long_edge=160, on_frame=received
+            source,
+            0,
+            list(range(75)),
+            tmp_path / "frames",
+            long_edge=160,
+            timeout_seconds=TIMEOUT,
+            on_frame=received,
         )
     assert len(ready) == 1 and ready[0].read_bytes().startswith(b"\xff\xd8")
     assert list((tmp_path / "frames").iterdir()) == ready
@@ -223,7 +232,12 @@ def test_batch_over_one_hundred_frames_is_one_decode_and_byte_identical(
 
     monkeypatch.setattr(preprocess, "run_process", spy)
     published = extract_frame_indices(
-        source, 0, list(range(150)), tmp_path / "batch", long_edge=LONG_EDGE
+        source,
+        0,
+        list(range(150)),
+        tmp_path / "batch",
+        long_edge=LONG_EDGE,
+        timeout_seconds=TIMEOUT,
     )
     monkeypatch.setattr(preprocess, "run_process", real_run_process)
 
@@ -273,3 +287,34 @@ def test_select_expression_bounds_chain_depth() -> None:
         found = [int(item) for item in re.findall(r"eq\(n\\,(\d+)\)", expression)]
         assert sorted(found) == list(range(count))
         assert len(found) == count
+
+
+def test_batch_hands_its_limit_to_the_decoder_and_a_timeout_is_a_runtime_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """묶음 추출의 한도는 호출자가 원본 길이로 정한 값이다(D59) — 예전 리터럴 1800이 아니다.
+
+    한도를 넘기면 `ProcessTimeout`(RuntimeError)이고 반쪽 장은 게시되지 않는다.
+    """
+    source = tmp_path / "clip.mp4"
+    _make_media(source, audio=False, seconds="3")
+    seen: list[dict[str, Any]] = []
+    real_run_process = preprocess.run_process
+
+    def spy(command: list[str], *args: Any, **kwargs: Any) -> Any:
+        seen.append(dict(kwargs))
+        return real_run_process(command, *args, **kwargs)
+
+    monkeypatch.setattr(preprocess, "run_process", spy)
+    extract_frame_indices(
+        source, 0, [3], tmp_path / "a", long_edge=LONG_EDGE, timeout_seconds=4321.0
+    )
+    assert (seen[0]["timeout"], seen[0]["step"]) == (4321.0, "프레임 묶음 추출")
+    with (
+        pytest.raises(RuntimeError, match="프레임 묶음 추출 — 시간 한도"),
+        cancellation_scope(lambda: None),
+    ):
+        extract_frame_indices(
+            source, 0, list(range(75)), tmp_path / "b", long_edge=LONG_EDGE, timeout_seconds=0.0
+        )
+    assert not list((tmp_path / "b").glob(".frame-batch-*"))

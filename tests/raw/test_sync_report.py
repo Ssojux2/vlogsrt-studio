@@ -12,7 +12,9 @@ import shutil
 import sqlite3
 import threading
 import time
-from dataclasses import fields
+import types
+from dataclasses import fields, replace
+from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
@@ -81,23 +83,52 @@ def numpy_present(monkeypatch: pytest.MonkeyPatch) -> None:
     numpy_or_fake(monkeypatch)  # VAD extra 없는 개발 환경에서도 같은 단언이 돈다
 
 
+REPLAY_ANALYSIS_MODEL = "gpt-6-luna"
+"""재생 의미 판정 픽스처(`luna-fixtures.json`, `output_text` 모양)를 읽는 분석 모델.
+
+18a(D58)부터 새 작업공간의 기본은 Claude Sonnet 5.5인데 이 픽스처는 Claude 응답 모양이 아니라
+창마다 거부돼 원본 행이 조용히 `failed`로 끝났다 — 「분석했다」는 재료가 분석되지 않았다(D59).
+"""
+
+
 @pytest.fixture
 def analyzed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Any, Path, str]:
     """톤 덩어리 원본 하나를 재생 분석한 작업공간 — 분석 뒤 확인 작업까지 끝난 상태."""
     monkeypatch.setattr(sync_report, "default_session_factory", energy_factory)
-    service, root, asset_id, handle = start_tone_analysis(tmp_path)
+    service, root, asset_id, handle = start_tone_analysis(tmp_path, model=REPLAY_ANALYSIS_MODEL)
     assert wait(service, root, handle.job_id).status == "succeeded"
+    assert source_statuses(service, root) == ["analyzed"]  # 이름 그대로 분석이 끝났다
     wait_sync(service, root)
     return service, root, asset_id
 
 
-def start_tone_analysis(tmp_path: Path) -> tuple[Any, Path, str, Any]:
-    """톤 덩어리 원본 하나를 가져와 재생 분석을 건다(유료 호출 0) — 작업 손잡이를 돌려준다."""
+def source_statuses(service: raw.RawWorkspaceService, root: Path) -> list[str]:
+    """가장 최근 분석 리비전의 원본 행 상태들."""
+    from vlogsrt.project.raw.analysis_store import AnalysisStore
+
+    store = AnalysisStore(service._workspace(root))
+    latest = store.list_revisions()[-1]
+    return [row.status for row in store.list_source_results(latest.revision_id)]
+
+
+def start_tone_analysis(
+    tmp_path: Path, *, declared: bool = True, model: str | None = None
+) -> tuple[Any, Path, str, Any]:
+    """톤 덩어리 원본 하나를 가져와 재생 분석을 건다(유료 호출 0) — 작업 손잡이를 돌려준다.
+
+    `declared=False`면 재생 ASR 선언을 비워 둔다 — 모든 청크가 전사 실패로 기록된다.
+    `model`이 있으면 작업공간을 만든 직후 의미 분석 모델을 그것으로 저장한다(재생 의미 판정은
+    `REPLAY_ANALYSIS_MODEL`의 응답 모양이다).
+    """
     card = tmp_path / "card"
     make_media(card / "tone.mov")
     root = tmp_path / "ws"
     service = raw.RawWorkspaceService()
     service.create_workspace(root, "시각")
+    if model is not None:
+        workflow = service.settings(root)
+        models = replace(workflow.models, luna_model=model)
+        service.update_settings(root, replace(workflow, models=models))
     proposal = service.scan_sources(root, card)
     confirmation = service.confirm_ingest(root, proposal)
     assert wait(service, root, service.start_ingest_copy(root, confirmation).job_id).status == (
@@ -111,9 +142,8 @@ def start_tone_analysis(tmp_path: Path) -> tuple[Any, Path, str, Any]:
         {"start": float(start), "end": float(end), "text": f"말 {index}"}
         for index, (start, end) in enumerate(bursts())
     ]
-    (replay / "asr-fixtures.json").write_text(
-        json.dumps({"sources": {asset.content_sha256: spoken}}), encoding="utf-8"
-    )
+    sources = {asset.content_sha256: spoken} if declared else {}
+    (replay / "asr-fixtures.json").write_text(json.dumps({"sources": sources}), encoding="utf-8")
     luna = {f"window_{i:06d}": _luna(f"window_{i:06d}") for i in range(12)}
     (replay / "luna-fixtures.json").write_text(json.dumps({"windows": luna}), encoding="utf-8")
     return service, root, asset.asset_id, service.start_analysis(root)
@@ -313,8 +343,9 @@ def test_a_broken_hook_never_changes_the_analysis_or_the_edit(
     monkeypatch.setattr(sync_report, "pending_sources", locked)
     warnings: list[str] = []
     monkeypatch.setattr(raw.log, "warn", warnings.append)
-    service, root, source_id, handle = start_tone_analysis(tmp_path)
+    service, root, source_id, handle = start_tone_analysis(tmp_path, model=REPLAY_ANALYSIS_MODEL)
     assert wait(service, root, handle.job_id).status == "succeeded"
+    assert source_statuses(service, root) == ["analyzed"]
     assert service.latest_job(root, raw.SYNC_CHECK_JOB_KIND) is None
     transcript = service.source_transcript(root, source_id)
     edited = service.edit_source_transcript(
@@ -660,3 +691,151 @@ def test_vad_session_is_made_once_per_process_and_kept(monkeypatch: pytest.Monke
     first = sync_report.default_session_factory(project)()
     second = sync_report.default_session_factory(project)()
     assert first is second and len(made) == 1
+
+
+# ── D59 — 전사 뒤에 분석이 죽어도 실패 구간이 보인다(0018 꼴) ──────────────────────
+
+
+def _stage1_body(created_at: str, *, failed: bool, document: str = "asr_outcome.json") -> dict:
+    """1단계 기록 한 장 — 0018처럼 16kHz 1359초, 마지막 청크(1260–1359초)가 실패한 모양."""
+    rate = 16000
+    chunks = [
+        {
+            "chunk_index": index,
+            "sample_start": start * rate,
+            "sample_end": end * rate,
+            "failure": "connection: 연결이 끊겼다" if failed and index == 7 else "",
+        }
+        for index, (start, end) in enumerate(
+            [(i * 180, (i + 1) * 180) for i in range(7)] + [(1260, 1359)]
+        )
+    ]
+    return {
+        "schema": "raw-analysis-asr-outcome/v1" if document == "asr_outcome.json" else "x",
+        "source_sha256": "f" * 64,
+        "created_at": created_at,
+        "video": {"presentation_origin": {"num": 0, "den": 1}},
+        "audio": {
+            "pcm_sha256": "0" * 64,
+            "audio_stream_index": 1,
+            "sample_rate": rate,
+            "channels": 2,
+            "sample_count": rate * 1359,
+            "pcm_sample0_file_time": {"num": 0, "den": 1},
+        },
+        "asr": {"chunks": chunks},
+    }
+
+
+def _stage1_folder(root: Path, revision: str, body: dict, name: str = "asr_outcome.json") -> Path:
+    folder = root / "analysis" / revision / "000011_src"
+    folder.mkdir(parents=True)
+    (folder / name).write_text(json.dumps(body), encoding="utf-8")
+    (folder / "analysis.pcm").write_bytes(b"\x00" * 64)  # 0018 폴더처럼 PCM·청크 WAV는 있다
+    (folder / "asr-chunk-0007.wav").write_bytes(b"RIFF")
+    return folder
+
+
+def _source_with(stage1: sync_report.Stage1Audio | None) -> sync_report.SyncSource:
+    return sync_report.SyncSource(
+        source_id="src",
+        source_name="DJI_0018_D.mov",
+        source_sha256="f" * 64,
+        original=None,
+        original_note="원본 없음",
+        transcript_revision="rev",
+        cues=(),
+        stage1=stage1,
+    )
+
+
+def test_a_failed_chunk_is_found_in_the_record_written_right_after_transcription(
+    tmp_path: Path,
+) -> None:
+    """0018 꼴 — 실패·중단된 리비전 폴더에 `asr_phase.json`이 없어도 전사 직후 기록이 있다.
+
+    더 오래된 리비전의 온전한 1단계 기록(실패 없음)보다 이 기록이 최근이다 — 지금 자막을 심은
+    전사가 이것이다. 보고서는 실패 구간을 「1260–1359초」로 말한다.
+    """
+    _stage1_folder(
+        tmp_path, "anal_old", _stage1_body("2026-10-08T11:02:00+00:00", failed=False),
+        name="asr_phase.json",
+    )  # fmt: skip
+    _stage1_folder(tmp_path, "anal_died", _stage1_body("2026-10-09T08:44:00+00:00", failed=True))
+    stage1 = sync_report.stage1_audio(tmp_path, "src", "f" * 64)
+    assert stage1 is not None and stage1.folder.parent.name == "anal_died"
+    document = sync_report.measure_source(_source_with(stage1), cache_root=tmp_path / "cache")
+    assert document["failed_chunks"] == [
+        {"start": "1260/1", "end": "1359/1", "reason": "connection: 연결이 끊겼다"}
+    ]
+    texts = [reason["text"] for reason in document["reasons"]]
+    assert any("전사 청크 1개가 실패해 그 구간(1260–1359초)에 자막이 없음" in t for t in texts)
+    asset = types.SimpleNamespace(asset_id="src", content_sha256="f" * 64)
+    workspace = types.SimpleNamespace(root=tmp_path)
+    assert sync_report.caption_gaps(workspace, asset) == document["failed_chunks"]
+
+
+def test_a_richer_record_in_the_same_folder_wins_over_the_early_one(tmp_path: Path) -> None:
+    """끝까지 간 실행은 둘 다 남긴다 — 같은 전사의 더 큰 기록(`asr_phase.json`)을 읽는다."""
+    folder = _stage1_folder(
+        tmp_path, "anal_done", _stage1_body("2026-10-09T08:44:00+00:00", failed=True)
+    )
+    whole = _stage1_body("2026-10-09T08:50:00+00:00", failed=True, document="asr_phase.json")
+    whole["asr"]["chunks"][7]["clamped_segments"] = [2]
+    (folder / "asr_phase.json").write_text(json.dumps(whole), encoding="utf-8")
+    stage1 = sync_report.stage1_audio(tmp_path, "src", "f" * 64)
+    assert stage1 is not None and stage1.clamped == 1 and len(stage1.failed) == 1
+
+
+def test_without_any_record_the_report_says_it_does_not_know(tmp_path: Path) -> None:
+    """19a 이전에 죽은 실행(실측 0018의 두 폴더)은 PCM·청크 WAV만 있다 — 지어내지 않고 「모름」."""
+    folder = tmp_path / "analysis" / "anal_815ac9f11ed4d35e" / "000010_src"
+    folder.mkdir(parents=True)
+    (folder / "analysis.pcm").write_bytes(b"\x00" * 64)
+    (folder / "asr-chunk-0007.wav").write_bytes(b"RIFF")
+    assert sync_report.stage1_audio(tmp_path, "src", "f" * 64) is None
+    document = sync_report.measure_source(_source_with(None), cache_root=tmp_path / "cache")
+    assert document["failed_chunks"] == []
+    checks = {check["name"]: check for check in document["checks"]}
+    assert checks["전사 실패 구간"]["detail"] == "1단계 기록이 없어 실패 구간을 모름"
+    asset = types.SimpleNamespace(asset_id="src", content_sha256="f" * 64)
+    assert sync_report.caption_gaps(types.SimpleNamespace(root=tmp_path), asset) is None
+
+
+def test_an_analysis_that_dies_after_transcription_leaves_the_failed_chunks_on_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """끝까지 — 재생 전사가 실패하고(선언 없음) 장면 단계에서 원본 분석이 죽는다(0018 꼴).
+
+    원본 자막은 이미 심겼고 1단계 기록(`asr_phase.json`·`analysis_transcript.json`)은 없다.
+    전사 직후 기록이 남아 확인 보고서가 실패 구간을 말한다.
+    """
+    from vlogsrt.project.raw import analysis_workflow
+    from vlogsrt.project.raw.analysis_store import AnalysisStore
+
+    monkeypatch.setattr(sync_report, "default_session_factory", energy_factory)
+
+    def died(*_: Any, **__: Any) -> Any:
+        raise RuntimeError("장면 단계가 죽었다(합성)")
+
+    monkeypatch.setattr(analysis_workflow, "_scene_plan", died)
+    service, root, asset_id, handle = start_tone_analysis(tmp_path, declared=False)
+    wait(service, root, handle.job_id)
+    latest = service.latest_job(root, raw.SYNC_CHECK_JOB_KIND)
+    if latest is not None:
+        wait(service, root, latest.job_id)
+    workspace = service._workspace(root)
+    store = AnalysisStore(workspace)
+    (revision,) = store.list_revisions()
+    (row,) = store.list_source_results(revision.revision_id)
+    assert row.status == "failed" and "장면 단계가 죽었다" in str(row.error)
+    (folder,) = root.glob(f"analysis/*/*_{asset_id}")
+    assert (folder / "asr_outcome.json").is_file()
+    assert not (folder / "asr_phase.json").exists()
+    assert not (folder / "analysis_transcript.json").exists()
+    source = sync_report.gather_source(workspace, workspace.source_asset(asset_id))
+    assert source is not None and source.cues == ()  # 자막은 심겼다(큐 0개)
+    assert source.stage1 is not None and len(source.stage1.failed) == 1
+    document = sync_report.measure_source(source, cache_root=tmp_path / "measure")
+    assert [Fraction(row["start"]) for row in document["failed_chunks"]] == [0]
+    assert "failed_chunks" in {reason["code"] for reason in document["reasons"]}

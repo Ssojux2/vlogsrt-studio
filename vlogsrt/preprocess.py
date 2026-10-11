@@ -54,13 +54,53 @@ def require_ffmpeg(tool: str = "ffmpeg") -> str:
     return path
 
 
+_CANCELLABLE_TIMEOUT_SECONDS = 1800.0
+"""취소를 듣는 실행에 한도를 따로 주지 않았을 때의 상한 — 멈춘 자식을 무한히 기다리지 않는다.
+
+예전에는 `run_process` 안의 리터럴이었다(규칙 8). 원본 길이를 따라 자라야 하는 디코드(분석
+프록시 만들기·프레임 묶음·장면 컷)는 이 값을 쓰지 않고 호출자가 설정의 한도를 넘긴다(D59).
+"""
+
+
+class ProcessTimeout(RuntimeError):
+    """외부 프로세스가 시간 한도를 넘겨 멈췄다 — `subprocess.TimeoutExpired`의 유일한 번역.
+
+    RuntimeError라서 실패를 RuntimeError로 받는 호출자(분석 프록시의 원본 폴백 등)가 그대로
+    받는다. `TimeoutExpired`는 `SubprocessError`라 그 그물을 빠져나가 원본 전체의 분석을
+    실패시켰다(D59). 이 모듈 밖에서는 `TimeoutExpired`를 잡지 않는다.
+    """
+
+    def __init__(self, command: Sequence[str], limit_seconds: float, step: str | None) -> None:
+        self.command = list(command)
+        self.limit_seconds = float(limit_seconds)
+        self.step = step or Path(command[0]).name
+        super().__init__(
+            f"{self.step} — 시간 한도 {self.limit_seconds:.0f}초를 넘겨 멈췄습니다"
+            " (원본이 길거나 다른 분석과 함께 도는 중일 수 있습니다)"
+        )
+
+
 def run_process(
-    command: list[str], *, on_poll: Callable[[], None] | None = None, **kwargs: Any
+    command: list[str],
+    *,
+    on_poll: Callable[[], None] | None = None,
+    step: str | None = None,
+    **kwargs: Any,
+) -> subprocess.CompletedProcess:
+    """외부 프로세스 한 번 — 시간 한도를 넘기면 `ProcessTimeout`(어느 단계·몇 초인지)이다."""
+    try:
+        return _run_process(command, on_poll=on_poll, **kwargs)
+    except subprocess.TimeoutExpired as expired:
+        raise ProcessTimeout(command, float(expired.timeout), step) from expired
+
+
+def _run_process(
+    command: list[str], *, on_poll: Callable[[], None] | None, **kwargs: Any
 ) -> subprocess.CompletedProcess:
     if not cancellation_active() and on_poll is None:
         return subprocess.run(command, **kwargs)
     check_cancel()
-    timeout = kwargs.pop("timeout", 1800.0)
+    timeout = kwargs.pop("timeout", _CANCELLABLE_TIMEOUT_SECONDS)
     kwargs.pop("check", None)
     if kwargs.pop("capture_output", False):
         kwargs.update(stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -69,10 +109,12 @@ def run_process(
     try:
         while True:
             check_cancel()
-            if time.monotonic() >= deadline:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
                 raise subprocess.TimeoutExpired(command, timeout)
             try:
-                stdout, stderr = process.communicate(timeout=0.15)
+                # 마지막 기다림도 한도를 넘지 않는다 — 한도 안에 끝난 것만 끝난 것이다.
+                stdout, stderr = process.communicate(timeout=min(0.15, remaining))
                 if on_poll is not None:
                     on_poll()
                 return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
@@ -90,9 +132,19 @@ def run_process(
         raise
 
 
-def _run(command: list[str]) -> subprocess.CompletedProcess[str]:
+def _run(
+    command: list[str], *, timeout: float | None = None, step: str | None = None
+) -> subprocess.CompletedProcess[str]:
+    """실패는 RuntimeError다 — 시간 한도를 넘기면 그 하위인 `ProcessTimeout`.
+
+    `timeout`이 없으면 예전과 같다: 취소를 듣지 않는 실행은 한도 없이, 듣는 실행은
+    `_CANCELLABLE_TIMEOUT_SECONDS`까지 기다린다.
+    """
+    limit: dict[str, Any] = {} if timeout is None else {"timeout": timeout}
     try:
-        completed = run_process(command, capture_output=True, text=True, check=False)
+        completed = run_process(
+            command, capture_output=True, text=True, check=False, step=step, **limit
+        )
     except OSError as exc:
         raise RuntimeError(f"명령 실행 실패: {command[0]} ({exc})") from exc
     if completed.returncode != 0:
@@ -128,8 +180,9 @@ def _run_probe(command: list[str]) -> str:
     """마감이 정해진 ffprobe 한 번 — 위상 확인 전용의 `_run` 변형.
 
     실패의 네 가지 모양(실행 불가·비0 종료·마감 초과·깨진 출력)이 전부
-    RuntimeError로 나간다. 이 경로의 호출자는 실패를 **절대 0으로 해석해서는
-    안 된다** — '스트림 0개·무음'은 지원되는 상태지 실패의 위장이 아니다.
+    RuntimeError로 나간다(마감 초과는 그 하위인 `ProcessTimeout`). 이 경로의 호출자는
+    실패를 **절대 0으로 해석해서는 안 된다** — '스트림 0개·무음'은 지원되는 상태지
+    실패의 위장이 아니다.
     """
     try:
         completed = run_process(
@@ -138,12 +191,8 @@ def _run_probe(command: list[str]) -> str:
             text=True,
             check=False,
             timeout=_PROBE_TIMEOUT_SECONDS,
+            step=f"스트림 확인({command[-1]})",
         )
-    except subprocess.TimeoutExpired as exc:
-        raise RuntimeError(
-            f"스트림 확인이 마감({_PROBE_TIMEOUT_SECONDS:.0f}초)을 넘겼다:"
-            f" {command[0]} {command[-1]}"
-        ) from exc
     except OSError as exc:
         raise RuntimeError(f"명령 실행 실패: {command[0]} ({exc})") from exc
     if completed.returncode != 0:
@@ -1226,6 +1275,7 @@ def extract_frame_indices(
     directory: Path,
     *,
     long_edge: int,
+    timeout_seconds: float,
     on_frame: Callable[[int, Path], None] | None = None,
 ) -> dict[int, Path]:
     """Decode once in presentation order and publish only completed JPEGs.
@@ -1234,7 +1284,8 @@ def extract_frame_indices(
     image2 atomic_writing prevents progress polling from publishing partial files.
     Completed frames survive cancellation, while the private staging area is removed.
     select 식은 균형 잡힌 괄호 나무다 — 평평한 `+` 사슬은 101항에서 ffmpeg 식 파서가
-    깊이 한도로 죽는다(`_SELECT_CHAIN_MAX_TERMS`).
+    깊이 한도로 죽는다(`_SELECT_CHAIN_MAX_TERMS`). `timeout_seconds`는 호출자가 원본 길이로
+    정한 한도다(`AnalysisProxyLimits`) — 넘기면 `ProcessTimeout`이다.
     """
     _require_index(stream_index, "스트림 번호")
     for index in frame_indices:
@@ -1303,7 +1354,8 @@ def extract_frame_indices(
             capture_output=True,
             text=True,
             check=False,
-            timeout=1800.0,
+            timeout=timeout_seconds,
+            step="프레임 묶음 추출",
             on_poll=publish_ready,
         )
         if completed.returncode:
@@ -2365,6 +2417,25 @@ def _reserve_staging_temp(staging_output: Path) -> Path:
     raise RawStagingError(f"스테이징 임시 자리를 못 잡는다: {staging_output.parent}")
 
 
+def staging_leftovers(staging_output: Path) -> tuple[Path, ...]:
+    """`_reserve_staging_temp`가 이 경로 옆에 맡았다가 남긴 임시 파일 — 이름 꼴이 같은 것만.
+
+    강제 종료된 만들기는 `.part`를 지우지 못한다(실측: 분석 프록시 폴더 셋에 45–162MB). 새
+    이름은 무작위라 다음 만들기를 막지는 않지만 디스크에 쌓인다. 지우는 것은 호출자의 몫이다 —
+    그 폴더의 만들기 잠금을 쥔 동안에만 지워야 살아 있는 만들기의 파일을 건드리지 않는다.
+    """
+    pattern = re.compile(re.escape(f".{staging_output.name}.") + r"[0-9]+\.[0-9a-f]{8}\.part")
+    if not staging_output.parent.is_dir():
+        return ()
+    return tuple(
+        sorted(
+            entry
+            for entry in staging_output.parent.iterdir()
+            if pattern.fullmatch(entry.name) and entry.is_file() and not entry.is_symlink()
+        )
+    )
+
+
 def _publish_staged_clip(temp: Path, staging_output: Path) -> None:
     """검증을 통과한 임시 파일을 호출자 경로로 원자 게시 — 이미 있으면 절대 덮어치지 않는다.
 
@@ -3147,30 +3218,25 @@ def build_analysis_proxy(
     crf: int,
     gop: int,
     pix_fmt: str,
+    timeout_seconds: float,
 ) -> AnalysisProxyBuild:
     """원본을 한 번 읽어 저해상도 분석 프록시를 **스테이징에** 만들고 원자 게시한다.
 
     프레임 한 장마다 4K 스트림을 앞에서부터 디코드하는 비용을 이 한 번으로 바꾼다. 실측값만
     돌려준다 — 원본과의 대조는 호출자(`media_refs`)가 짝 검증으로 한다. 취소는 `_run`이 듣는다.
+    인코드가 `timeout_seconds`를 넘기면 `ProcessTimeout`(RuntimeError)이고 스테이징은 지워진다 —
+    호출자는 원본으로 물러난다(D47·D59).
     """
     _assert_safe_staging(source, staging_output)
     probe = probe_raw_media(source)
     staging_output.parent.mkdir(parents=True, exist_ok=True)
     staged = _reserve_staging_temp(staging_output)
     try:
-        _run(
-            _analysis_proxy_command(
-                source,
-                staged,
-                probe.video.stream_index,
-                scale=scale,
-                video_codec=video_codec,
-                preset=preset,
-                crf=crf,
-                gop=gop,
-                pix_fmt=pix_fmt,
-            )
-        )
+        command = _analysis_proxy_command(
+            source, staged, probe.video.stream_index, scale=scale, video_codec=video_codec,
+            preset=preset, crf=crf, gop=gop, pix_fmt=pix_fmt,
+        )  # fmt: skip
+        _run(command, timeout=timeout_seconds, step="분석 프록시 만들기")
         measured = _measure_proxy(staged)
     except BaseException:
         staged.unlink(missing_ok=True)
@@ -3244,8 +3310,11 @@ def correspondence_samples(
     return tuple(samples)
 
 
-def verified_scene_times(path: Path) -> tuple[Fraction, ...]:
-    """Decoded adjacent-frame cuts; low resolution is sufficient for cut evidence."""
+def verified_scene_times(path: Path, *, timeout_seconds: float) -> tuple[Fraction, ...]:
+    """Decoded adjacent-frame cuts; low resolution is sufficient for cut evidence.
+
+    한 번에 출처를 통째로 디코드한다 — 한도는 호출자가 원본 길이로 정한다(`AnalysisProxyLimits`).
+    """
     result = _run(
         [
             require_ffmpeg(),
@@ -3263,6 +3332,8 @@ def verified_scene_times(path: Path) -> tuple[Fraction, ...]:
             "-f",
             "null",
             "-",
-        ]
+        ],
+        timeout=timeout_seconds,
+        step="장면 컷 찾기",
     )
     return tuple(Fraction(value) for value in re.findall(r"pts_time:([0-9.]+)", result.stderr))

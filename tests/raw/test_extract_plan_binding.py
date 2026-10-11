@@ -23,9 +23,11 @@ from pathlib import Path
 
 import pytest
 
+from tests.raw.test_review_workspace import keep_luna_workspace
 from vlogsrt import preprocess
 from vlogsrt.project.raw import runner as extract_runner
 from vlogsrt.project.raw import service as raw
+from vlogsrt.project.raw.analysis_store import AnalysisStore
 
 needs_ffmpeg = pytest.mark.skipif(
     shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
@@ -87,6 +89,7 @@ def _prepared_workspace(tmp_path: Path) -> tuple[raw.RawWorkspaceService, Path]:
     service = raw.RawWorkspaceService()
     root = tmp_path / "VlogProject"
     service.create_workspace(root, "제주")
+    keep_luna_workspace(root)  # 재생 픽스처는 gpt-6-luna 응답 모양이다(D58)
     card = tmp_path / "card" / "DCIM"
     _make_media(card / "제주.mov")
     proposal = service.scan_sources(root, tmp_path / "card")
@@ -147,6 +150,9 @@ def test_new_revision_same_geometry_extracts_new_package(tmp_path: Path) -> None
     analysis = service.start_analysis(root)
     analysis_record = _wait_terminal(service, root, analysis.job_id)
     assert analysis_record.status == "succeeded", analysis_record.error
+    store = AnalysisStore(service._workspace(root))
+    latest = store.list_revisions()[-1]
+    assert [row.status for row in store.list_source_results(latest.revision_id)] == ["analyzed"]
     plan2 = service.plan_segmentation_from_analysis(root)
     assert plan2.revision_id != plan1.revision_id
     assert plan2.fingerprint == plan1.fingerprint  # 형상은 같다 — 충돌의 전제

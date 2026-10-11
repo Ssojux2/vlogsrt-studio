@@ -549,7 +549,81 @@ def _finalcut_sent_text(sent: dict[str, Any]) -> str:
             "\n\n`자막 시각 확인 필요` 키워드는 달지 못해 키워드 없이 보냈습니다"
             f" — {sent['caption_timing_error']} (로그 참고)"
         )
-    return text
+    return text + "".join("\n\n" + line for line in _caption_honesty_lines(sent))
+
+
+def _caption_honesty_lines(sent: Mapping[str, Any]) -> list[str]:
+    """보낸 파일의 자막이 비어 있는 곳을 이름으로 말한다(D59) — 조용히 빠지지 않게.
+
+    자막이 하나도 없는 영상, 전사가 실패해 자막이 빠진 구간, 기록이 없어 그것을 모르는 영상, 시각
+    확인이 끝나지 않아 키워드가 붙지 않은 영상. 가격은 말하지 않는다(D57).
+    """
+    lines: list[str] = []
+    empty = list(sent.get("no_captions") or ())
+    if empty:
+        lines.append(f"자막이 없는 영상 {len(empty)}개는 자막 없이 보냈습니다: {', '.join(empty)}.")
+    gaps = list(sent.get("caption_gaps") or ())
+    if gaps:
+        listed = ", ".join(f"{row['name']}({row['spans']})" for row in gaps)
+        lines.append(
+            f"전사가 실패해 자막이 빠진 구간이 있는 영상 {len(gaps)}개: {listed} — 그 구간에는"
+            " 자막이 없습니다."
+        )
+    unknown = list(sent.get("unknown_gaps") or ())
+    if unknown:
+        lines.append(
+            f"전사 기록이 없어 빠진 구간을 알 수 없는 영상 {len(unknown)}개: {', '.join(unknown)}."
+        )
+    unchecked = list(sent.get("unchecked") or ())
+    if unchecked:
+        running = " 지금 확인하는 중입니다." if sent.get("sync_running") else ""
+        lines.append(
+            f"시각 확인이 끝나지 않은 영상 {len(unchecked)}개({', '.join(unchecked)})에는"
+            " 「자막 시각 확인 필요」 키워드가 붙지 않았습니다 — 확인이 끝난 뒤 다시 보내면"
+            f" 빨강으로 나온 영상에만 붙습니다.{running}"
+        )
+    return lines
+
+
+def _send_caption_facts(report: Mapping[str, Any]) -> dict[str, Any]:
+    """보내기 보고서에서 화면이 말할 자막 사실만 고른다 — 이름은 보고서의 원본 이름이다.
+
+    시각 확인 칸의 `missing`·`stale` 가운데 자막이 없는 영상은 뺀다(잴 자막이 없으니 확인을
+    기다리는 것이 아니다 — 「자막 없음」 줄이 이미 말한다).
+    """
+    sources = list(report.get("sources") or ())
+    names = {str(row["asset_id"]): str(row["name"]) for row in sources}
+    silent = {str(row["asset_id"]) for row in sources if not row.get("captions")}
+    section = report.get("sync_check") or {}
+    waiting = [
+        names.get(str(row["source_id"]), str(row.get("name") or row["source_id"]))
+        for bucket in ("missing", "stale")
+        for row in section.get(bucket) or ()
+        if str(row["source_id"]) not in silent
+    ]
+    return {
+        "no_captions": [names[asset_id] for asset_id in names if asset_id in silent],
+        "caption_gaps": [
+            {"name": str(row["name"]), "spans": _gap_spans_text(row["caption_gaps"])}
+            for row in sources
+            if row.get("caption_gaps")
+        ],
+        "unknown_gaps": [
+            str(row["name"])
+            for row in sources
+            if row.get("captions") and "caption_gaps" in row and row["caption_gaps"] is None
+        ],
+        "unchecked": waiting,
+        "sync_running": bool(section.get("running")),
+    }
+
+
+def _gap_spans_text(spans: Sequence[Mapping[str, str]]) -> str:
+    """`[{start: "1260", end: "4077073/3000"}]` → `1260–1359초` (보고서의 정확 유리수를 초로)."""
+    return ", ".join(
+        f"{float(Fraction(span['start'])):.0f}–{float(Fraction(span['end'])):.0f}초"
+        for span in spans
+    )
 
 
 class RawWorkspaceUi:
@@ -2562,6 +2636,7 @@ class RawWorkspaceUi:
                 "counts": report["counts"],
                 "not_exported": len(report["not_exported"]),
                 "caption_timing_error": report.get("sync_check", {}).get("error"),
+                **_send_caption_facts(report),
             }
             self._remember_finalcut(root, signature, sent)
             try:

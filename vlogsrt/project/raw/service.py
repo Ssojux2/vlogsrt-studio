@@ -2068,7 +2068,32 @@ class RawWorkspaceService:
         from vlogsrt.project.raw import finalcut_export
 
         flags = self._caption_timing_flags_or_reason(root)
-        return finalcut_export.export(self, root, context, caption_timing=flags).fcpxml
+        gaps = self._caption_gaps_or_unknown(root)
+        outcome = finalcut_export.export(
+            self, root, context, caption_timing=flags, caption_gaps=gaps
+        )
+        return outcome.fcpxml
+
+    def _caption_gaps_or_unknown(self, root: Path) -> dict[str, Any] | None:
+        """보내기 보고서의 전사 실패 구간 — 원본마다 1단계 기록을 읽기만 한다(D59).
+
+        표시 전용 칸이라 못 읽어도 보내기를 막지 않는다 — 그때는 None(모름)으로 남기고 이유를
+        로그에 남긴다. 빈 목록으로 꾸미지 않는다(빈 목록은 '실패 구간 없음'이다).
+        """
+        from vlogsrt.project.raw import sync_report
+
+        workspace = self._workspace(root)
+        try:
+            return {
+                asset.asset_id: sync_report.caption_gaps(workspace, asset)
+                for asset in self.global_order_proposal(root)
+            }
+        except Exception as error:  # noqa: BLE001 - 표시 전용 보고서 칸이 보내기를 막지 못한다
+            log.warn(
+                "자막이 빠진 구간을 읽지 못해 보내기 보고서에 '모름'으로 남깁니다"
+                f" — {type(error).__name__}: {error}"
+            )
+            return None
 
     def _caption_timing_flags_or_reason(self, root: Path) -> Any:
         """표지는 표시 전용이다 — 못 만들면 키워드 없이 보내고, 이유를 보고서 칸과 로그에 남긴다.
@@ -2107,7 +2132,11 @@ class RawWorkspaceService:
             )
         flagged = frozenset(row["source_id"] for row in buckets["flagged"])
         keyword = finalcut_timeline.KEYWORD_CAPTION_TIMING
-        section = {"rule": "current_red_only", "keyword": keyword, **buckets}
+        # 확인 작업이 도는 중이면 `missing`·`stale`은 아직 쓰이는 중인 보고서다(실측 09:17 보내기,
+        # D59) — 화면이 「확인이 끝난 뒤 다시 보내면 붙습니다」를 말할 근거로 남긴다.
+        latest = self.latest_job(root, SYNC_CHECK_JOB_KIND)
+        running = latest is not None and latest.status in ACTIVE_JOB_STATUSES
+        section = {"rule": "current_red_only", "keyword": keyword, "running": running, **buckets}
         return finalcut_export.CaptionTimingFlags(flagged=flagged, section=section)
 
     def scan_sources(

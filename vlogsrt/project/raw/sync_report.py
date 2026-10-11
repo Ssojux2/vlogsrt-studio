@@ -169,12 +169,23 @@ def cues_of(transcript: Mapping[str, Any]) -> tuple[Cue, ...]:
     )
 
 
-STAGE1_DOCUMENTS = ("asr_phase.json", "analysis_transcript.json")
-"""1단계 오디오 신원을 담은 문서 — 두 단계 실행은 앞의 것, 한 번에 끝난 실행은 뒤의 것."""
+STAGE1_DOCUMENTS = ("asr_phase.json", "analysis_transcript.json", "asr_outcome.json")
+"""1단계 오디오 신원을 담은 문서 — 두 단계 실행은 첫째, 한 번에 끝난 실행은 둘째.
+
+셋째(`asr_outcome.json`, D59)는 전사가 끝나자마자 쓰이는 기록이다. 전사 뒤 장면 컷·프레임
+단계에서 분석이 죽으면(실측 0018: 분석 프록시 시간 초과·앱 종료) 앞의 둘은 남지 않지만 원본
+자막은 이미 심겨 있다 — 그 자막의 실패 청크를 알 수 있는 기록은 이것뿐이다. 한 폴더에 여럿이면
+앞의 것이 이긴다(같은 전사의 더 큰 기록이다).
+"""
 
 
 def stage1_audio(workspace_root: Path, asset_id: str, source_sha256: str) -> Stage1Audio | None:
-    """이 원본의 가장 최근 1단계 기록 — 원본 해시가 같은 것만. 없으면 None. 읽기만 한다."""
+    """이 원본의 가장 최근 1단계 기록 — 원본 해시가 같은 것만. 없으면 None. 읽기만 한다.
+
+    자막은 전사 직후에 심기고 같은 때 기록이 남으므로 "가장 최근"이 지금 자막을 심은 전사다
+    (사람이 고친 자막은 다시 심기지 않는다 — 그때는 가장 최근 전사의 실패를 말한다). 실패·중단된
+    리비전의 폴더도 본다 — 분석 행의 상태와 무관하게 폴더의 문서로 찾는다(D59).
+    """
     found: list[Stage1Audio] = []
     for folder in sorted(workspace_root.glob(f"analysis/*/*_{asset_id}")):
         try:
@@ -819,6 +830,18 @@ def _common_flags(flagged: Iterable[sync_check.CueFlag], shift: Fraction) -> lis
         for item in flagged
     ]
     return sync_check.flagged_document(restored)
+
+
+def caption_gaps(workspace: Any, asset: Any) -> list[dict[str, str]] | None:
+    """원본 하나의 전사 실패 구간(공통 시계) — Final Cut 보내기 보고서에 값으로 넘긴다(D59).
+
+    보고서와 같은 1단계 기록·같은 산술이다. 확인 보고서가 아직 없어도(재는 중·낡음) 읽힌다 —
+    재지 않고 기록만 읽는다. 기록이 없으면 빈 목록이 아니라 None이다('없음'이 아니라 '모름').
+    """
+    stage1 = stage1_audio(workspace.root, asset.asset_id, asset.content_sha256 or "")
+    if stage1 is None:
+        return None
+    return _failed_document(stage1)
 
 
 def _failed_document(stage1: Stage1Audio | None) -> list[dict[str, str]]:

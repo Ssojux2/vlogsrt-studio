@@ -10,7 +10,7 @@ import json
 import shutil
 import subprocess
 import threading
-from dataclasses import asdict
+from dataclasses import asdict, fields
 from fractions import Fraction
 from pathlib import Path
 
@@ -19,11 +19,15 @@ import pytest
 from tests.raw.test_media_refs import transcode
 from tests.raw.test_review_workspace import _wait_terminal
 from vlogsrt import log, preprocess
-from vlogsrt.project.raw import analysis_workflow, media_refs, source_transcript
+from vlogsrt.project.raw import analysis_workflow, media_refs, source_transcript, sync_report
 from vlogsrt.project.raw.analysis_config import (
     ANALYSIS_PROXY,
+    ANALYSIS_PROXY_LIMITS,
     PAIR_VIDEO_SAMPLE_SIZE,
+    AnalysisProxyLimits,
+    AnalysisProxyRecipe,
     RawUnderstandingSettings,
+    validate_analysis_proxy_limits,
 )
 from vlogsrt.project.raw.analysis_store import AnalysisStore
 from vlogsrt.project.raw.jobs import JobCancelledError
@@ -487,6 +491,7 @@ def test_ten_bit_4k_original_verifies_against_its_analysis_proxy(tmp_path):
     preprocess.build_analysis_proxy(
         original, proxy, scale=recipe.scale, video_codec=recipe.video_codec,
         preset=recipe.preset, crf=recipe.crf, gop=recipe.gop, pix_fmt=recipe.pix_fmt,
+        timeout_seconds=ANALYSIS_PROXY_LIMITS.proxy_timeout(None),
     )  # fmt: skip
     verdict = media_refs.validate_analysis_proxy(original, proxy)
     assert verdict.status == "verified", verdict.reason
@@ -524,7 +529,9 @@ def _window_plan(workspace, asset):
 def test_scene_cut_probe_decodes_the_analysis_proxy(imported, monkeypatch):
     workspace, asset, _, _ = imported
     seen = []
-    monkeypatch.setattr(preprocess, "verified_scene_times", lambda path: seen.append(path) or ())
+    monkeypatch.setattr(
+        preprocess, "verified_scene_times", lambda path, **_: seen.append(path) or ()
+    )
     analysis_workflow._scene_plan(workspace, asset, _window_plan(workspace, asset))
     assert seen and seen[0].is_relative_to(workspace.root / "cache" / "analysis-proxy")
 
@@ -539,7 +546,7 @@ def test_stage_two_scene_cuts_follow_the_stage_one_frame_source(imported, monkey
     base = media_refs.fingerprint(workspace, asset.asset_id)
     seen: list[Path] = []
     monkeypatch.setattr(
-        preprocess, "verified_scene_times", lambda path: seen.append(path) or (Fraction(1),)
+        preprocess, "verified_scene_times", lambda path, **_: seen.append(path) or (Fraction(1),)
     )
     monkeypatch.setattr(
         preprocess, "build_analysis_proxy", lambda *a, **k: pytest.fail("2단계가 프록시를 만들었다")
@@ -575,5 +582,218 @@ def test_build_refuses_to_overwrite_an_existing_target(imported, tmp_path):
             workspace.source_media_path(asset), target, scale=recipe.scale,
             video_codec=recipe.video_codec, preset=recipe.preset, crf=recipe.crf,
             gop=recipe.gop, pix_fmt=recipe.pix_fmt,
+            timeout_seconds=ANALYSIS_PROXY_LIMITS.proxy_timeout(None),
         )  # fmt: skip
     assert target.read_bytes() == b"x"
+
+
+# ─── D59 — 시간 한도는 원본 길이를 따르고, 넘기면 원본으로 물러난다 ─────────────────
+
+PRE_19A_TAG = "analysis-proxy/v1/scale=0.25/libx264/veryfast/crf28/g12/yuv420p"
+PRE_19A_KEY_FOR_A64 = "4ee90948c629b183f851843992fc898e06f84ec3193164ee1537b719a454656d"
+"""19a 이전 코드로 잰 `_proxy_directory`의 열쇠(원본 해시 `a`×64) — 한도가 열쇠 밖이라는 증거."""
+
+
+def test_limits_grow_with_the_source_and_keep_the_old_floor():
+    limits = AnalysisProxyLimits()
+    assert (limits.timeout_floor_seconds, limits.timeout_media_ratio) == (1800.0, 6.0)
+    assert (limits.frame_batch_timeout_floor_seconds, limits.frame_batch_timeout_media_ratio) == (
+        1800.0,
+        6.0,
+    )
+    assert limits.proxy_timeout(None) == limits.proxy_timeout(20.0) == 1800.0  # 짧은 원본은 그대로
+    assert limits.proxy_timeout(545.145) == pytest.approx(3270.87)  # 0016
+    assert limits.proxy_timeout(1359.025) == pytest.approx(8154.15)  # 0018
+    assert limits.frame_batch_timeout(1359.025) == pytest.approx(8154.15)
+    for unknown in (float("nan"), float("inf"), -1.0, 0.0):
+        assert limits.proxy_timeout(unknown) == 1800.0
+    validate_analysis_proxy_limits(limits)
+    for broken in (
+        AnalysisProxyLimits(timeout_floor_seconds=0.0),
+        AnalysisProxyLimits(timeout_media_ratio=-1.0),
+        AnalysisProxyLimits(frame_batch_timeout_floor_seconds=float("nan")),
+        AnalysisProxyLimits(frame_batch_timeout_media_ratio=True),
+    ):
+        with pytest.raises(ValueError, match="디코드 시간 한도"):
+            validate_analysis_proxy_limits(broken)
+
+
+def test_limits_stay_outside_the_recipe_tag_and_every_cache_key(imported, monkeypatch):
+    """한도는 기다리는 시간이지 만들어지는 바이트가 아니다 — 열쇠·지문은 19a 이전 그대로다."""
+    workspace, asset, _, _ = imported
+    assert ANALYSIS_PROXY.tag() == PRE_19A_TAG
+    assert media_refs._proxy_directory(workspace, "a" * 64, ANALYSIS_PROXY).name == (
+        PRE_19A_KEY_FOR_A64
+    )
+    assert not [f.name for f in fields(AnalysisProxyRecipe) if "timeout" in f.name]
+    assert not [key for key in asdict(RawUnderstandingSettings()) if "timeout" in key]
+    first = media_refs.resolve(workspace, asset, "frames")
+    before = media_refs.frames_fingerprint(workspace, asset.asset_id)
+    monkeypatch.setattr(
+        media_refs,
+        "ANALYSIS_PROXY_LIMITS",
+        AnalysisProxyLimits(timeout_floor_seconds=99.0, timeout_media_ratio=99.0),
+    )
+    monkeypatch.setattr(
+        preprocess, "build_analysis_proxy", lambda *a, **k: pytest.fail("한도가 열쇠를 바꿨다")
+    )
+    assert media_refs.resolve(workspace, asset, "frames") == first
+    assert media_refs.frames_fingerprint(workspace, asset.asset_id) == before
+
+
+def test_build_hands_the_media_scaled_limit_to_the_encoder(imported, monkeypatch):
+    workspace, asset, _, _ = imported
+    seen: list[dict] = []
+    real_run = preprocess._run
+
+    def spy(command, **kwargs):
+        if "-copyts" in command:
+            seen.append(kwargs)
+        return real_run(command, **kwargs)
+
+    monkeypatch.setattr(preprocess, "_run", spy)
+    media_refs.resolve(workspace, asset, "frames")
+    (kwargs,) = seen
+    assert kwargs == {
+        "timeout": ANALYSIS_PROXY_LIMITS.proxy_timeout(asset.duration_seconds),
+        "step": "분석 프록시 만들기",
+    }
+    sampler = media_refs.frame_sampler(workspace, asset)
+    assert sampler.decode_timeout_seconds == ANALYSIS_PROXY_LIMITS.frame_batch_timeout(
+        asset.duration_seconds
+    )
+
+
+def test_a_proxy_timeout_falls_back_to_the_original_with_a_warning(imported, monkeypatch):
+    """0016·0018 꼴 — 인코드가 한도를 넘기면 `ProcessTimeout`(RuntimeError)이 원본 폴백을 탄다.
+
+    예전에는 `TimeoutExpired`(SubprocessError)가 `_build_and_verify`의 그물을 빠져나가 원본
+    전체의 분석이 실패했다. 실제 ffmpeg를 한도 0.01초로 멈춘다.
+    """
+    workspace, asset, _, _ = imported
+    original = workspace.source_media_path(asset)
+    warned = _warnings(monkeypatch)
+    monkeypatch.setattr(
+        media_refs,
+        "ANALYSIS_PROXY_LIMITS",
+        AnalysisProxyLimits(timeout_floor_seconds=0.01, timeout_media_ratio=0.0),
+    )
+    assert media_refs.resolve(workspace, asset, "frames") == original
+    (warning,) = warned
+    assert "원본으로 분석합니다" in warning and "ProcessTimeout" in warning
+    assert "분석 프록시 만들기 — 시간 한도" in warning
+    proxy_root = workspace.root / "cache" / "analysis-proxy"
+    assert not list(proxy_root.rglob("*.part")) and not list(proxy_root.rglob("*.mp4"))
+    assert not list(proxy_root.rglob("record.json"))
+    assert media_refs.frames_fingerprint(workspace, asset.asset_id) == media_refs.fingerprint(
+        workspace, asset.asset_id
+    )
+    sampler = media_refs.frame_sampler(workspace, asset)
+    assert sampler.source == original
+    sampled = workspace.root / "sampled"
+    sampled.mkdir()
+    sampler.prepare(frame_indices=(5, 60), directory=sampled, long_edge=160)
+    assert sorted(p.name for p in sampled.glob("frame_*.jpg")) == [
+        "frame_00000005.jpg",
+        "frame_00000060.jpg",
+    ]
+
+
+def test_leftovers_of_a_killed_build_neither_block_nor_poison_the_next_build(imported):
+    """실측 `cache/analysis-proxy`: 잠금만 남은 폴더 둘, `.part`가 남은 폴더 셋(강제 종료).
+
+    `flock`은 프로세스가 죽으면 풀리므로 남은 잠금 파일은 막지 않는다. `.part`는 무작위 새 이름과
+    겹치지 않아 막지 않지만 쌓인다 — 두 잠금을 쥔 다음 만들기가 치운다(살아 있는 만들기의 파일은
+    그때 있을 수 없다).
+    """
+    workspace, asset, _, _ = imported
+    original = workspace.source_media_path(asset)
+    directory = media_refs._proxy_directory(
+        workspace, media_refs._source_sha(workspace, asset, original), ANALYSIS_PROXY
+    )
+    directory.mkdir(parents=True)
+    (directory / "build.lock").touch()
+    dead = directory / ".proxy.mp4.74770.668bb83e.part"
+    dead.write_bytes(b"\x00" * 4096)
+    (directory / "record.json.tmp").write_text("{", encoding="utf-8")  # 반쯤 쓰다 죽은 기록
+    proxy = media_refs.resolve(workspace, asset, "frames")
+    assert proxy == directory / "proxy.mp4" and proxy.is_file()
+    assert not dead.exists()
+    assert (directory / "build.lock").exists()
+    assert json.loads((directory / "record.json").read_text(encoding="utf-8"))["state"] == "ready"
+    assert _clock(proxy).frame_count == _clock(original).frame_count
+
+
+def test_a_dead_build_next_to_a_ready_proxy_is_swept_and_the_proxy_kept(imported):
+    """실측 한 폴더(b453…)는 준비된 프록시 옆에 죽은 만들기의 `.part`(45MB)가 남았다.
+
+    잠금을 쥔 동안에는 그 폴더에서 만드는 중인 것이 없으니 치운다 — 게시본·기록은 그대로다.
+    """
+    workspace, asset, _, _ = imported
+    proxy = media_refs.resolve(workspace, asset, "frames")
+    stray = proxy.parent / ".proxy.mp4.40775.b567f817.part"
+    stray.write_bytes(b"x")
+    before = (proxy.read_bytes(), (proxy.parent / "record.json").read_bytes())
+    assert media_refs.resolve(workspace, asset, "frames") == proxy
+    assert not stray.exists()
+    assert (proxy.read_bytes(), (proxy.parent / "record.json").read_bytes()) == before
+
+
+def test_a_sweep_that_cannot_clean_warns_and_the_analysis_goes_on(imported, monkeypatch):
+    """치우기는 청소일 뿐이다 — 찾기·지우기의 OSError는 WARN으로 남고 프록시는 그대로 쓰인다."""
+    workspace, asset, _, _ = imported
+    proxy = media_refs.resolve(workspace, asset, "frames")
+    warned = _warnings(monkeypatch)
+    vanished = proxy.parent / ".proxy.mp4.1.0123abcd.part"  # 찾은 뒤 사라졌다(stat 실패)
+    monkeypatch.setattr(preprocess, "staging_leftovers", lambda target: (vanished,))
+    assert media_refs.resolve(workspace, asset, "frames") == proxy
+    assert len(warned) == 1 and "잔재를 지우지 못해" in warned[0]
+
+    def unreadable(target):
+        raise PermissionError("읽을 수 없는 폴더")
+
+    monkeypatch.setattr(preprocess, "staging_leftovers", unreadable)
+    assert media_refs.resolve(workspace, asset, "frames") == proxy
+    assert len(warned) == 2 and "잔재를 찾지 못해" in warned[1]
+
+
+def test_a_proxy_timeout_no_longer_fails_the_source_analysis(tmp_path, monkeypatch):
+    """0016 꼴 끝까지 — 분석 프록시가 시간 한도를 넘겨도 원본의 분석은 원본 프레임으로 끝난다.
+
+    분석 작업 안(취소를 듣는 실행)의 자체 마감이 `ProcessTimeout`이 되는 길이다. 예전에는
+    이 자리에서 원본 행이 `failed`(`TimeoutExpired: Command '[ffmpeg … -copyts …]'`)로 끝났다.
+    """
+    from tests._sync_fakes import energy_factory, numpy_or_fake
+    from tests.raw.test_sync_report import REPLAY_ANALYSIS_MODEL, start_tone_analysis, wait
+
+    numpy_or_fake(monkeypatch)
+    monkeypatch.setattr(sync_report, "default_session_factory", energy_factory)
+    warned = _warnings(monkeypatch)
+    monkeypatch.setattr(
+        media_refs,
+        "ANALYSIS_PROXY_LIMITS",
+        AnalysisProxyLimits(timeout_floor_seconds=0.01, timeout_media_ratio=0.0),
+    )
+    service, root, asset_id, handle = start_tone_analysis(tmp_path, model=REPLAY_ANALYSIS_MODEL)
+    assert wait(service, root, handle.job_id).status == "succeeded"
+    _settle_sync_job(service, root)
+    store = AnalysisStore(service._workspace(root))
+    (revision,) = store.list_revisions()
+    (row,) = store.list_source_results(revision.revision_id)
+    # 끝까지 분석됐다 — 예전에는 failed · error에 TimeoutExpired · 문서 없음이었다.
+    assert row.status == "analyzed" and row.error is None and row.document_path is not None, row
+    assert [w for w in warned if "ProcessTimeout" in w and "원본으로 분석합니다" in w]
+    document = json.loads((root / row.document_path).read_text(encoding="utf-8"))
+    assert document["frame_source"] == media_refs.ORIGINAL_ONLY_FINGERPRINT  # 원본에서 뽑았다
+    assert document["frames"]["failures"] == [] and document["frames"]["frames"]
+    assert not list((root / "cache" / "analysis-proxy").rglob("*.mp4"))
+
+
+def _settle_sync_job(service, root) -> None:
+    """분석 끝에 걸리는 무료 확인 작업이 끝날 때까지 — 임시 폴더를 치우기 전에."""
+    from tests.raw.test_sync_report import wait
+    from vlogsrt.project.raw import service as raw_service
+
+    latest = service.latest_job(root, raw_service.SYNC_CHECK_JOB_KIND)
+    if latest is not None:
+        wait(service, root, latest.job_id)

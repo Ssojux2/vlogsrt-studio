@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import array
+import ast
 import json
 import shutil
 import subprocess
+import sys
+import time
 from fractions import Fraction
 from pathlib import Path
 
@@ -27,6 +30,7 @@ from vlogsrt.preprocess import (
     probe_video_stream,
     split_at,
 )
+from vlogsrt.task_runtime import cancellation_scope
 
 
 def _fake_run(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
@@ -1822,3 +1826,83 @@ def test_probe_timecode_reads_a_real_matroska_container_timecode(tmp_path: Path)
     assert preprocess.probe_timecode(media) == preprocess.SourceTimecode(
         "10:00:00:00", Fraction(25)
     )
+
+
+# ─── D59 — 시간 한도는 ProcessTimeout(RuntimeError)으로만 나간다 ─────────────────
+
+_SLEEPER = [sys.executable, "-c", "import time; time.sleep(30)"]
+
+
+def test_a_timeout_is_a_process_timeout_naming_the_step_and_the_limit() -> None:
+    """`TimeoutExpired`는 `SubprocessError`라 RuntimeError 그물을 빠져나갔다(0016·0018)."""
+    started = time.monotonic()
+    with pytest.raises(preprocess.ProcessTimeout) as caught:
+        preprocess.run_process(
+            _SLEEPER, capture_output=True, text=True, check=False, timeout=1.0, step="장면 컷 찾기"
+        )
+    error = caught.value
+    assert isinstance(error, RuntimeError)
+    assert not isinstance(error, subprocess.SubprocessError)
+    assert isinstance(error.__cause__, subprocess.TimeoutExpired)
+    assert error.limit_seconds == 1.0 and error.step == "장면 컷 찾기"
+    assert str(error).startswith("장면 컷 찾기 — 시간 한도 1초를 넘겨 멈췄습니다")
+    assert time.monotonic() - started < 20  # 자식은 기다리지 않고 멈춘다
+
+
+def test_a_timeout_under_cancellation_is_also_a_process_timeout() -> None:
+    """작업 안(취소를 듣는 실행)은 자체 마감을 잰다 — 같은 번역을 지난다."""
+    started = time.monotonic()
+    with cancellation_scope(lambda: None), pytest.raises(preprocess.ProcessTimeout) as caught:
+        preprocess.run_process(_SLEEPER, capture_output=True, text=True, check=False, timeout=0.5)
+    assert caught.value.step == Path(sys.executable).name  # 단계 이름이 없으면 도구 이름
+    assert time.monotonic() - started < 20
+
+
+def test_run_without_a_limit_keeps_the_named_cancellable_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """한도를 주지 않은 실행은 예전과 같다 — 다만 그 상한은 이름 붙은 값에서 온다(규칙 8)."""
+    monkeypatch.setattr(preprocess, "_CANCELLABLE_TIMEOUT_SECONDS", 0.5)
+    with cancellation_scope(lambda: None), pytest.raises(RuntimeError, match="시간 한도"):
+        preprocess._run(_SLEEPER)
+
+
+def test_run_hands_its_limit_and_step_to_the_process(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, object] = {}
+
+    def recording(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        seen.update(kwargs)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(preprocess, "run_process", recording)
+    preprocess._run(["ffmpeg"], timeout=1234.5, step="분석 프록시 만들기")
+    assert (seen["timeout"], seen["step"]) == (1234.5, "분석 프록시 만들기")
+    seen.clear()
+    preprocess._run(["ffprobe"])
+    assert "timeout" not in seen  # 한도가 없으면 예전 그대로(취소를 듣지 않는 실행은 무한)
+
+
+def test_no_1800_second_literal_lives_inside_a_function() -> None:
+    """예전의 `timeout=1800.0` 둘은 함수 안 리터럴이었다 — 이름 붙은 값·설정으로 옮겼다."""
+    tree = ast.parse(Path(preprocess.__file__).read_text(encoding="utf-8"))
+    functions = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef | ast.AsyncFunctionDef)]
+    literals = [
+        node.lineno
+        for function in functions
+        for node in ast.walk(function)
+        if isinstance(node, ast.Constant) and node.value in (1800, 1800.0)
+    ]
+    assert literals == []
+
+
+def test_staging_leftovers_match_only_the_reserved_temp_names(tmp_path: Path) -> None:
+    """강제 종료된 만들기의 `.part`만 고른다 — 이웃 파일·게시본·심볼릭 링크는 아니다."""
+    target = tmp_path / "proxy.mp4"
+    reserved = preprocess._reserve_staging_temp(target)
+    old = tmp_path / ".proxy.mp4.74770.668bb83e.part"
+    old.write_bytes(b"x")
+    for name in ("proxy.mp4", ".proxy.mp4.part", ".other.mp4.1.0123abcd.part", "build.lock"):
+        (tmp_path / name).write_bytes(b"y")
+    (tmp_path / ".proxy.mp4.9.deadbeef.part").symlink_to(tmp_path / "proxy.mp4")
+    assert preprocess.staging_leftovers(target) == tuple(sorted((old, reserved)))
+    assert preprocess.staging_leftovers(tmp_path / "missing" / "proxy.mp4") == ()

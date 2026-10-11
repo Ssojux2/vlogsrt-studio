@@ -32,7 +32,7 @@ import itertools
 import json
 import os
 import re
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -101,6 +101,12 @@ class CaptionTimingFlags:
 
     flagged: frozenset[str]
     section: Mapping[str, object]
+
+
+CaptionGaps = Mapping[str, Sequence[Mapping[str, str]] | None]
+"""원본 → 전사 실패 구간(공통 시계 `start`·`end`·`reason`) — 서비스가 1단계 기록을 읽어 값으로
+넘긴다(D59). 이 계층은 확인 계층을 모른다. 값이 None인 원본은 기록이 없어 '모름'이다. 리포트에만
+실린다 — 문서(FCPXML) 바이트는 이 값과 무관하다(D56)."""
 
 
 class FinalCutExportError(RawWorkspaceError):
@@ -481,6 +487,7 @@ class _Scope:
     head: ReviewRevision | None
     evidence: Mapping[str, AnalysisSourceResult]
     shelf: _LibraryShelf
+    caption_gaps: CaptionGaps | None = None
 
 
 def _gather(scope: _Scope, asset: SourceAsset) -> _Gathered:
@@ -499,7 +506,9 @@ def _gather(scope: _Scope, asset: SourceAsset) -> _Gathered:
         report=report,
         cues=_cues(scope.service, scope.root, asset),
     )
-    facts = _source_facts(asset, source, code, row if report is not None else None)
+    facts = _source_facts(
+        asset, source, code, row if report is not None else None, scope.caption_gaps
+    )
     return _Gathered(source, facts, from_library=declared is not None)
 
 
@@ -545,9 +554,17 @@ def _source_facts(
     source: timeline.SourceInput,
     code: _Timecode,
     row: AnalysisSourceResult | None,
+    gaps: CaptionGaps | None,
 ) -> dict[str, object]:
+    """리포트 한 줄 — 자막은 정직하게: 실은 큐 수와 전사 실패 구간까지(D59).
+
+    `captions`는 실제로 실은 큐가 있는가다. 예전에는 원본 자막 문서가 있는가였다 — 큐 0개인
+    0008이 `true`로 적혔다. `caption_gaps`는 서비스가 넘긴 값 그대로이고, 넘기지 않았으면 None
+    (모름)이다. 문서(FCPXML)는 이 칸들과 무관하다.
+    """
     media = source.media
     label = code.label
+    cues = source.cues or ()
     return {
         "asset_id": asset.asset_id,
         "name": media.name,
@@ -559,8 +576,17 @@ def _source_facts(
         "frames": media.frame_count,
         "segments": None if source.segments is None else len(source.segments),
         "analysis_revision": None if row is None else row.revision_id,
-        "captions": source.cues is not None,
+        "captions": bool(cues),
+        "caption_count": len(cues),
+        "caption_gaps": _gaps_of(gaps, asset.asset_id),
     }
+
+
+def _gaps_of(gaps: CaptionGaps | None, asset_id: str) -> list[dict[str, str]] | None:
+    if gaps is None:
+        return None
+    spans = gaps.get(asset_id)
+    return None if spans is None else [dict(span) for span in spans]
 
 
 # ── 모으기 ───────────────────────────────────────────────────────────────
@@ -786,6 +812,7 @@ def export(
     now: Callable[[], datetime] = _utc_now,
     dtd_path: Path = INSTALLED_DTD,
     caption_timing: CaptionTimingFlags | None = None,
+    caption_gaps: CaptionGaps | None = None,
 ) -> ExportOutcome:
     """ready 원본 전부(촬영 순) → 새 FCPXML + 리포트. Final Cut은 열지 않는다(D55 표지는 값으로)."""
     facade = service.review_workspace_facade(root)
@@ -800,7 +827,8 @@ def export(
             raise FinalCutExportError("보낼 원본이 없다 — 가져오기를 먼저 끝내세요")
         head = _load_head(facade, assets)
         shelf = _LibraryShelf(service.remembered_fcp_library(root))
-        scope = _Scope(service, workspace.root, workspace, head, facade.tier_evidence_rows(), shelf)
+        rows = facade.tier_evidence_rows()
+        scope = _Scope(service, workspace.root, workspace, head, rows, shelf, caption_gaps)
         gathered = _gather_all(scope, assets, context)
         document = _document(gathered, workspace, moment, shelf, caption_timing)
         exported = {asset.asset_id for asset in assets}
@@ -812,10 +840,28 @@ def export(
             "review_head": None if head is None else head.revision_id,
             "sources": [item.facts for item in gathered],
             "not_exported": _not_exported(service, root, head, exported),
-            "counts": timeline.document_counts(document),
+            "counts": _report_counts(document, gathered),
             **({} if caption_timing is None else {"sync_check": dict(caption_timing.section)}),
         }
         return _publish(folder, timeline.render(document), report, moment, dtd_path)
+
+
+def _report_counts(
+    document: timeline.TimelineDocument, gathered: list[_Gathered]
+) -> dict[str, object]:
+    """빌더의 요약 + 큐 0개인 원본(D59) — 자막의 두 가지 「없음」을 따로 센다.
+
+    `sources_without_captions`(빌더)는 원본 자막 **문서가 없는** 원본이다(분석 전 등).
+    `sources_with_empty_captions`는 문서는 있지만 **큐가 0개**인 원본이다(실측 0008). 둘 다 원본
+    줄의 `captions`가 false다. 문서(FCPXML)는 이 요약과 무관하다.
+    """
+    counts = timeline.document_counts(document)
+    counts["sources_with_empty_captions"] = [
+        item.source.media.name
+        for item in gathered
+        if item.source.cues is not None and not item.source.cues
+    ]
+    return counts
 
 
 def _document(

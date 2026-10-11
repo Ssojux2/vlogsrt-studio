@@ -24,6 +24,7 @@ from typing import Any
 from vlogsrt import log, preprocess
 from vlogsrt.project.raw.analysis_config import (
     ANALYSIS_PROXY,
+    ANALYSIS_PROXY_LIMITS,
     PAIR_AUDIO_MIN_CORRELATION,
     PAIR_AUDIO_TAIL_SECONDS,
     PAIR_SHIFT_MARGIN,
@@ -503,12 +504,14 @@ def _exclusive(directory: Path) -> Iterator[None]:
 
 
 def _build_and_verify(
-    directory: Path, original: Path, recipe: AnalysisProxyRecipe
+    directory: Path, original: Path, recipe: AnalysisProxyRecipe, timeout_seconds: float
 ) -> tuple[bool, str]:
     """만들고 검증한 결과 — 실패는 (False, 사유)로, 취소 예외는 그대로 올라간다.
 
     두 잠금 안에서, 남은 파일을 잔재로 치운 뒤에만 불린다(`_clear_leftover`). 만들기는
-    이미 있는 대상을 덮어쓰지 않는다.
+    이미 있는 대상을 덮어쓰지 않는다. 시간 한도를 넘긴 만들기는 `ProcessTimeout`
+    (RuntimeError)이라 여기서 실패로 바뀌어 원본으로 물러난다(D59) — 예전에는
+    `TimeoutExpired`가 이 그물을 빠져나가 원본 전체의 분석이 실패했다.
     """
     target = directory / _PROXY_FILE
     started = time.monotonic()
@@ -522,6 +525,7 @@ def _build_and_verify(
             crf=recipe.crf,
             gop=recipe.gop,
             pix_fmt=recipe.pix_fmt,
+            timeout_seconds=timeout_seconds,
         )
     except (OSError, RuntimeError, ValueError) as error:
         return False, f"{type(error).__name__}: {error}"
@@ -544,6 +548,29 @@ def _clear_leftover(directory: Path, recipe: AnalysisProxyRecipe) -> None:
     (directory / _PROXY_FILE).unlink(missing_ok=True)
 
 
+def _sweep_dead_staging(directory: Path) -> None:
+    """강제 종료된 만들기가 남긴 스테이징(`.part`)을 치운다 — 두 잠금을 쥔 동안에만 부른다(D59).
+
+    만들기는 두 잠금 안에서만 일어나므로 잠금을 쥔 지금 이 폴더의 `.part`는 전부 죽은 만들기의
+    것이다(실측: 강제 종료로 남은 45–162MB 셋). 잠금 파일은 남긴다 — `flock`은 프로세스가 죽으면
+    커널이 풀어 주므로 남은 파일이 다음 만들기를 막지 않는다. 게시본·기록은 건드리지 않는다.
+    치우기는 청소일 뿐이다 — 못 치워도(권한·경합) 경고만 남기고 분석은 계속한다.
+    """
+    try:
+        leftovers = preprocess.staging_leftovers(directory / _PROXY_FILE)
+    except OSError as error:
+        log.warn(f"분석 프록시 — 잔재를 찾지 못해 그대로 둡니다: {directory.name} ({error})")
+        return
+    for stale in leftovers:
+        try:
+            size = stale.stat().st_size
+            stale.unlink(missing_ok=True)
+        except OSError as error:
+            log.warn(f"분석 프록시 — 잔재를 지우지 못해 그대로 둡니다: {stale.name} ({error})")
+            continue
+        log.info(f"분석 프록시 — 강제 종료된 만들기의 잔재를 지웠습니다: {stale.name} ({size}B)")
+
+
 def ensure_analysis_proxy(workspace: Any, asset: Any, original: Path) -> Path | None:
     """원본의 25% 분석 프록시 — 없으면 한 번 만들고 검증한다. 못 쓰면 None(원본으로 간다).
 
@@ -553,14 +580,17 @@ def ensure_analysis_proxy(workspace: Any, asset: Any, original: Path) -> Path | 
     """
     recipe = ANALYSIS_PROXY
     directory = _proxy_directory(workspace, _source_sha(workspace, asset, original), recipe)
+    # 한도는 원본 길이를 따라 자란다(D59) — 조리법·캐시 열쇠에는 들어가지 않는다.
+    timeout_seconds = ANALYSIS_PROXY_LIMITS.proxy_timeout(asset.duration_seconds)
     with _exclusive(directory):
+        _sweep_dead_staging(directory)
         # 실패를 준비보다 먼저 본다 — 한 실행 안에서 프레임 출처(와 캐시 키)가 뒤집히지 않게.
         if str(directory) in _FAILED:
             return None
         if _ready(directory, recipe):
             return directory / _PROXY_FILE
         _clear_leftover(directory, recipe)
-        ok, reason = _build_and_verify(directory, original, recipe)
+        ok, reason = _build_and_verify(directory, original, recipe, timeout_seconds)
         if not ok:
             _fall_back(directory, original, reason)
             return None
@@ -629,6 +659,8 @@ class _FrameSampler:
     source: Path
     stream_index: int
     cache_directory: Path
+    decode_timeout_seconds: float
+    """묶음 추출 한 번(출처를 통째로 한 번 디코드)의 한도 — 원본 길이로 정한다(D59)."""
     batch_attempts: dict[tuple[int, int], str] = field(default_factory=dict, compare=False)
 
     def _cached(self, index: int, edge: int) -> Path | None:
@@ -671,6 +703,7 @@ class _FrameSampler:
                 missing,
                 directory,
                 long_edge=long_edge,
+                timeout_seconds=self.decode_timeout_seconds,
                 on_frame=lambda index, path: self._cache(index, long_edge, path),
             )
         except Exception as error:
@@ -707,4 +740,5 @@ def frame_sampler(workspace: Any, asset: Any) -> Any:
         path,
         preprocess.probe_raw_media(path).video.stream_index,
         workspace.root / "cache" / "source-frames" / key,
+        ANALYSIS_PROXY_LIMITS.frame_batch_timeout(asset.duration_seconds),
     )

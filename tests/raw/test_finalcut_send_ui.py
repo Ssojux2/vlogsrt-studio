@@ -218,3 +218,84 @@ def test_send_button_replaces_the_old_two_step_labels(tmp_path: Path, local_sock
     assert "Final Cut에서 " + "열기" not in labels
     assert not hasattr(RawWorkspaceUi, "capcut_" + "handoff_view")
     assert not hasattr(RawWorkspaceUi, "capcut_" + "open_view")
+
+
+# ─── D59 — 보낸 결과가 자막이 비어 있는 곳을 이름으로 말한다 ─────────────────────
+
+
+def _honest_report() -> dict[str, Any]:
+    """실측 09:17:44 보내기의 꼴 — 0008 큐 0개, 0018 실패 청크, 0011은 확인을 기다린다."""
+    return {
+        "sources": [
+            {"asset_id": "a8", "name": "DJI_0008_D", "captions": False, "caption_gaps": []},
+            {"asset_id": "a11", "name": "DJI_0011_D", "captions": True, "caption_gaps": []},
+            {
+                "asset_id": "a18",
+                "name": "DJI_0018_D",
+                "captions": True,
+                "caption_gaps": [{"start": "1260/1", "end": "4077073/3000", "reason": "x"}],
+            },
+            {"asset_id": "a19", "name": "DJI_0019_D", "captions": True, "caption_gaps": None},
+        ],
+        "sync_check": {
+            "rule": "current_red_only",
+            "running": True,
+            "missing": [
+                {"source_id": "a8", "name": "DJI_0008_D.mov"},
+                {"source_id": "a11", "name": "DJI_0011_D.mov"},
+            ],
+            "stale": [{"source_id": "a19", "name": "DJI_0019_D.mov"}],
+            "flagged": [],
+        },
+    }
+
+
+def test_send_facts_pick_empty_sources_failed_spans_and_unchecked_timing() -> None:
+    from ui.workspace_service import _send_caption_facts
+
+    facts = _send_caption_facts(_honest_report())
+    assert facts == {
+        "no_captions": ["DJI_0008_D"],
+        "caption_gaps": [{"name": "DJI_0018_D", "spans": "1260–1359초"}],
+        "unknown_gaps": ["DJI_0019_D"],  # 자막은 있는데 전사 기록이 없다 — '없음'이 아니라 '모름'
+        "unchecked": ["DJI_0011_D", "DJI_0019_D"],  # 자막 없는 0008은 확인을 기다리지 않는다
+        "sync_running": True,
+    }
+
+
+def test_send_text_says_it_politely_and_without_prices() -> None:
+    from ui.workspace_service import _finalcut_sent_text, _send_caption_facts
+
+    sent = {
+        "path": "/x/vlogsrt_20261011T001744Z.fcpxml",
+        "counts": {"sources": 4, "spine_clips": 9, "disabled_clips": 0, "unreviewed_clips": 0},
+        "not_exported": 0,
+        **_send_caption_facts(_honest_report()),
+    }
+    text = _finalcut_sent_text(sent)
+    assert "자막이 없는 영상 1개는 자막 없이 보냈습니다: DJI_0008_D." in text
+    assert "전사가 실패해 자막이 빠진 구간이 있는 영상 1개: DJI_0018_D(1260–1359초)" in text
+    assert "전사 기록이 없어 빠진 구간을 알 수 없는 영상 1개: DJI_0019_D." in text
+    assert (
+        "시각 확인이 끝나지 않은 영상 2개(DJI_0011_D, DJI_0019_D)에는 「자막 시각 확인 필요」"
+        " 키워드가 붙지 않았습니다 — 확인이 끝난 뒤 다시 보내면 빨강으로 나온 영상에만 붙습니다."
+        " 지금 확인하는 중입니다."
+    ) in text
+    assert "$" not in text and "달러" not in text
+    quiet = _finalcut_sent_text(
+        {**sent, "no_captions": [], "caption_gaps": [], "unknown_gaps": [], "unchecked": []}
+    )
+    assert "자막이 없는" not in quiet and "시각 확인이 끝나지" not in quiet
+    assert "알 수 없는" not in quiet
+    old = {k: v for k, v in sent.items() if k in ("path", "counts", "not_exported")}
+    assert _finalcut_sent_text(old).startswith("**Final Cut으로 보냈습니다**")  # 예전 기억도 읽힌다
+
+
+def test_sending_a_source_without_subtitles_names_it_in_the_result(tmp_path: Path):
+    opened: list[Path] = []
+    server, signature, root = _server(tmp_path, opened)
+    server.finalcut_send_view(signature)
+    assert _send_job(server, root).status == "succeeded"
+    status = str(server.capcut_status_view(signature))
+    assert "자막이 없는 영상 1개는 자막 없이 보냈습니다: plain." in status
+    assert "시각 확인이 끝나지 않은" not in status  # 잴 자막이 없으면 기다리는 것도 아니다

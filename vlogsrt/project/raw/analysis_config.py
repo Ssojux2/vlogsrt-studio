@@ -148,6 +148,73 @@ class AnalysisProxyRecipe:
 ANALYSIS_PROXY = AnalysisProxyRecipe()
 """지금 쓰는 분석 프록시 조리법 — 모든 호출 지점이 이 하나를 읽는다."""
 
+
+@dataclass(frozen=True)
+class AnalysisProxyLimits:
+    """원본을 통째로 디코드하는 ffmpeg 한 번의 시간 한도 — `max(바닥, 배율 × 원본 길이)`초(D59).
+
+    분석 프록시 만들기와, 프레임 출처를 통째로 한 번 디코드하는 일(프레임 묶음·장면 컷)이 각자
+    한 쌍을 쓴다. 예전에는 둘 다 길이와 무관하게 1800초였다 — 실측 0016(545초 4K HEVC)과
+    0018(1359초)의 분석 프록시 만들기가 분석 셋이 함께 도는 동안(D49) 1800초를 넘겨
+    `TimeoutExpired`로 원본 전체의 분석이 실패했다. 이제 한도는 원본 길이를 따라 자라고, 넘기면
+    분석 프록시는 원본으로 물러난다(D47의 안전망).
+
+    **외부 근거 없는 조정 대상**(`cut_*`처럼): 바닥 1800초는 예전 상한 그대로라 짧은 원본의 동작이
+    바뀌지 않는다. 배율 6은 실패가 확인된 지점(0016: 원본 길이의 3.3배를 넘어도 끝나지 않음)의
+    약 1.8배다 — 0016은 3271초, 0018은 8154초까지 기다린다. 조리법(`AnalysisProxyRecipe.tag()`)·
+    분석 지문·캐시 열쇠 어디에도 들어가지 않는다 — 한도는 기다리는 시간이지 만들어지는 바이트가
+    아니다.
+    """
+
+    timeout_floor_seconds: float = 1800.0
+    timeout_media_ratio: float = 6.0
+    frame_batch_timeout_floor_seconds: float = 1800.0
+    frame_batch_timeout_media_ratio: float = 6.0
+
+    def proxy_timeout(self, media_seconds: float | None) -> float:
+        """분석 프록시 만들기의 한도 — 길이를 모르면 바닥이다."""
+        validate_analysis_proxy_limits(self)
+        return _scaled_timeout(self.timeout_floor_seconds, self.timeout_media_ratio, media_seconds)
+
+    def frame_batch_timeout(self, media_seconds: float | None) -> float:
+        """프레임 출처를 통째로 디코드하는 한 번(프레임 묶음·장면 컷)의 한도."""
+        validate_analysis_proxy_limits(self)
+        return _scaled_timeout(
+            self.frame_batch_timeout_floor_seconds,
+            self.frame_batch_timeout_media_ratio,
+            media_seconds,
+        )
+
+
+def _scaled_timeout(floor: float, ratio: float, media_seconds: float | None) -> float:
+    if media_seconds is None or not math.isfinite(media_seconds) or media_seconds <= 0:
+        return floor
+    return max(floor, ratio * media_seconds)
+
+
+ANALYSIS_PROXY_LIMITS = AnalysisProxyLimits()
+"""지금 쓰는 디코드 시간 한도 — 분석 프록시·프레임 묶음·장면 컷이 주입이 없으면 이 하나를 읽는다."""
+
+
+def validate_analysis_proxy_limits(limits: AnalysisProxyLimits) -> None:
+    """값역 검사 — 바닥은 유한한 양수, 배율은 유한한 0 이상. NaN은 비교를 무력화하므로 먼저 본다."""
+    problems: list[str] = []
+    for name, value, minimum_exclusive in (
+        ("프록시 한도 바닥", limits.timeout_floor_seconds, True),
+        ("프록시 한도 배율", limits.timeout_media_ratio, False),
+        ("프레임 묶음 한도 바닥", limits.frame_batch_timeout_floor_seconds, True),
+        ("프레임 묶음 한도 배율", limits.frame_batch_timeout_media_ratio, False),
+    ):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            problems.append(f"{name}은 실수여야 한다: {value!r}")
+        elif not math.isfinite(float(value)):
+            problems.append(f"{name}이 유한하지 않다: {value!r}")
+        elif value < 0 or (minimum_exclusive and value == 0):
+            problems.append(f"{name}이 범위 밖이다: {value!r}")
+    if problems:
+        raise ValueError("디코드 시간 한도가 계약을 어긴다: " + "; ".join(problems))
+
+
 PAIR_VIDEO_SAMPLE_SIZE = 1024
 """대응 프레임 표본 한 장의 바이트 수 — `correspondence_samples`의 32×32 루마(Y) 평면 한 장."""
 
