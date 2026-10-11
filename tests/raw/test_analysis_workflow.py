@@ -852,6 +852,92 @@ def test_live_two_phase_asr_stops_for_semantic_then_resumes(
 
 
 @needs_ffmpeg
+def test_an_old_prompt_revision_cannot_resume_its_semantic_phase(
+    workspace: Path, tmp_path: Path, stereo_offset: Path, monkeypatch
+) -> None:
+    """18b(D58) — 옛 안내문 리비전으로 멈춘 리비전은 2단계를 잇지 않는다(송신 0회).
+
+    안내문·schema는 코드에 있다. 옛 리비전을 이으면 새 안내문을 보내고 옛 리비전 이름을 단다 —
+    그 결과는 지금 설정과 맞지 않아 어디서도 다시 쓰이지 않는다. 새 분석은 전사를 다시 사지 않는다.
+    2단계 승인은 그 리비전의 실측 견적으로 만든 **유효한** 승인이다 — 문이 없으면 실제로 보낸다.
+    """
+    from ui.workspace_service import RawWorkspaceUi
+    from vlogsrt.project.raw.understanding_luna import AnalysisBudget, OnlineAnalysisApproval
+
+    _live_online(raw.RawWorkspaceService(), workspace, monkeypatch)
+    service = raw.RawWorkspaceService()
+    _ingest_card(service, workspace, _card(tmp_path, "cardP", {"스테레오.mov": stereo_offset}))
+    service.confirm_global_source_order(workspace)
+    asset = service.list_source_assets(workspace)[0]
+    workflow = service.settings(workspace)
+    probe = preprocess.probe_raw_media(workspace / asset.relative_path)
+    stream_index = probe.audio[0].stream_index
+    old = replace(RawUnderstandingSettings(), prompt_revision="raw-suitability-v2")
+    sender = _FakeSender([{"start": 0.5, "end": 2.0, "text": "도착해서 일정 설명"}])
+    handle, record = _analyze(
+        service,
+        workspace,
+        mode="live",
+        settings=old,
+        asr_approvals={asset.asset_id: _asr_approval(asset, workflow, old, stream_index)},
+        sender=sender,
+        cfg=Config(),
+    )
+    assert record.status == "succeeded", record.error
+    summary = service.analysis_overview(workspace)
+    assert summary is not None and summary.revision.status == "awaiting_semantic"
+    revision_id = summary.revision.revision_id
+    (estimate,) = service.analysis_semantic_estimate(workspace, revision_id)
+    binding = _artifact(service, workspace, revision_id, asset.asset_id)
+    approval = OnlineAnalysisApproval(
+        approved=True,
+        source_sha256=asset.content_sha256 or "",
+        audio_stream_index=binding["audio"]["audio_stream_index"],
+        sample_count=binding["audio"]["sample_count"],
+        window_count=estimate.window_count,
+        fingerprint=estimate.semantic_fingerprint,
+        asr_model=workflow.models.timing_model,
+        luna_model=workflow.models.luna_model,
+        budget=AnalysisBudget(max_luna_requests=estimate.window_count, max_asr_chunks=1),
+    )
+    ui = RawWorkspaceUi(state_path=tmp_path / "ui-state.json")
+    assert service.analysis_jobs_on_old_prompt(workspace) == {handle.job_id}
+    assert ui.resumable_analysis_choices(workspace) == []  # 누를 수 없는 재개는 보이지 않는다
+    client = _FakeClient(_luna_body("window_000000"))
+    with pytest.raises(raw.AnalysisError, match="이전 분석 기준") as refused:
+        service.resume_analysis_semantic(
+            workspace, handle.job_id, luna_approvals={asset.asset_id: approval}, client=client
+        )
+    assert "raw-suitability" not in str(refused.value)  # 내부 리비전 이름은 화면에 싣지 않는다
+    with pytest.raises(raw.AnalysisError, match="이전 분석 기준"):
+        service.retry_analysis(
+            workspace,
+            handle.job_id,
+            asr_approvals={asset.asset_id: _asr_approval(asset, workflow, old, stream_index)},
+            sender=sender,
+            cfg=Config(),
+        )
+    assert client.calls == [] and len(sender.calls) == 1
+    # 지금 안내문으로 새로 시작하면 1단계는 전사 캐시를 다시 쓴다 — whisper 0회 추가.
+    settings = RawUnderstandingSettings()
+    again, fresh = _analyze(
+        service,
+        workspace,
+        mode="live",
+        asr_approvals={asset.asset_id: _asr_approval(asset, workflow, settings, stream_index)},
+        sender=sender,
+        cfg=Config(),
+    )
+    assert fresh.status == "succeeded", fresh.error
+    assert len(sender.calls) == 1
+    latest = service.analysis_overview(workspace)
+    assert latest is not None and latest.revision.revision_id != revision_id
+    assert latest.revision.status == "awaiting_semantic"
+    assert service.analysis_jobs_on_old_prompt(workspace) == {handle.job_id}
+    assert [job_id for _label, job_id in ui.resumable_analysis_choices(workspace)] == [again.job_id]
+
+
+@needs_ffmpeg
 def test_live_asr_gates_refuse_wrong_approvals_before_any_send(
     workspace: Path, tmp_path: Path, stereo_offset: Path, monkeypatch
 ) -> None:

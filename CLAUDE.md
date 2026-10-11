@@ -269,7 +269,7 @@ vlogsrt run <video> --offline             # 픽스처 기반 전체 파이프라
 | Claude Opus 5.5 단가 (`RawClaudeAnalysisProfile`) | 2026-10-09 공식 가격표(https://platform.claude.com/docs/en/about-claude/pricing) — 입력 $4 · 출력 $20 · 캐시 쓰기 5분 $5 · 1시간 $8 · 읽기 $0.20 / 100만 토큰, `inference_geo=global`(D54). **0으로 두지 마라** — 못 매기면 가격 미정이다 |
 | Claude Sonnet 5.5 단가 (`RawClaudeAnalysisProfile`, 의미 분석 기본) | 2026-10-11 공식 가격표(https://platform.claude.com/docs/en/about-claude/pricing) — 입력 $2 · 출력 $10 · 캐시 쓰기 5분 $2.50 · 1시간 $4 · 읽기 $0.10 · 배치 $1/$5 / 100만 토큰, `inference_geo=global`(D58). **0으로 두지 마라** — 못 매기면 가격 미정이다 |
 | `effort`·`max_output_tokens`·`quote_*` (Claude 프로파일) | 외부 근거 없는 조정 대상(D54·D58). Opus 5.5 medium · 8192 · Sonnet 5.5 medium · 12000(적응형 생각 토큰도 이 안에 든다) · 창당 텍스트 여유 12000 + 부대 여유 2000 토큰 |
-| 이미지 토큰 ⌈w/28⌉×⌈h/28⌉, 장당 4784 상한 (Claude) | Claude vision 문서(D54) — 고해상도 등급(Claude 4.7 이후, Sonnet 5.5도 같다, D58). 768px 프레임은 줄지 않아 장당 784 이하 — 창당 상한 Opus $0.248 · Sonnet 약 $0.162의 재료다 |
+| 이미지 토큰 ⌈w/28⌉×⌈h/28⌉, 장당 4784 상한 (Claude) | Claude vision 문서(D54) — 고해상도 등급(Claude 4.7 이후, Sonnet 5.5도 같다, D58). 768px 프레임은 줄지 않아 장당 784 이하 — 창당 상한 Opus 약 $0.249 · Sonnet 약 $0.162(schema 941바이트, D58 18b)의 재료다 |
 
 **압축률은 창 안에서만 재라.** 통째로 재면 길이 검사가 된다 — 정상 발화도 길어지기만
 하면 임계값을 넘어서, 되살린 구간을 접어버린다(D27이 그 버그를 잡았다).

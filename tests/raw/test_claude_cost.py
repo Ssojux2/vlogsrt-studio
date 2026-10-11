@@ -69,13 +69,16 @@ def test_the_image_bound_is_the_28_pixel_patch_square_capped_by_the_tier() -> No
 
 
 def test_the_default_window_ceiling_is_the_documented_decimal() -> None:
-    """(12000 + 801 + 2000 + 8×784)×$4 + 8192×$20, 100만 토큰당 — 창당 $0.248132."""
-    assert luna_output_schema_bytes() == 801
-    ceiling = window_ceiling_usd(PROFILE, SETTINGS, schema_bytes=801)
-    assert ceiling == Decimal("0.248132")
+    """(12000 + 941 + 2000 + 8×784)×$4 + 8192×$20, 100만 토큰당 — 창당 $0.248692.
+
+    18b(D58)가 schema에 `visual_issues`를 더해 801 → 941바이트, $0.248132 → $0.248692가 됐다.
+    """
+    assert luna_output_schema_bytes() == 941
+    ceiling = window_ceiling_usd(PROFILE, SETTINGS, schema_bytes=941)
+    assert ceiling == Decimal("0.248692")
     budget = semantic_analysis_budget(CLAUDE, SETTINGS, max_luna_requests=40, max_asr_chunks=4)
     assert budget.luna_price_status == PRICE_OFFICIAL
-    assert budget.request_ceiling_usd == Decimal("0.248132")
+    assert budget.request_ceiling_usd == Decimal("0.248692")
     assert (budget.max_luna_requests, budget.max_asr_chunks) == (40, 4)
 
 
@@ -100,10 +103,10 @@ def test_a_payload_bound_counts_text_bytes_schema_overhead_and_real_image_sizes(
     images = sum(1 for block in payload["messages"][0]["content"] if block["type"] == "image")
     assert images == 2
     bound = payload_bound(payload, PROFILE)
-    expected_input = _text_bytes(payload) + 801 + 2000 + 2 * 448  # ⌈768/28⌉×⌈432/28⌉ = 28×16
+    expected_input = _text_bytes(payload) + 941 + 2000 + 2 * 448  # ⌈768/28⌉×⌈432/28⌉ = 28×16
     assert (bound.input_tokens, bound.output_tokens) == (expected_input, 8192)
     assert bound.usd == (Decimal(expected_input) * 4 + Decimal(8192) * 20) / Decimal(1_000_000)
-    assert bound.usd <= window_ceiling_usd(PROFILE, SETTINGS, schema_bytes=801)
+    assert bound.usd <= window_ceiling_usd(PROFILE, SETTINGS, schema_bytes=941)
 
 
 def test_image_tokens_come_from_the_jpeg_dimensions_not_the_configured_edge() -> None:
@@ -183,9 +186,9 @@ def test_a_payload_with_unreadable_or_large_frames_is_bounded_conservatively(
     tmp_path: Path,
 ) -> None:
     fake = build_semantic_payload(make_evidence(tmp_path), SETTINGS, CLAUDE)
-    assert payload_bound(fake, PROFILE).input_tokens == _text_bytes(fake) + 801 + 2000 + 2 * 4784
+    assert payload_bound(fake, PROFILE).input_tokens == _text_bytes(fake) + 941 + 2000 + 2 * 4784
     large = _with_frames(tmp_path / "large", 1920, 1080)
-    assert payload_bound(large, PROFILE).input_tokens == _text_bytes(large) + 801 + 2000 + 2 * 2691
+    assert payload_bound(large, PROFILE).input_tokens == _text_bytes(large) + 941 + 2000 + 2 * 2691
     broken = _with_block(
         fake,
         {
@@ -193,7 +196,7 @@ def test_a_payload_with_unreadable_or_large_frames_is_bounded_conservatively(
             "source": {"type": "base64", "media_type": "image/jpeg", "data": "!!not-base64!!"},
         },
     )
-    assert payload_bound(broken, PROFILE).input_tokens == _text_bytes(broken) + 801 + 2000 + (
+    assert payload_bound(broken, PROFILE).input_tokens == _text_bytes(broken) + 941 + 2000 + (
         3 * 4784
     )
 
@@ -295,7 +298,7 @@ def test_claude_estimates_are_official_and_luna_estimates_are_unchanged() -> Non
     official = semantic_analysis_budget(CLAUDE, SETTINGS, max_luna_requests=3, max_asr_chunks=1)
     estimate = estimate_luna_cost(3, official)
     assert estimate.price_status == PRICE_OFFICIAL
-    assert estimate.ceiling_total == Decimal("0.248132") * 3
+    assert estimate.ceiling_total == Decimal("0.248692") * 3
     assert estimate.user_ceiling_total is None
     assert "상한" in estimate.note
 

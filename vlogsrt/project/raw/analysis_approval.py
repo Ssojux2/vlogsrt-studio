@@ -25,6 +25,7 @@ from pathlib import Path
 
 from vlogsrt.env import ANALYSIS_CLAUDE_KEY_ENV
 from vlogsrt.project.raw.analysis_config import (
+    TRANSCRIPTION_IDENTITY_PROMPT_REVISION,
     UNDERSTANDING_SCHEMA_VERSION,
     RawUnderstandingSettings,
     validate_understanding_settings,
@@ -80,7 +81,8 @@ def asr_settings_fingerprint(
     원본 해시·실측 격자는 승인 레코드의 다른 칸이 묶으므로 여기 없다. 같은 설정·
     같은 모델이면 같은 값이 나온다 — 승인은 이 값으로 설정 드리프트를 잡는다.
     의미 분석 모델은 전사 전용 보기(`transcription_identity_view`)로 고정한다(D54) —
-    전사는 그 모델을 듣지 않고, 기본 설정의 지문은 W-14 이전과 같다.
+    전사는 그 모델을 듣지 않고, 기본 설정의 지문은 W-14 이전과 같다. 안내문 리비전도 같은
+    이유로 고정값이다(D58 18b) — 안내문을 고쳐도 전사 승인은 그대로다.
     """
     validate_understanding_settings(settings)
     validate_raw_workflow_config(workflow)
@@ -92,7 +94,7 @@ def asr_settings_fingerprint(
         str(settings.context_seconds),
         str(settings.max_images_per_window),
         str(settings.image_long_edge),
-        str(settings.prompt_revision),
+        TRANSCRIPTION_IDENTITY_PROMPT_REVISION,
         str(settings.asr_chunk_max_seconds),
         str(settings.asr_chunk_max_bytes),
         workflow.models.timing_model,

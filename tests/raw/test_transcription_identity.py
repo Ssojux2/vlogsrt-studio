@@ -9,7 +9,8 @@
 W-18(D58)에서 새 작업공간의 기본 모델이 Claude Sonnet 5.5가 됐다. 그래서 "W-14 이전 조립"에
 넣는 설정은 지금의 기본값이 아니라 **바뀌기 전의 기본 설정** — A0/A1에서 수락된 저장 설정
 글자 그대로(`ACCEPTED_SETTINGS_JSON`, gpt-6-luna) — 이다. 기본이 바뀐 뒤의 열쇠가 그 값과
-바이트까지 같다는 것이 이 파일의 증명이다.
+바이트까지 같다는 것이 이 파일의 증명이다. 18b(D58)에서 안내문 리비전이 올라갔다 — 1단계 승인
+지문의 조립에 넣는 분석 설정도 같은 이유로 18b 이전의 기본(`PRE_18B_UNDERSTANDING`)이다.
 """
 
 from __future__ import annotations
@@ -41,6 +42,8 @@ CLAUDE = "claude-opus-5-5"
 SPANS = (SampleSpan(0, 160000), SampleSpan(160000, 320000))
 PRE_W18_DEFAULT = raw_workflow_config_from_json(ACCEPTED_SETTINGS_JSON)
 """W-18 이전의 기본 설정 — 의미 분석 모델이 gpt-6-luna다. 이미 있는 작업공간이 저장한 값이다."""
+PRE_18B_UNDERSTANDING = replace(RawUnderstandingSettings(), prompt_revision="raw-suitability-v2")
+"""18b(D58) 이전의 기본 분석 설정 — 안내문 리비전만 다르다. 1단계 승인 지문은 이 값으로 조립된다."""
 
 
 def claude(config: RawWorkflowConfig) -> RawWorkflowConfig:
@@ -183,7 +186,7 @@ def test_the_asr_approval_fingerprint_ignores_the_analysis_model() -> None:
     """전사 승인은 전사만 묶는다 — 모델을 바꿔도 1단계 승인·전사 지문이 그대로다."""
     understanding, workflow = RawUnderstandingSettings(), RawWorkflowConfig()
     default = asr_settings_fingerprint(understanding, workflow)
-    assert default == pre_w14_asr_settings_fingerprint(understanding, PRE_W18_DEFAULT)
+    assert default == pre_w14_asr_settings_fingerprint(PRE_18B_UNDERSTANDING, PRE_W18_DEFAULT)
     assert asr_settings_fingerprint(understanding, PRE_W18_DEFAULT) == default
     assert asr_settings_fingerprint(understanding, claude(workflow)) == default
 

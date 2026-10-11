@@ -52,8 +52,12 @@ from vlogsrt.transcribe import create_claude_client
 CLAUDE = "claude-opus-5-5"
 LUNA = OPENAI_LUNA_MODEL  # W-18(D58) 전에는 기본값이었다 — 이 파일은 Luna 경로를 그대로 본다
 FIXTURES = Path(__file__).parent.parent / "fixtures" / "synthetic" / "claude"
-PRE_W14_LUNA_SHA = "909bc2363f7b6217379bbde2b4a3db2e89e53c2314ccb743a7b7471d3e563c13"
-"""W-14 이전 코드가 `make_evidence`의 창에 대해 낸 Luna 요청 신원 — 바뀌면 캐시가 깨진다."""
+PRE_W14_LUNA_SHA = "d2131a8b1cb40b96dae9da82c1437c769e1d57040e2fd717a4bc395847f124d2"
+"""`make_evidence`의 창에 대한 Luna 요청 신원 — 바뀌면 캐시가 깨진다.
+
+W-14·W-18 18a는 이 값을 한 바이트도 바꾸지 않았다(909bc236…3e563c13). 18b(D58)가 안내문의
+`recommended` 기준과 schema의 `visual_issues`를 더해 일부러 바꿨다 — 안내문 리비전도 v3로 올라
+옛 판정은 어차피 다시 쓰지 않는다. 이름은 추적을 위해 그대로 둔다."""
 
 
 def fixture(name: str) -> dict[str, Any]:
@@ -190,6 +194,7 @@ def test_an_end_turn_message_is_accepted_and_thinking_is_ignored(tmp_path: Path)
     assert annotation.status == luna.ANNOTATION_ACCEPTED, annotation.defect
     assert annotation.luna_model == CLAUDE
     assert annotation.suitability == "usable"
+    assert annotation.visual_issues == ("none",)  # 18b(D58) — 보고 문제 없다고 답했다
     built = parse_with(CLAUDE, claude_reply(accepted_body(evidence)), evidence)
     assert built.status == luna.ANNOTATION_ACCEPTED, built.defect
 

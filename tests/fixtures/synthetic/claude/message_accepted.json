@@ -7,7 +7,7 @@
     {"type": "thinking", "thinking": "", "signature": "synthetic-signature"},
     {
       "type": "text",
-      "text": "{\"window_id\":\"window_000000\",\"speech_summary\":\"도착 인사\",\"visual_summary\":\"실내\",\"scene_tags\":[\"talking\"],\"evidence_ids\":[],\"suggested_boundary_ids\":[],\"editing_notes\":[],\"needs_review\":false,\"uncertainties\":[],\"suitability\":\"usable\",\"suitability_reason\":\"인물이 또렷하고 흔들림이 적다\"}"
+      "text": "{\"window_id\":\"window_000000\",\"speech_summary\":\"도착 인사\",\"visual_summary\":\"실내\",\"scene_tags\":[\"talking\"],\"evidence_ids\":[],\"suggested_boundary_ids\":[],\"editing_notes\":[],\"needs_review\":false,\"uncertainties\":[],\"suitability\":\"usable\",\"suitability_reason\":\"인물이 또렷하고 흔들림이 적다\",\"visual_issues\":[\"none\"]}"
     }
   ],
   "stop_reason": "end_turn",

@@ -130,11 +130,19 @@ LUNA_OUTPUT_FIELDS: tuple[str, ...] = (
     "uncertainties",
     "suitability",
     "suitability_reason",
+    "visual_issues",
 )
 """출력 칸 전부 — schema 빌더와 결함 검사가 같은 목록을 쓴다."""
 
+LEGACY_OPTIONAL_FIELDS = frozenset({"suitability", "suitability_reason", "visual_issues"})
+"""나중에 더한 칸 — 옛 응답·재생 픽스처에 없을 수 있다. 없으면 「평가 없음」으로 받는다."""
+
 SUITABILITY_VALUES = ("recommended", "usable", "review")
 """사용성 판정의 허용 값 — schema의 enum과 같다."""
+
+VISUAL_ISSUE_NONE = "none"
+VISUAL_ISSUE_VALUES = ("blur", "shake", "dark", "overexposed", "obstructed", VISUAL_ISSUE_NONE)
+"""화면 문제의 허용 값(D58 18b) — 흐림·흔들림·어두움·과노출·가림, 그리고 「문제 없음」."""
 
 
 def luna_output_schema() -> dict[str, object]:
@@ -142,6 +150,8 @@ def luna_output_schema() -> dict[str, object]:
 
     `additionalProperties: false`에 모든 칸이 필수다(strict 모드의 요건).
     수치 confidence 칸은 아예 없다 — 보정된 확률로 취급하지 않는다(§7.5).
+    `visual_issues`(D58 18b)에 개수·길이 제약을 달지 않는다 — Claude 구조화 출력은 배열·문자열
+    제약을 받지 않는다(400). 같은 schema가 Luna·Opus 5.5·Sonnet 5.5로 간다.
     """
     properties: dict[str, object] = {
         "window_id": {"type": "string"},
@@ -155,6 +165,10 @@ def luna_output_schema() -> dict[str, object]:
         "uncertainties": {"type": "array", "items": {"type": "string"}},
         "suitability": {"type": "string", "enum": ["recommended", "usable", "review"]},
         "suitability_reason": {"type": "string"},
+        "visual_issues": {
+            "type": "array",
+            "items": {"type": "string", "enum": list(VISUAL_ISSUE_VALUES)},
+        },
     }
     return {
         "type": "object",
@@ -324,6 +338,40 @@ def luna_output_schema_bytes() -> int:
     return len(compact.encode("utf-8"))
 
 
+_INSTRUCTION_RULES: tuple[str, ...] = (
+    "규칙:",
+    "- 제공된 window/frame/utterance/boundary 아이디 외의 아이디를 말하지 마라.",
+    "- 증거에 없는 말·장면을 지어내지 마라. 빈 확인은 '확인 안 됨'으로만 다뤄라.",
+    "- 경계는 발화·이어지는 동작을 자르지 않는 쪽만 제안하라. 모호하면 제안하지 마라.",
+    "- 영상을 지우거나 순서를 바꾸는 명령은 없다. 요약·태그·메모·경계 제안만 있다.",
+    "- suitability는 이 코어 구간을 편집에 쓸 가치: recommended(편집에 남길 구간),"
+    " usable(쓸 수는 있는 구간), review(확인 필요)다.",
+    "- recommended는 프레임에서 다음이 모두 보일 때만 준다: 편집에 남길 만한 장면·행동·순간이"
+    " 보인다. 주된 피사체를 또렷이 알아볼 수 있다. 노출이 받아들일 만하다. 프레임에 심한"
+    " 움직임 번짐이나 가림이 보이지 않는다. 볼 장면 없이 이동만 하는 구간(걷기·차 안 등)이나"
+    " 거의 같은 화면이 되풀이되는 채움 장면이 아니다.",
+    "- 장면은 알아볼 수 있지만 위 조건 가운데 하나라도 맞지 않거나, 편집에 남길 만한지 애매하면"
+    " usable이다. 보이지 않는 문제를 짐작해 낮추지는 마라.",
+    "- 프레임이 부족하거나 무엇을 찍었는지 알아볼 수 없으면 review다. 보이는 화면 문제가 장면을"
+    " 쓰지 못할 만큼 크면 그때도 review다. recommended에는 실제 frame evidence_ids를 포함하라.",
+    "- 풍경·행동·현장 분위기도 좋은 영상이다. 말이 없다는 이유로 낮게 평가하지 마라.",
+    "- 구도·흔들림·초점·노출·고유 사건·장면 맥락을 프레임 증거로 판단하고"
+    " 구체적인 한국어 이유를 suitability_reason에 써라.",
+    "- visual_issues에는 프레임에 보이는 화면 문제를 모두 적어라: blur(초점 흐림),"
+    " shake(흔들림 — 프레임에 움직임 번짐이 보일 때만), dark(어두움), overexposed(과노출),"
+    ' obstructed(손·물체 등에 가림). 보이는 문제가 없으면 ["none"] 하나만 적고,'
+    " none을 다른 값과 함께 쓰지 마라.",
+    "- 완전한 발화 문장과 풍경을 보여 주는 구간은 보존한다. 무발화는 삭제 근거가 아니다.",
+    "- 정지 프레임만으로 움직임·흔들림을 확정하지 마라 — 번짐이 보이지 않으면 shake가 아니다."
+    " 프록시 압축으로 화면이 조금 뭉개진 것은 blur가 아니다 — 피사체를 알아볼 수 있으면"
+    " 초점이 맞은 것으로 보고, 판단이 어려웠던 사정은 suitability_reason에 적어라.",
+    "- NG·중복은 같은 원본의 완전한 대체 테이크와 증거 ID가 확인될 때만 후보로 표시한다.",
+    "- 다른 원본 사이 중복은 후보만 제시한다. 임의의 정밀 시각이나 장면 경계를 만들지 마라.",
+    "- 출력은 지정된 JSON schema 하나다.",
+)
+"""안내문의 규칙 줄 — 창마다 같다. 바꾸면 `DEFAULT_PROMPT_REVISION`을 올린다(D58 18b가 v3)."""
+
+
 def _instruction(evidence: WindowEvidence) -> str:
     """창 하나에 대한 안내문 — 아이디의 세계를 먼저 알려고 규칙으로 닫는다."""
     window = evidence.window
@@ -349,25 +397,7 @@ def _instruction(evidence: WindowEvidence) -> str:
             f"프레임 증거(순서대로): {frame_ids}",
             "제안 가능한 경계 후보(이 안에서만 제안하라):",
             *candidate_lines,
-            "규칙:",
-            "- 제공된 window/frame/utterance/boundary 아이디 외의 아이디를 말하지 마라.",
-            "- 증거에 없는 말·장면을 지어내지 마라. 빈 확인은 '확인 안 됨'으로만 다뤄라.",
-            "- 경계는 발화·이어지는 동작을 자르지 않는 쪽만 제안하라. 모호하면 제안하지 마라.",
-            "- 영상을 지우거나 순서를 바꾸는 명령은 없다. 요약·태그·메모·경계 제안만 있다.",
-            "- suitability는 이 코어 구간을 편집에 쓸 가치: recommended(좋은 구간),"
-            " usable(사용 가능), review(확인 필요)다.",
-            "- 풍경·행동·현장 분위기도 좋은 영상이다. 말이 없다는 이유로 낮게 평가하지 마라.",
-            "- 구도·흔들림·초점·노출·고유 사건·장면 맥락을 프레임 증거로 판단하고"
-            " 구체적인 한국어 이유를 suitability_reason에 써라.",
-            "- 장면이 모호하거나 프레임이 부족하면 review다."
-            " recommended에는 실제 frame evidence_ids를 포함하라.",
-            "- 완전한 발화 문장과 풍경을 보여 주는 구간은 보존한다. 무발화는 삭제 근거가 아니다.",
-            "- 정지 프레임만으로 움직임·흔들림을 확정하지 마라."
-            " 프록시 압축으로 초점이 불분명하면 확인 필요다.",
-            "- NG·중복은 같은 원본의 완전한 대체 테이크와 증거 ID가 확인될 때만 후보로 표시한다.",
-            "- 다른 원본 사이 중복은 후보만 제시한다."
-            " 임의의 정밀 시각이나 장면 경계를 만들지 마라.",
-            "- 출력은 지정된 JSON schema 하나다.",
+            *_INSTRUCTION_RULES,
         ]
     )
 
@@ -396,6 +426,10 @@ class SemanticAnnotation:
     올라간다 — 판정이 검토를 대신하지 않는다. `defect`는 거부·실패의 이유다.
     `origin`은 실제 호출(live)과 픽스처 재생(replay)을 가른다 — 재생을 실제
     성공으로 표시하지 않는다(§14.3).
+
+    `visual_issues`(D58 18b)는 세 뜻을 가른다: `()`는 「알 수 없음」(키가 없는 옛 응답·옛 문서,
+    거부·실패 판정), `("none",)`은 화면을 보고 문제가 없다고 답한 것, 그 밖은 실제 문제다
+    (`none`은 섞이지 않는다). 정규화로 고친 일은 `visual_issues_note`에 남는다.
     """
 
     window_id: str
@@ -418,6 +452,8 @@ class SemanticAnnotation:
     suitability_evaluated: bool = False
     suitability: str = "review"
     suitability_reason: str = "사용성 평가가 없는 이전 분석입니다"
+    visual_issues: tuple[str, ...] = ()
+    visual_issues_note: str = ""
 
 
 def parse_luna_response(
@@ -446,12 +482,15 @@ def parse_luna_response(
         return _rejected(
             evidence, model, request_sha256, origin, prompt_revision, f"JSON이 아니다: {exc}"
         )
+    folded = False
     if claude:
-        parsed = _lowercase_suitability(parsed)
+        parsed, folded = _lowercase_visual_issues(_lowercase_suitability(parsed))
     defect = _annotation_defect(parsed, evidence)
     if defect:
         return _rejected(evidence, model, request_sha256, origin, prompt_revision, defect)
-    return _accepted(parsed, evidence, model, request_sha256, origin, prompt_revision)
+    return _accepted(
+        parsed, evidence, model, request_sha256, origin, prompt_revision, case_folded=folded
+    )
 
 
 def _responses_text(response: Mapping[str, object]) -> tuple[str | None, str]:
@@ -510,6 +549,51 @@ def _lowercase_suitability(parsed: Any) -> Any:
     return parsed
 
 
+def _lowercase_visual_issues(parsed: Any) -> tuple[Any, bool]:
+    """`visual_issues`도 같다 — 소문자가 허용 값인 항목만 맞추고 나머지는 결함 검사에 맡긴다.
+
+    둘째 값은 실제로 고친 항목이 있었는가다 — 고친 일은 `visual_issues_note`에 남는다.
+    """
+    if not isinstance(parsed, dict) or not isinstance(parsed.get("visual_issues"), list):
+        return parsed, False
+    given = parsed["visual_issues"]
+    lowered = [
+        item.lower() if isinstance(item, str) and item.lower() in VISUAL_ISSUE_VALUES else item
+        for item in given
+    ]
+    return {**parsed, "visual_issues": lowered}, lowered != given
+
+
+def _normalized_visual_issues(
+    body: Mapping[str, Any], evidence: WindowEvidence, *, case_folded: bool
+) -> tuple[tuple[str, ...], str]:
+    """결함 검사를 지난 `visual_issues`를 저장 모양으로 — (값, 고친 일의 기록).
+
+    보수적으로 고친다: 실제 문제는 하나도 버리지 않는다. 함께 온 `none`은 뺀다(문제가 있다고 한
+    답과 없다고 한 답이 겹치면 있다는 쪽이 남는다). 중복은 처음 나온 순서로 합친다. 빈 배열은
+    「보고 아무 문제도 적지 않았다」이므로 `none`으로 읽는다 — 키가 없는 「알 수 없음」(`()`)과
+    섞이지 않게. 키가 없으면 `()`이고 기록도 없다. 프레임이 한 장도 없는 창(오디오만)은 화면을
+    본 적이 없으므로 무엇을 답했든 `()`(알 수 없음)다 — `none`을 「문제없음」으로 남기지 않는다.
+    """
+    if "visual_issues" not in body:
+        return (), ""
+    notes = ["visual_issues의 대소문자를 맞췄다"] if case_folded else []
+    if not evidence.frames:
+        notes.append("프레임 증거가 없는 창이라 visual_issues를 알 수 없음으로 둔다")
+        return (), "; ".join(notes)
+    given = list(body["visual_issues"])
+    issues = list(dict.fromkeys(given))
+    if len(issues) < len(given):
+        notes.append("visual_issues의 중복 값을 하나로 합쳤다")
+    if VISUAL_ISSUE_NONE in issues and len(issues) > 1:
+        issues.remove(VISUAL_ISSUE_NONE)
+        notes.append("visual_issues에 none과 화면 문제가 함께 와서 none을 뺐다")
+    if not issues:
+        issues = [VISUAL_ISSUE_NONE]
+        notes.append("visual_issues가 비어 있어 none으로 읽었다")
+    return tuple(issues), "; ".join(notes)
+
+
 def _accepted(
     body: Mapping[str, Any],
     evidence: WindowEvidence,
@@ -517,8 +601,13 @@ def _accepted(
     request_sha256: str,
     origin: str,
     prompt_revision: str,
+    *,
+    case_folded: bool = False,
 ) -> SemanticAnnotation:
     """결함 검사를 지난 본문의 accepted 판정 — 칸은 검사가 이미 보증했다."""
+    visual_issues, visual_issues_note = _normalized_visual_issues(
+        body, evidence, case_folded=case_folded
+    )
     return SemanticAnnotation(
         window_id=evidence.window.window_id,
         status=ANNOTATION_ACCEPTED,
@@ -539,6 +628,8 @@ def _accepted(
         suitability_reason=str(
             body.get("suitability_reason", "사용성 평가가 없는 이전 분석입니다")
         ),
+        visual_issues=visual_issues,
+        visual_issues_note=visual_issues_note,
     )
 
 
@@ -570,26 +661,14 @@ def _annotation_defect(parsed: object, evidence: WindowEvidence) -> str:
     unknown = sorted(set(parsed) - set(LUNA_OUTPUT_FIELDS))
     if unknown:
         return f"schema에 없는 칸이 있다: {', '.join(unknown)}"
-    legacy_required = [
-        key for key in LUNA_OUTPUT_FIELDS if key not in ("suitability", "suitability_reason")
-    ]
-    missing = sorted(key for key in legacy_required if key not in parsed)
+    missing = sorted(
+        key for key in LUNA_OUTPUT_FIELDS if key not in LEGACY_OPTIONAL_FIELDS | set(parsed)
+    )
     if missing:
         return f"필수 칸이 비었다: {', '.join(missing)}"
-    if "suitability" in parsed:
-        if parsed["suitability"] not in ("recommended", "usable", "review"):
-            return "suitability 값이 허용 범위 밖이다"
-        if (
-            not isinstance(parsed.get("suitability_reason"), str)
-            or not parsed["suitability_reason"].strip()
-        ):
-            return "suitability_reason이 비었다"
-        if not isinstance(parsed.get("evidence_ids"), list):
-            return "evidence_ids가 배열이 아니다"
-        if parsed["suitability"] == "recommended" and not any(
-            frame.frame_id in parsed.get("evidence_ids", []) for frame in evidence.frames
-        ):
-            return "추천 판정에 프레임 근거가 없다"
+    defect = _suitability_defect(parsed, evidence) or _visual_issues_defect(parsed)
+    if defect:
+        return defect
     if parsed["window_id"] != evidence.window.window_id:
         return (
             f"window_id가 이 창이 아니다: {parsed['window_id']!r}"
@@ -604,6 +683,46 @@ def _annotation_defect(parsed: object, evidence: WindowEvidence) -> str:
             return defect
     if not isinstance(parsed["needs_review"], bool):
         return f"needs_review가 bool이 아니다: {parsed['needs_review']!r}"
+    return _identifier_defect(parsed, evidence)
+
+
+def _suitability_defect(parsed: Mapping[str, Any], evidence: WindowEvidence) -> str:
+    """사용성 판정의 검사 — 칸이 없으면(옛 응답) 검사할 것도 없다."""
+    if "suitability" not in parsed:
+        return ""
+    if parsed["suitability"] not in SUITABILITY_VALUES:
+        return "suitability 값이 허용 범위 밖이다"
+    reason = parsed.get("suitability_reason")
+    if not isinstance(reason, str) or not reason.strip():
+        return "suitability_reason이 비었다"
+    if not isinstance(parsed.get("evidence_ids"), list):
+        return "evidence_ids가 배열이 아니다"
+    if parsed["suitability"] == "recommended" and not any(
+        frame.frame_id in parsed.get("evidence_ids", []) for frame in evidence.frames
+    ):
+        return "추천 판정에 프레임 근거가 없다"
+    return ""
+
+
+def _visual_issues_defect(parsed: Mapping[str, Any]) -> str:
+    """화면 문제 칸의 검사 — 문자열 배열이고 값마다 enum 안이어야 한다(D58 18b).
+
+    enum 밖의 값은 다른 schema 위반처럼 판정 전체를 거부한다 — 모르는 값을 버리고 받으면
+    모델이 말한 화면 문제가 조용히 사라진다. 칸이 없으면(옛 응답) 「알 수 없음」으로 받는다.
+    """
+    if "visual_issues" not in parsed:
+        return ""
+    shape = _string_list_defect(parsed["visual_issues"], "visual_issues")
+    if shape:
+        return shape
+    outside = [item for item in parsed["visual_issues"] if item not in VISUAL_ISSUE_VALUES]
+    if outside:
+        return f"visual_issues 값이 허용 범위 밖이다: {outside[0]!r}"
+    return ""
+
+
+def _identifier_defect(parsed: Mapping[str, Any], evidence: WindowEvidence) -> str:
+    """아이디 소속 검사 — 제공한 증거·경계 아이디의 세계 밖은 없다."""
     provided = evidence.provided_evidence_ids()
     for identifier in _string_list(parsed["evidence_ids"], "evidence_ids"):
         if identifier not in provided:
@@ -1688,7 +1807,11 @@ def annotation_cache_document(
 
 
 def annotation_json(annotation: SemanticAnnotation) -> dict[str, object]:
-    """판정의 JSON — 상태·근거·지문까지 전부 실린다."""
+    """판정의 JSON — 상태·근거·지문까지 전부 실린다.
+
+    `visual_issues`는 언제나 실린다: `[]`는 「알 수 없음」, `["none"]`은 「문제 없음」이다. 18b
+    이전 문서에는 두 칸이 없다 — 읽는 쪽(`SemanticAnnotation(**row)`·등급)은 기본값으로 받는다.
+    """
     return {
         "window_id": annotation.window_id,
         "status": annotation.status,
@@ -1710,6 +1833,8 @@ def annotation_json(annotation: SemanticAnnotation) -> dict[str, object]:
         "suitability_evaluated": annotation.suitability_evaluated,
         "suitability": annotation.suitability,
         "suitability_reason": annotation.suitability_reason,
+        "visual_issues": list(annotation.visual_issues),
+        "visual_issues_note": annotation.visual_issues_note,
     }
 
 

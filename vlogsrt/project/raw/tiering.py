@@ -103,6 +103,15 @@ VIDEO_LABELS = {
     VIDEO_FAILED: "판정 실패",
     VIDEO_UNANALYZED: "판정 전",
 }
+VISUAL_ISSUE_LABELS = {
+    "blur": "흐림",
+    "shake": "흔들림",
+    "dark": "어두움",
+    "overexposed": "과노출",
+    "obstructed": "가림",
+}
+"""판정의 화면 문제(D58 18b)를 보일 쉬운 말 — 영상 이유(「분석 근거」)에만 붙고 등급·규칙·합치기
+열쇠에는 들어가지 않는다(등급에 쓰는 일은 W-20b). `none`과 키 없음은 아무 말도 보태지 않는다."""
 TIER_LABELS = {TIER_GREEN: "추천", TIER_YELLOW: "보통", TIER_RED: "제외 제안"}
 HOLD_LABEL = "판정 보류"
 """근거가 없어 노랑인 조각의 이름(화면의 점선 노랑) — Final Cut 키워드로 나간다(D56)."""
@@ -585,6 +594,16 @@ def _luna_notes(annotation: Mapping[str, Any], partial: bool) -> str:
     return text
 
 
+def _visual_issue_note(annotation: Mapping[str, Any]) -> str:
+    """판정이 적은 화면 문제를 쉬운 말로 — 표시만 한다(등급을 바꾸지 않는다)."""
+    labels = [
+        VISUAL_ISSUE_LABELS[item]
+        for item in annotation.get("visual_issues") or []
+        if isinstance(item, str) and item in VISUAL_ISSUE_LABELS
+    ]
+    return " · 화면 문제: " + "·".join(labels) if labels else ""
+
+
 def _window_judgment(evidence: SourceEvidence, window: _Window) -> VideoJudgment:
     row = window.annotation
     wid = window.window_id
@@ -608,7 +627,7 @@ def _window_judgment(evidence: SourceEvidence, window: _Window) -> VideoJudgment
         str(row.get("suitability")), VIDEO_FLAGGED
     )
     reason = str(row.get("suitability_reason") or VIDEO_LABELS[status])
-    reason += _luna_notes(row, len(frames) < len(window.frame_ids))
+    reason += _luna_notes(row, len(frames) < len(window.frame_ids)) + _visual_issue_note(row)
     return _video(status, reason, (f"window:{wid}",), wid)
 
 

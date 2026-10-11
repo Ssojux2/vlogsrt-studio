@@ -298,8 +298,9 @@ def test_annotate_windows_records_failures_per_window(tmp_path: Path) -> None:
     assert "시간 초과" in annotations[0].defect
 
 
-NORMAL_WINDOW_REQUEST_SHA256 = "48eac75d44e2a91dbe4199c9e85c4621d49e5e16b8cb342cffc0a2baceb97324"
-"""`make_evidence` 창(프레임 2장)의 요청 신원 — 7f74338에서 잰 값.
+NORMAL_WINDOW_REQUEST_SHA256 = "d7a6b818801596a995540029e09f98d7eb014e1ebc819a5e2513b4980fc61cbf"
+"""`make_evidence` 창(프레임 2장)의 요청 신원 — 7f74338에서 잰 값(48eac75d…baceb97324)을
+18b(D58)가 안내문·schema(`visual_issues`)를 바꾸며 다시 쟀다.
 
 바뀌면 저장된 판정이 전부 다시 청구된다 — 프레임 누락 처리는 이 값을 건드리지 못한다.
 """

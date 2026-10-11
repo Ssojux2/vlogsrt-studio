@@ -4908,9 +4908,141 @@ Sonnet 본문에 400 칸 없음 · 생각·가린 생각 블록 뒤의 text만 �
 (옛 Luna 작업공간이 산 전사를 새 기본이 재구매 0회로 쓴다), `tests/test_invariants.py`(작업대의 모델 리터럴).
 
 **18b로 넘긴 것**: 지시문의 `recommended` 기준, schema `visual_issues`, `DEFAULT_PROMPT_REVISION` 올림과 그에 따른
-요청 해시 기대값 변경.
+요청 해시 기대값 변경 — 아래 「D58 18b」.
 
 **못 한 것·사람 몫**: 실제 Sonnet 호출은 0회다. 첫 사람 실행에서 응답 `model`의 메아리, `usage.inference_geo`,
 영수증 금액 대 콘솔 청구, 생각 토큰 실측(12000 한도에 닿는 창이 있는지 — 닿으면 `max_tokens` 거부 판정)을
 본다. 기존 작업공간을 Sonnet으로 옮기려면 「API 연결」의 「영상 분석 모델」에서 고른다 — 그 뒤 분석은 새
 견적·승인(유료)이다. 화면·CLI의 단계 이름은 여전히 "Luna"다(작업 상태의 열쇠, D54).
+
+### D58 18b — 지시문의 `recommended` 기준 · schema `visual_issues` · 안내문 리비전 v3 (2026-10-11, W-18 세션 18b)
+
+**문제**: 최신 분석 창 202개 중 149개가 `recommended`였다(계획 Context). 지시문은 `recommended`를 "좋은 구간"이라고만
+했다. 그리고 D52가 적어 둔 위험 — 응답에 화면 결함 칸이 없어 흐림·어두움 같은 문제를 등급이 알 길이 없다.
+
+**결정 — 지시문**(`understanding_luna._INSTRUCTION_RULES`. 규칙 줄을 모듈 상수로 옮겨 `_instruction`이 40줄 안에
+든다 — 바뀐 규칙 줄 밖의 글자는 그대로다):
+
+- `recommended`(편집에 남길 구간)는 프레임에서 다음이 **모두 보일** 때만: 편집에 남길 만한 장면·행동·순간이 보인다 ·
+  주된 피사체를 또렷이 알아볼 수 있다 · 노출이 받아들일 만하다 · 프레임에 심한 움직임 번짐이나 가림이 보이지 않는다
+  · 볼 장면 없이 이동만 하는 구간(걷기·차 안 등)이나 거의 같은 화면이 되풀이되는 채움 장면이 아니다. 기준은 **보이는
+  것**으로 적었다 — "확실하지 않으면 낮춘다"로 적으면 정지 프레임만 받는 모델이 모든 창을 낮추게 된다(검증 지적).
+- `usable`: 장면은 알아볼 수 있지만 위 조건 가운데 하나라도 맞지 않거나, 편집에 남길 만한지 애매할 때. 보이지 않는
+  문제를 짐작해 낮추지 않는다.
+- `review`: 프레임이 부족하거나 무엇을 찍었는지 알아볼 수 없을 때, 또는 보이는 화면 문제가 장면을 쓰지 못할 만큼 클 때.
+  옛 규칙 「장면이 모호하거나 프레임이 부족하면 review」를 이 줄로 바꿨다.
+- `visual_issues`에 프레임에 보이는 화면 문제를 모두 적는다 — blur(초점 흐림) · shake(흔들림 — 프레임에 움직임 번짐이
+  보일 때만. 기울어진 수평은 구도이지 흔들림이 아니다) · dark · overexposed · obstructed(손·물체 등에 가림). 보이는
+  문제가 없으면 `["none"]` 하나만, `none`을 다른 값과 섞지 않는다.
+- 옛 규칙 「프록시 압축으로 초점이 불분명하면 확인 필요」는 「프록시 압축으로 조금 뭉개진 것은 blur가 아니다 — 피사체를
+  알아볼 수 있으면 초점이 맞은 것으로 보고, 판단이 어려웠던 사정은 suitability_reason에 적어라」로 바꿨다(review의
+  정의와 맞춘다). 「정지 프레임만으로 움직임·흔들림을 확정하지 마라」는 그대로 두고 「번짐이 보이지 않으면 shake가
+  아니다」를 붙였다.
+- 「창밖」을 채움의 예에서 뺐다 — 창밖 풍경 B롤은 「풍경도 좋은 영상이다」 규칙대로 볼 장면이다.
+- 아이디 계약(제공된 아이디만 · 추천에는 실제 frame evidence_ids)·풍경 존중·무발화는 삭제 근거가 아님·NG 규칙은
+  그대로다.
+- 「이웃 창과 거의 같은 장면」은 넣지 않았다 — 모델은 창 하나(문맥 2초 포함)만 보므로 "증거에 없는 것을 지어내지
+  마라"와 부딪힌다. 창 안의 되풀이 채움만 묻는다. 이웃 사이의 중복은 W-20b(씬 일관성)의 몫이다.
+- 결과로 예상되는 것: D52 표에서 「자막 없는 긴 공백 × `usable`」은 빨강 제안이다. 기준이 엄격해지면 그런 제안이
+  늘 수 있다 — 제안일 뿐 사람 확인 전에는 아무것도 빠지지 않는다(D56). 실측은 사람의 새 전체 분석 뒤다.
+
+**결정 — schema**: `visual_issues: {"type": "array", "items": {"type": "string", "enum": ["blur", "shake", "dark",
+"overexposed", "obstructed", "none"]}}`, `required`에 들고, `additionalProperties: false` 그대로, **개수·길이 제약 없음**.
+Claude 구조화 출력의 JSON Schema 한계(복잡한 배열 제약·문자열 길이·수치 제약 미지원 — enum은 지원. 2026-10-11
+Claude API 참고 문서의 「JSON Schema Limitations」 표로 확인 — 실제 호출로 시험하지 않았다)와 OpenAI strict 모드
+(모든 칸 필수·`additionalProperties: false`·enum 지원)를 둘 다 지킨다. 같은 schema가 gpt-6-luna·Opus 5.5·Sonnet
+5.5로 간다(시험). schema 이름 `raw_understanding_window_v1`은 그대로다 — 안내문 리비전이 이미 지문을 가른다.
+
+- 압축 schema 바이트 801 → 941. 창당 보수적 상한(같은 공식): Opus $0.248132 → **$0.248692**, Sonnet $0.162146 →
+  **$0.162426**. 견적(`ceiling_usd`)과 그 지문도 따라 바뀐다 — 견적은 그 자리에서 다시 재므로 저장된 것이 없다.
+
+**결정 — 해석·정규화**(`_visual_issues_defect` · `_normalized_visual_issues`):
+
+- 배열이 아님 · 문자열이 아닌 항목 · enum 밖의 값 → 판정 전체를 `rejected`(다른 schema 위반과 같다). 모르는 값을
+  버리고 받으면 모델이 말한 화면 문제가 조용히 사라진다.
+- Claude만 대소문자를 맞춘다(`suitability`와 같은 관용). Luna(strict)는 그대로 거부한다.
+- 중복은 처음 나온 순서로 합친다 · `none`과 실제 문제가 함께 오면 `none`을 뺀다(실제 문제는 하나도 버리지 않는다) ·
+  빈 배열은 「보고 아무것도 적지 않았다」이므로 `none`으로 읽는다(키 없음의 「알 수 없음」과 섞이지 않게).
+- **프레임이 한 장도 없는 창**(오디오만)은 화면을 본 적이 없다 — 무엇을 답했든(`["none"]`·문제·빈 배열) `()`(알 수
+  없음)로 둔다. `none`을 「보고 문제없음」으로 남기지 않는다.
+- **고친 일은 모두** `visual_issues_note`에 한국어로 남는다(여럿이면 `; `로 잇는다) — 대소문자 맞춤 · 중복 합침 · 섞인
+  `none` 뺌 · 빈 배열을 `none`으로 읽음 · 프레임 없는 창을 알 수 없음으로 둠. 키가 없으면 고칠 것도 기록도 없다.
+- 키 없음(옛 응답·재생 픽스처) → 받아들이고 `()`. `suitability`의 옛 응답 관용과 같은 자리(`LEGACY_OPTIONAL_FIELDS`)다.
+
+**결정 — 저장 표현**: `SemanticAnnotation.visual_issues: tuple[str, ...] = ()` · `visual_issues_note: str = ""`.
+`annotation_json`은 두 칸을 언제나 쓴다. 뜻은 셋이다:
+
+- `[]` 또는 키 없음 = **알 수 없음**(18b 이전 문서·키 없는 응답·거부·실패 판정·프레임 없는 창). W-20b는 이것으로
+  낮추지 않는다.
+- `["none"]` = 화면을 보고 문제가 없다고 답했다.
+- 그 밖 = 실제 문제(`none`은 섞이지 않는다). W-20b가 영상 쪽을 good이 아닌 것으로 친다.
+
+옛 창 캐시(`cache/source-luna/…`)·진행 문서(`suitability_progress.json`)·완성 문서는 키가 없어도 엄격한
+`SemanticAnnotation(**row)`가 기본값으로 연다(시험 — 18b 이전 합성 완성 문서 `tier_source`의 모든 판정).
+
+**결정 — 화면**: 등급 계층의 영상 이유 끝에 「 · 화면 문제: 흐림·흔들림」처럼 붙는다(흐림·흔들림·어두움·과노출·
+가림, `tiering.VISUAL_ISSUE_LABELS`). 그 이유가 「분석 근거」의 `영상:` 줄과 제외 제안 패널의 「영상 · …」 줄로
+보인다. `none`·키 없음은 아무 말도 보태지 않는다. 모델 이름·가격은 없다(D57). 이유 글자는 합치기 열쇠·등급·규칙에
+들어가지 않아 등급이 하나도 바뀌지 않는다(시험) — 그래서 `tier_version`을 올리지 않았다(D52가 올리라는 것은 판정·
+합치기 규칙·설정값이다). 옛 문서는 키가 없어 이유 글자도 그대로다.
+
+**결정 — 안내문 리비전 v3**(`DEFAULT_PROMPT_REVISION = "raw-suitability-v3"`). 리비전이 묶이는 곳과 그 결과:
+
+- 원본 입력 지문(`source_input_fingerprint`) · 창 판정 캐시 폴더(`asdict(settings)`) · `_reusable`(리비전 비교) ·
+  `_same_analysis`·`stored_analysis_for_settings`(`settings_json == 기본`) → v2로 끝난 분석은 어디서도 다시 쓰이지
+  않는다. 요청 sha도 안내문·schema가 바뀌어 다르다.
+- **1단계 승인 지문**(`asr_settings_fingerprint`)은 안내문 리비전 자리를 `TRANSCRIPTION_IDENTITY_PROMPT_REVISION =
+  "raw-suitability-v2"`로 고정했다 — 전사는 안내문을 듣지 않는다(`TRANSCRIPTION_IDENTITY_LUNA_MODEL`과 같은 모양).
+  기본 설정의 지문은 W-14 이전과 바이트까지 같다 — 증명은 수락된 저장 설정(gpt-6-luna)과 18b 이전 분석 설정(v2)을
+  W-14 이전 조립 함수에 넣은 값과 비교한다(`test_visual_issues.py`·`test_transcription_identity.py`).
+- **whisper 청크 열쇠**는 분석 설정을 묶지 않는다(워크플로 설정의 전사 보기만) — v2 분석 설정으로 산 전사를 v3 1단계가
+  전송 0회로 다시 쓴다(시험).
+- 1단계 기록의 `input_fingerprint`는 리비전을 묶는다. 그래서 v2로 멈춘 리비전(`awaiting_semantic`)은 이어 갈 수 없다
+  — 이으면 새 안내문을 보내 놓고 옛 이름을 달고, 그 결과는 지금 설정과 맞지 않아 어디서도 다시 쓰이지 않는다(돈만
+  든다). `resume_analysis_semantic`(2단계 재시도도 이 문을 지난다)과 `retry_analysis`의 1단계 재시도가 리비전의
+  안내문이 지금 것이 아니면 0송신으로 닫는다(`service._require_current_prompt`, 계획에 없던 작은 문 — 리비전을 올린
+  뜻을 지킨다). 거절 문구는 내부 리비전 이름 없이 존댓말이다(D57): 「이 분석은 이전 분석 기준으로 시작해 이어서 진행할
+  수 없습니다. 새 분석을 시작해 주세요 (이미 받은 전사는 다시 사지 않습니다).」 화면의 재개 목록(`resumable_analysis_choices`)은
+  그런 작업을 빼고 보인다(`service.analysis_jobs_on_old_prompt`) — 누를 수 없는 항목을 보이지 않는다. 새 분석을
+  시작하면 전사는 캐시에서 온다(시험: whisper 추가 0회). 옛 기준 리비전의 실패 청크(0008·0018·0024)는
+  「실패 구간 재시도」가 거절되므로 새 분석(또는 W-19의 「전사만」)을 시작한다 — 실패는 캐시하지 않으므로 실패 청크만
+  다시 묻는다(독립 검증 탐침: 실패 1개 + 성공 2개 → whisper 추가 1회). 시험의 2단계 승인은 그 리비전의 실측 견적으로 만든 유효한
+  승인이다 — 문을 빼면 실제로 보낸다(문을 끈 변이로 시험이 깨지는 것을 확인했다).
+- **결과: 기존의 모든 분석은 다음 실행에서 다시 산다.** 계획이 이미 그렇다 — 모델을 Sonnet으로 바꾸면 어차피 다시
+  산다(18a). 계획 순서대로 마지막 새 전체 분석(20c 뒤) 한 번으로 끝난다.
+
+**바꾼 기대값과 사유**(값을 단언하던 줄만):
+
+- `tests/raw/test_claude_payload.py` `PRE_W14_LUNA_SHA` `909bc236…3e563c13` → `d2131a8b…47f124d2` — 안내문(기준·
+  `visual_issues` 줄)과 schema가 Luna 요청 본문에 실려 요청 신원이 일부러 바뀐다. 이름은 추적용으로 두었다. (첫 구현의
+  값 `475c6ebf…`는 검증 뒤 기준 문구를 고쳐 다시 쟀다 — 글자만 바뀌었다.)
+- `tests/raw/test_understanding_luna.py` `NORMAL_WINDOW_REQUEST_SHA256` `48eac75d…baceb97324` → `d7a6b818…4980fc61cbf` —
+  같은 이유(첫 구현의 `462e01c7…`도 같은 까닭으로 다시 쟀다).
+- `tests/raw/test_claude_cost.py` schema 바이트 801 → 941(일곱 자리) · Opus 창당 상한 $0.248132 → $0.248692(세 자리) —
+  schema에 칸 하나가 더해진 산술 그대로다.
+- `tests/raw/test_transcription_identity.py::test_the_asr_approval_fingerprint_ignores_the_analysis_model` — W-14 이전
+  조립에 넣는 분석 설정 `RawUnderstandingSettings()` → `PRE_18B_UNDERSTANDING`(리비전 v2): 기본의 리비전이 바뀌어 "18b
+  이전 기본"을 따로 지어야 한다. 기대 지문 값은 한 바이트도 바뀌지 않는다.
+- `tests/fixtures/synthetic/claude/message_accepted.json` — 판정 본문에 `"visual_issues":["none"]`: 새 schema의 응답
+  모양이다(`test_claude_payload`가 `("none",)`으로 저장되는지 본다). 전송 시험(`test_anthropic_messages`)은 본문 글을
+  보지 않는다.
+- `tests/raw/test_claude_analysis_flow.py::judgment` — 가짜 응답이 창마다 `visual_issues`를 싣는다(새 schema 모양).
+  기존 단언은 그대로다.
+- 바꾸지 않은 것: 합성 완성 문서 `tier_source.analysis_transcript.json`(18b 이전 v2 문서 — 키 없는 문서가 「알 수
+  없음」으로 열리는 시험 재료로 그대로 둔다), 판정을 만드는 다른 시험들(키 없음 = 기본값이라 그대로 지난다), Sonnet
+  창당 상한 시험(0.16 < 상한 < 0.17이 그대로 맞는다).
+
+**더한 시험**: `tests/raw/test_visual_issues.py`(schema 모양·제약 없음 · 세 공급자 같은 schema · 지시문 기준과
+등급 경계 문구 · 세 모델 저장·왕복 · 정규화 일곱 경우 · enum 밖 여섯 경우 거부(두 공급자) · Claude 대소문자와 그 기록
+· 프레임 없는 창은 알 수 없음(세 경우) · 키 없음 = 알 수 없음 · 거부 판정은 빈 칸 · 옛 문서 로드 · 리비전 v3와
+`_same_analysis` · 옛 판정 재사용 안 됨 · 입력 지문 이동 · 1단계 승인 지문 바이트 동일 · whisper 열쇠 불변 · 화면 이유
+문구·검토 조각 `영상:` 태그와 등급 불변), `test_claude_analysis_flow.py`(가짜 opener의 Sonnet 흐름이 `visual_issues`를
+완성 문서에 남긴다 — 섞인 `none`은 빠지고 기록이 남는다), `test_analysis_workflow.py`(v2로 멈춘 리비전은 유효한 2단계
+승인으로도 재개가 0송신 거절 · 1단계 재시도도 거절 · 문구에 내부 이름 없음 · 재개 목록에서 빠짐 · 새 분석은 whisper
+추가 0회이고 목록에 새 작업만).
+
+**못 한 것·후속**: 실제 Sonnet 응답에서 `recommended`가 얼마나 줄고 `visual_issues`가 얼마나 맞는지는 사람 실행 뒤에
+잰다. `visual_issues`는 아직 등급에 쓰이지 않는다(W-20b: 실제 문제 → 영상 good 아님, 알 수 없음 → 낮추지 않음).
+프록시 화질 단서(`analysis_workflow`가 `suitability_reason`의 「초점·선명·흐릿」 낱말을 보고 확인 메모를 단다)는
+`blur`를 아직 보지 않는다 — W-20b에서 함께 본다. 1단계 기록의 `input_fingerprint`에서 안내문 리비전을 빼면 v2로 멈춘
+1단계를 v3 2단계가 이을 수 있지만, 지문 계약을 바꾸는 일이라 하지 않았다.

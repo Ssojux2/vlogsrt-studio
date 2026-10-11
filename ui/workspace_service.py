@@ -5875,8 +5875,12 @@ class RawWorkspaceUi:
             summary = None
         if summary is not None and summary.revision.status == "awaiting_semantic":
             awaiting_fingerprint = summary.revision.fingerprint
+        # 이전 분석 기준으로 시작한 작업은 이어 갈 수 없다(D58 18b) — 누를 수 없는 항목은 숨긴다.
+        stale = self.raw.analysis_jobs_on_old_prompt(root)
         choices: list[tuple[str, str]] = []
         for job in self.raw.list_jobs(root):
+            if job.job_id in stale:
+                continue
             in_awaiting = (
                 awaiting_fingerprint is not None
                 and job.kind == raw_service.ANALYSIS_JOB_KIND

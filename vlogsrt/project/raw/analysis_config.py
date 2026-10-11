@@ -20,8 +20,20 @@ from fractions import Fraction
 UNDERSTANDING_SCHEMA_VERSION = "raw-understanding/v1"
 """첫 단계 기록(analysis_transcript.json)의 namespace(계획 §13.1·§15.1)."""
 
-DEFAULT_PROMPT_REVISION = "raw-suitability-v2"
-"""Luna 안내문의 리비전 — 캐시 지문과 승인에 함께 실린다(§14.2)."""
+DEFAULT_PROMPT_REVISION = "raw-suitability-v3"
+"""Luna 안내문의 리비전 — 캐시 지문과 승인에 함께 실린다(§14.2).
+
+v3(W-18 18b, D58): `recommended`의 엄격한 기준과 schema의 `visual_issues`. 안내문·schema는
+코드에 있으므로 리비전을 올려야 v2로 끝난 분석이 `visual_issues` 없이 다시 쓰이지 않는다.
+"""
+
+TRANSCRIPTION_IDENTITY_PROMPT_REVISION = "raw-suitability-v2"
+"""1단계(전사) 승인 지문이 안내문 리비전 자리에 묶는 고정값(D58 18b).
+
+전사는 의미 분석 안내문을 듣지 않는다. 안내문을 고칠 때마다 전사 승인 지문이 흔들리지 않도록
+그 자리를 18b 이전 기본값으로 고정한다 — 기본 설정의 지문은 W-14 이전과 바이트까지 같다.
+`DEFAULT_PROMPT_REVISION`을 가리키게 하지 마라: 그 이름이 바뀌어도 이 값은 그대로여야 한다.
+"""
 
 MAX_ASR_CHUNK_SECONDS = 180.0
 """엔진의 동결 상한(D26·D28). 이 값을 넘는 청크 설정은 만들 수 없다."""

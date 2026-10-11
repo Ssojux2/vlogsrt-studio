@@ -58,6 +58,8 @@ USAGE = {
 }
 """가짜 Claude 응답의 사용량 — Opus 공식 단가로 (5000×$4 + 1200×$20)/100만 = $0.044,
 Sonnet 공식 단가로 (5000×$2 + 1200×$10)/100만 = $0.022."""
+VISUAL_ISSUES = (["none"], ["shake", "dark"], ["blur", "none"])
+"""창마다의 화면 문제(18b, D58) — 셋째는 `none`이 섞여 저장 때 빠진다."""
 
 
 def judgment(text: str) -> dict[str, Any]:
@@ -78,6 +80,7 @@ def judgment(text: str) -> dict[str, Any]:
         "uncertainties": [],
         "suitability": ["recommended", "review", "usable"][min(index, 2)],
         "suitability_reason": ["안정된 구도", "움직임 확인", "연결 장면"][min(index, 2)],
+        "visual_issues": VISUAL_ISSUES[min(index, 2)],
     }
 
 
@@ -292,6 +295,31 @@ def test_a_new_workspace_analyzes_with_sonnet_without_choosing_and_prices_at_son
     )
     assert Decimal(quoted.ceiling_usd) == per_window * quoted.window_count
     assert sum(Decimal(row["cost_usd"]) for row in rows) <= Decimal(quoted.ceiling_usd)
+
+
+@needs_ffmpeg
+def test_a_sonnet_judgment_stores_its_visual_issues_in_the_document(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """18b(D58) — 가짜 Messages 응답의 `visual_issues`가 완성 문서의 판정에 그대로 남는다."""
+    source = tmp_path / "scene.mov"
+    _make_media(source, audio=True, seconds="32")
+    opener = ClaudeOpener()
+    server, _sender, _luna = make_server(tmp_path, monkeypatch, source, opener=opener, model=None)
+    server.capcut_choose_view(server.current_signature())
+    state = settle(server)
+    assert state["stage"] == DONE, state
+    for _request, body in opener.calls:
+        schema = body["output_config"]["format"]["schema"]
+        assert "visual_issues" in schema["required"]
+        assert "visual_issues" in body["messages"][0]["content"][-1]["text"]
+    root, (asset_id,) = server.workspace_root(), tuple(state["asset_ids"])
+    document = server.raw.analysis_document(root, state["revision"], asset_id)
+    rows = sorted(document["annotations"], key=lambda row: row["window_id"])
+    assert [row["status"] for row in rows] == ["accepted"] * 3
+    assert [row["visual_issues"] for row in rows] == [["none"], ["shake", "dark"], ["blur"]]
+    assert [bool(row["visual_issues_note"]) for row in rows] == [False, False, True]
+    assert all(row["prompt_revision"] == RawUnderstandingSettings().prompt_revision for row in rows)
 
 
 @needs_ffmpeg

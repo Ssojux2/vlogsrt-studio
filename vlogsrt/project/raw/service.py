@@ -39,6 +39,7 @@ from vlogsrt.project.raw.analysis_approval import (
 )
 from vlogsrt.project.raw.analysis_config import (
     ANALYSIS_CONCURRENCY,
+    DEFAULT_PROMPT_REVISION,
     RawAnalysisConcurrency,
     RawUnderstandingSettings,
     validate_analysis_concurrency,
@@ -388,6 +389,13 @@ SYNC_CHECK_JOB_KIND = "subtitle_sync_check"
 
 SYNC_ALL_SOURCES = "*"
 """'걸지 못함' 표지의 자리 — 원본을 모르는 실패(앱 열기 고리가 재료조차 못 읽음)는 전체에."""
+
+OLD_PROMPT_REFUSAL = (
+    "이 분석은 이전 분석 기준으로 시작해 이어서 진행할 수 없습니다. 새 분석을 시작해 주세요"
+    " (이미 받은 전사는 다시 사지 않습니다)."
+)
+"""이전 안내문 리비전으로 시작한 분석을 이으려 할 때의 거절 문구(D58 18b) — 내부 리비전 이름은
+싣지 않는다(D57)."""
 
 UPKEEP_CAPTURE = "촬영 시각"
 UPKEEP_ORDER = "영상 순서"
@@ -2671,6 +2679,7 @@ class RawWorkspaceService:
         order = self._order_revision(root, revision.order_revision_id)
         understanding = RawUnderstandingSettings(**json.loads(revision.settings_json))
         validate_understanding_settings(understanding)
+        _require_current_prompt(understanding)
         workflow = self.settings(root)
         rows = store.list_source_results(revision.revision_id)
         selected_ids = [row.asset_id for row in rows if row.status != "unanalyzed"]
@@ -2770,6 +2779,7 @@ class RawWorkspaceService:
         order = self._order_revision(root, revision.order_revision_id)
         understanding = RawUnderstandingSettings(**json.loads(revision.settings_json))
         validate_understanding_settings(understanding)
+        _require_current_prompt(understanding)
         workflow = self.settings(root)
         self._require_revision_models(revision, workflow)
         rows = store.list_source_results(revision.revision_id)
@@ -2952,6 +2962,27 @@ class RawWorkspaceService:
             if wanted <= {row.asset_id for row in rows if row.status in ("analyzed", "cached")}:
                 return revision.revision_id
         return None
+
+    def analysis_jobs_on_old_prompt(self, root: Path) -> frozenset[str]:
+        """이전 분석 기준(안내문 리비전)으로 시작해 이어 갈 수 없는 분석 작업 ID(D58 18b).
+
+        재시도·2단계 재개는 그런 리비전을 0송신으로 거절한다(`_require_current_prompt`) — 화면의
+        재개 목록은 이 집합을 빼서 누를 수 없는 항목을 보이지 않는다.
+        """
+        old = [
+            revision
+            for revision in AnalysisStore(self._workspace(root)).list_revisions()
+            if not _current_prompt(json.loads(revision.settings_json).get("prompt_revision"))
+        ]
+        keys = {revision.fingerprint for revision in old} | {
+            analysis_workflow.semantic_job_fingerprint(revision.revision_id) for revision in old
+        }
+        kinds = (ANALYSIS_JOB_KIND, ANALYSIS_SEMANTIC_JOB_KIND)
+        return frozenset(
+            job.job_id
+            for job in self.list_jobs(root)
+            if job.kind in kinds and job.input_fingerprint in keys
+        )
 
     def _require_revision_models(
         self, revision: AnalysisRevision, workflow: RawWorkflowConfig
@@ -3979,6 +4010,21 @@ def _finished_analysis(store: AnalysisStore, revision_id: str | None) -> Analysi
             f"분석이 완성 상태가 아니다({revision.status}) — 완료된 리비전만 계획에 쓴다"
         )
     return revision
+
+
+def _require_current_prompt(understanding: RawUnderstandingSettings) -> None:
+    """재시도·2단계 재개할 리비전의 안내문이 지금 코드의 것인가(D58 18b) — 아니면 0송신으로 닫는다.
+
+    안내문·schema는 코드에 있고 리비전에는 그 이름(`prompt_revision`)만 있다. 옛 이름의 리비전을
+    이으면 새 안내문을 보내 놓고 옛 이름을 단다 — 그 결과는 지금 설정과 맞지 않아 다시 쓰이지
+    않으므로 돈만 든다. 새 분석은 전사를 다시 사지 않는다(전사 열쇠는 안내문을 묶지 않는다).
+    """
+    if not _current_prompt(understanding.prompt_revision):
+        raise AnalysisError(OLD_PROMPT_REFUSAL)
+
+
+def _current_prompt(prompt_revision: object) -> bool:
+    return prompt_revision == DEFAULT_PROMPT_REVISION
 
 
 def _tier_state(facade: Any, head: ReviewRevision) -> str:
