@@ -38,12 +38,20 @@ from typing import Any, Protocol
 
 from vlogsrt import log, preprocess
 from vlogsrt.project.raw import asr_epoch as asr_epoch_store
-from vlogsrt.project.raw import glossary, media_refs, request_usage, source_text, source_transcript
+from vlogsrt.project.raw import (
+    cross_check,
+    glossary,
+    media_refs,
+    request_usage,
+    source_text,
+    source_transcript,
+)
 from vlogsrt.project.raw import understanding as stage1
 from vlogsrt.project.raw import understanding_luna as luna
 from vlogsrt.project.raw.analysis_approval import (
     AsrPhaseApproval,
     require_live_asr_approval,
+    require_text_approval,
 )
 from vlogsrt.project.raw.analysis_config import (
     ANALYSIS_PROXY_LIMITS,
@@ -509,14 +517,9 @@ def source_input_fingerprint(
     media_fingerprint: str = media_refs.ORIGINAL_ONLY_FINGERPRINT,
     transcript_fingerprint: str = "asr-original/v1",
     asr_epoch: int = 0,
+    cross_check_tag: str | None = None,
 ) -> str:
-    """원본 하나의 분석 입력 지문 — 결과에 영향을 주는 입력만 묶는다.
-
-    출처 내용 해시·비디오 격자(원점·프레임 길이·프레임 수)·오디오 신원(스트림·
-    분량·원점)·분석 설정(창·문맥·표본 수·긴변·프롬프트 리비전·청크 상한)·모델.
-    하나라도 바뀌면 **그 원본의 캐시만** 무효가 된다. 표시 전용 값은 오지 않는다.
-    다시 듣기 차례는 `_input_digest`(D59 19b).
-    """
+    """원본 하나의 분석 입력 지문(결과에 닿는 입력만) — 차례·교차 확인 꼬리표는 있을 때만."""
     parts = [
         INPUT_FINGERPRINT_SCHEMA,
         media_fingerprint,
@@ -542,7 +545,7 @@ def source_input_fingerprint(
         workflow.models.timing_model,
         workflow.models.luna_model,
     ]
-    return _input_digest(parts, asr_epoch)
+    return _input_digest(parts, asr_epoch, cross_check_tag)
 
 
 def _current_input(
@@ -555,7 +558,9 @@ def _current_input(
 ) -> tuple[str, int]:
     """원본의 지금 입력 지문과 다시 듣기 차례 — 차례는 한 번 읽어 지문과 청크 열쇠가 함께 본다.
 
-    미디어 참조·원본 자막 지문도 지금 값이다(D59 19b — 1단계와 2단계가 같은 조립을 쓴다)."""
+    미디어 참조·원본 자막 지문도 지금 값이다(D59 19b — 1단계와 2단계가 같은 조립을 쓴다). 교차
+    확인 꼬리표(D59 19d)는 소리가 있는 원본에만 붙는다 — 두 번째 귀에 물을 것이 없는 무성 원본의
+    끝난 분석은 설정을 켜도 그대로 이어 쓴다."""
     epoch = asr_epoch_store.current(workspace, asset.asset_id)
     fingerprint = source_input_fingerprint(
         source_sha256=asset.content_sha256 or "",
@@ -566,8 +571,14 @@ def _current_input(
         media_fingerprint=media_refs.fingerprint(workspace, asset.asset_id),
         transcript_fingerprint=source_transcript.fingerprint(workspace, asset.asset_id),
         asr_epoch=epoch,
+        cross_check_tag=_cross_check_tag(workspace, audio),
     )
     return fingerprint, epoch
+
+
+def _cross_check_tag(workspace: RawWorkspace, audio: SelectedAudio | None) -> str | None:
+    """원본 입력 지문의 교차 확인 꼬리표 — 꺼져 있거나 소리가 없으면 None(바이트 그대로)."""
+    return None if audio is None else cross_check.binding_tag(workspace)
 
 
 def _audio_identity_text(audio: SelectedAudio | None) -> str:
@@ -583,13 +594,15 @@ def _audio_identity_text(audio: SelectedAudio | None) -> str:
     )
 
 
-def _input_digest(parts: list[str], asr_epoch: int) -> str:
+def _input_digest(parts: list[str], asr_epoch: int, cross_check_tag: str | None = None) -> str:
     """입력 지문의 해시 — 다시 듣기 차례(D59 19b)는 0이 아닐 때만 맨 끝에 붙는다.
 
     0이면 지문은 19b 이전 바이트 그대로이고, 차례가 오른 원본은 옛 분석 결과를 캐시로 다시
-    쓰지 않는다."""
+    쓰지 않는다. 교차 확인 꼬리표(D59 19d)도 있을 때만 그 뒤에 붙는다 — 두 번째 귀에 묻기 전에
+    끝난 분석은 캐시로 다시 쓰지 않는다(그래야 1단계가 다시 돌아 글자를 묻는다)."""
     tag = asr_epoch_store.binding_tag(asr_epoch)
-    body = "\0".join(parts if tag is None else [*parts, tag])
+    tags = [item for item in (tag, cross_check_tag) if item is not None]
+    body = "\0".join([*parts, *tags])
     return hashlib.sha256(body.encode("utf-8")).hexdigest()
 
 
@@ -1213,20 +1226,17 @@ def _seed_stage1(
 ) -> tuple[tuple[UtteranceEvidence, ...], str]:
     """1단계의 원본 자막 심기 — 글자 경로가 자막 지문을 바꿨으면 그 지문으로 입력 지문을 다시 잰다.
 
-    두 번째 귀의 글자가 실리면 원본 자막 지문이 `asr-original/v1`에서 발화 해시로 바뀐다(D59 19c).
-    입력 지문은 전사 **전에** 쟀으므로, 그대로 두면 2단계가 지금 지문으로 다시 재 대조할 때 1단계
-    기록과 갈린다. 다시 재는 것은 자막 지문 하나다 — 다시 듣기 차례·미디어 결속은 전사를 시작할
-    때의 값 그대로여야 한다. 그래서 지금 값으로 **심기 전 지문**을 다시 재어 처음 입력 지문이
-    그대로 나올 때만(그사이 차례·미디어·사람 편집 어느 것도 움직이지 않았다) 새 자막 지문으로
-    바꾼다. 무엇이든 움직였으면 처음 값 그대로 두어 2단계가 지금 값으로 다시 재 대조해 닫는다(19b와
-    같은 선). 심기가 지문을 바꾸지 않았으면(사람이 고친 자막·whisper 글자 그대로) 처음 값 그대로다.
-    """
+    두 번째 귀의 글자가 실리면 자막 지문이 발화 해시로 바뀐다(D59 19c). 입력 지문은 전사 **전에**
+    쟀으므로 다시 재는 것은 자막 지문 하나다: 지금 값(미디어·차례·교차 확인 꼬리표)으로 **심기
+    전 지문**을 다시 재어 처음 입력 지문이 그대로 나올 때만 새 자막 지문으로 바꾼다. 무엇이든
+    움직였으면 처음 값 그대로 두어 2단계가 지금 값으로 다시 재 대조해 닫는다(19b와 같은 선)."""
     before = source_transcript.fingerprint(workspace, asset.asset_id)
     seeded = _seed_transcript(workspace, asset, timeline, utterances)
     after = source_transcript.fingerprint(workspace, asset.asset_id)
     if after == before:
         return seeded, input_fp
     media = media_refs.fingerprint(workspace, asset.asset_id)
+    cross_tag = _cross_check_tag(workspace, timeline.audio)  # 지금 값 — 그사이 바뀌었으면 안 맞는다
 
     def measured(transcript: str) -> str:
         return source_input_fingerprint(
@@ -1238,6 +1248,7 @@ def _seed_stage1(
             media_fingerprint=media,
             transcript_fingerprint=transcript,
             asr_epoch=asr_epoch,
+            cross_check_tag=cross_tag,
         )
 
     return seeded, measured(after) if measured(before) == input_fp else input_fp
@@ -1320,8 +1331,9 @@ def _cross_check_text(
 ) -> tuple[tuple[UtteranceEvidence, ...], dict[str, object]]:
     """1단계 글자 경로(D59 19c) — whisper가 들은 같은 WAV를 두 번째 귀에 묻고 게이트로 얹는다.
 
-    용어집은 이 요청에만 실린다(규칙 6 — whisper 요청에는 힌트 칸이 없다). 제공자가 없으면(19d 전
-    온라인·글자 픽스처 없는 재생) 아무것도 보내지 않고 캐시에 있는 답만 쓴다."""
+    용어집은 이 요청에만 실린다(규칙 6 — whisper 요청에는 힌트 칸이 없다). 제공자가 없으면(승인이
+    글자를 묶지 않은 온라인 — 교차 확인이 꺼져 있거나 물을 청크가 없다 — ·글자 픽스처 없는 재생)
+    아무것도 보내지 않고 캐시에 있는 답만 쓴다."""
     request = source_text.TextPassRequest(
         settings=SOURCE_TEXT_SETTINGS,
         glossary=glossary.current(workspace).terms,
@@ -1332,7 +1344,7 @@ def _cross_check_text(
         cache_dir=workspace.root / "cache" / source_text.TEXT_CACHE_DIRNAME / asset.asset_id,
         origin=providers.origin,
     )
-    provider = _text_provider_for(providers, workflow, settings, audio, asset.asset_id)
+    provider = _text_provider_for(providers, workflow, settings, audio, asset.asset_id, request)
     outcomes = source_text.run_text_pass(audio, evidence, request, provider)
     utterances = stage1.utterance_evidence(audio, evidence)
     result = source_text.apply_text_pass(
@@ -1440,13 +1452,8 @@ def _asr_phase_source(
     있으면 다시 부르지 않는다 — 재시작·재개는 전사를 재사용한다(A4-F1).
     """
     artifact_path = source_dir / ASR_PHASE_DOCUMENT_NAME
-    if _phase_reusable(artifact_path):
-        artifact = _read_asr_phase_artifact(artifact_path)
-        if str(artifact.get("input_fingerprint")) != input_fp:
-            raise AnalysisError(
-                f"1단계 기록이 지금의 입력과 다르다: {asset.source_name} — 새 분석"
-                " 리비전으로 1단계부터 다시 받아라"
-            )
+    artifact = _reusable_phase(artifact_path, providers, asset, input_fp)
+    if artifact is not None:
         log.out(f"1단계 전사 기록 재사용: {asset.source_name} (ASR 재호출 없음)")
         return _upsert(
             store,
@@ -1905,39 +1912,95 @@ def _text_provider_for(
     settings: RawUnderstandingSettings,
     audio: SelectedAudio,
     asset_id: str,
+    request: source_text.TextPassRequest,
 ) -> source_text.SourceTextProvider | None:
-    """1단계 글자 경로의 제공자 — 재생 선언이거나, 승인이 글자 모델을 묶은 실제 전송이다(D59 19c).
+    """1단계 글자 경로의 제공자 — 재생 선언이거나, 승인(v2)이 글자를 묶은 실제 전송(D59 19d).
 
-    승인이 글자 모델을 묶지 않았으면 실제 전송은 만들지 않는다(`_approved_text_model`) — 19c의
-    온라인 1단계는 글자 요청을 한 번도 보내지 않고, 캐시에 있는 답만 쓴다."""
+    글자 모델이 빠진 승인은 캐시만 쓴다. 글자 문이 닫히면 WARN하고 묻지 않는다(D39)."""
     if not providers.is_live():
         return None if providers.replay is None else providers.replay.text_for(audio.source_sha256)
     approval = (providers.asr_approvals or {}).get(asset_id)
     model = _approved_text_model(approval)
     if approval is None or model is None:
         return None
+    identity = source_text.text_identity(request.settings, request.glossary_sha)
+    try:
+        require_text_approval(approval, workflow=workflow, identity=identity, on=request.on)
+    except AnalysisApprovalError as error:
+        log.warn(
+            f"1단계 글자 경로: 글자 요청을 보내지 않습니다 — whisper 글자 그대로 둡니다: {error}"
+        )
+        return None
+    return _approved_text_provider(providers, workflow, settings, audio, approval, identity)
+
+
+def _approved_text_provider(
+    providers: AnalysisProviders,
+    workflow: RawWorkflowConfig,
+    settings: RawUnderstandingSettings,
+    audio: SelectedAudio,
+    approval: AsrPhaseApproval,
+    identity: str,
+) -> source_text.ApprovedPhaseTextProvider:
+    """글자 문을 지난 승인의 전송 경계 — 상한·청크 집합은 승인(견적)이 묶은 그대로다."""
     sender, cfg = providers.live_sender, providers.live_cfg
     if sender is None or cfg is None:
         raise AnalysisApprovalError(
             "실제 호출에는 전송 경계(sender)와 엔진 설정(cfg)이 필요하다 — 사람이 공급한다"
         )
+    keys = approval.text_chunk_keys
     return source_text.ApprovedPhaseTextProvider(
         inner=TransportTextProvider(sender=sender, cfg=cfg),  # type: ignore[arg-type]
         workflow=workflow,
         understanding=settings,
         audio=audio,
         approval=approval,
-        approved_model=model,
-        gate=CountingAsrGate(limit=approval.chunk_budget),
+        approved_model=str(approval.text_model),
+        approved_identity=identity,
+        gate=CountingAsrGate(limit=approval.text_chunk_budget),
+        approved_keys=None if keys is None else frozenset(keys),
     )
 
 
-def _approved_text_model(approval: AsrPhaseApproval | None) -> str | None:
-    """1단계 승인이 묶은 글자 모델 — 19c의 `AsrPhaseApproval`에는 그 칸이 없다(`approval` 미사용).
+def _reusable_phase(
+    artifact_path: Path, providers: AnalysisProviders, asset: SourceAsset, input_fp: str
+) -> dict[str, Any] | None:
+    """같은 리비전의 1단계 기록을 그대로 쓸 수 있으면 그 기록, 아니면 None(1단계를 다시 듣는다).
 
-    19d가 승인에 `text_model`을 더하고 견적에 글자 비용을 실을 때까지 언제나 None이다. 그래서
-    승인 없이 유료 글자 요청이 나가는 길은 없다 — 견적·승인이 그 비용을 아직 보이지 않는다."""
+    whisper 실패가 남았거나(`_phase_reusable`), 승인이 글자를 묶었거나(`_text_due`), 기록의 입력
+    지문이 지금과 다르면 다시 듣는다. 입력이 다른 기록은 교차 확인이 켜진 리비전에서 생긴다(D59
+    19d): 결속은 두 번째 귀 글자를 빼므로 용어집을 되돌리면 옛 리비전에 다시 붙는데, 그 기록은 다른
+    글자로 심은 것이다. 다시 들어도 whisper·글자는 캐시에서 오고 새로 사는 것은 승인이 묶은
+    만큼뿐이다."""
+    if not _phase_reusable(artifact_path) or _text_due(providers, asset.asset_id):
+        return None
+    artifact = _read_asr_phase_artifact(artifact_path)
+    if str(artifact.get("input_fingerprint")) == input_fp:
+        return artifact
+    log.warn(f"1단계 기록이 지금 입력과 달라 다시 듣습니다: {asset.source_name} (캐시 우선)")
     return None
+
+
+def _text_due(providers: AnalysisProviders, asset_id: str) -> bool:
+    """승인이 이 원본의 글자 요청을 묶었는가(D59 19d) — 그러면 1단계 기록을 다시 쓰지 않는다.
+
+    견적은 답이 캐시에 없는 청크가 있을 때만 글자 분량을 세고, 승인은 그때만 글자를 묶는다. 그
+    청크를 묻는 것이 이 승인의 일이므로 같은 리비전의 1단계 기록(글자 실패가 남은 「전사만」)을
+    그대로 쓰지 않고 다시 듣는다 — whisper는 청크 캐시에서 오고 글자는 답이 없는 청크만 묻는다."""
+    if not providers.is_live():
+        return False
+    return _approved_text_model((providers.asr_approvals or {}).get(asset_id)) is not None
+
+
+def _approved_text_model(approval: AsrPhaseApproval | None) -> str | None:
+    """1단계 승인이 묶은 글자 모델(D59 19d) — 승인이 없거나 글자 칸이 비었으면 None(요청 0회).
+
+    글자 칸은 「다른 귀로 교차 확인」이 켜져 있고 견적이 물을 청크를 셌을 때만 채워진다
+    (`browser_runtime.mint_asr_approvals`) — 사람이 본 견적 없이 유료 글자 요청이 나가는 길이
+    없다."""
+    if approval is None or not approval.text_model:
+        return None
+    return approval.text_model
 
 
 def _luna_responder_for(

@@ -258,6 +258,7 @@ def asr_estimate_digest(estimates: Sequence[AnalysisEstimate]) -> str:
     표시 전용 문구(note)는 빼고, 승인이 묶는 측정값(출처·스트림·청크·창·모델
     회신 수)만 묶는다 — 문구만 바뀌었다고 승인을 다시 받게 하지 않는다. 비용
     상한은 **있을 때만** 덧붙인다(D54) — Luna 견적의 지문은 W-14 이전과 같다.
+    교차 확인의 글자 분량(D59 19d)도 **있을 때만**이다 — 꺼져 있으면 19d 이전 바이트 그대로다.
     """
     rows = sorted(
         (
@@ -271,6 +272,7 @@ def asr_estimate_digest(estimates: Sequence[AnalysisEstimate]) -> str:
             item.asr_chunk_count,
             item.luna_request_count,
             *_present(item.ceiling_usd),
+            *_text_pass(item),
         )
         for item in estimates
     )
@@ -304,6 +306,14 @@ def _present(value: str | None) -> tuple[str, ...]:
     return () if value is None else (value,)
 
 
+def _text_pass(item: AnalysisEstimate) -> tuple[object, ...]:
+    """교차 확인 글자 분량(D59 19d) — 켜져 있어 견적이 센 때만 칸을 더한다(수·길이·금액)."""
+    if item.text_chunk_count is None:
+        return ()
+    keys = () if item.text_chunk_keys is None else (list(item.text_chunk_keys),)
+    return ("text-pass", item.text_chunk_count, item.text_seconds, item.text_usd, *keys)
+
+
 def mint_asr_approvals(
     service: Any,
     root: Path,
@@ -311,16 +321,17 @@ def mint_asr_approvals(
     *,
     understanding: RawUnderstandingSettings | None = None,
     on: date | None = None,
+    quoted: Sequence[AnalysisEstimate] = (),
+    text_identity: str | None = None,
 ) -> dict[str, AsrPhaseApproval]:
-    """견적의 측정값으로 1단계 승인을 만든다 — 전사 전에 알 수 있는 값만.
+    """견적의 측정값으로 1단계 승인을 만든다 — 전사 전에 알 수 있는 값만(무성 원본은 없다).
 
-    무성 원본은 승인을 만들지 않는다(ASR 작업 자체가 없다, §7.3). 청크 예산은
-    견적이 잰 청크 수 그대로다 — 실행이 그보다 많이 자르면 게이트가 전송 전에
-    닫는다. 전송 순간의 재검사는 `ApprovedPhaseAsrProvider`가 맡는다.
-    """
+    글자 칸(D59 19d)은 **사람이 본 견적** 줄(`quoted`)과 그 digest가 묶은 신원(`text_identity`)
+    으로만 묶는다 — 용어집을 다시 읽지 않는다. 하나라도 없으면(고급 탭) 글자 요청이 0회다."""
     settings = understanding or RawUnderstandingSettings()
     workflow = service.settings(root)
     estimates = service.analysis_estimate(root, asset_ids, settings)
+    texts = _quoted_text_fields(quoted, workflow.models.text_model, text_identity)
     assets = {asset.asset_id: asset for asset in service.list_source_assets(root)}
     approvals: dict[str, AsrPhaseApproval] = {}
     for estimate in estimates:
@@ -339,8 +350,33 @@ def mint_asr_approvals(
             settings_fingerprint=asr_settings_fingerprint(settings, workflow),
             timing_model=workflow.models.timing_model,
             approved_on=(on or date.today()).isoformat(),
+            **texts.get(estimate.asset_id, {}),
         )
     return approvals
+
+
+def _quoted_text_fields(
+    quoted: Sequence[AnalysisEstimate], text_model: str, identity: str | None
+) -> dict[str, dict[str, Any]]:
+    """사람이 본 견적 줄마다 승인의 글자 칸 — 물을 청크를 센 줄만(D59 19d), 신원이 없으면 없다."""
+    if not quoted or identity is None:
+        return {}
+    fields = {item.asset_id: _text_approval_fields(item, text_model, identity) for item in quoted}
+    return {asset_id: values for asset_id, values in fields.items() if values}
+
+
+def _text_approval_fields(
+    estimate: AnalysisEstimate, text_model: str, identity: str
+) -> dict[str, Any]:
+    """승인의 글자 칸(D59 19d) — 견적이 물을 청크를 셌을 때만. 아니면 빈 사전(19d 이전 모양)."""
+    if not estimate.text_chunk_count:
+        return {}
+    return {
+        "text_model": text_model,
+        "text_identity": identity,
+        "text_chunk_budget": int(estimate.text_chunk_count),
+        "text_chunk_keys": estimate.text_chunk_keys,
+    }
 
 
 def _phase_artifact_for(service: Any, root: Path, revision_id: str, asset_id: str) -> Any:

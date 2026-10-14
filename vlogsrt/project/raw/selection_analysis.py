@@ -9,7 +9,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from vlogsrt.project.raw import browser_runtime
+from vlogsrt.project.raw import browser_runtime, cross_check
 from vlogsrt.project.raw.analysis_config import RawUnderstandingSettings
 from vlogsrt.project.raw.analysis_store import AnalysisStore
 from vlogsrt.project.raw.config import RawWorkflowConfig
@@ -39,6 +39,8 @@ class SelectionQuote:
     approved: bool = False
     mode: str = MODE_FULL
     """승인 범위 — digest에 접혀 있어 「전사만」 승인을 전체 실행으로(또는 거꾸로) 쓸 수 없다."""
+    cross_tag: str | None = None
+    """digest에 접힌 교차 확인 꼬리표(D59 19d, 꺼지면 None) — 승인이 묶은 글자 요청 신원이다."""
 
 
 def quote(
@@ -82,32 +84,45 @@ def _assemble_quote(
     """견적 묶음 — 측정값·원본별 결속·범위를 digest 하나로 접는다.
 
     전체 범위·차례 0의 digest는 19b 이전 바이트 그대로다: 다시 듣기 차례는 0이 아닐 때만
-    결속 줄의 넷째 칸이 되고, 범위는 「전사만」일 때만 끝에 붙는다(D59 19b).
+    결속 줄의 넷째 칸이 되고, 범위는 「전사만」일 때만 끝에 붙는다(D59 19b). 「다른 귀로 교차
+    확인」(D59 19d)이 켜져 있으면 줄마다 글자 분량(측정값 쪽)과 꼬리표(결속 쪽)가 더 붙는다 — 꺼져
+    있으면 19d 이전 바이트 그대로다. 글자 분량은 측정이 아니라 지금의 기록·캐시에서 다시 잰다
+    (ffprobe 없음) — 그래서 다시 묶을 때(`rebound_quote`)도 맞다.
     """
     import hashlib
 
     if mode not in MODES:
         raise RawWorkspaceError(f"알 수 없는 승인 범위입니다: {mode!r}")
+    workspace = service._workspace(root)
+    estimates = cross_check.with_text_passes(workspace, estimates)
+    tag = cross_check.binding_tag(workspace)
     payload = browser_runtime.asr_estimate_digest(estimates) + json.dumps(
-        [_quote_binding(service._workspace(root), a) for a in asset_ids]
+        [_quote_binding(workspace, a, tag) for a in asset_ids]
     )
     if mode != MODE_FULL:
         payload += "\0mode=" + mode
     digest = hashlib.sha256(payload.encode()).hexdigest()
-    return SelectionQuote(asset_ids, estimates, digest, service.settings(root), mode=mode)
+    workflow = service.settings(root)
+    return SelectionQuote(asset_ids, estimates, digest, workflow, mode=mode, cross_tag=tag)
 
 
-def _quote_binding(workspace: Any, asset_id: str) -> tuple[str, ...]:
-    """원본 하나의 견적 결속 — 미디어 참조·원본 자막, 그리고 0이 아닌 다시 듣기 차례."""
+def _quote_binding(workspace: Any, asset_id: str, cross_tag: str | None) -> tuple[str, ...]:
+    """원본 하나의 견적 결속 — 미디어 참조·원본 자막, 0이 아닌 다시 듣기 차례, 교차 확인 꼬리표.
+
+    교차 확인이 켜져 있으면 자막 지문은 두 번째 귀가 얹은 글자를 뺀 것이다
+    (`source_transcript.binding_fingerprint`) — 그 글자는 꼬리표가 묶으므로, 실행이 글자를 얹어도
+    다음 견적이 같은 결속을 본다(19c-5 알려진 한계를 닫는다, D59 19d)."""
     from vlogsrt.project.raw import asr_epoch, media_refs, source_transcript
 
-    row = (
+    row: tuple[str, ...] = (
         asset_id,
         media_refs.fingerprint(workspace, asset_id),
-        source_transcript.fingerprint(workspace, asset_id),
+        source_transcript.binding_fingerprint(workspace, asset_id, cross_tag is not None),
     )
     tag = asr_epoch.binding_tag(asr_epoch.current(workspace, asset_id))
-    return row if tag is None else (*row, tag)
+    if tag is not None:
+        row = (*row, tag)
+    return row if cross_tag is None else (*row, cross_tag)
 
 
 def _order_free_fingerprints(service: Any, root: Path, assets: dict[str, Any]) -> set[str]:
@@ -176,18 +191,27 @@ def _documents_reusable(
 
 
 def _document_reusable(service: Any, root: Path, row: Any) -> bool:
-    """완성 문서가 읽히고, 미디어 결속이 지금과 같고, 창 판정이 모두 받아들여졌는가."""
+    """완성 문서가 읽히고, 미디어·자막 결속이 지금과 같고, 창 판정이 모두 받아들여졌는가.
+
+    자막은 결속(교차 확인이 켜지면 두 번째 귀 글자를 뺀 지문, D59 19d)이 아니라 **실제** 지문으로
+    본다(`_complete_source_current`와 같은 대조) — 용어집을 되돌리면 꼬리표는 옛 리비전과 같아지지만
+    지금 심긴 글자는 다른 용어집의 것이라, 그 글자로 판정한 분석이 아니면 다시 쓰지 않는다."""
     if not row.document_path:
         return False
     try:
         document = json.loads((root / row.document_path).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return False
+    from vlogsrt.project.raw import source_transcript
     from vlogsrt.project.raw.media_refs import ORIGINAL_ONLY_FINGERPRINT, fingerprint
 
+    workspace = service._workspace(root)
     if document.get("media_fingerprint", ORIGINAL_ONLY_FINGERPRINT) != fingerprint(
-        service._workspace(root), row.asset_id
+        workspace, row.asset_id
     ):
+        return False
+    transcript = document.get("transcript_fingerprint", source_transcript.ORIGINAL_FINGERPRINT)
+    if transcript != source_transcript.fingerprint(workspace, row.asset_id):
         return False
     return all(a.get("status") == "accepted" for a in document.get("annotations", []))
 
@@ -207,20 +231,40 @@ def execute(
     없어도 된다)."""
     if not approved.approved:
         raise RawWorkspaceError("선택 영상의 전사·Luna 분석 승인이 필요합니다")
+    # 글자 요청 신원(D59 19d)은 다시 재기 **전에** 읽는다 — 그사이 용어집이 바뀌면 아래에서 닫힌다.
+    identity = cross_check.request_identity(service._workspace(root))
     current = quote(service, root, approved.asset_ids, approved.mode)
     if current.digest != approved.digest or current.workflow != approved.workflow:
         raise RawWorkspaceError("선택 영상이나 설정이 바뀌었습니다. 현재 범위를 다시 확인하세요")
+    text_identity = _approved_text_identity(current, identity)
     transcribe_only = approved.mode == MODE_TRANSCRIBE
     # 의미 분석 클라이언트를 먼저 받는다 — 키가 없으면 전사도 사기 전에 닫힌다(D54).
     client = (
         None if transcribe_only else transport.semantic_client(approved.workflow.models.luna_model)
     )
     context.check_cancel()
-    first, revision_id = _run_transcription(service, root, approved, transport, context, report)
+    first, revision_id = _run_transcription(
+        service, root, approved, transport, context, report, text_identity
+    )
     if transcribe_only:
         return revision_id
     _run_semantic(service, root, approved, transport, context, report, first, revision_id, client)
     return revision_id
+
+
+def _approved_text_identity(current: SelectionQuote, identity: str) -> str | None:
+    """승인한 digest가 묶은 글자 요청 신원(D59 19d) — 꺼져 있으면 None(글자 요청 없음).
+
+    다시 잰 견적의 digest가 승인한 것과 같으므로 그 꼬리표가 승인이 본 꼬리표다. 다시 재기 전에 읽은
+    신원과 다르면 그 사이 용어집·문맥이 바뀐 것이라 0송신으로 닫는다."""
+    if current.cross_tag is None:
+        return None
+    if current.cross_tag != cross_check.TAG_PREFIX + identity:
+        raise RawWorkspaceError(
+            "용어집이 바뀌었습니다. 새 견적을 확인하고 다시 승인하세요 — 유료 호출은 시작하지"
+            " 않았습니다"
+        )
+    return identity
 
 
 def _run_transcription(
@@ -230,11 +274,21 @@ def _run_transcription(
     transport: Any,
     context: Any,
     report: Callable[[str, str | None], None],
+    text_identity: str | None = None,
 ) -> tuple[Any, str]:
     """1단계 — 전사 승인을 만들고 전사·원본 자막·장면·프레임을 기다린다(의미 분석 0회)."""
     browser_runtime.prepare_approved_browser_network()
     service.update_settings(root, replace(approved.workflow, network_mode="online"))
-    asr = browser_runtime.mint_asr_approvals(service, root, approved.asset_ids, on=transport.on)
+    # 글자 칸(D59 19d)은 사람이 본 견적 줄과 그 digest가 묶은 신원에서만 — 지금 용어집을 다시 읽지
+    # 않는다(그사이 저장된 용어집은 승인 밖이다 — 보낼 때 신원 대조가 닫는다).
+    asr = browser_runtime.mint_asr_approvals(
+        service,
+        root,
+        approved.asset_ids,
+        on=transport.on,
+        quoted=approved.estimates,
+        text_identity=text_identity,
+    )
     first = service.start_analysis(
         root,
         asset_ids=approved.asset_ids,

@@ -1330,6 +1330,12 @@ _SHELL_CSS = """
   border: 1px solid var(--vl-line); background: var(--vl-surface-raised); }
 #vl-approval-mode .wrap { gap: 4px 12px; }
 #review-tab:has(#library-approve:disabled) #vl-approval-mode { display: none; }
+/* 다른 귀로 교차 확인(D59 19d) — 승인 범위 바로 아래의 켬·끔. 같은 상자 모양이고, 승인할 견적이
+   없으면 함께 숨는다. 분량·금액은 칸이 아니라 견적 문구가 말한다. */
+#vl-cross-check {
+  min-width: 0; padding: 6px 10px; border-radius: 6px;
+  border: 1px solid var(--vl-line); background: var(--vl-surface-raised); }
+#review-tab:has(#library-approve:disabled) #vl-cross-check { display: none; }
 @media (min-width: 1051px) {
   #review-tab:has(#library-approve:disabled) #visual-stage:not(:has(#vl-quote-note)) .vl-panel {
     grid-row: 1 / 3; }

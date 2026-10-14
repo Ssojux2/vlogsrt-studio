@@ -197,6 +197,15 @@ class SourceTextSettings:
 
 SOURCE_TEXT_SETTINGS = SourceTextSettings()
 
+TEXT_MODEL_LABELS = {RawModelRoles().text_model: "GPT-Transcribe"}
+"""견적 문구에 쓰는 두 번째 귀(문구 역할) 모델의 이름(D59 19d) — 모델 이름은 견적에서만
+보인다."""
+
+
+def text_model_label(model: str) -> str:
+    """견적의 「다른 귀(…)」 괄호 안 이름 — 등록된 이름이 없으면 모델 이름 그대로."""
+    return TEXT_MODEL_LABELS.get(model, model)
+
 
 def source_text_problems(settings: SourceTextSettings) -> list[str]:
     """글자 경로 설정의 자기 일관성 — 확인된 문구 모델·비지 않은 언어·제어문자 없는 문맥."""

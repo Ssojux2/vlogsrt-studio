@@ -13,9 +13,12 @@
 - **힌트는 두 번째 귀에게만 간다**(규칙 6). 고정 문맥·용어집·언어는 이 요청 하나에만 실린다.
 - **실패는 whisper 글자 그대로 + WARN**(D37·D39). 실패는 캐시하지 않고 `asr.chunks`에도 넣지 않는다
   — 1단계 기록의 재사용 판정(`_phase_reusable`)이 글자 실패 때문에 whisper를 다시 사지 않는다.
-- **19d 전에는 온라인에서 글자 요청을 한 번도 보내지 않는다.** 1단계 승인(`AsrPhaseApproval`)이
-  아직 글자 모델을 묶지 않으므로 실행 경로는 실제 제공자를 만들지 않는다. 캐시에 이미 있는 답은
-  그대로 쓴다(무료) — 같은 whisper 캐시와 같은 글자 캐시는 같은 발화를 낳는다(심기가 멱등이다).
+- **온라인 글자 요청은 승인이 묶은 것만 나간다(D59 19d).** 1단계 승인(`AsrPhaseApproval` v2)이 글자
+  모델·요청 신원(`text_identity`)·요청 상한을 묶어야 실제 제공자가 생기고, 청크마다 그 셋을 다시
+  본다. 캐시에 이미 있는 답은 그대로 쓴다(무료) — 같은 whisper 캐시와 같은 글자 캐시는 같은 발화를
+  낳는다(심기가 멱등이다).
+- **접은 글자가 같으면 바꾸지 않는다(D59 19d).** 공백·부호만 다른 답은 `agreed`이고 whisper 글자를
+  둔다 — 자막 지문은 글자가 실제로 바뀔 때만 바뀐다(접기는 retext 비교와 같은 `strip_for_compare`).
 """
 
 from __future__ import annotations
@@ -31,6 +34,7 @@ from typing import Any, Protocol
 
 from vlogsrt import log, retext
 from vlogsrt.config import Config
+from vlogsrt.hangul import strip_for_compare
 from vlogsrt.models import Chunk, RetextRecord, RetextRejection, RetextUnplaced, Segment
 from vlogsrt.project.raw import request_log
 from vlogsrt.project.raw.analysis_approval import AsrPhaseApproval, require_live_asr_approval
@@ -46,6 +50,7 @@ from vlogsrt.project.raw.config import RawWorkflowConfig, SourceTextSettings, so
 from vlogsrt.project.raw.glossary import glossary_sha, validated
 from vlogsrt.project.raw.source_transcript import TEXT_SOURCE_WHISPER
 from vlogsrt.project.raw.understanding import (
+    TEXT_ORIGIN_FIELD,
     AsrChunkOutcome,
     AsrEvidence,
     SampleSpan,
@@ -183,6 +188,72 @@ def text_chunk_key(
     }
     body = json.dumps(identity, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+
+TEXT_IDENTITY_SCHEMA = "raw-source-text-identity/v1"
+
+
+def text_identity(settings: SourceTextSettings, glossary_digest: str) -> str:
+    """글자 요청의 신원(D59 19d) — schema·모델·언어·문맥·용어집 sha. WAV·범위·출처는 없다.
+
+    1단계 승인(`AsrPhaseApproval.text_identity`)과 교차 확인 결속 꼬리표가 이 값을 묶는다 —
+    용어집이나 문맥이 승인 뒤에 바뀌면 그 승인으로는 글자를 묻지 않는다."""
+    identity = {
+        "identity": TEXT_IDENTITY_SCHEMA,
+        "schema": settings.schema,
+        "model": settings.model,
+        "languages": list(settings.languages),
+        "prompt": settings.prompt,
+        "glossary": glossary_digest,
+    }
+    body = json.dumps(identity, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+
+def call_identity(
+    model: str,
+    prompt: str,
+    keywords: tuple[str, ...] | None,
+    languages: tuple[str, ...] | None,
+) -> str:
+    """전송 순간의 요청 재료로 다시 잰 신원 — 승인이 묶은 `text_identity`와 같아야 보낸다."""
+    settings = _call_settings(model, prompt, languages)
+    return text_identity(settings, glossary_sha(tuple(keywords or ())))
+
+
+def call_key(
+    binding: AudioChunkBinding,
+    model: str,
+    prompt: str,
+    keywords: tuple[str, ...] | None,
+    languages: tuple[str, ...] | None,
+) -> str:
+    """전송 순간의 청크로 다시 잰 글자 캐시 열쇠(출처 live) — 승인이 묶은 청크 집합과 대조한다."""
+    span = SampleSpan(int(binding.sample_start), int(binding.sample_end))
+    settings = _call_settings(model, prompt, languages)
+    digest = glossary_sha(tuple(keywords or ()))
+    return text_chunk_key(binding.audio_sha256, settings, digest, span, ORIGIN_LIVE)
+
+
+def _call_settings(
+    model: str, prompt: str, languages: tuple[str, ...] | None
+) -> SourceTextSettings:
+    return replace(
+        SourceTextSettings(), model=model, languages=tuple(languages or ()), prompt=prompt
+    )
+
+
+def cached_answer_exists(cache_dir: Path, key: str) -> bool:
+    """견적용 확인 — 그 열쇠의 성공 답이 캐시에 있는가. 읽지 못하면 WARN하고 없다(묻는 쪽, 상한)."""
+    path = cache_dir / f"{key}.json"
+    if not path.is_file():
+        return False
+    try:
+        body = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        log.warn(f"글자 캐시를 읽지 못했다 — 견적은 묻는 것으로 셉니다: {path.name} ({error})")
+        return False
+    return isinstance(body, dict) and body.get("key") == key and isinstance(body.get("text"), str)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -367,13 +438,19 @@ def apply_text_pass(
         if outcome.status == STATUS_RECEIVED
     }
     applied = tuple(
-        _with_evidence(item, decisions.get(item.chunk_index), request.settings.model)
+        _with_evidence(
+            item, decisions.get(item.chunk_index), request.settings.model, request.origin
+        )
         for item in utterances
     )
-    applied, carried, dropped = _carry_previous(applied, set(decisions), previous)
+    applied, carried, dropped = _carry_previous(applied, set(decisions), previous, request.origin)
     _require_same_skeleton(utterances, applied)
     record = _record(outcomes, decisions, members, applied, request)
-    record.update(carried=carried, dropped_cross_checked=dropped)
+    record.update(
+        carried=len(carried),
+        carried_replaced=sum(item.retext_reason == REASON_ACCEPTED for item in carried),
+        dropped_cross_checked=dropped,
+    )
     _report(record)
     return TextPassResult(utterances=applied, record=record)
 
@@ -382,22 +459,28 @@ def _carry_previous(
     applied: tuple[UtteranceEvidence, ...],
     decided: set[int],
     previous: Sequence[Mapping[str, object]],
-) -> tuple[tuple[UtteranceEvidence, ...], int, int]:
-    """답이 없는 청크의 발화에 지금 심긴 글자 증거를 잇는다 — 같은 whisper 답일 때만."""
+    origin: str,
+) -> tuple[tuple[UtteranceEvidence, ...], tuple[UtteranceEvidence, ...], int]:
+    """답이 없는 청크의 발화에 지금 심긴 글자 증거를 잇는다 — 같은 whisper 답·같은 출처일 때만.
+
+    출처(D59 19d)는 그 글자 판정이 실제 답(`live`)인지 재생 답(`replay`)인지다 — 다르면 잇지 않는다.
+    출처 칸이 없는 19c 줄도 잇지 않는다(어디서 온 글자인지 모른다). 돌려주는 것은 (발화, 이어 간 줄,
+    이을 수 없던 교차 확인 줄 수)다."""
     rows = {str(row.get("utterance_id")): row for row in previous if "text_source" in row}
-    carried = dropped = 0
+    carried: list[UtteranceEvidence] = []
+    dropped = 0
     result: list[UtteranceEvidence] = []
     for item in applied:
         row = rows.get(item.utterance_id)
         if item.chunk_index in decided or row is None:
             result.append(item)
-        elif _same_whisper(item, row):
-            result.append(_carried(item, row))
-            carried += 1
+        elif _same_whisper(item, row) and row.get(TEXT_ORIGIN_FIELD) == origin:
+            carried.append(_carried(item, row))
+            result.append(carried[-1])
         else:
             result.append(item)
             dropped += row.get("text_source") != TEXT_SOURCE_WHISPER
-    return tuple(result), carried, dropped
+    return tuple(result), tuple(carried), dropped
 
 
 def _carried(item: UtteranceEvidence, row: Mapping[str, object]) -> UtteranceEvidence:
@@ -410,6 +493,7 @@ def _carried(item: UtteranceEvidence, row: Mapping[str, object]) -> UtteranceEvi
         text_source=evidence["text_source"],
         retext_reason=evidence["retext_reason"],
         alt_text=evidence["alt_text"],
+        text_origin=evidence.get(TEXT_ORIGIN_FIELD),
     )
 
 
@@ -455,13 +539,16 @@ def _decide(
 
 
 def _with_evidence(
-    item: UtteranceEvidence, decision: _Decision | None, model: str
+    item: UtteranceEvidence, decision: _Decision | None, model: str, origin: str
 ) -> UtteranceEvidence:
-    """발화 하나의 글자와 증거 — whisper 글자는 언제나 남고, 거절된 후보는 `alt_text`로 남는다."""
+    """발화 하나의 글자와 증거 — whisper 글자는 언제나 남고, 거절된 후보는 `alt_text`로 남는다.
+
+    통과한 답이라도 접은 글자가 whisper와 같으면(공백·부호만 다르다, D59 19d) 바꾸지 않고
+    `agreed`다 — 그래야 부호만 고친 교차 확인이 자막 지문을 바꿔 끝난 분석을 낡게 하지 않는다."""
     if decision is None:
         return item  # 답이 없는 청크 — 19c 이전 모양 그대로(증거 칸 없음)
     accepted = decision.texts.get(item.position)
-    if accepted is not None and accepted.strip() != item.text.strip():
+    if accepted is not None and strip_for_compare(accepted) != strip_for_compare(item.text):
         return replace(
             item,
             text=accepted,
@@ -469,6 +556,7 @@ def _with_evidence(
             text_source=model,
             retext_reason=REASON_ACCEPTED,
             alt_text="",
+            text_origin=origin,
         )
     rejection = decision.rejections.get(item.position)
     if accepted is not None:
@@ -481,6 +569,7 @@ def _with_evidence(
         text_source=TEXT_SOURCE_WHISPER,
         retext_reason=reason,
         alt_text="" if rejection is None else rejection.candidate,
+        text_origin=origin,
     )
 
 
@@ -613,7 +702,8 @@ def _report(record: Mapping[str, Any]) -> None:
     if record["carried"]:
         log.out(
             f"1단계 글자 경로: 글자 답이 없는 청크에서 이미 교차 확인된 {record['carried']}줄을"
-            " 그대로 둡니다(같은 whisper 답)"
+            " 그대로 둡니다(같은 whisper 답·같은 출처 — 그중 바뀐 글자"
+            f" {record['carried_replaced']}줄)"
         )
     if record["dropped_cross_checked"]:
         log.warn(
@@ -631,9 +721,10 @@ def _report(record: Mapping[str, Any]) -> None:
 class ApprovedPhaseTextProvider:
     """1단계 글자 경로의 전송 경계 — 승인이 묶은 글자 모델과 1단계 승인을 청크마다 다시 지난다.
 
-    `analysis_workflow.ApprovedPhaseAsrProvider`와 같은 모양이다. 승인이 글자 모델을 묶어야만
-    만들어진다 — 19c의 `AsrPhaseApproval`에는 아직 그 칸이 없어(19d가 더한다) 실행 경로는 이
-    제공자를 만들지 않고, 온라인 글자 요청은 0회다. 예약 문은 whisper와 따로 센다.
+    `analysis_workflow.ApprovedPhaseAsrProvider`와 같은 모양이다. 승인(`AsrPhaseApproval` v2,
+    D59 19d)이 글자 모델·요청 신원·요청 상한을 묶어야만 만들어진다. 전송 순간마다 1단계 승인·
+    모델·요청 신원(문맥·언어·용어집)·스트림·범위를 다시 보고, 예약 문(승인이 묶은 글자 요청
+    상한)은 whisper와 따로 센다.
     """
 
     inner: SourceTextProvider
@@ -642,7 +733,10 @@ class ApprovedPhaseTextProvider:
     audio: SelectedAudio
     approval: AsrPhaseApproval
     approved_model: str
+    approved_identity: str
     gate: TextReservationGate
+    approved_keys: frozenset[str] | None = None
+    """견적이 센 바로 그 청크들(글자 캐시 열쇠) — 있으면 그 밖의 청크는 보내지 않는다(D59 19d)."""
 
     def text_transcript(
         self,
@@ -658,6 +752,7 @@ class ApprovedPhaseTextProvider:
         languages: tuple[str, ...] | None = None,
     ) -> TextTranscript:
         self._require_open(binding, settings, on)
+        self._require_quoted(binding, settings.models.text_model, prompt, keywords, languages)
         self.gate.reserve(count=1, key=str(binding.request_id))
         return self.inner.text_transcript(
             binding=binding,
@@ -670,6 +765,24 @@ class ApprovedPhaseTextProvider:
             keywords=keywords,
             languages=languages,
         )
+
+    def _require_quoted(
+        self,
+        binding: AudioChunkBinding,
+        model: str,
+        prompt: str,
+        keywords: tuple[str, ...] | None,
+        languages: tuple[str, ...] | None,
+    ) -> None:
+        """그 호출의 문맥·언어·용어집으로 다시 잰 신원과 청크가 승인이 본 것인가(아니면 0송신)."""
+        if call_identity(model, prompt, keywords, languages) != self.approved_identity:
+            raise AnalysisApprovalError(
+                "승인이 본 글자 요청(문맥·언어·용어집)과 지금의 요청이 다르다 — 보내지 않는다"
+            )
+        if self.approved_keys is not None and (
+            call_key(binding, model, prompt, keywords, languages) not in self.approved_keys
+        ):
+            raise AnalysisApprovalError("견적에 없던 청크다 — 승인 밖이라 보내지 않는다")
 
     def _require_open(
         self, binding: AudioChunkBinding, settings: RawWorkflowConfig, on: date
@@ -742,6 +855,7 @@ __all__ = [
     "STATUS_TIMING_FAILED",
     "STATUS_UNAVAILABLE",
     "TEXT_CACHE_DIRNAME",
+    "TEXT_IDENTITY_SCHEMA",
     "TEXT_REQUEST_STAGE",
     "ApprovedPhaseTextProvider",
     "ReplayTextMissing",
@@ -751,6 +865,10 @@ __all__ = [
     "TextPassRequest",
     "TextPassResult",
     "apply_text_pass",
+    "cached_answer_exists",
+    "call_identity",
+    "call_key",
     "run_text_pass",
     "text_chunk_key",
+    "text_identity",
 ]

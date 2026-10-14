@@ -25,7 +25,7 @@ from typing import Any
 import pytest
 
 from tests.raw.test_browser_runtime import _CountingSender, _make_media
-from tests.raw.test_selection_analysis import wait_until
+from tests.raw.test_selection_analysis import keep_whisper_only, wait_until
 from tests.raw.test_tiering import document as tier_document
 from ui.workspace_service import RawWorkspaceUi
 from vlogsrt.anthropic_messages import ClaudeMessagesClient
@@ -194,6 +194,7 @@ def make_server(
         ),
     )
     server.create_workspace_view("Claude 분석 흐름", str(tmp_path / "workspace"))
+    keep_whisper_only(server)  # 19d 이전 흐름 — 교차 확인을 끈 채 Claude 호출·상한을 잰다
     if model is not None:
         root = server.workspace_root()
         workflow = server.raw.settings(root)

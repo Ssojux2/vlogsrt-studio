@@ -41,8 +41,14 @@ from vlogsrt.project.raw.config import (
 )
 from vlogsrt.project.raw.understanding_luna import AnalysisApprovalError, online_env_blocked
 
-ASR_APPROVAL_SCHEMA = "raw-analysis-asr-approval/v1"
-"""1단계 승인이 묶는 값의 schema — 설정 지문이 이 값으로 갈라진다."""
+ASR_APPROVAL_SCHEMA = "raw-analysis-asr-approval/v2"
+"""1단계 승인 기록의 schema — v2(D59 19d)는 「다른 귀로 교차 확인」의 글자 요청 세 칸을 더했다."""
+
+ASR_SETTINGS_FINGERPRINT_SCHEMA = "raw-analysis-asr-approval/v1"
+"""1단계 승인이 묶는 **설정 지문**의 schema — 기록이 v2가 돼도 지문 바이트는 v1 그대로다.
+
+설정 지문은 whisper 전사의 설정만 묶는다. 글자 요청(19d)은 승인의 다른 칸이 따로 묶으므로 이 값을
+올리면 이미 만든 승인·기존 시험의 지문만 흔들린다 — 그래서 고정한다."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,6 +59,9 @@ class AsrPhaseApproval:
     닫힌다. 실측 샘플 수·원점은 1단계 기록에 남고 2단계 지문이 묶는다 — 이 승인이
     미리 알 수 없는 값을 묶는 척하지 않는다. `approved_on`은 승인이 만들어진
     서버 날짜로, 시간 제공자 종료 예정일 검사(`capabilities`)가 이 날짜를 본다.
+
+    v2(D59 19d)의 글자 칸 셋은 「다른 귀로 교차 확인」이 켜져 있고 견적이 글자 분량을 보였을 때만
+    채워진다. 비어 있으면(기본) 글자 요청은 한 번도 나가지 않는다 — 캐시에 있는 답만 쓴다.
     """
 
     approved: bool
@@ -62,6 +71,15 @@ class AsrPhaseApproval:
     settings_fingerprint: str
     timing_model: str
     approved_on: str
+    text_model: str | None = None
+    """승인이 묶은 글자(두 번째 귀) 모델 — None이면 글자 요청을 보내지 않는다."""
+    text_identity: str | None = None
+    """글자 요청의 신원(`source_text.text_identity` — 문맥·언어·용어집 sha). 보낼 때 다시 잰다."""
+    text_chunk_budget: int = 0
+    """글자 요청 상한 — 견적이 센 「아직 답이 없는 청크」 수. whisper 예산과 따로 센다."""
+    text_chunk_keys: tuple[str, ...] | None = None
+    """견적이 센 바로 그 청크들의 글자 캐시 열쇠 — 있으면 이 청크만 보낸다(더 긴 다른 청크로
+    상한을 채우지 못한다). None은 1단계 기록이 없던 원본 — 견적이 그 오디오의 청크 전부를 셌다."""
 
     def approved_on_date(self) -> date:
         """승인 날짜의 date — 모양이 어긋나면 승인 자체가 계약 위반이다."""
@@ -88,7 +106,7 @@ def asr_settings_fingerprint(
     validate_raw_workflow_config(workflow)
     workflow = transcription_identity_view(workflow)
     parts = [
-        ASR_APPROVAL_SCHEMA,
+        ASR_SETTINGS_FINGERPRINT_SCHEMA,
         UNDERSTANDING_SCHEMA_VERSION,
         str(settings.window_seconds),
         str(settings.context_seconds),
@@ -153,6 +171,41 @@ def require_live_asr_approval(
         ) from error
 
 
+def require_text_approval(
+    approval: AsrPhaseApproval,
+    *,
+    workflow: RawWorkflowConfig,
+    identity: str,
+    on: date,
+) -> None:
+    """글자(두 번째 귀) 요청의 문(D59 19d) — 승인이 글자 모델·요청 신원·상한을 묶었는가.
+
+    1단계 승인 문(`require_live_asr_approval`)을 지난 뒤에 본다. 지어낸 모델·빠진 모델·승인 뒤에
+    바뀐 용어집이나 문맥은 보내기 **전에** 닫는다. 문구 역할의 수명주기(확인된 모델)도 여기서 본다 —
+    부르는 쪽은 이 문이 닫히면 글자를 묻지 않고 whisper 글자를 둔다(D39: 글자 실패는 전사를 막지
+    않는다)."""
+    if approval.text_model is None:
+        raise AnalysisApprovalError("1단계 승인이 글자 모델을 묶지 않았다 — 글자 요청은 없다")
+    if approval.text_model != workflow.models.text_model:
+        raise AnalysisApprovalError("승인이 본 글자 모델과 설정 모델이 다르다")
+    if approval.text_identity != identity:
+        raise AnalysisApprovalError(
+            "승인이 본 글자 요청(문맥·언어·용어집)과 지금이 다르다 — 새 견적과 새 승인을 받아라"
+        )
+    budget = approval.text_chunk_budget
+    if isinstance(budget, bool) or not isinstance(budget, int) or budget < 1:
+        raise AnalysisApprovalError(f"글자 요청 상한은 1 이상 정수다: {budget!r}")
+    keys = approval.text_chunk_keys
+    if keys is not None and len(set(keys)) != budget:
+        raise AnalysisApprovalError("승인이 묶은 글자 청크와 요청 상한이 어긋난다")
+    from vlogsrt.project.raw.capabilities import ROLE_TEXT, preflight_online_transcription
+
+    try:
+        preflight_online_transcription(workflow, on, roles=(ROLE_TEXT,))
+    except Exception as error:  # noqa: BLE001 - 수명주기 실패도 승인 문의 오류로 닫는다
+        raise AnalysisApprovalError(f"글자 요청의 수명주기 문이 닫혔다: {error}") from error
+
+
 @dataclass(frozen=True, slots=True)
 class LiveAnalysisTransport:
     """실제 호출 재료의 주입 경계 — UI는 자격증명을 스스로 찾지 않는다.
@@ -199,8 +252,10 @@ class LiveAnalysisTransport:
 
 __all__ = [
     "ASR_APPROVAL_SCHEMA",
+    "ASR_SETTINGS_FINGERPRINT_SCHEMA",
     "AsrPhaseApproval",
     "LiveAnalysisTransport",
     "asr_settings_fingerprint",
     "require_live_asr_approval",
+    "require_text_approval",
 ]

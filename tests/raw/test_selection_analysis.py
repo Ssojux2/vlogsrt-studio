@@ -82,6 +82,16 @@ def keep_luna(server: RawWorkspaceUi) -> None:
     server.raw.update_settings(root, replace(workflow, models=models))
 
 
+def keep_whisper_only(server: RawWorkspaceUi) -> None:
+    """D59 19d 이전에 쓰인 흐름 시험 — 「다른 귀로 교차 확인」을 끈 작업공간에서 출발한다.
+
+    새 작업공간의 기본은 켜짐이다. 켜져 있으면 승인한 1단계가 두 번째 귀에도 묻고(가짜 전송이 그
+    요청까지 센다) 견적 문구·digest에 글자 분량이 실린다. 이 흐름 시험들은 whisper·Luna 호출 수와
+    19d 이전 문구·digest를 재므로 끈 채 돈다 — 켠 흐름은 `test_cross_check.py`가 본다.
+    """
+    server.raw.set_cross_check(server.workspace_root(), False)
+
+
 def make_server(
     tmp_path: Path, monkeypatch, source: Path, client=None, parallel_analysis_limit=None
 ):
@@ -102,6 +112,7 @@ def make_server(
     )
     server.create_workspace_view("선택 자동 분석", str(tmp_path / "workspace"))
     keep_luna(server)
+    keep_whisper_only(server)
     server._selection_auto_approval = lambda quote: True
     return server, sender, client
 

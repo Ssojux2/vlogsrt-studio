@@ -25,7 +25,7 @@ from tests.raw.test_raw_config import ACCEPTED_SETTINGS_JSON
 from tests.raw.test_understanding import BEFORE_SHUTDOWN, SETTINGS, FakeTimingProvider, make_audio
 from vlogsrt.config import Config
 from vlogsrt.project.raw import final_caption
-from vlogsrt.project.raw.analysis_approval import ASR_APPROVAL_SCHEMA, asr_settings_fingerprint
+from vlogsrt.project.raw.analysis_approval import asr_settings_fingerprint
 from vlogsrt.project.raw.analysis_config import (
     UNDERSTANDING_SCHEMA_VERSION,
     RawUnderstandingSettings,
@@ -167,7 +167,7 @@ def pre_w14_asr_settings_fingerprint(
 ) -> str:
     """W-14 이전 `asr_settings_fingerprint`의 조립 그대로 — 의미 분석 모델이 끝에 묶였다."""
     parts = [
-        ASR_APPROVAL_SCHEMA,
+        "raw-analysis-asr-approval/v1",  # 19d가 승인 기록을 v2로 올려도 지문은 v1 바이트(D59 19d)
         UNDERSTANDING_SCHEMA_VERSION,
         str(settings.window_seconds),
         str(settings.context_seconds),

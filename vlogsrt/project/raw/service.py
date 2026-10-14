@@ -77,6 +77,7 @@ from vlogsrt.project.raw.config import (
     analysis_model_label,
     analysis_provider,
     claude_profile,
+    text_model_label,
     validate_raw_workflow_config,
 )
 from vlogsrt.project.raw.fcp import (
@@ -337,6 +338,7 @@ __all__ = [
     "WorkspaceStatus",
     "analysis_model_label",
     "analysis_provider",
+    "text_model_label",
     "asr_estimate_digest",
     "validate_analysis_concurrency",
     "caption_ms",
@@ -1237,6 +1239,18 @@ class RawWorkspaceService:
             )
             connection.commit()
         return mode
+
+    def cross_check_enabled(self, root: Path) -> bool:
+        """「다른 귀로 교차 확인」(D59 19d) — 고른 적이 없으면 켜짐(기본)이다. 읽기만 한다."""
+        from vlogsrt.project.raw import cross_check
+
+        return cross_check.enabled(self._workspace(root))
+
+    def set_cross_check(self, root: Path, on: bool) -> bool:
+        """교차 확인 켬·끔을 저장한다(무료) — 견적·승인이 그 값으로 다시 묶인다(호출 0회)."""
+        from vlogsrt.project.raw import cross_check
+
+        return cross_check.set_enabled(self._workspace(root), on)
 
     def glossary(self, root: Path) -> Any:
         """프로젝트 용어집(D59 19c) — 마지막 리비전. 읽기만 한다(표를 만들지 않는다)."""
@@ -3964,19 +3978,25 @@ class RawWorkspaceService:
         """원본별 결속 지문 — 고친 자막·미디어 참조·다시 듣기 차례가 분석 지문을 바꾼다.
 
         다시 듣기 차례(D59 19b)는 0이 아닐 때만 셋째 칸으로 붙는다 — 0이면 결속은 예전 두 칸
-        그대로라 끝난 분석의 지문이 바뀌지 않는다.
+        그대로라 끝난 분석의 지문이 바뀌지 않는다. 「다른 귀로 교차 확인」(D59 19d)이 켜져 있으면
+        끝에 꼬리표가 붙고, 자막 지문은 두 번째 귀가 얹은 글자를 뺀 것이다 — 실행 전에 묶은 결속이
+        실행이 글자를 얹은 뒤에도 같아 끝난 분석을 다시 찾는다. 꺼져 있으면 19d 이전 바이트
+        그대로다.
         """
-        from vlogsrt.project.raw import asr_epoch, media_refs, source_transcript
+        from vlogsrt.project.raw import asr_epoch, cross_check, media_refs, source_transcript
 
         workspace = self._workspace(root)
+        cross_tag = cross_check.binding_tag(workspace)
         bindings: dict[str, list[str]] = {}
         for asset_id in assets:
             row = [
-                source_transcript.fingerprint(workspace, asset_id),
+                source_transcript.binding_fingerprint(workspace, asset_id, cross_tag is not None),
                 media_refs.fingerprint(workspace, asset_id),
             ]
             tag = asr_epoch.binding_tag(asr_epoch.current(workspace, asset_id))
-            bindings[asset_id] = row if tag is None else [*row, tag]
+            if tag is not None:
+                row.append(tag)
+            bindings[asset_id] = row if cross_tag is None else [*row, cross_tag]
         return bindings
 
     def _analysis_intervals(

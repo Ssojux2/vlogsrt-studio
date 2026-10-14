@@ -503,17 +503,29 @@ class UtteranceEvidence:
     text_source: str | None = None
     retext_reason: str | None = None
     alt_text: str | None = None
+    # 그 글자 판정이 어디서 온 답인가(`live`·`replay`, D59 19d) — 이어 가기가 출처까지 대조한다.
+    # 19c 기록에는 칸이 없다(None) — 그때는 기록 모양이 19c 그대로다.
+    text_origin: str | None = None
 
 
 TEXT_EVIDENCE_FIELDS = ("whisper_text", "text_source", "retext_reason", "alt_text")
 """발화 기록의 글자 증거 칸 — `text_source`가 있을 때만 넷이 함께 실린다(D59 19c)."""
 
+TEXT_ORIGIN_FIELD = "text_origin"
+"""글자 답의 출처 칸(D59 19d) — 증거가 있고 출처를 아는 줄에만 실린다(19c 기록은 바이트 그대로)."""
+
 
 def utterance_text_evidence(raw: Mapping[str, object]) -> dict[str, str]:
-    """기록에서 글자 증거를 다시 읽는다 — `text_source`가 없으면 빈 사전(19c 이전 기록)."""
+    """기록에서 글자 증거를 다시 읽는다 — `text_source`가 없으면 빈 사전(19c 이전 기록).
+
+    출처 칸(19d)은 기록에 있을 때만 돌려준다 — 없는 칸을 빈 글로 지어 다시 쓰면 19c 기록의 바이트가
+    바뀌어 심기가 새 리비전을 만든다."""
     if "text_source" not in raw:
         return {}
-    return {name: str(raw.get(name) or "") for name in TEXT_EVIDENCE_FIELDS}
+    evidence = {name: str(raw.get(name) or "") for name in TEXT_EVIDENCE_FIELDS}
+    if raw.get(TEXT_ORIGIN_FIELD):
+        evidence[TEXT_ORIGIN_FIELD] = str(raw[TEXT_ORIGIN_FIELD])
+    return evidence
 
 
 def utterance_evidence(
@@ -1526,6 +1538,8 @@ def _utterance_json(item: UtteranceEvidence) -> dict[str, object]:
             retext_reason=item.retext_reason or "",
             alt_text=item.alt_text or "",
         )
+        if item.text_origin:
+            body[TEXT_ORIGIN_FIELD] = item.text_origin
     return body
 
 

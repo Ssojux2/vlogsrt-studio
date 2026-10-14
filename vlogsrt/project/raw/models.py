@@ -685,6 +685,16 @@ class AnalysisEstimate:
     note: str
     ceiling_usd: str | None = None
     """공식 단가 스냅샷의 보수적 상한 합(D54, Claude만) — 없으면 견적 지문에도 없다."""
+    text_chunk_count: int | None = None
+    """「다른 귀로 교차 확인」(D59 19d)이 켜져 있을 때만 — 두 번째 귀에 물을(답이 캐시에 없는) 청크
+    수. 꺼져 있거나 소리가 없으면 None이고 견적 지문에도 없다(19d 이전 바이트 그대로)."""
+    text_seconds: str | None = None
+    """그 청크들의 오디오 길이(초, 정확 유리수 문자열)."""
+    text_usd: str | None = None
+    """그 길이 × 문구 역할 공식 분당 단가(`RawPricingSnapshot.text_per_minute`)."""
+    text_chunk_keys: tuple[str, ...] | None = None
+    """그 청크들의 글자 캐시 열쇠(1단계 기록이 있을 때만) — 승인이 이 청크만 보내게 묶는다. 기록이
+    없으면(처음 듣는 영상) None이고 그때는 그 오디오의 청크 전부를 센 것이다."""
 
 
 @dataclass(frozen=True, slots=True)

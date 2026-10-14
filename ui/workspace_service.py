@@ -119,6 +119,14 @@ APPROVAL_MODE_CHOICES = [
 """승인 단추가 무엇을 승인하는지(D59 19b) — 단추의 이름·범위는 그대로다(D57 결정 4). 「전사만」은
 1단계(전사·원본 자막·장면·프레임)만 돌고 영상 분석 앞에서 멈춘다. 고른 값은 견적 문구에 실리고
 그 문구가 승인 클릭과 함께 간다 — 보이는 범위만 승인된다."""
+CROSS_CHECK_ID = "vl-cross-check"
+CROSS_CHECK_LABEL = "다른 귀로 교차 확인"
+CROSS_CHECK_INFO = (
+    "켜 두면 전사할 때 다른 귀로 한 번 더 듣고, 두 귀가 맞춰 본 줄만 글자를 고칩니다."
+    " 들을 분량과 비용은 아래 견적에 나옵니다."
+)
+"""「다른 귀로 교차 확인」(D59 19d) — 승인 범위 바로 아래의 켬·끔. 칸에는 모델 이름·금액이 없다
+(D57 결정 7) — 무엇을 얼마에 듣는지는 그 아래 견적 문구만 말하고, 승인은 그 문구에 묶인다."""
 RELISTEN_EXPLANATION = (
     "이 영상을 처음부터 다시 듣습니다 — 기존 전사는 온도 설정 오류로 받은 것이라 되풀이가 많을 수"
     " 있습니다."
@@ -528,13 +536,43 @@ def _transcribe_only(quote: Any) -> bool:
     return _quote_mode(quote) == raw_service.SELECTION_MODE_TRANSCRIBE
 
 
-def _transcribe_only_summary(pending: int, cached: int, chunks: int, limit: int) -> str:
-    """「전사만」 견적 문구 — 범위가 전사뿐임을 먼저 말한다. 금액은 싣지 않는다(D57 결정 7)."""
+def _transcribe_only_summary(
+    pending: int, cached: int, chunks: int, limit: int, text_pass: str = ""
+) -> str:
+    """「전사만」 견적 문구 — 범위가 전사뿐임을 먼저 말한다. whisper 금액은 싣지 않는다(D57 결정 7).
+
+    「다른 귀로 교차 확인」이 물을 분량이 있으면 그 문장(`_text_pass_sentence`)이 동시 처리 앞에
+    들어간다 — 그 문장만 분량·공식 단가 금액을 말한다(D59 19d, 견적 칸이라 금액이 허용된다)."""
     return (
         f"전사만 · 대상 영상 {pending}개 · 저장 결과 {cached}개 재사용 · 전사 최대 {chunks}회. "
         "영상 분석은 하지 않습니다 — 이미 받은 전사 조각은 다시 사지 않고, 실패한 조각과 다시"
-        f" 듣기를 고른 영상, 처음 듣는 영상만 새로 듣습니다. 최대 {limit}개를 동시에 처리합니다."
+        f" 듣기를 고른 영상, 처음 듣는 영상만 새로 듣습니다.{text_pass}"
+        f" 최대 {limit}개를 동시에 처리합니다."
     )
+
+
+def _text_pass_sentence(quote: Any, estimates: Sequence[Any]) -> str:
+    """교차 확인(D59 19d) 견적 문장 — 켜져 있고 두 번째 귀에 물을 청크가 있을 때만(앞 공백 포함).
+
+    분량은 「아직 답이 없는 청크」의 길이를 분으로 올리고, 금액은 공식 분당 단가 합을 센트로 올린다.
+    끝난 분석에 글자를 다시 심는 결과도 말한다(19c 검증이 남긴 요구 (b)): 「전사만」은 다음 영상
+    분석 때 그 창을 다시 판정하고(지금은 영상 분석 비용 없음), 전체 범위는 이번 영상 분석 견적(횟수·
+    상한)에 그 창이 이미 들어 있다 — 교차 확인을 기다리는 영상은 저장 결과로 세지 않는다."""
+    asked = [e for e in estimates if getattr(e, "text_chunk_count", None)]
+    workflow = getattr(quote, "workflow", None)
+    if not asked or workflow is None:
+        return ""
+    seconds = sum((Fraction(e.text_seconds) for e in asked), Fraction(0))
+    minutes = max(1, -(-seconds // 60))
+    usd = sum((Decimal(e.text_usd) for e in asked), Decimal(0))
+    label = raw_service.text_model_label(workflow.models.text_model)
+    heard = (
+        f" 다른 귀({label})로 영상 {len(asked)}개 {minutes}분을 한 번 더 듣습니다"
+        f"(공식 단가로 약 ${usd.quantize(CENT, rounding=ROUND_CEILING)})"
+    )
+    if _transcribe_only(quote):
+        return f"{heard}. 바뀐 자막이 있는 창은 다음 영상 분석 때 다시 판정합니다."
+    return f"{heard} — 바뀐 자막이 있는 창도 이번 영상 분석이 판정하며 위 견적에 들어 있습니다."
 
 
 def _semantic_quote_terms(model: str | None, estimates: Sequence[Any]) -> tuple[str, str]:
@@ -1849,11 +1887,14 @@ class RawWorkspaceUi:
             if not self._quote_current(root, measured, "라이브러리"):
                 return
             self._library_cached_ids[root] = cached
-            # 범위는 끝난 순간의 것으로 묶는다 — 재는 사이 범위를 바꿨어도 지금 범위의 견적이 선다.
-            self._library_quotes[root] = self._scoped(root, measured)
+            # 범위·교차 확인은 끝난 순간의 것으로 묶는다 — 재는 사이 바꿨어도 지금 값의 견적이 선다.
+            self._library_quotes[root] = self.raw.selection_rebound_quote(
+                root, measured, ids, self._approval_mode(root)
+            )
 
         model = self.raw.settings(root).models.luna_model
-        self.raw.submit_job(root, "library_quote", repr((ids, model)), prepare)
+        cross = self.raw.cross_check_enabled(root)  # 켬·끔이 바뀌면 다시 잰다(재사용 셈이 바뀐다)
+        self.raw.submit_job(root, "library_quote", repr((ids, model, cross)), prepare)
 
     def library_analysis_summary(self) -> str:
         root = self._snapshot_root()
@@ -1867,15 +1908,18 @@ class RawWorkspaceUi:
         cached = self._library_cached_ids.get(root, set()).intersection(quote.asset_ids)
         pending = [e for e in quote.estimates if e.asset_id not in cached]
         asr = sum(e.asr_chunk_count for e in pending)
+        text_pass = _text_pass_sentence(quote, pending)
         if _transcribe_only(quote):
-            return _transcribe_only_summary(len(pending), len(cached), asr, self._analysis_limit)
+            return _transcribe_only_summary(
+                len(pending), len(cached), asr, self._analysis_limit, text_pass
+            )
         luna = sum(e.luna_request_count for e in pending)
         label, ceiling = _semantic_quote_terms(_quote_model(quote), pending)
         model = "" if label == "Luna" else f"({label})"
         return (
             f"분석 대상 {len(pending)}개 · 저장 결과 {len(cached)}개 재사용 · "
-            f"전사 최대 {asr}회 + 영상 분석{model} 최대 {luna}회{ceiling}. 승인하면 두 단계가"
-            f" 이어집니다. 최대 {self._analysis_limit}개를 동시에 분석합니다."
+            f"전사 최대 {asr}회 + 영상 분석{model} 최대 {luna}회{ceiling}.{text_pass} 승인하면 두"
+            f" 단계가 이어집니다. 최대 {self._analysis_limit}개를 동시에 분석합니다."
         )
 
     # ── 승인 범위(전체 · 「전사만」, D59 19b) — 작업공간 meta에 산다 ─────────────────
@@ -1917,6 +1961,48 @@ class RawWorkspaceUi:
         self._set_approval_mode(root, mode)
         self._rescope_quotes(root)
         return self.library_analysis_summary_markdown()
+
+    # ── 「다른 귀로 교차 확인」(D59 19d) — 작업공간 meta에 산다(기본 켜짐) ─────────────
+
+    def cross_check_value(self) -> bool:
+        """칸의 처음 값 — 화면을 열 때마다 지금 작업공간의 값으로 다시 잰다(없으면 켜짐)."""
+        root = self._snapshot_root()
+        return bool(self.raw.cross_check_enabled(root)) if root else True
+
+    def cross_check_view(self, signature: str | None, on: bool | None) -> Any:
+        """사람이 교차 확인을 켜거나 껐다 — 저장하고 견적을 그 값으로 다시 묶는다(호출 0회).
+
+        글자 분량·꼬리표가 견적 digest에 실리므로 다시 묶은 견적만 승인된다. 저장 결과(재사용) 셈도
+        결속이 바뀌므로 라이브러리 견적을 백그라운드에서 다시 잰다(ffprobe — 유료 호출 없음)."""
+        root = self._require_current_selection(signature)
+        self.raw.set_cross_check(root, bool(on))
+        self._rebind_quotes(root)
+        self._prepare_library_quote(root)
+        return self.library_analysis_summary_markdown()
+
+    def cross_check_tick(self, signature: str | None, shown: bool | None) -> Any:
+        """1초 틱 — 그 탭의 칸 값이 저장값과 다르면 칸을 맞춘다.
+
+        다른 탭이 바꿔도 칸이 견적 문구(승인되는 값)와 어긋난 채 남지 않는다."""
+        root = self._snapshot_root()
+        if not self._quote_signature_current(signature) or root is None:
+            return gr.skip()
+        on = bool(self.raw.cross_check_enabled(root))
+        return gr.skip() if shown is not None and bool(shown) == on else gr.Checkbox(value=on)
+
+    def _rebind_quotes(self, root: Path) -> None:
+        """라이브러리 견적과 고른 영상의 승인 대기 견적을 지금 결속으로 다시 묶는다(측정 그대로)."""
+        quote = self._library_quotes.get(root)
+        if quote is not None:
+            ids = tuple(quote.asset_ids)
+            self._library_quotes[root] = self.raw.selection_rebound_quote(root, quote, ids)
+        state = self._quick
+        held = state.get("quote")
+        if state.get("root") == root and state.get("stage") == "승인 대기" and held is not None:
+            ids = tuple(held.asset_ids)
+            self._quick_update(
+                state["token"], quote=self.raw.selection_rebound_quote(root, held, ids)
+            )
 
     def approval_mode_tick(self, signature: str | None, shown: str | None) -> Any:
         """1초 틱 — 그 탭의 칸이 보이는 값(`shown`)이 저장된 범위와 다르면 칸을 맞춘다.
@@ -2308,11 +2394,12 @@ class RawWorkspaceUi:
         「전사만」 견적은 전사만 말한다 — 영상 분석 모델·상한은 싣지 않는다(D59 19b)."""
         chunks = sum(e.asr_chunk_count for e in quote.estimates)
         duration = sum(float(Fraction(e.asr_seconds)) for e in quote.estimates)
+        text_pass = _text_pass_sentence(quote, quote.estimates)
         if _transcribe_only(quote):
             return (
                 f"**전사만 준비 완료** · 선택 영상 {len(quote.asset_ids)}개\n\n"
                 f"전사 최대 {chunks}요청({duration:.0f}초). 영상 분석은 하지 않습니다 — 이미"
-                " 받은 전사 조각은 다시 사지 않습니다.\n\n"
+                f" 받은 전사 조각은 다시 사지 않습니다.{text_pass}\n\n"
                 f"「{LIBRARY_APPROVE_LABEL}」으로 승인하면 전사·원본 자막·장면 준비까지 하고"
                 " 영상 분석 앞에서 멈춥니다."
             )
@@ -2320,8 +2407,8 @@ class RawWorkspaceUi:
         label, ceiling = _semantic_quote_terms(_quote_model(quote), quote.estimates)
         return (
             f"**{label} 분석 준비 완료** · 선택 영상 {len(quote.asset_ids)}개\n\n"
-            f"전사 최대 {chunks}요청({duration:.0f}초) + {label} 최대 {requests}요청{ceiling}. "
-            "실제 비용은 사용한 오디오·토큰에 따라 정해집니다.\n\n"
+            f"전사 최대 {chunks}요청({duration:.0f}초) + {label} 최대 {requests}요청{ceiling}."
+            f"{text_pass} 실제 비용은 사용한 오디오·토큰에 따라 정해집니다.\n\n"
             f"「{LIBRARY_APPROVE_LABEL}」으로 한 번 승인하면 전사·장면 분석·추천 표시가"
             " 자동으로 이어집니다."
         )
@@ -3028,6 +3115,7 @@ class RawWorkspaceUi:
             note = self.quote_note_markdown()
             with gr.Column(elem_id="vl-quote", min_width=0):
                 self._approval_mode_radio = self._approval_mode_cell()
+                self._cross_check_box = self._cross_check_cell()
                 # 값은 글 그대로 그려지는 마크다운(문장부호 escape)이고 LaTeX도 끈다 — 그려진 글이
                 # 견적 원문과 같아야 승인 앞 단계의 글 대조가 선다.
                 self._library_summary_md = gr.Markdown(
@@ -3049,6 +3137,19 @@ class RawWorkspaceUi:
             label=APPROVAL_MODE_LABEL,
             interactive=True,
             elem_id=APPROVAL_MODE_ID,
+        )
+
+    def _cross_check_cell(self) -> gr.Checkbox:
+        """「다른 귀로 교차 확인」(D59 19d) — 승인 범위 바로 아래, 견적 문구 바로 위의 켬·끔.
+
+        켜면 견적 문구에 두 번째 귀로 들을 분량·금액이 실리고, 그 문구가 승인 클릭과 함께 간다 —
+        보이는 견적만 승인된다. 처음 값은 화면을 열 때마다 그 작업공간의 저장값이다(기본 켜짐)."""
+        return gr.Checkbox(
+            value=self.cross_check_value,
+            label=CROSS_CHECK_LABEL,
+            info=CROSS_CHECK_INFO,
+            interactive=True,
+            elem_id=CROSS_CHECK_ID,
         )
 
     def quote_note_markdown(self) -> str:
@@ -3158,6 +3259,33 @@ class RawWorkspaceUi:
             self.approval_mode_tick,
             [self._signature_state, radio],
             radio,
+            queue=False,
+            show_progress="hidden",
+        )
+        self._wire_cross_check()
+
+    def _wire_cross_check(self) -> None:
+        """「다른 귀로 교차 확인」 — 「승인 범위」와 같은 배선: 누르면(`input`) 저장하고 견적 문구를
+        바로 다시 그리고, 1초 틱이 그 탭의 칸 값을 저장값과 견줘 다를 때만 칸을 맞춘다(D59 19d)."""
+        box = self._cross_check_box  # 무대(`_review_stage`)가 먼저 만든다
+        chosen = box.input(
+            self.cross_check_view,
+            [self._signature_state, box],
+            self._library_summary_md,
+            queue=False,
+            show_progress="hidden",
+        )
+        chosen.then(
+            self.quote_note_view,
+            self._signature_state,
+            self._quote_note_md,
+            queue=False,
+            show_progress="hidden",
+        )
+        gr.Timer(1).tick(
+            self.cross_check_tick,
+            [self._signature_state, box],
+            box,
             queue=False,
             show_progress="hidden",
         )

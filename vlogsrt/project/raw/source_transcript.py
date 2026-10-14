@@ -19,6 +19,9 @@ TEXT_SOURCE_MANUAL = "manual"
 TEXT_SOURCE_MIXED = "mixed"
 """글자 출처가 다른 두 줄을 그대로 이어 붙였다."""
 
+ORIGINAL_FINGERPRINT = "asr-original/v1"
+"""고치지 않은 whisper 글자의 원본 자막 지문 — 19c 이전 바이트 그대로."""
+
 
 def _init(workspace: Any) -> None:
     with workspace.connect() as db:
@@ -105,7 +108,26 @@ def fingerprint(workspace: Any, asset_id: str) -> str:
     """
     document = load(workspace, asset_id)
     if not document or not (human_edited(document) or cross_checked(document)):
-        return "asr-original/v1"
+        return ORIGINAL_FINGERPRINT
+    return _utterance_hash(document)
+
+
+def binding_fingerprint(workspace: Any, asset_id: str, cross_check: bool) -> str:
+    """분석 결속·견적 digest에 싣는 원본 자막 지문(D59 19d).
+
+    교차 확인이 꺼져 있으면 `fingerprint` 그대로다(19d 이전 바이트). 켜져 있으면 두 번째 귀가 얹은
+    글자는 지문에서 뺀다 — 그 글자는 결속의 교차 확인 꼬리표(글자 요청의 신원)와 whisper 답이 함께
+    정하는 결과라서, 실행 **전**에 묶은 결속이 실행 **뒤**에도 같아야 끝난 분석을 다시 찾는다(19c-5
+    알려진 한계). 사람이 고친 자막은 언제나 발화를 해시한다 — 고친 자막은 결속을 바꾼다."""
+    if not cross_check:
+        return fingerprint(workspace, asset_id)
+    document = load(workspace, asset_id)
+    if not document or not human_edited(document):
+        return ORIGINAL_FINGERPRINT
+    return _utterance_hash(document)
+
+
+def _utterance_hash(document: dict) -> str:
     return hashlib.sha256(
         json.dumps(document["utterances"], sort_keys=True, ensure_ascii=False).encode()
     ).hexdigest()
@@ -221,7 +243,7 @@ def _merged_evidence(left: dict, right: dict, *, typed: bool) -> dict:
     sources = {str(side.get("text_source", TEXT_SOURCE_WHISPER)) for side in (left, right)}
     source = sources.pop() if len(sources) == 1 else TEXT_SOURCE_MIXED
     reasons = (str(side.get("retext_reason") or "") for side in (left, right))
-    return {
+    merged = {
         "whisper_text": _joined(
             str(left.get("whisper_text", left["text"])),
             str(right.get("whisper_text", right["text"])),
@@ -230,6 +252,11 @@ def _merged_evidence(left: dict, right: dict, *, typed: bool) -> dict:
         "retext_reason": "+".join(dict.fromkeys(reason for reason in reasons if reason)),
         "alt_text": _joined(str(left.get("alt_text") or ""), str(right.get("alt_text") or "")),
     }
+    # 글자 답의 출처(D59 19d)는 양쪽이 같을 때만 남긴다 — 섞인 줄은 출처를 지어내지 않는다.
+    origins = {str(side["text_origin"]) for side in (left, right) if side.get("text_origin")}
+    if len(origins) == 1:
+        merged["text_origin"] = origins.pop()
+    return merged
 
 
 def _joined(left: str, right: str) -> str:

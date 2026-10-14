@@ -29,6 +29,7 @@ from vlogsrt.models import Chunk
 from vlogsrt.project.raw import (
     analysis_workflow,
     capabilities,
+    cross_check,
     glossary,
     source_text,
     source_transcript,
@@ -92,8 +93,10 @@ WHISPER: dict[int, list[dict[str, Any]]] = {
     ],
 }
 GPT = {
+    # 「망원동」 줄은 공백·부호만 다르다 — 접은 글자가 같아 바꾸지 않는다(D59 19d (c)).
     0: "망원동 카페에 왔어요. 정말 맛있네! 치즈",
-    1: "개좋아 여기 진짜 좋다. 저기 봐봐 사진 찍자",
+    # 「개좋아」 줄은 글자가 실제로 다르다(진짜 → 정말) — 게이트를 지나 바뀌는 줄이다.
+    1: "개좋아 여기 정말 좋다. 저기 봐봐 사진 찍자",
 }
 GPT_MODEL = RawModelRoles().text_model
 TERMS = ("왕방", "백숙")
@@ -281,11 +284,20 @@ def test_the_gate_replaces_only_passing_utterances_and_keeps_whisper_evidence(
     by_text = {u.whisper_text: u for u in result.utterances}
     assert len(result.utterances) == len(whisper) == 5
     assert _skeleton(result.utterances) == _skeleton(whisper)  # 시각·아이디·순서·수 그대로
-    first = by_text[" 망원동 카페에 왔어요"]
-    assert (first.text, first.text_source, first.retext_reason, first.alt_text) == (
-        "망원동 카페에 왔어요.",
+    changed = by_text[" 개좋아 여기 진짜 좋다"]
+    assert (changed.text, changed.text_source, changed.retext_reason, changed.alt_text) == (
+        "개좋아 여기 정말 좋다.",
         GPT_MODEL,
         source_text.REASON_ACCEPTED,
+        "",
+    )
+    assert changed.text_origin == ORIGIN_LIVE  # 글자 판정의 출처(D59 19d (d))
+    # (c) 공백·부호만 다른 답은 통과해도 바꾸지 않는다 — whisper 글자 그대로, 출처 whisper.
+    first = by_text[" 망원동 카페에 왔어요"]
+    assert (first.text, first.text_source, first.retext_reason, first.alt_text) == (
+        " 망원동 카페에 왔어요",
+        source_transcript.TEXT_SOURCE_WHISPER,
+        source_text.REASON_AGREED,
         "",
     )
     rejected = by_text[" 진짜 맛있다"]
@@ -304,7 +316,8 @@ def test_the_gate_replaces_only_passing_utterances_and_keeps_whisper_evidence(
     assert by_text[" 사진 찍자"].retext_reason == source_text.REASON_AGREED
     record = result.record
     assert record["status"] == source_text.PASS_APPLIED
-    assert (record["replaced"], record["kept"]) == (2, 3)
+    assert (record["replaced"], record["kept"]) == (1, 4)
+    assert (record["carried"], record["carried_replaced"]) == (0, 0)
 
 
 def test_text_between_segments_is_recorded_and_never_attached(tmp_path: Path) -> None:
@@ -482,6 +495,7 @@ def test_a_glossary_change_keeps_already_cross_checked_lines_instead_of_revertin
     kept, _, _ = _pass(tmp_path, None, terms=("새 용어",), previous=seeded)
     assert kept.record["status"] == source_text.STATUS_NOT_REQUESTED
     assert (kept.record["carried"], kept.record["dropped_cross_checked"]) == (5, 0)
+    assert (kept.record["replaced"], kept.record["carried_replaced"]) == (0, 1)  # (e) 따로 센다
     assert kept.utterances == bought.utterances
     again = source_transcript.seed(
         workspace, "src", utterances_json(kept.utterances), Fraction(20), "a" * 64
@@ -493,7 +507,7 @@ def test_a_glossary_change_keeps_already_cross_checked_lines_instead_of_revertin
     moved = tuple({**row, "evidence_id": "new-request:0"} for row in seeded)
     reverted, _, _ = _pass(tmp_path, None, terms=("새 용어",), previous=moved)
     assert reverted.utterances == whisper
-    assert reverted.record["dropped_cross_checked"] == 2  # 바뀐 글자였던 두 줄
+    assert reverted.record["dropped_cross_checked"] == 1  # 바뀐 글자였던 한 줄(「개좋아」)
     assert any("다시 교차 확인하세요" in line for line in warnings)
 
 
@@ -519,6 +533,8 @@ def _seed_case(
         "audio": audio,
         "settings": SETTINGS,
         "workflow": RawWorkflowConfig(),
+        # 새 작업공간은 교차 확인이 켜져 있다(D59 19d 기본) — 입력 지문 끝에 그 꼬리표가 붙는다.
+        "cross_check_tag": cross_check.binding_tag(workspace),
     }
     start = analysis_workflow.source_input_fingerprint(**values, media_fingerprint="M0")
     monkeypatch.setattr(analysis_workflow.media_refs, "fingerprint", lambda *_: media)
@@ -576,6 +592,10 @@ class FakeInner:
         return parse_text_response({"text": "글자"}, binding=binding, model=GPT_MODEL)
 
 
+CALL_IDENTITY = source_text.call_identity(GPT_MODEL, "", TERMS, None)
+"""승인 문 시험의 요청 신원 — 문맥 없이 용어집(TERMS)만 실은 호출이다."""
+
+
 def _approved(
     directory: Path, seconds: float = 20.0, **overrides: Any
 ) -> tuple[source_text.ApprovedPhaseTextProvider, FakeInner, RawWorkflowConfig]:
@@ -589,6 +609,9 @@ def _approved(
         settings_fingerprint=asr_settings_fingerprint(SETTINGS, workflow),
         timing_model=workflow.models.timing_model,
         approved_on=date(2026, 10, 2).isoformat(),
+        text_model=GPT_MODEL,
+        text_identity=CALL_IDENTITY,
+        text_chunk_budget=1,
     )
     inner = FakeInner()
     values: dict[str, Any] = {
@@ -598,6 +621,7 @@ def _approved(
         "audio": make_audio(directory, seconds=seconds),
         "approval": approval,
         "approved_model": GPT_MODEL,
+        "approved_identity": CALL_IDENTITY,
         "gate": CountingAsrGate(limit=1),
     }
     values.update(overrides)
@@ -614,50 +638,86 @@ def _binding_and_chunk(tmp_path: Path) -> tuple[Any, Chunk]:
     return binding, chunk
 
 
-def test_online_stage1_builds_no_text_provider_until_an_approval_binds_a_text_model(
+def test_a_live_text_provider_exists_only_for_an_approval_that_binds_the_text_request(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """19c — 승인·전송 경계·cfg가 다 있어도 승인이 글자 모델을 묶지 않으면 제공자가 없다(0송신)."""
+    """19d — 승인(v2)이 글자 모델·요청 신원·상한을 묶었을 때만 실제 제공자가 생긴다.
+
+    빠진 모델(교차 확인 꺼짐·물을 청크 없음)은 조용히 0송신이고, 지어낸 모델·승인 뒤에 바뀐 요청
+    신원(용어집·문맥)·상한 0은 WARN과 0송신이다 — whisper는 그대로 간다(D39)."""
+    warnings: list[str] = []
+    monkeypatch.setattr(log, "warn", warnings.append)
     provider, _inner, workflow = _approved(tmp_path / "wire")
-    live = analysis_workflow.AnalysisProviders(
-        origin="live",
-        phase="asr",
-        live_sender=RecordingSender(GPT),
-        live_cfg=Config(),
-        asr_approvals={"src": provider.approval},
-    )
-    choose = analysis_workflow._text_provider_for
-    assert choose(live, workflow, SETTINGS, provider.audio, "src") is None
-    assert analysis_workflow._approved_text_model(provider.approval) is None
-    # 19d가 승인에 글자 모델을 묶으면 — 그때만 승인 문이 있는 실제 제공자가 생긴다.
-    monkeypatch.setattr(analysis_workflow, "_approved_text_model", lambda approval: GPT_MODEL)
-    built = choose(live, workflow, SETTINGS, provider.audio, "src")
+    request = _request(tmp_path)
+    identity = source_text.text_identity(SOURCE_TEXT_SETTINGS, glossary.glossary_sha(TERMS))
+    bound = replace(provider.approval, text_identity=identity, text_chunk_budget=2)
+
+    def choose(approval: AsrPhaseApproval, asset_id: str = "src") -> Any:
+        live = analysis_workflow.AnalysisProviders(
+            origin="live",
+            phase="asr",
+            live_sender=RecordingSender(GPT),
+            live_cfg=Config(),
+            asr_approvals={"src": approval},
+        )
+        chosen = analysis_workflow._text_provider_for
+        return chosen(live, workflow, SETTINGS, provider.audio, asset_id, request)
+
+    built = choose(bound)
     assert isinstance(built, source_text.ApprovedPhaseTextProvider)
-    assert isinstance(built.inner, TransportTextProvider) and built.approved_model == GPT_MODEL
-    assert choose(live, workflow, SETTINGS, provider.audio, "other") is None  # 승인 없는 원본
+    assert isinstance(built.inner, TransportTextProvider)
+    assert (built.approved_model, built.approved_identity) == (GPT_MODEL, identity)
+    assert built.gate.limit == 2  # 글자 요청 상한 = 승인이 묶은 수(whisper 예산과 따로)
+    assert choose(bound, "other") is None  # 승인 없는 원본
+    omitted = replace(bound, text_model=None, text_identity=None, text_chunk_budget=0)
+    assert analysis_workflow._approved_text_model(omitted) is None
+    assert choose(omitted) is None and warnings == []  # 19d 이전 모양의 승인 — 묻지 않는다
+    keyed = choose(replace(bound, text_chunk_keys=("k0", "k1")))
+    assert keyed.approved_keys == frozenset({"k0", "k1"})  # 견적이 센 그 청크만 보낸다
+    for forged in (
+        replace(bound, text_model="forged-text-model"),
+        replace(bound, text_identity="f" * 64),  # 승인 뒤에 용어집이 바뀌었다
+        replace(bound, text_chunk_budget=0),
+        replace(bound, text_chunk_keys=("k0",)),  # 청크 집합과 상한이 어긋난다
+    ):
+        assert choose(forged) is None
+    assert sum("글자 요청을 보내지 않습니다" in line for line in warnings) == 4
 
 
 def test_the_approved_text_gate_passes_only_an_open_matching_approval(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """19d가 쓸 승인 문 — 승인·환경·모델·범위·예산이 모두 맞을 때만 안쪽 전송에 닿는다."""
+    """승인 문 — 승인·환경·모델·요청 신원·범위·예산이 모두 맞을 때만 안쪽 전송에 닿는다."""
     monkeypatch.setattr("vlogsrt.env.is_offline", lambda: False)
     provider, inner, workflow = _approved(tmp_path / "open")
     binding, chunk = _binding_and_chunk(tmp_path)
-    ask: dict[str, Any] = {"binding": binding, "chunk": chunk, "on": BEFORE_SHUTDOWN}
-    assert provider.text_transcript(settings=workflow, keywords=TERMS, **ask).text == "글자"
+    ask: dict[str, Any] = {
+        "binding": binding,
+        "chunk": chunk,
+        "on": BEFORE_SHUTDOWN,
+        "keywords": TERMS,
+    }
+    assert provider.text_transcript(settings=workflow, **ask).text == "글자"
     assert inner.calls[0]["keywords"] == TERMS
     with pytest.raises(AsrBudgetExhausted):  # 예약 문은 승인 예산을 넘지 않는다
         provider.text_transcript(settings=workflow, **ask)
-    refusals: list[tuple[dict[str, Any], RawWorkflowConfig]] = [
-        ({"approved_model": "other-text-model"}, workflow),
-        ({}, replace(workflow, network_mode="offline")),
-        ({"seconds": 5.0}, workflow),  # 청크가 선택 오디오 밖이다
+    refusals: list[tuple[dict[str, Any], RawWorkflowConfig, dict[str, Any]]] = [
+        ({"approved_model": "other-text-model"}, workflow, {}),
+        ({}, replace(workflow, network_mode="offline"), {}),
+        ({"seconds": 5.0}, workflow, {}),  # 청크가 선택 오디오 밖이다
+        ({"approved_identity": "f" * 64}, workflow, {}),  # 지어낸 요청 신원
+        ({}, workflow, {"keywords": ("다른 용어",)}),  # 승인 뒤에 바뀐 용어집
+        ({}, workflow, {"prompt": "다른 문맥"}),  # 승인 뒤에 바뀐 문맥
+        ({"approved_keys": frozenset({"f" * 64})}, workflow, {}),  # 견적에 없던 청크
     ]
-    for number, (overrides, settings) in enumerate(refusals):
+    quoted_key = source_text.call_key(binding, GPT_MODEL, "", TERMS, None)
+    exact, exact_inner, _ = _approved(tmp_path / "exact", approved_keys=frozenset({quoted_key}))
+    assert exact.text_transcript(settings=workflow, **ask).text == "글자"  # 견적이 센 그 청크
+    assert len(exact_inner.calls) == 1
+    for number, (overrides, settings, call) in enumerate(refusals):
         closed, closed_inner, _ = _approved(tmp_path / f"closed-{number}", **overrides)
         with pytest.raises(AnalysisApprovalError):
-            closed.text_transcript(settings=settings, **ask)
+            closed.text_transcript(settings=settings, **{**ask, **call})
         assert closed_inner.calls == []
     monkeypatch.setattr("vlogsrt.env.is_offline", lambda: True)
     offline, offline_inner, _ = _approved(tmp_path / "offline")
