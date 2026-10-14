@@ -522,6 +522,40 @@ def sync_check_settings_sha256(settings: SyncCheckSettings) -> str:
     return hashlib.sha256(body.encode("utf-8")).hexdigest()
 
 
+@dataclass(frozen=True)
+class GapRefillSettings:
+    """말소리 빈칸 재전사(D59 19f)가 **다시 물을** 구간을 넓히는 기준 — 외부 근거 없는 조정 대상.
+
+    재료는 자막 시각 확인(D55)의 「말소리 − 큐 ±τ」다(τ는 `SyncCheckSettings.speech_reach_seconds`).
+    그 칸을 표본으로 옮긴 뒤 `merge_seconds` 이하로 떨어진 빈칸을 하나로 잇고(whisper가 앞뒤 말과
+    함께 듣게 — 단 사이에 기존 큐 칸이 한 프레임이라도 있으면 잇지 않는다), 양쪽을 `pad_seconds`만큼
+    넓혀 `[0, PCM 길이]`로 자른다. 넓힌 구간은 **통째로** 다시 묻는다(규칙 4 — 다시 묻기 위해 고르는
+    것은 되고, 빼려고 고르지 않는다). 잇기가 큐 칸을 건너지 않고 넓힘이 τ 이하이므로 넓힌 구간은
+    기존 큐 칸으로 들어가지 않는다(시험이 둘 다 못 박는다).
+
+    `ProjectConfig`·`RawWorkflowConfig`·`RawUnderstandingSettings`·`SourceTextSettings`의 칸이
+    **아니고** 어느 분석·전사·자막 지문이나 캐시 열쇠·1단계 승인에도 실리지 않는다 — 바꿔도 이미
+    산 것이 낡지 않는다. 그 결과(고른 구간)만 빈칸 재전사 견적 digest와 그 승인이 묶는다.
+    """
+
+    merge_seconds: Fraction = Fraction(2)
+    pad_seconds: Fraction = Fraction(1, 2)
+
+
+GAP_REFILL_SETTINGS = GapRefillSettings()
+"""지금 쓰는 빈칸 고르기 기준 — 주입이 없으면 이 하나를 읽는다."""
+
+
+def gap_refill_problems(settings: GapRefillSettings) -> list[str]:
+    """값역 — 잇는 거리·넓힘은 0 이상의 정확 유리수(초)다."""
+    problems: list[str] = []
+    for name in ("merge_seconds", "pad_seconds"):
+        value = getattr(settings, name)
+        if not isinstance(value, Fraction) or value < 0:
+            problems.append(f"{name}은(는) 0 이상의 정확 유리수(초)여야 한다: {value!r}")
+    return problems
+
+
 # 키 하나, 해석기 하나. 여기 없는 키는 전부 거부한다 — 조용히 넘기는 순간
 # 오타가 기본값으로 둔갑한다.
 _FIELD_PARSERS: dict[str, Callable[[str, object, str], Any]] = {

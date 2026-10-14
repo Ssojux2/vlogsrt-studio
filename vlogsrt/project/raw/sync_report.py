@@ -14,6 +14,7 @@ from __future__ import annotations
 import atexit
 import hashlib
 import json
+import math
 import os
 import re
 import tempfile
@@ -1256,6 +1257,125 @@ def current_report(
         return {**exact, "stale": False}
     older = latest_report(cache_root, source_id)
     return None if older is None else {**older, "stale": True}
+
+
+@dataclass(frozen=True, slots=True)
+class MeasuredSpeech:
+    """지금 원본 자막 리비전을 잰 확인의 재료 — 말소리 칸·PCM 시계의 큐·실패 청크(표본).
+
+    읽기만 한다.
+
+    말소리 빈칸 재전사(D59 19f)가 **다시 물을 구간을 고르는** 재료다 — 확인 판정은 여전히 표시만
+    하고(D55), 이 값은 자막·전사·지문 어디에도 쓰이지 않는다. 시각은 확인과 같은 산술(`audio_start`
+    만큼 민 PCM 시계)이다.
+    """
+
+    report: Mapping[str, Any]
+    pcm_sha256: str
+    sample_count: int
+    audio_start: Fraction
+    speech: sync_check.SpeechTrack
+    cues: tuple[Cue, ...]
+    failed: tuple[tuple[int, int], ...]
+    failures_known: bool = True
+    """1단계 기록이 있어 전사 실패 구간을 아는가(19a-3) — 없으면 `failed`가 비어도 「실패 없음」이
+    아니다."""
+
+
+def measured_speech(
+    workspace: Any,
+    source_id: str,
+    settings: SyncCheckSettings = SYNC_CHECK_SETTINGS,
+    project: ProjectConfig | None = None,
+) -> MeasuredSpeech | None:
+    """지금 자막 리비전의 보고서와 그 PCM의 저장된 말소리 칸 — 없거나 낡았으면 None.
+
+    VAD를 돌리지도 디코드하지도 않는다 — 확인 작업이 남긴 보고서·칸 캐시를 읽을 뿐이다.
+    """
+    from vlogsrt.project.raw.source_transcript import load
+
+    transcript = load(workspace, source_id)
+    report = current_report(workspace, source_id, settings)
+    if transcript is None or report is None or report.get("stale") or not report.get("pcm"):
+        return None
+    pcm = report["pcm"]
+    speech = stored_speech(workspace.root / SYNC_CACHE, pcm, project or ProjectConfig())
+    if speech is None:
+        return None
+    shift = Fraction(str(pcm["audio_start"]))
+    cues = tuple(
+        replace(cue, start=cue.start - shift, end=cue.end - shift) for cue in cues_of(transcript)
+    )
+    return MeasuredSpeech(
+        report=report,
+        pcm_sha256=str(pcm["pcm_sha256"]),
+        sample_count=int(pcm["sample_count"]),
+        audio_start=shift,
+        speech=speech,
+        cues=cues,
+        failed=_failed_samples(report, shift),
+        failures_known=report.get("stage1_pcm_sha256") is not None,
+    )
+
+
+def stored_speech(
+    cache_root: Path, pcm: Mapping[str, Any], project: ProjectConfig
+) -> sync_check.SpeechTrack | None:
+    """그 PCM의 저장된 말소리 칸 — 확인 작업이 쓴 캐시가 그 PCM·VAD의 것일 때만(없으면 None)."""
+    key = vad_key(project)
+    sha = str(pcm["pcm_sha256"])
+    cached = _read_json(cache_root / "vad" / f"{sha[:24]}-{key[:8]}.json")
+    if cached is None or cached.get("pcm_sha256") != sha or cached.get("vad") != key:
+        return None
+    count = int(pcm["sample_count"])
+    window = project.vad_window_samples
+    return sync_check.SpeechTrack(
+        Fraction(window, project.vad_sample_rate),
+        -(-count // window),
+        Fraction(count, project.vad_sample_rate),
+        tuple((int(start), int(end)) for start, end in cached["runs"]),
+    )
+
+
+def _failed_samples(report: Mapping[str, Any], shift: Fraction) -> tuple[tuple[int, int], ...]:
+    """보고서의 실패 청크(공통 시계)를 PCM 표본 범위로 — 시작은 내림, 끝은 올림."""
+    return tuple(
+        (
+            math.floor((Fraction(str(item["start"])) - shift) * PCM_RATE),
+            math.ceil((Fraction(str(item["end"])) - shift) * PCM_RATE),
+        )
+        for item in report.get("failed_chunks", [])
+    )
+
+
+def measured_pcm(workspace: Any, asset: Any, pcm_sha256: str) -> PcmChoice | None:
+    """확인이 말소리를 잰 **그** PCM 파일 — 1단계 저장본이나 확인의 디코드본 중 해시가 같은 것.
+
+    읽기만 한다(디코드하지 않는다). 둘 다 해시가 다르거나 없으면 None — 다른 소리를 자르지 않는다.
+    """
+    stage1 = stage1_audio(workspace.root, asset.asset_id, asset.content_sha256 or "")
+    if stage1 is not None and not stage1.absent and stage1.pcm_sha256 == pcm_sha256:
+        choice = PcmChoice(
+            path=stage1.pcm_path,
+            pcm_sha256=stage1.pcm_sha256,
+            stream_index=stage1.stream_index,
+            channels=stage1.channels,
+            sample_count=stage1.sample_count,
+            origin=stage1.origin,
+            presentation_origin=stage1.presentation_origin,
+            basis="stored",
+            checks=(),
+        )
+        if choice.path.is_file() and sha256_file(choice.path) == pcm_sha256:
+            return choice
+    folder = workspace.root / SYNC_CACHE / "pcm" / (asset.content_sha256 or "")[:24]
+    meta = _read_json(folder / "audio.json")
+    if meta is None or meta.get("pcm_sha256") != pcm_sha256:
+        return None
+    decoded = _choice_from_meta(meta, folder / "audio.pcm")
+    if not decoded.path.is_file() or sha256_file(decoded.path) != pcm_sha256:
+        return None
+    return decoded
 
 
 SYNC_FAILED_LABEL = "자막 시각 확인을 걸지 못함 (로그 참고)"

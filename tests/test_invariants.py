@@ -2437,3 +2437,276 @@ def test_the_suspect_settings_stay_outside_every_fingerprint(
 
 def test_the_real_suspect_layer_passes() -> None:
     assert check_invariants.check_subtitle_suspects_only_display() == []
+
+
+# ── D59 19f: 말소리 빈칸 재전사 — 고르기는 순수, 넣기는 승인된 빈칸 재전사만, whisper 힌트 없음
+
+GAPS = "vlogsrt/project/raw/speech_gaps.py"
+CLEAN_GAPS = (
+    "from vlogsrt.project import sync_check\n"
+    "from vlogsrt.project.config import GapRefillSettings, SyncCheckSettings\n"
+)
+REFILL = "vlogsrt/project/raw/speech_refill.py"
+CLEAN_REFILL = (
+    "from vlogsrt.project.raw import speech_gaps\n"
+    "def run(audio, spans, provider):\n"
+    "    return stage1.transcribe_selected_audio(audio, spans, provider=provider, on=None)\n"
+)
+SERVICE = "vlogsrt/project/raw/service.py"
+CLEAN_SERVICE = (
+    "from vlogsrt.project.raw import speech_gaps\n"
+    "class RawWorkspaceService:\n"
+    "    def _refill_settle(self, workspace, rows):\n"
+    "        return source_transcript.insert_segments(workspace, 'a', 'r', rows)\n"
+)
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "import subprocess",
+        "import sqlite3",
+        "from vlogsrt import preprocess",
+        "from vlogsrt.project.raw import sync_report",
+        "from vlogsrt.project.raw import source_transcript",
+        "from vlogsrt.project.raw import service",
+        "from vlogsrt.project.raw import understanding",
+        "from vlogsrt.project.raw import speech_refill",
+        "from vlogsrt.project.raw.tiering import classify",
+        "BODY = Path('vad.json').read_text()",
+    ],
+)
+def test_the_gap_selection_takes_values_only(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, statement: str
+) -> None:
+    _fake_source_tree(monkeypatch, tmp_path, {GAPS: CLEAN_GAPS})
+    assert check_invariants.check_speech_gaps_stays_pure() == []
+    (tmp_path / GAPS).write_text(CLEAN_GAPS + statement + "\n", encoding="utf-8")
+    assert check_invariants.check_speech_gaps_stays_pure()
+    (tmp_path / GAPS).unlink()
+    assert check_invariants.check_speech_gaps_stays_pure() == [
+        f"{GAPS}: 말소리 빈칸 고르기 계층이 사라졌다 (D59 19f)"
+    ]
+
+
+@pytest.mark.parametrize(
+    "importer",
+    [
+        "vlogsrt/project/raw/tiering.py",
+        "vlogsrt/project/raw/auto_cleanup.py",
+        "vlogsrt/project/raw/selection_analysis.py",
+        "vlogsrt/project/raw/finalcut_export.py",
+    ],
+)
+def test_only_the_refill_and_the_service_read_the_gaps(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, importer: str
+) -> None:
+    reads = "from vlogsrt.project.raw import speech_gaps\n"
+    _fake_source_tree(
+        monkeypatch, tmp_path, {GAPS: CLEAN_GAPS, SERVICE: reads, REFILL: CLEAN_REFILL}
+    )
+    assert check_invariants.check_speech_gaps_stays_pure() == []
+    (tmp_path / importer).parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / importer).write_text(reads, encoding="utf-8")
+    assert check_invariants.check_speech_gaps_stays_pure() == [
+        f"{importer}: speech_gaps를 import한다 — 다시 물을 구간이 묻기 밖으로 샌다 (D59 19f)"
+    ]
+
+
+def test_the_gap_selection_may_read_the_sync_cells_but_nothing_else_may_newly(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """D55 「표시만」의 예외는 빈칸 고르기 하나다 — 빈칸 재전사(묻기)는 확인 칸을 직접 모른다."""
+    clean = {
+        "vlogsrt/project/sync_check.py": SYNC_CLEAN,
+        "vlogsrt/project/raw/sync_report.py": SYNC_REPORT_CLEAN,
+        "vlogsrt/project/config.py": "class ProjectConfig:\n    schema_version: int = 1\n",
+        GAPS: CLEAN_GAPS,
+    }
+    _fake_source_tree(monkeypatch, tmp_path, clean)
+    assert check_invariants.check_sync_check_only_displays() == []
+    (tmp_path / REFILL).write_text("from vlogsrt.project import sync_check\n", encoding="utf-8")
+    assert check_invariants.check_sync_check_only_displays() == [
+        f"{REFILL}: sync_check를 import한다 — 판정이 표시 밖으로 샌다 (D55)"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("rel", "body"),
+    [
+        (RAW_CONFIG, "class RawWorkflowConfig:\n    gaps: object = GAP_REFILL_SETTINGS\n"),
+        ("vlogsrt/project/raw/understanding.py", "KEY = GapRefillSettings()\n"),
+        ("vlogsrt/project/raw/analysis_approval.py", "from . import speech_gaps\n"),
+        (
+            "vlogsrt/project/config.py",
+            "class ProjectConfig:\n    gaps: object = GapRefillSettings()\n",
+        ),
+    ],
+)
+def test_the_gap_settings_stay_outside_every_fingerprint(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, rel: str, body: str
+) -> None:
+    clean = {
+        "vlogsrt/project/sync_check.py": SYNC_CLEAN,
+        "vlogsrt/project/raw/sync_report.py": SYNC_REPORT_CLEAN,
+        "vlogsrt/project/config.py": "class ProjectConfig:\n    schema_version: int = 1\n",
+    }
+    _fake_source_tree(monkeypatch, tmp_path, clean)
+    assert check_invariants.check_sync_check_only_displays() == []
+    (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / rel).write_text(body, encoding="utf-8")
+    failures = check_invariants.check_sync_check_only_displays()
+    assert any("지문·캐시 열쇠 밖" in failure for failure in failures), failures
+
+
+@pytest.mark.parametrize(
+    ("rel", "body", "line"),
+    [
+        (
+            SERVICE,
+            "class RawWorkspaceService:\n"
+            "    def edit_source_transcript(self, workspace, rows):\n"
+            "        return source_transcript.insert_segments(workspace, 'a', 'r', rows)\n",
+            3,
+        ),
+        (
+            "vlogsrt/project/raw/analysis_workflow.py",
+            "def _seed(workspace):\n"
+            "    source_transcript.insert_segments(workspace, 'a', 'r', [])\n",
+            2,
+        ),
+        (
+            "vlogsrt/project/raw/speech_refill.py",
+            "from vlogsrt.project.raw.source_transcript import insert_segments\n",
+            1,
+        ),
+        (
+            "ui/workspace_service.py",
+            "def refill_x(raw):\n    raw.insert_segments(1, 2, 3, [])\n",
+            2,
+        ),
+        # 검증 지적 7 — 이름 앞머리(refill_)로는 안 된다. 정산 한 자리만이다.
+        (
+            SERVICE,
+            "class RawWorkspaceService:\n"
+            "    def refill_source(self, workspace, rows):\n"
+            "        return source_transcript.insert_segments(workspace, 'a', 'r', rows)\n",
+            3,
+        ),
+        # 가리키기만 해도 자리다 — 별명·문자열 이름·이름 가져오기·람다로 넘기기.
+        (
+            SERVICE,
+            "class RawWorkspaceService:\n"
+            "    def _refill_settle(self, workspace, rows):\n"
+            "        put = source_transcript.insert_segments\n"
+            "        return put(workspace, 'a', 'r', rows)\n",
+            3,
+        ),
+        (
+            SERVICE,
+            "class RawWorkspaceService:\n"
+            "    def _refill_plan(self, workspace):\n"
+            "        put = getattr(source_transcript, 'insert_segments')\n"
+            "        return put(workspace, 'a', 'r', [])\n",
+            3,
+        ),
+        (
+            SERVICE,
+            "from vlogsrt.project.raw.source_transcript import insert_segments as put\n",
+            1,
+        ),
+        (
+            SERVICE,
+            "class RawWorkspaceService:\n"
+            "    def _refill_settle(self, workspace, rows):\n"
+            "        later = lambda r: source_transcript.insert_segments(workspace, 'a', 'r', r)\n"
+            "        return later(rows)\n",
+            3,
+        ),
+        (
+            "vlogsrt/project/raw/source_transcript.py",
+            "def insert_segments(workspace, asset_id, revision, rows):\n    return None\n"
+            "def seed(workspace):\n    return insert_segments(workspace, 'a', 'r', [])\n",
+            4,
+        ),
+        (
+            "vlogsrt/pipeline.py",
+            "from vlogsrt.project.raw.source_transcript import insert_segments\n",
+            1,
+        ),
+    ],
+)
+def test_only_the_approved_refill_inserts_rows(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, rel: str, body: str, line: int
+) -> None:
+    owner = (
+        "def insert_segments(workspace, asset_id, revision, rows):\n    return None\n"
+        "__all__ = ['insert_segments']\n"
+    )
+    _fake_source_tree(
+        monkeypatch,
+        tmp_path,
+        {SERVICE: CLEAN_SERVICE, "vlogsrt/project/raw/source_transcript.py": owner},
+    )
+    assert check_invariants.check_insert_segments_only_from_refill() == []
+    (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / rel).write_text(body, encoding="utf-8")
+    (failure,) = check_invariants.check_insert_segments_only_from_refill()
+    assert failure.startswith(f"{rel}:{line}: insert_segments를") and "_refill_settle" in failure
+
+
+@pytest.mark.parametrize(
+    "importer",
+    [
+        "ui/workspace_service.py",
+        "ui/app.py",
+        "vlogsrt/project/raw/analysis_workflow.py",
+        "vlogsrt/cli.py",
+    ],
+)
+def test_only_the_service_calls_the_paid_refill(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, importer: str
+) -> None:
+    """검증 지적 7 — 빈칸 재전사는 서비스만 부른다(화면은 서비스 메서드로만 닿는다)."""
+    reads = "from vlogsrt.project.raw import speech_refill\n"
+    _fake_source_tree(monkeypatch, tmp_path, {SERVICE: reads, REFILL: CLEAN_REFILL})
+    assert check_invariants.check_speech_refill_only_from_service() == []
+    (tmp_path / importer).parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / importer).write_text(reads, encoding="utf-8")
+    assert check_invariants.check_speech_refill_only_from_service() == [
+        f"{importer}: speech_refill을 import한다 — 빈칸 재전사는 서비스의 승인 문으로만 닿는다"
+        " (D59 19f)"
+    ]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "stage1.transcribe_selected_audio(audio, spans, provider=p, prompt='한국 여행 브이로그')\n",
+        "provider.timed_transcript(binding=b, chunk=c, keywords=('왕방',))\n",
+        "provider.timed_transcript(binding=b, chunk=c, languages=('ko',))\n",
+        "request = timing_transcription_request(chunk, settings=s)\n",
+        "sender.send_request(request, cfg, kind='caption-timing', stem='', source='')\n",
+        # 검증 지적 7 — 풀어 넣은 인자는 무엇이 실리는지 보이지 않는다.
+        "stage1.transcribe_selected_audio(audio, spans, provider=p, **extra)\n",
+        "provider.timed_transcript(*parts)\n",
+    ],
+)
+def test_the_refill_whisper_carries_no_hints(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, body: str
+) -> None:
+    _fake_source_tree(monkeypatch, tmp_path, {REFILL: CLEAN_REFILL})
+    assert check_invariants.check_refill_whisper_has_no_hints() == []
+    (tmp_path / REFILL).write_text(CLEAN_REFILL + body, encoding="utf-8")
+    assert check_invariants.check_refill_whisper_has_no_hints()
+    (tmp_path / REFILL).unlink()
+    assert check_invariants.check_refill_whisper_has_no_hints() == [
+        f"{REFILL}: 말소리 빈칸 재전사 계층이 사라졌다 (D59 19f)"
+    ]
+
+
+def test_the_real_refill_layers_pass() -> None:
+    assert check_invariants.check_speech_gaps_stays_pure() == []
+    assert check_invariants.check_insert_segments_only_from_refill() == []
+    assert check_invariants.check_refill_whisper_has_no_hints() == []
+    assert check_invariants.check_speech_refill_only_from_service() == []

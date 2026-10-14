@@ -363,13 +363,49 @@ def _estimate(
 # ─────────────────────────────────────────────────────────────
 
 
+def _near(runs: Iterable[Run], speech: SpeechTrack, settings: SyncCheckSettings) -> tuple[Run, ...]:
+    """구간을 τ(`speech_reach_seconds`)만큼 넓힌 칸 — Pτ·Rτ와 빈칸 고르기가 같은 τ를 쓴다."""
+    reach = _frames(settings.speech_reach_seconds, speech.hop)
+    return dilate_runs(runs, reach, speech.frame_count)
+
+
+def subtract_runs(left: Iterable[Run], right: Iterable[Run]) -> tuple[Run, ...]:
+    """`left − right` — 두 구간열을 정렬·합친 뒤 두 손가락으로 한 번 훑는다."""
+    cut = merge_runs(right)
+    kept: list[Run] = []
+    at = 0
+    for start, end in merge_runs(left):
+        cursor = start
+        while at < len(cut) and cut[at][1] <= cursor:
+            at += 1
+        probe = at
+        while probe < len(cut) and cut[probe][0] < end:
+            if cut[probe][0] > cursor:
+                kept.append((cursor, cut[probe][0]))
+            cursor = max(cursor, cut[probe][1])
+            probe += 1
+        if cursor < end:
+            kept.append((cursor, end))
+    return tuple(kept)
+
+
+def uncovered_speech(
+    marks: Sequence[Run], speech: SpeechTrack, settings: SyncCheckSettings
+) -> tuple[Run, ...]:
+    """말소리 칸 중 큐 τ **밖** — Rτ가 세지 않은 칸 그대로(D59 19f, 다시 물을 구간의 재료).
+
+    판정이 아니다: 「말이 아니다」도 「말이다」도 정하지 않고, Rτ의 나머지를 칸으로 돌려줄 뿐이다.
+    합은 언제나 `(1 − Rτ) × 말소리 칸`이다(시험이 못 박는다).
+    """
+    return subtract_runs(speech.runs, _near(marks, speech, settings))
+
+
 def coverage(
     marks: Sequence[Run], speech: SpeechTrack, settings: SyncCheckSettings
 ) -> tuple[Fraction | None, Fraction | None]:
     """(Pτ, Rτ) — 큐 칸 중 말소리 τ 안의 몫, 말소리 칸 중 큐 τ 안의 몫."""
-    reach = _frames(settings.speech_reach_seconds, speech.hop)
-    near_speech = dilate_runs(speech.runs, reach, speech.frame_count)
-    near_cues = dilate_runs(marks, reach, speech.frame_count)
+    near_speech = _near(speech.runs, speech, settings)
+    near_cues = _near(marks, speech, settings)
     cue_frames, spoken = run_total(marks), run_total(speech.runs)
     precision = (
         Fraction(intersection_frames(marks, near_speech), cue_frames) if cue_frames else None

@@ -1001,6 +1001,10 @@ SYNC_CHECK_IMPORTERS = (
     "vlogsrt/project/raw/service.py",
     "vlogsrt/project/raw/commands.py",
     "vlogsrt/project/commands.py",
+    # D59 19f — D55 「표시만」의 좁은 예외 「다시 물을 구간 고르기」: 순수 빈칸 고르기는 Rτ와 같은
+    # 칸 산술을 쓴다. 고른 구간은 다시 **묻는** 범위일 뿐 자막·컷·제거·등급으로 흐르지 않는다
+    # (`check_speech_gaps_stays_pure`가 그 모듈의 입출력·읽는 쪽을 막는다).
+    "vlogsrt/project/raw/speech_gaps.py",
 )
 SYNC_REPORT_IMPORTERS = (
     "vlogsrt/project/raw/service.py",
@@ -1031,7 +1035,12 @@ SYNC_FREE_FINGERPRINT_PATHS = (
     "vlogsrt/project/raw/final_caption.py",
     "vlogsrt/project/raw/caption_workspace.py",
 )
-SYNC_NAMES = re.compile(r"SyncCheckSettings|SYNC_CHECK_SETTINGS|sync_check|sync_report")
+SYNC_NAMES = re.compile(
+    r"SyncCheckSettings|SYNC_CHECK_SETTINGS|sync_check|sync_report"
+    # D59 19f — 빈칸 고르기 기준·모듈도 확인과 같이 지문·캐시 열쇠 밖이다(고른 결과만 빈칸
+    # 재전사 견적 digest가 묶는다).
+    r"|GapRefillSettings|GAP_REFILL_SETTINGS|speech_gaps"
+)
 
 
 def check_sync_check_stays_pure() -> list[str]:
@@ -1135,6 +1144,196 @@ def _class_source(body: str, class_name: str) -> str:
         if isinstance(node, ast.ClassDef) and node.name == class_name:
             return ast.get_source_segment(body, node) or ""
     return ""
+
+
+# 말소리 빈칸 재전사(D59 19f) — 다시 물을 구간 **고르기**는 순수 계산이고(재료는 확인 칸·큐 값),
+# 고른 결과는 빈칸 재전사(`speech_refill`)와 서비스만 읽는다. 빈칸 재전사(유료 묻기)는 서비스만
+# 부른다 — 화면은 서비스의 메서드로만 닿는다(견적·승인·작업 문이 서비스에 있다). 원본 자막에 줄을
+# **넣는** 일은 서비스의 승인된 빈칸 재전사 정산(`_refill_settle`) 하나뿐이고, 그것도 그 자리에서
+# 바로 부르는 꼴만 된다 — 별명·`getattr`·다른 함수로 넘기면 승인·견적 밖에서 자막이 바뀔 길이 된다.
+SPEECH_GAPS_MODULE = "vlogsrt/project/raw/speech_gaps.py"
+SPEECH_GAPS_MUST_NOT_IMPORT = (
+    "subprocess", "openai", "anthropic_messages", "preprocess", "transcribe", "sqlite3", "service",
+    "workspace", "source_transcript", "sync_report", "understanding", "caption_provider",
+    "analysis_workflow", "speech_refill", "tiering", "auto_cleanup", "selection_analysis",
+    "segmentation", "edit", "export",
+)  # fmt: skip
+SPEECH_GAPS_IMPORTERS = (
+    "vlogsrt/project/raw/service.py",
+    "vlogsrt/project/raw/speech_refill.py",
+)
+INSERT_OWNER = "vlogsrt/project/raw/source_transcript.py"
+INSERT_NAME = "insert_segments"
+INSERT_CALLER = "vlogsrt/project/raw/service.py"
+INSERT_CALLER_FUNCTION = "_refill_settle"
+SPEECH_REFILL_MODULE = "vlogsrt/project/raw/speech_refill.py"
+SPEECH_REFILL_IMPORTERS = ("vlogsrt/project/raw/service.py",)
+# whisper 요청에 힌트가 실리는 칸(규칙 6) — 빈칸 재전사의 whisper 호출에 이 키워드가 나타나면
+# 실패다.
+WHISPER_HINT_KEYWORDS = ("prompt", "keywords", "languages")
+WHISPER_CALLS = ("transcribe_selected_audio", "timed_transcript")
+# 빈칸 재전사는 정해진 제공자 길만 지난다 — 요청을 직접 짓거나 보내면 승인 문을 건너뛴다.
+SPEECH_REFILL_FORBIDDEN_CALLS = (
+    "timing_transcription_request", "text_transcription_request", "send_request",
+)  # fmt: skip
+
+
+def check_speech_gaps_stays_pure() -> list[str]:
+    """D59 19f — 빈칸 고르기는 값만 받아 구간을 돌려주고, 빈칸 재전사와 서비스만 그것을 읽는다."""
+    path = ROOT / SPEECH_GAPS_MODULE
+    if not path.exists():
+        return [f"{SPEECH_GAPS_MODULE}: 말소리 빈칸 고르기 계층이 사라졌다 (D59 19f)"]
+    body = path.read_text(encoding="utf-8")
+    failures = [
+        f"speech_gaps.py: {name}을 import한다 — 빈칸 고르기가 순수 함수가 아니게 된다 (D59 19f)"
+        for name in _imports(body, SPEECH_GAPS_MUST_NOT_IMPORT)
+    ]
+    failures += [
+        f"speech_gaps.py:{number}: 파일을 직접 읽거나 쓴다 — 재료는 서비스가 값으로 넘긴다"
+        " (D59 19f)"
+        for number, line in enumerate(body.splitlines(), start=1)
+        if TIERING_FILE_IO.search(line)
+    ]
+    for source in _project_sources():
+        rel = _rel(source)
+        if rel == SPEECH_GAPS_MODULE or rel in SPEECH_GAPS_IMPORTERS:
+            continue
+        if "speech_gaps" in _imported_names(source.read_text(encoding="utf-8")):
+            failures.append(
+                f"{rel}: speech_gaps를 import한다 — 다시 물을 구간이 묻기 밖으로 샌다 (D59 19f)"
+            )
+    return failures
+
+
+def check_insert_segments_only_from_refill() -> list[str]:
+    """D59 19f — 줄 넣기는 서비스의 `_refill_settle`이 그 자리에서 바로 부를 때만 된다.
+
+    부르기만이 아니라 **가리키는 것**도 센다 — 이름 가져오기(별명 포함)·속성 꺼내 담기
+    (`put = source_transcript.insert_segments`)·문자열 이름(`getattr(…, "insert_segments")`)이 다
+    자리다. 정의한 모듈 안에서는 모듈 수준의 이름 문자열(`__all__`)만 된다.
+    """
+    failures: list[str] = []
+    for source in [*_sources(), *sorted(UI_DIR.rglob("*.py"))]:
+        rel = _rel(source)
+        for line, owner in _insert_references(ast.parse(source.read_text(encoding="utf-8")), rel):
+            failures.append(
+                f"{rel}:{line}: insert_segments를 {owner or '모듈 수준'}에서 가리킨다 — 줄 넣기는"
+                f" 서비스의 {INSERT_CALLER_FUNCTION}이 바로 부를 때만 된다 (D59 19f)"
+            )
+    return failures
+
+
+def _insert_references(tree: ast.Module, rel: str) -> list[tuple[int, str | None]]:
+    """허락되지 않은 `insert_segments` 자리(줄, 품은 함수) — 허락은 둘뿐이다(위 docstring)."""
+    allowed: set[int] = set()
+    found: list[tuple[int, str | None]] = []
+
+    def visit(node: ast.AST, owner: str | None) -> None:
+        for child in ast.iter_child_nodes(node):
+            name = owner
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                name = child.name
+            elif isinstance(child, ast.Lambda):
+                name = "<lambda>"
+            if isinstance(child, ast.Call) and _direct_insert_call(child, rel, owner):
+                allowed.add(id(child.func))  # 호출이 먼저 보이고 그 func가 뒤에 보인다
+            if (
+                _names_insert(child)
+                and id(child) not in allowed
+                and not _owner_listing(child, rel, owner)
+            ):
+                found.append((getattr(child, "lineno", 0), owner))
+            visit(child, name)
+
+    visit(tree, None)
+    return found
+
+
+def _direct_insert_call(call: ast.Call, rel: str, owner: str | None) -> bool:
+    return (
+        rel == INSERT_CALLER
+        and owner == INSERT_CALLER_FUNCTION
+        and isinstance(call.func, ast.Attribute)
+        and call.func.attr == INSERT_NAME
+    )
+
+
+def _names_insert(node: ast.AST) -> bool:
+    if isinstance(node, ast.Name):
+        return node.id == INSERT_NAME
+    if isinstance(node, ast.Attribute):
+        return node.attr == INSERT_NAME
+    if isinstance(node, ast.alias):
+        return INSERT_NAME in (node.name.split(".")[-1], node.asname)
+    return isinstance(node, ast.Constant) and node.value == INSERT_NAME
+
+
+def _owner_listing(node: ast.AST, rel: str, owner: str | None) -> bool:
+    """정의한 모듈의 모듈 수준 이름 문자열(`__all__`)만 가리켜도 된다."""
+    return rel == INSERT_OWNER and owner is None and isinstance(node, ast.Constant)
+
+
+def _call_name(call: ast.Call) -> str:
+    func = call.func
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    return func.id if isinstance(func, ast.Name) else ""
+
+
+def check_refill_whisper_has_no_hints() -> list[str]:
+    """규칙 6 — 빈칸 재전사의 whisper 호출에는 힌트 칸이 없고, 요청은 정해진 제공자 길로만 간다.
+
+    `**`·`*`로 풀어 넣은 인자는 무엇이 실리는지 보이지 않으므로 그 자체로 실패다.
+    """
+    path = ROOT / SPEECH_REFILL_MODULE
+    if not path.exists():
+        return [f"{SPEECH_REFILL_MODULE}: 말소리 빈칸 재전사 계층이 사라졌다 (D59 19f)"]
+    failures: list[str] = []
+    for call in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        if not isinstance(call, ast.Call):
+            continue
+        name = _call_name(call)
+        if name in WHISPER_CALLS:
+            failures += _whisper_call_problems(call, name)
+        if name in SPEECH_REFILL_FORBIDDEN_CALLS:
+            failures.append(
+                f"speech_refill.py:{call.lineno}: {name}을 직접 부른다 — 요청은 승인 문이 있는"
+                " 제공자 길로만 간다 (D59 19f)"
+            )
+    return failures
+
+
+def _whisper_call_problems(call: ast.Call, name: str) -> list[str]:
+    problems = [
+        f"speech_refill.py:{call.lineno}: {name}에 {keyword.arg}가 실린다 — whisper에는 힌트를"
+        " 보내지 않는다 (규칙 6, D16)"
+        for keyword in call.keywords
+        if keyword.arg in WHISPER_HINT_KEYWORDS
+    ]
+    unpacked = any(keyword.arg is None for keyword in call.keywords) or any(
+        isinstance(arg, ast.Starred) for arg in call.args
+    )
+    if unpacked:
+        problems.append(
+            f"speech_refill.py:{call.lineno}: {name}에 인자를 풀어 넣는다(**·*) — 무엇이 실리는지"
+            " 보여야 한다 (규칙 6, D16)"
+        )
+    return problems
+
+
+def check_speech_refill_only_from_service() -> list[str]:
+    """D59 19f — 유료 빈칸 재전사는 서비스만 부른다(견적·승인·작업 문이 서비스에 있다)."""
+    failures: list[str] = []
+    for source in [*_sources(), *sorted(UI_DIR.rglob("*.py"))]:
+        rel = _rel(source)
+        if rel == SPEECH_REFILL_MODULE or rel in SPEECH_REFILL_IMPORTERS:
+            continue
+        if "speech_refill" in _imported_names(source.read_text(encoding="utf-8")):
+            failures.append(
+                f"{rel}: speech_refill을 import한다 — 빈칸 재전사는 서비스의 승인 문으로만 닿는다"
+                " (D59 19f)"
+            )
+    return failures
 
 
 # 원본 자막의 「확인 필요」 표시(D59 19e)는 **표시만** 한다 — 순수 계산은 큐 글자와 아이디를 값으로
@@ -1806,6 +2005,10 @@ CHECKS = (
     ("자막 시각 확인은 순수하다", check_sync_check_stays_pure),
     ("자막 시각 확인은 표시만 한다", check_sync_check_only_displays),
     ("자막 의심 표시는 순수하고 표시만 한다", check_subtitle_suspects_only_display),
+    ("말소리 빈칸 고르기는 순수하다", check_speech_gaps_stays_pure),
+    ("원본 자막 줄 넣기는 빈칸 재전사만", check_insert_segments_only_from_refill),
+    ("빈칸 재전사의 whisper에는 힌트가 없다", check_refill_whisper_has_no_hints),
+    ("빈칸 재전사는 서비스만 부른다", check_speech_refill_only_from_service),
     ("Final Cut 타임라인 빌더는 순수하다", check_finalcut_timeline_stays_pure),
     ("Final Cut 보내기는 원본을 복사·재해시하지 않는다", check_finalcut_export_never_copies),
     ("옛 선택한 컷 Final Cut 출력은 되살리지 않는다", check_old_finalcut_path_stays_dead),

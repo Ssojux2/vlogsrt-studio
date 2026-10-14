@@ -6,6 +6,7 @@ import hashlib
 import json
 import uuid
 from collections.abc import Mapping
+from dataclasses import dataclass
 from fractions import Fraction
 from typing import Any
 
@@ -318,6 +319,119 @@ def _store_edit(workspace: Any, asset_id: str, expected_revision: str, payload: 
             ),
         )
         db.commit()
+
+
+REFILL_FIELD = "refill_id"
+"""말소리 빈칸 재전사(D59 19f)가 넣은 줄의 출처 칸 — 그 재전사 견적 digest의 앞 16자리."""
+
+
+@dataclass(frozen=True, slots=True)
+class InsertOutcome:
+    """빈칸 줄 넣기의 결과 — 넣은 줄, 기존 줄과 겹쳐 넣지 않은 줄, 원본 범위 밖이라 넣지 않은 줄.
+
+    넣지 않은 줄도 글자·시각·이유째 남는다(규칙 9 — 조용히 사라지지 않는다). 넣은 줄이 없으면
+    새 리비전을 만들지 않는다(`document`는 지금 문서 그대로).
+    """
+
+    document: dict
+    inserted: tuple[str, ...]
+    overlapped: tuple[dict, ...]
+    out_of_range: tuple[dict, ...]
+
+
+def insert_segments(
+    workspace: Any, asset_id: str, expected_revision: str, rows: list[dict]
+) -> InsertOutcome:
+    """빈칸 재전사의 whisper 줄을 넣는다(D59 19f) — 기존 줄은 바이트까지 그대로, 겹치지 않는 줄만.
+
+    기존 줄과(또는 먼저 받은 새 줄과) 시각이 겹치는 줄, 원본 범위 `[0, 길이]` 밖의 줄은 넣지 않고
+    결과에 남긴다 — 부르는 쪽이 WARN하고 기록한다. 넣으면 새 리비전은 `edited=True`다: 다음 1단계
+    심기(`seed`)가 이 자막을 덮지 않는다(그래서 다시 듣기는 거절되고 교차 확인 글자는 제안으로만
+    남는다 — 화면이 순서를 경고한다). 바뀐 범위는 줄마다 `dirty_ranges`에 남는다. 지금 리비전이
+    `expected_revision`이 아니면 거절한다 — 견적 뒤에 바뀐 자막에 넣지 않는다.
+    """
+    current = load(workspace, asset_id)
+    if not current or current["revision"] != expected_revision:
+        raise RawWorkspaceError(
+            "원본 자막이 바뀌었습니다. 빈칸을 다시 세어 새 견적으로 승인하세요 — 자막은"
+            " 그대로입니다"
+        )
+    duration = rational(current["duration"])
+    existing = list(current["utterances"])
+    taken = {str(row["utterance_id"]) for row in existing}
+    accepted: list[dict] = []
+    overlapped: list[dict] = []
+    outside: list[dict] = []
+    for row in sorted(rows, key=lambda item: (rational(item["start"]), rational(item["end"]))):
+        _require_new_row(row, taken)
+        clash = _clash(row, [*existing, *accepted])
+        if not _within(row, duration):
+            outside.append(_left_out(row, None))
+        elif clash is not None:
+            overlapped.append(_left_out(row, clash))
+        else:
+            accepted.append(dict(row))
+            taken.add(str(row["utterance_id"]))
+    if not accepted:
+        return InsertOutcome(current, (), tuple(overlapped), tuple(outside))
+    payload = _inserted_payload(current, existing, accepted)
+    _store_edit(workspace, asset_id, expected_revision, payload)
+    inserted = tuple(str(row["utterance_id"]) for row in accepted)
+    return InsertOutcome(payload, inserted, tuple(overlapped), tuple(outside))
+
+
+def _require_new_row(row: dict, taken: set[str]) -> None:
+    """새 줄의 꼴 — 아이디가 겹치지 않고 글자가 있으며 시각이 뒤집히지 않았다(길이 0은 된다)."""
+    if str(row.get("utterance_id")) in taken or not isinstance(row.get("text"), str):
+        raise RawWorkspaceError(
+            f"넣을 자막 줄의 아이디·글자가 맞지 않습니다: {row.get('utterance_id')}"
+        )
+    if rational(row["start"]) > rational(row["end"]):
+        raise RawWorkspaceError(f"넣을 자막 줄의 시각이 뒤집혔습니다: {row['utterance_id']}")
+
+
+def _within(row: dict, duration: Fraction) -> bool:
+    return rational(row["start"]) >= 0 and rational(row["end"]) <= duration
+
+
+def _clash(row: dict, others: list[dict]) -> str | None:
+    """시각이 겹치는 첫 줄의 아이디 — 맞닿기만 한 줄은 겹치지 않는다(길이 0 줄도 같은 규칙)."""
+    start, end = rational(row["start"]), rational(row["end"])
+    for other in others:
+        if start < rational(other["end"]) and rational(other["start"]) < end:
+            return str(other["utterance_id"])
+    return None
+
+
+def _left_out(row: dict, clash: str | None) -> dict:
+    """넣지 않은 줄의 기록 — 글자·시각·겹친 줄(범위 밖이면 None)을 그대로 남긴다."""
+    return {
+        "utterance_id": row["utterance_id"],
+        "text": row["text"],
+        "start": row["start"],
+        "end": row["end"],
+        "with": clash,
+    }
+
+
+def _inserted_payload(current: dict, existing: list[dict], accepted: list[dict]) -> dict:
+    """기존 줄의 순서·바이트를 그대로 두고 새 줄을 시각 자리에 끼운 새 리비전."""
+    pending = list(accepted)
+    merged: list[dict] = []
+    for row in existing:
+        while pending and rational(row["end"]) > rational(pending[0]["start"]):
+            merged.append(pending.pop(0))
+        merged.append(row)
+    merged.extend(pending)
+    ranges = [{"start": row["start"], "end": row["end"]} for row in accepted]
+    return dict(
+        current,
+        sequence=current["sequence"] + 1,
+        edited=True,
+        revision=uuid.uuid4().hex,
+        utterances=merged,
+        dirty_ranges=current["dirty_ranges"] + ranges,
+    )
 
 
 def _seconds(value: Fraction) -> str:

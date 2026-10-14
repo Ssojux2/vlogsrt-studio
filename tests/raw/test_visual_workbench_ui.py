@@ -2470,6 +2470,7 @@ def test_visual_server_functions_bind_client_revision(tmp_path: Path) -> None:
         "vl_relink_original",
         "vl_sync_recheck",  # 자막 시각 「다시 재기」(D55)
         "vl_relisten",  # 「다시 듣기」(D59 19b) — 차례만 올린다(유료 호출 0회)
+        "vl_refill",  # 「빈칸 재전사 승인」(D59 19f) — 보이는 견적·digest를 대조한 뒤에만 작업
     ]
     signature = model["signature"]
     base = model["basePlanId"]
@@ -4385,6 +4386,7 @@ def test_blocks_wire_workbench_outputs(tmp_path: Path, local_socket: None) -> No
         "vl_relink_original",
         "vl_sync_recheck",  # 자막 시각 「다시 재기」(D55)
         "vl_relisten",  # 「다시 듣기」(D59 19b) — 차례만 올린다(유료 호출 0회)
+        "vl_refill",  # 「빈칸 재전사 승인」(D59 19f) — 보이는 견적·digest를 대조한 뒤에만 작업
     ]
     cap_names = [fn.__name__ for fn in server._caption_workbench_block.server_fns]
     assert cap_names == ["cap_save", "cap_confirm"]

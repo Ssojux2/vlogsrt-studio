@@ -157,6 +157,61 @@ RELISTEN_PENDING_TEXT = (
     " 누르면 시작합니다."
 )
 RELISTEN_BUSY_TEXT = "이 영상의 분석이 진행 중입니다. 끝난 뒤 다시 눌러 주세요."
+REFILL_EXPLANATION = (
+    "말소리 측정으로 말소리를 찾았는데 자막이 없는 곳을, 그 구간만 다시 들어 자막을 넣습니다."
+    " 기존 자막은 한 줄도 바꾸지 않습니다."
+)
+REFILL_ORDER_WARNING = (
+    "빈칸을 채우면 이 영상의 원본 자막은 직접 고친 자막이 됩니다 — 그 뒤로는 다시 듣기·실패 구간"
+    " 재시도·다른 귀 교차 확인이 이 자막을 덮지 않습니다. 그 셋을 먼저 끝낸 뒤에 채우세요."
+)
+"""계획의 「비용을 한 번만 내기 위한 순서」(D59) — 빈칸 넣기는 재시도·다시 듣기·교차 확인 뒤다."""
+REFILL_APPROVE_LABEL = "빈칸 재전사 승인"
+REFILL_STARTED_TEXT = "빈칸 재전사를 시작했습니다 — 끝나면 넣은 자막이 원본 자막 목록에 보입니다."
+REFILL_UNSEEN_TEXT = (
+    "새 견적을 확인하세요 — 화면의 빈칸·견적이 지금과 다릅니다. 아무것도 시작하지 않았습니다."
+)
+REFILL_KEY_TEXT = (
+    "연결 설정이 필요합니다 — OpenAI API 키가 없어 빈칸 재전사를 시작하지 않았습니다."
+    " 「API 연결」에서 키를 넣어 주세요."
+)
+REFILL_BUSY_TEXT = "이 영상의 분석이나 빈칸 재전사가 진행 중입니다. 끝난 뒤 다시 눌러 주세요."
+REFILL_RUNNING_TEXT = "빈칸을 다시 묻는 중입니다 — 끝나면 넣은 자막이 원본 자막 목록에 보입니다."
+REFILL_NONE_TEXT = "자막이 덮지 않은 말소리를 찾지 못했습니다."
+REFILL_DONE_TEXT = (
+    "이미 다시 물어 넣은 구간 안의 빈칸만 남았습니다 — 같은 소리를 다시 사지 않습니다. 남은 말은"
+    " 원본 자막 목록에서 가까운 자막을 직접 고쳐 넣을 수 있습니다."
+)
+REFILL_NOTE_FAILED = (
+    "전사가 실패한 구간이 있습니다 — 「실패 구간 재시도」를 먼저 하면 그 구간은 처음부터 다시"
+    " 듣습니다."
+)
+REFILL_NOTE_RED = (
+    "자막 시각이 말소리와 어긋나 있습니다(빨강) — 빈칸으로 보이는 말이 실은 기존 자막의 말일 수"
+    " 있습니다. 먼저 다시 듣기로 시각을 바로잡으세요."
+)
+REFILL_NOTE_UNCHECKED = (
+    "다른 귀 교차 확인을 아직 하지 않은 자막입니다 — 빈칸을 채운 뒤에는 기존 줄에 다른 귀의 글자가"
+    " 제안으로만 남습니다."
+)
+REFILL_NOTE_UNRECORDED = (
+    "전사가 실패한 구간이 있었는지 이 화면은 알 수 없습니다 — 「전사만」 승인으로 다시 전사하면"
+    " 기록이 남아 나눠 보입니다. 비용은 그 견적에 나옵니다."
+)
+REFILL_SUMMARY_UNRECORDED = "1단계 전사 기록이 없어 실패 구간과 건너뛴 곳을 나누지 못했습니다."
+REFILL_SKIPPED_NOTE = (
+    "넣지 않은 줄 {count}개 — 그 구간은 다시 묻지 않습니다. 필요하면 아래 글을 보고 가까운 자막을"
+    " 직접 고쳐 넣으세요."
+)
+"""넣지 않은 줄(겹침·범위 밖)의 안내 — 그 조각은 물은 것으로 적혀 다시 묻지 않는다(규칙 9)."""
+REFILL_SKIPPED_OVERLAP = "기존 자막과 겹침"
+REFILL_SKIPPED_RANGE = "원본 길이 밖"
+RELISTEN_REFILL_RUNNING_TEXT = (
+    "말소리 빈칸 재전사가 진행 중이라 지금은 다시 듣지 않습니다 — 끝난 뒤에 눌러 주세요."
+)
+REFILL_SHOWN_SPANS = 12
+"""「말소리 빈칸 재전사」 칸에 단추로 보이는 빈칸 수 — 나머지는 「외 N곳」(문구 길이일 뿐 판정이
+아니다). 넣지 않은 줄도 같은 수까지 글자째 보이고 나머지는 「외 N줄」이다."""
 WORKBENCH_TOKEN_ACTIONS = (
     "prepare",
     "propose",
@@ -167,6 +222,7 @@ WORKBENCH_TOKEN_ACTIONS = (
     "relink-original",
     "sync-recheck",
     "relisten",
+    "refill",
 )
 """작업대 수명 토큰을 요구하는 동작 — 바꾸는 동작 전부다(질의 `refresh`만 열려 있다, F1c)."""
 STAGE_NOTES = {
@@ -550,6 +606,99 @@ def _quote_mode(quote: Any) -> str:
 
 def _transcribe_only(quote: Any) -> bool:
     return _quote_mode(quote) == raw_service.SELECTION_MODE_TRANSCRIBE
+
+
+def _refill_summary(quote: Any) -> str:
+    """요약 한 줄 — 건너뛴 곳과 실패 구간 안을 나눈다(1단계 기록이 없으면 나누지 않는다).
+
+    이미 다시 물어 넣은 조각 안에 남은 말소리는 따로 밝힌다 — 견적은 그 말소리를 세지 않는다."""
+    speech, failed = quote.speech_seconds, quote.failed_seconds
+    head = f"자막 없는 말소리 {float(speech):.1f}초(빈칸 {len(quote.spans)}곳)"
+    split = ""
+    if quote.failures_known:
+        split = (
+            f" — 전사가 건너뛴 곳 {float(speech - failed):.1f}초 · 전사가 실패한 구간 안"
+            f" {float(failed):.1f}초"
+        )
+    asked = speech - quote.asking_speech_seconds
+    tail = f" · 그중 이미 다시 물은 구간 안 {float(asked):.1f}초" if quote.asked and asked else ""
+    unknown = "" if quote.failures_known else f" {REFILL_SUMMARY_UNRECORDED}"
+    return f"{head}{split}{tail}입니다.{unknown}"
+
+
+def _refill_spans(quote: Any) -> dict[str, object]:
+    """빈칸 칸의 요약 한 줄과 단추로 보일 빈칸(공통 시계)."""
+    summary = _refill_summary(quote)
+    shown = [
+        {
+            "start": str(quote.at(span.start)),
+            "end": str(quote.at(span.end)),
+            "failed": bool(span.failed_speech),
+        }
+        for span in quote.spans[:REFILL_SHOWN_SPANS]
+    ]
+    return {"summary": summary, "spans": shown, "more": max(0, len(quote.spans) - len(shown))}
+
+
+def _refill_notes(
+    quote: Any,
+    transcript: Mapping[str, Any],
+    sync_view: Mapping[str, Any] | None,
+    cross_check_on: bool,
+) -> list[str]:
+    """순서 경고에 더하는 이 영상의 사정 — 실패 구간·기록 없음·빨강 시각·교차 확인 전(D59 순서)."""
+    notes: list[str] = []
+    if any(span.failed_speech for span in quote.spans):
+        notes.append(REFILL_NOTE_FAILED)
+    if not quote.failures_known:
+        notes.append(REFILL_NOTE_UNRECORDED)
+    if sync_view is not None and sync_view.get("level") == "red":
+        notes.append(REFILL_NOTE_RED)
+    rows = transcript.get("utterances", [])
+    edited = raw_service.RawWorkspaceService.transcript_human_edited(transcript)
+    if cross_check_on and not edited and not any("text_source" in row for row in rows):
+        notes.append(REFILL_NOTE_UNCHECKED)
+    return notes
+
+
+def _refill_last_line(record: Mapping[str, Any] | None) -> str | None:
+    """지난 빈칸 재전사 한 줄 — 넣은 줄·넣지 않은 줄·받지 못한 조각(규칙 9 — 조용하지 않다).
+
+    「실행 기록에 … 남았습니다」는 넣지 않은 줄이 있을 때만 말한다(그 줄은 칸에도 글자째 보인다)."""
+    if record is None:
+        return None
+    asked = len(record.get("answered", [])) + len(record.get("failed", []))
+    skipped = len(record.get("overlapped", [])) + len(record.get("out_of_range", []))
+    line = (
+        f"지난 빈칸 재전사 — 조각 {asked}개 · 넣은 줄 {len(record.get('inserted', []))}개 ·"
+        f" 받지 못한 조각 {len(record.get('failed', []))}개."
+    )
+    if record.get("refused"):
+        return f"{line} 받은 줄을 넣지 못했습니다 — {record['refused']}"
+    if skipped:
+        return f"{line} 넣지 않은 줄 {skipped}개는 아래에 글자째 보이고 실행 기록에도 남았습니다."
+    return line
+
+
+def _refill_skipped(rows: Sequence[Mapping[str, Any]]) -> dict[str, object]:
+    """넣지 않은 줄 — 시각(공통 시계)·글자·까닭. 없으면 빈 목록만(안내 문장도 없다)."""
+    if not rows:
+        return {"skipped": []}
+    why = {"overlap": REFILL_SKIPPED_OVERLAP, "range": REFILL_SKIPPED_RANGE}
+    shown = [
+        {
+            "start": str(Fraction(row["start"]["num"], row["start"]["den"])),
+            "end": str(Fraction(row["end"]["num"], row["end"]["den"])),
+            "text": str(row.get("text", "")),
+            "why": why.get(str(row.get("why")), REFILL_SKIPPED_OVERLAP),
+        }
+        for row in rows[:REFILL_SHOWN_SPANS]
+    ]
+    return {
+        "skipped": shown,
+        "skippedMore": max(0, len(rows) - len(shown)),
+        "skippedNote": REFILL_SKIPPED_NOTE.format(count=len(rows)),
+    }
 
 
 def _transcribe_only_summary(
@@ -5034,7 +5183,7 @@ class RawWorkspaceUi:
             if kind in WORKBENCH_TOKEN_ACTIONS:
                 # 질의(refresh)는 열어 둔다 — 서버 재시작 뒤 화면이 스스로 회복하는 길.
                 self._require_workbench_token(payload, self._visual_lifetime_token, "영상 작업대")
-            single = {"sync-recheck": self._visual_sync_recheck, "relisten": self._visual_relisten}
+            single = self._single_source_actions()
             if kind in single:
                 return single[kind](root, payload, echo)
             if kind in ("source-caption", "relink-original"):
@@ -5434,18 +5583,25 @@ class RawWorkspaceUi:
         if sync_view is not None:
             source["syncCheck"] = sync_view
         source["relisten"] = self._relisten_view(root, sid, transcript)
+        source["refill"] = self._refill_view(root, sid, transcript, sync_view)
 
     def _relisten_view(
         self, root: Path, source_id: str, transcript: Mapping[str, Any]
     ) -> dict[str, object]:
-        """「다시 듣기」 칸의 상태(D59 19b) — 기다리는 중 · 사람이 고친 자막 · 다시 들은 전사."""
+        """「다시 듣기」 칸의 상태(D59 19b) — 기다리는 중 · 사람이 고친 자막 · 다시 들은 전사.
+
+        빈칸 재전사가 도는 동안만 `refillRunning`이 붙는다(D59 19f 검증 뒤 고침 1 — 넣으면 고친
+        자막이 되므로 그동안 다시 듣기를 받지 않는다). 돌지 않으면 칸 값은 19b 그대로다."""
         epoch = self.raw.asr_epoch_state(root, source_id)
-        return {
+        view: dict[str, object] = {
             "pending": bool(epoch.pending),
             "edited": self.raw.transcript_human_edited(transcript),
             "heard": bool(epoch.epoch and not epoch.pending),
             "explanation": RELISTEN_EXPLANATION,
         }
+        if self.raw.refill_running(root, source_id):
+            view["refillRunning"] = RELISTEN_REFILL_RUNNING_TEXT
+        return view
 
     def _visual_relisten(self, root: Path, payload: Mapping[str, object], echo: str) -> dict:
         """「다시 듣기」 — 그 영상의 차례를 올리고 승인 범위를 「전사만」으로 둔다(무료, D59 19b).
@@ -5472,6 +5628,91 @@ class RawWorkspaceUi:
             "videoSrc": None,
             "message": RELISTEN_PENDING_TEXT if before.pending else RELISTEN_DONE_TEXT,
         }
+
+    def _single_source_actions(
+        self,
+    ) -> dict[str, Callable[[Path, Mapping[str, object], str], dict]]:
+        """원본 하나를 다루는 작업대 동작 — 다시 재기(D55)·다시 듣기(19b)·빈칸 재전사 승인(19f)."""
+        return {
+            "sync-recheck": self._visual_sync_recheck,
+            "relisten": self._visual_relisten,
+            "refill": self._visual_refill,
+        }
+
+    def _refill_view(
+        self,
+        root: Path,
+        source_id: str,
+        transcript: Mapping[str, Any],
+        sync_view: Mapping[str, Any] | None,
+    ) -> dict[str, object]:
+        """「말소리 빈칸 재전사」 칸의 값(D59 19f) — 상태·빈칸·견적·순서 경고·지난 결과(무료, 표시).
+
+        금액·모델 이름은 견적 문구(`quote`) 안에만 있다(D57). 승인은 그 문구와 digest를 보낸다(D54).
+        """
+        view: dict[str, object] = {
+            "explanation": REFILL_EXPLANATION,
+            "order": REFILL_ORDER_WARNING,
+            "last": _refill_last_line(self.raw.refill_last(root, source_id)),
+            **_refill_skipped(self.raw.refill_skipped(root, source_id)),
+        }
+        if self.raw.refill_running(root, source_id):
+            return {**view, "state": "running", "reason": REFILL_RUNNING_TEXT}
+        quote = self.raw.refill_quote(root, source_id)
+        if isinstance(quote, str):
+            return {**view, "state": "blocked", "reason": quote}
+        notes = _refill_notes(quote, transcript, sync_view, self.raw.cross_check_enabled(root))
+        view.update(_refill_spans(quote), notes=notes)
+        if not quote.spans:
+            return {**view, "state": "none", "reason": REFILL_NONE_TEXT}
+        if not quote.pieces:
+            return {**view, "state": "done", "reason": REFILL_DONE_TEXT}
+        return {**view, "state": "ready", "quote": quote.text, "digest": quote.digest}
+
+    def _visual_refill(self, root: Path, payload: Mapping[str, object], echo: str) -> dict:
+        """「빈칸 재전사 승인」 — 보이는 견적 문구·digest가 지금 견적과 같을 때만 작업을 건다(D54).
+
+        다르면(다른 탭·용어집·빈칸이 바뀌었다) 아무것도 시작하지 않고 새 견적을 그려 보인다(0송신).
+        작업 본문(`refill_source`)이 유료 호출 전에 견적을 한 번 더 재어 맞춘다.
+        """
+        source_id = self._serve_str(payload, "sourceId")
+        task = self._task_for(root, (source_id,))
+        busy = task is not None and self._task_running(root, task)
+        if busy or self.raw.refill_running(root, source_id):
+            raise gr.Error(REFILL_BUSY_TEXT)
+        current = self.raw.refill_quote(root, source_id)
+        if isinstance(current, str):
+            raise gr.Error(current)
+        shown = " ".join(self._serve_str(payload, "quote").split())
+        if (
+            not current.pieces
+            or self._serve_str(payload, "digest") != current.digest
+            or shown != " ".join(current.text.split())
+        ):
+            return self._refill_reply(root, source_id, echo, REFILL_UNSEEN_TEXT)
+        if self._startup_credentials is None and self._live_transport is None:
+            raise gr.Error(REFILL_KEY_TEXT)
+        transport = self._live_transport_for_action()
+        self.raw.refill_start(
+            root, source_id, current, transport, after=lambda: self._after_refill(root, source_id)
+        )
+        return self._refill_reply(root, source_id, echo, REFILL_STARTED_TEXT)
+
+    def _refill_reply(self, root: Path, source_id: str, echo: str, message: str) -> dict:
+        _shell, workbench = self.visual_workbench_render(root, source_id=source_id or None)
+        return {
+            "ok": True,
+            "echoEpoch": echo,
+            "html": workbench,
+            "videoSrc": None,
+            "message": message,
+        }
+
+    def _after_refill(self, root: Path, source_id: str) -> None:
+        """빈칸을 넣은 뒤 — 자막 지문이 바뀌었으니 그 영상의 저장 결과 셈과 라이브러리 견적을
+        다시 묶는다."""
+        self._library_cached_ids.get(root, set()).discard(source_id)
+        self._refresh_library_quote(root)
 
     def _refresh_library_quote(self, root: Path) -> None:
         """결속(자막·다시 듣기 차례)이 바뀐 뒤 — 잰 견적이 있으면 다시 묶고(빠름), 없으면 잰다."""
@@ -5543,6 +5784,7 @@ class RawWorkspaceUi:
             vl_relink_original,
             self._vl_sync_recheck_function(),
             self._vl_relisten_function(),
+            self._vl_refill_function(),
         ]
 
     def _vl_sync_recheck_function(self) -> Callable[[dict[str, object]], dict[str, object]]:
@@ -5560,6 +5802,15 @@ class RawWorkspaceUi:
             return self.visual_workbench_action(payload, "relisten")
 
         return vl_relisten
+
+    def _vl_refill_function(self) -> Callable[[dict[str, object]], dict[str, object]]:
+        """「빈칸 재전사 승인」(D59 19f) — 같은 토큰 문, 보이는 견적 문구·digest를 서버가
+        대조한다."""
+
+        def vl_refill(payload: dict[str, object]) -> dict[str, object]:
+            return self.visual_workbench_action(payload, "refill")
+
+        return vl_refill
 
     # ── 화면 1 — SD/폴더 가져오기(조사 → 순서 확인 → 복사·검증) ──
 

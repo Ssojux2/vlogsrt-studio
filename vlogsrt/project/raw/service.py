@@ -16,7 +16,7 @@ import os
 import threading
 import uuid
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, date, datetime
 from fractions import Fraction
 from pathlib import Path
@@ -424,6 +424,38 @@ RELISTEN_SILENT_REFUSAL = (
 )
 RELISTEN_MEDIA_MISSING_REFUSAL = (
     "원본 파일을 읽지 못했습니다 — 원본 연결을 확인하세요. 아무것도 바꾸지 않았습니다."
+)
+REFILL_JOB_KIND = "speech_refill"
+"""말소리 빈칸 재전사 작업(D59 19f) — 승인한 견적의 조각만 whisper(·두 번째 귀)에 다시
+묻는다(유료)."""
+REFILL_UNTRANSCRIBED = "이 영상은 아직 전사하지 않았습니다 — 분석을 승인하면 처음부터 듣습니다."
+REFILL_WAITING = "자막 시각 확인이 끝나면 빈칸을 셉니다(무료) — 잠시 뒤에 다시 보세요."
+REFILL_UNMEASURED = (
+    "말소리를 잴 수 없어 빈칸을 고르지 못했습니다 — 「자막 시각 확인」 칸의 이유를 보세요."
+)
+REFILL_RELISTEN_PENDING = (
+    "다시 듣기를 기다리는 영상입니다 — 다시 듣기를 먼저 끝낸 뒤에 빈칸을 채우세요. 빈칸을 먼저"
+    " 채우면 다시 들은 전사가 이 자막을 덮지 못해 다시 듣기에 낸 돈이 헛됩니다."
+)
+REFILL_CHANGED = (
+    "빈칸이나 견적이 바뀌었습니다 — 새 견적을 확인하고 다시 승인하세요. 유료 호출은 시작하지"
+    " 않았습니다."
+)
+REFILL_GLOSSARY_CHANGED = (
+    "용어집이 바뀌었습니다. 새 견적을 확인하고 다시 승인하세요 — 유료 호출은 시작하지 않았습니다."
+)
+REFILL_RELISTEN_SETTLE_REFUSAL = (
+    "다시 듣기를 기다리고 있어 받은 줄을 넣지 않았습니다 — 다시 들은 전사가 이 자막을 덮을 수 있게"
+    " 그대로 둡니다. 「전사만」 승인으로 다시 듣기를 마친 뒤 빈칸을 다시 견적하세요 — 같은 구간은"
+    " 받은 답이 남아 있어 다시 사지 않습니다."
+)
+RELISTEN_REFILL_RUNNING_REFUSAL = (
+    "이 영상의 말소리 빈칸 재전사가 진행 중입니다 — 끝난 뒤 다시 눌러 주세요. 아무것도 바꾸지"
+    " 않았습니다."
+)
+REFILL_PCM_MISSING = (
+    "말소리를 잰 오디오를 찾지 못했습니다 — 「자막 시각 확인」을 다시 잰 뒤에 채우세요. 유료 호출은"
+    " 시작하지 않았습니다."
 )
 
 
@@ -1293,9 +1325,210 @@ class RawWorkspaceService:
             raise RawWorkspaceError(RELISTEN_UNTRANSCRIBED_REFUSAL)
         if source_transcript.human_edited(document):
             raise RawWorkspaceError(RELISTEN_EDITED_REFUSAL)
+        # 도는 빈칸 재전사가 넣으면 고친 자막이 되어 다시 들은 전사가 덮지 못한다(D59 19f).
+        if self.refill_running(root, asset_id):
+            raise RawWorkspaceError(RELISTEN_REFILL_RUNNING_REFUSAL)
         if not _source_has_audio(workspace.source_media_path(asset)):
             raise RawWorkspaceError(RELISTEN_SILENT_REFUSAL)
         return asr_epoch.bump(workspace, asset_id)
+
+    # ── 말소리 빈칸 재전사(D59 19f) — 고르기는 무료, 묻기는 승인한 견적만 ──────────
+
+    def refill_quote(self, root: Path, asset_id: str) -> Any:
+        """빈칸 재전사의 지금 견적(무료) — 고를 수 없으면 그 이유(존댓말 한 줄)를 돌려준다.
+
+        재료는 자막 시각 확인(D55)이 지금 자막 리비전을 잰 보고서·말소리 칸이다(읽기만 — VAD·디코드
+        없음). 구간 고르기는 순수 `speech_gaps`, 견적·digest는 `speech_refill`이 짓는다.
+        """
+        from vlogsrt.project.raw import speech_refill
+
+        plan = self._refill_plan(root, asset_id)
+        return plan if isinstance(plan, str) else speech_refill.quote_for(plan)
+
+    def refill_running(self, root: Path, asset_id: str) -> bool:
+        """그 원본의 빈칸 재전사 작업이 도는 중인가 — 작업 지문은 `<원본>:<digest>`다."""
+        return any(
+            job.input_fingerprint.startswith(f"{asset_id}:")
+            for job in self.active_jobs(root, (REFILL_JOB_KIND,))
+        )
+
+    def refill_last(self, root: Path, asset_id: str) -> dict | None:
+        """가장 최근 빈칸 재전사 기록 — 화면의 「지난 빈칸 재전사」 한 줄. 읽기만 한다."""
+        from vlogsrt.project.raw import speech_refill
+
+        return speech_refill.latest_record(self._workspace(root).root, asset_id)
+
+    def refill_skipped(self, root: Path, asset_id: str) -> list[dict[str, object]]:
+        """넣지 않은 줄(겹침·범위 밖) 전부 — 화면이 글자째 보인다(규칙 9). 읽기만 한다."""
+        from vlogsrt.project.raw import speech_refill
+
+        return speech_refill.skipped_rows(self._workspace(root).root, asset_id)
+
+    def refill_start(
+        self,
+        root: Path,
+        asset_id: str,
+        approved: Any,
+        transport: Any,
+        after: Callable[[], None] | None = None,
+    ) -> JobHandle:
+        """승인한 빈칸 재전사를 작업으로 건다 — 본문(`refill_source`)이 견적을 다시 재어 맞춘다.
+
+        `after`는 본문이 끝난 뒤의 화면 고리(라이브러리 견적 다시 묶기)다 — 실패한 본문 뒤에는
+        돌지 않는다.
+        """
+
+        def body(context: JobContext) -> None:
+            self.refill_source(root, asset_id, approved, transport, context)
+            if after is not None:
+                after()
+
+        fingerprint = f"{asset_id}:{approved.digest}"
+        return self.submit_job(root, REFILL_JOB_KIND, fingerprint, body)
+
+    def refill_source(
+        self, root: Path, asset_id: str, approved: Any, transport: Any, context: JobContext
+    ) -> dict[str, Any]:
+        """승인한 빈칸 재전사(작업 본문, 유료) — 견적이 승인한 것과 같을 때만 묻고 받은 줄을 넣는다.
+
+        넣기(`source_transcript.insert_segments`)는 이 본문의 `_refill_settle`만 부른다(불변식).
+        기존 줄은 바이트까지 그대로이고 겹치는 줄은 넣지 않고 WARN·기록한다. 넣으면 원본 자막은
+        고친 자막(`edited`)이 된다. 실행은 다시 잰 견적만 쓴다 — 승인 객체는 digest만 대조한다.
+        """
+        from vlogsrt.project.raw import browser_runtime, cross_check, request_log, speech_refill
+
+        workspace = self._workspace(root)
+        identity = cross_check.request_identity(workspace)  # 다시 재기 전에 읽는다(19d와 같은 선)
+        plan = self._refill_plan(root, asset_id)
+        if isinstance(plan, str):
+            raise RawWorkspaceError(plan)
+        current = speech_refill.quote_for(plan)
+        if current.digest != approved.digest:
+            raise RawWorkspaceError(REFILL_CHANGED)
+        if current.text_identity not in (None, identity):
+            raise RawWorkspaceError(REFILL_GLOSSARY_CHANGED)
+        audio = self._refill_audio(workspace, asset_id, plan)
+        browser_runtime.prepare_approved_browser_network()
+        self.update_settings(root, plan.workflow)  # 승인한 실행만 online — 일괄 승인과 같은 선
+        context.check_cancel()
+        with request_log.scope(workspace, context.job_id, live=True):
+            result = speech_refill.run(
+                plan, current, audio, transport, on=transport.on or datetime.now(UTC).date()
+            )
+        return self._refill_settle(root, plan, current, result)
+
+    def _refill_settle(self, root: Path, plan: Any, quote: Any, result: Any) -> dict[str, Any]:
+        """받은 줄을 넣고 기록한다(넣기는 여기 하나다, 불변식).
+
+        넣지 못하면(그사이 자막이 바뀌었다) 기록·WARN을 남기고 거절을 올린다 — 받은 답은 캐시에
+        남는다.
+        """
+        from vlogsrt.project.raw import asr_epoch, source_transcript, speech_refill
+
+        workspace = self._workspace(root)
+        if asr_epoch.state(workspace, plan.asset_id).pending:  # 다시 들은 전사가 덮을 수 있게 둔다
+            speech_refill.write_record(
+                plan, quote, _refill_record(result, None, REFILL_RELISTEN_SETTLE_REFUSAL)
+            )
+            log.warn(f"빈칸 재전사: {REFILL_RELISTEN_SETTLE_REFUSAL}")
+            raise RawWorkspaceError(REFILL_RELISTEN_SETTLE_REFUSAL)
+        speech_refill.claim(plan, quote, result.answered)  # 넣기 전에 — 멈춰도 다시 사지 않게
+        try:
+            outcome = source_transcript.insert_segments(
+                workspace, plan.asset_id, quote.transcript_revision, result.rows
+            )
+        except RawWorkspaceError as error:
+            speech_refill.write_record(plan, quote, _refill_record(result, None, str(error)))
+            log.warn(f"빈칸 재전사: 받은 줄을 넣지 못했습니다 — {error} (받은 답은 캐시에 남았다)")
+            raise
+        speech_refill.mark_asked(plan, result.answered)
+        record = _refill_record(result, outcome, None)
+        speech_refill.write_record(plan, quote, record)
+        _warn_refill(plan.asset_id, outcome, result)
+        if outcome.inserted:  # 자막이 바뀌었다 — 시각 확인을 다시(D55)
+            self._queue_sync_checks(root, (plan.asset_id,))
+        return record
+
+    def _refill_plan(self, root: Path, asset_id: str) -> Any:
+        """견적 재료(값) — 다시 듣기를 기다리거나 확인 보고서가 없으면 그 이유(존댓말)."""
+        from vlogsrt.project.raw import asr_epoch, sync_report
+        from vlogsrt.project.raw.source_transcript import REFILL_FIELD
+
+        workspace = self._workspace(root)
+        asset = workspace.source_asset(asset_id)
+        transcript = self.source_transcript(root, asset_id)
+        if transcript is None:
+            return REFILL_UNTRANSCRIBED
+        if asr_epoch.state(workspace, asset_id).pending:
+            return REFILL_RELISTEN_PENDING
+        measured = sync_report.measured_speech(workspace, asset_id)
+        if measured is None:
+            report = sync_report.current_report(workspace, asset_id)
+            unmeasured = report is not None and not report.get("stale") and not report.get("pcm")
+            return REFILL_UNMEASURED if unmeasured else REFILL_WAITING
+        refill_ids = frozenset(
+            str(row[REFILL_FIELD]) for row in transcript["utterances"] if row.get(REFILL_FIELD)
+        )
+        return self._refill_plan_of(root, workspace, asset, measured, refill_ids)
+
+    def _refill_plan_of(
+        self,
+        root: Path,
+        workspace: RawWorkspace,
+        asset: SourceAsset,
+        measured: Any,
+        refill_ids: frozenset[str],
+    ) -> Any:
+        from vlogsrt.project.config import GAP_REFILL_SETTINGS, SYNC_CHECK_SETTINGS
+        from vlogsrt.project.raw import cross_check, glossary, speech_gaps, speech_refill
+
+        rate = analysis_workflow.stage1.PCM_SAMPLE_RATE
+        spans = speech_gaps.select_gaps(
+            measured.cues,
+            measured.speech,
+            sample_count=measured.sample_count,
+            sample_rate=rate,
+            failed=measured.failed,
+            sync_settings=SYNC_CHECK_SETTINGS,
+            settings=GAP_REFILL_SETTINGS,
+        )
+        return speech_refill.RefillPlan(
+            root=workspace.root,
+            asset_id=asset.asset_id,
+            transcript_revision=str(measured.report["source"]["transcript_revision"]),
+            source_sha256=asset.content_sha256 or "",
+            pcm_sha256=measured.pcm_sha256,
+            sample_count=measured.sample_count,
+            audio_start=measured.audio_start,
+            spans=spans,
+            workflow=replace(self.settings(root), network_mode="online"),
+            cross_check=cross_check.enabled(workspace),
+            glossary=glossary.current(workspace).terms,
+            chunk_bound=_refill_bound(int(measured.report["pcm"]["channels"])),
+            refill_ids=refill_ids,
+            failures_known=measured.failures_known,
+        )
+
+    @staticmethod
+    def _refill_audio(workspace: RawWorkspace, asset_id: str, plan: Any) -> Any:
+        """확인이 말소리를 잰 그 PCM — 해시가 같은 파일이 없으면 0송신으로 닫는다."""
+        from vlogsrt.project.raw import speech_refill, sync_report
+
+        asset = workspace.source_asset(asset_id)
+        choice = sync_report.measured_pcm(workspace, asset, plan.pcm_sha256)
+        if choice is None:
+            raise RawWorkspaceError(REFILL_PCM_MISSING)
+        return speech_refill.RefillAudio(
+            source_id=asset_id,
+            source_sha256=asset.content_sha256 or "",
+            stream_index=choice.stream_index,
+            pcm_path=choice.path,
+            pcm_sha256=choice.pcm_sha256,
+            channels=choice.channels,
+            sample_count=choice.sample_count,
+            origin=choice.origin,
+            audio_start=plan.audio_start,
+        )
 
     @staticmethod
     def transcript_human_edited(document: Mapping[str, Any]) -> bool:
@@ -4213,6 +4446,49 @@ def _sync_fingerprint(pending: Mapping[str, str]) -> str:
     """요청마다 다른 지문 — 끝나 정산을 기다리는 작업이나 running으로 남은 줄에 붙지 않게(D55)."""
     body = json.dumps([sorted(pending.items()), uuid.uuid4().hex], ensure_ascii=False)
     return hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+
+def _refill_bound(channels: int) -> int:
+    """빈칸 재전사 조각의 표본 상한 — 1단계 청크 계획과 같은 두 한도(초·바이트) 중 작은 쪽."""
+    settings = RawUnderstandingSettings()
+    rate = analysis_workflow.stage1.PCM_SAMPLE_RATE
+    width = analysis_workflow.stage1.PCM_SAMPLE_WIDTH * max(1, channels)
+    return min(int(settings.asr_chunk_max_seconds * rate), settings.asr_chunk_max_bytes // width)
+
+
+def _refill_record(result: Any, outcome: Any, refusal: str | None) -> dict[str, Any]:
+    """빈칸 재전사 실행 기록 — 넣은 줄·겹쳐 넣지 않은 줄·범위 밖·실패 조각·글자 경로(규칙 9)."""
+    return {
+        "created_at": datetime.now(UTC).isoformat(),
+        "answered": [list(piece) for piece in result.answered],
+        "failed": list(result.failed),
+        "rows": len(result.rows),
+        "inserted": [] if outcome is None else list(outcome.inserted),
+        "overlapped": [] if outcome is None else list(outcome.overlapped),
+        "out_of_range": [] if outcome is None else list(outcome.out_of_range),
+        "refused": refusal,
+        "asr": analysis_workflow.stage1.asr_evidence_json(result.evidence),
+        "asr_text": result.text_record,
+    }
+
+
+def _warn_refill(asset_id: str, outcome: Any, result: Any) -> None:
+    """넣지 않은 줄·실패한 조각은 조용하지 않다(규칙 9) — 수와 기록 자리를 경고로 남긴다."""
+    log.out(
+        f"빈칸 재전사({asset_id}): 조각 {len(result.answered) + len(result.failed)}개 ·"
+        f" 받은 줄 {len(result.rows)}개 · 넣은 줄 {len(outcome.inserted)}개"
+    )
+    if outcome.overlapped or outcome.out_of_range:
+        log.warn(
+            f"빈칸 재전사({asset_id}): 기존 자막과 겹친 줄 {len(outcome.overlapped)}개 · 원본 범위"
+            f" 밖 줄 {len(outcome.out_of_range)}개는 넣지 않았습니다 — 실행 기록에 글자째"
+            " 남겼습니다"
+        )
+    if result.failed:
+        log.warn(
+            f"빈칸 재전사({asset_id}): 조각 {len(result.failed)}개를 받지 못했습니다 — 다음 견적이"
+            " 그 조각을 다시 셉니다"
+        )
 
 
 def _order_ids(revision: GlobalOrderRevision) -> tuple[str, ...]:
