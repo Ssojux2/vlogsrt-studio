@@ -65,7 +65,9 @@ TEXT_ON_GROUNDS: dict[str, tuple[str, ...]] = {
 # 글자가 아닌 표지(조작 테두리·초점 고리·렠 위 선) — 3:1.
 MARK_ON_GROUNDS: dict[str, tuple[str, ...]] = {
     "line-strong": ("bg", "surface", "surface-raised"),
-    "accent-ink": ("surface-sunken",),
+    # 자막 칩 위 「다른 귀」 표지(D59 19e) — 모서리 삼각형 warn · 아래 선 accent-ink.
+    "accent-ink": ("surface-sunken", "caption-chip"),
+    "warn": ("caption-chip",),
     "playhead": ("surface-sunken",),
     "draft": ("surface-sunken",),
     "accent": ("surface-sunken",),

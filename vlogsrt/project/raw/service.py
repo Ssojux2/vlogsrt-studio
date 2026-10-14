@@ -1261,7 +1261,9 @@ class RawWorkspaceService:
     def save_glossary(self, root: Path, text: str) -> Any:
         """용어집을 새 리비전으로 저장한다(무료) — 1단계 글자 경로의 keywords로만 간다.
 
-        whisper·설정·견적에는 들어가지 않는다. 쓸 수 없는 글자가 있으면 저장하지 않는다.
+        whisper·설정에는 들어가지 않는다. 두 번째 귀의 요청 신원(견적·결속의 교차 확인 꼬리표,
+        D59 19d)에 sha로 실리므로 저장한 뒤에는 견적을 다시 묶어야 한다(화면 19e가 한다). 쓸 수 없는
+        글자가 있으면 저장하지 않는다.
         """
         from vlogsrt.project.raw import glossary
 
@@ -2024,6 +2026,36 @@ class RawWorkspaceService:
         if failure is not None:
             return sync_report.failure_view(failure, running=running)
         return sync_report.view_of(self.sync_report(root, source_id), running=running)
+
+    @staticmethod
+    def subtitle_cue_notes(
+        transcript: Mapping[str, Any], sync_view: Mapping[str, Any] | None
+    ) -> dict[str, dict[str, Any]]:
+        """원본 자막 줄마다 화면 표시(D59 19e) — 「다른 귀」 증거와 「확인 필요」 이유. 표시만 한다.
+
+        줄을 지우거나 숨기거나 고치지 않는다(규칙 4·9) — 아이디로 이유를 달 뿐이다. 말소리
+        측정상 없음은 **지금 자막 리비전**의 확인 보고서(`stale`이 아닌 것)에서만 값으로 넘긴다 —
+        다른 리비전을 잰 표지는 그 줄의 것이 아닐 수 있다. 표시가 없는 줄은 싣지 않는다.
+        """
+        from vlogsrt.project.raw import source_transcript, subtitle_suspects
+
+        rows = list(transcript.get("utterances", []))
+        flagged = subtitle_suspects.suspects(
+            [(str(row["utterance_id"]), str(row["text"])) for row in rows],
+            _current_no_speech(sync_view),
+        )
+        notes: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            cue_id = str(row["utterance_id"])
+            note: dict[str, Any] = {}
+            ear = source_transcript.ear_evidence(row)
+            if ear is not None:
+                note["ear"] = ear
+            if cue_id in flagged:
+                note["suspects"] = [{"code": s.code, "text": s.text} for s in flagged[cue_id]]
+            if note:
+                notes[cue_id] = note
+        return notes
 
     def record_sync_failure(
         self, root: Path, source_ids: Sequence[str] | None, error: BaseException
@@ -4159,6 +4191,22 @@ def _sync_export_bucket(document: Mapping[str, Any] | None) -> str:
         return "stale"
     verdict = str(document.get("verdict"))
     return {"red": "flagged", "amber": "amber", "green": "green"}.get(verdict, "skip")
+
+
+def _current_no_speech(sync_view: Mapping[str, Any] | None) -> frozenset[str]:
+    """지금 자막 리비전의 확인 보고서가 「말소리를 못 찾음」으로 짚은 큐 아이디(D55) — 값으로만.
+
+    보고서가 없거나 낡았으면(다른 리비전을 쟀다) 빈 집합이다 — 표시를 지어내지 않는다.
+    """
+    from vlogsrt.project import sync_check
+
+    if not sync_view or sync_view.get("stale"):
+        return frozenset()
+    return frozenset(
+        str(cue.get("id"))
+        for cue in sync_view.get("cues", [])
+        if sync_check.FLAG_NO_SPEECH in (cue.get("flags") or ())
+    )
 
 
 def _sync_fingerprint(pending: Mapping[str, str]) -> str:

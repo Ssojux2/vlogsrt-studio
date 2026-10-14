@@ -45,6 +45,20 @@ SYNC_CACHE = Path("cache") / "sync-check"
 
 SIDECAR_SUFFIX = ".sync.json"
 VAD_SCHEMA = "sync-vad/v1"
+
+VAD_MISSING_HEAD = "VAD 런타임이 없어 잴 수 없음 (선택 extra `project`)"
+VAD_FAILED_HEAD = "VAD가 실패해 잴 수 없음"
+VAD_SHUTDOWN_HEAD = "앱이 끝나는 중이라 VAD를 멈췄다"
+SCREEN_TAIL_SEPARATOR = " — "
+"""고정 머리와 그 뒤 오류 글의 경계 — 이 뒤는 화면에서도 바이트 그대로다."""
+SCREEN_HEADS = {
+    VAD_MISSING_HEAD: "말소리 측정 런타임이 없어 잴 수 없음 (선택 extra `project`)",
+    VAD_FAILED_HEAD: "말소리 측정이 실패해 잴 수 없음",
+    VAD_SHUTDOWN_HEAD: "앱이 끝나는 중이라 말소리 측정을 멈췄다",
+}
+"""화면 말(D57·D59 19e) — 보고서 파일·CLI·로그에는 코드가 쓴 머리(`VAD …`)가 그대로 남고,
+작업대에는 「말소리 측정」 머리로 보인다(조사까지 맞춘다). 보고서 바이트는 바꾸지 않는다 — 옛 캐시
+보고서도 같은 길로 보인다."""
 PCM_RATE = 16000
 PCM_WIDTH = 2
 _HASH_BLOCK = 1 << 20
@@ -679,7 +693,7 @@ def _infer_runs(
     try:
         session = _GatedSession(session_factory())
     except VadUnavailable as error:
-        text = f"VAD 런타임이 없어 잴 수 없음 (선택 extra `project`) — {error}"
+        text = f"{VAD_MISSING_HEAD}{SCREEN_TAIL_SEPARATOR}{error}"
         raise SyncUnavailable(Reason("vad_unavailable", sync_check.LEVEL_SKIP, text)) from error
     reference = PcmReference(
         source_id=source_id,
@@ -696,9 +710,9 @@ def _infer_runs(
     result = infer_vad(reference, source_id, project, session)
     if result.status != "success" and _VAD_GATE.closing:
         # infer_vad는 창 오류를 결과로 접는다 — 문이 닫힌 탓이면 측정 불가가 아니다.
-        raise SyncShutdown(f"앱이 끝나는 중이라 VAD를 멈췄다 — {result.error}")
+        raise SyncShutdown(f"{VAD_SHUTDOWN_HEAD}{SCREEN_TAIL_SEPARATOR}{result.error}")
     if result.status != "success":
-        text = f"VAD가 실패해 잴 수 없음 — {result.error}"
+        text = f"{VAD_FAILED_HEAD}{SCREEN_TAIL_SEPARATOR}{result.error}"
         raise SyncUnavailable(Reason("vad_failed", sync_check.LEVEL_SKIP, text))
     flags = [False] * frame_count
     for window in result.windows:
@@ -1256,7 +1270,7 @@ def failure_view(reason: str, *, running: bool) -> dict[str, Any]:
         "tone": "grey",
         "stale": False,
         "running": running,
-        "reasons": [reason],
+        "reasons": [screen_text(reason)],
         "checks": [],
         "cues": [],
     }
@@ -1276,7 +1290,30 @@ def view_of(document: Mapping[str, Any] | None, *, running: bool) -> dict[str, A
         "tone": tone,
         "stale": bool(document.get("stale")),
         "running": running,
-        "reasons": [str(item.get("text", "")) for item in document.get("reasons", [])],
-        "checks": list(document.get("checks", [])),
+        "reasons": [screen_text(str(item.get("text", ""))) for item in document.get("reasons", [])],
+        "checks": [_screen_check(check) for check in document.get("checks", [])],
         "cues": list(document.get("cues", [])),
+    }
+
+
+def screen_text(text: str) -> str:
+    """화면에 올리는 확인 문구 — 코드가 쓴 고정 머리만 「말소리 측정」 말로 바꾼다(D59 19e).
+
+    머리는 첫 ` — ` 앞이다. 그 뒤(오류·경로)는 바이트 그대로 둔다 — 낱말을 글 전체에서 바꾸면
+    `SileroVADIterator`·`/Volumes/VADUZ` 같은 오류 글과 경로가 망가진다(검증 지적 1). 머리 앞의
+    `형식 이름: `(걸지 못함 표지의 `SyncShutdown: …`)도 그대로 둔다. 모르는 글은 손대지 않는다.
+    """
+    head, separator, tail = text.partition(SCREEN_TAIL_SEPARATOR)
+    for fixed, shown in SCREEN_HEADS.items():
+        prefix = head.removesuffix(fixed)
+        if prefix != head and (not prefix or prefix.endswith(": ")):
+            return f"{prefix}{shown}{separator}{tail}"
+    return text
+
+
+def _screen_check(check: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        **check,
+        "name": screen_text(str(check.get("name", ""))),
+        "detail": screen_text(str(check.get("detail", ""))),
     }

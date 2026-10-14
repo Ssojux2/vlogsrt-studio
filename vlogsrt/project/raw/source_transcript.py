@@ -5,9 +5,11 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
+from collections.abc import Mapping
 from fractions import Fraction
 from typing import Any
 
+from vlogsrt.hangul import strip_for_compare
 from vlogsrt.project.raw.models import RawWorkspaceError
 
 TEXT_SOURCE_WHISPER = "whisper"
@@ -98,6 +100,38 @@ def cross_checked(document: dict) -> bool:
         str(row.get("text_source", TEXT_SOURCE_WHISPER)) != TEXT_SOURCE_WHISPER
         for row in document["utterances"]
     )
+
+
+EAR_ALT = "alt"
+"""화면 「다른 귀」 표시 — 두 번째 귀가 다르게 들었지만 게이트를 지나지 못한 후보가 있다
+(D59 19e)."""
+
+EAR_REPLACED = "replaced"
+"""화면 「다른 귀」 표시 — 두 번째 귀의 글자로 바꾼 줄이다(D59 19e)."""
+
+
+def ear_evidence(row: Mapping[str, Any]) -> dict[str, str] | None:
+    """원본 자막 한 줄의 「다른 귀」 증거(D59 19e) — 화면에 보일 것만. 읽기만 한다.
+
+    `mark`는 `alt`(고르지 않은 후보 `alt_text`가 지금 글자와 다르다) 또는 `replaced`(글자 출처가
+    whisper·사람·섞임이 아닌 두 번째 귀다), `other`는 다른 귀의 글자, `first`는 지금 글자와 다른
+    whisper 글자(처음 들은 글)다. 「다르다」는 19d (c)의 `agreed`와 같은 접기(`strip_for_compare` —
+    공백·부호·대소문자)로 견준다 — 부호만 다른 후보는 후보가 아니다. 증거 칸이 없는 줄(19c 이전·답이
+    없던 청크)과 두 귀가 같은 줄은 None이다.
+    """
+    if "text_source" not in row:
+        return None
+    text = str(row["text"])
+    folded = strip_for_compare(text)
+    whisper = str(row.get("whisper_text") or "")
+    first = whisper if strip_for_compare(whisper) not in ("", folded) else ""
+    alt = str(row.get("alt_text") or "")
+    if strip_for_compare(alt) not in ("", folded):
+        return {"mark": EAR_ALT, "other": alt, "first": first}
+    source = str(row.get("text_source") or TEXT_SOURCE_WHISPER)
+    if source not in (TEXT_SOURCE_WHISPER, TEXT_SOURCE_MANUAL, TEXT_SOURCE_MIXED):
+        return {"mark": EAR_REPLACED, "other": text, "first": first}
+    return None
 
 
 def fingerprint(workspace: Any, asset_id: str) -> str:

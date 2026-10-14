@@ -1688,6 +1688,23 @@ WORKBENCH_CSS = (
   background: var(--vl-caption-chip); color: var(--vl-on-caption-chip);
   white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .vl-source-caption-editor { border:1px solid var(--vl-line-strong); padding:10px; }
+/* 다른 귀(D59 19e) — 고르지 않은 후보가 있는 자막은 오른쪽 위 모서리 삼각형(warn), 다른 귀가 고친
+   자막은 아래 2px 안쪽 선(accent-ink). 가상 원소·안쪽 그림자라 칸의 자리·크기는 그대로다(B단계
+   레일 좌표). 자막 칩(caption-chip) 위 두 테마 모두 3:1 이상(시험). */
+.vl-source-caption[data-vl-ear="alt"]::after { content: ""; position: absolute; top: 0; right: 0;
+  width: 0; height: 0; border-top: 7px solid var(--vl-warn); border-left: 7px solid transparent; }
+.vl-source-caption[data-vl-ear="replaced"] { box-shadow: inset 0 -2px 0 var(--vl-accent-ink); }
+/* 목록·편집기의 표지 — 다른 귀 후보와 「확인 필요」는 warn, 다른 귀로 고친 줄은 accent-ink. */
+.vl-badge[data-vl-ear="alt"], .vl-badge[data-vl-suspect] {
+  border-color: var(--vl-warn); color: var(--vl-warn); }
+.vl-badge[data-vl-ear="replaced"] {
+  border-color: var(--vl-accent-ink); color: var(--vl-accent-ink); }
+.vl-ear { border-left: 3px solid var(--vl-line-strong); padding: 2px 0 2px 8px; margin: 0 0 8px; }
+.vl-ear-line { display: flex; gap: 8px; align-items: baseline; justify-content: space-between; }
+/* 긴 후보(실측 480자)가 문구 칸·「저장」을 밀어내지 않게 줄 높이를 묶고, 넘치면 줄 안에서
+   스크롤한다. */
+.vl-ear-text { min-width: 0; overflow-wrap: anywhere; max-height: 4.5em; overflow-y: auto; }
+.vl-ear-line > .vl-btn { flex: none; }
 .vl-audio-strip { position:absolute; top:var(--vl-audio-top); left:0; right:0;
  height:var(--vl-audio-h); padding:3px 8px; line-height:14px;
  background: var(--vl-surface); color: var(--vl-ink-muted); font-size:11px; box-sizing:border-box; }
@@ -2714,9 +2731,11 @@ VISUAL_BOOTSTRAP_JS = (
           var a = displayTime(ratOf(cue.start)), b = displayTime(ratOf(cue.end));
           if (!a || !b || VL.cmp(a,b) >= 0) { return; }
           html.push('<button type="button" class="vl-source-caption" data-vl-source-cue="' + index +
-            '" style="left:' + VL.pct(a,dur).toFixed(3) + '%;width:' +
+            '"' + (cue.ear ? ' data-vl-ear="' + esc(cue.ear.mark) + '"' : '') +
+            (cue.suspects && cue.suspects.length ? ' data-vl-suspect="1"' : '') +
+            ' style="left:' + VL.pct(a,dur).toFixed(3) + '%;width:' +
             Math.max(.6,VL.pct(VL.sub(b,a),dur)).toFixed(3) + '%" title="' +
-            esc(cue.text) + '">' + esc(cue.text) + '</button>');
+            esc(cueTitle(cue)) + '">' + esc(cue.text) + '</button>');
         });
         html.push('<div class="vl-audio-strip">' +
           (info && info.tracks && info.tracks.length ? '원본 오디오' : '오디오 없음') + '</div>');
@@ -3052,6 +3071,87 @@ VISUAL_BOOTSTRAP_JS = (
         }
         return out.join("");
       }
+      // 「다른 귀」·「확인 필요」(D59 19e) — 표시만 한다. 자막을 지우거나 숨기거나 고치지 않는다.
+      function earNote(ear) {
+        if (!ear) { return ""; }
+        return ear.mark === "alt" ? "다른 귀는 다르게 들었습니다 — 고르지 않은 후보가 있습니다"
+          : "다른 귀가 고친 줄입니다 — 처음 들은 글과 다릅니다";
+      }
+      function earWord(ear) {
+        return ear && ear.mark === "alt" ? "다른 귀 후보" : "다른 귀로 고침";
+      }
+      function suspectNote(cue) {
+        return (cue.suspects || []).map(function (s) { return s.text; }).join(" · ");
+      }
+      function cueTitle(cue) {
+        var parts = [cue.text];
+        if (cue.ear) { parts.push(earNote(cue.ear)); }
+        if (cue.suspects && cue.suspects.length) { parts.push("확인 필요 — " + suspectNote(cue)); }
+        return parts.join(" · ");
+      }
+      function cueBadges(cue) {
+        var out = "";
+        if (cue.ear) {
+          out += ' <span class="vl-badge" data-vl-ear="' + esc(cue.ear.mark) + '" title="' +
+            esc(earNote(cue.ear)) + '">' + esc(earWord(cue.ear)) + "</span>";
+        }
+        if (cue.suspects && cue.suspects.length) {
+          out += ' <span class="vl-badge" data-vl-suspect="1" title="' + esc(suspectNote(cue)) +
+            '">확인 필요</span>';
+        }
+        return out;
+      }
+      function earLine(label, text, take) {
+        // 긴 후보는 줄 안에서 스크롤한다(높이 상한은 CSS) — 키보드로도 닿게 초점을 받는다.
+        return '<p class="vl-kv vl-ear-line"><span class="vl-ear-text" tabindex="0">' + label +
+          ": " + esc(text) + '</span><button type="button" class="vl-btn" data-vl-act="ear-take" ' +
+          'data-vl-take="' + take + '" aria-label="' + label + ' 가져오기">가져오기</button></p>';
+      }
+      function earLines(cue) {
+        var ear = cue.ear;
+        if (!ear) { return ""; }
+        var out = ['<div class="vl-ear" role="group" aria-label="다른 귀">'];
+        out.push(earLine("다른 귀", ear.other, "other"));
+        if (ear.first) { out.push(earLine("처음 들은 글", ear.first, "first")); }
+        out.push('<p class="vl-kv"><small>' + (ear.mark === "alt"
+          ? "두 귀가 맞지 않아 글자를 바꾸지 않았습니다."
+          : "두 귀가 맞춰 본 줄이라 다른 귀의 글자로 바꿨습니다.") +
+          " 「가져오기」는 문구 칸만 채웁니다 — 「저장」을 눌러야 바뀝니다.</small></p></div>");
+        return out.join("");
+      }
+      function suspectLines(cue) {
+        if (!cue.suspects || !cue.suspects.length) { return ""; }
+        return '<p class="vl-kv"><span class="vl-badge" data-vl-suspect="1">확인 필요</span> ' +
+          esc(suspectNote(cue)) + '</p><p class="vl-kv"><small>표시만 합니다 — 자막은 그대로' +
+          "입니다.</small></p>";
+      }
+      // 「가져오기」로 넣은 글자 — 같은 줄·같은 리비전이면 패널을 다시 그려도 문구 칸에 남는다.
+      function takenText(cue, info) {
+        var take = state.sourceTake;
+        return take && take.sourceId === curSourceId() && take.id === cue.id &&
+          take.revision === info.transcriptRevision ? take.text : cue.text;
+      }
+      var EAR_TAKE_NOTE = "문구 칸에 넣었습니다 — 「저장」을 눌러야 원본 자막이 바뀝니다.";
+      // 다른 줄을 고르면 가져온 글자를 버린다 — 그 각주도 걷는다(다른 각주는 그대로 둔다).
+      function dropTake() {
+        if (!state.sourceTake) { return; }
+        state.sourceTake = null;
+        if (state.lastMsg === EAR_TAKE_NOTE) { msg(""); }
+      }
+      // 「가져오기」 — 문구 칸만 채운다. 서버를 부르지 않는다(저장은 사람이 「저장」으로 한다).
+      function takeEar(which) {
+        var info = curSource();
+        var cue = info && state.sourceCue && state.sourceCue.sourceId === curSourceId() ?
+          (info.subtitles || []).find(function (u) { return u.id === state.sourceCue.id; }) : null;
+        var ear = cue && cue.ear;
+        var text = ear ? (which === "first" ? ear.first : ear.other) : "";
+        var box = doc.getElementById("vl-source-text");
+        if (!text || !box) { return; }
+        box.value = text;
+        state.sourceTake = { sourceId: curSourceId(), id: cue.id,
+          revision: info.transcriptRevision, text: text };
+        msg(EAR_TAKE_NOTE);
+      }
       function captionEditor(info) {
         var cue = info && (info.subtitles || []).find(function(u) {
           return state.sourceCue && state.sourceCue.sourceId === curSourceId() &&
@@ -3059,8 +3159,9 @@ VISUAL_BOOTSTRAP_JS = (
         });
         if (!cue) { return ""; }
         return '<fieldset class="vl-source-caption-editor"><legend>원본 자막 수정</legend>' +
+          earLines(cue) + suspectLines(cue) +
           '<label>문구<textarea id="vl-source-text" class="vl-input">' +
-          esc(cue.text) + '</textarea></label>' +
+          esc(takenText(cue, info)) + '</textarea></label>' +
           '<label>시작(초)<input id="vl-source-start" class="vl-input" value="' +
           VL.fmt(ratOf(cue.start)) + '"></label>' +
           '<label>끝(초)<input id="vl-source-end" class="vl-input" value="' +
@@ -3182,15 +3283,25 @@ VISUAL_BOOTSTRAP_JS = (
         var row = mark && mark.rule ? mark : redRowFor(info, card);
         return row && row.rule ? row.rule : "";
       }
+      // 목록 머리 — 확인 필요·다른 귀 줄 수(있을 때만). 표시만 하므로 걸러 보이지 않는다.
+      function cueListSummary(subtitles) {
+        var suspects = subtitles.filter(function (u) {
+          return u.suspects && u.suspects.length;
+        }).length;
+        var ears = subtitles.filter(function (u) { return !!u.ear; }).length;
+        return "원본 자막 목록" + (suspects ? " · 확인 필요 " + suspects + "개" : "") +
+          (ears ? " · 다른 귀 " + ears + "개" : "");
+      }
       function folded(card, info, opened) {
         // 접힌 상세 — 사람의 메모는 기계 근거(분석 근거)와 따로 둔다(D52).
         var out = [];
         if (info && info.subtitles && info.subtitles.length) {
-          out.push(details(opened, "cues", "원본 자막 목록", info.subtitles.map(function (u) {
-            return '<button type="button" class="vl-btn" data-vl-act="source-pick" ' +
-              'data-vl-cue-id="' + esc(u.id) + '">' +
-              esc(VL.fmt(ratOf(u.start)) + '초 · ' + u.text) + '</button>';
-          }).join("")));
+          out.push(details(opened, "cues", cueListSummary(info.subtitles),
+            info.subtitles.map(function (u) {
+              return '<button type="button" class="vl-btn" data-vl-act="source-pick" ' +
+                'data-vl-cue-id="' + esc(u.id) + '" title="' + esc(cueTitle(u)) + '">' +
+                esc(VL.fmt(ratOf(u.start)) + '초 · ' + u.text) + cueBadges(u) + '</button>';
+            }).join("")));
         }
         var tags = card.tags || [];
         var rule = judgedRule(card, info);
@@ -3482,7 +3593,7 @@ VISUAL_BOOTSTRAP_JS = (
           var cueInfo = curSource();
           var cue = cueInfo && (cueInfo.subtitles || [])[Number(cueIndex)];
           if (cue) {
-            state.sourceCue = {sourceId:curSourceId(), id:cue.id};
+            state.sourceCue = {sourceId:curSourceId(), id:cue.id}; dropTake();
             state.marker = {sourceId:curSourceId(), label:'원본 자막',
               reason:cue.text, start:cue.start, end:cue.end};
             seekTo(ratOf(cue.start)); renderPanel();
@@ -3604,13 +3715,14 @@ VISUAL_BOOTSTRAP_JS = (
           call('vl_relisten', {sourceId:curSourceId()}, '다시 듣기를 준비하는 중(무료)…');
           return;
         }
+        if (act === 'ear-take') { takeEar(node.getAttribute('data-vl-take')); return; }
         if (act === 'source-pick') {
           var info = curSource();
           var picked = info && (info.subtitles || []).find(function(u) {
             return u.id === node.getAttribute('data-vl-cue-id');
           });
           if (picked) {
-            state.sourceCue = {sourceId:curSourceId(),id:picked.id};
+            state.sourceCue = {sourceId:curSourceId(),id:picked.id}; dropTake();
             state.marker = {sourceId:curSourceId(),label:'원본 자막',
               reason:picked.text,start:picked.start,end:picked.end};
             seekTo(ratOf(picked.start)); renderPanel();
@@ -3797,7 +3909,7 @@ VISUAL_BOOTSTRAP_JS = (
         });
         if (cue) {
           var v = videoEl(); if (v) { v.pause(); }
-          state.sourceCue = {sourceId:curSourceId(),id:cue.id};
+          state.sourceCue = {sourceId:curSourceId(),id:cue.id}; dropTake();
           renderPanel();
         }
       });

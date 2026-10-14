@@ -1137,6 +1137,84 @@ def _class_source(body: str, class_name: str) -> str:
     return ""
 
 
+# 원본 자막의 「확인 필요」 표시(D59 19e)는 **표시만** 한다 — 순수 계산은 큐 글자와 아이디를 값으로
+# 받고(말소리 측정상 없음도 값), 결과는 화면 값을 짓는 서비스 하나만 읽는다. 등급·자동 정리·선택·
+# 출력·자막 쓰기로 흐르면 「이 줄은 말이 아니다」(규칙 4)나 조용한 삭제(규칙 9)의 길이 된다.
+SUSPECTS_MODULE = "vlogsrt/project/raw/subtitle_suspects.py"
+SUSPECTS_MUST_NOT_IMPORT = (
+    "subprocess", "openai", "anthropic_messages", "preprocess", "transcribe", "sqlite3", "service",
+    "workspace", "source_transcript", "sync_check", "sync_report", "tiering", "auto_cleanup",
+    "selection_analysis", "review_workspace",
+)  # fmt: skip
+SUSPECTS_IMPORTERS = ("vlogsrt/project/raw/service.py",)
+SUSPECT_NAMES = re.compile(r"SubtitleSuspectSettings|SUBTITLE_SUSPECT_SETTINGS|subtitle_suspect")
+# 이 자리들은 분석·전사·자막·글자의 지문·캐시 열쇠·승인을 만든다 — 표시 기준을 알면 기준을
+# 바꿀 때마다 이미 산 결과가 낡는다(D47). 정의 자리(`raw/config.py`)는 그 파일의 지문 클래스만
+# 본다.
+SUSPECT_FREE_FINGERPRINT_PATHS = (
+    "vlogsrt/project/config.py:ProjectConfig",
+    "vlogsrt/project/raw/config.py:RawWorkflowConfig",
+    "vlogsrt/project/raw/config.py:RawCaptionContract",
+    "vlogsrt/project/raw/config.py:SourceTextSettings",
+    "vlogsrt/project/raw/analysis_config.py",
+    "vlogsrt/project/raw/analysis_approval.py",
+    "vlogsrt/project/raw/analysis_workflow.py",
+    "vlogsrt/project/raw/understanding.py",
+    "vlogsrt/project/raw/final_caption.py",
+    "vlogsrt/project/raw/caption_workspace.py",
+    "vlogsrt/project/raw/source_text.py",
+    "vlogsrt/project/raw/cross_check.py",
+    "vlogsrt/project/raw/selection_analysis.py",
+)
+
+
+def check_subtitle_suspects_only_display() -> list[str]:
+    """D59 19e — `subtitle_suspects.py`는 값만 받아 이유를 돌려주고, 서비스만 그것을 읽는다.
+
+    파일이 사라지면 조용히 통과하지 않는다 — 표시 권한이 어디로 옮겨 갔는지 모르게 된다.
+    """
+    path = ROOT / SUSPECTS_MODULE
+    if not path.exists():
+        return [f"{SUSPECTS_MODULE}: 자막 의심 표시 계층이 사라졌다 (D59 19e)"]
+    body = path.read_text(encoding="utf-8")
+    failures = [
+        f"subtitle_suspects.py: {name}을 import한다 — 의심 표시가 순수 함수가 아니게 된다 (D59 19e)"
+        for name in _imports(body, SUSPECTS_MUST_NOT_IMPORT)
+    ]
+    failures += [
+        f"subtitle_suspects.py:{number}: 파일을 직접 읽거나 쓴다 — 입출력은 서비스의 몫이다"
+        " (D59 19e)"
+        for number, line in enumerate(body.splitlines(), start=1)
+        if TIERING_FILE_IO.search(line)
+    ]
+    for source in _project_sources():
+        rel = _rel(source)
+        if rel == SUSPECTS_MODULE or rel in SUSPECTS_IMPORTERS:
+            continue
+        if "subtitle_suspects" in _imported_names(source.read_text(encoding="utf-8")):
+            failures.append(
+                f"{rel}: subtitle_suspects를 import한다 — 의심 표시가 표시 밖으로 샌다 (D59 19e)"
+            )
+    return failures + _suspect_fingerprint_failures()
+
+
+def _suspect_fingerprint_failures() -> list[str]:
+    failures: list[str] = []
+    for entry in SUSPECT_FREE_FINGERPRINT_PATHS:
+        rel, _, class_name = entry.partition(":")
+        path = ROOT / rel
+        if not path.exists():
+            continue
+        body = path.read_text(encoding="utf-8")
+        if class_name:
+            body = _class_source(body, class_name)
+        if SUSPECT_NAMES.search(body):
+            failures.append(
+                f"{entry}: 자막 의심 표시 기준을 안다 — 지문·캐시 열쇠 밖이어야 한다 (D59 19e)"
+            )
+    return failures
+
+
 def check_edit_layer_ignores_audio() -> list[str]:
     """규칙 4·9 — 제거 계층(edit.py·export.py)은 오디오·전사·판정 계층을 import하지 못한다.
 
@@ -1727,6 +1805,7 @@ CHECKS = (
     ("3단 등급은 순수하다", check_tiering_stays_pure),
     ("자막 시각 확인은 순수하다", check_sync_check_stays_pure),
     ("자막 시각 확인은 표시만 한다", check_sync_check_only_displays),
+    ("자막 의심 표시는 순수하고 표시만 한다", check_subtitle_suspects_only_display),
     ("Final Cut 타임라인 빌더는 순수하다", check_finalcut_timeline_stays_pure),
     ("Final Cut 보내기는 원본을 복사·재해시하지 않는다", check_finalcut_export_never_copies),
     ("옛 선택한 컷 Final Cut 출력은 되살리지 않는다", check_old_finalcut_path_stays_dead),

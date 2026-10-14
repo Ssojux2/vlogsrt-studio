@@ -127,6 +127,22 @@ CROSS_CHECK_INFO = (
 )
 """「다른 귀로 교차 확인」(D59 19d) — 승인 범위 바로 아래의 켬·끔. 칸에는 모델 이름·금액이 없다
 (D57 결정 7) — 무엇을 얼마에 듣는지는 그 아래 견적 문구만 말하고, 승인은 그 문구에 묶인다."""
+GLOSSARY_PANEL_ID = "vl-glossary-panel"
+GLOSSARY_ID = "vl-glossary"
+GLOSSARY_SAVE_ID = "vl-glossary-save"
+GLOSSARY_STATUS_ID = "vl-glossary-status"
+GLOSSARY_LABEL = "용어집(고유명사, 한 줄에 하나)"
+GLOSSARY_SAVE_LABEL = "용어집 저장"
+GLOSSARY_INFO = (
+    "다른 귀에게만 알려 주는 말입니다 — 처음 듣는 귀에는 보내지 않습니다. 용어집을 바꾸면"
+    " 다음 견적부터 다른 귀에게 새 용어집으로 다시 묻습니다. 들을 분량과 비용은 견적에 나옵니다."
+)
+"""설정 서랍의 용어집 칸(D59 19c·19e) — 저장은 무료이고, 견적만 다시 묶는다. 모델 이름·금액이 없다
+(D57 결정 7). `#` 뒤는 메모로 버리고 같은 말은 한 번만 남는다(`glossary.parse`)."""
+GLOSSARY_BUSY_TEXT = (
+    "분석이나 승인 확인이 진행 중이라 용어집을 저장하지 않았습니다 — 끝나거나 취소한 뒤에 저장해"
+    " 주세요."
+)
 RELISTEN_EXPLANATION = (
     "이 영상을 처음부터 다시 듣습니다 — 기존 전사는 온도 설정 오류로 받은 것이라 되풀이가 많을 수"
     " 있습니다."
@@ -575,6 +591,37 @@ def _text_pass_sentence(quote: Any, estimates: Sequence[Any]) -> str:
     return f"{heard} — 바뀐 자막이 있는 창도 이번 영상 분석이 판정하며 위 견적에 들어 있습니다."
 
 
+def _glossary_now(glossary: Any) -> str:
+    """용어집 칸 아래 한 줄 — 지금 저장된 용어 수(D59 19e)."""
+    count = len(glossary.terms)
+    return (
+        f"지금 용어집에는 용어가 {count}개 있습니다." if count else "지금 용어집은 비어 있습니다."
+    )
+
+
+def _glossary_saved(glossary: Any) -> str:
+    """저장한 뒤 한 줄 — 다음 견적부터(두 범위 모두) 새 용어집으로 묻는다(금액·모델 이름 없음)."""
+    count = len(glossary.terms)
+    head = f"용어집을 저장했습니다 — 용어 {count}개." if count else "용어집을 비웠습니다."
+    return f"{head} 다음 견적부터 다른 귀에게 이 용어집으로 묻습니다."
+
+
+GLOSSARY_MOVED_SHOWN_TERMS = 5
+"""다른 탭이 바꾼 용어집을 알릴 때 이름 대는 용어 수 — 문구 길이일 뿐 판정이 아니다."""
+
+
+def _glossary_moved(glossary: Any) -> str:
+    """다른 탭이 먼저 저장했다 — 지금 용어집을 보이고 쓴 글은 그대로 둔다(덮어쓰지 않는다)."""
+    terms = list(glossary.terms)
+    shown = " · ".join(terms[:GLOSSARY_MOVED_SHOWN_TERMS])
+    more = len(terms) - GLOSSARY_MOVED_SHOWN_TERMS
+    now = (f"{shown} 외 {more}개" if more > 0 else shown) if terms else "비어 있음"
+    return (
+        f"다른 탭에서 용어집이 바뀌었습니다 — 지금 용어집: {now}. 쓴 글은 그대로 두었습니다."
+        " 확인한 뒤 다시 누르면 쓴 글로 저장합니다."
+    )
+
+
 def _semantic_quote_terms(model: str | None, estimates: Sequence[Any]) -> tuple[str, str]:
     """견적 문구의 (모델 이름, 비용 상한 꼬리) — Luna는 W-14 이전 문구 그대로다(D54).
 
@@ -884,6 +931,11 @@ class RawWorkspaceUi:
         # 「영상 분석 모델」 칸과 상태 줄 — 작업공간이 바뀔 때마다 그 작업공간의 저장값으로 맞춘다.
         self._analysis_model_dd: gr.Dropdown | None = None
         self._analysis_model_md: gr.Markdown | None = None
+        # 「용어집」 칸과 상태 줄(D59 19e) — 같은 사건들이 그 작업공간의 용어집으로 맞춘다.
+        self._glossary_box: gr.Textbox | None = None
+        self._glossary_status_md: gr.Markdown | None = None
+        self._glossary_loaded_state: gr.State | None = None
+        self._glossary_warned: set[str] = set()
         self._choose_event: Any = None
         # 선택기·조사 단추 참조 — 배선 증명은 실제 Blocks 의존성(app.config)이 한다.
         self._open_button: gr.Button | None = None
@@ -1894,7 +1946,10 @@ class RawWorkspaceUi:
 
         model = self.raw.settings(root).models.luna_model
         cross = self.raw.cross_check_enabled(root)  # 켬·끔이 바뀌면 다시 잰다(재사용 셈이 바뀐다)
-        self.raw.submit_job(root, "library_quote", repr((ids, model, cross)), prepare)
+        # 용어집도 결속 꼬리표(요청 신원)에 실린다 — 바뀌면 도는 재기에 붙지 않고 새로 잰다
+        # (D59 19e).
+        terms = self._glossary_sha(root)
+        self.raw.submit_job(root, "library_quote", repr((ids, model, cross, terms)), prepare)
 
     def library_analysis_summary(self) -> str:
         root = self._snapshot_root()
@@ -1989,6 +2044,102 @@ class RawWorkspaceUi:
             return gr.skip()
         on = bool(self.raw.cross_check_enabled(root))
         return gr.skip() if shown is not None and bool(shown) == on else gr.Checkbox(value=on)
+
+    # ── 용어집(D59 19c·19e) — 작업공간 DB에 산다. 저장은 무료이고 견적만 다시 묶는다 ─────────────
+
+    def _read_glossary(self, root: Path) -> tuple[Any | None, str]:
+        """지금 용어집과 읽기 실패 사유 — 저장된 모양이 깨졌으면 (None, 사유)와 WARN.
+
+        같은 사유는 한 번만 경고한다 — 1초 틱이 같은 경고를 되풀이하지 않게(검증 지적 7).
+        """
+        try:
+            return self.raw.glossary(root), ""
+        except raw_service.RawWorkspaceError as error:
+            reason = str(error)
+            if reason not in self._glossary_warned:
+                self._glossary_warned.add(reason)
+                log.warn(
+                    f"용어집을 읽지 못했습니다 — {reason} (칸은 비워 두고 견적은 그대로 잽니다)"
+                )
+            return None, reason
+
+    def _glossary_sha(self, root: Path) -> str:
+        """견적 재기 작업의 열쇠 재료 — 저장된 용어집이 깨졌으면 빈 값(재기는 그대로 돈다)."""
+        current, _reason = self._read_glossary(root)
+        return "" if current is None else str(current.sha)
+
+    def glossary_value(self) -> str:
+        """용어집 칸의 처음 값 — 화면을 열 때마다 지금 작업공간의 용어집(한 줄에 하나)."""
+        loaded = self.glossary_loaded_value()
+        return loaded[1] if loaded else ""
+
+    def glossary_loaded_value(self) -> list[str] | None:
+        """이 탭이 불러온 용어집 `[sha, 글]` — 저장은 이 sha에 묶인다(다른 탭의 저장을 덮지
+        않게)."""
+        root = self._snapshot_root()
+        current = None if root is None else self._read_glossary(root)[0]
+        return None if current is None else [str(current.sha), str(current.text())]
+
+    def glossary_controls(self) -> tuple[Any, str, Any]:
+        """작업공간을 열거나 바꾸면 칸·상태 줄·불러온 용어집을 그 작업공간의 것으로 맞춘다.
+
+        값을 맞출 뿐 저장하지 않는다 — 저장은 사람의 「용어집 저장」뿐이다.
+        """
+        root = self._snapshot_root()
+        if root is None:
+            return gr.Textbox(value=""), "", None
+        current, reason = self._read_glossary(root)
+        if current is None:
+            return gr.Textbox(value=""), ui_facade.literal_markdown(reason), None
+        status = ui_facade.literal_markdown(_glossary_now(current))
+        return gr.Textbox(value=current.text()), status, [current.sha, current.text()]
+
+    def glossary_tick(
+        self, signature: str | None, shown: str | None, loaded: list[str] | None
+    ) -> tuple[Any, Any, Any]:
+        """1초 틱 — 다른 탭이 용어집을 바꿨고 이 탭의 칸이 불러온 그대로일 때만 칸을 맞춘다.
+
+        사람이 칸에 쓰는 중이면(불러온 글과 다르면) 건드리지 않는다 — 저장이 그 차이를 알린다.
+        """
+        skip = (gr.skip(), gr.skip(), gr.skip())
+        root = self._snapshot_root()
+        if not self._quote_signature_current(signature) or root is None or not loaded:
+            return skip
+        current, _reason = self._read_glossary(root)
+        if current is None or current.sha == loaded[0] or (shown or "") != loaded[1]:
+            return skip
+        status = ui_facade.literal_markdown(_glossary_now(current))
+        return gr.Textbox(value=current.text()), status, [current.sha, current.text()]
+
+    def glossary_save_view(
+        self, signature: str | None, text: str | None, loaded: list[str] | None
+    ) -> tuple[Any, Any, Any, Any]:
+        """「용어집 저장」 — 저장하고 견적을 새 용어집으로 다시 묶는다(유료 호출 0회).
+
+        두 번째 귀의 요청 신원과 글자 캐시 열쇠가 용어집 sha를 묶으므로(19d) 견적의 글자 분량·
+        digest가 바뀐다 — 보이는 견적 문구를 바로 다시 그려 승인이 언제나 지금 용어집의 견적에만
+        묶이게 한다. 저장은 이 탭이 불러온 용어집(`loaded`)에 묶인다 — 그사이 다른 탭이 저장했으면
+        한 번 거절하고 지금 용어집을 보인다(쓴 글은 그대로, 다시 누르면 저장한다). 쓸 수 없는 글자가
+        있거나 분석·승인 확인이 도는 동안에는 저장하지 않는다(칸은 사람이 쓴 그대로).
+        """
+        root = self._require_current_selection(signature)
+        if self._analysis_busy(root):
+            return ui_facade.literal_markdown(GLOSSARY_BUSY_TEXT), *(gr.skip(),) * 3
+        try:
+            before = self.raw.glossary(root)
+            if not loaded or loaded[0] != before.sha:
+                moved = ui_facade.literal_markdown(_glossary_moved(before))
+                return moved, gr.skip(), gr.skip(), [before.sha, before.text()]
+            saved = self.raw.save_glossary(root, text or "")
+        except raw_service.RawWorkspaceError as error:
+            return ui_facade.literal_markdown(str(error)), *(gr.skip(),) * 3
+        box, now = gr.Textbox(value=saved.text()), [saved.sha, saved.text()]
+        if saved.terms == before.terms:
+            return ui_facade.literal_markdown(_glossary_now(saved)), box, gr.skip(), now
+        self._rebind_quotes(root)
+        self._prepare_library_quote(root)
+        status = ui_facade.literal_markdown(_glossary_saved(saved))
+        return status, box, self.library_analysis_summary_markdown(), now
 
     def _rebind_quotes(self, root: Path) -> None:
         """라이브러리 견적과 고른 영상의 승인 대기 견적을 지금 결속으로 다시 묶는다(측정 그대로)."""
@@ -3335,6 +3486,7 @@ class RawWorkspaceUi:
         with gr.Sidebar(open=False, position="right", width=560, elem_id="settings-drawer"):
             self._drawer_head("설정 · 고급 도구", "settings-drawer")
             quick_api_panel, quick_api_key = self._quick_api_panel()
+            self._glossary_panel()
             with gr.Accordion("분석 실행 설정", open=False, visible=False):
                 primary_network = gr.Dropdown(
                     choices=["offline", "online"],
@@ -3354,6 +3506,54 @@ class RawWorkspaceUi:
             self._package_tab()
         self._wire_library_approval(quick_api_panel, quick_api_key)
         return advanced
+
+    def _glossary_panel(self) -> None:
+        """「용어집」(D59 19e) — 고유명사 칸과 저장 단추. 저장하면 견적 문구를 바로 다시 그린다.
+
+        저장은 사람의 단추뿐이다(칸을 고치는 것만으로는 저장하지 않는다). 견적 칸·전문 칸은 무대
+        (`_review_stage`)가 먼저 만든다 — 서랍은 탭 뒤에 짓는다.
+        """
+        with gr.Accordion("용어집", open=True, elem_id=GLOSSARY_PANEL_ID):
+            box = gr.Textbox(
+                value=self.glossary_value,
+                label=GLOSSARY_LABEL,
+                info=GLOSSARY_INFO,
+                lines=4,
+                max_lines=12,
+                interactive=True,
+                elem_id=GLOSSARY_ID,
+            )
+            save = gr.Button(GLOSSARY_SAVE_LABEL, elem_id=GLOSSARY_SAVE_ID)
+            status = gr.Markdown("", elem_id=GLOSSARY_STATUS_ID, latex_delimiters=[])
+        # 탭마다 불러온 용어집 — 함수(메서드가 아니다)라 deepcopy가 서버 객체를 복사하지 않는다.
+        loaded = gr.State(lambda: self.glossary_loaded_value())
+        self._glossary_box, self._glossary_status_md = box, status
+        self._glossary_loaded_state = loaded
+        self._wire_glossary(save, box, status, loaded)
+
+    def _wire_glossary(self, save: gr.Button, box: Any, status: Any, loaded: gr.State) -> None:
+        """저장(그 탭이 불러온 용어집에 묶임) → 견적 문구·전문 칸, 그리고 쓰지 않은 칸만 맞추는
+        1초 틱(D59 19e 검증 뒤 고침 6)."""
+        saved = save.click(
+            self.glossary_save_view,
+            [self._signature_state, box, loaded],
+            [status, box, self._library_summary_md, loaded],
+            show_progress="hidden",
+        )
+        saved.then(
+            self.quote_note_view,
+            self._signature_state,
+            self._quote_note_md,
+            queue=False,
+            show_progress="hidden",
+        )
+        gr.Timer(1).tick(
+            self.glossary_tick,
+            [self._signature_state, box, loaded],
+            [box, status, loaded],
+            queue=False,
+            show_progress="hidden",
+        )
 
     def _restore_tools(self) -> None:
         """「복원 · 전달 · 고급 조작」 — 서랍 안에서는 펼친 채 둔다(열면 바로 단추가 보인다)."""
@@ -5206,25 +5406,31 @@ class RawWorkspaceUi:
     def _annotate_transcript(
         self, root: Path, sid: str, source: dict[str, Any], quick: Mapping[str, Any]
     ) -> None:
-        """원본 하나의 원본 자막 칸 — 큐 · 중복 후보 · 갱신 필요 · 시각 확인 · 다시 듣기(D59)."""
+        """원본 하나의 원본 자막 칸 — 큐 · 중복 후보 · 갱신 필요 · 시각 확인 · 다시 듣기(D59).
+
+        큐마다 「다른 귀」 증거(`ear`)와 「확인 필요」 이유(`suspects`)를 싣는다(D59 19e) — 표시만
+        한다. 큐는 하나도 빼거나 고치지 않는다(규칙 4·9).
+        """
         transcript = self.raw.source_transcript(root, sid)
         if not transcript:
             return
         source["transcriptRevision"] = transcript["revision"]
         source["crossSourceCandidates"] = self.raw.source_repeat_candidates(root, sid)
+        sync_view = self.raw.sync_check_view(root, sid)  # 자막 시각 확인 — 표시만(D55)
+        notes = self.raw.subtitle_cue_notes(transcript, sync_view)
         source["subtitles"] = [
             {
                 "id": u["utterance_id"],
                 "text": u["text"],
                 "start": str(Fraction(u["start"]["num"], u["start"]["den"])),
                 "end": str(Fraction(u["end"]["num"], u["end"]["den"])),
+                **notes.get(str(u["utterance_id"]), {}),
             }
             for u in transcript["utterances"]
         ]
         source["transcriptDirty"] = bool(
             transcript["sequence"] and quick.get("stage") in ("자막 변경 · 갱신 필요", "승인 대기")
         )
-        sync_view = self.raw.sync_check_view(root, sid)  # 자막 시각 확인 — 표시만(D55)
         if sync_view is not None:
             source["syncCheck"] = sync_view
         source["relisten"] = self._relisten_view(root, sid, transcript)
@@ -8720,10 +8926,15 @@ class RawWorkspaceUi:
         뿐이다.
         """
         assert self._analysis_model_dd is not None and self._analysis_model_md is not None
+        assert self._glossary_box is not None and self._glossary_status_md is not None
+        assert self._glossary_loaded_state is not None
         targets = [self._analysis_model_dd, self._analysis_model_md]
+        glossary = [self._glossary_box, self._glossary_status_md, self._glossary_loaded_state]
         for event in events:
             assert event is not None
             event.then(self.analysis_model_controls, None, targets)
+            # 용어집 칸도 같은 이유(D59 19e) — 상태 줄에 진행 표시가 깜박이지 않게 숨긴다.
+            event.then(self.glossary_controls, None, glossary, show_progress="hidden")
 
     def _ws_path_display(self) -> str:
         """읽기전용 경로 표시 칸의 값 — 지금 열린 작업공간 자리(선택기로만 정해진다)."""

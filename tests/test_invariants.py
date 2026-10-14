@@ -2351,3 +2351,89 @@ def test_the_workflow_config_never_carries_the_glossary_or_text_lane(
 
 def test_the_real_glossary_and_config_pass() -> None:
     assert check_invariants.check_glossary_stays_local() == []
+
+
+# ── D59 19e: 원본 자막의 「확인 필요」 표시는 순수하고, 서비스만 읽고, 지문 밖에 산다 ───────────
+
+SUSPECTS = "vlogsrt/project/raw/subtitle_suspects.py"
+CLEAN_SUSPECTS = (
+    "import unicodedata\n"
+    "from vlogsrt.hangul import strip_for_compare\n"
+    "from vlogsrt.project.raw.config import SUBTITLE_SUSPECT_SETTINGS\n"
+)
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "import subprocess",
+        "import sqlite3",
+        "from vlogsrt.project import sync_check",
+        "from vlogsrt.project.raw import sync_report",
+        "from vlogsrt.project.raw import source_transcript",
+        "from vlogsrt.project.raw import service",
+        "from vlogsrt.project.raw.tiering import classify",
+        "BODY = Path('cues.json').read_text()",
+    ],
+)
+def test_the_suspect_layer_takes_values_only(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, statement: str
+) -> None:
+    _fake_source_tree(monkeypatch, tmp_path, {SUSPECTS: CLEAN_SUSPECTS})
+    assert check_invariants.check_subtitle_suspects_only_display() == []
+    (tmp_path / SUSPECTS).write_text(CLEAN_SUSPECTS + statement + "\n", encoding="utf-8")
+    assert check_invariants.check_subtitle_suspects_only_display()
+    (tmp_path / SUSPECTS).unlink()
+    assert check_invariants.check_subtitle_suspects_only_display() == [
+        f"{SUSPECTS}: 자막 의심 표시 계층이 사라졌다 (D59 19e)"
+    ]
+
+
+@pytest.mark.parametrize(
+    "importer",
+    [
+        "vlogsrt/project/raw/tiering.py",
+        "vlogsrt/project/raw/auto_cleanup.py",
+        "vlogsrt/project/raw/finalcut_export.py",
+        "vlogsrt/project/raw/source_transcript.py",
+    ],
+)
+def test_only_the_service_reads_the_suspects(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, importer: str
+) -> None:
+    service = "vlogsrt/project/raw/service.py"
+    reads = "from vlogsrt.project.raw import subtitle_suspects\n"
+    _fake_source_tree(monkeypatch, tmp_path, {SUSPECTS: CLEAN_SUSPECTS, service: reads})
+    assert check_invariants.check_subtitle_suspects_only_display() == []
+    (tmp_path / importer).parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / importer).write_text(reads, encoding="utf-8")
+    assert check_invariants.check_subtitle_suspects_only_display() == [
+        f"{importer}: subtitle_suspects를 import한다 — 의심 표시가 표시 밖으로 샌다 (D59 19e)"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("rel", "body"),
+    [
+        (
+            RAW_CONFIG,
+            "class RawWorkflowConfig:\n    suspects: object = SUBTITLE_SUSPECT_SETTINGS\n",
+        ),
+        (RAW_CONFIG, "class SourceTextSettings:\n    hints: object = SubtitleSuspectSettings()\n"),
+        ("vlogsrt/project/raw/source_text.py", "from .config import SUBTITLE_SUSPECT_SETTINGS\n"),
+        ("vlogsrt/project/raw/cross_check.py", "KEY = 'subtitle_suspects'\n"),
+    ],
+)
+def test_the_suspect_settings_stay_outside_every_fingerprint(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, rel: str, body: str
+) -> None:
+    defined = "class SubtitleSuspectSettings:\n    repeat_run_min: int = 3\n"
+    _fake_source_tree(monkeypatch, tmp_path, {SUSPECTS: CLEAN_SUSPECTS, RAW_CONFIG: defined})
+    assert check_invariants.check_subtitle_suspects_only_display() == []  # 정의 자리는 괜찮다
+    (tmp_path / rel).write_text(defined + body, encoding="utf-8")
+    (failure,) = check_invariants.check_subtitle_suspects_only_display()
+    assert failure.startswith(rel) and "지문·캐시 열쇠 밖" in failure
+
+
+def test_the_real_suspect_layer_passes() -> None:
+    assert check_invariants.check_subtitle_suspects_only_display() == []

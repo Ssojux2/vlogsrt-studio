@@ -227,6 +227,63 @@ def source_text_problems(settings: SourceTextSettings) -> list[str]:
 
 
 @dataclass(frozen=True)
+class SubtitleSuspectSettings:
+    """원본 자막 「확인 필요」 표시의 기준(D59 19e) — **표시만** 한다. 외부 근거 없는 조정 대상.
+
+    `RawWorkflowConfig`·`RawUnderstandingSettings`·`RawTierSettings`의 칸이 **아니고** 어느 지문·
+    캐시 열쇠·승인·견적에도 실리지 않는다 — 바꿔도 아무것도 다시 사지 않는다. 표시가 자막을 지우거나
+    숨기거나 고치지 않으므로(규칙 4·9) 값이 틀려도 잃는 것은 사람의 눈길뿐이다.
+
+    - `repeat_run_min`: 접은 글자(공백·부호·대소문자)가 같은 큐가 이만큼 **이어지면** 표시한다.
+      2는 「네」「네」 같은 맞장구까지 걸어 3이다(실측 18개 원본: 2개짜리 런 6개, 3개 이상 11개 —
+      「개좋아」 35·11, 「이곳은 정말 아름다운 곳입니다」 18, 「Cut」 13·7, 「水が少し」 5 …).
+    - `boilerplate_phrases`: whisper가 조각 끝 무음에서 지어내곤 하는 영상 끝 인사말. 접은 글자가 큐
+      안에 들어 있으면 표시한다(「다음 영상에서 만나요!」도 걸린다).
+    - `allowed_letter_scripts`: 글자(유니코드 L 범주)의 이름에 이 낱말 중 하나가 있어야 한다 —
+      한글·라틴 밖의 글자(키릴 `усhod`, 일본어 `水が少し`)를 짚는다. 숫자·부호·기호는 보지 않고,
+      수식 글자(Lm — `ʼ`·`ˈ`)도 보지 않으며, NFKC로 허용 낱말의 글자가 되는 호환 글자(`º`·`ª`·`ℓ`)는
+      받는다.
+    - `allowed_letters`: 이름이 허용 낱말에 없고 NFKC로도 되지 않지만 받는 글자 — 단위의 마이크로
+      기호(`µ`, U+00B5 — NFKC가 그리스 뮤로 접는다). 그리스 뮤(U+03BC) 자체는 여전히 다른 문자다.
+    """
+
+    repeat_run_min: int = 3
+    boilerplate_phrases: tuple[str, ...] = (
+        "시청해 주셔서 감사합니다",
+        "영상 봐주셔서 감사합니다",
+        "다음 영상에서 만나요",
+        "구독과 좋아요 부탁드립니다",
+    )
+    allowed_letter_scripts: tuple[str, ...] = ("HANGUL", "LATIN")
+    allowed_letters: tuple[str, ...] = ("\u00b5",)
+
+
+SUBTITLE_SUSPECT_SETTINGS = SubtitleSuspectSettings()
+"""지금 쓰는 「확인 필요」 기준 — 표시 계산은 주입이 없으면 이 하나를 읽는다."""
+
+
+def subtitle_suspect_problems(settings: SubtitleSuspectSettings) -> list[str]:
+    """값역 — 런 길이는 2 이상의 정수, 인사말은 글자·숫자가 든 줄, 문자 이름은 대문자 낱말."""
+    problems: list[str] = []
+    run = settings.repeat_run_min
+    if isinstance(run, bool) or not isinstance(run, int) or run < 2:
+        problems.append(f"같은 말 런 길이는 2 이상의 정수여야 한다: {run!r}")
+    for phrase in settings.boilerplate_phrases:
+        if not isinstance(phrase, str) or not any(char.isalnum() for char in phrase):
+            problems.append(f"영상 끝 인사말에 글자가 없다: {phrase!r}")
+    problems += hint_problems("영상 끝 인사말", tuple(map(str, settings.boilerplate_phrases)))
+    if not settings.allowed_letter_scripts:
+        problems.append("허용 문자 이름이 비었다")
+    for script in settings.allowed_letter_scripts:
+        if not isinstance(script, str) or not script.isascii() or not script.isupper():
+            problems.append(f"허용 문자 이름은 유니코드 이름의 대문자 낱말이어야 한다: {script!r}")
+    for letter in settings.allowed_letters:
+        if not isinstance(letter, str) or len(letter) != 1:
+            problems.append(f"허용 글자는 한 글자씩이어야 한다: {letter!r}")
+    return problems
+
+
+@dataclass(frozen=True)
 class RawWorkflowConfig:
     """v2 원본 워크플로의 최상위 설정 — 기본은 오프라인이다(계획 §14.3)."""
 
