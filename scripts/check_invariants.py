@@ -636,6 +636,9 @@ RETEXT_MUST_NOT_IMPORT = (
 TIERING_MUST_NOT_IMPORT = (
     "subprocess", "openai", "service", "review_workspace", "understanding_luna", "preprocess",
     "anthropic_messages",
+    # D60 — 자막 시각 확인 값은 서비스가 지금 리비전 보고서에서 만들어 **값으로** 넘긴다. 등급이
+    # 확인 계층·보고서·의심 표시·원본 자막을 직접 알면 그 값의 리비전 결속이 서비스 밖으로 샌다.
+    "sync_check", "sync_report", "subtitle_suspects", "source_transcript", "importlib",
 )  # fmt: skip
 TIERING_FILE_IO = re.compile(r"\.(open|read_text|read_bytes|write_text|write_bytes)\(|\bopen\(")
 
@@ -917,7 +920,192 @@ def check_tiering_stays_pure() -> list[str]:
         for number, line in enumerate(body.splitlines(), start=1)
         if TIERING_FILE_IO.search(line)
     ]
+    # D60 — 글로 이름을 넘겨 들이는 길(`__import__("vlogsrt.project.sync_check")`·`exec`)도 막는다.
+    # `importlib`은 import 목록이 막는다. 이름을 잘라 이어 붙인 글은 이 둘 없이 쓸 수 없다.
+    failures += [
+        f"tiering.py:{number}: 동적 코드·import를 연다 — 재료는 서비스가 값으로 넘긴다 (D60)"
+        for number, line in enumerate(body.splitlines(), start=1)
+        if SYNC_SNAP_FORBIDDEN_CALLS.search(line)
+    ]
     return failures
+
+
+# D60 — 자막 시각 확인(D55)이 등급으로 가는 길은 하나다: 서비스의 `_tier_timing`이 지금
+# 리비전 보고서에서 값(`TimingSignals`)을 만들고, 등급 보고서의 유일한 자리
+# `_tier_report_for_row`가 그 값을 `classify(…, timing=self._tier_timing(…))`로 넘긴다.
+# 화면·검토 머리·자동 제외 후보·Final Cut 키워드는 모두 그 자리를 지나므로 같은 등급을 본다 —
+# 값을 빠뜨리거나 다른 값을 넘기는 자리가 생기면 소비자마다 등급이 갈린다.
+TIER_TIMING_SERVICE = "vlogsrt/project/raw/service.py"
+TIER_TIMING_MODULE = "vlogsrt/project/raw/tiering.py"
+TIER_CLASSIFY_OWNER = "RawWorkspaceService._tier_report_for_row"
+TIER_TIMING_OWNER = "RawWorkspaceService._tier_timing"
+TIER_TIMING_NAMES = frozenset({"TimingSignals", "UNKNOWN_TIMING"})
+TIER_CLASSIFY_NAME = "classify"
+TIER_TIMING_ENTRY = "_tier_timing"
+# 등급 모듈이나 그 부르기를 글로 가리키는 꼴 — `getattr(tiering, "classify")`·
+# `vars(m)["classify"]`·`importlib.import_module("vlogsrt.project.raw.tiering")`·
+# `getattr(self, "_tier_timing")`. 이름을 잘라 이어 붙인 글(`"class" + "ify"`)은 못 본다 —
+# 정규식의 한계로 받아들이고 리뷰가 지킨다(19g·19h와 같다).
+TIER_SPELLED = re.compile(r"classify|_tier_timing|[\w.]*\btiering")
+
+
+def check_tier_timing_only_from_service() -> list[str]:
+    """D60 — `tiering.classify`는 서비스의 한 자리에서만, 언제나 `_tier_timing`의 값과 함께 불린다.
+
+    `vlogsrt/`와 `ui/`의 `tiering.py` 밖 소스를 AST로 본다(19h의 시각 맞춤 검사와 같은
+    꼴): 등급 모듈의 별명(`import … as _t`·점 경로)을 따라 `classify`를 부르기·부르지 않고
+    꺼내기·이름으로·`*`로 가져오기, 모듈을 다른 이름에 묶기, 그 이름을 쓴 글. 시각 확인 값
+    (`TimingSignals`·`UNKNOWN_TIMING`)은 `_tier_timing`만 만들고, `_tier_timing`은
+    `_tier_report_for_row`만 읽는다.
+    """
+    failures: list[str] = []
+    for source in [*_sources(), *sorted(UI_DIR.rglob("*.py"))]:
+        rel = _rel(source)
+        if rel == TIER_TIMING_MODULE:
+            continue
+        tree = ast.parse(source.read_text(encoding="utf-8"))
+        aliases = _tiering_aliases(tree)
+        sites = (_allowed_classify_calls(rel, tree, aliases), _called_funcs(tree))
+        for node, owner in _owned_nodes(tree):
+            failures += _tier_classify_failures(rel, node, owner, aliases, sites)
+            failures += _tier_timing_entry_failures(rel, node, owner)
+            failures += _tier_timing_value_failures(rel, node, owner)
+    return failures
+
+
+def _tiering_aliases(tree: ast.Module) -> frozenset[str]:
+    """등급 모듈을 가리키는 이름 — `tiering`, `… import tiering as X`, `import ….tiering as X`."""
+    names = {"tiering"}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            names.update(
+                alias.asname or alias.name
+                for alias in node.names
+                if alias.name.split(".")[-1] == "tiering"
+                and (alias.asname or isinstance(node, ast.ImportFrom))
+            )
+    return frozenset(names)
+
+
+def _is_tiering_ref(value: ast.AST, aliases: frozenset[str]) -> bool:
+    """등급 모듈 그 자체 — 별명 이름이나 `vlogsrt.project.raw.tiering` 같은 점 경로."""
+    if isinstance(value, ast.Name):
+        return value.id in aliases
+    return isinstance(value, ast.Attribute) and value.attr == "tiering"
+
+
+def _is_classify_ref(node: ast.AST, aliases: frozenset[str]) -> bool:
+    return (
+        isinstance(node, ast.Attribute)
+        and node.attr == TIER_CLASSIFY_NAME
+        and _is_tiering_ref(node.value, aliases)
+    )
+
+
+def _called_funcs(tree: ast.Module) -> frozenset[int]:
+    return frozenset(id(node.func) for node in ast.walk(tree) if isinstance(node, ast.Call))
+
+
+def _allowed_classify_calls(rel: str, tree: ast.Module, aliases: frozenset[str]) -> frozenset[int]:
+    """허락된 부르기의 `func` 노드 — 서비스의 그 자리에서 `timing=self._tier_timing(…)`과 함께."""
+    if rel != TIER_TIMING_SERVICE:
+        return frozenset()
+    return frozenset(
+        id(node.func)
+        for node, owner in _owned_nodes(tree)
+        if isinstance(node, ast.Call)
+        and owner == TIER_CLASSIFY_OWNER
+        and _is_classify_ref(node.func, aliases)
+        and any(kw.arg == "timing" and _is_tier_timing_call(kw.value) for kw in node.keywords)
+    )
+
+
+def _tier_classify_failures(
+    rel: str,
+    node: ast.AST,
+    owner: str | None,
+    aliases: frozenset[str],
+    sites: tuple[frozenset[int], frozenset[int]],
+) -> list[str]:
+    where = f"{rel}:{getattr(node, 'lineno', 0)}"
+    reason = _tier_classify_reason(node, owner, aliases, sites, rel)
+    return [f"{where}: {reason} (D60)"] if reason else []
+
+
+def _tier_classify_reason(
+    node: ast.AST,
+    owner: str | None,
+    aliases: frozenset[str],
+    sites: tuple[frozenset[int], frozenset[int]],
+    rel: str,
+) -> str | None:
+    place = owner or "모듈 수준"
+    if isinstance(node, ast.ImportFrom) and (node.module or "").split(".")[-1] == "tiering":
+        imported = {alias.name for alias in node.names} & {TIER_CLASSIFY_NAME, "*"}
+        return (
+            "tiering.classify를 이름으로 가져온다 — 서비스의 한 자리만 부른다" if imported else None
+        )
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        if TIER_SPELLED.fullmatch(node.value):
+            return (
+                f"등급 부르기를 글 {node.value!r}로 가리킨다({place}) — 서비스의 한 자리만 부른다"
+            )
+        return None
+    if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None:
+        if _is_tiering_ref(node.value, aliases):
+            return f"등급 모듈을 다른 이름에 묶는다({place}) — 부르기를 숨길 수 있다"
+        return None
+    if not _is_classify_ref(node, aliases) or id(node) in sites[0]:
+        return None
+    if id(node) not in sites[1]:
+        return f"tiering.classify를 부르지 않고 꺼낸다({place}) — 서비스의 한 자리만 부른다"
+    if rel != TIER_TIMING_SERVICE or owner != TIER_CLASSIFY_OWNER:
+        return (
+            f"tiering.classify를 {place}에서 부른다 — 등급 보고서는 {TIER_CLASSIFY_OWNER}"
+            " 한 자리뿐이다"
+        )
+    return "tiering.classify에 timing=self._tier_timing(…)이 없다 — 소비자마다 등급이 갈린다"
+
+
+def _tier_timing_entry_failures(rel: str, node: ast.AST, owner: str | None) -> list[str]:
+    """`_tier_timing`(값의 문)은 등급 보고서의 그 자리만 읽는다 — 다른 메서드가 값을 쥐면 그 길로
+    등급이 아닌 곳(컷·제거·견적)에 시각 확인 값이 샐 수 있다."""
+    name = node.attr if isinstance(node, ast.Attribute) else getattr(node, "id", None)
+    if name != TIER_TIMING_ENTRY:
+        return []
+    if rel == TIER_TIMING_SERVICE and owner == TIER_CLASSIFY_OWNER:
+        return []
+    return [
+        f"{rel}:{getattr(node, 'lineno', 0)}: {TIER_TIMING_ENTRY}를 {owner or '모듈 수준'}에서"
+        f" 읽는다 — 시각 확인 값은 {TIER_CLASSIFY_OWNER}만 넘긴다 (D60)"
+    ]
+
+
+def _is_tier_timing_call(value: ast.AST) -> bool:
+    return (
+        isinstance(value, ast.Call)
+        and isinstance(value.func, ast.Attribute)
+        and value.func.attr == "_tier_timing"
+        and isinstance(value.func.value, ast.Name)
+        and value.func.value.id == "self"
+    )
+
+
+def _tier_timing_value_failures(rel: str, node: ast.AST, owner: str | None) -> list[str]:
+    names: set[str] = set()
+    if isinstance(node, ast.Name):
+        names = {node.id}
+    elif isinstance(node, ast.Attribute):
+        names = {node.attr}
+    elif isinstance(node, ast.alias):
+        names = {node.name.split(".")[-1], node.asname or ""}
+    found = sorted(names & TIER_TIMING_NAMES)
+    if not found or (rel == TIER_TIMING_SERVICE and owner == TIER_TIMING_OWNER):
+        return []
+    return [
+        f"{rel}:{getattr(node, 'lineno', 0)}: {', '.join(found)}를 {owner or '모듈 수준'}에서"
+        f" 가리킨다 — 등급에 넘길 시각 확인 값은 {TIER_TIMING_OWNER}만 만든다 (D60)"
+    ]
 
 
 def check_finalcut_timeline_stays_pure() -> list[str]:
@@ -991,7 +1179,10 @@ def check_finalcut_export_never_copies() -> list[str]:
 
 
 # 자막 시각 확인(D55)은 **표시만** 한다 — 순수 계산은 프로세스·모델·전사·조판을 모르고, 결과는
-# 등급·자동 정리·선택·출력·분할로 흘러가지 않으며, 기준은 어느 분석·전사·자막 지문에도 없다.
+# 자동 정리·선택·출력·분할로 흘러가지 않으며, 기준은 어느 분석·전사·자막 지문에도 없다. 좁은 예외
+# 하나(D60): 등급은 서비스가 지금 리비전 보고서에서 만든 **값**으로만 녹색을 노랑으로 내린다 —
+# 등급 계층은 확인 계층을 import하지 못하고(`TIERING_MUST_NOT_IMPORT`), 그 값의 길은 서비스 한
+# 자리다(`check_tier_timing_only_from_service`). 그래서 아래 import 목록은 넓히지 않았다.
 SYNC_CHECK_MUST_NOT_IMPORT = (
     "subprocess", "openai", "numpy", "onnxruntime", "preprocess", "output", "refine", "repair",
     "transcribe", "service", "sync_report", "source_transcript",
@@ -2355,6 +2546,7 @@ CHECKS = (
     ("재전사는 전사 단계에 머문다", check_repair_stays_upstream),
     ("글자 교정은 순수하다", check_retext_stays_pure),
     ("3단 등급은 순수하다", check_tiering_stays_pure),
+    ("등급의 시각 확인 값은 서비스 한 자리만", check_tier_timing_only_from_service),
     ("자막 시각 확인은 순수하다", check_sync_check_stays_pure),
     ("자막 시각 확인은 표시만 한다", check_sync_check_only_displays),
     ("자막 의심 표시는 순수하고 표시만 한다", check_subtitle_suspects_only_display),

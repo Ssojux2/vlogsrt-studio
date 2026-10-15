@@ -403,7 +403,8 @@ UPKEEP_JOB_KIND = "workspace_upkeep"
 
 SYNC_CHECK_JOB_KIND = "subtitle_sync_check"
 """자막 시각 확인 작업(D55) — 무료 로컬 VAD로 원본 자막과 말소리를 대조해 **표시만** 한다.
-자막·전사·SRT·지문을 쓰지 않고 등급·자동 정리·선택·출력·분할에 들어가지 않는다."""
+자막·전사·SRT·지문을 쓰지 않고 자동 정리·선택·출력·분할에 들어가지 않는다. 등급만 좁은 예외다
+(D60): 지금 리비전 보고서의 판정·표지가 `_tier_timing`을 거쳐 추천을 보통으로 내릴 수만 있다."""
 
 SYNC_ALL_SOURCES = "*"
 """'걸지 못함' 표지의 자리 — 원본을 모르는 실패(앱 열기 고리가 재료조차 못 읽음)는 전체에."""
@@ -1763,12 +1764,12 @@ class RawWorkspaceService:
         result: dict[str, list[dict]] = {}
         if summary is None:
             return result
-        workspace_root = self._workspace(root).root
+        workspace = self._workspace(root)
         for row in summary.results:
             if row.asset_id not in asset_ids:
                 continue
             try:
-                report = self._tier_report_for_row(workspace_root, row)
+                report = self._tier_report_for_row(workspace, row)
             except (OSError, ValueError, KeyError, TypeError):
                 continue
             if report is not None:
@@ -1779,26 +1780,30 @@ class RawWorkspaceService:
         """원본 하나의 3단 등급 보고서 — 저장된 분석 문서만 읽는다(유료 호출 0회, D51·D52).
 
         완성 문서가 있으면 그 문서로, Luna가 도는 동안이면 진행 문서로(자막 칸이 아직 없어
-        빨강 없이) 계산한다. 분석이 없으면 None이다. 아무것도 쓰지 않는다.
+        빨강 없이) 계산한다. 분석이 없으면 None이다. 아무것도 쓰지 않는다. 자막 시각 확인 값은
+        `_tier_report_for_row`가 지금 리비전 보고서에서 한 번 읽어 넘긴다(D60).
         """
         workspace = self._workspace(root)
         row = AnalysisStore(workspace).source_result(revision_id, asset_id)
-        return None if row is None else self._tier_report_for_row(workspace.root, row)
+        return None if row is None else self._tier_report_for_row(workspace, row)
 
     def _tier_report_for_row(
-        self, workspace_root: Path, row: AnalysisSourceResult
+        self, workspace: RawWorkspace, row: AnalysisSourceResult
     ) -> tiering.TierReport | None:
+        """등급 보고서의 유일한 자리 — 화면·검토 머리·자동 제외 후보·Final Cut 키워드가 모두 이
+        길로 같은 값(`_tier_timing`)을 받아 같은 등급을 본다(D60, `check_invariants`)."""
         if row.status == "transcribed":
             # 1단계만 끝난 행(「전사만」 · 영상 분석 승인 전, D59 19b) — 판정이 없다. 행의 문서는
             # 1단계 기록(`asr_phase.json`)이라 등급 문서로 읽지 않는다.
             return None
-        directory, document = _tier_paths(workspace_root, row)
+        directory, document = _tier_paths(workspace.root, row)
         if document.is_file():
             body = document.read_bytes()
             return tiering.classify(
                 json.loads(body),
-                audio_start=_record_audio_start(workspace_root, row),
+                audio_start=_record_audio_start(workspace.root, row),
                 document_sha256=hashlib.sha256(body).hexdigest(),
+                timing=self._tier_timing(workspace, row.asset_id),
             )
         progress = directory / "suitability_progress.json"
         if not progress.is_file():
@@ -1806,7 +1811,39 @@ class RawWorkspaceService:
         payload = json.loads(progress.read_text(encoding="utf-8"))
         if payload.get("analysis_revision_id") != row.revision_id:
             return None
-        return tiering.classify(payload)
+        return tiering.classify(payload, timing=self._tier_timing(workspace, row.asset_id))
+
+    def _tier_timing(self, workspace: RawWorkspace, asset_id: str) -> tiering.TimingSignals:
+        """등급에 넘길 자막 시각 확인 값 — **지금** 보고서에서만(D60).
+
+        지금이란 보고서의 자막 리비전·1단계 PCM·기준이 지금과 같다는 뜻이다(`is_current` —
+        Final Cut의 `자막 시각 확인 필요` 키워드와 같은 규칙). 없거나 낡았거나 다른 리비전을
+        쟀으면 모름(아무것도 내리지 않는다). 「말소리를 못 찾음」 큐는 판정이 난 보고서(빨강·
+        노랑·초록)에서만 넘긴다 — 측정 불가(말소리 3초 미만 등)는 측정 자체를 믿을 수 없다.
+        보고서를 못 읽으면 모름으로 두고 경고한다(표시용 측정이 등급 계산을 막지 못한다).
+        읽기만 한다.
+        """
+        from vlogsrt.project import sync_check
+        from vlogsrt.project.raw import sync_report
+
+        try:
+            report = sync_report.current_report(workspace, asset_id, strict=True)
+            if report is None or report.get("stale"):
+                return tiering.UNKNOWN_TIMING
+            level = str(report.get("verdict"))
+            judged = level in (sync_check.LEVEL_RED, sync_check.LEVEL_AMBER, sync_check.LEVEL_GREEN)
+            cues = (report.get("cues") or ()) if judged else ()
+            flagged = frozenset(
+                (str(cue["id"]), Fraction(str(cue["start"])), Fraction(str(cue["end"])))
+                for cue in cues
+                if sync_check.FLAG_NO_SPEECH in (cue.get("flags") or ())
+            )
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            log.warn(
+                f"자막 시각 확인 보고서를 읽지 못해 등급에는 모름으로 둔다 — {asset_id}: {error}"
+            )
+            return tiering.UNKNOWN_TIMING
+        return tiering.TimingSignals(level=level, no_speech=flagged)
 
     def start_reference_import(
         self,
@@ -2129,10 +2166,14 @@ class RawWorkspaceService:
         """지금 머리를 다시 읽어 옮긴다 — 손대지 않았으면 증거로 다시 세우고, 아니면 등급만 단다.
 
         표지가 있어도 옛 판 제안이 실려 있으면 옮긴다(D53 실데이터 — 옛 머리 입양이 v1 제안을
-        v2 표지와 함께 되살렸다). 손대지 않았는지는 내용으로 본다(`is_untouched`).
+        v2 표지와 함께 되살렸다). 손대지 않았는지는 내용으로 본다(`is_untouched`). 판이 같아도
+        등급의 재료(자막 시각 확인 값 등, D60)가 바뀌어 다시 매긴 등급이 다르면 등급만 다시
+        단다 — 빨강은 그 재료와 무관하므로 다시 세울 일이 없다(바뀐 것이 없으면 리비전도 없다).
         """
         current = facade.load_head().revision
         if not facade.needs_tier_migration(current):
+            if facade.stale_grade_segments(current):
+                facade.retier(current.base_plan_id)
             return
         if facade.is_untouched(current):
             self._migrate_unedited_head(root, facade, current)
@@ -2193,8 +2234,9 @@ class RawWorkspaceService:
         head = _review_head(facade)
         if head is None:
             return pending
-        if facade.needs_tier_migration(head) and facade.tier_evidence_rows():
-            pending[UPKEEP_TIERS] = _tier_state(facade, head)
+        tier_state = _tier_state(facade, head) if facade.tier_evidence_rows() else None
+        if tier_state is not None:
+            pending[UPKEEP_TIERS] = tier_state
         if order is not None and self._reorder_pending(root, head, order):
             pending[UPKEEP_ALIGN] = f"{head.revision_id}>{order.revision_id}"
         return pending
@@ -2216,7 +2258,9 @@ class RawWorkspaceService:
                 "영상을 촬영 시각 순으로 맞춥니다 — 원본의 촬영 날짜를 다시 읽고, 사람이 정한"
                 " 사용/제외·메모는 그대로입니다. 분석 승인은 다시 받지 않습니다."
             )
-        if UPKEEP_TIERS in pending:
+        if UPKEEP_TIERS in pending and pending[UPKEEP_TIERS].startswith(_REGRADE_STATE):
+            lines.append(_REGRADE_MESSAGE)
+        elif UPKEEP_TIERS in pending:
             facade = self.review_workspace_facade(root)
             lines.append(_tier_migration_message(facade.is_untouched(facade.load_head().revision)))
         return "\n\n".join(lines)
@@ -2537,7 +2581,10 @@ class RawWorkspaceService:
             return None
         if handle is None:
             return None
-        return f"자막 시각 확인 {len(fresh)}개를 백그라운드에서 잽니다(무료 · 표시만 합니다)."
+        return (
+            f"자막 시각 확인 {len(fresh)}개를 백그라운드에서 잽니다(무료 · 자막과 컷은"
+            " 그대로입니다)."
+        )
 
     def _queue_sync_checks(self, root: Path, source_ids: Sequence[str]) -> None:
         """분석·자막 수정 뒤의 고리 — 부른 쪽의 결과를 **절대** 바꾸지 않는다(D55).
@@ -4519,7 +4566,7 @@ class RawWorkspaceService:
         self, workspace: RawWorkspace, row: AnalysisSourceResult, record: Mapping[str, Any]
     ) -> set[Fraction]:
         decisions = list(record.get("auto_decisions", []))
-        report = self._tier_report_for_row(workspace.root, row) if row.document_path else None
+        report = self._tier_report_for_row(workspace, row) if row.document_path else None
         if report is not None:
             decisions.extend(tiering.red_decisions(report))
         if not decisions:
@@ -4898,16 +4945,48 @@ def _current_prompt(prompt_revision: object) -> bool:
     return prompt_revision == DEFAULT_PROMPT_REVISION
 
 
-def _tier_state(facade: Any, head: ReviewRevision) -> str:
-    """등급판 옮기기의 할 일 열쇠 — 판·표지·옛 제안 자리로만 만든다(머리 리비전이 아니라).
+_REGRADE_STATE = "다시 매김|"
+"""등급 재료만 바뀐 머리(D60)의 할 일 열쇠 머리 — 안내 글을 고르는 표지다."""
 
-    다시 세우면 머리 리비전이 늘 바뀐다 — 그것을 열쇠로 쓰면 옮겨도 남는 것이 있을 때 앱을
-    열 때마다가 아니라 화면 갱신마다 다시 세우기(원본 재해시)가 되풀이된다. 같은 것이 남으면
-    같은 열쇠라 이번 실행에서는 다시 걸지 않는다.
+_REGRADE_MESSAGE = (
+    "자막 시각 확인 결과나 분석 근거가 바뀌어 등급 표시만 다시 답니다 — 사람이 정한"
+    " 사용/제외·메모·경계는 그대로입니다."
+)
+
+
+def _tier_state(facade: Any, head: ReviewRevision) -> str | None:
+    """등급판 옮기기의 할 일 열쇠 — 할 일이 없으면 None.
+
+    옮기기(판·표지·옛 제안)는 그 자리로만 만든다(머리 리비전이 아니라): 다시 세우면 머리 리비전이
+    늘 바뀐다 — 그것을 열쇠로 쓰면 옮겨도 남는 것이 있을 때 앱을 열 때마다가 아니라 화면 갱신마다
+    다시 세우기(원본 재해시)가 되풀이된다. 같은 것이 남으면 같은 열쇠라 이번 실행에서는 다시 걸지
+    않는다. 판이 같은데 다시 매긴 등급만 다르면(D60 — 자막 시각 확인을 다시 쟀다) 등급만 다시 다는
+    할 일이고, 그 열쇠는 머리 리비전과 바뀔 조각으로 만든다 — 다시 세우기가 없어 싸고, 사람이 그
+    사이 편집했으면(그래서 한 번 실패했으면) 다음 갱신이 다시 건다.
     """
-    spans = json.dumps(facade.stale_tier_proposal_spans(head))
-    digest = hashlib.sha256(spans.encode("utf-8")).hexdigest()[:16]
-    return f"{TIER_SETTINGS.tier_version}|표지 {facade.has_tier_marker(head)}|옛 제안 {digest}"
+    if facade.needs_tier_migration(head):
+        spans = json.dumps(facade.stale_tier_proposal_spans(head))
+        digest = hashlib.sha256(spans.encode("utf-8")).hexdigest()[:16]
+        return f"{TIER_SETTINGS.tier_version}|표지 {facade.has_tier_marker(head)}|옛 제안 {digest}"
+    return _regrade_state(facade, head)
+
+
+def _regrade_state(facade: Any, head: ReviewRevision) -> str | None:
+    """등급 재료만 바뀐 머리의 할 일 열쇠(D60) — 다시 매길 것이 없으면 None.
+
+    다시 매긴 등급을 재다가 증거를 못 읽으면 화면 그리기를 막지 않고 할 일로 넘긴다 — 정리
+    작업이 같은 계산을 다시 해 실패를 작업 기록과 「작업공간 정리 실패」 안내로 남긴다(조용히
+    넘기지 않는다).
+    """
+    head_key = f"{_REGRADE_STATE}{TIER_SETTINGS.tier_version}|{head.revision_id}"
+    try:
+        stale = facade.stale_grade_segments(head)
+    except (OSError, ValueError, KeyError, TypeError, RawWorkspaceError) as error:
+        return f"{head_key}|읽기 실패 {type(error).__name__}"
+    if not stale:
+        return None
+    digest = hashlib.sha256(json.dumps(stale, ensure_ascii=False).encode("utf-8")).hexdigest()
+    return f"{head_key}|{digest[:16]}"
 
 
 def _same_sources(head: ReviewRevision, order: GlobalOrderRevision) -> bool:
@@ -4926,12 +5005,12 @@ def _tier_migration_message(untouched: bool) -> str:
     """등급판 옮기기 안내 — 손대지 않은 머리는 다시 세우고, 손댄 머리는 등급만 다시 단다."""
     if untouched:
         return (
-            "등급 기준이 AI 판정 + 자막으로 바뀌어 검토를 다시 세웁니다 — 손대지 않은"
-            " 검토라 제외 제안 구간을 조각으로 나눕니다."
+            "등급 기준이 바뀌어(AI 판정 + 자막, 추천 기준 강화) 검토를 다시 세웁니다 — 손대지"
+            " 않은 검토라 제외 제안 구간을 조각으로 나눕니다."
         )
     return (
-        "등급 기준이 AI 판정 + 자막으로 바뀌어 등급 표시만 다시 답니다 — 사람이 정한"
-        " 사용/제외는 그대로이고, 근거가 사라진 옛 제외 제안은 사용으로 되돌립니다."
+        "등급 기준이 바뀌어(AI 판정 + 자막, 추천 기준 강화) 등급 표시만 다시 답니다 — 사람이"
+        " 정한 사용/제외는 그대로이고, 근거가 사라진 옛 제외 제안은 사용으로 되돌립니다."
     )
 
 

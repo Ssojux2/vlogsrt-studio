@@ -1678,6 +1678,17 @@ def test_the_real_edit_module_passes_the_removal_layer_check() -> None:
         "from vlogsrt import preprocess",
         "BODY = Path('x').read_text()",
         "with open('x') as handle:\n    pass",
+        # D60 — 시각 확인 값은 서비스가 값으로 넘긴다. 등급이 확인 계층·원본 자막을 알면 안 된다.
+        "from vlogsrt.project import sync_check",
+        "from vlogsrt.project.sync_check import LEVEL_RED",
+        "from vlogsrt.project.raw import sync_report",
+        "import vlogsrt.project.raw.sync_report as reports",
+        "from vlogsrt.project.raw import subtitle_suspects",
+        "from vlogsrt.project.raw.source_transcript import load",
+        # 글로 이름을 넘겨 들이는 길(20a 검증 뒤 고침).
+        "import importlib",
+        "MODULE = __import__('vlogsrt.project.sync_check')",
+        "exec('from vlogsrt.project import sync_check')",
     ],
 )
 def test_tiering_is_pure(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, statement: str) -> None:
@@ -1699,6 +1710,198 @@ def test_tiering_is_pure(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, statem
 
 def test_real_tiering_module_passes_the_purity_check() -> None:
     assert check_invariants.check_tiering_stays_pure() == []
+
+
+# ── D60: 등급의 시각 확인 값은 서비스 한 자리만 ─────────────────────────────
+
+TIER_SERVICE = "vlogsrt/project/raw/service.py"
+CLEAN_TIER_SERVICE = (
+    "from vlogsrt.project.raw import tiering\n"
+    "\n"
+    "\n"
+    "class RawWorkspaceService:\n"
+    "    def _tier_report_for_row(self, workspace, row):\n"
+    "        if row:\n"
+    "            return tiering.classify({}, timing=self._tier_timing(workspace, row))\n"
+    "        return tiering.classify({'p': 1}, timing=self._tier_timing(workspace, row))\n"
+    "\n"
+    "    def _tier_timing(self, workspace, asset_id):\n"
+    "        if asset_id:\n"
+    "            return tiering.TimingSignals(level='red')\n"
+    "        return tiering.UNKNOWN_TIMING\n"
+)
+CLEAN_TIERING = (
+    "class TimingSignals:\n    pass\n\n\nUNKNOWN_TIMING = TimingSignals()\n\n\n"
+    "def classify(document, *, timing=UNKNOWN_TIMING):\n    return document\n"
+)
+
+
+@pytest.mark.parametrize(
+    ("rel", "body", "line", "fragment"),
+    [
+        # 서비스의 다른 메서드가 부른다 — 값과 함께여도 자리가 틀렸다.
+        (
+            TIER_SERVICE,
+            CLEAN_TIER_SERVICE + "\n    def tier_report(self, ws, row):\n"
+            "        return tiering.classify({}, timing=self._tier_timing(ws, row))\n",
+            16,
+            "tiering.classify를 RawWorkspaceService.tier_report에서 부른다",
+        ),
+        # 그 자리에서 값을 빠뜨렸다.
+        (
+            TIER_SERVICE,
+            CLEAN_TIER_SERVICE.replace(
+                "tiering.classify({}, timing=self._tier_timing(workspace, row))",
+                "tiering.classify({})",
+            ),
+            7,
+            "timing=self._tier_timing(…)이 없다",
+        ),
+        # 그 자리에서 다른 값을 넘겼다(모름으로 덮어 신호를 버린다).
+        (
+            TIER_SERVICE,
+            CLEAN_TIER_SERVICE.replace(
+                "timing=self._tier_timing(workspace, row))\n        return",
+                "timing=tiering.UNKNOWN_TIMING)\n        return",
+            ),
+            7,
+            "timing=self._tier_timing(…)이 없다",
+        ),
+        # 그 자리 안에 둔 함수는 그 자리가 아니다.
+        (
+            TIER_SERVICE,
+            CLEAN_TIER_SERVICE + "\n    def _other(self, ws, row):\n"
+            "        def inner():\n"
+            "            return tiering.classify({}, timing=self._tier_timing(ws, row))\n"
+            "        return inner()\n",
+            17,
+            "RawWorkspaceService._other.inner에서 부른다",
+        ),
+        # 모듈 수준에서 값을 만든다.
+        (
+            TIER_SERVICE,
+            CLEAN_TIER_SERVICE + "\nDEFAULT = tiering.TimingSignals(level='red')\n",
+            15,
+            "TimingSignals를 모듈 수준에서 가리킨다",
+        ),
+        # 다른 모듈이 등급을 직접 매긴다·값을 만든다·이름으로 가져온다.
+        (
+            "vlogsrt/project/raw/finalcut_export.py",
+            "from vlogsrt.project.raw import tiering\n\n\n"
+            "def report(document):\n    return tiering.classify(document)\n",
+            5,
+            "tiering.classify를 report에서 부른다",
+        ),
+        (
+            "vlogsrt/project/raw/review_workspace.py",
+            "from vlogsrt.project.raw.tiering import TimingSignals\n",
+            1,
+            "TimingSignals를 모듈 수준에서 가리킨다",
+        ),
+        (
+            "ui/workspace_service.py",
+            "from vlogsrt.project.raw.tiering import classify\n",
+            1,
+            "tiering.classify를 이름으로 가져온다",
+        ),
+        (
+            "vlogsrt/project/raw/review_workspace.py",
+            "from vlogsrt.project.raw import tiering\n\n\n"
+            "def grade(report):\n    return tiering.UNKNOWN_TIMING\n",
+            5,
+            "UNKNOWN_TIMING를 grade에서 가리킨다",
+        ),
+        # 독립 검증이 찾은 빈틈(20a 검증 뒤 고침) — 별명·getattr 글·부르지 않고 꺼내기·값의 문 읽기.
+        (
+            TIER_SERVICE,
+            CLEAN_TIER_SERVICE + "\n    def _removal_cuts(self, ws, row):\n"
+            "        from vlogsrt.project.raw import tiering as _t\n"
+            "        return _t.classify({})\n",
+            17,
+            "tiering.classify를 RawWorkspaceService._removal_cuts에서 부른다",
+        ),
+        (
+            TIER_SERVICE,
+            CLEAN_TIER_SERVICE + "\n    def other(self, doc):\n"
+            "        return getattr(tiering, 'classify')(doc)\n",
+            16,
+            "등급 부르기를 글 'classify'로 가리킨다",
+        ),
+        (
+            TIER_SERVICE,
+            CLEAN_TIER_SERVICE + "\n    def other(self, doc):\n"
+            "        fn = tiering.classify\n        return fn(doc)\n",
+            16,
+            "tiering.classify를 부르지 않고 꺼낸다",
+        ),
+        (
+            TIER_SERVICE,
+            CLEAN_TIER_SERVICE + "\n    def _removal_cuts(self, ws, row):\n"
+            "        return self._tier_timing(ws, row)\n",
+            16,
+            "_tier_timing를 RawWorkspaceService._removal_cuts에서 읽는다",
+        ),
+        (
+            TIER_SERVICE,
+            CLEAN_TIER_SERVICE + "\n    def other(self, ws, row):\n"
+            "        return getattr(self, '_tier_timing')(ws, row)\n",
+            16,
+            "등급 부르기를 글 '_tier_timing'로 가리킨다",
+        ),
+        (
+            TIER_SERVICE,
+            CLEAN_TIER_SERVICE + "\nMODULE = tiering\n",
+            15,
+            "등급 모듈을 다른 이름에 묶는다",
+        ),
+        (
+            "vlogsrt/project/raw/review_workspace.py",
+            "import importlib\n\n\ndef grade(doc):\n"
+            "    module = importlib.import_module('vlogsrt.project.raw.tiering')\n"
+            "    return module.classify(doc)\n",
+            5,
+            "등급 부르기를 글 'vlogsrt.project.raw.tiering'로 가리킨다",
+        ),
+        (
+            "ui/workspace_service.py",
+            "from vlogsrt.project.raw.tiering import *\n",
+            1,
+            "tiering.classify를 이름으로 가져온다",
+        ),
+        (
+            "vlogsrt/project/raw/finalcut_export.py",
+            "import vlogsrt.project.raw.tiering\n\n\n"
+            "def report(doc):\n    return vlogsrt.project.raw.tiering.classify(doc)\n",
+            5,
+            "tiering.classify를 report에서 부른다",
+        ),
+        (
+            "ui/workspace_service.py",
+            "import vlogsrt.project.raw.tiering as tm\n\n\n"
+            "def report(doc):\n    return tm.classify(doc, timing=None)\n",
+            5,
+            "tiering.classify를 report에서 부른다",
+        ),
+    ],
+)
+def test_tier_timing_reaches_tiering_only_through_the_service_entry(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, rel: str, body: str, line: int, fragment: str
+) -> None:
+    clean = {TIER_SERVICE: CLEAN_TIER_SERVICE, "vlogsrt/project/raw/tiering.py": CLEAN_TIERING}
+    _fake_source_tree(monkeypatch, tmp_path, clean)
+    (tmp_path / "ui").mkdir(exist_ok=True)
+    assert check_invariants.check_tier_timing_only_from_service() == []
+    (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / rel).write_text(body, encoding="utf-8")
+    failures = check_invariants.check_tier_timing_only_from_service()
+    assert any(
+        failure.startswith(f"{rel}:{line}: ") and fragment in failure for failure in failures
+    ), failures
+    assert all(failure.endswith("(D60)") for failure in failures)
+
+
+def test_real_tree_passes_the_tier_timing_entry_check() -> None:
+    assert check_invariants.check_tier_timing_only_from_service() == []
 
 
 # ── D56: Final Cut 타임라인 빌더는 순수 계층이다 ──────────────────────────

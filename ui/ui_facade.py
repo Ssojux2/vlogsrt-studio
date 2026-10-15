@@ -2424,7 +2424,8 @@ VISUAL_BOOTSTRAP_JS = (
             "] " + check.name + " — " + check.detail) + "</small></p>");
         });
         out.push('<button type="button" class="vl-btn" data-vl-act="sync-recheck">' +
-          "다시 재기(무료)</button><small>표시만 합니다 — 자막과 컷은 바뀌지 않습니다." +
+          "다시 재기(무료)</button><small>자막과 컷은 바뀌지 않습니다 — 빨강이면 이 영상의 추천은" +
+          " 보통까지입니다." +
           "</small></details>");
         return out.join("");
       }
@@ -2686,8 +2687,10 @@ VISUAL_BOOTSTRAP_JS = (
       }
       function tierDetail(row) {
         if (!row.audio || !row.video) { return row.reason || ""; }
+        // 표가 추천이라 했지만 추천하지 않는 까닭(D60) — 막대의 제목·읽기 글에도 붙인다.
+        var caps = (row.caps || []).map(function(text) { return " · 추천 제한: " + text; });
         return "자막: " + (row.audio.reason || row.audio.label || "") +
-          " · 영상: " + (row.video.reason || row.video.label || "");
+          " · 영상: " + (row.video.reason || row.video.label || "") + caps.join("");
       }
       function tagText(card, prefix) {
         var hit = (card.tags || []).find(function(t) { return t.indexOf(prefix) === 0; });
@@ -2911,7 +2914,25 @@ VISUAL_BOOTSTRAP_JS = (
           from: VL.fmt(ratOf(it.sourceStart || it.start), 1),
           to: VL.fmt(ratOf(it.sourceEnd || it.end), 1) };
       }
+      // 등급 막대 표지는 누른 순간의 구간을 베낀 것이다 — 그리기마다 지금 구간(같은 원본·시작·끝)
+      // 에서 다시 읽는다. 자막 시각을 다시 재면 같은 구간의 등급·까닭이 바뀐다(D60). 그 구간이
+      // 사라졌으면 표지를 거둔다. 원본 자막·큐 표지는 등급 구간이 아니라 그대로 둔다.
+      function refreshTierMarker() {
+        var mark = state.marker;
+        if (!mark || !mark.tierSpan) { return; }
+        var info = sourceInfo(mark.sourceId);
+        if (!info || !Array.isArray(info.suggestions)) { return; }
+        var row = info.suggestions.find(function (r) {
+          return r.start === mark.start && r.end === mark.end;
+        });
+        if (!row) { state.marker = null; return; }
+        state.marker = Object.assign({ sourceId: mark.sourceId, segmentId: mark.segmentId,
+          tierSpan: true, label: mark.queued ? tierWord("red", false) :
+            tierWord(tierOf(row), row.hold) || recLabel(row.rec),
+          queued: mark.queued }, row);
+      }
       function renderRail() {
+        refreshTierMarker();
         var mount = doc.getElementById("visual-rail");
         if (!mount) { return; }
         var rail = railOf();
@@ -3026,6 +3047,9 @@ VISUAL_BOOTSTRAP_JS = (
         } else if (mk.reason) {
           out.push('<p>' + esc(mk.reason) + '</p>');
         }
+        (mk.caps || []).forEach(function(text) {
+          out.push('<p class="vl-kv">추천 제한 · ' + esc(text) + '</p>');
+        });
         if (mk.start !== undefined && mk.end !== undefined) {
           out.push('<small>' + esc(VL.fmt(ratOf(mk.start)) + '초 ~ ' +
             VL.fmt(ratOf(mk.end)) + '초') + '</small>');
@@ -3140,7 +3164,8 @@ VISUAL_BOOTSTRAP_JS = (
             return r.start === item.redStart && r.end === item.redEnd;
           });
         return Object.assign({ sourceId: item.sourceId, label: tierWord("red", false),
-          segmentId: item.segmentId }, row || { start: item.start, end: item.end, tier: "red" });
+          segmentId: item.segmentId, tierSpan: !!row, queued: true },
+          row || { start: item.start, end: item.end, tier: "red" });
       }
       // 옮길 시각 — 빨강 시작과 컷 시작 중 늦은 쪽(빨강이 컷보다 앞이면 이웃 컷으로 떨어진다).
       function queueSeek(item) {
@@ -3846,7 +3871,7 @@ VISUAL_BOOTSTRAP_JS = (
             // 단추가 옛 선택을 겨냥하지 않도록 조각 ID를 표지에 묶어 둔다.
             state.marker = Object.assign({sourceId:curSourceId(), label:
               tierWord(tierOf(row), row.hold) || recLabel(row.rec),
-              segmentId: selectedInterval ? selectedInterval.id : null}, row);
+              segmentId: selectedInterval ? selectedInterval.id : null, tierSpan: true}, row);
             seekTo(ratOf(row.start)); renderPanel();
           }
           return;

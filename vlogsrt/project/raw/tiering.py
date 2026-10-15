@@ -1,9 +1,11 @@
 """3단 등급 — 자막과 영상을 **따로** 판정한 뒤 표 하나로 합친다(W-11·W-12, D51·D52).
 
-순수 함수만 산다: 프로세스·DB·서비스·파일 읽기가 없다. 입력은 저장된 분석 문서 하나뿐이다 —
+순수 함수만 산다: 프로세스·DB·서비스·파일 읽기가 없다. 입력은 저장된 분석 문서와 값 하나다 —
 AI 판정(Luna 창의 `annotations[]`·프레임 유무)과 생성 자막(`utterances[]`·ASR 청크 실패·오디오
-트랙 유무). 소리 크기나 화면 밝기를 로컬에서 재지 않는다(D52). 같은 문서면 같은 보고서가 나온다 —
-유료 호출 0회로 언제든 다시 계산한다(분석 지문에 들어가지 않는다).
+트랙 유무), 그리고 서비스가 **지금 리비전**의 자막 시각 확인(D55) 보고서에서 만든 값
+`TimingSignals`(판정 수준·「말소리를 못 찾음」 큐, D60). 소리 크기나 화면 밝기를 로컬에서 재지
+않는다(D52) — 확인 계층(`sync_check`·`sync_report`)도 모른다. 같은 문서·같은 값이면 같은 보고서가
+나온다 — 유료 호출 0회로 언제든 다시 계산한다(분석 지문에 들어가지 않는다).
 
 지키는 선:
 
@@ -14,23 +16,30 @@ AI 판정(Luna 창의 `annotations[]`·프레임 유무)과 생성 자막(`utter
 - **모름은 결함이 아니다.** 프레임이 없거나 판정이 실패했거나 아직 없으면 노랑 + 판정 보류다.
   전사 실패 구간은 절대 무음이 아니고, 자막이 아직 없으면(진행 문서) 공백도 아니다.
 - **구간은 빈틈없이 덮는다.** 보고서의 구간은 `[0, extent]`를 겹침·틈 없이 타일한다.
+- **추천은 확인된 말로만(D60).** 같은 말 되풀이·느린 추임새는 밀도에서 뺀다 — 말이 있는지(빨강
+  판단)는 여전히 모든 발화로 본다. 시각 확인 값은 다 정한 구간 위에서 **녹색을 노랑으로 내릴 수만**
+  있다: 경계를 옮기지 않고 빨강을 만들거나 지우지 않는다.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import unicodedata
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from fractions import Fraction
-from typing import Any
+from typing import Any, TypeVar
 
+from vlogsrt.hangul import strip_for_compare, to_nfc
 from vlogsrt.project.raw.analysis_config import (
     TIER_SETTINGS,
     RawTierSettings,
     validate_tier_settings,
 )
 from vlogsrt.project.raw.suitability import rational
+
+_T = TypeVar("_T")
 
 TIER_RED = "red"
 TIER_YELLOW = "yellow"
@@ -119,6 +128,7 @@ HOLD_LABEL = "판정 보류"
 TIER_TAG_PREFIX = "등급: "
 AUDIO_TAG_PREFIX = "자막: "
 VIDEO_TAG_PREFIX = "영상: "
+CAP_TAG_PREFIX = "추천 제한: "
 MARKER_PREFIX = "등급판 "
 LEGACY_GRADE_PREFIX = "Luna 평가: "
 GRADE_TAG_PREFIXES = (
@@ -126,7 +136,32 @@ GRADE_TAG_PREFIXES = (
     TIER_TAG_PREFIX,
     AUDIO_TAG_PREFIX,
     VIDEO_TAG_PREFIX,
+    CAP_TAG_PREFIX,
     MARKER_PREFIX,
+)
+
+# ── 추천 기준 강화(D60) ──────────────────────────────────────────────────
+
+TIMING_RED = "red"
+"""자막 시각 확인(D55) 빨강 판정의 값 — 등급은 확인 계층을 모르므로 값만 둔다(시험이
+`sync_check.LEVEL_RED`와 같음을 못 박는다)."""
+
+UNCONFIRMED_REPEAT = "repeat"
+UNCONFIRMED_SLOW = "slow_filler"
+UNCONFIRMED_NO_SPEECH = "no_speech"
+UNCONFIRMED_KINDS = (UNCONFIRMED_REPEAT, UNCONFIRMED_SLOW, UNCONFIRMED_NO_SPEECH)
+"""밀도에서 뺀 줄의 까닭 — 한 줄에 하나, 이 순서가 우선이다. 문서의 글자에서 아는 까닭(되풀이·
+느린 추임새)이 먼저라 「측정 한계일 수 있음」은 측정만으로 뺀 줄에만 붙는다."""
+
+_COUNTED_CATEGORIES = frozenset("LN")
+"""느린 추임새의 「글자」 — NFC 뒤 문자(L)·숫자(N) 범주 낱자. 한글은 음절 하나가 한 자, 라틴은
+철자 하나가 한 자다(영어는 덜 걸린다 — 빼지 않는 쪽으로만 틀린다). 공백·부호·기호는 세지 않는다."""
+
+CAP_TOO_SHORT = "too_short"
+CAP_TIMING_RED = "timing_red"
+_TIMING_RED_CAP = (
+    CAP_TIMING_RED,
+    "자막 시각 확인이 빨강이라 보통까지만 추천합니다 — 시각을 맞춘 뒤 다시 재면 풀립니다",
 )
 
 _REASON_SEPARATOR = " · "
@@ -155,13 +190,35 @@ def _rational_json(value: Fraction) -> dict[str, int]:
 
 
 @dataclass(frozen=True)
+class TimingSignals:
+    """자막 시각 확인(D55)이 등급에 넘기는 값 — 서비스가 **지금 리비전** 보고서에서만 만든다(D60).
+
+    `level`은 그 보고서의 판정(red·amber·green·skip)이고, 보고서가 없거나 낡았으면 None(모름)이다.
+    `no_speech`는 그 보고서가 「말소리를 못 찾음」으로 짚은 큐의 (아이디, 시작, 끝) — 공통 시계의
+    정확 유리수. 분석 문서의 발화와 아이디·시작·끝이 **모두** 같은 줄에만 쓴다(다른 리비전의 줄은
+    모름이다). 둘 다 녹색을 노랑으로 내릴 수만 있다.
+    """
+
+    level: str | None = None
+    no_speech: frozenset[tuple[str, Fraction, Fraction]] = frozenset()
+
+
+UNKNOWN_TIMING = TimingSignals()
+"""시각 확인을 모른다 — 아무것도 내리지 않는다(보고서 없음·낡음·다른 리비전)."""
+
+
+@dataclass(frozen=True)
 class AudioJudgment:
-    """자막 쪽 판정 — 밀도는 발화가 덮은 길이 ÷ 구간 길이다."""
+    """자막 쪽 판정 — 밀도는 **확인된** 발화가 덮은 길이 ÷ 구간 길이다(D60).
+
+    `excluded`는 구간에 닿았지만 밀도에서 뺀 발화의 (아이디, 까닭)이다 — 근거에는 그대로 남는다.
+    """
 
     status: str
     density: Fraction
     reason: str
     evidence: tuple[str, ...]
+    excluded: tuple[tuple[str, str], ...] = ()
 
     def document(self) -> dict[str, object]:
         return {
@@ -170,6 +227,7 @@ class AudioJudgment:
             "reason": self.reason,
             "density": _rational_json(self.density),
             "evidence": list(self.evidence),
+            "excluded": [{"id": uid, "kind": kind} for uid, kind in self.excluded],
         }
 
 
@@ -194,7 +252,11 @@ class VideoJudgment:
 
 @dataclass(frozen=True)
 class TierSpan:
-    """보고서의 구간 하나 — 두 판정과 표가 낸 등급을 함께 싣는다."""
+    """보고서의 구간 하나 — 두 판정과 표가 낸 등급을 함께 싣는다.
+
+    `caps`는 표가 녹색이라 했지만 추천하지 않는 까닭(코드, 말)이다 — 최소 길이·자막 시각
+    빨강(D60). 그때 규칙(`rule`)은 표의 칸 그대로이고 등급만 노랑이다.
+    """
 
     start: Fraction
     end: Fraction
@@ -203,6 +265,7 @@ class TierSpan:
     audio: AudioJudgment
     video: VideoJudgment
     red_reason: str | None
+    caps: tuple[tuple[str, str], ...] = ()
 
     @property
     def hold(self) -> bool:
@@ -216,6 +279,7 @@ class TierSpan:
         return span_recommendation(self)
 
     def document(self) -> dict[str, object]:
+        capped = "".join(f"{_REASON_SEPARATOR}{CAP_TAG_PREFIX}{text}" for _, text in self.caps)
         return {
             "start": _rational_json(self.start),
             "end": _rational_json(self.end),
@@ -224,7 +288,8 @@ class TierSpan:
             "hold": self.hold,
             "red_reason": self.red_reason,
             "recommendation": self.recommendation,
-            "reason": f"자막: {self.audio.reason} · 영상: {self.video.reason}",
+            "reason": f"자막: {self.audio.reason} · 영상: {self.video.reason}{capped}",
+            "caps": [{"code": code, "text": text} for code, text in self.caps],
             "audio": self.audio.document(),
             "video": self.video.document(),
         }
@@ -275,7 +340,8 @@ class SourceEvidence:
     """원본 하나의 판정 재료 — 문서를 한 번만 읽어 정리한 값이다.
 
     `audio_state`는 `present`(자막 칸이 있다) · `absent`(오디오 트랙 없음) · `unknown`(진행
-    문서처럼 자막 칸이 아직 없다)이다. `silent`는 무음 후보인 긴 자막 공백이다.
+    문서처럼 자막 칸이 아직 없다)이다. `silent`는 무음 후보인 긴 자막 공백이다. `unconfirmed`는
+    문서의 글자만으로 밀도에서 빼는 발화(같은 말 되풀이·느린 추임새, D60) — 발화 행 → 까닭.
     """
 
     extent: Fraction
@@ -287,6 +353,7 @@ class SourceEvidence:
     frames_known: bool
     present_frames: frozenset[str]
     settings: RawTierSettings
+    unconfirmed: Mapping[tuple[Fraction, Fraction, str], str] = field(default_factory=dict)
 
 
 def extent_of(document: Mapping[str, Any]) -> Fraction:
@@ -386,7 +453,11 @@ def evidence_of(
     settings: RawTierSettings = TIER_SETTINGS,
     audio_start: Fraction = Fraction(0),
 ) -> SourceEvidence:
-    """판정 재료를 한 번에 정리한다 — 저장된 문서 밖의 값은 받지 않는다(D52)."""
+    """판정 재료를 한 번에 정리한다 — 저장된 문서 밖의 값은 받지 않는다(D52).
+
+    밀도에서 뺄 줄은 문서의 글자로 아는 것(되풀이·느린 추임새)만 싣는다 — 시각 확인 값은 다 정한
+    구간 위에서만 쓴다(`classify`, D60).
+    """
     frames_known, present = _frames(document)
     return SourceEvidence(
         extent=extent_of(document),
@@ -398,7 +469,86 @@ def evidence_of(
         frames_known=frames_known,
         present_frames=present,
         settings=settings,
+        unconfirmed=unconfirmed_speech(document, settings),
     )
+
+
+# ── 확인된 말소리(D60) ───────────────────────────────────────────────────
+
+
+def _row_key(row: Mapping[str, Any]) -> tuple[Fraction, Fraction, str]:
+    """발화 행의 열쇠 — `_spoken`과 같은 (시작, 끝, 아이디)."""
+    return rational(row["start"]), rational(row["end"]), str(row.get("utterance_id", ""))
+
+
+def _repeat_keys(
+    rows: Sequence[Mapping[str, Any]], run_min: int
+) -> set[tuple[Fraction, Fraction, str]]:
+    """접은 글자(19e와 같은 `strip_for_compare`)가 같은 발화가 `run_min`줄 이상 잇따른 런.
+
+    문서 순서로 잰다. 접어서 비는 줄(부호뿐)은 런을 만들지도 잇지도 않는다.
+    """
+    folded = [strip_for_compare(str(row.get("text", ""))) for row in rows]
+    keys: set[tuple[Fraction, Fraction, str]] = set()
+    start = 0
+    while start < len(rows):
+        end = start + 1
+        while folded[start] and end < len(rows) and folded[end] == folded[start]:
+            end += 1
+        if folded[start] and end - start >= run_min:
+            keys.update(_row_key(row) for row in rows[start:end])
+        start = end
+    return keys
+
+
+def _letters(text: str) -> int:
+    return sum(1 for ch in to_nfc(text) if unicodedata.category(ch)[0] in _COUNTED_CATEGORIES)
+
+
+def _slow_filler(row: Mapping[str, Any], settings: RawTierSettings) -> bool:
+    """`slow_filler_min_seconds` 이상이면서 글자가 초당 `slow_filler_chars_per_second`보다 적다."""
+    start, end, _ = _row_key(row)
+    length = end - start
+    if length < Fraction(str(settings.slow_filler_min_seconds)):
+        return False
+    pace = Fraction(str(settings.slow_filler_chars_per_second))
+    return _letters(str(row.get("text", ""))) < pace * length
+
+
+def unconfirmed_speech(
+    document: Mapping[str, Any],
+    settings: RawTierSettings = TIER_SETTINGS,
+    timing: TimingSignals = UNKNOWN_TIMING,
+) -> dict[tuple[Fraction, Fraction, str], str]:
+    """밀도에서 뺄 발화(`_spoken`의 행) → 까닭 — 되풀이 · 느린 추임새 · 말소리 측정상 없음 순.
+
+    말소리 측정상 없음은 `timing.no_speech`에 아이디·시작·끝이 모두 같은 줄만이다. 줄을 지우지도
+    고치지도 않는다 — 밀도의 재료에서만 뺀다(규칙 4·9).
+    """
+    rows = [row for row in document.get("utterances", []) or [] if isinstance(row, Mapping)]
+    repeats = _repeat_keys(rows, settings.same_text_run_min)
+    texts = {_row_key(row): row for row in rows if str(row.get("text", "")).strip()}
+    spoken = _spoken(document)
+    found: dict[tuple[Fraction, Fraction, str], str] = {}
+    for key in spoken:
+        if key in repeats:
+            found[key] = UNCONFIRMED_REPEAT
+        elif _slow_filler(texts[key], settings):
+            found[key] = UNCONFIRMED_SLOW
+    return _with_measured(found, spoken, timing)
+
+
+def _with_measured(
+    found: Mapping[tuple[Fraction, Fraction, str], str],
+    spoken: Sequence[tuple[Fraction, Fraction, str]],
+    timing: TimingSignals,
+) -> dict[tuple[Fraction, Fraction, str], str]:
+    """글자로 뺀 줄에 시각 확인이 짚은 줄을 더한다 — 아이디·시작·끝이 모두 같은 줄만(D60)."""
+    merged = dict(found)
+    for row in spoken:
+        if row not in merged and (row[2], row[0], row[1]) in timing.no_speech:
+            merged[row] = UNCONFIRMED_NO_SPEECH
+    return merged
 
 
 def _merged_speech(
@@ -521,8 +671,30 @@ def _percent(value: Fraction) -> int:
     return round(value * 100)
 
 
-def _audio_reason(status: str, density: Fraction, settings: RawTierSettings) -> str:
-    return {
+_EXCLUDED_NOTES = {
+    UNCONFIRMED_REPEAT: "같은 말이 되풀이된 줄 {}개를 밀도에서 뺐습니다",
+    UNCONFIRMED_SLOW: "느린 추임새 {}개를 밀도에서 뺐습니다",
+    UNCONFIRMED_NO_SPEECH: ("말소리 측정상 없는 줄 {}개를 밀도에서 뺐습니다(측정 한계일 수 있음)"),
+}
+"""밀도에서 뺀 줄의 말(D60) — 측정으로 뺀 줄에는 D55의 단서를 그대로 단다. 「VAD」라고 쓰지
+않는다(D57·D59 19e)."""
+
+
+def _excluded_notes(excluded: Sequence[tuple[str, str]]) -> tuple[str, ...]:
+    """밀도에서 뺀 줄의 말 — 까닭마다 한 마디, 정해진 순서로(D60)."""
+    counts = {kind: sum(1 for _, k in excluded if k == kind) for kind in UNCONFIRMED_KINDS}
+    return tuple(
+        _EXCLUDED_NOTES[kind].format(counts[kind]) for kind in UNCONFIRMED_KINDS if counts[kind]
+    )
+
+
+def _audio_reason(
+    status: str,
+    density: Fraction,
+    settings: RawTierSettings,
+    excluded: Sequence[tuple[str, str]] = (),
+) -> str:
+    base = {
         AUDIO_SPEECH_DENSE: f"발화가 구간의 {_percent(density)}%를 덮는다",
         AUDIO_SPEECH_SPARSE: f"발화가 구간의 {_percent(density)}%뿐이다",
         AUDIO_SILENT: f"발화 없음 · 자막 없는 공백 {settings.silence_min_seconds:g}초 이상",
@@ -531,6 +703,7 @@ def _audio_reason(status: str, density: Fraction, settings: RawTierSettings) -> 
         AUDIO_ABSENT: "오디오 트랙이 없다",
         AUDIO_PENDING: "자막을 아직 만들지 않았다(분석 중)",
     }[status]
+    return _REASON_SEPARATOR.join((base, *_excluded_notes(excluded)))
 
 
 def _audio(
@@ -539,33 +712,66 @@ def _audio(
     *,
     density: Fraction = Fraction(0),
     evidence: tuple[str, ...] = (),
+    excluded: tuple[tuple[str, str], ...] = (),
 ) -> AudioJudgment:
-    return AudioJudgment(status, density, _audio_reason(status, density, settings), evidence)
+    reason = _audio_reason(status, density, settings, excluded)
+    return AudioJudgment(status, density, reason, evidence, excluded)
+
+
+@dataclass(frozen=True)
+class _Cover:
+    """구간 하나의 발화 덮음 — 모든 발화(말이 있는가)와 확인된 발화(밀도)."""
+
+    spoken: Fraction
+    confirmed: Fraction
+    ids: tuple[str, ...]
+    excluded: tuple[tuple[str, str], ...]
 
 
 def _speech_cover(
-    evidence: SourceEvidence, start: Fraction, end: Fraction
-) -> tuple[Fraction, tuple[str, ...]]:
+    evidence: SourceEvidence,
+    start: Fraction,
+    end: Fraction,
+    unconfirmed: Mapping[tuple[Fraction, Fraction, str], str] | None = None,
+) -> _Cover:
+    """덮음을 잰다 — 뺄 줄(`unconfirmed`, 없으면 문서의 글자로 아는 것)은 밀도에만 빠진다."""
+    skip = evidence.unconfirmed if unconfirmed is None else unconfirmed
     touching = [row for row in evidence.speech if row[0] < end and row[1] > start]
     clipped = [(max(a, start), min(b, end), uid) for a, b, uid in touching]
-    covered = sum((b - a for a, b in _merged_speech(clipped)), Fraction(0))
-    return covered, tuple(uid for _, _, uid in touching)
+    kept = [clip for clip, row in zip(clipped, touching, strict=True) if row not in skip]
+    return _Cover(
+        spoken=sum((b - a for a, b in _merged_speech(clipped)), Fraction(0)),
+        confirmed=sum((b - a for a, b in _merged_speech(kept)), Fraction(0)),
+        ids=tuple(uid for _, _, uid in touching),
+        excluded=tuple((row[2], skip[row]) for row in touching if row in skip),
+    )
+
+
+def _speech_judgment(
+    cover: _Cover, start: Fraction, end: Fraction, settings: RawTierSettings
+) -> AudioJudgment:
+    """말이 있는 구간의 판정 — 밀도는 확인된 발화로만 잰다(D60)."""
+    density = cover.confirmed / (end - start)
+    dense = density >= Fraction(str(settings.speech_density_green))
+    status = AUDIO_SPEECH_DENSE if dense else AUDIO_SPEECH_SPARSE
+    return _audio(status, settings, density=density, evidence=cover.ids, excluded=cover.excluded)
 
 
 def judge_audio(evidence: SourceEvidence, start: Fraction, end: Fraction) -> AudioJudgment:
-    """구간 하나의 자막 판정 — 순서가 곧 우선순위다(부재 → 실패 → 발화 → 자막 전 → 공백)."""
+    """구간 하나의 자막 판정 — 순서가 곧 우선순위다(부재 → 실패 → 발화 → 자막 전 → 공백).
+
+    말이 있는지는 **모든** 발화로 본다 — 밀도에서 뺀 줄도 말이 있던 자리라 공백(빨강의 재료)이
+    되지 않는다(규칙 4·9, D60).
+    """
     settings = evidence.settings
     if evidence.audio_state == "absent":
         return _audio(AUDIO_ABSENT, settings)
     failed = tuple(label for a, b, label in evidence.failed if a < end and b > start)
     if failed:
         return _audio(AUDIO_FAILED, settings, evidence=failed)
-    covered, ids = _speech_cover(evidence, start, end)
-    if covered > 0:
-        density = covered / (end - start)
-        dense = density >= Fraction(str(settings.speech_density_green))
-        status = AUDIO_SPEECH_DENSE if dense else AUDIO_SPEECH_SPARSE
-        return _audio(status, settings, density=density, evidence=ids)
+    cover = _speech_cover(evidence, start, end)
+    if cover.spoken > 0:
+        return _speech_judgment(cover, start, end, settings)
     if evidence.audio_state != "present":
         return _audio(AUDIO_PENDING, settings)
     for a, b in evidence.silent:
@@ -680,7 +886,7 @@ def _span(evidence: SourceEvidence, start: Fraction, end: Fraction) -> TierSpan:
     return TierSpan(start, end, tier, rule, audio, video, red)
 
 
-def _dedupe(*groups: Sequence[str]) -> tuple[str, ...]:
+def _dedupe(*groups: Sequence[_T]) -> tuple[_T, ...]:
     return tuple(dict.fromkeys(item for group in groups for item in group))
 
 
@@ -697,11 +903,15 @@ def _grow(host: TierSpan, other: TierSpan, settings: RawTierSettings, *, absorb:
     audio_evidence = (
         host.audio.evidence if absorb else _dedupe(first.audio.evidence, second.audio.evidence)
     )
+    excluded = (
+        host.audio.excluded if absorb else _dedupe(first.audio.excluded, second.audio.excluded)
+    )
     audio = AudioJudgment(
         host.audio.status,
         density,
-        _audio_reason(host.audio.status, density, settings),
+        _audio_reason(host.audio.status, density, settings, excluded),
         audio_evidence,
+        excluded,
     )
     video = VideoJudgment(
         host.video.status,
@@ -785,22 +995,65 @@ def _document_sha256(document: Mapping[str, Any]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def _measured_density(
+    span: TierSpan,
+    evidence: SourceEvidence,
+    unconfirmed: Mapping[tuple[Fraction, Fraction, str], str],
+) -> TierSpan:
+    """말소리 측정상 없는 줄을 녹색 구간의 밀도에서도 뺀다 — 녹색만, 경계는 그대로(D60).
+
+    그 줄이 닿지 않은 녹색은 그대로다. 밀도가 기준 밑으로 내려가면 표의 칸(발화 적음 × 그 화면)이
+    다시 정한다 — 발화가 있으니 빨강은 나올 수 없다(빨강은 공백 × 의심 화면뿐).
+    """
+    if span.tier != TIER_GREEN or span.audio.status != AUDIO_SPEECH_DENSE:
+        return span
+    cover = _speech_cover(evidence, span.start, span.end, unconfirmed)
+    if not any(kind == UNCONFIRMED_NO_SPEECH for _, kind in cover.excluded):
+        return span
+    judged = _speech_judgment(cover, span.start, span.end, evidence.settings)
+    audio = replace(judged, evidence=span.audio.evidence)
+    tier, rule, _ = combine(audio, span.video)
+    return replace(span, tier=tier, rule=rule, audio=audio)
+
+
+def _capped(span: TierSpan, settings: RawTierSettings, timing: TimingSignals) -> TierSpan:
+    """녹색이지만 추천하지 않는 까닭 — 최소 길이·자막 시각 빨강(D60). 녹색만 노랑으로 내린다."""
+    if span.tier != TIER_GREEN:
+        return span
+    caps = []
+    if span.end - span.start < Fraction(str(settings.recommended_min_seconds)):
+        caps.append(_too_short_cap(settings))
+    if timing.level == TIMING_RED:
+        caps.append(_TIMING_RED_CAP)
+    return replace(span, tier=TIER_YELLOW, caps=tuple(caps)) if caps else span
+
+
+def _too_short_cap(settings: RawTierSettings) -> tuple[str, str]:
+    return CAP_TOO_SHORT, f"{settings.recommended_min_seconds:g}초보다 짧아 추천하지 않습니다"
+
+
 def classify(
     document: Mapping[str, Any],
     *,
     settings: RawTierSettings = TIER_SETTINGS,
     audio_start: Fraction = Fraction(0),
     document_sha256: str | None = None,
+    timing: TimingSignals = UNKNOWN_TIMING,
 ) -> TierReport:
     """저장된 분석 문서 → 등급 보고서. 결정적이고 설정을 함께 싣는다.
 
-    로컬 측정(공백 RMS·프레임 화질)은 받지 않는다 — AI 판정과 생성 자막만이 재료다(D52).
+    로컬 측정(공백 RMS·프레임 화질)은 받지 않는다 — AI 판정과 생성 자막만이 재료다(D52). 자막
+    시각 확인 값(`timing`, D60)은 다 정한 구간 위에서 녹색을 노랑으로 내리는 데만 쓴다 — 구간
+    경계·빨강·자동 제외 후보는 그 값과 무관하다(서비스만 넘긴다, `check_invariants`).
     """
     validate_tier_settings(settings)
     evidence = evidence_of(document, settings=settings, audio_start=audio_start)
     points = atomic_boundaries(document, settings, audio_start=audio_start)
     spans = [_span(evidence, a, b) for a, b in zip(points, points[1:], strict=False)]
     spans = _merge(_absorb(_merge(spans, settings), settings), settings)
+    measured = _with_measured(evidence.unconfirmed, evidence.speech, timing)
+    spans = [_measured_density(span, evidence, measured) for span in spans]
+    spans = [_capped(span, settings, timing) for span in spans]
     _require_tiling(spans, evidence.extent)
     return TierReport(
         tier_version=settings.tier_version,
@@ -848,19 +1101,33 @@ def _significant_spans(report: TierReport, start: Fraction, end: Fraction) -> li
     return significant or sorted(touching, key=overlap)[-1:]
 
 
-def _segment_tier(report: TierReport, start: Fraction, end: Fraction) -> tuple[list[TierSpan], str]:
+@dataclass(frozen=True)
+class _SegmentTier:
+    """검토 조각 하나가 볼 구간 · 그 등급 · 추천하지 않는 까닭(코드, 말)."""
+
+    rows: list[TierSpan]
+    tier: str
+    caps: tuple[tuple[str, str], ...]
+
+
+def _segment_tier(report: TierReport, start: Fraction, end: Fraction) -> _SegmentTier:
     """검토 조각 하나가 볼 구간과 그 등급 — `segment_grade`와 `segment_keyword`의 한 규칙.
 
     `min_span_seconds`보다 짧게 겹친 구간은 보지 않는다 — 빨강 끝을 프레임 안쪽으로 붙이면
     이웃 조각에 0.02초짜리 빨강 자투리가 남는데, 그것이 녹색 조각을 보통으로 끌어내리면 안
     된다. 조각이 그보다 짧거나 넉넉히 겹친 구간이 없으면 가장 많이 겹친 구간 하나로 본다.
-    전부 녹색이어야 녹색, 전부 빨강이어야 빨강이고 나머지는 노랑이다.
+    전부 녹색이어야 녹색, 전부 빨강이어야 빨강이고 나머지는 노랑이다. 다만 `recommended_min_
+    seconds`보다 짧은 조각은 녹색 구간 위에 있어도 보통까지다 — 짧은 조각이 이웃(또는 품은)
+    녹색에게서 추천을 물려받지 않는다(D60).
     """
     rows = _significant_spans(report, start, end)
     tiers = {span.tier for span in rows}
+    caps = _dedupe(*(span.caps for span in rows))
     if rows and tiers == {TIER_GREEN}:
-        return rows, TIER_GREEN
-    return rows, TIER_RED if tiers == {TIER_RED} else TIER_YELLOW
+        if end - start < Fraction(str(report.settings.recommended_min_seconds)):
+            return _SegmentTier(rows, TIER_YELLOW, (_too_short_cap(report.settings),))
+        return _SegmentTier(rows, TIER_GREEN, caps)
+    return _SegmentTier(rows, TIER_RED if tiers == {TIER_RED} else TIER_YELLOW, caps)
 
 
 def segment_keyword(report: TierReport, start: Fraction, end: Fraction) -> str:
@@ -870,10 +1137,10 @@ def segment_keyword(report: TierReport, start: Fraction, end: Fraction) -> str:
     볼 구간이 아예 없으면 판정 보류다 — 판정된 구간이 하나라도 섞이면 보통이다(녹색·빨강이
     '전부'일 때만 그 등급인 것과 같은 모양이다).
     """
-    rows, tier = _segment_tier(report, start, end)
-    if tier == TIER_YELLOW and all(span.hold for span in rows):
+    judged = _segment_tier(report, start, end)
+    if judged.tier == TIER_YELLOW and all(span.hold for span in judged.rows):
         return HOLD_LABEL
-    return TIER_LABELS[tier]
+    return TIER_LABELS[judged.tier]
 
 
 def segment_grade(
@@ -881,9 +1148,11 @@ def segment_grade(
 ) -> tuple[str, tuple[str, ...]]:
     """검토 조각 하나의 권고와 등급 태그 — 권고는 닫힌 집합(recommended/normal/review_required).
 
-    볼 구간과 등급은 `_segment_tier`가 정한다(`segment_keyword`와 한 규칙).
+    볼 구간과 등급은 `_segment_tier`가 정한다(`segment_keyword`와 한 규칙). 추천하지 않는 까닭이
+    있으면 `추천 제한: …` 태그로 단다(「분석 근거」에 보인다, D60).
     """
-    rows, tier = _segment_tier(report, start, end)
+    judged = _segment_tier(report, start, end)
+    rows, tier = judged.rows, judged.tier
     if tier == TIER_GREEN:
         recommendation = "recommended"
     else:
@@ -895,6 +1164,7 @@ def segment_grade(
         TIER_TAG_PREFIX + TIER_LABELS[tier],
         AUDIO_TAG_PREFIX + audio,
         VIDEO_TAG_PREFIX + video,
+        *(CAP_TAG_PREFIX + text for _, text in judged.caps),
         MARKER_PREFIX + report.tier_version,
     )
 

@@ -132,10 +132,15 @@ def test_selection_runs_both_providers_and_publishes_progress_and_recommendation
         progress = server.raw.selection_suitability(root, state["revision"], state["asset_ids"])
         ranges = progress[state["asset_ids"][0]]
         # 3단 등급(D51·D52) — Luna가 도는 동안은 자막 칸이 아직 없어 빨강이 없고(자막 전),
-        # 판정 전 창은 보류다. 발화 끝(1.5초)+여유 0.3초까지가 발화 구역이다.
+        # 판정 전 창은 보류다. 발화 끝(1.5초)+여유 0.3초까지가 발화 구역이다. 그 1.8초 녹색은
+        # 3초보다 짧아 추천하지 않는다(D60 — 표의 칸은 그대로 `both-good`, 등급만 보통).
         assert len(ranges) == 3
         assert ranges[0]["end"] == {"num": 9, "den": 5}
-        assert (ranges[0]["tier"], ranges[0]["recommendation"]) == ("green", "recommended")
+        assert (ranges[0]["tier"], ranges[0]["recommendation"]) == ("yellow", "normal")
+        assert (ranges[0]["rule"], ranges[0]["caps"]) == (
+            "both-good",
+            [{"code": "too_short", "text": "3초보다 짧아 추천하지 않습니다"}],
+        )
         assert ranges[1]["end"] == {"num": 15, "den": 1}
         assert (ranges[1]["tier"], ranges[1]["audio"]["status"]) == ("yellow", "subtitle_pending")
         assert ranges[2]["recommendation"] == "review_required"
@@ -161,7 +166,7 @@ def test_selection_runs_both_providers_and_publishes_progress_and_recommendation
         (s.recommendation, [t for t in s.visual_tags if t.startswith("등급: ")])
         for s in head.segments
     ] == [("normal", ["등급: 보통"])]
-    assert all("등급판 raw-tier/v2" in s.visual_tags for s in head.segments)
+    assert all("등급판 raw-tier/v3" in s.visual_tags for s in head.segments)
     assert all(s.selection == "included" for s in head.segments)  # no scenic deletion
     assert unreviewed_auto_exclusions(head) == ()
     final = server.raw.selection_suitability(root, state["revision"], state["asset_ids"])
@@ -235,7 +240,7 @@ def test_analysis_completion_proposes_red_as_unreviewed_exclusion_and_export_wai
     for segment in pending:
         assert segment.selection == "excluded" and "등급: 제외 제안" in segment.visual_tags
         provenance = json.loads(segment.notes.removeprefix("자동 제외: "))
-        assert (provenance["reason"], provenance["version"]) == ("tier_silence", "raw-tier/v2")
+        assert (provenance["reason"], provenance["version"]) == ("tier_silence", "raw-tier/v3")
         assert provenance["evidence"][:2] == ["tier:silent-not-scenery", "audio:subtitle_silence"]
         assert provenance["source_id"] == segment.source_id
         assert provenance["analysis_revision_id"] == server._quick["revision"]

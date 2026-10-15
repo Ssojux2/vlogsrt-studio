@@ -39,11 +39,14 @@ from vlogsrt.project.xml_validation import validate_xml
 
 TITLE = "vlogsrt · 260810_wangbang · 2026-10-09 18:30"
 
-# W-16(d350091)의 빌더가 낸 바이트의 지문 — 걸린 영상이 없으면 그대로여야 한다.
+# W-16(d350091)의 빌더가 낸 바이트의 지문 — 걸린 영상이 없으면 그대로여야 한다. 하나만 등급
+# 키워드로 바뀌었다(D60 규칙 2): `mixed`의 1프레임 원본 D는 녹색 구간 위의 0.03초 조각이라
+# 3초보다 짧아 「추천」이 「보통」이 되고 브라우저 클립의 즐겨찾기가 빠진다(W-16·74c6adb의 값
+# `40aa3dd1…4521f8ee`). 나머지 바이트는 같다.
 W16_DOCUMENT_SHA256 = {
     "film": "160c4890adcc5554ee6c2f6c6b380b9b2e7e7b6f36617bb94c58345acbd6b9a3",
     "hfr": "86b6f2c054a71bed193a11bf2f6871886dba2ca42282b5a8d4fe519e62385961",
-    "mixed": "40aa3dd1270419667ac6279b778e605b9ffb943b7e9c746c615e979d4521f8ee",
+    "mixed": "4a536973c4423ff13b76df5f94c98986f37be061c63d8bc6bea12969f02f4b96",
     "pal": "3327606ec11e6f1d919012230a324167aacb2b6c37380226677a8001e58e7ee8",
     "real_like": "42d830be7997e43d9b848e73ee47ab460001cec733a50a9e5e4ca23c36c5dadc",
     "red": "902b46fe43fd6bf260c18897811e1312db09ecfe72bde470e496d6e01108d74d",

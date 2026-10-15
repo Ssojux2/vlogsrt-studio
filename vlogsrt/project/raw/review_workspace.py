@@ -450,6 +450,15 @@ def _stale_tier_proposal(segment: ReviewSegment) -> bool | None:
     return provenance.get("reason") in tiering.TIER_RED_REASONS and stale
 
 
+def _grade_signature(
+    segment: ReviewSegment,
+) -> tuple[str, tuple[str, ...], tuple[str, ...]]:
+    """(권고, 등급 태그, 나머지 태그) — 묶음 안의 순서는 보고, 두 묶음이 섞인 자리는 보지 않는다."""
+    grade = tuple(t for t in segment.visual_tags if t.startswith(tiering.GRADE_TAG_PREFIXES))
+    other = tuple(t for t in segment.visual_tags if not t.startswith(tiering.GRADE_TAG_PREFIXES))
+    return segment.recommendation, grade, other
+
+
 def _release_stale_tier_proposal(segment: ReviewSegment) -> ReviewSegment:
     """옛 등급판이 낸 미검토 제외 제안을 푼다 — 지금 등급이 빨강이 아닐 때만(D52).
 
@@ -1116,6 +1125,18 @@ class ReviewWorkspaceFacade:
         않은 기계 제안이다). 바뀐 것이 없으면 리비전을 만들지 않는다.
         """
         head = self.load_head(base_plan_id).revision
+        segments = tuple(_release_stale_tier_proposal(s) for s in self._regraded(head))
+        if segments == head.segments:
+            return head
+        return self._publish_snapshot(
+            head, segments, "등급 재계산 " + tiering.TIER_SETTINGS.tier_version
+        )
+
+    def _regraded(self, head: ReviewRevision) -> list[ReviewSegment]:
+        """지금 계산(판정 증거 + 자막 시각 확인 값, D60)으로 다시 매긴 조각 — 쓰지 않는다.
+
+        덮은 조각은 권고를 그대로 두고 태그만 새로 단다(`retier`와 같은 규칙).
+        """
         rows = self.tier_evidence_rows()
         reports: dict[str, tiering.TierReport | None] = {}
         segments = []
@@ -1123,11 +1144,24 @@ class ReviewWorkspaceFacade:
             graded = self._graded(segment, head, rows, reports)
             if segment.override_recommendation is not None:
                 graded = replace(graded, recommendation=segment.recommendation)
-            segments.append(_release_stale_tier_proposal(graded))
-        if tuple(segments) == head.segments:
-            return head
-        return self._publish_snapshot(
-            head, tuple(segments), "등급 재계산 " + tiering.TIER_SETTINGS.tier_version
+            segments.append(graded)
+        return segments
+
+    def stale_grade_segments(
+        self, head: ReviewRevision
+    ) -> tuple[tuple[str, str, tuple[str, ...]], ...]:
+        """다시 매기면 권고·등급 태그가 바뀌는 조각 (아이디, 새 권고, 새 태그) — 비면 머리가 지금
+        계산 그대로다. 읽기만 한다.
+
+        판·표지가 같아도 등급의 재료가 바뀌면 머리가 낡는다 — 자막 시각 확인을 다시 재 빨강
+        상한이 풀리거나 생겼을 때(D60)가 그 길이다. 정리 고리가 이것으로 `retier`를 건다(선택·
+        메모·경계는 그대로). 태그의 **자리**만 다른 것은 낡음이 아니다 — 입양의 되풀이가 미검토
+        표지를 등급 태그 뒤에 붙인다.
+        """
+        return tuple(
+            (new.segment_id, new.recommendation, _grade_signature(new)[1])
+            for old, new in zip(head.segments, self._regraded(head), strict=True)
+            if _grade_signature(old) != _grade_signature(new)
         )
 
     def _publish_snapshot(

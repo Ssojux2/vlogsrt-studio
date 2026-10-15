@@ -21,6 +21,7 @@ import subprocess
 import sys
 import unicodedata
 import xml.etree.ElementTree as ET
+from dataclasses import replace
 from datetime import datetime
 from fractions import Fraction
 from pathlib import Path
@@ -30,7 +31,7 @@ import pytest
 from vlogsrt.project.fcp_tables import FRAME_RATE_TAGS
 from vlogsrt.project.raw import finalcut_timeline as ft
 from vlogsrt.project.raw import tiering
-from vlogsrt.project.raw.analysis_config import TIER_SETTINGS
+from vlogsrt.project.raw.analysis_config import TIER_SETTINGS, RawTierSettings
 from vlogsrt.project.xml_validation import validate_xml
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -120,10 +121,17 @@ def span(a: Fraction, b: Fraction, kind: str) -> tiering.TierSpan:
     )
 
 
-def report(*spans: tiering.TierSpan) -> tiering.TierReport:
+NO_MINIMUM = replace(TIER_SETTINGS, recommended_min_seconds=0.0)
+"""추천 최소 3초(D60 규칙 2)를 끈 설정 — 손으로 만든 1–2초짜리 녹색 구간으로 스냅·합치기·
+즐겨찾기를 보는 시험이 그 규칙과 섞이지 않게 한다(규칙 2의 효과는 따로 단언한다)."""
+
+
+def report(
+    *spans: tiering.TierSpan, settings: RawTierSettings = TIER_SETTINGS
+) -> tiering.TierReport:
     return tiering.TierReport(
-        tier_version=TIER_SETTINGS.tier_version,
-        settings=TIER_SETTINGS,
+        tier_version=settings.tier_version,
+        settings=settings,
         document_sha256="0" * 64,
         spans=tuple(spans),
     )
@@ -511,22 +519,24 @@ def test_unreviewed_mark_on_an_included_segment_is_refused() -> None:
 
 
 def test_timeline_keyword_is_segment_keyword_and_all_hold_is_hold() -> None:
-    tiers = report(
+    spans = (
         span(at(0), at(40), "green"),
         span(at(40), at(70), "hold"),
         span(at(70), at(100), "yellow"),
         span(at(100), at(160), "hold"),
     )
     segments = (seg(0, 40), seg(40, 70), seg(70, 160), seg(160, 200))
-    source = ft.SourceInput(
-        media=media("tiers", frames=200, ident=None), segments=segments, report=tiers
-    )
-    plan = ft.plan_source(source)
-    expected = [
-        tiering.segment_keyword(tiers, at(s.start_frame), at(s.end_frame)) for s in segments
-    ]
-    assert [clip.keywords[0] for clip in plan.clips] == expected
-    assert expected == ["추천", "판정 보류", "보통", "판정 보류"]
+    for tiers, first in ((report(*spans, settings=NO_MINIMUM), "추천"), (report(*spans), "보통")):
+        source = ft.SourceInput(
+            media=media("tiers", frames=200, ident=None), segments=segments, report=tiers
+        )
+        plan = ft.plan_source(source)
+        expected = [
+            tiering.segment_keyword(tiers, at(s.start_frame), at(s.end_frame)) for s in segments
+        ]
+        assert [clip.keywords[0] for clip in plan.clips] == expected
+        # 40프레임(1.33초) 녹색 조각은 3초보다 짧아 보통이다(D60 규칙 2) — 끄면 추천.
+        assert expected == [first, "판정 보류", "보통", "판정 보류"]
 
 
 def test_analysed_source_outside_the_review_head_is_one_whole_file_clip() -> None:
@@ -543,16 +553,21 @@ def test_analysed_source_outside_the_review_head_is_one_whole_file_clip() -> Non
 
 def test_browser_ranges_snap_tier_spans_to_the_nearest_frame() -> None:
     source = media("browse", frames=100, ident=None)
-    tiers = report(
+    spans = (
         span(F(0), F(1234, 1000), "yellow"),  # 36.98프레임 → 37
         span(F(1234, 1000), F(124, 100), "green"),  # 37 → 37: 0프레임 자투리는 버린다
         span(F(124, 100), F(3), "green"),  # 37 → 90
         span(F(3), F(35, 10), "red"),  # 90 → 105 → 100으로 자른다
         span(F(35, 10), F(4), "red2"),  # 같은 키워드 → 앞과 합친다
     )
-    assert ft.browser_ranges(tiers, source) == (
+    assert ft.browser_ranges(report(*spans, settings=NO_MINIMUM), source) == (
         ft.BrowserRange(0, 37, "보통", False),
         ft.BrowserRange(37, 90, "추천", True),
+        ft.BrowserRange(90, 100, "제외 제안", False),
+    )
+    # 1.76초 녹색은 3초보다 짧아 보통이다(D60 규칙 2) — 앞 보통과 합쳐지고 즐겨찾기가 없다.
+    assert ft.browser_ranges(report(*spans), source) == (
+        ft.BrowserRange(0, 90, "보통", False),
         ft.BrowserRange(90, 100, "제외 제안", False),
     )
 

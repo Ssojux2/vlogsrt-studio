@@ -291,15 +291,29 @@ class RawTierSettings:
     이 값은 검토 조각의 `등급판` 표지(`tier_version`)로만 남는다.
 
     로컬 측정 값(공백 RMS·검은 화면 루마·흐림)은 사용자 지시로 지웠다(D52) — 측정 계층이
-    없어졌으므로 기준도 없다. 남은 값은 D51 그대로다. 값이나 `tiering.py`의 규칙을 바꾸면
-    `tier_version`을 올린다 — 옮기기는 이 표지로만 낡은 검토 머리를 안다.
+    없어졌으므로 기준도 없다. 앞의 넷은 D51 그대로다. 값이나 `tiering.py`의 규칙을 바꾸면
+    `tier_version`을 올린다 — 옮기기는 이 표지로만 낡은 검토 머리를 안다(20a = v3, D60).
+
+    추천 기준 강화(D60, 외부 근거 없는 조정 대상 — 바꾸면 D60에 근거를 남긴다):
+
+    - `same_text_run_min`: 접은 글자가 같은 발화가 이만큼 잇따르면 그 줄들을 밀도에서 뺀다(같은 말
+      되풀이 — whisper 메아리). 19e 「확인 필요」와 같은 값·같은 접기지만 따로 둔다(표시 기준을
+      바꿔도 등급이 움직이지 않게).
+    - `slow_filler_chars_per_second`·`slow_filler_min_seconds`: 이 길이 이상이면서 글자(NFC 뒤 문자·
+      숫자 범주 낱자)가 초당 이보다 적은 발화는 느린 추임새로 보고 밀도에서 뺀다. 0이면 끈다.
+    - `recommended_min_seconds`: 이보다 짧은 녹색 구간·검토 조각은 추천하지 않는다(보통까지). 0이면
+      끈다.
     """
 
-    tier_version: str = "raw-tier/v2"
+    tier_version: str = "raw-tier/v3"
     silence_min_seconds: float = 5.0
     speech_handle_seconds: float = 0.3
     min_span_seconds: float = 1.0
     speech_density_green: float = 0.35
+    same_text_run_min: int = 3
+    slow_filler_chars_per_second: float = 1.5
+    slow_filler_min_seconds: float = 2.0
+    recommended_min_seconds: float = 3.0
 
 
 TIER_SETTINGS = RawTierSettings()
@@ -319,6 +333,9 @@ def tier_settings_problems(settings: RawTierSettings) -> list[str]:
         "발화 여유": settings.speech_handle_seconds,
         "최소 구간": settings.min_span_seconds,
         "발화 밀도": settings.speech_density_green,
+        "느린 추임새 속도": settings.slow_filler_chars_per_second,
+        "느린 추임새 길이": settings.slow_filler_min_seconds,
+        "추천 최소 길이": settings.recommended_min_seconds,
     }
     problems = [
         f"{name}은 유한한 실수여야 한다: {value!r}"
@@ -327,6 +344,9 @@ def tier_settings_problems(settings: RawTierSettings) -> list[str]:
         or not isinstance(value, (int, float))
         or not math.isfinite(float(value))
     ]
+    run = settings.same_text_run_min
+    if isinstance(run, bool) or not isinstance(run, int):
+        problems.append(f"같은 말 런 길이는 정수여야 한다: {run!r}")
     if not isinstance(settings.tier_version, str) or not settings.tier_version.strip():
         problems.append(f"등급판 이름이 비었다: {settings.tier_version!r}")
     return problems or _tier_range_problems(settings)
@@ -340,6 +360,12 @@ def _tier_range_problems(settings: RawTierSettings) -> list[str]:
         problems.append("발화 여유 양쪽이 공백 길이를 다 먹는다 — 무음 구간이 남지 않는다")
     if not 0 < settings.speech_density_green <= 1:
         problems.append(f"발화 밀도는 (0, 1]이어야 한다: {settings.speech_density_green!r}")
+    if settings.same_text_run_min < 2:
+        problems.append(f"같은 말 런은 2줄 이상이어야 한다: {settings.same_text_run_min!r}")
+    if settings.slow_filler_chars_per_second < 0 or settings.slow_filler_min_seconds <= 0:
+        problems.append("느린 추임새 속도는 0 이상, 길이는 양수여야 한다")
+    if settings.recommended_min_seconds < 0:
+        problems.append(f"추천 최소 길이는 0 이상이어야 한다: {settings.recommended_min_seconds!r}")
     return problems
 
 

@@ -4947,7 +4947,10 @@ class RawWorkspaceUi:
 
     @staticmethod
     def _suggestion_row(row: Mapping[str, Any]) -> dict[str, object]:
-        """등급 구간 하나의 화면 값 — 자막·영상 판정을 따로 싣는다(W-11, D51)."""
+        """등급 구간 하나의 화면 값 — 자막·영상 판정을 따로 싣는다(W-11, D51).
+
+        `caps`는 표가 추천이라 했지만 추천하지 않는 까닭의 말이다(최소 길이·자막 시각 빨강, D60).
+        """
         audio = row.get("audio") or {}
         video = row.get("video") or {}
         density = audio.get("density") or {"num": 0, "den": 1}
@@ -4959,6 +4962,7 @@ class RawWorkspaceUi:
             "rec": row["recommendation"],
             "rule": row.get("rule", ""),
             "reason": row["reason"],
+            "caps": [str(cap.get("text", "")) for cap in row.get("caps") or ()],
             "redReason": row.get("red_reason"),
             "audio": {
                 "status": audio.get("status", ""),
@@ -5985,7 +5989,7 @@ class RawWorkspaceUi:
             "html": workbench,
             "videoSrc": None,
             "message": (
-                "자막 시각을 다시 잽니다(무료 · 표시만 합니다)."
+                "자막 시각을 다시 잽니다(무료 · 자막과 컷은 그대로입니다)."
                 if handle is not None
                 else "잴 원본 자막이 없습니다."
             ),
