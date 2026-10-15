@@ -1345,16 +1345,18 @@ def check_speech_refill_only_from_service() -> list[str]:
 
 # 시각 맞춤 제안(D59 19g) — 큐 경계를 말소리 경계에 맞춘 **제안**은 값만 받아 값만 돌려주는 순수
 # 계산이다. 들여올 수 있는 것은 표준 라이브러리의 정해진 몇과 확인 계산(`sync_check`)·설정뿐이고,
-# 파일·프로세스를 열지 않는다. 그 모듈을 읽는 쪽은 목록에 적힌 자리뿐이다 — 19g에는 **없다**(시험만
-# 읽는다). 19h가 서비스의 적용·되돌리기(`apply_*`·`revert_*`)를 적는다. 등급·출력·분석 지문이
-# 제안이나 그 기준을 알면 「표시만」이 무너지고(D55), 기준을 바꿀 때마다 이미 산 것이 낡는다(D47).
+# 파일·프로세스를 열지 않는다. 그 모듈을 읽는 쪽은 목록에 적힌 자리뿐이다 — 19h부터 서비스 하나이고,
+# 서비스 안에서도 시각 맞춤 적용·되돌리기 함수(`apply_snap*`·`revert_snap*`, 앞 밑줄 포함)만 안다
+# (`check_sync_snap_in_service_only_from_snap_entries`). 화면은 서비스 메서드로만 닿는다. 등급·출력·
+# 분석 지문이 제안이나 그 기준을 알면 「표시만」이 무너지고(D55), 기준을 바꿀 때마다 이미 산 것이
+# 낡는다(D47).
 SYNC_SNAP_MODULE = "vlogsrt/project/sync_snap.py"
 SYNC_SNAP_STDLIB = (
     "__future__", "bisect", "collections", "dataclasses", "fractions", "hashlib", "json", "math",
     "typing",
 )  # fmt: skip
 SYNC_SNAP_PROJECT_MODULES = ("vlogsrt.project.sync_check", "vlogsrt.project.config")
-SYNC_SNAP_IMPORTERS: tuple[str, ...] = ()
+SYNC_SNAP_IMPORTERS: tuple[str, ...] = ("vlogsrt/project/raw/service.py",)
 SYNC_SNAP_SETTING_OWNER = "vlogsrt/project/config.py"
 SYNC_SNAP_FORBIDDEN_CALLS = re.compile(
     r"\b(__import__|exec|eval|compile|breakpoint)\s*\(|__builtins__"
@@ -1439,6 +1441,252 @@ def check_sync_snap_only_from_listed() -> list[str]:
                 " 부른다 (D59 19g)"
             )
     return failures
+
+
+# 소유자 이름 — 모듈 함수는 `이름`, 클래스 메서드는 `클래스.이름`, 안에 둔 함수·람다는 그 뒤에
+# `.이름`·`.<lambda>`가 붙는다. 서비스 안의 자리는 정확한 이름 목록으로만 허락한다(앞머리 정규식은
+# `apply_snapshot_*` 같은 남의 이름까지 받았다 — 19h 검증 뒤 고침).
+SNAP_SERVICE = "vlogsrt/project/raw/service.py"
+SNAP_SERVICE_CLASS = "RawWorkspaceService"
+SNAP_SERVICE_METHODS = (
+    "apply_snap_preview", "apply_snap_blocker", "apply_snap", "_apply_snap_plan",
+    "revert_snap_state", "revert_snap",
+)  # fmt: skip
+SNAP_SERVICE_HELPERS = (
+    "_apply_snap_unready", "_apply_snap_offset", "_apply_snap_preview", "_apply_snap_listen",
+    "_apply_snap_hold", "_apply_snap_check", "SnapCue", "SnapPreview",
+)  # fmt: skip
+SNAP_SERVICE_OWNERS = frozenset(
+    (*(f"{SNAP_SERVICE_CLASS}.{name}" for name in SNAP_SERVICE_METHODS), *SNAP_SERVICE_HELPERS)
+)
+# 제안 모듈·기준을 아는 서비스 자리 — 제안을 실제로 계산하는 둘뿐이다.
+SYNC_SNAP_SERVICE_OWNERS = frozenset(
+    {f"{SNAP_SERVICE_CLASS}._apply_snap_plan", "_apply_snap_preview"}
+)
+SYNC_SNAP_EXACT_NAMES = frozenset({"sync_snap", "SyncSnapSettings", "SYNC_SNAP_SETTINGS"})
+# 서비스의 시각 맞춤 API·값 이름 — 서비스 안의 그 자리와 화면 진입점(`ui/workspace_service.py`)만
+# 안다.
+SNAP_API_NAME = re.compile(r"^(_?(apply|revert)_snap(_\w*)?|Snap(Preview|Cue))$")
+SNAP_API_SCREEN = "ui/workspace_service.py"
+
+
+def _owned_nodes(tree: ast.Module) -> list[tuple[ast.AST, str | None]]:
+    """(노드, 소유자 이름) 전부 — 클래스·함수·람다를 지날 때마다 소유자 이름이 길어진다."""
+    found: list[tuple[ast.AST, str | None]] = []
+
+    def visit(node: ast.AST, owner: str | None) -> None:
+        for child in ast.iter_child_nodes(node):
+            found.append((child, owner))
+            name = owner
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                name = f"{owner}.{child.name}" if owner else child.name
+            elif isinstance(child, ast.Lambda):
+                name = f"{owner}.<lambda>" if owner else "<lambda>"
+            visit(child, name)
+
+    visit(tree, None)
+    return found
+
+
+def check_sync_snap_in_service_only_from_snap_entries() -> list[str]:
+    """D59 19h — 서비스 안에서 제안 모듈·기준을 가리키는 자리는 제안을 계산하는 둘뿐이다.
+
+    import·별명·속성 꺼내기·이름·문자열(`importlib` 문자열·docstring 포함)을 AST로 센다 — 정확한
+    소유자 이름 목록(`SYNC_SNAP_SERVICE_OWNERS`) 밖(모듈 수준·다른 메서드·같은 이름의 모듈 함수·안에
+    둔 함수)이면 실패다.
+    """
+    path = ROOT / SNAP_SERVICE
+    if not path.exists():
+        return []
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    return [
+        f"{SNAP_SERVICE}:{getattr(node, 'lineno', 0)}: 시각 맞춤 제안을 {owner or '모듈 수준'}에서"
+        " 가리킨다 — 서비스 안에서는 _apply_snap_plan·_apply_snap_preview만 안다 (D59 19h)"
+        for node, owner in _owned_nodes(tree)
+        if _mentions_sync_snap(node) and owner not in SYNC_SNAP_SERVICE_OWNERS
+    ]
+
+
+def _mentions_sync_snap(node: ast.AST) -> bool:
+    if isinstance(node, ast.Name):
+        return node.id in SYNC_SNAP_EXACT_NAMES
+    if isinstance(node, ast.Attribute):
+        return node.attr in SYNC_SNAP_EXACT_NAMES
+    if isinstance(node, ast.alias):
+        parts = {*node.name.split("."), node.asname or ""}
+        return bool(parts & SYNC_SNAP_EXACT_NAMES)
+    if isinstance(node, ast.ImportFrom):
+        return bool(set((node.module or "").split(".")) & SYNC_SNAP_EXACT_NAMES)
+    return (
+        isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and bool(SYNC_SNAP_NAMES.search(node.value))
+    )
+
+
+def check_snap_api_only_from_service_and_screen() -> list[str]:
+    """D59 19h — 서비스의 시각 맞춤 API(`apply_snap*`·`revert_snap*`·`_apply_snap*`)와 그 값
+    (`SnapPreview`·`SnapCue`)은 서비스 안의 그 자리와 화면 진입점만 안다.
+
+    등급·컷·제거·지문·캐시 열쇠·승인·보내기·선택 분석이 서비스를 거쳐 제안을 읽으면(`scope.service.
+    apply_snap_preview(...)`) 「표시만」이 무너진다. 이름·속성·이름 가져오기·문자열(통째로 같은
+    것)을 센다. 서비스의 다른 메서드도 자리다(`self.apply_snap_preview` — 19h 검증 뒤 고침).
+    """
+    failures: list[str] = []
+    for source in [*_sources(), *sorted(UI_DIR.rglob("*.py"))]:
+        rel = _rel(source)
+        if rel == SNAP_API_SCREEN:
+            continue
+        for node, owner in _owned_nodes(ast.parse(source.read_text(encoding="utf-8"))):
+            name = _snap_api_name(node)
+            if name is None or (rel == SNAP_SERVICE and owner in SNAP_SERVICE_OWNERS):
+                continue
+            failures.append(
+                f"{rel}:{getattr(node, 'lineno', 0)}: {name}을 {owner or '모듈 수준'}에서"
+                " 가리킨다 —"
+                " 시각 맞춤 API는 서비스의 그 자리와 화면 진입점만 안다 (D59 19h)"
+            )
+    return failures
+
+
+def _snap_api_name(node: ast.AST) -> str | None:
+    candidates: tuple[str, ...] = ()
+    if isinstance(node, ast.Name):
+        candidates = (node.id,)
+    elif isinstance(node, ast.Attribute):
+        candidates = (node.attr,)
+    elif isinstance(node, ast.alias):
+        candidates = (node.name.split(".")[-1], node.asname or "")
+    elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+        candidates = (node.value,)
+    return next((name for name in candidates if SNAP_API_NAME.match(name)), None)
+
+
+# 시각 맞춤의 원본 자막 쓰기(D59 19h) — 적용(`apply_changes`)은 서비스 메서드 `apply_snap`이,
+# 되돌리기(`restore`)는 `revert_snap`이 그 자리에서 바로 부를 때만 된다(19f의 줄 넣기와 같은 엄격함:
+# 이름 가져오기·별명·속성 꺼내 담기·문자열 이름·람다로 넘기기·첨자 꺼내기(`vars(m)["restore"]`·
+# `m.__dict__[…]`·`globals()[…]`)·`*` import가 다 자리다). 정의한 모듈 안에서는 정의 말고는 어느
+# 자리도 안 된다. `restore`는 흔한 낱말이라(화면의 「자동 제외 전체 복원」 단추 변수·동작 이름)
+# **다른 모듈에서는** 그 이름 자체와 문자열을 속성 꺼내기 호출(`getattr` 등)의 인자일 때만 센다 —
+# 이름 가져오기·속성 꺼내기·첨자는 언제나 센다. 변수에 담은 문자열은 못 본다(받아들인 빈틈).
+SNAP_WRITE_CALLER = SNAP_SERVICE
+SNAP_WRITE_OWNER = "vlogsrt/project/raw/source_transcript.py"
+SNAP_WRITES = {
+    "apply_changes": f"{SNAP_SERVICE_CLASS}.apply_snap",
+    "restore": f"{SNAP_SERVICE_CLASS}.revert_snap",
+}
+SNAP_COMMON_WORDS = frozenset({"restore"})
+ATTRIBUTE_GETTERS = ("getattr", "hasattr", "setattr", "attrgetter", "methodcaller")
+
+
+def check_snap_writes_only_from_service() -> list[str]:
+    """D59 19h — 원본 자막의 시각 맞춤 적용·되돌리기는 서비스 메서드 `apply_snap`·`revert_snap`만
+    부른다."""
+    failures: list[str] = []
+    for source in [*_sources(), *sorted(UI_DIR.rglob("*.py"))]:
+        rel = _rel(source)
+        tree = ast.parse(source.read_text(encoding="utf-8"))
+        for line, name, owner in _snap_write_references(tree, rel):
+            failures.append(
+                f"{rel}:{line}: {name}을 {owner or '모듈 수준'}에서 가리킨다 — 시각 맞춤의"
+                f" 원본 자막 쓰기는 {SNAP_WRITES.get(name, '서비스')}가 바로 부를 때만 된다"
+                " (D59 19h)"
+            )
+    return failures
+
+
+def _snap_write_references(tree: ast.Module, rel: str) -> list[tuple[int, str, str | None]]:
+    """허락되지 않은 `apply_changes`·`restore` 자리(줄, 이름, 소유자 이름)."""
+    owned = _owned_nodes(tree)
+    allowed = {
+        id(node.func)  # 호출 자리의 func만 — 같은 이름의 다른 자리는 세어진다
+        for node, owner in owned
+        if isinstance(node, ast.Call) and _direct_snap_write(node, rel, owner)
+    }
+    getter_args = {
+        id(argument)
+        for node, _ in owned
+        if isinstance(node, ast.Call) and _call_name(node) in ATTRIBUTE_GETTERS
+        for argument in node.args
+    }
+    strict = rel == SNAP_WRITE_OWNER  # 정의한 모듈 — 흔한 낱말 예외가 없다
+    found: list[tuple[int, str, str | None]] = []
+    for node, owner in owned:
+        written = _names_snap_write(node, getter_args, strict=strict)
+        if written is not None and id(node) not in allowed:
+            found.append((getattr(node, "lineno", 0), written, owner))
+    return found
+
+
+def _direct_snap_write(call: ast.Call, rel: str, owner: str | None) -> bool:
+    func = call.func
+    return (
+        rel == SNAP_WRITE_CALLER
+        and isinstance(func, ast.Attribute)
+        and owner is not None
+        and SNAP_WRITES.get(func.attr) == owner
+    )
+
+
+def _names_snap_write(node: ast.AST, getter_args: set[int], *, strict: bool) -> str | None:
+    if (
+        isinstance(node, ast.ImportFrom)
+        and (node.module or "").endswith("source_transcript")
+        and any(alias.name == "*" for alias in node.names)
+    ):
+        return "*"
+    if (
+        isinstance(node, ast.Subscript)
+        and isinstance(node.slice, ast.Constant)
+        and node.slice.value in SNAP_WRITES
+    ):
+        return str(node.slice.value)
+    for name in SNAP_WRITES:
+        loose = name in SNAP_COMMON_WORDS and not strict
+        if isinstance(node, ast.Attribute) and node.attr == name:
+            return name
+        if isinstance(node, ast.alias) and name in (node.name.split(".")[-1], node.asname):
+            return name
+        if isinstance(node, ast.Name) and node.id == name and not loose:
+            return name
+        if (
+            isinstance(node, ast.Constant)
+            and node.value == name
+            and (not loose or id(node) in getter_args)
+        ):
+            return name
+    return None
+
+
+# 원본 자막 리비전을 쓰는 낮은 문 — 정의한 모듈의 공개 쓰기(편집·줄 넣기·적용·되돌리기·심기)만
+# 연다. 밖에서 바로 열면 위 불변식들이 지키는 자리를 건너 아무 줄이나 쓸 수 있다(D59 19h 재검증).
+STORE_EDIT_NAME = "_store_edit"
+
+
+def check_store_edit_stays_private() -> list[str]:
+    """D59 19h — `source_transcript._store_edit`는 정의한 모듈 밖에서 가리키지 못한다."""
+    failures: list[str] = []
+    for source in [*_sources(), *sorted(UI_DIR.rglob("*.py"))]:
+        rel = _rel(source)
+        if rel == SNAP_WRITE_OWNER:
+            continue
+        for node in ast.walk(ast.parse(source.read_text(encoding="utf-8"))):
+            if _names_store_edit(node):
+                failures.append(
+                    f"{rel}:{getattr(node, 'lineno', 0)}: {STORE_EDIT_NAME}을 가리킨다 — 원본"
+                    " 자막 리비전은 source_transcript의 공개 쓰기로만 쓴다 (D59 19h)"
+                )
+    return failures
+
+
+def _names_store_edit(node: ast.AST) -> bool:
+    if isinstance(node, ast.Attribute):
+        return node.attr == STORE_EDIT_NAME
+    if isinstance(node, ast.Name):
+        return node.id == STORE_EDIT_NAME
+    if isinstance(node, ast.alias):
+        return STORE_EDIT_NAME in (node.name.split(".")[-1], node.asname)
+    return isinstance(node, ast.Constant) and node.value == STORE_EDIT_NAME
 
 
 # 원본 자막의 「확인 필요」 표시(D59 19e)는 **표시만** 한다 — 순수 계산은 큐 글자와 아이디를 값으로
@@ -2116,6 +2364,13 @@ CHECKS = (
     ("빈칸 재전사는 서비스만 부른다", check_speech_refill_only_from_service),
     ("시각 맞춤 제안은 순수하다", check_sync_snap_stays_pure),
     ("시각 맞춤 제안은 정해진 자리만 부른다", check_sync_snap_only_from_listed),
+    (
+        "서비스 안의 시각 맞춤 제안은 적용·되돌리기만",
+        check_sync_snap_in_service_only_from_snap_entries,
+    ),
+    ("시각 맞춤 적용·되돌리기 쓰기는 서비스만", check_snap_writes_only_from_service),
+    ("시각 맞춤 API는 서비스와 화면 진입점만", check_snap_api_only_from_service_and_screen),
+    ("원본 자막의 낮은 쓰기 문은 정의 모듈 안에만", check_store_edit_stays_private),
     ("Final Cut 타임라인 빌더는 순수하다", check_finalcut_timeline_stays_pure),
     ("Final Cut 보내기는 원본을 복사·재해시하지 않는다", check_finalcut_export_never_copies),
     ("옛 선택한 컷 Final Cut 출력은 되살리지 않는다", check_old_finalcut_path_stays_dead),

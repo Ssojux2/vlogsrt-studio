@@ -1287,15 +1287,18 @@ def measured_speech(
     source_id: str,
     settings: SyncCheckSettings = SYNC_CHECK_SETTINGS,
     project: ProjectConfig | None = None,
+    *,
+    strict: bool = False,
 ) -> MeasuredSpeech | None:
     """지금 자막 리비전의 보고서와 그 PCM의 저장된 말소리 칸 — 없거나 낡았으면 None.
 
-    VAD를 돌리지도 디코드하지도 않는다 — 확인 작업이 남긴 보고서·칸 캐시를 읽을 뿐이다.
+    VAD를 돌리지도 디코드하지도 않는다 — 확인 작업이 남긴 보고서·칸 캐시를 읽을 뿐이다. `strict`면
+    1단계 PCM·기준까지 대조해 낡음을 정한다(`current_report`의 같은 칸 — 시각 맞춤 적용, D59 19h).
     """
     from vlogsrt.project.raw.source_transcript import load
 
     transcript = load(workspace, source_id)
-    report = current_report(workspace, source_id, settings)
+    report = current_report(workspace, source_id, settings, strict=strict)
     if transcript is None or report is None or report.get("stale") or not report.get("pcm"):
         return None
     pcm = report["pcm"]

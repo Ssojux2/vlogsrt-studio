@@ -19,6 +19,7 @@ from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, date, datetime
 from fractions import Fraction
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -46,7 +47,11 @@ from vlogsrt.project.raw.analysis_config import (
     validate_analysis_concurrency,
     validate_understanding_settings,
 )
-from vlogsrt.project.raw.analysis_store import ANALYSIS_ROOT, AnalysisStore
+from vlogsrt.project.raw.analysis_store import (
+    ANALYSIS_ROOT,
+    AnalysisStore,
+    analyzing_revisions_on,
+)
 from vlogsrt.project.raw.browser_runtime import (
     BrowserRuntimeError,
     ClaudeCredentials,
@@ -109,7 +114,12 @@ from vlogsrt.project.raw.ingest import (
     run_ingest_copy,
     scan_sources,
 )
-from vlogsrt.project.raw.jobs import JobCancelledError, JobContext, JobManager
+from vlogsrt.project.raw.jobs import (
+    JobCancelledError,
+    JobContext,
+    JobManager,
+    active_fingerprints_on,
+)
 from vlogsrt.project.raw.models import (
     ACTIVE_JOB_STATUSES,
     ANALYSIS_JOB_KIND,
@@ -456,6 +466,50 @@ RELISTEN_REFILL_RUNNING_REFUSAL = (
 REFILL_PCM_MISSING = (
     "말소리를 잰 오디오를 찾지 못했습니다 — 「자막 시각 확인」을 다시 잰 뒤에 채우세요. 유료 호출은"
     " 시작하지 않았습니다."
+)
+# 시각 맞춤 적용·되돌리기(D59 19h) — 무료이고 사람이 누를 때만 한다. 화면 말은 존댓말이고 「VAD」
+# 대신 「말소리 측정」이다(D59 19e-4). 금액·모델 이름은 없다(D57).
+SNAP_UNTRANSCRIBED = "이 영상은 아직 전사하지 않았습니다 — 맞출 원본 자막이 없습니다."
+SNAP_WAITING = (
+    "자막 시각 확인이 지금 자막을 재면 시각 맞춤 제안이 보입니다(무료) — 잠시 뒤에 다시 보세요."
+)
+SNAP_UNMEASURED = (
+    "말소리를 잴 수 없어 시각 맞춤을 제안하지 못했습니다 — 「자막 시각 확인」 칸의 이유를 보세요."
+)
+SNAP_SPEECH_MISSING = (
+    "지금 자막을 잰 말소리 측정을 쓸 수 없습니다 — 「자막 시각 확인」 칸의 「다시 재기(무료)」를"
+    " 누른 뒤에 다시 보세요."
+)
+SNAP_RELISTEN_PENDING = (
+    "다시 듣기를 기다리는 영상입니다 — 다시 듣기를 먼저 끝낸 뒤에 시각을 맞추세요. 지금 맞추면 직접"
+    " 고친 자막이 되어 다시 들은 전사가 이 자막을 덮지 못하고, 다시 듣기에 낸 돈이 헛됩니다."
+)
+SNAP_REFILL_RUNNING = (
+    "이 영상의 말소리 빈칸 재전사가 진행 중이라 지금은 시각 맞춤을 적용하거나 되돌리지 않습니다 —"
+    " 끝나면 할 수 있습니다."
+)
+SNAP_ANALYSIS_RUNNING = (
+    "이 영상을 분석하는 중이라 지금은 시각 맞춤을 적용하거나 되돌리지 않습니다 — 분석이 끝나면"
+    " 할 수 있습니다."
+)
+SNAP_APPLIED_ONCE = (
+    "이미 시각 맞춤을 적용한 자막입니다 — 다시 맞추려면 「되돌리기」로 적용 전 자막으로 돌린 뒤 새"
+    " 제안을 들어 보세요."
+)
+"""한 걸음 규칙(D59 19h) — 적용한 리비전은 다시 맞추지 않는다. 쓰기 계층의 거절
+(`source_transcript.SNAP_ALREADY_APPLIED`)은 이 말에 「아무것도 바꾸지 않았습니다.」를 붙인
+것이다."""
+SNAP_CHANGED = (
+    "시각 맞춤 제안이 화면에 보이는 것과 다릅니다 — 새 제안을 듣고 다시 적용하세요. 아무것도 바꾸지"
+    " 않았습니다."
+)
+SNAP_NOTHING_CHANGED = "아무것도 바꾸지 않았습니다."
+SNAP_LISTEN_FIRST = 5
+"""「시각 맞춤 제안」 칸이 먼저 들어 보라고 내놓는 줄 수 — 끝이 크게 움직인 줄부터(D59 19g (c)).
+문구 길이일 뿐 판정이 아니다(적용은 언제나 모든 줄이다)."""
+RELISTEN_SNAPPED_REFUSAL = (
+    "시각 맞춤을 적용한 자막이라 다시 듣지 않습니다 — 다시 들으려면 「되돌리기」로 적용 전 자막으로"
+    " 돌린 뒤에 누르세요. 유료 호출은 시작하지 않았습니다."
 )
 
 
@@ -1323,14 +1377,19 @@ class RawWorkspaceService:
         document = source_transcript.load(workspace, asset_id)
         if document is None:
             raise RawWorkspaceError(RELISTEN_UNTRANSCRIBED_REFUSAL)
-        if source_transcript.human_edited(document):
-            raise RawWorkspaceError(RELISTEN_EDITED_REFUSAL)
+        refusal = _relisten_refusal(document)
+        if refusal is not None:
+            raise RawWorkspaceError(refusal)
         # 도는 빈칸 재전사가 넣으면 고친 자막이 되어 다시 들은 전사가 덮지 못한다(D59 19f).
         if self.refill_running(root, asset_id):
             raise RawWorkspaceError(RELISTEN_REFILL_RUNNING_REFUSAL)
         if not _source_has_audio(workspace.source_media_path(asset)):
             raise RawWorkspaceError(RELISTEN_SILENT_REFUSAL)
-        return asr_epoch.bump(workspace, asset_id)
+        # 위 검사와 차례 올리기 사이(ffprobe 동안)에 적용·편집·빈칸 재전사가 끼면 고친 자막에 유료
+        # 다시 듣기가 남는다 — 같은 쓰기 트랜잭션 안에서 다시 본다(D59 19h).
+        return asr_epoch.bump(
+            workspace, asset_id, guard=partial(_relisten_check, asset_id=asset_id)
+        )
 
     # ── 말소리 빈칸 재전사(D59 19f) — 고르기는 무료, 묻기는 승인한 견적만 ──────────
 
@@ -1529,6 +1588,131 @@ class RawWorkspaceService:
             origin=choice.origin,
             audio_start=plan.audio_start,
         )
+
+    # ── 시각 맞춤 적용·되돌리기(D59 19h) — 제안은 무료로 다시 재고, 적용은 사람이 누를 때만 ──────
+    # 제안 계산(`sync_snap`)과 원본 자막 쓰기(`apply_changes`·`restore`)는 이 아래의 `apply_snap*`·
+    # `revert_snap*`만 부른다(불변식). 화면은 이 메서드들로만 닿는다.
+
+    def apply_snap_preview(self, root: Path, asset_id: str) -> Any:
+        """「시각 맞춤 제안」 칸의 값(무료) — 지금 제안의 sha·센 어긋남·판정 수·예측·먼저 들을 줄.
+
+        제안을 만들 수 없으면 그 이유(존댓말 한 줄)를 돌려준다. 재료는 자막 시각 확인(D55)이 지금
+        자막 리비전을 잰 보고서·저장된 말소리 칸이다(읽기만 — 말소리 측정·디코드 없음). 아무것도
+        쓰지 않는다.
+        """
+        found = self._apply_snap_plan(root, asset_id, strict=False)
+        if isinstance(found, str):
+            return found
+        plan, measured = found
+        return _apply_snap_preview(plan, measured)
+
+    def apply_snap_blocker(self, root: Path, asset_id: str) -> str | None:
+        """지금 적용을 받지 않는 까닭 — 다시 듣기 대기 · 빈칸 재전사 진행 · 그 원본을 분석하는 중.
+
+        적용하면 고친 자막이 된다: 다시 들은 전사가 덮지 못해 다시 듣기에 낸 돈이 헛되고, 도는 빈칸
+        재전사는 넣을 리비전을 잃고(D59 19f와 같은 선), 분석은 심는 중인 자막과 어긋난다. 적용은 이
+        검사를 쓰기 트랜잭션 안에서 한 번 더 한다(`_apply_snap_check`).
+        """
+        with self._workspace(root).connect() as db:
+            return _apply_snap_hold(db, asset_id, relisten=True)
+
+    def apply_snap(self, root: Path, asset_id: str, sha256: str) -> dict:
+        """「시각 맞춤 적용(무료)」 — 지금 다시 잰 제안의 sha가 화면이 본 sha와 같을 때만 쓴다.
+
+        **모든** 제안의 새 시각을 판정과 무관하게 리비전 하나로 쓴다(D59 19g 「적용 규칙」 — 막힘·못
+        찾음 줄의 밀기 포함). 제안은 지금 리비전·그 리비전의 보고서(1단계 PCM·기준까지 대조)·저장된
+        말소리 칸으로 다시 잰다 — sha가 다르면(다른 탭·자막 편집·다시 잰 측정·기준 변경) 아무것도
+        쓰지 않고 거절한다. 원본 자막은 고친 자막(`edited`)이 되고 시각 확인을 다시 건다.
+        **한 걸음**: 이미 적용한 리비전은 다시 맞추지 않는다(되돌린 뒤에만). 막는 사정은 쓰기
+        트랜잭션 안에서 다시 본다.
+        """
+        from vlogsrt.project.raw import source_transcript
+
+        workspace = self._workspace(root)
+        workspace.source_asset(asset_id)
+        blocker = self.apply_snap_blocker(root, asset_id)
+        if blocker is not None:
+            raise RawWorkspaceError(f"{blocker} {SNAP_NOTHING_CHANGED}")
+        found = self._apply_snap_plan(root, asset_id, strict=True)
+        if isinstance(found, str):
+            raise RawWorkspaceError(f"{found} {SNAP_NOTHING_CHANGED}")
+        plan, _measured = found
+        if plan.sha256 != sha256:
+            raise RawWorkspaceError(SNAP_CHANGED)
+        times = [
+            (item.cue_id, plan.on_common(item.new_start), plan.on_common(item.new_end))
+            for item in plan.proposals
+        ]
+        document = source_transcript.apply_changes(
+            workspace,
+            asset_id,
+            plan.source.transcript_revision,
+            times,
+            plan_sha256=plan.sha256,
+            settings_version=plan.settings.version,
+            guard=partial(_apply_snap_check, asset_id=asset_id, relisten=True),
+        )
+        log.out(f"시각 맞춤을 적용했습니다: {asset_id} — 바뀐 줄 {document['snap']['changed']}개")
+        self._queue_sync_checks(root, (asset_id,))  # 자막이 바뀌었다 — 시각 확인을 다시(D55)
+        return document
+
+    def _apply_snap_plan(self, root: Path, asset_id: str, *, strict: bool) -> Any:
+        """지금 자막 리비전·그 보고서·저장된 말소리 칸으로 잰 (제안, 재료) — 없으면 그
+        이유(존댓말)."""
+        from vlogsrt.project import sync_snap
+        from vlogsrt.project.config import SYNC_SNAP_SETTINGS, ProjectConfig
+        from vlogsrt.project.raw import source_transcript, sync_report
+
+        workspace = self._workspace(root)
+        transcript = source_transcript.load(workspace, asset_id)
+        if transcript is None:
+            return SNAP_UNTRANSCRIBED
+        if source_transcript.snap_applied(transcript) is not None:
+            return SNAP_APPLIED_ONCE  # 한 걸음 규칙 — 되돌린 뒤에만 다시 잰다
+        measured = sync_report.measured_speech(workspace, asset_id, strict=strict)
+        revision = str(transcript["revision"])
+        if measured is None or measured.report["source"]["transcript_revision"] != revision:
+            return _apply_snap_unready(sync_report.current_report(workspace, asset_id))
+        source = sync_snap.SnapSource(
+            source_id=asset_id,
+            transcript_revision=revision,
+            pcm_sha256=measured.pcm_sha256,
+            vad_key=sync_report.vad_key(ProjectConfig()),
+            audio_start=measured.audio_start,
+            transcript_duration=source_transcript.rational(transcript["duration"]),
+        )
+        offset = _apply_snap_offset(measured.report)
+        plan = sync_snap.propose(
+            measured.cues, measured.speech, offset, source=source, settings=SYNC_SNAP_SETTINGS
+        )
+        return plan, measured
+
+    def revert_snap_state(self, root: Path, asset_id: str) -> dict | None:
+        """지금 리비전이 시각 맞춤을 적용한 리비전이면 그 기록 — 「되돌리기」 단추의 재료.
+        읽기만 한다."""
+        from vlogsrt.project.raw import source_transcript
+
+        document = source_transcript.load(self._workspace(root), asset_id)
+        return None if document is None else source_transcript.snap_applied(document)
+
+    def revert_snap(self, root: Path, asset_id: str, revision: str) -> dict:
+        """「되돌리기」(무료) — 적용 전 리비전의 줄과 `edited`를 바이트 그대로 새 리비전으로 쌓는다.
+
+        화면이 본 리비전이 지금 리비전이고 그것이 시각 맞춤을 적용한 리비전일 때만 된다 — 그 뒤에
+        고치거나 넣은 자막은 지우지 않는다(거절). 빈칸 재전사가 돌거나 그 원본을 분석하는 동안은
+        받지 않는다 — 쓰기 트랜잭션 안에서 다시 본다. 되돌린 뒤 시각 확인을 다시 건다.
+        """
+        from vlogsrt.project.raw import source_transcript
+
+        workspace = self._workspace(root)
+        workspace.source_asset(asset_id)
+        with workspace.connect() as db:
+            _apply_snap_check(db, asset_id=asset_id, relisten=False)
+        guard = partial(_apply_snap_check, asset_id=asset_id, relisten=False)
+        document = source_transcript.restore(workspace, asset_id, revision, guard=guard)
+        log.out(f"시각 맞춤을 되돌렸습니다: {asset_id}")
+        self._queue_sync_checks(root, (asset_id,))  # 자막이 바뀌었다 — 시각 확인을 다시(D55)
+        return document
 
     @staticmethod
     def transcript_human_edited(document: Mapping[str, Any]) -> bool:
@@ -4489,6 +4673,187 @@ def _warn_refill(asset_id: str, outcome: Any, result: Any) -> None:
             f"빈칸 재전사({asset_id}): 조각 {len(result.failed)}개를 받지 못했습니다 — 다음 견적이"
             " 그 조각을 다시 셉니다"
         )
+
+
+@dataclass(frozen=True, slots=True)
+class SnapCue:
+    """먼저 들어 볼 줄 하나(D59 19h) — 시각은 원본 자막의 공통 시계(정확 유리수)다."""
+
+    cue_id: str
+    text: str
+    old_start: Fraction
+    old_end: Fraction
+    new_start: Fraction
+    new_end: Fraction
+    status: str
+    """경계 맞춤의 판정 — moved · unchanged · blocked · no_speech(D59 19g)."""
+    shift_only: bool
+    """경계는 맞추지 않고 센 전체 어긋남만큼만 옮긴다 — 막힘·못 찾음 줄도 그렇게 옮겨진다."""
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class SnapPreview:
+    """「시각 맞춤 제안」 칸의 값(D59 19h) — 화면은 이 값만 본다(제안 모듈을 모른다).
+
+    `level`·`predicted`는 같은 말소리 칸으로 잰 판정이다 — 맞춘 경계가 그 칸에서 왔으니 예측은
+    좋아지게 마련이다(자기 참조, D59 19g (c)). 화면은 「같은 측정으로 잰 예측」이라고 밝힌다.
+    """
+
+    sha256: str
+    transcript_revision: str
+    shift: Fraction
+    """센 전체 어긋남(`+` = 자막이 말보다 이르다) — 세지 않았으면 0."""
+    shifted: int
+    """그 어긋남만큼 옮긴 줄 수 — 원본 길이 밖·옮기지 않은 줄과 겹침·길이 0 줄은 옮기지 않는다."""
+    counts: tuple[tuple[str, int], ...]
+    """경계 맞춤 판정별 줄 수 — (moved, unchanged, blocked, no_speech) 순서."""
+    shift_only: int
+    changes: int
+    """적용하면 시각이 바뀌는 줄 수(판정과 무관 — 막힘·못 찾음 줄의 밀기 포함)."""
+    total: int
+    level: str
+    predicted: str
+    listen: tuple[SnapCue, ...]
+
+
+def _refill_active_on(db: Any, asset_id: str) -> bool:
+    """그 원본의 빈칸 재전사 작업이 활성인가 — 연결 하나 위에서(작업 지문은 `<원본>:<digest>`)."""
+    return any(
+        fingerprint.startswith(f"{asset_id}:")
+        for fingerprint in active_fingerprints_on(db, (REFILL_JOB_KIND,))
+    )
+
+
+def _relisten_refusal(document: Mapping[str, Any]) -> str | None:
+    """고친 자막이면 다시 듣기 거절 문구 — 시각 맞춤만 얹은 자막이면 되돌리는 길을 밝힌다
+    (D59 19h)."""
+    from vlogsrt.project.raw import source_transcript
+
+    if not source_transcript.human_edited(dict(document)):
+        return None
+    snapped = source_transcript.snap_applied(document)
+    undoable = snapped is not None and not snapped.get("from_edited")
+    return RELISTEN_SNAPPED_REFUSAL if undoable else RELISTEN_EDITED_REFUSAL
+
+
+def _relisten_check(db: Any, *, asset_id: str) -> None:
+    """차례를 올리는 쓰기 트랜잭션 안의 다시 검사 — 그사이 고친 자막(적용·편집·넣기)이 되었거나
+    빈칸 재전사가 걸렸으면 거절한다(같은 연결, D59 19h)."""
+    from vlogsrt.project.raw import source_transcript
+
+    document = source_transcript.latest_on(db, asset_id)
+    refusal = None if document is None else _relisten_refusal(document)
+    if refusal is not None:
+        raise RawWorkspaceError(refusal)
+    if _refill_active_on(db, asset_id):
+        raise RawWorkspaceError(RELISTEN_REFILL_RUNNING_REFUSAL)
+
+
+def _apply_snap_hold(db: Any, asset_id: str, *, relisten: bool) -> str | None:
+    """지금 시각 맞춤을 적용·되돌리지 않는 까닭(연결 하나 위에서) — 다시 듣기 대기(적용만) · 빈칸
+    재전사 · 그 원본을 지금 분석(`analyzing`)하는 작업. 셋 다 같은 DB라 쓰기 트랜잭션 안에서도
+    읽는다.
+    """
+    from vlogsrt.project.raw import asr_epoch
+
+    if relisten and asr_epoch.pending_on(db, asset_id):
+        return SNAP_RELISTEN_PENDING
+    if _refill_active_on(db, asset_id):
+        return SNAP_REFILL_RUNNING
+    active = active_fingerprints_on(db, (ANALYSIS_JOB_KIND, ANALYSIS_SEMANTIC_JOB_KIND))
+    for revision_id, fingerprint in analyzing_revisions_on(db, asset_id):
+        if (
+            fingerprint in active
+            or analysis_workflow.semantic_job_fingerprint(revision_id) in active
+        ):
+            return SNAP_ANALYSIS_RUNNING
+    return None
+
+
+def _apply_snap_check(db: Any, *, asset_id: str, relisten: bool) -> None:
+    """`_apply_snap_hold`의 거절판 — 쓰기 트랜잭션 안의 다시 검사(`_store_edit`의 `guard`)."""
+    reason = _apply_snap_hold(db, asset_id, relisten=relisten)
+    if reason is not None:
+        raise RawWorkspaceError(f"{reason} {SNAP_NOTHING_CHANGED}")
+
+
+def _apply_snap_unready(report: Mapping[str, Any] | None) -> str:
+    """제안을 지금 잴 수 없는 까닭 — 확인을 기다림 · 측정 불가 · 지금 보고서는 있는데 그 말소리 칸을
+    쓸 수 없음(저장 칸이 없거나 1단계 PCM·기준이 바뀌었다 — 저절로 다시 재지 않을 수 있어 「다시
+    재기」를 말한다)."""
+    if report is None or report.get("stale"):
+        return SNAP_WAITING
+    return SNAP_UNMEASURED if not report.get("pcm") else SNAP_SPEECH_MISSING
+
+
+def _apply_snap_offset(report: Mapping[str, Any]) -> Any:
+    """보고서의 전체 어긋남 추정(`metrics.offset`) — 확인이 쓴 그대로의 값(정확 유리수)."""
+    from vlogsrt.project import sync_check
+
+    body = report["metrics"]["offset"]
+    seconds = None if body.get("seconds") is None else Fraction(str(body["seconds"]))
+    gain = None if body.get("gain") is None else Fraction(str(body["gain"]))
+    peak = None if body.get("peak_z") is None else float(body["peak_z"])
+    return sync_check.ShiftEstimate(str(body["status"]), seconds, gain, peak)
+
+
+def _apply_snap_preview(plan: Any, measured: Any) -> SnapPreview:
+    """제안 → 칸의 값. 판정 전후는 같은 말소리 칸·같은 기준으로 잰다(보고서의 덧붙은 이유는
+    뺀다)."""
+    from vlogsrt.project import sync_check, sync_snap
+    from vlogsrt.project.config import SYNC_CHECK_SETTINGS
+
+    after = tuple(
+        replace(cue, start=item.new_start, end=item.new_end)
+        for cue, item in zip(measured.cues, plan.proposals, strict=True)
+    )
+    levels = [
+        sync_check.judge(
+            sync_check.measure(cues, measured.speech, SYNC_CHECK_SETTINGS), SYNC_CHECK_SETTINGS
+        ).level
+        for cues in (measured.cues, after)
+    ]
+    moving = [item for item in plan.proposals if item.moves]
+    return SnapPreview(
+        sha256=plan.sha256,
+        transcript_revision=plan.source.transcript_revision,
+        shift=plan.shift,
+        shifted=sum(1 for item in plan.proposals if item.shifted),
+        counts=tuple((status, plan.count(status)) for status in sync_snap.STATUSES),
+        shift_only=sum(1 for item in moving if item.shift_only),
+        changes=len(moving),
+        total=len(plan.proposals),
+        level=levels[0],
+        predicted=levels[1],
+        listen=_apply_snap_listen(plan),
+    )
+
+
+def _apply_snap_listen(plan: Any) -> tuple[SnapCue, ...]:
+    """먼저 들어 볼 줄 — 시각이 바뀌는 줄 중 **끝이 크게 움직인 것부터**(같으면 시작, 그다음 순서).
+
+    시작 맞춤은 다른 신호(포락선)로 뒷받침되지만 끝 맞춤은 우연보다 낫다는 것이 보이지 않았다
+    (D59 19g (c)) — 사람이 끝 경계부터 듣는다. 시각이 바뀌지 않는 줄은 들어 볼 것이 없다.
+    """
+    moving = [(index, item) for index, item in enumerate(plan.proposals) if item.moves]
+    ranked = sorted(
+        moving, key=lambda pair: (-abs(pair[1].end_move), -abs(pair[1].start_move), pair[0])
+    )
+    return tuple(
+        SnapCue(
+            cue_id=item.cue_id,
+            text=item.text,
+            old_start=plan.on_common(item.old_start),
+            old_end=plan.on_common(item.old_end),
+            new_start=plan.on_common(item.new_start),
+            new_end=plan.on_common(item.new_end),
+            status=item.status,
+            shift_only=item.shift_only,
+            reason=item.reason,
+        )
+        for _, item in ranked[:SNAP_LISTEN_FIRST]
+    )
 
 
 def _order_ids(revision: GlobalOrderRevision) -> tuple[str, ...]:

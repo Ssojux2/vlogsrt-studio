@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -58,11 +59,18 @@ def current(workspace: Any, asset_id: str) -> int:
     return state(workspace, asset_id).epoch
 
 
-def bump(workspace: Any, asset_id: str) -> AsrEpoch:
-    """차례를 하나 올린다 — 이미 기다리는 중이면 그대로 돌려준다(두 번 눌러도 한 번이다)."""
+def bump(workspace: Any, asset_id: str, *, guard: Callable[[Any], None] | None = None) -> AsrEpoch:
+    """차례를 하나 올린다 — 이미 기다리는 중이면 그대로 돌려준다(두 번 눌러도 한 번이다).
+
+    `guard`는 쓰기 트랜잭션(`BEGIN IMMEDIATE`) 안에서 같은 연결로 돈다 — 부른 쪽이 그 검사와 이
+    쓰기 사이에 다른 쓰기(원본 자막의 시각 맞춤 적용 등)가 끼지 못하게 한다(D59 19h). 거절하려면
+    `RawWorkspaceError`를 올리고, 그러면 아무것도 쓰지 않는다.
+    """
     with workspace.connect() as db:
         _create(db)
         db.execute("BEGIN IMMEDIATE")
+        if guard is not None:
+            guard(db)
         row = db.execute(
             f"SELECT epoch, heard FROM {TABLE} WHERE asset_id=?", (asset_id,)
         ).fetchone()
@@ -91,6 +99,17 @@ def mark_heard(workspace: Any, asset_id: str, epoch: int) -> None:
             (epoch, asset_id, epoch, epoch),
         )
         db.commit()
+
+
+def pending_on(db: Any, asset_id: str) -> bool:
+    """연결 하나 위에서 읽은 「다시 듣기 대기」 — 다른 쓰기 트랜잭션 안의 검사가 같은 연결로 읽는다.
+
+    표를 만들지 않는다(읽기만).
+    """
+    if not _table_exists(db):
+        return False
+    row = db.execute(f"SELECT epoch, heard FROM {TABLE} WHERE asset_id=?", (asset_id,)).fetchone()
+    return row is not None and int(row[0]) > int(row[1])
 
 
 def withdraw(workspace: Any, asset_id: str) -> bool:
@@ -135,6 +154,7 @@ __all__ = [
     "bump",
     "current",
     "mark_heard",
+    "pending_on",
     "state",
     "withdraw",
 ]

@@ -84,6 +84,25 @@ def new_analysis_revision_id() -> str:
     return f"anal_{secrets.token_hex(8)}"
 
 
+def analyzing_revisions_on(connection: sqlite3.Connection, asset_id: str) -> list[tuple[str, str]]:
+    """연결 하나 위에서 읽은, 그 원본을 지금 분석하는(`analyzing`) 리비전의 (아이디, 지문).
+
+    다른 쓰기 트랜잭션 안의 검사가 같은 연결로 읽는다. 분석 표가 없으면 빈 목록이다.
+    """
+    table = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='analysis_source_results'"
+    ).fetchone()
+    if table is None:
+        return []
+    rows = connection.execute(
+        "SELECT r.revision_id, r.fingerprint FROM analysis_source_results s"
+        " JOIN analysis_revisions r ON r.revision_id = s.revision_id"
+        " WHERE s.asset_id = ? AND s.status = 'analyzing'",
+        (asset_id,),
+    ).fetchall()
+    return [(str(row[0]), str(row[1])) for row in rows]
+
+
 class AnalysisStore:
     """분석 리비전·원본 결과의 SQL 문장 — `RawWorkspace.connect`를 빌려 쓴다."""
 

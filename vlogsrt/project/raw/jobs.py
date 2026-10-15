@@ -62,6 +62,21 @@ class JobContext:
         JobStore(self._workspace).advance(self.job_id)
 
 
+def active_fingerprints_on(connection: sqlite3.Connection, kinds: Collection[str]) -> set[str]:
+    """연결 하나 위에서 읽은 그 종류의 활성 작업 지문 — 다른 쓰기 트랜잭션 안의 검사가 같은
+    연결로 읽는다(작업 등록 `insert_deduplicated`도 같은 DB의 쓰기 트랜잭션이라 그 사이에 끼지
+    못한다).
+    """
+    kind_marks = ", ".join("?" for _ in kinds)
+    status_marks = ", ".join("?" for _ in ACTIVE_JOB_STATUSES)
+    rows = connection.execute(
+        f"SELECT input_fingerprint FROM jobs WHERE kind IN ({kind_marks})"
+        f" AND status IN ({status_marks})",
+        (*kinds, *ACTIVE_JOB_STATUSES),
+    ).fetchall()
+    return {str(row[0]) for row in rows}
+
+
 class JobStore:
     """jobs 표의 문장 단위 갱신 — 호출마다 짧은 연결을 쓴다(스레드 안전)."""
 

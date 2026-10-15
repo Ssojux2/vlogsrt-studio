@@ -1708,6 +1708,10 @@ WORKBENCH_CSS = (
 /* 말소리 빈칸 재전사(D59 19f) — 빈칸 단추는 서로 띄우고, 견적 문구는 승인이 대조하는 글이라
    상자로 묶는다(긴 문구도 칸 안에서 줄바꿈 — 가로로 넘치지 않는다). */
 [data-vl-refill] .vl-btn { margin: 0 6px 6px 0; }
+/* 시각 맞춤 제안(D59 19h) — 들어 볼 줄은 왼쪽 선으로 묶고, 긴 글자·이유는 칸 안에서 줄바꿈한다. */
+[data-vl-snap] .vl-btn { margin: 0 6px 6px 0; }
+.vl-snap-cue { border-left: 3px solid var(--vl-line-strong); padding: 2px 0 2px 8px;
+  margin: 0 0 8px; overflow-wrap: anywhere; }
 .vl-refill-quote { border: 1px solid var(--vl-line-strong); border-radius: 4px; padding: 6px 8px;
   background: var(--vl-surface-raised); overflow-wrap: anywhere; }
 .vl-audio-strip { position:absolute; top:var(--vl-audio-top); left:0; right:0;
@@ -2424,6 +2428,111 @@ VISUAL_BOOTSTRAP_JS = (
           "</small></details>");
         return out.join("");
       }
+      // 시각 맞춤 제안(D59 19g·19h) — 자막 시각 확인이 잰 말소리 경계에 큐를 맞춘 **제안**이다.
+      // 적용은 무료이고 사람이 누를 때만, 그 영상의 모든 줄을 함께 바꾼다(막힘·못 찾음 줄의 밀기
+      // 포함). 적용은 누른 순간 그려져 있던 제안의 sha에 묶이고 서버가 다시 재어 대조한다 — 새로
+      // 그려진 지 REFILL_READ_MS가 안 된 제안은 들을 틈이 없었으니 빈 sha다(서버가 거절하고 새
+      // 제안을 그린다).
+      // 들어 볼 줄은 끝이 크게 움직인 것부터 — 옛 시각과 제안 시각을 같은 재생기로 차례로 듣는다.
+      function snapPanel(info) {
+        var sn = info && info.snap;
+        if (!sn) { return ""; }
+        var open = sn.state === "ready" || !!sn.undo;
+        var out = ['<details class="vl-details" data-vl-snap="1"' + (open ? " open" : "") +
+          "><summary>시각 맞춤 제안" +
+          (sn.undo ? ' <span class="vl-badge">적용함</span>' : "") + "</summary>"];
+        out.push('<p class="vl-kv">' + esc(sn.explanation) + "</p>");
+        if (sn.undo) {
+          out.push('<p class="vl-kv">' + esc(sn.undo.note) + "</p>");
+          out.push('<button type="button" class="vl-btn" data-vl-act="snap-revert" ' +
+            'data-vl-revision="' + esc(sn.undo.revision) + '">되돌리기</button>');
+        }
+        ["shift", "counts", "changes"].forEach(function(key) {
+          if (sn[key]) { out.push('<p class="vl-kv">' + esc(sn[key]) + "</p>"); }
+        });
+        if (sn.prediction) {
+          out.push('<p class="vl-kv">' + esc(sn.prediction) + " <small>" +
+            esc(sn.predictionLabel) + "</small></p>");
+        }
+        if (sn.listenNote) { out.push('<p class="vl-kv">' + esc(sn.listenNote) + "</p>"); }
+        (sn.listen || []).forEach(function(row) { out.push(snapListenRow(row)); });
+        if (sn.order) { out.push('<p class="vl-kv"><small>' + esc(sn.order) + "</small></p>"); }
+        if (sn.undoRule) {
+          out.push('<p class="vl-kv"><small>' + esc(sn.undoRule) + "</small></p>");
+        }
+        if (sn.state === "ready" && sn.sha) {
+          noteSnapShown(sn.sha);
+          out.push('<button type="button" class="vl-btn vl-btn-primary" ' +
+            'data-vl-act="snap-apply" data-vl-sha="' + esc(sn.sha) + '">' +
+            "시각 맞춤 적용(무료)</button>");
+        } else if (sn.reason) {
+          out.push('<p class="vl-kv">' + esc(sn.reason) + "</p>");
+        }
+        out.push("</details>");
+        return out.join("");
+      }
+      function snapSpan(start, end) {
+        return VL.fmt(ratOf(start)) + "–" + VL.fmt(ratOf(end)) + "초";
+      }
+      // 들어 볼 줄 하나 — 옛 시각·제안 시각 단추는 그 구간만 재생하고 끝에서 멈춘다(A/B).
+      function snapListenRow(row) {
+        return '<div class="vl-snap-cue" data-vl-snap-cue="' + esc(row.id) + '">' +
+          '<p class="vl-kv">' + esc(row.text) + ' <span class="vl-badge">' + esc(row.label) +
+          "</span></p>" +
+          '<p class="vl-kv"><small>' + esc(row.reason) + "</small></p>" +
+          '<button type="button" class="vl-btn" data-vl-act="snap-listen" data-vl-from="' +
+          esc(row.oldStart) + '" data-vl-to="' + esc(row.oldEnd) + '">' +
+          esc("옛 시각 " + snapSpan(row.oldStart, row.oldEnd)) + "</button>" +
+          '<button type="button" class="vl-btn" data-vl-act="snap-listen" data-vl-from="' +
+          esc(row.newStart) + '" data-vl-to="' + esc(row.newEnd) + '">' +
+          esc("제안 " + snapSpan(row.newStart, row.newEnd)) + "</button></div>";
+      }
+      function noteSnapShown(sha) {
+        if (!state.snapShown || state.snapShown.sha !== sha) {
+          state.snapShown = { sha: sha, at: Date.now() };
+        }
+      }
+      // 누른 순간의 신원 — 적용은 그때 그려져 있던 sha(읽을 틈이 지났을 때만), 되돌리기는 그
+      // 리비전.
+      function snapPress(node) {
+        var act = node.getAttribute("data-vl-act");
+        if (act === "snap-revert") {
+          return { act: act, sourceId: curSourceId(),
+            revision: node.getAttribute("data-vl-revision") || "" };
+        }
+        var sha = node.getAttribute("data-vl-sha") || "";
+        var shown = state.snapShown;
+        var unread = !shown || shown.sha !== sha || Date.now() - shown.at < REFILL_READ_MS;
+        return { act: act, sourceId: curSourceId(), sha: unread ? "" : sha };
+      }
+      // 들어 보기 — 그 구간만 재생하고 끝에서 멈춘다(반복 없음). 새 소리 파일은 없다. 끝은 화면
+      // 프레임마다 본다 — `timeupdate`는 0.25초(부하가 있으면 그 이상)마다라 끝 경계를 넘겨
+      // 들려준다(탐침이 0.48초 넘김을 잡았다). 프레임 콜백이 없는 곳에서는 틱(`timeupdate`)이
+      // 멈춘다.
+      function listenSpan(from, to) {
+        var v = videoEl();
+        var info = curSource();
+        if (!v || !info || !info.src || !from || !to) {
+          msg("이 원본의 미리보기가 없습니다. 준비가 끝나면 들을 수 있습니다.");
+          return;
+        }
+        stopLoop(); state.keptPlaying = false;
+        state.listenEnd = to;
+        seekTo(from);
+        v.play();
+        if (W.requestAnimationFrame) { W.requestAnimationFrame(watchListenEnd); }
+      }
+      function watchListenEnd() {
+        var v = videoEl();
+        if (staleWire() || !state.listenEnd || !v || listenDone(v)) { return; }
+        W.requestAnimationFrame(watchListenEnd);
+      }
+      function listenDone(v) {
+        if (v.currentTime < VL.toFloat(VL.add(state.listenEnd, originRat()))) { return false; }
+        state.listenEnd = null;
+        v.pause();
+        return true;
+      }
       // 다시 듣기(D59 19b) — 누르면 차례만 오르고(무료) 승인 범위가 「전사만」이 된다. 유료 전사는
       // 견적을 확인하고 승인해야 시작한다. 사람이 고친 자막은 덮지 않는다(단추가 없다).
       function relistenPanel(info) {
@@ -2434,6 +2543,12 @@ VISUAL_BOOTSTRAP_JS = (
           (red || re.pending ? " open" : "") + "><summary>다시 듣기" +
           (re.pending ? ' <span class="vl-badge">승인 대기</span>' : "") + "</summary>"];
         out.push('<p class="vl-kv">' + esc(re.explanation) + "</p>");
+        if (re.edited && re.snapped) {
+          // 시각 맞춤만 얹은 자막 — 「되돌리기」로 적용 전 자막으로 돌리면 다시 들을 수
+          // 있다(D59 19h).
+          out.push('<p class="vl-kv">' + esc(re.snapped) + "</p></details>");
+          return out.join("");
+        }
         if (re.edited) {
           out.push('<p class="vl-kv">직접 고친 자막이 있어 다시 듣지 않습니다 — 고친 자막을' +
             " 덮어쓰지 않습니다.</p></details>");
@@ -2585,7 +2700,7 @@ VISUAL_BOOTSTRAP_JS = (
           return VL.cmp(ratOf(it.start), mid) <= 0 && VL.cmp(ratOf(it.end), mid) > 0;
         });
       }
-      function stopLoop() { state.loop = null; }
+      function stopLoop() { state.loop = null; state.listenEnd = null; }
       function unloadVideo(v) {
         clearSourceCaptions(v);
         stopLoop();
@@ -3162,6 +3277,7 @@ VISUAL_BOOTSTRAP_JS = (
           }
         }
         out.push(syncPanel(info));
+        out.push(snapPanel(info));
         out.push(relistenPanel(info));
         out.push(refillPanel(info));
         ((info && info.crossSourceCandidates) || []).forEach(function(candidate) {
@@ -3509,6 +3625,7 @@ VISUAL_BOOTSTRAP_JS = (
 
       function tick() {
         var v = videoEl();
+        if (state.listenEnd && v) { listenDone(v); }
         if (state.loop && v) {
           var endB = VL.toFloat(VL.add(state.loop.end, originRat()));
           var startB = VL.toFloat(VL.add(state.loop.start, originRat()));
@@ -3832,6 +3949,27 @@ VISUAL_BOOTSTRAP_JS = (
           return;
         }
         if (act === 'refill-pick') { seekTo(ratOf(node.getAttribute('data-vl-at'))); return; }
+        if (act === 'snap-listen') {
+          listenSpan(ratOf(node.getAttribute('data-vl-from')),
+            ratOf(node.getAttribute('data-vl-to')));
+          return;
+        }
+        if (act === 'snap-apply' || act === 'snap-revert') {
+          // 누른 순간 적어 둔 신원(키보드로 눌렀으면 지금)을 보낸다 — 한 번 쓰고 지운다.
+          var snap = state.snapPress;
+          state.snapPress = null;
+          if (!snap || snap.act !== act || snap.sourceId !== curSourceId()) {
+            snap = snapPress(node);
+          }
+          if (act === 'snap-apply') {
+            call('vl_snap_apply', {sourceId:curSourceId(), sha:snap.sha},
+              '시각 맞춤을 적용하는 중(무료)…');
+          } else {
+            call('vl_snap_revert', {sourceId:curSourceId(), revision:snap.revision},
+              '시각 맞춤을 되돌리는 중(무료)…');
+          }
+          return;
+        }
         if (act === 'refill-approve') {
           // 누른 순간 적어 둔 견적(키보드로 눌렀으면 지금)을 보낸다 — 한 번 쓰고 지운다.
           var press = state.refillPress;
@@ -3997,9 +4135,11 @@ VISUAL_BOOTSTRAP_JS = (
         while (node && node !== root && !(node.getAttribute && node.getAttribute("data-vl-act"))) {
           node = node.parentNode;
         }
-        var approve = node && node !== root && node.getAttribute &&
-          node.getAttribute("data-vl-act") === "refill-approve";
-        state.refillPress = approve ? refillPress(node) : null;
+        var pressed = node && node !== root && node.getAttribute ?
+          node.getAttribute("data-vl-act") : "";
+        state.refillPress = pressed === "refill-approve" ? refillPress(node) : null;
+        state.snapPress = pressed === "snap-apply" || pressed === "snap-revert" ?
+          snapPress(node) : null;
       };
       root.addEventListener("pointerdown", root._vlDown);
 

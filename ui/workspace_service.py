@@ -212,6 +212,69 @@ RELISTEN_REFILL_RUNNING_TEXT = (
 REFILL_SHOWN_SPANS = 12
 """「말소리 빈칸 재전사」 칸에 단추로 보이는 빈칸 수 — 나머지는 「외 N곳」(문구 길이일 뿐 판정이
 아니다). 넣지 않은 줄도 같은 수까지 글자째 보이고 나머지는 「외 N줄」이다."""
+# 시각 맞춤 제안(D59 19h) — 「자막 시각 확인」 바로 아래 칸. 적용·되돌리기는 무료이고 사람이 누를
+# 때만 한다. 말은 존댓말, 「VAD」 대신 「말소리 측정」(D59 19e-4), 금액·모델 이름은 없다(D57).
+SNAP_EXPLANATION = (
+    "자막 시각 확인이 잰 말소리 경계에 원본 자막의 시작과 끝을 맞춘 제안입니다. 적용은 무료이고"
+    " 이 영상의 모든 줄을 함께 바꿉니다 — 경계를 맞추지 못한 줄도 전체 어긋남만큼은 함께 옮겨"
+    " 순서가 지켜집니다."
+)
+SNAP_PREDICTION_LABEL = "같은 측정으로 잰 예측 — 귀로 확인하세요"
+SNAP_PREDICTION = "말소리 측정으로 다시 재면 지금 {before}에서 적용 뒤 {after}입니다."
+SNAP_PREDICTION_SAME = "말소리 측정으로 다시 재도 판정은 {before} 그대로입니다."
+SNAP_LEVEL_WORDS = {"red": "빨강", "amber": "노랑", "green": "초록", "skip": "측정 불가"}
+SNAP_SHIFT_LATE = (
+    "자막이 말보다 {seconds}초 이릅니다(자막 시각 확인이 센 전체 어긋남) — 줄 {count}개를 먼저"
+    " 그만큼 늦춘 뒤 경계를 맞춥니다."
+)
+SNAP_SHIFT_EARLY = (
+    "자막이 말보다 {seconds}초 늦습니다(자막 시각 확인이 센 전체 어긋남) — 줄 {count}개를 먼저"
+    " 그만큼 앞당긴 뒤 경계를 맞춥니다."
+)
+SNAP_SHIFT_HELD = (
+    "원본 길이 밖으로 나가거나 옮기지 않은 줄과 겹치는 줄, 길이 0인 줄 {count}개는 옮기지 않습니다."
+)
+SNAP_COUNTS = (
+    "제안 {total}줄 — 맞춤 {moved}줄 · 그대로 {unchanged}줄 · 막힘 {blocked}줄 · 못 찾음"
+    " {no_speech}줄입니다. 못 찾음은 앞뒤에서 말소리를 못 찾은 줄로, 측정 한계일 수 있습니다."
+)
+SNAP_CHANGES = "적용하면 시각이 바뀌는 줄은 {changes}개입니다."
+SNAP_SHIFT_ONLY = (
+    "그중 {count}개는 경계를 맞추지 않고 전체 어긋남만큼만 옮깁니다 — 막힘·못 찾음 줄도 함께"
+    " 옮겨 순서가 지켜집니다."
+)
+SNAP_LISTEN_NOTE = (
+    "먼저 들어 볼 줄 {count}개입니다 — 끝이 크게 움직인 줄부터 보입니다. 끝 경계는 말소리 측정 말고"
+    " 다른 신호로는 맞춤이 확인되지 않았으니 「옛 시각」과 「제안」을 차례로 들어 보세요."
+)
+SNAP_ORDER_WARNING = (
+    "적용하면 이 영상의 원본 자막은 직접 고친 자막이 됩니다 — 그 뒤로는 다시 듣기·실패 구간 재시도·"
+    "다른 귀 교차 확인이 이 자막을 덮지 않습니다. 그 셋과 말소리 빈칸 재전사를 먼저 끝낸 뒤에"
+    " 적용하세요. 다음 영상 분석은 자막이 바뀐 이 영상을 다시 판정합니다(비용은 그 분석 견적에"
+    " 나옵니다)."
+)
+SNAP_UNDO_RULE = (
+    "적용한 뒤에는 이 칸에서 적용 전 자막으로 되돌릴 수 있습니다 — 자막을 다시 고치거나 빈칸을"
+    " 채우기 전까지만입니다."
+)
+SNAP_UNDO_NOTE = (
+    "시각 맞춤을 적용한 자막입니다(바뀐 줄 {changed}개). 「되돌리기」는 적용 전 자막을 그대로"
+    " 되살립니다 — 자막을 다시 고치거나 빈칸을 채우면 되돌릴 수 없습니다."
+)
+SNAP_NONE_TEXT = "말소리 경계에 맞춰 바꿀 시각이 없습니다."
+SNAP_BUSY_TEXT = raw_service.SNAP_ANALYSIS_RUNNING
+SNAP_APPLIED_TEXT = (
+    "시각 맞춤을 적용했습니다(바뀐 줄 {changed}개) — 자막 시각 확인이 새 자막을 무료로 다시 잽니다."
+)
+SNAP_REVERTED_TEXT = (
+    "시각 맞춤을 되돌렸습니다 — 적용 전 자막 그대로이고, 자막 시각 확인이 무료로 다시 잽니다."
+)
+SNAP_APPLY_LABEL = "시각 맞춤 적용(무료)"
+SNAP_REVERT_LABEL = "되돌리기"
+RELISTEN_SNAPPED_TEXT = (
+    "시각 맞춤을 적용한 자막이라 다시 듣지 않습니다 — 「시각 맞춤 제안」 칸의 「되돌리기」로 적용"
+    " 전 자막으로 돌리면 다시 들을 수 있습니다."
+)
 WORKBENCH_TOKEN_ACTIONS = (
     "prepare",
     "propose",
@@ -223,6 +286,8 @@ WORKBENCH_TOKEN_ACTIONS = (
     "sync-recheck",
     "relisten",
     "refill",
+    "snap-apply",
+    "snap-revert",
 )
 """작업대 수명 토큰을 요구하는 동작 — 바꾸는 동작 전부다(질의 `refresh`만 열려 있다, F1c)."""
 STAGE_NOTES = {
@@ -699,6 +764,111 @@ def _refill_skipped(rows: Sequence[Mapping[str, Any]]) -> dict[str, object]:
         "skippedMore": max(0, len(rows) - len(shown)),
         "skippedNote": REFILL_SKIPPED_NOTE.format(count=len(rows)),
     }
+
+
+def _snap_applied_view(record: Mapping[str, Any]) -> dict[str, object]:
+    """시각 맞춤을 적용한 리비전의 칸 — 적용한 상태·「되돌리기」(그 리비전에 묶임)·안내 한 줄.
+
+    한 걸음 규칙(D59 19h): 적용한 리비전 위에는 새 제안을 세우지 않는다 — 판정 수·들어 볼 줄·적용
+    단추·순서 경고가 없다(적용 뒤라 「적용하면 …」은 맞지 않는다).
+    """
+    return {
+        "explanation": SNAP_EXPLANATION,
+        "undo": {
+            "revision": str(record["revision"]),
+            "note": SNAP_UNDO_NOTE.format(changed=int(record.get("changed", 0))),
+        },
+        "state": "applied",
+        "reason": raw_service.SNAP_APPLIED_ONCE,
+    }
+
+
+def _snap_summary(preview: Any) -> dict[str, object]:
+    """「시각 맞춤 제안」 칸의 글 — 센 어긋남·판정 수·바뀌는 줄·예측·먼저 들을 줄(D59 19h).
+
+    막힘·못 찾음 줄을 「그대로」로 세지 않는다 — 판정은 판정대로 세고, 그 줄도 전체 어긋남만큼
+    옮겨지면 「밀기만」으로 따로 밝힌다(D59 19g 「적용 규칙」).
+    """
+    counts = dict(preview.counts)
+    changes = SNAP_CHANGES.format(changes=preview.changes)
+    if preview.shift_only:
+        changes += " " + SNAP_SHIFT_ONLY.format(count=preview.shift_only)
+    listen = [_snap_listen_row(cue, preview.shift) for cue in preview.listen]
+    view: dict[str, object] = {
+        "sha": preview.sha256,
+        "counts": SNAP_COUNTS.format(
+            total=preview.total,
+            moved=counts.get("moved", 0),
+            unchanged=counts.get("unchanged", 0),
+            blocked=counts.get("blocked", 0),
+            no_speech=counts.get("no_speech", 0),
+        ),
+        "changes": changes,
+        "prediction": _snap_prediction(preview.level, preview.predicted),
+        "predictionLabel": SNAP_PREDICTION_LABEL,
+        "listen": listen,
+    }
+    if preview.shift:
+        view["shift"] = _snap_shift_line(preview)
+    if listen:
+        view["listenNote"] = SNAP_LISTEN_NOTE.format(count=len(listen))
+    return view
+
+
+def _snap_prediction(before: str, after: str) -> str:
+    words = [SNAP_LEVEL_WORDS.get(level, SNAP_LEVEL_WORDS["skip"]) for level in (before, after)]
+    template = SNAP_PREDICTION_SAME if before == after else SNAP_PREDICTION
+    return template.format(before=words[0], after=words[1])
+
+
+def _snap_shift_line(preview: Any) -> str:
+    """센 전체 어긋남 한 줄 — 옮기지 않는 줄이 있으면 그 수도 밝힌다(조용히 빠지지 않는다)."""
+    shift = Fraction(preview.shift)
+    template = SNAP_SHIFT_LATE if shift > 0 else SNAP_SHIFT_EARLY
+    line = template.format(seconds=f"{float(abs(shift)):.3f}", count=preview.shifted)
+    held = preview.total - preview.shifted
+    return f"{line} {SNAP_SHIFT_HELD.format(count=held)}" if held else line
+
+
+def _snap_listen_row(cue: Any, shift: Fraction) -> dict[str, object]:
+    """먼저 들을 줄 하나 — 옛·제안 시각(공통 시계, 재생 머리가 그대로 쓴다)·판정·이유.
+
+    움직임은 따로 싣지 않는다 — 이유 문장(19g)이 「시작 +0.120초 · 끝 +0.300초」를 이미 말하고,
+    밀기만 하는 줄은 표지(「밀기만(+3.872초)」)가 말한다(검증 뒤 고침: 처음 판은 같은 움직임을 두
+    번 보였다).
+    """
+    return {
+        "id": cue.cue_id,
+        "text": cue.text,
+        "oldStart": str(cue.old_start),
+        "oldEnd": str(cue.old_end),
+        "newStart": str(cue.new_start),
+        "newEnd": str(cue.new_end),
+        "label": _snap_label(cue, shift),
+        "reason": cue.reason,
+    }
+
+
+def _snap_label(cue: Any, shift: Fraction) -> str:
+    """판정 말 — 막힘·못 찾음이어도 옮겨지면 「밀기만」을 붙인다(「그대로」로 보이지 않는다)."""
+    word = {"moved": "맞춤", "unchanged": "그대로", "blocked": "막힘", "no_speech": "못 찾음"}.get(
+        cue.status, cue.status
+    )
+    if not cue.shift_only:
+        return word
+    pushed = f"밀기만({_snap_move(Fraction(shift))})"
+    return pushed if cue.status == "moved" else f"{word} · {pushed}"
+
+
+def _snap_move(value: Fraction) -> str:
+    """움직임 — 원본 자막 편집 칸과 같은 소수 셋째 자리. 0.000으로 보일 움직임은 그렇게 쓰지
+    않는다."""
+    if value == 0:
+        return "그대로"
+    text = f"{float(value):+.3f}"
+    if float(text) == 0:
+        return f"0.001초 미만 {'늦춤' if value > 0 else '앞당김'}"
+    return f"{text}초"
 
 
 def _transcribe_only_summary(
@@ -5584,6 +5754,7 @@ class RawWorkspaceUi:
             source["syncCheck"] = sync_view
         source["relisten"] = self._relisten_view(root, sid, transcript)
         source["refill"] = self._refill_view(root, sid, transcript, sync_view)
+        source["snap"] = self._snap_view(root, sid)
 
     def _relisten_view(
         self, root: Path, source_id: str, transcript: Mapping[str, Any]
@@ -5601,6 +5772,11 @@ class RawWorkspaceUi:
         }
         if self.raw.refill_running(root, source_id):
             view["refillRunning"] = RELISTEN_REFILL_RUNNING_TEXT
+        snapped = self.raw.revert_snap_state(root, source_id)
+        if snapped is not None and not snapped.get("from_edited"):
+            # 시각 맞춤만 얹은 자막 — 되돌리면 다시 들을 수 있다(D59 19h). 아니면 칸 값은 19b
+            # 그대로.
+            view["snapped"] = RELISTEN_SNAPPED_TEXT
         return view
 
     def _visual_relisten(self, root: Path, payload: Mapping[str, object], echo: str) -> dict:
@@ -5632,11 +5808,14 @@ class RawWorkspaceUi:
     def _single_source_actions(
         self,
     ) -> dict[str, Callable[[Path, Mapping[str, object], str], dict]]:
-        """원본 하나를 다루는 작업대 동작 — 다시 재기(D55)·다시 듣기(19b)·빈칸 재전사 승인(19f)."""
+        """원본 하나를 다루는 작업대 동작 — 다시 재기(D55)·다시 듣기(19b)·빈칸 재전사 승인(19f)·
+        시각 맞춤 적용·되돌리기(19h)."""
         return {
             "sync-recheck": self._visual_sync_recheck,
             "relisten": self._visual_relisten,
             "refill": self._visual_refill,
+            "snap-apply": self._visual_snap_apply,
+            "snap-revert": self._visual_snap_revert,
         }
 
     def _refill_view(
@@ -5689,16 +5868,87 @@ class RawWorkspaceUi:
             or self._serve_str(payload, "digest") != current.digest
             or shown != " ".join(current.text.split())
         ):
-            return self._refill_reply(root, source_id, echo, REFILL_UNSEEN_TEXT)
+            return self._source_reply(root, source_id, echo, REFILL_UNSEEN_TEXT)
         if self._startup_credentials is None and self._live_transport is None:
             raise gr.Error(REFILL_KEY_TEXT)
         transport = self._live_transport_for_action()
         self.raw.refill_start(
-            root, source_id, current, transport, after=lambda: self._after_refill(root, source_id)
+            root,
+            source_id,
+            current,
+            transport,
+            after=lambda: self._after_transcript_change(root, source_id),
         )
-        return self._refill_reply(root, source_id, echo, REFILL_STARTED_TEXT)
+        return self._source_reply(root, source_id, echo, REFILL_STARTED_TEXT)
 
-    def _refill_reply(self, root: Path, source_id: str, echo: str, message: str) -> dict:
+    def _snap_view(self, root: Path, source_id: str) -> dict[str, object]:
+        """「시각 맞춤 제안」 칸의 값(D59 19h) — 상태·센 어긋남·판정 수·예측·먼저 들을 줄·되돌리기.
+
+        무료이고 표시만 한다(쓰지 않는다). 적용 단추는 `ready`일 때만이고 그 sha에 묶인다 — 서버가
+        누른 순간 다시 재어 대조한다. 지금 리비전이 시각 맞춤을 적용한 리비전이면(한 걸음 규칙)
+        적용한 상태와 「되돌리기」(그 리비전에 묶임), 안내 한 줄만 보인다 — 새 제안·적용 단추는
+        없다.
+        """
+        record = self.raw.revert_snap_state(root, source_id)
+        if record is not None:
+            return _snap_applied_view(record)
+        view: dict[str, object] = {
+            "explanation": SNAP_EXPLANATION,
+            "order": SNAP_ORDER_WARNING,
+            "undoRule": SNAP_UNDO_RULE,
+        }
+        preview = self.raw.apply_snap_preview(root, source_id)
+        if isinstance(preview, str):
+            return {**view, "state": "blocked", "reason": preview}
+        view.update(_snap_summary(preview))
+        if not preview.changes:
+            return {**view, "state": "none", "reason": SNAP_NONE_TEXT}
+        blocker = SNAP_BUSY_TEXT if self._source_busy(root, source_id) else None
+        blocker = blocker or self.raw.apply_snap_blocker(root, source_id)
+        if blocker is not None:
+            return {**view, "state": "waiting", "reason": blocker}
+        return {**view, "state": "ready"}
+
+    def _source_busy(self, root: Path, source_id: str) -> bool:
+        """그 영상의 분석(빠른 분석 작업)이 도는 중인가 — 다시 듣기·빈칸 재전사와 같은 판정."""
+        task = self._task_for(root, (source_id,))
+        return task is not None and self._task_running(root, task)
+
+    def _visual_snap_apply(self, root: Path, payload: Mapping[str, object], echo: str) -> dict:
+        """「시각 맞춤 적용(무료)」 — 화면이 본 제안의 sha가 지금 다시 잰 제안과 같을 때만
+        쓴다(D59 19h).
+
+        다르면(다른 탭·자막 편집·다시 잰 측정·기준 변경) 아무것도 쓰지 않고 새 제안을 그려 보인다.
+        다시 듣기 대기·빈칸 재전사 진행도 같은 길로 거절한다(서비스). 분석이 도는 영상은 받지
+        않는다.
+        """
+        source_id = self._serve_str(payload, "sourceId")
+        if self._source_busy(root, source_id):
+            raise gr.Error(SNAP_BUSY_TEXT)
+        try:
+            document = self.raw.apply_snap(root, source_id, self._serve_str(payload, "sha"))
+        except raw_service.RawWorkspaceError as refused:
+            return self._source_reply(root, source_id, echo, str(refused))
+        self._after_transcript_change(root, source_id)
+        changed = int(document["snap"]["changed"])
+        return self._source_reply(root, source_id, echo, SNAP_APPLIED_TEXT.format(changed=changed))
+
+    def _visual_snap_revert(self, root: Path, payload: Mapping[str, object], echo: str) -> dict:
+        """「되돌리기」(무료) — 화면이 본 리비전이 지금 시각 맞춤을 적용한 리비전일 때만(D59 19h).
+
+        그 뒤에 고치거나 넣은 자막이 있으면 지우지 않고 거절한다 — 거절도 새 화면을 그려 보인다.
+        """
+        source_id = self._serve_str(payload, "sourceId")
+        if self._source_busy(root, source_id):
+            raise gr.Error(SNAP_BUSY_TEXT)
+        try:
+            self.raw.revert_snap(root, source_id, self._serve_str(payload, "revision"))
+        except raw_service.RawWorkspaceError as refused:
+            return self._source_reply(root, source_id, echo, str(refused))
+        self._after_transcript_change(root, source_id)
+        return self._source_reply(root, source_id, echo, SNAP_REVERTED_TEXT)
+
+    def _source_reply(self, root: Path, source_id: str, echo: str, message: str) -> dict:
         _shell, workbench = self.visual_workbench_render(root, source_id=source_id or None)
         return {
             "ok": True,
@@ -5708,9 +5958,9 @@ class RawWorkspaceUi:
             "message": message,
         }
 
-    def _after_refill(self, root: Path, source_id: str) -> None:
-        """빈칸을 넣은 뒤 — 자막 지문이 바뀌었으니 그 영상의 저장 결과 셈과 라이브러리 견적을
-        다시 묶는다."""
+    def _after_transcript_change(self, root: Path, source_id: str) -> None:
+        """빈칸을 넣거나 시각 맞춤을 적용·되돌린 뒤 — 자막 지문이 바뀌었으니 그 영상의 저장 결과
+        셈과 라이브러리 견적을 다시 묶는다."""
         self._library_cached_ids.get(root, set()).discard(source_id)
         self._refresh_library_quote(root)
 
@@ -5782,9 +6032,17 @@ class RawWorkspaceUi:
             vl_select_source,
             vl_source_caption,
             vl_relink_original,
+            *self._vl_source_functions(),
+        ]
+
+    def _vl_source_functions(self) -> list[Callable[[dict[str, object]], dict[str, object]]]:
+        """원본 하나를 다루는 서버 함수 — 다시 재기(D55)·다시 듣기(19b)·빈칸 재전사 승인(19f)·시각
+        맞춤 적용·되돌리기(19h). 순서는 이름 목록의 끝 그대로다."""
+        return [
             self._vl_sync_recheck_function(),
             self._vl_relisten_function(),
             self._vl_refill_function(),
+            *self._vl_snap_functions(),
         ]
 
     def _vl_sync_recheck_function(self) -> Callable[[dict[str, object]], dict[str, object]]:
@@ -5811,6 +6069,18 @@ class RawWorkspaceUi:
             return self.visual_workbench_action(payload, "refill")
 
         return vl_refill
+
+    def _vl_snap_functions(self) -> list[Callable[[dict[str, object]], dict[str, object]]]:
+        """「시각 맞춤 적용(무료)」·「되돌리기」(D59 19h) — 같은 토큰 문, 화면이 본 sha·리비전을
+        서버가 대조한다. 유료 호출 0회."""
+
+        def vl_snap_apply(payload: dict[str, object]) -> dict[str, object]:
+            return self.visual_workbench_action(payload, "snap-apply")
+
+        def vl_snap_revert(payload: dict[str, object]) -> dict[str, object]:
+            return self.visual_workbench_action(payload, "snap-revert")
+
+        return [vl_snap_apply, vl_snap_revert]
 
     # ── 화면 1 — SD/폴더 가져오기(조사 → 순서 확인 → 복사·검증) ──
 

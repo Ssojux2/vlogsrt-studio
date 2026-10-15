@@ -2769,7 +2769,8 @@ def test_the_snap_proposal_takes_values_only(
 @pytest.mark.parametrize(
     ("importer", "body"),
     [
-        # 별명 · ui/ · 등급 · 보내기 · 지문 자리 · 레거시 · 문자열로 끌어오기 · 19h 전의 서비스
+        # 별명 · ui/ · 등급 · 보내기 · 지문 자리 · 레거시 · 문자열로 끌어오기 · 서비스 옆
+        # 빈칸 재전사
         ("vlogsrt/project/raw/tiering.py", "from vlogsrt.project import sync_snap as snap\n"),
         ("ui/workspace_service.py", "from vlogsrt.project import sync_snap\n"),
         ("ui/ui_facade.py", "import vlogsrt.project.sync_snap as proposals\n"),
@@ -2783,7 +2784,8 @@ def test_the_snap_proposal_takes_values_only(
             "vlogsrt/project/raw/analysis_workflow.py",
             "import importlib\nSNAP = importlib.import_module('vlogsrt.project.sync_snap')\n",
         ),
-        ("vlogsrt/project/raw/service.py", "from vlogsrt.project import sync_snap\n"),
+        # 19h가 서비스를 목록에 적었다 — 그 옆의 다른 raw 모듈은 여전히 자리다.
+        ("vlogsrt/project/raw/speech_refill.py", "from vlogsrt.project import sync_snap\n"),
         # 기준 이름만 가져와도 자리다 — 등급·타임라인·지문 자리
         ("vlogsrt/project/raw/tiering.py", "from vlogsrt.project.config import SyncSnapSettings\n"),
         (
@@ -2820,9 +2822,9 @@ def test_only_listed_sites_reach_the_snap_proposal(
     assert failure.startswith(f"{importer}: ") and "(D59 19g)" in failure
 
 
-def test_the_snap_importer_list_is_empty_in_19g() -> None:
-    """19g에는 아무도 제안을 부르지 않는다 — 19h가 서비스의 적용·되돌리기를 적는다."""
-    assert check_invariants.SYNC_SNAP_IMPORTERS == ()
+def test_the_snap_importer_list_is_the_service_only() -> None:
+    """19h — 제안을 부르는 자리는 서비스 하나다(그 안에서도 적용·되돌리기 함수만, 아래 검사)."""
+    assert check_invariants.SYNC_SNAP_IMPORTERS == ("vlogsrt/project/raw/service.py",)
 
 
 @pytest.mark.parametrize(
@@ -2878,3 +2880,564 @@ def test_the_real_snap_layer_passes() -> None:
     assert check_invariants.check_sync_snap_stays_pure() == []
     assert check_invariants.check_sync_snap_only_from_listed() == []
     assert check_invariants.check_sync_check_only_displays() == []
+
+
+# ── D59 19h: 시각 맞춤 적용·되돌리기 — 서비스 안에서도 apply_snap*·revert_snap*만 ───
+
+CLEAN_SNAP_SERVICE = (
+    "class RawWorkspaceService:\n"
+    "    def apply_snap(self, workspace, plan):\n"
+    "        from vlogsrt.project.raw import source_transcript\n"
+    "        return source_transcript.apply_changes(workspace, 'a', 'r', [], plan_sha256='', "
+    "settings_version='')\n"
+    "    def _apply_snap_plan(self, cues):\n"
+    "        from vlogsrt.project import sync_snap\n"
+    "        from vlogsrt.project.config import SYNC_SNAP_SETTINGS\n"
+    "        return sync_snap.propose(cues, None, None, source=None, settings=SYNC_SNAP_SETTINGS)\n"
+    "    def revert_snap(self, workspace, revision):\n"
+    "        from vlogsrt.project.raw import source_transcript\n"
+    "        return source_transcript.restore(workspace, 'a', revision)\n"
+    "    def revert_snap_state(self, document):\n"
+    "        return source_transcript.snap_applied(document)\n"
+    "def _apply_snap_preview(plan):\n"
+    "    from vlogsrt.project import sync_snap\n"
+    "    return sync_snap.STATUSES\n"
+)
+SNAP_OWNER = (
+    "def apply_changes(workspace, asset_id, revision, times, *, plan_sha256, settings_version):\n"
+    "    return None\n"
+    "def restore(workspace, asset_id, revision):\n"
+    "    return None\n"
+)
+
+
+@pytest.mark.parametrize(
+    ("body", "line"),
+    [
+        ("from vlogsrt.project import sync_snap\n", 1),  # 모듈 수준 — 모든 메서드가 쥔다
+        (
+            "class RawWorkspaceService:\n"
+            "    def refill_quote(self, cues):\n"
+            "        from vlogsrt.project import sync_snap\n"
+            "        return sync_snap.propose(cues)\n",
+            3,
+        ),
+        (
+            "class RawWorkspaceService:\n"
+            "    def _refill_plan(self):\n"
+            "        from vlogsrt.project import config\n"
+            "        return config.SYNC_SNAP_SETTINGS\n",
+            4,
+        ),
+        (
+            "class RawWorkspaceService:\n"
+            "    def edit_source_transcript(self):\n"
+            "        import importlib\n"
+            "        return importlib.import_module('vlogsrt.project.sync_snap')\n",
+            4,
+        ),
+        (
+            "class RawWorkspaceService:\n"
+            "    def relisten_source(self):\n"
+            "        from vlogsrt.project.sync_snap import propose as snap\n"
+            "        return snap\n",
+            3,
+        ),
+        # 적용 함수 안에 둔 다른 이름의 함수는 그 함수의 자리다.
+        (
+            "class RawWorkspaceService:\n"
+            "    def apply_snap(self):\n"
+            "        def helper():\n"
+            "            from vlogsrt.project import sync_snap\n"
+            "            return sync_snap\n"
+            "        return helper()\n",
+            4,
+        ),
+        ("def _tier_snap(plan):\n    return plan.sync_snap\n", 2),
+    ],
+)
+def test_inside_the_service_only_the_snap_entries_reach_the_proposal(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, body: str, line: int
+) -> None:
+    _fake_source_tree(monkeypatch, tmp_path, {SERVICE: CLEAN_SNAP_SERVICE})
+    assert check_invariants.check_sync_snap_in_service_only_from_snap_entries() == []
+    (tmp_path / SERVICE).write_text(body, encoding="utf-8")
+    failures = check_invariants.check_sync_snap_in_service_only_from_snap_entries()
+    assert failures and failures[0].startswith(f"{SERVICE}:{line}: 시각 맞춤 제안을"), failures
+    assert all("(D59 19h)" in failure for failure in failures)
+
+
+@pytest.mark.parametrize(
+    ("rel", "body", "line", "name"),
+    [
+        # 서비스 안 — 쓰기는 각자의 자리 하나다(적용은 apply_snap, 되돌리기는 revert_snap).
+        (
+            SERVICE,
+            "class RawWorkspaceService:\n"
+            "    def revert_snap(self, workspace):\n"
+            "        return source_transcript.apply_changes(workspace, 'a', 'r', [])\n",
+            3,
+            "apply_changes",
+        ),
+        (
+            SERVICE,
+            "class RawWorkspaceService:\n"
+            "    def apply_snap(self, workspace):\n"
+            "        return source_transcript.restore(workspace, 'a', 'r')\n",
+            3,
+            "restore",
+        ),
+        (
+            SERVICE,
+            "class RawWorkspaceService:\n"
+            "    def apply_snap_preview(self, workspace):\n"
+            "        return source_transcript.apply_changes(workspace, 'a', 'r', [])\n",
+            3,
+            "apply_changes",
+        ),
+        (
+            SERVICE,
+            "class RawWorkspaceService:\n"
+            "    def edit_source_transcript(self, workspace):\n"
+            "        return source_transcript.restore(workspace, 'a', 'r')\n",
+            3,
+            "restore",
+        ),
+        # 가리키기만 해도 자리다 — 별명·문자열 이름·이름 가져오기·람다로 넘기기.
+        (
+            SERVICE,
+            "class RawWorkspaceService:\n"
+            "    def apply_snap(self, workspace):\n"
+            "        put = source_transcript.apply_changes\n"
+            "        return put(workspace, 'a', 'r', [])\n",
+            3,
+            "apply_changes",
+        ),
+        (
+            SERVICE,
+            "class RawWorkspaceService:\n"
+            "    def apply_snap(self, workspace):\n"
+            "        put = getattr(source_transcript, 'apply_changes')\n"
+            "        return put(workspace, 'a', 'r', [])\n",
+            3,
+            "apply_changes",
+        ),
+        (
+            SERVICE,
+            "class RawWorkspaceService:\n"
+            "    def revert_snap(self, workspace):\n"
+            "        undo = getattr(source_transcript, 'restore')\n"
+            "        return undo(workspace, 'a', 'r')\n",
+            3,
+            "restore",
+        ),
+        (
+            SERVICE,
+            "from vlogsrt.project.raw.source_transcript import restore as undo\n",
+            1,
+            "restore",
+        ),
+        (
+            SERVICE,
+            "class RawWorkspaceService:\n"
+            "    def apply_snap(self, workspace):\n"
+            "        later = lambda: source_transcript.apply_changes(workspace, 'a', 'r', [])\n"
+            "        return later()\n",
+            3,
+            "apply_changes",
+        ),
+        # 화면·등급·제거·보내기·지문 자리·작업 흐름·레거시 — 시각 맞춤의 쓰기에 닿지 못한다.
+        (
+            "ui/workspace_service.py",
+            "def snap(raw):\n    return raw.restore(1, 2, 3)\n",
+            2,
+            "restore",
+        ),
+        (
+            "ui/ui_facade.py",
+            "def snap(raw):\n    return raw.source_transcript.apply_changes(1, 2, 3, [])\n",
+            2,
+            "apply_changes",
+        ),
+        (
+            "vlogsrt/project/raw/tiering.py",
+            "from vlogsrt.project.raw.source_transcript import apply_changes\n",
+            1,
+            "apply_changes",
+        ),
+        (
+            "vlogsrt/project/edit.py",
+            "def cut(workspace):\n    return source_transcript.restore(workspace, 'a', 'r')\n",
+            2,
+            "restore",
+        ),
+        (
+            "vlogsrt/project/raw/finalcut_export.py",
+            "import operator\nUNDO = operator.attrgetter('restore')\n",
+            2,
+            "restore",
+        ),
+        (
+            "vlogsrt/project/raw/understanding.py",
+            "def key(workspace):\n    return source_transcript.apply_changes\n",
+            2,
+            "apply_changes",
+        ),
+        (
+            "vlogsrt/project/raw/analysis_workflow.py",
+            "def seed(workspace):\n    source_transcript.apply_changes(workspace, 'a', 'r', [])\n",
+            2,
+            "apply_changes",
+        ),
+        (
+            "vlogsrt/pipeline.py",
+            "from vlogsrt.project.raw import source_transcript as st\nX = st.restore\n",
+            2,
+            "restore",
+        ),
+        # 정의한 모듈 안에서도 다른 함수가 부르면 자리다.
+        (
+            "vlogsrt/project/raw/source_transcript.py",
+            SNAP_OWNER
+            + "def edit(workspace):\n    return apply_changes(workspace, 'a', 'r', [])\n",
+            6,
+            "apply_changes",
+        ),
+    ],
+)
+def test_only_the_snap_entries_write_the_snapped_transcript(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, rel: str, body: str, line: int, name: str
+) -> None:
+    clean = {SERVICE: CLEAN_SNAP_SERVICE, "vlogsrt/project/raw/source_transcript.py": SNAP_OWNER}
+    _fake_source_tree(monkeypatch, tmp_path, clean)
+    assert check_invariants.check_snap_writes_only_from_service() == []
+    (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / rel).write_text(body, encoding="utf-8")
+    (failure,) = check_invariants.check_snap_writes_only_from_service()
+    assert failure.startswith(f"{rel}:{line}: {name}을"), failure
+    assert check_invariants.SNAP_WRITES[name] in failure and "(D59 19h)" in failure
+
+
+def test_the_common_word_restore_is_not_a_write_by_itself(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`restore`는 흔한 낱말이다 — 화면의 단추 변수·동작 이름 문자열은 자리가 아니다."""
+    ui = (
+        "def build(gr, view):\n"
+        "    restore = gr.Button('자동 제외 전체 복원')\n"
+        "    return restore, view('restore')\n"
+    )
+    clean = {
+        SERVICE: CLEAN_SNAP_SERVICE,
+        "vlogsrt/project/raw/source_transcript.py": SNAP_OWNER,
+        "ui/workspace_service.py": ui,
+    }
+    _fake_source_tree(monkeypatch, tmp_path, clean)
+    assert check_invariants.check_snap_writes_only_from_service() == []
+
+
+def test_the_screen_reaches_the_snap_only_through_the_service(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """화면은 제안 모듈도 원본 자막 모듈도 들이지 못한다 — 서비스 메서드로만 닿는다."""
+    allowed = "from vlogsrt.project.raw import service as raw_service\n"
+    _fake_source_tree(monkeypatch, tmp_path, {"ui/workspace_service.py": allowed})
+    assert check_invariants.check_source_does_not_import_project() == []
+    assert check_invariants.check_sync_snap_only_from_listed() == []
+    screen = tmp_path / "ui/workspace_service.py"
+    screen.write_text(allowed + "from vlogsrt.project.raw import source_transcript\n", "utf-8")
+    assert check_invariants.check_source_does_not_import_project()
+    screen.write_text(allowed + "from vlogsrt.project import sync_snap\n", "utf-8")
+    assert check_invariants.check_source_does_not_import_project()
+    assert check_invariants.check_sync_snap_only_from_listed()
+
+
+def test_the_real_snap_entries_pass() -> None:
+    assert check_invariants.check_sync_snap_in_service_only_from_snap_entries() == []
+    assert check_invariants.check_snap_writes_only_from_service() == []
+    assert check_invariants.check_sync_snap_only_from_listed() == []
+
+
+# ── 19h 검증 뒤 고침 2 — 빈틈 다섯: 서비스를 거친 제안 · 정의 모듈의 맨 이름 · 모듈 수준
+# 같은 이름 · 앞머리 정규식 · 첨자 꺼내기 ───────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("rel", "body", "line", "name"),
+    [
+        # 서비스 메서드가 아닌 모듈 수준 같은 이름 — 소유자는 정확히
+        # `RawWorkspaceService.apply_snap`이다.
+        (
+            SERVICE,
+            CLEAN_SNAP_SERVICE
+            + "def apply_snap(workspace):\n"
+            + "    return source_transcript.apply_changes(workspace, 'a', 'r', [])\n",
+            CLEAN_SNAP_SERVICE.count("\n") + 2,
+            "apply_changes",
+        ),
+        (
+            SERVICE,
+            CLEAN_SNAP_SERVICE
+            + "def revert_snap(workspace):\n"
+            + "    return source_transcript.restore(workspace, 'a', 'r')\n",
+            CLEAN_SNAP_SERVICE.count("\n") + 2,
+            "restore",
+        ),
+        # 적용 메서드 안에 둔 같은 이름의 함수
+        (
+            SERVICE,
+            "class RawWorkspaceService:\n"
+            "    def apply_snap(self, workspace):\n"
+            "        def apply_snap(times):\n"
+            "            return source_transcript.apply_changes(workspace, 'a', 'r', times)\n"
+            "        return apply_snap([])\n",
+            4,
+            "apply_changes",
+        ),
+        # 앞머리만 같은 남의 이름
+        (
+            SERVICE,
+            "class RawWorkspaceService:\n"
+            "    def apply_snapshot_cleanup(self, workspace):\n"
+            "        return source_transcript.restore(workspace, 'a', 'r')\n",
+            3,
+            "restore",
+        ),
+        # 정의한 모듈 안의 맨 이름 `restore` — 흔한 낱말 예외는 다른 모듈에만 있다.
+        (
+            "vlogsrt/project/raw/source_transcript.py",
+            SNAP_OWNER + "def edit(workspace):\n    return restore(workspace, 'a', 'r')\n",
+            6,
+            "restore",
+        ),
+        # 첨자 꺼내기 — `vars(m)[…]` · `m.__dict__[…]` · `globals()[…]`
+        (
+            "vlogsrt/project/raw/tiering.py",
+            "def _undo(m, ws):\n    return vars(m)['restore'](ws, 'a', 'r')\n",
+            2,
+            "restore",
+        ),
+        (
+            "vlogsrt/project/raw/finalcut_export.py",
+            "def _snap(m, ws):\n    return m.__dict__['restore'](ws, 'a', 'r')\n",
+            2,
+            "restore",
+        ),
+        (
+            "vlogsrt/project/raw/source_transcript.py",
+            SNAP_OWNER
+            + "def edit(workspace):\n    return globals()['restore'](workspace, 'a', 'r')\n",
+            6,
+            "restore",
+        ),
+        # `*` import — 정의 모듈의 이름을 통째로 들인다.
+        (
+            "vlogsrt/project/raw/speech_refill.py",
+            "from vlogsrt.project.raw.source_transcript import *  # noqa: F403\n",
+            1,
+            "*",
+        ),
+    ],
+)
+def test_the_snap_writes_have_no_side_doors(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, rel: str, body: str, line: int, name: str
+) -> None:
+    clean = {SERVICE: CLEAN_SNAP_SERVICE, "vlogsrt/project/raw/source_transcript.py": SNAP_OWNER}
+    _fake_source_tree(monkeypatch, tmp_path, clean)
+    assert check_invariants.check_snap_writes_only_from_service() == []
+    (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / rel).write_text(body, encoding="utf-8")
+    failures = check_invariants.check_snap_writes_only_from_service()
+    assert failures and all(f.startswith(f"{rel}:{line}: {name}을") for f in failures), failures
+
+
+def test_the_dunder_dict_key_apply_changes_is_counted(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    clean = {SERVICE: CLEAN_SNAP_SERVICE, "vlogsrt/project/raw/source_transcript.py": SNAP_OWNER}
+    _fake_source_tree(monkeypatch, tmp_path, clean)
+    rel = "vlogsrt/project/raw/selection_analysis.py"
+    (tmp_path / rel).write_text(
+        "def _snap(m, ws):\n    return m.__dict__['apply_changes'](ws, 'a', 'r', [])\n",
+        encoding="utf-8",
+    )
+    failures = check_invariants.check_snap_writes_only_from_service()
+    assert failures and all(f.startswith(f"{rel}:2: apply_changes을") for f in failures)
+
+
+@pytest.mark.parametrize(
+    ("body", "line"),
+    [
+        # 앞머리만 같은 남의 메서드 · 목록 밖의 적용 자리 · 같은 이름의 모듈 함수
+        (
+            "class RawWorkspaceService:\n"
+            "    def apply_snapshot_tiers(self):\n"
+            "        from vlogsrt.project import sync_snap\n"
+            "        return sync_snap.propose\n",
+            3,
+        ),
+        (
+            "class RawWorkspaceService:\n"
+            "    def revert_snap_state(self):\n"
+            "        from vlogsrt.project import sync_snap\n"
+            "        return sync_snap\n",
+            3,
+        ),
+        (
+            "def _apply_snap_plan(cues):\n"
+            "    from vlogsrt.project import sync_snap\n"
+            "    return sync_snap.propose(cues)\n",
+            2,
+        ),
+    ],
+)
+def test_the_service_sites_for_the_proposal_are_an_exact_list(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, body: str, line: int
+) -> None:
+    _fake_source_tree(monkeypatch, tmp_path, {SERVICE: CLEAN_SNAP_SERVICE})
+    assert check_invariants.check_sync_snap_in_service_only_from_snap_entries() == []
+    (tmp_path / SERVICE).write_text(body, encoding="utf-8")
+    failures = check_invariants.check_sync_snap_in_service_only_from_snap_entries()
+    assert failures and failures[0].startswith(f"{SERVICE}:{line}: 시각 맞춤 제안을"), failures
+
+
+@pytest.mark.parametrize(
+    ("rel", "body", "line", "name"),
+    [
+        # 등급·보내기·선택 분석·지문 자리·제거·화면 그리기가 서비스를 거쳐 제안·적용을 쓰면 실패다.
+        (
+            "vlogsrt/project/raw/tiering.py",
+            "def _x(service, root, a):\n    return service.apply_snap_preview(root, a)\n",
+            2,
+            "apply_snap_preview",
+        ),
+        (
+            "vlogsrt/project/raw/finalcut_export.py",
+            "def _p(scope, a):\n"
+            "    return scope.service._apply_snap_plan(scope.root, a, strict=False)\n",
+            2,
+            "_apply_snap_plan",
+        ),
+        (
+            "vlogsrt/project/raw/selection_analysis.py",
+            "def _b(service, root, a):\n    return service.apply_snap_preview(root, a).sha256\n",
+            2,
+            "apply_snap_preview",
+        ),
+        (
+            "vlogsrt/project/raw/understanding.py",
+            "from vlogsrt.project.raw.service import SnapPreview\n",
+            1,
+            "SnapPreview",
+        ),
+        (
+            "vlogsrt/project/edit.py",
+            "def _cut(service, root, a, r):\n    return service.revert_snap(root, a, r)\n",
+            2,
+            "revert_snap",
+        ),
+        (
+            "ui/ui_facade.py",
+            "def _x(raw):\n    return getattr(raw, 'apply_snap')\n",
+            2,
+            "apply_snap",
+        ),
+        # 서비스의 다른 메서드도 자리다.
+        (
+            SERVICE,
+            CLEAN_SNAP_SERVICE
+            + "class Other:\n"
+            + "    def tier_view(self, root, a):\n"
+            + "        return self.apply_snap_preview(root, a)\n",
+            CLEAN_SNAP_SERVICE.count("\n") + 3,
+            "apply_snap_preview",
+        ),
+    ],
+)
+def test_only_the_service_and_the_screen_reach_the_snap_api(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, rel: str, body: str, line: int, name: str
+) -> None:
+    screen = (
+        "def _snap_view(raw, root, sid):\n"
+        "    return raw.apply_snap_preview(root, sid), raw.revert_snap_state(root, sid)\n"
+    )
+    clean = {SERVICE: CLEAN_SNAP_SERVICE, "ui/workspace_service.py": screen}
+    _fake_source_tree(monkeypatch, tmp_path, clean)
+    assert check_invariants.check_snap_api_only_from_service_and_screen() == []
+    (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / rel).write_text(body, encoding="utf-8")
+    (failure,) = check_invariants.check_snap_api_only_from_service_and_screen()
+    assert failure.startswith(f"{rel}:{line}: {name}을") and "(D59 19h)" in failure
+
+
+def test_an_unrelated_snapshot_name_is_not_the_snap_api(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    body = "def apply_snapshot_tiers(x):\n    return x.apply_snapshot\n"
+    _fake_source_tree(monkeypatch, tmp_path, {"vlogsrt/project/raw/tiering.py": body})
+    assert check_invariants.check_snap_api_only_from_service_and_screen() == []
+
+
+def test_the_real_tree_passes_the_tightened_snap_checks() -> None:
+    assert check_invariants.check_snap_api_only_from_service_and_screen() == []
+    assert check_invariants.check_snap_writes_only_from_service() == []
+    assert check_invariants.check_sync_snap_in_service_only_from_snap_entries() == []
+    assert check_invariants.check_store_edit_stays_private() == []
+
+
+STORE_EDIT_OWNER = (
+    "def _store_edit(workspace, asset_id, expected_revision, payload):\n"
+    "    return None\n"
+    "def edit(workspace, asset_id, expected_revision, rows):\n"
+    "    return _store_edit(workspace, asset_id, expected_revision, {'utterances': rows})\n"
+)
+
+
+@pytest.mark.parametrize(
+    ("rel", "body", "line"),
+    [
+        # 서비스 메서드가 낮은 문을 바로 열어 시각을 바꾼 줄을 쓴다(재검증 n05).
+        (
+            SERVICE,
+            "class RawWorkspaceService:\n"
+            "    def tidy(self, workspace, rows):\n"
+            "        from vlogsrt.project.raw import source_transcript\n"
+            "        return source_transcript._store_edit(workspace, 'a', 'r', rows)\n",
+            4,
+        ),
+        (
+            "vlogsrt/project/raw/speech_refill.py",
+            "from vlogsrt.project.raw.source_transcript import _store_edit as write\n",
+            1,
+        ),
+        (
+            "ui/workspace_service.py",
+            "def save(st, ws):\n    return getattr(st, '_store_edit')(ws, 'a', 'r', {})\n",
+            2,
+        ),
+        (
+            "vlogsrt/project/raw/tiering.py",
+            "def save(st, ws):\n    return vars(st)['_store_edit'](ws, 'a', 'r', {})\n",
+            2,
+        ),
+    ],
+)
+def test_the_low_transcript_write_stays_inside_its_module(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, rel: str, body: str, line: int
+) -> None:
+    """정의 모듈 안의 공개 쓰기는 낮은 문을 열 수 있고, 밖의 어느 자리도 열지 못한다."""
+    owner = "vlogsrt/project/raw/source_transcript.py"
+    _fake_source_tree(monkeypatch, tmp_path, {owner: STORE_EDIT_OWNER})
+    assert check_invariants.check_store_edit_stays_private() == []
+    (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / rel).write_text(body, encoding="utf-8")
+    (failure,) = check_invariants.check_store_edit_stays_private()
+    assert failure.startswith(f"{rel}:{line}: _store_edit을") and "(D59 19h)" in failure
+
+
+def test_a_docstring_naming_the_low_write_is_not_a_reference(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    body = 'def check():\n    """`_store_edit`의 `guard` 안에서 다시 본다."""\n'
+    _fake_source_tree(monkeypatch, tmp_path, {SERVICE: body})
+    assert check_invariants.check_store_edit_stays_private() == []

@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from fractions import Fraction
 from typing import Any
@@ -198,7 +198,7 @@ def edit(
         raise RawWorkspaceError("알 수 없는 자막 편집입니다")
     _validate_rows(rows, rational(current["duration"]), changed_ids)
     payload = dict(
-        current,
+        _carried(current),
         sequence=current["sequence"] + 1,
         edited=True,
         revision=uuid.uuid4().hex,
@@ -298,8 +298,25 @@ def _joined(left: str, right: str) -> str:
     return f"{left} {right}".strip()
 
 
-def _store_edit(workspace: Any, asset_id: str, expected_revision: str, payload: dict) -> None:
-    """고친 리비전을 쌓는다 — 그사이 다른 편집이 먼저 저장됐으면 거절한다."""
+StoreGuard = Callable[[Any], None]
+"""쓰기 트랜잭션 안에서 같은 연결로 하는 검사 — 거절하려면 `RawWorkspaceError`를 올린다."""
+
+
+def _store_edit(
+    workspace: Any,
+    asset_id: str,
+    expected_revision: str,
+    payload: dict,
+    *,
+    guard: StoreGuard | None = None,
+    stale: str = "다른 자막 편집이 먼저 저장됐습니다. 다시 확인하세요",
+) -> None:
+    """고친 리비전을 쌓는다 — 그사이 다른 편집이 먼저 저장됐으면 `stale`로 거절한다.
+
+    `guard`는 `BEGIN IMMEDIATE` 안에서 같은 연결로 돈다 — 그 검사와 이 쓰기 사이에 다른 쓰기
+    (다시 듣기 차례 올리기·작업 등록, 모두 같은 DB의 쓰기 트랜잭션)가 끼지 못한다. 거절이면 아무것도
+    쓰지 않는다(커밋 전에 연결이 닫혀 되감긴다).
+    """
     with workspace.connect() as db:
         db.execute("BEGIN IMMEDIATE")
         latest = db.execute(
@@ -308,7 +325,9 @@ def _store_edit(workspace: Any, asset_id: str, expected_revision: str, payload: 
             (asset_id,),
         ).fetchone()
         if not latest or latest[0] != expected_revision:
-            raise RawWorkspaceError("다른 자막 편집이 먼저 저장됐습니다. 다시 확인하세요")
+            raise RawWorkspaceError(stale)
+        if guard is not None:
+            guard(db)
         db.execute(
             "INSERT INTO source_transcripts VALUES(?,?,?,?)",
             (
@@ -425,13 +444,253 @@ def _inserted_payload(current: dict, existing: list[dict], accepted: list[dict])
     merged.extend(pending)
     ranges = [{"start": row["start"], "end": row["end"]} for row in accepted]
     return dict(
-        current,
+        _carried(current),
         sequence=current["sequence"] + 1,
         edited=True,
         revision=uuid.uuid4().hex,
         utterances=merged,
         dirty_ranges=current["dirty_ranges"] + ranges,
     )
+
+
+# ─────────────────────────────────────────────────────────────
+#  시각 맞춤 적용·되돌리기(D59 19h) — 사람이 누를 때만, 서비스의 `apply_snap`·`revert_snap`만 부른다
+# ─────────────────────────────────────────────────────────────
+
+SNAP_FIELD = "snap"
+"""시각 맞춤을 적용한 리비전의 출처 기록 — 그 리비전에만 있다(다음 리비전으로 옮기지 않는다)."""
+
+SNAP_UNDO_FIELD = "snap_undo"
+"""시각 맞춤을 되돌린 리비전의 기록 — 그 리비전에만 있다."""
+
+REVISION_ONLY_FIELDS = (SNAP_FIELD, SNAP_UNDO_FIELD)
+"""리비전 하나에만 속하는 기록 — 다음 편집·넣기·적용·되돌리기가 새 리비전으로 옮기지 않는다."""
+
+SNAP_SCHEMA = "sync-snap-apply/v1"
+SNAP_UNDO_SCHEMA = "sync-snap-undo/v1"
+
+SNAP_REVISION_CHANGED = (
+    "원본 자막이 그사이 바뀌었습니다 — 새 시각 맞춤 제안을 확인하고 다시 적용하세요. 아무것도"
+    " 바꾸지 않았습니다."
+)
+SNAP_ROWS_MISMATCH = (
+    "시각 맞춤 제안이 지금 원본 자막의 줄과 맞지 않습니다 — 모든 줄의 새 시각을 함께 적용합니다."
+    " 아무것도 바꾸지 않았습니다."
+)
+SNAP_NO_CHANGE = "바꿀 시각이 없습니다 — 아무것도 바꾸지 않았습니다."
+UNDO_CHANGED = (
+    "원본 자막이 그사이 바뀌어 되돌리지 않습니다 — 나중에 고치거나 넣은 내용을 지우지 않습니다."
+    " 새 화면을 확인하세요. 아무것도 바꾸지 않았습니다."
+)
+SNAP_ALREADY_APPLIED = (
+    "이미 시각 맞춤을 적용한 자막입니다 — 다시 맞추려면 「되돌리기」로 적용 전 자막으로 돌린 뒤 새"
+    " 제안을 들어 보세요. 아무것도 바꾸지 않았습니다."
+)
+UNDO_NOTHING = "되돌릴 시각 맞춤이 없습니다 — 아무것도 바꾸지 않았습니다."
+UNDO_MISSING = "적용 전 원본 자막을 찾지 못해 되돌리지 않습니다 — 아무것도 바꾸지 않았습니다."
+
+
+def _carried(current: Mapping[str, Any]) -> dict:
+    """새 리비전이 이어받는 칸 — 리비전 하나에만 속하는 기록(`REVISION_ONLY_FIELDS`)은 뺀다.
+
+    그 기록이 없는 문서(19h 이전·적용한 적 없는 자막)에서는 `dict(current)`와 바이트까지 같다.
+    """
+    return {key: value for key, value in current.items() if key not in REVISION_ONLY_FIELDS}
+
+
+def load_revision(workspace: Any, asset_id: str, revision: str) -> dict | None:
+    """원본 자막의 정해진 리비전 하나 — 없으면 None. 읽기만 한다."""
+    _init(workspace)
+    with workspace.connect() as db:
+        row = db.execute(
+            "SELECT payload FROM source_transcripts WHERE asset_id=? AND revision=?",
+            (asset_id, revision),
+        ).fetchone()
+    return json.loads(row[0]) if row else None
+
+
+def latest_on(db: Any, asset_id: str) -> dict | None:
+    """연결 하나 위의 지금 리비전 — 다른 쓰기 트랜잭션 안의 검사가 같은 연결로 읽는다(읽기만).
+
+    표가 없으면(원본 자막을 심은 적이 없는 작업공간) None이다 — 표를 만들지 않는다.
+    """
+    table = db.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='source_transcripts'"
+    ).fetchone()
+    if table is None:
+        return None
+    row = db.execute(
+        "SELECT payload FROM source_transcripts WHERE asset_id=? ORDER BY sequence DESC LIMIT 1",
+        (asset_id,),
+    ).fetchone()
+    return json.loads(row[0]) if row else None
+
+
+def snap_applied(document: Mapping[str, Any]) -> dict | None:
+    """이 리비전이 시각 맞춤을 적용한 리비전이면 그 기록 — 아니면 None.
+
+    기록은 자기 리비전 아이디를 싣는다 — 기록이 다른 리비전으로 옮겨 가도(옮기지 않지만) 그
+    리비전을 적용한 리비전으로 읽지 않는다.
+    """
+    record = document.get(SNAP_FIELD)
+    if isinstance(record, dict) and record.get("revision") == document.get("revision"):
+        return record
+    return None
+
+
+def apply_changes(
+    workspace: Any,
+    asset_id: str,
+    expected_revision: str,
+    times: Sequence[tuple[str, Fraction, Fraction]],
+    *,
+    plan_sha256: str,
+    settings_version: str,
+    guard: StoreGuard | None = None,
+) -> dict:
+    """시각 맞춤 제안을 리비전 하나로 적용한다(D59 19h) — **모든** 줄의 새 시각을 함께, 아니면 없다.
+
+    `times`는 지금 줄 **전부**의 (아이디, 시작, 끝)이다 — 아이디·순서·수가 지금 줄과 같아야 하고
+    시각은 정확 유리수(공통 시계)다. 일부만 주면 거절한다(D59 19g 「적용 규칙」). 바뀌는 칸은
+    `start`·`end`뿐이고 시각이 같은 줄은 바이트 그대로다 — 글자·아이디·순서·수·증거 칸(whisper 틱
+    `start_sample`·`end_sample` 포함)은 손대지 않는다. 새 리비전은 `edited=True`, 바뀐 줄마다
+    `dirty_ranges` 하나, 출처 기록(`SNAP_FIELD`)을 싣는다. 편집 검사를 지나야 하고, 본 리비전·한
+    걸음 규칙(이미 적용한 리비전은 거절)은 `_snap_target`, `guard`는 쓰기 트랜잭션 안에서 돈다.
+    """
+    current = _snap_target(workspace, asset_id, expected_revision)
+    rows, changed_ids, spans = _retimed(current["utterances"], times)
+    if not changed_ids:
+        raise RawWorkspaceError(SNAP_NO_CHANGE)
+    _validate_rows(rows, rational(current["duration"]), changed_ids)
+    revision = uuid.uuid4().hex
+    payload = dict(
+        _carried(current),
+        sequence=current["sequence"] + 1,
+        edited=True,
+        revision=revision,
+        utterances=rows,
+        dirty_ranges=current["dirty_ranges"] + spans,
+    )
+    payload[SNAP_FIELD] = _snap_record(current, revision, plan_sha256, settings_version)
+    payload[SNAP_FIELD]["changed"] = len(changed_ids)
+    _store_edit(
+        workspace, asset_id, expected_revision, payload, guard=guard, stale=SNAP_REVISION_CHANGED
+    )
+    return payload
+
+
+def _snap_target(workspace: Any, asset_id: str, expected_revision: str) -> dict:
+    """적용할 리비전 — 화면이 본 그 리비전이 지금이고, 이미 시각 맞춤을 적용한 리비전이 아니다."""
+    current = load(workspace, asset_id)
+    if not current or current["revision"] != expected_revision:
+        raise RawWorkspaceError(SNAP_REVISION_CHANGED)
+    if snap_applied(current) is not None:
+        raise RawWorkspaceError(SNAP_ALREADY_APPLIED)
+    return current
+
+
+def _snap_record(current: dict, revision: str, plan_sha256: str, settings_version: str) -> dict:
+    """적용한 리비전의 출처 기록 — 자기 리비전·적용 전 리비전과 그 `edited`·제안 sha·기준 판."""
+    return {
+        "schema": SNAP_SCHEMA,
+        "revision": revision,
+        "from_revision": current["revision"],
+        "from_edited": human_edited(current),
+        "plan_sha256": plan_sha256,
+        "settings_version": settings_version,
+    }
+
+
+def _retimed(
+    rows: list[dict], times: Sequence[tuple[str, Fraction, Fraction]]
+) -> tuple[list[dict], set[str], list[dict]]:
+    """새 시각을 얹은 줄 · 바뀐 줄 아이디 · 바뀐 범위 — 같은 시각의 줄은 그 사전 그대로다."""
+    if [str(row["utterance_id"]) for row in rows] != [str(item[0]) for item in times]:
+        raise RawWorkspaceError(SNAP_ROWS_MISMATCH)
+    retimed: list[dict] = []
+    changed: set[str] = set()
+    spans: list[dict] = []
+    for row, (row_id, start, end) in zip(rows, times, strict=True):
+        if not (isinstance(start, Fraction) and isinstance(end, Fraction)):
+            raise TypeError(f"시각 맞춤의 시각은 정확 유리수여야 한다: {row_id} {start!r} {end!r}")
+        old_start, old_end = rational(row["start"]), rational(row["end"])
+        if (start, end) == (old_start, old_end):
+            retimed.append(row)
+            continue
+        retimed.append(dict(row, start=encoded(start), end=encoded(end)))
+        changed.add(str(row_id))
+        spans.append({"start": encoded(min(old_start, start)), "end": encoded(max(old_end, end))})
+    return retimed, changed, spans
+
+
+def restore(
+    workspace: Any, asset_id: str, expected_revision: str, *, guard: StoreGuard | None = None
+) -> dict:
+    """시각 맞춤을 되돌린다(D59 19h) — 적용 전 리비전의 줄과 `edited`를 바이트 그대로 새 리비전에.
+
+    지금 리비전이 `expected_revision`이고 그것이 시각 맞춤을 적용한 리비전일 때만 된다 — 그 뒤에
+    고치거나 넣은 리비전이 있으면 거절한다(나중의 사람 편집·빈칸 재전사를 조용히 지우지 않는다).
+    그래서 지문(`fingerprint`)·`human_edited`·다시 듣기 자격이 적용 전과 같아진다. 새 리비전은
+    되돌린 범위를 `dirty_ranges`에 더하고 되돌린 기록(`SNAP_UNDO_FIELD`)을 싣는다.
+    """
+    current = load(workspace, asset_id)
+    if not current or current["revision"] != expected_revision:
+        raise RawWorkspaceError(UNDO_CHANGED)
+    record = snap_applied(current)
+    if record is None:
+        raise RawWorkspaceError(UNDO_NOTHING)
+    source = load_revision(workspace, asset_id, str(record["from_revision"]))
+    if source is None:
+        raise RawWorkspaceError(UNDO_MISSING)
+    revision = uuid.uuid4().hex
+    payload = dict(
+        _carried(current),
+        sequence=current["sequence"] + 1,
+        revision=revision,
+        utterances=source["utterances"],
+        dirty_ranges=current["dirty_ranges"]
+        + _restored_spans(current["utterances"], source["utterances"]),
+    )
+    _restore_edited(payload, source)
+    payload[SNAP_UNDO_FIELD] = {
+        "schema": SNAP_UNDO_SCHEMA,
+        "revision": revision,
+        "undone_revision": current["revision"],
+        "restored_revision": source["revision"],
+        "plan_sha256": record["plan_sha256"],
+    }
+    _store_edit(workspace, asset_id, expected_revision, payload, guard=guard, stale=UNDO_CHANGED)
+    return payload
+
+
+def _restore_edited(payload: dict, source: Mapping[str, Any]) -> None:
+    """되돌린 리비전의 `edited` — `human_edited`와 심기(`seed`)가 적용 전과 **똑같이** 읽게.
+
+    칸이 있으면 그 값 그대로다. 칸이 없는 옛 문서는 둘로 갈린다: 차례 > 0이면 칸을 빼 둔다 —
+    되돌린 리비전의 차례도 > 0이라 `human_edited`는 그대로 참이고, 심기는 적용 전처럼 칸이 없는
+    문서로 본다(`current.get("edited")`가 없음). 차례 0이면 `edited=False`를 적는다 — 칸 없이 두면
+    새 차례(> 0) 때문에 「고친 자막」으로 읽힌다.
+    """
+    if "edited" in source:
+        payload["edited"] = source["edited"]
+    elif int(source["sequence"]) > 0:
+        payload.pop("edited", None)
+    else:
+        payload["edited"] = False
+
+
+def _restored_spans(applied: list[dict], restored: list[dict]) -> list[dict]:
+    """되돌려 시각이 바뀌는 줄마다 그 범위 — 적용은 줄의 아이디·순서를 바꾸지 않는다."""
+    if [row["utterance_id"] for row in applied] != [row["utterance_id"] for row in restored]:
+        raise RawWorkspaceError(UNDO_MISSING)
+    spans: list[dict] = []
+    for now, before in zip(applied, restored, strict=True):
+        now_span = (rational(now["start"]), rational(now["end"]))
+        old_span = (rational(before["start"]), rational(before["end"]))
+        if now_span != old_span:
+            low, high = min(now_span[0], old_span[0]), max(now_span[1], old_span[1])
+            spans.append({"start": encoded(low), "end": encoded(high)})
+    return spans
 
 
 def _seconds(value: Fraction) -> str:
