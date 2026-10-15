@@ -522,6 +522,49 @@ def sync_check_settings_sha256(settings: SyncCheckSettings) -> str:
     return hashlib.sha256(body.encode("utf-8")).hexdigest()
 
 
+@dataclass(frozen=True, slots=True)
+class SyncSnapSettings:
+    """시각 맞춤 제안(D59 19g)의 기준 — 큐 경계를 말소리 경계에 맞춘 **제안**만 계산한다.
+
+    `reach_seconds`만 새 조정 대상이다(외부 근거 없음 — 실측 18개로 고른 값, D59 19g). 나머지
+    넷은 정제(`vlogsrt.config.Config` — refine)의 값을 **그대로** 옮겼다: 이 파일은 원본 설정을
+    import하지 않으므로 숫자를 적고, 시험이 정확 유리수로 같음을 못 박는다. refine 값을 바꾸면
+    여기도 같이 바꾼다.
+
+    `ProjectConfig`·`RawWorkflowConfig`·`RawCaptionContract`·`RawUnderstandingSettings`·
+    `SourceTextSettings`의 칸이 **아니고** 어느 분석·전사·자막 지문이나 캐시 열쇠·승인에도 실리지
+    않는다 — 바꿔도 이미 산 것이 낡지 않는다. 기준은 제안의 sha에만 실린다(19h의 적용이 그 sha를
+    대조한다).
+    """
+
+    version: str = "sync-snap/v1"
+    # 경계에서 이만큼 안의 말소리 경계에만 맞춘다(±). 그 안에 말소리가 없으면 「못 찾음」 표시만.
+    reach_seconds: Fraction = Fraction(1)
+    # refine 값 그대로(Config.lead_in · lead_out · min_gap · min_duration).
+    lead_in: Fraction = Fraction(1, 10)
+    lead_out: Fraction = Fraction(3, 10)
+    min_gap: Fraction = Fraction(8, 100)
+    min_duration: Fraction = Fraction(85, 100)
+
+
+SYNC_SNAP_SETTINGS = SyncSnapSettings()
+"""지금 쓰는 시각 맞춤 기준 — 주입이 없으면 이 하나를 읽는다."""
+
+
+def sync_snap_problems(settings: SyncSnapSettings) -> list[str]:
+    """값역 — 찾는 폭·최소 길이는 양수, 여유·간격은 0 이상의 정확 유리수(초)다."""
+    problems: list[str] = []
+    if not isinstance(settings.version, str) or not settings.version.strip():
+        problems.append(f"version은 비어 있지 않은 문자열이어야 한다: {settings.version!r}")
+    for name in ("reach_seconds", "lead_in", "lead_out", "min_gap", "min_duration"):
+        value = getattr(settings, name)
+        positive = name in ("reach_seconds", "min_duration")
+        if not isinstance(value, Fraction) or value < 0 or (positive and value == 0):
+            kind = "양" if positive else "0 이상"
+            problems.append(f"{name}은(는) {kind}의 정확 유리수(초)여야 한다: {value!r}")
+    return problems
+
+
 @dataclass(frozen=True)
 class GapRefillSettings:
     """말소리 빈칸 재전사(D59 19f)가 **다시 물을** 구간을 넓히는 기준 — 외부 근거 없는 조정 대상.

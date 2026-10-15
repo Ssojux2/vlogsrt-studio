@@ -2710,3 +2710,171 @@ def test_the_real_refill_layers_pass() -> None:
     assert check_invariants.check_insert_segments_only_from_refill() == []
     assert check_invariants.check_refill_whisper_has_no_hints() == []
     assert check_invariants.check_speech_refill_only_from_service() == []
+
+
+# ── D59 19g: 시각 맞춤 제안 — 순수하고, 정해진 자리(19g에는 없음)만 부르며, 기준은 지문 밖 ───
+
+SNAP = "vlogsrt/project/sync_snap.py"
+CLEAN_SNAP = (
+    "from __future__ import annotations\n"
+    "import hashlib\n"
+    "from bisect import bisect_left\n"
+    "from collections.abc import Sequence\n"
+    "from fractions import Fraction\n"
+    "from vlogsrt.project import sync_check\n"
+    "from vlogsrt.project.config import SyncSnapSettings, sync_snap_problems\n"
+    "from .sync_check import Cue\n"
+)
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "import os",
+        "import sqlite3",
+        "import subprocess",
+        "import importlib",
+        "from pathlib import Path",
+        "from vlogsrt import refine",
+        "from vlogsrt import retext",
+        "from vlogsrt import transcribe",
+        "from vlogsrt import preprocess",
+        "from vlogsrt.project.raw import sync_report",
+        "from vlogsrt.project.raw import source_transcript",
+        "from vlogsrt.project.raw import service",
+        "from vlogsrt.project.raw.tiering import classify",
+        "from vlogsrt.project import sync_check, pcm",
+        "from .raw import speech_gaps",
+        "from .. import output",
+        "import vlogsrt.output as cues",
+        "BODY = open('cues.json').read()",
+        "DATA = PCM.read_bytes()",
+        "MODULE = __import__('os')",
+        "OPEN = getattr(__builtins__, 'op' + 'en')",
+    ],
+)
+def test_the_snap_proposal_takes_values_only(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, statement: str
+) -> None:
+    _fake_source_tree(monkeypatch, tmp_path, {SNAP: CLEAN_SNAP})
+    assert check_invariants.check_sync_snap_stays_pure() == []
+    (tmp_path / SNAP).write_text(CLEAN_SNAP + statement + "\n", encoding="utf-8")
+    assert check_invariants.check_sync_snap_stays_pure()
+    (tmp_path / SNAP).unlink()
+    assert check_invariants.check_sync_snap_stays_pure() == [
+        f"{SNAP}: 시각 맞춤 제안 계층이 사라졌다 (D59 19g)"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("importer", "body"),
+    [
+        # 별명 · ui/ · 등급 · 보내기 · 지문 자리 · 레거시 · 문자열로 끌어오기 · 19h 전의 서비스
+        ("vlogsrt/project/raw/tiering.py", "from vlogsrt.project import sync_snap as snap\n"),
+        ("ui/workspace_service.py", "from vlogsrt.project import sync_snap\n"),
+        ("ui/ui_facade.py", "import vlogsrt.project.sync_snap as proposals\n"),
+        (
+            "vlogsrt/project/raw/finalcut_export.py",
+            "from vlogsrt.project.sync_snap import propose\n",
+        ),
+        ("vlogsrt/project/raw/understanding.py", "from ..sync_snap import plan_document\n"),
+        ("vlogsrt/cli.py", "from vlogsrt.project import sync_snap\n"),
+        (
+            "vlogsrt/project/raw/analysis_workflow.py",
+            "import importlib\nSNAP = importlib.import_module('vlogsrt.project.sync_snap')\n",
+        ),
+        ("vlogsrt/project/raw/service.py", "from vlogsrt.project import sync_snap\n"),
+        # 기준 이름만 가져와도 자리다 — 등급·타임라인·지문 자리
+        ("vlogsrt/project/raw/tiering.py", "from vlogsrt.project.config import SyncSnapSettings\n"),
+        (
+            "vlogsrt/project/raw/finalcut_timeline.py",
+            "from vlogsrt.project.config import SYNC_SNAP_SETTINGS as LIMITS\n",
+        ),
+        ("vlogsrt/project/raw/config.py", "from ..config import sync_snap_problems\n"),
+        # 19g 검증 뒤 고침 4 — import 문이 아닌 길: 설정 모듈의 속성 꺼내기 · 이름에 담은 문자열
+        (
+            "vlogsrt/project/raw/tiering.py",
+            "from vlogsrt.project import config as _cfg\n"
+            "_R = _cfg.SYNC_SNAP_SETTINGS.reach_seconds\n",
+        ),
+        (
+            "vlogsrt/project/raw/finalcut_export.py",
+            "import vlogsrt.project.config as _c\n_X = _c.SyncSnapSettings\n",
+        ),
+        (
+            "vlogsrt/project/raw/finalcut_timeline.py",
+            "import importlib\n_N = 'vlogsrt.project.sync_snap'\n"
+            "_M = importlib.import_module(_N)\n",
+        ),
+    ],
+)
+def test_only_listed_sites_reach_the_snap_proposal(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, importer: str, body: str
+) -> None:
+    owner = "class SyncSnapSettings:\n    reach_seconds: object = None\n"
+    _fake_source_tree(monkeypatch, tmp_path, {SNAP: CLEAN_SNAP, "vlogsrt/project/config.py": owner})
+    assert check_invariants.check_sync_snap_only_from_listed() == []
+    (tmp_path / importer).parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / importer).write_text(body, encoding="utf-8")
+    (failure,) = check_invariants.check_sync_snap_only_from_listed()
+    assert failure.startswith(f"{importer}: ") and "(D59 19g)" in failure
+
+
+def test_the_snap_importer_list_is_empty_in_19g() -> None:
+    """19g에는 아무도 제안을 부르지 않는다 — 19h가 서비스의 적용·되돌리기를 적는다."""
+    assert check_invariants.SYNC_SNAP_IMPORTERS == ()
+
+
+@pytest.mark.parametrize(
+    ("rel", "body"),
+    [
+        (RAW_CONFIG, "class RawWorkflowConfig:\n    snap: object = SYNC_SNAP_SETTINGS\n"),
+        ("vlogsrt/project/raw/understanding.py", "KEY = SyncSnapSettings()\n"),
+        ("vlogsrt/project/raw/analysis_approval.py", "from vlogsrt.project import sync_snap\n"),
+        ("vlogsrt/project/raw/final_caption.py", "LIMIT = sync_snap.propose\n"),
+        (
+            "vlogsrt/project/config.py",
+            "class ProjectConfig:\n    snap: object = SyncSnapSettings()\n",
+        ),
+    ],
+)
+def test_the_snap_settings_stay_outside_every_fingerprint(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, rel: str, body: str
+) -> None:
+    clean = {
+        "vlogsrt/project/sync_check.py": SYNC_CLEAN,
+        "vlogsrt/project/raw/sync_report.py": SYNC_REPORT_CLEAN,
+        "vlogsrt/project/config.py": "class ProjectConfig:\n    schema_version: int = 1\n",
+        SNAP: CLEAN_SNAP,
+    }
+    _fake_source_tree(monkeypatch, tmp_path, clean)
+    assert check_invariants.check_sync_check_only_displays() == []
+    (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / rel).write_text(body, encoding="utf-8")
+    failures = check_invariants.check_sync_check_only_displays()
+    assert any("지문·캐시 열쇠 밖" in failure for failure in failures), failures
+
+
+def test_the_snap_proposal_may_read_the_sync_cells_but_nothing_new_may(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """D55 「표시만」의 예외는 제안 모듈 하나다 — 옆에 새 모듈을 두면 확인 계산을 못 들인다."""
+    clean = {
+        "vlogsrt/project/sync_check.py": SYNC_CLEAN,
+        "vlogsrt/project/raw/sync_report.py": SYNC_REPORT_CLEAN,
+        "vlogsrt/project/config.py": "class ProjectConfig:\n    schema_version: int = 1\n",
+        SNAP: CLEAN_SNAP,
+    }
+    _fake_source_tree(monkeypatch, tmp_path, clean)
+    assert check_invariants.check_sync_check_only_displays() == []
+    helper = "vlogsrt/project/sync_snap_apply.py"
+    (tmp_path / helper).write_text("from vlogsrt.project import sync_check\n", encoding="utf-8")
+    assert check_invariants.check_sync_check_only_displays() == [
+        f"{helper}: sync_check를 import한다 — 판정이 표시 밖으로 샌다 (D55)"
+    ]
+
+
+def test_the_real_snap_layer_passes() -> None:
+    assert check_invariants.check_sync_snap_stays_pure() == []
+    assert check_invariants.check_sync_snap_only_from_listed() == []
+    assert check_invariants.check_sync_check_only_displays() == []

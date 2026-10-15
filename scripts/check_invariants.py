@@ -1005,6 +1005,11 @@ SYNC_CHECK_IMPORTERS = (
     # 칸 산술을 쓴다. 고른 구간은 다시 **묻는** 범위일 뿐 자막·컷·제거·등급으로 흐르지 않는다
     # (`check_speech_gaps_stays_pure`가 그 모듈의 입출력·읽는 쪽을 막는다).
     "vlogsrt/project/raw/speech_gaps.py",
+    # D59 19g — D55 「표시만」의 좁은 예외 「시각 맞춤 제안」: 순수 제안 계산은 확인의 말소리 칸·
+    # 어긋남 추정(형식과 구간 산술)을 쓴다. 제안은 **표시만** 하고 사람이 적용한 리비전만 시각을
+    # 바꾼다(19h). `check_sync_snap_stays_pure`·`check_sync_snap_only_from_listed`가 그 모듈의
+    # 입출력·읽는 쪽을 막는다.
+    "vlogsrt/project/sync_snap.py",
 )
 SYNC_REPORT_IMPORTERS = (
     "vlogsrt/project/raw/service.py",
@@ -1040,6 +1045,8 @@ SYNC_NAMES = re.compile(
     # D59 19f — 빈칸 고르기 기준·모듈도 확인과 같이 지문·캐시 열쇠 밖이다(고른 결과만 빈칸
     # 재전사 견적 digest가 묶는다).
     r"|GapRefillSettings|GAP_REFILL_SETTINGS|speech_gaps"
+    # D59 19g — 시각 맞춤 기준·모듈도 지문·캐시 열쇠 밖이다(제안의 sha만 기준을 묶는다).
+    r"|SyncSnapSettings|SYNC_SNAP_SETTINGS|sync_snap"
 )
 
 
@@ -1332,6 +1339,104 @@ def check_speech_refill_only_from_service() -> list[str]:
             failures.append(
                 f"{rel}: speech_refill을 import한다 — 빈칸 재전사는 서비스의 승인 문으로만 닿는다"
                 " (D59 19f)"
+            )
+    return failures
+
+
+# 시각 맞춤 제안(D59 19g) — 큐 경계를 말소리 경계에 맞춘 **제안**은 값만 받아 값만 돌려주는 순수
+# 계산이다. 들여올 수 있는 것은 표준 라이브러리의 정해진 몇과 확인 계산(`sync_check`)·설정뿐이고,
+# 파일·프로세스를 열지 않는다. 그 모듈을 읽는 쪽은 목록에 적힌 자리뿐이다 — 19g에는 **없다**(시험만
+# 읽는다). 19h가 서비스의 적용·되돌리기(`apply_*`·`revert_*`)를 적는다. 등급·출력·분석 지문이
+# 제안이나 그 기준을 알면 「표시만」이 무너지고(D55), 기준을 바꿀 때마다 이미 산 것이 낡는다(D47).
+SYNC_SNAP_MODULE = "vlogsrt/project/sync_snap.py"
+SYNC_SNAP_STDLIB = (
+    "__future__", "bisect", "collections", "dataclasses", "fractions", "hashlib", "json", "math",
+    "typing",
+)  # fmt: skip
+SYNC_SNAP_PROJECT_MODULES = ("vlogsrt.project.sync_check", "vlogsrt.project.config")
+SYNC_SNAP_IMPORTERS: tuple[str, ...] = ()
+SYNC_SNAP_SETTING_OWNER = "vlogsrt/project/config.py"
+SYNC_SNAP_FORBIDDEN_CALLS = re.compile(
+    r"\b(__import__|exec|eval|compile|breakpoint)\s*\(|__builtins__"
+)  # `getattr(__builtins__, 'op' + 'en')`처럼 내장 함수를 이름으로 꺼내는 길도 막는다
+# 제안 모듈·기준의 이름 — 목록 밖 소스의 **글 전체**(import·속성 꺼내기 `config.SYNC_SNAP_SETTINGS`·
+# 문자열 `'vlogsrt.project.sync_snap'`·주석)에서 찾는다. 이름을 잘라 이어 붙인 동적 import
+# (`'sync_' + 'snap'`)는 못 본다 — 정규식의 한계로 받아들이고 리뷰가 지킨다(D59 19g).
+SYNC_SNAP_NAMES = re.compile(r"SyncSnapSettings|SYNC_SNAP_SETTINGS|sync_snap")
+
+
+def check_sync_snap_stays_pure() -> list[str]:
+    """D59 19g — `sync_snap.py`는 정해진 표준 라이브러리·`sync_check`·설정만 들이고 입출력이 없다.
+
+    파일이 사라지면 조용히 통과하지 않는다 — 제안 권한이 어디로 옮겨 갔는지 모르게 된다.
+    """
+    path = ROOT / SYNC_SNAP_MODULE
+    if not path.exists():
+        return [f"{SYNC_SNAP_MODULE}: 시각 맞춤 제안 계층이 사라졌다 (D59 19g)"]
+    body = path.read_text(encoding="utf-8")
+    failures = [
+        f"sync_snap.py:{line}: {name}을 import한다 — 시각 맞춤 제안이 순수 함수가 아니게 된다"
+        " (D59 19g)"
+        for line, name in _sync_snap_foreign_imports(ast.parse(body))
+    ]
+    failures += [
+        f"sync_snap.py:{number}: 파일·프로세스·동적 코드를 연다 — 재료는 값으로만 받는다 (D59 19g)"
+        for number, line in enumerate(body.splitlines(), start=1)
+        if TIERING_FILE_IO.search(line) or SYNC_SNAP_FORBIDDEN_CALLS.search(line)
+    ]
+    return failures
+
+
+def _sync_snap_foreign_imports(tree: ast.Module) -> list[tuple[int, str]]:
+    """허용 밖 import(줄, 이름) — 상대 import는 `vlogsrt.project` 기준으로 푼다."""
+    found: list[tuple[int, str]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            found += [
+                (node.lineno, alias.name)
+                for alias in node.names
+                if not _sync_snap_allowed(alias.name, ())
+            ]
+        elif isinstance(node, ast.ImportFrom):
+            module = _resolved_project_module(node.module, node.level)
+            names = tuple(alias.name for alias in node.names)
+            if not _sync_snap_allowed(module, names):
+                found.append((node.lineno, f"{module} ({', '.join(names)})"))
+    return found
+
+
+def _resolved_project_module(module: str | None, level: int) -> str:
+    if level == 0:
+        return module or ""
+    parts = ["vlogsrt", "project"][: max(0, 3 - level)]
+    return ".".join([*parts, *([module] if module else [])])
+
+
+def _sync_snap_allowed(module: str, names: tuple[str, ...]) -> bool:
+    if module.split(".")[0] in SYNC_SNAP_STDLIB or module in SYNC_SNAP_PROJECT_MODULES:
+        return True
+    allowed_children = {name.rsplit(".", 1)[-1] for name in SYNC_SNAP_PROJECT_MODULES}
+    return module == "vlogsrt.project" and bool(names) and set(names) <= allowed_children
+
+
+def check_sync_snap_only_from_listed() -> list[str]:
+    """D59 19g — 제안 모듈과 그 기준은 목록(`SYNC_SNAP_IMPORTERS`)의 자리만 안다.
+
+    `vlogsrt/`와 `ui/`의 목록 밖 소스의 **글 전체**에서 이름을 찾는다 — 별명 import·모듈 객체·
+    이름 가져오기·설정 모듈의 속성 꺼내기(`config.SYNC_SNAP_SETTINGS`)·`importlib` 문자열이 자리다
+    (19g 검증 뒤 고침: 처음 판은 import 문만 보아 속성 꺼내기를 놓쳤다). 기준을 정의한 설정 파일만
+    예외다. 이름을 잘라 이어 붙인 동적 import는 못 본다(받아들인 빈틈).
+    """
+    failures: list[str] = []
+    for source in [*_sources(), *sorted(UI_DIR.rglob("*.py"))]:
+        rel = _rel(source)
+        if rel in (SYNC_SNAP_MODULE, SYNC_SNAP_SETTING_OWNER) or rel in SYNC_SNAP_IMPORTERS:
+            continue
+        names = sorted(set(SYNC_SNAP_NAMES.findall(source.read_text(encoding="utf-8"))))
+        if names:
+            failures.append(
+                f"{rel}: {', '.join(names)}를 안다 — 시각 맞춤 제안과 그 기준은 정해진 자리만"
+                " 부른다 (D59 19g)"
             )
     return failures
 
@@ -2009,6 +2114,8 @@ CHECKS = (
     ("원본 자막 줄 넣기는 빈칸 재전사만", check_insert_segments_only_from_refill),
     ("빈칸 재전사의 whisper에는 힌트가 없다", check_refill_whisper_has_no_hints),
     ("빈칸 재전사는 서비스만 부른다", check_speech_refill_only_from_service),
+    ("시각 맞춤 제안은 순수하다", check_sync_snap_stays_pure),
+    ("시각 맞춤 제안은 정해진 자리만 부른다", check_sync_snap_only_from_listed),
     ("Final Cut 타임라인 빌더는 순수하다", check_finalcut_timeline_stays_pure),
     ("Final Cut 보내기는 원본을 복사·재해시하지 않는다", check_finalcut_export_never_copies),
     ("옛 선택한 컷 Final Cut 출력은 되살리지 않는다", check_old_finalcut_path_stays_dead),
