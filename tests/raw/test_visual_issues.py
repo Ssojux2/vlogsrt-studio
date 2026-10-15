@@ -400,7 +400,7 @@ def test_whisper_chunk_keys_do_not_see_the_prompt_revision(tmp_path: Path) -> No
 # ─────────────────────────────────────────────────────────────
 
 
-def test_the_video_reason_names_the_issues_in_plain_korean_without_changing_tiers() -> None:
+def test_the_video_reason_names_the_issues_and_only_green_is_capped() -> None:
     plain = tier_document()
     flagged = tier_document()
     flagged["annotations"][0]["visual_issues"] = ["blur", "shake", "dark"]
@@ -416,10 +416,24 @@ def test_the_video_reason_names_the_issues_in_plain_korean_without_changing_tier
     for text in (window0.reason, window1.reason):
         for word in ("Luna", "Claude", "Sonnet", "Opus", "gpt", "$"):
             assert word not in text.split(" · 화면 문제")[1]
-    # 표시만 바뀐다 — 등급·규칙·구간은 그대로다(등급에 쓰는 것은 W-20b)
-    shown = [(s.start, s.end, s.tier, s.rule) for s in tiering.classify(flagged).spans]
-    assert shown == [(s.start, s.end, s.tier, s.rule) for s in tiering.classify(plain).spans]
-    # 「분석 근거」가 보이는 검토 조각의 `영상:` 태그에 그 말이 실린다
-    _rec, tags = tiering.segment_grade(tiering.classify(flagged), Fraction(0), Fraction(10))
+    # 규칙·구간·영상 판정·빨강은 그대로다 — 바뀐 것은 실제 문제가 있는 창 위의 녹색 → 보통 하나뿐
+    # (D60 20b-final 규칙 5. 18b의 이 시험은 「등급 불변」을 단언했다 — 등급에 쓰기 전이었다).
+    before, after = tiering.classify(plain), tiering.classify(flagged)
+    shown = [(s.start, s.end, s.rule, s.video.status, s.red_reason) for s in after.spans]
+    assert shown == [(s.start, s.end, s.rule, s.video.status, s.red_reason) for s in before.spans]
+    changed = [
+        (a.start, a.end, b.tier, a.tier)
+        for b, a in zip(before.spans, after.spans, strict=True)
+        if a.tier != b.tier
+    ]
+    assert changed == [(Fraction(0), Fraction(15), tiering.TIER_GREEN, tiering.TIER_YELLOW)]
+    assert after.spans[0].caps == (
+        (tiering.CAP_VISUAL_ISSUES, "화면 문제(흐림·흔들림·어두움)가 있어 보통까지만 추천합니다"),
+    )
+    assert tiering.red_decisions(after) == tiering.red_decisions(before)
+    # 「분석 근거」가 보이는 검토 조각의 `영상:` 태그와 「추천 제한」 태그에 그 말이 실린다
+    recommendation, tags = tiering.segment_grade(after, Fraction(0), Fraction(10))
     video = [tag for tag in tags if tag.startswith(tiering.VIDEO_TAG_PREFIX)]
     assert len(video) == 1 and "화면 문제: 흐림·흔들림·어두움" in video[0]
+    assert recommendation == "normal" and tags[0] == "등급: 보통"
+    assert "추천 제한: 화면 문제(흐림·흔들림·어두움)가 있어 보통까지만 추천합니다" in tags

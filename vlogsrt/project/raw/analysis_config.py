@@ -292,7 +292,8 @@ class RawTierSettings:
 
     로컬 측정 값(공백 RMS·검은 화면 루마·흐림)은 사용자 지시로 지웠다(D52) — 측정 계층이
     없어졌으므로 기준도 없다. 앞의 넷은 D51 그대로다. 값이나 `tiering.py`의 규칙을 바꾸면
-    `tier_version`을 올린다 — 옮기기는 이 표지로만 낡은 검토 머리를 안다(20a = v3, D60).
+    `tier_version`을 올린다 — 옮기기는 이 표지로만 낡은 검토 머리를 안다(20a = v3 ·
+    20b-final = v4, D60).
 
     추천 기준 강화(D60, 외부 근거 없는 조정 대상 — 바꾸면 D60에 근거를 남긴다):
 
@@ -305,7 +306,7 @@ class RawTierSettings:
       끈다.
     """
 
-    tier_version: str = "raw-tier/v3"
+    tier_version: str = "raw-tier/v4"
     silence_min_seconds: float = 5.0
     speech_handle_seconds: float = 0.3
     min_span_seconds: float = 1.0

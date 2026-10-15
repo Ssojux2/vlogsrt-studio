@@ -341,7 +341,7 @@ def test_report_is_deterministic_and_embeds_settings():
     first, second = report(), report()
     assert first == second and first.document() == second.document()
     assert first.document()["settings"] == asdict(TIER_SETTINGS)
-    assert first.tier_version == "raw-tier/v3" and len(first.document_sha256) == 64
+    assert first.tier_version == "raw-tier/v4" and len(first.document_sha256) == 64
     assert set(first.document()) == {"tier_version", "settings", "document_sha256", "spans"}
     # 공백 기준을 두 공백(12초·13초)보다 길게 잡으면 빨강이 없다.
     strict = report(settings=replace(TIER_SETTINGS, silence_min_seconds=13.5))
@@ -359,7 +359,7 @@ def test_red_decisions_shape_matches_auto_decisions():
     row = rows[0]
     assert set(row) == {"start", "end", "reason", "evidence", "version"}
     assert row["start"] == {"num": 15, "den": 1} and row["end"] == {"num": 257, "den": 10}
-    assert row["reason"] == tiering.RED_SILENCE and row["version"] == "raw-tier/v3"
+    assert row["reason"] == tiering.RED_SILENCE and row["version"] == "raw-tier/v4"
     assert row["evidence"][:3] == [
         "tier:silent-not-scenery",
         "audio:subtitle_silence",
@@ -381,7 +381,7 @@ def test_segment_grade_maps_to_closed_recommendation_set():
     closed = {"recommended", "normal", "review_required"}
     green = tiering.segment_grade(result, F(1), F(14))
     assert green[0] == "recommended"
-    assert green[1][0] == "등급: 추천" and green[1][-1] == "등급판 raw-tier/v3"
+    assert green[1][0] == "등급: 추천" and green[1][-1] == "등급판 raw-tier/v4"
     assert green[1][1].startswith("자막: 발화가 구간의") and green[1][2].startswith("영상: ")
     red = tiering.segment_grade(result, F(16), F(25))
     assert red == ("normal", red[1]) and red[1][0] == "등급: 제외 제안"
@@ -471,7 +471,7 @@ def test_default_tier_settings_hold_only_subtitle_and_span_values():
 
 def test_default_tier_settings_are_valid_and_unchanged():
     validate_tier_settings(TIER_SETTINGS)
-    assert TIER_SETTINGS.tier_version == "raw-tier/v3"
+    assert TIER_SETTINGS.tier_version == "raw-tier/v4"
     assert TIER_SETTINGS.speech_density_green == 0.35
     assert (TIER_SETTINGS.silence_min_seconds, TIER_SETTINGS.speech_handle_seconds) == (5.0, 0.3)
     assert TIER_SETTINGS.min_span_seconds == 1.0

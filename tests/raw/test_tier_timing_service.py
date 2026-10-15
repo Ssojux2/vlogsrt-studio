@@ -8,7 +8,8 @@
 - 빨강 판정이면 추천이 보통까지 — 다시 재 초록이면 정리 고리가 검토 머리의 등급을 다시 단다(사용/
   제외·메모·경계는 그대로), 보내기 키워드도 따른다.
 - 빨강(제외 제안)·자동 제외 후보·컷 자리는 신호가 있든 없든 바이트까지 같다.
-- v3 옮기기는 사람 결정(확인한 제외·메모·덮기)을 그대로 두고, 두 번 하면 아무것도 하지 않는다.
+- v3·v4 옮기기는 사람 결정(확인한 제외·메모·덮기)을 그대로 두고, 두 번 하면 아무것도 하지 않는다.
+  v4(20b-final 규칙 5)는 화면 문제가 있는 창 위의 추천을 보통까지로 내린다.
 
 유료 호출 0회 — 제공자 조립을 막아 두고 잰다.
 """
@@ -63,8 +64,15 @@ def _forbid_providers(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(RawWorkspaceService, name, refuse)
 
 
-def _project(tmp_path: Path, suitability: str = "recommended", utterances=DENSE):
-    service, root = tier_project(tmp_path, suitability=suitability, utterances=utterances)
+def _project(
+    tmp_path: Path,
+    suitability: str = "recommended",
+    utterances=DENSE,
+    visual_issues: list[str] | None = None,
+):
+    service, root = tier_project(
+        tmp_path, suitability=suitability, utterances=utterances, visual_issues=visual_issues
+    )
     _settle_sync(service, root)  # 앱이 거는 확인 작업 — 무음 합성 소리라 측정 불가(회색)로 끝난다
     (asset,) = service.list_source_assets(root)
     workspace = service._workspace(root)
@@ -354,33 +362,44 @@ def _usable_red(tmp_path: Path):
     return service, root, asset, workspace, source
 
 
-# ── v3 옮기기 — 사람 결정은 그대로, 두 번째는 아무것도 하지 않는다 ─────────────
+# ── v3·v4 옮기기 — 사람 결정은 그대로, 두 번째는 아무것도 하지 않는다 ─────────
 
 
-def _as_v2(tags: tuple[str, ...]) -> tuple[str, ...]:
-    """v2 머리의 태그 모양 — 표지가 v2이고 v3의 「추천 제한」 태그가 없다."""
-    marker = tiering.MARKER_PREFIX + "raw-tier/v2"
+OLD_VERSIONS = ("raw-tier/v2", "raw-tier/v3")
+ISSUE_CAP = "추천 제한: 화면 문제(흐림)가 있어 보통까지만 추천합니다"
+
+
+def _as_old(tags: tuple[str, ...], version: str) -> tuple[str, ...]:
+    """옛 판 머리의 태그 모양 — 표지가 그 판이고, v2에는 「추천 제한」 태그가 없다(v3부터)."""
+    marker = tiering.MARKER_PREFIX + version
     return tuple(
         marker if tag.startswith(tiering.MARKER_PREFIX) else tag
         for tag in tags
-        if not tag.startswith(tiering.CAP_TAG_PREFIX)
+        if version != "raw-tier/v2" or not tag.startswith(tiering.CAP_TAG_PREFIX)
     )
 
 
-def _v2_head(service: RawWorkspaceService, root: Path, monkeypatch: pytest.MonkeyPatch):
-    """v2 판이 세운 머리 — 등급판 표지와 빨강 제안 근거의 판이 v2다."""
+def _old_head(
+    service: RawWorkspaceService, root: Path, monkeypatch: pytest.MonkeyPatch, version: str
+):
+    """옛 판이 세운 머리 — 등급판 표지와 빨강 제안 근거의 판이 그 판이고, 화면 문제(v4 규칙 5)를
+    모른다(v2·v3에는 그 상한이 없었다)."""
     facade = ReviewWorkspaceFacade(root)
     real_grade, real_red = tiering.segment_grade, tiering.red_decisions
     with monkeypatch.context() as patch:
+        patch.setattr(tiering, "_span_issue_labels", lambda evidence, start, end: ())
         patch.setattr(
             tiering,
             "segment_grade",
-            lambda report, a, b: (real_grade(report, a, b)[0], _as_v2(real_grade(report, a, b)[1])),
+            lambda report, a, b: (
+                real_grade(report, a, b)[0],
+                _as_old(real_grade(report, a, b)[1], version),
+            ),
         )
         patch.setattr(
             tiering,
             "red_decisions",
-            lambda report: [{**row, "version": "raw-tier/v2"} for row in real_red(report)],
+            lambda report: [{**row, "version": version} for row in real_red(report)],
         )
         plan = service.plan_segmentation_from_analysis(root)
         legacy = facade.initialize_review(plan.revision_id)
@@ -389,11 +408,12 @@ def _v2_head(service: RawWorkspaceService, root: Path, monkeypatch: pytest.Monke
 
 
 @needs_ffmpeg
-def test_v3_migration_keeps_confirmed_exclusions_notes_and_is_idempotent(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("version", OLD_VERSIONS)
+def test_old_head_migration_keeps_confirmed_exclusions_notes_and_is_idempotent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, version: str
 ):
     service, root, *_ = _usable_red(tmp_path)
-    facade, legacy = _v2_head(service, root, monkeypatch)
+    facade, legacy = _old_head(service, root, monkeypatch, version)
     (proposal,) = unreviewed_auto_exclusions(legacy)
     confirmed = facade.confirm_automatic_exclusions()
     other = next(s for s in confirmed.segments if s.segment_id != proposal.segment_id)
@@ -412,9 +432,48 @@ def test_v3_migration_keeps_confirmed_exclusions_notes_and_is_idempotent(
         and AUTO_EXCLUDED_UNREVIEWED_TAG not in excluded.visual_tags
     )
     assert all(tiering.tier_marker() in s.visual_tags for s in migrated.segments)
-    assert all("raw-tier/v2" not in t for s in migrated.segments for t in s.visual_tags)
+    assert all(version not in t for s in migrated.segments for t in s.visual_tags)
     # 두 번째 바퀴는 할 일이 없다 — 작업도 리비전도 없다.
     jobs = len(service.list_jobs(root))
     assert service.start_upkeep(root) is None
     assert len(service.list_jobs(root)) == jobs
     assert facade.retier(migrated.base_plan_id) == migrated
+
+
+@needs_ffmpeg
+def test_v4_migration_caps_recommended_under_a_screen_problem_and_keeps_human_decisions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """v3 머리의 추천 조각이 화면 문제(흐림) 창 위라면 v4 옮기기가 보통 + 「추천 제한」으로
+    다시 단다 — 메모·덮기·경계·선택은 그대로, 제공자 조립 0, 두 번째 바퀴는 할 일이 없다."""
+    service, root, asset, *_ = _project(tmp_path, visual_issues=["blur"])
+    revision = service.analysis_overview(root).revision.revision_id
+    rows = service.selection_suitability(root, revision, (asset.asset_id,))[asset.asset_id]
+    assert [(r["tier"], r["rule"], r["recommendation"]) for r in rows] == [
+        ("yellow", "both-good", "normal")
+    ]
+    assert rows[0]["caps"] == [
+        {"code": tiering.CAP_VISUAL_ISSUES, "text": ISSUE_CAP.removeprefix("추천 제한: ")}
+    ]
+    assert "화면 문제: 흐림" in rows[0]["video"]["reason"] and rows[0]["red_reason"] is None
+    assert _keywords(service, root) == [["보통"]]  # 묻힌 추천도 없다 — 녹색이 하나도 없다
+    facade, legacy = _old_head(service, root, monkeypatch, "raw-tier/v3")
+    (segment,) = legacy.segments
+    assert (segment.recommendation, segment.visual_tags[0]) == ("recommended", "등급: 추천")
+    touched = facade.set_notes(legacy.base_plan_id, segment.segment_id, "사람 메모")
+    touched = facade.set_override(touched.base_plan_id, segment.segment_id, "review_required")
+    _forbid_providers(monkeypatch)
+    message = _upkeep(service, root)
+    assert message is not None and "등급 표시만 다시 답니다" in message
+    (after,) = facade.load_head().revision.segments
+    assert (after.segment_id, after.start_pts, after.end_pts, after.selection) == (
+        segment.segment_id,
+        segment.start_pts,
+        segment.end_pts,
+        segment.selection,
+    )
+    assert (after.notes, after.override_recommendation) == ("사람 메모", "review_required")
+    assert after.recommendation == segment.recommendation  # 사람이 덮은 조각은 권고도 그대로
+    assert "등급: 보통" in after.visual_tags and ISSUE_CAP in after.visual_tags
+    assert tiering.tier_marker() in after.visual_tags
+    assert service.start_upkeep(root) is None

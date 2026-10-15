@@ -18,7 +18,8 @@ AI 판정(Luna 창의 `annotations[]`·프레임 유무)과 생성 자막(`utter
 - **구간은 빈틈없이 덮는다.** 보고서의 구간은 `[0, extent]`를 겹침·틈 없이 타일한다.
 - **추천은 확인된 말로만(D60).** 같은 말 되풀이·느린 추임새는 밀도에서 뺀다 — 말이 있는지(빨강
   판단)는 여전히 모든 발화로 본다. 시각 확인 값은 다 정한 구간 위에서 **녹색을 노랑으로 내릴 수만**
-  있다: 경계를 옮기지 않고 빨강을 만들거나 지우지 않는다.
+  있다: 경계를 옮기지 않고 빨강을 만들거나 지우지 않는다. 판정이 적은 실제 화면 문제
+  (`visual_issues`, 알 수 없음은 빼고)도 같은 자리에서 녹색을 보통까지로만 내린다(D60 20b-final).
 """
 
 from __future__ import annotations
@@ -119,8 +120,9 @@ VISUAL_ISSUE_LABELS = {
     "overexposed": "과노출",
     "obstructed": "가림",
 }
-"""판정의 화면 문제(D58 18b)를 보일 쉬운 말 — 영상 이유(「분석 근거」)에만 붙고 등급·규칙·합치기
-열쇠에는 들어가지 않는다(등급에 쓰는 일은 W-20b). `none`과 키 없음은 아무 말도 보태지 않는다."""
+"""판정의 화면 문제(D58 18b)를 보일 쉬운 말 — 영상 이유(「분석 근거」)에 붙고, 녹색 구간이면
+추천 제한(`visual_issues`, D60 20b-final)의 말에도 쓰인다. 영상 판정·규칙·합치기 열쇠에는 들어가지
+않는다. `none`과 키 없음·빈 칸(알 수 없음)은 아무 말도 보태지 않고 아무것도 내리지 않는다."""
 TIER_LABELS = {TIER_GREEN: "추천", TIER_YELLOW: "보통", TIER_RED: "제외 제안"}
 HOLD_LABEL = "판정 보류"
 """근거가 없어 노랑인 조각의 이름(화면의 점선 노랑) — Final Cut 키워드로 나간다(D56)."""
@@ -159,6 +161,7 @@ _COUNTED_CATEGORIES = frozenset("LN")
 
 CAP_TOO_SHORT = "too_short"
 CAP_TIMING_RED = "timing_red"
+CAP_VISUAL_ISSUES = "visual_issues"
 _TIMING_RED_CAP = (
     CAP_TIMING_RED,
     "자막 시각 확인이 빨강이라 보통까지만 추천합니다 — 시각을 맞춘 뒤 다시 재면 풀립니다",
@@ -800,13 +803,22 @@ def _luna_notes(annotation: Mapping[str, Any], partial: bool) -> str:
     return text
 
 
-def _visual_issue_note(annotation: Mapping[str, Any]) -> str:
-    """판정이 적은 화면 문제를 쉬운 말로 — 표시만 한다(등급을 바꾸지 않는다)."""
-    labels = [
+def _issue_labels(annotation: Mapping[str, Any]) -> list[str]:
+    """판정이 적은 실제 화면 문제의 쉬운 말 — `none`·모르는 값·키 없음·빈 칸은 없다(D58)."""
+    return [
         VISUAL_ISSUE_LABELS[item]
         for item in annotation.get("visual_issues") or []
         if isinstance(item, str) and item in VISUAL_ISSUE_LABELS
     ]
+
+
+def _visual_issue_note(annotation: Mapping[str, Any]) -> str:
+    """판정이 적은 화면 문제를 쉬운 말로 영상 이유에 — 영상 판정(좋음·사용 가능·…)은 바꾸지 않는다.
+
+    등급에 닿는 길은 따로 하나다: 녹색 구간을 덮는 창에 실제 문제가 있으면 `_capped`가 그 구간을
+    보통까지로 내린다(D60 20b-final 규칙 5). 빨강·구간 경계·합치기는 이 칸을 보지 않는다.
+    """
+    labels = _issue_labels(annotation)
     return " · 화면 문제: " + "·".join(labels) if labels else ""
 
 
@@ -1016,8 +1028,11 @@ def _measured_density(
     return replace(span, tier=tier, rule=rule, audio=audio)
 
 
-def _capped(span: TierSpan, settings: RawTierSettings, timing: TimingSignals) -> TierSpan:
-    """녹색이지만 추천하지 않는 까닭 — 최소 길이·자막 시각 빨강(D60). 녹색만 노랑으로 내린다."""
+def _capped(
+    span: TierSpan, settings: RawTierSettings, timing: TimingSignals, evidence: SourceEvidence
+) -> TierSpan:
+    """녹색이지만 추천하지 않는 까닭 — 최소 길이·자막 시각 빨강·화면 문제(D60). 녹색만 노랑으로
+    내린다(규칙 칸·영상 판정·경계 그대로 — 빨강은 이 단계를 지나지 않는다)."""
     if span.tier != TIER_GREEN:
         return span
     caps = []
@@ -1025,7 +1040,37 @@ def _capped(span: TierSpan, settings: RawTierSettings, timing: TimingSignals) ->
         caps.append(_too_short_cap(settings))
     if timing.level == TIMING_RED:
         caps.append(_TIMING_RED_CAP)
+    issues = _span_issue_labels(evidence, span, settings)
+    if issues:
+        caps.append(_visual_issues_cap(issues))
     return replace(span, tier=TIER_YELLOW, caps=tuple(caps)) if caps else span
+
+
+def _span_issue_labels(
+    evidence: SourceEvidence, span: TierSpan, settings: RawTierSettings
+) -> tuple[str, ...]:
+    """구간을 덮는 창의 **받아들인** 판정이 적은 실제 화면 문제 — 정해진 순서
+    (`VISUAL_ISSUE_LABELS`)로 한 번씩. 실패·거부·판정 전 창과 알 수 없음은 없다.
+
+    `min_span_seconds`보다 짧게 겹친 창은 보지 않는다(구간이 더 짧으면 그 길이 —
+    `_significant_spans`와 같은 바닥). 짧은 조각을 흡수한 녹색이 그 조각 쪽 이웃 창의 문제로
+    통째 내려가지 않게 한다. 바닥 이상 겹친 창 하나가 문제를 적었으면 합친 녹색 구간 **전체**가
+    보통이다(창 경계로 나누지 않는다, D60).
+    """
+    floor = min(Fraction(str(settings.min_span_seconds)), span.end - span.start)
+    found: set[str] = set()
+    for window in evidence.windows:
+        row = window.annotation
+        if row is None or row.get("status") != _ANNOTATION_ACCEPTED:
+            continue
+        overlap = min(span.end, window.end) - max(span.start, window.start)
+        if overlap > 0 and overlap >= floor:
+            found.update(_issue_labels(row))
+    return tuple(label for label in VISUAL_ISSUE_LABELS.values() if label in found)
+
+
+def _visual_issues_cap(labels: Sequence[str]) -> tuple[str, str]:
+    return CAP_VISUAL_ISSUES, f"화면 문제({'·'.join(labels)})가 있어 보통까지만 추천합니다"
 
 
 def _too_short_cap(settings: RawTierSettings) -> tuple[str, str]:
@@ -1053,7 +1098,7 @@ def classify(
     spans = _merge(_absorb(_merge(spans, settings), settings), settings)
     measured = _with_measured(evidence.unconfirmed, evidence.speech, timing)
     spans = [_measured_density(span, evidence, measured) for span in spans]
-    spans = [_capped(span, settings, timing) for span in spans]
+    spans = [_capped(span, settings, timing, evidence) for span in spans]
     _require_tiling(spans, evidence.extent)
     return TierReport(
         tier_version=settings.tier_version,

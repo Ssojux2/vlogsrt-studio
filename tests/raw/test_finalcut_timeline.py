@@ -592,6 +592,174 @@ def test_browser_clips_carry_keyword_ranges_and_favorites_only_on_green() -> Non
     assert collections == ["추천", "보통", "제외 제안", "판정 보류"]
 
 
+# ─── 묻힌 추천(D60 20b-final) ─────────────────────────────────────────────
+
+
+def buried_source(
+    segments: tuple[ft.SegmentState, ...] = (seg(0, 300), seg(300, 600)),
+    rows: tuple[tuple[Fraction | int, Fraction | int, str], ...] = (
+        (0, 100, "yellow"),
+        (100, 200, "green"),
+        (200, 600, "yellow"),
+    ),
+) -> ft.SourceInput:
+    """600프레임 원본 — 녹색 100–200프레임(3.34초)이 첫 조각(0–300, 보통) 안에 묻힌다."""
+    return ft.SourceInput(
+        media=media("buried", frames=600, ident=None),
+        segments=segments,
+        report=frames_report(NTSC, *rows),
+        cues=(cue_at(120, 150, "묻힌 추천 속 말"),),
+    )  # fmt: skip
+
+
+def buried_document(source: ft.SourceInput) -> ft.TimelineDocument:
+    return ft.plan([source], title="t", library_bundle=None)
+
+
+def clip_keyword_ranges(clip: ET.Element) -> list[tuple[Fraction, Fraction, str]]:
+    return [
+        (t(k.attrib["start"]), t(k.attrib["duration"]), k.attrib["value"])
+        for k in clip.findall("keyword")
+    ]
+
+
+def test_buried_recommended_range_gets_one_extra_keyword_range() -> None:
+    source = buried_source()
+    document = buried_document(source)
+    first, second = document.sources[0].clips
+    assert first.keywords == ("보통",) and first.recommended == ((100, 200),)
+    assert second.recommended == ()  # 녹색과 겹치지 않는다
+    root = parsed(document)
+    clip, other = spine_clips(root)
+    tc = 1396282
+    assert clip_keyword_ranges(clip) == [
+        (tc * NTSC, 300 * NTSC, "보통"),
+        ((tc + 100) * NTSC, 100 * NTSC, "추천"),
+    ]
+    assert [child.tag for child in clip] == ["caption", "keyword", "keyword"]
+    assert clip_keyword_ranges(other) == [((tc + 300) * NTSC, 300 * NTSC, "보통")]
+    # 컷·켜짐·등급 키워드·캡션·브라우저 클립은 그대로다
+    base = ft.timeline_clips(source)
+    assert tuple(replace(c, recommended=()) for c in document.sources[0].clips) == base
+    assert document.sources[0].captions == ft.caption_pieces(source.cues or (), base, NTSC)[0]
+    assert document.sources[0].browser == ft.browser_ranges(source.report, source.media)
+    assert ft.document_counts(document)["keywords"] == {"보통": 2}
+
+
+def test_buried_ranges_are_cut_at_the_clip_edges_and_one_per_overlap() -> None:
+    """녹색 하나가 두 클립에 걸치면 클립마다 제 겹침 하나씩 — 겹침이 짧은 쪽은 없다."""
+    source = buried_source(
+        segments=(seg(0, 150), seg(150, 400), seg(400, 600)),
+        rows=((0, 50, "yellow"), (50, 260, "green"), (260, 330, "yellow"),
+              (330, 500, "green"), (500, 600, "yellow")),
+    )  # fmt: skip
+    clips = buried_document(source).sources[0].clips
+    assert [c.keywords[0] for c in clips] == ["보통", "보통", "보통"]
+    assert [c.recommended for c in clips] == [((50, 150),), ((150, 260),), ((400, 500),)]
+    # 두 번째 클립의 330–400(70프레임 = 2.34초)은 3초가 못 되어 없다
+
+
+def test_recommended_clip_gets_no_extra_range() -> None:
+    source = buried_source(segments=(seg(0, 300), seg(300, 600)), rows=((0, 600, "green"),))
+    document = buried_document(source)
+    assert [c.keywords[0] for c in document.sources[0].clips] == ["추천", "추천"]
+    assert all(c.recommended == () for c in document.sources[0].clips)
+    for clip in spine_clips(parsed(document)):
+        assert [k.attrib["value"] for k in clip.findall("keyword")] == ["추천"]
+
+
+def test_disabled_clip_gets_no_extra_range() -> None:
+    """사람이 확정한 제외는 끈 채 그대로 — 그 안의 추천을 다시 알리지 않는다."""
+    source = buried_source(segments=(seg(0, 300, excluded=True), seg(300, 600)))
+    document = buried_document(source)
+    first = document.sources[0].clips[0]
+    assert (first.enabled, first.recommended) == (False, ())
+    clip = spine_clips(parsed(document))[0]
+    assert [k.attrib["value"] for k in clip.findall("keyword")] == ["보통", "제외 확정"]
+
+
+def test_unreviewed_red_clip_is_enabled_and_still_shows_buried_recommended() -> None:
+    """미검토 제외 제안은 켠 클립이다 — 그 안의 추천도 보인다(키워드만, 켜짐 그대로)."""
+    source = buried_source(
+        segments=(seg(0, 300, excluded=True, unreviewed=True), seg(300, 600)),
+        rows=((0, 100, "red"), (100, 200, "green"), (200, 300, "red"), (300, 600, "yellow")),
+    )
+    first = buried_document(source).sources[0].clips[0]
+    assert first.enabled and first.keywords == ("보통", ft.KEYWORD_UNREVIEWED)
+    assert first.recommended == ((100, 200),)
+
+
+@pytest.mark.parametrize(("length", "kept"), [(89, False), (90, True)])
+def test_overlap_under_three_seconds_gets_none_and_the_minimum_rounds_up(
+    length: int, kept: bool
+) -> None:
+    """3초 = 89.91프레임 → 올려 90프레임(3.003초)부터 — 89프레임(2.97초)은 모자란다.
+
+    손으로 만든 녹색 구간은 길어서 브라우저에서는 「추천」이다 — 겹침의 길이만 본다.
+    """
+    source = buried_source(
+        rows=((0, 100, "yellow"), (100, 300 + length, "green"), (300 + length, 600, "yellow")),
+    )
+    first, second = buried_document(source).sources[0].clips
+    assert (first.keywords[0], second.keywords[0]) == ("보통", "보통")
+    assert first.recommended == ((100, 300),)
+    assert second.recommended == (((300, 300 + length),) if kept else ())
+
+
+def test_minimum_frames_round_up_per_frame_rate() -> None:
+    assert ft._minimum_frames(3.0, NTSC) == 90
+    assert ft._minimum_frames(3.0, F(1, 25)) == 75
+    assert ft._minimum_frames(3.0, F(1001, 60000)) == 180
+    assert ft._minimum_frames(3.0, F(1001, 24000)) == 72
+    assert ft._minimum_frames(0.0, NTSC) == 1  # 규칙을 끄면 1프레임 이상의 겹침 모두
+
+
+@needs_xmllint
+@needs_installed_dtd
+def test_buried_ranges_pass_the_installed_dtd(tmp_path: Path) -> None:
+    source = buried_source(
+        segments=(seg(0, 150), seg(150, 400), seg(400, 600)),
+        rows=((0, 50, "yellow"), (50, 260, "green"), (260, 330, "yellow"),
+              (330, 500, "green"), (500, 600, "yellow")),
+    )  # fmt: skip
+    document = ft.plan(
+        [source], title="t", library_bundle=None, caption_timing=frozenset({"asset-buried"})
+    )
+    raw = ft.render(document)
+    spine = [clip_keyword_ranges(clip) for clip in spine_clips(ET.fromstring(raw))]
+    assert [sum(value == "추천" for *_, value in rows) for rows in spine] == [1, 1, 1]
+    target = tmp_path / "buried.fcpxml"
+    target.write_bytes(raw)
+    result = validate_xml(target, dtd_path=INSTALLED_DTD)
+    assert result.dtd_checked is True and result.valid is True, result.diagnostics
+
+
+@pytest.mark.parametrize("name", sorted(EDGE_DOCUMENTS))
+def test_edge_documents_have_nothing_buried(name: str) -> None:
+    """빌더 시험의 경계 문서에는 묻힌 추천이 없다 — 바이트는 W-16 지문 시험이 잇는다."""
+    document = EDGE_DOCUMENTS[name]()
+    assert all(clip.recommended == () for s in document.sources for clip in s.clips)
+
+
+def test_buried_ranges_add_only_their_own_keyword_lines() -> None:
+    """묻힌 추천을 걷은 문서의 바이트 = 묻힌 추천 줄만 뺀 바이트 — 그 밖은 한 바이트도 같다."""
+    document = buried_document(buried_source())
+    stripped = replace(
+        document,
+        sources=tuple(
+            replace(s, clips=tuple(replace(c, recommended=()) for c in s.clips))
+            for s in document.sources
+        ),
+    )
+    # 같은 줄이 브라우저 클립(추천 범위)과 스파인 클립(묻힌 추천)에 하나씩 — 스파인은 뒤에 온다
+    extra = '<keyword start="1397778382/30000s" duration="100100/30000s" value="추천" />'
+    lines = ft.render(document).decode().splitlines(keepends=True)
+    found = [index for index, line in enumerate(lines) if line.strip() == extra]
+    assert len(found) == 2
+    kept = "".join(line for index, line in enumerate(lines) if index != found[-1])
+    assert ft.render(stripped).decode() == kept
+
+
 # ─── 8·9. 캡션 ──────────────────────────────────────────────────────────
 
 

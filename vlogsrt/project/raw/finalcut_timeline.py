@@ -14,10 +14,14 @@
   값을 쓴다: 0008 `12:56:29;10` → `1397678282/30000s`). 캡션·키워드 범위를 프레임에 맞추는
   것(½프레임 이내, 최소 1프레임)은 FCPXML이 프레임 격자만 받기 때문이지 시각 유도가 아니다.
 - **고치지 않고 센다.** 빈 글·겹침·줄 수·영상 밖 꼬리는 그대로 두거나 건너뛰고 수를 보고한다.
+- **묻힌 추천도 보인다(D60 20b-final).** 켠 클립의 등급이 추천이 아니어도 그 안에 추천 최소 길이
+  이상 겹친 브라우저 「추천」 범위가 있으면 그 겹침에 `추천` 키워드 범위를 하나 더 단다 — 컷·켜짐·
+  등급 키워드·캡션은 그대로다. 묻힌 추천이 없으면 바이트가 W-16 빌더 그대로다.
 """
 
 from __future__ import annotations
 
+import math
 import re
 import xml.etree.ElementTree as ET
 from collections import Counter
@@ -173,6 +177,8 @@ class ClipPlan:
     end_frame: int
     enabled: bool
     keywords: tuple[str, ...]
+    recommended: tuple[tuple[int, int], ...] = ()
+    """클립 안에 묻힌 추천 범위(원본 프레임 반개 구간) — 켠 비추천 클립에만 있다(D60)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -377,6 +383,41 @@ def browser_ranges(report: TierReport, media: SourceMedia) -> tuple[BrowserRange
     return tuple(ranges)
 
 
+def _minimum_frames(seconds: float, frame_duration: Fraction) -> int:
+    """추천 최소 길이(보고서 설정의 `recommended_min_seconds`)를 프레임으로 — **올림**.
+
+    그 길이 이상인 가장 짧은 프레임 수라 「최소 3초」의 뜻 그대로이고(29.97p 90프레임 = 3.003초,
+    89프레임 = 2.97초는 모자란다), 검토 조각의 3초 규칙(`segment_keyword`가 프레임 경계의 정확
+    유리수로 견준다)과 같은 경계다. 0이면 1프레임 이상이다.
+    """
+    return max(math.ceil(Fraction(str(seconds)) / frame_duration), 1)
+
+
+def _buried_recommended(
+    clip: ClipPlan, browser: Sequence[BrowserRange], minimum: int
+) -> tuple[tuple[int, int], ...]:
+    """켠 클립 하나에 묻힌 추천 — 브라우저 즐겨찾기(=「추천」) 범위와의 겹침 가운데 `minimum`프레임
+    이상인 것. 꺼진 클립(사람이 확정한 제외)과 이미 추천인 클립은 없다."""
+    if not clip.enabled or clip.keywords[0] == KEYWORD_RECOMMENDED:
+        return ()
+    overlaps = (
+        (max(clip.start_frame, row.start_frame), min(clip.end_frame, row.end_frame))
+        for row in browser
+        if row.favorite
+    )
+    return tuple((start, end) for start, end in overlaps if end - start >= minimum)
+
+
+def _with_buried_recommended(
+    clips: tuple[ClipPlan, ...], browser: Sequence[BrowserRange], report: TierReport, fd: Fraction
+) -> tuple[ClipPlan, ...]:
+    """보통·보류·제외 제안 클립 안의 추천 범위를 클립에 싣는다 — 컷·켜짐·등급 키워드는 그대로다."""
+    minimum = _minimum_frames(report.settings.recommended_min_seconds, fd)
+    return tuple(
+        replace(clip, recommended=_buried_recommended(clip, browser, minimum)) for clip in clips
+    )
+
+
 def _line_issue(text: str) -> bool:
     lines = text.replace("\r\n", "\n").split("\n")
     return len(lines) > CAPTION_MAX_LINES or any(not line.strip() for line in lines)
@@ -470,6 +511,9 @@ def plan_source(source: SourceInput, *, caption_timing: bool = False) -> SourceP
         except FinalCutTimelineError as error:
             raise _refuse(media, str(error)) from error
     report = source.report
+    browser = None if report is None else browser_ranges(report, media)
+    if report is not None and browser is not None:
+        clips = _with_buried_recommended(clips, browser, report, media.frame_duration)
     return SourcePlan(
         media=media,
         color_space=COLOR_SPACES.get(media.color),
@@ -477,7 +521,7 @@ def plan_source(source: SourceInput, *, caption_timing: bool = False) -> SourceP
         clips=clips,
         captions=captions,
         caption_counts=counts,
-        browser=None if report is None else browser_ranges(report, media),
+        browser=browser,
         caption_timing=caption_timing,
     )
 
@@ -738,7 +782,10 @@ def _caption_element(parent: ET.Element, media: SourceMedia, piece: CaptionPiece
 def _spine_clip(
     spine: ET.Element, ids: tuple[str, str], plan: SourcePlan, index: int, offset: int
 ) -> int:
-    """스파인 클립 하나 — 자식은 캡션(anchor) 다음 키워드(marker) 순서여야 DTD를 통과한다."""
+    """스파인 클립 하나 — 자식은 캡션(anchor) 다음 키워드(marker) 순서여야 DTD를 통과한다.
+
+    클립 전체의 키워드 뒤에 묻힌 추천 범위(`recommended`)마다 `추천` 키워드 범위를 단다(D60).
+    """
     media, clip = plan.media, plan.clips[index]
     frames = clip.end_frame - clip.start_frame
     attrib = _clip_attrib(*ids, media, clip.start_frame, frames)
@@ -751,6 +798,8 @@ def _spine_clip(
             _caption_element(element, media, piece)
     for keyword in clip.keywords:
         _range_element(element, "keyword", media, clip.start_frame, clip.end_frame, keyword)
+    for start, end in clip.recommended:
+        _range_element(element, "keyword", media, start, end, KEYWORD_RECOMMENDED)
     return offset + frames
 
 

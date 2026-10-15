@@ -4949,7 +4949,8 @@ class RawWorkspaceUi:
     def _suggestion_row(row: Mapping[str, Any]) -> dict[str, object]:
         """등급 구간 하나의 화면 값 — 자막·영상 판정을 따로 싣는다(W-11, D51).
 
-        `caps`는 표가 추천이라 했지만 추천하지 않는 까닭의 말이다(최소 길이·자막 시각 빨강, D60).
+        `caps`는 표가 추천이라 했지만 추천하지 않는 까닭의 말이다(최소 길이·자막 시각 빨강·
+        화면 문제, D60).
         """
         audio = row.get("audio") or {}
         video = row.get("video") or {}

@@ -126,7 +126,7 @@ TALK = "오늘은 계곡에 왔어요 물이 정말 맑네요"  # 16자 — 2–
 def test_v3_settings_are_the_published_values():
     validate_tier_settings(TIER_SETTINGS)
     validate_tier_settings(V2_RULES)  # 0은 「끔」이다 — 값역 안
-    assert TIER_SETTINGS.tier_version == "raw-tier/v3"
+    assert TIER_SETTINGS.tier_version == "raw-tier/v4"
     assert TIER_SETTINGS.same_text_run_min == 3
     assert TIER_SETTINGS.slow_filler_chars_per_second == 1.5
     assert TIER_SETTINGS.slow_filler_min_seconds == 2.0
@@ -392,6 +392,7 @@ def test_timing_signals_never_move_a_boundary_and_only_lower_green():
             assert json.dumps(tiering.red_decisions(signalled)) == json.dumps(
                 tiering.red_decisions(plain)
             )
+        _assert_issues_only_lower_green(doc, plain, rng)
 
 
 def test_v3_document_rules_never_create_remove_or_move_red():
@@ -403,6 +404,10 @@ def test_v3_document_rules_never_create_remove_or_move_red():
         v2 = tiering.classify(doc, settings=V2_RULES)
         assert json.dumps(tiering.red_decisions(v3)) == json.dumps(tiering.red_decisions(v2))
         assert tiering.red_ranges(v3) == tiering.red_ranges(v2)
+        flagged = _with_issues(doc, rng)
+        v4 = tiering.classify(flagged, timing=_signals(flagged, rng, sync_check.LEVEL_RED))
+        assert json.dumps(tiering.red_decisions(v4)) == json.dumps(tiering.red_decisions(v2))
+        assert tiering.red_ranges(v4) == tiering.red_ranges(v2)
 
 
 def _random_document(rng: random.Random) -> dict:
@@ -422,6 +427,38 @@ def _random_document(rng: random.Random) -> dict:
         utterances.append((cursor, cursor + length, rng.choice(texts)))
         cursor += length
     return make_document(extent, windows, utterances)
+
+
+ISSUE_CHOICES: tuple[list[str] | None, ...] = (
+    None, [], ["none"], ["blur"], ["shake", "dark"], ["overexposed"], ["obstructed", "blur"],
+)  # fmt: skip
+"""판정의 `visual_issues` 모양 — 키 없음 · 빈 칸(알 수 없음) · `none` · 실제 문제(정규화 뒤)."""
+
+
+def _with_issues(doc: dict, rng: random.Random) -> dict:
+    """같은 문서에 창마다 무작위 `visual_issues`를 단 사본 — 그 밖은 바이트까지 같다."""
+    flagged = json.loads(json.dumps(doc))
+    for row in flagged["annotations"]:
+        picked = rng.choice(ISSUE_CHOICES)
+        if picked is not None:
+            row["visual_issues"] = picked
+    return flagged
+
+
+def _assert_issues_only_lower_green(doc: dict, plain: tiering.TierReport, rng: random.Random):
+    """화면 문제는 녹색 → 노랑(`visual_issues` 상한)만 — 경계·영상 판정·빨강·제외 후보 그대로."""
+    flagged = tiering.classify(_with_issues(doc, rng))
+    assert [(s.start, s.end) for s in flagged.spans] == [(s.start, s.end) for s in plain.spans]
+    for before, after in zip(plain.spans, flagged.spans, strict=True):
+        assert (after.rule, after.red_reason, after.video.status) == (
+            before.rule,
+            before.red_reason,
+            before.video.status,
+        )
+        assert after.tier == before.tier or (before.tier, after.tier) == (G, Y)
+        if after.tier != before.tier:
+            assert after.caps[-1][0] == tiering.CAP_VISUAL_ISSUES
+    assert json.dumps(tiering.red_decisions(flagged)) == json.dumps(tiering.red_decisions(plain))
 
 
 def _signals(doc: dict, rng: random.Random, level: str | None) -> tiering.TimingSignals:
@@ -473,7 +510,7 @@ def test_short_review_piece_next_to_green_does_not_inherit_recommended():
     recommendation, tags = tiering.segment_grade(report, *piece)
     assert recommendation == "normal" and tags[0] == "등급: 보통"
     assert "추천 제한: 3초보다 짧아 추천하지 않습니다" in tags
-    assert tags[-1] == "등급판 raw-tier/v3"
+    assert tags[-1] == "등급판 raw-tier/v4"
     assert tiering.segment_keyword(report, *piece) == "보통"
     # 녹색 안의 0.3초도, 2.99초도 보통이다 — 정확히 3초부터 추천이다.
     assert tiering.segment_keyword(report, F(5), F(53, 10)) == "보통"
@@ -549,3 +586,150 @@ def test_classify_takes_no_measurement_and_no_io():
     """D52 그대로 — 받는 것은 문서와 값뿐이다(PCM·말소리 칸·파일 없음)."""
     with pytest.raises(TypeError):
         tiering.classify(make_document(10, [], []), speech_track=())  # type: ignore[call-arg]
+
+
+# ── 규칙 5 — 화면 문제가 있으면 보통까지(20b-final) ─────────────────────────
+
+
+def _issue_document(issues: list[str] | None, *, second: list[str] | None = None) -> dict:
+    """0–15초 추천 창(말 많음) + 15–30초 사용 가능 창 — 첫 창에 `visual_issues`를 단다."""
+    doc = make_document(30, [(0, 15, "recommended"), (15, 30, "usable")], chatter(0, 30))
+    if issues is not None:
+        doc["annotations"][0]["visual_issues"] = issues
+    if second is not None:
+        doc["annotations"][1]["visual_issues"] = second
+    return doc
+
+
+ISSUE_TEXT = "화면 문제({})가 있어 보통까지만 추천합니다"
+
+
+@pytest.mark.parametrize(
+    ("issue", "label"),
+    [("blur", "흐림"), ("shake", "흔들림"), ("dark", "어두움"),
+     ("overexposed", "과노출"), ("obstructed", "가림")],
+)  # fmt: skip
+def test_each_visual_issue_caps_green_at_yellow_with_a_reason(issue: str, label: str):
+    plain = tiering.classify(_issue_document(None))
+    report = tiering.classify(_issue_document([issue]))
+    assert layout(plain)[0] == (F(0), F(15), G)
+    first = report.spans[0]
+    assert (first.start, first.end, first.tier, first.rule) == (F(0), F(15), Y, "both-good")
+    before = plain.spans[0].video
+    assert (first.video.status, first.video.windows) == (before.status, before.windows)
+    assert first.video.reason == f"{before.reason} · 화면 문제: {label}"  # 영상 판정은 그대로
+    assert first.caps == ((tiering.CAP_VISUAL_ISSUES, ISSUE_TEXT.format(label)),)
+    assert first.recommendation == "normal" and not first.hold
+    assert f"추천 제한: {ISSUE_TEXT.format(label)}" in first.document()["reason"]
+    recommendation, tags = tiering.segment_grade(report, F(1), F(14))
+    assert recommendation == "normal" and tags[0] == "등급: 보통"
+    assert f"추천 제한: {ISSUE_TEXT.format(label)}" in tags
+    assert tags[-1] == "등급판 raw-tier/v4"
+    assert tiering.segment_keyword(report, F(1), F(14)) == "보통"
+    assert layout(report)[1:] == layout(plain)[1:]
+
+
+@pytest.mark.parametrize("issues", [None, [], ["none"]])
+def test_none_missing_and_unknown_issues_leave_green_alone(issues: list[str] | None):
+    report = tiering.classify(_issue_document(issues))
+    assert report.spans == tiering.classify(_issue_document(None)).spans
+    assert (report.spans[0].tier, report.spans[0].caps) == (G, ())
+    assert tiering.segment_keyword(report, F(1), F(14)) == "추천"
+
+
+def test_issues_on_a_failed_or_frameless_window_do_not_cap():
+    """받아들이지 않은 판정의 칸은 보지 않는다 — 그 창은 이미 판정 보류다(D51)."""
+    doc = _issue_document(["blur"])
+    doc["annotations"][0]["status"] = "rejected"
+    report = tiering.classify(doc)
+    assert all(code != tiering.CAP_VISUAL_ISSUES for s in report.spans for code, _ in s.caps)
+
+
+def test_issue_labels_follow_the_fixed_order_once_each_across_windows():
+    """두 창이 한 녹색 구간을 덮으면 두 창의 문제를 정해진 순서로 한 번씩 적는다."""
+    doc = make_document(30, [(0, 15, "recommended"), (15, 30, "recommended")], chatter(0, 30))
+    doc["annotations"][0]["visual_issues"] = ["obstructed", "blur"]
+    doc["annotations"][1]["visual_issues"] = ["blur", "shake"]
+    (span,) = tiering.classify(doc).spans
+    assert span.caps == ((tiering.CAP_VISUAL_ISSUES, ISSUE_TEXT.format("흐림·흔들림·가림")),)
+
+
+def test_a_window_touching_green_only_through_an_absorbed_sliver_does_not_cap_it():
+    """1초보다 짧은 조각을 흡수한 녹색은 이웃 창과 조금만 겹친다 — 그 창의 문제로 내리지 않는다.
+
+    `_significant_spans`와 같은 바닥(`min_span_seconds`, 구간이 더 짧으면 그 길이)이다.
+    """
+    utterances = [*chatter(0, 15), (F(15), F(154, 10), TALK)]
+    doc = make_document(40, [(0, 15, "recommended"), (15, 40, "usable")], utterances)
+    plain = tiering.classify(doc)
+    assert (plain.spans[0].start, plain.spans[0].end, plain.spans[0].tier) == (F(0), F(157, 10), G)
+    doc["annotations"][1]["visual_issues"] = ["blur"]
+    flagged = tiering.classify(doc)
+    # 이웃 빨강의 영상 이유 「화면 문제: 흐림」은 표시라 다르다 — 녹색과 구간 배치는 같다.
+    assert flagged.spans[0] == plain.spans[0]
+    assert layout(flagged) == layout(plain)
+    doc["annotations"][0]["visual_issues"] = ["shake"]
+    capped = tiering.classify(doc).spans[0]
+    assert capped.caps == ((tiering.CAP_VISUAL_ISSUES, ISSUE_TEXT.format("흔들림")),)
+
+
+def test_issue_cap_comes_after_the_other_caps():
+    report = tiering.classify(
+        _green_island(F(2)), timing=tiering.TimingSignals(level=sync_check.LEVEL_RED)
+    )
+    doc = _green_island(F(2))
+    doc["annotations"][1]["visual_issues"] = ["dark"]
+    capped = tiering.classify(doc, timing=tiering.TimingSignals(level=sync_check.LEVEL_RED))
+    assert [code for code, _ in capped.spans[1].caps] == [
+        tiering.CAP_TOO_SHORT,
+        tiering.CAP_TIMING_RED,
+        tiering.CAP_VISUAL_ISSUES,
+    ]
+    assert layout(capped) == layout(report)
+
+
+def test_silent_span_under_an_issue_window_keeps_its_tier_and_never_turns_red():
+    """자막 없는 긴 공백 × 추천 화면(풍경)은 노랑이다 — 화면 문제가 있어도 빨강이 되지 않는다.
+
+    `combine`과 영상 판정을 바꾸지 않았기 때문이다: 화면 문제로 영상을 `usable`로 내렸다면
+    「자막 없는 공백 × 사용 가능」이 빨강(새 제외 제안)이 되었을 것이다.
+    """
+    doc = make_document(
+        30, [(0, 30, "recommended")], [(0, 2, TALK), (15, 17, TALK + " 다시"), (28, 30, TALK)]
+    )
+    plain = tiering.classify(doc)
+    silent = [
+        (s.start, s.end, s.tier) for s in plain.spans if s.audio.status == tiering.AUDIO_SILENT
+    ]
+    assert silent and all(tier == Y for *_, tier in silent)
+    for issues in (["blur"], ["dark", "obstructed"], ["none"], []):
+        doc["annotations"][0]["visual_issues"] = issues
+        flagged = tiering.classify(doc)
+        assert [
+            (s.start, s.end, s.tier)
+            for s in flagged.spans
+            if s.audio.status == tiering.AUDIO_SILENT
+        ] == silent
+        assert tiering.red_ranges(flagged) == tiering.red_ranges(plain) == ()
+        assert json.dumps(tiering.red_decisions(flagged)) == json.dumps(
+            tiering.red_decisions(plain)
+        )
+
+
+def test_red_decisions_are_identical_with_and_without_visual_issues():
+    """빨강이 있는 문서(공백 × 사용 가능·검토) — 어느 창에 어떤 문제를 달아도 제외 후보가 같다."""
+    doc = make_document(
+        40,
+        [(0, 12, "recommended"), (12, 26, "usable"), (26, 40, "review")],
+        [(0, 4, TALK), (4, 7, TALK + " 둘"), (24, 26, TALK), (38, 40, TALK)],
+    )
+    plain = tiering.classify(doc)
+    assert tiering.red_ranges(plain)
+    for picked in ISSUE_CHOICES:
+        flagged = json.loads(json.dumps(doc))
+        for row in flagged["annotations"]:
+            if picked is not None:
+                row["visual_issues"] = picked
+        report = tiering.classify(flagged)
+        assert json.dumps(tiering.red_decisions(report)) == json.dumps(tiering.red_decisions(plain))
+        assert [(s.start, s.end) for s in report.spans] == [(s.start, s.end) for s in plain.spans]

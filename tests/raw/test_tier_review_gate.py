@@ -63,10 +63,12 @@ def analyzed_tier_project(
     tmp_path: Path,
     suitability: str = "recommended",
     utterances: tuple[dict[str, object], ...] = UTTERANCES,
+    visual_issues: list[str] | None = None,
 ) -> tuple[RawWorkspaceService, Path]:
     """가져오기 → 순서 → 재생 분석까지 — 검토 머리는 아직 없다. 창 하나의 Luna 판정을 고른다.
 
     재생 전사(`utterances`)도 고를 수 있다 — 기본은 위 넷(3→11초가 자막 공백)이다.
+    `visual_issues`를 주면 그 창의 판정에 화면 문제를 싣는다(기본은 키 없음 = 알 수 없음).
     """
     source = tmp_path / "tier.mov"
     _encode(source)
@@ -86,6 +88,8 @@ def analyzed_tier_project(
         evidence_ids=[FIRST_FRAME],
         uncertainties=["원거리 인물 식별 불확실"],
     )
+    if visual_issues is not None:
+        fixtures["windows"]["window_000000"]["visual_issues"] = visual_issues
     luna_path.write_text(json.dumps(fixtures, ensure_ascii=False))
     analysis = service.start_analysis(root, mode="replay")
     assert _wait_terminal(service, root, analysis.job_id).status == "succeeded"
@@ -96,9 +100,10 @@ def tier_project(
     tmp_path: Path,
     suitability: str = "recommended",
     utterances: tuple[dict[str, object], ...] = UTTERANCES,
+    visual_issues: list[str] | None = None,
 ) -> tuple[RawWorkspaceService, Path]:
     """분석 뒤 자동 정리까지 — 검토 머리가 새 등급판으로 선다."""
-    service, root = analyzed_tier_project(tmp_path, suitability, utterances)
+    service, root = analyzed_tier_project(tmp_path, suitability, utterances, visual_issues)
     cleanup = service.start_cleanup(root)
     finished = _wait_terminal(service, root, cleanup.job_id)
     assert finished.status == "succeeded", finished.error
@@ -139,7 +144,7 @@ def test_red_silence_becomes_unreviewed_auto_exclusion_and_finalcut_keeps_it_ena
     (segment,) = pending
     provenance = json.loads(segment.notes.removeprefix("자동 제외: "))
     assert provenance["reason"] == tiering.RED_SILENCE
-    assert provenance["version"] == "raw-tier/v3"
+    assert provenance["version"] == "raw-tier/v4"
     assert provenance["evidence"][:3] == [
         "tier:silent-not-scenery",
         "audio:subtitle_silence",
@@ -147,7 +152,7 @@ def test_red_silence_becomes_unreviewed_auto_exclusion_and_finalcut_keeps_it_ena
     ]
     assert not any(e.startswith("pcm:") for e in provenance["evidence"])
     assert "등급: 제외 제안" in segment.visual_tags
-    assert "등급판 raw-tier/v3" in segment.visual_tags
+    assert "등급판 raw-tier/v4" in segment.visual_tags
     package_dir = service.package_overview(root).package.package_dir
     with pytest.raises(RawWorkspaceError, match="자동 제외 1개를 먼저 확인"):
         facade.export_confirmed(package_dir)  # 잘라 내는 쪽의 관문은 그대로다(D35)
@@ -207,7 +212,7 @@ def test_retier_keeps_manual_selection_override_and_notes(
     edited = facade.set_notes(edited.base_plan_id, first.segment_id, "사람 메모")
     retiered = facade.retier(edited.base_plan_id)
     assert retiered.sequence == edited.sequence + 1
-    assert retiered.edit is not None and retiered.edit.notes == "등급 재계산 raw-tier/v3"
+    assert retiered.edit is not None and retiered.edit.notes == "등급 재계산 raw-tier/v4"
     for before, after in zip(edited.segments, retiered.segments, strict=True):
         assert (before.segment_id, before.start_pts, before.end_pts) == (
             after.segment_id,
