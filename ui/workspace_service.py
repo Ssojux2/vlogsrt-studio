@@ -405,6 +405,20 @@ CLOSE_OUTLIVES_JOB_KINDS = frozenset({raw_service.UPKEEP_JOB_KIND, raw_service.S
 """닫아도 그대로 끝나게 두는 작업 — 무료 로컬이고 DB에만 쓴다(화면 기억 없음). 서비스가 실행마다
 한 번만 걸므로(`_upkeep_tries`·`_sync_tries`) 취소하면 서버를 다시 띄울 때까지 다시 걸리지 않는다.
 두 목록 밖의 종류(분석·승인·가져오기·내보내기·보내기·모르는 종류)는 닫기를 막는다."""
+WORKBENCH_PROGRESS_JOB_KINDS = frozenset(
+    {
+        "source_preview",
+        raw_service.VISUAL_PREPARE_JOB_KIND,
+        raw_service.SYNC_CHECK_JOB_KIND,
+        raw_service.INGEST_JOB_KIND,
+    }
+)
+"""진행 한 걸음이 작업대를 바꾸는 작업(W-24 세션 G) — 미리보기·썸네일을 하나씩 만들고(카드·레일의
+썸네일, 재생기의 원본 미리보기), 시각 확인은 원본마다 보고서를 써서 판정과 추천 제한(D60)이 바뀌고,
+가져오기는 원본마다 준비를 표시해 카드가 생긴다. 2초 틱의 그리기 열쇠는 이 종류의 진행 수만 싣는다.
+다른 작업의 진행(분석·내보내기의 n/N)은 작업대 값에 없다 — 1초 상태 칸과 「지금 도는 작업」이
+보인다. 그 작업들이 작업대를 바꾸는 순간(끝남·단계·자막 리비전·등급 문서)은 열쇠의
+다른 칸이 잡는다."""
 ACTIVITY_ROUTE = ui_facade.ACTIVITY_ROUTE
 """「기록」 판의 서버 쪽(D61) — 읽기만 하는 GET 하나. 다른 경로와 같은 Host/Origin 가드를 지난다."""
 ACTIVITY_LOG_PAGE = 500
@@ -2031,20 +2045,31 @@ class RawWorkspaceUi:
         `upkeep=False`는 타이머가 진행만 바뀐 틱에서 정리 고리 둘을 건너뛸 때다(D63) — 고리의 재료
         (원본·순서·분석 결과·검토 머리·자막·시각 확인 보고서)는 작업이 끝나거나 사람이 누를 때만
         바뀐다. 단추·열기·새로고침은 늘 돈다.
+
+        정리 고리의 할 일 재기도 읽기 범위 안이다(W-24 세션 G) — 고리는 그리기와 같은 것(등급 증거·
+        검토 머리·원본 자막·시각 확인 재료)을 읽는다. 예전엔 범위 밖이라 단추 하나가 그리기 한 번을
+        더 했다. 고리가 작업을 걸었을 수 있으면(안내가 돌아오면) 기억을 모두 버리고 그린다 — 쓴
+        뒤의 읽기는 처음부터다. 범위는 이 단추 한 번만 산다.
         """
-        if upkeep:
-            message = self._with_upkeep_notes(root, message)
-        # 읽기 범위는 정리 고리(작업을 건다) 뒤에 연다 — 패널 머리 맞춤과 그리기가 같은 읽기를 함께
-        # 쓴다(D63). 범위는 이 그리기 한 번만 산다.
-        with raw_service.read_scope.open():
+        with raw_service.read_scope.open() as scope:
+            if upkeep:
+                message = self._with_upkeep_notes(root, message, scope)
             self._refresh_review_panel_state(root)
             return message, *self.visual_workbench_render(root)
 
-    def _with_upkeep_notes(self, root: Path, message: str) -> str:
-        """정리 고리 둘을 돌리고 그 안내를 답 뒤에 붙인다."""
-        for note in (self._maybe_upkeep(root), self._maybe_sync_upkeep(root)):
+    def _with_upkeep_notes(
+        self, root: Path, message: str, scope: raw_service.read_scope.ReadScope
+    ) -> str:
+        """정리 고리 둘을 돌리고 그 안내를 답 뒤에 붙인다 — 안내가 있으면 범위의 기억을 버린다.
+
+        안내는 고리가 작업을 걸었거나(쓰기) 이미 도는 작업을 알린다는 뜻이다. 둘째 고리와 그리기는
+        그 뒤에 읽으므로 기억을 버려 쓴 뒤의 값을 본다(안내 없는 고리는 읽기만 했다).
+        """
+        for step in (self._maybe_upkeep, self._maybe_sync_upkeep):
+            note = step(root)
             if note:
                 message += "\n\n" + note
+                scope.forget()
         return message
 
     def _maybe_upkeep(self, root: Path) -> str | None:
@@ -3516,7 +3541,11 @@ class RawWorkspaceUi:
         return message, gr.skip(), workbench, key
 
     def _tick_key(self, root: Path, signature: str) -> tuple[tuple, frozenset[tuple[str, str]]]:
-        """타이머 틱의 그리기 열쇠와 작업 상태 묶음 — 읽기만 한다(선택 상태는 화면 기억에 둔다)."""
+        """타이머 틱의 그리기 열쇠와 작업 상태 묶음 — 읽기만 한다(선택 상태는 화면 기억에 둔다).
+
+        진행 수는 작업대에 보이는 종류(`WORKBENCH_PROGRESS_JOB_KINDS`)만 싣는다 — 예전엔 어느 작업
+        이든 진행이 한 칸 움직이면 2초마다 작업대 전체를 다시 그려 보냈다(W-24 세션 G).
+        """
         if not self._quick:
             self._quick = self.raw.load_selection_state(root)
         self._load_quick_tasks(root)
@@ -3530,7 +3559,12 @@ class RawWorkspaceUi:
             signature,
             self._capcut_render_generation,
             transcript_revisions,
-            tuple((j.job_id, j.status, j.progress_current) for j in jobs),
+            tuple(
+                (j.job_id, j.status, j.progress_current)
+                if j.kind in WORKBENCH_PROGRESS_JOB_KINDS
+                else (j.job_id, j.status)
+                for j in jobs
+            ),
             job_states,
             self._quick.get("stage"),
             self._quick.get("revision"),

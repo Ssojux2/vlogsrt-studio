@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import threading
 import time
@@ -141,6 +142,29 @@ class JobStore:
             rows = connection.execute(
                 "SELECT * FROM jobs ORDER BY created_at DESC, job_id DESC LIMIT ?",
                 (limit,),
+            ).fetchall()
+        return tuple(self._record(row) for row in rows)
+
+    def by_ids(self, job_ids: Collection[str]) -> dict[str, JobRecord]:
+        """아이디로 찾은 작업 — 없는 아이디는 빠진다. 최근 몇 개의 창이 아니라 아이디로 찾는다.
+
+        선택 분석 상태마다 작업 목록 1000줄을 통째로 읽던 자리다(W-24 세션 G) — 작업이 1000개를
+        넘으면 창 밖의 끝난 작업을 못 찾아 「중단」으로 잘못 불렀다. 읽기 범위 안에서는 같은 묶음을
+        한 번만 읽는다(D63).
+        """
+        wanted = tuple(sorted(set(job_ids)))
+        if not wanted:
+            return {}
+        key = ("jobs.by_ids", str(self._workspace.root), wanted)
+        records = read_scope.memo(key, lambda: self._read_by_ids(wanted))
+        return {record.job_id: record for record in records}
+
+    def _read_by_ids(self, job_ids: tuple[str, ...]) -> tuple[JobRecord, ...]:
+        # 아이디 묶음은 JSON 배열 하나로 넘긴다 — 묶음 크기가 SQL 변수 한도에 닿지 않는다.
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM jobs WHERE job_id IN (SELECT value FROM json_each(?))",
+                (json.dumps(job_ids),),
             ).fetchall()
         return tuple(self._record(row) for row in rows)
 
@@ -421,6 +445,9 @@ class JobManager:
 
     def latest_of_kind(self, kind: str) -> JobRecord | None:
         return self._store.latest_of_kind(kind)
+
+    def by_ids(self, job_ids: Collection[str]) -> dict[str, JobRecord]:
+        return self._store.by_ids(job_ids)
 
     def active_of_kinds(self, kinds: Collection[str]) -> tuple[JobRecord, ...]:
         return self._store.active_of_kinds(kinds)

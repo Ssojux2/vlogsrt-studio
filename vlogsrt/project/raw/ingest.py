@@ -15,11 +15,13 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
 import shutil
 import stat as stat_module
+import threading
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -140,7 +142,50 @@ def ffprobe_media_inspector(path: Path) -> SourceInspection:
     `invalid`로 남긴다 — 있는데 못 믿는 것과 아예 없는 것을 갈라 기록한다.
     비디오 스트림이 없거나 깨진 파일은 `RuntimeError`로 죽고(preprocess 계약),
     스캔이 `InspectionError` 사유로 바꿔 기록한다.
+
+    같은 파일은 이 프로세스 안에서 한 번만 조사한다(W-24 세션 G) — 작업대의 첫 Final Cut 판이
+    원본·프록시마다 ffprobe를 돌렸다(원본 18개 + 프록시 ≈ 36번, 2–8초). 같은 파일인지는 경로와
+    stat 신원(크기·수정 시각 ns·inode·장치)으로 가른다 — 하나라도 바뀌면 다시 조사한다. 기억은
+    디스크에 남지 않고, 실패(예외)는 기억하지 않는다.
     """
+    try:
+        before = _file_identity(path)
+    except OSError:
+        return _inspect(path)  # 없는 파일 — 조사자가 예전 그대로 실패를 알린다
+    key = str(path)
+    with _INSPECTED_LOCK:
+        held = _INSPECTED.get(key)
+    if held is not None and held[0] == before:
+        return held[1]
+    inspection = _inspect(path)
+    with contextlib.suppress(OSError):
+        if _file_identity(path) == before:  # 조사하는 동안 바뀐 파일은 기억하지 않는다
+            with _INSPECTED_LOCK:
+                _INSPECTED[key] = (before, inspection)
+    return inspection
+
+
+_INSPECTED: dict[str, tuple[tuple[object, ...], SourceInspection]] = {}
+"""경로 → (stat 신원, 조사값) — 프로세스 메모리에만 산다. 경로마다 마지막 하나만 둔다."""
+_INSPECTED_LOCK = threading.Lock()
+
+
+def _file_identity(path: Path) -> tuple[object, ...]:
+    """조사값을 다시 써도 되는 같은 파일인가의 열쇠 — 조사자 함수까지 넣는다(갈아 끼우면 새로).
+    변경 시각(ctime)은 크기·수정 시각을 그대로 둔 덮어쓰기(`cp -p`, 거친 시각의 카메라 카드)를
+    잡는다."""
+    info = path.stat()
+    return (
+        preprocess.probe_raw_media,
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+        info.st_ino,
+        info.st_dev,
+    )
+
+
+def _inspect(path: Path) -> SourceInspection:
     probe = preprocess.probe_raw_media(path)
     creation = probe.creation_time
     if creation.valid and creation.utc is not None:

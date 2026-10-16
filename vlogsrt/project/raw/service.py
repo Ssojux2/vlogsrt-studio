@@ -1133,6 +1133,10 @@ class RawWorkspaceService:
     def list_jobs(self, root: Path, limit: int = 50) -> tuple[JobRecord, ...]:
         return self._jobs(root).list_jobs(limit)
 
+    def jobs_by_id(self, root: Path, job_ids: Collection[str]) -> dict[str, JobRecord]:
+        """아이디로 찾은 작업 — 최근 목록 창과 무관하다. 없는 아이디는 빠진다(W-24 세션 G)."""
+        return self._jobs(root).by_ids(job_ids)
+
     def active_jobs(self, root: Path, kinds: Collection[str]) -> tuple[JobRecord, ...]:
         """그 종류의 활성 작업 전부 — 목록 창(최근 50개) 밖의 오래된 작업도 놓치지 않는다."""
         return self._jobs(root).active_of_kinds(kinds)
@@ -1338,10 +1342,18 @@ class RawWorkspaceService:
         return request_usage.summarize(workspace, ids)
 
     def analysis_usage_line(self, root: Path, revision_id: str) -> str:
-        """The one-line status text for a revision's usage; empty before any paid attempt."""
+        """The one-line status text for a revision's usage; empty before any paid attempt.
+
+        1초 상태 틱은 이 줄을 두 번 쓴다(상태 줄과 기록 판의 실사용 칸) — 읽기 범위 안에서는 한
+        번만 센다(W-24 세션 G). 범위 밖에서는 매번 센다.
+        """
         from vlogsrt.project.raw import request_usage
 
-        return request_usage.format_usage_line(self.analysis_usage_summary(root, revision_id))
+        key = ("analysis_usage_line", str(root.expanduser().resolve()), revision_id)
+        return read_scope.memo(
+            key,
+            lambda: request_usage.format_usage_line(self.analysis_usage_summary(root, revision_id)),
+        )
 
     def with_request_receipts(self, root: Path, body: Any, timing: object, text: object) -> Any:
         """Open the receipt scope around a final-caption run when its providers are live."""
@@ -2612,14 +2624,16 @@ class RawWorkspaceService:
             failures = self._sync_failures.setdefault(key, {})
             fresh = any(failures.get(target) != reason for target in targets)
             failures.update(dict.fromkeys(targets, reason))
+        _forget_read_scope()  # 표지는 `sync_check_view`가 읽는다 — 범위 안의 기억은 낡았다
         return fresh
 
     def _clear_sync_failures(self, key: Path, source_ids: Iterable[str]) -> None:
         """확인이 다시 걸렸다 — 그 원본과 작업공간 전체의 '걸지 못함' 표지를 지운다."""
         with self._lock:
             failures = self._sync_failures.get(key, {})
-            for target in (*source_ids, SYNC_ALL_SOURCES):
-                failures.pop(target, None)
+            cleared = [failures.pop(target, None) for target in (*source_ids, SYNC_ALL_SOURCES)]
+        if any(reason is not None for reason in cleared):
+            _forget_read_scope()
 
     def _note_sync_failure(
         self, root: Path, source_ids: Sequence[str] | None, error: BaseException, *, repeat: bool
@@ -5160,6 +5174,17 @@ def _regrade_state(facade: Any, head: ReviewRevision) -> str | None:
 def _same_sources(head: ReviewRevision, order: GlobalOrderRevision) -> bool:
     """검토 머리와 전체 순서가 같은 영상 묶음인가 — 순서만 다를 수 있다."""
     return {clock.source_id for clock in head.clocks} == set(_order_ids(order))
+
+
+def _forget_read_scope() -> None:
+    """화면 값이 읽는 서비스 기억(메모리)을 바꿨다 — 열린 읽기 범위의 기억을 버린다(W-24 세션 G).
+
+    단추 길은 정리 고리를 읽기 범위 안에서 잰다. 고리가 '걸지 못함' 표지를 세우거나 지우면 그 뒤의
+    그리기가 방금 바뀐 표지를 봐야 한다. 범위가 없으면 할 일이 없다.
+    """
+    scope = read_scope.current()
+    if scope is not None:
+        scope.forget()
 
 
 def _upkeep_failure_note(latest: JobRecord | None) -> str | None:

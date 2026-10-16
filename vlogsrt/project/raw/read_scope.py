@@ -12,6 +12,10 @@
 
 기억한 값은 부른 쪽이 바꾸지 않는 값(얼린 데이터클래스·튜플·읽기만 하는 문서)이어야 한다 — 바꾸는
 쪽에 돌려줄 값은 부를 때마다 복사한다.
+
+범위 안에서 쓸 수도 있는 진입점은 하나다: 단추 길(`_capcut_result`)은 정리 고리 둘의 할 일을 범위
+안에서 재고(그리기와 같은 읽기다), 고리가 작업을 걸었을 수 있으면(안내가 돌아오면) `forget`으로
+기억을 모두 버린 뒤 그린다 — 쓴 뒤의 읽기는 언제나 처음부터다(W-24 세션 G).
 """
 
 from __future__ import annotations
@@ -37,6 +41,10 @@ class ReadScope:
         answer = compute()
         self._answers[key] = answer
         return answer
+
+    def forget(self) -> None:
+        """기억한 답을 모두 버린다 — 범위 안에서 무언가를 썼을 수 있는 자리 바로 뒤에 부른다."""
+        self._answers.clear()
 
     def __len__(self) -> int:
         return len(self._answers)

@@ -201,8 +201,16 @@ def stage1_audio(workspace_root: Path, asset_id: str, source_sha256: str) -> Sta
 
     자막은 전사 직후에 심기고 같은 때 기록이 남으므로 "가장 최근"이 지금 자막을 심은 전사다
     (사람이 고친 자막은 다시 심기지 않는다 — 그때는 가장 최근 전사의 실패를 말한다). 실패·중단된
-    리비전의 폴더도 본다 — 분석 행의 상태와 무관하게 폴더의 문서로 찾는다(D59).
+    리비전의 폴더도 본다 — 분석 행의 상태와 무관하게 폴더의 문서로 찾는다(D59). 읽기 범위 안에서는
+    같은 인자에 한 번만 읽는다(폴더 훑기와 기록 풀기, W-24 세션 G) — 돌려준 값은 얼린 값이다.
     """
+    key = ("sync_report.stage1_audio", str(workspace_root), asset_id, source_sha256)
+    return read_scope.memo(key, lambda: _read_stage1_audio(workspace_root, asset_id, source_sha256))
+
+
+def _read_stage1_audio(
+    workspace_root: Path, asset_id: str, source_sha256: str
+) -> Stage1Audio | None:
     found: list[Stage1Audio] = []
     for folder in sorted(workspace_root.glob(f"analysis/*/*_{asset_id}")):
         try:
@@ -1101,7 +1109,17 @@ def origin_reasons(
 
 
 def gather_source(workspace: Any, asset: Any) -> SyncSource | None:
-    """원본 하나의 재료 — 원본 자막이 없으면 잴 것도 없다(None)."""
+    """원본 하나의 재료 — 원본 자막이 없으면 잴 것도 없다(None).
+
+    읽기 범위 안에서는 같은 원본 기록에 한 번만 모은다(W-24 세션 G) — 단추 하나가 정리 고리의
+    할 일 재기(`pending_sources`)와 등급의 시각 확인 판정(`current_report(strict)`)과 그리기에서
+    같은 재료를 세 번 모았다. 돌려준 값은 얼린 값이다.
+    """
+    key = ("sync_report.gather_source", str(workspace.root), asset)
+    return read_scope.memo(key, lambda: _read_gather_source(workspace, asset))
+
+
+def _read_gather_source(workspace: Any, asset: Any) -> SyncSource | None:
     from vlogsrt.project.raw.models import RawWorkspaceError
     from vlogsrt.project.raw.source_transcript import load
 

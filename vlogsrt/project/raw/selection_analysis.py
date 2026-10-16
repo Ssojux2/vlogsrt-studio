@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from decimal import Decimal
 from pathlib import Path
@@ -417,13 +417,12 @@ def save_state(service: Any, root: Path, state: dict[str, Any], *, selected: boo
         connection.commit()
 
 
-def _restored(service: Any, root: Path, payload: str) -> dict[str, Any]:
-    state = json.loads(payload)
+def _restored(root: Path, state: dict[str, Any], jobs: Mapping[str, Any]) -> dict[str, Any]:
     state.update(
         root=root, paths=tuple(state.get("paths", ())), asset_ids=tuple(state.get("asset_ids", ()))
     )
-    jobs = {j.job_id: j for j in service.list_jobs(root, limit=1000)}
-    job = jobs.get(state.get("job_id"))
+    job_id = state.get("job_id")
+    job = jobs.get(job_id) if isinstance(job_id, str) else None
     if state.get("stage") not in (
         "추천 구간 준비 완료",
         "부분 완료 · 확인 필요",
@@ -439,12 +438,24 @@ def _restored(service: Any, root: Path, payload: str) -> dict[str, Any]:
     return state
 
 
+def _restored_all(service: Any, root: Path, payloads: Sequence[str]) -> list[dict[str, Any]]:
+    """저장된 상태들 — 가리키는 작업은 아이디로 한 번에 찾는다(W-24 세션 G).
+
+    예전에는 상태마다 최근 작업 1000줄을 읽었다(실데이터: 상태 108개 ≈ 260 ms) — 그리고 작업이
+    1000개를 넘으면 창 밖의 끝난 작업을 못 찾아 끝난 상태를 「중단」으로 바꿔 불렀다.
+    """
+    states = [json.loads(payload) for payload in payloads]
+    wanted = {state["job_id"] for state in states if isinstance(state.get("job_id"), str)}
+    jobs = service.jobs_by_id(root, wanted) if wanted else {}
+    return [_restored(root, state, jobs) for state in states]
+
+
 def load_state(service: Any, root: Path) -> dict[str, Any]:
     with service._workspace(root).connect() as connection:
         row = connection.execute(
             "SELECT value FROM meta WHERE key='selection_analysis_state'"
         ).fetchone()
-    return _restored(service, root, row[0]) if row else {}
+    return _restored_all(service, root, (row[0],))[0] if row else {}
 
 
 def load_states(service: Any, root: Path) -> tuple[dict[str, Any], ...]:
@@ -452,7 +463,7 @@ def load_states(service: Any, root: Path) -> tuple[dict[str, Any], ...]:
         rows = connection.execute(
             "SELECT value FROM meta WHERE key LIKE 'selection_task:%' ORDER BY rowid"
         ).fetchall()
-    return tuple(_restored(service, root, row[0]) for row in rows)
+    return tuple(_restored_all(service, root, [row[0] for row in rows]))
 
 
 def completion(service: Any, root: Path, revision_id: str) -> str:

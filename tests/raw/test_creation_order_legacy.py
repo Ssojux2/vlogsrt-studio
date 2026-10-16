@@ -12,12 +12,14 @@
 
 from __future__ import annotations
 
+import shutil
 from collections.abc import Callable
 from pathlib import Path
 
 import pytest
 
 from tests.raw import test_creation_order as co
+from tests.raw.restore_reference import head_document, reference_restore
 from vlogsrt.project.raw import review_workspace as review_module
 from vlogsrt.project.raw.review_workspace import ReviewWorkspaceFacade
 from vlogsrt.project.raw.segment_review import (
@@ -72,6 +74,15 @@ def old_build_adopt(
         return facade.adopt_plan_review(plan, mapping, old_revision=head)
 
 
+def _restore_matches_the_old_walk(root: Path, copy: Path) -> None:
+    """같은 작업공간 두 벌 — 지금 복원과 옛 걸음(353c544)의 새 머리 문서가 바이트째 같다(W-24 G)."""
+    shutil.copytree(root, copy)
+    restored = ReviewWorkspaceFacade(root).restore_automatic()
+    reference = reference_restore(ReviewWorkspaceFacade(copy))
+    assert restored.sequence == reference.sequence
+    assert head_document(ReviewWorkspaceFacade(root)) == head_document(ReviewWorkspaceFacade(copy))
+
+
 def _memo_survives_a_publish(service, root, source_id: str) -> bool:
     revision = service.analysis_overview(root).revision.revision_id
     service.publish_selection_review(root, revision, _Context())
@@ -118,6 +129,7 @@ def test_a_human_memo_interleaved_into_an_old_replay_is_detected(
     assert one in facade.human_source_ids(adopted)
     assert not facade.is_untouched(adopted)
     assert _memo_survives_a_publish(service, root, one)
+    _restore_matches_the_old_walk(root, tmp_path / "copy")  # 확인 못 한 창 — 모두 사람 편집으로
 
 
 @needs_ffmpeg
@@ -136,7 +148,11 @@ def test_restore_after_an_old_adoption_brings_back_auto_exclusions(
         if s.source_id == two and s.selection == "excluded" and not s.notes.startswith("자동 제외")
     ]
     assert len(human_excluded) == 1
+    shutil.copytree(root, tmp_path / "copy")  # 옛 걸음(353c544)과 바이트 대조할 둘째 벌
     restored = facade.restore_automatic()
+    reference = reference_restore(ReviewWorkspaceFacade(tmp_path / "copy"))
+    assert head_document(facade) == head_document(ReviewWorkspaceFacade(tmp_path / "copy"))
+    assert restored.segments == reference.segments
     auto = [s for s in restored.segments if s.notes.startswith("자동 제외: ")]
     assert auto and all(s.selection == "included" for s in auto)
     assert all(AUTO_EXCLUDED_UNREVIEWED_TAG not in s.visual_tags for s in auto)

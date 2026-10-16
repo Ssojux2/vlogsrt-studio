@@ -1113,16 +1113,22 @@ __VL_SERVER_ACTIVITY__
 """
 
 
-def _model_attribute(model: Mapping[str, object]) -> str:
-    """작업대 상태를 뿌리 칸의 data 속성에 안전히 싣는다 — <script>는 쓰지 않는다.
+MODEL_HOLDER_ATTRIBUTE = "data-vl-model-json"
+"""작업대 상태 JSON을 싣는 칸의 표식 — 뿌리의 첫 자식이다(클라이언트 `VL.modelRaw`가 찾는다)."""
 
-    gradio 6은 값에 `<script`가 있으면 경고를 내고 실행도 안 된다(innerHTML).
-    대신 이스케이프된 JSON을 속성에 넣고 클라이언트가 `dataset`으로 읽는다.
-    `</` 계열도 속성 안에서는 무해하지만 이중 안전망으로 `<`를 유니코드 이스케이프해
-    둔다(문자열 값이 태그처럼 보이게 두지 않는다).
+
+def _model_holder(model: Mapping[str, object]) -> str:
+    """작업대 상태를 뿌리의 첫 자식(숨은 칸)의 글자로 싣는다 — <script>는 쓰지 않는다.
+
+    gradio 6은 값에 `<script`가 있으면 그릴 때마다 경고를 낸다(innerHTML이라 실행도 안 된다).
+    예전엔 JSON을 뿌리의 data 속성에 넣었다 — 따옴표마다 `&quot;`라 그린 값이 JSON의 1.76배였다
+    (합성 18개 253 KB, 실데이터 추정 0.8–1.2 MB). 이제 글자로 싣고 JSON 안에서만 `<`·`&`를 유니코드
+    이스케이프한다(W-24 세션 G) — HTML이 글자로 풀 것이 없어 `textContent`가 곧 JSON이고, 문자열
+    값이 태그나 문자 참조처럼 보이지 않는다. 둘은 JSON 문자열 안에만 나올 수 있어 값은 그대로다.
     """
     payload = json.dumps(model, ensure_ascii=False, separators=(",", ":"))
-    return html.escape(payload.replace("<", "\\u003c"), quote=True)
+    text = payload.replace("<", "\\u003c").replace("&", "\\u0026")
+    return f'<div class="vl-model-data" {MODEL_HOLDER_ATTRIBUTE} hidden>{text}</div>'
 
 
 TIER_LEGEND_HTML = (
@@ -1220,8 +1226,7 @@ def visual_workbench_html(
             f'<p class="vl-note">{html.escape(placeholder)}</p></div>'
         )
     return (
-        '<div id="visual-workbench" class="vl-workbench"'
-        f' data-vl-model="{_model_attribute(model)}"{flow_attrs}>\n'
+        f'<div id="visual-workbench" class="vl-workbench"{flow_attrs}>{_model_holder(model)}\n'
         '  <div id="vl-thumbs" class="vl-thumbs" role="listbox"'
         ' aria-label="영상 목록(촬영 시각 순)"></div>\n'
         '  <div id="vl-panel" class="vl-panel" aria-live="polite"></div>\n'
@@ -1280,8 +1285,7 @@ def caption_workbench_html(model: Mapping[str, object]) -> str:
             f'<p class="vl-note">{html.escape(placeholder)}</p></div>'
         )
     return (
-        '<div id="caption-workbench" class="vl-workbench"'
-        f' data-vl-model="{_model_attribute(model)}">\n'
+        f'<div id="caption-workbench" class="vl-workbench">{_model_holder(model)}\n'
         '  <div id="cap-cues" class="cap-cues" role="listbox"'
         ' aria-label="자막 큐 목록 — 행을 고르면 재생기가 그 큐로 이동한다"></div>\n'
         '  <div class="cap-editor">\n'
@@ -2194,6 +2198,19 @@ if (!VL) {
     var f = VL.toFloat(a);
     return f.toFixed(places === undefined ? 3 : places);
   };
+  // 작업대 모델 JSON(W-24 세션 G) — 뿌리의 첫 자식 [data-vl-model-json]의 글자다. 뿌리의
+  // data-vl-model 속성은 옛 모양이다(시험 하네스가 아직 쓴다) — 칸이 없으면 속성을 읽는다.
+  VL.modelHolder = function (root) {
+    var holder = root ? root.firstElementChild : null;
+    return holder && holder.hasAttribute && holder.hasAttribute("data-vl-model-json")
+      ? holder : null;
+  };
+  VL.modelRaw = function (root) {
+    if (!root || !root.getAttribute) { return null; }
+    var holder = VL.modelHolder(root);
+    if (holder) { return holder.textContent || null; }
+    return root.getAttribute("data-vl-model");
+  };
   window.__vlLib = VL;
 }
 """
@@ -2220,7 +2237,7 @@ def _workbench_state(component_id: str, state_key: str) -> str:
       function modelEpoch() {{
         var el = doc.getElementById("{component_id}");
         if (!el) {{ return null; }}
-        var raw = el.getAttribute("data-vl-model");
+        var raw = W.__vlLib.modelRaw(el);
         if (!raw) {{ return null; }}
         try {{ return JSON.parse(raw).epoch; }} catch (err) {{ return null; }}
       }}
@@ -2339,7 +2356,7 @@ VISUAL_BOOTSTRAP_JS = (
     + r"""
       var VL = W.__vlLib;
       if (!root || !root.getAttribute) { return; }
-      var rawModel = root.getAttribute("data-vl-model");
+      var rawModel = VL.modelRaw(root);
       if (!rawModel) { return; }
       var model;
       try { model = JSON.parse(rawModel); } catch (err) { return; }
@@ -4546,7 +4563,7 @@ VISUAL_BOOTSTRAP_JS = (
     var fresh = d.getElementById("visual-workbench");
     if (!fresh || !fresh.getAttribute) { return; }
     paintFlow(fresh);
-    var raw = fresh.getAttribute("data-vl-model");
+    var raw = W.__vlLib.modelRaw(fresh);
     if (!raw) {
       // 반복 통보는 무동작(같은 빈 세대 표식) — 관찰자 루프 없음.
       if (fresh.__vlVisualWiredModel === "__vlEmpty__") { return; }
@@ -4571,13 +4588,13 @@ VISUAL_BOOTSTRAP_JS = (
   var Observer = W.MutationObserver ||
     (typeof MutationObserver !== "undefined" ? MutationObserver : null);
   if (Observer && element && !element.__vlVisualObserver) {
-    // 그라디오는 포장 안쪽에서 morph하므로 subtree로 보고, 모델 속성도 본다 —
-    // 화면이 같아 보이는 새로고침(epoch만 바뀐 모델)은 자식 변화가 없을 수
-    // 있다. 배선은 하위 원소만 고치고 data-vl-model은 건드리지 않는다 — 루프
-    // 없음.
+    // 그라디오는 포장 안쪽에서 morph하므로 subtree로 보고, 모델 칸의 글자(characterData —
+    // morph는 같은 칸의 글자 마디만 고친다)와 옛 모델 속성도 본다 — 화면이 같아 보이는
+    // 새로고침(epoch만 바뀐 모델)은 자식 변화가 없을 수 있다. 배선은 하위 원소만 고치고
+    // 모델은 건드리지 않는다 — 루프 없음(같은 모델이면 wireCommitted가 무동작).
     element.__vlVisualObserver = new Observer(function () { wireCommitted(); });
     element.__vlVisualObserver.observe(element, { childList: true, subtree: true,
-      attributes: true, attributeFilter: ["data-vl-model"] });
+      characterData: true, attributes: true, attributeFilter: ["data-vl-model"] });
   }
   if (!W.__vlStageFitBound && typeof W.addEventListener === "function") {
     W.__vlStageFitBound = true;
@@ -4701,7 +4718,7 @@ CAPTION_BOOTSTRAP_JS = (
     + r"""
       var VL = W.__vlLib;
       if (!root || !root.getAttribute) { return; }
-      var rawModel = root.getAttribute("data-vl-model");
+      var rawModel = VL.modelRaw(root);
       if (!rawModel) { return; }
       var model;
       try { model = JSON.parse(rawModel); } catch (err) { return; }
@@ -4720,7 +4737,11 @@ CAPTION_BOOTSTRAP_JS = (
           typeof model.head === "number" && typeof state.model.head === "number" &&
           model.head < state.model.head) {
         var keepRaw = JSON.stringify(state.model);
-        try { root.setAttribute("data-vl-model", keepRaw); } catch (setErr) {
+        var keepHolder = VL.modelHolder(root);
+        try {
+          if (keepHolder) { keepHolder.textContent = keepRaw; }
+          else { root.setAttribute("data-vl-model", keepRaw); }
+        } catch (setErr) {
           // 읽기 전용 뿌리 — 표식만으로도 다음 배선이 지금 모델을 본다.
         }
         root.__vlCaptionWiredModel = keepRaw;
@@ -5028,7 +5049,7 @@ CAPTION_BOOTSTRAP_JS = (
     var d = W.__vlCaptionDoc || document;
     var fresh = d.getElementById("caption-workbench");
     if (!fresh || !fresh.getAttribute) { return; }
-    var raw = fresh.getAttribute("data-vl-model");
+    var raw = W.__vlLib.modelRaw(fresh);
     if (!raw) {
       // 반복 통보는 무동작(같은 빈 세대 표식) — 관찰자 루프 없음.
       if (fresh.__vlCaptionWiredModel === "__vlEmpty__") { return; }
@@ -5052,11 +5073,12 @@ CAPTION_BOOTSTRAP_JS = (
   var Observer = W.MutationObserver ||
     (typeof MutationObserver !== "undefined" ? MutationObserver : null);
   if (Observer && element && !element.__vlCaptionObserver) {
-    // 영상 작업대와 같은 관찰 — 포장 안쪽 morph(subtree)와 모델 속성(세대)을
-    // 함께 본다. 배선은 data-vl-model을 건드리지 않는다 — 루프 없음.
+    // 영상 작업대와 같은 관찰 — 포장 안쪽 morph(subtree)와 모델 칸의 글자·옛 모델 속성
+    // (세대)을 함께 본다. 배선은 모델을 건드리지 않는다 — 루프 없음(낡은 출력 방어가 칸을
+    // 지금 모델로 되돌려도 표식이 같아 wireCommitted가 무동작).
     element.__vlCaptionObserver = new Observer(function () { wireCommitted(); });
     element.__vlCaptionObserver.observe(element, { childList: true, subtree: true,
-      attributes: true, attributeFilter: ["data-vl-model"] });
+      characterData: true, attributes: true, attributeFilter: ["data-vl-model"] });
   }
   if (!W.__vlCaptionWatchBound) {
     W.__vlCaptionWatchBound = true;

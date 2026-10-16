@@ -103,6 +103,7 @@ from vlogsrt.project.raw.segment_review import (
     merge_edit,
     note_edit,
     override_edit,
+    parse_edit,
     parse_revision,
     reextract_segment_ids,
     selection_edit,
@@ -597,6 +598,13 @@ def _replay_key(edit_json: str | None) -> tuple[str, str, str] | None:
     if not isinstance(ids, list) or len(ids) != 1 or not isinstance(value, str):
         return None
     return str(kind), str(ids[0]), value
+
+
+def _window_edits(
+    lineage: Mapping[int, tuple[str | None, str | None]], end: int
+) -> tuple[str | None, ...]:
+    """순번 1..end의 편집 JSON을 순번 차례로 — `edit_documents`와 같은 값(빠진 순번은 짧아진다)."""
+    return tuple(lineage[sequence][1] for sequence in sorted(lineage) if 1 <= sequence <= end)
 
 
 def _replay_window_matches(edits: Sequence[str | None], legacy: _LegacyReplay) -> bool:
@@ -1213,27 +1221,7 @@ class ReviewWorkspaceFacade:
 
     def restore_automatic(self, base_plan_id: str | None = None) -> ReviewRevision:
         head = self.load_head(base_plan_id).revision
-        manually_selected: set[str] = set()
-        cursor = head
-        legacy = self._legacy_replay(head)
-        while cursor.parent_revision_id is not None:
-            if legacy is not None and 0 < cursor.sequence <= legacy.end:
-                if self._replay_matches(head.base_plan_id, legacy):
-                    break  # 확인한 옛 입양의 되풀이는 사람 선택이 아니다
-                legacy = None  # 확인 못 한 창 — 그 선택까지 사람 선택으로 셈해 제외를 남긴다
-            label = (cursor.edit.notes or "") if cursor.edit and cursor.edit.kind == "note" else ""
-            # 입양 표지 앞은 입양의 되풀이다 — 사람 선택은 `수동 선택 · ` 메모로 이미 실려 와 복원이
-            # 건너뛴다. 되풀이의 선택 편집까지 사람 선택으로 셈하면 복원이 아무것도 하지 않는다.
-            if label.startswith(ADOPTION_REPLAY_LABEL + " ← "):
-                break
-            if cursor.edit and cursor.edit.kind == "selection":
-                manually_selected.update(cursor.edit.segment_ids)
-            document, _ = self._store.revision_document(
-                self._project_id,
-                head.base_plan_id,
-                self._sequence_of_revision_id(cursor.parent_revision_id),
-            )
-            cursor = parse_revision(document)
+        manually_selected = self._manually_selected(head)
         segments = tuple(
             replace(s, selection="included", visual_tags=confirm_tags(s.visual_tags))
             if s.notes.startswith(_AUTO_NOTE_PREFIX) and s.segment_id not in manually_selected
@@ -1241,6 +1229,46 @@ class ReviewWorkspaceFacade:
             for s in head.segments
         )
         return self._publish_snapshot(head, segments, "자동 제외 전체 복원")
+
+    def _manually_selected(self, head: ReviewRevision) -> set[str]:
+        """사람이 사용/제외를 고른 조각 — 머리에서 사슬을 거꾸로 걷는다(복원이 건너뛸 조각).
+
+        사슬의 부모·편집은 한 질의로 읽는다(`revision_lineage`, W-24 세션 G) — 예전엔 걸음마다
+        연결을 열고 문서 전체를 풀었다. 답은 예전 걸음과 같다: 같은 행의 같은 칸이다.
+        """
+        lineage = self._store.revision_lineage(self._project_id, head.base_plan_id, head.sequence)
+        manually_selected: set[str] = set()
+        sequence, parent, edit = head.sequence, head.parent_revision_id, head.edit
+        legacy = self._legacy_replay(head)
+        while parent is not None:
+            if legacy is not None and 0 < sequence <= legacy.end:
+                if _replay_window_matches(_window_edits(lineage, legacy.end), legacy):
+                    break  # 확인한 옛 입양의 되풀이는 사람 선택이 아니다
+                legacy = None  # 확인 못 한 창 — 그 선택까지 사람 선택으로 셈해 제외를 남긴다
+            label = (edit.notes or "") if edit and edit.kind == "note" else ""
+            # 입양 표지 앞은 입양의 되풀이다 — 사람 선택은 `수동 선택 · ` 메모로 이미 실려 와 복원이
+            # 건너뛴다. 되풀이의 선택 편집까지 사람 선택으로 셈하면 복원이 아무것도 하지 않는다.
+            if label.startswith(ADOPTION_REPLAY_LABEL + " ← "):
+                break
+            if edit and edit.kind == "selection":
+                manually_selected.update(edit.segment_ids)
+            sequence = self._sequence_of_revision_id(parent)
+            parent, edit = self._lineage_step(lineage, head.base_plan_id, sequence)
+        return manually_selected
+
+    def _lineage_step(
+        self,
+        lineage: Mapping[int, tuple[str | None, str | None]],
+        base_plan_id: str,
+        sequence: int,
+    ) -> tuple[str | None, ReviewEdit | None]:
+        """한 리비전의 (부모, 편집) — 질의에 없으면 그 리비전을 읽는다(없으면 예전 오류)."""
+        if sequence not in lineage:
+            document, _ = self._store.revision_document(self._project_id, base_plan_id, sequence)
+            revision = parse_revision(document)
+            return revision.parent_revision_id, revision.edit
+        parent, edit_json = lineage[sequence]
+        return parent, None if edit_json is None else parse_edit(edit_json)
 
     def confirm_automatic_exclusions(self, base_plan_id: str | None = None) -> ReviewRevision:
         """미검토 자동 제외를 모두 확인한다 — 제외는 그대로 두고 표지만 거둔다(D35).

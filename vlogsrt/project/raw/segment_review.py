@@ -1123,6 +1123,18 @@ def _blank_segment() -> ReviewSegment:
     )
 
 
+def parse_edit(text: str) -> ReviewEdit:
+    """리비전 문서의 편집 칸 하나(JSON)를 편집으로 — 문서 전체를 풀지 않고 사슬을 걸을 때 쓴다.
+
+    검사는 `parse_revision`이 편집 칸에 하는 그대로다(모르는 칸·타입은 못 들어온다).
+    """
+    try:
+        document = json.loads(text)
+    except json.JSONDecodeError as error:
+        raise ReviewParseError(f"편집이 JSON이 아니다: {error}") from error
+    return _edit_from_document(document)
+
+
 def _edit_from_document(item: object) -> ReviewEdit:
     values = _require_dict(item, "edit")
     _require_keys(values, set(_edit_document(ReviewEdit("", "", ()))), "edit")

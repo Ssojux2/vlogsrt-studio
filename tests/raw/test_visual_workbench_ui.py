@@ -3,7 +3,7 @@
 세 층을 잰다(스펙: "presence-only/no-op 인라인 실행본 금지"):
 
 1. **순수 도우미** — 작업대 HTML은 이스케이프되고 `<script>`를 쓰지 않으며 모델
-   JSON은 data 속성에 안전히 실린다.
+   JSON은 뿌리의 숨은 첫 칸에 글자로 안전히 실린다(W-24 세션 G 이전엔 data 속성).
 2. **클라이언트 실행본(node)** — 부트스트랩을 실제로 실행해(문자열 포함 검사가
    아니다) 정수 유리수(`1001/30000`), 선택→시작점 탐색(썸네일 가운데 아님),
    시간 렠 클릭=탐색 전용, 반복, 늦은 응답 버림(epoch), 같은 원소 재선택 시
@@ -28,7 +28,6 @@
 
 from __future__ import annotations
 
-import html as html_module
 import json
 import re
 import shutil
@@ -85,10 +84,15 @@ def _wait_terminal(server: workspace_service.RawWorkspaceUi, root: Path, job_id:
     return server.raw.get_job(root, job_id)
 
 
+MODEL_HOLDER = re.compile(r'<div class="vl-model-data" data-vl-model-json hidden>([^<]*)</div>')
+"""작업대 모델 칸 — 뿌리의 첫 자식, 글자가 곧 JSON이다(W-24 세션 G 이전엔 뿌리의 data 속성)."""
+
+
 def _model_of(workbench_html: str) -> dict[str, Any]:
-    matched = re.search(r'data-vl-model="([^"]*)"', workbench_html)
+    matched = MODEL_HOLDER.search(workbench_html)
     assert matched is not None, "작업대 값에 모델이 없다"
-    return json.loads(html_module.unescape(matched.group(1)).replace("\\u003c", "<"))
+    assert "&" not in matched.group(1)  # HTML이 풀 문자 참조가 없다 — 글자가 곧 JSON이다
+    return json.loads(matched.group(1))
 
 
 def _new_server(tmp_path: Path, **kwargs: Any) -> workspace_service.RawWorkspaceUi:
@@ -142,7 +146,7 @@ def _prepare_review(server: workspace_service.RawWorkspaceUi, root: Path, tmp_pa
 
 
 def test_workbench_html_has_no_script_and_escapes_model() -> None:
-    """모델은 data 속성에, `<`·따옴표는 이스케이프되고 `<script>`는 아예 없다."""
+    """모델은 숨은 첫 칸의 글자에, `<`·`&`는 JSON 안에서 이스케이프되고 `<script>`는 아예 없다."""
     tricky = {
         "empty": None,
         "signature": 'sig"quote<angle>&amp',
@@ -151,11 +155,12 @@ def test_workbench_html_has_no_script_and_escapes_model() -> None:
     }
     value = ui_facade.visual_workbench_html(tricky)  # type: ignore[arg-type]
     assert "<script" not in value
-    assert 'data-vl-model="' in value
+    assert 'id="visual-workbench" class="vl-workbench"><div class="vl-model-data"' in value
+    assert "data-vl-model=" not in value  # 뿌리 속성(따옴표마다 &quot;)은 더 쓰지 않는다
     parsed = _model_of(value)
     assert parsed["signature"] == 'sig"quote<angle>&amp'
     assert parsed["cards"][0]["note"] == "메모<script>alert(1)</script>"
-    assert "\\u003c" in value  # 원문 `<`는 속성 안에 그대로 남지 않는다
+    assert "\\u003c" in value and "\\u0026" in value  # 원문 `<`·`&`는 칸 안에 그대로 남지 않는다
     # 자리 표시 — 안내 문장도 이스케이프된다.
     placeholder = ui_facade.visual_workbench_html({"empty": "계획이 <없다>"})
     assert "data-vl-empty" in placeholder and "계획이 &lt;없다&gt;" in placeholder
@@ -242,6 +247,7 @@ function el(spec) {
     set textContent(v) { this._text = String(v == null ? '' : v); this._children = []; },
     appendChild(child) { this._children.push(child); },
     setAttribute(k, v) { this.attrs[k] = String(v); },
+    hasAttribute(k) { return k in this.attrs; },
     getAttribute(k) {
       if (k in this.attrs) {
         return this.attrs[k].replace(/&quot;/g, '"').replace(/&amp;/g, '&');
@@ -2096,6 +2102,51 @@ checkpoints.push({ case: 'new-run-lower-head-accepted',
   headBound: windowScope.__vlCaptionWorkbenchState.model.head === 0,
   cuesFromNewRun: envRollback.cues.innerHTML.includes('새 실행 첫 큐') });
 
+// 모델 칸(W-24 세션 G) — 실제 그리기는 모델을 뿌리의 숨은 첫 칸 글자로 싣고, 그라디오 morph는
+// 그 칸의 글자 마디만 고친다(characterData). 칸이 있으면 속성이 아니라 칸을 읽는다.
+const envHolder = visualEnv({});
+const holderSerial = windowScope.__vlVisualWireSerial;
+const visualHolder = el({ attrs: { 'data-vl-model-json': '' } });
+envHolder.root.firstElementChild = visualHolder;
+envHolder.root.removeAttribute('data-vl-model');
+const holderModel = visualModel();
+holderModel.epoch = 'epoch-holder';
+visualHolder.textContent = JSON.stringify(holderModel);
+flushObservers(envHolder.block);
+checkpoints.push({ case: 'model-holder-rewires',
+  rewired: windowScope.__vlVisualWireSerial === holderSerial + 1,
+  epochFresh: windowScope.__vlVisualWorkbenchState.model.epoch === 'epoch-holder',
+  onceOnly: (() => {
+    flushObservers(envHolder.block);
+    return windowScope.__vlVisualWireSerial === holderSerial + 1;
+  })(),
+  textWatched: envHolder.block.__vlObservers[0].options.characterData === true &&
+    envHolder.block.__vlObservers[0].options.subtree === true });
+
+// 자막 모델 칸 — 같은 실행의 낮은 머리(낡은 출력)는 속성이 아니라 칸의 글자를 지금 모델로
+// 되돌린다. 새 배선 세대는 만들지 않는다.
+const capHolderEnv = captionEnv({});
+const captionHolder = el({ attrs: { 'data-vl-model-json': '' } });
+capHolderEnv.root.firstElementChild = captionHolder;
+capHolderEnv.root.removeAttribute('data-vl-model');
+const capHolderModel = captionModel();
+capHolderModel.epoch = 'cap-epoch-holder';
+capHolderModel.head = 4;
+captionHolder.textContent = JSON.stringify(capHolderModel);
+flushObservers(capHolderEnv.block);
+const capHolderSerial = windowScope.__vlCaptionWireSerial;
+const capHolderStale = captionModel();
+capHolderStale.epoch = 'cap-epoch-holder-stale';
+captionHolder.textContent = JSON.stringify(capHolderStale);
+flushObservers(capHolderEnv.block);
+checkpoints.push({ case: 'caption-model-holder',
+  wired: windowScope.__vlCaptionWorkbenchState.model.epoch === 'cap-epoch-holder',
+  headKept: windowScope.__vlCaptionWorkbenchState.model.head === 4,
+  holderRestored: JSON.parse(captionHolder.textContent).head === 4,
+  noAttribute: capHolderEnv.root.getAttribute('data-vl-model') === null,
+  noRewire: windowScope.__vlCaptionWireSerial === capHolderSerial,
+  textWatched: capHolderEnv.block.__vlObservers[0].options.characterData === true });
+
 process.stdout.write(JSON.stringify(checkpoints));
 })().catch((err) => { console.error(err); process.exit(1); });
 """
@@ -2322,6 +2373,10 @@ def test_client_bootstraps_execute_real_interactions(tmp_path: Path) -> None:
     holds("morph-attribute-only-rewires", "epochFresh")
     holds("morph-attribute-only-rewires", "onceOnly")
     holds("morph-attribute-only-rewires", "attrWatched")
+    for key in ("rewired", "epochFresh", "onceOnly", "textWatched"):
+        holds("model-holder-rewires", key)
+    for key in ("wired", "headKept", "holderRestored", "noAttribute", "noRewire", "textWatched"):
+        holds("caption-model-holder", key)
     holds("morph-caption-save-keeps-screen-life", "replyApplied")
     holds("morph-caption-save-keeps-screen-life", "wiredOnce")
     holds("morph-caption-save-keeps-screen-life", "cuesFromCommit")
@@ -3277,7 +3332,7 @@ def test_caption_confirm_gate_reports_open_items(tmp_path: Path) -> None:
         "details": [],
     }
     value = ui_facade.caption_workbench_html(model)  # type: ignore[arg-type]
-    assert 'id="cap-confirm"' in value and 'data-vl-model="' in value
+    assert 'id="cap-confirm"' in value and "data-vl-model-json" in value
     parsed = _model_of(value)
     assert parsed["canConfirm"] is False and parsed["blockReason"] == "열린 경고 1개"
 

@@ -391,6 +391,33 @@ class ReviewWorkspaceStore:
             ).fetchall()
         return tuple(None if row["edit_json"] is None else str(row["edit_json"]) for row in rows)
 
+    def revision_lineage(
+        self, project_id: str, base_plan_id: str, last_sequence: int
+    ) -> dict[int, tuple[str | None, str | None]]:
+        """순번 0..last 리비전의 (부모 리비전 ID, 편집 JSON) — 한 연결 한 질의로(W-24 세션 G).
+
+        「자동 제외 전체 복원」이 사슬을 거꾸로 걸을 때 쓴다 — 예전엔 리비전마다 연결을 열고 문서
+        전체(조각 수백 개)를 풀었다(실데이터 152개 ≈ 200 ms). 편집 JSON은 `edit_documents`와 같은
+        모양이다(`json_extract` 그대로). 빠진 순번은 사전에 없다 — 호출자가 안다.
+        """
+        with self._session() as connection:
+            rows = connection.execute(
+                "SELECT sequence,"
+                " json_extract(document_json, '$.parent_revision_id') AS parent_id,"
+                " json_extract(document_json, '$.edit') AS edit_json"
+                " FROM review_workspace_revisions"
+                " WHERE project_id = ? AND base_plan_id = ? AND sequence <= ?"
+                " ORDER BY sequence",
+                (project_id, base_plan_id, last_sequence),
+            ).fetchall()
+        return {
+            int(row["sequence"]): (
+                None if row["parent_id"] is None else str(row["parent_id"]),
+                None if row["edit_json"] is None else str(row["edit_json"]),
+            )
+            for row in rows
+        }
+
     # ── 내보내기 리비전 — 서버 소유 이름공간의 기록 ──────────────
 
     def insert_export_revision(

@@ -13,6 +13,7 @@ import functools
 import json
 import queue
 import re
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -29,6 +30,7 @@ from tests.raw.test_review_workspace import _ingest_card, _wait_terminal, _write
 from tests.raw.test_tier_review_gate import FIRST_FRAME, UTTERANCES
 from ui.workspace_service import RawWorkspaceUi
 from vlogsrt.project.raw import source_transcript, sync_report, workspace
+from vlogsrt.project.raw.jobs import JobStore
 from vlogsrt.project.raw.review_workspace import ReviewWorkspaceFacade
 from vlogsrt.project.raw.service import RawWorkspaceService
 
@@ -110,6 +112,82 @@ def settle(service: RawWorkspaceService, root: Path) -> None:
 
 SETTLE_SECONDS = 300.0
 
+INFLATED_JOBS = 700
+"""실데이터 작업공간의 작업 기록 수(약 700줄) — 작업 목록을 통째로 읽는 길이 드러나는 크기다."""
+INFLATED_STATES = 100
+"""실데이터의 선택 분석 상태 수(108개) — 상태마다 하는 읽기가 드러나는 크기다(W-24 세션 G)."""
+
+
+def inflate(
+    root: Path, *, jobs: int = INFLATED_JOBS, states: int = INFLATED_STATES
+) -> tuple[str, ...]:
+    """실데이터 크기로 부풀린다 — 끝난 옛 작업 `jobs`줄과 그 작업을 가리키는 선택 분석 상태.
+
+    작업은 지금 기록보다 앞선 시각의 끝난 줄이라 최근 창·활동 묶음에 들지 않는다. 상태는 영상
+    하나씩을 가리키는 「추천 구간 준비 완료」(분석 리비전 없음)라 영상을 골라도 다시 걸 일이 없다.
+    부풀린 작업 아이디를 돌려준다.
+    """
+    assets = [
+        row[0]
+        for row in _rows(
+            root, "SELECT asset_id FROM source_assets WHERE status = 'ready' ORDER BY ordinal"
+        )
+    ]
+    job_ids = tuple(f"job_x{index:06d}" for index in range(jobs))
+    connection = sqlite3.connect(root / workspace.DB_NAME, timeout=10.0)
+    try:
+        connection.executemany(
+            "INSERT INTO jobs (job_id, kind, input_fingerprint, status, progress_current,"
+            " progress_total, error, cancellation_requested, created_at, updated_at)"
+            " VALUES (?, ?, ?, 'succeeded', 1, 1, NULL, 0, ?, ?)",
+            [
+                (job_id, _INFLATED_KINDS[index % len(_INFLATED_KINDS)], job_id, *_stamps(index))
+                for index, job_id in enumerate(job_ids)
+            ],
+        )
+        connection.executemany(
+            "INSERT INTO meta (key, value) VALUES (?, ?)",
+            [
+                (
+                    f"selection_task:{index:032x}",
+                    json.dumps(
+                        {
+                            "token": f"{index:032x}",
+                            "paths": [],
+                            "asset_ids": [assets[index % len(assets)]],
+                            "stage": "추천 구간 준비 완료",
+                            "revision": None,
+                            "job_id": job_ids[index * 7 % len(job_ids)],
+                        },
+                        ensure_ascii=False,
+                    ),
+                )
+                for index in range(states)
+            ],
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    return job_ids
+
+
+def _stamps(index: int) -> tuple[str, str]:
+    """옛 작업의 만든·고친 시각 — 지금 기록보다 앞서고 아이디 차례대로다."""
+    stamp = f"2026-08-01T{index // 3600:02d}:{index // 60 % 60:02d}:{index % 60:02d}+00:00"
+    return stamp, stamp
+
+
+_INFLATED_KINDS = ("selection_analysis", "source_preview", "visual_prepare", "selection_review")
+
+
+def _rows(root: Path, sql: str) -> list[tuple[Any, ...]]:
+    connection = sqlite3.connect(root / workspace.DB_NAME, timeout=10.0)
+    try:
+        return connection.execute(sql).fetchall()
+    finally:
+        connection.close()
+
+
 _HEX_ID = re.compile(r"[0-9a-f]{16,64}")
 
 
@@ -136,19 +214,25 @@ COUNTED_FUNCTIONS: tuple[tuple[str, Callable[..., Any]], ...] = (
     ("open_db", workspace.open_db),
     ("source_transcript.load", source_transcript._read_latest),
     ("source_transcript.load", source_transcript._read_latest_payloads),
-    ("sync_report.gather_source", sync_report.gather_source),
+    ("sync_report.gather_source", sync_report._read_gather_source),
+    ("sync_report.stage1_audio", sync_report._read_stage1_audio),
 )
 """모듈 함수 — 이름으로 가져간 모듈(`from … import open_db`)까지 같은 함수를 갈아 끼운다.
 
 세는 것은 **실제 읽기**다(W-23 세션 B): 원본 자막·검토 머리·분석 개요는 공개 함수가 읽기
 범위(`read_scope`)에 기억한 답을 돌려줄 수 있어, 그 아래 실제로 DB를 읽는 함수를 센다. 범위가
 없으면 둘은 한 번씩 짝지어 불리므로 세션 A의 수(1fc3b44)와 그대로 견줄 수 있다. 원본 자막은 한
-원본 읽기와 범위 안의 「지금 리비전 전부」 읽기를 같은 이름으로 센다."""
+원본 읽기와 범위 안의 「지금 리비전 전부」 읽기를 같은 이름으로 센다. 시각 확인 재료
+(`gather_source`)와 1단계 기록(`stage1_audio`)도 범위에 기억되므로(W-24 세션 G) 그 아래 실제로
+모으는 함수를 센다."""
 
 COUNTED_METHODS: tuple[tuple[str, type, str], ...] = (
     ("ReviewWorkspaceFacade()", ReviewWorkspaceFacade, "__init__"),
     ("load_head", ReviewWorkspaceFacade, "_read_head"),
     ("analysis_overview", RawWorkspaceService, "_read_analysis_overview"),
+    ("jobs.list", JobStore, "_read_jobs"),
+    ("jobs.by_ids", JobStore, "_read_by_ids"),
+    ("analysis_usage_summary", RawWorkspaceService, "analysis_usage_summary"),
     ("visual_workbench_render", RawWorkspaceUi, "visual_workbench_render"),
     ("start_upkeep", RawWorkspaceService, "start_upkeep"),
     ("start_sync_upkeep", RawWorkspaceService, "start_sync_upkeep"),
@@ -202,11 +286,15 @@ class TickTab:
 
 
 class SteppedJob:
-    """진행 수만 바꾸는 작업 하나 — 부르는 쪽이 한 걸음씩 민다(잠자기 없음)."""
+    """진행 수만 바꾸는 작업 하나 — 부르는 쪽이 한 걸음씩 민다(잠자기 없음).
+
+    종류는 작업대에 진행이 보이지 않는 것이 기본이다. 썸네일·미리보기를 만드는 종류(`kind`)는
+    진행 한 걸음이 작업대의 썸네일 하나다(W-24 세션 G).
+    """
 
     KIND = "render_cost_progress"
 
-    def __init__(self, service: RawWorkspaceService, root: Path) -> None:
+    def __init__(self, service: RawWorkspaceService, root: Path, kind: str = KIND) -> None:
         self._service, self._root = service, root
         self._steps: queue.Queue[int | None] = queue.Queue()
         self._acks: queue.Queue[int] = queue.Queue()
@@ -217,7 +305,7 @@ class SteppedJob:
                 context.set_progress(value)
                 self._acks.put(value)
 
-        self.job_id = service.submit_job(root, self.KIND, uuid.uuid4().hex, body).job_id
+        self.job_id = service.submit_job(root, kind, uuid.uuid4().hex, body).job_id
 
     def step(self, value: int) -> None:
         """진행을 `value`로 — 작업이 DB에 적을 때까지 기다린다."""
