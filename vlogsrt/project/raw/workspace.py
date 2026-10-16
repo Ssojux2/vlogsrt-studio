@@ -9,13 +9,16 @@ DB가 자산·작업 상태의 정본이고, 내부 경로는 **작업공간 루
 
 from __future__ import annotations
 
+import atexit
 import hashlib
 import json
 import os
 import secrets
 import sqlite3
 import stat as stat_module
+import threading
 import tomllib
+from collections import OrderedDict
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import asdict
@@ -24,6 +27,7 @@ from pathlib import Path
 
 import tomli_w
 
+from vlogsrt import log
 from vlogsrt.project.raw import segmentation
 from vlogsrt.project.raw.config import (
     WORKFLOW_SCHEMA_VERSION,
@@ -104,6 +108,83 @@ def open_db(path: Path) -> sqlite3.Connection:
         connection.close()
         raise
     return connection
+
+
+def enable_wal(connection: sqlite3.Connection) -> None:
+    """작업공간 DB를 WAL 모드로 — 파일에 남는 설정이라 만들 때·열 때 한 번이면 된다(D63).
+
+    롤백 저널에서는 분석 작업이 쓰는 동안 화면의 읽기가 `busy_timeout`만큼 기다렸다. WAL에서는
+    읽기와 쓰기가 서로 막지 않는다. 다른 연결이 쥐고 있어 바꾸지 못하면 경고만 남기고 지금 모드로
+    계속한다 — 바꾸지 못해도 정합성은 그대로다(다음 열기가 다시 시도한다).
+
+    옆 파일(`-wal`·`-shm`)도 DB 정본이다 — 아직 체크포인트되지 않은 커밋이 `-wal`에 산다. DB를
+    베끼려면 `sqlite3.Connection.backup`을 쓰거나 모든 연결을 닫은 뒤(마지막 연결이 체크포인트하고
+    옆 파일을 지운다) 베낀다. 캐시 정리는 옆 파일을 보호한다(`cache_policy`).
+    """
+    try:
+        row = connection.execute("PRAGMA journal_mode = WAL").fetchone()
+    except sqlite3.OperationalError as error:
+        log.warn(f"작업공간 DB를 WAL로 바꾸지 못했다 — 지금 모드로 계속한다: {error}")
+        return
+    if row is None or str(row[0]).lower() != "wal":
+        log.warn(f"작업공간 DB가 WAL을 받지 않았다 — 지금 모드 {row[0] if row else None!r}")
+
+
+WAL_ANCHOR_LIMIT = 8
+"""WAL 색인을 붙잡아 둘 작업공간 DB 수 — 오래 안 연 것부터 닫는다(D63). 앱은 작업공간 하나를 쓴다.
+
+시험 한 벌은 작업공간 수천 개를 만들므로 상한이 fd(닻 하나에 DB·`-wal`·`-shm` 셋)를 묶는다."""
+
+_wal_anchors: OrderedDict[Path, sqlite3.Connection] = OrderedDict()
+_wal_anchor_lock = threading.Lock()
+
+
+def anchor_wal(path: Path) -> None:
+    """이 DB에 아무것도 하지 않는 연결 하나를 열어 둔다 — WAL 색인이 프로세스에 남게(D63).
+
+    WAL에서는 마지막 연결이 닫힐 때 체크포인트하고 `-wal`·`-shm`을 지운다. 연결마다 짧게 여닫는
+    이 저장소에서는 그래서 열기마다 색인을 새로 만들었다(실측 열기 하나 0.07 → 0.4ms, 그리기 한
+    번에 열기 1600번 — 그리기가 3배 느려졌다). 닻은 트랜잭션을 쥐지 않는다 — 문장을 끝까지 읽고
+    놓으므로 체크포인트를 막지 않는다.
+    """
+    key = path.expanduser().resolve()
+    with _wal_anchor_lock:
+        if key in _wal_anchors:
+            _wal_anchors.move_to_end(key)
+            return
+    anchor = sqlite3.connect(key, timeout=10.0, check_same_thread=False)
+    try:
+        anchor.execute("SELECT count(*) FROM sqlite_master").fetchall()
+    except BaseException:
+        anchor.close()
+        raise
+    with _wal_anchor_lock:
+        stale = [anchor] if key in _wal_anchors else []
+        if not stale:
+            _wal_anchors[key] = anchor
+        while len(_wal_anchors) > WAL_ANCHOR_LIMIT:
+            stale.append(_wal_anchors.popitem(last=False)[1])
+    for connection in stale:
+        connection.close()
+
+
+def release_wal_anchors() -> None:
+    """닻을 모두 닫는다 — 마지막 연결이면 SQLite가 체크포인트하고 옆 파일을 지운다."""
+    with _wal_anchor_lock:
+        anchors = list(_wal_anchors.values())
+        _wal_anchors.clear()
+    for connection in anchors:
+        connection.close()
+
+
+atexit.register(release_wal_anchors)
+
+
+def _schema_version(connection: sqlite3.Connection) -> str:
+    row = connection.execute("SELECT value FROM meta WHERE key = 'db_schema_version'").fetchone()
+    if row is None:
+        raise WorkspaceVersionError("DB에 schema 버전이 없다")
+    return str(row[0])
 
 
 @contextmanager
@@ -564,6 +645,7 @@ class RawWorkspace:
         _write_project_toml(root, name.strip(), created_at)
         workspace = cls(root, name.strip(), created_at)
         with workspace.connect() as connection:
+            enable_wal(connection)  # 저널 모드는 트랜잭션 밖에서만 바뀐다 — 스키마보다 먼저
             connection.executescript(_SCHEMA_SQL)  # executescript는 먼저 commit한다
             _apply_ingest_schema(connection)
             connection.execute(
@@ -584,6 +666,7 @@ class RawWorkspace:
                 (raw_workflow_config_to_json(RawWorkflowConfig()), created_at),
             )
             connection.commit()
+        anchor_wal(root / DB_NAME)
         return workspace
 
     @classmethod
@@ -598,19 +681,25 @@ class RawWorkspace:
             raise WorkspaceNotFoundError(f"v2 작업공간이 아니다: {root}")
         identity = cls._read_identity(root)
         workspace = cls(root, identity["name"], identity["created_at"])
-        version = workspace.db_schema_version()
-        if version in (
+        older = (
             DB_SCHEMA_VERSION_V1,
             DB_SCHEMA_VERSION_V2,
             DB_SCHEMA_VERSION_V3,
             DB_SCHEMA_VERSION_V4,
             DB_SCHEMA_VERSION_V5,
-        ):
+        )
+        with workspace.connect() as connection:
+            version = _schema_version(connection)
+            if version != DB_SCHEMA_VERSION and version not in older:
+                raise WorkspaceVersionError(
+                    f"DB schema가 다르다: {version} (이 프로그램은 {DB_SCHEMA_VERSION})"
+                )
+            # 받아들인 DB만 — D63 이전 작업공간도 여기서 한 번 바뀐다(파일에 남는다). 버전 읽기와
+            # 같은 연결이라 열기마다 연결을 하나 더 쓰지 않는다. 모르는 버전은 건드리지 않는다.
+            enable_wal(connection)
+        anchor_wal(root / DB_NAME)
+        if version in older:
             workspace._upgrade_ingest_tables()
-        elif version != DB_SCHEMA_VERSION:
-            raise WorkspaceVersionError(
-                f"DB schema가 다르다: {version} (이 프로그램은 {DB_SCHEMA_VERSION})"
-            )
         return workspace
 
     def _upgrade_ingest_tables(self) -> None:
@@ -653,12 +742,7 @@ class RawWorkspace:
 
     def db_schema_version(self) -> str:
         with self.connect() as connection:
-            row = connection.execute(
-                "SELECT value FROM meta WHERE key = 'db_schema_version'"
-            ).fetchone()
-        if row is None:
-            raise WorkspaceVersionError("DB에 schema 버전이 없다")
-        return str(row[0])
+            return _schema_version(connection)
 
     def workspace_id(self) -> str:
         """이 작업공간의 불변 신원 — 화면의 선택 검증이 이 토큰을 믿는다.

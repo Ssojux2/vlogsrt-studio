@@ -1230,6 +1230,27 @@ class RawWorkspaceService:
             if row.asset_id in asset_ids
         )
 
+    def analysis_tier_stamp(
+        self, root: Path, revision_id: str | None, asset_ids: tuple[str, ...]
+    ) -> tuple[tuple[str, tuple[int, int] | None, tuple[int, int] | None], ...]:
+        """원본마다 (아이디, 진행 문서, 완성 문서)의 (mtime_ns, 크기) — 등급 구간의 재료(D63).
+
+        영상 분석이 도는 동안 창 판정은 `suitability_progress.json`에 쌓이고, 작업대는 그 문서로
+        등급 구간을 그린다(`_tier_report_for_row`). 화면 타이머는 이 도장이 바뀔 때만 다시 그린다 —
+        문서를 열지 않고 stat만 한다. 없는 문서는 None.
+        """
+        if not revision_id:
+            return ()
+        workspace = self._workspace(root)
+        stamps = []
+        for row in AnalysisStore(workspace).list_source_results(revision_id):
+            if row.asset_id not in asset_ids:
+                continue
+            directory, document = _tier_paths(workspace.root, row)
+            progress = directory / "suitability_progress.json"
+            stamps.append((row.asset_id, _file_stamp(progress), _file_stamp(document)))
+        return tuple(stamps)
+
     def source_repeat_candidates(self, root: Path, asset_id: str) -> list[dict]:
         from vlogsrt.project.raw.source_transcript import cross_source_candidates
 
@@ -5061,6 +5082,15 @@ def _tier_paths(workspace_root: Path, row: AnalysisSourceResult) -> tuple[Path, 
         else directory / ANALYSIS_DOCUMENT_NAME
     )
     return directory, document
+
+
+def _file_stamp(path: Path) -> tuple[int, int] | None:
+    """파일의 (mtime_ns, 크기) — 없으면 None(아직 쓰지 않은 문서는 정상 상태다)."""
+    try:
+        status = path.stat()
+    except FileNotFoundError:
+        return None
+    return status.st_mtime_ns, status.st_size
 
 
 def _record_audio_start(workspace_root: Path, row: AnalysisSourceResult) -> Fraction:

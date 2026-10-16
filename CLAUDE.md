@@ -42,6 +42,7 @@
 추천 범위에도 「추천」 키워드 범위를 하나씩 더 단다, D60 20b-final)로 Final Cut에 보낸다(D56).
 긴 로컬 단계(분석 프록시·미리보기·썸네일)는 「기록」 판의 「지금 도는 작업」·「서버 로그」로 보인다 — 읽기 전용
 `/vl-activity`, 등록표는 `preprocess.run_process` 한 자리, ffmpeg `-progress`는 서버만 켠다(D61).
+작업공간 DB는 WAL이다(만들기·열기가 바꾸고 닻 연결 하나를 쥔다 — DB를 베끼려면 `-wal`까지, D63). 타이머 틱은 작업 `(job_id, status)`가 바뀐 틱에서만 정리 고리를 돈다 — 진행 수만 바뀐 틱은 그리기만 한다(D63).
 **Final Cut 플러그인(Workflow Extension)은 2026-10-02 사용자 지시로 제거됐다 — 되살리지
 마라.** 계획 정본은 `docs/plans/2026-10-02-raw-video-browser-v2.md` + D44·D45, 보드는
 `TASKS.md`의 W 시리즈. 작업대의 3단 등급(추천·보통·제외 제안)은 순수 계층

@@ -50,8 +50,15 @@ PROTECTED_DIR_NAMES: tuple[str, ...] = (
 )
 """보호 디렉터리 이름 — cache 안에 있어도(잘못 붙은 이름) 지우지 않는다."""
 
-PROTECTED_FILE_NAMES: tuple[str, ...] = ("project.toml", "project.sqlite3")
-"""보호 파일 이름 — 작업공간의 설정·DB 정본이다."""
+PROTECTED_FILE_NAMES: tuple[str, ...] = (
+    "project.toml",
+    "project.sqlite3",
+    "project.sqlite3-wal",
+    "project.sqlite3-shm",
+    "project.sqlite3-journal",
+)
+"""보호 파일 이름 — 작업공간의 설정·DB 정본이다. WAL(D63)의 옆 파일도 정본의 일부다 — 아직
+체크포인트되지 않은 커밋이 `-wal`에 산다."""
 
 CONFIRMED_NAME_PREFIX = "confirmed_"
 """확정 내보내기 이름 — `clips/confirmed_*`는 물론 어디에 있어도 보호한다."""

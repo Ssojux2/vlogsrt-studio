@@ -141,7 +141,7 @@ def test_lightweight_status_does_not_wait_for_workbench_render(tmp_path, monkeyp
     count = [1]
     monkeypatch.setattr(ui, "_quick_status", lambda: f"프레임 {count[0]}/40")
 
-    def slow_render(root, message):
+    def slow_render(root, message, **_upkeep):  # 틱은 `upkeep=`를 넘긴다(D63)
         entered.set()
         assert release.wait(5)
         return message, "shell", "workbench"

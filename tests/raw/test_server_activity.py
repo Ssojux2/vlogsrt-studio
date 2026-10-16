@@ -92,9 +92,15 @@ def _activity(**fields: object) -> preprocess.ProcessActivity:
 
 
 def _workspace_bytes(root: Path) -> dict[str, str]:
+    """DB 내용의 바이트 — DB 파일과 WAL 쓰기 기록(`-wal`).
+
+    `-shm`은 WAL 색인(공유 메모리)이라 **읽기도** 읽기 표지를 적는다(D63) — 내용이 아니다.
+    쓰기는 반드시 `-wal`(또는 체크포인트된 DB)에 남으므로 그 둘로 「읽기만 한다」를 잰다.
+    """
     return {
         path.name: hashlib.sha256(path.read_bytes()).hexdigest()
         for path in sorted(root.glob("project.sqlite3*"))
+        if not path.name.endswith("-shm")
     }
 
 

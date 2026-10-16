@@ -61,7 +61,9 @@ LIBRARY_APPROVAL_JOB_KIND = "library_approval"
 """라이브러리 일괄 승인 작업 — 승인한 견적의 digest에 묶여 같은 승인이 두 번 돌지 않는다."""
 
 # 분석이 실제로 돌고 있다고 보는 단계 — 이 동안 일괄 승인 버튼은 다시 누를 수 없다.
-ACTIVE_ANALYSIS_STAGES = ("분석 대기", "분석 시작", "전사·장면 준비", "Luna 추천 구간 분석")
+SEMANTIC_STAGE = "Luna 추천 구간 분석"
+"""영상 분석(2단계)이 도는 단계 — 창 판정이 진행 문서에 쌓여 등급 구간이 자란다(D63)."""
+ACTIVE_ANALYSIS_STAGES = ("분석 대기", "분석 시작", "전사·장면 준비", SEMANTIC_STAGE)
 # 영상 클릭이 다시 시작하지 않고 그대로 이어 붙는 단계 — 준비 중인 작업을 두 번 띄우지 않는다.
 # 승인된 실행은 이것이 아니라 ACTIVE_ANALYSIS_STAGES만 보고, 미승인 준비는 대신한다.
 BUSY_QUICK_STAGES = ("영상 준비", *ACTIVE_ANALYSIS_STAGES)
@@ -1260,6 +1262,8 @@ class RawWorkspaceUi:
         self._project_names: dict[Path, str] = {}  # 머리줄 이름 캐시(`_project_name`)
         self._capcut_quote_phase: dict[str, str] = {}
         self._capcut_render_key: tuple | None = None
+        # 타이머가 마지막으로 정리 고리를 돌린 작업 상태 — 진행만 바뀐 틱은 고리를 돌지 않는다(D63).
+        self._capcut_upkeep_key: tuple | None = None
         # 자막 작업대의 확정 조건 표시 — 검토 상태를 다시 읽을 때마다 갱신한다.
         self._caption_warnings_open: int = 0
         self._caption_unplaced_open: int = 0
@@ -1910,21 +1914,30 @@ class RawWorkspaceUi:
 
     # ── 화면 2 — 분석 · 조각 검토 ──────────────────────────────
 
-    def _capcut_result(self, root: Path, message: str) -> tuple[str, str, str]:
+    def _capcut_result(
+        self, root: Path, message: str, *, upkeep: bool = True
+    ) -> tuple[str, str, str]:
         """명령 답 + 다시 그린 작업대 — 답에는 제외 제안 수를 싣지 않는다(D57 C 고침 3).
 
         미검토 수는 정보일 뿐 보내기를 막지 않는다(D56). 그 수와 「켠 채 … 키워드」 안내는 그릴
         때마다 다시 세는 대기열(`model.queue`)이 싣는다. 답에 실은 수는 그 순간의 값이라, 활동 칸·
         상태 줄 각주에 남아 확인·실행 취소 뒤의 대기열과 어긋났다.
+
+        `upkeep=False`는 타이머가 진행만 바뀐 틱에서 정리 고리 둘을 건너뛸 때다(D63) — 고리의 재료
+        (원본·순서·분석 결과·검토 머리·자막·시각 확인 보고서)는 작업이 끝나거나 사람이 누를 때만
+        바뀐다. 단추·열기·새로고침은 늘 돈다.
         """
-        upkeep = self._maybe_upkeep(root)
         if upkeep:
-            message += "\n\n" + upkeep
-        sync_note = self._maybe_sync_upkeep(root)
-        if sync_note:
-            message += "\n\n" + sync_note
+            message = self._with_upkeep_notes(root, message)
         self._refresh_review_panel_state(root)
         return message, *self.visual_workbench_render(root)
+
+    def _with_upkeep_notes(self, root: Path, message: str) -> str:
+        """정리 고리 둘을 돌리고 그 안내를 답 뒤에 붙인다."""
+        for note in (self._maybe_upkeep(root), self._maybe_sync_upkeep(root)):
+            if note:
+                message += "\n\n" + note
+        return message
 
     def _maybe_upkeep(self, root: Path) -> str | None:
         """앱 열기·새로고침의 정리 고리 하나(D52·D53) — 촬영 시각 순서와 등급판을 맞춘다.
@@ -3287,26 +3300,56 @@ class RawWorkspaceUi:
             (asset_id, (self.raw.source_transcript(root, asset_id) or {}).get("revision"))
             for asset_id in self._quick.get("asset_ids", ())
         )
+        job_states = self._job_states(root, jobs)
         key = (
             signature,
             transcript_revisions,
             tuple((j.job_id, j.status, j.progress_current) for j in jobs),
+            job_states,
             self._quick.get("stage"),
             self._quick.get("revision"),
+            self._semantic_stamps(root),
         )
-        if key == self._capcut_render_key and self._quick.get("stage") != "Luna 추천 구간 분석":
-            return (
-                self._quick_status() if self._quick else self._capcut_progress(root),
-                gr.skip(),
-                gr.skip(),
-            )
+        status = self._quick_status() if self._quick else self._capcut_progress(root)
+        if key == self._capcut_render_key:
+            return status, gr.skip(), gr.skip()
         self._capcut_render_key = key
-        message, _shell, workbench = self._capcut_result(
-            root, self._quick_status() if self._quick else self._capcut_progress(root)
-        )
+        upkeep = (signature, job_states) != self._capcut_upkeep_key
+        self._capcut_upkeep_key = (signature, job_states)
+        message, _shell, workbench = self._capcut_result(root, status, upkeep=upkeep)
         if view_token != self._visual_lifetime_token or root != self._snapshot_root():
             return gr.skip(), gr.skip(), gr.skip()
         return message, gr.skip(), workbench
+
+    def _job_states(self, root: Path, recent: Sequence[Any]) -> frozenset[tuple[str, str]]:
+        """작업 (아이디, 상태)의 묶음 — 최근 작업과 활동 중인 작업 전부(D63).
+
+        정리 고리의 재료는 작업 본문이 쓰고, 본문이 끝나야 상태가 바뀐다 — 그래서 상태가 바뀐
+        틱만 고리를 돌린다. 진행 수는 넣지 않는다. 최근 창(8개) 밖으로 밀린 오래된 작업도 끝나면
+        활동 묶음에서 빠지므로 놓치지 않는다.
+        """
+        active = self.raw.all_active_jobs(root)
+        return frozenset((job.job_id, job.status) for job in (*recent, *active))
+
+    def _semantic_stamps(self, root: Path) -> tuple:
+        """영상 분석 중인 작업마다 등급 문서 도장 — 창 판정이 쌓이면 작업대를 다시 그린다(D63).
+
+        예전에는 이 단계 내내 틱마다(2초) 정리 고리째 다시 그렸다. 이제 진행 문서가 바뀐 틱만
+        그린다 — 분석 중이 아니면 빈 값이라 파일을 보지 않는다.
+        """
+        with self._selection_lock:
+            tasks = [self._quick, *self._quick_tasks.values()]
+        running = {
+            (str(task["revision"]), tuple(task.get("asset_ids", ())))
+            for task in tasks
+            if task.get("root") == root
+            and task.get("stage") == SEMANTIC_STAGE
+            and task.get("revision")
+        }
+        return tuple(
+            (revision, self.raw.analysis_tier_stamp(root, revision, ids))
+            for revision, ids in sorted(running)
+        )
 
     def capcut_edit_view(self, signature: str | None, action: str) -> tuple[str, str, str]:
         """실행 취소 · 「자동 제외 전체 복원」 — 되돌릴 것이 없으면 막힌 동작으로 알린다."""
