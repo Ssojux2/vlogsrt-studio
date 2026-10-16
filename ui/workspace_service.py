@@ -2803,8 +2803,9 @@ class RawWorkspaceUi:
         # 견적의 측정값(영상마다 ffprobe)은 network_mode에 의존하지 않는다 — 전체를 다시
         # 재지 않고 방금 잰 측정값에 지금의 결속 지문·설정만 다시 묶는다. 영상별 견적을
         # 먼저 묶고 전체를 나중에 묶어야, 영상별 견적이 본 결속이 승인한 것과 같다는
-        # 것이 확인된다. 그 뒤의 변화는 실행 문(`selection_analysis.execute`)이 유료 호출
-        # 전에 영상마다 다시 재어 이 digest와 맞추므로 문이 약해지지 않는다.
+        # 것이 확인된다. 그 뒤의 변화 중 크기·mtime·inode가 바뀐 것은 실행 문
+        # (`selection_analysis.execute`)의 다시 재기가, 내용만 바뀐 것은 유료 호출 전
+        # 승인 만들기(`mint_asr_approvals`)의 완전 해시가 영상마다 막는다(D62 A2).
         children = [
             replace(self.raw.selection_rebound_quote(root, fresh, (source_id,)), approved=True)
             for source_id in ids

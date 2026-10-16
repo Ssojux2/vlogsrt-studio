@@ -29,6 +29,7 @@ from vlogsrt.project.raw import (
     analysis_workflow,
     segmentation,
     selection_analysis,
+    source_verify,
     tiering,
     visual_review,
 )
@@ -3205,19 +3206,23 @@ class RawWorkspaceService:
         root: Path,
         asset_ids: Sequence[str] | None = None,
         settings: RawUnderstandingSettings | None = None,
+        *,
+        trust_stat: bool = False,
     ) -> tuple[AnalysisEstimate, ...]:
         """선택 원본의 분석 견적 — 로컬 조사만, 실제 호출은 전혀 없다(§14.3).
 
         창·프레임·청크 수는 측정된 시계에서 잰 값이고(이미지 수는 상한),
         Luna 단가는 미확인이라 금액을 만들지 않는다(Claude는 공식 단가의 보수적
         상한, D54). 실제 호출은 이 견적을 본 사람의 승인 뒤에만 시작한다.
+        `trust_stat`은 원본 재검증의 stat 믿기다(D62 A2) — 승인 견적만 켠다. 1단계 승인을
+        만드는 `mint_asr_approvals`와 실행 문(`start_analysis`)은 끈 채 완전 해시한다.
         """
         workspace = self._workspace(root)
         order = self._order_revision(root, None)
         understanding = settings or RawUnderstandingSettings()
         validate_understanding_settings(understanding)
         workflow = self.settings(root)
-        selected = self._analysis_selection(root, order, asset_ids)
+        selected = self._analysis_selection(root, order, asset_ids, trust_stat=trust_stat)
         width = Fraction(str(understanding.window_seconds))
         estimates: list[AnalysisEstimate] = []
         for entry in sorted(order.entries, key=lambda item: item.ordinal):
@@ -4225,7 +4230,12 @@ class RawWorkspaceService:
     # ── A4 내부 — 선택·지문·공급자·구간 조립 ────────────────────
 
     def _analysis_selection(
-        self, root: Path, order: GlobalOrderRevision, asset_ids: Sequence[str] | None
+        self,
+        root: Path,
+        order: GlobalOrderRevision,
+        asset_ids: Sequence[str] | None,
+        *,
+        trust_stat: bool = False,
     ) -> dict[str, SourceAsset]:
         """분석 선택 원본 — 전체이거나 순서 리비전 안의 명시적 부분집합이다."""
         workspace = self._workspace(root)
@@ -4243,7 +4253,10 @@ class RawWorkspaceService:
             if not given:
                 raise AnalysisError("선택한 원본이 비었다 — 전체 또는 한 개 이상을 고르세요")
             chosen = sorted(set(given))
-        return {asset_id: _verified_asset(workspace, asset_id) for asset_id in chosen}
+        return {
+            asset_id: _verified_asset(workspace, asset_id, trust_stat=trust_stat)
+            for asset_id in chosen
+        }
 
     def _analysis_providers(
         self,
@@ -5102,11 +5115,15 @@ def _record_audio_start(workspace_root: Path, row: AnalysisSourceResult) -> Frac
     return _json_fraction(start) if start else Fraction(0)
 
 
-def _verified_asset(workspace: RawWorkspace, asset_id: str) -> SourceAsset:
+def _verified_asset(
+    workspace: RawWorkspace, asset_id: str, *, trust_stat: bool = False
+) -> SourceAsset:
     """ready 원본의 재검증 — 크기·SHA-256을 지금 다시 읽어 계획의 밑천을 확인한다.
 
     검증 이력(`content_sha256`)이 없는 원본은 계획 재료가 되지 못한다 — 상태표가
     아니라 내용으로 판단한다(§5.3의 완료 정의를 계획에도 그대로 적용한다).
+    `trust_stat`은 승인 견적(`selection_analysis.quote`)만 켠다 — stat이 지난 완전 검증과
+    같으면 기록된 해시를 믿는다(D62 A2). 계획·추출·분석 실행·1단계 승인 만들기는 끈 채다.
     """
     asset = workspace.source_asset(asset_id)
     if asset.status != "ready" or asset.content_sha256 is None:
@@ -5121,11 +5138,9 @@ def _verified_asset(workspace: RawWorkspace, asset_id: str) -> SourceAsset:
             f"원본 크기가 가져오기 때와 다르다: {asset.source_relative_path}"
             f" ({asset.size_bytes} → {probed.st_size}B)"
         )
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for block in iter(lambda: handle.read(1 << 20), b""):
-            digest.update(block)
-    if digest.hexdigest() != asset.content_sha256:
+    if source_verify.source_digest(workspace, asset, path, trust_stat=trust_stat) != (
+        asset.content_sha256
+    ):
         raise SegmentationError(
             f"원본 내용이 가져오기 때와 다르다: {asset.source_relative_path}"
             " — 다시 가져오세요(새 배치)"

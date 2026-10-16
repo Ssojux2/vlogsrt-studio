@@ -46,9 +46,15 @@ class SelectionQuote:
 def quote(
     service: Any, root: Path, asset_ids: tuple[str, ...], mode: str = MODE_FULL
 ) -> SelectionQuote:
-    return _assemble_quote(
-        service, root, asset_ids, tuple(service.analysis_estimate(root, asset_ids)), mode
-    )
+    """승인 견적 — 원본 재검증은 stat 믿기다(D62 A2).
+
+    앱 시작·자막·용어집 편집마다 라이브러리 전체를 다시 해시하면 원본 18개에 20–35분이 걸렸다.
+    digest가 묶는 것은 기록된 `content_sha256`(stat이 아니다)이고, 유료 요청 앞에서는 1단계 승인
+    만들기(`mint_asr_approvals`)·실행 문(`start_analysis`)·분석 본체(`_analyze_source`)가 각각
+    완전 해시한다 — stat을 그대로 둔 채 내용만 바뀐 원본도 그 자리에서 0송신으로 닫힌다.
+    """
+    estimates = service.analysis_estimate(root, asset_ids, trust_stat=True)
+    return _assemble_quote(service, root, asset_ids, tuple(estimates), mode)
 
 
 def rebound_quote(
