@@ -82,7 +82,6 @@ NOTICE_DONE = "done"
 NOTICE_PREPARING = "preparing"
 NOTICE_CHANGED = "changed"
 NOTICE_RECHECK = "recheck"
-NOTICE_STALE = "stale"
 NOTICE_KEY = "key"
 NOTICE_FAILED = "failed"
 NOTICE_INTERRUPTED = "interrupted"
@@ -97,7 +96,6 @@ NOTICE_TEXT = {
     "갱신된 분석 범위를 확인하고 다시 승인하세요.",
     NOTICE_RECHECK: "입력이 바뀌었습니다. 아무것도 시작하지 않았습니다. "
     "갱신된 범위를 확인하고 다시 승인하세요.",
-    NOTICE_STALE: "저장 결과의 입력이 바뀌었습니다. 갱신된 범위를 확인하세요.",
     NOTICE_KEY: "**연결 설정 필요 · 아직 분석하지 않았습니다**\n\n"
     "API 연결에 키를 입력한 뒤 표시된 범위를 승인하세요.",
     NOTICE_UNSEEN: "**새 견적을 확인하세요** · 화면에 보인 범위·비용이 지금 견적과 다릅니다"
@@ -114,6 +112,18 @@ QUOTE_NOTICE_KINDS = frozenset({NOTICE_UNSEEN})
 않고 1050px 이하에서 재생기를 밀어낸다(W-17 B 2차) — 실사용 줄은 기록 판의 고정 줄로 간다.
 """
 LIBRARY_APPROVE_LABEL = "전체 영상 분석 승인"
+LIBRARY_REMAINING_LABEL = "남은 {count}개 분석 승인"
+"""끝난 영상이 있을 때의 일괄 승인 — 견적·승인·실행이 남은 영상만 묶는다(W-24 세션 E, D64)."""
+PENDING_KINDS = (
+    ("실패", ("분석 확인 필요", "부분 완료 · 확인 필요")),
+    ("중단", ("취소됨", "중단 · 재시도 승인 필요")),
+    ("다시 듣기", (raw_service.RELISTEN_STAGE,)),
+    ("전사 완료", (raw_service.TRANSCRIBED_STAGE,)),
+)
+"""남은 영상이 남은 까닭(견적 문구의 괄호) — 순서대로 첫 맞는 것. 처음·갱신은 아래가 가른다."""
+PENDING_FIRST = "처음"
+PENDING_RENEW = "갱신"
+FIRST_STAGES = ("영상 준비", "승인 대기")
 APPROVAL_MODE_ID = "vl-approval-mode"
 APPROVAL_MODE_LABEL = "승인 범위"
 APPROVAL_MODE_CHOICES = [
@@ -766,6 +776,27 @@ def _transcribe_only(quote: Any) -> bool:
     return _quote_mode(quote) == raw_service.SELECTION_MODE_TRANSCRIBE
 
 
+def _pending_kind(task: Mapping[str, Any] | None) -> str:
+    """남은 영상 하나가 남은 까닭 — 분석 기록이 없는 준비·승인 대기는 처음, 나머지 바뀜은 갱신."""
+    stage = (task or {}).get("stage")
+    for kind, stages in PENDING_KINDS:
+        if stage in stages:
+            return kind
+    if task is None or (not task.get("revision") and stage in FIRST_STAGES):
+        return PENDING_FIRST
+    return PENDING_RENEW
+
+
+def _pending_breakdown(tasks: Mapping[str, Mapping[str, Any]], ids: Sequence[str]) -> str:
+    """「(실패 1 · 처음 2)」 — 0인 까닭은 싣지 않는다."""
+    counts: dict[str, int] = {}
+    for asset_id in ids:
+        kind = _pending_kind(tasks.get(asset_id))
+        counts[kind] = counts.get(kind, 0) + 1
+    order = (*(kind for kind, _stages in PENDING_KINDS), PENDING_RENEW, PENDING_FIRST)
+    return "(" + " · ".join(f"{kind} {counts[kind]}" for kind in order if counts.get(kind)) + ")"
+
+
 def _refill_summary(quote: Any) -> str:
     """요약 한 줄 — 건너뛴 곳과 실패 구간 안을 나눈다(1단계 기록이 없으면 나누지 않는다).
 
@@ -965,14 +996,15 @@ def _snap_move(value: Fraction) -> str:
 
 
 def _transcribe_only_summary(
-    pending: int, cached: int, chunks: int, limit: int, text_pass: str = ""
+    pending: int, cached: int, chunks: int, limit: int, text_pass: str = "", breakdown: str = ""
 ) -> str:
     """「전사만」 견적 문구 — 범위가 전사뿐임을 먼저 말한다. whisper 금액은 싣지 않는다(D57 결정 7).
 
     「다른 귀로 교차 확인」이 물을 분량이 있으면 그 문장(`_text_pass_sentence`)이 동시 처리 앞에
     들어간다 — 그 문장만 분량·공식 단가 금액을 말한다(D59 19d, 견적 칸이라 금액이 허용된다)."""
     return (
-        f"전사만 · 대상 영상 {pending}개 · 저장 결과 {cached}개 재사용 · 전사 최대 {chunks}회. "
+        f"전사만 · 대상 영상 {pending}개{breakdown} · 저장 결과 {cached}개 재사용 · "
+        f"전사 최대 {chunks}회. "
         "영상 분석은 하지 않습니다 — 이미 받은 전사 조각은 다시 사지 않고, 실패한 조각과 다시"
         f" 듣기를 고른 영상, 처음 듣는 영상만 새로 듣습니다.{text_pass}"
         f" 최대 {limit}개를 동시에 처리합니다."
@@ -1322,6 +1354,9 @@ class RawWorkspaceUi:
         )
         self._library_quotes: dict[Path, Any] = {}
         self._library_cached_ids: dict[Path, set[str]] = {}
+        # 남은 영상의 견적(라이브러리 견적, 남은 영상, 그 견적) — 라이브러리 견적 칸은 늘 전체다
+        # (선택 분석·진행 수가 그렇게 읽는다). 라이브러리 견적이나 남은 영상이 바뀌면 다시 묶는다.
+        self._library_pending_quotes: dict[Path, tuple[Any, tuple[str, ...], Any]] = {}
         # 승인 클릭의 답은 1초 타이머가 상태 칸을 다시 쓰므로 상태 쪽에 남겨야 보인다.
         self._approval_notice: dict[Path, _ApprovalNotice] = {}
         self._approval_jobs: dict[Path, str] = {}
@@ -2389,12 +2424,12 @@ class RawWorkspaceUi:
         def prepare(context: Any) -> None:
             context.check_cancel()
             measured = self.raw.selection_quote(root, ids)
-            tasks = self._task_views(root)
+            # 다시 쓸 수 있는 저장 결과면 끝난 영상이다 — 단계 글자(완료 기록 전에 멈춘 서버의
+            # 「중단」 등)와 무관하다. 다시 쓰는 데 드는 호출은 0회다(D64 E).
             cached = {
                 source_id
                 for source_id in ids
-                if tasks.get(source_id, {}).get("stage") == "추천 구간 준비 완료"
-                and self.raw.cached_selection_analysis(root, (source_id,))
+                if self.raw.cached_selection_analysis(root, (source_id,))
             }
             context.check_cancel()
             if not self._quote_current(root, measured, "라이브러리"):
@@ -2414,26 +2449,72 @@ class RawWorkspaceUi:
 
     def library_analysis_summary(self) -> str:
         root = self._snapshot_root()
-        quote = self._library_quotes.get(root) if root else None
-        if root is None or quote is None:
+        pending = self._library_pending(root) if root else None
+        if root is None or pending is None:
             return "라이브러리를 불러오면 분석 범위와 요청 상한을 안내합니다."
-        return self._library_summary_for(root, quote)
+        ids, quote = pending
+        return self._library_summary_for(root, quote, ids)
 
-    def _library_summary_for(self, root: Path, quote: Any) -> str:
-        """견적 하나의 문구 — 승인 클릭은 대조한 바로 그 견적을 접수한다(다시 읽지 않는다)."""
-        cached = self._library_cached_ids.get(root, set()).intersection(quote.asset_ids)
-        pending = [e for e in quote.estimates if e.asset_id not in cached]
+    def _library_cached(self, root: Path) -> set[str]:
+        # 끝난 분석이 다른 스레드에서 이 집합을 고친다 — 잠금 안에서 사본을 뜬다.
+        with self._selection_lock:
+            return set(self._library_cached_ids.get(root, ()))
+
+    def _library_busy_ids(self, root: Path, tasks: Mapping[str, Mapping[str, Any]]) -> set[str]:
+        """지금 돌거나 기다리는 영상 — 승인된 작업이 분석 대기열에 들어간 순간부터다."""
+        with self._selection_lock:
+            queued = {*self._analysis_queue, *self._analysis_active}
+        return {
+            asset_id
+            for asset_id, task in tasks.items()
+            if task.get("stage") in ACTIVE_ANALYSIS_STAGES or task.get("token") in queued
+        }
+
+    def _library_pending(self, root: Path) -> tuple[tuple[str, ...], Any] | None:
+        """남은 영상과 그 견적 — 준비된 원본 − 다시 쓸 수 있는 저장 결과 − 돌거나 기다리는 영상.
+
+        견적은 라이브러리 견적의 측정값으로 남은 영상만 다시 묶는다(ffprobe 없음) — 끝난 영상의
+        결속이 digest에 들지 않아 그 영상을 고쳐도 남은 영상의 승인이 무르지 않는다(D64 E). 남은
+        영상이 전부거나 없으면 라이브러리 견적 그대로다(다시 묶지 않는다 — 같은 digest다).
+        """
+        library = self._library_quotes.get(root)
+        if library is None:
+            return None
+        skip = self._library_cached(root) | self._library_busy_ids(root, self._task_views(root))
+        ids = tuple(a for a in library.asset_ids if a not in skip)
+        held = self._library_pending_quotes.get(root)
+        if held is not None and held[0] is library and held[1] == ids:
+            return ids, held[2]
+        quote = library
+        if ids and len(ids) < len(library.asset_ids):
+            quote = self.raw.selection_rebound_quote(root, library, ids, _quote_mode(library))
+        self._library_pending_quotes[root] = (library, ids, quote)
+        return ids, quote
+
+    def _library_summary_for(self, root: Path, quote: Any, ids: Sequence[str] | None = None) -> str:
+        """견적 하나의 문구 — 승인 클릭은 대조한 바로 그 견적을 접수한다(다시 읽지 않는다).
+
+        `ids`는 이번 승인이 묶는 남은 영상이다(주지 않으면 견적에서 저장 결과를 뺀 것). 끝난
+        영상과 남은 영상이 섞여 있으면 남은 까닭을 괄호로 단다(D64 E).
+        """
+        library = self._library_quotes.get(root) or quote
+        cached = self._library_cached(root).intersection(library.asset_ids)
+        wanted = set(ids) if ids is not None else set(quote.asset_ids) - cached
+        pending = [e for e in quote.estimates if e.asset_id in wanted]
+        breakdown = ""
+        if cached and pending:
+            breakdown = _pending_breakdown(self._task_views(root), [e.asset_id for e in pending])
         asr = sum(e.asr_chunk_count for e in pending)
         text_pass = _text_pass_sentence(quote, pending)
         if _transcribe_only(quote):
             return _transcribe_only_summary(
-                len(pending), len(cached), asr, self._analysis_limit, text_pass
+                len(pending), len(cached), asr, self._analysis_limit, text_pass, breakdown
             )
         luna = sum(e.luna_request_count for e in pending)
         label, ceiling = _semantic_quote_terms(_quote_model(quote), pending)
         model = "" if label == "Luna" else f"({label})"
         return (
-            f"분석 대상 {len(pending)}개 · 저장 결과 {len(cached)}개 재사용 · "
+            f"분석 대상 {len(pending)}개{breakdown} · 저장 결과 {len(cached)}개 재사용 · "
             f"전사 최대 {asr}회 + 영상 분석{model} 최대 {luna}회{ceiling}.{text_pass} 승인하면 두"
             f" 단계가 이어집니다. 최대 {self._analysis_limit}개를 동시에 분석합니다."
         )
@@ -2634,21 +2715,23 @@ class RawWorkspaceUi:
 
     def library_analysis_button(self) -> Any:
         root = self._snapshot_root()
-        quote = self._library_quotes.get(root) if root else None
-        tasks = self._task_views(root) if root else {}
-        active = (root is not None and self._approval_active(root)) or any(
-            t.get("stage") in ACTIVE_ANALYSIS_STAGES for t in tasks.values()
+        active = root is not None and (
+            self._approval_active(root)
+            or bool(self._library_busy_ids(root, self._task_views(root)))
         )
-        cached = self._library_cached_ids.get(root, set()) if root else set()
-        complete = (
-            quote is not None
-            and set(quote.asset_ids) <= cached
-            and all(tasks.get(a, {}).get("stage") == "추천 구간 준비 완료" for a in quote.asset_ids)
-        )
-        label = "분석 진행 중" if active else "분석 완료" if complete else LIBRARY_APPROVE_LABEL
-        return gr.Button(
-            value=label, visible=True, interactive=bool(quote) and not active and not complete
-        )
+        pending = self._library_pending(root) if root else None
+        ids = pending[0] if pending is not None else ()
+        library = self._library_quotes.get(root) if root else None
+        if active or library is None:
+            label = "분석 진행 중" if active else LIBRARY_APPROVE_LABEL
+        elif not ids:
+            label = "분석 완료"
+        elif len(ids) < len(library.asset_ids):
+            # 끝난 영상(다시 쓸 저장 결과)이 있다 — 단추가 남은 수를 말한다. 승인이 그만큼만 묶는다.
+            label = LIBRARY_REMAINING_LABEL.format(count=len(ids))
+        else:
+            label = LIBRARY_APPROVE_LABEL
+        return gr.Button(value=label, visible=True, interactive=not active and bool(ids))
 
     def _set_approval_notice(
         self,
@@ -2733,15 +2816,21 @@ class RawWorkspaceUi:
         self, signature: str | None, api_key: str | None, shown_summary: str | None
     ) -> tuple:
         root = self._require_current_selection(signature)
-        ids = self._library_ids(root)
-        quote = self._library_quotes.get(root)
-        if not ids or quote is None or tuple(quote.asset_ids) != ids:
+        every = self._library_ids(root)
+        library = self._library_quotes.get(root)
+        if not every or library is None or tuple(library.asset_ids) != every:
             self._prepare_library_quote(root)
             return self._library_reply(root, NOTICE_PREPARING)
+        pending = self._library_pending(root)
+        if pending is None or not pending[0]:
+            # 남은 영상이 없다(다른 탭의 낡은 단추) — 시작할 것도, 물을 것도 없다.
+            return (self._quick_status(), gr.Accordion(open=False), gr.Textbox(value=""))
+        ids, quote = pending
         # 대조한 바로 그 견적을 접수한다 — 다시 읽으면 그 사이 범위 칸이 다시 묶은 견적이 들어온다.
-        quote = self._library_quote_seen(root, quote, shown_summary)
+        quote = self._library_quote_seen(root, quote, ids, shown_summary)
         if quote is None:
             return (self._quick_status(), gr.Accordion(open=False), gr.Textbox(value=""))
+        ids = tuple(quote.asset_ids)
         key = (api_key or "").strip()
         if key:
             self._startup_credentials = raw_service.EnvironmentCredentials(
@@ -2763,20 +2852,24 @@ class RawWorkspaceUi:
         self._submit_library_approval(root, ids, quote)
         return (self._quick_status(), gr.Accordion(open=False), gr.Textbox(value=""))
 
-    def _library_quote_seen(self, root: Path, quote: Any, shown_summary: str | None) -> Any:
+    def _library_quote_seen(
+        self, root: Path, quote: Any, ids: tuple[str, ...], shown_summary: str | None
+    ) -> Any:
         """화면에 보인 견적이면 **대조한 그 견적**을, 아니면 None(거절)을 돌려준다.
 
-        고른 범위와 다른 범위의 견적이면(범위를 바꾸는 사이에 견적이 다시 섰다) 지금 범위로 다시
-        묶고 거절한다. 거절 알림은 확인할 견적(범위·상한)을 직접 싣는다 — 상태 칸이 그것을 가리지
-        않는다.
+        `quote`는 남은 영상(`ids`)의 견적이라 대조하는 문구도 남은 영상의 것이다(D64 E). 고른 범위와
+        다른 범위의 견적이면(범위를 바꾸는 사이에 견적이 다시 섰다) 지금 범위로 다시 묶고 거절한다.
+        거절 알림은 확인할 견적(범위·상한)을 직접 싣는다 — 상태 칸이 그것을 가리지 않는다.
         """
         if _quote_mode(quote) != self._approval_mode(root):
-            quote = self._library_quotes[root] = self._scoped(root, quote)
+            self._library_quotes[root] = self._scoped(root, self._library_quotes[root])
+            ids, quote = self._library_pending(root) or (ids, quote)
             shown_summary = ""  # 이 클릭이 본 견적은 지금 범위의 것이 아니다
         # 칸이 그리는 문구(놓인 견적)와 대조한다 — 그 사이 바뀌었으면 잡은 견적의 문구로.
-        held = self._library_quotes.get(root) is quote
+        placed = self._library_pending(root)
+        held = placed is not None and placed[1] is quote
         summary = (
-            self.library_analysis_summary() if held else self._library_summary_for(root, quote)
+            self.library_analysis_summary() if held else self._library_summary_for(root, quote, ids)
         )
         if shown_summary is None or shown_summary == summary:
             return quote
@@ -2817,45 +2910,76 @@ class RawWorkspaceUi:
             self._drop_notice(root, held)
 
     def _approve_library(self, root: Path, ids: tuple[str, ...], quote: Any, context: Any) -> None:
+        """남은 영상(`ids`)의 승인 — 그 영상들만 다시 재어 화면의 견적과 대조한다(D64 E).
+
+        끝난 영상은 이 승인의 비용과 무관하다 — 그 영상을 고쳐도(자막 고침) 이 승인을 무르지 않고,
+        고친 영상은 다음 견적의 남은 영상이 된다.
+        """
         context.check_cancel()
         # 비용 문: 화면에 표시된 견적(digest·workflow)만 승인한다. 다르면 아무것도 시작하지 않는다.
         # 승인한 범위로 다시 잰다 — 범위는 digest에 접혀 있다(D59 19b).
         fresh = self._scoped(root, self.raw.selection_quote(root, ids), _quote_mode(quote))
         if fresh.digest != quote.digest or fresh.workflow != quote.workflow:
-            self._library_quotes[root] = fresh
+            self._keep_library_measure(root, fresh)
             self._set_approval_notice(root, NOTICE_CHANGED)
             return
-        cached = self._library_cached_ids.get(root, set()).intersection(ids)
-        invalid = {s for s in cached if not self.raw.cached_selection_analysis(root, (s,))}
-        if invalid:
-            self._library_cached_ids[root].difference_update(invalid)
-            self._prepare_library_quote(root)
-            self._set_approval_notice(root, NOTICE_STALE)
-            return
+        self._drop_stale_cached(root)
         context.check_cancel()
         online = replace(fresh.workflow, network_mode="online")
         self.raw.update_settings(root, online)
-        # 견적의 측정값(영상마다 ffprobe)은 network_mode에 의존하지 않는다 — 전체를 다시
-        # 재지 않고 방금 잰 측정값에 지금의 결속 지문·설정만 다시 묶는다. 영상별 견적을
-        # 먼저 묶고 전체를 나중에 묶어야, 영상별 견적이 본 결속이 승인한 것과 같다는
-        # 것이 확인된다. 그 뒤의 변화 중 크기·mtime·inode가 바뀐 것은 실행 문
-        # (`selection_analysis.execute`)의 다시 재기가, 내용만 바뀐 것은 유료 호출 전
-        # 승인 만들기(`mint_asr_approvals`)의 완전 해시가 영상마다 막는다(D62 A2).
+        # 견적의 측정값(영상마다 ffprobe)은 network_mode에 의존하지 않는다 — 다시 재지 않고
+        # 방금 잰 측정값에 지금의 결속 지문·설정만 다시 묶는다. 영상별 견적을 먼저 묶고 전체를
+        # 나중에 묶어야, 영상별 견적이 본 결속이 승인한 것과 같다는 것이 확인된다. 그 뒤의 변화
+        # 중 크기·mtime·inode가 바뀐 것은 실행 문(`selection_analysis.execute`)의 다시 재기가,
+        # 내용만 바뀐 것은 유료 호출 전 승인 만들기(`mint_asr_approvals`)의 완전 해시가 영상마다
+        # 막는다(D62 A2). 그사이 끝났거나 돌기 시작한 영상은 띄우지 않는다.
+        skip = self._library_cached(root) | self._library_busy_ids(root, self._task_views(root))
         children = [
             replace(self.raw.selection_rebound_quote(root, fresh, (source_id,)), approved=True)
             for source_id in ids
-            if source_id not in cached
+            if source_id not in skip
         ]
         checked = self.raw.selection_rebound_quote(root, fresh, ids)
         if checked.digest != quote.digest or any(
             q.workflow != online for q in (checked, *children)
         ):
-            self._library_quotes[root] = checked
+            self._keep_library_measure(root, checked)
             self._set_approval_notice(root, NOTICE_RECHECK)
             return
         watch = self._fan_out_library(root, ids, children, context)
-        self._library_quotes[root] = checked
+        self._keep_library_measure(root, checked)
         self._set_approval_notice(root, NOTICE_DONE, watch=watch)
+
+    def _keep_library_measure(self, root: Path, measured: Any) -> None:
+        """승인이 다시 잰 견적을 라이브러리 견적에 남긴다 — 라이브러리 견적 칸은 늘 전체다.
+
+        남은 영상만 잰 견적이면 그 영상들의 측정값만 갈아 끼우고 전체를 지금 결속으로 다시 묶는다
+        (ffprobe 없음) — 남은 영상의 다음 견적이 방금 잰 값으로 선다.
+        """
+        library = self._library_quotes.get(root)
+        if library is None or set(measured.asset_ids) >= set(library.asset_ids):
+            self._library_quotes[root] = measured
+            return
+        fresh = {e.asset_id: e for e in measured.estimates}
+        merged = replace(
+            library, estimates=tuple(fresh.get(e.asset_id, e) for e in library.estimates)
+        )
+        every = tuple(library.asset_ids)
+        self._library_quotes[root] = self.raw.selection_rebound_quote(root, merged, every)
+
+    def _drop_stale_cached(self, root: Path) -> None:
+        """다시 쓸 수 없게 된 저장 결과(끝난 뒤 자막을 고친 영상 등)를 끝난 영상에서 뺀다.
+
+        이번 승인을 막지 않는다 — 그 영상은 이번 승인에 없고, 다음 견적의 남은 영상이 된다.
+        """
+        stale = {
+            s
+            for s in self._library_cached(root)
+            if not self.raw.cached_selection_analysis(root, (s,))
+        }
+        if stale:
+            with self._selection_lock:
+                self._library_cached_ids.get(root, set()).difference_update(stale)
 
     def _fan_out_library(
         self, root: Path, ids: tuple[str, ...], children: list, context: Any

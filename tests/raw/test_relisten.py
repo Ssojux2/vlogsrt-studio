@@ -311,7 +311,8 @@ def test_relisten_rebuys_only_that_video_and_a_full_run_then_buys_no_whisper(
     assert ui.raw.cached_selection_analysis(root, (a,)) is None  # 끝난 분석을 다시 쓰지 않는다
     assert ui.raw.cached_selection_analysis(root, (b,)) is not None
     summary = ui.library_analysis_summary()
-    assert summary.startswith("전사만 · 대상 영상 1개 · 저장 결과 1개 재사용")
+    # 끝난 b와 남은 a가 섞였다 — 남은 까닭을 단다(D64 E).
+    assert summary.startswith("전사만 · 대상 영상 1개(다시 듣기 1) · 저장 결과 1개 재사용")
     assert len(sender.calls) == 2  # 누르기만 했다 — 유료 호출 0회
 
     approve(ui, TRANSCRIBE)

@@ -42,11 +42,25 @@ def ensure_schema(db: sqlite3.Connection) -> None:
         "stage TEXT NOT NULL, fingerprint TEXT NOT NULL, status TEXT NOT NULL, note TEXT, "
         "created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"
     )
-    present = {row[1] for row in db.execute("PRAGMA table_info(analysis_requests)")}
+    present = _columns(db)
     for name, kind in _USAGE_COLUMNS:
         if name not in present:
-            db.execute(f"ALTER TABLE analysis_requests ADD COLUMN {name} {kind}")
+            _add_column(db, name, kind)
     db.commit()
+
+
+def _columns(db: sqlite3.Connection) -> set[str]:
+    return {row[1] for row in db.execute("PRAGMA table_info(analysis_requests)")}
+
+
+def _add_column(db: sqlite3.Connection, name: str, kind: str) -> None:
+    try:
+        db.execute(f"ALTER TABLE analysis_requests ADD COLUMN {name} {kind}")
+    except sqlite3.OperationalError:
+        # 동시에 시작한 분석 둘이 같은 옛 칸 목록을 읽고 함께 더하려 했다 — 다른 쪽이 먼저
+        # 더했으면 할 일은 끝났다. 칸이 정말 없으면 그 오류 그대로다.
+        if name not in _columns(db):
+            raise
 
 
 @contextmanager

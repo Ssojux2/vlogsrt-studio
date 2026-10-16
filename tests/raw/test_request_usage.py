@@ -286,6 +286,34 @@ def test_old_schema_table_gains_columns_once_and_old_rows_stay_readable(tmp_path
     assert summary.billed_seconds == Decimal(0) and summary.cost_usd == Decimal(0)
 
 
+class _StaleColumns:
+    """첫 칸 목록만 옛것을 돌려주는 연결 — 그것을 읽은 사이 다른 분석이 칸을 더했다."""
+
+    def __init__(self, db: sqlite3.Connection, names: tuple[str, ...]) -> None:
+        self._db, self._names, self.stale_reads = db, names, 1
+
+    def execute(self, sql: str, *args: Any) -> Any:
+        if sql.startswith("PRAGMA table_info") and self.stale_reads:
+            self.stale_reads -= 1
+            return [(index, name) for index, name in enumerate(self._names)]
+        return self._db.execute(sql, *args)
+
+    def commit(self) -> None:
+        self._db.commit()
+
+
+def test_two_analyses_adding_the_same_column_at_once_both_open(tmp_path):
+    """W-24 세션 E에서 드러난 경합 — 둘이 같은 옛 칸 목록을 읽으면 늦은 쪽의 ADD COLUMN이
+    「duplicate column name」으로 그 영상의 분석을 실패시켰다(유료 호출 전에)."""
+    workspace = _workspace(tmp_path)
+    base = ("id", "job_id", "stage", "fingerprint", "status", "note", "created_at")
+    with workspace.connect() as db:
+        request_log.ensure_schema(db)  # 먼저 연 쪽이 칸을 다 더했다
+        request_log.ensure_schema(_StaleColumns(db, base))  # type: ignore[arg-type]
+        columns = {r["name"] for r in db.execute("PRAGMA table_info(analysis_requests)")}
+    assert {"unpriced_reason", "provider_request_id"} <= columns
+
+
 def test_summary_totals_per_job_and_overall(monkeypatch, tmp_path):
     workspace = _workspace(tmp_path)
     asr = {"segments": [], "usage": {"type": "duration", "seconds": 60}}
