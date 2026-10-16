@@ -1,0 +1,443 @@
+{
+ "annotations": [
+  {
+   "defect": "",
+   "editing_notes": [],
+   "error_code": "",
+   "evidence_ids": [],
+   "luna_model": "synthetic-luna",
+   "needs_review": true,
+   "origin": "replay",
+   "prompt_revision": "raw-suitability-v2",
+   "request_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+   "response_uncertain": false,
+   "scene_tags": [
+    "계곡"
+   ],
+   "speech_summary": "",
+   "status": "accepted",
+   "suggested_boundary_ids": [],
+   "suitability": "recommended",
+   "suitability_evaluated": true,
+   "suitability_reason": "계곡과 인물이 선명하다",
+   "uncertainties": [
+    "원거리 인물 식별 불확실"
+   ],
+   "visual_summary": "",
+   "window_id": "window_000000"
+  },
+  {
+   "defect": "",
+   "editing_notes": [],
+   "error_code": "",
+   "evidence_ids": [],
+   "luna_model": "synthetic-luna",
+   "needs_review": false,
+   "origin": "replay",
+   "prompt_revision": "raw-suitability-v2",
+   "request_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+   "response_uncertain": false,
+   "scene_tags": [
+    "계곡"
+   ],
+   "speech_summary": "",
+   "status": "accepted",
+   "suggested_boundary_ids": [],
+   "suitability": "usable",
+   "suitability_evaluated": true,
+   "suitability_reason": "구도가 조금 기울었다",
+   "uncertainties": [],
+   "visual_summary": "",
+   "window_id": "window_000001"
+  },
+  {
+   "defect": "",
+   "editing_notes": [],
+   "error_code": "",
+   "evidence_ids": [],
+   "luna_model": "synthetic-luna",
+   "needs_review": false,
+   "origin": "replay",
+   "prompt_revision": "raw-suitability-v2",
+   "request_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+   "response_uncertain": false,
+   "scene_tags": [
+    "계곡"
+   ],
+   "speech_summary": "",
+   "status": "accepted",
+   "suggested_boundary_ids": [],
+   "suitability": "review",
+   "suitability_evaluated": true,
+   "suitability_reason": "역광으로 얼굴이 어둡다",
+   "uncertainties": [],
+   "visual_summary": "",
+   "window_id": "window_000002"
+  },
+  {
+   "defect": "",
+   "editing_notes": [],
+   "error_code": "",
+   "evidence_ids": [],
+   "luna_model": "synthetic-luna",
+   "needs_review": false,
+   "origin": "replay",
+   "prompt_revision": "raw-suitability-v2",
+   "request_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+   "response_uncertain": false,
+   "scene_tags": [
+    "계곡"
+   ],
+   "speech_summary": "",
+   "status": "accepted",
+   "suggested_boundary_ids": [],
+   "suitability": "recommended",
+   "suitability_evaluated": true,
+   "suitability_reason": "프레임 없이 내린 판정",
+   "uncertainties": [],
+   "visual_summary": "",
+   "window_id": "window_000003"
+  }
+ ],
+ "asr": {
+  "chunks": [
+   {
+    "chunk_index": 0,
+    "failure": "",
+    "request_id": "c0",
+    "sample_end": 720000,
+    "sample_start": 0,
+    "segments": [],
+    "wav_sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+   },
+   {
+    "chunk_index": 1,
+    "failure": "MalformedCaptionResponse: 합성 실패",
+    "request_id": "c1",
+    "sample_end": 960000,
+    "sample_start": 720000,
+    "segments": [],
+    "wav_sha256": "3333333333333333333333333333333333333333333333333333333333333333"
+   }
+  ],
+  "request_id": "anal_tier:source_tier",
+  "sample_rate": 16000
+ },
+ "audio": {
+  "audio_stream_index": 1,
+  "channels": 2,
+  "extent": {
+   "den": 16000,
+   "num": 960000
+  },
+  "pcm_sample0_file_time": {
+   "den": 1,
+   "num": 0
+  },
+  "pcm_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "sample_count": 960000,
+  "sample_rate": 16000,
+  "source_id": "source_tier",
+  "source_sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+ },
+ "frames": {
+  "failures": [
+   {
+    "error": "RuntimeError: 프레임 묶음 추출 실패",
+    "frame_id": "frame_00000006"
+   },
+   {
+    "error": "RuntimeError: 프레임 묶음 추출 실패",
+    "frame_id": "frame_00000007"
+   }
+  ],
+  "frames": [
+   {
+    "file_time": {
+     "den": 1,
+     "num": 1
+    },
+    "frame_id": "frame_00000000",
+    "frame_index": 0,
+    "image_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+   },
+   {
+    "file_time": {
+     "den": 1,
+     "num": 8
+    },
+    "frame_id": "frame_00000001",
+    "frame_index": 30,
+    "image_sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+   },
+   {
+    "file_time": {
+     "den": 1,
+     "num": 15
+    },
+    "frame_id": "frame_00000002",
+    "frame_index": 60,
+    "image_sha256": "0000000000000000000000000000000000000000000000000000000000000002"
+   },
+   {
+    "file_time": {
+     "den": 1,
+     "num": 22
+    },
+    "frame_id": "frame_00000003",
+    "frame_index": 90,
+    "image_sha256": "0000000000000000000000000000000000000000000000000000000000000003"
+   },
+   {
+    "file_time": {
+     "den": 1,
+     "num": 29
+    },
+    "frame_id": "frame_00000004",
+    "frame_index": 120,
+    "image_sha256": "0000000000000000000000000000000000000000000000000000000000000004"
+   },
+   {
+    "file_time": {
+     "den": 1,
+     "num": 36
+    },
+    "frame_id": "frame_00000005",
+    "frame_index": 150,
+    "image_sha256": "0000000000000000000000000000000000000000000000000000000000000005"
+   }
+  ]
+ },
+ "recommendation_boundaries": [
+  {
+   "den": 1,
+   "num": 0
+  },
+  {
+   "den": 1,
+   "num": 60
+  }
+ ],
+ "segmentation": {
+  "extent": {
+   "den": 1,
+   "num": 60
+  },
+  "segments": [],
+  "tick_grid": "video_frame"
+ },
+ "stage": "understanding_stage1",
+ "utterances": [
+  {
+   "chunk_index": 0,
+   "end": {
+    "den": 1,
+    "num": 4
+   },
+   "end_sample": 64000,
+   "evidence_id": "anal_tier:source_tier:chunk-0000:0",
+   "position": 0,
+   "start": {
+    "den": 1,
+    "num": 1
+   },
+   "start_sample": 16000,
+   "text": "안녕하세요",
+   "utterance_id": "utterance_000000"
+  },
+  {
+   "chunk_index": 0,
+   "end": {
+    "den": 1,
+    "num": 9
+   },
+   "end_sample": 144000,
+   "evidence_id": "anal_tier:source_tier:chunk-0000:1",
+   "position": 1,
+   "start": {
+    "den": 1,
+    "num": 5
+   },
+   "start_sample": 80000,
+   "text": "오늘은 계곡에 왔어요",
+   "utterance_id": "utterance_000001"
+  },
+  {
+   "chunk_index": 0,
+   "end": {
+    "den": 1,
+    "num": 14
+   },
+   "end_sample": 224000,
+   "evidence_id": "anal_tier:source_tier:chunk-0000:2",
+   "position": 2,
+   "start": {
+    "den": 1,
+    "num": 10
+   },
+   "start_sample": 160000,
+   "text": "물이 정말 맑네요",
+   "utterance_id": "utterance_000002"
+  },
+  {
+   "chunk_index": 0,
+   "end": {
+    "den": 1,
+    "num": 27
+   },
+   "end_sample": 432000,
+   "evidence_id": "anal_tier:source_tier:chunk-0000:3",
+   "position": 3,
+   "start": {
+    "den": 1,
+    "num": 26
+   },
+   "start_sample": 416000,
+   "text": "와",
+   "utterance_id": "utterance_000003"
+  },
+  {
+   "chunk_index": 0,
+   "end": {
+    "den": 1,
+    "num": 41
+   },
+   "end_sample": 656000,
+   "evidence_id": "anal_tier:source_tier:chunk-0000:4",
+   "position": 4,
+   "start": {
+    "den": 1,
+    "num": 40
+   },
+   "start_sample": 640000,
+   "text": "여기 봐",
+   "utterance_id": "utterance_000004"
+  }
+ ],
+ "windows": {
+  "boundary_candidates": [
+   {
+    "boundary_id": "scene_00000660",
+    "kind": "verified_scene",
+    "position": {
+     "den": 1,
+     "num": 22
+    },
+    "tick": 660,
+    "window_id": "window_000001"
+   }
+  ],
+  "extent": {
+   "den": 1,
+   "num": 60
+  },
+  "source_id": "source_tier",
+  "video_status": "proven",
+  "windows": [
+   {
+    "boundary_ids": [],
+    "context_end": {
+     "den": 1,
+     "num": 17
+    },
+    "context_start": {
+     "den": 1,
+     "num": 0
+    },
+    "core_end": {
+     "den": 1,
+     "num": 15
+    },
+    "core_start": {
+     "den": 1,
+     "num": 0
+    },
+    "frame_ids": [
+     "frame_00000000",
+     "frame_00000001"
+    ],
+    "ordinal": 0,
+    "utterance_ids": [],
+    "window_id": "window_000000"
+   },
+   {
+    "boundary_ids": [],
+    "context_end": {
+     "den": 1,
+     "num": 32
+    },
+    "context_start": {
+     "den": 1,
+     "num": 13
+    },
+    "core_end": {
+     "den": 1,
+     "num": 30
+    },
+    "core_start": {
+     "den": 1,
+     "num": 15
+    },
+    "frame_ids": [
+     "frame_00000002",
+     "frame_00000003"
+    ],
+    "ordinal": 1,
+    "utterance_ids": [],
+    "window_id": "window_000001"
+   },
+   {
+    "boundary_ids": [],
+    "context_end": {
+     "den": 1,
+     "num": 47
+    },
+    "context_start": {
+     "den": 1,
+     "num": 28
+    },
+    "core_end": {
+     "den": 1,
+     "num": 45
+    },
+    "core_start": {
+     "den": 1,
+     "num": 30
+    },
+    "frame_ids": [
+     "frame_00000004",
+     "frame_00000005"
+    ],
+    "ordinal": 2,
+    "utterance_ids": [],
+    "window_id": "window_000002"
+   },
+   {
+    "boundary_ids": [],
+    "context_end": {
+     "den": 1,
+     "num": 60
+    },
+    "context_start": {
+     "den": 1,
+     "num": 43
+    },
+    "core_end": {
+     "den": 1,
+     "num": 60
+    },
+    "core_start": {
+     "den": 1,
+     "num": 45
+    },
+    "frame_ids": [
+     "frame_00000006",
+     "frame_00000007"
+    ],
+    "ordinal": 3,
+    "utterance_ids": [],
+    "window_id": "window_000003"
+   }
+  ]
+ }
+}

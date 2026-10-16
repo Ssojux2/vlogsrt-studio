@@ -6,17 +6,23 @@ import json
 import os
 import sys
 import types
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import replace as data_replace
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from vlogsrt import env
+from vlogsrt import transcribe as transcribe_module
 from vlogsrt.config import Config
 from vlogsrt.models import Chunk
 from vlogsrt.transcribe import (
+    CAPTION_TEXT_KIND,
+    CAPTION_TIMING_KIND,
     FIXTURE_KIND,
+    TRANSCRIPTION_OPERATION,
+    AudioTranscriptionRequest,
     ChunkCoverage,
     ChunkResponse,
     ClosedVisionResponder,
@@ -28,6 +34,7 @@ from vlogsrt.transcribe import (
     MalformedTranscript,
     MissingVisionFixture,
     TranscriptionJob,
+    UnsupportedTranscriptionRequest,
     build_spine,
     create_vision_client,
     estimate_cost,
@@ -238,10 +245,14 @@ def real_job(tmp_path: Path) -> TranscriptionJob:
     return TranscriptionJob(stem="demo", chunks=(Chunk(audio, 0.0, 24.0, 0),))
 
 
-def _live(monkeypatch: pytest.MonkeyPatch, client: FakeClient) -> LiveTranscriber:
+def _live(
+    monkeypatch: pytest.MonkeyPatch,
+    client: FakeClient,
+    cancellation: Callable[[], None] | None = None,
+) -> LiveTranscriber:
     """`LiveTranscriber`는 frozen+slots라 인스턴스에 못 꽂는다. 클래스에 꽂는다."""
     monkeypatch.setattr(LiveTranscriber, "_client", lambda self: client)
-    return LiveTranscriber(api_key="sk-test")
+    return LiveTranscriber(api_key="sk-test", cancellation=cancellation)
 
 
 def test_the_call_asks_for_a_format_that_carries_times(
@@ -286,6 +297,144 @@ def test_retries_without_extras_on_400(monkeypatch: pytest.MonkeyPatch, tmp_path
 
     assert len(client.calls) == 2
     assert "language" in client.calls[0] and "language" not in client.calls[1]
+
+
+# ─────────────────────────────────────────────────────────────
+#  호출 직전 취소 게이트 (S1A) — 조각·재시도·거부 재요청마다 지난다
+# ─────────────────────────────────────────────────────────────
+
+
+class Cancelled(BaseException):
+    """프로젝트 계층의 WorkflowCancelled와 같은 부류 — `except Exception`에 잡히지 않는다."""
+
+
+class Throttled(FakeClient):
+    """429로 답한다 — 재시도 판단을 유도한다."""
+
+    def create(self, **kwargs: object) -> dict[str, object]:
+        self.calls.append(kwargs)
+        error = RuntimeError("Error code: 429 - rate limited")
+        error.status_code = 429  # type: ignore[attr-defined]
+        raise error
+
+
+def _gate_after(limit: int) -> tuple[list[int], Callable[[], None]]:
+    """`limit`번 확인 뒤 취소되는 게이트 — 확인 횟수를 세서 돌려준다."""
+    checks: list[int] = []
+
+    def gate() -> None:
+        checks.append(len(checks) + 1)
+        if len(checks) > limit:
+            raise Cancelled
+
+    return checks, gate
+
+
+def multi_job(tmp_path: Path) -> TranscriptionJob:
+    audio = tmp_path / "demo.mp3"
+    audio.write_bytes(b"\x00")
+    return TranscriptionJob(
+        stem="demo",
+        chunks=(
+            Chunk(audio, 0.0, 24.0, 0),
+            Chunk(audio, 24.0, 24.0, 1),
+            Chunk(audio, 48.0, 24.0, 2),
+        ),
+    )
+
+
+def test_cancellation_gate_blocks_the_transient_retry_attempt(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """429 뒤의 재시도 직전에 취소가 보이면 재요청이 없다."""
+    client = Throttled()
+    _, gate = _gate_after(1)
+    live = _live(monkeypatch, client, gate)
+    cfg = data_replace(Config(), api_backoff_base=0.0)  # 대기 없이 즉시 재시도한다
+
+    with pytest.raises(Cancelled):
+        live.transcribe(real_job(tmp_path), cfg)
+    assert len(client.calls) == 1  # 첫 시도만 — 재시도 요청은 없다
+
+
+def test_cancellation_gate_blocks_later_chunks(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """둘째 조각 직전에 취소가 보이면 그 조각 요청이 없다."""
+    monkeypatch.setattr(env, "max_workers", lambda: 1)  # 조각을 한 줄로 세워 순서를 잡는다
+    client = FakeClient()
+    _, gate = _gate_after(1)
+    live = _live(monkeypatch, client, gate)
+
+    with pytest.raises(Cancelled):
+        live.transcribe(multi_job(tmp_path), Config())
+    assert len(client.calls) == 1  # 첫 조각만 — 둘째·셋째 요청은 없다
+
+
+def test_cancellation_gate_blocks_the_rejected_parameter_reak(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """400으로 부가 인자를 떼고 다시 부르는 재요청도 게이트를 지난다."""
+
+    class Rejecting(FakeClient):
+        def create(self, **kwargs: object) -> dict[str, object]:
+            self.calls.append(kwargs)
+            if "language" in kwargs:
+                error = RuntimeError("Error code: 400 - unknown parameter 'language'")
+                error.status_code = 400  # type: ignore[attr-defined]
+                raise error
+            return {"segments": []}
+
+    client = Rejecting()
+    _, gate = _gate_after(1)
+    live = _live(monkeypatch, client, gate)
+
+    with pytest.raises(Cancelled):
+        live.transcribe(real_job(tmp_path), Config())
+    assert len(client.calls) == 1  # 거부당한 원요청만 — 떼고 다시 부르는 요청은 없다
+
+
+def test_cancellation_is_not_swallowed_as_a_transcription_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """게이트의 취소는 실패 상태 기록이 아니다 — 결과형 안에서 사라지지 않는다."""
+    client = Throttled()
+    _, gate = _gate_after(1)
+    live = _live(monkeypatch, client, gate)
+    cfg = data_replace(Config(), api_backoff_base=0.0)
+
+    # transcribe_outcome의 `except Exception`은 상태 기록으로 바꿔 삼키는 층이다 —
+    # 취소(BaseException)는 여기를 뚫고 올라가야 실행 전체가 cancelled로 닫힌다.
+    with pytest.raises(Cancelled):
+        transcribe_outcome(live, real_job(tmp_path), cfg)
+
+
+def test_get_transcriber_routes_the_gate_to_the_live_path_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+
+    def gate() -> None:
+        raise Cancelled
+
+    live = get_transcriber(Config(), online=True, cancellation=gate)
+    assert isinstance(live, LiveTranscriber)
+    assert live.cancellation is gate
+    # 픽스처 경로는 외부 호출이 없다 — 게이트를 물려주지 않는다.
+    assert isinstance(get_transcriber(None, cancellation=gate), FixtureTranscriber)
+
+
+def test_stt_client_pins_the_sdk_hidden_retries_to_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SDK 기본 재시도(2)는 게이트 밖에서 조용히 재호출한다 — 재시도는 _retry가 한다.
+
+    실제 SDK로 생성만 증명한다(호출은 없다). 비전 클라이언트와 같은 규율이다.
+    """
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    assert LiveTranscriber(api_key="sk-test")._client().max_retries == 0
+    proxy = LiveTranscriber(api_key="sk-test", base_url="https://stt.example/v1")
+    assert proxy._client().max_retries == 0
 
 
 def test_the_model_and_format_that_carry_times_are_required(
@@ -1046,11 +1195,13 @@ def test_vision_client_takes_explicit_key_and_base_url(
             "api_key": "vision-key",
             "base_url": "https://vision.example/api",
             "max_retries": 0,
+            "timeout": 60.0,
         },
         {
             "api_key": "vision-key",
             "base_url": "https://api.openai.com/v1",
             "max_retries": 0,
+            "timeout": 60.0,
         },
     ]
 
@@ -1075,6 +1226,7 @@ def test_vision_client_ignores_the_environment_and_legacy_helpers(
             "api_key": "vision-key",
             "base_url": "https://api.openai.com/v1",
             "max_retries": 0,
+            "timeout": 60.0,
         }
     ]
 
@@ -1204,3 +1356,411 @@ def test_fixture_responder_rejects_unsafe_block_ids(tmp_path: Path, block_id: st
         FixtureVisionResponder(namespace=tmp_path).decide(
             model="m", payload=VISION_PAYLOAD, block_id=block_id
         )
+
+
+# ─────────────────────────────────────────────────────────────
+#  공개 전송 경계 (A7-1) — 파생 계층의 좁은 요청이 같은 호출 지점을 지난다
+# ─────────────────────────────────────────────────────────────
+
+
+def text_request(tmp_path: Path) -> AudioTranscriptionRequest:
+    """문구 경로 요청 — 확인된 힌트 세 칸만 쓴다(§11.4)."""
+    audio = tmp_path / "final.mp3"
+    audio.write_bytes(b"\x00")
+    chunk = Chunk(audio, 0.0, 24.0, 0)
+    return AudioTranscriptionRequest(
+        chunk=chunk,
+        model=Config().verify_model,
+        response_format="json",
+        languages=("ko",),
+        keywords=("블루펭귄",),
+        prompt="망원동, 아페로",
+    )
+
+
+def timing_request(tmp_path: Path) -> AudioTranscriptionRequest:
+    """시간 경로 요청 — 문구 힌트 칸이 비어 있는 것이 배선 자체다(§11.4)."""
+    audio = tmp_path / "final.mp3"
+    audio.write_bytes(b"\x00")
+    chunk = Chunk(audio, 0.0, 24.0, 0)
+    return AudioTranscriptionRequest(
+        chunk=chunk,
+        model=Config().transcribe_model,
+        response_format="verbose_json",
+        timestamp_granularities=("segment",),
+    )
+
+
+@pytest.mark.parametrize("response_format", ["srt", "vtt", "text", ""])
+def test_transport_rejects_subtitle_formats_before_any_call(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, response_format: str
+) -> None:
+    """srt·vtt는 전송 계약에 없다 — 클라이언트를 만들기도 전에 끝난다."""
+    client = FakeClient()
+    live = _live(monkeypatch, client)
+    request = AudioTranscriptionRequest(
+        chunk=real_job(tmp_path).chunks[0], model="m", response_format=response_format
+    )
+    with pytest.raises(UnsupportedTranscriptionRequest, match="전송 계약에 없다"):
+        live.send_request(request, Config(), kind=CAPTION_TEXT_KIND)
+    assert client.calls == []
+
+
+def test_transport_rejects_broken_shapes_before_any_call(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    client = FakeClient()
+    live = _live(monkeypatch, client)
+    chunk = real_job(tmp_path).chunks[0]
+    broken = [
+        AudioTranscriptionRequest(chunk=chunk, model="  ", response_format="json"),
+        AudioTranscriptionRequest(
+            chunk=chunk, model="m", response_format="json", prompt="줄\n바꿈"
+        ),
+        AudioTranscriptionRequest(chunk=chunk, model="m", response_format="json", keywords=("",)),
+        AudioTranscriptionRequest(
+            chunk=chunk, model="m", response_format="json", timestamp_granularities=("frame",)
+        ),
+        AudioTranscriptionRequest(
+            chunk=chunk,
+            model="m",
+            response_format="json",
+            timestamp_granularities=("segment",),  # 입자는 verbose_json과만 짝한다
+        ),
+        AudioTranscriptionRequest(
+            chunk=chunk, model="m", response_format="json", temperature=float("nan")
+        ),
+    ]
+    for request in broken:
+        with pytest.raises(UnsupportedTranscriptionRequest):
+            live.send_request(request, Config(), kind=CAPTION_TEXT_KIND)
+    assert client.calls == []
+
+
+def test_text_request_sends_native_hint_arrays(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """설치된 SDK(3.8)는 languages·keywords를 정식 인자로 받는다 — extra_body 없이."""
+    client = FakeClient()
+    _live(monkeypatch, client).send_request(
+        text_request(tmp_path), Config(), kind=CAPTION_TEXT_KIND
+    )
+    (call,) = client.calls
+    assert call["languages"] == ["ko"]
+    assert call["keywords"] == ["블루펭귄"]
+    assert call["prompt"] == "망원동, 아페로"
+    assert "extra_body" not in call
+    assert "timestamp_granularities" not in call
+    assert call["response_format"] == "json"
+
+
+def test_empty_hints_are_omitted_not_sent_empty(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """빈 힌트는 빈 배열로 보내지 않고 필드째 뺀다(§11.4)."""
+    client = FakeClient()
+    request = AudioTranscriptionRequest(
+        chunk=real_job(tmp_path).chunks[0], model="m", response_format="json"
+    )
+    _live(monkeypatch, client).send_request(request, Config(), kind=CAPTION_TEXT_KIND)
+    (call,) = client.calls
+    for absent in ("languages", "keywords", "prompt", "extra_body"):
+        assert absent not in call
+
+
+def test_old_sdk_gets_hints_through_documented_extra_body(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """정식 인자가 없는 옛 SDK는 extra_body 길로 — 같은 필드를 두 경로로 보내지 않는다."""
+    monkeypatch.setattr(transcribe_module, "sdk_native_hint_params", lambda: ())
+    client = FakeClient()
+    _live(monkeypatch, client).send_request(
+        text_request(tmp_path), Config(), kind=CAPTION_TEXT_KIND
+    )
+    (call,) = client.calls
+    assert call["extra_body"] == {"languages": ["ko"], "keywords": ["블루펭귄"]}
+    assert "languages" not in call and "keywords" not in call  # 중복 전달 금지
+    assert call["prompt"] == "망원동, 아페로"  # prompt는 옛 SDK에서도 정식 인자다
+
+
+def test_timing_request_carries_no_text_hints(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """문구 힌트가 시간 요청에 실리는 일은 요청 칸이 아니라 배선에서 막힌다."""
+    client = FakeClient()
+    _live(monkeypatch, client).send_request(
+        timing_request(tmp_path), Config(), kind=CAPTION_TIMING_KIND
+    )
+    (call,) = client.calls
+    for absent in ("prompt", "keywords", "languages", "extra_body"):
+        assert absent not in call
+    assert call["timestamp_granularities"] == ["segment"]
+    assert call["response_format"] == "verbose_json"
+
+
+def test_transport_retries_transient_failures_and_propagates(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """429는 `_retry`의 바운드 안에서만 다시 묻는다 — 못 하면 그대로 올라간다."""
+    client = Throttled()
+    live = _live(monkeypatch, client)
+    cfg = data_replace(Config(), api_max_retries=3, api_backoff_base=0.0)
+    with pytest.raises(RuntimeError, match="429"):
+        live.send_request(timing_request(tmp_path), cfg, kind=CAPTION_TIMING_KIND)
+    assert len(client.calls) == 3  # 바운드를 넘은 몰래 재시도는 없다
+
+
+def test_transport_does_not_silently_drop_fields_on_400(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """확인된 등록표가 틀렸다는 신호다 — 인자를 떼고 다시 부르지 않는다(§11.8)."""
+
+    class Rejecting(FakeClient):
+        def create(self, **kwargs: object) -> dict[str, object]:
+            self.calls.append(kwargs)
+            error = RuntimeError("Error code: 400 - unknown parameter 'languages'")
+            error.status_code = 400  # type: ignore[attr-defined]
+            raise error
+
+    client = Rejecting()
+    live = _live(monkeypatch, client)
+    with pytest.raises(RuntimeError, match="400"):
+        live.send_request(text_request(tmp_path), Config(), kind=CAPTION_TEXT_KIND)
+    assert len(client.calls) == 1  # 레거시와 달리 축소 재요청이 없다
+
+
+def test_transport_cancellation_gate_blocks_before_the_call(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """승인 직전의 취소 확인 — 게이트가 닫히면 SDK를 부르지 않는다(S1A)."""
+    client = FakeClient()
+
+    def gate() -> None:
+        raise Cancelled
+
+    live = _live(monkeypatch, client, gate)
+    with pytest.raises(Cancelled):
+        live.send_request(timing_request(tmp_path), Config(), kind=CAPTION_TIMING_KIND)
+    assert client.calls == []
+
+
+def test_transport_observer_sees_kind_and_sanitized_options(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """관찰 훅은 파생 계층 호출에도 그대로 붙는다 — 인자 사본에 자격 칸은 없다."""
+    metas: list[object] = []
+    responses: list[object] = []
+
+    class Ledger:
+        def authorize(self, meta: object) -> None:
+            metas.append(meta)
+
+        def on_response(self, ticket: object, meta: object, response: object) -> None:
+            responses.append(response)
+
+        def on_error(self, ticket: object, meta: object, error: object) -> None:
+            raise AssertionError("성공 경로에서 오류 훅은 없다")
+
+    client = FakeClient()
+    monkeypatch.setattr(LiveTranscriber, "_client", lambda self: client)  # type: ignore[arg-type]
+    live = LiveTranscriber(api_key="sk-test", observer=Ledger())  # type: ignore[arg-type]
+    payload = live.send_request(
+        timing_request(tmp_path), Config(), kind=CAPTION_TIMING_KIND, stem="final-01"
+    )
+    (meta,) = metas
+    assert meta.kind == CAPTION_TIMING_KIND
+    assert meta.operation == TRANSCRIPTION_OPERATION
+    assert meta.stem == "final-01"
+    assert meta.options["response_format"] == "verbose_json"
+    assert "api_key" not in meta.options
+    assert payload == {"segments": []}
+    assert len(responses) == 1
+
+
+# ─────────────────────────────────────────────────────────────
+#  Claude Messages 경계(D54) — Luna 경계와 같은 문·관찰·취소
+# ─────────────────────────────────────────────────────────────
+
+
+CLAUDE_PAYLOAD = {
+    "max_tokens": 16,
+    "messages": [{"role": "user", "content": [{"type": "text", "text": "안녕"}]}],
+}
+
+
+class _ClaudeReply:
+    status = 200
+    headers = {"request-id": "req_synthetic"}
+
+    def read(self) -> bytes:
+        return json.dumps({"type": "message", "stop_reason": "end_turn", "content": []}).encode()
+
+    def __enter__(self) -> _ClaudeReply:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+
+class _ClaudeOpener:
+    """Claude 클라이언트의 전송 자리 — 보낸 본문을 기록하고 정해진 응답을 돌려준다."""
+
+    def __init__(self) -> None:
+        self.bodies: list[dict[str, Any]] = []
+
+    def __call__(self, request: Any, timeout: float) -> _ClaudeReply:
+        self.bodies.append(json.loads(request.data))
+        return _ClaudeReply()
+
+
+def _claude_client(opener: _ClaudeOpener) -> Any:
+    from vlogsrt.anthropic_messages import ClaudeMessagesClient
+
+    return ClaudeMessagesClient(
+        api_key="sk-ant-synthetic",
+        base_url="https://api.anthropic.com",
+        api_version="2023-06-01",
+        timeout_seconds=30.0,
+        opener=opener,
+    )
+
+
+class _ClaudeLedger:
+    def __init__(self, trace: list[str]) -> None:
+        self.trace = trace
+        self.metas: list[Any] = []
+        self.responses: list[Any] = []
+
+    def authorize(self, meta: Any) -> str:
+        self.trace.append("authorize")
+        self.metas.append(meta)
+        return "ticket"
+
+    def on_response(self, ticket: object, meta: Any, response: Any) -> None:
+        self.trace.append("response")
+        self.responses.append(response)
+
+    def on_error(self, ticket: object, meta: Any, error: Exception) -> None:
+        self.trace.append("error")
+
+
+def test_claude_messages_are_closed_without_explicit_online() -> None:
+    from vlogsrt.transcribe import request_claude_messages
+
+    opener = _ClaudeOpener()
+    with pytest.raises(RuntimeError, match="online=True"):
+        request_claude_messages(
+            _claude_client(opener), model="claude-opus-5-5", payload=CLAUDE_PAYLOAD
+        )
+    with pytest.raises(RuntimeError, match="online=True"):
+        request_claude_messages(
+            _claude_client(opener), model="claude-opus-5-5", payload=CLAUDE_PAYLOAD, online=False
+        )
+    assert opener.bodies == []
+
+
+def test_claude_payload_redefining_model_fails_before_authorization() -> None:
+    from vlogsrt.transcribe import request_claude_messages
+
+    opener = _ClaudeOpener()
+    ledger = _ClaudeLedger([])
+    with pytest.raises(TypeError, match="model"):
+        request_claude_messages(
+            _claude_client(opener),
+            model="claude-opus-5-5",
+            payload={**CLAUDE_PAYLOAD, "model": "other"},
+            online=True,
+            observer=ledger,
+        )
+    assert ledger.metas == [] and opener.bodies == []
+
+
+def test_a_non_claude_client_fails_before_authorization() -> None:
+    from vlogsrt.transcribe import request_claude_messages
+
+    ledger = _ClaudeLedger([])
+    with pytest.raises(TypeError, match="Claude"):
+        request_claude_messages(
+            object(), model="claude-opus-5-5", payload=CLAUDE_PAYLOAD, online=True, observer=ledger
+        )
+    assert ledger.metas == []
+
+
+def test_claude_observer_hooks_fire_with_the_messages_operation() -> None:
+    from vlogsrt.transcribe import MESSAGES_OPERATION, request_claude_messages
+
+    trace: list[str] = []
+    opener = _ClaudeOpener()
+    ledger = _ClaudeLedger(trace)
+    reply = request_claude_messages(
+        _claude_client(opener),
+        model="claude-opus-5-5",
+        payload=CLAUDE_PAYLOAD,
+        online=True,
+        observer=ledger,
+    )
+    assert trace == ["authorize", "response"]
+    (meta,) = ledger.metas
+    assert meta.operation == MESSAGES_OPERATION == "messages.create"
+    assert meta.model == "claude-opus-5-5"
+    assert meta.options["max_tokens"] == 16
+    assert opener.bodies == [{"model": "claude-opus-5-5", **CLAUDE_PAYLOAD}]
+    assert ledger.responses == [reply]
+    assert reply["request_id"] == "req_synthetic"
+
+
+def test_claude_cancellation_gates_the_send() -> None:
+    from vlogsrt.transcribe import request_claude_messages
+
+    class Stop(BaseException):
+        pass
+
+    def gate() -> None:
+        raise Stop
+
+    opener = _ClaudeOpener()
+    ledger = _ClaudeLedger([])
+    with pytest.raises(Stop):
+        request_claude_messages(
+            _claude_client(opener),
+            model="claude-opus-5-5",
+            payload=CLAUDE_PAYLOAD,
+            online=True,
+            observer=ledger,
+            cancellation=gate,
+        )
+    with pytest.raises(Stop):  # 관찰자 없는 길도 전송 전에 멈춘다
+        request_claude_messages(
+            _claude_client(opener),
+            model="claude-opus-5-5",
+            payload=CLAUDE_PAYLOAD,
+            online=True,
+            cancellation=gate,
+        )
+    assert opener.bodies == [] and ledger.metas == []
+
+
+def test_the_live_transcriber_never_prints_its_key() -> None:
+    live = LiveTranscriber(api_key="sk-synthetic-stt-key", base_url="https://example.test/v1")
+    assert "sk-synthetic-stt-key" not in repr(live)
+    assert "sk-synthetic-stt-key" not in str(live)
+    assert live.api_key == "sk-synthetic-stt-key"  # 값은 그대로 쓰인다 — 보이지 않을 뿐
+
+
+def test_create_claude_client_takes_only_given_values() -> None:
+    from vlogsrt.transcribe import create_claude_client, is_claude_client
+
+    client = create_claude_client(
+        api_key="sk-ant-synthetic",
+        base_url="https://api.anthropic.com",
+        api_version="2023-06-01",
+        timeout_seconds=300.0,
+    )
+    assert is_claude_client(client)
+    assert not is_claude_client(object())
+    assert (client.base_url, client.api_version, client.timeout_seconds) == (
+        "https://api.anthropic.com",
+        "2023-06-01",
+        300.0,
+    )
+    assert "sk-ant-synthetic" not in repr(client)

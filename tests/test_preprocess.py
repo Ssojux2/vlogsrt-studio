@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import array
+import ast
 import json
 import shutil
 import subprocess
+import sys
+import time
 from fractions import Fraction
 from pathlib import Path
 
@@ -27,6 +30,7 @@ from vlogsrt.preprocess import (
     probe_video_stream,
     split_at,
 )
+from vlogsrt.task_runtime import cancellation_scope
 
 
 def _fake_run(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
@@ -600,7 +604,7 @@ def test_extraction_command_preserves_the_measured_clock(
     extract_pcm_s16le(tmp_path / "in.mp4", tmp_path / "out.pcm", stream_index=1)
 
     assert commands[-1] == [
-        "ffmpeg", "-hide_banner", "-loglevel", "info", "-nostdin", "-y",
+        "ffmpeg", "-hide_banner", "-loglevel", "info", "-nostats", "-nostdin", "-y",
         "-copyts",
         "-i", str(tmp_path / "in.mp4"),
         "-map", "0:5",
@@ -721,6 +725,51 @@ def test_extraction_rejects_nonpositive_converted_fields(
     """채널·주파수·프레임 길이가 0이면 시계가 아니다 — pts만 음수를 허용한다."""
     _fake_ffmpeg_ffprobe(monkeypatch, _probe_json(), line, 0)
     with pytest.raises(RuntimeError, match="양수"):
+        extract_pcm_s16le(tmp_path / "in.mov", tmp_path / "out.pcm", stream_index=0)
+
+
+# 실측 꼴: ffmpeg 진행 통계 줄(`\r`로 끝난다)이 ashowinfo 한 프레임의 av_log 호출 사이에
+# 끼어, 꼬리(`D3780D5D ]`)가 새 접두어를 달고 다시 찍혔다. 사이 문자가 `\r`이든 `\n`이든
+# `splitlines()`가 나누는 자리만 다를 뿐 조각은 `n:` 없는 줄로 남는다.
+_STATS_LINE = "size=    1792KiB time=00:00:00.00 bitrate=N/A speed=   0x elapsed=0:00:00.50    "
+_SPLIT_HEAD = (
+    "[Parsed_ashowinfo_3 @ 0x1] n:1 pts:1024 pts_time:0.064 fmt:s16 channels:2 chlayout:stereo "
+    "rate:16000 nb_samples:1024 checksum:D3780D5D plane_checksums: [ "
+)
+_SPLIT_TAIL = "[Parsed_ashowinfo_3 @ 0x1] D3780D5D ]"
+
+
+@pytest.mark.parametrize(
+    "split",
+    [
+        _SPLIT_HEAD + _STATS_LINE + "\r" + _SPLIT_TAIL,
+        _SPLIT_HEAD + "\n" + _STATS_LINE + "\r" + _SPLIT_TAIL,
+        _SPLIT_HEAD + "\n" + _STATS_LINE + "\n" + _SPLIT_TAIL,
+    ],
+    ids=["stats-joined-by-cr", "stats-own-line-cr", "stats-own-line-lf"],
+)
+def test_extraction_ignores_ashowinfo_fragments_split_by_another_log_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, split: str
+) -> None:
+    """다른 스레드의 줄이 한 프레임 기록을 갈라도 조각은 프레임이 아니다 — 원점·길이는 그대로."""
+    stderr = "\n".join([_ashowinfo(0, 0, nb=1024), split, _ashowinfo(2, 2048, nb=1024)])
+    _fake_ffmpeg_ffprobe(monkeypatch, _probe_json(start_time="0"), stderr, 3 * 1024 * 2 * 2)
+    extraction = extract_pcm_s16le(tmp_path / "in.mov", tmp_path / "out.pcm", stream_index=0)
+
+    assert extraction.sample_count == 3072
+    assert extraction.pcm_sample0_file_time == 0
+
+
+def test_extraction_fails_when_a_frame_record_is_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """조각을 건너뛰는 대가로 프레임 번호가 이어지는지 본다 — 빠진 기록은 시계 증거가 아니다.
+
+    pts와 파일 길이는 두 프레임으로 맞아 떨어지게 둔다. 그래도 n:1이 없으면 거절한다.
+    """
+    stderr = "\n".join([_ashowinfo(0, 0, nb=1024), _ashowinfo(2, 1024, nb=1024)])
+    _fake_ffmpeg_ffprobe(monkeypatch, _probe_json(start_time="0"), stderr, 2 * 1024 * 2 * 2)
+    with pytest.raises(RuntimeError, match="이어지지"):
         extract_pcm_s16le(tmp_path / "in.mov", tmp_path / "out.pcm", stream_index=0)
 
 
@@ -1590,3 +1639,270 @@ def _image_size(path: Path) -> tuple[int, int]:
     )  # fmt: skip
     first, second = completed.stdout.split()
     return int(first), int(second)
+
+
+# ─────────────────────────────────────────────────────────────
+#  시작 타임코드 (W-16, D56) — Final Cut 클립 시작의 재료
+# ─────────────────────────────────────────────────────────────
+
+
+def _timecode_probe(
+    monkeypatch: pytest.MonkeyPatch, streams: list[dict], format_tags: dict | None = None
+) -> list[list[str]]:
+    commands: list[list[str]] = []
+
+    def run_probe(command: list[str]) -> str:
+        commands.append(command)
+        document: dict[str, object] = {"streams": streams}
+        if format_tags is not None:
+            document["format"] = {"tags": format_tags}
+        return json.dumps(document)
+
+    monkeypatch.setattr(preprocess, "_run_probe", run_probe)
+    monkeypatch.setattr(preprocess, "require_ffmpeg", lambda tool="ffmpeg": tool)
+    return commands
+
+
+def test_probe_timecode_prefers_the_tmcd_track_in_one_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    commands = _timecode_probe(
+        monkeypatch,
+        [
+            {"codec_type": "video", "codec_tag_string": "hvc1", "avg_frame_rate": "30000/1001",
+             "tags": {"timecode": "01:00:00;00"}},
+            {"codec_type": "data", "codec_tag_string": "tmcd", "avg_frame_rate": "30000/1001",
+             "tags": {"timecode": "12:56:29;10"}},
+            {"codec_type": "audio", "codec_tag_string": "mp4a", "avg_frame_rate": "0/0"},
+        ],
+    )  # fmt: skip
+    found = preprocess.probe_timecode(tmp_path / "a.mov")
+    assert found == preprocess.SourceTimecode("12:56:29;10", Fraction(30000, 1001))
+    assert len(commands) == 1 and commands[0][0] == "ffprobe"
+
+
+def test_probe_timecode_takes_video_rate_when_tmcd_rate_is_unknown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _timecode_probe(
+        monkeypatch,
+        [
+            {"codec_type": "video", "codec_tag_string": "avc1", "avg_frame_rate": "25/1"},
+            {"codec_type": "data", "codec_tag_string": "tmcd", "avg_frame_rate": "0/0",
+             "tags": {"timecode": "10:00:00:00"}},
+        ],
+    )  # fmt: skip
+    found = preprocess.probe_timecode(tmp_path / "a.mov")
+    assert found == preprocess.SourceTimecode("10:00:00:00", Fraction(25))
+
+
+def test_probe_timecode_reads_a_video_stream_tag_without_tmcd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _timecode_probe(
+        monkeypatch,
+        [
+            {"codec_type": "video", "avg_frame_rate": "24000/1001",
+             "tags": {"timecode": "00:00:01:00"}},
+        ],
+    )  # fmt: skip
+    found = preprocess.probe_timecode(tmp_path / "a.mov")
+    assert found == preprocess.SourceTimecode("00:00:01:00", Fraction(24000, 1001))
+
+
+def test_probe_timecode_without_any_timecode_is_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _timecode_probe(monkeypatch, [{"codec_type": "video", "avg_frame_rate": "30/1", "tags": {}}])
+    assert preprocess.probe_timecode(tmp_path / "a.mov") is None
+
+
+def test_probe_timecode_without_a_known_rate_fails_loudly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _timecode_probe(
+        monkeypatch,
+        [
+            {"codec_type": "data", "codec_tag_string": "tmcd", "avg_frame_rate": "0/0",
+             "tags": {"timecode": "10:00:00:00"}},
+        ],
+    )  # fmt: skip
+    with pytest.raises(RuntimeError, match="레이트"):
+        preprocess.probe_timecode(tmp_path / "a.mov")
+
+
+def _encode_mov(target: Path, *extra: str) -> Path:
+    subprocess.run(
+        [
+            "ffmpeg", "-hide_banner", "-nostdin", "-y",
+            "-f", "lavfi", "-i", "testsrc=size=64x36:rate=30000/1001:duration=0.5",
+            "-c:v", "mpeg4", *extra,
+            str(target),
+        ],
+        capture_output=True,
+        check=True,
+    )  # fmt: skip
+    return target
+
+
+@needs_ffmpeg
+def test_probe_timecode_reads_a_real_drop_frame_track(tmp_path: Path) -> None:
+    media = _encode_mov(tmp_path / "tc.mov", "-timecode", "12:56:29;10")
+    found = preprocess.probe_timecode(media)
+    assert found == preprocess.SourceTimecode("12:56:29;10", Fraction(30000, 1001))
+
+
+@needs_ffmpeg
+def test_probe_timecode_of_a_real_file_without_timecode_is_none(tmp_path: Path) -> None:
+    assert preprocess.probe_timecode(_encode_mov(tmp_path / "plain.mov")) is None
+
+
+def test_probe_timecode_reads_a_container_only_upper_case_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """MKV·MXF: ffmpeg 9는 타임코드를 컨테이너에만 `TIMECODE`로 적는다 — 한 번의 호출에서 읽는다."""
+    commands = _timecode_probe(
+        monkeypatch,
+        [{"codec_type": "video", "avg_frame_rate": "25/1", "tags": {"ENCODER": "x"}}],
+        format_tags={"TIMECODE": "10:00:00:00"},
+    )
+    found = preprocess.probe_timecode(tmp_path / "a.mkv")
+    assert found == preprocess.SourceTimecode("10:00:00:00", Fraction(25))
+    (command,) = commands
+    assert "format_tags=timecode" in command[command.index("-show_entries") + 1]
+
+
+def test_probe_timecode_matches_an_upper_case_stream_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _timecode_probe(
+        monkeypatch,
+        [{"codec_type": "video", "avg_frame_rate": "50/1", "tags": {"TIMECODE": "01:02:03:04"}}],
+        format_tags={"timecode": "09:00:00:00"},
+    )
+    found = preprocess.probe_timecode(tmp_path / "a.mkv")
+    assert found == preprocess.SourceTimecode("01:02:03:04", Fraction(50))  # 스트림이 먼저다
+
+
+@pytest.mark.parametrize("value", ["", "  ", 7, ["10:00:00:00"]])
+def test_reported_but_unreadable_timecode_fails_naming_the_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, value: object
+) -> None:
+    """타임코드가 보였는데 None을 돌려주면 클립 시작이 조용히 0이 된다 — 죽는다."""
+    _timecode_probe(
+        monkeypatch,
+        [{"codec_type": "video", "avg_frame_rate": "25/1"}],
+        format_tags={"Timecode": value},
+    )
+    with pytest.raises(RuntimeError, match="broken.mkv"):
+        preprocess.probe_timecode(tmp_path / "broken.mkv")
+
+
+def test_container_timecode_without_any_video_rate_fails_naming_the_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _timecode_probe(
+        monkeypatch,
+        [{"codec_type": "video", "avg_frame_rate": "0/0"}],
+        format_tags={"TIMECODE": "10:00:00:00"},
+    )
+    with pytest.raises(RuntimeError, match="레이트.*norate.mxf|norate.mxf.*레이트"):
+        preprocess.probe_timecode(tmp_path / "norate.mxf")
+
+
+@needs_ffmpeg
+def test_probe_timecode_reads_a_real_matroska_container_timecode(tmp_path: Path) -> None:
+    media = tmp_path / "tc.mkv"
+    subprocess.run(
+        [
+            "ffmpeg", "-hide_banner", "-nostdin", "-y",
+            "-f", "lavfi", "-i", "testsrc=size=64x36:rate=25:duration=0.4",
+            "-c:v", "mpeg4", "-timecode", "10:00:00:00",
+            str(media),
+        ],
+        capture_output=True,
+        check=True,
+    )  # fmt: skip
+    assert preprocess.probe_timecode(media) == preprocess.SourceTimecode(
+        "10:00:00:00", Fraction(25)
+    )
+
+
+# ─── D59 — 시간 한도는 ProcessTimeout(RuntimeError)으로만 나간다 ─────────────────
+
+_SLEEPER = [sys.executable, "-c", "import time; time.sleep(30)"]
+
+
+def test_a_timeout_is_a_process_timeout_naming_the_step_and_the_limit() -> None:
+    """`TimeoutExpired`는 `SubprocessError`라 RuntimeError 그물을 빠져나갔다(0016·0018)."""
+    started = time.monotonic()
+    with pytest.raises(preprocess.ProcessTimeout) as caught:
+        preprocess.run_process(
+            _SLEEPER, capture_output=True, text=True, check=False, timeout=1.0, step="장면 컷 찾기"
+        )
+    error = caught.value
+    assert isinstance(error, RuntimeError)
+    assert not isinstance(error, subprocess.SubprocessError)
+    assert isinstance(error.__cause__, subprocess.TimeoutExpired)
+    assert error.limit_seconds == 1.0 and error.step == "장면 컷 찾기"
+    assert str(error).startswith("장면 컷 찾기 — 시간 한도 1초를 넘겨 멈췄습니다")
+    assert time.monotonic() - started < 20  # 자식은 기다리지 않고 멈춘다
+
+
+def test_a_timeout_under_cancellation_is_also_a_process_timeout() -> None:
+    """작업 안(취소를 듣는 실행)은 자체 마감을 잰다 — 같은 번역을 지난다."""
+    started = time.monotonic()
+    with cancellation_scope(lambda: None), pytest.raises(preprocess.ProcessTimeout) as caught:
+        preprocess.run_process(_SLEEPER, capture_output=True, text=True, check=False, timeout=0.5)
+    assert caught.value.step == Path(sys.executable).name  # 단계 이름이 없으면 도구 이름
+    assert time.monotonic() - started < 20
+
+
+def test_run_without_a_limit_keeps_the_named_cancellable_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """한도를 주지 않은 실행은 예전과 같다 — 다만 그 상한은 이름 붙은 값에서 온다(규칙 8)."""
+    monkeypatch.setattr(preprocess, "_CANCELLABLE_TIMEOUT_SECONDS", 0.5)
+    with cancellation_scope(lambda: None), pytest.raises(RuntimeError, match="시간 한도"):
+        preprocess._run(_SLEEPER)
+
+
+def test_run_hands_its_limit_and_step_to_the_process(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, object] = {}
+
+    def recording(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        seen.update(kwargs)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(preprocess, "run_process", recording)
+    preprocess._run(["ffmpeg"], timeout=1234.5, step="분석 프록시 만들기")
+    assert (seen["timeout"], seen["step"]) == (1234.5, "분석 프록시 만들기")
+    seen.clear()
+    preprocess._run(["ffprobe"])
+    assert "timeout" not in seen  # 한도가 없으면 예전 그대로(취소를 듣지 않는 실행은 무한)
+
+
+def test_no_1800_second_literal_lives_inside_a_function() -> None:
+    """예전의 `timeout=1800.0` 둘은 함수 안 리터럴이었다 — 이름 붙은 값·설정으로 옮겼다."""
+    tree = ast.parse(Path(preprocess.__file__).read_text(encoding="utf-8"))
+    functions = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef | ast.AsyncFunctionDef)]
+    literals = [
+        node.lineno
+        for function in functions
+        for node in ast.walk(function)
+        if isinstance(node, ast.Constant) and node.value in (1800, 1800.0)
+    ]
+    assert literals == []
+
+
+def test_staging_leftovers_match_only_the_reserved_temp_names(tmp_path: Path) -> None:
+    """강제 종료된 만들기의 `.part`만 고른다 — 이웃 파일·게시본·심볼릭 링크는 아니다."""
+    target = tmp_path / "proxy.mp4"
+    reserved = preprocess._reserve_staging_temp(target)
+    old = tmp_path / ".proxy.mp4.74770.668bb83e.part"
+    old.write_bytes(b"x")
+    for name in ("proxy.mp4", ".proxy.mp4.part", ".other.mp4.1.0123abcd.part", "build.lock"):
+        (tmp_path / name).write_bytes(b"y")
+    (tmp_path / ".proxy.mp4.9.deadbeef.part").symlink_to(tmp_path / "proxy.mp4")
+    assert preprocess.staging_leftovers(target) == tuple(sorted((old, reserved)))
+    assert preprocess.staging_leftovers(tmp_path / "missing" / "proxy.mp4") == ()

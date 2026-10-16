@@ -53,7 +53,7 @@ import Testing
   for base in [appGroupJob, externalJob] {
     let written = try String(contentsOf: base.appendingPathComponent("cancellation.jsonl"), encoding: .utf8)
     #expect(written == expectedLine)
-    #expect(written.contains("\"protocol_version\":\"1.2\""))
+    #expect(written.contains("\"protocol_version\":\"\(ProtocolCodec.analysisVersion)\""))
   }
 
   // 외부 쪽 기록을 App Group으로 가져온다 — 이미 있으면 덮어쓰지 않는다.
@@ -201,7 +201,8 @@ import Testing
   #expect(!path.contains("/opt/homebrew"))
   #expect(path.hasSuffix(":/usr/bin:/bin"))
 
-  // 키가 없으면(오프라인 실행) 키 변수 자체가 없다 — 빈 값으로 오인하지 않는다.
+  // 키가 없어도 운반자는 **항시** 실린다(S2A-2): 빈 값은 '이 실행에는 키가
+  // 없다'는 명시적 선언이라 자식 안에서 상속·dotenv의 낡은 키 부활을 닫는다.
   let offline = try BundledEngineInvocation.create(
     operation: .roughcut,
     jobID: "job-42",
@@ -209,7 +210,7 @@ import Testing
     engineRoot: engineRoot,
     apiKey: nil
   )
-  #expect(offline.environment[BundledEngineInvocation.apiKeyEnvironmentName] == nil)
+  #expect(offline.environment[BundledEngineInvocation.apiKeyEnvironmentName] == "")
   #expect(offline.environment[BundledEngineInvocation.pathEnvironmentName] != nil)
   #expect(
     BundledEngineInvocation.bundledToolPath(engineRoot: engineRoot)
@@ -274,34 +275,56 @@ func wavHeader(rate: UInt32) -> Data {
   return data
 }
 
-@Test func mediaAssetProtocolValidatesLocationsAndCreations() throws {
-  let root = FileManager.default.temporaryDirectory
-    .appendingPathComponent(UUID().uuidString, isDirectory: true)
-  let mediaRoot = root.appendingPathComponent("media", isDirectory: true)
-  let clip = mediaRoot.appendingPathComponent("clip.mov")
-  try FileManager.default.createDirectory(at: mediaRoot, withIntermediateDirectories: true)
-  try Data("media".utf8).write(to: clip)
-  defer { try? FileManager.default.removeItem(at: root) }
+@Test func mediaAssetProtocolAnswersTheDocumentedRecords() throws {
+  let folder = FileManager.default.temporaryDirectory
+    .appendingPathComponent("share-staging", isDirectory: true)
 
-  let inside = MediaAssetLocation.validate(assetID: "a1", fileURL: clip, allowedRoots: [mediaRoot])
-  #expect(inside.isUnderAllowedRoot)
-  let outside = MediaAssetLocation.validate(
-    assetID: "a1", fileURL: root.appendingPathComponent("outside.mov"), allowedRoots: [mediaRoot])
-  #expect(!outside.isUnderAllowedRoot)
+  // asset location — XML 전용 내보내기의 답: 미디어는 받지 않고 FCPXML만 받는다.
+  let location = AssetLocationRecord.xmlOnly(folder: folder, baseName: "에피소드 12")
+  #expect(location.hasMedia == false)
+  #expect(location.hasDescription == true)
+  #expect(location.cocoaDictionary["basename"] as? String == "에피소드 12")
+  #expect(location.cocoaDictionary["hasMedia"] as? Bool == false)
+  #expect(location.cocoaDictionary["hasDescription"] as? Bool == true)
+  #expect((location.cocoaDictionary["folder"] as? URL) == folder)
 
-  let creation = try MediaAssetCreation.validate(assetID: "render-1", fileURL: clip)
-  #expect(creation.assetID == "render-1")
-  #expect(throws: MediaAssetProtocolError.self) {
-    _ = try MediaAssetCreation.validate(assetID: "", fileURL: clip)
-  }
-  #expect(MediaDataOptions.analysis.maxLongEdge == 512)
-  #expect(MediaDataOptions.analysis.preferProxy == false)
+  // library location — 라이브러리 보관을 원하지 않는다는 명시적 답(플래그 둘뿐).
+  let library = LibraryLocationRecord.none()
+  #expect(library.hasArchive == false)
+  #expect(library.hasLibraryDescription == false)
+  #expect(library.cocoaDictionary.count == 2)
+  #expect(library.cocoaDictionary["hasArchive"] as? Bool == false)
+  #expect(library.cocoaDictionary["hasDescription"] as? Bool == false)
+
+  // data options 답 — 후보에서 "None" 보기와 1.14에 가장 가까운 버전을 고른다.
+  let reply = DataOptionsReply.choose(
+    availableMetadataSets: ["Camera View", "None"],
+    availableVersions: ["1.13", "1.14", "1.15"])
+  #expect(reply.metadataViewName == "None")
+  #expect(reply.dtdVersion == "1.14")
+  // 1.14가 없으면 가장 가까운 아래(1.13)지 위(1.16)가 아니다.
+  let fallback = DataOptionsReply.choose(
+    availableMetadataSets: [], availableVersions: ["1.13", "1.16"])
+  #expect(fallback.metadataViewName == nil)
+  #expect(fallback.dtdVersion == "1.13")
+  let empty = DataOptionsReply.choose(availableMetadataSets: [], availableVersions: [])
+  #expect(empty.metadataViewName == nil)
+  #expect(empty.dtdVersion == nil)
+  #expect(reply.cocoaDictionary["metadataSet"] as? String == "None")
+  #expect(reply.cocoaDictionary["descriptionVersion"] as? String == "1.14")
+
+  // metadata 답 — 받은 키를 그대로 되돌리고 share.id(추적 ID)를 보탠다.
+  let metadata = ShareMetadataReply.reply(
+    received: ["com.apple.proapps.share.episodeID": "MyNewEpisode"],
+    uniqueID: "asset-track-1")
+  #expect(metadata["com.apple.proapps.share.episodeID"] as? String == "MyNewEpisode")
+  #expect(metadata[ShareMetadataReply.shareIDKey] as? String == "asset-track-1")
 }
 
 @Test func shareDestinationReportsInstallStateAgainstTheBundledRevision() throws {
   let root = FileManager.default.temporaryDirectory
     .appendingPathComponent(UUID().uuidString, isDirectory: true)
-  let installed = root.appendingPathComponent("ShareTemplates", isDirectory: true)
+  let installed = root.appendingPathComponent("Share Destinations", isDirectory: true)
   try FileManager.default.createDirectory(at: installed, withIntermediateDirectories: true)
   defer { try? FileManager.default.removeItem(at: root) }
 
@@ -323,5 +346,5 @@ func wavHeader(rate: UInt32) -> Data {
 
   #expect(
     ShareDestination.defaultInstalledDirectory()
-      .path.hasSuffix("Library/Application Support/ProApps/ShareTemplates"))
+      .path.hasSuffix("Library/Application Support/ProApps/Share Destinations"))
 }

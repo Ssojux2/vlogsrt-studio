@@ -48,6 +48,18 @@ from vlogsrt.project.workflow_protocol import (
 )
 
 
+@pytest.fixture(autouse=True)
+def supported_audio_topology(monkeypatch: pytest.MonkeyPatch) -> None:
+    """이 파일의 합성 미디어는 오디오 스트림 하나다(S2A-2 위상 관문의 전제).
+
+    준비 왕복(inspect)이 실제 위상 검사를 지나므로 확인 함수만 1스트림으로
+    대신한다 — 검사 자체의 경로는 test_media_topology.py가 든다.
+    """
+    from vlogsrt.project import topology
+
+    monkeypatch.setattr(topology, "probe_audio_stream_count", lambda source: 1)
+
+
 def _project(tmp_path: Path) -> tuple[Path, object]:
     media = tmp_path / "clip.mov"
     media.write_bytes(b"synthetic-media")
@@ -335,7 +347,7 @@ def test_staged_cli_roundtrip_applies_only_the_reviewed_candidate(
     assert cli.main(["project", "roughcut", str(workspace), "-o", str(roughcut)]) == 0
 
     assert roughcut.is_file()
-    assert WorkflowJournal.open(workspace / "workflow.jsonl").state == "roughcut_imported"
+    assert WorkflowJournal.open(workspace / "workflow.jsonl").state == "roughcut_generated"
     root = ET.fromstring(roughcut.read_bytes())
     markers = root.findall("library/event/project/sequence/spine/asset-clip/marker")
     assert len(markers) == 1
@@ -375,7 +387,7 @@ def test_staged_cli_roundtrip_applies_only_the_reviewed_candidate(
         "--online",
     ]
     assert cli.main(caption_args) == 2
-    assert WorkflowJournal.open(workspace / "workflow.jsonl").state == "roughcut_imported"
+    assert WorkflowJournal.open(workspace / "workflow.jsonl").state == "roughcut_generated"
     # 승인은 방금 고정된 추정과 요청·가격 리비전에 정확히 묶인 것만 통과한다.
     request = create_caption_request(
         WorkflowJournal.open(workspace / "workflow.jsonl").revision.revision, audio, roughcut
@@ -682,11 +694,19 @@ def test_staged_media_grant_binds_the_estimate_and_drift_closes_it(tmp_path: Pat
     without_grant = project_commands._read_one(workspace / "analysis-estimate.jsonl")
     assert isinstance(without_grant, AnalysisEstimate)
 
-    # 같은 미디어, 다른 앱 권한 — 추정 리비전이 달라져야 한다.
+    # 같은 미디어, 다른 앱 권한 — 추정 리비전이 달라져야 한다. 문서는 이제
+    # 실제 모양(절대 루트 + 루트와 묶인 지문)이어야 한다(S2A-2 검증). 루트는
+    # 미디어를 포함해야 한다(커버리지 검증).
     workspace2 = tmp_path / "workspace-granted"
     assert cli.main(["project", "receive", str(input_path), "--workspace", str(workspace2)]) == 0
+    granted_roots = [str(tmp_path)]
     (workspace2 / "media-grant.json").write_text(
-        json.dumps({"grant_revision": "d" * 64, "roots": ["/Volumes/Media"]}),
+        json.dumps(
+            {
+                "grant_revision": project_commands._swift_grant_revision(granted_roots),
+                "roots": granted_roots,
+            }
+        ),
         encoding="utf-8",
     )
     assert cli.main(["project", "inspect", str(workspace2)]) == 0

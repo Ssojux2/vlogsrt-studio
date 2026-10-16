@@ -8,6 +8,31 @@ public struct MediaGrantDocument: Codable, Equatable, Sendable {
   public let roots: [String]
   public let grantRevision: String
 
+  /// 통신키는 소비자의 철자다 — 파이썬(`_staged_app_grant_revision`)은
+  /// `grant_revision`(snake_case)을 읽는다. Swift 프로퍼티 이름이 그대로
+  /// 나가면 앱이 스테이징한 문서가 엔진 쪽에서 '키가 없다'로 죽는다.
+  enum CodingKeys: String, CodingKey {
+    case roots
+    case grantRevision = "grant_revision"
+  }
+
+  /// 낡은 camelCase 문서도 **읽는다** — 이미 잡 디렉터리에 남아 있는 기록의
+  /// 정본을 잃지 않게. 쓰기는 snake_case 하나뿐이다: 두 철자가 함께 나가면
+  /// 읽는 쪽이 어느 것이 정본인지 말할 수 없다.
+  public init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    self.roots = try container.decode([String].self, forKey: .roots)
+    if let revision = try container.decodeIfPresent(String.self, forKey: .grantRevision) {
+      self.grantRevision = revision
+      return
+    }
+    enum LegacyKeys: String, CodingKey {
+      case grantRevision
+    }
+    let legacy = try decoder.container(keyedBy: LegacyKeys.self)
+    self.grantRevision = try legacy.decode(String.self, forKey: .grantRevision)
+  }
+
   public init(roots: [URL]) {
     let paths = roots
       .map { $0.resolvingSymlinksInPath().standardizedFileURL.path }
@@ -17,6 +42,7 @@ public struct MediaGrantDocument: Codable, Equatable, Sendable {
   }
 
   /// 루트 경로 목록의 지문 — 엔진은 이 값을 media_grant_revision에 섞는다.
+  /// (지문 재료의 키는 이 함수 안의 사정이지 통신 철자와 무관하다.)
   public static func revision(rootPaths: [String]) -> String {
     let payload = GrantRevisionPayload(rootPaths: rootPaths.sorted())
     let encoder = JSONEncoder()

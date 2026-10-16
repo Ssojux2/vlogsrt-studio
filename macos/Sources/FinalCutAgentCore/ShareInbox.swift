@@ -1,4 +1,3 @@
-import CryptoKit
 import Foundation
 
 public struct SharedExport: Equatable, Sendable {
@@ -66,20 +65,31 @@ public enum ShareInbox {
   ///
   /// classify → validate → job 생성 → 스테이징 순서가 계약이다: WAV·FCPXML 둘
   /// 중 하나라도 유효하지 않으면 예외로 닫히고 **잡 디렉터리 자체가 없다**.
-  /// 반쪽 job이 남는 경로는 없다.
+  /// 반쪽 job이 남는 경로는 없다. 원본 매핑(`origin`)은 확정된 러프컷 연결이며
+  /// `caption-origin.json`으로 스테이징된다(S4B) — 요청 자체는 엔진이 만든다.
   @discardableResult
   public static func receive(
     urls: [URL],
     workspace: AppGroupWorkspace,
     jobID: String,
-    originRevision: String,
+    origin: OriginMapping,
     fileManager: FileManager = .default
   ) throws -> URL {
     let export = try classify(urls)
     try validate(export)
+    let resolvedXML = try FCPXMLDocument.resolve(export.fcpxml)
+    // 공유의 프로젝트 UID가 매핑과 같은지 여기서도 잰다 — 스테이징 뒤 엔진이
+    // 다시 잰다는 사실과 무관하게, 남의 타임라인을 조용히 스테이징하지 않는다.
+    let xmlData = try Data(contentsOf: resolvedXML)
+    guard let uid = finalProjectUID(xmlData) else {
+      throw ShareInboxError.missingProjectUID
+    }
+    guard uid == origin.projectUID else {
+      throw ShareInboxError.projectUIDMismatch(expected: origin.projectUID, actual: uid)
+    }
     let job = try workspace.createJob(id: jobID, fileManager: fileManager)
-    return try stageCaptionRequest(
-      export, originRevision: originRevision, in: job, fileManager: fileManager
+    return try stageCaptionOrigin(
+      export, origin: origin, in: job, fileManager: fileManager
     )
   }
 
@@ -100,31 +110,54 @@ public enum ShareInbox {
     return SharedExport(audio: audio, fcpxml: xml)
   }
 
-  public static func stageCaptionRequest(
+  /// 최종 FCPXML의 프로젝트 UID — 원본 매핑 조회의 열쇠(S4B 결정 1).
+  public static func finalProjectUID(_ data: Data) -> String? {
+    let parser = ProjectUIDParser()
+    guard parser.parse(data), let uid = parser.uid, !uid.isEmpty else { return nil }
+    return uid
+  }
+
+  /// 불변 내보내기 쌍 + 원본 문서를 스테이징한다 — 요청·추정은 엔진의 몫이다(S4A).
+  static func stageCaptionOrigin(
     _ export: SharedExport,
-    originRevision: String,
+    origin: OriginMapping,
     in job: URL,
     fileManager: FileManager = .default
   ) throws -> URL {
-    let staged = try stage(export, in: job, fileManager: fileManager)
-    let xmlData = try Data(contentsOf: staged.fcpxml)
-    let digest = SHA256.hash(data: xmlData).map { String(format: "%02x", $0) }.joined()
-    let audioData = try Data(contentsOf: staged.audio)
-    let audioDigest = SHA256.hash(data: audioData).map { String(format: "%02x", $0) }.joined()
-    let request = CaptionRequest(
-      originRevision: originRevision,
-      finalRevision: digest,
-      renderAudio: staged.audio.path,
-      renderAudioSHA256: audioDigest,
-      finalFCPXML: staged.fcpxml.path
-    )
-    let requestURL = job.appendingPathComponent("caption-request.jsonl")
-    try Data(
-      ProtocolCodec.encode(request, type: "CaptionRequest", version: ProtocolCodec.captionVersion)
-        .utf8
-    )
-    .write(to: requestURL, options: .atomic)
-    return requestURL
+    _ = try stage(export, in: job, fileManager: fileManager)
+    let document: [String: String] = [
+      "origin_job_id": origin.originJobID,
+      "origin_revision": origin.originRevision,
+      "project_uid": origin.projectUID,
+    ]
+    let payload = try JSONSerialization.data(
+      withJSONObject: document, options: [.sortedKeys])
+    let originURL = job.appendingPathComponent("caption-origin.json")
+    try fileManager.createDirectory(
+      at: originURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try payload.write(to: originURL, options: [.atomic])
+    return originURL
+  }
+}
+
+/// FCPXML에서 첫 `project` 원소의 `uid` 속성만 읽는 스트리밍 해석기.
+private final class ProjectUIDParser: NSObject, XMLParserDelegate {
+  var uid: String?
+
+  func parse(_ data: Data) -> Bool {
+    let parser = XMLParser(data: data)
+    parser.delegate = self
+    _ = parser.parse()
+    return uid != nil
+  }
+
+  func parser(
+    _ parser: XMLParser, didStartElement elementName: String, namespaceURI: String?,
+    qualifiedName qName: String?, attributes attributeDict: [String: String] = [:]
+  ) {
+    guard elementName == "project" else { return }
+    uid = attributeDict["uid"]
+    parser.abortParsing()
   }
 }
 
@@ -154,4 +187,6 @@ public enum ShareInboxError: Error {
   case notAWAVFile
   case notPCM(UInt16)
   case sampleRate(UInt32)
+  case missingProjectUID
+  case projectUIDMismatch(expected: String, actual: String)
 }

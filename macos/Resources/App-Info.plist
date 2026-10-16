@@ -10,6 +10,8 @@
   <key>CFBundleShortVersionString</key><string>$(MARKETING_VERSION)</string>
   <key>CFBundleVersion</key><string>$(CURRENT_PROJECT_VERSION)</string>
   <key>LSMinimumSystemVersion</key><string>$(MACOSX_DEPLOYMENT_TARGET)</string>
+  <key>NSAppleEventsUsageDescription</key>
+  <string>Final Cut 프로젝트 정보를 읽고 승인된 러프컷을 전달합니다.</string>
   <key>NSPrincipalClass</key><string>NSApplication</string>
   <key>CFBundleURLTypes</key>
   <array>

@@ -2,9 +2,12 @@ import Foundation
 
 public enum ProtocolCodec {
   public static let version = "1.0"
-  public static let analysisVersion = "1.2"
+  public static let analysisVersion = "1.3"
+  /// 1.2·1.1 기록도 읽는다 — 결과 상태가 없는 판정은 legacy/unknown로만 취급한다.
+  public static let priorAnalysisVersion = "1.2"
   public static let legacyAnalysisVersion = "1.1"
   public static let captionVersion = "1.1"
+  public static let analysisVersions = [analysisVersion, priorAnalysisVersion, legacyAnalysisVersion]
 
   public static func encode<Payload: Encodable>(
     _ payload: Payload,
@@ -35,6 +38,26 @@ public enum ProtocolCodec {
       from: Data(line.utf8)
     )
     guard envelope.protocolVersion == expectedVersion else {
+      throw ProtocolCodecError.unsupportedVersion(envelope.protocolVersion)
+    }
+    guard envelope.type == type else {
+      throw ProtocolCodecError.typeMismatch(expected: type, actual: envelope.type)
+    }
+    return envelope.payload
+  }
+
+  /// 분석 프로토콜의 낡은 기록(1.1·1.2)도 읽는다 — 페이로드가 같은 종류는
+  /// 버전만 바뀌어도 같은 payload로 복원한다(S1B).
+  public static func decodeAnalysis<Payload: Decodable>(
+    _ payload: Payload.Type,
+    type: String,
+    from line: String
+  ) throws -> Payload {
+    let envelope = try JSONDecoder().decode(
+      DecodedEnvelope<Payload>.self,
+      from: Data(line.utf8)
+    )
+    guard analysisVersions.contains(envelope.protocolVersion) else {
       throw ProtocolCodecError.unsupportedVersion(envelope.protocolVersion)
     }
     guard envelope.type == type else {
@@ -300,6 +323,44 @@ public struct CaptionAuthorizationMessage: Codable, Equatable, Sendable {
   }
 }
 
+/// 자막 실행의 결과(S4A) — 성공한 무발화와 실패한 전사가 갈라져 있다.
+/// `srtPath`는 오직 `speech`일 때만 있고, 실패 결과는 앱이 시도 기록에서 본다.
+public struct CaptionResultMessage: Codable, Equatable, Sendable {
+  public let finalRevision: String
+  public let srtPath: String?
+  public let warnings: [String]
+  public let quality: [String]
+  public let speechStatus: String
+
+  enum CodingKeys: String, CodingKey {
+    case finalRevision = "final_revision"
+    case srtPath = "srt_path"
+    case warnings
+    case quality
+    case speechStatus = "speech_status"
+  }
+}
+
+/// 자막 시도 하나의 상태(S4A) — `pending → running → 결과`의 내구 진행 기록.
+/// 실패에만 오류 문면이 실리고, 그 외 상태는 오류를 가질 수 없다.
+public struct CaptionAttemptMessage: Codable, Equatable, Sendable {
+  public let requestRevision: String
+  public let estimateRevision: String
+  public let attemptID: String
+  public let status: String
+  public let startedAt: String
+  public let error: String?
+
+  enum CodingKeys: String, CodingKey {
+    case requestRevision = "request_revision"
+    case estimateRevision = "estimate_revision"
+    case attemptID = "attempt_id"
+    case status
+    case startedAt = "started_at"
+    case error
+  }
+}
+
 private struct DecodedEnvelope<Payload: Decodable>: Decodable {
   let payload: Payload
   let protocolVersion: String
@@ -362,4 +423,207 @@ public enum ProtocolCodecError: Error, Equatable {
   case invalidUTF8
   case unsupportedVersion(String)
   case typeMismatch(expected: String, actual: String)
+}
+
+/// Python AnalysisAttempt 메시지 — 시도의 상태가 집계와 같은 job에 묶였는지의 근거.
+public struct AnalysisAttemptMessage: Codable, Equatable, Sendable {
+  public let inputRevision: String
+  public let estimateRevision: String
+  public let attemptID: String
+  /// `pending` | `running` | `succeeded` | `failed` | `cancelled`
+  public let status: String
+  public let startedAt: String
+  public let error: String?
+
+  enum CodingKeys: String, CodingKey {
+    case inputRevision = "input_revision"
+    case estimateRevision = "estimate_revision"
+    case attemptID = "attempt_id"
+    case status
+    case startedAt = "started_at"
+    case error
+  }
+}
+
+/// 상류(오디오·전사·VAD) 단계의 시도·실패·미적용 수 — Python UpstreamStages와 같은 모양.
+/// skipped는 선언된 무오디오 등 "적용하지 않았다"다 — 성공도 실패도 아니다.
+public struct UpstreamStageCounts: Codable, Equatable, Sendable {
+  public let total: Int
+  public let failed: Int
+  public let skipped: Int
+}
+
+/// 소스 단위 수 — usable은 오디오·전사·VAD가 모두 성공한 소스의 수다.
+public struct UpstreamSourceCounts: Codable, Equatable, Sendable {
+  public let total: Int
+  public let usable: Int
+}
+
+/// 시도 하나의 집계 — Python AnalysisResult 메시지(프로토콜 1.3).
+public struct AnalysisResultMessage: Codable, Equatable, Sendable {
+  public let inputRevision: String
+  public let attemptID: String
+  public let estimateRevision: String
+  /// `success` | `partial_error` | `error`
+  public let status: String
+  public let windows: WindowCounts
+  public let candidateCount: Int
+  public let upstream: UpstreamCounts
+  public let reasonCodes: [String]
+  public let resultRevision: String
+
+  public struct WindowCounts: Codable, Equatable, Sendable {
+    public let total: Int
+    public let successful: Int
+    public let failed: Int
+    public let skipped: Int
+  }
+
+  public struct UpstreamCounts: Codable, Equatable, Sendable {
+    public let audio: UpstreamStageCounts
+    public let transcription: UpstreamStageCounts
+    public let vad: UpstreamStageCounts
+    public let sources: UpstreamSourceCounts
+  }
+
+  enum CodingKeys: String, CodingKey {
+    case inputRevision = "input_revision"
+    case attemptID = "attempt_id"
+    case estimateRevision = "estimate_revision"
+    case status
+    case windows
+    case candidateCount = "candidate_count"
+    case upstream
+    case reasonCodes = "reason_codes"
+    case resultRevision = "result_revision"
+  }
+}
+
+/// 앱이 사용자에게 보여주는 분석 결과의 네 가지 얼굴 — 성공(후보 0건 포함)·
+/// 부분 실패·전체 실패·알 수 없음(구형·낡은·중단·진행 중 기록). 알 수 없음은
+/// 새 성공 증거도 재실행 근거도 아니다 — "모른다"로 보여줄 뿐이다. 종료 코드
+/// 0만으로 전체 성공 요약을 내리지 않는다.
+public enum AnalysisOutcome: Equatable, Sendable {
+  case success(candidateCount: Int)
+  case partial(candidateCount: Int, windowsFailed: Int, windowsSkipped: Int, reasons: [String])
+  case failed(reasons: [String])
+  case legacyUnknown
+
+  public static func make(_ result: AnalysisResultMessage?) -> AnalysisOutcome {
+    guard let result else { return .legacyUnknown }
+    switch result.status {
+    case "success":
+      return AnalysisOutcome.success(candidateCount: result.candidateCount)
+    case "partial_error":
+      return AnalysisOutcome.partial(
+        candidateCount: result.candidateCount,
+        windowsFailed: result.windows.failed,
+        windowsSkipped: result.windows.skipped,
+        reasons: result.reasonCodes
+      )
+    default:
+      return AnalysisOutcome.failed(reasons: result.reasonCodes)
+    }
+  }
+
+  /// 네 상태가 각각 다르게 읽히는 사용자 문장 — 후보 0건 성공이 실패로
+  /// 읽히거나 실패가 "완료"로 읽히면 안 된다.
+  public var userFacingSummary: String {
+    switch self {
+    case .success(let candidateCount):
+      candidateCount == 0
+        ? "분석 완료 — 컷 후보 0건 (발화·후보 없음, 정상)"
+        : "분석 완료 — 컷 후보 \(candidateCount)건"
+    case .partial(let candidateCount, let windowsFailed, let windowsSkipped, let reasons):
+      "분석 부분 실패 — 창 실패 \(windowsFailed)개·미처리 \(windowsSkipped)개"
+        + " (사유: \(reasons.joined(separator: ", "))) · 실패한 구간은 보존"
+        + (candidateCount == 0 ? " · 후보 0건" : " · 안전 후보 \(candidateCount)건 검토 가능")
+    case .failed(let reasons):
+      "분석 실패 — 성공한 창이 없다 (사유: \(reasons.joined(separator: ", "))) · 영상은 보존됨"
+    case .legacyUnknown:
+      "분석 상태를 알 수 없다 — 기록이 구형·낡았거나 진행 중·중단이다 · 자동 재실행하지 않는다"
+    }
+  }
+
+  /// 지금 시도의 결과로 후보 검토 화면을 열어도 되는가 — 검토는 **검증된 지금
+  /// success·partial 결과**에만 켠다. 옛 시도가 남긴 candidates 파일이 있어도
+  /// 알 수 없음·실패는 검토 가능으로 보이지 않는다(S1B-R1).
+  public static func shouldLoadCandidates(
+    outcome: AnalysisOutcome, candidatesFileExists: Bool
+  ) -> Bool {
+    switch outcome {
+    case .success, .partial: candidatesFileExists
+    case .failed, .legacyUnknown: false
+    }
+  }
+
+  /// 실패한 작업의 다음 요청이 어디로 가는가 — 같은 작업 재시도는 명시적이다.
+  /// 첫 실패는 안내만 보여주고(재시도 가능), 사용자가 다시 누르면 엔진을 다시
+  /// 부른다. 알 수 없음은 재실행하지 않는다 — 실패와 섞지 않는다.
+  public static func retryRoute(outcome: AnalysisOutcome, retryArmed: Bool) -> AnalysisRetryRoute {
+    switch outcome {
+    case .failed:
+      retryArmed ? .retryEngine : .showFailure(canRetry: true)
+    case .legacyUnknown, .success, .partial:
+      .noOutcome
+    }
+  }
+}
+
+/// 실패 뒤 사용자 요청의 행선지 — 재시도는 같은 작업에 대한 명시적 선택이다.
+public enum AnalysisRetryRoute: Equatable, Sendable {
+  case showFailure(canRetry: Bool)
+  case retryEngine
+  case noOutcome
+}
+
+/// job 기록의 셋 중 하나 — 새 작업과 모호한 기록을 갈라 말한다(S1B-R1).
+/// `fresh`는 시도·집계·후보 기록이 전혀 없는 새 job이고, `unknown`은 기록은
+/// 있으되 지금 job의 리비전·시도·상태와 묶을 수 없는 것이다 — 낡은 집계,
+/// 진행 중·취소 시도, 없거나 깨진 추정/시도 기록이 모두 여기다.
+public enum AnalysisRecordState: Equatable, Sendable {
+  case fresh
+  case valid(AnalysisResultMessage)
+  case unknown
+}
+
+/// 검토 화면의 행선지 — 모호한 기록은 요약만 보여주고 정지한다(재실행 없음).
+public enum AnalysisReviewRoute: Equatable, Sendable {
+  /// 새 작업 — 승인·분석 요청 흐름으로 간다.
+  case freshJob
+  /// 검증된 success·partial — 후보 검토와 함께 요약을 보여준다.
+  case reviewCandidates(AnalysisOutcome)
+  /// 검증된 실패 — 안내만 보여준다(재시도는 사용자의 다음 누름).
+  case showFailure(AnalysisOutcome)
+  /// 검증된 실패의 명시적 재시도 — 엔진을 다시 부른다.
+  case retryEngine
+  /// 모호한 기록 — 정직한 unknown 요약을 보여주고 정지한다.
+  case showUnknown
+}
+
+/// 기록 상태를 화면 행선으로 정규화하는 공유 라우터 — extension과 앱이 같은
+/// 표를 쓴다. unknown은 어떤 경우도 엔진 호출·후보 검토로 가지 않는다.
+public enum AnalysisReviewRouter {
+  public static func route(
+    record: AnalysisRecordState,
+    candidatesFileExists: Bool,
+    retryArmed: Bool
+  ) -> AnalysisReviewRoute {
+    switch record {
+    case .fresh:
+      return AnalysisReviewRoute.freshJob
+    case .unknown:
+      return AnalysisReviewRoute.showUnknown
+    case .valid(let result):
+      let outcome = AnalysisOutcome.make(result)
+      switch outcome {
+      case .success, .partial:
+        return AnalysisReviewRoute.reviewCandidates(outcome)
+      case .failed:
+        return retryArmed ? .retryEngine : .showFailure(outcome)
+      case .legacyUnknown:
+        return AnalysisReviewRoute.showUnknown
+      }
+    }
+  }
 }

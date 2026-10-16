@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!--
+    AI Rough Cut 사용자 지정 공유 대상 — 현재 프로젝트의 FCPXML만 내보낸다.
+    엔진 계약: 이 내보내기는 분석·러프컷의 입력이며 원본 프로젝트는 그대로다
+    (호스트는 UID 키 인박스에 스테이징만 한다 — 분석·실행은 패널 동작으로만
+    열린다). 설치 위치는 ShareDestination.installedDirectory를 본다.
+  -->
+  <key>CFBundleIdentifier</key>
+  <string>com.ssojux2.vlogsrt.share.ai-rough-cut</string>
+  <key>CFBundleName</key>
+  <string>AI Rough Cut</string>
+  <key>FFExports</key>
+  <array>
+    <dict>
+      <key>kind</key>
+      <string>fcpxml</string>
+      <key>version</key>
+      <string>1.14</string>
+    </dict>
+  </array>
+</dict>
+</plist>

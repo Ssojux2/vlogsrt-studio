@@ -12,7 +12,7 @@ from decimal import Decimal
 from fractions import Fraction
 from pathlib import Path
 
-from vlogsrt import pipeline, transcribe
+from vlogsrt import pipeline, retext, transcribe
 from vlogsrt.config import Config
 from vlogsrt.project.fcpxml import element_tree
 from vlogsrt.project.timebase import parse_fcpx_time
@@ -33,6 +33,98 @@ class CaptionDelivery:
     result: CaptionResult
     review_report: Path
     estimated_cost: float
+
+
+@dataclass(frozen=True, slots=True)
+class CaptionOrigin:
+    """공유 받기 내보내기가 어늌 러프컷 job에서 왔는지의 기록(S4A).
+
+    앱이 잡을 만들 때 스테이징한다. 엔진은 이 문서로 결과 프로젝트 UID와 요청의
+    원본 리비전이 같은 내보내기인지 잰다 — UID가 다르면 남의 타임라인에 자막을
+    얹을 뻔한 것이다.
+    """
+
+    origin_job_id: str
+    origin_revision: str
+    project_uid: str
+
+    def __post_init__(self) -> None:
+        if not self.origin_job_id:
+            raise ValueError("자막 원본 job ID가 비어 있다")
+        if len(self.origin_revision) != 64 or any(
+            char not in "0123456789abcdef" for char in self.origin_revision
+        ):
+            raise ValueError("자막 원본 리비전이 SHA-256이 아니다")
+        if not self.project_uid:
+            raise ValueError("자막 원본 프로젝트 UID가 비어 있다")
+
+
+def load_caption_origin(path: Path) -> CaptionOrigin:
+    """앱이 스테이징한 원본 매핑 문서를 읽는다 — 없으면 그 자체가 실패다.
+
+    원본 오디오로 되돌아가는 길은 없다(S4A). 매핑을 모르는 내보내기에서 자막을
+    만들면 어느 타임라인의 것인지 말할 수 없으므로 조용히 진행하지 않는다.
+    """
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise CaptionGenerationError(f"자막 원본 매핑 문서가 없다: {path}") from exc
+    except (OSError, json.JSONDecodeError) as exc:
+        raise CaptionGenerationError(f"자막 원본 매핑 문서를 해석할 수 없다: {path}") from exc
+    if not isinstance(document, dict):
+        raise CaptionGenerationError("자막 원본 매핑 문서가 객체가 아니다")
+    try:
+        return CaptionOrigin(
+            origin_job_id=str(document["origin_job_id"]),
+            origin_revision=str(document["origin_revision"]),
+            project_uid=str(document["project_uid"]),
+        )
+    except (KeyError, ValueError) as exc:
+        raise CaptionGenerationError(f"자막 원본 매핑 문서의 계약이 깨졌다: {exc}") from exc
+
+
+@dataclass(frozen=True, slots=True)
+class ValidatedCaptionInput:
+    """추정·실행 앞에서 함께 잰 최종 내보내기의 사실."""
+
+    audio_seconds: Fraction
+    project_name: str
+    timeline_duration: Fraction
+    project_uid: str
+
+
+def validate_caption_request(
+    request: CaptionRequest, origin: CaptionOrigin
+) -> ValidatedCaptionInput:
+    """추정 직전·실행 직전에 같은 문으로 잰다 — 재검증이지 캐시가 아니다.
+
+    PCM 모양·오디오 해시·XML 해시·결과 프로젝트 UID·길이 대응·원본 매핑 전부를
+    하나의 실패로 닫는다. 원본 소스 오디오로 되돌아가는 갈림길은 없다.
+    """
+    audio_seconds = _validate_pcm(request)
+    project_name, timeline_duration, project_uid = _validate_final_xml(request)
+    if abs(audio_seconds - timeline_duration) > Fraction(1, 48_000):
+        raise CaptionGenerationError(
+            f"렌더 오디오와 최종 타임라인 길이가 다르다: "
+            f"{float(audio_seconds):.6f}초 ≠ {float(timeline_duration):.6f}초"
+        )
+    if project_uid != origin.project_uid:
+        if not project_uid:
+            raise CaptionGenerationError("최종 FCPXML에 프로젝트 UID가 없다 — 매핑할 수 없다")
+        raise CaptionGenerationError(
+            f"최종 FCPXML의 프로젝트 UID가 원본 매핑과 다르다: {project_uid} ≠ {origin.project_uid}"
+        )
+    if request.origin_revision != origin.origin_revision:
+        raise CaptionGenerationError(
+            "자막 요청의 원본 리비전이 매핑 문서와 다르다: "
+            f"{request.origin_revision} ≠ {origin.origin_revision}"
+        )
+    return ValidatedCaptionInput(
+        audio_seconds=audio_seconds,
+        project_name=project_name,
+        timeline_duration=timeline_duration,
+        project_uid=project_uid,
+    )
 
 
 def create_caption_request(
@@ -116,10 +208,18 @@ def generate_final_captions(
     *,
     online: bool,
     confirmed_cost: bool,
+    transcriber: transcribe.Transcriber | None = None,
+    srt_stem: str | None = None,
 ) -> CaptionDelivery:
-    """최종 48kHz PCM을 새로 전사하고 SRT와 검토 보고서를 원자적으로 공개한다."""
+    """최종 48kHz PCM을 새로 전사하고 SRT와 검토 보고서를 원자적으로 공개한다.
+
+    ``transcriber``를 주면 그것이 곧 전사기다 — 취소 게이트와 요청 회계가 붙은
+    위임물을 넘겨 실제 호출마다 예약·확정·취소 확인을 지나게 한다(S4A). 주지
+    않으면 파이프라인이 스스로 만드는 기본 경로 그대로다. ``srt_stem``은 엔진
+    호출이 앱에 보이는 안정된 파일 이름을 쓰기 위한 것만이다.
+    """
     audio_duration = _validate_pcm(request)
-    project_name, timeline_duration = _validate_final_xml(request)
+    project_name, timeline_duration, _project_uid = _validate_final_xml(request)
     if abs(audio_duration - timeline_duration) > Fraction(1, 48_000):
         raise CaptionGenerationError(
             f"렌더 오디오와 최종 타임라인 길이가 다르다: "
@@ -131,8 +231,10 @@ def generate_final_captions(
             f"예상 비용 ${estimated_cost:.3f}를 확인해야 온라인 전사를 시작할 수 있다"
         )
     destination.mkdir(parents=True, exist_ok=True)
-    stem = _safe_filename(project_name)
-    basename = f"{stem}.{request.final_revision}.ko"
+    if srt_stem is None:
+        basename = f"{_safe_filename(project_name)}.{request.final_revision}.ko"
+    else:
+        basename = _safe_filename(srt_stem)
     review_path = destination / f"{basename}.review.json"
     try:
         with tempfile.TemporaryDirectory(prefix=".caption-", dir=destination) as temporary:
@@ -149,6 +251,7 @@ def generate_final_captions(
                     verify_with_second_model=True,
                     repair_repeats=True,
                     require_complete_coverage=True,
+                    transcriber=transcriber,
                 )
             except transcribe.ConfirmedNoSpeech:
                 result = CaptionResult(
@@ -175,7 +278,7 @@ def generate_final_captions(
             result = CaptionResult(
                 final_revision=request.final_revision,
                 srt_path=target_srt,
-                warnings=(),
+                warnings=_caption_warnings(run),
                 quality=tuple(quality),
                 speech_status="speech",
             )
@@ -185,6 +288,26 @@ def generate_final_captions(
         raise
     except Exception as exc:
         raise CaptionGenerationError(f"최종 자막 생성 실패: {exc}") from exc
+
+
+def _caption_warnings(run: pipeline.RunResult) -> tuple[str, ...]:
+    """사람이 검토해야 할 사실만 뽑는다 — 경고는 결과와 함께 남는다(S4A).
+
+    되풀이 재전사·글자 교정의 예외·검증 의심은 모두 파이프라인 로그에 WARN로
+    남던 것들이다. 자막 작업은 그 사실을 SRT 곁의 기록에도 실어 보낸다.
+    """
+    warnings: list[str] = []
+    if run.repairs:
+        warnings.append(f"되풀이 재전사 {len(run.repairs)}구간")
+    record = run.trace.retext
+    if record.status != retext.RETEXT_APPLIED:
+        warnings.append(f"글자 교정 {record.status} — whisper 글자로 나갔다")
+    elif record.unplaced:
+        dropped = sum(item.chars for item in record.unplaced)
+        warnings.append(f"세그먼트 사이에 낀 글자 {dropped}자는 시각이 없어 출력하지 않았다")
+    if run.verification is not None and run.verification.suspects:
+        warnings.append(f"검증 의심 큐 {len(run.verification.suspects)}건")
+    return tuple(warnings)
 
 
 def _validate_pcm(request: CaptionRequest) -> Fraction:
@@ -210,7 +333,7 @@ def _validate_pcm(request: CaptionRequest) -> Fraction:
     return Fraction(frames, rate)
 
 
-def _validate_final_xml(request: CaptionRequest) -> tuple[str, Fraction]:
+def _validate_final_xml(request: CaptionRequest) -> tuple[str, Fraction, str]:
     try:
         raw = request.final_fcpxml.read_bytes()
     except OSError as exc:
@@ -229,6 +352,10 @@ def _validate_final_xml(request: CaptionRequest) -> tuple[str, Fraction]:
     name = project.get("name", "").strip() if project is not None else ""
     if not name:
         raise CaptionGenerationError("최종 FCPXML에 프로젝트 이름이 없다")
+    # 결과 프로젝트 UID — 원본 매핑과 잴 재료다. 비어 있어도 여기서는 실패하지
+    # 않는다: 이 함수를 쓰는 통합 흐름(같은 작업공간의 `project caption`)에는
+    # 매핑 문서가 없다. 매핑을 요구하는 문은 `validate_caption_request`다(S4A).
+    uid = project.get("uid", "").strip() if project is not None else ""
     duration_text = sequence.get("duration") if sequence is not None else None
     if duration_text is None:
         raise CaptionGenerationError("최종 FCPXML에 sequence.duration이 없다")
@@ -236,7 +363,7 @@ def _validate_final_xml(request: CaptionRequest) -> tuple[str, Fraction]:
         duration = parse_fcpx_time(duration_text)
     except ValueError as exc:
         raise CaptionGenerationError(f"최종 타임라인 길이를 읽을 수 없다: {exc}") from exc
-    return name, duration
+    return name, duration, uid
 
 
 def _file_sha256(path: Path) -> str:

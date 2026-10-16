@@ -55,7 +55,9 @@ targets:
         HEADER_SEARCH_PATHS: "$(inherited) /Library/Developer/SDKs/WorkflowExtensionSDK.sdk/usr/include"
         SWIFT_OBJC_BRIDGING_HEADER: Resources/FinalCutAgentWorkflowExtension-Bridging-Header.h
         LD_ENTRY_POINT: _ProExtensionMain
-        OTHER_LDFLAGS: "$(inherited) -fapplication-extension -lProExtension"
+        # The SDK offers only a link-time .tbd. At runtime Final Cut provides
+        # ProExtensionHost.framework from its own Frameworks directory.
+        OTHER_LDFLAGS: '$(inherited) -fapplication-extension -lProExtension -rpath "/Applications/Final Cut Pro.app/Contents/Frameworks"'
         APPLICATION_EXTENSION_API_ONLY: YES
         SKIP_INSTALL: YES
 
@@ -69,6 +71,7 @@ targets:
       - path: Resources/Engine
         buildPhase: resources
       - path: Resources/AI Captions.fcpxdest
+      - path: Resources/AI Rough Cut.fcpxdest
         buildPhase: resources
       - path: Resources/FinalCutAgent.sdef
         buildPhase: resources

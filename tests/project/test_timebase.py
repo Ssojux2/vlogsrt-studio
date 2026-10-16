@@ -27,6 +27,7 @@ from vlogsrt.project.timebase import (
     milliseconds_half_up,
     parse_fcpx_time,
     require_supported_frame_duration,
+    timecode_frames,
 )
 
 # 계획 "Input and output"이 허락하는 프레임 길이 전부 — 24·25·30·50·60와
@@ -465,3 +466,87 @@ def test_accumulated_boundaries_match_direct_products_exactly() -> None:
 def test_hours_widen_past_two_digits() -> None:
     """두 자리를 넘는 시간은 자리를 넓힌다 — 자르지 않는다."""
     assert format_srt_time(Fraction(360000)) == "100:00:00,000"
+
+
+# ─── 시작 타임코드 → 프레임 수 (W-16, D56) ─────────────────────────────────
+#
+# Final Cut은 원본의 타임코드 트랙에서 클립 시작을 정한다: 프레임 수 × 프레임 길이.
+# 아래 넷은 실제 DJI 원본(드롭프레임)의 `FFMIORADAsset.mediaRange` 시작과 정확히
+# 일치한 실측 벡터다 — 0008 `12:56:29;10` → 1396282 → `1397678282/30000s`.
+
+NTSC_RATE = Fraction(30000, 1001)
+REAL_DROP_FRAME_VECTORS = [
+    ("12:56:29;10", 1396282, Fraction(1397678282, 30000)),
+    ("13:18:20;13", 1435575, Fraction(1437010575, 30000)),
+    ("15:37:58;21", 1686673, Fraction(1688359673, 30000)),
+    ("16:05:05;10", 1735422, Fraction(1737157422, 30000)),
+]
+
+
+@pytest.mark.parametrize(("text", "frames", "media_start"), REAL_DROP_FRAME_VECTORS)
+def test_drop_frame_timecode_matches_real_library_media_start(
+    text: str, frames: int, media_start: Fraction
+) -> None:
+    assert timecode_frames(text, NTSC_RATE) == (frames, True)
+    assert frames * Fraction(1001, 30000) == media_start
+
+
+def test_drop_frame_skips_two_labels_per_minute_except_every_tenth() -> None:
+    """29.97 DF: 매 분 첫 두 라벨(;00·;01)이 없다 — 10분마다는 예외다."""
+    assert timecode_frames("00:00:59;29", NTSC_RATE) == (1799, True)
+    assert timecode_frames("00:01:00;02", NTSC_RATE) == (1800, True)
+    assert timecode_frames("00:09:59;29", NTSC_RATE) == (17981, True)
+    assert timecode_frames("00:10:00;00", NTSC_RATE) == (17982, True)
+    assert timecode_frames("01:00:00;00", NTSC_RATE) == (107892, True)
+
+
+def test_drop_frame_at_59_94_skips_four_labels_per_minute() -> None:
+    rate = Fraction(60000, 1001)
+    assert timecode_frames("00:00:59;59", rate) == (3599, True)
+    assert timecode_frames("00:01:00;04", rate) == (3600, True)
+    assert timecode_frames("00:10:00;00", rate) == (35964, True)
+    assert timecode_frames("01:00:00;00", rate) == (215784, True)
+    with pytest.raises(ValueError, match="드롭"):
+        timecode_frames("00:01:00;03", rate)
+
+
+@pytest.mark.parametrize(
+    ("text", "rate", "frames"),
+    [
+        ("00:00:00:00", Fraction(25), 0),
+        ("01:00:00:00", Fraction(25), 90000),
+        ("12:56:29:10", NTSC_RATE, (12 * 3600 + 56 * 60 + 29) * 30 + 10),
+        ("00:00:01:23", Fraction(24000, 1001), 47),
+        ("00:00:01:59", Fraction(60), 119),
+    ],
+)
+def test_non_drop_frame_counts_every_label(text: str, rate: Fraction, frames: int) -> None:
+    assert timecode_frames(text, rate) == (frames, False)
+
+
+@pytest.mark.parametrize(
+    ("text", "rate"),
+    [
+        ("", NTSC_RATE),
+        ("12:56:29", NTSC_RATE),
+        ("12:56:29.10", NTSC_RATE),
+        ("1:02:03:04", Fraction(25)),
+        ("00:60:00:00", Fraction(25)),
+        ("00:00:60:00", Fraction(25)),
+        ("24:00:00:00", Fraction(25)),
+        ("00:00:00:25", Fraction(25)),
+        ("00:00:00:30", NTSC_RATE),
+        ("00:01:00;00", NTSC_RATE),
+        ("00:01:00;01", NTSC_RATE),
+        ("00:00:00;00", Fraction(25)),
+        ("00:00:00;00", Fraction(30)),
+        ("00:00:00:00", Fraction(30000, 1000 + 7)),
+        ("00:00:00:00", Fraction(0)),
+        (" 00:00:00:00", Fraction(25)),
+        ("１２:56:29;10", NTSC_RATE),  # 전각 숫자 — `\d`는 받지만 타임코드가 아니다
+        ("12:56:29;١٠", NTSC_RATE),  # 아라비아-인도 숫자
+    ],
+)
+def test_malformed_or_impossible_timecode_is_rejected(text: str, rate: Fraction) -> None:
+    with pytest.raises(ValueError):
+        timecode_frames(text, rate)

@@ -11,17 +11,22 @@ from vlogsrt.project.workflow_protocol import (
     ANALYSIS_PROTOCOL_VERSION,
     CAPTION_PROTOCOL_VERSION,
     LEGACY_ANALYSIS_PROTOCOL_VERSION,
+    PRIOR_ANALYSIS_PROTOCOL_VERSION,
     PROTOCOL_VERSION,
     ActualUsage,
     AnalysisAttempt,
     AnalysisAuthorization,
     AnalysisEstimate,
+    AnalysisResult,
     CancellationRequest,
     CandidatePreview,
+    CaptionAttempt,
     CaptionAuthorization,
     CaptionEstimate,
+    CaptionJournal,
     CaptionRequest,
     CaptionResult,
+    CaptionStateEvent,
     CutCandidate,
     CutResult,
     EditPlan,
@@ -29,8 +34,10 @@ from vlogsrt.project.workflow_protocol import (
     ProjectRevision,
     ProjectSelection,
     RationalRange,
+    UpstreamStages,
     VisionWindowDecision,
     WorkflowJournal,
+    WorkflowStateEvent,
     decode_message,
     encode_message,
 )
@@ -133,6 +140,26 @@ def test_jsonl_protocol_round_trips_every_public_message_deterministically(tmp_p
             started_at="2026-09-21T04:00:01Z",
             error=None,
         ),
+        AnalysisResult.create(
+            input_revision=revision.revision,
+            attempt_id="attempt-001",
+            estimate_revision=_estimate(revision).estimate_revision,
+            status="success",
+            windows_total=2,
+            windows_successful=2,
+            windows_failed=0,
+            windows_skipped=0,
+            candidate_count=1,
+            upstream=UpstreamStages(
+                audio_total=1,
+                audio_failed=0,
+                transcription_total=1,
+                transcription_failed=0,
+                vad_total=1,
+                vad_failed=0,
+            ),
+            reason_codes=(),
+        ),
         CancellationRequest.create(
             input_revision=revision.revision,
             attempt_id="attempt-001",
@@ -200,6 +227,18 @@ def test_jsonl_protocol_round_trips_every_public_message_deterministically(tmp_p
             quality=("timing:pass",),
             speech_status="speech",
         ),
+        CaptionAttempt(
+            request_revision=caption_request.request_revision,
+            estimate_revision=caption_estimate.estimate_revision,
+            attempt_id="caption-attempt-001",
+            status="failed",
+            started_at="2026-09-21T05:01:00Z",
+            error="전사 실패",
+        ),
+        CaptionStateEvent(
+            request_revision=caption_request.request_revision,
+            state="caption_ready",
+        ),
     )
 
     first = [encode_message(message) for message in messages]
@@ -213,7 +252,7 @@ def test_jsonl_protocol_round_trips_every_public_message_deterministically(tmp_p
     assert f'"protocol_version":"{CAPTION_PROTOCOL_VERSION}"' in first[-1]
 
 
-def test_analysis_12_rejects_stale_or_malformed_authority_and_decisions() -> None:
+def test_analysis_13_reads_legacy_versions_but_rejects_stale_authority() -> None:
     """입력/추정/가격/권한 드리프트와 모델의 복수·미지 후보가 삭제 권한으로 바뀌는 회귀를 잡는다."""
     revision = _revision()
     pricing = official_pricing_snapshot()
@@ -279,10 +318,18 @@ def test_analysis_12_rejects_stale_or_malformed_authority_and_decisions() -> Non
             response_sha256="f" * 64,
         )
 
-    for legacy in (PROTOCOL_VERSION, LEGACY_ANALYSIS_PROTOCOL_VERSION, "9.0"):
+    for legacy in (PRIOR_ANALYSIS_PROTOCOL_VERSION, LEGACY_ANALYSIS_PROTOCOL_VERSION):
+        # 낡은 분석 기록은 읽는다 — 후보 페이로드는 그대로다(S1B). 단 판정은
+        # 결과 상태가 없어 legacy/unknown로만 읽힌다(위 재생 시험이 닫는다).
         stale = encode_message(_candidate(revision)).replace(
             f'"protocol_version":"{ANALYSIS_PROTOCOL_VERSION}"',
             f'"protocol_version":"{legacy}"',
+        )
+        assert decode_message(stale) == _candidate(revision)
+    for rejected in (PROTOCOL_VERSION, "9.0"):
+        stale = encode_message(_candidate(revision)).replace(
+            f'"protocol_version":"{ANALYSIS_PROTOCOL_VERSION}"',
+            f'"protocol_version":"{rejected}"',
         )
         with pytest.raises(ValueError, match="프로토콜"):
             decode_message(stale)
@@ -458,14 +505,17 @@ def test_journal_walks_the_authorized_state_machine_and_stops_at_terminals(
     assert reloaded.state == "review_required"
 
     with pytest.raises(ValueError, match="리비전"):
-        reloaded.transition(_revision(digest="c" * 64).revision, "roughcut_imported")
+        reloaded.transition(_revision(digest="c" * 64).revision, "roughcut_generated")
+    with pytest.raises(ValueError, match="허용되지 않는 상태 전이"):
+        # 낡은 이름은 이제 새 쓰기로 못 박지 않는다(S2C) — 기록은 읽기 호환일 뿐.
+        reloaded.transition(revision.revision, "roughcut_imported")
     with pytest.raises(ValueError, match="허용되지 않는 상태 전이"):
         reloaded.transition(revision.revision, "caption_received")
     with pytest.raises(ValueError, match="허용되지 않는 상태 전이"):
         reloaded.transition(revision.revision, "estimate_ready")
     assert WorkflowJournal.open(journal.path).state == "review_required"
 
-    reloaded.transition(revision.revision, "roughcut_imported")
+    reloaded.transition(revision.revision, "roughcut_generated")
     reloaded.transition(revision.revision, "caption_received")
     reloaded.transition(revision.revision, "caption_estimate_ready")
     reloaded.transition(revision.revision, "caption_authorized")
@@ -475,6 +525,23 @@ def test_journal_walks_the_authorized_state_machine_and_stops_at_terminals(
     lines = journal.path.read_bytes().splitlines(keepends=True)
     assert all(hashlib.sha256(line).digest() for line in lines)
     assert len(lines) == 10
+
+
+def test_workflow_journal_reads_legacy_roughcut_imported_and_continues(
+    tmp_path: Path,
+) -> None:
+    """S2C 읽기 호환 — 낡은 저널의 roughcut_imported는 재생되고 그 뒤는 이어진다."""
+    revision = _revision()
+    journal = WorkflowJournal.create(tmp_path / "workflow.jsonl", revision)
+    for state in ("estimate_ready", "authorized", "analyzing", "review_required"):
+        journal.transition(revision.revision, state)
+    with (tmp_path / "workflow.jsonl").open("a", encoding="utf-8", newline="\n") as stream:
+        stream.write(encode_message(WorkflowStateEvent(revision.revision, "roughcut_imported")))
+
+    reloaded = WorkflowJournal.open(tmp_path / "workflow.jsonl")
+    assert reloaded.state == "roughcut_imported"
+    reloaded.transition(revision.revision, "caption_received")
+    assert WorkflowJournal.open(tmp_path / "workflow.jsonl").state == "caption_received"
 
 
 def test_journal_accepts_terminal_states_from_running_states_only_as_endpoints(
@@ -513,6 +580,71 @@ def test_two_open_journals_cannot_append_the_same_transition(tmp_path: Path) -> 
     with pytest.raises(ValueError, match="허용되지 않는 상태 전이"):
         stale.transition(revision.revision, "estimate_ready")
     assert WorkflowJournal.open(first.path).state == "estimate_ready"
+
+
+def _caption_request(tmp_path: Path) -> CaptionRequest:
+    return CaptionRequest(
+        origin_revision="a" * 64,
+        final_revision="b" * 64,
+        render_audio=tmp_path / "mix.wav",
+        render_audio_sha256="c" * 64,
+        final_fcpxml=tmp_path / "final.fcpxml",
+    )
+
+
+def test_caption_journal_keeps_failed_attempts_retryable_under_one_request(
+    tmp_path: Path,
+) -> None:
+    """자막 job 원장(S4A) — 시도 실패로 종료하지 않고 같은 요청·승인으로 재시도한다."""
+    request = _caption_request(tmp_path)
+    journal = CaptionJournal.create(tmp_path / "caption.jsonl", request)
+    assert journal.state == "caption_received"
+
+    journal.transition(request.request_revision, "caption_estimate_ready")
+    journal.transition(request.request_revision, "caption_authorized")
+    # 실패한 시도가 원장을 종료 상태로 옮기지 않는다 — 여기가 재시도의 문이다.
+    assert CaptionJournal.open(journal.path).state == "caption_authorized"
+    journal.transition(request.request_revision, "caption_ready")
+    assert CaptionJournal.open(journal.path).state == "caption_ready"
+    # 완료 상태는 종료가 아니지만 뒤로는 못 돌아간다 — 재실행은 새 job이다.
+    with pytest.raises(ValueError, match="허용되지 않는 상태 전이"):
+        journal.transition(request.request_revision, "caption_authorized")
+
+    # 원장이 이미 있으면 배타 생성으로 거부다 — 승인 뒤 조용히 새 원장이 열리지 않는다.
+    with pytest.raises(ValueError, match="이미 있다"):
+        CaptionJournal.create(tmp_path / "caption.jsonl", request)
+
+    # 다른 요청 리비전의 상태는 섞이지 않는다.
+    with pytest.raises(ValueError, match="리비전"):
+        journal.transition("d" * 64, "caption_ready")
+
+    # 취소는 종료 상태다 — 어떤 실행 상태에서도 닫히고 그 뒤는 없다.
+    cancelled = CaptionJournal.create(tmp_path / "cancelled.jsonl", request)
+    cancelled.transition(request.request_revision, "caption_estimate_ready")
+    cancelled.transition(request.request_revision, "cancelled")
+    assert CaptionJournal.open(cancelled.path).state == "cancelled"
+    with pytest.raises(ValueError, match="종료 상태"):
+        cancelled.transition(request.request_revision, "caption_authorized")
+
+    # 상태 줄이 아닌 기록은 자막 원장이 아니다 — 러프컷 상태와 자리가 다르다.
+    foreign = tmp_path / "foreign.jsonl"
+    foreign.write_text(encode_message(request) + encode_message(request), encoding="utf-8")
+    with pytest.raises(ValueError, match="CaptionStateEvent"):
+        CaptionJournal.open(foreign)
+
+    # 러프컷 상태는 자막 원장에 못 들어간다 — 만들 때도, 읽을 때도 같은 규칙이다.
+    with pytest.raises(ValueError, match="없는 상태"):
+        CaptionStateEvent(request_revision=request.request_revision, state="received")
+    valid_event = encode_message(
+        CaptionStateEvent(request_revision=request.request_revision, state="caption_ready")
+    )
+    mixed = tmp_path / "mixed.jsonl"
+    mixed.write_text(
+        encode_message(request) + valid_event.replace('"caption_ready"', '"received"'),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="없는 상태"):
+        CaptionJournal.open(mixed)
 
 
 def test_protocol_rejects_unknown_versions_and_overlapping_approval_sets() -> None:

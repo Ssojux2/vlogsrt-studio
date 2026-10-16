@@ -116,11 +116,14 @@ def test_estimate_deduplicates_source_audio_and_caps_windows_images_and_tokens()
     assert estimate.transcription_seconds == 120
     assert estimate.max_windows == 4
     assert estimate.max_images == 24
-    assert estimate.max_image_tokens == 24 * 308
+    # 이미지는 low detail 정액(308)의 2배 여유(616)로, 글자는 바이트 상한의
+    # 토큰 환산(8192+64)으로 잰다(S2B-2b) — 실제 요청 예약이 승인을 넘지 않게.
+    assert estimate.max_image_tokens == 24 * 616
     assert estimate.pricing_snapshot_revision == pricing.snapshot_revision
     assert estimate.media_grant_revision == "9" * 64
-    # 120s 전사 × (whisper 0.006 + gpt 0.0045) + 24×308 입력 + 4×256 출력 토큰.
-    assert estimate.cost_upper_bound == "0.0237072"
+    # 120s 전사 × (whisper 0.006 + gpt 0.0045) + (24×616 + 4×(8192+64)) 입력 토큰
+    # + 4×256 출력 토큰. 글자 상한 항이 새로 들어갔다(값은 2026-09-21 스냅샷 그대로).
+    assert estimate.cost_upper_bound == "0.0317904"
     with pytest.raises(ValueError, match="다르다"):
         build_analysis_estimate(
             document,
@@ -139,6 +142,8 @@ def test_effective_settings_fingerprint_binds_engine_project_media_and_sources()
         project_config={"silence_min_seconds": "2/1"},
         media_overrides_sha256="a" * 64,
         source_sha256s=("b" * 64,),
+        endpoint_sha256="1" * 64,
+        workspace_binding_sha256="2" * 64,
     )
     assert base != effective_analysis_settings_sha256(
         AnalysisSettings(),
@@ -146,6 +151,8 @@ def test_effective_settings_fingerprint_binds_engine_project_media_and_sources()
         project_config={"silence_min_seconds": "2/1"},
         media_overrides_sha256="a" * 64,
         source_sha256s=("b" * 64,),
+        endpoint_sha256="1" * 64,
+        workspace_binding_sha256="2" * 64,
     )
     assert base != effective_analysis_settings_sha256(
         AnalysisSettings(),
@@ -153,6 +160,28 @@ def test_effective_settings_fingerprint_binds_engine_project_media_and_sources()
         project_config={"silence_min_seconds": "2/1"},
         media_overrides_sha256="c" * 64,
         source_sha256s=("d" * 64,),
+        endpoint_sha256="1" * 64,
+        workspace_binding_sha256="2" * 64,
+    )
+    # 엔드포인트·작업공간 자리도 지문의 재료다(S2B-2b) — 다른 공급자·다른 개발
+    # 루트가 같은 승인을 여는 길이 없다.
+    assert base != effective_analysis_settings_sha256(
+        AnalysisSettings(),
+        engine_config={"transcribe_model": "whisper-1"},
+        project_config={"silence_min_seconds": "2/1"},
+        media_overrides_sha256="a" * 64,
+        source_sha256s=("b" * 64,),
+        endpoint_sha256="3" * 64,
+        workspace_binding_sha256="2" * 64,
+    )
+    assert base != effective_analysis_settings_sha256(
+        AnalysisSettings(),
+        engine_config={"transcribe_model": "whisper-1"},
+        project_config={"silence_min_seconds": "2/1"},
+        media_overrides_sha256="a" * 64,
+        source_sha256s=("b" * 64,),
+        endpoint_sha256="1" * 64,
+        workspace_binding_sha256="4" * 64,
     )
 
 

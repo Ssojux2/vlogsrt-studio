@@ -24,7 +24,7 @@ subprocess를 물려받는다. import·호출 판정은 AST로 한다. 정규식
 (`import vlogsrt.project`, `from vlogsrt.project import x`, `from vlogsrt import project`)와
 상대(`from .project import x`, `from . import project`).
 
-**유일한 예외**: `vlogsrt/cli.py` (정확 경로). 문서화된 CLI 조립 진입점이며,
+**첫째 예외**: `vlogsrt/cli.py` (정확 경로). 문서화된 CLI 조립 진입점이며,
 가져올 수 있는 대상은 **정확히 `vlogsrt.project.commands` 모듈 하나**다 — 계획된
 `commands.py`를 가리키는 절대 형태(`import vlogsrt.project.commands`, `from
 vlogsrt.project import commands`, `from vlogsrt.project.commands import …`)와 그
@@ -37,6 +37,16 @@ commands 외 하위 모듈(config 등)도 **CLI에서 거부**한다. 이 예외
 `repetition`, `refine`, `output`, `layout`, `polish`, `pipeline`, `models`,
 `config`, `env`, `log`, `cutpoints`, `hangul`, `keywords`, `evaluate`)과
 `verify.py`, `ui/**`는 project 전체(commands를 포함해)를 import할 수 없다.
+
+**둘째 예외 — 브라우저 작업공간 진입점 (2026-10-02, 원본 영상 브라우저 v2)**:
+`ui/workspace_service.py` (정확 경로). 가져올 수 있는 대상은 **정확히
+`vlogsrt.project.raw.service` 모듈 하나**다 — `import vlogsrt.project.raw.service`,
+`from vlogsrt.project.raw.service import …`, `from vlogsrt.project.raw import
+service`만 허용한다. **상대 형태는 전부 거부한다** — ui/는 vlogsrt 패키지 안이
+아니라 `from .project…`가 vlogsrt.project로 귀결하지 않는다(CLI 예외와 다른 점).
+하위 모듈(`raw.service.models`)·패키지 핸들(`import vlogsrt.project.raw`)·이웃
+모듈(`raw.config` 등)도 거부한다. `ui/`의 다른 파일(app.py·service.py 포함)은
+여전히 project 전체를 import할 수 없다. 근거: `docs/plans/2026-10-02-raw-video-browser-v2.md` §3.2.
 
 ## 2. 원본 기록은 불변이다
 
@@ -67,6 +77,15 @@ openai import의 허용 지점은 **정확 경로 `vlogsrt/transcribe.py` 하나
 모든 파일 — `vlogsrt/project/**`를 포함한다 — 에서 금지다. project 쪽에 vision
 전송이 필요해도 직접 import하지 않는다; `vlogsrt/transcribe.py` 안에 좁은 전송을
 더하는 방향만 있다.
+
+Claude Messages API(D54)는 SDK 없이 표준 라이브러리로 부른다. 네트워크 모듈
+(`urllib.request`·`urllib.error`·`http.client`·`socket`·`ssl`, 별칭과 `from urllib import
+request` 포함)의 허용 지점은 **정확 경로 `vlogsrt/anthropic_messages.py` 하나**이고, 그
+모듈을 import할 수 있는 파일은 **정확 경로 `vlogsrt/transcribe.py` 하나**다(승인 문·관찰·
+취소가 그 안에 있다). `urllib.parse`는 네트워크가 아니라 어디서나 쓴다. `anthropic`·
+`httpx`·`requests`·`urllib3`·`aiohttp`는 어디서도 import하지 않는다. 예외는 로컬 브라우저
+서버의 두 정확 경로뿐이고 각자 모듈 하나만 쓴다 — `ui/instance.py`는 `urllib.request`,
+`ui/service.py`는 `socket`(`UI_NETWORK_ALLOWLIST`).
 
 ## 5. subprocess — 정확히 두 파일
 
@@ -123,11 +142,18 @@ openai import의 허용 지점은 **정확 경로 `vlogsrt/transcribe.py` 하나
 ## 7. 모델 이름 — 리터럴은 정확한 config 경로에만
 
 엔진 모델 리터럴(`whisper-1`, `gpt-*transcribe*`)은 **정확 경로
-`vlogsrt/config.py`와 `vlogsrt/project/config.py`**에만 있을 수 있다. 파생 계층의
-비전 모델 리터럴(`glm-*`, `gemini-*`)은 **정확 경로 `vlogsrt/project/config.py`
-하나**에만 있을 수 있다 — 새 튜너블은 전부 프로젝트 config에 살기 때문에 원본
-`vlogsrt/config.py`는 비전 모델 예외를 물려받지 않는다. 중첩 경로의 같은 이름 파일
-(`vlogsrt/project/tuning/config.py` 등)도 예외를 물려받지 못한다.
+`vlogsrt/config.py`, `vlogsrt/project/config.py`, `vlogsrt/project/raw/config.py`**
+셋에만 있을 수 있다. 파생 계층의 비전 모델 리터럴(`glm-*`, `gemini-*`)은
+**정확 경로 `vlogsrt/project/config.py` 하나**에만 있을 수 있다 — 새 튜너블은
+전부 프로젝트 config에 살기 때문에 원본 `vlogsrt/config.py`와 raw config는 비전
+모델 예외를 물려받지 않는다. **v2 원본 워크플로의 의미 분석 모델 리터럴
+(`gpt-6-luna`)은 정확 경로 `vlogsrt/project/raw/config.py` 하나**에만 있을 수
+있다(2026-10-02 계획 §3.2·§15.1 — 모델 리터럴은 허용된 설정 경로에만 둔다).
+중첩 경로의 같은 이름 파일(`vlogsrt/project/tuning/config.py`,
+`vlogsrt/project/tuning/raw/config.py` 등)도 예외를 물려받지 못한다.
+**Claude 의미 분석 모델 리터럴(`claude-*`)도 정확 경로 `vlogsrt/project/raw/config.py`
+하나**에만 있을 수 있다(D54) — 등록표(`CLAUDE_ANALYSIS_PROFILES`)가 단가와 함께 모델
+이름을 정하고, 다른 파일은 그 등록표와 `ANALYSIS_MODEL_CHOICES`를 거쳐서만 이름을 얻는다.
 
 **공급자를 바꿔도 접두사 목록은 좁히지 않는다.** 2026-09-13에 기본 비전 공급자가
 z.ai(`glm-5.3-flash`)에서 Google(`gemini-3.8-flash`)로 바뀌었지만 `glm-*`은 금지
@@ -185,10 +211,11 @@ whisper 글자로 완성물이 나간다. 재전사·심판·커터 실패가 �
 
 ## 집행
 
-`scripts/check_invariants.py`가 이 계약의 **구문 경계** — import 방향과 CLI 예외의
-폭(§1), openai·subprocess 경로 예외(§4·§5), xmllint의 run 고정·두 argv 형태(§5),
-선택 의존성의 vad 한정(§6), 모델 리터럴 경로(§7), 파생 데이터클래스 frozen(§8) —
-을 AST로 기계 검사한다(19군). 이 검사는 **열거된 구문 경계만** 집행한다. 원본
+`scripts/check_invariants.py`가 이 계약의 **구문 경계** — import 방향과 CLI·UI
+작업공간 예외의 폭(§1), openai·subprocess 경로 예외(§4·§5), xmllint의 run
+고정·두 argv 형태(§5), 선택 의존성의 vad 한정(§6), 모델 리터럴 경로(§7), 파생
+데이터클래스 frozen(§8) —
+을 AST로 기계 검사한다. 이 검사는 **열거된 구문 경계만** 집행한다. 원본
 기록 불변(§2)과 시각 투영(§3)은 구문 검사로 증명되지 않는다 — 그 둘은 행동
 테스트가 지킨다. 일반적인 정적 분석 엔진이나 파이썬 보안 샌드박스를 주장하는
 것도 아니다. 계약 위반 의심은 코드를 고치지 말고 **보고**한다 — 예외를 넓히는

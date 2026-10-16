@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.resources
+import os
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -37,6 +38,12 @@ _INTRA_OP_THREADS = 1
 _SHA256_HEX = re.compile(r"[0-9a-f]{64}")
 _LFS_POINTER_PREFIX = b"version https://git-lfs.github.com/spec/v1"
 _HASH_BLOCK_BYTES = 1 << 20
+# 공식 onnxruntime 빌드는 원격 측정이 기본으로 켜져 있다 — macOS에서는 내장 1DS
+# 업로더가 네이티브 스레드로 Microsoft에 보낸다(설치본 Privacy.md). 환경 변수는
+# 런타임이 초기화되기 **전에만** 들으며 업로더·이벤트·기기 식별자를 아예 만들지
+# 않게 한다. 이름은 런타임의 계약이지 취향이 아니다.
+_ORT_TELEMETRY_ENV = "ORT_DISABLE_TELEMETRY"
+_ORT_TELEMETRY_OFF = "1"
 
 
 class VadUnavailable(RuntimeError):
@@ -140,6 +147,7 @@ def _create_cpu_session(artifact: VadArtifact) -> object:
     _revalidate_record(artifact)
     onnxruntime = _load_onnxruntime()
     _assert_numpy_capable()
+    _disable_telemetry_events(onnxruntime)
     options = onnxruntime.SessionOptions()
     options.inter_op_num_threads = _INTER_OP_THREADS
     options.intra_op_num_threads = _INTRA_OP_THREADS
@@ -276,7 +284,14 @@ def _assert_numpy_capable() -> None:
 
 
 def _load_onnxruntime() -> Any:
-    """onnxruntime를 함수 안에서만 끌어온다 — 없으면 extra 설치를 진단한다."""
+    """onnxruntime를 함수 안에서만 끌어온다 — 없으면 extra 설치를 진단한다.
+
+    끌어오기 **전에** 원격 측정 환경 변수를 넣는다 — 런타임은 초기화 때 한 번만
+    읽는다. 사람이 이미 값을 정했으면 그 선택을 덮지 않는다(`setdefault`). 이 모듈이
+    onnxruntime를 끌어오는 유일한 곳이지만, 같은 프로세스의 다른 코드가 먼저 끌어왔다면
+    이 값은 늦다 — 그때는 세션 직전의 API 호출(`_disable_telemetry_events`)만 남는다.
+    """
+    os.environ.setdefault(_ORT_TELEMETRY_ENV, _ORT_TELEMETRY_OFF)
     try:
         import onnxruntime
     except ImportError as exc:
@@ -287,6 +302,22 @@ def _load_onnxruntime() -> Any:
         if not hasattr(onnxruntime, attribute):
             raise VadUnavailable(f"onnxruntime 설치가 온전하지 않다 — {attribute}가 없다")
     return onnxruntime
+
+
+def _disable_telemetry_events(onnxruntime: Any) -> None:
+    """세션을 만들기 전에 비필수 원격 측정 이벤트를 끈다(Python 바인딩의 공개 API).
+
+    환경 변수와 달리 초기화 뒤에도 듣지만, 그 전에 나간 초기화 이벤트는 못 막는다
+    — 그래서 둘 다 쓴다. 이 API가 없는 런타임(가짜 포함)은 그냥 지나가고, 있는데
+    실패하면 세션을 열지 않는다(끄지 못한 원격 측정 위에서 추론하지 않는다).
+    """
+    disable = getattr(onnxruntime, "disable_telemetry_events", None)
+    if disable is None:
+        return
+    try:
+        disable()
+    except Exception as exc:
+        raise VadUnavailable(f"onnxruntime 원격 측정을 끄지 못했다: {exc}") from exc
 
 
 def _assert_cpu_only(session: Any) -> None:

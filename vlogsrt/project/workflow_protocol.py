@@ -11,6 +11,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
@@ -19,10 +20,13 @@ from pathlib import Path
 from typing import Literal, TypeAlias, cast
 
 PROTOCOL_VERSION = "1.0"
-ANALYSIS_PROTOCOL_VERSION = "1.2"
+ANALYSIS_PROTOCOL_VERSION = "1.3"
+# 1.2·1.1 기록은 읽는다 — 단 판정의 결과 상태가 없어 legacy/unknown로만 읽힌다.
+PRIOR_ANALYSIS_PROTOCOL_VERSION = "1.2"
 LEGACY_ANALYSIS_PROTOCOL_VERSION = "1.1"
 CAPTION_PROTOCOL_VERSION = "1.1"
 DEFAULT_REVIEW_CONFIDENCE = Decimal("0.90")
+_REASON_CODE = re.compile(r"^[a-z][a-z0-9_]*$")
 
 WorkflowState: TypeAlias = Literal[
     "received",
@@ -30,6 +34,9 @@ WorkflowState: TypeAlias = Literal[
     "authorized",
     "analyzing",
     "review_required",
+    # 러프컷 쓰기가 끝난 정직한 상태(S2C) — 가져오기는 별개의 요청·확인 기록이고
+    # 저널은 여기서 멈춘다. `roughcut_imported`는 같은 자리의 낡은 이름이다.
+    "roughcut_generated",
     "roughcut_imported",
     "caption_received",
     "caption_estimate_ready",
@@ -44,12 +51,20 @@ _NEXT_STATE: dict[WorkflowState, WorkflowState] = {
     "estimate_ready": "authorized",
     "authorized": "analyzing",
     "analyzing": "review_required",
-    "review_required": "roughcut_imported",
+    "review_required": "roughcut_generated",
+    "roughcut_generated": "caption_received",
+    # 낡은 저널은 이 자리에 roughcut_imported로 멈춰 있다 — 그 뒤는 그대로 이어
+    # 간다(읽기 호환). 새 쓰기는 roughcut_generated만 쓴다.
     "roughcut_imported": "caption_received",
     "caption_received": "caption_estimate_ready",
     "caption_estimate_ready": "caption_authorized",
     "caption_authorized": "caption_ready",
 }
+
+# 낡은 기록을 읽을 때만 받는 전이(S2C) — 재생은 호환, 새 쓰기는 정준 계승만.
+_LEGACY_TRANSITIONS: frozenset[tuple[WorkflowState, WorkflowState]] = frozenset(
+    {("review_required", "roughcut_imported")}
+)
 
 _TERMINAL_STATES = frozenset({"cancelled", "failed"})
 
@@ -338,6 +353,107 @@ class AnalysisAttempt:
             raise ValueError("실패가 아닌 분석 시도는 오류를 가질 수 없다")
 
 
+ProgressStage: TypeAlias = Literal["preparation", "audio", "vision", "publication"]
+ProgressStatus: TypeAlias = Literal["running", "succeeded", "failed", "cancelled"]
+
+_PROGRESS_STAGES = frozenset({"preparation", "audio", "vision", "publication"})
+_PROGRESS_STATUSES = frozenset({"running", "succeeded", "failed", "cancelled"})
+
+
+@dataclass(frozen=True, slots=True)
+class AnalysisProgress:
+    """시도 하나의 진행 경계(S2A-3) — 원자 스냅샷 한 장으로 남는다.
+
+    신원은 작업·입력·추정·시도 넷이다: job은 파일의 자리가 아니라 엔진이 알린
+    ``job_id``로, 호출은 잠금 소유자만 아는 ``invocation_id``로 묶는다(중복
+    요청의 릴레이가 남의 호출 진행을 흉내 내는 길을 닫는다). 계수는 **아는
+    때만** 실린다 — 창 계획이 선 뒤의 vision 단계뿐이고, 단위 수가 전체
+    백분율인 척하지 않는다. 준비·오디오 단계는 부정(ineterminate)이다.
+    ``succeeded``는 발행(publication) 단계에만 올 수 있다 — 후보·시도·집계가
+    내구적으로 정착한 뒤의 마지막 경계다. 오류 문면은 절대 실리지 않는다.
+    """
+
+    input_revision: str
+    estimate_revision: str
+    attempt_id: str
+    job_id: str | None
+    invocation_id: str | None
+    stage: ProgressStage
+    status: ProgressStatus
+    completed: int | None
+    total: int | None
+    recorded_at: str
+    progress_revision: str
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        input_revision: str,
+        estimate_revision: str,
+        attempt_id: str,
+        job_id: str | None,
+        invocation_id: str | None,
+        stage: ProgressStage,
+        status: ProgressStatus,
+        recorded_at: str,
+        completed: int | None = None,
+        total: int | None = None,
+    ) -> AnalysisProgress:
+        payload = _analysis_progress_payload(
+            input_revision=input_revision,
+            estimate_revision=estimate_revision,
+            attempt_id=attempt_id,
+            job_id=job_id,
+            invocation_id=invocation_id,
+            stage=stage,
+            status=status,
+            completed=completed,
+            total=total,
+            recorded_at=recorded_at,
+        )
+        return cls(
+            input_revision,
+            estimate_revision,
+            attempt_id,
+            job_id,
+            invocation_id,
+            stage,
+            status,
+            completed,
+            total,
+            recorded_at,
+            _digest(payload),
+        )
+
+    def __post_init__(self) -> None:
+        _require_sha256(self.input_revision, "입력 리비전")
+        _require_sha256(self.estimate_revision, "비용 추정 리비전")
+        _require_sha256(self.progress_revision, "진행 리비전")
+        if not self.attempt_id or not self.recorded_at:
+            raise ValueError("진행의 시도 ID·기록 시각은 비어 있을 수 없다")
+        if self.job_id is not None and not self.job_id:
+            raise ValueError("진행의 job ID는 비어 있으면 안 된다")
+        if self.invocation_id is not None and not self.invocation_id:
+            raise ValueError("진행의 호출 ID는 비어 있으면 안 된다")
+        if self.stage not in _PROGRESS_STAGES:
+            raise ValueError(f"알 수 없는 진행 단계다: {self.stage!r}")
+        if self.status not in _PROGRESS_STATUSES:
+            raise ValueError(f"알 수 없는 진행 상태다: {self.status!r}")
+        if (self.completed is None) != (self.total is None):
+            raise ValueError("창 계수는 완료·전체가 함께 와야 한다")
+        if self.completed is not None and self.total is not None:
+            for name, value in (("completed", self.completed), ("total", self.total)):
+                if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                    raise ValueError(f"{name}는 0 이상 정수여야 한다")
+            if self.completed > self.total:
+                raise ValueError("완료 창 수가 전체 창 수보다 크다")
+            if self.stage != "vision":
+                raise ValueError("창 계수는 vision 단계에만 붙는다")
+        if self.status == "succeeded" and self.stage != "publication":
+            raise ValueError("succeeded는 발행 단계의 마지막 경계에만 올 수 있다")
+
+
 @dataclass(frozen=True, slots=True)
 class CancellationRequest:
     input_revision: str
@@ -430,6 +546,9 @@ class ActualUsage:
             raise ValueError("실제 비용은 0 이상이어야 한다")
 
 
+VisionDecisionStatus: TypeAlias = Literal["success", "error", "skipped", "legacy"]
+
+
 @dataclass(frozen=True, slots=True)
 class VisionWindowDecision:
     input_revision: str
@@ -440,6 +559,10 @@ class VisionWindowDecision:
     confidence: str
     response_sha256: str
     decision_revision: str
+    # D-S1B: 판정의 결과 상태. legacy는 1.2 이전 기록을 읽었을 때의 unknown이다 —
+    # 성공 증거로 쓸 수 없고(후보를 만들지 못한다) 재실행의 근거로도 쓰지 않는다.
+    status: VisionDecisionStatus = "success"
+    reason_code: str = "ok"
 
     @classmethod
     def create(
@@ -452,6 +575,8 @@ class VisionWindowDecision:
         evidence_frame_ids: tuple[str, ...],
         confidence: str,
         response_sha256: str,
+        status: VisionDecisionStatus = "success",
+        reason_code: str = "ok",
     ) -> VisionWindowDecision:
         payload = _vision_decision_payload(
             input_revision=input_revision,
@@ -461,6 +586,8 @@ class VisionWindowDecision:
             evidence_frame_ids=evidence_frame_ids,
             confidence=confidence,
             response_sha256=response_sha256,
+            status=status,
+            reason_code=reason_code,
         )
         return cls(
             input_revision=input_revision,
@@ -471,6 +598,8 @@ class VisionWindowDecision:
             confidence=cast(str, payload["confidence"]),
             response_sha256=response_sha256,
             decision_revision=_digest(payload),
+            status=status,
+            reason_code=reason_code,
         )
 
     def __post_init__(self) -> None:
@@ -479,15 +608,232 @@ class VisionWindowDecision:
         _require_sha256(self.decision_revision, "비전 판정 리비전")
         if not self.window_id:
             raise ValueError("창 ID가 비어 있다")
+        if self.status not in {"success", "error", "skipped", "legacy"}:
+            raise ValueError(f"알 수 없는 판정 상태다: {self.status!r}")
+        if not _REASON_CODE.fullmatch(self.reason_code):
+            raise ValueError(f"판정 사유 코드는 정돈된 소문자 어휘여야 한다: {self.reason_code!r}")
         if self.choice == "keep" and self.candidate_id is not None:
             raise ValueError("keep 판정은 후보 ID를 가질 수 없다")
         if self.choice == "propose_cut" and not self.candidate_id:
             raise ValueError("propose_cut 판정에는 후보 ID가 필요하다")
         if self.choice == "propose_cut" and not self.evidence_frame_ids:
             raise ValueError("propose_cut 판정에는 근거 프레임 ID가 하나 이상 필요하다")
+        if self.status in {"error", "skipped"} and (
+            self.choice != "keep"
+            or self.candidate_id is not None
+            or self.evidence_frame_ids
+            or self.confidence != "0"
+        ):
+            raise ValueError("error·skipped 판정은 후보 없는 keep·빈 근거·신뢰도 0으로 닫힌다")
         confidence_value = _confidence(self.confidence)
         if not confidence_value.is_finite() or not 0 <= confidence_value <= 1:
             raise ValueError("신뢰도는 유한한 0~1이어야 한다")
+
+
+@dataclass(frozen=True, slots=True)
+class UpstreamStages:
+    """상류(오디오 준비·전사·VAD) 단계의 계획·실패·미적용 수 — 집계의 입력.
+
+    세 단계 모두 같은 환산을 쓴다: `total`은 **계획한 소스 수**다(시도한 수가
+    아니라 소스 전체). `skipped`는 적용하지 않은 소스(선언된 무오디오, 소스가
+    없어서 못 한 하류 단계)고 `failed`는 각 단계가 남긴 error뿐이다. 성공한 소스는
+    `total - failed - skipped`로 유도한다. "적용하지 않았다"를 성공도 실패도 아닌
+    수로 남겨야 무오디오 입력이 실패로, 실패가 성공으로 둔갑하지 않는다.
+    `sources_usable`은 오디오·전사·VAD가 모두 성공한 소스의 수다 — 창이 0개여도
+    독립적으로 쓸 수 있는 커버리지의 근거다.
+    """
+
+    audio_total: int = 0
+    audio_failed: int = 0
+    audio_skipped: int = 0
+    transcription_total: int = 0
+    transcription_failed: int = 0
+    transcription_skipped: int = 0
+    vad_total: int = 0
+    vad_failed: int = 0
+    vad_skipped: int = 0
+    sources_total: int = 0
+    sources_usable: int = 0
+
+    def __post_init__(self) -> None:
+        for name in (
+            "audio_total",
+            "audio_failed",
+            "audio_skipped",
+            "transcription_total",
+            "transcription_failed",
+            "transcription_skipped",
+            "vad_total",
+            "vad_failed",
+            "vad_skipped",
+            "sources_total",
+            "sources_usable",
+        ):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"{name}는 0 이상 정수여야 한다")
+        for stage, failed, skipped, total in (
+            ("오디오", self.audio_failed, self.audio_skipped, self.audio_total),
+            (
+                "전사",
+                self.transcription_failed,
+                self.transcription_skipped,
+                self.transcription_total,
+            ),
+            ("VAD", self.vad_failed, self.vad_skipped, self.vad_total),
+        ):
+            if failed + skipped > total:
+                raise ValueError(f"{stage} 실패·미적용 수가 계획 수보다 크다")
+        if self.sources_usable > self.sources_total:
+            raise ValueError("사용 가능 소스 수가 소스 수보다 크다")
+
+
+AnalysisResultStatus: TypeAlias = Literal["success", "partial_error", "error"]
+
+
+@dataclass(frozen=True, slots=True)
+class AnalysisResult:
+    """시도 하나의 집계 — 후보 0건 성공과 전체·부분 실패를 갈라 말한다.
+
+    창 수의 합은 계획한 창 수와 정확히 같다(빠져 보이면 안 된다). status success는
+    창·상류 어디에도 실패가 없을 때뿐이고, 성공 커버리지 없이 실패가 하나라도 있으면
+    error, 커버리지가 있는 실패는 partial_error다.
+    """
+
+    input_revision: str
+    attempt_id: str
+    estimate_revision: str
+    status: AnalysisResultStatus
+    windows_total: int
+    windows_successful: int
+    windows_failed: int
+    windows_skipped: int
+    candidate_count: int
+    upstream_audio_total: int
+    upstream_audio_failed: int
+    upstream_audio_skipped: int
+    upstream_transcription_total: int
+    upstream_transcription_failed: int
+    upstream_transcription_skipped: int
+    upstream_vad_total: int
+    upstream_vad_failed: int
+    upstream_vad_skipped: int
+    upstream_sources_total: int
+    upstream_sources_usable: int
+    reason_codes: tuple[str, ...]
+    result_revision: str
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        input_revision: str,
+        attempt_id: str,
+        estimate_revision: str,
+        status: AnalysisResultStatus,
+        windows_total: int,
+        windows_successful: int,
+        windows_failed: int,
+        windows_skipped: int,
+        candidate_count: int,
+        upstream: UpstreamStages,
+        reason_codes: tuple[str, ...],
+    ) -> AnalysisResult:
+        payload = _analysis_result_payload(
+            input_revision=input_revision,
+            attempt_id=attempt_id,
+            estimate_revision=estimate_revision,
+            status=status,
+            windows_total=windows_total,
+            windows_successful=windows_successful,
+            windows_failed=windows_failed,
+            windows_skipped=windows_skipped,
+            candidate_count=candidate_count,
+            upstream=upstream,
+            reason_codes=reason_codes,
+        )
+        return cls(
+            input_revision=input_revision,
+            attempt_id=attempt_id,
+            estimate_revision=estimate_revision,
+            status=status,
+            windows_total=windows_total,
+            windows_successful=windows_successful,
+            windows_failed=windows_failed,
+            windows_skipped=windows_skipped,
+            candidate_count=candidate_count,
+            upstream_audio_total=upstream.audio_total,
+            upstream_audio_failed=upstream.audio_failed,
+            upstream_audio_skipped=upstream.audio_skipped,
+            upstream_transcription_total=upstream.transcription_total,
+            upstream_transcription_failed=upstream.transcription_failed,
+            upstream_transcription_skipped=upstream.transcription_skipped,
+            upstream_vad_total=upstream.vad_total,
+            upstream_vad_failed=upstream.vad_failed,
+            upstream_vad_skipped=upstream.vad_skipped,
+            upstream_sources_total=upstream.sources_total,
+            upstream_sources_usable=upstream.sources_usable,
+            reason_codes=tuple(sorted(set(reason_codes))),
+            result_revision=_digest(payload),
+        )
+
+    def __post_init__(self) -> None:
+        _require_sha256(self.input_revision, "입력 리비전")
+        _require_sha256(self.estimate_revision, "비용 추정 리비전")
+        _require_sha256(self.result_revision, "분석 결과 리비전")
+        if not self.attempt_id:
+            raise ValueError("분석 결과의 시도 ID가 비어 있다")
+        if self.status not in {"success", "partial_error", "error"}:
+            raise ValueError(f"알 수 없는 분석 결과 상태다: {self.status!r}")
+        for name in (
+            "windows_total",
+            "windows_successful",
+            "windows_failed",
+            "windows_skipped",
+            "candidate_count",
+            "upstream_audio_total",
+            "upstream_audio_failed",
+            "upstream_audio_skipped",
+            "upstream_transcription_total",
+            "upstream_transcription_failed",
+            "upstream_transcription_skipped",
+            "upstream_vad_total",
+            "upstream_vad_failed",
+            "upstream_vad_skipped",
+            "upstream_sources_total",
+            "upstream_sources_usable",
+        ):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"{name}는 0 이상 정수여야 한다")
+        if self.windows_successful + self.windows_failed + self.windows_skipped != (
+            self.windows_total
+        ):
+            raise ValueError("창 상태의 합이 계획한 창 수와 다르다 — 조용히 빠진 창이 있다")
+        if self.upstream_audio_failed + self.upstream_audio_skipped > self.upstream_audio_total:
+            raise ValueError("오디오 실패·미적용 수가 계획 수보다 크다")
+        if (
+            self.upstream_transcription_failed + self.upstream_transcription_skipped
+            > self.upstream_transcription_total
+        ):
+            raise ValueError("전사 실패·미적용 수가 계획 수보다 크다")
+        if self.upstream_vad_failed + self.upstream_vad_skipped > self.upstream_vad_total:
+            raise ValueError("VAD 실패·미적용 수가 계획 수보다 크다")
+        if self.upstream_sources_usable > self.upstream_sources_total:
+            raise ValueError("사용 가능 소스 수가 소스 수보다 크다")
+        if tuple(sorted(set(self.reason_codes))) != self.reason_codes:
+            raise ValueError("결과 사유 코드는 정렬·중복 제거된 채여야 한다")
+        for code in self.reason_codes:
+            if not _REASON_CODE.fullmatch(code):
+                raise ValueError(f"결과 사유 코드가 정돈된 어휘가 아니다: {code!r}")
+        if self.status == "success" and (
+            self.windows_failed
+            or self.windows_skipped
+            or self.upstream_audio_failed
+            or self.upstream_transcription_failed
+            or self.upstream_vad_failed
+        ):
+            raise ValueError("success 집계에는 창·상류 실패가 하나도 없어야 한다")
 
 
 @dataclass(frozen=True, slots=True)
@@ -835,6 +1181,56 @@ class CaptionResult:
             raise ValueError("발화 없음 또는 오류 결과는 SRT 경로를 가질 수 없다")
 
 
+CaptionAttemptStatus: TypeAlias = Literal["pending", "running", "succeeded", "failed", "cancelled"]
+
+# 자막 작업만 쓰는 상태 — 원본 러프컷 워크플로(`WorkflowJournal`)와 자리가 다르다.
+# 공유 받기로 시작한 job에는 input.fcpxml이 없으므로 ProjectRevision도 없다: 이
+# 원장의 첫 줄은 CaptionRequest고 상태는 request_revision에 묶인다(S4A).
+_CAPTION_ORDERED_STATES: tuple[WorkflowState, ...] = (
+    "caption_received",
+    "caption_estimate_ready",
+    "caption_authorized",
+    "caption_ready",
+)
+_NEXT_CAPTION_STATE = dict(zip(_CAPTION_ORDERED_STATES, _CAPTION_ORDERED_STATES[1:], strict=False))
+_CAPTION_STATES = frozenset(_CAPTION_ORDERED_STATES)
+
+
+@dataclass(frozen=True, slots=True)
+class CaptionStateEvent:
+    request_revision: str
+    state: WorkflowState
+
+    def __post_init__(self) -> None:
+        _require_sha256(self.request_revision, "자막 요청 리비전")
+        if self.state not in _CAPTION_STATES and self.state not in _TERMINAL_STATES:
+            raise ValueError(f"자막 작업에는 없는 상태다: {self.state!r}")
+
+
+@dataclass(frozen=True, slots=True)
+class CaptionAttempt:
+    """자막 시도 하나의 상태 — 성공한 무발화와 실패한 전사를 갈라 남긴다(S4A)."""
+
+    request_revision: str
+    estimate_revision: str
+    attempt_id: str
+    status: CaptionAttemptStatus
+    started_at: str
+    error: str | None
+
+    def __post_init__(self) -> None:
+        _require_sha256(self.request_revision, "자막 요청 리비전")
+        _require_sha256(self.estimate_revision, "자막 추정 리비전")
+        if not self.attempt_id or not self.started_at:
+            raise ValueError("시도 ID·시작 시각은 비어 있을 수 없다")
+        if self.status not in {"pending", "running", "succeeded", "failed", "cancelled"}:
+            raise ValueError(f"알 수 없는 자막 시도 상태다: {self.status!r}")
+        if self.status == "failed" and not self.error:
+            raise ValueError("실패한 자막 시도에는 오류가 필요하다")
+        if self.status != "failed" and self.error is not None:
+            raise ValueError("실패가 아닌 자막 시도는 오류를 가질 수 없다")
+
+
 @dataclass(frozen=True, slots=True)
 class WorkflowStateEvent:
     input_revision: str
@@ -851,9 +1247,11 @@ ProtocolMessage: TypeAlias = (
     | AnalysisEstimate
     | AnalysisAuthorization
     | AnalysisAttempt
+    | AnalysisProgress
     | CancellationRequest
     | ActualUsage
     | VisionWindowDecision
+    | AnalysisResult
     | CutCandidate
     | CandidatePreview
     | EditPlan
@@ -862,6 +1260,8 @@ ProtocolMessage: TypeAlias = (
     | CaptionEstimate
     | CaptionAuthorization
     | CaptionResult
+    | CaptionAttempt
+    | CaptionStateEvent
     | WorkflowStateEvent
 )
 
@@ -890,12 +1290,17 @@ def decode_message(line: str) -> ProtocolMessage:
     kind = envelope.get("type")
     version = envelope.get("protocol_version")
     expected_version = _protocol_version_for_kind(kind)
-    if version != expected_version:
+    readable = (
+        version in _READABLE_ANALYSIS_VERSIONS
+        if kind in _ANALYSIS_PROTOCOL_TYPES
+        else version == expected_version
+    )
+    if not readable:
         raise ValueError(f"지원하지 않는 프로토콜 버전이다: {version!r}")
     payload = envelope.get("payload")
     if not isinstance(payload, dict):
         raise ValueError("JSONL 메시지 payload는 객체여야 한다")
-    return _decode_payload(kind, payload)
+    return _decode_payload(kind, payload, cast(str, version))
 
 
 class WorkflowJournal:
@@ -943,7 +1348,8 @@ class WorkflowJournal:
             if state in _TERMINAL_STATES:
                 raise ValueError(f"종료 상태 뒤에는 전이가 없다: {state} → {event.state}")
             expected = _NEXT_STATE.get(state)
-            if event.state != expected and event.state not in _TERMINAL_STATES:
+            legacy = (state, event.state) in _LEGACY_TRANSITIONS
+            if event.state != expected and not legacy and event.state not in _TERMINAL_STATES:
                 raise ValueError(f"허용되지 않는 상태 전이: {state} → {event.state}")
             state = event.state
         return cls(path, first, state)
@@ -966,6 +1372,87 @@ class WorkflowJournal:
                     raise ValueError(f"허용되지 않는 상태 전이: {current.state} → {state}")
                 stream.seek(0, os.SEEK_END)
                 stream.write(encode_message(WorkflowStateEvent(input_revision, state)))
+                stream.flush()
+                os.fsync(stream.fileno())
+                self.state = state
+            finally:
+                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+
+
+class CaptionJournal:
+    """공유 받기로 시작한 자막 작업의 append-only 상태 원장(S4A).
+
+    첫 줄은 ``CaptionRequest``고 그 뒤의 상태 줄은 전부 ``request_revision``에
+    묶인다. ``caption_authorized``는 종료 상태가 아니다 — 시도가 예외로 무너져도
+    같은 요청·같은 추정으로 다시 실행할 수 있어야 한다(분석의 ``authorized``와
+    같은 규율). 종료 상태는 ``cancelled``·``failed`` 둘뿐이다.
+    """
+
+    def __init__(self, path: Path, request: CaptionRequest, state: WorkflowState) -> None:
+        self.path = path
+        self.request = request
+        self.state = state
+
+    @classmethod
+    def create(cls, path: Path, request: CaptionRequest) -> CaptionJournal:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with path.open("x", encoding="utf-8", newline="\n") as stream:
+                stream.write(encode_message(request))
+                stream.flush()
+                os.fsync(stream.fileno())
+        except FileExistsError as exc:
+            raise ValueError(f"자막 작업 원장이 이미 있다: {path}") from exc
+        return cls(path, request, "caption_received")
+
+    @classmethod
+    def open(cls, path: Path) -> CaptionJournal:
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+        except FileNotFoundError as exc:
+            raise ValueError(f"자막 작업 원장이 없다: {path}") from exc
+        return cls._from_lines(path, lines)
+
+    @classmethod
+    def _from_lines(cls, path: Path, lines: list[str]) -> CaptionJournal:
+        if not lines:
+            raise ValueError(f"자막 작업 원장이 비어 있다: {path}")
+        first = decode_message(lines[0])
+        if not isinstance(first, CaptionRequest):
+            raise ValueError("자막 작업 원장의 첫 줄은 CaptionRequest여야 한다")
+        state: WorkflowState = "caption_received"
+        for line in lines[1:]:
+            event = decode_message(line)
+            if not isinstance(event, CaptionStateEvent):
+                raise ValueError("자막 작업 원장의 상태 줄은 CaptionStateEvent여야 한다")
+            if event.request_revision != first.request_revision:
+                raise ValueError("자막 작업 원장에 다른 요청 리비전의 상태가 섞였다")
+            if state in _TERMINAL_STATES:
+                raise ValueError(f"종료 상태 뒤에는 전이가 없다: {state} → {event.state}")
+            expected = _NEXT_CAPTION_STATE.get(state)
+            if event.state != expected and event.state not in _TERMINAL_STATES:
+                raise ValueError(f"허용되지 않는 상태 전이: {state} → {event.state}")
+            state = event.state
+        return cls(path, first, state)
+
+    def transition(self, request_revision: str, state: WorkflowState) -> None:
+        with self.path.open("r+", encoding="utf-8", newline="\n") as stream:
+            fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+            try:
+                stream.seek(0)
+                current = self._from_lines(self.path, stream.readlines())
+                if request_revision != current.request.request_revision:
+                    raise ValueError(
+                        f"요청 리비전이 자막 작업과 다르다: {request_revision} ≠ "
+                        f"{current.request.request_revision}"
+                    )
+                expected = _NEXT_CAPTION_STATE.get(current.state)
+                if current.state in _TERMINAL_STATES:
+                    raise ValueError(f"종료 상태 뒤에는 전이가 없다: {current.state} → {state}")
+                if state != expected and state not in _TERMINAL_STATES:
+                    raise ValueError(f"허용되지 않는 상태 전이: {current.state} → {state}")
+                stream.seek(0, os.SEEK_END)
+                stream.write(encode_message(CaptionStateEvent(request_revision, state)))
                 stream.flush()
                 os.fsync(stream.fileno())
                 self.state = state
@@ -1033,6 +1520,22 @@ def _message_payload(message: ProtocolMessage) -> dict[str, object]:
             "started_at": message.started_at,
             "status": message.status,
         }
+    if isinstance(message, AnalysisProgress):
+        return {
+            **_analysis_progress_payload(
+                input_revision=message.input_revision,
+                estimate_revision=message.estimate_revision,
+                attempt_id=message.attempt_id,
+                job_id=message.job_id,
+                invocation_id=message.invocation_id,
+                stage=message.stage,
+                status=message.status,
+                completed=message.completed,
+                total=message.total,
+                recorded_at=message.recorded_at,
+            ),
+            "progress_revision": message.progress_revision,
+        }
     if isinstance(message, CancellationRequest):
         return {
             "attempt_id": message.attempt_id,
@@ -1065,8 +1568,39 @@ def _message_payload(message: ProtocolMessage) -> dict[str, object]:
                 evidence_frame_ids=message.evidence_frame_ids,
                 confidence=message.confidence,
                 response_sha256=message.response_sha256,
+                status=message.status,
+                reason_code=message.reason_code,
             ),
             "decision_revision": message.decision_revision,
+        }
+    if isinstance(message, AnalysisResult):
+        return {
+            **_analysis_result_payload(
+                input_revision=message.input_revision,
+                attempt_id=message.attempt_id,
+                estimate_revision=message.estimate_revision,
+                status=message.status,
+                windows_total=message.windows_total,
+                windows_successful=message.windows_successful,
+                windows_failed=message.windows_failed,
+                windows_skipped=message.windows_skipped,
+                candidate_count=message.candidate_count,
+                upstream=UpstreamStages(
+                    audio_total=message.upstream_audio_total,
+                    audio_failed=message.upstream_audio_failed,
+                    audio_skipped=message.upstream_audio_skipped,
+                    transcription_total=message.upstream_transcription_total,
+                    transcription_failed=message.upstream_transcription_failed,
+                    transcription_skipped=message.upstream_transcription_skipped,
+                    vad_total=message.upstream_vad_total,
+                    vad_failed=message.upstream_vad_failed,
+                    vad_skipped=message.upstream_vad_skipped,
+                    sources_total=message.upstream_sources_total,
+                    sources_usable=message.upstream_sources_usable,
+                ),
+                reason_codes=message.reason_codes,
+            ),
+            "result_revision": message.result_revision,
         }
     if isinstance(message, CutCandidate):
         return {
@@ -1153,12 +1687,23 @@ def _message_payload(message: ProtocolMessage) -> dict[str, object]:
             "srt_path": str(message.srt_path) if message.srt_path is not None else None,
             "warnings": list(message.warnings),
         }
+    if isinstance(message, CaptionAttempt):
+        return {
+            "attempt_id": message.attempt_id,
+            "error": message.error,
+            "estimate_revision": message.estimate_revision,
+            "request_revision": message.request_revision,
+            "started_at": message.started_at,
+            "status": message.status,
+        }
+    if isinstance(message, CaptionStateEvent):
+        return {"request_revision": message.request_revision, "state": message.state}
     if isinstance(message, WorkflowStateEvent):
         return {"input_revision": message.input_revision, "state": message.state}
     raise TypeError(f"지원하지 않는 프로토콜 메시지다: {type(message).__name__}")
 
 
-def _decode_payload(kind: object, payload: dict[str, object]) -> ProtocolMessage:
+def _decode_payload(kind: object, payload: dict[str, object], version: str) -> ProtocolMessage:
     if kind == "ProjectRevision":
         message = ProjectRevision(
             input_sha256=_string(payload, "input_sha256"),
@@ -1263,10 +1808,40 @@ def _decode_payload(kind: object, payload: dict[str, object]) -> ProtocolMessage
             started_at=_string(payload, "started_at"),
             error=error,
         )
+    if kind == "AnalysisProgress":
+        # 진행 스냅샷은 관측이지 결과가 아니다 — 깨진 신원·계수·열거는 회복하지
+        # 않고 그냥 거절한다. 낡은 작업공간에는 파일 자체가 없으므로 legacy 읽기는
+        # '없음'(부재)으로 흘러간다.
+        progress = AnalysisProgress.create(
+            input_revision=_string(payload, "input_revision"),
+            estimate_revision=_string(payload, "estimate_revision"),
+            attempt_id=_string(payload, "attempt_id"),
+            job_id=_optional_string(payload, "job_id"),
+            invocation_id=_optional_string(payload, "invocation_id"),
+            stage=cast(ProgressStage, _string(payload, "stage")),
+            status=cast(ProgressStatus, _string(payload, "status")),
+            recorded_at=_string(payload, "recorded_at"),
+            completed=_optional_integer(payload, "completed"),
+            total=_optional_integer(payload, "total"),
+        )
+        if payload.get("progress_revision") != progress.progress_revision:
+            raise ValueError("AnalysisProgress의 계산 리비전이 기록과 다르다")
+        return progress
     if kind == "VisionWindowDecision":
         candidate_id = payload.get("candidate_id")
         if candidate_id is not None and not isinstance(candidate_id, str):
             raise ValueError("VisionWindowDecision.candidate_id는 문자열 또는 null이어야 한다")
+        # 결과 상태는 1.3의 계약이다 — 낡은 봉투(1.2 이전)의 기록은 상태가 없어
+        # legacy/unknown로 읽힌다(성공 증거도 재실행 근거도 아니다). 1.3 봉투에서
+        # 상태가 빠졌으면 그건 깨진 기록이다 — legacy로 슬쩍 두지 않는다.
+        legacy = version != ANALYSIS_PROTOCOL_VERSION
+        if not legacy and ("status" not in payload or "reason_code" not in payload):
+            raise ValueError("1.3 판정 기록에 결과 상태·사유 코드가 없다")
+        status = cast(
+            VisionDecisionStatus,
+            "legacy" if legacy else _string(payload, "status"),
+        )
+        reason_code = "legacy_no_outcome" if legacy else _string(payload, "reason_code")
         decision = VisionWindowDecision.create(
             input_revision=_string(payload, "input_revision"),
             window_id=_string(payload, "window_id"),
@@ -1275,10 +1850,45 @@ def _decode_payload(kind: object, payload: dict[str, object]) -> ProtocolMessage
             evidence_frame_ids=_strings(payload, "evidence_frame_ids"),
             confidence=_string(payload, "confidence"),
             response_sha256=_string(payload, "response_sha256"),
+            status=status,
+            reason_code=reason_code,
         )
         if payload.get("decision_revision") != decision.decision_revision:
             raise ValueError("VisionWindowDecision의 계산 리비전이 기록과 다르다")
         return decision
+    if kind == "AnalysisResult":
+        upstream = payload.get("upstream")
+        windows = payload.get("windows")
+        if not isinstance(upstream, dict) or not isinstance(windows, dict):
+            raise ValueError("AnalysisResult의 upstream·windows는 객체여야 한다")
+        result = AnalysisResult.create(
+            input_revision=_string(payload, "input_revision"),
+            attempt_id=_string(payload, "attempt_id"),
+            estimate_revision=_string(payload, "estimate_revision"),
+            status=cast(AnalysisResultStatus, _string(payload, "status")),
+            windows_total=_integer(windows, "total"),
+            windows_successful=_integer(windows, "successful"),
+            windows_failed=_integer(windows, "failed"),
+            windows_skipped=_integer(windows, "skipped"),
+            candidate_count=_integer(payload, "candidate_count"),
+            upstream=UpstreamStages(
+                audio_total=_integer(_stage(upstream, "audio"), "total"),
+                audio_failed=_integer(_stage(upstream, "audio"), "failed"),
+                audio_skipped=_integer(_stage(upstream, "audio"), "skipped"),
+                transcription_total=_integer(_stage(upstream, "transcription"), "total"),
+                transcription_failed=_integer(_stage(upstream, "transcription"), "failed"),
+                transcription_skipped=_integer(_stage(upstream, "transcription"), "skipped"),
+                vad_total=_integer(_stage(upstream, "vad"), "total"),
+                vad_failed=_integer(_stage(upstream, "vad"), "failed"),
+                vad_skipped=_integer(_stage(upstream, "vad"), "skipped"),
+                sources_total=_integer(_stage(upstream, "sources"), "total"),
+                sources_usable=_integer(_stage(upstream, "sources"), "usable"),
+            ),
+            reason_codes=_strings(payload, "reason_codes"),
+        )
+        if payload.get("result_revision") != result.result_revision:
+            raise ValueError("AnalysisResult의 계산 리비전이 기록과 다르다")
+        return result
     if kind == "CutCandidate":
         candidate = CutCandidate(
             candidate_id=_string(payload, "candidate_id"),
@@ -1370,6 +1980,23 @@ def _decode_payload(kind: object, payload: dict[str, object]) -> ProtocolMessage
             speech_status=cast(
                 Literal["speech", "no_speech", "error"], _string(payload, "speech_status")
             ),
+        )
+    if kind == "CaptionAttempt":
+        error = payload.get("error")
+        if error is not None and not isinstance(error, str):
+            raise ValueError("CaptionAttempt.error는 문자열 또는 null이어야 한다")
+        return CaptionAttempt(
+            request_revision=_string(payload, "request_revision"),
+            estimate_revision=_string(payload, "estimate_revision"),
+            attempt_id=_string(payload, "attempt_id"),
+            status=cast(CaptionAttemptStatus, _string(payload, "status")),
+            started_at=_string(payload, "started_at"),
+            error=error,
+        )
+    if kind == "CaptionStateEvent":
+        return CaptionStateEvent(
+            request_revision=_string(payload, "request_revision"),
+            state=cast(WorkflowState, _string(payload, "state")),
         )
     if kind == "WorkflowStateEvent":
         return WorkflowStateEvent(
@@ -1478,6 +2105,33 @@ def _pricing_snapshot_payload(
     }
 
 
+def _analysis_progress_payload(
+    *,
+    input_revision: str,
+    estimate_revision: str,
+    attempt_id: str,
+    job_id: str | None,
+    invocation_id: str | None,
+    stage: str,
+    status: str,
+    completed: int | None,
+    total: int | None,
+    recorded_at: str,
+) -> dict[str, object]:
+    return {
+        "attempt_id": attempt_id,
+        "completed": completed,
+        "estimate_revision": estimate_revision,
+        "input_revision": input_revision,
+        "invocation_id": invocation_id,
+        "job_id": job_id,
+        "recorded_at": recorded_at,
+        "stage": stage,
+        "status": status,
+        "total": total,
+    }
+
+
 def _actual_usage_payload(
     *,
     input_revision: str,
@@ -1558,8 +2212,10 @@ def _vision_decision_payload(
     evidence_frame_ids: tuple[str, ...],
     confidence: str,
     response_sha256: str,
+    status: str = "success",
+    reason_code: str = "ok",
 ) -> dict[str, object]:
-    return {
+    payload: dict[str, object] = {
         "candidate_id": candidate_id,
         "choice": choice,
         "confidence": _decimal_text(_confidence(confidence)),
@@ -1567,6 +2223,63 @@ def _vision_decision_payload(
         "input_revision": input_revision,
         "response_sha256": response_sha256,
         "window_id": window_id,
+    }
+    # legacy 판정의 리비전은 1.2 공식 그대로다 — 낡은 기록의 decision_revision을
+    # 다시 계산해 검증하려면 같은 필드만 묶어야 한다. 새 판정은 상태를 묶는다.
+    if status != "legacy":
+        payload["reason_code"] = reason_code
+        payload["status"] = status
+    return payload
+
+
+def _analysis_result_payload(
+    *,
+    input_revision: str,
+    attempt_id: str,
+    estimate_revision: str,
+    status: str,
+    windows_total: int,
+    windows_successful: int,
+    windows_failed: int,
+    windows_skipped: int,
+    candidate_count: int,
+    upstream: UpstreamStages,
+    reason_codes: tuple[str, ...],
+) -> dict[str, object]:
+    return {
+        "attempt_id": attempt_id,
+        "candidate_count": candidate_count,
+        "estimate_revision": estimate_revision,
+        "input_revision": input_revision,
+        "reason_codes": sorted(set(reason_codes)),
+        "status": status,
+        "upstream": {
+            "audio": {
+                "failed": upstream.audio_failed,
+                "skipped": upstream.audio_skipped,
+                "total": upstream.audio_total,
+            },
+            "transcription": {
+                "failed": upstream.transcription_failed,
+                "skipped": upstream.transcription_skipped,
+                "total": upstream.transcription_total,
+            },
+            "vad": {
+                "failed": upstream.vad_failed,
+                "skipped": upstream.vad_skipped,
+                "total": upstream.vad_total,
+            },
+            "sources": {
+                "total": upstream.sources_total,
+                "usable": upstream.sources_usable,
+            },
+        },
+        "windows": {
+            "failed": windows_failed,
+            "skipped": windows_skipped,
+            "successful": windows_successful,
+            "total": windows_total,
+        },
     }
 
 
@@ -1579,6 +2292,13 @@ def _range(payload: dict[str, object], key: str) -> RationalRange:
     if not isinstance(value, dict):
         raise ValueError(f"{key}는 객체여야 한다")
     return RationalRange(_fraction(value, "start"), _fraction(value, "end"))
+
+
+def _stage(payload: dict[str, object], key: str) -> dict[str, object]:
+    value = payload.get(key)
+    if not isinstance(value, dict):
+        raise ValueError(f"{key}는 객체여야 한다")
+    return value
 
 
 def _fraction(payload: dict[str, object], key: str) -> Fraction:
@@ -1600,6 +2320,15 @@ def _optional_string(payload: dict[str, object], key: str) -> str | None:
     value = payload.get(key)
     if value is not None and not isinstance(value, str):
         raise ValueError(f"{key}는 문자열 또는 null이어야 한다")
+    return value
+
+
+def _optional_integer(payload: dict[str, object], key: str) -> int | None:
+    value = payload.get(key)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{key}는 정수 또는 null이어야 한다")
     return value
 
 
@@ -1671,13 +2400,20 @@ _ANALYSIS_PROTOCOL_TYPES = frozenset(
         "AnalysisEstimate",
         "AnalysisAuthorization",
         "AnalysisAttempt",
+        "AnalysisProgress",
         "CancellationRequest",
         "ActualUsage",
         "VisionWindowDecision",
+        "AnalysisResult",
         "CutCandidate",
         "CandidatePreview",
         "EditPlan",
     }
+)
+
+# 분석 프로토콜은 낡은 기록도 읽는다 — 단 결과 상태가 없는 판정은 legacy다.
+_READABLE_ANALYSIS_VERSIONS = frozenset(
+    {ANALYSIS_PROTOCOL_VERSION, PRIOR_ANALYSIS_PROTOCOL_VERSION, LEGACY_ANALYSIS_PROTOCOL_VERSION}
 )
 
 _CAPTION_PROTOCOL_TYPES = frozenset(
@@ -1686,6 +2422,8 @@ _CAPTION_PROTOCOL_TYPES = frozenset(
         "CaptionEstimate",
         "CaptionAuthorization",
         "CaptionResult",
+        "CaptionAttempt",
+        "CaptionStateEvent",
     }
 )
 

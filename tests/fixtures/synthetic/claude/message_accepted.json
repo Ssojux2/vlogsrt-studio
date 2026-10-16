@@ -1,0 +1,22 @@
+{
+  "id": "msg_synthetic_accepted",
+  "type": "message",
+  "role": "assistant",
+  "model": "claude-opus-5-5",
+  "content": [
+    {"type": "thinking", "thinking": "", "signature": "synthetic-signature"},
+    {
+      "type": "text",
+      "text": "{\"window_id\":\"window_000000\",\"speech_summary\":\"도착 인사\",\"visual_summary\":\"실내\",\"scene_tags\":[\"talking\"],\"evidence_ids\":[],\"suggested_boundary_ids\":[],\"editing_notes\":[],\"needs_review\":false,\"uncertainties\":[],\"suitability\":\"usable\",\"suitability_reason\":\"인물이 또렷하고 흔들림이 적다\",\"visual_issues\":[\"none\"]}"
+    }
+  ],
+  "stop_reason": "end_turn",
+  "stop_sequence": null,
+  "stop_details": null,
+  "usage": {
+    "input_tokens": 5000,
+    "output_tokens": 1200,
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0
+  }
+}

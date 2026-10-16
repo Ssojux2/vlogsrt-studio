@@ -49,3 +49,7 @@ macos/LocalSigning.xcconfig
 
 # SwiftPM 빌드 산물
 .build/
+
+# 로컬 실행 상태·브라우저 점검 산물 (개인 경로가 들어 있다)
+.vlogsrt-ui-state.json
+.playwright-mcp/

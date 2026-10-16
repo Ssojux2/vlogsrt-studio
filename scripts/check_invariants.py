@@ -36,12 +36,24 @@ BANNED_IMPORTS = (
     "jamo", "konlpy", "pysrt", "ffmpeg", "pydantic", "dotenv", "regex", "numpy", "onnxruntime",
     # UI는 ui/ 에만 산다. 핵심 패키지가 gradio를 끌어오면 규칙 7이 무너진다.
     "gradio",
+    # Claude는 표준 라이브러리 urllib로 부른다(D54) — SDK·HTTP 클라이언트 의존성은 없다.
+    "anthropic", "httpx", "requests", "urllib3", "aiohttp",
 )  # fmt: skip
 ALLOWED_DEPENDENCIES = {"openai", "tomli-w", "rich"}
 
 # 예외는 전부 **정확 상대 경로**로 판정한다. 파일 이름으로 판정하면 같은 이름의
 # 파일이 예외를 물려받는다 — `vlogsrt/project/transcribe.py`가 openai를 얻는 식이다.
 OPENAI_BOUNDARY_PATH = "vlogsrt/transcribe.py"
+# 네트워크 모듈을 import할 수 있는 유일한 파일(D54) — Claude Messages의 HTTP 전송.
+# `urllib.parse`는 네트워크가 아니라 문자열 해석이라 어디서나 쓴다.
+NETWORK_BOUNDARY_PATH = "vlogsrt/anthropic_messages.py"
+NETWORK_MODULES = ("urllib.request", "urllib.error", "http.client", "socket", "ssl")
+# ui/의 로컬 브라우저 서버는 파일마다 정해진 네트워크 모듈 하나만 쓴다(정확 경로) —
+# 인스턴스 확인(루프백 HTTP)과 빈 포트 찾기. 같은 파일의 다른 모듈은 허용하지 않는다.
+UI_NETWORK_ALLOWLIST = {"ui/instance.py": "urllib.request", "ui/service.py": "socket"}
+# 그 전송 파일을 import할 수 있는 유일한 파일 — 승인 문·관찰·취소를 건너뛰는 길이 없다.
+CLAUDE_TRANSPORT_MODULE = "anthropic_messages"
+CLAUDE_TRANSPORT_ENTRY_PATH = "vlogsrt/transcribe.py"
 SUBPROCESS_BOUNDARY_PATHS = ("vlogsrt/preprocess.py", "vlogsrt/project/xml_validation.py")
 
 # 제거 계층(규칙 4·9) — P6는 이 프로젝트에서 처음으로 구간을 실제 제거하는 계층이다.
@@ -63,21 +75,39 @@ EDIT_BANNED_IMPORTS = (
     "vlogsrt.project.vad.inference", "vlogsrt.project.vad.runtime",
     "vlogsrt.project.vision.sampling",
     "vlogsrt.repetition", "vlogsrt.repair", "vlogsrt.refine",
-    "vlogsrt.output", "vlogsrt.layout",
+    "vlogsrt.output", "vlogsrt.layout", "vlogsrt.anthropic_messages",
 )  # fmt: skip
 EDIT_SAMPLE_TYPE_MODULE = "vlogsrt.project.vision.sampling"
 EDIT_SAMPLE_TYPE = "FrameSampleRequest"
 EDIT_PACKAGE = "vlogsrt.project"
 
-MODEL_LITERAL_PATHS = ("vlogsrt/config.py", "vlogsrt/project/config.py")
+MODEL_LITERAL_PATHS = (
+    "vlogsrt/config.py",
+    "vlogsrt/project/config.py",
+    "vlogsrt/project/raw/config.py",
+)
 # glm-*·gemini-*은 파생 계층의 비전 모델이다 — 새 튜너블은 프로젝트 config에만 산다(재검토).
 # 공급자를 바꿔도 난간은 좁아지지 않는다: 쓰지 않게 된 접두사도 목록에 남겨 둔다.
 PROJECT_MODEL_LITERAL_PATHS = ("vlogsrt/project/config.py",)
+# 원본 영상 브라우저 v2의 모델 리터럴(문구·시간·의미 분석 역할)은 새 설정 경로
+# 하나에만 산다(2026-10-02 계획 §3.2·§15.1). 다른 config도 이 예외를 물려받지
+# 않는다 — 중첩 경로의 같은 이름 파일도 마찬가지다.
+RAW_MODEL_LITERAL_PATHS = ("vlogsrt/project/raw/config.py",)
 ENGINE_MODEL_LITERAL = re.compile(r"[\"'](whisper-1|gpt-[\w.-]*transcribe[\w.-]*)[\"']")
 PROJECT_MODEL_LITERAL = re.compile(r"[\"'](?:glm|gemini)-[\w.-]+[\"']")
+RAW_MODEL_LITERAL = re.compile(r"[\"']gpt-6-luna[\w.-]*[\"']")
+# Claude 모델 이름(D54)도 raw 설정 경로 하나에만 산다 — 등록표가 단가와 함께 정한다.
+CLAUDE_MODEL_LITERAL = re.compile(r"[\"']claude-[\w.-]+[\"']")
 # 레거시가 project를 import할 수 있는 유일한 진입점 — 문서화된 CLI 조립 지점.
 # 예외도 정확히 `project.commands` 모듈로 좁다: CLI는 명령 묶음만 조립한다(재조정).
 CLI_COMPOSITION_ENTRYPOINT = "vlogsrt/cli.py"
+CLI_ALLOWED_PROJECT_TARGET: tuple[str, ...] = ("commands",)
+# 브라우저 작업공간 서비스의 진입점 — v2 계획이 정확 경로 예외로 허가했다
+# (2026-10-02 계획 §3.2). 예외도 정확히 `project.raw.service` 모듈로 좁고,
+# 상대 import는 인정하지 않는다: ui/는 vlogsrt 패키지 안이 아니라 `.project`가
+# vlogsrt.project로 귀결하지 않는다.
+UI_RAW_SERVICE_ENTRYPOINT = "ui/workspace_service.py"
+UI_ALLOWED_PROJECT_TARGET: tuple[str, ...] = ("raw", "service")
 XMLLINT_EXECUTABLE = "xmllint"
 # XML 검증 경계의 subprocess API는 run 하나로 얼어 있다(재검토). 별명은 정적으로 푼다.
 SUBPROCESS_API_SYMBOLS = ("run", "Popen", "call", "check_call", "check_output")
@@ -129,6 +159,154 @@ def check_openai_boundary() -> list[str]:
         for lineno, name in _import_roots(path.read_text(encoding="utf-8")):
             if name == "openai":
                 failures.append(f"{rel}:{lineno} openai import는 transcribe.py에만")
+    return failures
+
+
+def _network_root(name: str) -> str | None:
+    """점 이름이 속한 네트워크 모듈 — `socket.socket`은 `socket`, 아니면 None."""
+    return next(
+        (root for root in NETWORK_MODULES if name == root or name.startswith(root + ".")), None
+    )
+
+
+def _static_import_names(tree: ast.Module) -> list[tuple[int, str]]:
+    """정적 import의 (줄번호, 점 이름) — `from urllib import request`는 `urllib.request`로."""
+    rows: list[tuple[int, str]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            rows.extend((node.lineno, alias.name) for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            rows.append((node.lineno, node.module))
+            rows.extend((node.lineno, f"{node.module}.{alias.name}") for alias in node.names)
+    return rows
+
+
+def _dynamic_import_names(tree: ast.Module) -> list[tuple[int, str]]:
+    """문자열 상수로 부르는 import — `importlib.import_module("…")`·`__import__("…")`.
+
+    `from importlib import import_module as im`처럼 별명으로 묶은 이름도 같은 호출이다.
+    상수가 아닌 인자(f-string·변수)는 판정하지 않는다 — 정적으로 이름을 알 수 없다.
+    """
+    importers = {"import_module", "__import__"} | {
+        alias.asname
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module == "importlib"
+        for alias in node.names
+        if alias.name == "import_module" and alias.asname
+    }
+    rows: list[tuple[int, str]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not node.args:
+            continue
+        func = node.func
+        # 속성 호출(`importlib.import_module`·`builtins.__import__`)은 이름 그대로, 맨 이름
+        # 호출은 별명까지 본다 — 별명은 그 파일이 importlib에서 묶은 것뿐이다.
+        called = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+        target = getattr(node.args[0], "value", None)
+        if called in importers and isinstance(target, str):
+            rows.append((node.lineno, target))
+    return rows
+
+
+def _package_attribute_names(tree: ast.Module) -> list[tuple[int, str]]:
+    """맨 패키지 import 뒤의 하위 모듈 접근 — `import urllib` 다음 `urllib.request.…`.
+
+    `import urllib.parse`도 이름 `urllib`을 묶는다 — 그 뒤의 `urllib.request`는 같은 우회다.
+    """
+    bound: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.asname is None:
+                    bound[alias.name.split(".")[0]] = alias.name.split(".")[0]
+                elif "." not in alias.name:
+                    bound[alias.asname] = alias.name
+    return [
+        (node.lineno, f"{bound[node.value.id]}.{node.attr}")
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id in bound
+    ]
+
+
+def _network_imports(body: str) -> list[tuple[int, str]]:
+    """네트워크 모듈 사용 (줄번호, 모듈) — 정적·문자열 상수 import·패키지 속성 접근 전부.
+
+    한 파일에서 같은 모듈은 처음 한 번만 센다.
+    """
+    tree = ast.parse(body)
+    names = [
+        *_static_import_names(tree),
+        *_dynamic_import_names(tree),
+        *_package_attribute_names(tree),
+    ]
+    seen: dict[str, int] = {}
+    for lineno, name in sorted(names):
+        root = _network_root(name)
+        if root is not None:
+            seen.setdefault(root, lineno)
+    return sorted((lineno, root) for root, lineno in seen.items())
+
+
+def check_network_boundary() -> list[str]:
+    """규칙 7(D54) — 네트워크 모듈은 정확 경로 하나에서만. 같은 이름의 다른 경로는 안 된다.
+
+    ui/도 검사한다 — 로컬 브라우저 서버의 두 파일만 각자 정해진 모듈 하나를 쓴다
+    (`UI_NETWORK_ALLOWLIST`, 정확 경로). 일괄 면제는 없다.
+    """
+    failures = []
+    for path in _sources() + sorted(UI_DIR.rglob("*.py")):
+        rel = _rel(path)
+        if rel == NETWORK_BOUNDARY_PATH:
+            continue
+        allowed = UI_NETWORK_ALLOWLIST.get(rel)
+        failures.extend(
+            f"{rel}:{lineno} 네트워크 모듈 {name}은 {NETWORK_BOUNDARY_PATH}에만"
+            for lineno, name in _network_imports(path.read_text(encoding="utf-8"))
+            if name != allowed
+        )
+    return failures
+
+
+def _imports_claude_transport(body: str) -> list[int]:
+    """전송 파일에 닿는 줄 — 절대·상대·모듈 핸들·하위 이름·문자열 상수·패키지 속성 전부.
+
+    패키지 속성(`vlogsrt.anthropic_messages`)은 누가 한 번 import한 뒤에는 실제로 닿는다 —
+    어떤 객체의 속성으로든 그 이름을 부르면 잡는다.
+    """
+    tree = ast.parse(body)
+    lines: list[int] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            parts = [part for alias in node.names for part in alias.name.split(".")]
+        elif isinstance(node, ast.ImportFrom):
+            parts = [*(node.module or "").split("."), *(alias.name for alias in node.names)]
+        elif isinstance(node, ast.Attribute):
+            parts = [node.attr]
+        else:
+            continue
+        if CLAUDE_TRANSPORT_MODULE in parts:
+            lines.append(node.lineno)
+    lines.extend(
+        lineno
+        for lineno, name in _dynamic_import_names(tree)
+        if CLAUDE_TRANSPORT_MODULE in name.split(".")
+    )
+    return sorted(lines)
+
+
+def check_claude_transport_entry() -> list[str]:
+    """규칙 7(D54) — Claude HTTP 전송은 transcribe.py만 안다. 승인 문을 건너뛰는 길이 없다."""
+    failures = []
+    for path in _sources() + sorted(UI_DIR.rglob("*.py")):
+        rel = _rel(path)
+        if rel in (CLAUDE_TRANSPORT_ENTRY_PATH, NETWORK_BOUNDARY_PATH):
+            continue
+        failures.extend(
+            f"{rel}:{lineno} {CLAUDE_TRANSPORT_MODULE}는 {CLAUDE_TRANSPORT_ENTRY_PATH}만 import한다"
+            for lineno in _imports_claude_transport(path.read_text(encoding="utf-8"))
+        )
     return failures
 
 
@@ -298,24 +476,65 @@ def check_source_does_not_import_project() -> list[str]:
 
     절대(`import vlogsrt.project`, `from vlogsrt import project`)와
     상대(`from .project import x`, `from . import project`) 전부 거부한다.
-    예외는 CLI 조립 진입점 `vlogsrt/cli.py` 하나(정확 경로)뿐이고, 그 예외도
-    **정확히 `project.commands` 모듈** 대상으로 좁다 — 하위 모듈(commands.parser)도
-    거부한다(재조정). 방향은 project → 레거시 공개 경계로만 열려 있다.
+    예외는 둘이고 둘 다 정확 경로다 — CLI 조립 진입점 `vlogsrt/cli.py`는
+    **정확히 `project.commands` 모듈**, 브라우저 작업공간 진입점
+    `ui/workspace_service.py`는 **정확히 `project.raw.service` 모듈**까지다
+    (2026-10-02 계획 §3.2). 어느 쪽 예외도 하위 모듈(commands.parser·
+    raw.service.models)과 패키지 핸들은 거부한다. UI 예외는 절대 형태만 인정한다 —
+    ui/는 vlogsrt 안이 아니라 상대 형태가 vlogsrt.project로 귀결하지 않는다.
+    방향은 project → 레거시 공개 경계로만 열려 있다.
     """
     failures = []
     for path in _legacy_sources():
         rel = _rel(path)
-        is_cli = rel == CLI_COMPOSITION_ENTRYPOINT
-        for lineno, form, commands_only in _project_imports(path.read_text(encoding="utf-8")):
-            if is_cli and commands_only:
+        allowance = _legacy_project_import_allowance(rel)
+        for lineno, form, level, tail, names in _project_imports(path.read_text(encoding="utf-8")):
+            if allowance is not None and _import_targets_allowed_module(
+                level, tail, names, allowance
+            ):
                 continue
-            why = (
-                "CLI 예외는 project.commands로 좁다"
-                if is_cli
-                else "레거시가 vlogsrt.project를 import한다"
-            )
-            failures.append(f"{rel}:{lineno} {why} ({form})")
+            failures.append(f"{rel}:{lineno} {_project_import_failure_reason(rel)} ({form})")
     return failures
+
+
+def _legacy_project_import_allowance(rel: str) -> tuple[tuple[str, ...], bool] | None:
+    """정확 경로 예외의 허용 모듈 — (프로젝트 아래 경로, 절대 형태 한정 여부).
+
+    CLI는 vlogsrt 패키지 안에 살아 `.project` 상대 형태가 project로 귀결한다.
+    ui/는 그렇지 않으므로 절대 형태만 인정한다.
+    """
+    if rel == CLI_COMPOSITION_ENTRYPOINT:
+        return CLI_ALLOWED_PROJECT_TARGET, False
+    if rel == UI_RAW_SERVICE_ENTRYPOINT:
+        return UI_ALLOWED_PROJECT_TARGET, True
+    return None
+
+
+def _import_targets_allowed_module(
+    level: int,
+    tail: tuple[str, ...],
+    names: tuple[str, ...],
+    allowance: tuple[tuple[str, ...], bool],
+) -> bool:
+    """import 하나가 허용 모듈로 귀결하는가 — 모듈 자체만, 하위·패키지 핸들은 안 된다.
+
+    `from …project.raw import service`는 마지막 한 칸을 가져온 이름이 채워
+    `project.raw.service`로 귀결하므로 통과한다(가져온 이름 전부가 그 한 칸일 때만).
+    """
+    allowed, absolute_only = allowance
+    if absolute_only and level != 0:
+        return False
+    if tail == allowed:
+        return True
+    return tail == allowed[:-1] and bool(names) and all(name == allowed[-1] for name in names)
+
+
+def _project_import_failure_reason(rel: str) -> str:
+    if rel == CLI_COMPOSITION_ENTRYPOINT:
+        return "CLI 예외는 project.commands로 좁다"
+    if rel == UI_RAW_SERVICE_ENTRYPOINT:
+        return "UI 예외는 절대 형태의 project.raw.service로 좁다"
+    return "레거시가 vlogsrt.project를 import한다"
 
 
 def check_project_dependency_scope() -> list[str]:
@@ -336,22 +555,25 @@ def check_project_dependency_scope() -> list[str]:
     return failures
 
 
-def _project_imports(body: str) -> list[tuple[int, str, bool]]:
-    """vlogsrt.project를 참조하는 import문 (줄번호, 형태 서술, commands 대상 여부).
+ProjectImportRef = tuple[int, str, int, tuple[str, ...], tuple[str, ...]]
+"""project를 참조하는 import문 하나 — (줄번호, 형태 서술, 상대 단계, 프로젝트 아래
+모듈 경로, 가져온 이름들). 경로가 비면 project 패키지(또는 그 핸들) 자체다."""
 
-    commands 대상은 **정확히 `project.commands` 모듈**이다 — 그 하위
-    (`commands.parser`)가 아니라(재조정). `from …project import commands`와
-    `from …project.commands import 이름`은 그 모듈 자체를 쓰는 형태라 통과한다.
-    project 패키지 전체를 묶는 형태는 CLI에서도 거짓이다.
+
+def _project_imports(body: str) -> list[ProjectImportRef]:
+    """vlogsrt.project를 참조하는 import문 전부 — 절대·상대·별명을 AST로 뽑는다.
+
+    허용 판정은 `_import_targets_allowed_module`이 파일별 허용 모듈로 내린다 —
+    CLI는 `project.commands`, 브라우저 작업공간 서비스는 `project.raw.service`
+    (2026-10-02 계획 §3.2). 어느 쪽도 하위 모듈이나 패키지 핸들은 통과하지 못한다.
     """
-    hits: list[tuple[int, str, bool]] = []
+    hits: list[ProjectImportRef] = []
     for node in ast.walk(ast.parse(body)):
         if isinstance(node, ast.Import):
             for alias in node.names:
                 parts = alias.name.split(".")
                 if parts[:2] == ["vlogsrt", "project"]:
-                    commands_only = parts[2:] == ["commands"]
-                    hits.append((node.lineno, f"import {alias.name}", commands_only))
+                    hits.append((node.lineno, f"import {alias.name}", 0, tuple(parts[2:]), ()))
         elif isinstance(node, ast.ImportFrom):
             hit = _project_importfrom(node)
             if hit is not None:
@@ -359,18 +581,24 @@ def _project_imports(body: str) -> list[tuple[int, str, bool]]:
     return hits
 
 
-def _project_importfrom(node: ast.ImportFrom) -> tuple[int, str, bool] | None:
+def _project_importfrom(node: ast.ImportFrom) -> ProjectImportRef | None:
     module = node.module or ""
     dots = "." * node.level
     if _targets_project_package(module, node.level):
-        # project 바로 아래에서 가져올 때는 가져온 이름 전부가 commands여야 한다.
-        tail = module.split(".")[2 if node.level == 0 else 1 :]
-        commands_only = tail == ["commands"] or (
-            not tail and all(alias.name == "commands" for alias in node.names)
-        )
-        return node.lineno, f"from {dots}{module} import …", commands_only
+        # from 모듈의 프로젝트 아래 경로. `import`문과 달리 이름이 마지막 한 칸을
+        # 채울 수 있다 — 허용 판정이 그 조합을 본다.
+        tail = tuple(module.split(".")[2 if node.level == 0 else 1 :])
+        names = tuple(alias.name for alias in node.names)
+        return node.lineno, f"from {dots}{module} import …", node.level, tail, names
     if module in ("", "vlogsrt") and any(alias.name == "project" for alias in node.names):
-        return node.lineno, f"from {dots}{module or 'vlogsrt'} import project", False
+        # project 패키지 핸들을 직접 묶는 형태 — 경로 없음(패키지 자체)으로 귀결한다.
+        return (
+            node.lineno,
+            f"from {dots}{module or 'vlogsrt'} import project",
+            node.level,
+            (),
+            ("project",),
+        )
     return None
 
 
@@ -399,8 +627,51 @@ REPAIR_MUST_NOT_IMPORT = ("refine", "output", "layout", "polish", "verify")
 # 교체 판정이 다른 계층의 행동에 기대게 된다 — 입력은 값으로만 받는다.
 RETEXT_MUST_NOT_IMPORT = (
     "transcribe", "preprocess", "verify", "refine", "output", "layout", "repair", "polish",
-    "openai", "subprocess",
+    "openai", "subprocess", "anthropic_messages",
 )  # fmt: skip
+
+# 3단 등급은 **저장된 분석 문서(AI 판정 + 생성 자막) 위의 결정적 재계산**이다(D51·D52).
+# 프로세스·제공자·서비스·검토 저장소를 알면 같은 증거가 다른 등급을 낳거나 등급 계산이 유료
+# 호출이나 로컬 측정으로 번진다. 문서 읽기는 `service.py`의 몫이다.
+TIERING_MUST_NOT_IMPORT = (
+    "subprocess", "openai", "service", "review_workspace", "understanding_luna", "preprocess",
+    "anthropic_messages",
+    # D60 — 자막 시각 확인 값은 서비스가 지금 리비전 보고서에서 만들어 **값으로** 넘긴다. 등급이
+    # 확인 계층·보고서·의심 표시·원본 자막을 직접 알면 그 값의 리비전 결속이 서비스 밖으로 샌다.
+    "sync_check", "sync_report", "subtitle_suspects", "source_transcript", "importlib",
+)  # fmt: skip
+TIERING_FILE_IO = re.compile(r"\.(open|read_text|read_bytes|write_text|write_bytes)\(|\bopen\(")
+
+# Final Cut 타임라인 빌더는 **값만 받아 바이트를 돌려주는 순수 함수**다(D56). 원본·라이브러리·
+# 검토 저장소·ffprobe를 알면 같은 계획이 디스크 상태에 따라 다른 문서를 낳고, 확정 패키지를
+# 알면 지우지 않는 보내기가 잘라내는 내보내기의 관문에 다시 묶인다. `clips`·`media`는 그
+# 자체가 ffprobe·내용 해시 경계를 끌고 오므로 함께 막는다 — 철자 표는 `fcp_tables`에서 읽는다.
+# 모으고 쓰는 일은 내보내기 계층(`finalcut_export.py`)의 몫이다.
+FINALCUT_TIMELINE_MUST_NOT_IMPORT = (
+    "subprocess", "openai", "os", "shutil", "tempfile", "sqlite3", "service",
+    "review_workspace", "preprocess", "confirmed_package", "library", "media_refs", "clips",
+    "media",
+)  # fmt: skip
+# Final Cut 보내기(D56)는 원본을 **읽지 않는다** — 29GB를 다시 해시하거나 복사하는 길이 생기면
+# 지우지 않는 보내기가 확정 패키지(잘라내는 내보내기)처럼 무거워지고, 원본 대신 사본을 가리킬 수
+# 있다. 저장된 해시끼리와 stat만 대조한다. 덮어쓰는 `os.replace`도 막는다 — 보내기는 언제나
+# 새 파일이다(`os.link`는 대상이 있으면 실패한다). ffprobe는 `preprocess`, xmllint는
+# `xml_validation`을 지난다.
+FINALCUT_EXPORT_MUST_NOT_IMPORT = (
+    "shutil", "hashlib", "subprocess", "confirmed_package", "final_cut_handoff", "clips",
+    "media",
+)  # fmt: skip
+FINALCUT_EXPORT_FORBIDDEN = re.compile(
+    r"\b(probe_clips|sha256_file|_sha256_file|_facts|_verified_asset|export_confirmed"
+    r"|copyfile|copy2|copytree)\b|\bos\.(replace|rename)\(|\.(replace|rename)\("
+)
+"""`os.replace`·`os.rename`·`Path.replace`·`Path.rename`은 대상이 있으면 덮어쓴다. 텍스트로는
+`str.replace`와 갈라 볼 수 없으므로 이 모듈에서는 `.replace(` 자체를 쓰지 않는다."""
+
+FINALCUT_TIMELINE_FILE_IO = re.compile(
+    r"\.(open|read_text|read_bytes|write_text|write_bytes|write|exists|is_file|is_dir|stat"
+    r"|lstat|resolve|iterdir|glob|rglob|unlink|mkdir|touch|rename)\(|\bopen\("
+)
 
 # 조판 이후 계층이 되풀이 판정을 알면, 판정이 파이프라인 아래로 새어나간다(D27).
 DOWNSTREAM_MUST_NOT_IMPORT = {
@@ -499,6 +770,1192 @@ def check_retext_stays_pure() -> list[str]:
         f"retext.py: {name}을 import한다 — 교정 계획이 순수 함수가 아니게 된다 (D37)"
         for name in _imports(path.read_text(encoding="utf-8"), RETEXT_MUST_NOT_IMPORT)
     ]
+
+
+# 요청 빌더의 칸(D59 19c) — whisper(시간) 요청에는 힌트가, 글자 요청에는 시각 입자가 실리지 않는다.
+# 1단계 글자 경로가 용어집·고정 문맥을 요청마다 싣게 되면서 그 길이 whisper 쪽으로 새지 않게 막는다.
+REQUEST_LANES = (
+    (
+        "timing_transcription_request",
+        ("languages", "keywords", "prompt"),
+        "whisper 요청에 힌트가 실린다 (규칙 6, D16)",
+    ),
+    (
+        "text_transcription_request",
+        ("timestamp_granularities",),
+        "글자 요청에 시각 입자가 실린다 — 글자에는 시각이 없다 (규칙 1, D59 19c)",
+    ),
+)
+
+# 용어집은 작업공간 DB 하나만 안다(D59 19c) — 전송·프로세스·전사·설정을 알면 용어 하나가 whisper
+# 열쇠나 요청 경계로 번진다. 설정(`RawWorkflowConfig`·`RawCaptionContract`)도 용어집·글자 경로를
+# 모른다 — 내부 whisper 청크 열쇠가 그 설정 전체를 해시한다.
+GLOSSARY_MUST_NOT_IMPORT = (
+    "subprocess", "openai", "transcribe", "preprocess", "anthropic_messages", "caption_provider",
+    "understanding", "analysis_workflow", "source_text", "config", "service",
+)  # fmt: skip
+CONFIG_TEXT_LANE_NAMES = re.compile(r"glossary|SourceTextSettings|SOURCE_TEXT")
+# 두 설정 클래스의 칸은 이름까지 고정이다 — 칸을 하나 더하면 엄격한 왕복이 기존 작업공간을 못 열고
+# whisper 열쇠가 바뀐다. 칸 이름이 무엇이든(이름 무늬로 못 잡는 `hints` 같은 칸도) 여기서 막힌다.
+CONFIG_PINNED_FIELDS = {
+    "RawWorkflowConfig": (
+        "workflow_schema_version", "models", "caption", "registry", "pricing", "network_mode",
+        "require_explicit_authorization",
+    ),
+    "RawCaptionContract": (
+        "schema_version", "profile", "timing_provider", "languages", "keywords",
+        "text_response_format", "timing_response_format", "timestamp_granularities",
+        "allow_silent_model_fallback", "allow_guessed_timestamps",
+    ),
+}  # fmt: skip
+
+
+def check_caption_request_lanes() -> list[str]:
+    """규칙 1·6 — 시간 요청 빌더에는 힌트 칸이, 글자 요청 빌더에는 시각 입자 칸이 없다.
+
+    매개변수와 빌더 안의 키워드 인자를 함께 본다. 빌더가 사라지면 조용히 통과하지 않는다.
+    """
+    path = PROJECT_PACKAGE / "raw" / "caption_provider.py"
+    if not path.exists():
+        return ["vlogsrt/project/raw/caption_provider.py: 요청 빌더가 사라졌다 (규칙 6)"]
+    functions = {
+        node.name: node
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
+        if isinstance(node, ast.FunctionDef)
+    }
+    failures: list[str] = []
+    for name, banned, why in REQUEST_LANES:
+        node = functions.get(name)
+        if node is None:
+            failures.append(f"caption_provider.py: {name}을 찾지 못했다 — 검사가 무력해졌다")
+            continue
+        used = _lane_fields(node)
+        failures += [
+            f"caption_provider.py:{name}: {field} — {why}" for field in banned if field in used
+        ]
+    return failures
+
+
+def _lane_fields(node: ast.FunctionDef) -> set[str]:
+    """빌더의 매개변수 이름과, 빌더 안 호출의 키워드 인자 이름."""
+    params = {arg.arg for arg in (*node.args.args, *node.args.kwonlyargs)}
+    keywords = {
+        keyword.arg
+        for call in ast.walk(node)
+        if isinstance(call, ast.Call)
+        for keyword in call.keywords
+        if keyword.arg
+    }
+    return params | keywords
+
+
+def check_glossary_stays_local() -> list[str]:
+    """D59 19c — 용어집은 작업공간 DB만 알고, 설정은 용어집·글자 경로를 모른다."""
+    failures: list[str] = []
+    path = PROJECT_PACKAGE / "raw" / "glossary.py"
+    if not path.exists():
+        failures.append("vlogsrt/project/raw/glossary.py: 용어집 계층이 사라졌다 (D59 19c)")
+    else:
+        body = path.read_text(encoding="utf-8")
+        failures += [
+            f"glossary.py: {name}을 import한다 — 용어집이 전송·전사·설정으로 번진다 (D59 19c)"
+            for name in _imports(body, GLOSSARY_MUST_NOT_IMPORT)
+        ]
+        failures += [
+            f"glossary.py:{number}: 파일을 직접 읽거나 쓴다 — 용어집은 작업공간 DB만 쓴다"
+            for number, line in enumerate(body.splitlines(), start=1)
+            if TIERING_FILE_IO.search(line)
+        ]
+    config = PROJECT_PACKAGE / "raw" / "config.py"
+    if config.exists():
+        failures += _config_lane_failures(config.read_text(encoding="utf-8"))
+    return failures
+
+
+def _config_lane_failures(body: str) -> list[str]:
+    """설정 클래스 둘 — 칸 이름이 고정 목록 그대로이고, 본문에 용어집·글자 경로가 없다."""
+    failures: list[str] = []
+    for name, pinned in CONFIG_PINNED_FIELDS.items():
+        fields = _class_fields(body, name)
+        if fields != pinned:
+            failures.append(
+                f"raw/config.py:{name}의 칸이 고정 목록과 다르다 {list(fields)} — 용어집·글자"
+                " 경로는 설정 밖이다. whisper 열쇠가 그 설정을 통째로 해시한다 (D59 19c)"
+            )
+        if CONFIG_TEXT_LANE_NAMES.search(_class_source(body, name)):
+            failures.append(
+                f"raw/config.py:{name}에 용어집·글자 경로가 실렸다 — whisper 열쇠가 그 설정을"
+                " 통째로 해시한다 (D59 19c)"
+            )
+    return failures
+
+
+def _class_fields(body: str, class_name: str) -> tuple[str, ...]:
+    """클래스 본문의 타입 붙은 칸 이름 — 정의 순서대로(데이터클래스 칸)."""
+    for node in ast.walk(ast.parse(body)):
+        if isinstance(node, ast.ClassDef) and node.name == class_name:
+            return tuple(
+                item.target.id
+                for item in node.body
+                if isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name)
+            )
+    return ()
+
+
+def check_tiering_stays_pure() -> list[str]:
+    """D51·D52 — `tiering.py`는 증거 문서를 **값으로** 받아 등급만 돌려준다.
+
+    파일이 사라지면 조용히 통과하지 않는다 — 등급 권한이 어디로 옮겨 갔는지 모르게 된다.
+    """
+    path = PROJECT_PACKAGE / "raw" / "tiering.py"
+    if not path.exists():
+        return ["vlogsrt/project/raw/tiering.py: 3단 등급 계층이 사라졌다 (D51)"]
+    body = path.read_text(encoding="utf-8")
+    failures = [
+        f"tiering.py: {name}을 import한다 — 등급 판정이 순수 함수가 아니게 된다 (D51)"
+        for name in _imports(body, TIERING_MUST_NOT_IMPORT)
+    ]
+    failures += [
+        f"tiering.py:{number}: 파일을 직접 읽거나 쓴다 — 입출력은 service.py의 몫이다 (D51)"
+        for number, line in enumerate(body.splitlines(), start=1)
+        if TIERING_FILE_IO.search(line)
+    ]
+    # D60 — 글로 이름을 넘겨 들이는 길(`__import__("vlogsrt.project.sync_check")`·`exec`)도 막는다.
+    # `importlib`은 import 목록이 막는다. 이름을 잘라 이어 붙인 글은 이 둘 없이 쓸 수 없다.
+    failures += [
+        f"tiering.py:{number}: 동적 코드·import를 연다 — 재료는 서비스가 값으로 넘긴다 (D60)"
+        for number, line in enumerate(body.splitlines(), start=1)
+        if SYNC_SNAP_FORBIDDEN_CALLS.search(line)
+    ]
+    return failures
+
+
+# D60 — 자막 시각 확인(D55)이 등급으로 가는 길은 하나다: 서비스의 `_tier_timing`이 지금
+# 리비전 보고서에서 값(`TimingSignals`)을 만들고, 등급 보고서의 유일한 자리
+# `_tier_report_for_row`가 그 값을 `classify(…, timing=self._tier_timing(…))`로 넘긴다.
+# 화면·검토 머리·자동 제외 후보·Final Cut 키워드는 모두 그 자리를 지나므로 같은 등급을 본다 —
+# 값을 빠뜨리거나 다른 값을 넘기는 자리가 생기면 소비자마다 등급이 갈린다.
+TIER_TIMING_SERVICE = "vlogsrt/project/raw/service.py"
+TIER_TIMING_MODULE = "vlogsrt/project/raw/tiering.py"
+TIER_CLASSIFY_OWNER = "RawWorkspaceService._tier_report_for_row"
+TIER_TIMING_OWNER = "RawWorkspaceService._tier_timing"
+TIER_TIMING_NAMES = frozenset({"TimingSignals", "UNKNOWN_TIMING"})
+TIER_CLASSIFY_NAME = "classify"
+TIER_TIMING_ENTRY = "_tier_timing"
+# 등급 모듈이나 그 부르기를 글로 가리키는 꼴 — `getattr(tiering, "classify")`·
+# `vars(m)["classify"]`·`importlib.import_module("vlogsrt.project.raw.tiering")`·
+# `getattr(self, "_tier_timing")`. 이름을 잘라 이어 붙인 글(`"class" + "ify"`)은 못 본다 —
+# 정규식의 한계로 받아들이고 리뷰가 지킨다(19g·19h와 같다).
+TIER_SPELLED = re.compile(r"classify|_tier_timing|[\w.]*\btiering")
+
+
+def check_tier_timing_only_from_service() -> list[str]:
+    """D60 — `tiering.classify`는 서비스의 한 자리에서만, 언제나 `_tier_timing`의 값과 함께 불린다.
+
+    `vlogsrt/`와 `ui/`의 `tiering.py` 밖 소스를 AST로 본다(19h의 시각 맞춤 검사와 같은
+    꼴): 등급 모듈의 별명(`import … as _t`·점 경로)을 따라 `classify`를 부르기·부르지 않고
+    꺼내기·이름으로·`*`로 가져오기, 모듈을 다른 이름에 묶기, 그 이름을 쓴 글. 시각 확인 값
+    (`TimingSignals`·`UNKNOWN_TIMING`)은 `_tier_timing`만 만들고, `_tier_timing`은
+    `_tier_report_for_row`만 읽는다.
+    """
+    failures: list[str] = []
+    for source in [*_sources(), *sorted(UI_DIR.rglob("*.py"))]:
+        rel = _rel(source)
+        if rel == TIER_TIMING_MODULE:
+            continue
+        tree = ast.parse(source.read_text(encoding="utf-8"))
+        aliases = _tiering_aliases(tree)
+        sites = (_allowed_classify_calls(rel, tree, aliases), _called_funcs(tree))
+        for node, owner in _owned_nodes(tree):
+            failures += _tier_classify_failures(rel, node, owner, aliases, sites)
+            failures += _tier_timing_entry_failures(rel, node, owner)
+            failures += _tier_timing_value_failures(rel, node, owner)
+    return failures
+
+
+def _tiering_aliases(tree: ast.Module) -> frozenset[str]:
+    """등급 모듈을 가리키는 이름 — `tiering`, `… import tiering as X`, `import ….tiering as X`."""
+    names = {"tiering"}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            names.update(
+                alias.asname or alias.name
+                for alias in node.names
+                if alias.name.split(".")[-1] == "tiering"
+                and (alias.asname or isinstance(node, ast.ImportFrom))
+            )
+    return frozenset(names)
+
+
+def _is_tiering_ref(value: ast.AST, aliases: frozenset[str]) -> bool:
+    """등급 모듈 그 자체 — 별명 이름이나 `vlogsrt.project.raw.tiering` 같은 점 경로."""
+    if isinstance(value, ast.Name):
+        return value.id in aliases
+    return isinstance(value, ast.Attribute) and value.attr == "tiering"
+
+
+def _is_classify_ref(node: ast.AST, aliases: frozenset[str]) -> bool:
+    return (
+        isinstance(node, ast.Attribute)
+        and node.attr == TIER_CLASSIFY_NAME
+        and _is_tiering_ref(node.value, aliases)
+    )
+
+
+def _called_funcs(tree: ast.Module) -> frozenset[int]:
+    return frozenset(id(node.func) for node in ast.walk(tree) if isinstance(node, ast.Call))
+
+
+def _allowed_classify_calls(rel: str, tree: ast.Module, aliases: frozenset[str]) -> frozenset[int]:
+    """허락된 부르기의 `func` 노드 — 서비스의 그 자리에서 `timing=self._tier_timing(…)`과 함께."""
+    if rel != TIER_TIMING_SERVICE:
+        return frozenset()
+    return frozenset(
+        id(node.func)
+        for node, owner in _owned_nodes(tree)
+        if isinstance(node, ast.Call)
+        and owner == TIER_CLASSIFY_OWNER
+        and _is_classify_ref(node.func, aliases)
+        and any(kw.arg == "timing" and _is_tier_timing_call(kw.value) for kw in node.keywords)
+    )
+
+
+def _tier_classify_failures(
+    rel: str,
+    node: ast.AST,
+    owner: str | None,
+    aliases: frozenset[str],
+    sites: tuple[frozenset[int], frozenset[int]],
+) -> list[str]:
+    where = f"{rel}:{getattr(node, 'lineno', 0)}"
+    reason = _tier_classify_reason(node, owner, aliases, sites, rel)
+    return [f"{where}: {reason} (D60)"] if reason else []
+
+
+def _tier_classify_reason(
+    node: ast.AST,
+    owner: str | None,
+    aliases: frozenset[str],
+    sites: tuple[frozenset[int], frozenset[int]],
+    rel: str,
+) -> str | None:
+    place = owner or "모듈 수준"
+    if isinstance(node, ast.ImportFrom) and (node.module or "").split(".")[-1] == "tiering":
+        imported = {alias.name for alias in node.names} & {TIER_CLASSIFY_NAME, "*"}
+        return (
+            "tiering.classify를 이름으로 가져온다 — 서비스의 한 자리만 부른다" if imported else None
+        )
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        if TIER_SPELLED.fullmatch(node.value):
+            return (
+                f"등급 부르기를 글 {node.value!r}로 가리킨다({place}) — 서비스의 한 자리만 부른다"
+            )
+        return None
+    if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None:
+        if _is_tiering_ref(node.value, aliases):
+            return f"등급 모듈을 다른 이름에 묶는다({place}) — 부르기를 숨길 수 있다"
+        return None
+    if not _is_classify_ref(node, aliases) or id(node) in sites[0]:
+        return None
+    if id(node) not in sites[1]:
+        return f"tiering.classify를 부르지 않고 꺼낸다({place}) — 서비스의 한 자리만 부른다"
+    if rel != TIER_TIMING_SERVICE or owner != TIER_CLASSIFY_OWNER:
+        return (
+            f"tiering.classify를 {place}에서 부른다 — 등급 보고서는 {TIER_CLASSIFY_OWNER}"
+            " 한 자리뿐이다"
+        )
+    return "tiering.classify에 timing=self._tier_timing(…)이 없다 — 소비자마다 등급이 갈린다"
+
+
+def _tier_timing_entry_failures(rel: str, node: ast.AST, owner: str | None) -> list[str]:
+    """`_tier_timing`(값의 문)은 등급 보고서의 그 자리만 읽는다 — 다른 메서드가 값을 쥐면 그 길로
+    등급이 아닌 곳(컷·제거·견적)에 시각 확인 값이 샐 수 있다."""
+    name = node.attr if isinstance(node, ast.Attribute) else getattr(node, "id", None)
+    if name != TIER_TIMING_ENTRY:
+        return []
+    if rel == TIER_TIMING_SERVICE and owner == TIER_CLASSIFY_OWNER:
+        return []
+    return [
+        f"{rel}:{getattr(node, 'lineno', 0)}: {TIER_TIMING_ENTRY}를 {owner or '모듈 수준'}에서"
+        f" 읽는다 — 시각 확인 값은 {TIER_CLASSIFY_OWNER}만 넘긴다 (D60)"
+    ]
+
+
+def _is_tier_timing_call(value: ast.AST) -> bool:
+    return (
+        isinstance(value, ast.Call)
+        and isinstance(value.func, ast.Attribute)
+        and value.func.attr == "_tier_timing"
+        and isinstance(value.func.value, ast.Name)
+        and value.func.value.id == "self"
+    )
+
+
+def _tier_timing_value_failures(rel: str, node: ast.AST, owner: str | None) -> list[str]:
+    names: set[str] = set()
+    if isinstance(node, ast.Name):
+        names = {node.id}
+    elif isinstance(node, ast.Attribute):
+        names = {node.attr}
+    elif isinstance(node, ast.alias):
+        names = {node.name.split(".")[-1], node.asname or ""}
+    found = sorted(names & TIER_TIMING_NAMES)
+    if not found or (rel == TIER_TIMING_SERVICE and owner == TIER_TIMING_OWNER):
+        return []
+    return [
+        f"{rel}:{getattr(node, 'lineno', 0)}: {', '.join(found)}를 {owner or '모듈 수준'}에서"
+        f" 가리킨다 — 등급에 넘길 시각 확인 값은 {TIER_TIMING_OWNER}만 만든다 (D60)"
+    ]
+
+
+def check_finalcut_timeline_stays_pure() -> list[str]:
+    """D56 — `finalcut_timeline.py`는 원본 사실·조각 상태·등급·자막을 **값으로** 받아 문서만 낸다.
+
+    파일이 사라지면 조용히 통과하지 않는다 — 문서를 짜는 권한이 어디로 옮겨 갔는지 모르게 된다.
+    """
+    path = PROJECT_PACKAGE / "raw" / "finalcut_timeline.py"
+    if not path.exists():
+        return [
+            "vlogsrt/project/raw/finalcut_timeline.py: Final Cut 타임라인 빌더가 사라졌다 (D56)"
+        ]
+    body = path.read_text(encoding="utf-8")
+    failures = [
+        f"finalcut_timeline.py: {name}을 import한다 — 타임라인 빌더가 순수 함수가 아니게 된다 (D56)"
+        for name in _imports(body, FINALCUT_TIMELINE_MUST_NOT_IMPORT)
+    ]
+    failures += [
+        f"finalcut_timeline.py:{number}: 파일을 직접 읽거나 쓴다 — 입출력은 내보내기 계층의 몫이다"
+        " (D56)"
+        for number, line in enumerate(body.splitlines(), start=1)
+        if FINALCUT_TIMELINE_FILE_IO.search(line)
+    ]
+    return failures
+
+
+# D56이 대신한 옛 「선택한 컷 Final Cut으로 출력」 길 — 확정 패키지를 뽑고(materialize) 그 옆에
+# XML을 썼다. 지금 보내기는 원본 전체를 지우지 않고 보낸다. 옛 이름이 돌아오면 미검토 관문이
+# 걸린 두 갈래 출력이 다시 생긴다.
+OLD_FINALCUT_MODULE = "project/raw/final_cut_handoff.py"
+OLD_FINALCUT_NAMES = re.compile(
+    r"\b(export_final_cut|materialize_review|capcut_handoff_view|capcut_open_view)\b"
+)
+
+
+def check_old_finalcut_path_stays_dead() -> list[str]:
+    """D56 — 옛 출력 모듈·이름이 `vlogsrt`·`ui`에 돌아오지 않는다."""
+    failures = []
+    if (PACKAGE / OLD_FINALCUT_MODULE).exists():
+        failures.append(
+            f"vlogsrt/{OLD_FINALCUT_MODULE}: 지운 옛 Final Cut 출력 모듈이 돌아왔다 (D56)"
+        )
+    for path in sorted([*PACKAGE.rglob("*.py"), *UI_DIR.rglob("*.py")]):
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+            if OLD_FINALCUT_NAMES.search(line):
+                failures.append(
+                    f"{_rel(path)}:{number}: 옛 「선택한 컷」 Final Cut 출력 이름이 돌아왔다 (D56)"
+                )
+    return failures
+
+
+def check_finalcut_export_never_copies() -> list[str]:
+    """D56 — `finalcut_export.py`는 원본을 복사·재해시하지 않고, 쓴 파일을 덮어쓰지 않는다.
+
+    파일이 사라지면 조용히 통과하지 않는다 — 보내기가 어디로 옮겨 갔는지 모르게 된다.
+    """
+    path = PROJECT_PACKAGE / "raw" / "finalcut_export.py"
+    if not path.exists():
+        return ["vlogsrt/project/raw/finalcut_export.py: Final Cut 보내기 계층이 사라졌다 (D56)"]
+    body = path.read_text(encoding="utf-8")
+    failures = [
+        f"finalcut_export.py: {name}을 import한다 — 보내기가 원본을 복사·재해시할 수 있다 (D56)"
+        for name in _imports(body, FINALCUT_EXPORT_MUST_NOT_IMPORT)
+    ]
+    failures += [
+        f"finalcut_export.py:{number}: 재해시·복사·덮어쓰기 경로를 부른다 (D56)"
+        for number, line in enumerate(body.splitlines(), start=1)
+        if FINALCUT_EXPORT_FORBIDDEN.search(line)
+    ]
+    return failures
+
+
+# 자막 시각 확인(D55)은 **표시만** 한다 — 순수 계산은 프로세스·모델·전사·조판을 모르고, 결과는
+# 자동 정리·선택·출력·분할로 흘러가지 않으며, 기준은 어느 분석·전사·자막 지문에도 없다. 좁은 예외
+# 하나(D60): 등급은 서비스가 지금 리비전 보고서에서 만든 **값**으로만 녹색을 노랑으로 내린다 —
+# 등급 계층은 확인 계층을 import하지 못하고(`TIERING_MUST_NOT_IMPORT`), 그 값의 길은 서비스 한
+# 자리다(`check_tier_timing_only_from_service`). 그래서 아래 import 목록은 넓히지 않았다.
+SYNC_CHECK_MUST_NOT_IMPORT = (
+    "subprocess", "openai", "numpy", "onnxruntime", "preprocess", "output", "refine", "repair",
+    "transcribe", "service", "sync_report", "source_transcript",
+)  # fmt: skip
+SYNC_CHECK_IMPORTERS = (
+    "vlogsrt/project/raw/sync_report.py",
+    "vlogsrt/project/raw/service.py",
+    "vlogsrt/project/raw/commands.py",
+    "vlogsrt/project/commands.py",
+    # D59 19f — D55 「표시만」의 좁은 예외 「다시 물을 구간 고르기」: 순수 빈칸 고르기는 Rτ와 같은
+    # 칸 산술을 쓴다. 고른 구간은 다시 **묻는** 범위일 뿐 자막·컷·제거·등급으로 흐르지 않는다
+    # (`check_speech_gaps_stays_pure`가 그 모듈의 입출력·읽는 쪽을 막는다).
+    "vlogsrt/project/raw/speech_gaps.py",
+    # D59 19g — D55 「표시만」의 좁은 예외 「시각 맞춤 제안」: 순수 제안 계산은 확인의 말소리 칸·
+    # 어긋남 추정(형식과 구간 산술)을 쓴다. 제안은 **표시만** 하고 사람이 적용한 리비전만 시각을
+    # 바꾼다(19h). `check_sync_snap_stays_pure`·`check_sync_snap_only_from_listed`가 그 모듈의
+    # 입출력·읽는 쪽을 막는다.
+    "vlogsrt/project/sync_snap.py",
+)
+SYNC_REPORT_IMPORTERS = (
+    "vlogsrt/project/raw/service.py",
+    "vlogsrt/project/raw/commands.py",
+    "vlogsrt/project/commands.py",
+)
+SYNC_REPORT_MUST_NOT_IMPORT = (
+    "output", "refine", "repair", "caption_artifacts", "caption_review", "final_caption",
+    "finalcut_export", "finalcut_timeline", "tiering", "auto_cleanup", "segmentation",
+    "selection_analysis",
+)  # fmt: skip
+# SQL 쓰기 문장의 모양 — 대소문자 무관. `dict.update(`·`replace(...)`는 SQL이 아니라 걸리지 않는다.
+SYNC_WRITES_SQL = re.compile(
+    r"\b(INSERT\s+(OR\s+\w+\s+)?INTO|UPDATE\s+\w+\s+SET|DELETE\s+FROM|REPLACE\s+INTO)\b",
+    re.IGNORECASE,
+)
+# sync_report가 원본 자막에서 가져올 수 있는 것 — 이름으로 가져온 읽기 함수뿐(모듈 객체는 안 된다).
+SYNC_TRANSCRIPT_READS = ("load",)
+# 이 파일들은 분석·전사·자막의 지문·캐시 열쇠를 만든다 — 확인 기준을 알면 기준을 바꿀 때마다
+# 이미 받은 결과가 낡는다(D47).
+SYNC_FREE_FINGERPRINT_PATHS = (
+    "vlogsrt/project/config.py:ProjectConfig",
+    "vlogsrt/project/raw/config.py",
+    "vlogsrt/project/raw/analysis_config.py",
+    "vlogsrt/project/raw/analysis_approval.py",
+    "vlogsrt/project/raw/analysis_workflow.py",
+    "vlogsrt/project/raw/understanding.py",
+    "vlogsrt/project/raw/final_caption.py",
+    "vlogsrt/project/raw/caption_workspace.py",
+)
+SYNC_NAMES = re.compile(
+    r"SyncCheckSettings|SYNC_CHECK_SETTINGS|sync_check|sync_report"
+    # D59 19f — 빈칸 고르기 기준·모듈도 확인과 같이 지문·캐시 열쇠 밖이다(고른 결과만 빈칸
+    # 재전사 견적 digest가 묶는다).
+    r"|GapRefillSettings|GAP_REFILL_SETTINGS|speech_gaps"
+    # D59 19g — 시각 맞춤 기준·모듈도 지문·캐시 열쇠 밖이다(제안의 sha만 기준을 묶는다).
+    r"|SyncSnapSettings|SYNC_SNAP_SETTINGS|sync_snap"
+)
+
+
+def check_sync_check_stays_pure() -> list[str]:
+    """D55 — `sync_check.py`는 큐·말소리 칸을 **값으로** 받아 판정만 돌려준다(입출력 없음)."""
+    path = PROJECT_PACKAGE / "sync_check.py"
+    if not path.exists():
+        return ["vlogsrt/project/sync_check.py: 자막 시각 확인 계층이 사라졌다 (D55)"]
+    body = path.read_text(encoding="utf-8")
+    failures = [
+        f"sync_check.py: {name}을 import한다 — 시각 확인이 순수 함수가 아니게 된다 (D55)"
+        for name in _imports(body, SYNC_CHECK_MUST_NOT_IMPORT)
+    ]
+    failures += [
+        f"sync_check.py:{number}: 파일을 직접 읽거나 쓴다 — 입출력은 sync_report.py의 몫이다 (D55)"
+        for number, line in enumerate(body.splitlines(), start=1)
+        if TIERING_FILE_IO.search(line)
+    ]
+    return failures
+
+
+def check_sync_check_only_displays() -> list[str]:
+    """D55 — 확인 결과는 정해진 곳에서만 읽히고, 자막·전사·지문을 쓰지 않는다."""
+    failures: list[str] = []
+    for path in _project_sources():
+        rel = _rel(path)
+        imported = _imported_names(path.read_text(encoding="utf-8"))
+        if (
+            "sync_check" in imported
+            and rel not in SYNC_CHECK_IMPORTERS
+            and rel != _rel(PROJECT_PACKAGE / "sync_check.py")
+        ):
+            failures.append(f"{rel}: sync_check를 import한다 — 판정이 표시 밖으로 샌다 (D55)")
+        if "sync_report" in imported and rel not in SYNC_REPORT_IMPORTERS:
+            failures.append(f"{rel}: sync_report를 import한다 — 판정이 표시 밖으로 샌다 (D55)")
+    failures += _sync_report_failures()
+    failures += _sync_fingerprint_failures()
+    return failures
+
+
+def _sync_report_failures() -> list[str]:
+    path = PROJECT_PACKAGE / "raw" / "sync_report.py"
+    if not path.exists():
+        return ["vlogsrt/project/raw/sync_report.py: 자막 시각 확인 보고서 계층이 사라졌다 (D55)"]
+    body = path.read_text(encoding="utf-8")
+    failures = [
+        f"sync_report.py: {name}을 import한다 — 확인이 자막·출력 계층을 안다 (D55)"
+        for name in _imports(body, SYNC_REPORT_MUST_NOT_IMPORT)
+    ]
+    failures += _sync_transcript_import_failures(ast.parse(body))
+    failures += [
+        f"sync_report.py:{number}: DB에 쓰는 SQL이 있다 — 확인은 보고서 파일만 쓴다 (D55)"
+        for number, line in enumerate(body.splitlines(), start=1)
+        if SYNC_WRITES_SQL.search(line)
+    ]
+    return failures
+
+
+def _sync_transcript_import_failures(tree: ast.Module) -> list[str]:
+    """원본 자막은 이름으로 가져온 읽기 함수로만 — 모듈 객체를 쥐면 `.edit()`·`.seed()`가 열린다."""
+    failures: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            failures += [
+                f"sync_report.py:{node.lineno}: source_transcript 모듈을 들여온다 — "
+                "읽기 함수만 이름으로 가져온다 (D55)"
+                for alias in node.names
+                if alias.name.split(".")[-1] == "source_transcript"
+            ]
+        elif isinstance(node, ast.ImportFrom):
+            from_transcript = (node.module or "").split(".")[-1] == "source_transcript"
+            failures += [
+                f"sync_report.py:{node.lineno}: source_transcript"
+                f"{'.' + alias.name if from_transcript else ''}를 가져온다 — "
+                f"읽기({', '.join(SYNC_TRANSCRIPT_READS)})만 허용이다 (D55)"
+                for alias in node.names
+                if (from_transcript and alias.name not in SYNC_TRANSCRIPT_READS)
+                or (not from_transcript and alias.name == "source_transcript")
+            ]
+    return failures
+
+
+def _sync_fingerprint_failures() -> list[str]:
+    failures: list[str] = []
+    for entry in SYNC_FREE_FINGERPRINT_PATHS:
+        rel, _, class_name = entry.partition(":")
+        path = ROOT / rel
+        if not path.exists():
+            continue
+        body = path.read_text(encoding="utf-8")
+        if class_name:
+            body = _class_source(body, class_name)
+        if SYNC_NAMES.search(body):
+            failures.append(
+                f"{entry}: 자막 시각 확인 기준을 안다 — 지문·캐시 열쇠 밖이어야 한다 (D55)"
+            )
+    return failures
+
+
+def _class_source(body: str, class_name: str) -> str:
+    for node in ast.walk(ast.parse(body)):
+        if isinstance(node, ast.ClassDef) and node.name == class_name:
+            return ast.get_source_segment(body, node) or ""
+    return ""
+
+
+# 말소리 빈칸 재전사(D59 19f) — 다시 물을 구간 **고르기**는 순수 계산이고(재료는 확인 칸·큐 값),
+# 고른 결과는 빈칸 재전사(`speech_refill`)와 서비스만 읽는다. 빈칸 재전사(유료 묻기)는 서비스만
+# 부른다 — 화면은 서비스의 메서드로만 닿는다(견적·승인·작업 문이 서비스에 있다). 원본 자막에 줄을
+# **넣는** 일은 서비스의 승인된 빈칸 재전사 정산(`_refill_settle`) 하나뿐이고, 그것도 그 자리에서
+# 바로 부르는 꼴만 된다 — 별명·`getattr`·다른 함수로 넘기면 승인·견적 밖에서 자막이 바뀔 길이 된다.
+SPEECH_GAPS_MODULE = "vlogsrt/project/raw/speech_gaps.py"
+SPEECH_GAPS_MUST_NOT_IMPORT = (
+    "subprocess", "openai", "anthropic_messages", "preprocess", "transcribe", "sqlite3", "service",
+    "workspace", "source_transcript", "sync_report", "understanding", "caption_provider",
+    "analysis_workflow", "speech_refill", "tiering", "auto_cleanup", "selection_analysis",
+    "segmentation", "edit", "export",
+)  # fmt: skip
+SPEECH_GAPS_IMPORTERS = (
+    "vlogsrt/project/raw/service.py",
+    "vlogsrt/project/raw/speech_refill.py",
+)
+INSERT_OWNER = "vlogsrt/project/raw/source_transcript.py"
+INSERT_NAME = "insert_segments"
+INSERT_CALLER = "vlogsrt/project/raw/service.py"
+INSERT_CALLER_FUNCTION = "_refill_settle"
+SPEECH_REFILL_MODULE = "vlogsrt/project/raw/speech_refill.py"
+SPEECH_REFILL_IMPORTERS = ("vlogsrt/project/raw/service.py",)
+# whisper 요청에 힌트가 실리는 칸(규칙 6) — 빈칸 재전사의 whisper 호출에 이 키워드가 나타나면
+# 실패다.
+WHISPER_HINT_KEYWORDS = ("prompt", "keywords", "languages")
+WHISPER_CALLS = ("transcribe_selected_audio", "timed_transcript")
+# 빈칸 재전사는 정해진 제공자 길만 지난다 — 요청을 직접 짓거나 보내면 승인 문을 건너뛴다.
+SPEECH_REFILL_FORBIDDEN_CALLS = (
+    "timing_transcription_request", "text_transcription_request", "send_request",
+)  # fmt: skip
+
+
+def check_speech_gaps_stays_pure() -> list[str]:
+    """D59 19f — 빈칸 고르기는 값만 받아 구간을 돌려주고, 빈칸 재전사와 서비스만 그것을 읽는다."""
+    path = ROOT / SPEECH_GAPS_MODULE
+    if not path.exists():
+        return [f"{SPEECH_GAPS_MODULE}: 말소리 빈칸 고르기 계층이 사라졌다 (D59 19f)"]
+    body = path.read_text(encoding="utf-8")
+    failures = [
+        f"speech_gaps.py: {name}을 import한다 — 빈칸 고르기가 순수 함수가 아니게 된다 (D59 19f)"
+        for name in _imports(body, SPEECH_GAPS_MUST_NOT_IMPORT)
+    ]
+    failures += [
+        f"speech_gaps.py:{number}: 파일을 직접 읽거나 쓴다 — 재료는 서비스가 값으로 넘긴다"
+        " (D59 19f)"
+        for number, line in enumerate(body.splitlines(), start=1)
+        if TIERING_FILE_IO.search(line)
+    ]
+    for source in _project_sources():
+        rel = _rel(source)
+        if rel == SPEECH_GAPS_MODULE or rel in SPEECH_GAPS_IMPORTERS:
+            continue
+        if "speech_gaps" in _imported_names(source.read_text(encoding="utf-8")):
+            failures.append(
+                f"{rel}: speech_gaps를 import한다 — 다시 물을 구간이 묻기 밖으로 샌다 (D59 19f)"
+            )
+    return failures
+
+
+def check_insert_segments_only_from_refill() -> list[str]:
+    """D59 19f — 줄 넣기는 서비스의 `_refill_settle`이 그 자리에서 바로 부를 때만 된다.
+
+    부르기만이 아니라 **가리키는 것**도 센다 — 이름 가져오기(별명 포함)·속성 꺼내 담기
+    (`put = source_transcript.insert_segments`)·문자열 이름(`getattr(…, "insert_segments")`)이 다
+    자리다. 정의한 모듈 안에서는 모듈 수준의 이름 문자열(`__all__`)만 된다.
+    """
+    failures: list[str] = []
+    for source in [*_sources(), *sorted(UI_DIR.rglob("*.py"))]:
+        rel = _rel(source)
+        for line, owner in _insert_references(ast.parse(source.read_text(encoding="utf-8")), rel):
+            failures.append(
+                f"{rel}:{line}: insert_segments를 {owner or '모듈 수준'}에서 가리킨다 — 줄 넣기는"
+                f" 서비스의 {INSERT_CALLER_FUNCTION}이 바로 부를 때만 된다 (D59 19f)"
+            )
+    return failures
+
+
+def _insert_references(tree: ast.Module, rel: str) -> list[tuple[int, str | None]]:
+    """허락되지 않은 `insert_segments` 자리(줄, 품은 함수) — 허락은 둘뿐이다(위 docstring)."""
+    allowed: set[int] = set()
+    found: list[tuple[int, str | None]] = []
+
+    def visit(node: ast.AST, owner: str | None) -> None:
+        for child in ast.iter_child_nodes(node):
+            name = owner
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                name = child.name
+            elif isinstance(child, ast.Lambda):
+                name = "<lambda>"
+            if isinstance(child, ast.Call) and _direct_insert_call(child, rel, owner):
+                allowed.add(id(child.func))  # 호출이 먼저 보이고 그 func가 뒤에 보인다
+            if (
+                _names_insert(child)
+                and id(child) not in allowed
+                and not _owner_listing(child, rel, owner)
+            ):
+                found.append((getattr(child, "lineno", 0), owner))
+            visit(child, name)
+
+    visit(tree, None)
+    return found
+
+
+def _direct_insert_call(call: ast.Call, rel: str, owner: str | None) -> bool:
+    return (
+        rel == INSERT_CALLER
+        and owner == INSERT_CALLER_FUNCTION
+        and isinstance(call.func, ast.Attribute)
+        and call.func.attr == INSERT_NAME
+    )
+
+
+def _names_insert(node: ast.AST) -> bool:
+    if isinstance(node, ast.Name):
+        return node.id == INSERT_NAME
+    if isinstance(node, ast.Attribute):
+        return node.attr == INSERT_NAME
+    if isinstance(node, ast.alias):
+        return INSERT_NAME in (node.name.split(".")[-1], node.asname)
+    return isinstance(node, ast.Constant) and node.value == INSERT_NAME
+
+
+def _owner_listing(node: ast.AST, rel: str, owner: str | None) -> bool:
+    """정의한 모듈의 모듈 수준 이름 문자열(`__all__`)만 가리켜도 된다."""
+    return rel == INSERT_OWNER and owner is None and isinstance(node, ast.Constant)
+
+
+def _call_name(call: ast.Call) -> str:
+    func = call.func
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    return func.id if isinstance(func, ast.Name) else ""
+
+
+def check_refill_whisper_has_no_hints() -> list[str]:
+    """규칙 6 — 빈칸 재전사의 whisper 호출에는 힌트 칸이 없고, 요청은 정해진 제공자 길로만 간다.
+
+    `**`·`*`로 풀어 넣은 인자는 무엇이 실리는지 보이지 않으므로 그 자체로 실패다.
+    """
+    path = ROOT / SPEECH_REFILL_MODULE
+    if not path.exists():
+        return [f"{SPEECH_REFILL_MODULE}: 말소리 빈칸 재전사 계층이 사라졌다 (D59 19f)"]
+    failures: list[str] = []
+    for call in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        if not isinstance(call, ast.Call):
+            continue
+        name = _call_name(call)
+        if name in WHISPER_CALLS:
+            failures += _whisper_call_problems(call, name)
+        if name in SPEECH_REFILL_FORBIDDEN_CALLS:
+            failures.append(
+                f"speech_refill.py:{call.lineno}: {name}을 직접 부른다 — 요청은 승인 문이 있는"
+                " 제공자 길로만 간다 (D59 19f)"
+            )
+    return failures
+
+
+def _whisper_call_problems(call: ast.Call, name: str) -> list[str]:
+    problems = [
+        f"speech_refill.py:{call.lineno}: {name}에 {keyword.arg}가 실린다 — whisper에는 힌트를"
+        " 보내지 않는다 (규칙 6, D16)"
+        for keyword in call.keywords
+        if keyword.arg in WHISPER_HINT_KEYWORDS
+    ]
+    unpacked = any(keyword.arg is None for keyword in call.keywords) or any(
+        isinstance(arg, ast.Starred) for arg in call.args
+    )
+    if unpacked:
+        problems.append(
+            f"speech_refill.py:{call.lineno}: {name}에 인자를 풀어 넣는다(**·*) — 무엇이 실리는지"
+            " 보여야 한다 (규칙 6, D16)"
+        )
+    return problems
+
+
+def check_speech_refill_only_from_service() -> list[str]:
+    """D59 19f — 유료 빈칸 재전사는 서비스만 부른다(견적·승인·작업 문이 서비스에 있다)."""
+    failures: list[str] = []
+    for source in [*_sources(), *sorted(UI_DIR.rglob("*.py"))]:
+        rel = _rel(source)
+        if rel == SPEECH_REFILL_MODULE or rel in SPEECH_REFILL_IMPORTERS:
+            continue
+        if "speech_refill" in _imported_names(source.read_text(encoding="utf-8")):
+            failures.append(
+                f"{rel}: speech_refill을 import한다 — 빈칸 재전사는 서비스의 승인 문으로만 닿는다"
+                " (D59 19f)"
+            )
+    return failures
+
+
+# 시각 맞춤 제안(D59 19g) — 큐 경계를 말소리 경계에 맞춘 **제안**은 값만 받아 값만 돌려주는 순수
+# 계산이다. 들여올 수 있는 것은 표준 라이브러리의 정해진 몇과 확인 계산(`sync_check`)·설정뿐이고,
+# 파일·프로세스를 열지 않는다. 그 모듈을 읽는 쪽은 목록에 적힌 자리뿐이다 — 19h부터 서비스 하나이고,
+# 서비스 안에서도 시각 맞춤 적용·되돌리기 함수(`apply_snap*`·`revert_snap*`, 앞 밑줄 포함)만 안다
+# (`check_sync_snap_in_service_only_from_snap_entries`). 화면은 서비스 메서드로만 닿는다. 등급·출력·
+# 분석 지문이 제안이나 그 기준을 알면 「표시만」이 무너지고(D55), 기준을 바꿀 때마다 이미 산 것이
+# 낡는다(D47).
+SYNC_SNAP_MODULE = "vlogsrt/project/sync_snap.py"
+SYNC_SNAP_STDLIB = (
+    "__future__", "bisect", "collections", "dataclasses", "fractions", "hashlib", "json", "math",
+    "typing",
+)  # fmt: skip
+SYNC_SNAP_PROJECT_MODULES = ("vlogsrt.project.sync_check", "vlogsrt.project.config")
+SYNC_SNAP_IMPORTERS: tuple[str, ...] = ("vlogsrt/project/raw/service.py",)
+SYNC_SNAP_SETTING_OWNER = "vlogsrt/project/config.py"
+SYNC_SNAP_FORBIDDEN_CALLS = re.compile(
+    r"\b(__import__|exec|eval|compile|breakpoint)\s*\(|__builtins__"
+)  # `getattr(__builtins__, 'op' + 'en')`처럼 내장 함수를 이름으로 꺼내는 길도 막는다
+# 제안 모듈·기준의 이름 — 목록 밖 소스의 **글 전체**(import·속성 꺼내기 `config.SYNC_SNAP_SETTINGS`·
+# 문자열 `'vlogsrt.project.sync_snap'`·주석)에서 찾는다. 이름을 잘라 이어 붙인 동적 import
+# (`'sync_' + 'snap'`)는 못 본다 — 정규식의 한계로 받아들이고 리뷰가 지킨다(D59 19g).
+SYNC_SNAP_NAMES = re.compile(r"SyncSnapSettings|SYNC_SNAP_SETTINGS|sync_snap")
+
+
+def check_sync_snap_stays_pure() -> list[str]:
+    """D59 19g — `sync_snap.py`는 정해진 표준 라이브러리·`sync_check`·설정만 들이고 입출력이 없다.
+
+    파일이 사라지면 조용히 통과하지 않는다 — 제안 권한이 어디로 옮겨 갔는지 모르게 된다.
+    """
+    path = ROOT / SYNC_SNAP_MODULE
+    if not path.exists():
+        return [f"{SYNC_SNAP_MODULE}: 시각 맞춤 제안 계층이 사라졌다 (D59 19g)"]
+    body = path.read_text(encoding="utf-8")
+    failures = [
+        f"sync_snap.py:{line}: {name}을 import한다 — 시각 맞춤 제안이 순수 함수가 아니게 된다"
+        " (D59 19g)"
+        for line, name in _sync_snap_foreign_imports(ast.parse(body))
+    ]
+    failures += [
+        f"sync_snap.py:{number}: 파일·프로세스·동적 코드를 연다 — 재료는 값으로만 받는다 (D59 19g)"
+        for number, line in enumerate(body.splitlines(), start=1)
+        if TIERING_FILE_IO.search(line) or SYNC_SNAP_FORBIDDEN_CALLS.search(line)
+    ]
+    return failures
+
+
+def _sync_snap_foreign_imports(tree: ast.Module) -> list[tuple[int, str]]:
+    """허용 밖 import(줄, 이름) — 상대 import는 `vlogsrt.project` 기준으로 푼다."""
+    found: list[tuple[int, str]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            found += [
+                (node.lineno, alias.name)
+                for alias in node.names
+                if not _sync_snap_allowed(alias.name, ())
+            ]
+        elif isinstance(node, ast.ImportFrom):
+            module = _resolved_project_module(node.module, node.level)
+            names = tuple(alias.name for alias in node.names)
+            if not _sync_snap_allowed(module, names):
+                found.append((node.lineno, f"{module} ({', '.join(names)})"))
+    return found
+
+
+def _resolved_project_module(module: str | None, level: int) -> str:
+    if level == 0:
+        return module or ""
+    parts = ["vlogsrt", "project"][: max(0, 3 - level)]
+    return ".".join([*parts, *([module] if module else [])])
+
+
+def _sync_snap_allowed(module: str, names: tuple[str, ...]) -> bool:
+    if module.split(".")[0] in SYNC_SNAP_STDLIB or module in SYNC_SNAP_PROJECT_MODULES:
+        return True
+    allowed_children = {name.rsplit(".", 1)[-1] for name in SYNC_SNAP_PROJECT_MODULES}
+    return module == "vlogsrt.project" and bool(names) and set(names) <= allowed_children
+
+
+def check_sync_snap_only_from_listed() -> list[str]:
+    """D59 19g — 제안 모듈과 그 기준은 목록(`SYNC_SNAP_IMPORTERS`)의 자리만 안다.
+
+    `vlogsrt/`와 `ui/`의 목록 밖 소스의 **글 전체**에서 이름을 찾는다 — 별명 import·모듈 객체·
+    이름 가져오기·설정 모듈의 속성 꺼내기(`config.SYNC_SNAP_SETTINGS`)·`importlib` 문자열이 자리다
+    (19g 검증 뒤 고침: 처음 판은 import 문만 보아 속성 꺼내기를 놓쳤다). 기준을 정의한 설정 파일만
+    예외다. 이름을 잘라 이어 붙인 동적 import는 못 본다(받아들인 빈틈).
+    """
+    failures: list[str] = []
+    for source in [*_sources(), *sorted(UI_DIR.rglob("*.py"))]:
+        rel = _rel(source)
+        if rel in (SYNC_SNAP_MODULE, SYNC_SNAP_SETTING_OWNER) or rel in SYNC_SNAP_IMPORTERS:
+            continue
+        names = sorted(set(SYNC_SNAP_NAMES.findall(source.read_text(encoding="utf-8"))))
+        if names:
+            failures.append(
+                f"{rel}: {', '.join(names)}를 안다 — 시각 맞춤 제안과 그 기준은 정해진 자리만"
+                " 부른다 (D59 19g)"
+            )
+    return failures
+
+
+# 소유자 이름 — 모듈 함수는 `이름`, 클래스 메서드는 `클래스.이름`, 안에 둔 함수·람다는 그 뒤에
+# `.이름`·`.<lambda>`가 붙는다. 서비스 안의 자리는 정확한 이름 목록으로만 허락한다(앞머리 정규식은
+# `apply_snapshot_*` 같은 남의 이름까지 받았다 — 19h 검증 뒤 고침).
+SNAP_SERVICE = "vlogsrt/project/raw/service.py"
+SNAP_SERVICE_CLASS = "RawWorkspaceService"
+SNAP_SERVICE_METHODS = (
+    "apply_snap_preview", "apply_snap_blocker", "apply_snap", "_apply_snap_plan",
+    "revert_snap_state", "revert_snap",
+)  # fmt: skip
+SNAP_SERVICE_HELPERS = (
+    "_apply_snap_unready", "_apply_snap_offset", "_apply_snap_preview", "_apply_snap_listen",
+    "_apply_snap_hold", "_apply_snap_check", "SnapCue", "SnapPreview",
+)  # fmt: skip
+SNAP_SERVICE_OWNERS = frozenset(
+    (*(f"{SNAP_SERVICE_CLASS}.{name}" for name in SNAP_SERVICE_METHODS), *SNAP_SERVICE_HELPERS)
+)
+# 제안 모듈·기준을 아는 서비스 자리 — 제안을 실제로 계산하는 둘뿐이다.
+SYNC_SNAP_SERVICE_OWNERS = frozenset(
+    {f"{SNAP_SERVICE_CLASS}._apply_snap_plan", "_apply_snap_preview"}
+)
+SYNC_SNAP_EXACT_NAMES = frozenset({"sync_snap", "SyncSnapSettings", "SYNC_SNAP_SETTINGS"})
+# 서비스의 시각 맞춤 API·값 이름 — 서비스 안의 그 자리와 화면 진입점(`ui/workspace_service.py`)만
+# 안다.
+SNAP_API_NAME = re.compile(r"^(_?(apply|revert)_snap(_\w*)?|Snap(Preview|Cue))$")
+SNAP_API_SCREEN = "ui/workspace_service.py"
+
+
+def _owned_nodes(tree: ast.Module) -> list[tuple[ast.AST, str | None]]:
+    """(노드, 소유자 이름) 전부 — 클래스·함수·람다를 지날 때마다 소유자 이름이 길어진다."""
+    found: list[tuple[ast.AST, str | None]] = []
+
+    def visit(node: ast.AST, owner: str | None) -> None:
+        for child in ast.iter_child_nodes(node):
+            found.append((child, owner))
+            name = owner
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                name = f"{owner}.{child.name}" if owner else child.name
+            elif isinstance(child, ast.Lambda):
+                name = f"{owner}.<lambda>" if owner else "<lambda>"
+            visit(child, name)
+
+    visit(tree, None)
+    return found
+
+
+def check_sync_snap_in_service_only_from_snap_entries() -> list[str]:
+    """D59 19h — 서비스 안에서 제안 모듈·기준을 가리키는 자리는 제안을 계산하는 둘뿐이다.
+
+    import·별명·속성 꺼내기·이름·문자열(`importlib` 문자열·docstring 포함)을 AST로 센다 — 정확한
+    소유자 이름 목록(`SYNC_SNAP_SERVICE_OWNERS`) 밖(모듈 수준·다른 메서드·같은 이름의 모듈 함수·안에
+    둔 함수)이면 실패다.
+    """
+    path = ROOT / SNAP_SERVICE
+    if not path.exists():
+        return []
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    return [
+        f"{SNAP_SERVICE}:{getattr(node, 'lineno', 0)}: 시각 맞춤 제안을 {owner or '모듈 수준'}에서"
+        " 가리킨다 — 서비스 안에서는 _apply_snap_plan·_apply_snap_preview만 안다 (D59 19h)"
+        for node, owner in _owned_nodes(tree)
+        if _mentions_sync_snap(node) and owner not in SYNC_SNAP_SERVICE_OWNERS
+    ]
+
+
+def _mentions_sync_snap(node: ast.AST) -> bool:
+    if isinstance(node, ast.Name):
+        return node.id in SYNC_SNAP_EXACT_NAMES
+    if isinstance(node, ast.Attribute):
+        return node.attr in SYNC_SNAP_EXACT_NAMES
+    if isinstance(node, ast.alias):
+        parts = {*node.name.split("."), node.asname or ""}
+        return bool(parts & SYNC_SNAP_EXACT_NAMES)
+    if isinstance(node, ast.ImportFrom):
+        return bool(set((node.module or "").split(".")) & SYNC_SNAP_EXACT_NAMES)
+    return (
+        isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and bool(SYNC_SNAP_NAMES.search(node.value))
+    )
+
+
+def check_snap_api_only_from_service_and_screen() -> list[str]:
+    """D59 19h — 서비스의 시각 맞춤 API(`apply_snap*`·`revert_snap*`·`_apply_snap*`)와 그 값
+    (`SnapPreview`·`SnapCue`)은 서비스 안의 그 자리와 화면 진입점만 안다.
+
+    등급·컷·제거·지문·캐시 열쇠·승인·보내기·선택 분석이 서비스를 거쳐 제안을 읽으면(`scope.service.
+    apply_snap_preview(...)`) 「표시만」이 무너진다. 이름·속성·이름 가져오기·문자열(통째로 같은
+    것)을 센다. 서비스의 다른 메서드도 자리다(`self.apply_snap_preview` — 19h 검증 뒤 고침).
+    """
+    failures: list[str] = []
+    for source in [*_sources(), *sorted(UI_DIR.rglob("*.py"))]:
+        rel = _rel(source)
+        if rel == SNAP_API_SCREEN:
+            continue
+        for node, owner in _owned_nodes(ast.parse(source.read_text(encoding="utf-8"))):
+            name = _snap_api_name(node)
+            if name is None or (rel == SNAP_SERVICE and owner in SNAP_SERVICE_OWNERS):
+                continue
+            failures.append(
+                f"{rel}:{getattr(node, 'lineno', 0)}: {name}을 {owner or '모듈 수준'}에서"
+                " 가리킨다 —"
+                " 시각 맞춤 API는 서비스의 그 자리와 화면 진입점만 안다 (D59 19h)"
+            )
+    return failures
+
+
+def _snap_api_name(node: ast.AST) -> str | None:
+    candidates: tuple[str, ...] = ()
+    if isinstance(node, ast.Name):
+        candidates = (node.id,)
+    elif isinstance(node, ast.Attribute):
+        candidates = (node.attr,)
+    elif isinstance(node, ast.alias):
+        candidates = (node.name.split(".")[-1], node.asname or "")
+    elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+        candidates = (node.value,)
+    return next((name for name in candidates if SNAP_API_NAME.match(name)), None)
+
+
+# 시각 맞춤의 원본 자막 쓰기(D59 19h) — 적용(`apply_changes`)은 서비스 메서드 `apply_snap`이,
+# 되돌리기(`restore`)는 `revert_snap`이 그 자리에서 바로 부를 때만 된다(19f의 줄 넣기와 같은 엄격함:
+# 이름 가져오기·별명·속성 꺼내 담기·문자열 이름·람다로 넘기기·첨자 꺼내기(`vars(m)["restore"]`·
+# `m.__dict__[…]`·`globals()[…]`)·`*` import가 다 자리다). 정의한 모듈 안에서는 정의 말고는 어느
+# 자리도 안 된다. `restore`는 흔한 낱말이라(화면의 「자동 제외 전체 복원」 단추 변수·동작 이름)
+# **다른 모듈에서는** 그 이름 자체와 문자열을 속성 꺼내기 호출(`getattr` 등)의 인자일 때만 센다 —
+# 이름 가져오기·속성 꺼내기·첨자는 언제나 센다. 변수에 담은 문자열은 못 본다(받아들인 빈틈).
+SNAP_WRITE_CALLER = SNAP_SERVICE
+SNAP_WRITE_OWNER = "vlogsrt/project/raw/source_transcript.py"
+SNAP_WRITES = {
+    "apply_changes": f"{SNAP_SERVICE_CLASS}.apply_snap",
+    "restore": f"{SNAP_SERVICE_CLASS}.revert_snap",
+}
+SNAP_COMMON_WORDS = frozenset({"restore"})
+ATTRIBUTE_GETTERS = ("getattr", "hasattr", "setattr", "attrgetter", "methodcaller")
+
+
+def check_snap_writes_only_from_service() -> list[str]:
+    """D59 19h — 원본 자막의 시각 맞춤 적용·되돌리기는 서비스 메서드 `apply_snap`·`revert_snap`만
+    부른다."""
+    failures: list[str] = []
+    for source in [*_sources(), *sorted(UI_DIR.rglob("*.py"))]:
+        rel = _rel(source)
+        tree = ast.parse(source.read_text(encoding="utf-8"))
+        for line, name, owner in _snap_write_references(tree, rel):
+            failures.append(
+                f"{rel}:{line}: {name}을 {owner or '모듈 수준'}에서 가리킨다 — 시각 맞춤의"
+                f" 원본 자막 쓰기는 {SNAP_WRITES.get(name, '서비스')}가 바로 부를 때만 된다"
+                " (D59 19h)"
+            )
+    return failures
+
+
+def _snap_write_references(tree: ast.Module, rel: str) -> list[tuple[int, str, str | None]]:
+    """허락되지 않은 `apply_changes`·`restore` 자리(줄, 이름, 소유자 이름)."""
+    owned = _owned_nodes(tree)
+    allowed = {
+        id(node.func)  # 호출 자리의 func만 — 같은 이름의 다른 자리는 세어진다
+        for node, owner in owned
+        if isinstance(node, ast.Call) and _direct_snap_write(node, rel, owner)
+    }
+    getter_args = {
+        id(argument)
+        for node, _ in owned
+        if isinstance(node, ast.Call) and _call_name(node) in ATTRIBUTE_GETTERS
+        for argument in node.args
+    }
+    strict = rel == SNAP_WRITE_OWNER  # 정의한 모듈 — 흔한 낱말 예외가 없다
+    found: list[tuple[int, str, str | None]] = []
+    for node, owner in owned:
+        written = _names_snap_write(node, getter_args, strict=strict)
+        if written is not None and id(node) not in allowed:
+            found.append((getattr(node, "lineno", 0), written, owner))
+    return found
+
+
+def _direct_snap_write(call: ast.Call, rel: str, owner: str | None) -> bool:
+    func = call.func
+    return (
+        rel == SNAP_WRITE_CALLER
+        and isinstance(func, ast.Attribute)
+        and owner is not None
+        and SNAP_WRITES.get(func.attr) == owner
+    )
+
+
+def _names_snap_write(node: ast.AST, getter_args: set[int], *, strict: bool) -> str | None:
+    if (
+        isinstance(node, ast.ImportFrom)
+        and (node.module or "").endswith("source_transcript")
+        and any(alias.name == "*" for alias in node.names)
+    ):
+        return "*"
+    if (
+        isinstance(node, ast.Subscript)
+        and isinstance(node.slice, ast.Constant)
+        and node.slice.value in SNAP_WRITES
+    ):
+        return str(node.slice.value)
+    for name in SNAP_WRITES:
+        loose = name in SNAP_COMMON_WORDS and not strict
+        if isinstance(node, ast.Attribute) and node.attr == name:
+            return name
+        if isinstance(node, ast.alias) and name in (node.name.split(".")[-1], node.asname):
+            return name
+        if isinstance(node, ast.Name) and node.id == name and not loose:
+            return name
+        if (
+            isinstance(node, ast.Constant)
+            and node.value == name
+            and (not loose or id(node) in getter_args)
+        ):
+            return name
+    return None
+
+
+# 원본 자막 리비전을 쓰는 낮은 문 — 정의한 모듈의 공개 쓰기(편집·줄 넣기·적용·되돌리기·심기)만
+# 연다. 밖에서 바로 열면 위 불변식들이 지키는 자리를 건너 아무 줄이나 쓸 수 있다(D59 19h 재검증).
+STORE_EDIT_NAME = "_store_edit"
+
+
+def check_store_edit_stays_private() -> list[str]:
+    """D59 19h — `source_transcript._store_edit`는 정의한 모듈 밖에서 가리키지 못한다."""
+    failures: list[str] = []
+    for source in [*_sources(), *sorted(UI_DIR.rglob("*.py"))]:
+        rel = _rel(source)
+        if rel == SNAP_WRITE_OWNER:
+            continue
+        for node in ast.walk(ast.parse(source.read_text(encoding="utf-8"))):
+            if _names_store_edit(node):
+                failures.append(
+                    f"{rel}:{getattr(node, 'lineno', 0)}: {STORE_EDIT_NAME}을 가리킨다 — 원본"
+                    " 자막 리비전은 source_transcript의 공개 쓰기로만 쓴다 (D59 19h)"
+                )
+    return failures
+
+
+def _names_store_edit(node: ast.AST) -> bool:
+    if isinstance(node, ast.Attribute):
+        return node.attr == STORE_EDIT_NAME
+    if isinstance(node, ast.Name):
+        return node.id == STORE_EDIT_NAME
+    if isinstance(node, ast.alias):
+        return STORE_EDIT_NAME in (node.name.split(".")[-1], node.asname)
+    return isinstance(node, ast.Constant) and node.value == STORE_EDIT_NAME
+
+
+# 원본 자막의 「확인 필요」 표시(D59 19e)는 **표시만** 한다 — 순수 계산은 큐 글자와 아이디를 값으로
+# 받고(말소리 측정상 없음도 값), 결과는 화면 값을 짓는 서비스 하나만 읽는다. 등급·자동 정리·선택·
+# 출력·자막 쓰기로 흐르면 「이 줄은 말이 아니다」(규칙 4)나 조용한 삭제(규칙 9)의 길이 된다.
+SUSPECTS_MODULE = "vlogsrt/project/raw/subtitle_suspects.py"
+SUSPECTS_MUST_NOT_IMPORT = (
+    "subprocess", "openai", "anthropic_messages", "preprocess", "transcribe", "sqlite3", "service",
+    "workspace", "source_transcript", "sync_check", "sync_report", "tiering", "auto_cleanup",
+    "selection_analysis", "review_workspace",
+)  # fmt: skip
+SUSPECTS_IMPORTERS = ("vlogsrt/project/raw/service.py",)
+SUSPECT_NAMES = re.compile(r"SubtitleSuspectSettings|SUBTITLE_SUSPECT_SETTINGS|subtitle_suspect")
+# 이 자리들은 분석·전사·자막·글자의 지문·캐시 열쇠·승인을 만든다 — 표시 기준을 알면 기준을
+# 바꿀 때마다 이미 산 결과가 낡는다(D47). 정의 자리(`raw/config.py`)는 그 파일의 지문 클래스만
+# 본다.
+SUSPECT_FREE_FINGERPRINT_PATHS = (
+    "vlogsrt/project/config.py:ProjectConfig",
+    "vlogsrt/project/raw/config.py:RawWorkflowConfig",
+    "vlogsrt/project/raw/config.py:RawCaptionContract",
+    "vlogsrt/project/raw/config.py:SourceTextSettings",
+    "vlogsrt/project/raw/analysis_config.py",
+    "vlogsrt/project/raw/analysis_approval.py",
+    "vlogsrt/project/raw/analysis_workflow.py",
+    "vlogsrt/project/raw/understanding.py",
+    "vlogsrt/project/raw/final_caption.py",
+    "vlogsrt/project/raw/caption_workspace.py",
+    "vlogsrt/project/raw/source_text.py",
+    "vlogsrt/project/raw/cross_check.py",
+    "vlogsrt/project/raw/selection_analysis.py",
+)
+
+
+def check_subtitle_suspects_only_display() -> list[str]:
+    """D59 19e — `subtitle_suspects.py`는 값만 받아 이유를 돌려주고, 서비스만 그것을 읽는다.
+
+    파일이 사라지면 조용히 통과하지 않는다 — 표시 권한이 어디로 옮겨 갔는지 모르게 된다.
+    """
+    path = ROOT / SUSPECTS_MODULE
+    if not path.exists():
+        return [f"{SUSPECTS_MODULE}: 자막 의심 표시 계층이 사라졌다 (D59 19e)"]
+    body = path.read_text(encoding="utf-8")
+    failures = [
+        f"subtitle_suspects.py: {name}을 import한다 — 의심 표시가 순수 함수가 아니게 된다 (D59 19e)"
+        for name in _imports(body, SUSPECTS_MUST_NOT_IMPORT)
+    ]
+    failures += [
+        f"subtitle_suspects.py:{number}: 파일을 직접 읽거나 쓴다 — 입출력은 서비스의 몫이다"
+        " (D59 19e)"
+        for number, line in enumerate(body.splitlines(), start=1)
+        if TIERING_FILE_IO.search(line)
+    ]
+    for source in _project_sources():
+        rel = _rel(source)
+        if rel == SUSPECTS_MODULE or rel in SUSPECTS_IMPORTERS:
+            continue
+        if "subtitle_suspects" in _imported_names(source.read_text(encoding="utf-8")):
+            failures.append(
+                f"{rel}: subtitle_suspects를 import한다 — 의심 표시가 표시 밖으로 샌다 (D59 19e)"
+            )
+    return failures + _suspect_fingerprint_failures()
+
+
+def _suspect_fingerprint_failures() -> list[str]:
+    failures: list[str] = []
+    for entry in SUSPECT_FREE_FINGERPRINT_PATHS:
+        rel, _, class_name = entry.partition(":")
+        path = ROOT / rel
+        if not path.exists():
+            continue
+        body = path.read_text(encoding="utf-8")
+        if class_name:
+            body = _class_source(body, class_name)
+        if SUSPECT_NAMES.search(body):
+            failures.append(
+                f"{entry}: 자막 의심 표시 기준을 안다 — 지문·캐시 열쇠 밖이어야 한다 (D59 19e)"
+            )
+    return failures
 
 
 def check_edit_layer_ignores_audio() -> list[str]:
@@ -615,7 +2072,9 @@ def check_pure_layer() -> list[str]:
     `cutpoints.py`가 ffmpeg를 직접 부르기 시작하면 진폭을 지어내며 시험할 수 없게 된다.
     """
     failures = []
-    forbidden = re.compile(r"^\s*(?:import|from)\s+(openai|subprocess|shutil)\b")
+    forbidden = re.compile(
+        r"^\s*(?:import|from)\s+(openai|subprocess|shutil|urllib|http|socket|ssl)\b"
+    )
     for name in PURE_MODULES:
         path = PACKAGE / name
         if not path.exists():
@@ -1038,18 +2497,28 @@ def check_one_transcription_call() -> list[str]:
 def check_no_hardcoded_model() -> list[str]:
     """규칙 6 — 모델 이름도 config에서 온다. 코드에 박으면 되돌리기가 커밋이 된다.
 
-    glm-*·gemini-*은 파생 계층의 비전 모델이다 — 원본 config(`vlogsrt/config.py`)는 엔진
-    모델(whisper-1·gpt-*transcribe*)만 예외로 받고 비전 모델은 물려받지 않는다(재검토).
+    경로별 허용 폭: `vlogsrt/config.py`·`vlogsrt/project/raw/config.py`는 엔진 모델
+    (whisper-1·gpt-*transcribe*)을 놓아도 되지만 glm·gemini는 금지다.
+    `vlogsrt/project/config.py`는 셋 다 놓아도 되나 raw 전용 리터럴(gpt-6-luna)은
+    금지다. gpt-6-luna는 정확히 `vlogsrt/project/raw/config.py`에만 있을 수 있다
+    (2026-10-02 계획 §3.2 — 모델 리터럴은 허용된 설정 경로에만 둔다). 작업대(`ui/`)도
+    본다 — 화면이 모델 이름을 박으면 기본 모델(D58)을 바꿀 때 두 곳이 갈린다.
     """
     failures = []
-    for path in _sources():
+    for path in _sources() + sorted(UI_DIR.rglob("*.py")):
         rel = _rel(path)
-        if rel in PROJECT_MODEL_LITERAL_PATHS:
-            continue
-        # 원본 config는 엔진 모델을 놓아도 된다 — 금지하는 건 glm뿐이다.
-        patterns = (PROJECT_MODEL_LITERAL,)
-        if rel not in MODEL_LITERAL_PATHS:
-            patterns = (ENGINE_MODEL_LITERAL, PROJECT_MODEL_LITERAL)
+        patterns = (
+            ENGINE_MODEL_LITERAL,
+            PROJECT_MODEL_LITERAL,
+            RAW_MODEL_LITERAL,
+            CLAUDE_MODEL_LITERAL,
+        )
+        if rel in RAW_MODEL_LITERAL_PATHS:
+            patterns = (PROJECT_MODEL_LITERAL,)
+        elif rel in PROJECT_MODEL_LITERAL_PATHS:
+            patterns = (RAW_MODEL_LITERAL, CLAUDE_MODEL_LITERAL)
+        elif rel in MODEL_LITERAL_PATHS:
+            patterns = (PROJECT_MODEL_LITERAL, RAW_MODEL_LITERAL, CLAUDE_MODEL_LITERAL)
         for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
             if any(pattern.search(line) for pattern in patterns):
                 failures.append(f"{rel}:{number} 모델 이름이 코드에 박혀 있다")
@@ -1058,10 +2527,14 @@ def check_no_hardcoded_model() -> list[str]:
 
 CHECKS = (
     ("openai 경계", check_openai_boundary),
+    ("네트워크 모듈 경계", check_network_boundary),
+    ("Claude 전송은 transcribe만 안다", check_claude_transport_entry),
     ("ffmpeg 경계", check_ffmpeg_boundary),
     ("순수 계층", check_pure_layer),
     ("시각 유도 계층 부활 금지", check_time_deriving_layers_stay_buried),
     ("whisper에 prompt 금지", check_no_prompt_to_whisper),
+    ("요청 빌더의 칸은 갈라져 있다", check_caption_request_lanes),
+    ("용어집은 설정 밖, DB만 안다", check_glossary_stays_local),
     ("autojunk=False", check_autojunk),
     ("금지 의존성", check_banned_imports),
     ("의존성 3개", check_dependencies),
@@ -1072,6 +2545,27 @@ CHECKS = (
     ("검증은 출력을 못 건드린다", check_verify_cannot_touch_output),
     ("재전사는 전사 단계에 머문다", check_repair_stays_upstream),
     ("글자 교정은 순수하다", check_retext_stays_pure),
+    ("3단 등급은 순수하다", check_tiering_stays_pure),
+    ("등급의 시각 확인 값은 서비스 한 자리만", check_tier_timing_only_from_service),
+    ("자막 시각 확인은 순수하다", check_sync_check_stays_pure),
+    ("자막 시각 확인은 표시만 한다", check_sync_check_only_displays),
+    ("자막 의심 표시는 순수하고 표시만 한다", check_subtitle_suspects_only_display),
+    ("말소리 빈칸 고르기는 순수하다", check_speech_gaps_stays_pure),
+    ("원본 자막 줄 넣기는 빈칸 재전사만", check_insert_segments_only_from_refill),
+    ("빈칸 재전사의 whisper에는 힌트가 없다", check_refill_whisper_has_no_hints),
+    ("빈칸 재전사는 서비스만 부른다", check_speech_refill_only_from_service),
+    ("시각 맞춤 제안은 순수하다", check_sync_snap_stays_pure),
+    ("시각 맞춤 제안은 정해진 자리만 부른다", check_sync_snap_only_from_listed),
+    (
+        "서비스 안의 시각 맞춤 제안은 적용·되돌리기만",
+        check_sync_snap_in_service_only_from_snap_entries,
+    ),
+    ("시각 맞춤 적용·되돌리기 쓰기는 서비스만", check_snap_writes_only_from_service),
+    ("시각 맞춤 API는 서비스와 화면 진입점만", check_snap_api_only_from_service_and_screen),
+    ("원본 자막의 낮은 쓰기 문은 정의 모듈 안에만", check_store_edit_stays_private),
+    ("Final Cut 타임라인 빌더는 순수하다", check_finalcut_timeline_stays_pure),
+    ("Final Cut 보내기는 원본을 복사·재해시하지 않는다", check_finalcut_export_never_copies),
+    ("옛 선택한 컷 Final Cut 출력은 되살리지 않는다", check_old_finalcut_path_stays_dead),
     ("신뢰도 메타 보존", check_confidence_meta_survives),
     ("전사 호출 1개", check_one_transcription_call),
     ("모델 이름 비하드코딩", check_no_hardcoded_model),

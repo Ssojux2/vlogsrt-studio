@@ -30,7 +30,8 @@ public struct ShareDestination: Sendable {
       .appendingPathComponent("Library", isDirectory: true)
       .appendingPathComponent("Application Support", isDirectory: true)
       .appendingPathComponent("ProApps", isDirectory: true)
-      .appendingPathComponent("ShareTemplates", isDirectory: true)
+      // Final Cut이 custom .fcpxdest를 읽는 공식 사용자 설치 위치.
+      .appendingPathComponent("Share Destinations", isDirectory: true)
   }
 
   public var installedURL: URL {
