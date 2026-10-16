@@ -805,9 +805,10 @@ def test_blocks_put_the_cross_check_under_the_scope_and_wire_it_like_the_radio(
     assert chosen["outputs"] == [ui._library_summary_md._id]
     follow = [d for d in deps if d.get("trigger_after") == chosen["id"]]
     assert [d["outputs"] for d in follow] == [[ui._quote_note_md._id]]
-    refresh = {d["targets"][0][1]: d for d in deps if d["outputs"] == [box._id]}
+    # 틱은 1초 상태 틱 하나다(D63 세션 C) — 교차 확인 칸은 범위 칸 다음 칸이다.
+    refresh = {d["targets"][0][1]: d for d in deps if box._id in d["outputs"]}
     assert sorted(refresh) == ["load", "tick"]
-    assert refresh["tick"]["inputs"] == [ui._signature_state._id, box._id]
+    assert refresh["tick"]["inputs"][:3] == [ui._signature_state._id, radio._id, box._id]
     css = ui_facade.WORKBENCH_CSS
     assert "#review-tab:has(#library-approve:disabled) #vl-cross-check { display: none; }" in css
 

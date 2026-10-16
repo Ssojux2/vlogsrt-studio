@@ -388,9 +388,11 @@ def test_blocks_put_the_glossary_in_the_settings_drawer_and_wire_save_and_refres
     follow = [d for d in deps if d.get("trigger_after") == clicked["id"]]
     assert [d["outputs"] for d in follow] == [[ui._quote_note_md._id]]
     assert not [d for d in deps if (box._id, "change") in d["targets"]]  # 저장은 단추뿐이다
-    (tick,) = [f for f in app.fns.values() if getattr(f.fn, "__name__", "") == "glossary_tick"]
-    assert [block._id for block in tick.inputs] == [ui._signature_state._id, box._id, loaded._id]
-    assert [block._id for block in tick.outputs] == [box._id, status._id, loaded._id]
+    # 쓰지 않은 칸만 맞추는 `glossary_tick`은 1초 상태 틱 하나 안에서 돈다(D63 세션 C).
+    (tick,) = [f for f in app.fns.values() if getattr(f.fn, "__name__", "") == "status_tick"]
+    inputs, outputs = [b._id for b in tick.inputs], [b._id for b in tick.outputs]
+    assert inputs[0] == ui._signature_state._id and inputs[3:5] == [box._id, loaded._id]
+    assert outputs[2:5] == [box._id, status._id, loaded._id]
     refreshers = [
         f for f in app.fns.values() if getattr(f.fn, "__name__", "") == "glossary_controls"
     ]

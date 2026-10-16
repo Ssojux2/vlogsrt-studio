@@ -3727,5 +3727,19 @@ def test_reading_through_a_scope_is_not_opening_one(
     assert check_invariants.check_read_scope_only_at_entry_points() == []
 
 
+def test_the_one_second_status_tick_is_a_screen_entry_point(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """W-23 세션 C — 1초 상태 틱은 쓰지 않는 틱이라 제 범위를 연다(진입점 다섯째)."""
+    body = READ_SCOPE_SCREEN + (
+        "    def status_tick(self, signature):\n"
+        "        with raw_service.read_scope.open():\n"
+        "            return signature\n"
+    )
+    _fake_source_tree(monkeypatch, tmp_path, {"ui/workspace_service.py": body})
+    assert check_invariants.check_read_scope_only_at_entry_points() == []
+    assert "RawWorkspaceUi.status_tick" in check_invariants.READ_SCOPE_ENTRY_POINTS
+
+
 def test_the_real_tree_opens_read_scopes_only_at_the_screen_entry_points() -> None:
     assert check_invariants.check_read_scope_only_at_entry_points() == []

@@ -131,6 +131,10 @@ CROSS_CHECK_INFO = (
 )
 """「다른 귀로 교차 확인」(D59 19d) — 승인 범위 바로 아래의 켬·끔. 칸에는 모델 이름·금액이 없다
 (D57 결정 7) — 무엇을 얼마에 듣는지는 그 아래 견적 문구만 말하고, 승인은 그 문구에 묶인다."""
+STATUS_SENT_CELLS = ("button", "summary", "progress", "note", "usage")
+"""1초 상태 틱(D63 세션 C)이 세션마다 「마지막으로 보낸 값」을 기억하는 칸 — 승인 단추 · 견적 문구 ·
+상태 줄 · 전문 칸 · 실사용 원천. 칸마다 `gr.State` 하나다: 다른 사건이 칸을 잊게 할 때 틱이 쓰는
+다른 칸의 기억과 엇갈려 덮지 않는다. 범위·교차 확인·용어집 칸은 그 탭의 칸 값과 견주어 건너뛴다."""
 GLOSSARY_PANEL_ID = "vl-glossary-panel"
 GLOSSARY_ID = "vl-glossary"
 GLOSSARY_SAVE_ID = "vl-glossary-save"
@@ -1030,6 +1034,28 @@ def _glossary_moved(glossary: Any) -> str:
     )
 
 
+def _sent_form(update: Any) -> Any:
+    """보낸 값의 비교 모양 — 구성요소 갱신이면 그 인자(값·보임·누를 수 있음), 글이면 글.
+
+    처리기가 건너뛴 칸은 None이다(보낸 것이 없다)."""
+    if isinstance(update, gr.components.Component):
+        return type(update).__name__, tuple(sorted(update.constructor_args.items()))
+    return None if update == gr.skip() else update
+
+
+def _unsent(fresh: Sequence[Any], sent: Sequence[Any]) -> tuple[list[Any], list[Any]]:
+    """칸마다 (보낼 값, 새 기억) — 이 세션이 마지막으로 보낸 것과 같거나 처리기가 건너뛴 칸은
+    둘 다 건너뛴다(기억은 보낸 칸만 바뀐다 — 다른 사건이 잊게 한 기억을 덮지 않는다)."""
+    cells: list[Any] = []
+    memory: list[Any] = []
+    for update, before in zip(fresh, sent, strict=True):
+        form = _sent_form(update)
+        changed = form is not None and form != before
+        cells.append(update if changed else gr.skip())
+        memory.append(form if changed else gr.skip())
+    return cells, memory
+
+
 def _semantic_quote_terms(model: str | None, estimates: Sequence[Any]) -> tuple[str, str]:
     """견적 문구의 (모델 이름, 비용 상한 꼬리) — Luna는 W-14 이전 문구 그대로다(D54).
 
@@ -1348,6 +1374,9 @@ class RawWorkspaceUi:
         self._glossary_status_md: gr.Markdown | None = None
         self._glossary_loaded_state: gr.State | None = None
         self._glossary_warned: set[str] = set()
+        # 1초 상태 틱 하나와 칸마다 이 세션이 마지막으로 보낸 값(D63 세션 C).
+        self._status_timer: gr.Timer | None = None
+        self._status_sent: tuple[gr.State, ...] = ()
         self._choose_event: Any = None
         # 선택기·조사 단추 참조 — 배선 증명은 실제 Blocks 의존성(app.config)이 한다.
         self._open_button: gr.Button | None = None
@@ -3807,6 +3836,62 @@ class RawWorkspaceUi:
             return gr.skip(), gr.skip()
         return self.quote_note_view(signature), self.usage_line_markdown()
 
+    def status_tick(
+        self,
+        signature: str | None,
+        mode_shown: str | None,
+        cross_shown: bool | None,
+        glossary_shown: str | None,
+        glossary_loaded: list[str] | None,
+        *sent: Any,
+    ) -> tuple[Any, ...]:
+        """1초 틱 하나(W-23 세션 C, D63) — 옛 1초 타이머 일곱의 처리기를 틱마다 모두 부른다.
+
+        부수 효과(끝난 승인 작업·지난 알림 걷기, 용어집 경고 한 번)와 주기는 예전 그대로다. 쓰지
+        않는 틱이라 읽기는 한 범위 안에서 한 번이다. 범위·교차 확인·용어집 칸은 옛 처리기가 그 탭의
+        칸 값과 견주어 건너뛰고, 나머지 다섯은 이 세션이 마지막으로 보낸 값(`sent`, 칸마다
+        `gr.State`)과 같으면 보내지 않는다 — 다른 사건이 그 칸에 쓰면 `forget_sent_view`가 잊는다.
+        """
+        with raw_service.read_scope.open():
+            button = self.library_analysis_button()
+            summary = self.library_analysis_summary_markdown()
+            progress = self.capcut_status_view(signature)
+            note, usage = self.quote_cells_view(signature)
+            mode = self.approval_mode_tick(signature, mode_shown)
+            cross = self.cross_check_tick(signature, cross_shown)
+            glossary = self.glossary_tick(signature, glossary_shown, glossary_loaded)
+        cells, memory = _unsent((button, summary, progress, note, usage), sent)
+        return (mode, cross, *glossary, *cells, *memory)
+
+    def forget_sent_view(self) -> tuple[None, None]:
+        """다른 사건이 칸 둘에 쓴 뒤 — 그 칸들의 「마지막으로 보낸 값」을 잊는다."""
+        return None, None
+
+    def _forget_sent_after(self, event: Any, *cells: str) -> None:
+        targets = [self._status_sent[STATUS_SENT_CELLS.index(cell)] for cell in cells]
+        event.then(self.forget_sent_view, None, targets, queue=False, show_progress="hidden")
+
+    def _wire_status_tick(self) -> None:
+        """1초 상태 틱의 입출력 — 칸이 모두 지어진 뒤(용어집은 서랍에 산다) 옛 일곱을 잇는다."""
+        assert self._status_timer is not None and self._glossary_box is not None
+        assert self._glossary_status_md is not None and self._glossary_loaded_state is not None
+        shown = [self._approval_mode_radio, self._cross_check_box, self._glossary_box]
+        glossary = [self._glossary_status_md, self._glossary_loaded_state]
+        cells = [
+            self._library_approve_button,
+            self._library_summary_md,
+            self._capcut_progress_md,
+            self._quote_note_md,
+            self._usage_md,
+        ]
+        self._status_timer.tick(
+            self.status_tick,
+            [self._signature_state, *shown, self._glossary_loaded_state, *self._status_sent],
+            [*shown, *glossary, *cells, *self._status_sent],
+            queue=False,
+            show_progress="hidden",
+        )
+
     def _report_activity(self, event: Any, reply: Any) -> None:
         """단추 응답을 활동 칸으로 — 응답이 실린 구성요소 값을 실행본이 받는다(서버 호출 0회).
 
@@ -3867,20 +3952,14 @@ class RawWorkspaceUi:
             queue=False,
             show_progress="hidden",
         )
-        chosen.then(
+        noted = chosen.then(
             self.quote_note_view,
             self._signature_state,
             self._quote_note_md,
             queue=False,
             show_progress="hidden",
         )
-        gr.Timer(1).tick(
-            self.approval_mode_tick,
-            [self._signature_state, radio],
-            radio,
-            queue=False,
-            show_progress="hidden",
-        )
+        self._forget_sent_after(noted, "summary", "note")
         self._wire_cross_check()
 
     def _wire_cross_check(self) -> None:
@@ -3894,50 +3973,23 @@ class RawWorkspaceUi:
             queue=False,
             show_progress="hidden",
         )
-        chosen.then(
+        noted = chosen.then(
             self.quote_note_view,
             self._signature_state,
             self._quote_note_md,
             queue=False,
             show_progress="hidden",
         )
-        gr.Timer(1).tick(
-            self.cross_check_tick,
-            [self._signature_state, box],
-            box,
-            queue=False,
-            show_progress="hidden",
-        )
+        self._forget_sent_after(noted, "summary", "note")
 
     def _wire_review_timers(self, outputs: list[Any]) -> None:
-        """1·2초 타이머 — 승인 단추 이름, 견적 문구, 상태 줄, 작업대 다시 그리기, 보내기 알림."""
-        gr.Timer(1).tick(
-            self.library_analysis_button,
-            None,
-            self._library_approve_button,
-            show_progress="hidden",
-        )
-        gr.Timer(1).tick(
-            self.library_analysis_summary_markdown,
-            None,
-            self._library_summary_md,
-            queue=False,
-            show_progress="hidden",
-        )
-        gr.Timer(1).tick(
-            self.capcut_status_view,
-            self._signature_state,
-            self._capcut_progress_md,
-            queue=False,
-            show_progress="hidden",
-        )
-        gr.Timer(1).tick(
-            self.quote_cells_view,
-            self._signature_state,
-            [self._quote_note_md, self._usage_md],
-            queue=False,
-            show_progress="hidden",
-        )
+        """1·2초 타이머 — 1초는 상태 틱 하나(승인 단추 · 견적 문구 · 상태 줄 · 전문 칸 · 범위 칸 ·
+        교차 확인 칸 · 용어집, 배선은 `_wire_status_tick`), 2초는 작업대 다시 그리기와 보내기 알림.
+
+        옛 1초 타이머 일곱은 탭 하나가 초마다 서버를 일곱 번 불렀다(D63 세션 C).
+        """
+        self._status_timer = gr.Timer(1)
+        self._status_sent = tuple(gr.State(None) for _cell in STATUS_SENT_CELLS)
         gr.Timer(2).tick(
             self.capcut_tick_view,
             self._signature_state,
@@ -3973,6 +4025,7 @@ class RawWorkspaceUi:
                 advanced = self._review_advanced_tab()
             self._package_tab()
         self._wire_library_approval(quick_api_panel, quick_api_key)
+        self._wire_status_tick()  # 용어집 칸까지 지어진 뒤 — 1초 틱의 칸이 다 있다
         return advanced
 
     def _glossary_panel(self) -> None:
@@ -4000,28 +4053,22 @@ class RawWorkspaceUi:
         self._wire_glossary(save, box, status, loaded)
 
     def _wire_glossary(self, save: gr.Button, box: Any, status: Any, loaded: gr.State) -> None:
-        """저장(그 탭이 불러온 용어집에 묶임) → 견적 문구·전문 칸, 그리고 쓰지 않은 칸만 맞추는
-        1초 틱(D59 19e 검증 뒤 고침 6)."""
+        """저장(그 탭이 불러온 용어집에 묶임) → 견적 문구·전문 칸. 쓰지 않은 칸만 맞추는 것은
+        1초 상태 틱의 `glossary_tick`이다(D59 19e 검증 뒤 고침 6, D63 세션 C)."""
         saved = save.click(
             self.glossary_save_view,
             [self._signature_state, box, loaded],
             [status, box, self._library_summary_md, loaded],
             show_progress="hidden",
         )
-        saved.then(
+        noted = saved.then(
             self.quote_note_view,
             self._signature_state,
             self._quote_note_md,
             queue=False,
             show_progress="hidden",
         )
-        gr.Timer(1).tick(
-            self.glossary_tick,
-            [self._signature_state, box, loaded],
-            [box, status, loaded],
-            queue=False,
-            show_progress="hidden",
-        )
+        self._forget_sent_after(noted, "summary", "note")
 
     def _restore_tools(self) -> None:
         """「복원 · 전달 · 고급 조작」 — 서랍 안에서는 펼친 채 둔다(열면 바로 단추가 보인다)."""
@@ -4059,13 +4106,15 @@ class RawWorkspaceUi:
         )
         approved.then(fn=None, js=ui_facade.KEY_NOTICE_JS)
         self._report_activity(approved, self._capcut_progress_md)
-        approved.success(
+        noted = approved.success(
             self.quote_note_view,
             self._signature_state,
             self._quote_note_md,
             queue=False,
             show_progress="hidden",
         )
+        # 답이 상태 줄에 쓴 글은 틱의 글과 다를 수 있다 — 다음 틱이 틱의 글을 다시 보낸다.
+        self._forget_sent_after(noted, "progress", "note")
 
     def _review_advanced_tab(
         self,

@@ -164,10 +164,11 @@ def test_progress_timer_is_unqueued_and_old_render_cannot_overwrite_it(tmp_path,
 
     ui = RawWorkspaceUi(state_path=tmp_path / "state.json")
     app = ui.build_blocks()
-    status = next(f for f in app.fns.values() if f.fn == ui.capcut_status_view)
+    # 상태 줄은 1초 상태 틱 하나가 쓴다(D63 세션 C) — 대기열 밖, 다시 그리기와 따로.
+    status = next(f for f in app.fns.values() if f.fn == ui.status_tick)
     render = next(f for f in app.fns.values() if f.fn == ui.capcut_tick_view)
     assert status.queue is False
-    assert status.outputs == [ui._capcut_progress_md]
+    assert ui._capcut_progress_md in status.outputs
     assert ui._capcut_progress_md not in render.outputs
 
 

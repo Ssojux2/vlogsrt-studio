@@ -307,10 +307,11 @@ def test_blocks_put_the_approval_mode_above_the_quote_and_wire_it(
     follow = [d for d in deps if d.get("trigger_after") == chosen["id"]]
     assert [d["outputs"] for d in follow] == [[ui._quote_note_md._id]]
     # 칸의 값을 맞추는 것은 둘 — 화면을 열 때(그때의 작업공간 값)와 1초 틱. 틱은 그 탭의 칸
-    # 값을 입력으로 받아 저장값과 다를 때만 보낸다(탭마다 따로 — 검증 지적 1).
-    refresh = {d["targets"][0][1]: d for d in deps if d["outputs"] == [radio._id]}
+    # 값을 입력으로 받아 저장값과 다를 때만 보낸다(탭마다 따로 — 검증 지적 1). 틱은 1초 상태 틱
+    # 하나다(D63 세션 C) — 범위 칸은 그 틱의 첫 칸이다.
+    refresh = {d["targets"][0][1]: d for d in deps if radio._id in d["outputs"]}
     assert sorted(refresh) == ["load", "tick"]
-    assert refresh["tick"]["inputs"] == [ui._signature_state._id, radio._id]
+    assert refresh["tick"]["inputs"][:2] == [ui._signature_state._id, radio._id]
     # 승인 클릭의 결합은 그대로 — 보이는 견적 문구만 함께 간다(D54·D57).
     buttons = {b.value: b for b in app.blocks.values() if isinstance(b, gr.Button)}
     (approve_dep,) = [

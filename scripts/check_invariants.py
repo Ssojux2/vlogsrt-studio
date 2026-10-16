@@ -1881,15 +1881,18 @@ def _names_store_edit(node: ast.AST) -> bool:
 
 
 # 그리기 한 번의 읽기 범위(W-23 세션 B, D63) — 범위 안의 읽기는 같은 답을 기억한다. 범위가 쓰기를
-# 넘으면 방금 쓴 것을 못 본다. 그래서 범위를 여는 자리는 화면 진입점 넷뿐이고, 처리기는 쓰기를 마친
-# 뒤에만 연다(`_capcut_result`는 정리 고리 뒤, 동작은 그리기 안). 서비스·작업 본문·다른 처리기는
-# 열지 않는다 — 읽기(`read_scope.memo`·`current`)는 어디서나 된다. 시험(tests/)은 보지 않는다.
+# 넘으면 방금 쓴 것을 못 본다. 그래서 범위를 여는 자리는 화면 진입점 다섯뿐이고, 처리기는 쓰기를
+# 마친 뒤에만 연다(`_capcut_result`는 정리 고리 뒤, 동작은 그리기 안, 1초 상태 틱은 쓰지 않는다 —
+# 세션 C).
+# 서비스·작업 본문·다른 처리기는 열지 않는다 — 읽기(`read_scope.memo`·`current`)는 어디서나 된다.
+# 시험(tests/)은 보지 않는다.
 READ_SCOPE_SCREEN = "ui/workspace_service.py"
 READ_SCOPE_ENTRY_POINTS = frozenset(
     f"RawWorkspaceUi.{name}"
     for name in (
         "_capcut_result",
         "capcut_tick_view",
+        "status_tick",
         "visual_workbench_action",
         "visual_workbench_render",
     )
@@ -1897,7 +1900,7 @@ READ_SCOPE_ENTRY_POINTS = frozenset(
 
 
 def check_read_scope_only_at_entry_points() -> list[str]:
-    """D63 — `read_scope.open`은 화면 진입점 넷(메서드 몸통 그 자리)만 가리킨다."""
+    """D63 — `read_scope.open`은 화면 진입점 다섯(메서드 몸통 그 자리)만 가리킨다."""
     failures: list[str] = []
     for source in [*_sources(), *sorted(UI_DIR.rglob("*.py"))]:
         rel = _rel(source)

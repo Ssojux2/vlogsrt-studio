@@ -243,7 +243,10 @@ def test_every_action_reply_reaches_the_activity_area(tmp_path: Path, local_sock
     ]
     assert len(notes) == 1 and notes[0]["trigger_only_on_success"] is True  # 답을 전문 칸에 바로
     cells = [server._quote_note_md._id, server._usage_md._id]
-    (cell_tick,) = [d for d in deps if d["outputs"] == cells]
+    # 1초 상태 틱 하나가 두 칸을 잇달아 쓴다(D63 세션 C).
+    (cell_tick,) = [
+        d for d in deps if any(d["outputs"][i : i + 2] == cells for i in range(len(d["outputs"])))
+    ]
     assert cell_tick["targets"][0][1] == "tick"  # 1초 타이머 — 전문 칸 + 기록 판의 실사용 원천
     # 2초 타이머는 같은 숨은 칸을 다시 쓴다 — 그 쓰기는 활동 칸으로 가지 않는다.
     ticks = [d for d in deps if d["targets"] and d["targets"][0][1] == "tick"]
