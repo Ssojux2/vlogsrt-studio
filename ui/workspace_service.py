@@ -19,9 +19,11 @@ import json
 import os
 import shutil
 import threading
+import time
 import uuid
 from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from decimal import ROUND_CEILING, Decimal
 from fractions import Fraction
 from pathlib import Path
@@ -39,9 +41,9 @@ from fastapi.responses import (  # noqa: E402
     StreamingResponse,
 )
 
+from ui import activity_log, design_tokens, ui_facade  # noqa: E402
 from ui import chooser as ui_chooser  # noqa: E402
-from ui import design_tokens, ui_facade  # noqa: E402
-from vlogsrt import log  # noqa: E402
+from vlogsrt import log, preprocess  # noqa: E402
 from vlogsrt.project.raw import service as raw_service  # noqa: E402
 
 STATE_ENV = "VLOGSRT_RAW_UI_STATE"
@@ -361,6 +363,36 @@ MODEL_BUSY_JOB_KINDS = (
     LIBRARY_APPROVAL_JOB_KIND,
 )
 """이 작업이 도는 동안에는 분석 모델을 바꾸지 않는다 — 견적·승인이 본 모델과 실행 모델이 갈린다."""
+ACTIVITY_ROUTE = ui_facade.ACTIVITY_ROUTE
+"""「기록」 판의 서버 쪽(D61) — 읽기만 하는 GET 하나. 다른 경로와 같은 Host/Origin 가드를 지난다."""
+ACTIVITY_LOG_PAGE = 500
+"""한 번에 보내는 서버 줄 상한 — 판도 이만큼만 그린다(처음 열 때 몇 시간치를 보내지 않는다)."""
+ACTIVITY_JOB_LABELS = {
+    raw_service.INGEST_JOB_KIND: "원본 가져오기",
+    "reference_import": "원본 연결",
+    "selected_video_import": "영상 가져오기",
+    "source_preview": "원본 미리보기",
+    raw_service.VISUAL_PREPARE_JOB_KIND: "미리보기 준비",
+    raw_service.SEGMENT_JOB_KIND: "컷 준비",
+    raw_service.ANALYSIS_JOB_KIND: "영상 분석 1단계(전사·장면)",
+    raw_service.ANALYSIS_SEMANTIC_JOB_KIND: "영상 분석 2단계(의미 분석)",
+    raw_service.UPKEEP_JOB_KIND: "작업공간 정리",
+    raw_service.SYNC_CHECK_JOB_KIND: "자막 시각 확인",
+    raw_service.REFILL_JOB_KIND: "말소리 빈칸 재전사",
+    "automatic_cleanup": "자동 정리",
+    "cleanup_pipeline": "영상 정리",
+    "selection_analysis": "분석 준비",
+    "selection_review": "분석 결과 불러오기",
+    "selection_quote": "견적 준비",
+    "library_quote": "견적 준비",
+    LIBRARY_APPROVAL_JOB_KIND: "전체 영상 분석",
+    REVIEW_EXPORT_JOB_KIND: "확정 내보내기",
+    FINALCUT_SEND_JOB_KIND: "Final Cut 보내기",
+    OLD_SELECTED_CUTS_JOB_KIND: "Final Cut 전달(옛 방식)",
+    "caption_run": "최종 자막 만들기",
+}
+"""작업 종류의 화면 이름 — 모르는 종류는 「작업(종류)」로 그대로 보인다."""
+ACTIVITY_STATUS_LABELS = {"running": "진행 중", "queued": "대기", "cancel_requested": "취소 중"}
 CLAUDE_KEY_MISSING_TEXT = (
     "{label} 분석에는 `{env}`가 필요합니다. `.env`에 키를 넣고 앱을 다시 띄우거나, "
     "API 연결에서 영상 분석 모델을 바꾸세요. 유료 호출은 시작하지 않았습니다."
@@ -595,6 +627,61 @@ def default_state_path() -> Path:
     """마지막 작업공간 기록 위치 — 서버를 다시 띄워도 같은 프로젝트를 연다(§4.1)."""
     override = os.environ.get(STATE_ENV)
     return Path(override) if override else Path.cwd() / ".vlogsrt-ui-state.json"
+
+
+def _process_row(
+    item: preprocess.ProcessActivity,
+    names: Mapping[str, tuple[str, float | None]],
+    now: float,
+) -> dict[str, object]:
+    """「지금 도는 작업」 프로세스 한 줄 — 입력이 원본이면 원본 이름과 길이로 %까지(D61)."""
+    path = item.input_path
+    known = names.get(os.path.normpath(path)) if path else None
+    name = known[0] if known else (Path(path).name if path else item.tool)
+    duration = known[1] if known else None
+    percent = (
+        ui_facade.progress_percent(item.progress_seconds, duration) if item.whole_input else None
+    )
+    elapsed = max(0.0, now - item.started_at)
+    return {
+        "step": item.step,
+        "name": name,
+        "tool": item.tool,
+        "elapsed_seconds": round(elapsed, 1),
+        "timeout_seconds": item.timeout_seconds,
+        "progress_seconds": item.progress_seconds,
+        "percent": percent,
+        "text": ui_facade.process_row_text(item.step, name, elapsed, item.timeout_seconds, percent),
+    }
+
+
+def _job_row(job: raw_service.JobRecord, now: datetime) -> dict[str, object]:
+    """「지금 도는 작업」 작업 한 줄 — 진행 수와 마지막 갱신 뒤 몇 분인지(멈춤을 가르는 재료)."""
+    label = ACTIVITY_JOB_LABELS.get(job.kind, f"작업({job.kind})")
+    status = ACTIVITY_STATUS_LABELS.get(job.status, job.status)
+    minutes = _minutes_since(job.updated_at, now)
+    return {
+        "kind": job.kind,
+        "label": label,
+        "status": job.status,
+        "status_label": status,
+        "progress_current": job.progress_current,
+        "progress_total": job.progress_total,
+        "minutes_since_update": minutes,
+        "text": ui_facade.job_row_text(
+            label, status, job.progress_current, job.progress_total, minutes
+        ),
+    }
+
+
+def _minutes_since(stamp: str, now: datetime) -> int | None:
+    try:
+        then = datetime.fromisoformat(stamp)
+    except ValueError:
+        return None  # 모르는 꼴의 시각은 「몇 분 전」을 말하지 않는다
+    if then.tzinfo is None:
+        then = then.replace(tzinfo=UTC)
+    return max(0, int((now - then).total_seconds() // 60))
 
 
 def open_in_final_cut(path: Path) -> None:
@@ -1127,6 +1214,8 @@ class RawWorkspaceUi:
     ) -> None:
         self.port = port
         self.raw = raw_service.RawWorkspaceService()
+        # 서버 터미널 줄 — 진입점(`ui/app.py`)이 감싼 흐름의 버퍼다(D61). 시험은 새 버퍼를 넣는다.
+        self.activity_log = activity_log.SERVER_LOG
         self.state_path = state_path if state_path is not None else default_state_path()
         self._inspector = inspector  # None이면 서비스 기본(ffprobe). 시험은 가짜 조사자를 넣는다.
         # 네이티브 경로 선택기 — 화면은 직접 입력 경로를 받지 않는다. 시험은 가짜를 넣는다.
@@ -9522,6 +9611,7 @@ class RawWorkspaceUi:
         )
         self._add_guard_middleware(app)
         self._add_media_routes(app)
+        self._add_activity_routes(app)
         self._add_font_routes(app)
         if mount_blocks:
             # loopback 고정·share 없음·allowed_paths 없음(§4.4) — 이 마운트가 유일한
@@ -9576,6 +9666,70 @@ class RawWorkspaceUi:
         @app.head("/media/{file_id}")
         def head_media(file_id: str, request: Request) -> Response:
             return self.media_response(file_id, request.headers.get("range"), want_body=False)
+
+    def _add_activity_routes(self, app: FastAPI) -> None:
+        @app.get(ACTIVITY_ROUTE)
+        def get_activity(after: int = 0) -> Response:
+            return JSONResponse(
+                self.server_activity(max(0, after)), headers={"Cache-Control": "no-store"}
+            )
+
+    def server_activity(self, after: int) -> dict[str, object]:
+        """「기록」 판의 서버 쪽 — 지금 도는 외부 프로세스·작업과 `after` 뒤의 서버 줄(D61).
+
+        읽기만 한다: 작업공간 DB를 고치지 않고, 작업을 제출하지 않으며, 유료 호출이 없다.
+        """
+        root = self._snapshot_root()
+        processes = preprocess.active_processes()
+        names = self._activity_names(root) if processes else {}
+        now = time.time()
+        return {
+            "processes": [_process_row(item, names, now) for item in processes],
+            "jobs": self._activity_jobs(root),
+            "log": self._activity_lines(after),
+        }
+
+    def _activity_names(self, root: Path | None) -> dict[str, tuple[str, float | None]]:
+        if root is None:
+            return {}
+        try:
+            names = self.raw.source_media_names(root)
+        except raw_service.RawWorkspaceError:
+            # 이름 찾기는 표시만 돕는다 — 작업공간을 못 읽으면 줄은 파일 이름으로 보인다.
+            return {}
+        return {os.path.normpath(path): value for path, value in names.items()}
+
+    def _activity_jobs(self, root: Path | None) -> list[dict[str, object]]:
+        if root is None:
+            return []
+        try:
+            # 상태로 찾는다 — 최근 몇 개의 창이면 오래 기다린 대기 줄을 놓친다.
+            active = self.raw.all_active_jobs(root)
+        except raw_service.RawWorkspaceError:
+            # 작업 목록도 표시만 한다 — 못 읽으면 프로세스 줄과 서버 줄만 보인다.
+            return []
+        now = datetime.now(UTC)
+        return [_job_row(job, now) for job in active]  # 오래된 것(먼저 시작한 것)부터
+
+    def _activity_lines(self, after: int) -> dict[str, object]:
+        """`after` 뒤의 서버 줄과 서버 프로세스의 `boot` — 바뀌면 화면이 처음부터 받는다."""
+        lines = self.activity_log.lines_since(after)[-ACTIVITY_LOG_PAGE:]
+        # 마지막 번호는 보낸 줄에서 — 그 사이 들어온 줄을 건너뛰지 않는다.
+        latest = lines[-1].seq if lines else after
+        return {
+            "boot": self.activity_log.boot_id,
+            "latest": latest,
+            "lines": [
+                {
+                    "seq": line.seq,
+                    "time": time.strftime("%H:%M:%S", time.localtime(line.wall_time)),
+                    "stream": line.stream,
+                    "level": line.level,
+                    "text": line.text,
+                }
+                for line in lines
+            ],
+        }
 
     @staticmethod
     def _add_font_routes(app: FastAPI) -> None:

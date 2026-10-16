@@ -8,6 +8,8 @@ ffmpeg는 `subprocess`로 직접 부른다(규칙 10). 자를 자리를 고르�
 from __future__ import annotations
 
 import array
+import functools
+import itertools
 import json
 import math
 import os
@@ -16,13 +18,16 @@ import secrets
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar, Token
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from fractions import Fraction
 from pathlib import Path
-from typing import Any
+from typing import Any, ParamSpec, TypeVar
 
 from . import cutpoints, log
 from .config import Config
@@ -80,6 +85,210 @@ class ProcessTimeout(RuntimeError):
         )
 
 
+# ── 지금 도는 외부 프로세스(D61) ─────────────────────────────────────────────
+# 긴 ffmpeg(분석 프록시·미리보기·썸네일)가 20–60분 돌 때 화면에는 「완료 12/18」뿐이라 멈춤과
+# 느림을 가를 수 없었다(0016·0018의 프록시, 0018의 미리보기 시간 초과). 모든 ffmpeg·ffprobe가
+# `run_process` 한 자리를 지나므로 등록표도 여기 하나다 — 규칙 7의 경계가 그대로 산다.
+
+
+@dataclass(frozen=True, slots=True)
+class ProcessActivity:
+    """도는 외부 프로세스 하나의 스냅숏 — 「기록」 판 「지금 도는 작업」 한 줄의 재료.
+
+    `started_at`은 벽시계(epoch 초)다. `progress_seconds`는 서버가 진행 파일을 켰고 ffmpeg가
+    출력 시각을 적었을 때만 있다. `whole_input`은 입력을 잘라 읽지 않는 디코드인가 — 원본
+    길이로 %를 재도 되는 것은 그것뿐이다.
+    """
+
+    process_id: int
+    step: str
+    tool: str
+    input_path: str | None
+    output_path: str | None
+    started_at: float
+    timeout_seconds: float | None
+    progress_seconds: float | None
+    whole_input: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _Running:
+    activity: ProcessActivity
+    progress_file: Path | None
+
+
+_ACTIVE: dict[int, _Running] = {}
+_ACTIVE_LOCK = threading.Lock()
+_PROCESS_IDS = itertools.count(1)
+_PROGRESS_DIR: Path | None = None
+_STEP: ContextVar[str | None] = ContextVar("vlogsrt_process_step", default=None)
+_RANGE_FLAGS = frozenset({"-ss", "-sseof", "-t", "-to"})
+"""입력을 잘라 읽는 ffmpeg 선택 — 있으면 출력 시각이 원본 길이의 몇 %인지 말하지 않는다."""
+_PROGRESS_TAIL_BYTES = 4096
+"""진행 파일은 0.5초마다 한 묶음씩 자란다(한 시간이면 MB) — 마지막 묶음은 끝 4KB 안에 있다."""
+_MICROSECONDS = 1_000_000
+_OUT_TIME = re.compile(r"^out_time_(?:us|ms)=(\d+)\r?\n", re.MULTILINE)
+"""ffmpeg `-progress`의 출력 시각 — `out_time_ms`도 ffmpeg의 오래된 버그로 마이크로초다.
+
+줄바꿈까지 있는 줄만 본다: 쓰다 만 마지막 줄의 숫자는 아직 덜 적혔을 수 있다."""
+
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+
+
+class _ProcessStep:
+    """`process_step`의 한 번 쓰는 범위 — `with`마다·호출마다 새로 만들어 스레드가 섞이지 않는다."""
+
+    def __init__(self, label: str) -> None:
+        self.label = label
+        self._token: Token[str | None] | None = None
+
+    def __enter__(self) -> _ProcessStep:
+        self._token = _STEP.set(_STEP.get() or self.label)
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        if self._token is not None:
+            _STEP.reset(self._token)
+            self._token = None
+
+    def __call__(self, function: Callable[_P, _R]) -> Callable[_P, _R]:
+        label = self.label
+
+        @functools.wraps(function)
+        def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> _R:
+            with _ProcessStep(label):
+                return function(*args, **kwargs)
+
+        wrapper.__vl_process_step__ = label  # type: ignore[attr-defined]
+        return wrapper
+
+
+def process_step(label: str) -> _ProcessStep:
+    """이 안에서 이름 없이 도는 외부 프로세스의 단계 이름 — 함수에 달거나 `with`로 쓴다.
+
+    **바깥 이름이 이긴다**: 바깥이 더 구체적이다 — 썸네일을 만드는 자리가 그 아래 일반 이름
+    「프레임 추출」 대신 「썸네일 추출」이라고 말한다. `run_process(step=…)`가 이것보다 앞선다.
+    """
+    return _ProcessStep(label)
+
+
+def current_process_step() -> str | None:
+    return _STEP.get()
+
+
+def enable_process_progress(directory: Path) -> None:
+    """ffmpeg에 `-progress <폴더>/<번호>.txt`를 붙인다 — 브라우저 서버만 켠다(CLI·시험은 끈 채).
+
+    진행 파일은 보고만 한다: 출력 미디어 바이트는 켜든 끄든 같다. 끄면 argv가 바이트 그대로다.
+    """
+    global _PROGRESS_DIR
+    directory.mkdir(parents=True, exist_ok=True)
+    _PROGRESS_DIR = directory
+
+
+def disable_process_progress() -> None:
+    global _PROGRESS_DIR
+    _PROGRESS_DIR = None
+
+
+def progress_directory() -> Path | None:
+    return _PROGRESS_DIR
+
+
+def active_processes() -> tuple[ProcessActivity, ...]:
+    """지금 도는 외부 프로세스 — 시작 순서. 진행은 읽는 순간 진행 파일 끝에서 잰다."""
+    with _ACTIVE_LOCK:
+        running = sorted(_ACTIVE.values(), key=lambda item: item.activity.process_id)
+    return tuple(
+        item.activity
+        if item.progress_file is None
+        else replace(item.activity, progress_seconds=_read_progress_seconds(item.progress_file))
+        for item in running
+    )
+
+
+def _read_progress_seconds(path: Path) -> float | None:
+    """마지막 출력 시각(초) — 파일이 아직 없거나 시각이 없으면 모름(None)이다.
+
+    진행은 표시만 한다 — 못 읽은 진행 파일은 「모름」이지 실행의 실패가 아니다.
+    """
+    try:
+        with path.open("rb") as handle:
+            size = handle.seek(0, os.SEEK_END)
+            handle.seek(max(0, size - _PROGRESS_TAIL_BYTES))
+            tail = handle.read().decode("utf-8", errors="replace")
+    except OSError:
+        return None
+    found = _OUT_TIME.findall(tail)
+    return int(found[-1]) / _MICROSECONDS if found else None
+
+
+def _describe(command: Sequence[str]) -> tuple[str | None, str | None, bool]:
+    """(입력, 출력, 잘라 읽지 않는가) — ffmpeg는 `-i` 뒤와 마지막 인자, ffprobe는 마지막 인자."""
+    args = [str(arg) for arg in command[1:]]
+    whole = not _RANGE_FLAGS.intersection(args)
+    if Path(command[0]).name == "ffprobe":
+        return (args[-1] if args else None), None, whole
+    if "-i" not in args:
+        return None, None, whole
+    position = args.index("-i") + 1
+    source = args[position] if position < len(args) else None
+    target = args[-1] if position < len(args) - 1 else None
+    return source, (None if target == "-" else target), whole
+
+
+def _with_progress(command: list[str], process_id: int) -> tuple[list[str], Path | None]:
+    """켜져 있으면 입력이 있는 ffmpeg에만 진행 파일 — 꺼져 있으면 받은 목록을 그대로 돌려준다.
+
+    폴더가 없으면 ffmpeg는 진행 URL을 못 열어 실행 전체가 254로 죽는다 — 며칠 켜 둔 서버에서
+    `$TMPDIR` 청소가 폴더를 지울 수 있다. 그래서 부를 때마다 폴더를 다시 만들고, 못 만들면 진행 없이
+    그대로 돈다(진행은 표시만 한다). `file:`을 붙여 경로의 `:`가 프로토콜로 읽히지 않게 한다.
+    """
+    directory = _PROGRESS_DIR
+    if directory is None or Path(command[0]).name != "ffmpeg" or "-i" not in command:
+        return command, None
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+    except OSError as error:
+        log.warn(f"진행 파일 폴더를 만들지 못해 진행 없이 실행합니다: {directory} {error}")
+        return command, None
+    target = directory / f"{process_id}.txt"
+    return [command[0], "-progress", f"file:{target}", *command[1:]], target
+
+
+@contextmanager
+def _tracked(command: list[str], step: str | None, timeout: float | None) -> Iterator[list[str]]:
+    """도는 동안 등록표에 올린다 — 어떻게 끝나든(성공·실패·한도·취소) 내리고 진행 파일을 지운다."""
+    with _ACTIVE_LOCK:
+        process_id = next(_PROCESS_IDS)
+    argv, progress = _with_progress(command, process_id)
+    source, target, whole = _describe(command)
+    tool = Path(command[0]).name
+    activity = ProcessActivity(
+        process_id=process_id, step=step or tool, tool=tool, input_path=source,
+        output_path=target, started_at=time.time(),
+        timeout_seconds=None if timeout is None else float(timeout),
+        progress_seconds=None, whole_input=whole,
+    )  # fmt: skip
+    with _ACTIVE_LOCK:
+        _ACTIVE[process_id] = _Running(activity, progress)
+    try:
+        yield argv
+    finally:
+        with _ACTIVE_LOCK:
+            _ACTIVE.pop(process_id, None)
+        if progress is not None:
+            _remove_progress(progress)
+
+
+def _remove_progress(path: Path) -> None:
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as error:
+        log.warn(f"진행 파일을 지우지 못했습니다 — 서버가 끝날 때 폴더째 치웁니다: {path} {error}")
+
+
 def run_process(
     command: list[str],
     *,
@@ -87,24 +296,42 @@ def run_process(
     step: str | None = None,
     **kwargs: Any,
 ) -> subprocess.CompletedProcess:
-    """외부 프로세스 한 번 — 시간 한도를 넘기면 `ProcessTimeout`(어느 단계·몇 초인지)이다."""
+    """외부 프로세스 한 번 — 시간 한도를 넘기면 `ProcessTimeout`(어느 단계·몇 초인지)이다.
+
+    단계 이름은 `step`, 없으면 바깥 `process_step` 범위의 이름이다. 도는 동안 등록표에 있다.
+    """
+    label = step if step is not None else _STEP.get()
     try:
-        return _run_process(command, on_poll=on_poll, **kwargs)
+        return _run_process(command, on_poll=on_poll, step=label, **kwargs)
     except subprocess.TimeoutExpired as expired:
-        raise ProcessTimeout(command, float(expired.timeout), step) from expired
+        raise ProcessTimeout(command, float(expired.timeout), label) from expired
 
 
 def _run_process(
-    command: list[str], *, on_poll: Callable[[], None] | None, **kwargs: Any
+    command: list[str], *, on_poll: Callable[[], None] | None, step: str | None, **kwargs: Any
 ) -> subprocess.CompletedProcess:
     if not cancellation_active() and on_poll is None:
-        return subprocess.run(command, **kwargs)
+        with _tracked(command, step, kwargs.get("timeout")) as argv:
+            completed = subprocess.run(argv, **kwargs)
+        if argv is not command:
+            completed.args = command  # 진행 파일을 붙였어도 호출자는 자기가 준 argv를 돌려받는다
+        return completed
     check_cancel()
     timeout = kwargs.pop("timeout", _CANCELLABLE_TIMEOUT_SECONDS)
     kwargs.pop("check", None)
     if kwargs.pop("capture_output", False):
         kwargs.update(stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    process = subprocess.Popen(command, **kwargs)
+    with _tracked(command, step, timeout) as argv:
+        process = subprocess.Popen(argv, **kwargs)
+        return _wait_polling(process, command, timeout, on_poll)
+
+
+def _wait_polling(
+    process: subprocess.Popen,
+    command: list[str],
+    timeout: float,
+    on_poll: Callable[[], None] | None,
+) -> subprocess.CompletedProcess:
     deadline = time.monotonic() + timeout
     try:
         while True:
@@ -153,6 +380,7 @@ def _run(
     return completed
 
 
+@process_step("길이 확인")
 def probe_duration(path: Path) -> float:
     ffprobe = require_ffmpeg("ffprobe")
     completed = _run(
@@ -241,6 +469,7 @@ def probe_audio_stream_count(source: Path) -> int:
     return sum(1 for entry in streams if _stream_codec_type(entry, source) == "audio")
 
 
+@process_step("오디오 추출")
 def extract_audio(src: Path, dst: Path, cfg: Config) -> Path:
     """오디오를 손대지 않고 뽑는다 — 필터 없음(D20).
 
@@ -310,6 +539,7 @@ def _validate_ordinal(stream_index: int) -> None:
         raise RuntimeError(f"오디오 순번은 0 이상 정수여야 합니다: {stream_index!r}")
 
 
+@process_step("오디오 스트림 확인")
 def probe_audio_stream(source: Path, stream_index: int) -> AudioStreamInfo:
     """ffprobe JSON에서 오디오 스트림의 시계를 **정확한 분수로** 읽는다.
 
@@ -359,6 +589,7 @@ class MediaSummary:
     audio_rate: int | None
 
 
+@process_step("스트림 구성 확인")
 def probe_media_summary(source: Path) -> MediaSummary:
     """스트림 구성·화면 크기·색 좌표·오디오 파라미터를 한 번에 읽는다.
 
@@ -588,6 +819,7 @@ class _ConvertedFrame:
     samples: int
 
 
+@process_step("PCM 추출")
 def extract_pcm_s16le(
     source: Path, destination: Path, *, stream_index: int, sample_rate: int = 16000
 ) -> PcmExtraction:
@@ -640,6 +872,7 @@ def extract_pcm_s16le(
     )
 
 
+@process_step("PCM 구간 읽기")
 def pcm_window_s16le(
     source: Path,
     *,
@@ -682,6 +915,7 @@ def pcm_window_s16le(
     return raw
 
 
+@process_step("시작 시각 확인")
 def _container_start_time(source: Path) -> Fraction:
     """컨테이너 시작 시각 — 없으면 0. 입력 `-ss`가 이 값에 더해진다(ffmpeg 규약)."""
     ffprobe = require_ffmpeg("ffprobe")
@@ -789,6 +1023,7 @@ def _pcm_frame_count(destination: Path, channels: int) -> int:
 # ─────────────────────────────────────────────────────────────
 
 
+@process_step("조용한 지점 찾기")
 def amplitudes(path: Path, start: float, length: float, cfg: Config) -> list[float]:
     """구간별 최대 진폭. ffmpeg는 디코딩만 하고 계산은 여기서 한다.
 
@@ -844,6 +1079,7 @@ def make_chunks(audio: Path, duration: float, cfg: Config, workdir: Path) -> lis
     return split_at(audio, cuts, workdir)
 
 
+@process_step("조각 나누기")
 def split_at(audio: Path, cuts: Sequence[float], workdir: Path) -> list[Chunk]:
     """ffmpeg 세그먼트 분할 한 번. **오프셋은 ffmpeg가 알려준 실제값을 쓴다.**
 
@@ -942,6 +1178,7 @@ def _validate_video_ordinal(stream_index: int) -> None:
         raise RuntimeError(f"비디오 순번은 0 이상 정수여야 합니다: {stream_index!r}")
 
 
+@process_step("영상 시계 확인")
 def probe_video_stream(source: Path, stream_index: int = 0) -> VideoStreamInfo:
     """선언과 디코드 증거를 한 번의 ffprobe로 읽어 균일 CFR 그리드를 증명한다.
 
@@ -987,6 +1224,7 @@ def probe_video_stream(source: Path, stream_index: int = 0) -> VideoStreamInfo:
     )
 
 
+@process_step("프레임 격자 확인")
 def probe_video_grid(source: Path, stream_index: int) -> VideoStreamInfo:
     """같은 격자를 **패킷 타임스탬프**로 증명한다 — 디코드하지 않는다.
 
@@ -1237,6 +1475,7 @@ def _select_frames_expression(indices: Sequence[int]) -> str:
     return build(terms)
 
 
+@process_step("프레임 추출")
 def extract_frame_index(
     source: Path,
     stream_index: int,
@@ -1476,6 +1715,7 @@ def _creation_from_tags(fmt: dict[str, object]) -> CreationTime:
     return CreationTime(raw=first_raw, valid=False, utc=None)
 
 
+@process_step("촬영 시각 확인")
 def probe_creation_time(source: Path) -> CreationTime:
     """원본 하나의 촬영 시각만 읽는다 — 컨테이너 태그뿐이라 디코딩이 없다(D53 되채움)."""
     ffprobe = require_ffmpeg("ffprobe")
@@ -1560,6 +1800,7 @@ class RawMediaProbe:
     ffprobe_version: str
 
 
+@process_step("원본 확인")
 def probe_raw_media(source: Path, *, video_ordinal: int = 0) -> RawMediaProbe:
     """원본 하나를 ffprobe 한 번으로 조사한다 — 가져오기용 빠른 경로.
 
@@ -1786,6 +2027,7 @@ def _optional_stream_pts(entry: dict[str, object], field: str, source: Path) -> 
     return value
 
 
+@process_step("도구 버전 확인")
 def _tool_version(tool: str) -> str:
     completed = _run([tool, "-version"])
     first = completed.stdout.strip().splitlines()
@@ -1823,6 +2065,7 @@ class RawVideoClock:
     grid_note: str
 
 
+@process_step("추출 시계 확인")
 def probe_extraction_clock(
     source: Path, *, video_ordinal: int = 0, probe: RawMediaProbe | None = None
 ) -> RawVideoClock:
@@ -2011,6 +2254,7 @@ class AudioPacketExtent:
     packet_ticks: int
 
 
+@process_step("오디오 길이 확인")
 def probe_audio_extents(source: Path) -> tuple[AudioPacketExtent, ...]:
     """오디오 패킷 전체를 한 번 디먹스해 실측 원점·끝을 잰다.
 
@@ -2536,6 +2780,7 @@ class RawClipExtraction:
     ffmpeg_version: str
 
 
+@process_step("클립 추출")
 def extract_raw_clip(
     source: Path,
     staging_output: Path,
@@ -2811,6 +3056,7 @@ def _verify_raw_duration(out_probe: RawMediaProbe, plan: _RawMediaPlan) -> list[
     return failures
 
 
+@process_step("디코드 확인")
 def _verify_raw_decodes(path: Path) -> None:
     """출력 전체를 디코드해 본다 — 패킷 선언만으로 디코드 품질을 주장하지 않는다.
 
@@ -2831,6 +3077,7 @@ def _verify_raw_decodes(path: Path) -> None:
         )
 
 
+@process_step("인코더 확인")
 def ffmpeg_provenance() -> str:
     """ffmpeg/ffprobe 버전과 필요 인코더의 실측 가용성 — 보고·진단용."""
     ffmpeg = require_ffmpeg()
@@ -2936,6 +3183,7 @@ def _caption_preview_codec_args(
     return args, tuple(warnings), video_copy and audio_copy
 
 
+@process_step("미리보기 원점 확인")
 def _caption_preview_origin(preview: Path, channels: int) -> Fraction:
     """미리보기 선택 오디오의 디코드 원점 — 등록 원점과 같은 16 kHz 파이프라인.
 
@@ -2961,6 +3209,7 @@ def _caption_preview_origin(preview: Path, channels: int) -> Fraction:
     return _sample0_file_time(frames, rate, channels, preview)
 
 
+@process_step("자막 미리보기 만들기")
 def extract_caption_preview(
     source: Path, staging_output: Path, *, audio_stream_index: int
 ) -> CaptionPreviewExtraction:
@@ -3092,6 +3341,7 @@ def _visual_preview_args(
     return args, tuple(warnings), video_copy and track.codec_name == "aac"
 
 
+@process_step("미리보기 만들기")
 def extract_visual_review_preview(
     source: Path, staging_output: Path, *, audio_stream_index: int | None
 ) -> VisualPreviewExtraction:
@@ -3208,6 +3458,7 @@ def _analysis_proxy_command(
     ]  # fmt: skip
 
 
+@process_step("분석 프록시 만들기")
 def build_analysis_proxy(
     source: Path,
     staging_output: Path,
@@ -3263,6 +3514,7 @@ def _measure_proxy(staged: Path) -> AnalysisProxyBuild:
 _CORRESPONDENCE_VIDEO_FILTER = "scale=32:32,format=yuv420p,extractplanes=y"
 
 
+@process_step("대응 표본 추출")
 def correspondence_samples(
     path: Path, seconds: Sequence[Fraction], *, audio: bool = False
 ) -> tuple[bytes, ...]:

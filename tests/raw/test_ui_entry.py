@@ -151,3 +151,33 @@ def test_normal_launcher_mode_precedes_dotenv_without_changing_file(
     assert dotenv.read_bytes() == before
     assert world["launched"]["port"] == 7860
     assert world["killed"] == []
+
+
+def test_the_server_run_tees_the_terminal_and_turns_progress_on_only_while_serving(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D61 — 서버가 도는 동안만 터미널 줄을 「기록」 판에 남기고 ffmpeg 진행 파일을 켠다."""
+    import sys
+
+    from ui import activity_log
+    from vlogsrt import preprocess
+
+    _patch_launch(monkeypatch, chosen_port=7993)
+    seen: dict[str, Any] = {}
+
+    def serve(app: object, **kwargs: Any) -> None:
+        seen.update(stdout=sys.stdout, stderr=sys.stderr, progress=preprocess.progress_directory())
+        seen["progress_exists"] = seen["progress"] is not None and seen["progress"].is_dir()
+        sys.stderr.write("WARN 진입점 시험 줄\n")
+
+    monkeypatch.setattr(ui_app.uvicorn, "run", serve)
+    original = (sys.stdout, sys.stderr)
+    assert ui_app.main(["--port", "7993", "--no-browser"]) == 0
+    assert isinstance(seen["stdout"], activity_log.TeeStream)
+    assert isinstance(seen["stderr"], activity_log.TeeStream)
+    assert seen["progress_exists"] is True
+    assert (sys.stdout, sys.stderr) == original  # 끝나면 되돌린다
+    assert preprocess.progress_directory() is None
+    assert not seen["progress"].exists()  # 진행 파일 폴더도 치운다
+    texts = [line.text for line in activity_log.SERVER_LOG.lines_since(0)]
+    assert "WARN 진입점 시험 줄" in texts

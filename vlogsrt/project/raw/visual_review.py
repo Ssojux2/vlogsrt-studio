@@ -1222,13 +1222,15 @@ def _prepare_thumb(
         staged = target.with_name(
             f".{target.name}.{os.getpid()}.{secrets.token_hex(4)}.partial.jpg"
         )
-        preprocess.extract_frame_index(
-            selection.path,
-            selection.video_stream_index,
-            frame_index,
-            staged,
-            long_edge=VISUAL_THUMB_LONG_EDGE,
-        )
+        # 「지금 도는 작업」이 일반 이름(프레임 추출) 대신 사람이 기다리는 단계를 말한다(D61).
+        with preprocess.process_step("썸네일 추출"):
+            preprocess.extract_frame_index(
+                selection.path,
+                selection.video_stream_index,
+                frame_index,
+                staged,
+                long_edge=VISUAL_THUMB_LONG_EDGE,
+            )
         _publish(staged, target)
     except RuntimeError as error:
         _write_record(

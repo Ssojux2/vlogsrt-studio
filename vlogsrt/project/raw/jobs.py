@@ -150,6 +150,16 @@ class JobStore:
             ).fetchall()
         return tuple(self._record(row) for row in rows)
 
+    def active(self) -> tuple[JobRecord, ...]:
+        """종류를 가리지 않는 활성 작업 전부 — 상태로 찾는다(오래된 것이 먼저). 읽기만 한다."""
+        status_marks = ", ".join("?" for _ in ACTIVE_JOB_STATUSES)
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"SELECT * FROM jobs WHERE status IN ({status_marks}) ORDER BY created_at, job_id",
+                ACTIVE_JOB_STATUSES,
+            ).fetchall()
+        return tuple(self._record(row) for row in rows)
+
     def latest_of_kind(self, kind: str) -> JobRecord | None:
         """그 종류의 가장 최근 작업 — 최근 몇 개의 창이 아니라 종류로 찾는다."""
         with self._connect() as connection:
@@ -396,6 +406,9 @@ class JobManager:
 
     def active_of_kinds(self, kinds: Collection[str]) -> tuple[JobRecord, ...]:
         return self._store.active_of_kinds(kinds)
+
+    def active(self) -> tuple[JobRecord, ...]:
+        return self._store.active()
 
     def is_executing(self, job_id: str) -> bool:
         """이 관리자가 그 작업의 본문을 아직 쥐고 있는가 — 끝 상태를 정산할 때까지 참이다."""

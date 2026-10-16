@@ -397,6 +397,29 @@ def _source_sha(workspace: Any, asset: Any, original: Path) -> str:
     return str(asset.content_sha256 or "")
 
 
+def known_media_paths(workspace: Any, asset: Any) -> tuple[Path, ...]:
+    """이 원본을 가리킬 수 있는 경로 전부 — 도는 외부 프로세스의 입력을 원본 이름으로 읽는다(D61).
+
+    복사본·참조 원본·연결된 원본과 FCP 프록시, 그리고 분석 프록시 자리. 읽기만 한다 — 해시를
+    다시 재지 않고 기록된 값으로 분석 프록시 폴더를 다시 잰다(`_source_sha`가 고를 수 있는 둘 다).
+    """
+    paths = [
+        workspace.root / asset.relative_path,
+        Path(asset.source_root) / asset.source_relative_path,
+    ]
+    record = load(workspace, asset.asset_id) or {}
+    shas = {str(asset.content_sha256 or "")}
+    for side in ("original", "proxy"):
+        reference = record.get(side)
+        if reference:
+            paths.append(Path(reference["path"]))
+            if side == "original":
+                shas.add(str(reference["sha256"]))
+    for sha in sorted(sha for sha in shas if sha):
+        paths.append(_proxy_directory(workspace, sha, ANALYSIS_PROXY) / _PROXY_FILE)
+    return tuple(paths)
+
+
 def _proxy_directory(workspace: Any, source_sha: str, recipe: AnalysisProxyRecipe) -> Path:
     key = hashlib.sha256(f"{source_sha}\0{recipe.tag()}".encode()).hexdigest()
     return workspace.root / "cache" / "analysis-proxy" / key

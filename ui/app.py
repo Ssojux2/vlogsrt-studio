@@ -13,14 +13,17 @@ from __future__ import annotations
 import argparse
 import os
 import resource
+import tempfile
 import webbrowser
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 import uvicorn
 
-from ui import service, workspace_service
+from ui import activity_log, service, workspace_service
 from ui.instance import UiInstance
-from vlogsrt import log
+from vlogsrt import log, preprocess
 
 OPEN_FILE_SOFT_LIMIT = 4096
 """Finder·터미널에서 띄우면 macOS 기본 soft 한도 256을 물려받는다 — 작업 여럿이
@@ -42,7 +45,27 @@ def _raise_open_file_limit() -> None:
     log.info(f"열린 파일 한도 {soft} → {target}")
 
 
-def main(argv: list[str] | None = None) -> int:
+@contextmanager
+def _server_activity() -> Iterator[None]:
+    """서버가 도는 동안만 — 터미널 줄을 「기록」 판에도 남기고 ffmpeg 진행 파일을 켠다(D61).
+
+    CLI와 시험은 이 길을 지나지 않으므로 argv가 그대로다. 진행 파일 폴더는 끝날 때 치운다.
+    """
+    with (
+        # 며칠 켜 둔 서버에서 `$TMPDIR` 청소가 먼저 지웠어도 끝내기가 죽지 않는다.
+        tempfile.TemporaryDirectory(
+            prefix="vlogsrt-progress-", ignore_cleanup_errors=True
+        ) as progress,
+        activity_log.captured(),
+    ):
+        preprocess.enable_process_progress(Path(progress))
+        try:
+            yield
+        finally:
+            preprocess.disable_process_progress()
+
+
+def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="vlogsrt-ui", description="vlogsrt 원본 브라우저 UI")
     parser.add_argument("--port", type=int, default=7860)
     parser.add_argument(
@@ -63,7 +86,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.set_defaults(online=True)
     parser.add_argument("--no-browser", action="store_true", help="브라우저를 열지 않는다")
-    args = parser.parse_args(argv)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _parser().parse_args(argv)
     if args.share:
         log.error("이 UI는 로컬 전용이다 — 외부 공유(share)는 제공하지 않는다.")
         return 1
@@ -94,19 +121,24 @@ def main(argv: list[str] | None = None) -> int:
                 "새 서버를 다른 포트에 자동 실행하지 않았습니다."
             )
             return 1
-        _raise_open_file_limit()
-        server = workspace_service.RawWorkspaceUi(port=port)
-        log.info(server.startup())
-        app = server.build_fastapi()
-        log.out(f"\nvlogsrt 원본 브라우저  →  {url}")
-        log.out("멈추려면 Ctrl+C\n")
-        if not args.no_browser:
-            webbrowser.open(url)
-        try:
-            uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")
-        except KeyboardInterrupt:
-            log.info("종료")
-        return 0
+        with _server_activity():
+            return _serve(port, url, open_browser=not args.no_browser)
+
+
+def _serve(port: int, url: str, *, open_browser: bool) -> int:
+    _raise_open_file_limit()
+    server = workspace_service.RawWorkspaceUi(port=port)
+    log.info(server.startup())
+    app = server.build_fastapi()
+    log.out(f"\nvlogsrt 원본 브라우저  →  {url}")
+    log.out("멈추려면 Ctrl+C\n")
+    if open_browser:
+        webbrowser.open(url)
+    try:
+        uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")
+    except KeyboardInterrupt:
+        log.info("종료")
+    return 0
 
 
 if __name__ == "__main__":

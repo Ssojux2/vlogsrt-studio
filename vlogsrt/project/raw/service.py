@@ -1119,6 +1119,10 @@ class RawWorkspaceService:
         """그 종류의 활성 작업 전부 — 목록 창(최근 50개) 밖의 오래된 작업도 놓치지 않는다."""
         return self._jobs(root).active_of_kinds(kinds)
 
+    def all_active_jobs(self, root: Path) -> tuple[JobRecord, ...]:
+        """종류를 가리지 않는 활성 작업 전부(오래된 것부터) — 「지금 도는 작업」이 읽는다(D61)."""
+        return self._jobs(root).active()
+
     def resume_job(
         self,
         root: Path,
@@ -1142,6 +1146,20 @@ class RawWorkspaceService:
     def recover_interrupted_jobs(self, root: Path) -> int:
         """서버 시작 경로 전용 — 진행 중 작업을 재개 가능 상태로 돌린다(§14.1)."""
         return self._jobs(root).recover_interrupted()
+
+    def source_media_names(self, root: Path) -> dict[str, tuple[str, float | None]]:
+        """경로 → (원본 이름, 길이 초) — 「지금 도는 작업」이 ffmpeg 입력을 원본으로 읽는다(D61).
+
+        읽기만 한다. 같은 경로를 두 원본이 가리키면 먼저 온 원본(배치·순번 순)이 이긴다.
+        """
+        from vlogsrt.project.raw.media_refs import known_media_paths
+
+        workspace = self._workspace(root)
+        names: dict[str, tuple[str, float | None]] = {}
+        for asset in workspace.list_source_assets():
+            for path in known_media_paths(workspace, asset):
+                names.setdefault(str(path), (asset.source_name, asset.duration_seconds))
+        return names
 
     # ── A2 — SD/폴더 가져오기·원본 순서 ───────────────────────
 
