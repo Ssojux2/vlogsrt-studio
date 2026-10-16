@@ -4095,6 +4095,62 @@ class RawWorkspaceService:
             total=visual_review.VISUAL_PAGE_SIZE,
         )
 
+    def start_visual_source_preparation(
+        self,
+        root: Path,
+        *,
+        source_id: str,
+        audio_selections: Mapping[str, int | None] | None = None,
+        expected_revision_id: str | None = None,
+    ) -> JobHandle:
+        """고른 영상 하나의 미리보기를 채우는 작업 — 쪽과 무관하게 그 영상의 컷 전부(D64).
+
+        같은 (계획, 영상, 소리 선택)의 활성 작업이 있으면 그 작업에 다시 붙는다. 소리 선택·리비전
+        묶음·없는 것만 만드는 규칙은 쪽 준비(`start_visual_page_preparation`)와 같다.
+        """
+        workspace = self._workspace(root)
+        facade = self.review_workspace_facade(root)
+        head = facade.load_head(None).revision
+        visual_review.require_head_revision(head, expected_revision_id)
+        if head.clock_for(source_id) is None:
+            raise visual_review.VisualReviewError(f"검토 머리에 원본 {source_id!r}이(가) 없다")
+        selections = visual_review.validated_audio_selections(audio_selections)
+        fingerprint = visual_review.source_preparation_fingerprint(
+            head.base_plan_id, source_id, visual_review.audio_selection_material(selections)
+        )
+        base_plan_id = head.base_plan_id
+
+        def body(context: JobContext) -> None:
+            visual_review.run_source_preparation(
+                context,
+                workspace,
+                facade,
+                source_id=source_id,
+                base_plan_id=base_plan_id,
+                audio_selections=selections,
+                expected_revision_id=expected_revision_id,
+            )
+
+        return self.submit_job(root, VISUAL_PREPARE_JOB_KIND, fingerprint, body)
+
+    def visual_source_preparation_missing(
+        self,
+        root: Path,
+        *,
+        source_id: str,
+        audio_selections: Mapping[str, int | None] | None = None,
+    ) -> int:
+        """고른 영상에서 준비가 만들 것의 수(읽기만).
+
+        0이면 「미리보기 다시 준비」가 할 일이 없다 — 작업을 걸지 않는다(D64).
+        """
+        return visual_review.source_preparation_missing(
+            self._workspace(root),
+            self.review_workspace_facade(root),
+            source_id=source_id,
+            audio_selections=audio_selections,
+        )
+
     # ── V1 편집 제안 — 저장보다 앞서고 아무 것도 쓰지 않는다 ──────
 
     def visual_snap_proposal(

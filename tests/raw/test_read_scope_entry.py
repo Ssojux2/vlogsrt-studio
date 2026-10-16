@@ -84,7 +84,7 @@ def test_a_tick_reads_its_key_in_a_scope_and_runs_upkeep_outside_it(
     monkeypatch.setattr(server, "_semantic_stamps", lambda _root: ())
     monkeypatch.setattr(server, "_capcut_progress", lambda _root: "진행")
     monkeypatch.setattr(server, "_capcut_result", _spy(seen, "result", ("답", "껍", "본")))
-    message, _shell, workbench = server.capcut_tick_view("s")
+    message, _shell, workbench, _drawn = server.capcut_tick_view("s")
     assert (message, workbench) == ("답", "본")
     assert seen["jobs"][0] is not None  # 열쇠 재료는 범위 안에서 읽는다
     assert seen["result"] == [None]  # 정리 고리가 도는 자리는 범위 밖이다

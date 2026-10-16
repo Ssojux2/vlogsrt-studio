@@ -154,18 +154,17 @@ def _phases(server: RawWorkspaceUi, root: Path, signature: str, counts: Counter[
     rows = [
         _measure("작업대 그리기", counts, lambda _i: server.visual_workbench_render(root), nothing)
     ]
-    server.capcut_tick_view(signature)  # 열쇠를 채운다 — 아래 틱은 바뀐 것이 없다
-    rows.append(
-        _measure("바뀐 것 없는 틱", counts, lambda _i: server.capcut_tick_view(signature), nothing)
-    )
+    tab = fixture.TickTab(server, signature)  # 탭 하나 — 마지막으로 그린 열쇠를 쥔다(D64)
+    tab.tick()  # 열쇠를 채운다 — 아래 틱은 바뀐 것이 없다
+    rows.append(_measure("바뀐 것 없는 틱", counts, lambda _i: tab.tick(), nothing))
     stepped = fixture.SteppedJob(server.raw, root)
     stepped.step(1)
-    server.capcut_tick_view(signature)  # 작업이 막 돌기 시작한 틱(상태가 바뀌었다)은 빼고 잰다
+    tab.tick()  # 작업이 막 돌기 시작한 틱(상태가 바뀌었다)은 빼고 잰다
     rows.append(
         _measure(
             "진행만 바뀐 틱",
             counts,
-            lambda _i: server.capcut_tick_view(signature),
+            lambda _i: tab.tick(),
             lambda index: stepped.step(index + 2),
         )
     )

@@ -105,9 +105,12 @@ __all__ = [
     "query_overview",
     "require_head_revision",
     "run_page_preparation",
+    "run_source_preparation",
     "set_selection",
     "snap_proposal",
     "snapped_frame_index",
+    "source_preparation_fingerprint",
+    "source_preparation_missing",
     "split_segment",
     "thumbnail_media_key",
     "validated_audio_selections",
@@ -304,6 +307,20 @@ class VisualReviewOverview:
     selected: VisualSelectedSegment | None
     sources: tuple[VisualSourcePreview, ...]
     active_preparation_jobs: tuple[str, ...]
+    representatives: tuple[VisualSegmentCard, ...] = ()
+    """영상마다 대표 컷 하나 — 쪽과 무관하다(D64). `include_all_sources`일 때만 채운다.
+
+    영상 카드는 이 칸을 그린다. 예전에는 지금 쪽(24컷)에 컷이 없는 영상이 지어낸 「아직 없음」
+    카드였다 — 썸네일이 있어도 쪽 밖이면 없다고 보였다. 대표는 그 영상에서 필터에 맞는 첫 컷,
+    맞는 컷이 없으면 첫 컷이다(카드를 누르면 그 컷이 골라진다).
+    """
+    view_segments: tuple[VisualSegmentCard, ...] = ()
+    """고른 영상의 컷 가운데 쪽 목록(`segments`)에 없는 것 — 쪽·필터와 무관하다(D64).
+
+    쪽 넘김이 없어 쪽은 늘 1이다. 레일 구간의 썸네일과 화면의 컷 찾기(`findCut`)가 쪽 목록만
+    보면 첫 쪽(24컷) 밖 영상의 컷은 썸네일도 범위도 없었다. 고른 영상 하나만 싣는다(모든 영상의
+    모든 컷이 아니다 — 값을 작게 둔다). `include_all_sources`일 때만 채운다.
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -408,6 +425,16 @@ def preparation_fingerprint(base_plan_id: str, page: int, selection_material: st
     같은 작업에 재결합하는 일이 없고, 각자의 캐시(키도 서수를 묶는다)를 채운다.
     """
     material = f"{VISUAL_PREVIEW_RECIPE}|{base_plan_id}|page:{page}|audio:{selection_material}"
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def source_preparation_fingerprint(
+    base_plan_id: str, source_id: str, selection_material: str = ""
+) -> str:
+    """영상 하나 준비(D64)의 지문 — 같은 (계획, 영상, 소리 선택)의 활성 작업은 하나로 묶는다."""
+    material = (
+        f"{VISUAL_PREVIEW_RECIPE}|{base_plan_id}|source:{source_id}|audio:{selection_material}"
+    )
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
@@ -1043,6 +1070,20 @@ def query_overview(
         selected = _selected_segment(
             workspace, revision, ordered, chosen_position, fingerprints, purged, previews, claimed
         )
+
+    def cards_at(wanted: Sequence[int]) -> tuple[VisualSegmentCard, ...]:
+        return tuple(
+            _segment_card(
+                workspace, revision, ordered, position, fingerprints, purged, previews, claimed
+            )
+            for position in wanted
+        )
+
+    representatives: tuple[VisualSegmentCard, ...] = ()
+    view_segments: tuple[VisualSegmentCard, ...] = ()
+    if include_all_sources:
+        representatives = cards_at(_representative_positions(ordered, matching))
+        view_segments = cards_at(_view_positions(ordered, chosen_position, positions))
     return VisualReviewOverview(
         workspace_id=facade.project_id,
         base_plan_id=revision.base_plan_id,
@@ -1056,7 +1097,37 @@ def query_overview(
         selected=selected,
         sources=tuple(previews[source_id] for source_id in sorted(previews)),
         active_preparation_jobs=tuple(job.job_id for job in active),
+        representatives=representatives,
+        view_segments=view_segments,
     )
+
+
+def _view_positions(
+    ordered: Sequence[ReviewSegment], chosen_position: int | None, page_positions: Sequence[int]
+) -> list[int]:
+    """고른 영상의 컷 가운데 쪽 목록에 없는 것의 위치 — 필터와 무관하다(레일은 거르지 않는다)."""
+    if chosen_position is None:
+        return []
+    source_id = ordered[chosen_position].source_id
+    shown = set(page_positions)
+    return [
+        position
+        for position, segment in enumerate(ordered)
+        if segment.source_id == source_id and position not in shown
+    ]
+
+
+def _representative_positions(
+    ordered: Sequence[ReviewSegment], matching: Sequence[int]
+) -> list[int]:
+    """영상마다 대표 컷의 위치 — 필터에 맞는 첫 컷, 없으면 첫 컷. 영상 순서(촬영 시각 순) 그대로."""
+    first: dict[str, int] = {}
+    for position, segment in enumerate(ordered):
+        first.setdefault(segment.source_id, position)
+    chosen: dict[str, int] = {}
+    for position in matching:
+        chosen.setdefault(ordered[position].source_id, position)
+    return sorted(chosen.get(source_id, position) for source_id, position in first.items())
 
 
 def _require_page(page: int) -> None:
@@ -1290,21 +1361,87 @@ def run_page_preparation(
     page_segments = ordered[start : start + VISUAL_PAGE_SIZE]
     if asset_ids:
         page_segments = tuple(s for s in page_segments if s.source_id in asset_ids)
-    if not page_segments:
+    _run_preparation(
+        context, workspace, revision, page_segments, validated_audio_selections(audio_selections)
+    )
+
+
+def run_source_preparation(
+    context: JobContext,
+    workspace: RawWorkspace,
+    facade: ReviewWorkspaceFacade,
+    *,
+    source_id: str,
+    base_plan_id: str | None = None,
+    audio_selections: Mapping[str, int | None] | None = None,
+    expected_revision_id: str | None = None,
+) -> None:
+    """영상 하나의 미리보기를 채운다 — 쪽과 무관하게 그 영상의 원본 전체 MP4와 모든 컷 썸네일(D64).
+
+    작업대 「미리보기 다시 준비」가 고른 영상에 이것을 건다. 예전에는 쪽 준비
+    (`run_page_preparation`)가 필터 없는 컷 목록의 지금 쪽을 채웠다 — 고른 영상이 그 쪽 밖이면
+    아무것도 하지 않고 「시작했습니다」라고 답했다. 없는 것만 만드는 규칙·실패 기록·소리 선택은
+    쪽 준비와 같다.
+    """
+    revision = facade.load_head(base_plan_id).revision
+    require_head_revision(revision, expected_revision_id)
+    segments = tuple(s for s in chronological(revision) if s.source_id == source_id)
+    if not segments:
+        raise VisualReviewError(f"검토 머리에 원본 {source_id!r}의 컷이 없다")
+    _run_preparation(
+        context, workspace, revision, segments, validated_audio_selections(audio_selections)
+    )
+
+
+def source_preparation_missing(
+    workspace: RawWorkspace,
+    facade: ReviewWorkspaceFacade,
+    *,
+    source_id: str,
+    base_plan_id: str | None = None,
+    audio_selections: Mapping[str, int | None] | None = None,
+) -> int:
+    """영상 하나에서 준비가 만들 것의 수 — 원본 전체 미리보기(완성본이 없으면 1) + 파일 없는 썸네일.
+
+    읽기만 한다. 0이면 「미리보기 다시 준비」가 할 일이 없다 — 작업을 걸지 않고 그렇게 답한다(D64).
+    """
+    revision = facade.load_head(base_plan_id).revision
+    clock = _required_clock(revision, source_id)
+    selections = validated_audio_selections(audio_selections)
+    chosen = (selections[source_id],) if source_id in selections else None
+    preview = _source_preview_state(workspace, source_id, clock.source_sha256, (), chosen)
+    missing = 0 if preview.state == "ready" else 1
+    for segment in chronological(revision):
+        if segment.source_id != source_id:
+            continue
+        frame_index, _, _ = _snapped_fields(clock, segment.start_pts, segment.end_pts)
+        key = thumbnail_media_key(clock.source_sha256, frame_index)
+        missing += not (workspace.root / _thumb_relative(key)).is_file()
+    return missing
+
+
+def _run_preparation(
+    context: JobContext,
+    workspace: RawWorkspace,
+    revision: ReviewRevision,
+    segments: Sequence[ReviewSegment],
+    choices: Mapping[str, int | None],
+) -> None:
+    """준비 본문 — 맡은 원본을 표시하고 조각을 순서대로 채운다. 실패가 있으면 실패로 닫는다."""
+    if not segments:
         return
-    context.set_total(len(page_segments))
-    choices = validated_audio_selections(audio_selections)
+    context.set_total(len(segments))
     sweep_preview_leftovers(workspace, ())
     claims = _write_claims(
         workspace,
         context.job_id,
         {
             (seg.source_id, _required_clock(revision, seg.source_id).source_sha256)
-            for seg in page_segments
+            for seg in segments
         },
     )
     try:
-        failures = _prepare_segments(context, workspace, revision, page_segments, choices)
+        failures = _prepare_segments(context, workspace, revision, segments, choices)
     finally:
         _drop_claims(claims)
     if failures:

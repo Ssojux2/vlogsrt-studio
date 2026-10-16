@@ -1622,7 +1622,7 @@ WORKBENCH_CSS = (
   border-radius: 6px; border: 1px solid var(--vl-line);
   background: var(--vl-surface);
 }
-#visual-stage .vl-thumbs > .vl-row, #visual-stage .vl-pager { grid-column: 1 / -1; }
+#visual-stage .vl-thumbs > .vl-row { grid-column: 1 / -1; }
 /* 필터는 한 줄짜리 묶음 단추 — 300px 열에서 네 번째 단추가 둘째 줄로 떨어지던 자리. */
 #visual-stage .vl-thumbs > .vl-row {
   margin: 0; gap: 0; flex-wrap: nowrap; overflow: hidden;
@@ -1685,11 +1685,6 @@ WORKBENCH_CSS = (
   max-width: none; white-space: normal; overflow-wrap: anywhere; line-height: 18px;
   display: -webkit-box; -webkit-line-clamp: var(--vl-name-lines); -webkit-box-orient: vertical;
   overflow: hidden; }
-.vl-thumb-sub {
-  grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 3px; align-items: center;
-  min-width: 0; font-size: 11px; color: var(--vl-ink-muted);
-  font-variant-numeric: tabular-nums;
-}
 #visual-stage .vl-thumb-meta {
   grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center;
   justify-content: space-between; gap: 4px 8px; min-width: 0; min-height: 18px; }
@@ -2022,11 +2017,6 @@ WORKBENCH_CSS = (
   color: var(--vl-ink); font-size: 12px;
   margin: 6px 0 0; min-height: 1em;
 }
-.vl-pager {
-  display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: center;
-  padding: 6px 0 2px; font-size: 12px; color: var(--vl-ink-muted);
-}
-.vl-pager > .vl-btn { white-space: nowrap; }
 .cap-overlay {
   min-height: 1.7em; margin-top: 4px; padding: 4px 10px; font-size: 15px;
   background: var(--vl-surface); border-radius: 6px;
@@ -2236,12 +2226,23 @@ def _workbench_state(component_id: str, state_key: str) -> str:
           return staleWire() || modelEpoch() !== epochAtCall;
         }}
         msg(note || "서버에 보내는 중입니다…");
+        // 버린 답의 「보내는 중」은 남기지 않는다(D64) — 다시 그린 화면은 그 각주를 되살려
+        // 그리므로 답이 버려지면 영원히 「보내는 중」이었다. 뒤에 나간 요청이 각주를 맡았으면
+        // 건드리지 않는다.
+        var sendSerial = (state.sendSerial = (state.sendSerial || 0) + 1);
+        var sendingLine = state.lastMsg;
+        function dropped() {{
+          if (state.sendSerial === sendSerial && state.lastMsg === sendingLine) {{
+            msg("화면이 그 사이 다시 그려져 이 답은 반영하지 않았습니다. 결과가 안 보이면 " +
+              "새로고침하세요.");
+          }}
+        }}
         // 새 요청이 시작되면 이 화면에 남아 있던 내려받기 링크는 물러난다 —
         // 편집 뒤 낡은 머리의 링크가 살아 있지 않게(자막 확정 흐름).
         state.downloads = null;
         if (!server || !server[name]) {{ msg("서버 함수가 없습니다: " + name); return; }}
         server[name](payload).then(function (res) {{
-          if (lateRequest()) {{ return; }}
+          if (lateRequest()) {{ dropped(); return; }}
           if (!res) {{ msg("서버 응답이 비어 있습니다."); return; }}
           if (res.ok === false) {{
             // 신선한 요청의 진짜 오류다 — 공개 생산자의 오류 응답은 echoEpoch 없이
@@ -2253,7 +2254,7 @@ def _workbench_state(component_id: str, state_key: str) -> str:
             return;
           }}
           var now = modelEpoch();
-          if (res.echoEpoch !== now) {{ return; }}
+          if (res.echoEpoch !== now) {{ dropped(); return; }}
           if (!res.ok) {{
             msg(res.error || "실패했습니다.");
             if (onResponse) {{ onResponse(res); }}
@@ -2273,7 +2274,7 @@ def _workbench_state(component_id: str, state_key: str) -> str:
             if (W.__vl{state_key}Rewire) {{ W.__vl{state_key}Rewire(); }}
           }}
         }}, function (err) {{
-          if (lateRequest()) {{ return; }}
+          if (lateRequest()) {{ dropped(); return; }}
           msg("서버 오류입니다. " + (err && err.message ? err.message : String(err)));
         }});
       }}
@@ -2325,7 +2326,9 @@ VISUAL_BOOTSTRAP_JS = (
         state.selectionToken = model.selectionToken;
       }
       state.model = model;
-      state.filter = model.filter || "all";
+      // 필터는 탭의 것이다(D64) — 필터를 실어 온 요청의 답만 값을 싣는다. 틱·명령 줄 단추의 다시
+      // 그리기는 빈 값이라 탭이 고른 필터가 그대로 남는다(예전엔 「전체」로 되돌아갔다).
+      state.filter = model.filter || state.filter || "all";
       state.epoch = model.epoch;
       if (firstWire) { state.draft = null; }
       // 배선 세대 — 이 클로저의 사건은 이 배선이 살아 있는 동안만 유효하다.
@@ -2510,11 +2513,14 @@ VISUAL_BOOTSTRAP_JS = (
         v.currentTime = VL.toFloat(target);
         paintPlayhead(); paintSourceCaptions();
       }
-      // 컷을 먼저 푼다 — 이 쪽 목록의 컷 → 서버가 고른 컷 → 「다음」이 기억한 컷. 영상 카드는 첫
-      // 컷의 ID를 빌려 쓰므로 그 셋보다 먼저 보면 컷이 영상 전체 범위로 풀린다(검증 MAJOR 2:
-      // 컷 #1의 결정 상자 위에 0~202초가 섰다). 영상 카드 값은 셋이 모를 때만 쓴다.
+      // 컷을 먼저 푼다 — 고른 영상의 컷(쪽과 무관, D64) → 이 쪽 목록의 컷 → 서버가 고른 컷 →
+      // 「다음」이 기억한 컷. 영상 카드는 첫 컷의 ID를 빌려 쓰므로 그 넷보다 먼저 보면 컷이 영상
+      // 전체 범위로 풀린다(검증 MAJOR 2: 컷 #1의 결정 상자 위에 0~202초가 섰다). 영상 카드 값은
+      // 넷이 모를 때만 쓴다. 쪽 넘김이 없어 쪽은 늘 1이다 — 첫 쪽(24컷) 밖 영상의 컷은 고른 영상의
+      // 컷(`viewCards`)에만 있다.
+      function knownCuts() { return (model.viewCards || []).concat(model.cards || []); }
       function findCut(id) {
-        var cuts = model.cards || [];
+        var cuts = knownCuts();
         for (var i = 0; i < cuts.length; i += 1) {
           if (cuts[i].id === id) { return cuts[i]; }
         }
@@ -2961,7 +2967,7 @@ VISUAL_BOOTSTRAP_JS = (
       }
       // 배지는 하나뿐, 눈을 불러야 할 때만 — 자막 시각 확인(D55)이 있으면 그것이 배지다.
       function cardBadge(c, info) {
-        var sync = c.media ? syncBadge(info) : "";
+        var sync = syncBadge(info);
         if (sync) { return sync; }
         var badge = info && info.analysisBadge;
         if (badge && badge.label) {
@@ -2971,7 +2977,10 @@ VISUAL_BOOTSTRAP_JS = (
         if (info && info.originalMissing) {
           return ' <span class="vl-badge" data-vl-badge="warn">원본 연결 필요</span>';
         }
-        return c.needsExtract ? ' <span class="vl-badge vl-badge-warn">영상 갱신 필요</span>' : "";
+        // 영상의 컷 하나라도 경계가 계획과 다르면 — 대표 컷 하나만 보던 표시는 쪽에 따라
+        // 갈렸다(D64).
+        var stale = videoCuts(info).some(function (it) { return it.needsExtract; });
+        return stale ? ' <span class="vl-badge vl-badge-warn">영상 갱신 필요</span>' : "";
       }
       function cardArt(c) {
         var art = c.thumb && c.thumb.state === "ready" && c.thumb.src
@@ -2981,53 +2990,47 @@ VISUAL_BOOTSTRAP_JS = (
         return '<span class="vl-thumb-art">' + art + '<span class="dur">' + durLabel(c.dur) +
           "</span></span>";
       }
-      function cardExcluded(c, info) {
-        if (!c.media) { return c.sel === "excluded"; }
-        var cuts = info && info.rail ? info.rail.intervals : [];
+      // 영상의 컷 — 쪽과 무관하게 그 영상 전부다(레일의 구간 목록, D64).
+      function videoCuts(info) { return info && info.rail ? info.rail.intervals : []; }
+      function cardExcluded(info) {
+        var cuts = videoCuts(info);
         return cuts.length > 0 && cuts.every(function (it) { return it.sel === "excluded"; });
       }
       function cardButton(c, sel) {
         var info = (model.sources || {})[c.sourceId] || null;
-        var cls = "vl-thumb" +
-          (c.id === sel || (c.media && c.sourceId === curSourceId()) ? " vl-thumb-sel" : "") +
-          (cardExcluded(c, info) ? " vl-thumb-ex" : "");
+        // 고른 컷이 이 영상의 것이면 이 카드가 골라진 것이다 — 보이는 강조와 aria가 같은 값이다
+        // (D64: 예전 aria는 대표 컷 ID만 견줘 영상의 다른 컷을 고르면 아무 카드도 골라지지 않았다).
+        var picked = c.id === sel || c.sourceId === curSourceId();
+        var cls = "vl-thumb" + (picked ? " vl-thumb-sel" : "") +
+          (cardExcluded(info) ? " vl-thumb-ex" : "");
         return '<button type="button" class="' + cls + '" data-vl-card="' +
             esc(c.id) + '" role="option"' + ' title="' + esc(c.sourceName) + '"' +
-          ' aria-selected="' + (c.id === sel ? "true" : "false") + '">' + cardArt(c) +
-          '<span class="vl-thumb-name">' +
-            esc(c.sourceName) + (c.media ? "" : " " + (c.order + 1) + "번") + "</span>" +
-          (c.media ? "" : '<span class="vl-thumb-sub">' + VL.fmt(ratOf(c.start)) + "~" +
-            VL.fmt(ratOf(c.end)) + "초 · " + VL.fmt(ratOf(c.dur)) + "초</span>") +
+          ' aria-selected="' + (picked ? "true" : "false") + '">' + cardArt(c) +
+          '<span class="vl-thumb-name">' + esc(c.sourceName) + "</span>" +
           '<span class="vl-thumb-meta">' + cardCounts(info) + cardBadge(c, info) + "</span>" +
           '<span class="vl-mbar" aria-hidden="true">' + cardSpans(info) + "</span></button>";
       }
-      // 「제외 제안」 보기(D57 C) — 결정을 기다리는 제외 제안만: 영상 카드는 대기열에 열린 제안이
-      // 남은 영상, 컷 카드는 미검토 제안 컷. 옛 이름의 이 보기는 보류·검토 필요 컷도 실었다.
+      // 「제외 제안」 보기(D57 C) — 결정을 기다리는 제외 제안만: 대기열에 열린 제안이 남은 영상.
+      // 옛 이름의 이 보기는 보류·검토 필요 컷도 실었다.
       function openProposalsBySource() {
         var count = {};
         queueItems().forEach(function (it) { count[it.sourceId] = (count[it.sourceId] || 0) + 1; });
         return count;
       }
+      // 「사용할 컷」·「제외된 컷」은 영상마다 그 영상의 컷 전부로 판정한다 — 맞는 컷이 하나라도
+      // 있으면 보인다(D64). 예전에는 쪽에 따라 바뀌는 대표 컷 하나의 사용 여부로 갈렸다.
       function cardFiltered(c, open) {
-        if (state.filter === "included") { return c.sel !== "included"; }
-        if (state.filter === "excluded") { return c.sel !== "excluded"; }
-        if (state.filter === "review") { return c.media ? !open[c.sourceId] : !c.autoPending; }
+        var want = ({ included: "included", excluded: "excluded" })[state.filter];
+        if (want) {
+          return !videoCuts(sourceInfo(c.sourceId)).some(function (it) { return it.sel === want; });
+        }
+        if (state.filter === "review") { return !open[c.sourceId]; }
         return false;
       }
-      // 목록 머리 — 영상은 언제나 촬영 시각 순이다(D53). 쪽 넘김은 컷이 한 쪽을 넘을 때만.
+      // 목록 머리 — 영상은 언제나 촬영 시각 순이다(D53). 영상 카드는 모든 영상을 한 번에 그리므로
+      // 쪽 넘김이 없다(D64 — 옛 「다음 쪽」은 그리지 않는 컷 목록을 넘겼다).
       function listHead(shown) {
-        var videos = !!(model.mediaCards && model.mediaCards.length);
-        return '<p class="vl-list-head"><b>' + (videos ? "영상 " : "컷 ") + shown.length +
-          "개</b> · 촬영 시각 순</p>";
-      }
-      function pagerBlock() {
-        if (!(model.pageCount > 1)) { return ""; }
-        return '<div class="vl-pager">' +
-          '<button type="button" class="vl-btn" data-vl-act="page-prev"' +
-          (model.page <= 1 ? " disabled" : "") + ">이전 쪽</button><span>컷 " + model.total +
-          "개 · " + model.pageCount + "쪽 중 " + model.page + "쪽</span>" +
-          '<button type="button" class="vl-btn" data-vl-act="page-next"' +
-          (model.page >= model.pageCount ? " disabled" : "") + ">다음 쪽</button></div>";
+        return '<p class="vl-list-head"><b>영상 ' + shown.length + "개</b> · 촬영 시각 순</p>";
       }
       function renderThumbs() {
         var mount = doc.getElementById("vl-thumbs");
@@ -3040,7 +3043,7 @@ VISUAL_BOOTSTRAP_JS = (
         });
         var sel = selectedId();
         var open = openProposalsBySource();
-        var shown = (model.mediaCards || model.cards || []).filter(function (c) {
+        var shown = (model.mediaCards || []).filter(function (c) {
           return !cardFiltered(c, open);
         });
         rows.push('</div><div class="vl-cards">');
@@ -3053,7 +3056,7 @@ VISUAL_BOOTSTRAP_JS = (
         var keep = !!(active && active.getAttribute &&
           active.getAttribute("data-vl-act") === "queue-next") ||
           (!!state.queueRefocus && (!active || active === doc.body));
-        mount.innerHTML = queueBlock() + listHead(shown) + rows.join("") + pagerBlock();
+        mount.innerHTML = queueBlock() + listHead(shown) + rows.join("");
         var next = keep && typeof mount.querySelector === "function"
           ? mount.querySelector('[data-vl-act="queue-next"]') : null;
         if (next && !next.disabled) { next.focus(); }
@@ -3164,7 +3167,7 @@ VISUAL_BOOTSTRAP_JS = (
           var frameCard = findCard(it.id);
           var thumb = frameCard && frameCard.thumb && frameCard.thumb.src;
           if (!thumb) {
-            var sourceCard = (model.cards || []).find(function(c) {
+            var sourceCard = knownCuts().find(function(c) {
               return c.sourceId === curSourceId() && c.thumb && c.thumb.src;
             });
             thumb = sourceCard && sourceCard.thumb.src;
@@ -4213,12 +4216,6 @@ VISUAL_BOOTSTRAP_JS = (
         if (act === "refresh") { call("vl_refresh", { page: model.page,
           selectedId: selectedId(), basePlanId: model.basePlanId,
           sourceId: curSourceId(), playheadSec: VL.str(playheadLocal()) }); return; }
-        if (act === "page-prev") { call("vl_refresh", { page: model.page - 1,
-          selectedId: selectedId(), basePlanId: model.basePlanId,
-          sourceId: curSourceId(), playheadSec: VL.str(playheadLocal()) }); return; }
-        if (act === "page-next") { call("vl_refresh", { page: model.page + 1,
-          selectedId: selectedId(), basePlanId: model.basePlanId,
-          sourceId: curSourceId(), playheadSec: VL.str(playheadLocal()) }); return; }
         if (act === "prepare") {
           var trackEl = doc.getElementById("vl-track");
           var pick = trackEl ? trackEl.value : "";
@@ -4229,8 +4226,9 @@ VISUAL_BOOTSTRAP_JS = (
           if (sid && pick !== "" && pick !== null && pick !== undefined) {
             sel[sid] = pick === "silence" ? null : parseInt(pick, 10);
           }
-          call("vl_prepare", { page: model.page, selectedId: selectedId(), audioSelections: sel },
-            "미리보기를 준비합니다. 없는 것만 만듭니다…");
+          // 고른 영상 하나를 준비한다 — 쪽과 무관하게 그 영상의 컷 전부(D64).
+          call("vl_prepare", { page: model.page, selectedId: selectedId(), sourceId: sid,
+            audioSelections: sel }, "이 영상의 미리보기를 준비합니다. 없는 것만 만듭니다…");
           return;
         }
         if (act === "red-confirm" || act === "red-revert") {

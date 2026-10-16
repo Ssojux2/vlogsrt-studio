@@ -32,6 +32,8 @@ pytest.importorskip(
 
 from tests.raw import render_cost_fixture as fixture  # noqa: E402
 from tests.raw.test_proposal_queue import _with_tiers, needs_ffmpeg  # noqa: E402
+from tests.raw.test_review_workspace import _wait_terminal  # noqa: E402
+from tests.raw.test_visual_workbench_ui import _model_of  # noqa: E402
 from ui import workspace_service  # noqa: E402
 from ui.workspace_service import RawWorkspaceUi  # noqa: E402
 from vlogsrt.project.raw import read_scope  # noqa: E402
@@ -129,8 +131,9 @@ def test_an_unchanged_tick_neither_renders_nor_runs_upkeep(
 ) -> None:
     server, _root, signature = _opened(built, tmp_path)
     counts = _counted(monkeypatch)
-    server.capcut_tick_view(signature)  # 열쇠를 채운다
-    calls = _during(counts, lambda: server.capcut_tick_view(signature))
+    tab = fixture.TickTab(server, signature)
+    tab.tick()  # 열쇠를 채운다
+    calls = _during(counts, tab.tick)
     assert calls["visual_workbench_render"] == 0
     assert calls["start_upkeep"] == calls["start_sync_upkeep"] == 0
 
@@ -142,12 +145,13 @@ def test_a_progress_only_tick_renders_without_upkeep(
     server, root, signature = _opened(built, tmp_path)
     counts = _counted(monkeypatch)
     stepped = fixture.SteppedJob(server.raw, root)
+    tab = fixture.TickTab(server, signature)
     try:
         stepped.step(1)
-        server.capcut_tick_view(signature)  # 작업이 돌기 시작한 틱 — 상태가 바뀌었다
+        tab.tick()  # 작업이 돌기 시작한 틱 — 상태가 바뀌었다
         for value in (2, 3):
             stepped.step(value)
-            calls = _during(counts, lambda: server.capcut_tick_view(signature))
+            calls = _during(counts, tab.tick)
             assert calls["visual_workbench_render"] == 1  # 진행 수는 그리기 열쇠에 남는다
             assert calls["start_upkeep"] == calls["start_sync_upkeep"] == 0
             # 고급 패널 머리 맞춤과 그리기가 한 범위를 함께 쓴다 — 파사드·검토 머리는 한 번이다.
@@ -164,13 +168,14 @@ def test_a_job_status_change_runs_upkeep_once(
     server, root, signature = _opened(built, tmp_path)
     counts = _counted(monkeypatch)
     stepped = fixture.SteppedJob(server.raw, root)
+    tab = fixture.TickTab(server, signature)
     stepped.step(1)
-    server.capcut_tick_view(signature)
+    tab.tick()
     stepped.finish()  # 돌던 작업이 끝났다 — 정리 고리의 재료가 바뀌었을 수 있는 순간이다
-    calls = _during(counts, lambda: server.capcut_tick_view(signature))
+    calls = _during(counts, tab.tick)
     assert calls["visual_workbench_render"] == 1
     assert calls["start_upkeep"] == calls["start_sync_upkeep"] == 1
-    again = _during(counts, lambda: server.capcut_tick_view(signature))
+    again = _during(counts, tab.tick)
     assert again["start_upkeep"] == again["visual_workbench_render"] == 0
 
 
@@ -192,8 +197,9 @@ def test_during_semantic_analysis_only_a_changed_progress_document_redraws(
         "asset_ids": (asset_id,),
     }
     counts = _counted(monkeypatch)
-    server.capcut_tick_view(signature)
-    still = _during(counts, lambda: server.capcut_tick_view(signature))
+    tab = fixture.TickTab(server, signature)
+    tab.tick()
+    still = _during(counts, tab.tick)
     assert still["visual_workbench_render"] == 0
     row = AnalysisStore(RawWorkspace.open(root)).source_result(revision, asset_id)
     assert row is not None
@@ -202,6 +208,115 @@ def test_during_semantic_analysis_only_a_changed_progress_document_redraws(
     progress = directory / "suitability_progress.json"
     progress.write_text(json.dumps({"analysis_revision_id": "다른 리비전"}), encoding="utf-8")
     assert server.raw.analysis_tier_stamp(root, revision, (asset_id,)) != before
-    redrawn = _during(counts, lambda: server.capcut_tick_view(signature))
+    redrawn = _during(counts, tab.tick)
     assert redrawn["visual_workbench_render"] == 1
     assert redrawn["start_upkeep"] == redrawn["start_sync_upkeep"] == 0
+
+
+# ── 화면과 동작 일치(W-24 세션 D, D64) — 같은 18개 작업공간 ──────────────────────────
+
+
+@needs_ffmpeg
+def test_every_video_gets_a_card_with_its_real_thumbnail(built: Path, tmp_path: Path) -> None:
+    """영상 18개 — 컷은 한 쪽(24)을 넘지만 카드는 모두이고, 쪽 밖 영상도 진짜 썸네일 상태다."""
+    server, root, _signature = _opened(built, tmp_path)
+    model = _model_of(server.visual_workbench_render(root)[1])
+    assert model["pageCount"] > 1 and len(model["cards"]) == raw_service.VISUAL_PAGE_SIZE
+    cards = model["mediaCards"]
+    assert [card["sourceId"] for card in cards] == list(model["sources"])
+    assert len(cards) == fixture.SOURCE_COUNT
+    paged = {card["sourceId"] for card in model["cards"]}
+    assert any(card["sourceId"] not in paged for card in cards)  # 이 쪽에 컷이 없는 영상
+    assert all(card["thumb"]["state"] == "ready" and card["thumb"]["src"] for card in cards)
+    for card in cards:  # 대표 컷은 그 영상의 컷이다(누르면 그 컷이 골라진다)
+        cuts = model["sources"][card["sourceId"]]["rail"]["intervals"]
+        assert card["id"] in [cut["id"] for cut in cuts]
+
+
+@needs_ffmpeg
+def test_the_selected_video_beyond_the_first_page_ships_its_cuts(
+    built: Path, tmp_path: Path
+) -> None:
+    """첫 쪽(24컷) 밖 영상을 고르면 그 영상의 컷(썸네일 포함)만 따로 싣는다 — 다른 영상은 없다."""
+    server, root, _signature = _opened(built, tmp_path)
+    overview = server.raw.visual_review_query(root, include_all_sources=True)
+    last = overview.representatives[-1]
+    model = _model_of(
+        server.visual_workbench_render(root, preferred_selected_id=last.segment_id)[1]
+    )
+    assert model["selectedSourceId"] == last.source_id
+    rail = [cut["id"] for cut in model["sources"][last.source_id]["rail"]["intervals"]]
+    paged = {card["id"] for card in model["cards"]}
+    assert not paged & set(rail)  # 쪽 목록에는 이 영상의 컷이 없다
+    view = model["viewCards"]
+    assert [card["id"] for card in view] == rail
+    assert {card["sourceId"] for card in view} == {last.source_id}
+    assert all(card["thumb"]["state"] == "ready" and card["thumb"]["src"] for card in view)
+
+
+@needs_ffmpeg
+def test_two_tabs_keep_their_own_render_keys(
+    built: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """한 탭이 그렸다고 다른 탭이 건너뛰지 않는다 — 열쇠는 탭마다다(서버 하나의 값이 아니다)."""
+    server, root, signature = _opened(built, tmp_path)
+    counts = _counted(monkeypatch)
+    first, second = fixture.TickTab(server, signature), fixture.TickTab(server, signature)
+    for tab in (first, second):  # 처음 본 탭은 각자 그린다
+        assert _during(counts, tab.tick)["visual_workbench_render"] == 1
+    for tab in (first, second):
+        assert _during(counts, tab.tick)["visual_workbench_render"] == 0
+    stepped = fixture.SteppedJob(server.raw, root)
+    try:
+        stepped.step(1)
+        assert _during(counts, first.tick)["visual_workbench_render"] == 1
+        assert _during(counts, second.tick)["visual_workbench_render"] == 1  # 예전엔 건너뛰었다
+        assert _during(counts, second.tick)["visual_workbench_render"] == 0
+    finally:
+        stepped.finish()
+
+
+@needs_ffmpeg
+def test_redraws_without_a_filter_leave_the_tab_filter_alone(built: Path, tmp_path: Path) -> None:
+    """틱·명령 줄 단추의 다시 그리기는 필터 칸이 비었다 — 실행본이 탭의 필터를 그대로 둔다."""
+    server, root, signature = _opened(built, tmp_path)
+    ticked = fixture.TickTab(server, signature).tick()
+    assert _model_of(ticked[2])["filter"] is None
+    assert _model_of(server.capcut_refresh_view(signature)[2])["filter"] is None
+    shown = _model_of(server.visual_workbench_render(root)[1])
+    fns = {fn.__name__: fn for fn in server._visual_server_functions()}
+    reply = fns["vl_refresh"](
+        {"epoch": shown["epoch"], "signature": signature, "page": 1, "filter": "excluded"}
+    )
+    assert reply["ok"] and _model_of(reply["html"])["filter"] == "excluded"
+
+
+@needs_ffmpeg
+def test_reprepare_fills_the_selected_video_beyond_the_first_page(
+    built: Path, tmp_path: Path
+) -> None:
+    """「미리보기 다시 준비」는 고른 영상의 썸네일을 채운다 — 첫 쪽 밖이어도, 다른 영상은 그대로."""
+    server, root, signature = _opened(built, tmp_path)
+    overview = server.raw.visual_review_query(root, include_all_sources=True)
+    first, last = overview.representatives[0], overview.representatives[-1]
+    assert last.segment_id not in {card.segment_id for card in overview.segments}  # 쪽 밖
+    for card in (first, last):
+        assert card.thumb_relative_path is not None
+        (root / card.thumb_relative_path).unlink()
+    shown = _model_of(server.visual_workbench_render(root)[1])
+    fns = {fn.__name__: fn for fn in server._visual_server_functions()}
+    reply = fns["vl_prepare"](
+        {
+            "epoch": shown["epoch"],
+            "token": shown["token"],
+            "signature": signature,
+            "page": 1,
+            "selectedId": last.segment_id,
+            "sourceId": last.source_id,
+        }
+    )
+    assert reply["ok"] and "이 영상의 미리보기 준비 작업" in reply["message"]
+    for job in server.raw.all_active_jobs(root):
+        assert _wait_terminal(server.raw, root, job.job_id).status == "succeeded"
+    assert (root / str(last.thumb_relative_path)).is_file()  # 고른 영상 — 채웠다
+    assert not (root / str(first.thumb_relative_path)).is_file()  # 첫 쪽 영상 — 그대로

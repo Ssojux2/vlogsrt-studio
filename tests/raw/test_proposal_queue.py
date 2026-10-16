@@ -1180,12 +1180,13 @@ def test_bulk_confirm_presses_the_old_handler_and_the_empty_queue_is_inert(
 @needs_node
 def test_the_proposal_filter_shows_only_unreviewed_proposals(tmp_path: Path) -> None:
     report = _run_queue_harness(tmp_path)
-    cuts = report["filterThumbs"]
-    assert ">제외 제안</button>" in cuts and "검토 대기" not in cuts
-    assert 'data-vl-act="filter-review" aria-pressed="true"' in cuts
-    assert 'data-vl-card="segA3"' in cuts and 'data-vl-card="segB1"' in cuts
-    for other in ("segA1", "segA2", "segB2", "segC1"):
-        assert f'data-vl-card="{other}"' not in cuts, other  # 보류·검토 필요는 제안이 아니다
+    # 목록은 언제나 영상 카드다(D64 — 컷 카드로 물러나는 길을 지웠다). 대기열에 열린 제안(segA3·
+    # segB1)이 남은 영상 A·B만 보이고, 보류·검토 필요뿐인 영상 C는 제안이 아니다.
+    cards = report["filterThumbs"]
+    assert ">제외 제안</button>" in cards and "검토 대기" not in cards
+    assert 'data-vl-act="filter-review" aria-pressed="true"' in cards
+    assert 'data-vl-card="segA1"' in cards and 'data-vl-card="segB1"' in cards
+    assert 'data-vl-card="segC1"' not in cards
     videos = report["mediaThumbs"]
     assert 'data-vl-card="segA1"' in videos  # 열린 제안이 있는 영상(대표 카드)
     assert 'data-vl-card="segB1"' not in videos and 'data-vl-card="segC1"' not in videos

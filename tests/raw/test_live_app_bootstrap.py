@@ -65,7 +65,7 @@ def test_source_captions_visible_before_frames_and_luna(tmp_path, monkeypatch):
     try:
         assert entered.wait(20), server._quick
         assert len(sender.calls) == 1 and not client.calls
-        status, _, workbench = server.capcut_tick_view(server.current_signature())
+        status, _, workbench, _drawn = server.capcut_tick_view(server.current_signature())
         assert "원본 자막 1개 표시" in status
         assert "영상 프레임 준비 중 (0/최대 8)" in status
         assert "합성 영상입니다." in workbench and "subtitles" in workbench

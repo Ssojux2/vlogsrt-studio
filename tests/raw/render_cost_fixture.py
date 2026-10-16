@@ -23,6 +23,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+import gradio as gr
+
 from tests.raw.test_review_workspace import _ingest_card, _wait_terminal, _write_replay_fixtures
 from tests.raw.test_tier_review_gate import FIRST_FRAME, UTTERANCES
 from ui.workspace_service import RawWorkspaceUi
@@ -183,6 +185,20 @@ def install_counters(patch: Patch) -> Counter[str]:
     for name, owner, attribute in COUNTED_METHODS:
         patch(owner, attribute, counted(name, getattr(owner, attribute)))
     return counts
+
+
+class TickTab:
+    """브라우저 탭 하나의 2초 틱 — 탭이 마지막으로 그린 열쇠를 쥔다(그라디오의 `gr.State`, D64)."""
+
+    def __init__(self, server: RawWorkspaceUi, signature: str) -> None:
+        self._server, self._signature = server, signature
+        self.drawn: Any = None
+
+    def tick(self) -> tuple[Any, ...]:
+        reply = self._server.capcut_tick_view(self._signature, self.drawn)
+        if reply[3] != gr.skip():
+            self.drawn = reply[3]  # 그라디오는 건너뛴 State 칸을 그대로 둔다
+        return tuple(reply)
 
 
 class SteppedJob:

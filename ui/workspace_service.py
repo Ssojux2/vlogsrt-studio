@@ -1287,7 +1287,10 @@ class RawWorkspaceUi:
         self._finalcut_sent, self._finalcut_announced = self._send_memory()
         self._project_names: dict[Path, str] = {}  # 머리줄 이름 캐시(`_project_name`)
         self._capcut_quote_phase: dict[str, str] = {}
-        self._capcut_render_key: tuple | None = None
+        # 그리기 열쇠의 세대 — 올리면 모든 탭의 다음 틱이 다시 그린다. 탭마다 마지막으로 그린
+        # 열쇠는 세션의 `gr.State`가 쥔다(D64): 서버 하나의 값이면 먼저 본 탭이 열쇠를 먹어 다른
+        # 탭이 낡았다.
+        self._capcut_render_generation = 0
         # 타이머가 마지막으로 정리 고리를 돌린 작업 상태 — 진행만 바뀐 틱은 고리를 돌지 않는다(D63).
         self._capcut_upkeep_key: tuple | None = None
         # 자막 작업대의 확정 조건 표시 — 검토 상태를 다시 읽을 때마다 갱신한다.
@@ -2138,7 +2141,7 @@ class RawWorkspaceUi:
             if source_id:
                 state["view_source_id"] = source_id
             self._visual_lifetime_token = uuid.uuid4().hex
-            self._capcut_render_key = None
+            self._capcut_render_generation += 1
             self._drop_settled_notice(state["root"])
             self.raw.save_selection_state(state["root"], state)
 
@@ -3320,9 +3323,14 @@ class RawWorkspaceUi:
             message += f"\n\n다른 영상의 백그라운드 분석 {len(others)}개가 계속 진행됩니다."
         return message
 
-    def capcut_tick_view(self, signature: str | None) -> tuple:
+    def capcut_tick_view(self, signature: str | None, drawn: tuple | None = None) -> tuple:
+        """2초 틱 — 이 탭이 마지막으로 그린 열쇠(`drawn`, 세션의 `gr.State`)와 다를 때만 그린다.
+
+        답은 (상태 줄, 껍데기, 작업대, 새 열쇠)다. 열쇠는 탭마다라 한 탭이 그렸다고 다른 탭이
+        건너뛰지 않는다(D64). 정리 고리는 서버의 일이라 작업 상태가 바뀐 틱에서 한 번만 돈다(D63).
+        """
         if not signature or signature != self._signature_for(self._snapshot_root()):
-            return gr.skip(), gr.skip(), gr.skip()
+            return gr.skip(), gr.skip(), gr.skip(), gr.skip()
         root = self._require_current_selection(signature)
         view_token = self._visual_lifetime_token
         # 그리기 열쇠의 재료만 읽기 범위 안에서 읽는다 — 정리 고리(작업을 건다)가 도는
@@ -3330,15 +3338,14 @@ class RawWorkspaceUi:
         with raw_service.read_scope.open():
             key, job_states = self._tick_key(root, signature)
             status = self._quick_status() if self._quick else self._capcut_progress(root)
-        if key == self._capcut_render_key:
-            return status, gr.skip(), gr.skip()
-        self._capcut_render_key = key
+        if key == drawn:
+            return status, gr.skip(), gr.skip(), gr.skip()
         upkeep = (signature, job_states) != self._capcut_upkeep_key
         self._capcut_upkeep_key = (signature, job_states)
         message, _shell, workbench = self._capcut_result(root, status, upkeep=upkeep)
         if view_token != self._visual_lifetime_token or root != self._snapshot_root():
-            return gr.skip(), gr.skip(), gr.skip()
-        return message, gr.skip(), workbench
+            return gr.skip(), gr.skip(), gr.skip(), gr.skip()  # 열쇠는 그대로 — 다음 틱이 다시 본다
+        return message, gr.skip(), workbench, key
 
     def _tick_key(self, root: Path, signature: str) -> tuple[tuple, frozenset[tuple[str, str]]]:
         """타이머 틱의 그리기 열쇠와 작업 상태 묶음 — 읽기만 한다(선택 상태는 화면 기억에 둔다)."""
@@ -3353,6 +3360,7 @@ class RawWorkspaceUi:
         job_states = self._job_states(root, jobs)
         key = (
             signature,
+            self._capcut_render_generation,
             transcript_revisions,
             tuple((j.job_id, j.status, j.progress_current) for j in jobs),
             job_states,
@@ -3429,9 +3437,15 @@ class RawWorkspaceUi:
         return self._capcut_result(root, message)
 
     def capcut_cancel_view(self, signature: str | None) -> str:
+        """「선택 분석 취소」 — 고른 영상의 분석이 **돌거나 기다릴 때만** 멈춘다(D64).
+
+        끝난 분석에 누르면 예전에는 단계를 「취소됨」으로 덮고 새 토큰을 냈다 — 끝난 분석이 끝나지
+        않은 것이 되어 승인 단추가 다시 켜지고 화면의 선택이 풀렸다. 「전체 분석 취소」와 같은
+        판정(`_task_running`)이다. 돌지 않으면 아무것도 바꾸지 않고 그렇게 답한다.
+        """
         root = self._require_current_selection(signature)
-        if self._quick.get("root") != root:
-            message = "취소할 선택 분석 작업이 없습니다."
+        if self._quick.get("root") != root or not self._task_running(root, self._quick):
+            message = "취소할 선택 분석 작업이 없습니다. 끝난 결과는 그대로입니다."
             _toast("warning", message)
             return message
         self._cancel_quick()
@@ -3447,13 +3461,19 @@ class RawWorkspaceUi:
         """승인 확인과 돌거나 기다리는 모든 영상 분석을 멈춘다 — 끝난 결과는 그대로 남는다."""
         root = self._require_current_selection(signature)
         # 확인 중인 승인부터 멈춰야 그 뒤에 새 영상 분석이 더 띄워지지 않는다.
-        if self._approval_active(root):
+        stopped = self._approval_active(root)
+        if stopped:
             self.raw.cancel_job(root, self._approval_jobs[root])
         tasks = {task["token"]: task for task in self._task_views(root).values()}
         for token, task in tasks.items():
             if self._task_running(root, task):
+                stopped = True
                 self._cancel_task(task)
                 self._quick_update(token, token=uuid.uuid4().hex, stage="취소됨", error=None)
+        if not stopped:  # 멈춘 것이 없으면 「요청했습니다」라고 하지 않는다(D64)
+            message = "취소할 분석이 없습니다. 끝난 결과는 그대로입니다."
+            _toast("warning", message)
+            return message
         message = "전체 분석 취소를 요청했습니다. 완료된 결과는 보존됩니다."
         _toast("info", message)
         return message
@@ -3990,10 +4010,11 @@ class RawWorkspaceUi:
         """
         self._status_timer = gr.Timer(1)
         self._status_sent = tuple(gr.State(None) for _cell in STATUS_SENT_CELLS)
+        drawn = gr.State(None)  # 이 탭이 마지막으로 그린 열쇠(D64)
         gr.Timer(2).tick(
             self.capcut_tick_view,
-            self._signature_state,
-            outputs,
+            [self._signature_state, drawn],
+            [*outputs, drawn],
             show_progress="hidden",
         )
         # 보내기는 뒤에서 끝난다 — 끝난 결과를 알림으로 한 번(알림은 대기열을 지나야 뜬다).
@@ -4862,9 +4883,12 @@ class RawWorkspaceUi:
         preferred_selected_id: str | None = None,
         playhead_sec: Fraction | None = None,
         source_id: str | None = None,
-        selection_filter: str = "all",
+        selection_filter: str | None = None,
     ) -> tuple[str, str]:
         """영상 작업대 (껍데기, 본문) — 읽기 범위 하나 안에서 그린다(D63).
+
+        `selection_filter`는 탭이 실어 온 필터다. None(틱·명령 줄 단추)이면 「전체」로 묻고 모델의
+        필터 칸을 비워 실행본이 탭의 필터를 그대로 둔다(D64).
 
         그리기는 읽기만 하므로 같은 읽기(원본 자막·검토 머리·분석 개요·작업 목록)를 범위가 한 번만
         한다. 작업대 동작은 쓰기를 마친 뒤 이것을 부르므로 범위는 언제나 쓰기 뒤에 열린다. 이미 열린
@@ -4888,7 +4912,7 @@ class RawWorkspaceUi:
         preferred_selected_id: str | None,
         playhead_sec: Fraction | None,
         source_id: str | None,
-        selection_filter: str,
+        selection_filter: str | None,
     ) -> tuple[str, str]:
         """영상 작업대 (껍데기, 본문) — 질의·읽기만으로 만든다(미디어 생성 0).
 
@@ -4935,7 +4959,7 @@ class RawWorkspaceUi:
         if playhead_sec is not None and preferred_pos is not None:
             query_page = preferred_pos // raw_service.VISUAL_PAGE_SIZE + 1
         try:
-            overview = self._visual_query(root, query_page, preferred_id, selection_filter)
+            overview = self._visual_query(root, query_page, preferred_id, selection_filter or "all")
         except (raw_service.RawWorkspaceError, raw_service.ReviewError) as error:
             note = f"영상 검토를 열지 못했습니다. {error}"
             return (
@@ -5100,44 +5124,21 @@ class RawWorkspaceUi:
                 source["mediaStatus"] = refs["validation"]["reason"]
                 source["originalMissing"] = refs["original"] is None
             source.setdefault("analysisState", "분석 전")
-        media_cards = []
-        for sid, source in sources_model.items():
-            rail_data = source.get("rail")
-            if not isinstance(rail_data, dict):
-                continue
-            representative = next((card for card in cards if card["sourceId"] == sid), None)
-            intervals_for_source = rail_data["intervals"]
-            if representative is None and intervals_for_source:
-                first = intervals_for_source[0]
-                representative = {
-                    "id": first["id"],
-                    "sourceId": sid,
-                    "sourceName": source["sourceName"],
-                    "start": first["start"],
-                    "end": first["end"],
-                    "sel": first["sel"],
-                    "rec": "normal",
-                    "speech": "unconfirmed_empty",
-                    "thumb": {"state": "missing", "src": None},
-                    "order": 0,
-                    "needsExtract": False,
-                }
-            if representative is not None:
-                media_cards.append(
-                    {
-                        **representative,
-                        "media": True,
-                        "start": "0",
-                        "end": rail_data["duration"],
-                        "dur": rail_data["duration"],
-                    }
-                )
+        media_cards = self._media_cards(overview, sources_model, ordered, _card_values)
+        # 고른 영상의 쪽 밖 컷(D64) — 레일 썸네일과 화면의 컷 찾기가 쪽과 무관하게 이 영상을 본다.
+        order_of = {seg.segment_id: index for index, seg in enumerate(ordered or ())}
+        view_cards = [
+            _card_values(seg_card, order_of.get(seg_card.segment_id, 0))
+            for seg_card in overview.view_segments
+        ]
         model: dict[str, object] = {
             "epoch": uuid.uuid4().hex,
             "token": self._visual_lifetime_token,
             "signature": self._signature_for(root),
             "basePlanId": overview.base_plan_id,
             "revisionId": overview.revision_id,
+            # 필터는 탭의 것이다(D64) — 필터를 실어 온 요청만 값을 싣는다. 틱·명령 줄 단추의 다시
+            # 그리기는 None이라 실행본이 탭의 필터를 그대로 둔다(예전엔 「전체」로 되돌아갔다).
             "filter": selection_filter,
             "page": overview.page,
             "pageCount": overview.page_count,
@@ -5150,6 +5151,7 @@ class RawWorkspaceUi:
             "autoAnalyzeSelection": True,
             "cards": cards,
             "mediaCards": media_cards,
+            "viewCards": view_cards,
             "activeJobs": list(overview.active_preparation_jobs),
             "staleSources": [list(pair) for pair in overview.stale_sources],
             "needsPlan": needs_plan,
@@ -5170,6 +5172,31 @@ class RawWorkspaceUi:
         return shell, self._workbench_html(
             root, model, analysed=analysed, proposals=len(pending_ids)
         )
+
+    @staticmethod
+    def _media_cards(
+        overview: Any,
+        sources_model: Mapping[str, Mapping[str, object]],
+        ordered: Sequence[Any] | None,
+        card_values: Callable[[Any, int], dict[str, object]],
+    ) -> list[dict[str, object]]:
+        """영상 카드 — 영상마다 하나, 질의가 쪽과 무관하게 고른 대표 컷의 값(D64).
+
+        예전에는 지금 쪽(24컷)에 컷이 없는 영상에 지어낸 「아직 없음」 카드를 냈다 — 썸네일이 있어도
+        쪽 밖이면 없다고 보였다. 카드의 범위는 영상 전체이고, 누르면 대표 컷이 골라진다.
+        """
+        positions = {seg.segment_id: index for index, seg in enumerate(ordered or ())}
+        media_cards: list[dict[str, object]] = []
+        for representative in overview.representatives:
+            source = sources_model.get(representative.source_id)
+            rail_data = source.get("rail") if source is not None else None
+            if not isinstance(rail_data, dict):
+                continue
+            card = card_values(representative, positions.get(representative.segment_id, 0))
+            duration = rail_data["duration"]
+            card.update(media=True, start="0", end=duration, dur=duration)
+            media_cards.append(card)
+        return media_cards
 
     @staticmethod
     def _suggestion_row(row: Mapping[str, Any]) -> dict[str, object]:
@@ -5668,28 +5695,7 @@ class RawWorkspaceUi:
             if kind == "refresh":
                 return self._visual_refresh(root, payload, echo)
             if kind == "prepare":
-                selections = self._visual_audio_selections(payload)
-                page = self._serve_int(payload, "page", 1)
-                handle = self.raw.start_visual_page_preparation(
-                    root, page=page, audio_selections=selections or None
-                )
-                preferred = self._serve_str(payload, "selectedId") or None
-                _shell, workbench = self.visual_workbench_render(
-                    root,
-                    page=page,
-                    preferred_selected_id=preferred,
-                    selection_filter=self._serve_str(payload, "filter") or "all",
-                )
-                return {
-                    "ok": True,
-                    "echoEpoch": echo,
-                    "html": workbench,
-                    "videoSrc": None,
-                    "message": (
-                        f"미리보기 준비 작업 `{handle.job_id}`을 시작했습니다. 없는 것만"
-                        " 만듭니다. 끝나면 새로고침하세요."
-                    ),
-                }
+                return self._visual_prepare(root, payload, echo)
             if kind == "propose":
                 return self._visual_propose(root, payload, echo)
             if kind == "apply":
@@ -5701,6 +5707,44 @@ class RawWorkspaceUi:
             # RawWorkspaceError·ReviewError·Caption 계열 오류는 모두 RuntimeError
             # 집안이다 — 서버 함수는 500이 아니라 값으로 닫는다(gradio 전송 계약).
             return fail(error)
+
+    def _visual_prepare(self, root: Path, payload: Mapping[str, object], echo: str) -> dict:
+        """「미리보기 다시 준비」 — 고른 영상 하나의 미리보기·썸네일 전부를 채운다(D64).
+
+        예전에는 필터 없는 컷 목록의 지금 쪽을 채웠다 — 고른 영상이 그 쪽 밖이면 아무것도 하지
+        않고 「시작했습니다」라고 답했다. 만들 것이 없으면 작업을 걸지 않고 그렇게 답한다.
+        """
+        source_id = self._serve_str(payload, "sourceId")
+        selections = self._visual_audio_selections(payload)
+        if not source_id:
+            message = "미리보기를 준비할 영상을 먼저 고르세요."
+        elif not self.raw.visual_source_preparation_missing(
+            root, source_id=source_id, audio_selections=selections or None
+        ):
+            message = (
+                "이 영상의 미리보기와 썸네일은 이미 모두 준비돼 있습니다. 새로 만들 것이 없습니다."
+            )
+        else:
+            handle = self.raw.start_visual_source_preparation(
+                root, source_id=source_id, audio_selections=selections or None
+            )
+            message = (
+                f"이 영상의 미리보기 준비 작업 `{handle.job_id}`을 시작했습니다. 없는 것만"
+                " 만듭니다. 끝나면 새로고침하세요."
+            )
+        _shell, workbench = self.visual_workbench_render(
+            root,
+            page=self._serve_int(payload, "page", 1),
+            preferred_selected_id=self._serve_str(payload, "selectedId") or None,
+            selection_filter=self._serve_str(payload, "filter") or "all",
+        )
+        return {
+            "ok": True,
+            "echoEpoch": echo,
+            "html": workbench,
+            "videoSrc": None,
+            "message": message,
+        }
 
     def _visual_refresh(self, root: Path, payload: Mapping[str, object], echo: str) -> dict:
         """질의 — 화면이 보던 쪽·선택으로 다시 그린다. `focusId`면 대기열 「다음」의 초점이다."""
@@ -7292,7 +7336,7 @@ class RawWorkspaceUi:
         with self._selection_lock:
             self._library_cached_ids.pop(root, None)
             self._library_quotes.pop(root, None)
-            self._capcut_render_key = None  # 작업대의 영상별 단계 표시를 다시 그린다
+            self._capcut_render_generation += 1  # 작업대의 영상별 단계 표시를 다시 그린다
         self._prepare_library_quote(root)
         self._requote_selected(root)
 

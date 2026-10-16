@@ -379,8 +379,31 @@ checkpoints.push({ case: 'rat-arith',
     (VL.cmp(VL.parse('1/2'), VL.parse('1/2')) === 0) });
 
 // ── 영상 작업대 — 원본 A/B/C(서로 다른 원점·화면·소리) ──────────────────────
+// 영상 카드(D64) — 서버처럼 영상마다 하나, 그 영상의 첫 컷 값에 영상 전체 범위. 목록은 이것만
+// 그린다(컷 카드로 물러나는 길은 지웠다). 읽을 때마다 지금 `cards`에서 만든다 — 시험이 컷을
+// 걸러 낸 모델은 그 영상의 카드도 없다. 시험이 값을 주면 그 값이 이긴다.
+function videoCardsOf(m) {
+  const seen = {};
+  return (m.cards || []).filter((c) => !seen[c.sourceId] && (seen[c.sourceId] = true))
+    .map((c) => {
+      const rail = ((m.sources || {})[c.sourceId] || {}).rail;
+      const dur = rail ? rail.duration : c.dur;
+      return Object.assign({}, c, { media: true, start: '0', end: dur, dur });
+    });
+}
+function withVideoCards(m) {
+  Object.defineProperty(m, 'mediaCards', {
+    enumerable: true, configurable: true,
+    get() { return videoCardsOf(this); },
+    set(value) {
+      Object.defineProperty(this, 'mediaCards',
+        { value, writable: true, enumerable: true, configurable: true });
+    },
+  });
+  return m;
+}
 function visualModel() {
-  return {
+  return withVideoCards({
     epoch: 'epoch-1', token: 'tok-1', signature: 'ws-sig',
     basePlanId: 'plan-1', revisionId: 'rev-1',
     page: 1, pageCount: 1, total: 6,
@@ -444,7 +467,7 @@ function visualModel() {
         neighbor: null, needsExtract: false },
     ],
     activeJobs: [], staleSources: [], needsPlan: true, packageDir: 'clips/package-000001',
-  };
+  });
 }
 
 let envSerial = 0;
@@ -524,10 +547,10 @@ checkpoints.push({ case: 'wire-render',
     env.panel.innerHTML.includes('발화 없음(미측정)'),
   excludedBadge: env.thumbs.innerHTML.includes('제외'),
   needsBadge: env.thumbs.innerHTML.includes('영상 갱신 필요'),
-  // 목록 머리(D57 C) — 옛 쪽수 줄(페이지 1/1 · 조각 N개) 대신 영상 수와 촬영 시각 순. 쪽 넘김은
-  // 한 쪽을 넘을 때만 보인다.
-  pager: env.thumbs.innerHTML.includes('<b>컷 6개</b> · 촬영 시각 순') &&
-    !env.thumbs.innerHTML.includes('vl-pager'),
+  // 목록 머리(D57 C) — 옛 쪽수 줄(페이지 1/1 · 조각 N개) 대신 영상 수와 촬영 시각 순. 영상 카드는
+  // 모든 영상을 한 번에 그리므로 쪽 넘김이 없다(D64).
+  pager: env.thumbs.innerHTML.includes('<b>영상 3개</b> · 촬영 시각 순') &&
+    !env.thumbs.innerHTML.includes('vl-pager') && !env.thumbs.innerHTML.includes('쪽'),
   rail: env.rail.innerHTML.includes('data-vl-interval="segA1"') &&
     env.rail.innerHTML.includes('data-vl-handle="left"'),
   playhead: env.rail.innerHTML.includes('vl-playhead'),
@@ -1144,7 +1167,9 @@ await new Promise((resolve) => setTimeout(resolve, 0));
 checkpoints.push({ case: 'direct-props-no-watch-observer-rewires',
   wiredByObserver: windowScope.__vlVisualWireSerial === noWatchSerial + 1,
   newRootWired: noWatchRoot._listeners.click.length === 1,
-  rendered: envNoWatch.thumbs.innerHTML.includes('data-vl-card="segA2"') &&
+  // 영상 카드(D64) — 영상 A의 카드(대표 컷 segA1)가 고른 컷 segA2의 영상이라 골라져 있다.
+  rendered: envNoWatch.thumbs.innerHTML.includes(
+    'class="vl-thumb vl-thumb-sel" data-vl-card="segA1"') &&
     envNoWatch.thumbs.innerHTML.includes('data-vl-card="segB1"') === false,
   noServer: envNoWatch.serverCalls.length === 0 });
 
@@ -1536,10 +1561,15 @@ checkpoints.push({ case: 'placeholder-morph-tears-down-caption',
     capEmpty.vid.calls.play === capRecBeforeOld.plays,
   noServer: capEmpty.serverCalls.length === 0 });
 
-// ── 늦은 실패 응답 — 화면이 바뀐 뒤 도착한 null·거부는 새 화면의 각주·lastMsg ──
-// 를 바꾸지 않는다(A9 실측: null·거부 분기가 echoEpoch 검사 앞이라 무가드였다).
-// 요청이 나간 배선 세대·epoch·뿌리가 응답 때까지 살아 있을 때만 효과가 나고,
-// 신선한 화면의 진짜 진단(빈 응답·거부·서버 오류)은 그대로 산다.
+// ── 늦은 실패 응답 — 화면이 바뀐 뒤 도착한 null·거부의 내용은 새 화면에 닿지 않는다 ──
+// (A9 실측: null·거부 분기가 echoEpoch 검사 앞이라 무가드였다). 요청이 나간 배선 세대·
+// epoch·뿌리가 응답 때까지 살아 있을 때만 효과가 나고, 신선한 화면의 진짜 진단(빈 응답·
+// 거부·서버 오류)은 그대로 산다. 다만 다시 그린 화면이 되살려 그린 **이 요청의** 「저장
+// 중」 각주는 남기지 않는다 — 답이 버려졌다고 말한다(D64: 예전엔 영원히 「보내는 중」이었다).
+function droppedHonest(before, foot, lastMsg, leaked) {
+  return /중/.test(before) && foot !== before && foot.includes('반영하지 않았습니다') &&
+    !foot.includes(leaked) && lastMsg === foot;
+}
 const lateNoteBox = el({ id: 'vl-note-input' });
 lateNoteBox.value = '늦은 저장 메모';
 const envLate = visualEnv({ vl_apply: () => ({ __hold: true }) });
@@ -1561,8 +1591,8 @@ const lateBefore = { foot: envLate.registry['vl-footnote'].textContent,
 lateHeld.deferred.resolve(null);
 await new Promise((resolve) => setTimeout(resolve, 0));
 checkpoints.push({ case: 'late-null-inert',
-  footnoteKept: envLate.registry['vl-footnote'].textContent === lateBefore.foot,
-  lastMsgKept: windowScope.__vlVisualWorkbenchState.lastMsg === lateBefore.lastMsg,
+  footnoteHonest: droppedHonest(lateBefore.foot, envLate.registry['vl-footnote'].textContent,
+    windowScope.__vlVisualWorkbenchState.lastMsg, '비어'),
   thumbsKept: envLate.thumbs.innerHTML === lateBefore.thumbs });
 // 늦은 거부 — 새 배선에서 낸 요청을 붙잡고 또 전환한 뒤 거부한다.
 envLate.click({ getAttribute: (k) => (k === 'data-vl-act' ? 'save-note' : null) });
@@ -1578,8 +1608,8 @@ const lateBefore2 = { foot: envLate.registry['vl-footnote'].textContent,
 envLate.held[1].deferred.reject(new Error('늦은 거부 사유'));
 await new Promise((resolve) => setTimeout(resolve, 0));
 checkpoints.push({ case: 'late-reject-inert',
-  footnoteKept: envLate.registry['vl-footnote'].textContent === lateBefore2.foot,
-  lastMsgKept: windowScope.__vlVisualWorkbenchState.lastMsg === lateBefore2.lastMsg });
+  footnoteHonest: droppedHonest(lateBefore2.foot, envLate.registry['vl-footnote'].textContent,
+    windowScope.__vlVisualWorkbenchState.lastMsg, '늦은 거부 사유') });
 // 자리표시 전환 뒤 늦은 null — 정리 세대가 비운 lastMsg·각주를 그대로 둔다.
 const emptyLateNote = el({ id: 'vl-note-input' });
 emptyLateNote.value = '자리표시 전 메모';
@@ -1667,8 +1697,8 @@ const capLateBefore = { msg: capLateEnv.msg.textContent,
 capLateEnv.held[0].deferred.resolve(null);
 await new Promise((resolve) => setTimeout(resolve, 0));
 checkpoints.push({ case: 'late-null-inert-caption',
-  msgKept: capLateEnv.msg.textContent === capLateBefore.msg,
-  lastMsgKept: windowScope.__vlCaptionWorkbenchState.lastMsg === capLateBefore.lastMsg });
+  msgHonest: droppedHonest(capLateBefore.msg, capLateEnv.msg.textContent,
+    windowScope.__vlCaptionWorkbenchState.lastMsg, '비어') });
 capLateEnv.click({ getAttribute: (k) => (k === 'id' ? 'cap-save' : null) });
 await new Promise((resolve) => setTimeout(resolve, 0));
 const capLateSwitch2 = captionModel();
@@ -1682,8 +1712,8 @@ const capLateBefore2 = { msg: capLateEnv.msg.textContent,
 capLateEnv.held[1].deferred.reject(new Error('자막 늦은 거부'));
 await new Promise((resolve) => setTimeout(resolve, 0));
 checkpoints.push({ case: 'late-reject-inert-caption',
-  msgKept: capLateEnv.msg.textContent === capLateBefore2.msg,
-  lastMsgKept: windowScope.__vlCaptionWorkbenchState.lastMsg === capLateBefore2.lastMsg });
+  msgHonest: droppedHonest(capLateBefore2.msg, capLateEnv.msg.textContent,
+    windowScope.__vlCaptionWorkbenchState.lastMsg, '자막 늦은 거부') });
 const capFreshFail = captionEnv({ cap_save: () => ({ __hold: true }) });
 capFreshFail.cueIdEl.value = 'a0000';
 capFreshFail.textEl.value = '신선한 자막';
@@ -1857,7 +1887,9 @@ flushObservers(envInflight.block);
 await new Promise((resolve) => setTimeout(resolve, 0));
 checkpoints.push({ case: 'inflight-refresh-applies-mapped-selection',
   newPlanBound: windowScope.__vlVisualWorkbenchState.model.basePlanId === 'plan-new',
-  visibleSelection: ariaSelectedId(envInflight.thumbs) === 'segNew',
+  // 영상 카드(D64) — 매핑된 컷 segNew가 든 영상 A의 카드가 골라지고, 패널이 그 컷을 보인다.
+  visibleSelection: ariaSelectedId(envInflight.thumbs) === inflightNew.cards[0].id &&
+    envInflight.panel.innerHTML.includes('<code>segNew</code>'),
   committedSelection: windowScope.__vlVisualWorkbenchState.model.selectedId === 'segNew',
   playheadKept: Math.abs(envInflight.vid.state.currentTime - 3.15) < 1e-9,
   replyApplied: envInflight.propsCalls.length === 1 });
@@ -2333,11 +2365,9 @@ def test_client_bootstraps_execute_real_interactions(tmp_path: Path) -> None:
     holds("placeholder-morph-tears-down-caption", "recovered")
     holds("placeholder-morph-tears-down-caption", "oldClosureInert")
     holds("placeholder-morph-tears-down-caption", "noServer")
-    holds("late-null-inert", "footnoteKept")
-    holds("late-null-inert", "lastMsgKept")
+    holds("late-null-inert", "footnoteHonest")
     holds("late-null-inert", "thumbsKept")
-    holds("late-reject-inert", "footnoteKept")
-    holds("late-reject-inert", "lastMsgKept")
+    holds("late-reject-inert", "footnoteHonest")
     holds("late-null-inert-after-empty", "clearedBefore")
     holds("late-null-inert-after-empty", "footnoteKept")
     holds("late-null-inert-after-empty", "lastMsgKept")
@@ -2348,10 +2378,8 @@ def test_client_bootstraps_execute_real_interactions(tmp_path: Path) -> None:
     holds("fresh-propose-error-closes-draft", "invalidShown")
     holds("fresh-propose-error-closes-draft", "reasonKept")
     holds("fresh-propose-error-closes-draft", "notPending")
-    holds("late-null-inert-caption", "msgKept")
-    holds("late-null-inert-caption", "lastMsgKept")
-    holds("late-reject-inert-caption", "msgKept")
-    holds("late-reject-inert-caption", "lastMsgKept")
+    holds("late-null-inert-caption", "msgHonest")
+    holds("late-reject-inert-caption", "msgHonest")
     holds("fresh-failure-diagnostics-preserved-caption", "nullShown")
     holds("fresh-failure-diagnostics-preserved-caption", "rejectShown")
     holds("fresh-server-error-shown-caption", "errorShown")
@@ -2676,10 +2704,11 @@ def test_visual_prepare_ready_preview_and_player_stability(tmp_path: Path) -> No
             "signature": model["signature"],
             "page": 1,
             "selectedId": model["selectedId"],
+            "sourceId": model["selectedSourceId"],
             "audioSelections": {model["selectedSourceId"]: 0},
         }
     )
-    assert prepared["ok"] and "준비 작업" in prepared["message"]
+    assert prepared["ok"] and "이 영상의 미리보기 준비 작업" in prepared["message"]
     for job in [job for job in server.raw.list_jobs(root) if job.kind == "visual_prepare"]:
         record = _wait_terminal(server, root, job.job_id)
         assert record.status == "succeeded", record.error
@@ -2713,6 +2742,7 @@ def test_visual_prepare_ready_preview_and_player_stability(tmp_path: Path) -> No
             "token": ready["token"],
             "signature": ready["signature"],
             "page": 1,
+            "sourceId": ready["selectedSourceId"],
             "audioSelections": {ready["selectedSourceId"]: True},
         }
     )
@@ -3744,8 +3774,9 @@ def test_review_filter_includes_pending_red_cards(tmp_path: Path) -> None:
     for span in ('<i class="g" style="flex:1.000">', '<i class="h" style="flex:1.000">'):
         assert span in everything, span
     assert '<i class="r" style="flex:0.800">' in everything  # 빨강은 빗금 칸, 길이 그대로
-    assert 'data-vl-card="segA3"' in review  # 미검토 자동 제외
-    assert 'data-vl-card="segA1"' not in review  # 추천·사용 조각은 대기가 아니다
+    # 영상 카드(D64) — 미검토 자동 제외(segA3)가 남은 영상 A만, 제안이 없는 영상 B·C는 없다.
+    assert 'data-vl-card="segA1"' in review
+    assert 'data-vl-card="segB1"' not in review and 'data-vl-card="segC1"' not in review
     assert "unconfirmed_empty" not in everything and "빈 실행" not in everything
 
 
