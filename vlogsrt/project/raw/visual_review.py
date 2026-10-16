@@ -32,7 +32,9 @@
 (원본 해시·스트림 서수·조리법 판). 도구가 바뀌어 같은 요청의 결과물이 달라지면
 조리법 판을 올려 키를 갈아야 한다(자막 미리보기와 다른 선택 — 이유는 키가
 질의에서 **도구 조사 없이** 재계산되어야 하기 때문이다). 도구 판은 기록 파일에
-증거로 남는다.
+증거로 남는다. 예외 하나(D62): 미리보기를 검토용 크기로 줄인 조리법은 판을 올리지 않았다 —
+이미 만든 4K 완성본을 그대로 쓰려고다. 미리보기는 표시용이라 바이트에 기대는 곳이 없고, 새로
+만든 기록만 `encoding`에 조리법 이름을 남긴다.
 """
 
 from __future__ import annotations
@@ -41,6 +43,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import secrets
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -48,7 +51,9 @@ from datetime import UTC, datetime
 from fractions import Fraction
 from pathlib import Path
 
-from vlogsrt import preprocess
+from vlogsrt import log, preprocess
+from vlogsrt.project.raw import source_verify
+from vlogsrt.project.raw.analysis_config import REVIEW_MEDIA
 from vlogsrt.project.raw.jobs import JobContext
 from vlogsrt.project.raw.media_refs import ORIGINAL_ONLY_FINGERPRINT
 from vlogsrt.project.raw.models import (
@@ -118,7 +123,10 @@ VISUAL_THUMB_DIRNAME = "thumbs"
 """썸네일의 자리 — 미리보기 MP4와 같은 `previews/visual/` 아래 한 단계다."""
 
 VISUAL_PREVIEW_RECIPE = "visual-review-preview/v1"
-"""원본 전체 미리보기의 조리법 판 — 인코딩 설정·키 재료가 바뀌면 이 값을 올린다."""
+"""원본 전체 미리보기의 조리법 판 — 키 재료가 바뀌면 이 값을 올린다.
+
+D62의 검토용 크기(`REVIEW_MEDIA`)로는 올리지 않았다 — 이미 만든 미리보기를 다시 만들지 않는다.
+"""
 
 VISUAL_THUMB_RECIPE = "visual-review-thumb/v1"
 """썸네일의 조리법 판 — long_edge·JPEG 설정이 바뀌면 이 값을 올린다."""
@@ -131,6 +139,16 @@ VISUAL_THUMB_LONG_EDGE = 480
 
 VISUAL_VIDEO_ORDINAL = 0
 """미리보기가 담는 영상 스트림 — 첫 번째 영상 하나뿐이다(지원 부분집합)."""
+
+VISUAL_CLAIM_DIRNAME = "claims"
+"""준비 작업의 맡음 표시 자리 — `previews/visual/claims/<원본 해시>.<작업 번호>.json`(D62)."""
+
+_JOB_ID = re.compile(r"[A-Za-z0-9_-]+")
+_LEFTOVER = re.compile(
+    r"\.(?P<name>.+)\.(?P<pid>[0-9]+)\.[0-9a-f]{8}\.(?:part|partial|partial\.jpg)"
+)
+"""끊긴 만들기의 임시 파일 — `.<최종 이름>.<pid>.<토큰>.part`(미리보기)·`.partial.jpg`(썸네일)·
+`.partial`(기록). 이름에 박힌 pid로 살아 있는 만들기의 것을 가른다."""
 
 VISUAL_STATES: tuple[str, ...] = ("preparing", "ready", "failed", "stale", "missing")
 """미리보기 항목의 상태 — 위 다섯 값뿐이다(문서 머리글의 정의)."""
@@ -560,6 +578,145 @@ def _read_inventory(workspace: RawWorkspace, source_sha256: str) -> tuple[Visual
     return tuple(tracks)
 
 
+# ── 맡음 표시 — 준비 작업이 지금 어느 원본을 맡았는가(D62) ───────────────────────
+
+
+def _claim_dir(workspace: RawWorkspace) -> Path:
+    return workspace.root / VISUAL_PREVIEW_ROOT / VISUAL_CLAIM_DIRNAME
+
+
+def _write_claims(
+    workspace: RawWorkspace, job_id: str, sources: set[tuple[str, str]]
+) -> tuple[Path, ...]:
+    """이 작업이 이 페이지의 원본을 맡았다고 적는다 — 원본 검증(9GB 해시) 전에 「준비 중」이 보인다.
+
+    기록 파일(`<키>.json`)은 원본을 검증하고 스트림을 고른 **뒤에야** 키를 알아 쓸 수 있다. 그
+    사이 화면이 「미리보기 아직 없음」을 말했다(실측). 맡음 표시는 원본 해시(검토 시계의 기록값)와
+    작업 번호만으로 쓰고, 질의는 그 작업이 지금 활성일 때만 믿는다. 작업이 끝나면 지운다.
+    """
+    if not _JOB_ID.fullmatch(job_id):
+        log.warn(f"작업 번호가 파일 이름에 맞지 않아 맡음 표시를 쓰지 않습니다: {job_id!r}")
+        return ()
+    written: list[Path] = []
+    for source_id, source_sha256 in sorted(sources):
+        target = _claim_dir(workspace) / f"{source_sha256}.{job_id}.json"
+        _write_record(
+            target,
+            {"source_id": source_id, "job_id": job_id, "pid": os.getpid(), "claimed_at": _now()},
+        )
+        written.append(target)
+    return tuple(written)
+
+
+def _drop_claims(claims: Sequence[Path]) -> None:
+    for claim in claims:
+        try:
+            claim.unlink(missing_ok=True)
+        except OSError as error:
+            log.warn(f"맡음 표시를 지우지 못했습니다(작업이 끝나 무시됨): {claim.name} ({error})")
+
+
+def _claimed_sources(workspace: RawWorkspace, active: Sequence[JobRecord]) -> frozenset[str]:
+    """지금 활성인 작업이 맡은 원본 해시 — 끝난·끊긴 작업의 표시는 아무것도 말하지 않는다."""
+    directory = _claim_dir(workspace)
+    active_ids = {job.job_id for job in active}
+    if not active_ids or not directory.is_dir():
+        return frozenset()
+    claimed: set[str] = set()
+    for claim in directory.glob("*.json"):
+        sha, _, job_id = claim.name.removesuffix(".json").partition(".")
+        if job_id in active_ids:
+            claimed.add(sha)
+    return frozenset(claimed)
+
+
+# ── 끊긴 만들기의 잔재 — 서버 시작·준비 시작에 치운다(D62) ────────────────────────
+
+
+def sweep_preview_leftovers(workspace: RawWorkspace, active: Sequence[JobRecord]) -> int:
+    """죽은 프로세스가 남긴 임시 파일·맡음 표시를 지우고 끊긴 'preparing' 기록을 닫는다.
+
+    지우는 것은 이름에 박힌 pid가 이 프로세스가 아니고 살아 있지도 않은 임시 파일뿐이다 — 게시된
+    최종 파일(`<키>.mp4`·`<키>.jpg`·`<키>.json`)은 이름 꼴이 달라 절대 고르지 않는다
+    (실측: 10/7–10/11의 `.part` 6.1GB). 기록은 지우지 않고 상태만 'interrupted'로 닫는다 —
+    질의가 「준비 중」 대신 낡음을 말해 「미리보기 다시 준비」가 보인다. 답은 지운 바이트 수다.
+    """
+    root = workspace.root / VISUAL_PREVIEW_ROOT
+    if not root.is_dir():
+        return 0
+    freed = 0
+    for directory in (root, root / VISUAL_THUMB_DIRNAME, root / "inventory", _claim_dir(workspace)):
+        freed += _sweep_directory(directory)
+    closed = _close_orphaned_records(root, active)
+    if freed or closed:
+        log.info(
+            f"미리보기 잔재 정리: 끊긴 만들기의 임시 파일 {freed:,}B를 지우고"
+            f" 끊긴 준비 기록 {closed}개를 닫았습니다 ({root})"
+        )
+    return freed
+
+
+def _pid_alive(pid: int) -> bool:
+    """그 pid가 지금 살아 있는가 — 이 프로세스이거나 신호를 보낼 수 없는(남의) 프로세스면 산 것."""
+    if pid == os.getpid():
+        return True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _dead_owner(entry: Path) -> bool:
+    """이 임시 파일·맡음 표시를 남긴 프로세스가 죽었는가 — 꼴이 아니면 False(건드리지 않는다)."""
+    if entry.parent.name == VISUAL_CLAIM_DIRNAME and entry.suffix == ".json":
+        pid = _record_int(_read_record(entry), "pid")
+        return pid is not None and not _pid_alive(pid)
+    match = _LEFTOVER.fullmatch(entry.name)
+    return match is not None and not _pid_alive(int(match.group("pid")))
+
+
+def _sweep_directory(directory: Path) -> int:
+    if not directory.is_dir():
+        return 0
+    freed = 0
+    for entry in directory.iterdir():
+        if entry.is_symlink() or not entry.is_file() or not _dead_owner(entry):
+            continue
+        try:
+            size = entry.stat().st_size
+            entry.unlink()
+        except FileNotFoundError:
+            continue  # 다른 정리가 먼저 지웠다
+        except OSError as error:
+            log.warn(f"미리보기 잔재를 지우지 못해 그대로 둡니다: {entry} ({error})")
+            continue
+        freed += size
+    return freed
+
+
+def _close_orphaned_records(root: Path, active: Sequence[JobRecord]) -> int:
+    """만드는 쪽이 사라진 'preparing' 기록을 'interrupted'로 닫는다 — 닫은 수.
+
+    pid가 있으면 그 프로세스가 죽었을 때, pid가 없는 옛 기록은 활성 준비 작업이 하나도 없을 때
+    (서버 시작이 바로 그때다) 사라진 것이다.
+    """
+    preparing_active = any(job.kind == VISUAL_PREPARE_JOB_KIND for job in active)
+    closed = 0
+    for record_path in sorted(root.glob("*.json")):
+        record = _read_record(record_path)
+        if record is None or record.get("state") != "preparing":
+            continue
+        pid = _record_int(record, "pid")
+        if (pid is not None and _pid_alive(pid)) or (pid is None and preparing_active):
+            continue
+        _write_record(record_path, {**record, "state": "interrupted", "interrupted_at": _now()})
+        closed += 1
+    return closed
+
+
 def _registration_for(workspace: RawWorkspace, relative: Path) -> MediaRegistration | None:
     """이 상대 경로의 등록 행 — 미리보기 종류만 훑는다(질의는 생성을 하지 않는다)."""
     wanted = relative.as_posix()
@@ -619,9 +776,22 @@ def _derive_record_state(
         return "ready"
     if declared == "failed":
         return "failed"
-    if declared == "preparing" and any(job.kind == VISUAL_PREPARE_JOB_KIND for job in active):
+    if declared == "preparing" and _preparing_backed(record, active):
         return "preparing"
     return "stale"
+
+
+def _preparing_backed(record: dict[str, object], active: Sequence[JobRecord]) -> bool:
+    """'preparing' 기록을 지금 도는 작업이 받치는가 — 기록을 쓴 **그 작업**이어야 한다(D62).
+
+    끊긴 만들기의 기록은 영원히 'preparing'으로 남는다(실측 10/7–10/11). 아무 준비 작업이나
+    받침으로 치면 다른 영상의 준비가 도는 동안 그것들이 「준비 중」으로 보였다. 작업 번호가 없는
+    옛 기록만 예전 규칙(준비 작업 하나라도)이다 — 서버 시작의 정리가 그것을 'interrupted'로 닫는다.
+    """
+    owner = record.get("job_id")
+    if isinstance(owner, str):
+        return any(job.job_id == owner for job in active)
+    return any(job.kind == VISUAL_PREPARE_JOB_KIND for job in active)
 
 
 def _source_candidates(
@@ -684,12 +854,14 @@ def _source_preview_state(
     source_sha256: str,
     active: Sequence[JobRecord],
     selected_audio: tuple[int | None, ...] | None = None,
+    claimed: bool = False,
 ) -> VisualSourcePreview:
     """원본 하나의 미리보기 상태 — 기록 주도로 유도한다(질의는 조사하지 않는다).
 
     `selected_audio`는 이 원본에 대해 질의가 **명시적으로** 고른 서수다 — 그 서수의
     기록만 보고, 없으면 `missing`(그 선택은 한 번도 만들지 않았다)이다. 생략하면
-    가장 최근 기록(V1 기본 질의)을 본다.
+    가장 최근 기록(V1 기본 질의)을 본다. `claimed`는 지금 활성인 준비 작업이 이 원본을
+    맡았다는 표시다 — 재생 가능한 완성본이 없으면 「준비 중」이다(기록이 아직 없어도, D62).
     """
     audio_tracks = _read_inventory(workspace, source_sha256)
     found = _latest_source_record(workspace, source_sha256, selected_audio, active)
@@ -700,6 +872,8 @@ def _source_preview_state(
         else:
             state = "stale" if _visual_traces_purged(workspace) else "missing"
             chosen = None
+        if claimed:
+            state = "preparing"  # 작업이 원본 검증 중이라 기록이 아직 없다(D62)
         return VisualSourcePreview(
             source_id=source_id,
             source_sha256=source_sha256,
@@ -725,6 +899,8 @@ def _source_preview_state(
     mp4_exists = _record_mp4_exists(workspace, key, record)
     direct_file_id = record.get("direct_file_id")
     state = _derive_record_state(workspace, key, record, active)
+    if claimed and state != "ready":
+        state = "preparing"  # 지난 시도가 낡았거나 실패했어도 지금 작업이 다시 만들고 있다
     remuxed = record.get("remuxed")
     # 매핑 원점은 증거(video_origin_seconds)에서 다시 잓는다 — F1까지의 기록이
     # browser_origin_seconds를 소리 원점 뺄셈으로 적어 늦은 트랙·침묵 선택에서
@@ -797,6 +973,7 @@ def query_overview(
     )
     fingerprints = {job.input_fingerprint for job in active}
     purged = _visual_traces_purged(workspace)
+    claimed = _claimed_sources(workspace, active)
     if selection_filter not in ("all", "included", "excluded", "review"):
         raise VisualReviewError("알 수 없는 컷 필터입니다")
     # 「제외 제안」 보기(키는 옛 이름 review) — 결정을 기다리는 제외 제안만이다(W-17 C, D57).
@@ -843,17 +1020,20 @@ def query_overview(
             _required_clock(revision, source_id).source_sha256,
             active,
             chosen_filters.get(source_id),
+            claimed=_required_clock(revision, source_id).source_sha256 in claimed,
         )
         for source_id in sorted(touched)
     }
     cards = tuple(
-        _segment_card(workspace, revision, ordered, position, fingerprints, purged, previews)
+        _segment_card(
+            workspace, revision, ordered, position, fingerprints, purged, previews, claimed
+        )
         for position in positions
     )
     selected = None
     if chosen_position is not None:
         selected = _selected_segment(
-            workspace, revision, ordered, chosen_position, fingerprints, purged, previews
+            workspace, revision, ordered, chosen_position, fingerprints, purged, previews, claimed
         )
     return VisualReviewOverview(
         workspace_id=facade.project_id,
@@ -941,6 +1121,7 @@ def _segment_card(
     fingerprints: frozenset[str] | set[str],
     purged: bool,
     previews: Mapping[str, VisualSourcePreview],
+    claimed: frozenset[str] = frozenset(),
 ) -> VisualSegmentCard:
     """목록 한 칸 — 조각 값과 미리보기 상태를 묶는다(생성은 하지 않는다)."""
     segment = ordered[position]
@@ -949,6 +1130,7 @@ def _segment_card(
     key = thumbnail_media_key(clock.source_sha256, frame_index)
     fingerprint_active = (
         preparation_fingerprint(revision.base_plan_id, _page_of(position)) in fingerprints
+        or clock.source_sha256 in claimed  # 원본 미리보기 작업이 맡은 원본의 썸네일(D62)
     )
     state, registration = _thumb_state(workspace, key, fingerprint_active, purged)
     preview = previews.get(segment.source_id)
@@ -1017,9 +1199,12 @@ def _selected_segment(
     fingerprints: frozenset[str] | set[str],
     purged: bool,
     previews: Mapping[str, VisualSourcePreview],
+    claimed: frozenset[str] = frozenset(),
 ) -> VisualSelectedSegment:
     """선택 조각의 자세한 기록 — 카드에 덮기 등급을 더한 모양이다."""
-    card = _segment_card(workspace, revision, ordered, position, fingerprints, purged, previews)
+    card = _segment_card(
+        workspace, revision, ordered, position, fingerprints, purged, previews, claimed
+    )
     segment = ordered[position]
     return VisualSelectedSegment(
         segment_id=card.segment_id,
@@ -1060,6 +1245,8 @@ class _SourceSelection:
     video_stream_index: int
     audio_ordinal: int | None
     audio_stream_index: int | None
+    job_id: str | None = None
+    """이 준비를 도는 작업 — 'preparing' 기록이 그 작업에 묶인다(D62)."""
 
 
 def run_page_preparation(
@@ -1099,7 +1286,36 @@ def run_page_preparation(
         return
     context.set_total(len(page_segments))
     choices = validated_audio_selections(audio_selections)
+    sweep_preview_leftovers(workspace, ())
+    claims = _write_claims(
+        workspace,
+        context.job_id,
+        {
+            (seg.source_id, _required_clock(revision, seg.source_id).source_sha256)
+            for seg in page_segments
+        },
+    )
+    try:
+        failures = _prepare_segments(context, workspace, revision, page_segments, choices)
+    finally:
+        _drop_claims(claims)
+    if failures:
+        raise VisualReviewError(
+            f"미리보기 준비 실패 {len(failures)}건(원본 전체·썸네일 각각 기록에 남았다): "
+            + "; ".join(failures[:5])
+        )
+
+
+def _prepare_segments(
+    context: JobContext,
+    workspace: RawWorkspace,
+    revision: ReviewRevision,
+    page_segments: Sequence[ReviewSegment],
+    choices: Mapping[str, int | None],
+) -> list[str]:
+    """페이지 조각을 순서대로 — 원본마다 한 번 검증·미리보기, 조각마다 썸네일. 실패 목록이 답."""
     selections: dict[str, _SourceSelection] = {}
+    seek_plans: dict[str, preprocess.FrameSeekPlan | None] = {}
     failures: list[str] = []
     for done, segment in enumerate(page_segments, start=1):
         context.check_cancel()
@@ -1113,16 +1329,13 @@ def run_page_preparation(
                 source_id,
                 explicit=explicit,
                 ordinal=choices[source_id] if explicit else None,
+                job_id=context.job_id,
             )
             selections[source_id] = selection
             _ensure_full_source_preview(workspace, selection, failures)
-        _prepare_thumb(workspace, revision, segment, selection, failures)
+        _prepare_thumb(workspace, revision, segment, selection, failures, seek_plans)
         context.set_progress(done)
-    if failures:
-        raise VisualReviewError(
-            f"미리보기 준비 실패 {len(failures)}건(원본 전체·썸네일 각각 기록에 남았다): "
-            + "; ".join(failures[:5])
-        )
+    return failures
 
 
 def _select_source(
@@ -1132,6 +1345,7 @@ def _select_source(
     *,
     explicit: bool,
     ordinal: int | None,
+    job_id: str | None = None,
 ) -> _SourceSelection:
     """원본의 검증·조사·스트림 선택 — 명시적 선택이 없으면 첫 트랙(없으면 침묵).
 
@@ -1143,7 +1357,7 @@ def _select_source(
     clock = _required_clock(revision, source_id)
     asset = workspace.source_asset(source_id)
     path = workspace.source_media_path(asset)
-    _verify_source_unchanged(asset, path)
+    _verify_source_unchanged(workspace, asset, path)
     from vlogsrt.project.raw.media_refs import resolve
 
     path = resolve(workspace, asset, "preview")
@@ -1171,14 +1385,17 @@ def _select_source(
         video_stream_index=probe.video.stream_index,
         audio_ordinal=audio_ordinal,
         audio_stream_index=chosen.stream_index if chosen is not None else None,
+        job_id=job_id,
     )
 
 
-def _verify_source_unchanged(asset: object, path: Path) -> None:
-    """ready 원본의 재검증 — 크기·SHA-256을 지금 다시 읽는다(서비스·검토와 같은 계약).
+def _verify_source_unchanged(workspace: RawWorkspace, asset: object, path: Path) -> None:
+    """ready 원본의 재검증 — 크기를 지금 다시 읽고, 내용은 stat이 같으면 기록을 믿는다(D62).
 
     서비스의 `_verified_asset`·검토 파사드의 `_verify_source_unchanged`와 같은 문장을
-    여기 다시 쓴다 — 이 모듈은 서비스를 import하지 않아야 순환이 없다(W1 계약).
+    여기 다시 쓴다 — 이 모듈은 서비스를 import하지 않아야 순환이 없다(W1 계약). 미리보기는
+    표시용 재생본이라 카드를 누를 때마다 9GB를 다시 해시하지 않는다(`source_verify`) — stat이
+    지난 완전 검증과 다르면 예전대로 완전 해시하고, 다르면 같은 문장으로 거부한다.
     """
     status = getattr(asset, "status", None)
     recorded_sha = getattr(asset, "content_sha256", None)
@@ -1193,12 +1410,20 @@ def _verify_source_unchanged(asset: object, path: Path) -> None:
         raise VisualReviewError(
             f"원본 크기가 가져오기 때와 다르다: {path} ({recorded_size} → {probed.st_size}B)"
         )
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for block in iter(lambda: handle.read(1 << 20), b""):
-            digest.update(block)
-    if digest.hexdigest() != recorded_sha:
+    if source_verify.source_digest(workspace, asset, path, trust_stat=True) != recorded_sha:
         raise VisualReviewError(f"원본 내용이 가져오기 때와 다르다: {path} — 다시 가져오세요")
+
+
+def _seek_plan_for(
+    selection: _SourceSelection, plans: dict[str, preprocess.FrameSeekPlan | None]
+) -> preprocess.FrameSeekPlan | None:
+    """이 원본의 빠른 프레임 찾기 증명 — 원본마다 한 번만 잰다(디먹스만, D62)."""
+    if selection.source_id not in plans:
+        margin = Fraction(REVIEW_MEDIA.thumb_seek_margin_seconds)
+        plans[selection.source_id] = preprocess.probe_frame_seek_plan(
+            selection.path, selection.video_stream_index, margin_seconds=margin
+        )
+    return plans[selection.source_id]
 
 
 def _prepare_thumb(
@@ -1207,8 +1432,13 @@ def _prepare_thumb(
     segment: ReviewSegment,
     selection: _SourceSelection,
     failures: list[str],
+    seek_plans: dict[str, preprocess.FrameSeekPlan | None] | None = None,
 ) -> None:
-    """조각 하나의 썸네일 — 이미 있으면 ffmpeg을 돌리지 않고 돌아간다."""
+    """조각 하나의 썸네일 — 이미 있으면 ffmpeg을 돌리지 않고 돌아간다.
+
+    만들 때는 빠른 프레임 찾기를 쓴다(증명이 없으면 처음부터 디코드 — 바이트는 같다, D62)
+    그리고 낮은 OS 우선순위로 돈다 — 분석과 CPU를 다투지 않는다.
+    """
     clock = _required_clock(revision, segment.source_id)
     frame_index, _, _ = _snapped_fields(clock, segment.start_pts, segment.end_pts)
     key = thumbnail_media_key(selection.source_sha256, frame_index)
@@ -1224,12 +1454,15 @@ def _prepare_thumb(
         )
         # 「지금 도는 작업」이 일반 이름(프레임 추출) 대신 사람이 기다리는 단계를 말한다(D61).
         with preprocess.process_step("썸네일 추출"):
+            seek = _seek_plan_for(selection, {} if seek_plans is None else seek_plans)
             preprocess.extract_frame_index(
                 selection.path,
                 selection.video_stream_index,
                 frame_index,
                 staged,
                 long_edge=VISUAL_THUMB_LONG_EDGE,
+                seek=seek,
+                priority=REVIEW_MEDIA.process_niceness,
             )
         _publish(staged, target)
     except RuntimeError as error:
@@ -1354,7 +1587,13 @@ def _ensure_full_source_preview(
     _write_record(record_path, _source_record_payload(selection, key, "preparing", None, None))
     try:
         extraction = preprocess.extract_visual_review_preview(
-            selection.path, target, audio_stream_index=selection.audio_stream_index
+            selection.path,
+            target,
+            audio_stream_index=selection.audio_stream_index,
+            encoding=_preview_encoding(),
+            # 한도는 원본 길이를 따라 자란다 — 0018(1359초)이 고정 1800초에 걸렸다(D62).
+            timeout_seconds=REVIEW_MEDIA.preview_timeout(float(probe.duration)),
+            priority=REVIEW_MEDIA.process_niceness,
         )
         built = True
     except RuntimeError as error:
@@ -1381,6 +1620,15 @@ def _ensure_full_source_preview(
         return
     _write_record(record_path, _source_record_payload(selection, key, "ready", None, extraction))
     _ensure_registered(workspace, target, relative, rebuilt=built)
+
+
+def _preview_encoding() -> preprocess.PreviewEncoding:
+    """새로 만드는 미리보기의 조리법 — 설정에서 온다. 캐시 열쇠에는 들어가지 않는다(D62)."""
+    return preprocess.PreviewEncoding(
+        long_edge=REVIEW_MEDIA.preview_long_edge,
+        preset=REVIEW_MEDIA.preview_x264_preset,
+        crf=REVIEW_MEDIA.preview_x264_crf,
+    )
 
 
 def _measure_preview(target: Path) -> preprocess.VisualPreviewExtraction:
@@ -1441,9 +1689,13 @@ def _source_record_payload(
         "error": error,
         "built_at": _now(),
     }
+    if state == "preparing":
+        # 만드는 쪽의 신원 — 작업 번호로 받침을, pid로 서버 시작 정리를 가른다(D62).
+        payload.update(job_id=selection.job_id, pid=os.getpid())
     if extraction is not None:
         payload.update(
             {
+                "encoding": extraction.encoding,
                 "duration": str(extraction.duration),
                 "video_origin_seconds": str(extraction.video_origin),
                 "audio_origin_seconds": (

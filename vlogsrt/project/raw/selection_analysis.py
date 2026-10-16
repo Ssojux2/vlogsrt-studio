@@ -156,7 +156,10 @@ def cached_revision(service: Any, root: Path, asset_ids: tuple[str, ...]) -> str
 
     try:
         for asset in assets.values():
-            _require_source_unchanged(workspace.source_media_path(asset), asset)
+            # 카드를 누를 때마다 9GB를 다시 해시하지 않는다 — stat이 같으면 기록을 믿는다(D62).
+            _require_source_unchanged(
+                workspace, workspace.source_media_path(asset), asset, trust_stat=True
+            )
     except (OSError, RawWorkspaceError):
         return None
     expected = _order_free_fingerprints(service, root, assets)

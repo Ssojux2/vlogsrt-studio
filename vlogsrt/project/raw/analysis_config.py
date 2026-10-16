@@ -215,6 +215,71 @@ def validate_analysis_proxy_limits(limits: AnalysisProxyLimits) -> None:
         raise ValueError("디코드 시간 한도가 계약을 어긴다: " + "; ".join(problems))
 
 
+@dataclass(frozen=True)
+class ReviewMediaSettings:
+    """작업대 검토 보조 미디어(원본 전체 미리보기·썸네일)의 만들기 설정(D62).
+
+    **외부 근거 없는 조정 대상**(`cut_*`처럼). 미리보기는 검토 보조일 뿐이다 — Final Cut 보내기는
+    원본을 쓴다. 4K를 그대로 `medium`·crf 20으로 다시 인코딩하던 것이 35초 클립에 부하 아래 약
+    5분, 9분 0016에 6.8GB였다. 그래서 긴 변 1920(키우지 않는다)·`veryfast`·crf 23으로 만든다.
+
+    한도는 `AnalysisProxyLimits`와 같은 꼴 `max(바닥, 배율 × 원본 길이)`이다 — 0018(1359초)의
+    미리보기가 고정 1800초에 걸려 멈췄다. 바닥 1800초는 예전 상한 그대로, 배율 6은 분석 프록시와
+    같다. `process_niceness`는 미리보기·썸네일 ffmpeg의 OS 우선순위(nice)다 — 분석 프록시와
+    CPU를 다투지 않게 한다(부하 80–100/10코어 실측). `thumb_seek_margin_seconds`는 썸네일의
+    빠른 찾기가 목표 프레임보다 얼마나 앞에서 디코드를 시작하는가다.
+
+    어느 값도 미리보기·썸네일 캐시 열쇠·조리법 판(`VISUAL_PREVIEW_RECIPE`)·분석 지문에 들어가지
+    않는다 — 이미 만든 미리보기는 그대로 쓰고, 새로 만든 것만 기록에 `encoding`을 남긴다.
+    """
+
+    preview_long_edge: int = 1920
+    preview_x264_preset: str = "veryfast"
+    preview_x264_crf: int = 23
+    preview_timeout_floor_seconds: float = 1800.0
+    preview_timeout_media_ratio: float = 6.0
+    process_niceness: int = 10
+    thumb_seek_margin_seconds: float = 1.0
+
+    def preview_timeout(self, media_seconds: float | None) -> float:
+        """원본 전체 미리보기 한 번의 한도 — 길이를 모르면 바닥이다."""
+        validate_review_media_settings(self)
+        return _scaled_timeout(
+            self.preview_timeout_floor_seconds, self.preview_timeout_media_ratio, media_seconds
+        )
+
+
+REVIEW_MEDIA = ReviewMediaSettings()
+"""지금 쓰는 검토 보조 미디어 설정 — 미리보기·썸네일 만들기가 이 하나를 읽는다."""
+
+
+def validate_review_media_settings(settings: ReviewMediaSettings) -> None:
+    """값역 검사 — 긴 변은 2 이상 짝수, crf 0–51, nice 0–20, 한도·여유는 유한한 양수/0 이상."""
+    problems: list[str] = []
+    edge = settings.preview_long_edge
+    if isinstance(edge, bool) or not isinstance(edge, int) or edge < 2 or edge % 2:
+        problems.append(f"미리보기 긴 변은 2 이상 짝수 정수여야 한다: {edge!r}")
+    crf = settings.preview_x264_crf
+    if isinstance(crf, bool) or not isinstance(crf, int) or not 0 <= crf <= 51:
+        problems.append(f"미리보기 crf는 0–51 정수여야 한다: {crf!r}")
+    nice = settings.process_niceness
+    if isinstance(nice, bool) or not isinstance(nice, int) or not 0 <= nice <= 20:
+        problems.append(f"nice 값은 0–20 정수여야 한다: {nice!r}")
+    if not settings.preview_x264_preset or not settings.preview_x264_preset.isalpha():
+        problems.append(f"x264 preset 이름이 아니다: {settings.preview_x264_preset!r}")
+    for name, value, minimum_exclusive in (
+        ("미리보기 한도 바닥", settings.preview_timeout_floor_seconds, True),
+        ("미리보기 한도 배율", settings.preview_timeout_media_ratio, False),
+        ("썸네일 찾기 여유", settings.thumb_seek_margin_seconds, False),
+    ):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            problems.append(f"{name}은 실수여야 한다: {value!r}")
+        elif not math.isfinite(float(value)) or value < 0 or (minimum_exclusive and value == 0):
+            problems.append(f"{name}이 범위 밖이다: {value!r}")
+    if problems:
+        raise ValueError("검토 보조 미디어 설정이 계약을 어긴다: " + "; ".join(problems))
+
+
 PAIR_VIDEO_SAMPLE_SIZE = 1024
 """대응 프레임 표본 한 장의 바이트 수 — `correspondence_samples`의 32×32 루마(Y) 평면 한 장."""
 

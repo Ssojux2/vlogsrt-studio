@@ -45,6 +45,7 @@ from vlogsrt.project.raw import (
     request_usage,
     source_text,
     source_transcript,
+    source_verify,
 )
 from vlogsrt.project.raw import understanding as stage1
 from vlogsrt.project.raw import understanding_luna as luna
@@ -941,7 +942,9 @@ def _complete_source_current(
         return False
     try:
         document = json.loads((workspace.root / result.document_path).read_text(encoding="utf-8"))
-        _require_source_unchanged(workspace.source_media_path(asset), asset)
+        _require_source_unchanged(
+            workspace, workspace.source_media_path(asset), asset, trust_stat=True
+        )
         stored = document.get("media_fingerprint", media_refs.ORIGINAL_ONLY_FINGERPRINT)
         return stored == media_refs.fingerprint(workspace, asset.asset_id) and document.get(
             "transcript_fingerprint", "asr-original/v1"
@@ -1041,7 +1044,7 @@ def _analyze_source(
 ) -> AnalysisSourceResult:
     """원본 하나의 분석 본체 — 조사→증거→판정→조정→문서까지."""
     path = workspace.source_media_path(asset)
-    _require_source_unchanged(path, asset)
+    _require_source_unchanged(workspace, path, asset, trust_stat=False)
     probe = preprocess.probe_raw_media(path)
     clock = preprocess.probe_extraction_clock(path, probe=probe)
     if not clock.uniform_grid:
@@ -2415,19 +2418,22 @@ def _reusable_cache(
     return result
 
 
-def _require_source_unchanged(path: Path, asset: SourceAsset) -> None:
-    """원본 재검증 — 크기·SHA-256을 지금 다시 읽는다(§14.2)."""
+def _require_source_unchanged(
+    workspace: RawWorkspace, path: Path, asset: SourceAsset, *, trust_stat: bool
+) -> None:
+    """원본 재검증 — 크기·SHA-256을 지금 다시 읽는다(§14.2).
+
+    `trust_stat`은 재사용 검사(캐시된 분석을 다시 쓸 수 있는가)만 켠다 — 지난 완전 검증 때와
+    stat이 같으면 기록된 해시를 믿는다(`source_verify`, D62). 분석 본체는 끄고 완전 해시한다.
+    """
     probed = path.stat()
     if probed.st_size != asset.size_bytes:
         raise AnalysisError(
             f"원본 크기가 가져오기 때와 다르다: {asset.source_relative_path}"
             f" ({asset.size_bytes} → {probed.st_size}B)"
         )
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for block in iter(lambda: handle.read(1 << 20), b""):
-            digest.update(block)
-    if asset.content_sha256 is None or digest.hexdigest() != asset.content_sha256:
+    digest = source_verify.source_digest(workspace, asset, path, trust_stat=trust_stat)
+    if asset.content_sha256 is None or digest != asset.content_sha256:
         raise AnalysisError(
             f"원본 내용이 가져오기 때와 다르다: {asset.source_relative_path} — 다시 가져오세요"
         )

@@ -294,23 +294,31 @@ def run_process(
     *,
     on_poll: Callable[[], None] | None = None,
     step: str | None = None,
+    priority: int | None = None,
     **kwargs: Any,
 ) -> subprocess.CompletedProcess:
     """외부 프로세스 한 번 — 시간 한도를 넘기면 `ProcessTimeout`(어느 단계·몇 초인지)이다.
 
     단계 이름은 `step`, 없으면 바깥 `process_step` 범위의 이름이다. 도는 동안 등록표에 있다.
+    `priority`는 자식의 nice 값이다(D62) — 주면 Popen 길로 띄우고 띄운 바로 뒤 `os.setpriority`로
+    낮춘다. `preexec_fn`은 스레드가 있는 서버에서 안전하지 않아 쓰지 않는다. 높이지는 않는다.
     """
     label = step if step is not None else _STEP.get()
     try:
-        return _run_process(command, on_poll=on_poll, step=label, **kwargs)
+        return _run_process(command, on_poll=on_poll, step=label, priority=priority, **kwargs)
     except subprocess.TimeoutExpired as expired:
         raise ProcessTimeout(command, float(expired.timeout), label) from expired
 
 
 def _run_process(
-    command: list[str], *, on_poll: Callable[[], None] | None, step: str | None, **kwargs: Any
+    command: list[str],
+    *,
+    on_poll: Callable[[], None] | None,
+    step: str | None,
+    priority: int | None,
+    **kwargs: Any,
 ) -> subprocess.CompletedProcess:
-    if not cancellation_active() and on_poll is None:
+    if not cancellation_active() and on_poll is None and priority is None:
         with _tracked(command, step, kwargs.get("timeout")) as argv:
             completed = subprocess.run(argv, **kwargs)
         if argv is not command:
@@ -323,7 +331,25 @@ def _run_process(
         kwargs.update(stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     with _tracked(command, step, timeout) as argv:
         process = subprocess.Popen(argv, **kwargs)
+        if priority is not None:
+            _lower_priority(process.pid, priority)
         return _wait_polling(process, command, timeout, on_poll)
+
+
+def _lower_priority(pid: int, niceness: int) -> None:
+    """자식의 nice를 `niceness`까지 낮춘다 — 이미 더 낮으면 그대로(일반 사용자는 못 높인다).
+
+    낮추기는 양보일 뿐 실행의 조건이 아니다 — 못 낮춰도 경고만 남기고 그대로 돈다. 띄운 바로
+    뒤라 ffmpeg가 일꾼 스레드를 만들기 전이고, 그 스레드들은 낮춘 값을 물려받는다.
+    """
+    try:
+        current = os.getpriority(os.PRIO_PROCESS, pid)
+        if current < niceness:
+            os.setpriority(os.PRIO_PROCESS, pid, niceness)
+    except ProcessLookupError:
+        return  # 벌써 끝난 자식 — 낮출 것이 없다(결과는 기다리기가 받는다)
+    except OSError as error:
+        log.warn(f"외부 프로세스 우선순위를 낮추지 못했습니다(그대로 실행): pid {pid} {error}")
 
 
 def _wait_polling(
@@ -360,17 +386,28 @@ def _wait_polling(
 
 
 def _run(
-    command: list[str], *, timeout: float | None = None, step: str | None = None
+    command: list[str],
+    *,
+    timeout: float | None = None,
+    step: str | None = None,
+    priority: int | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """실패는 RuntimeError다 — 시간 한도를 넘기면 그 하위인 `ProcessTimeout`.
 
     `timeout`이 없으면 예전과 같다: 취소를 듣지 않는 실행은 한도 없이, 듣는 실행은
-    `_CANCELLABLE_TIMEOUT_SECONDS`까지 기다린다.
+    `_CANCELLABLE_TIMEOUT_SECONDS`까지 기다린다. `priority`를 주면 Popen 길이라 한도가 없을 때도
+    `_CANCELLABLE_TIMEOUT_SECONDS`까지다(`run_process`).
     """
     limit: dict[str, Any] = {} if timeout is None else {"timeout": timeout}
     try:
         completed = run_process(
-            command, capture_output=True, text=True, check=False, step=step, **limit
+            command,
+            capture_output=True,
+            text=True,
+            check=False,
+            step=step,
+            priority=priority,
+            **limit,
         )
     except OSError as exc:
         raise RuntimeError(f"명령 실행 실패: {command[0]} ({exc})") from exc
@@ -378,6 +415,18 @@ def _run(
         tail = "\n".join(completed.stderr.strip().splitlines()[-5:])
         raise RuntimeError(f"{command[0]} 실패 (코드 {completed.returncode})\n{tail}")
     return completed
+
+
+def _run_niced(
+    command: list[str], priority: int | None, *, timeout: float | None = None
+) -> subprocess.CompletedProcess[str]:
+    """`_run`에 nice·한도를 줄 때만 싣는다 — 안 주면 예전 호출 그대로다(argv·인자 모두)."""
+    options: dict[str, Any] = {}
+    if priority is not None:
+        options["priority"] = priority
+    if timeout is not None:
+        options["timeout"] = timeout
+    return _run(command, **options)
 
 
 @process_step("길이 확인")
@@ -1475,6 +1524,82 @@ def _select_frames_expression(indices: Sequence[int]) -> str:
     return build(terms)
 
 
+@dataclass(frozen=True, slots=True)
+class FrameSeekPlan:
+    """프레임 번호를 **시각으로 찾아갈 수 있다**는 증명 — `probe_frame_seek_plan`만 만든다(D62).
+
+    디코드하는 그 파일의 패킷 격자가 정확한 정수 틱 CFR이고(`first_pts + n × frame_ticks`),
+    버림·깨짐 표시 패킷이 하나도 없다는 뜻이다. 그때 n번째 디코드 프레임의 PTS가 곧 그
+    격자 값이다. `margin_seconds`는 그 시각보다 얼마나 앞에서 디코드를 시작하는가다.
+    """
+
+    stream_index: int
+    time_base: Fraction
+    first_pts: int
+    frame_ticks: int
+    frame_count: int
+    margin_seconds: Fraction
+
+
+@process_step("프레임 찾기 격자 확인")
+def probe_frame_seek_plan(
+    source: Path, stream_index: int, *, margin_seconds: Fraction
+) -> FrameSeekPlan | None:
+    """빠른 프레임 찾기가 안전한지 패킷으로 잰다 — 안전하지 않으면 None(옛 방법을 쓴다).
+
+    디먹스만 한다(디코드 없음 — 4만 패킷이 1초 남짓). 안전의 조건은 셋이다: (1) 프레임 길이가
+    time_base의 정수 틱이고 모든 패킷 pts가 오차 0으로 격자 위에 있다(VFR·양자화 시계는 아니다),
+    (2) 버림(D)·깨짐(C) 표시 패킷이 없다 — 편집 목록이 잘라 낸 프레임은 디코더가 내지 않으므로
+    패킷 순번과 디코드 순번이 갈린다, (3) 패킷 pts가 모두 정수다. 무엇 하나라도 어긋나면 그
+    이유를 남기고 None이다.
+    """
+    _require_index(stream_index, "스트림 번호")
+    completed = _run(
+        [
+            require_ffmpeg("ffprobe"), "-v", "error",
+            "-select_streams", str(stream_index),
+            "-show_entries", "stream=index,codec_type,r_frame_rate,time_base",
+            "-show_entries", "packet=pts,flags",
+            "-of", "json",
+            str(source),
+        ]
+    )  # fmt: skip
+    try:
+        return _seek_plan(completed.stdout, source, stream_index, Fraction(margin_seconds))
+    except RuntimeError as unsafe:
+        log.debug(f"빠른 프레임 찾기를 쓰지 않습니다(처음부터 디코드): {source} — {unsafe}")
+        return None
+
+
+def _seek_plan(stdout: str, source: Path, stream_index: int, margin: Fraction) -> FrameSeekPlan:
+    entry = _selected_stream(stdout, source, str(stream_index), "비디오", "video")
+    if _stream_global_index(entry, source) != stream_index:
+        raise RuntimeError(f"고른 스트림이 {stream_index}번이 아닙니다")
+    time_base = _stream_positive_fraction(entry, "time_base", source)
+    frame_duration = Fraction(1) / _stream_positive_fraction(entry, "r_frame_rate", source)
+    ticks = frame_duration / time_base
+    if ticks.denominator != 1:
+        raise RuntimeError(f"프레임 길이가 정수 틱이 아닙니다({ticks}틱)")
+    packets = json.loads(stdout).get("packets")
+    if not isinstance(packets, list):
+        raise RuntimeError("패킷 기록이 목록이 아닙니다")
+    marked = [
+        p for p in packets if not isinstance(p, dict) or set(str(p.get("flags"))) & {"D", "C"}
+    ]
+    if marked:
+        raise RuntimeError(f"버림·깨짐 표시 패킷 {len(marked)}개")
+    pts = _packet_pts(stdout, source)
+    _prove_uniform_grid(pts, time_base, frame_duration, source)  # 정수 틱이면 허용 오차 0
+    return FrameSeekPlan(
+        stream_index=stream_index,
+        time_base=time_base,
+        first_pts=pts[0],
+        frame_ticks=ticks.numerator,
+        frame_count=len(pts),
+        margin_seconds=margin,
+    )
+
+
 @process_step("프레임 추출")
 def extract_frame_index(
     source: Path,
@@ -1483,13 +1608,22 @@ def extract_frame_index(
     destination: Path,
     *,
     long_edge: int,
+    seek: FrameSeekPlan | None = None,
+    priority: int | None = None,
 ) -> Path:
     """정확히 한 프레임을 이미지로 뽑는다 — 전역 스트림 번호와 디코드 프레임 번호로.
 
-    `-ss` 시각 탐색을 쓰지 않는다: 요청한 시각과 디코드된 프레임이 어긋나면
-    이웃 프레임이 조용히 뽑힌다. `select=eq(n,번호)`는 디코드 출력(=제시 순서)
-    의 프레임 번호를 직접 고른다. 인코딩 설정은 고정되어 같은 프레임이면 같은
-    바이트를 낸다 — 해시 대상의 결정성이 계약이다(P5-04).
+    기본은 `select=eq(n,번호)`로 디코드 출력(=제시 순서)의 프레임 번호를 직접 고른다 —
+    스트림 처음부터 디코드하므로 번호에 비례해 느리다(4K HEVC 썸네일 24장에 30분 넘게, D62).
+
+    `seek`(`probe_frame_seek_plan`의 증명)이 있으면 빠른 길이다: 목표 시각보다 여유만큼 앞에서
+    입력을 찾아가고(`-ss`, 정확 찾기 끔 — 키프레임에서 시작해 아무것도 버리지 않는다)
+    `-copyts`로 절대 PTS를 지켜 `select=eq(pts,격자 값)`으로 **같은 프레임**을 고른다. 시각을
+    맞추는 것이 아니라 증명된 격자의 정수 PTS로 고르므로 이웃 프레임이 뽑히지 않는다. 찾아간
+    자리는 `원점 상대 시각 + 컨테이너 시작`이라 목표보다 늦을 수 없다. 옛 방법으로 돌아가는 때:
+    증명이 없을 때(VFR·양자화 시계·버림 패킷·다른 스트림), 번호가 격자 밖일 때, 빠른 길이
+    그림을 내지 못했을 때(경고). 두 길의 바이트가 같음은 실 ffmpeg 시험이 증명한다 — 그래서
+    썸네일 캐시 열쇠는 그대로다. 인코딩 설정은 고정이다(같은 프레임 = 같은 바이트, P5-04).
     """
     _require_index(stream_index, "스트림 번호")
     _require_index(frame_index, "프레임 번호")
@@ -1497,14 +1631,52 @@ def extract_frame_index(
         raise RuntimeError(f"long_edge는 양수 정수여야 합니다: {long_edge!r}")
     ffmpeg = require_ffmpeg()
     destination.parent.mkdir(parents=True, exist_ok=True)
+    if seek is not None and seek.stream_index == stream_index and frame_index < seek.frame_count:
+        fast = _seek_frame_command(ffmpeg, source, seek, frame_index, destination, long_edge)
+        _run_niced(fast, priority)
+        if destination.is_file():
+            log.debug(f"프레임 찾기 추출 완료: {destination} (프레임 {frame_index})")
+            return destination
+        log.warn(
+            f"빠른 프레임 찾기가 그림을 못 냈다 — 처음부터 디코드합니다: {source} #{frame_index}"
+        )
     command = _frame_extraction_command(
         ffmpeg, source, stream_index, frame_index, destination, long_edge
     )
-    _run(command)
+    _run_niced(command, priority)
     if not destination.is_file():
         raise RuntimeError(f"프레임 이미지가 남지 않았습니다: {destination}")
     log.debug(f"프레임 추출 완료: {destination} (스트림 {stream_index}, 프레임 {frame_index})")
     return destination
+
+
+def _seek_frame_command(
+    ffmpeg: str,
+    source: Path,
+    seek: FrameSeekPlan,
+    frame_index: int,
+    destination: Path,
+    long_edge: int,
+) -> list[str]:
+    """빠른 길의 argv — 옛 argv와 다른 것은 입력 앞 찾기·`-copyts`·select 식뿐이다(출력은 같다)."""
+    target_pts = seek.first_pts + frame_index * seek.frame_ticks
+    start = frame_index * seek.frame_ticks * seek.time_base - seek.margin_seconds
+    jump = [] if start <= 0 else ["-noaccurate_seek", "-ss", _format_us(start, ceil=False)]
+    frame_filter = f"select=eq(pts\\,{target_pts})" + "," + _long_edge_scale(long_edge)
+    return [
+        ffmpeg, "-hide_banner", "-nostdin", "-y",
+        *jump, "-copyts",
+        "-i", str(source),
+        "-map", f"0:{seek.stream_index}",
+        "-vf", frame_filter,
+        "-fps_mode", "passthrough",
+        "-frames:v", "1",
+        "-q:v", str(_JPEG_QUALITY),
+        "-pix_fmt", _JPEG_PIXFMT,
+        "-fflags", "+bitexact",
+        "-flags:v", "+bitexact",
+        str(destination),
+    ]  # fmt: skip
 
 
 def extract_frame_indices(
@@ -3283,6 +3455,35 @@ class VisualPreviewUnsupported(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
+class PreviewEncoding:
+    """다시 인코딩할 때의 미리보기 조리법(D62) — 값은 호출자의 설정에서 온다(규칙 8).
+
+    긴 변을 `long_edge` 안으로 줄이고(키우지 않는다·비율 유지·짝수 변) x264 `preset`·`crf`로
+    만든다. 크기만 바꾸는 필터라 시각(PTS)·프레임 수는 그대로다. 코덱 복사(브라우저가 그대로
+    재생하는 원본)에는 쓰이지 않는다.
+    """
+
+    long_edge: int
+    preset: str
+    crf: int
+
+    def tag(self) -> str:
+        """기록에 남기는 이름 — 이 미리보기를 무엇으로 만들었는가(캐시 열쇠가 아니다)."""
+        return f"libx264/{self.preset}/crf{self.crf}/le{self.long_edge}"
+
+    def scale_filter(self) -> str:
+        """긴 변만 줄이는 스케일 — 회전은 그 앞에서 ffmpeg 자동 회전이 이미 물리로 적용했다.
+
+        고정하는 변은 `min(변, 한도)`를 짝수로 내리고 다른 변은 `-2`(비율 유지·짝수)다 —
+        H.264 4:2:0이 홀수 변을 못 담는다. 한도보다 작은 입력은 줄지 않는다(짝수 내림 1픽셀뿐).
+        """
+        edge = self.long_edge
+        wide = f"trunc(min(iw,{edge})/2)*2"
+        tall = f"trunc(min(ih,{edge})/2)*2"
+        return f"scale=w='if(gte(iw,ih),{wide},-2)':h='if(gte(iw,ih),-2,{tall})'"
+
+
+@dataclass(frozen=True, slots=True)
 class VisualPreviewExtraction:
     """원본 전체 미리보기의 실측 — 화면 기하·회전·시각 원점까지 남긴다.
 
@@ -3314,23 +3515,36 @@ class VisualPreviewExtraction:
     source_audio_codec: str | None
     ffmpeg_version: str
     warnings: tuple[str, ...]
+    encoding: str | None = None
+    """다시 인코딩했으면 그 조리법 이름(`PreviewEncoding.tag`) — 복사·잰 기록·옛 조리법은 None."""
+
+
+def _visual_video_args(
+    video: RawVideoMedia, encoding: PreviewEncoding | None
+) -> tuple[list[str], list[str], bool]:
+    """영상 다리의 인자·경고·복사 여부 — 복사 판정은 자막 미리보기와 같다."""
+    if video.codec_name == "h264" and video.pix_fmt in _CAPTION_PREVIEW_VIDEO_COPY_PIXFMTS:
+        return ["-c:v", "copy"], [], True
+    note = f"영상 {video.codec_name}/{video.pix_fmt}을(를) H264 8bit로 변환했다 (원본은 그대로다)"
+    if encoding is None:
+        legacy = ["-c:v", "libx264", *_CAPTION_PREVIEW_X264_ARGS, "-pix_fmt", "yuv420p"]
+        return legacy, [note], False
+    args = [
+        "-vf", encoding.scale_filter(),
+        "-c:v", "libx264", "-preset", encoding.preset, "-crf", str(encoding.crf),
+        "-pix_fmt", "yuv420p",
+    ]  # fmt: skip
+    return args, [note + f" — 긴 변 {encoding.long_edge} 이하 검토용"], False
 
 
 def _visual_preview_args(
-    probe: RawMediaProbe, track: RawAudioTrack | None
+    probe: RawMediaProbe, track: RawAudioTrack | None, encoding: PreviewEncoding | None = None
 ) -> tuple[list[str], tuple[str, ...], bool]:
-    """브라우저 재생 인코딩 인자 — 자막 미리보기와 같은 판정, 침묵은 영상만 지나간다."""
-    video = probe.video
-    video_copy = video.codec_name == "h264" and video.pix_fmt in _CAPTION_PREVIEW_VIDEO_COPY_PIXFMTS
-    warnings: list[str] = []
-    args: list[str] = []
-    if video_copy:
-        args += ["-c:v", "copy"]
-    else:
-        args += ["-c:v", "libx264", *_CAPTION_PREVIEW_X264_ARGS, "-pix_fmt", "yuv420p"]
-        warnings.append(
-            f"영상 {video.codec_name}/{video.pix_fmt}을(를) H264 8bit로 변환했다 (원본은 그대로다)"
-        )
+    """브라우저 재생 인코딩 인자 — 자막 미리보기와 같은 판정, 침묵은 영상만 지나간다.
+
+    `encoding`이 없으면 예전 조리법(크기 그대로·medium·crf 20)이다 — 작업대는 언제나 준다(D62).
+    """
+    args, warnings, video_copy = _visual_video_args(probe.video, encoding)
     if track is None:
         return args, tuple(warnings), video_copy
     if track.codec_name == "aac":
@@ -3343,21 +3557,30 @@ def _visual_preview_args(
 
 @process_step("미리보기 만들기")
 def extract_visual_review_preview(
-    source: Path, staging_output: Path, *, audio_stream_index: int | None
+    source: Path,
+    staging_output: Path,
+    *,
+    audio_stream_index: int | None,
+    encoding: PreviewEncoding | None = None,
+    timeout_seconds: float | None = None,
+    priority: int | None = None,
 ) -> VisualPreviewExtraction:
     """원본 전체를 브라우저 재생 MP4로 **스테이징에** 만든다 — 침묵·선택 트랙 한 개.
 
     매핑은 영상 첫 스트림과 (고르면) 지정한 오디오 스트림 하나뿐이다. `-ss`를 쓰지
-    않아 원본 시각이 그대로 흐른다. 크기·회전을 바꾸는 필터는 하나도 없다 —
-    재인코딩할 때 ffmpeg의 기본 autorotate가 방향을 지킨다. 스테이징 안전장치는
-    `extract_raw_clip`·`extract_caption_preview`과 같은 것을 쓴다.
+    않아 원본 시각이 그대로 흐른다. 회전은 재인코딩할 때 ffmpeg의 기본 autorotate가
+    물리로 적용해 방향을 지킨다. 다시 인코딩할 때 `encoding`이 있으면 긴 변만 줄인다(D62) —
+    크기 필터는 PTS를 건드리지 않으므로 원점 측정(`video_origin`)은 그대로다. 코덱 복사는
+    크기·바이트를 바꾸지 않는다. `timeout_seconds`는 호출자가 원본 길이로 정한 한도,
+    `priority`는 nice 값이다. 스테이징 안전장치는 `extract_raw_clip`·`extract_caption_preview`과
+    같은 것을 쓴다.
     """
     _assert_safe_staging(source, staging_output)
     probe = probe_raw_media(source)
     track = (
         None if audio_stream_index is None else _caption_preview_track(probe, audio_stream_index)
     )
-    codec_args, warnings, remuxed = _visual_preview_args(probe, track)
+    codec_args, warnings, remuxed = _visual_preview_args(probe, track, encoding)
     staging_output.parent.mkdir(parents=True, exist_ok=True)
     staged = _reserve_staging_temp(staging_output)
     try:
@@ -3369,7 +3592,7 @@ def extract_visual_review_preview(
         if track is not None:
             command += ["-map", f"0:{track.stream_index}"]
         command += ["-dn", "-sn", *codec_args, "-movflags", "+faststart", "-f", "mp4", str(staged)]
-        _run(command)
+        _run_niced(command, priority, timeout=timeout_seconds)
     except BaseException:
         staged.unlink(missing_ok=True)
         raise
@@ -3399,6 +3622,7 @@ def extract_visual_review_preview(
         source_audio_codec=None if track is None else track.codec_name,
         ffmpeg_version=_tool_version("ffmpeg"),
         warnings=warnings,
+        encoding=encoding.tag() if encoding is not None and "-vf" in codec_args else None,
     )
 
 

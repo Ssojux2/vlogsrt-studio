@@ -1147,6 +1147,15 @@ class RawWorkspaceService:
         """서버 시작 경로 전용 — 진행 중 작업을 재개 가능 상태로 돌린다(§14.1)."""
         return self._jobs(root).recover_interrupted()
 
+    def sweep_preview_leftovers(self, root: Path) -> int:
+        """끊긴 미리보기·썸네일 만들기의 잔재를 치운다 — 지운 바이트 수(D62).
+
+        죽은 pid의 임시 파일만 지우고 게시본은 건드리지 않는다. 끊긴 'preparing' 기록은 닫아
+        「미리보기 다시 준비」가 보이게 한다. 서버 시작이 작업 복구 뒤에 부른다.
+        """
+        active = self.active_jobs(root, (VISUAL_PREPARE_JOB_KIND,))
+        return visual_review.sweep_preview_leftovers(self._workspace(root), active)
+
     def source_media_names(self, root: Path) -> dict[str, tuple[str, float | None]]:
         """경로 → (원본 이름, 길이 초) — 「지금 도는 작업」이 ffmpeg 입력을 원본으로 읽는다(D61).
 

@@ -1398,6 +1398,11 @@ class RawWorkspaceUi:
         root = Path(status.workspace_root)
         self._set_root(root)
         recovered = self.raw.recover_interrupted_jobs(root)
+        try:
+            # 복구 뒤라 돌던 만들기는 하나도 없다 — 끊긴 잔재만 남았다(D62).
+            self.raw.sweep_preview_leftovers(root)
+        except OSError as error:
+            log.warn(f"미리보기 잔재를 치우지 못했습니다(그대로 둡니다): {error}")
         self._quick = self.raw.load_selection_state(root)
         if (
             self._quick.get("asset_ids")
