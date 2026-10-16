@@ -244,7 +244,9 @@ from vlogsrt.project.raw.workspace import (
     DB_NAME,
     PROJECT_TOML_NAME,
     RawWorkspace,
+    anchor_wal,
     new_segment_plan_revision_id,
+    release_wal_anchor,
 )
 
 __all__ = [
@@ -1033,9 +1035,23 @@ class RawWorkspaceService:
         return self.workspace_status(workspace.root)
 
     def open_workspace(self, root: Path) -> WorkspaceStatus:
-        """작업공간을 연다 — 작업 복구는 하지 않는다(서버 시작 때 한 번만, §14.1)."""
+        """작업공간을 연다 — 작업 복구는 하지 않는다(서버 시작 때 한 번만, §14.1).
+
+        캐시된 작업공간을 다시 열 때도 WAL 닻을 다시 세운다 — 화면이 닫으며 닻을 놓았을 수
+        있다(`close_workspace`). 이미 서 있으면 순서만 앞으로 당긴다(새 연결 0).
+        """
         workspace = self._workspace(root)
+        anchor_wal(workspace.root / DB_NAME)
         return self.workspace_status(workspace.root)
+
+    def close_workspace(self, root: Path) -> None:
+        """화면이 작업공간을 닫는다(D64 세션 F) — WAL 닻만 놓는다. DB·파일은 그대로다.
+
+        캐시된 작업공간과 작업 관리자는 버리지 않는다 — 관리자를 새로 만들면 그 시작 복구가
+        다른 탭에서 살아 있는 작업을 중단으로 적을 수 있다(관리자는 서비스에 하나). 다시 열면
+        `open_workspace`가 닻을 다시 세운다.
+        """
+        release_wal_anchor(root.expanduser().resolve() / DB_NAME)
 
     def workspace_status(self, root: Path) -> WorkspaceStatus:
         workspace = self._workspace(root)

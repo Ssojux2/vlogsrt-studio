@@ -388,6 +388,11 @@ TOAST_TITLES = {"error": "오류", "warning": "주의", "info": "알림", "succe
 """
 CONFIRM_ALL_SOURCE_ID = "vl-queue-confirm-src"
 """대기열의 「남은 M개 모두 제외 유지」가 누르는 숨은 단추 — 옛 「자동 제외 확인」 처리기다."""
+LIBRARY_CLOSE_TEXT = "라이브러리 닫기"
+LIBRARY_CLOSE_ID = "vl-library-close"
+"""머리줄의 「라이브러리 닫기」(D64 세션 F) — 열린 작업공간이 있을 때만 보인다."""
+LIBRARY_CLOSE_SOURCE_ID = "vl-library-close-src"
+"""머리줄 닫기 단추가 누르는 숨은 그라디오 단추 — 처리기·입출력은 그쪽에 묶인다."""
 
 _CHECK_SVG = (
     '<svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2"'
@@ -505,13 +510,17 @@ def keysheet_html() -> str:
     )
 
 
-def topbar_html(*, online: bool, mode_note: str, project: str, flow: str) -> str:
-    """머리줄(44px) — 이름 · 프로젝트(왼쪽 서랍) · 흐름 단계 · 연결 방식 · 단축키 · 설정.
+def topbar_html(
+    *, online: bool, mode_note: str, project: str, flow: str, can_close: bool = False
+) -> str:
+    """머리줄(44px) — 이름 · 프로젝트(왼쪽 서랍) · 닫기 · 흐름 단계 · 연결 방식 · 단축키 · 설정.
 
     연결 방식은 돈이 나갈 수 있음을 말하므로 온라인이면 경고 모양이다(뒤꼬리 글이 아니다).
-    `flow`는 `flow_steps_html`이 지은(이스케이프된) 조각이다.
+    `flow`는 `flow_steps_html`이 지은(이스케이프된) 조각이다. 「라이브러리 닫기」는 열린 작업공간이
+    있을 때만 보인다(`can_close`) — 그 뒤로는 작업대 값의 닫힘 표지를 실행본이 따른다.
     """
     mode = "online" if online else "offline"
+    hidden = "" if can_close else " hidden"
     return (
         '<header class="vl-topbar">'
         '<span class="vl-wordmark">vlogsrt</span>'
@@ -519,6 +528,9 @@ def topbar_html(*, online: bool, mode_note: str, project: str, flow: str) -> str
         ' aria-controls="project-tools" title="프로젝트 · 라이브러리 가져오기">'
         f'<span id="vl-project-name">{html.escape(project or PROJECT_EMPTY_LABEL)}</span>'
         f"{_CHEVRON_SVG}</button>"
+        f'<button type="button" id="{LIBRARY_CLOSE_ID}" class="vl-btn vl-btn-ghost vl-btn-sm"'
+        f' title="작업공간을 닫고 빈 화면으로 — 원본·분석 결과는 그대로입니다"{hidden}>'
+        f"{LIBRARY_CLOSE_TEXT}</button>"
         f'<nav id="vl-flow" class="vl-steps" aria-label="작업 단계">{flow}</nav>'
         '<span class="vl-grow"></span>'
         f'<span class="vl-mode {mode}" data-vl-mode="{mode}"><span class="vl-dot"'
@@ -1046,6 +1058,18 @@ __VL_SERVER_ACTIVITY__
       { childList: true, subtree: true, characterData: true });
     W.__vlToastTitles(wrap);
   }
+  // 「라이브러리 닫기」 — 숨은 그라디오 단추를 누른다(처리기·입출력·활동 칸 답은 그쪽에 있다).
+  function closeLibrary() {
+    var source = byId("vl-library-close-src");
+    if (source && source.tagName !== "BUTTON" && source.querySelector) {
+      source = source.querySelector("button") || source;
+    }
+    if (!source || typeof source.click !== "function") {
+      A.show("라이브러리 닫기 단추를 찾지 못했습니다. 새로고침하세요.", "reply");
+      return;
+    }
+    source.click();
+  }
   function watch() { A.watchStatus(); A.readUsage(); watchDrawers(); watchToasts(); }
   W.setInterval(watch, WATCH_MS);
   watch();
@@ -1067,6 +1091,7 @@ __VL_SERVER_ACTIVITY__
       return;
     }
     if (t.closest("#vl-activity-key")) { A.openKey(true); return; }
+    if (t.closest("#vl-library-close")) { closeLibrary(); return; }
     if (!t.closest("#vl-keysheet, #vl-activity-log")) { closePopovers(null); }
   });
   // Esc — 떠 있는 판부터, 없으면 서랍을 닫는다(재생 단축키 표에는 없는 키다).
@@ -1158,12 +1183,16 @@ def visual_player_shell_html(video_src: str | None, note: str) -> str:
 
 
 def _flow_attributes(project: str | None, flow: FlowCounts | None) -> str:
-    """머리줄로 옮길 값 — 프로젝트 이름과 흐름 단계 조각(이스케이프된 HTML)을 속성에 싣는다."""
+    """머리줄로 옮길 값 — 프로젝트 이름과 흐름 단계 조각(이스케이프된 HTML)을 속성에 싣는다.
+
+    작업공간이 없으면(`project` 없음) 닫힘 표지도 싣는다 — 실행본이 「라이브러리 닫기」를 숨긴다.
+    """
     if flow is None:
         return ""
     steps = html.escape(flow_steps_html(flow_steps(flow)), quote=True)
     name = html.escape(project or PROJECT_EMPTY_LABEL, quote=True)
-    return f' data-vl-flow="{steps}" data-vl-project="{name}"'
+    closed = ' data-vl-closed="1"' if project is None else ""
+    return f' data-vl-flow="{steps}" data-vl-project="{name}"{closed}'
 
 
 def visual_workbench_html(
@@ -4505,6 +4534,12 @@ VISUAL_BOOTSTRAP_JS = (
     var project = fresh.getAttribute("data-vl-project");
     var name = d.getElementById("vl-project-name");
     if (project !== null && name && name.textContent !== project) { name.textContent = project; }
+    // 「라이브러리 닫기」 — 열린 작업공간이 있을 때만 보인다(닫힘 표지가 없을 때).
+    var closer = d.getElementById("vl-library-close");
+    if (steps !== null && closer) {
+      var shut = fresh.hasAttribute("data-vl-closed");
+      if (closer.hidden !== shut) { closer.hidden = shut; }
+    }
   };
   var wireCommitted = function () {
     var d = W.__vlVisualDoc || document;

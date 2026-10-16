@@ -27,7 +27,7 @@ from datetime import UTC, datetime
 from decimal import ROUND_CEILING, Decimal
 from fractions import Fraction
 from pathlib import Path
-from typing import Any
+from typing import Any, get_args
 
 # 로컬 전용 UI다 — gradio의 사용 보고가 네트워크를 만지지 않게 수입 전에 끈다.
 os.environ.setdefault("GRADIO_ANALYTICS_ENABLED", "False")
@@ -352,6 +352,18 @@ UNREVIEWED_KEYWORD = "제외 제안(미검토)"
 """보낸 파일의 미검토 제외 제안에 붙는 Final Cut 키워드 이름 — `finalcut_timeline`의
 `KEYWORD_UNREVIEWED`와 같다(시험)."""
 NO_WORKSPACE_TEXT = "작업공간이 열려 있지 않습니다. Final Cut 라이브러리를 먼저 불러오세요."
+LIBRARY_CLOSE_LABEL = ui_facade.LIBRARY_CLOSE_TEXT
+LIBRARY_CLOSED_TEXT = (
+    "라이브러리를 닫았습니다 — 원본·분석 결과는 그대로이고, 다시 불러오면 이어서 엽니다."
+)
+LIBRARY_CLOSE_NOTHING = "열린 라이브러리가 없습니다."
+LIBRARY_CLOSE_BUSY_ANALYSIS = (
+    "분석이 도는 중입니다 — 「전체 분석 취소」 뒤에 닫으세요. 아무것도 바꾸지 않았습니다."
+)
+LIBRARY_CLOSE_BUSY_JOBS = (
+    "작업이 도는 중입니다({jobs}) — 끝난 뒤에 닫으세요. 아무것도 바꾸지 않았습니다."
+)
+"""닫기를 거절하는 답 — 도는 작업이 닫힌 작업공간에 결과를 쓰거나 화면 기억을 되살리지 않게 한다."""
 CONFIRM_ALL_SOURCE_LABEL = "남은 제외 제안 모두 제외 유지"
 """제안 대기열의 「남은 M개 모두 제외 유지」가 누르는 숨은 단추 — 옛 「자동 제외 확인」의 처리기
 그대로다(같은 서비스 호출, D57 C). 화면에 보이는 단추는 대기열 안에 있다."""
@@ -379,6 +391,20 @@ MODEL_BUSY_JOB_KINDS = (
     LIBRARY_APPROVAL_JOB_KIND,
 )
 """이 작업이 도는 동안에는 분석 모델을 바꾸지 않는다 — 견적·승인이 본 모델과 실행 모델이 갈린다."""
+CLOSE_CANCELS_JOB_KINDS = frozenset(
+    {
+        "library_quote",
+        "selection_quote",
+        "source_preview",
+        raw_service.VISUAL_PREPARE_JOB_KIND,
+    }
+)
+"""「라이브러리 닫기」가 취소를 요청하고 닫는 작업(D64 F) — 돈이 들지 않는 로컬 일이고, 다시 열면
+견적·미리보기·썸네일을 다시 만든다. 늦게 끝난 라이브러리 견적은 닫기 세대가 막는다."""
+CLOSE_OUTLIVES_JOB_KINDS = frozenset({raw_service.UPKEEP_JOB_KIND, raw_service.SYNC_CHECK_JOB_KIND})
+"""닫아도 그대로 끝나게 두는 작업 — 무료 로컬이고 DB에만 쓴다(화면 기억 없음). 서비스가 실행마다
+한 번만 걸므로(`_upkeep_tries`·`_sync_tries`) 취소하면 서버를 다시 띄울 때까지 다시 걸리지 않는다.
+두 목록 밖의 종류(분석·승인·가져오기·내보내기·보내기·모르는 종류)는 닫기를 막는다."""
 ACTIVITY_ROUTE = ui_facade.ACTIVITY_ROUTE
 """「기록」 판의 서버 쪽(D61) — 읽기만 하는 GET 하나. 다른 경로와 같은 Host/Origin 가드를 지난다."""
 ACTIVITY_LOG_PAGE = 500
@@ -1354,6 +1380,8 @@ class RawWorkspaceUi:
         )
         self._library_quotes: dict[Path, Any] = {}
         self._library_cached_ids: dict[Path, set[str]] = {}
+        # 「라이브러리 닫기」마다 오른다 — 닫기 전에 띄운 견적의 늦은 쓰기를 막는다(D64 F).
+        self._close_epoch = 0
         # 남은 영상의 견적(라이브러리 견적, 남은 영상, 그 견적) — 라이브러리 견적 칸은 늘 전체다
         # (선택 분석·진행 수가 그렇게 읽는다). 라이브러리 견적이나 남은 영상이 바뀌면 다시 묶는다.
         self._library_pending_quotes: dict[Path, tuple[Any, tuple[str, ...], Any]] = {}
@@ -1499,6 +1527,16 @@ class RawWorkspaceUi:
         self.state_path.write_text(
             json.dumps({"workspace_root": str(root)}, ensure_ascii=False, indent=2),
             encoding="utf-8",
+        )
+
+    def _forget_state(self) -> None:
+        """마지막 작업공간 기록을 지운다 — 닫은 뒤 서버를 다시 띄우면 빈 화면이다(D64 세션 F)."""
+        state = self._read_state()
+        if "workspace_root" not in state:
+            return
+        state.pop("workspace_root")
+        self.state_path.write_text(
+            json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8"
         )
 
     def _set_root(self, root: Path | None) -> None:
@@ -2421,6 +2459,8 @@ class RawWorkspaceUi:
         if not ids:
             return
 
+        epoch = self._close_epoch
+
         def prepare(context: Any) -> None:
             context.check_cancel()
             measured = self.raw.selection_quote(root, ids)
@@ -2434,18 +2474,22 @@ class RawWorkspaceUi:
             context.check_cancel()
             if not self._quote_current(root, measured, "라이브러리"):
                 return
-            self._library_cached_ids[root] = cached
             # 범위·교차 확인은 끝난 순간의 것으로 묶는다 — 재는 사이 바꿨어도 지금 값의 견적이 선다.
-            self._library_quotes[root] = self.raw.selection_rebound_quote(
-                root, measured, ids, self._approval_mode(root)
-            )
+            quote = self.raw.selection_rebound_quote(root, measured, ids, self._approval_mode(root))
+            with self._selection_lock:
+                if self._close_epoch != epoch:
+                    return  # 그 사이 라이브러리를 닫았다 — 닫힌 작업공간의 견적을 되살리지 않는다
+                self._library_cached_ids[root] = cached
+                self._library_quotes[root] = quote
 
         model = self.raw.settings(root).models.luna_model
         cross = self.raw.cross_check_enabled(root)  # 켬·끔이 바뀌면 다시 잰다(재사용 셈이 바뀐다)
         # 용어집도 결속 꼬리표(요청 신원)에 실린다 — 바뀌면 도는 재기에 붙지 않고 새로 잰다
         # (D59 19e).
         terms = self._glossary_sha(root)
-        self.raw.submit_job(root, "library_quote", repr((ids, model, cross, terms)), prepare)
+        # 닫기 세대도 지문에 싣는다 — 닫은 뒤 다시 열면 취소 요청된 옛 작업에 붙지 않고 새로 잰다.
+        fingerprint = repr((ids, model, cross, terms, *((epoch,) if epoch else ())))
+        self.raw.submit_job(root, "library_quote", fingerprint, prepare)
 
     def library_analysis_summary(self) -> str:
         root = self._snapshot_root()
@@ -3870,6 +3914,10 @@ class RawWorkspaceUi:
             self._confirm_auto_button = gr.Button(
                 CONFIRM_ALL_SOURCE_LABEL, visible="hidden", elem_id=ui_facade.CONFIRM_ALL_SOURCE_ID
             )
+            # 「라이브러리 닫기」의 원천 — 화면의 단추는 머리줄에 있고 이 숨은 단추를 누른다.
+            self._library_close_button = gr.Button(
+                LIBRARY_CLOSE_LABEL, visible="hidden", elem_id=ui_facade.LIBRARY_CLOSE_SOURCE_ID
+            )
             gr.HTML(
                 ui_facade.activity_html(),
                 elem_id="vl-activity-block",
@@ -4785,6 +4833,90 @@ class RawWorkspaceUi:
         self._remember(Path(status.workspace_root))
         return self.workspace_view_values()
 
+    def close_library_view(self, signature: str | None) -> tuple:
+        """「라이브러리 닫기」(D64 세션 F) — 작업공간을 닫고 빈 화면을 내린다.
+
+        닫는 것은 화면의 선택뿐이다: 원본·DB·분석 결과는 그대로이고 같은 라이브러리를 다시
+        불러오면 이어서 연다. 작업이 돌면 닫지 않고 아무것도 바꾸지 않는다 — 도는 작업이 닫힌
+        작업공간의 화면 기억(견적·알림)을 되살리거나, 닫은 뒤 그 결과를 아무도 보지 못하게 된다.
+        """
+        if self._snapshot_root() is None:
+            return (LIBRARY_CLOSE_NOTHING, *self._closed_view())
+        root = self._require_current_selection(signature)
+        # 승인 클릭과 한 덩어리로 — 확인과 닫기 사이에 새 승인이 제출되지 않는다.
+        with self._approval_lock:
+            refusal = self._close_refusal(root)
+            if refusal is None:
+                self._close_library(root, signature)
+        if refusal is not None:
+            return (refusal, *(gr.skip() for _ in self._closed_view_arity()))
+        return (LIBRARY_CLOSED_TEXT, *self._closed_view())
+
+    def _close_refusal(self, root: Path) -> str | None:
+        """닫기를 막는 까닭 — 분석·승인, 또는 무료 로컬 목록 밖의 도는 작업. 없으면 None."""
+        if self._analysis_busy(root):
+            return LIBRARY_CLOSE_BUSY_ANALYSIS
+        free = CLOSE_CANCELS_JOB_KINDS | CLOSE_OUTLIVES_JOB_KINDS
+        blocking = [job for job in self.raw.all_active_jobs(root) if job.kind not in free]
+        if not blocking:
+            return None
+        counts: dict[str, int] = {}
+        for job in blocking:
+            label = ACTIVITY_JOB_LABELS.get(job.kind, f"작업({job.kind})")
+            counts[label] = counts.get(label, 0) + 1
+        jobs = " · ".join(f"{label} {count}개" for label, count in counts.items())
+        return LIBRARY_CLOSE_BUSY_JOBS.format(jobs=jobs)
+
+    def _close_library(self, root: Path, signature: str | None) -> None:
+        """선택을 거두고 그 작업공간 몫의 화면 기억(견적·알림·이름)을 걷는다 — 다시 열면 다시 잰다.
+
+        영상별 작업 기록(`_quick_tasks`)은 남긴다 — 도는 것은 없고(거절했다), 지우면 다시 열 때
+        DB의 「승인 대기」가 서버 재시작처럼 「중단 · 재시도 승인 필요」로 되살아난다(실측).
+        """
+        for job in self.raw.all_active_jobs(root):
+            if job.kind in CLOSE_CANCELS_JOB_KINDS:
+                with contextlib.suppress(raw_service.RawWorkspaceError):
+                    self.raw.cancel_job(root, job.job_id)
+        self._set_root(None)
+        with self._selection_lock:
+            self._close_epoch += 1  # 늦게 끝나는 라이브러리 견적이 닫힌 뒤에 쓰지 못한다
+            for store in (
+                self._library_quotes,
+                self._library_pending_quotes,
+                self._library_cached_ids,
+                self._approval_notice,
+                self._approval_jobs,
+                self._project_names,
+            ):
+                store.pop(root, None)
+            if signature:
+                self._finalcut_sent.pop(signature, None)
+                self._finalcut_announced.pop(signature, None)
+                self._capcut_quote_phase.pop(signature, None)
+            self._capcut_render_generation += 1
+        self._forget_state()
+        self.raw.close_workspace(root)
+
+    def _closed_view(self) -> tuple:
+        """닫은 뒤의 화면 — 전체 보기 · FCP 연결 칸 · 1초 상태 칸 다섯 · 그 칸들의 비운 기억."""
+        cells = (
+            self.library_analysis_button(),
+            self.library_analysis_summary_markdown(),
+            self._quick_status(),
+            gr.Markdown(value="", visible=False),
+            self.usage_line_markdown(),
+        )
+        return (
+            *self.workspace_view_values(),
+            *self.capcut_fcp_panel_view(),
+            *cells,
+            *(None for _ in STATUS_SENT_CELLS),
+        )
+
+    def _closed_view_arity(self) -> range:
+        """거절 답이 건너뛸 칸 수 — `_closed_view`와 같은 모양(처리기를 부르지 않고 센다)."""
+        return range(len(get_args(WorkspaceView)) + 3 + 2 * len(STATUS_SENT_CELLS))
+
     def workspace_view_values(self) -> WorkspaceView:
         """작업공간 전환 뒤 화면이 받아야 하는 전체 보기(서명 포함).
 
@@ -5647,6 +5779,7 @@ class RawWorkspaceUi:
             mode_note=ONLINE_MODE_NOTE if online else OFFLINE_MODE_NOTE,
             project=self._project_name(root) if root is not None else "",
             flow=ui_facade.flow_steps_html(ui_facade.flow_steps(counts)),
+            can_close=root is not None,
         )
 
     @staticmethod
@@ -9860,6 +9993,7 @@ class RawWorkspaceUi:
             created.then(self.capcut_fcp_panel_view, None, fcp_outputs)
             loaded = app.load(self.refresh_outputs, None, self._load_outputs())
             loaded.then(self.capcut_fcp_panel_view, None, fcp_outputs)
+            closed = self._wire_library_close([*selection_outputs, *fcp_outputs])
             self._wire_model_refresh(
                 (
                     direct_opened,
@@ -9869,9 +10003,36 @@ class RawWorkspaceUi:
                     created,
                     loaded,
                     self._choose_event,
+                    closed,
                 )
             )
         return app
+
+    def _wire_library_close(self, view_outputs: list[object]) -> Any:
+        """「라이브러리 닫기」 — 답(활동 칸) · 빈 화면 전체 보기 · 1초 상태 칸 다섯과 그 기억.
+
+        닫은 탭의 서명이 비면 1초 틱은 상태 칸을 건너뛰므로 이 사건이 칸을 직접 쓰고, 칸마다
+        「마지막으로 보낸 값」도 같은 사건에서 비운다 — 다시 열면 틱이 새 값을 다시 보낸다.
+        """
+        cells = [
+            self._library_approve_button,
+            self._library_summary_md,
+            self._capcut_progress_md,
+            self._quote_note_md,
+            self._usage_md,
+        ]
+        closed = self._library_close_button.click(
+            self.close_library_view,
+            self._signature_state,
+            [self._capcut_status, *view_outputs, *cells, *self._status_sent],
+            api_name=False,
+            js="""(signature) => {
+                if (window.__vlDrawer) { window.__vlDrawer('project-tools', false); }
+                return signature;
+            }""",
+        )
+        self._report_activity(closed, self._capcut_status)
+        return closed
 
     def _wire_model_refresh(self, events: Sequence[Any]) -> None:
         """작업공간을 열거나 만들거나 바꾸는 사건마다 「영상 분석 모델」 칸·상태 줄을 다시 맞춘다.

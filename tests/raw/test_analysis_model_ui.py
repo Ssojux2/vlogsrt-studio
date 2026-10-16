@@ -155,6 +155,7 @@ def test_every_workspace_change_rewires_the_model_chooser(
             "create_project_chooser_view",
             "refresh_outputs",
             "capcut_choose_view",
+            "close_library_view",  # 「라이브러리 닫기」도 작업공간을 바꾼다(D64 세션 F)
         ]
     )
     assert not any(

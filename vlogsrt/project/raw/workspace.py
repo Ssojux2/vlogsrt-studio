@@ -168,6 +168,21 @@ def anchor_wal(path: Path) -> None:
         connection.close()
 
 
+def release_wal_anchor(path: Path) -> bool:
+    """이 DB의 닻 하나만 닫는다 — 화면이 작업공간을 닫을 때(D64 세션 F). 닻이 없었으면 False.
+
+    닻이 마지막 연결이면 SQLite가 닫으며 체크포인트하고 옆 파일을 지운다. 닫기 전에 명시적
+    `wal_checkpoint(TRUNCATE)`를 걸 자리가 여기다(세션 H) — 지금은 걸지 않는다.
+    """
+    key = path.expanduser().resolve()
+    with _wal_anchor_lock:
+        anchor = _wal_anchors.pop(key, None)
+    if anchor is None:
+        return False
+    anchor.close()
+    return True
+
+
 def release_wal_anchors() -> None:
     """닻을 모두 닫는다 — 마지막 연결이면 SQLite가 체크포인트하고 옆 파일을 지운다."""
     with _wal_anchor_lock:

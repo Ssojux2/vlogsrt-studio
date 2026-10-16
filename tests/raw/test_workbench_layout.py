@@ -44,6 +44,7 @@ ACTION_LABELS = (
     "전체 분석 취소",
     FINALCUT_SEND_LABEL,
     CONFIRM_ALL_SOURCE_LABEL,  # 대기열 단추가 누르는 숨은 원천(옛 「자동 제외 확인」, D57 C)
+    "라이브러리 닫기",  # 머리줄 단추가 누르는 숨은 원천(D64 세션 F)
     "자동 제외 전체 복원",
     "실행 취소",
     "결과 확인",
@@ -244,9 +245,13 @@ def test_every_action_reply_reaches_the_activity_area(tmp_path: Path, local_sock
     assert len(notes) == 1 and notes[0]["trigger_only_on_success"] is True  # 답을 전문 칸에 바로
     cells = [server._quote_note_md._id, server._usage_md._id]
     # 1초 상태 틱 하나가 두 칸을 잇달아 쓴다(D63 세션 C).
-    (cell_tick,) = [
+    writers = [
         d for d in deps if any(d["outputs"][i : i + 2] == cells for i in range(len(d["outputs"])))
     ]
+    (cell_tick,) = [d for d in writers if d["targets"][0][1] == "tick"]
+    # 「라이브러리 닫기」도 두 칸을 직접 쓴다 — 닫은 탭의 틱은 칸을 건너뛴다(D64 세션 F).
+    close_click = [(buttons["라이브러리 닫기"]._id, "click")]
+    assert [d["targets"] for d in writers if d is not cell_tick] == [close_click]
     assert cell_tick["targets"][0][1] == "tick"  # 1초 타이머 — 전문 칸 + 기록 판의 실사용 원천
     # 2초 타이머는 같은 숨은 칸을 다시 쓴다 — 그 쓰기는 활동 칸으로 가지 않는다.
     ticks = [d for d in deps if d["targets"] and d["targets"][0][1] == "tick"]
