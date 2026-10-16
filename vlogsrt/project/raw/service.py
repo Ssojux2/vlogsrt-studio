@@ -27,6 +27,7 @@ from vlogsrt import log, preprocess
 from vlogsrt.env import ANALYSIS_CLAUDE_KEY_ENV
 from vlogsrt.project.raw import (
     analysis_workflow,
+    read_scope,
     segmentation,
     selection_analysis,
     source_verify,
@@ -1195,9 +1196,13 @@ class RawWorkspaceService:
         return load_state(self, root)
 
     def load_selection_states(self, root: Path) -> tuple[dict[str, Any], ...]:
+        """저장된 선택 분석 상태들 — 화면이 받아 고치므로 범위 안에서도 부를 때마다 새 사본이다."""
+        import copy
+
         from vlogsrt.project.raw.selection_analysis import load_states
 
-        return load_states(self, root)
+        key = ("load_selection_states", str(self._workspace(root).root))
+        return copy.deepcopy(read_scope.memo(key, lambda: load_states(self, root)))
 
     def selection_completion(self, root: Path, revision_id: str) -> tuple[str, str | None]:
         from vlogsrt.project.raw.selection_analysis import completion, completion_error
@@ -1840,7 +1845,11 @@ class RawWorkspaceService:
         self, workspace: RawWorkspace, row: AnalysisSourceResult
     ) -> tiering.TierReport | None:
         """등급 보고서의 유일한 자리 — 화면·검토 머리·자동 제외 후보·Final Cut 키워드가 모두 이
-        길로 같은 값(`_tier_timing`)을 받아 같은 등급을 본다(D60, `check_invariants`)."""
+        길로 같은 값(`_tier_timing`)을 받아 같은 등급을 본다(D60, `check_invariants`).
+
+        읽을 때마다 계산하고 어디에도 보관하지 않는다(D51·D52). 그리기 한 번은 원본마다 한 번만
+        부른다(`selection_suitability`를 리비전마다 한 번, D63) — 재료 읽기(분석 개요·시각 확인
+        보고서·원본 자막)는 읽기 범위가 한 번으로 줄인다."""
         if row.status == "transcribed":
             # 1단계만 끝난 행(「전사만」 · 영상 분석 승인 전, D59 19b) — 판정이 없다. 행의 문서는
             # 1단계 기록(`asr_phase.json`)이라 등급 문서로 읽지 않는다.
@@ -2525,6 +2534,10 @@ class RawWorkspaceService:
 
     def sync_check_view(self, root: Path, source_id: str) -> dict[str, Any] | None:
         """작업대 표지·패널의 값 — 측정 불가·걸지 못함은 회색이다(결코 초록이 아니다)."""
+        key = ("sync_check_view", str(root.expanduser().resolve()), source_id)
+        return read_scope.memo(key, lambda: self._read_sync_check_view(root, source_id))
+
+    def _read_sync_check_view(self, root: Path, source_id: str) -> dict[str, Any] | None:
         from vlogsrt.project.raw import sync_report
 
         key = root.expanduser().resolve()
@@ -3654,6 +3667,10 @@ class RawWorkspaceService:
         의미 분석 모델을 바꾸면 다른 모델로 끝난 분석은 끝났다고 보이지 않아야 한다(되돌리면
         다시 맞는다). 없는 리비전은 맞지 않는다.
         """
+        key = ("revision_matches_settings", str(self._workspace(root).root), revision_id)
+        return read_scope.memo(key, lambda: self._read_revision_matches(root, revision_id))
+
+    def _read_revision_matches(self, root: Path, revision_id: str) -> bool:
         revision = AnalysisStore(self._workspace(root)).revision(revision_id)
         if revision is None:
             return False
@@ -3667,6 +3684,10 @@ class RawWorkspaceService:
         원본 재해시·지문 대조는 하지 않는다(초마다 그리는 문구라서). 실제 재사용은 영상을
         고를 때 `cached_selection_analysis`가 전부 확인한다 — 이 답만으로 호출을 건너뛰지 않는다.
         """
+        key = ("stored_analysis_for_settings", str(self._workspace(root).root), tuple(asset_ids))
+        return read_scope.memo(key, lambda: self._read_stored_analysis(root, asset_ids))
+
+    def _read_stored_analysis(self, root: Path, asset_ids: Sequence[str]) -> str | None:
         store = AnalysisStore(self._workspace(root))
         models = self.settings(root).models
         expected = {"timing": models.timing_model, "luna": models.luna_model}
@@ -3719,10 +3740,14 @@ class RawWorkspaceService:
     def analysis_overview(
         self, root: Path, revision_id: str | None = None
     ) -> AnalysisSummary | None:
-        """분석 읽기 모델 — 리비전과 원본별 결과(상태·창 수·실행 모드·오류)."""
+        """분석 읽기 모델 — 리비전과 원본별 결과(상태·창 수·실행 모드·오류).
+
+        읽기 범위(그리기 한 번) 안에서는 리비전 목록과 리비전마다의 결과를 한 번만 읽는다(D63) —
+        리비전을 주든(지금 것) 안 주든 같은 리비전이면 같은 답이다. 값은 얼린 데이터클래스다."""
         workspace = self._workspace(root)
         store = AnalysisStore(workspace)
-        revisions = store.list_revisions()
+        key_root = str(workspace.root)
+        revisions = read_scope.memo(("analysis_revisions", key_root), store.list_revisions)
         revision = None
         if revision_id is not None:
             revision = next((item for item in revisions if item.revision_id == revision_id), None)
@@ -3730,6 +3755,12 @@ class RawWorkspaceService:
             revision = revisions[-1]
         if revision is None:
             return None
+        key = ("analysis_overview", key_root, revision)
+        return read_scope.memo(key, lambda: self._read_analysis_overview(store, revision))
+
+    def _read_analysis_overview(
+        self, store: AnalysisStore, revision: AnalysisRevision
+    ) -> AnalysisSummary:
         return AnalysisSummary(
             revision=revision,
             results=store.list_source_results(revision.revision_id),
@@ -4209,7 +4240,11 @@ class RawWorkspaceService:
                 "검토 작업공간 백엔드(review_workspace)가 이 빌드에 없다 — 병합 뒤"
                 " 활성화된다. 그 전까지 검토 화면은 안내만 보인다."
             ) from error
-        return ReviewWorkspaceFacade(self._workspace(root).root)
+        resolved = self._workspace(root).root
+        # 그리기 한 번 안에서는 작업공간마다 하나다(D63) — 파사드는 상태를 들지 않는다.
+        return read_scope.memo(
+            ("review_workspace_facade", str(resolved)), lambda: ReviewWorkspaceFacade(resolved)
+        )
 
     def caption_workspace(self, root: Path) -> Any:
         """자막 작업공간(W2) — 등록→추정→승인→실행→검토→확정의 정본 handle.

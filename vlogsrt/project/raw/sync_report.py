@@ -38,6 +38,7 @@ from vlogsrt.project.config import (
     validate_sync_check_settings,
 )
 from vlogsrt.project.pcm import PcmReference
+from vlogsrt.project.raw import read_scope
 from vlogsrt.project.sync_check import Check, Cue, Reason
 from vlogsrt.project.vad.inference import infer_vad
 from vlogsrt.project.vad.runtime import VadUnavailable, bundled_artifact, create_cpu_session
@@ -1242,8 +1243,18 @@ def current_report(
     """지금 원본 자막 리비전의 보고서 — 없으면 가장 최근 것을 `stale`로. 읽기만 한다.
 
     `strict`면 1단계 PCM·기준까지 `is_current`로 대조한다(화면 표지는 가벼운 길을 쓴다 —
-    1초 틱마다 1단계 기록을 열지 않게).
+    1초 틱마다 1단계 기록을 열지 않게). 읽기 범위(그리기 한 번) 안에서는 같은 인자에 한 번만
+    읽는다(D63) — 돌려준 문서는 읽기만 한다.
     """
+    key = ("sync_report.current_report", str(workspace.root), source_id, settings, strict)
+    return read_scope.memo(
+        key, lambda: _read_current_report(workspace, source_id, settings, strict=strict)
+    )
+
+
+def _read_current_report(
+    workspace: Any, source_id: str, settings: SyncCheckSettings, *, strict: bool
+) -> dict[str, Any] | None:
     from vlogsrt.project.raw.source_transcript import load
 
     transcript = load(workspace, source_id)

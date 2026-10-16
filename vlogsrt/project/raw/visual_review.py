@@ -52,7 +52,7 @@ from fractions import Fraction
 from pathlib import Path
 
 from vlogsrt import log, preprocess
-from vlogsrt.project.raw import source_verify
+from vlogsrt.project.raw import read_scope, source_verify
 from vlogsrt.project.raw.analysis_config import REVIEW_MEDIA
 from vlogsrt.project.raw.jobs import JobContext
 from vlogsrt.project.raw.media_refs import ORIGINAL_ONLY_FINGERPRINT
@@ -726,7 +726,15 @@ def _registration_for(workspace: RawWorkspace, relative: Path) -> MediaRegistrat
 
 
 def _visual_traces_purged(workspace: RawWorkspace) -> bool:
-    """영상 검토 미리보기의 흔적이 정리됐는가 — 등록 행은 남았는데 파일이 없다(§9.2)."""
+    """영상 검토 미리보기의 흔적이 정리됐는가 — 등록 행은 남았는데 파일이 없다(§9.2).
+
+    질의는 원본마다 이것을 묻는다 — 읽기 범위(그리기 한 번) 안에서는 등록 파일을 한 번만 본다(D63).
+    """
+    key = ("visual_traces_purged", str(workspace.root))
+    return read_scope.memo(key, lambda: _read_traces_purged(workspace))
+
+
+def _read_traces_purged(workspace: RawWorkspace) -> bool:
     return any(
         not (workspace.root / Path(row.relative_path)).is_file()
         for row in workspace.list_media("preview")

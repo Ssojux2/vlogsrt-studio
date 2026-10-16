@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from vlogsrt import log
+from vlogsrt.project.raw import read_scope
 from vlogsrt.project.raw.models import (
     ACTIVE_JOB_STATUSES,
     JobHandle,
@@ -131,6 +132,11 @@ class JobStore:
         return self._record(row)
 
     def list_jobs(self, limit: int = 50) -> tuple[JobRecord, ...]:
+        """최근 작업 — 읽기 범위(그리기 한 번) 안에서는 같은 창을 한 번만 읽는다(D63)."""
+        key = ("jobs.list", str(self._workspace.root), limit)
+        return read_scope.memo(key, lambda: self._read_jobs(limit))
+
+    def _read_jobs(self, limit: int) -> tuple[JobRecord, ...]:
         with self._connect() as connection:
             rows = connection.execute(
                 "SELECT * FROM jobs ORDER BY created_at DESC, job_id DESC LIMIT ?",
@@ -140,6 +146,11 @@ class JobStore:
 
     def active_of_kinds(self, kinds: Collection[str]) -> tuple[JobRecord, ...]:
         """그 종류의 활성 작업 전부 — 최근 몇 개의 창이 아니라 상태로 찾는다(오래된 것이 먼저)."""
+        ordered = tuple(kinds)
+        key = ("jobs.active_of_kinds", str(self._workspace.root), ordered)
+        return read_scope.memo(key, lambda: self._read_active_of_kinds(ordered))
+
+    def _read_active_of_kinds(self, kinds: tuple[str, ...]) -> tuple[JobRecord, ...]:
         kind_marks = ", ".join("?" for _ in kinds)
         status_marks = ", ".join("?" for _ in ACTIVE_JOB_STATUSES)
         with self._connect() as connection:
@@ -152,6 +163,9 @@ class JobStore:
 
     def active(self) -> tuple[JobRecord, ...]:
         """종류를 가리지 않는 활성 작업 전부 — 상태로 찾는다(오래된 것이 먼저). 읽기만 한다."""
+        return read_scope.memo(("jobs.active", str(self._workspace.root)), self._read_active)
+
+    def _read_active(self) -> tuple[JobRecord, ...]:
         status_marks = ", ".join("?" for _ in ACTIVE_JOB_STATUSES)
         with self._connect() as connection:
             rows = connection.execute(
@@ -162,6 +176,10 @@ class JobStore:
 
     def latest_of_kind(self, kind: str) -> JobRecord | None:
         """그 종류의 가장 최근 작업 — 최근 몇 개의 창이 아니라 종류로 찾는다."""
+        key = ("jobs.latest_of_kind", str(self._workspace.root), kind)
+        return read_scope.memo(key, lambda: self._read_latest_of_kind(kind))
+
+    def _read_latest_of_kind(self, kind: str) -> JobRecord | None:
         with self._connect() as connection:
             row = connection.execute(
                 "SELECT * FROM jobs WHERE kind = ? ORDER BY created_at DESC, job_id DESC LIMIT 1",

@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from vlogsrt import log, preprocess
+from vlogsrt.project.raw import read_scope
 from vlogsrt.project.raw.analysis_config import (
     ANALYSIS_PROXY,
     ANALYSIS_PROXY_LIMITS,
@@ -243,11 +244,39 @@ def _save(workspace: Any, asset_id: str, record: dict) -> None:
 
 
 def load(workspace: Any, asset_id: str) -> dict | None:
+    """원본의 미디어 연결 기록 — 읽기 범위(그리기 한 번) 안에서는 기록 전부를 한 번에 읽는다(D63).
+
+    돌려준 기록은 읽기만 한다. 기록을 바탕으로 쓰는 쪽은 `_read_record`로 새로 읽는다."""
+    scope = read_scope.current()
+    if scope is None:
+        return _read_record(workspace, asset_id)
+    root = str(workspace.root)
+
+    def parsed() -> dict | None:
+        raw = scope.memo(("media_refs.records", root), lambda: _read_records(workspace))
+        return json.loads(raw[asset_id]) if asset_id in raw else None
+
+    return scope.memo(("media_refs.load", root, asset_id), parsed)
+
+
+def _read_record(workspace: Any, asset_id: str) -> dict | None:
     with workspace.connect() as connection:
         row = connection.execute(
             "SELECT value FROM meta WHERE key=?", ("media_refs:" + asset_id,)
         ).fetchone()
     return json.loads(row[0]) if row else None
+
+
+def _read_records(workspace: Any) -> dict[str, str]:
+    """원본 → 기록 글 — 열쇠 `media_refs:<원본>` 전부(`LIKE`의 `_`는 아무 글자라 머리를 본다)."""
+    prefix = "media_refs:"
+    with workspace.connect() as connection:
+        rows = connection.execute(
+            "SELECT key, value FROM meta WHERE key LIKE 'media_refs:%'"
+        ).fetchall()
+    return {
+        str(key)[len(prefix) :]: str(value) for key, value in rows if str(key).startswith(prefix)
+    }
 
 
 def connect(workspace: Any, asset_id: str, *, original: Path | None, proxy: Path | None) -> dict:
@@ -318,7 +347,7 @@ def register_direct(workspace: Any, asset_id: str, path: Path) -> str:
     asset = workspace.source_asset(asset_id)
     if resolve(workspace, asset, "preview") != path:
         raise RawWorkspaceError("현재 검증된 미디어만 등록할 수 있습니다")
-    record = load(workspace, asset_id)
+    record = _read_record(workspace, asset_id)
     if not record or record["validation"]["status"] not in ("verified", "proxy_only"):
         raise RawWorkspaceError("검증된 프록시가 아닙니다")
     key = "proxy_" + hashlib.sha256((asset_id + str(path)).encode()).hexdigest()[:24]
@@ -358,7 +387,8 @@ def _uses_source_bytes(workspace: Any, asset_id: str, record: dict) -> bool:
 
 
 def fingerprint(workspace: Any, asset_id: str) -> str:
-    record = load(workspace, asset_id)
+    # 프록시가 바뀌면 기록을 고쳐 쓰므로 기억한 기록(`load`)이 아니라 새로 읽는다(D63).
+    record = _read_record(workspace, asset_id)
     if record is None:
         return ORIGINAL_ONLY_FINGERPRINT
     if record.get("original"):
@@ -667,7 +697,7 @@ def frames_decode_source(
 
 
 def relink_original(workspace: Any, asset_id: str, original: Path) -> dict:
-    record = load(workspace, asset_id)
+    record = _read_record(workspace, asset_id)
     if not record or not record.get("proxy"):
         raise RawWorkspaceError("재연결할 프록시가 없습니다")
     proxy = _unchanged(record["proxy"])

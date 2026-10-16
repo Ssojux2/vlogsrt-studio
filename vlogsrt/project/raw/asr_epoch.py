@@ -18,6 +18,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from vlogsrt.project.raw import read_scope
 from vlogsrt.project.raw.models import RawWorkspaceError
 
 TABLE = "source_asr_epochs"
@@ -45,7 +46,13 @@ def binding_tag(epoch: int) -> str | None:
 
 
 def state(workspace: Any, asset_id: str) -> AsrEpoch:
-    """원본의 차례 — 표나 줄이 없으면 0/0이다. 표를 만들지 않는다."""
+    """원본의 차례 — 표나 줄이 없으면 0/0이다. 표를 만들지 않는다.
+
+    읽기 범위(그리기 한 번) 안에서는 표를 한 번에 읽는다(D63)."""
+    scope = read_scope.current()
+    if scope is not None:
+        epochs = scope.memo(("asr_epoch.states", str(workspace.root)), lambda: _states(workspace))
+        return epochs.get(asset_id, AsrEpoch())
     with workspace.connect() as db:
         if not _table_exists(db):
             return AsrEpoch()
@@ -53,6 +60,14 @@ def state(workspace: Any, asset_id: str) -> AsrEpoch:
             f"SELECT epoch, heard FROM {TABLE} WHERE asset_id=?", (asset_id,)
         ).fetchone()
     return AsrEpoch() if row is None else AsrEpoch(int(row[0]), int(row[1]))
+
+
+def _states(workspace: Any) -> dict[str, AsrEpoch]:
+    with workspace.connect() as db:
+        if not _table_exists(db):
+            return {}
+        rows = db.execute(f"SELECT asset_id, epoch, heard FROM {TABLE}").fetchall()
+    return {str(row[0]): AsrEpoch(int(row[1]), int(row[2])) for row in rows}
 
 
 def current(workspace: Any, asset_id: str) -> int:

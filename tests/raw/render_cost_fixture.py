@@ -132,22 +132,28 @@ Patch = Callable[[object, str, object], None]
 
 COUNTED_FUNCTIONS: tuple[tuple[str, Callable[..., Any]], ...] = (
     ("open_db", workspace.open_db),
-    ("source_transcript.load", source_transcript.load),
+    ("source_transcript.load", source_transcript._read_latest),
+    ("source_transcript.load", source_transcript._read_latest_payloads),
     ("sync_report.gather_source", sync_report.gather_source),
 )
-"""모듈 함수 — 이름으로 가져간 모듈(`from … import open_db`)까지 같은 함수를 갈아 끼운다."""
+"""모듈 함수 — 이름으로 가져간 모듈(`from … import open_db`)까지 같은 함수를 갈아 끼운다.
+
+세는 것은 **실제 읽기**다(W-23 세션 B): 원본 자막·검토 머리·분석 개요는 공개 함수가 읽기
+범위(`read_scope`)에 기억한 답을 돌려줄 수 있어, 그 아래 실제로 DB를 읽는 함수를 센다. 범위가
+없으면 둘은 한 번씩 짝지어 불리므로 세션 A의 수(1fc3b44)와 그대로 견줄 수 있다. 원본 자막은 한
+원본 읽기와 범위 안의 「지금 리비전 전부」 읽기를 같은 이름으로 센다."""
 
 COUNTED_METHODS: tuple[tuple[str, type, str], ...] = (
     ("ReviewWorkspaceFacade()", ReviewWorkspaceFacade, "__init__"),
-    ("load_head", ReviewWorkspaceFacade, "load_head"),
-    ("analysis_overview", RawWorkspaceService, "analysis_overview"),
+    ("load_head", ReviewWorkspaceFacade, "_read_head"),
+    ("analysis_overview", RawWorkspaceService, "_read_analysis_overview"),
     ("visual_workbench_render", RawWorkspaceUi, "visual_workbench_render"),
     ("start_upkeep", RawWorkspaceService, "start_upkeep"),
     ("start_sync_upkeep", RawWorkspaceService, "start_sync_upkeep"),
 )
 
-COUNTED_NAMES: tuple[str, ...] = tuple(name for name, _ in COUNTED_FUNCTIONS) + tuple(
-    name for name, _, _ in COUNTED_METHODS
+COUNTED_NAMES: tuple[str, ...] = tuple(
+    dict.fromkeys((*(name for name, _ in COUNTED_FUNCTIONS), *(n for n, _, _ in COUNTED_METHODS)))
 )
 
 

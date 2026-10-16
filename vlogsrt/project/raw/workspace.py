@@ -28,7 +28,7 @@ from pathlib import Path
 import tomli_w
 
 from vlogsrt import log
-from vlogsrt.project.raw import segmentation
+from vlogsrt.project.raw import read_scope, segmentation
 from vlogsrt.project.raw.config import (
     WORKFLOW_SCHEMA_VERSION,
     RawWorkflowConfig,
@@ -748,8 +748,12 @@ class RawWorkspace:
         """이 작업공간의 불변 신원 — 화면의 선택 검증이 이 토큰을 믿는다.
 
         이 fix 이전에 만들어진 작업공간에는 없다 — 처음 물은 한 번만 정해져 이후
-        불변이다(경합에서도 INSERT OR IGNORE가 한 쪽만 살린다).
+        불변이다(경합에서도 INSERT OR IGNORE가 한 쪽만 살린다). 불변이라 읽기 범위(그리기 한 번)
+        안에서는 한 번만 묻는다(D63).
         """
+        return read_scope.memo(("workspace_id", str(self.root)), self._read_workspace_id)
+
+    def _read_workspace_id(self) -> str:
         with self.connect() as connection:
             row = connection.execute(
                 "SELECT value FROM meta WHERE key = ?", (WORKSPACE_ID_KEY,)
@@ -785,7 +789,12 @@ class RawWorkspace:
     # ── 설정 ───────────────────────────────────────────────────
 
     def load_workflow(self) -> RawWorkflowConfig:
-        """저장된 설정을 검증까지 마쳐서 돌려준다 — 왕복이 곧 계약이다(A0 §9.1)."""
+        """저장된 설정을 검증까지 마쳐서 돌려준다 — 왕복이 곧 계약이다(A0 §9.1).
+
+        읽기 범위(그리기 한 번) 안에서는 한 번만 읽는다(D63) — 설정은 얼린 값이다."""
+        return read_scope.memo(("load_workflow", str(self.root)), self._read_workflow)
+
+    def _read_workflow(self) -> RawWorkflowConfig:
         with self.connect() as connection:
             row = connection.execute("SELECT value FROM settings WHERE key = 'workflow'").fetchone()
         if row is None:
@@ -978,7 +987,11 @@ class RawWorkspace:
         )
 
     def list_media(self, kind: str | None = None) -> tuple[MediaRegistration, ...]:
-        """등록 순서대로 — ID가 무작위라 정렬 근거는 삽입 행(rowid)이다."""
+        """등록 순서대로 — ID가 무작위라 정렬 근거는 삽입 행(rowid)이다. 읽기 범위 안에서는 종류마다
+        한 번만 읽는다(D63)."""
+        return read_scope.memo(("list_media", str(self.root), kind), lambda: self._read_media(kind))
+
+    def _read_media(self, kind: str | None) -> tuple[MediaRegistration, ...]:
         query = "SELECT * FROM media_files"
         params: tuple[str, ...] = ()
         if kind is not None:
@@ -1082,6 +1095,11 @@ class RawWorkspace:
             connection.commit()
 
     def source_reference_path(self, asset_id: str) -> str | None:
+        """원본 참조 경로 — 읽기 범위 안에서는 참조 표를 한 번에 읽는다(D63)."""
+        scope = read_scope.current()
+        if scope is not None:
+            key = ("source_references", str(self.root))
+            return scope.memo(key, self._read_reference_paths).get(asset_id)
         with self.connect() as connection:
             exists = connection.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='source_references'"
@@ -1121,7 +1139,28 @@ class RawWorkspace:
         _source_stat(target, asset)
         return target
 
+    def _read_reference_paths(self) -> dict[str, str]:
+        with self.connect() as connection:
+            exists = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='source_references'"
+            ).fetchone()
+            if exists is None:
+                return {}
+            rows = connection.execute(
+                "SELECT asset_id, absolute_path FROM source_references"
+            ).fetchall()
+        return {str(row[0]): str(row[1]) for row in rows}
+
     def source_asset(self, asset_id: str) -> SourceAsset:
+        """원본 하나 — 읽기 범위 안에서는 전체 목록 한 번에서 찾는다(같은 행·같은 값, D63)."""
+        if read_scope.current() is not None:
+            by_id = read_scope.memo(
+                ("source_assets_by_id", str(self.root)),
+                lambda: {asset.asset_id: asset for asset in self.list_source_assets()},
+            )
+            if asset_id not in by_id:
+                raise RawWorkspaceError(f"없는 자산 ID: {asset_id}")
+            return by_id[asset_id]
         with self.connect() as connection:
             row = connection.execute(
                 "SELECT * FROM source_assets WHERE asset_id = ?", (asset_id,)
@@ -1135,8 +1174,13 @@ class RawWorkspace:
 
         전체 목록이 `ordinal`만으로 정렬되면 모든 배치의 1번이 무작위 자산 ID로
         뒤섞인다(루트 지적). 배치 디렉터리(가져온 순서)를 앞에 두고, 그 안에서만
-        사람이 확정한 순번을 지킨다 — 배치 안 사용자 순서는 그대로다.
+        사람이 확정한 순번을 지킨다 — 배치 안 사용자 순서는 그대로다. 읽기 범위 안에서는 배치마다
+        한 번만 읽는다(D63).
         """
+        key = ("list_source_assets", str(self.root), batch_dir)
+        return read_scope.memo(key, lambda: self._read_source_assets(batch_dir))
+
+    def _read_source_assets(self, batch_dir: str | None) -> tuple[SourceAsset, ...]:
         query = "SELECT * FROM source_assets"
         params: tuple[str, ...] = ()
         if batch_dir is not None:

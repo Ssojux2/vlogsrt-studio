@@ -40,7 +40,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from vlogsrt import log, preprocess
-from vlogsrt.project.raw import cache_policy, tiering
+from vlogsrt.project.raw import cache_policy, read_scope, tiering
 from vlogsrt.project.raw import confirmed_package as confirmed
 from vlogsrt.project.raw.analysis_store import AnalysisStore
 from vlogsrt.project.raw.jobs import JobContext
@@ -1394,8 +1394,16 @@ class ReviewWorkspaceFacade:
         return bool(self._store.list_base_plan_ids(self._project_id))
 
     def load_head(self, base_plan_id: str | None = None) -> LoadedReview:
-        """저장된 헤드를 되돌린다 — 내용 지문을 다시 잰다(깨진 행은 못 지난다)."""
+        """저장된 헤드를 되돌린다 — 내용 지문을 다시 잰다(깨진 행은 못 지난다).
+
+        읽기 범위(그리기 한 번) 안에서는 기본 계획마다 한 번 읽고 잰다(D63) — 지문 검사는 깨진
+        저장소를 막는 문이라 그리기마다 한 번이면 된다. 범위 밖에서는 부를 때마다 다시 잰다.
+        """
         base = base_plan_id or self._latest_base_plan()
+        key = ("load_head", str(self.root), base)
+        return read_scope.memo(key, lambda: self._read_head(base))
+
+    def _read_head(self, base: str) -> LoadedReview:
         head_id = self._store.head_revision_id(self._project_id, base)
         if head_id is None:
             raise ReviewWorkspaceError(f"검토 헤드가 없다: {base} — 먼저 초기화하세요")

@@ -1929,8 +1929,11 @@ class RawWorkspaceUi:
         """
         if upkeep:
             message = self._with_upkeep_notes(root, message)
-        self._refresh_review_panel_state(root)
-        return message, *self.visual_workbench_render(root)
+        # 읽기 범위는 정리 고리(작업을 건다) 뒤에 연다 — 패널 머리 맞춤과 그리기가 같은 읽기를 함께
+        # 쓴다(D63). 범위는 이 그리기 한 번만 산다.
+        with raw_service.read_scope.open():
+            self._refresh_review_panel_state(root)
+            return message, *self.visual_workbench_render(root)
 
     def _with_upkeep_notes(self, root: Path, message: str) -> str:
         """정리 고리 둘을 돌리고 그 안내를 답 뒤에 붙인다."""
@@ -3293,6 +3296,23 @@ class RawWorkspaceUi:
             return gr.skip(), gr.skip(), gr.skip()
         root = self._require_current_selection(signature)
         view_token = self._visual_lifetime_token
+        # 그리기 열쇠의 재료만 읽기 범위 안에서 읽는다 — 정리 고리(작업을 건다)가 도는
+        # `_capcut_result`는 이 범위 밖이고, 그리기는 그 뒤에 제 범위를 연다(D63).
+        with raw_service.read_scope.open():
+            key, job_states = self._tick_key(root, signature)
+            status = self._quick_status() if self._quick else self._capcut_progress(root)
+        if key == self._capcut_render_key:
+            return status, gr.skip(), gr.skip()
+        self._capcut_render_key = key
+        upkeep = (signature, job_states) != self._capcut_upkeep_key
+        self._capcut_upkeep_key = (signature, job_states)
+        message, _shell, workbench = self._capcut_result(root, status, upkeep=upkeep)
+        if view_token != self._visual_lifetime_token or root != self._snapshot_root():
+            return gr.skip(), gr.skip(), gr.skip()
+        return message, gr.skip(), workbench
+
+    def _tick_key(self, root: Path, signature: str) -> tuple[tuple, frozenset[tuple[str, str]]]:
+        """타이머 틱의 그리기 열쇠와 작업 상태 묶음 — 읽기만 한다(선택 상태는 화면 기억에 둔다)."""
         if not self._quick:
             self._quick = self.raw.load_selection_state(root)
         self._load_quick_tasks(root)
@@ -3311,16 +3331,7 @@ class RawWorkspaceUi:
             self._quick.get("revision"),
             self._semantic_stamps(root),
         )
-        status = self._quick_status() if self._quick else self._capcut_progress(root)
-        if key == self._capcut_render_key:
-            return status, gr.skip(), gr.skip()
-        self._capcut_render_key = key
-        upkeep = (signature, job_states) != self._capcut_upkeep_key
-        self._capcut_upkeep_key = (signature, job_states)
-        message, _shell, workbench = self._capcut_result(root, status, upkeep=upkeep)
-        if view_token != self._visual_lifetime_token or root != self._snapshot_root():
-            return gr.skip(), gr.skip(), gr.skip()
-        return message, gr.skip(), workbench
+        return key, job_states
 
     def _job_states(self, root: Path, recent: Sequence[Any]) -> frozenset[tuple[str, str]]:
         """작업 (아이디, 상태)의 묶음 — 최근 작업과 활동 중인 작업 전부(D63).
@@ -4804,6 +4815,32 @@ class RawWorkspaceUi:
         source_id: str | None = None,
         selection_filter: str = "all",
     ) -> tuple[str, str]:
+        """영상 작업대 (껍데기, 본문) — 읽기 범위 하나 안에서 그린다(D63).
+
+        그리기는 읽기만 하므로 같은 읽기(원본 자막·검토 머리·분석 개요·작업 목록)를 범위가 한 번만
+        한다. 작업대 동작은 쓰기를 마친 뒤 이것을 부르므로 범위는 언제나 쓰기 뒤에 열린다. 이미 열린
+        범위(`_capcut_result`) 안이면 그 범위를 그대로 쓴다.
+        """
+        with raw_service.read_scope.open():
+            return self._visual_workbench_render(
+                root,
+                page=page,
+                preferred_selected_id=preferred_selected_id,
+                playhead_sec=playhead_sec,
+                source_id=source_id,
+                selection_filter=selection_filter,
+            )
+
+    def _visual_workbench_render(
+        self,
+        root: Path | None,
+        *,
+        page: int,
+        preferred_selected_id: str | None,
+        playhead_sec: Fraction | None,
+        source_id: str | None,
+        selection_filter: str,
+    ) -> tuple[str, str]:
         """영상 작업대 (껍데기, 본문) — 질의·읽기만으로 만든다(미디어 생성 0).
 
         값은 전부 공개 서비스에서 온다: 조각·시계·미리보기는 `visual_review_query`,
@@ -5003,8 +5040,10 @@ class RawWorkspaceUi:
             selected_card = _card_values(selected, selected_order)
         task_views = self._task_views(root)
         pending_ids = self._pending_cut_ids(ordered)
+        suitability = self._suitability_rows(root, sources_model, task_views)
         for sid, source in sources_model.items():
-            self._annotate_tiers(root, sid, source, task_views.get(sid, {}), pending_ids)
+            task = task_views.get(sid, {})
+            self._annotate_tiers(root, sid, source, task, pending_ids, suitability)
         for sid, source in sources_model.items():
             self._annotate_transcript(root, sid, source, quick)
             refs = self.raw.source_media_references(root, sid)
@@ -5153,6 +5192,27 @@ class RawWorkspaceUi:
             and raw_service.AUTO_EXCLUDED_UNREVIEWED_TAG in seg.visual_tags
         }
 
+    def _suitability_rows(
+        self,
+        root: Path,
+        sources: Mapping[str, Any],
+        task_views: Mapping[str, Mapping[str, Any]],
+    ) -> dict[tuple[Any, str], list[dict]]:
+        """(분석 리비전, 원본) → 등급 구간 행 — 리비전마다 한 번에 묻는다(D63).
+
+        원본마다 따로 묻던 것과 같은 행이다: 서비스는 원본마다 따로 계산해 고른 원본만 돌려준다.
+        """
+        wanted: dict[Any, list[str]] = {}
+        for sid in sources:
+            revision = task_views.get(sid, {}).get("revision")
+            if revision:
+                wanted.setdefault(revision, []).append(sid)
+        rows: dict[tuple[Any, str], list[dict]] = {}
+        for revision, ids in wanted.items():
+            found = self.raw.selection_suitability(root, revision, tuple(ids))
+            rows.update({(revision, sid): found[sid] for sid in ids if sid in found})
+        return rows
+
     def _annotate_tiers(
         self,
         root: Path,
@@ -5160,10 +5220,12 @@ class RawWorkspaceUi:
         source: dict[str, Any],
         task: Mapping[str, Any],
         pending_ids: set[str],
+        suitability: Mapping[tuple[Any, str], list[dict]],
     ) -> None:
         """원본 하나에 분석 상태·카드 배지·등급 구간(열린 빨강·경계와 맞지 않는 빨강 표시)을 싣는다.
 
-        경계와 맞지 않는 빨강의 수는 대기열이 그 표시(`loose`)로 한 번 센다(`_proposal_queue`).
+        등급 구간은 `_suitability_rows`가 리비전마다 한 번에 물은 행이다. 경계와 맞지 않는 빨강의
+        수는 대기열이 그 표시(`loose`)로 한 번 센다(`_proposal_queue`).
         """
         source["analysisState"] = self._shown_stage(root, task, "분석 대기")
         source["analysisLabel"] = _stage_label(str(source["analysisState"]))
@@ -5172,8 +5234,8 @@ class RawWorkspaceUi:
             source["analysisBadge"] = badge
         if not task.get("revision"):
             return
-        rows = self.raw.selection_suitability(root, task["revision"], (source_id,))
-        source["suggestions"] = [self._suggestion_row(row) for row in rows.get(source_id, [])]
+        rows = suitability.get((task["revision"], source_id), [])
+        source["suggestions"] = [self._suggestion_row(row) for row in rows]
         self._mark_open_reds(source, pending_ids)
 
     @staticmethod
@@ -6135,9 +6197,13 @@ class RawWorkspaceUi:
         }
 
     def _refresh_review_panel_state(self, root: Path) -> None:
-        """고급(기존) 검토 패널의 화면 상태를 새 머리로 맞춘다 — 최선 노력."""
+        """고급(기존) 검토 패널의 화면 상태를 새 머리로 맞춘다 — 최선 노력.
+
+        패널의 행 값은 짓지 않는다(버리던 값이다, D63) — 머리의 시계·조각 범위·신원만 둔다. 그리기와
+        같은 읽기 범위 안이면 검토 머리를 한 번만 읽는다."""
         with contextlib.suppress(raw_service.RawWorkspaceError, raw_service.ReviewError, gr.Error):
-            self._review_head_and_rows(root)
+            loaded = self.raw.review_workspace_facade(root).load_head()
+            self._adopt_review_head(root, loaded.revision)
 
     def _visual_server_functions(self) -> list[Callable[[dict[str, object]], dict[str, object]]]:
         """영상 작업대의 서버 함수 — 클라이언트 `server.vl_*`로 직접 불린다."""
@@ -7597,16 +7663,10 @@ class RawWorkspaceUi:
         loaded = facade.load_head()
         revision = loaded.revision
         names = {a.asset_id: a.source_name for a in self.raw.list_source_assets(root)}
-        clocks = {clock.source_id: clock for clock in revision.clocks}
+        clocks = self._adopt_review_head(root, revision)
         rows: list[dict[str, object]] = []
-        spans: dict[str, tuple[str, int, int]] = {}
         for segment in revision.segments:
-            clock = clocks.get(segment.source_id)
-            if clock is None:
-                raise gr.Error(
-                    f"검토 리비전에 원본 {segment.source_id}의 시계가 없다 — 저장소가 깨졌다"
-                )
-            spans[segment.segment_id] = (segment.source_id, segment.start_pts, segment.end_pts)
+            clock = clocks[segment.source_id]
             rows.append(
                 {
                     "segment_id": segment.segment_id,
@@ -7625,12 +7685,26 @@ class RawWorkspaceUi:
                     "notes": segment.notes,
                 }
             )
+        return loaded, rows
+
+    def _adopt_review_head(self, root: Path, revision: Any) -> dict[str, Any]:
+        """화면이 본 리비전 신원(헤드·기본 계획)과 편집 재료(원본별 시계·조각 범위)를 서버에 둔다.
+
+        시계가 없는 조각이 있으면 아무것도 두지 않고 오류로 밝힌다(저장소가 깨졌다)."""
+        clocks = {clock.source_id: clock for clock in revision.clocks}
+        spans: dict[str, tuple[str, int, int]] = {}
+        for segment in revision.segments:
+            if segment.source_id not in clocks:
+                raise gr.Error(
+                    f"검토 리비전에 원본 {segment.source_id}의 시계가 없다 — 저장소가 깨졌다"
+                )
+            spans[segment.segment_id] = (segment.source_id, segment.start_pts, segment.end_pts)
         self._review_clocks = clocks
         self._review_spans = spans
         self._review_revision_id = revision.revision_id
         self._review_base_plan_id = revision.base_plan_id
         self._review_signature = self._signature_for(root)
-        return loaded, rows
+        return clocks
 
     def _review_panel_markdown(self, root: Path, extra: str = "") -> str:
         """검토 패널 — 헤드 리비전·시간순 행 표·안내.

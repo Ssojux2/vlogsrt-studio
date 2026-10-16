@@ -1880,6 +1880,52 @@ def _names_store_edit(node: ast.AST) -> bool:
     return isinstance(node, ast.Constant) and node.value == STORE_EDIT_NAME
 
 
+# 그리기 한 번의 읽기 범위(W-23 세션 B, D63) — 범위 안의 읽기는 같은 답을 기억한다. 범위가 쓰기를
+# 넘으면 방금 쓴 것을 못 본다. 그래서 범위를 여는 자리는 화면 진입점 넷뿐이고, 처리기는 쓰기를 마친
+# 뒤에만 연다(`_capcut_result`는 정리 고리 뒤, 동작은 그리기 안). 서비스·작업 본문·다른 처리기는
+# 열지 않는다 — 읽기(`read_scope.memo`·`current`)는 어디서나 된다. 시험(tests/)은 보지 않는다.
+READ_SCOPE_SCREEN = "ui/workspace_service.py"
+READ_SCOPE_ENTRY_POINTS = frozenset(
+    f"RawWorkspaceUi.{name}"
+    for name in (
+        "_capcut_result",
+        "capcut_tick_view",
+        "visual_workbench_action",
+        "visual_workbench_render",
+    )
+)
+
+
+def check_read_scope_only_at_entry_points() -> list[str]:
+    """D63 — `read_scope.open`은 화면 진입점 넷(메서드 몸통 그 자리)만 가리킨다."""
+    failures: list[str] = []
+    for source in [*_sources(), *sorted(UI_DIR.rglob("*.py"))]:
+        rel = _rel(source)
+        for node, owner in _owned_nodes(ast.parse(source.read_text(encoding="utf-8"))):
+            if not _names_read_scope_open(node):
+                continue
+            if rel == READ_SCOPE_SCREEN and owner in READ_SCOPE_ENTRY_POINTS:
+                continue
+            failures.append(
+                f"{rel}:{getattr(node, 'lineno', 0)}: read_scope.open을 {owner or '모듈 수준'}에서"
+                " 가리킨다 — 읽기 범위는 화면 진입점만 쓰기 뒤에 연다 (D63)"
+            )
+    return failures
+
+
+def _names_read_scope_open(node: ast.AST) -> bool:
+    """`read_scope.open` — 화면은 서비스 손잡이(`raw_service.read_scope.open`)로 닿는다."""
+    if isinstance(node, ast.Attribute) and node.attr == "open":
+        value = node.value
+        return (isinstance(value, ast.Name) and value.id == "read_scope") or (
+            isinstance(value, ast.Attribute) and value.attr == "read_scope"
+        )
+    if isinstance(node, ast.ImportFrom):
+        module = node.module or ""
+        return module.endswith("read_scope") and any(a.name == "open" for a in node.names)
+    return False
+
+
 # 원본 자막의 「확인 필요」 표시(D59 19e)는 **표시만** 한다 — 순수 계산은 큐 글자와 아이디를 값으로
 # 받고(말소리 측정상 없음도 값), 결과는 화면 값을 짓는 서비스 하나만 읽는다. 등급·자동 정리·선택·
 # 출력·자막 쓰기로 흐르면 「이 줄은 말이 아니다」(규칙 4)나 조용한 삭제(규칙 9)의 길이 된다.
@@ -2563,6 +2609,7 @@ CHECKS = (
     ("시각 맞춤 적용·되돌리기 쓰기는 서비스만", check_snap_writes_only_from_service),
     ("시각 맞춤 API는 서비스와 화면 진입점만", check_snap_api_only_from_service_and_screen),
     ("원본 자막의 낮은 쓰기 문은 정의 모듈 안에만", check_store_edit_stays_private),
+    ("읽기 범위는 화면 진입점만 연다", check_read_scope_only_at_entry_points),
     ("Final Cut 타임라인 빌더는 순수하다", check_finalcut_timeline_stays_pure),
     ("Final Cut 보내기는 원본을 복사·재해시하지 않는다", check_finalcut_export_never_copies),
     ("옛 선택한 컷 Final Cut 출력은 되살리지 않는다", check_old_finalcut_path_stays_dead),

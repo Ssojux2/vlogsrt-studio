@@ -34,6 +34,7 @@ from tests.raw import render_cost_fixture as fixture  # noqa: E402
 from tests.raw.test_proposal_queue import _with_tiers, needs_ffmpeg  # noqa: E402
 from ui import workspace_service  # noqa: E402
 from ui.workspace_service import RawWorkspaceUi  # noqa: E402
+from vlogsrt.project.raw import read_scope  # noqa: E402
 from vlogsrt.project.raw import service as raw_service  # noqa: E402
 from vlogsrt.project.raw.analysis_store import AnalysisStore  # noqa: E402
 from vlogsrt.project.raw.workspace import DB_NAME, RawWorkspace  # noqa: E402
@@ -41,17 +42,23 @@ from vlogsrt.project.raw.workspace import DB_NAME, RawWorkspace  # noqa: E402
 GOLDEN = Path(__file__).resolve().parents[1] / "fixtures/synthetic/workbench_render_18_sources.html"
 
 RENDER_CEILING: dict[str, int] = {
-    "open_db": 1602,
-    "source_transcript.load": 540,
+    "open_db": 30,
+    "source_transcript.load": 18,
     "sync_report.gather_source": 18,
-    "ReviewWorkspaceFacade()": 3,
-    "load_head": 3,
-    "analysis_overview": 19,
+    "ReviewWorkspaceFacade()": 1,
+    "load_head": 1,
+    "analysis_overview": 1,
     "visual_workbench_render": 1,
     "start_upkeep": 0,
     "start_sync_upkeep": 0,
 }
-"""그리기 한 번의 부른 수 — W-23 세션 A의 실측(1fc3b44와 같다). 상한이다: 줄면 이 값을 낮춘다."""
+"""그리기 한 번의 실제 읽기 수 — 상한이다: 줄면 이 값을 낮춘다.
+
+세션 A(1fc3b44)의 실측은 DB 열기 1602 · 원본 자막 540 · 시각 확인 재료 18 · 검토 파사드 3 · 검토
+머리 3 · 분석 개요 19였다. 세션 B는 그리기 한 번을 읽기 범위(`read_scope`) 하나로 묶어 같은 읽기를
+한 번만 한다 — 파사드는 작업공간마다, 검토 머리는 기본 계획마다, 원본 자막은 지금 리비전 전부를 한
+번에, 분석 개요는 리비전마다 한 번이다.
+"""
 
 
 @pytest.fixture(scope="module")
@@ -113,6 +120,7 @@ def test_one_render_stays_under_the_measured_call_ceiling(
     over = {name: calls[name] for name, ceiling in RENDER_CEILING.items() if calls[name] > ceiling}
     assert over == {}, f"그리기 한 번의 부른 수가 늘었다: {dict(calls)}"
     assert calls["visual_workbench_render"] == 1
+    assert read_scope.current() is None  # 범위는 그리기 한 번만 산다
 
 
 @needs_ffmpeg
@@ -142,6 +150,9 @@ def test_a_progress_only_tick_renders_without_upkeep(
             calls = _during(counts, lambda: server.capcut_tick_view(signature))
             assert calls["visual_workbench_render"] == 1  # 진행 수는 그리기 열쇠에 남는다
             assert calls["start_upkeep"] == calls["start_sync_upkeep"] == 0
+            # 고급 패널 머리 맞춤과 그리기가 한 범위를 함께 쓴다 — 파사드·검토 머리는 한 번이다.
+            assert calls["ReviewWorkspaceFacade()"] == calls["load_head"] == 1, dict(calls)
+            assert calls["source_transcript.load"] <= RENDER_CEILING["source_transcript.load"]
     finally:
         stepped.finish()
 

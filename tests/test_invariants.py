@@ -3644,3 +3644,88 @@ def test_a_docstring_naming_the_low_write_is_not_a_reference(
     body = 'def check():\n    """`_store_edit`의 `guard` 안에서 다시 본다."""\n'
     _fake_source_tree(monkeypatch, tmp_path, {SERVICE: body})
     assert check_invariants.check_store_edit_stays_private() == []
+
+
+# ── 읽기 범위(W-23 세션 B, D63) — 범위는 화면 진입점만 쓰기 뒤에 연다 ──────────────
+
+READ_SCOPE_SCREEN = (
+    "from vlogsrt.project.raw import read_scope\n"
+    "class RawWorkspaceUi:\n"
+    "    def _capcut_result(self, root):\n"
+    "        with read_scope.open():\n"
+    "            return root\n"
+    "    def capcut_tick_view(self, signature):\n"
+    "        with read_scope.open():\n"
+    "            return signature\n"
+    "    def visual_workbench_action(self, payload, kind):\n"
+    "        with read_scope.open():\n"
+    "            return kind\n"
+    "    def visual_workbench_render(self, root):\n"
+    "        with read_scope.open():\n"
+    "            return root\n"
+)
+
+
+@pytest.mark.parametrize(
+    ("rel", "body", "line"),
+    [
+        # 화면의 다른 처리기가 쓰기 앞에서 범위를 열면 쓰기를 넘어 기억한다.
+        (
+            "ui/workspace_service.py",
+            READ_SCOPE_SCREEN + "    def capcut_edit_view(self, signature):\n"
+            "        with read_scope.open():\n"
+            "            return signature\n",
+            16,
+        ),
+        # 서비스·작업 본문은 범위를 열지 않는다 — 작업 스레드는 범위 없이 돈다.
+        (
+            SERVICE,
+            "from vlogsrt.project.raw import read_scope\n"
+            "def tick(root):\n"
+            "    with read_scope.open():\n"
+            "        return root\n",
+            3,
+        ),
+        # 화면이 서비스 손잡이로 열어도 같은 문이다 — 진입점이 아닌 처리기다.
+        (
+            "ui/workspace_service.py",
+            READ_SCOPE_SCREEN + "    def capcut_confirm_auto_view(self, signature):\n"
+            "        with raw_service.read_scope.open():\n"
+            "            return signature\n",
+            16,
+        ),
+        # 이름으로 가져와 다른 이름으로 열어도 같은 문이다.
+        ("ui/ui_facade.py", "from vlogsrt.project.raw.read_scope import open as scoped\n", 1),
+        # 담아 두었다가 여는 것도 자리다.
+        (
+            "ui/ui_facade.py",
+            "from vlogsrt.project.raw import read_scope\nOPEN = read_scope.open\n",
+            2,
+        ),
+    ],
+)
+def test_only_the_screen_entry_points_open_a_read_scope(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, rel: str, body: str, line: int
+) -> None:
+    _fake_source_tree(monkeypatch, tmp_path, {"ui/workspace_service.py": READ_SCOPE_SCREEN})
+    assert check_invariants.check_read_scope_only_at_entry_points() == []
+    (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / rel).write_text(body, encoding="utf-8")
+    (failure,) = check_invariants.check_read_scope_only_at_entry_points()
+    assert failure.startswith(f"{rel}:{line}: ") and "(D63)" in failure
+
+
+def test_reading_through_a_scope_is_not_opening_one(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    body = (
+        "from vlogsrt.project.raw import read_scope\n"
+        "def load(workspace, asset_id):\n"
+        "    return read_scope.memo(('load', asset_id), lambda: None), read_scope.current()\n"
+    )
+    _fake_source_tree(monkeypatch, tmp_path, {"vlogsrt/project/raw/source_transcript.py": body})
+    assert check_invariants.check_read_scope_only_at_entry_points() == []
+
+
+def test_the_real_tree_opens_read_scopes_only_at_the_screen_entry_points() -> None:
+    assert check_invariants.check_read_scope_only_at_entry_points() == []

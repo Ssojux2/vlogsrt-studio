@@ -26,6 +26,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from vlogsrt.keywords import dedupe, parse_keywords
+from vlogsrt.project.raw import read_scope
 from vlogsrt.project.raw.models import RawWorkspaceError
 
 TABLE = "project_glossary"
@@ -91,7 +92,15 @@ def parse(text: str) -> tuple[str, ...]:
 
 
 def current(workspace: Any) -> Glossary:
-    """마지막 리비전 — 표나 줄이 없으면 빈 용어집이다. 표를 만들지 않는다."""
+    """마지막 리비전 — 표나 줄이 없으면 빈 용어집이다. 표를 만들지 않는다.
+
+    읽기 범위(그리기 한 번) 안에서는 한 번만 읽는다(D63) — 용어집은 얼린 값이다."""
+    return read_scope.memo(
+        ("glossary.current", str(workspace.root)), lambda: _read_current(workspace)
+    )
+
+
+def _read_current(workspace: Any) -> Glossary:
     with workspace.connect() as db:
         if not _table_exists(db):
             return Glossary()
@@ -109,7 +118,7 @@ def current(workspace: Any) -> Glossary:
 def save(workspace: Any, text: str) -> Glossary:
     """새 리비전으로 덧붙인다 — 지금과 같으면 그대로 돌려준다(빈 용어집은 표를 만들지 않는다)."""
     terms = parse(text)
-    now = current(workspace)
+    now = _read_current(workspace)  # 쓰기는 기억한 값을 믿지 않는다
     if terms == now.terms:
         return now
     with workspace.connect() as db:

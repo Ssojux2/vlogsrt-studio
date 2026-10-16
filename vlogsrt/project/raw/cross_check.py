@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any
 
 from vlogsrt import log
-from vlogsrt.project.raw import glossary, source_text
+from vlogsrt.project.raw import glossary, read_scope, source_text
 from vlogsrt.project.raw.config import SOURCE_TEXT_SETTINGS
 from vlogsrt.project.raw.models import AnalysisEstimate, RawWorkspaceError
 from vlogsrt.project.raw.understanding import SampleSpan
@@ -47,7 +47,15 @@ USD_STEP = Decimal("0.000001")
 
 
 def enabled(workspace: Any) -> bool:
-    """교차 확인이 켜져 있는가 — 고른 적이 없거나 모르는 값이면 켜짐(기본)이다."""
+    """교차 확인이 켜져 있는가 — 고른 적이 없거나 모르는 값이면 켜짐(기본)이다.
+
+    읽기 범위(그리기 한 번) 안에서는 한 번만 읽는다(D63)."""
+    return read_scope.memo(
+        ("cross_check.enabled", str(workspace.root)), lambda: _enabled(workspace)
+    )
+
+
+def _enabled(workspace: Any) -> bool:
     with workspace.connect() as db:
         row = db.execute("SELECT value FROM meta WHERE key=?", (META_KEY,)).fetchone()
     return row is None or str(row[0]) != SETTING_OFF

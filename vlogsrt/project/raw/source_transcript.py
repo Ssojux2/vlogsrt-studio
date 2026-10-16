@@ -11,6 +11,7 @@ from fractions import Fraction
 from typing import Any
 
 from vlogsrt.hangul import strip_for_compare
+from vlogsrt.project.raw import read_scope
 from vlogsrt.project.raw.models import RawWorkspaceError
 
 TEXT_SOURCE_WHISPER = "whisper"
@@ -37,6 +38,28 @@ def _init(workspace: Any) -> None:
 
 
 def load(workspace: Any, asset_id: str) -> dict | None:
+    """지금 리비전 — 읽기 범위 안에서는 원본마다 한 번 읽는다(W-23 세션 B, D63).
+
+    범위 안의 첫 읽기가 모든 원본의 지금 리비전을 한 연결로 가져온다(그리기는 어차피 전부 읽는다 —
+    다른 원본과 같은 자막 후보). 돌려준 문서는 읽기만 한다 — 고치는 쓰기는 `_read_latest`로 새로
+    읽는다. 범위가 없으면 예전 그대로 매번 읽는다.
+    """
+    scope = read_scope.current()
+    if scope is None:
+        return _read_latest(workspace, asset_id)
+    root = str(workspace.root)
+
+    def parsed() -> dict | None:
+        payload = scope.memo(
+            ("source_transcript.payloads", root), lambda: _read_latest_payloads(workspace)
+        ).get(asset_id)
+        return None if payload is None else json.loads(payload)
+
+    return scope.memo(("source_transcript.load", root, asset_id), parsed)
+
+
+def _read_latest(workspace: Any, asset_id: str) -> dict | None:
+    """원본 하나의 지금 리비전을 DB에서 — 쓰기는 늘 이것으로 읽는다(기억한 문서를 믿지 않는다)."""
     _init(workspace)
     with workspace.connect() as db:
         row = db.execute(
@@ -45,6 +68,18 @@ def load(workspace: Any, asset_id: str) -> dict | None:
             (asset_id,),
         ).fetchone()
     return json.loads(row[0]) if row else None
+
+
+def _read_latest_payloads(workspace: Any) -> dict[str, str]:
+    """원본마다 지금 리비전의 본문(JSON 글) — `(asset_id, sequence)`가 기본 키라 원본마다 하나다."""
+    _init(workspace)
+    with workspace.connect() as db:
+        rows = db.execute(
+            "SELECT t.asset_id, t.payload FROM source_transcripts AS t JOIN (SELECT asset_id,"
+            " MAX(sequence) AS top FROM source_transcripts GROUP BY asset_id) AS m"
+            " ON t.asset_id = m.asset_id AND t.sequence = m.top"
+        ).fetchall()
+    return {str(row[0]): str(row[1]) for row in rows}
 
 
 def rational(value: Any) -> Fraction:
@@ -58,7 +93,7 @@ def encoded(value: Fraction) -> dict[str, int]:
 def seed(
     workspace: Any, asset_id: str, utterances: list[dict], duration: Fraction, source_sha256: str
 ) -> dict:
-    current = load(workspace, asset_id)
+    current = _read_latest(workspace, asset_id)
     if current is not None:
         if current["source_sha256"] != source_sha256:
             raise RawWorkspaceError("자막의 원본 신원이 다릅니다. 원본을 확인하세요")
@@ -81,7 +116,7 @@ def seed(
             (asset_id, sequence, payload["revision"], json.dumps(payload, ensure_ascii=False)),
         )
         db.commit()
-    saved = load(workspace, asset_id)
+    saved = _read_latest(workspace, asset_id)
     assert saved is not None
     return saved
 
@@ -181,7 +216,7 @@ def edit(
     split_at: str | None = None,
     right_text: str | None = None,
 ) -> dict:
-    current = load(workspace, asset_id)
+    current = _read_latest(workspace, asset_id)
     if not current or current["revision"] != expected_revision:
         raise RawWorkspaceError("원본 자막이 바뀌었습니다. 최신 자막에서 다시 수정하세요")
     rows = [dict(row) for row in current["utterances"]]
@@ -369,7 +404,7 @@ def insert_segments(
     남는다 — 화면이 순서를 경고한다). 바뀐 범위는 줄마다 `dirty_ranges`에 남는다. 지금 리비전이
     `expected_revision`이 아니면 거절한다 — 견적 뒤에 바뀐 자막에 넣지 않는다.
     """
-    current = load(workspace, asset_id)
+    current = _read_latest(workspace, asset_id)
     if not current or current["revision"] != expected_revision:
         raise RawWorkspaceError(
             "원본 자막이 바뀌었습니다. 빈칸을 다시 세어 새 견적으로 승인하세요 — 자막은"
@@ -581,7 +616,7 @@ def apply_changes(
 
 def _snap_target(workspace: Any, asset_id: str, expected_revision: str) -> dict:
     """적용할 리비전 — 화면이 본 그 리비전이 지금이고, 이미 시각 맞춤을 적용한 리비전이 아니다."""
-    current = load(workspace, asset_id)
+    current = _read_latest(workspace, asset_id)
     if not current or current["revision"] != expected_revision:
         raise RawWorkspaceError(SNAP_REVISION_CHANGED)
     if snap_applied(current) is not None:
@@ -633,7 +668,7 @@ def restore(
     그래서 지문(`fingerprint`)·`human_edited`·다시 듣기 자격이 적용 전과 같아진다. 새 리비전은
     되돌린 범위를 `dirty_ranges`에 더하고 되돌린 기록(`SNAP_UNDO_FIELD`)을 싣는다.
     """
-    current = load(workspace, asset_id)
+    current = _read_latest(workspace, asset_id)
     if not current or current["revision"] != expected_revision:
         raise RawWorkspaceError(UNDO_CHANGED)
     record = snap_applied(current)
@@ -744,7 +779,11 @@ def spoken(workspace: Any, asset_id: str, fallback: Any) -> tuple:
 
 
 def cross_source_candidates(workspace: Any, asset_id: str) -> list[dict]:
-    """Exact repeated text across originals is informational only, never a cut."""
+    """Exact repeated text across originals is informational only, never a cut.
+
+    읽기 범위 안에서는 모든 원본의 줄을 글자별 색인 하나로 한 번만 모은다(W-23 세션 B) — 원본마다
+    다른 원본 17개를 다시 읽던 길이다. 결과의 줄과 순서(원본 목록 순 → 줄 순)는 범위 밖과 같다.
+    """
     doc = load(workspace, asset_id)
     if not doc:
         return []
@@ -753,6 +792,12 @@ def cross_source_candidates(workspace: Any, asset_id: str) -> list[dict]:
         for u in doc["utterances"]
         if len(u["text"].strip()) >= 12
     }
+    scope = read_scope.current()
+    if scope is not None:
+        index = scope.memo(
+            ("source_transcript.cue_index", str(workspace.root)), lambda: _cue_index(workspace)
+        )
+        return _indexed_candidates(index, texts, asset_id)
     result = []
     for asset in workspace.list_source_assets():
         if asset.asset_id == asset_id:
@@ -770,3 +815,53 @@ def cross_source_candidates(workspace: Any, asset_id: str) -> list[dict]:
                     }
                 )
     return result
+
+
+@dataclass(frozen=True, slots=True)
+class _IndexedCue:
+    """색인의 줄 하나 — 원본 목록 안 자리·줄 자리가 범위 밖 순회의 순서를 다시 만든다."""
+
+    asset_position: int
+    cue_position: int
+    asset_id: str
+    source_name: str
+    utterance_id: Any
+    text: Any
+
+
+def _cue_index(workspace: Any) -> dict[str, list[_IndexedCue]]:
+    """모든 원본의 줄 — 공백을 접은 글 → 그 글의 줄들(원본 목록 순, 그 안은 줄 순)."""
+    index: dict[str, list[_IndexedCue]] = {}
+    for asset_position, asset in enumerate(workspace.list_source_assets()):
+        other = load(workspace, asset.asset_id)
+        for cue_position, cue in enumerate(other["utterances"] if other else []):
+            entry = _IndexedCue(
+                asset_position,
+                cue_position,
+                asset.asset_id,
+                asset.source_name,
+                cue["utterance_id"],
+                cue["text"],
+            )
+            index.setdefault(" ".join(cue["text"].split()), []).append(entry)
+    return index
+
+
+def _indexed_candidates(
+    index: Mapping[str, list[_IndexedCue]], texts: Mapping[str, Any], asset_id: str
+) -> list[dict]:
+    """색인으로 찾은 다른 원본의 같은 글 — 범위 밖 순회와 같은 줄, 같은 순서."""
+    found = sorted(
+        (entry for normalized in texts for entry in index.get(normalized, ())),
+        key=lambda entry: (entry.asset_position, entry.cue_position),
+    )
+    return [
+        {
+            "utterance_id": texts[" ".join(entry.text.split())],
+            "other_source": entry.source_name,
+            "other_utterance": entry.utterance_id,
+            "text": entry.text,
+        }
+        for entry in found
+        if entry.asset_id != asset_id
+    ]
