@@ -29,6 +29,7 @@ import tomli_w
 
 from vlogsrt import log
 from vlogsrt.project.raw import read_scope, segmentation
+from vlogsrt.project.raw.analysis_config import WORKSPACE_DB, validate_workspace_db_settings
 from vlogsrt.project.raw.config import (
     WORKFLOW_SCHEMA_VERSION,
     RawWorkflowConfig,
@@ -97,12 +98,18 @@ CAPTURE_TIME_BASIS = "creationdate-first/v1"
 """
 
 
-def open_db(path: Path) -> sqlite3.Connection:
-    """작업공간 DB 연결 하나 — 닫는 것은 호출자 몫이다(`db_session`을 먼저 쓴다)."""
-    connection = sqlite3.connect(path, timeout=10.0)
+def open_db(path: Path, *, must_exist: bool = False) -> sqlite3.Connection:
+    """작업공간 DB 연결 하나 — 닫는 것은 호출자 몫이다(`db_session`을 먼저 쓴다).
+
+    `must_exist`면 파일이 없을 때 빈 DB를 만들지 않고 실패한다(작업 끝 체크포인트 — 그 사이
+    작업공간이 치워졌을 수 있다).
+    """
+    target: str | Path = f"{path.absolute().as_uri()}?mode=rw" if must_exist else path
+    connection = sqlite3.connect(target, timeout=10.0, uri=must_exist)
     try:
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA busy_timeout = 10000")
+        _limit_wal_size(connection)
     except BaseException:
         # 준비 문장이 죽은 연결을 흘리면 fd가 새는 길이 된다 — 닫고 다시 던진다.
         connection.close()
@@ -130,6 +137,62 @@ def enable_wal(connection: sqlite3.Connection) -> None:
         log.warn(f"작업공간 DB가 WAL을 받지 않았다 — 지금 모드 {row[0] if row else None!r}")
 
 
+def _limit_wal_size(connection: sqlite3.Connection) -> None:
+    """`-wal`의 크기 상한 — 연결마다의 설정이라 여는 자리마다 건다(D63 H).
+
+    기본값(-1, 무제한)이면 `-wal`이 가장 컸던 때의 크기로 남는다. 상한이 있으면 체크포인트가
+    WAL을 처음으로 되돌릴 때 이 크기로 자른다. 값은 정수로 검사한 뒤에만 문장에 싣는다.
+    """
+    validate_workspace_db_settings(WORKSPACE_DB)
+    connection.execute(f"PRAGMA journal_size_limit = {WORKSPACE_DB.journal_size_limit_bytes}")
+
+
+WAL_CHECKPOINT_MODES = ("PASSIVE", "TRUNCATE")
+"""이 저장소가 거는 체크포인트 둘 — PASSIVE는 아무도 기다리지 않고, TRUNCATE는 다 옮긴 뒤
+0으로 자른다."""
+
+
+def checkpoint_wal(connection: sqlite3.Connection, mode: str, path: Path) -> bool:
+    """체크포인트 한 번 — 끝까지 했으면 True, 바빴으면 경고를 남기고 False(D63 H).
+
+    바쁨은 예상된 결과다: 다른 연결이 쓰기 트랜잭션을 쥐었거나(TRUNCATE는 `busy_timeout`만큼
+    기다린 뒤 결과 행의 busy=1로 답한다) 잠금이 풀리지 않았다(`database is locked`). 어느 쪽이든
+    내용은 `-wal`에 그대로 있고 다음 체크포인트가 옮긴다. 그 밖의 오류는 그대로 던진다.
+    """
+    if mode not in WAL_CHECKPOINT_MODES:
+        raise ValueError(f"모르는 체크포인트 방식이다: {mode!r}")
+    try:
+        row = connection.execute(f"PRAGMA wal_checkpoint({mode})").fetchone()
+    except sqlite3.OperationalError as error:
+        if not _is_busy(error):
+            raise
+        log.warn(f"WAL 체크포인트({mode})가 잠금에 막혔다 — 다음에 옮긴다: {path} ({error})")
+        return False
+    if row is not None and int(row[0]) != 0:
+        log.warn(f"WAL 체크포인트({mode})가 바빴다 — 다음에 옮긴다: {path} (쪽 {row[1]}/{row[2]})")
+        return False
+    log.debug(f"WAL 체크포인트({mode}) 끝: {path}")
+    return True
+
+
+def _is_busy(error: sqlite3.OperationalError) -> bool:
+    message = str(error).lower()
+    return "locked" in message or "busy" in message
+
+
+def _checkpoint_and_close(key: Path, anchor: sqlite3.Connection) -> None:
+    """닻을 닫기 전에 TRUNCATE — 다른 연결이 남아 있어도 `-wal`이 0으로 줄어든다.
+
+    대기는 연결의 10초가 아니라 설정의 짧은 값이다 — 종료(atexit)가 닻마다 오래 막히지 않게.
+    바쁘면 경고만 남기고 닫는다(`checkpoint_wal`). 닫기는 언제나 한다.
+    """
+    try:
+        anchor.execute(f"PRAGMA busy_timeout = {WORKSPACE_DB.checkpoint_busy_timeout_ms}")
+        checkpoint_wal(anchor, "TRUNCATE", key)
+    finally:
+        anchor.close()
+
+
 WAL_ANCHOR_LIMIT = 8
 """WAL 색인을 붙잡아 둘 작업공간 DB 수 — 오래 안 연 것부터 닫는다(D63). 앱은 작업공간 하나를 쓴다.
 
@@ -154,6 +217,7 @@ def anchor_wal(path: Path) -> None:
             return
     anchor = sqlite3.connect(key, timeout=10.0, check_same_thread=False)
     try:
+        _limit_wal_size(anchor)
         anchor.execute("SELECT count(*) FROM sqlite_master").fetchall()
     except BaseException:
         anchor.close()
@@ -171,25 +235,32 @@ def anchor_wal(path: Path) -> None:
 def release_wal_anchor(path: Path) -> bool:
     """이 DB의 닻 하나만 닫는다 — 화면이 작업공간을 닫을 때(D64 세션 F). 닻이 없었으면 False.
 
-    닻이 마지막 연결이면 SQLite가 닫으며 체크포인트하고 옆 파일을 지운다. 닫기 전에 명시적
-    `wal_checkpoint(TRUNCATE)`를 걸 자리가 여기다(세션 H) — 지금은 걸지 않는다.
+    닫기 전에 `wal_checkpoint(TRUNCATE)`를 건다(세션 H) — 다른 연결이 남아 있어도 `-wal`이 0으로
+    줄어든다. 닻이 마지막 연결이면 SQLite가 닫으며 옆 파일까지 지운다. 바쁘면 경고만 남긴다.
     """
     key = path.expanduser().resolve()
     with _wal_anchor_lock:
         anchor = _wal_anchors.pop(key, None)
     if anchor is None:
         return False
-    anchor.close()
+    _checkpoint_and_close(key, anchor)
     return True
 
 
 def release_wal_anchors() -> None:
-    """닻을 모두 닫는다 — 마지막 연결이면 SQLite가 체크포인트하고 옆 파일을 지운다."""
+    """닻을 모두 닫는다 — 닻마다 TRUNCATE 체크포인트 뒤에 닫는다(종료 때 atexit, 세션 H)."""
     with _wal_anchor_lock:
-        anchors = list(_wal_anchors.values())
+        anchors = list(_wal_anchors.items())
         _wal_anchors.clear()
-    for connection in anchors:
-        connection.close()
+    failures: list[sqlite3.Error] = []
+    for key, connection in anchors:
+        try:
+            _checkpoint_and_close(key, connection)
+        except sqlite3.Error as error:
+            # 하나가 예상 밖으로 실패해도 나머지 닻은 닫고, 그 오류는 끝에 그대로 던진다.
+            failures.append(error)
+    if failures:
+        raise failures[0]
 
 
 atexit.register(release_wal_anchors)

@@ -524,10 +524,11 @@ def _project_sync_check(args: argparse.Namespace) -> int:
 
     from vlogsrt.project import sync_check
     from vlogsrt.project.raw import sync_report
+    from vlogsrt.scratch_dirs import SYNC_SCRATCH, pid_prefix
 
     media = args.media.expanduser().resolve()
     srt = args.srt.expanduser().resolve()
-    with tempfile.TemporaryDirectory(prefix="vlogsrt-sync-") as scratch:
+    with tempfile.TemporaryDirectory(prefix=pid_prefix(SYNC_SCRATCH)) as scratch:
         document = sync_report.measure_srt(
             media, srt, scratch=Path(scratch), audio_ordinal=args.audio_ordinal
         )

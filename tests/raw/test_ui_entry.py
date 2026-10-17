@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -34,7 +35,24 @@ from ui import service as legacy_service  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
-def synthetic_ui_state(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+def private_tmpdir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """잠금 파일·진행 폴더·시작 청소가 모두 `$TMPDIR`을 본다.
+
+    진짜 것(살아 있는 서버의 잠금·진행 폴더)은 만지지 않는다.
+    """
+    import tempfile
+
+    directory = tmp_path / "tmpdir"
+    directory.mkdir()
+    monkeypatch.setenv("TMPDIR", str(directory))
+    monkeypatch.setattr(tempfile, "tempdir", str(directory))
+    return directory
+
+
+@pytest.fixture(autouse=True)
+def synthetic_ui_state(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, private_tmpdir: Path
+) -> Path:
     from ui.instance import UiInstance
 
     monkeypatch.setattr(ui_app, "UiInstance", lambda project, port: UiInstance(tmp_path, port))
@@ -179,5 +197,41 @@ def test_the_server_run_tees_the_terminal_and_turns_progress_on_only_while_servi
     assert (sys.stdout, sys.stderr) == original  # 끝나면 되돌린다
     assert preprocess.progress_directory() is None
     assert not seen["progress"].exists()  # 진행 파일 폴더도 치운다
+    assert seen["progress"].name.startswith(f"vlogsrt-progress-{os.getpid()}-")  # D63 H
     texts = [line.text for line in activity_log.SERVER_LOG.lines_since(0)]
     assert "WARN 진입점 시험 줄" in texts
+
+
+def test_the_server_start_sweeps_only_dead_pid_scratch_dirs(
+    monkeypatch: pytest.MonkeyPatch, private_tmpdir: Path
+) -> None:
+    """D63 H — 서버 시작이 죽은 pid의 진행·시각 확인 폴더만 지운다.
+
+    옛 이름·살아 있는 pid·다른 종류는 남긴다.
+    """
+    dead_pid = _dead_pid()
+    dead = [
+        private_tmpdir / f"vlogsrt-progress-{dead_pid}-abc12345",
+        private_tmpdir / f"vlogsrt-sync-{dead_pid}-def67890",
+    ]
+    kept = [
+        private_tmpdir / f"vlogsrt-progress-{os.getpid()}-live0000",
+        private_tmpdir / "vlogsrt-progress-oldfmt12",
+        private_tmpdir / "vlogsrt-status-0F0E2C1B-0000-4000-8000-000000000000",
+    ]
+    for path in (*dead, *kept):
+        path.mkdir()
+    (dead[1] / "audio.pcm").write_bytes(b"\0" * 64)
+    _patch_launch(monkeypatch, chosen_port=7994)
+    assert ui_app.main(["--port", "7994", "--no-browser"]) == 0
+    assert [path.exists() for path in dead] == [False, False]
+    assert all(path.is_dir() for path in kept)
+
+
+def _dead_pid() -> int:
+    import subprocess
+    import sys
+
+    process = subprocess.Popen([sys.executable, "-c", "pass"])
+    process.wait()
+    return process.pid

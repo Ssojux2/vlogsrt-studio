@@ -25,7 +25,13 @@ from vlogsrt.project.raw.models import (
     JobRecord,
     RawWorkspaceError,
 )
-from vlogsrt.project.raw.workspace import DB_NAME, RawWorkspace, db_session, open_db
+from vlogsrt.project.raw.workspace import (
+    DB_NAME,
+    RawWorkspace,
+    checkpoint_wal,
+    db_session,
+    open_db,
+)
 from vlogsrt.task_runtime import cancellation_scope
 
 FINAL_STATE_ATTEMPTS = 3
@@ -394,6 +400,26 @@ class JobManager:
         finally:
             with self._lock:
                 self._executions.pop(job_id, None)
+            self._checkpoint_after_finish(job_id)
+
+    def _checkpoint_after_finish(self, job_id: str) -> None:
+        """작업이 끝 상태에 닿은 뒤 PASSIVE 체크포인트 한 번(D63 H) — 쓰기·읽기를 기다리지 않는다.
+
+        작업 하나가 쓴 쪽을 다음 자동 체크포인트까지 `-wal`에 쌓아 두지 않는다. 다시 묻지 않는다.
+        바쁨은 `checkpoint_wal`이 경고로 남기고, 그 밖의 DB 오류도 끝 상태 기록(`_settle`)처럼
+        기록만 하고 스레드를 끝낸다 — 끝 상태는 이미 남았고 내용은 `-wal`에 그대로 있다.
+        """
+        path = self._workspace.root / DB_NAME
+        try:
+            connection = open_db(path, must_exist=True)
+            try:
+                checkpoint_wal(connection, "PASSIVE", path)
+            finally:
+                connection.close()
+        except sqlite3.Error as error:
+            log.error(
+                f"작업 {job_id} 뒤 WAL 체크포인트를 하지 못했다: {error} — 다음 체크포인트가 옮긴다"
+            )
 
     def _settle(self, job_id: str, **changes: object) -> None:
         """끝 상태를 남긴다 — 끝내 못 남기면 스레드를 죽이지 않고 기록만 한다.

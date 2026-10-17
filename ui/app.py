@@ -23,7 +23,7 @@ import uvicorn
 
 from ui import activity_log, service, workspace_service
 from ui.instance import UiInstance
-from vlogsrt import log, preprocess
+from vlogsrt import log, preprocess, scratch_dirs
 
 OPEN_FILE_SOFT_LIMIT = 4096
 """Finder·터미널에서 띄우면 macOS 기본 soft 한도 256을 물려받는다 — 작업 여럿이
@@ -50,11 +50,13 @@ def _server_activity() -> Iterator[None]:
     """서버가 도는 동안만 — 터미널 줄을 「기록」 판에도 남기고 ffmpeg 진행 파일을 켠다(D61).
 
     CLI와 시험은 이 길을 지나지 않으므로 argv가 그대로다. 진행 파일 폴더는 끝날 때 치운다.
+    폴더 이름에 pid를 싣는다 — 서버가 죽어 남으면 다음 시작의 청소가 지운다(D63 H).
     """
     with (
         # 며칠 켜 둔 서버에서 `$TMPDIR` 청소가 먼저 지웠어도 끝내기가 죽지 않는다.
         tempfile.TemporaryDirectory(
-            prefix="vlogsrt-progress-", ignore_cleanup_errors=True
+            prefix=scratch_dirs.pid_prefix(scratch_dirs.PROGRESS_SCRATCH),
+            ignore_cleanup_errors=True,
         ) as progress,
         activity_log.captured(),
     ):
@@ -121,6 +123,8 @@ def main(argv: list[str] | None = None) -> int:
                 "새 서버를 다른 포트에 자동 실행하지 않았습니다."
             )
             return 1
+        # 서버를 띄우는 자리에서만 — 죽은 프로세스가 남긴 pid 임시 폴더를 치운다(D63 H).
+        scratch_dirs.sweep_dead_scratch()
         with _server_activity():
             return _serve(port, url, open_browser=not args.no_browser)
 

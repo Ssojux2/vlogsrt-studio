@@ -460,3 +460,45 @@ def validate_analysis_concurrency(settings: RawAnalysisConcurrency) -> None:
         raise ValueError(f"동시 분석 한도는 정수여야 한다: {value!r}")
     if value < 1:
         raise ValueError(f"동시 분석 한도는 1 이상이어야 한다: {value!r}")
+
+
+@dataclass(frozen=True)
+class WorkspaceDbSettings:
+    """작업공간 DB(WAL)의 옆 파일 크기 상한과 체크포인트 대기 — 외부 근거 없는 조정 대상(D63 H).
+
+    `journal_size_limit_bytes`는 연결마다 거는 `PRAGMA journal_size_limit`이다. SQLite 기본값
+    -1(무제한)에서는 `-wal`이 가장 컸던 때의 크기로 남는다 — 실제 작업공간의 `-wal`이 3.4 MB로
+    줄지 않았다(체크포인트는 내용을 옮길 뿐 파일을 줄이지 않는다). 상한을 걸면 체크포인트가 WAL을
+    처음으로 되돌릴 때마다 파일을 이 크기로 자른다. 1 MiB(4 KiB 쪽 256장)는 관찰한 3.4 MB의 3분의
+    1 아래이면서, 작업 상태·진행 한 번 쓰기(몇 쪽)를 수백 번 담아 작은 쓰기마다 파일을 다시
+    늘리지 않는다. 쓰기가 몰리는 동안에는 자동 체크포인트(1000쪽)까지 잠깐 넘을 수 있다.
+
+    `checkpoint_busy_timeout_ms`는 닻을 닫으며 거는 `wal_checkpoint(TRUNCATE)`의 대기다. 연결의
+    `busy_timeout`(10초)을 그대로 쓰면 종료(atexit)가 닻 수 × 10초까지 막힐 수 있다. 0.5초는 작업
+    상태 한 번 커밋(밀리초)을 기다리기에 넉넉하고, 닻 상한 8개에도 종료를 4초 안에 묶는다. 못 끝내면
+    경고만 남기고 닫는다 — 내용은 `-wal`에 그대로 있고 다음 체크포인트가 옮긴다.
+
+    어느 값도 분석 지문·캐시 열쇠·승인에 들어가지 않는다 — DB 파일 관리일 뿐 결과를 바꾸지 않는다.
+    """
+
+    journal_size_limit_bytes: int = 1_048_576
+    checkpoint_busy_timeout_ms: int = 500
+
+
+WORKSPACE_DB = WorkspaceDbSettings()
+"""지금 쓰는 작업공간 DB 설정 — 모든 작업공간 연결과 닻이 이 하나를 읽는다."""
+
+
+def validate_workspace_db_settings(settings: WorkspaceDbSettings) -> None:
+    """값역 검사 — PRAGMA 문장에 그대로 실리므로 bool이 아닌 정수만, 상한은 0 이상·대기는 양수."""
+    problems: list[str] = []
+    for name, value, minimum in (
+        ("journal_size_limit_bytes", settings.journal_size_limit_bytes, 0),
+        ("checkpoint_busy_timeout_ms", settings.checkpoint_busy_timeout_ms, 1),
+    ):
+        if isinstance(value, bool) or not isinstance(value, int):
+            problems.append(f"{name}은 정수여야 한다: {value!r}")
+        elif value < minimum:
+            problems.append(f"{name}이 범위 밖이다: {value!r}")
+    if problems:
+        raise ValueError("작업공간 DB 설정이 계약을 어긴다: " + "; ".join(problems))

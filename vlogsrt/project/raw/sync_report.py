@@ -42,6 +42,7 @@ from vlogsrt.project.raw import read_scope
 from vlogsrt.project.sync_check import Check, Cue, Reason
 from vlogsrt.project.vad.inference import infer_vad
 from vlogsrt.project.vad.runtime import VadUnavailable, bundled_artifact, create_cpu_session
+from vlogsrt.scratch_dirs import SYNC_SCRATCH, pid_prefix
 
 SYNC_CACHE = Path("cache") / "sync-check"
 """작업공간 안 유일한 쓰기 자리 — 어느 지문에도 들어가지 않는다."""
@@ -1247,7 +1248,7 @@ def measure_workspace(
         for document in documents:
             write_report(cache_root, document, SYNC_CHECK_SETTINGS)
         return documents
-    with tempfile.TemporaryDirectory(prefix="vlogsrt-sync-") as scratch:
+    with tempfile.TemporaryDirectory(prefix=pid_prefix(SYNC_SCRATCH)) as scratch:
         return [_measured(s, Path(scratch), SYNC_CHECK_SETTINGS, project, factory) for s in sources]
 
 
