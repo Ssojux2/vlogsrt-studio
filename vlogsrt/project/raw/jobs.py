@@ -191,6 +191,33 @@ class JobStore:
             ).fetchall()
         return tuple(self._record(row) for row in rows)
 
+    def recent_of_kinds(
+        self, kinds: Collection[str], limit: int | None = 50
+    ) -> tuple[JobRecord, ...]:
+        """그 종류의 최근 작업(최근 것이 먼저) — 다른 종류가 아무리 쌓여도 창을 밀어내지 못한다.
+
+        전체 최근 창(`list_jobs`)을 종류로 거르면, 짧은 미리보기 작업이 몇 분 만에 수십 개 쌓여
+        오래 도는 작업·실패한 작업을 창 밖으로 밀어냈다(W-24 세션 J). `limit`이 None이면 그 종류
+        전부다. 읽기 범위 안에서는 같은 묶음을 한 번만 읽는다(D63).
+        """
+        ordered = tuple(kinds)
+        key = ("jobs.recent_of_kinds", str(self._workspace.root), ordered, limit)
+        return read_scope.memo(key, lambda: self._read_recent_of_kinds(ordered, limit))
+
+    def _read_recent_of_kinds(
+        self, kinds: tuple[str, ...], limit: int | None
+    ) -> tuple[JobRecord, ...]:
+        kind_marks = ", ".join("?" for _ in kinds)
+        # SQLite의 음수 LIMIT은 한도 없음이다.
+        bound = -1 if limit is None else limit
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"SELECT * FROM jobs WHERE kind IN ({kind_marks})"
+                " ORDER BY created_at DESC, job_id DESC LIMIT ?",
+                (*kinds, bound),
+            ).fetchall()
+        return tuple(self._record(row) for row in rows)
+
     def active(self) -> tuple[JobRecord, ...]:
         """종류를 가리지 않는 활성 작업 전부 — 상태로 찾는다(오래된 것이 먼저). 읽기만 한다."""
         return read_scope.memo(("jobs.active", str(self._workspace.root)), self._read_active)
@@ -477,6 +504,11 @@ class JobManager:
 
     def active_of_kinds(self, kinds: Collection[str]) -> tuple[JobRecord, ...]:
         return self._store.active_of_kinds(kinds)
+
+    def recent_of_kinds(
+        self, kinds: Collection[str], limit: int | None = 50
+    ) -> tuple[JobRecord, ...]:
+        return self._store.recent_of_kinds(kinds, limit)
 
     def active(self) -> tuple[JobRecord, ...]:
         return self._store.active()

@@ -254,7 +254,8 @@ def test_retry_on_an_old_prompt_offers_a_transcribe_only_analysis(
     root = ui.workspace_root()
     signature = ui.current_signature()
     old_job = SimpleNamespace(job_id="job_old", status="failed", kind=raw.ANALYSIS_JOB_KIND)
-    monkeypatch.setattr(ui.raw, "list_jobs", lambda _root, limit=50: (old_job,))
+    # 재시도는 다시 걸 수 있는 종류의 최근 창만 본다(W-24 J).
+    monkeypatch.setattr(ui.raw, "recent_jobs", lambda _root, kinds, limit=50: (old_job,))
     monkeypatch.setattr(ui.raw, "analysis_jobs_on_old_prompt", lambda _root: frozenset({"job_old"}))
     retried: list[str] = []
     monkeypatch.setattr(ui, "_retry_job", lambda *args: retried.append("retry") or "재시도")

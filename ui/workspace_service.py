@@ -337,6 +337,19 @@ FINALCUT_SEND_LABEL = "Final Cut으로 보내기"
 FINALCUT_SEND_JOB_KIND = "finalcut_send"
 OLD_SELECTED_CUTS_JOB_KIND = "capcut_export"
 """D56 이전 「선택한 컷」 출력 작업 — 기록에만 남는다. 다시 걸지 않는다."""
+RETRYABLE_JOB_KINDS = (
+    raw_service.ANALYSIS_JOB_KIND,
+    raw_service.ANALYSIS_SEMANTIC_JOB_KIND,
+    "reference_import",
+    "source_preview",
+    raw_service.INGEST_JOB_KIND,
+    raw_service.SEGMENT_JOB_KIND,
+    FINALCUT_SEND_JOB_KIND,
+    OLD_SELECTED_CUTS_JOB_KIND,
+)
+"""「실패 재시도」가 아는 종류(`_retry_job`과 짝) — 이 종류의 최근 창에서만 실패를 찾는다(W-24 J).
+
+전체 최근 창을 쓰면 짧은 미리보기 준비 작업 수십 개가 실패한 분석을 창 밖으로 밀어냈다."""
 FINALCUT_VFR_NOTE = (
     "가변 프레임(VFR) 영상이 있습니다 — 아이폰 영상에 흔합니다. 프레임마다 간격이 달라 컷 경계와"
     " 시작 시각을 프레임 단위로 맞출 수 없어 보내지 않았습니다. 그 영상을 일정한 프레임(예: 30fps)"
@@ -352,6 +365,14 @@ UNREVIEWED_KEYWORD = "제외 제안(미검토)"
 """보낸 파일의 미검토 제외 제안에 붙는 Final Cut 키워드 이름 — `finalcut_timeline`의
 `KEYWORD_UNREVIEWED`와 같다(시험)."""
 NO_WORKSPACE_TEXT = "작업공간이 열려 있지 않습니다. Final Cut 라이브러리를 먼저 불러오세요."
+FINALCUT_SEND_STARTED_TEXT = (
+    "원본 전체를 촬영 시각 순 타임라인 하나로 만들어 Final Cut으로 보냅니다 — 지우는 것은"
+    " 없고, 사람이 확인한 제외만 끈 채로 갑니다."
+)
+LIBRARY_FIRST_TEXT = "라이브러리를 먼저 불러오세요."
+"""라이브러리가 닫혀 있을 때 명령 줄의 취소·보내기 단추가 활동 칸에 하는 답(W-24 세션 J)."""
+WORKBENCH_LOADING_TEXT = "작업대를 불러오는 중입니다."
+"""조립 때 작업대의 처음 값 — 페이지 로드가 진짜 값으로 갈기 전의 자리표시(W-24 세션 J)."""
 LIBRARY_CLOSE_LABEL = ui_facade.LIBRARY_CLOSE_TEXT
 LIBRARY_CLOSED_TEXT = (
     "라이브러리를 닫았습니다 — 원본·분석 결과는 그대로이고, 다시 불러오면 이어서 엽니다."
@@ -1810,11 +1831,10 @@ class RawWorkspaceUi:
         root = root if root is not None else self._snapshot_root()
         if root is None:
             return []
-        jobs = self.raw.list_jobs(root)
+        # 상태로 찾는다(최근 것이 먼저) — 최근 창 밖의 오래 도는 작업도 고를 수 있다(W-24 J).
         return [
             (f"{job.job_id} · {job.kind} · {job.status}", job.job_id)
-            for job in jobs
-            if job.status in raw_service.ACTIVE_JOB_STATUSES
+            for job in reversed(self.raw.all_active_jobs(root))
         ]
 
     def device_choices(self) -> list[tuple[str, str]]:
@@ -3408,14 +3428,10 @@ class RawWorkspaceUi:
 
         def finish(context: Any) -> None:
             # The semantic job is separately durable and owns provider calls.
-            jobs = [
-                j
-                for j in self.raw.list_jobs(root)
-                if j.kind == raw_service.ANALYSIS_SEMANTIC_JOB_KIND
-            ]
-            if not jobs:
+            semantic = self.raw.latest_job(root, raw_service.ANALYSIS_SEMANTIC_JOB_KIND)
+            if semantic is None:
                 raise RuntimeError("의미 분석 작업을 찾을 수 없습니다")
-            self.raw.wait_child_job(root, jobs[0], context)
+            self.raw.wait_child_job(root, semantic, context)
             self.raw.wait_child_job(root, self.raw.start_cleanup(root), context)
 
         self.raw.submit_job(root, "cleanup_pipeline", summary.revision.revision_id, finish)
@@ -3502,10 +3518,8 @@ class RawWorkspaceUi:
         root = self._snapshot_root()
         if root is None:
             return gr.skip()
-        export = next(
-            (j for j in self.raw.list_jobs(root, limit=10) if j.kind == FINALCUT_SEND_JOB_KIND),
-            None,
-        )
+        # 종류로 찾는다 — 최근 10개 창은 짧은 미리보기 작업 몇 개에 밀려 보내는 중을 놓쳤다(W-24 J).
+        export = self.raw.latest_job(root, FINALCUT_SEND_JOB_KIND)
         if export and export.status in ("queued", "running"):
             return "**Final Cut으로 보내는 중** · 원본 전체를 촬영 시각 순 타임라인 하나로 씁니다."
         message = self._quick_status()
@@ -3659,6 +3673,9 @@ class RawWorkspaceUi:
         않은 것이 되어 승인 단추가 다시 켜지고 화면의 선택이 풀렸다. 「전체 분석 취소」와 같은
         판정(`_task_running`)이다. 돌지 않으면 아무것도 바꾸지 않고 그렇게 답한다.
         """
+        closed = self._library_first_reply()
+        if closed is not None:
+            return closed
         root = self._require_current_selection(signature)
         if self._quick.get("root") != root or not self._task_running(root, self._quick):
             message = "취소할 선택 분석 작업이 없습니다. 끝난 결과는 그대로입니다."
@@ -3675,6 +3692,9 @@ class RawWorkspaceUi:
 
     def capcut_cancel_all_view(self, signature: str | None) -> str:
         """승인 확인과 돌거나 기다리는 모든 영상 분석을 멈춘다 — 끝난 결과는 그대로 남는다."""
+        closed = self._library_first_reply()
+        if closed is not None:
+            return closed
         root = self._require_current_selection(signature)
         # 확인 중인 승인부터 멈춰야 그 뒤에 새 영상 분석이 더 띄워지지 않는다.
         stopped = self._approval_active(root)
@@ -3693,6 +3713,17 @@ class RawWorkspaceUi:
         message = "전체 분석 취소를 요청했습니다. 완료된 결과는 보존됩니다."
         _toast("info", message)
         return message
+
+    def _library_first_reply(self) -> str | None:
+        """라이브러리가 닫혀 있으면 그 답(주의 알림과 함께), 열려 있으면 None(W-24 세션 J).
+
+        명령 줄의 취소·보내기 단추는 늘 누를 수 있다 — 닫힌 채 누르면 오류(`gr.Error`)는 활동 칸에
+        닿지 않아 아무 답도 보이지 않았다. 활동 칸은 성공한 답만 옮긴다(`_report_activity`).
+        """
+        if self._snapshot_root() is not None:
+            return None
+        _toast("warning", LIBRARY_FIRST_TEXT)
+        return LIBRARY_FIRST_TEXT
 
     def _task_running(self, root: Path, task: dict) -> bool:
         if task.get("stage") in BUSY_QUICK_STAGES:
@@ -3720,7 +3751,8 @@ class RawWorkspaceUi:
                 return RETRY_TRANSCRIBE_TEXT
             return "선택 영상의 실패·누락 단계를 확인합니다. 표시된 범위를 승인하면 재개합니다."
         stale = self.raw.analysis_jobs_on_old_prompt(root)
-        for job in self.raw.list_jobs(root):
+        # 다시 걸 수 있는 종류의 최근 창 — 짧은 미리보기 작업이 실패를 밀어내지 못한다(W-24 J).
+        for job in self.raw.recent_jobs(root, RETRYABLE_JOB_KINDS):
             if job.status in ("failed", "interrupted", "paused"):
                 if job.job_id in stale:
                     self._set_approval_mode(root, raw_service.SELECTION_MODE_TRANSCRIBE)
@@ -3792,6 +3824,9 @@ class RawWorkspaceUi:
         아무것도 지우지 않으므로 미검토 자동 제외가 있어도 막지 않는다(켠 채 키워드로 간다, D56).
         쓰기·DTD 검증은 서비스가 하고, 여는 것은 주입된 opener다(시험은 가짜).
         """
+        closed = self._library_first_reply()
+        if closed is not None:
+            return closed
         root = self._require_current_selection(signature)
         opener = self._finalcut_opener or self._system_finalcut_open
 
@@ -3822,10 +3857,7 @@ class RawWorkspaceUi:
         with self._selection_lock:
             self._finalcut_sent.pop(str(signature), None)
         self.raw.submit_job(root, FINALCUT_SEND_JOB_KIND, FINALCUT_SEND_JOB_KIND, body)
-        return (
-            "원본 전체를 촬영 시각 순 타임라인 하나로 만들어 Final Cut으로 보냅니다 — 지우는 것은"
-            " 없고, 사람이 확인한 제외만 끈 채로 갑니다."
-        )
+        return FINALCUT_SEND_STARTED_TEXT
 
     @staticmethod
     def _send_memory() -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
@@ -3860,10 +3892,7 @@ class RawWorkspaceUi:
         root = self._snapshot_root()
         if not signature or root is None or signature != self._signature_for(root):
             return None
-        export = next(
-            (j for j in self.raw.list_jobs(root, limit=10) if j.kind == FINALCUT_SEND_JOB_KIND),
-            None,
-        )
+        export = self.raw.latest_job(root, FINALCUT_SEND_JOB_KIND)
         if export is None or export.status not in ("succeeded", "failed"):
             return None
         with self._selection_lock:
@@ -3985,8 +4014,13 @@ class RawWorkspaceUi:
         동안 재생이 이어진다(F1a·F1b). 견적 칸(넓은 화면은 패널 열 위, 1050px 이하는 명령 줄
         바로 아래)은 승인 단추가 묶는 문구와 그 아래 전문(견적을 실은 승인 거절)을 말줄임 없이
         싣는다.
+
+        처음 값은 작업공간과 무관한 자리표시다(W-24 세션 J) — 조립은 서버 시작에 한 번뿐이라
+        그때 열린 작업공간의 썸네일·영상 주소가 페이지마다 처음 값으로 실렸고, 「라이브러리
+        닫기」 뒤 새로 연 페이지가 페이지 로드가 값을 갈기 전에 닫힌 작업공간의 `/media/<id>`를
+        스무 번 넘게 불러 404를 받았다. 진짜 값은 페이지 로드(`refresh_outputs`)가 그린다.
         """
-        shell, workbench = self.visual_workbench_render(self._snapshot_root())
+        shell, workbench = self._initial_workbench_values()
         with gr.Row(elem_id="visual-stage"):
             self._visual_player_block = gr.HTML(
                 shell,
@@ -4012,6 +4046,13 @@ class RawWorkspaceUi:
                     latex_delimiters=[],
                 )
                 self._quote_note_md = gr.Markdown(note, elem_id="vl-quote-note", visible=bool(note))
+
+    def _initial_workbench_values(self) -> tuple[str, str]:
+        """조립 때의 (껍데기, 본문) — 미디어 주소 없는 자리표시. 페이지 로드가 곧 갈아 끼운다."""
+        return (
+            ui_facade.visual_player_shell_html(None, WORKBENCH_LOADING_TEXT),
+            self._workbench_html(None, {"empty": WORKBENCH_LOADING_TEXT}),
+        )
 
     def _approval_mode_cell(self) -> gr.Radio:
         """승인 범위(D59 19b) — 견적 문구 바로 위의 두 갈래.
@@ -6986,8 +7027,8 @@ class RawWorkspaceUi:
                 f"{job.job_id} · {job.status} · {job.progress_current}/{job.progress_total}",
                 job.job_id,
             )
-            for job in self.raw.list_jobs(root)
-            if job.kind == raw_service.INGEST_JOB_KIND and job.status in resumable
+            for job in self.raw.recent_jobs(root, (raw_service.INGEST_JOB_KIND,))
+            if job.status in resumable
         ]
 
     # ── 화면 2 — 결정적 분할 계획·추출(오프라인) ─────────────────
@@ -7730,7 +7771,7 @@ class RawWorkspaceUi:
         # 이전 분석 기준으로 시작한 작업은 이어 갈 수 없다(D58 18b) — 누를 수 없는 항목은 숨긴다.
         stale = self.raw.analysis_jobs_on_old_prompt(root)
         choices: list[tuple[str, str]] = []
-        for job in self.raw.list_jobs(root):
+        for job in self.raw.recent_jobs(root, tuple(sorted(kinds))):
             if job.job_id in stale:
                 continue
             in_awaiting = (
@@ -7793,7 +7834,7 @@ class RawWorkspaceUi:
                 f" {last.core_end_pts}) @ {time_base} |"
                 f" {len(entries) == _coverage_count(latest, source_order)} |"
             )
-        jobs = [job for job in self.raw.list_jobs(root) if job.kind == raw_service.SEGMENT_JOB_KIND]
+        jobs = self.raw.recent_jobs(root, (raw_service.SEGMENT_JOB_KIND,))
         if jobs:
             lines += ["", "**추출 작업**"]
             lines += [
@@ -7896,8 +7937,8 @@ class RawWorkspaceUi:
                 f"{job.job_id} · {job.status} · {job.progress_current}/{job.progress_total}",
                 job.job_id,
             )
-            for job in self.raw.list_jobs(root)
-            if job.kind == raw_service.SEGMENT_JOB_KIND and job.status in resumable
+            for job in self.raw.recent_jobs(root, (raw_service.SEGMENT_JOB_KIND,))
+            if job.status in resumable
         ]
 
     def clip_choices(self, root: Path | None = None) -> list[tuple[str, str]]:

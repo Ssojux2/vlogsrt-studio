@@ -486,10 +486,12 @@ def cmd_settings(args: argparse.Namespace) -> int:
 
 
 def _analysis_active(service: raw_service.RawWorkspaceService, root: Path) -> bool:
+    # 분석 종류 전부에서 본다 — 최근 창으로 거르면 다른 작업이 쌓인 뒤 도는 분석을 놓친다(W-24 J).
     return any(
-        job.kind in (ANALYSIS_JOB_KIND, ANALYSIS_SEMANTIC_JOB_KIND)
-        and job.status not in _TERMINAL_STATUSES
-        for job in service.list_jobs(root)
+        job.status not in _TERMINAL_STATUSES
+        for job in service.recent_jobs(
+            root, (ANALYSIS_JOB_KIND, ANALYSIS_SEMANTIC_JOB_KIND), limit=None
+        )
     )
 
 

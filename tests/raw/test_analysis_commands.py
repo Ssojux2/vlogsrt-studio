@@ -268,8 +268,11 @@ def test_media_settings_refuses_a_switch_during_an_active_analysis(
         created_at="2026-10-09T00:00:00Z",
         updated_at="2026-10-09T00:00:00Z",
     )
+    # 분석 종류의 작업만 묻는다(W-24 J) — 최근 50개 창이 아니다.
     monkeypatch.setattr(
-        raw_service.RawWorkspaceService, "list_jobs", lambda self, root, limit=50: (running,)
+        raw_service.RawWorkspaceService,
+        "recent_jobs",
+        lambda self, root, kinds, limit=50: (running,) if running.kind in kinds else (),
     )
     assert media.media_command(_settings_args(workspace, "--analysis-model", CLAUDE)) == 1
     assert "분석" in capsys.readouterr().err

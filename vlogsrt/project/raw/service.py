@@ -1060,9 +1060,8 @@ class RawWorkspaceService:
     def workspace_status(self, root: Path) -> WorkspaceStatus:
         workspace = self._workspace(root)
         config = workspace.load_workflow()
-        active = sum(
-            1 for job in self._jobs(workspace.root).list_jobs() if job.status in ACTIVE_JOB_STATUSES
-        )
+        # 최근 창이 아니라 상태로 센다 — 짧은 작업이 쌓여도 오래 도는 작업이 빠지지 않는다(W-24 J).
+        active = len(self._jobs(workspace.root).active())
         return WorkspaceStatus(
             workspace_root=str(workspace.root),
             workspace_id=workspace.workspace_id(),
@@ -1144,6 +1143,15 @@ class RawWorkspaceService:
     def active_jobs(self, root: Path, kinds: Collection[str]) -> tuple[JobRecord, ...]:
         """그 종류의 활성 작업 전부 — 목록 창(최근 50개) 밖의 오래된 작업도 놓치지 않는다."""
         return self._jobs(root).active_of_kinds(kinds)
+
+    def recent_jobs(
+        self, root: Path, kinds: Collection[str], limit: int | None = 50
+    ) -> tuple[JobRecord, ...]:
+        """그 종류의 최근 작업(최근 것이 먼저) — 다른 종류의 작업이 창을 밀어내지 못한다(W-24 J).
+
+        `limit`이 None이면 그 종류 전부다.
+        """
+        return self._jobs(root).recent_of_kinds(kinds, limit)
 
     def all_active_jobs(self, root: Path) -> tuple[JobRecord, ...]:
         """종류를 가리지 않는 활성 작업 전부(오래된 것부터) — 「지금 도는 작업」이 읽는다(D61)."""
@@ -2028,7 +2036,8 @@ class RawWorkspaceService:
         asset_ids: tuple[str, ...],
         context: JobContext,
     ) -> None:
-        for page in range(1, (len(head.segments) + VISUAL_PAGE_SIZE - 1) // VISUAL_PAGE_SIZE + 1):
+        # 고른 원본의 조각이 없는 쪽은 걸지 않는다 — 그 쪽의 준비는 만들 것이 없다(W-24 세션 J).
+        for page in visual_review.pages_with_sources(head, asset_ids):
             context.check_cancel()
 
             def prepare_page(ctx: JobContext, page: int = page) -> None:
@@ -2119,11 +2128,11 @@ class RawWorkspaceService:
         if summary is None or summary.revision.status != "complete":
             raise RawWorkspaceError("분석이 끝난 뒤 자동 정리를 시작하세요")
         revision_id = summary.revision.revision_id
+        # 그 종류 전부에서 찾는다 — 최근 창 밖으로 밀린 성공을 놓치면 사람 결정이 실린 검토
+        # 머리를 다시 세운다(W-24 세션 J).
         initialized = any(
-            job.kind == "automatic_cleanup"
-            and job.input_fingerprint == revision_id
-            and job.status == "succeeded"
-            for job in self.list_jobs(root)
+            job.input_fingerprint == revision_id and job.status == "succeeded"
+            for job in self.recent_jobs(root, ("automatic_cleanup",), limit=None)
         )
 
         def body(context: JobContext) -> None:
@@ -2981,7 +2990,7 @@ class RawWorkspaceService:
             revision = workspace.order_revision(assets[0].batch_dir)
         elif batch_dir is not None:
             revision = workspace.order_revision(batch_dir)
-        jobs = tuple(job for job in self.list_jobs(root) if job.kind == INGEST_JOB_KIND)
+        jobs = self.recent_jobs(root, (INGEST_JOB_KIND,))
         return (assets if batch_dir else _propose_global_order(assets)), revision, jobs
 
     def list_source_assets(
@@ -3337,10 +3346,8 @@ class RawWorkspaceService:
         active = next(
             (
                 job
-                for job in self.list_jobs(root)
-                if job.kind == ANALYSIS_JOB_KIND
-                and job.status in ACTIVE_JOB_STATUSES
-                and job.input_fingerprint == fingerprint
+                for job in reversed(self.active_jobs(root, (ANALYSIS_JOB_KIND,)))
+                if job.input_fingerprint == fingerprint
             ),
             None,
         )
@@ -3573,10 +3580,8 @@ class RawWorkspaceService:
         active = next(
             (
                 job
-                for job in self.list_jobs(root)
-                if job.kind == ANALYSIS_SEMANTIC_JOB_KIND
-                and job.status in ACTIVE_JOB_STATUSES
-                and job.input_fingerprint == fingerprint
+                for job in reversed(self.active_jobs(root, (ANALYSIS_SEMANTIC_JOB_KIND,)))
+                if job.input_fingerprint == fingerprint
             ),
             None,
         )
@@ -3754,8 +3759,8 @@ class RawWorkspaceService:
         kinds = (ANALYSIS_JOB_KIND, ANALYSIS_SEMANTIC_JOB_KIND)
         return frozenset(
             job.job_id
-            for job in self.list_jobs(root)
-            if job.kind in kinds and job.input_fingerprint in keys
+            for job in self.recent_jobs(root, kinds, limit=None)
+            if job.input_fingerprint in keys
         )
 
     def _require_revision_models(
@@ -4067,11 +4072,9 @@ class RawWorkspaceService:
         """
         workspace = self._workspace(root)
         facade = self.review_workspace_facade(root)
-        active = tuple(
-            job
-            for job in self.list_jobs(root)
-            if job.kind == VISUAL_PREPARE_JOB_KIND and job.status in ACTIVE_JOB_STATUSES
-        )
+        # 상태로 찾는다 — 최근 50개 창으로 거르면 짧은 준비 작업이 쌓인 뒤 오래 도는 원본 전체
+        # 인코딩이 창 밖으로 밀려 「준비 중」이 「미리보기 낡음」으로 보였다(W-24 J, 실측 0024).
+        active = self.active_jobs(root, (VISUAL_PREPARE_JOB_KIND,))
         return visual_review.query_overview(
             workspace,
             facade,

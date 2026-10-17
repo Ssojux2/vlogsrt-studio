@@ -1417,6 +1417,27 @@ def run_page_preparation(
     )
 
 
+def pages_with_sources(revision: ReviewRevision, asset_ids: tuple[str, ...]) -> tuple[int, ...]:
+    """쪽 준비(`run_page_preparation`)가 그 원본들의 조각을 하나라도 맡는 쪽 번호 — 읽기만 한다.
+
+    `asset_ids`가 비면 모든 쪽이다. 나머지 쪽의 준비는 조각이 없어 아무것도 만들지 않는다 —
+    원본 미리보기가 그런 쪽마다 빈 준비 작업을 걸어, 영상 하나를 고를 때마다 작업이 쪽 수만큼
+    쌓였다(W-24 세션 J).
+    """
+    ordered = chronological(revision)
+    page_count = (len(ordered) + VISUAL_PAGE_SIZE - 1) // VISUAL_PAGE_SIZE
+    wanted = set(asset_ids)
+    return tuple(
+        page
+        for page in range(1, page_count + 1)
+        if not wanted
+        or any(
+            segment.source_id in wanted
+            for segment in ordered[(page - 1) * VISUAL_PAGE_SIZE : page * VISUAL_PAGE_SIZE]
+        )
+    )
+
+
 def run_source_preparation(
     context: JobContext,
     workspace: RawWorkspace,
