@@ -39,13 +39,14 @@
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import math
 import os
 import re
 import secrets
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from fractions import Fraction
@@ -54,7 +55,7 @@ from pathlib import Path
 from vlogsrt import log, preprocess
 from vlogsrt.project.raw import read_scope, source_verify
 from vlogsrt.project.raw.analysis_config import REVIEW_MEDIA
-from vlogsrt.project.raw.jobs import JobContext
+from vlogsrt.project.raw.jobs import JobCancelledError, JobContext
 from vlogsrt.project.raw.media_refs import ORIGINAL_ONLY_FINGERPRINT
 from vlogsrt.project.raw.models import (
     ACTIVE_JOB_STATUSES,
@@ -81,6 +82,7 @@ from vlogsrt.project.raw.segment_review import (
 from vlogsrt.project.raw.workspace import RawWorkspace
 
 __all__ = [
+    "REPRESENTATIVE_THUMBS_PREFIX",
     "VISUAL_INVENTORY_RECIPE",
     "VISUAL_PAGE_SIZE",
     "VISUAL_PREVIEW_RECIPE",
@@ -103,8 +105,11 @@ __all__ = [
     "preparation_fingerprint",
     "preview_media_key",
     "query_overview",
+    "representative_thumbs_fingerprint",
+    "representative_thumbs_missing",
     "require_head_revision",
     "run_page_preparation",
+    "run_representative_thumbnails",
     "run_source_preparation",
     "set_selection",
     "snap_proposal",
@@ -320,6 +325,14 @@ class VisualReviewOverview:
     쪽 넘김이 없어 쪽은 늘 1이다. 레일 구간의 썸네일과 화면의 컷 찾기(`findCut`)가 쪽 목록만
     보면 첫 쪽(24컷) 밖 영상의 컷은 썸네일도 범위도 없었다. 고른 영상 하나만 싣는다(모든 영상의
     모든 컷이 아니다 — 값을 작게 둔다). `include_all_sources`일 때만 채운다.
+    """
+    representative_thumbs: tuple[str | None, ...] = ()
+    """영상 카드의 그림 — `representatives`와 같은 차례의 썸네일 등록 ID(W-24 세션 I).
+
+    대표 컷의 썸네일이 그릴 수 있으면(파일과 등록 행이 다 있다) 그것, 아니면 그 영상의 컷 가운데
+    필터와 무관하게 처음 그릴 수 있는 것, 하나도 없으면 None이다. 카드가 고르는 컷(선택·필터의
+    뜻, D64)은 그대로이고 그림만 이 값이다 — 대표 컷의 썸네일이 지워진 영상이 다른 컷의 썸네일이
+    있는데도 「낡음」으로 보였다.
     """
 
 
@@ -1081,9 +1094,13 @@ def query_overview(
 
     representatives: tuple[VisualSegmentCard, ...] = ()
     view_segments: tuple[VisualSegmentCard, ...] = ()
+    representative_thumbs: tuple[str | None, ...] = ()
     if include_all_sources:
         representatives = cards_at(_representative_positions(ordered, matching))
         view_segments = cards_at(_view_positions(ordered, chosen_position, positions))
+        representative_thumbs = tuple(
+            _card_thumb(workspace, revision, ordered, card) for card in representatives
+        )
     return VisualReviewOverview(
         workspace_id=facade.project_id,
         base_plan_id=revision.base_plan_id,
@@ -1099,6 +1116,7 @@ def query_overview(
         active_preparation_jobs=tuple(job.job_id for job in active),
         representatives=representatives,
         view_segments=view_segments,
+        representative_thumbs=representative_thumbs,
     )
 
 
@@ -1128,6 +1146,39 @@ def _representative_positions(
     for position in matching:
         chosen.setdefault(ordered[position].source_id, position)
     return sorted(chosen.get(source_id, position) for source_id, position in first.items())
+
+
+def _drawable_thumb_id(workspace: RawWorkspace, key: str) -> str | None:
+    """화면이 그릴 수 있는 썸네일의 등록 ID — 파일과 등록 행이 다 있어야 한다(`/media/<id>`).
+
+    파일만 있고 등록이 없는 것(`ready`인데 주소가 없다)은 그릴 수 없다 — 카드가 그림 대신
+    「준비됨」 글자를 보였다(W-24 세션 I).
+    """
+    relative = _thumb_relative(key)
+    if not (workspace.root / relative).is_file():
+        return None
+    registration = _registration_for(workspace, relative)
+    return registration.file_id if registration is not None else None
+
+
+def _card_thumb(
+    workspace: RawWorkspace,
+    revision: ReviewRevision,
+    ordered: Sequence[ReviewSegment],
+    card: VisualSegmentCard,
+) -> str | None:
+    """영상 카드의 그림 — 대표 컷의 것, 없으면 그 영상의 컷 차례로 처음 그릴 수 있는 것."""
+    if card.thumb_state == "ready" and card.thumb_registered_file_id is not None:
+        return card.thumb_registered_file_id
+    clock = _required_clock(revision, card.source_id)
+    for segment in ordered:
+        if segment.source_id != card.source_id:
+            continue
+        frame_index, _, _ = _snapped_fields(clock, segment.start_pts, segment.end_pts)
+        found = _drawable_thumb_id(workspace, thumbnail_media_key(clock.source_sha256, frame_index))
+        if found is not None:
+            return found
+    return None
 
 
 def _require_page(page: int) -> None:
@@ -1420,6 +1471,110 @@ def source_preparation_missing(
     return missing
 
 
+REPRESENTATIVE_THUMBS_PREFIX = "representative-thumbs:"
+"""영상마다 첫 컷 썸네일 작업(W-24 세션 I)의 지문 머리 — 쪽·영상 준비의 지문(16진 해시)과 갈린다."""
+
+
+def _first_cuts(revision: ReviewRevision) -> dict[str, ReviewSegment]:
+    """영상마다 첫 컷(촬영 시각 순) — 필터 없는 목록의 대표 컷이다."""
+    first: dict[str, ReviewSegment] = {}
+    for segment in chronological(revision):
+        first.setdefault(segment.source_id, segment)
+    return first
+
+
+def representative_thumbs_missing(
+    workspace: RawWorkspace, revision: ReviewRevision
+) -> tuple[tuple[str, str], ...]:
+    """첫 컷의 썸네일을 그릴 수 없는 영상 — (원본, 썸네일 키), 촬영 시각 순. 읽기만 한다.
+
+    파일은 있는데 등록이 없는 것도 고른다 — 준비가 ffmpeg 없이 등록만 채운다(`_prepare_thumb`).
+    """
+    missing: list[tuple[str, str]] = []
+    for source_id, segment in _first_cuts(revision).items():
+        clock = _required_clock(revision, source_id)
+        frame_index, _, _ = _snapped_fields(clock, segment.start_pts, segment.end_pts)
+        key = thumbnail_media_key(clock.source_sha256, frame_index)
+        if _drawable_thumb_id(workspace, key) is None:
+            missing.append((source_id, key))
+    return tuple(missing)
+
+
+def representative_thumbs_fingerprint(keys: Sequence[str]) -> str:
+    """첫 컷 썸네일 작업의 지문 — 같은 썸네일 묶음의 활성 작업은 하나로 묶는다."""
+    material = f"{VISUAL_THUMB_RECIPE}|" + ",".join(sorted(keys))
+    return REPRESENTATIVE_THUMBS_PREFIX + hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def run_representative_thumbnails(
+    context: JobContext,
+    workspace: RawWorkspace,
+    revision: ReviewRevision,
+    missing: Sequence[tuple[str, str]],
+    attempted: Callable[[str], None],
+) -> None:
+    """고른 영상마다 첫 컷의 썸네일 하나만 — 원본 전체 미리보기는 만들지 않는다(W-24 세션 I).
+
+    `missing`은 `representative_thumbs_missing`의 (원본, 썸네일 키)다. 하나를 시도하고 나면(성공·
+    실패·뜻밖의 오류 모두) `attempted(키)`를 부른다 — 서비스가 그 키를 이번 실행에서 다시 걸지
+    않는다. 취소되면 남은 키까지 모두 적는다 — 사람이 취소한 작업을 다음 고리가 곧바로 다시 걸지
+    않게. 「라이브러리 닫기」의 취소는 서비스가 세대를 올려 이 기록을 버리므로 다시 열면 다시 건다.
+
+    라이브러리를 열면 모든 영상 카드에 그림이 있어야 한다. 썸네일은 영상을 고를 때·「미리보기
+    다시 준비」·자동 정리만 만들어서, 고르지 않은 영상(실측 0024)은 그림이 없었다. 원본마다
+    검증·조사 한 번에 프레임 하나, 하나씩 차례로, 낮은 OS 우선순위로(`_prepare_thumb`). 키·조리법·
+    바이트는 다른 준비와 같다. 하나가 실패해도 다음 영상으로 가고, 실패가 있으면 작업을 실패로
+    닫는다 — 조용한 빈 성공이 없다.
+    """
+    first = _first_cuts(revision)
+    context.set_total(len(missing))
+    failures: list[str] = []
+    seek_plans: dict[str, preprocess.FrameSeekPlan | None] = {}
+    try:
+        for done, (source_id, key) in enumerate(missing, start=1):
+            context.check_cancel()
+            segment = first.get(source_id)
+            if segment is not None:
+                attempt = functools.partial(
+                    _first_cut_thumb, context, workspace, revision, segment, failures, seek_plans
+                )
+                _tried_once(key, attempted, attempt)
+            context.set_progress(done)
+    except JobCancelledError:
+        for _, key in missing:
+            attempted(key)
+        raise
+    if failures:
+        raise VisualReviewError(
+            f"첫 컷 썸네일 실패 {len(failures)}건(기록에 남았다): " + "; ".join(failures[:5])
+        )
+
+
+def _tried_once(key: str, attempted: Callable[[str], None], attempt: Callable[[], None]) -> None:
+    """시도 하나 — 어떻게 멈추든(성공·실패·오류·취소) 적는다(취소는 부르는 쪽이 남은 키까지)."""
+    try:
+        attempt()
+    finally:
+        attempted(key)
+
+
+def _first_cut_thumb(
+    context: JobContext,
+    workspace: RawWorkspace,
+    revision: ReviewRevision,
+    segment: ReviewSegment,
+    failures: list[str],
+    seek_plans: dict[str, preprocess.FrameSeekPlan | None],
+) -> None:
+    """영상 하나의 첫 컷 썸네일 — 원본을 못 열면 실패로 적고 다음 영상으로 간다."""
+    try:
+        selection = _chosen_source(workspace, revision, segment.source_id, {}, context)
+    except (RawWorkspaceError, RuntimeError, OSError) as error:
+        failures.append(f"원본 {segment.source_id!r}: {error}")
+        return
+    _prepare_thumb(workspace, revision, segment, selection, failures, seek_plans)
+
+
 def _run_preparation(
     context: JobContext,
     workspace: RawWorkspace,
@@ -1430,7 +1585,6 @@ def _run_preparation(
     """준비 본문 — 맡은 원본을 표시하고 조각을 순서대로 채운다. 실패가 있으면 실패로 닫는다."""
     if not segments:
         return
-    context.set_total(len(segments))
     sweep_preview_leftovers(workspace, ())
     claims = _write_claims(
         workspace,
@@ -1458,29 +1612,53 @@ def _prepare_segments(
     page_segments: Sequence[ReviewSegment],
     choices: Mapping[str, int | None],
 ) -> list[str]:
-    """페이지 조각을 순서대로 — 원본마다 한 번 검증·미리보기, 조각마다 썸네일. 실패 목록이 답."""
+    """페이지 조각을 순서대로 — 원본마다 검증 한 번, 조각마다 썸네일, 그 뒤에 원본 전체 미리보기.
+
+    썸네일이 먼저다(W-24 세션 I). 예전에는 원본마다 첫 썸네일 앞에서 원본 전체 인코딩을 했다 —
+    실측 0024(33컷)는 그 인코딩이 매번 한도·서버 멈춤에 끊겨 썸네일이 하나도 없었다. 썸네일은
+    미리보기 파일이 아니라 원본(또는 프록시, `_select_source`가 고른 것)에서 바로 뽑으므로 순서만
+    바뀌고 바이트·키는 같다. 진행 눈금은 썸네일 수 + 원본 수다. 실패 목록이 답.
+    """
     selections: dict[str, _SourceSelection] = {}
     seek_plans: dict[str, preprocess.FrameSeekPlan | None] = {}
     failures: list[str] = []
-    for done, segment in enumerate(page_segments, start=1):
+    sources = {segment.source_id for segment in page_segments}
+    context.set_total(len(page_segments) + len(sources))
+    done = 0
+    for segment in page_segments:
         context.check_cancel()
-        source_id = segment.source_id
-        selection = selections.get(source_id)
+        selection = selections.get(segment.source_id)
         if selection is None:
-            explicit = source_id in choices
-            selection = _select_source(
-                workspace,
-                revision,
-                source_id,
-                explicit=explicit,
-                ordinal=choices[source_id] if explicit else None,
-                job_id=context.job_id,
-            )
-            selections[source_id] = selection
-            _ensure_full_source_preview(workspace, selection, failures)
+            selection = _chosen_source(workspace, revision, segment.source_id, choices, context)
+            selections[segment.source_id] = selection
         _prepare_thumb(workspace, revision, segment, selection, failures, seek_plans)
+        done += 1
+        context.set_progress(done)
+    for selection in selections.values():
+        context.check_cancel()
+        _ensure_full_source_preview(workspace, selection, failures)
+        done += 1
         context.set_progress(done)
     return failures
+
+
+def _chosen_source(
+    workspace: RawWorkspace,
+    revision: ReviewRevision,
+    source_id: str,
+    choices: Mapping[str, int | None],
+    context: JobContext,
+) -> _SourceSelection:
+    """준비의 원본 선택 — 명시적 소리 선택이 있으면 그 서수, 없으면 기본(첫 트랙)."""
+    explicit = source_id in choices
+    return _select_source(
+        workspace,
+        revision,
+        source_id,
+        explicit=explicit,
+        ordinal=choices[source_id] if explicit else None,
+        job_id=context.job_id,
+    )
 
 
 def _select_source(

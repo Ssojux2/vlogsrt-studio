@@ -2070,6 +2070,8 @@ class RawWorkspaceUi:
             if note:
                 message += "\n\n" + note
                 scope.forget()
+        if self._maybe_thumb_upkeep(root):
+            scope.forget()  # 작업을 걸었다 — 그리기는 그 작업(활성 준비)을 본다
         return message
 
     def _maybe_upkeep(self, root: Path) -> str | None:
@@ -2083,6 +2085,18 @@ class RawWorkspaceUi:
         except (raw_service.RawWorkspaceError, raw_service.ReviewError) as error:
             log.warn(f"작업공간 정리를 걸지 못했다: {error}")
             return None
+
+    def _maybe_thumb_upkeep(self, root: Path) -> bool:
+        """라이브러리 열기·새로고침의 첫 컷 썸네일(W-24 세션 I) — 그림 없는 카드만, 실행마다 한 번.
+
+        안내 문장은 없다 — 카드에 그림이 차례로 들어오는 것이 곧 표시다. 작업을 걸었으면 True.
+        고리는 화면 그리기를 막지 않는다 — 올라온 오류는 경고로 남긴다.
+        """
+        try:
+            return self.raw.start_representative_thumbnails(root) is not None
+        except (raw_service.RawWorkspaceError, raw_service.ReviewError) as error:
+            log.warn(f"첫 컷 썸네일을 걸지 못했다: {error}")
+            return False
 
     def _maybe_sync_upkeep(self, root: Path) -> str | None:
         """앱 열기의 자막 시각 확인(D55) — 보고서가 없거나 낡은 원본만, 이번 실행에서 한 번."""
@@ -4911,6 +4925,7 @@ class RawWorkspaceUi:
             if job.kind in CLOSE_CANCELS_JOB_KINDS:
                 with contextlib.suppress(raw_service.RawWorkspaceError):
                     self.raw.cancel_job(root, job.job_id)
+        self.raw.forget_thumbnail_tries(root)  # 다시 열면 끝내지 못한 첫 컷 썸네일을 다시 건다
         self._set_root(None)
         with self._selection_lock:
             self._close_epoch += 1  # 늦게 끝나는 라이브러리 견적이 닫힌 뒤에 쓰지 못한다
@@ -5474,8 +5489,18 @@ class RawWorkspaceUi:
 
         예전에는 지금 쪽(24컷)에 컷이 없는 영상에 지어낸 「아직 없음」 카드를 냈다 — 썸네일이 있어도
         쪽 밖이면 없다고 보였다. 카드의 범위는 영상 전체이고, 누르면 대표 컷이 골라진다.
+
+        `cardThumb`는 카드가 그릴 그림의 주소다(W-24 세션 I) — 대표 컷의 썸네일, 없으면 그 영상의
+        다른 컷 것(질의의 `representative_thumbs`), 그릴 것이 없으면 None(그때 카드는 대표 컷의
+        상태 글자를 보인다).
         """
         positions = {seg.segment_id: index for index, seg in enumerate(ordered or ())}
+        art = {
+            card.segment_id: thumb_id
+            for card, thumb_id in zip(
+                overview.representatives, overview.representative_thumbs, strict=True
+            )
+        }
         media_cards: list[dict[str, object]] = []
         for representative in overview.representatives:
             source = sources_model.get(representative.source_id)
@@ -5485,6 +5510,8 @@ class RawWorkspaceUi:
             card = card_values(representative, positions.get(representative.segment_id, 0))
             duration = rail_data["duration"]
             card.update(media=True, start="0", end=duration, dur=duration)
+            thumb_id = art.get(representative.segment_id)
+            card["cardThumb"] = f"/media/{thumb_id}" if thumb_id else None
             media_cards.append(card)
         return media_cards
 

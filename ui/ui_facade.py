@@ -3028,11 +3028,20 @@ VISUAL_BOOTSTRAP_JS = (
         var stale = videoCuts(info).some(function (it) { return it.needsExtract; });
         return stale ? ' <span class="vl-badge vl-badge-warn">영상 갱신 필요</span>' : "";
       }
+      // 그릴 수 있는 썸네일 — 준비됨이고 주소가 있어야 한다(낡음·실패의 옛 주소는 404다).
+      function drawableThumb(c) {
+        return c && c.thumb && c.thumb.state === "ready" && c.thumb.src ? c.thumb.src : null;
+      }
+      // 카드 그림은 서버가 고른 그 영상의 그릴 수 있는 썸네일(`cardThumb`, W-24 세션 I) — 대표 컷
+      // 것이 없으면 다른 컷 것이다. 그릴 것이 없으면 대표 컷의 상태 글자다(주소 없는 준비됨은
+      // 아직 없음).
       function cardArt(c) {
-        var art = c.thumb && c.thumb.state === "ready" && c.thumb.src
-          ? '<img src="' + esc(c.thumb.src) + '" alt="조각 대표 프레임">'
-          : '<span class="vl-thumb-missing">' + esc(c.thumb &&
-            c.thumb.state ? stateLabel(c.thumb.state) : "없음") + "</span>";
+        var src = c.cardThumb !== undefined ? c.cardThumb : drawableThumb(c);
+        var shown = c.thumb && c.thumb.state === "ready" ? "missing" : c.thumb && c.thumb.state;
+        var art = src
+          ? '<img src="' + esc(src) + '" alt="조각 대표 프레임">'
+          : '<span class="vl-thumb-missing">' + esc(shown ? stateLabel(shown) : "없음") +
+            "</span>";
         return '<span class="vl-thumb-art">' + art + '<span class="dur">' + durLabel(c.dur) +
           "</span></span>";
       }
@@ -3211,12 +3220,12 @@ VISUAL_BOOTSTRAP_JS = (
             (it.sel === "excluded" ? " vl-int-ex" : "") + (it.needsExtract ? " vl-int-needs" : "");
           var cutLabel = cutRangeLabel(it, numbers[it.id]);
           var frameCard = findCard(it.id);
-          var thumb = frameCard && frameCard.thumb && frameCard.thumb.src;
+          var thumb = drawableThumb(frameCard);
           if (!thumb) {
             var sourceCard = knownCuts().find(function(c) {
-              return c.sourceId === curSourceId() && c.thumb && c.thumb.src;
+              return c.sourceId === curSourceId() && drawableThumb(c);
             });
-            thumb = sourceCard && sourceCard.thumb.src;
+            thumb = drawableThumb(sourceCard);
           }
           html.push('<button type="button" class="' + cls +
             '" data-vl-interval="' + esc(it.id) + '"' +

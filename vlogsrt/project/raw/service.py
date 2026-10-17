@@ -997,6 +997,10 @@ class RawWorkspaceService:
         self._upkeep_tries: set[tuple[Path, str, str]] = set()
         # 자막 시각 확인도 (작업공간, 원본, 재료 열쇠)마다 이번 실행에서 한 번만 건다(D55).
         self._sync_tries: set[tuple[Path, str, str]] = set()
+        # 영상마다 첫 컷 썸네일도 (작업공간, 썸네일 키)마다 이번 실행에서 한 번만 건다(W-24 세션 I)
+        # — 계속 실패하는 원본의 썸네일을 그리기마다 다시 걸지 않는다.
+        self._thumb_tries: set[tuple[Path, str]] = set()
+        self._thumb_epochs: dict[Path, int] = {}
         # 확인 작업은 작업공간마다 한 번에 하나다 — 도는 동안 온 요청은 (원본 → 다시 재기)로 합친다.
         self._sync_lock = threading.Lock()
         self._sync_running: dict[Path, str] = {}
@@ -4124,6 +4128,66 @@ class RawWorkspaceService:
             ),
             total=visual_review.VISUAL_PAGE_SIZE,
         )
+
+    def start_representative_thumbnails(self, root: Path) -> JobHandle | None:
+        """영상마다 첫 컷의 썸네일이 없으면 그것만 만드는 작업 하나를 건다(W-24 세션 I).
+
+        라이브러리 열기·화면 갱신의 정리 고리가 부른다. 무료 로컬이고 원본 전체 미리보기는 만들지
+        않는다. 없을 것이 없거나, 이 일을 하는 작업이 이미 돌거나, 남은 썸네일을 이번 실행에서
+        이미 한 번 시도했으면 None — 계속 실패하는 원본을 그리기마다 다시 걸지 않는다(서버를 다시
+        띄우면 한 번 더 시도한다). 시도는 작업이 그 썸네일에서 멈추면(성공·실패·취소) 적는다 —
+        사람이 작업을 취소하면 다음 고리가 다시 걸지 않는다. 「라이브러리 닫기」는
+        `forget_thumbnail_tries`로 그 작업공간의 기록을 지우고 세대를 올려, 취소된 작업이 늦게
+        적는 시도도 버린다 — 다시 열면 끝내지 못한 것을 다시 건다. 종류는 미리보기 준비라
+        「라이브러리 닫기」가 취소하고, 진행이 작업대를 다시 그린다. 분석 승인과는 무관하다(다른
+        스레드의 작업이다).
+        """
+        facade = self.review_workspace_facade(root)
+        head = _review_head(facade)
+        if head is None:
+            return None
+        workspace = self._workspace(root)
+        key = root.expanduser().resolve()
+        missing = tuple(
+            item
+            for item in visual_review.representative_thumbs_missing(workspace, head)
+            if (key, item[1]) not in self._thumb_tries
+        )
+        if not missing:
+            return None
+
+        epoch = self._thumb_epochs.get(key, 0)
+
+        def attempted(thumb_key: str) -> None:
+            with self._lock:
+                if self._thumb_epochs.get(key, 0) == epoch:
+                    self._thumb_tries.add((key, thumb_key))
+
+        def body(context: JobContext) -> None:
+            visual_review.run_representative_thumbnails(
+                context, workspace, head, missing, attempted
+            )
+
+        fingerprint = visual_review.representative_thumbs_fingerprint([k for _, k in missing])
+        with self._lock:  # 확인과 제출을 한 덩어리로 — 두 고리가 겹쳐 작업 둘을 걸지 않는다
+            if any(
+                job.input_fingerprint.startswith(visual_review.REPRESENTATIVE_THUMBS_PREFIX)
+                for job in self.active_jobs(root, (VISUAL_PREPARE_JOB_KIND,))
+            ):
+                return None
+            return self.submit_job(
+                root, VISUAL_PREPARE_JOB_KIND, fingerprint, body, total=len(missing)
+            )
+
+    def forget_thumbnail_tries(self, root: Path) -> None:
+        """닫은 작업공간의 첫 컷 썸네일 시도 기록을 지운다 — 다시 열면 다시 건다(W-24 세션 I).
+
+        세대를 올려, 닫기가 취소한 작업이 그 뒤에 적는 시도도 버린다.
+        """
+        key = root.expanduser().resolve()
+        with self._lock:
+            self._thumb_epochs[key] = self._thumb_epochs.get(key, 0) + 1
+            self._thumb_tries = {item for item in self._thumb_tries if item[0] != key}
 
     def start_visual_source_preparation(
         self,
