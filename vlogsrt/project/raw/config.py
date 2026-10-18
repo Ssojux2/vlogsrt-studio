@@ -262,6 +262,34 @@ SUBTITLE_SUSPECT_SETTINGS = SubtitleSuspectSettings()
 """지금 쓰는 「확인 필요」 기준 — 표시 계산은 주입이 없으면 이 하나를 읽는다."""
 
 
+ORIENTATION_LANDSCAPE = "landscape"
+"""가로 — 너비가 높이 이상이다(정사각형도 가로다, D66)."""
+ORIENTATION_PORTRAIT = "portrait"
+"""세로 — 높이가 너비보다 크다."""
+ORIENTATIONS = (ORIENTATION_LANDSCAPE, ORIENTATION_PORTRAIT)
+
+
+@dataclass(frozen=True)
+class FinalCutTimelineSettings:
+    """전체 타임라인 하나(D56)의 문서 설정 — 프로젝트(시퀀스) 방향을 고르는 규칙(W-26, D66).
+
+    프로젝트 방향은 **켠 스파인 클립 길이**가 많은 쪽을 따른다. `orientation_tie`는 두 쪽 길이가
+    프레임까지 같을 때의 편이다 — 외부 근거 없는 선택이고, 가로 영상 기준인 Final Cut 기본
+    프로젝트와 같은 쪽을 골랐다. 문서 바이트만 정하므로 어느 지문·캐시 열쇠·승인·견적에도 없다.
+    """
+
+    orientation_tie: str = ORIENTATION_LANDSCAPE
+
+    def __post_init__(self) -> None:
+        if self.orientation_tie not in ORIENTATIONS:
+            sides = " 또는 ".join(ORIENTATIONS)
+            raise ValueError(f"orientation_tie는 {sides}여야 한다: {self.orientation_tie!r}")
+
+
+FINALCUT_TIMELINE = FinalCutTimelineSettings()
+"""지금 쓰는 타임라인 문서 설정 — 내보내기 계층(`finalcut_export._document`)이 빌더에 넘긴다."""
+
+
 def subtitle_suspect_problems(settings: SubtitleSuspectSettings) -> list[str]:
     """값역 — 런 길이는 2 이상의 정수, 인사말은 글자·숫자가 든 줄, 문자 이름은 대문자 낱말."""
     problems: list[str] = []

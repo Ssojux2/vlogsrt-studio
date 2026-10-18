@@ -17,6 +17,11 @@
 - **묻힌 추천도 보인다(D60 20b-final).** 켠 클립의 등급이 추천이 아니어도 그 안에 추천 최소 길이
   이상 겹친 브라우저 「추천」 범위가 있으면 그 겹침에 `추천` 키워드 범위를 하나 더 단다 — 컷·켜짐·
   등급 키워드·캡션은 그대로다. 묻힌 추천이 없으면 바이트가 W-16 빌더 그대로다.
+- **프로젝트 방향은 많은 쪽이다(W-26, D66).** 켠 스파인 클립 길이를 가로(너비 ≥ 높이)·세로로
+  나눠 많은 쪽이 시퀀스 방향이 되고(켠 클립이 없으면 모든 클립, 같으면 설정의 편), 그 방향의 포맷
+  가운데서만 W-16 규칙(원본 길이가 가장 긴 포맷)으로 고른다. 한쪽 방향뿐이면 바이트가 W-16
+  그대로다. 소수 쪽 클립은 제 포맷 그대로 두고 맞춤 지시(`adjust-conform`)를 적지 않는다 —
+  Final Cut 기본(fit)이다.
 """
 
 from __future__ import annotations
@@ -37,6 +42,12 @@ from vlogsrt.project.fcp_tables import (
     AUDIO_RATE_TAGS,
     COLOR_SPACES,
     FRAME_RATE_TAGS,
+)
+from vlogsrt.project.raw.config import (
+    FINALCUT_TIMELINE,
+    ORIENTATION_LANDSCAPE,
+    ORIENTATION_PORTRAIT,
+    FinalCutTimelineSettings,
 )
 from vlogsrt.project.raw.tiering import (
     HOLD_LABEL,
@@ -565,6 +576,53 @@ def _format_ids(formats: Sequence[FormatPlan]) -> dict[tuple[int, int, Fraction,
     return {(f.width, f.height, f.frame_duration, f.color_space): f.format_id for f in formats}
 
 
+def orientation_of(width: int, height: int) -> str:
+    """화면 방향 — 너비가 높이 이상이면 가로다(정사각형도 가로, D66)."""
+    return ORIENTATION_LANDSCAPE if width >= height else ORIENTATION_PORTRAIT
+
+
+def _media_orientation(media: SourceMedia) -> str:
+    return orientation_of(media.width, media.height)
+
+
+def _orientation_frames(plans: Sequence[SourcePlan]) -> dict[str, int]:
+    """방향마다 스파인 클립 프레임 합 — 켠 클립만 센다. 켠 클립이 하나도 없으면 모든 클립이다
+    (사람이 전부 끈 타임라인도 방향은 있어야 한다)."""
+    any_enabled = any(clip.enabled for plan in plans for clip in plan.clips)
+    totals = {ORIENTATION_LANDSCAPE: 0, ORIENTATION_PORTRAIT: 0}
+    for plan in plans:
+        side = _media_orientation(plan.media)
+        for clip in plan.clips:
+            if clip.enabled or not any_enabled:
+                totals[side] += clip.end_frame - clip.start_frame
+    return totals
+
+
+def _sequence_orientation(plans: Sequence[SourcePlan], settings: FinalCutTimelineSettings) -> str:
+    totals = _orientation_frames(plans)
+    landscape, portrait = totals[ORIENTATION_LANDSCAPE], totals[ORIENTATION_PORTRAIT]
+    if landscape == portrait:
+        return settings.orientation_tie
+    return ORIENTATION_LANDSCAPE if landscape > portrait else ORIENTATION_PORTRAIT
+
+
+def _sequence_format(
+    plans: Sequence[SourcePlan],
+    ids: dict[tuple[int, int, Fraction, str | None], str],
+    settings: FinalCutTimelineSettings,
+) -> str:
+    """시퀀스 포맷 — 많은 쪽 방향의 포맷 가운데 W-16 규칙(원본 길이가 가장 긴 것) 그대로.
+
+    방향의 표는 켠 길이로 세지만 그 안의 고르기는 바꾸지 않는다 — 한쪽 방향뿐이면 거르는 것이
+    없으므로 W-16과 같은 포맷이 나온다(D66). 고른 방향에는 늘 원본이 있다: 이긴 쪽은 0보다 크고,
+    같으면 두 쪽 다 0보다 크다(원본마다 클립이 1프레임 이상을 덮고, 켠 클립이 없으면 모든 클립이
+    표다).
+    """
+    side = _sequence_orientation(plans, settings)
+    chosen = [p for p in plans if _media_orientation(p.media) == side]
+    return _dominant([(ids[_format_key(p)], p.media.frame_count) for p in chosen])
+
+
 def _sequence_audio(plans: Sequence[SourcePlan]) -> tuple[int, int] | None:
     """시퀀스 오디오 — Final Cut 철자가 있는 값 가운데 가장 길게 쓰이는 것, 없으면 생략한다."""
     uses: list[tuple[tuple[int, int], int]] = []
@@ -583,12 +641,13 @@ def plan(
     title: str,
     library_bundle: Path | None,
     caption_timing: frozenset[str] = frozenset(),
+    settings: FinalCutTimelineSettings = FINALCUT_TIMELINE,
 ) -> TimelineDocument:
     """원본 전부(주어진 촬영 순서 그대로) → 타임라인 문서. 원본 순서를 바꾸지 않는다.
 
     `caption_timing`은 자막 시각 확인(D55)이 **지금 빨강**이라고 한 원본 ID다 — 고르는 일은
     내보내기 계층(서비스)이 저장된 보고서를 읽어 하고, 여기는 값으로 받아 키워드만 단다.
-    비어 있으면 문서는 W-16과 바이트까지 같다.
+    비어 있으면 문서는 W-16과 바이트까지 같다. `settings`는 프로젝트 방향의 규칙이다(D66).
     """
     if not sources:
         raise FinalCutTimelineError("보낼 원본이 하나도 없다")
@@ -606,13 +665,12 @@ def plan(
     _require_one_rate(plans)
     formats = _formats(plans)
     ids = _format_ids(formats)
-    uses = [(ids[_format_key(p)], p.media.frame_count) for p in plans]
     drop = _dominant([(p.media.drop_frame, p.media.frame_count) for p in plans])
     return TimelineDocument(
         title=title,
         library_location=None if library_bundle is None else _library_uri(library_bundle),
         formats=formats,
-        sequence_format=_dominant(uses),
+        sequence_format=_sequence_format(plans, ids, settings),
         sequence_drop_frame=drop,
         sequence_audio=_sequence_audio(plans),
         sources=plans,
@@ -654,7 +712,14 @@ def document_counts(document: TimelineDocument) -> dict[str, object]:
         ],
         "unknown_color": [s.media.name for s in document.sources if s.color_space is None],
         "formats": len(document.formats),
+        "orientation": _document_orientation(document),
     }
+
+
+def _document_orientation(document: TimelineDocument) -> str:
+    """보낸 프로젝트(시퀀스 포맷)의 방향 — 리포트 JSON에만 싣는다(D66)."""
+    (sequence,) = (f for f in document.formats if f.format_id == document.sequence_format)
+    return orientation_of(sequence.width, sequence.height)
 
 
 # ── 직렬화 ───────────────────────────────────────────────────────────────

@@ -1703,6 +1703,9 @@ WORKBENCH_CSS = (
 }
 .vl-thumb-art img {
   display: block; width: 100%; height: 100%; object-fit: cover; background: var(--vl-video-well); }
+/* 세로 그림(W-26)은 잘라 채우지 않고 담는다 — 64×36에 cover면 9:16 그림의 위아래 대부분이
+   잘려 무엇을 찍었는지 안 보인다. 표지는 그림을 받은 뒤 실행본(VL.fitThumb)이 단다. */
+.vl-thumb-art img[data-vl-fit="contain"] { object-fit: contain; }
 .vl-thumb-art .dur {
   position: absolute; right: 2px; bottom: 2px; padding: 0 3px; border-radius: 2px;
   background: var(--vl-video-overlay); color: var(--vl-on-video-overlay);
@@ -2210,6 +2213,16 @@ if (!VL) {
     var holder = VL.modelHolder(root);
     if (holder) { return holder.textContent || null; }
     return root.getAttribute("data-vl-model");
+  };
+  // 카드 그림의 방향(W-26) — 세로 그림(높이 > 너비)이면 `data-vl-fit="contain"`을 단다. 크기는
+  // 그림을 받은 뒤에야 알므로 이미 받았으면 바로, 아니면 load 때 단다. 정사각형은 가로다(D66).
+  VL.fitThumb = function (img) {
+    if (!img || !img.setAttribute) { return; }
+    function mark() {
+      if (img.naturalHeight > img.naturalWidth) { img.setAttribute("data-vl-fit", "contain"); }
+    }
+    if (img.complete && img.naturalWidth) { mark(); return; }
+    if (img.addEventListener) { img.addEventListener("load", mark, { once: true }); }
   };
   window.__vlLib = VL;
 }
@@ -3114,6 +3127,9 @@ VISUAL_BOOTSTRAP_JS = (
           active.getAttribute("data-vl-act") === "queue-next") ||
           (!!state.queueRefocus && (!active || active === doc.body));
         mount.innerHTML = queueBlock() + listHead(shown) + rows.join("");
+        if (typeof mount.querySelectorAll === "function" && VL.fitThumb) {
+          Array.prototype.forEach.call(mount.querySelectorAll(".vl-thumb-art img"), VL.fitThumb);
+        }
         var next = keep && typeof mount.querySelector === "function"
           ? mount.querySelector('[data-vl-act="queue-next"]') : null;
         if (next && !next.disabled) { next.focus(); }

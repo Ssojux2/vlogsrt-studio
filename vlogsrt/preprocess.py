@@ -1947,6 +1947,13 @@ class RawVideoMedia:
     start_pts: int
     duration_ts: int | None
 
+    @property
+    def display_size(self) -> tuple[int, int]:
+        """재생 화면의 (너비, 높이) — 90°·270° 회전이면 저장된 가로·세로가 뒤바뀐다(W-26)."""
+        if self.rotation_degrees % 180:
+            return self.height, self.width
+        return self.width, self.height
+
 
 @dataclass(frozen=True, slots=True)
 class RawMediaProbe:

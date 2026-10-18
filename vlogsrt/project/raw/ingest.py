@@ -120,6 +120,10 @@ class SourceInspection:
     적은 무언가가 있었으나 파싱·시간대·상식 bound를 못 넘었다는 뜻이고,
     `uninspected`는 아예 묻지 않은 것이다. 어느 쪽도 mtime으로 메워지지
     않는다(§6.2).
+
+    `width`·`height`는 **재생 화면**의 크기다 — 회전 선언(90°·270°)이 있으면 저장된 가로·세로를
+    뒤바꾼 값이다(W-26, D66). 아이폰 세로 영상이 가져오기 표에 1920×1080으로 보이던 자리다. 이
+    값은 표시와 `source_assets` 기록에만 쓰이고 어느 지문·캐시 열쇠·승인·견적에도 들지 않는다.
     """
 
     duration_seconds: float | None
@@ -197,10 +201,11 @@ def _inspect(path: Path) -> SourceInspection:
     else:
         status = CAPTURE_STATUS_UNINSPECTED
         capture_time = None
+    width, height = probe.video.display_size  # 회전 선언을 반영한 재생 화면(W-26)
     return SourceInspection(
         duration_seconds=float(probe.duration),
-        width=probe.video.width,
-        height=probe.video.height,
+        width=width,
+        height=height,
         audio_streams=len(probe.audio),
         capture_time=capture_time,
         capture_time_status=status,

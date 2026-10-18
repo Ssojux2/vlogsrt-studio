@@ -960,3 +960,70 @@ def test_a_running_timing_check_is_recorded_so_the_screen_can_say_so(tmp_path: P
     store.update(record.job_id, status="running")
     section = _report(service.export_finalcut_timeline(root))["sync_check"]
     assert section["running"] is True
+
+
+# ─── W-26 — 프로젝트 방향은 켠 길이가 많은 쪽 (D66) ──────────────────────────
+
+
+def _rotated(target: Path, *, seconds: str = "2") -> Path:
+    """가로로 저장된 160x90에 90° 회전 선언 — 아이폰 세로 촬영처럼 재생 화면은 90x160이다."""
+    plain = _encode(target.with_name(target.stem + "-coded.mov"), seconds=seconds)
+    result = subprocess.run(
+        ["ffmpeg", "-v", "error", "-y", "-display_rotation", "90", "-i", str(plain),
+         "-c:v", "copy", "-c:a", "copy", str(target)],
+        capture_output=True,
+    )  # fmt: skip
+    assert result.returncode == 0, result.stderr
+    plain.unlink()
+    return target
+
+
+def _import(service: RawWorkspaceService, root: Path, source: Path) -> None:
+    handle = service.import_selected_video(root, source)
+    assert _wait_terminal(service, root, handle.job_id).status == "succeeded"
+
+
+def _sequence_size(path: Path) -> tuple[str, str]:
+    root_element = _parsed(path)
+    sequence = root_element.find(".//sequence")
+    assert sequence is not None
+    fmt = root_element.find(f"./resources/format[@id='{sequence.attrib['format']}']")
+    assert fmt is not None
+    return fmt.attrib["width"], fmt.attrib["height"]
+
+
+def test_a_rotated_source_exports_its_display_size_and_a_portrait_project(tmp_path: Path):
+    service = RawWorkspaceService()
+    root = tmp_path / "project"
+    service.create_workspace(root, "세로")
+    _import(service, root, _rotated(tmp_path / "card" / "portrait.mov"))
+    (asset,) = service.list_source_assets(root)
+    assert (asset.width, asset.height) == (90, 160)  # 가져오기 기록도 재생 화면 크기다
+    path = service.export_finalcut_timeline(root)
+    _assert_valid(path)
+    (fmt,) = _parsed(path).findall("./resources/format")
+    assert (fmt.attrib["width"], fmt.attrib["height"]) == ("90", "160")
+    assert _sequence_size(path) == ("90", "160")
+    assert _report(path)["counts"]["orientation"] == "portrait"
+    assert b"adjust-conform" not in path.read_bytes()
+
+
+@pytest.mark.parametrize(
+    ("portrait_seconds", "landscape_seconds", "expected"),
+    [("4", "2", ("90", "160")), ("2", "4", ("160", "90"))],
+)
+def test_mixed_rotated_and_plain_sources_follow_the_longer_side(
+    tmp_path: Path, portrait_seconds: str, landscape_seconds: str, expected: tuple[str, str]
+):
+    service = RawWorkspaceService()
+    root = tmp_path / "project"
+    service.create_workspace(root, "섞임")
+    _import(service, root, _rotated(tmp_path / "card" / "portrait.mov", seconds=portrait_seconds))
+    _import(service, root, _encode(tmp_path / "card" / "landscape.mov", seconds=landscape_seconds))
+    path = service.export_finalcut_timeline(root)
+    _assert_valid(path)
+    sizes = {(f.attrib["width"], f.attrib["height"]) for f in _parsed(path).iter("format")}
+    assert sizes == {("90", "160"), ("160", "90")}  # 원본마다 제 화면 크기 그대로
+    assert _sequence_size(path) == expected
+    side = "portrait" if expected == ("90", "160") else "landscape"
+    assert _report(path)["counts"]["orientation"] == side

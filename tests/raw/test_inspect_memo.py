@@ -32,7 +32,8 @@ class _Probe:
         return SimpleNamespace(
             creation_time=SimpleNamespace(valid=False, utc=None, raw=""),
             duration=float(len(self.calls)),
-            video=SimpleNamespace(width=160, height=90),
+            # 조사는 재생 화면 크기(`RawVideoMedia.display_size`, W-26)를 읽는다 — 회전 없음.
+            video=SimpleNamespace(width=160, height=90, display_size=(160, 90)),
             audio=(),
         )
 

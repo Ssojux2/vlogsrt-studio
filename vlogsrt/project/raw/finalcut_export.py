@@ -45,6 +45,7 @@ from vlogsrt.project import library
 from vlogsrt.project.models import UnsupportedProject
 from vlogsrt.project.raw import finalcut_timeline as timeline
 from vlogsrt.project.raw import media_refs
+from vlogsrt.project.raw.config import FINALCUT_TIMELINE
 from vlogsrt.project.raw.models import (
     INGEST_JOB_KIND,
     AnalysisSourceResult,
@@ -471,10 +472,9 @@ def _cues(
 
 
 def _display_geometry(video: preprocess.RawVideoMedia) -> tuple[int, int]:
-    """재생 화면의 크기 — 90°·270° 회전이면 저장된 가로·세로가 뒤바뀐다."""
-    if video.rotation_degrees % 180:
-        return video.height, video.width
-    return video.width, video.height
+    """재생 화면의 크기 — 90°·270° 회전이면 저장된 가로·세로가 뒤바뀐다. 가져오기 조사가 기록하는
+    크기와 한 규칙이다(`RawVideoMedia.display_size`, W-26)."""
+    return video.display_size
 
 
 @dataclass(frozen=True, slots=True)
@@ -871,7 +871,8 @@ def _document(
     shelf: _LibraryShelf,
     caption_timing: CaptionTimingFlags | None = None,
 ) -> timeline.TimelineDocument:
-    """모은 것 → 문서. 자막 시각 확인(D55)이 걸린 원본에는 빌더가 키워드를 단다."""
+    """모은 것 → 문서. 자막 시각 확인(D55)이 걸린 원본에는 빌더가 키워드를 단다. 프로젝트 방향은
+    설정(`FINALCUT_TIMELINE`)의 규칙으로 빌더가 고른다 — 켠 길이가 많은 쪽(D66)."""
     bundle = shelf.bundle if any(item.from_library for item in gathered) else None
     flagged = frozenset() if caption_timing is None else caption_timing.flagged
     try:
@@ -880,6 +881,7 @@ def _document(
             title=timeline.export_title(workspace.name, moment.astimezone()),
             library_bundle=bundle,
             caption_timing=flagged,
+            settings=FINALCUT_TIMELINE,
         )
     except timeline.FinalCutTimelineError as error:
         raise FinalCutExportError(f"Final Cut 타임라인을 짜지 못했다 — {error}") from error

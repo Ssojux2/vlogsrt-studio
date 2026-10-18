@@ -3463,6 +3463,55 @@ def test_stage_layout_has_no_fixed_list_width_or_inner_overflow() -> None:
     assert "' title=\"' + esc(c.sourceName) + '\"'" in ui_facade.VISUAL_BOOTSTRAP_JS
 
 
+_FIT_THUMB_SCRIPT = r"""
+const window = {};
+new Function('window', process.argv[2])(window);
+const VL = window.__vlLib;
+function img(w, h, complete) {
+  const node = { attrs: {}, listeners: {}, naturalWidth: complete ? w : 0,
+    naturalHeight: complete ? h : 0, complete: !!complete,
+    setAttribute(k, v) { this.attrs[k] = String(v); },
+    addEventListener(type, fn) { this.listeners[type] = fn; } };
+  node.arrive = () => { node.naturalWidth = w; node.naturalHeight = h; node.complete = true;
+    node.listeners.load(); };
+  return node;
+}
+const portrait = img(1080, 1920, true), landscape = img(1920, 1080, true);
+const square = img(1080, 1080, true), late = img(90, 160, false);
+[portrait, landscape, square, late].forEach(VL.fitThumb);
+const before = late.attrs['data-vl-fit'] || null;
+late.arrive();
+console.log(JSON.stringify({ portrait: portrait.attrs['data-vl-fit'] || null,
+  landscape: landscape.attrs['data-vl-fit'] || null, square: square.attrs['data-vl-fit'] || null,
+  lateBefore: before, lateAfter: late.attrs['data-vl-fit'] || null }));
+"""
+
+
+@needs_node
+def test_portrait_card_thumbnails_are_contained_not_cropped(tmp_path: Path) -> None:
+    """W-26 — 64×36 카드에 `cover`면 9:16 그림의 위아래 대부분이 잘린다. 세로 그림(높이 > 너비)만
+    `contain`이고, 가로·정사각형은 예전 그대로 채운다. 표지는 그림 크기를 안 뒤에 단다 — 모델에
+    칸을 더하지 않으므로 그린 바이트(잠근 렌더)는 그대로다."""
+    harness = tmp_path / "fit_thumb.js"
+    harness.write_text(_FIT_THUMB_SCRIPT, encoding="utf-8")
+    completed = subprocess.run(
+        ["node", str(harness), ui_facade._CLIENT_LIB_BODY],
+        capture_output=True, text=True, timeout=20, check=False,
+    )  # fmt: skip
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout) == {
+        "portrait": "contain", "landscape": None, "square": None,
+        "lateBefore": None, "lateAfter": "contain",
+    }  # fmt: skip
+    css = ui_facade.WORKBENCH_CSS
+    assert "object-fit: contain" in _css_rule_body(css, '.vl-thumb-art img[data-vl-fit="contain"]')
+    assert "object-fit: cover" in _css_rule_body(css, ".vl-thumb-art img")
+    js = ui_facade.VISUAL_BOOTSTRAP_JS
+    render_list = js[js.index("function renderThumbs()") :]
+    render_list = render_list[: render_list.index("function railIndex(")]
+    assert 'mount.querySelectorAll(".vl-thumb-art img"), VL.fitThumb' in render_list
+
+
 def test_global_shortcuts_declared_once() -> None:
     """전역 단축키·무대 맞춤은 한 번만 묶이고 입력·조합·반복·수정키를 피한다(D50)."""
     js = ui_facade.VISUAL_BOOTSTRAP_JS

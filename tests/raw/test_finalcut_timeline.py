@@ -32,6 +32,7 @@ from vlogsrt.project.fcp_tables import FRAME_RATE_TAGS
 from vlogsrt.project.raw import finalcut_timeline as ft
 from vlogsrt.project.raw import tiering
 from vlogsrt.project.raw.analysis_config import TIER_SETTINGS, RawTierSettings
+from vlogsrt.project.raw.config import FINALCUT_TIMELINE, FinalCutTimelineSettings
 from vlogsrt.project.xml_validation import validate_xml
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -933,6 +934,157 @@ def test_sequence_audio_and_timecode_format_follow_the_longest_use() -> None:
     assert "audioRole" not in clip.attrib
     asset = root.find("./resources/asset")
     assert asset is not None and asset.attrib["hasAudio"] == "0"
+
+
+# ─── 11b. 프로젝트 방향 — 켠 길이가 많은 쪽 (W-26, D66) ───────────────────
+
+PORTRAIT = (1080, 1920)
+LANDSCAPE = (1920, 1080)
+HLG = ("bt2020", "arib-std-b67", "bt2020nc")
+
+
+def whole(
+    name: str,
+    frames: int,
+    size: tuple[int, int],
+    *,
+    color: tuple[str, str, str] = BT709,
+    segments: tuple[ft.SegmentState, ...] | None = None,
+) -> ft.SourceInput:
+    """분석 전 원본 하나 — 방향 시험은 등급과 무관하다(키워드는 늘 `미분석`)."""
+    return ft.SourceInput(
+        media=media(name, frames=frames, size=size, ident=None, color=color), segments=segments
+    )
+
+
+def sequence_size(document: ft.TimelineDocument) -> tuple[int, int]:
+    root = parsed(document)
+    sequence = root.find(".//sequence")
+    assert sequence is not None
+    fmt = root.find(f"./resources/format[@id='{sequence.attrib['format']}']")
+    assert fmt is not None
+    return int(fmt.attrib["width"]), int(fmt.attrib["height"])
+
+
+def legacy_sequence_format(document: ft.TimelineDocument) -> str:
+    """W-16의 규칙 그대로 — 방향과 무관하게 원본 전체 길이가 가장 긴 (크기·색) 포맷."""
+    ids = {(f.width, f.height, f.frame_duration, f.color_space): f.format_id
+           for f in document.formats}  # fmt: skip
+    totals: dict[str, int] = {}
+    for source in document.sources:
+        key = (source.media.width, source.media.height, source.media.frame_duration,
+               source.color_space)  # fmt: skip
+        totals[ids[key]] = totals.get(ids[key], 0) + source.media.frame_count
+    return max(totals, key=lambda key: totals[key])
+
+
+def test_majority_landscape_makes_a_landscape_project() -> None:
+    document = ft.plan(
+        [whole("p", 100, PORTRAIT), whole("l", 300, LANDSCAPE)], title="t", library_bundle=None
+    )
+    assert sequence_size(document) == LANDSCAPE
+    assert ft.document_counts(document)["orientation"] == "landscape"
+
+
+def test_majority_portrait_makes_a_portrait_project_and_keeps_each_clip_format() -> None:
+    sources = [whole("l", 100, LANDSCAPE), whole("p1", 200, PORTRAIT), whole("p2", 50, PORTRAIT)]
+    document = ft.plan(sources, title="t", library_bundle=None)
+    assert sequence_size(document) == PORTRAIT
+    assert ft.document_counts(document)["orientation"] == "portrait"
+    root = parsed(document)
+    assert [c.attrib["format"] for c in spine_clips(root)] == ["r1", "r2", "r2"]
+    # 소수 쪽 클립은 Final Cut 기본(fit)에 맡긴다 — 맞춤 지시를 적지 않는다.
+    assert b"adjust-conform" not in ft.render(document)
+
+
+def test_a_tie_goes_to_the_configured_side() -> None:
+    sources = [whole("p", 100, PORTRAIT), whole("l", 100, LANDSCAPE)]
+    assert FINALCUT_TIMELINE.orientation_tie == "landscape"
+    assert sequence_size(ft.plan(sources, title="t", library_bundle=None)) == LANDSCAPE
+    portrait_first = FinalCutTimelineSettings(orientation_tie="portrait")
+    document = ft.plan(sources, title="t", library_bundle=None, settings=portrait_first)
+    assert sequence_size(document) == PORTRAIT
+
+
+def test_a_square_frame_counts_as_landscape() -> None:
+    assert ft.orientation_of(1080, 1080) == "landscape"
+    assert ft.orientation_of(1081, 1080) == "landscape"
+    assert ft.orientation_of(1080, 1081) == "portrait"
+    portrait_tie = FinalCutTimelineSettings(orientation_tie="portrait")
+    sources = [whole("sq", 100, (1080, 1080)), whole("p", 100, PORTRAIT)]
+    document = ft.plan(sources, title="t", library_bundle=None, settings=portrait_tie)
+    assert sequence_size(document) == PORTRAIT  # 정사각형이 세로였다면 같은 편 100:100이 아니다
+
+
+def test_an_unknown_tie_side_is_refused() -> None:
+    with pytest.raises(ValueError, match="orientation_tie"):
+        FinalCutTimelineSettings(orientation_tie="square")
+
+
+def test_total_duration_beats_the_number_of_clips() -> None:
+    shorts = [whole(f"p{index}", 100, PORTRAIT) for index in range(3)]
+    document = ft.plan([*shorts, whole("l", 400, LANDSCAPE)], title="t", library_bundle=None)
+    assert sequence_size(document) == LANDSCAPE
+
+
+def test_only_enabled_clips_vote_and_unreviewed_exclusions_stay_enabled() -> None:
+    """사람이 확정한 제외(꺼진 클립)는 표가 없다 — 미검토 제외 제안은 켠 채라 표가 있다."""
+    portrait = whole("p", 500, PORTRAIT, segments=(seg(0, 450, excluded=True), seg(450, 500)))
+    document = ft.plan([portrait, whole("l", 100, LANDSCAPE)], title="t", library_bundle=None)
+    assert sequence_size(document) == LANDSCAPE
+    assert legacy_sequence_format(document) != document.sequence_format  # 옛 규칙이면 세로
+    unreviewed = whole(
+        "p", 500, PORTRAIT, segments=(seg(0, 450, excluded=True, unreviewed=True), seg(450, 500))
+    )
+    document = ft.plan([unreviewed, whole("l", 100, LANDSCAPE)], title="t", library_bundle=None)
+    assert sequence_size(document) == PORTRAIT
+
+
+def test_when_every_clip_is_excluded_all_clips_vote() -> None:
+    portrait = whole("p", 300, PORTRAIT, segments=(seg(0, 300, excluded=True),))
+    landscape = whole("l", 100, LANDSCAPE, segments=(seg(0, 100, excluded=True),))
+    document = ft.plan([landscape, portrait], title="t", library_bundle=None)
+    assert sequence_size(document) == PORTRAIT
+
+
+def test_landscape_split_across_colours_still_beats_one_longer_portrait() -> None:
+    """옛 규칙은 (크기·색) 묶음마다 따로 셌다 — 가로 300이 색 셋으로 갈리면 세로 200이 이겼다."""
+    sources = [
+        whole("l709", 100, LANDSCAPE),
+        whole("lhlg", 100, LANDSCAPE, color=HLG),
+        whole("lodd", 100, LANDSCAPE, color=("", "", "")),
+        whole("p", 200, PORTRAIT),
+    ]
+    document = ft.plan(sources, title="t", library_bundle=None)
+    assert legacy_sequence_format(document) == "r4"
+    assert document.sequence_format == "r1"  # 가로 안에서는 W-16 규칙 그대로 — 같으면 먼저 나온 것
+    assert sequence_size(document) == LANDSCAPE
+
+
+ONE_SIDE_SHA256 = "47da87315606164ab27c4aa2dc9c88ee4dba82a9f25f14ba030a7d09288b41d7"
+"""W-26 앞(75f541c)의 빌더로 렌더한 `one_side_document()` — 한쪽 방향뿐이면 바이트가 같다."""
+
+
+def one_side_document() -> ft.TimelineDocument:
+    sources = [
+        whole("a", 300, (3840, 2160), color=HLG),
+        whole("b", 200, (3840, 2160), segments=(seg(0, 50), seg(50, 200, excluded=True))),
+        whole("c", 250, LANDSCAPE, color=HLG),
+        whole("d", 120, (3840, 2160), color=("", "", "")),
+    ]
+    return ft.plan(sources, title="t", library_bundle=None)
+
+
+@pytest.mark.parametrize("name", [*EDGE_DOCUMENTS, "one_side"])
+def test_single_orientation_documents_keep_the_w16_sequence_format(name: str) -> None:
+    document = one_side_document() if name == "one_side" else EDGE_DOCUMENTS[name]()
+    assert document.sequence_format == legacy_sequence_format(document)
+    legacy = replace(document, sequence_format=legacy_sequence_format(document))
+    assert ft.render(document) == ft.render(legacy)
+
+
+def test_single_orientation_bytes_match_the_pre_w26_render() -> None:
+    assert hashlib.sha256(ft.render(one_side_document())).hexdigest() == ONE_SIDE_SHA256
 
 
 # ─── 12·13. 시작 타임코드와 신원 ─────────────────────────────────────────

@@ -166,3 +166,23 @@ def test_scan_order_follows_apple_shot_dates(tmp_path: Path) -> None:
     _encode(card / "A_0002.MOV", None, apple_date="2026-08-11T09:00:00+0900")
     proposal = ingest.scan_sources(card, tmp_path / "ws")
     assert [candidate.source_name for candidate in proposal.order] == ["A_0002.MOV", "A_0001.MOV"]
+
+
+@needs_ffmpeg
+@pytest.mark.parametrize(("rotation", "expected"), [("90", (180, 320)), ("180", (320, 180))])
+def test_inspection_reports_the_display_size_of_a_rotated_clip(
+    media: Path, rotation: str, expected: tuple[int, int]
+) -> None:
+    """아이폰 세로 영상은 가로로 저장하고 회전을 선언한다 — 가져오기 표·기록은 재생 화면 크기다
+    (W-26: 예전엔 세로 영상이 1920×1080으로 보였다). 180°는 가로·세로가 그대로다."""
+    coded = _encode(media / "coded.MOV", None)
+    rotated = media / "IMG_0002.MOV"
+    completed = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+         "-display_rotation", rotation, "-i", str(coded), "-c:v", "copy", str(rotated)],
+        capture_output=True, text=True, check=False,
+    )  # fmt: skip
+    assert completed.returncode == 0, completed.stderr[-300:]
+    assert preprocess.probe_raw_media(rotated).video.width == 320  # 저장된 기하는 그대로다
+    inspection = ingest.ffprobe_media_inspector(rotated)
+    assert (inspection.width, inspection.height) == expected
