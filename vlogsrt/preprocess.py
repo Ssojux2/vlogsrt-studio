@@ -27,7 +27,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from fractions import Fraction
 from pathlib import Path
-from typing import Any, ParamSpec, TypeVar
+from typing import Any, Literal, ParamSpec, TypeVar
 
 from . import cutpoints, log
 from .config import Config
@@ -2220,6 +2220,13 @@ def _tool_version(tool: str) -> str:
 # ─────────────────────────────────────────────────────────────
 
 
+ConformKind = Literal["uniform", "snap", "map"]
+"""시계가 명목 격자에 놓이는 방식(D69) — 슬롯 s가 보이는 패킷은 언제나 하나의 정의다:
+`pts < 원점 + s·T + T/2`인 마지막 패킷(가운데 붙잡기). `uniform`은 모든 패킷이 슬롯 위에
+정확히 있다. `snap`은 그 정의의 항등 경우다 — 패킷 k가 슬롯 k의 반 프레임 안에 있다.
+`map`(W-27c 몫, 아직 없음)은 같은 정의가 항등이 아닌 경우다(빠진 슬롯·속도 전환)."""
+
+
 @dataclass(frozen=True, slots=True)
 class RawVideoClock:
     """비디오 스트림의 **측정된** 시계 — 패킷(디먹스) 증거다.
@@ -2230,6 +2237,13 @@ class RawVideoClock:
     '측정된 사실'로 돌려준다(추출은 지원 매트릭스에서 VFR을 막는다).
     이 증거는 타임스탬프 격자만 증명한다. **소스의 디코드 품질은 증명하지
     않는다** — 디코드 검증은 추출물에 대해 `extract_raw_clip`이 한다.
+
+    근접 CFR(D69): 패킷이 명목 슬롯에서 반 프레임 미만으로만 흔들리면 `uniform_grid`가
+    참이고 `conform_kind="snap"`, `max_deviation_ticks`가 가장 큰 어긋남(틱)이다 —
+    `frame_count`는 패킷 수, `exact_end`는 명목 끝(`원점 + 수 × 프레임 길이`)이다.
+    관문은 어디서나 `uniform_grid` 하나다. 두 칸은 지문·캐시 열쇠에 넣지 않는다(snap은
+    항등이라 프레임 신원이 바뀌지 않는다). `uniform_grid`가 거짓이면 두 칸은 기본값이고
+    뜻이 없다.
     """
 
     stream_index: int
@@ -2242,17 +2256,25 @@ class RawVideoClock:
     exact_end: Fraction
     uniform_grid: bool
     grid_note: str
+    max_deviation_ticks: int = 0
+    conform_kind: ConformKind = "uniform"
 
 
 @process_step("추출 시계 확인")
 def probe_extraction_clock(
-    source: Path, *, video_ordinal: int = 0, probe: RawMediaProbe | None = None
+    source: Path,
+    *,
+    video_ordinal: int = 0,
+    probe: RawMediaProbe | None = None,
+    policy: GridConformPolicy | None = None,
 ) -> RawVideoClock:
     """비디오 패킷 타임스탬프로 격자를 잰다 — 디코드하지 않는다.
 
     격자 증명 자체는 `probe_video_grid`와 같은 함수를 쓴다. 다른 점은 실패의
     취급뿐이다: 캡션 엔진의 증명은 CFR이 증명될 때까지 살아있는 계약이지만,
     원본 경계는 VFR도 '측정된 사실'로 돌려줘야 가져오기가 판단을 할 수 있다.
+    엄격한 증명이 실패하면 근접 CFR 맞춤(`policy`, 기본 `RAW_GRID_CONFORM`)을 한 번 더
+    본다 — 이 자리 하나만 맞춘다(D68 위험 (b): 검토·보내기·프록시가 모두 이 함수로 다시 잰다).
     """
     _validate_video_ordinal(video_ordinal)
     ffprobe = require_ffmpeg("ffprobe")
@@ -2271,7 +2293,8 @@ def probe_extraction_clock(
     rate = _stream_positive_fraction(entry, "r_frame_rate", source)
     time_base = _stream_positive_fraction(entry, "time_base", source)
     pts = _packet_pts(completed.stdout, source)
-    clock = _measured_clock(entry, rate, time_base, pts, source)
+    conform = policy if policy is not None else RAW_GRID_CONFORM
+    clock = _measured_clock(entry, rate, time_base, pts, source, conform)
     if probe is not None and clock.stream_index != probe.video.stream_index:
         raise RuntimeError(
             f"시계의 스트림이 프로브와 다릅니다: {source} "
@@ -2286,15 +2309,18 @@ def _measured_clock(
     time_base: Fraction,
     pts: list[int],
     source: Path,
+    policy: GridConformPolicy,
 ) -> RawVideoClock:
+    _require_snap_policy(policy)
     frame_duration = Fraction(1) / rate
     notes: list[str] = []
     uniform = True
+    deviation = 0
     try:
         _prove_uniform_grid(pts, time_base, frame_duration, source)
     except RuntimeError as exc:
-        uniform = False
-        notes.append(str(exc))
+        uniform, deviation, note = _conformed(pts, time_base, frame_duration, policy, source, exc)
+        notes.append(note)
     try:
         average = _stream_positive_fraction(entry, "avg_frame_rate", source)
         _prove_declared_evidence(entry, average, pts, time_base, frame_duration, source)
@@ -2319,7 +2345,83 @@ def _measured_clock(
         exact_end=exact_end,
         uniform_grid=uniform,
         grid_note="\n".join(notes),
+        max_deviation_ticks=deviation,
+        conform_kind="snap" if deviation else "uniform",
     )
+
+
+def _conformed(
+    pts: list[int],
+    time_base: Fraction,
+    frame_duration: Fraction,
+    policy: GridConformPolicy,
+    source: Path,
+    strict: RuntimeError,
+) -> tuple[bool, int, str]:
+    """엄격한 증명이 실패한 시계를 명목 격자에 맞춰 본다 — (균일, 최대 어긋남, 기록).
+
+    프레임 길이가 정수 틱이 아닌 시계(양자화된 30000/1001 등)는 이미 한 틱을 허용받았으므로
+    엄격한 판정 그대로다. 맞추지 못하면 엄격한 증명의 말에 까닭 한 줄을 덧붙인다(D68 지원 밖
+    카드가 그대로 보인다).
+    """
+    ticks = frame_duration / time_base
+    if ticks.denominator != 1:
+        return False, 0, str(strict)
+    try:
+        deviation = _conform_grid(pts, ticks.numerator, policy, source)
+    except RuntimeError as refusal:
+        return False, 0, f"{strict}\n격자 맞춤 불가: {refusal}"
+    note = (
+        f"격자 맞춤: 최대 어긋남 {deviation}틱 (프레임 {ticks.numerator}틱의 반 미만 — "
+        f"패킷 {len(pts)}개가 모두 원점+순번×프레임 길이의 제 슬롯에 놓인다)"
+    )
+    return True, deviation, note
+
+
+def _conform_grid(
+    pts: list[int], ticks_per_frame: int, policy: GridConformPolicy, source: Path
+) -> int:
+    """패킷 k마다 유일한 명목 슬롯 `pts₀ + k·T`에 반 프레임 미만으로 떨어지는가 — 최대 어긋남(틱).
+
+    반 프레임 미만이면 가장 가까운 슬롯이 하나뿐이라 맞춤이 패킷 순서를 바꾸지 않는다(Final
+    Cut이 conform하는 nearest-frame과 같다). 슬롯이 순번과 다르면(빈 슬롯·두 패킷이 한 슬롯)
+    패킷 순번 ≠ 슬롯이다 — 프레임 표본(`select=eq(n,…)`)이 그 뒤로 밀리므로 받지 않는다.
+    """
+    bound = ticks_per_frame * policy.half_frame_bound
+    origin = pts[0]
+    worst = 0
+    for ordinal, value in enumerate(pts):
+        if ordinal and value <= pts[ordinal - 1]:
+            raise RuntimeError(f"순번 {ordinal} pts {value}가 앞 패킷보다 늦지 않다")
+        slot = round(Fraction(value - origin, ticks_per_frame))
+        deviation = value - origin - slot * ticks_per_frame
+        if abs(deviation) >= bound:
+            raise RuntimeError(
+                f"순번 {ordinal} pts {value}가 슬롯 {slot}에서 {deviation}틱 — "
+                f"허용 {bound}틱 미만(프레임 {ticks_per_frame}틱 × {policy.half_frame_bound})"
+            )
+        if slot != ordinal:
+            raise RuntimeError(_slot_mismatch(ordinal, slot, value, policy))
+        worst = max(worst, abs(deviation))
+    return worst
+
+
+def _slot_mismatch(ordinal: int, slot: int, value: int, policy: GridConformPolicy) -> str:
+    if slot > ordinal:
+        return (
+            f"슬롯 {ordinal}이 비었다(빠진 프레임 — 순번 {ordinal} pts {value}가 슬롯 {slot}에"
+            f" 놓인다, 허용 빈 슬롯 {policy.max_dropped_slots})"
+        )
+    return f"순번 {ordinal} pts {value}가 앞 패킷과 같은 슬롯 {slot}에 놓인다"
+
+
+def _require_snap_policy(policy: GridConformPolicy) -> None:
+    """빈 슬롯·속도 전환을 받는 정책은 map 갈래(W-27c)가 있어야 뜻이 있다 — 아직 없다."""
+    if policy.max_dropped_slots != 0 or policy.allow_rate_remap:
+        raise RuntimeError(
+            f"격자 맞춤 정책 {policy}는 map 갈래가 필요하다 — 이 판은 snap(빈 슬롯 0, 속도"
+            " 다시 고르기 없음)만 안다"
+        )
 
 
 def _vfr_exact_end(pts: list[int], time_base: Fraction, frame_duration: Fraction) -> Fraction:
@@ -2576,6 +2678,64 @@ class RawClipHandles:
     after: Fraction = Fraction(0)
 
 
+@dataclass(frozen=True, slots=True)
+class GridConformPolicy:
+    """근접 CFR 원본을 명목 격자에 맞추는 규칙(D69) — `probe_extraction_clock`만 쓴다.
+
+    `half_frame_bound`: 패킷이 제 슬롯에서 벗어날 수 있는 한도(프레임 길이에 곱한다, 미만).
+    1/2 미만이면 가장 가까운 슬롯이 유일하다 — Final Cut이 30fps로 conform하는 nearest-frame
+    규칙과 같다. 1/2를 넘기면 슬롯이 둘이 되므로 받지 않는다.
+    `max_dropped_slots`: 받는 빈 슬롯 수. 0 — 빈 슬롯은 패킷 순번 ≠ 슬롯이라 프레임 표본이 그
+    뒤로 한 프레임씩 밀린다(W-27c의 map 몫).
+    `allow_rate_remap`: r_frame_rate 대신 실제 간격으로 명목 T를 다시 고르는가(W-27c 몫, 거짓).
+    캡션 엔진(`probe_video_stream`·`probe_video_grid`)과 썸네일 찾기(`_seek_plan`)는 이 정책을
+    쓰지 않는다 — 엄격하다.
+    """
+
+    max_dropped_slots: int = 0
+    half_frame_bound: Fraction = Fraction(1, 2)
+    allow_rate_remap: bool = False
+
+    def __post_init__(self) -> None:
+        if not 0 < self.half_frame_bound <= Fraction(1, 2):
+            raise ValueError(f"반 프레임 한도는 (0, 1/2]여야 합니다: {self.half_frame_bound}")
+        if self.max_dropped_slots < 0:
+            raise ValueError(f"빈 슬롯 허용은 0 이상이어야 합니다: {self.max_dropped_slots}")
+
+
+RAW_GRID_CONFORM = GridConformPolicy()
+"""원본 경계의 기본 맞춤 정책 — 반 프레임 미만 · 빈 슬롯 0 · 속도 다시 고르기 없음(D69)."""
+
+
+_DECLARED_WINDOW_QUANTUM = Fraction(1, _RAW_US_PER_SECOND)
+"""선언 창의 두 항(format start_time·duration)의 눈금 — libavformat이 AV_TIME_BASE(µs) 정수로
+들고 있어 ffprobe가 µs까지만 적는다. 참값은 적힌 값에서 이 눈금 하나만큼 늦을 수 있다."""
+
+
+def _packet_evidence_end(clock: RawVideoClock) -> Fraction:
+    """마지막 패킷 제시의 끝 — 맞춘 시계(D69)의 `exact_end`는 명목 끝이라 패킷 증거로 다시 잰다.
+
+    균일 시계는 예전 값(`exact_end`) 그대로다 — 양자화 시계에서 두 값이 한 틱 갈려도 판정이
+    바뀌지 않게.
+    """
+    if clock.max_deviation_ticks:
+        return clock.last_pts * clock.time_base + clock.frame_duration
+    return clock.exact_end
+
+
+def _declared_window_slack(probe: RawMediaProbe, clock: RawVideoClock) -> Fraction:
+    """선언 창 끝을 넘어도 되는 몫 — 한 틱, 맞춘 시계는 선언 두 항의 µs 눈금까지.
+
+    맞춘 원본(D69)의 마지막 패킷이 늦으면 패킷 끝이 선언 길이와 정확히 한 틱 차로 붙는다(실측
+    IMG_8863: 패킷 끝 2391/100초 = 참 선언 끝 14345/600초 + 1/600초). 선언은 µs로 내려 적혀
+    있어(23.908333초) 그 경계가 1/3000000초 넘친 것처럼 보였다 — 적힌 값의 눈금만큼은 참값의
+    몫이다. 그보다 먼 패킷은 여전히 막는다. 균일 시계는 예전 한 틱 그대로다(판정 바이트 그대로).
+    """
+    if clock.max_deviation_ticks:
+        return probe.video.time_base + 2 * _DECLARED_WINDOW_QUANTUM
+    return probe.video.time_base
+
+
 def _assert_raw_supported(probe: RawMediaProbe, clock: RawVideoClock) -> None:
     """지원 매트릭스 — 밖이면 이유를 말하고 죽인다. 정밀도를 낮추지 않는다."""
     video = probe.video
@@ -2591,14 +2751,15 @@ def _assert_raw_supported(probe: RawMediaProbe, clock: RawVideoClock) -> None:
     if any(kind == "video" for _, kind in probe.other_tracks):
         failures.append("비디오 스트림이 둘 이상이다")
     declared_end = probe.format_start + probe.duration
-    if clock.exact_end > declared_end + probe.video.time_base:
+    packet_end = _packet_evidence_end(clock)
+    if packet_end > declared_end + _declared_window_slack(probe, clock):
         # 실측: ffmpeg의 입력 -ss(절대 좌표)는 선언 창(start_time+duration)까지만
         # 읽는다(1.25초 이동 pts를 만든 파일에서 90프레임 중 33프레임만 들어옴).
         # 선언 창보다 먼 패킷이 있으면 그 구간이 조용히 사라지므로 추출 전에 막는다.
         # 창은 절대 좌표로 재었다 — 시작 2초·길이 4.8초·패킷 끝 6.8초의 정상 파일을
         # 길이(구간)와 절대 끝을 바꿔 비교해 거짓으로 막아선 안 된다(A3 실측).
         failures.append(
-            f"패킷 증거({clock.exact_end}초)가 선언 창("
+            f"패킷 증거({packet_end}초)가 선언 창("
             f"{probe.format_start}~{declared_end}초)을 넘는다 — 입력 탐색 창이 그 구간을 잃는다"
         )
     if not clock.uniform_grid:
@@ -2625,6 +2786,31 @@ class _RawMediaPlan:
     mapped_audio: tuple[AudioPacketExtent, ...]
     unmapped: tuple[tuple[int, str], ...]
     warnings: tuple[str, ...]
+    seek: Fraction
+    """입력 `-ss`의 정확한 값(절대 초) — 매체 시작에서 `common_shift_ticks`만큼 앞이다."""
+    common_shift_ticks: int
+    """매체 시작 − 탐색 점(원본 틱). 오디오는 탐색 점에서 시작하므로 출력 오디오 시작의 기대값에
+    더한다. 영상은 인코더의 프레임 눈금(1/fps)이 이 반 프레임 미만의 몫을 0으로 떨어뜨린다."""
+    snap_ticks_per_frame: int
+    """맞춘 시계(D69)면 프레임 길이(틱) — `setpts`가 프레임을 슬롯에 놓는다. 균일이면 0(argv
+    그대로)."""
+
+
+def _raw_seek(clock: RawVideoClock, media_range: RawPtsRange) -> tuple[Fraction, int]:
+    """입력 탐색 점과 공통 시프트(틱) — 균일 시계는 예전 그대로 한 틱 일찍이다.
+
+    양자화된 시계(예: 1/1000)에서는 격자 시각과 실제 pts가 한 틱 어길 수 있어 한 틱 일찍 잡는다.
+    맞춘 시계(D69)는 첫 프레임이 슬롯보다 최대 어긋남만큼 이를 수 있다 — 정확한 탐색이 그
+    프레임을 버리지 않게 그만큼 앞당긴다. 앞 프레임은 반 프레임 넘게 떨어져 있어 되살아나지
+    않는다. 음수 -ss는 ffmpeg가 '지연'으로 읽으므로 0에서 자른다.
+    """
+    lead = max(1, clock.max_deviation_ticks)
+    start = media_range.start_seconds
+    seek = max(Fraction(0), start - lead * clock.time_base)
+    shift = (start - seek) / clock.time_base
+    if shift.denominator != 1:
+        raise RuntimeError(f"탐색 시프트가 정수 틱이 아닙니다: {shift}틱")
+    return seek, shift.numerator
 
 
 def _validate_raw_range(source_range: RawPtsRange) -> None:
@@ -2667,6 +2853,7 @@ def _plan_raw_media(
     if media_first >= media_after:
         raise RuntimeError("핸들을 포함한 매체 범위가 비었습니다")
     media_range = clock_frame_range(clock, media_first, media_after)
+    seek, shift = _raw_seek(clock, media_range)
     media_start = media_range.start_seconds
     media_end = media_range.end_seconds
     # 오디오 꼬리 보존은 원본의 마지막 영상 프레임을 담은 클립에서만 한다(A3P-F2).
@@ -2697,7 +2884,33 @@ def _plan_raw_media(
         final_clip=final_clip,
         mapped_audio=mapping.mapped,
         unmapped=mapping.unmapped,
-        warnings=tuple(warnings),
+        warnings=tuple(warnings) + _conform_warnings(clock, shift),
+        seek=seek,
+        common_shift_ticks=shift,
+        snap_ticks_per_frame=_conform_frame_ticks(clock),
+    )
+
+
+def _conform_frame_ticks(clock: RawVideoClock) -> int:
+    """맞춘 시계의 프레임 길이(틱) — 균일 시계는 0이라 필터를 더하지 않는다."""
+    if not clock.max_deviation_ticks:
+        return 0
+    ticks = clock.frame_duration / clock.time_base
+    if ticks.denominator != 1:
+        raise RuntimeError(f"맞춘 시계의 프레임 길이가 정수 틱이 아닙니다: {ticks}틱")
+    return ticks.numerator
+
+
+def _conform_warnings(clock: RawVideoClock, shift: int) -> tuple[str, ...]:
+    """맞춘 시계의 추출 기록 — 균일 시계는 아무것도 더하지 않는다(경고 바이트 그대로)."""
+    if not clock.max_deviation_ticks:
+        return ()
+    return (
+        f"격자 맞춤(D69): 영상 프레임을 명목 슬롯에 놓았다(원본 최대 어긋남"
+        f" {clock.max_deviation_ticks}틱) — 탐색 점을 {shift}틱 앞당겼다. 오디오는 탐색 점에서"
+        f" 시작하므로 같은 출력 시각에 화면보다 {shift}틱({shift * clock.time_base}초, 반 프레임"
+        " 미만) 이른 원본 소리가 실린다 — 화면이 소리보다 그만큼 앞서고 소리는 그만큼 늦게"
+        " 들린다",
     )
 
 
@@ -2888,11 +3101,9 @@ def _raw_extract_command(
     plan: _RawMediaPlan,
 ) -> list[str]:
     encoder, encoder_args = _raw_encoder(profile, probe.video.codec_name)
-    # -ss를 time_base 한 틱 일찍 잡는다: 양자화된 시계(예: 1/1000)에서 격자 시각과
-    # 실제 pts가 한 틱 어길 수 있는데, 바닥 µs만 쓰면 첫 프레임이 잘릴 수 있다.
-    # 한 틱 일찍는 이전 프레임을 되살리지 못한다(프레임 간격 ≫ 틱). 음수 -ss는
-    # ffmpeg가 '지연'으로 읽으므로 0에서 자른다.
-    seek = max(Fraction(0), plan.media_range.start_seconds - probe.video.time_base)
+    # -ss는 계획이 정했다(`_raw_seek`) — 균일 시계는 한 틱 일찍, 맞춘 시계는 최대 어긋남만큼.
+    # 바닥 µs만 쓰면 첫 프레임이 잘릴 수 있어서다.
+    seek = plan.seek
     # -y는 호출자 경로가 아니라 우리가 O_EXCL로 exclusively 맡은 임시 파일에만
     # 붙는다(A3P-F2). 임시 파일은 검증을 통과한 뒤 os.link로 원자 게시된다 —
     # 있으면 EEXIST라 경합에서도 아무것도 덮어쓰지 않는다.
@@ -2921,12 +3132,26 @@ def _raw_extract_command(
     command += [
         "-c:v", encoder, *encoder_args,
         "-pix_fmt", pix_fmt,
-        "-vf", f"select=lt(n\\,{frames})",
+        "-vf", f"select=lt(n\\,{frames})" + _snap_filter(plan),
         "-fps_mode", "passthrough",
         "-c:a", profile.audio_codec,
     ]  # fmt: skip
     # 색 좌표는 출력 경로 **앞**에 붙는다 — ffmpeg는 출력 URL 뒤의 인자를 무시한다.
     return command + _raw_color_args(probe.video) + ["-f", profile.container, str(staging_output)]
+
+
+def _snap_filter(plan: _RawMediaPlan) -> str:
+    """맞춘 시계(D69)의 프레임을 제 슬롯에 놓는 `setpts` — 균일 시계는 빈 글자(argv 그대로).
+
+    필터 안의 PTS는 원본 time_base 틱이고 탐색 점에서 잰다: 순번 j 프레임은 `j·T + 어긋남 +
+    시프트`다. 어긋남이 반 프레임 미만이라 `round((PTS − 시프트)/T)·T`가 정확히 `j·T`다(정수
+    연산 — 초 단위 부동소수점을 거치지 않는다). 패스스루 인코더의 1/fps 눈금으로 반올림될 때
+    프레임이 이웃 슬롯으로 넘어가지 않게 한다(어긋남 + 시프트가 반 프레임을 넘을 수 있다).
+    """
+    ticks = plan.snap_ticks_per_frame
+    if not ticks:
+        return ""
+    return f",setpts=round((PTS-{plan.common_shift_ticks})/{ticks})*{ticks}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -3115,13 +3340,7 @@ def _verify_raw_video(
             f"프레임 타이밍이 바뀌었습니다: 원본 {source_clock.frame_duration}, "
             f"출력 {out_clock.frame_duration} — 무단 fps 변환은 없다"
         )
-    if not out_clock.uniform_grid:
-        failures.append(f"출력 격자가 균일하지 않습니다: {out_clock.grid_note}")
-    if abs(out_clock.presentation_origin) > out_clock.time_base:
-        failures.append(
-            f"출력 원점이 0이 아닙니다: {out_clock.presentation_origin}초 "
-            f"(허용 {out_clock.time_base}초)"
-        )
+    failures += _verify_raw_grid(out_clock)
     expected_width, expected_height = _expected_geometry(source)
     if (video.width, video.height) != (expected_width, expected_height):
         failures.append(
@@ -3142,6 +3361,27 @@ def _verify_raw_video(
     failures += _verify_raw_colors(video, source)
     if video.rotation_degrees != 0:
         failures.append(f"출력에 회전 메타데이터가 남았습니다: {video.rotation_degrees}°")
+    return failures
+
+
+def _verify_raw_grid(out_clock: RawVideoClock) -> list[str]:
+    """추출물의 격자 — 맞춤 없이 정확히 균일하고 원점이 0이어야 한다.
+
+    맞춘 원본(D69)의 지터는 추출에서 끝난다: 출력이 다시 맞춤을 거쳐야 균일하다면 `setpts`가
+    프레임을 슬롯에 놓지 못한 것이다. 영상 원점이 0인 것은 공통 시프트(`common_shift_ticks`,
+    반 프레임 미만)를 인코더의 프레임 눈금(1/fps)이 떨어뜨리기 때문이다 — 오디오 기대값만 그
+    시프트를 진다(`_verify_raw_audio`).
+    """
+    failures: list[str] = []
+    if not out_clock.uniform_grid:
+        failures.append(f"출력 격자가 균일하지 않습니다: {out_clock.grid_note}")
+    elif out_clock.conform_kind != "uniform":
+        failures.append(f"출력 격자가 정확히 균일하지 않습니다: {out_clock.grid_note}")
+    if abs(out_clock.presentation_origin) > out_clock.time_base:
+        failures.append(
+            f"출력 원점이 0이 아닙니다: {out_clock.presentation_origin}초 "
+            f"(허용 {out_clock.time_base}초)"
+        )
     return failures
 
 
@@ -3191,7 +3431,8 @@ def _verify_raw_audio(
         if source is None:
             failures.append(f"오디오 스트림 {extent.stream_index}: 매핑했는데 패킷 증거가 없다")
             continue
-        expected = max(Fraction(0), source - plan.media_range.start_seconds)
+        # 오디오는 탐색 점에서 시작한다 — 매체 시작이 아니라 `plan.seek`(= 매체 시작 − 공통 시프트).
+        expected = max(Fraction(0), source - plan.seek)
         tolerance = extent.packet_ticks * extent.time_base + extent.time_base
         measured = track.start_time
         if abs(measured - expected) > tolerance:

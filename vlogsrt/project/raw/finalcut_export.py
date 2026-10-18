@@ -156,6 +156,9 @@ class _Grid:
 
     frame_duration: Fraction
     frame_count: int
+    deviation_frames: Fraction = Fraction(0)
+    """맞춘 원본(D69)의 최대 어긋남을 프레임으로 — 머리 정보·라이브러리 선언 길이가 명목 프레임
+    수에서 이만큼 벗어날 수 있다. 균일 원본은 0이라 예전처럼 정확히 같아야 한다."""
 
 
 def _refuse(asset: SourceAsset, reason: str) -> FinalCutExportError:
@@ -333,7 +336,7 @@ def _probe(
     try:
         probe = preprocess.probe_raw_media(path)
         if review is not None:
-            grid = _review_grid(asset, review, probe)
+            grid = _review_grid(asset, review, probe, path)
         else:
             clock = preprocess.probe_extraction_clock(path, probe=probe)
             grid = _measured_grid(asset, clock, probe)
@@ -351,8 +354,11 @@ def _measured_grid(
     """검토 머리 밖 원본의 격자 — 패킷을 훑어 잰 것만 믿는다. VFR은 프레임 수가 길이가 아니다."""
     if not clock.uniform_grid:
         raise _UnsupportedGrid(asset, clock.grid_note or "")
-    _require_plain_timeline(asset, clock.first_pts, clock.frame_count, clock.frame_duration, probe)
-    return _Grid(clock.frame_duration, clock.frame_count)
+    deviation = clock.max_deviation_ticks * clock.time_base / clock.frame_duration
+    _require_plain_timeline(
+        asset, clock.first_pts, clock.frame_count, clock.frame_duration, probe, deviation
+    )
+    return _Grid(clock.frame_duration, clock.frame_count, deviation)
 
 
 def _require_plain_timeline(
@@ -361,18 +367,20 @@ def _require_plain_timeline(
     frames: int,
     frame_duration: Fraction,
     probe: preprocess.RawMediaProbe,
+    deviation_frames: Fraction = Fraction(0),
 ) -> None:
     """편집 목록(edit list)이 없는 파일이어야 한다 — 패킷 격자와 Final Cut이 보는 길이가 같다.
 
     스트림 복사로 자른 파일은 첫 프레임이 0보다 앞에 있고 머리 정보의 길이가 실제 프레임보다
     짧다. Final Cut은 머리 정보 쪽(0부터·짧은 길이)으로 보므로 그대로 보내면 모든 컷이 그만큼
-    밀린다. 검토를 다시 세워도 같은 시계를 재므로 고칠 곳은 파일이다.
+    밀린다. 검토를 다시 세워도 같은 시계를 재므로 고칠 곳은 파일이다. 맞춘 원본(D69)의 머리
+    정보는 마지막 패킷의 어긋남만큼 명목 길이와 다르다(실측 0–6틱) — 그 몫(`deviation_frames`,
+    반 프레임 미만)까지만 받는다. 편집 목록이 자른 길이는 프레임 단위라 이 몫에 숨지 못한다.
     """
-    video = probe.video
-    stated = video.duration_ts
-    header = None if stated is None else Fraction(stated) * video.time_base / frame_duration
-    if origin_pts >= 0 and (header is None or header == frames):
+    header = _header_frames(probe, frame_duration)
+    if origin_pts >= 0 and (header is None or abs(header - frames) <= deviation_frames):
         return
+    video = probe.video
     raise _refuse(
         asset,
         f"편집 목록(edit list)이 있는 파일이다 — 첫 프레임이 {origin_pts * video.time_base}초,"
@@ -382,11 +390,22 @@ def _require_plain_timeline(
     )
 
 
-def _review_grid(asset: SourceAsset, review: SourceClock, probe: preprocess.RawMediaProbe) -> _Grid:
+def _header_frames(probe: preprocess.RawMediaProbe, frame_duration: Fraction) -> Fraction | None:
+    """머리 정보(duration_ts)의 길이를 프레임으로 — 선언이 없으면 None."""
+    video = probe.video
+    stated = video.duration_ts
+    return None if stated is None else Fraction(stated) * video.time_base / frame_duration
+
+
+def _review_grid(
+    asset: SourceAsset, review: SourceClock, probe: preprocess.RawMediaProbe, path: Path
+) -> _Grid:
     """검토 머리의 시계 — 내용 해시에 묶여 있고 stat이 같으면 원본을 다시 훑지 않는다.
 
     머리의 0프레임이 원본 첫 프레임이다(머리를 세울 때 첫 패킷 pts를 원점으로 쟀다). 지금
-    선언과의 대조는 값싼 머리 정보로만 한다: 스트림 timebase와 프레임 레이트.
+    선언과의 대조는 값싼 머리 정보로만 한다: 스트림 timebase와 프레임 레이트. 머리 정보의
+    길이가 명목 프레임 수와 다를 때만 패킷을 훑어 맞춘 원본(D69)의 어긋남을 잰다 — 균일
+    원본은 예전처럼 다시 훑지 않는다.
     """
     if review.source_sha256 != asset.content_sha256:
         raise _refuse(asset, "검토 머리가 다른 원본 내용에 묶여 있다 — 검토를 다시 세우세요")
@@ -400,8 +419,12 @@ def _review_grid(asset: SourceAsset, review: SourceClock, probe: preprocess.RawM
             f"검토 시계(timebase·프레임 길이) {(review.time_base, duration)}가 지금 원본 선언"
             f" {declared}과 다르다 — 검토를 다시 세우세요",
         )
-    _require_plain_timeline(asset, review.origin_pts, frames.numerator, duration, probe)
-    return _Grid(duration, frames.numerator)
+    deviation = Fraction(0)
+    if _header_frames(probe, duration) not in (None, frames):
+        clock = preprocess.probe_extraction_clock(path, probe=probe)
+        deviation = clock.max_deviation_ticks * clock.time_base / clock.frame_duration
+    _require_plain_timeline(asset, review.origin_pts, frames.numerator, duration, probe, deviation)
+    return _Grid(duration, frames.numerator, deviation)
 
 
 def _timecode(
@@ -423,12 +446,30 @@ def _timecode(
     return _Timecode(frames, drop, label)
 
 
+def _declared_frames(declared: library.LibraryMedia, grid: _Grid) -> int:
+    """라이브러리 선언 길이를 프레임으로 — 맞춘 원본(D69)만 어긋남 몫까지 명목 수로 읽는다.
+
+    Final Cut은 지터 원본의 길이를 실제 마지막 패킷까지로 적는다(실측 848.05프레임). 같은
+    프레임 길이이고 그 차가 측정한 어긋남(반 프레임 미만) 안이면 명목 수와 같은 원본이다. 그
+    밖은 예전 그대로 격자에 떨어져야 한다(`LibraryMedia.frame_count`가 거부한다).
+    """
+    if grid.deviation_frames and declared.frame_duration == grid.frame_duration:
+        frames = declared.duration / declared.frame_duration
+        if abs(frames - grid.frame_count) <= grid.deviation_frames:
+            return grid.frame_count
+    return declared.frame_count
+
+
 def _check_library(
     asset: SourceAsset, declared: library.LibraryMedia, grid: _Grid, code: _Timecode
 ) -> None:
     """라이브러리 선언은 증명이 아니다 — 프레임 길이·수·시작이 같아야 그 신원을 쓴다."""
     try:
-        observed = (declared.frame_duration, declared.frame_count, declared.start_frame)
+        observed = (
+            declared.frame_duration,
+            _declared_frames(declared, grid),
+            declared.start_frame,
+        )
     except UnsupportedProject as error:
         raise _refuse(asset, f"라이브러리 선언이 프레임 격자 밖이다 — {error.reason}") from error
     measured = (grid.frame_duration, grid.frame_count, code.frames)

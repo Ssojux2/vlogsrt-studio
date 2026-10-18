@@ -45,6 +45,12 @@
 프레임 격자를 증명하지 못한 원본(VFR)은 분할 계획이 덮지 않고 `SegmentPlanSnapshot.unsupported`에 까닭과 함께 남긴다 —
 목록에는 「분석 지원 밖」 카드로 촬영 시각 순 자리에 서고, Final Cut 보내기는 그 원본만 빼고 보고서에 이름을 남긴다.
 원본 하나가 라이브러리 전체의 검토를 막지 않으며, CFR만이면 계획·지문·보내기 바이트가 그대로다(D68).
+근접 CFR(아이폰 지터)은 받는다 — `probe_extraction_clock` 한 자리만, r_frame_rate가 정수 틱 T이고 모든 패킷이
+제 명목 슬롯 `원점 + k·T`에서 반 프레임 미만이며 빈 슬롯이 없으면 `uniform_grid=True`·`conform_kind="snap"`이다
+(프레임 수 = 패킷 수 · 끝은 명목 · 정책 `preprocess.RAW_GRID_CONFORM`). 추출만 그 원본에서 탐색을 최대 어긋남만큼
+앞당기고 `setpts`로 슬롯에 놓으며, 보내기는 머리 정보·라이브러리 길이의 그 몫만 받는다. 빈 슬롯·속도 전환은
+D68의 지원 밖 그대로, 캡션 엔진·썸네일 찾기 증명은 엄격 그대로, 균일 원본의 시계·argv·지문은 바이트 그대로다.
+기록된 지원 밖 원본이 지금 덮이면 미리보기·정리 고리가 다시 깐다(사람 결정 그대로, D69).
 긴 로컬 단계(분석 프록시·미리보기·썸네일)는 「기록」 판의 「지금 도는 작업」·「서버 로그」로 보인다 — 읽기 전용
 `/vl-activity`, 등록표는 `preprocess.run_process` 한 자리, ffmpeg `-progress`는 서버만 켠다(D61).
 작업공간 DB는 WAL이다(만들기·열기가 바꾸고 닻 연결 하나를 쥔다 — DB를 베끼려면 `-wal`까지, D63). `-wal`은 연결마다 1 MiB 상한(`journal_size_limit`)이고, 작업 끝 PASSIVE·닻 닫기 TRUNCATE 체크포인트로 줄어든다 — 바쁜 체크포인트는 경고일 뿐 닫기를 막지 않는다(D63 H). 타이머 틱은 작업 `(job_id, status)`가 바뀐 틱에서만 정리 고리를 돈다 — 진행 수만 바뀐 틱은 그리기만 한다(D63).
@@ -313,6 +319,7 @@ vlogsrt run <video> --offline             # 픽스처 기반 전체 파이프라
 | `AnalysisProxyLimits` (바닥 1800초 · 배율 6, 분석 프록시와 프레임 묶음·장면 컷에 한 쌍씩) | 외부 근거 없는 조정 대상(D59). 한도 = max(바닥, 배율 × 원본 길이). 실측 0016(545초)·0018(1359초)의 분석 프록시가 분석 셋 동시 실행(D49)에서 고정 1800초를 넘겨 원본 전체의 분석이 실패했다 — 이제 넘기면 `ProcessTimeout`이고 분석 프록시는 원본으로 물러난다(D47). 조리법 tag·분석 지문·캐시 열쇠 밖이다 |
 | `ReviewMediaSettings` (`REVIEW_MEDIA`, 7개 — 미리보기 긴 변 1920 · `veryfast` · crf 23 · 한도 바닥 1800초 · 배율 6 · nice 10 · 썸네일 찾기 여유 1초) | 외부 근거 없는 조정 대상(D62). 작업대 검토 보조 미디어(원본 전체 미리보기·썸네일)의 만들기 설정 — 미리보기는 검토용이라 4K 그대로 `medium`·crf 20(35초 클립에 부하 아래 약 5분, 9분 0016에 6.8GB) 대신 줄여 만든다(키우지 않는다). 한도 = max(바닥, 배율 × 원본 길이) — 0018(1359초)의 미리보기가 고정 1800초에 걸렸다. nice는 미리보기·썸네일 ffmpeg만 낮춰 분석과 CPU를 다투지 않게 한다. 여유는 썸네일 빠른 찾기가 목표보다 얼마나 앞에서 디코드를 시작하는가(맞는 프레임은 정수 PTS로 고르므로 바이트와 무관). `analysis_config.py`에 있고 미리보기·썸네일 캐시 열쇠·조리법 판(`visual-review-preview/v1`·`visual-review-thumb/v1`)·분석 지문·승인 어디에도 없다 — 바꿔도 이미 만든 미리보기는 그대로 쓰고 새 기록만 `encoding`을 남긴다 |
 | `WorkspaceDbSettings` (`journal_size_limit_bytes = 1_048_576` · `checkpoint_busy_timeout_ms = 500`) | 외부 근거 없는 조정 대상(D63 H). 작업공간 DB `-wal`의 크기 상한 — SQLite 기본 -1(무제한)에서 실제 `-wal`이 3.4 MB로 줄지 않았다. 1 MiB는 그 3분의 1 아래이면서 작은 쓰기(몇 쪽) 수백 번을 담는다. 대기는 닻 닫기·atexit의 TRUNCATE 체크포인트만 — 연결의 10초 대신 0.5초라 닻 8개에도 종료가 4초 안이다. `analysis_config.py`에 있고 어느 지문·캐시 열쇠·승인에도 없다 |
+| `GridConformPolicy` (`RAW_GRID_CONFORM` — `half_frame_bound = 1/2` · `max_dropped_slots = 0` · `allow_rate_remap = False`, `preprocess.py`) | 반 프레임 한도는 **기하 근거**다(D69): 어긋남이 프레임 길이의 반 **미만**이면 가장 가까운 명목 슬롯이 하나뿐이다 — Final Cut이 30fps로 conform하는 nearest-frame 규칙과 같다(T=20틱이면 9틱까지, 10틱은 슬롯이 둘이라 거부). 실측 맞춘 원본 10개의 어긋남은 1–6틱. 1/2를 넘기면 `__post_init__`가 거부한다. 빈 슬롯 0 · 속도 다시 고르기 없음은 이 판의 범위다(빈 슬롯은 패킷 순번 ≠ 슬롯이라 프레임 표본이 밀린다 — W-27c의 map 몫이고 지금 켜면 측정이 시끄럽게 거부한다). 원본 경계(`probe_extraction_clock`)만 쓰고 캡션 엔진·썸네일 찾기에는 닿지 않는다. 최대 어긋남·`grid_note`는 어느 지문·캐시 열쇠·조리법 판에도 없다(snap은 항등 맞춤이라 프레임 신원이 같다) |
 | `ScratchSweepSettings.entry_limit = 2048`(`vlogsrt/scratch_dirs.py`) · `UiInstanceSettings`(`ui/instance.py` — 포트 읽기 20 × 0.05초 · 다시 열기 5 · 경고에 적는 실패 3) | 외부 근거 없는 조정 대상(D63 H). UI 서버 시작의 청소(죽은 pid 임시 폴더 · 아무도 쥐지 않은 UI 잠금 파일)가 한 번에 살펴볼 이름 맞는 항목 수 — 실측 잠금 1018개가 한 번에 끝나고 시작을 오래 막지 않는다. 포트 읽기는 예전 리터럴 그대로, 다시 열기는 지워진 inode를 잠근 실행의 재시도 상한이다 |
 | Claude Opus 5.5 단가 (`RawClaudeAnalysisProfile`) | 2026-10-09 공식 가격표(https://platform.claude.com/docs/en/about-claude/pricing) — 입력 $4 · 출력 $20 · 캐시 쓰기 5분 $5 · 1시간 $8 · 읽기 $0.20 / 100만 토큰, `inference_geo=global`(D54). **0으로 두지 마라** — 못 매기면 가격 미정이다 |
 | Claude Sonnet 5.5 단가 (`RawClaudeAnalysisProfile`, 의미 분석 기본) | 2026-10-11 공식 가격표(https://platform.claude.com/docs/en/about-claude/pricing) — 입력 $2 · 출력 $10 · 캐시 쓰기 5분 $2.50 · 1시간 $4 · 읽기 $0.10 · 배치 $1/$5 / 100만 토큰, `inference_geo=global`(D58). **0으로 두지 마라** — 못 매기면 가격 미정이다 |

@@ -33,6 +33,7 @@ __all__ = [
     "DEFAULT_TILE_SECONDS",
     "MIN_SEGMENT_FRAMES",
     "SEGMENTATION_SCHEMA_DIGEST",
+    "WHOLE_SOURCE_TILE_SECONDS",
     "boundary_frames",
     "new_segment_id",
     "plan_segments",
@@ -44,6 +45,10 @@ __all__ = [
 DEFAULT_TILE_SECONDS = Fraction(30)
 """기본 타일 길이 — 계획 §1.2의 대화 밴드(5~45초) 한가운데 값. 의미 완결성이
 길이보다 우선이라는 원칙은 A4의 몫이고, A3는 어디까지나 결정적 기본값이다."""
+
+WHOLE_SOURCE_TILE_SECONDS = Fraction(10**12)
+"""원본 하나를 한 장으로 덮는 타일 — 새로 든 영상(미리보기 머리, D53)·새로 덮인 영상(D69)의
+첫 조각이다. 어떤 원본보다 길어 경계가 생기지 않는다(지문에는 경계만 들어간다)."""
 
 MIN_SEGMENT_FRAMES = 1
 """조각의 최소 프레임 수 — 경계 둘이 같은 프레임에 떨어지면 빈 조각이다."""

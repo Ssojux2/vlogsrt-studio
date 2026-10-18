@@ -1625,6 +1625,14 @@ class RawWorkspace:
             unsupported=unsupported,
         )
 
+    def segment_plan_unsupported(self, revision_id: str) -> tuple[UnsupportedSource, ...]:
+        """계획이 덮지 못한 원본만 — 정리 고리의 할 일 읽기(D69)는 그리기 범위의 연결을 함께 쓴다.
+
+        계획 전체(조각 JSON)를 풀지 않고, 단추 한 번의 읽기에 DB를 더 열지 않는다(D67 읽기 범위).
+        """
+        with read_scope.shared(("workspace.db", str(self.root)), self.connect) as db:
+            return _unsupported_of(db, revision_id)
+
     def list_segment_plan_revisions(self) -> tuple[SegmentPlanSnapshot, ...]:
         with self.connect() as connection:
             rows = connection.execute(

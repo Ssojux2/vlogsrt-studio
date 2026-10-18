@@ -543,6 +543,7 @@ UPKEEP_CAPTURE = "촬영 시각"
 UPKEEP_ORDER = "영상 순서"
 UPKEEP_TIERS = "등급판"
 UPKEEP_ALIGN = "검토 순서"
+UPKEEP_COVER = "격자 맞춤"
 
 TIER_SETTINGS = tiering.TIER_SETTINGS
 TIER_TAG_PREFIX = tiering.TIER_TAG_PREFIX
@@ -1012,6 +1013,9 @@ class RawWorkspaceService:
         # 영상마다 첫 컷 썸네일도 (작업공간, 썸네일 키)마다 이번 실행에서 한 번만 건다(W-24 세션 I)
         # — 계속 실패하는 원본의 썸네일을 그리기마다 다시 걸지 않는다.
         self._thumb_tries: set[tuple[Path, str]] = set()
+        # 계획이 덮지 못했다고 기록한 원본(D68)을 지금 시계로 덮을 수 있는가 — (작업공간, 원본,
+        # 내용 해시)마다 이번 실행에서 한 번만 잰다(D69). 같은 내용·같은 규칙이면 답이 같다.
+        self._coverable: dict[tuple[Path, str, str], bool] = {}
         self._thumb_epochs: dict[Path, int] = {}
         # 확인 작업은 작업공간마다 한 번에 하나다 — 도는 동안 온 요청은 (원본 → 다시 재기)로 합친다.
         self._sync_lock = threading.Lock()
@@ -2135,16 +2139,67 @@ class RawWorkspaceService:
             head is not None
             and latest is not None
             and _same_sources(head, latest, self._unsupported_ids(root, head))
+            and not self._newly_coverable(root, head)
         ):
             return head
-        # 새로 든 영상만 한 장으로 깐다 — 이미 있던 영상(시계가 같은)은 사람 손이 닿았든 아니든
-        # 그 조각·미검토 제안을 그대로 둔다(D53: 가져오기가 손대지 않은 영상의 분석을 지우지 않게).
-        plan = self.plan_segmentation(root, tile_seconds=Fraction(10**12))
+        # 새로 든 영상(새로 덮인 영상, D69 포함)만 한 장으로 깐다 — 이미 있던 영상(시계가 같은)은
+        # 사람 손이 닿았든 아니든 그 조각·미검토 제안을 그대로 둔다(D53: 가져오기가 손대지 않은
+        # 영상의 분석을 지우지 않게).
+        return self._lay_new_sources(root, facade, head)
+
+    def _lay_new_sources(
+        self,
+        root: Path,
+        facade: Any,
+        head: ReviewRevision | None,
+        *,
+        expected_head: str | None = None,
+    ) -> ReviewRevision:
+        """지금 순서의 원본을 모두 다시 재어 계획한다 — 이미 머리에 있던 원본은 그 조각 그대로."""
+        plan = self.plan_segmentation(root, tile_seconds=segmentation.WHOLE_SOURCE_TILE_SECONDS)
         kept = tuple(clock.source_id for clock in head.clocks) if head is not None else ()
         revision: ReviewRevision = facade.initialize_review(
-            plan.revision_id, preserve_source_ids=kept
+            plan.revision_id, preserve_source_ids=kept, expected_head=expected_head
         )
         return revision
+
+    def _newly_coverable(self, root: Path, head: ReviewRevision) -> tuple[str, ...]:
+        """머리의 계획이 덮지 못했다고 기록한 원본(D68) 가운데 지금 시계로는 덮을 수 있는 원본.
+
+        기록은 그때의 측정이다. 같은 내용의 원본이 근접 CFR 맞춤(D69)으로 이제 격자를 증명하면,
+        옛 머리를 쓰는 한 「분석 지원 밖」으로 남는다(D68 (e)) — 그것이 다시 계획할 까닭이다.
+        """
+        workspace = self._workspace(root)
+        # 기록만 읽는다 — 그리기 범위의 연결을 함께 써 단추 한 번에 DB를 더 열지 않는다.
+        recorded = workspace.segment_plan_unsupported(head.base_plan_id)
+        return tuple(
+            item.asset_id
+            for item in recorded
+            if self._coverable_now(root, workspace, item.asset_id)
+        )
+
+    def _coverable_now(self, root: Path, workspace: RawWorkspace, asset_id: str) -> bool:
+        """원본 하나를 지금 시계로 덮을 수 있는가 — 패킷만 훑고(디코드 없음) 실행마다 한 번.
+
+        화면 갱신(정리 고리의 할 일 읽기)마다 다시 재지 않는다. 재지 못하면 경고하고 지원 밖
+        그대로 둔다 — 답을 기억하지 않으므로 다음 갱신이 다시 잰다.
+        """
+        asset = workspace.source_asset(asset_id)
+        key = (root.expanduser().resolve(), asset_id, asset.content_sha256 or "")
+        with self._lock:
+            known = self._coverable.get(key)
+        if known is not None:
+            return known
+        try:
+            covered = _measured_source(workspace, asset).clock.uniform_grid
+        except (OSError, RuntimeError) as error:
+            log.warn(f"덮지 못한 원본을 다시 재지 못했다: {asset.source_name} — {error}")
+            return False
+        if covered:
+            log.info(f"덮지 못했던 원본을 이제 덮을 수 있다(격자 맞춤, D69): {asset.source_name}")
+        with self._lock:
+            self._coverable[key] = covered
+        return covered
 
     def _prepare_preview_pages(
         self,
@@ -2455,6 +2510,9 @@ class RawWorkspaceService:
             pending[UPKEEP_TIERS] = tier_state
         if order is not None and self._reorder_pending(root, head, order):
             pending[UPKEEP_ALIGN] = f"{head.revision_id}>{order.revision_id}"
+        covered = self._newly_coverable(root, head)
+        if covered:
+            pending[UPKEEP_COVER] = f"{head.revision_id}+{','.join(covered)}"
         return pending
 
     def _claim_upkeep(self, root: Path, pending: Mapping[str, str]) -> bool:
@@ -2474,6 +2532,8 @@ class RawWorkspaceService:
                 "영상을 촬영 시각 순으로 맞춥니다 — 원본의 촬영 날짜를 다시 읽고, 사람이 정한"
                 " 사용/제외·메모는 그대로입니다. 분석 승인은 다시 받지 않습니다."
             )
+        if UPKEEP_COVER in pending:
+            lines.append(_COVER_MESSAGE)
         if UPKEEP_TIERS in pending and pending[UPKEEP_TIERS].startswith(_REGRADE_STATE):
             lines.append(_REGRADE_MESSAGE)
         elif UPKEEP_TIERS in pending:
@@ -2494,12 +2554,13 @@ class RawWorkspaceService:
             (UPKEEP_ORDER, self._order_step),
             (UPKEEP_TIERS, self._tier_step),
             (UPKEEP_ALIGN, self.align_review_order),
+            (UPKEEP_COVER, self._cover_step),
         )
         failures: dict[str, str] = {}
         for step, run in steps:
             context.check_cancel()
-            if step == UPKEEP_ALIGN and UPKEEP_TIERS in failures:
-                if self._align_pending(root):
+            if step in (UPKEEP_ALIGN, UPKEEP_COVER) and UPKEEP_TIERS in failures:
+                if self._align_pending(root) or self._cover_pending(root):
                     failures[step] = "등급판 옮기기가 실패해 다음 열기로 미뤘다"
                     log.warn(f"작업공간 정리 — {step}: {failures[step]}")
                 continue
@@ -2510,6 +2571,28 @@ class RawWorkspaceService:
                 failures[step] = str(error)
         if failures:
             raise RawWorkspaceError(" · ".join(f"{step}: {why}" for step, why in failures.items()))
+
+    def _cover_pending(self, root: Path) -> bool:
+        head = _review_head(self.review_workspace_facade(root))
+        return head is not None and bool(self._newly_coverable(root, head))
+
+    def _cover_step(self, root: Path) -> bool:
+        """기록된 지원 밖 원본이 지금 덮이면 검토를 다시 깐다 — 사람 결정은 덮은 원본에 그대로(D69).
+
+        순서 맞춤이 먼저 돌아 손댄 머리의 옮기기는 이미 그 원본을 덮었다(`plan_from_review`).
+        여기 오는 것은 순서가 그대로인 머리다. 다시 계획은 원본을 다시 해시해 길다 — 그 사이
+        머리가 바뀌었으면 덮지 않고 미룬다(`_migrate_unedited_head`와 같은 규율). 했으면 True.
+        """
+        facade = self.review_workspace_facade(root)
+        head = _review_head(facade)
+        if head is None or not self._newly_coverable(root, head):
+            return False
+        try:
+            self._lay_new_sources(root, facade, head, expected_head=head.revision_id)
+        except StaleRevisionError as error:
+            log.warn(f"검토가 그 사이 바뀌어 새로 덮인 원본 깔기를 다음 갱신으로 미룬다 — {error}")
+            return False
+        return True
 
     def _capture_step(self, root: Path) -> None:
         missing = self.refresh_capture_times(root)
@@ -5424,6 +5507,12 @@ _REGRADE_MESSAGE = (
     "자막 시각 확인 결과나 분석 근거가 바뀌어 등급 표시만 다시 답니다 — 사람이 정한"
     " 사용/제외·메모·경계는 그대로입니다."
 )
+
+_COVER_MESSAGE = (
+    "프레임이 조금 흔들리던 영상을 이제 일정한 프레임에 맞춰 받을 수 있어 검토에 넣습니다 —"
+    " 이미 있던 영상의 사용/제외·메모·경계는 그대로입니다."
+)
+"""기록된 「분석 지원 밖」 원본이 맞춤(D69)으로 덮이게 된 머리의 안내."""
 
 
 def _tier_state(facade: Any, head: ReviewRevision) -> str | None:

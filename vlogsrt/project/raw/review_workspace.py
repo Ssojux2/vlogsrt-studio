@@ -111,6 +111,7 @@ from vlogsrt.project.raw.segment_review import (
     split_edit,
     unreviewed_auto_exclusions,
 )
+from vlogsrt.project.raw.segmentation import WHOLE_SOURCE_TILE_SECONDS
 from vlogsrt.project.raw.workspace import RawWorkspace
 
 if TYPE_CHECKING:  # 순환 방지 — 공개 서비스가 이 파사드를 import한다(W1).
@@ -165,26 +166,28 @@ class ReviewPlanMapping:
     old_revision_id: str
     new_plan_revision_id: str
     pairs: tuple[MappingPair, ...]
+    covered_sources: tuple[str, ...] = ()
+    """옛 계획이 덮지 못했다고 기록했고(D68) 새 계획이 처음 덮는 원본(D69) — 옛 조각이 없어
+    짝이 없다. 입양이 새 조각으로 깐다. 없으면 문서에 칸이 없다(예전 바이트 그대로)."""
 
     def as_document(self) -> str:
         """매핑의 정렬된 JSON — 저장소 기록용."""
-        return json.dumps(
-            {
-                "old_revision_id": self.old_revision_id,
-                "new_plan_revision_id": self.new_plan_revision_id,
-                "pairs": [
-                    {
-                        "old_segment_id": pair.old_segment_id,
-                        "new_segment_id": pair.new_segment_id,
-                        "source_id": pair.source_id,
-                        "core": [pair.core_start_pts, pair.core_end_pts],
-                    }
-                    for pair in self.pairs
-                ],
-            },
-            ensure_ascii=False,
-            sort_keys=True,
-        )
+        body: dict[str, object] = {
+            "old_revision_id": self.old_revision_id,
+            "new_plan_revision_id": self.new_plan_revision_id,
+            "pairs": [
+                {
+                    "old_segment_id": pair.old_segment_id,
+                    "new_segment_id": pair.new_segment_id,
+                    "source_id": pair.source_id,
+                    "core": [pair.core_start_pts, pair.core_end_pts],
+                }
+                for pair in self.pairs
+            ],
+        }
+        if self.covered_sources:
+            body["covered_sources"] = list(self.covered_sources)
+        return json.dumps(body, ensure_ascii=False, sort_keys=True)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1652,7 +1655,9 @@ class ReviewWorkspaceFacade:
         """편집된 덮개를 새 분할 계획으로 — 경계 왕복이 항등임을 검증하고 매핑을 남긴다.
 
         `order_revision_id`를 주면 그 전체 순서 위에 세운다 — 순서만 바뀐 머리를 옮길 때다(D53).
-        매핑은 (원본, 경계)로 맞추므로 순서와 무관하다.
+        매핑은 (원본, 경계)로 맞추므로 순서와 무관하다. 옛 계획이 덮지 못했다고 기록한 원본이 지금
+        덮이면(D69 — 맞춤 규칙이 생겼다) 그 원본은 한 장으로 덮고 짝 없이 매핑에 적는다 — 사람
+        결정은 옛 덮개의 원본에만 있으므로 잃을 것이 없다(D68 (e)).
         """
         revision = self.load_head(base_plan_id).revision
         snapshot = self._snapshot(revision.base_plan_id)
@@ -1672,9 +1677,12 @@ class ReviewWorkspaceFacade:
             self.root,
             order_revision_id=order_revision_id or snapshot.order_revision_id,
             intervals=intervals,
+            # 구간이 없는 원본은 새로 덮인 원본뿐이다 — 새로 든 영상처럼 한 장으로 깐다.
+            tile_seconds=WHOLE_SOURCE_TILE_SECONDS,
             basis=SEGMENTATION_BASIS_PLANNED,
         )
-        return new_snapshot, self._verified_mapping(revision, new_snapshot)
+        recorded = frozenset(item.asset_id for item in snapshot.unsupported)
+        return new_snapshot, self._verified_mapping(revision, new_snapshot, recorded)
 
     @staticmethod
     def _coverage_by_source(revision: ReviewRevision) -> dict[str, list[ReviewSegment]]:
@@ -1685,15 +1693,29 @@ class ReviewWorkspaceFacade:
         return grouped
 
     def _verified_mapping(
-        self, revision: ReviewRevision, new_snapshot: SegmentPlanSnapshot
+        self,
+        revision: ReviewRevision,
+        new_snapshot: SegmentPlanSnapshot,
+        recorded_unsupported: Set[str] = frozenset(),
     ) -> ReviewPlanMapping:
-        """옛 조각 ↔ 새 계획 조각 — core 범위 집합이 정확히 같을 때만 매핑이다."""
+        """옛 조각 ↔ 새 계획 조각 — core 범위 집합이 정확히 같을 때만 매핑이다.
+
+        옛 머리에 시계가 없고 옛 계획이 덮지 못했다고 기록한(`recorded_unsupported`) 원본만 짝
+        없이 지나간다 — 새로 덮인 원본(D69)이다. 그 밖의 새 조각은 예전처럼 환원 실패다.
+        """
         by_range = {
             (segment.source_id, segment.start_pts, segment.end_pts): segment.segment_id
             for segment in revision.segments
         }
+        covered = {
+            entry.asset_id
+            for entry in new_snapshot.entries
+            if entry.asset_id in recorded_unsupported and revision.clock_for(entry.asset_id) is None
+        }
         pairs: list[MappingPair] = []
         for entry in new_snapshot.entries:
+            if entry.asset_id in covered:
+                continue
             old_id = by_range.get((entry.asset_id, entry.core_start_pts, entry.core_end_pts))
             if old_id is None:
                 raise ReviewWorkspaceError(
@@ -1718,6 +1740,7 @@ class ReviewWorkspaceFacade:
             old_revision_id=revision.revision_id,
             new_plan_revision_id=new_snapshot.revision_id,
             pairs=tuple(pairs),
+            covered_sources=tuple(sorted(covered)),
         )
 
     def adopt_plan_review(
@@ -1759,13 +1782,17 @@ class ReviewWorkspaceFacade:
                 f"이 계획의 검토가 이미 있다: {new_snapshot.revision_id} — load_head으로 여세요"
             )
         statuses = {segment.source_id: segment.speech_status for segment in old.segments}
+        if mapping.covered_sources:
+            # 새로 덮인 원본(D69)의 발화 상태는 초기화와 같은 규칙으로 — 분석 증거가 말하는 것만.
+            fresh = self._speech_statuses(new_snapshot, None)
+            statuses.update({source: fresh[source] for source in mapping.covered_sources})
         entries = [
             _PlanReviewEntry(entry, statuses[entry.asset_id]) for entry in new_snapshot.entries
         ]
         adopted = initial_revision(
             self._project_id,
             new_snapshot.revision_id,
-            self._adopted_clocks(old, new_snapshot),
+            self._adopted_clocks(old, new_snapshot, mapping),
             entries,
         )
         # 입양은 경계만 옮긴다 — 등급은 저장된 증거로 새 조각마다 다시 매긴다(D51).
@@ -1784,10 +1811,20 @@ class ReviewWorkspaceFacade:
         )
 
     def _adopted_clocks(
-        self, old: ReviewRevision, new_snapshot: SegmentPlanSnapshot
+        self, old: ReviewRevision, new_snapshot: SegmentPlanSnapshot, mapping: ReviewPlanMapping
     ) -> tuple[SourceClock, ...]:
-        """새 계획의 덮개가 옛 시계와 같은 시계 위에 있는가 — 다르면 입양이 거짓이다."""
+        """새 계획의 덮개가 옛 시계와 같은 시계 위에 있는가 — 다르면 입양이 거짓이다.
+
+        새로 덮인 원본(D69, `mapping.covered_sources`)은 옛 시계가 없다 — 초기화처럼 지금 다시
+        검증·재측정해 시계를 세워 옛 시계 뒤에 붙인다. 그 밖에 옛 시계 없는 덮개는 거짓이다.
+        """
         new_coverage = {coverage.asset_id: coverage for coverage in new_snapshot.coverage}
+        unknown = set(new_coverage) - {clock.source_id for clock in old.clocks}
+        if unknown != set(mapping.covered_sources):
+            raise ReviewWorkspaceError(
+                f"새 계획이 옛 검토에 없는 원본을 덮는다: {sorted(unknown)} — 매핑이 새로 덮인"
+                f" 원본으로 적은 것은 {list(mapping.covered_sources)}"
+            )
         clocks: list[SourceClock] = []
         for clock in old.clocks:
             coverage = new_coverage.get(clock.source_id)
@@ -1804,6 +1841,9 @@ class ReviewWorkspaceFacade:
                     f"새 계획의 시계가 검토 시계와 다르다: {clock.source_id!r}"
                 )
             clocks.append(clock)
+        clocks.extend(
+            self._review_clock(new_coverage[source_id]) for source_id in mapping.covered_sources
+        )
         return tuple(clocks)
 
     def _replay_metadata(
