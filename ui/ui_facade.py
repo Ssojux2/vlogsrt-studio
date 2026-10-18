@@ -2909,8 +2909,10 @@ VISUAL_BOOTSTRAP_JS = (
         if (!row.audio || !row.video) { return row.reason || ""; }
         // 표가 추천이라 했지만 추천하지 않는 까닭(D60) — 막대의 제목·읽기 글에도 붙인다.
         var caps = (row.caps || []).map(function(text) { return " · 추천 제한: " + text; });
+        // 「자막 확인됨」으로 추천한 까닭(D65) — 추천 제한과 같은 자리에 쉬운 말로.
+        var lift = row.lift ? " · 추천 근거: " + row.lift : "";
         return "자막: " + (row.audio.reason || row.audio.label || "") +
-          " · 영상: " + (row.video.reason || row.video.label || "") + caps.join("");
+          " · 영상: " + (row.video.reason || row.video.label || "") + caps.join("") + lift;
       }
       function tagText(card, prefix) {
         var hit = (card.tags || []).find(function(t) { return t.indexOf(prefix) === 0; });
@@ -3276,6 +3278,7 @@ VISUAL_BOOTSTRAP_JS = (
         (mk.caps || []).forEach(function(text) {
           out.push('<p class="vl-kv">추천 제한 · ' + esc(text) + '</p>');
         });
+        if (mk.lift) { out.push('<p class="vl-kv">추천 근거 · ' + esc(mk.lift) + '</p>'); }
         if (mk.start !== undefined && mk.end !== undefined) {
           out.push('<small>' + esc(VL.fmt(ratOf(mk.start)) + '초 ~ ' +
             VL.fmt(ratOf(mk.end)) + '초') + '</small>');

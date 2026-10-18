@@ -408,7 +408,8 @@ UPKEEP_JOB_KIND = "workspace_upkeep"
 SYNC_CHECK_JOB_KIND = "subtitle_sync_check"
 """자막 시각 확인 작업(D55) — 무료 로컬 VAD로 원본 자막과 말소리를 대조해 **표시만** 한다.
 자막·전사·SRT·지문을 쓰지 않고 자동 정리·선택·출력·분할에 들어가지 않는다. 등급만 좁은 예외다
-(D60): 지금 리비전 보고서의 판정·표지가 `_tier_timing`을 거쳐 추천을 보통으로 내릴 수만 있다."""
+(D60·D65): 지금 리비전 보고서의 판정·표지가 `_tier_timing`을 거쳐 추천을 보통으로 내리고, 초록이면서
+확인 필요 줄이 적은 영상에서만 표의 `usable` × 발화 많음 칸 하나를 추천으로 올린다."""
 
 SYNC_ALL_SOURCES = "*"
 """'걸지 못함' 표지의 자리 — 원본을 모르는 실패(앱 열기 고리가 재료조차 못 읽음)는 전체에."""
@@ -1912,36 +1913,34 @@ class RawWorkspaceService:
         return tiering.classify(payload, timing=self._tier_timing(workspace, row.asset_id))
 
     def _tier_timing(self, workspace: RawWorkspace, asset_id: str) -> tiering.TimingSignals:
-        """등급에 넘길 자막 시각 확인 값 — **지금** 보고서에서만(D60).
+        """등급에 넘길 자막 시각 확인 값 — **지금** 보고서에서만(D60·D65). 이 값의 유일한 생산자다.
 
         지금이란 보고서의 자막 리비전·1단계 PCM·기준이 지금과 같다는 뜻이다(`is_current` —
         Final Cut의 `자막 시각 확인 필요` 키워드와 같은 규칙). 없거나 낡았거나 다른 리비전을
-        쟀으면 모름(아무것도 내리지 않는다). 「말소리를 못 찾음」 큐는 판정이 난 보고서(빨강·
-        노랑·초록)에서만 넘긴다 — 측정 불가(말소리 3초 미만 등)는 측정 자체를 믿을 수 없다.
-        보고서를 못 읽으면 모름으로 두고 경고한다(표시용 측정이 등급 계산을 막지 못한다).
-        읽기만 한다.
+        쟀으면 모름(아무것도 내리지도 올리지도 않는다). 「말소리를 못 찾음」 큐는 판정이 난
+        보고서(빨강·노랑·초록)에서만 넘긴다 — 측정 불가(말소리 3초 미만 등)는 측정 자체를 믿을 수
+        없다. 「자막 확인됨」(D65)은 그 보고서가 초록이고 같은 리비전 원본 자막의 확인 필요 줄 몫이
+        기준 이하일 때만 참이다(`_timing_read`). 보고서를 못 읽으면 모름으로 두고 경고한다(표시용
+        측정이 등급 계산을 막지 못한다). 읽기만 한다.
         """
-        from vlogsrt.project import sync_check
-        from vlogsrt.project.raw import sync_report
-
         try:
-            report = sync_report.current_report(workspace, asset_id, strict=True)
-            if report is None or report.get("stale"):
-                return tiering.UNKNOWN_TIMING
-            level = str(report.get("verdict"))
-            judged = level in (sync_check.LEVEL_RED, sync_check.LEVEL_AMBER, sync_check.LEVEL_GREEN)
-            cues = (report.get("cues") or ()) if judged else ()
-            flagged = frozenset(
-                (str(cue["id"]), Fraction(str(cue["start"])), Fraction(str(cue["end"])))
-                for cue in cues
-                if sync_check.FLAG_NO_SPEECH in (cue.get("flags") or ())
-            )
+            read = _timing_read(workspace, asset_id)
         except (OSError, ValueError, KeyError, TypeError) as error:
             log.warn(
                 f"자막 시각 확인 보고서를 읽지 못해 등급에는 모름으로 둔다 — {asset_id}: {error}"
             )
             return tiering.UNKNOWN_TIMING
-        return tiering.TimingSignals(level=level, no_speech=flagged)
+        if read is None:
+            return tiering.UNKNOWN_TIMING
+        if not tiering.verified_subtitles(read.level, read.suspect_lines, read.lines):
+            return tiering.TimingSignals(level=read.level, no_speech=read.no_speech)
+        return tiering.TimingSignals(
+            level=read.level,
+            no_speech=read.no_speech,
+            subtitle_verified=True,
+            subtitle_suspect_lines=read.suspect_lines,
+            subtitle_lines=read.lines,
+        )
 
     def start_reference_import(
         self,
@@ -4904,6 +4903,62 @@ def _sync_export_bucket(document: Mapping[str, Any] | None) -> str:
         return "stale"
     verdict = str(document.get("verdict"))
     return {"red": "flagged", "amber": "amber", "green": "green"}.get(verdict, "skip")
+
+
+@dataclass(frozen=True)
+class _TimingRead:
+    """지금 보고서에서 읽은 등급 재료 — `_tier_timing`이 값(`TimingSignals`)으로 바꾼다(D60·D65).
+
+    줄 수(`suspect_lines`/`lines`)는 초록 보고서에서만 센다 — 아니면 둘 다 0이다(「자막 확인됨」은
+    초록에서만 참이라 셀 까닭이 없고, 원본 자막을 한 번 더 읽지 않는다).
+    """
+
+    level: str
+    no_speech: frozenset[tuple[str, Fraction, Fraction]]
+    suspect_lines: int = 0
+    lines: int = 0
+
+
+def _timing_read(workspace: RawWorkspace, asset_id: str) -> _TimingRead | None:
+    """지금(엄격한 `is_current`) 보고서의 판정 · 「말소리를 못 찾음」 큐 · 초록이면 확인 필요 줄 몫.
+
+    없거나 낡았으면 None(모름)이다. 읽기만 한다 — 못 읽은 오류는 부른 쪽이 모름으로 바꾸고 경고한다.
+    """
+    from vlogsrt.project import sync_check
+    from vlogsrt.project.raw import sync_report
+
+    report = sync_report.current_report(workspace, asset_id, strict=True)
+    if report is None or report.get("stale"):
+        return None
+    level = str(report.get("verdict"))
+    judged = level in (sync_check.LEVEL_RED, sync_check.LEVEL_AMBER, sync_check.LEVEL_GREEN)
+    cues = (report.get("cues") or ()) if judged else ()
+    flagged = frozenset(
+        (str(cue["id"]), Fraction(str(cue["start"])), Fraction(str(cue["end"])))
+        for cue in cues
+        if sync_check.FLAG_NO_SPEECH in (cue.get("flags") or ())
+    )
+    if level != sync_check.LEVEL_GREEN:
+        return _TimingRead(level, flagged)
+    suspect_lines, lines = _suspect_share(workspace, asset_id, report)
+    return _TimingRead(level, flagged, suspect_lines, lines)
+
+
+def _suspect_share(
+    workspace: RawWorkspace, asset_id: str, report: Mapping[str, Any]
+) -> tuple[int, int]:
+    """(확인 필요 줄 수, 줄 수) — 보고서가 잰 바로 그 원본 자막 리비전에서, 화면의 「확인 필요」와
+    같은 부르기(`subtitle_cue_notes`)로 센다(D59 19e · D65). 리비전이 다르면 (0, 0) — 확인 안 됨.
+    """
+    from vlogsrt.project.raw import source_transcript
+
+    transcript = source_transcript.load(workspace, asset_id)
+    revision = report["source"]["transcript_revision"]
+    if transcript is None or str(transcript.get("revision")) != revision:
+        return 0, 0
+    notes = RawWorkspaceService.subtitle_cue_notes(transcript, report)
+    flagged = sum(1 for note in notes.values() if note.get("suspects"))
+    return flagged, len(transcript.get("utterances") or ())
 
 
 def _current_no_speech(sync_view: Mapping[str, Any] | None) -> frozenset[str]:

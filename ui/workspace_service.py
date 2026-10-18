@@ -5561,7 +5561,8 @@ class RawWorkspaceUi:
         """등급 구간 하나의 화면 값 — 자막·영상 판정을 따로 싣는다(W-11, D51).
 
         `caps`는 표가 추천이라 했지만 추천하지 않는 까닭의 말이다(최소 길이·자막 시각 빨강·
-        화면 문제, D60).
+        화면 문제, D60). `lift`는 「자막 확인됨」으로 추천한 구간의 근거 말이다(D65 — 없으면 칸이
+        없다).
         """
         audio = row.get("audio") or {}
         video = row.get("video") or {}
@@ -5575,6 +5576,8 @@ class RawWorkspaceUi:
             "rule": row.get("rule", ""),
             "reason": row["reason"],
             "caps": [str(cap.get("text", "")) for cap in row.get("caps") or ()],
+            # 「자막 확인됨」 근거가 있는 구간만 칸을 싣는다 — 없는 구간의 그리기 값은 v4 그대로다.
+            **({"lift": str(row["lift"])} if row.get("lift") else {}),
             "redReason": row.get("red_reason"),
             "audio": {
                 "status": audio.get("status", ""),

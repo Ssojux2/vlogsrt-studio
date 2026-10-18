@@ -126,7 +126,7 @@ TALK = "오늘은 계곡에 왔어요 물이 정말 맑네요"  # 16자 — 2–
 def test_v3_settings_are_the_published_values():
     validate_tier_settings(TIER_SETTINGS)
     validate_tier_settings(V2_RULES)  # 0은 「끔」이다 — 값역 안
-    assert TIER_SETTINGS.tier_version == "raw-tier/v4"
+    assert TIER_SETTINGS.tier_version == "raw-tier/v5"
     assert TIER_SETTINGS.same_text_run_min == 3
     assert TIER_SETTINGS.slow_filler_chars_per_second == 1.5
     assert TIER_SETTINGS.slow_filler_min_seconds == 2.0
@@ -510,7 +510,7 @@ def test_short_review_piece_next_to_green_does_not_inherit_recommended():
     recommendation, tags = tiering.segment_grade(report, *piece)
     assert recommendation == "normal" and tags[0] == "등급: 보통"
     assert "추천 제한: 3초보다 짧아 추천하지 않습니다" in tags
-    assert tags[-1] == "등급판 raw-tier/v4"
+    assert tags[-1] == "등급판 raw-tier/v5"
     assert tiering.segment_keyword(report, *piece) == "보통"
     # 녹색 안의 0.3초도, 2.99초도 보통이다 — 정확히 3초부터 추천이다.
     assert tiering.segment_keyword(report, F(5), F(53, 10)) == "보통"
@@ -624,7 +624,7 @@ def test_each_visual_issue_caps_green_at_yellow_with_a_reason(issue: str, label:
     recommendation, tags = tiering.segment_grade(report, F(1), F(14))
     assert recommendation == "normal" and tags[0] == "등급: 보통"
     assert f"추천 제한: {ISSUE_TEXT.format(label)}" in tags
-    assert tags[-1] == "등급판 raw-tier/v4"
+    assert tags[-1] == "등급판 raw-tier/v5"
     assert tiering.segment_keyword(report, F(1), F(14)) == "보통"
     assert layout(report)[1:] == layout(plain)[1:]
 

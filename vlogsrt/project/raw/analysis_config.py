@@ -358,7 +358,7 @@ class RawTierSettings:
     로컬 측정 값(공백 RMS·검은 화면 루마·흐림)은 사용자 지시로 지웠다(D52) — 측정 계층이
     없어졌으므로 기준도 없다. 앞의 넷은 D51 그대로다. 값이나 `tiering.py`의 규칙을 바꾸면
     `tier_version`을 올린다 — 옮기기는 이 표지로만 낡은 검토 머리를 안다(20a = v3 ·
-    20b-final = v4, D60).
+    20b-final = v4, D60 · W-25 a = v5, D65).
 
     추천 기준 강화(D60, 외부 근거 없는 조정 대상 — 바꾸면 D60에 근거를 남긴다):
 
@@ -369,9 +369,16 @@ class RawTierSettings:
       숫자 범주 낱자)가 초당 이보다 적은 발화는 느린 추임새로 보고 밀도에서 뺀다. 0이면 끈다.
     - `recommended_min_seconds`: 이보다 짧은 녹색 구간·검토 조각은 추천하지 않는다(보통까지). 0이면
       끈다.
+
+    자막이 확인된 영상(D65, 외부 근거 없는 조정 대상 — 바꾸면 D65에 근거를 남긴다):
+
+    - `subtitle_verified_suspect_share`: 지금 자막 리비전의 시각 확인이 초록인 영상에서
+      「확인 필요」(D59 19e) 표시가 붙은 원본 자막 줄의 몫이 이 값 **이하**면 「자막 확인됨」이다 —
+      그 영상의 `usable` × 발화 많음 칸이 추천이 된다. 0이면 의심 줄이 하나도 없어야 하고, 1이면
+      초록 판정만 본다.
     """
 
-    tier_version: str = "raw-tier/v4"
+    tier_version: str = "raw-tier/v5"
     silence_min_seconds: float = 5.0
     speech_handle_seconds: float = 0.3
     min_span_seconds: float = 1.0
@@ -380,6 +387,7 @@ class RawTierSettings:
     slow_filler_chars_per_second: float = 1.5
     slow_filler_min_seconds: float = 2.0
     recommended_min_seconds: float = 3.0
+    subtitle_verified_suspect_share: float = 0.10
 
 
 TIER_SETTINGS = RawTierSettings()
@@ -402,6 +410,7 @@ def tier_settings_problems(settings: RawTierSettings) -> list[str]:
         "느린 추임새 속도": settings.slow_filler_chars_per_second,
         "느린 추임새 길이": settings.slow_filler_min_seconds,
         "추천 최소 길이": settings.recommended_min_seconds,
+        "자막 확인 의심 줄 몫": settings.subtitle_verified_suspect_share,
     }
     problems = [
         f"{name}은 유한한 실수여야 한다: {value!r}"
@@ -432,6 +441,9 @@ def _tier_range_problems(settings: RawTierSettings) -> list[str]:
         problems.append("느린 추임새 속도는 0 이상, 길이는 양수여야 한다")
     if settings.recommended_min_seconds < 0:
         problems.append(f"추천 최소 길이는 0 이상이어야 한다: {settings.recommended_min_seconds!r}")
+    if not 0 <= settings.subtitle_verified_suspect_share <= 1:
+        share = settings.subtitle_verified_suspect_share
+        problems.append(f"자막 확인 의심 줄 몫은 [0, 1]이어야 한다: {share!r}")
     return problems
 
 

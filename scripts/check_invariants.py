@@ -940,6 +940,10 @@ TIER_TIMING_MODULE = "vlogsrt/project/raw/tiering.py"
 TIER_CLASSIFY_OWNER = "RawWorkspaceService._tier_report_for_row"
 TIER_TIMING_OWNER = "RawWorkspaceService._tier_timing"
 TIER_TIMING_NAMES = frozenset({"TimingSignals", "UNKNOWN_TIMING"})
+# D65 — 「자막 확인됨」은 그 값의 칸이다. 이름으로 만들지 않아도 받은 값을 고쳐(`replace(…,
+# subtitle_verified=True)`·`setattr` 글·`**{…}`·속성 쓰기) 추천을 올릴 수 있으므로, 칸을 채우는
+# 자리도 `_tier_timing` 하나뿐이다. 읽기(`timing.subtitle_verified`)는 막지 않는다.
+TIER_TIMING_FIELDS = frozenset({"subtitle_verified", "subtitle_suspect_lines", "subtitle_lines"})
 TIER_CLASSIFY_NAME = "classify"
 TIER_TIMING_ENTRY = "_tier_timing"
 # 등급 모듈이나 그 부르기를 글로 가리키는 꼴 — `getattr(tiering, "classify")`·
@@ -956,7 +960,8 @@ def check_tier_timing_only_from_service() -> list[str]:
     꼴): 등급 모듈의 별명(`import … as _t`·점 경로)을 따라 `classify`를 부르기·부르지 않고
     꺼내기·이름으로·`*`로 가져오기, 모듈을 다른 이름에 묶기, 그 이름을 쓴 글. 시각 확인 값
     (`TimingSignals`·`UNKNOWN_TIMING`)은 `_tier_timing`만 만들고, `_tier_timing`은
-    `_tier_report_for_row`만 읽는다.
+    `_tier_report_for_row`만 읽는다. 「자막 확인됨」의 칸(`TIER_TIMING_FIELDS`)도 `_tier_timing`만
+    채운다(D65).
     """
     failures: list[str] = []
     for source in [*_sources(), *sorted(UI_DIR.rglob("*.py"))]:
@@ -970,6 +975,7 @@ def check_tier_timing_only_from_service() -> list[str]:
             failures += _tier_classify_failures(rel, node, owner, aliases, sites)
             failures += _tier_timing_entry_failures(rel, node, owner)
             failures += _tier_timing_value_failures(rel, node, owner)
+            failures += _tier_timing_field_failures(rel, node, owner)
     return failures
 
 
@@ -1105,6 +1111,26 @@ def _tier_timing_value_failures(rel: str, node: ast.AST, owner: str | None) -> l
     return [
         f"{rel}:{getattr(node, 'lineno', 0)}: {', '.join(found)}를 {owner or '모듈 수준'}에서"
         f" 가리킨다 — 등급에 넘길 시각 확인 값은 {TIER_TIMING_OWNER}만 만든다 (D60)"
+    ]
+
+
+def _tier_timing_field_failures(rel: str, node: ast.AST, owner: str | None) -> list[str]:
+    """「자막 확인됨」의 칸을 채우는 자리 — 낱말 인자·속성 쓰기·글(`setattr`·`**{…}`)(D65)."""
+    if rel == TIER_TIMING_SERVICE and owner == TIER_TIMING_OWNER:
+        return []
+    found: str | None = None
+    if isinstance(node, ast.keyword) and node.arg in TIER_TIMING_FIELDS:
+        found = node.arg
+    elif isinstance(node, ast.Attribute) and isinstance(node.ctx, (ast.Store, ast.Del)):
+        found = node.attr if node.attr in TIER_TIMING_FIELDS else None
+    # 글 상수까지 막는 것은 일부러다 — `setattr(x, "…")`·`**{"…": …}`로 돌아 채우는 길을 닫는다.
+    elif isinstance(node, ast.Constant) and node.value in TIER_TIMING_FIELDS:
+        found = str(node.value)
+    if found is None:
+        return []
+    return [
+        f"{rel}:{getattr(node, 'lineno', 0)}: {found}를 {owner or '모듈 수준'}에서 채운다 —"
+        f" 「자막 확인됨」은 {TIER_TIMING_OWNER}만 만든다 (D65)"
     ]
 
 

@@ -17,9 +17,13 @@ AI 판정(Luna 창의 `annotations[]`·프레임 유무)과 생성 자막(`utter
   전사 실패 구간은 절대 무음이 아니고, 자막이 아직 없으면(진행 문서) 공백도 아니다.
 - **구간은 빈틈없이 덮는다.** 보고서의 구간은 `[0, extent]`를 겹침·틈 없이 타일한다.
 - **추천은 확인된 말로만(D60).** 같은 말 되풀이·느린 추임새는 밀도에서 뺀다 — 말이 있는지(빨강
-  판단)는 여전히 모든 발화로 본다. 시각 확인 값은 다 정한 구간 위에서 **녹색을 노랑으로 내릴 수만**
-  있다: 경계를 옮기지 않고 빨강을 만들거나 지우지 않는다. 판정이 적은 실제 화면 문제
-  (`visual_issues`, 알 수 없음은 빼고)도 같은 자리에서 녹색을 보통까지로만 내린다(D60 20b-final).
+  판단)는 여전히 모든 발화로 본다. 시각 확인 값은 다 정한 구간 위에서 **녹색을 노랑으로 내릴 수**
+  있다(올리는 칸은 아래 D65 하나뿐): 경계를 옮기지 않고 빨강을 만들거나 지우지 않는다.
+  판정이 적은 실제 화면 문제(`visual_issues`, 알 수 없음은 빼고)도 같은 자리에서 녹색을
+  보통까지로만 내린다(D60 20b-final).
+- **올리는 칸은 하나뿐이다(D65).** 서비스가 「자막 확인됨」(지금 리비전 확인이 초록 + 확인 필요 줄이
+  적다)을 넘기면 표의 `usable` × 발화 많음 칸 하나가 노랑 대신 녹색(`subtitle-verified`)이다. 빨강
+  칸보다 늦게 보므로 빨강·경계·자동 제외 후보는 그대로이고, 추천 제한은 그 뒤에 그대로 걸린다.
 """
 
 from __future__ import annotations
@@ -131,6 +135,8 @@ TIER_TAG_PREFIX = "등급: "
 AUDIO_TAG_PREFIX = "자막: "
 VIDEO_TAG_PREFIX = "영상: "
 CAP_TAG_PREFIX = "추천 제한: "
+LIFT_TAG_PREFIX = "추천 근거: "
+"""표가 「자막 확인됨」으로 추천한 까닭(D65) — 「추천 제한」과 짝인 등급 태그 묶음이다."""
 MARKER_PREFIX = "등급판 "
 LEGACY_GRADE_PREFIX = "Luna 평가: "
 GRADE_TAG_PREFIXES = (
@@ -139,6 +145,7 @@ GRADE_TAG_PREFIXES = (
     AUDIO_TAG_PREFIX,
     VIDEO_TAG_PREFIX,
     CAP_TAG_PREFIX,
+    LIFT_TAG_PREFIX,
     MARKER_PREFIX,
 )
 
@@ -147,6 +154,11 @@ GRADE_TAG_PREFIXES = (
 TIMING_RED = "red"
 """자막 시각 확인(D55) 빨강 판정의 값 — 등급은 확인 계층을 모르므로 값만 둔다(시험이
 `sync_check.LEVEL_RED`와 같음을 못 박는다)."""
+TIMING_GREEN = "green"
+"""초록 판정의 값 — 「자막 확인됨」(D65)의 첫 조건이다(시험이 `sync_check.LEVEL_GREEN`과 같음을
+못 박는다)."""
+RULE_SUBTITLE_VERIFIED = "subtitle-verified"
+"""「자막 확인됨」이 녹색으로 올린 칸(`usable` × 발화 많음)의 규칙 이름(D65)."""
 
 UNCONFIRMED_REPEAT = "repeat"
 UNCONFIRMED_SLOW = "slow_filler"
@@ -200,14 +212,36 @@ class TimingSignals:
     `no_speech`는 그 보고서가 「말소리를 못 찾음」으로 짚은 큐의 (아이디, 시작, 끝) — 공통 시계의
     정확 유리수. 분석 문서의 발화와 아이디·시작·끝이 **모두** 같은 줄에만 쓴다(다른 리비전의 줄은
     모름이다). 둘 다 녹색을 노랑으로 내릴 수만 있다.
+
+    `subtitle_verified`는 「자막 확인됨」(D65) — 초록 보고서 + 확인 필요 줄의 몫이 기준 이하
+    (`verified_subtitles`). 참일 때만 표의 `usable` × 발화 많음 칸을 녹색으로 올리고, 그때의 줄 수
+    (`subtitle_suspect_lines`/`subtitle_lines`)가 근거의 말에 실린다 — 참이 아니면 둘 다 0이다.
     """
 
     level: str | None = None
     no_speech: frozenset[tuple[str, Fraction, Fraction]] = frozenset()
+    subtitle_verified: bool = False
+    subtitle_suspect_lines: int = 0
+    subtitle_lines: int = 0
 
 
 UNKNOWN_TIMING = TimingSignals()
-"""시각 확인을 모른다 — 아무것도 내리지 않는다(보고서 없음·낡음·다른 리비전)."""
+"""시각 확인을 모른다 — 아무것도 내리지도 올리지도 않는다(보고서 없음·낡음·다른 리비전)."""
+
+
+def verified_subtitles(
+    level: str | None,
+    suspect_lines: int,
+    lines: int,
+    settings: RawTierSettings = TIER_SETTINGS,
+) -> bool:
+    """「자막 확인됨」(D65) — 판정이 초록이고, 확인 필요 줄의 몫이 기준 이하다(정확 유리수로 잰다).
+
+    줄이 없으면 확인할 자막도 없다(거짓). 값만 받는다 — 보고서·원본 자막은 서비스가 읽는다.
+    """
+    if level != TIMING_GREEN or lines < 1:
+        return False
+    return Fraction(suspect_lines, lines) <= Fraction(str(settings.subtitle_verified_suspect_share))
 
 
 @dataclass(frozen=True)
@@ -258,7 +292,8 @@ class TierSpan:
     """보고서의 구간 하나 — 두 판정과 표가 낸 등급을 함께 싣는다.
 
     `caps`는 표가 녹색이라 했지만 추천하지 않는 까닭(코드, 말)이다 — 최소 길이·자막 시각
-    빨강(D60). 그때 규칙(`rule`)은 표의 칸 그대로이고 등급만 노랑이다.
+    빨강(D60). 그때 규칙(`rule`)은 표의 칸 그대로이고 등급만 노랑이다. `lift`는 「자막 확인됨」이
+    녹색으로 올린 구간이 끝까지 녹색일 때만 붙는 근거의 말이다(D65).
     """
 
     start: Fraction
@@ -269,6 +304,7 @@ class TierSpan:
     video: VideoJudgment
     red_reason: str | None
     caps: tuple[tuple[str, str], ...] = ()
+    lift: str | None = None
 
     @property
     def hold(self) -> bool:
@@ -283,6 +319,8 @@ class TierSpan:
 
     def document(self) -> dict[str, object]:
         capped = "".join(f"{_REASON_SEPARATOR}{CAP_TAG_PREFIX}{text}" for _, text in self.caps)
+        if self.lift:
+            capped += f"{_REASON_SEPARATOR}{LIFT_TAG_PREFIX}{self.lift}"
         return {
             "start": _rational_json(self.start),
             "end": _rational_json(self.end),
@@ -293,6 +331,7 @@ class TierSpan:
             "recommendation": self.recommendation,
             "reason": f"자막: {self.audio.reason} · 영상: {self.video.reason}{capped}",
             "caps": [{"code": code, "text": text} for code, text in self.caps],
+            "lift": self.lift,
             "audio": self.audio.document(),
             "video": self.video.document(),
         }
@@ -862,16 +901,22 @@ def judge_video(evidence: SourceEvidence, start: Fraction, end: Fraction) -> Vid
 # ── 합치기 ───────────────────────────────────────────────────────────────
 
 
-def combine(audio: AudioJudgment, video: VideoJudgment) -> tuple[str, str, str | None]:
+def combine(
+    audio: AudioJudgment, video: VideoJudgment, *, subtitle_verified: bool = False
+) -> tuple[str, str, str | None]:
     """두 판정 → (등급, 규칙, 빨강 이유).
 
     빨강은 자막 없는 긴 공백 × Luna가 풍경으로 보지 않은 화면뿐이다. 풍경으로 본 화면이면
     말이 없어도 노랑이고(풍경 컷), Luna 판정이 없으면 보류다 — AI 근거 없이는 빨강이 없다.
+    「자막 확인됨」(`subtitle_verified`, D65)은 `usable` × 발화 많음 칸 하나만 녹색으로 올린다 —
+    빨강 칸을 먼저 보므로 빨강은 그 값과 무관하다.
     """
     if audio.status == AUDIO_SILENT and video.status in _SILENCE_RED_VIDEO:
         return TIER_RED, "silent-not-scenery", RED_SILENCE
     if video.status == VIDEO_GOOD and audio.status == AUDIO_SPEECH_DENSE:
         return TIER_GREEN, "both-good", None
+    if subtitle_verified and video.status == VIDEO_USABLE and audio.status == AUDIO_SPEECH_DENSE:
+        return TIER_GREEN, RULE_SUBTITLE_VERIFIED, None
     if video.status == VIDEO_GOOD and audio.status == AUDIO_ABSENT:
         return TIER_GREEN, "video-only-good", None
     return TIER_YELLOW, _yellow_rule(audio.status, video.status), None
@@ -891,10 +936,12 @@ def _yellow_rule(audio: str, video: str) -> str:
     return by_audio.get(audio, f"video-{video}")
 
 
-def _span(evidence: SourceEvidence, start: Fraction, end: Fraction) -> TierSpan:
+def _span(
+    evidence: SourceEvidence, start: Fraction, end: Fraction, timing: TimingSignals
+) -> TierSpan:
     audio = judge_audio(evidence, start, end)
     video = judge_video(evidence, start, end)
-    tier, rule, red = combine(audio, video)
+    tier, rule, red = combine(audio, video, subtitle_verified=timing.subtitle_verified)
     return TierSpan(start, end, tier, rule, audio, video, red)
 
 
@@ -1011,6 +1058,7 @@ def _measured_density(
     span: TierSpan,
     evidence: SourceEvidence,
     unconfirmed: Mapping[tuple[Fraction, Fraction, str], str],
+    timing: TimingSignals,
 ) -> TierSpan:
     """말소리 측정상 없는 줄을 녹색 구간의 밀도에서도 뺀다 — 녹색만, 경계는 그대로(D60).
 
@@ -1024,7 +1072,7 @@ def _measured_density(
         return span
     judged = _speech_judgment(cover, span.start, span.end, evidence.settings)
     audio = replace(judged, evidence=span.audio.evidence)
-    tier, rule, _ = combine(audio, span.video)
+    tier, rule, _ = combine(audio, span.video, subtitle_verified=timing.subtitle_verified)
     return replace(span, tier=tier, rule=rule, audio=audio)
 
 
@@ -1069,6 +1117,14 @@ def _span_issue_labels(
     return tuple(label for label in VISUAL_ISSUE_LABELS.values() if label in found)
 
 
+def _lifted(span: TierSpan, timing: TimingSignals) -> TierSpan:
+    """「자막 확인됨」이 올린 구간이 추천 제한을 지나 녹색으로 남았으면 근거의 말을 단다(D65)."""
+    if span.tier != TIER_GREEN or span.rule != RULE_SUBTITLE_VERIFIED:
+        return span
+    counts = f"{timing.subtitle_suspect_lines}/{timing.subtitle_lines}"
+    return replace(span, lift=f"자막 확인됨(시각 확인 초록 · 확인 필요 {counts}줄)")
+
+
 def _visual_issues_cap(labels: Sequence[str]) -> tuple[str, str]:
     return CAP_VISUAL_ISSUES, f"화면 문제({'·'.join(labels)})가 있어 보통까지만 추천합니다"
 
@@ -1088,17 +1144,18 @@ def classify(
     """저장된 분석 문서 → 등급 보고서. 결정적이고 설정을 함께 싣는다.
 
     로컬 측정(공백 RMS·프레임 화질)은 받지 않는다 — AI 판정과 생성 자막만이 재료다(D52). 자막
-    시각 확인 값(`timing`, D60)은 다 정한 구간 위에서 녹색을 노랑으로 내리는 데만 쓴다 — 구간
-    경계·빨강·자동 제외 후보는 그 값과 무관하다(서비스만 넘긴다, `check_invariants`).
+    시각 확인 값(`timing`, D60)은 다 정한 구간 위에서 녹색을 노랑으로 내리는 데 쓰고, 「자막
+    확인됨」(D65)일 때만 표의 `usable` × 발화 많음 칸을 녹색으로 올린다 — 구간 경계·빨강·자동
+    제외 후보는 그 값과 무관하다(서비스만 넘긴다, `check_invariants`).
     """
     validate_tier_settings(settings)
     evidence = evidence_of(document, settings=settings, audio_start=audio_start)
     points = atomic_boundaries(document, settings, audio_start=audio_start)
-    spans = [_span(evidence, a, b) for a, b in zip(points, points[1:], strict=False)]
+    spans = [_span(evidence, a, b, timing) for a, b in zip(points, points[1:], strict=False)]
     spans = _merge(_absorb(_merge(spans, settings), settings), settings)
     measured = _with_measured(evidence.unconfirmed, evidence.speech, timing)
-    spans = [_measured_density(span, evidence, measured) for span in spans]
-    spans = [_capped(span, settings, timing, evidence) for span in spans]
+    spans = [_measured_density(span, evidence, measured, timing) for span in spans]
+    spans = [_lifted(_capped(span, settings, timing, evidence), timing) for span in spans]
     _require_tiling(spans, evidence.extent)
     return TierReport(
         tier_version=settings.tier_version,
@@ -1153,6 +1210,7 @@ class _SegmentTier:
     rows: list[TierSpan]
     tier: str
     caps: tuple[tuple[str, str], ...]
+    lifts: tuple[str, ...] = ()
 
 
 def _segment_tier(report: TierReport, start: Fraction, end: Fraction) -> _SegmentTier:
@@ -1171,7 +1229,8 @@ def _segment_tier(report: TierReport, start: Fraction, end: Fraction) -> _Segmen
     if rows and tiers == {TIER_GREEN}:
         if end - start < Fraction(str(report.settings.recommended_min_seconds)):
             return _SegmentTier(rows, TIER_YELLOW, (_too_short_cap(report.settings),))
-        return _SegmentTier(rows, TIER_GREEN, caps)
+        lifts = _dedupe([span.lift for span in rows if span.lift])
+        return _SegmentTier(rows, TIER_GREEN, caps, lifts)
     return _SegmentTier(rows, TIER_RED if tiers == {TIER_RED} else TIER_YELLOW, caps)
 
 
@@ -1194,7 +1253,8 @@ def segment_grade(
     """검토 조각 하나의 권고와 등급 태그 — 권고는 닫힌 집합(recommended/normal/review_required).
 
     볼 구간과 등급은 `_segment_tier`가 정한다(`segment_keyword`와 한 규칙). 추천하지 않는 까닭이
-    있으면 `추천 제한: …` 태그로 단다(「분석 근거」에 보인다, D60).
+    있으면 `추천 제한: …` 태그로 단다(「분석 근거」에 보인다, D60). 「자막 확인됨」으로 추천한
+    조각은 `추천 근거: …` 태그를 단다(D65).
     """
     judged = _segment_tier(report, start, end)
     rows, tier = judged.rows, judged.tier
@@ -1210,6 +1270,7 @@ def segment_grade(
         AUDIO_TAG_PREFIX + audio,
         VIDEO_TAG_PREFIX + video,
         *(CAP_TAG_PREFIX + text for _, text in judged.caps),
+        *(LIFT_TAG_PREFIX + text for text in judged.lifts),
         MARKER_PREFIX + report.tier_version,
     )
 
