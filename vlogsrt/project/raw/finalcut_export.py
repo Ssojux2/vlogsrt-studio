@@ -158,7 +158,21 @@ class _Grid:
     frame_count: int
     deviation_frames: Fraction = Fraction(0)
     """맞춘 원본(D69)의 최대 어긋남을 프레임으로 — 머리 정보·라이브러리 선언 길이가 명목 프레임
-    수에서 이만큼 벗어날 수 있다. 균일 원본은 0이라 예전처럼 정확히 같아야 한다."""
+    수에서 이만큼 벗어날 수 있다. 균일 원본은 0이라 예전처럼 정확히 같아야 한다. map 원본(D70)은
+    한 프레임 미만(`(T−1)/T` — 틱 단위 차이라 1프레임에 닿지 않는다)이다(`_grid_tolerance`)."""
+
+
+def _grid_tolerance(clock: preprocess.RawVideoClock) -> Fraction:
+    """머리 정보·라이브러리 선언 길이가 명목 프레임 수에서 벗어날 수 있는 몫(프레임).
+
+    snap(D69)은 잰 최대 어긋남까지(반 프레임 미만). map(D70)은 명목 수가 마지막 패킷의 슬롯에서
+    오므로 선언 끝(마지막 패킷 + 마지막 간격)과 한 프레임 안에서 갈린다(실측 0.2–0.5프레임) — 한
+    프레임 미만까지 받는다. 한 프레임 이상이면 Final Cut이 다른 프레임 수를 본다. 균일은 0.
+    """
+    if clock.conform_kind == "map":
+        ticks = clock.frame_duration / clock.time_base
+        return (ticks - 1) / ticks
+    return clock.max_deviation_ticks * clock.time_base / clock.frame_duration
 
 
 def _refuse(asset: SourceAsset, reason: str) -> FinalCutExportError:
@@ -354,7 +368,7 @@ def _measured_grid(
     """검토 머리 밖 원본의 격자 — 패킷을 훑어 잰 것만 믿는다. VFR은 프레임 수가 길이가 아니다."""
     if not clock.uniform_grid:
         raise _UnsupportedGrid(asset, clock.grid_note or "")
-    deviation = clock.max_deviation_ticks * clock.time_base / clock.frame_duration
+    deviation = _grid_tolerance(clock)
     _require_plain_timeline(
         asset, clock.first_pts, clock.frame_count, clock.frame_duration, probe, deviation
     )
@@ -375,7 +389,8 @@ def _require_plain_timeline(
     짧다. Final Cut은 머리 정보 쪽(0부터·짧은 길이)으로 보므로 그대로 보내면 모든 컷이 그만큼
     밀린다. 검토를 다시 세워도 같은 시계를 재므로 고칠 곳은 파일이다. 맞춘 원본(D69)의 머리
     정보는 마지막 패킷의 어긋남만큼 명목 길이와 다르다(실측 0–6틱) — 그 몫(`deviation_frames`,
-    반 프레임 미만)까지만 받는다. 편집 목록이 자른 길이는 프레임 단위라 이 몫에 숨지 못한다.
+    반 프레임 미만)까지만 받는다. 편집 목록이 자른 길이는 프레임 단위라 이 몫에 숨지 못한다. map
+    원본(D70)의 몫은 한 프레임 미만이다 — 한 프레임 자른 편집 목록은 첫 프레임 원점으로도 잡힌다.
     """
     header = _header_frames(probe, frame_duration)
     if origin_pts >= 0 and (header is None or abs(header - frames) <= deviation_frames):
@@ -405,7 +420,8 @@ def _review_grid(
     머리의 0프레임이 원본 첫 프레임이다(머리를 세울 때 첫 패킷 pts를 원점으로 쟀다). 지금
     선언과의 대조는 값싼 머리 정보로만 한다: 스트림 timebase와 프레임 레이트. 머리 정보의
     길이가 명목 프레임 수와 다를 때만 패킷을 훑어 맞춘 원본(D69)의 어긋남을 잰다 — 균일
-    원본은 예전처럼 다시 훑지 않는다.
+    원본은 예전처럼 다시 훑지 않는다. 선언 r_frame_rate가 검토 시계의 프레임 길이와 다르면(D70 —
+    명목 T를 패킷 간격에서 다시 골랐다) 그때도 다시 재어 같은 길이인지 본다.
     """
     if review.source_sha256 != asset.content_sha256:
         raise _refuse(asset, "검토 머리가 다른 원본 내용에 묶여 있다 — 검토를 다시 세우세요")
@@ -413,6 +429,12 @@ def _review_grid(
     frames = Fraction(ticks, review.frame_ticks)
     duration = review.frame_ticks * review.time_base
     declared = (probe.video.time_base, 1 / probe.video.r_frame_rate)
+    clock = None
+    if frames.denominator == 1 and review.time_base == declared[0] and duration != declared[1]:
+        clock = preprocess.probe_extraction_clock(path, probe=probe)
+        # 다시 고른 명목(D70)은 맞춘 시계(snap·map)에서만 나온다 — 균일 시계라면 어긋남이다.
+        remapped = clock.uniform_grid and clock.conform_kind != "uniform"
+        declared = (clock.time_base, clock.frame_duration) if remapped else declared
     if frames.denominator != 1 or (review.time_base, duration) != declared:
         raise _refuse(
             asset,
@@ -421,8 +443,8 @@ def _review_grid(
         )
     deviation = Fraction(0)
     if _header_frames(probe, duration) not in (None, frames):
-        clock = preprocess.probe_extraction_clock(path, probe=probe)
-        deviation = clock.max_deviation_ticks * clock.time_base / clock.frame_duration
+        clock = clock or preprocess.probe_extraction_clock(path, probe=probe)
+        deviation = _grid_tolerance(clock)
     _require_plain_timeline(asset, review.origin_pts, frames.numerator, duration, probe, deviation)
     return _Grid(duration, frames.numerator, deviation)
 

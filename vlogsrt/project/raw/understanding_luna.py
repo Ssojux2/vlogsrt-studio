@@ -35,6 +35,7 @@ from fractions import Fraction
 from types import MappingProxyType
 from typing import Any, Protocol
 
+from vlogsrt.preprocess import GRID_CONFORM_TAG
 from vlogsrt.project.raw import request_log
 from vlogsrt.project.raw.analysis_config import (
     UNDERSTANDING_SCHEMA_VERSION,
@@ -1305,6 +1306,7 @@ def visual_analysis_fingerprint(
         LUNA_OUTPUT_SCHEMA_NAME,
         luna_model,
     ]
+    parts += _grid_conform_parts(video)
     for window in plan.windows:
         parts.append(
             f"{window.window_id}:{window.core_start.numerator}/{window.core_start.denominator}"
@@ -1314,6 +1316,11 @@ def visual_analysis_fingerprint(
     for candidate in plan.candidates:
         parts.append(f"{candidate.boundary_id}:{candidate.kind}:{candidate.tick}")
     return hashlib.sha256("\0".join(parts).encode("utf-8")).hexdigest()
+
+
+def _grid_conform_parts(video: VideoGrid | None) -> list[str]:
+    """map 원본(D70)의 프레임 번호는 슬롯이고 보이는 패킷은 규칙이 고른다 — 판을 싣는다."""
+    return [GRID_CONFORM_TAG] if video is not None and video.slot_packets else []
 
 
 def online_env_blocked() -> str | None:
@@ -1771,6 +1778,7 @@ def analysis_fingerprint(
         asr_model,
         luna_model,
     ]
+    parts += _grid_conform_parts(plan.video)
     for window in plan.windows:
         parts.append(
             f"{window.window_id}:{window.core_start.numerator}/{window.core_start.denominator}"

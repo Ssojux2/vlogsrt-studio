@@ -5725,6 +5725,7 @@ def _planned_sources(
         if not facts.clock.uniform_grid:
             result.unsupported.append(_unsupported_source(asset, order_entry.ordinal, facts.clock))
             continue
+        visual_review.note_grid_conform(workspace.root, asset.content_sha256 or "", facts.clock)
         spans, proof = segmentation.plan_segments(
             asset_id=asset.asset_id,
             batch_dir=order_entry.batch_dir,
@@ -5755,9 +5756,13 @@ def _planned_sources(
 def _plan_fingerprint_inputs(
     asset: SourceAsset, facts: _MeasuredSource, spans: Sequence[SegmentPlanEntry]
 ) -> dict[str, object]:
-    """계획 지문의 원본별 재료 — 내용 해시·시계·선택된 경계 틱(§14.2)."""
+    """계획 지문의 원본별 재료 — 내용 해시·시계·선택된 경계 틱(§14.2).
+
+    map 원본(D70)만 맞춤 규칙 판(`grid_conform`)을 더 싣는다 — 같은 원본이라도 규칙이 바뀌면
+    슬롯이 보이는 프레임(추출물)이 바뀐다. 균일·snap 원본은 칸이 없다(지문 바이트 그대로).
+    """
     clock = facts.clock
-    return {
+    material: dict[str, object] = {
         "content_sha256": asset.content_sha256,
         "time_base": f"{clock.time_base.numerator}/{clock.time_base.denominator}",
         "origin_pts": clock.first_pts,
@@ -5765,6 +5770,9 @@ def _plan_fingerprint_inputs(
         "frame_duration": str(clock.frame_duration),
         "boundaries": [span.core_start_pts for span in spans] + [spans[-1].core_end_pts],
     }
+    if clock.conform_kind == "map":
+        material["grid_conform"] = preprocess.GRID_CONFORM_TAG
+    return material
 
 
 def _validated_handles(before: Fraction, after: Fraction) -> preprocess.RawClipHandles:

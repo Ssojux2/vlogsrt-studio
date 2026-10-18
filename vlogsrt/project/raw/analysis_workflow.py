@@ -546,7 +546,12 @@ def source_input_fingerprint(
         workflow.models.timing_model,
         workflow.models.luna_model,
     ]
-    return _input_digest(parts, asr_epoch, cross_check_tag)
+    return _input_digest(parts + _grid_conform_parts(video), asr_epoch, cross_check_tag)
+
+
+def _grid_conform_parts(video: VideoGrid) -> list[str]:
+    """map 원본(D70)의 프레임 표본은 맞춤 규칙이 고른 패킷이다 — 규칙 판을 묶는다(그 밖은 없음)."""
+    return [preprocess.GRID_CONFORM_TAG] if video.slot_packets else []
 
 
 def _current_input(
@@ -1057,6 +1062,7 @@ def _analyze_source(
         presentation_origin=clock.presentation_origin,
         frame_duration=clock.frame_duration,
         frame_count=clock.frame_count,
+        slot_packets=clock.slot_packets,
     )
     source_dir = (
         workspace.root
@@ -1141,9 +1147,11 @@ def _analyze_source(
         plan,
         directory=source_dir / "frames",
         settings=settings,
-        sampler=media_refs.frame_sampler(workspace, asset),
+        sampler=media_refs.frame_sampler(workspace, asset, slot_packets=grid.slot_packets),
     )
-    frame_source = media_refs.frames_fingerprint(workspace, asset.asset_id)
+    frame_source = media_refs.frames_fingerprint(
+        workspace, asset.asset_id, mapped=bool(grid.slot_packets)
+    )
     return _finish_source(
         context,
         workspace,
@@ -1491,11 +1499,13 @@ def _asr_phase_source(
         plan,
         directory=source_dir / "frames",
         settings=settings,
-        sampler=media_refs.frame_sampler(workspace, asset),
+        sampler=media_refs.frame_sampler(workspace, asset, slot_packets=grid.slot_packets),
     )
     semantic_fp = _semantic_fingerprint(asset, grid, audio, plan, settings, workflow)
     # 2단계가 장면 컷을 같은 출처에서 다시 재도록 남긴다 — 출처가 바뀌면 실측 지문이 어긋난다.
-    frame_source = media_refs.frames_fingerprint(workspace, asset.asset_id)
+    frame_source = media_refs.frames_fingerprint(
+        workspace, asset.asset_id, mapped=bool(grid.slot_packets)
+    )
     _write_json_atomic(
         artifact_path,
         {
@@ -2555,16 +2565,19 @@ def _scene_cache(workspace: RawWorkspace, asset: SourceAsset, frame_source: str)
 
 
 def _scene_times(
-    workspace: RawWorkspace, asset: SourceAsset, frame_source: str | None
+    workspace: RawWorkspace, asset: SourceAsset, frame_source: str | None, mapped: bool
 ) -> tuple[Fraction, ...]:
     """디코드 출처마다 따로 캐시한 장면 컷 — 기록된 출처가 있으면 그 출처를 따른다.
 
-    2단계는 1단계가 잰 출처를 넘긴다. 캐시가 있으면 프록시를 만들러 가지도 않는다.
+    2단계는 1단계가 잰 출처를 넘긴다. 캐시가 있으면 프록시를 만들러 가지도 않는다. `mapped`(map
+    시계, D70)면 출처가 맞춤 규칙 판을 싣는다 — 컷이 놓이는 슬롯이 규칙에서 나온다.
     """
     if frame_source is not None and _scene_cache(workspace, asset, frame_source).is_file():
         cache = _scene_cache(workspace, asset, frame_source)
     else:
-        decode_source, actual = media_refs.frames_decode_source(workspace, asset, frame_source)
+        decode_source, actual = media_refs.frames_decode_source(
+            workspace, asset, frame_source, mapped=mapped
+        )
         cache = _scene_cache(workspace, asset, actual)
         if not cache.is_file():
             limit = ANALYSIS_PROXY_LIMITS.frame_batch_timeout(asset.duration_seconds)
@@ -2582,7 +2595,7 @@ def _scene_plan(
 ) -> WindowPlan:
     """Cache decoded cuts and attach only measured boundaries, retaining request image ceilings."""
     assert plan.video is not None
-    times = _scene_times(workspace, asset, frame_source)
+    times = _scene_times(workspace, asset, frame_source, bool(plan.video.slot_packets))
     candidates = list(plan.candidates)
     windows = []
     for window in plan.windows:

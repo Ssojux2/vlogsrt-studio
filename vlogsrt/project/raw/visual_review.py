@@ -422,13 +422,30 @@ def preview_media_key(source_sha256: str, audio_ordinal: int | None) -> str:
     return hashlib.sha256(material.encode("utf-8")).hexdigest()[:24]
 
 
-def thumbnail_media_key(source_sha256: str, frame_index: int) -> str:
-    """썸네일의 캐시 키 — 원본 해시·영상 서수·프레임 번호·조리법(§14.2)."""
+def thumbnail_media_key(source_sha256: str, frame_index: int, *, mapped: bool = False) -> str:
+    """썸네일의 캐시 키 — 원본 해시·영상 서수·프레임 번호·조리법(§14.2).
+
+    `mapped`(map 시계, D70)면 프레임 번호는 슬롯이고 보이는 패킷은 맞춤 규칙이 고른다 — 규칙 판
+    (`preprocess.GRID_CONFORM_TAG`)을 재료에 얹는다. 균일·snap은 예전 재료 그대로다.
+    """
     material = (
         f"{source_sha256}|v{VISUAL_VIDEO_ORDINAL}|f{frame_index}"
         f"|{VISUAL_THUMB_RECIPE}|e{VISUAL_THUMB_LONG_EDGE}"
     )
+    if mapped:
+        material += f"|{preprocess.GRID_CONFORM_TAG}"
     return hashlib.sha256(material.encode("utf-8")).hexdigest()[:24]
+
+
+def _thumb_key(workspace: RawWorkspace, source_sha256: str, frame_index: int) -> str:
+    """질의(읽기)가 쓰는 썸네일 키 — map 여부는 준비가 잰 조사 기록에서 읽는다(ffprobe 없음).
+
+    기록이 없으면(첫 준비 전·정리 뒤) 맞춤 꼬리 없는 키다 — map 원본의 썸네일은 그 키로 만든
+    적이 없으므로(D70 전에는 지원 밖) 없음으로 보이고, 다음 준비가 기록과 함께 다시 잇는다.
+    """
+    return thumbnail_media_key(
+        source_sha256, frame_index, mapped=_inventory_mapped(workspace, source_sha256)
+    )
 
 
 def preparation_fingerprint(base_plan_id: str, page: int, selection_material: str = "") -> str:
@@ -562,32 +579,45 @@ def _write_inventory(
     source_id: str,
     source_sha256: str,
     audio: Sequence[preprocess.RawAudioTrack],
+    grid_conform: str | None = None,
 ) -> None:
     """원본의 소리 트랙 목록 기록 — 준비가 조사할 때마다 남긴다(질의는 읽기만).
+
+    map 원본(D70)이면 맞춤 규칙 판(`grid_conform`)도 남긴다 — 질의가 ffprobe 없이 썸네일 키를
+    맞춘다(`_thumb_key`). 균일·snap 원본은 칸이 없다.
 
     이 목록이 화면의 선택기를 채운다. 질의가 ffprobe을 돌리지 않으므로 목록은
     **준비가 잰 조사**에서만 온다 — 첫 준비 전에는 비어 있는 게 정직한 값이다.
     `previews/`는 정리 대상이므로 이 기록도 지워질 수 있고, 다음 준비가 다시 쓴다.
     """
-    _write_record(
-        workspace.root / _inventory_relative(source_sha256),
-        {
-            "schema": VISUAL_INVENTORY_RECIPE,
-            "source_id": source_id,
-            "source_sha256": source_sha256,
-            "audio": [
-                {
-                    "ordinal": ordinal,
-                    "stream_index": track.stream_index,
-                    "codec_name": track.codec_name,
-                    "channels": track.channels,
-                    "sample_rate": track.sample_rate,
-                }
-                for ordinal, track in enumerate(audio)
-            ],
-            "built_at": _now(),
-        },
+    record: dict[str, object] = {
+        "schema": VISUAL_INVENTORY_RECIPE,
+        "source_id": source_id,
+        "source_sha256": source_sha256,
+        "audio": [
+            {
+                "ordinal": ordinal,
+                "stream_index": track.stream_index,
+                "codec_name": track.codec_name,
+                "channels": track.channels,
+                "sample_rate": track.sample_rate,
+            }
+            for ordinal, track in enumerate(audio)
+        ],
+        "built_at": _now(),
+    }
+    if grid_conform is not None:
+        record["grid_conform"] = grid_conform
+    _write_record(workspace.root / _inventory_relative(source_sha256), record)
+
+
+def _inventory_mapped(workspace: RawWorkspace, source_sha256: str) -> bool:
+    """조사 기록이 지금 판의 map 원본이라고 말하는가 — 다른 판·없음은 거짓."""
+    record = read_scope.memo(
+        ("visual_review.inventory", str(workspace.root), source_sha256),
+        lambda: _read_record(workspace.root / _inventory_relative(source_sha256)),
     )
+    return _record_str(record, "grid_conform") == preprocess.GRID_CONFORM_TAG
 
 
 def _read_inventory(workspace: RawWorkspace, source_sha256: str) -> tuple[VisualAudioTrack, ...]:
@@ -1175,7 +1205,8 @@ def _card_thumb(
         if segment.source_id != card.source_id:
             continue
         frame_index, _, _ = _snapped_fields(clock, segment.start_pts, segment.end_pts)
-        found = _drawable_thumb_id(workspace, thumbnail_media_key(clock.source_sha256, frame_index))
+        key = _thumb_key(workspace, clock.source_sha256, frame_index)
+        found = _drawable_thumb_id(workspace, key)
         if found is not None:
             return found
     return None
@@ -1257,7 +1288,7 @@ def _segment_card(
     segment = ordered[position]
     clock = _required_clock(revision, segment.source_id)
     frame_index, snapped_pts, seconds = _snapped_fields(clock, segment.start_pts, segment.end_pts)
-    key = thumbnail_media_key(clock.source_sha256, frame_index)
+    key = _thumb_key(workspace, clock.source_sha256, frame_index)
     fingerprint_active = (
         preparation_fingerprint(revision.base_plan_id, _page_of(position)) in fingerprints
         or clock.source_sha256 in claimed  # 원본 미리보기 작업이 맡은 원본의 썸네일(D62)
@@ -1377,6 +1408,8 @@ class _SourceSelection:
     audio_stream_index: int | None
     job_id: str | None = None
     """이 준비를 도는 작업 — 'preparing' 기록이 그 작업에 묶인다(D62)."""
+    slot_packets: tuple[int, ...] = ()
+    """디코드할 파일이 map 시계(D70)면 슬롯 → 패킷 순번 — 썸네일 번호는 슬롯이다."""
 
 
 def run_page_preparation(
@@ -1487,7 +1520,7 @@ def source_preparation_missing(
         if segment.source_id != source_id:
             continue
         frame_index, _, _ = _snapped_fields(clock, segment.start_pts, segment.end_pts)
-        key = thumbnail_media_key(clock.source_sha256, frame_index)
+        key = _thumb_key(workspace, clock.source_sha256, frame_index)
         missing += not (workspace.root / _thumb_relative(key)).is_file()
     return missing
 
@@ -1515,7 +1548,7 @@ def representative_thumbs_missing(
     for source_id, segment in _first_cuts(revision).items():
         clock = _required_clock(revision, source_id)
         frame_index, _, _ = _snapped_fields(clock, segment.start_pts, segment.end_pts)
-        key = thumbnail_media_key(clock.source_sha256, frame_index)
+        key = _thumb_key(workspace, clock.source_sha256, frame_index)
         if _drawable_thumb_id(workspace, key) is None:
             missing.append((source_id, key))
     return tuple(missing)
@@ -1706,7 +1739,9 @@ def _select_source(
 
     path = resolve(workspace, asset, "preview")
     probe = preprocess.probe_raw_media(path)
-    _write_inventory(workspace, source_id, clock.source_sha256, probe.audio)
+    slots = _decode_slots(workspace, clock.source_sha256, path, probe)
+    tag = preprocess.GRID_CONFORM_TAG if slots else None
+    _write_inventory(workspace, source_id, clock.source_sha256, probe.audio, tag)
     if not explicit:
         audio_ordinal: int | None = 0 if probe.audio else None
         chosen = probe.audio[0] if probe.audio else None
@@ -1730,7 +1765,64 @@ def _select_source(
         audio_ordinal=audio_ordinal,
         audio_stream_index=chosen.stream_index if chosen is not None else None,
         job_id=job_id,
+        slot_packets=slots,
     )
+
+
+GRID_MARKER_DIRNAME = "cache/grid-conform"
+"""원본 내용마다 맞춤 갈래의 표지(D70) — 계획이 잰 시계에서 남긴다. 내용 해시와 규칙 판에 묶여 늘
+참이고, 지워지면(캐시 정리) 다음 준비가 한 번 다시 잰다."""
+GRID_MARKER_SCHEMA = "grid-conform-marker/v1"
+
+
+def _grid_marker(root: Path, source_sha256: str) -> Path:
+    return root / GRID_MARKER_DIRNAME / f"{source_sha256}.json"
+
+
+def note_grid_conform(root: Path, source_sha256: str, clock: preprocess.RawVideoClock) -> None:
+    """원본 시계가 map인지 남긴다 — 준비가 map이 아닌 원본의 패킷을 다시 훑지 않게(D70).
+
+    격자를 증명하지 못한 시계는 남기지 않는다(검토 머리에 들지 못한다). 같은 표지면 쓰지 않는다.
+    """
+    if not clock.uniform_grid:
+        return
+    payload: dict[str, object] = {
+        "schema": GRID_MARKER_SCHEMA,
+        "rule": preprocess.GRID_CONFORM_TAG,
+        "source_sha256": source_sha256,
+        "mapped": clock.conform_kind == "map",
+    }
+    target = _grid_marker(root, source_sha256)
+    if _read_record(target) != payload:
+        _write_record(target, payload)
+
+
+def _marked_unmapped(root: Path, source_sha256: str) -> bool:
+    """지금 규칙 판의 표지가 「map 아님」인가 — 표지가 없거나 다른 판이면 거짓(다시 잰다)."""
+    record = _read_record(_grid_marker(root, source_sha256))
+    return (
+        record is not None
+        and record.get("schema") == GRID_MARKER_SCHEMA
+        and record.get("rule") == preprocess.GRID_CONFORM_TAG
+        and record.get("mapped") is False
+    )
+
+
+def _decode_slots(
+    workspace: RawWorkspace, source_sha256: str, path: Path, probe: preprocess.RawMediaProbe
+) -> tuple[int, ...]:
+    """디코드할 파일의 map 대응(D70) — 균일·snap은 빈 튜플이고 패킷을 훑지 않는다.
+
+    계획이 남긴 표지(`note_grid_conform`)가 「map 아님」이면 그대로 돌아간다 — 균일·snap 원본의
+    준비는 D70 앞과 같은 ffprobe만 돈다. map이거나 표지가 없으면(D70 앞에 세운 머리) 이 파일의
+    시계를 재고 표지를 남긴다. 디코드할 파일은 원본이거나 같은 대응으로 검증된 프록시다
+    (`media_refs._lattice_rejection`).
+    """
+    if _marked_unmapped(workspace.root, source_sha256):
+        return ()
+    clock = preprocess.probe_extraction_clock(path, probe=probe)
+    note_grid_conform(workspace.root, source_sha256, clock)
+    return clock.slot_packets if clock.uniform_grid else ()
 
 
 def _verify_source_unchanged(workspace: RawWorkspace, asset: object, path: Path) -> None:
@@ -1785,7 +1877,8 @@ def _prepare_thumb(
     """
     clock = _required_clock(revision, segment.source_id)
     frame_index, _, _ = _snapped_fields(clock, segment.start_pts, segment.end_pts)
-    key = thumbnail_media_key(selection.source_sha256, frame_index)
+    mapped = bool(selection.slot_packets)
+    key = thumbnail_media_key(selection.source_sha256, frame_index, mapped=mapped)
     relative = _thumb_relative(key)
     target = workspace.root / relative
     if target.is_file():
@@ -1807,6 +1900,7 @@ def _prepare_thumb(
                 long_edge=VISUAL_THUMB_LONG_EDGE,
                 seek=seek,
                 priority=REVIEW_MEDIA.process_niceness,
+                slot_packets=selection.slot_packets,
             )
         _publish(staged, target)
     except RuntimeError as error:

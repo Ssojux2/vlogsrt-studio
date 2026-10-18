@@ -1610,8 +1610,13 @@ def extract_frame_index(
     long_edge: int,
     seek: FrameSeekPlan | None = None,
     priority: int | None = None,
+    slot_packets: Sequence[int] = (),
 ) -> Path:
     """정확히 한 프레임을 이미지로 뽑는다 — 전역 스트림 번호와 디코드 프레임 번호로.
+
+    `slot_packets`(map 시계, D70)가 있으면 `frame_index`는 슬롯이고 그 슬롯이 보이는 패킷
+    순번을 뽑는다 — 빈 슬롯은 앞 프레임과 같은 바이트다. 빠른 길의 증명은 엄격한 균일 격자라
+    map에는 없다(처음부터 디코드).
 
     기본은 `select=eq(n,번호)`로 디코드 출력(=제시 순서)의 프레임 번호를 직접 고른다 —
     스트림 처음부터 디코드하므로 번호에 비례해 느리다(4K HEVC 썸네일 24장에 30분 넘게, D62).
@@ -1629,6 +1634,8 @@ def extract_frame_index(
     _require_index(frame_index, "프레임 번호")
     if isinstance(long_edge, bool) or not isinstance(long_edge, int) or long_edge <= 0:
         raise RuntimeError(f"long_edge는 양수 정수여야 합니다: {long_edge!r}")
+    if slot_packets:
+        frame_index, seek = _slot_ordinal(slot_packets, frame_index), None
     ffmpeg = require_ffmpeg()
     destination.parent.mkdir(parents=True, exist_ok=True)
     if seek is not None and seek.stream_index == stream_index and frame_index < seek.frame_count:
@@ -1648,6 +1655,13 @@ def extract_frame_index(
         raise RuntimeError(f"프레임 이미지가 남지 않았습니다: {destination}")
     log.debug(f"프레임 추출 완료: {destination} (스트림 {stream_index}, 프레임 {frame_index})")
     return destination
+
+
+def _slot_ordinal(slot_packets: Sequence[int], slot: int) -> int:
+    """map 시계의 슬롯 → 그 슬롯이 보이는 패킷의 제시 순번(D70)."""
+    if slot >= len(slot_packets):
+        raise RuntimeError(f"슬롯 {slot}이 map 밖입니다(슬롯 {len(slot_packets)}칸)")
+    return slot_packets[slot]
 
 
 def _seek_frame_command(
@@ -1688,8 +1702,13 @@ def extract_frame_indices(
     long_edge: int,
     timeout_seconds: float,
     on_frame: Callable[[int, Path], None] | None = None,
+    slot_packets: Sequence[int] = (),
 ) -> dict[int, Path]:
     """Decode once in presentation order and publish only completed JPEGs.
+
+    `slot_packets`(map 시계, D70)가 있으면 번호는 슬롯이다 — 보이는 패킷 순번마다 한 번 디코드해
+    그 슬롯들의 `frame_{슬롯}.jpg`로 게시한다(빈 슬롯은 앞 프레임과 같은 바이트, `on_frame`도
+    슬롯마다).
 
     Source decode indices remain exact; no approximate timestamp seeking is used.
     image2 atomic_writing prevents progress polling from publishing partial files.
@@ -1703,6 +1722,9 @@ def extract_frame_indices(
         _require_index(index, "프레임 번호")
     if isinstance(long_edge, bool) or not isinstance(long_edge, int) or long_edge <= 0:
         raise RuntimeError("long_edge는 양수 정수여야 합니다")
+    if slot_packets:
+        batch = (source, stream_index, frame_indices, directory, slot_packets)
+        return _extract_slot_frames(*batch, long_edge, timeout_seconds, on_frame)
     indices = sorted(set(frame_indices))
     if not indices:
         return {}
@@ -1774,6 +1796,46 @@ def extract_frame_indices(
         publish_ready()
         if len(published) != len(indices):
             raise RuntimeError(f"프레임 묶음이 완전하지 않습니다: {len(published)}/{len(indices)}")
+    return published
+
+
+def _extract_slot_frames(
+    source: Path,
+    stream_index: int,
+    slots: Sequence[int],
+    directory: Path,
+    slot_packets: Sequence[int],
+    long_edge: int,
+    timeout_seconds: float,
+    on_frame: Callable[[int, Path], None] | None,
+) -> dict[int, Path]:
+    """map 시계(D70)의 슬롯 묶음 — 패킷 순번으로 한 번 디코드해 슬롯 이름으로 게시한다."""
+    by_ordinal: dict[int, list[int]] = {}
+    for slot in sorted(set(slots)):
+        by_ordinal.setdefault(_slot_ordinal(slot_packets, slot), []).append(slot)
+    directory.mkdir(parents=True, exist_ok=True)
+    published: dict[int, Path] = {}
+    with tempfile.TemporaryDirectory(prefix=".slot-batch-", dir=directory) as temporary:
+
+        def publish(ordinal: int, decoded: Path) -> None:
+            for slot in by_ordinal[ordinal]:
+                target = directory / f"frame_{slot:08d}.jpg"
+                staged = Path(temporary) / f"slot_{slot:08d}.jpg"
+                shutil.copyfile(decoded, staged)
+                os.replace(staged, target)
+                published[slot] = target
+                if on_frame is not None:
+                    on_frame(slot, target)
+
+        extract_frame_indices(
+            source,
+            stream_index,
+            list(by_ordinal),
+            Path(temporary),
+            long_edge=long_edge,
+            timeout_seconds=timeout_seconds,
+            on_frame=publish,
+        )
     return published
 
 
@@ -2224,7 +2286,15 @@ ConformKind = Literal["uniform", "snap", "map"]
 """시계가 명목 격자에 놓이는 방식(D69) — 슬롯 s가 보이는 패킷은 언제나 하나의 정의다:
 `pts < 원점 + s·T + T/2`인 마지막 패킷(가운데 붙잡기). `uniform`은 모든 패킷이 슬롯 위에
 정확히 있다. `snap`은 그 정의의 항등 경우다 — 패킷 k가 슬롯 k의 반 프레임 안에 있다.
-`map`(W-27c 몫, 아직 없음)은 같은 정의가 항등이 아닌 경우다(빠진 슬롯·속도 전환)."""
+`map`(D70)은 같은 정의가 항등이 아닌 경우다(빈 슬롯은 앞 프레임을 붙잡고, 한 슬롯 창에 든
+두 패킷은 뒤의 것이 보인다 — 빠진 프레임·속도 전환)."""
+
+GRID_CONFORM_TAG = "grid-conform/v1"
+"""항등이 아닌 격자 맞춤(map)의 규칙 판(D70) — 슬롯 → 패킷 대응이 이 규칙에서 나오므로 map
+원본의 계획·분석 입력·시각 분석 지문, 프레임·장면 캐시 출처, 썸네일 열쇠에만 싣는다. 균일·snap
+원본은 프레임 신원이 패킷 순번 그대로라 싣지 않는다(바이트 그대로). `RAW_GRID_CONFORM`이나 슬롯
+규칙을 바꾸면 이 판을 올린다 — 안 올리면 원본마다 남긴 「map 아님」 표지(`cache/grid-conform/`)가
+새로 map이 된 원본의 슬롯 대응을 조용히 건너뛴다."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -2243,7 +2313,14 @@ class RawVideoClock:
     `frame_count`는 패킷 수, `exact_end`는 명목 끝(`원점 + 수 × 프레임 길이`)이다.
     관문은 어디서나 `uniform_grid` 하나다. 두 칸은 지문·캐시 열쇠에 넣지 않는다(snap은
     항등이라 프레임 신원이 바뀌지 않는다). `uniform_grid`가 거짓이면 두 칸은 기본값이고
-    뜻이 없다.
+    뜻이 없다. snap의 프레임 길이는 r_frame_rate가 아니라 패킷 간격에서 다시 고른 값일 수
+    있다(D70 — ffprobe가 30fps 재료를 30000/1001로 읽는 원본).
+
+    빠진 슬롯·속도 전환(D70): 명목 프레임 길이를 패킷 간격에서 고르고(길이 몫이 가장 큰 간격)
+    가운데 붙잡기 대응이 항등이 아니면 `conform_kind="map"`, `slot_packets`가 슬롯마다 보이는
+    패킷 순번이다 — `frame_count`는 슬롯 수(`마지막 패킷의 슬롯 + 1`), `exact_end`는 명목 끝,
+    `max_deviation_ticks`는 패킷과 가장 가까운 슬롯의 최대 거리(기록용, 반 프레임 이하)다.
+    map만 규칙 판(`GRID_CONFORM_TAG`)을 지문·열쇠에 싣는다.
     """
 
     stream_index: int
@@ -2258,6 +2335,9 @@ class RawVideoClock:
     grid_note: str
     max_deviation_ticks: int = 0
     conform_kind: ConformKind = "uniform"
+    slot_packets: tuple[int, ...] = ()
+    """map(D70)만 — 슬롯 s가 보이는 패킷의 제시 순번(`select=eq(n,…)`의 n). 길이가 곧
+    `frame_count`다. 균일·snap은 빈 튜플이다(순번 = 슬롯)."""
 
 
 @process_step("추출 시계 확인")
@@ -2303,6 +2383,19 @@ def probe_extraction_clock(
     return clock
 
 
+@dataclass(frozen=True, slots=True)
+class _GridFit:
+    """격자 판정 한 번의 결과 — `_measured_clock`이 시계 칸으로 옮긴다."""
+
+    uniform: bool
+    frame_duration: Fraction
+    frame_count: int
+    deviation: int = 0
+    kind: ConformKind = "uniform"
+    slots: tuple[int, ...] = ()
+    note: str = ""
+
+
 def _measured_clock(
     entry: dict[str, object],
     rate: Fraction,
@@ -2311,28 +2404,26 @@ def _measured_clock(
     source: Path,
     policy: GridConformPolicy,
 ) -> RawVideoClock:
-    _require_snap_policy(policy)
-    frame_duration = Fraction(1) / rate
+    declared = Fraction(1) / rate
     notes: list[str] = []
-    uniform = True
-    deviation = 0
     try:
-        _prove_uniform_grid(pts, time_base, frame_duration, source)
+        _prove_uniform_grid(pts, time_base, declared, source)
+        fit = _GridFit(uniform=True, frame_duration=declared, frame_count=len(pts))
     except RuntimeError as exc:
-        uniform, deviation, note = _conformed(pts, time_base, frame_duration, policy, source, exc)
-        notes.append(note)
+        fit = _fitted(pts, time_base, declared, policy, source, exc)
+        notes.append(fit.note)
     try:
         average = _stream_positive_fraction(entry, "avg_frame_rate", source)
-        _prove_declared_evidence(entry, average, pts, time_base, frame_duration, source)
+        _prove_declared_evidence(entry, average, pts, time_base, fit.frame_duration, source)
     except RuntimeError as exc:
         # 격자가 균일해도 선언이 어긋나면 증거가 갈라진다 — VFR 판정은 바꾸지 않고
         # 기록으로만 남긴다(선언 부재를 VFR로 오인해 정상 원본을 막지 않는다).
         notes.append(f"선언 불일치: {exc}")
     origin = pts[0] * time_base
     exact_end = (
-        origin + len(pts) * frame_duration
-        if uniform
-        else _vfr_exact_end(pts, time_base, frame_duration)
+        origin + fit.frame_count * fit.frame_duration
+        if fit.uniform
+        else _vfr_exact_end(pts, time_base, declared)
     )
     return RawVideoClock(
         stream_index=_stream_global_index(entry, source),
@@ -2340,42 +2431,202 @@ def _measured_clock(
         first_pts=pts[0],
         last_pts=pts[-1],
         presentation_origin=origin,
-        frame_duration=frame_duration,
-        frame_count=len(pts),
+        frame_duration=fit.frame_duration,
+        frame_count=fit.frame_count,
         exact_end=exact_end,
-        uniform_grid=uniform,
+        uniform_grid=fit.uniform,
         grid_note="\n".join(notes),
-        max_deviation_ticks=deviation,
-        conform_kind="snap" if deviation else "uniform",
+        max_deviation_ticks=fit.deviation,
+        conform_kind=fit.kind,
+        slot_packets=fit.slots,
     )
 
 
-def _conformed(
+def _fitted(
     pts: list[int],
     time_base: Fraction,
-    frame_duration: Fraction,
+    declared: Fraction,
     policy: GridConformPolicy,
     source: Path,
     strict: RuntimeError,
-) -> tuple[bool, int, str]:
-    """엄격한 증명이 실패한 시계를 명목 격자에 맞춰 본다 — (균일, 최대 어긋남, 기록).
+) -> _GridFit:
+    """엄격한 증명이 실패한 시계를 명목 격자에 맞춰 본다 — 선언 길이로 snap(D69), 그다음 map(D70).
 
     프레임 길이가 정수 틱이 아닌 시계(양자화된 30000/1001 등)는 이미 한 틱을 허용받았으므로
-    엄격한 판정 그대로다. 맞추지 못하면 엄격한 증명의 말에 까닭 한 줄을 덧붙인다(D68 지원 밖
-    카드가 그대로 보인다).
+    선언 길이로는 맞추지 않는다. 맞추지 못하면 엄격한 증명의 말에 까닭을 한 줄씩 덧붙인다(D68
+    지원 밖 카드가 그대로 보인다). map 갈래는 정책이 허락할 때만 본다(`GridConformPolicy.maps`).
     """
-    ticks = frame_duration / time_base
-    if ticks.denominator != 1:
-        return False, 0, str(strict)
+    ticks = declared / time_base
+    refusal = str(strict)
+    not_snap = "선언 프레임 길이가 정수 틱이 아니다"
+    if ticks.denominator == 1:
+        try:
+            deviation = _conform_grid(pts, ticks.numerator, policy, source)
+            return _snap_fit(pts, ticks.numerator, time_base, deviation, remapped_from=None)
+        except RuntimeError as snap:
+            refusal = f"{strict}\n격자 맞춤 불가: {snap}"
+            not_snap = str(snap)
+    if not policy.maps:
+        return _GridFit(uniform=False, frame_duration=declared, frame_count=len(pts), note=refusal)
     try:
-        deviation = _conform_grid(pts, ticks.numerator, policy, source)
-    except RuntimeError as refusal:
-        return False, 0, f"{strict}\n격자 맞춤 불가: {refusal}"
+        return _remapped(pts, time_base, declared, policy, source, not_snap)
+    except RuntimeError as remap:
+        note = f"{refusal}\n격자 다시 맞춤 불가: {remap}"
+        return _GridFit(uniform=False, frame_duration=declared, frame_count=len(pts), note=note)
+
+
+def _snap_fit(
+    pts: list[int],
+    ticks_per_frame: int,
+    time_base: Fraction,
+    deviation: int,
+    *,
+    remapped_from: Fraction | None,
+) -> _GridFit:
+    """항등 맞춤(snap) — 패킷 k가 슬롯 k다. 다시 고른 길이면 선언 길이를 기록에만 남긴다."""
     note = (
-        f"격자 맞춤: 최대 어긋남 {deviation}틱 (프레임 {ticks.numerator}틱의 반 미만 — "
+        f"격자 맞춤: 최대 어긋남 {deviation}틱 (프레임 {ticks_per_frame}틱의 반 미만 — "
         f"패킷 {len(pts)}개가 모두 원점+순번×프레임 길이의 제 슬롯에 놓인다)"
     )
-    return True, deviation, note
+    if remapped_from is not None:
+        note += (
+            f" — 프레임 길이를 패킷 간격에서 다시 골랐다(D70): {ticks_per_frame}틱"
+            f" = {1 / (ticks_per_frame * time_base)}fps, 선언 r_frame_rate {1 / remapped_from}는"
+            " 기록뿐"
+        )
+    return _GridFit(
+        uniform=True,
+        frame_duration=ticks_per_frame * time_base,
+        frame_count=len(pts),
+        deviation=deviation,
+        kind="snap",
+        note=note,
+    )
+
+
+def _remapped(
+    pts: list[int],
+    time_base: Fraction,
+    declared: Fraction,
+    policy: GridConformPolicy,
+    source: Path,
+    not_snap: str,
+) -> _GridFit:
+    """명목 프레임 길이를 패킷 간격에서 고르고 가운데 붙잡기로 슬롯에 놓는다(D70).
+
+    명목 T는 간격마다 `개수 × 간격`(그 간격이 덮는 길이)이 가장 큰 간격이다 — 동점은 짧은
+    간격. T는 Final Cut 프레임 레이트여야 하고(`nominal_frame_durations`), 선언과 다르면
+    `allow_rate_remap`이 있어야 한다. 그 T에서 항등이면 snap(새 추출 길이 없음), 아니면 map —
+    빈 슬롯 수가 정책 허용 안이어야 한다. `not_snap`은 선언 길이로 snap이 아니었던 까닭이다 —
+    명목이 선언과 같으면 그것이 map인 까닭이고, 다르면 명목 T에서 다시 본 까닭으로 바뀐다.
+    """
+    ticks = _nominal_ticks(pts)
+    duration = ticks * time_base
+    if duration not in policy.nominal_frame_durations:
+        raise RuntimeError(
+            f"명목 프레임 {ticks}틱({1 / duration}fps — 패킷 간격 중 길이 몫이 가장 큰 값)이"
+            " Final Cut 프레임 레이트가 아니다"
+        )
+    if duration != declared:
+        if not policy.allow_rate_remap:
+            raise RuntimeError(
+                f"명목 프레임 {ticks}틱이 선언 r_frame_rate {1 / declared}와 다르다 — 속도 다시"
+                " 고르기를 허용하지 않는다"
+            )
+        try:
+            deviation = _conform_grid(pts, ticks, policy, source)
+        except RuntimeError as identity:
+            # 그 T에서도 항등이 아니다 — map으로 보고 까닭을 기록에 싣는다.
+            not_snap = f"명목 {ticks}틱에서도 snap이 아니다 — {identity}"
+        else:
+            return _snap_fit(pts, ticks, time_base, deviation, remapped_from=declared)
+    return _map_fit(pts, ticks, time_base, declared, policy, not_snap)
+
+
+def _map_fit(
+    pts: list[int],
+    ticks_per_frame: int,
+    time_base: Fraction,
+    declared: Fraction,
+    policy: GridConformPolicy,
+    not_snap: str,
+) -> _GridFit:
+    """가운데 붙잡기 대응(map) — 빈 슬롯이 정책 허용 안일 때만 받는다(기록에 snap이 아닌 까닭)."""
+    slots = _slot_packets(pts, ticks_per_frame)
+    held = _held_slots(slots)
+    allowed = policy.dropped_allowance(len(slots))
+    if held > allowed:
+        raise RuntimeError(
+            f"빈 슬롯 {held}칸(앞 프레임을 붙잡는 슬롯)이 허용 {allowed}칸을 넘는다 — 슬롯"
+            f" {len(slots)}칸 × {policy.max_dropped_share}, 적어도 {policy.max_dropped_slots}칸"
+        )
+    origin = pts[0]
+    deviation = max(
+        abs(value - origin - _nearest_slot(value - origin, ticks_per_frame) * ticks_per_frame)
+        for value in pts
+    )
+    note = (
+        f"격자 맞춤(map, {GRID_CONFORM_TAG}): 명목 프레임 {ticks_per_frame}틱"
+        f"({1 / (ticks_per_frame * time_base)}fps, 선언 r_frame_rate {1 / declared}는 기록뿐) —"
+        f" 슬롯 {len(slots)}칸에 패킷 {len(pts)}개, 빈 슬롯 {held}칸(허용 {allowed}칸)은 앞"
+        f" 프레임을 붙잡고 한 슬롯 창에 겹친 패킷 {len(pts) - len(set(slots))}개는 뒤의 것이"
+        f" 보인다, 패킷과 가장 가까운 슬롯의 최대 거리 {deviation}틱 — snap이 아닌 까닭: {not_snap}"
+    )
+    return _GridFit(
+        uniform=True,
+        frame_duration=ticks_per_frame * time_base,
+        frame_count=len(slots),
+        deviation=deviation,
+        kind="map",
+        slots=slots,
+        note=note,
+    )
+
+
+def _held_slots(slots: Sequence[int]) -> int:
+    """앞 슬롯과 같은 패킷을 보이는 슬롯(빈 슬롯 — 앞 프레임을 붙잡는다)의 수."""
+    return sum(1 for index in range(1, len(slots)) if slots[index] == slots[index - 1])
+
+
+def _nominal_ticks(pts: list[int]) -> int:
+    """패킷 간격 가운데 `개수 × 간격`이 가장 큰 간격(틱) — 동점은 짧은 간격이다(D70)."""
+    weights: dict[int, int] = {}
+    for ordinal in range(1, len(pts)):
+        delta = pts[ordinal] - pts[ordinal - 1]
+        if delta <= 0:
+            raise RuntimeError(f"순번 {ordinal} pts {pts[ordinal]}가 앞 패킷보다 늦지 않다")
+        weights[delta] = weights.get(delta, 0) + delta
+    if not weights:
+        raise RuntimeError("패킷이 하나뿐이라 간격을 잴 수 없다")
+    return min(weights, key=lambda delta: (-weights[delta], delta))
+
+
+def _nearest_slot(offset_ticks: int, ticks_per_frame: int) -> int:
+    """원점에서 `offset_ticks` 떨어진 패킷이 처음 보이는 슬롯 — 반 프레임 동점은 뒤 슬롯이다.
+
+    정의(가운데 붙잡기): 슬롯 s는 `pts < 원점 + s·T + T/2`인 마지막 패킷을 보인다. 그래서 패킷이
+    처음 보이는 슬롯은 `2·x < (2s+1)·T`인 가장 작은 s = ⌊(2x + T) / 2T⌋다(정수 연산).
+    """
+    return (2 * offset_ticks + ticks_per_frame) // (2 * ticks_per_frame)
+
+
+def _slot_packets(pts: list[int], ticks_per_frame: int) -> tuple[int, ...]:
+    """슬롯마다 보이는 패킷의 제시 순번 — 마지막 패킷이 처음 보이는 슬롯까지(D70).
+
+    빈 슬롯은 앞 패킷이 그대로 보이고(붙잡기), 한 슬롯 창에 든 두 패킷은 뒤의 것이 보인다.
+    `fps=…:round=near`가 원점 상대 pts를 출력 눈금으로 반올림해 고르는 프레임과 같다(실 ffmpeg
+    시험이 프레임마다 잠근다).
+    """
+    origin = pts[0]
+    count = _nearest_slot(pts[-1] - origin, ticks_per_frame) + 1
+    shown: list[int] = []
+    ordinal = 0
+    for slot in range(count):
+        limit = (2 * slot + 1) * ticks_per_frame
+        while ordinal + 1 < len(pts) and 2 * (pts[ordinal + 1] - origin) < limit:
+            ordinal += 1
+        shown.append(ordinal)
+    return tuple(shown)
 
 
 def _conform_grid(
@@ -2385,7 +2636,7 @@ def _conform_grid(
 
     반 프레임 미만이면 가장 가까운 슬롯이 하나뿐이라 맞춤이 패킷 순서를 바꾸지 않는다(Final
     Cut이 conform하는 nearest-frame과 같다). 슬롯이 순번과 다르면(빈 슬롯·두 패킷이 한 슬롯)
-    패킷 순번 ≠ 슬롯이다 — 프레임 표본(`select=eq(n,…)`)이 그 뒤로 밀리므로 받지 않는다.
+    패킷 순번 ≠ 슬롯이다 — 그때는 map(D70)이 슬롯 → 패킷 대응을 따로 진다.
     """
     bound = ticks_per_frame * policy.half_frame_bound
     origin = pts[0]
@@ -2413,15 +2664,6 @@ def _slot_mismatch(ordinal: int, slot: int, value: int, policy: GridConformPolic
             f" 놓인다, 허용 빈 슬롯 {policy.max_dropped_slots})"
         )
     return f"순번 {ordinal} pts {value}가 앞 패킷과 같은 슬롯 {slot}에 놓인다"
-
-
-def _require_snap_policy(policy: GridConformPolicy) -> None:
-    """빈 슬롯·속도 전환을 받는 정책은 map 갈래(W-27c)가 있어야 뜻이 있다 — 아직 없다."""
-    if policy.max_dropped_slots != 0 or policy.allow_rate_remap:
-        raise RuntimeError(
-            f"격자 맞춤 정책 {policy}는 map 갈래가 필요하다 — 이 판은 snap(빈 슬롯 0, 속도"
-            " 다시 고르기 없음)만 안다"
-        )
 
 
 def _vfr_exact_end(pts: list[int], time_base: Fraction, frame_duration: Fraction) -> Fraction:
@@ -2680,31 +2922,74 @@ class RawClipHandles:
 
 @dataclass(frozen=True, slots=True)
 class GridConformPolicy:
-    """근접 CFR 원본을 명목 격자에 맞추는 규칙(D69) — `probe_extraction_clock`만 쓴다.
+    """원본을 명목 격자에 맞추는 규칙(D69·D70) — `probe_extraction_clock`만 쓴다.
 
-    `half_frame_bound`: 패킷이 제 슬롯에서 벗어날 수 있는 한도(프레임 길이에 곱한다, 미만).
-    1/2 미만이면 가장 가까운 슬롯이 유일하다 — Final Cut이 30fps로 conform하는 nearest-frame
-    규칙과 같다. 1/2를 넘기면 슬롯이 둘이 되므로 받지 않는다.
-    `max_dropped_slots`: 받는 빈 슬롯 수. 0 — 빈 슬롯은 패킷 순번 ≠ 슬롯이라 프레임 표본이 그
-    뒤로 한 프레임씩 밀린다(W-27c의 map 몫).
-    `allow_rate_remap`: r_frame_rate 대신 실제 간격으로 명목 T를 다시 고르는가(W-27c 몫, 거짓).
-    캡션 엔진(`probe_video_stream`·`probe_video_grid`)과 썸네일 찾기(`_seek_plan`)는 이 정책을
-    쓰지 않는다 — 엄격하다.
+    `half_frame_bound`: snap — 패킷이 제 슬롯에서 벗어날 수 있는 한도(프레임 길이에 곱한다,
+    미만). 1/2 미만이면 가장 가까운 슬롯이 유일하다 — Final Cut이 30fps로 conform하는
+    nearest-frame 규칙과 같다. 1/2를 넘기면 슬롯이 둘이 되므로 받지 않는다.
+    `max_dropped_slots`·`max_dropped_share`: map — 받는 빈 슬롯(앞 프레임을 붙잡는 슬롯) 수는
+    `max(max_dropped_slots, ⌊max_dropped_share × 슬롯 수⌋)`까지다. 짧은 원본의 한 번 끊김은
+    개수가, 긴 원본은 몫이 받는다.
+    `allow_rate_remap`: r_frame_rate와 다른 명목 T(패킷 간격에서 고른 값)를 받는가.
+    `nominal_frame_durations`: 명목 T가 될 수 있는 프레임 길이 — Final Cut이 아는 레이트만
+    (`vlogsrt.project.fcp_tables.FRAME_RATE_TAGS`의 열쇠, 시험이 둘을 맞춘다 — 이 모듈은
+    `vlogsrt.project`를 import하지 못한다).
+    map 갈래(`maps`)는 빈 슬롯이나 다시 고르기를 하나라도 허락할 때만 열린다 — 기본값(W-27b 판)은
+    snap만이다. 캡션 엔진(`probe_video_stream`·`probe_video_grid`)과 썸네일 찾기(`_seek_plan`)는
+    이 정책을 쓰지 않는다 — 엄격하다.
     """
 
     max_dropped_slots: int = 0
     half_frame_bound: Fraction = Fraction(1, 2)
     allow_rate_remap: bool = False
+    max_dropped_share: Fraction = Fraction(0)
+    nominal_frame_durations: frozenset[Fraction] = frozenset()
 
     def __post_init__(self) -> None:
         if not 0 < self.half_frame_bound <= Fraction(1, 2):
             raise ValueError(f"반 프레임 한도는 (0, 1/2]여야 합니다: {self.half_frame_bound}")
         if self.max_dropped_slots < 0:
             raise ValueError(f"빈 슬롯 허용은 0 이상이어야 합니다: {self.max_dropped_slots}")
+        if not 0 <= self.max_dropped_share < 1:
+            raise ValueError(f"빈 슬롯 몫은 [0, 1)이어야 합니다: {self.max_dropped_share}")
+        if any(duration <= 0 for duration in self.nominal_frame_durations):
+            raise ValueError(f"명목 프레임 길이는 양수여야 합니다: {self.nominal_frame_durations}")
+
+    @property
+    def maps(self) -> bool:
+        """map 갈래(D70)가 열리는가 — 빈 슬롯이나 속도 다시 고르기를 하나라도 받을 때."""
+        return bool(self.max_dropped_slots or self.max_dropped_share or self.allow_rate_remap)
+
+    def dropped_allowance(self, slots: int) -> int:
+        """슬롯 `slots`칸인 원본이 받는 빈 슬롯 수."""
+        return max(self.max_dropped_slots, math.floor(self.max_dropped_share * slots))
 
 
-RAW_GRID_CONFORM = GridConformPolicy()
-"""원본 경계의 기본 맞춤 정책 — 반 프레임 미만 · 빈 슬롯 0 · 속도 다시 고르기 없음(D69)."""
+_FINAL_CUT_FRAME_DURATIONS = frozenset(
+    {
+        Fraction(1001, 24000),
+        Fraction(1, 24),
+        Fraction(1, 25),
+        Fraction(1001, 30000),
+        Fraction(1, 30),
+        Fraction(1, 50),
+        Fraction(1001, 60000),
+        Fraction(1, 60),
+    }
+)
+"""Final Cut이 아는 프레임 길이 — `vlogsrt.project.fcp_tables.FRAME_RATE_TAGS`의 열쇠와 같다
+(시험이 잠근다). 명목 T가 이 밖이면 Final Cut 타임라인에 놓을 격자가 없다."""
+
+
+RAW_GRID_CONFORM = GridConformPolicy(
+    max_dropped_slots=1,
+    half_frame_bound=Fraction(1, 2),
+    allow_rate_remap=True,
+    max_dropped_share=Fraction(1, 100),
+    nominal_frame_durations=_FINAL_CUT_FRAME_DURATIONS,
+)
+"""원본 경계의 기본 맞춤 정책(D69·D70) — snap은 반 프레임 미만, map은 빈 슬롯
+`max(1, ⌊슬롯 수 / 100⌋)`칸까지 · 명목 T는 Final Cut 레이트 · 속도 다시 고르기 허용."""
 
 
 _DECLARED_WINDOW_QUANTUM = Fraction(1, _RAW_US_PER_SECOND)
@@ -2716,9 +3001,12 @@ def _packet_evidence_end(clock: RawVideoClock) -> Fraction:
     """마지막 패킷 제시의 끝 — 맞춘 시계(D69)의 `exact_end`는 명목 끝이라 패킷 증거로 다시 잰다.
 
     균일 시계는 예전 값(`exact_end`) 그대로다 — 양자화 시계에서 두 값이 한 틱 갈려도 판정이
-    바뀌지 않게.
+    바뀌지 않게. map(D70)의 마지막 패킷은 명목 프레임 길이보다 짧게 보일 수 있다(한 슬롯 창에 든
+    소수 레이트 패킷) — 마지막 패킷이 선언 창 **안에서 시작하는가**만 본다(한 틱).
     """
-    if clock.max_deviation_ticks:
+    if clock.conform_kind == "map":
+        return clock.last_pts * clock.time_base + clock.time_base
+    if clock.conform_kind != "uniform":
         return clock.last_pts * clock.time_base + clock.frame_duration
     return clock.exact_end
 
@@ -2730,8 +3018,11 @@ def _declared_window_slack(probe: RawMediaProbe, clock: RawVideoClock) -> Fracti
     IMG_8863: 패킷 끝 2391/100초 = 참 선언 끝 14345/600초 + 1/600초). 선언은 µs로 내려 적혀
     있어(23.908333초) 그 경계가 1/3000000초 넘친 것처럼 보였다 — 적힌 값의 눈금만큼은 참값의
     몫이다. 그보다 먼 패킷은 여전히 막는다. 균일 시계는 예전 한 틱 그대로다(판정 바이트 그대로).
+    map(D70)은 패킷 시작 한 틱을 이미 셌으므로 µs 눈금만이다.
     """
-    if clock.max_deviation_ticks:
+    if clock.conform_kind == "map":
+        return 2 * _DECLARED_WINDOW_QUANTUM
+    if clock.conform_kind != "uniform":
         return probe.video.time_base + 2 * _DECLARED_WINDOW_QUANTUM
     return probe.video.time_base
 
@@ -2794,6 +3085,49 @@ class _RawMediaPlan:
     snap_ticks_per_frame: int
     """맞춘 시계(D69)면 프레임 길이(틱) — `setpts`가 프레임을 슬롯에 놓는다. 균일이면 0(argv
     그대로)."""
+    slot_window: _SlotWindow | None = None
+    """map 시계(D70)의 슬롯 창 — 추출이 `fps`로 슬롯마다 프레임을 고른다. 그 밖은 None."""
+    encoder_time_base: Fraction | None = None
+    """snap인데 프레임 길이를 패킷 간격에서 다시 골랐으면(D70) 그 길이 — 인코더 눈금을 맞춘다
+    (`-enc_time_base`; 패스스루 인코더는 선언 r_frame_rate 눈금으로 반올림한다). 그 밖은 None."""
+
+
+@dataclass(frozen=True, slots=True)
+class _SlotWindow:
+    """map 원본(D70)의 추출 창 — 슬롯 `[first_slot, after_slot)`과 영상 입력의 탐색 점.
+
+    `seek`(절대 초, 정확 탐색 끔)는 첫 슬롯이 보이는 패킷보다 반 프레임 넘게 앞이라 그 패킷이
+    빠지지 않는다 — 앞에서 디코드한 프레임은 `trim`이 버린다. 입력 시각은 탐색 점에서 0이므로
+    `origin_shift_ticks`(= 탐색 점 − 원점, 원본 틱)를 더하면 원점 상대 pts다.
+    """
+
+    origin_shift_ticks: int
+    first_slot: int
+    after_slot: int
+    seek: Fraction
+    rate: Fraction
+    """명목 레이트(1/프레임 길이) — `fps`의 출력 눈금이다."""
+
+
+def _slot_window(clock: RawVideoClock, first: int, after: int) -> _SlotWindow:
+    """map 시계의 슬롯 창 — 첫 슬롯이 붙잡은 패킷이 처음 보인 슬롯의 한 프레임 앞에서 찾는다."""
+    ticks = clock.frame_duration / clock.time_base
+    if ticks.denominator != 1 or len(clock.slot_packets) != clock.frame_count:
+        raise RuntimeError(
+            f"map 시계가 아닙니다: 프레임 {ticks}틱, 슬롯 {len(clock.slot_packets)}칸"
+        )
+    shown = clock.slot_packets[first]
+    held_from = first
+    while held_from > 0 and clock.slot_packets[held_from - 1] == shown:
+        held_from -= 1
+    seek_ticks = max(0, clock.first_pts + (held_from - 1) * ticks.numerator)
+    return _SlotWindow(
+        origin_shift_ticks=seek_ticks - clock.first_pts,
+        first_slot=first,
+        after_slot=after,
+        seek=seek_ticks * clock.time_base,
+        rate=1 / clock.frame_duration,
+    )
 
 
 def _raw_seek(clock: RawVideoClock, media_range: RawPtsRange) -> tuple[Fraction, int]:
@@ -2830,6 +3164,8 @@ def _plan_raw_media(
     source_range: RawPtsRange,
     handles: RawClipHandles,
     audio_extents: Sequence[AudioPacketExtent],
+    *,
+    declared_rate: Fraction | None = None,
 ) -> _RawMediaPlan:
     core_start = source_range.start_seconds
     core_end = source_range.end_seconds
@@ -2853,7 +3189,7 @@ def _plan_raw_media(
     if media_first >= media_after:
         raise RuntimeError("핸들을 포함한 매체 범위가 비었습니다")
     media_range = clock_frame_range(clock, media_first, media_after)
-    seek, shift = _raw_seek(clock, media_range)
+    window, seek, shift = _media_seek(clock, media_range, media_first, media_after)
     media_start = media_range.start_seconds
     media_end = media_range.end_seconds
     # 오디오 꼬리 보존은 원본의 마지막 영상 프레임을 담은 클립에서만 한다(A3P-F2).
@@ -2884,16 +3220,38 @@ def _plan_raw_media(
         final_clip=final_clip,
         mapped_audio=mapping.mapped,
         unmapped=mapping.unmapped,
-        warnings=tuple(warnings) + _conform_warnings(clock, shift),
+        warnings=tuple(warnings) + _conform_warnings(clock, shift, window),
         seek=seek,
         common_shift_ticks=shift,
         snap_ticks_per_frame=_conform_frame_ticks(clock),
+        slot_window=window,
+        encoder_time_base=_remapped_time_base(clock, declared_rate),
     )
 
 
+def _media_seek(
+    clock: RawVideoClock, media_range: RawPtsRange, first: int, after: int
+) -> tuple[_SlotWindow | None, Fraction, int]:
+    """(map 창, 소리·영상의 탐색 점, 공통 시프트) — map(D70)은 소리를 첫 슬롯 시각에서 자른다.
+
+    그래서 map의 시프트는 0이다(영상과 같은 원본 시각이 지역 0). 그 밖은 `_raw_seek` 그대로.
+    """
+    if clock.conform_kind == "map":
+        return _slot_window(clock, first, after), media_range.start_seconds, 0
+    seek, shift = _raw_seek(clock, media_range)
+    return None, seek, shift
+
+
+def _remapped_time_base(clock: RawVideoClock, declared_rate: Fraction | None) -> Fraction | None:
+    """snap 시계의 프레임 길이가 선언 r_frame_rate와 다르면(D70) 그 길이 — 아니면 None."""
+    if clock.conform_kind != "snap" or declared_rate is None:
+        return None
+    return None if clock.frame_duration == 1 / declared_rate else clock.frame_duration
+
+
 def _conform_frame_ticks(clock: RawVideoClock) -> int:
-    """맞춘 시계의 프레임 길이(틱) — 균일 시계는 0이라 필터를 더하지 않는다."""
-    if not clock.max_deviation_ticks:
+    """snap 시계의 프레임 길이(틱) — 균일·map 시계, 어긋남 0인 snap은 0이라 `setpts`가 없다."""
+    if clock.conform_kind != "snap" or not clock.max_deviation_ticks:
         return 0
     ticks = clock.frame_duration / clock.time_base
     if ticks.denominator != 1:
@@ -2901,8 +3259,19 @@ def _conform_frame_ticks(clock: RawVideoClock) -> int:
     return ticks.numerator
 
 
-def _conform_warnings(clock: RawVideoClock, shift: int) -> tuple[str, ...]:
+def _conform_warnings(
+    clock: RawVideoClock, shift: int, window: _SlotWindow | None = None
+) -> tuple[str, ...]:
     """맞춘 시계의 추출 기록 — 균일 시계는 아무것도 더하지 않는다(경고 바이트 그대로)."""
+    if window is not None:
+        shown = clock.slot_packets[window.first_slot : window.after_slot]
+        held = _held_slots(shown)
+        return (
+            f"격자 맞춤(map, D70): 슬롯 [{window.first_slot}, {window.after_slot})를 명목"
+            f" {1 / clock.frame_duration}fps로 다시 놓았다 — 빈 슬롯 {held}칸은 앞 프레임을"
+            f" 붙잡고, 한 슬롯에 겹친 패킷은 뒤의 것을 싣는다({GRID_CONFORM_TAG}). 오디오는 첫"
+            " 슬롯의 원본 시각에서 잘려 화면과 같은 시각에서 시작한다",
+        )
     if not clock.max_deviation_ticks:
         return ()
     return (
@@ -3100,6 +3469,8 @@ def _raw_extract_command(
     profile: RawTranscodeProfile,
     plan: _RawMediaPlan,
 ) -> list[str]:
+    if plan.slot_window is not None:
+        return _map_extract_command(source, staging_output, probe, profile, plan)
     encoder, encoder_args = _raw_encoder(profile, probe.video.codec_name)
     # -ss는 계획이 정했다(`_raw_seek`) — 균일 시계는 한 틱 일찍, 맞춘 시계는 최대 어긋남만큼.
     # 바닥 µs만 쓰면 첫 프레임이 잘릴 수 있어서다.
@@ -3134,10 +3505,85 @@ def _raw_extract_command(
         "-pix_fmt", pix_fmt,
         "-vf", f"select=lt(n\\,{frames})" + _snap_filter(plan),
         "-fps_mode", "passthrough",
+        *_encoder_time_base_args(plan),
         "-c:a", profile.audio_codec,
     ]  # fmt: skip
     # 색 좌표는 출력 경로 **앞**에 붙는다 — ffmpeg는 출력 URL 뒤의 인자를 무시한다.
     return command + _raw_color_args(probe.video) + ["-f", profile.container, str(staging_output)]
+
+
+def _encoder_time_base_args(plan: _RawMediaPlan) -> list[str]:
+    """다시 고른 snap(D70)만 — 인코더 눈금을 명목 프레임 길이로. 그 밖은 빈 목록(argv 그대로).
+
+    패스스루 인코더의 눈금은 선언 r_frame_rate(예: 1001/30000)에서 온다 — 30fps 슬롯을 그
+    눈금으로 반올림하면 출력이 29.97 격자가 된다(실측). `-r`은 패스스루와 함께 쓸 수 없다.
+    """
+    rate = plan.encoder_time_base
+    return [] if rate is None else ["-enc_time_base", f"{rate.numerator}/{rate.denominator}"]
+
+
+def _map_extract_command(
+    source: Path,
+    staging_output: Path,
+    probe: RawMediaProbe,
+    profile: RawTranscodeProfile,
+    plan: _RawMediaPlan,
+) -> list[str]:
+    """map 원본(D70)의 추출 argv — 슬롯마다 프레임을 `fps`가 고른다(가운데 붙잡기).
+
+    영상과 소리를 같은 파일의 두 입력으로 읽는다. 영상 입력은 정확 탐색을 끈다(`-noaccurate_seek`
+    — 키프레임부터 버리지 않고 필터에 넣는다): 원점 상대 pts로 옮기고(`setpts`, 원본 틱)
+    `fps=…:round=near`가 출력 눈금(1/명목 레이트)으로 반올림하면 슬롯 k는 반올림 값이 k 이하인
+    마지막 프레임 — `pts < 원점 + k·T + T/2`인 마지막 패킷이다(`_slot_packets`와 같은 정의, 동점은
+    뒤 슬롯). `trim`이 창 밖 슬롯을 버리고 0부터 다시 센다. 소리 입력은 첫 슬롯의 원본 시각에서
+    정확 탐색·`-t`로 자른다 — 균일 원본의 오디오와 같은 길(복사 프로파일도 그대로)이고, 시프트가
+    0이라 화면과 소리의 지역 0이 같은 원본 시각이다.
+    """
+    window = plan.slot_window
+    assert window is not None  # 부른 쪽이 갈랐다
+    encoder, encoder_args = _raw_encoder(profile, probe.video.codec_name)
+    command = [require_ffmpeg(), "-hide_banner", "-nostdin", "-y", *_map_inputs(source, plan)]
+    command += ["-map", f"0:{probe.video.stream_index}"]
+    for extent in plan.mapped_audio:
+        command += ["-map", f"1:{extent.stream_index}"]
+    pix_fmt = profile.pix_fmt if profile.pix_fmt is not None else probe.video.pix_fmt
+    command += [
+        "-c:v", encoder, *encoder_args,
+        "-pix_fmt", pix_fmt,
+        "-vf", _slot_video_filter(window),
+        "-fps_mode", "passthrough",
+        "-c:a", profile.audio_codec,
+    ]  # fmt: skip
+    return command + _raw_color_args(probe.video) + ["-f", profile.container, str(staging_output)]
+
+
+def _map_inputs(source: Path, plan: _RawMediaPlan) -> list[str]:
+    """map 추출의 입력 — 영상은 정확 탐색 없이 창 앞에서, 소리는 첫 슬롯 시각에서 `-t`만큼."""
+    assert plan.slot_window is not None
+    inputs = [
+        "-seek_timestamp", "1",
+        "-noaccurate_seek", "-ss", _format_us(plan.slot_window.seek, ceil=False),
+        "-i", str(source),
+    ]  # fmt: skip
+    if plan.mapped_audio:
+        inputs += [
+            "-seek_timestamp", "1",
+            "-ss", _format_us(plan.seek, ceil=False),
+            "-t", _format_us(plan.out_duration, ceil=True),
+            "-i", str(source),
+        ]  # fmt: skip
+    return inputs
+
+
+def _slot_video_filter(window: _SlotWindow) -> str:
+    """원점 상대로 옮겨 명목 눈금으로 슬롯을 고른 뒤 창만 남긴다 — 정수 틱·정수 슬롯 연산뿐이다."""
+    rate = window.rate
+    return (
+        f"setpts=PTS{window.origin_shift_ticks:+d},"
+        f"fps=fps={rate.numerator}/{rate.denominator}:round=near,"
+        f"trim=start_pts={window.first_slot}:end_pts={window.after_slot},"
+        f"setpts=PTS-{window.first_slot}"
+    )
 
 
 def _snap_filter(plan: _RawMediaPlan) -> str:
@@ -3216,7 +3662,10 @@ def extract_raw_clip(
     extents = audio_extents if audio_extents is not None else probe_audio_extents(source)
     clip_handles = handles if handles is not None else RawClipHandles()
     _assert_raw_supported(media_probe, video_clock)
-    plan = _plan_raw_media(video_clock, source_range, clip_handles, extents)
+    declared_rate = media_probe.video.r_frame_rate
+    plan = _plan_raw_media(
+        video_clock, source_range, clip_handles, extents, declared_rate=declared_rate
+    )
     staging_output.parent.mkdir(parents=True, exist_ok=True)
     staged = _reserve_staging_temp(staging_output)
     try:

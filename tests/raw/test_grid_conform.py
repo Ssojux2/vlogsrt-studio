@@ -30,6 +30,9 @@ needs_ffmpeg = pytest.mark.skipif(
 IPHONE_TB = "1/600"
 IPHONE_RATE = "30/1"
 T = 20  # 30fps를 1/600에 담은 프레임 길이(틱)
+SNAP_ONLY = GridConformPolicy()
+"""W-27b 판의 규칙 — snap만(빈 슬롯 0 · 다시 고르기 없음). 아래 「받지 않는다」 시험은 이 판의
+경계를 본다. 기본 정책(D70)은 같은 모양을 map으로 받는다 — `tests/raw/test_grid_map.py`."""
 
 
 def _packets(deltas: list[int], *, start: int = 0) -> list[int]:
@@ -113,8 +116,12 @@ def test_nine_ticks_is_still_under_half_a_frame(
 def test_ten_ticks_is_half_a_frame_and_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, offset: int
 ) -> None:
-    """반 프레임이면 가장 가까운 슬롯이 둘이다 — 맞추지 않는다(floor((T−1)/2) = 9틱이 끝)."""
-    clock = _clock(monkeypatch, tmp_path, _stream_json(_one_off(offset)))
+    """반 프레임이면 가장 가까운 슬롯이 둘이다 — snap이 아니다(floor((T−1)/2) = 9틱이 끝).
+
+    snap만 아는 판은 거부한다. 기본 정책은 가운데 붙잡기로 받는다(동점은 뒤 슬롯 — +10은 빈 슬롯
+    하나, −10은 항등이지만 반 프레임이라 map, D70).
+    """
+    clock = _clock(monkeypatch, tmp_path, _stream_json(_one_off(offset)), policy=SNAP_ONLY)
     assert clock.uniform_grid is False
     assert (clock.conform_kind, clock.max_deviation_ticks) == ("uniform", 0)  # 뜻 없는 기본값
     assert "격자를 벗어났습니다" in clock.grid_note  # 엄격한 증명의 말은 그대로
@@ -129,12 +136,12 @@ def test_one_dropped_frame_is_refused_naming_the_empty_slot(
 ) -> None:
     """IMG_8877·8871 모양: 지터 끝에 한 슬롯을 건너뛴다(패킷 411개가 슬롯 412칸을 덮는다)."""
     deltas = [20] * 410 + [31] + [20] * 40  # 순번 411이 +11틱 → 가장 가까운 슬롯은 412
-    clock = _clock(monkeypatch, tmp_path, _stream_json(_packets(deltas)))
+    clock = _clock(monkeypatch, tmp_path, _stream_json(_packets(deltas)), policy=SNAP_ONLY)
     assert clock.uniform_grid is False
     assert "슬롯 411이 비었다" in clock.grid_note
 
     dropped = _packets([20] * 200 + [40] + [20] * 50)  # 프레임 하나를 통째로 떨어뜨림
-    clock = _clock(monkeypatch, tmp_path, _stream_json(dropped))
+    clock = _clock(monkeypatch, tmp_path, _stream_json(dropped), policy=SNAP_ONLY)
     assert clock.uniform_grid is False and "슬롯 201이 비었다" in clock.grid_note
 
 
@@ -143,7 +150,7 @@ def test_the_8858_rate_switch_shape_is_refused(
 ) -> None:
     """IMG_8858: r=24(T=25)인데 뒤가 30fps(20틱)다 — 두 패킷이 한 슬롯에 떨어진다."""
     pts = _packets([25] * 150 + [20] * 80)
-    clock = _clock(monkeypatch, tmp_path, _stream_json(pts, rate="24/1"))
+    clock = _clock(monkeypatch, tmp_path, _stream_json(pts, rate="24/1"), policy=SNAP_ONLY)
     assert clock.uniform_grid is False
     assert "앞 패킷과 같은 슬롯" in clock.grid_note
 
@@ -153,7 +160,8 @@ def test_the_8850_120fps_declaration_is_refused(
 ) -> None:
     """IMG_8850: r=120(T=5)인데 패킷은 20틱 간격 — 슬롯 1·2·3이 비었다."""
     pts = _packets([20] * 188)
-    clock = _clock(monkeypatch, tmp_path, _stream_json(pts, rate="120/1", avg="30/1"))
+    stdout = _stream_json(pts, rate="120/1", avg="30/1")
+    clock = _clock(monkeypatch, tmp_path, stdout, policy=SNAP_ONLY)
     assert clock.uniform_grid is False
     assert "슬롯 1이 비었다" in clock.grid_note
 
@@ -199,10 +207,13 @@ def test_a_uniform_clock_is_byte_for_byte_what_it_was(
 
 
 def test_the_policy_is_frozen_config_and_rejects_impossible_bounds() -> None:
-    expected = GridConformPolicy(
+    """정책 기본값은 W-27b 판(snap만)이다 — 원본 경계의 정책(`RAW_GRID_CONFORM`)은 D70이 연다."""
+    narrow = GridConformPolicy(
         max_dropped_slots=0, half_frame_bound=Fraction(1, 2), allow_rate_remap=False
     )
-    assert expected == preprocess.RAW_GRID_CONFORM
+    assert narrow == SNAP_ONLY
+    assert SNAP_ONLY.maps is False
+    assert preprocess.RAW_GRID_CONFORM.half_frame_bound == Fraction(1, 2)
     with pytest.raises(ValueError):
         GridConformPolicy(half_frame_bound=Fraction(3, 4))  # 슬롯이 둘이 된다
     with pytest.raises(ValueError):
@@ -212,11 +223,14 @@ def test_the_policy_is_frozen_config_and_rejects_impossible_bounds() -> None:
 def test_a_tighter_policy_refuses_and_a_map_policy_is_not_silently_used(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """좁은 정책은 거부한다. map을 여는 정책도 Final Cut 레이트 목록이 비면 아무것도 맞추지 않는다
+    (W-27b 판에서는 이 정책이 측정째 죽었다 — map 갈래가 생겨 거부 까닭이 된다, D70)."""
     stdout = _stream_json(_one_off(3))
     tight = GridConformPolicy(half_frame_bound=Fraction(1, 10))  # 2틱 미만만
     assert _clock(monkeypatch, tmp_path, stdout, policy=tight).uniform_grid is False
-    with pytest.raises(RuntimeError, match="map 갈래"):
-        _clock(monkeypatch, tmp_path, stdout, policy=GridConformPolicy(max_dropped_slots=1))
+    bare_map = GridConformPolicy(half_frame_bound=Fraction(1, 10), max_dropped_slots=1)
+    clock = _clock(monkeypatch, tmp_path, stdout, policy=bare_map)
+    assert clock.uniform_grid is False and "Final Cut 프레임 레이트가 아니다" in clock.grid_note
 
 
 def test_caption_and_thumbnail_provers_stay_strict(

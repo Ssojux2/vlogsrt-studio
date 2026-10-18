@@ -357,15 +357,18 @@ def test_clock_measures_the_grid_and_exposes_the_vfr_fact(
     assert clock.frame_count == 100
     assert clock.exact_end == Fraction(256, 12800) + 100 * Fraction(1, 25)
 
-    # 30번째 프레임을 반 프레임(256틱) 밀면 격자 증명이 실패하고, 그 사실이 글자로 남는다 —
-    # 반 프레임 미만의 지터는 명목 격자에 맞춰 받으므로(D69) 그 경계 바로 위를 민다.
+    # 30·60번째 프레임을 반 프레임(256틱) 밀면 격자 증명이 실패하고, 그 사실이 글자로 남는다 —
+    # 반 프레임 미만의 지터는 명목 격자에 맞춰 받고(D69), 반 프레임 한 번은 빈 슬롯 하나로
+    # 받으므로(D70 — 100슬롯의 허용은 1칸) 빈 슬롯 둘을 만든다. 시험 재료를 바꿨다(임계값 아님).
     jittered = list(uniform)
     jittered[30] += 256
+    jittered[60] += 256
     _fake_ffprobe(monkeypatch, _clock_json(jittered))
     vfr = preprocess.probe_extraction_clock(tmp_path / "vfr.mp4")
     assert vfr.uniform_grid is False
     assert "격자를 벗어났습니다" in vfr.grid_note
     assert "격자 맞춤 불가" in vfr.grid_note
+    assert "빈 슬롯 2칸" in vfr.grid_note and "허용 1칸" in vfr.grid_note
 
 
 def test_clock_declared_mismatch_is_a_note_not_a_vfr_verdict(

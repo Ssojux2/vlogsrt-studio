@@ -593,6 +593,10 @@ class VideoGrid:
     presentation_origin: Fraction
     frame_duration: Fraction
     frame_count: int
+    slot_packets: tuple[int, ...] = ()
+    """map 시계(D70)만 — 슬롯 → 보이는 패킷 순번(`RawVideoClock.slot_packets`). 프레임 번호는
+    언제나 슬롯이고, 표본 추출이 이 대응으로 패킷을 고른다. 있으면 지문이 맞춤 규칙 판
+    (`preprocess.GRID_CONFORM_TAG`)을 싣는다. 균일·snap은 빈 튜플(번호 = 패킷 순번)."""
 
     @property
     def extent(self) -> Fraction:

@@ -107,9 +107,18 @@ def _sample_points(clock: Any) -> tuple[Fraction, ...]:
 
 
 def _lattice_rejection(a: Any, b: Any, exact_origin: bool) -> PairValidation | None:
-    """격자·원점이 대응을 허락하는가 — 프레임을 하나도 디코드하기 전의 검사."""
+    """격자·원점이 대응을 허락하는가 — 프레임을 하나도 디코드하기 전의 검사.
+
+    map 원본(D70)은 슬롯 → 패킷 대응까지 같아야 한다 — 프록시는 원본 pts를 그대로 이어받으므로
+    (`-copyts`·패스스루) 같은 대응이 나온다. 대응이 다른 짝(예: 고른 레이트로 다시 만든 사본)은
+    같은 슬롯에 다른 프레임을 보이므로 잇지 않는다. 균일·snap은 둘 다 빈 대응이라 예전 판정이다.
+    """
     if not a.uniform_grid or not b.uniform_grid:
         return PairValidation("rejected", "불균일 프레임 시간은 자동 연결하지 않습니다")
+    if (a.conform_kind == "map" or b.conform_kind == "map") and (
+        a.conform_kind != b.conform_kind or a.slot_packets != b.slot_packets
+    ):
+        return PairValidation("rejected", "프레임 격자 맞춤(슬롯 대응)이 일치하지 않습니다")
     origin_gap = abs(a.presentation_origin - b.presentation_origin)
     if (
         a.frame_duration != b.frame_duration
@@ -660,14 +669,24 @@ def _frames_original(workspace: Any, asset: Any) -> Path | None:
     return None if is_fcp_proxy else path
 
 
-def frames_fingerprint(workspace: Any, asset_id: str) -> str:
+def frames_fingerprint(workspace: Any, asset_id: str, *, mapped: bool = False) -> str:
     """프레임을 디코드하는 바이트의 지문 — 프레임·장면 캐시처럼 디코드에서 나온 로컬 캐시 전용.
 
     분석 프록시에서 디코드한 프레임은 원본 프레임과 다른 바이트라 조리법을 얹어 그 캐시를
     가른다. 저장된 분석의 재사용·견적·과금 키는 `fingerprint`다 — 거기에 조리법을 실으면
     프록시 이전에 끝낸(돈을 낸) 분석이 낡아 보여 다시 청구된다(D47). 이 프로세스에서
     만들기에 실패해 원본으로 가는 중이면 `fingerprint` 그대로다 — `resolve` 뒤에 읽는다.
+    `mapped`(map 시계, D70)면 맞춤 규칙 판을 끝에 얹는다 — 슬롯이 보이는 프레임이 규칙에서 나온다.
     """
+    return _frames_material(workspace, asset_id) + _conform_suffix(mapped)
+
+
+def _conform_suffix(mapped: bool) -> str:
+    """map 원본(D70)의 프레임 출처 꼬리 — 균일·snap은 빈 글자(지문 바이트 그대로)."""
+    return f"+{preprocess.GRID_CONFORM_TAG}" if mapped else ""
+
+
+def _frames_material(workspace: Any, asset_id: str) -> str:
     base = fingerprint(workspace, asset_id)
     asset = workspace.source_asset(asset_id)
     original = _frames_original(workspace, asset)
@@ -680,20 +699,20 @@ def frames_fingerprint(workspace: Any, asset_id: str) -> str:
 
 
 def frames_decode_source(
-    workspace: Any, asset: Any, recorded: str | None = None
+    workspace: Any, asset: Any, recorded: str | None = None, *, mapped: bool = False
 ) -> tuple[Path, str]:
     """프레임을 디코드할 경로와 그 출처의 `frames_fingerprint`.
 
     `recorded`는 앞선 단계(1단계 기록)가 실제로 디코드한 출처다. 그것이 분석 프록시를 거치지
     않은 출처(`fingerprint` 그대로 — 프록시 이전이거나 그 실행에서 만들기에 실패했다)면 지금
     프록시가 있어도 같은 출처를 다시 읽는다. 장면 컷이 출처에 따라 달라지면 2단계의 실측 지문이
-    1단계와 어긋나 유료 1단계를 다시 돌려야 하기 때문이다.
+    1단계와 어긋나 유료 1단계를 다시 돌려야 하기 때문이다. `mapped`는 `frames_fingerprint`와 같다.
     """
-    base = fingerprint(workspace, asset.asset_id)
+    base = fingerprint(workspace, asset.asset_id) + _conform_suffix(mapped)
     if recorded is not None and recorded == base:
         return _resolve_media(workspace, asset, "frames")[0], base
     path = resolve(workspace, asset, "frames")
-    return path, frames_fingerprint(workspace, asset.asset_id)
+    return path, frames_fingerprint(workspace, asset.asset_id, mapped=mapped)
 
 
 def relink_original(workspace: Any, asset_id: str, original: Path) -> dict:
@@ -715,6 +734,8 @@ class _FrameSampler:
     decode_timeout_seconds: float
     """묶음 추출 한 번(출처를 통째로 한 번 디코드)의 한도 — 원본 길이로 정한다(D59)."""
     batch_attempts: dict[tuple[int, int], str] = field(default_factory=dict, compare=False)
+    slot_packets: tuple[int, ...] = ()
+    """map 원본(D70)이면 슬롯 → 패킷 순번 — 프레임 번호는 슬롯이다(캐시 이름도 슬롯)."""
 
     def _cached(self, index: int, edge: int) -> Path | None:
         cached = self.cache_directory / f"{self.stream_index}-{index}-{edge}.jpg"
@@ -758,6 +779,7 @@ class _FrameSampler:
                 long_edge=long_edge,
                 timeout_seconds=self.decode_timeout_seconds,
                 on_frame=lambda index, path: self._cache(index, long_edge, path),
+                slot_packets=self.slot_packets,
             )
         except Exception as error:
             for index in missing:
@@ -775,23 +797,33 @@ class _FrameSampler:
         if (frame_index, long_edge) in self.batch_attempts:
             raise RuntimeError(self.batch_attempts[(frame_index, long_edge)])
         path = preprocess.extract_frame_index(
-            self.source, self.stream_index, frame_index, destination, long_edge=long_edge
+            self.source,
+            self.stream_index,
+            frame_index,
+            destination,
+            long_edge=long_edge,
+            slot_packets=self.slot_packets,
         )
         self._cache(frame_index, long_edge, path)
         return path
 
 
-def frame_sampler(workspace: Any, asset: Any) -> Any:
+def frame_sampler(workspace: Any, asset: Any, *, slot_packets: tuple[int, ...] = ()) -> Any:
+    """원본(또는 검증된 프록시)의 프레임 표본기 — `slot_packets`는 원본 map 시계의 대응이다(D70).
+
+    프록시는 짝 검증이 같은 슬롯 대응을 요구했으므로(`_lattice_rejection`) 원본의 대응을 그대로
+    쓴다.
+    """
     path = resolve(workspace, asset, "frames")
     # Candidate frames remain on the source frame lattice; validated pairs have
     # exactly matching rate/count and a measured origin mapping. 분석 프록시의 프레임은
     # 다른 바이트라 지문(조리법 포함)이 캐시 폴더를 가른다 — resolve가 먼저 정한 뒤에 읽는다.
-    key = hashlib.sha256(
-        (asset.content_sha256 + frames_fingerprint(workspace, asset.asset_id)).encode()
-    ).hexdigest()
+    source = frames_fingerprint(workspace, asset.asset_id, mapped=bool(slot_packets))
+    key = hashlib.sha256((asset.content_sha256 + source).encode()).hexdigest()
     return _FrameSampler(
         path,
         preprocess.probe_raw_media(path).video.stream_index,
         workspace.root / "cache" / "source-frames" / key,
         ANALYSIS_PROXY_LIMITS.frame_batch_timeout(asset.duration_seconds),
+        slot_packets=slot_packets,
     )

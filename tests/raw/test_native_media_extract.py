@@ -479,13 +479,15 @@ def rotated(media: Path) -> Path:
 
 @pytest.fixture(scope="session")
 def vfr(media: Path) -> Path:
+    """20 → 30fps 이어 붙이기 — 명목 레이트(간격 길이 몫이 가장 큰 20fps)가 Final Cut 레이트가
+    아니라 격자 맞춤(D70)도 받지 못한다. 예전 25 → 30fps 재료는 map으로 받으므로 바꿨다(재료만)."""
     path = media / "vfr.mp4"
     _encode(
         [
             "-f",
             "lavfi",
             "-i",
-            "testsrc2=size=160x90:rate=25:duration=1",
+            "testsrc2=size=160x90:rate=20:duration=1",
             "-f",
             "lavfi",
             "-i",
@@ -891,6 +893,7 @@ def test_vfr_is_measured_and_refused(vfr: Path, tmp_path: Path) -> None:
     clock = probe_extraction_clock(vfr)
     assert clock.uniform_grid is False
     assert clock.grid_note
+    assert "Final Cut 프레임 레이트가 아니다" in clock.grid_note  # 맞춤(D70)도 받지 못한 까닭
     with pytest.raises(RawMediaUnsupported, match="VFR"):
         extract_raw_clip(
             vfr, tmp_path / "no.mp4", clock_frame_range(clock, 0, 10), RAW_SOURCE_MATCHED

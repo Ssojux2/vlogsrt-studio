@@ -54,17 +54,24 @@ def make_cfr(path: Path, seconds: str) -> Path:
 
 
 def make_vfr(path: Path) -> Path:
-    """가운데서 25 → 30fps로 바뀌는 합성 원본 — 아이폰처럼 격자를 증명하지 못한다."""
+    """가운데서 20 → 30fps로 바뀌는 합성 원본 — 격자를 증명하지 못하고 맞추지도 못한다.
+
+    W-27c(D70)부터 25 → 30fps(예전 재료)는 map으로 받는다(명목 25fps, 30fps 쪽은 겹친 패킷).
+    지원 밖 길을 계속 보이려고 앞쪽을 20fps로 바꿨다 — 간격 길이 몫이 가장 큰 명목 레이트가 20fps라
+    Final Cut 프레임 레이트가 아니다. 시험 재료를 바꿨을 뿐 판정 기준은 그대로다.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     _ffmpeg(
-        "-f", "lavfi", "-i", "testsrc2=size=160x90:rate=25:duration=2",
+        "-f", "lavfi", "-i", "testsrc2=size=160x90:rate=20:duration=2",
         "-f", "lavfi", "-i", "testsrc2=size=160x90:rate=30:duration=2",
         "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=4",
         "-filter_complex", "[0:v][1:v]concat=n=2:v=1:a=0[v]", "-map", "[v]", "-map", "2:a",
         "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
         "-fps_mode", "passthrough", "-c:a", "aac", "-b:a", "64k", str(path),
     )  # fmt: skip
-    assert not preprocess.probe_extraction_clock(path).uniform_grid  # 재료가 정말 VFR이다
+    clock = preprocess.probe_extraction_clock(path)
+    assert not clock.uniform_grid  # 재료가 정말 VFR이다
+    assert "Final Cut 프레임 레이트가 아니다" in clock.grid_note  # 맞춤(D70)도 받지 못한다
     return path
 
 
