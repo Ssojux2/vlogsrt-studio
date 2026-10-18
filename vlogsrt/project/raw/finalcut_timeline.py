@@ -22,6 +22,13 @@
   가운데서만 W-16 규칙(원본 길이가 가장 긴 포맷)으로 고른다. 한쪽 방향뿐이면 바이트가 W-16
   그대로다. 소수 쪽 클립은 제 포맷 그대로 두고 맞춤 지시(`adjust-conform`)를 적지 않는다 —
   Final Cut 기본(fit)이다.
+- **프레임레이트가 섞이면 많은 쪽 레이트 하나다(W-27d, D71).** 고른 방향 안에서 켠 클립 길이(초)가
+  많은 레이트가 시퀀스 레이트다(같으면 설정의 편). 소수 쪽 클립은 제 포맷 그대로이고 첫 자식에
+  `conform-rate scaleEnabled="0"`을 적는다 — 프레임을 1:1로 얹으면(scaleEnabled="1") 시간이
+  늘거나 줄어 D42의 1.36초 사고가 된다. 그 클립의 위치·길이는 시퀀스 격자이고, 원본마다 누적
+  경계를 가장 가까운 시퀀스 프레임에 맞춰(½프레임 이내) 오차가 쌓이지 않으며, 마지막 클립만 남은
+  미디어로 내려 원본 끝을 넘지 않는다. 시작·캡션·키워드 범위는 클립 안 시각(원본 격자) 그대로다.
+  레이트가 하나면 바이트가 W-27d 앞 그대로다.
 """
 
 from __future__ import annotations
@@ -41,10 +48,12 @@ from vlogsrt.project.fcp_tables import (
     AUDIO_LAYOUTS,
     AUDIO_RATE_TAGS,
     COLOR_SPACES,
+    CONFORM_RATES,
     FRAME_RATE_TAGS,
 )
 from vlogsrt.project.raw.config import (
     FINALCUT_TIMELINE,
+    FRAME_RATE_HIGHER,
     ORIENTATION_LANDSCAPE,
     ORIENTATION_PORTRAIT,
     FinalCutTimelineSettings,
@@ -58,7 +67,7 @@ from vlogsrt.project.raw.tiering import (
     TierReport,
     segment_keyword,
 )
-from vlogsrt.project.timebase import format_srt_time, frame_nearest
+from vlogsrt.project.timebase import format_srt_time, frame_floor, frame_nearest
 
 _Key = TypeVar("_Key")
 
@@ -97,6 +106,8 @@ CAPTION_START = "3600s"
 CAPTION_MAX_LINES = 2
 AUDIO_ROLE = "dialogue"
 SEQUENCE_TC_START = "0s"
+CONFORM_KEEP_TIME = "0"
+"""`conform-rate@scaleEnabled` — 0이면 클립의 시간을 지킨다(Final Cut 자신의 내보내기 철자)."""
 RATING_FAVORITE = "favorite"
 TC_DROP, TC_NON_DROP = "DF", "NDF"
 _DROP_FRAME_DURATIONS = frozenset({Fraction(1001, 30000), Fraction(1001, 60000)})
@@ -247,6 +258,11 @@ class SourcePlan:
     browser: tuple[BrowserRange, ...] | None
     caption_timing: bool = False
     """자막 시각 확인(D55)이 지금 빨강이라고 한 원본 — 모든 클립과 브라우저 클립에 키워드만 단다."""
+    sequence_frames: tuple[int, ...] = ()
+    """클립마다 시퀀스 프레임 수 — 시퀀스와 레이트가 다른 원본에만 있다(비면 원본 프레임 그대로,
+    W-27d)."""
+    sequence_padded: int = 0
+    """시퀀스 1프레임이 안 돼 1프레임으로 늘린 클립 수 — 고치지 않고 센다."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -272,6 +288,8 @@ class TimelineDocument:
     sequence_drop_frame: bool
     sequence_audio: tuple[int, int] | None
     sources: tuple[SourcePlan, ...]
+    sequence_frame_duration: Fraction
+    """시퀀스 포맷의 프레임 길이 — 스파인의 위치·길이가 이 격자에 선다(W-27d)."""
 
 
 # ── 원본 하나 ────────────────────────────────────────────────────────────
@@ -548,16 +566,6 @@ def _dominant(uses: Sequence[tuple[_Key, int]]) -> _Key:
     return max(totals, key=lambda key: totals[key])
 
 
-def _require_one_rate(plans: Sequence[SourcePlan]) -> None:
-    """프레임레이트가 섞이면 거부한다 — 맞추면 그 리샘플링이 1.36초 사고를 다시 낸다."""
-    groups: dict[Fraction, list[str]] = {}
-    for plan in plans:
-        groups.setdefault(plan.media.frame_duration, []).append(plan.media.name)
-    if len(groups) > 1:
-        listed = " / ".join(f"{fd}초: {', '.join(names)}" for fd, names in groups.items())
-        raise FinalCutTimelineError(f"프레임레이트가 섞였다 — 맞추지 않고 거부한다: {listed}")
-
-
 def _format_key(plan: SourcePlan) -> tuple[int, int, Fraction, str | None]:
     media = plan.media
     return media.width, media.height, media.frame_duration, plan.color_space
@@ -585,42 +593,114 @@ def _media_orientation(media: SourceMedia) -> str:
     return orientation_of(media.width, media.height)
 
 
-def _orientation_frames(plans: Sequence[SourcePlan]) -> dict[str, int]:
-    """방향마다 스파인 클립 프레임 합 — 켠 클립만 센다. 켠 클립이 하나도 없으면 모든 클립이다
-    (사람이 전부 끈 타임라인도 방향은 있어야 한다)."""
+def _voting_seconds(plans: Sequence[SourcePlan]) -> list[tuple[SourcePlan, Fraction]]:
+    """원본마다 표가 되는 길이(초) — 켠 클립만 센다. 켠 클립이 하나도 없으면 모든 클립이다
+    (사람이 전부 끈 타임라인도 방향·레이트는 있어야 한다). 레이트가 섞이면 프레임 수는 서로 다른
+    시간이라 초로 잰다 — 레이트가 하나면 같은 배수라 프레임으로 잰 것과 순서가 같다."""
     any_enabled = any(clip.enabled for plan in plans for clip in plan.clips)
-    totals = {ORIENTATION_LANDSCAPE: 0, ORIENTATION_PORTRAIT: 0}
-    for plan in plans:
-        side = _media_orientation(plan.media)
-        for clip in plan.clips:
-            if clip.enabled or not any_enabled:
-                totals[side] += clip.end_frame - clip.start_frame
+    return [
+        (
+            plan,
+            plan.media.frame_duration
+            * sum(
+                clip.end_frame - clip.start_frame
+                for clip in plan.clips
+                if clip.enabled or not any_enabled
+            ),
+        )
+        for plan in plans
+    ]
+
+
+def _orientation_seconds(plans: Sequence[SourcePlan]) -> dict[str, Fraction]:
+    """방향마다 켠 스파인 클립 길이(초) 합(D66)."""
+    totals = {ORIENTATION_LANDSCAPE: Fraction(), ORIENTATION_PORTRAIT: Fraction()}
+    for plan, seconds in _voting_seconds(plans):
+        totals[_media_orientation(plan.media)] += seconds
     return totals
 
 
 def _sequence_orientation(plans: Sequence[SourcePlan], settings: FinalCutTimelineSettings) -> str:
-    totals = _orientation_frames(plans)
+    totals = _orientation_seconds(plans)
     landscape, portrait = totals[ORIENTATION_LANDSCAPE], totals[ORIENTATION_PORTRAIT]
     if landscape == portrait:
         return settings.orientation_tie
     return ORIENTATION_LANDSCAPE if landscape > portrait else ORIENTATION_PORTRAIT
 
 
+def _sequence_rate(
+    plans: Sequence[SourcePlan], side: str, settings: FinalCutTimelineSettings
+) -> Fraction:
+    """시퀀스 프레임 길이 — 고른 방향 안에서 켠 길이(초)가 가장 많은 레이트(W-27d, D71).
+
+    예전에는 섞이면 거부했다(D42·D66). 이제 소수 쪽은 시간을 지키며 맞춰 재생된다. 길이가 같은
+    레이트가 여럿이면 설정의 편(`frame_rate_tie`) — 높은 레이트는 프레임 길이가 짧은 쪽이다.
+    고른 방향의 표는 0보다 크므로(`_sequence_format`) 늘 레이트가 하나 이상 있다.
+    """
+    totals: dict[Fraction, Fraction] = {}
+    for plan, seconds in _voting_seconds(plans):
+        if _media_orientation(plan.media) == side:
+            fd = plan.media.frame_duration
+            totals[fd] = totals.get(fd, Fraction()) + seconds
+    most = max(totals.values())
+    tied = [fd for fd, seconds in totals.items() if seconds == most]
+    return min(tied) if settings.frame_rate_tie == FRAME_RATE_HIGHER else max(tied)
+
+
 def _sequence_format(
     plans: Sequence[SourcePlan],
     ids: dict[tuple[int, int, Fraction, str | None], str],
     settings: FinalCutTimelineSettings,
-) -> str:
-    """시퀀스 포맷 — 많은 쪽 방향의 포맷 가운데 W-16 규칙(원본 길이가 가장 긴 것) 그대로.
+) -> tuple[str, Fraction]:
+    """시퀀스 포맷과 프레임 길이 — 방향(D66) → 그 안의 레이트(D71) → 그 (방향·레이트)의 포맷
+    가운데 W-16 규칙(원본 길이가 가장 긴 것) 그대로.
 
-    방향의 표는 켠 길이로 세지만 그 안의 고르기는 바꾸지 않는다 — 한쪽 방향뿐이면 거르는 것이
-    없으므로 W-16과 같은 포맷이 나온다(D66). 고른 방향에는 늘 원본이 있다: 이긴 쪽은 0보다 크고,
-    같으면 두 쪽 다 0보다 크다(원본마다 클립이 1프레임 이상을 덮고, 켠 클립이 없으면 모든 클립이
-    표다).
+    방향·레이트의 표는 켠 길이로 세지만 그 안의 고르기는 바꾸지 않는다 — 한쪽 방향·한 레이트뿐이면
+    거르는 것이 없으므로 W-16과 같은 포맷이 나온다. 고른 방향에는 늘 원본이 있다: 이긴 쪽은 0보다
+    크고, 같으면 두 쪽 다 0보다 크다(원본마다 클립이 1프레임 이상을 덮고, 켠 클립이 없으면 모든
+    클립이 표다). 이긴 레이트도 같은 까닭으로 0보다 크다.
     """
     side = _sequence_orientation(plans, settings)
-    chosen = [p for p in plans if _media_orientation(p.media) == side]
-    return _dominant([(ids[_format_key(p)], p.media.frame_count) for p in chosen])
+    rate = _sequence_rate(plans, side, settings)
+    chosen = [
+        p for p in plans if _media_orientation(p.media) == side and p.media.frame_duration == rate
+    ]
+    return _dominant([(ids[_format_key(p)], p.media.frame_count) for p in chosen]), rate
+
+
+def _sequence_layout(plan: SourcePlan, sequence_fd: Fraction) -> tuple[tuple[int, ...], int]:
+    """레이트가 다른 원본의 클립마다 시퀀스 프레임 수와, 1프레임으로 늘린 클립 수(W-27d, D71).
+
+    클립마다 따로 반올림하면 오차가 클립 수만큼 쌓인다(25프레임 @24 = 31.25프레임 @30 — 200개면
+    1.7초). 그래서 원본 안의 **누적 경계**를 가장 가까운 시퀀스 프레임에 맞추고 그 차를 쓴다 —
+    안쪽 컷마다 ½프레임 이내이고 쌓이지 않는다. **마지막 클립만 남은 미디어로 내림**이다: 그 클립의
+    시작은 원본 시각 그대로라 끝 = 시작 + 시퀀스 길이이고, 앞 경계가 내려 맞춰졌으면 가장 가까운
+    끝(또는 원본 끝의 내림)도 원본에 없는 미디어를 가리킨다(Final Cut 자신의 내보내기에는 그런
+    클립이 없다). 그래서 마지막 길이는 남은 미디어를 넘지 않는 가장 긴 프레임 수다 — 1프레임 안의
+    꼬리만 보이지 않는다. 두 경계가 같은 프레임에 떨어지면(시퀀스 1프레임보다 짧은 조각) 0프레임
+    클립은 쓸 수 없어 1프레임으로 늘리고 세며, 다음 경계부터 다시 제 규칙으로 돌아간다. 시간은
+    원본 시계에서만 온다 — 격자에 맞출 뿐 유도하지 않는다.
+    """
+    fd = plan.media.frame_duration
+    last = len(plan.clips) - 1
+    edges = [0]
+    padded = 0
+    for index, clip in enumerate(plan.clips):
+        edge = frame_nearest(clip.end_frame * fd, sequence_fd)
+        if index == last:
+            remaining = (clip.end_frame - clip.start_frame) * fd
+            edge = min(edge, edges[-1] + frame_floor(remaining, sequence_fd))
+        padded += edge <= edges[-1]
+        edges.append(max(edge, edges[-1] + 1))
+    return tuple(b - a for a, b in zip(edges, edges[1:], strict=False)), padded
+
+
+def _with_sequence_layout(plan: SourcePlan, sequence_fd: Fraction) -> SourcePlan:
+    """시퀀스와 레이트가 같은 원본은 그대로 둔다 — 레이트가 하나면 계획이 W-27d 앞과 같다."""
+    if plan.media.frame_duration == sequence_fd:
+        return plan
+    frames, padded = _sequence_layout(plan, sequence_fd)
+    return replace(plan, sequence_frames=frames, sequence_padded=padded)
 
 
 def _sequence_audio(plans: Sequence[SourcePlan]) -> tuple[int, int] | None:
@@ -635,6 +715,14 @@ def _sequence_audio(plans: Sequence[SourcePlan]) -> tuple[int, int] | None:
     return _dominant(uses) if uses else None
 
 
+def _sequence_drop_frame(plans: Sequence[SourcePlan], sequence_fd: Fraction) -> bool:
+    """시퀀스 타임코드 형식 — 시퀀스 레이트의 원본만 정한다(D71). 30p 프로젝트에 29.97 DF 소수가
+    DF를 끌어오면 성립하지 않는 선언이 된다(드롭프레임은 29.97·59.94에서만). 레이트가 하나면
+    모든 원본이라 W-16 그대로다."""
+    majority = [p for p in plans if p.media.frame_duration == sequence_fd]
+    return _dominant([(p.media.drop_frame, p.media.frame_count) for p in majority])
+
+
 def plan(
     sources: Sequence[SourceInput],
     *,
@@ -647,7 +735,7 @@ def plan(
 
     `caption_timing`은 자막 시각 확인(D55)이 **지금 빨강**이라고 한 원본 ID다 — 고르는 일은
     내보내기 계층(서비스)이 저장된 보고서를 읽어 하고, 여기는 값으로 받아 키워드만 단다.
-    비어 있으면 문서는 W-16과 바이트까지 같다. `settings`는 프로젝트 방향의 규칙이다(D66).
+    비어 있으면 문서는 W-16과 바이트까지 같다. `settings`는 방향·레이트 규칙이다(D66·D71).
     """
     if not sources:
         raise FinalCutTimelineError("보낼 원본이 하나도 없다")
@@ -662,18 +750,17 @@ def plan(
         plan_source(source, caption_timing=source.media.source_id in caption_timing)
         for source in sources
     )
-    _require_one_rate(plans)
     formats = _formats(plans)
-    ids = _format_ids(formats)
-    drop = _dominant([(p.media.drop_frame, p.media.frame_count) for p in plans])
+    sequence_format, sequence_fd = _sequence_format(plans, _format_ids(formats), settings)
     return TimelineDocument(
         title=title,
         library_location=None if library_bundle is None else _library_uri(library_bundle),
         formats=formats,
-        sequence_format=_sequence_format(plans, ids, settings),
-        sequence_drop_frame=drop,
+        sequence_format=sequence_format,
+        sequence_drop_frame=_sequence_drop_frame(plans, sequence_fd),
         sequence_audio=_sequence_audio(plans),
-        sources=plans,
+        sources=tuple(_with_sequence_layout(p, sequence_fd) for p in plans),
+        sequence_frame_duration=sequence_fd,
     )
 
 
@@ -713,6 +800,24 @@ def document_counts(document: TimelineDocument) -> dict[str, object]:
         "unknown_color": [s.media.name for s in document.sources if s.color_space is None],
         "formats": len(document.formats),
         "orientation": _document_orientation(document),
+        **_rate_counts(document),
+    }
+
+
+def _rate_counts(document: TimelineDocument) -> dict[str, object]:
+    """프로젝트 레이트와 그에 맞춰 재생되는 소수 쪽(W-27d, D71) — 리포트 JSON과 화면 문구에만 싣고
+    문서 바이트와 무관하다. `frames`(원본 프레임 합)는 그대로 두고 시퀀스 길이는 따로 센다."""
+    sequence_fd = document.sequence_frame_duration
+    conformed = [s for s in document.sources if s.media.frame_duration != sequence_fd]
+    fates = Counter(fate for s in conformed for fate in _caption_fates(s, sequence_fd))
+    return {
+        "frame_rate": CONFORM_RATES[sequence_fd],
+        "sequence_frames": sum(sum(_sequence_frames(s)) for s in document.sources),
+        "conformed_sources": [s.media.name for s in conformed],
+        "conformed_clips": sum(len(s.clips) for s in conformed),
+        "conformed_padded_clips": sum(s.sequence_padded for s in conformed),
+        "conformed_clamped_captions": fates[_CAPTION_CLAMPED],
+        "conformed_hidden_captions": fates[_CAPTION_HIDDEN],
     }
 
 
@@ -734,6 +839,13 @@ def _time(frames: int, frame_duration: Fraction) -> str:
     if frame_duration.denominator == 1:
         return f"{numerator}s"
     return f"{numerator}/{frame_duration.denominator}s"
+
+
+def _seconds(value: Fraction) -> str:
+    """격자 밖 시각(잘린 캡션 꼬리) → FCPXML 시간. 약분한 유리수 그대로 적는다."""
+    if value.denominator == 1:
+        return f"{value.numerator}s"
+    return f"{value.numerator}/{value.denominator}s"
 
 
 def _tc_format(drop_frame: bool) -> str:
@@ -790,14 +902,21 @@ def _asset_element(parent: ET.Element, asset_id: str, format_id: str, media: Sou
 
 
 def _clip_attrib(
-    asset_id: str, format_id: str, media: SourceMedia, start_frame: int, frames: int
+    asset_id: str,
+    format_id: str,
+    media: SourceMedia,
+    start_frame: int,
+    frames: int,
+    duration: str | None = None,
 ) -> dict[str, str]:
+    """클립 속성 — `start`는 원본 격자, `duration`은 부모 시간이다. 스파인 클립은 시퀀스 격자의
+    길이를 넘기고(`duration`), 브라우저 클립은 원본 프레임 그대로다."""
     fd = media.frame_duration
     attrib = {
         "ref": asset_id,
         "name": media.name,
         "start": _time(media.timecode_frames + start_frame, fd),
-        "duration": _time(frames, fd),
+        "duration": _time(frames, fd) if duration is None else duration,
         "format": format_id,
         "tcFormat": _tc_format(media.drop_frame),
     }
@@ -828,14 +947,71 @@ def _browser_clip(parent: ET.Element, ids: tuple[str, str], plan: SourcePlan) ->
             _range_element(clip, "rating", media, row.start_frame, row.end_frame, RATING_FAVORITE)
 
 
-def _caption_element(parent: ET.Element, media: SourceMedia, piece: CaptionPiece) -> None:
+_CAPTION_KEPT, _CAPTION_CLAMPED, _CAPTION_HIDDEN = "kept", "clamped", "hidden"
+
+
+def _sequence_frames(plan: SourcePlan) -> tuple[int, ...]:
+    """클립마다 시퀀스 프레임 수 — 시퀀스와 레이트가 같은 원본은 원본 프레임 그대로다."""
+    return plan.sequence_frames or tuple(clip.end_frame - clip.start_frame for clip in plan.clips)
+
+
+def _local_ends(plan: SourcePlan, sequence_fd: Fraction) -> list[Fraction | None]:
+    """클립마다 보이는 끝의 클립 안 시각 — 시작(원본 격자) + 시퀀스 길이. 같은 레이트는 None이다.
+
+    `scaleEnabled="0"`이면 클립 안 시각이 그대로 시퀀스 시각으로 옮겨지므로(이동만), 시퀀스 길이가
+    원본 조각보다 짧으면(½프레임 이내) 이 시각 뒤는 보이지 않는다.
+    """
+    if not plan.sequence_frames:
+        return [None] * len(plan.clips)
+    media = plan.media
+    return [
+        (media.timecode_frames + clip.start_frame) * media.frame_duration + frames * sequence_fd
+        for clip, frames in zip(plan.clips, plan.sequence_frames, strict=True)
+    ]
+
+
+def _caption_fate(media: SourceMedia, piece: CaptionPiece, local_end: Fraction | None) -> str:
+    """캡션 조각이 클립 끝과 어떤가 — 그대로 · 꼬리를 그 끝에서 자름 · 보이는 끝 뒤에서 시작함.
+
+    뒤에서 시작하는 조각은 소수 쪽 원본 프레임이 시퀀스 프레임보다 짧을 때만 생긴다(경계 둘이
+    ½프레임씩 반대로 맞춰지면 클립이 시퀀스 1프레임 가까이 짧아진다 — 그 클립에서 보이지 않는
+    조각) — 길이 0 이하 캡션은 쓸 수 없어 넣지 않고 센다.
+    """
+    if local_end is None:
+        return _CAPTION_KEPT
     fd = media.frame_duration
+    if (media.timecode_frames + piece.start_frame) * fd >= local_end:
+        return _CAPTION_HIDDEN
+    if (media.timecode_frames + piece.end_frame) * fd > local_end:
+        return _CAPTION_CLAMPED
+    return _CAPTION_KEPT
+
+
+def _caption_fates(plan: SourcePlan, sequence_fd: Fraction) -> list[str]:
+    ends = _local_ends(plan, sequence_fd)
+    return [_caption_fate(plan.media, piece, ends[piece.clip_index]) for piece in plan.captions]
+
+
+def _caption_element(
+    parent: ET.Element, media: SourceMedia, piece: CaptionPiece, local_end: Fraction | None
+) -> None:
+    """캡션 하나 — 클립 안 시각(원본 격자). 소수 쪽 클립에서 꼬리가 보이는 끝을 넘으면 거기서
+    자른다(다음 클립의 캡션과 겹치지 않게). 글·시작은 그대로다."""
+    fate = _caption_fate(media, piece, local_end)
+    if fate == _CAPTION_HIDDEN:
+        return
+    fd = media.frame_duration
+    begin = media.timecode_frames + piece.start_frame
+    if fate == _CAPTION_CLAMPED and local_end is not None:
+        duration = _seconds(local_end - begin * fd)
+    else:
+        duration = _time(piece.end_frame - piece.start_frame, fd)
     attrib = {
         "lane": CAPTION_LANE,
-        "offset": _time(media.timecode_frames + piece.start_frame, fd),
+        "offset": _time(begin, fd),
         "name": piece.text,  # Final Cut 자신의 내보내기처럼 캡션 이름이 곧 글이다
         "start": CAPTION_START,
-        "duration": _time(piece.end_frame - piece.start_frame, fd),
+        "duration": duration,
         "role": CAPTION_ROLE,
     }
     if not piece.enabled:
@@ -845,31 +1021,45 @@ def _caption_element(parent: ET.Element, media: SourceMedia, piece: CaptionPiece
 
 
 def _spine_clip(
-    spine: ET.Element, ids: tuple[str, str], plan: SourcePlan, index: int, offset: int
-) -> int:
-    """스파인 클립 하나 — 자식은 캡션(anchor) 다음 키워드(marker) 순서여야 DTD를 통과한다.
+    spine: ET.Element,
+    ids: tuple[str, str],
+    plan: SourcePlan,
+    index: int,
+    placement: tuple[int, int],
+    sequence_fd: Fraction,
+) -> None:
+    """스파인 클립 하나 — 자식은 conform-rate(timing) · 캡션(anchor) · 키워드(marker) 순서여야
+    DTD를 통과한다. `placement`는 시퀀스 프레임의 (위치, 길이)다.
 
-    클립 전체의 키워드 뒤에 묻힌 추천 범위(`recommended`)마다 `추천` 키워드 범위를 단다(D60).
+    시퀀스와 레이트가 다른 원본이면 첫 자식에 시간을 지키는 `conform-rate`를 적는다(D71) — 빼면
+    Final Cut 기본(scaleEnabled="1")이 프레임을 1:1로 얹어 시간이 바뀐다. 클립 전체의 키워드 뒤에
+    묻힌 추천 범위(`recommended`)마다 `추천` 키워드 범위를 단다(D60).
     """
     media, clip = plan.media, plan.clips[index]
-    frames = clip.end_frame - clip.start_frame
-    attrib = _clip_attrib(*ids, media, clip.start_frame, frames)
-    attrib = {"ref": attrib.pop("ref"), "offset": _time(offset, media.frame_duration), **attrib}
+    offset, frames = placement
+    span = clip.end_frame - clip.start_frame
+    attrib = _clip_attrib(*ids, media, clip.start_frame, span, _time(frames, sequence_fd))
+    attrib = {"ref": attrib.pop("ref"), "offset": _time(offset, sequence_fd), **attrib}
     if not clip.enabled:
         attrib["enabled"] = "0"
     element = ET.SubElement(spine, "asset-clip", attrib)
+    if media.frame_duration != sequence_fd:
+        rate = CONFORM_RATES[media.frame_duration]
+        ET.SubElement(
+            element, "conform-rate", {"scaleEnabled": CONFORM_KEEP_TIME, "srcFrameRate": rate}
+        )
+    local_end = _local_ends(plan, sequence_fd)[index]
     for piece in plan.captions:
         if piece.clip_index == index:
-            _caption_element(element, media, piece)
+            _caption_element(element, media, piece, local_end)
     for keyword in clip.keywords:
         _range_element(element, "keyword", media, clip.start_frame, clip.end_frame, keyword)
     for start, end in clip.recommended:
         _range_element(element, "keyword", media, start, end, KEYWORD_RECOMMENDED)
-    return offset + frames
 
 
 def _sequence(project: ET.Element, document: TimelineDocument, total_frames: int) -> ET.Element:
-    fd = document.sources[0].media.frame_duration
+    fd = document.sequence_frame_duration
     attrib = {
         "format": document.sequence_format,
         "duration": _time(total_frames, fd),
@@ -903,12 +1093,14 @@ def _event(library: ET.Element, document: TimelineDocument, ids: list[tuple[str,
         if keyword in used:
             ET.SubElement(event, "keyword-collection", {"name": keyword})
     project = ET.SubElement(event, "project", {"name": document.title})
-    total = sum(plan.media.frame_count for plan in document.sources)
+    total = sum(sum(_sequence_frames(plan)) for plan in document.sources)
     spine = _sequence(project, document, total)
+    sequence_fd = document.sequence_frame_duration
     offset = 0
     for plan, pair in zip(document.sources, ids, strict=True):
-        for index in range(len(plan.clips)):
-            offset = _spine_clip(spine, pair, plan, index, offset)
+        for index, frames in enumerate(_sequence_frames(plan)):
+            _spine_clip(spine, pair, plan, index, (offset, frames), sequence_fd)
+            offset += frames
 
 
 def render(document: TimelineDocument) -> bytes:

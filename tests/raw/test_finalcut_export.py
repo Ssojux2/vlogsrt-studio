@@ -61,12 +61,12 @@ F = Fraction
 # ─── 재료 ────────────────────────────────────────────────────────────────
 
 
-def _encode(target: Path, *extra: str, seconds: str = "2") -> Path:
+def _encode(target: Path, *extra: str, seconds: str = "2", rate: str = "25") -> Path:
     target.parent.mkdir(parents=True, exist_ok=True)
     result = subprocess.run(
         [
             "ffmpeg", "-v", "error", "-y",
-            "-f", "lavfi", "-i", f"testsrc2=size=160x90:rate=25:duration={seconds}",
+            "-f", "lavfi", "-i", f"testsrc2=size=160x90:rate={rate}:duration={seconds}",
             "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo",
             "-t", seconds, "-c:v", "libx264", "-pix_fmt", "yuv420p",
             "-x264-params", "colorprim=bt709:transfer=bt709:colormatrix=bt709",
@@ -1027,3 +1027,43 @@ def test_mixed_rotated_and_plain_sources_follow_the_longer_side(
     assert _sequence_size(path) == expected
     side = "portrait" if expected == ("90", "160") else "landscape"
     assert _report(path)["counts"]["orientation"] == side
+
+
+# ─── W-27d — 프레임레이트가 섞이면 많은 쪽 레이트 하나로 (D71) ─────────────────
+
+
+def test_mixed_rate_sources_export_one_project_at_the_majority_rate(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
+    """실제 ffmpeg 원본 30fps 4초 + 24fps 2초 — 거부하지 않고 30p 프로젝트 하나, 24p 클립은 제
+    포맷에 시간을 지키는 `conform-rate`(scaleEnabled="0")."""
+    service = RawWorkspaceService()
+    root = tmp_path / "project"
+    service.create_workspace(root, "레이트")
+    _import(service, root, _encode(tmp_path / "card" / "a30.mov", seconds="4", rate="30"))
+    _import(service, root, _encode(tmp_path / "card" / "b24.mov", seconds="2", rate="24"))
+    path = service.export_finalcut_timeline(root)
+    _assert_valid(path)
+    document = _parsed(path)
+    rates = {f.attrib["id"]: f.attrib["frameDuration"] for f in document.iter("format")}
+    assert sorted(rates.values()) == ["1/24s", "1/30s"]
+    sequence = document.find(".//sequence")
+    assert sequence is not None and rates[sequence.attrib["format"]] == "1/30s"
+    clips = {clip.attrib["name"]: clip for clip in _spine(path)}
+    assert clips["a30"].find("conform-rate") is None
+    conform = clips["b24"][0]
+    assert conform.tag == "conform-rate"
+    assert conform.attrib == {"scaleEnabled": "0", "srcFrameRate": "24"}
+    assert clips["b24"].attrib["duration"] == "60/30s"  # 2초 그대로 — 48프레임이 아니다
+    report = _report(path)
+    counts = report["counts"]
+    assert counts["frame_rate"] == "30" and counts["conformed_sources"] == ["b24"]
+    assert counts["conformed_clips"] == 1 and counts["sequence_frames"] == 120 + 60
+    facts = {row["name"]: row["frame_duration"] for row in report["sources"]}
+    assert facts == {"a30": "1/30", "b24": "1/24"}
+    # CLI도 맞춰 재생되는 영상과 손댄 자막 조각 수를 말한다(합성 원본에는 자막이 없어 0개).
+    args = _parser().parse_args(["media", "finalcut", "--workspace", str(root)])
+    assert media_commands.media_command(args) == 0
+    printed = "".join(capsys.readouterr().out.split())  # rich가 좁은 폭에서 줄을 접는다
+    assert "프레임레이트가다른영상1개(b24)는프로젝트30fps에맞춰재생된다" in printed
+    assert "한프레임보다짧게남아싣지않은조각0개" in printed

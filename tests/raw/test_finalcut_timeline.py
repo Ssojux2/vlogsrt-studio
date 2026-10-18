@@ -15,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import random
 import re
 import shutil
 import subprocess
@@ -33,6 +34,7 @@ from vlogsrt.project.raw import finalcut_timeline as ft
 from vlogsrt.project.raw import tiering
 from vlogsrt.project.raw.analysis_config import TIER_SETTINGS, RawTierSettings
 from vlogsrt.project.raw.config import FINALCUT_TIMELINE, FinalCutTimelineSettings
+from vlogsrt.project.timebase import frame_floor, frame_nearest
 from vlogsrt.project.xml_validation import validate_xml
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -299,14 +301,99 @@ EDGE_DOCUMENTS = {
 }
 
 
+# 프레임레이트가 섞인 문서(W-27d, D71) — DTD 시험이 함께 돈다.
+
+P24, P25, P30, P60 = F(1, 24), F(1, 25), F(1, 30), F(1, 60)
+
+SINGLE_RATE_SHA256 = {
+    "film": "160c4890adcc5554ee6c2f6c6b380b9b2e7e7b6f36617bb94c58345acbd6b9a3",
+    "hfr": "86b6f2c054a71bed193a11bf2f6871886dba2ca42282b5a8d4fe519e62385961",
+    "mixed": "4a536973c4423ff13b76df5f94c98986f37be061c63d8bc6bea12969f02f4b96",
+    "one_side": "47da87315606164ab27c4aa2dc9c88ee4dba82a9f25f14ba030a7d09288b41d7",
+    "pal": "3327606ec11e6f1d919012230a324167aacb2b6c37380226677a8001e58e7ee8",
+    "real_like": "42d830be7997e43d9b848e73ee47ab460001cec733a50a9e5e4ca23c36c5dadc",
+    "red": "902b46fe43fd6bf260c18897811e1312db09ecfe72bde470e496d6e01108d74d",
+}
+"""W-27d 앞(e1fcafc)의 빌더로 렌더한 한 레이트 문서들 — 레이트가 하나면 바이트가 그대로다."""
+
+
+def rated(
+    name: str,
+    frames: int,
+    fd: Fraction,
+    *,
+    size: tuple[int, int] = (1920, 1080),
+    tc: int = 0,
+    drop: bool = False,
+    segments: tuple[ft.SegmentState, ...] | None = None,
+    cues: tuple[ft.Cue, ...] | None = None,
+) -> ft.SourceInput:
+    """레이트를 고른 원본 하나. 조각이 있으면 전부 「보통」 보고서를 단다 — 분석 전 원본은 맞닿은
+    같은 상태 조각을 합치므로(`_merge_identical`) 컷이 사라진다. 레이트 시험은 등급과 무관하다."""
+    return ft.SourceInput(
+        media=media(name, frames=frames, fd=fd, tc=tc, drop=drop, ident=None, size=size),
+        segments=segments,
+        report=None if segments is None else frames_report(fd, (0, frames, "yellow")),
+        cues=cues,
+    )
+
+
+def mixed_rate_sources() -> list[ft.SourceInput]:
+    """300초 @30 + 37초 @24(타임코드 1시간) — 실물 IMG_8852(24p)가 30p 원본 사이에 선 모양."""
+    return [rated("a30", 9000, P30), rated("b24", 888, P24, tc=86400)]
+
+
+def sequence_rate(root: ET.Element) -> Fraction:
+    sequence = root.find(".//sequence")
+    assert sequence is not None
+    fmt = root.find(f"./resources/format[@id='{sequence.attrib['format']}']")
+    assert fmt is not None
+    return t(fmt.attrib["frameDuration"])
+
+
+def rate_of(sources: list[ft.SourceInput], **settings: str) -> Fraction:
+    chosen = FinalCutTimelineSettings(**settings)
+    return sequence_rate(parsed(ft.plan(sources, title="t", library_bundle=None, settings=chosen)))
+
+
+def cut_segments(frames: int, *cuts: int) -> tuple[ft.SegmentState, ...]:
+    edges = (0, *cuts, frames)
+    return tuple(seg(a, b) for a, b in zip(edges, edges[1:], strict=False))
+
+
+def mixed_rate_captions() -> ft.TimelineDocument:
+    """24p 클립 둘(129 | 111프레임)에 컷을 넘는 큐 하나 — 앞 클립 꼬리는 시퀀스 끝에서 잘린다."""
+    minor = rated(
+        "c24", 240, P24, segments=cut_segments(240, 129),
+        cues=(cue_at(100, 150, "컷을 넘는 큐", P24), cue_at(10, 20, "앞", P24)),
+    )  # fmt: skip
+    return ft.plan([rated("a30", 600, P30), minor], title="t", library_bundle=None)
+
+
+def mixed_rate_df() -> ft.TimelineDocument:
+    """30p 프로젝트 안의 29.97 DF 소수 — 대부분을 끈 긴 DF 원본(프레임 수로는 DF가 많다)."""
+    df = rated(
+        "df", 3000, NTSC, drop=True, tc=TC_0008,
+        segments=(seg(0, 2900, excluded=True), seg(2900, 3000)),
+    )  # fmt: skip
+    return ft.plan([rated("a30", 600, P30), df], title="t", library_bundle=None)
+
+
+MIXED_RATE_DOCUMENTS = {
+    "mixed_rate": lambda: ft.plan(mixed_rate_sources(), title="t", library_bundle=None),
+    "mixed_rate_captions": mixed_rate_captions,
+    "mixed_rate_df": mixed_rate_df,
+}
+
+
 @needs_xmllint
 @needs_installed_dtd
-@pytest.mark.parametrize("name", sorted(EDGE_DOCUMENTS))
+@pytest.mark.parametrize("name", sorted({**EDGE_DOCUMENTS, **MIXED_RATE_DOCUMENTS}))
 def test_documents_pass_the_installed_fcpxml_1_14_dtd(tmp_path: Path, name: str) -> None:
     digest = hashlib.sha256(INSTALLED_DTD.read_bytes()).hexdigest()
     assert digest == INSTALLED_DTD_SHA256, f"설치 DTD가 바뀌었다: {digest}"
     target = tmp_path / f"{name}.fcpxml"
-    target.write_bytes(ft.render(EDGE_DOCUMENTS[name]()))
+    target.write_bytes(ft.render({**EDGE_DOCUMENTS, **MIXED_RATE_DOCUMENTS}[name]()))
     result = validate_xml(target, dtd_path=INSTALLED_DTD)
     assert result.dtd_checked is True
     assert result.valid is True, result.diagnostics
@@ -907,12 +994,30 @@ def test_mixed_resolution_gets_two_formats_and_the_longest_use_sets_the_sequence
     assert ft.document_counts(document)["unknown_color"] == ["odd"]
 
 
-def test_mixed_frame_rates_are_refused_naming_the_files() -> None:
-    ntsc = ft.SourceInput(media=media("ntsc_clip", frames=10, ident=None))
-    pal = ft.SourceInput(media=media("pal_clip", frames=10, fd=F(1, 25), drop=False, ident=None))
-    with pytest.raises(ft.FinalCutTimelineError) as caught:
-        ft.plan([ntsc, pal], title="t", library_bundle=None)
-    assert "ntsc_clip" in str(caught.value) and "pal_clip" in str(caught.value)
+def test_mixed_frame_rates_make_one_project_at_the_majority_rate() -> None:
+    """W-27d(D71) — 예전 이 자리는 섞인 레이트를 거부했다(D42·D66). 사용자 결정으로 뜻이 바뀌었다:
+    많은 쪽 레이트의 프로젝트 하나, 소수 쪽 클립은 제 포맷 + 시간을 지키는 `conform-rate`."""
+    document = ft.plan(mixed_rate_sources(), title="t", library_bundle=None)
+    root = parsed(document)
+    assert sequence_rate(root) == P30
+    assert [f.attrib["frameDuration"] for f in root.findall("./resources/format")] == [
+        "1/30s",
+        "1/24s",
+    ]
+    major, minor = spine_clips(root)
+    assert major.find("conform-rate") is None and major.attrib["format"] == "r1"
+    assert minor.attrib["format"] == "r2"
+    assert minor[0].tag == "conform-rate"  # 첫 자식이어야 DTD를 지난다
+    assert minor[0].attrib == {"scaleEnabled": "0", "srcFrameRate": "24"}
+    assert minor.attrib["offset"] == "9000/30s"  # 시퀀스 격자
+    assert minor.attrib["duration"] == "1110/30s"  # 37초 = 시퀀스 1110프레임(888 × 1.25)
+    assert minor.attrib["start"] == "86400/24s"  # 원본 격자 — 타임코드 그대로
+    sequence = root.find(".//sequence")
+    assert sequence is not None and sequence.attrib["duration"] == "10110/30s"
+    counts = ft.document_counts(document)
+    assert counts["frame_rate"] == "30" and counts["frames"] == 9000 + 888
+    assert counts["conformed_sources"] == ["b24"] and counts["conformed_clips"] == 1
+    assert counts["sequence_frames"] == 10110
 
 
 def test_sequence_audio_and_timecode_format_follow_the_longest_use() -> None:
@@ -1085,6 +1190,259 @@ def test_single_orientation_documents_keep_the_w16_sequence_format(name: str) ->
 
 def test_single_orientation_bytes_match_the_pre_w26_render() -> None:
     assert hashlib.sha256(ft.render(one_side_document())).hexdigest() == ONE_SIDE_SHA256
+
+
+# ─── 11c. 프레임레이트가 섞이면 많은 쪽 레이트 하나로 (W-27d, D71) ─────────────
+
+
+def test_the_rate_vote_counts_seconds_not_frames_or_files() -> None:
+    # 프레임 수로는 30p(400)가 많지만 초로는 24p(13.75초 > 13.33초)다.
+    assert rate_of([rated("a", 400, P30), rated("b", 330, P24)]) == P24
+    # 짧은 30p 셋(10초) 대 긴 24p 하나(12.5초) — 파일 수가 아니라 길이다.
+    shorts = [rated(f"s{index}", 100, P30) for index in range(3)]
+    assert rate_of([*shorts, rated("long", 300, P24)]) == P24
+
+
+def test_only_enabled_clips_vote_for_the_rate() -> None:
+    mostly_off = rated("a", 900, P30, segments=(seg(0, 800, excluded=True), seg(800, 900)))
+    assert rate_of([mostly_off, rated("b", 240, P24)]) == P24
+    unreviewed = rated(
+        "a", 900, P30, segments=(seg(0, 800, excluded=True, unreviewed=True), seg(800, 900))
+    )
+    assert rate_of([unreviewed, rated("b", 240, P24)]) == P30  # 미검토 제외 제안은 켠 채다
+
+
+def test_when_every_clip_is_excluded_all_clips_vote_for_the_rate() -> None:
+    off30 = rated("a", 300, P30, segments=(seg(0, 300, excluded=True),))
+    off24 = rated("b", 120, P24, segments=(seg(0, 120, excluded=True),))
+    assert rate_of([off24, off30]) == P30
+
+
+def test_a_rate_tie_goes_to_the_configured_side() -> None:
+    tie = [rated("b", 240, P24), rated("a", 300, P30)]  # 10초 : 10초
+    assert FINALCUT_TIMELINE.frame_rate_tie == "higher"
+    assert rate_of(tie) == P30
+    assert rate_of(tie, frame_rate_tie="lower") == P24
+
+
+def test_an_unknown_rate_tie_side_is_refused() -> None:
+    with pytest.raises(ValueError, match="frame_rate_tie"):
+        FinalCutTimelineSettings(frame_rate_tie="fast")
+
+
+def test_orientation_is_decided_before_the_rate() -> None:
+    """세로 24p(41.7초)가 레이트 하나로는 가장 길지만 방향은 가로(44초)가 이기고, 그 안에서
+    25p(24초)가 30p(20초)를 이긴다."""
+    sources = [
+        rated("p24", 1000, P24, size=PORTRAIT),
+        rated("l30", 600, P30),
+        rated("l25", 600, P25),
+    ]
+    document = ft.plan(sources, title="t", library_bundle=None)
+    assert sequence_size(document) == LANDSCAPE
+    assert sequence_rate(parsed(document)) == P25
+    assert ft.document_counts(document)["conformed_sources"] == ["p24", "l30"]
+
+
+def test_a_drop_frame_minority_leaves_a_non_drop_project() -> None:
+    root = parsed(mixed_rate_df())
+    sequence = root.find(".//sequence")
+    assert sequence is not None and sequence.attrib["tcFormat"] == "NDF"
+    for clip in spine_clips(root)[1:]:
+        assert clip.attrib["tcFormat"] == "DF"  # 클립은 제 타임코드 그대로
+        assert clip[0].attrib == {"scaleEnabled": "0", "srcFrameRate": "29.97"}
+
+
+def test_conform_rate_spellings_cover_every_supported_rate() -> None:
+    from vlogsrt.project.fcp_tables import CONFORM_RATES
+
+    assert set(CONFORM_RATES) == set(FRAME_RATE_TAGS)
+    assert CONFORM_RATES[NTSC] == "29.97" and CONFORM_RATES[F(1001, 24000)] == "23.98"
+
+
+@pytest.mark.parametrize("name", sorted(SINGLE_RATE_SHA256))
+def test_single_rate_documents_keep_their_pre_w27d_bytes(name: str) -> None:
+    document = one_side_document() if name == "one_side" else EDGE_DOCUMENTS[name]()
+    raw = ft.render(document)
+    assert hashlib.sha256(raw).hexdigest() == SINGLE_RATE_SHA256[name]
+    assert b"conform-rate" not in raw
+    assert all(not source.sequence_frames for source in document.sources)
+    assert document.sequence_frame_duration == document.sources[0].media.frame_duration
+
+
+@pytest.mark.parametrize("name", sorted(MIXED_RATE_DOCUMENTS))
+def test_mixed_rate_documents_tile_the_sequence_and_each_source(name: str) -> None:
+    """위치·길이는 시퀀스 격자로 빈틈없이 잇고, 시작은 원본 격자에서 원본 안을 앞으로만 간다."""
+    root = parsed(MIXED_RATE_DOCUMENTS[name]())
+    assets = {a.attrib["id"]: a for a in root.findall("./resources/asset")}
+    rates = {f.attrib["id"]: t(f.attrib["frameDuration"]) for f in root.iter("format")}
+    seq_fd = sequence_rate(root)
+    cursor = F(0)
+    starts: dict[str, list[Fraction]] = {}
+    ends: dict[str, ET.Element] = {}
+    for clip in spine_clips(root):
+        assert t(clip.attrib["offset"]) == cursor
+        for key in ("offset", "duration"):
+            assert (t(clip.attrib[key]) / seq_fd).denominator == 1
+        fd = rates[clip.attrib["format"]]
+        assert (t(clip.attrib["start"]) / fd).denominator == 1
+        assert (clip.find("conform-rate") is not None) == (fd != seq_fd)
+        starts.setdefault(clip.attrib["ref"], []).append(t(clip.attrib["start"]))
+        ends[clip.attrib["ref"]] = clip
+        cursor += t(clip.attrib["duration"])
+        _check_spine_clip(clip)
+    sequence = root.find(".//sequence")
+    assert sequence is not None and t(sequence.attrib["duration"]) == cursor
+    for ref, rows in starts.items():
+        assert rows[0] == t(assets[ref].attrib["start"]) and rows == sorted(set(rows))
+    for ref, clip in ends.items():  # 마지막 클립이 원본에 없는 미디어를 가리키지 않는다
+        asset = assets[ref]
+        asset_end = t(asset.attrib["start"]) + t(asset.attrib["duration"])
+        assert t(clip.attrib["start"]) + t(clip.attrib["duration"]) <= asset_end
+
+
+def _assert_minority_boundaries(root: ET.Element, minor: ft.SourceInput, seq_fd: Fraction) -> None:
+    """소수 쪽 원본(문서에 하나뿐)의 경계마다 시퀀스 격자 위 — 안쪽 컷은 원본 시각과 ½프레임 안,
+    마지막 클립은 원본 끝을 넘지 않고 보이지 않는 꼬리가 1프레임보다 짧다(원본에 없는 미디어를
+    가리키지 않는다)."""
+    fd = minor.media.frame_duration
+    origin = minor.media.timecode_frames * fd
+    clips = [clip for clip in spine_clips(root) if clip.find("conform-rate") is not None]
+    base = t(clips[0].attrib["offset"])
+    for clip in clips:
+        position = t(clip.attrib["offset"])
+        assert (position / seq_fd).denominator == 1
+        assert abs(position - base - (t(clip.attrib["start"]) - origin)) <= seq_fd / 2
+    last = clips[-1]
+    asset_end = (minor.media.timecode_frames + minor.media.frame_count) * fd
+    unseen = asset_end - (t(last.attrib["start"]) + t(last.attrib["duration"]))
+    assert 0 <= unseen < seq_fd
+
+
+@pytest.mark.parametrize(
+    ("seed", "fd"), [(27, P24), (2, P24), (4, P24), (6, P24), (8, F(1001, 24000))]
+)
+def test_random_cuts_stay_within_half_a_frame_and_never_pass_the_media_end(
+    seed: int, fd: Fraction
+) -> None:
+    """24→30(과 23.976→30) 무작위 길이·컷 — 안쪽 컷은 ½프레임 안, 끝은 원본을 넘지 않는다."""
+    rng = random.Random(seed)
+    frames = rng.randrange(3001, 7000)
+    cuts = sorted(rng.sample(range(1, frames), 120))
+    minor = rated(
+        "r24", frames, fd, tc=rng.randrange(0, 90000), segments=cut_segments(frames, *cuts)
+    )
+    document = ft.plan([rated("a30", 9000, P30), minor], title="t", library_bundle=None)
+    root = parsed(document)
+    _assert_minority_boundaries(root, minor, P30)
+    clips = spine_clips(root)
+    for before, after in zip(clips, clips[1:], strict=False):  # 위치는 앞 끝에서 그대로 잇는다
+        end = t(before.attrib["offset"]) + t(before.attrib["duration"])
+        assert t(after.attrib["offset"]) == end
+    assert ft.document_counts(document)["conformed_padded_clips"] == 0
+
+
+def test_random_lengths_include_ends_that_nearest_would_push_past_the_media() -> None:
+    """시험이 헛돌지 않게 — 위 무작위 문서 가운데 마지막 경계를 가장 가까운 프레임으로 두면 마지막
+    클립이 원본 끝을 넘는 것이 있다(내림이 실제로 일한다)."""
+    pushed = []
+    for seed in (27, 2, 4, 6):
+        rng = random.Random(seed)
+        frames = rng.randrange(3001, 7000)
+        last_cut = sorted(rng.sample(range(1, frames), 120))[-1]
+        start_edge = frame_nearest(last_cut * P24, P30)
+        nearest_end = frame_nearest(frames * P24, P30)
+        pushed.append(last_cut * P24 + (nearest_end - start_edge) * P30 > frames * P24)
+    assert any(pushed)
+
+
+def test_the_d42_clip_keeps_its_real_length_within_a_frame() -> None:
+    """D42의 1.36초 사고 — 29.97 클립 40,730프레임을 30p 시퀀스 40,730프레임으로 쓰면 1357.67초다.
+    원본은 40,730 × 1001/30000 = 1359.0243초 = 시퀀스 40,770.73프레임이다. 가장 가까운 40,771은
+    원본 끝을 9ms 넘으므로 끝은 내림 40,770(1359.0초 — 24ms 짧다, 1프레임 33ms 안)이다."""
+    d42 = rated("d42", 40730, NTSC, tc=TC_0008)
+    document = ft.plan([rated("a30", 50000, P30), d42], title="t", library_bundle=None)
+    root = parsed(document)
+    clip = spine_clips(root)[1]
+    assert clip.attrib["duration"] == "40770/30s"
+    assert clip[0].attrib == {"scaleEnabled": "0", "srcFrameRate": "29.97"}
+    assert F(0) <= 40730 * NTSC - F(40770, 30) < F(25, 1000)
+    _assert_minority_boundaries(root, d42, P30)
+
+
+def test_two_hundred_short_minority_clips_do_not_drift() -> None:
+    """25프레임 @24 = 31.25 시퀀스 프레임 — 클립마다 반올림하면 200개에 50프레임(1.7초)이 밀린다."""
+    minor = rated("s24", 4999, P24, segments=cut_segments(4999, *range(25, 4975, 25), 4975))
+    document = ft.plan([rated("a30", 9000, P30), minor], title="t", library_bundle=None)
+    root = parsed(document)
+    assert len(spine_clips(root)) == 201
+    _assert_minority_boundaries(root, minor, P30)
+    sequence = root.find(".//sequence")
+    # 마지막 클립(24프레임 = 1초)은 남은 미디어 그대로 30프레임 — 4999 @24 = 6248.75 @30의 가장
+    # 가까운 6249와 같다(앞 경계 4975 @24 = 6218.75 → 6219).
+    assert sequence is not None and sequence.attrib["duration"] == f"{9000 + 6249}/30s"
+
+
+def test_a_sub_frame_tile_gets_one_frame_and_is_counted_without_drift() -> None:
+    """60p 1프레임 조각은 30p 시퀀스의 ½프레임이다 — 0프레임 클립은 쓸 수 없으니 1프레임으로 두고
+    센다. 뒤 경계는 다시 가장 가까운 프레임으로 돌아가 밀림이 쌓이지 않는다."""
+    minor = rated("h60", 120, P60, segments=cut_segments(120, 1, 2, 3))
+    document = ft.plan([rated("a30", 300, P30), minor], title="t", library_bundle=None)
+    (plan_60,) = (s for s in document.sources if s.media.name == "h60")
+    assert plan_60.sequence_frames == (1, 1, 1, 57)
+    assert sum(plan_60.sequence_frames) == frame_floor(120 * P60, P30)
+    counts = ft.document_counts(document)
+    assert counts["conformed_padded_clips"] == 2 and counts["conformed_clips"] == 4
+
+
+def test_captions_in_a_minority_clip_stay_on_its_grid_and_the_tail_is_clamped() -> None:
+    document = mixed_rate_captions()
+    _, first, second = spine_clips(parsed(document))
+    # 129프레임 @24 = 5.375초 → 시퀀스 161프레임(5.3667초): 앞 클립이 0.0083초 짧다.
+    assert first.attrib["duration"] == "161/30s"
+    captions = {c.attrib["name"]: c for c in first.findall("caption")}
+    assert captions["앞"].attrib["offset"] == "10/24s"
+    assert captions["앞"].attrib["duration"] == "10/24s"
+    crossing = captions["컷을 넘는 큐"]
+    assert crossing.attrib["offset"] == "100/24s"
+    # 원본 격자의 끝(129/24)은 클립 끝을 넘는다 — 클립의 시퀀스 끝(161/30)에서 자른다.
+    assert t(crossing.attrib["offset"]) + t(crossing.attrib["duration"]) == F(161, 30)
+    # 마지막 클립은 남은 미디어(111프레임 @24 = 138.75 @30)의 내림 138 — 앞 경계가 161로 내려 맞춰져
+    # 가장 가까운 끝 300이면 139프레임이 원본 끝을 1/120초 넘는다.
+    assert second.attrib["duration"] == "138/30s"
+    (tail,) = second.findall("caption")
+    assert (tail.attrib["offset"], tail.attrib["duration"]) == ("129/24s", "21/24s")
+    for clip in (first, second):
+        _check_spine_clip(clip)
+    assert ft.document_counts(document)["conformed_clamped_captions"] == 1
+
+
+def test_a_caption_that_starts_after_a_clamped_clip_end_is_counted_not_written() -> None:
+    """60p 6프레임(0.1초)은 24p 시퀀스 2프레임(0.0833초)이다 — 마지막 원본 프레임에서 시작하는
+    조각은 그 클립이 보이는 끝 뒤에 있다. 길이 0 이하 캡션은 쓸 수 없으니 넣지 않고 센다."""
+    minor = rated(
+        "h60", 120, P60, segments=cut_segments(120, 6), cues=(cue_at(5, 9, "끝 프레임", P60),)
+    )
+    document = ft.plan([rated("a24", 480, P24), minor], title="t", library_bundle=None)
+    _, first, second = spine_clips(parsed(document))
+    assert first.attrib["duration"] == "2/24s" and first.find("caption") is None
+    (piece,) = second.findall("caption")
+    assert piece.attrib["offset"] == "6/60s"
+    assert ft.document_counts(document)["conformed_hidden_captions"] == 1
+
+
+@needs_xmllint
+@needs_installed_dtd
+def test_conform_rate_after_a_caption_is_what_the_dtd_rejects(tmp_path: Path) -> None:
+    root = parsed(mixed_rate_captions())
+    clip = spine_clips(root)[1]
+    conform = clip.find("conform-rate")
+    assert conform is not None
+    clip.remove(conform)
+    clip.append(conform)
+    target = tmp_path / "reversed.fcpxml"
+    target.write_bytes(b'<?xml version="1.0" encoding="UTF-8"?>\n' + ET.tostring(root))
+    assert validate_xml(target, dtd_path=INSTALLED_DTD).valid is False
 
 
 # ─── 12·13. 시작 타임코드와 신원 ─────────────────────────────────────────

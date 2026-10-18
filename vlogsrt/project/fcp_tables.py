@@ -22,6 +22,20 @@ FRAME_RATE_TAGS: dict[Fraction, str] = {
     Fraction(1, 60): "60",
 }
 
+# `conform-rate@srcFrameRate`의 철자 — DTD 1.14가 받는 값 가운데 위 표의 레이트(W-27d, D71).
+# 포맷 이름과 달리 점을 찍는다: 사용자의 실제 Final Cut 내보내기가 29.97 클립에
+# `<conform-rate scaleEnabled="0" srcFrameRate="29.97"/>`을 적는다.
+CONFORM_RATES: dict[Fraction, str] = {
+    Fraction(1001, 24000): "23.98",
+    Fraction(1, 24): "24",
+    Fraction(1, 25): "25",
+    Fraction(1001, 30000): "29.97",
+    Fraction(1, 30): "30",
+    Fraction(1, 50): "50",
+    Fraction(1001, 60000): "59.94",
+    Fraction(1, 60): "60",
+}
+
 # (primaries, transfer, matrix) → FCPXML `colorSpace` 철자. ffprobe가 부르는 이름과
 # Final Cut이 적는 이름이 달라서 표로 잇는다. 표에 없는 값을 기본값으로 밀어 넣으면 그
 # 추측이 타임라인 선언이 된다 — 입력 합성은 거부하고, 타임라인 보내기는 생략하고 보고한다.

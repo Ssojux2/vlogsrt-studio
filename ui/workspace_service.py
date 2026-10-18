@@ -1269,6 +1269,9 @@ def _finalcut_sent_text(sent: dict[str, Any]) -> str:
             "\n\n`자막 시각 확인 필요` 키워드는 달지 못해 키워드 없이 보냈습니다"
             f" — {sent['caption_timing_error']} (로그 참고)"
         )
+    conformed = _conformed_rate_line(counts)
+    if conformed:
+        text += "\n\n" + conformed
     unsupported = list(sent.get("unsupported") or ())
     if unsupported:
         # 빼고 보낸 원본은 이름으로 말한다(D68) — 수만 보이면 어느 영상이 빠졌는지 모른다.
@@ -1278,6 +1281,28 @@ def _finalcut_sent_text(sent: dict[str, Any]) -> str:
             " 보낼 수 있습니다."
         )
     return text + "".join("\n\n" + line for line in _caption_honesty_lines(sent))
+
+
+def _conformed_rate_line(counts: Mapping[str, Any]) -> str:
+    """프로젝트 레이트와 다른 영상(D71)을 이름으로, 그 클립 끝에서 손댄 자막 조각을 수로 — 빼거나
+    자른 조각도 말없이 두지 않는다(규칙 9의 정신). W-27d 앞의 기록에는 칸이 없어 빈 글이다."""
+    names = list(counts.get("conformed_sources") or ())
+    if not names:
+        return ""
+    text = (
+        f"프레임레이트가 다른 영상 {len(names)}개({', '.join(names)})는 프로젝트"
+        f" {counts.get('frame_rate')}fps에 맞춰 재생됩니다 — 길이·자막은 그대로입니다."
+    )
+    hidden = counts.get("conformed_hidden_captions") or 0
+    if hidden:
+        text += (
+            f" 클립 경계에서 한 프레임보다 짧게 남은 자막 조각 {hidden}개는 그 클립에서 보이지 않는"
+            " 자리라 싣지 않았습니다."
+        )
+    clamped = counts.get("conformed_clamped_captions") or 0
+    if clamped:
+        text += f" 자막 조각 {clamped}개는 클립 끝에서 한 프레임 안쪽으로 잘렸습니다."
+    return text
 
 
 def _send_unsupported_facts(report: Mapping[str, Any]) -> dict[str, Any]:

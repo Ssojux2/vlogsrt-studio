@@ -291,6 +291,44 @@ def test_send_text_says_it_politely_and_without_prices() -> None:
     assert _finalcut_sent_text(old).startswith("**Final Cut으로 보냈습니다**")  # 예전 기억도 읽힌다
 
 
+def test_send_text_names_the_clips_conformed_to_the_project_rate() -> None:
+    """프레임레이트가 섞이면 많은 쪽 레이트 하나로 보낸다(D71) — 맞춰 재생되는 영상은 이름으로."""
+    from ui.workspace_service import _finalcut_sent_text
+
+    counts = {"sources": 3, "spine_clips": 5, "disabled_clips": 0, "unreviewed_clips": 0}
+    sent = {
+        "path": "/x/vlogsrt_20261018T001744Z.fcpxml",
+        "counts": {**counts, "frame_rate": "29.97", "conformed_sources": ["IMG_8852"]},
+        "not_exported": 0,
+    }
+    assert (
+        "프레임레이트가 다른 영상 1개(IMG_8852)는 프로젝트 29.97fps에 맞춰 재생됩니다"
+        " — 길이·자막은 그대로입니다."
+    ) in _finalcut_sent_text(sent)
+    single = {**sent, "counts": {**counts, "frame_rate": "30", "conformed_sources": []}}
+    assert "프레임레이트" not in _finalcut_sent_text(single)
+    old = {**sent, "counts": counts}  # W-27d 앞의 기록에는 칸이 없다
+    assert "프레임레이트" not in _finalcut_sent_text(old)
+    assert "자막 조각" not in _finalcut_sent_text(sent)  # 손댄 조각이 없으면 말하지 않는다
+
+
+def test_send_text_says_how_many_caption_pieces_were_left_out_or_clamped() -> None:
+    """맞춰 재생되는 클립 끝에서 빼거나 자른 자막 조각도 말없이 두지 않는다(D71, 규칙 9의 정신)."""
+    from ui.workspace_service import _finalcut_sent_text
+
+    counts = {
+        "sources": 2, "spine_clips": 3, "disabled_clips": 0, "unreviewed_clips": 0,
+        "frame_rate": "24", "conformed_sources": ["h60"],
+        "conformed_hidden_captions": 1, "conformed_clamped_captions": 2,
+    }  # fmt: skip
+    text = _finalcut_sent_text({"path": "/x/v.fcpxml", "counts": counts, "not_exported": 0})
+    assert (
+        "클립 경계에서 한 프레임보다 짧게 남은 자막 조각 1개는 그 클립에서 보이지 않는 자리라"
+        " 싣지 않았습니다."
+    ) in text
+    assert "자막 조각 2개는 클립 끝에서 한 프레임 안쪽으로 잘렸습니다." in text
+
+
 def test_sending_a_source_without_subtitles_names_it_in_the_result(tmp_path: Path):
     opened: list[Path] = []
     server, signature, root = _server(tmp_path, opened)

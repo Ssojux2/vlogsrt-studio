@@ -267,23 +267,35 @@ ORIENTATION_LANDSCAPE = "landscape"
 ORIENTATION_PORTRAIT = "portrait"
 """세로 — 높이가 너비보다 크다."""
 ORIENTATIONS = (ORIENTATION_LANDSCAPE, ORIENTATION_PORTRAIT)
+FRAME_RATE_HIGHER = "higher"
+"""높은 프레임레이트 — 소수 쪽 낮은 레이트 클립은 프레임을 되풀이해 보일 뿐 잃지 않는다(D71)."""
+FRAME_RATE_LOWER = "lower"
+"""낮은 프레임레이트 — 소수 쪽 높은 레이트 클립은 프레임을 건너뛰어 보인다."""
+FRAME_RATE_TIES = (FRAME_RATE_HIGHER, FRAME_RATE_LOWER)
 
 
 @dataclass(frozen=True)
 class FinalCutTimelineSettings:
-    """전체 타임라인 하나(D56)의 문서 설정 — 프로젝트(시퀀스) 방향을 고르는 규칙(W-26, D66).
+    """전체 타임라인 하나(D56)의 문서 설정 — 프로젝트(시퀀스) 방향과 프레임레이트를 고르는 규칙.
 
-    프로젝트 방향은 **켠 스파인 클립 길이**가 많은 쪽을 따른다. `orientation_tie`는 두 쪽 길이가
-    프레임까지 같을 때의 편이다 — 외부 근거 없는 선택이고, 가로 영상 기준인 Final Cut 기본
-    프로젝트와 같은 쪽을 골랐다. 문서 바이트만 정하므로 어느 지문·캐시 열쇠·승인·견적에도 없다.
+    프로젝트 방향은 **켠 스파인 클립 길이**가 많은 쪽을 따른다(W-26, D66). `orientation_tie`는 두
+    쪽 길이가 같을 때의 편이다 — 외부 근거 없는 선택이고, 가로 영상 기준인 Final Cut 기본
+    프로젝트와 같은 쪽을 골랐다. 그 방향 안에서 프레임레이트도 켠 길이(초)가 많은 쪽이고
+    (W-27d, D71), `frame_rate_tie`는 레이트끼리 길이가 같을 때의 편이다 — 역시 외부 근거 없는
+    선택이고, 낮은 쪽에 맞추면 소수 쪽 프레임을 버리지만 높은 쪽에 맞추면 되풀이할 뿐이라 높은
+    쪽을 골랐다. 문서 바이트만 정하므로 어느 지문·캐시 열쇠·승인·견적에도 없다.
     """
 
     orientation_tie: str = ORIENTATION_LANDSCAPE
+    frame_rate_tie: str = FRAME_RATE_HIGHER
 
     def __post_init__(self) -> None:
         if self.orientation_tie not in ORIENTATIONS:
             sides = " 또는 ".join(ORIENTATIONS)
             raise ValueError(f"orientation_tie는 {sides}여야 한다: {self.orientation_tie!r}")
+        if self.frame_rate_tie not in FRAME_RATE_TIES:
+            sides = " 또는 ".join(FRAME_RATE_TIES)
+            raise ValueError(f"frame_rate_tie는 {sides}여야 한다: {self.frame_rate_tie!r}")
 
 
 FINALCUT_TIMELINE = FinalCutTimelineSettings()

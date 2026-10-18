@@ -650,6 +650,8 @@ def _source_facts(
         "uid": timeline.asset_identity(media)[0],
         "timecode": None if label is None else {"text": label.text, "rate": str(label.rate)},
         "frames": media.frame_count,
+        # 프로젝트 레이트와 다르면 Final Cut이 시간을 지키며 맞춰 재생한다(D71) — 어느 원본인지.
+        "frame_duration": str(media.frame_duration),
         "segments": None if source.segments is None else len(source.segments),
         "analysis_revision": None if row is None else row.revision_id,
         "captions": bool(cues),

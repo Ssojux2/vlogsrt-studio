@@ -827,6 +827,17 @@ def cmd_finalcut(args: argparse.Namespace) -> int:
         f" · 미검토 제외 제안 {counts['unreviewed_clips']}개"
         f" · 캡션 {captions['placed']}개(조각 {captions['pieces']})"
     )
+    conformed = counts["conformed_sources"]
+    if conformed:
+        # 섞인 레이트는 거부하지 않고 많은 쪽 하나로 보낸다(D71) — 맞춰 재생되는 원본을 이름으로.
+        clamped = counts.get("conformed_clamped_captions", 0)
+        hidden = counts.get("conformed_hidden_captions", 0)
+        log.out(
+            f"프레임레이트가 다른 영상 {len(conformed)}개({', '.join(conformed)})는 프로젝트"
+            f" {counts['frame_rate']}fps에 맞춰 재생된다 — 길이·자막은 그대로다"
+            f" · 클립 끝에서 잘린 자막 조각 {clamped}개"
+            f" · 한 프레임보다 짧게 남아 싣지 않은 조각 {hidden}개"
+        )
     for row in report["not_exported"]:
         log.out(f"넣지 않은 원본: {row['name'] or row['asset_id']} — {row['reason']}")
     return 0
