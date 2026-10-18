@@ -289,6 +289,24 @@ SNAP_REVERTED_TEXT = (
 )
 SNAP_APPLY_LABEL = "시각 맞춤 적용(무료)"
 SNAP_REVERT_LABEL = "되돌리기"
+TRUTH_START_LABEL = "참 시작"
+TRUTH_END_LABEL = "참 끝"
+TRUTH_STRATUM_LABELS = {
+    "chunk_first": "조각 첫 줄",
+    "no_speech": "말소리 못 찾음",
+    "whole_second": "정수 초",
+    "ordinary": "보통 줄",
+}
+"""시각 정답(W-25b, D67)이 들어 보라고 권하는 줄의 층 이름 — 표시만 한다."""
+TRUTH_EXPLANATION = (
+    "들어 보고 말이 실제로 시작·끝나는 자리에서 멈춘 뒤 「참 시작」·「참 끝」을 누르세요"
+    "(「,」·「.」로 한 프레임씩 옮길 수 있습니다). 정답은 자막과 따로 저장하고 자막은"
+    " 그대로입니다 — 시각 정확도 보고서만 읽습니다."
+)
+TRUTH_MARKED_TEXT = "시각 정답을 찍었습니다({edge} {seconds}초) — 자막은 그대로입니다."
+TRUTH_CLEARED_TEXT = "시각 정답을 지웠습니다 — 자막은 그대로입니다."
+TRUTH_STALE_TEXT = "자막 줄이 바뀌어 낡은 정답입니다 — 다시 찍으세요."
+TRUTH_MISSING_TEXT = "사라진 줄의 시각 정답 {count}개 — 보고서에서 빠집니다. 다시 찍으세요."
 RELISTEN_SNAPPED_TEXT = (
     "시각 맞춤을 적용한 자막이라 다시 듣지 않습니다 — 「시각 맞춤 제안」 칸의 「되돌리기」로 적용"
     " 전 자막으로 돌리면 다시 들을 수 있습니다."
@@ -306,6 +324,7 @@ WORKBENCH_TOKEN_ACTIONS = (
     "refill",
     "snap-apply",
     "snap-revert",
+    "timing-truth",
 )
 """작업대 수명 토큰을 요구하는 동작 — 바꾸는 동작 전부다(질의 `refresh`만 열려 있다, F1c)."""
 STAGE_NOTES = {
@@ -949,6 +968,19 @@ def _refill_skipped(rows: Sequence[Mapping[str, Any]]) -> dict[str, object]:
         "skippedMore": max(0, len(rows) - len(shown)),
         "skippedNote": REFILL_SKIPPED_NOTE.format(count=len(rows)),
     }
+
+
+def _truth_cue(note: Mapping[str, Any] | None) -> dict[str, object]:
+    """줄 하나의 시각 정답 칸(W-25b) — 권하는 층(이름째)·찍은 정답. 없으면 칸을 싣지 않는다."""
+    if not note:
+        return {}
+    cue: dict[str, object] = {}
+    stratum = note.get("truthStratum")
+    if stratum is not None:
+        cue["truthStratum"] = {"code": stratum, "label": TRUTH_STRATUM_LABELS[str(stratum)]}
+    if note.get("truth"):
+        cue["truth"] = dict(note["truth"])
+    return cue
 
 
 def _snap_applied_view(record: Mapping[str, Any]) -> dict[str, object]:
@@ -6493,6 +6525,7 @@ class RawWorkspaceUi:
         source["crossSourceCandidates"] = self.raw.source_repeat_candidates(root, sid)
         sync_view = self.raw.sync_check_view(root, sid)  # 자막 시각 확인 — 표시만(D55)
         notes = self.raw.subtitle_cue_notes(transcript, sync_view)
+        truths, missing = self.raw.timing_truth_view(root, sid, transcript, sync_view)
         source["subtitles"] = [
             {
                 "id": u["utterance_id"],
@@ -6500,9 +6533,12 @@ class RawWorkspaceUi:
                 "start": str(Fraction(u["start"]["num"], u["start"]["den"])),
                 "end": str(Fraction(u["end"]["num"], u["end"]["den"])),
                 **notes.get(str(u["utterance_id"]), {}),
+                **_truth_cue(truths.get(str(u["utterance_id"]))),
             }
             for u in transcript["utterances"]
         ]
+        if missing:
+            source["truthMissing"] = TRUTH_MISSING_TEXT.format(count=missing)
         source["transcriptDirty"] = bool(
             transcript["sequence"] and quick.get("stage") in ("자막 변경 · 갱신 필요", "승인 대기")
         )
@@ -6565,13 +6601,14 @@ class RawWorkspaceUi:
         self,
     ) -> dict[str, Callable[[Path, Mapping[str, object], str], dict]]:
         """원본 하나를 다루는 작업대 동작 — 다시 재기(D55)·다시 듣기(19b)·빈칸 재전사 승인(19f)·
-        시각 맞춤 적용·되돌리기(19h)."""
+        시각 맞춤 적용·되돌리기(19h)·시각 정답 찍기(W-25b)."""
         return {
             "sync-recheck": self._visual_sync_recheck,
             "relisten": self._visual_relisten,
             "refill": self._visual_refill,
             "snap-apply": self._visual_snap_apply,
             "snap-revert": self._visual_snap_revert,
+            "timing-truth": self._visual_timing_truth,
         }
 
     def _refill_view(
@@ -6704,6 +6741,33 @@ class RawWorkspaceUi:
         self._after_transcript_change(root, source_id)
         return self._source_reply(root, source_id, echo, SNAP_REVERTED_TEXT)
 
+    def _visual_timing_truth(self, root: Path, payload: Mapping[str, object], echo: str) -> dict:
+        """「참 시작」·「참 끝」·지우기(무료, W-25b) — 정답만 쓰고 자막·견적·작업은 그대로다.
+
+        화면이 본 리비전의 그 줄에만 찍는다(서비스가 대조한다). 거절도 새 화면을 그려 보인다.
+        """
+        source_id = self._serve_str(payload, "sourceId")
+        utterance_id = self._serve_str(payload, "utteranceId")
+        edge = self._serve_str(payload, "edge")
+        try:
+            if self._serve_str(payload, "action") == "clear":
+                self.raw.clear_timing_truth(root, source_id, utterance_id=utterance_id, edge=edge)
+                return self._source_reply(root, source_id, echo, TRUTH_CLEARED_TEXT)
+            seconds = self._serve_fraction(payload, "at")
+            self.raw.mark_timing_truth(
+                root,
+                source_id,
+                utterance_id=utterance_id,
+                edge=edge,
+                seconds=seconds,
+                transcript_revision=self._serve_str(payload, "transcriptRevision"),
+            )
+        except raw_service.RawWorkspaceError as refused:
+            return self._source_reply(root, source_id, echo, str(refused))
+        label = TRUTH_START_LABEL if edge == "start" else TRUTH_END_LABEL
+        message = TRUTH_MARKED_TEXT.format(edge=label, seconds=f"{float(seconds):.3f}")
+        return self._source_reply(root, source_id, echo, message)
+
     def _source_reply(self, root: Path, source_id: str, echo: str, message: str) -> dict:
         _shell, workbench = self.visual_workbench_render(root, source_id=source_id or None)
         return {
@@ -6797,12 +6861,13 @@ class RawWorkspaceUi:
 
     def _vl_source_functions(self) -> list[Callable[[dict[str, object]], dict[str, object]]]:
         """원본 하나를 다루는 서버 함수 — 다시 재기(D55)·다시 듣기(19b)·빈칸 재전사 승인(19f)·시각
-        맞춤 적용·되돌리기(19h). 순서는 이름 목록의 끝 그대로다."""
+        맞춤 적용·되돌리기(19h)·시각 정답(W-25b). 순서는 이름 목록의 끝 그대로다."""
         return [
             self._vl_sync_recheck_function(),
             self._vl_relisten_function(),
             self._vl_refill_function(),
             *self._vl_snap_functions(),
+            self._vl_timing_truth_function(),
         ]
 
     def _vl_sync_recheck_function(self) -> Callable[[dict[str, object]], dict[str, object]]:
@@ -6841,6 +6906,15 @@ class RawWorkspaceUi:
             return self.visual_workbench_action(payload, "snap-revert")
 
         return [vl_snap_apply, vl_snap_revert]
+
+    def _vl_timing_truth_function(self) -> Callable[[dict[str, object]], dict[str, object]]:
+        """「참 시작」·「참 끝」(W-25b) — 같은 토큰 문, 화면이 본 리비전을 서버가 대조한다.
+        유료 호출 0회 · 자막은 그대로다."""
+
+        def vl_timing_truth(payload: dict[str, object]) -> dict[str, object]:
+            return self.visual_workbench_action(payload, "timing-truth")
+
+        return vl_timing_truth
 
     # ── 화면 1 — SD/폴더 가져오기(조사 → 순서 확인 → 복사·검증) ──
 

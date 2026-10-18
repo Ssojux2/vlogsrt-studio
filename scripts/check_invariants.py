@@ -1560,6 +1560,43 @@ def check_speech_refill_only_from_service() -> list[str]:
     return failures
 
 
+# 시각 정답(W-25b, D67) — 사람이 찍은 참 시작·끝은 자막과 **따로** 산다. 전사·원본 자막·
+# 등급·승인·내보내기가 그 표나 기준을 알면 정답이 자막·지문·캐시 열쇠·승인·등급·Final Cut으로
+# 번진다 — 정답은 화면 표시와 보고서(`scripts/timing_truth_report.py`)만 읽는다. 글 전체에서
+# 이름을 찾는다(import·별명·`importlib` 문자열·주석). 이름을 잘라 이어 붙인 동적 import는 못
+# 본다(받아들인 빈틈).
+TIMING_TRUTH_FORBIDDEN_READERS = (
+    "raw/understanding.py", "raw/source_transcript.py", "raw/finalcut_export.py",
+    "raw/finalcut_timeline.py", "raw/tiering.py", "raw/analysis_approval.py",
+    "raw/understanding_luna.py", "raw/media_refs.py", "raw/speech_refill.py",
+    "raw/analysis_workflow.py", "raw/sync_report.py", "raw/caption_provider.py",
+    "raw/asr_epoch.py",
+)  # fmt: skip
+TIMING_TRUTH_NAMES = re.compile(r"timing_truth|TimingTruth|TIMING_TRUTH")
+
+
+def check_timing_truth_stays_apart() -> list[str]:
+    """W-25b — 전사·원본 자막·내보내기·등급·승인 모듈은 시각 정답을 모른다.
+
+    파일이 사라지면 그 자리는 건너뛴다(그 계층의 부재는 다른 검사가 본다). 정답 모듈 자체가
+    사라지면 조용히 통과하지 않는다.
+    """
+    if not (PROJECT_PACKAGE / "raw" / "timing_truth.py").exists():
+        return ["vlogsrt/project/raw/timing_truth.py: 시각 정답 계층이 사라졌다 (D67)"]
+    failures: list[str] = []
+    for rel in TIMING_TRUTH_FORBIDDEN_READERS:
+        path = PROJECT_PACKAGE / rel
+        if not path.exists():
+            continue
+        names = sorted(set(TIMING_TRUTH_NAMES.findall(path.read_text(encoding="utf-8"))))
+        if names:
+            failures.append(
+                f"vlogsrt/project/{rel}: {', '.join(names)}를 안다 — 시각 정답은 자막·지문·승인·"
+                "등급·내보내기에 들어가지 않는다 (D67)"
+            )
+    return failures
+
+
 # 시각 맞춤 제안(D59 19g) — 큐 경계를 말소리 경계에 맞춘 **제안**은 값만 받아 값만 돌려주는 순수
 # 계산이다. 들여올 수 있는 것은 표준 라이브러리의 정해진 몇과 확인 계산(`sync_check`)·설정뿐이고,
 # 파일·프로세스를 열지 않는다. 그 모듈을 읽는 쪽은 목록에 적힌 자리뿐이다 — 19h부터 서비스 하나이고,
@@ -2631,6 +2668,7 @@ CHECKS = (
     ("원본 자막 줄 넣기는 빈칸 재전사만", check_insert_segments_only_from_refill),
     ("빈칸 재전사의 whisper에는 힌트가 없다", check_refill_whisper_has_no_hints),
     ("빈칸 재전사는 서비스만 부른다", check_speech_refill_only_from_service),
+    ("시각 정답은 자막·등급·내보내기와 따로", check_timing_truth_stays_apart),
     ("시각 맞춤 제안은 순수하다", check_sync_snap_stays_pure),
     ("시각 맞춤 제안은 정해진 자리만 부른다", check_sync_snap_only_from_listed),
     (

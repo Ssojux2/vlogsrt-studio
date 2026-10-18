@@ -565,6 +565,41 @@ def sync_snap_problems(settings: SyncSnapSettings) -> list[str]:
     return problems
 
 
+@dataclass(frozen=True, slots=True)
+class TimingTruthSettings:
+    """시각 정답 표본(W-25b, D67) — 영상마다 들어 볼 줄을 층마다 몇 개 권할지와 적중 폭.
+
+    층별 줄 수는 외부 근거 없는 조정 대상이다(영상당 약 다섯 줄 — 사람이 한 영상에 들일 만한 품).
+    적중 폭 ±200ms는 원본 평가(`vlogsrt.config.Config.start_tol`)의 값 **그대로**다 — 이 파일은 원본
+    설정을 import하지 않으므로 숫자를 적고, 시험이 정확 유리수로 같음을 못 박는다.
+
+    `ProjectConfig`·`RawWorkflowConfig`·`RawUnderstandingSettings`·`SourceTextSettings`의 칸이
+    **아니고** 어느 지문·캐시 열쇠·승인·견적·등급에도 실리지 않는다 — 정답 표시와 보고서만 읽는다.
+    """
+
+    chunk_first_lines: int = 2
+    no_speech_lines: int = 1
+    whole_second_lines: int = 1
+    ordinary_lines: int = 1
+    hit_seconds: Fraction = Fraction(1, 5)
+
+
+TIMING_TRUTH_SETTINGS = TimingTruthSettings()
+"""지금 쓰는 시각 정답 기준 — 주입이 없으면 이 하나를 읽는다."""
+
+
+def timing_truth_problems(settings: TimingTruthSettings) -> list[str]:
+    """값역 — 층별 줄 수는 0 이상의 정수, 적중 폭은 양의 정확 유리수(초)다."""
+    problems: list[str] = []
+    for name in ("chunk_first_lines", "no_speech_lines", "whole_second_lines", "ordinary_lines"):
+        value = getattr(settings, name)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            problems.append(f"{name}은(는) 0 이상의 정수여야 한다: {value!r}")
+    if not isinstance(settings.hit_seconds, Fraction) or settings.hit_seconds <= 0:
+        problems.append(f"hit_seconds는 양의 정확 유리수(초)여야 한다: {settings.hit_seconds!r}")
+    return problems
+
+
 @dataclass(frozen=True)
 class GapRefillSettings:
     """말소리 빈칸 재전사(D59 19f)가 **다시 물을** 구간을 넓히는 기준 — 외부 근거 없는 조정 대상.

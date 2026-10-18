@@ -1898,6 +1898,11 @@ WORKBENCH_CSS = (
   border-color: var(--vl-warn); color: var(--vl-warn); }
 .vl-badge[data-vl-ear="replaced"] {
   border-color: var(--vl-accent-ink); color: var(--vl-accent-ink); }
+.vl-badge[data-vl-truth-stratum], .vl-badge[data-vl-truth] {
+  border-color: var(--vl-line-strong); color: var(--vl-ink); }
+.vl-truth { border-left: 3px solid var(--vl-line-strong); padding: 2px 0 2px 8px;
+  margin: 0 0 8px; }
+.vl-truth-line .vl-btn { margin: 0 6px 0 0; }
 .vl-ear { border-left: 3px solid var(--vl-line-strong); padding: 2px 0 2px 8px; margin: 0 0 8px; }
 .vl-ear-line { display: flex; gap: 8px; align-items: baseline; justify-content: space-between; }
 /* 긴 후보(실측 480자)가 문구 칸·「저장」을 밀어내지 않게 줄 높이를 묶고, 넘치면 줄 안에서
@@ -3630,7 +3635,54 @@ VISUAL_BOOTSTRAP_JS = (
           out += ' <span class="vl-badge" data-vl-suspect="1" title="' + esc(suspectNote(cue)) +
             '">확인 필요</span>';
         }
+        return out + truthBadges(cue);
+      }
+      // 시각 정답(W-25b) — 권하는 층과 찍은 정답 수를 보일 뿐이다. 자막은 그대로다.
+      function truthBadges(cue) {
+        var out = "";
+        if (cue.truthStratum) {
+          out += ' <span class="vl-badge" data-vl-truth-stratum="' +
+            esc(cue.truthStratum.code) + '" title="시각 정답을 찍어 볼 줄">' +
+            esc(cue.truthStratum.label) + "</span>";
+        }
+        var marked = ["start", "end"].filter(function (edge) {
+          return cue.truth && cue.truth[edge];
+        }).length;
+        if (marked) {
+          out += ' <span class="vl-badge" data-vl-truth="' + marked + '">정답 ' + marked +
+            "/2</span>";
+        }
         return out;
+      }
+      function truthValue(cue, edge) {
+        var mark = cue.truth && cue.truth[edge];
+        return mark ? VL.fmt(ratOf(mark.at)) + "초" : "아직 없음";
+      }
+      function truthLine(cue, edge) {
+        var label = edge === "start" ? "참 시작" : "참 끝";
+        var mark = cue.truth && cue.truth[edge];
+        return '<p class="vl-kv vl-truth-line"><button type="button" class="vl-btn" ' +
+          'data-vl-act="truth-mark" data-vl-edge="' + edge + '">' + label + "</button> " +
+          esc(label + " " + truthValue(cue, edge)) +
+          (mark ? ' <button type="button" class="vl-btn" data-vl-act="truth-clear" ' +
+            'data-vl-edge="' + edge + '" aria-label="' + label + ' 지우기">지우기</button>' : "") +
+          (mark && mark.stale ? " <small>자막 줄이 바뀌어 낡은 정답입니다 — 다시 찍으세요." +
+            "</small>" : "") + "</p>";
+      }
+      function truthLines(cue) {
+        var out = ['<div class="vl-truth" role="group" aria-label="시각 정답">'];
+        if (cue.truthStratum) {
+          out.push('<p class="vl-kv"><span class="vl-badge" data-vl-truth-stratum="' +
+            esc(cue.truthStratum.code) + '">' + esc(cue.truthStratum.label) +
+            "</span> 시각 정답을 찍어 볼 줄입니다.</p>");
+        }
+        out.push(truthLine(cue, "start"));
+        out.push(truthLine(cue, "end"));
+        out.push('<p class="vl-kv"><small>들어 보고 말이 실제로 시작·끝나는 자리에서 멈춘 뒤 ' +
+          "「참 시작」·「참 끝」을 누르세요(「,」·「.」로 한 프레임씩 옮길 수 있습니다). " +
+          "정답은 자막과 따로 저장하고 자막은 그대로입니다 — 시각 정확도 보고서만 " +
+          "읽습니다.</small></p></div>");
+        return out.join("");
       }
       function earLine(label, text, take) {
         // 긴 후보는 줄 안에서 스크롤한다(높이 상한은 CSS) — 키보드로도 닿게 초점을 받는다.
@@ -3690,7 +3742,7 @@ VISUAL_BOOTSTRAP_JS = (
         });
         if (!cue) { return ""; }
         return '<fieldset class="vl-source-caption-editor"><legend>원본 자막 수정</legend>' +
-          earLines(cue) + suspectLines(cue) +
+          earLines(cue) + suspectLines(cue) + truthLines(cue) +
           '<label>문구<textarea id="vl-source-text" class="vl-input">' +
           esc(takenText(cue, info)) + '</textarea></label>' +
           '<label>시작(초)<input id="vl-source-start" class="vl-input" value="' +
@@ -3823,12 +3875,17 @@ VISUAL_BOOTSTRAP_JS = (
         return "원본 자막 목록" + (suspects ? " · 확인 필요 " + suspects + "개" : "") +
           (ears ? " · 다른 귀 " + ears + "개" : "");
       }
+      // 사라진 줄의 시각 정답(W-25b) — 목록 맨 위 한 줄. 정답은 보고서에서 빠진다.
+      function truthMissingLine(info) {
+        return info && info.truthMissing ?
+          '<p class="vl-kv"><small>' + esc(info.truthMissing) + "</small></p>" : "";
+      }
       function folded(card, info, opened) {
         // 접힌 상세 — 사람의 메모는 기계 근거(분석 근거)와 따로 둔다(D52).
         var out = [];
         if (info && info.subtitles && info.subtitles.length) {
           out.push(details(opened, "cues", cueListSummary(info.subtitles),
-            info.subtitles.map(function (u) {
+            truthMissingLine(info) + info.subtitles.map(function (u) {
               return '<button type="button" class="vl-btn" data-vl-act="source-pick" ' +
                 'data-vl-cue-id="' + esc(u.id) + '" title="' + esc(cueTitle(u)) + '">' +
                 esc(VL.fmt(ratOf(u.start)) + '초 · ' + u.text) + cueBadges(u) + '</button>';
@@ -4295,6 +4352,17 @@ VISUAL_BOOTSTRAP_JS = (
               reason:picked.text,start:picked.start,end:picked.end};
             seekTo(ratOf(picked.start)); renderPanel();
           }
+          return;
+        }
+        if (act === 'truth-mark' || act === 'truth-clear') {
+          // 시각 정답(W-25b) — 지금 재생 위치(원본 시각)를 정답으로 찍는다. 자막은 그대로다.
+          var truthInfo = curSource();
+          var at = playheadLocal();
+          if (!truthInfo || !state.sourceCue || (act === 'truth-mark' && !at)) { return; }
+          call('vl_timing_truth', {sourceId:curSourceId(),
+            transcriptRevision:truthInfo.transcriptRevision, utteranceId:state.sourceCue.id,
+            edge:node.getAttribute('data-vl-edge'), action:act.slice(6),
+            at:at ? VL.str(at) : ''}, '시각 정답을 저장하는 중…');
           return;
         }
         if (act.indexOf('source-') === 0) {

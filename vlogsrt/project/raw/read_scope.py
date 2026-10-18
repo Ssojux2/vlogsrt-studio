@@ -21,7 +21,9 @@
 from __future__ import annotations
 
 import contextlib
+import threading
 from collections.abc import Callable, Hashable, Iterator
+from contextlib import AbstractContextManager
 from contextvars import ContextVar
 from typing import Any, TypeVar
 
@@ -33,6 +35,8 @@ class ReadScope:
 
     def __init__(self) -> None:
         self._answers: dict[Hashable, Any] = {}
+        self._held: dict[Hashable, tuple[int, Any]] = {}
+        self._stack = contextlib.ExitStack()
 
     def memo(self, key: Hashable, compute: Callable[[], T]) -> T:
         """기억한 답, 없으면 계산해 기억한다 — 계산이 예외를 올리면 기억하지 않는다."""
@@ -43,8 +47,26 @@ class ReadScope:
         return answer
 
     def forget(self) -> None:
-        """기억한 답을 모두 버린다 — 범위 안에서 무언가를 썼을 수 있는 자리 바로 뒤에 부른다."""
+        """기억한 답을 모두 버린다 — 범위 안에서 무언가를 썼을 수 있는 자리 바로 뒤에 부른다.
+
+        함께 쓰던 연결도 닫는다 — 쓴 뒤의 읽기는 연결까지 처음부터다."""
         self._answers.clear()
+        self.close()
+
+    def held(self, key: Hashable, opener: Callable[[], AbstractContextManager[T]]) -> T | None:
+        """범위가 끝날 때까지 함께 쓰는 자원(DB 연결 등) — 다른 스레드에서 부르면 None(그쪽이
+        연다)."""
+        owner = threading.get_ident()
+        if key not in self._held:
+            self._held[key] = (owner, self._stack.enter_context(opener()))
+        thread, value = self._held[key]
+        return value if thread == owner else None
+
+    def close(self) -> None:
+        """함께 쓰던 자원을 모두 닫는다."""
+        self._held.clear()
+        self._stack.close()
+        self._stack = contextlib.ExitStack()
 
     def __len__(self) -> int:
         return len(self._answers)
@@ -69,6 +91,7 @@ def open() -> Iterator[ReadScope]:
         yield scope
     finally:
         _CURRENT.reset(token)
+        scope.close()
 
 
 def current() -> ReadScope | None:
@@ -80,3 +103,19 @@ def memo(key: Hashable, compute: Callable[[], T]) -> T:
     """범위가 열려 있으면 기억한 답, 아니면 그냥 계산한다(예전 그대로)."""
     scope = _CURRENT.get()
     return compute() if scope is None else scope.memo(key, compute)
+
+
+@contextlib.contextmanager
+def shared(key: Hashable, opener: Callable[[], AbstractContextManager[T]]) -> Iterator[T]:
+    """범위 안에서는 하나를 함께 쓰는 자원, 범위 밖(또는 다른 스레드)에서는 매번 여닫는다.
+
+    작은 표 몇 개를 읽는 그리기 길이 표마다 DB를 따로 열지 않게 한다 — 연결은 범위가 끝날 때
+    닫힌다(W-25b, D67). 읽기만 하는 자리가 쓴다(범위는 쓰기가 끝난 뒤에만 열린다).
+    """
+    scope = _CURRENT.get()
+    value = None if scope is None else scope.held(key, opener)
+    if value is not None:
+        yield value
+        return
+    with opener() as fresh:
+        yield fresh

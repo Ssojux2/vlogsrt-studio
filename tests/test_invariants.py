@@ -1904,6 +1904,57 @@ def test_real_tree_passes_the_tier_timing_entry_check() -> None:
     assert check_invariants.check_tier_timing_only_from_service() == []
 
 
+# ── W-25b: 시각 정답은 자막·등급·내보내기와 따로 ────────────────────────────
+
+
+@pytest.mark.parametrize("reader", check_invariants.TIMING_TRUTH_FORBIDDEN_READERS)
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "from vlogsrt.project.raw import timing_truth",
+        "from vlogsrt.project.raw.timing_truth import marks",
+        "import vlogsrt.project.raw.timing_truth as truth",
+        "from . import timing_truth",
+        "from vlogsrt.project.config import TIMING_TRUTH_SETTINGS",
+        "from vlogsrt.project.config import TimingTruthSettings",
+        "import importlib\nM = importlib.import_module('vlogsrt.project.raw.timing_truth')",
+    ],
+)
+def test_truth_marks_stay_out_of_subtitles_tiers_approval_and_export(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, reader: str, statement: str
+) -> None:
+    clean = "from fractions import Fraction\n"
+    files = {
+        f"vlogsrt/project/{rel}": clean for rel in check_invariants.TIMING_TRUTH_FORBIDDEN_READERS
+    }
+    files["vlogsrt/project/raw/timing_truth.py"] = clean
+    _fake_source_tree(monkeypatch, tmp_path, files)
+    assert check_invariants.check_timing_truth_stays_apart() == []
+    (tmp_path / "vlogsrt" / "project" / reader).write_text(clean + statement + "\n", "utf-8")
+    (failure,) = check_invariants.check_timing_truth_stays_apart()
+    assert failure.startswith(f"vlogsrt/project/{reader}: ") and failure.endswith("(D67)")
+
+
+def test_the_truth_check_names_the_readers_and_notices_a_missing_module(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    assert set(check_invariants.TIMING_TRUTH_FORBIDDEN_READERS) >= {
+        "raw/understanding.py",
+        "raw/source_transcript.py",
+        "raw/finalcut_export.py",
+        "raw/finalcut_timeline.py",
+        "raw/tiering.py",
+    }
+    _fake_source_tree(monkeypatch, tmp_path, {"vlogsrt/project/raw/tiering.py": ""})
+    assert check_invariants.check_timing_truth_stays_apart() == [
+        "vlogsrt/project/raw/timing_truth.py: 시각 정답 계층이 사라졌다 (D67)"
+    ]
+
+
+def test_real_tree_keeps_truth_marks_apart() -> None:
+    assert check_invariants.check_timing_truth_stays_apart() == []
+
+
 # ── D56: Final Cut 타임라인 빌더는 순수 계층이다 ──────────────────────────
 
 

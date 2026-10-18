@@ -124,6 +124,8 @@ class Stage1Audio:
     presentation_origin: Fraction = Fraction(0)
     failed: tuple[FailedChunk, ...] = ()
     clamped: int = 0  # 1단계가 청크 끝에 맞춘 세그먼트 수(D55)
+    chunk_starts: tuple[Fraction, ...] = ()
+    """전사 청크마다의 시작(PCM 시계의 초) — 시각 정답의 「조각 첫 줄」 층(W-25b)만 읽는다."""
 
     @property
     def pcm_path(self) -> Path:
@@ -265,6 +267,10 @@ def _stage1_of(
         failed=_failed_chunks(body, rate),
         clamped=sum(
             len(chunk.get("clamped_segments", []))
+            for chunk in (body.get("asr") or {}).get("chunks", [])
+        ),
+        chunk_starts=tuple(
+            Fraction(int(chunk["sample_start"]), rate)
             for chunk in (body.get("asr") or {}).get("chunks", [])
         ),
     )

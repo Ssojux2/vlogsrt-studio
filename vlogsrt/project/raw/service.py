@@ -514,6 +514,13 @@ SNAP_CHANGED = (
     " 않았습니다."
 )
 SNAP_NOTHING_CHANGED = "아무것도 바꾸지 않았습니다."
+TRUTH_NO_TRANSCRIPT = "원본 자막이 없어 정답을 찍을 수 없습니다."
+TRUTH_REVISION_CHANGED = (
+    "화면이 본 뒤에 원본 자막이 바뀌었습니다 — 새로고침한 뒤 다시 찍으세요. 아무것도 찍지"
+    " 않았습니다."
+)
+TRUTH_LINE_MISSING = "그 자막 줄이 지금 원본 자막에 없습니다. 아무것도 찍지 않았습니다."
+TRUTH_OUT_OF_RANGE = "재생 위치가 원본 길이 밖입니다. 아무것도 찍지 않았습니다."
 SNAP_LISTEN_FIRST = 5
 """「시각 맞춤 제안」 칸이 먼저 들어 보라고 내놓는 줄 수 — 끝이 크게 움직인 줄부터(D59 19g (c)).
 문구 길이일 뿐 판정이 아니다(적용은 언제나 모든 줄이다)."""
@@ -1813,6 +1820,93 @@ class RawWorkspaceService:
         log.out(f"시각 맞춤을 되돌렸습니다: {asset_id}")
         self._queue_sync_checks(root, (asset_id,))  # 자막이 바뀌었다 — 시각 확인을 다시(D55)
         return document
+
+    # ── 시각 정답(W-25b, D67) — 사람이 들어 찍은 참 시작·끝. 자막과 따로 둔다 ───────────────────
+    # 찍어도 원본 자막 리비전·줄·시각 확인·지문·캐시 열쇠·승인·견적·등급은 그대로다. 읽는 곳은
+    # 화면의 표시와 `scripts/timing_truth_report.py`뿐이다.
+
+    def timing_truth_view(
+        self,
+        root: Path,
+        asset_id: str,
+        transcript: Mapping[str, Any],
+        sync_view: Mapping[str, Any] | None,
+    ) -> tuple[dict[str, dict[str, Any]], int]:
+        """줄마다의 화면 값(권하는 층 `truthStratum` · 찍은 정답 `truth`)과 줄이 사라진 정답 수.
+
+        글자가 바뀐 줄의 정답은 그 줄에 `stale`로 싣는다(다시 찍기). 읽기만 한다(표를 만들지
+        않는다).
+        """
+        from vlogsrt.project.raw import timing_truth
+
+        workspace = self._workspace(root)
+        lines = timing_truth.lines_of(transcript)
+        strata = _truth_strata(workspace, asset_id, transcript, lines, sync_view)
+        notes: dict[str, dict[str, Any]] = {
+            cue_id: {"truthStratum": stratum}
+            for cue_id, stratum in timing_truth.suggest(lines, strata).items()
+        }
+        missing = 0
+        for state in timing_truth.judge(timing_truth.marks(workspace, asset_id), lines):
+            if state.stale == timing_truth.STALE_LINE_MISSING:
+                missing += 1
+                continue
+            value: dict[str, Any] = {"at": str(state.mark.seconds)}
+            if state.stale is not None:
+                value["stale"] = True
+            notes.setdefault(state.mark.utterance_id, {}).setdefault("truth", {})[
+                state.mark.edge
+            ] = value
+        return notes, missing
+
+    def mark_timing_truth(
+        self,
+        root: Path,
+        asset_id: str,
+        *,
+        utterance_id: str,
+        edge: str,
+        seconds: Fraction,
+        transcript_revision: str,
+    ) -> Any:
+        """「참 시작」·「참 끝」(무료) — 화면이 본 리비전의 그 줄에 정답 하나를 찍는다.
+
+        줄은 한 칸도 움직이지 않고 원본 자막 리비전도 쓰지 않는다. 화면이 본 뒤 자막이 바뀌었거나
+        줄이 없거나 시각이 원본 길이 밖이면 거절한다(아무것도 쓰지 않는다). 그 줄의 지금 층을 함께
+        적는다 — 보고서는 찍을 때의 층으로 나눈다(나중에 시각 확인이 바뀌어도 기준선이 흔들리지
+        않게).
+        """
+        from vlogsrt.project.raw import source_transcript, timing_truth
+
+        workspace = self._workspace(root)
+        transcript = source_transcript.load(workspace, asset_id)
+        lines = _truth_lines(transcript, transcript_revision, seconds)
+        line = next((item for item in lines if item.cue_id == utterance_id), None)
+        if transcript is None or line is None:
+            raise RawWorkspaceError(TRUTH_LINE_MISSING)
+        sync_view = self.sync_check_view(root, asset_id)
+        strata = _truth_strata(workspace, asset_id, transcript, lines, sync_view)
+        entry = timing_truth.mark(
+            workspace,
+            asset_id,
+            line,
+            edge,
+            seconds,
+            transcript_revision=transcript_revision,
+            stratum=strata[line.cue_id],
+        )
+        log.out(
+            f"시각 정답을 찍었습니다: {asset_id} {utterance_id} {edge} = {float(seconds):.3f}초"
+        )
+        return entry
+
+    def clear_timing_truth(
+        self, root: Path, asset_id: str, *, utterance_id: str, edge: str
+    ) -> bool:
+        """찍은 정답 하나를 지운다(무료) — 지웠으면 True. 자막은 그대로다."""
+        from vlogsrt.project.raw import timing_truth
+
+        return timing_truth.clear(self._workspace(root), asset_id, utterance_id, edge)
 
     @staticmethod
     def transcript_human_edited(document: Mapping[str, Any]) -> bool:
@@ -4990,6 +5084,49 @@ def _suspect_share(
     notes = RawWorkspaceService.subtitle_cue_notes(transcript, report)
     flagged = sum(1 for note in notes.values() if note.get("suspects"))
     return flagged, len(transcript.get("utterances") or ())
+
+
+def _truth_lines(
+    transcript: Mapping[str, Any] | None, revision: str, seconds: Fraction
+) -> tuple[Any, ...]:
+    """시각 정답을 찍을 수 있는 지금 리비전의 줄 — 자막이 없거나 화면이 본 리비전이 아니거나 시각이
+    원본 길이 밖이면 거절한다(아무것도 쓰지 않는다)."""
+    from vlogsrt.project.raw import source_transcript, timing_truth
+
+    if transcript is None:
+        raise RawWorkspaceError(TRUTH_NO_TRANSCRIPT)
+    if str(transcript["revision"]) != revision:
+        raise RawWorkspaceError(TRUTH_REVISION_CHANGED)
+    if not 0 <= seconds <= source_transcript.rational(transcript["duration"]):
+        raise RawWorkspaceError(TRUTH_OUT_OF_RANGE)
+    return timing_truth.lines_of(transcript)
+
+
+def _truth_strata(
+    workspace: RawWorkspace,
+    asset_id: str,
+    transcript: Mapping[str, Any],
+    lines: Sequence[Any],
+    sync_view: Mapping[str, Any] | None,
+) -> dict[str, str]:
+    """시각 정답의 층(W-25b) — 1단계 기록의 청크 시작·PCM 원점과 지금 확인의 「못 찾음」 줄로.
+
+    1단계 기록은 원본 자막이 묶인 원본 해시로 찾는다(읽기 범위가 그리기 한 번에 한 번만 읽는다).
+    기록이 없으면 청크 층이 비고 PCM 원점은 0이다 — 층을 지어내지 않는다.
+    """
+    from vlogsrt.project.raw import sync_report, timing_truth
+
+    stage1 = sync_report.stage1_audio(
+        workspace.root, asset_id, str(transcript.get("source_sha256") or "")
+    )
+    origin = Fraction(0)
+    starts: tuple[Fraction, ...] = ()
+    if stage1 is not None and not stage1.absent:
+        origin = stage1.origin - stage1.presentation_origin
+        starts = tuple(origin + start for start in stage1.chunk_starts)
+    return timing_truth.stratify(
+        lines, chunk_starts=starts, audio_start=origin, no_speech=_current_no_speech(sync_view)
+    )
 
 
 def _current_no_speech(sync_view: Mapping[str, Any] | None) -> frozenset[str]:

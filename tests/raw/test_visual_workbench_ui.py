@@ -2556,6 +2556,7 @@ def test_visual_server_functions_bind_client_revision(tmp_path: Path) -> None:
         "vl_refill",  # 「빈칸 재전사 승인」(D59 19f) — 보이는 견적·digest를 대조한 뒤에만 작업
         "vl_snap_apply",  # 「시각 맞춤 적용(무료)」(D59 19h) — 화면이 본 제안 sha를 대조한다
         "vl_snap_revert",  # 「되돌리기」(D59 19h) — 화면이 본 리비전에만
+        "vl_timing_truth",  # 「참 시작」·「참 끝」(W-25b) — 자막과 따로, 화면이 본 리비전에만
     ]
     signature = model["signature"]
     base = model["basePlanId"]
@@ -4526,6 +4527,7 @@ def test_blocks_wire_workbench_outputs(tmp_path: Path, local_socket: None) -> No
         "vl_refill",  # 「빈칸 재전사 승인」(D59 19f) — 보이는 견적·digest를 대조한 뒤에만 작업
         "vl_snap_apply",  # 「시각 맞춤 적용(무료)」(D59 19h) — 화면이 본 제안 sha를 대조한다
         "vl_snap_revert",  # 「되돌리기」(D59 19h) — 화면이 본 리비전에만
+        "vl_timing_truth",  # 「참 시작」·「참 끝」(W-25b) — 자막과 따로, 화면이 본 리비전에만
     ]
     cap_names = [fn.__name__ for fn in server._caption_workbench_block.server_fns]
     assert cap_names == ["cap_save", "cap_confirm"]

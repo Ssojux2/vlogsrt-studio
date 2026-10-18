@@ -63,7 +63,8 @@ def state(workspace: Any, asset_id: str) -> AsrEpoch:
 
 
 def _states(workspace: Any) -> dict[str, AsrEpoch]:
-    with workspace.connect() as db:
+    # 그리기 범위의 작은 표 읽기는 연결 하나를 함께 쓴다(시각 정답 표와 같은 연결, D67).
+    with read_scope.shared(("workspace.db", str(workspace.root)), workspace.connect) as db:
         if not _table_exists(db):
             return {}
         rows = db.execute(f"SELECT asset_id, epoch, heard FROM {TABLE}").fetchall()
