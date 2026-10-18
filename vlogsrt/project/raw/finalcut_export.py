@@ -13,9 +13,12 @@
 - **지우지 않으니 관문이 없다.** 미검토 자동 제외도 켠 채 보낸다(D35는 잘라내는 확정
   내보내기의 관문이다). 끄는 것은 사람이 확정한 제외뿐이다.
 - **조용히 바꾸지 않는다.** 원본이 바뀌었거나, 검토 시계·라이브러리 선언·타임코드가 지금
-  측정과 어긋나면 그 파일 이름을 대고 전체를 거부한다. 라이브러리에서 온 원본에 해시 uid를
-  지어 붙이는 대체 경로는 없다 — 그러면 Final Cut이 같은 미디어를 둘로 본다. 보낼 원본과
-  무관한 라이브러리 기록이 깨진 것은 거부하지 않고 리포트에 경고로 남긴다.
+  측정과 어긋나면 그 파일 이름을 대고 전체를 거부한다. 단 하나의 예외는 프레임 격자를 증명하지
+  못한 원본(VFR, D68)이다 — 격자 계산 없이는 실을 수 없으므로 그 원본만 빼고 보내며, 이름과
+  까닭을 리포트의 `not_exported`와 경고에 남긴다. 보낼 원본이 그것뿐이면 거부한다.
+  라이브러리에서 온 원본에 해시 uid를 지어 붙이는 대체 경로는 없다 — 그러면 Final Cut이 같은
+  미디어를 둘로 본다. 보낼 원본과 무관한 라이브러리 기록이 깨진 것은 거부하지 않고 리포트에
+  경고로 남긴다.
 - **덮어쓰지 않는다.** 매번 새 이름이고, 작업공간마다 한 번에 하나만 쓴다(폴더 잠금). 숨은
   초안(`.vlogsrt_….partial`)에 쓰고 fsync한 뒤 검증을 통과한 것만 링크로 제 이름을 얻는다.
   검증에 실패한 문서는 `.invalid.xml`로만 남는다 — 끝난 것처럼 보이지 않는다.
@@ -48,6 +51,7 @@ from vlogsrt.project.raw import media_refs
 from vlogsrt.project.raw.config import FINALCUT_TIMELINE
 from vlogsrt.project.raw.models import (
     INGEST_JOB_KIND,
+    UNSUPPORTED_GRID_REASON,
     AnalysisSourceResult,
     RawWorkspaceError,
     SourceAsset,
@@ -112,6 +116,15 @@ CaptionGaps = Mapping[str, Sequence[Mapping[str, str]] | None]
 
 class FinalCutExportError(RawWorkspaceError):
     """보내지 않았다 — 어느 원본·라이브러리의 무엇이 문제인지 이름으로 말한다."""
+
+
+class _UnsupportedGrid(FinalCutExportError):
+    """그 원본은 프레임 격자를 증명하지 못했다(VFR) — 그 원본만 빼고 보낸다(D68)."""
+
+    def __init__(self, asset: SourceAsset, note: str) -> None:
+        super().__init__(f"{asset.source_name}: 프레임 격자가 균일하지 않다(VFR) — {note}")
+        self.asset = asset
+        self.reason = f"{UNSUPPORTED_GRID_REASON} — {note}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -337,7 +350,7 @@ def _measured_grid(
 ) -> _Grid:
     """검토 머리 밖 원본의 격자 — 패킷을 훑어 잰 것만 믿는다. VFR은 프레임 수가 길이가 아니다."""
     if not clock.uniform_grid:
-        raise _refuse(asset, f"프레임 격자가 균일하지 않다(VFR) — {clock.grid_note}")
+        raise _UnsupportedGrid(asset, clock.grid_note or "")
     _require_plain_timeline(asset, clock.first_pts, clock.frame_count, clock.frame_duration, probe)
     return _Grid(clock.frame_duration, clock.frame_count)
 
@@ -622,11 +635,22 @@ def _require_no_import(service: RawWorkspaceService, root: Path) -> None:
 
 
 def _not_exported(
-    service: RawWorkspaceService, root: Path, head: ReviewRevision | None, exported: set[str]
+    service: RawWorkspaceService,
+    root: Path,
+    head: ReviewRevision | None,
+    exported: set[str],
+    reasons: Mapping[str, str],
 ) -> list[dict[str, str]]:
-    """타임라인에 오르지 못한 것 — 조용히 빠지지 않게 리포트와 경고로 남긴다."""
+    """타임라인에 오르지 못한 것 — 조용히 빠지지 않게 리포트와 경고로 남긴다.
+
+    `reasons`는 모으기가 뺀 원본의 까닭이다(VFR, D68). 그 밖의 원본은 가져오기 상태가 까닭이다.
+    """
     rows = [
-        {"asset_id": a.asset_id, "name": a.source_name, "reason": f"상태 {a.status}"}
+        {
+            "asset_id": a.asset_id,
+            "name": a.source_name,
+            "reason": reasons.get(a.asset_id, f"상태 {a.status}"),
+        }
         for a in service.list_source_assets(root)
         if a.asset_id not in exported
     ]
@@ -645,10 +669,14 @@ def _not_exported(
 
 def _gather_all(
     scope: _Scope, assets: tuple[SourceAsset, ...], context: JobContext | None
-) -> list[_Gathered]:
-    """원본마다 모은다 — 문제는 끝까지 다 모아 한 번에 이름을 대고 거부한다."""
+) -> tuple[list[_Gathered], dict[str, str]]:
+    """원본마다 모은다 — 문제는 끝까지 다 모아 한 번에 이름을 대고 거부한다.
+
+    격자를 증명하지 못한 원본(VFR)은 문제가 아니라 뺄 원본이다(D68) — (모은 것, 뺀 원본 → 까닭).
+    보낼 것이 그것들뿐이면 거부한다(빈 타임라인을 보낸 성공으로 꾸미지 않는다)."""
     gathered: list[_Gathered] = []
     problems: list[str] = []
+    skipped: dict[str, _UnsupportedGrid] = {}
     if context is not None:
         context.set_total(len(assets))
     for asset in assets:
@@ -656,15 +684,19 @@ def _gather_all(
             context.check_cancel()
         try:
             gathered.append(_gather(scope, asset))
+        except _UnsupportedGrid as error:
+            skipped[asset.asset_id] = error
         except FinalCutExportError as error:
             problems.append(str(error))
         if context is not None:
             context.advance()
+    if not problems and not gathered:
+        problems = [str(error) for error in skipped.values()]
     if problems:
         raise FinalCutExportError(
             f"Final Cut으로 보내지 않았다 — 원본 {len(problems)}개: " + " / ".join(problems)
         )
-    return gathered
+    return gathered, {asset_id: error.reason for asset_id, error in skipped.items()}
 
 
 # ── 쓰기 ─────────────────────────────────────────────────────────────────
@@ -829,9 +861,9 @@ def export(
         shelf = _LibraryShelf(service.remembered_fcp_library(root))
         rows = facade.tier_evidence_rows()
         scope = _Scope(service, workspace.root, workspace, head, rows, shelf, caption_gaps)
-        gathered = _gather_all(scope, assets, context)
+        gathered, skipped = _gather_all(scope, assets, context)
         document = _document(gathered, workspace, moment, shelf, caption_timing)
-        exported = {asset.asset_id for asset in assets}
+        exported = {asset.asset_id for asset in assets} - set(skipped)
         report: dict[str, object] = {
             "schema": REPORT_SCHEMA,
             "created_at": moment.astimezone(UTC).isoformat(),
@@ -839,7 +871,7 @@ def export(
             "library": shelf.facts(),
             "review_head": None if head is None else head.revision_id,
             "sources": [item.facts for item in gathered],
-            "not_exported": _not_exported(service, root, head, exported),
+            "not_exported": _not_exported(service, root, head, exported, skipped),
             "counts": _report_counts(document, gathered),
             **({} if caption_timing is None else {"sync_check": dict(caption_timing.section)}),
         }

@@ -1237,7 +1237,25 @@ def _finalcut_sent_text(sent: dict[str, Any]) -> str:
             "\n\n`자막 시각 확인 필요` 키워드는 달지 못해 키워드 없이 보냈습니다"
             f" — {sent['caption_timing_error']} (로그 참고)"
         )
+    unsupported = list(sent.get("unsupported") or ())
+    if unsupported:
+        # 빼고 보낸 원본은 이름으로 말한다(D68) — 수만 보이면 어느 영상이 빠졌는지 모른다.
+        text += (
+            f"\n\n{raw_service.UNSUPPORTED_GRID_REASON}이라 넣지 않은 영상 {len(unsupported)}개:"
+            f" {', '.join(unsupported)}. 일정한 프레임(예: 30fps)으로 다시 저장해 불러오면 함께"
+            " 보낼 수 있습니다."
+        )
     return text + "".join("\n\n" + line for line in _caption_honesty_lines(sent))
+
+
+def _send_unsupported_facts(report: Mapping[str, Any]) -> dict[str, Any]:
+    """보내기가 뺀 VFR 원본의 이름(D68) — 없으면 칸을 싣지 않는다(D68 이전 결과와 같은 값)."""
+    names = [
+        str(row["name"] or row["asset_id"])
+        for row in report.get("not_exported") or ()
+        if str(row.get("reason", "")).startswith(raw_service.UNSUPPORTED_GRID_REASON)
+    ]
+    return {"unsupported": names} if names else {}
 
 
 def _caption_honesty_lines(sent: Mapping[str, Any]) -> list[str]:
@@ -2361,20 +2379,7 @@ class RawWorkspaceUi:
                     "추천 구간 준비 완료",
                     "부분 완료 · 확인 필요",
                 ):
-                    view_token = self._visual_lifetime_token
-
-                    def show_cached(context: Any) -> None:
-                        with self._review_publish_lock:
-                            if (
-                                view_token == self._visual_lifetime_token
-                                and self._snapshot_root() == root
-                            ):
-                                self.raw.publish_selection_review(
-                                    root, existing["revision"], context
-                                )
-
-                    handle = self.raw.submit_job(root, "selection_review", view_token, show_cached)
-                    self._quick_update(existing["token"], review_job_id=handle.job_id)
+                    self._show_cached_review(root, existing)
                 return
         token = uuid.uuid4().hex
         state = {
@@ -2413,9 +2418,7 @@ class RawWorkspaceUi:
                 cached = self.raw.cached_selection_analysis(root, ids)
                 if cached:
                     self._quick_update(token, stage="저장된 Luna 결과", revision=cached)
-                    with self._review_publish_lock:
-                        if self._quick.get("token") == token and self._snapshot_root() == root:
-                            self.raw.publish_selection_review(root, cached, context)
+                    self._publish_selection(root, token, cached, context)
                     with self._selection_lock:
                         self._library_cached_ids.setdefault(root, set()).update(ids)
                     self._quick_update(token, stage="추천 구간 준비 완료")
@@ -2439,6 +2442,25 @@ class RawWorkspaceUi:
                         self._analysis_queue.remove(token)
 
         self._submit_selection(root, token, prepare)
+
+    def _show_cached_review(self, root: Path, existing: dict) -> None:
+        """다시 본 영상의 저장된 분석으로 검토를 게시한다 — 미뤄 둔 게시(`_publish_selection`)다.
+
+        실패는 그 영상의 상태에 남긴다(D68) — 작업 기록에만 남으면 화면은 「추천 구간 준비
+        완료」인데 검토가 없다."""
+        view_token = self._visual_lifetime_token
+
+        def show_cached(context: Any) -> None:
+            try:
+                with self._review_publish_lock:
+                    if view_token == self._visual_lifetime_token and self._snapshot_root() == root:
+                        self.raw.publish_selection_review(root, existing["revision"], context)
+            except Exception as error:
+                self._quick_update(existing["token"], error=f"검토를 열지 못했습니다 — {error}")
+                raise
+
+        handle = self.raw.submit_job(root, "selection_review", view_token, show_cached)
+        self._quick_update(existing["token"], review_job_id=handle.job_id)
 
     def _submit_selection(self, root: Path, token: str, prepare: Callable[[Any], None]) -> None:
         try:
@@ -2497,9 +2519,7 @@ class RawWorkspaceUi:
         # 「전사만」은 영상 분석 앞에서 멈춘다 — 판정이 없으니 검토를 새로 세우지 않는다(D59 19b).
         # 지금 검토(이전 분석의 등급·사람 결정)는 그대로 남는다.
         if not _transcribe_only(quote):
-            with self._review_publish_lock:
-                if self._quick.get("token") == token and self._snapshot_root() == root:
-                    self.raw.publish_selection_review(root, revision, context)
+            self._publish_selection(root, token, revision, context)
         self._quick_assert_current(root, token, context)
         stage, error = self.raw.selection_completion(root, revision)
         if stage == "추천 구간 준비 완료":
@@ -2507,6 +2527,22 @@ class RawWorkspaceUi:
             with self._selection_lock:
                 self._library_cached_ids.setdefault(root, set()).update(quote.asset_ids)
         self._quick_update(token, stage=stage, revision=revision, error=error)
+
+    def _publish_selection(self, root: Path, token: str, revision: str, context: Any) -> None:
+        """선택 분석의 검토 게시 — 보는 영상이면, 그리고 검토 머리가 아직 없으면 언제나 게시한다.
+
+        예전에는 보는 영상이 아니면 아무 말 없이 건너뛰었다 — 라이브러리 승인의 영상들(보지 않는
+        채 돈다)이 모두 「추천 구간 준비 완료」·작업 성공으로 끝났는데 검토 머리가 하나도 없었다
+        (실데이터 34개, D68). 게시는 원본 전부를 다시 해시하므로 머리가 있으면 그 영상을 볼 때로
+        미루고(`show_cached`), 미뤘다는 것을 로그에 남긴다. 게시 실패는 그대로 올라가 작업을
+        실패로 남긴다.
+        """
+        with self._review_publish_lock:
+            viewed = self._quick.get("token") == token and self._snapshot_root() == root
+            if viewed or not self.raw.review_workspace_facade(root).has_review():
+                self.raw.publish_selection_review(root, revision, context)
+                return
+        log.info(f"검토 게시는 그 영상을 볼 때 한다 — 분석 리비전 {revision}")
 
     def _library_ids(self, root: Path) -> tuple[str, ...]:
         ready = {a.asset_id for a in self.raw.list_source_assets(root) if a.status == "ready"}
@@ -3153,6 +3189,11 @@ class RawWorkspaceUi:
             a.asset_id for a in self.raw.list_source_assets(root) if a.status == "ready"
         }:
             raise gr.Error("현재 프로젝트의 영상을 선택하세요")
+        skipped = {item.asset_id: item for item in self.raw.review_unsupported_sources(root)}
+        if source_id in skipped:
+            # 계획이 덮지 못한 영상(VFR, D68)은 재생·분석할 조각이 없다 — 「준비 중」으로 멈춰
+            # 보이지 않게 까닭을 말하고 아무 작업도 걸지 않는다.
+            raise gr.Error(f"이 영상은 {skipped[source_id].reason}입니다 — 재생·검토에서 빠집니다")
         if self._quick.get("view_source_id") != source_id:
             self._start_quick(root, (), asset_ids=(source_id,))
         return self._capcut_result(root, self._quick_status())
@@ -3844,6 +3885,7 @@ class RawWorkspaceUi:
                 "not_exported": len(report["not_exported"]),
                 "caption_timing_error": report.get("sync_check", {}).get("error"),
                 **_send_caption_facts(report),
+                **_send_unsupported_facts(report),
             }
             self._remember_finalcut(root, signature, sent)
             try:
@@ -5134,15 +5176,21 @@ class RawWorkspaceUi:
         except raw_service.RawWorkspaceError:
             return {}
 
-    def _visual_plan_ranges(self, root: Path, base_plan_id: str) -> set[tuple[str, int, int]]:
-        """기본 계획의 core 범위 — 재추출 판정(영상 갱신 필요 표시)의 재료."""
+    def _visual_plan_facts(
+        self, root: Path, base_plan_id: str
+    ) -> tuple[set[tuple[str, int, int]], tuple[raw_service.UnsupportedSource, ...]]:
+        """기본 계획의 (core 범위, 덮지 못한 원본) — 계획을 한 번만 읽는다.
+
+        core 범위는 재추출 판정(영상 갱신 필요 표시)의 재료이고, 덮지 못한 원본(VFR, D68)은 목록에
+        까닭과 함께 보일 영상이다."""
         try:
             plan = self.raw.segment_plan_revision(root, base_plan_id)
         except raw_service.RawWorkspaceError:
-            return set()
-        return {
+            return set(), ()
+        ranges = {
             (entry.asset_id, entry.core_start_pts, entry.core_end_pts) for entry in plan.entries
         }
+        return ranges, plan.unsupported
 
     def _visual_chronological(self, root: Path, base_plan_id: str | None) -> tuple[Any, Any]:
         """(리비전, 시간순 조각) — 전체 원본 레일·선호 선택 계산의 공개 읽기."""
@@ -5307,13 +5355,13 @@ class RawWorkspaceUi:
         try:
             overview = self._visual_query(root, query_page, preferred_id, selection_filter or "all")
         except (raw_service.RawWorkspaceError, raw_service.ReviewError) as error:
-            note = f"영상 검토를 열지 못했습니다. {error}"
+            note = f"영상 검토를 열지 못했습니다. {error}{self._preview_failure_hint(root)}"
             return (
                 ui_facade.visual_player_shell_html(None, note),
                 self._workbench_html(root, {"empty": note}),
             )
         names = self._visual_source_names(root)
-        plan_ranges = self._visual_plan_ranges(root, overview.base_plan_id)
+        plan_ranges, unsupported = self._visual_plan_facts(root, overview.base_plan_id)
         # 전체 원본 레일·분석 태그 — 질의와 같은 리비전인지 비교해 한 번만 공개 읽는다.
         revision: Any = None
         ordered: Any = None
@@ -5503,6 +5551,7 @@ class RawWorkspaceUi:
             "needsPlan": needs_plan,
             "packageDir": self._latest_package_dir(root),
             **self._proposal_fields(sources_model, ordered, pending_ids),
+            **self._unsupported_fields(unsupported, names, ordered, source_id),
         }
         shell_src = None
         if selected is not None:
@@ -5518,6 +5567,53 @@ class RawWorkspaceUi:
         return shell, self._workbench_html(
             root, model, analysed=analysed, proposals=len(pending_ids)
         )
+
+    def _preview_failure_hint(self, root: Path) -> str:
+        """검토를 못 열었을 때 덧붙일 까닭 — 검토 머리를 세우는 미리보기 준비가 실패했으면 그 말.
+
+        머리가 없다는 말만으로는 왜 없는지 모른다(실데이터: 계획이 VFR 원본에서 멈췄다, D68)."""
+        latest = self.raw.latest_job(root, "source_preview")
+        if latest is None or latest.status != "failed" or not latest.error:
+            return ""
+        return f" · 미리보기 준비 실패: {latest.error}"
+
+    @staticmethod
+    def _unsupported_fields(
+        unsupported: Sequence[raw_service.UnsupportedSource],
+        names: Mapping[str, str],
+        ordered: Sequence[Any] | None,
+        view_source_id: str | None,
+    ) -> dict[str, object]:
+        """계획이 덮지 못한 영상(VFR, D68)의 카드 값 — 없으면 칸을 싣지 않는다(D68 이전과 같은 값).
+
+        영상은 언제나 촬영 시각 순이다(D53) — `before`는 그 영상 바로 뒤의 덮은 영상이고(없으면
+        끝), 화면이 그 카드 앞에 끼운다. 카드는 재생하지 않고 누르면 까닭을 보인다. 보던 영상이
+        그것이면 `viewUnsupported`가 같은 까닭을 싣는다(「준비 중」으로 멈춰 보이지 않게).
+        """
+        if not unsupported:
+            return {}
+        first_order: dict[str, int] = {}
+        for segment in ordered or ():
+            first_order.setdefault(segment.source_id, segment.source_order)
+        covered = sorted(first_order.items(), key=lambda item: item[1])
+        rows: list[dict[str, object]] = []
+        for item in unsupported:
+            name = names.get(item.asset_id, item.asset_id)
+            rows.append(
+                {
+                    "sourceId": item.asset_id,
+                    "sourceName": name,
+                    "reason": item.reason,
+                    "note": f"{name}: {item.reason} — 재생·검토·Final Cut 보내기에서 빠집니다."
+                    " 일정한 프레임(예: 30fps)으로 다시 저장해 불러오세요.",
+                    "before": next((sid for sid, at in covered if at > item.source_order), None),
+                }
+            )
+        fields: dict[str, object] = {"unsupportedSources": rows}
+        viewed = next((row for row in rows if row["sourceId"] == view_source_id), None)
+        if viewed is not None:
+            fields["viewUnsupported"] = viewed["note"]
+        return fields
 
     @staticmethod
     def _media_cards(

@@ -60,6 +60,7 @@ from vlogsrt.project.raw.models import (
     SourceAssetDraft,
     SourceOrderEntry,
     SourceOrderRevision,
+    UnsupportedSource,
     WorkspaceAlreadyExistsError,
     WorkspaceNotFoundError,
     WorkspaceVersionError,
@@ -504,6 +505,53 @@ JSON이다. 문장 목록로 두는 이유는 하나의 트랜잭션 안에서 �
 
 def _now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
+
+
+UNSUPPORTED_TABLE = "segment_plan_unsupported"
+"""계획이 덮지 못한 원본(D68)의 표 — 그런 원본이 처음 생길 때 만든다.
+
+덮지 못한 원본이 없는 작업공간에는 표가 생기지 않는다 — DB 스키마 버전도 그대로이고, 읽기는 표를
+만들지 않는다(`asr_epoch`과 같은 규율). 계획 행과 같은 트랜잭션에 들어간다."""
+
+_UNSUPPORTED_SCHEMA = (
+    f"CREATE TABLE IF NOT EXISTS {UNSUPPORTED_TABLE} ("
+    " revision_id TEXT NOT NULL, asset_id TEXT NOT NULL, source_order INTEGER NOT NULL,"
+    " reason TEXT NOT NULL, detail TEXT NOT NULL, PRIMARY KEY (revision_id, asset_id))"
+)
+
+
+def _insert_unsupported(connection: sqlite3.Connection, snapshot: SegmentPlanSnapshot) -> None:
+    """계획 리비전의 덮지 못한 원본을 같은 트랜잭션에 — 없으면 표에 손대지 않는다."""
+    if not snapshot.unsupported:
+        return
+    connection.execute(_UNSUPPORTED_SCHEMA)
+    connection.executemany(
+        f"INSERT INTO {UNSUPPORTED_TABLE} (revision_id, asset_id, source_order, reason, detail)"
+        " VALUES (?, ?, ?, ?, ?)",
+        [
+            (snapshot.revision_id, item.asset_id, item.source_order, item.reason, item.detail)
+            for item in snapshot.unsupported
+        ],
+    )
+
+
+def _unsupported_of(
+    connection: sqlite3.Connection, revision_id: str
+) -> tuple[UnsupportedSource, ...]:
+    """계획 리비전의 덮지 못한 원본 — 표가 없으면 빈 값이다(표를 만들지 않는다)."""
+    table = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (UNSUPPORTED_TABLE,)
+    ).fetchone()
+    if table is None:
+        return ()
+    rows = connection.execute(
+        f"SELECT asset_id, source_order, reason, detail FROM {UNSUPPORTED_TABLE}"
+        " WHERE revision_id = ? ORDER BY source_order",
+        (revision_id,),
+    ).fetchall()
+    return tuple(
+        UnsupportedSource(str(row[0]), int(row[1]), str(row[2]), str(row[3])) for row in rows
+    )
 
 
 def _insert_source_asset(
@@ -1553,6 +1601,7 @@ class RawWorkspace:
                     snapshot.created_at,
                 ),
             )
+            _insert_unsupported(connection, snapshot)
             connection.commit()
 
     def segment_plan_revision(self, revision_id: str) -> SegmentPlanSnapshot:
@@ -1560,6 +1609,7 @@ class RawWorkspace:
             row = connection.execute(
                 "SELECT * FROM segment_plan_revisions WHERE revision_id = ?", (revision_id,)
             ).fetchone()
+            unsupported = _unsupported_of(connection, revision_id) if row is not None else ()
         if row is None:
             raise PlanNotFoundError(f"없는 분할 계획 리비전: {revision_id}")
         return SegmentPlanSnapshot(
@@ -1572,6 +1622,7 @@ class RawWorkspace:
             ),
             fingerprint=str(row["fingerprint"]),
             created_at=str(row["created_at"]),
+            unsupported=unsupported,
         )
 
     def list_segment_plan_revisions(self) -> tuple[SegmentPlanSnapshot, ...]:

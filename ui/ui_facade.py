@@ -3099,8 +3099,38 @@ VISUAL_BOOTSTRAP_JS = (
       }
       // 목록 머리 — 영상은 언제나 촬영 시각 순이다(D53). 영상 카드는 모든 영상을 한 번에 그리므로
       // 쪽 넘김이 없다(D64 — 옛 「다음 쪽」은 그리지 않는 컷 목록을 넘겼다).
-      function listHead(shown) {
-        return '<p class="vl-list-head"><b>영상 ' + shown.length + "개</b> · 촬영 시각 순</p>";
+      // 계획이 덮지 못한 영상(VFR, D68)도 수에 든다 — 빠진 영상이 수에서도 사라지지 않게.
+      function listHead(shown, skipped) {
+        var extra = skipped.length ? " · 분석 지원 밖 " + skipped.length + "개" : "";
+        return '<p class="vl-list-head"><b>영상 ' + (shown.length + skipped.length) +
+          "개</b> · 촬영 시각 순" + extra + "</p>";
+      }
+      // 덮지 못한 영상의 카드(D68) — 재생할 조각이 없어 고르지 않는다. 누르면 까닭을 보인다.
+      function unsupportedCard(u) {
+        return '<button type="button" class="vl-thumb vl-thumb-ex vl-thumb-unsupported"' +
+          ' data-vl-act="unsupported-pick" data-vl-unsupported="' + esc(u.sourceId) +
+          '" data-vl-note="' + esc(u.note) + '" title="' + esc(u.sourceName) + '">' +
+          '<span class="vl-thumb-art"><span class="vl-thumb-missing">VFR</span></span>' +
+          '<span class="vl-thumb-name">' + esc(u.sourceName) + "</span>" +
+          '<span class="vl-thumb-meta"><span class="vl-badge vl-badge-amber">' +
+          esc(u.reason) + "</span></span></button>";
+      }
+      // 촬영 시각 순(D53) — 덮지 못한 영상은 서버가 정한 다음 영상(`before`) 카드 앞에 선다.
+      function cardsInOrder(shown, skipped, sel) {
+        var placed = {};
+        var out = [];
+        shown.forEach(function (c) {
+          skipped.forEach(function (u) {
+            if (u.before === c.sourceId && !placed[u.sourceId]) {
+              placed[u.sourceId] = true; out.push(unsupportedCard(u));
+            }
+          });
+          out.push(cardButton(c, sel));
+        });
+        skipped.forEach(function (u) {
+          if (!placed[u.sourceId]) { out.push(unsupportedCard(u)); }
+        });
+        return out;
       }
       function renderThumbs() {
         var mount = doc.getElementById("vl-thumbs");
@@ -3116,8 +3146,10 @@ VISUAL_BOOTSTRAP_JS = (
         var shown = (model.mediaCards || []).filter(function (c) {
           return !cardFiltered(c, open);
         });
+        // 덮지 못한 영상은 컷이 없어 「전체」 보기에만 선다.
+        var skipped = (state.filter || "all") === "all" ? (model.unsupportedSources || []) : [];
         rows.push('</div><div class="vl-cards">');
-        shown.forEach(function (c) { rows.push(cardButton(c, sel)); });
+        rows = rows.concat(cardsInOrder(shown, skipped, sel));
         rows.push("</div>");
         // 다시 그려도 「다음」의 키보드 초점은 새 「다음」으로 옮긴다(연달아 Enter). 서버 답은
         // 그라디오가 작업대를 갈아 그려 초점이 문서로 떨어진 뒤에 온다 — 마지막으로 누른 것이
@@ -3126,7 +3158,7 @@ VISUAL_BOOTSTRAP_JS = (
         var keep = !!(active && active.getAttribute &&
           active.getAttribute("data-vl-act") === "queue-next") ||
           (!!state.queueRefocus && (!active || active === doc.body));
-        mount.innerHTML = queueBlock() + listHead(shown) + rows.join("");
+        mount.innerHTML = queueBlock() + listHead(shown, skipped) + rows.join("");
         if (typeof mount.querySelectorAll === "function" && VL.fitThumb) {
           Array.prototype.forEach.call(mount.querySelectorAll(".vl-thumb-art img"), VL.fitThumb);
         }
@@ -4205,6 +4237,7 @@ VISUAL_BOOTSTRAP_JS = (
         }
         var act = node.getAttribute("data-vl-act");
         if (!act) { return; }
+        if (act === "unsupported-pick") { say(node.getAttribute("data-vl-note")); return; }
         if (act === 'relink-original') {
           call('vl_relink_original',
             {sourceId:curSourceId(), path:doc.getElementById('vl-original-path').value});
@@ -4505,6 +4538,8 @@ VISUAL_BOOTSTRAP_JS = (
       paintPlayhead();
       if (state.lastMsg) { msg(state.lastMsg); }
       else { liveFootnote(); }
+      // 보던 영상이 계획이 덮지 못한 영상이면(D68) 「준비 중」 대신 까닭을 말한다.
+      if (model.viewUnsupported) { say(model.viewUnsupported); }
     };
   }
   // 커밋 뒤 재배선 — 설치된 그라디오(6.29) 실측 세 가지를 다 다룬다:

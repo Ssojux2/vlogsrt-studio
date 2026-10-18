@@ -489,12 +489,33 @@ class SegmentCoverage:
     time_base_den: int
 
 
+UNSUPPORTED_GRID_REASON = "분석 지원 밖 — 프레임 격자가 고르지 않음(VFR)"
+"""계획이 원본을 덮지 못한 까닭(D68) — 화면·보내기 보고서·작업 기록이 같은 말을 쓴다."""
+
+
+@dataclass(frozen=True, slots=True)
+class UnsupportedSource:
+    """계획이 덮지 못한 원본 하나 — 빼지 않고 까닭과 함께 계획에 남는다(D68).
+
+    프레임 격자를 증명하지 못한 원본(VFR)은 프레임 단위 계획·검토·보내기의 재료가 되지
+    못한다. 원본과 전사 기록은 그대로이고, 조용히 사라지지 않게 계획이 이 기록을 진다.
+    `detail`은 측정이 남긴 말(`grid_note`) 그대로다.
+    """
+
+    asset_id: str
+    source_order: int
+    reason: str
+    detail: str
+
+
 @dataclass(frozen=True, slots=True)
 class SegmentPlanSnapshot:
     """분할 계획 리비전 — 전체 순서 리비전 위의 불변 스냅샷(§6.5).
 
     새 계획은 새 리비전일 뿐 옛 스냅샷을 다시 쓰지 않는다. `fingerprint`는
     원본 해시·시계·경계까지 묶은 sha256으로, 추출 작업 지문의 밑천이 된다.
+    `unsupported`는 순서에 있지만 덮지 못한 원본이다(D68) — 지문에는 넣지 않는다
+    (덮은 원본만 추출의 재료다). 비어 있으면 D68 이전 계획과 바이트째 같다.
     """
 
     revision_id: str
@@ -504,6 +525,7 @@ class SegmentPlanSnapshot:
     coverage: tuple[SegmentCoverage, ...]
     fingerprint: str
     created_at: str
+    unsupported: tuple[UnsupportedSource, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

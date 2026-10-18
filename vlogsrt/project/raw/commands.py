@@ -540,6 +540,8 @@ def cmd_plan(args: argparse.Namespace) -> int:
             f"  원본 순번 {proof.source_order}: 조각 {proof.segment_count}개 ·"
             f" {proof.source_frame_count}프레임 · 덮음 {seconds}초"
         )
+    for skipped in snapshot.unsupported:
+        log.warn(f"  원본 순번 {skipped.source_order}: 덮지 않음 — {skipped.reason}")
     for entry in snapshot.entries:
         log.out(
             f"  {entry.source_order}/{entry.segment_order:03d} · {entry.segment_id}"

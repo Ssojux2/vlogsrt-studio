@@ -137,6 +137,7 @@ from vlogsrt.project.raw.models import (
     SEGMENTATION_BASIS_DETERMINISTIC,
     SEGMENTATION_BASIS_PLANNED,
     SEGMENTATION_BASIS_SEMANTIC,
+    UNSUPPORTED_GRID_REASON,
     VISUAL_PREPARE_JOB_KIND,
     AnalysisError,
     AnalysisEstimate,
@@ -177,6 +178,7 @@ from vlogsrt.project.raw.models import (
     SourceAsset,
     SourceNestingError,
     SourceOrderRevision,
+    UnsupportedSource,
     WorkspaceAlreadyExistsError,
     WorkspaceModuleUnavailableError,
     WorkspaceNotFoundError,
@@ -328,6 +330,8 @@ __all__ = [
     "SourceInspection",
     "SourceNestingError",
     "SourceOrderRevision",
+    "UNSUPPORTED_GRID_REASON",
+    "UnsupportedSource",
     "TIER_LABELS",
     "TIER_SETTINGS",
     "TIER_TAG_PREFIX",
@@ -2002,9 +2006,26 @@ class RawWorkspaceService:
         def body(context: JobContext) -> None:
             facade = self.review_workspace_facade(root)
             head = self._preview_head(root, facade)
-            self._prepare_preview_pages(root, facade, head, asset_ids, context)
+            wanted = self._previewable(root, head, asset_ids)
+            if asset_ids and not wanted:
+                return  # 고른 원본이 모두 덮지 못한 원본이다 — 빈 고름은 「모든 쪽」이라 멈춘다
+            self._prepare_preview_pages(root, facade, head, wanted, context)
 
         return self.submit_job(root, "source_preview", order.revision_id + repr(asset_ids), body)
+
+    def _previewable(
+        self, root: Path, head: ReviewRevision, asset_ids: tuple[str, ...]
+    ) -> tuple[str, ...]:
+        """미리보기를 만들 원본 — 계획이 덮지 못한 원본(VFR, D68)은 까닭을 남기고 뺀다.
+
+        그 원본은 머리에 조각이 없어 만들 것이 없다. 화면은 같은 까닭을 카드에 보인다."""
+        if not asset_ids:
+            return asset_ids
+        unsupported = self._unsupported_ids(root, head)
+        for asset_id in asset_ids:
+            if asset_id in unsupported:
+                log.warn(f"미리보기를 만들지 않는다: {asset_id} — {UNSUPPORTED_GRID_REASON}")
+        return tuple(asset_id for asset_id in asset_ids if asset_id not in unsupported)
 
     def _preview_head(self, root: Path, facade: Any) -> ReviewRevision:
         """미리보기가 쓸 검토 머리 — 같은 영상 묶음이면 머리를 다시 깔지 않는다(D53).
@@ -2016,7 +2037,11 @@ class RawWorkspaceService:
         self.align_review_order(root)
         head = _review_head(facade)
         latest = self.latest_global_source_order(root)
-        if head is not None and latest is not None and _same_sources(head, latest):
+        if (
+            head is not None
+            and latest is not None
+            and _same_sources(head, latest, self._unsupported_ids(root, head))
+        ):
             return head
         # 새로 든 영상만 한 장으로 깐다 — 이미 있던 영상(시계가 같은)은 사람 손이 닿았든 아니든
         # 그 조각·미검토 제안을 그대로 둔다(D53: 가져오기가 손대지 않은 영상의 분석을 지우지 않게).
@@ -2239,12 +2264,11 @@ class RawWorkspaceService:
         """원본마다 주어진 분석 결과 행으로 계획한다 — 행이 없는 원본은 전체 한 조각이다."""
         workspace = self._workspace(root)
         order = self._order_revision(root, None)
-        intervals = {
-            entry.asset_id: self._analysis_intervals(
-                workspace, rows.get(entry.asset_id), entry.asset_id
-            )
-            for entry in sorted(order.entries, key=lambda item: item.ordinal)
-        }
+        intervals: dict[str, list[PlannedInterval]] = {}
+        for entry in sorted(order.entries, key=lambda item: item.ordinal):
+            spans = self._analysis_intervals(workspace, rows.get(entry.asset_id), entry.asset_id)
+            if spans is not None:  # None은 VFR — 계획이 덮지 않고 까닭을 남긴다(D68)
+                intervals[entry.asset_id] = spans
         return self.plan_segmentation(
             root,
             order_revision_id=order.revision_id,
@@ -2787,7 +2811,19 @@ class RawWorkspaceService:
         plan = self.segment_plan_revision(root, head.base_plan_id)
         if plan.order_revision_id == order.revision_id:
             return False
-        return _same_sources(head, order)
+        return _same_sources(head, order, {item.asset_id for item in plan.unsupported})
+
+    def _unsupported_ids(self, root: Path, head: ReviewRevision) -> set[str]:
+        """머리의 계획이 덮지 못한 원본(D68) — 머리에 시계가 없어도 순서에서 빠진 영상이 아니다."""
+        plan = self.segment_plan_revision(root, head.base_plan_id)
+        return {item.asset_id for item in plan.unsupported}
+
+    def review_unsupported_sources(self, root: Path) -> tuple[UnsupportedSource, ...]:
+        """지금 검토 머리의 계획이 덮지 못한 원본과 까닭(D68) — 머리가 없으면 빈 값이다."""
+        head = _review_head(self.review_workspace_facade(root))
+        if head is None:
+            return ()
+        return self.segment_plan_revision(root, head.base_plan_id).unsupported
 
     def order_covers_same_sources(self, root: Path, order_revision_id: str) -> bool:
         """그 전체 순서가 지금 순서와 같은 원본 묶음인가 — 순서만 다르면 같은 묶음이다(D53).
@@ -3086,6 +3122,8 @@ class RawWorkspaceService:
         새 계획은 새 리비전일 뿐 옛 계획을 다시 쓰지 않는다(§6.5). `basis`는
         구간의 출처 표기다(기본: 사람 구간/결정적 타일) — A4 의미 분석이
         `plan_segmentation_from_analysis`로 조정 구간을 줄 때만 semantic 값을 쓴다.
+        프레임 격자를 증명하지 못한 원본(VFR)은 덮지 않고 까닭과 함께 `unsupported`에
+        남긴다(D68) — 원본 하나가 라이브러리 전체의 계획을 막지 않는다.
         """
         workspace = self._workspace(root)
         revision = self._order_revision(root, order_revision_id)
@@ -3095,39 +3133,24 @@ class RawWorkspaceService:
             raise SegmentationError(
                 f"순서 리비전에 없는 자산에게 구간을 주었다: {', '.join(unknown[:3])}"
             )
-        entries: list[SegmentPlanEntry] = []
-        coverage: list[SegmentCoverage] = []
-        clocks: dict[str, dict[str, object]] = {}
-        for order_entry in sorted(revision.entries, key=lambda item: item.ordinal):
-            asset = _verified_asset(workspace, order_entry.asset_id)
-            facts = _measured_source(workspace, asset)
-            spans, proof = segmentation.plan_segments(
-                asset_id=asset.asset_id,
-                batch_dir=order_entry.batch_dir,
-                source_order=order_entry.ordinal,
-                time_base=facts.clock.time_base,
-                presentation_origin_pts=facts.clock.first_pts,
-                frame_count=facts.clock.frame_count,
-                frame_duration=facts.clock.frame_duration,
-                exact_end_pts=facts.exact_end_pts,
-                intervals=planned.get(asset.asset_id),
-                order_revision_id=revision.revision_id,
-                tile_seconds=tile_seconds,
-            )
-            entries.extend(spans)
-            coverage.append(proof)
-            clocks[asset.asset_id] = _plan_fingerprint_inputs(asset, facts, spans)
+        planned_sources = _planned_sources(workspace, revision, planned, tile_seconds)
         snapshot = SegmentPlanSnapshot(
             revision_id=new_segment_plan_revision_id(),
             order_revision_id=revision.revision_id,
             basis=basis
             or (SEGMENTATION_BASIS_PLANNED if planned else SEGMENTATION_BASIS_DETERMINISTIC),
             entries=tuple(
-                sorted(entries, key=lambda item: (item.source_order, item.segment_order))
+                sorted(
+                    planned_sources.entries,
+                    key=lambda item: (item.source_order, item.segment_order),
+                )
             ),
-            coverage=tuple(coverage),
-            fingerprint=segmentation.segmentation_fingerprint(revision.revision_id, clocks),
+            coverage=tuple(planned_sources.coverage),
+            fingerprint=segmentation.segmentation_fingerprint(
+                revision.revision_id, planned_sources.clocks
+            ),
             created_at=_plan_timestamp(),
+            unsupported=tuple(planned_sources.unsupported),
         )
         workspace.insert_segment_plan_revision(snapshot)
         return snapshot
@@ -3851,7 +3874,9 @@ class RawWorkspaceService:
                 raise AnalysisError(
                     f"분석 결과 행이 없다: {entry.asset_id} — 분석을 다시 실행하세요"
                 )
-            intervals[entry.asset_id] = self._analysis_intervals(workspace, row, entry.asset_id)
+            spans = self._analysis_intervals(workspace, row, entry.asset_id)
+            if spans is not None:  # None은 VFR — 계획이 덮지 않고 까닭을 남긴다(D68)
+                intervals[entry.asset_id] = spans
         # 지금 순서를 쓰라고 했으면 계획도 그 순서 위에 선다 — 분석 당시 순서에 세우면 촬영 시각
         # 순으로 맞춘 머리가 옛 순서로 되돌아간다(D53).
         return self.plan_segmentation(
@@ -4748,8 +4773,12 @@ class RawWorkspaceService:
         workspace: RawWorkspace,
         row: AnalysisSourceResult | None,
         asset_id: str,
-    ) -> list[PlannedInterval]:
-        """원본 하나의 계획 구간 — 분석됨은 기록 그대로, 아니면 전체 보존 한 조각."""
+    ) -> list[PlannedInterval] | None:
+        """원본 하나의 계획 구간 — 분석됨은 기록 그대로, 아니면 전체 보존 한 조각.
+
+        격자를 증명하지 못한 원본(VFR)은 None이다 — 구간이 없으니 계획이 덮지 않고
+        까닭을 남긴다(D68).
+        """
         if (
             row is not None
             and row.status in ("analyzed", "cached", "partial")
@@ -4760,6 +4789,8 @@ class RawWorkspaceService:
                 return recorded
         asset = _verified_asset(workspace, asset_id)
         facts = _measured_source(workspace, asset)
+        if not facts.clock.uniform_grid:
+            return None
         playable = (facts.exact_end_pts - facts.clock.first_pts) * facts.clock.time_base
         return [PlannedInterval(start=Fraction(0), end=playable)]
 
@@ -5293,9 +5324,15 @@ def _regrade_state(facade: Any, head: ReviewRevision) -> str | None:
     return f"{head_key}|{digest[:16]}"
 
 
-def _same_sources(head: ReviewRevision, order: GlobalOrderRevision) -> bool:
-    """검토 머리와 전체 순서가 같은 영상 묶음인가 — 순서만 다를 수 있다."""
-    return {clock.source_id for clock in head.clocks} == set(_order_ids(order))
+def _same_sources(
+    head: ReviewRevision, order: GlobalOrderRevision, unsupported: Collection[str] = ()
+) -> bool:
+    """검토 머리와 전체 순서가 같은 영상 묶음인가 — 순서만 다를 수 있다.
+
+    머리의 계획이 덮지 못한 원본(VFR, D68)은 시계 없이 묶음에 든다 — 빼면 미리보기마다 다시
+    계획한다(원본 전부 재해시)."""
+    sources = {clock.source_id for clock in head.clocks} | set(unsupported)
+    return sources == set(_order_ids(order))
 
 
 def _forget_read_scope() -> None:
@@ -5415,15 +5452,78 @@ class _MeasuredSource:
 
 
 def _measured_source(workspace: RawWorkspace, asset: SourceAsset) -> _MeasuredSource:
+    """원본의 시계를 잰다 — 격자 증명(`uniform_grid`)의 판정은 부른 쪽이 본다(D68)."""
     path = workspace.source_media_path(asset)
     probe = preprocess.probe_raw_media(path)
     clock = preprocess.probe_extraction_clock(path, probe=probe)
-    if not clock.uniform_grid:
-        raise SegmentationError(
-            f"원본이 균일 격자가 아니다(VFR) — 추출 지원 밖이다: "
-            f"{asset.source_relative_path} ({clock.grid_note})"
-        )
     return _MeasuredSource(clock=clock, exact_end_pts=math.ceil(clock.exact_end / clock.time_base))
+
+
+def _unsupported_source(
+    asset: SourceAsset, source_order: int, clock: preprocess.RawVideoClock
+) -> UnsupportedSource:
+    """격자를 증명하지 못한 원본의 기록 — 빼지 않고 이름·까닭을 남긴다(D68, 규칙 9)."""
+    log.warn(
+        f"분할 계획에서 덮지 않았다: {asset.source_relative_path} — {UNSUPPORTED_GRID_REASON}"
+        f" ({clock.grid_note})"
+    )
+    return UnsupportedSource(
+        asset_id=asset.asset_id,
+        source_order=source_order,
+        reason=UNSUPPORTED_GRID_REASON,
+        detail=clock.grid_note or "",
+    )
+
+
+@dataclass(slots=True)
+class _PlannedSources:
+    """계획 한 번의 원본별 재료 — 덮은 원본의 조각·증명·지문 재료와 덮지 못한 원본."""
+
+    entries: list[SegmentPlanEntry]
+    coverage: list[SegmentCoverage]
+    clocks: dict[str, dict[str, object]]
+    unsupported: list[UnsupportedSource]
+
+
+def _planned_sources(
+    workspace: RawWorkspace,
+    revision: GlobalOrderRevision,
+    planned: Mapping[str, Sequence[PlannedInterval]],
+    tile_seconds: Fraction,
+) -> _PlannedSources:
+    """순서의 원본마다 다시 검증·측정해 조각을 짓는다 — VFR은 덮지 않고 기록한다(D68)."""
+    result = _PlannedSources([], [], {}, [])
+    for order_entry in sorted(revision.entries, key=lambda item: item.ordinal):
+        asset = _verified_asset(workspace, order_entry.asset_id)
+        facts = _measured_source(workspace, asset)
+        if not facts.clock.uniform_grid:
+            result.unsupported.append(_unsupported_source(asset, order_entry.ordinal, facts.clock))
+            continue
+        spans, proof = segmentation.plan_segments(
+            asset_id=asset.asset_id,
+            batch_dir=order_entry.batch_dir,
+            source_order=order_entry.ordinal,
+            time_base=facts.clock.time_base,
+            presentation_origin_pts=facts.clock.first_pts,
+            frame_count=facts.clock.frame_count,
+            frame_duration=facts.clock.frame_duration,
+            exact_end_pts=facts.exact_end_pts,
+            intervals=planned.get(asset.asset_id),
+            order_revision_id=revision.revision_id,
+            tile_seconds=tile_seconds,
+        )
+        result.entries.extend(spans)
+        result.coverage.append(proof)
+        result.clocks[asset.asset_id] = _plan_fingerprint_inputs(asset, facts, spans)
+    if result.unsupported and not result.coverage:
+        names = ", ".join(
+            workspace.source_asset(u.asset_id).source_name for u in result.unsupported
+        )
+        raise SegmentationError(
+            f"계획할 수 있는 원본이 없다 — 모두 {UNSUPPORTED_GRID_REASON}: {names[:300]}."
+            " 일정한 프레임(예: 30fps)으로 다시 저장해 불러오세요"
+        )
+    return result
 
 
 def _plan_fingerprint_inputs(
