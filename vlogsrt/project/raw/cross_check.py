@@ -27,10 +27,10 @@ from pathlib import Path
 from typing import Any
 
 from vlogsrt import log
-from vlogsrt.project.raw import glossary, read_scope, source_text
+from vlogsrt.project.raw import asr_epoch, glossary, read_scope, source_text
 from vlogsrt.project.raw.config import SOURCE_TEXT_SETTINGS
 from vlogsrt.project.raw.models import AnalysisEstimate, RawWorkspaceError
-from vlogsrt.project.raw.understanding import SampleSpan
+from vlogsrt.project.raw.understanding import CHUNK_PLAN_FIXED, SampleSpan
 from vlogsrt.project.raw.understanding_luna import ORIGIN_LIVE
 
 META_KEY = "source_text_cross_check"
@@ -113,7 +113,13 @@ def with_text_passes(
         asset.asset_id: asset.content_sha256 or "" for asset in workspace.list_source_assets()
     }
     return tuple(
-        _with_text(workspace.root, item, owners.get(item.asset_id, ""), digest)
+        _with_text(
+            workspace.root,
+            item,
+            owners.get(item.asset_id, ""),
+            digest,
+            replanned=asr_epoch.state(workspace, item.asset_id).pending,
+        )
         for item in estimates
     )
 
@@ -125,11 +131,18 @@ def _without_text(item: AnalysisEstimate) -> AnalysisEstimate:
 
 
 def _with_text(
-    root: Path, item: AnalysisEstimate, source_sha256: str, glossary_digest: str
+    root: Path,
+    item: AnalysisEstimate,
+    source_sha256: str,
+    glossary_digest: str,
+    *,
+    replanned: bool = False,
 ) -> AnalysisEstimate:
     if not item.has_audio:
         return _without_text(item)  # 소리가 없으면 물을 것이 없다
-    count, seconds, keys = _pending_text(root, item, source_sha256, glossary_digest)
+    count, seconds, keys = _pending_text(
+        root, item, source_sha256, glossary_digest, replanned=replanned
+    )
     return replace(
         item,
         text_chunk_count=count,
@@ -148,12 +161,19 @@ def text_cost(seconds: Fraction) -> Decimal:
 
 
 def _pending_text(
-    root: Path, item: AnalysisEstimate, source_sha256: str, glossary_digest: str
+    root: Path,
+    item: AnalysisEstimate,
+    source_sha256: str,
+    glossary_digest: str,
+    *,
+    replanned: bool = False,
 ) -> tuple[int, Fraction, tuple[str, ...] | None]:
     """(물을 청크 수, 그 길이, 그 청크의 글자 캐시 열쇠) — 기록이 없으면 전부·열쇠 없음.
 
-    기록의 청크 계획이 견적과 같을 때만 캐시를 빼고 센다. 열쇠는 승인이 「이 청크만」으로 묶는다."""
-    chunks = _recorded_chunks(root, item.asset_id, source_sha256)
+    기록의 청크 계획이 견적과 같을 때만 캐시를 빼고 센다. 열쇠는 승인이 「이 청크만」으로 묶는다.
+    `replanned`(다시 듣기 대기)면 다음 실행이 조용한 계획으로 다시 자르므로(D74) 고정 계획 기록은
+    쓰지 않는다."""
+    chunks = _recorded_chunks(root, item.asset_id, source_sha256, replanned=replanned)
     if chunks is None or len(chunks) != item.asr_chunk_count:
         return item.asr_chunk_count, Fraction(item.asr_seconds), None
     cache_dir = root / "cache" / source_text.TEXT_CACHE_DIRNAME / item.asset_id
@@ -173,13 +193,15 @@ def _text_key(chunk: _RecordedChunk, glossary_digest: str) -> str:
 
 
 def _recorded_chunks(
-    root: Path, asset_id: str, source_sha256: str
+    root: Path, asset_id: str, source_sha256: str, *, replanned: bool = False
 ) -> tuple[_RecordedChunk, ...] | None:
-    """이 원본의 가장 최근 1단계 기록의 청크 — 원본 해시가 같은 것만. 없으면 None. 읽기만 한다."""
+    """이 원본의 가장 최근 1단계 기록의 청크 — 원본 해시가 같은 것만. 없으면 None. 읽기만 한다.
+
+    `replanned`면 여러 청크의 고정 계획 기록은 건너뛴다 — 다음 실행의 청크가 아니다(D74)."""
     found: list[tuple[str, tuple[_RecordedChunk, ...]]] = []
     for folder in sorted(root.glob(f"analysis/*/*_{asset_id}")):
         try:
-            parsed = _chunks_in(folder, source_sha256)
+            parsed = _chunks_in(folder, source_sha256, replanned)
         except (OSError, ValueError, KeyError, TypeError) as error:
             log.warn(f"교차 확인 견적 — 1단계 기록을 읽지 못해 건너뜁니다: {folder.name} ({error})")
             continue
@@ -188,7 +210,9 @@ def _recorded_chunks(
     return max(found, key=lambda pair: pair[0])[1] if found else None
 
 
-def _chunks_in(folder: Path, source_sha256: str) -> tuple[str, tuple[_RecordedChunk, ...]] | None:
+def _chunks_in(
+    folder: Path, source_sha256: str, replanned: bool = False
+) -> tuple[str, tuple[_RecordedChunk, ...]] | None:
     for name in STAGE1_RECORDS:
         path = folder / name
         if not path.is_file():
@@ -206,6 +230,9 @@ def _chunks_in(folder: Path, source_sha256: str) -> tuple[str, tuple[_RecordedCh
             )
             for chunk in asr["chunks"]
         )
+        fixed = asr.get("chunk_plan", CHUNK_PLAN_FIXED) == CHUNK_PLAN_FIXED
+        if replanned and fixed and len(chunks) > 1:
+            return None
         return str(body.get("created_at") or ""), chunks
     return None
 

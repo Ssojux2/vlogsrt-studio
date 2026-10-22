@@ -1310,18 +1310,28 @@ def _hear_source(
 ) -> tuple[AsrEvidence, tuple[UtteranceEvidence, ...], dict[str, object]]:
     """whisper로 시각과 글자를 듣고, 같은 청크 WAV를 두 번째 귀에 한 번 더 묻는다(D59 19c)."""
     asr_provider = _asr_provider_for(providers, workflow, settings, audio, asset.asset_id)
-    spans = stage1.plan_audio_chunks(audio, settings)
+    cache_dir = workspace.root / "cache" / "source-asr" / asset.asset_id
+    plan = stage1.plan_heard_chunks(
+        audio,
+        settings,
+        settings=workflow,
+        provider=asr_provider,
+        workdir=source_dir,
+        cache_dir=cache_dir,
+        asr_epoch=asr_epoch,
+    )
     evidence = stage1.transcribe_selected_audio(
         audio,
-        spans,
+        plan.spans,
         settings=workflow,
         understanding=settings,
         provider=asr_provider,
         on=providers.on or datetime.now(UTC).date(),
         request_id=f"{revision.revision_id}:{asset.asset_id}",
         workdir=source_dir,
-        cache_dir=workspace.root / "cache" / "source-asr" / asset.asset_id,
+        cache_dir=cache_dir,
         asr_epoch=asr_epoch,
+        chunk_plan=plan.schema,
     )
     utterances, record = _cross_check_text(
         workspace, revision, asset, settings, workflow, providers, audio, evidence, source_dir
@@ -2289,6 +2299,7 @@ def _asr_from_artifact(artifact: Mapping[str, object]) -> AsrEvidence:
         request_id=str(raw.get("request_id") or ""),
         sample_rate=int(raw.get("sample_rate") or stage1.PCM_SAMPLE_RATE),
         chunks=tuple(chunks),
+        chunk_plan=str(raw.get("chunk_plan") or stage1.CHUNK_PLAN_FIXED),
     )
 
 

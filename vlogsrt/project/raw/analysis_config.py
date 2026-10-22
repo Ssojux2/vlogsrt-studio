@@ -114,6 +114,29 @@ def understanding_settings_problems(settings: RawUnderstandingSettings) -> list[
     return problems
 
 
+@dataclass(frozen=True)
+class AsrChunkCutSettings:
+    """1단계 청크를 조용한 지점에서 자르는 찾는 폭·칸(D74) — `RawUnderstandingSettings` 밖이다.
+
+    값은 원본 엔진의 `Config.cut_search_seconds`·`cut_quiet_window_ms` **그대로**다(시험이 같음을
+    못 박는다 — 엔진을 바꾸면 같이 바꾼다). 조용함의 임계값은 없다 — 폭 안에서 가장 조용한 칸을
+    고를 뿐이라 온통 시끄러워도 목표 가까이에서 자르고 아무것도 버리지 않는다(규칙 4). 이해 설정의
+    칸이 아니어서 1단계 승인 지문·청크 열쇠의 설정 해시에 들지 않는다 — 자른 자리는 청크 범위로
+    열쇠에 실린다."""
+
+    search_seconds: Fraction = Fraction(5)
+    hop_ms: int = 20
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.search_seconds, Fraction) or self.search_seconds < 0:
+            raise ValueError(f"찾는 폭은 0 이상의 유리수다: {self.search_seconds!r}")
+        if isinstance(self.hop_ms, bool) or not isinstance(self.hop_ms, int) or self.hop_ms < 1:
+            raise ValueError(f"칸은 1ms 이상의 정수다: {self.hop_ms!r}")
+
+
+ASR_CHUNK_CUT = AsrChunkCutSettings()
+
+
 ANALYSIS_PROXY_VERSION = "analysis-proxy/v1"
 """분석 프록시 조리법의 버전 — 인코더 인자를 바꾸면 올려서 낡은 프록시·프레임 캐시를 버린다."""
 

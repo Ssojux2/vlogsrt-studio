@@ -20,10 +20,13 @@ ffmpeg·ffprobe는 `vlogsrt/preprocess.py`의 공개 함수만 쓴다(불변 규
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import math
 import os
+import sys
 import wave
+from array import array
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from datetime import date
@@ -36,6 +39,8 @@ from vlogsrt.models import Chunk
 from vlogsrt.preprocess import VideoStreamInfo, extract_frame_index, extract_pcm_s16le
 from vlogsrt.project.raw import request_log
 from vlogsrt.project.raw.analysis_config import (
+    ASR_CHUNK_CUT,
+    AsrChunkCutSettings,
     RawUnderstandingSettings,
     validate_understanding_settings,
 )
@@ -161,17 +166,42 @@ class SampleSpan:
     end: int
 
 
+CHUNK_PLAN_FIXED = "asr-chunks/v1"
+"""고정 계획 — 상한, 상한, …, 나머지(W-25d 앞의 유일한 계획). 기록에 칸이 없으면 이것이다."""
+
+CHUNK_PLAN_QUIET = "asr-chunks/v2"
+"""조용한 계획(W-25d, D74) — 같은 청크 수, 균등 목표 ±찾는 폭의 가장 조용한 칸에서 자른다."""
+
+
+@dataclass(frozen=True, slots=True)
+class ChunkPlan:
+    """원본 하나의 1단계 청크 계획과 그 판."""
+
+    spans: tuple[SampleSpan, ...]
+    schema: str
+
+
 def plan_audio_chunks(
     audio: SelectedAudio, settings: RawUnderstandingSettings
 ) -> tuple[SampleSpan, ...]:
-    """선택 오디오 전체를 빈틈없이 덮는 청크 계획 — 단일 패스, 잘라내기 없다.
+    """선택 오디오 전체를 빈틈없이 덮는 고정 청크 계획 — 단일 패스, 잘라내기 없다.
 
     청크 길이 상한은 시간(설정, ≤180초)과 바이트(API 안전 여유) 중 작은 쪽이다.
     마지막 청크는 남은 만큼 짧다 — 늘리거나 붙이지 않는다(§7.3: 입력을 줄이지
-    않는다). 조용한 자리 탐색으로 경계를 옮기지도 않는다 — 그것은 엔진 되풀이
-    재전사의 권한이고 첫 단계 증거 수집은 그대로 담는 쪽이다.
+    않는다). 청크 수는 견적·승인 예산의 수다 — 조용한 계획(`plan_quiet_chunks`)도 같은 수다.
     """
     _require_settings(settings)
+    bound = _chunk_bound(audio, settings)
+    spans = [
+        SampleSpan(start, min(start + bound, audio.sample_count))
+        for start in range(0, audio.sample_count, bound)
+    ]
+    _require_coverage(spans, audio.sample_count)
+    return tuple(spans)
+
+
+def _chunk_bound(audio: SelectedAudio, settings: RawUnderstandingSettings) -> int:
+    """청크 하나의 프레임 상한 — 시간 상한과 바이트 상한 중 작은 쪽."""
     frame_bytes = PCM_SAMPLE_WIDTH * audio.channels
     seconds_bound = int(float(settings.asr_chunk_max_seconds) * audio.sample_rate)
     bytes_bound = settings.asr_chunk_max_bytes // frame_bytes
@@ -181,12 +211,104 @@ def plan_audio_chunks(
             f"청크 상한이 한 프레임보다 작다 — 시간 {settings.asr_chunk_max_seconds}초,"
             f" 바이트 {settings.asr_chunk_max_bytes}, 프레임 {frame_bytes}바이트"
         )
-    spans = [
-        SampleSpan(start, min(start + bound, audio.sample_count))
-        for start in range(0, audio.sample_count, bound)
-    ]
-    _require_coverage(spans, audio.sample_count)
+    return bound
+
+
+def plan_quiet_chunks(
+    audio: SelectedAudio,
+    settings: RawUnderstandingSettings,
+    cut: AsrChunkCutSettings = ASR_CHUNK_CUT,
+) -> tuple[SampleSpan, ...]:
+    """조용한 지점에서 자르는 청크 계획(D74) — **자리만 고르고 구간을 고르지 않는다**(규칙 4).
+
+    청크 수는 고정 계획과 같다(⌈표본 수 / 상한⌉ — 견적·승인 예산 그대로). 목표는 균등 분할이고,
+    목표 ±찾는 폭에서 진폭이 가장 낮은 칸의 가운데를 자른다(같으면 목표에 가까운 쪽, 그다음 앞).
+    폭은 청크가 상한을 넘지 않고 남은 청크가 나머지를 덮을 수 있는 만큼으로 줄인다. 임계값이 없어
+    온통 시끄러워도 목표 가까이를 자를 뿐이고, `[0, 표본 수]`는 언제나 빈틈없이 덮인다."""
+    _require_settings(settings)
+    bound = _chunk_bound(audio, settings)
+    total = audio.sample_count
+    count = -(-total // bound)
+    reach = int(cut.search_seconds * audio.sample_rate)
+    hop = max(1, cut.hop_ms * audio.sample_rate // 1000)
+    cuts: list[int] = []
+    previous = 0
+    for index in range(1, count):
+        target = total * index // count
+        floor = total - (count - index) * bound  # 남은 청크가 나머지를 덮는 가장 이른 자리
+        low = max(target - reach, floor, previous + 1)
+        high = min(target + reach, previous + bound, total - 1)
+        if low <= high:
+            cuts.append(_quietest_tick(audio, low, high, target, hop))
+        else:
+            cuts.append(min(max(target, floor), previous + bound))
+        previous = cuts[-1]
+    edges = [0, *cuts, total] if total > 0 else []
+    spans = [SampleSpan(left, right) for left, right in zip(edges, edges[1:], strict=False)]
+    _require_coverage(spans, total)
     return tuple(spans)
+
+
+def _quietest_tick(audio: SelectedAudio, low: int, high: int, target: int, hop: int) -> int:
+    """`[low, high]`에서 `hop`칸 간격의 자리 가운데 둘레 한 칸의 평균 절댓값이 가장 낮은 자리."""
+    half = hop // 2
+    first = max(0, low - half)
+    last = min(audio.sample_count, high - half + hop)
+    samples = array("h")
+    samples.frombytes(_read_frames(audio, SampleSpan(first, last)))
+    if sys.byteorder == "big":
+        samples.byteswap()
+    channels = audio.channels
+
+    def level(centre: int) -> Fraction:
+        start, end = max(first, centre - half), min(last, centre - half + hop)
+        window = samples[(start - first) * channels : (end - first) * channels]
+        return Fraction(sum(abs(value) for value in window), max(1, len(window)))
+
+    return min(
+        range(low, high + 1, hop),
+        key=lambda centre: (level(centre), abs(centre - target), centre),
+    )
+
+
+def plan_heard_chunks(
+    audio: SelectedAudio,
+    understanding: RawUnderstandingSettings,
+    *,
+    settings: RawWorkflowConfig,
+    provider: TimingProvider,
+    workdir: Path,
+    cache_dir: Path | None = None,
+    asr_epoch: int = 0,
+) -> ChunkPlan:
+    """이 원본을 들을 청크 계획 — 이미 산 전사가 있으면 고정 계획, 아니면 조용한 계획(D74).
+
+    고정 계획의 청크가 지금 차례의 캐시에 **하나라도** 있으면 그 계획 그대로다 — 조용한 계획으로
+    바꾸면 범위가 달라 열쇠가 바뀌고, 분석 모델을 바꾼 다시 돌리기도 whisper를 다시 산다. 그래서
+    처음 듣는 원본과 「다시 듣기」로 차례가 오른 원본만 조용한 계획이다. 청크 수는 같다."""
+    fixed = plan_audio_chunks(audio, understanding)
+    if len(fixed) == 1 or _heard_before(
+        audio, fixed, settings, type(provider).__name__, workdir, cache_dir, asr_epoch
+    ):
+        return ChunkPlan(fixed, CHUNK_PLAN_FIXED)
+    return ChunkPlan(plan_quiet_chunks(audio, understanding), CHUNK_PLAN_QUIET)
+
+
+def _heard_before(
+    audio: SelectedAudio,
+    spans: Sequence[SampleSpan],
+    settings: RawWorkflowConfig,
+    provider_origin: str,
+    workdir: Path,
+    cache_dir: Path | None,
+    asr_epoch: int,
+) -> bool:
+    for position, span in enumerate(spans):
+        wav = hashlib.sha256(_wav_bytes(audio, span)).hexdigest()
+        key = asr_chunk_key(wav, provider_origin, settings, span, asr_epoch)
+        if _cached_success(_cache_path(workdir, cache_dir, position, key), key) is not None:
+            return True
+    return False
 
 
 def _require_coverage(spans: Sequence[SampleSpan], sample_count: int) -> None:
@@ -246,6 +368,7 @@ class AsrEvidence:
     request_id: str
     sample_rate: int
     chunks: tuple[AsrChunkOutcome, ...]
+    chunk_plan: str = CHUNK_PLAN_FIXED  # 청크 계획의 판(D74) — 고정이면 기록에 칸이 없다
 
 
 def transcribe_selected_audio(
@@ -260,6 +383,7 @@ def transcribe_selected_audio(
     workdir: Path,
     cache_dir: Path | None = None,
     asr_epoch: int = 0,
+    chunk_plan: str = CHUNK_PLAN_FIXED,
 ) -> AsrEvidence:
     """계획된 청크를 순서대로 내부 전사한다 — 주입된 시간 제공자를 통해서만.
 
@@ -287,7 +411,12 @@ def transcribe_selected_audio(
                 asr_epoch=asr_epoch,
             )
         )
-    return AsrEvidence(request_id=request_id, sample_rate=audio.sample_rate, chunks=tuple(outcomes))
+    return AsrEvidence(
+        request_id=request_id,
+        sample_rate=audio.sample_rate,
+        chunks=tuple(outcomes),
+        chunk_plan=chunk_plan,
+    )
 
 
 def _transcribe_span(
@@ -313,20 +442,15 @@ def _transcribe_span(
         index=position,
     )
     chunk_request_id = f"{request_id}:chunk-{position:04d}"
-    cache_path = workdir / f"asr-chunk-{position:04d}.json"
     fingerprint = asr_chunk_key(
         _sha256_file(wav_path), type(provider).__name__, settings, span, asr_epoch
     )
     if cache_dir is not None:
         cache_dir.mkdir(parents=True, exist_ok=True)
-        cache_path = cache_dir / (fingerprint + ".json")
-    if cache_path.is_file():
-        try:
-            cache = json.loads(cache_path.read_text(encoding="utf-8"))
-            if cache.get("fingerprint") == fingerprint and not cache["outcome"].get("failure"):
-                return AsrChunkOutcome(**cache["outcome"])
-        except (ValueError, KeyError, TypeError):
-            pass
+    cache_path = _cache_path(workdir, cache_dir, position, fingerprint)
+    cached = _cached_success(cache_path, fingerprint)
+    if cached is not None:
+        return cached
     try:
         binding = audio_chunk_binding(
             chunk,
@@ -378,6 +502,26 @@ def _transcribe_span(
     )
     temp.replace(cache_path)
     return outcome
+
+
+def _cache_path(workdir: Path, cache_dir: Path | None, position: int, fingerprint: str) -> Path:
+    """청크 캐시의 자리 — 원본 캐시 폴더가 있으면 열쇠 이름, 없으면 실행 폴더의 차례 이름."""
+    if cache_dir is None:
+        return workdir / f"asr-chunk-{position:04d}.json"
+    return cache_dir / (fingerprint + ".json")
+
+
+def _cached_success(path: Path, fingerprint: str) -> AsrChunkOutcome | None:
+    """열쇠가 같고 실패가 아닌 캐시 항목 — 없거나 읽을 수 없으면 None(다시 묻는다)."""
+    if not path.is_file():
+        return None
+    try:
+        cache = json.loads(path.read_text(encoding="utf-8"))
+        if cache.get("fingerprint") == fingerprint and not cache["outcome"].get("failure"):
+            return AsrChunkOutcome(**cache["outcome"])
+    except (ValueError, KeyError, TypeError):
+        return None
+    return None
 
 
 def chunk_wav_path(workdir: Path, position: int) -> Path:
@@ -466,11 +610,33 @@ def write_pcm_slice(audio: SelectedAudio, span: SampleSpan, destination: Path) -
     데이터는 저장 바이트 그대로다 — 재인코딩·이득 보정·덧붙임이 없다. 원자적으로
     공개하므로 실패하면 반쪽 파일이 목격되지 않는다.
     """
-    frame_bytes = PCM_SAMPLE_WIDTH * audio.channels
     if span.start < 0 or span.end <= span.start or span.end > audio.sample_count:
         raise AnalysisPlanningError(f"청크 범위가 오디오 밖이다: [{span.start}, {span.end})")
     if destination.resolve() == audio.pcm_path.resolve():
         raise AnalysisPlanningError(f"슬라이스가 저장 PCM 자리로는 못 간다: {destination}")
+    temp = destination.with_name(destination.name + ".partial")
+    try:
+        temp.write_bytes(_wav_bytes(audio, span))
+        os.replace(temp, destination)
+    finally:
+        temp.unlink(missing_ok=True)
+    return destination
+
+
+def _wav_bytes(audio: SelectedAudio, span: SampleSpan) -> bytes:
+    """청크 WAV의 바이트 — 저장 PCM 프레임에 헤더만 붙인다(캐시 열쇠가 이 바이트의 해시다)."""
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as handle:
+        handle.setnchannels(audio.channels)
+        handle.setsampwidth(PCM_SAMPLE_WIDTH)
+        handle.setframerate(audio.sample_rate)
+        handle.writeframes(_read_frames(audio, span))
+    return buffer.getvalue()
+
+
+def _read_frames(audio: SelectedAudio, span: SampleSpan) -> bytes:
+    """저장 PCM의 `[start, end)` 프레임 그대로 — 모자라면 실패한다(지어 채우지 않는다)."""
+    frame_bytes = PCM_SAMPLE_WIDTH * audio.channels
     expected = (span.end - span.start) * frame_bytes
     with audio.pcm_path.open("rb") as source:
         source.seek(span.start * frame_bytes)
@@ -479,17 +645,7 @@ def write_pcm_slice(audio: SelectedAudio, span: SampleSpan, destination: Path) -
         raise AnalysisPlanningError(
             f"PCM 슬라이스가 짧다 — {len(data)}/{expected}바이트 ({audio.pcm_path})"
         )
-    temp = destination.with_name(destination.name + ".partial")
-    try:
-        with wave.open(str(temp), "wb") as handle:
-            handle.setnchannels(audio.channels)
-            handle.setsampwidth(PCM_SAMPLE_WIDTH)
-            handle.setframerate(audio.sample_rate)
-            handle.writeframes(data)
-        os.replace(temp, destination)
-    finally:
-        temp.unlink(missing_ok=True)
-    return destination
+    return data
 
 
 # ─────────────────────────────────────────────────────────────
@@ -1515,12 +1671,15 @@ def selected_audio_json(audio: SelectedAudio) -> dict[str, object]:
 
 
 def asr_evidence_json(evidence: AsrEvidence) -> dict[str, object]:
-    """내부 전사 증거의 JSON — 실패 청크도 그대로 실린다."""
-    return {
+    """내부 전사 증거의 JSON — 실패 청크도 그대로 실린다. 조용한 계획이면 그 판을 싣는다(D74)."""
+    body: dict[str, object] = {
         "request_id": evidence.request_id,
         "sample_rate": evidence.sample_rate,
         "chunks": [_asr_chunk_json(chunk) for chunk in evidence.chunks],
     }
+    if evidence.chunk_plan != CHUNK_PLAN_FIXED:
+        body["chunk_plan"] = evidence.chunk_plan
+    return body
 
 
 def _asr_chunk_json(chunk: AsrChunkOutcome) -> dict[str, object]:
