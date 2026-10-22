@@ -39,7 +39,11 @@ from vlogsrt.project.raw.analysis_config import (
     RawUnderstandingSettings,
     validate_understanding_settings,
 )
-from vlogsrt.project.raw.caption_provider import TimingProvider, audio_chunk_binding
+from vlogsrt.project.raw.caption_provider import (
+    TimedTranscript,
+    TimingProvider,
+    audio_chunk_binding,
+)
 from vlogsrt.project.raw.config import RawWorkflowConfig, transcription_identity_view
 from vlogsrt.task_runtime import check_cancel, provider_error
 
@@ -225,6 +229,15 @@ class AsrChunkOutcome:
     failure: str = ""
     # 청크 끝을 관용 안에서 넘어 끝에 맞춘 세그먼트 위치(D55) — 화면이 「N줄을 맞춤」으로 보인다.
     clamped_segments: tuple[int, ...] = ()
+    # 응답 메타(D73) — 세그먼트마다의 점수(`transcript`와 같은 순서, 모든 세그먼트에 있을 때만)와
+    # 청크의 단어 시각 `(start, end, word)`. 단어는 `transcript`처럼 **청크 국소 초**(응답
+    # 숫자 그대로)이고, 공통 시계로는 `word_spans`가 세그먼트와 같은 틱 환산으로 옮긴다. 줄 시각을
+    # 만드는 코드는
+    # 이 칸들을 읽지 않는다 — 단어는 제안·표시 재료뿐이다(규칙 1). 빈 값이면 캐시에 칸이 없다.
+    no_speech_prob: tuple[float, ...] = ()
+    avg_logprob: tuple[float, ...] = ()
+    words: tuple[tuple[float, float, str], ...] = ()
+    words_requested: bool = False
 
     @property
     def succeeded(self) -> bool:
@@ -337,7 +350,6 @@ def _transcribe_span(
             source=audio.source_id,
         )
         request_log.finish(attempt, received=True)
-        segments = tuple((seg.start, seg.end, seg.text) for seg in timed.segments)
         clamped = _clamped_of(timed.clamped_segments, position)
     except Exception as exc:  # 청크 하나의 실패 — 전체 실행의 실패가 아니다(§7.3)
         request_log.finish(
@@ -348,15 +360,37 @@ def _transcribe_span(
         check_cancel()
         log.warn(f"내부 전사 청크 {position} 실패 — 이 구간에는 자막이 없다: {exc}")
         return _failed_outcome(span, position, chunk_request_id, wav_path, exc)
-    outcome = AsrChunkOutcome(
+    outcome = _answered_outcome(span, position, chunk_request_id, wav_path, timed, clamped)
+    _store_cached(cache_path, fingerprint, outcome)
+    return outcome
+
+
+def _answered_outcome(
+    span: SampleSpan,
+    position: int,
+    chunk_request_id: str,
+    wav_path: Path,
+    timed: TimedTranscript,
+    clamped: tuple[int, ...],
+) -> AsrChunkOutcome:
+    """답을 받은 청크의 기록 — 세그먼트는 시각·글자 그대로, 응답 메타는 따로 싣는다(D73)."""
+    return AsrChunkOutcome(
         chunk_index=position,
         sample_start=span.start,
         sample_end=span.end,
         wav_sha256=_sha256_file(wav_path),
         request_id=chunk_request_id,
-        transcript=segments,
+        transcript=tuple((seg.start, seg.end, seg.text) for seg in timed.segments),
         clamped_segments=clamped,
+        no_speech_prob=timed.no_speech_prob,
+        avg_logprob=timed.avg_logprob,
+        words=tuple((word.start, word.end, word.word) for word in timed.words),
+        words_requested=timed.words_requested,
     )
+
+
+def _store_cached(cache_path: Path, fingerprint: str, outcome: AsrChunkOutcome) -> None:
+    """캐시 항목을 원자적으로 쓴다 — 반쪽 파일이 목격되지 않는다."""
     temp = cache_path.with_suffix(".tmp")
     temp.write_text(
         json.dumps(
@@ -365,12 +399,37 @@ def _transcribe_span(
         encoding="utf-8",
     )
     temp.replace(cache_path)
-    return outcome
 
 
 def chunk_wav_path(workdir: Path, position: int) -> Path:
     """청크 WAV의 자리 — 1단계 글자 경로(D59 19c)가 whisper와 **같은 WAV**를 다시 쓴다."""
     return workdir / f"asr-chunk-{position:04d}.wav"
+
+
+ASR_CACHE_DIRNAME = "source-asr"
+"""1단계 whisper 청크 캐시의 자리 — `cache/source-asr/<원본>/<열쇠>.json`(보고서도 읽는다, D73)."""
+
+
+def word_spans(
+    chunk: AsrChunkOutcome, sample_rate: int
+) -> tuple[tuple[Fraction, Fraction, str], ...]:
+    """청크의 단어 시각을 PCM 시계의 정확 유리수로(D73) — **제안·측정 재료일 뿐 줄 시각이 아니다.**
+
+    세그먼트와 같은 환산(`_to_sample` 반올림 + 청크 시작, 끝은 청크 끝에서 닫는다)이라 단어와 줄이
+    같은 틱 격자 위에서 견줘진다. 어느 줄에도 이 시각을 주지 않는다(규칙 1).
+    """
+    spans: list[tuple[Fraction, Fraction, str]] = []
+    for start, end, word in chunk.words:
+        start_sample = min(chunk.sample_end, chunk.sample_start + _to_sample(start, sample_rate))
+        end_sample = min(chunk.sample_end, chunk.sample_start + _to_sample(end, sample_rate))
+        spans.append(
+            (
+                Fraction(start_sample, sample_rate),
+                Fraction(max(start_sample, end_sample), sample_rate),
+                str(word),
+            )
+        )
+    return tuple(spans)
 
 
 def asr_chunk_key(
@@ -400,15 +459,28 @@ def asr_chunk_key(
     return hashlib.sha256(json.dumps(identity, sort_keys=True, default=str).encode()).hexdigest()
 
 
-def _cached_outcome(outcome: AsrChunkOutcome) -> dict[str, object]:
-    """캐시 항목 — 맞춘 줄이 없으면 그 칸을 싣지 않는다(W-15 이전 모양 그대로, D55).
+OPTIONAL_CACHE_FIELDS = (
+    "clamped_segments",
+    "no_speech_prob",
+    "avg_logprob",
+    "words",
+    "words_requested",
+)
+"""값이 비면(빈 튜플·False) 캐시 항목에 칸째 없는 칸들 — 넘침(D55)·응답 메타(D73)."""
 
-    W-15 이전 빌드는 모르는 칸이 있으면 `AsrChunkOutcome(**…)`에서 TypeError를 내고 캐시를
-    놓친 것으로 쳐 유료 전사를 다시 보낸다 — 넘침이 없는 항목은 바이트까지 예전과 같아야 한다.
+
+def _cached_outcome(outcome: AsrChunkOutcome) -> dict[str, object]:
+    """캐시 항목 — 빈 선택 칸은 싣지 않는다(W-15·W-25c 이전 모양 그대로, D55·D73).
+
+    옛 빌드는 모르는 칸이 있으면 `AsrChunkOutcome(**…)`에서 TypeError를 내고 캐시를 놓친 것으로
+    쳐 유료 전사를 다시 보낸다 — 넘침·메타가 없는 항목은 바이트까지 예전과 같아야 한다. 거꾸로
+    단어·점수를 실은 **새** 항목을 옛 빌드가 읽으면 그 TypeError로 캐시를 놓친다(그 빌드로 되돌릴
+    때만의 일이다, D73).
     """
     body = asdict(outcome)
-    if not outcome.clamped_segments:
-        del body["clamped_segments"]
+    for name in OPTIONAL_CACHE_FIELDS:
+        if not getattr(outcome, name):
+            del body[name]
     return body
 
 

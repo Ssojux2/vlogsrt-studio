@@ -2526,6 +2526,60 @@ def test_the_real_request_builders_keep_their_lanes() -> None:
     assert check_invariants.check_caption_request_lanes() == []
 
 
+# ── D73: 줄 시각을 만드는 자리는 단어 시각·세그먼트 점수를 읽지 않는다 ─────────────
+
+LINE_TIME_CLEAN = {
+    "vlogsrt/project/raw/caption_provider.py": (
+        "def _timed_segments(records):\n    return records\n"
+        "def _timed_segment(record):\n    return record['start']\n"
+        "def _close_at_chunk_end(start, end):\n    return start, end\n"
+    ),
+    "vlogsrt/project/raw/understanding.py": "".join(
+        f"def {name}(chunk):\n    '''words는 여기 없다.'''\n    return chunk.transcript\n"
+        for name in (
+            "utterance_evidence",
+            "_project_segment",
+            "utterances_json",
+            "_utterance_json",
+            "asr_evidence_json",
+            "_asr_chunk_json",
+        )
+    ),  # fmt: skip
+    "vlogsrt/project/raw/source_transcript.py": "def seed(rows):\n    return rows\n",
+    "vlogsrt/project/raw/speech_refill.py": "def run(plan):\n    return plan\n",
+    "vlogsrt/project/sync_snap.py": "def propose(cues):\n    return cues\n",
+}
+
+
+@pytest.mark.parametrize(
+    ("rel", "old", "new"),
+    [
+        (
+            "vlogsrt/project/raw/understanding.py",
+            "return chunk.transcript\n",
+            "return chunk.words\n",
+        ),
+        ("vlogsrt/project/raw/caption_provider.py", "record['start']", "record['words']"),
+        ("vlogsrt/project/raw/source_transcript.py", "return rows", "return rows.no_speech_prob"),
+        ("vlogsrt/project/sync_snap.py", "return cues", "return word_spans(cues)"),
+        ("vlogsrt/project/raw/caption_provider.py", "def _timed_segment(", "def _renamed("),
+    ],
+)
+def test_line_time_code_never_reads_word_meta(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, rel: str, old: str, new: str
+) -> None:
+    _fake_source_tree(monkeypatch, tmp_path, LINE_TIME_CLEAN)
+    assert check_invariants.check_line_times_ignore_word_meta() == []
+    body = LINE_TIME_CLEAN[rel]
+    (tmp_path / rel).write_text(body.replace(old, new, 1), encoding="utf-8")
+    failures = check_invariants.check_line_times_ignore_word_meta()
+    assert len(failures) == 1 and "D73" in failures[0], failures
+
+
+def test_the_real_line_time_code_never_reads_word_meta() -> None:
+    assert check_invariants.check_line_times_ignore_word_meta() == []
+
+
 # ── D59 19c: 용어집은 DB만 알고, 설정은 용어집·글자 경로를 모른다 ─────────────────
 
 GLOSSARY = "vlogsrt/project/raw/glossary.py"

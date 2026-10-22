@@ -849,6 +849,65 @@ def _lane_fields(node: ast.FunctionDef) -> set[str]:
     return params | keywords
 
 
+# D73 — 단어 시각·세그먼트 점수는 제안·표시 재료다. 줄 시각을 만드는 자리(세그먼트 해석·발화 투영·
+# 1단계 기록 JSON·원본 자막·빈칸 재전사·시각 맞춤 제안)가 그것을 읽는 순간 단어가 줄 시각이 된다
+# (규칙 1). 이름·속성·정확히 같은 문자열 상수를 본다(문서 글은 보지 않는다).
+WORD_META_NAMES = frozenset({"words", "word_spans", "no_speech_prob", "avg_logprob"})
+LINE_TIME_FUNCTIONS = {
+    "raw/caption_provider.py": ("_timed_segments", "_timed_segment", "_close_at_chunk_end"),
+    "raw/understanding.py": (
+        "utterance_evidence", "_project_segment", "utterances_json", "_utterance_json",
+        "asr_evidence_json", "_asr_chunk_json",
+    ),
+}  # fmt: skip
+LINE_TIME_MODULES = ("raw/source_transcript.py", "raw/speech_refill.py", "sync_snap.py")
+
+
+def check_line_times_ignore_word_meta() -> list[str]:
+    """규칙 1·D73 — 줄 시각을 만드는 함수·모듈은 단어 시각·세그먼트 점수를 읽지 않는다.
+
+    함수나 파일이 사라지면 조용히 통과하지 않는다 — 줄 시각이 어디로 옮겨 갔는지 모르게 된다."""
+    failures: list[str] = []
+    for rel, names in LINE_TIME_FUNCTIONS.items():
+        path = PROJECT_PACKAGE / rel
+        if not path.exists():
+            failures.append(f"vlogsrt/project/{rel}: 줄 시각 계층이 사라졌다 (D73)")
+            continue
+        found = {
+            node.name: node
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
+            if isinstance(node, ast.FunctionDef)
+        }
+        for name in names:
+            node = found.get(name)
+            if node is None:
+                failures.append(f"{rel}: {name}을 찾지 못했다 — 검사가 무력해졌다 (D73)")
+            elif used := _word_meta_used(node):
+                failures.append(
+                    f"{rel}:{name}: {', '.join(used)}를 읽는다 — 단어는 제안 재료다 (D73)"
+                )
+    for rel in LINE_TIME_MODULES:
+        path = PROJECT_PACKAGE / rel
+        if not path.exists():
+            failures.append(f"vlogsrt/project/{rel}: 줄 시각 계층이 사라졌다 (D73)")
+        elif used := _word_meta_used(ast.parse(path.read_text(encoding="utf-8"))):
+            failures.append(f"vlogsrt/project/{rel}: {', '.join(used)}를 읽는다 (D73)")
+    return failures
+
+
+def _word_meta_used(tree: ast.AST) -> list[str]:
+    """나무 안의 이름·속성·문자열 상수 가운데 단어 메타 이름."""
+    seen: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name):
+            seen.add(node.id)
+        elif isinstance(node, ast.Attribute):
+            seen.add(node.attr)
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+            seen.add(node.value)
+    return sorted(seen & WORD_META_NAMES)
+
+
 def check_glossary_stays_local() -> list[str]:
     """D59 19c — 용어집은 작업공간 DB만 알고, 설정은 용어집·글자 경로를 모른다."""
     failures: list[str] = []
@@ -2648,6 +2707,7 @@ CHECKS = (
     ("시각 유도 계층 부활 금지", check_time_deriving_layers_stay_buried),
     ("whisper에 prompt 금지", check_no_prompt_to_whisper),
     ("요청 빌더의 칸은 갈라져 있다", check_caption_request_lanes),
+    ("줄 시각은 단어 시각을 읽지 않는다", check_line_times_ignore_word_meta),
     ("용어집은 설정 밖, DB만 안다", check_glossary_stays_local),
     ("autojunk=False", check_autojunk),
     ("금지 의존성", check_banned_imports),

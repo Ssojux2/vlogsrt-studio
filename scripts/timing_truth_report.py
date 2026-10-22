@@ -17,6 +17,11 @@
 같은 지표를 작업대 「시각 맞춤 제안」 칸과 같은 재료(지금 리비전의 보고서 · 저장된 말소리 칸)로
 메모리에서만 잰 `sync_snap.propose` 결과에도 매긴다 — 끝 맞춤이 도움이 되는지 여기서 판가름한다.
 시각 맞춤을 이미 적용한 자막은 제안이 없다(한 걸음 규칙) — 그때 자막 칸이 곧 적용 뒤의 값이다.
+
+「단어 경계」(W-25c, D73): 정답마다 그 원본의 가장 가까운 whisper 단어 경계(시작은 단어 시작, 끝은
+단어 끝)를 같은 지표로 잰다 — 단어 시각이 줄 시각의 제안 재료로 쓸 만한지 판가름한다. 단어는 지금
+자막을 심은 1단계 기록의 청크(`request_id`·WAV 해시)로 내부 전사 캐시(`cache/source-asr`)를 찾아
+읽기만 한다. 단어 입자(D73) 이전에 산 전사에는 단어가 없다 — 그때는 「단어 시각 없음」이다.
 """
 
 from __future__ import annotations
@@ -34,6 +39,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from vlogsrt import log  # noqa: E402
 from vlogsrt.project import sync_check, sync_snap  # noqa: E402
 from vlogsrt.project.config import (  # noqa: E402
     SYNC_CHECK_SETTINGS,
@@ -41,13 +47,22 @@ from vlogsrt.project.config import (  # noqa: E402
     TIMING_TRUTH_SETTINGS,
     ProjectConfig,
 )
-from vlogsrt.project.raw import source_transcript, sync_report, timing_truth  # noqa: E402
+from vlogsrt.project.raw import (  # noqa: E402
+    source_transcript,
+    sync_report,
+    timing_truth,
+    understanding,
+)
 
 DB_NAME = "project.sqlite3"
 SUBTITLE = "subtitle"
 PROPOSAL = "proposal"
 MATCHED = "subtitle_matched"
 """제안이 있는 영상의 정답만으로 잰 자막 — 제안과 같은 표본에서 견준다."""
+WORDS = "word_boundary"
+"""정답과 가장 가까운 단어 경계(D73) — 단어 시각이 있는 원본만."""
+NO_WORDS = "단어 시각 없음"
+NO_STAGE1 = "1단계 기록 없음"
 
 
 def _connect(workspace: Path) -> sqlite3.Connection:
@@ -129,18 +144,64 @@ def proposal_lines(
     )
 
 
+def word_boundaries(
+    workspace: Path, asset_id: str, transcript: Mapping[str, Any]
+) -> tuple[tuple[Fraction, Fraction], ...] | str:
+    """지금 자막을 심은 1단계 전사의 단어 시각(공통 시계) — 없으면 그 까닭. 캐시를 읽기만 한다.
+
+    청크는 1단계 기록의 `request_id`·WAV 해시·시작 틱으로 캐시 항목과 짝짓는다 — 캐시에서 온
+    청크는 산 때의 `request_id`를 그대로 기록하므로, 다시 듣기 뒤에 옛 항목이 남아 있어도 섞이지
+    않는다. 공통 시계 = PCM 시계 + (PCM 표본 0의 파일 시각 − 영상 제시 원점), 화면의 층과 같다."""
+    stage1 = sync_report.stage1_audio(
+        workspace, asset_id, str(transcript.get("source_sha256") or "")
+    )
+    if stage1 is None or stage1.absent or not stage1.sample_rate:
+        return NO_STAGE1
+    origin = stage1.origin - stage1.presentation_origin
+    cached = _cached_chunks(workspace / "cache" / understanding.ASR_CACHE_DIRNAME / asset_id)
+    found: list[tuple[Fraction, Fraction]] = []
+    for start, (request_id, wav) in zip(stage1.chunk_starts, stage1.chunk_sources, strict=True):
+        chunk = cached.get((request_id, wav, int(start * stage1.sample_rate)))
+        if chunk is not None:
+            found += [
+                (origin + low, origin + high)
+                for low, high, _word in understanding.word_spans(chunk, stage1.sample_rate)
+            ]
+    return tuple(found) if found else NO_WORDS
+
+
+def _cached_chunks(folder: Path) -> dict[tuple[str, str, int], understanding.AsrChunkOutcome]:
+    """원본 하나의 내부 전사 캐시 항목 — `(request_id, WAV 해시, 시작 틱)`마다.
+
+    못 읽는 항목(깨진 JSON·모르는 칸)은 경고하고 건너뛴다 — 보고서는 쓰지 않는다."""
+    chunks: dict[tuple[str, str, int], understanding.AsrChunkOutcome] = {}
+    for path in sorted(folder.glob("*.json")):
+        try:
+            chunk = understanding.AsrChunkOutcome(
+                **json.loads(path.read_text(encoding="utf-8"))["outcome"]
+            )
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            log.warn(f"시각 정답 보고서 — 전사 캐시 항목을 읽지 못해 건너뛴다: {path} ({error})")
+            continue
+        chunks[(chunk.request_id, chunk.wav_sha256, chunk.sample_start)] = chunk
+    return chunks
+
+
 def _video(
     workspace: Path, asset_id: str, transcript: Mapping[str, Any], marks: Sequence[Any]
 ) -> dict[str, Any]:
-    """영상 하나 — 정답 처지 · 자막 짝 · 제안 짝(없으면 까닭)."""
+    """영상 하나 — 정답 처지 · 자막 짝 · 제안 짝 · 단어 경계 짝(없으면 까닭)."""
     lines = timing_truth.lines_of(transcript)
     states = timing_truth.judge(marks, lines)
     proposed = proposal_lines(workspace, asset_id, transcript)
+    words = word_boundaries(workspace, asset_id, transcript)
     return {
         "states": states,
         SUBTITLE: timing_truth.pairs(states, lines),
         PROPOSAL: () if isinstance(proposed, str) else timing_truth.pairs(states, proposed),
         "proposal_note": proposed if isinstance(proposed, str) else None,
+        WORDS: () if isinstance(words, str) else timing_truth.word_pairs(states, words),
+        "word_note": words if isinstance(words, str) else None,
     }
 
 
@@ -173,6 +234,7 @@ def _document(
     subtitle = [pair for video in videos.values() for pair in video[SUBTITLE]]
     proposal = [pair for video in videos.values() for pair in video[PROPOSAL]]
     matched = [pair for video in videos.values() if video[PROPOSAL] for pair in video[SUBTITLE]]
+    words = [pair for video in videos.values() for pair in video[WORDS]]
     return {
         "hit_seconds": str(TIMING_TRUTH_SETTINGS.hit_seconds),
         "videos": [
@@ -183,15 +245,20 @@ def _document(
             SUBTITLE: _metrics(subtitle),
             MATCHED: _metrics(matched),
             PROPOSAL: _metrics(proposal),
+            WORDS: _metrics(words),
         },
         "strata": {
             stratum: {
                 SUBTITLE: _metrics(_only(subtitle, stratum)),
                 MATCHED: _metrics(_only(matched, stratum)),
                 PROPOSAL: _metrics(_only(proposal, stratum)),
+                WORDS: _metrics(_only(words, stratum)),
             }
             for stratum in timing_truth.STRATA
         },
+        "word_note": None
+        if any(video["word_note"] is None for video in videos.values())
+        else NO_WORDS,
         "orphaned_marks": orphaned,
     }
 
@@ -206,6 +273,8 @@ def _video_row(asset_id: str, name: str, video: Mapping[str, Any]) -> dict[str, 
         SUBTITLE: _metrics(video[SUBTITLE]),
         PROPOSAL: _metrics(video[PROPOSAL]),
         "proposal_note": video["proposal_note"],
+        WORDS: _metrics(video[WORDS]),
+        "word_note": video["word_note"],
     }
 
 
@@ -245,6 +314,12 @@ def _line(label: str, values: Mapping[str, Any]) -> str:
     )
 
 
+def _word_line(values: Mapping[str, Any], note: str | None) -> str:
+    """단어 경계 줄 — 단어가 없으면 까닭(「단어 시각 없음」)만 적는다."""
+    label = "  단어 경계"
+    return f"{label:<22} {note}" if note else _line(label, values)
+
+
 def render(document: Mapping[str, Any]) -> list[str]:
     hit = float(Fraction(document["hit_seconds"])) * 1000
     rows = [f"시각 정답 보고서 — 적중 폭 ±{hit:.0f}ms"]
@@ -255,14 +330,17 @@ def render(document: Mapping[str, Any]) -> list[str]:
         )
         rows.append(_line("  자막", video[SUBTITLE]))
         rows.append(_line("  제안", video[PROPOSAL]))
+        rows.append(_word_line(video[WORDS], video["word_note"]))
     rows.append("전체")
     rows.append(_line("  자막", document["overall"][SUBTITLE]))
     rows.append(_line("  자막(제안과 같은 표본)", document["overall"][MATCHED]))
     rows.append(_line("  제안", document["overall"][PROPOSAL]))
+    rows.append(_word_line(document["overall"][WORDS], document["word_note"]))
     for stratum, values in document["strata"].items():
         rows.append(f"층 {stratum}")
         rows.append(_line("  자막", values[SUBTITLE]))
         rows.append(_line("  제안", values[PROPOSAL]))
+        rows.append(_word_line(values[WORDS], document["word_note"]))
     if document["orphaned_marks"]:
         rows.append(f"원본 자막이 없는 원본의 정답 {document['orphaned_marks']}개 — 세지 않음")
     return rows

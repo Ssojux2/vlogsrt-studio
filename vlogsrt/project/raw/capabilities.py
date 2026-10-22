@@ -57,7 +57,10 @@ _TEXT_UNCONFIRMED = (
     FEATURE_WORD_TIMES,
     FEATURE_LOGPROBS,
 )
-_TIMING_CONFIRMED = (FEATURE_VERBOSE_JSON, FEATURE_SEGMENT_TIMES)
+# 단어 입자(D73)는 verbose_json과 함께 쓰는 문서화된 API enum이고 요금이 같다(지연만 는다). 확인은
+# 시간 역할에서만이다 — 단어 시각은 제안 재료일 뿐 줄 시각의 원천이 아니다(규칙 1). 문구 역할(gpt-
+# transcribe)은 verbose_json 단어를 받지 않으므로 그대로 미확인이다.
+_TIMING_CONFIRMED = (FEATURE_VERBOSE_JSON, FEATURE_SEGMENT_TIMES, FEATURE_WORD_TIMES)
 _TIMING_UNCONFIRMED = (
     FEATURE_JSON,
     FEATURE_SRT,
@@ -65,7 +68,6 @@ _TIMING_UNCONFIRMED = (
     FEATURE_LANGUAGES,
     FEATURE_KEYWORDS,
     FEATURE_PROMPT,
-    FEATURE_WORD_TIMES,
     FEATURE_LOGPROBS,
 )
 

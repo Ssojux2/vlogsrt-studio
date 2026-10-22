@@ -45,7 +45,14 @@ TIMING_RESPONSE_FORMAT_VERBOSE_JSON = "verbose_json"
 """시간 경로의 응답 형식 — 세그먼트 골격의 원천이다(§11.4)."""
 
 TIMESTAMP_GRANULARITIES_SEGMENT = ("segment",)
-"""기본은 세그먼트 시간이다. `word`는 별도 계약·검증 뒤에만 허용한다(§11.3)."""
+"""자막 계약의 시간 입자 칸 — 언제나 세그먼트뿐이다. 줄 시각·경계는 `segments[]`에서만 온다."""
+
+TIMESTAMP_GRANULARITY_WORD = "word"
+"""단어 입자(D73) — 계약 칸이 **아니라** 1단계·빈칸 재전사의 whisper 요청만 덧붙인다.
+
+단어 시각은 제안 재료일 뿐이다 — 어느 줄에도 시각을 주지 않고(규칙 1), 저장된 설정·청크 열쇠·
+승인 지문 어디에도 실리지 않는다. 계약 칸에 넣으면 `asdict(RawWorkflowConfig)`를 통째로 해시하는
+청크 열쇠가 바뀌어 이미 산 전사가 모두 낡고, 저장된 작업공간 설정과도 어긋난다(D47·D55의 교훈)."""
 
 CONFIRMED_REGISTRY_REVISION = "openai-caption-2026-10-02-v1"
 """2026-10-02 공식 문서로 확인한 등록표 리비전 — 아래 확정값들의 열쇠다."""
@@ -687,7 +694,10 @@ def caption_problems(caption: RawCaptionContract) -> list[str]:
     if caption.timing_response_format != TIMING_RESPONSE_FORMAT_VERBOSE_JSON:
         problems.append(f"시간 응답 형식은 {TIMING_RESPONSE_FORMAT_VERBOSE_JSON}여야 한다")
     if caption.timestamp_granularities != TIMESTAMP_GRANULARITIES_SEGMENT:
-        problems.append("시간 입자는 세그먼트뿐이다 — word는 별도 계약·검증이 필요하다")
+        problems.append(
+            "시간 입자는 세그먼트뿐이다 — 단어 시각은 계약 칸이 아니라 1단계 whisper 요청이"
+            " 따로 덧붙인다(D73)"
+        )
     # 빈 languages·keywords는 합법이다 — "힌트 없음"이지 무발화가 아니다(§11.4,
     # 코디네이터 재결). 요청 어댑터는 빈 배열을 필드째 빼고 보낸다.
     problems += hint_problems("예상 언어", caption.languages)

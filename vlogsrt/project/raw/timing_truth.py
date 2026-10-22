@@ -231,6 +231,38 @@ def pairs(states: Iterable[MarkState], lines: Sequence[TruthLine]) -> tuple[Trut
     return tuple(found)
 
 
+def word_pairs(
+    states: Iterable[MarkState], words: Sequence[tuple[Fraction, Fraction]]
+) -> tuple[TruthPair, ...]:
+    """낡지 않은 정답마다 가장 가까운 단어 경계(D73) — 시작은 단어 시작, 끝은 단어 끝과 견준다.
+
+    `words`는 공통 시계의 `(시작, 끝)`이다. 줄과 상관없이 그 원본의 모든 단어에서 고른다(같은 거리면
+    이른 쪽). 단어 시각이 줄 시각을 얼마나 잘 맞출 수 있는지의 측정일 뿐 어느 줄에도 시각을 주지
+    않는다(규칙 1). 단어가 없으면 빈 튜플이다."""
+    edges = {
+        EDGE_START: sorted(start for start, _end in words),
+        EDGE_END: sorted(end for _start, end in words),
+    }
+    found: list[TruthPair] = []
+    for state in states:
+        candidates = edges[state.mark.edge]
+        if state.stale is not None or not candidates:
+            continue
+        truth = state.mark.seconds
+        nearest = min(candidates, key=lambda boundary: (abs(boundary - truth), boundary))
+        found.append(
+            TruthPair(
+                state.mark.asset_id,
+                state.mark.utterance_id,
+                state.mark.stratum,
+                state.mark.edge,
+                truth,
+                nearest,
+            )
+        )
+    return tuple(found)
+
+
 def metrics(
     found: Iterable[TruthPair], settings: TimingTruthSettings = TIMING_TRUTH_SETTINGS
 ) -> TruthMetrics:
@@ -419,4 +451,5 @@ __all__ = [
     "metrics",
     "pairs",
     "suggest",
+    "word_pairs",
 ]

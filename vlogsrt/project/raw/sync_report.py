@@ -126,6 +126,10 @@ class Stage1Audio:
     clamped: int = 0  # 1단계가 청크 끝에 맞춘 세그먼트 수(D55)
     chunk_starts: tuple[Fraction, ...] = ()
     """전사 청크마다의 시작(PCM 시계의 초) — 시각 정답의 「조각 첫 줄」 층(W-25b)만 읽는다."""
+    sample_rate: int = 0
+    chunk_sources: tuple[tuple[str, str], ...] = ()
+    """청크마다 `(request_id, wav_sha256)` — `chunk_starts`와 같은 순서. 시각 정답 보고서가 그
+    청크의 캐시 항목(단어 시각, D73)을 찾을 때만 읽는다."""
 
     @property
     def pcm_path(self) -> Path:
@@ -254,6 +258,7 @@ def _stage1_of(
     if body.get("source_sha256", audio.get("source_sha256")) != source_sha256:
         return None
     rate = int(audio["sample_rate"])
+    chunks = (body.get("asr") or {}).get("chunks", [])
     return Stage1Audio(
         folder=folder,
         created_at=created,
@@ -265,13 +270,11 @@ def _stage1_of(
         origin=_rational(audio["pcm_sample0_file_time"]),
         presentation_origin=_presentation_of(body, record),
         failed=_failed_chunks(body, rate),
-        clamped=sum(
-            len(chunk.get("clamped_segments", []))
-            for chunk in (body.get("asr") or {}).get("chunks", [])
-        ),
-        chunk_starts=tuple(
-            Fraction(int(chunk["sample_start"]), rate)
-            for chunk in (body.get("asr") or {}).get("chunks", [])
+        clamped=sum(len(chunk.get("clamped_segments", [])) for chunk in chunks),
+        chunk_starts=tuple(Fraction(int(chunk["sample_start"]), rate) for chunk in chunks),
+        sample_rate=rate,
+        chunk_sources=tuple(
+            (str(chunk.get("request_id", "")), str(chunk.get("wav_sha256", ""))) for chunk in chunks
         ),
     )
 

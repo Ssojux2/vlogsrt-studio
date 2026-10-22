@@ -20,13 +20,18 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
-from typing import Protocol, TypeGuard
+from typing import Protocol, TypeGuard, cast
 
 from vlogsrt import log
 from vlogsrt.config import Config
 from vlogsrt.models import Chunk
 from vlogsrt.project.raw import capabilities
-from vlogsrt.project.raw.config import TIMING_RESPONSE_TOLERANCE, RawWorkflowConfig
+from vlogsrt.project.raw.config import (
+    TIMESTAMP_GRANULARITIES_SEGMENT,
+    TIMESTAMP_GRANULARITY_WORD,
+    TIMING_RESPONSE_TOLERANCE,
+    RawWorkflowConfig,
+)
 from vlogsrt.transcribe import (
     CAPTION_TEXT_KIND,
     CAPTION_TIMING_KIND,
@@ -178,6 +183,19 @@ class TimedSegment:
 
 
 @dataclass(frozen=True, slots=True)
+class TimedWord:
+    """응답의 단어 하나(D73) — 청크 국소 초, 응답 숫자 그대로(닫거나 옮기지 않는다).
+
+    **제안 재료일 뿐이다.** 어느 줄·세그먼트에도 시각을 주지 않는다(규칙 1) — 줄 시각·경계는
+    `TimedSegment`에서만 온다. whisper는 단어를 세그먼트 안이 아니라 응답 맨 위 `words[]`로 준다.
+    """
+
+    start: float
+    end: float
+    word: str
+
+
+@dataclass(frozen=True, slots=True)
 class TimedTranscript:
     """시간 경로의 결과 — 세그먼트 시각의 유일한 원천이다(§11.10·§13.1).
 
@@ -195,6 +213,12 @@ class TimedTranscript:
     response: Mapping[str, object] | None = None
     # 청크 끝으로 닫은 세그먼트의 위치(D55) — 원 응답은 `response`에 그대로 있다.
     clamped_segments: tuple[int, ...] = ()
+    # 응답 메타(D73) — 세그먼트마다의 무발화 확률·평균 로그 확률(모든 세그먼트에 있을 때만, 순서
+    # 그대로)과 청크의 단어 시각. 표시·제안 재료일 뿐 세그먼트 시각·글자를 바꾸지 않는다.
+    no_speech_prob: tuple[float, ...] = ()
+    avg_logprob: tuple[float, ...] = ()
+    words: tuple[TimedWord, ...] = ()
+    words_requested: bool = False
 
     @property
     def unconfirmed_empty(self) -> bool:
@@ -291,6 +315,7 @@ def parse_timing_response(
     chunk_duration: float,
     chunk_offset: float = 0.0,
     overrun_tolerance: float = TIMING_RESPONSE_TOLERANCE.chunk_end_overrun_seconds,
+    words_requested: bool = False,
 ) -> TimedTranscript:
     """시간 응답을 `TimedTranscript`로 — 세그먼트가 없으면 그대로 없다고 남긴다.
 
@@ -298,8 +323,33 @@ def parse_timing_response(
     (§11.11)이고 어긋난 시각을 몰래 메우지 않는다 — cue를 지어내면 가짜 SRT가 돌아온다.
     예외 하나(D55): 청크 끝을 `overrun_tolerance` 이하로 넘은 시각은 **청크 끝으로 닫고**
     경고한다 — 그 하나로 청크째 버리면 말이 조용히 사라진다(규칙 9, 실측 4/38). 길이 0은
-    글자째 남는다. 원 응답은 `response`에 그대로 남는다.
+    글자째 남는다. 원 응답은 `response`에 그대로 남는다. 응답 메타(무발화 확률·평균 로그 확률·
+    단어, D73)는 세그먼트와 따로 읽는다 — 꼴이 어긋나면 그 메타만 싣지 않고 경고한다.
     """
+    body = _timing_frame(payload, chunk_offset, chunk_duration)
+    segments, clamped = _timed_segments(
+        body["segments"], binding.request_id, chunk_duration, overrun_tolerance
+    )
+    records = cast(list[Mapping[str, object]], body["segments"])  # 꼴은 위에서 확인했다
+    return TimedTranscript(
+        binding=binding,
+        model=model,
+        provider=provider,
+        segments=segments,
+        chunk_offset=chunk_offset,
+        response=body,
+        clamped_segments=clamped,
+        no_speech_prob=_segment_scores(records, "no_speech_prob"),
+        avg_logprob=_segment_scores(records, "avg_logprob"),
+        words=_timed_words(body.get("words")),
+        words_requested=words_requested,
+    )
+
+
+def _timing_frame(
+    payload: object, chunk_offset: float, chunk_duration: float
+) -> Mapping[str, object]:
+    """응답·청크 좌표의 겉꼴 — JSON 객체 · 유한한 청크 좌표 · `segments` 칸이 있어야 한다."""
     if not isinstance(payload, Mapping):
         raise MalformedCaptionResponse(f"시간 응답이 JSON 객체가 아니다: {type(payload).__name__}")
     if not _finite_number(chunk_offset) or chunk_offset < 0:
@@ -310,18 +360,44 @@ def parse_timing_response(
         raise MalformedCaptionResponse(
             f"시간 응답에 segments가 없다 — 받은 필드: {sorted(payload)}"
         )
-    segments, clamped = _timed_segments(
-        payload["segments"], binding.request_id, chunk_duration, overrun_tolerance
+    return payload
+
+
+def _segment_scores(records: list[Mapping[str, object]], name: str) -> tuple[float, ...]:
+    """세그먼트마다의 점수 하나(D73) — **모든** 세그먼트에 유한 숫자가 있을 때만, 순서 그대로.
+
+    일부만 있으면 어느 세그먼트의 값인지 짝이 흔들리므로 통째로 싣지 않고 경고한다. 하나도 없으면
+    (재생 픽스처·옛 모양) 조용히 빈 튜플이다 — 그때 캐시 바이트가 예전 그대로다.
+    """
+    values = [record.get(name) for record in records]
+    if values and all(_finite_number(value) for value in values):
+        return tuple(float(cast(float, value)) for value in values)
+    if any(value is not None for value in values):
+        log.warn(f"시간 응답의 {name}이 일부 세그먼트에만 있거나 숫자가 아니다 — 싣지 않는다 (D73)")
+    return ()
+
+
+def _timed_words(raw: object) -> tuple[TimedWord, ...]:
+    """응답 맨 위 `words[]`(D73) — 꼴이 어긋나면 단어만 싣지 않고 경고한다(세그먼트는 그대로).
+
+    단어는 줄 시각이 아니라 제안 재료라서, 그 꼴 하나로 유료 청크를 실패로 돌리지 않는다.
+    """
+    if raw is None:
+        return ()
+    if not isinstance(raw, list) or not all(_word_shape_ok(item) for item in raw):
+        log.warn("시간 응답의 단어 시각 꼴이 어긋난다 — 단어는 싣지 않는다(세그먼트는 그대로, D73)")
+        return ()
+    return tuple(
+        TimedWord(start=float(item["start"]), end=float(item["end"]), word=str(item["word"]))
+        for item in raw
     )
-    return TimedTranscript(
-        binding=binding,
-        model=model,
-        provider=provider,
-        segments=segments,
-        chunk_offset=chunk_offset,
-        response=payload,
-        clamped_segments=clamped,
-    )
+
+
+def _word_shape_ok(item: object) -> bool:
+    if not isinstance(item, Mapping) or not isinstance(item.get("word"), str):
+        return False
+    start, end = item.get("start"), item.get("end")
+    return _finite_number(start) and _finite_number(end) and 0 <= float(start) <= float(end)
 
 
 def _timed_segments(
@@ -458,33 +534,50 @@ def text_transcription_request(
 
 
 def timing_transcription_request(
-    chunk: Chunk, *, settings: RawWorkflowConfig, temperature: float | None = None
+    chunk: Chunk,
+    *,
+    settings: RawWorkflowConfig,
+    temperature: float | None = None,
+    word_times: bool = False,
 ) -> AudioTranscriptionRequest:
     """시간 경로 요청 — 문구 힌트가 **실리지 않는다**(규칙 6, §11.4).
 
     힌트 인자가 아예 없으므로 문구 설정의 languages·keywords가 넘어올 길이
     없다. `temperature`는 되풀이 대응의 손잡이(D28)로 호출자가 값을 정한다 —
     `None`이면 필드가 빠진다. 실전송 어댑터는 `None`을 받지 않고 엔진 1차 온도를
-    채워 부른다(D55).
+    채워 부른다(D55). `word_times`(D73)는 계약의 세그먼트 입자 **뒤에** 단어 입자를 덧붙인다 —
+    1단계·빈칸 재전사만 켠다. 요금은 같고 줄 시각은 여전히 `segments[]`에서만 온다(규칙 1).
     """
     contract, models = settings.caption, settings.models
+    granularities = _sent_granularities(contract.timestamp_granularities, word_times)
     capabilities.confirm_request_combo(
         role=capabilities.ROLE_TIMING,
         model=models.timing_model,
         response_format=contract.timing_response_format,
-        features=_granularity_features(contract.timestamp_granularities),
+        features=_granularity_features(granularities),
     )
     return AudioTranscriptionRequest(
         chunk=chunk,
         model=models.timing_model,
         response_format=contract.timing_response_format,
-        timestamp_granularities=contract.timestamp_granularities,
+        timestamp_granularities=granularities,
         temperature=temperature,
     )
 
 
+def _sent_granularities(contract: tuple[str, ...], word_times: bool) -> tuple[str, ...]:
+    """보낼 입자 — 세그먼트 골격은 언제나 묻는다(줄 시각의 유일한 원천, 규칙 1). 단어는 덧붙임."""
+    if not set(TIMESTAMP_GRANULARITIES_SEGMENT) <= set(contract):
+        raise capabilities.UnverifiedModelCapability(
+            f"시간 요청은 세그먼트 입자를 묻는다 — 받은 입자: {contract!r} (규칙 1)"
+        )
+    if word_times and TIMESTAMP_GRANULARITY_WORD not in contract:
+        return (*contract, TIMESTAMP_GRANULARITY_WORD)
+    return contract
+
+
 def _granularity_features(granularities: tuple[str, ...]) -> tuple[str, ...]:
-    """계약의 입자를 확인받는다 — 세그먼트만 확인됐고 word는 별도 계약이다(§11.3)."""
+    """보낼 입자를 확인받는다 — 시간 역할은 세그먼트·단어가 확인됐다(D73)."""
     return tuple(f"timestamp_granularities:{granularity}" for granularity in granularities)
 
 
@@ -564,6 +657,9 @@ class TransportTimingProvider:
 
     sender: TranscriptionSender
     cfg: Config
+    # 단어 입자를 덧붙이는가(D73) — 1단계·빈칸 재전사(`stage1_timing_provider`)만 켠다. 최종 자막·
+    # 회복 재전사는 끈 채 그대로다(세그먼트만 쓰고 단어를 보관할 자리가 없다).
+    word_times: bool = False
 
     def timed_transcript(
         self,
@@ -578,7 +674,9 @@ class TransportTimingProvider:
     ) -> TimedTranscript:
         capabilities.preflight_online_transcription(settings, on, roles=(capabilities.ROLE_TIMING,))
         sent = self.cfg.transcribe_temperature if temperature is None else temperature
-        request = timing_transcription_request(chunk, settings=settings, temperature=sent)
+        request = timing_transcription_request(
+            chunk, settings=settings, temperature=sent, word_times=self.word_times
+        )
         verify_chunk_binding(binding, chunk)
         payload = self.sender.send_request(
             request, self.cfg, kind=CAPTION_TIMING_KIND, stem=stem, source=source
@@ -590,7 +688,17 @@ class TransportTimingProvider:
             provider=settings.caption.timing_provider,
             chunk_duration=chunk.duration,
             chunk_offset=chunk.offset,
+            words_requested=TIMESTAMP_GRANULARITY_WORD in request.timestamp_granularities,
         )
+
+
+def stage1_timing_provider(sender: TranscriptionSender, cfg: Config) -> TransportTimingProvider:
+    """1단계 내부 전사·말소리 빈칸 재전사의 whisper 전송 — 단어 입자를 함께 묻는다(D73).
+
+    두 길 모두 청크 결과를 내부 전사 캐시(`understanding._cached_outcome`)에 남기므로 단어를 보관할
+    자리가 있다. 청크 열쇠·승인 지문·견적은 그대로다 — 입자는 저장된 설정의 칸이 아니다.
+    """
+    return TransportTimingProvider(sender=sender, cfg=cfg, word_times=True)
 
 
 @dataclass(frozen=True, slots=True)

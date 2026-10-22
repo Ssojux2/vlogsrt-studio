@@ -67,8 +67,8 @@ from vlogsrt.project.raw.analysis_store import (
 from vlogsrt.project.raw.caption_provider import (
     TimingProvider,
     TransportTextProvider,
-    TransportTimingProvider,
     parse_timing_response,
+    stage1_timing_provider,
 )
 from vlogsrt.project.raw.config import SOURCE_TEXT_SETTINGS, RawWorkflowConfig
 from vlogsrt.project.raw.jobs import JobCancelledError, JobContext
@@ -1320,7 +1320,7 @@ def _hear_source(
         on=providers.on or datetime.now(UTC).date(),
         request_id=f"{revision.revision_id}:{asset.asset_id}",
         workdir=source_dir,
-        cache_dir=workspace.root / "cache" / "source-asr" / asset.asset_id,
+        cache_dir=workspace.root / "cache" / stage1.ASR_CACHE_DIRNAME / asset.asset_id,
         asr_epoch=asr_epoch,
     )
     utterances, record = _cross_check_text(
@@ -1908,7 +1908,7 @@ def _asr_provider_for(
         source_sha256=audio.source_sha256,
         on=providers.on or datetime.now(UTC).date(),
     )
-    inner = TransportTimingProvider(sender=sender, cfg=cfg)  # type: ignore[arg-type]
+    inner = stage1_timing_provider(sender, cfg)  # type: ignore[arg-type]  # 단어 입자 포함(D73)
     return ApprovedPhaseAsrProvider(
         inner=inner,
         workflow=workflow,
