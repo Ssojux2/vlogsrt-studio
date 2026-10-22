@@ -19,7 +19,7 @@ import를 막는다). 읽는 곳은 화면의 표시와 `scripts/timing_truth_re
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from fractions import Fraction
 from typing import Any
@@ -207,6 +207,33 @@ def judge(marks: Iterable[TruthMark], lines: Sequence[TruthLine]) -> tuple[MarkS
         else:
             states.append(MarkState(mark, None))
     return tuple(states)
+
+
+def word_lines(
+    lines: Sequence[TruthLine],
+    word_edges: Sequence[tuple[Fraction, Fraction]],
+    *,
+    reach: Fraction,
+) -> tuple[TruthLine, ...]:
+    """줄 경계를 `reach` 안의 가장 가까운 단어 경계로 옮겨 본 값(W-25c, D73) — 보고서 재료뿐이다.
+
+    시작은 단어 시작, 끝은 단어 끝 가운데 가장 가까운 것(같으면 앞)이고, 폭 안에 없으면 그 경계는
+    그대로다. 줄의 시각을 바꾸지 않는다 — 단어 시각으로 줄 경계를 정할지 판단할 숫자를 낼 뿐이다."""
+    starts = sorted(start for start, _end in word_edges)
+    ends = sorted(end for _start, end in word_edges)
+    return tuple(
+        replace(
+            line,
+            start=_nearest(line.start, starts, reach),
+            end=_nearest(line.end, ends, reach),
+        )
+        for line in lines
+    )
+
+
+def _nearest(at: Fraction, edges: Sequence[Fraction], reach: Fraction) -> Fraction:
+    inside = [edge for edge in edges if abs(edge - at) <= reach]
+    return min(inside, key=lambda edge: (abs(edge - at), edge), default=at)
 
 
 def pairs(states: Iterable[MarkState], lines: Sequence[TruthLine]) -> tuple[TruthPair, ...]:

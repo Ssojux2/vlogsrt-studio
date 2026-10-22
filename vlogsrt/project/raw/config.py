@@ -45,7 +45,18 @@ TIMING_RESPONSE_FORMAT_VERBOSE_JSON = "verbose_json"
 """시간 경로의 응답 형식 — 세그먼트 골격의 원천이다(§11.4)."""
 
 TIMESTAMP_GRANULARITIES_SEGMENT = ("segment",)
-"""기본은 세그먼트 시간이다. `word`는 별도 계약·검증 뒤에만 허용한다(§11.3)."""
+"""기본은 세그먼트 시간이다. `word`는 세그먼트와 함께일 때만 허용한다(§11.3, D73)."""
+
+STAGE1_TIMESTAMP_GRANULARITIES = ("segment", "word")
+"""1단계 내부 전사가 묻는 입자(W-25c, D73) — 단어 시각은 **제안·보고서 재료로만** 남는다.
+
+자막의 시각과 경계는 여전히 `segments[]`에서만 온다(규칙 1). whisper-1은 같은 값에 단어 시각을
+함께 준다(지연만 는다). 저장된 작업공간 설정의 칸이 아니다 — 칸을 바꾸면 이미 만든 작업공간은
+옛 값을 그대로 읽고, 청크 열쇠가 설정 전체를 해시하므로 이미 산 전사가 모두 낡는다. 그래서
+`stage1_timing_view`가 요청에만 얹고 열쇠는 저장된 설정으로 잰다."""
+
+TIMESTAMP_GRANULARITIES_ALLOWED = (TIMESTAMP_GRANULARITIES_SEGMENT, STAGE1_TIMESTAMP_GRANULARITIES)
+"""계약이 받는 입자 조합 — 세그먼트만, 또는 세그먼트와 단어. 단어만은 골격이 없다."""
 
 CONFIRMED_REGISTRY_REVISION = "openai-caption-2026-10-02-v1"
 """2026-10-02 공식 문서로 확인한 등록표 리비전 — 아래 확정값들의 열쇠다."""
@@ -531,6 +542,15 @@ def transcription_identity_view(config: RawWorkflowConfig) -> RawWorkflowConfig:
     return replace(config, models=pinned)
 
 
+def stage1_timing_view(config: RawWorkflowConfig) -> RawWorkflowConfig:
+    """1단계 내부 전사 요청이 보는 설정 — 입자만 세그먼트+단어로 바꾼다(W-25c, D73).
+
+    청크 캐시 열쇠는 이 보기가 아니라 저장된 설정으로 잰다 — 단어는 덧붙는 재료라 이미 산 전사
+    (단어 없음)를 그대로 쓰고, 새로 사는 청크부터 단어가 실린다."""
+    caption = replace(config.caption, timestamp_granularities=STAGE1_TIMESTAMP_GRANULARITIES)
+    return replace(config, caption=caption)
+
+
 def claude_profile_problems(profile: RawClaudeAnalysisProfile) -> list[str]:
     """프로파일의 자기 일관성 — 단가는 유한한 양수, 한도·엔드포인트는 쓸 수 있는 값."""
     problems = [
@@ -686,8 +706,10 @@ def caption_problems(caption: RawCaptionContract) -> list[str]:
         )
     if caption.timing_response_format != TIMING_RESPONSE_FORMAT_VERBOSE_JSON:
         problems.append(f"시간 응답 형식은 {TIMING_RESPONSE_FORMAT_VERBOSE_JSON}여야 한다")
-    if caption.timestamp_granularities != TIMESTAMP_GRANULARITIES_SEGMENT:
-        problems.append("시간 입자는 세그먼트뿐이다 — word는 별도 계약·검증이 필요하다")
+    if caption.timestamp_granularities not in TIMESTAMP_GRANULARITIES_ALLOWED:
+        problems.append(
+            "시간 입자는 세그먼트, 또는 세그먼트와 단어뿐이다 — 단어만으로는 골격이 없다(D73)"
+        )
     # 빈 languages·keywords는 합법이다 — "힌트 없음"이지 무발화가 아니다(§11.4,
     # 코디네이터 재결). 요청 어댑터는 빈 배열을 필드째 빼고 보낸다.
     problems += hint_problems("예상 언어", caption.languages)

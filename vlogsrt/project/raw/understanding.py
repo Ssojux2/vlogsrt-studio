@@ -39,8 +39,12 @@ from vlogsrt.project.raw.analysis_config import (
     RawUnderstandingSettings,
     validate_understanding_settings,
 )
-from vlogsrt.project.raw.caption_provider import TimingProvider, audio_chunk_binding
-from vlogsrt.project.raw.config import RawWorkflowConfig, transcription_identity_view
+from vlogsrt.project.raw.caption_provider import TimedSegment, TimingProvider, audio_chunk_binding
+from vlogsrt.project.raw.config import (
+    RawWorkflowConfig,
+    stage1_timing_view,
+    transcription_identity_view,
+)
 from vlogsrt.task_runtime import check_cancel, provider_error
 
 PCM_SAMPLE_RATE = 16000
@@ -225,6 +229,10 @@ class AsrChunkOutcome:
     failure: str = ""
     # 청크 끝을 관용 안에서 넘어 끝에 맞춘 세그먼트 위치(D55) — 화면이 「N줄을 맞춤」으로 보인다.
     clamped_segments: tuple[int, ...] = ()
+    # 세그먼트마다 (no_speech_prob, avg_logprob)와 단어 (start, end, word)(W-25c, D73) — 청크 국소
+    # 초 그대로의 재료다. 하나도 없으면 빈 튜플이고 기록·캐시에 칸이 없다(옛 바이트 그대로).
+    segment_scores: tuple[tuple[float | None, float | None], ...] = ()
+    words: tuple[tuple[float, float, str], ...] = ()
 
     @property
     def succeeded(self) -> bool:
@@ -331,7 +339,7 @@ def _transcribe_span(
         timed = provider.timed_transcript(
             binding=binding,
             chunk=chunk,
-            settings=settings,
+            settings=stage1_timing_view(settings),  # 단어도 묻는다 — 열쇠는 저장 설정(D73)
             on=on,
             stem=wav_path.stem,
             source=audio.source_id,
@@ -339,6 +347,8 @@ def _transcribe_span(
         request_log.finish(attempt, received=True)
         segments = tuple((seg.start, seg.end, seg.text) for seg in timed.segments)
         clamped = _clamped_of(timed.clamped_segments, position)
+        scores = _scores_of(timed.segments)
+        words = tuple((word.start, word.end, word.word) for word in timed.words)
     except Exception as exc:  # 청크 하나의 실패 — 전체 실행의 실패가 아니다(§7.3)
         request_log.finish(
             locals().get("attempt"),
@@ -356,6 +366,8 @@ def _transcribe_span(
         request_id=chunk_request_id,
         transcript=segments,
         clamped_segments=clamped,
+        segment_scores=scores,
+        words=words,
     )
     temp = cache_path.with_suffix(".tmp")
     temp.write_text(
@@ -407,9 +419,16 @@ def _cached_outcome(outcome: AsrChunkOutcome) -> dict[str, object]:
     놓친 것으로 쳐 유료 전사를 다시 보낸다 — 넘침이 없는 항목은 바이트까지 예전과 같아야 한다.
     """
     body = asdict(outcome)
-    if not outcome.clamped_segments:
-        del body["clamped_segments"]
+    for name in ("clamped_segments", "segment_scores", "words"):
+        if not getattr(outcome, name):
+            del body[name]
     return body
+
+
+def _scores_of(segments: Sequence[TimedSegment]) -> tuple[tuple[float | None, float | None], ...]:
+    """세그먼트 신뢰도 — 하나도 없으면 빈 튜플(칸을 싣지 않는다), 있으면 세그먼트마다 한 쌍."""
+    scores = tuple((seg.no_speech_prob, seg.avg_logprob) for seg in segments)
+    return scores if any(value is not None for pair in scores for value in pair) else ()
 
 
 def _clamped_of(clamped: Sequence[int], position: int) -> tuple[int, ...]:
@@ -553,8 +572,8 @@ def _project_segment(
     ordinal: int,
 ) -> UtteranceEvidence:
     """세그먼트 하나를 청크 국소 좌표에서 전역 PCM 틱으로 옮긴다."""
-    start_sample = chunk.sample_start + _to_sample(start, audio.sample_rate)
-    end_sample = min(chunk.sample_end, chunk.sample_start + _to_sample(end, audio.sample_rate))
+    start_sample = chunk_tick(chunk.sample_start, start, audio.sample_rate)
+    end_sample = min(chunk.sample_end, chunk_tick(chunk.sample_start, end, audio.sample_rate))
     if end_sample < start_sample:
         end_sample = start_sample
     return UtteranceEvidence(
@@ -568,6 +587,11 @@ def _project_segment(
         end_sample=end_sample,
         evidence_id=f"{chunk.request_id}:{position}",
     )
+
+
+def chunk_tick(sample_start: int, seconds: float, sample_rate: int) -> int:
+    """청크 국소 초를 전역 PCM 틱으로 — 세그먼트와 기록의 단어 시각(D73)이 같은 환산을 쓴다."""
+    return sample_start + _to_sample(seconds, sample_rate)
 
 
 def _to_sample(seconds: float, sample_rate: int) -> int:
@@ -1507,14 +1531,61 @@ def _asr_chunk_json(chunk: AsrChunkOutcome) -> dict[str, object]:
         "sample_end": chunk.sample_end,
         "wav_sha256": chunk.wav_sha256,
         "request_id": chunk.request_id,
-        "segments": [
-            {"start": start, "end": end, "text": text} for start, end, text in chunk.transcript
-        ],
+        "segments": _segments_json(chunk),
         "failure": chunk.failure,
     }
     if chunk.clamped_segments:
         body["clamped_segments"] = list(chunk.clamped_segments)
+    if chunk.words:
+        body["words"] = [
+            {"start": start, "end": end, "word": word} for start, end, word in chunk.words
+        ]
     return body
+
+
+def _segments_json(chunk: AsrChunkOutcome) -> list[dict[str, object]]:
+    """청크의 세그먼트 — 신뢰도는 응답에 있던 값만 그 세그먼트에 싣는다(W-25c, D73)."""
+    rows: list[dict[str, object]] = []
+    for position, (start, end, text) in enumerate(chunk.transcript):
+        row: dict[str, object] = {"start": start, "end": end, "text": text}
+        if chunk.segment_scores:
+            no_speech, logprob = chunk.segment_scores[position]
+            if no_speech is not None:
+                row["no_speech_prob"] = no_speech
+            if logprob is not None:
+                row["avg_logprob"] = logprob
+        rows.append(row)
+    return rows
+
+
+def asr_chunk_material(
+    raw: Mapping[str, object],
+) -> tuple[tuple[tuple[float | None, float | None], ...], tuple[tuple[float, float, str], ...]]:
+    """1단계 기록의 청크에서 (신뢰도, 단어)를 다시 읽는다(D73) — 옛 기록이면 둘 다 빈 튜플."""
+    segments = raw.get("segments")
+    rows = (
+        [row for row in segments if isinstance(row, Mapping)] if isinstance(segments, list) else []
+    )
+    scores = tuple(
+        (_optional_float(row.get("no_speech_prob")), _optional_float(row.get("avg_logprob")))
+        for row in rows
+    )
+    if not any(value is not None for pair in scores for value in pair):
+        scores = ()
+    words = raw.get("words")
+    found = tuple(
+        (float(item["start"]), float(item["end"]), str(item["word"]))
+        for item in (words if isinstance(words, list) else [])
+    )
+    return scores, found
+
+
+def _optional_float(value: object) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"1단계 기록의 신뢰도가 숫자가 아니다: {value!r}")
+    return float(value)
 
 
 def utterances_json(utterances: Sequence[UtteranceEvidence]) -> list[dict[str, object]]:

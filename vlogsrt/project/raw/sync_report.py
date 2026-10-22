@@ -40,6 +40,7 @@ from vlogsrt.project.config import (
 )
 from vlogsrt.project.pcm import PcmReference
 from vlogsrt.project.raw import read_scope
+from vlogsrt.project.raw.understanding import chunk_tick
 from vlogsrt.project.sync_check import Check, Cue, Reason
 from vlogsrt.project.vad.inference import infer_vad
 from vlogsrt.project.vad.runtime import VadUnavailable, bundled_artifact, create_cpu_session
@@ -126,6 +127,8 @@ class Stage1Audio:
     clamped: int = 0  # 1단계가 청크 끝에 맞춘 세그먼트 수(D55)
     chunk_starts: tuple[Fraction, ...] = ()
     """전사 청크마다의 시작(PCM 시계의 초) — 시각 정답의 「조각 첫 줄」 층(W-25b)만 읽는다."""
+    word_edges: tuple[tuple[Fraction, Fraction], ...] = ()
+    """whisper 단어마다 (시작, 끝)(PCM 시계의 초) — 정답 보고서의 「단어 경계」만 읽는다(D73)."""
 
     @property
     def pcm_path(self) -> Path:
@@ -273,7 +276,30 @@ def _stage1_of(
             Fraction(int(chunk["sample_start"]), rate)
             for chunk in (body.get("asr") or {}).get("chunks", [])
         ),
+        word_edges=_word_edges(body, rate),
     )
+
+
+def _word_edges(body: Mapping[str, Any], rate: int) -> tuple[tuple[Fraction, Fraction], ...]:
+    """기록의 단어 시각을 PCM 시계로 — 세그먼트와 같은 틱 환산(`chunk_tick`)이다(W-25c, D73).
+
+    단어는 보고서 재료뿐이라 꼴이 어긋나도 기록 전체(확인의 재료)를 버리지 않는다 — 단어만 비우고
+    경고한다."""
+    edges: list[tuple[Fraction, Fraction]] = []
+    try:
+        for chunk in (body.get("asr") or {}).get("chunks", []):
+            start = int(chunk["sample_start"])
+            for word in chunk.get("words", []):
+                edges.append(
+                    (
+                        Fraction(chunk_tick(start, float(word["start"]), rate), rate),
+                        Fraction(chunk_tick(start, float(word["end"]), rate), rate),
+                    )
+                )
+    except (KeyError, TypeError, ValueError) as error:
+        log.warn(f"1단계 기록의 단어 시각을 읽지 못해 단어만 뺀다 (D73): {error}")
+        return ()
+    return tuple(edges)
 
 
 def _presentation_of(body: Mapping[str, Any], record: Mapping[str, Any]) -> Fraction:

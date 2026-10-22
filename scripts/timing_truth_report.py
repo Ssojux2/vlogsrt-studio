@@ -14,6 +14,10 @@
 도구라 쓰지 않는다(여기는 같은 줄이 이미 정해져 있다). 낡은 정답(줄이 사라졌거나 글자가 바뀜)은
 세지 않고 수만 적는다.
 
+「단어 경계」는 줄 경계를 1단계 기록의 whisper 단어 시각(W-25c, D73) 가운데 찾는 폭
+(`SyncSnapSettings.reach_seconds`) 안의 가장 가까운 것으로 옮겨 본 값이다 — 단어 시각으로 줄 경계를
+정할지 판단할 숫자일 뿐 자막을 바꾸지 않는다. 단어가 없는 기록(W-25c 앞에 산 전사)은 까닭만 적는다.
+
 같은 지표를 작업대 「시각 맞춤 제안」 칸과 같은 재료(지금 리비전의 보고서 · 저장된 말소리 칸)로
 메모리에서만 잰 `sync_snap.propose` 결과에도 매긴다 — 끝 맞춤이 도움이 되는지 여기서 판가름한다.
 시각 맞춤을 이미 적용한 자막은 제안이 없다(한 걸음 규칙) — 그때 자막 칸이 곧 적용 뒤의 값이다.
@@ -48,6 +52,8 @@ SUBTITLE = "subtitle"
 PROPOSAL = "proposal"
 MATCHED = "subtitle_matched"
 """제안이 있는 영상의 정답만으로 잰 자막 — 제안과 같은 표본에서 견준다."""
+WORD = "word"
+"""줄 경계를 가장 가까운 whisper 단어 경계로 옮겨 본 값(W-25c)."""
 
 
 def _connect(workspace: Path) -> sqlite3.Connection:
@@ -129,18 +135,39 @@ def proposal_lines(
     )
 
 
+def word_lines_of(
+    workspace: Path, asset_id: str, transcript: Mapping[str, Any]
+) -> tuple[timing_truth.TruthLine, ...] | str:
+    """줄 경계를 1단계 기록의 단어 경계로 옮겨 본 값(공통 시계) — 잴 수 없으면 그 까닭."""
+    stage1 = sync_report.stage1_audio(
+        workspace, asset_id, str(transcript.get("source_sha256") or "")
+    )
+    if stage1 is None or stage1.absent:
+        return "1단계 기록 없음"
+    if not stage1.word_edges:
+        return "단어 시각 없음"
+    origin = stage1.origin - stage1.presentation_origin
+    edges = tuple((origin + start, origin + end) for start, end in stage1.word_edges)
+    return timing_truth.word_lines(
+        timing_truth.lines_of(transcript), edges, reach=SYNC_SNAP_SETTINGS.reach_seconds
+    )
+
+
 def _video(
     workspace: Path, asset_id: str, transcript: Mapping[str, Any], marks: Sequence[Any]
 ) -> dict[str, Any]:
-    """영상 하나 — 정답 처지 · 자막 짝 · 제안 짝(없으면 까닭)."""
+    """영상 하나 — 정답 처지 · 자막 짝 · 제안 짝 · 단어 경계 짝(없으면 까닭)."""
     lines = timing_truth.lines_of(transcript)
     states = timing_truth.judge(marks, lines)
     proposed = proposal_lines(workspace, asset_id, transcript)
+    worded = word_lines_of(workspace, asset_id, transcript)
     return {
         "states": states,
         SUBTITLE: timing_truth.pairs(states, lines),
         PROPOSAL: () if isinstance(proposed, str) else timing_truth.pairs(states, proposed),
         "proposal_note": proposed if isinstance(proposed, str) else None,
+        WORD: () if isinstance(worded, str) else timing_truth.pairs(states, worded),
+        "word_note": worded if isinstance(worded, str) else None,
     }
 
 
@@ -173,6 +200,7 @@ def _document(
     subtitle = [pair for video in videos.values() for pair in video[SUBTITLE]]
     proposal = [pair for video in videos.values() for pair in video[PROPOSAL]]
     matched = [pair for video in videos.values() if video[PROPOSAL] for pair in video[SUBTITLE]]
+    word = [pair for video in videos.values() for pair in video[WORD]]
     return {
         "hit_seconds": str(TIMING_TRUTH_SETTINGS.hit_seconds),
         "videos": [
@@ -183,12 +211,14 @@ def _document(
             SUBTITLE: _metrics(subtitle),
             MATCHED: _metrics(matched),
             PROPOSAL: _metrics(proposal),
+            WORD: _metrics(word),
         },
         "strata": {
             stratum: {
                 SUBTITLE: _metrics(_only(subtitle, stratum)),
                 MATCHED: _metrics(_only(matched, stratum)),
                 PROPOSAL: _metrics(_only(proposal, stratum)),
+                WORD: _metrics(_only(word, stratum)),
             }
             for stratum in timing_truth.STRATA
         },
@@ -206,6 +236,8 @@ def _video_row(asset_id: str, name: str, video: Mapping[str, Any]) -> dict[str, 
         SUBTITLE: _metrics(video[SUBTITLE]),
         PROPOSAL: _metrics(video[PROPOSAL]),
         "proposal_note": video["proposal_note"],
+        WORD: _metrics(video[WORD]),
+        "word_note": video["word_note"],
     }
 
 
@@ -250,19 +282,23 @@ def render(document: Mapping[str, Any]) -> list[str]:
     rows = [f"시각 정답 보고서 — 적중 폭 ±{hit:.0f}ms"]
     for video in document["videos"]:
         note = f" (제안: {video['proposal_note']})" if video["proposal_note"] else ""
+        note += f" (단어: {video['word_note']})" if video["word_note"] else ""
         rows.append(
             f"{video['source_name']} — 정답 {video['marks']}개 · 낡음 {video['stale']}개{note}"
         )
         rows.append(_line("  자막", video[SUBTITLE]))
         rows.append(_line("  제안", video[PROPOSAL]))
+        rows.append(_line("  단어 경계", video[WORD]))
     rows.append("전체")
     rows.append(_line("  자막", document["overall"][SUBTITLE]))
     rows.append(_line("  자막(제안과 같은 표본)", document["overall"][MATCHED]))
     rows.append(_line("  제안", document["overall"][PROPOSAL]))
+    rows.append(_line("  단어 경계", document["overall"][WORD]))
     for stratum, values in document["strata"].items():
         rows.append(f"층 {stratum}")
         rows.append(_line("  자막", values[SUBTITLE]))
         rows.append(_line("  제안", values[PROPOSAL]))
+        rows.append(_line("  단어 경계", values[WORD]))
     if document["orphaned_marks"]:
         rows.append(f"원본 자막이 없는 원본의 정답 {document['orphaned_marks']}개 — 세지 않음")
     return rows

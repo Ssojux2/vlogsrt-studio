@@ -100,8 +100,9 @@ def test_validation_reports_every_problem_at_once() -> None:
         ({"text_response_format": "srt"}, "문구 응답 형식은 json"),
         ({"text_response_format": "verbose_json"}, "문구 응답 형식은 json"),
         ({"timing_response_format": "json"}, "시간 응답 형식은 verbose_json"),
-        ({"timestamp_granularities": ("segment", "word")}, "시간 입자는 세그먼트뿐"),
-        ({"timestamp_granularities": ("word",)}, "시간 입자는 세그먼트뿐"),
+        # 단어만은 골격이 없다 — 세그먼트와 함께일 때만 받는다(D73, W-25c)
+        ({"timestamp_granularities": ("word",)}, "단어만으로는 골격이 없다"),
+        ({"timestamp_granularities": ("word", "segment")}, "단어만으로는 골격이 없다"),
     ],
 )
 def test_caption_contract_violations_are_rejected(

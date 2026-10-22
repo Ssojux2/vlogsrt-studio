@@ -75,10 +75,14 @@ def test_text_role_confirms_only_text_features() -> None:
     } <= refused
 
 
-def test_timing_role_confirms_only_the_segment_skeleton() -> None:
-    """시간 역할의 확인된 기능은 verbose_json·세그먼트 입자뿐이다."""
+def test_timing_role_confirms_only_the_segment_skeleton_and_word_times() -> None:
+    """시간 역할의 확인된 기능은 verbose_json·세그먼트 입자·단어 입자뿐이다(단어는 D73, W-25c)."""
     timing = snapshot("timing")
-    assert set(timing.confirmed_supported_features) == {FEATURE_VERBOSE_JSON, FEATURE_SEGMENT_TIMES}
+    assert set(timing.confirmed_supported_features) == {
+        FEATURE_VERBOSE_JSON,
+        FEATURE_SEGMENT_TIMES,
+        FEATURE_WORD_TIMES,
+    }
     refused = set(timing.unsupported_or_unverified_features)
     assert {
         FEATURE_JSON,
@@ -87,7 +91,6 @@ def test_timing_role_confirms_only_the_segment_skeleton() -> None:
         FEATURE_PROMPT,
         FEATURE_SRT,
         FEATURE_VTT,
-        FEATURE_WORD_TIMES,
         FEATURE_LOGPROBS,
     } <= refused
 
@@ -116,6 +119,7 @@ def test_access_and_integration_status_start_unverified() -> None:
         ("text", TEXT_MODEL, "json", (FEATURE_LANGUAGES, FEATURE_KEYWORDS, FEATURE_PROMPT)),
         ("text", TEXT_MODEL, "json", ()),
         ("timing", TIMING_MODEL, "verbose_json", (FEATURE_SEGMENT_TIMES,)),
+        ("timing", TIMING_MODEL, "verbose_json", (FEATURE_SEGMENT_TIMES, FEATURE_WORD_TIMES)),
     ],
 )
 def test_confirm_accepts_the_documented_combos(
@@ -138,7 +142,6 @@ def test_confirm_accepts_the_documented_combos(
         ("timing", TIMING_MODEL, "json", ()),
         ("timing", TIMING_MODEL, "verbose_json", (FEATURE_PROMPT,)),
         ("timing", TIMING_MODEL, "verbose_json", (FEATURE_LANGUAGES,)),
-        ("timing", TIMING_MODEL, "verbose_json", (FEATURE_WORD_TIMES,)),
         # 모델 교체 — 조용한 fallback이 아니라 실패 (§11.9)
         ("text", "gpt-4o-mini-transcribe", "json", ()),
         ("timing", "whisper-large-v3", "verbose_json", ()),

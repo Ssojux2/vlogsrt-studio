@@ -8019,3 +8019,48 @@ D65는 그 값이 올릴 수 있는 길을 **하나** 연다 — 같은 리비�
 **시험**: `tests/project/test_library_12_4.py`(실물 키 모양의 `FFAsset` 빌더 — NSNull `videoFormatName` · 접힌 `videoProps`·`audioSourceDict` 사전): 색인 · `mediaRange` 길이 · 가장 가까운 프레임 6(848.05 · 451.5 → 452 · 904.5 → 905 · 904.48 → 904 · 189.95 → 190 · 178.6 → 179) · 포맷 문자열 · 빠진 키 넷 · 신원 없는 행은 problems · 모르는 모양 다섯 · 한 이벤트에 두 종류 · `FFMIORADAsset` 격자·NSNull 문구 그대로 · 빠진 기록 문구. `tests/raw/test_finalcut_library_12_4.py`(실제 ffmpeg): 회전 세로 + 가로 12.4 라이브러리가 `export_finalcut_timeline`을 지난다(848.05 모양 · half-up 동점 99.5 → 100 · 정확) — 신원 uid · 재생 화면 크기 포맷 · 세로 시퀀스 · 경고 없음 · 가장 가까운 프레임이 다른 길이(100.5 → 101 · 101 · 99.49 → 99)는 이름을 대고 거부 · 시작이 다르면 거부 · `_declared_frames`: 시계 셋 어디서든 가장 가까운 프레임(map 몫을 얹지 않음) · `FFMIORADAsset` 예전 규칙. 픽스처 `library_fixtures.archived`는 사전 값을 접을 수 있게 했다(리프만 든 기록의 바이트는 그대로). `test_grid_conform_library.py`의 손으로 만든 `LibraryMedia`에 `record_type`을 더했다. **끝 자름(6번)**: 같은 파일 — 실제 ffmpeg 원본의 영상 `elst`를 바이트로 고친 재료(다시 인코딩 없음, 패킷 그대로 균일): 1/4프레임 끝 자름은 받고 리포트(`tail_trimmed_sources` · 원본 줄 `tail_trim_frames`)·애셋 길이 패킷 수 · ½ · ¾ · 1프레임 자름과 시작 옮김은 예전 문구로 거부 · 자르지 않은 원본은 `[]`·`"0"` · 검토 머리 길도 한 틱 끝 자름을 받음(1/512) · snap 몫 밖 0.4프레임은 snap이면 거부, 균일이면 받음 · 12.4 세로 + 끝 자름(IMG_8874 모양) 보내기 · 결과 글·CLI 문구와 옛 기록. **바뀐 옛 시험**: `test_finalcut_export.py::test_head_frame_count_must_match_the_header`는 머리 정보를 한 틱 줄여 거부를 보였다 — 사용자 결정으로 그 재료가 받는 쪽이 되어(위의 머리 길 시험) 반 프레임 줄인 머리 정보로 거부를 지킨다(뜻은 그대로: 맞지 않는 머리 정보는 거부). 다른 편집 목록 거부 시험(`_trim_copy` 둘 · 원점 옮긴 머리)은 손대지 않았다.
 
 ---
+
+## D73 — W-25c whisper 단어 시각·세그먼트 신뢰도를 버리지 않고 남긴다 (2026-10-22, W-25c)
+
+**문제**: 1단계 내부 전사 캐시(`cache/source-asr/*`)와 1단계 기록에는 세그먼트의 start/end/text뿐이었다.
+whisper가 함께 주는 `no_speech_prob`·`avg_logprob`는 파서가 버렸고, 단어 시각은 묻지도 않았다.
+W-25의 다음 세션들(d 조용한 지점 조각 · e 시각 맞춤 전체 적용 · f 낮은 확신 표시)과 시각 정답 보고서(D67)가
+그 재료를 쓸 수 없었다. whisper-1은 `timestamp_granularities=["segment","word"]`에 같은 값을 받는다(지연만 는다).
+
+**결정**:
+
+1. **1단계 내부 전사만 단어를 묻는다.** `config.STAGE1_TIMESTAMP_GRANULARITIES = ("segment","word")`를
+   `stage1_timing_view`가 요청에만 얹는다(`understanding._transcribe_span`). **저장된 작업공간 설정의 칸이 아니다**
+   — 기본값을 바꾸면 이미 만든 작업공간은 저장된 `("segment",)`를 그대로 읽어 단어를 영영 묻지 않고, 바꾼 작업공간은
+   청크 열쇠(설정 전체의 해시)가 바뀌어 이미 산 전사를 모두 다시 산다. 최종 자막·빈칸 재전사·재전사 요청은 세그먼트만이다.
+2. **청크 캐시 열쇠는 저장된 설정으로 잰다 — 바뀌지 않는다.** 옛 계획(W-25 「b」)은 열쇠를 바꾸고 다시 사기를
+   조용한 지점 조각(W-25d)과 묶어 한 번만 하자고 적었다. 열쇠를 바꾸면 다시 듣기가 아닌 다시 돌리기(분석 모델 바꾸기 ·
+   다시 승인)도 whisper를 다시 사므로 `ASR_CACHE_KEY_BEFORE_FIX`·`pre_w14_chunk_key`가 지키던 「재전사 0」을 깬다.
+   단어는 덧붙는 재료라 이미 산 전사(단어 없음)를 그대로 쓰고, **새로 사는 청크부터** 단어가 실린다 — 사람이 W-25d
+   뒤 「다시 듣기」(19b, 차례가 열쇠에 실린다)를 하면 그때 모두 실린다. 1단계 승인 지문도 그대로다(단가 같음).
+3. **계약**: `caption_problems`는 세그먼트만 또는 세그먼트+단어를 받고, 단어만(골격 없음)은 거부한다. 시간 역할의
+   기능 등록표가 `timestamp_granularities:word`를 확인됨으로 옮긴다(등록표 리비전은 그대로 — 2026-10-02 문서에 있던 기능이다).
+   요청 빌더(`caption_provider._granularity_features`)도 단어만을 전송 전에 닫는다.
+4. **파서**(`caption_provider`): 세그먼트에 `no_speech_prob`·`avg_logprob`(유한 숫자일 때만, 아니면 None — 지어내지 않는다),
+   전사에 `words`(`TimedWord`, 청크 국소 초). **단어는 시각의 원천이 아니다** — 세그먼트에 나눠 붙이지 않고 세그먼트 시각은
+   단어·신뢰도를 뺀 응답과 바이트째 같다(녹화 응답 `fr_day_1_2_fhd.whisper.json`으로 시험). 꼴이 어긋난 단어는 청크를 버리지
+   않고 **단어만** 비우며 경고하고, 청크 끝을 관용 안에서 넘은 단어는 세그먼트와 같은 선(D55)으로 닫고 수를 경고한다.
+5. **기록**: `AsrChunkOutcome.segment_scores`·`words` — 하나도 없으면 빈 튜플이고 캐시·청크 기록에 칸이 없다(옛 바이트
+   그대로, `clamped_segments` 방식). 청크 기록(`asr_outcome.json`·`asr_phase.json`·`analysis_transcript.json`의 `asr.chunks`)은
+   신뢰도를 그 세그먼트 칸에, 단어를 청크의 `words`에 싣고, 기록에서 다시 세운 증거(`_asr_from_artifact`)는 같은 JSON을 낸다.
+   **발화(원본 자막을 심는 줄)에는 싣지 않는다** — 심기가 줄을 견주므로 칸이 늘면 새 리비전이 생긴다. 읽는 쪽은 발화의
+   `evidence_id`(청크 요청 · 세그먼트 위치)로 청크 기록을 찾는다.
+6. **정답 보고서의 「단어 경계」**: `sync_report.Stage1Audio.word_edges`가 단어 시각을 PCM 시계로(세그먼트와 같은 틱 환산
+   `understanding.chunk_tick`) 읽고, `timing_truth.word_lines`가 줄 경계를 찾는 폭(`SyncSnapSettings.reach_seconds`, 1초)
+   안의 가장 가까운 단어 경계로 옮겨 본다(시작은 단어 시작, 끝은 단어 끝, 같으면 앞, 없으면 그대로). 보고서
+   (`scripts/timing_truth_report.py`)가 자막·제안과 같은 지표를 낸다 — 단어 시각으로 줄 경계를 정할지 판단할 숫자일 뿐
+   자막을 바꾸지 않는다(사용자 결정: 단어는 제안 재료뿐). 단어가 없는 기록은 「단어 시각 없음」으로 까닭만 적는다.
+
+**그대로인 것**: 자막의 시각·경계는 `segments[]`에서만(규칙 1) · whisper에 prompt 없음(규칙 6) · 청크 열쇠·1단계 승인 지문 ·
+옛 캐시·기록 바이트 · 원본 자막 리비전 · 등급·지문·견적. 새 값(임계값)은 없다.
+
+**시험**: `tests/raw/test_asr_words.py`(요청 입자·열쇠·최종 자막 · 녹화 응답의 단어·신뢰도와 같은 세그먼트 시각 · 꼴 어긋남 ·
+청크 끝 닫기 · 기록·캐시·다시 세우기 · 발화 칸 그대로 · 단어 경계 PCM 시계·옮기기·동점 · 보고서). 계약 시험
+(`test_raw_config`·`test_capabilities`)은 단어만 거부 · 세그먼트+단어 허용으로 바꿨다.
+
+**사람**: W-25d(조용한 지점 조각) 뒤 영상마다 「다시 듣기」를 하면 단어·신뢰도가 실린다. 그 전에는 새로 분석하는 원본만 실린다.

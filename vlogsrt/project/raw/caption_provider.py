@@ -26,7 +26,11 @@ from vlogsrt import log
 from vlogsrt.config import Config
 from vlogsrt.models import Chunk
 from vlogsrt.project.raw import capabilities
-from vlogsrt.project.raw.config import TIMING_RESPONSE_TOLERANCE, RawWorkflowConfig
+from vlogsrt.project.raw.config import (
+    TIMESTAMP_GRANULARITIES_ALLOWED,
+    TIMING_RESPONSE_TOLERANCE,
+    RawWorkflowConfig,
+)
 from vlogsrt.transcribe import (
     CAPTION_TEXT_KIND,
     CAPTION_TIMING_KIND,
@@ -175,6 +179,18 @@ class TimedSegment:
     end: float
     text: str
     evidence_id: str
+    # whisper의 세그먼트 신뢰도(W-25c, D73) — 응답에 유한 숫자로 있을 때만. 표시·보고서 재료다.
+    no_speech_prob: float | None = None
+    avg_logprob: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class TimedWord:
+    """단어 시각 하나(W-25c, D73) — 청크 국소 초. **제안·보고서 재료일 뿐** 자막 시각이 아니다."""
+
+    start: float
+    end: float
+    word: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -195,6 +211,8 @@ class TimedTranscript:
     response: Mapping[str, object] | None = None
     # 청크 끝으로 닫은 세그먼트의 위치(D55) — 원 응답은 `response`에 그대로 있다.
     clamped_segments: tuple[int, ...] = ()
+    # 단어 시각(W-25c, D73) — 세그먼트와 따로 산다. 단어를 세그먼트에 나눠 붙이지 않는다.
+    words: tuple[TimedWord, ...] = ()
 
     @property
     def unconfirmed_empty(self) -> bool:
@@ -321,6 +339,7 @@ def parse_timing_response(
         chunk_offset=chunk_offset,
         response=payload,
         clamped_segments=clamped,
+        words=_timed_words(payload.get("words"), chunk_duration, overrun_tolerance),
     )
 
 
@@ -377,7 +396,61 @@ def _timed_segment(
         end=closed_end,
         text=text,
         evidence_id=f"{request_id}:{position}",
+        no_speech_prob=_score(record, "no_speech_prob"),
+        avg_logprob=_score(record, "avg_logprob"),
     )
+
+
+def _score(record: Mapping[object, object], name: str) -> float | None:
+    """세그먼트 신뢰도 하나 — 유한 숫자가 아니면 없는 것으로 둔다(지어내지 않는다, D73)."""
+    value = record.get(name)
+    return float(value) if _finite_number(value) else None
+
+
+def _timed_words(records: object, chunk_duration: float, tolerance: float) -> tuple[TimedWord, ...]:
+    """단어 시각 전부(W-25c, D73) — 없으면 빈 튜플이다.
+
+    단어는 시각의 원천이 아니라 재료라서 꼴이 어긋나도 청크를 버리지 않는다 — 세그먼트는
+    그대로 두고 **단어만** 비우며 경고한다(조용한 손실은 없다). 청크 끝을 관용 안에서 넘은
+    단어는 세그먼트와 같은 선(D55)으로 청크 끝에 닫고 그 수를 경고한다."""
+    if records is None:
+        return ()
+    try:
+        if not isinstance(records, list):
+            raise MalformedCaptionResponse(f"words가 리스트가 아니다: {type(records).__name__}")
+        words = tuple(_timed_word(record, position) for position, record in enumerate(records))
+        closed = tuple(_close_word(word, chunk_duration, tolerance) for word in words)
+    except MalformedCaptionResponse as error:
+        log.warn(f"단어 시각을 싣지 않는다 — 세그먼트는 그대로다 (D73): {error}")
+        return ()
+    moved = sum(1 for before, after in zip(words, closed, strict=True) if before != after)
+    if moved:
+        log.warn(f"단어 시각 {moved}개의 끝이 청크 끝을 넘어 청크 끝으로 닫았다 (D55·D73)")
+    return closed
+
+
+def _timed_word(record: object, position: int) -> TimedWord:
+    where = f"단어 {position}"
+    if not isinstance(record, Mapping) or not isinstance(record.get("word"), str):
+        raise MalformedCaptionResponse(f"{where}에 문자열 word가 없다: {record!r}")
+    start, end = record.get("start"), record.get("end")
+    if not _finite_number(start) or not _finite_number(end):
+        raise MalformedCaptionResponse(f"{where}의 시각이 유한 숫자가 아니다: {record!r}")
+    if float(start) < 0 or float(start) > float(end):
+        raise MalformedCaptionResponse(f"{where}의 시각이 0 ≤ start ≤ end를 어긴다: {record!r}")
+    return TimedWord(start=float(start), end=float(end), word=str(record["word"]))
+
+
+def _close_word(word: TimedWord, chunk_duration: float, tolerance: float) -> TimedWord:
+    over = word.end - chunk_duration
+    if over <= 0:
+        return word
+    if over > tolerance:
+        raise MalformedCaptionResponse(
+            f"단어 {word.word!r}의 끝({word.end!r})이 청크 길이({chunk_duration!r})를 관용 밖으로"
+            " 벗어난다"
+        )
+    return TimedWord(min(word.start, chunk_duration), chunk_duration, word.word)
 
 
 def _close_at_chunk_end(
@@ -484,7 +557,13 @@ def timing_transcription_request(
 
 
 def _granularity_features(granularities: tuple[str, ...]) -> tuple[str, ...]:
-    """계약의 입자를 확인받는다 — 세그먼트만 확인됐고 word는 별도 계약이다(§11.3)."""
+    """계약의 입자를 확인받는다 — 세그먼트만, 또는 세그먼트와 단어뿐이다(§11.3, D73).
+
+    단어만은 등록표가 아는 기능이라도 골격(세그먼트)이 없는 요청이라 전송 전에 닫는다."""
+    if granularities not in TIMESTAMP_GRANULARITIES_ALLOWED:
+        raise capabilities.UnverifiedModelCapability(
+            f"시간 입자 {granularities!r}는 계약 밖이다 — 세그먼트 없이는 시각 골격이 없다"
+        )
     return tuple(f"timestamp_granularities:{granularity}" for granularity in granularities)
 
 

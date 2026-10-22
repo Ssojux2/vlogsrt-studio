@@ -2270,6 +2270,7 @@ def _asr_from_artifact(artifact: Mapping[str, object]) -> AsrEvidence:
             for seg in item.get("segments", [])
             if isinstance(seg, Mapping)
         )
+        scores, words = stage1.asr_chunk_material(item)
         chunks.append(
             AsrChunkOutcome(
                 chunk_index=int(item["chunk_index"]),
@@ -2280,6 +2281,8 @@ def _asr_from_artifact(artifact: Mapping[str, object]) -> AsrEvidence:
                 transcript=transcript,
                 failure=str(item.get("failure") or ""),
                 clamped_segments=tuple(int(at) for at in item.get("clamped_segments", [])),
+                segment_scores=scores,
+                words=words,
             )
         )
     return AsrEvidence(
