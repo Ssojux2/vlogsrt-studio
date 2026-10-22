@@ -196,6 +196,8 @@ def test_settings_live_outside_every_fingerprinted_settings() -> None:
         "boilerplate_phrases",
         "allowed_letter_scripts",
         "allowed_letters",
+        "low_confidence_avg_logprob",  # W-25f(D76) — 표시 기준, whisper 레퍼런스 기본값
+        "low_confidence_no_speech_prob",
     }
     for fingerprinted in (
         RawWorkflowConfig(),

@@ -40,7 +40,7 @@ from vlogsrt.project.config import (
 )
 from vlogsrt.project.pcm import PcmReference
 from vlogsrt.project.raw import read_scope
-from vlogsrt.project.raw.understanding import chunk_tick
+from vlogsrt.project.raw.understanding import asr_chunk_material, chunk_tick
 from vlogsrt.project.sync_check import Check, Cue, Reason
 from vlogsrt.project.vad.inference import infer_vad
 from vlogsrt.project.vad.runtime import VadUnavailable, bundled_artifact, create_cpu_session
@@ -111,6 +111,20 @@ class FailedChunk:
 
 
 @dataclass(frozen=True, slots=True)
+class RecordedChunk:
+    """1단계 기록의 전사 조각 하나 — 원본 자막 「확인 필요」의 시각 표시 셋(W-25f, D76)만 읽는다.
+
+    `request_id`는 발화의 `evidence_id`(`<요청 아이디>:<세그먼트 위치>`) 앞부분이다. `clamped`는
+    조각 끝에 맞춘 세그먼트 위치(D55), `scores`는 세그먼트마다 (no_speech_prob, avg_logprob)(D73 —
+    옛 기록이면 빈 튜플)."""
+
+    request_id: str
+    start: Fraction
+    clamped: tuple[int, ...] = ()
+    scores: tuple[tuple[float | None, float | None], ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class Stage1Audio:
     """1단계 기록이 잰 오디오 신원 — 저장 PCM은 기록 폴더의 `analysis.pcm`이다."""
 
@@ -129,6 +143,8 @@ class Stage1Audio:
     """전사 청크마다의 시작(PCM 시계의 초) — 시각 정답의 「조각 첫 줄」 층(W-25b)만 읽는다."""
     word_edges: tuple[tuple[Fraction, Fraction], ...] = ()
     """whisper 단어마다 (시작, 끝)(PCM 시계의 초) — 정답 보고서의 「단어 경계」만 읽는다(D73)."""
+    chunks: tuple[RecordedChunk, ...] = ()
+    """성공한 전사 조각마다의 재료 — 원본 자막 「확인 필요」의 시각 표시 셋(D76)만 읽는다."""
 
     @property
     def pcm_path(self) -> Path:
@@ -277,7 +293,31 @@ def _stage1_of(
             for chunk in (body.get("asr") or {}).get("chunks", [])
         ),
         word_edges=_word_edges(body, rate),
+        chunks=_recorded_chunks(body, rate),
     )
+
+
+def _recorded_chunks(body: Mapping[str, Any], rate: int) -> tuple[RecordedChunk, ...]:
+    """성공 조각의 요청 아이디·시작·끝에 맞춘 위치·신뢰도 — 표시 재료라 꼴이 어긋나면 그 신뢰도만
+    빼고 경고한다(기록 전체는 버리지 않는다)."""
+    found: list[RecordedChunk] = []
+    for chunk in (body.get("asr") or {}).get("chunks", []):
+        if chunk.get("failure") or not chunk.get("request_id"):
+            continue
+        try:
+            scores, _words = asr_chunk_material(chunk)
+        except (KeyError, TypeError, ValueError) as error:
+            log.warn(f"1단계 기록의 신뢰도를 읽지 못해 신뢰도만 뺀다 (D76): {error}")
+            scores = ()
+        found.append(
+            RecordedChunk(
+                request_id=str(chunk["request_id"]),
+                start=Fraction(int(chunk["sample_start"]), rate),
+                clamped=tuple(int(at) for at in chunk.get("clamped_segments", [])),
+                scores=scores,
+            )
+        )
+    return tuple(found)
 
 
 def _word_edges(body: Mapping[str, Any], rate: int) -> tuple[tuple[Fraction, Fraction], ...]:

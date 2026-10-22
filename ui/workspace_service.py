@@ -6606,7 +6606,9 @@ class RawWorkspaceUi:
         source["transcriptRevision"] = transcript["revision"]
         source["crossSourceCandidates"] = self.raw.source_repeat_candidates(root, sid)
         sync_view = self.raw.sync_check_view(root, sid)  # 자막 시각 확인 — 표시만(D55)
-        notes = self.raw.subtitle_cue_notes(transcript, sync_view)
+        notes = self.raw.subtitle_cue_notes(
+            transcript, sync_view, self.raw.subtitle_timing(root, sid, transcript)
+        )
         truths, missing = self.raw.timing_truth_view(root, sid, transcript, sync_view)
         source["subtitles"] = [
             {

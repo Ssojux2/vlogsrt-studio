@@ -256,6 +256,9 @@ class SubtitleSuspectSettings:
       받는다.
     - `allowed_letters`: 이름이 허용 낱말에 없고 NFKC로도 되지 않지만 받는 글자 — 단위의 마이크로
       기호(`µ`, U+00B5 — NFKC가 그리스 뮤로 접는다). 그리스 뮤(U+03BC) 자체는 여전히 다른 문자다.
+    - `low_confidence_avg_logprob`·`low_confidence_no_speech_prob`(W-25f, D76): whisper 세그먼트의
+      평균 로그 확률이 이보다 **낮거나** 무음 확률이 이 **이상**이면 「전사 확신이 낮습니다」다.
+      whisper 레퍼런스 구현의 `logprob_threshold`(−1.0)·`no_speech_threshold`(0.6) 그대로다.
     """
 
     repeat_run_min: int = 3
@@ -267,6 +270,8 @@ class SubtitleSuspectSettings:
     )
     allowed_letter_scripts: tuple[str, ...] = ("HANGUL", "LATIN")
     allowed_letters: tuple[str, ...] = ("\u00b5",)
+    low_confidence_avg_logprob: float = -1.0
+    low_confidence_no_speech_prob: float = 0.6
 
 
 SUBTITLE_SUSPECT_SETTINGS = SubtitleSuspectSettings()
@@ -331,7 +336,21 @@ def subtitle_suspect_problems(settings: SubtitleSuspectSettings) -> list[str]:
     for letter in settings.allowed_letters:
         if not isinstance(letter, str) or len(letter) != 1:
             problems.append(f"허용 글자는 한 글자씩이어야 한다: {letter!r}")
+    logprob = settings.low_confidence_avg_logprob
+    if not _finite_float(logprob) or logprob > 0:
+        problems.append(f"낮은 확신의 로그 확률 기준은 0 이하의 유한 실수여야 한다: {logprob!r}")
+    no_speech = settings.low_confidence_no_speech_prob
+    if not _finite_float(no_speech) or not 0 < no_speech <= 1:
+        problems.append(f"낮은 확신의 무음 확률 기준은 (0, 1]이어야 한다: {no_speech!r}")
     return problems
+
+
+def _finite_float(value: object) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(float(value))
+    )
 
 
 @dataclass(frozen=True)

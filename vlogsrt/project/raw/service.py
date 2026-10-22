@@ -2854,13 +2854,17 @@ class RawWorkspaceService:
 
     @staticmethod
     def subtitle_cue_notes(
-        transcript: Mapping[str, Any], sync_view: Mapping[str, Any] | None
+        transcript: Mapping[str, Any],
+        sync_view: Mapping[str, Any] | None,
+        timing: Any = None,
     ) -> dict[str, dict[str, Any]]:
         """원본 자막 줄마다 화면 표시(D59 19e) — 「다른 귀」 증거와 「확인 필요」 이유. 표시만 한다.
 
         줄을 지우거나 숨기거나 고치지 않는다(규칙 4·9) — 아이디로 이유를 달 뿐이다. 말소리
         측정상 없음은 **지금 자막 리비전**의 확인 보고서(`stale`이 아닌 것)에서만 값으로 넘긴다 —
         다른 리비전을 잰 표지는 그 줄의 것이 아닐 수 있다. 표시가 없는 줄은 싣지 않는다.
+        `timing`(`subtitle_cue_timing`의 값)이 있을 때만 시각 표시 셋(D76)이 더해진다 — 등급의
+        「자막 확인됨」 몫(D65)은 그것 없이 센다(`_suspect_share`).
         """
         from vlogsrt.project.raw import source_transcript, subtitle_suspects
 
@@ -2868,6 +2872,7 @@ class RawWorkspaceService:
         flagged = subtitle_suspects.suspects(
             [(str(row["utterance_id"]), str(row["text"])) for row in rows],
             _current_no_speech(sync_view),
+            timing=timing,
         )
         notes: dict[str, dict[str, Any]] = {}
         for row in rows:
@@ -2881,6 +2886,52 @@ class RawWorkspaceService:
             if note:
                 notes[cue_id] = note
         return notes
+
+    @staticmethod
+    def subtitle_cue_timing(transcript: Mapping[str, Any], stage1: Any) -> Any:
+        """「확인 필요」 시각 표시 셋(W-25f, D76)의 재료 — 1단계 기록의 조각을 줄의 `evidence_id`로
+        잇는다.
+
+        `evidence_id`(`<조각 요청 아이디>:<세그먼트 위치>`)가 기록의 조각과 이어지는 줄만 싣는다
+        — 빈칸 재전사로 넣은 줄·다른 전사의 줄은 빠진다. 조각 시계는 줄의 공통 시계에서 PCM 0의
+        자리(PCM 원점 − 제시 원점)와 조각 시작을 뺀 값이다. 기록이 없으면 빈 재료다(표시를 지어내지
+        않는다).
+        """
+        from vlogsrt.project.raw import source_transcript, subtitle_suspects
+
+        if stage1 is None or stage1.absent:
+            return subtitle_suspects.CueTiming()
+        by_request = {chunk.request_id: chunk for chunk in stage1.chunks}
+        pcm_zero = stage1.origin - stage1.presentation_origin
+        clamped: set[str] = set()
+        local: dict[str, tuple[Fraction, Fraction]] = {}
+        scores: dict[str, tuple[float | None, float | None]] = {}
+        for row in transcript.get("utterances", []):
+            request, _, position = str(row.get("evidence_id") or "").rpartition(":")
+            chunk = by_request.get(request)
+            if chunk is None or not position.isdigit():
+                continue
+            cue_id, at = str(row["utterance_id"]), int(position)
+            shift = pcm_zero + chunk.start
+            local[cue_id] = (
+                source_transcript.rational(row["start"]) - shift,
+                source_transcript.rational(row["end"]) - shift,
+            )
+            if at in chunk.clamped:
+                clamped.add(cue_id)
+            if at < len(chunk.scores):
+                scores[cue_id] = chunk.scores[at]
+        return subtitle_suspects.CueTiming(frozenset(clamped), local, scores)
+
+    def subtitle_timing(self, root: Path, source_id: str, transcript: Mapping[str, Any]) -> Any:
+        """화면의 「확인 필요」 시각 표시 셋 재료 — 원본 자막이 묶인 원본 해시의 가장 최근 1단계
+        기록으로."""
+        from vlogsrt.project.raw import sync_report
+
+        stage1 = sync_report.stage1_audio(
+            self._workspace(root).root, source_id, str(transcript.get("source_sha256") or "")
+        )
+        return self.subtitle_cue_timing(transcript, stage1)
 
     def record_sync_failure(
         self, root: Path, source_ids: Sequence[str] | None, error: BaseException
