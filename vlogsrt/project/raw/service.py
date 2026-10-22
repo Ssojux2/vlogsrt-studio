@@ -514,6 +514,12 @@ SNAP_CHANGED = (
     " 않았습니다."
 )
 SNAP_NOTHING_CHANGED = "아무것도 바꾸지 않았습니다."
+SNAP_ALL_CHANGED = (
+    "확인한 뒤로 어느 영상의 시각 맞춤 제안이 바뀌었습니다 — 「모든 영상 시각 맞춤 확인」을 다시"
+    " 누르세요."
+)
+"""일괄 적용(W-25e, D75)의 거절 — 확인 때 묶은 영상·sha가 지금과 다르면 어느 영상도 쓰지 않는다."""
+SNAP_ALL_NOTHING = "말소리 경계에 맞춰 바꿀 시각이 없습니다."
 TRUTH_NO_TRANSCRIPT = "원본 자막이 없어 정답을 찍을 수 없습니다."
 TRUTH_REVISION_CHANGED = (
     "화면이 본 뒤에 원본 자막이 바뀌었습니다 — 새로고침한 뒤 다시 찍으세요. 아무것도 찍지"
@@ -1797,6 +1803,61 @@ class RawWorkspaceService:
             measured.cues, measured.speech, offset, source=source, settings=SYNC_SNAP_SETTINGS
         )
         return plan, measured
+
+    def apply_snap_all_preview(self, root: Path) -> SnapAllPreview:
+        """「모든 영상 시각 맞춤 확인(무료)」(D75) — 원본 자막이 있는 영상마다 적용할 수 있는지.
+
+        영상마다 `apply_snap_preview`·`apply_snap_blocker`(19h) 그대로 잰다 — 적용할 수 있으면 그
+        제안의 sha와 바뀔 줄 수, 아니면 까닭이다. 묶음 토큰은 적용할 영상과 sha를 묶는다. 아무것도
+        쓰지 않는다. 아직 전사하지 않은 영상은 싣지 않는다.
+        """
+        rows: list[SnapAllRow] = []
+        for asset in self._workspace(root).list_source_assets():
+            preview = self.apply_snap_preview(root, asset.asset_id)
+            if preview == SNAP_UNTRANSCRIBED:
+                continue
+            rows.append(self._apply_snap_all_row(root, asset.asset_id, asset.source_name, preview))
+        return SnapAllPreview(tuple(rows), _apply_snap_all_token(rows))
+
+    def _apply_snap_all_row(self, root: Path, asset_id: str, name: str, preview: Any) -> SnapAllRow:
+        if isinstance(preview, str):
+            return SnapAllRow(asset_id, name, None, 0, preview)
+        if not preview.changes:
+            return SnapAllRow(asset_id, name, None, 0, SNAP_ALL_NOTHING)
+        blocker = self.apply_snap_blocker(root, asset_id)
+        if blocker is not None:
+            return SnapAllRow(asset_id, name, None, preview.changes, blocker)
+        return SnapAllRow(asset_id, name, preview.sha256, preview.changes, None)
+
+    def apply_snap_all(
+        self, root: Path, token: str, *, held: Mapping[str, str] | None = None
+    ) -> SnapAllResult:
+        """「모든 영상 시각 맞춤 적용(무료)」(W-25e, D75) — 확인 때의 토큰이 지금과 같을 때만 쓴다.
+
+        다르면(그사이 자막·측정·다시 듣기·적용이 바뀌었다) 어느 영상도 쓰지 않고 거절한다. 같으면
+        적용할 수 있는 영상마다 그 sha로 `apply_snap`을 부른다 — 막힘·한 걸음·sha 대조·쓰기 트랜잭션
+        안의 다시 검사가 영상마다 그대로다. 한 영상의 거절은 그 영상만 건너뛰고(까닭을 남긴다) 다음
+        영상으로 간다. `held`는 화면이 붙잡아 달라는 영상(분석이 도는 영상)과 그 까닭이다.
+        """
+        preview = self.apply_snap_all_preview(root)
+        if preview.token != token:
+            raise RawWorkspaceError(f"{SNAP_ALL_CHANGED} {SNAP_NOTHING_CHANGED}")
+        applied: list[SnapAllApplied] = []
+        skipped: list[SnapAllSkipped] = []
+        for row in preview.ready:
+            reason = (held or {}).get(row.asset_id)
+            if reason is None:
+                try:
+                    document = self.apply_snap(root, row.asset_id, str(row.sha256))
+                except RawWorkspaceError as refused:
+                    reason = str(refused)
+                else:
+                    changed = int(document["snap"]["changed"])
+                    applied.append(SnapAllApplied(row.asset_id, row.source_name, changed))
+                    continue
+            skipped.append(SnapAllSkipped(row.asset_id, row.source_name, reason))
+        log.out(f"모든 영상 시각 맞춤 — 적용 {len(applied)}개 · 건너뜀 {len(skipped)}개")
+        return SnapAllResult(tuple(applied), tuple(skipped))
 
     def revert_snap_state(self, root: Path, asset_id: str) -> dict | None:
         """지금 리비전이 시각 맞춤을 적용한 리비전이면 그 기록 — 「되돌리기」 단추의 재료.
@@ -5317,6 +5378,58 @@ class SnapPreview:
     level: str
     predicted: str
     listen: tuple[SnapCue, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class SnapAllRow:
+    """일괄 확인의 영상 하나(W-25e) — 적용할 수 있으면 `sha256`, 아니면 `reason`."""
+
+    asset_id: str
+    source_name: str
+    sha256: str | None
+    changed: int
+    reason: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class SnapAllPreview:
+    """일괄 확인(W-25e) — 영상들과 묶음 토큰(적용할 영상·sha의 해시)."""
+
+    rows: tuple[SnapAllRow, ...]
+    token: str
+
+    @property
+    def ready(self) -> tuple[SnapAllRow, ...]:
+        return tuple(row for row in self.rows if row.sha256 is not None)
+
+
+@dataclass(frozen=True, slots=True)
+class SnapAllApplied:
+    asset_id: str
+    source_name: str
+    changed: int
+
+
+@dataclass(frozen=True, slots=True)
+class SnapAllSkipped:
+    asset_id: str
+    source_name: str
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class SnapAllResult:
+    """일괄 적용(W-25e)의 결과 — 적용한 영상과 건너뛴 영상(까닭)."""
+
+    applied: tuple[SnapAllApplied, ...]
+    skipped: tuple[SnapAllSkipped, ...]
+
+
+def _apply_snap_all_token(rows: Sequence[SnapAllRow]) -> str:
+    """적용할 영상과 그 제안 sha의 해시 — 확인과 적용 사이에 하나라도 바뀌면 다르다."""
+    ready = [[row.asset_id, row.sha256] for row in rows if row.sha256 is not None]
+    payload = json.dumps({"schema": "snap-all/v1", "ready": ready}, sort_keys=True)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _refill_active_on(db: Any, asset_id: str) -> bool:

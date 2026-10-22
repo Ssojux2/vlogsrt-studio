@@ -289,6 +289,24 @@ SNAP_REVERTED_TEXT = (
 )
 SNAP_APPLY_LABEL = "시각 맞춤 적용(무료)"
 SNAP_REVERT_LABEL = "되돌리기"
+SNAP_ALL_CHECK_LABEL = "모든 영상 시각 맞춤 확인(무료)"
+SNAP_ALL_APPLY_LABEL = "확인한 영상 모두 적용(무료)"
+SNAP_ALL_EXPLANATION = (
+    "원본 자막이 있는 영상마다 지금 시각 맞춤 제안을 다시 재어 보였습니다(무료). 「모두 적용」은"
+    " 적용할 수 있는 영상마다 그 제안을 한 번씩 적용합니다 — 영상마다 이 칸의 「되돌리기」로"
+    " 돌릴 수 있습니다."
+)
+SNAP_ALL_SUMMARY = (
+    "적용할 수 있는 영상 {ready}개 · 바뀔 줄 {lines}개 · 지금 적용하지 않는 영상 {held}개입니다."
+)
+SNAP_ALL_READY_ROW = "{name}: 바뀔 줄 {changed}개"
+SNAP_ALL_HELD_ROW = "{name}: {reason}"
+SNAP_ALL_CHECKED_TEXT = "모든 영상의 시각 맞춤 제안을 확인했습니다 — 목록을 보고 적용하세요."
+SNAP_ALL_NONE_TEXT = "지금 시각 맞춤을 적용할 수 있는 영상이 없습니다."
+SNAP_ALL_DONE_TEXT = (
+    "시각 맞춤을 영상 {applied}개에 적용했습니다 — 자막 시각 확인이 새 자막을 무료로 다시 잽니다."
+)
+SNAP_ALL_SKIPPED_TEXT = "건너뛴 영상 {count}개: {names} — 영상마다 이 칸의 까닭을 보세요."
 TRUTH_START_LABEL = "참 시작"
 TRUTH_END_LABEL = "참 끝"
 TRUTH_STRATUM_LABELS = {
@@ -325,6 +343,8 @@ WORKBENCH_TOKEN_ACTIONS = (
     "snap-apply",
     "snap-revert",
     "timing-truth",
+    "snap-all-check",
+    "snap-all-apply",
 )
 """작업대 수명 토큰을 요구하는 동작 — 바꾸는 동작 전부다(질의 `refresh`만 열려 있다, F1c)."""
 STAGE_NOTES = {
@@ -1000,6 +1020,28 @@ def _snap_applied_view(record: Mapping[str, Any]) -> dict[str, object]:
     }
 
 
+def _snap_all_view(preview: Any, held: Mapping[str, str]) -> dict[str, object]:
+    """「모든 영상 시각 맞춤 확인」 목록의 값 — 요약 한 줄 · 영상마다 한 줄 · 적용 토큰."""
+    ready = [row for row in preview.ready if row.asset_id not in held]
+    waiting = [row for row in preview.rows if row not in ready]
+    rows = [SNAP_ALL_READY_ROW.format(name=row.source_name, changed=row.changed) for row in ready]
+    rows += [
+        SNAP_ALL_HELD_ROW.format(name=row.source_name, reason=held.get(row.asset_id) or row.reason)
+        for row in waiting
+    ]
+    summary = SNAP_ALL_SUMMARY.format(
+        ready=len(ready), lines=sum(row.changed for row in ready), held=len(waiting)
+    )
+    view: dict[str, object] = {
+        "explanation": SNAP_ALL_EXPLANATION,
+        "summary": summary,
+        "rows": rows,
+    }
+    if ready:
+        view["token"] = preview.token
+    return view
+
+
 def _snap_summary(preview: Any) -> dict[str, object]:
     """「시각 맞춤 제안」 칸의 글 — 센 어긋남·판정 수·바뀌는 줄·예측·먼저 들을 줄(D59 19h).
 
@@ -1503,6 +1545,8 @@ class RawWorkspaceUi:
         )
         self._library_quotes: dict[Path, Any] = {}
         self._library_cached_ids: dict[Path, set[str]] = {}
+        # 「모든 영상 시각 맞춤 확인」(W-25e)이 마지막으로 보인 목록 — 적용은 그 토큰을 대조한다.
+        self._snap_all_views: dict[Path, dict[str, object]] = {}
         # 「라이브러리 닫기」마다 오른다 — 닫기 전에 띄운 견적의 늦은 쓰기를 막는다(D64 F).
         self._close_epoch = 0
         # 남은 영상의 견적(라이브러리 견적, 남은 영상, 그 견적) — 라이브러리 견적 칸은 늘 전체다
@@ -6647,6 +6691,8 @@ class RawWorkspaceUi:
             "snap-apply": self._visual_snap_apply,
             "snap-revert": self._visual_snap_revert,
             "timing-truth": self._visual_timing_truth,
+            "snap-all-check": self._visual_snap_all_check,
+            "snap-all-apply": self._visual_snap_all_apply,
         }
 
     def _refill_view(
@@ -6722,12 +6768,13 @@ class RawWorkspaceUi:
         """
         record = self.raw.revert_snap_state(root, source_id)
         if record is not None:
-            return _snap_applied_view(record)
+            return {**_snap_applied_view(record), **self._snap_all_part(root)}
         view: dict[str, object] = {
             "explanation": SNAP_EXPLANATION,
             "order": SNAP_ORDER_WARNING,
             "undoRule": SNAP_UNDO_RULE,
         }
+        view.update(self._snap_all_part(root))
         preview = self.raw.apply_snap_preview(root, source_id)
         if isinstance(preview, str):
             return {**view, "state": "blocked", "reason": preview}
@@ -6739,6 +6786,55 @@ class RawWorkspaceUi:
         if blocker is not None:
             return {**view, "state": "waiting", "reason": blocker}
         return {**view, "state": "ready"}
+
+    def _snap_all_part(self, root: Path) -> dict[str, object]:
+        """마지막 「모든 영상 시각 맞춤 확인」의 목록 — 확인하기 전에는 칸이 없다(그리기 바이트
+        그대로)."""
+        found = self._snap_all_views.get(root)
+        return {} if found is None else {"all": found}
+
+    def _visual_snap_all_check(self, root: Path, payload: Mapping[str, object], echo: str) -> dict:
+        """「모든 영상 시각 맞춤 확인(무료)」(W-25e) — 영상마다 제안을 다시 재어 목록과 토큰을
+        보인다.
+
+        아무것도 쓰지 않는다. 분석이 도는 영상은 적용할 수 있어도 「지금 적용하지 않는 영상」으로
+        보인다(적용 때 다시 본다)."""
+        source_id = self._serve_str(payload, "sourceId")
+        preview = self.raw.apply_snap_all_preview(root)
+        self._snap_all_views[root] = _snap_all_view(preview, self._snap_all_held(root))
+        message = SNAP_ALL_CHECKED_TEXT if preview.ready else SNAP_ALL_NONE_TEXT
+        return self._source_reply(root, source_id, echo, message)
+
+    def _visual_snap_all_apply(self, root: Path, payload: Mapping[str, object], echo: str) -> dict:
+        """「확인한 영상 모두 적용(무료)」(W-25e) — 확인 때의 토큰이 지금과 같을 때만, 영상마다
+        19h 적용.
+
+        다르면 어느 영상도 쓰지 않고 다시 확인하라고 말한다. 분석이 도는 영상은 건너뛴다."""
+        source_id = self._serve_str(payload, "sourceId")
+        self._snap_all_views.pop(root, None)
+        try:
+            result = self.raw.apply_snap_all(
+                root, self._serve_str(payload, "snapToken"), held=self._snap_all_held(root)
+            )
+        except raw_service.RawWorkspaceError as refused:
+            return self._source_reply(root, source_id, echo, str(refused))
+        for item in result.applied:
+            self._library_cached_ids.get(root, set()).discard(item.asset_id)
+        if result.applied:
+            self._refresh_library_quote(root)
+        message = SNAP_ALL_DONE_TEXT.format(applied=len(result.applied))
+        if result.skipped:
+            names = ", ".join(item.source_name for item in result.skipped)
+            message += " " + SNAP_ALL_SKIPPED_TEXT.format(count=len(result.skipped), names=names)
+        return self._source_reply(root, source_id, echo, message)
+
+    def _snap_all_held(self, root: Path) -> dict[str, str]:
+        """분석(빠른 분석 작업)이 도는 영상 — 일괄 적용이 건너뛴다(영상 하나의 적용과 같은 판정)."""
+        return {
+            asset.asset_id: SNAP_BUSY_TEXT
+            for asset in self.raw.list_source_assets(root)
+            if self._source_busy(root, asset.asset_id)
+        }
 
     def _source_busy(self, root: Path, source_id: str) -> bool:
         """그 영상의 분석(빠른 분석 작업)이 도는 중인가 — 다시 듣기·빈칸 재전사와 같은 판정."""
@@ -6906,6 +7002,7 @@ class RawWorkspaceUi:
             self._vl_refill_function(),
             *self._vl_snap_functions(),
             self._vl_timing_truth_function(),
+            *self._vl_snap_all_functions(),
         ]
 
     def _vl_sync_recheck_function(self) -> Callable[[dict[str, object]], dict[str, object]]:
@@ -6944,6 +7041,19 @@ class RawWorkspaceUi:
             return self.visual_workbench_action(payload, "snap-revert")
 
         return [vl_snap_apply, vl_snap_revert]
+
+    def _vl_snap_all_functions(self) -> list[Callable[[dict[str, object]], dict[str, object]]]:
+        """「모든 영상 시각 맞춤 확인」·「확인한 영상 모두 적용」(W-25e) — 같은 토큰 문, 적용은 확인
+        때의
+        묶음 토큰을 서버가 대조한다. 유료 호출 0회."""
+
+        def vl_snap_all_check(payload: dict[str, object]) -> dict[str, object]:
+            return self.visual_workbench_action(payload, "snap-all-check")
+
+        def vl_snap_all_apply(payload: dict[str, object]) -> dict[str, object]:
+            return self.visual_workbench_action(payload, "snap-all-apply")
+
+        return [vl_snap_all_check, vl_snap_all_apply]
 
     def _vl_timing_truth_function(self) -> Callable[[dict[str, object]], dict[str, object]]:
         """「참 시작」·「참 끝」(W-25b) — 같은 토큰 문, 화면이 본 리비전을 서버가 대조한다.

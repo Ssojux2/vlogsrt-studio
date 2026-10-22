@@ -2707,7 +2707,29 @@ VISUAL_BOOTSTRAP_JS = (
         } else if (sn.reason) {
           out.push('<p class="vl-kv">' + esc(sn.reason) + "</p>");
         }
+        out.push(snapAllPart(sn.all));
         out.push("</details>");
+        return out.join("");
+      }
+      // 모든 영상 시각 맞춤(W-25e) — 확인 단추는 언제나, 확인한 목록과 「모두 적용」은 확인한
+      // 뒤에만.
+      // 적용은 그 목록의 묶음 토큰에 묶이고 서버가 다시 재어 대조한다.
+      function snapAllPart(all) {
+        var out = ['<div class="vl-snap-all">'];
+        if (all) {
+          out.push('<p class="vl-kv">' + esc(all.explanation) + "</p>");
+          out.push('<p class="vl-kv">' + esc(all.summary) + "</p>");
+          (all.rows || []).forEach(function(row) {
+            out.push('<p class="vl-kv"><small>' + esc(row) + "</small></p>");
+          });
+          if (all.token) {
+            out.push('<button type="button" class="vl-btn vl-btn-primary" ' +
+              'data-vl-act="snap-all-apply" data-vl-token="' + esc(all.token) + '">' +
+              "확인한 영상 모두 적용(무료)</button>");
+          }
+        }
+        out.push('<button type="button" class="vl-btn" data-vl-act="snap-all-check">' +
+          "모든 영상 시각 맞춤 확인(무료)</button></div>");
         return out.join("");
       }
       function snapSpan(start, end) {
@@ -4328,6 +4350,17 @@ VISUAL_BOOTSTRAP_JS = (
             call('vl_snap_revert', {sourceId:curSourceId(), revision:snap.revision},
               '시각 맞춤을 되돌리는 중(무료)…');
           }
+          return;
+        }
+        if (act === 'snap-all-check') {
+          call('vl_snap_all_check', {sourceId:curSourceId()},
+            '모든 영상의 시각 맞춤 제안을 확인하는 중(무료)…');
+          return;
+        }
+        if (act === 'snap-all-apply') {
+          call('vl_snap_all_apply', {sourceId:curSourceId(),
+            snapToken:node.getAttribute('data-vl-token') || ''},
+            '모든 영상에 시각 맞춤을 적용하는 중(무료)…');
           return;
         }
         if (act === 'refill-approve') {

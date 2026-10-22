@@ -1705,10 +1705,12 @@ SNAP_SERVICE_CLASS = "RawWorkspaceService"
 SNAP_SERVICE_METHODS = (
     "apply_snap_preview", "apply_snap_blocker", "apply_snap", "_apply_snap_plan",
     "revert_snap_state", "revert_snap",
+    # W-25e(D75) — 일괄 확인·적용은 영상마다 위의 미리보기·막힘·적용을 부를 뿐이다.
+    "apply_snap_all_preview", "_apply_snap_all_row", "apply_snap_all",
 )  # fmt: skip
 SNAP_SERVICE_HELPERS = (
     "_apply_snap_unready", "_apply_snap_offset", "_apply_snap_preview", "_apply_snap_listen",
-    "_apply_snap_hold", "_apply_snap_check", "SnapCue", "SnapPreview",
+    "_apply_snap_hold", "_apply_snap_check", "SnapCue", "SnapPreview", "_apply_snap_all_token",
 )  # fmt: skip
 SNAP_SERVICE_OWNERS = frozenset(
     (*(f"{SNAP_SERVICE_CLASS}.{name}" for name in SNAP_SERVICE_METHODS), *SNAP_SERVICE_HELPERS)
