@@ -160,6 +160,8 @@ class _Grid:
     """맞춘 원본(D69)의 최대 어긋남을 프레임으로 — 머리 정보·라이브러리 선언 길이가 명목 프레임
     수에서 이만큼 벗어날 수 있다. 균일 원본은 0이라 예전처럼 정확히 같아야 한다. map 원본(D70)은
     한 프레임 미만(`(T−1)/T` — 틱 단위 차이라 1프레임에 닿지 않는다)이다(`_grid_tolerance`)."""
+    tail_trim_frames: Fraction = Fraction(0)
+    """균일 원본의 편집 목록이 끝에서 자른 몫(프레임, 반 프레임 미만 — D72). 0이면 자르지 않았다."""
 
 
 def _grid_tolerance(clock: preprocess.RawVideoClock) -> Fraction:
@@ -369,10 +371,10 @@ def _measured_grid(
     if not clock.uniform_grid:
         raise _UnsupportedGrid(asset, clock.grid_note or "")
     deviation = _grid_tolerance(clock)
-    _require_plain_timeline(
+    trim = _require_plain_timeline(
         asset, clock.first_pts, clock.frame_count, clock.frame_duration, probe, deviation
     )
-    return _Grid(clock.frame_duration, clock.frame_count, deviation)
+    return _Grid(clock.frame_duration, clock.frame_count, deviation, trim)
 
 
 def _require_plain_timeline(
@@ -382,7 +384,7 @@ def _require_plain_timeline(
     frame_duration: Fraction,
     probe: preprocess.RawMediaProbe,
     deviation_frames: Fraction = Fraction(0),
-) -> None:
+) -> Fraction:
     """편집 목록(edit list)이 없는 파일이어야 한다 — 패킷 격자와 Final Cut이 보는 길이가 같다.
 
     스트림 복사로 자른 파일은 첫 프레임이 0보다 앞에 있고 머리 정보의 길이가 실제 프레임보다
@@ -391,10 +393,17 @@ def _require_plain_timeline(
     정보는 마지막 패킷의 어긋남만큼 명목 길이와 다르다(실측 0–6틱) — 그 몫(`deviation_frames`,
     반 프레임 미만)까지만 받는다. 편집 목록이 자른 길이는 프레임 단위라 이 몫에 숨지 못한다. map
     원본(D70)의 몫은 한 프레임 미만이다 — 한 프레임 자른 편집 목록은 첫 프레임 원점으로도 잡힌다.
+
+    균일 원본은 하나만 더 받는다(D72, 사용자 결정): 시작은 그대로이고 **끝만** 반 프레임 미만
+    자른 편집 목록(실측 IMG_8874 — 패킷 190개가 정확히 균일한데 `elst`가 한 틱 짧다). 돌려주는
+    값이 그 자른 몫(프레임)이고, 자르지 않았으면 0이다.
     """
     header = _header_frames(probe, frame_duration)
     if origin_pts >= 0 and (header is None or abs(header - frames) <= deviation_frames):
-        return
+        return Fraction(0)
+    trim = _tail_trim(origin_pts, header, frames) if not deviation_frames else None
+    if trim is not None:
+        return trim
     video = probe.video
     raise _refuse(
         asset,
@@ -403,6 +412,21 @@ def _require_plain_timeline(
         " 보므로 그대로 보내면 컷이 어긋난다. 그 파일을 완전히 다시 인코딩하거나 편집 목록 없이"
         " 다시 저장(re-wrap)한 뒤 다시 불러오세요",
     )
+
+
+def _tail_trim(origin_pts: int, header: Fraction | None, frames: int) -> Fraction | None:
+    """시작이 그대로(원점 0)이고 끝만 반 프레임 미만 자른 편집 목록이면 그 몫(프레임), 아니면 None.
+
+    라이브러리 규칙(`library.nearest_frame`)과 같은 반올림의 말이다 — 머리 정보의 가장 가까운
+    프레임이 측정 프레임 수이고, 그 가운데 끝을 자른 쪽만 받는다. 반 프레임 동점은 half-up이면
+    측정 수로 가지만 받지 않는다: 사용자 결정이 「반 프레임 미만」이고, 동점에서 Final Cut이 어느
+    쪽으로 세는지 모른다. 맞춘 원본(snap·map)은 이 갈래를 타지 않는다 — 그 몫(D69·D70)이 이미
+    끝의 어긋남을 맡고, 둘을 더하면 각자가 뜻한 것보다 넓어진다.
+    """
+    if header is None or origin_pts != 0:
+        return None
+    trim = frames - header
+    return trim if 0 < trim < library.HALF_FRAME else None
 
 
 def _header_frames(probe: preprocess.RawMediaProbe, frame_duration: Fraction) -> Fraction | None:
@@ -445,8 +469,10 @@ def _review_grid(
     if _header_frames(probe, duration) not in (None, frames):
         clock = clock or preprocess.probe_extraction_clock(path, probe=probe)
         deviation = _grid_tolerance(clock)
-    _require_plain_timeline(asset, review.origin_pts, frames.numerator, duration, probe, deviation)
-    return _Grid(duration, frames.numerator, deviation)
+    trim = _require_plain_timeline(
+        asset, review.origin_pts, frames.numerator, duration, probe, deviation
+    )
+    return _Grid(duration, frames.numerator, deviation, trim)
 
 
 def _timecode(
@@ -474,7 +500,14 @@ def _declared_frames(declared: library.LibraryMedia, grid: _Grid) -> int:
     Final Cut은 지터 원본의 길이를 실제 마지막 패킷까지로 적는다(실측 848.05프레임). 같은
     프레임 길이이고 그 차가 측정한 어긋남(반 프레임 미만) 안이면 명목 수와 같은 원본이다. 그
     밖은 예전 그대로 격자에 떨어져야 한다(`LibraryMedia.frame_count`가 거부한다).
+
+    12.4의 `FFAsset`(D72)은 길이가 영상 머리 정보의 실제 길이라 균일 원본도 격자에 떨어지지 않는다
+    (실측 8874 189.95 대 190). 그 선언의 프레임 수는 가장 가까운 프레임(half-up)이고, 측정과
+    **정확히** 같아야 한다 — 어긋남 몫(D69 snap 반 프레임 미만 · D70 map 한 프레임 미만)을 더
+    얹지 않는다. 받는 창은 시계 종류와 무관하게 [n − ½, n + ½)이다(실측 34개 모두 이 창 안).
     """
+    if declared.container_length:
+        return declared.frame_count
     if grid.deviation_frames and declared.frame_duration == grid.frame_duration:
         frames = declared.duration / declared.frame_duration
         if abs(frames - grid.frame_count) <= grid.deviation_frames:
@@ -585,6 +618,7 @@ def _gather(scope: _Scope, asset: SourceAsset) -> _Gathered:
     facts = _source_facts(
         asset, source, code, row if report is not None else None, scope.caption_gaps
     )
+    facts["tail_trim_frames"] = str(grid.tail_trim_frames)
     return _Gathered(source, facts, from_library=declared is not None)
 
 
@@ -958,7 +992,20 @@ def _report_counts(
         for item in gathered
         if item.source.cues is not None and not item.source.cues
     ]
+    counts["tail_trimmed_sources"] = _tail_trimmed(gathered)
     return counts
+
+
+def _tail_trimmed(gathered: list[_Gathered]) -> list[dict[str, str]]:
+    """끝만 반 프레임 미만 자른 편집 목록으로 받은 원본(D72) — 이름과 자른 몫(프레임·초)."""
+    rows: list[dict[str, str]] = []
+    for item in gathered:
+        trim = Fraction(str(item.facts["tail_trim_frames"]))
+        if trim:
+            media = item.source.media
+            seconds = trim * media.frame_duration
+            rows.append({"name": media.name, "frames": str(trim), "seconds": str(seconds)})
+    return rows
 
 
 def _document(

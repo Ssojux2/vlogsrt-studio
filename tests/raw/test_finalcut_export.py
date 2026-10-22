@@ -763,13 +763,19 @@ def test_a_folder_without_file_locks_is_a_named_refusal(
 
 
 def test_head_frame_count_must_match_the_header(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """W-28(D72, 사용자 결정)부터 끝만 반 프레임 **미만** 자른 균일 원본은 받는다 — 예전 한 틱
+    재료는 이제 받는 쪽이라(`test_finalcut_library_12_4.py`), 이 시험은 반 프레임 짧은 머리
+    정보로 거부를 지킨다."""
     service, root = tier_project(tmp_path)
     real = preprocess.probe_raw_media
 
     def shorter(path: Path, **kwargs: Any) -> Any:
         probe = real(path, **kwargs)
         assert probe.video.duration_ts is not None
-        video = dataclasses.replace(probe.video, duration_ts=probe.video.duration_ts - 1)
+        half = Fraction(1, 2) / probe.video.r_frame_rate / probe.video.time_base
+        assert half.denominator == 1
+        stated = probe.video.duration_ts - half.numerator
+        video = dataclasses.replace(probe.video, duration_ts=stated)
         return dataclasses.replace(probe, video=video)
 
     monkeypatch.setattr(preprocess, "probe_raw_media", shorter)

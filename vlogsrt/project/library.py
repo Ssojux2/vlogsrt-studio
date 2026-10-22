@@ -15,14 +15,18 @@ untouched", 2026-09-13 "FCP 라이브러리 DB는 계속 안 건드린다", 2026
 
 **근거의 한계**: 스키마는 비공개다. 실측 대상은 라이브러리 하나를 Final Cut Pro
 **12.3**(`CurrentVersion.plist`의 catalogVersion `1193`)과 **12.4**(`1195; 12.4`)에서
-읽은 것뿐이다. 12.4에서도 이 모듈이 읽는 키는 그대로였고, W-16은 클립 시작
-(`mediaRange` 시작 = 타임코드 프레임 × 프레임 길이)과 `timecodeDisplayDropFrame`을
-더 읽는다. 모르는 구조·빠진 키는 조용한 기본값 대신 `UnsupportedProject`로
-거부한다 — 라이브러리가 바뀌면 읽기가 막히는 편이 틀린 값을 흘리는 것보다 낫다.
+읽은 것뿐이다. 12.3에서 가져온 미디어는 12.4로 올려도 `FFMIORADAsset` 그대로였고, W-16은
+클립 시작(`mediaRange` 시작 = 타임코드 프레임 × 프레임 길이)과 `timecodeDisplayDropFrame`을
+더 읽는다. **12.4에서 새로 가져온 미디어는 `FFAsset`으로 적힌다**(D72 — 실물 reelog 34개·
+vibeDL 1개): `durationForOfflineProvider`가 없고 길이는 `mediaRange` 길이(영상 머리 정보의 실제
+길이 — 프레임 격자에 떨어지지 않을 수 있다)이며 `videoFormatName`은 NSNull이다. 모르는
+구조·빠진 키는 조용한 기본값 대신 `UnsupportedProject`로 거부한다 — 라이브러리가 바뀌면
+읽기가 막히는 편이 틀린 값을 흘리는 것보다 낫다.
 """
 
 from __future__ import annotations
 
+import math
 import plistlib
 import re
 import sqlite3
@@ -36,6 +40,22 @@ from .models import UnsupportedProject
 LIBRARY_DB = "CurrentVersion.flexolibrary"
 EVENT_DB = "CurrentVersion.fcpevent"
 LOCK_INFO = ".lock-info"
+
+RAD_ASSET = "FFMIORADAsset"
+"""12.3까지(그리고 그때 가져온 미디어를 12.4로 올린 라이브러리)의 자산 기록."""
+ASSET = "FFAsset"
+"""12.4에서 새로 가져온 미디어의 자산 기록(D72)."""
+ASSET_RECORDS = (RAD_ASSET, ASSET)
+
+HALF_FRAME = Fraction(1, 2)
+"""가장 가까운 프레임의 정의(반 프레임 걸침은 위로) — 임계값이 아니라 반올림의 뜻이다. 보내기의
+편집 목록 관문(끝만 반 프레임 미만 자른 균일 원본, D72)도 같은 값으로 잰다."""
+
+
+def nearest_frame(frames: Fraction) -> int:
+    """프레임 좌표의 가장 가까운 프레임 — half-up(904.5 → 905, 은행가 반올림이 아니다)."""
+    return math.floor(frames + HALF_FRAME)
+
 
 # `{(시작),(길이)}` — 두 값 모두 정확한 분수다. 소수 표기는 이 형식이 아니다.
 _RANGE = re.compile(r"^\{\((-?\d+)(?:/(\d+))?\),\((-?\d+)(?:/(\d+))?\)\}$")
@@ -78,7 +98,8 @@ class LibraryMedia:
     media_identifier: str
     frame_duration: Fraction
     duration: Fraction
-    format_name: str
+    format_name: str | None
+    """`videoFormatName` — `FFAsset`(12.4)은 NSNull이라 None이다. 읽는 곳은 없다(표시용)."""
     has_video: bool
     has_audio: bool
     audio_rate: int | None
@@ -87,10 +108,25 @@ class LibraryMedia:
     """클립 시작(`mediaRange` 시작) — 실물 DJI 원본은 타임코드 프레임 × 프레임 길이다."""
     drop_frame: bool
     """타임코드를 드롭프레임으로 표시한다(`timecodeDisplayDropFrame`)."""
+    record_type: str
+    """선언을 읽은 자산 기록의 종류 — `RAD_ASSET` 또는 `ASSET`(D72)."""
+
+    @property
+    def container_length(self) -> bool:
+        """길이가 프레임 수 선언이 아니라 영상 머리 정보의 실제 길이다(`FFAsset`, D72)."""
+        return self.record_type == ASSET
 
     @property
     def frame_count(self) -> int:
-        """선언 길이를 프레임으로. 격자에 떨어지지 않으면 선언이 깨진 것이다."""
+        """선언 길이를 프레임으로.
+
+        `FFMIORADAsset`은 격자에 떨어지지 않으면 선언이 깨진 것이다. `FFAsset`의 길이는 영상 머리
+        정보(편집 목록)의 실제 길이라(실측 848.05·189.95프레임 — 머리 정보와 34/34 같다) 가장
+        가까운 프레임(half-up — 904.5 → 905)이 선언한 프레임 수다. 그 수가 측정과 같은지는
+        보내기가 본다(D72).
+        """
+        if self.container_length:
+            return nearest_frame(self.duration / self.frame_duration)
         return self._frames(self.duration, "선언 길이")
 
     @property
@@ -178,6 +214,22 @@ def _rows(database: Path, types: tuple[str, ...]) -> list[tuple[str, bytes]]:
     return [(str(kind), blob) for kind, blob in rows]
 
 
+class ArchivedNull(dict[str, object]):
+    """값 자리의 `NSNull` 인스턴스 — 예전처럼 `{'$class': UID(n)}` 사전 그대로라(같은 repr) 문자열을
+    바라는 키의 거부 문구는 바뀌지 않는다. NSNull을 「값 없음」으로 받아도 되는 키(`FFAsset`의
+    `videoFormatName`, D72)만 이 형으로 알아본다."""
+
+
+def _is_null_instance(node: dict[object, object], objects: list[object]) -> bool:
+    if set(node) != {"$class"}:
+        return False
+    marker = node["$class"]
+    if not isinstance(marker, plistlib.UID) or marker.data >= len(objects):
+        return False
+    described = objects[marker.data]
+    return isinstance(described, dict) and described.get("$classname") == "NSNull"
+
+
 def _unarchive(blob: bytes, where: str) -> dict[str, object]:
     """`NSKeyedArchiver` 그래프에서 뿌리 사전을 꺼낸다 — UID를 한 겹만 역참조한다."""
     try:
@@ -200,6 +252,8 @@ def _unarchive(blob: bytes, where: str) -> dict[str, object]:
             }
         if isinstance(node, dict) and "NS.objects" in node:
             return [deref(item) for item in node["NS.objects"]]
+        if isinstance(node, dict) and _is_null_instance(node, objects):
+            return ArchivedNull(node)
         return node
 
     root = deref(top["root"])
@@ -293,7 +347,9 @@ class EventIndex:
 
     깨진 행 하나가 이벤트 전체를 막지 않게 하려는 것이다(실물: 12.3 백업의 day1·day3에는
     `videoFormatName`이 NSNull인 기록이 있다). 읽지 못한 행은 `problems`로 돌려주고, 자산
-    기록은 아직 풀지 않은 채 들고 있다 — 쓰려는 기록 하나만 `media`가 엄격하게 푼다.
+    기록은 아직 풀지 않은 채 들고 있다 — 쓰려는 기록 하나만 `media`가 엄격하게 푼다. 자산
+    기록은 두 종류다(`FFMIORADAsset` · 12.4의 `FFAsset`, D72) — `asset_types`가 신원마다 어느
+    쪽인지 적는다.
     """
 
     event: LibraryEvent
@@ -301,14 +357,19 @@ class EventIndex:
     proxies: Mapping[str, Path]
     assets: Mapping[str, Mapping[str, object]]
     problems: tuple[UnsupportedProject, ...]
+    asset_types: Mapping[str, str]
 
     def media(self, identity: str) -> LibraryMedia:
         """신원 하나의 선언 — 모르는 구조·빠진 키는 그대로 거부한다(기본값 없음)."""
-        where = f"{self.event.path / EVENT_DB}:FFMIORADAsset"
         record = self.assets.get(identity)
         if record is None:
-            raise UnsupportedProject(where, f"자산 {identity}의 FFMIORADAsset 기록이 없다")
-        return _media(identity, record, self.originals, self.proxies, where)
+            where = f"{self.event.path / EVENT_DB}:{'·'.join(ASSET_RECORDS)}"
+            raise UnsupportedProject(
+                where, f"자산 {identity}의 {'·'.join(ASSET_RECORDS)} 기록이 없다"
+            )
+        kind = self.asset_types[identity]
+        where = f"{self.event.path / EVENT_DB}:{kind}"
+        return _media(identity, kind, record, self.originals, self.proxies, where)
 
 
 def index_event(event: LibraryEvent) -> EventIndex:
@@ -317,18 +378,21 @@ def index_event(event: LibraryEvent) -> EventIndex:
     originals: dict[str, Path] = {}
     proxies: dict[str, Path] = {}
     assets: dict[str, Mapping[str, object]] = {}
+    asset_types: dict[str, str] = {}
     problems: list[UnsupportedProject] = []
-    for kind, blob in _rows(database, ("FFMediaRep", "FFMIORADAsset")):
+    for kind, blob in _rows(database, ("FFMediaRep", *ASSET_RECORDS)):
         where = f"{database}:{kind}"
         try:
             record = _unarchive(blob, where)
             if kind == "FFMediaRep":
                 _place_rep(record, where, event, originals, proxies)
             else:
-                assets[_text(record, "mediaIdentifier", where)] = record
+                identity = _text(record, "mediaIdentifier", where)
+                assets[identity] = record
+                asset_types[identity] = kind
         except UnsupportedProject as error:
             problems.append(error)
-    return EventIndex(event, originals, proxies, assets, tuple(problems))
+    return EventIndex(event, originals, proxies, assets, tuple(problems), asset_types)
 
 
 def _place_rep(
@@ -350,9 +414,9 @@ def _place_rep(
 def read_event_media(event: LibraryEvent) -> tuple[LibraryMedia, ...]:
     """이벤트가 가진 영상 목록 — 행 하나라도 깨지면 거부한다(엄격). 이름 오름차순.
 
-    `FFMediaRep`(파일)과 `FFMIORADAsset`(시계·포맷)은 서로 다른 객체라 내용 신원으로
-    잇는다 — rep의 `md5Seed`와 asset의 `mediaIdentifier`가 같은 값이다. 깨진 행을 건너뛰고
-    읽어야 하는 쪽은 `index_event`를 쓴다.
+    `FFMediaRep`(파일)과 자산 기록(`FFMIORADAsset`·`FFAsset` — 시계·포맷)은 서로 다른 객체라
+    내용 신원으로 잇는다 — rep의 `md5Seed`와 asset의 `mediaIdentifier`가 같은 값이다. 깨진 행을
+    건너뛰고 읽어야 하는 쪽은 `index_event`를 쓴다.
     """
     index = index_event(event)
     if index.problems:
@@ -363,6 +427,7 @@ def read_event_media(event: LibraryEvent) -> tuple[LibraryMedia, ...]:
 
 def _media(
     identity: str,
+    kind: str,
     record: Mapping[str, object],
     originals: Mapping[str, Path],
     proxies: Mapping[str, Path],
@@ -375,23 +440,55 @@ def _media(
     audio_rate = record.get("audioSampleRate")
     audio_channels = record.get("audioChannelCount")
     has_audio = record.get("hasAudio") is True
+    # 읽는 순서가 곧 거부 순서다 — FFMIORADAsset은 예전 순서(이름·프레임 길이·선언 길이·포맷·
+    # 시작) 그대로 첫 빠진 키를 말한다.
+    name = _text(record, "displayName", where)
+    frame_duration = _fraction(record, "timecodeFrameDuration", where)
+    duration, format_name, media_start = _declared_clock(kind, record, where)
     return LibraryMedia(
-        name=_text(record, "displayName", where),
+        name=name,
         original=original,
         proxy=proxy if proxy is not None and proxy.is_file() else None,
         media_identifier=identity,
-        frame_duration=_fraction(record, "timecodeFrameDuration", where),
-        duration=_fraction(record, "durationForOfflineProvider", where),
-        format_name=_text(record, "videoFormatName", where),
+        frame_duration=frame_duration,
+        duration=duration,
+        format_name=format_name,
         has_video=record.get("hasVideo") is True,
         has_audio=has_audio,
         audio_rate=int(audio_rate) if has_audio and isinstance(audio_rate, (int, float)) else None,
         audio_channels=(
             int(audio_channels) if has_audio and isinstance(audio_channels, int) else None
         ),
-        media_start=_media_start(record, where),
+        media_start=media_start,
         drop_frame=_drop_frame(record, where),
+        record_type=kind,
     )
+
+
+def _declared_clock(
+    kind: str, record: Mapping[str, object], where: str
+) -> tuple[Fraction, str | None, Fraction]:
+    """(길이, 포맷 이름, 클립 시작) — 기록 종류마다 길이를 적는 자리가 다르다(D72)."""
+    if kind == RAD_ASSET:
+        duration = _fraction(record, "durationForOfflineProvider", where)
+        format_name = _text(record, "videoFormatName", where)
+        return duration, format_name, _media_start(record, where)
+    if kind != ASSET:
+        raise UnsupportedProject(where, f"모르는 자산 기록 종류다: {kind!r}")
+    # 12.4의 FFAsset에는 durationForOfflineProvider가 없다 — `mediaRange`가 유일한 길이 선언이다.
+    start, length = record_range(record, where)
+    if length <= 0:
+        raise UnsupportedProject(where, f"mediaRange 길이가 양수가 아니다: {length}초")
+    return length, _optional_format(record, where), start
+
+
+def _optional_format(record: Mapping[str, object], where: str) -> str | None:
+    """`FFAsset`의 `videoFormatName` — 실물은 NSNull이다. 없거나 NSNull이면 None, 그 밖의 모양은
+    모르는 구조라 거부한다."""
+    value = record.get("videoFormatName")
+    if value is None or isinstance(value, ArchivedNull):
+        return None
+    return _text(record, "videoFormatName", where)
 
 
 def _media_start(record: Mapping[str, object], where: str) -> Fraction:

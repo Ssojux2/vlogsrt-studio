@@ -18,6 +18,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import replace
 from fractions import Fraction
 from pathlib import Path
+from typing import Any
 
 from vlogsrt import log
 from vlogsrt.env import ANALYSIS_CLAUDE_KEY_ENV
@@ -802,6 +803,27 @@ def cmd_caption(args: argparse.Namespace) -> int:
     return 0
 
 
+def _log_finalcut_notes(counts: dict[str, Any]) -> None:
+    """보내기가 받되 손댄 원본 — 맞춰 재생되는 레이트(D71)·끝만 자른 편집 목록(D72)을 이름으로."""
+    conformed = counts["conformed_sources"]
+    if conformed:
+        # 섞인 레이트는 거부하지 않고 많은 쪽 하나로 보낸다(D71) — 맞춰 재생되는 원본을 이름으로.
+        clamped = counts.get("conformed_clamped_captions", 0)
+        hidden = counts.get("conformed_hidden_captions", 0)
+        log.out(
+            f"프레임레이트가 다른 영상 {len(conformed)}개({', '.join(conformed)})는 프로젝트"
+            f" {counts['frame_rate']}fps에 맞춰 재생된다 — 길이·자막은 그대로다"
+            f" · 클립 끝에서 잘린 자막 조각 {clamped}개"
+            f" · 한 프레임보다 짧게 남아 싣지 않은 조각 {hidden}개"
+        )
+    for row in counts.get("tail_trimmed_sources") or ():
+        # 끝만 반 프레임 미만 자른 편집 목록은 받는다(D72) — 받은 원본과 몫을 이름으로.
+        log.out(
+            f"끝을 반 프레임보다 짧게 자른 편집 목록: {row['name']}"
+            f" — {row['seconds']}초({row['frames']}프레임), 시작은 그대로"
+        )
+
+
 def cmd_finalcut(args: argparse.Namespace) -> int:
     """`media finalcut` — 전체 타임라인 FCPXML과 리포트를 새로 쓴다(D56, 로컬만).
 
@@ -827,17 +849,7 @@ def cmd_finalcut(args: argparse.Namespace) -> int:
         f" · 미검토 제외 제안 {counts['unreviewed_clips']}개"
         f" · 캡션 {captions['placed']}개(조각 {captions['pieces']})"
     )
-    conformed = counts["conformed_sources"]
-    if conformed:
-        # 섞인 레이트는 거부하지 않고 많은 쪽 하나로 보낸다(D71) — 맞춰 재생되는 원본을 이름으로.
-        clamped = counts.get("conformed_clamped_captions", 0)
-        hidden = counts.get("conformed_hidden_captions", 0)
-        log.out(
-            f"프레임레이트가 다른 영상 {len(conformed)}개({', '.join(conformed)})는 프로젝트"
-            f" {counts['frame_rate']}fps에 맞춰 재생된다 — 길이·자막은 그대로다"
-            f" · 클립 끝에서 잘린 자막 조각 {clamped}개"
-            f" · 한 프레임보다 짧게 남아 싣지 않은 조각 {hidden}개"
-        )
+    _log_finalcut_notes(counts)
     for row in report["not_exported"]:
         log.out(f"넣지 않은 원본: {row['name'] or row['asset_id']} — {row['reason']}")
     return 0

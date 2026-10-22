@@ -26,7 +26,7 @@ from tests.raw.test_review_workspace import _ingest_card, _wait_terminal
 from tests.raw.test_vfr_library import make_cfr
 from vlogsrt import preprocess
 from vlogsrt.preprocess import GridConformPolicy
-from vlogsrt.project.library import LibraryMedia
+from vlogsrt.project.library import RAD_ASSET, LibraryMedia
 from vlogsrt.project.raw import finalcut_export
 from vlogsrt.project.raw import service as raw_service
 from vlogsrt.project.raw.review_workspace import ReviewWorkspaceFacade
@@ -279,6 +279,7 @@ def _declared(duration: Fraction) -> LibraryMedia:
         audio_channels=2,
         media_start=Fraction(0),
         drop_frame=False,
+        record_type=RAD_ASSET,  # 12.3 기록 — 길이가 프레임 수 선언이다(D72 이전 그대로)
     )
 
 

@@ -1269,9 +1269,8 @@ def _finalcut_sent_text(sent: dict[str, Any]) -> str:
             "\n\n`자막 시각 확인 필요` 키워드는 달지 못해 키워드 없이 보냈습니다"
             f" — {sent['caption_timing_error']} (로그 참고)"
         )
-    conformed = _conformed_rate_line(counts)
-    if conformed:
-        text += "\n\n" + conformed
+    for line in (_conformed_rate_line(counts), _tail_trimmed_line(counts)):
+        text += "\n\n" + line if line else ""
     unsupported = list(sent.get("unsupported") or ())
     if unsupported:
         # 빼고 보낸 원본은 이름으로 말한다(D68) — 수만 보이면 어느 영상이 빠졌는지 모른다.
@@ -1281,6 +1280,20 @@ def _finalcut_sent_text(sent: dict[str, Any]) -> str:
             " 보낼 수 있습니다."
         )
     return text + "".join("\n\n" + line for line in _caption_honesty_lines(sent))
+
+
+def _tail_trimmed_line(counts: Mapping[str, Any]) -> str:
+    """끝만 반 프레임 미만 자른 편집 목록으로 받은 영상(D72)을 이름과 몫으로 — 받았다고 말없이 두지
+    않는다. W-28 앞의 기록에는 칸이 없어 빈 글이다."""
+    rows = list(counts.get("tail_trimmed_sources") or ())
+    if not rows:
+        return ""
+    named = ", ".join(f"{row['name']}({row['seconds']}초)" for row in rows)
+    return (
+        f"편집 목록이 끝을 반 프레임보다 짧게 자른 영상 {len(rows)}개({named})는 그대로"
+        " 보냈습니다 — 시작은 그대로이고 클립 끝이 그만큼 원본 끝을 지납니다. Final Cut에서 그"
+        " 클립 끝에 경고나 빈 프레임이 없는지 확인하세요."
+    )
 
 
 def _conformed_rate_line(counts: Mapping[str, Any]) -> str:

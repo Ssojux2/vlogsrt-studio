@@ -7971,3 +7971,51 @@ D65는 그 값이 올릴 수 있는 길을 **하나** 연다 — 같은 리비�
 **사람 확인 남음**(`docs/FCP_MANUAL_ACCEPTANCE.md`): 실물 IMG_8852(24p 균일)와 W-27c가 받은 24p map 원본 8850·8854·8858이 30p 원본 사이에 리타임 배지 없이 서는지 · 인스펙터 Rate Conform = Floor · 그 클립의 캡션이 말소리와 맞는지 · 컷을 넘는 캡션이 튀지 않는지 · 소수 쪽 마지막 클립에 미디어 범위 경고가 없는지.
 
 ---
+
+## D72 — W-28 Final Cut 12.4가 새로 가져온 미디어는 `FFAsset` 기록이다 (2026-10-22, W-28)
+
+**문제**(실데이터, 읽기 전용 — 이벤트 DB는 임시 폴더에 복사해 `immutable=1`로만 열었다): 사용자가 새 라이브러리 `261018_reelog`(아이폰 세로 HEVC `.mov` 34개, Final Cut Pro **12.4**에서 가져옴 — catalogVersion `1195; 12.4 (454072)`)를 Final Cut으로 보냈더니 34개 모두 「…/raw_vid/CurrentVersion.fcpevent:FFMIORADAsset: 자산 CC71…의 FFMIORADAsset 기록이 없다」로 거부됐다. `library.index_event`는 `FFMediaRep` + `FFMIORADAsset`만 읽었는데, 이 이벤트 DB에는 `FFMIORADAsset`이 없고 **`FFAsset`** 34개(+ `FFAssetRef` 34 · `FFMediaRep` 68 …)가 있다. 세로 영상만의 일이 아니다 — 12.4에서 가로 mp4를 가져온 `vibeDL.fcpbundle/lec1`도 `FFAsset`이다. 12.3에서 가져온 `260810_wangbang`은 라이브러리를 12.4로 올린 뒤에도(catalogVersion `1195; 12.4`, base `1193; 12.3`) 원본 이벤트 `clips`가 `FFMIORADAsset` 18개 그대로다 — 기록 종류는 라이브러리 버전이 아니라 **가져온 앱 버전**을 따른다.
+
+**두 기록의 키**(`library._unarchive`로 푼 것):
+
+| 기록 | 키 |
+|---|---|
+| `FFAsset`(12.4 가져오기) | alphaHandling · audioChannelCount · audioSampleRate · audioSourceCount · audioSourceDict · audioSourceDictVersion · displayName · fieldDominanceOverride · hasAudio · hasClosedCaptionTrack · hasVideo · md5String · mediaIdentifier · mediaRange · rotationDegrees(회전 원본만 — vibeDL 가로에는 없다) · timecodeDisplayDropFrame · timecodeFrameDuration · uttype · videoFormatName(**NSNull 인스턴스** 34/34 · 1/1) · videoProps(`{'PB': '{{0, 0}, {2160, 3840}}', 'FRD': {flags 1, value 20, timescale 600, epoch 0}, 'CSE': 65793}`) |
+| `FFMIORADAsset`(12.3 가져오기) | 같은 핵심 키 + durationForOfflineProvider · startForOfflineProvider · originalMediaStart · canIngest · clipID · metadata. rotationDegrees·videoProps 없음, videoFormatName은 `FFVideoFormat3840x2160p2997` 같은 문자열 |
+
+**실측**(34개 전부 — 복사한 DB 대 원본의 ffprobe·`preprocess.probe_extraction_clock`, 이번 코드의 `_probe` + `_check_library`):
+
+- `timecodeFrameDuration` = 우리 시계의 `frame_duration` **34/34**(W-27c map 원본 8850·8854·8858의 1/24 포함 — W-27c의 레이트 고르기를 Final Cut이 같게 본다).
+- `mediaRange` 시작 0 · 우리 시작 프레임 0 — 34/34.
+- `mediaRange` 길이 = 영상 스트림 머리 정보 길이(`duration_ts × time_base`) **34/34 정확히**. 그래서 길이 / 프레임 길이는 자주 정수가 아니다: 8844 848.05 · 8850 178.6 · 8865 904.5 · 8877 451.5 · 8871 691.55 · 균일 8874 189.95(우리 190).
+- 그 값의 **가장 가까운 프레임(half-up)** = 우리 `frame_count` **34/34**. 예전 규칙(격자에 떨어지고 정확히 같다)으로는 19/34만 통과한다(15개 거부). 904.5는 half-up이라 905다 — Python `round`(은행가)면 904로 틀린다.
+- `videoProps.PB` = 우리 재생 화면 크기(`RawVideoMedia.display_size`, 2160×3840) 34/34 — 회전 ±90° 모두.
+- 12.3 회귀: wangbang `clips` 18개(`FFMIORADAsset`, DJI 29.97 DF)가 같은 대조를 18/18 통과하고(예전 규칙 그대로), vlogsrt가 만든 이벤트 셋은 `FFAssetRef`만 있어 색인이 비고(원본 0 · 기록 0 · 문제 0) 그 안 프로젝트 셋은 `read_project_timeline`이 그대로 읽는다.
+
+**결정**:
+
+1. **두 종류를 다 색인한다**(`library.ASSET_RECORDS = (RAD_ASSET, ASSET)`). 잇는 열쇠는 그대로 `md5Seed` == `mediaIdentifier`. `EventIndex.asset_types`가 신원마다 종류를 적고, `media`가 그 종류로 푼다. 기록이 아예 없으면 「FFMIORADAsset·FFAsset 기록이 없다」.
+2. **`FFAsset`의 선언**(`_declared_clock`): 길이는 `mediaRange` 길이(양수여야 한다 — 0·음수는 거부), 시작은 `mediaRange` 시작(`record_range` 그대로), `videoFormatName`은 없거나 NSNull이면 None · 비지 않은 문자열이면 그 문자열 · 그 밖의 모양은 거부. 그래서 `LibraryMedia.format_name`은 `str | None`이다 — 이 값을 읽는 제품 코드는 없다(표시용, 시험만 읽는다). 빠진 키(`mediaRange`·`timecodeFrameDuration`·`displayName`·`timecodeDisplayDropFrame`)는 예전처럼 기본값 없이 거부한다. NSNull은 `_unarchive`가 `ArchivedNull`(dict 하위형 — repr이 예전 `{'$class': UID(n)}` 그대로)로 표시만 한다: `FFMIORADAsset`의 NSNull 포맷(제주 day1·day3 모양) 거부 문구가 한 글자도 바뀌지 않는다.
+3. **회전·화면 크기(`rotationDegrees`·`videoProps.PB`)는 읽지 않는다.** 소비자가 없다 — 보내기의 포맷은 원본 ffprobe의 재생 화면 크기(W-26)가 정하고, 실측에서 PB가 그와 34/34 같음을 확인했을 뿐이다. 대조 관문으로 쓰면 (비정방 화소·클린 어퍼처 등) 본 적 없는 모양에서 정상 보내기를 막을 위험이 이득보다 크다. 필요해지면 그때 더한다.
+4. **선언 프레임 수의 규칙**(`LibraryMedia.frame_count`, `record_type`·`container_length`): `FFMIORADAsset`은 예전 그대로 격자에 떨어져야 한다. `FFAsset`은 **가장 가까운 프레임**(`floor(길이 / 프레임 길이 + ½)`, half-up — ½은 반올림의 정의라 설정값이 아니다)이다. 보내기(`finalcut_export._declared_frames`)는 그 수가 측정 프레임 수와 **정확히** 같아야 하고, 프레임 길이·시작 프레임도 예전처럼 같아야 한다(`_check_library`). 받는 창은 [n − ½, n + ½)이다.
+5. **어긋남 몫(D69·D70)과의 관계 — 넓히지 않는다.** `FFAsset`에는 `deviation_frames`를 얹지 않는다: 균일(0)·snap(반 프레임 미만)·map(한 프레임 미만) 어느 시계든 같은 가장 가까운 프레임 하나다. snap의 몫은 이 창 안이라 얹어도 같고, map의 몫(19/20)을 얹으면 452.7프레임(가장 가까운 453)도 452로 받게 돼 필요 이상으로 넓다 — 실측 map 원본 6개(8850·8854·8858·8865·8871·8877)도 가장 가까운 프레임만으로 통과한다. 거꾸로 균일 원본(8874 189.95)은 몫이 0이라 예전 규칙으론 거부되므로 가장 가까운 프레임이 꼭 필요하다. `FFMIORADAsset` 쪽은 넓히지 않았다(격자 + 맞춘 원본의 몫, D69·D70 그대로).
+6. **편집 목록 관문 — 끝만 반 프레임 미만 자른 균일 원본은 받는다**(사용자 결정, IMG_8874). 실물 8874는 패킷 190개가 정확히 균일(20틱)한데 `elst`가 길이를 3799틱으로 적는다 — 머리 정보 189.95 대 190, 시작 0. 처음 판(이 결정의 1–5)은 관문을 그대로 두어 8874 하나가 reelog 보내기를 통째 막았다(`_gather_all`은 원본 하나의 거부로 전체를 거부한다). 규칙(`_require_plain_timeline` → `_tail_trim`, 머리 길·패킷 길 같은 자리):
+   - **균일 원본**(`deviation_frames` 0)은 예전의 「정확히 같음」에 더해 **원점(첫 패킷 pts)이 0**이고 **0 < 측정 수 − 머리 정보 < ½프레임**이면 받는다. 이는 라이브러리 규칙과 같은 반올림의 말이다 — 머리 정보의 가장 가까운 프레임이 측정 수이고 끝을 자른 쪽(½은 `library.HALF_FRAME`, `nearest_frame`이 쓰는 그 값 — 새 숫자가 없다). 다만 **½ 동점은 받지 않는다**: half-up이면 측정 수로 가지만, 사용자 결정이 「반 프레임 미만」이고 동점에서 Final Cut이 어느 쪽으로 세는지 모른다. 라이브러리 규칙(4)은 동점을 받으므로(실측 map 8865 904.5) 균일 원본에 둘이 겹치면 관문이 더 좁은 쪽이 이긴다.
+   - **거부 그대로**(예전 문구): 시작을 옮긴 편집 목록(원점 ≠ 0 — 음수 원점은 예전부터, 양수 원점도 끝 자름으로는 받지 않는다) · ½프레임 이상 자름 · 머리 정보가 패킷보다 긴 것 · 정수 프레임을 자른 것(`_trim_copy`).
+   - **맞춘 원본(snap·map)은 이 갈래를 타지 않는다** — D69 `D/T`·D70 `(T−1)/T` 몫이 이미 끝의 어긋남을 맡는다. snap 몫에 끝 자름 ½을 더하면 snap이 뜻한 「잰 어긋남까지」보다 넓고, map 몫(한 프레임 미만)은 이미 그보다 넓다 — 합치면 어느 쪽 뜻보다 느슨해진다.
+   - **리포트**: 원본 줄 `tail_trim_frames`(분수 문자열, 자르지 않았으면 `"0"`) · `counts.tail_trimmed_sources` = `[{name, frames, seconds}]`. 보내기 결과 글(`_tail_trimmed_line`)과 `media finalcut` 로그(`_log_finalcut_notes`)가 이름과 몫을 말한다 — 둘 다 `.get`이라 W-28 앞의 기록은 그대로 읽힌다.
+   - **쓰는 길이**: 애셋·마지막 클립은 예전처럼 **패킷 수**(8874면 190프레임 = 3800/600초)다 — 머리 정보 끝(3799/600초)을 1/600초 지난다. W-27d의 「마지막 클립 ≤ 남은 미디어」 내림(`frame_floor`)은 여기 쓰지 않는다: (a) 마지막 프레임의 패킷은 파일에 온전히 있고 그 표시 시작(3780틱)이 머리 정보 끝보다 앞이라 Final Cut이 보여 줄 프레임이 있다 — 내리면 실제 프레임 하나를 타임라인에서 버린다. (b) 검토 머리·분할 계획·캡션이 모두 패킷 수 격자에 서 있어 마지막 경계를 바꾸면 문서 바이트와 계획이 원본마다 달라진다. (c) 같은 방향의 1프레임 미만 넘침은 이미 D70 map 원본(8877 머리 정보 451.5 대 452)이 같은 모양으로 보낸다. 해가 없다는 것은 Final Cut 안에서만 확인된다 — 사람 확인 남음.
+7. **다른 독자**: `read_event_media`는 `index_event` 위라 두 종류를 함께 읽는다(엄격 — 행 하나라도 깨지면 거부). `read_project_timeline`은 `FFSequenceInfo`·`FFAnchoredCollection`만 읽어 자산 기록과 무관하고 제품 코드가 부르지 않는다(시험만) — 보낸 뒤 Final Cut 안을 다시 읽어 대조하는 제품 경로는 없다(보내기 리포트는 우리가 쓴 문서에서 나온다). `_LibraryShelf.warnings`는 `index.assets`의 표시 이름만 읽어 그대로 맞다. `fcp.py`(라이브러리 조사)는 `CurrentVersion.fcpevent` 표지 파일만 보고 기록을 풀지 않는다. `ui/`·`scripts/`에 자산 기록을 읽는 곳은 없다.
+8. **세로**: 회전(90°) 원본 + `FFAsset` 라이브러리의 보내기가 W-26 그대로 원본마다 재생 화면 크기의 `<format>`(90×160)이고, 켠 길이가 많은 쪽이 세로면 세로 프로젝트다(시험). 「세로 영상인 경우 파이널컷 내보내기가 안돼」의 원인은 세로가 아니라 12.4 기록 종류였다 — 고친 뒤 세로 때문에 막히는 곳은 찾지 못했다.
+
+**그대로인 것**: `FFMIORADAsset` 읽기의 값·거부 순서·문구(빠진 기록 하나의 문구만 두 종류를 말한다) · 12.3 실물 18/18 · W-16·D69·D70 보내기 규칙 · 문서 바이트(라이브러리 원본의 `asset`은 여전히 신원·측정 프레임 수로 쓴다) · 지문·캐시 열쇠·승인·견적.
+
+**남은 것**(실데이터):
+
+- **IMG_8874**는 6번 규칙으로 받는다(끝 1/20프레임 = 1/600초) — reelog 실데이터는 라이브러리 규칙과 편집 목록 관문을 함께 **34/34** 통과한다(복사본, ffprobe만).
+- **vibeDL lec1 `1.mp4`**는 다른 까닭으로 거부된다 — Final Cut은 1001/30000(29.97), 우리 시계는 1/30 snap이라 프레임 길이부터 다르다(그리고 편집 목록 관문). 기록 종류와 무관하고 엄격한 대조가 맞게 막는 경우다.
+- **사람 확인 남음**(`docs/FCP_MANUAL_ACCEPTANCE.md` 「12.4에서 가져온 라이브러리」에 적었다): reelog를 실제로 보내 Final Cut 12.4가 `FFAsset` 원본을 신원(uid = mediaIdentifier)으로 다시 찾아 새 미디어를 만들지 않는지 · 848.05·904.5 같은 원본의 클립 끝에 미디어 범위 경고가 없는지 · **IMG_8874 클립 끝에 경고·빈(검은) 프레임이 없는지**(애셋 190프레임이 머리 정보 189.95프레임을 1/600초 지난다 — 6번) · 세로 프로젝트 포맷.
+
+**시험**: `tests/project/test_library_12_4.py`(실물 키 모양의 `FFAsset` 빌더 — NSNull `videoFormatName` · 접힌 `videoProps`·`audioSourceDict` 사전): 색인 · `mediaRange` 길이 · 가장 가까운 프레임 6(848.05 · 451.5 → 452 · 904.5 → 905 · 904.48 → 904 · 189.95 → 190 · 178.6 → 179) · 포맷 문자열 · 빠진 키 넷 · 신원 없는 행은 problems · 모르는 모양 다섯 · 한 이벤트에 두 종류 · `FFMIORADAsset` 격자·NSNull 문구 그대로 · 빠진 기록 문구. `tests/raw/test_finalcut_library_12_4.py`(실제 ffmpeg): 회전 세로 + 가로 12.4 라이브러리가 `export_finalcut_timeline`을 지난다(848.05 모양 · half-up 동점 99.5 → 100 · 정확) — 신원 uid · 재생 화면 크기 포맷 · 세로 시퀀스 · 경고 없음 · 가장 가까운 프레임이 다른 길이(100.5 → 101 · 101 · 99.49 → 99)는 이름을 대고 거부 · 시작이 다르면 거부 · `_declared_frames`: 시계 셋 어디서든 가장 가까운 프레임(map 몫을 얹지 않음) · `FFMIORADAsset` 예전 규칙. 픽스처 `library_fixtures.archived`는 사전 값을 접을 수 있게 했다(리프만 든 기록의 바이트는 그대로). `test_grid_conform_library.py`의 손으로 만든 `LibraryMedia`에 `record_type`을 더했다. **끝 자름(6번)**: 같은 파일 — 실제 ffmpeg 원본의 영상 `elst`를 바이트로 고친 재료(다시 인코딩 없음, 패킷 그대로 균일): 1/4프레임 끝 자름은 받고 리포트(`tail_trimmed_sources` · 원본 줄 `tail_trim_frames`)·애셋 길이 패킷 수 · ½ · ¾ · 1프레임 자름과 시작 옮김은 예전 문구로 거부 · 자르지 않은 원본은 `[]`·`"0"` · 검토 머리 길도 한 틱 끝 자름을 받음(1/512) · snap 몫 밖 0.4프레임은 snap이면 거부, 균일이면 받음 · 12.4 세로 + 끝 자름(IMG_8874 모양) 보내기 · 결과 글·CLI 문구와 옛 기록. **바뀐 옛 시험**: `test_finalcut_export.py::test_head_frame_count_must_match_the_header`는 머리 정보를 한 틱 줄여 거부를 보였다 — 사용자 결정으로 그 재료가 받는 쪽이 되어(위의 머리 길 시험) 반 프레임 줄인 머리 정보로 거부를 지킨다(뜻은 그대로: 맞지 않는 머리 정보는 거부). 다른 편집 목록 거부 시험(`_trim_copy` 둘 · 원점 옮긴 머리)은 손대지 않았다.
+
+---

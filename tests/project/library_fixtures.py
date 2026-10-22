@@ -26,6 +26,9 @@ LOCK_INFO = ".lock-info"
 
 NTSC = Fraction(1001, 30000)
 
+RAD_ASSET = "FFMIORADAsset"
+ASSET = "FFAsset"
+
 NSNULL = object()
 """값 자리의 `NSNull` 인스턴스 — 실물 12.3 백업(제주 day1·day3)의 `videoFormatName`이 이 모양이다.
 리더가 역참조하면 `{'$class': UID(n)}` 사전이 된다(문자열이 아니다)."""
@@ -34,8 +37,10 @@ NSNULL = object()
 def archived(record: dict[str, object]) -> bytes:
     """평범한 사전 하나를 NSKeyedArchiver bplist 블롭으로 조립한다.
 
-    키·값은 전부 리프(문자열·정수·불린)로만 쓴다 — 리더는 한 겹 역참조면 충분하다.
-    값이 `NSNULL`이면 그 자리에 NSNull 클래스를 가리키는 객체를 둔다.
+    값이 리프(문자열·정수·불린)면 한 겹 역참조로 읽힌다. 값이 `NSNULL`이면 그 자리에 NSNull
+    클래스를 가리키는 객체를 둔다. 값이 사전이면(12.4 `FFAsset`의 `videoProps`·
+    `audioSourceDict`) 실물처럼 `NS.keys`/`NS.objects` 사전으로 접어 클래스 뒤에 붙인다 —
+    리프만 든 기록의 바이트는 예전 그대로다.
     """
     count = len(record)
     dictionary_class = 2 + 2 * count
@@ -45,9 +50,8 @@ def archived(record: dict[str, object]) -> bytes:
         "$class": plistlib.UID(dictionary_class),
     }
     objects: list[object] = ["$null", root]
-    for key, value in record.items():
-        objects.append(key)
-        objects.append({"$class": plistlib.UID(dictionary_class + 1)} if value is NSNULL else value)
+    for key in record:
+        objects.extend([key, None])
     objects.append(
         {
             "$classname": "NSMutableDictionary",
@@ -55,6 +59,8 @@ def archived(record: dict[str, object]) -> bytes:
         }
     )
     objects.append({"$classname": "NSNull", "$classes": ["NSNull", "NSObject"]})
+    for index, value in enumerate(record.values()):
+        objects[3 + 2 * index] = _node(value, objects, dictionary_class)
     return plistlib.dumps(
         {
             "$version": 100000,
@@ -64,6 +70,23 @@ def archived(record: dict[str, object]) -> bytes:
         },
         fmt=plistlib.FMT_BINARY,
     )
+
+
+def _node(value: object, objects: list[object], dictionary_class: int) -> object:
+    if value is NSNULL:
+        return {"$class": plistlib.UID(dictionary_class + 1)}
+    if isinstance(value, dict):
+        keys = [_push(key, objects, dictionary_class) for key in value]
+        values = [_push(item, objects, dictionary_class) for item in value.values()]
+        return {"NS.keys": keys, "NS.objects": values, "$class": plistlib.UID(dictionary_class)}
+    return value
+
+
+def _push(value: object, objects: list[object], dictionary_class: int) -> plistlib.UID:
+    objects.append(None)
+    index = len(objects) - 1
+    objects[index] = _node(value, objects, dictionary_class)
+    return plistlib.UID(index)
 
 
 def archived_sequence(values: Sequence[object]) -> bytes:
@@ -141,6 +164,14 @@ class MediaSpec:
     """`timecodeDisplayDropFrame` 값. 실물은 정수 1이다. `None`이면 키를 빼고 쓴다."""
     media_range_override: str | None = None
     """`mediaRange`를 통째로 정해 쓰는 구멍. 빈 문자열이면 키를 빼고 쓴다."""
+    record: str = RAD_ASSET
+    """자산 기록 종류 — `FFAsset`이면 12.4에서 새로 가져온 실물의 키 모양으로 적는다(D72)."""
+    rotation: float | None = None
+    """`FFAsset`의 `rotationDegrees` — 실물 세로 아이폰은 -90.0, 가로 원본에는 키가 없다."""
+    display: tuple[int, int] = (3840, 2160)
+    """`FFAsset`의 `videoProps.PB` — 회전 뒤 재생 화면 크기(실물 세로 `{{0, 0}, {2160, 3840}}`)."""
+    omit: tuple[str, ...] = ()
+    """`FFAsset` 기록에서 뺄 키 — 빠진 키 거부 시험용."""
 
     @property
     def identity(self) -> str:
@@ -216,8 +247,58 @@ def _media_rows(event_dir: Path, media: Sequence[MediaSpec]) -> list[tuple[str, 
                     ),
                 )
             )
-        rows.append(("FFMIORADAsset", archived(_asset_record(spec))))
+        if spec.record == ASSET:
+            rows.append((ASSET, archived(asset_12_4_record(spec))))
+        else:
+            rows.append((RAD_ASSET, archived(_asset_record(spec))))
     return rows
+
+
+def _video_props(spec: MediaSpec) -> dict[str, object]:
+    """`PB`는 회전 뒤 재생 화면 크기, `FRD`는 프레임 길이의 CMTime 사전이다(실물 20/600)."""
+    frame = Fraction(spec.frame_duration)
+    width, height = spec.display
+    return {
+        "PB": f"{{{{0, 0}}, {{{width}, {height}}}}}",
+        "FRD": {"flags": 1, "value": frame.numerator, "timescale": frame.denominator, "epoch": 0},
+        "CSE": 65793,
+    }
+
+
+def asset_12_4_record(spec: MediaSpec) -> dict[str, object]:
+    """12.4가 새로 가져온 미디어의 `FFAsset` — 실물(reelog IMG_8877) 키 모양 그대로.
+
+    `durationForOfflineProvider`가 없고 길이는 `mediaRange`뿐이며, `videoFormatName`은 NSNull
+    객체이고, 재생 화면은 `videoProps.PB`, 회전은 `rotationDegrees`(가로 원본에는 없다)다.
+    """
+    record: dict[str, object] = {
+        "alphaHandling": 2,
+        "audioChannelCount": spec.audio_channels,
+        "audioSampleRate": float(spec.audio_rate or 0),
+        "audioSourceCount": 1,
+        "audioSourceDict": {"a1": {"FFMediaAudioSourceDefaultEnableKey": True}},
+        "audioSourceDictVersion": 3,
+        "displayName": spec.name,
+        "fieldDominanceOverride": 1,
+        "hasAudio": spec.has_audio,
+        "hasClosedCaptionTrack": 1,
+        "hasVideo": spec.has_video,
+        "md5String": spec.identity,
+        "mediaIdentifier": spec.identity,
+        "mediaRange": spec.media_range,
+        "rotationDegrees": spec.rotation,
+        "timecodeDisplayDropFrame": spec.drop_frame,
+        "timecodeFrameDuration": spec.frame_duration,
+        "uttype": "com.apple.quicktime-movie",
+        "videoFormatName": spec.format,
+        "videoProps": _video_props(spec),
+    }
+    dropped = {"rotationDegrees"} if spec.rotation is None else set()
+    if spec.drop_frame is None:
+        dropped.add("timecodeDisplayDropFrame")
+    if not spec.media_range:
+        dropped.add("mediaRange")
+    return {key: value for key, value in record.items() if key not in {*dropped, *spec.omit}}
 
 
 def _asset_record(spec: MediaSpec) -> dict[str, object]:
