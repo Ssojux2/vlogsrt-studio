@@ -1,5 +1,5 @@
 """빨강 등급은 미검토 자동 제외로만 들어간다 — 사람이 보기 전까지 잘라 내는 확정 내보내기는
-닫히고, Final Cut 전체 타임라인에는 켠 채 키워드로만 간다(W-11, D51, D35, D56).
+닫히고, Final Cut 전체 타임라인에는 끈 채 키워드와 함께 간다(W-11, D51, D35, D56, D80).
 
 합성 미디어(15초 · 창 하나)에 재생 분석을 돌린다. 발화는 0.5–1.5·2–3·11–12·12.5–13.5초,
 3→11초가 8초짜리 자막 공백이다 — 발화 쪽 0.3초를 남긴 3.3–10.7초가 자막 없는 긴 공백이다(D52).
@@ -133,7 +133,7 @@ def _legacy_head(service: RawWorkspaceService, root: Path, monkeypatch: pytest.M
 
 
 @needs_ffmpeg
-def test_red_silence_becomes_unreviewed_auto_exclusion_and_finalcut_keeps_it_enabled(
+def test_red_silence_becomes_unreviewed_auto_exclusion_and_finalcut_sends_it_disabled(
     tmp_path: Path,
 ):
     service, root = tier_project(tmp_path, suitability="usable")
@@ -159,7 +159,7 @@ def test_red_silence_becomes_unreviewed_auto_exclusion_and_finalcut_keeps_it_ena
     red_start = f"{RED[0] * 25}/25s"
     pending_xml = ET.parse(service.export_finalcut_timeline(root))
     (red,) = [c for c in pending_xml.iter("asset-clip") if c.get("start") == red_start][-1:]
-    assert red.get("enabled") is None  # 지우지 않는 보내기는 관문이 없다(D56)
+    assert red.get("enabled") == "0"  # 지우지 않고 끈다 — 관문이 없다(D56·D80)
     assert [k.get("value") for k in red.findall("keyword")] == ["제외 제안", "제외 제안(미검토)"]
     confirmed = facade.confirm_automatic_exclusions()
     assert unreviewed_auto_exclusions(confirmed) == ()

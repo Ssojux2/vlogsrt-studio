@@ -579,7 +579,8 @@ def test_proposals_never_disable_the_send_button(tmp_path: Path, local_socket: N
     queue_js = js[js.index("function queueBlock(") : js.index("function nextQueueItem(")]
     assert "disabled" not in queue_js.replace('" disabled"', "")  # 「다음」만 끈다
     keyword = finalcut_timeline.KEYWORD_UNREVIEWED  # 대기열이 말하는 키워드 = 실제로 다는 키워드
-    assert '켠 채 <span class=\\"vl-kw\\">' + keyword + "</span> 키워드로 갑니다" in js
+    assert '개는 <span class=\\"vl-kw\\">' + keyword + "</span> 키워드로 갑니다 — 빨강은 " in js
+    assert "꺼진 채 갑니다(Final Cut에서 V로 켭니다)" in js  # W-29d, D80
 
 
 @needs_ffmpeg
@@ -1118,7 +1119,10 @@ def test_the_queue_panel_counts_and_offers_next_and_bulk(tmp_path: Path) -> None
     assert 'data-vl-act="queue-next">다음</button>' in thumbs
     assert 'data-vl-act="queue-confirm">남은 2개 모두 제외 유지</button>' in thumbs
     keyword = '<span class="vl-kw">제외 제안(미검토)</span>'
-    note = f"미검토 제외 제안 2개는 켠 채 {keyword} 키워드로 갑니다."
+    note = (
+        f"미검토 제외 제안 2개는 {keyword} 키워드로 갑니다 — 빨강은 꺼진 채 갑니다"
+        "(Final Cut에서 V로 켭니다)."
+    )
     assert note in thumbs  # 정보일 뿐 — 보내기를 막지 않는다(D56)
     # 목록 열 맨 위 — 결정 상자는 패널 맨 위를 그대로 지킨다(1280×800에서 스크롤 없이).
     assert thumbs.index('class="vl-queue"') < thumbs.index("vl-list-head")
@@ -1162,7 +1166,7 @@ def test_bulk_confirm_presses_the_old_handler_and_the_empty_queue_is_inert(
     empty = report["empty"]
     assert "제외 제안 3개 중 0개 남음" in re.sub(r"<[^>]+>", "", empty["thumbs"])
     assert 'data-vl-act="queue-next" disabled>다음</button>' in empty["thumbs"]
-    assert "queue-confirm" not in empty["thumbs"] and "켠 채" not in empty["thumbs"]
+    assert "queue-confirm" not in empty["thumbs"] and "꺼진 채" not in empty["thumbs"]
     assert empty["calls"] == 0 and empty["footnote"] == "남은 제외 제안이 없습니다."
     assert "vl-queue" not in report["noneThumbs"]  # 제안이 없으면 대기열도 없다
     # 경계와 맞지 않는 빨강만 있으면 — 남은 것은 없다고 말하고 「다음」도 일괄도 없다. 안내 한 줄.

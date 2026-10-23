@@ -284,7 +284,7 @@ def require_automatic_exclusions_reviewed(revision: ReviewRevision) -> None:
     """확정 내보내기 관문 — 사람이 보지 않은 자동 제외가 있으면 잘라내지 않고 멈춘다(D35).
 
     실제로 잘라 내는 `export_confirmed`만 이 관문을 지난다. Final Cut 전체 타임라인 보내기는
-    아무것도 지우지 않으므로(미검토 제외도 켠 채 키워드로만 간다) 관문이 없다(D56).
+    아무것도 지우지 않으므로(미검토 빨강은 끈 채 키워드와 함께 간다, D80) 관문이 없다(D56).
     """
     pending = unreviewed_auto_exclusions(revision)
     if pending:

@@ -1,6 +1,6 @@
 """자동 제외는 사람이 보기 전까지 미검토다 — 잘라 내는 확정 내보내기는 그 상태로 나가지
-못한다(D35·W-5). Final Cut 전체 타임라인은 지우지 않으므로 관문이 없고, 미검토 제외를 켠 채
-키워드로만 보낸다 — 사람이 확인하면 그때부터 꺼진 채 간다(D56).
+못한다(D35·W-5). Final Cut 전체 타임라인은 지우지 않으므로 관문이 없고, 미검토 제외는 키워드와
+함께 보낸다 — 등급이 빨강이면 처음부터, 아니면 사람이 확인한 뒤부터 꺼진 채 간다(D56·D80).
 
 순수 층(도메인 편집·설정)은 손으로 만든 리비전으로, 통합 층(조립·재분석·출력 관문)은
 `test_capcut_flow`와 같은 합성 ffmpeg 미디어로 잰다. 유료 호출 0회.
@@ -299,7 +299,7 @@ def test_ui_shows_pending_count_sends_without_a_gate_and_confirms_in_one_click(t
     signature = server.open_workspace_view(str(root))[1]
     pending = ReviewWorkspaceFacade(root).unreviewed_auto_exclusion_count()
     assert pending >= 2
-    server.finalcut_send_view(signature)  # 미검토가 있어도 보낸다 — 켠 채 키워드로(D56)
+    server.finalcut_send_view(signature)  # 미검토가 있어도 보낸다 — 빨강이 아니면 켠 채(D56·D80)
     job = next(j for j in server.raw.list_jobs(root) if j.kind == FINALCUT_SEND_JOB_KIND)
     assert _wait_terminal(service, root, job.job_id).status == "succeeded"
     (sent,) = opened

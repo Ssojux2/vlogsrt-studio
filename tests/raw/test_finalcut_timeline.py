@@ -4,7 +4,8 @@
 부르지 않으므로 재료는 전부 여기서 만든다. 지키는 선:
 
 - 아무것도 지우지 않는다 — 원본마다 클립 길이 합이 원본 길이다.
-- 사람이 확정한 제외만 끈다(`enabled="0"` + `제외 확정`). 미검토 빨강은 켠 채 키워드 둘.
+- 사람이 확정한 제외(`enabled="0"` + `제외 확정`)와 미검토 빨강(`enabled="0"` + 키워드 둘)을
+  끈다(W-29d, D80). 보통·보류·미분석인 미검토 제외는 켠다.
 - 키워드는 `tiering.segment_keyword`와 한 규칙이다. 평가는 브라우저 클립의 초록에만, reject 없음.
 - 캡션은 프레임에 맞추고 컷에서 나누며, 빈 글·겹침·줄·꼬리를 **세기만** 한다.
 - 시각은 실측 타임코드에서: 0008 `12:56:29;10` → `1397678282/30000s`.
@@ -309,13 +310,15 @@ P24, P25, P30, P60 = F(1, 24), F(1, 25), F(1, 30), F(1, 60)
 SINGLE_RATE_SHA256 = {
     "film": "160c4890adcc5554ee6c2f6c6b380b9b2e7e7b6f36617bb94c58345acbd6b9a3",
     "hfr": "86b6f2c054a71bed193a11bf2f6871886dba2ca42282b5a8d4fe519e62385961",
-    "mixed": "4a536973c4423ff13b76df5f94c98986f37be061c63d8bc6bea12969f02f4b96",
+    "mixed": "883d4932a19c1b443d250ba1cad53d350d1134382ce214609b71a7920f070d88",
     "one_side": "47da87315606164ab27c4aa2dc9c88ee4dba82a9f25f14ba030a7d09288b41d7",
     "pal": "3327606ec11e6f1d919012230a324167aacb2b6c37380226677a8001e58e7ee8",
-    "real_like": "42d830be7997e43d9b848e73ee47ab460001cec733a50a9e5e4ca23c36c5dadc",
-    "red": "902b46fe43fd6bf260c18897811e1312db09ecfe72bde470e496d6e01108d74d",
+    "real_like": "74fe170a9070b7635405a5567cc219233765ba127da3cafcd6a96c81e7bbf690",
+    "red": "1cc7f2d925252c8461df08bb146e1de715eaff8551abdd234f54151214304785",
 }
-"""W-27d 앞(e1fcafc)의 빌더로 렌더한 한 레이트 문서들 — 레이트가 하나면 바이트가 그대로다."""
+"""W-27d 앞(e1fcafc)의 빌더로 렌더한 한 레이트 문서들 — 레이트가 하나면 바이트가 그대로다.
+`mixed`·`real_like`·`red`는 W-29d(D80)에서 다시 고정했다 — 미검토 빨강 클립과 그 캡션에
+`enabled="0"`이 붙은 것 말고는 바이트가 같다(그 diff를 손으로 확인했다)."""
 
 
 def rated(
@@ -402,9 +405,11 @@ def test_documents_pass_the_installed_fcpxml_1_14_dtd(tmp_path: Path, name: str)
 
 def _check_spine_clip(clip: ET.Element) -> None:
     keywords = [k.attrib["value"] for k in clip.findall("keyword")]
-    assert (clip.get("enabled") == "0") == (ft.KEYWORD_CONFIRMED_EXCLUSION in keywords)
-    if ft.KEYWORD_UNREVIEWED in keywords:
-        assert clip.get("enabled") is None and ft.KEYWORD_SUGGESTED_EXCLUSION in keywords
+    unreviewed_red = ft.KEYWORD_UNREVIEWED in keywords and (
+        keywords[0] == ft.KEYWORD_SUGGESTED_EXCLUSION
+    )
+    disabled = ft.KEYWORD_CONFIRMED_EXCLUSION in keywords or unreviewed_red
+    assert (clip.get("enabled") == "0") == disabled
     assert clip.find("rating") is None
     begin = t(clip.attrib["start"])
     end = begin + t(clip.attrib["duration"])
@@ -459,7 +464,7 @@ def test_edge_documents_report_what_they_could_not_carry() -> None:
     assert asset is not None and asset.attrib["start"] == "0s" and asset.attrib["hasAudio"] == "0"
     red_root = parsed(edge_red())
     (clip,) = spine_clips(red_root)
-    assert "enabled" not in clip.attrib
+    assert clip.attrib["enabled"] == "0"  # 미검토 빨강은 꺼진 채 간다(W-29d, D80)
     assert [k.attrib["value"] for k in clip.findall("keyword")] == [
         "제외 제안",
         "제외 제안(미검토)",
@@ -572,16 +577,17 @@ def test_segments_that_do_not_tile_the_whole_file_are_refused(
 # ─── 5·6. 켜고 끄기와 키워드 ─────────────────────────────────────────────
 
 
-def test_only_human_confirmed_exclusions_are_disabled() -> None:
+def test_confirmed_exclusions_and_unreviewed_red_are_disabled() -> None:
+    """확정 제외와 미검토 빨강만 끈다 — 판정 보류는 켠다(W-29d, D80)."""
     plan = ft.plan_source(real_like_sources()[1])
     excluded, unreviewed, kept = plan.clips
     assert excluded.enabled is False
     assert excluded.keywords == (ft.KEYWORD_NORMAL, ft.KEYWORD_CONFIRMED_EXCLUSION)
-    assert unreviewed.enabled is True
+    assert unreviewed.enabled is False
     assert unreviewed.keywords == (ft.KEYWORD_SUGGESTED_EXCLUSION, ft.KEYWORD_UNREVIEWED)
     assert kept.enabled is True and kept.keywords == (ft.KEYWORD_HOLD,)
     clips = spine_clips(parsed(real_like_document()))[2:5]
-    assert [c.attrib.get("enabled") for c in clips] == ["0", None, None]
+    assert [c.attrib.get("enabled") for c in clips] == ["0", "0", None]
     assert [[k.attrib["value"] for k in c.findall("keyword")] for c in clips] == [
         ["보통", "제외 확정"],
         ["제외 제안", "제외 제안(미검토)"],
@@ -774,8 +780,9 @@ def test_disabled_clip_gets_no_extra_range() -> None:
     assert [k.attrib["value"] for k in clip.findall("keyword")] == ["보통", "제외 확정"]
 
 
-def test_unreviewed_red_clip_is_enabled_and_still_shows_buried_recommended() -> None:
-    """미검토 제외 제안은 켠 클립이다 — 그 안의 추천도 보인다(키워드만, 켜짐 그대로)."""
+def test_unreviewed_exclusion_graded_normal_stays_enabled_and_shows_buried_recommended() -> None:
+    """미검토 제외라도 조각 등급이 보통이면 켠 클립이다(W-29d, D80 — 끄는 것은 빨강뿐) — 그 안의
+    추천도 보인다(키워드만, 켜짐 그대로)."""
     source = buried_source(
         segments=(seg(0, 300, excluded=True, unreviewed=True), seg(300, 600)),
         rows=((0, 100, "red"), (100, 200, "green"), (200, 300, "red"), (300, 600, "yellow")),
@@ -1143,7 +1150,8 @@ def test_total_duration_beats_the_number_of_clips() -> None:
 
 
 def test_only_enabled_clips_vote_and_unreviewed_exclusions_stay_enabled() -> None:
-    """사람이 확정한 제외(꺼진 클립)는 표가 없다 — 미검토 제외 제안은 켠 채라 표가 있다."""
+    """사람이 확정한 제외(꺼진 클립)는 표가 없다 — 등급이 빨강이 아닌(여기선 미분석) 미검토
+    제외는 켠 채라 표가 있다."""
     portrait = whole("p", 500, PORTRAIT, segments=(seg(0, 450, excluded=True), seg(450, 500)))
     document = ft.plan([portrait, whole("l", 100, LANDSCAPE)], title="t", library_bundle=None)
     assert sequence_size(document) == LANDSCAPE
@@ -1153,6 +1161,20 @@ def test_only_enabled_clips_vote_and_unreviewed_exclusions_stay_enabled() -> Non
     )
     document = ft.plan([unreviewed, whole("l", 100, LANDSCAPE)], title="t", library_bundle=None)
     assert sequence_size(document) == PORTRAIT
+
+
+def test_unreviewed_red_is_disabled_and_loses_its_vote() -> None:
+    """미검토 빨강은 꺼진 채라(W-29d, D80) 방향 표가 없다 — 확정 제외와 같다."""
+    portrait = ft.SourceInput(
+        media=media("p", frames=500, size=PORTRAIT, ident=None),
+        segments=(seg(0, 450, excluded=True, unreviewed=True), seg(450, 500)),
+        report=frames_report(NTSC, (0, 450, "red"), (450, 500, "yellow")),
+    )
+    document = ft.plan([portrait, whole("l", 100, LANDSCAPE)], title="t", library_bundle=None)
+    red, _rest = document.sources[0].clips
+    assert red.enabled is False
+    assert red.keywords == (ft.KEYWORD_SUGGESTED_EXCLUSION, ft.KEYWORD_UNREVIEWED)
+    assert sequence_size(document) == LANDSCAPE
 
 
 def test_when_every_clip_is_excluded_all_clips_vote() -> None:
@@ -1219,7 +1241,7 @@ def test_only_enabled_clips_vote_for_the_rate() -> None:
     unreviewed = rated(
         "a", 900, P30, segments=(seg(0, 800, excluded=True, unreviewed=True), seg(800, 900))
     )
-    assert rate_of([unreviewed, rated("b", 240, P24)]) == P30  # 미검토 제외 제안은 켠 채다
+    assert rate_of([unreviewed, rated("b", 240, P24)]) == P30  # 미분석 미검토 제외는 켠 채다
 
 
 def test_when_every_clip_is_excluded_all_clips_vote_for_the_rate() -> None:
@@ -1616,7 +1638,7 @@ def test_document_counts_summarise_what_was_sent() -> None:
     counts = ft.document_counts(real_like_document())
     assert counts["sources"] == 3 and counts["analysed"] == 2
     assert counts["spine_clips"] == 6
-    assert counts["disabled_clips"] == 1 and counts["unreviewed_clips"] == 1
+    assert counts["disabled_clips"] == 2 and counts["unreviewed_clips"] == 1
     assert counts["frames"] == 1168 + 604 + 1064
     assert counts["keywords"] == {
         "보통": 2, "추천": 1, "제외 확정": 1, "제외 제안": 1, "제외 제안(미검토)": 1,

@@ -255,12 +255,12 @@ def test_analysis_completion_proposes_red_as_unreviewed_exclusion_and_export_wai
     # 관문은 패키지를 보기 전에 선다(이 흐름은 아직 조각을 뽑지 않았다).
     with pytest.raises(RawWorkspaceError, match="자동 제외 2개를 먼저 확인"):
         facade.export_confirmed("clips/package_never_built")
-    # Final Cut 보내기는 지우지 않으므로 막지 않는다 — 미검토 빨강은 켠 채 키워드로 간다(D56).
+    # Final Cut 보내기는 지우지 않으므로 막지 않는다 — 미검토 빨강은 끈 채 키워드와 간다(D56·D80).
     opened: list[Path] = []
     server._finalcut_opener = opened.append  # 시험은 실제 Final Cut을 열지 않는다
     sent = _send(server, root)
     assert [_state(sent, seconds(s)[0]) for s in pending] == [
-        (None, ["제외 제안", "제외 제안(미검토)"])
+        ("0", ["제외 제안", "제외 제안(미검토)"])
     ] * 2
     assert _state(sent, seconds(kept[0])[0])[0] is None
     facade.confirm_automatic_exclusions()

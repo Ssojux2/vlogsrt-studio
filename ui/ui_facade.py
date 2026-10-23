@@ -3422,7 +3422,8 @@ VISUAL_BOOTSTRAP_JS = (
           out.push('<button type="button" class="vl-btn vl-btn-danger vl-btn-sm" ' +
             'data-vl-act="queue-confirm">남은 ' + q.open + "개 모두 제외 유지</button>" +
             '<p class="vl-queue-note">미검토 제외 제안 ' + q.open +
-            "개는 켠 채 <span class=\"vl-kw\">제외 제안(미검토)</span> 키워드로 갑니다.</p>");
+            "개는 <span class=\"vl-kw\">제외 제안(미검토)</span> 키워드로 갑니다 — 빨강은 " +
+            "꺼진 채 갑니다(Final Cut에서 V로 켭니다).</p>");
         }
         if (loose > 0) {
           out.push('<p class="vl-queue-note">' + looseLine(loose, q.looseSources || []) + "</p>");

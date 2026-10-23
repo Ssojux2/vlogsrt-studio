@@ -7,9 +7,9 @@
 지키는 선:
 
 - **아무것도 지우지 않는다.** 원본마다 클립이 `[0, frame_count)`를 빈틈없이 덮는다. 끄는 것은
-  사람이 확정한 제외뿐이고(`enabled="0"` + `제외 확정`), 꺼진 클립은 Final Cut에서 V로 되살아난다.
-  미검토 자동 제외는 켠 채 `제외 제안(미검토)` 키워드만 단다 — 사람이 보기 전에 화면에서 사라지면
-  손실을 발견할 기회가 없어진다(D35, 규칙 9).
+  사람이 확정한 제외(`enabled="0"` + `제외 확정`)와 미검토 빨강(`enabled="0"` + `제외 제안` +
+  `제외 제안(미검토)`, W-29d D80)이고, 꺼진 클립은 Final Cut에서 V로 되살아난다 — 클립·캡션·
+  키워드가 그대로 남아 사람이 찾을 수 있다(D35, 규칙 9). 보통·판정 보류는 켠다.
 - **시각은 실측에서만 온다.** 클립 시작은 원본 타임코드 프레임 × 프레임 길이다(Final Cut이 같은
   값을 쓴다: 0008 `12:56:29;10` → `1397678282/30000s`). 캡션·키워드 범위를 프레임에 맞추는
   것(½프레임 이내, 최소 1프레임)은 FCPXML이 프레임 격자만 받기 때문이지 시각 유도가 아니다.
@@ -358,14 +358,21 @@ def _base_keyword(source: SourceInput, start_frame: int, end_frame: int) -> str:
 
 
 def _clip(source: SourceInput, segment: SegmentState) -> ClipPlan:
-    """조각 하나 → 클립. 사람이 확정한 제외만 끄고, 미검토 제외는 켠 채 키워드로만 알린다."""
-    keywords = [_base_keyword(source, segment.start_frame, segment.end_frame)]
+    """조각 하나 → 클립. 사람이 확정한 제외와 미검토 빨강(`제외 제안`)을 끈다(W-29d, D80).
+
+    미검토 제외라도 등급이 빨강이 아니면(보통·보류·미분석) 켠 채 키워드로만 알리고, 사람이
+    되살린 빨강(제외 아님)도 켠다. 끄기는 지우기가 아니다 — Final Cut에서 V로 되살아난다.
+    """
+    tier_keyword = _base_keyword(source, segment.start_frame, segment.end_frame)
+    keywords = [tier_keyword]
     confirmed = segment.excluded and not segment.unreviewed
+    suggested = segment.unreviewed and tier_keyword == KEYWORD_SUGGESTED_EXCLUSION
     if segment.unreviewed:
         keywords.append(KEYWORD_UNREVIEWED)
     if confirmed:
         keywords.append(KEYWORD_CONFIRMED_EXCLUSION)
-    return ClipPlan(segment.start_frame, segment.end_frame, not confirmed, tuple(keywords))
+    enabled = not (confirmed or suggested)
+    return ClipPlan(segment.start_frame, segment.end_frame, enabled, tuple(keywords))
 
 
 def _merge_identical(clips: Sequence[ClipPlan]) -> tuple[ClipPlan, ...]:

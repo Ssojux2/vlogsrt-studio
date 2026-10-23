@@ -3,7 +3,7 @@
 `finalcut_timeline`(순수)이 짠 문서를 실제 작업공간에서 모아 쓰는 길을 합성 ffmpeg 미디어로
 증명한다. 유료 호출 0회. 지키는 선:
 
-- 미검토 빨강이 남아 있어도 보낸다(지우지 않으므로 관문이 없다) — 켠 채 키워드로만 알린다.
+- 미검토 빨강이 남아 있어도 보낸다(지우지 않으므로 관문이 없다) — 끈 채 키워드와 함께(D80).
   사람이 확인한 뒤 다시 보내면 그 조각만 꺼진다(`enabled="0"`).
 - 원본을 열지도, 다시 해시하지도, 복사하지도 않는다. 작업공간에서 바뀌는 것은
   `review/finalcut/` 아래 새 파일뿐이고, 다시 보내면 언제나 새 파일이다(덮어쓰지 않는다).
@@ -171,7 +171,8 @@ def _export_files(root: Path) -> list[str]:
 # ─── 17·22. 관문 없음 · 확인 뒤 꺼짐 · 다시 보내면 새 파일 ─────────────────────
 
 
-def test_unreviewed_red_is_sent_enabled_then_disabled_after_human_confirm(tmp_path: Path):
+def test_unreviewed_red_is_sent_disabled_and_stays_disabled_after_human_confirm(tmp_path: Path):
+    """미검토 빨강은 처음부터 꺼진 채 간다(W-29d, D80) — 확인 뒤에는 키워드만 「제외 확정」으로."""
     service, root = tier_project(tmp_path, suitability="usable")
     first = service.export_finalcut_timeline(root)
     assert first.parent == root / "review" / "finalcut" and first.suffix == ".fcpxml"
@@ -181,10 +182,11 @@ def test_unreviewed_red_is_sent_enabled_then_disabled_after_human_confirm(tmp_pa
     clips = _spine(first)
     (red,) = [c for c in clips if c.attrib["start"] == red_start]
     assert red.attrib["duration"] == red_length
-    assert "enabled" not in red.attrib
+    assert red.attrib["enabled"] == "0"
     assert _keywords(red) == ["제외 제안", "제외 제안(미검토)"]
-    assert not any(c.get("enabled") == "0" for c in clips)
-    assert _report(first)["counts"]["unreviewed_clips"] == 1
+    assert [c for c in clips if c.get("enabled") == "0"] == [red]
+    counts = _report(first)["counts"]
+    assert (counts["disabled_clips"], counts["unreviewed_clips"]) == (1, 1)
 
     ReviewWorkspaceFacade(root).confirm_automatic_exclusions()
     second = service.export_finalcut_timeline(root)
