@@ -80,6 +80,9 @@ class AsrPhaseApproval:
     text_chunk_keys: tuple[str, ...] | None = None
     """견적이 센 바로 그 청크들의 글자 캐시 열쇠 — 있으면 이 청크만 보낸다(더 긴 다른 청크로
     상한을 채우지 못한다). None은 1단계 기록이 없던 원본 — 견적이 그 오디오의 청크 전부를 셌다."""
+    rescue_chunk_budget: int = 0
+    """「다른 귀 기준 재전사」(W-29b, D78)의 whisper 다시 묻기 상한 — 0이면 다시 묻지 않는다. 1차
+    전사 예산(`chunk_budget`)과 따로 센다."""
 
     def approved_on_date(self) -> date:
         """승인 날짜의 date — 모양이 어긋나면 승인 자체가 계약 위반이다."""

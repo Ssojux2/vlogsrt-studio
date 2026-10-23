@@ -772,6 +772,31 @@ def check_retext_stays_pure() -> list[str]:
     ]
 
 
+# 「다른 귀 기준 재전사」의 판정(W-29b, D78)도 값만 받아 값만 돌려준다 — 전송·파일·전사 흐름을 알면
+# 다시 묻기를 고르는 판정이 호출·캐시 상태에 기대게 된다. 묻고 쓰는 일은 `understanding.py`의 몫이다.
+EAR_RESCUE_MUST_NOT_IMPORT = (
+    *RETEXT_MUST_NOT_IMPORT, "understanding", "source_text", "service", "sqlite3", "caption_provider",
+)  # fmt: skip
+
+
+def check_ear_rescue_stays_pure() -> list[str]:
+    """D78 — `ear_rescue.py`는 whisper 세그먼트·다른 귀 글자를 **값으로** 받아 판정만 돌려준다."""
+    path = PROJECT_PACKAGE / "raw" / "ear_rescue.py"
+    if not path.exists():
+        return ["vlogsrt/project/raw/ear_rescue.py: 다른 귀 기준 재전사 판정 계층이 사라졌다 (D78)"]
+    body = path.read_text(encoding="utf-8")
+    failures = [
+        f"ear_rescue.py: {name}을 import한다 — 다시 묻기 판정이 순수 함수가 아니게 된다 (D78)"
+        for name in _imports(body, EAR_RESCUE_MUST_NOT_IMPORT)
+    ]
+    failures += [
+        f"ear_rescue.py:{number}: 파일을 직접 읽거나 쓴다 — 판정은 값만 다룬다 (D78)"
+        for number, line in enumerate(body.splitlines(), start=1)
+        if TIERING_FILE_IO.search(line)
+    ]
+    return failures
+
+
 # 요청 빌더의 칸(D59 19c) — whisper(시간) 요청에는 힌트가, 글자 요청에는 시각 입자가 실리지 않는다.
 # 1단계 글자 경로가 용어집·고정 문맥을 요청마다 싣게 되면서 그 길이 whisper 쪽으로 새지 않게 막는다.
 REQUEST_LANES = (
@@ -2661,6 +2686,7 @@ CHECKS = (
     ("검증은 출력을 못 건드린다", check_verify_cannot_touch_output),
     ("재전사는 전사 단계에 머문다", check_repair_stays_upstream),
     ("글자 교정은 순수하다", check_retext_stays_pure),
+    ("다른 귀 기준 재전사 판정은 순수하다", check_ear_rescue_stays_pure),
     ("3단 등급은 순수하다", check_tiering_stays_pure),
     ("등급의 시각 확인 값은 서비스 한 자리만", check_tier_timing_only_from_service),
     ("자막 시각 확인은 순수하다", check_sync_check_stays_pure),

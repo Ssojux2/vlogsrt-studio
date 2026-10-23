@@ -717,6 +717,13 @@ class AnalysisEstimate:
     text_chunk_keys: tuple[str, ...] | None = None
     """그 청크들의 글자 캐시 열쇠(1단계 기록이 있을 때만) — 승인이 이 청크만 보내게 묶는다. 기록이
     없으면(처음 듣는 영상) None이고 그때는 그 오디오의 청크 전부를 센 것이다."""
+    rescue_chunk_count: int | None = None
+    """「다른 귀 기준 재전사」(W-29b, D78)의 whisper 다시 묻기 최대 횟수 — 교차 확인이 켜져 있고
+    소리가 있을 때만(청크 수 × 온도 차례). 꺼져 있으면 None이고 견적 지문에도 없다(바이트
+    그대로)."""
+    rescue_usd: str | None = None
+    """그 최대 횟수의 오디오 길이 × 시간 역할 공식 분당 단가(`USD_STEP` 올림) — 상한이지 예상이
+    아니다."""
 
 
 @dataclass(frozen=True, slots=True)

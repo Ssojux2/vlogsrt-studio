@@ -289,6 +289,11 @@ SNAP_REVERTED_TEXT = (
 )
 SNAP_APPLY_LABEL = "시각 맞춤 적용(무료)"
 SNAP_REVERT_LABEL = "되돌리기"
+RESCUE_QUOTE_TEXT = (
+    " 교차 확인과 맞지 않는 조각만 전사에 다시 묻습니다(최대 {count}회, 공식 단가로 최대 ${usd} —"
+    " 맞지 않는 조각이 없으면 0회입니다)."
+)
+"""「다른 귀 기준 재전사」(W-29b, D78)의 견적 문장 — 상한과 금액(앞 공백 포함)."""
 SNAP_ALL_CHECK_LABEL = "모든 영상 시각 맞춤 확인(무료)"
 SNAP_ALL_APPLY_LABEL = "확인한 영상 모두 적용(무료)"
 SNAP_ALL_EXPLANATION = (
@@ -1168,6 +1173,19 @@ def _text_pass_sentence(quote: Any, estimates: Sequence[Any]) -> str:
     if _transcribe_only(quote):
         return f"{heard}. 바뀐 자막이 있는 창은 다음 영상 분석 때 다시 판정합니다."
     return f"{heard} — 바뀐 자막이 있는 창도 이번 영상 분석이 판정하며 위 견적에 들어 있습니다."
+
+
+def _rescue_sentence(estimates: Sequence[Any]) -> str:
+    """「다른 귀 기준 재전사」(W-29b, D78) 견적 문장 — 견적이 상한을 실었을 때만(앞 공백 포함).
+
+    상한이지 예상이 아니다 — 실제로는 두 귀가 어긋난 조각만 다시 묻는다. 금액은 공식 단가 합을
+    센트로 올린다(견적 칸이라 금액이 허용된다, D57)."""
+    asked = [e for e in estimates if getattr(e, "rescue_chunk_count", None)]
+    if not asked:
+        return ""
+    count = sum(int(e.rescue_chunk_count) for e in asked)
+    usd = sum((Decimal(e.rescue_usd) for e in asked), Decimal(0))
+    return RESCUE_QUOTE_TEXT.format(count=count, usd=usd.quantize(CENT, rounding=ROUND_CEILING))
 
 
 def _glossary_now(glossary: Any) -> str:
@@ -2759,9 +2777,13 @@ class RawWorkspaceUi:
             breakdown = _pending_breakdown(self._task_views(root), [e.asset_id for e in pending])
         asr = sum(e.asr_chunk_count for e in pending)
         text_pass = _text_pass_sentence(quote, pending)
+        rescue = _rescue_sentence(pending)
         if _transcribe_only(quote):
-            return _transcribe_only_summary(
-                len(pending), len(cached), asr, self._analysis_limit, text_pass, breakdown
+            return (
+                _transcribe_only_summary(
+                    len(pending), len(cached), asr, self._analysis_limit, text_pass, breakdown
+                )
+                + rescue
             )
         luna = sum(e.luna_request_count for e in pending)
         label, ceiling = _semantic_quote_terms(_quote_model(quote), pending)
@@ -2769,7 +2791,7 @@ class RawWorkspaceUi:
         return (
             f"분석 대상 {len(pending)}개{breakdown} · 저장 결과 {len(cached)}개 재사용 · "
             f"전사 최대 {asr}회 + 영상 분석{model} 최대 {luna}회{ceiling}.{text_pass} 승인하면 두"
-            f" 단계가 이어집니다. 최대 {self._analysis_limit}개를 동시에 분석합니다."
+            f" 단계가 이어집니다. 최대 {self._analysis_limit}개를 동시에 분석합니다.{rescue}"
         )
 
     # ── 승인 범위(전체 · 「전사만」, D59 19b) — 작업공간 meta에 산다 ─────────────────
@@ -3390,13 +3412,14 @@ class RawWorkspaceUi:
         chunks = sum(e.asr_chunk_count for e in quote.estimates)
         duration = sum(float(Fraction(e.asr_seconds)) for e in quote.estimates)
         text_pass = _text_pass_sentence(quote, quote.estimates)
+        rescue = _rescue_sentence(quote.estimates)
         if _transcribe_only(quote):
             return (
                 f"**전사만 준비 완료** · 선택 영상 {len(quote.asset_ids)}개\n\n"
                 f"전사 최대 {chunks}요청({duration:.0f}초). 영상 분석은 하지 않습니다 — 이미"
                 f" 받은 전사 조각은 다시 사지 않습니다.{text_pass}\n\n"
                 f"「{LIBRARY_APPROVE_LABEL}」으로 승인하면 전사·원본 자막·장면 준비까지 하고"
-                " 영상 분석 앞에서 멈춥니다."
+                f" 영상 분석 앞에서 멈춥니다.{rescue}"
             )
         requests = sum(max(1, e.luna_request_count) for e in quote.estimates)
         label, ceiling = _semantic_quote_terms(_quote_model(quote), quote.estimates)
@@ -3405,7 +3428,7 @@ class RawWorkspaceUi:
             f"전사 최대 {chunks}요청({duration:.0f}초) + {label} 최대 {requests}요청{ceiling}."
             f"{text_pass} 실제 비용은 사용한 오디오·토큰에 따라 정해집니다.\n\n"
             f"「{LIBRARY_APPROVE_LABEL}」으로 한 번 승인하면 전사·장면 분석·추천 표시가"
-            " 자동으로 이어집니다."
+            f" 자동으로 이어집니다.{rescue}"
         )
 
     # ── 영상 분석 모델(D54) — 작업공간 설정에 산다 ─────────────────────────

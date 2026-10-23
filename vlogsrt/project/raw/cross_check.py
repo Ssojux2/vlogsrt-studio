@@ -27,7 +27,9 @@ from pathlib import Path
 from typing import Any
 
 from vlogsrt import log
-from vlogsrt.project.raw import asr_epoch, glossary, read_scope, source_text
+from vlogsrt.config import Config
+from vlogsrt.project.raw import asr_epoch, ear_rescue, glossary, read_scope, source_text
+from vlogsrt.project.raw.capabilities import ROLE_TIMING, price_per_minute
 from vlogsrt.project.raw.config import SOURCE_TEXT_SETTINGS
 from vlogsrt.project.raw.models import AnalysisEstimate, RawWorkspaceError
 from vlogsrt.project.raw.understanding import CHUNK_PLAN_FIXED, SampleSpan
@@ -113,20 +115,40 @@ def with_text_passes(
         asset.asset_id: asset.content_sha256 or "" for asset in workspace.list_source_assets()
     }
     return tuple(
-        _with_text(
-            workspace.root,
-            item,
-            owners.get(item.asset_id, ""),
-            digest,
-            replanned=asr_epoch.state(workspace, item.asset_id).pending,
+        with_rescue(
+            _with_text(
+                workspace.root,
+                item,
+                owners.get(item.asset_id, ""),
+                digest,
+                replanned=asr_epoch.state(workspace, item.asset_id).pending,
+            )
         )
         for item in estimates
     )
 
 
+def with_rescue(item: AnalysisEstimate) -> AnalysisEstimate:
+    """「다른 귀 기준 재전사」(W-29b, D78)의 상한 — 소리가 있으면 청크마다 온도 차례만큼 다시
+    묻는다고 본다. 실제로는 다른 귀와 어긋난 청크만 묻는다(상한이지 예상이 아니다)."""
+    if not item.has_audio:
+        return item
+    attempts = len(ear_rescue.temperatures(Config()))
+    seconds = Fraction(item.asr_seconds) * attempts
+    exact = Decimal(seconds.numerator) / Decimal(seconds.denominator) / Decimal(60)
+    usd = (exact * price_per_minute(ROLE_TIMING)).quantize(USD_STEP, rounding=ROUND_CEILING)
+    return replace(item, rescue_chunk_count=item.asr_chunk_count * attempts, rescue_usd=str(usd))
+
+
 def _without_text(item: AnalysisEstimate) -> AnalysisEstimate:
     return replace(
-        item, text_chunk_count=None, text_seconds=None, text_usd=None, text_chunk_keys=None
+        item,
+        text_chunk_count=None,
+        text_seconds=None,
+        text_usd=None,
+        text_chunk_keys=None,
+        rescue_chunk_count=None,
+        rescue_usd=None,
     )
 
 

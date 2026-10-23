@@ -273,11 +273,19 @@ def asr_estimate_digest(estimates: Sequence[AnalysisEstimate]) -> str:
             item.luna_request_count,
             *_present(item.ceiling_usd),
             *_text_pass(item),
+            *_rescue_pass(item),
         )
         for item in estimates
     )
     body = json.dumps(rows, ensure_ascii=False, sort_keys=True)
     return hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+
+def _rescue_pass(item: AnalysisEstimate) -> tuple[object, ...]:
+    """「다른 귀 기준 재전사」 상한(W-29b, D78) — 견적이 실었을 때만 칸을 더한다(수·금액)."""
+    if item.rescue_chunk_count is None:
+        return ()
+    return ("rescue", item.rescue_chunk_count, item.rescue_usd)
 
 
 def semantic_estimate_digest(estimates: Sequence[AnalysisSemanticEstimate]) -> str:
@@ -351,8 +359,23 @@ def mint_asr_approvals(
             timing_model=workflow.models.timing_model,
             approved_on=(on or date.today()).isoformat(),
             **texts.get(estimate.asset_id, {}),
+            **_quoted_rescue(quoted, estimate.asset_id),
         )
     return approvals
+
+
+def _quoted_rescue(quoted: Sequence[AnalysisEstimate], asset_id: str) -> dict[str, Any]:
+    """사람이 본 견적 줄의 다시 묻기 예산(D78) — 그 원본 줄이 없으면(고급 탭) 0이다."""
+    row = next((item for item in quoted if item.asset_id == asset_id), None)
+    return {} if row is None else _rescue_approval_fields(row)
+
+
+def _rescue_approval_fields(estimate: AnalysisEstimate) -> dict[str, Any]:
+    """승인의 다시 묻기 예산(W-29b, D78) — 사람이 본 견적이 상한을 실었을 때만. 아니면 0(묻지
+    않는다)."""
+    if not estimate.rescue_chunk_count:
+        return {}
+    return {"rescue_chunk_budget": int(estimate.rescue_chunk_count)}
 
 
 def _quoted_text_fields(

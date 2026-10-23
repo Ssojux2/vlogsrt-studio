@@ -34,7 +34,7 @@ from datetime import UTC, datetime
 from datetime import date as date_type
 from fractions import Fraction
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from vlogsrt import log, preprocess
 from vlogsrt.project.raw import asr_epoch as asr_epoch_store
@@ -65,6 +65,7 @@ from vlogsrt.project.raw.analysis_store import (
     new_analysis_revision_id,
 )
 from vlogsrt.project.raw.caption_provider import (
+    RescueTimingProvider,
     TimingProvider,
     TransportTextProvider,
     TransportTimingProvider,
@@ -468,6 +469,9 @@ class ApprovedPhaseAsrProvider:
     audio: SelectedAudio
     approval: AsrPhaseApproval
     gate: AsrReservationGate
+    rescue_gate: AsrReservationGate | None = None
+    """「다른 귀 기준 재전사」(D78) 예산 문 — 승인이 다시 묻기를 묶었을 때만. 없으면 온도를 단
+    요청(다시 묻기)은 보내지 않는다."""
 
     def timed_transcript(
         self,
@@ -478,6 +482,7 @@ class ApprovedPhaseAsrProvider:
         on: date_type,
         stem: str = "",
         source: str = "",
+        temperature: float | None = None,
     ) -> Any:
         require_live_asr_approval(
             self.approval,
@@ -497,15 +502,44 @@ class ApprovedPhaseAsrProvider:
                 f"청크 범위가 선택 오디오 밖이다: [{binding.sample_start}, {binding.sample_end})"
                 f" / {self.audio.sample_count} 샘플"
             )
+        if temperature is not None:
+            return self._rescue(binding, chunk, settings, on, stem, source, temperature)
         self.gate.reserve(count=1, key=str(binding.request_id))
         return self.inner.timed_transcript(
             binding=binding, chunk=chunk, settings=settings, on=on, stem=stem, source=source
         )
 
+    # ─────────────────────────────────────────────────────────────
+    #  원본별 입력 지문 — 캐시 무효화의 열쇠(§14.2)
+    # ─────────────────────────────────────────────────────────────
 
-# ─────────────────────────────────────────────────────────────
-#  원본별 입력 지문 — 캐시 무효화의 열쇠(§14.2)
-# ─────────────────────────────────────────────────────────────
+    def _rescue(
+        self,
+        binding: Any,
+        chunk: Any,
+        settings: RawWorkflowConfig,
+        on: date_type,
+        stem: str,
+        source: str,
+        temperature: float,
+    ) -> Any:
+        """다시 묻기 한 번 — 승인의 다시 묻기 예산에서 센다(1차 예산과 따로). 문은 위에서 이미
+        지났다."""
+        if self.rescue_gate is None:
+            raise AnalysisApprovalError(
+                "승인이 다시 묻기를 묶지 않았다 — 다른 귀와 어긋난 조각을 다시 묻지 않는다"
+            )
+        self.rescue_gate.reserve(count=1, key=str(binding.request_id))
+        tempered = cast(RescueTimingProvider, self.inner)  # TransportTimingProvider만 온다
+        return tempered.timed_transcript(
+            binding=binding,
+            chunk=chunk,
+            settings=settings,
+            on=on,
+            stem=stem,
+            source=source,
+            temperature=temperature,
+        )
 
 
 def source_input_fingerprint(
@@ -1310,33 +1344,70 @@ def _hear_source(
 ) -> tuple[AsrEvidence, tuple[UtteranceEvidence, ...], dict[str, object]]:
     """whisper로 시각과 글자를 듣고, 같은 청크 WAV를 두 번째 귀에 한 번 더 묻는다(D59 19c)."""
     asr_provider = _asr_provider_for(providers, workflow, settings, audio, asset.asset_id)
-    cache_dir = workspace.root / "cache" / "source-asr" / asset.asset_id
+    hearing = _Hearing(
+        asr_provider,
+        workspace.root / "cache" / "source-asr" / asset.asset_id,
+        asr_epoch,
+        _may_rescue(asr_provider),
+    )
+    evidence = _first_hearing(
+        revision, asset, settings, workflow, providers, audio, source_dir, hearing
+    )
+    return _cross_check_text(
+        workspace,
+        revision,
+        asset,
+        settings,
+        workflow,
+        providers,
+        audio,
+        evidence,
+        source_dir,
+        hearing,
+    )
+
+
+def _first_hearing(
+    revision: AnalysisRevision,
+    asset: SourceAsset,
+    settings: RawUnderstandingSettings,
+    workflow: RawWorkflowConfig,
+    providers: AnalysisProviders,
+    audio: SelectedAudio,
+    source_dir: Path,
+    hearing: _Hearing,
+) -> AsrEvidence:
+    """1차 whisper — 청크 계획(D74)을 고르고 그 계획으로 듣는다."""
     plan = stage1.plan_heard_chunks(
         audio,
         settings,
         settings=workflow,
-        provider=asr_provider,
+        provider=hearing.provider,
         workdir=source_dir,
-        cache_dir=cache_dir,
-        asr_epoch=asr_epoch,
+        cache_dir=hearing.cache_dir,
+        asr_epoch=hearing.asr_epoch,
     )
-    evidence = stage1.transcribe_selected_audio(
+    return stage1.transcribe_selected_audio(
         audio,
         plan.spans,
         settings=workflow,
         understanding=settings,
-        provider=asr_provider,
+        provider=hearing.provider,
         on=providers.on or datetime.now(UTC).date(),
         request_id=f"{revision.revision_id}:{asset.asset_id}",
         workdir=source_dir,
-        cache_dir=cache_dir,
-        asr_epoch=asr_epoch,
+        cache_dir=hearing.cache_dir,
+        asr_epoch=hearing.asr_epoch,
         chunk_plan=plan.schema,
     )
-    utterances, record = _cross_check_text(
-        workspace, revision, asset, settings, workflow, providers, audio, evidence, source_dir
-    )
-    return evidence, utterances, record
+
+
+def _may_rescue(provider: TimingProvider) -> bool:
+    """새로 다시 물어도 되는가(D78) — 승인된 실제 호출은 승인이 다시 묻기 예산을 묶었을 때만이다.
+    묶지 않았으면 전에 채택한 답만 캐시에서 이어 쓴다(거절 기록을 남기며 두드리지 않는다)."""
+    if isinstance(provider, ApprovedPhaseAsrProvider):
+        return provider.rescue_gate is not None
+    return True
 
 
 def _cross_check_text(
@@ -1349,8 +1420,12 @@ def _cross_check_text(
     audio: SelectedAudio,
     evidence: AsrEvidence,
     source_dir: Path,
-) -> tuple[tuple[UtteranceEvidence, ...], dict[str, object]]:
+    hearing: _Hearing | None = None,
+) -> tuple[AsrEvidence, tuple[UtteranceEvidence, ...], dict[str, object]]:
     """1단계 글자 경로(D59 19c) — whisper가 들은 같은 WAV를 두 번째 귀에 묻고 게이트로 얹는다.
+
+    `hearing`(whisper 제공자·캐시·차례)이 있으면 게이트에 앞서 두 귀가 어긋난 청크만 whisper에 다시
+    묻는다(「다른 귀 기준 재전사」, W-29b D78) — 채택된 답 위에서 게이트가 다른 귀 글자를 얹는다.
 
     용어집은 이 요청에만 실린다(규칙 6 — whisper 요청에는 힌트 칸이 없다). 제공자가 없으면(승인이
     글자를 묶지 않은 온라인 — 교차 확인이 꺼져 있거나 물을 청크가 없다 — ·글자 픽스처 없는 재생)
@@ -1367,11 +1442,49 @@ def _cross_check_text(
     )
     provider = _text_provider_for(providers, workflow, settings, audio, asset.asset_id, request)
     outcomes = source_text.run_text_pass(audio, evidence, request, provider)
+    if hearing is not None:
+        evidence = _rescue_evidence(audio, evidence, outcomes, workflow, hearing, request)
     utterances = stage1.utterance_evidence(audio, evidence)
     result = source_text.apply_text_pass(
         utterances, outcomes, request, audio.sample_rate, _seeded_rows(workspace, asset)
     )
-    return result.utterances, result.record
+    return evidence, result.utterances, result.record
+
+
+def _rescue_evidence(
+    audio: SelectedAudio,
+    evidence: AsrEvidence,
+    outcomes: Sequence[source_text.TextChunkOutcome],
+    workflow: RawWorkflowConfig,
+    hearing: _Hearing,
+    request: source_text.TextPassRequest,
+) -> AsrEvidence:
+    """다른 귀 답을 받은 청크만 넘긴다 — 빈 답은 「아무것도 못 들음」, 없는 청크는 「이번엔 답
+    없음」."""
+    received = {o.chunk_index: o.text for o in outcomes if o.status == source_text.STATUS_RECEIVED}
+    return stage1.rescue_disagreeing_chunks(
+        audio,
+        evidence,
+        received,
+        settings=workflow,
+        provider=hearing.provider,
+        on=request.on,
+        workdir=request.workdir,
+        cache_dir=hearing.cache_dir,
+        asr_epoch=hearing.asr_epoch,
+        may_ask=hearing.may_ask,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _Hearing:
+    """1차 whisper를 들은 그 제공자·캐시·차례 — 다시 묻기(D78)가 같은 열쇠 계열을 쓴다. `may_ask`가
+    거짓이면 새로 묻지 않고 전에 채택한 답만 잇는다."""
+
+    provider: TimingProvider
+    cache_dir: Path
+    asr_epoch: int
+    may_ask: bool = True
 
 
 def _seeded_rows(workspace: RawWorkspace, asset: SourceAsset) -> list[dict]:
@@ -1919,6 +2032,18 @@ def _asr_provider_for(
         on=providers.on or datetime.now(UTC).date(),
     )
     inner = TransportTimingProvider(sender=sender, cfg=cfg)  # type: ignore[arg-type]
+    return _approved_phase_provider(inner, workflow, settings, audio, approval)
+
+
+def _approved_phase_provider(
+    inner: TimingProvider,
+    workflow: RawWorkflowConfig,
+    settings: RawUnderstandingSettings,
+    audio: SelectedAudio,
+    approval: AsrPhaseApproval,
+) -> ApprovedPhaseAsrProvider:
+    """승인의 두 예산 문 — 1차 청크 예산과, 승인이 묶었을 때만 다시 묻기 예산(D78)."""
+    rescue = approval.rescue_chunk_budget
     return ApprovedPhaseAsrProvider(
         inner=inner,
         workflow=workflow,
@@ -1926,6 +2051,7 @@ def _asr_provider_for(
         audio=audio,
         approval=approval,
         gate=CountingAsrGate(limit=approval.chunk_budget),
+        rescue_gate=CountingAsrGate(limit=rescue) if rescue else None,
     )
 
 
@@ -2281,6 +2407,7 @@ def _asr_from_artifact(artifact: Mapping[str, object]) -> AsrEvidence:
             if isinstance(seg, Mapping)
         )
         scores, words = stage1.asr_chunk_material(item)
+        attempts, first = stage1.asr_chunk_rescue(item)
         chunks.append(
             AsrChunkOutcome(
                 chunk_index=int(item["chunk_index"]),
@@ -2293,6 +2420,8 @@ def _asr_from_artifact(artifact: Mapping[str, object]) -> AsrEvidence:
                 clamped_segments=tuple(int(at) for at in item.get("clamped_segments", [])),
                 segment_scores=scores,
                 words=words,
+                rescue_attempts=attempts,
+                first_transcript=first,
             )
         )
     return AsrEvidence(
