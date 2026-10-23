@@ -399,9 +399,20 @@ class RawTierSettings:
       「확인 필요」(D59 19e) 표시가 붙은 원본 자막 줄의 몫이 이 값 **이하**면 「자막 확인됨」이다 —
       그 영상의 `usable` × 발화 많음 칸이 추천이 된다. 0이면 의심 줄이 하나도 없어야 하고, 1이면
       초록 판정만 본다.
+
+    손셀피 브이로그의 추천 넓히기(W-29c, D79, `raw-tier/v6` — 사용자 결정 「초록을 충분히 늘려줘」,
+    외부 근거 없는 조정 대상):
+
+    - `usable_speech_green`: AI가 `usable`이라 한 화면 × 발화 많음 → 추천(「자막 확인됨」이 없어도).
+    - `scenery_green`: AI가 `recommended`라 한 화면 × 자막 공백(풍경) → 추천(D51을 바꾼다).
+    - `good_sparse_green`: AI가 `recommended`라 한 화면 × 발화 적음 → 추천.
+    - `visual_issue_caps`: 녹색을 보통으로 내리는 화면 문제(D60 20b-final)를 이 종류만으로 좁힌다 —
+      손에 든 셀피에 늘 붙는 가림·흔들림·흐림은 빼고 어두움·과노출만 남긴다(사용자 결정).
+    - `segment_green_share`: 검토 조각은 빨강이 없고 녹색 구간이 조각 길이의 이 몫 **이상**이면
+      추천이다(예전엔 전부 녹색이어야 했다). 3초 상한은 그대로 걸린다. 1이면 예전 규칙이다.
     """
 
-    tier_version: str = "raw-tier/v5"
+    tier_version: str = "raw-tier/v6"
     silence_min_seconds: float = 5.0
     speech_handle_seconds: float = 0.3
     min_span_seconds: float = 1.0
@@ -411,6 +422,11 @@ class RawTierSettings:
     slow_filler_min_seconds: float = 2.0
     recommended_min_seconds: float = 3.0
     subtitle_verified_suspect_share: float = 0.10
+    usable_speech_green: bool = True
+    scenery_green: bool = True
+    good_sparse_green: bool = True
+    visual_issue_caps: tuple[str, ...] = ("dark", "overexposed")
+    segment_green_share: float = 0.5
 
 
 TIER_SETTINGS = RawTierSettings()
@@ -447,7 +463,35 @@ def tier_settings_problems(settings: RawTierSettings) -> list[str]:
         problems.append(f"같은 말 런 길이는 정수여야 한다: {run!r}")
     if not isinstance(settings.tier_version, str) or not settings.tier_version.strip():
         problems.append(f"등급판 이름이 비었다: {settings.tier_version!r}")
+    problems += _tier_v6_problems(settings)
     return problems or _tier_range_problems(settings)
+
+
+VISUAL_ISSUE_KINDS = ("blur", "shake", "dark", "overexposed", "obstructed")
+"""AI 판정의 화면 문제 종류(D58 18b) — `tiering.VISUAL_ISSUE_LABELS`의 열쇠와 같다(시험이
+잠근다)."""
+
+
+def _tier_v6_problems(settings: RawTierSettings) -> list[str]:
+    problems = [
+        f"{name}은 참·거짓이어야 한다: {value!r}"
+        for name, value in (
+            ("usable 발화 추천", settings.usable_speech_green),
+            ("풍경 추천", settings.scenery_green),
+            ("발화 적은 좋은 화면 추천", settings.good_sparse_green),
+        )
+        if not isinstance(value, bool)
+    ]
+    caps = settings.visual_issue_caps
+    if not isinstance(caps, tuple) or not all(isinstance(kind, str) for kind in caps):
+        return [*problems, f"추천을 막는 화면 문제는 글자의 튜플이어야 한다: {caps!r}"]
+    unknown = [kind for kind in caps if kind not in VISUAL_ISSUE_KINDS]
+    if unknown:
+        problems.append(f"추천을 막는 화면 문제 종류를 모른다: {unknown!r}")
+    share = settings.segment_green_share
+    if isinstance(share, bool) or not isinstance(share, (int, float)) or not 0 < share <= 1:
+        problems.append(f"조각 녹색 몫은 (0, 1]이어야 한다: {share!r}")
+    return problems
 
 
 def _tier_range_problems(settings: RawTierSettings) -> list[str]:

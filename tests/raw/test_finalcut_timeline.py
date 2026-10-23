@@ -29,6 +29,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.raw.tier_rules import V5_RULES
 from vlogsrt.project.fcp_tables import FRAME_RATE_TAGS
 from vlogsrt.project.raw import finalcut_timeline as ft
 from vlogsrt.project.raw import tiering
@@ -700,6 +701,13 @@ def buried_source(
     )  # fmt: skip
 
 
+def all_green_segments(source: ft.SourceInput) -> ft.SourceInput:
+    """검토 조각을 v5 규칙(전부 녹색이어야 추천)으로 매긴다 — v6(D79)은 녹색이 절반 이상인
+    조각도 추천이라, 묻힌 범위를 보려는 시험이 그 조각을 「보통」으로 두려면 이 규칙이 필요하다."""
+    assert source.report is not None
+    return replace(source, report=replace(source.report, settings=V5_RULES))
+
+
 def buried_document(source: ft.SourceInput) -> ft.TimelineDocument:
     return ft.plan([source], title="t", library_bundle=None)
 
@@ -736,11 +744,11 @@ def test_buried_recommended_range_gets_one_extra_keyword_range() -> None:
 
 def test_buried_ranges_are_cut_at_the_clip_edges_and_one_per_overlap() -> None:
     """녹색 하나가 두 클립에 걸치면 클립마다 제 겹침 하나씩 — 겹침이 짧은 쪽은 없다."""
-    source = buried_source(
+    source = all_green_segments(buried_source(
         segments=(seg(0, 150), seg(150, 400), seg(400, 600)),
         rows=((0, 50, "yellow"), (50, 260, "green"), (260, 330, "yellow"),
               (330, 500, "green"), (500, 600, "yellow")),
-    )  # fmt: skip
+    ))  # fmt: skip
     clips = buried_document(source).sources[0].clips
     assert [c.keywords[0] for c in clips] == ["보통", "보통", "보통"]
     assert [c.recommended for c in clips] == [((50, 150),), ((150, 260),), ((400, 500),)]
@@ -785,8 +793,10 @@ def test_overlap_under_three_seconds_gets_none_and_the_minimum_rounds_up(
 
     손으로 만든 녹색 구간은 길어서 브라우저에서는 「추천」이다 — 겹침의 길이만 본다.
     """
-    source = buried_source(
-        rows=((0, 100, "yellow"), (100, 300 + length, "green"), (300 + length, 600, "yellow")),
+    source = all_green_segments(
+        buried_source(
+            rows=((0, 100, "yellow"), (100, 300 + length, "green"), (300 + length, 600, "yellow")),
+        )
     )
     first, second = buried_document(source).sources[0].clips
     assert (first.keywords[0], second.keywords[0]) == ("보통", "보통")
@@ -805,11 +815,11 @@ def test_minimum_frames_round_up_per_frame_rate() -> None:
 @needs_xmllint
 @needs_installed_dtd
 def test_buried_ranges_pass_the_installed_dtd(tmp_path: Path) -> None:
-    source = buried_source(
+    source = all_green_segments(buried_source(
         segments=(seg(0, 150), seg(150, 400), seg(400, 600)),
         rows=((0, 50, "yellow"), (50, 260, "green"), (260, 330, "yellow"),
               (330, 500, "green"), (500, 600, "yellow")),
-    )  # fmt: skip
+    ))  # fmt: skip
     document = ft.plan(
         [source], title="t", library_bundle=None, caption_timing=frozenset({"asset-buried"})
     )

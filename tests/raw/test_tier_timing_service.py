@@ -295,7 +295,8 @@ def test_unreadable_evidence_never_breaks_the_upkeep_check_and_is_reported(tmp_p
 
 @needs_ffmpeg
 def test_no_speech_flags_lower_density_only_for_the_same_cues(tmp_path: Path):
-    service, root, asset, workspace, source = _project(tmp_path)
+    # `usable` 화면 — v6(D79)은 `recommended` × 발화 적음을 이미 녹색으로 보아 내림이 안 보인다.
+    service, root, asset, workspace, source = _project(tmp_path, "usable")
     cues = _cues(service, root, asset.asset_id)
     # 다섯 줄 중 넷을 짚었다 — 확인된 말이 2.5초뿐이라 밀도가 0.35 밑이다.
     _put_report(workspace, source, sync_check.LEVEL_AMBER, cues=_flagged(cues[:4]))
@@ -366,7 +367,7 @@ def _usable_red(tmp_path: Path):
 
 
 OLD_VERSIONS = ("raw-tier/v2", "raw-tier/v3")
-ISSUE_CAP = "추천 제한: 화면 문제(흐림)가 있어 보통까지만 추천합니다"
+ISSUE_CAP = "추천 제한: 화면 문제(어두움)가 있어 보통까지만 추천합니다"
 
 
 def _as_old(tags: tuple[str, ...], version: str) -> tuple[str, ...]:
@@ -444,9 +445,9 @@ def test_old_head_migration_keeps_confirmed_exclusions_notes_and_is_idempotent(
 def test_v4_migration_caps_recommended_under_a_screen_problem_and_keeps_human_decisions(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    """v3 머리의 추천 조각이 화면 문제(흐림) 창 위라면 v4 옮기기가 보통 + 「추천 제한」으로
+    """v3 머리의 추천 조각이 화면 문제(어두움) 창 위라면 v4 옮기기가 보통 + 「추천 제한」으로
     다시 단다 — 메모·덮기·경계·선택은 그대로, 제공자 조립 0, 두 번째 바퀴는 할 일이 없다."""
-    service, root, asset, *_ = _project(tmp_path, visual_issues=["blur"])
+    service, root, asset, *_ = _project(tmp_path, visual_issues=["dark"])
     revision = service.analysis_overview(root).revision.revision_id
     rows = service.selection_suitability(root, revision, (asset.asset_id,))[asset.asset_id]
     assert [(r["tier"], r["rule"], r["recommendation"]) for r in rows] == [
@@ -455,7 +456,7 @@ def test_v4_migration_caps_recommended_under_a_screen_problem_and_keeps_human_de
     assert rows[0]["caps"] == [
         {"code": tiering.CAP_VISUAL_ISSUES, "text": ISSUE_CAP.removeprefix("추천 제한: ")}
     ]
-    assert "화면 문제: 흐림" in rows[0]["video"]["reason"] and rows[0]["red_reason"] is None
+    assert "화면 문제: 어두움" in rows[0]["video"]["reason"] and rows[0]["red_reason"] is None
     assert _keywords(service, root) == [["보통"]]  # 묻힌 추천도 없다 — 녹색이 하나도 없다
     facade, legacy = _old_head(service, root, monkeypatch, "raw-tier/v3")
     (segment,) = legacy.segments

@@ -73,15 +73,15 @@ def test_tier_report_uses_stored_evidence_with_zero_provider_calls(
     _forbid_providers(monkeypatch)
     report = service.tier_report(root, revision_id, row.asset_id)
     assert [(s.tier, s.rule) for s in report.spans] == [
-        ("yellow", "video-usable"),
+        ("green", tiering.RULE_USABLE_SPEECH),  # D79 — v5는 노랑 "video-usable"
         ("red", "silent-not-scenery"),
-        ("yellow", "video-usable"),
+        ("green", tiering.RULE_USABLE_SPEECH),
     ]
     red = report.spans[1]
     assert (red.start, red.end) == (Fraction(33, 10), Fraction(107, 10))
     assert (red.audio.status, red.video.status) == ("subtitle_silence", "usable")
     rows = _tiers(service, root, revision_id, row.asset_id)
-    assert [r["tier"] for r in rows] == ["yellow", "red", "yellow"]
+    assert [r["tier"] for r in rows] == ["green", "red", "green"]
     assert {"recommendation", "tier", "rule", "audio", "video", "red_reason", "hold"} <= set(
         rows[0]
     )
@@ -100,10 +100,10 @@ def test_tiers_follow_document_without_cache(tmp_path: Path):
     """보관본이 없다 — 문서의 Luna 판정이 바뀌면 다음 읽기가 곧바로 따른다."""
     _, root = analyzed_tier_project(tmp_path, suitability="usable")
     service, revision_id, row = _only_row(root)
-    assert [r["tier"] for r in _tiers(service, root, revision_id, row.asset_id)] == [
-        "yellow",
-        "red",
-        "yellow",
+    assert [(r["tier"], r["rule"]) for r in _tiers(service, root, revision_id, row.asset_id)] == [
+        ("green", tiering.RULE_USABLE_SPEECH),
+        ("red", "silent-not-scenery"),
+        ("green", tiering.RULE_USABLE_SPEECH),
     ]
     document = root / row.document_path
     body = json.loads(document.read_text(encoding="utf-8"))
@@ -112,7 +112,7 @@ def test_tiers_follow_document_without_cache(tmp_path: Path):
     rows = _tiers(service, root, revision_id, row.asset_id)
     assert [(r["tier"], r["rule"]) for r in rows] == [
         ("green", "both-good"),
-        ("yellow", "scenery-no-speech"),
+        ("green", tiering.RULE_SCENERY_GOOD),  # D79 — v5는 노랑 "scenery-no-speech"
         ("green", "both-good"),
     ]
     assert not list(root.rglob("tier_report.json"))
@@ -197,7 +197,7 @@ def test_render_returns_tiers_immediately_without_background_job(
     jobs_before = {job.job_id for job in service.list_jobs(root)}
     model = _model_of(server.visual_workbench_render(root)[1])
     source = model["sources"][row.asset_id]
-    assert [s["tier"] for s in source["suggestions"]] == ["yellow", "red", "yellow"]
+    assert [s["tier"] for s in source["suggestions"]] == ["green", "red", "green"]
     assert source["analysisState"] == "추천 구간 준비 완료"
     assert "등급 계산" not in source["analysisState"] and "무료" not in source["analysisState"]
     new_jobs = [job for job in service.list_jobs(root) if job.job_id not in jobs_before]

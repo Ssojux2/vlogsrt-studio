@@ -159,6 +159,12 @@ TIMING_GREEN = "green"
 못 박는다)."""
 RULE_SUBTITLE_VERIFIED = "subtitle-verified"
 """「자막 확인됨」이 녹색으로 올린 칸(`usable` × 발화 많음)의 규칙 이름(D65)."""
+RULE_USABLE_SPEECH = "usable-speech"
+"""`usable` 화면 × 발화 많음 → 추천(W-29c, D79 — `usable_speech_green`)."""
+RULE_SCENERY_GOOD = "scenery-good"
+"""`recommended` 화면 × 자막 공백(풍경) → 추천(W-29c, D79 — `scenery_green`)."""
+RULE_GOOD_SPARSE = "good-sparse"
+"""`recommended` 화면 × 발화 적음 → 추천(W-29c, D79 — `good_sparse_green`)."""
 
 UNCONFIRMED_REPEAT = "repeat"
 UNCONFIRMED_SLOW = "slow_filler"
@@ -902,14 +908,20 @@ def judge_video(evidence: SourceEvidence, start: Fraction, end: Fraction) -> Vid
 
 
 def combine(
-    audio: AudioJudgment, video: VideoJudgment, *, subtitle_verified: bool = False
+    audio: AudioJudgment,
+    video: VideoJudgment,
+    *,
+    subtitle_verified: bool = False,
+    settings: RawTierSettings = TIER_SETTINGS,
 ) -> tuple[str, str, str | None]:
     """두 판정 → (등급, 규칙, 빨강 이유).
 
     빨강은 자막 없는 긴 공백 × Luna가 풍경으로 보지 않은 화면뿐이다. 풍경으로 본 화면이면
-    말이 없어도 노랑이고(풍경 컷), Luna 판정이 없으면 보류다 — AI 근거 없이는 빨강이 없다.
-    「자막 확인됨」(`subtitle_verified`, D65)은 `usable` × 발화 많음 칸 하나만 녹색으로 올린다 —
-    빨강 칸을 먼저 보므로 빨강은 그 값과 무관하다.
+    말이 없어도 빨강이 아니다 — `recommended` 화면이면 녹색(`scenery_green`, D79), 아니면
+    노랑(풍경 컷)이다. Luna 판정이 없으면 보류다 — AI 근거 없이는 빨강이 없다.
+    「자막 확인됨」(`subtitle_verified`, D65)은 `usable` × 발화 많음 칸을 녹색으로 올린다 —
+    v6에서는 그 칸이 이미 녹색(`usable_speech_green`)이라 규칙 이름과 근거의 말만 남는다.
+    빨강 칸을 먼저 보므로 빨강은 두 값과 무관하다.
     """
     if audio.status == AUDIO_SILENT and video.status in _SILENCE_RED_VIDEO:
         return TIER_RED, "silent-not-scenery", RED_SILENCE
@@ -919,7 +931,21 @@ def combine(
         return TIER_GREEN, RULE_SUBTITLE_VERIFIED, None
     if video.status == VIDEO_GOOD and audio.status == AUDIO_ABSENT:
         return TIER_GREEN, "video-only-good", None
+    widened = _widened_green(audio.status, video.status, settings)
+    if widened is not None:
+        return TIER_GREEN, widened, None
     return TIER_YELLOW, _yellow_rule(audio.status, video.status), None
+
+
+def _widened_green(audio: str, video: str, settings: RawTierSettings) -> str | None:
+    """v6의 넓힌 녹색 칸(W-29c, D79) — 설정마다 켜고 끈다(끄면 v5 표 그대로)."""
+    if settings.usable_speech_green and (video, audio) == (VIDEO_USABLE, AUDIO_SPEECH_DENSE):
+        return RULE_USABLE_SPEECH
+    if settings.scenery_green and (video, audio) == (VIDEO_GOOD, AUDIO_SILENT):
+        return RULE_SCENERY_GOOD
+    if settings.good_sparse_green and (video, audio) == (VIDEO_GOOD, AUDIO_SPEECH_SPARSE):
+        return RULE_GOOD_SPARSE
+    return None
 
 
 def _yellow_rule(audio: str, video: str) -> str:
@@ -941,7 +967,9 @@ def _span(
 ) -> TierSpan:
     audio = judge_audio(evidence, start, end)
     video = judge_video(evidence, start, end)
-    tier, rule, red = combine(audio, video, subtitle_verified=timing.subtitle_verified)
+    tier, rule, red = combine(
+        audio, video, subtitle_verified=timing.subtitle_verified, settings=evidence.settings
+    )
     return TierSpan(start, end, tier, rule, audio, video, red)
 
 
@@ -1072,7 +1100,9 @@ def _measured_density(
         return span
     judged = _speech_judgment(cover, span.start, span.end, evidence.settings)
     audio = replace(judged, evidence=span.audio.evidence)
-    tier, rule, _ = combine(audio, span.video, subtitle_verified=timing.subtitle_verified)
+    tier, rule, _ = combine(
+        audio, span.video, subtitle_verified=timing.subtitle_verified, settings=evidence.settings
+    )
     return replace(span, tier=tier, rule=rule, audio=audio)
 
 
@@ -1088,10 +1118,20 @@ def _capped(
         caps.append(_too_short_cap(settings))
     if timing.level == TIMING_RED:
         caps.append(_TIMING_RED_CAP)
-    issues = _span_issue_labels(evidence, span, settings)
+    issues = _capping_issue_labels(evidence, span, settings)
     if issues:
         caps.append(_visual_issues_cap(issues))
     return replace(span, tier=TIER_YELLOW, caps=tuple(caps)) if caps else span
+
+
+def _capping_issue_labels(
+    evidence: SourceEvidence, span: TierSpan, settings: RawTierSettings
+) -> tuple[str, ...]:
+    """녹색을 내리는 화면 문제 — 설정(`visual_issue_caps`, W-29c D79)에 든 종류만(어두움·과노출)."""
+    capping = {VISUAL_ISSUE_LABELS[kind] for kind in settings.visual_issue_caps}
+    return tuple(
+        label for label in _span_issue_labels(evidence, span, settings) if label in capping
+    )
 
 
 def _span_issue_labels(
@@ -1219,19 +1259,39 @@ def _segment_tier(report: TierReport, start: Fraction, end: Fraction) -> _Segmen
     `min_span_seconds`보다 짧게 겹친 구간은 보지 않는다 — 빨강 끝을 프레임 안쪽으로 붙이면
     이웃 조각에 0.02초짜리 빨강 자투리가 남는데, 그것이 녹색 조각을 보통으로 끌어내리면 안
     된다. 조각이 그보다 짧거나 넉넉히 겹친 구간이 없으면 가장 많이 겹친 구간 하나로 본다.
-    전부 녹색이어야 녹색, 전부 빨강이어야 빨강이고 나머지는 노랑이다. 다만 `recommended_min_
-    seconds`보다 짧은 조각은 녹색 구간 위에 있어도 보통까지다 — 짧은 조각이 이웃(또는 품은)
-    녹색에게서 추천을 물려받지 않는다(D60).
+    전부 녹색이거나 빨강 없이 녹색이 조각 길이의 `segment_green_share` 이상이면(W-29c, D79) 녹색,
+    전부 빨강이어야 빨강이고 나머지는 노랑이다. 다만 `recommended_min_seconds`보다 짧은 조각은
+    녹색 구간 위에 있어도 보통까지다 — 짧은 조각이 이웃(또는 품은) 녹색에게서 추천을 물려받지
+    않는다(D60).
     """
     rows = _significant_spans(report, start, end)
     tiers = {span.tier for span in rows}
     caps = _dedupe(*(span.caps for span in rows))
-    if rows and tiers == {TIER_GREEN}:
+    if rows and (tiers == {TIER_GREEN} or _mostly_green(report, rows, start, end)):
         if end - start < Fraction(str(report.settings.recommended_min_seconds)):
             return _SegmentTier(rows, TIER_YELLOW, (_too_short_cap(report.settings),))
-        lifts = _dedupe([span.lift for span in rows if span.lift])
-        return _SegmentTier(rows, TIER_GREEN, caps, lifts)
+        lifts = _dedupe([span.lift for span in rows if span.tier == TIER_GREEN and span.lift])
+        return _SegmentTier(rows, TIER_GREEN, (), lifts)
     return _SegmentTier(rows, TIER_RED if tiers == {TIER_RED} else TIER_YELLOW, caps)
+
+
+def _mostly_green(
+    report: TierReport, rows: Sequence[TierSpan], start: Fraction, end: Fraction
+) -> bool:
+    """빨강·판정 보류·화면 문제로 내린 구간이 없고 녹색이 조각 길이의 `segment_green_share`
+    이상인가(W-29c, D79). 보류(AI 판정 없음)와 어두움·과노출은 조각 절반이 녹색이어도 추천을
+    막는다 — 녹색 절반이 그 까닭을 덮어 지우면 안 된다."""
+    if any(span.tier == TIER_RED or span.hold or _visually_capped(span) for span in rows):
+        return False
+    green = sum(
+        (min(end, span.end) - max(start, span.start) for span in rows if span.tier == TIER_GREEN),
+        Fraction(0),
+    )
+    return green >= (end - start) * Fraction(str(report.settings.segment_green_share))
+
+
+def _visually_capped(span: TierSpan) -> bool:
+    return any(code == CAP_VISUAL_ISSUES for code, _ in span.caps)
 
 
 def segment_keyword(report: TierReport, start: Fraction, end: Fraction) -> str:

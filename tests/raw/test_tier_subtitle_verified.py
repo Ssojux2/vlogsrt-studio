@@ -1,4 +1,4 @@
-"""자막이 확인된 영상의 `usable` 구간은 추천(W-25 a, D65) — 등급판 `raw-tier/v5`.
+"""자막이 확인된 영상의 `usable` 구간은 추천(W-25 a, D65) — 등급판 `raw-tier/v6`.
 
 「자막 확인됨」은 영상 하나의 값이다: **지금** 자막 리비전의 자막 시각 확인(D55) 보고서가 초록이고
 (`_tier_timing`과 같은 엄격함 — 자막 리비전·1단계 PCM·기준이 같다), 그 리비전 원본 자막 줄
@@ -42,6 +42,7 @@ from tests.raw.test_tier_timing_service import (
 )
 from tests.raw.test_tiering_v3 import _random_document, chatter, cue_key, make_document
 from tests.raw.test_visual_workbench_ui import _NODE_HARNESS, needs_node
+from tests.raw.tier_rules import V5_RULES, pin_v5_rules
 from tests.test_invariants import CLEAN_TIERING, TIER_SERVICE, _fake_source_tree, check_invariants
 from ui import ui_facade
 from vlogsrt.project import sync_check
@@ -85,7 +86,7 @@ def usable_talk(extent: int = 30) -> dict:
 
 def test_v5_settings_are_the_published_values():
     validate_tier_settings(TIER_SETTINGS)
-    assert TIER_SETTINGS.tier_version == "raw-tier/v5"
+    assert TIER_SETTINGS.tier_version == "raw-tier/v6"
     assert TIER_SETTINGS.subtitle_verified_suspect_share == 0.10
     assert tiering.TIMING_GREEN == sync_check.LEVEL_GREEN
 
@@ -127,9 +128,9 @@ def test_default_timing_is_not_verified():
 
 def test_verified_usable_speech_is_green_with_the_new_rule_and_a_reason():
     doc = usable_talk()
-    (plain,) = tiering.classify(doc).spans
+    (plain,) = tiering.classify(doc, settings=V5_RULES).spans
     assert (plain.tier, plain.rule, plain.lift) == (Y, "video-usable", None)
-    report = tiering.classify(doc, timing=verified(1, 12))
+    report = tiering.classify(doc, timing=verified(1, 12), settings=V5_RULES)
     (span,) = report.spans
     assert (span.tier, span.rule, span.caps) == (G, RULE, ())
     assert (span.audio.status, span.video.status) == (
@@ -142,7 +143,7 @@ def test_verified_usable_speech_is_green_with_the_new_rule_and_a_reason():
     assert span.document()["reason"].endswith(" · 추천 근거: " + lift_text(1, 12))
     recommendation, tags = tiering.segment_grade(report, F(0), F(30))
     assert recommendation == "recommended"
-    assert tags[0] == "등급: 추천" and tags[-1] == "등급판 raw-tier/v5"
+    assert tags[0] == "등급: 추천" and tags[-1] == "등급판 raw-tier/v6"
     assert "추천 근거: " + lift_text(1, 12) in tags
     assert tiering.segment_keyword(report, F(0), F(30)) == "추천"
     # 등급 태그 묶음이라 다시 매기기 전에 걷힌다.
@@ -155,8 +156,8 @@ def test_combine_changes_only_the_usable_dense_cell():
         for video_status in tiering.VIDEO_STATUSES:
             audio = tiering.AudioJudgment(audio_status, F(1), "a", ())
             video = tiering.VideoJudgment(video_status, "v", (), ())
-            before = tiering.combine(audio, video)
-            after = tiering.combine(audio, video, subtitle_verified=True)
+            before = tiering.combine(audio, video, settings=V5_RULES)
+            after = tiering.combine(audio, video, subtitle_verified=True, settings=V5_RULES)
             if (audio_status, video_status) == (tiering.AUDIO_SPEECH_DENSE, tiering.VIDEO_USABLE):
                 assert before == (Y, "video-usable", None)
                 assert after == (G, RULE, None)
@@ -173,8 +174,8 @@ def test_combine_changes_only_the_usable_dense_cell():
 )
 def test_other_video_cells_keep_their_rule(windows: list, rule: str):
     doc = make_document(30, windows, chatter(0, 30))
-    plain = tiering.classify(doc)
-    lifted = tiering.classify(doc, timing=verified())
+    plain = tiering.classify(doc, settings=V5_RULES)
+    lifted = tiering.classify(doc, timing=verified(), settings=V5_RULES)
     assert [(s.tier, s.rule) for s in lifted.spans] == [(s.tier, s.rule) for s in plain.spans]
     assert [s.rule for s in lifted.spans] == [rule]
     assert all(s.lift is None for s in lifted.spans)
@@ -184,7 +185,7 @@ def test_sparse_speech_on_a_usable_screen_stays_yellow():
     """1초 말 · 3초 쉼(긴 공백이 아니다) — 밀도 27%라 표의 칸은 발화 적음 × usable이다."""
     sparse = [(F(4 * i), F(4 * i + 1), f"이야기 {i}번째 줄이에요") for i in range(8)]
     doc = make_document(30, [(0, 30, "usable")], sparse)
-    (span,) = tiering.classify(doc, timing=verified()).spans
+    (span,) = tiering.classify(doc, timing=verified(), settings=V5_RULES).spans
     assert (span.tier, span.rule, span.audio.status) == (
         Y,
         "speech-sparse",
@@ -197,7 +198,7 @@ def test_a_lifted_span_shorter_than_three_seconds_is_capped():
     doc = make_document(
         30, [(0, 10, "review"), (10, 12, "usable"), (12, 30, "review")], chatter(0, 30)
     )
-    report = tiering.classify(doc, timing=verified())
+    report = tiering.classify(doc, timing=verified(), settings=V5_RULES)
     island = next(s for s in report.spans if s.start == 10)
     assert (island.end, island.tier, island.rule) == (F(12), Y, RULE)
     assert island.caps == ((tiering.CAP_TOO_SHORT, "3초보다 짧아 추천하지 않습니다"),)
@@ -207,7 +208,7 @@ def test_a_lifted_span_shorter_than_three_seconds_is_capped():
 
 
 def test_a_short_review_piece_on_a_lifted_span_is_capped():
-    report = tiering.classify(usable_talk(), timing=verified())
+    report = tiering.classify(usable_talk(), timing=verified(), settings=V5_RULES)
     recommendation, tags = tiering.segment_grade(report, F(5), F(7))
     assert recommendation == "normal"
     assert "추천 제한: 3초보다 짧아 추천하지 않습니다" in tags
@@ -217,7 +218,7 @@ def test_a_short_review_piece_on_a_lifted_span_is_capped():
 def test_a_visual_issue_still_caps_a_lifted_span():
     doc = usable_talk()
     doc["annotations"][0]["visual_issues"] = ["blur"]
-    (span,) = tiering.classify(doc, timing=verified()).spans
+    (span,) = tiering.classify(doc, timing=verified(), settings=V5_RULES).spans
     assert (span.tier, span.rule) == (Y, RULE)
     assert [code for code, _ in span.caps] == [tiering.CAP_VISUAL_ISSUES]
 
@@ -226,7 +227,7 @@ def test_no_speech_cues_can_still_drop_a_lifted_span_below_the_density_line():
     doc = usable_talk(10)
     keys = frozenset(cue_key(doc, i) for i in range(3))
     timing = replace(verified(), no_speech=keys)
-    (span,) = tiering.classify(doc, timing=timing).spans
+    (span,) = tiering.classify(doc, timing=timing, settings=V5_RULES).spans
     assert (span.tier, span.rule, span.audio.status) == (
         Y,
         "speech-sparse",
@@ -238,8 +239,8 @@ def test_red_cells_are_unchanged_by_verified_subtitles():
     """자막 없는 긴 공백 × usable 화면은 빨강 그대로 — 제외 제안·자동 제외 후보가 바이트째 같다."""
     talk = chatter(0, 8) + chatter(20, 30)
     doc = make_document(30, [(0, 30, "usable")], talk)
-    plain = tiering.classify(doc)
-    lifted = tiering.classify(doc, timing=verified())
+    plain = tiering.classify(doc, settings=V5_RULES)
+    lifted = tiering.classify(doc, timing=verified(), settings=V5_RULES)
     assert tiering.red_ranges(plain) and tiering.red_ranges(lifted) == tiering.red_ranges(plain)
     assert json.dumps(tiering.red_decisions(lifted)) == json.dumps(tiering.red_decisions(plain))
     assert [(s.start, s.end) for s in lifted.spans] == [(s.start, s.end) for s in plain.spans]
@@ -251,8 +252,8 @@ def test_verified_subtitles_never_move_a_boundary_or_touch_red_on_random_documen
     rng = random.Random(65)
     for _ in range(300):
         doc = _random_document(rng)
-        plain = tiering.classify(doc)
-        lifted = tiering.classify(doc, timing=verified())
+        plain = tiering.classify(doc, settings=V5_RULES)
+        lifted = tiering.classify(doc, timing=verified(), settings=V5_RULES)
         assert [(s.start, s.end) for s in lifted.spans] == [(s.start, s.end) for s in plain.spans]
         for before, after in zip(plain.spans, lifted.spans, strict=True):
             assert (after.red_reason, after.video, after.audio) == (
@@ -310,6 +311,7 @@ def _head_marks(root: Path) -> list[tuple[str, list[str]]]:
 def test_current_green_report_with_few_suspects_recommends_usable_speech_everywhere(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
+    pin_v5_rules(monkeypatch)
     service, root, asset, workspace, source = _project(tmp_path, "usable", NINE)
     _forbid_providers(monkeypatch)
     assert _tier_rows(service, root, asset.asset_id) == [(Y, "video-usable", None)]
@@ -334,14 +336,17 @@ def test_current_green_report_with_few_suspects_recommends_usable_speech_everywh
     assert _keywords(service, root) == [["추천"]]
     assert _upkeep(service, root) is not None  # 정리 고리가 검토 머리의 등급만 다시 단다
     assert _head_marks(root) == [
-        ("recommended", ["등급: 추천", "추천 근거: " + lift_text(0, 9), "등급판 raw-tier/v5"])
+        ("recommended", ["등급: 추천", "추천 근거: " + lift_text(0, 9), "등급판 raw-tier/v6"])
     ]
     assert _upkeep(service, root) is None
 
 
 @needs_ffmpeg
-def test_only_a_current_green_report_with_few_suspects_verifies(tmp_path: Path):
+def test_only_a_current_green_report_with_few_suspects_verifies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     """노랑·빨강·측정 불가·낡음·다른 리비전·없음, 그리고 초록이어도 확인 필요 11% — 모두 보통."""
+    pin_v5_rules(monkeypatch)
     service, root, asset, workspace, source = _project(tmp_path, "usable", NINE)
     cues = list(service.source_transcript(root, asset.asset_id)["utterances"])
 
@@ -373,6 +378,7 @@ def test_only_a_current_green_report_with_few_suspects_verifies(tmp_path: Path):
 def test_v4_head_migration_lifts_marks_and_keeps_human_decisions(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
+    pin_v5_rules(monkeypatch)
     service, root, asset, workspace, source = _project(tmp_path, "usable", NINE)
     _put_report(workspace, source, sync_check.LEVEL_GREEN)
     facade = ReviewWorkspaceFacade(root)

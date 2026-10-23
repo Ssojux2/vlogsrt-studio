@@ -14,6 +14,7 @@ from fractions import Fraction
 
 import pytest
 
+from tests.raw.tier_rules import V5_RULES
 from vlogsrt.project import sync_check
 from vlogsrt.project.raw import subtitle_suspects, tiering
 from vlogsrt.project.raw.analysis_config import (
@@ -25,12 +26,13 @@ from vlogsrt.project.raw.analysis_config import (
 F = Fraction
 G, Y, R = tiering.TIER_GREEN, tiering.TIER_YELLOW, tiering.TIER_RED
 V2_RULES = replace(
-    TIER_SETTINGS,
+    V5_RULES,
     same_text_run_min=10_000,
     slow_filler_chars_per_second=0.0,
     recommended_min_seconds=0.0,
 )
-"""v3의 문서 규칙(같은 말 런·느린 추임새·최소 3초)을 끈 설정 — v2와 같은 판정을 낸다."""
+"""v3의 문서 규칙(같은 말 런·느린 추임새·최소 3초)을 끈 설정 — v2와 같은 판정을 낸다.
+v6(D79)의 넓힌 추천(칸 셋·화면 문제 종류·조각 몫)도 끈다 — v5 규칙 위에서 잰다."""
 
 
 def _rj(value: Fraction | int | str) -> dict[str, int]:
@@ -126,7 +128,7 @@ TALK = "오늘은 계곡에 왔어요 물이 정말 맑네요"  # 16자 — 2–
 def test_v3_settings_are_the_published_values():
     validate_tier_settings(TIER_SETTINGS)
     validate_tier_settings(V2_RULES)  # 0은 「끔」이다 — 값역 안
-    assert TIER_SETTINGS.tier_version == "raw-tier/v5"
+    assert TIER_SETTINGS.tier_version == "raw-tier/v6"
     assert TIER_SETTINGS.same_text_run_min == 3
     assert TIER_SETTINGS.slow_filler_chars_per_second == 1.5
     assert TIER_SETTINGS.slow_filler_min_seconds == 2.0
@@ -300,7 +302,7 @@ def test_density_counts_only_confirmed_speech_and_threshold_is_inclusive():
     short = make_document(10, [(0, 10, "recommended")], [(0, "349/100", TALK), (6, 9, "음")])
     judged = tiering.judge_audio(tiering.evidence_of(short), F(0), F(10))
     assert judged.status == tiering.AUDIO_SPEECH_SPARSE
-    assert tiering.classify(short).spans[0].tier == Y
+    assert tiering.classify(short, settings=V5_RULES).spans[0].tier == Y
     assert tiering.classify(short, settings=V2_RULES).spans[0].tier == G
 
 
@@ -329,7 +331,7 @@ def test_hallucinated_repetition_like_0024_no_longer_recommends():
     doc = make_document(720, [(540, 720, "recommended")], utterances)
     v2 = tiering.classify(doc, settings=V2_RULES)
     assert [(s.start, s.end, s.tier) for s in v2.spans if s.end > 540] == [(F(540), F(720), G)]
-    report = tiering.classify(doc)
+    report = tiering.classify(doc, settings=V5_RULES)
     (tail,) = [s for s in report.spans if s.end > 540]
     assert (tail.start, tail.end, tail.tier) == (F(540), F(720), Y)
     assert tail.audio.status == tiering.AUDIO_SPEECH_SPARSE and tail.audio.density == 0
@@ -346,7 +348,7 @@ def test_no_speech_reason_keeps_the_measurement_caveat_and_never_says_vad():
     timing = tiering.TimingSignals(
         level=sync_check.LEVEL_GREEN, no_speech=frozenset({cue_key(doc, 0)})
     )
-    report = tiering.classify(doc, timing=timing)
+    report = tiering.classify(doc, timing=timing, settings=V5_RULES)
     (span,) = report.spans
     assert (span.tier, span.rule, span.audio.density) == (Y, "speech-sparse", 0)
     assert "말소리 측정상 없는 줄 1개를 밀도에서 뺐습니다(측정 한계일 수 있음)" in span.audio.reason
@@ -370,7 +372,7 @@ def test_no_speech_lowers_a_green_span_only_when_its_density_falls_below_the_lin
     many = tiering.TimingSignals(
         level=sync_check.LEVEL_AMBER, no_speech=frozenset(cue_key(doc, i) for i in range(9))
     )
-    lowered = tiering.classify(doc, timing=many).spans[0]
+    lowered = tiering.classify(doc, timing=many, settings=V5_RULES).spans[0]
     assert (lowered.tier, lowered.audio.status) == (Y, tiering.AUDIO_SPEECH_SPARSE)
     assert lowered.audio.density == F(15, 2) / 30
 
@@ -480,9 +482,9 @@ def _green_island(length: Fraction) -> dict:
 
 
 def test_green_span_shorter_than_three_seconds_is_yellow_with_a_reason():
-    exact = tiering.classify(_green_island(F(3)))
+    exact = tiering.classify(_green_island(F(3)), settings=V5_RULES)
     assert layout(exact) == [(F(0), F(10), Y), (F(10), F(13), G), (F(13), F(30), Y)]
-    short = tiering.classify(_green_island(F(299, 100)))
+    short = tiering.classify(_green_island(F(299, 100)), settings=V5_RULES)
     island = short.spans[1]
     assert (island.start, island.end, island.tier, island.rule) == (
         F(10),
@@ -501,7 +503,7 @@ def test_green_span_shorter_than_three_seconds_is_yellow_with_a_reason():
 def test_short_review_piece_next_to_green_does_not_inherit_recommended():
     """0.3초 조각이 녹색 구간에 붙어도(또는 안에 있어도) 추천을 물려받지 않는다."""
     doc = make_document(30, [(0, 15, "recommended"), (15, 30, "usable")], chatter(0, 30))
-    report = tiering.classify(doc)
+    report = tiering.classify(doc, settings=V5_RULES)
     assert layout(report) == [(F(0), F(15), G), (F(15), F(30), Y)]
     # 녹색 0.2초 + 노랑 0.1초 — v2는 가장 많이 겹친 녹색으로 보았다.
     piece = (F(148, 10), F(151, 10))
@@ -510,7 +512,7 @@ def test_short_review_piece_next_to_green_does_not_inherit_recommended():
     recommendation, tags = tiering.segment_grade(report, *piece)
     assert recommendation == "normal" and tags[0] == "등급: 보통"
     assert "추천 제한: 3초보다 짧아 추천하지 않습니다" in tags
-    assert tags[-1] == "등급판 raw-tier/v5"
+    assert tags[-1] == "등급판 raw-tier/v6"
     assert tiering.segment_keyword(report, *piece) == "보통"
     # 녹색 안의 0.3초도, 2.99초도 보통이다 — 정확히 3초부터 추천이다.
     assert tiering.segment_keyword(report, F(5), F(53, 10)) == "보통"
@@ -610,8 +612,8 @@ ISSUE_TEXT = "화면 문제({})가 있어 보통까지만 추천합니다"
      ("overexposed", "과노출"), ("obstructed", "가림")],
 )  # fmt: skip
 def test_each_visual_issue_caps_green_at_yellow_with_a_reason(issue: str, label: str):
-    plain = tiering.classify(_issue_document(None))
-    report = tiering.classify(_issue_document([issue]))
+    plain = tiering.classify(_issue_document(None), settings=V5_RULES)
+    report = tiering.classify(_issue_document([issue]), settings=V5_RULES)
     assert layout(plain)[0] == (F(0), F(15), G)
     first = report.spans[0]
     assert (first.start, first.end, first.tier, first.rule) == (F(0), F(15), Y, "both-good")
@@ -624,7 +626,7 @@ def test_each_visual_issue_caps_green_at_yellow_with_a_reason(issue: str, label:
     recommendation, tags = tiering.segment_grade(report, F(1), F(14))
     assert recommendation == "normal" and tags[0] == "등급: 보통"
     assert f"추천 제한: {ISSUE_TEXT.format(label)}" in tags
-    assert tags[-1] == "등급판 raw-tier/v5"
+    assert tags[-1] == "등급판 raw-tier/v6"
     assert tiering.segment_keyword(report, F(1), F(14)) == "보통"
     assert layout(report)[1:] == layout(plain)[1:]
 
@@ -650,7 +652,7 @@ def test_issue_labels_follow_the_fixed_order_once_each_across_windows():
     doc = make_document(30, [(0, 15, "recommended"), (15, 30, "recommended")], chatter(0, 30))
     doc["annotations"][0]["visual_issues"] = ["obstructed", "blur"]
     doc["annotations"][1]["visual_issues"] = ["blur", "shake"]
-    (span,) = tiering.classify(doc).spans
+    (span,) = tiering.classify(doc, settings=V5_RULES).spans
     assert span.caps == ((tiering.CAP_VISUAL_ISSUES, ISSUE_TEXT.format("흐림·흔들림·가림")),)
 
 
@@ -661,15 +663,15 @@ def test_a_window_touching_green_only_through_an_absorbed_sliver_does_not_cap_it
     """
     utterances = [*chatter(0, 15), (F(15), F(154, 10), TALK)]
     doc = make_document(40, [(0, 15, "recommended"), (15, 40, "usable")], utterances)
-    plain = tiering.classify(doc)
+    plain = tiering.classify(doc, settings=V5_RULES)
     assert (plain.spans[0].start, plain.spans[0].end, plain.spans[0].tier) == (F(0), F(157, 10), G)
     doc["annotations"][1]["visual_issues"] = ["blur"]
-    flagged = tiering.classify(doc)
+    flagged = tiering.classify(doc, settings=V5_RULES)
     # 이웃 빨강의 영상 이유 「화면 문제: 흐림」은 표시라 다르다 — 녹색과 구간 배치는 같다.
     assert flagged.spans[0] == plain.spans[0]
     assert layout(flagged) == layout(plain)
     doc["annotations"][0]["visual_issues"] = ["shake"]
-    capped = tiering.classify(doc).spans[0]
+    capped = tiering.classify(doc, settings=V5_RULES).spans[0]
     assert capped.caps == ((tiering.CAP_VISUAL_ISSUES, ISSUE_TEXT.format("흔들림")),)
 
 
@@ -697,14 +699,14 @@ def test_silent_span_under_an_issue_window_keeps_its_tier_and_never_turns_red():
     doc = make_document(
         30, [(0, 30, "recommended")], [(0, 2, TALK), (15, 17, TALK + " 다시"), (28, 30, TALK)]
     )
-    plain = tiering.classify(doc)
+    plain = tiering.classify(doc, settings=V5_RULES)
     silent = [
         (s.start, s.end, s.tier) for s in plain.spans if s.audio.status == tiering.AUDIO_SILENT
     ]
     assert silent and all(tier == Y for *_, tier in silent)
     for issues in (["blur"], ["dark", "obstructed"], ["none"], []):
         doc["annotations"][0]["visual_issues"] = issues
-        flagged = tiering.classify(doc)
+        flagged = tiering.classify(doc, settings=V5_RULES)
         assert [
             (s.start, s.end, s.tier)
             for s in flagged.spans

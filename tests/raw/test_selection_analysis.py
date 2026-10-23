@@ -166,13 +166,18 @@ def test_selection_runs_both_providers_and_publishes_progress_and_recommendation
         (s.recommendation, [t for t in s.visual_tags if t.startswith("등급: ")])
         for s in head.segments
     ] == [("normal", ["등급: 보통"])]
-    assert all("등급판 raw-tier/v5" in s.visual_tags for s in head.segments)
+    assert all("등급판 raw-tier/v6" in s.visual_tags for s in head.segments)
     assert all(s.selection == "included" for s in head.segments)  # no scenic deletion
     assert unreviewed_auto_exclusions(head) == ()
     final = server.raw.selection_suitability(root, state["revision"], state["asset_ids"])
     statuses = {r["audio"]["status"] for r in final[state["asset_ids"][0]]}
     assert statuses == {"speech_sparse", "unconfirmed_empty"}
-    assert all(r["tier"] == "yellow" for r in final[state["asset_ids"][0]])
+    # D79 — 추천 화면 × 발화 적음은 초록(`good-sparse`, v5는 노랑), 자막 판정 전 칸은 노랑 그대로다.
+    assert [(r["tier"], r["rule"]) for r in final[state["asset_ids"][0]]] == [
+        ("green", "good-sparse"),
+        ("yellow", "speech-unconfirmed"),
+        ("yellow", "speech-unconfirmed"),
+    ]
     assert not list(
         (root / "clips").glob("package_*")
     )  # showing results doesn't wait for extraction
@@ -240,7 +245,7 @@ def test_analysis_completion_proposes_red_as_unreviewed_exclusion_and_export_wai
     for segment in pending:
         assert segment.selection == "excluded" and "등급: 제외 제안" in segment.visual_tags
         provenance = json.loads(segment.notes.removeprefix("자동 제외: "))
-        assert (provenance["reason"], provenance["version"]) == ("tier_silence", "raw-tier/v5")
+        assert (provenance["reason"], provenance["version"]) == ("tier_silence", "raw-tier/v6")
         assert provenance["evidence"][:2] == ["tier:silent-not-scenery", "audio:subtitle_silence"]
         assert provenance["source_id"] == segment.source_id
         assert provenance["analysis_revision_id"] == server._quick["revision"]

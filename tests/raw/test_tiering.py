@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.raw.tier_rules import V5_RULES
 from vlogsrt.project.raw import tiering
 from vlogsrt.project.raw.analysis_config import (
     TIER_SETTINGS,
@@ -190,13 +191,19 @@ G, Y, R = tiering.TIER_GREEN, tiering.TIER_YELLOW, tiering.TIER_RED
 UNKNOWN = ("no_frames", "failed", "unanalyzed")
 TABLE = {
     #                    good   usable flagged unknown
-    "speech_dense": (G, Y, Y, Y),
-    "speech_sparse": (Y, Y, Y, Y),
-    "subtitle_silence": (Y, R, R, Y),
+    "speech_dense": (G, G, Y, Y),  # usable → usable-speech (D79)
+    "speech_sparse": (G, Y, Y, Y),  # good → good-sparse (D79)
+    "subtitle_silence": (G, R, R, Y),  # good → scenery-good (D79)
     "unconfirmed_empty": (Y, Y, Y, Y),
     "analysis_failed": (Y, Y, Y, Y),
     "audio_absent": (G, Y, Y, Y),
     "subtitle_pending": (Y, Y, Y, Y),
+}
+TABLE_V5 = {
+    **TABLE,
+    "speech_dense": (G, Y, Y, Y),
+    "speech_sparse": (Y, Y, Y, Y),
+    "subtitle_silence": (Y, R, R, Y),
 }
 
 
@@ -223,7 +230,11 @@ def test_combination_table(audio_status: str, column: int):
         if (audio_status, video_status) == ("audio_absent", "good"):
             assert rule == "video-only-good"
         if (audio_status, video_status) == ("subtitle_silence", "good"):
-            assert rule == "scenery-no-speech"
+            assert rule == tiering.RULE_SCENERY_GOOD
+        if (audio_status, video_status) == ("speech_sparse", "good"):
+            assert rule == tiering.RULE_GOOD_SPARSE
+        if (audio_status, video_status) == ("speech_dense", "usable"):
+            assert rule == tiering.RULE_USABLE_SPEECH
         if tier == Y and audio_status == "analysis_failed":
             assert rule == "audio-failed"
         elif tier == Y and video_status in UNKNOWN:
@@ -236,13 +247,25 @@ def test_combination_table(audio_status: str, column: int):
         )
 
 
-def test_scenery_without_speech_is_yellow_and_only_ai_doubt_makes_silence_red():
-    """자막 없는 긴 공백은 Luna가 풍경으로 본 화면이면 노랑, 의심한 화면이면 빨강이다(D52)."""
+@pytest.mark.parametrize("audio_status", list(TABLE_V5))
+@pytest.mark.parametrize("column", range(4))
+def test_combination_table_with_v5_rules_is_the_old_table(audio_status: str, column: int):
+    """D79 — 세 손잡이를 끄면 v5 표 그대로다."""
+    audio = tiering.AudioJudgment(audio_status, F(0), "a", ())
+    videos = (["good"], ["usable"], ["flagged"], list(UNKNOWN))[column]
+    for video_status in videos:
+        video = tiering.VideoJudgment(video_status, "v", (), ())
+        tier, _, _ = tiering.combine(audio, video, settings=V5_RULES)
+        assert tier == TABLE_V5[audio_status][column], (audio_status, video_status)
+
+
+def test_scenery_without_speech_is_green_and_only_ai_doubt_makes_silence_red():
+    """자막 없는 긴 공백은 Luna가 풍경으로 본 화면이면 초록(D79, v5는 노랑), 의심하면 빨강(D52)."""
     doc = document()
     doc["annotations"][1]["suitability"] = "recommended"
     by_start = {s.start: s for s in report(doc).spans}
     scenery = by_start[SILENT_A[0]]
-    assert (scenery.tier, scenery.rule, scenery.end) == (Y, "scenery-no-speech", SILENT_A[1])
+    assert (scenery.tier, scenery.rule, scenery.end) == (G, tiering.RULE_SCENERY_GOOD, SILENT_A[1])
     assert scenery.audio.status == tiering.AUDIO_SILENT and scenery.video.status == "good"
     assert not tiering.red_decisions(replace(report(doc), spans=(scenery,)))
     # 판정이 거부된 창·판정이 없는 창·프레임 없는 창은 모름이다 — 빨강이 아니라 보류다.
@@ -265,7 +288,7 @@ def test_fixture_layout_reads_both_sides():
     assert layout(result) == [
         (F(0), F(15), G, "both-good"),  # 14.3–15초(0.7초) 풍경 자투리는 앞 녹색에 흡수된다
         (F(15), SILENT_A[1], R, "silent-not-scenery"),
-        (SILENT_A[1], SILENT_B[0], Y, "video-usable"),
+        (SILENT_A[1], SILENT_B[0], Y, "usable-speech"),  # 1.6초 < 3초라 추천 제한으로 보통(D60)
         (SILENT_B[0], F(30), R, "silent-not-scenery"),
         (F(30), SILENT_B[1], R, "silent-not-scenery"),
         (SILENT_B[1], F(413, 10), Y, "video-flagged"),
@@ -322,8 +345,8 @@ def test_short_red_without_red_neighbour_is_demoted_not_proposed():
     doc["annotations"][1]["suitability"] = "recommended"
     result = report(doc)
     assert layout(result)[:2] == [
-        (F(0), F(15), Y, "video-usable"),
-        (F(15), SILENT_A[1], Y, "scenery-no-speech"),
+        (F(0), F(15), G, "usable-speech"),  # D79 — v5는 노랑 "video-usable"
+        (F(15), SILENT_A[1], G, "scenery-good"),  # D79 — v5는 노랑 "scenery-no-speech"
     ]
     assert all(s.end - s.start >= 1 for s in result.spans if s.tier == R)
     assert [(r["start"], r["end"]) for r in tiering.red_decisions(result)] == [
@@ -341,7 +364,7 @@ def test_report_is_deterministic_and_embeds_settings():
     first, second = report(), report()
     assert first == second and first.document() == second.document()
     assert first.document()["settings"] == asdict(TIER_SETTINGS)
-    assert first.tier_version == "raw-tier/v5" and len(first.document_sha256) == 64
+    assert first.tier_version == "raw-tier/v6" and len(first.document_sha256) == 64
     assert set(first.document()) == {"tier_version", "settings", "document_sha256", "spans"}
     # 공백 기준을 두 공백(12초·13초)보다 길게 잡으면 빨강이 없다.
     strict = report(settings=replace(TIER_SETTINGS, silence_min_seconds=13.5))
@@ -359,7 +382,7 @@ def test_red_decisions_shape_matches_auto_decisions():
     row = rows[0]
     assert set(row) == {"start", "end", "reason", "evidence", "version"}
     assert row["start"] == {"num": 15, "den": 1} and row["end"] == {"num": 257, "den": 10}
-    assert row["reason"] == tiering.RED_SILENCE and row["version"] == "raw-tier/v5"
+    assert row["reason"] == tiering.RED_SILENCE and row["version"] == "raw-tier/v6"
     assert row["evidence"][:3] == [
         "tier:silent-not-scenery",
         "audio:subtitle_silence",
@@ -381,7 +404,7 @@ def test_segment_grade_maps_to_closed_recommendation_set():
     closed = {"recommended", "normal", "review_required"}
     green = tiering.segment_grade(result, F(1), F(14))
     assert green[0] == "recommended"
-    assert green[1][0] == "등급: 추천" and green[1][-1] == "등급판 raw-tier/v5"
+    assert green[1][0] == "등급: 추천" and green[1][-1] == "등급판 raw-tier/v6"
     assert green[1][1].startswith("자막: 발화가 구간의") and green[1][2].startswith("영상: ")
     red = tiering.segment_grade(result, F(16), F(25))
     assert red == ("normal", red[1]) and red[1][0] == "등급: 제외 제안"
@@ -455,7 +478,8 @@ def test_default_tier_settings_hold_only_subtitle_and_span_values():
 
     D60이 넷을 더했다 — 모두 생성 자막의 글자·시각과 구간 길이에서 오는 값이다(같은 말 런 ·
     느린 추임새 속도·길이 · 추천 최소 길이). D65가 하나를 더했다 — 원본 자막 「확인 필요」 줄의
-    몫(자막의 글자에서 오는 값). 측정 값은 여전히 없다.
+    몫(자막의 글자에서 오는 값). D79(v6)가 다섯을 더했다 — 칸 셋의 켜고 끔 · 추천을 막는 화면
+    문제 종류 · 조각 녹색 몫(모두 규칙 손잡이다). 측정 값은 여전히 없다.
     """
     assert {field.name for field in dataclasses.fields(RawTierSettings)} == {
         "tier_version",
@@ -468,12 +492,17 @@ def test_default_tier_settings_hold_only_subtitle_and_span_values():
         "slow_filler_min_seconds",
         "recommended_min_seconds",
         "subtitle_verified_suspect_share",
+        "usable_speech_green",
+        "scenery_green",
+        "good_sparse_green",
+        "visual_issue_caps",
+        "segment_green_share",
     }
 
 
 def test_default_tier_settings_are_valid_and_unchanged():
     validate_tier_settings(TIER_SETTINGS)
-    assert TIER_SETTINGS.tier_version == "raw-tier/v5"
+    assert TIER_SETTINGS.tier_version == "raw-tier/v6"
     assert TIER_SETTINGS.speech_density_green == 0.35
     assert (TIER_SETTINGS.silence_min_seconds, TIER_SETTINGS.speech_handle_seconds) == (5.0, 0.3)
     assert TIER_SETTINGS.min_span_seconds == 1.0

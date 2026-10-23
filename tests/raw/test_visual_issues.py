@@ -427,8 +427,9 @@ def test_the_video_reason_names_the_issues_and_only_green_is_capped() -> None:
         if a.tier != b.tier
     ]
     assert changed == [(Fraction(0), Fraction(15), tiering.TIER_GREEN, tiering.TIER_YELLOW)]
+    # 제한 말은 녹색을 막는 문제(v6 `visual_issue_caps` — 어두움·과노출, D79)만 이름 댄다
     assert after.spans[0].caps == (
-        (tiering.CAP_VISUAL_ISSUES, "화면 문제(흐림·흔들림·어두움)가 있어 보통까지만 추천합니다"),
+        (tiering.CAP_VISUAL_ISSUES, "화면 문제(어두움)가 있어 보통까지만 추천합니다"),
     )
     assert tiering.red_decisions(after) == tiering.red_decisions(before)
     # 「분석 근거」가 보이는 검토 조각의 `영상:` 태그와 「추천 제한」 태그에 그 말이 실린다
@@ -436,4 +437,4 @@ def test_the_video_reason_names_the_issues_and_only_green_is_capped() -> None:
     video = [tag for tag in tags if tag.startswith(tiering.VIDEO_TAG_PREFIX)]
     assert len(video) == 1 and "화면 문제: 흐림·흔들림·어두움" in video[0]
     assert recommendation == "normal" and tags[0] == "등급: 보통"
-    assert "추천 제한: 화면 문제(흐림·흔들림·어두움)가 있어 보통까지만 추천합니다" in tags
+    assert "추천 제한: 화면 문제(어두움)가 있어 보통까지만 추천합니다" in tags

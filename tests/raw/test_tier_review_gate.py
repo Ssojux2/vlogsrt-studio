@@ -5,7 +5,7 @@
 3→11초가 8초짜리 자막 공백이다 — 발화 쪽 0.3초를 남긴 3.3–10.7초가 자막 없는 긴 공백이다(D52).
 Luna가 그 창을 '사용 가능'(`suitability="usable"`)으로 보면 풍경이 아니므로 빨강이 되고, 프레임
 격자(1/25초) 안쪽으로 붙인 3.32–10.68초 조각이 자동 제외 후보가 된다. '추천'으로 보면 풍경이라
-노랑이다(제외 제안 없음). Luna는 저장 프레임 하나를 근거로 낸다. 유료 호출 0회.
+초록이다(D79 — v5는 노랑, 제외 제안 없음). Luna는 저장 프레임 하나를 근거로 낸다. 유료 호출 0회.
 """
 
 from __future__ import annotations
@@ -144,7 +144,7 @@ def test_red_silence_becomes_unreviewed_auto_exclusion_and_finalcut_keeps_it_ena
     (segment,) = pending
     provenance = json.loads(segment.notes.removeprefix("자동 제외: "))
     assert provenance["reason"] == tiering.RED_SILENCE
-    assert provenance["version"] == "raw-tier/v5"
+    assert provenance["version"] == "raw-tier/v6"
     assert provenance["evidence"][:3] == [
         "tier:silent-not-scenery",
         "audio:subtitle_silence",
@@ -152,7 +152,7 @@ def test_red_silence_becomes_unreviewed_auto_exclusion_and_finalcut_keeps_it_ena
     ]
     assert not any(e.startswith("pcm:") for e in provenance["evidence"])
     assert "등급: 제외 제안" in segment.visual_tags
-    assert "등급판 raw-tier/v5" in segment.visual_tags
+    assert "등급판 raw-tier/v6" in segment.visual_tags
     package_dir = service.package_overview(root).package.package_dir
     with pytest.raises(RawWorkspaceError, match="자동 제외 1개를 먼저 확인"):
         facade.export_confirmed(package_dir)  # 잘라 내는 쪽의 관문은 그대로다(D35)
@@ -175,7 +175,11 @@ def test_red_silence_becomes_unreviewed_auto_exclusion_and_finalcut_keeps_it_ena
 
 @needs_ffmpeg
 def test_green_and_yellow_never_change_selection(tmp_path: Path):
-    """Luna가 그 화면을 '추천'으로 보면 자막 없는 공백은 풍경이다 — 노랑, 제외 제안 없음(D52)."""
+    """Luna가 그 화면을 '추천'으로 보면 자막 없는 공백은 풍경이다 — 초록, 제외 제안 없음(D52·D79).
+
+    v5에서는 풍경이 노랑이었다. v6(D79)은 초록(`scenery-good`)이라, 노랑은 확인 권고(`review`) 화면
+    위에 말이 끊이지 않는 프로젝트에서 따로 본다.
+    """
     service, root = tier_project(tmp_path)
     head = ReviewWorkspaceFacade(root).load_head().revision
     rows = service.selection_suitability(
@@ -183,13 +187,32 @@ def test_green_and_yellow_never_change_selection(tmp_path: Path):
     )[head.segments[0].source_id]
     assert [(row["tier"], row["rule"]) for row in rows] == [
         ("green", "both-good"),
-        ("yellow", "scenery-no-speech"),
+        ("green", tiering.RULE_SCENERY_GOOD),
         ("green", "both-good"),
     ]
     assert rows[0]["audio"]["status"] == "speech_dense"
     assert rows[0]["video"]["status"] == "good"
     assert "확인 메모: 원거리 인물 식별 불확실" in rows[0]["video"]["reason"]
     assert (rows[1]["audio"]["status"], rows[1]["red_reason"]) == ("subtitle_silence", None)
+    _assert_selection_untouched(head)
+
+
+@needs_ffmpeg
+def test_yellow_never_changes_selection(tmp_path: Path):
+    """확인 권고 화면 위에 말이 끊이지 않으면 노랑만 남는다 — 제외 제안도 선택 변경도 없다."""
+    talk = tuple(
+        {"start": 0.5 + 2 * i, "end": 1.5 + 2 * i, "text": f"말 {i}번째"} for i in range(7)
+    )
+    service, root = tier_project(tmp_path, suitability="review", utterances=talk)
+    head = ReviewWorkspaceFacade(root).load_head().revision
+    rows = service.selection_suitability(
+        root, service.analysis_overview(root).revision.revision_id, (head.segments[0].source_id,)
+    )[head.segments[0].source_id]
+    assert {row["tier"] for row in rows} == {"yellow"}
+    _assert_selection_untouched(head)
+
+
+def _assert_selection_untouched(head) -> None:
     assert unreviewed_auto_exclusions(head) == ()
     for segment in head.segments:
         assert segment.selection == "included"
@@ -212,7 +235,7 @@ def test_retier_keeps_manual_selection_override_and_notes(
     edited = facade.set_notes(edited.base_plan_id, first.segment_id, "사람 메모")
     retiered = facade.retier(edited.base_plan_id)
     assert retiered.sequence == edited.sequence + 1
-    assert retiered.edit is not None and retiered.edit.notes == "등급 재계산 raw-tier/v5"
+    assert retiered.edit is not None and retiered.edit.notes == "등급 재계산 raw-tier/v6"
     for before, after in zip(edited.segments, retiered.segments, strict=True):
         assert (before.segment_id, before.start_pts, before.end_pts) == (
             after.segment_id,
@@ -411,9 +434,9 @@ def test_workbench_model_carries_tiers_and_pending_counts(tmp_path: Path):
     server.open_workspace_view(str(root))
     model = _model_of(server.visual_workbench_render(root)[1])
     by_tier = {card["tier"]: card for card in model["cards"]}
-    assert set(by_tier) == {"yellow", "red"}
+    assert set(by_tier) == {"green", "red"}  # D79 — `usable` × 발화 많음은 초록(v5는 노랑)
     assert by_tier["red"]["autoPending"] is True and by_tier["red"]["sel"] == "excluded"
-    assert by_tier["yellow"]["autoPending"] is False
+    assert by_tier["green"]["autoPending"] is False
     assert model["redPending"] == 1 and model["redUnmaterialized"] == 0
 
 

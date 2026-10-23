@@ -2066,6 +2066,7 @@ class RawWorkspaceService:
                 audio_start=_record_audio_start(workspace.root, row),
                 document_sha256=hashlib.sha256(body).hexdigest(),
                 timing=self._tier_timing(workspace, row.asset_id),
+                settings=TIER_SETTINGS,
             )
         progress = directory / "suitability_progress.json"
         if not progress.is_file():
@@ -2073,7 +2074,9 @@ class RawWorkspaceService:
         payload = json.loads(progress.read_text(encoding="utf-8"))
         if payload.get("analysis_revision_id") != row.revision_id:
             return None
-        return tiering.classify(payload, timing=self._tier_timing(workspace, row.asset_id))
+        return tiering.classify(
+            payload, timing=self._tier_timing(workspace, row.asset_id), settings=TIER_SETTINGS
+        )
 
     def _tier_timing(self, workspace: RawWorkspace, asset_id: str) -> tiering.TimingSignals:
         """등급에 넘길 자막 시각 확인 값 — **지금** 보고서에서만(D60·D65). 이 값의 유일한 생산자다.
