@@ -40,6 +40,8 @@ TRANSCRIPTION_ENDPOINT = "audio.transcriptions"
 FEATURE_JSON = "response_format:json"
 FEATURE_VERBOSE_JSON = "response_format:verbose_json"
 FEATURE_LANGUAGES = "languages"
+FEATURE_LANGUAGE = "language"
+"""whisper의 단수 언어 칸(D77) — 시간 역할만 확인했다. 복수형 `languages`(문구 힌트)와 다르다."""
 FEATURE_KEYWORDS = "keywords"
 FEATURE_PROMPT = "prompt"
 FEATURE_SEGMENT_TIMES = "timestamp_granularities:segment"
@@ -50,6 +52,7 @@ FEATURE_LOGPROBS = "logprobs"
 
 _TEXT_CONFIRMED = (FEATURE_JSON, FEATURE_LANGUAGES, FEATURE_KEYWORDS, FEATURE_PROMPT)
 _TEXT_UNCONFIRMED = (
+    FEATURE_LANGUAGE,
     FEATURE_VERBOSE_JSON,
     FEATURE_SRT,
     FEATURE_VTT,
@@ -59,7 +62,12 @@ _TEXT_UNCONFIRMED = (
 )
 # 단어 입자는 whisper-1 verbose_json 문서의 `timestamp_granularities[]`가 세그먼트와 함께 준다 —
 # 1단계 내부 전사만 제안·보고서 재료로 묻는다(W-25c, D73). 시각은 여전히 세그먼트에서만 온다.
-_TIMING_CONFIRMED = (FEATURE_VERBOSE_JSON, FEATURE_SEGMENT_TIMES, FEATURE_WORD_TIMES)
+_TIMING_CONFIRMED = (
+    FEATURE_VERBOSE_JSON,
+    FEATURE_SEGMENT_TIMES,
+    FEATURE_WORD_TIMES,
+    FEATURE_LANGUAGE,
+)
 _TIMING_UNCONFIRMED = (
     FEATURE_JSON,
     FEATURE_SRT,

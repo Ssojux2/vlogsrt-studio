@@ -2899,8 +2899,9 @@ class RawWorkspaceService:
         """
         from vlogsrt.project.raw import source_transcript, subtitle_suspects
 
+        disagreed = _ear_disagreed(transcript)
         if stage1 is None or stage1.absent:
-            return subtitle_suspects.CueTiming()
+            return subtitle_suspects.CueTiming(ear_disagreed=disagreed)
         by_request = {chunk.request_id: chunk for chunk in stage1.chunks}
         pcm_zero = stage1.origin - stage1.presentation_origin
         clamped: set[str] = set()
@@ -2921,7 +2922,7 @@ class RawWorkspaceService:
                 clamped.add(cue_id)
             if at < len(chunk.scores):
                 scores[cue_id] = chunk.scores[at]
-        return subtitle_suspects.CueTiming(frozenset(clamped), local, scores)
+        return subtitle_suspects.CueTiming(frozenset(clamped), local, scores, disagreed)
 
     def subtitle_timing(self, root: Path, source_id: str, transcript: Mapping[str, Any]) -> Any:
         """화면의 「확인 필요」 시각 표시 셋 재료 — 원본 자막이 묶인 원본 해시의 가장 최근 1단계
@@ -5321,6 +5322,18 @@ def _truth_strata(
         starts = tuple(origin + start for start in stage1.chunk_starts)
     return timing_truth.stratify(
         lines, chunk_starts=starts, audio_start=origin, no_speech=_current_no_speech(sync_view)
+    )
+
+
+def _ear_disagreed(transcript: Mapping[str, Any]) -> frozenset[str]:
+    """다른 귀가 조각을 다르게 들어 D37 조각 게이트가 거절한 줄(W-29a, D77) — 합친 줄은 `+`로 이은
+    이유 가운데 하나라도."""
+    from vlogsrt.retext import REASON_CHUNK
+
+    return frozenset(
+        str(row["utterance_id"])
+        for row in transcript.get("utterances", [])
+        if REASON_CHUNK in str(row.get("retext_reason") or "").split("+")
     )
 
 

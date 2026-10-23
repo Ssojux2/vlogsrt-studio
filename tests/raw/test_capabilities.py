@@ -75,13 +75,15 @@ def test_text_role_confirms_only_text_features() -> None:
     } <= refused
 
 
-def test_timing_role_confirms_only_the_segment_skeleton_and_word_times() -> None:
-    """시간 역할의 확인된 기능은 verbose_json·세그먼트 입자·단어 입자뿐이다(단어는 D73, W-25c)."""
+def test_timing_role_confirms_only_the_segment_skeleton_word_times_and_language() -> None:
+    """시간 역할의 확인된 기능은 verbose_json·세그먼트 입자·단어 입자·단수 언어뿐이다(단어는 D73
+    W-25c, 단수 언어는 D77 W-29a — 복수형 languages 힌트는 여전히 미확인)."""
     timing = snapshot("timing")
     assert set(timing.confirmed_supported_features) == {
         FEATURE_VERBOSE_JSON,
         FEATURE_SEGMENT_TIMES,
         FEATURE_WORD_TIMES,
+        capabilities.FEATURE_LANGUAGE,
     }
     refused = set(timing.unsupported_or_unverified_features)
     assert {

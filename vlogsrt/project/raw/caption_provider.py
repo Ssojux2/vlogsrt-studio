@@ -539,13 +539,19 @@ def timing_transcription_request(
     없다. `temperature`는 되풀이 대응의 손잡이(D28)로 호출자가 값을 정한다 —
     `None`이면 필드가 빠진다. 실전송 어댑터는 `None`을 받지 않고 엔진 1차 온도를
     채워 부른다(D55).
+
+    단수 `language`는 계약의 예상 언어 첫째다(D77) — 힌트가 아니라 디코더 언어 고정이라 whisper가
+    소음 위에서 일본어·영어 끝인사를 지어내는 길을 막는다. 레거시 CLI(`transcribe._extras`)도
+    보낸다. 예상 언어가 비었으면 칸째 빠진다.
     """
     contract, models = settings.caption, settings.models
+    language = contract.languages[0] if contract.languages else ""
+    features = _granularity_features(contract.timestamp_granularities)
     capabilities.confirm_request_combo(
         role=capabilities.ROLE_TIMING,
         model=models.timing_model,
         response_format=contract.timing_response_format,
-        features=_granularity_features(contract.timestamp_granularities),
+        features=features + ((capabilities.FEATURE_LANGUAGE,) if language else ()),
     )
     return AudioTranscriptionRequest(
         chunk=chunk,
@@ -553,6 +559,7 @@ def timing_transcription_request(
         response_format=contract.timing_response_format,
         timestamp_granularities=contract.timestamp_granularities,
         temperature=temperature,
+        language=language,
     )
 
 

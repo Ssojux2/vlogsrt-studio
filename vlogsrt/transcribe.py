@@ -780,6 +780,9 @@ def get_transcriber(
 TRANSPORT_RESPONSE_FORMATS = ("json", "verbose_json")
 """전송 경계가 아는 응답 형식 둘뿐이다 — srt·vtt는 어떤 역할에도 못 실는다."""
 
+ISO_639_1_LENGTH = 2
+"""whisper 단수 `language`의 모양 — ISO 639-1 코드는 두 글자다(D77)."""
+
 TRANSPORT_TIMESTAMP_GRANULARITIES = ("segment", "word")
 """timestamp_granularities의 API enum. word는 별도 계약이 필요하다(§11.3)."""
 
@@ -805,6 +808,9 @@ class AudioTranscriptionRequest:
     prompt: str = ""
     timestamp_granularities: tuple[str, ...] = ()
     temperature: float | None = None
+    # whisper의 단수 언어 칸(D77) — 힌트가 아니라 디코더 언어 고정이다(레거시 `_extras`도 보낸다).
+    # 비었으면 칸째 빠진다. 복수형 `languages`(문구 모델 힌트)와 다르다.
+    language: str = ""
 
 
 def transport_request_problems(request: AudioTranscriptionRequest) -> list[str]:
@@ -818,6 +824,7 @@ def transport_request_problems(request: AudioTranscriptionRequest) -> list[str]:
         )
     problems += _hint_shape_problems(request.languages, request.keywords, request.prompt)
     problems += _granularity_problems(request)
+    problems += _language_problems(request.language)
     if request.temperature is not None and not math.isfinite(request.temperature):
         problems.append("온도가 유한 숫자가 아니다")
     if not _finite_number(request.chunk.offset) or not _finite_number(request.chunk.duration):
@@ -851,6 +858,20 @@ def _granularity_problems(request: AudioTranscriptionRequest) -> list[str]:
     if request.timestamp_granularities and request.response_format != "verbose_json":
         problems.append("시간 입자는 verbose_json과만 함께 보낼 수 있다")
     return problems
+
+
+def _language_problems(language: str) -> list[str]:
+    """단수 언어는 ISO 639-1 두 글자 소문자다 — 나머지는 서버가 거절하거나 다른 뜻으로 읽는다."""
+    if not language:
+        return []
+    if (
+        len(language) != ISO_639_1_LENGTH
+        or not language.isascii()
+        or not language.isalpha()
+        or not language.islower()
+    ):
+        return [f"언어 {language!r}는 ISO 639-1 두 글자 소문자가 아니다"]
+    return []
 
 
 def validate_transport_request(request: AudioTranscriptionRequest) -> None:
@@ -896,6 +917,8 @@ def _transport_fields(request: AudioTranscriptionRequest) -> tuple[dict[str, Any
         extras["temperature"] = request.temperature
     if request.timestamp_granularities:
         extras["timestamp_granularities"] = list(request.timestamp_granularities)
+    if request.language:
+        extras["language"] = request.language
     extras.update(_hint_fields(request.languages, request.keywords, request.prompt))
     return required, extras
 

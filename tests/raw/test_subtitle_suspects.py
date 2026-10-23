@@ -198,6 +198,9 @@ def test_settings_live_outside_every_fingerprinted_settings() -> None:
         "allowed_letters",
         "low_confidence_avg_logprob",  # W-25f(D76) — 표시 기준, whisper 레퍼런스 기본값
         "low_confidence_no_speech_prob",
+        "small_vocabulary_run_min",  # W-29a(D77) — 번갈아 이어지는 적은 어휘 런
+        "small_vocabulary_max_kinds",
+        "symbols_only_min_chars",  # W-29a(D77) — 글자 없는 긴 부호 줄
     }
     for fingerprinted in (
         RawWorkflowConfig(),

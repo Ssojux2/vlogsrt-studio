@@ -256,6 +256,13 @@ class SubtitleSuspectSettings:
       받는다.
     - `allowed_letters`: 이름이 허용 낱말에 없고 NFKC로도 되지 않지만 받는 글자 — 단위의 마이크로
       기호(`µ`, U+00B5 — NFKC가 그리스 뮤로 접는다). 그리스 뮤(U+03BC) 자체는 여전히 다른 문자다.
+    - `small_vocabulary_run_min`·`small_vocabulary_max_kinds`(W-29a, D77): 접은 글자가 이만큼 **적은
+      종류**(2종 이상, 종류마다 두 번 이상, 한 종류가 절반 이하)뿐인 줄이 이만큼 이어지면 표시한다 —
+      whisper가 「Be safe/Be happy/Be cool」을 18줄 번갈아 지어냈다(같은 말 하나의 런은
+      `repeat_run_min`의 몫). 6줄은 맞장구 몇 마디를 넘는다.
+    - `symbols_only_min_chars`(W-29a, D77): 글자 없이 부호·기호만 이만큼 이어진 줄을 표시한다 —
+      실측 「¡¡¡¡…」 6.7초. 말 사이 쉼으로 흔한 「…」·「...」·「?!」(1–3자)는 걸리지 않게 바닥이
+      `SYMBOLS_ONLY_FLOOR`(4)다. 기본 6이면 「......」(6자)는 걸린다.
     - `low_confidence_avg_logprob`·`low_confidence_no_speech_prob`(W-25f, D76): whisper 세그먼트의
       평균 로그 확률이 이보다 **낮거나** 무음 확률이 이 **이상**이면 「전사 확신이 낮습니다」다.
       whisper 레퍼런스 구현의 `logprob_threshold`(−1.0)·`no_speech_threshold`(0.6) 그대로다.
@@ -267,11 +274,21 @@ class SubtitleSuspectSettings:
         "영상 봐주셔서 감사합니다",
         "다음 영상에서 만나요",
         "구독과 좋아요 부탁드립니다",
+        # W-29a(D77) — 실측 reelog 환각(소음 위 whisper): 끝인사·광고 고지·인사 문구
+        "다음에 만나요",
+        "찾아뵐게요",
+        "Thanks for watching",
+        "수고하셨습니다",
+        "유료광고를 포함",
+        "맛있게 잘 먹었습니다",
     )
     allowed_letter_scripts: tuple[str, ...] = ("HANGUL", "LATIN")
     allowed_letters: tuple[str, ...] = ("\u00b5",)
     low_confidence_avg_logprob: float = -1.0
     low_confidence_no_speech_prob: float = 0.6
+    small_vocabulary_run_min: int = 6
+    small_vocabulary_max_kinds: int = 3
+    symbols_only_min_chars: int = 6
 
 
 SUBTITLE_SUSPECT_SETTINGS = SubtitleSuspectSettings()
@@ -336,6 +353,17 @@ def subtitle_suspect_problems(settings: SubtitleSuspectSettings) -> list[str]:
     for letter in settings.allowed_letters:
         if not isinstance(letter, str) or len(letter) != 1:
             problems.append(f"허용 글자는 한 글자씩이어야 한다: {letter!r}")
+    vocabulary = (settings.small_vocabulary_run_min, settings.small_vocabulary_max_kinds)
+    if any(isinstance(value, bool) or not isinstance(value, int) for value in vocabulary):
+        problems.append(f"작은 어휘 런 기준은 정수여야 한다: {vocabulary!r}")
+    elif vocabulary[0] < 3 or vocabulary[1] < 2:
+        problems.append(f"작은 어휘 런은 3줄 이상 · 2종 이상이어야 한다: {vocabulary!r}")
+    symbols = settings.symbols_only_min_chars
+    if isinstance(symbols, bool) or not isinstance(symbols, int) or symbols < SYMBOLS_ONLY_FLOOR:
+        problems.append(
+            f"부호뿐인 줄 기준은 {SYMBOLS_ONLY_FLOOR} 이상의 정수여야 한다 — 「...」·「?!」"
+            f" 같은 쉼을 짚지 않게: {symbols!r}"
+        )
     logprob = settings.low_confidence_avg_logprob
     if not _finite_float(logprob) or logprob > 0:
         problems.append(f"낮은 확신의 로그 확률 기준은 0 이하의 유한 실수여야 한다: {logprob!r}")
@@ -711,6 +739,24 @@ def pricing_problems(pricing: RawPricingSnapshot) -> list[str]:
     return problems
 
 
+SYMBOLS_ONLY_FLOOR = 4
+"""「부호뿐인 줄」 기준의 바닥 — 말 사이 쉼(「…」·「...」·「?!」, 3자 이하)을 짚지 않는다(D77)."""
+
+ISO_639_1_LENGTH = 2
+"""whisper 단수 `language`의 모양 — ISO 639-1 두 글자 소문자(D77, `transcribe._language_problems`와
+같다)."""
+
+
+def _timing_language_problems(languages: tuple[str, ...]) -> list[str]:
+    """예상 언어 첫째는 whisper 단수 `language`로도 간다(D77) — 열 때 막는다(실행 중이 아니라)."""
+    if not languages:
+        return []
+    first = languages[0]
+    if len(first) == ISO_639_1_LENGTH and first.isascii() and first.isalpha() and first.islower():
+        return []
+    return [f"예상 언어 첫째 {first!r}는 whisper 언어 칸(ISO 639-1 두 글자 소문자)이 아니다"]
+
+
 def caption_problems(caption: RawCaptionContract) -> list[str]:
     """요청 형식·힌트·금지 조건 — 호출 전에 차단할 조합을 데이터 단계에서 막는다(§11.4)."""
     problems: list[str] = []
@@ -732,6 +778,7 @@ def caption_problems(caption: RawCaptionContract) -> list[str]:
     # 빈 languages·keywords는 합법이다 — "힌트 없음"이지 무발화가 아니다(§11.4,
     # 코디네이터 재결). 요청 어댑터는 빈 배열을 필드째 빼고 보낸다.
     problems += hint_problems("예상 언어", caption.languages)
+    problems += _timing_language_problems(caption.languages)
     problems += hint_problems("고유명사 힌트", caption.keywords)
     if caption.allow_silent_model_fallback:
         problems.append("조용한 구형 모델 fallback은 금지다")
