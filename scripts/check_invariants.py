@@ -773,9 +773,11 @@ def check_retext_stays_pure() -> list[str]:
 
 
 # 「다른 귀 기준 재전사」의 판정(W-29b, D78)도 값만 받아 값만 돌려준다 — 전송·파일·전사 흐름을 알면
-# 다시 묻기를 고르는 판정이 호출·캐시 상태에 기대게 된다. 묻고 쓰는 일은 `understanding.py`의 몫이다.
+# 다시 묻기를 고르는 판정이 호출·캐시 상태에 기대게 된다. 묻고 쓰는 일은 `understanding.py`의
+# 몫이다.
 EAR_RESCUE_MUST_NOT_IMPORT = (
-    *RETEXT_MUST_NOT_IMPORT, "understanding", "source_text", "service", "sqlite3", "caption_provider",
+    *RETEXT_MUST_NOT_IMPORT, "understanding", "source_text", "service", "sqlite3",
+    "caption_provider",
 )  # fmt: skip
 
 
@@ -783,7 +785,7 @@ def check_ear_rescue_stays_pure() -> list[str]:
     """D78 — `ear_rescue.py`는 whisper 세그먼트·다른 귀 글자를 **값으로** 받아 판정만 돌려준다."""
     path = PROJECT_PACKAGE / "raw" / "ear_rescue.py"
     if not path.exists():
-        return ["vlogsrt/project/raw/ear_rescue.py: 다른 귀 기준 재전사 판정 계층이 사라졌다 (D78)"]
+        return ["vlogsrt/project/raw/ear_rescue.py: 다시 묻기 판정 계층이 사라졌다 (D78)"]
     body = path.read_text(encoding="utf-8")
     failures = [
         f"ear_rescue.py: {name}을 import한다 — 다시 묻기 판정이 순수 함수가 아니게 된다 (D78)"
