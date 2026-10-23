@@ -309,16 +309,17 @@ P24, P25, P30, P60 = F(1, 24), F(1, 25), F(1, 30), F(1, 60)
 
 SINGLE_RATE_SHA256 = {
     "film": "160c4890adcc5554ee6c2f6c6b380b9b2e7e7b6f36617bb94c58345acbd6b9a3",
-    "hfr": "86b6f2c054a71bed193a11bf2f6871886dba2ca42282b5a8d4fe519e62385961",
-    "mixed": "883d4932a19c1b443d250ba1cad53d350d1134382ce214609b71a7920f070d88",
+    "hfr": "f29a6cfc05039a333560b18540fb32143940d5270d6fa601a31115bf45b42bcb",
+    "mixed": "f8e3635d7109b07d069fde14c27a795ab908409f58be1f50a0fe4d4fde977063",
     "one_side": "47da87315606164ab27c4aa2dc9c88ee4dba82a9f25f14ba030a7d09288b41d7",
-    "pal": "3327606ec11e6f1d919012230a324167aacb2b6c37380226677a8001e58e7ee8",
-    "real_like": "74fe170a9070b7635405a5567cc219233765ba127da3cafcd6a96c81e7bbf690",
+    "pal": "cc225cc58876bbbc87b1ea55c8f5cbb83bdcd67cbfd119633eec2bd3167c9618",
+    "real_like": "0b4cc01f6e5525d580f3b922f1124c09e2c0c5bb6de04c8ce197fbc841d204d1",
     "red": "1cc7f2d925252c8461df08bb146e1de715eaff8551abdd234f54151214304785",
 }
 """W-27d 앞(e1fcafc)의 빌더로 렌더한 한 레이트 문서들 — 레이트가 하나면 바이트가 그대로다.
 `mixed`·`real_like`·`red`는 W-29d(D80)에서 다시 고정했다 — 미검토 빨강 클립과 그 캡션에
-`enabled="0"`이 붙은 것 말고는 바이트가 같다(그 diff를 손으로 확인했다)."""
+`enabled="0"`이 붙은 것 말고는 바이트가 같다(그 diff를 손으로 확인했다). 캡션이 있는 `hfr`·
+`mixed`·`pal`·`real_like`는 W-29f(D81)에서 캡션 역할이 SRT로 바뀐 것 말고는 같다."""
 
 
 def rated(
@@ -899,7 +900,7 @@ def test_captions_snap_split_at_cuts_and_inherit_disabled_state() -> None:
         "name": "걸침",  # Final Cut 자신의 내보내기처럼 캡션 이름이 곧 글이다
         "start": "3600s",
         "duration": f"{3 * 1001}/30000s",
-        "role": "iTT?captionFormat=ITT.ko",
+        "role": "SRT?captionFormat=SRT.ko",  # Final Cut이 SRT로 내보낸다(W-29f, D81)
     }
     assert [x.text for x in caption] == ["걸침"]
     (tail,) = second.findall("caption")

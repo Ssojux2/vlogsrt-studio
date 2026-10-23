@@ -8344,3 +8344,20 @@ whisper $0.60 + 교차 확인 $0.45). 그 뒤 `scripts/timing_truth_report.py`�
 **시험**: `test_finalcut_timeline.py`(확정 제외·미검토 빨강만 꺼짐 · 보통인 미검토 제외는 켬 · 되살린 빨강은 켬 · 꺼진 미검토 빨강은 방향 표가
 없음 · 모든 스파인 클립의 켜짐 = 확정 or 미검토 빨강) · `test_finalcut_export.py` · `test_tier_review_gate.py` · `test_selection_analysis.py` ·
 `test_proposal_queue.py`(안내 문구).
+
+## D81 — W-29f Final Cut 캡션 역할 iTT → SRT (D56 개정, 2026-10-23, W-29f)
+
+**문제**: 사용자 지시(2026-10-23): 「이 작업 이후에 자막 추출이 iTT 파일로 되는데, SRT 파일로 되도록 수정해줘」. Final Cut의 캡션
+내보내기(파일 › 내보내기 › 캡션)는 캡션 **역할**이 정한 형식으로 파일을 쓴다 — D56은 캡션을 `iTT?captionFormat=ITT.ko`로 달았다.
+
+**결정**: `finalcut_timeline.CAPTION_ROLE = "SRT?captionFormat=SRT.ko"`. 철자는 설치된 Final Cut 12.4가 쓰는 틀
+`<짧은 이름>?captionFormat=<형식>.<언어>`를 따른다 — 예전 값이 그 틀(`iTT` · `ITT`)이었고, Final Cut의 `FFLocalizable.strings`가
+SRT의 짧은 이름을 `SRT`, 형식 식별자를 `SRT`로 둔다(`FFRoleCaptionFormatShortName_SRT = SRT`). lane 1 · `start="3600s"` · `name` = 글 ·
+꺼진 클립 밑 캡션은 꺼짐 · 프레임 맞춤은 그대로다. 두 줄을 넘는 캡션은 여전히 세기만 한다(`CAPTION_MAX_LINES = 2` — iTT 한도를 보수적으로
+남겼다, 글은 고치지 않는다).
+
+**바이트**: 캡션이 있는 고정 문서 넷(`hfr`·`mixed`·`pal`·`real_like`)은 `role` 값 말고는 바이트가 같아 다시 고정했다(diff 확인). 캡션이
+없는 `film`·`one_side`·`red`는 그대로다. DTD는 `role` 값을 제한하지 않는다(설치 DTD 검증 시험이 그대로 돈다).
+
+**사람 확인 남음**: Final Cut에서 새로 보낸 타임라인을 열어 캡션이 SRT 역할로 보이는지, 파일 › 내보내기 › 캡션이 `.srt`를 쓰는지
+(`docs/FCP_MANUAL_ACCEPTANCE.md`). 이미 가져온 예전 프로젝트의 캡션은 iTT 그대로다 — 다시 보내야 한다.

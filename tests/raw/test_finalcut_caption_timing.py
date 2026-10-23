@@ -44,12 +44,13 @@ TITLE = "vlogsrt · 260810_wangbang · 2026-10-09 18:30"
 # 3초보다 짧아 「추천」이 「보통」이 되고 브라우저 클립의 즐겨찾기가 빠진다(W-16·74c6adb의 값
 # `40aa3dd1…4521f8ee`). 나머지 바이트는 같다. W-29d(D80)에서 `mixed`·`real_like`·`red`를 다시
 # 고정했다 — 미검토 빨강 클립과 그 캡션에 `enabled="0"`이 붙은 것 말고는 같다(그 diff를 확인했다).
+# W-29f(D81)에서 캡션이 있는 `hfr`·`mixed`·`pal`·`real_like`를 다시 고정했다 — 캡션 역할이 SRT다.
 W16_DOCUMENT_SHA256 = {
     "film": "160c4890adcc5554ee6c2f6c6b380b9b2e7e7b6f36617bb94c58345acbd6b9a3",
-    "hfr": "86b6f2c054a71bed193a11bf2f6871886dba2ca42282b5a8d4fe519e62385961",
-    "mixed": "883d4932a19c1b443d250ba1cad53d350d1134382ce214609b71a7920f070d88",
-    "pal": "3327606ec11e6f1d919012230a324167aacb2b6c37380226677a8001e58e7ee8",
-    "real_like": "74fe170a9070b7635405a5567cc219233765ba127da3cafcd6a96c81e7bbf690",
+    "hfr": "f29a6cfc05039a333560b18540fb32143940d5270d6fa601a31115bf45b42bcb",
+    "mixed": "f8e3635d7109b07d069fde14c27a795ab908409f58be1f50a0fe4d4fde977063",
+    "pal": "cc225cc58876bbbc87b1ea55c8f5cbb83bdcd67cbfd119633eec2bd3167c9618",
+    "real_like": "0b4cc01f6e5525d580f3b922f1124c09e2c0c5bb6de04c8ce197fbc841d204d1",
     "red": "1cc7f2d925252c8461df08bb146e1de715eaff8551abdd234f54151214304785",
 }
 

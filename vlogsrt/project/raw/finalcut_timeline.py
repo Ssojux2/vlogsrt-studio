@@ -97,10 +97,15 @@ KEYWORDS = (
 """키워드 철자 전부 — `keyword@value`는 쉼표로 나뉘는 목록이라 쉼표가 들어가면 둘로 쪼개진다."""
 _TIER_KEYWORDS = (KEYWORD_RECOMMENDED, KEYWORD_NORMAL, KEYWORD_SUGGESTED_EXCLUSION, KEYWORD_HOLD)
 
-# Final Cut 형식의 사실(조정 임계값이 아니다). 캡션은 한국어 iTT 역할에 lane 1로 단다 —
-# Final Cut이 내보내는 캡션이 `start="3600s"`를 쓰고, iTT 캡션은 두 줄까지만 받는다(Apple
-# 캡션 검증 규칙). 평가는 즐겨찾기만 쓴다 — reject는 기본 필터가 숨겨 지운 것처럼 보인다.
-CAPTION_ROLE = "iTT?captionFormat=ITT.ko"
+# Final Cut 형식의 사실(조정 임계값이 아니다). 캡션은 한국어 SRT 역할에 lane 1로 단다 — 역할이
+# 캡션 형식을 정하고 Final Cut의 캡션 내보내기가 그 형식으로 파일을 쓴다(사용자 지시 2026-10-23
+# 「SRT 파일로」, W-29f D81). 철자는 Final Cut 12.4 자신의 규칙
+# `<짧은 이름>?captionFormat=<형식>.<언어>`(예전 `iTT?captionFormat=ITT.ko`와 같은 틀,
+# 짧은 이름·형식 둘 다 `SRT` — FFLocalizable.strings).
+# 캡션은 `start="3600s"`를 쓴다(Final Cut 자신의 내보내기). 두 줄을 넘는 캡션은 세기만 한다(Apple
+# 캡션 검증 규칙의 iTT 한도를 보수적으로 그대로 쓴다). 평가는 즐겨찾기만 쓴다 — reject는 기본
+# 필터가 숨겨 지운 것처럼 보인다.
+CAPTION_ROLE = "SRT?captionFormat=SRT.ko"
 CAPTION_LANE = "1"
 CAPTION_START = "3600s"
 CAPTION_MAX_LINES = 2
