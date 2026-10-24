@@ -57,6 +57,7 @@ from vlogsrt.project.raw.models import (
     RawWorkspaceError,
     SourceAsset,
 )
+from vlogsrt.project.raw.review_workspace import human_decided
 from vlogsrt.project.raw.segment_review import (
     SELECTION_EXCLUDED,
     ReviewRevision,
@@ -542,7 +543,7 @@ def _check_library(
 def _review_segments(
     asset: SourceAsset, head: ReviewRevision | None, review: SourceClock | None
 ) -> tuple[timeline.SegmentState, ...] | None:
-    """검토 머리의 조각 → 프레임 구간(원점 0)."""
+    """검토 머리의 조각 → 프레임 구간(원점 0)과 사용/제외·미검토·사람 결정."""
     if head is None or review is None:
         return None
     rows = sorted(
@@ -554,6 +555,7 @@ def _review_segments(
             end_frame=_frame(asset, review, row.end_pts),
             excluded=row.selection == SELECTION_EXCLUDED,
             unreviewed=is_unreviewed_auto_exclusion(row),
+            decided=human_decided(row),
         )
         for row in rows
     )

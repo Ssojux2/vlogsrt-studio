@@ -202,6 +202,50 @@ def test_unreviewed_red_is_sent_disabled_and_stays_disabled_after_human_confirm(
     )
 
 
+def test_red_restored_by_a_person_is_sent_enabled(tmp_path: Path):
+    """「자동 제외 전체 복원」으로 되살린 빨강은 사람 결정이라 켠다(W-29g, D82)."""
+    service, root = tier_project(tmp_path, suitability="usable")
+    ReviewWorkspaceFacade(root).restore_automatic()
+    path = service.export_finalcut_timeline(root)
+    (red,) = [c for c in _spine(path) if c.attrib["start"] == f"{RED[0] * 25}/25s"]
+    assert "enabled" not in red.attrib
+    assert _keywords(red) == ["제외 제안"]
+    assert _report(path)["counts"]["disabled_clips"] == 0
+
+
+def test_segment_states_carry_the_human_decision(tmp_path: Path):
+    """보내기는 검토 머리의 조각마다 사람 결정을 싣는다 — 제안된 적 없는 빨강(분석 전에 세운 머리의
+    「확인 필요」 조각)은 결정이 없고, 덮기·사람 메모·되살림은 결정이다(W-29g, D82)."""
+    service, root = tier_project(tmp_path, suitability="usable")
+    head = ReviewWorkspaceFacade(root).load_head().revision
+    (asset,) = service.list_source_assets(root)
+    clock = head.clock_for(asset.asset_id)
+    (pending,) = review_workspace.unreviewed_auto_exclusions(head)
+    never = dataclasses.replace(
+        pending,
+        selection="included",
+        visual_tags=review_workspace.confirm_tags(pending.visual_tags),
+        notes=review_workspace.REVIEW_NOTE_PREFIX + "분석 미완료 또는 실패",
+    )
+    variants = {
+        "never_proposed": (never, False),
+        "override": (dataclasses.replace(never, override_recommendation="recommended"), True),
+        "human_note": (dataclasses.replace(never, notes="여기는 살린다"), True),
+        "restored": (
+            dataclasses.replace(never, notes=pending.notes),  # 전체 복원은 근거 메모를 남긴다
+            True,
+        ),
+    }
+    for name, (segment, decided) in variants.items():
+        rows = tuple(segment if s.segment_id == pending.segment_id else s for s in head.segments)
+        states = finalcut_export._review_segments(
+            asset, dataclasses.replace(head, segments=rows), clock
+        )
+        assert states is not None
+        (state,) = [st for st in states if not st.excluded and st.start_frame == int(RED[0] * 25)]
+        assert (name, state.decided) == (name, decided)
+
+
 def test_report_records_counts_inputs_and_captions(tmp_path: Path):
     service, root = tier_project(tmp_path, suitability="usable")
     path = service.export_finalcut_timeline(root)

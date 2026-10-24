@@ -97,8 +97,12 @@ def media(
     )
 
 
-def seg(a: int, b: int, *, excluded: bool = False, unreviewed: bool = False) -> ft.SegmentState:
-    return ft.SegmentState(start_frame=a, end_frame=b, excluded=excluded, unreviewed=unreviewed)
+def seg(
+    a: int, b: int, *, excluded: bool = False, unreviewed: bool = False, decided: bool = False
+) -> ft.SegmentState:
+    return ft.SegmentState(
+        start_frame=a, end_frame=b, excluded=excluded, unreviewed=unreviewed, decided=decided
+    )
 
 
 _STATUSES = {
@@ -597,13 +601,41 @@ def test_confirmed_exclusions_and_unreviewed_red_are_disabled() -> None:
 
 
 def test_restored_red_segment_stays_enabled_with_only_its_tier_keyword() -> None:
+    """사람이 되살린(결정이 실린) 빨강은 켠다 — 키워드는 등급 하나뿐이다(W-29d·W-29g, D80·D82)."""
     source = ft.SourceInput(
         media=media("restored", frames=60, ident=None),
-        segments=(seg(0, 60),),
+        segments=(seg(0, 60, decided=True),),
         report=report(span(at(0), at(60), "red")),
     )
     (clip,) = ft.plan_source(source).clips
     assert clip.enabled is True and clip.keywords == (ft.KEYWORD_SUGGESTED_EXCLUSION,)
+
+
+def test_never_proposed_red_is_disabled_and_marked_unreviewed() -> None:
+    """자동 제외로 제안된 적 없는 빨강(분석 전에 세운 머리 · 컷을 다 덮지 못한 빨강)도 사람이 손대지
+    않았으면 끈다 — 미검토 제외 제안과 같은 키워드 둘로(W-29g, D82). 보통 조각은 그대로 켠다."""
+    source = ft.SourceInput(
+        media=media("loose", frames=120, ident=None),
+        segments=(seg(0, 60), seg(60, 120)),
+        report=report(span(at(0), at(60), "red"), span(at(60), at(120), "yellow")),
+    )
+    red, normal = ft.plan_source(source).clips
+    assert red.enabled is False
+    assert red.keywords == (ft.KEYWORD_SUGGESTED_EXCLUSION, ft.KEYWORD_UNREVIEWED)
+    assert normal.enabled is True and normal.keywords == (ft.KEYWORD_NORMAL,)
+
+
+def test_a_human_decision_on_any_segment_keeps_red_enabled_but_never_unexcludes() -> None:
+    """결정이 실린 빨강은 켜고, 사람이 제외한 조각은 결정과 상관없이 끈다."""
+    source = ft.SourceInput(
+        media=media("kept", frames=120, ident=None),
+        segments=(seg(0, 60, decided=True), seg(60, 120, excluded=True, decided=True)),
+        report=report(span(at(0), at(120), "red")),
+    )
+    kept, excluded = ft.plan_source(source).clips
+    assert kept.enabled is True and kept.keywords == (ft.KEYWORD_SUGGESTED_EXCLUSION,)
+    assert excluded.enabled is False
+    assert excluded.keywords == (ft.KEYWORD_SUGGESTED_EXCLUSION, ft.KEYWORD_CONFIRMED_EXCLUSION)
 
 
 def test_unreviewed_mark_on_an_included_segment_is_refused() -> None:

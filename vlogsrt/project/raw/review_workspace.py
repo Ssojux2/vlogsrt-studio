@@ -520,6 +520,13 @@ def _human_segment(segment: ReviewSegment) -> bool:
     )
 
 
+def human_decided(segment: ReviewSegment) -> bool:
+    """조각에 사람 결정이 실렸는가 — Final Cut 보내기가 사람이 보지 않은 빨강을 끌 때 사람이
+    남긴 빨강(되살림·덮기·메모·수동 선택)을 가르는 한 자리다(W-29g, D82). 판정은 `_human_segment`
+    그대로다."""
+    return _human_segment(segment)
+
+
 def _segment_states(revision: ReviewRevision) -> dict[str, tuple[tuple[object, ...], ...]]:
     """영상마다 조각의 (경계, 선택, 메모, 덮기, 태그) — 두 리비전의 영상별 차이를 견준다."""
     states: dict[str, list[tuple[object, ...]]] = {}

@@ -171,6 +171,9 @@ class SegmentState:
     excluded: bool
     unreviewed: bool
     """미검토 자동 제외 표지 — 제외된 조각에만 붙는다."""
+    decided: bool = False
+    """조각에 사람 결정이 실렸는가(되살림·덮기·사람 메모·수동 선택, W-29g D82) — 결정이 없는 빨강은
+    자동 제외로 제안된 적이 없어도 끈다."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -363,16 +366,21 @@ def _base_keyword(source: SourceInput, start_frame: int, end_frame: int) -> str:
 
 
 def _clip(source: SourceInput, segment: SegmentState) -> ClipPlan:
-    """조각 하나 → 클립. 사람이 확정한 제외와 미검토 빨강(`제외 제안`)을 끈다(W-29d, D80).
+    """조각 하나 → 클립. 사람이 확정한 제외와 사람이 보지 않은 빨강(`제외 제안`)을 끈다(D80·D82).
 
-    미검토 제외라도 등급이 빨강이 아니면(보통·보류·미분석) 켠 채 키워드로만 알리고, 사람이
-    되살린 빨강(제외 아님)도 켠다. 끄기는 지우기가 아니다 — Final Cut에서 V로 되살아난다.
+    사람이 보지 않은 빨강은 미검토 자동 제외이거나, 제안된 적 없이 사용으로 남은 결정 없는 조각이다
+    (분석 전에 세운 머리 · 컷을 다 덮지 못한 빨강, W-29g) — 둘 다 `제외 제안(미검토)` 키워드를 단다.
+    미검토 제외라도 등급이 빨강이 아니면(보통·보류·미분석) 켠 채 키워드로만 알리고, 사람이 되살린
+    빨강(결정이 실린 사용 조각)도 켠다. 끄기는 지우기가 아니다 — Final Cut에서 V로 되살아난다.
     """
     tier_keyword = _base_keyword(source, segment.start_frame, segment.end_frame)
     keywords = [tier_keyword]
     confirmed = segment.excluded and not segment.unreviewed
-    suggested = segment.unreviewed and tier_keyword == KEYWORD_SUGGESTED_EXCLUSION
-    if segment.unreviewed:
+    never_proposed = not segment.excluded and not segment.decided
+    suggested = tier_keyword == KEYWORD_SUGGESTED_EXCLUSION and (
+        segment.unreviewed or never_proposed
+    )
+    if segment.unreviewed or suggested:
         keywords.append(KEYWORD_UNREVIEWED)
     if confirmed:
         keywords.append(KEYWORD_CONFIRMED_EXCLUSION)
