@@ -104,6 +104,9 @@ ENGINE_MODEL_LITERAL = re.compile(r"[\"'](whisper-1|gpt-[\w.-]*transcribe[\w.-]*
 PROJECT_MODEL_LITERAL = re.compile(r"[\"'](?:glm|gemini)-[\w.-]+[\"']")
 RAW_MODEL_LITERAL = re.compile(r"[\"']gpt-6-luna[\w.-]*[\"']")
 # Claude 모델 이름(D54)도 raw 설정 경로 하나에만 산다 — 등록표가 단가와 함께 정한다.
+VISION_ONLY_MODEL_LITERAL = re.compile(r"[\"']glm-[\w.-]+[\"']")
+"""파생 계층 비전에만 쓰는 모델 — Gemini가 의미 분석 모델이 된 뒤(D84)에도 raw config에 들지
+않는다."""
 CLAUDE_MODEL_LITERAL = re.compile(r"[\"']claude-[\w.-]+[\"']")
 # 레거시가 project를 import할 수 있는 유일한 진입점 — 문서화된 CLI 조립 지점.
 # 예외도 정확히 `project.commands` 모듈로 좁다: CLI는 명령 묶음만 조립한다(재조정).
@@ -2673,7 +2676,8 @@ def check_no_hardcoded_model() -> list[str]:
             CLAUDE_MODEL_LITERAL,
         )
         if rel in RAW_MODEL_LITERAL_PATHS:
-            patterns = (PROJECT_MODEL_LITERAL,)
+            # Gemini 의미 분석 프로파일(W-30b, D84)은 raw config에 산다 — glm만 여전히 금지다.
+            patterns = (VISION_ONLY_MODEL_LITERAL,)
         elif rel in PROJECT_MODEL_LITERAL_PATHS:
             patterns = (RAW_MODEL_LITERAL, CLAUDE_MODEL_LITERAL)
         elif rel in MODEL_LITERAL_PATHS:

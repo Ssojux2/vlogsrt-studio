@@ -8436,3 +8436,34 @@ a 전송·문·불변식 → b 프로파일·단가·견적 상한·공급자 �
 분류 · 틀린 키 400 = 인증 · 키 가림·200자 · 비JSON 오류 · 시간 초과·연결 · 리다이렉트 거절 · 소켓 가드 · https만 · 바꿔치기 · 프록시
 CONNECT) · `tests/test_transcribe.py`(Gemini 문 다섯) · `tests/test_env.py`(키 이름 넷) · `tests/test_invariants.py`(전송 둘 · Google
 SDK · 순수 계층). 유료 호출 0회.
+
+## D84 — W-30b Gemini 분석 프로파일·단가·견적 상한 (2026-10-25, W-30b)
+
+**결정**: Claude 프로파일(D54·D58)의 거울로 `RawGeminiAnalysisProfile`을 raw 설정에 둔다 — `RawWorkflowConfig` **밖**이라 작업공간은
+모델 이름만 저장하고 단가·엔드포인트·한도는 등록표가 정한다. 등록표는 둘이다(공식 가격표 Standard 판, 갱신 2026-10-22, 확인 2026-10-25):
+
+| 모델 | 입력 · 출력(생각 포함) / 100만 토큰 | 이 단가의 마지막 날 | 다음 단가 | 창당 상한 |
+|---|---|---|---|---|
+| `gemini-3.8-flash` | $0.75 · $3.75 | 2026-12-31 | $1.50 · $7.50 | 약 $0.063 |
+| `gemini-4-argon` | $2 · $10 | 2026-11-30 | $4 · $20 | 약 $0.168 |
+
+- **알린 인상일**: 공식 표가 인상 날짜를 미리 적었다 — `price_valid_through`가 지나면 그 단가로 매기지 않는다(견적은 가격 미정 = None,
+  실제 페이로드 상한은 ValueError로 닫힘). 0원도 옛 단가도 아니다 — 새 단가를 확인해 등록표를 고치기 전까지 Gemini 분석 승인은 닫힌다.
+  확인한 날(`pricing_checked_at`) 앞의 날짜도 매기지 않는다.
+- **창당 상한**(`gemini_cost.window_ceiling_usd`): 입력 = 텍스트 여유 12000 + schema 바이트 + 부대 여유 2000 + 장수(8) × 1120, 출력 =
+  `max_output_tokens`(12000) 전부. 근거: 생각 토큰은 출력 단가로 청구되고 `maxOutputTokens` 안에 든다(「including thought tokens」 —
+  기반 시설이 강제하는 끊김, thinking 문서). 이미지는 `MEDIA_RESOLUTION_HIGH`에서 장당 1120토큰이 상한이다(크기와 무관, media resolution
+  문서). 텍스트 토큰 ≤ UTF-8 바이트는 Claude와 같은 가정이다(D54) — 첫 사람 실행의 영수증이 확인한다.
+- **실제 페이로드 상한**(`gemini_cost.payload_bound`): 최상위 `contents`·`generationConfig` 둘만, `generationConfig`는 `maxOutputTokens`
+  (1~65536)·`responseMimeType`(`application/json`)·`responseJsonSchema`·`thinkingConfig` 넷만, 사용자 차례 하나의 부분은 글자 또는
+  해상도가 `HIGH`로 고정된 base64 JPEG만 — 그 밖은 토큰을 모르므로 닫는다(후보 수·도구·시스템 지시·파일 참조·다른 해상도·PNG).
+- **조정 대상**(외부 근거 없음): `thinking_level = "MEDIUM"`(두 모델의 API 기본, 받는 값 LOW·MEDIUM·HIGH), `max_output_tokens = 12000`
+  (Sonnet 5.5와 같은 값, 동기 상한 65536), `quote_*`는 Claude와 같다.
+- **불변식**: raw config에 `gemini-*` 리터럴을 허용한다(등록표가 산다). `glm-*`은 여전히 파생 계층 비전 전용이다
+  (`VISION_ONLY_MODEL_LITERAL`) — 다른 경로의 gemini 리터럴도 그대로 금지다.
+- **아직 고를 수 없다**: `analysis_provider`는 바꾸지 않았다(`gemini-*`은 아직 공급자 판정이 없다) — 판정·응답자·클라이언트·견적·사용량을
+  W-30c가 한꺼번에 잇고, 고를 수 있는 목록·화면은 W-30d가 연다. 반쯤 이은 상태를 고를 수 있게 두지 않는다.
+
+**시험**: `tests/raw/test_gemini_cost.py`(등록표 값 · 등록되지 않은 이름 · 계약 위반 11가지 · 아직 못 고름 · 단가 유효 기간 경계 · 창당
+상한 정확값 · Argon > Flash · 인상 뒤 가격 미정 · 페이로드 상한 정확값 · 모르는 칸·설정·부분·차례 거부 · 인상 뒤 페이로드 거부) ·
+`tests/test_invariants.py`(raw config의 gemini 허용, glm 금지). 유료 호출 0회.

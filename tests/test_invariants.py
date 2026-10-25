@@ -1113,17 +1113,25 @@ def test_glm_literals_pass_inside_the_exact_config_paths(
     assert check_invariants.check_no_hardcoded_model() == []
 
 
+_VISION_LITERAL_PATHS = (
+    "vlogsrt/config.py",
+    "vlogsrt/gadget.py",
+    "vlogsrt/project/vision.py",
+    "vlogsrt/project/tuning/config.py",
+    "vlogsrt/project/raw/config.py",
+)
+
+
 @pytest.mark.parametrize(
-    "rel",
+    ("rel", "literal"),
     [
-        "vlogsrt/config.py",
-        "vlogsrt/gadget.py",
-        "vlogsrt/project/vision.py",
-        "vlogsrt/project/tuning/config.py",
-        "vlogsrt/project/raw/config.py",
+        (rel, literal)
+        for rel in _VISION_LITERAL_PATHS
+        for literal in ("glm-5.3-flash", "gemini-3.8-flash")
+        # Gemini 의미 분석 프로파일은 raw config에 산다 — 아래 시험이 따로 겨냥한다(D84)
+        if (rel, literal) != ("vlogsrt/project/raw/config.py", "gemini-3.8-flash")
     ],
 )
-@pytest.mark.parametrize("literal", ["glm-5.3-flash", "gemini-3.8-flash"])
 def test_vision_literals_fail_outside_the_exact_project_config(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, rel: str, literal: str
 ) -> None:
@@ -1136,6 +1144,25 @@ def test_vision_literals_fail_outside_the_exact_project_config(
     failures = check_invariants.check_no_hardcoded_model()
     assert len(failures) == 1, failures
     assert rel in failures[0]
+
+
+def test_gemini_analysis_profiles_live_in_the_raw_config_but_glm_still_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Gemini는 이제 의미 분석 모델이다(W-30b, D84) — 등록표가 단가와 함께 raw config에 둔다.
+    glm은 여전히 파생 계층 비전 전용이라 raw config에 들지 않는다."""
+    _fake_source_tree(
+        monkeypatch,
+        tmp_path,
+        {
+            "vlogsrt/project/raw/config.py": 'FLASH = "gemini-3.8-flash"\nGLM = "glm-5.3-flash"\n',
+            "vlogsrt/project/raw/understanding_luna.py": 'MODEL = "gemini-3.8-flash"\n',
+        },
+    )
+    failures = check_invariants.check_no_hardcoded_model()
+    assert len(failures) == 2, failures
+    assert any("raw/config.py:2" in failure for failure in failures)
+    assert any("understanding_luna.py" in failure for failure in failures)
 
 
 # ── A0(2026-10-02 v2 계획 §3.2): raw 전용 모델 리터럴의 정확 경로 가드 ─────────

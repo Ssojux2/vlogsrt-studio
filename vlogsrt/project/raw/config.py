@@ -542,6 +542,92 @@ CLAUDE_ANALYSIS_PROFILES: Mapping[str, RawClaudeAnalysisProfile] = MappingProxyT
 
 클라이언트(엔드포인트·버전·시간 한도)·단가·상한은 언제나 고른 모델의 프로파일에서 온다."""
 
+GEMINI_MODEL_PREFIX = "gemini-"
+"""Gemini 모델 이름의 접두어(W-30, D84). 공급자 판정에 쓰이는 것은 W-30c부터다 — 그 전에는
+등록표가 값만 들고 있고 고를 수 있는 모델(`ANALYSIS_MODEL_CHOICES`)에 들지 않는다."""
+
+GEMINI_THINKING_LEVELS = ("LOW", "MEDIUM", "HIGH")
+"""등록된 Gemini 모델이 모두 받는 `thinkingConfig.thinkingLevel` 값(thinking 문서, 2026-10-25) —
+3.8 Flash·4 Argon 둘 다 low·medium·high이고 기본은 medium이다. `MINIMAL`은 이 둘이 받지 않는다."""
+
+GEMINI_MAX_OUTPUT_TOKENS_LIMIT = 65_536
+"""동기(background=False) generateContent의 `maxOutputTokens` 상한(thinking 문서) — 넘기면 400이다.
+
+생각 토큰도 이 안에 든다(「including thought tokens」, 기반 시설이 강제하는 끊김) — 그래서 창당
+출력 상한은 이 한도 하나로 생각까지 덮는다."""
+
+GEMINI_MEDIA_RESOLUTION_HIGH = "MEDIA_RESOLUTION_HIGH"
+"""이미지 부분마다 다는 해상도(`Part.mediaResolution.level`) — Gemini 3·4의 이미지 권장값(media
+resolution 문서). 이 값에서 이미지 한 장의 토큰은 크기와 무관하게 `image_tokens`(1120) 이하다."""
+
+
+@dataclass(frozen=True)
+class RawGeminiAnalysisProfile:
+    """Gemini 의미 분석의 동결 프로파일 — Claude 프로파일처럼 RawWorkflowConfig **밖**에 산다(D84).
+
+    작업공간은 모델 이름만 저장하고 단가·엔드포인트·출력 한도는 이 등록표가 정한다. 칸의 기본값은
+    Gemini 3.8 Flash의 공식 가격표(https://ai.google.dev/gemini-api/docs/pricing, 갱신 2026-10-22,
+    확인 2026-10-25) Standard 판이다. 단가는 0원으로 두지 마라.
+
+    `price_valid_through`는 공식 표가 미리 알린 인상 전 마지막 날이다 — 그날이 지나면 이 단가로
+    매기지 않는다(가격 미정, 0원이 아니다). 새 단가를 확인해 등록표를 고치기 전까지 견적은 닫힌다.
+    `thinking_level`·`max_output_tokens`·`quote_*`는 외부 근거 없는 조정 대상이다. 결제 연결 키만
+    쓴다 — 무료 등급은 입력을 제품 개선에 쓴다(가격표). 계정 접근·유료 호출은 시험하지 않았다.
+    """
+
+    model: str = "gemini-3.8-flash"
+    label: str = "Gemini 3.8 Flash"
+    api_base_url: str = "https://generativelanguage.googleapis.com"
+    api_version: str = "v1beta"
+    timeout_seconds: float = 300.0
+    thinking_level: str = "MEDIUM"
+    max_output_tokens: int = 12000
+    media_resolution: str = GEMINI_MEDIA_RESOLUTION_HIGH
+    image_tokens: int = 1120
+    pricing_checked_at: date = date(2026, 10, 25)
+    pricing_revision: str = "google-gemini-3-8-flash-2026-10-22"
+    price_valid_through: date = date(2026, 12, 31)
+    currency: str = "USD"
+    input_per_mtok: Decimal = Decimal("0.75")
+    output_per_mtok: Decimal = Decimal("3.75")
+    quote_text_tokens_per_window: int = 12000
+    quote_overhead_tokens: int = 2000
+    account_access_status: str = "unverified"
+    integration_test_status: str = "not_run"
+    source_urls: tuple[str, ...] = (
+        "https://ai.google.dev/gemini-api/docs/pricing",
+        "https://ai.google.dev/gemini-api/docs/media-resolution",
+        "https://ai.google.dev/gemini-api/docs/thinking",
+        "https://ai.google.dev/api/generate-content",
+        "https://ai.google.dev/gemini-api/docs/migrate-to-interactions",
+    )
+
+
+GEMINI_FLASH_ANALYSIS_PROFILE = RawGeminiAnalysisProfile()
+"""Gemini 3.8 Flash — 입력 $0.75 · 출력(생각 포함) $3.75 / 100만 토큰, 2026-12-31까지(2027-01-01부터
+$1.50 · $7.50). 창당 보수적 상한은 약 $0.063이다(Sonnet 5.5의 약 $0.16의 40% 남짓 — 대부분 출력 한도
+12000토큰 몫이다)."""
+
+GEMINI_ARGON_ANALYSIS_PROFILE = RawGeminiAnalysisProfile(
+    model="gemini-4-argon",
+    label="Gemini 4 Argon",
+    pricing_revision="google-gemini-4-argon-2026-10-22",
+    price_valid_through=date(2026, 11, 30),
+    input_per_mtok=Decimal("2"),
+    output_per_mtok=Decimal("10"),
+)
+"""Gemini 4 Argon — 입력 $2 · 출력(생각 포함) $10 / 100만 토큰, 2026-11-30까지(2026-12-01부터
+$4 · $20). 무료 등급이 없다. 출력·생각 한도는 Flash와 같은 값으로 둔다(조정 대상). 창당 보수적
+상한은 약 $0.168이다(Sonnet 5.5와 비슷하다)."""
+
+GEMINI_ANALYSIS_PROFILES: Mapping[str, RawGeminiAnalysisProfile] = MappingProxyType(
+    {
+        GEMINI_FLASH_ANALYSIS_PROFILE.model: GEMINI_FLASH_ANALYSIS_PROFILE,
+        GEMINI_ARGON_ANALYSIS_PROFILE.model: GEMINI_ARGON_ANALYSIS_PROFILE,
+    }
+)
+"""모델 이름 → 프로파일(읽기 전용). 클라이언트·단가·상한은 언제나 고른 모델의 프로파일에서 온다."""
+
 DEFAULT_ANALYSIS_MODEL: str = RawModelRoles().luna_model
 """새 작업공간의 의미 분석 모델 — Claude Sonnet 5.5(D58). 기존 작업공간은 저장된 값을 쓴다."""
 
@@ -572,6 +658,14 @@ def claude_profile(model: str) -> RawClaudeAnalysisProfile:
         return CLAUDE_ANALYSIS_PROFILES[model]
     except KeyError as error:
         raise ValueError(f"등록되지 않은 Claude 모델이다: {model!r}") from error
+
+
+def gemini_profile(model: str) -> RawGeminiAnalysisProfile:
+    """등록된 Gemini 프로파일 — 없는 이름은 조용히 다른 프로파일로 대체하지 않는다."""
+    try:
+        return GEMINI_ANALYSIS_PROFILES[model]
+    except KeyError as error:
+        raise ValueError(f"등록되지 않은 Gemini 모델이다: {model!r}") from error
 
 
 def analysis_model_label(model: str) -> str:
@@ -629,6 +723,36 @@ def claude_profile_problems(profile: RawClaudeAnalysisProfile) -> list[str]:
         problems.append("이미지 토큰 계산값은 1 이상이어야 한다")
     if min(profile.quote_text_tokens_per_window, profile.quote_overhead_tokens) < 0:
         problems.append("견적 여유 토큰은 음수일 수 없다")
+    return problems
+
+
+def gemini_profile_problems(profile: RawGeminiAnalysisProfile) -> list[str]:
+    """프로파일의 자기 일관성 — 단가는 유한한 양수, 한도·엔드포인트는 쓸 수 있는 값(D84)."""
+    problems = [
+        f"{name}이(가) 유한한 양수가 아니다 — 미확인 단가를 무료로 두지 마라"
+        for name in ("input_per_mtok", "output_per_mtok")
+        if not _positive_decimal(getattr(profile, name))
+    ]
+    if not profile.model.startswith(GEMINI_MODEL_PREFIX):
+        problems.append(f"Gemini 모델 이름이 {GEMINI_MODEL_PREFIX!r}로 시작하지 않는다")
+    if profile.thinking_level not in GEMINI_THINKING_LEVELS:
+        problems.append(f"thinking_level이 허용 값이 아니다: {profile.thinking_level!r}")
+    if profile.media_resolution != GEMINI_MEDIA_RESOLUTION_HIGH:
+        problems.append("media_resolution은 이미지 토큰을 고정하는 MEDIA_RESOLUTION_HIGH여야 한다")
+    if not 1 <= profile.max_output_tokens <= GEMINI_MAX_OUTPUT_TOKENS_LIMIT:
+        problems.append(f"max_output_tokens는 1~{GEMINI_MAX_OUTPUT_TOKENS_LIMIT}이어야 한다")
+    if not _https_url(profile.api_base_url) or urlsplit(profile.api_base_url).path not in ("", "/"):
+        problems.append("api_base_url은 경로 없는 https 호스트여야 한다")
+    if not profile.api_version.strip():
+        problems.append("api_version이 비어 있다")
+    if not math.isfinite(profile.timeout_seconds) or profile.timeout_seconds <= 0:
+        problems.append("timeout_seconds는 유한한 양수여야 한다")
+    if profile.image_tokens < 1:
+        problems.append("이미지 토큰 상한은 1 이상이어야 한다")
+    if min(profile.quote_text_tokens_per_window, profile.quote_overhead_tokens) < 0:
+        problems.append("견적 여유 토큰은 음수일 수 없다")
+    if profile.price_valid_through < profile.pricing_checked_at:
+        problems.append("단가 유효 마지막 날이 확인한 날보다 앞이다")
     return problems
 
 
