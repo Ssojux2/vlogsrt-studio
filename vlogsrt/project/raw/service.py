@@ -58,12 +58,14 @@ from vlogsrt.project.raw.browser_runtime import (
     BrowserRuntimeError,
     ClaudeCredentials,
     EnvironmentCredentials,
+    GeminiCredentials,
     asr_estimate_digest,
     browser_network_mode,
     caption_transport_providers,
     capture_browser_credentials,
     capture_claude_credentials,
     capture_environment_credentials,
+    capture_gemini_credentials,
     live_transport_for_credentials,
     mint_asr_approvals,
     mint_luna_approvals,
@@ -84,6 +86,7 @@ from vlogsrt.project.raw.config import (
     analysis_model_label,
     analysis_provider,
     claude_profile,
+    official_price_model,
     text_model_label,
     validate_raw_workflow_config,
 )
@@ -275,6 +278,7 @@ __all__ = [
     "BrowserRuntimeError",
     "ByteRange",
     "ClaudeCredentials",
+    "GeminiCredentials",
     "DEFAULT_ANALYSIS_MODEL",
     "EnvironmentCredentials",
     "FCP_ROLE_ORIGINAL",
@@ -372,6 +376,7 @@ __all__ = [
     "capture_environment_credentials",
     "capture_browser_credentials",
     "capture_claude_credentials",
+    "capture_gemini_credentials",
     "claude_profile",
     "browser_network_mode",
     "caption_transport_providers",
@@ -799,7 +804,7 @@ def _semantic_cost_fields(
 
 def _semantic_cost_label(model: str) -> str:
     """견적 문구의 모델 이름 — Luna는 W-14 이전 문구 그대로 'Luna'다."""
-    if analysis_provider(model) == ANALYSIS_PROVIDER_ANTHROPIC:
+    if official_price_model(model):
         return analysis_model_label(model)
     return "Luna"
 

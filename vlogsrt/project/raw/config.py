@@ -400,6 +400,9 @@ class RawWorkflowConfig:
 
 ANALYSIS_PROVIDER_OPENAI = "openai"
 ANALYSIS_PROVIDER_ANTHROPIC = "anthropic"
+ANALYSIS_PROVIDER_GOOGLE = "google"
+OFFICIAL_PRICE_PROVIDERS = frozenset({ANALYSIS_PROVIDER_ANTHROPIC, ANALYSIS_PROVIDER_GOOGLE})
+"""공식 단가 스냅샷으로 창당 상한을 재는 공급자(D54·D86) — Luna(OpenAI)만 단가 미확인이다."""
 
 OPENAI_LUNA_MODEL = "gpt-6-luna"
 """OpenAI 쪽 의미 분석 모델(Luna) — W-18 이전의 기본이고, 지금도 고를 수 있다(D58)."""
@@ -543,8 +546,8 @@ CLAUDE_ANALYSIS_PROFILES: Mapping[str, RawClaudeAnalysisProfile] = MappingProxyT
 클라이언트(엔드포인트·버전·시간 한도)·단가·상한은 언제나 고른 모델의 프로파일에서 온다."""
 
 GEMINI_MODEL_PREFIX = "gemini-"
-"""Gemini 모델 이름의 접두어(W-30, D84). 공급자 판정에 쓰이는 것은 W-30c부터다 — 그 전에는
-등록표가 값만 들고 있고 고를 수 있는 모델(`ANALYSIS_MODEL_CHOICES`)에 들지 않는다."""
+"""Gemini 모델 이름의 접두어(W-30, D84·D86) — 공급자 판정의 근거다. 등록되지 않은 이름은 설정이
+거부한다."""
 
 GEMINI_THINKING_LEVELS = ("LOW", "MEDIUM", "HIGH")
 """등록된 Gemini 모델이 모두 받는 `thinkingConfig.thinkingLevel` 값(thinking 문서, 2026-10-25) —
@@ -571,8 +574,11 @@ class RawGeminiAnalysisProfile:
 
     `price_valid_through`는 공식 표가 미리 알린 인상 전 마지막 날이다 — 그날이 지나면 이 단가로
     매기지 않는다(가격 미정, 0원이 아니다). 새 단가를 확인해 등록표를 고치기 전까지 견적은 닫힌다.
-    `thinking_level`·`max_output_tokens`·`quote_*`는 외부 근거 없는 조정 대상이다. 결제 연결 키만
-    쓴다 — 무료 등급은 입력을 제품 개선에 쓴다(가격표). 계정 접근·유료 호출은 시험하지 않았다.
+    창 클립(D85)은 초당 `video_frames_per_second`장 × `video_frame_tokens` + 소리 초당
+    `audio_tokens_per_second`로 센다 — 공식 문서 두 곳의 값이 달라(영상 장당 258·280, 소리 25·32)
+    큰 쪽을 상한으로 쓴다. `thinking_level`·`max_output_tokens`·`quote_*`는 외부 근거 없는 조정
+    대상이다. 결제 연결 키만 쓴다 — 무료 등급은 입력을 제품 개선에 쓴다(가격표). 계정 접근·유료
+    호출은 시험하지 않았다.
     """
 
     model: str = "gemini-3.8-flash"
@@ -584,6 +590,9 @@ class RawGeminiAnalysisProfile:
     max_output_tokens: int = 12000
     media_resolution: str = GEMINI_MEDIA_RESOLUTION_HIGH
     image_tokens: int = 1120
+    video_frame_tokens: int = 280
+    video_frames_per_second: int = 1
+    audio_tokens_per_second: int = 32
     pricing_checked_at: date = date(2026, 10, 25)
     pricing_revision: str = "google-gemini-3-8-flash-2026-10-22"
     price_valid_through: date = date(2026, 12, 31)
@@ -605,8 +614,8 @@ class RawGeminiAnalysisProfile:
 
 GEMINI_FLASH_ANALYSIS_PROFILE = RawGeminiAnalysisProfile()
 """Gemini 3.8 Flash — 입력 $0.75 · 출력(생각 포함) $3.75 / 100만 토큰, 2026-12-31까지(2027-01-01부터
-$1.50 · $7.50). 창당 보수적 상한은 약 $0.063이다(Sonnet 5.5의 약 $0.16의 40% 남짓 — 대부분 출력 한도
-12000토큰 몫이다)."""
+$1.50 · $7.50). 창당 보수적 상한은 클립(D85)을 넣어 약 $0.068이다(Sonnet 5.5의 약 $0.16의 40% 남짓 —
+대부분 출력 한도 12000토큰 몫이다)."""
 
 GEMINI_ARGON_ANALYSIS_PROFILE = RawGeminiAnalysisProfile(
     model="gemini-4-argon",
@@ -618,7 +627,7 @@ GEMINI_ARGON_ANALYSIS_PROFILE = RawGeminiAnalysisProfile(
 )
 """Gemini 4 Argon — 입력 $2 · 출력(생각 포함) $10 / 100만 토큰, 2026-11-30까지(2026-12-01부터
 $4 · $20). 무료 등급이 없다. 출력·생각 한도는 Flash와 같은 값으로 둔다(조정 대상). 창당 보수적
-상한은 약 $0.168이다(Sonnet 5.5와 비슷하다)."""
+상한은 클립을 넣어 약 $0.180이다(Sonnet 5.5와 비슷하다)."""
 
 GEMINI_ANALYSIS_PROFILES: Mapping[str, RawGeminiAnalysisProfile] = MappingProxyType(
     {
@@ -646,10 +655,17 @@ ANALYSIS_MODEL_CHOICES: tuple[str, ...] = (
 
 
 def analysis_provider(model: str) -> str:
-    """의미 분석 모델의 공급자 — Claude 접두어면 anthropic, 아니면 지금처럼 openai."""
+    """의미 분석 모델의 공급자 — Claude·Gemini 접두어면 그 공급자, 아니면 지금처럼 openai."""
     if model.startswith(CLAUDE_MODEL_PREFIX):
         return ANALYSIS_PROVIDER_ANTHROPIC
+    if model.startswith(GEMINI_MODEL_PREFIX):
+        return ANALYSIS_PROVIDER_GOOGLE
     return ANALYSIS_PROVIDER_OPENAI
+
+
+def official_price_model(model: str) -> bool:
+    """공식 단가 스냅샷으로 창당 상한을 재는 모델인가 — 승인에 금액이 묶이는 모델이다."""
+    return analysis_provider(model) in OFFICIAL_PRICE_PROVIDERS
 
 
 def claude_profile(model: str) -> RawClaudeAnalysisProfile:
@@ -669,9 +685,12 @@ def gemini_profile(model: str) -> RawGeminiAnalysisProfile:
 
 
 def analysis_model_label(model: str) -> str:
-    """화면·CLI에 쓰는 이름 — Claude는 등록표의 이름, 나머지는 모델 이름 그대로."""
-    if analysis_provider(model) == ANALYSIS_PROVIDER_ANTHROPIC:
+    """화면·CLI에 쓰는 이름 — Claude·Gemini는 등록표의 이름, 나머지는 모델 이름 그대로."""
+    provider = analysis_provider(model)
+    if provider == ANALYSIS_PROVIDER_ANTHROPIC:
         return claude_profile(model).label
+    if provider == ANALYSIS_PROVIDER_GOOGLE:
+        return gemini_profile(model).label
     return model
 
 
@@ -747,8 +766,16 @@ def gemini_profile_problems(profile: RawGeminiAnalysisProfile) -> list[str]:
         problems.append("api_version이 비어 있다")
     if not math.isfinite(profile.timeout_seconds) or profile.timeout_seconds <= 0:
         problems.append("timeout_seconds는 유한한 양수여야 한다")
-    if profile.image_tokens < 1:
-        problems.append("이미지 토큰 상한은 1 이상이어야 한다")
+    if (
+        min(
+            profile.image_tokens,
+            profile.video_frame_tokens,
+            profile.video_frames_per_second,
+            profile.audio_tokens_per_second,
+        )
+        < 1
+    ):
+        problems.append("이미지·영상·소리 토큰 상한은 1 이상이어야 한다")
     if min(profile.quote_text_tokens_per_window, profile.quote_overhead_tokens) < 0:
         problems.append("견적 여유 토큰은 음수일 수 없다")
     if profile.price_valid_through < profile.pricing_checked_at:
@@ -811,15 +838,28 @@ def role_problems(models: RawModelRoles) -> list[str]:
         for role, model in (("문구", models.text_model), ("시간", models.timing_model))
         if analysis_provider(model) == ANALYSIS_PROVIDER_ANTHROPIC
     ]
-    if analysis_provider(models.luna_model) == ANALYSIS_PROVIDER_ANTHROPIC:
-        profile = CLAUDE_ANALYSIS_PROFILES.get(models.luna_model)
-        if profile is None:
-            problems.append(
-                f"의미 분석 모델이 등록되지 않은 Claude 모델이다: {models.luna_model!r}"
-            )
-        else:
-            problems += claude_profile_problems(profile)
-    return problems
+    problems += [
+        f"{role} 모델에 Gemini를 쓸 수 없다 — Gemini는 영상 분석 역할만 맡는다(D86): {model!r}"
+        for role, model in (("문구", models.text_model), ("시간", models.timing_model))
+        if analysis_provider(model) == ANALYSIS_PROVIDER_GOOGLE
+    ]
+    return problems + _analysis_profile_problems(models.luna_model)
+
+
+def _analysis_profile_problems(model: str) -> list[str]:
+    """의미 분석 모델이 Claude·Gemini면 등록표에 있어야 하고 프로파일이 계약을 지켜야 한다."""
+    provider = analysis_provider(model)
+    if provider == ANALYSIS_PROVIDER_ANTHROPIC:
+        claude = CLAUDE_ANALYSIS_PROFILES.get(model)
+        if claude is None:
+            return [f"의미 분석 모델이 등록되지 않은 Claude 모델이다: {model!r}"]
+        return claude_profile_problems(claude)
+    if provider == ANALYSIS_PROVIDER_GOOGLE:
+        gemini = GEMINI_ANALYSIS_PROFILES.get(model)
+        if gemini is None:
+            return [f"의미 분석 모델이 등록되지 않은 Gemini 모델이다: {model!r}"]
+        return gemini_profile_problems(gemini)
+    return []
 
 
 def registry_problems(registry: RawModelRegistry) -> list[str]:

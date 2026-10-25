@@ -1468,6 +1468,7 @@ class RawWorkspaceUi:
     # 시작 환경에서 찍은 키(`_capture_startup_credentials`) — 메모리에만 있고 화면에 값이 없다.
     _startup_credentials: raw_service.EnvironmentCredentials | None
     _startup_claude: raw_service.ClaudeCredentials | None
+    _startup_gemini: raw_service.GeminiCredentials | None
 
     def __init__(
         self,
@@ -4087,12 +4088,13 @@ class RawWorkspaceUi:
         open_in_final_cut(path)
 
     def _capture_startup_credentials(self) -> None:
-        """시작 환경의 키를 한 번 찍어 메모리에만 둔다 — OpenAI(전사·Luna)와 Claude(D54).
+        """시작 환경의 키를 한 번 찍어 메모리에만 둔다 — OpenAI(전사·Luna)·Claude(D54)·Gemini(D86).
 
-        값은 화면·로그에 나오지 않는다. 이 화면은 Claude 키를 입력받지 않는다(`.env`에서만).
+        값은 화면·로그에 나오지 않는다. 이 화면은 Claude·Gemini 키를 입력받지 않는다(`.env`에서만).
         """
         self._startup_credentials = raw_service.capture_browser_credentials()
         self._startup_claude = raw_service.capture_claude_credentials()
+        self._startup_gemini = raw_service.capture_gemini_credentials()
 
     def _quick_api_panel(self) -> tuple[gr.Accordion, gr.Textbox]:
         """「API 연결 · 처음 한 번」 — OpenAI 키 칸, 영상 분석 모델(D54)과 키 상태 한 줄."""
@@ -7681,6 +7683,7 @@ class RawWorkspaceUi:
             asr_approvals=self._production_asr_approvals,
             luna_approvals=self._production_luna_approvals,
             claude=self._startup_claude,
+            gemini=self._startup_gemini,
         )
 
     # ── 생산 승인 공급자 — 서버가 간직한 견적 기록에서 주조한다 ──

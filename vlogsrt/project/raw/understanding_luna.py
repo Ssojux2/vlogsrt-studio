@@ -19,7 +19,9 @@
 비용은 추정만 존재한다. Luna 단가는 미확인이며 0원으로 계산하지 않는다 —
 정직한 `unknown`이거나 사용자 제공 상한일 뿐이다(§14.3). Claude는 공식 가격표
 스냅샷의 보수적 상한(`official_snapshot`)을 가지고, 실행 문맥은 실제 페이로드마다
-그 상한을 다시 재서 넘으면 아무 것도 보내지 않는다(D54).
+그 상한을 다시 재서 넘으면 아무 것도 보내지 않는다(D54). Gemini(D86)도 같다 — 다만 Gemini는
+창마다 **클립(그림 + 소리, D85)** 을 함께 받는다(사용자 지시 2026-10-25). 클립은 판정의 증거일 뿐
+시각·경계·자막을 주지 않는다(규칙 1).
 """
 
 from __future__ import annotations
@@ -29,14 +31,16 @@ import hashlib
 import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import date
 from decimal import Decimal
 from difflib import SequenceMatcher
 from fractions import Fraction
+from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Protocol
 
 from vlogsrt.preprocess import GRID_CONFORM_TAG
-from vlogsrt.project.raw import request_log
+from vlogsrt.project.raw import gemini_cost, request_log
 from vlogsrt.project.raw.analysis_config import (
     UNDERSTANDING_SCHEMA_VERSION,
     RawUnderstandingSettings,
@@ -45,10 +49,14 @@ from vlogsrt.project.raw.analysis_config import (
 from vlogsrt.project.raw.claude_cost import payload_bound, window_ceiling_usd
 from vlogsrt.project.raw.config import (
     ANALYSIS_PROVIDER_ANTHROPIC,
+    ANALYSIS_PROVIDER_GOOGLE,
     RawClaudeAnalysisProfile,
+    RawGeminiAnalysisProfile,
     RawWorkflowConfig,
     analysis_provider,
     claude_profile,
+    gemini_profile,
+    official_price_model,
     validate_raw_workflow_config,
 )
 from vlogsrt.project.raw.understanding import (
@@ -72,7 +80,9 @@ from vlogsrt.task_runtime import check_cancel, provider_error
 from vlogsrt.transcribe import (
     RequestObserver,
     is_claude_client,
+    is_gemini_client,
     request_claude_messages,
+    request_gemini_generate,
     request_luna_vision,
 )
 
@@ -100,6 +110,9 @@ PRICE_OFFICIAL = "official_snapshot"
 
 CLAUDE_STOP_ACCEPTED = "end_turn"
 """Claude 판정을 받아 주는 유일한 멈춤 이유 — 나머지는 잘렸거나 거절됐다."""
+
+GEMINI_FINISH_ACCEPTED = "STOP"
+"""Gemini 판정을 받아 주는 유일한 멈춤 이유 — MAX_TOKENS는 잘렸고 SAFETY 등은 거절이다(D86)."""
 
 
 class LunaEvidenceError(RuntimeError):
@@ -185,17 +198,32 @@ def luna_output_schema() -> dict[str, object]:
 
 
 @dataclass(frozen=True, slots=True)
-class WindowEvidence:
-    """창 하나의 증거 묶음 — 창·프레임·발화·경계 후보가 전부다.
+class ClipEvidence:
+    """창 하나의 클립(D85) — 문맥 구간(창 시각)과 로컬에서 자른 MP4 한 개.
 
-    오디오 파일 경로는 어디에도 없다(§7.2). 프레임은 **뽑힌 것만** — 추출에
-    실패한 프레임은 증거가 아니므로 여기 오지 않는다.
+    `start`·`seconds`는 창 시각(공통 시계)이다 — 안내문이 「클립 0초 = 문맥 시작」을 알린다. 클립은
+    그림과 소리를 보여 주는 증거일 뿐 어떤 시각·경계도 여기서 나오지 않는다(규칙 1).
+    """
+
+    path: Path
+    start: Fraction
+    seconds: Fraction
+
+
+@dataclass(frozen=True, slots=True)
+class WindowEvidence:
+    """창 하나의 증거 묶음 — 창·프레임·발화·경계 후보, 그리고 (Gemini면) 클립.
+
+    Luna·Claude 경로에는 오디오·영상 파일이 없다(§7.2) — `clip`은 Gemini 공급자에만 채워진다(D86,
+    사용자 지시 2026-10-25). 프레임은 **뽑힌 것만** — 추출에 실패한 프레임은 증거가 아니므로 여기
+    오지 않는다.
     """
 
     window: AnalysisWindow
     frames: tuple[FrameEvidence, ...]
     utterances: tuple[UtteranceEvidence, ...]
     candidates: tuple[BoundaryCandidate, ...]
+    clip: ClipEvidence | None = None
 
     def provided_evidence_ids(self) -> frozenset[str]:
         """제공한 증거 아이디 전부 — Luna가 말할 수 있는 아이디의 세계다."""
@@ -214,8 +242,9 @@ def window_evidence(
     plan: WindowPlan,
     frames: FrameSamplingResult,
     utterances: Sequence[UtteranceEvidence],
+    clips: Mapping[str, ClipEvidence] | None = None,
 ) -> tuple[WindowEvidence, ...]:
-    """창마다 증거를 묶는다 — 창 계획이 정한 순서·아이디 그대로다."""
+    """창마다 증거를 묶는다 — 창 계획이 정한 순서·아이디 그대로다. 클립은 창 아이디로 붙는다."""
     by_id = {frame.frame_id: frame for frame in frames.frames}
     by_utterance = {item.utterance_id: item for item in utterances}
     candidates_by_window: dict[str, list[BoundaryCandidate]] = {}
@@ -229,6 +258,7 @@ def window_evidence(
             ),
             utterances=_related_utterances(window.utterance_ids, by_utterance),
             candidates=tuple(candidates_by_window.get(window.window_id, ())),
+            clip=(clips or {}).get(window.window_id),
         )
         for window in plan.windows
     )
@@ -320,6 +350,59 @@ def build_claude_payload(
     }
 
 
+def build_gemini_payload(
+    evidence: WindowEvidence,
+    settings: RawUnderstandingSettings,
+    profile: RawGeminiAnalysisProfile,
+) -> dict[str, object]:
+    """창 증거를 Gemini generateContent 본문으로(D86) — 클립 + 같은 프레임·같은 schema.
+
+    클립(그림 + 소리, D85)을 먼저, 프레임마다 아이디 이름표와 base64 JPEG를, 안내문을 맨 뒤에 둔다.
+    부분마다 해상도를 `MEDIA_RESOLUTION_HIGH`로 고정한다 — 그래야 이미지 토큰이 장당 상한(1120)이고
+    견적이 잴 수 있다. 클립은 `videoMetadata`에 길이와 표본 속도(초당 한 장)를 적는다 — 상한을 그
+    길이로 잰다. 출력 강제는 `responseJsonSchema`, 생각 수준은 프로파일 값이다. 시스템 지시·도구·
+    후보 수는 싣지 않는다. 클립을 못 자른 창은 클립 없이(Claude와 같은 증거로) 보낸다 — 안내문도
+    클립이 없다고 말한다.
+    """
+    parts: list[dict[str, object]] = []
+    clip = evidence.clip
+    if clip is not None:
+        span = f"{_seconds(clip.start)}초부터 {_seconds(clip.seconds)}초 동안"
+        parts.append({"text": f"clip: 문맥 구간 {span}"})
+        parts.append(
+            {
+                "inlineData": {
+                    "mimeType": gemini_cost.VIDEO_MIME_TYPE,
+                    "data": base64.b64encode(clip.path.read_bytes()).decode("ascii"),
+                },
+                "mediaResolution": {"level": profile.media_resolution},
+                "videoMetadata": {
+                    "startOffset": "0s",
+                    "endOffset": f"{float(clip.seconds):.3f}s",
+                    "fps": profile.video_frames_per_second,
+                },
+            }
+        )
+    for frame in evidence.frames:
+        parts.append({"text": f"{frame.frame_id}:"})
+        parts.append(
+            {
+                "inlineData": {"mimeType": "image/jpeg", "data": _image_base64(frame)},
+                "mediaResolution": {"level": profile.media_resolution},
+            }
+        )
+    parts.append({"text": _instruction(evidence, clip)})
+    return {
+        "contents": [{"role": "user", "parts": parts}],
+        "generationConfig": {
+            "maxOutputTokens": profile.max_output_tokens,
+            "responseMimeType": gemini_cost.JSON_MIME_TYPE,
+            "responseJsonSchema": luna_output_schema(),
+            "thinkingConfig": {"thinkingLevel": profile.thinking_level},
+        },
+    }
+
+
 def build_semantic_payload(
     evidence: WindowEvidence, settings: RawUnderstandingSettings, model: str
 ) -> dict[str, object]:
@@ -328,8 +411,11 @@ def build_semantic_payload(
     Luna 경로의 요청 신원(`luna_request_sha256`)은 W-14 이전과 한 바이트도 다르지 않다 —
     판정 캐시가 그 해시로 열린다.
     """
-    if analysis_provider(model) == ANALYSIS_PROVIDER_ANTHROPIC:
+    provider = analysis_provider(model)
+    if provider == ANALYSIS_PROVIDER_ANTHROPIC:
         return build_claude_payload(evidence, settings, claude_profile(model))
+    if provider == ANALYSIS_PROVIDER_GOOGLE:
+        return build_gemini_payload(evidence, settings, gemini_profile(model))
     return build_luna_payload(evidence, settings)
 
 
@@ -372,9 +458,26 @@ _INSTRUCTION_RULES: tuple[str, ...] = (
 )
 """안내문의 규칙 줄 — 창마다 같다. 바꾸면 `DEFAULT_PROMPT_REVISION`을 올린다(D58 18b가 v3)."""
 
+_CLIP_RULES: tuple[str, ...] = (
+    "- clip은 이 창의 문맥 구간을 그대로 담은 영상(그림과 소리)이다. 움직임·흔들림·초점·노출은"
+    " clip으로 판단하라 — 정지 프레임에 번짐이 없어도 clip에서 흔들리면 shake다.",
+    "- 소리는 장면의 분위기·현장감을 판단하는 데만 써라. 발화 내용·시각의 정본은 발화 증거다 —"
+    " 발화를 새로 받아 적거나 시각을 만들지 마라.",
+    "- recommended·evidence_ids에는 여전히 위의 frame 아이디를 써라 — clip은 아이디가 아니다.",
+)
+"""클립이 있는 Gemini 창(D86)에만 더하는 규칙 줄 — 같은 schema·같은 아이디 세계다.
 
-def _instruction(evidence: WindowEvidence) -> str:
-    """창 하나에 대한 안내문 — 아이디의 세계를 먼저 알려고 규칙으로 닫는다."""
+판정 기록의 `prompt_revision`은 설정 값 그대로다(Claude·Luna 판정 캐시를 흔들지 않게) — 요청
+신원(`luna_request_sha256`)이 모델 이름과 안내문 바이트를 묶으므로 다른 공급자의 판정을 가져다 쓰지
+않는다."""
+
+
+def _instruction(evidence: WindowEvidence, clip: ClipEvidence | None = None) -> str:
+    """창 하나에 대한 안내문 — 아이디의 세계를 먼저 알려고 규칙으로 닫는다.
+
+    `clip`은 Gemini 본문(D86)만 넘긴다 — 증거에 클립이 붙어 있어도 Luna·Claude의 안내문(과 그 요청
+    신원)은 한 바이트도 바뀌지 않는다.
+    """
     window = evidence.window
     utterance_lines = [
         f"  {item.utterance_id} [{_seconds(item.start)}~{_seconds(item.end)}초]"
@@ -386,10 +489,17 @@ def _instruction(evidence: WindowEvidence) -> str:
         for item in evidence.candidates
     ] or ["  (없음 — suggested_boundary_ids는 빈 배열이어야 한다)"]
     frame_ids = ", ".join(frame.frame_id for frame in evidence.frames) or "(없음)"
+    media = (
+        "원본 영상의 한 분석 시간창을 봅니다. 대화는 내부 전사 증거로, 장면은 프레임 표본과 이 창의"
+        f" 문맥 구간 영상 clip(그림과 소리, {_seconds(clip.start)}초부터"
+        f" {_seconds(clip.seconds)}초 동안 — clip의 0초가 그 시작이다)으로 주어집니다."
+        if clip is not None
+        else "원본 영상의 한 분석 시간창을 봅니다. 대화는 내부 전사 증거로, 장면은"
+        " 프레임 표본으로 주어집니다. 오디오·영상 파일은 주어지지 않습니다."
+    )
     return "\n".join(
         [
-            "원본 영상의 한 분석 시간창을 봅니다. 대화는 내부 전사 증거로, 장면은"
-            " 프레임 표본으로 주어집니다. 오디오·영상 파일은 주어지지 않습니다.",
+            media,
             f"window_id: {window.window_id}",
             f"코어 구간: {_seconds(window.core_start)}초 ~ {_seconds(window.core_end)}초"
             f" (정규화 시각, 표시는 소수 3자리)",
@@ -399,6 +509,7 @@ def _instruction(evidence: WindowEvidence) -> str:
             "제안 가능한 경계 후보(이 안에서만 제안하라):",
             *candidate_lines,
             *_INSTRUCTION_RULES,
+            *(_CLIP_RULES if clip is not None else ()),
         ]
     )
 
@@ -473,8 +584,8 @@ def parse_luna_response(
     그 창은 보수적 유지로 흘러간다(§7.6). 응답의 모양은 모델의 공급자가 정한다 —
     Claude는 Messages 본문, 나머지는 Responses의 `output_text`다.
     """
-    claude = analysis_provider(model) == ANALYSIS_PROVIDER_ANTHROPIC
-    text, missing = _claude_text(response) if claude else _responses_text(response)
+    provider = analysis_provider(model)
+    text, missing = _PROVIDER_TEXT.get(provider, _responses_text)(response)
     if text is None:
         return _rejected(evidence, model, request_sha256, origin, prompt_revision, missing)
     try:
@@ -484,7 +595,7 @@ def parse_luna_response(
             evidence, model, request_sha256, origin, prompt_revision, f"JSON이 아니다: {exc}"
         )
     folded = False
-    if claude:
+    if provider in (ANALYSIS_PROVIDER_ANTHROPIC, ANALYSIS_PROVIDER_GOOGLE):
         parsed, folded = _lowercase_visual_issues(_lowercase_suitability(parsed))
     defect = _annotation_defect(parsed, evidence)
     if defect:
@@ -531,6 +642,53 @@ def _claude_text(response: Mapping[str, object]) -> tuple[str | None, str]:
     if not text.strip():
         return None, "Claude 응답에 text 블록이 없다 — 판정 본문이 비었다"
     return text, ""
+
+
+def _gemini_text(response: Mapping[str, object]) -> tuple[str | None, str]:
+    """Gemini generateContent 응답의 판정 본문 — 첫 후보가 STOP일 때 생각 아닌 text 부분만(D86).
+
+    프롬프트가 막히면(`promptFeedback.blockReason`) 후보가 없다. MAX_TOKENS는 생각 토큰까지 한도에
+    닿아 잘렸고, SAFETY·RECITATION·PROHIBITED_CONTENT 등은 거절이다 — 청구됐어도 schema를 지킨다는
+    보장이 없으니 판정으로 받지 않고 이유를 그대로 남긴다. 생각 요약 부분(`thought: true`)은 읽지
+    않는다.
+    """
+    if not isinstance(response, Mapping):
+        return None, "Gemini 응답이 JSON 객체가 아니다"
+    feedback = response.get("promptFeedback")
+    blocked = feedback.get("blockReason") if isinstance(feedback, Mapping) else None
+    candidates = response.get("candidates")
+    if not isinstance(candidates, list) or not candidates:
+        reason = f"(blockReason={blocked})" if isinstance(blocked, str) else ""
+        return None, f"Gemini 응답에 후보가 없다{reason} — 이 창의 판정을 거절했다"
+    first = candidates[0]
+    finish = first.get("finishReason") if isinstance(first, Mapping) else None
+    if finish == "MAX_TOKENS":
+        return (
+            None,
+            "Gemini 판정이 출력 한도(maxOutputTokens)에 닿아 잘렸다 — 판정 본문을 믿을 수 없다",
+        )
+    if finish != GEMINI_FINISH_ACCEPTED:
+        return None, f"Gemini가 이 창의 판정을 마치지 않았다(finishReason={finish!r})"
+    content = first.get("content") if isinstance(first, Mapping) else None
+    parts = content.get("parts") if isinstance(content, Mapping) else None
+    if not isinstance(parts, list):
+        return None, "Gemini 응답에 parts 배열이 없다 — 판정 본문이 비었다"
+    text = "".join(
+        str(part.get("text", ""))
+        for part in parts
+        if isinstance(part, Mapping) and part.get("thought") is not True
+    )
+    if not text.strip():
+        return None, "Gemini 응답에 text 부분이 없다 — 판정 본문이 비었다"
+    return text, ""
+
+
+_PROVIDER_TEXT: Mapping[str, Callable[[Mapping[str, object]], tuple[str | None, str]]] = (
+    MappingProxyType(
+        {ANALYSIS_PROVIDER_ANTHROPIC: _claude_text, ANALYSIS_PROVIDER_GOOGLE: _gemini_text}
+    )
+)
+"""공급자 → 응답의 판정 본문 읽기. 여기 없는 공급자(Luna)는 Responses의 `output_text`다."""
 
 
 def _refusal_defect(details: object) -> str:
@@ -870,9 +1028,22 @@ def _require_client_kind(client: object, model: str) -> None:
     Claude 모델에 OpenAI 클라이언트가 붙으면 전송 경계가 TypeError로 닫히지만, 그건 예약을
     쓴 뒤다. 여기서 먼저 닫아 유료 예약이 어긋난 조합으로 나가는 길을 없앤다.
     """
-    claude = analysis_provider(model) == ANALYSIS_PROVIDER_ANTHROPIC
-    if claude != is_claude_client(client):
-        wanted = "Claude Messages" if claude else "OpenAI Responses"
+    provider = analysis_provider(model)
+    kind = (
+        ANALYSIS_PROVIDER_ANTHROPIC
+        if is_claude_client(client)
+        else ANALYSIS_PROVIDER_GOOGLE
+        if is_gemini_client(client)
+        else None
+    )
+    expected = (
+        provider if provider in (ANALYSIS_PROVIDER_ANTHROPIC, ANALYSIS_PROVIDER_GOOGLE) else None
+    )
+    if kind != expected:
+        wanted = {
+            ANALYSIS_PROVIDER_ANTHROPIC: "Claude Messages",
+            ANALYSIS_PROVIDER_GOOGLE: "Gemini generateContent",
+        }.get(provider, "OpenAI Responses")
         raise AnalysisApprovalError(
             f"의미 분석 모델({model!r})에는 {wanted} 클라이언트가 필요하다 — "
             f"받은 클라이언트: {type(client).__name__}"
@@ -883,9 +1054,28 @@ def _send_semantic(
     client: object, model: str, payload: Mapping[str, object], **gates: Any
 ) -> Mapping[str, object]:
     """공급자에 맞는 전송 경계 — 이름은 부르는 순간에 찾는다(시험이 모듈 경계에서 가로챈다)."""
-    if analysis_provider(model) == ANALYSIS_PROVIDER_ANTHROPIC:
+    provider = analysis_provider(model)
+    if provider == ANALYSIS_PROVIDER_ANTHROPIC:
         return request_claude_messages(client, model=model, payload=payload, online=True, **gates)
+    if provider == ANALYSIS_PROVIDER_GOOGLE:
+        _require_price_still_current(model)
+        return request_gemini_generate(client, model=model, payload=payload, online=True, **gates)
     return request_luna_vision(client, model=model, payload=payload, online=True, **gates)
+
+
+def _require_price_still_current(model: str) -> None:
+    """보내기 직전에 Gemini 단가가 오늘도 유효한가(D86) — 실행이 인상일 자정을 넘으면 거기서 멈춘다.
+
+    승인 상한은 인상 전 단가로 잰 값이다 — 인상 뒤의 요청 하나는 그 상한을 넘을 수 있다(Argon 출력
+    한도 전부가 $0.24 > $0.180). 문맥을 세울 때 한 번 본 것으로는 그 자정을 막지 못한다.
+    """
+    profile = gemini_profile(model)
+    today = date.today()
+    if not gemini_cost.price_current(profile, on=today):
+        raise AnalysisApprovalError(
+            f"{profile.label} 단가가 {today.isoformat()}에 유효하지 않다(가격 미정) — 남은 창은"
+            " 보내지 않는다. 단가를 확인해 고친 뒤 다시 승인받아라"
+        )
 
 
 def annotate_windows(
@@ -1135,17 +1325,32 @@ def semantic_analysis_budget(
     *,
     max_luna_requests: int,
     max_asr_chunks: int,
+    on: date | None = None,
 ) -> AnalysisBudget:
-    """의미 분석 모델의 예산 — Claude는 공식 단가 상한, Luna는 지금처럼 단가 미확인.
+    """의미 분석 모델의 예산 — Claude·Gemini는 공식 단가 상한, Luna는 지금처럼 단가 미확인.
 
-    Claude 상한은 창 하나의 보수적 금액이다(`claude_cost.window_ceiling_usd`). 실행 문맥은
+    상한은 창 하나의 보수적 금액이다(`claude_cost`·`gemini_cost.window_ceiling_usd`). 실행 문맥은
     실제 페이로드마다 다시 재서 이 상한을 넘는 창이 하나라도 있으면 아무 것도 보내지 않는다.
+    Gemini 단가가 그날 유효하지 않으면(알린 인상일 뒤, D84) 금액 없는 예산이다 — 견적은 가격
+    미정이고 실행 문맥(`_require_official_ceiling`)이 그 승인으로는 서지 않는다.
     """
-    if analysis_provider(model) != ANALYSIS_PROVIDER_ANTHROPIC:
-        return AnalysisBudget(max_luna_requests=max_luna_requests, max_asr_chunks=max_asr_chunks)
-    ceiling = window_ceiling_usd(
-        claude_profile(model), settings, schema_bytes=luna_output_schema_bytes()
-    )
+    provider = analysis_provider(model)
+    unpriced = AnalysisBudget(max_luna_requests=max_luna_requests, max_asr_chunks=max_asr_chunks)
+    if provider == ANALYSIS_PROVIDER_GOOGLE:
+        ceiling = gemini_cost.window_ceiling_usd(
+            gemini_profile(model),
+            settings,
+            schema_bytes=luna_output_schema_bytes(),
+            on=on or date.today(),
+        )
+        if ceiling is None:
+            return unpriced
+    elif provider == ANALYSIS_PROVIDER_ANTHROPIC:
+        ceiling = window_ceiling_usd(
+            claude_profile(model), settings, schema_bytes=luna_output_schema_bytes()
+        )
+    else:
+        return unpriced
     return AnalysisBudget(
         max_luna_requests=max_luna_requests,
         max_asr_chunks=max_asr_chunks,
@@ -1397,37 +1602,50 @@ def _semantic_request_hashes(
     }
 
 
-def _require_claude_ceiling(
+def _require_official_ceiling(
     model: str,
     understanding: RawUnderstandingSettings,
     evidence_windows: Sequence[WindowEvidence],
     budget: AnalysisBudget,
+    on: date | None = None,
 ) -> None:
-    """Claude 실행은 공식 단가 예산과 그 상한 아래의 페이로드로만 선다(D54).
+    """Claude·Gemini 실행은 공식 단가 예산과 그 상한 아래의 페이로드로만 선다(D54·D86).
 
     실제 페이로드마다 보수적 상한을 다시 잰다 — 승인 상한을 넘는 창이 하나라도 있으면
     문맥이 서지 않고 그 원본은 0송신이다. 요청 수 게이트와 함께, 실행 비용은 승인 상한 ×
-    승인 요청 수를 넘지 못한다. Luna는 이 문을 지나지 않는다(단가 미확인 그대로).
+    승인 요청 수를 넘지 못한다. Gemini는 인라인 요청 상한(20 MB)도 본다 — 넘는 창이 있으면 역시
+    0송신이다. Luna는 이 문을 지나지 않는다(단가 미확인 그대로).
     """
-    if analysis_provider(model) != ANALYSIS_PROVIDER_ANTHROPIC:
+    if not official_price_model(model):
         return
+    label = "Gemini" if analysis_provider(model) == ANALYSIS_PROVIDER_GOOGLE else "Claude"
     ceiling = budget.request_ceiling_usd
     if budget.luna_price_status != PRICE_OFFICIAL or ceiling is None:
         raise AnalysisApprovalError(
-            "Claude 실행에는 공식 단가 상한이 묶인 승인이 필요하다 — 새 견적과 승인을 받아라"
+            f"{label} 실행에는 공식 단가 상한이 묶인 승인이 필요하다 — 새 견적과 승인을 받아라"
         )
-    profile = claude_profile(model)
     for evidence in evidence_windows:
         payload = build_semantic_payload(evidence, understanding, model)
         try:
-            bound = payload_bound(payload, profile)
+            bound = _payload_bound(model, payload, on or date.today())
         except ValueError as error:
-            raise AnalysisApprovalError(f"Claude 페이로드의 상한을 잴 수 없다: {error}") from error
+            raise AnalysisApprovalError(f"{label} 페이로드의 상한을 잴 수 없다: {error}") from error
         if bound.usd > ceiling:
             raise AnalysisApprovalError(
                 f"{evidence.window.window_id}의 보수적 상한 ${bound.usd}이 승인 상한 ${ceiling}을"
                 " 넘는다 — 이 원본은 아무 것도 보내지 않는다"
             )
+
+
+def _payload_bound(model: str, payload: Mapping[str, object], on: date) -> Any:
+    """공급자의 페이로드 상한 — Gemini는 인라인 요청 상한을 넘으면 잴 수 없는 것으로 닫는다."""
+    if analysis_provider(model) != ANALYSIS_PROVIDER_GOOGLE:
+        return payload_bound(payload, claude_profile(model))
+    size = gemini_cost.request_bytes(payload)
+    if size > gemini_cost.INLINE_REQUEST_LIMIT_BYTES:
+        limit = gemini_cost.INLINE_REQUEST_LIMIT_BYTES
+        raise ValueError(f"요청 본문 {size}바이트가 인라인 상한 {limit}을 넘는다")
+    return gemini_cost.payload_bound(payload, gemini_profile(model), on=on)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1483,7 +1701,7 @@ class OnlineLunaExecutionContext:
             fingerprint=built_fingerprint,
         )
         model = self.settings.models.luna_model
-        _require_claude_ceiling(
+        _require_official_ceiling(
             model, self.understanding, self.evidence_windows, self.approval.budget
         )
         built_hashes = _semantic_request_hashes(model, self.understanding, self.evidence_windows)
@@ -1507,6 +1725,7 @@ def validated_luna_responder(
     gate: ReservationGate | None = None,
     observer: RequestObserver | None = None,
     cancellation: Callable[[], None] | None = None,
+    clips: Mapping[str, ClipEvidence] | None = None,
 ) -> LunaSemanticResponder:
     """검증된 온라인 실행 응답자를 만든다 — 승인 문을 통과해서만 존재한다.
 
@@ -1516,10 +1735,11 @@ def validated_luna_responder(
     예약 없는 길이 없다. 문맥은 만들어질 때 같은 검사를 스스로 다시 지나니
     이 공장을 우회한 직접 구성도 같은 문에서 걸린다. 창 증거는 문맥에
     얼어붙으니 호출자는 `responder.context.evidence_windows`를 그대로
-    `annotate_windows`에 넘기면 페이로드 신원이 어긋나지 않는다.
+    `annotate_windows`에 넘기면 페이로드 신원이 어긋나지 않는다. Gemini 창 클립(D86)은 `clips`로
+    받는다 — 호출자가 자기 증거에 쓴 같은 사전을 넘겨야 요청 신원이 맞는다.
     """
     validate_understanding_settings(understanding)
-    evidence_windows = window_evidence(plan, frames, utterances)
+    evidence_windows = window_evidence(plan, frames, utterances, clips)
     fingerprint = analysis_fingerprint(
         audio=audio,
         plan=plan,
@@ -1609,7 +1829,7 @@ class OnlineVisualLunaExecutionContext:
             fingerprint=built_fingerprint,
         )
         model = self.settings.models.luna_model
-        _require_claude_ceiling(
+        _require_official_ceiling(
             model, self.understanding, self.evidence_windows, self.approval.budget
         )
         built_hashes = _semantic_request_hashes(model, self.understanding, self.evidence_windows)
@@ -1693,6 +1913,7 @@ def validated_visual_luna_responder(
     approval: OnlineVisualAnalysisApproval,
     gate: ReservationGate | None = None,
     observer: RequestObserver | None = None,
+    clips: Mapping[str, ClipEvidence] | None = None,
 ) -> VisualLunaSemanticResponder:
     """무성 원본의 검증된 온라인 실행 응답자 — 시각 승인 문을 통과해서만 존재한다.
 
@@ -1703,7 +1924,7 @@ def validated_visual_luna_responder(
     `annotate_windows`에 넘긴다.
     """
     validate_understanding_settings(understanding)
-    evidence_windows = window_evidence(plan, frames, ())
+    evidence_windows = window_evidence(plan, frames, (), clips)
     fingerprint = visual_analysis_fingerprint(
         source_sha256=source_sha256,
         video=video,

@@ -18,6 +18,7 @@ import json
 from dataclasses import replace
 from datetime import date
 from decimal import Decimal
+from fractions import Fraction as F
 
 import pytest
 
@@ -25,7 +26,6 @@ from vlogsrt.project.raw import config as raw_config
 from vlogsrt.project.raw import gemini_cost
 from vlogsrt.project.raw.analysis_config import RawUnderstandingSettings
 from vlogsrt.project.raw.config import (
-    ANALYSIS_MODEL_CHOICES,
     GEMINI_ANALYSIS_PROFILES,
     GEMINI_ARGON_ANALYSIS_PROFILE,
     GEMINI_FLASH_ANALYSIS_PROFILE,
@@ -107,10 +107,26 @@ def test_a_profile_that_breaks_its_contract_is_reported(changes: dict[str, objec
     assert gemini_profile_problems(replace(FLASH, **changes))  # type: ignore[arg-type]
 
 
-def test_gemini_is_not_selectable_until_the_provider_is_wired() -> None:
-    """W-30b는 값만 더한다 — 공급자 판정·응답자·화면은 W-30c·d가 잇는다."""
-    assert not any(model.startswith("gemini-") for model in ANALYSIS_MODEL_CHOICES)
-    assert raw_config.analysis_provider("gemini-3.8-flash") == raw_config.ANALYSIS_PROVIDER_OPENAI
+def test_gemini_is_its_own_provider_with_an_official_price() -> None:
+    """W-30c2 — `gemini-*`은 google 공급자이고 공식 단가로 창당 상한을 잰다(D86)."""
+    assert raw_config.analysis_provider("gemini-3.8-flash") == raw_config.ANALYSIS_PROVIDER_GOOGLE
+    assert raw_config.official_price_model("gemini-4-argon")
+    assert raw_config.official_price_model("claude-sonnet-5-5")
+    assert not raw_config.official_price_model("gpt-6-luna")
+    assert raw_config.analysis_model_label("gemini-3.8-flash") == "Gemini 3.8 Flash"
+
+
+def test_an_unregistered_gemini_analysis_model_is_refused_by_the_settings() -> None:
+    roles = raw_config.RawModelRoles(luna_model="gemini-3.6-flash")
+    assert any("등록되지 않은 Gemini" in p for p in raw_config.role_problems(roles))
+    ok = raw_config.RawModelRoles(luna_model="gemini-3.8-flash")
+    assert raw_config.role_problems(ok) == []
+
+
+@pytest.mark.parametrize("role", ["text_model", "timing_model"])
+def test_gemini_cannot_take_the_text_or_timing_role(role: str) -> None:
+    roles = replace(raw_config.RawModelRoles(), **{role: "gemini-3.8-flash"})
+    assert any("Gemini는 영상 분석" in p for p in raw_config.role_problems(roles))
 
 
 # ── 단가 유효 기간 ───────────────────────────────────────────────────────
@@ -132,9 +148,10 @@ def test_the_price_is_current_through_the_last_announced_day_only(
 # ── 창당 상한 ────────────────────────────────────────────────────────────
 
 
-def test_the_window_ceiling_counts_text_schema_overhead_images_and_the_whole_output() -> None:
+def test_the_window_ceiling_counts_text_schema_overhead_images_clip_and_the_whole_output() -> None:
     ceiling = gemini_cost.window_ceiling_usd(FLASH, SETTINGS, schema_bytes=941, on=TODAY)
-    input_tokens = 12000 + 941 + 2000 + SETTINGS.max_images_per_window * 1120
+    clip = (19 + 1) * 280 + 19 * 32  # 창 15초 + 앞뒤 문맥 2초 · 초당 한 장(끝 한 장 더) + 소리
+    input_tokens = 12000 + 941 + 2000 + SETTINGS.max_images_per_window * 1120 + clip
     expected = (Decimal(input_tokens) * Decimal("0.75") + Decimal(12000) * Decimal("3.75")) / (
         Decimal(1_000_000)
     )
@@ -233,3 +250,126 @@ def test_only_one_user_turn_can_be_bounded(contents: list[dict[str, object]]) ->
 def test_a_payload_after_the_announced_raise_cannot_be_bounded() -> None:
     with pytest.raises(ValueError, match="가격 미정"):
         gemini_cost.payload_bound(payload([{"text": "a"}]), FLASH, on=date(2027, 1, 1))
+
+
+# ── 클립 부분(W-30c2, D86) ─────────────────────────────────────────────────
+
+MP4 = base64.b64encode(b"\x00\x00\x00\x18ftypmp42").decode()
+
+
+def clip_part(end: str = "19s", **overrides: object) -> dict[str, object]:
+    part: dict[str, object] = {
+        "inlineData": {"mimeType": "video/mp4", "data": MP4},
+        "mediaResolution": {"level": "MEDIA_RESOLUTION_HIGH"},
+        "videoMetadata": {"startOffset": "0s", "endOffset": end, "fps": 1},
+    }
+    part.update(overrides)
+    return part
+
+
+@pytest.mark.parametrize(
+    ("seconds", "tokens"),
+    [(F(19), 20 * 280 + 19 * 32), (F(1, 2), 2 * 280 + 1 * 32), (F(3), 4 * 280 + 3 * 32)],
+)
+def test_clip_tokens_count_one_frame_per_second_plus_the_last_and_audio(
+    seconds: F, tokens: int
+) -> None:
+    assert gemini_cost.clip_tokens(FLASH, seconds) == tokens
+
+
+def test_a_payload_with_a_clip_counts_its_declared_length() -> None:
+    parts = [{"text": "clip:"}, clip_part("12.5s"), {"text": "x"}]
+    bound = gemini_cost.payload_bound(payload(parts), FLASH, on=TODAY)
+    assert bound.input_tokens == (
+        len(b"clip:")
+        + 1
+        + SCHEMA_BYTES
+        + FLASH.quote_overhead_tokens
+        + gemini_cost.clip_tokens(FLASH, F(25, 2))
+    )
+
+
+@pytest.mark.parametrize(
+    "part",
+    [
+        clip_part(videoMetadata={"startOffset": "0s", "endOffset": "19s"}),  # fps 없음
+        clip_part(videoMetadata={"startOffset": "0s", "endOffset": "19s", "fps": 2}),
+        clip_part("-1s"),
+        clip_part("19"),
+        clip_part("1e3s"),
+        clip_part(videoMetadata={"startOffset": "5s", "endOffset": "5s", "fps": 1}),
+        clip_part(mediaResolution={"level": "MEDIA_RESOLUTION_LOW"}),
+        clip_part(inlineData={"mimeType": "video/webm", "data": MP4}),
+        {k: v for k, v in clip_part().items() if k != "videoMetadata"},
+    ],
+)
+def test_a_clip_whose_length_or_resolution_is_not_fixed_is_refused(part: dict[str, object]) -> None:
+    with pytest.raises(ValueError):
+        gemini_cost.payload_bound(payload([part]), FLASH, on=TODAY)
+
+
+def test_request_bytes_measure_the_compact_json_body() -> None:
+    body = payload([{"text": "가"}])
+    assert gemini_cost.request_bytes(body) == len(
+        json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode()
+    )
+    assert gemini_cost.INLINE_REQUEST_LIMIT_BYTES == 20_000_000
+
+
+# ── 영수증 ───────────────────────────────────────────────────────────────
+
+
+class Meta:
+    def __init__(self, model: str) -> None:
+        self.model = model
+
+
+def reply(**usage: object) -> dict[str, object]:
+    metadata = {"promptTokenCount": 9000, "candidatesTokenCount": 200, "thoughtsTokenCount": 800}
+    metadata.update(usage)
+    return {"usageMetadata": metadata, "modelVersion": "gemini-3.8-flash", "responseId": "r1"}
+
+
+def test_the_receipt_prices_prompt_and_output_plus_thoughts() -> None:
+    usage = gemini_cost.measure_gemini_usage(Meta("gemini-3.8-flash"), reply(), on=TODAY)
+    assert (usage.input_tokens, usage.output_tokens) == (9000, 1000)
+    expected = (Decimal(9000) * Decimal("0.75") + Decimal(1000) * Decimal("3.75")) / Decimal(10**6)
+    assert Decimal(usage.cost_usd or "nan") == expected
+    assert usage.pricing_revision == FLASH.pricing_revision
+    assert usage.provider_request_id == "r1" and usage.unpriced_reason is None
+
+
+def test_a_receipt_without_thoughts_counts_candidates_only() -> None:
+    body = reply()
+    body["usageMetadata"] = {"promptTokenCount": 10, "candidatesTokenCount": 5}
+    usage = gemini_cost.measure_gemini_usage(Meta("gemini-3.8-flash"), body, on=TODAY)
+    assert usage.output_tokens == 5
+
+
+@pytest.mark.parametrize(
+    ("model", "body", "reason"),
+    [
+        ("gemini-3.6-flash", reply(), "unknown_model"),
+        ("gemini-3.8-flash", reply(promptTokenCount=-1), "missing_or_invalid_usage"),
+        ("gemini-3.8-flash", {"modelVersion": "gemini-3.8-flash"}, "missing_or_invalid_usage"),
+        ("gemini-3.8-flash", {**reply(), "modelVersion": "gemini-4-argon"}, "model_mismatch"),
+        ("gemini-3.8-flash", {**reply(), "modelVersion": None}, "model_mismatch"),
+    ],
+)
+def test_an_unpriceable_receipt_keeps_its_reason_never_zero(
+    model: str, body: dict[str, object], reason: str
+) -> None:
+    usage = gemini_cost.measure_gemini_usage(Meta(model), body, on=TODAY)
+    assert usage.cost_usd is None and usage.unpriced_reason == reason
+
+
+def test_a_receipt_after_the_announced_raise_is_unpriced() -> None:
+    usage = gemini_cost.measure_gemini_usage(Meta("gemini-3.8-flash"), reply(), on=date(2027, 1, 1))
+    assert usage.cost_usd is None and usage.unpriced_reason == "price_not_current"
+    assert usage.input_tokens == 9000  # 토큰은 남긴다
+
+
+def test_a_dated_model_version_still_prices() -> None:
+    body = {**reply(), "modelVersion": "gemini-3.8-flash-001"}
+    usage = gemini_cost.measure_gemini_usage(Meta("gemini-3.8-flash"), body, on=TODAY)
+    assert usage.cost_usd is not None

@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import Any
 
 from vlogsrt.config import Config
-from vlogsrt.env import ANALYSIS_CLAUDE_KEY_ENV
+from vlogsrt.env import ANALYSIS_CLAUDE_KEY_ENV, ANALYSIS_GEMINI_KEY_ENV
 from vlogsrt.project.raw import request_usage
 from vlogsrt.project.raw.analysis_approval import (
     AsrPhaseApproval,
@@ -43,13 +43,19 @@ from vlogsrt.project.raw.analysis_approval import (
 )
 from vlogsrt.project.raw.analysis_config import RawUnderstandingSettings
 from vlogsrt.project.raw.config import (
-    ANALYSIS_PROVIDER_ANTHROPIC,
     CLAUDE_ANALYSIS_PROFILES,
+    GEMINI_ANALYSIS_PROFILES,
     RawClaudeAnalysisProfile,
-    analysis_provider,
+    analysis_model_label,
+    official_price_model,
 )
 from vlogsrt.project.raw.models import AnalysisEstimate, AnalysisSemanticEstimate
-from vlogsrt.transcribe import LiveTranscriber, create_claude_client, create_vision_client
+from vlogsrt.transcribe import (
+    LiveTranscriber,
+    create_claude_client,
+    create_gemini_client,
+    create_vision_client,
+)
 
 STT_KEY_ENV = "OPENAI_API_KEY"
 """STT·Luna가 함께 쓰는 서버 환경 키 이름 — 값은 화면·로그에 절대 나오지 않는다."""
@@ -123,6 +129,26 @@ def capture_claude_credentials(
     return ClaudeCredentials(api_key=key) if key else None
 
 
+@dataclass(frozen=True, slots=True)
+class GeminiCredentials:
+    """Gemini 의미 분석 키(D86) — 메모리에만 있고 repr·화면·로그에 나오지 않는다."""
+
+    api_key: str = field(repr=False)
+
+
+def capture_gemini_credentials(
+    environ: Mapping[str, str] | None = None,
+) -> GeminiCredentials | None:
+    """`GEMINI_API_KEY`를 한 번 찍는다 — 옛 비전 역할의 `GOOGLE_API_KEY`를 빌리지 않는다(D83)."""
+    if environ is None:
+        from vlogsrt import env
+
+        env.ensure_loaded()
+    source: Mapping[str, str] = os.environ if environ is None else environ
+    key = (source.get(ANALYSIS_GEMINI_KEY_ENV) or "").strip()
+    return GeminiCredentials(api_key=key) if key else None
+
+
 def browser_network_mode() -> str:
     """Effective process mode, without inspecting or returning credential values."""
     from vlogsrt import env
@@ -158,6 +184,7 @@ def live_transport_for_credentials(
     luna_approvals: Any,
     on: date | None = None,
     claude: ClaudeCredentials | None = None,
+    gemini: GeminiCredentials | None = None,
 ) -> LiveAnalysisTransport:
     """찍아 둔 자격증명으로 생산 transport를 만든다 — 정본 전송 경계만 쓴다.
 
@@ -178,6 +205,7 @@ def live_transport_for_credentials(
         luna_approvals=luna_approvals,
         on=on,
         claude_clients={} if claude is None else _claude_clients(claude),
+        gemini_clients={} if gemini is None else _gemini_clients(gemini),
     )
 
 
@@ -186,6 +214,19 @@ def _claude_clients(claude: ClaudeCredentials) -> dict[str, object]:
     return {
         model: _claude_client(claude, profile)
         for model, profile in CLAUDE_ANALYSIS_PROFILES.items()
+    }
+
+
+def _gemini_clients(gemini: GeminiCredentials) -> dict[str, object]:
+    """등록된 Gemini 모델 → 그 프로파일로 만든 클라이언트. 만들기만 하고 보내지 않는다."""
+    return {
+        model: create_gemini_client(
+            api_key=gemini.api_key,
+            base_url=profile.api_base_url,
+            api_version=profile.api_version,
+            timeout_seconds=profile.timeout_seconds,
+        )
+        for model, profile in GEMINI_ANALYSIS_PROFILES.items()
     }
 
 
@@ -217,6 +258,7 @@ def production_live_transport(
         luna_approvals=luna_approvals,
         on=on,
         claude=capture_claude_credentials(os.environ if environ is None else environ),
+        gemini=capture_gemini_credentials(os.environ if environ is None else environ),
     )
 
 
@@ -430,19 +472,20 @@ def _phase_artifact_for(service: Any, root: Path, revision_id: str, asset_id: st
 
 
 def _semantic_budget(model: str, estimate: AnalysisSemanticEstimate) -> Any:
-    """2단계 승인의 예산 — Claude는 견적이 잰 공식 단가 상한을 그대로 묶는다(D54).
+    """2단계 승인의 예산 — Claude·Gemini는 견적이 잰 공식 단가 상한을 그대로 묶는다(D54·D86).
 
-    상한 없는 Claude 견적으로는 승인을 만들지 않는다 — 사람이 금액을 보지 않은 승인이
-    된다. Luna는 지금처럼 단가 미확인 예산이다.
+    상한 없는 견적(Gemini 단가가 그날 유효하지 않으면 가격 미정)으로는 승인을 만들지 않는다 —
+    사람이 금액을 보지 않은 승인이 된다. Luna는 지금처럼 단가 미확인 예산이다.
     """
     from vlogsrt.project.raw.understanding_luna import PRICE_OFFICIAL, AnalysisBudget
 
     requests = max(1, estimate.window_count)
-    if analysis_provider(model) != ANALYSIS_PROVIDER_ANTHROPIC:
+    if not official_price_model(model):
         return AnalysisBudget(max_luna_requests=requests, max_asr_chunks=1)
     if estimate.request_ceiling_usd is None:
         raise BrowserRuntimeError(
-            f"Claude 2단계 견적에 비용 상한이 없다: {estimate.source_name} — 견적을 다시 받으세요"
+            f"{analysis_model_label(model)} 2단계 견적에 비용 상한이 없다(가격 미정):"
+            f" {estimate.source_name} — 단가를 확인해 고친 뒤 견적을 다시 받으세요"
         )
     return AnalysisBudget(
         max_luna_requests=requests,
@@ -521,6 +564,7 @@ __all__ = [
     "asr_estimate_digest",
     "caption_transport_providers",
     "capture_claude_credentials",
+    "capture_gemini_credentials",
     "capture_environment_credentials",
     "live_transport_for_credentials",
     "mint_asr_approvals",

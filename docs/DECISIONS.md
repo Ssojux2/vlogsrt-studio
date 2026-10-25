@@ -8495,3 +8495,54 @@ c2가 잰다. 형식은 `video/mp4` 등.
 
 **시험**: `tests/raw/test_analysis_clip.py`(조리법 tag·값역·한도 · 구간·모노 AAC·긴 변 · 같은 바이트 · 소리 없는 원본 · 세로 원본 ·
 크기 상한 넘으면 아무것도 안 남김 · 출력 안 덮음 · 캐시·망가진 캐시 · 캐시 폴더 열쇠). 무료·로컬, 유료 호출 0회.
+
+## D86 — W-30c2 Gemini 의미 분석 공급자 — 클립 + 프레임, 공식 단가 상한, 세 갈래 (2026-10-25, W-30c2)
+
+**결정**: `gemini-*`은 셋째 의미 분석 공급자 `google`이다(`analysis_provider`). 「Claude인가」로 갈리던 자리 약 20곳을 그 자리가 실제로
+묻는 것으로 고쳤다 — 공급자별 전송·판정 읽기·클라이언트는 세 갈래, 금액이 승인에 묶이는가는 `official_price_model`(Claude·Gemini).
+- **역할**: Gemini는 의미 분석 역할만 맡는다 — 문구·시간 모델로는 거부한다(오디오 계약은 whisper·gpt-transcribe 그대로, 규칙 1).
+  의미 분석 모델이면 등록표(D84)에 있어야 하고 프로파일이 계약을 지켜야 한다.
+- **본문**(`build_gemini_payload`): 사용자 차례 하나에 **클립(D85) → 프레임 아이디 이름표 + JPEG → 안내문**. 부분마다
+  `mediaResolution = MEDIA_RESOLUTION_HIGH`(이미지 장당 상한 1120토큰을 고정), 클립은 `videoMetadata`에 `startOffset 0s`·`endOffset`
+  (클립 길이)·`fps 1`을 적는다 — 견적 상한이 페이로드만으로 클립 토큰을 잰다. `generationConfig`는 `maxOutputTokens`·`responseMimeType
+  application/json`·`responseJsonSchema`(Claude·Luna와 같은 schema)·`thinkingConfig.thinkingLevel` 넷뿐 — 시스템 지시·도구·후보 수 없음.
+  클립을 못 자른 창은 클립 없이(프레임만) 묻고 안내문도 그렇게 말한다(경고를 남긴다).
+- **안내문**: 클립이 있으면 머리 줄이 「프레임 표본과 이 창의 문맥 구간 영상 clip(그림과 소리, X초부터 Y초 동안 — clip의 0초가 그
+  시작)」으로 바뀌고 규칙 셋을 더한다 — 움직임·흔들림·초점·노출은 clip으로 판단(정지 프레임에 번짐이 없어도 clip이 흔들리면 shake) ·
+  소리는 분위기·현장감 판단에만, 발화 내용·시각의 정본은 발화 증거(받아 적거나 시각을 만들지 마라) · 아이디는 여전히 frame 아이디.
+  **클립은 Gemini 본문만 안내문에 넘긴다** — 증거에 클립이 붙어 있어도 Luna·Claude 본문과 요청 신원은 한 바이트도 바뀌지 않는다
+  (시험이 처음에 이 결함을 잡았다). 설정의 `prompt_revision`은 그대로다 — Claude·Luna 판정 캐시를 흔들지 않고, 요청 신원이 모델 이름과
+  안내문 바이트를 묶으므로 다른 공급자의 판정을 가져다 쓰지 않는다.
+- **판정 읽기**(`_gemini_text`): 첫 후보의 `finishReason`이 `STOP`일 때 `thought: true`가 아닌 text 부분만. MAX_TOKENS(생각까지 한도에
+  닿음)·SAFETY·RECITATION 등·빈 이유·후보 없음(`promptFeedback.blockReason`)은 이유를 남긴 거부다. enum 대소문자는 Claude처럼 맞춘다.
+- **예산·상한**: `semantic_analysis_budget(…, on=)` — Gemini는 그날 유효한 단가로 창당 공식 상한(D84 + 클립: 창 15초 + 앞뒤 문맥 2초 =
+  19초 → (19 + 1)장 × 280 + 19 × 32 = 6208토큰), 알린 인상일 뒤에는 금액 없는 예산(견적 가격 미정). 실행 문맥
+  (`_require_official_ceiling`, 예전 `_require_claude_ceiling`)은 Gemini에도 공식 상한이 묶인 승인을 요구하고, 실제 페이로드마다 상한을
+  다시 재며, **인라인 요청 상한 20 MB**를 넘는 창이 하나라도 있으면 그 원본은 0송신이다. 2단계 승인 예산(`_semantic_budget`)도 상한 없는
+  Gemini 견적으로는 만들지 않는다. 창당 상한: Flash 약 $0.068 · Argon 약 $0.180.
+- **영수증**(`gemini_cost.measure_gemini_usage`, 관찰 연산 `models.generateContent`): 입력 = `promptTokenCount`, 출력 =
+  `candidatesTokenCount + thoughtsTokenCount`, 신원 = `responseId`. 등록되지 않은 모델·잘못된 사용량·`modelVersion`이 고른 모델로
+  시작하지 않음·그날 단가 무효는 가격 미정이다(토큰은 남긴다).
+- **클라이언트·키**: `LiveAnalysisTransport.gemini_clients`(등록 프로파일마다 하나, `GEMINI_API_KEY`가 있을 때만) — `semantic_client`가
+  키 없으면 1단계 전사조차 시작하기 전에 `GEMINI_API_KEY`를 말하며 닫는다. `capture_gemini_credentials`는 제 이름만 읽는다(옛 비전 역할의
+  `GOOGLE_API_KEY`를 빌리지 않는다). UI는 시작 때 한 번 찍어 메모리에만 둔다.
+- **작업 흐름**(`analysis_workflow._window_clips`): 의미 분석 모델이 Gemini일 때만 창마다 클립을 자른다(다른 공급자는 클립 0개) — 파일
+  시각 = 창 문맥 시작 + 영상 원점, 길이 = 문맥 끝 − 시작, 소리 트랙 = 1단계가 고른 트랙(무성 원본은 영상만). 같은 클립 사전이 증거와 검증
+  응답자(`validated_luna_responder`·`validated_visual_luna_responder`의 `clips`) 둘 다에 가야 요청 신원이 맞는다.
+- **독립 검토가 짚은 틈 셋**(고쳤다):
+  1. 실행이 알린 인상일 자정을 넘으면 승인 상한(인상 전 단가)을 넘는 요청이 나갈 수 있었다(Argon 출력 한도 전부 $0.24 > $0.180) —
+     이제 Gemini 요청마다 보내기 직전에 그날 단가가 유효한지 본다(`_send_semantic`), 아니면 남은 창은 보내지 않는다.
+  2. 인상일 뒤 견적은 가격 미정인데 1단계 전사(유료)는 그대로 사고 2단계에서야 막혔다 — 이제 `semantic_client`(전사 **전**에 부른다)가
+     닫는다(키 없는 Claude와 같은 판단, D54).
+  3. 모든 창의 클립을 못 자르면(인코더 없음·계통 시간 초과) 경고만 남기고 프레임만으로 보냈다 — 사람이 승인한 「클립 + 프레임」이 아니므로
+     이제 그 원본을 실패로 닫는다(보내지 않는다). 일부 창만 실패하면 그 창만 프레임으로 묻는다.
+  화면 문구(견적의 「Luna」·단가 미확인 문구·키 상태 줄)는 d가 고친다 — 그 전에는 Gemini를 고를 수 없으므로 잘못된 승인은 생기지 않는다.
+- **아직 고를 수 없다**: `ANALYSIS_MODEL_CHOICES`·화면 드롭다운·키 상태 줄·Flash 기본은 W-30d다.
+
+**사람 확인 남음**(유료): Gemini가 이 schema(`additionalProperties: false` 포함)를 `responseJsonSchema`로 받는지, 부분별 `mediaResolution`·
+`videoMetadata`가 400 없이 지나가는지, `modelVersion` 철자, 실제 토큰이 상한 안인지 — 첫 영상 하나의 영수증으로 본다.
+
+**시험**: `tests/raw/test_gemini_analysis.py`(본문 차례·칸 · 클립 없는 창 · 본문 ⊂ 견적 상한 · 클립은 Gemini에만 · 신원 · STOP 받음·생각
+무시 · 잘림·거절·막힘·빈 본문 · 대소문자 · 예산·인상일 · 클라이언트 종류 · Gemini 문으로만 보냄 · 가격 미정 승인 거부 · 인라인 상한 ·
+영수증 · 키 없음 · 프로파일마다 클라이언트 · 키 이름 · 작업 흐름 클립: Gemini만·파일 시각·실패한 창) · `tests/raw/test_gemini_cost.py`
+(공급자·역할·클립 부분·영수증). 유료 호출 0회.

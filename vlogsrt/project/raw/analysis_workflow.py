@@ -71,7 +71,12 @@ from vlogsrt.project.raw.caption_provider import (
     TransportTimingProvider,
     parse_timing_response,
 )
-from vlogsrt.project.raw.config import SOURCE_TEXT_SETTINGS, RawWorkflowConfig
+from vlogsrt.project.raw.config import (
+    ANALYSIS_PROVIDER_GOOGLE,
+    SOURCE_TEXT_SETTINGS,
+    RawWorkflowConfig,
+    analysis_provider,
+)
 from vlogsrt.project.raw.jobs import JobCancelledError, JobContext
 from vlogsrt.project.raw.models import (
     AnalysisError,
@@ -1766,6 +1771,50 @@ def _semantic_phase_source(
     )
 
 
+def _window_clips(
+    context: JobContext,
+    workspace: RawWorkspace,
+    asset: SourceAsset,
+    workflow: RawWorkflowConfig,
+    *,
+    grid: VideoGrid,
+    audio: SelectedAudio | None,
+    plan: WindowPlan,
+) -> dict[str, luna.ClipEvidence]:
+    """Gemini 분석이면 창마다 문맥 구간 클립(D85·D86) — 다른 공급자는 빈 사전이다(보내지 않는다).
+
+    창 시각은 영상 원점이 0인 공통 시계라 파일 시각은 그 원점을 더한 값이다. 클립은 무료·로컬이고
+    구간마다 캐시된다. 한 창의 클립을 못 자르면 그 창은 클립 없이(프레임만으로) 판정을 묻고 경고를
+    남긴다 — 분석 전체를 멈추지 않는다. 한 창도 못 자르면(인코더 없음·모든 창 시간 초과 같은 계통
+    실패) 사람이 승인한 「클립 + 프레임」이 아니므로 그 원본을 실패로 닫는다(보내지 않는다). 클립은
+    판정의 증거일 뿐 시각·경계를 주지 않는다(규칙 1).
+    """
+    if analysis_provider(workflow.models.luna_model) != ANALYSIS_PROVIDER_GOOGLE:
+        return {}
+    track = None if audio is None else audio.audio_stream_index
+    sampler = media_refs.clip_sampler(workspace, asset, audio_stream_index=track)
+    clips: dict[str, luna.ClipEvidence] = {}
+    for window in plan.windows:
+        context.check_cancel()
+        seconds = window.context_end - window.context_start
+        if seconds <= 0:
+            continue
+        try:
+            path = sampler.clip(
+                start=window.context_start + grid.presentation_origin, seconds=seconds
+            )
+        except (RuntimeError, OSError) as error:
+            log.warn(f"분석 클립 없이 묻는다 {asset.source_name} {window.window_id}: {error}")
+            continue
+        clips[window.window_id] = luna.ClipEvidence(path, window.context_start, seconds)
+    if plan.windows and not clips:
+        raise AnalysisError(
+            f"분석 클립을 한 창도 자르지 못했습니다: {asset.source_name} — 사람이 승인한 「클립 +"
+            " 프레임」이 아니므로 이 원본은 보내지 않습니다(유료 호출 없음)"
+        )
+    return clips
+
+
 def _finish_source(
     context: JobContext,
     workspace: RawWorkspace,
@@ -1790,7 +1839,8 @@ def _finish_source(
     frame_source: str,
 ) -> AnalysisSourceResult:
     """판정→조정→문서 기록까지의 공통 꼬리 — 재생 전체·2단계가 같은 길을 쓴다."""
-    evidence_windows = luna.window_evidence(plan, frames, spoken)
+    clips = _window_clips(context, workspace, asset, workflow, grid=grid, audio=audio, plan=plan)
+    evidence_windows = luna.window_evidence(plan, frames, spoken, clips)
 
     def publish_progress(rows: Sequence[Any]) -> None:
         context.check_cancel()
@@ -1850,7 +1900,7 @@ def _finish_source(
     annotations = luna.annotate_windows(
         evidence_windows,
         _luna_responder_for(
-            providers, workflow, settings, audio, grid, plan, spoken, frames, asset
+            providers, workflow, settings, audio, grid, plan, spoken, frames, asset, clips
         ),
         settings=settings,
         model=workflow.models.luna_model,
@@ -2162,6 +2212,7 @@ def _luna_responder_for(
     spoken: Sequence[UtteranceEvidence],
     frames: FrameSamplingResult,
     asset: SourceAsset,
+    clips: Mapping[str, luna.ClipEvidence] | None = None,
 ) -> SemanticResponder:
     """Luna 판정 경계 — 재생이거나 라이브러리의 자체 검증 응답자다(우회 불가).
 
@@ -2196,6 +2247,7 @@ def _luna_responder_for(
             frames=frames,
             approval=approval,
             observer=request_usage.observer(),
+            clips=clips,
         )
     if not isinstance(approval, OnlineVisualAnalysisApproval):
         raise AnalysisApprovalError(
@@ -2211,6 +2263,7 @@ def _luna_responder_for(
         frames=frames,
         approval=approval,
         observer=request_usage.observer(),
+        clips=clips,
     )
 
 

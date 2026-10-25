@@ -13,19 +13,28 @@ from __future__ import annotations
 import functools
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import date
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
 from vlogsrt.project.pricing import official_pricing_snapshot
 from vlogsrt.project.raw import request_log
 from vlogsrt.project.raw.claude_cost import measure_claude_usage
+from vlogsrt.project.raw.gemini_cost import measure_gemini_usage
 from vlogsrt.project.request_accounting import MeasuredUsage, measure_response_usage
 from vlogsrt.project.workflow_protocol import PricingSnapshot
 from vlogsrt.task_runtime import provider_error
-from vlogsrt.transcribe import MESSAGES_OPERATION, RESPONSES_OPERATION
+from vlogsrt.transcribe import (
+    GENERATE_CONTENT_OPERATION,
+    MESSAGES_OPERATION,
+    RESPONSES_OPERATION,
+)
 
-_SEMANTIC_OPERATIONS = frozenset({RESPONSES_OPERATION, MESSAGES_OPERATION})
-"""의미 분석 단계의 연산 — Luna(Responses)와 Claude(Messages, D54)가 같은 `luna` 단계다."""
+_SEMANTIC_OPERATIONS = frozenset(
+    {RESPONSES_OPERATION, MESSAGES_OPERATION, GENERATE_CONTENT_OPERATION}
+)
+"""의미 분석 단계의 연산 — Luna(Responses)·Claude(Messages, D54)·Gemini(generateContent, D86)가
+같은 `luna` 단계다."""
 
 _CHUNK = 500
 """Bound for one SQL `IN (...)` list — SQLite caps bound variables."""
@@ -56,9 +65,11 @@ class UsageObserver:
         request_log.finish(ticket, received=True)
 
     def _measure(self, meta: Any, response: object) -> MeasuredUsage:
-        """Claude는 등록된 프로파일의 공식 단가로, 나머지는 OpenAI 가격 스냅샷으로 잰다."""
+        """Claude·Gemini는 등록된 프로파일의 공식 단가로, 나머지는 OpenAI 가격 스냅샷으로 잰다."""
         if meta.operation == MESSAGES_OPERATION:
             return measure_claude_usage(meta, response)
+        if meta.operation == GENERATE_CONTENT_OPERATION:
+            return measure_gemini_usage(meta, response, on=date.today())
         pricing = self.pricing if self.pricing is not None else _official_pricing()
         return measure_response_usage(meta, response, pricing)
 

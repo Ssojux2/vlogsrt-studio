@@ -21,14 +21,17 @@ from pathlib import Path
 from typing import Any
 
 from vlogsrt import log
-from vlogsrt.env import ANALYSIS_CLAUDE_KEY_ENV
+from vlogsrt.env import ANALYSIS_CLAUDE_KEY_ENV, ANALYSIS_GEMINI_KEY_ENV
 from vlogsrt.project.raw import service as raw_service
 from vlogsrt.project.raw.config import (
     ANALYSIS_MODEL_CHOICES,
     ANALYSIS_PROVIDER_ANTHROPIC,
+    ANALYSIS_PROVIDER_GOOGLE,
     analysis_model_label,
     analysis_provider,
     claude_profile,
+    gemini_profile,
+    official_price_model,
 )
 from vlogsrt.project.raw.models import (
     ANALYSIS_JOB_KIND,
@@ -499,7 +502,10 @@ def _analysis_active(service: raw_service.RawWorkspaceService, root: Path) -> bo
 def _analysis_model_lines(model: str) -> list[str]:
     """의미 분석 모델의 설명 — 키는 이름만 말하고 값은 어디에도 싣지 않는다."""
     label = analysis_model_label(model)
-    if analysis_provider(model) != ANALYSIS_PROVIDER_ANTHROPIC:
+    provider = analysis_provider(model)
+    if provider == ANALYSIS_PROVIDER_GOOGLE:
+        return _gemini_model_lines(model)
+    if provider != ANALYSIS_PROVIDER_ANTHROPIC:
         return [f"의미 분석 모델: {label} — 단가 미확인(금액 추정 없음, 0원 계산 금지)"]
     profile = claude_profile(model)
     return [
@@ -701,9 +707,23 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     return 0
 
 
+def _gemini_model_lines(model: str) -> list[str]:
+    """Gemini 분석 모델의 설명(D86) — 키 이름·공식 단가·유효 마지막 날·클립 + 프레임."""
+    profile = gemini_profile(model)
+    return [
+        f"의미 분석 모델: {profile.label} ({model}) — 공급자 Google,"
+        f" 키 {ANALYSIS_GEMINI_KEY_ENV}(.env)",
+        f"  공식 단가({profile.pricing_checked_at.isoformat()}): 입력 ${profile.input_per_mtok}"
+        f" · 출력 ${profile.output_per_mtok} / 100만 토큰"
+        f" — {profile.price_valid_through.isoformat()}까지, 견적은 창당 보수적 상한이다",
+        f"  창마다 클립(그림 + 소리) + 프레임 · 생각 {profile.thinking_level}"
+        f" · 출력 한도 {profile.max_output_tokens} 토큰",
+    ]
+
+
 def _print_analysis_estimates(estimates: Sequence[AnalysisEstimate], model: str) -> None:
     """견적 표 — 의미 분석 모델의 이름으로 요청 수를 말한다(Luna 문구는 W-14 이전 그대로)."""
-    if analysis_provider(model) == ANALYSIS_PROVIDER_ANTHROPIC:
+    if official_price_model(model):
         label = analysis_model_label(model)
         log.out(
             f"** 분석 견적(로컬 — 실제 호출 없음) — 의미 분석 {label}:"

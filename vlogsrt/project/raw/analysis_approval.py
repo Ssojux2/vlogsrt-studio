@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 
-from vlogsrt.env import ANALYSIS_CLAUDE_KEY_ENV
+from vlogsrt.env import ANALYSIS_CLAUDE_KEY_ENV, ANALYSIS_GEMINI_KEY_ENV
 from vlogsrt.project.raw.analysis_config import (
     TRANSCRIPTION_IDENTITY_PROMPT_REVISION,
     UNDERSTANDING_SCHEMA_VERSION,
@@ -32,13 +32,17 @@ from vlogsrt.project.raw.analysis_config import (
 )
 from vlogsrt.project.raw.config import (
     ANALYSIS_PROVIDER_ANTHROPIC,
+    ANALYSIS_PROVIDER_GOOGLE,
     CLAUDE_ANALYSIS_PROFILES,
+    GEMINI_ANALYSIS_PROFILES,
     RawWorkflowConfig,
     analysis_model_label,
     analysis_provider,
+    gemini_profile,
     transcription_identity_view,
     validate_raw_workflow_config,
 )
+from vlogsrt.project.raw.gemini_cost import price_current
 from vlogsrt.project.raw.understanding_luna import AnalysisApprovalError, online_env_blocked
 
 ASR_APPROVAL_SCHEMA = "raw-analysis-asr-approval/v2"
@@ -230,6 +234,10 @@ class LiveAnalysisTransport:
 
     `ANTHROPIC_API_KEY`가 있을 때만 채워진다. 엔드포인트·버전·시간 한도가 모델마다 다를 수
     있으므로 클라이언트 하나를 모든 Claude 모델에 돌려 쓰지 않는다."""
+    gemini_clients: Mapping[str, object] = field(default_factory=dict)
+    """Gemini 모델 → 그 모델의 프로파일로 만든 클라이언트(D86).
+
+    `GEMINI_API_KEY`가 있을 때만 채워진다."""
 
     def semantic_client(self, model: str) -> object:
         """의미 분석 모델에 맞는 클라이언트 — 없으면 유료 호출이 시작되기 **전에** 닫는다.
@@ -238,19 +246,44 @@ class LiveAnalysisTransport:
         의미 분석에서 막히는 길을 남기지 않는다. 등록되지 않은 Claude 이름은 다른 모델의
         클라이언트로 대신하지 않는다.
         """
-        if analysis_provider(model) != ANALYSIS_PROVIDER_ANTHROPIC:
+        provider = analysis_provider(model)
+        registered: frozenset[str]
+        if provider == ANALYSIS_PROVIDER_ANTHROPIC:
+            registered, clients = frozenset(CLAUDE_ANALYSIS_PROFILES), self.claude_clients
+            name, key = "Claude", ANALYSIS_CLAUDE_KEY_ENV
+        elif provider == ANALYSIS_PROVIDER_GOOGLE:
+            registered, clients = frozenset(GEMINI_ANALYSIS_PROFILES), self.gemini_clients
+            name, key = "Gemini", ANALYSIS_GEMINI_KEY_ENV
+        else:
             return self.client
-        if model not in CLAUDE_ANALYSIS_PROFILES:
+        if model not in registered:
             raise AnalysisApprovalError(
-                f"등록되지 않은 Claude 모델입니다: {model!r} — 유료 호출은 시작하지 않았습니다"
+                f"등록되지 않은 {name} 모델입니다: {model!r} — 유료 호출은 시작하지 않았습니다"
             )
-        client = self.claude_clients.get(model)
+        client = clients.get(model)
         if client is None:
             raise AnalysisApprovalError(
-                f"{analysis_model_label(model)} 분석에는 {ANALYSIS_CLAUDE_KEY_ENV}가 필요합니다 — "
+                f"{analysis_model_label(model)} 분석에는 {key}가 필요합니다 — "
                 ".env에 키를 넣고 앱을 다시 띄우세요. 유료 호출은 시작하지 않았습니다"
             )
+        if provider == ANALYSIS_PROVIDER_GOOGLE:
+            _require_current_gemini_price(model, self.on or date.today())
         return client
+
+
+def _require_current_gemini_price(model: str, on: date) -> None:
+    """Gemini 단가가 그날 유효해야 한다(D84) — 아니면 전사를 사기 **전에** 닫는다(D86).
+
+    알린 인상일 뒤에는 견적이 가격 미정이다 — 그 승인으로 1단계 전사(유료)를 사 놓고 2단계에서
+    막히는 길을 남기지 않는다(키 없는 Claude와 같은 판단, D54).
+    """
+    profile = gemini_profile(model)
+    if not price_current(profile, on=on):
+        raise AnalysisApprovalError(
+            f"{profile.label} 단가가 {on.isoformat()}에 유효하지 않습니다(가격 미정 —"
+            f" {profile.price_valid_through.isoformat()}까지 확인한 단가) — 단가를 확인해 고친"
+            " 뒤 다시 견적을 받으세요. 유료 호출은 시작하지 않았습니다"
+        )
 
 
 __all__ = [
