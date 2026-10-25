@@ -14,6 +14,7 @@ import sqlite3
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 
+from vlogsrt.project.raw import read_scope
 from vlogsrt.project.raw.models import (
     ANALYSIS_SOURCE_STATUSES,
     AnalysisError,
@@ -250,6 +251,28 @@ class AnalysisStore:
                 (revision_id, asset_id),
             ).fetchone()
         return None if row is None else self._source_result(row)
+
+    def latest_judged_results(self) -> dict[str, AnalysisSourceResult]:
+        """원본마다 가장 최근 리비전의 판정 행(1단계만 끝난 「전사만」 행은 뺀다) — 쿼리 한 번.
+
+        자막 검증의 Gemini 재료(D88)가 그리기마다 원본 수만큼 DB를 열지 않게 한다 — 리비전 차례는
+        `list_revisions`와 같은 rowid 차례다(나중 행이 앞 행을 덮는다). 읽기만 하므로 그리기 범위의
+        연결을 함께 쓴다(D67) — 단추 한 번의 DB 열기가 늘지 않는다."""
+        workspace = self._workspace
+        with read_scope.shared(
+            ("workspace.db", str(workspace.root)), workspace.connect
+        ) as connection:
+            rows = connection.execute(
+                "SELECT r.* FROM analysis_source_results AS r"
+                " JOIN analysis_revisions AS v ON v.revision_id = r.revision_id"
+                " WHERE r.status != 'transcribed' AND r.document_path IS NOT NULL"
+                " ORDER BY v.rowid"
+            ).fetchall()
+        latest: dict[str, AnalysisSourceResult] = {}
+        for row in rows:
+            result = self._source_result(row)
+            latest[result.asset_id] = result
+        return latest
 
     def list_source_results(self, revision_id: str) -> tuple[AnalysisSourceResult, ...]:
         with self._connect() as connection:

@@ -27,7 +27,7 @@ from vlogsrt.project.raw import gemini_cost
 from vlogsrt.project.raw.analysis_config import RawUnderstandingSettings
 from vlogsrt.project.raw.analysis_store import AnalysisStore
 from vlogsrt.project.raw.config import GEMINI_ANALYSIS_PROFILES, gemini_profile
-from vlogsrt.project.raw.understanding_luna import luna_output_schema_bytes
+from vlogsrt.project.raw.understanding_luna import gemini_output_schema_bytes
 
 needs_ffmpeg = pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg required")
 
@@ -148,7 +148,7 @@ def test_a_new_workspace_analyzes_with_flash_clips_and_frames(
     per_window = gemini_cost.window_ceiling_usd(
         gemini_profile(FLASH),
         RawUnderstandingSettings(),
-        schema_bytes=luna_output_schema_bytes(),
+        schema_bytes=gemini_output_schema_bytes(),
         on=date.today(),
     )
     assert per_window is not None

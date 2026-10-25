@@ -146,7 +146,7 @@ def test_the_gemini_body_is_clip_then_frames_then_instruction(tmp_path: Path) ->
     assert payload["generationConfig"] == {
         "maxOutputTokens": PROFILE.max_output_tokens,
         "responseMimeType": "application/json",
-        "responseJsonSchema": luna_output_schema(),
+        "responseJsonSchema": luna.gemini_output_schema(),
         "thinkingConfig": {"thinkingLevel": "MEDIUM"},
     }
 
@@ -163,7 +163,7 @@ def test_the_body_fits_the_window_ceiling_the_quote_shows(tmp_path: Path) -> Non
     payload = build_gemini_payload(with_clip(tmp_path), SETTINGS, PROFILE)
     bound = gemini_cost.payload_bound(payload, PROFILE, on=TODAY)
     ceiling = gemini_cost.window_ceiling_usd(
-        PROFILE, SETTINGS, schema_bytes=luna.luna_output_schema_bytes(), on=TODAY
+        PROFILE, SETTINGS, schema_bytes=luna.gemini_output_schema_bytes(), on=TODAY
     )
     assert ceiling is not None and bound.usd <= ceiling
 
@@ -299,7 +299,7 @@ def test_the_budget_binds_the_official_ceiling_until_the_announced_raise() -> No
     )
     assert official.luna_price_status == luna.PRICE_OFFICIAL
     assert official.request_ceiling_usd == gemini_cost.window_ceiling_usd(
-        PROFILE, SETTINGS, schema_bytes=luna.luna_output_schema_bytes(), on=TODAY
+        PROFILE, SETTINGS, schema_bytes=luna.gemini_output_schema_bytes(), on=TODAY
     )
     late = semantic_analysis_budget(
         FLASH, SETTINGS, max_luna_requests=3, max_asr_chunks=1, on=date(2027, 1, 1)
@@ -508,7 +508,7 @@ def test_a_window_whose_clip_fails_is_asked_with_frames_only(
 
 def test_decimal_ceiling_values_are_positive_and_finite() -> None:
     ceiling = gemini_cost.window_ceiling_usd(
-        PROFILE, SETTINGS, schema_bytes=luna.luna_output_schema_bytes(), on=TODAY
+        PROFILE, SETTINGS, schema_bytes=luna.gemini_output_schema_bytes(), on=TODAY
     )
     assert isinstance(ceiling, Decimal) and ceiling.is_finite() and ceiling > 0
 
@@ -594,3 +594,40 @@ def test_a_failed_window_keeps_the_providers_redacted_reason(
 
 def test_other_errors_do_not_echo_their_text() -> None:
     assert luna._provider_detail(RuntimeError("sk-secret in a body")) == ""
+
+
+# ── Gemini가 들은 말(W-30e, D88) ─────────────────────────────────────────────
+
+
+def test_only_the_gemini_schema_carries_heard_speech(tmp_path: Path) -> None:
+    schema = luna.gemini_output_schema()
+    assert schema["properties"]["heard_speech"] == {"type": "string"}  # type: ignore[index]
+    assert "heard_speech" in schema["required"]  # type: ignore[operator]
+    assert "heard_speech" not in luna_output_schema()["properties"]  # type: ignore[operator]
+    evidence = with_clip(tmp_path)
+    instruction = build_gemini_payload(evidence, SETTINGS, PROFILE)["contents"][0]["parts"][-1][
+        "text"
+    ]  # type: ignore[index]
+    assert "heard_speech에는 clip에서 들린 말" in instruction
+    from vlogsrt.project.raw.config import claude_profile
+
+    claude = build_claude_payload(evidence, SETTINGS, claude_profile("claude-sonnet-5-5"))
+    assert "heard_speech" not in json.dumps(claude, ensure_ascii=False)
+
+
+def test_heard_speech_is_kept_on_the_verdict_and_only_then_in_the_document(tmp_path: Path) -> None:
+    evidence = make_evidence(tmp_path)
+    body = accepted_body(evidence, heard_speech="  안녕 여기 바다야  ")
+    annotation = parse_with(FLASH, gemini_reply(body), evidence)
+    assert annotation.status == luna.ANNOTATION_ACCEPTED
+    assert annotation.heard_speech == "안녕 여기 바다야"
+    assert luna.annotation_json(annotation)["heard_speech"] == "안녕 여기 바다야"
+    silent = parse_with(FLASH, gemini_reply(accepted_body(evidence, heard_speech="")), evidence)
+    assert "heard_speech" not in luna.annotation_json(silent)  # Luna·Claude 문서와 같은 모양
+
+
+def test_heard_speech_that_is_not_text_is_a_defect(tmp_path: Path) -> None:
+    evidence = make_evidence(tmp_path)
+    annotation = parse_with(FLASH, gemini_reply(accepted_body(evidence, heard_speech=3)), evidence)
+    assert annotation.status == luna.ANNOTATION_REJECTED
+    assert "heard_speech" in (annotation.defect or "")

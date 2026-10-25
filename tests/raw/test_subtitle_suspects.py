@@ -201,6 +201,8 @@ def test_settings_live_outside_every_fingerprinted_settings() -> None:
         "small_vocabulary_run_min",  # W-29a(D77) — 번갈아 이어지는 적은 어휘 런
         "small_vocabulary_max_kinds",
         "symbols_only_min_chars",  # W-29a(D77) — 글자 없는 긴 부호 줄
+        "gemini_heard_coverage_floor",  # W-30e(D88) — Gemini가 들은 말에서 찾은 몫
+        "gemini_heard_min_chars",
     }
     for fingerprinted in (
         RawWorkflowConfig(),

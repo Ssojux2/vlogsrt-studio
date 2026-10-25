@@ -290,6 +290,13 @@ class SubtitleSuspectSettings:
     small_vocabulary_run_min: int = 6
     small_vocabulary_max_kinds: int = 3
     symbols_only_min_chars: int = 6
+    gemini_heard_coverage_floor: float = 0.5
+    """줄 글자 가운데 Gemini가 들은 말(D88)에서 찾은 몫이 이보다 작으면 「Gemini가 다르게 들음」 —
+    외부 근거 없는 조정 대상(다른 귀 조각 게이트 `retext_chunk_similarity_floor`와 같은 0.5에서
+    시작)."""
+    gemini_heard_min_chars: int = 2
+    """비교하는 줄의 최소 글자 수(공백·부호 뺀) — 한 글자 추임새(「네」·「와」)는 몫이 흔들려 짚지
+    않는다."""
 
 
 SUBTITLE_SUSPECT_SETTINGS = SubtitleSuspectSettings()
@@ -365,6 +372,12 @@ def subtitle_suspect_problems(settings: SubtitleSuspectSettings) -> list[str]:
             f"부호뿐인 줄 기준은 {SYMBOLS_ONLY_FLOOR} 이상의 정수여야 한다 — 「...」·「?!」"
             f" 같은 쉼을 짚지 않게: {symbols!r}"
         )
+    floor = settings.gemini_heard_coverage_floor
+    if not _finite_float(floor) or not 0 < floor <= 1:
+        problems.append(f"Gemini가 들은 말의 몫 기준은 (0, 1]이어야 한다: {floor!r}")
+    shortest = settings.gemini_heard_min_chars
+    if isinstance(shortest, bool) or not isinstance(shortest, int) or shortest < 1:
+        problems.append(f"Gemini 비교의 최소 글자 수는 1 이상의 정수여야 한다: {shortest!r}")
     logprob = settings.low_confidence_avg_logprob
     if not _finite_float(logprob) or logprob > 0:
         problems.append(f"낮은 확신의 로그 확률 기준은 0 이하의 유한 실수여야 한다: {logprob!r}")

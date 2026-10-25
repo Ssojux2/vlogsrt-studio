@@ -42,6 +42,7 @@ import unicodedata
 from collections import Counter
 from collections.abc import Collection, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
+from difflib import SequenceMatcher
 from fractions import Fraction
 
 from vlogsrt.hangul import strip_for_compare, to_nfc
@@ -59,6 +60,7 @@ CHUNK_END_CLAMPED = "chunk_end_clamped"
 WHOLE_SECOND = "whole_second"
 LOW_CONFIDENCE = "low_confidence"
 EAR_DISAGREED = "ear_disagreed"
+GEMINI_DISAGREED = "gemini_disagreed"
 SMALL_VOCABULARY = "small_vocabulary"
 SYMBOLS_ONLY = "symbols_only"
 
@@ -74,6 +76,9 @@ WHOLE_SECOND_TEXT = "시작·끝이 정수 초입니다 — 시각이 거칠 수
 LOW_LOGPROB_TEXT = "전사 확신이 낮습니다"
 HIGH_NO_SPEECH_TEXT = "전사가 무음일 확률을 높게 봤습니다 (측정 한계일 수 있음)"
 EAR_DISAGREED_TEXT = "다른 귀가 이 조각을 다르게 들었습니다"
+GEMINI_DISAGREED_TEXT = "Gemini가 이 구간에서 다른 말을 들었습니다"
+GEMINI_HEARD_NOTHING_TEXT = "Gemini가 이 구간에서 말을 듣지 못했습니다 (판정 한계일 수 있음)"
+"""Gemini가 들은 말이 빈 창의 줄(D88) — 「말이 아니다」라고 말하지 않는다(규칙 4)."""
 SMALL_VOCABULARY_TEXT = "몇 가지 말이 {count}줄 번갈아 이어집니다"
 SYMBOLS_ONLY_TEXT = "글자 없이 부호만 있습니다"
 
@@ -104,6 +109,60 @@ class CueTiming:
     scores: Mapping[str, tuple[float | None, float | None]] = field(default_factory=dict)
     # 다른 귀(GPT-Transcribe)가 그 줄의 조각을 다르게 들은 줄(D37 조각 게이트 거절, W-29a D77).
     ear_disagreed: frozenset[str] = frozenset()
+    # Gemini가 그 줄의 창 클립에서 들은 말(W-30e, D88) — 줄 아이디 → 들은 말. 비교는
+    # `heard_comparison`.
+    gemini_heard: Mapping[str, str] = field(default_factory=dict)
+    gemini_disagreed: frozenset[str] = frozenset()
+
+
+@dataclass(frozen=True)
+class HeardWindow:
+    """Gemini가 창 하나의 클립에서 들은 말(D88) — 창의 코어 구간(공통 시계)과 시각 없는 글자."""
+
+    core_start: Fraction
+    core_end: Fraction
+    heard: str
+
+
+def heard_comparison(
+    cues: Sequence[tuple[str, str, Fraction, Fraction]],
+    windows: Sequence[HeardWindow],
+    settings: SubtitleSuspectSettings = SUBTITLE_SUSPECT_SETTINGS,
+) -> tuple[dict[str, str], frozenset[str]]:
+    """(줄 → 그 창에서 Gemini가 들은 말, Gemini가 다르게 들은 줄) — 값만 받아 값만 돌려준다(D88).
+
+    줄은 가운데가 코어에 드는 창 하나에 속한다(창은 문맥만큼 겹친다 — 코어는 겹치지 않는다).
+    Gemini의 말은 문맥까지 덮어 줄보다 넓으므로 「줄 글자 가운데 들은 말에서 찾은 몫」으로 잰다
+    (`SequenceMatcher`, autojunk=False). 몫이 `gemini_heard_coverage_floor`보다 작으면 다르게 들은
+    것이다 — 들은 말이 비었으면 몫은 0이다. 공백·부호를 뺀 글자가 `gemini_heard_min_chars`보다 짧은
+    줄은 짚지 않는다. Gemini가 들었는데 자막에 없는 말은 짚지 않는다(그것은 빈칸 재전사의 몫이다).
+    표시의 재료일 뿐이다 — 줄·시각·글자를 바꾸지 않는다.
+    """
+    heard: dict[str, str] = {}
+    disagreed: set[str] = set()
+    for cue_id, text, start, end in cues:
+        middle = (start + end) / 2
+        window = next((w for w in windows if w.core_start <= middle < w.core_end), None)
+        if window is None:
+            continue
+        heard[cue_id] = window.heard
+        letters = strip_for_compare(text)
+        if len(letters) < settings.gemini_heard_min_chars:
+            continue
+        if (
+            _coverage(letters, strip_for_compare(window.heard))
+            < settings.gemini_heard_coverage_floor
+        ):
+            disagreed.add(cue_id)
+    return heard, frozenset(disagreed)
+
+
+def _coverage(letters: str, heard: str) -> float:
+    """줄 글자 가운데 들은 말에서 같은 차례로 찾은 몫 — 들은 말이 비면 0이다."""
+    if not heard:
+        return 0.0
+    matcher = SequenceMatcher(None, letters, heard, autojunk=False)
+    return sum(block.size for block in matcher.get_matching_blocks()) / len(letters)
 
 
 @dataclass(frozen=True)
@@ -142,6 +201,7 @@ def suspects(
         *_whole_seconds(cues, timing.local_times),
         *_low_confidence(cues, timing, settings, frozenset(no_speech) & loud),
         *_ear_disagreements(cues, timing.ear_disagreed),
+        *_gemini_disagreements(cues, timing),
     ):
         found.setdefault(cue_id, []).append(reason)
     return {cue_id: tuple(found[cue_id]) for cue_id, _text in cues if cue_id in found}
@@ -234,6 +294,21 @@ def _ear_disagreements(
     for cue_id, _text in cues:
         if cue_id in disagreed:
             yield cue_id, Suspect(EAR_DISAGREED, EAR_DISAGREED_TEXT)
+
+
+def _gemini_disagreements(
+    cues: Sequence[tuple[str, str]], timing: CueTiming
+) -> Iterator[tuple[str, Suspect]]:
+    for cue_id, _text in cues:
+        if cue_id in timing.gemini_disagreed:
+            nothing = not strip_for_compare(timing.gemini_heard.get(cue_id, ""))
+            yield (
+                cue_id,
+                Suspect(
+                    GEMINI_DISAGREED,
+                    GEMINI_HEARD_NOTHING_TEXT if nothing else GEMINI_DISAGREED_TEXT,
+                ),
+            )
 
 
 def _boilerplates(
@@ -350,6 +425,11 @@ __all__ = [
     "CHUNK_END_CLAMPED",
     "CHUNK_END_CLAMPED_TEXT",
     "EAR_DISAGREED",
+    "GEMINI_DISAGREED",
+    "GEMINI_DISAGREED_TEXT",
+    "GEMINI_HEARD_NOTHING_TEXT",
+    "HeardWindow",
+    "heard_comparison",
     "EAR_DISAGREED_TEXT",
     "HIGH_NO_SPEECH_TEXT",
     "LOW_CONFIDENCE",

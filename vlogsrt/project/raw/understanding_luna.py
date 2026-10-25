@@ -149,6 +149,8 @@ LUNA_OUTPUT_FIELDS: tuple[str, ...] = (
 """출력 칸 전부 — schema 빌더와 결함 검사가 같은 목록을 쓴다."""
 
 LEGACY_OPTIONAL_FIELDS = frozenset({"suitability", "suitability_reason", "visual_issues"})
+HEARD_SPEECH_FIELD = "heard_speech"
+"""Gemini 판정에만 있는 칸(W-30e, D88) — 창 클립에서 들린 말. Luna·Claude schema에는 없다."""
 """나중에 더한 칸 — 옛 응답·재생 픽스처에 없을 수 있다. 없으면 「평가 없음」으로 받는다."""
 
 SUITABILITY_VALUES = ("recommended", "usable", "review")
@@ -391,13 +393,13 @@ def build_gemini_payload(
                 "mediaResolution": {"level": profile.media_resolution},
             }
         )
-    parts.append({"text": _instruction(evidence, clip)})
+    parts.append({"text": _instruction(evidence, clip, heard=True)})
     return {
         "contents": [{"role": "user", "parts": parts}],
         "generationConfig": {
             "maxOutputTokens": profile.max_output_tokens,
             "responseMimeType": gemini_cost.JSON_MIME_TYPE,
-            "responseJsonSchema": luna_output_schema(),
+            "responseJsonSchema": gemini_output_schema(),
             "thinkingConfig": {"thinkingLevel": profile.thinking_level},
         },
     }
@@ -417,6 +419,23 @@ def build_semantic_payload(
     if provider == ANALYSIS_PROVIDER_GOOGLE:
         return build_gemini_payload(evidence, settings, gemini_profile(model))
     return build_luna_payload(evidence, settings)
+
+
+def gemini_output_schema() -> dict[str, object]:
+    """Gemini 출력 schema(D88) — 공통 schema + `heard_speech`(클립에서 들린 말, 필수 문자열).
+
+    공통 schema(`luna_output_schema`)는 그대로다 — Luna·Claude 본문과 요청 신원이 바뀌지 않는다.
+    """
+    schema = luna_output_schema()
+    properties = {**schema["properties"], HEARD_SPEECH_FIELD: {"type": "string"}}  # type: ignore[dict-item]
+    required = [*schema["required"], HEARD_SPEECH_FIELD]  # type: ignore[misc]
+    return {**schema, "properties": properties, "required": required}
+
+
+def gemini_output_schema_bytes() -> int:
+    """Gemini 출력 schema의 압축 JSON 바이트 — Gemini 견적 상한이 쓴다."""
+    compact = json.dumps(gemini_output_schema(), ensure_ascii=False, separators=(",", ":"))
+    return len(compact.encode("utf-8"))
 
 
 def luna_output_schema_bytes() -> int:
@@ -458,6 +477,14 @@ _INSTRUCTION_RULES: tuple[str, ...] = (
 )
 """안내문의 규칙 줄 — 창마다 같다. 바꾸면 `DEFAULT_PROMPT_REVISION`을 올린다(D58 18b가 v3)."""
 
+_HEARD_RULES: tuple[str, ...] = (
+    "- heard_speech에는 clip에서 들린 말을 들린 그대로 한국어로 적어라 — 고치거나 다듬거나"
+    " 요약하지 말고, 시각·화자 표시 없이 들린 차례대로. 발화 증거를 베끼지 말고 clip을 직접"
+    " 들어라. 말이 들리지 않거나 clip이 없으면 빈 문자열이다.",
+)
+"""Gemini 본문(D88)에만 더하는 규칙 줄 — `heard_speech`는 자막 검증의 표시 재료일 뿐이다(자막을
+바꾸지 않는다)."""
+
 _CLIP_RULES: tuple[str, ...] = (
     "- clip은 이 창의 문맥 구간을 그대로 담은 영상(그림과 소리)이다. 움직임·흔들림·초점·노출은"
     " clip으로 판단하라 — 정지 프레임에 번짐이 없어도 clip에서 흔들리면 shake다.",
@@ -465,18 +492,20 @@ _CLIP_RULES: tuple[str, ...] = (
     " 발화를 새로 받아 적거나 시각을 만들지 마라.",
     "- recommended·evidence_ids에는 여전히 위의 frame 아이디를 써라 — clip은 아이디가 아니다.",
 )
-"""클립이 있는 Gemini 창(D86)에만 더하는 규칙 줄 — 같은 schema·같은 아이디 세계다.
+"""클립이 있는 Gemini 창(D86)에만 더하는 규칙 줄 — 같은 아이디 세계다.
 
 판정 기록의 `prompt_revision`은 설정 값 그대로다(Claude·Luna 판정 캐시를 흔들지 않게) — 요청
 신원(`luna_request_sha256`)이 모델 이름과 안내문 바이트를 묶으므로 다른 공급자의 판정을 가져다 쓰지
 않는다."""
 
 
-def _instruction(evidence: WindowEvidence, clip: ClipEvidence | None = None) -> str:
+def _instruction(
+    evidence: WindowEvidence, clip: ClipEvidence | None = None, *, heard: bool = False
+) -> str:
     """창 하나에 대한 안내문 — 아이디의 세계를 먼저 알려고 규칙으로 닫는다.
 
-    `clip`은 Gemini 본문(D86)만 넘긴다 — 증거에 클립이 붙어 있어도 Luna·Claude의 안내문(과 그 요청
-    신원)은 한 바이트도 바뀌지 않는다.
+    `clip`·`heard`는 Gemini 본문(D86·D88)만 넘긴다 — 증거에 클립이 붙어 있어도 Luna·Claude의
+    안내문(과 그 요청 신원)은 한 바이트도 바뀌지 않는다.
     """
     window = evidence.window
     utterance_lines = [
@@ -510,6 +539,7 @@ def _instruction(evidence: WindowEvidence, clip: ClipEvidence | None = None) -> 
             *candidate_lines,
             *_INSTRUCTION_RULES,
             *(_CLIP_RULES if clip is not None else ()),
+            *(_HEARD_RULES if heard else ()),
         ]
     )
 
@@ -566,6 +596,9 @@ class SemanticAnnotation:
     suitability_reason: str = "사용성 평가가 없는 이전 분석입니다"
     visual_issues: tuple[str, ...] = ()
     visual_issues_note: str = ""
+    heard_speech: str = ""
+    """Gemini가 창 클립에서 들은 말(W-30e, D88) — 시각 없는 글자, 자막 검증의 표시 재료일 뿐이다.
+    다른 공급자·클립 없는 창은 빈 글자다."""
 
 
 def parse_luna_response(
@@ -789,6 +822,7 @@ def _accepted(
         ),
         visual_issues=visual_issues,
         visual_issues_note=visual_issues_note,
+        heard_speech=str(body.get(HEARD_SPEECH_FIELD, "")).strip(),
     )
 
 
@@ -817,9 +851,11 @@ def _annotation_defect(parsed: object, evidence: WindowEvidence) -> str:
     """판정 본문의 결함 검사 — 칸·타입·아이디 소속·window 일치를 전부 본다."""
     if not isinstance(parsed, dict):
         return f"판정 본문이 JSON 객체가 아니다: {type(parsed).__name__}"
-    unknown = sorted(set(parsed) - set(LUNA_OUTPUT_FIELDS))
+    unknown = sorted(set(parsed) - {*LUNA_OUTPUT_FIELDS, HEARD_SPEECH_FIELD})
     if unknown:
         return f"schema에 없는 칸이 있다: {', '.join(unknown)}"
+    if not isinstance(parsed.get(HEARD_SPEECH_FIELD, ""), str):
+        return f"{HEARD_SPEECH_FIELD}이 문자열이 아니다: {parsed[HEARD_SPEECH_FIELD]!r}"
     missing = sorted(
         key for key in LUNA_OUTPUT_FIELDS if key not in LEGACY_OPTIONAL_FIELDS | set(parsed)
     )
@@ -1352,7 +1388,7 @@ def semantic_analysis_budget(
         ceiling = gemini_cost.window_ceiling_usd(
             gemini_profile(model),
             settings,
-            schema_bytes=luna_output_schema_bytes(),
+            schema_bytes=gemini_output_schema_bytes(),
             on=on or date.today(),
         )
         if ceiling is None:
@@ -2076,6 +2112,8 @@ def annotation_json(annotation: SemanticAnnotation) -> dict[str, object]:
         "suitability_reason": annotation.suitability_reason,
         "visual_issues": list(annotation.visual_issues),
         "visual_issues_note": annotation.visual_issues_note,
+        # Gemini 판정만 싣는다(D88) — Luna·Claude 문서는 한 바이트도 바뀌지 않는다.
+        **({HEARD_SPEECH_FIELD: annotation.heard_speech} if annotation.heard_speech else {}),
     }
 
 

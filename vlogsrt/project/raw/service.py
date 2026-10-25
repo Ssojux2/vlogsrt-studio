@@ -82,6 +82,7 @@ from vlogsrt.project.raw.config import (
     ANALYSIS_PROVIDER_ANTHROPIC,
     ANALYSIS_PROVIDER_GOOGLE,
     DEFAULT_ANALYSIS_MODEL,
+    GEMINI_MODEL_PREFIX,
     PREVIOUS_DEFAULT_ANALYSIS_MODELS,
     WORKFLOW_SCHEMA_VERSION,
     RawWorkflowConfig,
@@ -2935,6 +2936,9 @@ class RawWorkspaceService:
                 note["ear"] = ear
             if cue_id in flagged:
                 note["suspects"] = [{"code": s.code, "text": s.text} for s in flagged[cue_id]]
+            heard = timing.gemini_heard.get(cue_id, "") if timing is not None else ""
+            if heard.strip():
+                note["gemini"] = {"heard": heard}
             if note:
                 notes[cue_id] = note
         return notes
@@ -2984,7 +2988,85 @@ class RawWorkspaceService:
         stage1 = sync_report.stage1_audio(
             self._workspace(root).root, source_id, str(transcript.get("source_sha256") or "")
         )
-        return self.subtitle_cue_timing(transcript, stage1)
+        timing = self.subtitle_cue_timing(transcript, stage1)
+        return self.with_gemini_heard(
+            timing, transcript, self._gemini_heard_windows(root, source_id)
+        )
+
+    @staticmethod
+    def with_gemini_heard(
+        timing: Any, transcript: Mapping[str, Any], windows: Sequence[Any]
+    ) -> Any:
+        """「Gemini가 다르게 들음」(W-30e, D88)의 재료를 시각 재료에 얹는다 — 창이 없으면
+        그대로다."""
+        from vlogsrt.project.raw import source_transcript, subtitle_suspects
+
+        if not windows:
+            return timing
+        cues = [
+            (
+                str(row["utterance_id"]),
+                str(row["text"]),
+                source_transcript.rational(row["start"]),
+                source_transcript.rational(row["end"]),
+            )
+            for row in transcript.get("utterances", [])
+        ]
+        heard, disagreed = subtitle_suspects.heard_comparison(cues, windows)
+        return replace(timing, gemini_heard=heard, gemini_disagreed=disagreed)
+
+    def _gemini_heard_windows(self, root: Path, source_id: str) -> tuple[Any, ...]:
+        """그 원본의 **가장 최근** 영상 분석이 Gemini 판정이면 창마다 들은 말(D88) — 아니면 빈 값.
+
+        더 최근에 다른 모델로 다시 분석했으면 옛 Gemini의 말을 쓰지 않는다(그 분석이 지금의
+        판정이다). 받아들인 판정의 창만 싣는다 — 실패·거부한 창은 들은 말이 없다(빈 말로 「듣지
+        못함」을 짓지 않는다). 창 시각은 원본 자막과 같은 공통 시계다.
+        """
+        from vlogsrt.project.raw import source_transcript, subtitle_suspects
+
+        workspace = self._workspace(root)
+        document = self._latest_analysis_document(workspace, source_id)
+        if document is None:
+            return ()
+        annotations = {
+            str(row.get("window_id")): row
+            for row in document.get("annotations", [])
+            if isinstance(row, Mapping)
+            and row.get("status") == "accepted"
+            and str(row.get("luna_model", "")).startswith(GEMINI_MODEL_PREFIX)
+        }
+        windows = (document.get("windows") or {}).get("windows", [])
+        return tuple(
+            subtitle_suspects.HeardWindow(
+                source_transcript.rational(window["core_start"]),
+                source_transcript.rational(window["core_end"]),
+                str(annotations[str(window["window_id"])].get("heard_speech", "")),
+            )
+            for window in windows
+            if str(window.get("window_id")) in annotations
+        )
+
+    def _latest_analysis_document(
+        self, workspace: RawWorkspace, source_id: str
+    ) -> dict[str, Any] | None:
+        """그 원본의 가장 최근 판정 문서 — 1단계만 끝난 행(「전사만」)은 건너뛴다.
+
+        원본마다 최근 행은 그리기 한 번에 쿼리 한 번으로 모두 읽는다(읽기 범위, D63)."""
+        store = AnalysisStore(workspace)
+        latest = read_scope.memo(
+            ("latest_judged_results", str(workspace.root)), store.latest_judged_results
+        )
+        row = latest.get(source_id)
+        if row is None:
+            return None
+        _directory, path = _tier_paths(workspace.root, row)
+        if not path.is_file():
+            return None
+        try:
+            body = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        return body if isinstance(body, dict) else None
 
     def record_sync_failure(
         self, root: Path, source_ids: Sequence[str] | None, error: BaseException

@@ -3725,6 +3725,16 @@ VISUAL_BOOTSTRAP_JS = (
           " 「가져오기」는 문구 칸만 채웁니다 — 「저장」을 눌러야 바뀝니다.</small></p></div>");
         return out.join("");
       }
+      // Gemini가 이 줄의 창 클립에서 들은 말(D88) — 창 전체라 줄보다 넓을 수 있다. 참고만 한다.
+      function geminiLines(cue) {
+        var heard = cue.gemini && cue.gemini.heard;
+        if (!heard) { return ""; }
+        return '<div class="vl-ear" role="group" aria-label="Gemini가 들은 말">' +
+          earLine("Gemini가 들은 말(이 구간 전체)", heard, "gemini") +
+          '<p class="vl-kv"><small>Gemini는 이 줄이 든 분석 창의 클립 전체를 들었습니다' +
+          " — 이 줄보다 넓을 수 있어 필요한 부분만 남기세요. 「가져오기」는 문구 칸만 채웁니다" +
+          " — 「저장」을 눌러야 바뀝니다.</small></p></div>";
+      }
       function suspectLines(cue) {
         if (!cue.suspects || !cue.suspects.length) { return ""; }
         return '<p class="vl-kv"><span class="vl-badge" data-vl-suspect="1">확인 필요</span> ' +
@@ -3750,7 +3760,8 @@ VISUAL_BOOTSTRAP_JS = (
         var cue = info && state.sourceCue && state.sourceCue.sourceId === curSourceId() ?
           (info.subtitles || []).find(function (u) { return u.id === state.sourceCue.id; }) : null;
         var ear = cue && cue.ear;
-        var text = ear ? (which === "first" ? ear.first : ear.other) : "";
+        var text = which === "gemini" ? (cue && cue.gemini && cue.gemini.heard) || "" :
+          ear ? (which === "first" ? ear.first : ear.other) : "";
         var box = doc.getElementById("vl-source-text");
         if (!text || !box) { return; }
         box.value = text;
@@ -3765,7 +3776,7 @@ VISUAL_BOOTSTRAP_JS = (
         });
         if (!cue) { return ""; }
         return '<fieldset class="vl-source-caption-editor"><legend>원본 자막 수정</legend>' +
-          earLines(cue) + suspectLines(cue) + truthLines(cue) +
+          earLines(cue) + geminiLines(cue) + suspectLines(cue) + truthLines(cue) +
           '<label>문구<textarea id="vl-source-text" class="vl-input">' +
           esc(takenText(cue, info)) + '</textarea></label>' +
           '<label>시작(초)<input id="vl-source-start" class="vl-input" value="' +
