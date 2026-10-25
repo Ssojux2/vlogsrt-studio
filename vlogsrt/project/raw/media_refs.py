@@ -24,6 +24,7 @@ from typing import Any
 from vlogsrt import log, preprocess
 from vlogsrt.project.raw import read_scope
 from vlogsrt.project.raw.analysis_config import (
+    ANALYSIS_CLIP,
     ANALYSIS_PROXY,
     ANALYSIS_PROXY_LIMITS,
     PAIR_AUDIO_MIN_CORRELATION,
@@ -31,6 +32,7 @@ from vlogsrt.project.raw.analysis_config import (
     PAIR_SHIFT_MARGIN,
     PAIR_VIDEO_MAX_ERROR,
     PAIR_VIDEO_SAMPLE_SIZE,
+    AnalysisClipRecipe,
     AnalysisProxyRecipe,
 )
 from vlogsrt.project.raw.models import (
@@ -806,6 +808,95 @@ class _FrameSampler:
         )
         self._cache(frame_index, long_edge, path)
         return path
+
+
+def clip_encoding(recipe: AnalysisClipRecipe = ANALYSIS_CLIP) -> preprocess.AnalysisClipEncoding:
+    """조리법 → 경계(`preprocess`)가 받는 인코딩 값 — preprocess는 project 설정을 모른다."""
+    return preprocess.AnalysisClipEncoding(
+        long_edge=recipe.long_edge,
+        video_codec=recipe.video_codec,
+        preset=recipe.preset,
+        crf=recipe.crf,
+        pix_fmt=recipe.pix_fmt,
+        audio_codec=recipe.audio_codec,
+        audio_bitrate_kbps=recipe.audio_bitrate_kbps,
+        audio_channels=recipe.audio_channels,
+        max_bytes=recipe.max_bytes,
+    )
+
+
+def clip_cache_key(
+    content_sha256: str,
+    *,
+    audio_stream_index: int | None,
+    recipe: AnalysisClipRecipe = ANALYSIS_CLIP,
+) -> str:
+    """클립 캐시 폴더 이름 — 원본 바이트·조리법·고른 소리 트랙이 다르면 다른 폴더다."""
+    audio = "silent" if audio_stream_index is None else f"a{audio_stream_index}"
+    material = "\0".join((content_sha256, recipe.tag(), audio))
+    return hashlib.sha256(material.encode()).hexdigest()
+
+
+@dataclass(frozen=True)
+class ClipSampler:
+    """원본의 창 구간 클립(W-30c1, D85) — 구간마다 한 번 자르고 sha256 원장으로 캐시한다.
+
+    요청 신원이 클립 바이트를 해시하므로(`luna_request_sha256`) 캐시가 살아 있는 동안 같은 창은
+    언제나 같은 바이트를 보낸다. 원장과 다른 파일은 버리고 다시 자른다(조용히 다른 바이트를 쓰지
+    않는다).
+    """
+
+    source: Path
+    video_stream_index: int
+    audio_stream_index: int | None
+    cache_directory: Path
+    recipe: AnalysisClipRecipe = ANALYSIS_CLIP
+
+    def _path(self, start: Fraction, seconds: Fraction) -> Path:
+        name = hashlib.sha256(f"{start.numerator}/{start.denominator}+{seconds}".encode())
+        return self.cache_directory / f"{name.hexdigest()}.mp4"
+
+    def clip(self, *, start: Fraction, seconds: Fraction) -> Path:
+        """`start`(파일 시각)부터 `seconds`초의 클립 — 캐시에 있으면 그대로, 없으면 자른다."""
+        path = self._path(start, seconds)
+        manifest = path.with_suffix(".sha256")
+        if (
+            path.is_file()
+            and manifest.is_file()
+            and hashlib.sha256(path.read_bytes()).hexdigest() == manifest.read_text()
+        ):
+            return path
+        path.unlink(missing_ok=True)
+        manifest.unlink(missing_ok=True)
+        preprocess.extract_analysis_clip(
+            self.source,
+            path,
+            video_stream_index=self.video_stream_index,
+            audio_stream_index=self.audio_stream_index,
+            start=start,
+            seconds=seconds,
+            encoding=clip_encoding(self.recipe),
+            timeout_seconds=self.recipe.timeout(seconds),
+        )
+        staged = manifest.with_suffix(".tmp-hash")
+        staged.write_text(hashlib.sha256(path.read_bytes()).hexdigest())
+        staged.replace(manifest)
+        return path
+
+
+def clip_sampler(workspace: Any, asset: Any, *, audio_stream_index: int | None) -> ClipSampler:
+    """원본의 클립 표본기 — 소리가 있어야 하므로 분석 프록시(소리 없음)가 아니라 원본을 자른다.
+
+    `audio_stream_index`는 1단계가 고른 소리 트랙(전사가 들은 그 트랙)이다 — 없으면 영상만이다.
+    """
+    source = workspace.source_media_path(asset)
+    key = clip_cache_key(asset.content_sha256, audio_stream_index=audio_stream_index)
+    return ClipSampler(
+        source,
+        preprocess.probe_raw_media(source).video.stream_index,
+        audio_stream_index,
+        workspace.root / "cache" / "source-clips" / key,
+    )
 
 
 def frame_sampler(workspace: Any, asset: Any, *, slot_packets: tuple[int, ...] = ()) -> Any:

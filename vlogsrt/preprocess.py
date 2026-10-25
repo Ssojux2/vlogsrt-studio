@@ -4252,6 +4252,118 @@ def _visual_preview_args(
     return args, tuple(warnings), video_copy and track.codec_name == "aac"
 
 
+@dataclass(frozen=True, slots=True)
+class AnalysisClipEncoding:
+    """분석 클립(W-30c1, D85)의 인코딩 값 — 조리법은 project 설정에 살고 여기는 값만 받는다."""
+
+    long_edge: int
+    video_codec: str
+    preset: str
+    crf: int
+    pix_fmt: str
+    audio_codec: str
+    audio_bitrate_kbps: int
+    audio_channels: int
+    max_bytes: int
+
+
+_BITEXACT_ARGS = (
+    "-fflags", "+bitexact", "-flags:v", "+bitexact", "-flags:a", "+bitexact",
+    "-map_metadata", "-1", "-map_chapters", "-1",
+)  # fmt: skip
+"""같은 입력이면 같은 바이트 — 인코더 판 이름·생성 시각·원본 메타데이터를 싣지 않는다."""
+
+
+def _analysis_clip_command(
+    source: Path,
+    staged: Path,
+    *,
+    video_stream_index: int,
+    audio_stream_index: int | None,
+    seek: Fraction,
+    seconds: Fraction,
+    encoding: AnalysisClipEncoding,
+) -> list[str]:
+    command = [
+        require_ffmpeg(), "-v", "error", "-hide_banner", "-nostdin", "-y",
+        "-ss", f"{float(seek):.6f}",
+        "-i", str(source),
+        "-t", f"{float(seconds):.6f}",
+        "-map", f"0:{video_stream_index}",
+    ]  # fmt: skip
+    if audio_stream_index is not None:
+        command += ["-map", f"0:{audio_stream_index}"]
+    command += [
+        "-dn", "-sn",
+        "-vf", _long_edge_scale(encoding.long_edge) + ":force_divisible_by=2",
+        "-c:v", encoding.video_codec, "-preset", encoding.preset, "-crf", str(encoding.crf),
+        "-pix_fmt", encoding.pix_fmt,
+    ]  # fmt: skip
+    if audio_stream_index is not None:
+        command += [
+            "-c:a", encoding.audio_codec, "-b:a", f"{encoding.audio_bitrate_kbps}k",
+            "-ac", str(encoding.audio_channels),
+        ]  # fmt: skip
+    return [*command, *_BITEXACT_ARGS, "-movflags", "+faststart", "-f", "mp4", str(staged)]
+
+
+@process_step("분석 클립 자르기")
+def extract_analysis_clip(
+    source: Path,
+    output: Path,
+    *,
+    video_stream_index: int,
+    audio_stream_index: int | None,
+    start: Fraction,
+    seconds: Fraction,
+    encoding: AnalysisClipEncoding,
+    timeout_seconds: float,
+) -> Path:
+    """원본의 한 구간을 Gemini가 볼 작은 MP4로 자른다(W-30c1, D85) — 그림 + 고른 소리 트랙 하나.
+
+    `start`는 파일 시각(원점과 같은 시계)이고 입력 `-ss`는 컨테이너 시작 시각 기준이라 그 값을
+    빼서 넘긴다(`pcm_window_s16le`과 같다). 다시 인코딩하므로 입력 탐색도 프레임 정확하다. 회전은
+    ffmpeg 기본 autorotate가 물리로 적용한다. 이 클립은 **판정의 증거**일 뿐이다 — 어떤 시각·경계도
+    여기서 나오지 않는다(규칙 1). 출력은 O_EXCL 임시 파일에 쓰고 검사가 끝난 뒤에만 `output`으로
+    옮긴다 — 이미 있는 출력은 덮지 않는다. 크기 상한을 넘으면 아무것도 남기지 않고 실패한다.
+    """
+    if seconds <= 0:
+        raise RuntimeError(f"분석 클립 길이가 0 이하다: {seconds}")
+    _assert_safe_staging(source, output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    staged = _reserve_staging_temp(output)
+    try:
+        seek = max(Fraction(0), start - _container_start_time(source))
+        command = _analysis_clip_command(
+            source,
+            staged,
+            video_stream_index=video_stream_index,
+            audio_stream_index=audio_stream_index,
+            seek=seek,
+            seconds=seconds,
+            encoding=encoding,
+        )
+        _run(command, timeout=timeout_seconds, step="분석 클립 자르기")
+        _require_analysis_clip(staged, audio_stream_index, encoding)
+        os.link(staged, output)
+    finally:
+        staged.unlink(missing_ok=True)
+    return output
+
+
+def _require_analysis_clip(
+    staged: Path, audio_stream_index: int | None, encoding: AnalysisClipEncoding
+) -> None:
+    """잘린 클립의 모양 — 크기 상한 안, 영상 하나, 고른 소리가 있으면 소리 하나."""
+    size = staged.stat().st_size
+    if size > encoding.max_bytes:
+        raise RuntimeError(f"분석 클립이 크기 상한을 넘는다: {size} > {encoding.max_bytes}바이트")
+    probe = probe_raw_media(staged)
+    expected_audio = 0 if audio_stream_index is None else 1
+    if len(probe.audio) != expected_audio or probe.duration <= 0:
+        raise RuntimeError("분석 클립의 영상·소리 모양이 조리법과 다르다")
+
+
 @process_step("미리보기 만들기")
 def extract_visual_review_preview(
     source: Path,

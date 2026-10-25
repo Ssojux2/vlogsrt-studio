@@ -172,6 +172,66 @@ ANALYSIS_PROXY = AnalysisProxyRecipe()
 """지금 쓰는 분석 프록시 조리법 — 모든 호출 지점이 이 하나를 읽는다."""
 
 
+ANALYSIS_CLIP_VERSION = "analysis-clip/v1"
+"""분석 클립 조리법의 버전 — 인코더 인자를 바꾸면 올려서 낡은 클립 캐시를 버린다."""
+
+
+@dataclass(frozen=True)
+class AnalysisClipRecipe:
+    """Gemini가 창마다 직접 보는 짧은 클립(그림 + 소리)의 조리법(W-30c1, D85 — 사용자 지시
+    2026-10-25 「영상을 직접 모델이 보고 평가해도 돼」).
+
+    원본에서 창의 문맥 구간(창 15초 + 앞뒤 문맥 2초, 최대 19초)을 다시 인코딩한다 — 분석 프록시는
+    소리가 없어(`-an`) 쓰지 못한다. 긴 변만 `long_edge`로 줄이고(키우지 않는다) 소리는 고른 트랙
+    하나를 모노 AAC로 담는다. Gemini는 영상을 초당 한 장으로 표본하므로(video understanding 문서)
+    크기를 키워도 판정이 나아지지 않는다 — 요청 전체가 20 MB(인라인 상한) 안에 들도록 작게
+    둔다(`max_bytes`, 프레임 여덟 장의 base64 몫을 남긴다).
+
+    **외부 근거 없는 조정 대상**(`cut_*`처럼): 긴 변·crf·비트레이트·채널. `tag()`는 바이트를 정하는
+    칸만 싣는다 — 크기 상한·시간 한도는 기다림과 거절의 것이라 캐시 열쇠에 들지 않는다.
+    """
+
+    version: str = ANALYSIS_CLIP_VERSION
+    long_edge: int = 640
+    video_codec: str = "libx264"
+    preset: str = "veryfast"
+    crf: int = 30
+    pix_fmt: str = "yuv420p"
+    audio_codec: str = "aac"
+    audio_bitrate_kbps: int = 64
+    audio_channels: int = 1
+    max_bytes: int = 12_000_000
+    timeout_floor_seconds: float = 120.0
+    timeout_media_ratio: float = 6.0
+
+    def __post_init__(self) -> None:
+        for name in ("long_edge", "audio_bitrate_kbps", "audio_channels", "max_bytes"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"분석 클립 {name}은 1 이상의 정수다: {value!r}")
+        if isinstance(self.crf, bool) or not isinstance(self.crf, int) or not 0 <= self.crf <= 51:
+            raise ValueError(f"분석 클립 crf는 0~51의 정수다: {self.crf!r}")
+        for name in ("timeout_floor_seconds", "timeout_media_ratio"):
+            value = getattr(self, name)
+            if not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+                raise ValueError(f"분석 클립 {name}은 유한한 양수다: {value!r}")
+
+    def tag(self) -> str:
+        """클립 바이트를 정하는 조리법 전체의 이름 — 클립 캐시 열쇠에 실린다."""
+        return (
+            f"{self.version}/edge={self.long_edge}/{self.video_codec}/{self.preset}/crf{self.crf}"
+            f"/{self.pix_fmt}/{self.audio_codec}/{self.audio_bitrate_kbps}k/ac{self.audio_channels}"
+        )
+
+    def timeout(self, seconds: Fraction) -> float:
+        """클립 한 번 자르기의 시간 한도 — `max(바닥, 배율 × 클립 길이)`초."""
+        return _scaled_timeout(self.timeout_floor_seconds, self.timeout_media_ratio, float(seconds))
+
+
+ANALYSIS_CLIP = AnalysisClipRecipe()
+"""지금 쓰는 분석 클립 조리법 — 모든 호출 지점이 이 하나를 읽는다."""
+
+
 @dataclass(frozen=True)
 class AnalysisProxyLimits:
     """원본을 통째로 디코드하는 ffmpeg 한 번의 시간 한도 — `max(바닥, 배율 × 원본 길이)`초(D59).
