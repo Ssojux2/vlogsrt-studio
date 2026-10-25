@@ -1,0 +1,28 @@
+{
+  "candidates": [
+    {
+      "content": {
+        "role": "model",
+        "parts": [
+          {
+            "text": "합성 생각 — 출력이 아니다",
+            "thought": true
+          },
+          {
+            "text": "{\"window_id\": \"window_000000\", \"summary_ko\": \"합성\", \"suitability\": \"usable\"}"
+          }
+        ]
+      },
+      "finishReason": "STOP",
+      "index": 0
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 4610,
+    "candidatesTokenCount": 180,
+    "thoughtsTokenCount": 420,
+    "totalTokenCount": 5210
+  },
+  "modelVersion": "gemini-3.8-flash",
+  "responseId": "resp_synthetic_ok"
+}

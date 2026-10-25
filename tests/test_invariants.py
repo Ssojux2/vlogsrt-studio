@@ -2302,10 +2302,78 @@ def test_only_transcribe_may_import_the_claude_transport(
             "ui/workspace_service.py": statement + "\n",
         },
     )
-    failures = check_invariants.check_claude_transport_entry()
+    failures = check_invariants.check_transport_entry()
     assert len(failures) == 2, failures
     assert any("understanding_luna.py" in failure for failure in failures)
     assert any("ui/workspace_service.py" in failure for failure in failures)
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "from vlogsrt import gemini_messages",
+        "from . import gemini_messages",
+        "import vlogsrt.gemini_messages",
+        "from vlogsrt.gemini_messages import post_generate_content",
+        "from .gemini_messages import post_generate_content",
+        "import importlib\nimportlib.import_module('vlogsrt.gemini_messages')",
+        "import vlogsrt\nvlogsrt.gemini_messages.post_generate_content(client, 'm', {})",
+    ],
+)
+def test_only_transcribe_may_import_the_gemini_transport(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, statement: str
+) -> None:
+    """Gemini 전송도 transcribe.py만 안다(W-30a, D83) — Claude 전송 파일도 그것을 모른다."""
+    _fake_source_tree(
+        monkeypatch,
+        tmp_path,
+        {
+            "vlogsrt/transcribe.py": statement + "\n",
+            "vlogsrt/gemini_messages.py": statement + "\n",
+            _NETWORK_FILE: statement + "\n",
+            "vlogsrt/project/raw/understanding_luna.py": statement + "\n",
+        },
+    )
+    failures = check_invariants.check_transport_entry()
+    assert len(failures) == 2, failures
+    assert any("understanding_luna.py" in failure for failure in failures)
+    assert any(_NETWORK_FILE in failure for failure in failures)
+
+
+def test_the_gemini_transport_file_may_use_network_modules_at_its_exact_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """네트워크 경계는 공급자 전송 파일 둘의 정확 경로다 — 같은 이름의 다른 경로는 아니다."""
+    statement = "import urllib.request\nimport ssl\n"
+    _fake_source_tree(
+        monkeypatch,
+        tmp_path,
+        {
+            "vlogsrt/gemini_messages.py": statement,
+            _NETWORK_FILE: statement,
+            "vlogsrt/project/gemini_messages.py": statement,
+        },
+    )
+    failures = check_invariants.check_network_boundary()
+    assert failures and all("vlogsrt/project/gemini_messages.py" in f for f in failures), failures
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "import google.genai",
+        "from google import genai",
+        "import google.generativeai as genai",
+        "import vertexai",
+    ],
+)
+def test_google_sdks_are_banned_everywhere(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, statement: str
+) -> None:
+    """Gemini도 표준 라이브러리로 부른다(W-30a, D83) — Google SDK 의존성은 금지다(규칙 10)."""
+    _fake_source_tree(monkeypatch, tmp_path, {"vlogsrt/transcribe.py": statement + "\n"})
+    failures = check_invariants.check_banned_imports()
+    assert len(failures) == 1, failures
 
 
 @pytest.mark.parametrize("name", ["anthropic", "httpx", "requests", "urllib3", "aiohttp"])
@@ -2374,6 +2442,8 @@ def test_pure_layers_cannot_reach_the_claude_transport(
 ) -> None:
     _fake_source_tree(monkeypatch, tmp_path, {target: "from vlogsrt import anthropic_messages\n"})
     assert getattr(check_invariants, check_name)()
+    _fake_source_tree(monkeypatch, tmp_path, {target: "from vlogsrt import gemini_messages\n"})
+    assert getattr(check_invariants, check_name)()
 
 
 @pytest.mark.parametrize("statement", ["import socket", "from urllib import request", "import ssl"])
@@ -2388,7 +2458,7 @@ def test_the_pure_cut_layer_cannot_import_network_modules(
 
 def test_the_real_tree_passes_the_network_checks() -> None:
     assert check_invariants.check_network_boundary() == []
-    assert check_invariants.check_claude_transport_entry() == []
+    assert check_invariants.check_transport_entry() == []
     assert check_invariants.check_no_hardcoded_model() == []
 
 
@@ -2432,7 +2502,7 @@ def test_harmless_dynamic_or_attribute_forms_pass(
 ) -> None:
     _fake_source_tree(monkeypatch, tmp_path, {"vlogsrt/gadget.py": body})
     assert check_invariants.check_network_boundary() == []
-    assert check_invariants.check_claude_transport_entry() == []
+    assert check_invariants.check_transport_entry() == []
 
 
 @pytest.mark.parametrize(
@@ -2455,7 +2525,7 @@ def test_dynamic_imports_of_the_claude_transport_are_caught(
         tmp_path,
         {"vlogsrt/transcribe.py": body, "vlogsrt/project/raw/understanding_luna.py": body},
     )
-    failures = check_invariants.check_claude_transport_entry()
+    failures = check_invariants.check_transport_entry()
     assert len(failures) == 1, failures
     assert "understanding_luna.py" in failures[0]
 

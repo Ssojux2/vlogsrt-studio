@@ -30,6 +30,10 @@ def cancellation_active() -> bool:
     return _cancel.get() is not None
 
 
+AUTH_REASONS = frozenset({"API_KEY_INVALID"})
+"""인증 실패로 읽는 공급자 오류 까닭(`reason`) — 상태 코드가 401이 아닌 공급자의 것이다."""
+
+
 def provider_error(error: Exception) -> tuple[str, str, bool]:
     """Sanitized category and uncertainty, without echoing provider bodies or keys."""
     status = getattr(error, "status_code", None)
@@ -39,7 +43,13 @@ def provider_error(error: Exception) -> tuple[str, str, bool]:
         return "overloaded", "API 과부하 · 잠시 뒤 실패 구간을 다시 시도하세요", False
     if status == 402 or "billing" in kind:
         return "billing", "API 결제·크레딧 문제 · 계정 결제 상태를 확인하세요", False
-    if status == 401 or "authentication" in kind:
+    # Google은 틀린 키에 401이 아니라 400 + `API_KEY_INVALID`를 돌려준다(W-30a, D83).
+    reason = getattr(error, "reason", "")
+    if (
+        status == 401
+        or "authentication" in kind
+        or (isinstance(reason, str) and reason in AUTH_REASONS)
+    ):
         return "authentication", "API 인증 실패 · 키 설정을 확인하세요", False
     if status in (403, 404) or "permission" in kind or "notfound" in kind:
         return (

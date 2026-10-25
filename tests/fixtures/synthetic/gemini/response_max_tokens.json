@@ -1,0 +1,23 @@
+{
+  "candidates": [
+    {
+      "content": {
+        "role": "model",
+        "parts": [
+          {
+            "text": "{\"window_id\": \"win"
+          }
+        ]
+      },
+      "finishReason": "MAX_TOKENS",
+      "index": 0
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 4610,
+    "candidatesTokenCount": 12000,
+    "totalTokenCount": 16610
+  },
+  "modelVersion": "gemini-3.8-flash",
+  "responseId": "resp_synthetic_max"
+}

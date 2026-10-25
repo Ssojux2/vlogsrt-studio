@@ -249,6 +249,9 @@ RESPONSES_OPERATION = "responses.create"
 MESSAGES_OPERATION = "messages.create"
 """Claude Messages API 연산 — `POST /v1/messages` 한 번(D54)."""
 
+GENERATE_CONTENT_OPERATION = "models.generateContent"
+"""Gemini generateContent 연산 — `POST /v1beta/models/{model}:generateContent` 한 번(W-30a, D83)."""
+
 _REDACTED_OPTION_KEYS = frozenset({"api_key", "extra_headers"})
 """메타의 인자 사본에 아예 담지 않는 자격 칸 — 나가는 요청에서 걷어내는 게 아니라
 비추지 않는 것뿐이다(요건 2)."""
@@ -1165,6 +1168,97 @@ def _messages_create(client: Any, model: str, payload: Mapping[str, object]) -> 
     from . import anthropic_messages
 
     return anthropic_messages.post_messages(client, {"model": model, **dict(payload)})
+
+
+# ─────────────────────────────────────────────────────────────
+#  Gemini generateContent 경계(W-30a, D83) — HTTP 전송은 `gemini_messages`, 문은 여기
+# ─────────────────────────────────────────────────────────────
+
+
+def create_gemini_client(
+    *, api_key: str, base_url: str, api_version: str, timeout_seconds: float
+) -> Any:
+    """Gemini 의미 분석 클라이언트 — 값은 받은 것만 쓴다(환경·파일을 스스로 읽지 않는다).
+
+    만드는 것만으로는 아무 호출도 없다. 전송 모듈은 지연 import한다 — 그 파일을 얻는 파일은
+    이 파일 하나다(Claude 전송과 같은 선).
+    """
+    from . import gemini_messages
+
+    return gemini_messages.GeminiClient(
+        api_key=api_key,
+        base_url=base_url,
+        api_version=api_version,
+        timeout_seconds=timeout_seconds,
+    )
+
+
+def is_gemini_client(candidate: object) -> bool:
+    """Gemini 클라이언트인가 — 응답자가 공급자와 클라이언트 종류를 맞춰 보는 자리다."""
+    from . import gemini_messages
+
+    return isinstance(candidate, gemini_messages.GeminiClient)
+
+
+def request_gemini_generate(
+    client: Any,
+    *,
+    model: str,
+    payload: Mapping[str, object],
+    online: bool = False,
+    observer: RequestObserver | None = None,
+    cancellation: Callable[[], None] | None = None,
+) -> dict[str, Any]:
+    """승인형 의미 분석의 Gemini generateContent 경계 — `request_claude_messages`와 같은 문이다.
+
+    명시적 승인에서 온 ``online=True`` 없이는 클라이언트를 만지지 않는다. 지역 요청 결함(본문의
+    모델 재정의·Gemini가 아닌 클라이언트)은 승인(유료 예약)을 쓰기 **전에** 닫는다. 모델은 본문이
+    아니라 경로에 실린다 — 관찰 메타에는 다른 경계처럼 `model`이 함께 비친다. 재시도는 없다.
+    """
+    _require_gemini_request(client, model, payload, online=online)
+
+    def send(_prepared: Any) -> Any:
+        return _generate_content(client, model, payload)
+
+    if observer is None:
+        if cancellation is not None:
+            cancellation()
+        return _generate_content(client, model, payload)
+    reply: dict[str, Any] = _observed_call(
+        _AttemptWatch(observer=observer),
+        partial(_responses_attempt_meta, model, payload, GENERATE_CONTENT_OPERATION),
+        send,
+        gate=cancellation,
+    )()
+    return reply
+
+
+def _require_gemini_request(
+    client: Any, model: str, payload: Mapping[str, object], *, online: bool
+) -> None:
+    """승인 문과 지역 요청 결함 — 관찰자 승인(유료 예약)보다 먼저 닫는다. 모델 이름은 경로에
+    들어가므로 경로 조각 검사도 여기서 한다(전송이 키를 얹기 전에 한 번 더 본다)."""
+    if not online:
+        raise RuntimeError(
+            "Gemini 의미 분석 호출은 명시적 online=True 없이는 닫혀 있다 — "
+            "AnalysisAuthorization 승인이 필요하다"
+        )
+    if "model" in payload:
+        raise TypeError(
+            f"payload가 model을 다시 정의한다({payload['model']!r}) — "
+            "모델의 정본은 함수 인자 하나뿐이다"
+        )
+    if not is_gemini_client(client):
+        raise TypeError(f"Gemini 클라이언트가 아니다: {type(client).__name__}")
+    from . import gemini_messages
+
+    gemini_messages.require_model_segment(model)
+
+
+def _generate_content(client: Any, model: str, payload: Mapping[str, object]) -> dict[str, Any]:
+    from . import gemini_messages
+
+    return gemini_messages.post_generate_content(client, model, payload)
 
 
 class VisionResponder(Protocol):

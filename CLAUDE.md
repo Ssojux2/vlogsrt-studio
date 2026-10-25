@@ -170,9 +170,11 @@ Final Cut에 들어가지 않으며 `scripts/timing_truth_report.py`(읽기 전�
 7. **경계는 두 곳뿐이다.** API 호출은 `transcribe.py`에서만, ffmpeg 호출은
    `preprocess.py`에서만. **`cutpoints.py`와 `repetition.py`는 순수 함수여야 한다.**
    Claude도 같다(D54) — 승인 문·관찰·취소는 `transcribe.request_claude_messages`가 지고,
-   그 아래 HTTP 전송만 `anthropic_messages.py`에 산다. 네트워크 모듈(`urllib.request`·
-   `http.client`·`socket`·`ssl`)을 import할 수 있는 파일은 그 하나, 그 파일을 import할 수
-   있는 파일은 `transcribe.py` 하나다. 예외는 로컬 브라우저 서버의 `ui/instance.py`
+   그 아래 HTTP 전송만 `anthropic_messages.py`에 산다. Gemini도 같다(D83, 2026-10-23 사용자
+   승인으로 전송 파일 하나를 더했다) — 문은 `transcribe.request_gemini_generate`, 전송은
+   `gemini_messages.py`. 네트워크 모듈(`urllib.request`·`http.client`·`socket`·`ssl`)을
+   import할 수 있는 파일은 그 전송 파일 둘, 그 파일을 import할 수 있는 파일은 `transcribe.py`
+   하나다(전송 파일끼리도 서로 모른다). 예외는 로컬 브라우저 서버의 `ui/instance.py`
    (`urllib.request`)·`ui/service.py`(`socket`) 둘뿐이다(`UI_NETWORK_ALLOWLIST`).
 
 8. **모든 임계값은 `config`에서 온다.** 코드에 숫자를 하드코딩하지 마라.
@@ -201,7 +203,8 @@ Final Cut에 들어가지 않으며 `scripts/timing_truth_report.py`(읽기 전�
     (`difflib`, `unicodedata`, `array`, `bisect`, `zlib`, `subprocess`,
     `concurrent.futures`).
     `anthropic` SDK(와 `httpx`·`requests`)도 추가하지 마라 — Claude Messages API는 표준
-    라이브러리 `urllib`로 부른다(D54).
+    라이브러리 `urllib`로 부른다(D54). Google SDK(`google-genai`·`google-generativeai`·
+    `vertexai`)도 같다 — Gemini generateContent도 `urllib`로 부른다(D83).
 
 부수 규칙: `difflib.SequenceMatcher`는 항상 `autojunk=False`(기본값이면 한국어처럼
 고빈도 문자가 많은 시퀀스에서 비교가 무너진다).

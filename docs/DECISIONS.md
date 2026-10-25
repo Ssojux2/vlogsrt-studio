@@ -8390,3 +8390,49 @@ SRT의 짧은 이름을 `SRT`, 형식 식별자를 `SRT`로 둔다(`FFRoleCaptio
 **시험**: `test_finalcut_timeline.py`(제안된 적 없는 빨강은 꺼지고 키워드 둘 · 결정이 실린 빨강은 켬 · 제외는 결정과 무관하게 끔 · 되살린
 빨강 시험은 `decided=True`) · `test_finalcut_export.py`(전체 복원한 빨강은 켬 · 보내기가 조각마다 결정을 실음 — 제안된 적 없음 False,
 덮기·사람 메모·복원 True).
+
+## D83 — W-30a Gemini generateContent 전송과 문 (규칙 7 개정, 2026-10-25, W-30a)
+
+**문제**: 사용자 지시(2026-10-23): 「이 영상 분석에 google api를 추가하는 방안도 같이 검토해줘. api 선택해서 진행할 수 있도록」 —
+계획 질문에서 Gemini를 「이번에 포함」으로 골랐고, 규칙 7(네트워크 경계 파일은 하나)을 바꾸는 것을 승인했다. W-30은 넷으로 나눈다:
+a 전송·문·불변식 → b 프로파일·단가·견적 상한·공급자 세 갈래 → c 페이로드·판정·사용량 → d 화면·키·문서. 이 세션(a)은 아직 어떤
+분석 경로도 Gemini를 부르지 않는다 — 모델 목록·견적·승인은 그대로다.
+
+**공식 문서 확인**(2026-10-25):
+- https://ai.google.dev/gemini-api/docs/pricing (갱신 2026-10-22 UTC) — Standard 판. `gemini-3.8-flash` 입력 $0.75 · 출력(생각 포함)
+  $3.75 / 100만 토큰, 2027-01-01부터 $1.50 · $7.50. `gemini-4-argon` $2 · $10, 2026-12-01부터 $4 · $20, 무료 등급 없음. 무료 등급은
+  「Content used to improve our products」 — 결제 연결 키만 쓴다(d가 화면에 적는다).
+- https://ai.google.dev/gemini-api/docs/media-resolution — Gemini 3·4의 이미지는 `high`에서 장당 1120토큰(크기와 무관한 상한).
+- https://ai.google.dev/api/generate-content — `POST /v1beta/models/{model}:generateContent`, 키 헤더 `x-goog-api-key`, 부분별
+  `mediaResolution.level`, `generationConfig.responseMimeType`·`responseJsonSchema`·`maxOutputTokens`·`thinkingConfig.thinkingLevel`,
+  `candidates[].finishReason`(STOP·MAX_TOKENS·SAFETY…), `usageMetadata.promptTokenCount`·`candidatesTokenCount`·`thoughtsTokenCount`.
+- https://ai.google.dev/gemini-api/docs/migrate-to-interactions — 「generateContent remains fully supported」. 새 Interactions API는
+  기본으로 요청을 서버에 저장한다(`store=true`) — 판정 창의 프레임을 공급자 쪽에 남길 까닭이 없어 **상태 없는 generateContent**를 쓴다.
+
+**결정**:
+1. 전송 `vlogsrt/gemini_messages.py` — `anthropic_messages.py`의 거울(표준 라이브러리 urllib 한 번, https만, 리다이렉트 거절, https·프록시
+   처리기만 있는 opener, 재시도·스트리밍 없음). 다른 점: 모델이 본문이 아니라 **경로**에 산다 — 소문자·숫자·점·하이픈의 한 조각만
+   받는다(`/`·`:`·`?`면 다른 경로·연산·쿼리가 된다), API 판(`v1beta`)도 같다. 키는 쿼리(`?key=`)가 아니라 헤더로만 간다(URL은 프록시·
+   오류 문면에 남을 수 있다). 오류는 `error.status`(`RESOURCE_EXHAUSTED`…)와 첫 `ErrorInfo.reason`만 싣고 메시지는 키를 가려 200자로
+   자른다. 두 전송 파일은 서로 import하지 않는다 — 코드가 겹치는 opener·리다이렉트 거절은 일부러 두 벌이다(한 공급자의 전송이
+   다른 공급자의 전송에 기대지 않게). base_url은 **https 호스트(·포트)뿐**이다 — userinfo·쿼리·프래그먼트(빈 `?`·`#` 포함)·경로가
+   있으면 만들지도 보내지도 않는다(`https://h?x=`는 연산을 쿼리로 밀고 `https://h#`는 경로를 지운다 — 독립 검토가 짚었다). base_url·
+   API 판은 키를 얹기 직전에 다시 본다. 오류의 상태·까닭은 대문자 토큰(64자 이하)만 되뇌고, 까닭은 `@type`이 `ErrorInfo`인 항목에서만
+   읽는다. Claude 전송의 base_url 검사(스킴·호스트만)는 이번에 바꾸지 않았다 — 같은 틈이 있어 따로 고칠 거리다.
+2. 문 `transcribe.request_gemini_generate` — `request_claude_messages`와 같은 문: `online=True` 없이 닫힘 · 본문의 `model` 금지 ·
+   Gemini 클라이언트만 · 모델 이름의 경로 조각 검사(유료 예약 **전**) · 관찰 연산 `GENERATE_CONTENT_OPERATION = "models.generateContent"`(사용량 관찰이 연산 문자열로 갈라지므로 c가
+   쓴다 — 지금 `UsageObserver`는 Messages가 아닌 연산을 OpenAI 단가로 재므로, c가 이 연산을 받기 전에는 어떤 분석 경로도 이 문을
+   부르지 않는다) · 취소 문. `create_gemini_client`·`is_gemini_client`.
+3. 분류: Google은 틀린 키에 401이 아니라 **400 INVALID_ARGUMENT + `API_KEY_INVALID`**를 돌려준다 — `task_runtime.provider_error`가
+   `reason`이 `AUTH_REASONS`에 들면 인증 실패로 읽는다. 429·400·403·404·5xx는 기존 분류 그대로 맞는다.
+4. 키 이름 `GEMINI_API_KEY`(Google 문서의 이름) — `env.ANALYSIS_GEMINI_KEY_ENV`, `has_gemini_api_key()`(참·거짓만), 가림 목록에 든다.
+   옛 비전 역할(OpenAI 호환 chat-completions 경로)의 `GOOGLE_API_KEY`·`GEMINI_BASE_URL`과 따로 두고, 비전 역할이 이 이름을 물려받지
+   못한다(Claude 키와 같은 대우).
+5. 불변식(규칙 7 개정): 네트워크 경계는 전송 파일 **둘**의 정확 경로(`NETWORK_BOUNDARY_PATHS`) · 전송 모듈은 `transcribe.py`만 import ·
+   전송 파일끼리 서로 모름(`check_transport_entry`) · Google SDK(`google`·`vertexai`) 금지 · 순수 계층(retext·tiering·edit·glossary·
+   speech_gaps·suspects·ear_rescue)의 금지 목록에 `gemini_messages`.
+
+**시험**: `tests/test_gemini_messages.py`(URL·헤더 둘·압축 JSON · 키는 URL에 없음 · 모델·판 경로 조각 검사 · 429·503·400·401·403·404
+분류 · 틀린 키 400 = 인증 · 키 가림·200자 · 비JSON 오류 · 시간 초과·연결 · 리다이렉트 거절 · 소켓 가드 · https만 · 바꿔치기 · 프록시
+CONNECT) · `tests/test_transcribe.py`(Gemini 문 다섯) · `tests/test_env.py`(키 이름 넷) · `tests/test_invariants.py`(전송 둘 · Google
+SDK · 순수 계층). 유료 호출 0회.

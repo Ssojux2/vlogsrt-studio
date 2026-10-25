@@ -165,6 +165,11 @@ def has_anthropic_api_key() -> bool:
     return bool(get(ANALYSIS_CLAUDE_KEY_ENV).strip())
 
 
+def has_gemini_api_key() -> bool:
+    """Gemini 의미 분석 키가 있는지만 알려준다(D83). **값은 절대 돌려주지 않는다.**"""
+    return bool(get(ANALYSIS_GEMINI_KEY_ENV).strip())
+
+
 def require_api_key(force: bool = False) -> str:
     """실제 호출 직전에만 부른다. 오프라인이면 거부한다.
 
@@ -215,6 +220,11 @@ STT_ROLE_ENV_NAMES = frozenset({"OPENAI_API_KEY", "OPENAI_BASE_URL"})
 # Claude 의미 분석 키의 이름(D54) — 값은 `.env`에서 실행 시각에만 읽힌다. 비전 역할이 이
 # 이름을 물려받으면 한 키가 두 공급자를 연다.
 ANALYSIS_CLAUDE_KEY_ENV = "ANTHROPIC_API_KEY"
+# Gemini 의미 분석 키의 이름(W-30a, D83) — Google 공식 문서의 이름이다. 옛 비전 역할(OpenAI 호환
+# chat-completions 경로)의 `GOOGLE_API_KEY`와 따로 둔다 — 같은 키여도 이름이 다르면 무엇이 무엇을
+# 여는지 갈린다.
+ANALYSIS_GEMINI_KEY_ENV = "GEMINI_API_KEY"
+ANALYSIS_KEY_ENV_NAMES = (ANALYSIS_CLAUDE_KEY_ENV, ANALYSIS_GEMINI_KEY_ENV)
 
 # 적재에 성공한 마지막 역할 이름 — 설정 해석이 실패해도 가림이 두 값을 알게
 # 하는 근원이다(아래 redact_secrets 참조).
@@ -239,9 +249,9 @@ def validate_role_env_names(vision_key_name: str, vision_url_name: str) -> None:
                 f"비전 {label} 이름이 STT 자격증명 이름을 재사용한다: {name!r} — "
                 "비전 공급자는 별도 환경변수여야 한다"
             )
-        if name == ANALYSIS_CLAUDE_KEY_ENV:
+        if name in ANALYSIS_KEY_ENV_NAMES:
             raise RuntimeError(
-                f"비전 {label} 이름이 Claude 분석 키 이름을 재사용한다: {name!r} — "
+                f"비전 {label} 이름이 의미 분석 키 이름을 재사용한다: {name!r} — "
                 "비전 공급자는 별도 환경변수여야 한다"
             )
         if name in EXECUTION_SENSITIVE_ENV_NAMES:
@@ -289,9 +299,9 @@ def apply_role_credentials(
 
 
 def _managed_secret_values() -> tuple[str, ...]:
-    """가림이 알아야 하는 관리 값 — 엔진 STT 키, 적재된(또는 기본) 비전 키, Claude 분석 키."""
+    """가림이 알아야 하는 관리 값 — 엔진 STT 키, 적재된(또는 기본) 비전 키, 의미 분석 키 둘."""
     vision_name = _applied_vision_key_name or VISION_ROLE_DEFAULT_KEY_ENV
-    names = (STT_ROLE_KEY_ENV, vision_name, ANALYSIS_CLAUDE_KEY_ENV)
+    names = (STT_ROLE_KEY_ENV, vision_name, *ANALYSIS_KEY_ENV_NAMES)
     return tuple(value for value in (os.environ.get(name) for name in names) if value)
 
 
@@ -311,7 +321,7 @@ REDACTED_MARK = "∙∙∙"
 def redact_secrets(text: str, secrets: tuple[str, ...] = ()) -> str:
     """자격 증명 값을 문면에서 지운다 — 지속·인쇄 표면 앞의 마지막 문이다(S2A-2).
 
-    기본은 관리 값 셋(엔진 STT 키·비전 키·Claude 분석 키)의 현재 값이고, 다른 값은
+    기본은 관리 값 넷(엔진 STT 키·비전 키·Claude·Gemini 분석 키)의 현재 값이고, 다른 값은
     `secrets`로 넣는다. **이름을 대체하지 않는다** — 값만 지운다. 값은 절대
     만들어 내지 않는다: 문면에 없으면 문장은 그대로 둬서 진단을 죽이지
     않는다. 빈 값은 아무것도 지우지 않는다. 후보는 값 그대로 **와** 소비자가

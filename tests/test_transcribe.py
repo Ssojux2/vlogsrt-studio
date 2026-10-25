@@ -1740,6 +1740,166 @@ def test_claude_cancellation_gates_the_send() -> None:
     assert opener.bodies == [] and ledger.metas == []
 
 
+# ─── Gemini generateContent 경계(W-30a, D83) — Claude 문의 거울 ───────────────
+
+GEMINI_PAYLOAD = {
+    "contents": [{"role": "user", "parts": [{"text": "합성"}]}],
+    "generationConfig": {"maxOutputTokens": 16},
+}
+GEMINI_MODEL = "gemini-3.8-flash"
+
+
+class _GeminiReply(_ClaudeReply):
+    def read(self) -> bytes:
+        return b'{"candidates": [], "responseId": "resp_synthetic"}'
+
+
+class _GeminiOpener:
+    """Gemini 클라이언트의 전송 자리 — 보낸 (URL, 본문)을 기록하고 정해진 응답을 돌려준다."""
+
+    def __init__(self) -> None:
+        self.sent: list[tuple[str, dict[str, Any]]] = []
+
+    def __call__(self, request: Any, timeout: float) -> _GeminiReply:
+        self.sent.append((request.full_url, json.loads(request.data)))
+        return _GeminiReply()
+
+
+def _gemini_client(opener: _GeminiOpener) -> Any:
+    from vlogsrt.gemini_messages import GeminiClient
+
+    return GeminiClient(
+        api_key="AIza-synthetic",
+        base_url="https://generativelanguage.googleapis.com",
+        api_version="v1beta",
+        timeout_seconds=30.0,
+        opener=opener,
+    )
+
+
+def test_gemini_generate_is_closed_without_explicit_online() -> None:
+    from vlogsrt.transcribe import request_gemini_generate
+
+    opener = _GeminiOpener()
+    for online in (None, False):
+        kwargs = {} if online is None else {"online": online}
+        with pytest.raises(RuntimeError, match="online=True"):
+            request_gemini_generate(
+                _gemini_client(opener), model=GEMINI_MODEL, payload=GEMINI_PAYLOAD, **kwargs
+            )
+    assert opener.sent == []
+
+
+def test_gemini_payload_redefining_model_fails_before_authorization() -> None:
+    from vlogsrt.transcribe import request_gemini_generate
+
+    opener = _GeminiOpener()
+    ledger = _ClaudeLedger([])
+    with pytest.raises(TypeError, match="model"):
+        request_gemini_generate(
+            _gemini_client(opener),
+            model=GEMINI_MODEL,
+            payload={**GEMINI_PAYLOAD, "model": "other"},
+            online=True,
+            observer=ledger,
+        )
+    assert ledger.metas == [] and opener.sent == []
+
+
+@pytest.mark.parametrize("client", [object(), "claude"])
+def test_a_non_gemini_client_fails_before_authorization(client: object) -> None:
+    from vlogsrt.transcribe import request_gemini_generate
+
+    candidate = _claude_client(_ClaudeOpener()) if client == "claude" else client
+    ledger = _ClaudeLedger([])
+    with pytest.raises(TypeError, match="Gemini"):
+        request_gemini_generate(
+            candidate, model=GEMINI_MODEL, payload=GEMINI_PAYLOAD, online=True, observer=ledger
+        )
+    assert ledger.metas == []
+
+
+@pytest.mark.parametrize("model", ["", "gemini-3.8-flash:streamGenerateContent", "a/b", "G"])
+def test_a_gemini_model_that_is_not_a_path_segment_fails_before_authorization(model: str) -> None:
+    """모델 이름은 경로에 들어간다 — 그 결함은 유료 예약(승인)보다 먼저 닫힌다."""
+    from vlogsrt.transcribe import request_gemini_generate
+
+    opener = _GeminiOpener()
+    ledger = _ClaudeLedger([])
+    with pytest.raises(ValueError, match="모델"):
+        request_gemini_generate(
+            _gemini_client(opener),
+            model=model,
+            payload=GEMINI_PAYLOAD,
+            online=True,
+            observer=ledger,
+        )
+    assert ledger.metas == [] and opener.sent == []
+
+
+def test_gemini_observer_hooks_fire_with_the_generate_operation() -> None:
+    from vlogsrt.transcribe import GENERATE_CONTENT_OPERATION, request_gemini_generate
+
+    trace: list[str] = []
+    opener = _GeminiOpener()
+    ledger = _ClaudeLedger(trace)
+    reply = request_gemini_generate(
+        _gemini_client(opener),
+        model=GEMINI_MODEL,
+        payload=GEMINI_PAYLOAD,
+        online=True,
+        observer=ledger,
+    )
+    assert trace == ["authorize", "response"]
+    (meta,) = ledger.metas
+    assert meta.operation == GENERATE_CONTENT_OPERATION == "models.generateContent"
+    assert meta.model == GEMINI_MODEL
+    assert meta.options["generationConfig"] == {"maxOutputTokens": 16}
+    ((url, body),) = opener.sent
+    assert url.endswith("/v1beta/models/gemini-3.8-flash:generateContent")
+    assert body == GEMINI_PAYLOAD  # 모델은 본문이 아니라 경로에 실린다
+    assert ledger.responses == [reply]
+    assert reply["responseId"] == "resp_synthetic"
+
+
+def test_gemini_cancellation_gates_the_send() -> None:
+    from vlogsrt.transcribe import request_gemini_generate
+
+    class Stop(BaseException):
+        pass
+
+    def gate() -> None:
+        raise Stop
+
+    opener = _GeminiOpener()
+    ledger = _ClaudeLedger([])
+    for observer in (ledger, None):  # 관찰자 없는 길도 전송 전에 멈춘다
+        with pytest.raises(Stop):
+            request_gemini_generate(
+                _gemini_client(opener),
+                model=GEMINI_MODEL,
+                payload=GEMINI_PAYLOAD,
+                online=True,
+                observer=observer,
+                cancellation=gate,
+            )
+    assert opener.sent == [] and ledger.metas == []
+
+
+def test_create_gemini_client_takes_only_given_values() -> None:
+    from vlogsrt.transcribe import create_gemini_client, is_claude_client, is_gemini_client
+
+    client = create_gemini_client(
+        api_key="AIza-synthetic",
+        base_url="https://generativelanguage.googleapis.com",
+        api_version="v1beta",
+        timeout_seconds=300.0,
+    )
+    assert is_gemini_client(client) and not is_claude_client(client)
+    assert not is_gemini_client(object())
+    assert not is_gemini_client(_claude_client(_ClaudeOpener()))
+
+
 def test_the_live_transcriber_never_prints_its_key() -> None:
     live = LiveTranscriber(api_key="sk-synthetic-stt-key", base_url="https://example.test/v1")
     assert "sk-synthetic-stt-key" not in repr(live)

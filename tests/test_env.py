@@ -476,3 +476,46 @@ def test_vision_roles_cannot_reuse_the_claude_key_name(key_name: str, url_name: 
 
     with pytest.raises(RuntimeError, match="ANTHROPIC_API_KEY"):
         validate_role_env_names(key_name, url_name)
+
+
+# ─────────────────────────────────────────────────────────────
+#  Gemini 분석 키(W-30a, D83) — Claude 키와 같은 대우, 옛 비전 역할 이름과 따로
+# ─────────────────────────────────────────────────────────────
+
+
+def test_the_gemini_analysis_key_name_is_not_the_vision_role_default() -> None:
+    """옛 비전 역할(OpenAI 호환 경로)이 `GOOGLE_API_KEY`를 쓴다 — 분석 키는 따로다."""
+    from vlogsrt.env import ANALYSIS_GEMINI_KEY_ENV, VISION_ROLE_DEFAULT_KEY_ENV
+
+    assert ANALYSIS_GEMINI_KEY_ENV == "GEMINI_API_KEY"
+    assert ANALYSIS_GEMINI_KEY_ENV != VISION_ROLE_DEFAULT_KEY_ENV
+
+
+def test_redact_secrets_knows_the_gemini_analysis_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    from vlogsrt.env import redact_secrets
+
+    monkeypatch.setenv("GEMINI_API_KEY", "AIza-synthetic-gemini-key")
+    text = redact_secrets("upstream said AIza-synthetic-gemini-key was wrong")
+    assert "AIza-synthetic-gemini-key" not in text
+
+
+def test_has_gemini_api_key_is_a_bool_never_the_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    from vlogsrt.env import has_gemini_api_key
+
+    monkeypatch.setenv("GEMINI_API_KEY", "AIza-synthetic")
+    assert has_gemini_api_key() is True
+    monkeypatch.setenv("GEMINI_API_KEY", "  ")
+    assert has_gemini_api_key() is False
+    monkeypatch.delenv("GEMINI_API_KEY")
+    assert has_gemini_api_key() is False
+
+
+@pytest.mark.parametrize(
+    ("key_name", "url_name"),
+    [("GEMINI_API_KEY", "MY_URL"), ("MY_KEY", "GEMINI_API_KEY")],
+)
+def test_vision_roles_cannot_reuse_the_gemini_key_name(key_name: str, url_name: str) -> None:
+    from vlogsrt.env import validate_role_env_names
+
+    with pytest.raises(RuntimeError, match="GEMINI_API_KEY"):
+        validate_role_env_names(key_name, url_name)

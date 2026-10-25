@@ -38,22 +38,29 @@ BANNED_IMPORTS = (
     "gradio",
     # Claude는 표준 라이브러리 urllib로 부른다(D54) — SDK·HTTP 클라이언트 의존성은 없다.
     "anthropic", "httpx", "requests", "urllib3", "aiohttp",
+    # Gemini도 urllib로 부른다(W-30a, D83) — `google-genai`·`google-generativeai`·Vertex SDK는 없다.
+    "google", "vertexai",
 )  # fmt: skip
 ALLOWED_DEPENDENCIES = {"openai", "tomli-w", "rich"}
 
 # 예외는 전부 **정확 상대 경로**로 판정한다. 파일 이름으로 판정하면 같은 이름의
 # 파일이 예외를 물려받는다 — `vlogsrt/project/transcribe.py`가 openai를 얻는 식이다.
 OPENAI_BOUNDARY_PATH = "vlogsrt/transcribe.py"
-# 네트워크 모듈을 import할 수 있는 유일한 파일(D54) — Claude Messages의 HTTP 전송.
+# 네트워크 모듈을 import할 수 있는 파일 — 공급자마다 HTTP 전송 하나(정확 경로): Claude
+# Messages(D54)와 Gemini generateContent(W-30a, D83 — 규칙 7 개정, 사용자 승인 2026-10-23).
 # `urllib.parse`는 네트워크가 아니라 문자열 해석이라 어디서나 쓴다.
-NETWORK_BOUNDARY_PATH = "vlogsrt/anthropic_messages.py"
+NETWORK_BOUNDARY_PATHS = {
+    "anthropic_messages": "vlogsrt/anthropic_messages.py",
+    "gemini_messages": "vlogsrt/gemini_messages.py",
+}
 NETWORK_MODULES = ("urllib.request", "urllib.error", "http.client", "socket", "ssl")
 # ui/의 로컬 브라우저 서버는 파일마다 정해진 네트워크 모듈 하나만 쓴다(정확 경로) —
 # 인스턴스 확인(루프백 HTTP)과 빈 포트 찾기. 같은 파일의 다른 모듈은 허용하지 않는다.
 UI_NETWORK_ALLOWLIST = {"ui/instance.py": "urllib.request", "ui/service.py": "socket"}
-# 그 전송 파일을 import할 수 있는 유일한 파일 — 승인 문·관찰·취소를 건너뛰는 길이 없다.
-CLAUDE_TRANSPORT_MODULE = "anthropic_messages"
-CLAUDE_TRANSPORT_ENTRY_PATH = "vlogsrt/transcribe.py"
+# 그 전송 파일들을 import할 수 있는 유일한 파일 — 승인 문·관찰·취소를 건너뛰는 길이 없다.
+# 전송 파일끼리도 서로 import하지 않는다(한 공급자의 문이 다른 공급자의 전송을 얻지 않게).
+TRANSPORT_MODULES = tuple(NETWORK_BOUNDARY_PATHS)
+TRANSPORT_ENTRY_PATH = "vlogsrt/transcribe.py"
 SUBPROCESS_BOUNDARY_PATHS = ("vlogsrt/preprocess.py", "vlogsrt/project/xml_validation.py")
 
 # 제거 계층(규칙 4·9) — P6는 이 프로젝트에서 처음으로 구간을 실제 제거하는 계층이다.
@@ -75,7 +82,7 @@ EDIT_BANNED_IMPORTS = (
     "vlogsrt.project.vad.inference", "vlogsrt.project.vad.runtime",
     "vlogsrt.project.vision.sampling",
     "vlogsrt.repetition", "vlogsrt.repair", "vlogsrt.refine",
-    "vlogsrt.output", "vlogsrt.layout", "vlogsrt.anthropic_messages",
+    "vlogsrt.output", "vlogsrt.layout", "vlogsrt.anthropic_messages", "vlogsrt.gemini_messages",
 )  # fmt: skip
 EDIT_SAMPLE_TYPE_MODULE = "vlogsrt.project.vision.sampling"
 EDIT_SAMPLE_TYPE = "FrameSampleRequest"
@@ -250,26 +257,28 @@ def _network_imports(body: str) -> list[tuple[int, str]]:
 
 
 def check_network_boundary() -> list[str]:
-    """규칙 7(D54) — 네트워크 모듈은 정확 경로 하나에서만. 같은 이름의 다른 경로는 안 된다.
+    """규칙 7(D54·D83) — 네트워크 모듈은 정확 경로의 전송 파일에서만. 같은 이름의 다른 경로는
+    안 된다.
 
     ui/도 검사한다 — 로컬 브라우저 서버의 두 파일만 각자 정해진 모듈 하나를 쓴다
     (`UI_NETWORK_ALLOWLIST`, 정확 경로). 일괄 면제는 없다.
     """
+    boundaries = set(NETWORK_BOUNDARY_PATHS.values())
     failures = []
     for path in _sources() + sorted(UI_DIR.rglob("*.py")):
         rel = _rel(path)
-        if rel == NETWORK_BOUNDARY_PATH:
+        if rel in boundaries:
             continue
         allowed = UI_NETWORK_ALLOWLIST.get(rel)
         failures.extend(
-            f"{rel}:{lineno} 네트워크 모듈 {name}은 {NETWORK_BOUNDARY_PATH}에만"
+            f"{rel}:{lineno} 네트워크 모듈 {name}은 전송 파일({', '.join(sorted(boundaries))})에만"
             for lineno, name in _network_imports(path.read_text(encoding="utf-8"))
             if name != allowed
         )
     return failures
 
 
-def _imports_claude_transport(body: str) -> list[int]:
+def _imports_transport(body: str, module: str) -> list[int]:
     """전송 파일에 닿는 줄 — 절대·상대·모듈 핸들·하위 이름·문자열 상수·패키지 속성 전부.
 
     패키지 속성(`vlogsrt.anthropic_messages`)은 누가 한 번 import한 뒤에는 실제로 닿는다 —
@@ -286,27 +295,32 @@ def _imports_claude_transport(body: str) -> list[int]:
             parts = [node.attr]
         else:
             continue
-        if CLAUDE_TRANSPORT_MODULE in parts:
+        if module in parts:
             lines.append(node.lineno)
     lines.extend(
-        lineno
-        for lineno, name in _dynamic_import_names(tree)
-        if CLAUDE_TRANSPORT_MODULE in name.split(".")
+        lineno for lineno, name in _dynamic_import_names(tree) if module in name.split(".")
     )
     return sorted(lines)
 
 
-def check_claude_transport_entry() -> list[str]:
-    """규칙 7(D54) — Claude HTTP 전송은 transcribe.py만 안다. 승인 문을 건너뛰는 길이 없다."""
+def check_transport_entry() -> list[str]:
+    """규칙 7(D54·D83) — 공급자 HTTP 전송은 transcribe.py만 안다. 승인 문을 건너뛰는 길이 없다.
+
+    전송 파일끼리도 서로 모른다 — 제 파일만 제 이름을 쓴다.
+    """
     failures = []
     for path in _sources() + sorted(UI_DIR.rglob("*.py")):
         rel = _rel(path)
-        if rel in (CLAUDE_TRANSPORT_ENTRY_PATH, NETWORK_BOUNDARY_PATH):
+        if rel == TRANSPORT_ENTRY_PATH:
             continue
-        failures.extend(
-            f"{rel}:{lineno} {CLAUDE_TRANSPORT_MODULE}는 {CLAUDE_TRANSPORT_ENTRY_PATH}만 import한다"
-            for lineno in _imports_claude_transport(path.read_text(encoding="utf-8"))
-        )
+        body = path.read_text(encoding="utf-8")
+        for module in TRANSPORT_MODULES:
+            if rel == NETWORK_BOUNDARY_PATHS[module]:
+                continue
+            failures.extend(
+                f"{rel}:{lineno} {module}는 {TRANSPORT_ENTRY_PATH}만 import한다"
+                for lineno in _imports_transport(body, module)
+            )
     return failures
 
 
@@ -627,7 +641,7 @@ REPAIR_MUST_NOT_IMPORT = ("refine", "output", "layout", "polish", "verify")
 # 교체 판정이 다른 계층의 행동에 기대게 된다 — 입력은 값으로만 받는다.
 RETEXT_MUST_NOT_IMPORT = (
     "transcribe", "preprocess", "verify", "refine", "output", "layout", "repair", "polish",
-    "openai", "subprocess", "anthropic_messages",
+    "openai", "subprocess", "anthropic_messages", "gemini_messages",
 )  # fmt: skip
 
 # 3단 등급은 **저장된 분석 문서(AI 판정 + 생성 자막) 위의 결정적 재계산**이다(D51·D52).
@@ -635,7 +649,7 @@ RETEXT_MUST_NOT_IMPORT = (
 # 호출이나 로컬 측정으로 번진다. 문서 읽기는 `service.py`의 몫이다.
 TIERING_MUST_NOT_IMPORT = (
     "subprocess", "openai", "service", "review_workspace", "understanding_luna", "preprocess",
-    "anthropic_messages",
+    "anthropic_messages", "gemini_messages",
     # D60 — 자막 시각 확인 값은 서비스가 지금 리비전 보고서에서 만들어 **값으로** 넘긴다. 등급이
     # 확인 계층·보고서·의심 표시·원본 자막을 직접 알면 그 값의 리비전 결속이 서비스 밖으로 샌다.
     "sync_check", "sync_report", "subtitle_suspects", "source_transcript", "importlib",
@@ -818,8 +832,8 @@ REQUEST_LANES = (
 # 열쇠나 요청 경계로 번진다. 설정(`RawWorkflowConfig`·`RawCaptionContract`)도 용어집·글자 경로를
 # 모른다 — 내부 whisper 청크 열쇠가 그 설정 전체를 해시한다.
 GLOSSARY_MUST_NOT_IMPORT = (
-    "subprocess", "openai", "transcribe", "preprocess", "anthropic_messages", "caption_provider",
-    "understanding", "analysis_workflow", "source_text", "config", "service",
+    "subprocess", "openai", "transcribe", "preprocess", "anthropic_messages", "gemini_messages",
+    "caption_provider", "understanding", "analysis_workflow", "source_text", "config", "service",
 )  # fmt: skip
 CONFIG_TEXT_LANE_NAMES = re.compile(r"glossary|SourceTextSettings|SOURCE_TEXT")
 # 두 설정 클래스의 칸은 이름까지 고정이다 — 칸을 하나 더하면 엄격한 왕복이 기존 작업공간을 못 열고
@@ -1404,7 +1418,8 @@ def _class_source(body: str, class_name: str) -> str:
 # 바로 부르는 꼴만 된다 — 별명·`getattr`·다른 함수로 넘기면 승인·견적 밖에서 자막이 바뀔 길이 된다.
 SPEECH_GAPS_MODULE = "vlogsrt/project/raw/speech_gaps.py"
 SPEECH_GAPS_MUST_NOT_IMPORT = (
-    "subprocess", "openai", "anthropic_messages", "preprocess", "transcribe", "sqlite3", "service",
+    "subprocess", "openai", "anthropic_messages", "gemini_messages", "preprocess", "transcribe",
+    "sqlite3", "service",
     "workspace", "source_transcript", "sync_report", "understanding", "caption_provider",
     "analysis_workflow", "speech_refill", "tiering", "auto_cleanup", "selection_analysis",
     "segmentation", "edit", "export",
@@ -2028,7 +2043,8 @@ def _names_read_scope_open(node: ast.AST) -> bool:
 # 출력·자막 쓰기로 흐르면 「이 줄은 말이 아니다」(규칙 4)나 조용한 삭제(규칙 9)의 길이 된다.
 SUSPECTS_MODULE = "vlogsrt/project/raw/subtitle_suspects.py"
 SUSPECTS_MUST_NOT_IMPORT = (
-    "subprocess", "openai", "anthropic_messages", "preprocess", "transcribe", "sqlite3", "service",
+    "subprocess", "openai", "anthropic_messages", "gemini_messages", "preprocess", "transcribe",
+    "sqlite3", "service",
     "workspace", "source_transcript", "sync_check", "sync_report", "tiering", "auto_cleanup",
     "selection_analysis", "review_workspace",
 )  # fmt: skip
@@ -2671,7 +2687,7 @@ def check_no_hardcoded_model() -> list[str]:
 CHECKS = (
     ("openai 경계", check_openai_boundary),
     ("네트워크 모듈 경계", check_network_boundary),
-    ("Claude 전송은 transcribe만 안다", check_claude_transport_entry),
+    ("공급자 전송은 transcribe만 안다", check_transport_entry),
     ("ffmpeg 경계", check_ffmpeg_boundary),
     ("순수 계층", check_pure_layer),
     ("시각 유도 계층 부활 금지", check_time_deriving_layers_stay_buried),
