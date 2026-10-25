@@ -565,3 +565,32 @@ def test_a_run_that_crosses_the_raise_stops_before_the_next_send(
     with pytest.raises(AnalysisApprovalError, match="가격 미정"):
         luna._send_semantic(responder.client, FLASH, {"contents": []})
     assert sent == []
+
+
+def test_a_failed_window_keeps_the_providers_redacted_reason(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """실측(2026-10-25) — 인증 실패가 「API 인증 실패」 한 줄로만 남아 까닭을 몰랐다. 공급자가 말한
+    상태· 까닭·메시지(키는 가림)를 판정의 결함 문구에 붙인다."""
+    from vlogsrt.gemini_messages import GeminiAPIStatusError
+
+    env_online(monkeypatch)
+    responder = responder_for(tmp_path, gemini_client())
+    error = GeminiAPIStatusError(400, "INVALID_ARGUMENT", "API_KEY_INVALID", "API key not valid.")
+
+    def refuse(*args: Any, **kwargs: Any) -> Any:
+        raise error
+
+    monkeypatch.setattr(luna, "request_gemini_generate", refuse)
+    (first, *_rest) = responder.context.evidence_windows
+    (annotation,) = annotate_windows(
+        [first], responder, settings=SETTINGS, model=FLASH, origin="live"
+    )
+    assert annotation.status == luna.ANNOTATION_FAILED
+    assert annotation.error_code == "authentication"
+    assert "INVALID_ARGUMENT" in (annotation.defect or "")
+    assert "API key not valid" in (annotation.defect or "")
+
+
+def test_other_errors_do_not_echo_their_text() -> None:
+    assert luna._provider_detail(RuntimeError("sk-secret in a body")) == ""

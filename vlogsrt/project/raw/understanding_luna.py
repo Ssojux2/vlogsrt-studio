@@ -1204,7 +1204,7 @@ def _ask_luna(
             prompt_revision=settings.prompt_revision,
             origin=origin,
             needs_review=True,
-            defect=message,
+            defect=message + _provider_detail(exc),
             error_code=code,
             response_uncertain=uncertain,
         )
@@ -1216,6 +1216,18 @@ def _ask_luna(
         origin=origin,
         prompt_revision=settings.prompt_revision,
     )
+
+
+def _provider_detail(error: Exception) -> str:
+    """Claude·Gemini 전송의 상태 오류가 말한 사연 — 분류 문구만으로는 왜 막혔는지 모른다.
+
+    전송 경계(`anthropic_messages`·`gemini_messages`)가 만든 상태 오류만 붙인다: 그 문면은 상태
+    코드· 오류 종류·키를 가린 공급자 메시지 200자뿐이다(키·본문을 되뇌지 않는다). 실측(2026-10-25):
+    Gemini 인증 실패 90건이 「API 인증 실패」 한 줄로만 남아 키가 왜 거절됐는지 알 수 없었다.
+    """
+    if not isinstance(getattr(error, "error_type", None), str):
+        return ""
+    return f" — 공급자 응답: {error}"
 
 
 def verdicts_from_annotations(
