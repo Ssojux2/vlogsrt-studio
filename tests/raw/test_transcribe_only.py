@@ -39,7 +39,7 @@ from ui.workspace_service import (  # noqa: E402
     LIBRARY_APPROVE_LABEL,
     RawWorkspaceUi,
 )
-from vlogsrt.env import ANALYSIS_CLAUDE_KEY_ENV  # noqa: E402
+from vlogsrt.env import ANALYSIS_GEMINI_KEY_ENV  # noqa: E402
 from vlogsrt.project.raw import selection_analysis  # noqa: E402
 from vlogsrt.project.raw import service as raw  # noqa: E402
 from vlogsrt.project.raw.analysis_approval import LiveAnalysisTransport  # noqa: E402
@@ -102,7 +102,8 @@ def test_an_approval_cannot_be_replayed_in_the_other_mode(
 
 
 def _as_sonnet_without_key(ui: Any, root: Path) -> None:
-    """새 작업공간의 기본(Sonnet 5.5) — 가짜 전송에는 Claude 클라이언트가 없다(키 없음)."""
+    """새 작업공간의 기본(Gemini 3.8 Flash, D87) — 가짜 전송에는 Gemini 클라이언트가 없다(키
+    없음)."""
     workflow = ui.raw.settings(root)
     models = replace(workflow.models, luna_model=DEFAULT_ANALYSIS_MODEL)
     ui.raw.update_settings(root, replace(workflow, models=models))
@@ -122,7 +123,7 @@ def test_transcribe_only_sends_no_semantic_request_and_needs_no_claude_key(
     _as_sonnet_without_key(ui, root)
     signature = ui.current_signature()
     status = ui.library_analysis_view(signature, None, ui.library_analysis_summary())[0]
-    assert ANALYSIS_CLAUDE_KEY_ENV in status  # 전체 분석은 키가 없어 닫힌다
+    assert ANALYSIS_GEMINI_KEY_ENV in status  # 전체 분석은 키가 없어 닫힌다
     assert not sender.calls and ui._approval_jobs.get(root) is None
 
     def no_semantic(self: Any, model: str) -> object:

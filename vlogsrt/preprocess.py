@@ -4354,13 +4354,17 @@ def extract_analysis_clip(
 def _require_analysis_clip(
     staged: Path, audio_stream_index: int | None, encoding: AnalysisClipEncoding
 ) -> None:
-    """잘린 클립의 모양 — 크기 상한 안, 영상 하나, 고른 소리가 있으면 소리 하나."""
+    """잘린 클립의 모양 — 크기 상한 안, 영상 하나, 고른 소리가 있으면 소리는 많아야 하나.
+
+    소리 트랙이 영상보다 일찍 끝나는 원본에서는 그 끝 뒤의 창 클립에 소리가 없다(트랙째 빠진다) —
+    결함이 아니라 그 구간에 소리가 없는 것이다. 고르지 않은 소리가 실리면 결함이다.
+    """
     size = staged.stat().st_size
     if size > encoding.max_bytes:
         raise RuntimeError(f"분석 클립이 크기 상한을 넘는다: {size} > {encoding.max_bytes}바이트")
     probe = probe_raw_media(staged)
-    expected_audio = 0 if audio_stream_index is None else 1
-    if len(probe.audio) != expected_audio or probe.duration <= 0:
+    allowed_audio = 0 if audio_stream_index is None else 1
+    if len(probe.audio) > allowed_audio or probe.duration <= 0:
         raise RuntimeError("분석 클립의 영상·소리 모양이 조리법과 다르다")
 
 

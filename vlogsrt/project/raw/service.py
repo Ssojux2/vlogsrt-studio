@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from vlogsrt import log, preprocess
-from vlogsrt.env import ANALYSIS_CLAUDE_KEY_ENV
+from vlogsrt.env import ANALYSIS_CLAUDE_KEY_ENV, ANALYSIS_GEMINI_KEY_ENV
 from vlogsrt.project.raw import (
     analysis_workflow,
     read_scope,
@@ -80,12 +80,15 @@ from vlogsrt.project.raw.caption_workspace_types import (
 from vlogsrt.project.raw.config import (
     ANALYSIS_MODEL_CHOICES,
     ANALYSIS_PROVIDER_ANTHROPIC,
+    ANALYSIS_PROVIDER_GOOGLE,
     DEFAULT_ANALYSIS_MODEL,
+    PREVIOUS_DEFAULT_ANALYSIS_MODELS,
     WORKFLOW_SCHEMA_VERSION,
     RawWorkflowConfig,
     analysis_model_label,
     analysis_provider,
     claude_profile,
+    gemini_profile,
     official_price_model,
     text_model_label,
     validate_raw_workflow_config,
@@ -258,12 +261,14 @@ __all__ = [
     # UI는 이 모듈만 가져갈 수 있다(정확 경로 예외) — 계약 오류도 여기서 다시 낸다.
     "ACTIVE_JOB_STATUSES",
     "ANALYSIS_CLAUDE_KEY_ENV",
+    "ANALYSIS_GEMINI_KEY_ENV",
     "ANALYSIS_CONCURRENCY",
     "ANALYSIS_JOB_KIND",
     "ANALYSIS_MODEL_CHOICES",
     "ANALYSIS_MODES",
     "ANALYSIS_PHASES",
     "ANALYSIS_PROVIDER_ANTHROPIC",
+    "ANALYSIS_PROVIDER_GOOGLE",
     "ANALYSIS_ROOT",
     "ANALYSIS_SEMANTIC_JOB_KIND",
     "AnalysisApprovalError",
@@ -378,6 +383,8 @@ __all__ = [
     "capture_claude_credentials",
     "capture_gemini_credentials",
     "claude_profile",
+    "gemini_profile",
+    "official_price_model",
     "browser_network_mode",
     "caption_transport_providers",
     "content_type_for",
@@ -557,6 +564,11 @@ UPKEEP_ALIGN = "검토 순서"
 UPKEEP_COVER = "격자 맞춤"
 
 TIER_SETTINGS = tiering.TIER_SETTINGS
+
+ANALYSIS_DEFAULT_KEY = "analysis_model_default"
+"""작업공간 표지 — 영상 분석 모델을 마지막으로 옮겨 준 기본의 이름(D87, 한 번만 옮긴다)."""
+ANALYSIS_MODEL_BUSY_KINDS = (ANALYSIS_JOB_KIND, ANALYSIS_SEMANTIC_JOB_KIND)
+"""이 작업이 도는 동안에는 모델을 옮기지 않는다 — 견적이 본 모델과 실행이 갈리지 않게."""
 TIER_TAG_PREFIX = tiering.TIER_TAG_PREFIX
 TIER_LABELS = tiering.TIER_LABELS
 unmaterialized_red = tiering.unmaterialized_red
@@ -1109,6 +1121,38 @@ class RawWorkspaceService:
 
     def settings(self, root: Path) -> RawWorkflowConfig:
         return self._workspace(root).load_workflow()
+
+    def adopt_default_analysis_model(self, root: Path) -> str | None:
+        """기존 작업공간의 영상 분석 모델을 지금 기본(Gemini 3.8 Flash)으로 **한 번** 옮긴다(D87).
+
+        사용자 지시(2026-10-25): 「주로 Flash를 이용해서 처리」 — 새 작업공간과 지금 작업공간
+        모두다.
+        옮기는 것은 **예전 기본(Sonnet 5.5)에 머문 작업공간**뿐이다 — 사람이 따로 고른 Opus·Luna·
+        Gemini는 그대로 두고 표지만 남긴다. 표지(`meta`의 `analysis_model_default`)에 옮긴 기본의
+        이름을 남겨, 그 뒤 사람이 고른 모델은 다시 열어도 그대로다(기본이 또 바뀌면 그때 다시 본다).
+        분석 작업이 도는 동안에는 옮기지 않고 다음 열기에 다시 본다 — 견적이 본 모델과 실행이
+        갈리지 않게. 옮기기는 설정 하나뿐이다 — 이미 산 분석·검토 머리·자막은 그대로이고, 다시
+        분석하려면 새 견적을 보고 승인한다(유료). 옮겼으면 예전 모델 이름을 돌려준다.
+        """
+        workspace = self._workspace(root)
+        if workspace.meta_value(ANALYSIS_DEFAULT_KEY) == DEFAULT_ANALYSIS_MODEL:
+            return None
+        config = workspace.load_workflow()
+        previous = config.models.luna_model
+        moving = previous in PREVIOUS_DEFAULT_ANALYSIS_MODELS
+        if moving:
+            if self.active_jobs(workspace.root, ANALYSIS_MODEL_BUSY_KINDS):
+                return None
+            models = replace(config.models, luna_model=DEFAULT_ANALYSIS_MODEL)
+            self.update_settings(workspace.root, replace(config, models=models))
+        workspace.set_meta_value(ANALYSIS_DEFAULT_KEY, DEFAULT_ANALYSIS_MODEL)
+        if not moving:
+            return None
+        log.out(
+            f"영상 분석 모델을 {analysis_model_label(DEFAULT_ANALYSIS_MODEL)}로 옮겼다"
+            f"(예전: {previous})"
+        )
+        return previous
 
     def update_settings(self, root: Path, config: RawWorkflowConfig) -> None:
         """설정을 검증하고 저장한다 — 검증을 통과하지 못하면 아무 것도 바뀌지 않는다."""

@@ -127,6 +127,35 @@ def test_cutting_twice_gives_the_same_bytes(tmp_path: Path) -> None:
 
 
 @needs_ffmpeg
+def test_a_window_after_the_sound_ends_is_a_video_only_clip(tmp_path: Path) -> None:
+    """소리가 영상보다 일찍 끝나는 원본 — 그 뒤의 창 클립은 소리 없이 성공한다(그 구간에 소리가
+    없다)."""
+    source = tmp_path / "short-sound.mov"
+    subprocess.run(
+        [
+            "ffmpeg", "-v", "error",
+            "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=25:duration=8",
+            "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=2",
+            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", str(source),
+        ],
+        check=True,
+        capture_output=True,
+    )  # fmt: skip
+    probe = preprocess.probe_raw_media(source)
+    clip = preprocess.extract_analysis_clip(
+        source,
+        tmp_path / "late.mp4",
+        video_stream_index=probe.video.stream_index,
+        audio_stream_index=probe.audio[0].stream_index,
+        start=Fraction(5),
+        seconds=Fraction(2),
+        encoding=media_refs.clip_encoding(),
+        timeout_seconds=ANALYSIS_CLIP.timeout(Fraction(2)),
+    )
+    assert preprocess.probe_raw_media(clip).audio == ()
+
+
+@needs_ffmpeg
 def test_a_silent_source_gives_a_video_only_clip(tmp_path: Path) -> None:
     source = synthetic(tmp_path, audio=False)
     clip = cut(source, tmp_path / "clip.mp4", audio=None)

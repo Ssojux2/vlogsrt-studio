@@ -37,7 +37,7 @@ from vlogsrt.project.raw import understanding as stage1
 from vlogsrt.project.raw import understanding_luna as luna
 from vlogsrt.project.raw.analysis_config import RawUnderstandingSettings
 from vlogsrt.project.raw.analysis_workflow import source_input_fingerprint
-from vlogsrt.project.raw.config import RawWorkflowConfig
+from vlogsrt.project.raw.config import RawModelRoles, RawWorkflowConfig
 from vlogsrt.project.raw.service import _MeasuredSource, _plan_fingerprint_inputs
 
 
@@ -319,7 +319,9 @@ def test_the_raw_policy_opens_map_with_a_bounded_share_of_held_slots() -> None:
 # ── 지문·열쇠 — map만 규칙 판, 균일·snap은 W-27b 바이트 그대로 ──────────────────────
 
 SETTINGS = RawUnderstandingSettings()
-WORKFLOW = RawWorkflowConfig()
+WORKFLOW = RawWorkflowConfig(models=replace(RawModelRoles(), luna_model="claude-sonnet-5-5"))
+"""지문 고정값은 W-27b 판의 기본 설정(그때 기본 분석 모델 Sonnet 5.5, D58)으로 잰 것이다 — 기본이
+Flash로 바뀐 뒤(D87)에도 같은 입력을 쓰려고 모델을 못 박는다."""
 GRID = stage1.VideoGrid(0, Fraction(0), Fraction(1, 30), 848)
 MAPPED = replace(GRID, slot_packets=tuple(range(847)) + (846,))
 # 아래 값은 W-27b 판(이 변경 앞의 트리)에서 같은 입력으로 잰 것이다 — 균일·snap은 바이트 그대로다.

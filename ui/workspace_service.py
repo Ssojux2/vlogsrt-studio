@@ -23,7 +23,7 @@ import time
 import uuid
 from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import ROUND_CEILING, Decimal
 from fractions import Fraction
 from pathlib import Path
@@ -518,8 +518,14 @@ CLAUDE_KEY_MISSING_TEXT = (
     "{label} 분석에는 `{env}`가 필요합니다. `.env`에 키를 넣고 앱을 다시 띄우거나, "
     "API 연결에서 영상 분석 모델을 바꾸세요. 유료 호출은 시작하지 않았습니다."
 )
+"""Claude·Gemini 키가 없을 때의 안내 — 키 이름만 말하고 값은 어디에도 싣지 않는다."""
+GEMINI_PAID_KEY_NOTE = (
+    "결제를 연결한 키만 쓰세요 — 무료 등급 키는 입력(영상 클립·프레임)을 Google 제품 개선에 씁니다."
+)
+"""Gemini 키 상태 줄의 경고(D87) — 공식 가격표가 무료 등급을 「Content used to improve our
+products」로 적는다."""
 DEFAULT_MODEL_MARK = " (기본)"
-"""「영상 분석 모델」 칸에서 새 작업공간의 기본 모델(D58)에만 붙는 표시."""
+"""「영상 분석 모델」 칸에서 새 작업공간의 기본 모델(D87 — Gemini 3.8 Flash)에만 붙는 표시."""
 CENT = Decimal("0.01")
 
 
@@ -1244,14 +1250,28 @@ def _unsent(fresh: Sequence[Any], sent: Sequence[Any]) -> tuple[list[Any], list[
 def _semantic_quote_terms(model: str | None, estimates: Sequence[Any]) -> tuple[str, str]:
     """견적 문구의 (모델 이름, 비용 상한 꼬리) — Luna는 W-14 이전 문구 그대로다(D54).
 
-    Claude 상한은 공식 단가 스냅샷의 보수적 합계를 센트 단위로 올려 말한다 — 청구서가 아니다.
+    Claude·Gemini 상한은 공식 단가 스냅샷의 보수적 합계를 센트 단위로 올려 말한다 — 청구서가
+    아니다. 상한이 빠진 견적이 하나라도 있으면(Gemini 단가가 그날 유효하지 않다, D84) 합계를 말하지
+    않고 가격 미정이라 말한다 — 「$0.00」은 0원 계산이다.
     """
-    claude = raw_service.ANALYSIS_PROVIDER_ANTHROPIC
-    if model is None or raw_service.analysis_provider(model) != claude:
+    if model is None or not raw_service.official_price_model(model):
         return "Luna", ""
-    ceilings = [Decimal(e.ceiling_usd) for e in estimates if e.ceiling_usd is not None]
+    label = raw_service.analysis_model_label(model)
+    provider = _provider_word(model)
+    if any(e.ceiling_usd is None for e in estimates):
+        return (
+            label,
+            f" · {provider} 가격 미정(공식 단가 유효 기간 밖) — 이 견적은 승인할 수 없습니다",
+        )
+    ceilings = [Decimal(e.ceiling_usd) for e in estimates]
     total = sum(ceilings, Decimal(0)).quantize(CENT, rounding=ROUND_CEILING)
-    return raw_service.analysis_model_label(model), f" · Claude 비용 상한 ${total} (보수적)"
+    return label, f" · {provider} 비용 상한 ${total} (보수적)"
+
+
+def _provider_word(model: str) -> str:
+    """공급자의 화면 이름 — 견적 꼬리에만 쓴다."""
+    google = raw_service.analysis_provider(model) == raw_service.ANALYSIS_PROVIDER_GOOGLE
+    return "Gemini" if google else "Claude"
 
 
 def _analysis_model_choice_label(model: str) -> str:
@@ -1261,38 +1281,56 @@ def _analysis_model_choice_label(model: str) -> str:
 
 
 def _claude_price_suffix(model: str) -> str:
-    """설정 요약의 의미 분석 줄 꼬리 — Claude만 단가 상태를 붙인다(Luna 줄은 그대로)."""
-    if raw_service.analysis_provider(model) != raw_service.ANALYSIS_PROVIDER_ANTHROPIC:
+    """설정 요약의 의미 분석 줄 꼬리 — Claude·Gemini만 단가 상태를 붙인다(Luna 줄은 그대로)."""
+    if not raw_service.official_price_model(model):
         return ""
     return f" — {_analysis_price_status(model)}"
 
 
 def _price_status_note(model: str) -> str:
-    """화면의 단가 상태 — 달러·토큰 용어 없이 말한다(D57 결정 7, D58). 금액은 견적만 말한다."""
-    if raw_service.analysis_provider(model) != raw_service.ANALYSIS_PROVIDER_ANTHROPIC:
+    """화면의 단가 상태 — 달러·토큰 용어 없이 말한다(D57 결정 7, D58). 금액은 견적만 말한다.
+
+    Gemini 단가는 공식 표가 알린 인상 전 마지막 날까지만 쓴다(D84) — 그 뒤에는 가격 미정이다.
+    """
+    if not raw_service.official_price_model(model):
         return "단가 **미확인** — 금액 추정을 만들지 않습니다(0원으로 계산하지 않습니다)"
+    if raw_service.analysis_provider(model) == raw_service.ANALYSIS_PROVIDER_GOOGLE:
+        profile = raw_service.gemini_profile(model)
+        if date.today() > profile.price_valid_through:
+            return (
+                f"공식 단가가 {profile.price_valid_through.isoformat()}까지였습니다 —"
+                " **가격 미정**, 단가를 확인해 고칠 때까지 분석을 승인할 수 없습니다"
+            )
     return "공식 단가 확인됨 — 금액은 견적에서 보여 드립니다"
 
 
 def _analysis_price_status(model: str) -> str:
     """모델 이름을 붙인 단가 상태 한 줄 — 설정 요약·분석 설정 줄에 쓴다."""
-    if raw_service.analysis_provider(model) != raw_service.ANALYSIS_PROVIDER_ANTHROPIC:
+    if not raw_service.official_price_model(model):
         return f"Luna {_price_status_note(model)}"
     return f"{raw_service.analysis_model_label(model)} · {_price_status_note(model)}"
 
 
 def _cost_note(model: str, luna_text: str) -> str:
-    """견적 금액 문구 — Luna는 주어진 W-14 이전 문구 그대로, Claude는 공식 단가 한 줄.
+    """견적 금액 문구 — Luna는 주어진 W-14 이전 문구 그대로, Claude·Gemini는 공식 단가 한 줄.
 
     견적·승인 자리의 문구라 D54 그대로다 — 설정·상태 줄은 `_analysis_price_status`를 쓴다.
     """
-    if raw_service.analysis_provider(model) != raw_service.ANALYSIS_PROVIDER_ANTHROPIC:
+    if not raw_service.official_price_model(model):
         return luna_text
     return _quote_unit_price_text(model)
 
 
 def _quote_unit_price_text(model: str) -> str:
-    """견적 안의 Claude 공식 단가 한 줄(D54) — 견적 문구 밖에서는 쓰지 않는다(D57 결정 7)."""
+    """견적 안의 공식 단가 한 줄(D54·D87) — 견적 문구 밖에서는 쓰지 않는다(D57 결정 7)."""
+    if raw_service.analysis_provider(model) == raw_service.ANALYSIS_PROVIDER_GOOGLE:
+        gemini = raw_service.gemini_profile(model)
+        return (
+            f"{gemini.label} 공식 단가({gemini.pricing_checked_at.isoformat()} 확인,"
+            f" {gemini.price_valid_through.isoformat()}까지) 입력 ${gemini.input_per_mtok}"
+            f" · 출력(생각 포함) ${gemini.output_per_mtok} / 100만 토큰 · 창마다 클립(그림 + 소리)"
+            f" + 프레임 · 출력 한도 {gemini.max_output_tokens} 토큰 — 견적은 창마다 보수적 상한이다"
+        )
     profile = raw_service.claude_profile(model)
     return (
         f"{profile.label} 공식 단가({profile.pricing_checked_at.isoformat()}) 입력"
@@ -1682,6 +1720,7 @@ class RawWorkspaceUi:
             return f"이전 작업공간({root_text})을 열지 못했다: {error}"
         root = Path(status.workspace_root)
         self._set_root(root)
+        self._adopt_default_model(root)
         recovered = self.raw.recover_interrupted_jobs(root)
         try:
             # 복구 뒤라 돌던 만들기는 하나도 없다 — 끊긴 잔재만 남았다(D62).
@@ -3498,9 +3537,12 @@ class RawWorkspaceUi:
         return False
 
     def _claude_key_problem(self, root: Path) -> str | None:
-        """Claude를 골랐는데 키가 없으면 그 말 — 전사를 사기 전에, 작업을 띄우기 전에 닫는다."""
+        """Claude·Gemini를 골랐는데 키가 없으면 그 말 — 전사를 사기 전에, 작업을 띄우기 전에 닫는다.
+
+        이름은 D54 그대로다(Gemini도 같은 문을 지난다, D87).
+        """
         model = self.raw.settings(root).models.luna_model
-        if raw_service.analysis_provider(model) != raw_service.ANALYSIS_PROVIDER_ANTHROPIC:
+        if not raw_service.official_price_model(model):
             return None
         if self._live_transport is not None:
             try:
@@ -3508,10 +3550,13 @@ class RawWorkspaceUi:
             except raw_service.AnalysisApprovalError as error:
                 return str(error)
             return None
-        if self._startup_claude is not None:
+        google = raw_service.analysis_provider(model) == raw_service.ANALYSIS_PROVIDER_GOOGLE
+        captured = self._startup_gemini if google else self._startup_claude
+        if captured is not None:
             return None
+        env = raw_service.ANALYSIS_GEMINI_KEY_ENV if google else raw_service.ANALYSIS_CLAUDE_KEY_ENV
         return CLAUDE_KEY_MISSING_TEXT.format(
-            label=raw_service.analysis_model_label(model), env=raw_service.ANALYSIS_CLAUDE_KEY_ENV
+            label=raw_service.analysis_model_label(model), env=env
         )
 
     def capcut_fcp_import_view(
@@ -5088,8 +5133,25 @@ class RawWorkspaceUi:
         except raw_service.RawWorkspaceError as error:
             raise gr.Error(str(error)) from error
         self._remember(Path(status.workspace_root))
+        self._adopt_default_model(Path(status.workspace_root))
         self._maybe_upkeep(Path(status.workspace_root))
         return self.workspace_view_values()
+
+    def _adopt_default_model(self, root: Path) -> None:
+        """기존 작업공간의 영상 분석 모델을 기본(Gemini 3.8 Flash)으로 한 번 옮긴다(D87).
+
+        화면의 승인 확인이 도는 동안에는 옮기지 않는다(다음 열기에 다시 본다). 옮기면 견적만 다시
+        낸다 — 이미 산 분석은 그대로이고, 다시 분석하려면 새 견적을 보고 승인한다.
+        """
+        if self._analysis_busy(root):
+            return
+        try:
+            previous = self.raw.adopt_default_analysis_model(root)
+        except (raw_service.RawWorkspaceError, ValueError) as error:
+            log.warn(f"영상 분석 모델을 기본으로 옮기지 못했습니다(그대로 둡니다): {error}")
+            return
+        if previous is not None:
+            self._after_model_change(root)
 
     def create_workspace_view(self, name: str, path_text: str) -> WorkspaceView:
         """새 작업공간 만들기 이벤트 — 첫 생성(서명 None)에서도 같은 화면이 즉시 연결된다."""
@@ -7878,9 +7940,14 @@ class RawWorkspaceUi:
         )
         lines = self._semantic_estimate_table(root, estimates)
         model = estimates[0].luna_model
+        kind = (
+            raw_service.analysis_model_label(model)
+            if raw_service.official_price_model(model)
+            else "Luna"
+        )
         lines += [
             "",
-            f"- Luna 모델 `{model}` · 비용 상태 **{estimates[0].price_status}** — "
+            f"- {kind} 모델 `{model}` · 비용 상태 **{estimates[0].price_status}** — "
             + _cost_note(model, "미확인 단가는 금액을 만들지 않는다(0원 계산 금지)")
             + _semantic_quote_terms(model, estimates)[1]
             + ".",
@@ -7962,10 +8029,11 @@ class RawWorkspaceUi:
             raise gr.Error(str(error)) from error
 
     def analysis_model_choices(self) -> list[tuple[str, str]]:
-        """「영상 분석 모델」 칸의 선택지 — 기본(Claude Sonnet 5.5, D58)이 맨 앞이다.
+        """「영상 분석 모델」 칸의 선택지 — 기본(Gemini 3.8 Flash, D87)이 맨 앞이다.
 
-        「(기본)」 표시는 이 칸에만 붙는다 — 견적·상태 줄의 모델 이름은 그대로다. 기본은 새
-        작업공간의 값일 뿐이라 기존 작업공간의 저장된 모델을 옮기지 않는다. 달러는 싣지 않는다(D57).
+        「(기본)」 표시는 이 칸에만 붙는다 — 견적·상태 줄의 모델 이름은 그대로다. 기존 작업공간은
+        열 때 한 번 기본으로 옮기고(`adopt_default_analysis_model`), 그 뒤 고른 모델은 그대로다.
+        달러는 싣지 않는다(D57).
         """
         return [
             (_analysis_model_choice_label(model), model)
@@ -7987,12 +8055,23 @@ class RawWorkspaceUi:
     def analysis_model_status(self, root: Path | None = None) -> str:
         """모델·키 상태 한 줄 — 키는 이름만 말하고 값은 어디에도 싣지 않는다."""
         root = root if root is not None else self._snapshot_root()
-        env = raw_service.ANALYSIS_CLAUDE_KEY_ENV
-        key = (
-            f"Claude 키(`{env}`) 확인됨 — 값은 표시하지 않습니다."
-            if self._startup_claude is not None
-            else f"Claude 키(`{env}`) 없음 — Claude를 쓰려면 `.env`에 넣고 앱을 다시 띄우세요."
+        gemini_env, claude_env = (
+            raw_service.ANALYSIS_GEMINI_KEY_ENV,
+            raw_service.ANALYSIS_CLAUDE_KEY_ENV,
         )
+        gemini = (
+            f"Gemini 키(`{gemini_env}`) 확인됨 — 값은 표시하지 않습니다. {GEMINI_PAID_KEY_NOTE}"
+            if self._startup_gemini is not None
+            else f"Gemini 키(`{gemini_env}`) 없음 — Gemini를 쓰려면 `.env`에 넣고 앱을 다시"
+            f" 띄우세요. {GEMINI_PAID_KEY_NOTE}"
+        )
+        claude = (
+            f"Claude 키(`{claude_env}`) 확인됨 — 값은 표시하지 않습니다."
+            if self._startup_claude is not None
+            else f"Claude 키(`{claude_env}`) 없음 — Claude를 쓰려면 `.env`에 넣고 앱을 다시"
+            " 띄우세요."
+        )
+        key = f"{gemini}\n\n{claude}"
         if root is None:
             return key
         model = self.raw.settings(root).models.luna_model

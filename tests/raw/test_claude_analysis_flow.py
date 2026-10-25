@@ -172,11 +172,12 @@ def make_server(
     opener: ClaudeOpener | None,
     auto_approve: bool = True,
     model: str | None = LUNA,
+    gemini_clients: dict[str, Any] | None = None,
 ) -> tuple[RawWorkspaceUi, _CountingSender, LunaClient]:
     """가짜 전송의 작업대 — `model`이 있으면 그 모델로 저장된 기존 작업공간처럼 시작한다.
 
-    기본은 W-18 이전에 만든 Luna 작업공간이다. `model=None`은 새 작업공간의 기본(Sonnet 5.5)
-    그대로다.
+    기본은 W-18 이전에 만든 Luna 작업공간이다. `model=None`은 새 작업공간의 기본(Gemini 3.8 Flash,
+    D87) 그대로다 — 그때는 `gemini_clients`(가짜 전송을 단 Gemini 클라이언트)를 함께 준다.
     """
     monkeypatch.setattr("vlogsrt.env.is_offline", lambda: False)
     sender = _CountingSender([{"start": 0.5, "end": 1.5, "text": "합성 영상입니다."}])
@@ -191,6 +192,7 @@ def make_server(
             asr_approvals=lambda *a: {},
             luna_approvals=lambda *a: {},
             claude_clients=claude_clients(opener),
+            gemini_clients=gemini_clients or {},
         ),
     )
     server.create_workspace_view("Claude 분석 흐름", str(tmp_path / "workspace"))
@@ -264,14 +266,17 @@ def test_a_claude_selection_buys_asr_once_and_prices_every_claude_call(
 
 
 @needs_ffmpeg
-def test_a_new_workspace_analyzes_with_sonnet_without_choosing_and_prices_at_sonnet_rates(
+def test_a_sonnet_workspace_analyzes_with_sonnet_and_prices_at_sonnet_rates(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """W-18(D58) — 새 작업공간은 고르지 않아도 Sonnet 5.5로 판정하고 Sonnet 단가로 값을 매긴다."""
+    """W-18(D58) — Sonnet 5.5 작업공간은 Sonnet으로 판정하고 Sonnet 단가로 값을 매긴다.
+
+    D87부터 새 작업공간의 기본은 Gemini 3.8 Flash다 — 이 시험은 Sonnet을 고른 작업공간으로 연다.
+    """
     source = tmp_path / "scene.mov"
     _make_media(source, audio=True, seconds="32")
     opener = ClaudeOpener()
-    server, sender, luna = make_server(tmp_path, monkeypatch, source, opener=opener, model=None)
+    server, sender, luna = make_server(tmp_path, monkeypatch, source, opener=opener, model=SONNET)
     root = server.workspace_root()
     assert server.raw.settings(root).models.luna_model == SONNET
     server.capcut_choose_view(server.current_signature())
@@ -306,7 +311,7 @@ def test_a_sonnet_judgment_stores_its_visual_issues_in_the_document(
     source = tmp_path / "scene.mov"
     _make_media(source, audio=True, seconds="32")
     opener = ClaudeOpener()
-    server, _sender, _luna = make_server(tmp_path, monkeypatch, source, opener=opener, model=None)
+    server, _sender, _luna = make_server(tmp_path, monkeypatch, source, opener=opener, model=SONNET)
     server.capcut_choose_view(server.current_signature())
     state = settle(server)
     assert state["stage"] == DONE, state

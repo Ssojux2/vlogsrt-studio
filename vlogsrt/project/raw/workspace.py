@@ -910,6 +910,17 @@ class RawWorkspace:
             row = connection.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
         return None if row is None else str(row[0])
 
+    def set_meta_value(self, key: str, value: str) -> None:
+        """작업공간 표지 하나를 쓴다(있으면 갈아끼운다) — 설정·지문 밖의 기록이다."""
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                "INSERT INTO meta (key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (key, value),
+            )
+            connection.commit()
+
     # ── 연결 ───────────────────────────────────────────────────
 
     @contextmanager

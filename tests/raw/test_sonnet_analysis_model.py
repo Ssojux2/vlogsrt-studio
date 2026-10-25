@@ -138,22 +138,24 @@ def test_the_sonnet_window_ceiling_is_about_sixteen_cents() -> None:
 # ─────────────────────────────────────────────────────────────
 
 
-def test_the_default_analysis_model_is_sonnet_and_comes_first() -> None:
-    assert RawModelRoles().luna_model == DEFAULT_ANALYSIS_MODEL == SONNET
-    assert ANALYSIS_MODEL_CHOICES == (SONNET, OPUS, LUNA)
+def test_sonnet_stays_selectable_after_flash_became_the_default() -> None:
+    """D87 — 기본은 Gemini 3.8 Flash로 바뀌었고 Sonnet 5.5는 셋째로 그대로 고른다."""
+    assert RawModelRoles().luna_model == DEFAULT_ANALYSIS_MODEL == "gemini-3.8-flash"
+    assert ANALYSIS_MODEL_CHOICES == ("gemini-3.8-flash", "gemini-4-argon", SONNET, OPUS, LUNA)
     assert OPENAI_LUNA_MODEL == LUNA
     assert tuple(CLAUDE_ANALYSIS_PROFILES) == (SONNET, OPUS)
     validate_raw_workflow_config(RawWorkflowConfig())
     assert analysis_provider(SONNET) == ANALYSIS_PROVIDER_ANTHROPIC
     assert analysis_model_label(SONNET) == "Claude Sonnet 5.5"
-    for model in ANALYSIS_MODEL_CHOICES:  # 셋 다 그대로 고를 수 있다
+    for model in ANALYSIS_MODEL_CHOICES:  # 다섯 다 그대로 고를 수 있다
         chosen = replace(RawWorkflowConfig(), models=replace(RawModelRoles(), luna_model=model))
         validate_raw_workflow_config(chosen)
 
 
-def test_a_new_workspace_starts_on_sonnet(tmp_path: Path) -> None:
+def test_a_new_workspace_starts_on_flash_not_sonnet(tmp_path: Path) -> None:
+    """D87 — 새 작업공간은 Flash로 시작한다(D58의 Sonnet 기본을 바꿨다)."""
     workspace = RawWorkspace.create(tmp_path / "new", "새 작업공간")
-    assert workspace.load_workflow().models.luna_model == SONNET
+    assert workspace.load_workflow().models.luna_model == "gemini-3.8-flash"
 
 
 # ─────────────────────────────────────────────────────────────

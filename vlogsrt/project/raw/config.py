@@ -73,14 +73,15 @@ class RawModelRoles:
     프레임·전사 증거의 의미 해석만 맡는다. 한 모델이 두 역할을 겹치는 순간
     "시각 없는 문구에 가짜 시각"이 생긴다 — 검증이 그 조합을 막는다.
 
-    의미 분석(`luna_model` — 칸 이름은 저장 형식이라 그대로다)의 기본은 Claude Sonnet
-    5.5다(D58). 이 값은 **새 작업공간**에만 쓰인다 — 기존 작업공간은 저장된 모델을 엄격하게
-    읽고 빠진 칸을 기본으로 메우지 않으므로, 다시 분석(유료)할 모델은 사람이 고른다.
+    의미 분석(`luna_model` — 칸 이름은 저장 형식이라 그대로다)의 기본은 Gemini 3.8 Flash다(D87 —
+    사용자 지시 2026-10-25 「주로 Flash를 이용해서 처리」, 그 전에는 Claude Sonnet 5.5, D58). 새
+    작업공간은 이 값으로 만들어지고, 기존 작업공간은 열 때 한 번 이 값으로 옮긴다
+    (`RawWorkspaceService.adopt_default_analysis_model`) — 그 뒤 사람이 고른 모델은 그대로다.
     """
 
     text_model: str = "gpt-transcribe"
     timing_model: str = "whisper-1"
-    luna_model: str = "claude-sonnet-5-5"
+    luna_model: str = "gemini-3.8-flash"
 
 
 @dataclass(frozen=True)
@@ -638,20 +639,23 @@ GEMINI_ANALYSIS_PROFILES: Mapping[str, RawGeminiAnalysisProfile] = MappingProxyT
 """모델 이름 → 프로파일(읽기 전용). 클라이언트·단가·상한은 언제나 고른 모델의 프로파일에서 온다."""
 
 DEFAULT_ANALYSIS_MODEL: str = RawModelRoles().luna_model
+PREVIOUS_DEFAULT_ANALYSIS_MODELS = frozenset({CLAUDE_SONNET_ANALYSIS_PROFILE.model})
+"""열 때 기본으로 옮겨 줄 예전 기본(D58의 Sonnet 5.5) — 사람이 따로 고른 모델(Opus·Luna·Gemini)은
+옮기지 않는다(D87)."""
 """새 작업공간의 의미 분석 모델 — Claude Sonnet 5.5(D58). 기존 작업공간은 저장된 값을 쓴다."""
 
 ANALYSIS_MODEL_CHOICES: tuple[str, ...] = (
     DEFAULT_ANALYSIS_MODEL,
     *(
         model
-        for model in (*CLAUDE_ANALYSIS_PROFILES, OPENAI_LUNA_MODEL)
+        for model in (*GEMINI_ANALYSIS_PROFILES, *CLAUDE_ANALYSIS_PROFILES, OPENAI_LUNA_MODEL)
         if model != DEFAULT_ANALYSIS_MODEL
     ),
 )
-"""고를 수 있는 의미 분석 모델 — 기본(Sonnet 5.5)이 맨 앞, 그다음 Opus 5.5, gpt-6-luna.
+"""고를 수 있는 의미 분석 모델 — 기본(Gemini 3.8 Flash, D87)이 맨 앞, 그다음 Gemini 4 Argon, Claude
+Sonnet 5.5, Claude Opus 5.5, gpt-6-luna.
 
-기본이 바뀐 것은 새 작업공간뿐이다(D58) — 고르지 않은 기존 작업공간의 모델은 조용히 바뀌지
-않는다(다시 분석하면 유료다)."""
+모델을 바꿔도 이미 산 분석은 그대로 남는다 — 다시 분석하려면 새 견적을 보고 승인한다(유료)."""
 
 
 def analysis_provider(model: str) -> str:

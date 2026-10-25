@@ -6,8 +6,9 @@
 어디에도 싣지 않는다. 모델을 바꾸는 것은 사람의 검토 편집이 아니다 — 검토 머리·영상 순서가
 움직이지 않는다(D53).
 
-W-18(D58)부터 새 작업공간의 기본은 Claude Sonnet 5.5이고 칸 맨 앞에 「(기본)」으로 보인다. Luna에서
-출발하는 시험은 W-18 이전에 만든 작업공간처럼 Luna를 저장한 채 연다(`bare_server`·`make_server`).
+W-30d(D87)부터 새 작업공간의 기본은 Gemini 3.8 Flash이고 칸 맨 앞에 「(기본)」으로 보인다(그 전에는
+Claude Sonnet 5.5, D58). Luna에서 출발하는 시험은 Luna를 저장한 기존 작업공간처럼
+연다(`bare_server`· `make_server`) — 사람이 고른 Luna는 열어도 옮기지 않는다.
 """
 
 from __future__ import annotations
@@ -40,6 +41,7 @@ from vlogsrt.project.raw.analysis_store import AnalysisStore
 needs_ffmpeg = pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg required")
 
 SECRET = "sk-ant-synthetic-never-shown"
+FLASH = "gemini-3.8-flash"
 
 
 def bare_server(tmp_path: Path, model: str | None = LUNA) -> RawWorkspaceUi:
@@ -61,9 +63,11 @@ def model_of(server: RawWorkspaceUi) -> str:
 
 def test_the_dropdown_switches_the_workspace_model_and_back(tmp_path: Path) -> None:
     server = bare_server(tmp_path)
-    # W-18(D58): 기본(Sonnet 5.5)이 맨 앞에 「(기본)」으로, Opus 5.5·gpt-6-luna는 그대로 고른다
+    # W-30d(D87): 기본(Gemini 3.8 Flash)이 맨 앞에 「(기본)」으로, 나머지는 그대로 고른다
     assert server.analysis_model_choices() == [
-        ("Claude Sonnet 5.5 (기본)", SONNET),
+        ("Gemini 3.8 Flash (기본)", FLASH),
+        ("Gemini 4 Argon", "gemini-4-argon"),
+        ("Claude Sonnet 5.5", SONNET),
         ("Claude Opus 5.5", CLAUDE),
         (LUNA, LUNA),
     ]
@@ -74,17 +78,18 @@ def test_the_dropdown_switches_the_workspace_model_and_back(tmp_path: Path) -> N
     assert model_of(server) == LUNA and dropdown.value == LUNA
 
 
-def test_a_new_workspace_shows_sonnet_as_the_default_without_a_price(tmp_path: Path) -> None:
-    """새 작업공간은 Sonnet 5.5로 시작한다 — 「(기본)」은 선택지에만, 달러는 선택지에 없다(D57)."""
+def test_a_new_workspace_shows_flash_as_the_default_without_a_price(tmp_path: Path) -> None:
+    """새 작업공간은 Gemini 3.8 Flash로 시작한다(D87) — 「(기본)」은 선택지에만, 달러는 선택지에
+    없다."""
     server = bare_server(tmp_path, model=None)
-    assert model_of(server) == SONNET
+    assert model_of(server) == FLASH
     dropdown, status = server.analysis_model_controls()
-    assert dropdown.value == SONNET
+    assert dropdown.value == FLASH
     labels = [label for label, _ in server.analysis_model_choices()]
-    assert labels[0] == "Claude Sonnet 5.5 (기본)"
+    assert labels[0] == "Gemini 3.8 Flash (기본)"
     assert sum("(기본)" in label for label in labels) == 1
     assert not any("$" in label for label in labels)
-    assert "Claude Sonnet 5.5" in status and "(기본)" not in status
+    assert "Gemini 3.8 Flash" in status and "(기본)" not in status
     # 상태 줄도 달러·토큰 용어 없이 단가 상태만 말한다 — 금액은 견적이 말한다(D57 결정 7, D58)
     assert "공식 단가 확인됨" in status and "견적에서 보여 드립니다" in status
     assert not any(word in status for word in PRICE_WORDS), status
@@ -108,18 +113,22 @@ def test_no_screen_text_outside_quotes_shows_a_unit_price(tmp_path: Path, model:
     )
     for text in texts:
         assert not any(word in text for word in PRICE_WORDS), text
-    claude = raw_service.analysis_provider(model) == raw_service.ANALYSIS_PROVIDER_ANTHROPIC
-    expected = "공식 단가 확인됨" if claude else "단가 **미확인**"
+    official = raw_service.official_price_model(model)
+    expected = "공식 단가 확인됨" if official else "단가 **미확인**"
     assert all(expected in text for text in (texts[0], texts[2]))
 
 
 def test_switching_workspaces_refreshes_the_model_chooser(tmp_path: Path) -> None:
-    """작업공간을 바꾸면 칸도 그 작업공간의 모델을 보인다 — Luna 작업공간이 Sonnet으로 안 보인다."""
+    """작업공간을 바꾸면 칸도 그 작업공간의 모델을 보인다 — Luna 작업공간이 Flash로 안 보인다.
+
+    사람이 고른 Luna는 열어도 옮기지 않는다 — 옮기는 것은 예전 기본(Sonnet)에 머문
+    작업공간뿐이다(D87).
+    """
     server = bare_server(tmp_path)  # Luna를 저장한 기존 작업공간
     luna_root = server.workspace_root()
     server.create_workspace_view("새 작업공간", str(tmp_path / "fresh"))
     dropdown, status = server.analysis_model_controls()
-    assert dropdown.value == SONNET and "Claude Sonnet 5.5" in status
+    assert dropdown.value == FLASH and "Gemini 3.8 Flash" in status
     server.open_workspace_view(str(luna_root))
     dropdown, status = server.analysis_model_controls()
     assert dropdown.value == LUNA and "gpt-6-luna" in status
@@ -245,7 +254,13 @@ def test_the_api_panel_carries_the_model_dropdown_and_never_the_key(
     by_id = {getattr(block, "elem_id", None): block for block in app.blocks.values()}
     dropdown, status = by_id["analysis-model"], by_id["analysis-model-status"]
     assert isinstance(dropdown, gr.Dropdown) and dropdown.label == "영상 분석 모델"
-    assert [value for _, value in dropdown.choices] == [SONNET, CLAUDE, LUNA]
+    assert [value for _, value in dropdown.choices] == [
+        FLASH,
+        "gemini-4-argon",
+        SONNET,
+        CLAUDE,
+        LUNA,
+    ]
     assert dropdown.value == LUNA  # 저장된 모델 그대로 — 기본으로 옮기지 않는다
     assert dropdown.parent.parent is by_id["quick-api-panel"]  # gradio가 입력 칸을 Form으로 감싼다
     assert "확인됨" in str(status.value)

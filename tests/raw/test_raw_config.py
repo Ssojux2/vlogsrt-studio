@@ -32,7 +32,7 @@ def test_defaults_match_the_2026_10_02_plan() -> None:
     assert config.models.text_model == "gpt-transcribe"
     assert config.models.timing_model == "whisper-1"
     # W-18(D58): 새 작업공간의 의미 분석 기본은 Claude Sonnet 5.5다 — 나머지는 2026-10-02 그대로
-    assert config.models.luna_model == "claude-sonnet-5-5"
+    assert config.models.luna_model == "gemini-3.8-flash"  # D87(그 전 D58은 Sonnet 5.5)
     assert config.registry.revision == "openai-caption-2026-10-02-v1"
     assert config.registry.docs_checked_at == date(2026, 10, 2)
     assert config.registry.account_access_status == "unverified"
@@ -549,8 +549,14 @@ def test_provider_resolution_and_choices() -> None:
         claude_profile,
     )
 
-    # W-18(D58): 기본(Sonnet 5.5)이 맨 앞, Opus 5.5와 gpt-6-luna도 그대로 고를 수 있다
-    assert ANALYSIS_MODEL_CHOICES == ("claude-sonnet-5-5", "claude-opus-5-5", "gpt-6-luna")
+    # W-30d(D87): 기본(Gemini 3.8 Flash)이 맨 앞, Argon·Sonnet·Opus·gpt-6-luna도 그대로 고른다
+    assert ANALYSIS_MODEL_CHOICES == (
+        "gemini-3.8-flash",
+        "gemini-4-argon",
+        "claude-sonnet-5-5",
+        "claude-opus-5-5",
+        "gpt-6-luna",
+    )
     assert analysis_provider("gpt-6-luna") == ANALYSIS_PROVIDER_OPENAI == "openai"
     assert analysis_provider("claude-opus-5-5") == ANALYSIS_PROVIDER_ANTHROPIC == "anthropic"
     assert analysis_model_label("claude-opus-5-5") == "Claude Opus 5.5"
@@ -590,7 +596,7 @@ def test_the_default_workflow_json_is_byte_identical_with_no_new_keys() -> None:
     payload = raw_workflow_config_to_json(RawWorkflowConfig())
     luna_line = '"luna_model": "gpt-6-luna"'
     assert ACCEPTED_SETTINGS_JSON.count(luna_line) == 1
-    assert payload == ACCEPTED_SETTINGS_JSON.replace(luna_line, '"luna_model": "claude-sonnet-5-5"')
+    assert payload == ACCEPTED_SETTINGS_JSON.replace(luna_line, '"luna_model": "gemini-3.8-flash"')
     assert "anthropic" not in payload.lower()
 
 
