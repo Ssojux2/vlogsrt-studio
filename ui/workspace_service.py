@@ -380,20 +380,17 @@ FINALCUT_SEND_LABEL = "Final Cut으로 보내기"
 """원본 전체를 태그 달린 타임라인 하나로 쓰고 Final Cut에 건넨다(D56) — 옛 두 단계를 대신한다."""
 FINALCUT_SEND_JOB_KIND = "finalcut_send"
 FINALCUT_SRT_SEND_LABEL = "SRT로 Final Cut 보내기"
-"""고른 SRT의 줄마다 Final Cut 타이틀(Basic Title)을 단 타이틀만 있는 프로젝트를 쓰고 Final Cut에
-건넨다(D90) — 사람이 타이틀을 모두 복사해 편집 프로젝트에 붙이고 디자인을 한꺼번에 바꾼다."""
+"""원본 전체 타임라인(「Final Cut으로 보내기」와 같은 영상·컷·키워드)에 원본 자막 대신 고른 SRT의
+줄마다 Final Cut 타이틀(Basic Title)을 클립 위에 달아 Final Cut에 건넨다(D91)."""
 FINALCUT_SRT_FINGERPRINT_PREFIX = f"{FINALCUT_SEND_JOB_KIND}:srt:"
 """SRT로 보내는 작업의 입력 지문 머리 — 뒤는 고른 SRT 경로다(「실패 재시도」가 같은 파일로 다시
 건다)."""
 FINALCUT_SRT_STARTED_TEXT = (
-    "`{name}`의 줄을 Final Cut 타이틀(Basic Title)로 만들어 보냅니다 — 타이틀만 있는 새"
-    " 프로젝트로 들어가니 Final Cut에서 모두 복사해 편집 프로젝트에 붙이세요."
+    "원본 전체를 촬영 시각 순 타임라인으로 만들고, 원본 자막 대신 `{name}`의 줄을 Basic Title"
+    " 타이틀로 클립 위에 달아 Final Cut으로 보냅니다 — SRT 시각은 타임라인 처음(0초)부터입니다."
 )
-FINALCUT_TITLES_SENDING_TEXT = "**Final Cut으로 보내는 중** · SRT의 줄을 타이틀로 만듭니다."
-FINALCUT_TITLES_PASTE_TEXT = (
-    "Final Cut에서 새 이벤트의 프로젝트를 열고 ⌘A·⌘C로 타이틀을 모두 복사한 뒤, 편집 중인"
-    " 프로젝트의 처음(0초)에 재생헤드를 두고 ⌘V로 붙이세요. 붙인 타이틀을 모두 골라 글꼴·크기를"
-    " 바꾸거나 다른 타이틀로 바꿀 수 있습니다."
+FINALCUT_TITLES_SENDING_TEXT = (
+    "**Final Cut으로 보내는 중** · 원본 전체를 타임라인 하나로 쓰고 SRT의 줄을 타이틀로 답니다."
 )
 FINALCUT_SRT_CANCELLED_TEXT = "취소 — SRT를 고르지 않아 보내지 않았습니다."
 OLD_SELECTED_CUTS_JOB_KIND = "capcut_export"
@@ -1362,8 +1359,6 @@ def _finalcut_sent_text(sent: dict[str, Any]) -> str:
     if "error" in sent:
         text = f"**Final Cut으로 보내지 못했습니다** · {sent['error']}"
         return text + ("\n\n" + FINALCUT_VFR_NOTE if "VFR" in sent["error"] else "")
-    if "titles" in sent:
-        return _titles_sent_text(sent)
     counts = sent["counts"]
     # 보낸 파일 하나의 사실로 말한다 — 「… 미검토 제외 제안 N개 …」 나열은 활동 칸에 남아 0개 남은
     # 대기열 곁에서 지금의 수처럼 읽혔다(D57 C 고침 4).
@@ -1386,7 +1381,7 @@ def _finalcut_sent_text(sent: dict[str, Any]) -> str:
             "\n\n`자막 시각 확인 필요` 키워드는 달지 못해 키워드 없이 보냈습니다"
             f" — {sent['caption_timing_error']} (로그 참고)"
         )
-    for line in (_conformed_rate_line(counts), _tail_trimmed_line(counts)):
+    for line in (_titles_line(sent), _conformed_rate_line(counts), _tail_trimmed_line(counts)):
         text += "\n\n" + line if line else ""
     unsupported = list(sent.get("unsupported") or ())
     if unsupported:
@@ -1436,45 +1431,41 @@ def _conformed_rate_line(counts: Mapping[str, Any]) -> str:
 
 
 def _send_title_facts(report: Mapping[str, Any]) -> dict[str, Any]:
-    """타이틀 보내기(D90)의 리포트에서 화면이 말할 것 — SRT 이름·센 수·포맷과 그 출처."""
-    counts, fmt = report["counts"], report["format"]
+    """SRT 타이틀(D91)의 리포트 칸에서 화면이 말할 것 — SRT 이름·템플릿·센 수."""
+    section = report["titles"]
+    counts = section["counts"]
+    keys = ("placed", "empty", "outside", "tails", "trimmed", "stacked", "widened", "disabled")
     return {
-        "srt": report["srt"]["name"],
-        "effect": report["effect"]["name"],
-        "format": f"{fmt['width']}×{fmt['height']} {fmt['frame_rate']}fps",
-        "format_file": fmt["file"],
-        "duration_seconds": counts["duration_seconds"],
-        **{
-            key: counts[key]
-            for key in ("placed", "empty", "trimmed", "stacked", "widened", "line_issues")
-        },
+        "srt": section["srt"]["name"],
+        "effect": section["effect"]["name"],
+        **{key: counts[key] for key in (*keys, "line_issues")},
     }
 
 
-def _titles_sent_text(sent: Mapping[str, Any]) -> str:
-    """타이틀 보내기의 결과 — 고치지 않고 센 것은 0이 아닐 때만 수로 말하고, 붙이는 법을 말한다."""
-    titles = sent["titles"]
-    origin = (
-        f"지난 보내기 `{titles['format_file']}`의 포맷"
-        if titles["format_file"]
-        else "기본 포맷 — 작업대에서 「Final Cut으로 보내기」를 한 번 하면 그 포맷을 따릅니다"
-    )
+def _titles_line(sent: Mapping[str, Any]) -> str:
+    """SRT 타이틀 한 단락 — 고치지 않고 센 것은 0이 아닐 때만 수로 말한다."""
+    titles = sent.get("titles")
+    if not titles:
+        return ""
     text = (
-        f"**Final Cut으로 보냈습니다** · 보낸 파일 `{Path(sent['path']).name}`:"
-        f" `{titles['srt']}`의 줄 {titles['placed']}개를 「{titles['effect']}」 타이틀로"
-        f" (길이 {_seconds_text(titles['duration_seconds'])}초 · {titles['format']} — {origin})."
+        f"자막은 원본 자막 대신 `{titles['srt']}`의 줄 {titles['placed']}개를"
+        f" 「{titles['effect']}」 타이틀로 클립 위에 달았습니다 — 타이틀을 모두 골라 글꼴·크기를"
+        " 바꾸거나 다른 타이틀로 바꿀 수 있습니다."
     )
     notes = [
+        (titles["outside"], "타임라인 밖이라 싣지 않은 줄"),
+        (titles["tails"], "타임라인 끝에서 자른 줄"),
         (titles["trimmed"], "겹쳐서 끝을 줄인 줄"),
         (titles["stacked"], "같은 프레임에서 시작해 위 레인으로 올라갈 줄"),
         (titles["widened"], "1프레임으로 늘린 줄"),
+        (titles["disabled"], "꺼진 클립 위라 함께 꺼진 타이틀"),
         (titles["empty"], "빈 줄"),
         (titles["line_issues"], "두 줄을 넘는 줄"),
     ]
     counted = [f"{label} {count}개" for count, label in notes if count]
     if counted:
         text += " " + " · ".join(counted) + "(글은 고치지 않았습니다)."
-    return text + "\n\n" + FINALCUT_TITLES_PASTE_TEXT
+    return text
 
 
 def _seconds_text(value: str) -> str:
@@ -4124,9 +4115,9 @@ class RawWorkspaceUi:
         return FINALCUT_SEND_STARTED_TEXT
 
     def finalcut_srt_send_view(self, signature: str | None) -> str:
-        """「SRT로 Final Cut 보내기」 — 고른 SRT의 줄마다 Basic Title 타이틀을 단 타이틀만 있는
-        프로젝트를 쓴다(D90). 고르기는 네이티브 선택기뿐이고(직접 입력 없음), 취소는 아무것도
-        보내지 않는다."""
+        """「SRT로 Final Cut 보내기」 — 원본 전체 타임라인에 원본 자막 대신 고른 SRT의 줄마다
+        Basic Title 타이틀을 단다(D91). 고르기는 네이티브 선택기뿐이고(직접 입력 없음), 취소는
+        아무것도 보내지 않는다."""
         closed = self._library_first_reply()
         if closed is not None:
             return closed
@@ -4141,7 +4132,7 @@ class RawWorkspaceUi:
         return FINALCUT_SRT_STARTED_TEXT.format(name=srt.name)
 
     def _retry_finalcut(self, signature: str | None, job: Any) -> str:
-        """실패한 보내기를 같은 모양으로 — SRT로 보낸 것은 같은 SRT 파일로 다시 건다(D90)."""
+        """실패한 보내기를 같은 모양으로 — SRT로 보낸 것은 같은 SRT 파일로 다시 건다(D91)."""
         fingerprint = str(job.input_fingerprint)
         if not fingerprint.startswith(FINALCUT_SRT_FINGERPRINT_PREFIX):
             return self.finalcut_send_view(signature)
@@ -4155,7 +4146,7 @@ class RawWorkspaceUi:
         return FINALCUT_SRT_STARTED_TEXT.format(name=srt.name)
 
     def _send_finalcut(self, signature: str | None, srt: Path | None) -> None:
-        """보내기 작업 하나를 건다 — `srt`면 그 SRT의 줄로 타이틀만 있는 프로젝트를(D90)."""
+        """보내기 작업 하나를 건다 — `srt`면 원본 자막 대신 그 SRT의 줄을 타이틀로(D91)."""
         root = self._require_current_selection(signature)
         opener = self._finalcut_opener or self._system_finalcut_open
 
@@ -4185,20 +4176,20 @@ class RawWorkspaceUi:
     def _write_finalcut(
         self, root: Path, context: Any, srt: Path | None
     ) -> tuple[Path, dict[str, Any]]:
-        """쓰고 리포트에서 화면이 기억할 결과를 고른다 — 타이틀 보내기는 원본 자막을 싣지 않으니
-        원본 자막의 빈 곳을 말하지 않는다."""
+        """쓰고 리포트에서 화면이 기억할 결과를 고른다 — SRT 타이틀로 보낸 타임라인은 원본 자막을
+        싣지 않으니 원본 자막의 빈 곳 대신 타이틀의 센 수를 말한다(D91)."""
         if srt is not None:
-            path = self.raw.export_finalcut_titles(root, srt)
-            report = json.loads(path.with_suffix(".json").read_text(encoding="utf-8"))
-            return path, {"path": str(path), "titles": _send_title_facts(report)}
-        path = self.raw.export_finalcut_timeline(root, context)
+            path = self.raw.export_finalcut_titles(root, srt, context)
+        else:
+            path = self.raw.export_finalcut_timeline(root, context)
         report = json.loads(path.with_suffix(".json").read_text(encoding="utf-8"))
         return path, {
             "path": str(path),
             "counts": report["counts"],
             "not_exported": len(report["not_exported"]),
             "caption_timing_error": report.get("sync_check", {}).get("error"),
-            **_send_caption_facts(report),
+            **(_send_caption_facts(report) if srt is None else {}),
+            **({} if srt is None else {"titles": _send_title_facts(report)}),
             **_send_unsupported_facts(report),
         }
 
@@ -4224,12 +4215,10 @@ class RawWorkspaceUi:
         sent = self._finished_send(signature)
         if sent is None:
             return
-        if "titles" in sent:
-            _toast("info", f"Final Cut으로 보냈습니다. 타이틀 {sent['titles']['placed']}개.")
-            return
         if "path" in sent:
             sources, clips = sent["counts"]["sources"], sent["counts"]["spine_clips"]
-            _toast("info", f"Final Cut으로 보냈습니다. 원본 {sources}개 · 클립 {clips}개.")
+            titled = f" · 타이틀 {sent['titles']['placed']}개" if "titles" in sent else ""
+            _toast("info", f"Final Cut으로 보냈습니다. 원본 {sources}개 · 클립 {clips}개{titled}.")
             return
         raise _error(_send_failure_text(str(sent["error"])))
 

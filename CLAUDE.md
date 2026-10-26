@@ -40,10 +40,9 @@
 → 사용/제외를 검토하고 → **전체 타임라인 하나**(모든 원본·촬영 시각 순·
 검토 경계에서 자르고 등급 키워드·자막을 단다, 사람이 확정한 제외와 사람이 보지 않은 빨강(제외 제안 — 미검토 자동 제외 또는 제안된 적 없이 사람 결정이 없는 조각)만 끈다(D80·D82) — 켠 비추천 클립(보통·판정 보류) 안에 묻힌 3초 이상의
 추천 범위에도 「추천」 키워드 범위를 하나씩 더 단다, D60 20b-final)로 Final Cut에 보낸다(D56).
-「SRT로 Final Cut 보내기」는 고른 SRT(타임라인 시각, 0초 = 시퀀스 처음)의 줄마다 Basic Title 타이틀을 단 **타이틀만 있는
-프로젝트**(스파인은 빈 gap 하나 · 레인 1 · 포맷은 마지막 타임라인 보내기의 시퀀스 포맷, 없으면 `FINALCUT_TITLES.default_format`)를
-새로 쓴다 — 원본은 조사하지 않고, 겹친 줄은 다음 줄 시작에서 끝을 줄이고 센다(한 레인에 두 클립을 둘 수 없다), 빈 줄·두 줄 넘는
-줄은 고치지 않고 센다. 사람은 Final Cut에서 타이틀을 모두 복사해 편집 프로젝트에 붙인다(D90, D89 캡션 모드를 대체).
+「SRT로 Final Cut 보내기」는 위와 같은 전체 타임라인에 원본 자막 캡션 대신 고른 SRT(타임라인 시각, 0초 = 시퀀스 처음)의 줄마다
+Basic Title 타이틀을 그 줄이 시작하는 스파인 클립에 레인 1로 붙여 보낸다(컷을 넘어도 한 타이틀 · 꺼진 클립 위는 함께 꺼짐) —
+겹친 줄은 다음 줄 시작에서 끝을 줄이고 센다(한 레인에 두 클립을 둘 수 없다), 빈 줄·밖의 줄·두 줄 넘는 줄은 고치지 않고 센다(D91).
 그 프로젝트의 방향(가로·세로)은 **켠 클립 길이가 많은 쪽**이다 — 켠 것이 없으면 모든 클립, 같으면 가로(설정
 `FINALCUT_TIMELINE`), 그 방향 안의 포맷은 W-16 규칙 그대로라 한쪽 방향뿐이면 바이트가 같다(D66).
 프레임레이트가 섞이면 거부하지 않고 그 방향 안에서 **켠 클립 길이(초)가 많은 레이트**의 프로젝트 하나다(같으면 높은 쪽 — 설정 `frame_rate_tie`) —
@@ -344,7 +343,7 @@ vlogsrt run <video> --offline             # 픽스처 기반 전체 파이프라
 | `WorkspaceDbSettings` (`journal_size_limit_bytes = 1_048_576` · `checkpoint_busy_timeout_ms = 500`) | 외부 근거 없는 조정 대상(D63 H). 작업공간 DB `-wal`의 크기 상한 — SQLite 기본 -1(무제한)에서 실제 `-wal`이 3.4 MB로 줄지 않았다. 1 MiB는 그 3분의 1 아래이면서 작은 쓰기(몇 쪽) 수백 번을 담는다. 대기는 닻 닫기·atexit의 TRUNCATE 체크포인트만 — 연결의 10초 대신 0.5초라 닻 8개에도 종료가 4초 안이다. `analysis_config.py`에 있고 어느 지문·캐시 열쇠·승인에도 없다 |
 | `GridConformPolicy` (`RAW_GRID_CONFORM` — `half_frame_bound = 1/2` · `max_dropped_slots = 1` · `max_dropped_share = 1/100` · `allow_rate_remap = True` · `nominal_frame_durations` = Final Cut 레이트, `preprocess.py`) | 반 프레임 한도는 **기하 근거**다(D69): 어긋남이 프레임 길이의 반 **미만**이면 가장 가까운 명목 슬롯이 하나뿐이다 — Final Cut이 30fps로 conform하는 nearest-frame 규칙과 같다(T=20틱이면 9틱까지, 10틱은 snap이 아니라 map). 실측 snap 원본 13개의 어긋남은 1–6틱. 1/2를 넘기면 `__post_init__`가 거부한다. 빈 슬롯 허용 `max(max_dropped_slots, ⌊max_dropped_share × 슬롯 수⌋)`은 **외부 근거 없는 조정 대상**(D70): 실측 빈 슬롯은 원본마다 많아야 1칸(452·692·905슬롯 — 0.11–0.22%)이고 허용은 그 4–9배다. 개수 1은 짧은 원본의 한 번 끊김, 몫은 긴 원본 몫이다 — 빈 슬롯이 많으면 명목 T가 원본을 대표하지 못하므로 지원 밖에 남긴다. 겹쳐 가려진 패킷(속도 전환)은 세지 않는다. 명목 레이트 목록은 `vlogsrt.project.fcp_tables.FRAME_RATE_TAGS`의 열쇠와 같아야 한다(시험이 잠근다 — preprocess는 project를 import하지 못해 값을 옮겼다). `allow_rate_remap`은 r_frame_rate와 다른 명목을 받는다(실측 r=120 셋·30000/1001 셋). `GridConformPolicy()` 기본값은 W-27b 판(snap만)이다. 원본 경계(`probe_extraction_clock`)만 쓰고 캡션 엔진·썸네일 찾기에는 닿지 않는다. 최대 어긋남·`grid_note`는 어느 지문에도 없다 — 규칙 판 `GRID_CONFORM_TAG`(`grid-conform/v1`)만 map 원본의 지문·열쇠에 실린다(규칙을 바꾸면 판을 올린다) |
 | `ScratchSweepSettings.entry_limit = 2048`(`vlogsrt/scratch_dirs.py`) · `UiInstanceSettings`(`ui/instance.py` — 포트 읽기 20 × 0.05초 · 다시 열기 5 · 경고에 적는 실패 3) | 외부 근거 없는 조정 대상(D63 H). UI 서버 시작의 청소(죽은 pid 임시 폴더 · 아무도 쥐지 않은 UI 잠금 파일)가 한 번에 살펴볼 이름 맞는 항목 수 — 실측 잠금 1018개가 한 번에 끝나고 시작을 오래 막지 않는다. 포트 읽기는 예전 리터럴 그대로, 다시 열기는 지워진 inode를 잠근 실행의 재시도 상한이다 |
-| `FinalCutTitleSettings` (`raw/config.py`의 `FINALCUT_TITLES` — Basic Title · Apple SD Gothic Neo Bold · 글자 크기 높이×7/120 · 흰색 · 테두리 끔 · 아래 위치 높이×5/12 · 기본 포맷 1920×1080 30p) | 외부 근거 없는 조정 대상(D90). 크기는 Basic Title 자신의 기본(63 @1080), 위치는 Apple FCPXML 예시의 아래 자막 자리(`0 -450` @1080)를 높이 몫으로 옮겼다. 기본 포맷은 타임라인 보내기가 한 번도 없을 때만 쓴다. 문서 바이트만 정한다 — 어느 지문·캐시 열쇠·승인·견적에도 없다 |
+| `FinalCutTitleSettings` (`raw/config.py`의 `FINALCUT_TITLES` — Basic Title · Apple SD Gothic Neo Bold · 글자 크기 높이×7/120 · 흰색 · 테두리 끔 · 아래 위치 높이×5/12) | 외부 근거 없는 조정 대상(D90·D91). 크기는 Basic Title 자신의 기본(63 @1080), 위치는 Apple FCPXML 예시의 아래 자막 자리(`0 -450` @1080)를 시퀀스 높이 몫으로 옮겼다. 문서 바이트만 정한다 — 어느 지문·캐시 열쇠·승인·견적에도 없다 |
 | `FinalCutTimelineSettings.frame_rate_tie = "higher"` (`raw/config.py`의 `FINALCUT_TIMELINE`) | **외부 근거 없는 선택**(D71). 프레임레이트가 섞인 보내기에서 고른 방향 안의 레이트끼리 켠 클립 길이(초)가 같을 때의 편 — 낮은 쪽에 맞추면 소수 쪽 프레임을 건너뛰지만 높은 쪽에 맞추면 되풀이할 뿐이라 높은 쪽을 골랐다(`"lower"`도 받고 그 밖은 거부). `orientation_tie`(D66)와 같은 설정이고 문서 바이트만 정한다 — 어느 지문·캐시 열쇠·승인·견적에도 없다 |
 | Claude Opus 5.5 단가 (`RawClaudeAnalysisProfile`) | 2026-10-09 공식 가격표(https://platform.claude.com/docs/en/about-claude/pricing) — 입력 $4 · 출력 $20 · 캐시 쓰기 5분 $5 · 1시간 $8 · 읽기 $0.20 / 100만 토큰, `inference_geo=global`(D54). **0으로 두지 마라** — 못 매기면 가격 미정이다 |
 | Claude Sonnet 5.5 단가 (`RawClaudeAnalysisProfile`, 의미 분석 기본) | 2026-10-11 공식 가격표(https://platform.claude.com/docs/en/about-claude/pricing) — 입력 $2 · 출력 $10 · 캐시 쓰기 5분 $2.50 · 1시간 $4 · 읽기 $0.10 · 배치 $1/$5 / 100만 토큰, `inference_geo=global`(D58). **0으로 두지 마라** — 못 매기면 가격 미정이다 |

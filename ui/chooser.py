@@ -55,7 +55,8 @@ function run() {
         panel.message = kind === 'workspace'
             ? '프로젝트 폴더 또는 Final Cut 라이브러리(.fcpbundle)를 고르세요'
             : kind === 'folder' ? '폴더를 고르세요'
-            : kind === 'srt' ? '타이틀로 만들 SRT 자막 파일을 고르세요' : '영상 파일을 고르세요';
+            : kind === 'srt' ? '타이틀로 달 SRT 자막 파일을 고르세요'
+            : '영상 파일을 고르세요';
         if (kind === 'video') {
             panel.allowedFileTypes = ['mp4','mov','m4v','mkv','webm','avi','mp3','wav','m4a'];
         }

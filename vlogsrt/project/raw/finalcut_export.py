@@ -24,11 +24,11 @@
   초안(`.vlogsrt_….partial`)에 쓰고 fsync한 뒤 검증을 통과한 것만 링크로 제 이름을 얻는다.
   검증에 실패한 문서는 `.invalid.xml`로만 남는다 — 끝난 것처럼 보이지 않는다.
 
-**SRT → 타이틀(W-30f, D90).** `export_titles`는 사람이 고른 SRT의 줄마다 Final Cut 타이틀(기본
-Basic Title)을 단 **타이틀만 있는 프로젝트**를 쓴다 — 원본을 조사하지 않고, 포맷은 마지막 작업대
-보내기의 시퀀스 포맷(없으면 설정의 기본 포맷)이다. 이름에 `_titles`를 달고 리포트에 SRT 이름·
-sha256·포맷 출처·센 수를 남긴다. SRT를 읽고 해시하는 일은 `timeline_srt`가 한다(이 계층은
-hashlib을 모른다).
+**SRT → 타이틀(W-30f, D91).** `titles_srt`를 주면 같은 전체 타임라인(원본·컷·켜짐·키워드·포맷)에
+원본 자막 캡션 대신 그 SRT의 줄마다 Final Cut 타이틀(기본 Basic Title)을 스파인 클립에 붙인다
+(`finalcut_titles`) — 원본 자막과 그 표지(D55)·빠진 구간(D59)은 읽지 않는다. 이름에 `_titles`를 달고
+리포트의 `titles`에 SRT 이름·sha256·모양·센 수를 남긴다. SRT를 읽고 해시하는 일은 `timeline_srt`가
+한다(이 계층은 hashlib을 모른다).
 
 **읽는 쪽 규칙**: 보내기 하나는 `vlogsrt_<UTC>[_titles].fcpxml`이 **있을 때만** 끝난 것이다. 리포트
 (`.json`)는 `.fcpxml`보다 먼저 제 이름을 얻으므로, `.fcpxml` 없는 리포트는 중간에 죽은 시도다.
@@ -42,7 +42,6 @@ import itertools
 import json
 import os
 import re
-import xml.etree.ElementTree as ET
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
@@ -53,7 +52,6 @@ from typing import TYPE_CHECKING, Any
 
 from vlogsrt import log, preprocess
 from vlogsrt.project import library
-from vlogsrt.project.fcp_tables import CONFORM_RATES
 from vlogsrt.project.models import UnsupportedProject
 from vlogsrt.project.raw import finalcut_timeline as timeline
 from vlogsrt.project.raw import finalcut_titles as titles
@@ -61,7 +59,6 @@ from vlogsrt.project.raw import media_refs
 from vlogsrt.project.raw.config import (
     FINALCUT_TIMELINE,
     FINALCUT_TITLES,
-    FinalCutTitleFormat,
     FinalCutTitleSettings,
 )
 from vlogsrt.project.raw.models import (
@@ -105,12 +102,9 @@ _REPORT_SUFFIX = ".json"
 _INVALID_SUFFIX = ".invalid.xml"
 _DRAFT_SUFFIX = ".partial"
 _BUNDLE_SUFFIX = ".fcpbundle"
-TITLES_REPORT_SCHEMA = "vlogsrt-finalcut-titles/v1"
 _TITLES_TAG = "_titles"
-"""타이틀만 있는 프로젝트의 이름 꼬리 — 같은 폴더에서 타임라인 보내기와 갈린다(D90)."""
+"""SRT 타이틀을 단 타임라인의 이름 꼬리 — 같은 폴더에서 원본 자막 보내기와 갈린다(D91)."""
 _TITLES_TITLE = "자막 타이틀"
-_PUBLISHED_TIMELINE = re.compile(r"vlogsrt_[0-9]{8}T[0-9]{6}Z(?:_[0-9]+)?\.fcpxml")
-"""끝난 타임라인 보내기의 이름 — 타이틀 파일(`_titles`)과 옛 꼴은 들지 않는다."""
 _DRAFT_NAME = re.compile(
     r"\.vlogsrt_[0-9]{8}T[0-9]{6}Z(?:_titles)?(?:_[0-9]+)?\.(?:fcpxml|json)\.partial"
 )
@@ -623,6 +617,8 @@ class _Scope:
     evidence: Mapping[str, AnalysisSourceResult]
     shelf: _LibraryShelf
     caption_gaps: CaptionGaps | None = None
+    original_captions: bool = True
+    """원본 자막을 실을까 — SRT 타이틀로 보낼 때는 읽지도 않는다(D91)."""
 
 
 def _gather(scope: _Scope, asset: SourceAsset) -> _Gathered:
@@ -639,7 +635,7 @@ def _gather(scope: _Scope, asset: SourceAsset) -> _Gathered:
         media=_media(asset, path, probe, grid, code, declared),
         segments=_review_segments(asset, scope.head, review),
         report=report,
-        cues=_cues(scope.service, scope.root, asset),
+        cues=_cues(scope.service, scope.root, asset) if scope.original_captions else None,
     )
     facts = _source_facts(
         asset, source, code, row if report is not None else None, scope.caption_gaps
@@ -975,8 +971,16 @@ def export(
     dtd_path: Path = INSTALLED_DTD,
     caption_timing: CaptionTimingFlags | None = None,
     caption_gaps: CaptionGaps | None = None,
+    titles_srt: TimelineSrt | None = None,
+    title_settings: FinalCutTitleSettings = FINALCUT_TITLES,
 ) -> ExportOutcome:
-    """ready 원본 전부(촬영 순) → 새 FCPXML + 리포트. Final Cut은 열지 않는다(D55 표지는 값으로)."""
+    """ready 원본 전부(촬영 순) → 새 FCPXML + 리포트. Final Cut은 열지 않는다(D55 표지는 값으로).
+
+    `titles_srt`(서비스가 읽은 SRT)면 원본 자막 캡션 대신 그 줄마다 타이틀을 단다(D91) — 원본
+    자막의 표지·빠진 구간은 그 자막의 것이라 받아도 쓰지 않는다.
+    """
+    if titles_srt is not None:
+        caption_timing, caption_gaps = None, None
     facade = service.review_workspace_facade(root)
     workspace: RawWorkspace = facade.workspace
     folder = workspace.root / EXPORT_FOLDER
@@ -990,9 +994,14 @@ def export(
         head = _load_head(facade, assets)
         shelf = _LibraryShelf(service.remembered_fcp_library(root))
         rows = facade.tier_evidence_rows()
-        scope = _Scope(service, workspace.root, workspace, head, rows, shelf, caption_gaps)
+        scope = _Scope(
+            service, workspace.root, workspace, head, rows, shelf, caption_gaps, titles_srt is None
+        )
         gathered, skipped = _gather_all(scope, assets, context)
-        document = _document(gathered, workspace, moment, shelf, caption_timing)
+        document = _document(gathered, workspace, moment, shelf, caption_timing, titles_srt)
+        section: dict[str, object] | None = None
+        if titles_srt is not None:
+            document, section = _with_titles(document, titles_srt, title_settings)
         exported = {asset.asset_id for asset in assets} - set(skipped)
         report: dict[str, object] = {
             "schema": REPORT_SCHEMA,
@@ -1004,8 +1013,33 @@ def export(
             "not_exported": _not_exported(service, root, head, exported, skipped),
             "counts": _report_counts(document, gathered),
             **({} if caption_timing is None else {"sync_check": dict(caption_timing.section)}),
+            **({} if section is None else {"titles": section}),
         }
-        return _publish(folder, timeline.render(document), report, moment, dtd_path)
+        tag = "" if titles_srt is None else _TITLES_TAG
+        return _publish(folder, timeline.render(document), report, moment, dtd_path, tag)
+
+
+def _with_titles(
+    document: timeline.TimelineDocument, srt: TimelineSrt, settings: FinalCutTitleSettings
+) -> tuple[timeline.TimelineDocument, dict[str, object]]:
+    """같은 문서에 SRT 줄의 타이틀만 — 리포트 칸에는 파일·템플릿·모양·센 수와 마지막 줄의 끝(다른
+    타임라인에서 나온 SRT면 타임라인 길이와 어긋나 보인다)."""
+    try:
+        titled, counts = titles.with_srt_titles(document, srt.cues, settings)
+    except timeline.FinalCutTimelineError as error:
+        raise FinalCutExportError(
+            f"SRT `{srt.path.name}`을 타이틀로 달지 못했다 — {error}"
+        ) from error
+    last_end = max((cue.end for cue in srt.cues), default=None)
+    return titled, {
+        "srt": {"name": srt.path.name, "path": str(srt.path), "sha256": srt.sha256},
+        "effect": {"name": settings.effect_name, "uid": settings.effect_uid},
+        "style": titles.style_facts(titled),
+        "counts": {
+            **asdict(counts),
+            "last_cue_end_seconds": None if last_end is None else str(last_end),
+        },
+    }
 
 
 def _report_counts(
@@ -1045,6 +1079,7 @@ def _document(
     moment: datetime,
     shelf: _LibraryShelf,
     caption_timing: CaptionTimingFlags | None = None,
+    titles_srt: TimelineSrt | None = None,
 ) -> timeline.TimelineDocument:
     """모은 것 → 문서. 자막 시각 확인(D55)이 걸린 원본에는 빌더가 키워드를 단다. 프로젝트 방향은
     설정(`FINALCUT_TIMELINE`)의 규칙으로 빌더가 고른다 — 켠 길이가 많은 쪽(D66)."""
@@ -1053,116 +1088,12 @@ def _document(
     try:
         return timeline.plan(
             [item.source for item in gathered],
-            title=timeline.export_title(workspace.name, moment.astimezone()),
+            title=timeline.export_title(
+                workspace.name, moment.astimezone(), None if titles_srt is None else _TITLES_TITLE
+            ),
             library_bundle=bundle,
             caption_timing=flagged,
             settings=FINALCUT_TIMELINE,
         )
     except timeline.FinalCutTimelineError as error:
         raise FinalCutExportError(f"Final Cut 타임라인을 짜지 못했다 — {error}") from error
-
-
-# ── SRT → 타이틀(D90) ─────────────────────────────────────────────────────
-
-
-def export_titles(
-    service: RawWorkspaceService,
-    root: Path,
-    srt: TimelineSrt,
-    *,
-    now: Callable[[], datetime] = _utc_now,
-    dtd_path: Path = INSTALLED_DTD,
-    settings: FinalCutTitleSettings = FINALCUT_TITLES,
-) -> ExportOutcome:
-    """SRT의 줄마다 Final Cut 타이틀을 단 **타이틀만 있는 프로젝트** → 새 FCPXML + 리포트(D90).
-
-    원본을 조사하지 않는다. 포맷은 마지막 타임라인 보내기의 시퀀스 포맷이다 — 사람이 타이틀을 붙여
-    넣을 바로 그 프로젝트이고, Final Cut이 받아 준 그 포맷이다. 보낸 적이 없으면 설정의 기본 포맷.
-    """
-    workspace: RawWorkspace = service.review_workspace_facade(root).workspace
-    folder = workspace.root / EXPORT_FOLDER
-    folder.mkdir(parents=True, exist_ok=True)
-    with _exclusive(folder):
-        moment = now()
-        fmt, origin = _title_format(folder, settings)
-        name = timeline.export_title(workspace.name, moment.astimezone(), _TITLES_TITLE)
-        try:
-            document, counts = titles.plan_titles(srt.cues, fmt, title=name, settings=settings)
-        except timeline.FinalCutTimelineError as error:
-            raise FinalCutExportError(
-                f"SRT `{srt.path.name}`을 타이틀로 만들지 못했다 — {error}"
-            ) from error
-        report = _titles_report(srt, document, counts, origin, moment)
-        payload = titles.render_titles(document)
-        return _publish(folder, payload, report, moment, dtd_path, _TITLES_TAG)
-
-
-def _title_format(
-    folder: Path, settings: FinalCutTitleSettings
-) -> tuple[FinalCutTitleFormat, str | None]:
-    """(포맷, 그 포맷을 읽은 타임라인 보내기 이름 — 기본 포맷이면 None)."""
-    published = sorted(
-        path.name for path in folder.iterdir() if _PUBLISHED_TIMELINE.fullmatch(path.name)
-    )
-    if not published:
-        return settings.default_format, None
-    return _format_from_export(folder / published[-1]), published[-1]
-
-
-def _format_from_export(path: Path) -> FinalCutTitleFormat:
-    """타임라인 보내기의 시퀀스 포맷 — 못 읽으면 그 파일 이름을 대고 거부한다(추측하지 않는다)."""
-    try:
-        root = ET.parse(path).getroot()
-        sequence = root.find("library/event/project/sequence")
-        if sequence is None:
-            raise ValueError("시퀀스가 없다")
-        found = root.find(f"resources/format[@id='{sequence.get('format')}']")
-        if found is None:
-            raise ValueError("시퀀스 포맷이 없다")
-        duration = Fraction(str(found.get("frameDuration")).removesuffix("s"))
-        if duration not in CONFORM_RATES:
-            raise ValueError(f"Final Cut 레이트가 아니다: {duration}")
-        return FinalCutTitleFormat(
-            width=int(str(found.get("width"))),
-            height=int(str(found.get("height"))),
-            frame_duration=duration,
-            color_space=found.get("colorSpace"),
-            drop_frame=sequence.get("tcFormat") == timeline.TC_DROP,
-        )
-    except (OSError, ET.ParseError, ValueError, ZeroDivisionError) as error:
-        raise FinalCutExportError(
-            f"지난 타임라인 보내기 `{path.name}`의 포맷을 읽지 못해 타이틀을 쓰지 않는다 — {error}"
-        ) from error
-
-
-def _titles_report(
-    srt: TimelineSrt,
-    document: titles.TitleDocument,
-    counts: titles.TitleCounts,
-    origin: str | None,
-    moment: datetime,
-) -> dict[str, object]:
-    fmt, settings = document.format, document.settings
-    last_end = max((cue.end for cue in srt.cues), default=None)
-    return {
-        "schema": TITLES_REPORT_SCHEMA,
-        "created_at": moment.astimezone(UTC).isoformat(),
-        "title": document.title,
-        "srt": {"name": srt.path.name, "path": str(srt.path), "sha256": srt.sha256},
-        "effect": {"name": settings.effect_name, "uid": settings.effect_uid},
-        "style": titles.document_style(document),
-        "format": {
-            "width": fmt.width,
-            "height": fmt.height,
-            "frame_duration": str(fmt.frame_duration),
-            "frame_rate": CONFORM_RATES[fmt.frame_duration],
-            "drop_frame": fmt.drop_frame,
-            "origin": "default" if origin is None else "last_export",
-            "file": origin,
-        },
-        "counts": {
-            **asdict(counts),
-            "duration_seconds": str(counts.frames * fmt.frame_duration),
-            "last_cue_end_seconds": None if last_end is None else str(last_end),
-        },
-    }

@@ -3275,16 +3275,20 @@ class RawWorkspaceService:
         )
         return outcome.fcpxml
 
-    def export_finalcut_titles(self, root: Path, srt: Path) -> Path:
-        """SRT의 줄마다 Final Cut 타이틀(Basic Title)을 단 타이틀만 있는 프로젝트 — 새 FCPXML
-        경로(D90).
+    def export_finalcut_titles(
+        self, root: Path, srt: Path, context: JobContext | None = None
+    ) -> Path:
+        """같은 전체 타임라인에 원본 자막 대신 SRT 줄마다 Basic Title 타이틀을 단다 — 새 FCPXML
+        경로(D91).
 
-        SRT는 읽기만 한다(못 읽으면 이름을 대고 거부). 원본은 조사하지 않고 Final Cut은 열지 않는다.
+        SRT는 읽기만 한다(못 읽으면 이름을 대고 거부). 원본 자막의 시각 표지·빠진 구간은 그 자막의
+        것이라 읽지 않는다. Final Cut은 열지 않는다(여는 것은 화면의 몫이다).
         """
         from vlogsrt.project.raw import finalcut_export
         from vlogsrt.project.raw import timeline_srt as srt_file
 
-        return finalcut_export.export_titles(self, root, srt_file.read(srt)).fcpxml
+        lines = srt_file.read(srt)
+        return finalcut_export.export(self, root, context, titles_srt=lines).fcpxml
 
     def _caption_gaps_or_unknown(self, root: Path) -> dict[str, Any] | None:
         """보내기 보고서의 전사 실패 구간 — 원본마다 1단계 기록을 읽기만 한다(D59).

@@ -345,27 +345,8 @@ FINALCUT_TIMELINE = FinalCutTimelineSettings()
 
 
 @dataclass(frozen=True)
-class FinalCutTitleFormat:
-    """타이틀만 있는 프로젝트(D90)가 서는 프레임 — 크기·프레임 길이·색 공간·드롭 프레임 표기.
-
-    보통은 마지막 작업대 보내기의 시퀀스 포맷을 읽어 만들고(붙여 넣을 그 프로젝트다), 보낸 적이
-    없을 때만 `FinalCutTitleSettings.default_format`을 쓴다.
-    """
-
-    width: int = 1920
-    height: int = 1080
-    frame_duration: Fraction = Fraction(1, 30)
-    color_space: str | None = "1-1-1 (Rec. 709)"
-    drop_frame: bool = False
-
-    def __post_init__(self) -> None:
-        if self.width <= 0 or self.height <= 0 or self.frame_duration <= 0:
-            raise ValueError(f"타이틀 포맷의 크기·프레임 길이가 양수가 아니다: {self!r}")
-
-
-@dataclass(frozen=True)
 class FinalCutTitleSettings:
-    """SRT 줄마다 다는 Final Cut 타이틀(D90)의 모양 — 템플릿·글꼴·크기·색·테두리·아래 위치.
+    """SRT 줄마다 다는 Final Cut 타이틀(D91)의 모양 — 템플릿·글꼴·크기·색·테두리·아래 위치.
 
     외부 근거 없는 조정 대상이다. 크기는 Basic Title 자신의 기본 글자 크기(1080에서 63)를, 위치는
     Apple FCPXML 예시의 아래 자막 자리(1080에서 가운데보다 450 아래)를 프레임 높이 몫으로 옮겼다 —
@@ -386,7 +367,6 @@ class FinalCutTitleSettings:
     stroke_width_fraction: Fraction = Fraction(0)
     position_y_fraction: Fraction = Fraction(5, 12)
     """가운데에서 아래로 내린 거리 ÷ 프레임 높이 — 음수면 위로 올린다."""
-    default_format: FinalCutTitleFormat = FinalCutTitleFormat()
 
     def __post_init__(self) -> None:
         problems = [
@@ -438,7 +418,7 @@ def _title_color_problems(name: str, color: str) -> list[str]:
 
 
 FINALCUT_TITLES = FinalCutTitleSettings()
-"""지금 쓰는 타이틀 모양 — 타이틀 보내기(`finalcut_export.export_titles`)가 빌더에 넘긴다."""
+"""지금 쓰는 타이틀 모양 — 타이틀 보내기(`finalcut_export.export`)가 `finalcut_titles`에 넘긴다."""
 
 
 def subtitle_suspect_problems(settings: SubtitleSuspectSettings) -> list[str]:

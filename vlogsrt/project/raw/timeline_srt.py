@@ -1,8 +1,8 @@
-"""사람이 고른 SRT를 읽기만 한다 — Final Cut 타이틀의 재료(W-30f, D90).
+"""사람이 고른 SRT를 읽기만 한다 — Final Cut 타이틀의 재료(W-30f, D91).
 
 SRT 시각은 타임라인 시각(0초 = 시퀀스 처음)이다. 여기서는 바이트를 한 번 읽어 그 sha256과 큐를
-만들 뿐이고, 타이틀을 짜는 일은 순수 빌더(`finalcut_titles.plan_titles`)가 한다. 보내기 계층
-(`finalcut_export`)은 원본을 다시 해시하지 않도록 hashlib을 모르므로 해시는 여기서 한다.
+만들 뿐이고, 타이틀을 클립에 붙이는 일은 순수 계층(`finalcut_titles.with_srt_titles`)이 한다.
+보내기 계층(`finalcut_export`)은 원본을 다시 해시하지 않도록 hashlib을 모르므로 해시는 여기서 한다.
 """
 
 from __future__ import annotations

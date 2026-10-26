@@ -109,6 +109,9 @@ CAPTION_ROLE = "SRT?captionFormat=SRT.ko"
 CAPTION_LANE = "1"
 CAPTION_START = "3600s"
 CAPTION_MAX_LINES = 2
+TITLE_LANE = "1"
+TITLE_START = "3600s"
+"""타이틀의 안쪽 시계 시작 — Final Cut 자신의 철자(D91)."""
 AUDIO_ROLE = "dialogue"
 SEQUENCE_TC_START = "0s"
 CONFORM_KEEP_TIME = "0"
@@ -223,6 +226,33 @@ class CaptionPiece:
 
 
 @dataclass(frozen=True, slots=True)
+class TitlePiece:
+    """스파인 클립 하나에 붙은 타이틀(SRT 한 줄, D91) — 시작은 그 클립 안 원본 프레임(캡션과 같은
+    원본 격자), 길이는 시퀀스 시간이다. 컷을 넘는 줄도 나누지 않는다(붙은 클립 너머로 이어진다)."""
+
+    clip_index: int
+    start_frame: int
+    duration: str
+    text: str
+    enabled: bool
+    style_id: str
+    """`text-style-def@id` — XML ID라 문서 전체에서 유일하다."""
+
+
+@dataclass(frozen=True, slots=True)
+class TitleStyle:
+    """문서의 모든 타이틀이 같이 쓰는 템플릿과 모양 — `finalcut_titles`가 설정으로 만든다(D91)."""
+
+    effect_id: str
+    effect_name: str
+    effect_uid: str
+    params: tuple[tuple[str, str, str], ...]
+    """(이름, 열쇠, 값) — 템플릿 매개변수(Position·Flatten·Alignment)."""
+    text_style: tuple[tuple[str, str], ...]
+    """`text-style` 속성 — 넣은 순서 그대로 적는다."""
+
+
+@dataclass(frozen=True, slots=True)
 class CaptionCounts:
     """캡션을 만들며 센 것 — 무엇도 고치지 않았다는 증거다.
 
@@ -271,6 +301,8 @@ class SourcePlan:
     W-27d)."""
     sequence_padded: int = 0
     """시퀀스 1프레임이 안 돼 1프레임으로 늘린 클립 수 — 고치지 않고 센다."""
+    titles: tuple[TitlePiece, ...] = ()
+    """SRT 줄의 타이틀(D91) — 원본 자막 캡션 대신 실을 때만 있다."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -298,6 +330,8 @@ class TimelineDocument:
     sources: tuple[SourcePlan, ...]
     sequence_frame_duration: Fraction
     """시퀀스 포맷의 프레임 길이 — 스파인의 위치·길이가 이 격자에 선다(W-27d)."""
+    title_style: TitleStyle | None = None
+    """타이틀(D91)의 템플릿·모양 — 없으면 문서가 W-27d 그대로다."""
 
 
 # ── 원본 하나 ────────────────────────────────────────────────────────────
@@ -1044,6 +1078,30 @@ def _caption_element(
     ET.SubElement(caption, "text").text = piece.text
 
 
+def _title_element(
+    parent: ET.Element, media: SourceMedia, piece: TitlePiece, style: TitleStyle
+) -> None:
+    """타이틀 하나(D91) — 클립 안 시각(원본 격자)에서 시작하고, 자식은 param* → text →
+    text-style-def 순서여야 DTD를 통과한다. 글은 그대로(두 줄은 `\n`), 이름은 줄을 이은 글이다."""
+    attrib = {
+        "ref": style.effect_id,
+        "lane": TITLE_LANE,
+        "offset": _time(media.timecode_frames + piece.start_frame, media.frame_duration),
+        "name": " ".join(line.strip() for line in piece.text.splitlines() if line.strip()),
+        "start": TITLE_START,
+        "duration": piece.duration,
+    }
+    if not piece.enabled:
+        attrib["enabled"] = "0"
+    title = ET.SubElement(parent, "title", attrib)
+    for name, key, value in style.params:
+        ET.SubElement(title, "param", {"name": name, "key": key, "value": value})
+    text = ET.SubElement(title, "text")
+    ET.SubElement(text, "text-style", {"ref": piece.style_id}).text = piece.text
+    definition = ET.SubElement(title, "text-style-def", {"id": piece.style_id})
+    ET.SubElement(definition, "text-style", dict(style.text_style))
+
+
 def _spine_clip(
     spine: ET.Element,
     ids: tuple[str, str],
@@ -1051,6 +1109,7 @@ def _spine_clip(
     index: int,
     placement: tuple[int, int],
     sequence_fd: Fraction,
+    style: TitleStyle | None = None,
 ) -> None:
     """스파인 클립 하나 — 자식은 conform-rate(timing) · 캡션(anchor) · 키워드(marker) 순서여야
     DTD를 통과한다. `placement`는 시퀀스 프레임의 (위치, 길이)다.
@@ -1076,6 +1135,9 @@ def _spine_clip(
     for piece in plan.captions:
         if piece.clip_index == index:
             _caption_element(element, media, piece, local_end)
+    for title in plan.titles:
+        if title.clip_index == index and style is not None:
+            _title_element(element, media, title, style)
     for keyword in clip.keywords:
         _range_element(element, "keyword", media, clip.start_frame, clip.end_frame, keyword)
     for start, end in clip.recommended:
@@ -1122,7 +1184,8 @@ def _event(library: ET.Element, document: TimelineDocument, ids: list[tuple[str,
     offset = 0
     for plan, pair in zip(document.sources, ids, strict=True):
         for index, frames in enumerate(_sequence_frames(plan)):
-            _spine_clip(spine, pair, plan, index, (offset, frames), sequence_fd)
+            placement = (offset, frames)
+            _spine_clip(spine, pair, plan, index, placement, sequence_fd, document.title_style)
             offset += frames
 
 
@@ -1136,6 +1199,10 @@ def render(document: TimelineDocument) -> bytes:
     ids = _source_ids(document)
     for plan, (asset_id, format_id) in zip(document.sources, ids, strict=True):
         _asset_element(resources, asset_id, format_id, plan.media)
+    style = document.title_style
+    if style is not None:
+        effect = {"id": style.effect_id, "name": style.effect_name, "uid": style.effect_uid}
+        ET.SubElement(resources, "effect", effect)
     location = {} if document.library_location is None else {"location": document.library_location}
     _event(ET.SubElement(root, "library", location), document, ids)
     ET.indent(root, space=_INDENT)
