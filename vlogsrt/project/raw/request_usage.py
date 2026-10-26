@@ -20,11 +20,12 @@ from typing import Any
 from vlogsrt.project.pricing import official_pricing_snapshot
 from vlogsrt.project.raw import request_log
 from vlogsrt.project.raw.claude_cost import measure_claude_usage
-from vlogsrt.project.raw.gemini_cost import measure_gemini_usage
+from vlogsrt.project.raw.gemini_cost import measure_gemini_transcribe_usage, measure_gemini_usage
 from vlogsrt.project.request_accounting import MeasuredUsage, measure_response_usage
 from vlogsrt.project.workflow_protocol import PricingSnapshot
 from vlogsrt.task_runtime import provider_error
 from vlogsrt.transcribe import (
+    GEMINI_TRANSCRIBE_OPERATION,
     GENERATE_CONTENT_OPERATION,
     MESSAGES_OPERATION,
     RESPONSES_OPERATION,
@@ -70,6 +71,8 @@ class UsageObserver:
             return measure_claude_usage(meta, response)
         if meta.operation == GENERATE_CONTENT_OPERATION:
             return measure_gemini_usage(meta, response, on=date.today())
+        if meta.operation == GEMINI_TRANSCRIBE_OPERATION:
+            return measure_gemini_transcribe_usage(meta, response, on=date.today())
         pricing = self.pricing if self.pricing is not None else _official_pricing()
         return measure_response_usage(meta, response, pricing)
 

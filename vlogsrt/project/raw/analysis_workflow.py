@@ -25,6 +25,7 @@ Luna 판정 → **비디오 격자 조정** → 불변 문서 기록.
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import math
 import os
@@ -68,8 +69,8 @@ from vlogsrt.project.raw.caption_provider import (
     RescueTimingProvider,
     TimingProvider,
     TransportTextProvider,
-    TransportTimingProvider,
     parse_timing_response,
+    timing_provider_for,
 )
 from vlogsrt.project.raw.config import (
     ANALYSIS_PROVIDER_GOOGLE,
@@ -534,8 +535,13 @@ class ApprovedPhaseAsrProvider:
             raise AnalysisApprovalError(
                 "승인이 다시 묻기를 묶지 않았다 — 다른 귀와 어긋난 조각을 다시 묻지 않는다"
             )
+        if "temperature" not in inspect.signature(self.inner.timed_transcript).parameters:
+            raise AnalysisApprovalError(
+                "이 시간 엔진은 다시 묻기(온도)를 받지 않는다 — D78 다시 묻기는 whisper 원본에만"
+                " 있다(D92). 기본 온도로 몰래 다시 묻지 않는다(D28)"
+            )
         self.rescue_gate.reserve(count=1, key=str(binding.request_id))
-        tempered = cast(RescueTimingProvider, self.inner)  # TransportTimingProvider만 온다
+        tempered = cast(RescueTimingProvider, self.inner)  # 온도 손잡이를 확인했다
         return tempered.timed_transcript(
             binding=binding,
             chunk=chunk,
@@ -879,6 +885,9 @@ class AnalysisProviders:
     live_sender: object | None = None
     live_cfg: object | None = None
     live_client: object | None = None
+    timing_client: object | None = None
+    """Gemini 시간 엔진의 클라이언트(D92) — 시간 모델이 Gemini일 때만 쓴다. 없으면 유료 호출 전에
+    닫는다(`caption_provider.timing_provider_for`)."""
     asr_approvals: Mapping[str, AsrPhaseApproval] | None = None
     luna_approvals: Mapping[str, object] | None = None
     on: date_type | None = None
@@ -2081,7 +2090,9 @@ def _asr_provider_for(
         source_sha256=audio.source_sha256,
         on=providers.on or datetime.now(UTC).date(),
     )
-    inner = TransportTimingProvider(sender=sender, cfg=cfg)  # type: ignore[arg-type]
+    inner = timing_provider_for(
+        workflow, sender=sender, cfg=cfg, gemini_client=providers.timing_client
+    )
     return _approved_phase_provider(inner, workflow, settings, audio, approval)
 
 

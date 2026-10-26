@@ -8797,3 +8797,30 @@ SRT · CLI · 작업대 단추·취소·재시도). 유료 호출 0회. **사람
 - **시험**: `tests/raw/test_gemini_transcribe_parse.py` · `tests/raw/test_word_cues.py` · `tests/test_invariants.py` · 합성 픽스처
   `tests/fixtures/synthetic/gemini/transcribe_korean.json`·`transcribe_silent.json`. 유료 호출 0회.
 
+**W-31c(같은 날)** — 엔진 표·역할·능력표·사전 검사·제공자:
+- **엔진 표** `TIMING_ENGINES`(`raw/config.py`): whisper(`whisper_verbose_json` · verbose_json · 세그먼트 · 다시 묻기 있음 · 다른 귀는
+  게이트) / Gemini(`gemini_transcribe_word_info` · `word_info` · 단어 · 다시 묻기 없음 · 다른 귀는 후보만). `timing_engine_view(config,
+  engine)`는 이미 그 엔진이면 **같은 객체**를 돌려준다(whisper — 열쇠·지문·digest 바이트 그대로), Gemini면 모델·제공자·응답 형식·입자를
+  함께 바꾼다. 저장된 설정의 칸은 늘지 않는다(`CONFIG_PINNED_FIELDS`).
+- **동결 검사**: 시간 제공자·응답 형식·입자는 `TIMING_PROVIDER_CONTRACTS`의 한 짝이고(whisper 메시지는 예전 그대로 — 「단어만으로는
+  골격이 없다」), `engine_problems`가 모델과 제공자의 짝을 본다(표에 없는 모델은 사전 검사의 「조용한 모델 교체」가 닫는다).
+  `role_problems`: 시간 역할의 Gemini는 등록된 전사 엔진만, 글자 역할의 Gemini와 의미 분석 Gemini의 시간 역할은 그대로 거부(D86).
+- **능력표**: `confirmed_capability_snapshots()`는 예전 OpenAI 둘 그대로(역할의 기본), `all_capability_snapshots()`가 Gemini 시간 엔진
+  스냅샷을 더한다(엔드포인트 `interactions` · 확인 verbatim·단어 시각·`language_codes` · 금지 smart·custom_vocabulary·prompt·
+  system_instruction·화자 분리·세그먼트·srt·vtt). `capability_snapshot(role, model)`로 찾고, 요청 조합 확인은 그 모델의 스냅샷을 본다.
+- **사전 검사**: 엔진마다다 — whisper는 2027-02-26 차단 그대로, Gemini는 그 날짜에 막히지 않고 자기 단가 재확인 기한(2027-01-26)이
+  지나면 닫는다. `timing_price_per_minute(model, on)`(Gemini 기한 뒤 None — 0원이 아니다). `price_per_minute(role)`은 예전 그대로(기본).
+- **제공자** `GeminiTranscribeTimingProvider`(`caption_provider.py`): 사전 검사 → `gemini_timing_request`(등록된 Gemini가 아니면 거부 ·
+  확인된 조합 · 언어 잠금 `ko → ko-KR` · 등록표의 길이·크기 한도) → 청크 신원 재확인 → 문 → `gemini_timed_transcript`(해석 → 단어 묶기 →
+  whisper와 같은 `TimedTranscript` · 받아 줄 수 없는 응답은 `MalformedCaptionResponse` · 센 것은 경고). 온도 손잡이가 없다.
+  `timing_provider_for(workflow, sender, cfg, gemini_client)`가 1단계(`_asr_provider_for`)·빈칸 재전사의 하드코딩 자리를 대신한다 —
+  Gemini 클라이언트가 없으면 유료 호출 전에 `GEMINI_API_KEY`를 말하고, 관찰자·취소는 whisper 전송의 것을 옮긴다.
+  `AnalysisProviders.timing_client` 칸을 더했다(채우는 일은 W-31d). 다시 묻기(D78)는 온도 손잡이가 없는 제공자에 오면 기본 온도로
+  보내지 않고 거부한다(D28).
+- **영수증** `measure_gemini_transcribe_usage`: `usage.total_input_tokens`·`total_output_tokens`를 100만 토큰당 $2·$12로(가격표의
+  분당 값과 같은 칸) — 모델 다름·칸 없음·기한 지남은 가격 미정. `UsageObserver`가 연산 `interactions.transcribe`를 이리로 보낸다.
+  칸 이름은 문서 모양이다(H1 녹화가 다르면 여기만 고친다).
+- **불변식** `check_gemini_timing_builder_lane`: `gemini_timing_request`의 매개변수·키워드 인자에 힌트가 없다(규칙 6).
+- 아직 모든 원본은 whisper다 — 저장된 설정이 whisper이고 원본마다 엔진을 고르는 일은 W-31d다.
+- **시험**: `tests/raw/test_timing_engines.py` · `tests/raw/test_gemini_timing_provider.py` · `tests/test_invariants.py`. 유료 호출 0회.
+

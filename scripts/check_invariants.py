@@ -921,6 +921,35 @@ GEMINI_TIMING_BANNED = (
 )  # fmt: skip
 
 
+GEMINI_TIMING_BUILDER = "gemini_timing_request"
+
+
+def check_gemini_timing_builder_lane() -> list[str]:
+    """규칙 6(D92) — `caption_provider.gemini_timing_request`의 매개변수·키워드 인자에 힌트가
+    없다."""
+    path = PROJECT_PACKAGE / "raw" / "caption_provider.py"
+    if not path.exists():
+        return ["vlogsrt/project/raw/caption_provider.py: 요청 빌더가 사라졌다 (규칙 6)"]
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    builder = next(
+        (
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == GEMINI_TIMING_BUILDER
+        ),
+        None,
+    )
+    if builder is None:
+        return [f"caption_provider.py: {GEMINI_TIMING_BUILDER}을 찾지 못했다 — 검사가 무력해졌다"]
+    used = _lane_fields(builder)
+    return [
+        f"caption_provider.py:{GEMINI_TIMING_BUILDER}: {field} — Gemini 시간 요청에 힌트가"
+        " 실린다 (규칙 6, D92)"
+        for field in GEMINI_TIMING_BANNED
+        if field in used
+    ]
+
+
 def check_gemini_timing_request_lane() -> list[str]:
     """규칙 6(D92) — Gemini 시간 요청의 칸과 본문에 힌트가 없다. 요청·빌더가 사라져도 통과 없음."""
     path = PACKAGE / "transcribe.py"
@@ -2784,6 +2813,7 @@ CHECKS = (
     ("whisper에 prompt 금지", check_no_prompt_to_whisper),
     ("요청 빌더의 칸은 갈라져 있다", check_caption_request_lanes),
     ("Gemini 시간 요청에 힌트가 없다", check_gemini_timing_request_lane),
+    ("Gemini 시간 요청 빌더에 힌트가 없다", check_gemini_timing_builder_lane),
     ("용어집은 설정 밖, DB만 안다", check_glossary_stays_local),
     ("autojunk=False", check_autojunk),
     ("금지 의존성", check_banned_imports),

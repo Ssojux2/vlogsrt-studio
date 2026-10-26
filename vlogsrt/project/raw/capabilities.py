@@ -16,12 +16,16 @@ from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 
+from vlogsrt.project.raw import config as raw_config
 from vlogsrt.project.raw.config import (
     CONFIRMED_REGISTRY_REVISION,
+    TIMING_RESPONSE_FORMAT_WORD_INFO,
+    RawGeminiTranscribeProfile,
     RawModelRegistry,
     RawModelRoles,
     RawPricingSnapshot,
     RawWorkflowConfig,
+    gemini_transcribe_price_per_minute,
     validate_raw_workflow_config,
 )
 
@@ -33,6 +37,8 @@ ROLE_TIMING = "timing"
 
 TRANSCRIPTION_ENDPOINT = "audio.transcriptions"
 """두 역할이 함께 쓰는 엔드포인트 — 전송 경계의 연산 이름과 같다."""
+INTERACTIONS_ENDPOINT = "interactions"
+"""Gemini 3.5 Transcribe의 엔드포인트(D92) — `POST /v1beta/interactions`."""
 
 # 기능 이름은 `<요청 칸>:<값>` 또는 요청 칸 이름 그대로다. 역할별 목록은 모델의
 # 절대 능력이 아니라 **그 역할로 쓸 때**의 확인 상태다 — 같은 모델이 다른 역할에
@@ -49,6 +55,13 @@ FEATURE_WORD_TIMES = "timestamp_granularities:word"
 FEATURE_SRT = "response_format:srt"
 FEATURE_VTT = "response_format:vtt"
 FEATURE_LOGPROBS = "logprobs"
+FEATURE_VERBATIM = "mode:verbatim"
+FEATURE_SMART_MODE = "mode:smart"
+FEATURE_LANGUAGE_CODES = "language_codes"
+"""Gemini의 언어 잠금(`ko-KR`) — 힌트가 아니다(D77·D92)."""
+FEATURE_CUSTOM_VOCABULARY = "custom_vocabulary"
+FEATURE_SYSTEM_INSTRUCTION = "system_instruction"
+FEATURE_DIARIZATION = "speaker_diarization"
 
 _TEXT_CONFIRMED = (FEATURE_JSON, FEATURE_LANGUAGES, FEATURE_KEYWORDS, FEATURE_PROMPT)
 _TEXT_UNCONFIRMED = (
@@ -75,6 +88,33 @@ _TIMING_UNCONFIRMED = (
     FEATURE_LANGUAGES,
     FEATURE_KEYWORDS,
     FEATURE_PROMPT,
+    FEATURE_LOGPROBS,
+)
+
+
+# Gemini 3.5 Transcribe(D92, 2026-10-26 문서): verbatim + 단어 시각 + 언어 잠금만 확인했다.
+# smart 방식과 custom_vocabulary는 공급자가 단어 시각과 함께 받지 않는다. 힌트(prompt·
+# system_instruction)는 규칙 6이 막는다. 세그먼트 시각·srt·vtt는 이 모델에 없다.
+_GEMINI_TIMING_CONFIRMED = (
+    f"response_format:{TIMING_RESPONSE_FORMAT_WORD_INFO}",
+    FEATURE_VERBATIM,
+    FEATURE_WORD_TIMES,
+    FEATURE_LANGUAGE_CODES,
+)
+_GEMINI_TIMING_UNCONFIRMED = (
+    FEATURE_SMART_MODE,
+    FEATURE_CUSTOM_VOCABULARY,
+    FEATURE_PROMPT,
+    FEATURE_SYSTEM_INSTRUCTION,
+    FEATURE_DIARIZATION,
+    FEATURE_SEGMENT_TIMES,
+    FEATURE_SRT,
+    FEATURE_VTT,
+    FEATURE_VERBOSE_JSON,
+    FEATURE_JSON,
+    FEATURE_KEYWORDS,
+    FEATURE_LANGUAGES,
+    FEATURE_LANGUAGE,
     FEATURE_LOGPROBS,
 )
 
@@ -124,11 +164,47 @@ class ModelCapabilitySnapshot:
 
 
 def confirmed_capability_snapshots() -> tuple[ModelCapabilitySnapshot, ...]:
-    """2026-10-02 공식 문서로 확인된 역할별 스냅샷 둘 — 모델은 설정 기본값에서 온다.
+    """2026-10-02 공식 문서로 확인된 역할별 **기본** 스냅샷 둘(OpenAI) — 모델은 설정 기본값이다.
 
-    리터럴을 여기 두지 않기 위해 `RawModelRoles()`의 확정 기본값을 그대로 쓴다.
-    새 모델을 등록하려면 문서를 다시 확인하고 설정 기본값·리비전을 함께 내린다.
+    리터럴을 여기 두지 않기 위해 `RawModelRoles()`의 확정 기본값을 그대로 쓴다. 등록된 다른 엔진
+    (Gemini 시간 엔진, D92)까지 보려면 `all_capability_snapshots`.
     """
+    return _openai_snapshots()
+
+
+def all_capability_snapshots() -> tuple[ModelCapabilitySnapshot, ...]:
+    """기본 둘 + 등록된 Gemini 시간 엔진(2026-10-26, D92) — 요청 조합 확인은 여기서 찾는다."""
+    return (*_openai_snapshots(), *map(_gemini_timing_snapshot, _gemini_profiles()))
+
+
+def _gemini_profiles() -> tuple[RawGeminiTranscribeProfile, ...]:
+    return tuple(raw_config.GEMINI_TRANSCRIBE_PROFILES.values())
+
+
+def _gemini_timing_snapshot(profile: RawGeminiTranscribeProfile) -> ModelCapabilitySnapshot:
+    pricing = RawPricingSnapshot(
+        checked_at=profile.pricing_checked_at,
+        timing_per_minute=profile.audio_input_per_minute + profile.text_output_per_minute,
+    )
+    return ModelCapabilitySnapshot(
+        model_id=profile.model,
+        role=ROLE_TIMING,
+        endpoint=INTERACTIONS_ENDPOINT,
+        requested_response_format=TIMING_RESPONSE_FORMAT_WORD_INFO,
+        confirmed_supported_features=_GEMINI_TIMING_CONFIRMED,
+        unsupported_or_unverified_features=_GEMINI_TIMING_UNCONFIRMED,
+        docs_checked_at=profile.pricing_checked_at,
+        registry_revision=profile.pricing_revision,
+        pricing_snapshot=pricing,
+        deprecation_notice_date=None,
+        shutdown_date=None,
+        source_urls=profile.source_urls,
+        account_access_status=profile.account_access_status,
+        integration_test_status=profile.integration_test_status,
+    )
+
+
+def _openai_snapshots() -> tuple[ModelCapabilitySnapshot, ...]:
     roles = RawModelRoles()
     registry = RawModelRegistry()
     pricing = RawPricingSnapshot()
@@ -169,12 +245,25 @@ def confirmed_capability_snapshots() -> tuple[ModelCapabilitySnapshot, ...]:
 
 
 def capability_snapshot_for_role(role: str) -> ModelCapabilitySnapshot:
-    """역할의 확인된 스냅샷 — 모르는 역할은 등록표 밖이다."""
+    """역할의 **기본** 스냅샷(OpenAI) — 모르는 역할은 등록표 밖이다."""
     for snapshot in confirmed_capability_snapshots():
         if snapshot.role == role:
             return snapshot
     raise UnverifiedModelCapability(
         f"역할 {role!r}은(는) 확인된 등록표에 없다 — 역할은 문구·시간 둘뿐이다"
+    )
+
+
+def capability_snapshot(role: str, model: str) -> ModelCapabilitySnapshot:
+    """역할·모델의 확인된 스냅샷 — 없으면 조용히 다른 모델로 넘어가지 않고 실패한다."""
+    for snapshot in all_capability_snapshots():
+        if snapshot.role == role and snapshot.model_id == model:
+            return snapshot
+    default = capability_snapshot_for_role(role)
+    raise UnverifiedModelCapability(
+        f"{role} 역할의 확인된 모델은 {default.model_id!r}(또는 등록된 엔진)인데"
+        f" 요청은 {model!r}이다 — 조용한 모델 교체는 없다. 바꾸려면 문서를 다시 확인하고"
+        " 새 등록표 리비전을 내려라"
     )
 
 
@@ -187,12 +276,7 @@ def confirm_request_combo(
     넘어가는 길이 없다(§11.9). 응답 형식과 기능은 요청에 실제로 실리는 것만
     확인 받는다.
     """
-    snapshot = capability_snapshot_for_role(role)
-    if snapshot.model_id != model:
-        raise UnverifiedModelCapability(
-            f"{role} 역할의 확인된 모델은 {snapshot.model_id!r}인데 요청은 {model!r}이다 — "
-            "바꾸려면 문서를 다시 확인하고 새 등록표 리비전을 내려라"
-        )
+    snapshot = capability_snapshot(role, model)
     wanted = (f"response_format:{response_format}", *features)
     refused = [
         feature for feature in wanted if feature in snapshot.unsupported_or_unverified_features
@@ -240,14 +324,31 @@ def preflight_online_transcription(
             "미루는 우회는 없다"
         )
     for role in roles:
-        snapshot = capability_snapshot_for_role(role)
         configured = config.models.text_model if role == ROLE_TEXT else config.models.timing_model
-        if configured != snapshot.model_id:
-            raise UnverifiedModelCapability(
-                f"{role} 역할이 확인된 모델({snapshot.model_id})과 다른 {configured!r}을(를) "
-                "가리킨다 — 조용한 모델 교체는 없다"
+        snapshot = capability_snapshot(role, configured)
+        if role == ROLE_TIMING:
+            _require_timing_lifecycle(config, snapshot, on)
+
+
+def _require_timing_lifecycle(
+    config: RawWorkflowConfig, snapshot: ModelCapabilitySnapshot, on: date
+) -> None:
+    """시간 엔진의 수명주기 — whisper는 종료 예정일, Gemini는 자기 단가 재확인 기한(D92).
+
+    Gemini는 whisper의 종료일에 막히지 않는다. 그 대신 단가 재확인 기한이 지나면 가격 미정이라
+    새 온라인 작업을 닫는다(0원으로 부르지 않는다, D84).
+    """
+    profile = raw_config.GEMINI_TRANSCRIBE_PROFILES.get(snapshot.model_id)
+    if profile is not None:
+        if gemini_transcribe_price_per_minute(profile, today=on) is None:
+            raise TimingProviderUnavailable(
+                f"시간 엔진({profile.label})의 단가 재확인 기한"
+                f" {profile.price_valid_through.isoformat()}이 지났다(on={on.isoformat()}) —"
+                " 가격표를 다시 확인해 등록표를 고치기 전까지 새 온라인 작업을 닫는다(D92·D84)"
             )
-    if ROLE_TIMING in roles and registry.blocks_online_timing(on):
+        return
+    registry = config.registry
+    if registry.blocks_online_timing(on):
         raise TimingProviderUnavailable(
             f"시간 제공자({config.models.timing_model})가 종료 예정일 "
             f"{registry.timing_shutdown_date.isoformat()}에 도달했다(on={on.isoformat()}) — "
@@ -256,7 +357,15 @@ def preflight_online_transcription(
 
 
 def price_per_minute(role: str) -> Decimal:
-    """역할의 확인된 분당 요금 — 미확인 가격을 0원으로 계산하지 않기 위한 값이다."""
+    """역할의 **기본**(OpenAI) 확인된 분당 요금 — 미확인 가격을 0원으로 계산하지 않기 위한 값."""
     snapshot = capability_snapshot_for_role(role)
     pricing = snapshot.pricing_snapshot
     return pricing.text_per_minute if role == ROLE_TEXT else pricing.timing_per_minute
+
+
+def timing_price_per_minute(model: str, on: date) -> Decimal | None:
+    """시간 엔진의 분당 요금(D92) — Gemini는 재확인 기한이 지나면 None(가격 미정, 0원이 아니다)."""
+    profile = raw_config.GEMINI_TRANSCRIBE_PROFILES.get(model)
+    if profile is not None:
+        return gemini_transcribe_price_per_minute(profile, today=on)
+    return capability_snapshot(ROLE_TIMING, model).pricing_snapshot.timing_per_minute

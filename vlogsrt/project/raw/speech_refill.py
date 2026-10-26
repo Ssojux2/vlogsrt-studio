@@ -41,7 +41,7 @@ from vlogsrt.project.raw.analysis_approval import (
 )
 from vlogsrt.project.raw.analysis_config import RawUnderstandingSettings
 from vlogsrt.project.raw.analysis_workflow import ApprovedPhaseAsrProvider, CountingAsrGate
-from vlogsrt.project.raw.caption_provider import TransportTextProvider, TransportTimingProvider
+from vlogsrt.project.raw.caption_provider import TransportTextProvider, timing_provider_for
 from vlogsrt.project.raw.config import (
     SOURCE_TEXT_SETTINGS,
     RawWorkflowConfig,
@@ -629,7 +629,12 @@ def _timing_provider(
     """whisper 경계 — 바깥에서 조각·PCM, 안쪽에서 1단계 승인 문·예약(상한 = 새로 살 조각 수)."""
     sender, cfg = _transport_pair(transport)
     inner = ApprovedPhaseAsrProvider(
-        inner=TransportTimingProvider(sender=sender, cfg=cfg),
+        inner=timing_provider_for(
+            plan.workflow,
+            sender=sender,
+            cfg=cfg,
+            gemini_client=getattr(transport, "timing_client", None),
+        ),
         workflow=plan.workflow,
         understanding=RawUnderstandingSettings(),
         audio=audio,

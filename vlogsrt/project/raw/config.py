@@ -57,7 +57,27 @@ STAGE1_TIMESTAMP_GRANULARITIES = ("segment", "word")
 `stage1_timing_view`가 요청에만 얹고 열쇠는 저장된 설정으로 잰다."""
 
 TIMESTAMP_GRANULARITIES_ALLOWED = (TIMESTAMP_GRANULARITIES_SEGMENT, STAGE1_TIMESTAMP_GRANULARITIES)
-"""계약이 받는 입자 조합 — 세그먼트만, 또는 세그먼트와 단어. 단어만은 골격이 없다."""
+"""whisper 계약이 받는 입자 조합 — 세그먼트만, 또는 세그먼트와 단어. 단어만은 골격이 없다."""
+
+TIMING_PROVIDER_GEMINI_WORD_INFO = "gemini_transcribe_word_info"
+"""시간 제공자 어댑터 — Gemini 3.5 Transcribe의 단어 시각(W-31c, D92)."""
+TIMING_RESPONSE_FORMAT_WORD_INFO = "word_info"
+"""Gemini 시간 경로의 응답 형식 — 단어 `start_offset`·`end_offset`이 줄 경계의 원천이다(D92)."""
+TIMESTAMP_GRANULARITIES_WORD = ("word",)
+"""Gemini 엔진의 입자 — 단어 시각만 있고, 줄은 단어 경계에서 묶는다(`word_cues`, D92)."""
+TIMING_PROVIDER_CONTRACTS: Mapping[str, tuple[str, tuple[tuple[str, ...], ...]]] = MappingProxyType(
+    {
+        TIMING_PROVIDER_WHISPER_VERBOSE_JSON: (
+            TIMING_RESPONSE_FORMAT_VERBOSE_JSON,
+            TIMESTAMP_GRANULARITIES_ALLOWED,
+        ),
+        TIMING_PROVIDER_GEMINI_WORD_INFO: (
+            TIMING_RESPONSE_FORMAT_WORD_INFO,
+            (TIMESTAMP_GRANULARITIES_WORD,),
+        ),
+    }
+)
+"""시간 제공자 → (응답 형식, 받는 입자 조합) — 이 짝 밖의 계약은 동결 검사가 거부한다."""
 
 CONFIRMED_REGISTRY_REVISION = "openai-caption-2026-10-02-v1"
 """2026-10-02 공식 문서로 확인한 등록표 리비전 — 아래 확정값들의 열쇠다."""
@@ -766,6 +786,9 @@ class RawGeminiTranscribeProfile:
     inline_request_max_bytes: int = 20_000_000
     audio_input_per_minute: Decimal = Decimal("0.003")
     text_output_per_minute: Decimal = Decimal("0.002")
+    input_per_mtok: Decimal = Decimal("2")
+    output_per_mtok: Decimal = Decimal("12")
+    """영수증 단가 — 응답이 말한 토큰을 이 값으로 계산한다(분당 값은 견적용, 같은 가격표 칸)."""
     currency: str = "USD"
     pricing_checked_at: date = date(2026, 10, 26)
     pricing_revision: str = "google-gemini-3-5-transcribe-2026-10-26"
@@ -785,12 +808,120 @@ class RawGeminiTranscribeProfile:
 GEMINI_TRANSCRIBE_PROFILE = RawGeminiTranscribeProfile()
 """Gemini 3.5 Transcribe — 분당 약 $0.005(오디오 $0.003 + 글자 $0.002), 2026-10-26 확인."""
 
+GEMINI_TRANSCRIBE_PROFILES: Mapping[str, RawGeminiTranscribeProfile] = MappingProxyType(
+    {GEMINI_TRANSCRIBE_PROFILE.model: GEMINI_TRANSCRIBE_PROFILE}
+)
+"""모델 이름 → 시간 엔진 프로파일(읽기 전용) — 시간 역할에 설 수 있는 Gemini는 이것뿐이다."""
+
+TIMING_ENGINE_WHISPER = "whisper"
+TIMING_ENGINE_GEMINI = "gemini"
+TEXT_PASS_GATE = "gate"
+"""다른 귀 글자가 D37 게이트를 지나면 자막 글자를 바꾼다(whisper 원본)."""
+TEXT_PASS_CANDIDATE = "candidate"
+"""다른 귀 글자는 후보·「확인 필요」로만 남는다(Gemini 원본, D92 — 글자와 시각이 한 응답이다)."""
+
+
+@dataclass(frozen=True)
+class TimingEngine:
+    """1단계 시간 엔진 하나(D92) — 모델과 그 계약 짝, 그리고 엔진마다 다른 1단계 동작.
+
+    `rescue`는 D78 다시 묻기(온도를 올려 같은 엔진에 다시 묻기)를 받는가, `text_pass`는 다른 귀
+    글자를 어떻게 쓰는가다. 엔진은 원본마다 고정된다(W-31d) — 바꾸는 길은 「다시 듣기」뿐이다.
+    """
+
+    key: str
+    model: str
+    label: str
+    provider: str
+    response_format: str
+    granularities: tuple[str, ...]
+    rescue: bool
+    text_pass: str
+
+
+TIMING_ENGINES: Mapping[str, TimingEngine] = MappingProxyType(
+    {
+        TIMING_ENGINE_WHISPER: TimingEngine(
+            key=TIMING_ENGINE_WHISPER,
+            model=RawModelRoles().timing_model,
+            label="whisper-1",
+            provider=TIMING_PROVIDER_WHISPER_VERBOSE_JSON,
+            response_format=TIMING_RESPONSE_FORMAT_VERBOSE_JSON,
+            granularities=TIMESTAMP_GRANULARITIES_SEGMENT,
+            rescue=True,
+            text_pass=TEXT_PASS_GATE,
+        ),
+        TIMING_ENGINE_GEMINI: TimingEngine(
+            key=TIMING_ENGINE_GEMINI,
+            model=GEMINI_TRANSCRIBE_PROFILE.model,
+            label=GEMINI_TRANSCRIBE_PROFILE.label,
+            provider=TIMING_PROVIDER_GEMINI_WORD_INFO,
+            response_format=TIMING_RESPONSE_FORMAT_WORD_INFO,
+            granularities=TIMESTAMP_GRANULARITIES_WORD,
+            rescue=False,
+            text_pass=TEXT_PASS_CANDIDATE,
+        ),
+    }
+)
+"""엔진 열쇠 → 엔진. 기본(저장된 설정)은 whisper다 — 원본마다 고르는 일은 W-31d가 한다."""
+
+
+def timing_engine_for_model(model: str) -> TimingEngine:
+    for engine in TIMING_ENGINES.values():
+        if engine.model == model:
+            return engine
+    raise ValueError(f"시간 엔진 표에 없는 모델이다: {model!r}")
+
+
+def timing_engine_view(config: RawWorkflowConfig, engine: TimingEngine) -> RawWorkflowConfig:
+    """그 엔진으로 듣는 설정 — 이미 그 엔진이면 **같은 객체**다(열쇠·지문이 바이트 그대로).
+
+    Gemini는 모델·시간 제공자·응답 형식·입자를 함께 바꾼다(한 짝 — `engine_problems`). 저장된 설정의
+    칸은 늘지 않는다(`CONFIG_PINNED_FIELDS`)."""
+    if config.models.timing_model == engine.model:
+        return config
+    caption = replace(
+        config.caption,
+        timing_provider=engine.provider,
+        timing_response_format=engine.response_format,
+        timestamp_granularities=engine.granularities,
+    )
+    return replace(
+        config, models=replace(config.models, timing_model=engine.model), caption=caption
+    )
+
+
+def engine_problems(config: RawWorkflowConfig) -> list[str]:
+    """시간 모델과 시간 제공자는 엔진 표의 한 짝이어야 한다(D92).
+
+    표에 없는 모델은 여기서 보지 않는다 — 사전 검사(`preflight_online_transcription`)가 「조용한
+    모델 교체」로 닫는다. Gemini 제공자 계약에 Gemini 엔진이 아닌 모델이 서는 것도 거부한다.
+    """
+    model = config.models.timing_model
+    try:
+        engine = timing_engine_for_model(model)
+    except ValueError:
+        if config.caption.timing_provider == TIMING_PROVIDER_GEMINI_WORD_INFO:
+            return [f"Gemini 단어 시각 계약에 Gemini 전사 엔진이 아닌 {model!r}가 섰다"]
+        return []
+    if config.caption.timing_provider != engine.provider:
+        return [
+            f"시간 모델 {engine.model!r}의 제공자는 {engine.provider}인데 계약은"
+            f" {config.caption.timing_provider}다 — 모델과 계약은 함께 바뀐다"
+        ]
+    return []
+
 
 def gemini_transcribe_profile_problems(profile: RawGeminiTranscribeProfile) -> list[str]:
     """프로파일의 자기 일관성 — 단가는 유한한 양수, 방식·시각·한도·엔드포인트는 쓸 수 있는 값."""
     problems = [
         f"{name}이(가) 유한한 양수가 아니다 — 미확인 단가를 무료로 두지 마라"
-        for name in ("audio_input_per_minute", "text_output_per_minute")
+        for name in (
+            "audio_input_per_minute",
+            "text_output_per_minute",
+            "input_per_mtok",
+            "output_per_mtok",
+        )
         if not _positive_decimal(getattr(profile, name))
     ]
     if not profile.model.startswith(GEMINI_MODEL_PREFIX):
@@ -1043,6 +1174,7 @@ def validate_raw_workflow_config(config: RawWorkflowConfig) -> None:
         *registry_problems(config.registry),
         *pricing_problems(config.pricing),
         *caption_problems(config.caption),
+        *engine_problems(config),
         *network_problems(config),
     ]
     if problems:
@@ -1077,11 +1209,19 @@ def role_problems(models: RawModelRoles) -> list[str]:
         for role, model in (("문구", models.text_model), ("시간", models.timing_model))
         if analysis_provider(model) == ANALYSIS_PROVIDER_ANTHROPIC
     ]
-    problems += [
-        f"{role} 모델에 Gemini를 쓸 수 없다 — Gemini는 영상 분석 역할만 맡는다(D86): {model!r}"
-        for role, model in (("문구", models.text_model), ("시간", models.timing_model))
-        if analysis_provider(model) == ANALYSIS_PROVIDER_GOOGLE
-    ]
+    if analysis_provider(models.text_model) == ANALYSIS_PROVIDER_GOOGLE:
+        problems.append(
+            "문구 모델에 Gemini를 쓸 수 없다 — Gemini는 영상 분석 역할만 맡는다(D86):"
+            f" {models.text_model!r}"
+        )
+    if (
+        analysis_provider(models.timing_model) == ANALYSIS_PROVIDER_GOOGLE
+        and models.timing_model not in GEMINI_TRANSCRIBE_PROFILES
+    ):
+        problems.append(
+            "시간 모델에 Gemini를 쓸 수 없다 — Gemini는 영상 분석 역할만 맡는다(D86, 시간"
+            f" 역할은 등록된 전사 엔진만 — D92): {models.timing_model!r}"
+        )
     return problems + _analysis_profile_problems(models.luna_model)
 
 
@@ -1160,23 +1300,35 @@ def _timing_language_problems(languages: tuple[str, ...]) -> list[str]:
     return [f"예상 언어 첫째 {first!r}는 whisper 언어 칸(ISO 639-1 두 글자 소문자)이 아니다"]
 
 
+def _timing_contract_problems(caption: RawCaptionContract) -> list[str]:
+    """시간 제공자·응답 형식·입자는 한 짝이다(D92) — whisper 세그먼트 또는 Gemini 단어."""
+    contract = TIMING_PROVIDER_CONTRACTS.get(caption.timing_provider)
+    if contract is None:
+        known = " · ".join(TIMING_PROVIDER_CONTRACTS)
+        return [f"시간 제공자는 {known} 가운데 하나여야 한다: {caption.timing_provider!r}"]
+    response_format, granularities = contract
+    problems: list[str] = []
+    if caption.timing_response_format != response_format:
+        problems.append(f"{caption.timing_provider}의 시간 응답 형식은 {response_format}여야 한다")
+    if caption.timestamp_granularities not in granularities:
+        problems.append(
+            "시간 입자는 세그먼트, 또는 세그먼트와 단어뿐이다 — 단어만으로는 골격이 없다(D73)"
+            if caption.timing_provider == TIMING_PROVIDER_WHISPER_VERBOSE_JSON
+            else "Gemini 시간 입자는 단어(`word`)뿐이다 — 줄은 단어 경계에서 묶는다(D92)"
+        )
+    return problems
+
+
 def caption_problems(caption: RawCaptionContract) -> list[str]:
     """요청 형식·힌트·금지 조건 — 호출 전에 차단할 조합을 데이터 단계에서 막는다(§11.4)."""
     problems: list[str] = []
     if caption.profile != CAPTION_PROFILE_LATEST_OPENAI_SRT:
         problems.append(f"자막 프리셋은 {CAPTION_PROFILE_LATEST_OPENAI_SRT}여야 한다")
-    if caption.timing_provider != TIMING_PROVIDER_WHISPER_VERBOSE_JSON:
-        problems.append(f"시간 제공자는 {TIMING_PROVIDER_WHISPER_VERBOSE_JSON}여야 한다")
+    problems += _timing_contract_problems(caption)
     if caption.text_response_format != TEXT_RESPONSE_FORMAT_JSON:
         problems.append(
             f"문구 응답 형식은 {TEXT_RESPONSE_FORMAT_JSON}여야 한다 — "
             "srt·vtt는 문구 모델에 못 붙인다"
-        )
-    if caption.timing_response_format != TIMING_RESPONSE_FORMAT_VERBOSE_JSON:
-        problems.append(f"시간 응답 형식은 {TIMING_RESPONSE_FORMAT_VERBOSE_JSON}여야 한다")
-    if caption.timestamp_granularities not in TIMESTAMP_GRANULARITIES_ALLOWED:
-        problems.append(
-            "시간 입자는 세그먼트, 또는 세그먼트와 단어뿐이다 — 단어만으로는 골격이 없다(D73)"
         )
     # 빈 languages·keywords는 합법이다 — "힌트 없음"이지 무발화가 아니다(§11.4,
     # 코디네이터 재결). 요청 어댑터는 빈 배열을 필드째 빼고 보낸다.

@@ -35,8 +35,10 @@ from vlogsrt.project.raw.analysis_config import RawUnderstandingSettings
 from vlogsrt.project.raw.config import (
     GEMINI_ANALYSIS_PROFILES,
     GEMINI_MAX_OUTPUT_TOKENS_LIMIT,
+    GEMINI_TRANSCRIBE_PROFILES,
     PRICE_TOKEN_UNIT,
     RawGeminiAnalysisProfile,
+    gemini_transcribe_price_per_minute,
 )
 from vlogsrt.project.request_accounting import MeasuredUsage
 
@@ -287,3 +289,53 @@ def _decimal_text(value: Decimal) -> str:
     if value == 0:
         return "0"
     return format(value.normalize(), "f")
+
+
+# ─────────────────────────────────────────────────────────────
+#  시간 엔진 Gemini 3.5 Transcribe의 영수증(W-31c, D92)
+# ─────────────────────────────────────────────────────────────
+
+
+def measure_gemini_transcribe_usage(meta: Any, response: object, *, on: date) -> MeasuredUsage:
+    """관찰자가 본 Interactions 전사 응답 → 실측 사용량. 못 매기면 가격 미정, 토큰은 남긴다.
+
+    입력 = `usage.total_input_tokens`(오디오), 출력 = `usage.total_output_tokens`(글자) — 등록표의
+    100만 토큰당 단가($2 · $12)로 계산한다(가격표의 분당 값과 같은 칸). 응답의 `model`이 고른 모델로
+    시작하지 않으면 다른 모델이 답했으니 매기지 않는다. 재확인 기한이 지나도 가격 미정이다. 칸
+    이름은 문서 모양이다 — 사람의 녹화(H1)가 다르면 여기만 고친다(그때까지 다르면 가격 미정으로
+    남는다).
+    """
+    model = str(getattr(meta, "model", ""))
+    body: Mapping[str, Any] = response if isinstance(response, Mapping) else {}
+    profile = GEMINI_TRANSCRIBE_PROFILES.get(model)
+    usage = _transcribe_usage(body.get("usage"))
+    common: dict[str, Any] = {
+        "model": model,
+        "pricing_revision": profile.pricing_revision if profile is not None else "",
+        "input_tokens": usage[0] if usage is not None else None,
+        "output_tokens": usage[1] if usage is not None else None,
+        "provider_request_id": str(body.get("id") or "") or None,
+    }
+    if profile is None:
+        return MeasuredUsage(**common, unpriced_reason=UNPRICED_UNKNOWN_MODEL)
+    if usage is None:
+        return MeasuredUsage(**common, unpriced_reason=UNPRICED_INVALID_USAGE)
+    answered = body.get("model")
+    if isinstance(answered, str) and not answered.startswith(model):
+        return MeasuredUsage(**common, unpriced_reason=UNPRICED_MODEL_MISMATCH)
+    if gemini_transcribe_price_per_minute(profile, today=on) is None:
+        return MeasuredUsage(**common, unpriced_reason=UNPRICED_PRICE_EXPIRED)
+    cost = (
+        Decimal(usage[0]) * profile.input_per_mtok + Decimal(usage[1]) * profile.output_per_mtok
+    ) / PRICE_TOKEN_UNIT
+    return MeasuredUsage(**common, cost_usd=_decimal_text(cost))
+
+
+def _transcribe_usage(raw: object) -> tuple[int, int] | None:
+    """`usage` → (입력, 출력). 음수·문자열·빠진 칸은 None(가격 미정)이다."""
+    if not isinstance(raw, Mapping):
+        return None
+    total_in, total_out = raw.get("total_input_tokens"), raw.get("total_output_tokens")
+    if not (_count(total_in) and _count(total_out)):
+        return None
+    return total_in, total_out

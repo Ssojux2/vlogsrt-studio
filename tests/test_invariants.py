@@ -3978,3 +3978,24 @@ def test_word_cue_layers_stay_pure(
 
 def test_the_real_word_cue_layers_are_pure() -> None:
     assert check_invariants.check_word_cues_stays_pure() == []
+
+
+def test_a_hint_in_the_gemini_timing_builder_is_caught(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    clean = (
+        "def gemini_timing_request(chunk, *, settings):\n"
+        "    return Request(model='m', chunk=chunk, language_codes=('ko-KR',))\n"
+    )
+    _fake_source_tree(monkeypatch, tmp_path, {CAPTION_PROVIDER: clean})
+    assert check_invariants.check_gemini_timing_builder_lane() == []
+    dirty = clean.replace("language_codes=", "prompt='여행', language_codes=")
+    (tmp_path / CAPTION_PROVIDER).write_text(dirty, encoding="utf-8")
+    (failure,) = check_invariants.check_gemini_timing_builder_lane()
+    assert "prompt" in failure
+    (tmp_path / CAPTION_PROVIDER).write_text("def other():\n    pass\n", encoding="utf-8")
+    assert check_invariants.check_gemini_timing_builder_lane()
+
+
+def test_the_real_gemini_timing_builder_has_no_hint() -> None:
+    assert check_invariants.check_gemini_timing_builder_lane() == []

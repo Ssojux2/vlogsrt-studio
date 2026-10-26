@@ -16,26 +16,39 @@ from __future__ import annotations
 
 import hashlib
 import math
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import date
+from fractions import Fraction
 from pathlib import Path
-from typing import Protocol, TypeGuard
+from typing import Any, Protocol, TypeGuard
 
 from vlogsrt import log
 from vlogsrt.config import Config
+from vlogsrt.env import ANALYSIS_GEMINI_KEY_ENV
 from vlogsrt.models import Chunk
-from vlogsrt.project.raw import capabilities
+from vlogsrt.project.raw import capabilities, word_cues
 from vlogsrt.project.raw.config import (
+    GEMINI_TRANSCRIBE_PROFILES,
     TIMESTAMP_GRANULARITIES_ALLOWED,
     TIMING_RESPONSE_TOLERANCE,
+    WORD_CUE_SETTINGS,
     RawWorkflowConfig,
+    WordCueSettings,
+    gemini_transcribe_language_codes,
+)
+from vlogsrt.project.raw.gemini_transcribe_parse import (
+    FALLBACK,
+    ParsedTranscript,
+    parse_transcription,
 )
 from vlogsrt.transcribe import (
     CAPTION_TEXT_KIND,
     CAPTION_TIMING_KIND,
     AudioTranscriptionRequest,
+    GeminiTranscriptionRequest,
     TranscriptionSender,
+    request_gemini_transcription,
 )
 
 TIMED_TIME_UNIT = "seconds"
@@ -677,6 +690,174 @@ class TransportTimingProvider:
             chunk_duration=chunk.duration,
             chunk_offset=chunk.offset,
         )
+
+
+def gemini_timing_request(
+    chunk: Chunk, *, settings: RawWorkflowConfig
+) -> GeminiTranscriptionRequest:
+    """Gemini 시간 엔진 요청(D92) — 오디오·언어 잠금·verbatim·단어 시각뿐이다(규칙 6).
+
+    등록된 Gemini 전사 엔진이 아닌 설정은 보내기 전에 닫는다(whisper 설정이 이 문에 오지 않는다).
+    언어 잠금은 계약의 예상 언어(`ko`)를 등록표로 옮긴 값(`ko-KR`)이다 — 힌트가 아니다.
+    """
+    contract, model = settings.caption, settings.models.timing_model
+    profile = GEMINI_TRANSCRIBE_PROFILES.get(model)
+    if profile is None:
+        raise capabilities.UnverifiedModelCapability(
+            f"시간 모델 {model!r}은(는) 등록된 Gemini 전사 엔진이 아니다 — 이 문으로 보내지 않는다"
+        )
+    capabilities.confirm_request_combo(
+        role=capabilities.ROLE_TIMING,
+        model=model,
+        response_format=contract.timing_response_format,
+        features=(
+            capabilities.FEATURE_VERBATIM,
+            *(f"timestamp_granularities:{item}" for item in contract.timestamp_granularities),
+            capabilities.FEATURE_LANGUAGE_CODES,
+        ),
+    )
+    return GeminiTranscriptionRequest(
+        model=model,
+        chunk=chunk,
+        language_codes=gemini_transcribe_language_codes(contract.languages, profile),
+        max_audio_seconds=profile.max_audio_seconds_with_word_times,
+        max_request_bytes=profile.inline_request_max_bytes,
+        mode=profile.mode,
+        granularities=contract.timestamp_granularities,
+    )
+
+
+def gemini_timed_transcript(
+    payload: object,
+    *,
+    binding: AudioChunkBinding,
+    model: str,
+    provider: str,
+    chunk: Chunk,
+    cue_settings: WordCueSettings = WORD_CUE_SETTINGS,
+) -> TimedTranscript:
+    """Gemini 응답 → whisper와 같은 모양의 `TimedTranscript`(D92).
+
+    줄은 단어 경계에서만 묶고(`word_cues`), 줄 시각은 엔진 단어 시각 그대로다. 받아 줄 수 없는
+    응답은 `MalformedCaptionResponse`(청크 하나의 보이는 실패)다. 센 것(자리 없는 글자·시각 없는
+    단어·닫은 끝·순서 어긋남·정렬 실패)은 경고로 남긴다 — 조용한 손질은 없다(규칙 9).
+    """
+    try:
+        parsed = parse_transcription(payload, chunk_duration=chunk.duration)
+        grouped = word_cues.group(parsed.words, cue_settings)
+    except ValueError as error:
+        raise MalformedCaptionResponse(f"Gemini 전사 응답을 받아 줄 수 없다: {error}") from error
+    _warn_counts(chunk.index, parsed, grouped)
+    segments = tuple(
+        TimedSegment(
+            index=index,
+            start=float(cue.start),
+            end=float(cue.end),
+            text=cue.text,
+            evidence_id=f"{binding.request_id}:{index}",
+        )
+        for index, cue in enumerate(grouped.cues)
+    )
+    edge = Fraction(repr(float(chunk.duration)))
+    return TimedTranscript(
+        binding=binding,
+        model=model,
+        provider=provider,
+        segments=segments,
+        chunk_offset=chunk.offset,
+        response=payload if isinstance(payload, Mapping) else None,
+        clamped_segments=tuple(
+            index
+            for index, cue in enumerate(grouped.cues)
+            if parsed.clamped_words and cue.end == edge
+        ),
+        words=tuple(
+            TimedWord(start=float(word.start), end=float(word.end), word=word.text)
+            for word in parsed.words
+            if word.start is not None and word.end is not None
+        ),
+    )
+
+
+def _warn_counts(index: int, parsed: ParsedTranscript, grouped: word_cues.CueGroup) -> None:
+    counted = [
+        (parsed.unplaced_chars, "단어가 덮지 못해 싣지 않은 글자"),
+        (parsed.untimed_words, "시각 없이 이웃 줄에 남긴 단어"),
+        (parsed.clamped_words, "청크 끝으로 닫은 단어 끝"),
+        (grouped.out_of_order, "앞 단어보다 일찍 시작한 단어"),
+    ]
+    notes = [f"{label} {count}개" for count, label in counted if count]
+    if parsed.alignment == FALLBACK:
+        notes.append("단어를 전체 글에서 차례로 찾지 못해 띄어 이었다")
+    if notes:
+        log.warn(f"Gemini 전사 조각 {index}: " + " · ".join(notes) + " (D92)")
+
+
+@dataclass(frozen=True, slots=True)
+class GeminiTranscribeTimingProvider:
+    """Gemini 3.5 Transcribe 시간 어댑터(D92) — 공개 문(`request_gemini_transcription`)으로만.
+
+    사전 검사 → 확인된 조합 → 청크 신원 재확인 → 문 → 해석 → 단어 묶기. 온도 손잡이가 없다 — 다시
+    묻기(D78)는 이 엔진에 없다(`RescueTimingProvider`가 아니다). 관찰자·취소는 whisper 전송과 같은
+    것을 받는다(`timing_provider_for`가 그 전송에서 옮겨 준다).
+    """
+
+    client: Any
+    observer: Any = None
+    cancellation: Callable[[], None] | None = None
+    cue_settings: WordCueSettings = WORD_CUE_SETTINGS
+
+    def timed_transcript(
+        self,
+        *,
+        binding: AudioChunkBinding,
+        chunk: Chunk,
+        settings: RawWorkflowConfig,
+        on: date,
+        stem: str = "",
+        source: str = "",
+    ) -> TimedTranscript:
+        capabilities.preflight_online_transcription(settings, on, roles=(capabilities.ROLE_TIMING,))
+        request = gemini_timing_request(chunk, settings=settings)
+        verify_chunk_binding(binding, chunk)
+        payload = request_gemini_transcription(
+            self.client,
+            request=request,
+            online=True,
+            observer=self.observer,
+            cancellation=self.cancellation,
+            stem=stem,
+            source=source,
+        )
+        return gemini_timed_transcript(
+            payload,
+            binding=binding,
+            model=request.model,
+            provider=settings.caption.timing_provider,
+            chunk=chunk,
+            cue_settings=self.cue_settings,
+        )
+
+
+def timing_provider_for(
+    workflow: RawWorkflowConfig, *, sender: Any, cfg: Any, gemini_client: Any
+) -> TimingProvider:
+    """설정의 시간 모델에 맞는 실제 제공자 — whisper는 전송 경계, Gemini는 Gemini 문(D92).
+
+    Gemini 클라이언트가 없으면 유료 호출 전에 키 이름을 대고 닫는다. 관찰자·취소는 whisper 전송이
+    가진 것을 그대로 옮긴다(영수증·취소가 한 길이다)."""
+    if workflow.models.timing_model in GEMINI_TRANSCRIBE_PROFILES:
+        if gemini_client is None:
+            raise capabilities.TimingProviderUnavailable(
+                f"Gemini 전사 엔진의 키가 없다 — .env에 {ANALYSIS_GEMINI_KEY_ENV}(결제 연결 키)를"
+                " 넣고 앱을 다시 켜세요"
+            )
+        return GeminiTranscribeTimingProvider(
+            client=gemini_client,
+            observer=getattr(sender, "observer", None),
+            cancellation=getattr(sender, "cancellation", None),
+        )
+    return TransportTimingProvider(sender=sender, cfg=cfg)
 
 
 @dataclass(frozen=True, slots=True)
