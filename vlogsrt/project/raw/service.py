@@ -3260,14 +3260,22 @@ class RawWorkspaceService:
         recorded = self._order_revision(root, order_revision_id)
         return set(_order_ids(recorded)) == set(_order_ids(latest))
 
-    def export_finalcut_timeline(self, root: Path, context: JobContext | None = None) -> Path:
+    def export_finalcut_timeline(
+        self, root: Path, context: JobContext | None = None, timeline_srt: Path | None = None
+    ) -> Path:
         """불러온 원본 전부를 태그 달린 타임라인 하나로 — 새 FCPXML 경로를 돌려준다(D56).
 
         모으고 대조하고 쓰는 일은 `finalcut_export`가 한다. 지우지 않으므로 미검토 자동
-        제외 관문이 없고, Final Cut은 열지 않는다(여는 것은 화면의 몫이다).
+        제외 관문이 없고, Final Cut은 열지 않는다(여는 것은 화면의 몫이다). `timeline_srt`면
+        같은 타임라인에 원본 자막 대신 그 SRT의 줄을 싣는다(D89) — 원본 자막의 시각 표지와 빠진
+        구간은 그 자막의 것이라 읽지 않는다.
         """
         from vlogsrt.project.raw import finalcut_export
+        from vlogsrt.project.raw import timeline_srt as srt_file
 
+        if timeline_srt is not None:
+            srt = srt_file.read(timeline_srt)
+            return finalcut_export.export(self, root, context, timeline_srt=srt).fcpxml
         flags = self._caption_timing_flags_or_reason(root)
         gaps = self._caption_gaps_or_unknown(root)
         outcome = finalcut_export.export(

@@ -784,16 +784,118 @@ def plan(
     )
 
 
+# ── 타임라인 SRT(W-30f, D89) ────────────────────────────────────────────
+
+
+@dataclass(frozen=True, slots=True)
+class _SpineSlot:
+    """스파인 클립 하나의 자리 — 몇째 원본의 몇째 클립이 시퀀스 프레임 어디에 얼마나 있나."""
+
+    source: int
+    clip: int
+    offset: int
+    frames: int
+
+
+def _spine_slots(document: TimelineDocument) -> list[_SpineSlot]:
+    """렌더링(`_event`)이 클립을 놓는 순서·자리 그대로 — 꺼진 클립도 시간을 차지한다."""
+    slots: list[_SpineSlot] = []
+    offset = 0
+    for source, plan in enumerate(document.sources):
+        for clip, frames in enumerate(_sequence_frames(plan)):
+            slots.append(_SpineSlot(source, clip, offset, frames))
+            offset += frames
+    return slots
+
+
+def _clip_piece(
+    plan: SourcePlan, slot: _SpineSlot, span: tuple[int, int], sequence_fd: Fraction, text: str
+) -> CaptionPiece:
+    """시퀀스 프레임 `[a, b)` → 그 클립 안 원본 프레임. 레이트가 다른 원본은 클립 안 **시각**이
+    시퀀스 시각으로 옮겨지므로(`scaleEnabled="0"`, D71) 시각으로 옮기고 원본 격자에 맞춘다(최소
+    1프레임, 클립 안)."""
+    clip, fd = plan.clips[slot.clip], plan.media.frame_duration
+    a, b = span[0] - slot.offset, span[1] - slot.offset
+    if fd == sequence_fd:
+        begin, finish = clip.start_frame + a, clip.start_frame + b
+    else:
+        begin = min(clip.start_frame + frame_nearest(a * sequence_fd, fd), clip.end_frame - 1)
+        finish = min(clip.start_frame + frame_nearest(b * sequence_fd, fd), clip.end_frame)
+        finish = max(finish, begin + 1)
+    return CaptionPiece(slot.clip, begin, finish, text, clip.enabled)
+
+
+def timeline_caption_pieces(
+    document: TimelineDocument, cues: Sequence[Cue]
+) -> tuple[tuple[tuple[CaptionPiece, ...], ...], CaptionCounts]:
+    """타임라인 시각(0초 = 시퀀스 처음)의 큐 → 원본마다 캡션 조각과 센 수.
+
+    `caption_pieces`와 한 규칙이다 — 시퀀스 프레임에 맞추고, 빈 글은 건너뛰고, 타임라인 밖 꼬리는
+    잘라 내고(통째로 밖이면 넣지 않는다), 덮는 스파인 클립마다 같은 글로 조각을 낸다. 글은 한 자도
+    고치지 않는다. 시각은 사람이 고친 SRT에서만 온다 — 격자에 맞추고 클립 좌표로 옮길 뿐이다.
+    """
+    sequence_fd = document.sequence_frame_duration
+    slots = _spine_slots(document)
+    total = slots[-1].offset + slots[-1].frames if slots else 0
+    whole = ClipPlan(0, total, True, ())
+    pieces: list[list[CaptionPiece]] = [[] for _ in document.sources]
+    counts: Counter[str] = Counter()
+    reach = 0
+    for cue in sorted(cues, key=lambda row: (row.start, row.end)):
+        counts["cues"] += 1
+        if not cue.text.strip():
+            counts["empty"] += 1
+            continue
+        start, end, repair = _snapped(cue, sequence_fd)
+        begin, finish = max(start, 0), min(end, total)
+        if finish <= begin:
+            counts["outside"] += 1
+            continue
+        _cut_pieces(cue, begin, finish, (whole,))  # 글 검사 — XML이 받지 않는 문자는 시각을 댄다
+        if repair is not None:
+            counts[repair] += 1
+        counts["tails"] += (begin, finish) != (start, end)
+        counts["overlaps"] += begin < reach
+        counts["line_issues"] += _line_issue(cue.text)
+        reach = max(reach, finish)
+        made = 0
+        for slot in slots:
+            span = (max(begin, slot.offset), min(finish, slot.offset + slot.frames))
+            if span[0] < span[1]:
+                plan = document.sources[slot.source]
+                pieces[slot.source].append(_clip_piece(plan, slot, span, sequence_fd, cue.text))
+                made += 1
+        counts.update(placed=1, pieces=made, split=made > 1)
+    return tuple(tuple(row) for row in pieces), CaptionCounts(**counts)
+
+
+def with_timeline_captions(
+    document: TimelineDocument, cues: Sequence[Cue]
+) -> tuple[TimelineDocument, CaptionCounts]:
+    """같은 문서(원본·클립·키워드·켜짐·포맷·레이트)에 원본 자막 대신 타임라인 SRT의 캡션만 싣는다.
+
+    원본마다의 `caption_counts`는 그 원본에 실린 조각 수만 센다(컷·원본을 넘는 줄은 여러 원본에
+    조각이 난다) — 줄 단위의 센 수는 함께 돌려주는 문서 전체 하나다.
+    """
+    pieces, counts = timeline_caption_pieces(document, cues)
+    sources = tuple(
+        replace(plan, captions=row, caption_counts=CaptionCounts(pieces=len(row)))
+        for plan, row in zip(document.sources, pieces, strict=True)
+    )
+    return replace(document, sources=sources), counts
+
+
 def _library_uri(bundle: Path) -> str:
     """번들은 디렉터리라 URI 끝에 `/`를 단다 — Final Cut 자신의 내보내기가 그렇게 적는다
     (이 기기 실물: `<library location="file:///Volumes/SubSSD/EU.fcpbundle/">`)."""
     return bundle.as_uri() + "/"
 
 
-def export_title(workspace_name: str, moment: datetime) -> str:
-    """새 이벤트·프로젝트 이름 — `vlogsrt · <작업공간> · <YYYY-MM-DD HH:MM>`."""
+def export_title(workspace_name: str, moment: datetime, tag: str | None = None) -> str:
+    """새 이벤트·프로젝트 이름 — `vlogsrt · <작업공간> · <YYYY-MM-DD HH:MM>[ · <꼬리>]`."""
     stamp = moment.strftime("%Y-%m-%d %H:%M")
-    return _TITLE_SEPARATOR.join((_TITLE_PREFIX, workspace_name, stamp))
+    parts = (_TITLE_PREFIX, workspace_name, stamp, *(() if tag is None else (tag,)))
+    return _TITLE_SEPARATOR.join(parts)
 
 
 def document_counts(document: TimelineDocument) -> dict[str, object]:
@@ -975,6 +1077,11 @@ def _sequence_frames(plan: SourcePlan) -> tuple[int, ...]:
     return plan.sequence_frames or tuple(clip.end_frame - clip.start_frame for clip in plan.clips)
 
 
+def sequence_frame_total(document: TimelineDocument) -> int:
+    """시퀀스 길이(시퀀스 프레임) — 스파인 클립 길이의 합이다(꺼진 클립도 든다)."""
+    return sum(sum(_sequence_frames(plan)) for plan in document.sources)
+
+
 def _local_ends(plan: SourcePlan, sequence_fd: Fraction) -> list[Fraction | None]:
     """클립마다 보이는 끝의 클립 안 시각 — 시작(원본 격자) + 시퀀스 길이. 같은 레이트는 None이다.
 
@@ -1113,8 +1220,7 @@ def _event(library: ET.Element, document: TimelineDocument, ids: list[tuple[str,
         if keyword in used:
             ET.SubElement(event, "keyword-collection", {"name": keyword})
     project = ET.SubElement(event, "project", {"name": document.title})
-    total = sum(sum(_sequence_frames(plan)) for plan in document.sources)
-    spine = _sequence(project, document, total)
+    spine = _sequence(project, document, sequence_frame_total(document))
     sequence_fd = document.sequence_frame_duration
     offset = 0
     for plan, pair in zip(document.sources, ids, strict=True):

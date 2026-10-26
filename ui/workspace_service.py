@@ -379,6 +379,16 @@ REVIEW_TAB_ID = "review-tab"
 FINALCUT_SEND_LABEL = "Final Cut으로 보내기"
 """원본 전체를 태그 달린 타임라인 하나로 쓰고 Final Cut에 건넨다(D56) — 옛 두 단계를 대신한다."""
 FINALCUT_SEND_JOB_KIND = "finalcut_send"
+FINALCUT_SRT_SEND_LABEL = "SRT로 Final Cut 보내기"
+"""사람이 고친 SRT(타임라인 시각)를 같은 전체 타임라인의 캡션으로 싣고 Final Cut에 건넨다(D89)."""
+FINALCUT_SRT_FINGERPRINT_PREFIX = f"{FINALCUT_SEND_JOB_KIND}:srt:"
+"""SRT로 보내는 작업의 입력 지문 머리 — 뒤는 고른 SRT 경로다(「실패 재시도」가 같은 파일로 다시
+건다)."""
+FINALCUT_SRT_STARTED_TEXT = (
+    "원본 전체를 같은 타임라인으로 만들고 원본 자막 대신 `{name}`의 줄을 캡션으로 실어"
+    " Final Cut으로 보냅니다 — SRT 시각은 타임라인 처음(0초)부터입니다."
+)
+FINALCUT_SRT_CANCELLED_TEXT = "취소 — SRT를 고르지 않아 보내지 않았습니다."
 OLD_SELECTED_CUTS_JOB_KIND = "capcut_export"
 """D56 이전 「선택한 컷」 출력 작업 — 기록에만 남는다. 다시 걸지 않는다."""
 RETRYABLE_JOB_KINDS = (
@@ -1367,7 +1377,7 @@ def _finalcut_sent_text(sent: dict[str, Any]) -> str:
             "\n\n`자막 시각 확인 필요` 키워드는 달지 못해 키워드 없이 보냈습니다"
             f" — {sent['caption_timing_error']} (로그 참고)"
         )
-    for line in (_conformed_rate_line(counts), _tail_trimmed_line(counts)):
+    for line in (_srt_line(sent), _conformed_rate_line(counts), _tail_trimmed_line(counts)):
         text += "\n\n" + line if line else ""
     unsupported = list(sent.get("unsupported") or ())
     if unsupported:
@@ -1414,6 +1424,46 @@ def _conformed_rate_line(counts: Mapping[str, Any]) -> str:
     if clamped:
         text += f" 자막 조각 {clamped}개는 클립 끝에서 한 프레임 안쪽으로 잘렸습니다."
     return text
+
+
+def _send_srt_facts(report: Mapping[str, Any]) -> dict[str, Any]:
+    """타임라인 SRT로 보낸 결과에서 화면이 말할 것 — 파일 이름과 줄 단위로 센 수(D89)."""
+    section = report["timeline_srt"]
+    captions = section["captions"]
+    return {
+        "srt": {
+            "name": section["name"],
+            "timeline_seconds": section["timeline_seconds"],
+            "last_cue_end_seconds": section["last_cue_end_seconds"],
+            **{key: captions[key] for key in ("placed", "pieces", "empty", "outside", "tails")},
+        }
+    }
+
+
+def _srt_line(sent: Mapping[str, Any]) -> str:
+    """SRT로 실은 캡션 한 단락 — 타임라인 밖·잘린 줄은 고치지 않고 이름과 수로 말한다."""
+    srt = sent.get("srt")
+    if not srt:
+        return ""
+    text = (
+        f"자막은 원본 자막 대신 `{srt['name']}`의 줄 {srt['placed']}개(캡션 조각"
+        f" {srt['pieces']}개)로 실었습니다."
+    )
+    if srt["outside"] or srt["tails"]:
+        text += (
+            f" 타임라인({_seconds_text(srt['timeline_seconds'])}초) 밖이라 싣지 않은 줄"
+            f" {srt['outside']}개 · 끝이 잘린 줄 {srt['tails']}개 — 마지막 줄이"
+            f" {_seconds_text(srt['last_cue_end_seconds'])}초에 끝납니다. 이 SRT가 지금 보낸"
+            " 타임라인에서 나왔는지 확인하세요."
+        )
+    if srt["empty"]:
+        text += f" 글이 빈 줄 {srt['empty']}개는 싣지 않았습니다."
+    return text
+
+
+def _seconds_text(value: str) -> str:
+    """보고서의 정확 유리수 초 → 사람이 읽는 초(소수 셋째 자리)."""
+    return f"{float(Fraction(value)):.3f}".rstrip("0").rstrip(".")
 
 
 def _send_unsupported_facts(report: Mapping[str, Any]) -> dict[str, Any]:
@@ -4006,7 +4056,7 @@ class RawWorkspaceUi:
         if job.kind == raw_service.SEGMENT_JOB_KIND:
             return self._retry_segments(root, job)
         if job.kind == FINALCUT_SEND_JOB_KIND:
-            return self.finalcut_send_view(signature)
+            return self._retry_finalcut(signature, job)
         if job.kind == OLD_SELECTED_CUTS_JOB_KIND:
             # 옛 출력의 재시도가 전체 타임라인을 몰래 보내고 Final Cut을 열면 안 된다.
             return (
@@ -4052,13 +4102,49 @@ class RawWorkspaceUi:
         closed = self._library_first_reply()
         if closed is not None:
             return closed
+        self._send_finalcut(signature, None)
+        return FINALCUT_SEND_STARTED_TEXT
+
+    def finalcut_srt_send_view(self, signature: str | None) -> str:
+        """「SRT로 Final Cut 보내기」 — 사람이 고친 SRT(타임라인 시각)를 골라 같은 타임라인에 원본
+        자막 대신 싣는다(D89). 고르기는 네이티브 선택기뿐이고(직접 입력 없음), 취소는 아무것도
+        보내지 않는다."""
+        closed = self._library_first_reply()
+        if closed is not None:
+            return closed
+        self._require_current_selection(signature)
+        chosen = self._pick_path(ui_chooser.SRT_KIND)
+        if chosen is None:
+            return FINALCUT_SRT_CANCELLED_TEXT
+        srt = Path(chosen).expanduser()
+        if srt.suffix.lower() != ".srt" or not srt.is_file():
+            raise gr.Error(f"SRT 파일(.srt)을 고르세요 — {srt.name}은 SRT 파일이 아닙니다.")
+        self._send_finalcut(signature, srt)
+        return FINALCUT_SRT_STARTED_TEXT.format(name=srt.name)
+
+    def _retry_finalcut(self, signature: str | None, job: Any) -> str:
+        """실패한 보내기를 같은 모양으로 — SRT로 보낸 것은 같은 SRT 파일로 다시 건다(D89)."""
+        fingerprint = str(job.input_fingerprint)
+        if not fingerprint.startswith(FINALCUT_SRT_FINGERPRINT_PREFIX):
+            return self.finalcut_send_view(signature)
+        srt = Path(fingerprint.removeprefix(FINALCUT_SRT_FINGERPRINT_PREFIX))
+        if not srt.is_file():
+            return (
+                f"SRT `{srt.name}`을 찾지 못해 다시 보내지 않았습니다 —"
+                f" 「{FINALCUT_SRT_SEND_LABEL}」로 다시 고르세요."
+            )
+        self._send_finalcut(signature, srt)
+        return FINALCUT_SRT_STARTED_TEXT.format(name=srt.name)
+
+    def _send_finalcut(self, signature: str | None, srt: Path | None) -> None:
+        """보내기 작업 하나를 건다 — `srt`면 그 SRT의 줄을 캡션으로(D89)."""
         root = self._require_current_selection(signature)
         opener = self._finalcut_opener or self._system_finalcut_open
 
         def body(context: Any) -> None:
             # 어떤 예외든 사유를 적고 다시 던진다 — 실패한 작업이 「보냈습니다」로 보이면 안 된다.
             try:
-                path = self.raw.export_finalcut_timeline(root, context)
+                path = self.raw.export_finalcut_timeline(root, context, srt)
                 report = json.loads(path.with_suffix(".json").read_text(encoding="utf-8"))
             except Exception as error:
                 self._remember_finalcut(root, signature, {"error": str(error)})
@@ -4068,7 +4154,8 @@ class RawWorkspaceUi:
                 "counts": report["counts"],
                 "not_exported": len(report["not_exported"]),
                 "caption_timing_error": report.get("sync_check", {}).get("error"),
-                **_send_caption_facts(report),
+                # 타임라인 SRT의 캡션은 원본 자막이 아니다 — 원본 자막의 빈 곳을 말하지 않는다.
+                **(_send_caption_facts(report) if srt is None else _send_srt_facts(report)),
                 **_send_unsupported_facts(report),
             }
             self._remember_finalcut(root, signature, sent)
@@ -4082,8 +4169,10 @@ class RawWorkspaceUi:
 
         with self._selection_lock:
             self._finalcut_sent.pop(str(signature), None)
-        self.raw.submit_job(root, FINALCUT_SEND_JOB_KIND, FINALCUT_SEND_JOB_KIND, body)
-        return FINALCUT_SEND_STARTED_TEXT
+        fingerprint = (
+            FINALCUT_SEND_JOB_KIND if srt is None else f"{FINALCUT_SRT_FINGERPRINT_PREFIX}{srt}"
+        )
+        self.raw.submit_job(root, FINALCUT_SEND_JOB_KIND, fingerprint, body)
 
     @staticmethod
     def _send_memory() -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
@@ -4213,6 +4302,7 @@ class RawWorkspaceUi:
             self._cancel_button = gr.Button("선택 분석 취소", scale=0)
             self._cancel_all_button = gr.Button("전체 분석 취소", scale=0, variant="stop")
             self._handoff_button = gr.Button(FINALCUT_SEND_LABEL)
+            self._srt_handoff_button = gr.Button(FINALCUT_SRT_SEND_LABEL, scale=0)
             # 일괄 확인의 원천 — 화면의 단추는 제외 제안 대기열의 「남은 M개 모두 제외 유지」이고,
             # 그것이 이 숨은 단추를 누른다(옛 「자동 제외 확인」의 처리기·입출력 그대로, D57 C).
             self._confirm_auto_button = gr.Button(
@@ -4436,6 +4526,16 @@ class RawWorkspaceUi:
         )
         automatic.then(lambda: False, None, self._capcut_approval)
         self._report_activity(automatic, status)
+        # SRT 고르기는 네이티브 대화상자다 — 다른 선택기 단추와 같은 동시성 묶음(한 번에 하나).
+        srt_send = self._srt_handoff_button.click(
+            self.finalcut_srt_send_view,
+            self._signature_state,
+            status,
+            api_name=False,
+            concurrency_id=ui_chooser.CHOOSER_CONCURRENCY_ID,
+            concurrency_limit=1,
+        )
+        self._report_activity(srt_send, status)
         for button, handler, target in (
             (self._handoff_button, self.finalcut_send_view, status),
             (self._confirm_auto_button, self.capcut_confirm_auto_view, outputs),

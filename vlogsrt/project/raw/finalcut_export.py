@@ -24,7 +24,12 @@
   초안(`.vlogsrt_….partial`)에 쓰고 fsync한 뒤 검증을 통과한 것만 링크로 제 이름을 얻는다.
   검증에 실패한 문서는 `.invalid.xml`로만 남는다 — 끝난 것처럼 보이지 않는다.
 
-**읽는 쪽 규칙**: 보내기 하나는 `vlogsrt_<UTC>.fcpxml`이 **있을 때만** 끝난 것이다. 리포트
+**타임라인 SRT(W-30f, D89).** 사람이 고친 SRT(타임라인 시각)를 주면 같은 타임라인에 원본 자막
+대신 그 줄만 캡션으로 싣는다 — 원본 자막은 읽지 않고, 원본 자막 표지(D55)도 달지 않으며, 이름에
+`_srt`를 달고 리포트의 `timeline_srt`에 파일 이름·sha256·센 수를 남긴다. SRT를 읽고 해시하는 일은
+`timeline_srt`가 한다(이 계층은 hashlib을 모른다).
+
+**읽는 쪽 규칙**: 보내기 하나는 `vlogsrt_<UTC>[_srt].fcpxml`이 **있을 때만** 끝난 것이다. 리포트
 (`.json`)는 `.fcpxml`보다 먼저 제 이름을 얻으므로, `.fcpxml` 없는 리포트는 중간에 죽은 시도다.
 숨은 `.partial` 초안은 다음 보내기가 치운다.
 """
@@ -38,7 +43,7 @@ import os
 import re
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from fractions import Fraction
 from pathlib import Path
@@ -65,6 +70,7 @@ from vlogsrt.project.raw.segment_review import (
     is_unreviewed_auto_exclusion,
 )
 from vlogsrt.project.raw.source_transcript import rational
+from vlogsrt.project.raw.timeline_srt import TimelineSrt
 from vlogsrt.project.timebase import timecode_frames
 from vlogsrt.project.xml_validation import (
     XmlValidation,
@@ -90,7 +96,12 @@ _REPORT_SUFFIX = ".json"
 _INVALID_SUFFIX = ".invalid.xml"
 _DRAFT_SUFFIX = ".partial"
 _BUNDLE_SUFFIX = ".fcpbundle"
-_DRAFT_NAME = re.compile(r"\.vlogsrt_[0-9]{8}T[0-9]{6}Z(?:_[0-9]+)?\.(?:fcpxml|json)\.partial")
+_SRT_TAG = "_srt"
+"""타임라인 SRT로 쓴 보내기의 이름 꼬리 — 같은 폴더에서 원본 자막 보내기와 갈린다(D89)."""
+_SRT_TITLE = "SRT"
+_DRAFT_NAME = re.compile(
+    r"\.vlogsrt_[0-9]{8}T[0-9]{6}Z(?:_srt)?(?:_[0-9]+)?\.(?:fcpxml|json)\.partial"
+)
 """이 계층이 만드는 숨은 초안의 이름 — 치울 수 있는 것은 이 꼴뿐이다."""
 _IMPORT_JOB_KINDS = frozenset({INGEST_JOB_KIND, "reference_import"})
 """원본 목록을 바꾸는 작업 — 복사 가져오기와 라이브러리 참조 가져오기."""
@@ -600,6 +611,8 @@ class _Scope:
     evidence: Mapping[str, AnalysisSourceResult]
     shelf: _LibraryShelf
     caption_gaps: CaptionGaps | None = None
+    original_captions: bool = True
+    """원본 자막을 실을까 — 타임라인 SRT로 보낼 때는 읽지도 않는다(D89)."""
 
 
 def _gather(scope: _Scope, asset: SourceAsset) -> _Gathered:
@@ -616,7 +629,7 @@ def _gather(scope: _Scope, asset: SourceAsset) -> _Gathered:
         media=_media(asset, path, probe, grid, code, declared),
         segments=_review_segments(asset, scope.head, review),
         report=report,
-        cues=_cues(scope.service, scope.root, asset),
+        cues=_cues(scope.service, scope.root, asset) if scope.original_captions else None,
     )
     facts = _source_facts(
         asset, source, code, row if report is not None else None, scope.caption_gaps
@@ -852,9 +865,9 @@ def _taken(folder: Path, stem: str) -> bool:
     return any((folder / f"{stem}{suffix}").exists() for suffix in names)
 
 
-def _reserve(folder: Path, moment: datetime) -> tuple[str, Path]:
+def _reserve(folder: Path, moment: datetime, tag: str = "") -> tuple[str, Path]:
     """새 이름 하나를 잡는다 — 숨은 초안을 O_EXCL로 만들고, 그 사이 이름이 생겼으면 다음 번호."""
-    base = f"vlogsrt_{moment.astimezone(UTC):%Y%m%dT%H%M%SZ}"
+    base = f"vlogsrt_{moment.astimezone(UTC):%Y%m%dT%H%M%SZ}{tag}"
     for attempt in itertools.count(1):
         stem = base if attempt == 1 else f"{base}_{attempt}"
         if _taken(folder, stem):
@@ -901,11 +914,16 @@ def _reject(folder: Path, stem: str, draft: Path, validation: XmlValidation) -> 
 
 
 def _publish(
-    folder: Path, payload: bytes, report: dict[str, object], moment: datetime, dtd_path: Path
+    folder: Path,
+    payload: bytes,
+    report: dict[str, object],
+    moment: datetime,
+    dtd_path: Path,
+    tag: str = "",
 ) -> ExportOutcome:
     """초안 → fsync → 검증 → 리포트 → `.fcpxml` 순서로 제 이름을 준다(읽는 쪽 규칙 참고)."""
     _sweep_drafts(folder)
-    stem, draft = _reserve(folder, moment)
+    stem, draft = _reserve(folder, moment, tag)
     _write(os.open(draft, os.O_WRONLY | os.O_TRUNC), payload)
     validation = _validate(draft, dtd_path)
     if not validation.valid:
@@ -947,8 +965,16 @@ def export(
     dtd_path: Path = INSTALLED_DTD,
     caption_timing: CaptionTimingFlags | None = None,
     caption_gaps: CaptionGaps | None = None,
+    timeline_srt: TimelineSrt | None = None,
 ) -> ExportOutcome:
-    """ready 원본 전부(촬영 순) → 새 FCPXML + 리포트. Final Cut은 열지 않는다(D55 표지는 값으로)."""
+    """ready 원본 전부(촬영 순) → 새 FCPXML + 리포트. Final Cut은 열지 않는다(D55 표지는 값으로).
+
+    `timeline_srt`(서비스가 읽은 SRT)면 같은 타임라인에 원본 자막 대신 그 줄을 싣는다(D89) —
+    원본 자막의 표지·빠진 구간은 그 자막의 것이라 받아도 쓰지 않는다.
+    """
+    srt = timeline_srt
+    if srt is not None:
+        caption_timing, caption_gaps = None, None
     facade = service.review_workspace_facade(root)
     workspace: RawWorkspace = facade.workspace
     folder = workspace.root / EXPORT_FOLDER
@@ -962,9 +988,14 @@ def export(
         head = _load_head(facade, assets)
         shelf = _LibraryShelf(service.remembered_fcp_library(root))
         rows = facade.tier_evidence_rows()
-        scope = _Scope(service, workspace.root, workspace, head, rows, shelf, caption_gaps)
+        scope = _Scope(
+            service, workspace.root, workspace, head, rows, shelf, caption_gaps, srt is None
+        )
         gathered, skipped = _gather_all(scope, assets, context)
-        document = _document(gathered, workspace, moment, shelf, caption_timing)
+        document = _document(gathered, workspace, moment, shelf, caption_timing, srt)
+        section: dict[str, object] | None = None
+        if srt is not None:
+            document, section = _with_timeline_srt(document, srt)
         exported = {asset.asset_id for asset in assets} - set(skipped)
         report: dict[str, object] = {
             "schema": REPORT_SCHEMA,
@@ -974,14 +1005,39 @@ def export(
             "review_head": None if head is None else head.revision_id,
             "sources": [item.facts for item in gathered],
             "not_exported": _not_exported(service, root, head, exported, skipped),
-            "counts": _report_counts(document, gathered),
+            "counts": _report_counts(document, gathered, section),
             **({} if caption_timing is None else {"sync_check": dict(caption_timing.section)}),
+            **({} if section is None else {"timeline_srt": section}),
         }
-        return _publish(folder, timeline.render(document), report, moment, dtd_path)
+        tag = "" if srt is None else _SRT_TAG
+        return _publish(folder, timeline.render(document), report, moment, dtd_path, tag)
+
+
+def _with_timeline_srt(
+    document: timeline.TimelineDocument, srt: TimelineSrt
+) -> tuple[timeline.TimelineDocument, dict[str, object]]:
+    """같은 문서에 SRT 줄만 캡션으로 — 리포트 칸에는 파일과 센 수, 그리고 타임라인 길이와 마지막
+    줄의 끝을 나란히 둔다(다른 타임라인에서 나온 SRT면 둘이 어긋나 보인다)."""
+    try:
+        placed, counts = timeline.with_timeline_captions(document, srt.cues)
+    except timeline.FinalCutTimelineError as error:
+        raise FinalCutExportError(f"SRT `{srt.path.name}`을 싣지 못했다 — {error}") from error
+    frames = timeline.sequence_frame_total(placed)
+    last_end = max((cue.end for cue in srt.cues), default=None)
+    return placed, {
+        "name": srt.path.name,
+        "path": str(srt.path),
+        "sha256": srt.sha256,
+        "timeline_seconds": str(frames * placed.sequence_frame_duration),
+        "last_cue_end_seconds": None if last_end is None else str(last_end),
+        "captions": asdict(counts),
+    }
 
 
 def _report_counts(
-    document: timeline.TimelineDocument, gathered: list[_Gathered]
+    document: timeline.TimelineDocument,
+    gathered: list[_Gathered],
+    srt_section: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     """빌더의 요약 + 큐 0개인 원본(D59) — 자막의 두 가지 「없음」을 따로 센다.
 
@@ -996,6 +1052,12 @@ def _report_counts(
         if item.source.cues is not None and not item.source.cues
     ]
     counts["tail_trimmed_sources"] = _tail_trimmed(gathered)
+    if srt_section is not None:
+        # 타임라인 SRT(D89)는 줄 단위로 센다 — 원본마다 센 조각을 더하면 넘는 줄이 두 번 든다.
+        counts["captions"] = srt_section["captions"]
+        counts["sources_without_captions"] = [
+            plan.media.name for plan in document.sources if not plan.captions
+        ]
     return counts
 
 
@@ -1017,6 +1079,7 @@ def _document(
     moment: datetime,
     shelf: _LibraryShelf,
     caption_timing: CaptionTimingFlags | None = None,
+    srt: TimelineSrt | None = None,
 ) -> timeline.TimelineDocument:
     """모은 것 → 문서. 자막 시각 확인(D55)이 걸린 원본에는 빌더가 키워드를 단다. 프로젝트 방향은
     설정(`FINALCUT_TIMELINE`)의 규칙으로 빌더가 고른다 — 켠 길이가 많은 쪽(D66)."""
@@ -1025,7 +1088,9 @@ def _document(
     try:
         return timeline.plan(
             [item.source for item in gathered],
-            title=timeline.export_title(workspace.name, moment.astimezone()),
+            title=timeline.export_title(
+                workspace.name, moment.astimezone(), None if srt is None else _SRT_TITLE
+            ),
             library_bundle=bundle,
             caption_timing=flagged,
             settings=FINALCUT_TIMELINE,

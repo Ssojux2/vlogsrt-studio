@@ -411,6 +411,12 @@ def _add_finalcut_parser(commands: argparse._SubParsersAction) -> None:
         "(로컬만 — Final Cut은 열지 않는다)",
     )
     finalcut.add_argument("--workspace", type=Path, required=True, help="작업공간 경로")
+    finalcut.add_argument(
+        "--srt",
+        type=Path,
+        default=None,
+        help="원본 자막 대신 실을 SRT(타임라인 시각, 0초 = 타임라인 처음 — D89)",
+    )
 
     sync = commands.add_parser(
         "sync-check",
@@ -853,7 +859,7 @@ def cmd_finalcut(args: argparse.Namespace) -> int:
     service = _service()
     try:
         status = service.open_workspace(Path(args.workspace))
-        path = service.export_finalcut_timeline(Path(status.workspace_root))
+        path = service.export_finalcut_timeline(Path(status.workspace_root), timeline_srt=args.srt)
     except raw_service.RawWorkspaceError as error:
         log.error(str(error))
         return 1
@@ -869,6 +875,14 @@ def cmd_finalcut(args: argparse.Namespace) -> int:
         f" · 미검토 제외 제안 {counts['unreviewed_clips']}개"
         f" · 캡션 {captions['placed']}개(조각 {captions['pieces']})"
     )
+    if "timeline_srt" in report:
+        srt = report["timeline_srt"]
+        log.out(
+            f"자막은 원본 자막 대신 {srt['name']}의 줄 {captions['placed']}개"
+            f" · 타임라인 밖 {captions['outside']}개 · 끝이 잘린 줄 {captions['tails']}개"
+            f" (타임라인 {srt['timeline_seconds']}초"
+            f" · 마지막 줄 끝 {srt['last_cue_end_seconds']}초)"
+        )
     _log_finalcut_notes(counts)
     for row in report["not_exported"]:
         log.out(f"넣지 않은 원본: {row['name'] or row['asset_id']} — {row['reason']}")

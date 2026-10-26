@@ -14,6 +14,7 @@ from pathlib import Path
 WORKSPACE_KIND = "workspace"
 FOLDER_KIND = "folder"
 VIDEO_KIND = "video"
+SRT_KIND = "srt"
 CHOOSER_CONCURRENCY_ID = "native-chooser"
 DIALOG_TIMEOUT_SECONDS = 120.0
 VIDEO_DIALOG_SUFFIXES = (".mp4", ".mov", ".m4v", ".mkv", ".webm", ".avi", ".mp3", ".wav", ".m4a")
@@ -45,7 +46,7 @@ function run() {
         host.activate();
         const panel = $.NSOpenPanel.openPanel;
         panel.canChooseFiles = kind !== 'folder';
-        panel.canChooseDirectories = kind !== 'video';
+        panel.canChooseDirectories = kind !== 'video' && kind !== 'srt';
         panel.canCreateDirectories = false;
         panel.allowsMultipleSelection = false;
         panel.treatsFilePackagesAsDirectories = false;
@@ -53,9 +54,13 @@ function run() {
         panel.prompt = '고르기';
         panel.message = kind === 'workspace'
             ? '프로젝트 폴더 또는 Final Cut 라이브러리(.fcpbundle)를 고르세요'
-            : kind === 'folder' ? '폴더를 고르세요' : '영상 파일을 고르세요';
+            : kind === 'folder' ? '폴더를 고르세요'
+            : kind === 'srt' ? '타임라인 시각의 SRT 자막 파일을 고르세요' : '영상 파일을 고르세요';
         if (kind === 'video') {
             panel.allowedFileTypes = ['mp4','mov','m4v','mkv','webm','avi','mp3','wav','m4a'];
+        }
+        if (kind === 'srt') {
+            panel.allowedFileTypes = ['srt'];
         }
         panel.makeKeyAndOrderFront(null);
         $.NSRunningApplication.currentApplication.activateWithOptions(3);
@@ -94,7 +99,7 @@ def applescript_path_chooser(kind: str, timeout: float = DIALOG_TIMEOUT_SECONDS)
     """Launch one native panel; return its path, None on cancel, or a useful error."""
     if sys.platform != "darwin":
         raise ChooserError("경로 선택 대화상자는 macOS에서만 열립니다. 경로 입력을 이용하세요.")
-    if kind not in (WORKSPACE_KIND, FOLDER_KIND, VIDEO_KIND):
+    if kind not in (WORKSPACE_KIND, FOLDER_KIND, VIDEO_KIND, SRT_KIND):
         raise ChooserError(f"모르는 선택기 종류: {kind}")
     with tempfile.TemporaryDirectory(prefix="vlogsrt-picker-") as directory:
         app = Path(directory) / "vlogsrt Picker.app"
