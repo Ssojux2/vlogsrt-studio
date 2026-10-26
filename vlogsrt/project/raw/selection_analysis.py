@@ -118,7 +118,7 @@ def _quote_binding(workspace: Any, asset_id: str, cross_tag: str | None) -> tupl
     교차 확인이 켜져 있으면 자막 지문은 두 번째 귀가 얹은 글자를 뺀 것이다
     (`source_transcript.binding_fingerprint`) — 그 글자는 꼬리표가 묶으므로, 실행이 글자를 얹어도
     다음 견적이 같은 결속을 본다(19c-5 알려진 한계를 닫는다, D59 19d)."""
-    from vlogsrt.project.raw import asr_epoch, media_refs, source_transcript
+    from vlogsrt.project.raw import asr_epoch, media_refs, source_transcript, timing_engine
 
     row: tuple[str, ...] = (
         asset_id,
@@ -128,6 +128,9 @@ def _quote_binding(workspace: Any, asset_id: str, cross_tag: str | None) -> tupl
     tag = asr_epoch.binding_tag(asr_epoch.current(workspace, asset_id))
     if tag is not None:
         row = (*row, tag)
+    engine_tag = timing_engine.binding_tag(workspace, asset_id)
+    if engine_tag is not None:
+        row = (*row, engine_tag)  # whisper 원본은 붙지 않는다(D92)
     return row if cross_tag is None else (*row, cross_tag)
 
 
@@ -306,6 +309,7 @@ def _run_transcription(
         sender=transport.sender,
         cfg=transport.cfg,
         on=transport.on,
+        timing_client=getattr(transport, "timing_client", None),
     )
     job = service.get_job(root, first.job_id)
     revisions = AnalysisStore(service._workspace(root)).list_revisions()

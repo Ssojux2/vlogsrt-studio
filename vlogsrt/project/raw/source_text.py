@@ -46,7 +46,13 @@ from vlogsrt.project.raw.caption_provider import (
     parse_text_response,
     text_transcription_request,
 )
-from vlogsrt.project.raw.config import RawWorkflowConfig, SourceTextSettings, source_text_problems
+from vlogsrt.project.raw.config import (
+    TEXT_PASS_CANDIDATE,
+    RawWorkflowConfig,
+    SourceTextSettings,
+    source_text_problems,
+    timing_engine_for_model,
+)
 from vlogsrt.project.raw.glossary import glossary_sha, validated
 from vlogsrt.project.raw.source_transcript import TEXT_SOURCE_WHISPER
 from vlogsrt.project.raw.understanding import (
@@ -83,6 +89,8 @@ PASS_PARTIAL = "partial"
 REASON_ACCEPTED = "accepted"  # 게이트를 지나 글자를 바꿨다
 REASON_AGREED = "agreed"  # 게이트를 지났지만 두 귀가 같은 글자를 들었다 — whisper 글자 그대로
 REASON_UNDECIDED = "undecided"  # 계획에 판정이 없다(되풀이 제외 같은 자리) — whisper 글자 그대로
+REASON_CANDIDATE = "candidate"
+"""게이트를 지났지만 시간 엔진이 글자를 바꾸지 않는 엔진이다(Gemini, D92) — 후보(`alt_text`)로만."""
 
 
 class SourceTextProvider(Protocol):
@@ -437,9 +445,17 @@ def apply_text_pass(
         for outcome in outcomes
         if outcome.status == STATUS_RECEIVED
     }
+    candidate_only = (
+        timing_engine_for_model(request.workflow.models.timing_model).text_pass
+        == TEXT_PASS_CANDIDATE
+    )
     applied = tuple(
         _with_evidence(
-            item, decisions.get(item.chunk_index), request.settings.model, request.origin
+            item,
+            decisions.get(item.chunk_index),
+            request.settings.model,
+            request.origin,
+            candidate_only=candidate_only,
         )
         for item in utterances
     )
@@ -539,16 +555,33 @@ def _decide(
 
 
 def _with_evidence(
-    item: UtteranceEvidence, decision: _Decision | None, model: str, origin: str
+    item: UtteranceEvidence,
+    decision: _Decision | None,
+    model: str,
+    origin: str,
+    *,
+    candidate_only: bool = False,
 ) -> UtteranceEvidence:
     """발화 하나의 글자와 증거 — whisper 글자는 언제나 남고, 거절된 후보는 `alt_text`로 남는다.
 
     통과한 답이라도 접은 글자가 whisper와 같으면(공백·부호만 다르다, D59 19d) 바꾸지 않고
-    `agreed`다 — 그래야 부호만 고친 교차 확인이 자막 지문을 바꿔 끝난 분석을 낡게 하지 않는다."""
+    `agreed`다 — 그래야 부호만 고친 교차 확인이 자막 지문을 바꿔 끝난 분석을 낡게 하지 않는다.
+    `candidate_only`(Gemini 원본, D92)면 통과한 글자도 자막을 바꾸지 않고 후보로만 남긴다 — 그
+    엔진의 글자와 시각은 한 응답이라, 글자만 갈아 끼우면 시각을 준 단어와 어긋난다."""
     if decision is None:
         return item  # 답이 없는 청크 — 19c 이전 모양 그대로(증거 칸 없음)
     accepted = decision.texts.get(item.position)
-    if accepted is not None and strip_for_compare(accepted) != strip_for_compare(item.text):
+    differs = accepted is not None and strip_for_compare(accepted) != strip_for_compare(item.text)
+    if differs and candidate_only:
+        return replace(
+            item,
+            whisper_text=item.text,
+            text_source=TEXT_SOURCE_WHISPER,
+            retext_reason=REASON_CANDIDATE,
+            alt_text=str(accepted),
+            text_origin=origin,
+        )
+    if accepted is not None and differs:
         return replace(
             item,
             text=accepted,

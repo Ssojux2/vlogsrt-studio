@@ -47,6 +47,7 @@ from vlogsrt.project.raw import (
     source_text,
     source_transcript,
     source_verify,
+    timing_engine,
 )
 from vlogsrt.project.raw import understanding as stage1
 from vlogsrt.project.raw import understanding_luna as luna
@@ -77,6 +78,7 @@ from vlogsrt.project.raw.config import (
     SOURCE_TEXT_SETTINGS,
     RawWorkflowConfig,
     analysis_provider,
+    timing_engine_for_model,
 )
 from vlogsrt.project.raw.jobs import JobCancelledError, JobContext
 from vlogsrt.project.raw.models import (
@@ -1095,7 +1097,11 @@ def _analyze_source(
     workflow: RawWorkflowConfig,
     providers: AnalysisProviders,
 ) -> AnalysisSourceResult:
-    """원본 하나의 분석 본체 — 조사→증거→판정→조정→문서까지."""
+    """원본 하나의 분석 본체 — 조사→증거→판정→조정→문서까지.
+
+    설정은 그 원본의 시간 엔진 보기다(D92) — whisper 원본은 같은 객체라 열쇠·지문이 바이트 그대로다.
+    """
+    workflow = timing_engine.source_workflow(workspace, asset.asset_id, workflow)
     path = workspace.source_media_path(asset)
     _require_source_unchanged(workspace, path, asset, trust_stat=False)
     probe = preprocess.probe_raw_media(path)
@@ -1356,7 +1362,12 @@ def _hear_source(
     source_dir: Path,
     asr_epoch: int,
 ) -> tuple[AsrEvidence, tuple[UtteranceEvidence, ...], dict[str, object]]:
-    """whisper로 시각과 글자를 듣고, 같은 청크 WAV를 두 번째 귀에 한 번 더 묻는다(D59 19c)."""
+    """시간 엔진으로 시각과 글자를 듣고, 같은 청크 WAV를 두 번째 귀에 한 번 더 묻는다(D59 19c).
+
+    듣기를 시작하기 전에(첫 유료 호출 전에) 이 차례의 엔진을 고정한다(D92) — 다시 묻기(D78)는 그
+    엔진이 받을 때만(whisper) 건다."""
+    engine = timing_engine_for_model(workflow.models.timing_model)
+    timing_engine.pin(workspace, asset.asset_id, asr_epoch, engine.key)
     asr_provider = _asr_provider_for(providers, workflow, settings, audio, asset.asset_id)
     hearing = _Hearing(
         asr_provider,
@@ -1377,7 +1388,7 @@ def _hear_source(
         audio,
         evidence,
         source_dir,
-        hearing,
+        hearing if engine.rescue else None,
     )
 
 

@@ -238,6 +238,9 @@ class LiveAnalysisTransport:
     """Gemini 모델 → 그 모델의 프로파일로 만든 클라이언트(D86).
 
     `GEMINI_API_KEY`가 있을 때만 채워진다."""
+    timing_client: object | None = None
+    """Gemini 시간 엔진(Gemini 3.5 Transcribe, D92)의 클라이언트 — 같은 키가 있을 때만 채워진다.
+    Gemini로 듣는 원본이 있는데 없으면 1단계 시작 문이 유료 호출 전에 닫는다."""
 
     def semantic_client(self, model: str) -> object:
         """의미 분석 모델에 맞는 클라이언트 — 없으면 유료 호출이 시작되기 **전에** 닫는다.

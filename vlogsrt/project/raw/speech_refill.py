@@ -47,6 +47,7 @@ from vlogsrt.project.raw.config import (
     RawWorkflowConfig,
     text_model_label,
 )
+from vlogsrt.project.raw.models import RawWorkspaceError
 from vlogsrt.project.raw.source_transcript import REFILL_FIELD
 from vlogsrt.project.raw.speech_gaps import GapSpan, SampleRange, request_pieces
 from vlogsrt.project.raw.understanding import SampleSpan, SelectedAudio, UtteranceEvidence
@@ -195,7 +196,7 @@ def quote_for(plan: RefillPlan) -> RefillQuote:
         if identity is not None
         else ()
     )
-    usd = _cost(whisper_due, "timing") + _cost(text_due, "text")
+    usd = _cost(whisper_due, "timing", plan) + _cost(text_due, "text", plan)
     base = RefillQuote(
         asset_id=plan.asset_id,
         transcript_revision=plan.transcript_revision,
@@ -263,13 +264,27 @@ def _speech_in(spans: Sequence[GapSpan], pieces: Sequence[SampleRange]) -> Fract
     return Fraction(samples, stage1.PCM_SAMPLE_RATE)
 
 
-def _cost(pieces: Sequence[SampleRange], role: str) -> Decimal:
-    """공식 분당 단가 × 분(올림) — 시간 역할은 whisper, 글자 역할은 두 번째 귀."""
-    from vlogsrt.project.raw.capabilities import ROLE_TEXT, ROLE_TIMING, price_per_minute
+def _cost(pieces: Sequence[SampleRange], role: str, plan: RefillPlan) -> Decimal:
+    """공식 분당 단가 × 분(올림) — 시간 역할은 그 원본의 시간 엔진(D92), 글자 역할은 두 번째 귀.
+
+    시간 엔진의 단가가 재확인 기한을 넘었으면 견적을 만들지 않는다(가격 미정 — 0원이 아니다)."""
+    from vlogsrt.project.raw.capabilities import (
+        ROLE_TEXT,
+        price_per_minute,
+        timing_price_per_minute,
+    )
 
     seconds = sum((Fraction(b - a, stage1.PCM_SAMPLE_RATE) for a, b in pieces), Fraction(0))
     exact = Decimal(seconds.numerator) / Decimal(seconds.denominator) / Decimal(60)
-    unit = price_per_minute(ROLE_TEXT if role == "text" else ROLE_TIMING)
+    if role == "text":
+        unit: Decimal | None = price_per_minute(ROLE_TEXT)
+    else:
+        unit = timing_price_per_minute(plan.workflow.models.timing_model, date.today())
+    if unit is None:
+        raise RawWorkspaceError(
+            f"{plan.workflow.models.timing_model}의 단가 재확인 기한이 지나 빈칸 재전사 견적을"
+            " 만들 수 없습니다(가격 미정)"
+        )
     return (exact * unit).quantize(USD_STEP, rounding=ROUND_CEILING)
 
 

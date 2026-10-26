@@ -45,6 +45,7 @@ from vlogsrt.project.raw.analysis_config import RawUnderstandingSettings
 from vlogsrt.project.raw.config import (
     CLAUDE_ANALYSIS_PROFILES,
     GEMINI_ANALYSIS_PROFILES,
+    GEMINI_TRANSCRIBE_PROFILE,
     RawClaudeAnalysisProfile,
     analysis_model_label,
     official_price_model,
@@ -206,6 +207,18 @@ def live_transport_for_credentials(
         on=on,
         claude_clients={} if claude is None else _claude_clients(claude),
         gemini_clients={} if gemini is None else _gemini_clients(gemini),
+        timing_client=None if gemini is None else _gemini_timing_client(gemini),
+    )
+
+
+def _gemini_timing_client(gemini: GeminiCredentials) -> object:
+    """시간 엔진(D92)의 클라이언트 — 전사 프로파일의 엔드포인트·시간 한도로. 보내지 않는다."""
+    profile = GEMINI_TRANSCRIBE_PROFILE
+    return create_gemini_client(
+        api_key=gemini.api_key,
+        base_url=profile.api_base_url,
+        api_version=profile.api_version,
+        timeout_seconds=profile.timeout_seconds,
     )
 
 
@@ -316,11 +329,19 @@ def asr_estimate_digest(estimates: Sequence[AnalysisEstimate]) -> str:
             *_present(item.ceiling_usd),
             *_text_pass(item),
             *_rescue_pass(item),
+            *_timing_engine_pass(item),
         )
         for item in estimates
     )
     body = json.dumps(rows, ensure_ascii=False, sort_keys=True)
     return hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+
+def _timing_engine_pass(item: AnalysisEstimate) -> tuple[object, ...]:
+    """whisper가 아닌 시간 엔진(D92) — 견적이 실었을 때만 칸을 더한다(모델·금액)."""
+    if item.timing_model is None:
+        return ()
+    return ("timing-engine", item.timing_model, item.timing_usd)
 
 
 def _rescue_pass(item: AnalysisEstimate) -> tuple[object, ...]:
@@ -392,13 +413,14 @@ def mint_asr_approvals(
             raise BrowserRuntimeError(
                 f"검증된 원본이 아니다: {estimate.source_name} — 가져오기를 먼저 끝내세요"
             )
+        view = service.source_settings(root, estimate.asset_id)  # 그 원본의 시간 엔진(D92)
         approvals[estimate.asset_id] = AsrPhaseApproval(
             approved=True,
             source_sha256=asset.content_sha256,
             audio_stream_index=int(estimate.audio_stream_index or 0),
             chunk_budget=max(1, int(estimate.asr_chunk_count)),
-            settings_fingerprint=asr_settings_fingerprint(settings, workflow),
-            timing_model=workflow.models.timing_model,
+            settings_fingerprint=asr_settings_fingerprint(settings, view),
+            timing_model=view.models.timing_model,
             approved_on=(on or date.today()).isoformat(),
             **texts.get(estimate.asset_id, {}),
             **_quoted_rescue(quoted, estimate.asset_id),
@@ -535,7 +557,7 @@ def mint_luna_approvals(
                 sample_count=int(audio["sample_count"]),
                 window_count=estimate.window_count,
                 fingerprint=estimate.semantic_fingerprint,
-                asr_model=workflow.models.timing_model,
+                asr_model=service.source_settings(root, asset_id).models.timing_model,
                 luna_model=workflow.models.luna_model,
                 budget=budget,
             )

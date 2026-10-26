@@ -1076,7 +1076,10 @@ def stage1_timing_view(config: RawWorkflowConfig) -> RawWorkflowConfig:
     """1단계 내부 전사 요청이 보는 설정 — 입자만 세그먼트+단어로 바꾼다(W-25c, D73).
 
     청크 캐시 열쇠는 이 보기가 아니라 저장된 설정으로 잰다 — 단어는 덧붙는 재료라 이미 산 전사
-    (단어 없음)를 그대로 쓰고, 새로 사는 청크부터 단어가 실린다."""
+    (단어 없음)를 그대로 쓰고, 새로 사는 청크부터 단어가 실린다. Gemini 엔진(D92)은 이미 단어 시각만
+    묻는 계약이라 그대로 둔다."""
+    if config.caption.timing_provider != TIMING_PROVIDER_WHISPER_VERBOSE_JSON:
+        return config
     caption = replace(config.caption, timestamp_granularities=STAGE1_TIMESTAMP_GRANULARITIES)
     return replace(config, caption=caption)
 

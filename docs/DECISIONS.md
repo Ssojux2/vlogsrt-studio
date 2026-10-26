@@ -8824,3 +8824,28 @@ SRT · CLI · 작업대 단추·취소·재시도). 유료 호출 0회. **사람
 - 아직 모든 원본은 whisper다 — 저장된 설정이 whisper이고 원본마다 엔진을 고르는 일은 W-31d다.
 - **시험**: `tests/raw/test_timing_engines.py` · `tests/raw/test_gemini_timing_provider.py` · `tests/test_invariants.py`. 유료 호출 0회.
 
+**W-31d(2026-10-27)** — 원본마다 엔진:
+- **정하기** `raw/timing_engine.py`: 저장된 `RawWorkflowConfig`는 whisper 그대로이고, `source_workflow(workspace, asset_id, base)`가 원본마다
+  설정 보기를 만든다(whisper면 **같은 객체** — 청크 열쇠·입력 지문·견적 digest·결속·승인 지문이 바이트 그대로). 순서: 다시 듣기가
+  기다리면 그 차례에 고정된 엔진, 없으면 「새로 듣는 엔진」 → 이번 차례에 고정된 엔진 → 원본 자막 문서가 있으면 whisper → 「새로 듣는
+  엔진」. 「새로 듣는 엔진」은 작업공간 `meta` 표지 `stage1_timing_engine`(없거나 모르는 값이면 `DEFAULT_NEW_HEARING_ENGINE` = whisper,
+  W-31f 비교 전까지). 서비스 `new_hearing_engine`·`set_new_hearing_engine`·`source_settings`.
+- **고정** 표 `source_timing_engines(asset_id, epoch, engine)`: 1단계 듣기(`_hear_source`)가 첫 유료 호출 전에 쓴다 — 같은 값은 다시 써도
+  되고 다른 값은 거부한다. 들은 뒤 설정을 바꿔도 그 전사의 엔진이 조용히 바뀌지 않는다(엔진을 바꾸는 길은 「다시 듣기」뿐). 읽기는 표를
+  만들지 않고 그리기 범위에서 한 번만 읽는다(D63).
+- **연결 자리**: `_analyze_source` 첫 줄 · 견적(`analysis_estimate`) · 결속(`source_bindings` — 꼬리표 `timing-engine/gemini`는 whisper가
+  아닐 때만) · 승인(`mint_asr_approvals`의 모델·설정 지문, 의미 승인의 `asr_model`) · 실제 시작(`_live_asr_providers` — 원본마다 승인의
+  모델이 그 원본의 엔진과 같아야 하고, Gemini 원본은 `timing_client`가 없으면 유료 호출 전에 `GEMINI_API_KEY`를 말한다) · 빈칸 재전사 계획.
+  키는 `LiveAnalysisTransport.timing_client`(브라우저 실행이 Gemini 자격으로 전사 프로파일의 클라이언트를 만든다)로 들어온다.
+- **견적**: `AnalysisEstimate.timing_model`·`timing_usd`는 whisper가 아닐 때만 싣는다(분당 단가 × 분, 올림) — 1단계 견적 digest는
+  whisper 원본에서 바이트 그대로다.
+- **whisper 전용 기능**: 다른 귀(gpt-transcribe)는 Gemini 원본에서 게이트를 지나도 글자를 바꾸지 않고 `retext_reason="candidate"` ·
+  `alt_text`로만 남는다(그 엔진의 글자와 시각은 한 응답이다 — 편집기 「가져오기」는 그대로). D78 다른 귀 기준 재전사는 Gemini 원본에서
+  견적 칸도 실행도 없다. D76 낮은 확신 표시는 Gemini 응답에 logprob이 없어 생기지 않는다. 빈칸 재전사는 그 원본의 엔진과 그 단가로 묻고,
+  단가 재확인 기한이 지나면 견적을 만들지 않는다(가격 미정).
+- 아직 화면에 엔진을 고르는 줄이 없다(W-31e) — 지금은 서비스 호출로만 바뀐다. whisper 원본의 빈칸 재전사가 종료일 뒤에 「먼저 다시
+  듣기」를 안내하는 문구도 W-31e다.
+- **시험**: `tests/raw/test_timing_engine_resolve.py`(정하기·고정·표지·읽기) · `tests/raw/test_timing_engine_flow.py`(다른 귀 후보 · 견적·
+  결속 · 승인 · 실제 1단계: 키 없으면 거부 → whisper 전송 0회로 Gemini 한 번 · 고정 · 견적 뒤 엔진을 바꾸면 보내기 전 거부 · 빈칸 재전사
+  단가). 유료 호출 0회.
+

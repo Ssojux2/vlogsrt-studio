@@ -326,6 +326,9 @@ class _MintService:
     def settings(self, root):
         return self.workflow
 
+    def source_settings(self, root, asset_id):
+        return self.workflow  # whisper 원본 — 저장된 설정 그대로(D92)
+
     def analysis_semantic_estimate(self, root, revision_id):
         return (self.estimate,)
 

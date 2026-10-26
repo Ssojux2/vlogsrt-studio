@@ -18,6 +18,7 @@ import uuid
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, date, datetime
+from decimal import ROUND_CEILING, Decimal
 from fractions import Fraction
 from functools import partial
 from pathlib import Path
@@ -32,6 +33,7 @@ from vlogsrt.project.raw import (
     selection_analysis,
     source_verify,
     tiering,
+    timing_engine,
     visual_review,
 )
 from vlogsrt.project.raw import package as package_layout
@@ -84,6 +86,7 @@ from vlogsrt.project.raw.config import (
     DEFAULT_ANALYSIS_MODEL,
     GEMINI_MODEL_PREFIX,
     PREVIOUS_DEFAULT_ANALYSIS_MODELS,
+    TIMING_ENGINE_WHISPER,
     WORKFLOW_SCHEMA_VERSION,
     RawWorkflowConfig,
     analysis_model_label,
@@ -92,6 +95,7 @@ from vlogsrt.project.raw.config import (
     gemini_profile,
     official_price_model,
     text_model_label,
+    timing_engine_for_model,
     validate_raw_workflow_config,
 )
 from vlogsrt.project.raw.fcp import (
@@ -768,7 +772,30 @@ def _analysis_estimate_for(
         asr_chunk_count=asr_chunks,
         asr_seconds=str(audio_seconds),
         **_estimate_cost_fields(workflow, settings, window_count, asr_chunks, note),
+        **_timing_engine_fields(workflow, audio_seconds if probe.audio else None),
     )
+
+
+def _timing_engine_fields(
+    workflow: RawWorkflowConfig, audio_seconds: Fraction | None
+) -> dict[str, Any]:
+    """whisper가 아닌 시간 엔진(D92)의 견적 칸 — 모델과, 오디오 전체를 한 번 듣는 금액(올림).
+
+    whisper 원본은 칸이 없다(견적 지문이 바이트 그대로 — whisper 전사비는 D57 결정 7대로 금액 없이
+    둔다). 단가 재확인 기한이 지났으면 금액은 None이다(가격 미정)."""
+    from vlogsrt.project.raw.capabilities import timing_price_per_minute
+
+    engine = timing_engine_for_model(workflow.models.timing_model)
+    if engine.key == TIMING_ENGINE_WHISPER or audio_seconds is None:
+        return {}
+    per_minute = timing_price_per_minute(engine.model, date.today())
+    if per_minute is None:
+        return {"timing_model": engine.model, "timing_usd": None}
+    exact = Decimal(audio_seconds.numerator) / Decimal(audio_seconds.denominator) / Decimal(60)
+    from vlogsrt.project.raw.cross_check import USD_STEP
+
+    usd = (exact * per_minute).quantize(USD_STEP, rounding=ROUND_CEILING)
+    return {"timing_model": engine.model, "timing_usd": str(usd)}
 
 
 def _estimate_cost_fields(
@@ -1727,7 +1754,7 @@ class RawWorkspaceService:
             sample_count=measured.sample_count,
             audio_start=measured.audio_start,
             spans=spans,
-            workflow=replace(self.settings(root), network_mode="online"),
+            workflow=replace(self.source_settings(root, asset.asset_id), network_mode="online"),
             cross_check=cross_check.enabled(workspace),
             glossary=glossary.current(workspace).terms,
             chunk_bound=_refill_bound(int(measured.report["pcm"]["channels"])),
@@ -3260,6 +3287,19 @@ class RawWorkspaceService:
         recorded = self._order_revision(root, order_revision_id)
         return set(_order_ids(recorded)) == set(_order_ids(latest))
 
+    def source_settings(self, root: Path, asset_id: str) -> RawWorkflowConfig:
+        """그 원본을 듣는 설정 보기(D92) — whisper 원본은 저장된 설정 그대로(같은 객체)다."""
+        return timing_engine.source_workflow(self._workspace(root), asset_id, self.settings(root))
+
+    def new_hearing_engine(self, root: Path) -> str:
+        """처음 듣거나 다시 듣는 영상이 쓸 시간 엔진의 열쇠(D92)."""
+        return timing_engine.new_hearing_engine(self._workspace(root))
+
+    def set_new_hearing_engine(self, root: Path, key: str) -> str:
+        """「새로 듣는 엔진」을 바꾼다 — 이미 들은 영상은 그대로다(바꾸려면 다시 듣기, D92)."""
+        timing_engine.set_new_hearing_engine(self._workspace(root), key)
+        return timing_engine.new_hearing_engine(self._workspace(root))
+
     def export_finalcut_timeline(self, root: Path, context: JobContext | None = None) -> Path:
         """불러온 원본 전부를 태그 달린 타임라인 하나로 — 새 FCPXML 경로를 돌려준다(D56).
 
@@ -3746,10 +3786,9 @@ class RawWorkspaceService:
             asset = selected.get(entry.asset_id)
             if asset is None:
                 continue
+            view = timing_engine.source_workflow(workspace, asset.asset_id, workflow)
             estimates.append(
-                _analysis_estimate_for(
-                    workspace, asset, entry.ordinal, understanding, workflow, width
-                )
+                _analysis_estimate_for(workspace, asset, entry.ordinal, understanding, view, width)
             )
         return tuple(estimates)
 
@@ -3766,6 +3805,7 @@ class RawWorkspaceService:
         cfg: object | None = None,
         client: object | None = None,
         on: date | None = None,
+        timing_client: object | None = None,
     ) -> JobHandle:
         """의미 분석 작업을 제출한다 — 기본은 **오프라인 재생**, 실제 호출은 두 단계 승인만.
 
@@ -3800,6 +3840,7 @@ class RawWorkspaceService:
             understanding,
             on,
             assets,
+            timing_client=timing_client,
         )
         fingerprint = self._analysis_fingerprint(
             order.revision_id, assets, understanding, workflow, mode, root=root
@@ -3876,6 +3917,7 @@ class RawWorkspaceService:
         cfg: object | None = None,
         client: object | None = None,
         on: date | None = None,
+        timing_client: object | None = None,
     ) -> JobHandle:
         """실패·중단된 분석의 명시적 재시도 — 같은 작업 ID·같은 지문으로 다시 붙는다.
 
@@ -3935,6 +3977,7 @@ class RawWorkspaceService:
             understanding,
             on,
             assets,
+            timing_client=timing_client,
         )
         fingerprint = self._analysis_fingerprint(
             order.revision_id, assets, understanding, workflow, revision.mode, root=root
@@ -4925,6 +4968,8 @@ class RawWorkspaceService:
         on: date | None,
         assets: Mapping[str, SourceAsset],
         semantic_revision_id: str | None = None,
+        *,
+        timing_client: object | None = None,
     ) -> analysis_workflow.AnalysisProviders:
         """작업의 호출 경계 — 재생 픽스처 또는 단계별 사람 승인 실제 호출 재료.
 
@@ -4959,7 +5004,13 @@ class RawWorkspaceService:
             )
         if phase == "asr":
             return self._live_asr_providers(
-                root, asr_approvals, sender, cfg, workflow, understanding, on, assets
+                root,
+                asr_approvals,
+                (sender, cfg, timing_client),
+                workflow,
+                understanding,
+                on,
+                assets,
             )
         if phase == "semantic":
             return self._live_semantic_providers(
@@ -4974,14 +5025,17 @@ class RawWorkspaceService:
         self,
         root: Path,
         asr_approvals: Mapping[str, object] | None,
-        sender: object,
-        cfg: object,
+        transport: tuple[object, object, object],
         workflow: RawWorkflowConfig,
         understanding: RawUnderstandingSettings,
         on: date | None,
         assets: Mapping[str, SourceAsset],
     ) -> analysis_workflow.AnalysisProviders:
-        """1단계(전사) 공급자 — 원본별 `AsrPhaseApproval`의 빠른 실패 문."""
+        """1단계(전사) 공급자 — 원본별 `AsrPhaseApproval`의 빠른 실패 문.
+
+        승인은 그 원본의 시간 엔진 보기(D92)와 대조한다 — whisper 원본은 저장된 설정 그대로다.
+        Gemini로 듣는 원본이 하나라도 있는데 그 키가 없으면 유료 호출 전에 닫는다."""
+        sender, cfg, timing_client = transport
         if sender is None or cfg is None:
             raise AnalysisError(
                 "1단계 실제 호출에는 전송 경계(sender·cfg)가 필요하다 — 사람이 공급한다"
@@ -4997,51 +5051,67 @@ class RawWorkspaceService:
             if not isinstance(approval, AsrPhaseApproval) or not approval.approved:
                 raise AnalysisError("1단계 승인 기록이 AsrPhaseApproval이 아니거나 미승인이다")
             checked[asset_id] = approval
-        settings_fp = asr_settings_fingerprint(understanding, workflow)
-        from vlogsrt.project.raw.capabilities import (
-            ROLE_TIMING,
-            preflight_online_transcription,
-        )
-
         for asset_id, asset in assets.items():
             probe = preprocess.probe_raw_media(workspace.source_media_path(asset))
             if not probe.audio:
                 continue  # 무성 원본 — 승인할 전사가 없다(ASR 작업을 만들지 않는다)
-            approval = checked.get(asset_id)
-            if approval is None:
-                raise AnalysisError(
-                    f"1단계(전사) 승인이 없는 원본이다: {asset.source_name} — 새 추정과"
-                    " 새 승인을 받아라(§14.3)"
-                )
-            if approval.source_sha256 != (asset.content_sha256 or ""):
-                raise AnalysisError(
-                    f"승인이 본 원본과 지금의 원본이 다르다: {asset.source_name} — 새 추정과"
-                    " 새 승인을 받아라(§14.3)"
-                )
-            if approval.timing_model != workflow.models.timing_model:
-                raise AnalysisError(
-                    f"승인이 본 ASR 모델과 설정 모델이 다르다: {asset.source_name}"
-                    f" ({approval.timing_model!r}/{workflow.models.timing_model!r})"
-                )
-            if approval.settings_fingerprint != settings_fp:
-                raise AnalysisError(
-                    f"승인이 본 설정 지문과 지금의 설정 지문이 다르다: {asset.source_name}"
-                    " — 새 추정과 새 승인을 받아라(§14.3)"
-                )
-            try:
-                preflight_online_transcription(workflow, on or date.today(), roles=(ROLE_TIMING,))
-            except Exception as error:  # noqa: BLE001 - 시작 문의 수명주기 실패는 AnalysisError로
-                raise AnalysisError(
-                    f"1단계 실제 호출의 수명주기 문이 닫혔다: {asset.source_name} — {error}"
-                ) from error
+            view = timing_engine.source_workflow(workspace, asset_id, workflow)
+            self._require_live_asr_source(
+                asset, checked.get(asset_id), view, understanding, on, timing_client
+            )
         return analysis_workflow.AnalysisProviders(
             origin="live",
             phase="asr",
             live_sender=sender,
             live_cfg=cfg,
+            timing_client=timing_client,
             asr_approvals=checked,
             on=on,
         )
+
+    @staticmethod
+    def _require_live_asr_source(
+        asset: SourceAsset,
+        approval: AsrPhaseApproval | None,
+        workflow: RawWorkflowConfig,
+        understanding: RawUnderstandingSettings,
+        on: date | None,
+        timing_client: object | None,
+    ) -> None:
+        """원본 하나의 1단계 시작 문 — 승인이 본 원본·엔진·설정 지문과 수명주기·키."""
+        from vlogsrt.project.raw.capabilities import ROLE_TIMING, preflight_online_transcription
+
+        name = asset.source_name
+        if approval is None:
+            raise AnalysisError(
+                f"1단계(전사) 승인이 없는 원본이다: {name} — 새 추정과 새 승인을 받아라(§14.3)"
+            )
+        if approval.source_sha256 != (asset.content_sha256 or ""):
+            raise AnalysisError(
+                f"승인이 본 원본과 지금의 원본이 다르다: {name} — 새 추정과 새 승인을 받아라(§14.3)"
+            )
+        if approval.timing_model != workflow.models.timing_model:
+            raise AnalysisError(
+                f"승인이 본 ASR 모델과 설정 모델이 다르다: {name}"
+                f" ({approval.timing_model!r}/{workflow.models.timing_model!r})"
+            )
+        if approval.settings_fingerprint != asr_settings_fingerprint(understanding, workflow):
+            raise AnalysisError(
+                f"승인이 본 설정 지문과 지금의 설정 지문이 다르다: {name}"
+                " — 새 추정과 새 승인을 받아라(§14.3)"
+            )
+        try:
+            preflight_online_transcription(workflow, on or date.today(), roles=(ROLE_TIMING,))
+        except Exception as error:  # noqa: BLE001 - 시작 문의 수명주기 실패는 AnalysisError로
+            raise AnalysisError(
+                f"1단계 실제 호출의 수명주기 문이 닫혔다: {name} — {error}"
+            ) from error
+        engine = timing_engine_for_model(workflow.models.timing_model)
+        if engine.key != TIMING_ENGINE_WHISPER and timing_client is None:
+            raise AnalysisError(
+                f"{name}은(는) {engine.label}로 듣는다 — .env에 {ANALYSIS_GEMINI_KEY_ENV}(결제 연결"
+                " 키)를 넣고 앱을 다시 켜세요. 유료 호출은 시작하지 않았습니다"
+            )
 
     def _live_semantic_providers(
         self,
@@ -5093,8 +5163,9 @@ class RawWorkspaceService:
                     f"승인이 본 Luna 모델과 설정 모델이 다르다: {asset.source_name}"
                     f" ({approval.luna_model!r}/{workflow.models.luna_model!r})"
                 )
+            heard_with = timing_engine.source_workflow(workspace, asset_id, workflow)
             if isinstance(approval, OnlineAnalysisApproval) and (
-                approval.asr_model != workflow.models.timing_model
+                approval.asr_model != heard_with.models.timing_model
             ):
                 raise AnalysisError(f"승인이 본 ASR 모델과 설정 모델이 다르다: {asset.source_name}")
             row = (
@@ -5204,6 +5275,9 @@ class RawWorkspaceService:
             tag = asr_epoch.binding_tag(asr_epoch.current(workspace, asset_id))
             if tag is not None:
                 row.append(tag)
+            engine_tag = timing_engine.binding_tag(workspace, asset_id)
+            if engine_tag is not None:
+                row.append(engine_tag)  # whisper 원본은 붙지 않는다 — 결속이 바이트 그대로(D92)
             bindings[asset_id] = row if cross_tag is None else [*row, cross_tag]
         return bindings
 

@@ -724,6 +724,12 @@ class AnalysisEstimate:
     rescue_usd: str | None = None
     """그 최대 횟수의 오디오 길이 × 시간 역할 공식 분당 단가(`USD_STEP` 올림) — 상한이지 예상이
     아니다."""
+    timing_model: str | None = None
+    """그 원본을 듣는 시간 엔진이 whisper가 아닐 때만(D92) — Gemini 원본이면 그 모델 이름이다.
+    whisper 원본은 None이고 견적 지문에도 없다(바이트 그대로)."""
+    timing_usd: str | None = None
+    """그 엔진으로 오디오 전체를 한 번 듣는 금액(공식 분당 단가 × 길이, `USD_STEP` 올림). 단가
+    재확인 기한이 지났으면 None이다(가격 미정 — 0원이 아니다)."""
 
 
 @dataclass(frozen=True, slots=True)

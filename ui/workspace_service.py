@@ -8022,6 +8022,7 @@ class RawWorkspaceUi:
                 sender=transport.sender,
                 cfg=transport.cfg,
                 on=transport.on,
+                timing_client=getattr(transport, "timing_client", None),
             )
         except raw_service.RawWorkspaceError as error:
             raise gr.Error(str(error)) from error

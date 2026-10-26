@@ -28,9 +28,16 @@ from typing import Any
 
 from vlogsrt import log
 from vlogsrt.config import Config
-from vlogsrt.project.raw import asr_epoch, ear_rescue, glossary, read_scope, source_text
+from vlogsrt.project.raw import (
+    asr_epoch,
+    ear_rescue,
+    glossary,
+    read_scope,
+    source_text,
+    timing_engine,
+)
 from vlogsrt.project.raw.capabilities import ROLE_TIMING, price_per_minute
-from vlogsrt.project.raw.config import SOURCE_TEXT_SETTINGS
+from vlogsrt.project.raw.config import SOURCE_TEXT_SETTINGS, TIMING_ENGINES
 from vlogsrt.project.raw.models import AnalysisEstimate, RawWorkspaceError
 from vlogsrt.project.raw.understanding import CHUNK_PLAN_FIXED, SampleSpan
 from vlogsrt.project.raw.understanding_luna import ORIGIN_LIVE
@@ -114,17 +121,22 @@ def with_text_passes(
     owners = {
         asset.asset_id: asset.content_sha256 or "" for asset in workspace.list_source_assets()
     }
-    return tuple(
-        with_rescue(
-            _with_text(
-                workspace.root,
-                item,
-                owners.get(item.asset_id, ""),
-                digest,
-                replanned=asr_epoch.state(workspace, item.asset_id).pending,
-            )
+    texts = (
+        _with_text(
+            workspace.root,
+            item,
+            owners.get(item.asset_id, ""),
+            digest,
+            replanned=asr_epoch.state(workspace, item.asset_id).pending,
         )
         for item in estimates
+    )
+    # 다시 묻기(D78)는 그 원본의 시간 엔진이 받을 때만이다(D92 — Gemini 원본은 칸이 없다).
+    return tuple(
+        with_rescue(item)
+        if TIMING_ENGINES[timing_engine.resolve(workspace, item.asset_id)].rescue
+        else item
+        for item in texts
     )
 
 
