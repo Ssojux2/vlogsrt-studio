@@ -1,0 +1,11 @@
+{
+  "id": "int_synthetic_silent",
+  "status": "completed",
+  "model": "gemini-3.5-transcribe",
+  "output_text": "",
+  "steps": [],
+  "usage": {
+    "total_input_tokens": 80,
+    "total_output_tokens": 0
+  }
+}

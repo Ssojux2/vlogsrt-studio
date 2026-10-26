@@ -8777,3 +8777,23 @@ SRT · CLI · 작업대 단추·취소·재시도). 유료 호출 0회. **사람
 `tests/test_transcribe.py`(online 문 · 본문 바이트 · 관찰 메타에 base64 없음 · 승인 전 지역 결함 · Gemini가 아닌 클라이언트 · 취소) ·
 `tests/raw/test_gemini_transcribe_profile.py` · `tests/test_record_gemini_transcribe.py` · `tests/test_invariants.py`. 유료 호출 0회.
 
+**W-31b(같은 날, 문서 모양의 합성 픽스처로 — 사람의 녹화 H1은 뒤로 미뤘다)**:
+- **응답 해석** `raw/gemini_transcribe_parse.py`(순수): `status == "completed"`와 문자열 `output_text`가 있어야 한다. 단어는
+  `steps[].content[].annotations[]`의 `type: "word_info"`뿐이고 시각은 `^\d+(\.\d{1,9})?s$` 꼴만 정확 유리수로 읽는다(NFC).
+  꼴이 어긋나거나 없거나 뒤집힌 시각의 단어는 **시각 없는 단어**로 남고 센다(글자를 버리지 않는다). 청크 끝 넘침은 D55 관용(2초) 안이면
+  닫고 세며, 밖이면 청크 실패다. 띄어쓰기·문장부호는 `output_text`에 맞춰 앞 단어 뒤에(첫 단어는 앞에도) 붙는다 — 단어가 덮지 못한
+  한글·영문·숫자는 **자리 없는 글자**로 세기만 한다. 단어를 차례로 찾지 못하면 단어를 띄어 이어 붙이고 `fallback`이라 적는다.
+  글자는 있는데 시각 단어가 0개면 실패, 둘 다 비면 빈 결과(미확인 빈 결과 — 「말이 아니다」 판정 없음).
+- **단어 → 자막 줄** `raw/word_cues.py`(순수): 끊는 자리는 문장 끝 부호 뒤 · 앞 시각 단어 끝과의 쉼 ≥ 0.6초인 단어 앞 · 글자 32자·
+  길이 7초를 넘기 전. 끊기는 시각 단어 앞에서, 지금 줄에 시각 단어가 있을 때만 하므로 모든 줄에 시각 단어가 있다. 줄 시작 = 첫 시각
+  단어 시작, 줄 끝 = 시각 단어 끝의 최대값(정확 유리수 그대로). 단어를 쪼개지 않고, 응답 순서를 바꾸지 않으며(앞보다 일찍 시작한 단어는
+  센다), 시각 없는 단어는 그 줄에 글자째 남고 세어진다. 시각 단어가 하나도 없는 입력은 거부한다.
+- **설정** `WordCueSettings`(`raw/config.py`, `RawWorkflowConfig` 밖): 판 `word-cues/v1` · 32자 · 7초는 엔진 `Config`의
+  `max_chars_per_cue`·`max_duration`과 **같은 값**(시험이 잠근다) · 쉼 0.6초는 외부 근거 없는 조정 대상 · 문장 끝 부호 7개.
+- **불변식** `check_word_cues_stays_pure`: 두 모듈은 전송·전사·`source_text`·`retext`·서비스·DB·`caption_provider`·`os`를 모르고
+  파일을 읽거나 쓰지 않는다 — 다른 귀 글자가 경계에 끼지 못한다.
+- 아직 1단계에 잇지 않았다(W-31c 제공자가 이 둘로 `TimedTranscript`를 짓는다). 녹화(H1)가 오면 실제 응답 모양으로 계약 시험을 더하고,
+  모양이 다르면 해석기만 고친다.
+- **시험**: `tests/raw/test_gemini_transcribe_parse.py` · `tests/raw/test_word_cues.py` · `tests/test_invariants.py` · 합성 픽스처
+  `tests/fixtures/synthetic/gemini/transcribe_korean.json`·`transcribe_silent.json`. 유료 호출 0회.
+

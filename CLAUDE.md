@@ -364,6 +364,8 @@ vlogsrt run <video> --offline             # 픽스처 기반 전체 파이프라
 | Claude Sonnet 5.5 단가 (`RawClaudeAnalysisProfile`, 의미 분석 기본) | 2026-10-11 공식 가격표(https://platform.claude.com/docs/en/about-claude/pricing) — 입력 $2 · 출력 $10 · 캐시 쓰기 5분 $2.50 · 1시간 $4 · 읽기 $0.10 · 배치 $1/$5 / 100만 토큰, `inference_geo=global`(D58). **0으로 두지 마라** — 못 매기면 가격 미정이다 |
 | Gemini 3.8 Flash · 4 Argon 단가 (`RawGeminiAnalysisProfile`, W-30b) | 2026-10-25 확인 공식 가격표 Standard 판(https://ai.google.dev/gemini-api/docs/pricing, 갱신 2026-10-22) — Flash 입력 $0.75 · 출력(생각 포함) $3.75, **2026-12-31까지**(이후 $1.50 · $7.50) · Argon $2 · $10, **2026-11-30까지**(이후 $4 · $20) / 100만 토큰(D84). `price_valid_through`가 지나면 그 단가로 매기지 않는다(가격 미정 — 새 단가를 확인해 고치기 전까지 견적이 닫힌다). 이미지 `MEDIA_RESOLUTION_HIGH` 장당 1120토큰 상한 · 생각 토큰은 `maxOutputTokens` 안(공식 문서). 영상 클립(D85·D86)은 초당 한 장 × 280 + 소리 초당 32토큰(두 문서 값 가운데 큰 쪽). **0으로 두지 마라**. 공급자 `google`(W-30c2) · 기본 분석 모델(W-30d, D87) |
 | `thinking_level`·`max_output_tokens`·`quote_*` (Gemini 프로파일) | 외부 근거 없는 조정 대상(D84). MEDIUM(두 모델의 API 기본) · 12000(동기 상한 65536) · 창당 텍스트 여유 12000 + 부대 여유 2000 토큰 — Claude와 같은 여유. 창당 상한(클립 포함) Flash 약 $0.068 · Argon 약 $0.180 |
+| Gemini 3.5 Transcribe 단가·한도 (`RawGeminiTranscribeProfile`, W-31a) | 2026-10-26 공식 문서(https://ai.google.dev/gemini-api/docs/transcribe · pricing) — 오디오 $0.003 + 글자 $0.002 / 분 · 단어 시각 길이 한도 900초(Gemini 문서 30분 · Cloud 문서 15분 가운데 짧은 쪽) · 인라인 요청 20 MB · `ko → ko-KR`. `price_valid_through=2027-01-26`은 인상일이 아니라 **재확인 기한**(외부 근거 없음 — 모델이 preview라 짧게 둔다, 지나면 가격 미정, D84). **0으로 두지 마라** (D92) |
+| `WordCueSettings` (`WORD_CUE_SETTINGS`, W-31b — 32자 · 7초 · 쉼 0.6초 · 문장 끝 부호 7개 · 판 `word-cues/v1`) | 32자·7초는 엔진 `Config`의 `max_chars_per_cue`·`max_duration` **그대로**다 — 시험이 같음을 못 박는다(엔진 값을 바꾸면 같이 바꾼다). 쉼 0.6초는 **외부 근거 없는 조정 대상**(W-31f에서 시각 정답으로 잰다). Gemini 원본의 큐 경계를 고를 뿐 시각을 만들지 않는다(D92). 값이나 규칙을 바꾸면 판을 올린다 |
 | `effort`·`max_output_tokens`·`quote_*` (Claude 프로파일) | 외부 근거 없는 조정 대상(D54·D58). Opus 5.5 medium · 8192 · Sonnet 5.5 medium · 12000(적응형 생각 토큰도 이 안에 든다) · 창당 텍스트 여유 12000 + 부대 여유 2000 토큰 |
 | 이미지 토큰 ⌈w/28⌉×⌈h/28⌉, 장당 4784 상한 (Claude) | Claude vision 문서(D54) — 고해상도 등급(Claude 4.7 이후, Sonnet 5.5도 같다, D58). 768px 프레임은 줄지 않아 장당 784 이하 — 창당 상한 Opus 약 $0.249 · Sonnet 약 $0.162(schema 941바이트, D58 18b)의 재료다 |
 
@@ -453,6 +455,8 @@ vlogsrt record golden/ep01.mp4          # 실제 API 호출. 유료.
 | refine / 정제 | 큐를 자르고 합치고 시간을 다듬는 유일한 단계 |
 | verify / 검증 | 두 번째 모델과 대조해 **표시만** 한다. 출력을 못 바꾼다 |
 | other ear / 다른 귀 | 작업대 1단계에서 같은 청크를 다시 듣는 두 번째 모델(gpt-transcribe). 게이트를 지난 줄만 글자를 바꾸고, 나머지는 원본 자막 편집기에 후보로만 보인다 — 「가져오기」는 문구 칸만 채운다(D59) |
+| time engine / 시간 엔진 | 작업대 1단계 원본 자막의 시각을 주는 전사 모델 — whisper-1(세그먼트 시각) 또는 Gemini 3.5 Transcribe(단어 시각, D92). 원본마다 하나로 고정되고, 바꾸는 길은 「다시 듣기」뿐이다 |
+| word cue / 단어 묶음 | Gemini 단어 시각을 자막 줄로 묶는 일(`word_cues.py`, 순수). 줄 경계는 엔진이 준 단어 경계에서만 고른다 — 시작 = 첫 시각 단어 시작, 끝 = 단어 끝의 최대값. 단어를 쪼개거나 시각을 만들지 않는다(D92) |
 | suspect / 확인 필요 | 원본 자막 줄의 무료 의심 표시(같은 말 런 · 끝 인사말 · 다른 문자 · 말소리 측정상 없음 · Gemini가 다르게 들음(D88)). **표시만** 한다 — 줄을 지우거나 숨기지 않는다(D59 19e) |
 | asr epoch / 다시 듣기 차례 | 작업대 원본의 내부 전사를 처음부터 다시 사려고 사람이 올리는 수. **0이 아닐 때만** 청크 열쇠·입력 지문·결속·견적에 실린다(D59 19b). 재전사(repair)와 다르다 |
 | transcribe-only / 전사만 | 작업대 승인 범위의 하나. 1단계(전사·원본 자막·장면·프레임)만 돌고 영상 분석 앞에서 멈춘다. 범위는 견적 digest에 접힌다(D59 19b) |

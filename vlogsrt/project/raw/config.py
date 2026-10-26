@@ -833,6 +833,46 @@ def gemini_transcribe_price_per_minute(
     return profile.audio_input_per_minute + profile.text_output_per_minute
 
 
+@dataclass(frozen=True)
+class WordCueSettings:
+    """Gemini 단어 → 자막 줄 묶기(W-31b, D92) — `RawWorkflowConfig` 밖이고 어느 승인·견적에도 없다.
+
+    끊는 자리는 엔진이 준 단어 경계뿐이다: 문장 끝 부호 뒤 · 앞 단어 끝과의 쉼이
+    `pause_break_seconds` 이상인 단어 앞 · 글자(`max_cue_chars`)·길이(`max_cue_seconds`) 한도를
+    넘기 전. 글자·길이 한도는
+    엔진 `Config`의 `max_chars_per_cue`(16자 × 2줄)·`max_duration`(7초) **그대로**다 — 시험이 같음을
+    못 박는다(엔진을 바꾸면 같이 바꾼다). 쉼 0.6초는 외부 근거 없는 조정 대상이다(W-31f에서 잰다).
+    값이나 규칙을 바꾸면 `rule_tag`를 올린다 — 그 판이 Gemini 원본의 입력 지문에 실려(W-31c·d)
+    캐시된 단어로 무료로 다시 묶인다(사람이 고친 자막은 덮지 않는다).
+    """
+
+    rule_tag: str = "word-cues/v1"
+    max_cue_chars: int = 32
+    max_cue_seconds: Fraction = Fraction(7)
+    pause_break_seconds: Fraction = Fraction(3, 5)
+    sentence_end_marks: tuple[str, ...] = (".", "?", "!", "…", "。", "？", "！")
+
+
+WORD_CUE_SETTINGS = WordCueSettings()
+"""지금 쓰는 단어 묶기 — `word_cues.group`의 기본값이다."""
+
+
+def word_cue_problems(settings: WordCueSettings) -> list[str]:
+    """묶기 설정의 자기 일관성 — 한도는 양수, 쉼은 0 이상, 문장 끝 부호와 판 이름은 비지 않는다."""
+    problems: list[str] = []
+    if not settings.rule_tag.strip():
+        problems.append("rule_tag가 비었다 — 묶기 규칙의 판이 지문에 실려야 한다")
+    if settings.max_cue_chars < 1:
+        problems.append("max_cue_chars는 1 이상이어야 한다")
+    if settings.max_cue_seconds <= 0:
+        problems.append("max_cue_seconds는 양수여야 한다")
+    if settings.pause_break_seconds < 0:
+        problems.append("pause_break_seconds는 0 이상이어야 한다")
+    if not settings.sentence_end_marks or not all(settings.sentence_end_marks):
+        problems.append("sentence_end_marks가 비었다")
+    return problems
+
+
 DEFAULT_ANALYSIS_MODEL: str = RawModelRoles().luna_model
 PREVIOUS_DEFAULT_ANALYSIS_MODELS = frozenset({CLAUDE_SONNET_ANALYSIS_PROFILE.model})
 """열 때 기본으로 옮겨 줄 예전 기본(D58의 Sonnet 5.5) — 사람이 따로 고른 모델(Opus·Luna·Gemini)은

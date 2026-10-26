@@ -1,0 +1,65 @@
+{
+  "id": "int_synthetic_transcribe_ko",
+  "status": "completed",
+  "model": "gemini-3.5-transcribe",
+  "output_text": "안녕하세요. 오늘은 한강에 왔어요! 날씨 진짜 좋다",
+  "steps": [
+    {
+      "type": "model_output",
+      "content": [
+        {
+          "type": "text",
+          "text": "안녕하세요. 오늘은 한강에 왔어요! 날씨 진짜 좋다",
+          "annotations": [
+            {
+              "type": "word_info",
+              "text": "안녕하세요",
+              "start_offset": "0.100s",
+              "end_offset": "0.900s"
+            },
+            {
+              "type": "word_info",
+              "text": "오늘은",
+              "start_offset": "1.200s",
+              "end_offset": "1.600s"
+            },
+            {
+              "type": "word_info",
+              "text": "한강에",
+              "start_offset": "1.700s",
+              "end_offset": "2.100s"
+            },
+            {
+              "type": "word_info",
+              "text": "왔어요",
+              "start_offset": "2.200s",
+              "end_offset": "2.800s"
+            },
+            {
+              "type": "word_info",
+              "text": "날씨",
+              "start_offset": "3.600s",
+              "end_offset": "3.900s"
+            },
+            {
+              "type": "word_info",
+              "text": "진짜",
+              "start_offset": "4s",
+              "end_offset": "4.300s"
+            },
+            {
+              "type": "word_info",
+              "text": "좋다",
+              "start_offset": "4.400s",
+              "end_offset": "4.800s"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "usage": {
+    "total_input_tokens": 125,
+    "total_output_tokens": 18
+  }
+}

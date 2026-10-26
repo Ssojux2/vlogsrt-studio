@@ -816,6 +816,37 @@ def check_ear_rescue_stays_pure() -> list[str]:
     return failures
 
 
+# Gemini 시간 엔진의 응답 해석과 단어 → 자막 줄 묶기(W-31b, D92)는 값만 받아 값만 돌려준다 — 큐
+# 경계는 엔진이 준 단어 경계에서만 고른다. 전사 흐름·다른 귀 글자(`source_text`·`retext`)·서비스·DB·
+# 파일을 알면 다른 귀의 글자나 캐시 상태가 경계에 끼어든다(D24의 모양).
+WORD_CUES_MODULES = ("gemini_transcribe_parse.py", "word_cues.py")
+WORD_CUES_MUST_NOT_IMPORT = (
+    *RETEXT_MUST_NOT_IMPORT, "retext", "understanding", "source_text", "service", "sqlite3",
+    "caption_provider", "analysis_workflow", "os", "shutil",
+)  # fmt: skip
+
+
+def check_word_cues_stays_pure() -> list[str]:
+    """D92 — 응답 해석·단어 묶기는 순수하다. 파일이 사라져도 조용히 통과하지 않는다."""
+    failures: list[str] = []
+    for name in WORD_CUES_MODULES:
+        path = PROJECT_PACKAGE / "raw" / name
+        if not path.exists():
+            failures.append(f"vlogsrt/project/raw/{name}: 단어 시각 계층이 사라졌다 (D92)")
+            continue
+        body = path.read_text(encoding="utf-8")
+        failures += [
+            f"{name}: {module}을 import한다 — 큐 경계가 엔진 단어 밖의 것에 기댄다 (D92)"
+            for module in _imports(body, WORD_CUES_MUST_NOT_IMPORT)
+        ]
+        failures += [
+            f"{name}:{number}: 파일을 직접 읽거나 쓴다 — 해석·묶기는 값만 다룬다 (D92)"
+            for number, line in enumerate(body.splitlines(), start=1)
+            if TIERING_FILE_IO.search(line)
+        ]
+    return failures
+
+
 # 요청 빌더의 칸(D59 19c) — whisper(시간) 요청에는 힌트가, 글자 요청에는 시각 입자가 실리지 않는다.
 # 1단계 글자 경로가 용어집·고정 문맥을 요청마다 싣게 되면서 그 길이 whisper 쪽으로 새지 않게 막는다.
 REQUEST_LANES = (
@@ -2765,6 +2796,7 @@ CHECKS = (
     ("재전사는 전사 단계에 머문다", check_repair_stays_upstream),
     ("글자 교정은 순수하다", check_retext_stays_pure),
     ("다른 귀 기준 재전사 판정은 순수하다", check_ear_rescue_stays_pure),
+    ("Gemini 단어 해석·묶기는 순수하다", check_word_cues_stays_pure),
     ("3단 등급은 순수하다", check_tiering_stays_pure),
     ("등급의 시각 확인 값은 서비스 한 자리만", check_tier_timing_only_from_service),
     ("자막 시각 확인은 순수하다", check_sync_check_stays_pure),

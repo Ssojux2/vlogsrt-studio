@@ -3943,3 +3943,38 @@ def test_a_missing_gemini_timing_builder_is_not_a_silent_pass(
 
 def test_the_real_gemini_timing_request_has_no_hint() -> None:
     assert check_invariants.check_gemini_timing_request_lane() == []
+
+
+# ── D92: Gemini 단어 해석·묶기는 순수하다 ─────────────────────────────────────
+
+
+@pytest.mark.parametrize("module", ["gemini_transcribe_parse.py", "word_cues.py"])
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "from vlogsrt.project.raw import source_text",
+        "from vlogsrt.project.raw.retext import plan",
+        "from vlogsrt import transcribe",
+        "import sqlite3",
+        "BODY = Path('x').read_text()",
+    ],
+)
+def test_word_cue_layers_stay_pure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, module: str, statement: str
+) -> None:
+    clean = "from fractions import Fraction\nfrom pathlib import Path\n"
+    files = {f"vlogsrt/project/raw/{name}": clean for name in check_invariants.WORD_CUES_MODULES}
+    _fake_source_tree(monkeypatch, tmp_path, files)
+    assert check_invariants.check_word_cues_stays_pure() == []
+    target = tmp_path / "vlogsrt" / "project" / "raw" / module
+    target.write_text(clean + statement + "\n", encoding="utf-8")
+    failures = check_invariants.check_word_cues_stays_pure()
+    assert failures and all(line.startswith(module) for line in failures)
+    target.unlink()
+    assert check_invariants.check_word_cues_stays_pure() == [
+        f"vlogsrt/project/raw/{module}: 단어 시각 계층이 사라졌다 (D92)"
+    ]
+
+
+def test_the_real_word_cue_layers_are_pure() -> None:
+    assert check_invariants.check_word_cues_stays_pure() == []
