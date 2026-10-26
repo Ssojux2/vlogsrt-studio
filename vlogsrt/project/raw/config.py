@@ -729,6 +729,110 @@ GEMINI_ANALYSIS_PROFILES: Mapping[str, RawGeminiAnalysisProfile] = MappingProxyT
 )
 """모델 이름 → 프로파일(읽기 전용). 클라이언트·단가·상한은 언제나 고른 모델의 프로파일에서 온다."""
 
+GEMINI_TRANSCRIBE_MODES = ("verbatim",)
+"""단어 시각과 함께 쓸 수 있는 전사 방식 — `smart`는 공급자가 시각과 함께 받지 않는다(D92)."""
+GEMINI_TRANSCRIBE_MIN_CHUNK_SECONDS = 180.0
+"""1단계 조각의 상한(`analysis_config.MAX_ASR_CHUNK_SECONDS`)과 같은 값 — 프로파일의 단어 시각 길이
+한도는 이보다 짧을 수 없다(raw config는 다른 설정을 import하지 않는 잎이라 값을 옮겼다 — 시험이
+같음을 잠근다)."""
+
+
+@dataclass(frozen=True)
+class RawGeminiTranscribeProfile:
+    """시간 엔진 Gemini 3.5 Transcribe의 동결 프로파일(W-31, D92) — RawWorkflowConfig **밖**에 산다.
+
+    공식 문서(https://ai.google.dev/gemini-api/docs/transcribe, 확인 2026-10-26): `POST
+    /v1beta/interactions`, verbatim + `timestamp_granularities: ["word"]` → 단어마다 `start_offset`·
+    `end_offset`. 단어 시각을 켜면 길이 한도가 짧아진다(Gemini 문서 30분 · Cloud 문서 15분 — 짧은
+    쪽을 쓴다). 인라인 요청은 20 MB까지. 단가는 오디오 입력 분당 $0.003 + 글자 출력 분당 $0.002
+    (https://ai.google.dev/gemini-api/docs/pricing#gemini-3.5-transcribe). 0원으로 두지 마라.
+
+    상태 표기가 엇갈린다(모델 표 Stable · 출시 글 2026-08-26 public preview · Cloud 문서의 단어 시각
+    Experimental) — 보수적인 쪽(`preview`·`experimental`)을 적는다. 그래서 `price_valid_through`는
+    알려진 인상일이 아니라 **재확인 기한**이다(외부 근거 없음) — 지나면 사람이 가격표를 다시 읽고
+    고치기 전까지 견적이 닫힌다(D84). 결제 연결 키만 쓴다 — 무료 등급은 입력을 제품 개선에 쓴다.
+    계정 접근·유료 호출은 아직 시험하지 않았다(사람의 녹화 H1).
+    """
+
+    model: str = "gemini-3.5-transcribe"
+    label: str = "Gemini 3.5 Transcribe"
+    api_base_url: str = "https://generativelanguage.googleapis.com"
+    api_version: str = "v1beta"
+    timeout_seconds: float = 300.0
+    mode: str = "verbatim"
+    granularities: tuple[str, ...] = ("word",)
+    language_codes: Mapping[str, str] = MappingProxyType({"ko": "ko-KR"})
+    max_audio_seconds_with_word_times: float = 900.0
+    inline_request_max_bytes: int = 20_000_000
+    audio_input_per_minute: Decimal = Decimal("0.003")
+    text_output_per_minute: Decimal = Decimal("0.002")
+    currency: str = "USD"
+    pricing_checked_at: date = date(2026, 10, 26)
+    pricing_revision: str = "google-gemini-3-5-transcribe-2026-10-26"
+    price_valid_through: date = date(2027, 1, 26)
+    lifecycle_status: str = "preview"
+    word_timestamps_status: str = "experimental"
+    account_access_status: str = "unverified"
+    integration_test_status: str = "not_run"
+    source_urls: tuple[str, ...] = (
+        "https://ai.google.dev/gemini-api/docs/transcribe",
+        "https://ai.google.dev/api/interactions-api",
+        "https://ai.google.dev/gemini-api/docs/pricing",
+        "https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/gemini/3-5-transcribe",
+    )
+
+
+GEMINI_TRANSCRIBE_PROFILE = RawGeminiTranscribeProfile()
+"""Gemini 3.5 Transcribe — 분당 약 $0.005(오디오 $0.003 + 글자 $0.002), 2026-10-26 확인."""
+
+
+def gemini_transcribe_profile_problems(profile: RawGeminiTranscribeProfile) -> list[str]:
+    """프로파일의 자기 일관성 — 단가는 유한한 양수, 방식·시각·한도·엔드포인트는 쓸 수 있는 값."""
+    problems = [
+        f"{name}이(가) 유한한 양수가 아니다 — 미확인 단가를 무료로 두지 마라"
+        for name in ("audio_input_per_minute", "text_output_per_minute")
+        if not _positive_decimal(getattr(profile, name))
+    ]
+    if not profile.model.startswith(GEMINI_MODEL_PREFIX):
+        problems.append(f"Gemini 모델 이름이 {GEMINI_MODEL_PREFIX!r}로 시작하지 않는다")
+    if profile.mode not in GEMINI_TRANSCRIBE_MODES:
+        problems.append(f"전사 방식은 단어 시각과 함께 쓸 수 있는 값이어야 한다: {profile.mode!r}")
+    if profile.granularities != ("word",):
+        problems.append("시간 엔진은 단어 시각(`word`) 하나만 받는다")
+    if not profile.language_codes:
+        problems.append("언어 잠금 표가 비었다")
+    if profile.max_audio_seconds_with_word_times < GEMINI_TRANSCRIBE_MIN_CHUNK_SECONDS:
+        problems.append("단어 시각 길이 한도가 1단계 조각(180초)보다 짧다")
+    if profile.inline_request_max_bytes < 1:
+        problems.append("인라인 요청 한도는 1바이트 이상이어야 한다")
+    if not _https_url(profile.api_base_url) or urlsplit(profile.api_base_url).path not in ("", "/"):
+        problems.append("api_base_url은 경로 없는 https 호스트여야 한다")
+    if not math.isfinite(profile.timeout_seconds) or profile.timeout_seconds <= 0:
+        problems.append("timeout_seconds는 유한한 양수여야 한다")
+    if profile.price_valid_through < profile.pricing_checked_at:
+        problems.append("단가 재확인 기한이 확인한 날보다 앞이다")
+    return problems
+
+
+def gemini_transcribe_language_codes(
+    languages: tuple[str, ...], profile: RawGeminiTranscribeProfile | None = None
+) -> tuple[str, ...]:
+    """계약의 언어(`ko`) → 공급자의 언어 잠금(`ko-KR`). 표에 없거나 비면 보내지 않는다."""
+    chosen = profile or GEMINI_TRANSCRIBE_PROFILE
+    if not languages or any(code not in chosen.language_codes for code in languages):
+        raise ValueError(f"Gemini 전사의 언어 잠금으로 옮길 수 없는 언어다: {languages!r}")
+    return tuple(chosen.language_codes[code] for code in languages)
+
+
+def gemini_transcribe_price_per_minute(
+    profile: RawGeminiTranscribeProfile, *, today: date
+) -> Decimal | None:
+    """분당 단가(오디오 + 글자) — 재확인 기한이 지나면 None(가격 미정, 0원이 아니다)."""
+    if today > profile.price_valid_through:
+        return None
+    return profile.audio_input_per_minute + profile.text_output_per_minute
+
+
 DEFAULT_ANALYSIS_MODEL: str = RawModelRoles().luna_model
 PREVIOUS_DEFAULT_ANALYSIS_MODELS = frozenset({CLAUDE_SONNET_ANALYSIS_PROFILE.model})
 """열 때 기본으로 옮겨 줄 예전 기본(D58의 Sonnet 5.5) — 사람이 따로 고른 모델(Opus·Luna·Gemini)은

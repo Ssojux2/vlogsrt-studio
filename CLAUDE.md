@@ -129,6 +129,17 @@ Final Cut에 들어가지 않으며 `scripts/timing_truth_report.py`(읽기 전�
    오프셋은 여전히 ffmpeg가 CSV로 알려준 실제값이다(D27).
    **whisper 단어 시각도 시각의 원천이 아니다**(D73) — 1단계 기록에 보고서·제안 재료로만 남고,
    세그먼트에 나눠 붙이거나 줄 경계를 정하지 않는다.
+   **작업대 1단계의 시간 엔진은 둘이 될 수 있다(D92, 2026-10-26 사용자 승인 — W-31로 연결 중).**
+   시각은 시간 엔진의 응답에서만 온다 — whisper `segments[]`의 세그먼트 시각, 또는 Gemini
+   3.5 Transcribe `word_info`의 단어 시각. `엔진 시각 + 조각 오프셋`이 원본 시각 그대로이고
+   유도·배분·보간은 없다(손질은 D55 청크 끝 닫기뿐). **Gemini 원본의 큐 경계는 엔진이 준 단어
+   경계에서만 고른다** — 큐 시작 = 첫 시각 단어의 시작, 큐 끝 = 그 큐 단어 끝의 최대값. 단어를
+   쪼개지 않고 단어 사이 시각을 만들지 않는다. 시각이 없는 단어의 글자는 이웃 큐에 남기고 세며
+   그 단어에 시각을 주지 않는다. **한 원본의 지금 전사는 한 엔진의 것이고, 엔진을 바꾸는 길은
+   「다시 듣기」뿐이다.** Gemini 원본에서는 다른 귀(gpt) 글자가 자막을 바꾸지 않는다(후보·「확인
+   필요」로만). 위 whisper 조항(D37·D27·D73)은 whisper 원본에 그대로다. D24와 다른 점: D24는
+   시각 없는 글자를 소리 구간에 글자 수로 **배분**했고, 여기는 모든 경계가 엔진이 그 단어에 대해
+   직접 준 시각이다 — 프로그램은 끊을 단어 경계만 고른다(자를 자리를 고르는 일과 같은 종류).
 
 2. **`spine[]`은 조립이 끝난 뒤 절대 수정하지 않는다.** 조립은 재전사가 끝나는 지점
    (`repair.settle`)이고, 그 뒤로 골격을 고치는 코드는 없다. 1차 전사 결과는 아직
@@ -169,13 +180,17 @@ Final Cut에 들어가지 않으며 `scripts/timing_truth_report.py`(읽기 전�
 6. **whisper에 `prompt`를 보내지 마라(D13, D16).** whisper는 `prompt`를 지시가 아니라
    직전 자막 텍스트로 읽는다 — 한 줄이 `'한국 여행 브이로그'` 138회·564초를 낳았다.
    힌트와 `keywords`는 **검증 모델에만** 간다. `check_invariants.py`가 검사한다.
+   시간 엔진 Gemini 3.5 Transcribe(D92)에도 `prompt`·`keywords`·`custom_vocabulary`·
+   `system_instruction`을 보내지 않는다(공급자도 custom_vocabulary와 단어 시각을 함께 받지 않는다).
+   `language_codes`(`ko-KR`)는 힌트가 아니라 언어 잠금이다 — whisper의 단수 `language`(D77)와 같다.
 
 7. **경계는 두 곳뿐이다.** API 호출은 `transcribe.py`에서만, ffmpeg 호출은
    `preprocess.py`에서만. **`cutpoints.py`와 `repetition.py`는 순수 함수여야 한다.**
    Claude도 같다(D54) — 승인 문·관찰·취소는 `transcribe.request_claude_messages`가 지고,
    그 아래 HTTP 전송만 `anthropic_messages.py`에 산다. Gemini도 같다(D83, 2026-10-23 사용자
-   승인으로 전송 파일 하나를 더했다) — 문은 `transcribe.request_gemini_generate`, 전송은
-   `gemini_messages.py`. 네트워크 모듈(`urllib.request`·`http.client`·`socket`·`ssl`)을
+   승인으로 전송 파일 하나를 더했다) — 문은 `transcribe.request_gemini_generate`(의미 분석)·
+   `transcribe.request_gemini_transcription`(시간 엔진, D92), 전송은 `gemini_messages.py`(같은
+   파일의 `post_generate_content`·`post_interaction`). 네트워크 모듈(`urllib.request`·`http.client`·`socket`·`ssl`)을
    import할 수 있는 파일은 그 전송 파일 둘, 그 파일을 import할 수 있는 파일은 `transcribe.py`
    하나다(전송 파일끼리도 서로 모른다). 예외는 로컬 브라우저 서버의 `ui/instance.py`
    (`urllib.request`)·`ui/service.py`(`socket`) 둘뿐이다(`UI_NETWORK_ALLOWLIST`).

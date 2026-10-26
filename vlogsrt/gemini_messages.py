@@ -6,8 +6,10 @@
 `anthropic_messages.py`의 거울이다 — 그 파일은 이 파일을 모르고 이 파일도 그 파일을 모른다
 (전송 파일끼리 서로 import하지 않는다).
 
-`generateContent`를 쓴다 — 상태 없는 한 번의 요청·응답이다. 새 Interactions API는 기본으로
-요청을 서버에 저장한다(`store=true`) — 판정 창의 프레임을 공급자 쪽에 남길 까닭이 없다.
+의미 분석은 `generateContent`를 쓴다 — 상태 없는 한 번의 요청·응답이다. 새 Interactions API는
+기본으로 요청을 서버에 저장한다(`store=true`) — 판정 창의 프레임을 공급자 쪽에 남길 까닭이 없다.
+시간 엔진 Gemini 3.5 Transcribe(W-31, D92)는 Interactions에만 있다 — 그 요청은 문(`transcribe`)이
+`store: false`를 실어 보내고, 여기는 `POST /{version}/interactions` 한 번을 보낼 뿐이다.
 
 재시도·스트리밍이 없다. 429·503·시간 초과는 명시적 실패 기록이어야 조용한 지연이 되지
 않는다. 리다이렉트도 따르지 않는다 — 키를 실은 요청이 다른 호스트로 넘어가는 길을 남기지
@@ -32,6 +34,7 @@ from urllib.parse import urlsplit
 from . import env
 
 GENERATE_PATH = "/{version}/models/{model}:generateContent"
+INTERACTIONS_PATH = "/{version}/interactions"
 API_KEY_HEADER = "x-goog-api-key"
 ERROR_MESSAGE_LIMIT = 200
 """오류 문면에 싣는 공급자 메시지의 최대 글자 수 — 진단에 넉넉하고 화면을 덮지 않는다."""
@@ -170,6 +173,26 @@ def post_generate_content(
     _require_endpoint(client)  # 생성 뒤의 바꿔치기도 키를 얹기 전에 다시 본다
     require_model_segment(model)
     path = GENERATE_PATH.format(version=client.api_version, model=model)
+    return _post_json(client, path, body)
+
+
+def post_interaction(client: GeminiClient, body: Mapping[str, object]) -> dict[str, Any]:
+    """`POST {base_url}/{version}/interactions` 한 번(W-31a, D92) — 파싱한 응답을 돌려준다.
+
+    Interactions에서는 모델이 경로가 아니라 본문에 산다 — 본문의 모델 이름도 경로 조각과 같은
+    모양만 받는다(키를 얹기 전에 닫는다). 오류·시간 초과·리다이렉트 거절은 generateContent와
+    한 길이다.
+    """
+    _require_endpoint(client)
+    model = body.get("model")
+    if not isinstance(model, str):
+        raise ValueError(f"Gemini Interactions 본문의 모델 이름이 없다: {model!r}")
+    require_model_segment(model)
+    path = INTERACTIONS_PATH.format(version=client.api_version)
+    return _post_json(client, path, body)
+
+
+def _post_json(client: GeminiClient, path: str, body: Mapping[str, object]) -> dict[str, Any]:
     request = urllib.request.Request(
         client.base_url.rstrip("/") + path,
         data=json.dumps(body, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode(

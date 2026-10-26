@@ -1924,3 +1924,177 @@ def test_create_claude_client_takes_only_given_values() -> None:
         300.0,
     )
     assert "sk-ant-synthetic" not in repr(client)
+
+
+# ─── Gemini 3.5 Transcribe 경계(W-31a, D92) — 시간 엔진의 문 ─────────────────
+
+TRANSCRIBE_MODEL = "gemini-3.5-transcribe"
+
+
+class _InteractionReply(_ClaudeReply):
+    def read(self) -> bytes:
+        return b'{"id": "int_synthetic", "status": "completed", "output_text": ""}'
+
+
+class _InteractionOpener:
+    def __init__(self) -> None:
+        self.sent: list[tuple[str, dict[str, Any]]] = []
+
+    def __call__(self, request: Any, timeout: float) -> _InteractionReply:
+        self.sent.append((request.full_url, json.loads(request.data)))
+        return _InteractionReply()
+
+
+def _wav_chunk(tmp_path: Path, payload: bytes = b"RIFF-synthetic-wav", **values: Any) -> Any:
+    from vlogsrt.models import Chunk
+
+    path = tmp_path / "asr-chunk-0000.wav"
+    path.write_bytes(payload)
+    fields = {"path": path, "offset": 12.5, "duration": 30.0, "index": 3}
+    fields.update(values)
+    return Chunk(**fields)
+
+
+def _transcription(chunk: Any, **values: Any) -> Any:
+    from vlogsrt.transcribe import GeminiTranscriptionRequest
+
+    fields: dict[str, Any] = {
+        "model": TRANSCRIBE_MODEL,
+        "chunk": chunk,
+        "language_codes": ("ko-KR",),
+        "max_audio_seconds": 900.0,
+        "max_request_bytes": 20_000_000,
+    }
+    fields.update(values)
+    return GeminiTranscriptionRequest(**fields)
+
+
+def _send_transcription(opener: Any, request: Any, **values: Any) -> Any:
+    from vlogsrt.transcribe import request_gemini_transcription
+
+    return request_gemini_transcription(_gemini_client(opener), request=request, **values)
+
+
+def test_gemini_transcription_is_closed_without_explicit_online(tmp_path: Path) -> None:
+    opener = _InteractionOpener()
+    for values in ({}, {"online": False}):
+        with pytest.raises(RuntimeError, match="online=True"):
+            _send_transcription(opener, _transcription(_wav_chunk(tmp_path)), **values)
+    assert opener.sent == []
+
+
+def test_gemini_transcription_sends_inline_wav_with_word_times_and_no_storage(
+    tmp_path: Path,
+) -> None:
+    import base64
+    import hashlib
+
+    from vlogsrt.transcribe import CAPTION_TIMING_KIND, GEMINI_TRANSCRIBE_OPERATION
+
+    trace: list[str] = []
+    opener = _InteractionOpener()
+    ledger = _ClaudeLedger(trace)
+    audio = b"RIFF-synthetic-wav"
+    reply = _send_transcription(
+        opener,
+        _transcription(_wav_chunk(tmp_path, audio)),
+        online=True,
+        observer=ledger,
+        stem="IMG_8875",
+        source="src-1",
+    )
+    ((url, body),) = opener.sent
+    assert url.endswith("/v1beta/interactions")
+    assert body == {
+        "model": TRANSCRIBE_MODEL,
+        "store": False,
+        "input": [
+            {
+                "type": "audio",
+                "data": base64.b64encode(audio).decode("ascii"),
+                "mime_type": "audio/wav",
+            }
+        ],
+        "generation_config": {
+            "transcription_config": {
+                "language_codes": ["ko-KR"],
+                "mode": {"type": "verbatim", "timestamp_granularities": ["word"]},
+            }
+        },
+    }
+    assert trace == ["authorize", "response"] and reply["status"] == "completed"
+    (meta,) = ledger.metas
+    assert meta.operation == GEMINI_TRANSCRIBE_OPERATION == "interactions.transcribe"
+    assert (meta.model, meta.kind, meta.stem, meta.source) == (
+        TRANSCRIBE_MODEL,
+        CAPTION_TIMING_KIND,
+        "IMG_8875",
+        "src-1",
+    )
+    assert (meta.chunk_index, meta.chunk_offset, meta.chunk_duration) == (3, 12.5, 30.0)
+    # 관찰 기록은 오디오를 다시 싣지 않는다 — 지문과 크기뿐이다
+    assert meta.options["input"] == [
+        {
+            "type": "audio",
+            "mime_type": "audio/wav",
+            "sha256": hashlib.sha256(audio).hexdigest(),
+            "bytes": len(audio),
+        }
+    ]
+    assert "data" not in json.dumps(dict(meta.options), default=str).replace('"bytes"', "")
+
+
+@pytest.mark.parametrize(
+    ("values", "match"),
+    [
+        ({"model": "gemini-3.5-transcribe:x"}, "모델"),
+        ({"language_codes": ()}, "언어"),
+        ({"max_audio_seconds": 10.0}, "길이"),
+        ({"max_request_bytes": 10}, "크기"),
+    ],
+)
+def test_a_local_transcription_defect_fails_before_authorization(
+    tmp_path: Path, values: dict[str, Any], match: str
+) -> None:
+    opener = _InteractionOpener()
+    ledger = _ClaudeLedger([])
+    with pytest.raises(ValueError, match=match):
+        _send_transcription(
+            opener, _transcription(_wav_chunk(tmp_path), **values), online=True, observer=ledger
+        )
+    assert ledger.metas == [] and opener.sent == []
+
+
+def test_a_non_gemini_client_cannot_transcribe(tmp_path: Path) -> None:
+    from vlogsrt.transcribe import request_gemini_transcription
+
+    ledger = _ClaudeLedger([])
+    with pytest.raises(TypeError, match="Gemini"):
+        request_gemini_transcription(
+            _claude_client(_ClaudeOpener()),
+            request=_transcription(_wav_chunk(tmp_path)),
+            online=True,
+            observer=ledger,
+        )
+    assert ledger.metas == []
+
+
+def test_gemini_transcription_cancellation_gates_the_send(tmp_path: Path) -> None:
+    class Stop(BaseException):
+        pass
+
+    def gate() -> None:
+        raise Stop
+
+    opener = _InteractionOpener()
+    ledger = _ClaudeLedger([])
+    for observer in (ledger, None):
+        with pytest.raises(Stop):
+            _send_transcription(
+                opener,
+                _transcription(_wav_chunk(tmp_path)),
+                online=True,
+                observer=observer,
+                cancellation=gate,
+            )
+    assert opener.sent == [] and ledger.metas == []

@@ -8720,3 +8720,60 @@ SRT · CLI · 작업대 단추·취소·재시도). 유료 호출 0회. **사람
 크기·위치(가로·세로) · 테두리 · 타이틀 없으면 바이트 그대로 · 설치 DTD 통과(같은 레이트·섞인 레이트)·결정성 · 설정 · 보내기 리포트 · 못
 읽는 SRT · CLI · 작업대 단추·취소·재시도). 유료 호출 0회. **사람 확인 남음**: Final Cut 12.4로 가져와 경고가 없는지, 타이틀이 말소리
 자리에 서는지(컷을 넘는 줄 포함), 꺼진 클립 위 타이틀, 글꼴·크기·위치(세로 프로젝트), 모두 골라 디자인 바꾸기.
+
+## D92 — W-31 작업대 1단계 시간 엔진에 Gemini 3.5 Transcribe — 규칙 1 변경 (2026-10-26, W-31)
+
+**사용자 지시**(2026-10-26): 「whisper가 너무 SRT 자막 정확도가 떨어지는데 제외하면 대안이 있을까? gemini나 chatgpt에서 srt 만들 때 쓸
+수 있는 것들을 doc을 읽고 조사해서 계획을 세워줘」. 조사 뒤 고른 것: **1단계 원본 자막의 시각·글자를 Gemini 3.5 Transcribe로 교체**
+(whisper는 종료일까지 「이전 엔진」) · 이미 whisper로 들은 영상은 그대로 두고 사람이 **「다시 듣기」**로 바꾼다(견적·승인, 사람이 고친
+자막은 덮지 않는다). 이 결정은 CLAUDE.md 규칙 1(시각은 whisper `segments[]`에서만)을 바꾼다 — 계획이 그 보고였고 사용자가 승인했다.
+
+**조사(공식 문서, 2026-10-26)**:
+- OpenAI: 권장 모델 `gpt-transcribe`($0.0045/분)는 JSON 글자만 준다 — 시각·srt·vtt가 없다(공식 이전 안내가 「SRT·시각이 필요하면
+  whisper-1을 유지하라」고 한다). 시각을 주는 OpenAI 모델(whisper-1 verbose_json, gpt-4o-transcribe-diarize)은 **2027-02-26 종료**
+  (https://developers.openai.com/api/docs/deprecations). 2026년 새 모델(gpt-transcribe·gpt-live-transcribe·gpt-realtime-whisper)
+  가운데 시각을 주는 것은 없다.
+- Google: **`gemini-3.5-transcribe`**(https://ai.google.dev/gemini-api/docs/transcribe) — `POST /v1beta/interactions`, verbatim +
+  `timestamp_granularities:["word"]` → 단어마다 `start_offset`·`end_offset`(밀리초 예시), ko-KR, 분당 약 $0.005(오디오 $0.003 +
+  글자 $0.002), `GEMINI_API_KEY`(헤더)로 부른다. 단어 시각을 켜면 길이 한도 30분(Cloud 문서 15분) · 「정확도가 떨어질 수 있다」
+  경고 · custom_vocabulary·smart 방식과 함께 못 쓴다. 상태 표기가 엇갈린다(Stable / public preview / 단어 시각 Experimental).
+  일반 Gemini 모델은 프롬프트로 MM:SS만 준다(자막 시각으로 못 쓴다). Cloud Speech-to-Text(Chirp)는 OAuth·Cloud Storage가 필요하다.
+
+**새 규칙 1**(CLAUDE.md에 넣었다): 시각은 시간 엔진의 응답에서만 온다 — whisper `segments[]` 또는 Gemini Transcribe `word_info`.
+`엔진 시각 + 조각 오프셋`이 원본 시각 그대로, 유도·배분·보간 없음(D55 청크 끝 닫기만). Gemini 원본의 큐 경계는 엔진이 준 단어
+경계에서만 고른다(큐 시작 = 첫 시각 단어 시작, 큐 끝 = 단어 끝의 최대값, 단어를 쪼개지 않는다). 시각 없는 단어의 글자는 이웃 큐에
+남기고 세며 시각을 주지 않는다. 한 원본의 지금 전사는 한 엔진의 것이고 바꾸는 길은 「다시 듣기」뿐이다. Gemini 원본에서 다른 귀
+글자는 자막을 바꾸지 않는다(후보·「확인 필요」). whisper 원본의 D37·D27·D73 조항은 그대로다.
+
+**D24와 다른 점**: D24는 silencedetect로 찾은 소리 구간에 시각 없는 모델 글자를 글자 수 비율로 **배분**했다 — 모델이 놓지 않은
+단어에 시각을 계산해 줬다. D92에서는 큐의 모든 시작·끝이 같은 응답 안에서 엔진이 그 단어에 대해 직접 보고한 시각이다. 프로그램은
+어느 단어 경계를 큐 경계로 쓸지만 고른다 — 규칙 4의 자를 자리 고르기와 같은 종류의 일이다.
+
+**설계(계획 정본 — W-31a–f)**:
+- **엔진은 원본마다 고정**한다. 저장된 `RawWorkflowConfig`(`timing_model="whisper-1"`, `CONFIG_PINNED_FIELDS`)는 그대로 두고 원본마다
+  유효 설정을 만든다 — whisper 원본은 같은 객체라 청크 열쇠·입력 지문·견적 digest가 바이트 그대로다. 정하는 순서: 다시 듣기 대기면
+  「새로 듣는 엔진」 → 이번 차례의 고정 줄 → 원본 자막 문서가 있으면 whisper → 처음 듣는 영상은 새로 듣는 엔진. 고정은 첫 유료 호출 전.
+- **전송·문**(W-31a, 이번 커밋): `gemini_messages.post_interaction`(본문의 모델을 키보다 먼저 검사 · https만 · 리다이렉트 거절 · 재시도
+  없음 · 키는 헤더만) · `transcribe.request_gemini_transcription`(online 문 · 관찰 · 취소 · 연산 `interactions.transcribe`). 본문은
+  `model` · `store: false`(공급자 쪽에 오디오를 남기지 않는다) · 오디오 **인라인 base64 WAV**(조각 ≤ 180초 16 kHz 모노 ≈ 5.8 MB,
+  base64 ≈ 7.7 MB < 20 MB — 업로드·48시간 보관·삭제가 없다) · `language_codes` · verbatim · 단어 시각. 길이(900초)·크기(20 MB) 한도를
+  넘으면 승인 전에 거부하고 Files API로 몰래 바꾸지 않는다. 관찰 기록에는 오디오 대신 sha256과 크기만 남긴다.
+- **등록표** `RawGeminiTranscribeProfile`(`raw/config.py`, `RawWorkflowConfig` 밖): 단가 오디오 $0.003 + 글자 $0.002 / 분(2026-10-26
+  확인) · `preview`·`experimental` · `price_valid_through=2027-01-26`은 알려진 인상일이 아니라 **재확인 기한**(외부 근거 없음 — 지나면
+  가격 미정으로 닫는다, D84) · 언어 잠금 `ko → ko-KR` · 한도 900초 · 20 MB.
+- **불변식**: `check_gemini_timing_request_lane` — Gemini 시간 요청의 칸·본문에 `prompt`·`keywords`·`custom_vocabulary`·
+  `system_instruction`·`languages`·`glossary`가 없다(규칙 6). 전송 파일은 여전히 둘이다(규칙 7).
+- **사람 전용 녹화** `scripts/record_gemini_transcribe.py <조각.wav> --out … --confirm-cost`(H1, 약 $0.02) — 확인 없이는 견적만, 있는
+  파일은 덮지 않는다. 인라인 7.7 MB·`store:false`가 받아지는지, `word_info`의 실제 모양, 한국어 단어(어절)·부호를 확인한다.
+  `store:false`가 거부되면 멈추고 사람에게 묻는다.
+- **남은 세션**: W-31b 응답 해석(엄격, `output_text`에 맞춰 부호를 단어에 붙임, 자리 없는 글자는 기록만) + 단어 → 큐 순수 모듈
+  (`WordCueSettings` — 32자·7초는 `Config`와 같은 값, 쉼 0.6초는 조정 대상) · W-31c 엔진 표·역할·능력표·사전 검사(Gemini는
+  whisper 종료일에 막히지 않는다)·제공자 · W-31d 원본마다 엔진(고정 표·견적·다른 귀는 후보만·D78 재질문 끔·D76 낮은 확신 없음·
+  빈칸 재전사는 고정 엔진으로) · W-31e 화면(「새로 듣는 전사 엔진」 · 견적 단가 문장) · H2 사람의 다시 듣기 3–5개 · W-31f 비교
+  보고서(시각 정답 MAE·±200 ms·환각 줄·Pτ/Rτ)와 기본값 결정. 예전 CLI와 4화면 최종 자막 경로는 whisper 그대로 — 2027-02-26 전에
+  옮기거나 걷어 낸다(W-32).
+
+**시험**(W-31a): `tests/test_gemini_messages.py`(Interactions 경로·헤더·본문 모델 검사·오류 토큰·바꿔친 클라이언트) ·
+`tests/test_transcribe.py`(online 문 · 본문 바이트 · 관찰 메타에 base64 없음 · 승인 전 지역 결함 · Gemini가 아닌 클라이언트 · 취소) ·
+`tests/raw/test_gemini_transcribe_profile.py` · `tests/test_record_gemini_transcribe.py` · `tests/test_invariants.py`. 유료 호출 0회.
+

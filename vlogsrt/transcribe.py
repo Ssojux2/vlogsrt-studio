@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import inspect
 import json
 import math
@@ -251,6 +253,8 @@ MESSAGES_OPERATION = "messages.create"
 
 GENERATE_CONTENT_OPERATION = "models.generateContent"
 """Gemini generateContent 연산 — `POST /v1beta/models/{model}:generateContent` 한 번(W-30a, D83)."""
+GEMINI_TRANSCRIBE_OPERATION = "interactions.transcribe"
+"""시간 엔진 Gemini 3.5 Transcribe 연산 — `POST /v1beta/interactions` 한 번(W-31a, D92)."""
 
 _REDACTED_OPTION_KEYS = frozenset({"api_key", "extra_headers"})
 """메타의 인자 사본에 아예 담지 않는 자격 칸 — 나가는 요청에서 걷어내는 게 아니라
@@ -1259,6 +1263,151 @@ def _generate_content(client: Any, model: str, payload: Mapping[str, object]) ->
     from . import gemini_messages
 
     return gemini_messages.post_generate_content(client, model, payload)
+
+
+# ─────────────────────────────────────────────────────────────
+#  Gemini 3.5 Transcribe 경계(W-31a, D92) — 시간 엔진의 문
+# ─────────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True, slots=True)
+class GeminiTranscriptionRequest:
+    """시간 엔진 요청 하나 — 오디오 조각 하나를 단어 시각과 함께 받아 적는다(D92).
+
+    보내는 것은 오디오·언어 잠금·verbatim·단어 시각뿐이다. `prompt`·`custom_vocabulary`·
+    `system_instruction` 칸은 없다(규칙 6 — 힌트는 시간 엔진에 가지 않는다, 그리고 공급자는
+    custom_vocabulary와 단어 시각을 함께 받지 않는다). 한도는 호출자가 등록표에서 넘긴다.
+    """
+
+    model: str
+    chunk: Chunk
+    language_codes: tuple[str, ...]
+    max_audio_seconds: float
+    max_request_bytes: int
+    mime_type: str = "audio/wav"
+    mode: str = "verbatim"
+    granularities: tuple[str, ...] = ("word",)
+
+
+def request_gemini_transcription(
+    client: Any,
+    *,
+    request: GeminiTranscriptionRequest,
+    online: bool = False,
+    observer: RequestObserver | None = None,
+    cancellation: Callable[[], None] | None = None,
+    stem: str = "",
+    source: str = "",
+) -> dict[str, Any]:
+    """승인형 1단계 전사의 Gemini 3.5 Transcribe 경계 — `request_gemini_generate`의 거울이다.
+
+    명시적 ``online=True`` 없이는 클라이언트를 만지지 않는다. 지역 결함(Gemini가 아닌 클라이언트·
+    경로 조각이 아닌 모델·빈 언어·한도를 넘는 길이와 크기)은 승인(유료 예약)보다 **먼저** 닫는다.
+    오디오는 인라인 base64로 싣는다(조각이 180초 이하라 20 MB 안 — 업로드·서버 보관이 없다).
+    `store: false` — 공급자 쪽에 오디오를 남기지 않는다. 관찰 기록에는 오디오 대신 지문과
+    크기만 남는다. 재시도는 없다.
+    """
+    _require_gemini_transcription(client, request, online=online)
+    audio = request.chunk.path.read_bytes()
+    body = _transcription_body(request, audio)
+    _require_transcription_size(request, body)
+
+    def send(_prepared: Any) -> Any:
+        return _interaction(client, body)
+
+    if observer is None:
+        if cancellation is not None:
+            cancellation()
+        return _interaction(client, body)
+    watch = _AttemptWatch(observer=observer, stem=stem, source=source)
+    reply: dict[str, Any] = _observed_call(
+        watch,
+        partial(_transcription_attempt_meta, watch, request, body, audio),
+        send,
+        gate=cancellation,
+    )()
+    return reply
+
+
+def _require_gemini_transcription(
+    client: Any, request: GeminiTranscriptionRequest, *, online: bool
+) -> None:
+    if not online:
+        raise RuntimeError(
+            "Gemini 전사 호출은 명시적 online=True 없이는 닫혀 있다 — 1단계 승인이 필요하다"
+        )
+    if not is_gemini_client(client):
+        raise TypeError(f"Gemini 클라이언트가 아니다: {type(client).__name__}")
+    from . import gemini_messages
+
+    gemini_messages.require_model_segment(request.model)
+    if not request.language_codes or not all(request.language_codes):
+        raise ValueError("Gemini 전사의 언어 잠금(language_codes)이 비었다")
+    if request.chunk.duration > request.max_audio_seconds:
+        raise ValueError(
+            f"조각 {request.chunk.index}의 길이 {request.chunk.duration}초가 단어 시각 전사의"
+            f" 한도 {request.max_audio_seconds}초를 넘는다"
+        )
+
+
+def _transcription_body(request: GeminiTranscriptionRequest, audio: bytes) -> dict[str, Any]:
+    audio_part = {
+        "type": "audio",
+        "data": base64.b64encode(audio).decode("ascii"),
+        "mime_type": request.mime_type,
+    }
+    return {
+        "model": request.model,
+        "store": False,
+        "input": [audio_part],
+        "generation_config": {"transcription_config": _transcription_config(request)},
+    }
+
+
+def _transcription_config(request: GeminiTranscriptionRequest) -> dict[str, Any]:
+    mode = {"type": request.mode, "timestamp_granularities": list(request.granularities)}
+    return {"language_codes": list(request.language_codes), "mode": mode}
+
+
+def _require_transcription_size(request: GeminiTranscriptionRequest, body: dict[str, Any]) -> None:
+    """인라인 요청 크기 — 넘으면 보내지 않는다(Files API로 몰래 바꾸지 않는다)."""
+    size = len(json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+    if size > request.max_request_bytes:
+        raise ValueError(
+            f"조각 {request.chunk.index}의 요청 크기 {size}바이트가 인라인 한도"
+            f" {request.max_request_bytes}바이트를 넘는다"
+        )
+
+
+def _transcription_attempt_meta(
+    watch: _AttemptWatch, request: GeminiTranscriptionRequest, body: dict[str, Any], audio: bytes
+) -> RequestAttemptMeta:
+    """관찰 메타 — 오디오(수 MB의 base64)는 다시 싣지 않고 sha256과 크기만 남긴다."""
+    audio_facts = {
+        "type": "audio",
+        "mime_type": request.mime_type,
+        "sha256": hashlib.sha256(audio).hexdigest(),
+        "bytes": len(audio),
+    }
+    chunk = request.chunk
+    return RequestAttemptMeta(
+        attempt_id=uuid4().hex,
+        operation=GEMINI_TRANSCRIBE_OPERATION,
+        model=request.model,
+        kind=CAPTION_TIMING_KIND,
+        stem=watch.stem,
+        source=watch.source,
+        chunk_index=chunk.index,
+        chunk_offset=chunk.offset,
+        chunk_duration=chunk.duration,
+        options=_snapshot_options({**body, "input": [audio_facts]}),
+    )
+
+
+def _interaction(client: Any, body: Mapping[str, object]) -> dict[str, Any]:
+    from . import gemini_messages
+
+    return gemini_messages.post_interaction(client, body)
 
 
 class VisionResponder(Protocol):

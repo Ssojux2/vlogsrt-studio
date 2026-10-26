@@ -407,3 +407,68 @@ def test_https_through_a_configured_proxy_is_a_connect_tunnel(
         client_with(lambda request, timeout: director.open(request, timeout=timeout)), MODEL, BODY
     )
     assert spy.seen == [("https", "proxy.test:3128", "generativelanguage.googleapis.com", URL)]
+
+
+# ─────────────────────────────────────────────────────────────
+#  Interactions — Gemini 3.5 Transcribe의 전송(W-31a, D92)
+# ─────────────────────────────────────────────────────────────
+
+INTERACTIONS_URL = "https://generativelanguage.googleapis.com/v1beta/interactions"
+TRANSCRIBE_BODY = {
+    "model": "gemini-3.5-transcribe",
+    "store": False,
+    "input": [{"type": "audio", "data": "UklGRg==", "mime_type": "audio/wav"}],
+}
+
+
+def test_an_interaction_posts_to_the_interactions_path_with_the_key_header_only() -> None:
+    opener = opener_with(body=b'{"status": "completed", "output_text": ""}')
+    reply = gemini_messages.post_interaction(client_with(opener), TRANSCRIBE_BODY)
+    ((request, timeout),) = opener.calls
+    assert request.full_url == INTERACTIONS_URL  # 키는 URL에 없다
+    assert request.get_method() == "POST"
+    assert dict(request.header_items()) == {
+        "X-goog-api-key": SECRET,
+        "Content-type": "application/json",
+    }
+    assert json.loads(request.data) == TRANSCRIBE_BODY  # 모델은 경로가 아니라 본문에 산다
+    assert timeout == 300.0 and reply["status"] == "completed"
+
+
+@pytest.mark.parametrize("model", [None, "", "gemini-3.5-transcribe/../x", "G", 3])
+def test_an_interaction_model_that_is_not_a_segment_is_refused_before_sending(
+    model: object,
+) -> None:
+    opener = opener_with()
+    body = {key: value for key, value in TRANSCRIBE_BODY.items() if key != "model"}
+    if model is not None:
+        body["model"] = model
+    with pytest.raises(ValueError, match="모델"):
+        gemini_messages.post_interaction(client_with(opener), body)
+    assert opener.calls == []
+
+
+def test_an_interaction_error_uses_the_same_bounded_status_parsing() -> None:
+    body = json.dumps(
+        {
+            "error": {
+                "code": 429,
+                "status": "RESOURCE_EXHAUSTED",
+                "message": f"monthly spending cap {SECRET}",
+            }
+        }
+    ).encode()
+    opener = opener_with(status=429, body=body)
+    with pytest.raises(GeminiAPIStatusError) as caught:
+        gemini_messages.post_interaction(client_with(opener), TRANSCRIBE_BODY)
+    assert caught.value.status_code == 429 and caught.value.error_type == "RESOURCE_EXHAUSTED"
+    assert SECRET not in str(caught.value)
+
+
+def test_a_tampered_client_is_refused_before_an_interaction_carries_the_key() -> None:
+    opener = opener_with()
+    client = client_with(opener)
+    object.__setattr__(client, "base_url", "http://generativelanguage.googleapis.com")
+    with pytest.raises(ValueError, match="https"):
+        gemini_messages.post_interaction(client, TRANSCRIBE_BODY)
+    assert opener.calls == []

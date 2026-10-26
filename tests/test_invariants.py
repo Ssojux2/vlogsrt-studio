@@ -3896,3 +3896,50 @@ def test_the_one_second_status_tick_is_a_screen_entry_point(
 
 def test_the_real_tree_opens_read_scopes_only_at_the_screen_entry_points() -> None:
     assert check_invariants.check_read_scope_only_at_entry_points() == []
+
+
+# ── D92: Gemini 시간 요청에도 힌트가 실리지 않는다(규칙 6) ─────────────────────
+
+_GEMINI_TIMING_CLEAN = """
+class GeminiTranscriptionRequest:
+    model: str
+    language_codes: tuple[str, ...]
+
+
+def _transcription_body(request, audio):
+    return {"model": request.model, "store": False, "input": []}
+
+
+def _transcription_config(request):
+    return {"language_codes": [], "mode": {"type": "verbatim"}}
+"""
+
+
+@pytest.mark.parametrize(
+    "dirty",
+    [
+        _GEMINI_TIMING_CLEAN.replace("    model: str", "    model: str\n    prompt: str"),
+        _GEMINI_TIMING_CLEAN.replace('"store": False', '"custom_vocabulary": []'),
+        _GEMINI_TIMING_CLEAN.replace('"mode":', '"system_instruction": "", "mode":'),
+    ],
+)
+def test_a_hint_in_the_gemini_timing_request_is_caught(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, dirty: str
+) -> None:
+    _fake_source_tree(monkeypatch, tmp_path, {"vlogsrt/transcribe.py": _GEMINI_TIMING_CLEAN})
+    assert check_invariants.check_gemini_timing_request_lane() == []
+    (tmp_path / "vlogsrt" / "transcribe.py").write_text(dirty, encoding="utf-8")
+    assert check_invariants.check_gemini_timing_request_lane()
+
+
+def test_a_missing_gemini_timing_builder_is_not_a_silent_pass(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    body = _GEMINI_TIMING_CLEAN.replace("def _transcription_config", "def _renamed")
+    _fake_source_tree(monkeypatch, tmp_path, {"vlogsrt/transcribe.py": body})
+    (failure,) = check_invariants.check_gemini_timing_request_lane()
+    assert "_transcription_config" in failure
+
+
+def test_the_real_gemini_timing_request_has_no_hint() -> None:
+    assert check_invariants.check_gemini_timing_request_lane() == []

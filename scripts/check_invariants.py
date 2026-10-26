@@ -880,6 +880,56 @@ def check_caption_request_lanes() -> list[str]:
     return failures
 
 
+# 시간 엔진 Gemini 3.5 Transcribe의 요청(W-31a, D92)에도 힌트가 실리지 않는다(규칙 6) — 요청 값의
+# 칸과 본문을 짓는 두 함수의 글자 상수를 본다. `custom_vocabulary`는 공급자도 단어 시각과 함께 받지
+# 않는다. 언어 잠금(`language_codes`)은 힌트가 아니다(D77과 같은 지위).
+GEMINI_TIMING_REQUEST = "GeminiTranscriptionRequest"
+GEMINI_TIMING_BUILDERS = ("_transcription_body", "_transcription_config")
+GEMINI_TIMING_BANNED = (
+    "prompt", "keywords", "custom_vocabulary", "system_instruction", "languages", "glossary",
+)  # fmt: skip
+
+
+def check_gemini_timing_request_lane() -> list[str]:
+    """규칙 6(D92) — Gemini 시간 요청의 칸과 본문에 힌트가 없다. 요청·빌더가 사라져도 통과 없음."""
+    path = PACKAGE / "transcribe.py"
+    if not path.exists():
+        return ["vlogsrt/transcribe.py: 전사 문이 사라졌다 (규칙 7)"]
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    nodes = {
+        node.name: node
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.ClassDef, ast.FunctionDef))
+    }
+    failures = [
+        f"transcribe.py: {name}을 찾지 못했다 — Gemini 시간 요청 검사가 무력해졌다"
+        for name in (GEMINI_TIMING_REQUEST, *GEMINI_TIMING_BUILDERS)
+        if name not in nodes
+    ]
+    used: set[str] = set()
+    request = nodes.get(GEMINI_TIMING_REQUEST)
+    if request is not None:
+        used |= {
+            item.target.id
+            for item in request.body
+            if isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name)
+        }
+    for name in GEMINI_TIMING_BUILDERS:
+        builder = nodes.get(name)
+        if builder is not None:
+            used |= {
+                node.value
+                for node in ast.walk(builder)
+                if isinstance(node, ast.Constant) and isinstance(node.value, str)
+            }
+    return failures + [
+        f"transcribe.py: Gemini 시간 요청에 {field}이(가) 실린다 — 힌트는 시간 엔진에 가지 않는다"
+        " (규칙 6, D92)"
+        for field in GEMINI_TIMING_BANNED
+        if field in used
+    ]
+
+
 def _lane_fields(node: ast.FunctionDef) -> set[str]:
     """빌더의 매개변수 이름과, 빌더 안 호출의 키워드 인자 이름."""
     params = {arg.arg for arg in (*node.args.args, *node.args.kwonlyargs)}
@@ -2702,6 +2752,7 @@ CHECKS = (
     ("시각 유도 계층 부활 금지", check_time_deriving_layers_stay_buried),
     ("whisper에 prompt 금지", check_no_prompt_to_whisper),
     ("요청 빌더의 칸은 갈라져 있다", check_caption_request_lanes),
+    ("Gemini 시간 요청에 힌트가 없다", check_gemini_timing_request_lane),
     ("용어집은 설정 밖, DB만 안다", check_glossary_stays_local),
     ("autojunk=False", check_autojunk),
     ("금지 의존성", check_banned_imports),
