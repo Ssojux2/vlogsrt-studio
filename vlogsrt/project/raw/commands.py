@@ -415,7 +415,8 @@ def _add_finalcut_parser(commands: argparse._SubParsersAction) -> None:
         "--srt",
         type=Path,
         default=None,
-        help="원본 자막 대신 실을 SRT(타임라인 시각, 0초 = 타임라인 처음 — D89)",
+        help="이 SRT의 줄마다 Basic Title 타이틀을 단 타이틀만 있는 프로젝트를 쓴다"
+        "(타임라인 시각, 0초 = 타임라인 처음 — D90)",
     )
 
     sync = commands.add_parser(
@@ -850,6 +851,23 @@ def _log_finalcut_notes(counts: dict[str, Any]) -> None:
         )
 
 
+def _log_titles(path: Path, report: dict[str, Any]) -> None:
+    """타이틀만 있는 프로젝트(D90)의 요약 — 줄인 줄·같은 시작·빈 줄은 고치지 않은 수로 말한다."""
+    counts, fmt = report["counts"], report["format"]
+    origin = f"지난 보내기 {fmt['file']}의 포맷" if fmt["file"] else "기본 포맷"
+    log.out(f"Final Cut 타이틀 프로젝트를 썼다: {path}")
+    log.out(f"리포트: {path.with_suffix('.json')}")
+    log.out(
+        f"{report['srt']['name']}의 줄 → {report['effect']['name']} 타이틀 {counts['placed']}개"
+        f" · {fmt['width']}×{fmt['height']} {fmt['frame_rate']}fps({origin})"
+        f" · 겹쳐서 끝을 줄인 줄 {counts['trimmed']}개 · 같은 프레임에서 시작한 줄"
+        f" {counts['stacked']}개 · 빈 줄 {counts['empty']}개"
+    )
+    log.out(
+        "Final Cut에서 그 프로젝트의 타이틀을 ⌘A·⌘C로 복사해 편집 프로젝트 처음에서 ⌘V로 붙이세요."
+    )
+
+
 def cmd_finalcut(args: argparse.Namespace) -> int:
     """`media finalcut` — 전체 타임라인 FCPXML과 리포트를 새로 쓴다(D56, 로컬만).
 
@@ -859,11 +877,18 @@ def cmd_finalcut(args: argparse.Namespace) -> int:
     service = _service()
     try:
         status = service.open_workspace(Path(args.workspace))
-        path = service.export_finalcut_timeline(Path(status.workspace_root), timeline_srt=args.srt)
+        root = Path(status.workspace_root)
+        if args.srt is not None:
+            path = service.export_finalcut_titles(root, args.srt)
+        else:
+            path = service.export_finalcut_timeline(root)
     except raw_service.RawWorkspaceError as error:
         log.error(str(error))
         return 1
     report = json.loads(path.with_suffix(".json").read_text(encoding="utf-8"))
+    if args.srt is not None:
+        _log_titles(path, report)
+        return 0
     counts = report["counts"]
     captions = counts["captions"]
     log.out(f"Final Cut 타임라인을 썼다: {path}")
@@ -875,14 +900,6 @@ def cmd_finalcut(args: argparse.Namespace) -> int:
         f" · 미검토 제외 제안 {counts['unreviewed_clips']}개"
         f" · 캡션 {captions['placed']}개(조각 {captions['pieces']})"
     )
-    if "timeline_srt" in report:
-        srt = report["timeline_srt"]
-        log.out(
-            f"자막은 원본 자막 대신 {srt['name']}의 줄 {captions['placed']}개"
-            f" · 타임라인 밖 {captions['outside']}개 · 끝이 잘린 줄 {captions['tails']}개"
-            f" (타임라인 {srt['timeline_seconds']}초"
-            f" · 마지막 줄 끝 {srt['last_cue_end_seconds']}초)"
-        )
     _log_finalcut_notes(counts)
     for row in report["not_exported"]:
         log.out(f"넣지 않은 원본: {row['name'] or row['asset_id']} — {row['reason']}")

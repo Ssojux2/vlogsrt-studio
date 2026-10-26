@@ -2012,8 +2012,9 @@ def test_real_tree_keeps_truth_marks_apart() -> None:
         "with open('x') as handle:\n    pass",
     ],
 )
+@pytest.mark.parametrize("builder", ["finalcut_timeline.py", "finalcut_titles.py"])
 def test_finalcut_timeline_is_pure(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, statement: str
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, statement: str, builder: str
 ) -> None:
     clean = (
         "import xml.etree.ElementTree as ET\n"
@@ -2025,14 +2026,18 @@ def test_finalcut_timeline_is_pure(
         "TEXT = 'a\\r\\n'.replace('\\r\\n', '\\n')\n"
         "URI = Path('/x').as_uri()\n"
     )
-    target = "vlogsrt/project/raw/finalcut_timeline.py"
-    _fake_source_tree(monkeypatch, tmp_path, {target: clean})
+    builders = {
+        f"vlogsrt/project/raw/{name}": clean for name in check_invariants.FINALCUT_PURE_BUILDERS
+    }
+    target = f"vlogsrt/project/raw/{builder}"
+    _fake_source_tree(monkeypatch, tmp_path, builders)
     assert check_invariants.check_finalcut_timeline_stays_pure() == []
     (tmp_path / target).write_text(clean + statement + "\n", encoding="utf-8")
-    assert check_invariants.check_finalcut_timeline_stays_pure()
+    failures = check_invariants.check_finalcut_timeline_stays_pure()
+    assert failures and all(line.startswith(builder) for line in failures)
     (tmp_path / target).unlink()
     assert check_invariants.check_finalcut_timeline_stays_pure() == [
-        "vlogsrt/project/raw/finalcut_timeline.py: Final Cut 타임라인 빌더가 사라졌다 (D56)"
+        f"{target}: Final Cut 빌더가 사라졌다 (D56·D90)"
     ]
 
 

@@ -1178,27 +1178,32 @@ def _tier_timing_field_failures(rel: str, node: ast.AST, owner: str | None) -> l
     ]
 
 
+FINALCUT_PURE_BUILDERS = ("finalcut_timeline.py", "finalcut_titles.py")
+"""문서를 짜는 순수 빌더 — 전체 타임라인(D56)과 SRT 타이틀만 있는 프로젝트(D90)."""
+
+
 def check_finalcut_timeline_stays_pure() -> list[str]:
-    """D56 — `finalcut_timeline.py`는 원본 사실·조각 상태·등급·자막을 **값으로** 받아 문서만 낸다.
+    """D56·D90 — Final Cut 빌더는 원본 사실·조각 상태·등급·자막·SRT 큐를 **값으로** 받아 문서만
+    낸다.
 
     파일이 사라지면 조용히 통과하지 않는다 — 문서를 짜는 권한이 어디로 옮겨 갔는지 모르게 된다.
     """
-    path = PROJECT_PACKAGE / "raw" / "finalcut_timeline.py"
-    if not path.exists():
-        return [
-            "vlogsrt/project/raw/finalcut_timeline.py: Final Cut 타임라인 빌더가 사라졌다 (D56)"
+    failures: list[str] = []
+    for name in FINALCUT_PURE_BUILDERS:
+        path = PROJECT_PACKAGE / "raw" / name
+        if not path.exists():
+            failures.append(f"vlogsrt/project/raw/{name}: Final Cut 빌더가 사라졌다 (D56·D90)")
+            continue
+        body = path.read_text(encoding="utf-8")
+        failures += [
+            f"{name}: {module}을 import한다 — Final Cut 빌더가 순수 함수가 아니게 된다 (D56·D90)"
+            for module in _imports(body, FINALCUT_TIMELINE_MUST_NOT_IMPORT)
         ]
-    body = path.read_text(encoding="utf-8")
-    failures = [
-        f"finalcut_timeline.py: {name}을 import한다 — 타임라인 빌더가 순수 함수가 아니게 된다 (D56)"
-        for name in _imports(body, FINALCUT_TIMELINE_MUST_NOT_IMPORT)
-    ]
-    failures += [
-        f"finalcut_timeline.py:{number}: 파일을 직접 읽거나 쓴다 — 입출력은 내보내기 계층의 몫이다"
-        " (D56)"
-        for number, line in enumerate(body.splitlines(), start=1)
-        if FINALCUT_TIMELINE_FILE_IO.search(line)
-    ]
+        failures += [
+            f"{name}:{number}: 파일을 직접 읽거나 쓴다 — 입출력은 내보내기 계층의 몫이다 (D56·D90)"
+            for number, line in enumerate(body.splitlines(), start=1)
+            if FINALCUT_TIMELINE_FILE_IO.search(line)
+        ]
     return failures
 
 
@@ -1279,8 +1284,8 @@ SYNC_REPORT_IMPORTERS = (
 )
 SYNC_REPORT_MUST_NOT_IMPORT = (
     "output", "refine", "repair", "caption_artifacts", "caption_review", "final_caption",
-    "finalcut_export", "finalcut_timeline", "tiering", "auto_cleanup", "segmentation",
-    "selection_analysis",
+    "finalcut_export", "finalcut_timeline", "finalcut_titles", "tiering", "auto_cleanup",
+    "segmentation", "selection_analysis",
 )  # fmt: skip
 # SQL 쓰기 문장의 모양 — 대소문자 무관. `dict.update(`·`replace(...)`는 SQL이 아니라 걸리지 않는다.
 SYNC_WRITES_SQL = re.compile(
@@ -1615,7 +1620,7 @@ TIMING_TRUTH_FORBIDDEN_READERS = (
     "raw/finalcut_timeline.py", "raw/tiering.py", "raw/analysis_approval.py",
     "raw/understanding_luna.py", "raw/media_refs.py", "raw/speech_refill.py",
     "raw/analysis_workflow.py", "raw/sync_report.py", "raw/caption_provider.py",
-    "raw/asr_epoch.py",
+    "raw/asr_epoch.py", "raw/finalcut_titles.py",
 )  # fmt: skip
 TIMING_TRUTH_NAMES = re.compile(r"timing_truth|TimingTruth|TIMING_TRUTH")
 
@@ -2729,7 +2734,7 @@ CHECKS = (
     ("시각 맞춤 API는 서비스와 화면 진입점만", check_snap_api_only_from_service_and_screen),
     ("원본 자막의 낮은 쓰기 문은 정의 모듈 안에만", check_store_edit_stays_private),
     ("읽기 범위는 화면 진입점만 연다", check_read_scope_only_at_entry_points),
-    ("Final Cut 타임라인 빌더는 순수하다", check_finalcut_timeline_stays_pure),
+    ("Final Cut 빌더(타임라인·타이틀)는 순수하다", check_finalcut_timeline_stays_pure),
     ("Final Cut 보내기는 원본을 복사·재해시하지 않는다", check_finalcut_export_never_copies),
     ("옛 선택한 컷 Final Cut 출력은 되살리지 않는다", check_old_finalcut_path_stays_dead),
     ("신뢰도 메타 보존", check_confidence_meta_survives),

@@ -8616,6 +8616,8 @@ Gemini 표지만 · 분석 중 안 옮김 · 새 작업공간 · 견적 꼬리·
 
 ## D89 — W-30f SRT를 FCPXML로 — 고친 SRT를 같은 전체 타임라인의 캡션으로 (2026-10-26, W-30f)
 
+> **대체됨 — 같은 날 D90.** 사용자가 원한 것은 캡션이 아니라 Final Cut **타이틀**이었다(타이틀 템플릿·글꼴로 꾸밀 수 있게). 아래 캡션 모드의 코드는 D90에서 지웠다.
+
 **사용자 지시**(2026-10-26): 「SRT를 FCPXML로 추출하는 모드도 필요해」. 고른 것: **타임라인에 SRT 싣기** — 작업대가 보내는 그 전체
 타임라인(같은 원본·촬영 순서·컷·켜짐·키워드·포맷·레이트)을 다시 만들고, 원본 자막 대신 고른 SRT의 줄을 캡션으로 싣는다. 예상하는
 흐름은 보낸 타임라인의 캡션을 Final Cut(또는 다른 도구)에서 SRT로 내보내 고친 뒤 다시 싣는 것이다.
@@ -8643,3 +8645,46 @@ Gemini 표지만 · 분석 중 안 옮김 · 새 작업공간 · 견적 꼬리·
 **시험**: `tests/raw/test_finalcut_srt.py`(컷·원본을 넘는 줄 · 꺼진 클립 · 센 수 · 원본 자막 대체 · 겹침·0초·뒤집힘·줄 수 · 레이트가 다른 원본 ·
 XML 금지 문자 · 렌더 · 보내기 리포트·이름·표지 없음 · 못 읽는 SRT · 작업대 단추·취소·재시도). 유료 호출 0회. **사람 확인 남음**: Final Cut이
 내보낸 캡션 SRT가 실제로 0초부터인지(프로젝트 시작 타임코드), 다시 가져온 캡션이 같은 자리에 서는지.
+
+## D90 — W-30f SRT를 Final Cut 타이틀로 — 타이틀만 있는 프로젝트 (2026-10-26, W-30f, D89 대체)
+
+**사용자 지시**(2026-10-26): 「SRT 파일을 주면 FCPXML로 만들어서 파이널컷 자체 자막을 적용할 수 있도록 … 지금처럼 파일을 그냥
+프로젝트에 입력하는 게 아니라, Vrew의 기능처럼 fcpxml로 뽑으면 파이널컷의 title 등을 적용할 수 있도록」. 조사(Fable 5.1) 뒤 고른 것:
+**타이틀만 있는 프로젝트** · **Basic Title** · D89 캡션 모드를 **교체**(단추·CLI 입구는 그대로).
+
+**결정**:
+- **문서 모양**: 스파인에 빈 `gap` 하나(offset 0s · start 3600s · 길이 = 마지막 끝), SRT 줄마다 레인 1에 `title`(ref = Basic Title
+  effect, offset = `3600s + 줄 시작`, start 3600s). 자식은 DTD 순서 param*(Position·Flatten·Alignment — FCP 12.4 `Basic Title.moti`의 장면
+  id와 맞는 Final Cut 자신의 철자) → text → text-style-def. `text-style-def` id는 XML ID라 타이틀마다 `ts1…tsN`. 글은 한 자도 고치지
+  않는다(두 줄은 `\n` 그대로, 클립 이름은 줄을 공백으로 이은 글). 설치된 1.14 DTD를 통과한 것만 제 이름을 얻는다(기존 `_publish`).
+  사람은 Final Cut에서 그 프로젝트의 타이틀을 ⌘A·⌘C로 복사해 편집 프로젝트 처음에서 ⌘V로 붙이고, 모두 골라 글꼴·크기·템플릿을 바꾼다.
+- **시각**: SRT 시각 = 타임라인 시각(0초 = 시퀀스 처음). 프레임 격자에 맞출 뿐이다(`_snapped` — 0프레임·뒤집힌 줄은 시작에 1프레임, 센다).
+  **겹친 줄은 끝을 다음 줄(시작이 더 늦은 첫 줄) 시작으로 줄이고 센다** — 「고치지 않고 센다」의 하나뿐인 의도된 예외다: Final Cut은
+  한 레인의 겹친 클립을 위 레인으로 밀어 계단을 만든다(Vrew FCPXML의 실제 버그). 같은 프레임에서 시작한 줄은 줄일 길이가 없어 둘 다
+  두고 센다(위 레인으로 간다). 빈 글만 싣지 않고 세며, 실을 줄이 하나도 없으면 거부한다(빈 프로젝트를 성공으로 꾸미지 않는다). XML이
+  받지 않는 글은 그 줄 시각을 대고 거부한다.
+- **포맷**: 마지막 타임라인 보내기(`review/finalcut/vlogsrt_<UTC>[_n].fcpxml`, `_titles`는 빼고)의 시퀀스 포맷 — 크기·프레임 길이·색
+  공간·드롭 프레임. 붙여 넣을 바로 그 프로젝트이고 Final Cut이 받아 준 포맷이다. `plan()`으로 다시 재면 원본을 모두 ffprobe로 다시
+  재야 하고, 그 사이 검토 머리가 바뀌었으면 다른 포맷이 나온다. 못 읽으면 그 파일 이름을 대고 거부한다(추측하지 않는다). 보낸 적이
+  없으면 설정의 `default_format`(1920×1080 30p). 리포트·결과 문구에 출처를 보인다.
+- **모양 설정** `FinalCutTitleSettings`(`raw/config.py`, `FINALCUT_TITLES`, 외부 근거 없는 조정 대상 — 문서 바이트만 정한다): Basic Title
+  uid · Apple SD Gothic Neo Bold · 글자 크기 = 높이 × 7/120(Basic Title 기본 63 @1080) · 흰색 · 테두리 기본 끔 · 아래 위치 = 높이 × 5/12
+  (Apple FCPXML 예시의 아래 자막 자리 `0 -450` @1080). 세로 1080×1920이면 112 · `0 -800`. param 열쇠·레인·3600s는 포맷 사실이라 빌더 상수다.
+- **보내기**(`finalcut_export.export_titles`, 서비스 `export_finalcut_titles(root, srt)`): 원본을 조사하지 않는다(ffprobe 0회). SRT는
+  `timeline_srt.read`가 읽고 해시한다. 이름 `vlogsrt_<UTC>_titles.fcpxml`, 이벤트·프로젝트 이름 꼬리 ` · 자막 타이틀`, 리포트 schema
+  `vlogsrt-finalcut-titles/v1`(srt 이름·경로·sha256 · effect · style · format(출처) · counts(+길이·마지막 줄 끝)).
+- **작업대·CLI**: 「SRT로 Final Cut 보내기」(`.srt` 선택기 · 취소는 보내지 않음 · 재시도는 같은 파일)와 `vlogsrt media finalcut --srt`가
+  이 보내기를 부른다. 결과 문구는 줄 수·포맷·출처, 0이 아닐 때만 줄인 줄·같은 시작·빈 줄·두 줄 넘는 줄, 그리고 붙이는 법을 말한다.
+- **지운 것**(D89): `finalcut_timeline`의 `_SpineSlot`·`_spine_slots`·`_clip_piece`·`timeline_caption_pieces`·`with_timeline_captions`,
+  `finalcut_export`의 `_SRT_TAG`·`_SRT_TITLE`·`_Scope.original_captions`·`export(timeline_srt)`·`_with_timeline_srt`, 서비스의 `timeline_srt`
+  인자, UI의 `_send_srt_facts`·`_srt_line`, `tests/raw/test_finalcut_srt.py`. 타임라인 보내기는 D89 앞과 같다.
+- **불변식**: 순수 빌더 검사가 `finalcut_timeline.py`와 `finalcut_titles.py` 둘 다 본다(import·파일 입출력 금지). 시각 정답·자막 시각
+  확인 계층도 새 모듈을 모른다.
+- **대안(기록만)**: Final Cut 12.3 이상의 `Edit > Captions > Duplicate Captions to Subtitles`는 타임라인 보내기의 캡션을 Subtitle 템플릿
+  타이틀로 바꾼다 — 사용자는 Basic Title을 골랐다.
+
+**시험**: `tests/raw/test_finalcut_titles.py`(offset·duration 정확 유리수 · 모든 레이트의 앵커 시각 · 겹침 줄이기·같은 시작 · 0초·뒤집힘·
+빈 줄·세 줄 · 빈 SRT 거부 · 금지 문자 · 두 줄 글·이름 · ts id·자식 순서·param 열쇠 · 크기·위치 비례 · 테두리 · 자원 · 설치 DTD 통과(가로·
+세로·NTSC DF)·결정성 · 설정 검증 · 보내기 기본 포맷·ffprobe 0회 · 지난 보내기 포맷·타이틀 파일은 고르지 않음 · 깨진 보내기 거부 · 못 읽는
+SRT · CLI · 작업대 단추·취소·재시도). 유료 호출 0회. **사람 확인 남음**: Final Cut 12.4로 가져와 경고·계단이 없는지, 글꼴·크기·위치,
+복사·붙이기 뒤 말소리와 맞는지, 템플릿 바꾸기.

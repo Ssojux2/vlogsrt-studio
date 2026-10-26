@@ -20,6 +20,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, fields, is_dataclass, replace
 from datetime import date
 from decimal import Decimal, InvalidOperation
+from fractions import Fraction
 from types import MappingProxyType
 from typing import TypeVar, cast
 from urllib.parse import urlsplit
@@ -341,6 +342,103 @@ class FinalCutTimelineSettings:
 
 FINALCUT_TIMELINE = FinalCutTimelineSettings()
 """지금 쓰는 타임라인 문서 설정 — 내보내기 계층(`finalcut_export._document`)이 빌더에 넘긴다."""
+
+
+@dataclass(frozen=True)
+class FinalCutTitleFormat:
+    """타이틀만 있는 프로젝트(D90)가 서는 프레임 — 크기·프레임 길이·색 공간·드롭 프레임 표기.
+
+    보통은 마지막 작업대 보내기의 시퀀스 포맷을 읽어 만들고(붙여 넣을 그 프로젝트다), 보낸 적이
+    없을 때만 `FinalCutTitleSettings.default_format`을 쓴다.
+    """
+
+    width: int = 1920
+    height: int = 1080
+    frame_duration: Fraction = Fraction(1, 30)
+    color_space: str | None = "1-1-1 (Rec. 709)"
+    drop_frame: bool = False
+
+    def __post_init__(self) -> None:
+        if self.width <= 0 or self.height <= 0 or self.frame_duration <= 0:
+            raise ValueError(f"타이틀 포맷의 크기·프레임 길이가 양수가 아니다: {self!r}")
+
+
+@dataclass(frozen=True)
+class FinalCutTitleSettings:
+    """SRT 줄마다 다는 Final Cut 타이틀(D90)의 모양 — 템플릿·글꼴·크기·색·테두리·아래 위치.
+
+    외부 근거 없는 조정 대상이다. 크기는 Basic Title 자신의 기본 글자 크기(1080에서 63)를, 위치는
+    Apple FCPXML 예시의 아래 자막 자리(1080에서 가운데보다 450 아래)를 프레임 높이 몫으로 옮겼다 —
+    세로 프로젝트에서도 같은 비율이다. 테두리는 기본으로 끈다(Final Cut 자신의 내보내기와 같다).
+    문서 바이트만 정하므로 어느 지문·캐시 열쇠·승인·견적에도 없다. 템플릿은 Final Cut의 uid
+    철자(`.../Titles.localized/…/<이름>.moti`)로 적는다.
+    """
+
+    effect_name: str = "Basic Title"
+    effect_uid: str = (
+        ".../Titles.localized/Bumper:Opener.localized/Basic Title.localized/Basic Title.moti"
+    )
+    font: str = "Apple SD Gothic Neo"
+    font_face: str = "Bold"
+    font_size_fraction: Fraction = Fraction(7, 120)
+    font_color: str = "1 1 1 1"
+    stroke_color: str | None = None
+    stroke_width_fraction: Fraction = Fraction(0)
+    position_y_fraction: Fraction = Fraction(5, 12)
+    """가운데에서 아래로 내린 거리 ÷ 프레임 높이 — 음수면 위로 올린다."""
+    default_format: FinalCutTitleFormat = FinalCutTitleFormat()
+
+    def __post_init__(self) -> None:
+        problems = [
+            *_title_text_problems(self),
+            *_title_color_problems("font_color", self.font_color),
+        ]
+        if not 0 < self.font_size_fraction <= 1:
+            problems.append(
+                f"font_size_fraction는 0보다 크고 1 이하여야 한다: {self.font_size_fraction}"
+            )
+        if not 0 <= self.stroke_width_fraction < 1:
+            problems.append(
+                f"stroke_width_fraction는 0 이상 1 미만이어야 한다: {self.stroke_width_fraction}"
+            )
+        if self.stroke_color is None and self.stroke_width_fraction:
+            problems.append("테두리 굵기는 stroke_color가 있을 때만 줄 수 있다")
+        if self.stroke_color is not None:
+            problems += _title_color_problems("stroke_color", self.stroke_color)
+        if abs(self.position_y_fraction) > Fraction(1, 2):
+            problems.append(
+                f"position_y_fraction는 화면 안(±1/2)이어야 한다: {self.position_y_fraction}"
+            )
+        if problems:
+            raise ValueError("Final Cut 타이틀 설정이 잘못됐다 — " + " · ".join(problems))
+
+
+def _title_text_problems(settings: FinalCutTitleSettings) -> list[str]:
+    problems = [
+        f"{name}가 비었다"
+        for name in ("effect_name", "font", "font_face")
+        if not str(getattr(settings, name)).strip()
+    ]
+    if not settings.effect_uid.strip().endswith(".moti"):
+        problems.append(
+            f"effect_uid는 Final Cut 템플릿(.moti) 철자여야 한다: {settings.effect_uid!r}"
+        )
+    return problems
+
+
+def _title_color_problems(name: str, color: str) -> list[str]:
+    """Final Cut 색 철자 — `r g b a` 네 수, 각각 0–1."""
+    try:
+        values = [float(part) for part in color.split()]
+    except ValueError:
+        values = []
+    if len(values) != 4 or not all(0 <= value <= 1 for value in values):
+        return [f"{name}는 0–1 사이 수 넷(r g b a)이어야 한다: {color!r}"]
+    return []
+
+
+FINALCUT_TITLES = FinalCutTitleSettings()
+"""지금 쓰는 타이틀 모양 — 타이틀 보내기(`finalcut_export.export_titles`)가 빌더에 넘긴다."""
 
 
 def subtitle_suspect_problems(settings: SubtitleSuspectSettings) -> list[str]:
