@@ -54,7 +54,7 @@ def with_issues(document: dict, issues: list[str]) -> dict:
 
 
 def test_v6_settings_are_the_published_values() -> None:
-    assert TIER_SETTINGS.tier_version == "raw-tier/v6"
+    assert TIER_SETTINGS.tier_version == "raw-tier/v7"
     assert TIER_SETTINGS.usable_speech_green is True
     assert TIER_SETTINGS.scenery_green is True
     assert TIER_SETTINGS.good_sparse_green is True
@@ -149,7 +149,7 @@ def test_a_segment_mostly_green_without_red_is_recommended() -> None:
     assert [tier for _a, _b, tier in layout(report)] == [G, Y]
     assert tiering.segment_keyword(report, F(0), F(15)) == "추천"
     recommendation, tags = tiering.segment_grade(report, F(0), F(15))
-    assert recommendation == "recommended" and tags[-1] == "등급판 raw-tier/v6"
+    assert recommendation == "recommended" and tags[-1] == "등급판 raw-tier/v7"
 
 
 def test_exactly_half_green_is_enough_and_less_is_not() -> None:

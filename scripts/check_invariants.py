@@ -937,6 +937,31 @@ def _mode_parameter_failures(body: str) -> list[str]:
     return found
 
 
+# 라이브러리 맥락 평가(W-39, D99) — 입력 짓기·응답 해석·등급 값·열쇠는 순수하다. 전송·전사·서비스·
+# DB·파일을 알면 평가가 승인 문(서비스) 밖에서 부르거나 저장 상태에 기대게 된다.
+CONTEXT_REVIEW_MODULE = "context_review.py"
+CONTEXT_REVIEW_MUST_NOT_IMPORT = (
+    *TIERING_MUST_NOT_IMPORT, "transcribe", "gemini_messages", "service", "sqlite3", "os", "shutil",
+)  # fmt: skip
+
+
+def check_context_review_stays_pure() -> list[str]:
+    """D99 — 맥락 평가 계층은 값만 다룬다. 파일이 사라져도 조용히 통과하지 않는다."""
+    path = PROJECT_PACKAGE / "raw" / CONTEXT_REVIEW_MODULE
+    if not path.exists():
+        return [f"vlogsrt/project/raw/{CONTEXT_REVIEW_MODULE}: 맥락 평가 계층이 사라졌다 (D99)"]
+    body = path.read_text(encoding="utf-8")
+    failures = [
+        f"{CONTEXT_REVIEW_MODULE}: {module}을 import한다 — 맥락 평가는 값만 다룬다 (D99)"
+        for module in _imports(body, CONTEXT_REVIEW_MUST_NOT_IMPORT)
+    ]
+    return failures + [
+        f"{CONTEXT_REVIEW_MODULE}:{number}: 파일을 직접 읽거나 쓴다 (D99)"
+        for number, line in enumerate(body.splitlines(), start=1)
+        if TIERING_FILE_IO.search(line)
+    ]
+
+
 # 요청 빌더의 칸(D59 19c) — whisper(시간) 요청에는 힌트가, 글자 요청에는 시각 입자가 실리지 않는다.
 # 1단계 글자 경로가 용어집·고정 문맥을 요청마다 싣게 되면서 그 길이 whisper 쪽으로 새지 않게 막는다.
 REQUEST_LANES = (
@@ -1190,11 +1215,13 @@ TIER_TIMING_NAMES = frozenset({"TimingSignals", "UNKNOWN_TIMING"})
 TIER_TIMING_FIELDS = frozenset({"subtitle_verified", "subtitle_suspect_lines", "subtitle_lines"})
 TIER_CLASSIFY_NAME = "classify"
 TIER_TIMING_ENTRY = "_tier_timing"
+TIER_CONTEXT_ENTRY = "_tier_context"
+"""맥락 평가 값(D99)의 문 — 시각 확인 값과 같은 규칙으로 등급 보고서의 그 자리만 읽는다."""
 # 등급 모듈이나 그 부르기를 글로 가리키는 꼴 — `getattr(tiering, "classify")`·
 # `vars(m)["classify"]`·`importlib.import_module("vlogsrt.project.raw.tiering")`·
 # `getattr(self, "_tier_timing")`. 이름을 잘라 이어 붙인 글(`"class" + "ify"`)은 못 본다 —
 # 정규식의 한계로 받아들이고 리뷰가 지킨다(19g·19h와 같다).
-TIER_SPELLED = re.compile(r"classify|_tier_timing|[\w.]*\btiering")
+TIER_SPELLED = re.compile(r"classify|_tier_timing|_tier_context|[\w.]*\btiering")
 
 
 def check_tier_timing_only_from_service() -> list[str]:
@@ -1267,6 +1294,10 @@ def _allowed_classify_calls(rel: str, tree: ast.Module, aliases: frozenset[str])
         and owner == TIER_CLASSIFY_OWNER
         and _is_classify_ref(node.func, aliases)
         and any(kw.arg == "timing" and _is_tier_timing_call(kw.value) for kw in node.keywords)
+        and any(
+            kw.arg == "context" and _is_self_call(kw.value, TIER_CONTEXT_ENTRY)
+            for kw in node.keywords
+        )
     )
 
 
@@ -1314,28 +1345,35 @@ def _tier_classify_reason(
             f"tiering.classify를 {place}에서 부른다 — 등급 보고서는 {TIER_CLASSIFY_OWNER}"
             " 한 자리뿐이다"
         )
-    return "tiering.classify에 timing=self._tier_timing(…)이 없다 — 소비자마다 등급이 갈린다"
+    return (
+        "tiering.classify에 timing=self._tier_timing(…)·context=self._tier_context(…)이 없다"
+        " — 소비자마다 등급이 갈린다"
+    )
 
 
 def _tier_timing_entry_failures(rel: str, node: ast.AST, owner: str | None) -> list[str]:
-    """`_tier_timing`(값의 문)은 등급 보고서의 그 자리만 읽는다 — 다른 메서드가 값을 쥐면 그 길로
-    등급이 아닌 곳(컷·제거·견적)에 시각 확인 값이 샐 수 있다."""
+    """`_tier_timing`·`_tier_context`(값의 문, D60·D99)는 등급 보고서의 그 자리만 읽는다 — 다른
+    메서드가 값을 쥐면 그 길로 등급이 아닌 곳(컷·제거·견적)에 그 값이 샐 수 있다."""
     name = node.attr if isinstance(node, ast.Attribute) else getattr(node, "id", None)
-    if name != TIER_TIMING_ENTRY:
+    if name not in (TIER_TIMING_ENTRY, TIER_CONTEXT_ENTRY):
         return []
     if rel == TIER_TIMING_SERVICE and owner == TIER_CLASSIFY_OWNER:
         return []
     return [
-        f"{rel}:{getattr(node, 'lineno', 0)}: {TIER_TIMING_ENTRY}를 {owner or '모듈 수준'}에서"
+        f"{rel}:{getattr(node, 'lineno', 0)}: {name}를 {owner or '모듈 수준'}에서"
         f" 읽는다 — 시각 확인 값은 {TIER_CLASSIFY_OWNER}만 넘긴다 (D60)"
     ]
 
 
 def _is_tier_timing_call(value: ast.AST) -> bool:
+    return _is_self_call(value, "_tier_timing")
+
+
+def _is_self_call(value: ast.AST, name: str) -> bool:
     return (
         isinstance(value, ast.Call)
         and isinstance(value.func, ast.Attribute)
-        and value.func.attr == "_tier_timing"
+        and value.func.attr == name
         and isinstance(value.func.value, ast.Name)
         and value.func.value.id == "self"
     )
@@ -2944,6 +2982,7 @@ CHECKS = (
     ("Gemini 단어 해석·묶기는 순수하다", check_word_cues_stays_pure),
     ("Gemini 단어 → whisper 줄 글자 배정은 순수하고 글자만 낸다", check_word_text_stays_pure),
     ("작업공간 모드는 순수하고 문서 밖이다", check_workspace_mode_stays_pure),
+    ("라이브러리 맥락 평가는 순수하다", check_context_review_stays_pure),
     ("3단 등급은 순수하다", check_tiering_stays_pure),
     ("등급의 시각 확인 값은 서비스 한 자리만", check_tier_timing_only_from_service),
     ("자막 시각 확인은 순수하다", check_sync_check_stays_pure),

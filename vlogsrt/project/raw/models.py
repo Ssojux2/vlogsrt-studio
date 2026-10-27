@@ -681,6 +681,24 @@ SEGMENTATION_BASIS_SEMANTIC = "semantic_analysis"
 
 
 @dataclass(frozen=True, slots=True)
+class ContextQuote:
+    """라이브러리 맥락 평가(D99)의 견적 — 사람이 보고 승인한다(D44). 금액이 없으면 가격 미정이다."""
+
+    key: str
+    model: str
+    sources: int
+    spans: int
+    input_tokens: int
+    output_tokens: int
+    usd: str | None
+    digest: str
+    cached: bool
+    dropped_lines: int
+    dropped_windows: int
+    clipped_texts: int
+
+
+@dataclass(frozen=True, slots=True)
 class AnalysisEstimate:
     """원본 하나의 분석 견적 — 창·프레임·청크 수는 사실, 금액은 상태가 말한다.
 

@@ -9007,3 +9007,51 @@ Gemini 글자이고, 단어 시각은 **어느 줄의 글자인지 정하는 데
   없다.
 - **시험**: `tests/raw/test_workspace_mode.py`(개수 다수 · 정사각형 · 동점 · 크기 모름 · 사람 고름 · 표지 · 문서 바이트 동일·리포트 ·
   CLI · 서랍 칸) · `tests/test_invariants.py`. 유료 호출 0회.
+
+## D99 — 라이브러리 전체 맥락 평가(Gemini) → 등급 반영 (2026-10-27, W-39, 등급판 `raw-tier/v7`)
+
+**사용자 지시(2026-10-27)**: 「추천 부분들을 확인할 때 클립별로만 체크하지 말고, 전체 분석 내용들과 자막을 보고 전체 맥락에서
+평가하는 부분을 하나 추가 — Gemini로」. 고른 것: **등급에 반영** · **라이브러리 전체**. 계획 `docs/plans/2026-10-27-longform-shortform-modes.md`
+트랙 C.
+
+**W-39a — 순수 평가 계층 + 등급 v7**
+- `raw/context_review.py`(순수): `build_input(sources)` — 원본(촬영 순서)마다 등급 구간(빨강은 싣지 않는다, 라이브러리 전체에 하나씩
+  `S001`…) · 창 요약(말·화면·태그) · 자막 줄을 JSON 글로. 예산 `ContextReviewSettings`(원본당 줄 400 · 줄 글자 80 · 창 80 · 요약
+  글자 200 — 외부 근거 없는 조정 대상)을 넘는 줄·창은 싣지 않고 긴 글은 자르며 그 수를 센다. `INSTRUCTION`·`RESPONSE_SCHEMA`(판정
+  core · supporting · redundant · off_topic, 확신 low · medium · high, 까닭, 겹침 대상, 줄거리 요약). `parse` — 모르는·두 번 나온 아이디 ·
+  목록 밖 값 · 없는 겹침 대상은 거부(`ContextReviewError`), 판정이 없는 구간은 모름. `signals_for(review, input, asset_id)` → 그 원본
+  몫의 `ContextSignals`(겹친 구간은 까닭에 「(원본 분:초와 겹침)」). `context_key` — (원본 · 분석 리비전 · 증거 sha · 자막 리비전) 목록 +
+  등급판 + 모델 + 예산의 sha256(지금 열쇠와 다른 평가는 낡았다 — W-39b가 등급에 쓰지 않는다).
+- **등급** `tiering.classify(…, context=ContextSignals)`: 다 정한 구간 위의 마지막 단계 `_contextualized` — 녹색 + `context_lower_verdicts`
+  (중복·맥락 밖)·확신 ≥ medium → 보통 + 추천 제한 「맥락: 중복 — …」; 노랑 + `core`·확신 high이면서 규칙 칸이 `context_raise_rules`
+  (발화 적음 · 풍경)이고 화면이 recommended·usable이며 판정 보류·추천 제한이 없을 때만 → 추천 + 추천 근거 「맥락: 핵심 — …」.
+  구간 경계·빨강·보류는 그대로, 판정 키는 구간 (시작, 끝)이라 경계가 달라진 구간은 판정이 없다(모름). 평가가 없으면(`UNKNOWN_CONTEXT`)
+  v6과 같은 등급이다. 등급판 `raw-tier/v7`(옛 시험의 판 이름·렌더 골든 한 자리를 다시 잠갔다).
+- **불변식** `check_context_review_stays_pure`. 생산자 제한(서비스 `_tier_context` 한 자리)은 W-39b에서 연결과 함께 더한다.
+- **시험**: `tests/raw/test_context_review.py` · `tests/test_invariants.py`. 유료 호출 0회.
+
+**W-39b — 서비스: 견적 · 승인 · 실행 · 저장**
+- `context_review_quote(root)`(무료): 촬영 순서의 원본마다 가장 최근 판정 증거 행(`tier_evidence_rows`)의 **평가 전** 등급
+  (`_tier_report_for_row(…, with_context=False)`) · 분석 문서의 받아들인 창 요약 · 원본 자막으로 입력을 짓고, 입력 토큰(글자 하나 =
+  토큰 하나, 보수적) + 출력 한도(`ContextReviewSettings.max_output_tokens = 32000`, 생각 포함)를 모델의 공식 단가로 잰 상한을 센트로
+  올린다. 모델은 분석 모델이 Gemini면 그것, 아니면 기본(Gemini 3.8 Flash). 단가 재확인 기한이 지났으면 금액이 없다(가격 미정).
+  digest = (열쇠 · 모델 · 금액).
+- `run_context_review(root, digest, client)`: 지금 견적의 digest가 다르면 거부 · 같은 열쇠의 평가가 있으면 **부르지 않고** 그것 ·
+  가격 미정·오프라인(환경 `VLOGSRT_OFFLINE` · 작업공간 network_mode)이면 보내기 전에 닫는다 · `transcribe.request_gemini_generate`로 한 번
+  (안내문 + 입력 글, `responseJsonSchema`) · `understanding_luna.gemini_text`(STOP · 생각 아닌 text)로 읽고 `parse` · 영수증
+  `measure_gemini_usage` · `analysis/context_review/<열쇠>.json`(`context_review_io`, 임시 파일 → 바꿔 달기). 실패는
+  `<열쇠>.failed.json`에 까닭과 함께, 등급 그대로. 성공하면 정리 고리의 등급 단계(`_tier_step`)로 검토 머리의 등급 표시만 다시 단다.
+- `_tier_context(workspace, asset_id)` — 맥락 값의 **유일한 생산자**: 평가 폴더가 없으면 읽지 않고 모름(열쇠를 재지 않는다 — 평가한 적
+  없는 작업공간은 비용 0), 있으면 지금 열쇠를 재어(그리기 범위에서 한 번) 그 열쇠의 문서만 등급 값으로. 못 읽으면 모름 + 경고.
+  `_tier_report_for_row`만 그것을 `classify(…, context=self._tier_context(…))`로 넘긴다 — 불변식 `check_tier_timing_only_from_service`가
+  `context=self._tier_context(…)`도 요구하고 `_tier_context`를 그 자리 밖에서 읽지 못하게 한다.
+- `context_review_state(root)` — 지금 평가 · 낡음(지금 열쇠의 평가는 없는데 다른 열쇠의 평가가 있다) · 지난 실패.
+
+**W-39c — 화면**: 설정 서랍 「맥락 평가 (Gemini)」 — 상태 줄(지금 평가의 날짜·모델·판정 수/구간 수 · 줄거리 요약, 또는 낡음·없음,
+지난 실패) · 「견적 보기」(무료 — 분량 · 모델 · 공식 단가 상한 · 줄인 재료 수 · 이미 평가함 · 가격 미정) · 「승인하고 평가」(보인
+견적의 digest에만 묶인다, 금액이 있고 아직 평가하지 않은 입력일 때만 열린다 · 키가 없으면 보내기 전에 닫는다). 판정의 까닭은 검토
+조각의 등급 태그(「추천 제한: 맥락: 중복 — …」·「추천 근거: 맥락: 핵심 — …」)와 Final Cut 등급 키워드로 따라간다.
+- **시험**: `tests/raw/test_context_review_flow.py`(가짜 Gemini — 견적 · digest 거부 · 실행 · 값이 구간에 닿음 · 같은 열쇠 0호출 · 낡음 ·
+  잘린 응답 · 오프라인 · 가격 미정 · 서랍 칸) · `tests/test_invariants.py`(맥락 값의 문). 유료 호출 0회.
+- **사람 H-C1**(유료, Flash로 약 $0.1–0.3): 실데이터 라이브러리 하나를 평가하고 중복 판정 10개를 들어 본다 — 문턱 조정은 여기에 근거를
+  남긴다.

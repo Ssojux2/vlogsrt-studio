@@ -86,7 +86,7 @@ def usable_talk(extent: int = 30) -> dict:
 
 def test_v5_settings_are_the_published_values():
     validate_tier_settings(TIER_SETTINGS)
-    assert TIER_SETTINGS.tier_version == "raw-tier/v6"
+    assert TIER_SETTINGS.tier_version == "raw-tier/v7"
     assert TIER_SETTINGS.subtitle_verified_suspect_share == 0.10
     assert tiering.TIMING_GREEN == sync_check.LEVEL_GREEN
 
@@ -143,7 +143,7 @@ def test_verified_usable_speech_is_green_with_the_new_rule_and_a_reason():
     assert span.document()["reason"].endswith(" · 추천 근거: " + lift_text(1, 12))
     recommendation, tags = tiering.segment_grade(report, F(0), F(30))
     assert recommendation == "recommended"
-    assert tags[0] == "등급: 추천" and tags[-1] == "등급판 raw-tier/v6"
+    assert tags[0] == "등급: 추천" and tags[-1] == "등급판 raw-tier/v7"
     assert "추천 근거: " + lift_text(1, 12) in tags
     assert tiering.segment_keyword(report, F(0), F(30)) == "추천"
     # 등급 태그 묶음이라 다시 매기기 전에 걷힌다.
@@ -336,7 +336,7 @@ def test_current_green_report_with_few_suspects_recommends_usable_speech_everywh
     assert _keywords(service, root) == [["추천"]]
     assert _upkeep(service, root) is not None  # 정리 고리가 검토 머리의 등급만 다시 단다
     assert _head_marks(root) == [
-        ("recommended", ["등급: 추천", "추천 근거: " + lift_text(0, 9), "등급판 raw-tier/v6"])
+        ("recommended", ["등급: 추천", "추천 근거: " + lift_text(0, 9), "등급판 raw-tier/v7"])
     ]
     assert _upkeep(service, root) is None
 
@@ -438,7 +438,8 @@ CLEAN_SERVICE = (
     "\n"
     "class RawWorkspaceService:\n"
     "    def _tier_report_for_row(self, workspace, row):\n"
-    "        return tiering.classify({}, timing=self._tier_timing(workspace, row))\n"
+    "        return tiering.classify({}, timing=self._tier_timing(workspace, row),"
+    " context=self._tier_context(workspace, row))\n"
     "\n"
     "    def _tier_timing(self, workspace, asset_id):\n"
     "        if asset_id:\n"

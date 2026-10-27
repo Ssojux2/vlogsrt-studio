@@ -39,6 +39,7 @@ from typing import Any, TypeVar
 
 from vlogsrt.hangul import strip_for_compare, to_nfc
 from vlogsrt.project.raw.analysis_config import (
+    CONTEXT_CONFIDENCES,
     TIER_SETTINGS,
     RawTierSettings,
     validate_tier_settings,
@@ -178,6 +179,15 @@ _COUNTED_CATEGORIES = frozenset("LN")
 """느린 추임새의 「글자」 — NFC 뒤 문자(L)·숫자(N) 범주 낱자. 한글은 음절 하나가 한 자, 라틴은
 철자 하나가 한 자다(영어는 덜 걸린다 — 빼지 않는 쪽으로만 틀린다). 공백·부호·기호는 세지 않는다."""
 
+CAP_CONTEXT = "context"
+"""맥락 평가(W-39, D99)가 녹색을 보통으로 내린 까닭의 코드."""
+CONTEXT_LABELS = {
+    "core": "핵심",
+    "supporting": "보조",
+    "redundant": "중복",
+    "off_topic": "맥락 밖",
+}
+"""맥락 판정의 화면 이름 — 「추천 제한: 맥락: 중복 — …」·「추천 근거: 맥락: 핵심 — …」."""
 CAP_TOO_SHORT = "too_short"
 CAP_TIMING_RED = "timing_red"
 CAP_VISUAL_ISSUES = "visual_issues"
@@ -230,6 +240,31 @@ class TimingSignals:
     subtitle_verified: bool = False
     subtitle_suspect_lines: int = 0
     subtitle_lines: int = 0
+
+
+@dataclass(frozen=True)
+class ContextVerdict:
+    """라이브러리 맥락 평가(W-39, D99)가 등급 구간 하나에 준 판정 — 값만 싣는다."""
+
+    verdict: str
+    confidence: str
+    reason: str
+    duplicate_of: str | None = None
+
+
+@dataclass(frozen=True)
+class ContextSignals:
+    """맥락 평가가 등급에 넘기는 값 — 서비스가 **지금**(같은 입력 열쇠의) 평가에서만 만든다(D99).
+
+    `verdicts`는 등급 구간의 (시작, 끝)(공통 시계의 정확 유리수) → 판정이다. 평가한 때와 경계가
+    다른 구간은 판정이 없다(모름). 다 정한 구간 위에서 녹색을 노랑으로 내리거나, 좁은 칸의 노랑을
+    녹색으로 올릴 수만 있다 — 경계·빨강·판정 보류·자동 제외 후보는 이 값과 무관하다."""
+
+    verdicts: Mapping[tuple[Fraction, Fraction], ContextVerdict] = field(default_factory=dict)
+
+
+UNKNOWN_CONTEXT = ContextSignals()
+"""맥락 평가를 모른다(없음·낡음) — 아무것도 내리지도 올리지도 않는다(v6과 같은 등급)."""
 
 
 UNKNOWN_TIMING = TimingSignals()
@@ -1174,6 +1209,37 @@ def _too_short_cap(settings: RawTierSettings) -> tuple[str, str]:
     return CAP_TOO_SHORT, f"{settings.recommended_min_seconds:g}초보다 짧아 추천하지 않습니다"
 
 
+def _contextualized(span: TierSpan, context: ContextSignals, settings: RawTierSettings) -> TierSpan:
+    """맥락 평가(D99)를 마지막에 — 녹색은 내리고 좁은 칸의 노랑만 올린다(빨강·보류 그대로)."""
+    verdict = context.verdicts.get((span.start, span.end))
+    if verdict is None:
+        return span
+    sure = CONTEXT_CONFIDENCES.index(verdict.confidence)
+    if (
+        span.tier == TIER_GREEN
+        and verdict.verdict in settings.context_lower_verdicts
+        and sure >= CONTEXT_CONFIDENCES.index(settings.context_lower_min_confidence)
+    ):
+        cap = (CAP_CONTEXT, _context_text(verdict))
+        return replace(span, tier=TIER_YELLOW, caps=(*span.caps, cap), lift=None)
+    if (
+        span.tier == TIER_YELLOW
+        and not span.hold
+        and not span.caps
+        and span.rule in settings.context_raise_rules
+        and span.video.status in (VIDEO_GOOD, VIDEO_USABLE)
+        and verdict.verdict in settings.context_raise_verdicts
+        and sure >= CONTEXT_CONFIDENCES.index(settings.context_raise_min_confidence)
+    ):
+        return replace(span, tier=TIER_GREEN, lift=_context_text(verdict))
+    return span
+
+
+def _context_text(verdict: ContextVerdict) -> str:
+    label = CONTEXT_LABELS.get(verdict.verdict, verdict.verdict)
+    return f"맥락: {label} — {verdict.reason}" if verdict.reason else f"맥락: {label}"
+
+
 def classify(
     document: Mapping[str, Any],
     *,
@@ -1181,13 +1247,15 @@ def classify(
     audio_start: Fraction = Fraction(0),
     document_sha256: str | None = None,
     timing: TimingSignals = UNKNOWN_TIMING,
+    context: ContextSignals = UNKNOWN_CONTEXT,
 ) -> TierReport:
     """저장된 분석 문서 → 등급 보고서. 결정적이고 설정을 함께 싣는다.
 
     로컬 측정(공백 RMS·프레임 화질)은 받지 않는다 — AI 판정과 생성 자막만이 재료다(D52). 자막
     시각 확인 값(`timing`, D60)은 다 정한 구간 위에서 녹색을 노랑으로 내리는 데 쓰고, 「자막
     확인됨」(D65)일 때만 표의 `usable` × 발화 많음 칸을 녹색으로 올린다 — 구간 경계·빨강·자동
-    제외 후보는 그 값과 무관하다(서비스만 넘긴다, `check_invariants`).
+    제외 후보는 그 값과 무관하다(서비스만 넘긴다, `check_invariants`). 맥락 평가 값(`context`,
+    D99)은 그 뒤 마지막에 얹는다(`_contextualized`).
     """
     validate_tier_settings(settings)
     evidence = evidence_of(document, settings=settings, audio_start=audio_start)
@@ -1197,6 +1265,7 @@ def classify(
     measured = _with_measured(evidence.unconfirmed, evidence.speech, timing)
     spans = [_measured_density(span, evidence, measured, timing) for span in spans]
     spans = [_lifted(_capped(span, settings, timing, evidence), timing) for span in spans]
+    spans = [_contextualized(span, context, settings) for span in spans]
     _require_tiling(spans, evidence.extent)
     return TierReport(
         tier_version=settings.tier_version,

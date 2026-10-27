@@ -140,7 +140,7 @@ Final Cut 전체 타임라인(D44·D45·D56). 플러그인은 제거됐다. 계�
 | W-36 | Final Cut으로 나가는 자막 글자 조판 정리(사용자 지시 2026-10-27 「맨 앞 띄어쓰기 제거 · 마지막 온점 안 찍히게」, D96) — `finalcut_export.caption_text`(줄마다 `polish.polish_text`, 비면 원문) · 원본 자막 캡션과 SRT 타이틀 · 저장된 원본 자막은 그대로 · 시험 `test_finalcut_caption_polish` | ✅ 2026-10-27 |
 | W-37 | 작업 모드: 가로(롱폼) · 세로(숏폼), 라이브러리마다 하나(사용자 지시 2026-10-27, D97, 계획 `docs/plans/2026-10-27-longform-shortform-modes.md`) — **a** 순수 `raw/workspace_mode.py`(개수 다수 · 정사각형 가로 · 동점 설정 · 크기 모름 제외 · 사람 고름 우선) · 표지 `workspace_mode` · 서비스 `workspace_mode`/`set_workspace_mode` · 보내기 리포트 `mode` 칸(문서 바이트 그대로) · CLI `media mode` · 불변식 `check_workspace_mode_stays_pure` · **b** 설정 서랍 「작업 모드」 칸·상태 줄 | ✅ 2026-10-27 |
 | W-38 | 세로: 편집한 프로젝트에 SRT(ko·en) 다시 넣기 — Final Cut 내장 Subtitle 템플릿 두 레인(영어 아래 · 한국어 위), 사용자 `.fcpxml`/`.fcpxmld` 트리 복사 + 덧붙이기만, DTD 검증(D98) — **사람 선행 H-B1**(Subtitle 타이틀 하나 얹은 프로젝트 XML 내보내기 — param key 철자) · **H-B2**(편집한 세로 프로젝트 XML 두 꼴 + Final Cut 캡션 SRT — 0초 기준) → a 느슨한 읽기 · b 배치·쓰기 · c 서비스·화면·CLI · H-B3 Final Cut 인수 | 사람 픽스처 대기 |
-| W-39 | 라이브러리 전체 맥락 평가(Gemini) → 등급 반영(D99 — 고른 것: 등급에 반영 · 라이브러리 전체) — a 순수 `raw/context_review.py` + 등급 `ContextSignals`·`raw-tier/v7`(경계·빨강·보류 불변, 녹색 → 노랑 내리기 · 좁은 칸만 올리기, 낡으면 무시) · b 견적·승인·실행·저장(같은 열쇠 0호출) · c 서랍 칸·배지 · H-C1 유료 1회 | 대기 |
+| W-39 | 라이브러리 전체 맥락 평가(Gemini) → 등급 반영(D99 — 고른 것: 등급에 반영 · 라이브러리 전체) — a 순수 `raw/context_review.py` + 등급 `ContextSignals`·`raw-tier/v7`(경계·빨강·보류 불변, 녹색 → 노랑 내리기 · 좁은 칸만 올리기, 낡으면 무시) · b 견적·승인·실행·저장(같은 열쇠 0호출) · c 서랍 칸 「맥락 평가 (Gemini)」 · H-C1 유료 1회 | a·b·c ✅ 2026-10-27 · H-C1 대기 |
 
 ---
 

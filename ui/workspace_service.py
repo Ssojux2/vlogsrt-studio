@@ -141,6 +141,24 @@ CROSS_CHECK_INFO = (
 )
 """「다른 귀로 교차 확인」(D59 19d) — 승인 범위 바로 아래의 켬·끔. 칸에는 모델 이름·금액이 없다
 (D57 결정 7) — 무엇을 얼마에 듣는지는 그 아래 견적 문구만 말하고, 승인은 그 문구에 묶인다."""
+CONTEXT_PANEL_ID = "vl-context-review"
+CONTEXT_PANEL_LABEL = "맥락 평가 (Gemini)"
+CONTEXT_QUOTE_LABEL = "견적 보기"
+CONTEXT_RUN_LABEL = "승인하고 평가"
+CONTEXT_NONE_TEXT = (
+    "아직 평가하지 않았습니다 — 라이브러리 전체(모든 영상의 분석 요약과 자막)를 한 번에 보고 추천"
+    " 구간마다 이야기에서의 자리(핵심 · 보조 · 중복 · 맥락 밖)를 판정해 등급에 반영합니다."
+)
+CONTEXT_STALE_TEXT = (
+    "분석·자막·모델이 바뀌어 지난 평가는 낡았습니다 — 등급에 쓰지 않습니다. 견적을 보고 다시"
+    " 평가하세요."
+)
+CONTEXT_CURRENT_TEXT = (
+    "지금 평가 — {when} · {model} · 판정 {judged}개 / 구간 {spans}개. 중복·맥락 밖 추천은 보통으로,"
+    " 핵심은 좁은 칸에서만 추천으로 바뀝니다(사람 결정은 그대로)."
+)
+CONTEXT_DONE_TEXT = "평가를 마쳤습니다 — 판정 {judged}개 / 구간 {spans}개를 등급에 반영했습니다."
+"""「맥락 평가 (Gemini)」(W-39c, D99) — 설정 서랍 칸의 문구. 금액은 견적 줄만 말한다(D57)."""
 WORKSPACE_MODE_ID = "vl-workspace-mode"
 WORKSPACE_MODE_LABEL = "작업 모드"
 WORKSPACE_MODE_INFO = (
@@ -1357,6 +1375,22 @@ def _provider_word(model: str) -> str:
     """공급자의 화면 이름 — 견적 꼬리에만 쓴다."""
     google = raw_service.analysis_provider(model) == raw_service.ANALYSIS_PROVIDER_GOOGLE
     return "Gemini" if google else "Claude"
+
+
+def _context_quote_text(quote: Any) -> str:
+    """맥락 평가 견적 한 줄 — 분량 · 모델 · 공식 단가 상한, 줄인 재료, 이미 평가함·가격 미정."""
+    label = raw_service.analysis_model_label(quote.model)
+    head = (
+        f"원본 {quote.sources}개 · 구간 {quote.spans}개 · 입력 약"
+        f" {quote.input_tokens:,}토큰(보수적) · 출력 한도 {quote.output_tokens:,}토큰"
+    )
+    if quote.cached:
+        return f"{head}. 같은 입력으로 이미 평가했습니다 — 다시 부르지 않습니다."
+    if quote.usd is None:
+        return f"{head}. {label} 공식 단가가 재확인 기한을 지나 **가격 미정** — 승인할 수 없습니다."
+    trimmed = quote.dropped_lines + quote.dropped_windows + quote.clipped_texts
+    note = f" 예산을 넘어 줄이거나 자른 재료 {trimmed}건." if trimmed else ""
+    return f"{head} · {label} 공식 단가로 최대 ${quote.usd}.{note}"
 
 
 def _engine_label_for_key(key: str) -> str:
@@ -4798,6 +4832,7 @@ class RawWorkspaceUi:
             quick_api_panel, quick_api_key = self._quick_api_panel()
             self._glossary_panel()
             self._finalcut_drop_panel()
+            self._context_review_panel()
             with gr.Accordion("분석 실행 설정", open=False, visible=False):
                 primary_network = gr.Dropdown(
                     choices=["offline", "online"],
@@ -4855,6 +4890,80 @@ class RawWorkspaceUi:
             queue=False,
             show_progress="hidden",
         )
+
+    def _context_review_panel(self) -> None:
+        """「맥락 평가 (Gemini)」(D99) — 상태 줄 · 무료 견적 · 그 견적에 묶인 승인(유료 한 번)."""
+        with gr.Accordion(CONTEXT_PANEL_LABEL, open=False, elem_id=CONTEXT_PANEL_ID):
+            status = gr.Markdown(self.context_review_status, elem_id=f"{CONTEXT_PANEL_ID}-status")
+            quote = gr.Markdown("", elem_id=f"{CONTEXT_PANEL_ID}-quote")
+            digest = gr.State(None)
+            with gr.Row():
+                ask = gr.Button(CONTEXT_QUOTE_LABEL, elem_id=f"{CONTEXT_PANEL_ID}-ask")
+                run = gr.Button(
+                    CONTEXT_RUN_LABEL,
+                    variant="primary",
+                    interactive=False,
+                    elem_id=f"{CONTEXT_PANEL_ID}-run",
+                )
+        ask.click(self.context_quote_view, self._signature_state, [quote, digest, run])
+        run.click(
+            self.context_run_view,
+            [self._signature_state, digest],
+            [status, quote, digest, run],
+            concurrency_limit=1,
+        )
+
+    def context_review_status(self, root: Path | None = None) -> str:
+        """맥락 평가 상태 — 지금 평가(줄거리) · 낡음 · 없음, 지난 실패. 작업공간이 없으면 빈 줄."""
+        root = root if root is not None else self._snapshot_root()
+        if root is None:
+            return ""
+        try:
+            state = self.raw.context_review_state(root)
+        except raw_service.RawWorkspaceError as error:
+            return f"맥락 평가 상태를 읽지 못했습니다 — {error}"
+        current = state["current"]
+        if current is not None:
+            line = CONTEXT_CURRENT_TEXT.format(
+                when=str(current["created_at"])[:16].replace("T", " "),
+                model=raw_service.analysis_model_label(str(current["model"])),
+                judged=len(current["verdicts"]),
+                spans=current["spans"],
+            )
+            story = str(current.get("storyline") or "")
+            line += f"\n\n> {story}" if story else ""
+        else:
+            line = CONTEXT_STALE_TEXT if state["stale"] else CONTEXT_NONE_TEXT
+        if state["failure"]:
+            line += f"\n\n지난 시도 실패 — {state['failure']}"
+        return line
+
+    def context_quote_view(self, signature: str | None) -> tuple[str, str | None, Any]:
+        """무료 견적 — 금액이 있고 아직 평가하지 않은 입력이면 승인 단추를 연다."""
+        root = self._require_current_selection(signature)
+        try:
+            quote = self.raw.context_review_quote(root)
+        except raw_service.RawWorkspaceError as error:
+            raise gr.Error(str(error)) from error
+        text = _context_quote_text(quote)
+        ready = quote.usd is not None and not quote.cached
+        return text, (quote.digest if ready else None), gr.Button(interactive=ready)
+
+    def context_run_view(
+        self, signature: str | None, digest: str | None
+    ) -> tuple[str, str, None, Any]:
+        """승인 — 화면이 본 견적(digest)으로 한 번 보낸다(유료). 키가 없으면 보내기 전에 닫는다."""
+        root = self._require_current_selection(signature)
+        if not digest:
+            raise gr.Error("먼저 견적을 보세요 — 승인은 화면에 보인 견적에만 묶입니다.")
+        try:
+            model = self.raw.context_review_quote(root).model
+            client = self._live_transport_for_action().semantic_client(model)
+            document = self.raw.run_context_review(root, digest, client)
+        except (raw_service.RawWorkspaceError, raw_service.AnalysisApprovalError) as error:
+            raise gr.Error(str(error)) from error
+        done = CONTEXT_DONE_TEXT.format(judged=len(document["verdicts"]), spans=document["spans"])
+        return self.context_review_status(root), done, None, gr.Button(interactive=False)
 
     def workspace_mode_value(self) -> str:
         """칸의 처음 값 — 저장된 고른 값(없으면 자동). 화면을 열 때마다 다시 잰다."""

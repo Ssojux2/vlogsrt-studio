@@ -144,7 +144,7 @@ def test_red_silence_becomes_unreviewed_auto_exclusion_and_finalcut_sends_it_dis
     (segment,) = pending
     provenance = json.loads(segment.notes.removeprefix("자동 제외: "))
     assert provenance["reason"] == tiering.RED_SILENCE
-    assert provenance["version"] == "raw-tier/v6"
+    assert provenance["version"] == "raw-tier/v7"
     assert provenance["evidence"][:3] == [
         "tier:silent-not-scenery",
         "audio:subtitle_silence",
@@ -152,7 +152,7 @@ def test_red_silence_becomes_unreviewed_auto_exclusion_and_finalcut_sends_it_dis
     ]
     assert not any(e.startswith("pcm:") for e in provenance["evidence"])
     assert "등급: 제외 제안" in segment.visual_tags
-    assert "등급판 raw-tier/v6" in segment.visual_tags
+    assert "등급판 raw-tier/v7" in segment.visual_tags
     package_dir = service.package_overview(root).package.package_dir
     with pytest.raises(RawWorkspaceError, match="자동 제외 1개를 먼저 확인"):
         facade.export_confirmed(package_dir)  # 잘라 내는 쪽의 관문은 그대로다(D35)
@@ -235,7 +235,7 @@ def test_retier_keeps_manual_selection_override_and_notes(
     edited = facade.set_notes(edited.base_plan_id, first.segment_id, "사람 메모")
     retiered = facade.retier(edited.base_plan_id)
     assert retiered.sequence == edited.sequence + 1
-    assert retiered.edit is not None and retiered.edit.notes == "등급 재계산 raw-tier/v6"
+    assert retiered.edit is not None and retiered.edit.notes == "등급 재계산 raw-tier/v7"
     for before, after in zip(edited.segments, retiered.segments, strict=True):
         assert (before.segment_id, before.start_pts, before.end_pts) == (
             after.segment_id,

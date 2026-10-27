@@ -14,6 +14,7 @@ import json
 import math
 import os
 import threading
+import types
 import uuid
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
@@ -45,6 +46,7 @@ from vlogsrt.project.raw.analysis_approval import (
 )
 from vlogsrt.project.raw.analysis_config import (
     ANALYSIS_CONCURRENCY,
+    CONTEXT_REVIEW,
     DEFAULT_PROMPT_REVISION,
     RawAnalysisConcurrency,
     RawUnderstandingSettings,
@@ -164,6 +166,7 @@ from vlogsrt.project.raw.models import (
     BrowseNotAllowedError,
     ByteRange,
     ClipArtifact,
+    ContextQuote,
     ExtractJobError,
     FolderEntry,
     FolderListing,
@@ -2179,14 +2182,15 @@ class RawWorkspaceService:
         return None if row is None else self._tier_report_for_row(workspace, row)
 
     def _tier_report_for_row(
-        self, workspace: RawWorkspace, row: AnalysisSourceResult
+        self, workspace: RawWorkspace, row: AnalysisSourceResult, *, with_context: bool = True
     ) -> tiering.TierReport | None:
         """등급 보고서의 유일한 자리 — 화면·검토 머리·자동 제외 후보·Final Cut 키워드가 모두 이
         길로 같은 값(`_tier_timing`)을 받아 같은 등급을 본다(D60, `check_invariants`).
 
         읽을 때마다 계산하고 어디에도 보관하지 않는다(D51·D52). 그리기 한 번은 원본마다 한 번만
         부른다(`selection_suitability`를 리비전마다 한 번, D63) — 재료 읽기(분석 개요·시각 확인
-        보고서·원본 자막)는 읽기 범위가 한 번으로 줄인다."""
+        보고서·원본 자막)는 읽기 범위가 한 번으로 줄인다. 맥락 평가 값(`_tier_context`, D99)도 이
+        자리에서만 넘긴다 — 맥락 평가의 입력을 지을 때만 `with_context=False`(평가 전 등급)다."""
         if row.status == "transcribed":
             # 1단계만 끝난 행(「전사만」 · 영상 분석 승인 전, D59 19b) — 판정이 없다. 행의 문서는
             # 1단계 기록(`asr_phase.json`)이라 등급 문서로 읽지 않는다.
@@ -2199,6 +2203,7 @@ class RawWorkspaceService:
                 audio_start=_record_audio_start(workspace.root, row),
                 document_sha256=hashlib.sha256(body).hexdigest(),
                 timing=self._tier_timing(workspace, row.asset_id),
+                context=self._tier_context(workspace, row.asset_id, applied=with_context),
                 settings=TIER_SETTINGS,
             )
         progress = directory / "suitability_progress.json"
@@ -2208,7 +2213,10 @@ class RawWorkspaceService:
         if payload.get("analysis_revision_id") != row.revision_id:
             return None
         return tiering.classify(
-            payload, timing=self._tier_timing(workspace, row.asset_id), settings=TIER_SETTINGS
+            payload,
+            timing=self._tier_timing(workspace, row.asset_id),
+            context=self._tier_context(workspace, row.asset_id, applied=with_context),
+            settings=TIER_SETTINGS,
         )
 
     def _tier_timing(self, workspace: RawWorkspace, asset_id: str) -> tiering.TimingSignals:
@@ -2240,6 +2248,224 @@ class RawWorkspaceService:
             subtitle_suspect_lines=read.suspect_lines,
             subtitle_lines=read.lines,
         )
+
+    def _tier_context(
+        self, workspace: RawWorkspace, asset_id: str, *, applied: bool = True
+    ) -> tiering.ContextSignals:
+        """등급에 넘길 맥락 평가 값 — **지금** 입력 열쇠의 평가에서만(D99). 이 값의 유일한 생산자다.
+
+        입력(원본 · 분석 · 원본 자막 리비전 · 등급판 · 모델 · 예산)이 바뀌어 열쇠가 다르면 평가가
+        낡았다 — 모름으로 두고 아무것도 내리지도 올리지도 않는다. 평가를 못 읽으면 모름으로 두고
+        경고한다(등급 계산을 막지 않는다). `applied`가 거짓이면(맥락 평가의 입력을 지을 때)
+        모름이다.
+        """
+        if not applied:
+            return tiering.UNKNOWN_CONTEXT
+        from vlogsrt.project.raw import context_review_io
+
+        folder = context_review_io.folder(workspace.root, ANALYSIS_ROOT)
+        if not folder.is_dir():
+            return tiering.UNKNOWN_CONTEXT  # 평가한 적이 없다 — 열쇠를 재지 않는다(읽기 0)
+        try:
+            state = read_scope.memo(
+                ("context_review.current", str(workspace.root)),
+                lambda: self._context_current(workspace.root),
+            )
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            log.warn(f"맥락 평가를 읽지 못해 등급에는 모름으로 둔다 — {error}")
+            return tiering.UNKNOWN_CONTEXT
+        document = state[1]
+        if document is None:
+            return tiering.UNKNOWN_CONTEXT
+        return context_review_io.signals_from(document, asset_id)
+
+    def _context_current(self, root: Path) -> tuple[str, dict[str, Any] | None]:
+        """(지금 입력 열쇠, 그 열쇠의 평가 문서 또는 None) — 읽기만 한다."""
+        from vlogsrt.project.raw import context_review_io as cio
+
+        key, _model = self._context_key(root)
+        found = cio.load(cio.result_path(root, ANALYSIS_ROOT, key), cio.RESULT_SCHEMA, key)
+        return key, found
+
+    def _context_model(self, root: Path) -> str:
+        """맥락 평가 모델 — 분석 모델이 Gemini면 그 모델, 아니면 기본 분석 모델(Gemini, D87)."""
+        model = self.settings(root).models.luna_model
+        if analysis_provider(model) == ANALYSIS_PROVIDER_GOOGLE:
+            return model
+        return DEFAULT_ANALYSIS_MODEL
+
+    def _context_rows(self, root: Path) -> list[tuple[SourceAsset, AnalysisSourceResult]]:
+        """촬영 순서의 원본마다 가장 최근 판정 증거 행 — 분석이 없는 원본은 뺀다."""
+        rows = self.review_workspace_facade(root).tier_evidence_rows()
+        return [
+            (asset, rows[asset.asset_id])
+            for asset in self.global_order_proposal(root)
+            if asset.asset_id in rows
+        ]
+
+    def _context_key(self, root: Path) -> tuple[str, str]:
+        """(지금 입력 열쇠, 모델) — 원본·분석 리비전·증거 문서·자막 리비전, 촬영 순서대로."""
+        from vlogsrt.project.raw import context_review
+
+        model = self._context_model(root)
+        parts = []
+        for asset, row in self._context_rows(root):
+            transcript = self.source_transcript(root, asset.asset_id) or {}
+            parts.append(
+                (
+                    asset.asset_id,
+                    row.revision_id,
+                    row.document_path or "",
+                    transcript.get("revision", ""),
+                )
+            )
+        key = context_review.context_key(
+            parts, tier_version=TIER_SETTINGS.tier_version, model=model, settings=CONTEXT_REVIEW
+        )
+        return key, model
+
+    def _context_sources(self, root: Path) -> list[Any]:
+        """맥락 평가의 재료 — 원본마다 평가 전 등급 구간 · 창 요약 · 원본 자막 줄(공통 시계)."""
+        from vlogsrt.project.raw import context_review as cr
+
+        workspace = self._workspace(root)
+        sources = []
+        for asset, row in self._context_rows(root):
+            report = self._tier_report_for_row(workspace, row, with_context=False)
+            if report is None:
+                continue
+            _directory, path = _tier_paths(workspace.root, row)
+            document = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+            shift = _record_audio_start(workspace.root, row)
+            transcript = self.source_transcript(root, asset.asset_id) or {}
+            spans = tuple(
+                cr.ContextSpan(s.start, s.end, s.tier, s.rule, s.audio.status, s.video.status)
+                for s in report.spans
+            )
+            sources.append(
+                cr.ContextSource(
+                    asset.asset_id,
+                    asset.source_name,
+                    spans,
+                    _context_windows(document, shift),
+                    _context_lines(transcript),
+                )
+            )
+        return sources
+
+    def context_review_quote(self, root: Path) -> ContextQuote:
+        """맥락 평가 견적(D99, 무료) — 입력을 지어 토큰을 재고 공식 단가로 상한을 낸다.
+
+        단가 재확인 기한이 지났으면 금액이 없다(가격 미정 — 승인할 수 없다). 같은 입력 열쇠의 평가가
+        이미 있으면 `cached`다(다시 부르지 않는다)."""
+        from vlogsrt.project.raw import context_review as cr
+        from vlogsrt.project.raw import context_review_io as cio
+        from vlogsrt.project.raw import gemini_cost
+
+        key, model = self._context_key(root)
+        sources = self._context_sources(root)
+        if not sources:
+            raise RawWorkspaceError("맥락을 평가할 분석이 없습니다 — 영상 분석을 먼저 마치세요")
+        given = cr.build_input(sources, CONTEXT_REVIEW)
+        profile = gemini_profile(model)
+        tokens_in = cio.input_tokens(given, CONTEXT_REVIEW)
+        tokens_out = CONTEXT_REVIEW.max_output_tokens
+        priced = gemini_cost.price_current(profile, on=date.today())
+        usd = str(cio.ceiling_usd(profile, tokens_in, tokens_out)) if priced else None
+        cached = cio.load(cio.result_path(root, ANALYSIS_ROOT, key), cio.RESULT_SCHEMA, key)
+        digest = hashlib.sha256(json.dumps([key, model, usd]).encode("utf-8")).hexdigest()
+        return ContextQuote(
+            key=key,
+            model=model,
+            sources=len(sources),
+            spans=len(given.spans),
+            input_tokens=tokens_in,
+            output_tokens=tokens_out,
+            usd=usd,
+            digest=digest,
+            cached=cached is not None,
+            dropped_lines=given.dropped_lines,
+            dropped_windows=given.dropped_windows,
+            clipped_texts=given.clipped_texts,
+        )
+
+    def run_context_review(self, root: Path, digest: str, client: object) -> dict[str, Any]:
+        """승인된 맥락 평가 한 번(유료, D44) — 사람이 본 견적(digest)과 지금 견적이 같을 때만.
+
+        같은 열쇠의 평가가 이미 있으면 부르지 않고 그것을 돌려준다(다시 사지 않는다). 오프라인·
+        가격 미정이면 보내기 전에 닫는다. 실패는 까닭과 함께 남기고 등급은 그대로다. 성공하면 검토
+        머리의 등급 표시만 다시 단다(사람 결정 그대로)."""
+        from vlogsrt.project.raw import context_review_io as cio
+
+        quote = self.context_review_quote(root)
+        if quote.digest != digest:
+            raise RawWorkspaceError("견적이 바뀌었습니다 — 새 견적을 확인한 뒤 다시 승인하세요")
+        path = cio.result_path(root, ANALYSIS_ROOT, quote.key)
+        existing = cio.load(path, cio.RESULT_SCHEMA, quote.key)
+        if existing is not None:
+            return existing
+        self._require_context_online(root, quote)
+        document = self._ask_context(root, quote, client)
+        cio.write(path, document)
+        self._tier_step(root)
+        return document
+
+    def _require_context_online(self, root: Path, quote: ContextQuote) -> None:
+        if quote.usd is None:
+            raise RawWorkspaceError(
+                f"{quote.model}의 공식 단가가 재확인 기한을 지나 가격 미정입니다 — 승인할 수"
+                " 없습니다"
+            )
+        blocked = online_env_blocked()
+        if blocked is not None:
+            raise AnalysisError(blocked)
+        if self.settings(root).network_mode != "online":
+            raise AnalysisError(
+                "작업공간 network_mode가 online이 아니다 — 맥락 평가를 보낼 수 없다"
+            )
+
+    def _ask_context(self, root: Path, quote: ContextQuote, client: object) -> dict[str, Any]:
+        """보내고 해석한다 — 어느 단계에서 실패하든 실패 문서를 남기고 이름을 대고 멈춘다."""
+        from vlogsrt.project.raw import context_review as cr
+        from vlogsrt.project.raw import context_review_io as cio
+        from vlogsrt.project.raw import gemini_cost
+        from vlogsrt.project.raw.understanding_luna import gemini_text
+        from vlogsrt.transcribe import request_gemini_generate
+
+        given = cr.build_input(self._context_sources(root), CONTEXT_REVIEW)
+        body = cio.payload(given, gemini_profile(quote.model), CONTEXT_REVIEW)
+        failure = cio.failure_path(root, ANALYSIS_ROOT, quote.key)
+        try:
+            response = request_gemini_generate(client, model=quote.model, payload=body, online=True)
+            text, reason = gemini_text(response)
+            if text is None:
+                raise cr.ContextReviewError(reason)
+            review = cr.parse(json.loads(text), given)
+        except Exception as error:
+            cio.write(failure, cio.failure_document(quote.key, quote.model, str(error)))
+            raise AnalysisError(f"맥락 평가가 실패했습니다 — {error}") from error
+        usage = gemini_cost.measure_gemini_usage(
+            types.SimpleNamespace(model=quote.model), response, on=date.today()
+        )
+        return cio.result_document(quote.key, quote.model, review, given, asdict(usage))
+
+    def context_review_state(self, root: Path) -> dict[str, Any]:
+        """화면의 맥락 평가 상태 — 지금 평가(줄거리·날짜·모델) · 낡음 · 지난 실패. 읽기만."""
+        from vlogsrt.project.raw import context_review_io as cio
+
+        key, model = self._context_key(root)
+        current = cio.load(cio.result_path(root, ANALYSIS_ROOT, key), cio.RESULT_SCHEMA, key)
+        failed = cio.load(cio.failure_path(root, ANALYSIS_ROOT, key), cio.FAILURE_SCHEMA, key)
+        folder = cio.folder(root, ANALYSIS_ROOT)
+        any_result = folder.is_dir() and any(
+            p for p in folder.glob("*.json") if not p.name.endswith(".failed.json")
+        )
+        return {
+            "model": model,
+            "current": current,
+            "stale": current is None and bool(any_result),
+            "failure": None if failed is None else failed.get("reason"),
+        }
 
     def start_reference_import(
         self,
@@ -6063,6 +6289,42 @@ def _tier_migration_message(untouched: bool) -> str:
 
 def _json_fraction(value: Mapping[str, Any]) -> Fraction:
     return Fraction(int(value["num"]), int(value["den"]))
+
+
+def _context_windows(document: Mapping[str, Any], shift: Fraction) -> tuple[Any, ...]:
+    """분석 문서의 창 요약(받아들인 판정만) — 공통 시계로 옮긴 코어 구간 · 말 · 화면 · 태그."""
+    from vlogsrt.project.raw import context_review as cr
+
+    annotations = {
+        str(row.get("window_id")): row
+        for row in document.get("annotations", [])
+        if isinstance(row, Mapping) and row.get("status") == "accepted"
+    }
+    found = []
+    for window in document.get("windows", {}).get("windows", []):
+        row = annotations.get(str(window.get("window_id")))
+        if row is None:
+            continue
+        found.append(
+            cr.ContextWindow(
+                _json_fraction(window["core_start"]) + shift,
+                _json_fraction(window["core_end"]) + shift,
+                str(row.get("speech_summary") or ""),
+                str(row.get("visual_summary") or ""),
+                tuple(str(tag) for tag in row.get("scene_tags") or ()),
+            )
+        )
+    return tuple(found)
+
+
+def _context_lines(transcript: Mapping[str, Any]) -> tuple[Any, ...]:
+    """원본 자막 줄(공통 시계) — 맥락 평가의 재료."""
+    from vlogsrt.project.raw import context_review as cr
+
+    return tuple(
+        cr.ContextLine(_json_fraction(row["start"]), _json_fraction(row["end"]), str(row["text"]))
+        for row in transcript.get("utterances", [])
+    )
 
 
 def _tier_paths(workspace_root: Path, row: AnalysisSourceResult) -> tuple[Path, Path]:

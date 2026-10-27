@@ -470,9 +470,19 @@ class RawTierSettings:
       손에 든 셀피에 늘 붙는 가림·흔들림·흐림은 빼고 어두움·과노출만 남긴다(사용자 결정).
     - `segment_green_share`: 검토 조각은 빨강이 없고 녹색 구간이 조각 길이의 이 몫 **이상**이면
       추천이다(예전엔 전부 녹색이어야 했다). 3초 상한은 그대로 걸린다. 1이면 예전 규칙이다.
+
+    라이브러리 전체 맥락 평가(W-39, D99, `raw-tier/v7` — 사용자 결정 「등급에 반영 · 라이브러리
+    전체」, 외부 근거 없는 조정 대상):
+
+    - `context_lower_verdicts`·`context_lower_min_confidence`: 맥락 평가가 이 판정을 이 확신
+      이상으로 준 녹색 구간은 보통으로 내린다(「추천 제한: 맥락: …」).
+    - `context_raise_verdicts`·`context_raise_min_confidence`·`context_raise_rules`: 이 판정을
+      이 확신 이상으로 준 노랑 구간은, 규칙 칸이 이 목록에 있고 화면이 `recommended`·`usable`이며
+      판정 보류·추천 제한이 없을 때만 추천으로 올린다(좁게 — 올린 추천은 D93으로 켜져 나간다).
+    - 평가가 없거나 낡았으면 v6과 같은 등급이다.
     """
 
-    tier_version: str = "raw-tier/v6"
+    tier_version: str = "raw-tier/v7"
     silence_min_seconds: float = 5.0
     speech_handle_seconds: float = 0.3
     min_span_seconds: float = 1.0
@@ -487,6 +497,11 @@ class RawTierSettings:
     good_sparse_green: bool = True
     visual_issue_caps: tuple[str, ...] = ("dark", "overexposed")
     segment_green_share: float = 0.5
+    context_lower_verdicts: tuple[str, ...] = ("redundant", "off_topic")
+    context_lower_min_confidence: str = "medium"
+    context_raise_verdicts: tuple[str, ...] = ("core",)
+    context_raise_min_confidence: str = "high"
+    context_raise_rules: tuple[str, ...] = ("speech-sparse", "scenery-no-speech")
 
 
 TIER_SETTINGS = RawTierSettings()
@@ -524,7 +539,73 @@ def tier_settings_problems(settings: RawTierSettings) -> list[str]:
     if not isinstance(settings.tier_version, str) or not settings.tier_version.strip():
         problems.append(f"등급판 이름이 비었다: {settings.tier_version!r}")
     problems += _tier_v6_problems(settings)
+    problems += _tier_context_problems(settings)
     return problems or _tier_range_problems(settings)
+
+
+@dataclass(frozen=True)
+class ContextReviewSettings:
+    """라이브러리 맥락 평가(W-39, D99)의 입력 예산과 안내문 판 — 외부 근거 없는 조정 대상.
+
+    원본마다 자막 줄·창 요약을 이 수까지만 싣고, 줄 글자·요약 글자를 이 길이에서 자른다 — 줄이고
+    자른 수는 입력 기록이 센다(조용히 줄이지 않는다). 모두 평가 열쇠에 실린다(바꾸면 지난 평가는
+    낡는다). 판정(`context_*`)은 등급 설정(`RawTierSettings`)이 정한다."""
+
+    prompt_revision: str = "context-review/v1"
+    max_lines_per_source: int = 400
+    max_line_chars: int = 80
+    max_windows_per_source: int = 80
+    max_summary_chars: int = 200
+    max_output_tokens: int = 32000
+    """응답 한도(생각 포함) — 구간 수백 개의 판정이 들어가게 넉넉히(Gemini 동기 상한 65536 안)."""
+    quote_chars_per_token: int = 1
+    """견적의 입력 토큰 추정 — 글자 하나 = 토큰 하나(한국어 JSON에 보수적인 쪽, 실제는 더 적다)."""
+
+    def __post_init__(self) -> None:
+        for name in (
+            "max_lines_per_source",
+            "max_line_chars",
+            "max_windows_per_source",
+            "max_summary_chars",
+            "max_output_tokens",
+            "quote_chars_per_token",
+        ):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"{name}는 1 이상의 정수여야 한다: {value!r}")
+        if not self.prompt_revision.strip():
+            raise ValueError("맥락 평가 안내문 판이 비었다")
+
+
+CONTEXT_REVIEW = ContextReviewSettings()
+"""지금 쓰는 맥락 평가 예산 — `context_review.build_input`의 기본값이다."""
+
+CONTEXT_VERDICTS = ("core", "supporting", "redundant", "off_topic")
+"""라이브러리 맥락 평가(W-39, D99)의 판정 — 핵심 · 보조 · 중복 · 맥락 밖."""
+CONTEXT_CONFIDENCES = ("low", "medium", "high")
+"""맥락 판정의 확신 — 낮은 것부터(차례가 곧 크기다)."""
+
+
+def _tier_context_problems(settings: RawTierSettings) -> list[str]:
+    problems: list[str] = []
+    for name, verdicts in (
+        ("내리는 맥락 판정", settings.context_lower_verdicts),
+        ("올리는 맥락 판정", settings.context_raise_verdicts),
+    ):
+        if not isinstance(verdicts, tuple) or any(v not in CONTEXT_VERDICTS for v in verdicts):
+            problems.append(f"{name}은 {CONTEXT_VERDICTS} 가운데의 튜플이어야 한다: {verdicts!r}")
+    if set(settings.context_lower_verdicts) & set(settings.context_raise_verdicts):
+        problems.append("같은 맥락 판정이 내리기와 올리기에 함께 있다")
+    for name, level in (
+        ("내리기 확신", settings.context_lower_min_confidence),
+        ("올리기 확신", settings.context_raise_min_confidence),
+    ):
+        if level not in CONTEXT_CONFIDENCES:
+            problems.append(f"{name}은 {CONTEXT_CONFIDENCES} 가운데 하나여야 한다: {level!r}")
+    rules = settings.context_raise_rules
+    if not isinstance(rules, tuple) or not all(isinstance(rule, str) for rule in rules):
+        problems.append(f"올리기 규칙 칸은 글자의 튜플이어야 한다: {rules!r}")
+    return problems
 
 
 VISUAL_ISSUE_KINDS = ("blur", "shake", "dark", "overexposed", "obstructed")

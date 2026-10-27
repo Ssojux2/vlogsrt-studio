@@ -1749,8 +1749,10 @@ CLEAN_TIER_SERVICE = (
     "class RawWorkspaceService:\n"
     "    def _tier_report_for_row(self, workspace, row):\n"
     "        if row:\n"
-    "            return tiering.classify({}, timing=self._tier_timing(workspace, row))\n"
-    "        return tiering.classify({'p': 1}, timing=self._tier_timing(workspace, row))\n"
+    "            return tiering.classify({}, timing=self._tier_timing(workspace, row),"
+    " context=self._tier_context(workspace, row))\n"
+    "        return tiering.classify({'p': 1}, timing=self._tier_timing(workspace, row),"
+    " context=self._tier_context(workspace, row))\n"
     "\n"
     "    def _tier_timing(self, workspace, asset_id):\n"
     "        if asset_id:\n"
@@ -1778,21 +1780,42 @@ CLEAN_TIERING = (
         (
             TIER_SERVICE,
             CLEAN_TIER_SERVICE.replace(
-                "tiering.classify({}, timing=self._tier_timing(workspace, row))",
+                "tiering.classify({}, timing=self._tier_timing(workspace, row),"
+                " context=self._tier_context(workspace, row))",
                 "tiering.classify({})",
             ),
             7,
-            "timing=self._tier_timing(…)이 없다",
+            "context=self._tier_context(…)이 없다",
         ),
         # 그 자리에서 다른 값을 넘겼다(모름으로 덮어 신호를 버린다).
         (
             TIER_SERVICE,
             CLEAN_TIER_SERVICE.replace(
-                "timing=self._tier_timing(workspace, row))\n        return",
-                "timing=tiering.UNKNOWN_TIMING)\n        return",
+                "timing=self._tier_timing(workspace, row),"
+                " context=self._tier_context(workspace, row))\n        return",
+                "timing=tiering.UNKNOWN_TIMING,"
+                " context=self._tier_context(workspace, row))\n        return",
             ),
             7,
-            "timing=self._tier_timing(…)이 없다",
+            "context=self._tier_context(…)이 없다",
+        ),
+        # 맥락 평가 값(D99)을 빠뜨렸다 — 시각 확인 값만 넘긴다.
+        (
+            TIER_SERVICE,
+            CLEAN_TIER_SERVICE.replace(
+                ", context=self._tier_context(workspace, row))\n        return",
+                ")\n        return",
+            ),
+            7,
+            "context=self._tier_context(…)이 없다",
+        ),
+        # 맥락 평가 값의 문을 다른 메서드가 읽는다(D99).
+        (
+            TIER_SERVICE,
+            CLEAN_TIER_SERVICE + "\n    def _removal_cuts(self, ws, row):\n"
+            "        return self._tier_context(ws, row)\n",
+            16,
+            "_tier_context를 RawWorkspaceService._removal_cuts에서 읽는다",
         ),
         # 그 자리 안에 둔 함수는 그 자리가 아니다.
         (
@@ -4075,3 +4098,34 @@ def test_workspace_mode_impurity_and_a_mode_parameter_on_the_builder_are_caught(
 
 def test_the_real_workspace_mode_layer_is_pure() -> None:
     assert check_invariants.check_workspace_mode_stays_pure() == []
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "from vlogsrt import transcribe",
+        "from vlogsrt import gemini_messages",
+        "from vlogsrt.project.raw import service",
+        "import sqlite3",
+        "Path('x').read_text()",
+    ],
+)
+def test_context_review_impurity_is_caught(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, statement: str
+) -> None:
+    """W-39a(D99) — 맥락 평가 계층은 전송·전사·서비스·DB·파일을 모른다."""
+    clean = "from fractions import Fraction\n"
+    _fake_source_tree(monkeypatch, tmp_path, {"vlogsrt/project/raw/context_review.py": clean})
+    assert check_invariants.check_context_review_stays_pure() == []
+    target = tmp_path / "vlogsrt" / "project" / "raw" / "context_review.py"
+    target.write_text(clean + statement + "\n", encoding="utf-8")
+    failures = check_invariants.check_context_review_stays_pure()
+    assert failures and all(line.startswith("context_review.py") for line in failures)
+    target.unlink()
+    assert check_invariants.check_context_review_stays_pure() == [
+        "vlogsrt/project/raw/context_review.py: 맥락 평가 계층이 사라졌다 (D99)"
+    ]
+
+
+def test_the_real_context_review_layer_is_pure() -> None:
+    assert check_invariants.check_context_review_stays_pure() == []

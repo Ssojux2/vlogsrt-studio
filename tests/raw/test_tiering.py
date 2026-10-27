@@ -364,7 +364,7 @@ def test_report_is_deterministic_and_embeds_settings():
     first, second = report(), report()
     assert first == second and first.document() == second.document()
     assert first.document()["settings"] == asdict(TIER_SETTINGS)
-    assert first.tier_version == "raw-tier/v6" and len(first.document_sha256) == 64
+    assert first.tier_version == "raw-tier/v7" and len(first.document_sha256) == 64
     assert set(first.document()) == {"tier_version", "settings", "document_sha256", "spans"}
     # 공백 기준을 두 공백(12초·13초)보다 길게 잡으면 빨강이 없다.
     strict = report(settings=replace(TIER_SETTINGS, silence_min_seconds=13.5))
@@ -382,7 +382,7 @@ def test_red_decisions_shape_matches_auto_decisions():
     row = rows[0]
     assert set(row) == {"start", "end", "reason", "evidence", "version"}
     assert row["start"] == {"num": 15, "den": 1} and row["end"] == {"num": 257, "den": 10}
-    assert row["reason"] == tiering.RED_SILENCE and row["version"] == "raw-tier/v6"
+    assert row["reason"] == tiering.RED_SILENCE and row["version"] == "raw-tier/v7"
     assert row["evidence"][:3] == [
         "tier:silent-not-scenery",
         "audio:subtitle_silence",
@@ -404,7 +404,7 @@ def test_segment_grade_maps_to_closed_recommendation_set():
     closed = {"recommended", "normal", "review_required"}
     green = tiering.segment_grade(result, F(1), F(14))
     assert green[0] == "recommended"
-    assert green[1][0] == "등급: 추천" and green[1][-1] == "등급판 raw-tier/v6"
+    assert green[1][0] == "등급: 추천" and green[1][-1] == "등급판 raw-tier/v7"
     assert green[1][1].startswith("자막: 발화가 구간의") and green[1][2].startswith("영상: ")
     red = tiering.segment_grade(result, F(16), F(25))
     assert red == ("normal", red[1]) and red[1][0] == "등급: 제외 제안"
@@ -479,7 +479,8 @@ def test_default_tier_settings_hold_only_subtitle_and_span_values():
     D60이 넷을 더했다 — 모두 생성 자막의 글자·시각과 구간 길이에서 오는 값이다(같은 말 런 ·
     느린 추임새 속도·길이 · 추천 최소 길이). D65가 하나를 더했다 — 원본 자막 「확인 필요」 줄의
     몫(자막의 글자에서 오는 값). D79(v6)가 다섯을 더했다 — 칸 셋의 켜고 끔 · 추천을 막는 화면
-    문제 종류 · 조각 녹색 몫(모두 규칙 손잡이다). 측정 값은 여전히 없다.
+    문제 종류 · 조각 녹색 몫(모두 규칙 손잡이다). D99(v7)가 다섯을 더했다 — 맥락 평가 판정을
+    등급에 얹는 손잡이(내리고 올리는 판정·확신 문턱·올리는 칸). 측정 값은 여전히 없다.
     """
     assert {field.name for field in dataclasses.fields(RawTierSettings)} == {
         "tier_version",
@@ -497,12 +498,17 @@ def test_default_tier_settings_hold_only_subtitle_and_span_values():
         "good_sparse_green",
         "visual_issue_caps",
         "segment_green_share",
+        "context_lower_verdicts",
+        "context_lower_min_confidence",
+        "context_raise_verdicts",
+        "context_raise_min_confidence",
+        "context_raise_rules",
     }
 
 
 def test_default_tier_settings_are_valid_and_unchanged():
     validate_tier_settings(TIER_SETTINGS)
-    assert TIER_SETTINGS.tier_version == "raw-tier/v6"
+    assert TIER_SETTINGS.tier_version == "raw-tier/v7"
     assert TIER_SETTINGS.speech_density_green == 0.35
     assert (TIER_SETTINGS.silence_min_seconds, TIER_SETTINGS.speech_handle_seconds) == (5.0, 0.3)
     assert TIER_SETTINGS.min_span_seconds == 1.0

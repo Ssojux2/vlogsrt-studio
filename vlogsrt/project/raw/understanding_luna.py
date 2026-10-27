@@ -716,6 +716,9 @@ def _gemini_text(response: Mapping[str, object]) -> tuple[str | None, str]:
     return text, ""
 
 
+gemini_text = _gemini_text
+"""Gemini 응답 본문 읽기 — 맥락 평가(D99)도 같은 규칙(STOP · 생각 아닌 text)으로 읽는다."""
+
 _PROVIDER_TEXT: Mapping[str, Callable[[Mapping[str, object]], tuple[str | None, str]]] = (
     MappingProxyType(
         {ANALYSIS_PROVIDER_ANTHROPIC: _claude_text, ANALYSIS_PROVIDER_GOOGLE: _gemini_text}
