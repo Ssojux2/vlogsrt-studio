@@ -312,11 +312,17 @@ class ReviewMediaSettings:
     CPU를 다투지 않게 한다(부하 80–100/10코어 실측). `thumb_seek_margin_seconds`는 썸네일의
     빠른 찾기가 목표 프레임보다 얼마나 앞에서 디코드를 시작하는가다.
 
+    `preview_long_edge_4k`는 4K 원본(화면 긴 변 ≥ `FOLDER_WORKSPACE.proxy_min_long_edge`)의 미리보기
+    긴 변이다(D100 §2) — 폴더 작업대의 재생기는 4K를 960×540(소리 있음)으로 본다. 브라우저가 그대로
+    재생하는 4K H.264도 복사하지 않고 줄인다. 외부 근거 없는 조정 대상이다(25% 분석 프록시와 같은
+    크기).
+
     어느 값도 미리보기·썸네일 캐시 열쇠·조리법 판(`VISUAL_PREVIEW_RECIPE`)·분석 지문에 들어가지
     않는다 — 이미 만든 미리보기는 그대로 쓰고, 새로 만든 것만 기록에 `encoding`을 남긴다.
     """
 
     preview_long_edge: int = 1920
+    preview_long_edge_4k: int = 960
     preview_x264_preset: str = "veryfast"
     preview_x264_crf: int = 23
     preview_timeout_floor_seconds: float = 1800.0
@@ -339,9 +345,9 @@ REVIEW_MEDIA = ReviewMediaSettings()
 def validate_review_media_settings(settings: ReviewMediaSettings) -> None:
     """값역 검사 — 긴 변은 2 이상 짝수, crf 0–51, nice 0–20, 한도·여유는 유한한 양수/0 이상."""
     problems: list[str] = []
-    edge = settings.preview_long_edge
-    if isinstance(edge, bool) or not isinstance(edge, int) or edge < 2 or edge % 2:
-        problems.append(f"미리보기 긴 변은 2 이상 짝수 정수여야 한다: {edge!r}")
+    for edge in (settings.preview_long_edge, settings.preview_long_edge_4k):
+        if isinstance(edge, bool) or not isinstance(edge, int) or edge < 2 or edge % 2:
+            problems.append(f"미리보기 긴 변은 2 이상 짝수 정수여야 한다: {edge!r}")
     crf = settings.preview_x264_crf
     if isinstance(crf, bool) or not isinstance(crf, int) or not 0 <= crf <= 51:
         problems.append(f"미리보기 crf는 0–51 정수여야 한다: {crf!r}")

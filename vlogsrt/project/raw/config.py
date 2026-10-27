@@ -1719,3 +1719,88 @@ def _render_codec_problems(settings: RenderSettings) -> list[str]:
 
 RENDER_SETTINGS = RenderSettings()
 """지금 쓰는 초안 렌더 설정 — 계획(`render_plan.build_plan`)과 렌더러의 기본값이다."""
+
+
+@dataclass(frozen=True)
+class LocalMediaConcurrency:
+    """로컬 미디어 작업(분석 프록시·원본 전체 미리보기 만들기)이 한 번에 돌리는 ffmpeg 수(D100 §2).
+
+    **외부 근거 없는 조정 대상이다.** 작업 스레드는 개수 제한이 없어(`jobs.JobManager`) 폴더를
+    불러오면 원본마다 프록시·미리보기가 한꺼번에 뜬다 — 4K 디코드가 CPU와 메모리를 다툰다. 한도는
+    `max(floor, min(ceiling, CPU 수 // cpu_divisor))`다: 코어 절반을 넘지 않고(분석·화면이 쓸 몫을
+    남긴다), 셋을 넘지 않는다(동시 분석 한도 D49와 같은 수). CPU 수를 모르면 `floor`다. 동시에 도는
+    수만 정하므로 어느 지문·캐시 열쇠·승인·견적에도 없다 — 바뀌는 것은 걸리는 시간뿐이다.
+    """
+
+    floor: int = 1
+    ceiling: int = 3
+    cpu_divisor: int = 2
+
+    def __post_init__(self) -> None:
+        for name in ("floor", "ceiling", "cpu_divisor"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"{name}는 1 이상 정수여야 한다: {value!r}")
+        if self.ceiling < self.floor:
+            raise ValueError(f"ceiling({self.ceiling})이 floor({self.floor})보다 작다")
+
+    def limit(self, cpu_count: int | None) -> int:
+        """이 기계의 동시 한도 — `os.cpu_count()`의 값을 받는다(None이면 모른다)."""
+        if cpu_count is None or cpu_count < 1:
+            return self.floor
+        return max(self.floor, min(self.ceiling, cpu_count // self.cpu_divisor))
+
+
+FOLDER_WORKSPACE_NAME_FORBIDDEN = ("/", "\\", ":")
+"""작업공간 폴더 이름에 들 수 없는 글자 — 경로 구분자·드라이브 표기(형식의 사실이다)."""
+
+
+@dataclass(frozen=True)
+class FolderWorkspaceSettings:
+    """촬영 영상 폴더 하나 = 작업공간 하나(D100 §2)의 자리와 4K 기준.
+
+    - `workspace_dirname`: 작업공간은 폴더 **안**의 이 이름(`<폴더>/_vlogsrt/`)이다. 스캔은 정확히
+      이 이름을 건너뛰고, 원본 루트 검사는 이 한 겹의 중첩만 허용한다. 점으로 시작하지 않는다 — 숨김
+      경로 검사(`fcp._protected_target_path`)에 걸리지 않게. 외부 근거 없는 선택이다.
+    - `sibling_suffix`: 폴더에 쓸 수 없으면(읽기 전용 SD 카드·권한) 형제 폴더 `<폴더><접미사>`로
+      물러난다. FCP 관리 작업공간(`<라이브러리>-vlogsrt`)과 같은 꼴이다. 외부 근거 없는 선택이다.
+    - `proxy_min_long_edge`: 화면 긴 변이 이 값 이상인 원본만 4K로 본다 — 불러올 때 25% 분석
+      프록시(`analysis-proxy/v1`, D47)를 만들고 원본 전체 미리보기를 작게 만든다. 3840은 4K UHD의
+      긴 변이다(사용자의 4K 정의). 그 아래 원본은 프레임을 원본에서 바로 디코드한다.
+    - `local_media`: 로컬 미디어 작업의 동시 한도(`LocalMediaConcurrency`).
+
+    어느 값도 분석 지문·결제 열쇠(`media_refs.fingerprint`)·승인·견적에 없다. 프록시를 쓰는지는
+    프레임·장면 로컬 캐시 열쇠(`frames_fingerprint`)만 가른다(D47).
+    """
+
+    workspace_dirname: str = "_vlogsrt"
+    sibling_suffix: str = "-vlogsrt"
+    proxy_min_long_edge: int = 3840
+    local_media: LocalMediaConcurrency = LocalMediaConcurrency()
+
+    def __post_init__(self) -> None:
+        problems = [
+            f"{name}는 비지 않고 점으로 시작하지 않으며 경로 구분자가 없어야 한다: {value!r}"
+            for name, value in (
+                ("workspace_dirname", self.workspace_dirname),
+                ("sibling_suffix", self.sibling_suffix),
+            )
+            if not value.strip()
+            or value.startswith(".")
+            or any(mark in value for mark in FOLDER_WORKSPACE_NAME_FORBIDDEN)
+        ]
+        edge = self.proxy_min_long_edge
+        if isinstance(edge, bool) or not isinstance(edge, int) or edge < 1:
+            problems.append(f"proxy_min_long_edge는 1 이상 정수여야 한다: {edge!r}")
+        if problems:
+            raise ValueError("폴더 작업공간 설정이 잘못됐다 — " + " · ".join(problems))
+
+    def is_uhd(self, width: int | None, height: int | None) -> bool:
+        """화면 긴 변이 4K 기준 이상인가 — 크기를 모르면 거짓이다(판정은 호출자가 정한다)."""
+        if width is None or height is None:
+            return False
+        return max(width, height) >= self.proxy_min_long_edge
+
+
+FOLDER_WORKSPACE = FolderWorkspaceSettings()
+"""지금 쓰는 폴더 작업공간 설정 — 스캔·작업공간 자리·4K 프록시·미리보기·동시 한도가 읽는다."""

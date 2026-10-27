@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import math
@@ -46,6 +47,7 @@ from vlogsrt.project.raw.analysis_approval import (
 )
 from vlogsrt.project.raw.analysis_config import (
     ANALYSIS_CONCURRENCY,
+    ANALYSIS_PROXY,
     CONTEXT_REVIEW,
     DEFAULT_PROMPT_REVISION,
     RawAnalysisConcurrency,
@@ -86,6 +88,7 @@ from vlogsrt.project.raw.config import (
     ANALYSIS_PROVIDER_ANTHROPIC,
     ANALYSIS_PROVIDER_GOOGLE,
     DEFAULT_ANALYSIS_MODEL,
+    FOLDER_WORKSPACE,
     GEMINI_MODEL_PREFIX,
     MODE_AUTO,
     MODE_CHOICES,
@@ -367,6 +370,7 @@ __all__ = [
     "TIER_SETTINGS",
     "TIER_TAG_PREFIX",
     "UPKEEP_JOB_KIND",
+    "ANALYSIS_PROXY_JOB_KIND",
     "SYNC_CHECK_JOB_KIND",
     "SELECTION_MODE_FULL",
     "SELECTION_MODE_TRANSCRIBE",
@@ -439,6 +443,13 @@ __all__ = [
     "snapped_frame_index",
     "unmaterialized_red",
 ]
+
+ANALYSIS_PROXY_JOB_KIND = "analysis_proxy"
+"""4K 원본 하나의 25% 분석 프록시를 불러올 때 미리 만드는 작업(D100 §2) — 무료 로컬. 조리법·열쇠는
+분석이 쓰는 그대로(`analysis-proxy/v1`, D47)라 1단계가 이것을 다시 쓴다."""
+
+FOLDER_WRITE_REFUSALS = frozenset({errno.EACCES, errno.EPERM, errno.EROFS})
+"""폴더 안에 작업공간을 만들 수 없다는 뜻의 오류 — 형제 폴더로 물러난다(D100 §2)."""
 
 UPKEEP_JOB_KIND = "workspace_upkeep"
 """앱 열기·화면 갱신의 정리 작업 하나 — 촬영 시각·영상 순서·등급판·검토 순서(D52·D53)."""
@@ -2474,6 +2485,7 @@ class RawWorkspaceService:
         *,
         prepare_preview: bool = True,
         fcp_scan: Any = None,
+        prepare_proxies: bool = False,
     ) -> JobHandle:
         from vlogsrt.project.raw.reference_ingest import register_references
 
@@ -2497,10 +2509,41 @@ class RawWorkspaceService:
                 )
                 bind_library(workspace, fcp_scan, self.selected_asset_ids(root, paths))
             self.ensure_source_order(root)
+            if prepare_proxies:
+                self.start_analysis_proxies(root)
             if prepare_preview:
                 self.wait_child_job(root, self.start_source_preview(root), context)
 
         return self.submit_job(root, "reference_import", fingerprint, body)
+
+    def start_analysis_proxies(
+        self, root: Path, asset_ids: tuple[str, ...] = ()
+    ) -> tuple[JobHandle, ...]:
+        """4K 원본마다 25% 분석 프록시를 미리 만드는 작업 하나씩(D100 §2) — 무료 로컬.
+
+        만들기는 분석이 쓰는 길 그대로다(`media_refs.resolve(…, "frames")`) — 같은 조리법·같은
+        자리라 1단계가 다시 만들지 않고, 결제 열쇠(`media_refs.fingerprint`)는 건드리지 않는다.
+        4K가 아닌 원본·준비되지 않은 원본은 건너뛴다. 동시에 도는 ffmpeg는 로컬 미디어 한도가
+        묶는다.
+        """
+        from vlogsrt.project.raw import media_refs
+
+        workspace = self._workspace(root)
+        wanted = set(asset_ids)
+        handles = []
+        for asset in self.global_order_proposal(root):
+            if wanted and asset.asset_id not in wanted:
+                continue
+            if asset.status != "ready" or not FOLDER_WORKSPACE.is_uhd(asset.width, asset.height):
+                continue
+
+            def body(context: JobContext, asset: SourceAsset = asset) -> None:
+                context.check_cancel()
+                media_refs.resolve(workspace, asset, "frames")
+
+            identity = f"{asset.asset_id}|{asset.content_sha256}|{ANALYSIS_PROXY.tag()}"
+            handles.append(self.submit_job(root, ANALYSIS_PROXY_JOB_KIND, identity, body))
+        return tuple(handles)
 
     def ensure_source_order(self, root: Path) -> bool:
         """전체 순서를 제안(촬영 시각 순)에 맞춘다 — 순서가 다를 때만 새 리비전. 바꿨으면 True.
@@ -3721,6 +3764,73 @@ class RawWorkspaceService:
                 f"관리 작업공간 자리({root})에 이미 다른 내용이 있다 — 비우거나 옮긴 뒤"
                 " 다시 시도하세요"
             ) from error
+
+    def managed_folder_workspace(self, folder: Path) -> tuple[WorkspaceStatus, bool]:
+        """촬영 영상 폴더의 작업공간 — `<폴더>/_vlogsrt/`를 만들거나 이어 연다(D100 §2).
+
+        폴더 안에 쓸 수 없으면(읽기 전용 SD 카드·권한) 형제 폴더 `<폴더>-vlogsrt`로 물러난다. 이미
+        있는 작업공간은 안쪽, 형제 순서로 찾아 그대로 연다(만들지 않는다). 자리에 작업공간 아닌 것이
+        있으면 조용히 덮지 않고 실패한다. (상태, 새로 만들었는가)를 돌려준다.
+        """
+        resolved = folder.expanduser().resolve()
+        if not resolved.is_dir():
+            raise IngestError(f"영상 폴더가 아니다: {folder}")
+        inside = resolved / FOLDER_WORKSPACE.workspace_dirname
+        sibling = resolved.with_name(resolved.name + FOLDER_WORKSPACE.sibling_suffix)
+        for root in (inside, sibling):
+            if (root / PROJECT_TOML_NAME).is_file() or (root / DB_NAME).is_file():
+                return self._open_folder_workspace(root), False
+        try:
+            return self._create_folder_workspace(inside, resolved.name), True
+        except OSError as error:
+            if error.errno not in FOLDER_WRITE_REFUSALS:
+                raise
+            log.warn(f"폴더에 쓸 수 없어 옆 폴더에 작업공간을 둡니다: {sibling} ({error})")
+        return self._create_folder_workspace(sibling, resolved.name), True
+
+    def _open_folder_workspace(self, root: Path) -> WorkspaceStatus:
+        try:
+            return self.open_workspace(root)
+        except WorkspaceNotFoundError as error:
+            raise IngestError(
+                f"작업공간 자리({root})가 이미 있지만 v2 작업공간이 아니다 — {error}"
+            ) from error
+
+    def _create_folder_workspace(self, root: Path, name: str) -> WorkspaceStatus:
+        try:
+            return self.create_workspace(root, name)
+        except WorkspaceAlreadyExistsError as error:
+            raise IngestError(
+                f"작업공간 자리({root})에 이미 다른 내용이 있다 — 비우거나 옮긴 뒤 다시 시도하세요"
+            ) from error
+
+    def start_folder_import(
+        self,
+        folder: Path,
+        inspect: MediaInspect = ffprobe_media_inspector,
+        *,
+        prepare_preview: bool = True,
+    ) -> tuple[WorkspaceStatus, JobHandle]:
+        """폴더 불러오기(D100 §2) — 작업공간을 열고, 스캔하고, 원본을 복사하지 않고 참조로 들인다.
+
+        원본은 읽기만 한다(해시만 잰다 — `reference_ingest.register_references`). 들인 뒤 4K 원본만
+        분석 프록시 작업을 따로 걸고(`start_analysis_proxies`), 원본 전체 미리보기를 기다린다.
+        영상이 하나도 없으면 사유와 함께 실패한다 — 빈 성공으로 넘어가지 않는다.
+        """
+        status, _created = self.managed_folder_workspace(folder)
+        root = Path(status.workspace_root)
+        proposal = self.scan_sources(root, folder, inspect)
+        if not proposal.order:
+            reasons = "; ".join(
+                f"{r.source_relative_path}: {r.reason}" for r in proposal.scan.rejected
+            )
+            raise IngestError(
+                f"불러올 영상이 없다: {folder}" + (f" — {reasons}" if reasons else "")
+            )
+        handle = self.start_reference_import(
+            root, proposal, prepare_preview=prepare_preview, fcp_scan=None, prepare_proxies=True
+        )
+        return status, handle
 
     def scan_fcp_library(
         self,

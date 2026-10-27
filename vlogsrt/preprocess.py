@@ -4200,6 +4200,9 @@ class PreviewEncoding:
     long_edge: int
     preset: str
     crf: int
+    shrink_copyable: bool = False
+    """참이면 그대로 복사할 수 있는 H.264도 긴 변이 `long_edge`보다 크면 다시 인코딩해 줄인다 —
+    4K 원본의 재생용 미리보기(D100 §2). 거짓(기본)이면 예전 그대로 복사한다(바이트 그대로)."""
 
     def tag(self) -> str:
         """기록에 남기는 이름 — 이 미리보기를 무엇으로 만들었는가(캐시 열쇠가 아니다)."""
@@ -4253,11 +4256,21 @@ class VisualPreviewExtraction:
     """다시 인코딩했으면 그 조리법 이름(`PreviewEncoding.tag`) — 복사·잰 기록·옛 조리법은 None."""
 
 
+def _shrinks_copyable(video: RawVideoMedia, encoding: PreviewEncoding | None) -> bool:
+    if encoding is None or not encoding.shrink_copyable:
+        return False
+    return max(video.width, video.height) > encoding.long_edge
+
+
 def _visual_video_args(
     video: RawVideoMedia, encoding: PreviewEncoding | None
 ) -> tuple[list[str], list[str], bool]:
-    """영상 다리의 인자·경고·복사 여부 — 복사 판정은 자막 미리보기와 같다."""
-    if video.codec_name == "h264" and video.pix_fmt in _CAPTION_PREVIEW_VIDEO_COPY_PIXFMTS:
+    """영상 다리의 인자·경고·복사 여부 — 복사 판정은 자막 미리보기와 같다.
+
+    `encoding.shrink_copyable`이면 복사할 수 있어도 긴 변이 한도보다 큰 원본은 줄인다(D100 §2).
+    """
+    copyable = video.codec_name == "h264" and video.pix_fmt in _CAPTION_PREVIEW_VIDEO_COPY_PIXFMTS
+    if copyable and not _shrinks_copyable(video, encoding):
         return ["-c:v", "copy"], [], True
     note = f"영상 {video.codec_name}/{video.pix_fmt}을(를) H264 8bit로 변환했다 (원본은 그대로다)"
     if encoding is None:

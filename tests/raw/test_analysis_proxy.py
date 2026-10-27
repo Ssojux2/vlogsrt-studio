@@ -10,7 +10,7 @@ import json
 import shutil
 import subprocess
 import threading
-from dataclasses import asdict, fields
+from dataclasses import asdict, fields, replace
 from fractions import Fraction
 from pathlib import Path
 
@@ -30,6 +30,7 @@ from vlogsrt.project.raw.analysis_config import (
     validate_analysis_proxy_limits,
 )
 from vlogsrt.project.raw.analysis_store import AnalysisStore
+from vlogsrt.project.raw.config import FOLDER_WORKSPACE
 from vlogsrt.project.raw.jobs import JobCancelledError
 from vlogsrt.project.raw.models import AnalysisRevision, AnalysisSourceResult
 from vlogsrt.project.raw.service import RawWorkspaceService
@@ -44,8 +45,15 @@ pytestmark = needs_ffmpeg
 
 @pytest.fixture(autouse=True)
 def fresh_process(monkeypatch):
-    """프로세스 안의 실패 기억은 테스트마다 비운다 — 테스트 하나가 앱 실행 하나다."""
+    """프로세스 안의 실패 기억은 테스트마다 비운다 — 테스트 하나가 앱 실행 하나다.
+
+    이 파일은 분석 프록시 자체의 시험이다 — 작은 합성 원본도 4K 기준(D100 §2) 안으로 들여 예전처럼
+    프록시를 만들게 한다. 기준 자체는 `tests/raw/test_folder_workspace.py`가 본다.
+    """
     monkeypatch.setattr(media_refs, "_FAILED", {})
+    monkeypatch.setattr(
+        media_refs, "FOLDER_WORKSPACE", replace(FOLDER_WORKSPACE, proxy_min_long_edge=2)
+    )
 
 
 def _make_original(

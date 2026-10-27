@@ -347,7 +347,10 @@ WORKSPACE_LAYOUT: tuple[str, ...] = (
     "subtitles",
     "cache",
     "jobs",
+    "export",
 )
+"""작업공간 폴더 — `export/`는 추천만 이어붙인 초안(D100)이 쓰는 자리다. 이 칸이 생기기 전의
+작업공간을 열 때 만들지 않는다(읽기 전용 사본도 연다) — 쓰는 쪽이 그 자리에서 만든다."""
 
 SERVABLE_MEDIA_PREFIXES: tuple[str, ...] = ("originals/", "previews/", "clips/", "final/")
 """미디어로 등록·제공할 수 있는 디렉터리 — 이 목록이 곧 보호 경계다(§4.4).

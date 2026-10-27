@@ -11,6 +11,7 @@ import contextlib
 import hashlib
 import json
 import math
+import os
 import shutil
 import threading
 import time
@@ -34,6 +35,7 @@ from vlogsrt.project.raw.analysis_config import (
     AnalysisClipRecipe,
     AnalysisProxyRecipe,
 )
+from vlogsrt.project.raw.config import FOLDER_WORKSPACE, FolderWorkspaceSettings
 from vlogsrt.project.raw.models import (
     MediaNotFoundError,
     MediaTargetChangedError,
@@ -325,11 +327,28 @@ def _resolve_media(workspace: Any, asset: Any, purpose: str) -> tuple[Path, bool
     return workspace.source_media_path(asset), False
 
 
+def needs_analysis_proxy(
+    width: int | None, height: int | None, settings: FolderWorkspaceSettings
+) -> bool:
+    """이 원본의 프레임을 25% 분석 프록시에서 디코드하는가 — 순수 판정(D100 §2).
+
+    4K(화면 긴 변 ≥ `proxy_min_long_edge`)만 그렇다 — 그 아래는 원본 디코드가 충분히 싸다.
+    크기를 모르면(옛 기록) 예전처럼 프록시를 쓴다(D47) — 4K를 원본 그대로 디코드하는 쪽이 더 비싸다.
+    """
+    if width is None or height is None:
+        return True
+    return settings.is_uhd(width, height)
+
+
+def _proxy_wanted(asset: Any) -> bool:
+    return needs_analysis_proxy(asset.width, asset.height, FOLDER_WORKSPACE)
+
+
 def resolve(workspace: Any, asset: Any, purpose: str) -> Path:
     path, is_fcp_proxy = _resolve_media(workspace, asset, purpose)
-    if purpose != "frames" or is_fcp_proxy:
+    if purpose != "frames" or is_fcp_proxy or not _proxy_wanted(asset):
         return path
-    # 사용할 수 있는 FCP 프록시가 없다 — 원본을 4K 그대로 프레임마다 디코드하지 않고,
+    # 사용할 수 있는 FCP 프록시가 없는 4K — 원본을 그대로 프레임마다 디코드하지 않고,
     # 한 번 만든 저해상도 분석 프록시를 쓴다. 못 만들면 원본이다(경고는 거기서 남긴다).
     return ensure_analysis_proxy(workspace, asset, path) or path
 
@@ -530,6 +549,24 @@ def validate_analysis_proxy(original: Path, proxy: Path) -> PairValidation:
     )
 
 
+_LOCAL_MEDIA_SLOTS = threading.BoundedSemaphore(FOLDER_WORKSPACE.local_media.limit(os.cpu_count()))
+"""이 프로세스의 로컬 미디어 ffmpeg 자리 — 분석 프록시와 원본 전체 미리보기가 함께 쓴다(D100 §2).
+
+작업 스레드에는 한도가 없다(`jobs.JobManager`) — 폴더를 불러오면 원본마다 프록시·미리보기가 한꺼번에
+뜬다. 자리는 다른 잠금을 쥐지 않는 잎에서만 잡는다(만들기 잠금은 그 앞에 잡는다) — 순환이 없다."""
+
+
+@contextlib.contextmanager
+def local_media_slot() -> Iterator[None]:
+    """로컬 미디어 ffmpeg 한 자리를 쥔다 — 기다리는 동안에도 취소를 듣는다."""
+    while not _LOCAL_MEDIA_SLOTS.acquire(timeout=_LOCK_POLL_SECONDS):
+        check_cancel()
+    try:
+        yield
+    finally:
+        _LOCAL_MEDIA_SLOTS.release()
+
+
 def _build_lock(directory: Path) -> threading.Lock:
     with _BUILD_LOCKS_GUARD:
         return _BUILD_LOCKS.setdefault(str(directory), threading.Lock())
@@ -578,26 +615,34 @@ def _build_and_verify(
     """
     target = directory / _PROXY_FILE
     started = time.monotonic()
-    try:
-        preprocess.build_analysis_proxy(
-            original,
-            target,
-            scale=recipe.scale,
-            video_codec=recipe.video_codec,
-            preset=recipe.preset,
-            crf=recipe.crf,
-            gop=recipe.gop,
-            pix_fmt=recipe.pix_fmt,
-            timeout_seconds=timeout_seconds,
-        )
-    except (OSError, RuntimeError, ValueError) as error:
-        return False, f"{type(error).__name__}: {error}"
-    verdict = validate_analysis_proxy(original, target)
+    # 만들기와 검증(4K 원본 다섯 곳 디코드)이 한 자리를 쥔다 — 로컬 미디어 동시 한도(D100 §2).
+    with local_media_slot():
+        try:
+            _build_proxy(original, target, recipe, timeout_seconds)
+        except (OSError, RuntimeError, ValueError) as error:
+            return False, f"{type(error).__name__}: {error}"
+        verdict = validate_analysis_proxy(original, target)
     if verdict.status != "verified":
         target.unlink(missing_ok=True)
         return False, verdict.reason
     log.info(f"분석 프록시 준비: {original.name} ({time.monotonic() - started:.1f}초)")
     return True, verdict.reason
+
+
+def _build_proxy(
+    original: Path, target: Path, recipe: AnalysisProxyRecipe, timeout_seconds: float
+) -> None:
+    preprocess.build_analysis_proxy(
+        original,
+        target,
+        scale=recipe.scale,
+        video_codec=recipe.video_codec,
+        preset=recipe.preset,
+        crf=recipe.crf,
+        gop=recipe.gop,
+        pix_fmt=recipe.pix_fmt,
+        timeout_seconds=timeout_seconds,
+    )
 
 
 def _clear_leftover(directory: Path, recipe: AnalysisProxyRecipe) -> None:
@@ -691,7 +736,7 @@ def _frames_material(workspace: Any, asset_id: str) -> str:
     base = fingerprint(workspace, asset_id)
     asset = workspace.source_asset(asset_id)
     original = _frames_original(workspace, asset)
-    if original is None:
+    if original is None or not _proxy_wanted(asset):
         return base
     directory = _proxy_directory(workspace, _source_sha(workspace, asset, original), ANALYSIS_PROXY)
     if str(directory) in _FAILED:
@@ -709,11 +754,31 @@ def frames_decode_source(
     프록시가 있어도 같은 출처를 다시 읽는다. 장면 컷이 출처에 따라 달라지면 2단계의 실측 지문이
     1단계와 어긋나 유료 1단계를 다시 돌려야 하기 때문이다. `mapped`는 `frames_fingerprint`와 같다.
     """
-    base = fingerprint(workspace, asset.asset_id) + _conform_suffix(mapped)
+    media = fingerprint(workspace, asset.asset_id)
+    base = media + _conform_suffix(mapped)
     if recorded is not None and recorded == base:
         return _resolve_media(workspace, asset, "frames")[0], base
+    if recorded is not None and recorded == f"{media}+{ANALYSIS_PROXY.tag()}" + _conform_suffix(
+        mapped
+    ):
+        held = _recorded_proxy(workspace, asset)
+        if held is not None:
+            return held, recorded
     path = resolve(workspace, asset, "frames")
     return path, frames_fingerprint(workspace, asset.asset_id, mapped=mapped)
+
+
+def _recorded_proxy(workspace: Any, asset: Any) -> Path | None:
+    """앞선 단계가 분석 프록시에서 디코드했다 — 4K 기준(D100 §2) 밖이어도 같은 프록시를 다시 읽는다.
+
+    4K만 프록시를 쓰게 되기 전에 1단계를 마친 비4K 원본이 그렇다. 2단계 장면 컷이 원본 디코드로
+    바뀌면 실측 지문이 1단계와 어긋나 유료 1단계를 다시 돌려야 한다. 지금 FCP 프록시가 붙었거나
+    만들기에 실패하면 None — 예전 길(`resolve`)로 간다.
+    """
+    path, is_fcp_proxy = _resolve_media(workspace, asset, "frames")
+    if is_fcp_proxy:
+        return None
+    return ensure_analysis_proxy(workspace, asset, path)
 
 
 def relink_original(workspace: Any, asset_id: str, original: Path) -> dict:

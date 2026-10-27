@@ -565,6 +565,7 @@ CLOSE_CANCELS_JOB_KINDS = frozenset(
         "selection_quote",
         "source_preview",
         raw_service.VISUAL_PREPARE_JOB_KIND,
+        raw_service.ANALYSIS_PROXY_JOB_KIND,
     }
 )
 """「라이브러리 닫기」가 취소를 요청하고 닫는 작업(D64 F) — 돈이 들지 않는 로컬 일이고, 다시 열면
@@ -597,6 +598,7 @@ ACTIVITY_JOB_LABELS = {
     "selected_video_import": "영상 가져오기",
     "source_preview": "원본 미리보기",
     raw_service.VISUAL_PREPARE_JOB_KIND: "미리보기 준비",
+    raw_service.ANALYSIS_PROXY_JOB_KIND: "4K 분석 프록시",
     raw_service.SEGMENT_JOB_KIND: "컷 준비",
     raw_service.ANALYSIS_JOB_KIND: "영상 분석 1단계(전사·장면)",
     raw_service.ANALYSIS_SEMANTIC_JOB_KIND: "영상 분석 2단계(의미 분석)",

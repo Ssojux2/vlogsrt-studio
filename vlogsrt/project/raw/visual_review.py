@@ -56,6 +56,7 @@ from vlogsrt import log, preprocess
 from vlogsrt.oscompat import process_alive, publish_exclusive
 from vlogsrt.project.raw import read_scope, source_verify
 from vlogsrt.project.raw.analysis_config import REVIEW_MEDIA
+from vlogsrt.project.raw.config import FOLDER_WORKSPACE
 from vlogsrt.project.raw.jobs import JobCancelledError, JobContext
 from vlogsrt.project.raw.media_refs import ORIGINAL_ONLY_FINGERPRINT
 from vlogsrt.project.raw.models import (
@@ -2022,15 +2023,17 @@ def _ensure_full_source_preview(
         return
     _write_record(record_path, _source_record_payload(selection, key, "preparing", None, None))
     try:
-        extraction = preprocess.extract_visual_review_preview(
-            selection.path,
-            target,
-            audio_stream_index=selection.audio_stream_index,
-            encoding=_preview_encoding(),
-            # 한도는 원본 길이를 따라 자란다 — 0018(1359초)이 고정 1800초에 걸렸다(D62).
-            timeout_seconds=REVIEW_MEDIA.preview_timeout(float(probe.duration)),
-            priority=REVIEW_MEDIA.process_niceness,
-        )
+        # 로컬 미디어 동시 한도(D100 §2) — 분석 프록시와 같은 자리를 다툰다.
+        with media_refs.local_media_slot():
+            extraction = preprocess.extract_visual_review_preview(
+                selection.path,
+                target,
+                audio_stream_index=selection.audio_stream_index,
+                encoding=_preview_encoding(probe.video),
+                # 한도는 원본 길이를 따라 자란다 — 0018(1359초)이 고정 1800초에 걸렸다(D62).
+                timeout_seconds=REVIEW_MEDIA.preview_timeout(float(probe.duration)),
+                priority=REVIEW_MEDIA.process_niceness,
+            )
         built = True
     except RuntimeError as error:
         if "게시 경로가 이미 있다" not in str(error):
@@ -2058,12 +2061,18 @@ def _ensure_full_source_preview(
     _ensure_registered(workspace, target, relative, rebuilt=built)
 
 
-def _preview_encoding() -> preprocess.PreviewEncoding:
-    """새로 만드는 미리보기의 조리법 — 설정에서 온다. 캐시 열쇠에는 들어가지 않는다(D62)."""
+def _preview_encoding(video: preprocess.RawVideoMedia) -> preprocess.PreviewEncoding:
+    """새로 만드는 미리보기의 조리법 — 설정에서 온다. 캐시 열쇠에는 들어가지 않는다(D62).
+
+    4K 원본(D100 §2)은 긴 변 `preview_long_edge_4k`로, 브라우저가 그대로 재생하는 H.264여도 줄인다.
+    열쇠에 긴 변이 없으므로 이미 만든 4K 미리보기(1920 또는 복사본)는 그대로 다시 쓴다.
+    """
+    uhd = FOLDER_WORKSPACE.is_uhd(video.width, video.height)
     return preprocess.PreviewEncoding(
-        long_edge=REVIEW_MEDIA.preview_long_edge,
+        long_edge=REVIEW_MEDIA.preview_long_edge_4k if uhd else REVIEW_MEDIA.preview_long_edge,
         preset=REVIEW_MEDIA.preview_x264_preset,
         crf=REVIEW_MEDIA.preview_x264_crf,
+        shrink_copyable=uhd,
     )
 
 

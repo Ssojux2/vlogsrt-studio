@@ -28,6 +28,7 @@ from pathlib import Path
 
 from vlogsrt import preprocess
 from vlogsrt.project.raw import source_order
+from vlogsrt.project.raw.config import FOLDER_WORKSPACE
 from vlogsrt.project.raw.jobs import JobCancelledError, JobContext
 from vlogsrt.project.raw.models import (
     CAPTURE_STATUS_INVALID,
@@ -332,6 +333,8 @@ def _safe_source_root(source_root: Path, workspace_root: Path) -> Path:
     if not resolved.is_dir():
         raise IngestError(f"원본 경로가 폴더가 아니다: {source_root}")
     workspace = workspace_root.expanduser().resolve()
+    if _is_folder_workspace(resolved, workspace):
+        return resolved  # 폴더 작업공간(D100 §2) — 스캔이 그 이름을 건너뛰므로 다시 읽지 않는다
     if resolved == workspace:
         raise SourceNestingError(
             "작업공간 그 자체를 가져올 수 없다 — 카드나 다른 원본 폴더를 고르세요"
@@ -346,6 +349,15 @@ def _safe_source_root(source_root: Path, workspace_root: Path) -> Path:
             "복사 결과가 다시 복사 대상이 된다"
         )
     return resolved
+
+
+def _is_folder_workspace(source_root: Path, workspace: Path) -> bool:
+    """작업공간이 정확히 `원본 루트/_vlogsrt`인가 — 허용하는 중첩은 이 한 겹뿐이다(D100 §2).
+
+    더 깊이 묻힌 작업공간(`원본/a/_vlogsrt`)이나 다른 이름의 작업공간은 그대로 거부된다 — 그
+    자리는 사람이 고른 폴더 작업공간이 아니다. 비교는 resolve() 뒤의 경로다.
+    """
+    return workspace.parent == source_root and workspace.name == FOLDER_WORKSPACE.workspace_dirname
 
 
 def _walk_sources(root: Path, inspect: MediaInspect) -> SourceScan:
@@ -409,8 +421,17 @@ def _consider_entry(
 
 
 def _pruned_name(name: str) -> bool:
-    """보호 철자 판정 — 파일시스템을 전혀 묻지 않는 순수 어휘 검사."""
-    return name.startswith(".") or name.casefold() in PROTECTED_SOURCE_NAMES
+    """보호 철자 판정 — 파일시스템을 전혀 묻지 않는 순수 어휘 검사.
+
+    폴더 작업공간 이름(`_vlogsrt`, D100 §2)도 건너뛴다 — 그 안의 분석 프록시·미리보기가 새 원본으로
+    잡히지 않게. 대소문자를 가리지 않는 파일 시스템(macOS·Windows)에서 같은 폴더라 접어 비교한다.
+    """
+    folded = name.casefold()
+    return (
+        name.startswith(".")
+        or folded in PROTECTED_SOURCE_NAMES
+        or folded == FOLDER_WORKSPACE.workspace_dirname.casefold()
+    )
 
 
 def space_estimate(workspace_root: Path, copy_bytes: int) -> SpaceEstimate:

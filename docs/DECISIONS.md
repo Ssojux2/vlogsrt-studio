@@ -9111,6 +9111,57 @@ macOS 동작은 바이트 그대로 둔다.
   (`tests/test_filelock.py` · `tests/test_oscompat.py` · `tests/test_platform_preprocess.py` · `tests/raw/test_fcp_windows_paths.py`), 타입은
   `make types-win`이 본다. 첫 Windows 실행 확인 목록은 README(WP2)에 둔다. 유료 호출 0회.
 
+### §2 폴더 작업공간 · 불러올 때 4K 프록시 (W-41)
+
+**왜**: 폴더 작업대의 입력은 Final Cut 라이브러리가 아니라 촬영 영상 폴더 하나다. 작업공간을 어디에 둘지, 원본을 복사할지, 4K를
+언제 줄일지를 정해야 했다. 첫 지시서의 `<폴더>/_vlogsrt_proxy/`는 다음 스캔에서 새 클립으로 잡혔고, 점 폴더로 하면 숨김 경로
+검사(`fcp._protected_target_path`)에 걸렸다.
+
+- **자리.** 작업공간은 폴더 **안** `<폴더>/_vlogsrt/`다(`FolderWorkspaceSettings.workspace_dirname` — 점이 없어 숨김 검사에 걸리지 않는다).
+  `service.managed_folder_workspace(folder)`가 안쪽 → 형제(`<폴더>-vlogsrt`) 순서로 이미 있는 작업공간을 찾아 열고, 없으면 안쪽에 만든다.
+  만들기가 `EACCES`·`EPERM`·`EROFS`로 실패하면(읽기 전용 SD 카드·권한) 경고를 남기고 형제 폴더에 만든다 — 그 밖의 실패(디스크 가득 등)는
+  감추지 않는다. 자리에 작업공간 아닌 것이 있으면 덮지 않고 실패한다(`managed_fcp_workspace`와 같은 규칙).
+- **스캔.** `ingest._pruned_name`이 정확히 그 이름(대소문자 접기)을 점 이름·보호 철자와 함께 조회 전에 건너뛴다 — 작업공간 안의 분석
+  프록시·미리보기 MP4가 원본으로 잡히지 않는다. `_safe_source_root`는 **작업공간 == 원본 루트/_vlogsrt** 한 경우만 중첩을 허용한다. 더 깊은
+  자리(`원본/a/_vlogsrt`)·다른 이름·두 겹 위의 루트·작업공간 그 자체·작업공간 안의 루트는 예전처럼 거부한다.
+- **불러오기 — 원본 복사 없음.** `service.start_folder_import(folder)`는 작업공간을 열고 스캔한 뒤 `start_reference_import(…, fcp_scan=None)`를
+  그대로 쓴다 — `reference_ingest.register_references`가 원본을 제자리에서 해시만 재고 `source_references`에 경로를 남긴다. `originals/`에는
+  아무것도 생기지 않고 원본의 바이트·mtime은 그대로다(시험). 순서는 촬영 시각이다(D53 — `ensure_source_order`). 영상이 하나도 없으면
+  사유와 함께 실패한다(빈 성공 없음). FCP 미디어 연결(`media_refs.connect`)은 부르지 않는다 — 그 기록이 생기면 결제 열쇠가 바뀐다.
+- **4K 프록시는 불러올 때.** 들인 뒤 4K 원본(화면 긴 변 ≥ `proxy_min_long_edge` = 3840 — 4K UHD의 긴 변, 사용자의 4K 정의)마다 작업
+  `analysis_proxy`(`start_analysis_proxies`)를 따로 건다. 본문은 분석이 쓰는 길 그대로 `media_refs.resolve(ws, asset, "frames")`다 — 조리법
+  `analysis-proxy/v1`의 바이트·태그·자리(`cache/analysis-proxy/<원본 해시+조리법>/`)·검증(D47)이 그대로라 1단계가 그것을 다시 쓴다. 지연 길도
+  같은 순수 판정 `media_refs.needs_analysis_proxy(width, height, settings)`로 묶었다 — **4K가 아닌 원본은 프레임을 원본에서 디코드한다**(그
+  크기는 원본 디코드가 충분히 싸다). 크기를 모르는 옛 기록은 예전처럼 프록시다.
+- **결제 열쇠는 그대로다.** `media_refs.fingerprint`는 폴더 원본에서 `original-only/v1`이고 프록시 전후로 같다(시험). 바뀌는 것은 로컬 캐시
+  열쇠 `frames_fingerprint`뿐이다(D47의 분리 그대로) — 4K는 `original-only/v1+analysis-proxy/v1/…`, 비4K는 이제 `original-only/v1`이다.
+  - **이미 끝낸(돈을 낸) 분석**: 재사용은 문서의 `media_fingerprint`와 자막 지문으로 고르므로(`_reusable_cache`) 그대로 다시 쓰인다.
+  - **1단계만 끝낸 비4K 원본**(이 변경 전에 프록시에서 장면을 쟀다): 2단계 장면 재측정이 1단계 기록의 `frame_source`를 따르는데, 기록이
+    프록시면 `frames_decode_source`가 4K 기준과 상관없이 **같은 프록시**를 다시 읽는다(`_recorded_proxy`). 원본 디코드로 바뀌면 실측 지문이
+    어긋나 유료 1단계를 다시 돌려야 하기 때문이다(시험 `test_a_stage_one_recorded_proxy_source_is_read_again_for_non_4k`). 프록시를 만들지
+    못하면 예전처럼 원본이다(D47의 폴백과 같은 위험).
+  - **비4K 원본의 1단계를 새로 돌리면**(새 승인) 프레임이 원본 디코드라 JPEG 바이트가 달라지고, 요청 신원이 바이트를 해시하므로 저장된
+    창 응답과 겹치지 않는다. 새 1단계는 언제나 사람의 새 견적·승인 뒤라 저절로 청구되는 일은 없다(D44).
+  - 로컬 캐시: 비4K 원본의 프록시 키 프레임·장면 캐시는 더 읽히지 않는다(디스크에만 남는다). 원본 키 캐시는 예전 그대로 적중한다.
+- **4K 미리보기 960.** `ReviewMediaSettings.preview_long_edge_4k = 960`(외부 근거 없는 조정 대상 — 분석 프록시와 같은 크기). 4K 원본의 원본
+  전체 미리보기는 긴 변 960·소리 있음이다. 브라우저가 그대로 재생하는 4K H.264(yuv420p)도 복사하지 않고 줄인다 —
+  `PreviewEncoding.shrink_copyable`(기본 거짓 — 예전 호출은 바이트 그대로). 미리보기 열쇠·조리법 판(`visual-review-preview/v1`)에는 긴 변이
+  없다(D62) — **이미 만든 4K 미리보기(1920 재인코딩 또는 4K 복사본)는 그대로 다시 쓴다.** 960으로 보고 싶으면 `previews/visual/`의 그
+  파일을 지우면 다음 준비가 다시 만든다(재생성이 원칙, §9.2).
+- **동시 한도.** 작업 스레드에는 한도가 없다(`jobs.JobManager`) — 폴더를 불러오면 원본마다 프록시·미리보기가 한꺼번에 뜬다. 프로세스 하나의
+  `BoundedSemaphore`(`media_refs.local_media_slot`, 한도 `LocalMediaConcurrency.limit(os.cpu_count())` = `max(1, min(3, CPU // 2))`, 외부 근거
+  없는 조정 대상)를 분석 프록시의 만들기 + 검증과 원본 전체 미리보기 추출이 함께 쓴다. 자리는 다른 잠금을 쥐지 않는 잎에서만 잡고(만들기
+  잠금은 그 앞에 잡는다) 기다리는 동안 취소를 듣는다. 1단계가 지연 길로 프록시를 만들 때도 같은 자리를 쓴다 — 동시 분석 한도(D49)와는 별개다.
+- **작업공간 칸.** `WORKSPACE_LAYOUT`에 `export`(초안 내보내기 자리, §5)를 더했다. 새 작업공간만 그 폴더를 만든다 — 옛 작업공간을 열 때는
+  만들지 않는다(읽기 전용 사본도 열 수 있어야 한다). 쓰는 쪽이 그 자리에서 만든다. `/media` 제공 목록(`SERVABLE_MEDIA_PREFIXES`)은 그대로다.
+- **화면.** `analysis_proxy`는 「라이브러리 닫기」가 취소를 요청하는 무료 로컬 작업이고(`CLOSE_CANCELS_JOB_KINDS`), 「기록」 판 이름은
+  「4K 분석 프록시」다. 폴더 불러오기 단추는 WP7이다.
+- **시험.** `tests/raw/test_folder_workspace.py` — lavfi 4K·1080p 2초(촬영 시각이 이름 순과 거꾸로) + 점 폴더. 스캔 가지치기 · 촬영 시각 순 ·
+  복사 없음(sha·mtime) · 프록시는 4K만(960×540 · 무음 · 프레임 수 같음)이고 두 번째 요청은 다시 만들지 않음 · 결제 열쇠 `original-only/v1` ·
+  4K 미리보기 960(소리 1) · 읽기 전용 폴더 → 형제 · 다른 실패는 형제로 가지 않음 · 다른 중첩 거부 · 기다리는 자리의 취소. 분석 프록시 자체의
+  시험(`test_analysis_proxy.py`)은 작은 합성 원본을 쓰므로 그 파일만 기준을 2로 내려 예전처럼 프록시를 만든다(시험 준비 — 기대값은 그대로).
+  유료 호출 0회. Windows는 실행하지 않았다(§1).
+
 ### §5a 렌더 계획 (W-44a)
 
 추천만 이어붙인 초안의 무엇을 남기고 무엇을 빼는지는 순수 모듈 `vlogsrt/project/raw/render_plan.py` 하나가 정한다. 작업대 레일과 ffmpeg 렌더러가 이 한 계획을 읽는다 — 화면에 보인 것이 곧 출력이다. 파일·프로세스·네트워크·서비스·작업공간·작업 실행기·hashlib을 모른다(`check_render_plan_stays_pure`).
