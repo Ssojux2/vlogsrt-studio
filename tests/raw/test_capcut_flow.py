@@ -18,8 +18,18 @@ from vlogsrt.project.raw.service import RawWorkspaceError, RawWorkspaceService
 from vlogsrt.project.timebase import parse_fcpx_time
 
 
+@pytest.fixture
+def d80_export(monkeypatch: pytest.MonkeyPatch) -> None:
+    """보통·판정 보류도 켜던 D80 보내기 설정 — 이 시험은 제외 규칙(확정·미검토)을 본다. 추천만 켜는
+    지금 보내기(D93)는 `tests/raw/test_finalcut_green_only.py`가 본다."""
+    from vlogsrt.project.raw import finalcut_export
+    from vlogsrt.project.raw.config import FinalCutTimelineSettings
+
+    monkeypatch.setattr(finalcut_export, "FINALCUT_TIMELINE", FinalCutTimelineSettings())
+
+
 @pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg required")
-def test_synthetic_cleanup_restore_restart_and_final_cut(tmp_path: Path):
+def test_synthetic_cleanup_restore_restart_and_final_cut(tmp_path: Path, d80_export: None):
     source = tmp_path / "synthetic.mov"
     result = subprocess.run(
         [

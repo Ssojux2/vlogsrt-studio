@@ -350,6 +350,10 @@ class FinalCutTimelineSettings:
 
     orientation_tie: str = ORIENTATION_LANDSCAPE
     frame_rate_tie: str = FRAME_RATE_HIGHER
+    recommended_only: bool = False
+    """켜서 보내는 클립(D93) — 참이면 등급이 추천인 조각과 사람이 「사용」으로 정한 조각만 켜고,
+    보통·판정 보류·미분석은 끈 채 보낸다(지우지 않는다 — Final Cut에서 V로 되살아난다). 거짓(빌더의
+    기본)이면 D80·D82 그대로 보통·보류·미분석도 켠다. 보내기가 쓰는 값은 `FINALCUT_TIMELINE`이다."""
 
     def __post_init__(self) -> None:
         if self.orientation_tie not in ORIENTATIONS:
@@ -360,8 +364,9 @@ class FinalCutTimelineSettings:
             raise ValueError(f"frame_rate_tie는 {sides}여야 한다: {self.frame_rate_tie!r}")
 
 
-FINALCUT_TIMELINE = FinalCutTimelineSettings()
-"""지금 쓰는 타임라인 문서 설정 — 내보내기 계층(`finalcut_export._document`)이 빌더에 넘긴다."""
+FINALCUT_TIMELINE = FinalCutTimelineSettings(recommended_only=True)
+"""지금 쓰는 타임라인 문서 설정 — 내보내기 계층(`finalcut_export._document`)이 빌더에 넘긴다.
+추천만 켠다(D93, 2026-10-27 사용자 지시 「노란색도 비활성하고 초록색만 활성해서 나가는 형식」)."""
 
 
 @dataclass(frozen=True)
@@ -986,6 +991,33 @@ class WordCueSettings:
 
 WORD_CUE_SETTINGS = WordCueSettings()
 """지금 쓰는 단어 묶기 — `word_cues.group`의 기본값이다."""
+
+
+@dataclass(frozen=True)
+class EngineCompareSettings:
+    """시간 엔진 비교 보고서(W-31f, D92)의 「더 낫다」 기준 — 새 엔진이 넘어야 할 선.
+
+    전부 외부 근거 없는 조정 대상이다(W-31f 계획에서 사람에게 제안한 값 그대로). 시작 적중은 이전
+    엔진 이상, 끝 적중은 `end_hit_slack`만큼 낮아도 되고, 시작 MAE는 `start_mae_slack`초까지 늘어도
+    되며, 환각류 「확인 필요」 줄은 이전 엔진의 `hallucination_share` 이하, 말소리 재현율(Rτ)은
+    `recall_slack` 만큼 낮아도 된다. 보고서가 판정을 적을 뿐 기본 엔진을 바꾸지 않는다 — 바꾸는 것은
+    사람이다. 어느 지문·캐시 열쇠·승인·견적에도 없다."""
+
+    end_hit_slack: Fraction = Fraction(5, 100)
+    start_mae_slack: Fraction = Fraction(5, 100)
+    hallucination_share: Fraction = Fraction(1, 2)
+    recall_slack: Fraction = Fraction(2, 100)
+
+    def __post_init__(self) -> None:
+        for name in ("end_hit_slack", "start_mae_slack", "recall_slack"):
+            if getattr(self, name) < 0:
+                raise ValueError(f"{name}는 0 이상이어야 한다: {getattr(self, name)}")
+        if not 0 <= self.hallucination_share <= 1:
+            raise ValueError(f"hallucination_share는 0–1이어야 한다: {self.hallucination_share}")
+
+
+ENGINE_COMPARE_SETTINGS = EngineCompareSettings()
+"""지금 쓰는 비교 기준 — `scripts/engine_compare_report.py`가 읽는다."""
 
 
 def word_cue_problems(settings: WordCueSettings) -> list[str]:

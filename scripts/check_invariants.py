@@ -1757,6 +1757,26 @@ def check_timing_truth_stays_apart() -> list[str]:
     return failures
 
 
+# 시간 엔진 비교(W-31f, D92) — 시각 정답과 엔진 판정을 함께 읽는 계층이라 보고서만 읽는다.
+# 패키지·화면 어디선가 그것을 알면 정답(D67)이나 「더 낫다」 판정이 자막·등급·승인·내보내기·
+# 기본 엔진으로 번진다.
+ENGINE_COMPARE_MODULE = "vlogsrt/project/raw/engine_compare.py"
+
+
+def check_engine_compare_report_only() -> list[str]:
+    """W-31f — 패키지·화면은 엔진 비교를 import하지 않는다(보고서 스크립트만 읽는다)."""
+    failures: list[str] = []
+    for source in [*_sources(), *sorted(UI_DIR.rglob("*.py"))]:
+        rel = _rel(source)
+        if rel == ENGINE_COMPARE_MODULE:
+            continue
+        if "engine_compare" in _imported_names(source.read_text(encoding="utf-8")):
+            failures.append(
+                f"{rel}: engine_compare를 import한다 — 엔진 비교는 보고서만 읽는다 (W-31f, D92)"
+            )
+    return failures
+
+
 # 시각 맞춤 제안(D59 19g) — 큐 경계를 말소리 경계에 맞춘 **제안**은 값만 받아 값만 돌려주는 순수
 # 계산이다. 들여올 수 있는 것은 표준 라이브러리의 정해진 몇과 확인 계산(`sync_check`)·설정뿐이고,
 # 파일·프로세스를 열지 않는다. 그 모듈을 읽는 쪽은 목록에 적힌 자리뿐이다 — 19h부터 서비스 하나이고,
@@ -2166,7 +2186,12 @@ SUSPECTS_MUST_NOT_IMPORT = (
     "workspace", "source_transcript", "sync_check", "sync_report", "tiering", "auto_cleanup",
     "selection_analysis", "review_workspace",
 )  # fmt: skip
-SUSPECTS_IMPORTERS = ("vlogsrt/project/raw/service.py",)
+SUSPECTS_IMPORTERS = (
+    "vlogsrt/project/raw/service.py",
+    # 엔진 비교(W-31f, D92)는 환각류 표시 수를 셀 뿐이고, 보고서만 그것을 읽는다
+    # (`check_engine_compare_report_only`) — 표시가 표시 밖으로 새지 않는다.
+    "vlogsrt/project/raw/engine_compare.py",
+)
 SUSPECT_NAMES = re.compile(r"SubtitleSuspectSettings|SUBTITLE_SUSPECT_SETTINGS|subtitle_suspect")
 # 이 자리들은 분석·전사·자막·글자의 지문·캐시 열쇠·승인을 만든다 — 표시 기준을 알면 기준을
 # 바꿀 때마다 이미 산 결과가 낡는다(D47). 정의 자리(`raw/config.py`)는 그 파일의 지문 클래스만
@@ -2837,6 +2862,7 @@ CHECKS = (
     ("빈칸 재전사의 whisper에는 힌트가 없다", check_refill_whisper_has_no_hints),
     ("빈칸 재전사는 서비스만 부른다", check_speech_refill_only_from_service),
     ("시각 정답은 자막·등급·내보내기와 따로", check_timing_truth_stays_apart),
+    ("시간 엔진 비교는 보고서만 읽는다", check_engine_compare_report_only),
     ("시각 맞춤 제안은 순수하다", check_sync_snap_stays_pure),
     ("시각 맞춤 제안은 정해진 자리만 부른다", check_sync_snap_only_from_listed),
     (

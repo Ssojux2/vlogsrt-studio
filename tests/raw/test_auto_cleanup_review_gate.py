@@ -194,6 +194,16 @@ def _synthetic_project(tmp_path: Path) -> tuple[RawWorkspaceService, Path]:
     return service, root
 
 
+@pytest.fixture
+def d80_export(monkeypatch: pytest.MonkeyPatch) -> None:
+    """보통·판정 보류도 켜던 D80 보내기 설정 — 이 시험은 제외 규칙(확정·미검토)을 본다. 추천만 켜는
+    지금 보내기(D93)는 `tests/raw/test_finalcut_green_only.py`가 본다."""
+    from vlogsrt.project.raw import finalcut_export
+    from vlogsrt.project.raw.config import FinalCutTimelineSettings
+
+    monkeypatch.setattr(finalcut_export, "FINALCUT_TIMELINE", FinalCutTimelineSettings())
+
+
 def _disabled(xml_path: Path) -> int:
     clips = ET.parse(xml_path).findall(".//spine/asset-clip")
     return sum(clip.get("enabled") == "0" for clip in clips)
@@ -204,7 +214,9 @@ def _package(service: RawWorkspaceService, root: Path) -> str:
 
 
 @needs_ffmpeg
-def test_materialization_marks_exclusions_and_only_the_cutting_export_is_gated(tmp_path: Path):
+def test_materialization_marks_exclusions_and_only_the_cutting_export_is_gated(
+    tmp_path: Path, d80_export: None
+):
     service, root = _synthetic_project(tmp_path)
     facade = ReviewWorkspaceFacade(root)
     head = facade.load_head().revision
@@ -288,7 +300,9 @@ def test_plan_adoption_replay_keeps_pending_exclusions_pending(tmp_path: Path):
 
 
 @needs_ffmpeg
-def test_ui_shows_pending_count_sends_without_a_gate_and_confirms_in_one_click(tmp_path: Path):
+def test_ui_shows_pending_count_sends_without_a_gate_and_confirms_in_one_click(
+    tmp_path: Path, d80_export: None
+):
     pytest.importorskip("gradio", reason="웹 UI extra(gradio)가 없다", exc_type=ImportError)
 
     from ui.workspace_service import FINALCUT_SEND_JOB_KIND, RawWorkspaceUi

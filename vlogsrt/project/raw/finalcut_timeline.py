@@ -9,7 +9,10 @@
 - **아무것도 지우지 않는다.** 원본마다 클립이 `[0, frame_count)`를 빈틈없이 덮는다. 끄는 것은
   사람이 확정한 제외(`enabled="0"` + `제외 확정`)와 미검토 빨강(`enabled="0"` + `제외 제안` +
   `제외 제안(미검토)`, W-29d D80)이고, 꺼진 클립은 Final Cut에서 V로 되살아난다 — 클립·캡션·
-  키워드가 그대로 남아 사람이 찾을 수 있다(D35, 규칙 9). 보통·판정 보류는 켠다.
+  키워드가 그대로 남아 사람이 찾을 수 있다(D35, 규칙 9). **추천만 켠다**(D93, 설정
+  `recommended_only`, 보내기 설정 `FINALCUT_TIMELINE`이 켠다): 보통·판정 보류·미분석 클립도 끈 채
+  보낸다 — 사람이 「사용」으로 정한 조각은 등급과 무관하게 켠다. 빌더의 기본 설정
+  (`FinalCutTimelineSettings()`)은 D80 그대로 보통·판정 보류를 켠다.
 - **시각은 실측에서만 온다.** 클립 시작은 원본 타임코드 프레임 × 프레임 길이다(Final Cut이 같은
   값을 쓴다: 0008 `12:56:29;10` → `1397678282/30000s`). 캡션·키워드 범위를 프레임에 맞추는
   것(½프레임 이내, 최소 1프레임)은 FCPXML이 프레임 격자만 받기 때문이지 시각 유도가 아니다.
@@ -52,7 +55,6 @@ from vlogsrt.project.fcp_tables import (
     FRAME_RATE_TAGS,
 )
 from vlogsrt.project.raw.config import (
-    FINALCUT_TIMELINE,
     FRAME_RATE_HIGHER,
     ORIENTATION_LANDSCAPE,
     ORIENTATION_PORTRAIT,
@@ -73,6 +75,10 @@ _Key = TypeVar("_Key")
 
 FCPXML_VERSION = "1.14"
 """설치된 Final Cut Pro 12.4의 DTD 버전 — 이 문서는 그 DTD로 검증된다."""
+
+BUILDER_DEFAULTS = FinalCutTimelineSettings()
+"""빌더 함수의 기본 설정 — D80 규칙 그대로(보통·보류도 켠다). 보내기는 `FINALCUT_TIMELINE`(추천만
+켠다, D93)을 넘긴다 — 빌더 시험은 규칙마다 설정을 골라 본다."""
 
 KEYWORD_RECOMMENDED = TIER_LABELS[TIER_GREEN]
 KEYWORD_NORMAL = TIER_LABELS[TIER_YELLOW]
@@ -399,13 +405,14 @@ def _base_keyword(source: SourceInput, start_frame: int, end_frame: int) -> str:
     return segment_keyword(source.report, start_frame * fd, end_frame * fd)
 
 
-def _clip(source: SourceInput, segment: SegmentState) -> ClipPlan:
+def _clip(source: SourceInput, segment: SegmentState, recommended_only: bool) -> ClipPlan:
     """조각 하나 → 클립. 사람이 확정한 제외와 사람이 보지 않은 빨강(`제외 제안`)을 끈다(D80·D82).
 
     사람이 보지 않은 빨강은 미검토 자동 제외이거나, 제안된 적 없이 사용으로 남은 결정 없는 조각이다
     (분석 전에 세운 머리 · 컷을 다 덮지 못한 빨강, W-29g) — 둘 다 `제외 제안(미검토)` 키워드를 단다.
-    미검토 제외라도 등급이 빨강이 아니면(보통·보류·미분석) 켠 채 키워드로만 알리고, 사람이 되살린
-    빨강(결정이 실린 사용 조각)도 켠다. 끄기는 지우기가 아니다 — Final Cut에서 V로 되살아난다.
+    미검토 제외라도 등급이 빨강이 아니면(보통·보류·미분석) 키워드로 알리고, 사람이 되살린
+    빨강(결정이 실린 사용 조각)은 켠다. `recommended_only`(D93)면 추천이 아니고 사람이 「사용」으로
+    정하지도 않은 조각(보통·보류·미분석)도 끈다. 끄기는 지우기가 아니다 — V로 되살아난다.
     """
     tier_keyword = _base_keyword(source, segment.start_frame, segment.end_frame)
     keywords = [tier_keyword]
@@ -418,7 +425,8 @@ def _clip(source: SourceInput, segment: SegmentState) -> ClipPlan:
         keywords.append(KEYWORD_UNREVIEWED)
     if confirmed:
         keywords.append(KEYWORD_CONFIRMED_EXCLUSION)
-    enabled = not (confirmed or suggested)
+    kept = tier_keyword == KEYWORD_RECOMMENDED or (segment.decided and not segment.excluded)
+    enabled = not (confirmed or suggested) and (kept or not recommended_only)
     return ClipPlan(segment.start_frame, segment.end_frame, enabled, tuple(keywords))
 
 
@@ -434,15 +442,18 @@ def _merge_identical(clips: Sequence[ClipPlan]) -> tuple[ClipPlan, ...]:
     return tuple(merged)
 
 
-def timeline_clips(source: SourceInput) -> tuple[ClipPlan, ...]:
+def timeline_clips(
+    source: SourceInput, settings: FinalCutTimelineSettings = BUILDER_DEFAULTS
+) -> tuple[ClipPlan, ...]:
     """원본 하나의 스파인 클립 — 검토 조각마다 하나, 검토 머리 밖이면 파일 통째로 하나."""
     media = source.media
+    only = settings.recommended_only
     if source.segments is None:
         whole = SegmentState(0, media.frame_count, excluded=False, unreviewed=False)
-        return (_clip(source, whole),)
+        return (_clip(source, whole, only),)
     segments = sorted(source.segments, key=lambda segment: segment.start_frame)
     _require_tiling(media, segments)
-    clips = tuple(_clip(source, segment) for segment in segments)
+    clips = tuple(_clip(source, segment, only) for segment in segments)
     return clips if source.report is not None else _merge_identical(clips)
 
 
@@ -479,9 +490,13 @@ def _minimum_frames(seconds: float, frame_duration: Fraction) -> int:
 def _buried_recommended(
     clip: ClipPlan, browser: Sequence[BrowserRange], minimum: int
 ) -> tuple[tuple[int, int], ...]:
-    """켠 클립 하나에 묻힌 추천 — 브라우저 즐겨찾기(=「추천」) 범위와의 겹침 가운데 `minimum`프레임
-    이상인 것. 꺼진 클립(사람이 확정한 제외)과 이미 추천인 클립은 없다."""
-    if not clip.enabled or clip.keywords[0] == KEYWORD_RECOMMENDED:
+    """클립 하나에 묻힌 추천 — 브라우저 즐겨찾기(=「추천」) 범위와의 겹침 가운데 `minimum`프레임
+    이상인 것. 제외로 꺼진 클립(사람이 확정한 제외·미검토 빨강)과 이미 추천인 클립은 없다. 추천만
+    켜서(D93) 꺼진 보통·보류 클립에는 단다 — 그 안의 추천을 찾아 V로 켤 수 있게."""
+    excluded = KEYWORD_CONFIRMED_EXCLUSION in clip.keywords or (
+        not clip.enabled and KEYWORD_UNREVIEWED in clip.keywords
+    )
+    if excluded or clip.keywords[0] == KEYWORD_RECOMMENDED:
         return ()
     overlaps = (
         (max(clip.start_frame, row.start_frame), min(clip.end_frame, row.end_frame))
@@ -579,11 +594,16 @@ def _with_caption_timing(clips: tuple[ClipPlan, ...]) -> tuple[ClipPlan, ...]:
     )
 
 
-def plan_source(source: SourceInput, *, caption_timing: bool = False) -> SourcePlan:
+def plan_source(
+    source: SourceInput,
+    *,
+    caption_timing: bool = False,
+    settings: FinalCutTimelineSettings = BUILDER_DEFAULTS,
+) -> SourcePlan:
     """원본 하나의 계획 — 클립·캡션·브라우저 범위. `caption_timing`이면 자막 시각 키워드를 단다."""
     media = source.media
     _require_media(media)
-    clips = timeline_clips(source)
+    clips = timeline_clips(source, settings)
     if caption_timing:
         clips = _with_caption_timing(clips)
     captions: tuple[CaptionPiece, ...] = ()
@@ -783,7 +803,7 @@ def plan(
     title: str,
     library_bundle: Path | None,
     caption_timing: frozenset[str] = frozenset(),
-    settings: FinalCutTimelineSettings = FINALCUT_TIMELINE,
+    settings: FinalCutTimelineSettings = BUILDER_DEFAULTS,
 ) -> TimelineDocument:
     """원본 전부(주어진 촬영 순서 그대로) → 타임라인 문서. 원본 순서를 바꾸지 않는다.
 
@@ -801,7 +821,9 @@ def plan(
     if library_bundle is not None and not library_bundle.is_absolute():
         raise FinalCutTimelineError(f"라이브러리 경로가 절대 경로가 아니다: {library_bundle}")
     plans = tuple(
-        plan_source(source, caption_timing=source.media.source_id in caption_timing)
+        plan_source(
+            source, caption_timing=source.media.source_id in caption_timing, settings=settings
+        )
         for source in sources
     )
     formats = _formats(plans)
