@@ -1254,6 +1254,9 @@ TIER_CLASSIFY_NAME = "classify"
 TIER_TIMING_ENTRY = "_tier_timing"
 TIER_CONTEXT_ENTRY = "_tier_context"
 """맥락 평가 값(D99)의 문 — 시각 확인 값과 같은 규칙으로 등급 보고서의 그 자리만 읽는다."""
+TIER_SETTINGS_ENTRY = "_tier_settings"
+"""작업공간별 추천 기준(W-42, D100 §3)의 문 — 그 자리의 `settings=`는 언제나 이 값이다. 전역 기준
+(`TIER_SETTINGS`)을 넘기면 덮은 기준이 화면·검토 머리·보내기 가운데 일부에서만 보인다."""
 # 등급 모듈이나 그 부르기를 글로 가리키는 꼴 — `getattr(tiering, "classify")`·
 # `vars(m)["classify"]`·`importlib.import_module("vlogsrt.project.raw.tiering")`·
 # `getattr(self, "_tier_timing")`. 이름을 잘라 이어 붙인 글(`"class" + "ify"`)은 못 본다 —
@@ -1321,7 +1324,8 @@ def _called_funcs(tree: ast.Module) -> frozenset[int]:
 
 
 def _allowed_classify_calls(rel: str, tree: ast.Module, aliases: frozenset[str]) -> frozenset[int]:
-    """허락된 부르기의 `func` 노드 — 서비스의 그 자리에서 `timing=self._tier_timing(…)`과 함께."""
+    """허락된 부르기의 `func` 노드 — 서비스의 그 자리에서 `timing=self._tier_timing(…)`·
+    `context=self._tier_context(…)`·`settings=self._tier_settings(…)`과 함께(D60·D99·D100 §3)."""
     if rel != TIER_TIMING_SERVICE:
         return frozenset()
     return frozenset(
@@ -1333,6 +1337,10 @@ def _allowed_classify_calls(rel: str, tree: ast.Module, aliases: frozenset[str])
         and any(kw.arg == "timing" and _is_tier_timing_call(kw.value) for kw in node.keywords)
         and any(
             kw.arg == "context" and _is_self_call(kw.value, TIER_CONTEXT_ENTRY)
+            for kw in node.keywords
+        )
+        and any(
+            kw.arg == "settings" and _is_self_call(kw.value, TIER_SETTINGS_ENTRY)
             for kw in node.keywords
         )
     )
@@ -1383,8 +1391,8 @@ def _tier_classify_reason(
             " 한 자리뿐이다"
         )
     return (
-        "tiering.classify에 timing=self._tier_timing(…)·context=self._tier_context(…)이 없다"
-        " — 소비자마다 등급이 갈린다"
+        "tiering.classify에 timing=self._tier_timing(…)·settings=self._tier_settings(…)·"
+        "context=self._tier_context(…)이 없다 — 소비자마다 등급이 갈린다"
     )
 
 

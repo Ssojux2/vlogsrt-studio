@@ -50,8 +50,13 @@ from vlogsrt.project.raw.analysis_config import (
     ANALYSIS_PROXY,
     CONTEXT_REVIEW,
     DEFAULT_PROMPT_REVISION,
+    EDITABLE_TIER_KEYS,
     RawAnalysisConcurrency,
+    RawTierSettings,
     RawUnderstandingSettings,
+    tier_settings_from_overrides,
+    tier_settings_overrides,
+    tier_settings_values,
     validate_analysis_concurrency,
     validate_understanding_settings,
 )
@@ -477,6 +482,10 @@ FINALCUT_DROP_DISABLED_KEY = "finalcut_drop_disabled"
 FINALCUT_DROP_DISABLED_ON = "on"
 FINALCUT_DROP_DISABLED_OFF = "off"
 """「꺼진 클립 빼고 보내기」(D94) 작업공간 표지 — 없거나 모르는 값이면 끔(전체 타임라인)이다."""
+
+TIER_SETTINGS_KEY = "tier_settings"
+"""작업공간별 추천 기준(W-42, D100 §3) 표지 — 기본값과 다른 칸만의 JSON 덮기. 없거나 비었으면
+기본 기준(`TIER_SETTINGS`)이다. 지문·승인·견적 밖이고, 기준 digest가 등급의 낡음 열쇠에 실린다."""
 
 TIMING_ENGINE_CHOICES: tuple[str, ...] = (TIMING_ENGINE_GEMINI, TIMING_ENGINE_WHISPER)
 """「새로 듣는 전사 엔진」 칸의 차례(W-31e) — 새 엔진이 앞, 종료될 whisper가 뒤다."""
@@ -1602,6 +1611,66 @@ class RawWorkspaceService:
         self._workspace(root).set_meta_value(FINALCUT_DROP_DISABLED_KEY, value)
         return self.finalcut_drop_disabled(root)
 
+    # ── 작업공간별 추천 기준(W-42, D100 §3) ─────────────────────────
+
+    def _tier_settings(self, workspace: RawWorkspace) -> RawTierSettings:
+        """이 작업공간의 등급 기준 — 표지 `tier_settings`의 덮기를 기본값 위에(읽기만 한다).
+
+        없거나 비었으면 기본 기준 그 자체다. 저장된 덮기를 못 읽으면(손으로 고친 DB · 지금 코드가
+        모르는 칸) 기본 기준으로 매기고 경고한다 — 등급 그리기를 막지 않고, 서랍이 까닭을 보인다
+        (`tier_settings_view`의 `stored_error`). 그리기 한 번에 한 번만 읽는다(읽기 범위)."""
+        return read_scope.memo(
+            ("tier_settings", str(workspace.root)), lambda: self._stored_tier_settings(workspace)[0]
+        )
+
+    def _stored_tier_settings(self, workspace: RawWorkspace) -> tuple[RawTierSettings, str | None]:
+        """(기준, 저장된 덮기를 못 읽은 까닭 또는 None)."""
+        stored = workspace.scoped_meta_value(TIER_SETTINGS_KEY)
+        if not stored:
+            return TIER_SETTINGS, None
+        try:
+            overrides = json.loads(stored)
+            return tier_settings_from_overrides(overrides), None
+        except ValueError as error:
+            log.warn(f"저장된 추천 기준을 읽지 못해 기본 기준으로 매긴다 — {error}")
+            return TIER_SETTINGS, str(error)
+
+    def tier_key(self, root: Path) -> str:
+        """이 작업공간 등급의 낡음 열쇠 — 기본 기준이면 등급판 그대로(D100 §3)."""
+        return tiering.tier_key(self._tier_settings(self._workspace(root)))
+
+    def tier_settings_view(self, root: Path) -> dict[str, Any]:
+        """추천 기준 서랍의 재료(무료, 읽기만) — 지금 값 · 기본값 · 덮은 칸 · 보일 칸 · digest."""
+        settings, stored_error = self._stored_tier_settings(self._workspace(root))
+        return {
+            "values": tier_settings_values(settings),
+            "defaults": tier_settings_values(TIER_SETTINGS),
+            "overrides": tier_settings_overrides(settings),
+            "editable_keys": list(EDITABLE_TIER_KEYS),
+            "digest": tiering.criteria_digest(settings),
+            "tier_key": tiering.tier_key(settings),
+            "stored_error": stored_error,
+        }
+
+    def set_tier_settings(self, root: Path, overrides: Mapping[str, object]) -> dict[str, Any]:
+        """추천 기준을 덮는다(무료 — 표지 하나, 지문·승인·견적 밖). 빈 덮기는 기본으로 돌린다.
+
+        검사를 지난 덮기만 기본값과 다른 칸으로 줄여 쓴다(거부는 쓰지 않는다). 쓴 뒤 정리 고리의
+        등급 단계(`_tier_step` — 맥락 평가·자막 시각 확인 뒤와 같은 길)가 검토 머리의 등급 표시를
+        다시 단다 — 사람이 정한 사용/제외·메모·덮기·경계는 그대로다."""
+        try:
+            settings = tier_settings_from_overrides(overrides)
+        except ValueError as error:
+            raise RawWorkspaceError(str(error)) from error
+        canonical = json.dumps(
+            tier_settings_overrides(settings), ensure_ascii=False, sort_keys=True
+        )
+        self._workspace(root).set_meta_value(TIER_SETTINGS_KEY, canonical)
+        _forget_read_scope()
+        self._tier_step(root)
+        _forget_read_scope()
+        return self.tier_settings_view(root)
+
     def glossary(self, root: Path) -> Any:
         """프로젝트 용어집(D59 19c) — 마지막 리비전. 읽기만 한다(표를 만들지 않는다)."""
         from vlogsrt.project.raw import glossary
@@ -2215,7 +2284,7 @@ class RawWorkspaceService:
                 document_sha256=hashlib.sha256(body).hexdigest(),
                 timing=self._tier_timing(workspace, row.asset_id),
                 context=self._tier_context(workspace, row.asset_id, applied=with_context),
-                settings=TIER_SETTINGS,
+                settings=self._tier_settings(workspace),
             )
         progress = directory / "suitability_progress.json"
         if not progress.is_file():
@@ -2227,7 +2296,7 @@ class RawWorkspaceService:
             payload,
             timing=self._tier_timing(workspace, row.asset_id),
             context=self._tier_context(workspace, row.asset_id, applied=with_context),
-            settings=TIER_SETTINGS,
+            settings=self._tier_settings(workspace),
         )
 
     def _tier_timing(self, workspace: RawWorkspace, asset_id: str) -> tiering.TimingSignals:
@@ -2250,7 +2319,8 @@ class RawWorkspaceService:
             return tiering.UNKNOWN_TIMING
         if read is None:
             return tiering.UNKNOWN_TIMING
-        if not tiering.verified_subtitles(read.level, read.suspect_lines, read.lines):
+        settings = self._tier_settings(workspace)
+        if not tiering.verified_subtitles(read.level, read.suspect_lines, read.lines, settings):
             return tiering.TimingSignals(level=read.level, no_speech=read.no_speech)
         return tiering.TimingSignals(
             level=read.level,
@@ -2331,7 +2401,7 @@ class RawWorkspaceService:
                 )
             )
         key = context_review.context_key(
-            parts, tier_version=TIER_SETTINGS.tier_version, model=model, settings=CONTEXT_REVIEW
+            parts, tier_version=self.tier_key(root), model=model, settings=CONTEXT_REVIEW
         )
         return key, model
 
@@ -6333,7 +6403,7 @@ def _tier_state(facade: Any, head: ReviewRevision) -> str | None:
     if facade.needs_tier_migration(head):
         spans = json.dumps(facade.stale_tier_proposal_spans(head))
         digest = hashlib.sha256(spans.encode("utf-8")).hexdigest()[:16]
-        return f"{TIER_SETTINGS.tier_version}|표지 {facade.has_tier_marker(head)}|옛 제안 {digest}"
+        return f"{facade.tier_key()}|표지 {facade.has_tier_marker(head)}|옛 제안 {digest}"
     return _regrade_state(facade, head)
 
 
@@ -6344,7 +6414,7 @@ def _regrade_state(facade: Any, head: ReviewRevision) -> str | None:
     작업이 같은 계산을 다시 해 실패를 작업 기록과 「작업공간 정리 실패」 안내로 남긴다(조용히
     넘기지 않는다).
     """
-    head_key = f"{_REGRADE_STATE}{TIER_SETTINGS.tier_version}|{head.revision_id}"
+    head_key = f"{_REGRADE_STATE}{facade.tier_key()}|{head.revision_id}"
     try:
         stale = facade.stale_grade_segments(head)
     except (OSError, ValueError, KeyError, TypeError, RawWorkspaceError) as error:

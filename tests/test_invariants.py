@@ -1797,9 +1797,9 @@ CLEAN_TIER_SERVICE = (
     "    def _tier_report_for_row(self, workspace, row):\n"
     "        if row:\n"
     "            return tiering.classify({}, timing=self._tier_timing(workspace, row),"
-    " context=self._tier_context(workspace, row))\n"
+    " context=self._tier_context(workspace, row), settings=self._tier_settings(workspace))\n"
     "        return tiering.classify({'p': 1}, timing=self._tier_timing(workspace, row),"
-    " context=self._tier_context(workspace, row))\n"
+    " context=self._tier_context(workspace, row), settings=self._tier_settings(workspace))\n"
     "\n"
     "    def _tier_timing(self, workspace, asset_id):\n"
     "        if asset_id:\n"
@@ -1828,7 +1828,8 @@ CLEAN_TIERING = (
             TIER_SERVICE,
             CLEAN_TIER_SERVICE.replace(
                 "tiering.classify({}, timing=self._tier_timing(workspace, row),"
-                " context=self._tier_context(workspace, row))",
+                " context=self._tier_context(workspace, row),"
+                " settings=self._tier_settings(workspace))",
                 "tiering.classify({})",
             ),
             7,
@@ -1839,9 +1840,11 @@ CLEAN_TIERING = (
             TIER_SERVICE,
             CLEAN_TIER_SERVICE.replace(
                 "timing=self._tier_timing(workspace, row),"
-                " context=self._tier_context(workspace, row))\n        return",
+                " context=self._tier_context(workspace, row),"
+                " settings=self._tier_settings(workspace))\n        return",
                 "timing=tiering.UNKNOWN_TIMING,"
-                " context=self._tier_context(workspace, row))\n        return",
+                " context=self._tier_context(workspace, row),"
+                " settings=self._tier_settings(workspace))\n        return",
             ),
             7,
             "context=self._tier_context(…)이 없다",
@@ -1850,11 +1853,32 @@ CLEAN_TIERING = (
         (
             TIER_SERVICE,
             CLEAN_TIER_SERVICE.replace(
-                ", context=self._tier_context(workspace, row))\n        return",
-                ")\n        return",
+                ", context=self._tier_context(workspace, row),"
+                " settings=self._tier_settings(workspace))\n        return",
+                ", settings=self._tier_settings(workspace))\n        return",
             ),
             7,
             "context=self._tier_context(…)이 없다",
+        ),
+        # 작업공간별 추천 기준(W-42, D100 §3)을 빠뜨렸다 — 전역 기본 기준으로 매긴다.
+        (
+            TIER_SERVICE,
+            CLEAN_TIER_SERVICE.replace(
+                ", settings=self._tier_settings(workspace))\n        return",
+                ")\n        return",
+            ),
+            7,
+            "settings=self._tier_settings(…)",
+        ),
+        # 그 자리에서 전역 기준을 넘겼다 — 덮은 기준이 소비자 일부에서만 보인다.
+        (
+            TIER_SERVICE,
+            CLEAN_TIER_SERVICE.replace(
+                ", settings=self._tier_settings(workspace))\n        return",
+                ", settings=tiering.TIER_SETTINGS)\n        return",
+            ),
+            7,
+            "settings=self._tier_settings(…)",
         ),
         # 맥락 평가 값의 문을 다른 메서드가 읽는다(D99).
         (

@@ -913,6 +913,13 @@ class RawWorkspace:
             row = connection.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
         return None if row is None else str(row[0])
 
+    def scoped_meta_value(self, key: str) -> str | None:
+        """`meta_value`와 같되 읽기 범위가 열려 있으면 그 범위의 연결을 함께 쓴다(D67) — 그리기마다
+        읽는 표지(추천 기준, D100 §3)가 단추 한 번의 DB 열기를 늘리지 않게 한다."""
+        with read_scope.shared(("workspace.db", str(self.root)), self.connect) as connection:
+            row = connection.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+        return None if row is None else str(row[0])
+
     def set_meta_value(self, key: str, value: str) -> None:
         """작업공간 표지 하나를 쓴다(있으면 갈아끼운다) — 설정·지문 밖의 기록이다."""
         with self.connect() as connection:

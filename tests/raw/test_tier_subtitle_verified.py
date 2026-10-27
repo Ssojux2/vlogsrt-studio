@@ -439,7 +439,7 @@ CLEAN_SERVICE = (
     "class RawWorkspaceService:\n"
     "    def _tier_report_for_row(self, workspace, row):\n"
     "        return tiering.classify({}, timing=self._tier_timing(workspace, row),"
-    " context=self._tier_context(workspace, row))\n"
+    " context=self._tier_context(workspace, row), settings=self._tier_settings(workspace))\n"
     "\n"
     "    def _tier_timing(self, workspace, asset_id):\n"
     "        if asset_id:\n"

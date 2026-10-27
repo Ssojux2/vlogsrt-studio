@@ -438,8 +438,9 @@ def _auto_provenance(notes: str) -> Mapping[str, object] | None:
     return provenance if isinstance(provenance, Mapping) else None
 
 
-def _stale_tier_proposal(segment: ReviewSegment) -> bool | None:
-    """옛 등급판이 낸, 지금 등급으로는 빨강이 아닌 미검토 제외 제안인가 — 근거를 못 읽으면 None.
+def _stale_tier_proposal(segment: ReviewSegment, tier_key: str) -> bool | None:
+    """옛 등급판(또는 다른 추천 기준)이 낸, 지금 등급으로는 빨강이 아닌 미검토 제외 제안인가 —
+    근거를 못 읽으면 None. `tier_key`는 작업공간의 낡음 열쇠다(`tiering.tier_key`, D100 §3).
 
     판단만 한다(경고 없음) — 화면 갱신마다 불리는 정리 고리의 '할 일' 계산도 이것을 쓴다.
     """
@@ -450,8 +451,22 @@ def _stale_tier_proposal(segment: ReviewSegment) -> bool | None:
     provenance = _auto_provenance(segment.notes)
     if provenance is None:
         return None
-    stale = provenance.get("version") != tiering.TIER_SETTINGS.tier_version
+    stale = provenance.get("version") != tier_key
     return provenance.get("reason") in tiering.TIER_RED_REASONS and stale
+
+
+def _keyed_red_decisions(report: tiering.TierReport) -> list[dict[str, object]]:
+    """빨강 제안 — 근거의 판 표지(`version`)는 작업공간의 낡음 열쇠다(`tiering.tier_key`, D100 §3).
+
+    기본 기준이면 등급판 그대로라 바이트가 같다. 덮은 기준이 낸 제안은 `등급판|digest`를 달아,
+    기준을 다시 바꾸거나 기본으로 돌린 뒤 빨강이 아니게 된 제안이 옛 기준의 것으로 보여 풀린다
+    (`_stale_tier_proposal`). 등급 보고서 자체(`red_decisions`)는 등급판만 싣는다 — 설정이 빨강을
+    만들거나 옮기지 않는지 견주는 시험이 그 바이트를 잠근다."""
+    key = tiering.tier_key(report.settings)
+    return [
+        {**decision, "version": key} if decision.get("version") == report.tier_version else decision
+        for decision in tiering.red_decisions(report)
+    ]
 
 
 def _grade_signature(
@@ -463,7 +478,7 @@ def _grade_signature(
     return segment.recommendation, grade, other
 
 
-def _release_stale_tier_proposal(segment: ReviewSegment) -> ReviewSegment:
+def _release_stale_tier_proposal(segment: ReviewSegment, tier_key: str) -> ReviewSegment:
     """옛 등급판이 낸 미검토 제외 제안을 푼다 — 지금 등급이 빨강이 아닐 때만(D52).
 
     기준이 바뀌어 근거가 사라진 제안이 사람의 확인을 기다리며 출력을 막으면 안 된다.
@@ -471,7 +486,7 @@ def _release_stale_tier_proposal(segment: ReviewSegment) -> ReviewSegment:
     지운다 — 남기면 「자동 제외 전체 복원」과 같은 사람 결정으로 읽힌다. 근거 메모를 사람이
     고쳤으면 풀지 않는다 — 지우면 사람이 쓴 말이 사라지므로 미검토 제외로 남겨 경고한다.
     """
-    stale = _stale_tier_proposal(segment)
+    stale = _stale_tier_proposal(segment, tier_key)
     if stale is None:
         log.warn(
             f"{segment.segment_id}: 자동 제외 근거 메모를 읽을 수 없다(사람이 고친 메모) — "
@@ -773,8 +788,11 @@ class ReviewWorkspaceFacade:
         segments = [segment for segment in revision.segments if segment.source_id not in retained]
         # 지금 판정 증거가 없어 옛 조각을 들고 오는 원본도 옛 판 제안은 거둔다(D52·D53) — 근거가
         # 사라진 기계 제안이 출력을 막고, 머리를 늘 '옮길 머리'로 남겨 다시 세우기를 되풀이시킨다.
+        tier_key = self.tier_key()
         segments.extend(
-            _release_stale_tier_proposal(replace(segment, source_order=orders[segment.source_id]))
+            _release_stale_tier_proposal(
+                replace(segment, source_order=orders[segment.source_id]), tier_key
+            )
             for segment in prior.segments
             if segment.source_id in retained
         )
@@ -860,7 +878,7 @@ class ReviewWorkspaceFacade:
             for d in _require_list(automatic.get("auto_decisions", []), "auto_decisions")
         ]
         report = self._tier_for(row, reports) if row.document_path else None
-        return candidates + (tiering.red_decisions(report) if report is not None else [])
+        return candidates + (_keyed_red_decisions(report) if report is not None else [])
 
     def _automatic_exclusion(
         self,
@@ -1110,20 +1128,25 @@ class ReviewWorkspaceFacade:
             return None
         return parse_revision(document)
 
-    @staticmethod
-    def stale_tier_proposal_spans(revision: ReviewRevision) -> tuple[tuple[str, int, int], ...]:
+    def tier_key(self) -> str:
+        """이 작업공간 등급의 낡음 열쇠 — 등급판, 추천 기준을 덮었으면 `등급판|digest`(D100 §3)."""
+        return self._service.tier_key(self.root)
+
+    def stale_tier_proposal_spans(
+        self, revision: ReviewRevision
+    ) -> tuple[tuple[str, int, int], ...]:
         """옛 등급판이 낸, 지금은 빨강이 아닌 미검토 제외의 (원본, 경계)(D53 실데이터 모양)."""
+        tier_key = self.tier_key()
         return tuple(
             sorted(
                 (segment.source_id, segment.start_pts, segment.end_pts)
                 for segment in revision.segments
-                if _stale_tier_proposal(segment)
+                if _stale_tier_proposal(segment, tier_key)
             )
         )
 
-    @classmethod
-    def has_stale_tier_proposals(cls, revision: ReviewRevision) -> bool:
-        return bool(cls.stale_tier_proposal_spans(revision))
+    def has_stale_tier_proposals(self, revision: ReviewRevision) -> bool:
+        return bool(self.stale_tier_proposal_spans(revision))
 
     def needs_tier_migration(self, revision: ReviewRevision) -> bool:
         """등급판을 옮길 머리인가 — 지금 판 표지가 없거나, 표지가 있어도 옛 판 제안이 실려 있다."""
@@ -1143,12 +1166,11 @@ class ReviewWorkspaceFacade:
         않은 기계 제안이다). 바뀐 것이 없으면 리비전을 만들지 않는다.
         """
         head = self.load_head(base_plan_id).revision
-        segments = tuple(_release_stale_tier_proposal(s) for s in self._regraded(head))
+        tier_key = self.tier_key()
+        segments = tuple(_release_stale_tier_proposal(s, tier_key) for s in self._regraded(head))
         if segments == head.segments:
             return head
-        return self._publish_snapshot(
-            head, segments, "등급 재계산 " + tiering.TIER_SETTINGS.tier_version
-        )
+        return self._publish_snapshot(head, segments, "등급 재계산 " + tier_key)
 
     def _regraded(self, head: ReviewRevision) -> list[ReviewSegment]:
         """지금 계산(판정 증거 + 자막 시각 확인 값, D60)으로 다시 매긴 조각 — 쓰지 않는다.

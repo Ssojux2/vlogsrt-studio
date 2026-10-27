@@ -14,8 +14,10 @@ ASR 청크 한도는 엔진의 동결 상한(180초·24MB)을 **천장으로** �
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, fields, replace
 from fractions import Fraction
+from typing import Any
 
 UNDERSTANDING_SCHEMA_VERSION = "raw-understanding/v1"
 """첫 단계 기록(analysis_transcript.json)의 namespace(계획 §13.1·§15.1)."""
@@ -659,6 +661,114 @@ def _tier_range_problems(settings: RawTierSettings) -> list[str]:
         share = settings.subtitle_verified_suspect_share
         problems.append(f"자막 확인 의심 줄 몫은 [0, 1]이어야 한다: {share!r}")
     return problems
+
+
+EDITABLE_TIER_KEYS: tuple[str, ...] = (
+    "recommended_min_seconds",
+    "speech_density_green",
+    "silence_min_seconds",
+    "usable_speech_green",
+    "scenery_green",
+    "good_sparse_green",
+    "segment_green_share",
+    "visual_issue_caps",
+)
+"""작업대가 보이는 추천 기준(W-42, D100 §3) — 최소 길이 · 밀도 · 공백 길이 · 녹색 칸 셋 · 녹색 몫 ·
+화면 문제. 나머지 칸도 작업공간 덮기로 바꿀 수 있지만 화면에는 없다."""
+
+CONTEXT_RAISE_RULE_CHOICES = ("speech-sparse", "scenery-no-speech")
+"""맥락 평가가 올릴 수 있는 노랑 칸(D99) — 덮기는 이 안에서 좁히기만 한다(넓히지 않는다)."""
+
+_TIER_OVERRIDE_FIXED = frozenset({"tier_version"})
+"""덮을 수 없는 칸 — 등급판은 코드의 규칙이다(작업공간 기준은 digest로 따로 낡음 열쇠에 실린다)."""
+
+_TIER_TUPLE_VOCABULARIES: dict[str, tuple[str, ...]] = {
+    "visual_issue_caps": VISUAL_ISSUE_KINDS,
+    "context_lower_verdicts": CONTEXT_VERDICTS,
+    "context_raise_verdicts": CONTEXT_VERDICTS,
+    "context_raise_rules": CONTEXT_RAISE_RULE_CHOICES,
+}
+
+
+def tier_settings_from_overrides(overrides: Mapping[str, object]) -> RawTierSettings:
+    """작업공간 덮기(JSON 값) → 등급 설정(W-42, D100 §3). 기본값 위에 얹고 검사한다.
+
+    모르는 칸·등급판·틀린 꼴(참·거짓 자리의 수, 실수 자리의 글 등)·목록 밖 낱말은
+    ValueError다. 실수 칸의 정수는 실수로 바꾼다(같은 값이 같은 digest를 낸다). 값역은
+    `validate_tier_settings`가 본다.
+    """
+    if not isinstance(overrides, Mapping):
+        raise ValueError(f"추천 기준 덮기는 칸 → 값의 객체여야 한다: {overrides!r}")
+    names = {field.name for field in fields(RawTierSettings)}
+    problems: list[str] = []
+    values: dict[str, Any] = {}
+    for key, value in overrides.items():
+        if key in _TIER_OVERRIDE_FIXED or key not in names:
+            problems.append(f"덮을 수 없는 추천 기준 칸이다: {key!r}")
+            continue
+        coerced, problem = _tier_override_value(key, value)
+        if problem is not None:
+            problems.append(problem)
+        else:
+            values[key] = coerced
+    if problems:
+        raise ValueError("추천 기준 덮기가 계약을 어긴다: " + "; ".join(problems))
+    settings = replace(TIER_SETTINGS, **values)
+    validate_tier_settings(settings)
+    return settings
+
+
+def _tier_override_value(key: str, value: object) -> tuple[object, str | None]:
+    """칸 하나의 JSON 값 → 설정 값 — 꼴은 기본값의 꼴을 따른다. (값, 문제)."""
+    default = getattr(TIER_SETTINGS, key)
+    wrong = f"{key}의 값 꼴이 틀렸다: {value!r}"
+    if isinstance(default, bool):
+        return (value, None) if isinstance(value, bool) else (None, wrong)
+    if isinstance(default, float):
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return float(value), None
+        return None, wrong
+    if isinstance(default, int):
+        whole = isinstance(value, int) and not isinstance(value, bool)
+        return (value, None) if whole else (None, wrong)
+    if isinstance(default, str):
+        return (value, None) if isinstance(value, str) else (None, wrong)
+    return _tier_override_words(key, value)
+
+
+def _tier_override_words(key: str, value: object) -> tuple[object, str | None]:
+    """낱말 목록 칸 — 알려진 낱말만, 겹치지 않게."""
+    if not isinstance(value, (list, tuple)) or not all(isinstance(word, str) for word in value):
+        return None, f"{key}는 낱말 목록이어야 한다: {value!r}"
+    if len(set(value)) != len(value):
+        return None, f"{key}에 같은 낱말이 두 번 있다: {value!r}"
+    vocabulary = _TIER_TUPLE_VOCABULARIES[key]
+    unknown = [word for word in value if word not in vocabulary]
+    if unknown:
+        return None, f"{key}의 낱말을 모른다 {unknown!r} — {vocabulary} 가운데서 고른다"
+    return tuple(value), None
+
+
+def tier_settings_overrides(settings: RawTierSettings) -> dict[str, object]:
+    """등급 설정 → 기본값과 다른 칸만의 JSON 덮기(`tier_settings_from_overrides`의 거꾸로)."""
+    found: dict[str, object] = {}
+    for field in fields(RawTierSettings):
+        if field.name in _TIER_OVERRIDE_FIXED:
+            continue
+        value = getattr(settings, field.name)
+        if value != getattr(TIER_SETTINGS, field.name):
+            found[field.name] = list(value) if isinstance(value, tuple) else value
+    return found
+
+
+def tier_settings_values(settings: RawTierSettings) -> dict[str, object]:
+    """등급 설정의 모든 칸(등급판 빼고)을 JSON 값으로 — 화면이 지금 값과 기본값을 함께 그린다."""
+    return {
+        field.name: list(value) if isinstance(value, tuple) else value
+        for field in fields(RawTierSettings)
+        if field.name not in _TIER_OVERRIDE_FIXED
+        for value in (getattr(settings, field.name),)
+    }
 
 
 @dataclass(frozen=True)

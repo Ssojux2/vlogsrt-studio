@@ -209,6 +209,31 @@ def tier_marker(settings: RawTierSettings = TIER_SETTINGS) -> str:
     return MARKER_PREFIX + settings.tier_version
 
 
+CRITERIA_DEFAULT = "default"
+"""기본 추천 기준의 digest(W-42, D100 §3) — 기준을 덮지 않은 작업공간의 낡음 열쇠·표지가 이 변경
+전과 바이트까지 같게 하는 고정 표지다(다시 매기기·다시 달기가 일어나지 않는다)."""
+
+_CRITERIA_DIGEST_CHARS = 12
+
+
+def criteria_digest(settings: RawTierSettings) -> str:
+    """추천 기준의 짧은 sha — 모든 칸의 정규 JSON에서. 기본 기준이면 `CRITERIA_DEFAULT`다."""
+    if settings == TIER_SETTINGS:
+        return CRITERIA_DEFAULT
+    canonical = json.dumps(
+        asdict(settings), sort_keys=True, ensure_ascii=False, separators=(",", ":")
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:_CRITERIA_DIGEST_CHARS]
+
+
+def tier_key(settings: RawTierSettings) -> str:
+    """등급의 낡음 열쇠 — 등급판, 덮은 기준이면 `등급판|digest`(어느 쪽이 바뀌어도 낡는다)."""
+    digest = criteria_digest(settings)
+    return (
+        settings.tier_version if digest == CRITERIA_DEFAULT else f"{settings.tier_version}|{digest}"
+    )
+
+
 def strip_grade_tags(tags: Sequence[str]) -> tuple[str, ...]:
     """옛 Luna 등급과 등급판 태그를 걷는다 — 다시 매기기 전에 한 번만 부른다."""
     return tuple(tag for tag in tags if not tag.startswith(GRADE_TAG_PREFIXES))
