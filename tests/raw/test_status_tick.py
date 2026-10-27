@@ -96,7 +96,14 @@ def test_one_second_timers_merge_into_one_status_tick(tmp_path: Path, local_sock
     deps = app.config["dependencies"]
     ticks = [d for d in deps if d["targets"] and d["targets"][0][1] == "tick"]
     by_name = {app.fns[d["id"]].fn.__name__: d for d in ticks}
-    assert sorted(by_name) == ["capcut_tick_view", "finalcut_toast_view", "status_tick"]
+    # 초안 결과 카드(W-46a)는 작업대의 2초 타이머에 붙는다 — 타이머 수는 그대로다.
+    assert sorted(by_name) == [
+        "capcut_tick_view",
+        "finalcut_toast_view",
+        "render_export_card_tick",
+        "status_tick",
+    ]
+    assert by_name["render_export_card_tick"]["targets"] == by_name["capcut_tick_view"]["targets"]
     assert {timers[d["targets"][0][0]].value for n, d in by_name.items() if n != "status_tick"} == {
         2
     }

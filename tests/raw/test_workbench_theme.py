@@ -333,7 +333,7 @@ def test_tier_legend_glyphs_and_legacy_marks() -> None:
     ):
         assert f"color: var(--vl-{token});" in _block(css, f".vl-tier-key.{tier}"), tier
     js = ui_facade.VISUAL_BOOTSTRAP_JS
-    for glyph in ("★ 추천", "✕ 제외 제안", "? 보류"):
+    for glyph in ("★ 추천", "✕ 비추천", "? 보류"):  # 빨강의 화면 이름(W-46a)
         assert glyph in js, glyph
     selectors = {sel for sel, _ in _rules(css)}
     for legacy in (

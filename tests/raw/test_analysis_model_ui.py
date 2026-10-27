@@ -165,6 +165,10 @@ def test_every_workspace_change_rewires_the_model_chooser(
             "refresh_outputs",
             "capcut_choose_view",
             "close_library_view",  # 「라이브러리 닫기」도 작업공간을 바꾼다(D64 세션 F)
+            # 폴더 불러오기(W-46a) — 단추 · 경로 칸 Enter · 찾아보기 뒤
+            "folder_import_view",
+            "folder_import_view",
+            "folder_browse_view",
         ]
     )
     assert not any(

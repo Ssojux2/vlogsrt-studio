@@ -3686,7 +3686,7 @@ def test_legend_names_three_tiers_with_pattern_cue() -> None:
     """범례는 3단 등급과 색 아닌 표지(빗금·점선)를 함께 말한다(D51)."""
     shell = ui_facade.visual_player_shell_html(None, "안내")
     legend = shell.split('class="vl-legend"', 1)[1].split("</span></span>", 1)[0]
-    for word in ("■ 추천", "■ 보통", "▨ 제외 제안", "□ 판정 보류"):
+    for word in ("■ 추천", "■ 보통", "▨ 비추천", "□ 판정 보류"):  # 빨강의 화면 이름(W-46a)
         assert word in legend, word
     assert "vl-good" not in legend and "vl-review" not in legend
     css = ui_facade.WORKBENCH_CSS
@@ -3826,7 +3826,7 @@ def test_rail_renders_tier_classes_glyphs_and_aria_labels(tmp_path: Path) -> Non
     assert 'class="vl-recommendation review_required yellow hold"' in hold
     assert ">? 보류</button>" in hold and 'aria-label="판정 보류 ' in hold
     assert 'class="vl-recommendation normal red"' in red and 'data-vl-tier="red"' in red
-    assert ">✕ 제외 제안</button>" in red and 'aria-label="제외 제안 2.1초~2.9초' in red
+    assert ">✕ 비추천</button>" in red and 'aria-label="비추천 2.1초~2.9초' in red
     assert 'title="자막: 발화 없음 · 자막 없는 공백 5초 이상 · 영상: 구도가 조금 기울었다"' in red
     assert "--vl-rec" not in red  # 세로 좌표는 CSS 변수(W-10) 몫이다 — 실행본은 left·width만
 
@@ -3835,7 +3835,7 @@ def test_rail_renders_tier_classes_glyphs_and_aria_labels(tmp_path: Path) -> Non
 def test_panel_shows_subtitle_and_video_reasons_for_marker(tmp_path: Path) -> None:
     report = _run_tier_harness(tmp_path)
     panel = report["panel"]
-    assert '<div class="vl-marker-reason red"><strong>제외 제안</strong>' in panel
+    assert '<div class="vl-marker-reason red"><strong>비추천</strong>' in panel
     assert "자막 · 자막 없음(긴 공백): 발화 없음 · 자막 없는 공백 5초 이상" in panel
     assert "영상 · 사용 가능: 구도가 조금 기울었다" in panel
     assert "판정 규칙 <code>silent-not-scenery</code>" in panel  # 규칙 ID는 접힌 상세에만
@@ -3849,7 +3849,7 @@ def test_panel_shows_subtitle_and_video_reasons_for_marker(tmp_path: Path) -> No
         "segmentId": "segA3",
     }
     assert report["revert"] == {"selection": "included", "segmentId": "segA3"}
-    assert "상태 제외 · 등급 제외 제안 · 자막 발화 없음 · 자막 없는 공백 · 영상 구도" in panel
+    assert "상태 제외 · 등급 비추천(미확인) · 자막 발화 없음 · 자막 없는 공백 · 영상 구도" in panel
     # 자동 제외 이유는 측정이 아니라 AI 판정 + 자막에서 왔다고 말한다(D52).
     assert "자동 판정 이유 · 자막 없음 · AI가 풍경으로 보지 않음" in panel
     assert "(측정)" not in panel

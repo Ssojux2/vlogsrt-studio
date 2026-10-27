@@ -51,6 +51,7 @@ from vlogsrt.project.raw.analysis_config import (
     CONTEXT_REVIEW,
     DEFAULT_PROMPT_REVISION,
     EDITABLE_TIER_KEYS,
+    VISUAL_ISSUE_KINDS,
     RawAnalysisConcurrency,
     RawTierSettings,
     RawUnderstandingSettings,
@@ -1098,6 +1099,42 @@ def mounted_device_candidates(bases: tuple[Path, ...] | None = None) -> tuple[Pa
 # ── 공개 서비스 ──────────────────────────────────────────────────────────────
 
 
+def tier_criteria_choices() -> dict[str, list[tuple[str, str]]]:
+    """「추천 기준」 낱말 목록 칸이 고를 수 있는 (쉬운 이름, 낱말) — 화면은 이 표만 보인다(W-46a).
+
+    화면 문제 종류(`VISUAL_ISSUE_KINDS`) 차례 그대로이고 이름은 등급 근거와 같은 말이다.
+    """
+    return {
+        "visual_issue_caps": [
+            (tiering.VISUAL_ISSUE_LABELS[kind], kind) for kind in VISUAL_ISSUE_KINDS
+        ]
+    }
+
+
+def _video_folder(folder: Path) -> Path:
+    """폴더 불러오기의 입력 — 펴서(resolve) 폴더인지 본다. 아니면 사유와 함께 실패한다.
+
+    작업공간 폴더 그 자체(`_vlogsrt` 등)는 영상 폴더가 아니다 — 받으면 그 안의 프록시·미리보기를
+    원본으로 스캔하고 작업공간 안에 작업공간을 만든다(W-46a).
+    """
+    resolved = folder.expanduser().resolve()
+    if not resolved.is_dir():
+        raise IngestError(f"영상 폴더가 아니다: {folder}")
+    if (resolved / PROJECT_TOML_NAME).is_file() or (resolved / DB_NAME).is_file():
+        raise IngestError(f"작업공간 폴더다 — 그 위의 촬영 영상 폴더를 고르세요: {folder}")
+    return resolved
+
+
+def _existing_folder_workspace(resolved: Path) -> Path | None:
+    """그 폴더의 이미 있는 작업공간 — 안쪽(`_vlogsrt`), 형제(`-vlogsrt`) 순서. 없으면 None."""
+    inside = resolved / FOLDER_WORKSPACE.workspace_dirname
+    sibling = resolved.with_name(resolved.name + FOLDER_WORKSPACE.sibling_suffix)
+    for root in (inside, sibling):
+        if (root / PROJECT_TOML_NAME).is_file() or (root / DB_NAME).is_file():
+            return root
+    return None
+
+
 class RawWorkspaceService:
     """작업공간·미디어·작업의 공개 조립점 — 화면 새로고침과 무관하게 상태는 DB에 산다.
 
@@ -1652,6 +1689,7 @@ class RawWorkspaceService:
             "defaults": tier_settings_values(TIER_SETTINGS),
             "overrides": tier_settings_overrides(settings),
             "editable_keys": list(EDITABLE_TIER_KEYS),
+            "choices": tier_criteria_choices(),
             "digest": tiering.criteria_digest(settings),
             "tier_key": tiering.tier_key(settings),
             "stored_error": stored_error,
@@ -3753,6 +3791,18 @@ class RawWorkspaceService:
 
         return self.submit_job(root, RENDER_EXPORT_JOB_KIND, "render_export/draft", body)
 
+    def has_render_export(self, root: Path) -> bool:
+        """다 낸 초안(보고서가 있는 폴더)이 하나라도 있는가 — 파일만 본다(DB를 열지 않는다, W-46a).
+
+        머리줄 「내보내기」 단계가 그릴 때마다 묻는다 — 그리기의 DB 열기 수를 늘리지 않는다.
+        """
+        from vlogsrt.project.raw import render_export
+
+        base = root.expanduser() / render_export.EXPORT_FOLDER
+        if not base.is_dir():
+            return False
+        return any((item / render_export.REPORT_NAME).is_file() for item in base.iterdir())
+
     def latest_render_export(self, root: Path) -> dict[str, Any] | None:
         """가장 최근에 다 낸 초안의 경로·요약(보고서가 있는 폴더) — 없으면 None. 읽기만 한다."""
         from vlogsrt.project.raw import render_export
@@ -3866,14 +3916,12 @@ class RawWorkspaceService:
         있는 작업공간은 안쪽, 형제 순서로 찾아 그대로 연다(만들지 않는다). 자리에 작업공간 아닌 것이
         있으면 조용히 덮지 않고 실패한다. (상태, 새로 만들었는가)를 돌려준다.
         """
-        resolved = folder.expanduser().resolve()
-        if not resolved.is_dir():
-            raise IngestError(f"영상 폴더가 아니다: {folder}")
+        resolved = _video_folder(folder)
         inside = resolved / FOLDER_WORKSPACE.workspace_dirname
         sibling = resolved.with_name(resolved.name + FOLDER_WORKSPACE.sibling_suffix)
-        for root in (inside, sibling):
-            if (root / PROJECT_TOML_NAME).is_file() or (root / DB_NAME).is_file():
-                return self._open_folder_workspace(root), False
+        existing = _existing_folder_workspace(resolved)
+        if existing is not None:
+            return self._open_folder_workspace(existing), False
         try:
             return self._create_folder_workspace(inside, resolved.name), True
         except OSError as error:
@@ -3909,11 +3957,15 @@ class RawWorkspaceService:
 
         원본은 읽기만 한다(해시만 잰다 — `reference_ingest.register_references`). 들인 뒤 4K 원본만
         분석 프록시 작업을 따로 걸고(`start_analysis_proxies`), 원본 전체 미리보기를 기다린다.
-        영상이 하나도 없으면 사유와 함께 실패한다 — 빈 성공으로 넘어가지 않는다.
+        영상이 하나도 없으면 작업공간을 만들기 전에 사유와 함께 실패한다 — 빈 성공으로 넘어가지
+        않고, 빈 `_vlogsrt`도 남기지 않는다(W-46a).
         """
-        status, _created = self.managed_folder_workspace(folder)
-        root = Path(status.workspace_root)
-        proposal = self.scan_sources(root, folder, inspect)
+        resolved = _video_folder(folder)
+        # 작업공간을 만들기 **전에** 스캔한다 — 영상이 없는 폴더에 빈 `_vlogsrt`를 남기지 않는다.
+        planned = _existing_folder_workspace(resolved) or (
+            resolved / FOLDER_WORKSPACE.workspace_dirname
+        )
+        proposal = scan_sources(resolved, planned, inspect)
         if not proposal.order:
             reasons = "; ".join(
                 f"{r.source_relative_path}: {r.reason}" for r in proposal.scan.rejected
@@ -3921,6 +3973,10 @@ class RawWorkspaceService:
             raise IngestError(
                 f"불러올 영상이 없다: {folder}" + (f" — {reasons}" if reasons else "")
             )
+        status, _created = self.managed_folder_workspace(resolved)
+        root = Path(status.workspace_root)
+        if root.resolve() != planned.resolve():  # 안쪽에 쓸 수 없어 형제로 물러났다
+            proposal = self.scan_sources(root, resolved, inspect)
         handle = self.start_reference_import(
             root, proposal, prepare_preview=prepare_preview, fcp_scan=None, prepare_proxies=True
         )

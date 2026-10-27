@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import signal
@@ -143,3 +144,65 @@ def applescript_path_chooser(kind: str, timeout: float = DIALOG_TIMEOUT_SECONDS)
             ) from error
         finally:
             _stop_owned_helper(result, app)
+
+
+TK_CHOOSER_SCRIPT = Path(__file__).with_name("tk_chooser.py")
+"""macOS 밖의 선택 창을 여는 자식 스크립트 — 표준 라이브러리만 쓴다(W-46a)."""
+
+
+def native_chooser_available() -> bool:
+    """이 컴퓨터에서 「찾아보기」 창을 열 수 있는가 — macOS는 언제나, 그 밖은 tkinter가 있을 때.
+
+    tkinter는 import하지 않고 찾기만 한다(서버 프로세스에 Tk를 들이지 않는다). 없으면 화면이
+    「찾아보기」를 숨기고 경로 입력만 남긴다.
+    """
+    if sys.platform == "darwin":
+        return True
+    return importlib.util.find_spec("tkinter") is not None
+
+
+def tkinter_path_chooser(kind: str, timeout: float = DIALOG_TIMEOUT_SECONDS) -> str | None:
+    """tkinter 창 하나를 **따로 띄운 프로세스**에서 연다 — 고른 경로, 취소면 None, 실패는 사유.
+
+    `-I`(격리)로 띄워 작업 폴더의 같은 이름 파일이 표준 라이브러리를 가리지 못하게 한다.
+    """
+    if kind not in (WORKSPACE_KIND, FOLDER_KIND, VIDEO_KIND, SRT_KIND):
+        raise ChooserError(f"모르는 선택기 종류: {kind}")
+    try:
+        completed = subprocess.run(
+            [sys.executable, "-I", str(TK_CHOOSER_SCRIPT), kind],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        raise ChooserError("선택 창의 대기 시간이 끝났습니다. 경로 입력으로 열어 주세요.") from None
+    except OSError as error:
+        raise ChooserError(f"선택 창을 열 수 없습니다: {error}. 경로 입력을 이용하세요.") from error
+    return _tk_result(kind, completed)
+
+
+def _tk_result(kind: str, completed: subprocess.CompletedProcess[str]) -> str | None:
+    lines = completed.stdout.strip().splitlines()
+    if completed.returncode or not lines:
+        raise _failure(kind, completed)
+    try:
+        payload = json.loads(lines[-1])
+    except ValueError as error:
+        raise ChooserError(f"선택 창이 알 수 없는 답을 냈습니다: {lines[-1][:200]}") from error
+    if not isinstance(payload, dict):
+        raise ChooserError("선택 창이 잘못된 답을 냈습니다.")
+    if payload.get("error"):
+        raise ChooserError(f"경로 선택 오류({kind}): {payload['error']}. 경로 입력을 이용하세요.")
+    selected = payload.get("path")
+    if selected is not None and not isinstance(selected, str):
+        raise ChooserError("선택 창이 잘못된 경로를 반환했습니다.")
+    return selected or None
+
+
+def native_path_chooser(kind: str) -> str | None:
+    """운영체제에 맞는 선택 창 — macOS는 NSOpenPanel(osascript), 그 밖은 tkinter(W-46a)."""
+    if sys.platform == "darwin":
+        return applescript_path_chooser(kind)
+    return tkinter_path_chooser(kind)

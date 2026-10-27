@@ -397,7 +397,7 @@ def test_blocks_put_the_glossary_in_the_settings_drawer_and_wire_save_and_refres
         f for f in app.fns.values() if getattr(f.fn, "__name__", "") == "glossary_controls"
     ]
     # 작업공간을 열고·만들고·바꾸고·닫는 사건마다(영상 분석 모델 칸과 같다 — 닫기는 D64 세션 F)
-    assert len(refreshers) == 8
+    assert len(refreshers) == 11  # 폴더 불러오기 셋(W-46a — 단추 · Enter · 찾아보기 뒤)
     assert all(
         [block._id for block in f.outputs] == [box._id, status._id, loaded._id] for f in refreshers
     )

@@ -557,8 +557,8 @@ def test_bulk_confirm_moves_into_the_queue_with_the_same_handler(
         if d.get("trigger_after") == dep["id"] and d.get("js") == ui_facade.ACTIVITY_REPLY_JS
     ]
     assert len(tails) == 1  # 응답은 그대로 활동 칸으로 간다
-    handoff = buttons[FINALCUT_SEND_LABEL]
-    assert source.parent is handoff.parent  # 서랍·아코디언 안이 아니다
+    # 명령 줄의 숨은 원천이다 — 서랍·아코디언 안이 아니다(보내기 단추는 W-46a에 서랍으로 갔다).
+    assert source.parent is buttons[workspace_service.RENDER_EXPORT_LABEL].parent
     node = source.parent
     while node is not None:
         assert not isinstance(node, (gr.Accordion, gr.Sidebar))

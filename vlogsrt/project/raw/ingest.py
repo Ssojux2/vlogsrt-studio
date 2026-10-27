@@ -435,8 +435,15 @@ def _pruned_name(name: str) -> bool:
 
 
 def space_estimate(workspace_root: Path, copy_bytes: int) -> SpaceEstimate:
-    """복사 공간 견적 — 남은 공간이 필요량(여유 배수 포함)을 못 넘기면 부족하다."""
-    usage = shutil.disk_usage(workspace_root)
+    """복사 공간 견적 — 남은 공간이 필요량(여유 배수 포함)을 못 넘기면 부족하다.
+
+    작업공간이 아직 없으면(폴더 불러오기는 만들기 전에 스캔한다) 있는 가장 가까운 위 폴더의
+    디스크를 잰다 — 작업공간은 그 안에 생긴다.
+    """
+    present = workspace_root.expanduser().absolute()
+    while not present.exists() and present.parent != present:
+        present = present.parent
+    usage = shutil.disk_usage(present)
     required = int(copy_bytes * SPACE_HEADROOM) + 1
     return SpaceEstimate(
         copy_bytes=copy_bytes,

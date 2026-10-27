@@ -123,8 +123,8 @@ def test_close_returns_the_empty_page_and_forgets_the_saved_workspace(tmp_path: 
     )
     assert workspace_view[1] is None  # 서명 칸이 비었다 — 이 탭의 틱은 이제 건너뛴다
     shell, workbench = workspace_view[15], workspace_view[16]
-    assert "Final Cut 라이브러리를 불러오세요." in shell
-    assert "Final Cut 라이브러리를 불러오세요." in workbench
+    assert workspace_service.FOLDER_FIRST_NOTE in shell  # 폴더 작업대의 빈 화면(W-46a)
+    assert workspace_service.FOLDER_FIRST_NOTE in workbench
     assert "data-vl-closed" in workbench  # 머리줄의 닫기 단추를 숨기라는 표지
     assert f'data-vl-project="{ui_facade.PROJECT_EMPTY_LABEL}"' in workbench
     assert workspace_view[-3:] == ("", "", "")  # 경로 표시 셋도 빈다
@@ -132,7 +132,7 @@ def test_close_returns_the_empty_page_and_forgets_the_saved_workspace(tmp_path: 
     button, summary, _progress, note, usage = cells
     assert button.interactive is False  # 승인 단추는 누를 수 없다
     assert summary == ui_facade.literal_markdown(
-        "라이브러리를 불러오면 분석 범위와 요청 상한을 안내합니다."
+        "폴더를 불러오면 분석 범위와 요청 상한을 안내합니다."
     )
     assert note.visible is False and usage == ""
     assert list(memory) == [None] * CELLS  # 1초 틱의 「마지막으로 보낸 값」을 잊는다

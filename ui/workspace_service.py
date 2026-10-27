@@ -512,12 +512,128 @@ QUICK_APPROVED_TEXT = "선택한 영상의 분석을 시작했습니다. 추천 
 UNREVIEWED_KEYWORD = "제외 제안(미검토)"
 """보낸 파일의 미검토 제외 제안에 붙는 Final Cut 키워드 이름 — `finalcut_timeline`의
 `KEYWORD_UNREVIEWED`와 같다(시험)."""
-NO_WORKSPACE_TEXT = "작업공간이 열려 있지 않습니다. Final Cut 라이브러리를 먼저 불러오세요."
+NO_WORKSPACE_TEXT = "작업공간이 열려 있지 않습니다. 촬영 영상 폴더를 먼저 불러오세요."
+FOLDER_FIRST_NOTE = "촬영 영상 폴더를 불러오세요 — 명령 줄의 「폴더 불러오기」를 누릅니다."
+"""작업공간이 없을 때 재생기·작업대 자리의 안내(W-46a)."""
+FOLDER_IMPORT_LABEL = "폴더 불러오기"
+"""명령 줄의 첫 단추 — 왼쪽 서랍의 「폴더 불러오기」 칸을 연다(서버 호출 없음, W-46a)."""
+FOLDER_OPEN_ID = "vl-folder-open"
+FOLDER_PATH_ID = "vl-folder-path"
+FOLDER_BROWSE_LABEL = "찾아보기"
+FOLDER_BROWSE_ID = "vl-folder-browse"
+FOLDER_SUBMIT_LABEL = "이 폴더 불러오기"
+FOLDER_SUBMIT_ID = "vl-folder-submit"
+FOLDER_IMPORT_CONCURRENCY_ID = "folder-import"
+"""폴더 불러오기는 한 번에 하나 — 경로 칸 Enter · 단추 · 찾아보기가 같은 묶음이다."""
+FOLDER_PATH_INFO = (
+    "영상을 복사하지 않고 그 자리에서 읽습니다. 작업 파일은 폴더 안 `_vlogsrt/`에 둡니다"
+    "(쓸 수 없는 폴더면 옆의 `-vlogsrt` 폴더)."
+)
+FOLDER_IMPORT_STARTED_TEXT = (
+    "「{name}」 폴더를 불러옵니다 — 영상을 촬영 시각 순으로 연결하고 미리보기를 만듭니다."
+)
+RENDER_EXPORT_LABEL = "추천만 이어붙여 내보내기"
+"""명령 줄의 내보내기 단추(W-46a, D100 §7a) — 추천(초록)만 이은 초안 영상 + SRT + 보고서."""
+RENDER_EXPORT_ID = "vl-render-export"
+RENDER_EXPORT_STARTED_TEXT = (
+    "추천 구간만 이어붙인 초안을 만듭니다 — 끝나면 견적 칸 아래에 결과 카드가 뜹니다."
+)
+RENDER_EXPORT_ATTACHED_TEXT = "이미 초안을 만드는 중입니다 — 끝나면 결과 카드가 뜹니다."
+RENDER_EXPORT_OPEN_LABEL = "초안 폴더 열기"
+RENDER_EXPORT_OPEN_ID = "vl-export-open"
+RENDER_EXPORT_CARD_ID = "vl-export-card"
+FOLDER_OPEN_JS = """() => {
+    if (window.__vlDrawer) { window.__vlDrawer('project-tools', true); }
+    setTimeout(function () {
+        var box = document.querySelector('#vl-folder-path textarea, #vl-folder-path input');
+        if (box) { box.focus(); }
+    }, 50);
+}"""
+"""명령 줄 「폴더 불러오기」의 실행본 — 왼쪽 서랍을 열고 경로 칸에 초점을 둔다(서버 호출 없음)."""
+FINALCUT_ADVANCED_LABEL = "고급 · Final Cut"
+"""Final Cut 라이브러리 불러오기·FCPXML 보내기를 모은 서랍 칸(W-46a) — 코드는 그대로 남는다."""
+FINALCUT_ADVANCED_ID = "vl-finalcut-advanced"
+FINALCUT_LIBRARY_LABEL = "Final Cut 라이브러리 불러오기"
+TIER_CRITERIA_LABEL = "추천 기준"
+TIER_CRITERIA_ID = "vl-tier-criteria"
+TIER_RESET_LABEL = "기본값"
+TIER_RESET_ALL_LABEL = "모두 기본값으로"
+TIER_APPLY_LABEL = "적용"
+TIER_DEFAULT_TEXT = "기본 기준으로 매깁니다. 바꾸고 「적용」을 누르면 이 작업공간에만 쓰입니다."
+TIER_CHANGED_TEXT = "**기준 바꿈** — 기본과 다른 칸: {fields}."
+TIER_APPLIED_TEXT = (
+    "적용했습니다 — 등급을 새 기준으로 다시 매겼습니다. 사람이 정한 표시는 그대로입니다."
+)
+TIER_PENDING_TEXT = "칸을 바꿨습니다 — 「적용」을 눌러야 등급에 쓰입니다."
+
+
+@dataclass(frozen=True)
+class TierCriterionField:
+    """「추천 기준」 서랍의 칸 하나 — 서비스 칸 이름 · 쉬운 이름 · 짧은 도움말 · 칸 모양."""
+
+    key: str
+    label: str
+    info: str
+    kind: str
+    """`number` · `toggle` · `choices`(낱말 목록)."""
+
+
+TIER_CRITERIA_FIELDS: tuple[TierCriterionField, ...] = (
+    TierCriterionField(
+        "recommended_min_seconds",
+        "추천 최소 길이(초)",
+        "이보다 짧은 추천 구간은 보통으로 둡니다. 0이면 끕니다.",
+        "number",
+    ),
+    TierCriterionField(
+        "speech_density_green",
+        "말 많음 기준(0–1)",
+        "구간 길이 중 확인된 말의 몫이 이 값 이상이면 「말 많음」입니다.",
+        "number",
+    ),
+    TierCriterionField(
+        "silence_min_seconds",
+        "자막 공백 길이(초)",
+        "자막 없는 구간이 이보다 길면 공백입니다 — 풍경이 아니면 비추천이 됩니다.",
+        "number",
+    ),
+    TierCriterionField(
+        "usable_speech_green",
+        "쓸 만한 화면 + 말 많음 → 추천",
+        "AI가 「쓸 만함」이라 본 화면에서 말이 많으면 추천합니다.",
+        "toggle",
+    ),
+    TierCriterionField(
+        "scenery_green",
+        "좋은 화면 + 자막 공백(풍경) → 추천",
+        "AI가 「추천」이라 본 화면은 말이 없어도 추천합니다.",
+        "toggle",
+    ),
+    TierCriterionField(
+        "good_sparse_green",
+        "좋은 화면 + 말 적음 → 추천",
+        "AI가 「추천」이라 본 화면은 말이 적어도 추천합니다.",
+        "toggle",
+    ),
+    TierCriterionField(
+        "segment_green_share",
+        "조각 추천 몫(0–1)",
+        "검토 조각에서 추천 구간이 이 몫 이상이면 조각 전체를 추천합니다.",
+        "number",
+    ),
+    TierCriterionField(
+        "visual_issue_caps",
+        "추천을 막는 화면 문제",
+        "고른 문제가 1초 이상 겹친 추천 구간은 보통으로 내립니다.",
+        "choices",
+    ),
+)
+"""화면이 보이는 추천 기준 — 서비스 `EDITABLE_TIER_KEYS` 여덟과 같은 칸·같은 차례다(시험)."""
 FINALCUT_SEND_STARTED_TEXT = (
     "원본 전체를 촬영 시각 순 타임라인 하나로 만들어 Final Cut으로 보냅니다 — 지우는 것은"
     " 없고, 사람이 확인한 제외만 끈 채로 갑니다."
 )
-LIBRARY_FIRST_TEXT = "라이브러리를 먼저 불러오세요."
+LIBRARY_FIRST_TEXT = "폴더를 먼저 불러오세요."
 """라이브러리가 닫혀 있을 때 명령 줄의 취소·보내기 단추가 활동 칸에 하는 답(W-24 세션 J)."""
 WORKBENCH_LOADING_TEXT = "작업대를 불러오는 중입니다."
 """조립 때 작업대의 처음 값 — 페이지 로드가 진짜 값으로 갈기 전의 자리표시(W-24 세션 J)."""
@@ -939,6 +1055,50 @@ def open_in_final_cut(path: Path) -> None:
         raise raw_service.RawWorkspaceError(
             "FCPXML은 만들었지만 Final Cut을 열지 못했습니다: " + result.stderr[:200]
         )
+
+
+def _folder_from_text(path_text: str | None) -> Path:
+    """「폴더 불러오기」 칸의 글 → 폴더 경로. 비었거나 상대 경로·없는 폴더·Final Cut 라이브러리면
+    사유를 실은 화면 오류다(W-46a). 붙여 넣은 따옴표는 걷는다."""
+    text = (path_text or "").strip().strip("\"'").strip()
+    if not text:
+        raise gr.Error("불러올 촬영 영상 폴더의 경로를 적거나 「찾아보기」로 고르세요.")
+    path = Path(text).expanduser()
+    if not path.is_absolute():
+        raise gr.Error(f"폴더의 전체 경로를 적으세요(지금은 상대 경로입니다): {text}")
+    if raw_service.is_fcp_library(path):
+        raise gr.Error(
+            "Final Cut 라이브러리입니다 — 설정 서랍의 「고급 · Final Cut」에서 불러오세요."
+        )
+    if not path.is_dir():
+        raise gr.Error(f"폴더가 없습니다: {path}")
+    return path
+
+
+def _tier_text(value: object) -> str:
+    """추천 기준 값의 쉬운 글 — 참·거짓은 켬·끔, 목록은 쉬운 이름을 잇는다(빈 목록은 없음)."""
+    if isinstance(value, bool):
+        return "켬" if value else "끔"
+    if isinstance(value, list):
+        choices = raw_service.tier_criteria_choices()["visual_issue_caps"]
+        labels = {kind: label for label, kind in choices}
+        return "·".join(labels.get(str(item), str(item)) for item in value) or "없음"
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value)
+
+
+def _tier_input(spec: TierCriterionField, value: object) -> object:
+    """화면 칸 값 → 서비스 덮기 값. 빈 수 칸은 사유와 함께 거절한다(값역 검사는 서비스가 한다)."""
+    if spec.kind == "toggle":
+        return bool(value)
+    if spec.kind == "choices":
+        kinds = [kind for _label, kind in raw_service.tier_criteria_choices()[spec.key]]
+        chosen = {str(item) for item in value} if isinstance(value, (list, tuple)) else set()
+        return [kind for kind in kinds if kind in chosen]
+    if value is None or isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"「{spec.label}」에 수를 넣으세요.")
+    return float(value)
 
 
 def _toast(level: str, message: str) -> None:
@@ -1737,6 +1897,7 @@ class RawWorkspaceUi:
         caption_providers: Callable[[], tuple[object, object]] | None = None,
         path_chooser: ui_chooser.PathChooser | None = None,
         parallel_analysis_limit: int | None = None,
+        folder_opener: Callable[[Path], None] | None = None,
     ) -> None:
         self.port = port
         self.raw = raw_service.RawWorkspaceService()
@@ -1745,7 +1906,12 @@ class RawWorkspaceUi:
         self.state_path = state_path if state_path is not None else default_state_path()
         self._inspector = inspector  # None이면 서비스 기본(ffprobe). 시험은 가짜 조사자를 넣는다.
         # 네이티브 경로 선택기 — 화면은 직접 입력 경로를 받지 않는다. 시험은 가짜를 넣는다.
-        self._path_chooser = path_chooser or ui_chooser.applescript_path_chooser
+        self._path_chooser = path_chooser or ui_chooser.native_path_chooser
+        # 「찾아보기」를 보일까 — 주입한 선택기가 있거나 이 컴퓨터가 창을 열 수 있을 때(W-46a).
+        # 없으면(tkinter 없는 리눅스 등) 단추를 숨기고 경로 입력만 남긴다.
+        self._chooser_available = path_chooser is not None or ui_chooser.native_chooser_available()
+        # 초안 폴더를 여는 경계 — 시험은 가짜를 넣는다(실제는 `os_open.open_folder`).
+        self._folder_opener = folder_opener
         # 네이티브 대화상자는 한 번에 하나 — 서버 자물쇠가 보장한다(화면 단추의 공유
         # 동시성 묶음과 짝이다. 종류가 달라도 대화상자가 겹치지 않는다).
         self._chooser_lock = threading.Lock()
@@ -1873,6 +2039,16 @@ class RawWorkspaceUi:
         self._source_box: gr.Textbox | None = None
         self._caption_path_box: gr.Textbox | None = None
         self._project_name_box: gr.Textbox | None = None
+        # 폴더 불러오기 칸(W-46a) — 경로 입력(어느 운영체제에서나) · 찾아보기 · 불러오기.
+        self._folder_path_box: gr.Textbox | None = None
+        self._folder_browse_button: gr.Button | None = None
+        self._folder_submit_button: gr.Button | None = None
+        # 추천 기준 칸(W-46a) — `TIER_CRITERIA_FIELDS` 차례, 상태 줄.
+        self._tier_fields: list[Any] = []
+        self._tier_status_md: gr.Markdown | None = None
+        # 초안 결과 카드와 그 「초안 폴더 열기」(W-46a).
+        self._export_card_html: gr.HTML | None = None
+        self._export_open_button: gr.Button | None = None
         self._fcp_role_dd: gr.Dropdown | None = None
         # 「영상 분석 모델」 칸과 상태 줄 — 작업공간이 바뀔 때마다 그 작업공간의 저장값으로 맞춘다.
         self._analysis_model_dd: gr.Dropdown | None = None
@@ -1884,6 +2060,7 @@ class RawWorkspaceUi:
         self._glossary_warned: set[str] = set()
         # 1초 상태 틱 하나와 칸마다 이 세션이 마지막으로 보낸 값(D63 세션 C).
         self._status_timer: gr.Timer | None = None
+        self._draw_timer: gr.Timer | None = None  # 2초 그리기 타이머(작업대 · 초안 카드)
         self._status_sent: tuple[gr.State, ...] = ()
         self._choose_event: Any = None
         # 선택기·조사 단추 참조 — 배선 증명은 실제 Blocks 의존성(app.config)이 한다.
@@ -1967,10 +2144,25 @@ class RawWorkspaceUi:
         return payload if isinstance(payload, dict) else {}
 
     def _write_state(self, root: Path) -> None:
+        """마지막 작업공간을 적는다 — 다른 기록(마지막 폴더)은 그대로 둔다."""
+        state = self._read_state()
+        state["workspace_root"] = str(root)
         self.state_path.write_text(
-            json.dumps({"workspace_root": str(root)}, ensure_ascii=False, indent=2),
-            encoding="utf-8",
+            json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8"
         )
+
+    def _remember_folder(self, folder: Path) -> None:
+        """마지막으로 불러온 촬영 영상 폴더 — 다음에 「폴더 불러오기」 칸이 이 경로로 열린다."""
+        state = self._read_state()
+        state["last_folder"] = str(folder)
+        self.state_path.write_text(
+            json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+
+    def last_folder_value(self) -> str:
+        """「폴더 불러오기」 칸의 처음 값 — 화면을 열 때마다 마지막 폴더를 다시 읽는다."""
+        value = self._read_state().get("last_folder", "")
+        return value if isinstance(value, str) else ""
 
     def _forget_state(self) -> None:
         """마지막 작업공간 기록을 지운다 — 닫은 뒤 서버를 다시 띄우면 빈 화면이다(D64 세션 F)."""
@@ -2307,15 +2499,67 @@ class RawWorkspaceUi:
 
     # ── 화면 1 — 프로젝트 · 가져오기 ───────────────────────────
 
-    def _project_tab(self) -> tuple[gr.Button, gr.Button]:
-        """프로젝트 · 가져오기 도구 — 왼쪽 서랍(무대 위에 겹친다). 전환 단추를 돌려준다.
+    def _folder_import_panel(self) -> None:
+        """「폴더 불러오기」 칸(W-46a) — 경로 입력 · 찾아보기(선택 창) · 불러오기.
 
-        경로는 **선택기로만** 정해진다 — 경로 칸은 전부 읽기전용 표시다(직접 입력 없음).
+        경로 입력은 어느 운영체제에서나 된다. 「찾아보기」는 선택 창을 열 수 있을 때만 보인다
+        (macOS는 NSOpenPanel, 그 밖은 tkinter — 없으면 숨긴다). 배선은 `build_blocks`가 한다.
+        """
+        with gr.Group(elem_id="vl-folder-import"):
+            self._folder_path_box = gr.Textbox(
+                value=self.last_folder_value,
+                label="촬영 영상 폴더",
+                info=FOLDER_PATH_INFO,
+                placeholder="/Users/나/Movies/제주 여행  또는  D:\\촬영\\제주 여행",
+                elem_id=FOLDER_PATH_ID,
+            )
+            with gr.Row():
+                self._folder_browse_button = gr.Button(
+                    FOLDER_BROWSE_LABEL, visible=self._chooser_available, elem_id=FOLDER_BROWSE_ID
+                )
+                self._folder_submit_button = gr.Button(
+                    FOLDER_SUBMIT_LABEL, variant="primary", elem_id=FOLDER_SUBMIT_ID
+                )
+
+    def folder_browse_view(self) -> str:
+        """「찾아보기」 — 선택 창으로 고른 폴더 경로를 칸에 넣는다. 취소는 아무것도 안 바꾼다."""
+        chosen = self._pick_path(ui_chooser.FOLDER_KIND)
+        if chosen is None:
+            raise gr.Error("취소 — 지금 작업공간을 그대로 둔다.")
+        return chosen
+
+    def folder_import_view(self, path_text: str) -> tuple:
+        """「이 폴더 불러오기」(W-46a, D100 §2) — 스캔 → 작업공간 → 참조 불러오기 → 그것을 연다.
+
+        영상이 없는 폴더는 작업공간을 만들기 전에 거절한다(빈 `_vlogsrt`를 남기지 않는다). 원본은
+        복사하지 않는다. 답은 (활동 칸 답, 작업공간 전체 보기, FCP 연결 칸)이다.
+        """
+        folder = _folder_from_text(path_text)
+        inspect = self._inspector or raw_service.ffprobe_media_inspector
+        try:
+            status, handle = self.raw.start_folder_import(folder, inspect)
+        except raw_service.RawWorkspaceError as error:
+            raise gr.Error(str(error)) from error
+        del handle  # 진행은 작업 목록(활동 칸 · 「기록」 판)이 보인다
+        root = Path(status.workspace_root)
+        self._remember(root)
+        self._remember_folder(folder)
+        self._adopt_default_model(root)
+        message = FOLDER_IMPORT_STARTED_TEXT.format(name=folder.name)
+        return (message, *self.workspace_view_values(), *self.capcut_fcp_panel_view())
+
+    def _project_tab(self) -> tuple[gr.Button, gr.Button]:
+        """프로젝트 · 폴더 불러오기 — 왼쪽 서랍(무대 위에 겹친다). 전환 단추를 돌려준다.
+
+        맨 위는 「폴더 불러오기」(W-46a) — 경로 입력(어느 운영체제에서나)과 「찾아보기」(선택 창).
+        그 아래 작업공간 열기·만들기의 경로는 선택기로 정하고, Final Cut 라이브러리는 접힌
+        「고급 · Final Cut」 안이다.
         """
         with gr.Sidebar(
             open=False, position="left", width=440, elem_id="project-tools"
         ) as self._project_tools:
-            self._drawer_head("프로젝트 · 라이브러리 가져오기", "project-tools")
+            self._drawer_head("프로젝트 · 폴더 불러오기", "project-tools")
+            self._folder_import_panel()
             self._workspace_md = gr.Markdown(self.workspace_markdown(), visible=False)
             with gr.Row():
                 self._ws_path_box = gr.Textbox(
@@ -2333,7 +2577,6 @@ class RawWorkspaceUi:
                     scale=6,
                 )
                 create_button = gr.Button("새 프로젝트", scale=2)
-                self._fcp_primary_button = gr.Button("Final Cut 라이브러리에서 가져오기", scale=3)
             with gr.Row():
                 self._direct_project_path = gr.Textbox(
                     label="선택 창이 안 뜨면 경로 붙여넣기",
@@ -2341,13 +2584,17 @@ class RawWorkspaceUi:
                     scale=6,
                 )
                 self._direct_project_open = gr.Button("경로로 열기", scale=2)
-            self._fcp_originals_group = gr.CheckboxGroup(
-                label="가져올 오리지널 영상", choices=[], interactive=True, visible=False
-            )
-            self._fcp_primary_info = gr.Markdown(visible=False)
-            self._fcp_primary_import = gr.Button(
-                "선택한 오리지널 연결", visible=False, variant="primary"
-            )
+            # Final Cut 라이브러리 가져오기(W-46a) — 주 흐름은 폴더다. 코드·배선은 그대로 두고
+            # 접힌 칸으로 옮겼다. 고르면 오리지널 목록이 이 칸 안에 뜬다.
+            with gr.Accordion(FINALCUT_ADVANCED_LABEL, open=False):
+                self._fcp_primary_button = gr.Button("Final Cut 라이브러리에서 가져오기")
+                self._fcp_originals_group = gr.CheckboxGroup(
+                    label="가져올 오리지널 영상", choices=[], interactive=True, visible=False
+                )
+                self._fcp_primary_info = gr.Markdown(visible=False)
+                self._fcp_primary_import = gr.Button(
+                    "선택한 오리지널 연결", visible=False, variant="primary"
+                )
 
             with gr.Accordion("폴더 · SD · Final Cut 가져오기", open=False):
                 gr.Markdown("---")
@@ -2980,7 +3227,7 @@ class RawWorkspaceUi:
         root = self._snapshot_root()
         pending = self._library_pending(root) if root else None
         if root is None or pending is None:
-            return "라이브러리를 불러오면 분석 범위와 요청 상한을 안내합니다."
+            return "폴더를 불러오면 분석 범위와 요청 상한을 안내합니다."
         ids, quote = pending
         return self._library_summary_for(root, quote, ids)
 
@@ -4515,7 +4762,8 @@ class RawWorkspaceUi:
         """
         with gr.Row(elem_id="vl-command-bar"):
             self._choose_button = gr.Button("영상 선택", visible=False)
-            self._quick_library_button = gr.Button("라이브러리 불러오기")
+            # 「폴더 불러오기」(W-46a) — 왼쪽 서랍의 폴더 칸을 연다(실행본만, 서버 호출 없음).
+            self._folder_open_button = gr.Button(FOLDER_IMPORT_LABEL, elem_id=FOLDER_OPEN_ID)
             self._automatic_button = gr.Button("자동 정리", visible=False)
             self._library_approve_button = gr.Button(
                 LIBRARY_APPROVE_LABEL,
@@ -4526,8 +4774,11 @@ class RawWorkspaceUi:
             )
             self._cancel_button = gr.Button("선택 분석 취소", scale=0)
             self._cancel_all_button = gr.Button("전체 분석 취소", scale=0, variant="stop")
-            self._handoff_button = gr.Button(FINALCUT_SEND_LABEL)
-            self._srt_handoff_button = gr.Button(FINALCUT_SRT_SEND_LABEL, scale=0)
+            # 「추천만 이어붙여 내보내기」(W-46a, D100 §7a) — Final Cut 보내기 둘은 서랍의
+            # 「고급 · Final Cut」으로 옮겼다(`_finalcut_panel`).
+            self._render_export_button = gr.Button(
+                RENDER_EXPORT_LABEL, variant="primary", elem_id=RENDER_EXPORT_ID
+            )
             # 일괄 확인의 원천 — 화면의 단추는 제외 제안 대기열의 「남은 M개 모두 제외 유지」이고,
             # 그것이 이 숨은 단추를 누른다(옛 「자동 제외 확인」의 처리기·입출력 그대로, D57 C).
             self._confirm_auto_button = gr.Button(
@@ -4588,6 +4839,16 @@ class RawWorkspaceUi:
                     latex_delimiters=[],
                 )
                 self._quote_note_md = gr.Markdown(note, elem_id="vl-quote-note", visible=bool(note))
+                # 초안 결과 카드(W-46a, D100 §7a) — 내보낸 적이 없으면 빈 글이다(자리 없음).
+                self._export_card_html = gr.HTML(
+                    "", elem_id=RENDER_EXPORT_CARD_ID, apply_default_css=False
+                )
+                self._export_open_button = gr.Button(
+                    RENDER_EXPORT_OPEN_LABEL,
+                    visible=False,
+                    size="sm",
+                    elem_id=RENDER_EXPORT_OPEN_ID,
+                )
 
     def _initial_workbench_values(self) -> tuple[str, str]:
         """조립 때의 (껍데기, 본문) — 미디어 주소 없는 자리표시. 페이지 로드가 곧 갈아 끼운다."""
@@ -4751,25 +5012,119 @@ class RawWorkspaceUi:
         )
         automatic.then(lambda: False, None, self._capcut_approval)
         self._report_activity(automatic, status)
-        # SRT 고르기는 네이티브 대화상자다 — 다른 선택기 단추와 같은 동시성 묶음(한 번에 하나).
-        srt_send = self._srt_handoff_button.click(
-            self.finalcut_srt_send_view,
-            self._signature_state,
-            status,
-            api_name=False,
-            concurrency_id=ui_chooser.CHOOSER_CONCURRENCY_ID,
-            concurrency_limit=1,
-        )
-        self._report_activity(srt_send, status)
+        self._folder_open_button.click(None, None, None, js=FOLDER_OPEN_JS, queue=False)
         for button, handler, target in (
-            (self._handoff_button, self.finalcut_send_view, status),
             (self._confirm_auto_button, self.capcut_confirm_auto_view, outputs),
             (self._cancel_button, self.capcut_cancel_view, status),
             (self._cancel_all_button, self.capcut_cancel_all_view, status),
         ):
             self._report_activity(button.click(handler, self._signature_state, target), status)
         self._wire_review_timers(outputs)
+        self._wire_render_export()
         self._wire_approval_mode()
+
+    def _wire_render_export(self) -> None:
+        """「추천만 이어붙여 내보내기」 · 결과 카드 · 「초안 폴더 열기」(W-46a, D100 §7a).
+
+        카드는 2초 그리기 타이머(작업대와 같은 타이머)가 그 작업공간의 마지막 내보내기 작업
+        (아이디, 상태)가 바뀐 틱에서만 다시 그린다(탭마다 기억 — D64와 같은 꼴). 누른 직후에도 한 번
+        그려 「만드는 중」을 바로 보인다.
+        """
+        assert self._export_card_html is not None and self._export_open_button is not None
+        assert self._draw_timer is not None  # `_wire_review_timers`가 먼저 만든다
+        status = self._capcut_status
+        shown = gr.State(None)
+        card = [self._export_card_html, self._export_open_button, shown]
+        started = self._render_export_button.click(
+            self.render_export_view, self._signature_state, status, concurrency_limit=1
+        )
+        self._report_activity(started, status)
+        started.then(
+            self.render_export_card_tick,
+            [self._signature_state, shown],
+            card,
+            show_progress="hidden",
+        )
+        opened = self._export_open_button.click(
+            self.render_export_open_view, self._signature_state, status
+        )
+        self._report_activity(opened, status)
+        self._draw_timer.tick(
+            self.render_export_card_tick,
+            [self._signature_state, shown],
+            card,
+            queue=False,
+            show_progress="hidden",
+        )
+
+    def render_export_view(self, signature: str | None) -> str:
+        """「추천만 이어붙여 내보내기」 — 초안 렌더 작업을 건다(무료 로컬). 끝은 결과 카드가 보인다.
+
+        확인하지 않은 비추천이 있어도 막지 않는다 — 빠진 구간은 보고서와 카드 경고가 말한다
+        (사용자 결정 2026-10-27, D100). 이미 만드는 중이면 그 작업에 다시 붙는다.
+        """
+        closed = self._library_first_reply()
+        if closed is not None:
+            return closed
+        root = self._require_current_selection(signature)
+        try:
+            handle = self.raw.start_render_export(root)
+        except raw_service.RawWorkspaceError as error:
+            raise gr.Error(str(error)) from error
+        return RENDER_EXPORT_ATTACHED_TEXT if handle.reattached else RENDER_EXPORT_STARTED_TEXT
+
+    def render_export_card_tick(self, signature: str | None, shown: tuple | None) -> tuple:
+        """결과 카드 — (카드 글, 「초안 폴더 열기」, 새 열쇠). 열쇠가 같으면 보내지 않는다.
+
+        작업공간이 닫혔으면 카드를 비운다. 다른 작업공간을 보는 옛 탭은 건너뛴다.
+        """
+        root = self._snapshot_root()
+        if root is None:
+            if shown is None:
+                return gr.skip(), gr.skip(), gr.skip()
+            return "", gr.Button(visible=False), None
+        if not signature or signature != self._signature_for(root):
+            return gr.skip(), gr.skip(), gr.skip()
+        latest = self.raw.latest_job(root, raw_service.RENDER_EXPORT_JOB_KIND)
+        key = (signature, latest.job_id if latest else None, latest.status if latest else None)
+        if key == shown:
+            return gr.skip(), gr.skip(), gr.skip()
+        text, ready = self._render_export_card(root, latest)
+        return text, gr.Button(visible=ready), key
+
+    def _render_export_card(self, root: Path, latest: Any) -> tuple[str, bool]:
+        """카드 글과 「초안 폴더 열기」를 보일지 — 마지막으로 다 낸 초안 + 도는 중·실패 줄."""
+        running = latest is not None and latest.status in raw_service.ACTIVE_JOB_STATUSES
+        failure = latest.error if latest is not None and latest.status == "failed" else None
+        try:
+            summary = self.raw.latest_render_export(root)
+        except (raw_service.RawWorkspaceError, OSError, ValueError) as error:
+            # 카드는 표시만 한다 — 못 읽으면 사유를 카드에 싣고 그리기를 막지 않는다.
+            log.warn(f"초안 결과를 읽지 못했습니다: {error}")
+            summary, failure = None, failure or f"결과를 읽지 못했습니다 — {error}"
+        card = ui_facade.render_export_card_html(summary, running=running, failure=failure)
+        return card, summary is not None
+
+    def render_export_open_view(self, signature: str | None) -> str:
+        """「초안 폴더 열기」 — 마지막 초안 폴더가 이 작업공간 안일 때만 파일 관리자로 연다."""
+        root = self._require_current_selection(signature)
+        summary = self.raw.latest_render_export(root)
+        if summary is None:
+            raise gr.Error("아직 내보낸 초안이 없습니다 — 「추천만 이어붙여 내보내기」를 누르세요.")
+        folder = Path(str(summary["folder"])).resolve()
+        if root.expanduser().resolve() not in folder.parents or not folder.is_dir():
+            raise gr.Error(f"초안 폴더가 작업공간 안에 없습니다: {folder}")
+        opener = self._folder_opener or self._system_folder_open
+        opener(folder)
+        return f"초안 폴더를 열었습니다: `{folder}`"
+
+    @staticmethod
+    def _system_folder_open(target: Path) -> None:
+        """실제 폴더 열기 — macOS Finder · Windows 탐색기 · 그 밖 `xdg-open`(`ui/os_open`)."""
+        try:
+            os_open.open_folder(target)
+        except OSError as error:
+            raise gr.Error(f"폴더를 열지 못했습니다: {error}") from error
 
     def _wire_approval_mode(self) -> None:
         """「승인 범위」 — 사람이 고르면(`input`) 저장하고 견적 문구를 바로 다시 그린다.
@@ -4824,7 +5179,9 @@ class RawWorkspaceUi:
         self._status_timer = gr.Timer(1)
         self._status_sent = tuple(gr.State(None) for _cell in STATUS_SENT_CELLS)
         drawn = gr.State(None)  # 이 탭이 마지막으로 그린 열쇠(D64)
-        gr.Timer(2).tick(
+        # 2초 그리기 타이머 — 초안 결과 카드(W-46a)도 이 타이머에 붙는다(타이머를 늘리지 않는다).
+        self._draw_timer = gr.Timer(2)
+        self._draw_timer.tick(
             self.capcut_tick_view,
             [self._signature_state, drawn],
             [*outputs, drawn],
@@ -4840,8 +5197,9 @@ class RawWorkspaceUi:
         with gr.Sidebar(open=False, position="right", width=560, elem_id="settings-drawer"):
             self._drawer_head("설정 · 고급 도구", "settings-drawer")
             quick_api_panel, quick_api_key = self._quick_api_panel()
+            self._tier_criteria_panel()
             self._glossary_panel()
-            self._finalcut_drop_panel()
+            self._finalcut_panel()
             self._context_review_panel()
             with gr.Accordion("분석 실행 설정", open=False, visible=False):
                 primary_network = gr.Dropdown(
@@ -4864,9 +5222,179 @@ class RawWorkspaceUi:
         self._wire_status_tick()  # 용어집 칸까지 지어진 뒤 — 1초 틱의 칸이 다 있다
         return advanced
 
+    def _tier_criteria_panel(self) -> None:
+        """「추천 기준」(W-46a, D100 §3) — 작업공간마다 덮는 추천 기준 여덟 칸 · 기본값 · 적용.
+
+        칸을 바꾸거나 「기본값」을 눌러도 화면만 바뀐다 — 쓰는 곳은 「적용」 하나다(검사를 지난
+        덮기만 저장하고 등급을 다시 매긴다). 무료이고 지문·견적·승인 밖이다.
+        """
+        with gr.Accordion(TIER_CRITERIA_LABEL, open=False, elem_id=TIER_CRITERIA_ID):
+            self._tier_status_md = gr.Markdown(
+                self.tier_criteria_status, elem_id=f"{TIER_CRITERIA_ID}-status"
+            )
+            resets = []
+            for spec in TIER_CRITERIA_FIELDS:
+                with gr.Row(equal_height=True):
+                    self._tier_fields.append(self._tier_field(spec))
+                    resets.append(
+                        gr.Button(
+                            TIER_RESET_LABEL,
+                            size="sm",
+                            scale=0,
+                            min_width=72,
+                            elem_id=f"{TIER_CRITERIA_ID}-reset-{spec.key}",
+                        )
+                    )
+            with gr.Row():
+                reset_all = gr.Button(TIER_RESET_ALL_LABEL, elem_id=f"{TIER_CRITERIA_ID}-reset-all")
+                apply = gr.Button(
+                    TIER_APPLY_LABEL, variant="primary", elem_id=f"{TIER_CRITERIA_ID}-apply"
+                )
+        self._wire_tier_criteria(resets, reset_all, apply)
+
+    def _tier_field(self, spec: TierCriterionField) -> Any:
+        """칸 하나 — 처음 값은 화면을 열 때마다 지금 작업공간의 값이다(작업공간이 없으면 빈 칸)."""
+        value = lambda key=spec.key: self.tier_field_value(key)  # noqa: E731 - 칸마다 다시 읽는다
+        elem_id = f"{TIER_CRITERIA_ID}-{spec.key}"
+        if spec.kind == "toggle":
+            return gr.Checkbox(value=value, label=spec.label, info=spec.info, elem_id=elem_id)
+        if spec.kind == "choices":
+            return gr.CheckboxGroup(
+                choices=raw_service.tier_criteria_choices()[spec.key],
+                value=value,
+                label=spec.label,
+                info=spec.info,
+                elem_id=elem_id,
+            )
+        return gr.Number(value=value, label=spec.label, info=spec.info, elem_id=elem_id)
+
+    def _wire_tier_criteria(self, resets: list[Any], reset_all: Any, apply: Any) -> None:
+        assert self._tier_status_md is not None
+        status = self._tier_status_md
+        for spec, field, reset in zip(TIER_CRITERIA_FIELDS, self._tier_fields, resets, strict=True):
+            reset.click(
+                lambda key=spec.key: self.tier_default_value(key),
+                None,
+                field,
+                queue=False,
+                show_progress="hidden",
+            ).then(lambda: TIER_PENDING_TEXT, None, status, queue=False, show_progress="hidden")
+        reset_all.click(self.tier_defaults_view, None, [status, *self._tier_fields], queue=False)
+        apply.click(
+            self.tier_apply_view,
+            [self._signature_state, *self._tier_fields],
+            [status, *self._tier_fields],
+            concurrency_limit=1,
+        )
+
+    def _tier_view(self, root: Path | None = None) -> dict[str, Any] | None:
+        root = root if root is not None else self._snapshot_root()
+        if root is None:
+            return None
+        try:
+            return self.raw.tier_settings_view(root)
+        except raw_service.RawWorkspaceError as error:
+            log.warn(f"추천 기준을 읽지 못했습니다: {error}")
+            return None
+
+    def tier_field_value(self, key: str) -> Any:
+        """칸의 지금 값 — 작업공간이 없으면 None(빈 칸)."""
+        view = self._tier_view()
+        return None if view is None else view["values"][key]
+
+    def tier_default_value(self, key: str) -> Any:
+        """「기본값」 — 그 칸만 기본값으로(저장하지 않는다)."""
+        view = self._tier_view()
+        if view is None:
+            raise gr.Error(NO_WORKSPACE_TEXT)
+        return view["defaults"][key]
+
+    def tier_defaults_view(self) -> tuple[Any, ...]:
+        """「모두 기본값으로」 — 칸을 모두 기본값으로(저장은 「적용」이 한다)."""
+        view = self._tier_view()
+        if view is None:
+            raise gr.Error(NO_WORKSPACE_TEXT)
+        values = [view["defaults"][spec.key] for spec in TIER_CRITERIA_FIELDS]
+        return (TIER_PENDING_TEXT, *values)
+
+    def tier_criteria_status(self, root: Path | None = None) -> str:
+        """상태 줄 — 기본인지, 바꿨다면 어느 칸을 무엇으로(기본값과 함께), 저장값을 못 읽었는지."""
+        view = self._tier_view(root)
+        if view is None:
+            return ""
+        labels = {spec.key: spec.label for spec in TIER_CRITERIA_FIELDS}
+        changed = [
+            f"{labels.get(key, key)} {_tier_text(value)}(기본 {_tier_text(view['defaults'][key])})"
+            for key, value in view["overrides"].items()
+        ]
+        line = (
+            TIER_CHANGED_TEXT.format(fields=" · ".join(changed)) if changed else TIER_DEFAULT_TEXT
+        )
+        if view.get("stored_error"):
+            line += f"\n\n저장된 기준을 읽지 못해 기본으로 매깁니다 — {view['stored_error']}"
+        return line
+
+    def tier_criteria_controls(self) -> tuple[Any, ...]:
+        """작업공간을 열거나 바꾼 뒤 — 상태 줄과 칸을 그 작업공간의 값으로 맞춘다(저장 없음)."""
+        view = self._tier_view()
+        values = [None if view is None else view["values"][s.key] for s in TIER_CRITERIA_FIELDS]
+        return (self.tier_criteria_status(), *values)
+
+    def tier_apply_view(self, signature: str | None, *values: Any) -> tuple[Any, ...]:
+        """「적용」 — 화면 칸을 덮기로 바꿔 저장하고 등급을 다시 매긴다. 틀린 값은 쓰지 않는다.
+
+        보이지 않는 칸의 덮기(서비스로만 바꾼 것)는 그대로 둔다. 기본값과 같은 칸은 덮기에서 뺀다.
+        거부되면 사유를 상태 줄에 싣고 칸은 그대로 둔다(고쳐서 다시 누른다).
+        """
+        root = self._require_current_selection(signature)
+        view = self.raw.tier_settings_view(root)
+        overrides = dict(view["overrides"])
+        try:
+            for spec, value in zip(TIER_CRITERIA_FIELDS, values, strict=True):
+                shown = _tier_input(spec, value)
+                if shown == view["defaults"][spec.key]:
+                    overrides.pop(spec.key, None)
+                else:
+                    overrides[spec.key] = shown
+            fresh = self.raw.set_tier_settings(root, overrides)
+        except (ValueError, raw_service.RawWorkspaceError) as error:
+            message = f"적용하지 못했습니다 — {error}"
+            _toast("warning", message)
+            return (message, *(gr.skip() for _ in TIER_CRITERIA_FIELDS))
+        with self._selection_lock:
+            self._capcut_render_generation += 1  # 레일·카드의 등급을 다음 틱에 다시 그린다
+        status = TIER_APPLIED_TEXT + "\n\n" + self.tier_criteria_status(root)
+        return (status, *(fresh["values"][spec.key] for spec in TIER_CRITERIA_FIELDS))
+
+    def _finalcut_panel(self) -> None:
+        """「고급 · Final Cut」(W-46a) — 라이브러리 불러오기 · FCPXML 보내기 둘 · 꺼진 클립(D94).
+
+        주 흐름은 폴더 → 추천만 이어붙인 초안이다. Final Cut 길은 처리기·배선 그대로 이 접힌 칸으로
+        옮겼다(D56의 보내기와 승인 문은 바뀌지 않는다).
+        """
+        status = self._capcut_status
+        with gr.Accordion(FINALCUT_ADVANCED_LABEL, open=False, elem_id=FINALCUT_ADVANCED_ID):
+            self._quick_library_button = gr.Button(FINALCUT_LIBRARY_LABEL)
+            with gr.Row():
+                self._handoff_button = gr.Button(FINALCUT_SEND_LABEL)
+                self._srt_handoff_button = gr.Button(FINALCUT_SRT_SEND_LABEL)
+            self._finalcut_drop_panel()
+        # SRT 고르기는 네이티브 대화상자다 — 다른 선택기 단추와 같은 동시성 묶음(한 번에 하나).
+        srt_send = self._srt_handoff_button.click(
+            self.finalcut_srt_send_view,
+            self._signature_state,
+            status,
+            api_name=False,
+            concurrency_id=ui_chooser.CHOOSER_CONCURRENCY_ID,
+            concurrency_limit=1,
+        )
+        self._report_activity(srt_send, status)
+        sent = self._handoff_button.click(self.finalcut_send_view, self._signature_state, status)
+        self._report_activity(sent, status)
+
     def _finalcut_drop_panel(self) -> None:
         """「Final Cut 보내기」(D94) — 꺼진 클립을 프로젝트에서 뺄지. 누르면 저장만 한다."""
-        with gr.Accordion("Final Cut 보내기", open=True, elem_id=FINALCUT_DROP_PANEL_ID):
+        with gr.Group(elem_id=FINALCUT_DROP_PANEL_ID):
             box = gr.Checkbox(
                 value=self.finalcut_drop_value,
                 label=FINALCUT_DROP_LABEL,
@@ -5999,7 +6527,7 @@ class RawWorkspaceUi:
         선택·탐색 계산은 클라이언트 실행본이 이 값을 가지고 한다.
         """
         if root is None:
-            note = "Final Cut 라이브러리를 불러오세요."
+            note = FOLDER_FIRST_NOTE
             return (
                 ui_facade.visual_player_shell_html(None, note),
                 self._workbench_html(None, {"empty": note}),
@@ -6615,8 +7143,25 @@ class RawWorkspaceUi:
             proposals = self._unreviewed_auto_count(root)
         sent = "path" in self._finalcut_sent.get(str(self._signature_for(root)), {})
         return ui_facade.FlowCounts(
-            imported=len(ready), analysed=analysed, proposals=proposals, sent=sent
+            imported=len(ready),
+            analysed=analysed,
+            proposals=proposals,
+            sent=sent,
+            exported=self._draft_exported(root),
         )
+
+    def _draft_exported(self, root: Path) -> bool:
+        """초안을 다 낸 적이 있는가 — 보고서가 있는 초안 폴더(W-46a). 파일만 본다(DB 열기 0)."""
+        try:
+            return self.raw.has_render_export(root)
+        except OSError as error:
+            log.warn(f"초안 폴더를 보지 못했습니다: {error}")
+            return False
+
+    def _criteria_changed(self, root: Path) -> bool:
+        """이 작업공간의 추천 기준이 기본값과 다른가 — 범례 옆 「기준 바꿈」(W-46a)."""
+        view = self._tier_view(root)
+        return view is not None and bool(view["overrides"]) and not view.get("stored_error")
 
     def _workbench_html(
         self,
@@ -6630,7 +7175,12 @@ class RawWorkspaceUi:
         if root is None:
             return ui_facade.visual_workbench_html(model, flow=ui_facade.FlowCounts())
         counts = self._flow_counts(root, analysed=analysed, proposals=proposals)
-        return ui_facade.visual_workbench_html(model, project=self._project_name(root), flow=counts)
+        return ui_facade.visual_workbench_html(
+            model,
+            project=self._project_name(root),
+            flow=counts,
+            criteria_changed=self._criteria_changed(root),
+        )
 
     def _top_bar(self) -> gr.HTML:
         """머리줄 구성요소 — 서랍·단축키 판·활동 칸의 실행본(SHELL_JS)을 함께 싣는다."""
@@ -11064,6 +11614,7 @@ class RawWorkspaceUi:
                 concurrency_id=ui_chooser.CHOOSER_CONCURRENCY_ID,
             )
             library_opened.then(lambda: gr.update(open=False), None, self._project_tools)
+            folder_events = self._wire_folder_import([*selection_outputs, *fcp_outputs])
             primary_opened = self._fcp_primary_button.click(
                 self.capcut_fcp_choose_view,
                 None,
@@ -11107,6 +11658,7 @@ class RawWorkspaceUi:
             closed = self._wire_library_close([*selection_outputs, *fcp_outputs])
             self._wire_model_refresh(
                 (
+                    *folder_events,
                     direct_opened,
                     library_opened,
                     primary_opened,
@@ -11118,6 +11670,33 @@ class RawWorkspaceUi:
                 )
             )
         return app
+
+    def _wire_folder_import(self, view_outputs: list[object]) -> tuple[Any, ...]:
+        """「폴더 불러오기」 배선(W-46a) — 경로 칸 Enter · 「이 폴더 불러오기」 · 「찾아보기」.
+
+        「찾아보기」는 선택 창이 고른 경로를 칸에 넣은 뒤에만 불러온다(취소면 멈춘다). 다른 선택기
+        단추와 같은 동시성 묶음이다. 불러오면 서랍을 닫아 무대를 보인다. 답은 활동 칸으로 간다.
+        """
+        assert self._folder_path_box is not None and self._folder_browse_button is not None
+        assert self._folder_submit_button is not None
+        box, status = self._folder_path_box, self._capcut_status
+        outputs = [status, *view_outputs]
+        once = {"concurrency_limit": 1, "concurrency_id": FOLDER_IMPORT_CONCURRENCY_ID}
+        submitted = self._folder_submit_button.click(self.folder_import_view, box, outputs, **once)
+        entered = box.submit(self.folder_import_view, box, outputs, **once)
+        browsed = self._folder_browse_button.click(
+            self.folder_browse_view,
+            None,
+            box,
+            api_name=False,
+            concurrency_limit=1,
+            concurrency_id=ui_chooser.CHOOSER_CONCURRENCY_ID,
+        ).success(self.folder_import_view, box, outputs, **once)
+        events = (submitted, entered, browsed)
+        for event in events:
+            event.success(lambda: gr.update(open=False), None, self._project_tools)
+            self._report_activity(event, status)
+        return events
 
     def _wire_library_close(self, view_outputs: list[object]) -> Any:
         """「라이브러리 닫기」 — 답(활동 칸) · 빈 화면 전체 보기 · 1초 상태 칸 다섯과 그 기억.
@@ -11157,9 +11736,13 @@ class RawWorkspaceUi:
         assert self._glossary_loaded_state is not None
         targets = [self._analysis_model_dd, self._analysis_model_md]
         glossary = [self._glossary_box, self._glossary_status_md, self._glossary_loaded_state]
+        assert self._tier_status_md is not None
+        criteria = [self._tier_status_md, *self._tier_fields]
         for event in events:
             assert event is not None
             event.then(self.analysis_model_controls, None, targets)
+            # 추천 기준 칸도 같은 이유(W-46a) — 다른 작업공간의 기준이 칸에 남지 않는다.
+            event.then(self.tier_criteria_controls, None, criteria, show_progress="hidden")
             # 용어집 칸도 같은 이유(D59 19e) — 상태 줄에 진행 표시가 깜박이지 않게 숨긴다.
             event.then(self.glossary_controls, None, glossary, show_progress="hidden")
 

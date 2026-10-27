@@ -352,8 +352,8 @@ def test_confirm_source_sits_next_to_the_send_button_with_the_old_handler(
     assert source.visible == "hidden"
     (dep,) = [d for d in app.config["dependencies"] if d["targets"] == [(source._id, "click")]]
     assert app.fns[dep["id"]].fn == server.capcut_confirm_auto_view  # 옛 처리기 그대로
-    handoff = buttons["Final Cut으로 보내기"]
-    assert source.parent is handoff.parent
+    # 명령 줄의 숨은 원천 — 보내기 단추는 W-46a에 서랍의 「고급 · Final Cut」으로 갔다.
+    assert source.parent is buttons["추천만 이어붙여 내보내기"].parent
     node = source.parent
     while node is not None:
         assert not isinstance(node, (gr.Accordion, gr.Sidebar))

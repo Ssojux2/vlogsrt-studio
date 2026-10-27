@@ -374,7 +374,7 @@ def vtt_timecode(total_ms: int) -> str:
 # 재서 작업대 값의 속성으로 싣고, 실행본이 그 값을 머리줄에 옮긴다 — 머리줄을 위한 타이머를
 # 따로 두지 않는다.
 
-FLOW_STEP_LABELS = ("불러오기", "분석 승인", "검토", "Final Cut")
+FLOW_STEP_LABELS = ("폴더 불러오기", "분석 승인", "검토", "내보내기")
 PROJECT_EMPTY_LABEL = "프로젝트 없음"
 SHORTCUT_SEEK_SECONDS = 5
 """J/L이 옮기는 초 — 실행본의 `VL_SEEK_SECONDS`와 같은 값이다(시험이 둘을 맞춰 본다)."""
@@ -438,6 +438,9 @@ class FlowCounts:
     analysed: int = 0
     proposals: int = 0
     sent: bool = False
+    """Final Cut으로 보냈다(서랍의 「고급 · Final Cut」)."""
+    exported: bool = False
+    """추천만 이어붙인 초안을 낸 적이 있다(W-46a, D100 §7a)."""
 
 
 @dataclass(frozen=True)
@@ -454,12 +457,13 @@ class FlowStep:
 def flow_steps(counts: FlowCounts) -> tuple[FlowStep, ...]:
     """네 단계의 상태와 수 — 보고만 한다. 「검토」의 제외 제안 수는 관문이 아니다(D56)."""
     total = counts.imported
-    done = (total > 0, total > 0 and counts.analysed >= total, counts.sent, counts.sent)
+    out = counts.sent or counts.exported
+    done = (total > 0, total > 0 and counts.analysed >= total, out, out)
     subs = (
         f"{total}개" if total else "",
         f"{counts.analysed}/{total}" if total else "",
-        f"제외 제안 {counts.proposals}" if counts.proposals else "",
-        "보냄" if counts.sent else "",
+        f"미확인 비추천 {counts.proposals}" if counts.proposals else "",
+        "내보냄" if counts.exported else "보냄" if counts.sent else "",
     )
     current = next((index for index, finished in enumerate(done) if not finished), None)
     return tuple(
@@ -553,6 +557,82 @@ def drawer_head_html(title: str, drawer_id: str) -> str:
         '<button type="button" class="vl-btn vl-btn-ghost vl-btn-sm"'
         f' data-vl-drawer-close="{html.escape(drawer_id, quote=True)}">닫기</button></div>'
     )
+
+
+RENDER_EXPORT_RUNNING_TEXT = "추천만 이어붙이는 중입니다 — 진행은 활동 칸과 「기록」 판에 보입니다."
+RENDER_EXPORT_WARN_TEXT = (
+    "확인하지 않은 비추천 구간 {count}곳이 빠졌습니다 — 보고서에 목록이 있습니다."
+)
+
+
+def format_duration(seconds: float) -> str:
+    """초 → 「3분 12.4초」·「8.2초」 — 결과 카드의 총 길이."""
+    tenths = round(max(0.0, float(seconds)) * 10)
+    minutes, rest = divmod(tenths, 600)
+    text = f"{rest // 10}.{rest % 10}초"
+    return f"{minutes}분 {text}" if minutes else text
+
+
+def render_export_card_html(
+    summary: Mapping[str, object] | None, *, running: bool = False, failure: str | None = None
+) -> str:
+    """「추천만 이어붙여 내보내기」 결과 카드(W-46a, D100 §7a) — 글자는 전부 이스케이프한다.
+
+    `summary`는 서비스 `latest_render_export`의 값(가장 최근에 다 낸 초안)이다. 확인하지 않은
+    비추천이 빠졌으면 빨간 경고 한 줄 — 내보내기는 막지 않고 알린다(사용자 결정 2026-10-27).
+    도는 중이면 그 줄을, 지난 시도가 실패했으면 그 사유를 맨 위에 싣는다. 아무것도 없으면 빈 글이다.
+    """
+    head: list[str] = []
+    if running:
+        head.append(f'<p class="vl-export-state">{html.escape(RENDER_EXPORT_RUNNING_TEXT)}</p>')
+    if failure:
+        head.append(f'<p class="vl-export-warn">지난 내보내기 실패 — {html.escape(failure)}</p>')
+    body = head + (_export_summary_lines(summary) if summary is not None else [])
+    if not body:
+        return ""
+    return (
+        '<section class="vl-export" aria-label="추천만 이어붙인 초안">'
+        + "".join(body)
+        + ("</section>")
+    )
+
+
+def _number(value: object) -> float:
+    return float(value) if isinstance(value, (int, float)) else 0.0
+
+
+def _export_summary_lines(summary: Mapping[str, object]) -> list[str]:
+    seconds = _number(summary.get("total_seconds"))
+    encoder = str(summary.get("encoder") or "알 수 없음")
+    lines = [
+        f'<p class="vl-export-head"><strong>초안</strong> {html.escape(format_duration(seconds))}'
+        f" · 조각 {int(_number(summary.get('parts')))}개 · 인코더 {html.escape(encoder)}</p>"
+    ]
+    dropped = int(_number(summary.get("unreviewed_red_dropped")))
+    if dropped > 0:
+        warn = RENDER_EXPORT_WARN_TEXT.format(count=dropped)
+        lines.append(f'<p class="vl-export-warn" role="alert">{html.escape(warn)}</p>')
+    listed = summary.get("unsupported")
+    unsupported = [str(name) for name in listed] if isinstance(listed, (list, tuple)) else []
+    if unsupported:
+        names = ", ".join(unsupported)
+        lines.append(
+            f'<p class="vl-export-note">분석 지원 밖이라 빠진 원본: {html.escape(names)}</p>'
+        )
+    media = summary.get("media_file_id")
+    if media:
+        src = html.escape(f"/media/{media}", quote=True)
+        lines.append(
+            f'<p><a href="{src}" target="_blank" rel="noopener">초안 영상 새 탭에서 보기</a></p>'
+            f'<video controls preload="metadata" src="{src}" aria-label="초안 영상"></video>'
+        )
+    rows = (("영상", "video"), ("자막", "srt"), ("보고서", "report"))
+    paths = "".join(
+        f"<dt>{label}</dt><dd>{html.escape(str(summary.get(key) or ''))}</dd>"
+        for label, key in rows
+    )
+    lines.append(f'<dl class="vl-export-paths">{paths}</dl>')
+    return lines
 
 
 def activity_html() -> str:
@@ -1131,17 +1211,27 @@ def _model_holder(model: Mapping[str, object]) -> str:
     return f'<div class="vl-model-data" {MODEL_HOLDER_ATTRIBUTE} hidden>{text}</div>'
 
 
+CRITERIA_BADGE_ID = "vl-criteria-badge"
+"""범례 옆 「기준 바꿈」 표지 — 작업공간 추천 기준이 기본값과 다를 때만 보인다(W-46a)."""
 TIER_LEGEND_HTML = (
     '<span class="vl-legend" aria-label="등급 범례">'
     '<span class="vl-tier-key green">■ 추천</span>'
     '<span class="vl-tier-key yellow">■ 보통</span>'
-    '<span class="vl-tier-key red">▨ 제외 제안</span>'
+    '<span class="vl-tier-key red">▨ 비추천</span>'
     '<span class="vl-tier-key hold">□ 판정 보류</span>'
     '<span class="vl-tier-key loose" title="컷 경계와 맞지 않는 제외 제안 — 남은 수에 들지'
     ' 않습니다"><i class="vl-key-hollow" aria-hidden="true"></i> 경계 어긋남</span>'
+    f'<span id="{CRITERIA_BADGE_ID}" class="vl-criteria-badge"'
+    ' title="이 작업공간의 추천 기준이 기본값과 다릅니다 — 설정의 「추천 기준」에서 봅니다"'
+    " hidden>기준 바꿈</span>"
     "</span>"
 )
-"""타임라인 등급 범례 — 3단 등급·보류와 속 빈 빨강(컷 경계와 맞지 않는 제안, D57 C 고침 4)."""
+"""타임라인 등급 범례 — 3단 등급·보류와 속 빈 빨강(컷 경계와 맞지 않는 제안, D57 C 고침 4).
+
+빨강의 화면 이름은 「비추천」이다(W-46a, D100 §7a) — 내부 등급 이름(`TIER_LABELS`)과 Final Cut
+키워드(「제외 제안」)는 그대로다. 「기준 바꿈」 표지는 작업대 값의 `data-vl-criteria`를 실행본이
+따른다.
+"""
 
 
 def visual_player_shell_html(video_src: str | None, note: str) -> str:
@@ -1188,17 +1278,22 @@ def visual_player_shell_html(video_src: str | None, note: str) -> str:
     )
 
 
-def _flow_attributes(project: str | None, flow: FlowCounts | None) -> str:
+def _flow_attributes(
+    project: str | None, flow: FlowCounts | None, *, criteria_changed: bool = False
+) -> str:
     """머리줄로 옮길 값 — 프로젝트 이름과 흐름 단계 조각(이스케이프된 HTML)을 속성에 싣는다.
 
     작업공간이 없으면(`project` 없음) 닫힘 표지도 싣는다 — 실행본이 「라이브러리 닫기」를 숨긴다.
+    추천 기준이 기본값과 다르면 `data-vl-criteria="changed"` — 실행본이 「기준 바꿈」을 보인다
+    (기본이면 싣지 않는다: 기준을 고친 적 없는 작업공간의 값은 예전 바이트 그대로다).
     """
     if flow is None:
         return ""
     steps = html.escape(flow_steps_html(flow_steps(flow)), quote=True)
     name = html.escape(project or PROJECT_EMPTY_LABEL, quote=True)
     closed = ' data-vl-closed="1"' if project is None else ""
-    return f' data-vl-flow="{steps}" data-vl-project="{name}"{closed}'
+    criteria = ' data-vl-criteria="changed"' if criteria_changed else ""
+    return f' data-vl-flow="{steps}" data-vl-project="{name}"{closed}{criteria}'
 
 
 def visual_workbench_html(
@@ -1206,6 +1301,7 @@ def visual_workbench_html(
     *,
     project: str | None = None,
     flow: FlowCounts | None = None,
+    criteria_changed: bool = False,
 ) -> str:
     """영상 작업대 본문 — 조각 목록·선택 패널의 빈 그릇과 상태 JSON.
 
@@ -1218,7 +1314,7 @@ def visual_workbench_html(
     이어진다(좁은 화면 ≤860px에서는 격자 영역 순서로 재생기·타임라인이 먼저 온다).
     `flow`가 있으면 머리줄의 흐름 단계·프로젝트 이름을 속성으로 싣는다(자리표시 포함).
     """
-    flow_attrs = _flow_attributes(project, flow)
+    flow_attrs = _flow_attributes(project, flow, criteria_changed=criteria_changed)
     placeholder = model.get("empty")
     if isinstance(placeholder, str) and placeholder:
         return (
@@ -1524,6 +1620,21 @@ _SHELL_CSS = """
 #vl-quote-note p { margin: 0 0 4px; }
 #vl-quote-note p:last-child { margin-bottom: 0; }
 #review-tab:has(#library-approve:disabled) #library-analysis-scope { display: none; }
+/* 초안 결과 카드(W-46a, D100 §7a) — 견적 칸 아래. 경로는 고정폭 글자로 줄바꿈해 다 보인다.
+   빨간 경고는 확인하지 않은 비추천이 빠졌다는 뜻이다(막지 않고 알린다). */
+#vl-export-card { min-width: 0; padding: 0; }
+.vl-export { min-width: 0; padding: 8px 10px; border-radius: 6px; font-size: 12px;
+  line-height: 16px; border: 1px solid var(--vl-line-strong); background: var(--vl-surface-raised);
+  overflow-wrap: anywhere; }
+.vl-export p { margin: 0 0 4px; }
+.vl-export video { display: block; width: 100%; max-height: 180px; margin: 4px 0;
+  }
+.vl-export-warn { padding: 4px 6px; border: 1px solid var(--vl-danger); border-radius: 4px;
+  color: var(--vl-danger); }
+.vl-export-paths { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 2px 8px;
+  margin: 4px 0 0; }
+.vl-export-paths dt { color: var(--vl-ink-muted); }
+.vl-export-paths dd { margin: 0; font-family: var(--vl-font-mono); font-size: 11px; }
 /* 승인 범위(D59 19b) — 견적 문구 바로 위의 두 갈래(전사 + 영상 분석 · 전사만). 승인할 견적이
    없으면 견적 문구와 함께 숨는다(그때 패널이 그 줄까지 올라온다). */
 #vl-approval-mode {
@@ -1538,7 +1649,8 @@ _SHELL_CSS = """
   border: 1px solid var(--vl-line); background: var(--vl-surface-raised); }
 #review-tab:has(#library-approve:disabled) #vl-cross-check { display: none; }
 @media (min-width: 1051px) {
-  #review-tab:has(#library-approve:disabled) #visual-stage:not(:has(#vl-quote-note)) .vl-panel {
+  #review-tab:has(#library-approve:disabled)
+    #visual-stage:not(:has(#vl-quote-note)):not(:has(.vl-export)) .vl-panel {
     grid-row: 1 / 3; }
 }
 /* 패널(D57 B) — 머리 · 결정 · 판정 · 알림 · 편집 · 접힌 상세. 결정 상자는 빗금 띠를 이고 선다. */
@@ -1864,6 +1976,10 @@ WORKBENCH_CSS = (
 .vl-tier-key.loose { color: var(--vl-tier-red-ink); }
 .vl-key-hollow { display: inline-block; width: 0.8em; height: 0.8em; box-sizing: border-box;
   color: inherit; border: 1px dashed currentColor; vertical-align: -1px; }
+/* 「기준 바꿈」(W-46a) — 작업공간 추천 기준이 기본값과 다를 때만 범례 끝에 선다. */
+.vl-criteria-badge { margin-left: 8px; padding: 0 6px; border: 1px solid var(--vl-warn);
+  border-radius: 4px; color: var(--vl-warn); font-size: 11px; line-height: 16px; }
+.vl-criteria-badge[hidden] { display: none; }
 .vl-badge-green { border-color: var(--vl-tier-green-ink); color: var(--vl-tier-green-ink); }
 .vl-badge-red { border-color: var(--vl-tier-red-ink); color: var(--vl-tier-red-ink); }
 .vl-badge-amber { border-color: var(--vl-warn); color: var(--vl-warn); }
@@ -2934,14 +3050,15 @@ VISUAL_BOOTSTRAP_JS = (
         var node = doc.getElementById("vl-refill-quote");
         if (node && node.scrollIntoView) { node.scrollIntoView({ block: "nearest" }); }
       }
-      // 3단 등급(D51) — 글자 표지는 색과 별개로 등급을 말한다(색약·흑백에서도 읽힌다).
+      // 3단 등급(D51) — 글자 표지는 색과 별개로 등급을 말한다(색약·흑백에서도 읽힌다). 빨강의
+      // 화면 이름은 「비추천」(W-46a) — 대기열·결정 상자의 「제외 제안」은 기다리는 제안이다.
       function tierWord(tier, hold) {
         if (tier === "yellow" && hold) { return "판정 보류"; }
-        return ({ green: "추천", yellow: "보통", red: "제외 제안" })[tier] || "";
+        return ({ green: "추천", yellow: "보통", red: "비추천" })[tier] || "";
       }
       function tierGlyph(tier, hold) {
         if (tier === "yellow" && hold) { return "? 보류"; }
-        return ({ green: "★ 추천", yellow: "보통", red: "✕ 제외 제안" })[tier] || "";
+        return ({ green: "★ 추천", yellow: "보통", red: "✕ 비추천" })[tier] || "";
       }
       function tierOf(row) {
         return row.tier || (row.rec === "recommended" ? "green" : "yellow");
@@ -3555,7 +3672,7 @@ VISUAL_BOOTSTRAP_JS = (
         var out = [];
         var speech = speechLabel(card.speech);
         var rec = recLabel(card.rec);
-        var grade = card.autoPending ? "제외 제안" : tierWord(card.tier || "", false);
+        var grade = card.autoPending ? "비추천(미확인)" : tierWord(card.tier || "", false);
         var subtitleWhy = tagText(card, "자막: ") || speech;
         var videoWhy = tagText(card, "영상: ");
         out.push('<p class="vl-kv">상태 ' + (card.sel === "excluded" ? "제외" : "사용") +
@@ -4738,6 +4855,12 @@ VISUAL_BOOTSTRAP_JS = (
     if (steps !== null && closer) {
       var shut = fresh.hasAttribute("data-vl-closed");
       if (closer.hidden !== shut) { closer.hidden = shut; }
+    }
+    // 「기준 바꿈」 — 추천 기준이 기본값과 다른 작업공간에서만 보인다(W-46a).
+    var badge = d.getElementById("vl-criteria-badge");
+    if (steps !== null && badge) {
+      var changed = fresh.getAttribute("data-vl-criteria") === "changed";
+      if (badge.hidden === changed) { badge.hidden = !changed; }
     }
   };
   var wireCommitted = function () {

@@ -79,7 +79,7 @@ def _media_block(css: str, query: str) -> str:
 def test_flow_steps_report_live_counts_and_never_gate_the_send() -> None:
     """네 단계의 수와 상태 — 「검토」의 제외 제안 수는 정보다(보내기를 막지 않는다, D56)."""
     empty = ui_facade.flow_steps(ui_facade.FlowCounts())
-    assert [s.label for s in empty] == ["불러오기", "분석 승인", "검토", "Final Cut"]
+    assert [s.label for s in empty] == ["폴더 불러오기", "분석 승인", "검토", "내보내기"]
     assert [s.state for s in empty] == ["cur", "todo", "todo", "todo"]
     assert all(s.sub == "" for s in empty)
     analysing = ui_facade.flow_steps(ui_facade.FlowCounts(imported=18, analysed=6))
@@ -87,7 +87,7 @@ def test_flow_steps_report_live_counts_and_never_gate_the_send() -> None:
     assert (analysing[0].sub, analysing[1].sub) == ("18개", "6/18")
     review = ui_facade.flow_steps(ui_facade.FlowCounts(imported=18, analysed=18, proposals=7))
     assert [s.state for s in review] == ["done", "done", "cur", "todo"]
-    assert review[2].sub == "제외 제안 7" and review[2].alert is True
+    assert review[2].sub == "미확인 비추천 7" and review[2].alert is True
     sent = ui_facade.flow_steps(
         ui_facade.FlowCounts(imported=18, analysed=18, proposals=7, sent=True)
     )
@@ -95,7 +95,7 @@ def test_flow_steps_report_live_counts_and_never_gate_the_send() -> None:
     assert sent[3].sub == "보냄" and sent[2].alert is True  # 미검토가 남아도 보냈다(키워드로 간다)
     html = ui_facade.flow_steps_html(review)
     assert html.count('class="vl-step ') == 4 and html.count('aria-current="step"') == 1
-    assert '<span class="sub r">제외 제안 7</span>' in html
+    assert '<span class="sub r">미확인 비추천 7</span>' in html
     assert "disabled" not in html  # 단계는 보고만 한다 — 누르는 곳도 막는 곳도 아니다
 
 
@@ -166,16 +166,21 @@ def test_blocks_place_top_bar_command_bar_and_stage(tmp_path: Path, local_socket
     bar = by_id["vl-command-bar"]
     assert isinstance(bar, gr.Row)
     for label in (
-        "라이브러리 불러오기",
+        workspace_service.FOLDER_IMPORT_LABEL,
         LIBRARY_APPROVE_LABEL,
         "선택 분석 취소",
         "전체 분석 취소",
-        FINALCUT_SEND_LABEL,
+        workspace_service.RENDER_EXPORT_LABEL,
         CONFIRM_ALL_SOURCE_LABEL,  # 숨은 원천 — 화면의 단추는 제외 제안 대기열 안이다(D57 C)
     ):
         assert buttons[label].parent is bar, label
     in_bar = [b for b in app.blocks.values() if isinstance(b, gr.Button) and b.parent is bar]
-    assert [b.value for b in in_bar if b.variant == "primary"] == [LIBRARY_APPROVE_LABEL]
+    # 주 단추는 단계마다 하나 — 분석 승인(견적에 묶인 돈의 문)과 초안 내보내기(W-46a).
+    assert [b.value for b in in_bar if b.variant == "primary"] == [
+        LIBRARY_APPROVE_LABEL,
+        workspace_service.RENDER_EXPORT_LABEL,
+    ]
+    assert FINALCUT_SEND_LABEL not in [b.value for b in in_bar]  # 서랍의 「고급 · Final Cut」
     # 취소 단추는 늘 보이고 늘 누를 수 있다 — 도는 작업을 못 멈추는 일이 없다.
     for label in ("선택 분석 취소", "전체 분석 취소"):
         assert buttons[label].visible is True and buttons[label].interactive is not False
@@ -326,7 +331,8 @@ def test_grid_areas_at_three_breakpoints() -> None:
         "#review-tab:has(#library-approve:disabled) #library-analysis-scope { display: none; }"
         in (css)
     )
-    assert "#visual-stage:not(:has(#vl-quote-note)) .vl-panel {" in css
+    # 초안 결과 카드(W-46a)가 있으면 그 칸도 패널이 덮지 않는다.
+    assert "#visual-stage:not(:has(#vl-quote-note)):not(:has(.vl-export)) .vl-panel {" in css
 
 
 @pytest.mark.parametrize("side", [0, 1], ids=["light", "dark"])
