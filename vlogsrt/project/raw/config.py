@@ -334,6 +334,33 @@ FRAME_RATE_HIGHER = "higher"
 FRAME_RATE_LOWER = "lower"
 """낮은 프레임레이트 — 소수 쪽 높은 레이트 클립은 프레임을 건너뛰어 보인다."""
 FRAME_RATE_TIES = (FRAME_RATE_HIGHER, FRAME_RATE_LOWER)
+MODE_AUTO = "auto"
+"""작업공간 모드를 불러온 영상 개수 다수로 정한다(W-37, D97)."""
+MODE_LANDSCAPE = ORIENTATION_LANDSCAPE
+"""가로 모드(롱폼) — 지금 흐름 그대로(한국어 캡션 → Final Cut 캡션 내보내기 → Subtitle Edit)."""
+MODE_PORTRAIT = ORIENTATION_PORTRAIT
+"""세로 모드(숏폼) — 같은 첫 보내기 + 편집한 프로젝트에 SRT(ko·en) 다시 넣기(W-38)."""
+MODE_CHOICES = (MODE_AUTO, MODE_LANDSCAPE, MODE_PORTRAIT)
+
+
+@dataclass(frozen=True)
+class WorkspaceModeSettings:
+    """작업공간 모드(D97)의 자동 규칙 — 영상 개수 다수, 같으면 `tie`의 편.
+
+    `tie`는 외부 근거 없는 선택이다 — 타임라인 방향 동점(`orientation_tie`, D66)과 같은 가로를
+    골랐다. 모드는 표지·흐름 게이트일 뿐 문서 바이트를 정하지 않는다 — 어느 지문·캐시 열쇠·승인·
+    견적에도 없다."""
+
+    tie: str = ORIENTATION_LANDSCAPE
+
+    def __post_init__(self) -> None:
+        if self.tie not in ORIENTATIONS:
+            sides = " 또는 ".join(ORIENTATIONS)
+            raise ValueError(f"tie는 {sides}여야 한다: {self.tie!r}")
+
+
+WORKSPACE_MODE = WorkspaceModeSettings()
+"""지금 쓰는 모드 규칙 — `workspace_mode.decide_mode`의 기본값이다."""
 
 
 @dataclass(frozen=True)

@@ -141,6 +141,28 @@ CROSS_CHECK_INFO = (
 )
 """「다른 귀로 교차 확인」(D59 19d) — 승인 범위 바로 아래의 켬·끔. 칸에는 모델 이름·금액이 없다
 (D57 결정 7) — 무엇을 얼마에 듣는지는 그 아래 견적 문구만 말하고, 승인은 그 문구에 묶인다."""
+WORKSPACE_MODE_ID = "vl-workspace-mode"
+WORKSPACE_MODE_LABEL = "작업 모드"
+WORKSPACE_MODE_INFO = (
+    "라이브러리마다 하나입니다. 자동이면 불러온 영상 가운데 가로·세로 개수가 많은 쪽을 따릅니다."
+    " 모드는 Final Cut으로 보내는 타임라인을 바꾸지 않습니다."
+)
+WORKSPACE_MODE_CHOICES = [
+    ("자동 (많은 쪽)", raw_service.MODE_AUTO),
+    ("가로 모드 (롱폼)", raw_service.MODE_LANDSCAPE),
+    ("세로 모드 (숏폼)", raw_service.MODE_PORTRAIT),
+]
+WORKSPACE_MODE_NOTES = {
+    raw_service.MODE_LANDSCAPE: (
+        "한국어 자막을 캡션으로 실어 보냅니다 — Final Cut에서 컷 편집 뒤 캡션을 SRT로 내보내"
+        " Subtitle Edit에서 다듬으세요."
+    ),
+    raw_service.MODE_PORTRAIT: (
+        "한국어 자막을 캡션으로 실어 보냅니다 — 편집을 마친 뒤 그 프로젝트와 한국어·영어 SRT를"
+        " 다시 넣는 흐름이 열립니다."
+    ),
+}
+"""작업 모드(W-37b, D97) — 「Final Cut 보내기」 서랍 칸. 작업공간 표지에 산다(기본 자동)."""
 FINALCUT_DROP_PANEL_ID = "vl-finalcut-drop-panel"
 FINALCUT_DROP_ID = "vl-finalcut-drop"
 FINALCUT_DROP_LABEL = "꺼진 클립 빼고 보내기 (추천만)"
@@ -4808,6 +4830,17 @@ class RawWorkspaceUi:
                 elem_id=FINALCUT_DROP_ID,
             )
             status = gr.Markdown("", elem_id=f"{FINALCUT_DROP_ID}-status")
+            mode = gr.Radio(
+                choices=WORKSPACE_MODE_CHOICES,
+                value=self.workspace_mode_value,
+                label=WORKSPACE_MODE_LABEL,
+                info=WORKSPACE_MODE_INFO,
+                interactive=True,
+                elem_id=WORKSPACE_MODE_ID,
+            )
+            mode_status = gr.Markdown(
+                self.workspace_mode_status, elem_id=f"{WORKSPACE_MODE_ID}-status"
+            )
         box.input(
             self.finalcut_drop_view,
             [self._signature_state, box],
@@ -4815,6 +4848,43 @@ class RawWorkspaceUi:
             queue=False,
             show_progress="hidden",
         )
+        mode.input(
+            self.workspace_mode_view,
+            [self._signature_state, mode],
+            mode_status,
+            queue=False,
+            show_progress="hidden",
+        )
+
+    def workspace_mode_value(self) -> str:
+        """칸의 처음 값 — 저장된 고른 값(없으면 자동). 화면을 열 때마다 다시 잰다."""
+        root = self._snapshot_root()
+        if root is None:
+            return raw_service.MODE_AUTO
+        decision = self.raw.workspace_mode(root)
+        return str(decision.mode if decision.basis == "manual" else raw_service.MODE_AUTO)
+
+    def workspace_mode_status(self, root: Path | None = None) -> str:
+        """모드 한 줄 — 지금 모드와 그 재료(가로·세로 영상 수). 작업공간이 없으면 빈 줄."""
+        root = root if root is not None else self._snapshot_root()
+        if root is None:
+            return ""
+        decision = self.raw.workspace_mode(root)
+        how = "직접 고름" if decision.basis == "manual" else "자동(영상 개수가 많은 쪽)"
+        counts = f"가로 영상 {decision.landscape}개 · 세로 영상 {decision.portrait}개"
+        line = f"지금 **{decision.label}** — {how} · {counts}."
+        if decision.basis == "manual" and decision.mode != decision.auto_mode:
+            line += " 자동이라면 다른 모드입니다."
+        return line + " " + WORKSPACE_MODE_NOTES[decision.mode]
+
+    def workspace_mode_view(self, signature: str | None, choice: str | None) -> str:
+        """모드를 저장한다(무료 — 표지 하나). Final Cut 문서는 바뀌지 않는다(D97)."""
+        root = self._require_current_selection(signature)
+        try:
+            self.raw.set_workspace_mode(root, str(choice))
+        except raw_service.RawWorkspaceError as error:
+            raise gr.Error(str(error)) from error
+        return self.workspace_mode_status(root)
 
     def finalcut_drop_value(self) -> bool:
         """칸의 처음 값 — 화면을 열 때마다 지금 작업공간의 값(없으면 끔)."""

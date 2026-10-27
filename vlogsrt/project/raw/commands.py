@@ -27,6 +27,7 @@ from vlogsrt.project.raw.config import (
     ANALYSIS_MODEL_CHOICES,
     ANALYSIS_PROVIDER_ANTHROPIC,
     ANALYSIS_PROVIDER_GOOGLE,
+    MODE_CHOICES,
     analysis_model_label,
     analysis_provider,
     claude_profile,
@@ -244,6 +245,7 @@ def media_command(args: argparse.Namespace) -> int:
         "finalcut": cmd_finalcut,
         "sync-check": cmd_sync_check,
         "settings": cmd_settings,
+        "mode": cmd_mode,
     }
     return handlers[args.media_command](args)
 
@@ -258,7 +260,7 @@ def add_media_parser(sub: argparse._SubParsersAction) -> None:
         required=True,
         metavar=(
             "{init,import,retry,inspect,plan,extract,clips,analyze,review,caption,finalcut,"
-            "sync-check,settings}"
+            "sync-check,settings,mode}"
         ),
     )
 
@@ -402,6 +404,7 @@ def _add_workspace_parsers(commands: argparse._SubParsersAction) -> None:
     """작업공간 하나만 받는 명령들 — Final Cut 전체 타임라인(D56)과 분석 모델 설정(D54)."""
     _add_finalcut_parser(commands)
     _add_settings_parser(commands)
+    _add_mode_parser(commands)
 
 
 def _add_finalcut_parser(commands: argparse._SubParsersAction) -> None:
@@ -464,6 +467,42 @@ def _add_settings_parser(commands: argparse._SubParsersAction) -> None:
         default=None,
         help="의미 분석 모델. 없으면 지금 설정을 인쇄만 한다",
     )
+
+
+def _add_mode_parser(commands: argparse._SubParsersAction) -> None:
+    """`media mode` — 작업공간 모드(가로 롱폼 · 세로 숏폼, D97)를 인쇄하고 고른다."""
+    mode = commands.add_parser(
+        "mode", help="작업공간 모드(가로 롱폼 · 세로 숏폼)를 인쇄하고 고른다(로컬 표지만)"
+    )
+    mode.add_argument("--workspace", type=Path, required=True, help="작업공간 경로")
+    mode.add_argument(
+        "--set",
+        choices=MODE_CHOICES,
+        default=None,
+        help="auto(불러온 영상 개수 다수) · landscape · portrait. 없으면 인쇄만 한다",
+    )
+
+
+def cmd_mode(args: argparse.Namespace) -> int:
+    """`media mode` — 모드와 그 재료(가로·세로 영상 수)를 인쇄하고, 주면 바꾼다(유료 호출 없음)."""
+    service = _service()
+    try:
+        status = service.open_workspace(Path(args.workspace))
+        root = Path(status.workspace_root)
+        if args.set is not None:
+            decision = service.set_workspace_mode(root, args.set)
+        else:
+            decision = service.workspace_mode(root)
+    except raw_service.RawWorkspaceError as error:
+        log.error(str(error))
+        return 1
+    how = "직접 고름" if decision.basis == "manual" else "자동"
+    log.out(
+        f"{decision.label} — {how} · 가로 영상 {decision.landscape}개 · 세로 영상"
+        f" {decision.portrait}개"
+        + (f" · 크기 모름 {decision.unknown}개" if decision.unknown else "")
+    )
+    return 0
 
 
 # ── W-14 — 의미 분석 모델 선택(로컬 설정만) ───────────────────────────────────

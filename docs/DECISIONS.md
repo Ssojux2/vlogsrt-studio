@@ -8983,3 +8983,27 @@ Gemini 글자이고, 단어 시각은 **어느 줄의 글자인지 정하는 데
   낡고 편집기 「저장」이 손대지 않은 줄까지 고친 자막으로 만든다. 그래서 내보내는 글자만 다듬는다(`finalcut_export.caption_text`).
 - 작업대 화면(줄 목록·재생기 자막·편집기)은 저장된 글자를 그대로 보인다. 정리 기준(`polish_*`)은 D30 그대로다.
 - **시험**: `tests/raw/test_finalcut_caption_polish.py`. 유료 호출 0회.
+
+## D97 — 작업 모드: 가로(롱폼) · 세로(숏폼), 라이브러리마다 하나 (2026-10-27, W-37)
+
+**사용자 지시(2026-10-27)**: 「가로 모드, 세로 모드를 추가 — 영상들을 읽었을 때 가로 영상이 많으면 가로 모드, 세로 영상이 많으면 세로
+모드」 · 「롱폼·숏폼을 동시에 처리하는 형태로」. 고른 것: **라이브러리마다 한 모드**(사람이 바꿀 수 있다). 계획 전체는
+`docs/plans/2026-10-27-longform-shortform-modes.md`(Fable 5.1 high 설계, W-37–W-39).
+
+**결정**:
+- 자동 모드 = 불러온 영상의 **개수** 다수(길이가 아니다 — 긴 가로 B롤 하나가 숏폼 라이브러리를 뒤집지 않게). 방향은
+  `finalcut_timeline.orientation_of`(너비 ≥ 높이면 가로, D66과 같은 정의 — `SourceAsset.width/height`는 회전을 반영한 표시 크기),
+  크기를 모르는 원본은 세지 않고, 같으면 `WorkspaceModeSettings.tie`(가로 — 외부 근거 없는 선택, D66 `orientation_tie`와 같은 편).
+- 작업공간 표지 `workspace_mode`(`auto|landscape|portrait`, 없거나 모르는 값이면 자동). 사람이 고른 가로·세로가 자동보다 이긴다.
+- **모드는 표지·흐름 게이트일 뿐이다** — 원본을 빼지 않고(규칙 9), 타임라인 빌더(`plan`·`render`)에 들어가지 않아 Final Cut 문서
+  방향(켠 클립 길이 투표, D66)과 바이트를 바꾸지 않는다. 보내기 리포트에 `mode` 칸(모드·근거·가로/세로/모름 수·문서 방향·같은가)만
+  더한다. 어느 지문·캐시 열쇠·승인·견적에도 없다.
+- 가로 모드 = 지금 흐름 그대로(한국어 캡션 `SRT?captionFormat=SRT.ko` → Final Cut 캡션 내보내기 → Subtitle Edit). 세로 모드 = 같은
+  첫 보내기 + 편집한 프로젝트에 SRT(ko·en) 다시 넣기(W-38, D98 — 사람 픽스처 H-B1·H-B2 뒤).
+- 화면: 설정 서랍 「Final Cut 보내기」의 「작업 모드」(자동 · 가로 · 세로)와 상태 줄(지금 모드 · 근거 · 가로/세로 영상 수 · 그 모드의
+  흐름). 머리줄 배지는 두지 않았다 — 머리줄은 서버 시작 때 한 번 조립되고 작업공간마다 갈리지 않는다(작업대 렌더 골든도 그대로).
+  CLI `media mode --workspace [--set auto|landscape|portrait]`.
+- **불변식** `check_workspace_mode_stays_pure`: 모드 계층은 DB·파일·서비스를 모르고, 빌더 입구 `plan`·`render`의 매개변수에 `mode`가
+  없다.
+- **시험**: `tests/raw/test_workspace_mode.py`(개수 다수 · 정사각형 · 동점 · 크기 모름 · 사람 고름 · 표지 · 문서 바이트 동일·리포트 ·
+  CLI · 서랍 칸) · `tests/test_invariants.py`. 유료 호출 0회.

@@ -4045,3 +4045,33 @@ def test_a_time_field_on_the_line_plan_and_a_missing_layer_are_caught(
 
 def test_the_real_word_text_layer_is_pure() -> None:
     assert check_invariants.check_word_text_stays_pure() == []
+
+
+def test_workspace_mode_impurity_and_a_mode_parameter_on_the_builder_are_caught(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """W-37(D97) — 모드 계층은 순수하고, 빌더 입구(`plan`·`render`)는 모드를 받지 않는다."""
+    clean = "from dataclasses import dataclass\n"
+    builder = "def plan(sources, *, title, settings):\n    pass\n"
+    files = {
+        "vlogsrt/project/raw/workspace_mode.py": clean,
+        "vlogsrt/project/raw/finalcut_timeline.py": builder,
+    }
+    _fake_source_tree(monkeypatch, tmp_path, files)
+    assert check_invariants.check_workspace_mode_stays_pure() == []
+    raw = tmp_path / "vlogsrt" / "project" / "raw"
+    (raw / "workspace_mode.py").write_text(clean + "import sqlite3\n", encoding="utf-8")
+    (raw / "finalcut_timeline.py").write_text(
+        builder.replace("settings", "settings, workspace_mode"), encoding="utf-8"
+    )
+    failures = check_invariants.check_workspace_mode_stays_pure()
+    assert any("sqlite3" in line for line in failures)
+    assert any("plan(workspace_mode)" in line for line in failures)
+    (raw / "workspace_mode.py").unlink()
+    assert check_invariants.check_workspace_mode_stays_pure() == [
+        "vlogsrt/project/raw/workspace_mode.py: 모드 계층이 사라졌다 (D97)"
+    ]
+
+
+def test_the_real_workspace_mode_layer_is_pure() -> None:
+    assert check_invariants.check_workspace_mode_stays_pure() == []

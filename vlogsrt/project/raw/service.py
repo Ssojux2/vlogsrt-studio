@@ -85,6 +85,10 @@ from vlogsrt.project.raw.config import (
     ANALYSIS_PROVIDER_GOOGLE,
     DEFAULT_ANALYSIS_MODEL,
     GEMINI_MODEL_PREFIX,
+    MODE_AUTO,
+    MODE_CHOICES,
+    MODE_LANDSCAPE,
+    MODE_PORTRAIT,
     PREVIOUS_DEFAULT_ANALYSIS_MODELS,
     TIMING_ENGINE_GEMINI,
     TIMING_ENGINE_WHISPER,
@@ -266,6 +270,10 @@ from vlogsrt.project.raw.workspace import (
 __all__ = [
     # UI는 이 모듈만 가져갈 수 있다(정확 경로 예외) — 계약 오류도 여기서 다시 낸다.
     "TIMING_ENGINE_CHOICES",
+    "WORKSPACE_MODE_KEY",
+    "MODE_AUTO",
+    "MODE_LANDSCAPE",
+    "MODE_PORTRAIT",
     "TIMING_ENGINE_GEMINI",
     "TIMING_ENGINE_WHISPER",
     "timing_engine_facts",
@@ -447,6 +455,9 @@ OLD_PROMPT_REFUSAL = (
 )
 """이전 안내문 리비전으로 시작한 분석을 이으려 할 때의 거절 문구(D58 18b) — 내부 리비전 이름은
 싣지 않는다(D57)."""
+
+WORKSPACE_MODE_KEY = "workspace_mode"
+"""작업공간 모드(D97) 표지 — `auto|landscape|portrait`, 없거나 모르는 값이면 자동이다."""
 
 FINALCUT_DROP_DISABLED_KEY = "finalcut_drop_disabled"
 FINALCUT_DROP_DISABLED_ON = "on"
@@ -1547,6 +1558,24 @@ class RawWorkspaceService:
         from vlogsrt.project.raw import cross_check
 
         return cross_check.set_enabled(self._workspace(root), on)
+
+    def workspace_mode(self, root: Path) -> Any:
+        """작업공간 모드(D97) — 사람이 고른 값(표지)이 없으면 불러온 영상 개수 다수다(읽기만)."""
+        from vlogsrt.project.raw import workspace_mode
+
+        stored = self._workspace(root).meta_value(WORKSPACE_MODE_KEY)
+        choice = stored if stored in MODE_CHOICES else MODE_AUTO
+        sizes = [(asset.width, asset.height) for asset in self.list_source_assets(root)]
+        return workspace_mode.decide_mode(sizes, choice)
+
+    def set_workspace_mode(self, root: Path, choice: str) -> Any:
+        """모드를 고른다(무료 — 표지 하나, 지문·승인·견적 밖). `auto`는 다시 개수 다수를 따른다."""
+        if choice not in MODE_CHOICES:
+            raise RawWorkspaceError(
+                f"모드는 {', '.join(MODE_CHOICES)} 가운데 하나입니다: {choice!r}"
+            )
+        self._workspace(root).set_meta_value(WORKSPACE_MODE_KEY, choice)
+        return self.workspace_mode(root)
 
     def finalcut_drop_disabled(self, root: Path) -> bool:
         """Final Cut 보내기에서 꺼진 클립을 뺄까(D94) — 고른 적이 없으면 빼지 않는다(기본)."""

@@ -894,6 +894,49 @@ def _word_text_plan_failures(body: str) -> list[str]:
     ]
 
 
+# 작업공간 모드(W-37, D97) — 가로·세로 모드는 표지·흐름 게이트다. 모드 계층이 DB·파일·서비스를
+# 알거나, 타임라인 빌더(`plan`·`render`)가 모드를 받으면 모드가 Final Cut 문서 바이트를 바꾼다.
+WORKSPACE_MODE_MODULE = "workspace_mode.py"
+WORKSPACE_MODE_MUST_NOT_IMPORT = ("service", "workspace", "sqlite3", "os", "shutil", "preprocess")
+TIMELINE_BUILDER_ENTRIES = ("plan", "render")
+
+
+def check_workspace_mode_stays_pure() -> list[str]:
+    """D97 — 모드 계층은 순수하고, 타임라인 빌더의 입구는 모드를 받지 않는다."""
+    path = PROJECT_PACKAGE / "raw" / WORKSPACE_MODE_MODULE
+    if not path.exists():
+        return [f"vlogsrt/project/raw/{WORKSPACE_MODE_MODULE}: 모드 계층이 사라졌다 (D97)"]
+    body = path.read_text(encoding="utf-8")
+    failures = [
+        f"{WORKSPACE_MODE_MODULE}: {module}을 import한다 — 모드 계층은 값만 다룬다 (D97)"
+        for module in _imports(body, WORKSPACE_MODE_MUST_NOT_IMPORT)
+    ]
+    failures += [
+        f"{WORKSPACE_MODE_MODULE}:{number}: 파일을 직접 읽거나 쓴다 (D97)"
+        for number, line in enumerate(body.splitlines(), start=1)
+        if TIERING_FILE_IO.search(line)
+    ]
+    builder = PROJECT_PACKAGE / "raw" / "finalcut_timeline.py"
+    if builder.exists():
+        failures += _mode_parameter_failures(builder.read_text(encoding="utf-8"))
+    return failures
+
+
+def _mode_parameter_failures(body: str) -> list[str]:
+    found: list[str] = []
+    for node in ast.walk(ast.parse(body)):
+        if not isinstance(node, ast.FunctionDef) or node.name not in TIMELINE_BUILDER_ENTRIES:
+            continue
+        arguments = node.args
+        names = [a.arg for a in (*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs)]
+        found += [
+            f"finalcut_timeline.py: {node.name}({name}) — 모드가 문서 바이트를 바꾼다 (D97)"
+            for name in names
+            if "mode" in name
+        ]
+    return found
+
+
 # 요청 빌더의 칸(D59 19c) — whisper(시간) 요청에는 힌트가, 글자 요청에는 시각 입자가 실리지 않는다.
 # 1단계 글자 경로가 용어집·고정 문맥을 요청마다 싣게 되면서 그 길이 whisper 쪽으로 새지 않게 막는다.
 REQUEST_LANES = (
@@ -2900,6 +2943,7 @@ CHECKS = (
     ("다른 귀 기준 재전사 판정은 순수하다", check_ear_rescue_stays_pure),
     ("Gemini 단어 해석·묶기는 순수하다", check_word_cues_stays_pure),
     ("Gemini 단어 → whisper 줄 글자 배정은 순수하고 글자만 낸다", check_word_text_stays_pure),
+    ("작업공간 모드는 순수하고 문서 밖이다", check_workspace_mode_stays_pure),
     ("3단 등급은 순수하다", check_tiering_stays_pure),
     ("등급의 시각 확인 값은 서비스 한 자리만", check_tier_timing_only_from_service),
     ("자막 시각 확인은 순수하다", check_sync_check_stays_pure),

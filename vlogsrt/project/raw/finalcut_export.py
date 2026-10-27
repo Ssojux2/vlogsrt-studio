@@ -1035,11 +1035,29 @@ def export(
             "sources": [item.facts for item in gathered],
             "not_exported": _not_exported(service, root, head, exported, skipped),
             "counts": _report_counts(document, gathered),
+            "mode": _mode_section(service, root, document),
             **({} if caption_timing is None else {"sync_check": dict(caption_timing.section)}),
             **({} if section is None else {"titles": section}),
         }
         tag = ("" if titles_srt is None else _TITLES_TAG) + (_GREEN_TAG if drop_disabled else "")
         return _publish(folder, timeline.render(document), report, moment, dtd_path, tag)
+
+
+def _mode_section(
+    service: RawWorkspaceService, root: Path, document: timeline.TimelineDocument
+) -> dict[str, object]:
+    """작업공간 모드(D97)와 이 문서의 방향 — 모드는 문서를 바꾸지 않고 다르면 메모만 남긴다."""
+    decision = service.workspace_mode(root)
+    orientation = timeline.document_counts(document)["orientation"]
+    return {
+        "mode": decision.mode,
+        "basis": decision.basis,
+        "landscape_sources": decision.landscape,
+        "portrait_sources": decision.portrait,
+        "unknown_sources": decision.unknown,
+        "timeline_orientation": orientation,
+        "matches_timeline": decision.mode == orientation,
+    }
 
 
 def _with_titles(
