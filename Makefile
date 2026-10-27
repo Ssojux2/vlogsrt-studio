@@ -23,7 +23,7 @@ types-win:
 invariant:
 	$(PY) scripts/check_invariants.py
 
-# 웹 UI. gradio가 필요하다: pip install -e ".[ui]"
+# 웹 UI. gradio·numpy·onnxruntime이 필요하다 — make venv가 함께 깐다(pip install -e ".[ui,project]").
 ui:
 	$(PY) -u -m ui.app
 
@@ -41,9 +41,11 @@ fixtures:
 	@echo "실제 API를 호출합니다. 약 \$$0.06/편."
 	@echo "  $(PY) -m vlogsrt.cli record $(GOLDEN)/ep01.mp4"
 
+# 실행 파일(실행.command·실행.bat)과 같은 꾸러미 + 개발 도구. 표지를 남겨 실행 파일이 다시 깔지 않는다(D100 §8).
 venv:
 	python3 -m venv .venv
-	.venv/bin/python -m pip install -e ".[dev]"
+	.venv/bin/python -m pip install -e ".[dev,ui,project]"
+	.venv/bin/python scripts/launch_check.py write-stamp
 
 clean:
 	rm -rf .pytest_cache .mypy_cache .ruff_cache out .vlogsrt-cache

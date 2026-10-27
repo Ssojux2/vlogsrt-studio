@@ -9342,3 +9342,39 @@ macOS 동작은 바이트 그대로 둔다.
 - **설정 더함**(`RenderSettings`, 모두 외부 근거 없는 조정 대상 · 어느 지문·캐시 열쇠·승인·견적에도 없다): `hardware_bits_per_pixel = 1/10` · `keyframe_seconds = 2` · `track_timescale_min = 10000` · `timeout_floor_seconds = 1800` · `timeout_media_ratio = 6` · `priority = 10`. nice 범위는 형식의 사실(`NICE_RANGE` 0–20, 미리보기 설정과 같은 검사)이다.
 - **실측.** 시험 폴더(4K@30 2초 · 1080p@30 9초 · 세로 1080×1920@24 2초 → 1920×1080@30, 남긴 조각 4개 · 246프레임 · 8.2초)의 내보내기가 M1 Pro에서 약 2.3–2.6초(모으기 0.5–0.6 · 렌더 1.5–1.7 · 이어붙이기 0.26), videotoolbox와 libx264가 비슷하다. 유료 호출 0회. Windows는 실행하지 않았다(§1).
 - **시험.** `tests/raw/test_render_export.py` — 렌더러(인코더 표 읽기 · 목록에 있으나 돌지 않는 인코더 → libx264 · 소리 없는 24fps 세로 조각의 필러박스·30fps 60장·정확한 침묵 · 이은 소리의 정렬 · 프레임 수가 다르면 게시하지 않음 · map 시계 거부) + 내보내기(1920×1080@30 H.264 + AAC 48 kHz 2채널 · `nb_frames = total_frames` · 길이 1/60초 안 · 촬영 시각 순 · 필러박스 · 24→30 · SRT = 투영 · 확인 안 된 빨강을 내고 보고 · 원본·`export/` 밖 그대로 · 두 번째는 새 폴더 · 취소면 폴더 없음 · map 원본 제외 · 남길 것 없으면 거부 · 서비스 작업). `tests/test_invariants.py`(새 검사).
+### §8 실행 파일 (W-47)
+
+**왜**: 쓰는 사람은 맥의 브이로거이고 곧 Windows 사용자다. 터미널 명령 없이 파일 하나를 더블클릭해 작업대를 띄워야 한다.
+예전 `실행.command`는 `/opt/homebrew/bin`을 무조건 PATH에 박고, `.venv`가 없으면 아무 `python3`(맥 기본은 3.9 — 앱이 뜨지 않는다)로
+그냥 띄웠다. 꾸러미를 깔아 주지도, ffmpeg가 없다고 알려 주지도 않았다.
+
+- **두 실행 파일, 한 판단.** `실행.command`(zsh)와 `실행.bat`(cmd)은 같은 순서를 밟는다 — Python 3.11+ 찾기 → 처음이면 `.venv` 만들기 →
+  설치 표지가 낡았으면 `pip install --upgrade pip` + `pip install -e ".[ui,project]"` → ffmpeg·ffprobe 확인 → `-u -m ui.app <인자 그대로>` →
+  0이 아닌 종료면 멈춰 오류를 읽게 한다. 판단(표지 · 꾸러미 · 도구 · 운영체제별 안내)은 `scripts/launch_check.py` 한 곳이다. 표준 라이브러리만
+  쓰고 앱을 import하지 않으며(꾸러미가 없는 첫 실행에서도 돈다) 프로세스를 띄우지 않는다 — pip·venv 호출은 실행 파일이 한다. `scripts/`는
+  불변식 검사(`vlogsrt/`·`ui/`만 훑는다)의 바깥이다. extra 목록은 모듈의 `INSTALL_EXTRAS`와 두 실행 파일의 글자가 같아야 한다(시험이 잠근다).
+- **Python 찾기.** 맥: `.venv/bin/python` → `python3.13`·`3.12`·`3.11` → `python3`, 각각 `sys.version_info >= (3, 11)` 확인(맥 기본 3.9를
+  거른다). Windows: `.venv\Scripts\python.exe` → `py -3.13`·`3.12`·`3.11` → `python` + 같은 확인(Microsoft Store 별칭은 실패로 걸러진다).
+  없으면 `brew install python@3.12` / `winget install Python.Python.3.12`. `.venv`의 Python이 3.11보다 낮으면 지우라고만 하고 지우지 않는다.
+- **설치 표지.** `.venv/.vlogsrt-install-stamp` = `launch-stamp/v1` + extra 목록 + `pyproject.toml` sha256. 같으면 pip를 부르지 않아 두 번째
+  실행부터 바로 뜨고(오프라인에서도), 업데이트로 `pyproject.toml`이 바뀌면 그때만 다시 깐다. `.venv`를 지우면 표지도 사라져 처음부터다.
+  설치가 실패해도(오프라인 재설치) 필요한 모듈이 모두 찾아지면(`importable` — `find_spec`, import하지 않는다) 경고하고 띄우며 표지는 쓰지
+  않는다 — 다음 실행이 다시 시도한다. 모듈이 빠졌으면 멈춘다. `make venv`도 `.[dev,ui,project]`를 깔고 표지를 남긴다 — 개발자와 실행 파일이
+  같은 꾸러미다. 넓힌 설치는 `make check`를 바꾸지 않는다(mypy는 `no_site_packages`, 시험은 좁은 설치에 기대는 곳이 없다).
+- **PATH.** 맥은 Finder에서 연 창이 로그인 셸 PATH를 다 받지 못하므로 **있는** Homebrew 자리(`/opt/homebrew/bin`, `/usr/local/bin`)만 앞에
+  붙인다(`typeset -U`로 중복 제거). Windows는 PATH를 건드리지 않는다 — `winget install Gyan.FFmpeg`이 사용자 PATH에 더하고, 이미 열린 창은
+  그것을 모르므로 안내가 「새 창에서 다시」를 말한다.
+- **Windows 인코딩.** `실행.bat`은 UTF-8(BOM 없음 — cmd는 BOM을 첫 명령의 글자로 읽는다) · CRLF(cmd는 LF뿐인 배치에서 레이블을 잘못 찾는다).
+  `.gitattributes`의 `* text=auto eol=lf` 뒤에 `*.bat text eol=crlf`를 더했다 — 저장소에는 LF, 체크아웃은 CRLF다. 맨 위 `chcp 65001`, 환경
+  `PYTHONUTF8=1`·`PYTHONIOENCODING=utf-8`. 배치의 한국어 안내는 콘솔 글꼴·빌드에 따라 깨질 수 있어 **영어 줄을 함께** 적는다. Python이
+  찍는 안내(ffmpeg 없음 등)는 콘솔 유니코드 API로 나가 깨지지 않는다. `if (…)` 묶음 안의 `echo`에는 괄호를 쓰지 않는다(묶음이 닫힌다).
+- **브라우저.** `ui/app.py`는 그대로다 — 이미 `webbrowser.open`으로 기본 브라우저를 열고(맥·Windows 공통 표준 라이브러리) `--no-browser`가
+  있다(WP7 스모크가 쓴다). 인자는 실행 파일이 그대로 넘긴다.
+- **README.** 첫머리를 한국어 빠른 시작으로 바꿨다 — 하는 일 · 준비물(맥·Windows) · `.env.example` → `.env` · 더블클릭(맥 처음엔 오른쪽 클릭 →
+  열기) · 파일 자리(`_vlogsrt/` · 형제 `-vlogsrt`) · Windows 첫 실행 확인 목록(ffmpeg PATH · LongPathsEnabled · exFAT · Defender) · 문제 해결.
+  개발 절은 `make venv`·`make types-win`을 더했다. 옛 「쓰기 — 웹 UI」 절(경로·힌트·로그·SRT 네 칸 화면)은 지웠다.
+- **시험.** `tests/test_launch_check.py` — 판 바닥 3.11 · 표지(없음 → 씀 → 같음, pyproject·extra가 바뀌면 낡음) · ffmpeg 없음 안내(운영체제별,
+  `shutil.which`·`sys.platform` 바꿔 끼움) · 빠진 모듈 · 표준 라이브러리만 · 두 실행 파일의 extra·명령 글자 · `.bat`의 CRLF·BOM 없음·UTF-8 ·
+  `goto`/`call` 레이블이 모두 있음 · `.command` 실행 비트. 맥 실행 파일은 `zsh -n`과 가짜 `ui/app.py`를 둔 임시 폴더에서 돌려 봤다(표지 없음 →
+  설치 실패 → 멈춤 · 표지 있음 → 인자 그대로 넘김 · 종료 코드 전달 · 시스템 Python 3.9만 있으면 못 찾음). **`실행.bat`은 Windows에서 실행하지
+  않았다** — 글자 검토와 위 정적 시험뿐이다. 유료 호출 0회.

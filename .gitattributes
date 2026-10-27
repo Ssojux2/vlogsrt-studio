@@ -19,3 +19,6 @@
 # OFL 원문은 꾸러미가 CRLF로 싣는다. 위 `eol=lf`가 고치면 해시가 어긋난다.
 *.woff2 binary
 ui/static/fonts/OFL.txt -text
+
+# Windows cmd는 LF만 있는 배치 파일에서 레이블·goto를 잘못 찾는다 — 배치 파일만 CRLF로 둔다(D100 §8).
+*.bat text eol=crlf
