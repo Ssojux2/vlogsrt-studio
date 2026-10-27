@@ -1789,6 +1789,17 @@ class LocalMediaConcurrency:
             return self.floor
         return max(self.floor, min(self.ceiling, cpu_count // self.cpu_divisor))
 
+    def encode_threads(self, cpu_count: int | None) -> int | None:
+        """자리 하나의 CPU 인코드(libx264) 스레드 — `CPU 수 // 한도`, 적어도 1(W-45, D100 §6).
+
+        libx264는 스스로 코어의 1.5배쯤 스레드를 띄운다. 자리 셋이 모두 차면 그 셋이 코어를 세 번
+        나눠 갖는다 — 몫을 주면 로컬 미디어 인코드의 합이 코어 수를 넘지 않는다. 새 조정값이 아니라
+        한도에서 나온 값이다. CPU 수를 모르면 None(ffmpeg가 정한다 — 예전 그대로).
+        """
+        if cpu_count is None or cpu_count < 1:
+            return None
+        return max(1, cpu_count // self.limit(cpu_count))
+
 
 FOLDER_WORKSPACE_NAME_FORBIDDEN = ("/", "\\", ":")
 """작업공간 폴더 이름에 들 수 없는 글자 — 경로 구분자·드라이브 표기(형식의 사실이다)."""

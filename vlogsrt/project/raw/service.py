@@ -760,9 +760,10 @@ def _analysis_estimate_for(
     맞춰진다(§14.3).
     """
     path = workspace.source_media_path(asset)
-    probe = preprocess.probe_raw_media(path)
+    # 부른 쪽(`_analysis_selection`)이 원본을 확인했다 — 같은 stat이면 다시 조사하지 않는다(W-45).
+    probe = preprocess.probe_raw_media_memo(path)
     try:
-        clock = preprocess.probe_extraction_clock(path, probe=probe)
+        clock = preprocess.probe_extraction_clock_memo(path, probe=probe)
     except RuntimeError as error:
         return AnalysisEstimate(
             asset_id=asset.asset_id,
@@ -5638,7 +5639,7 @@ class RawWorkspaceService:
                 raise AnalysisError("1단계 승인 기록이 AsrPhaseApproval이 아니거나 미승인이다")
             checked[asset_id] = approval
         for asset_id, asset in assets.items():
-            probe = preprocess.probe_raw_media(workspace.source_media_path(asset))
+            probe = preprocess.probe_raw_media_memo(workspace.source_media_path(asset))
             if not probe.audio:
                 continue  # 무성 원본 — 승인할 전사가 없다(ASR 작업을 만들지 않는다)
             view = timing_engine.source_workflow(workspace, asset_id, workflow)
@@ -6705,8 +6706,8 @@ class _MeasuredSource:
 def _measured_source(workspace: RawWorkspace, asset: SourceAsset) -> _MeasuredSource:
     """원본의 시계를 잰다 — 격자 증명(`uniform_grid`)의 판정은 부른 쪽이 본다(D68)."""
     path = workspace.source_media_path(asset)
-    probe = preprocess.probe_raw_media(path)
-    clock = preprocess.probe_extraction_clock(path, probe=probe)
+    probe = preprocess.probe_raw_media_memo(path)  # `_verified_asset`가 먼저 확인했다(W-45)
+    clock = preprocess.probe_extraction_clock_memo(path, probe=probe)
     return _MeasuredSource(clock=clock, exact_end_pts=math.ceil(clock.exact_end / clock.time_base))
 
 

@@ -22,7 +22,7 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
@@ -54,12 +54,39 @@ def chunk_glob(stem: str) -> str:
     return _CHUNK_NAME.format(stem=stem, number="*")
 
 
+_TOOL_PATHS: dict[tuple[str, str | None], str] = {}
+"""(도구, PATH) → 찾은 실행 파일 — 프로세스 메모리에만 산다(W-45, D100 §6). 호출 자리가 서른
+곳이 넘어 `shutil.which`가 PATH의 폴더마다 stat을 되풀이했다. PATH가 바뀌면 열쇠가 달라 다시
+찾는다. 못 찾은 것은 기억하지 않는다(깔고 나면 다시 실행하지 않아도 찾는다)."""
+_TOOL_VERSIONS: dict[str, str] = {}
+"""찾은 실행 파일 경로 → `-version` 첫 줄 — 원본 조사마다 `ffprobe -version`을 띄웠다."""
+_TOOL_LOCK = threading.Lock()
+_VERSION_LOCK = threading.Lock()
+"""버전 읽기는 잠근 채 띄운다 — 동시에 처음 묻는 조사들이 `-version`을 여러 번 띄우지 않게."""
+
+
 def require_ffmpeg(tool: str = "ffmpeg") -> str:
+    key = (tool, os.environ.get("PATH"))
+    with _TOOL_LOCK:
+        held = _TOOL_PATHS.get(key)
+    if held is not None and os.path.isfile(held):
+        return held  # 지운 실행 파일은 다시 찾는다 — stat 하나는 PATH 전체 훑기보다 싸다
     path = shutil.which(tool)
     if not path:
         hint = _ffmpeg_install_hint()
         raise RuntimeError(f"{tool} 를 찾지 못했습니다. `{hint}` 후 다시 실행하세요.")
+    with _TOOL_LOCK:
+        _TOOL_PATHS[key] = path
     return path
+
+
+def reset_process_caches() -> None:
+    """도구 경로·버전·원본 조사 기억을 비운다 — 시험이 가짜 도구를 갈아 끼울 때 쓴다(W-45)."""
+    with _TOOL_LOCK:
+        _TOOL_PATHS.clear()
+    with _VERSION_LOCK:
+        _TOOL_VERSIONS.clear()
+    _PROBE_MEMO.clear()
 
 
 def _ffmpeg_install_hint() -> str:
@@ -2328,11 +2355,21 @@ def _optional_stream_pts(entry: dict[str, object], field: str, source: Path) -> 
 
 @process_step("도구 버전 확인")
 def _tool_version(tool: str) -> str:
-    completed = _run([tool, "-version"])
-    first = completed.stdout.strip().splitlines()
-    if not first:
-        raise RuntimeError(f"{tool} -version 출력이 비었습니다")
-    return first[0]
+    """찾은 실행 파일의 `-version` 첫 줄 — 경로마다 프로세스에서 한 번 띄운다(W-45, D100 §6).
+
+    예전에는 원본 조사·추출·미리보기마다 띄웠다(미리보기 준비 한 번에 `-version` 21번). 열쇠는
+    찾은 경로라 PATH가 다른 ffmpeg를 가리키면 그것을 다시 읽는다. 실패는 기억하지 않는다.
+    """
+    path = require_ffmpeg(tool)
+    with _VERSION_LOCK:
+        held = _TOOL_VERSIONS.get(path)
+        if held is None:
+            completed = _run([path, "-version"])
+            first = completed.stdout.strip().splitlines()
+            if not first:
+                raise RuntimeError(f"{tool} -version 출력이 비었습니다")
+            held = _TOOL_VERSIONS[path] = first[0]
+    return held
 
 
 # ─────────────────────────────────────────────────────────────
@@ -2433,11 +2470,144 @@ def probe_extraction_clock(
     pts = _packet_pts(completed.stdout, source)
     conform = policy if policy is not None else RAW_GRID_CONFORM
     clock = _measured_clock(entry, rate, time_base, pts, source, conform)
-    if probe is not None and clock.stream_index != probe.video.stream_index:
+    if probe is not None:
+        _require_clock_stream(clock, probe, source)
+    return clock
+
+
+def _require_clock_stream(clock: RawVideoClock, probe: RawMediaProbe, source: Path) -> None:
+    if clock.stream_index != probe.video.stream_index:
         raise RuntimeError(
             f"시계의 스트림이 프로브와 다릅니다: {source} "
             f"(시계 {clock.stream_index}, 프로브 {probe.video.stream_index}) — 순번이 어긋났다"
         )
+
+
+# ── 원본 조사 기억(W-45, D100 §6) ───────────────────────────────────────────
+# 같은 원본을 불러오기·견적·계획·검토 초기화·미리보기·썸네일이 저마다 다시 조사했다(원본 셋의
+# 미리보기 준비 한 번에 ffprobe 48번). 그 자리들은 조사 앞에서 이미 원본이 그대로인지 확인한다
+# (해시 또는 stat) — 그런 자리만 `*_memo`를 부른다. 방금 쓴 출력을 다시 재는 검증(추출·미리보기·
+# 프록시·렌더의 결과 확인)은 언제나 `probe_raw_media`·`probe_extraction_clock`을 그대로 부른다.
+
+
+@dataclass(frozen=True, slots=True)
+class ProbeMemoSettings:
+    """원본 조사 기억의 크기 — **외부 근거 없는 조정 대상**(W-45). 원본 하나에 조사·시계 두 칸이라
+    128칸이면 원본 60개쯤의 작업대가 한 번 훑은 뒤 다시 띄우지 않는다. map 시계(D70)는 슬롯 대응을
+    싣고 있어(20분 원본에 수만 칸) 한도 없이 두지 않는다. 어느 지문·캐시 열쇠·승인에도 없다."""
+
+    entries: int = 128
+
+    def __post_init__(self) -> None:
+        if isinstance(self.entries, bool) or not isinstance(self.entries, int) or self.entries < 1:
+            raise ValueError(f"조사 기억 칸 수는 1 이상 정수여야 합니다: {self.entries!r}")
+
+
+PROBE_MEMO = ProbeMemoSettings()
+
+
+class _ProbeMemo:
+    """잠근 LRU 한 벌 — 프로세스 메모리에만 산다(디스크에 남지 않는다)."""
+
+    def __init__(self, settings: ProbeMemoSettings) -> None:
+        self._entries: dict[tuple[object, ...], object] = {}
+        self._limit = settings.entries
+        self._lock = threading.Lock()
+
+    def get(self, key: tuple[object, ...]) -> object | None:
+        with self._lock:
+            value = self._entries.pop(key, None)
+            if value is not None:
+                self._entries[key] = value  # 가장 최근으로
+            return value
+
+    def put(self, key: tuple[object, ...], value: object) -> None:
+        with self._lock:
+            self._entries.pop(key, None)
+            self._entries[key] = value
+            while len(self._entries) > self._limit:
+                del self._entries[next(iter(self._entries))]
+
+    def clear(self) -> None:
+        with self._lock:
+            self._entries.clear()
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._entries)
+
+
+_PROBE_MEMO = _ProbeMemo(PROBE_MEMO)
+
+
+def _probe_identity(source: Path) -> tuple[object, ...]:
+    """같은 파일·같은 ffprobe인가의 열쇠 — 크기·수정 시각·변경 시각(ns)·inode·장치 + 도구 버전.
+
+    변경 시각은 크기·수정 시각을 되돌린 덮어쓰기(`cp -p`·같은 크기로 다시 쓰기)를 잡는다.
+    """
+    resolved = Path(source).resolve(strict=True)
+    info = resolved.stat()
+    tool = _tool_version("ffprobe")
+    return (
+        str(resolved),
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+        info.st_ino,
+        info.st_dev,
+        tool,
+    )
+
+
+def _frozen_value(value: object) -> bool:
+    """기억해 돌려줘도 되는 값인가 — 얼린 dataclass만(가짜 조사자의 값은 기억하지 않는다)."""
+    params = getattr(type(value), "__dataclass_params__", None)
+    return params is not None and bool(params.frozen)
+
+
+_Probed = TypeVar("_Probed")
+
+
+def _memoized(source: Path, kind: object, prober: object, call: Callable[[], _Probed]) -> _Probed:
+    """기억이 있으면 그것을, 없으면 조사해 — 조사하는 동안 바뀌지 않은 파일의 값만 기억한다.
+
+    열쇠에 조사자 함수까지 넣는다 — 시험이 조사자를 갈아 끼우면 새로 잰다. 없는 파일·도구를 못
+    찾은 경우는 기억 없이 그대로 조사한다(실패를 알리는 것은 조사자다).
+    """
+    try:
+        before = _probe_identity(source)
+    except (OSError, RuntimeError):
+        return call()
+    key = (kind, prober, *before)
+    held = _PROBE_MEMO.get(key)
+    if held is not None:
+        return held  # type: ignore[return-value]
+    value = call()
+    with suppress(OSError, RuntimeError):
+        if _frozen_value(value) and _probe_identity(source) == before:
+            _PROBE_MEMO.put(key, value)
+    return value
+
+
+def probe_raw_media_memo(source: Path) -> RawMediaProbe:
+    """`probe_raw_media(source)`의 기억판 — 원본이 그대로인지 이미 확인한 자리만 부른다."""
+    prober = probe_raw_media
+    return _memoized(source, "raw", prober, lambda: prober(source))
+
+
+def probe_extraction_clock_memo(
+    source: Path, *, probe: RawMediaProbe | None = None
+) -> RawVideoClock:
+    """`probe_extraction_clock`(기본 정책)의 기억판 — 스트림 대조(`probe`)는 기억에도 한다."""
+    prober = probe_extraction_clock
+
+    def call() -> RawVideoClock:
+        return prober(source) if probe is None else prober(source, probe=probe)
+
+    # 기본 맞춤 정책도 열쇠다 — 정책(`RAW_GRID_CONFORM`)이 바뀌면 같은 파일도 다른 시계다(D69·D70).
+    clock = _memoized(source, ("clock", RAW_GRID_CONFORM), prober, call)
+    if probe is not None and _frozen_value(clock):
+        _require_clock_stream(clock, probe, source)
     return clock
 
 
@@ -4049,6 +4219,10 @@ _CAPTION_PREVIEW_VIDEO_COPY_PIXFMTS = frozenset({"yuv420p", "yuvj420p"})
 # 미리보기 인코딩 설정은 얼어 있다(코디네이터 재결 — 위 추출 프로파일과 같은 규율).
 # 미리보기는 납품물이 아니라 검토 보조라 crf 20을 쓴다(납품 추출 프로파일의 17과
 # 다르다). 음성은 AAC 192k — 검토 청취용 상한이지 원본 오디오 정책이 아니다.
+_SOFTWARE_H264 = "libx264"
+"""하드웨어 인코더가 하나도 돌지 않을 때의 마지막 자리 — 화질 손잡이(crf·preset)가 이
+인코더의 것이다."""
+
 _CAPTION_PREVIEW_X264_ARGS = ("-preset", "medium", "-crf", "20")
 _CAPTION_PREVIEW_AUDIO_BITRATE = "192k"
 _CAPTION_PREVIEW_ORIGIN_PROBE_SECONDS = "0.2"
@@ -4237,10 +4411,23 @@ class PreviewEncoding:
     shrink_copyable: bool = False
     """참이면 그대로 복사할 수 있는 H.264도 긴 변이 `long_edge`보다 크면 다시 인코딩해 줄인다 —
     4K 원본의 재생용 미리보기(D100 §2). 거짓(기본)이면 예전 그대로 복사한다(바이트 그대로)."""
+    video_codecs: tuple[str, ...] = (_SOFTWARE_H264,)
+    """고를 인코더의 차례(W-45, D100 §6) — 앞에서부터 목록에 있고 **실제로 도는** 첫 것
+    (`pick_video_encoder`). libx264 하나뿐이면(기본) 확인 없이 예전 그대로다."""
+    hardware_bits_per_pixel: Fraction | None = None
+    """하드웨어 인코더는 crf가 없다 — 비트레이트 = 이 값 × 줄인 화소 × 레이트(렌더와 같은 꼴)."""
+    threads: int | None = None
+    """libx264의 `-threads` — 로컬 미디어 자리 몫(`LocalMediaConcurrency.encode_threads`). 없으면
+    ffmpeg가 정한다(예전 그대로). 하드웨어 인코더에는 싣지 않는다."""
 
-    def tag(self) -> str:
-        """기록에 남기는 이름 — 이 미리보기를 무엇으로 만들었는가(캐시 열쇠가 아니다)."""
-        return f"libx264/{self.preset}/crf{self.crf}/le{self.long_edge}"
+    def tag(self, video_codec: str = _SOFTWARE_H264, bitrate: int | None = None) -> str:
+        """기록에 남기는 이름 — 이 미리보기를 무엇으로 만들었는가(캐시 열쇠가 아니다).
+
+        libx264는 예전 이름 그대로다. 하드웨어는 `인코더/b비트레이트/le긴변`이다.
+        """
+        if video_codec == _SOFTWARE_H264:
+            return f"libx264/{self.preset}/crf{self.crf}/le{self.long_edge}"
+        return f"{video_codec}/b{bitrate}/le{self.long_edge}"
 
     def scale_filter(self) -> str:
         """긴 변만 줄이는 스케일 — 회전은 그 앞에서 ffmpeg 자동 회전이 이미 물리로 적용했다.
@@ -4310,12 +4497,53 @@ def _visual_video_args(
     if encoding is None:
         legacy = ["-c:v", "libx264", *_CAPTION_PREVIEW_X264_ARGS, "-pix_fmt", "yuv420p"]
         return legacy, [note], False
+    codec = _preview_video_codec(encoding)
     args = [
         "-vf", encoding.scale_filter(),
-        "-c:v", "libx264", "-preset", encoding.preset, "-crf", str(encoding.crf),
+        *_preview_quality_args(encoding, codec, video),
         "-pix_fmt", "yuv420p",
     ]  # fmt: skip
     return args, [note + f" — 긴 변 {encoding.long_edge} 이하 검토용"], False
+
+
+def _preview_video_codec(encoding: PreviewEncoding) -> str:
+    """미리보기 인코더 — libx264 하나뿐이면 묻지 않는다(예전 그대로, 프로세스 0)."""
+    if encoding.video_codecs == (_SOFTWARE_H264,):
+        return _SOFTWARE_H264
+    return pick_video_encoder(encoding.video_codecs)
+
+
+def _preview_quality_args(encoding: PreviewEncoding, codec: str, video: RawVideoMedia) -> list[str]:
+    """인코더마다 화질 손잡이 — libx264는 preset·crf(·threads), 하드웨어는 비트레이트."""
+    if codec == _SOFTWARE_H264:
+        threads = [] if encoding.threads is None else ["-threads", str(encoding.threads)]
+        return ["-c:v", codec, "-preset", encoding.preset, "-crf", str(encoding.crf), *threads]
+    return ["-c:v", codec, "-b:v", str(_preview_bitrate(encoding, video))]
+
+
+def _preview_bitrate(encoding: PreviewEncoding, video: RawVideoMedia) -> int:
+    """하드웨어 미리보기 비트레이트 — 줄인 화소(긴 변 한도, 키우지 않는다) × 평균 레이트 × bpp."""
+    if encoding.hardware_bits_per_pixel is None:
+        raise RuntimeError(
+            "하드웨어 미리보기 인코더에는 화소당 비트(hardware_bits_per_pixel)가 필요하다"
+        )
+    scale = min(Fraction(1), Fraction(encoding.long_edge, max(video.width, video.height)))
+    pixels = video.width * video.height * scale * scale
+    return math.ceil(encoding.hardware_bits_per_pixel * pixels * video.avg_frame_rate)
+
+
+def _preview_tag(encoding: PreviewEncoding, codec_args: Sequence[str]) -> str | None:
+    """기록의 `encoding` — 다시 인코딩한 것만(복사·옛 조리법은 None), 고른 인코더 이름으로."""
+    if "-vf" not in codec_args:
+        return None
+    args = list(codec_args)
+    bitrate = int(args[args.index("-b:v") + 1]) if "-b:v" in args else None
+    return encoding.tag(_video_codec_of(args), bitrate)
+
+
+def _video_codec_of(codec_args: Sequence[str]) -> str:
+    args = list(codec_args)
+    return args[args.index("-c:v") + 1]
 
 
 def _visual_preview_args(
@@ -4473,7 +4701,7 @@ def extract_visual_review_preview(
     같은 것을 쓴다.
     """
     _assert_safe_staging(source, staging_output)
-    probe = probe_raw_media(source)
+    probe = probe_raw_media_memo(source)  # 호출자(`_select_source`)가 원본을 확인했다
     track = (
         None if audio_stream_index is None else _caption_preview_track(probe, audio_stream_index)
     )
@@ -4481,19 +4709,13 @@ def extract_visual_review_preview(
     staging_output.parent.mkdir(parents=True, exist_ok=True)
     staged = _reserve_staging_temp(staging_output)
     try:
-        command = [
-            require_ffmpeg(), "-hide_banner", "-nostdin", "-y",
-            "-i", str(source),
-            "-map", f"0:{probe.video.stream_index}",
-        ]  # fmt: skip
-        if track is not None:
-            command += ["-map", f"0:{track.stream_index}"]
-        command += ["-dn", "-sn", *codec_args, "-movflags", "+faststart", "-f", "mp4", str(staged)]
-        _run_niced(command, priority, timeout=timeout_seconds)
+        codec_args = _encode_visual_preview(
+            source, staged, probe, track, codec_args, encoding, priority, timeout_seconds
+        )
     except BaseException:
         staged.unlink(missing_ok=True)
         raise
-    out_probe = probe_raw_media(staged)
+    out_probe = probe_raw_media(staged)  # 방금 쓴 출력의 검증 — 기억을 쓰지 않는다
     expected_audio = 0 if track is None else 1
     if len(out_probe.audio) != expected_audio:
         staged.unlink(missing_ok=True)
@@ -4519,8 +4741,70 @@ def extract_visual_review_preview(
         source_audio_codec=None if track is None else track.codec_name,
         ffmpeg_version=_tool_version("ffmpeg"),
         warnings=warnings,
-        encoding=encoding.tag() if encoding is not None and "-vf" in codec_args else None,
+        encoding=None if encoding is None else _preview_tag(encoding, codec_args),
     )
+
+
+def _visual_preview_command(
+    source: Path,
+    staged: Path,
+    probe: RawMediaProbe,
+    track: RawAudioTrack | None,
+    codec_args: Sequence[str],
+) -> list[str]:
+    command = [
+        require_ffmpeg(), "-hide_banner", "-nostdin", "-y",
+        "-i", str(source),
+        "-map", f"0:{probe.video.stream_index}",
+    ]  # fmt: skip
+    if track is not None:
+        command += ["-map", f"0:{track.stream_index}"]
+    return [
+        *command,
+        "-dn",
+        "-sn",
+        *codec_args,
+        "-movflags",
+        "+faststart",
+        "-f",
+        "mp4",
+        str(staged),
+    ]
+
+
+def _encode_visual_preview(
+    source: Path,
+    staged: Path,
+    probe: RawMediaProbe,
+    track: RawAudioTrack | None,
+    codec_args: list[str],
+    encoding: PreviewEncoding | None,
+    priority: int | None,
+    timeout_seconds: float | None,
+) -> list[str]:
+    """만들고 실제로 쓴 인자를 돌려준다 — 하드웨어 인코더가 이 원본에서 실패하면 libx264로 한 번 더.
+
+    인코더 확인(`encoder_works`)은 작은 lavfi 입력이라 실제 원본(크기·화소 형식)에서 세션을 못 여는
+    하드웨어가 있다. 시간 한도(`ProcessTimeout`)·취소는 다시 하지 않는다 — 그대로 올라간다.
+    """
+    command = _visual_preview_command(source, staged, probe, track, codec_args)
+    try:
+        _run_niced(command, priority, timeout=timeout_seconds)
+        return codec_args
+    except ProcessTimeout:
+        raise
+    except RuntimeError as error:
+        if encoding is None or _video_codec_of(codec_args) in ("copy", _SOFTWARE_H264):
+            raise
+        log.warn(f"하드웨어 인코더로 미리보기를 만들지 못해 libx264로 다시 만든다: {error}")
+    software = replace(encoding, video_codecs=(_SOFTWARE_H264,))
+    retry_args, _, _ = _visual_preview_args(probe, track, software)
+    _run_niced(
+        _visual_preview_command(source, staged, probe, track, retry_args),
+        priority,
+        timeout=timeout_seconds,
+    )
+    return retry_args
 
 
 @dataclass(frozen=True, slots=True)
@@ -4720,10 +5004,6 @@ def verified_scene_times(path: Path, *, timeout_seconds: float) -> tuple[Fractio
 # 이어붙이고, 결과를 다시 재어 계획과 같을 때만 게시한다. preprocess는 project를 모르므로(규칙 7)
 # 계획의 값만 이 모듈의 작은 값 객체(`RenderTarget`·`RenderPartSpec`·`RenderEncoding`)로 받는다.
 
-_SOFTWARE_H264 = "libx264"
-"""하드웨어 인코더가 하나도 돌지 않을 때의 마지막 자리 — 화질 손잡이(crf·preset)가 이
-인코더의 것이다."""
-
 _ENCODER_PROBE_INPUT = "color=c=black:s=256x144:r=30:d=0.2"
 """인코더가 실제로 도는지 보는 작은 lavfi 입력 — 하드웨어 인코더는 목록에 있어도 세션을 못 열어
 실패한다(VideoToolbox 세션 오류 · GPU 없는 NVENC). 256×144는 하드웨어 인코더의 최소 크기
@@ -4790,6 +5070,9 @@ class RenderEncoding:
     timeout_floor_seconds: float
     timeout_media_ratio: float
     priority: int | None = None
+    threads: int | None = None
+    """libx264의 `-threads` — 로컬 미디어 자리 몫(W-45). 없으면 ffmpeg가 정한다. 모든 조각이 같은
+    값이라 이어붙이기(`-c copy`)는 그대로다. 하드웨어 인코더에는 싣지 않는다."""
 
     def timeout(self, seconds: Fraction) -> float:
         """조각·이어붙이기 한 번의 한도 — `max(바닥, 배율 × 길이)`(D59와 같은 꼴)."""
@@ -4876,6 +5159,8 @@ def _render_video_args(encoding: RenderEncoding, target: RenderTarget) -> list[s
     gop = max(1, math.ceil(encoding.keyframe_seconds / target.frame_duration))
     if encoding.video_codec == _SOFTWARE_H264:
         quality = ["-preset", encoding.preset, "-crf", str(encoding.crf)]
+        if encoding.threads is not None:
+            quality += ["-threads", str(encoding.threads)]
     else:
         pixels = target.width * target.height / target.frame_duration
         quality = ["-b:v", str(math.ceil(encoding.hardware_bits_per_pixel * pixels))]

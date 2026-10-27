@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import socket
 import subprocess
+from collections.abc import Iterator
 from pathlib import Path
 
 from tests._dotenv_guard import install as install_dotenv_guard
@@ -89,6 +90,20 @@ def never_open_final_cut(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         workspace_service.RawWorkspaceUi, "_system_finalcut_open", staticmethod(refuse)
     )
+
+
+@pytest.fixture(autouse=True)
+def fresh_process_caches() -> Iterator[None]:
+    """도구 경로·버전·원본 조사 기억(W-45)을 시험마다 비운다 — 가짜 도구가 다음 시험에 새지 않게.
+
+    시험은 `require_ffmpeg`·`_run`을 가짜로 바꿔 서로 다른 버전 문자열을 돌려준다. 기억이 남으면
+    앞 시험의 가짜 버전이 뒤 시험의 조사에 실린다.
+    """
+    from vlogsrt import preprocess
+
+    preprocess.reset_process_caches()
+    yield
+    preprocess.reset_process_caches()
 
 
 @pytest.fixture(autouse=True)

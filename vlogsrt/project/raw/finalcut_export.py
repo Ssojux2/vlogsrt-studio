@@ -379,11 +379,12 @@ def _probe(
 ) -> tuple[preprocess.RawMediaProbe, _Grid, _Timecode]:
     """머리 정보·격자·타임코드 — ffprobe 실패는 이름을 댄 거부다."""
     try:
-        probe = preprocess.probe_raw_media(path)
+        # 앞뒤로 크기·mtime·inode를 대조한다(`_export_path`·`_require_unchanged`) — 기억(W-45).
+        probe = preprocess.probe_raw_media_memo(path)
         if review is not None:
             grid = _review_grid(asset, review, probe, path)
         else:
-            clock = preprocess.probe_extraction_clock(path, probe=probe)
+            clock = preprocess.probe_extraction_clock_memo(path, probe=probe)
             grid = _measured_grid(asset, clock, probe)
         label = preprocess.probe_timecode(path)
     except FinalCutExportError:
@@ -484,7 +485,7 @@ def _review_grid(
     declared = (probe.video.time_base, 1 / probe.video.r_frame_rate)
     clock = None
     if frames.denominator == 1 and review.time_base == declared[0] and duration != declared[1]:
-        clock = preprocess.probe_extraction_clock(path, probe=probe)
+        clock = preprocess.probe_extraction_clock_memo(path, probe=probe)
         # 다시 고른 명목(D70)은 맞춘 시계(snap·map)에서만 나온다 — 균일 시계라면 어긋남이다.
         remapped = clock.uniform_grid and clock.conform_kind != "uniform"
         declared = (clock.time_base, clock.frame_duration) if remapped else declared
@@ -496,7 +497,7 @@ def _review_grid(
         )
     deviation = Fraction(0)
     if _header_frames(probe, duration) not in (None, frames):
-        clock = clock or preprocess.probe_extraction_clock(path, probe=probe)
+        clock = clock or preprocess.probe_extraction_clock_memo(path, probe=probe)
         deviation = _grid_tolerance(clock)
     trim = _require_plain_timeline(
         asset, review.origin_pts, frames.numerator, duration, probe, deviation

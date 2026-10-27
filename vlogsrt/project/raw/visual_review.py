@@ -1761,7 +1761,7 @@ def _select_source(
     from vlogsrt.project.raw.media_refs import resolve
 
     path = resolve(workspace, asset, "preview")
-    probe = preprocess.probe_raw_media(path)
+    probe = preprocess.probe_raw_media_memo(path)  # 원본을 방금 확인했다 — 기억(W-45)
     slots = _decode_slots(workspace, clock.source_sha256, path, probe)
     tag = preprocess.GRID_CONFORM_TAG if slots else None
     _write_inventory(workspace, source_id, clock.source_sha256, probe.audio, tag)
@@ -2017,7 +2017,7 @@ def _ensure_full_source_preview(
     target = workspace.root / relative
     record = _read_record(record_path)
     refs = media_refs.load(workspace, selection.source_id)
-    probe = preprocess.probe_raw_media(selection.path)
+    probe = preprocess.probe_raw_media_memo(selection.path)  # `_select_source`가 확인했다
     if (
         refs
         and refs["validation"]["status"] in ("verified", "proxy_only")
@@ -2097,6 +2097,10 @@ def _preview_encoding(video: preprocess.RawVideoMedia) -> preprocess.PreviewEnco
         preset=REVIEW_MEDIA.preview_x264_preset,
         crf=REVIEW_MEDIA.preview_x264_crf,
         shrink_copyable=uhd,
+        # 하드웨어 인코더가 먼저(W-45, D100 §6) — 고른 이름은 기록의 `encoding`에만 남는다.
+        video_codecs=REVIEW_MEDIA.preview_video_codecs,
+        hardware_bits_per_pixel=REVIEW_MEDIA.preview_hardware_bits_per_pixel,
+        threads=FOLDER_WORKSPACE.local_media.encode_threads(os.cpu_count()),
     )
 
 

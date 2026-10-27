@@ -1372,8 +1372,8 @@ class ReviewWorkspaceFacade:
         asset = self._workspace.source_asset(coverage.asset_id)
         self._verify_source_unchanged(asset)
         path = self._workspace.source_media_path(asset)
-        probe = preprocess.probe_raw_media(path)
-        clock = preprocess.probe_extraction_clock(path, probe=probe)
+        probe = preprocess.probe_raw_media_memo(path)  # 방금 확인했다 — 같은 stat이면 기억(W-45)
+        clock = preprocess.probe_extraction_clock_memo(path, probe=probe)
         if not clock.uniform_grid:
             raise ReviewWorkspaceError(
                 f"stale_profile: 원본이 균일 격자가 아니다(VFR): {asset.source_relative_path}"

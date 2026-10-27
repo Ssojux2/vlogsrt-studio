@@ -232,6 +232,8 @@ def test_a_new_preview_is_built_with_the_review_recipe_and_records_it(
         return real(*args, **kwargs)
 
     monkeypatch.setattr(preprocess, "extract_visual_review_preview", spy)
+    # libx264만 있는 기계 — 하드웨어 인코더를 고르는 길은 `test_speed_caches`가 본다(W-45).
+    monkeypatch.setattr(preprocess, "available_encoders", lambda: frozenset({"libx264"}))
     _, record = _prepared_page(service, workspace_root, base, page=1)
     assert record.status == "succeeded", record.error
     assert captured["priority"] == REVIEW_MEDIA.process_niceness

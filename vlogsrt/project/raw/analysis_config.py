@@ -319,14 +319,26 @@ class ReviewMediaSettings:
     재생하는 4K H.264도 복사하지 않고 줄인다. 외부 근거 없는 조정 대상이다(25% 분석 프록시와 같은
     크기).
 
+    `preview_video_codecs`는 새로 다시 인코딩하는 미리보기의 인코더 차례다(W-45, D100 §6) —
+    앞에서부터 목록에 있고 실제로 도는 첫 것(`preprocess.pick_video_encoder`), libx264가 마지막이다.
+    하드웨어 인코더는 crf가 없어 `preview_hardware_bits_per_pixel` × 줄인 화소 × 레이트의
+    비트레이트로 만든다(렌더의 `hardware_bits_per_pixel`과 같은 값 — 960×540@30이면 약 1.6 Mb/s,
+    1080p30이면 약 6.2 Mb/s).
+    분석 클립·프록시(바이트가 요청 신원)에는 쓰지 않는다 — 미리보기만이다. 썸네일은 그대로다.
+
     어느 값도 미리보기·썸네일 캐시 열쇠·조리법 판(`VISUAL_PREVIEW_RECIPE`)·분석 지문에 들어가지
-    않는다 — 이미 만든 미리보기는 그대로 쓰고, 새로 만든 것만 기록에 `encoding`을 남긴다.
+    않는다 — 이미 만든 미리보기는 그대로 쓰고, 새로 만든 것만 기록에 `encoding`을 남긴다(하드웨어면
+    `h264_videotoolbox/b1555200/le960`처럼 인코더 이름이 앞에 선다).
     """
 
     preview_long_edge: int = 1920
     preview_long_edge_4k: int = 960
     preview_x264_preset: str = "veryfast"
     preview_x264_crf: int = 23
+    preview_video_codecs: tuple[str, ...] = (
+        "h264_videotoolbox", "h264_nvenc", "h264_qsv", "h264_amf", "libx264",
+    )  # fmt: skip
+    preview_hardware_bits_per_pixel: Fraction = Fraction(1, 10)
     preview_timeout_floor_seconds: float = 1800.0
     preview_timeout_media_ratio: float = 6.0
     process_niceness: int = 10
@@ -358,6 +370,7 @@ def validate_review_media_settings(settings: ReviewMediaSettings) -> None:
         problems.append(f"nice 값은 0–20 정수여야 한다: {nice!r}")
     if not settings.preview_x264_preset or not settings.preview_x264_preset.isalpha():
         problems.append(f"x264 preset 이름이 아니다: {settings.preview_x264_preset!r}")
+    problems += _preview_encoder_problems(settings)
     for name, value, minimum_exclusive in (
         ("미리보기 한도 바닥", settings.preview_timeout_floor_seconds, True),
         ("미리보기 한도 배율", settings.preview_timeout_media_ratio, False),
@@ -369,6 +382,23 @@ def validate_review_media_settings(settings: ReviewMediaSettings) -> None:
             problems.append(f"{name}이 범위 밖이다: {value!r}")
     if problems:
         raise ValueError("검토 보조 미디어 설정이 계약을 어긴다: " + "; ".join(problems))
+
+
+def _preview_encoder_problems(settings: ReviewMediaSettings) -> list[str]:
+    """인코더 차례는 이름의 튜플이고 libx264로 끝난다 — 하드웨어가 하나도 돌지 않아도 만든다."""
+    problems: list[str] = []
+    codecs = settings.preview_video_codecs
+    if (
+        not isinstance(codecs, tuple)
+        or not codecs
+        or not all(isinstance(name, str) and name.strip() == name and name for name in codecs)
+        or codecs[-1] != "libx264"
+    ):
+        problems.append(f"미리보기 인코더 차례는 libx264로 끝나는 이름 튜플이어야 한다: {codecs!r}")
+    bits = settings.preview_hardware_bits_per_pixel
+    if not isinstance(bits, Fraction) or bits <= 0:
+        problems.append(f"미리보기 화소당 비트는 양수 Fraction이어야 한다: {bits!r}")
+    return problems
 
 
 PAIR_VIDEO_SAMPLE_SIZE = 1024

@@ -145,8 +145,9 @@ def gather_sources(
 def _gather(scope: _Scope, asset: SourceAsset) -> GatheredSource:
     path, before = finalcut_export._export_path(scope.workspace, asset)
     try:
-        probe = preprocess.probe_raw_media(path)
-        clock = preprocess.probe_extraction_clock(path, probe=probe)
+        # Final Cut 보내기와 같은 앞뒤 대조가 있다 — 같은 stat이면 조사 기억(W-45).
+        probe = preprocess.probe_raw_media_memo(path)
+        clock = preprocess.probe_extraction_clock_memo(path, probe=probe)
         audio = preprocess.probe_audio_extents(path)
     except RuntimeError as error:
         raise _refuse(asset, f"원본을 ffprobe로 읽지 못했다 — {error}") from error
@@ -283,6 +284,8 @@ def _encoding(settings: RenderSettings, codec: str) -> preprocess.RenderEncoding
         timeout_floor_seconds=settings.timeout_floor_seconds,
         timeout_media_ratio=settings.timeout_media_ratio,
         priority=settings.priority,
+        # CPU 인코드는 로컬 미디어 자리 몫의 스레드만(W-45, D100 §6) — 조각 일꾼이 그 자리를 다툰다.
+        threads=FOLDER_WORKSPACE.local_media.encode_threads(os.cpu_count()),
     )
 
 
