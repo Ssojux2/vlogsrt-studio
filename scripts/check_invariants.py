@@ -847,6 +847,53 @@ def check_word_cues_stays_pure() -> list[str]:
     return failures
 
 
+# Gemini 단어 → whisper 줄 글자(W-35a, D95) — 단어 시각은 어느 줄의 글자인지만 정한다.
+# 전송·전사·다른 귀·서비스·DB·파일·조판 계층을 알면 글자 배정이 다른 것에 기대고, 줄 계획에
+# 시각 칸이 생기면 단어 시각이 줄의 시각이 된다(규칙 1·3 — 시각의 원천은 whisper `segments[]`).
+WORD_TEXT_MODULE = "word_text.py"
+WORD_TEXT_MUST_NOT_IMPORT = (*WORD_CUES_MUST_NOT_IMPORT, "word_cues", "sync_check", "timing_truth")
+WORD_TEXT_PLAN_CLASS = "LineText"
+WORD_TEXT_TIME_FIELDS = ("start", "end", "start_sample", "end_sample")
+
+
+def check_word_text_stays_pure() -> list[str]:
+    """D95 — 단어 배정은 순수하고, 줄 계획(`LineText`)은 글자만 낸다(시각 칸이 없다)."""
+    path = PROJECT_PACKAGE / "raw" / WORD_TEXT_MODULE
+    if not path.exists():
+        return [f"vlogsrt/project/raw/{WORD_TEXT_MODULE}: 단어 배정 계층이 사라졌다 (D95)"]
+    body = path.read_text(encoding="utf-8")
+    failures = [
+        f"{WORD_TEXT_MODULE}: {module}을 import한다 — 글자 배정이 단어 시각 밖의 것에 기댄다 (D95)"
+        for module in _imports(body, WORD_TEXT_MUST_NOT_IMPORT)
+    ]
+    failures += [
+        f"{WORD_TEXT_MODULE}:{number}: 파일을 직접 읽거나 쓴다 — 배정은 값만 다룬다 (D95)"
+        for number, line in enumerate(body.splitlines(), start=1)
+        if TIERING_FILE_IO.search(line)
+    ]
+    return failures + _word_text_plan_failures(body)
+
+
+def _word_text_plan_failures(body: str) -> list[str]:
+    plans = [
+        node
+        for node in ast.walk(ast.parse(body))
+        if isinstance(node, ast.ClassDef) and node.name == WORD_TEXT_PLAN_CLASS
+    ]
+    if not plans:
+        return [f"{WORD_TEXT_MODULE}: 줄 계획 `{WORD_TEXT_PLAN_CLASS}`이 사라졌다 (D95)"]
+    names = {
+        item.target.id
+        for item in plans[0].body
+        if isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name)
+    }
+    return [
+        f"{WORD_TEXT_MODULE}: `{WORD_TEXT_PLAN_CLASS}.{name}` — 줄 계획이 시각을 낸다"
+        " (규칙 1·3, D95)"
+        for name in sorted(names.intersection(WORD_TEXT_TIME_FIELDS))
+    ]
+
+
 # 요청 빌더의 칸(D59 19c) — whisper(시간) 요청에는 힌트가, 글자 요청에는 시각 입자가 실리지 않는다.
 # 1단계 글자 경로가 용어집·고정 문맥을 요청마다 싣게 되면서 그 길이 whisper 쪽으로 새지 않게 막는다.
 REQUEST_LANES = (
@@ -2852,6 +2899,7 @@ CHECKS = (
     ("글자 교정은 순수하다", check_retext_stays_pure),
     ("다른 귀 기준 재전사 판정은 순수하다", check_ear_rescue_stays_pure),
     ("Gemini 단어 해석·묶기는 순수하다", check_word_cues_stays_pure),
+    ("Gemini 단어 → whisper 줄 글자 배정은 순수하고 글자만 낸다", check_word_text_stays_pure),
     ("3단 등급은 순수하다", check_tiering_stays_pure),
     ("등급의 시각 확인 값은 서비스 한 자리만", check_tier_timing_only_from_service),
     ("자막 시각 확인은 순수하다", check_sync_check_stays_pure),

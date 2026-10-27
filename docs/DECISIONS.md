@@ -8959,6 +8959,18 @@ Gemini 글자이고, 단어 시각은 **어느 줄의 글자인지 정하는 데
 **W-31과의 관계**: W-31a–e는 그대로 남고 W-35e(종료 뒤 전환)가 쓴다. W-31f의 「지금 기본 엔진을 Gemini 시각으로」 결정은 이
 계획으로 대체된다. 세션 a–e와 사람 단계(H1 녹화 · H2′ 글자만 다시 듣기)는 `docs/plans/2026-10-27-whisper-timing-gemini-text.md`.
 
+**W-35a(같은 날)** — 단어 배정(순수) + 규칙 문서:
+- `raw/word_text.py` `place(lines, words) -> WordTextPlan`: whisper 줄(`TimedLine` — 아이디·청크 국소 시작·끝·whisper 글자)과
+  Gemini 단어(`ParsedWord`, 응답 차례) → 줄마다 `LineText`(아이디 · 글자 · 출처 `gemini`/`whisper` · 배정된 단어 차례). 자리 =
+  (시작 + 끝)/2, 담는 줄 = 반열린 `[시작, 끝)`(길이 0인 줄은 담지 않는다), 겹치면 줄 가운데가 가까운 줄 · 같으면 앞 줄. 글자 = 배정된
+  단어 `display`를 이은 것의 앞뒤 공백만 정리. 줄 밖 단어는 `UnplacedWord`(앞에서 시작한 마지막 줄 · 뒤에서 시작하는 첫 줄 아이디),
+  시각 없는 단어는 시각·앞뒤 없이 기록하고 `untimed`로 센다. 규칙 판 `WORD_TEXT_VERSION = "word-text/v1"`(임계값 없음).
+- 줄 계획 `LineText`에는 시각 칸이 없다 — 시각은 whisper 줄의 것이고 이 계획이 내지 않는다.
+- **불변식** `check_word_text_stays_pure`: 전송·전사·다른 귀·서비스·DB·파일·조판 계층(`refine`·`output`·`layout`·`polish`)과
+  `word_cues`·`sync_check`·`timing_truth`를 import하지 않고, `LineText`에 `start`·`end`(·표본) 칸이 없다.
+- CLAUDE.md 규칙 1(글자 조항)·5(글자를 바꿀 수 있는 곳)·용어 「단어 배정」. 아직 1단계에 잇지 않았다(W-35b).
+- **시험**: `tests/raw/test_word_text.py` · `tests/test_invariants.py`. 유료 호출 0회.
+
 ## D96 — Final Cut으로 나가는 자막 글자는 조판 정리(D30)를 거친다 (2026-10-27, W-36)
 
 **사용자 지시(2026-10-27)**: 「자막 글자 맨 앞에 띄어쓰기가 들어가 있는 부분 제거 · 마지막 온점도 안 찍히게」.

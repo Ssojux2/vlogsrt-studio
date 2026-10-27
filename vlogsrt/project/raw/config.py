@@ -999,6 +999,11 @@ class WordCueSettings:
 WORD_CUE_SETTINGS = WordCueSettings()
 """지금 쓰는 단어 묶기 — `word_cues.group`의 기본값이다."""
 
+WORD_TEXT_VERSION = "word-text/v1"
+"""Gemini 단어 → whisper 줄 글자 배정(W-35a, D95)의 규칙 판 — 가운데 자리 · 반열린 줄 · 겹치면
+가운데가 가까운 줄(같으면 앞). 임계값이 없다. 규칙을 바꾸면 판을 올린다(글자 캐시 열쇠에 실린다,
+W-35b)."""
+
 
 @dataclass(frozen=True)
 class EngineCompareSettings:

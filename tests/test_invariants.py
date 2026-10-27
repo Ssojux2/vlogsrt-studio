@@ -3999,3 +3999,49 @@ def test_a_hint_in_the_gemini_timing_builder_is_caught(
 
 def test_the_real_gemini_timing_builder_has_no_hint() -> None:
     assert check_invariants.check_gemini_timing_builder_lane() == []
+
+
+WORD_TEXT_CLEAN = (
+    "from fractions import Fraction\nclass LineText:\n    line_id: str\n    text: str\n"
+)
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "from vlogsrt.project.raw import word_cues",
+        "from vlogsrt.project.raw import source_text",
+        "import sqlite3",
+        "from vlogsrt import refine",
+        "Path('x').write_text('y')",
+    ],
+)
+def test_word_text_impurity_is_caught(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, statement: str
+) -> None:
+    """W-35a(D95) — 단어 배정은 전송·전사·다른 귀·DB·파일·조판 계층을 모른다."""
+    files = {"vlogsrt/project/raw/word_text.py": WORD_TEXT_CLEAN}
+    _fake_source_tree(monkeypatch, tmp_path, files)
+    assert check_invariants.check_word_text_stays_pure() == []
+    target = tmp_path / "vlogsrt" / "project" / "raw" / "word_text.py"
+    target.write_text(WORD_TEXT_CLEAN + statement + "\n", encoding="utf-8")
+    failures = check_invariants.check_word_text_stays_pure()
+    assert failures and all(line.startswith("word_text.py") for line in failures)
+
+
+def test_a_time_field_on_the_line_plan_and_a_missing_layer_are_caught(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """줄 계획에 시각 칸이 생기면 단어 시각이 줄의 시각이 된다(규칙 1·3, D95)."""
+    files = {"vlogsrt/project/raw/word_text.py": WORD_TEXT_CLEAN + "    start: Fraction\n"}
+    _fake_source_tree(monkeypatch, tmp_path, files)
+    (failure,) = check_invariants.check_word_text_stays_pure()
+    assert "LineText.start" in failure
+    (tmp_path / "vlogsrt" / "project" / "raw" / "word_text.py").unlink()
+    assert check_invariants.check_word_text_stays_pure() == [
+        "vlogsrt/project/raw/word_text.py: 단어 배정 계층이 사라졌다 (D95)"
+    ]
+
+
+def test_the_real_word_text_layer_is_pure() -> None:
+    assert check_invariants.check_word_text_stays_pure() == []
