@@ -30,7 +30,7 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Any, Literal, ParamSpec, TypeVar
 
-from . import cutpoints, log
+from . import cutpoints, log, oscompat
 from .config import Config
 from .models import Chunk, Span
 from .oscompat import publish_exclusive
@@ -335,6 +335,7 @@ def _run_process(
     priority: int | None,
     **kwargs: Any,
 ) -> subprocess.CompletedProcess:
+    kwargs = _child_options(kwargs)
     if not cancellation_active() and on_poll is None and priority is None:
         with _tracked(command, step, kwargs.get("timeout")) as argv:
             completed = subprocess.run(argv, **kwargs)
@@ -349,6 +350,25 @@ def _run_process(
     with _tracked(command, step, timeout) as argv:
         process = _launch(argv, priority, kwargs)
         return _wait_polling(process, command, timeout, on_poll)
+
+
+def _child_options(kwargs: dict[str, Any]) -> dict[str, Any]:
+    """모든 자식 프로세스에 같은 두 가지 — 한 자리에서만 정한다(D100 §1b).
+
+    - 텍스트로 받는 출력은 UTF-8로 읽고 깨진 바이트는 대체 문자로 바꾼다. 인코딩을 안 주면
+      Windows는 시스템 코드 페이지(cp949)로 읽어, ffmpeg stderr의 한글 경로 하나가
+      `UnicodeDecodeError`(ValueError — `OSError` 감싸기 밖)로 실행 전체를 깨뜨린다.
+      호출자가 인코딩을 주면 그대로다.
+    - Windows에서는 ffmpeg·ffprobe가 콘솔 창을 띄우지 않는다(`CREATE_NO_WINDOW`).
+    """
+    options = dict(kwargs)
+    text_mode = options.get("text") or options.get("universal_newlines")
+    if text_mode and options.get("encoding") is None:
+        options["encoding"] = "utf-8"
+        options.setdefault("errors", "replace")
+    if sys.platform == "win32":
+        options["creationflags"] = options.get("creationflags", 0) | subprocess.CREATE_NO_WINDOW
+    return options
 
 
 def _launch(argv: list[str], priority: int | None, kwargs: dict[str, Any]) -> subprocess.Popen:
@@ -1778,7 +1798,7 @@ def extract_frame_indices(
                     break
                 index = indices[ordinal]
                 target = directory / f"frame_{index:08d}.jpg"
-                os.replace(staged, target)
+                oscompat.replace(staged, target)
                 published[index] = target
                 if on_frame is not None:
                     on_frame(index, target)
@@ -1858,7 +1878,7 @@ def _extract_slot_frames(
                 target = directory / f"frame_{slot:08d}.jpg"
                 staged = Path(temporary) / f"slot_{slot:08d}.jpg"
                 shutil.copyfile(decoded, staged)
-                os.replace(staged, target)
+                oscompat.replace(staged, target)
                 published[slot] = target
                 if on_frame is not None:
                     on_frame(slot, target)
@@ -3450,7 +3470,8 @@ def _reserve_staging_temp(staging_output: Path) -> Path:
             f".{staging_output.name}.{os.getpid()}.{secrets.token_hex(4)}.part"
         )
         try:
-            descriptor = os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0)
+            descriptor = os.open(candidate, flags, 0o600)
         except FileExistsError:
             continue
         os.close(descriptor)

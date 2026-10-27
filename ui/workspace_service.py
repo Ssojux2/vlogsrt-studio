@@ -18,6 +18,7 @@ import inspect
 import json
 import os
 import shutil
+import sys
 import threading
 import time
 import uuid
@@ -41,7 +42,7 @@ from fastapi.responses import (  # noqa: E402
     StreamingResponse,
 )
 
-from ui import activity_log, design_tokens, ui_facade  # noqa: E402
+from ui import activity_log, design_tokens, os_open, ui_facade  # noqa: E402
 from ui import chooser as ui_chooser  # noqa: E402
 from vlogsrt import log, preprocess  # noqa: E402
 from vlogsrt.project.raw import service as raw_service  # noqa: E402
@@ -924,6 +925,10 @@ def open_in_final_cut(path: Path) -> None:
     """
     import subprocess
 
+    if sys.platform != "darwin":
+        raise raw_service.RawWorkspaceError(
+            f"FCPXML은 만들었지만 Final Cut Pro는 macOS에만 있다 — 파일: {path}"
+        )
     result = subprocess.run(
         ["/usr/bin/open", "-a", "Final Cut Pro", str(path)], capture_output=True, text=True
     )
@@ -9625,14 +9630,11 @@ class RawWorkspaceUi:
 
     @staticmethod
     def _system_finder_open(target: Path) -> None:
-        """실제 Finder 열기 — macOS `open -R`, 인자는 리스트로 주입 없이 전달."""
-        import subprocess
-
-        completed = subprocess.run(
-            ["/usr/bin/open", "-R", str(target)], capture_output=True, text=True, check=False
-        )
-        if completed.returncode != 0:
-            raise gr.Error(f"Finder를 열지 못했다: {(completed.stderr or '').strip()[:200]}")
+        """실제 파일 관리자 열기 — macOS `open -R`, Windows 탐색기, 그 밖 `xdg-open`(D100 §1b)."""
+        try:
+            os_open.reveal(target)
+        except OSError as error:
+            raise gr.Error(f"Finder를 열지 못했다: {error}") from error
 
     def review_export_copy_view(self, signature: str | None) -> str:
         """경로 복사용 텍스트 — 마지막 내보내기 자리를 그대로 보여준다."""

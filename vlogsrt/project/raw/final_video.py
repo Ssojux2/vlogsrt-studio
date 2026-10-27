@@ -26,13 +26,12 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
 
-from vlogsrt import preprocess
+from vlogsrt import oscompat, preprocess
 from vlogsrt.models import Chunk
 from vlogsrt.project.raw.caption_config import FinalCaptionSettings, validate_final_caption_settings
 from vlogsrt.project.raw.understanding import (
@@ -231,7 +230,7 @@ def _verified_copy(source: Path, destination: Path, revision: str) -> None:
             raise FinalVideoCopyFailed(
                 f"검증 사본의 해시가 원본과 다르다: {destination} — 반쪽 사본은 신원이 못 된다"
             )
-        os.replace(temp, destination)
+        oscompat.replace(temp, destination)
     finally:
         temp.unlink(missing_ok=True)
 
@@ -260,7 +259,7 @@ def _write_manifest(manifest_path: Path, input_: FinalVideoInput, audio_ordinal:
             json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
-        os.replace(temp, manifest_path)
+        oscompat.replace(temp, manifest_path)
     finally:
         temp.unlink(missing_ok=True)
 

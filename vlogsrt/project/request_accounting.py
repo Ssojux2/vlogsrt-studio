@@ -1178,7 +1178,7 @@ def _atomic_write_bytes(path: Path, payload: bytes) -> None:
         stream.write(payload)
         stream.flush()
         os.fsync(stream.fileno())
-    os.replace(temporary, path)
+    oscompat.replace(temporary, path)
     _fsync_directory(path.parent)
 
 

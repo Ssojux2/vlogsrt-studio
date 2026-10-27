@@ -629,7 +629,7 @@ def _write_durable_bytes(path: Path, payload: bytes) -> None:
 
 
 def _replace_file(source: Path, destination: Path) -> None:
-    os.replace(source, destination)
+    oscompat.replace(source, destination)
 
 
 def _fsync_directory(path: Path) -> None:
@@ -657,8 +657,8 @@ def _ledger_lock(path: Path) -> Iterator[None]:
     """원장이 통째로 갈려도 잠금 대상은 변하지 않게 한다 — 전용 잠금 파일.
 
     잠금은 로컬 파일시스템의 POSIX advisory lock(flock)을 가정한다. 협조하지
-    않는 쓰기(이 잠금을 무시하는 외부 프로세스)는 막지 못한다. 스트림을 닫으면
-    잠금도 풀린다.
+    않는 쓰기(이 잠금을 무시하는 외부 프로세스)는 막지 못한다. 닫기 전에 잠금을
+    풀고 스트림을 닫는다.
     """
     lock_path = path.with_name(path.name + ".lock")
     try:
@@ -671,7 +671,10 @@ def _ledger_lock(path: Path) -> Iterator[None]:
         stream.close()
         raise LedgerUnavailable(f"원장 잠금을 얻지 못했다: {lock_path}") from exc
     try:
-        yield
+        try:
+            yield
+        finally:
+            filelock.unlock(stream)  # Windows는 닫기 전에 푼다 — 닫기의 풀림은 늦을 수 있다
     finally:
         stream.close()
 

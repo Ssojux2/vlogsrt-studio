@@ -19,10 +19,13 @@
 
 from __future__ import annotations
 
+import ntpath
 import os
+import posixpath
 import stat as stat_module
+import sys
 from dataclasses import dataclass
-from pathlib import Path, PurePath
+from pathlib import Path, PurePath, PureWindowsPath
 from typing import TypeVar
 
 from vlogsrt.project.raw import source_order
@@ -261,7 +264,7 @@ def _library_events(root: Path) -> tuple[tuple[str, Path], ...]:
     """
     events: list[tuple[str, Path]] = []
     for entry in sorted(root.iterdir(), key=lambda path: path.name):
-        if _pruned_entry(entry.name) or entry.is_symlink() or not entry.is_dir():
+        if _pruned_entry(entry.name) or _is_link_path(entry) or not entry.is_dir():
             continue
         if (entry / FCP_EVENT_MARKER).exists():
             events.append((entry.name, entry))
@@ -287,6 +290,7 @@ def _event_media_dirs(event_dir: Path) -> tuple[tuple[Path, str], ...]:
             if role is not None:
                 found.append((Path(dirpath) / name, role))
                 dirnames.remove(name)  # 미디어 폴더 안은 아래 걷기가 따로 본다
+        _skip_junctions(dirpath, dirnames)
     return tuple(found)
 
 
@@ -309,8 +313,10 @@ def _collect_media_dir(
     """미디어 폴더 한 곳을 걷는다 — 폴더 링크(재배치 미디어)도 풀어서 본다."""
     if _pruned_entry(media_dir.name):
         return
-    if media_dir.is_symlink():
-        # 폴더 링크도 칸마다 안전 풀기 — 어휘 보호 검사가 조회·걷기보다 앞선다.
+    relocated = _is_link_path(media_dir)
+    if relocated:
+        # 폴더 링크(Windows 연결 지점 포함)도 칸마다 안전 풀기 — 어휘 보호 검사가
+        # 조회·걷기보다 앞선다.
         resolved_dir, reason, probed = _resolve_path_safely(media_dir)
         if reason:
             broken.append(FcpBrokenLink(media_dir.relative_to(library).as_posix(), reason))
@@ -328,9 +334,9 @@ def _collect_media_dir(
             return
         resolved_dir = media_dir
     # 폴더 자체가 링크면(재배치 미디어) 그 안 파일은 전부 외부 미디어다.
-    relocated = media_dir.is_symlink()
     for dirpath, dirnames, filenames in os.walk(resolved_dir, followlinks=False):
         dirnames[:] = sorted(name for name in dirnames if not _pruned_entry(name))
+        _skip_junctions(dirpath, dirnames)
         for name in sorted(filenames):
             if _pruned_entry(name):
                 continue
@@ -375,7 +381,7 @@ def _consider_media_file(
         rejected.append(RejectedSource(in_library, f"조회 실패: {error}"))
         return
     target = entry
-    if stat_module.S_ISLNK(probed.st_mode):
+    if _is_link(probed):
         target, reason = _resolve_link(entry, workspace)
         if reason:
             broken.append(FcpBrokenLink(in_library, reason))
@@ -425,7 +431,7 @@ def _resolve_link(entry: Path, workspace: Path) -> tuple[Path, str]:
         return target, "링크 대상이 일반 파일이 아니다"
     if target.suffix.lower() not in MEDIA_SUFFIXES:
         return target, f"링크 대상이 미디어 확장자가 아니다({target.suffix or '없음'})"
-    if target.is_relative_to(workspace):
+    if _plain(target).is_relative_to(_plain(workspace)):
         return target, "링크 대상이 작업공간 안이다 — 스스로를 다시 복사하게 된다"
     return target, ""
 
@@ -492,7 +498,7 @@ def _resolve_path_safely(link: Path) -> tuple[Path, str, os.stat_result | None]:
     보호 검사하고, 링크를 만나면 `os.readlink` 표기로 다음 후보 **전체**를 다시
     검사한 뒤에만 따라간다. 돌려주는 것은 (푼 경로, 빈 사유면 성공, 마지막 칸 lstat).
     """
-    anchor, remaining = _split_anchored(_normalized_absolute(link))
+    anchor, remaining = _split_anchored(_plain(_normalized_absolute(link)))
     start_anchor = anchor
     resolved: list[str] = []
     hops = 0
@@ -507,14 +513,14 @@ def _resolve_path_safely(link: Path) -> tuple[Path, str, os.stat_result | None]:
             probed = os.lstat(candidate)
         except OSError as error:
             return candidate, f"링크 대상이 없다: {error}", None
-        if stat_module.S_ISLNK(probed.st_mode):
+        if _is_link(probed):
             hops += 1
             if hops > _LINK_HOP_LIMIT:
                 return candidate, "링크 고리(또는 너무 긴 사슬) — 풀기를 끊는다", None
             anchor, remaining = _hop_parts(candidate, anchor, resolved, remaining)
             resolved = []
             if _hops_to_new_share(start_anchor, anchor):
-                return candidate, _UNC_HOP_REASON, None
+                return candidate, _hop_reason(anchor), None
             continue
         resolved.append(part)
         if remaining and not stat_module.S_ISDIR(probed.st_mode):
@@ -525,17 +531,25 @@ def _resolve_path_safely(link: Path) -> tuple[Path, str, os.stat_result | None]:
 
 
 _UNC_HOP_REASON = "링크 대상이 다른 네트워크 공유(UNC)다 — 따라가지 않는다"
+_DEVICE_HOP_REASON = "링크 대상이 장치 경로(\\\\?\\·\\\\.\\)다 — 따라가지 않는다"
+_DEVICE_PREFIXES = ("\\\\?\\", "\\\\.\\", "//?/", "//./")
 
 
 def _hops_to_new_share(start_anchor: str, anchor: str) -> bool:
-    """링크가 처음과 다른 UNC 공유(`\\\\server\\share`)로 넘어가는가.
+    """링크가 처음과 다른 UNC 공유(`\\\\server\\share`)나 장치 경로로 넘어가는가.
 
     Windows는 UNC 경로를 조회하는 순간 그 서버에 인증을 시도한다(자격 증명 노출).
     사람이 고른 폴더 자체가 공유 위에 있는 것은 받고, 링크가 **새** 공유로 데려가는
-    것만 조회 전에 끊는다(D100 §1 보안 검토).
+    것만 조회 전에 끊는다(D100 §1 보안 검토). 같은 공유는 대소문자를 가리지 않는다.
+    `\\\\?\\C:\\`·`\\\\?\\UNC\\`는 `_hop_parts`가 먼저 풀어 두므로 여기 오는 `\\\\?\\`는
+    볼륨 GUID·장치 이름뿐이다 — 그것도 새 앵커면 끊는다(D100 §1b).
     """
     unc = anchor.startswith(("\\\\", "//")) and len(anchor) > 2
     return unc and anchor.casefold() != start_anchor.casefold()
+
+
+def _hop_reason(anchor: str) -> str:
+    return _DEVICE_HOP_REASON if anchor.startswith(_DEVICE_PREFIXES) else _UNC_HOP_REASON
 
 
 def _hop_parts(
@@ -543,18 +557,114 @@ def _hop_parts(
 ) -> tuple[str, list[str]]:
     """링크 한 칸을 표기로만 넘는다 — 대상의 (앵커, 칸 + 남은 칸). 조회는 안 한다.
 
-    절대 표기는 제 앵커를 가져온다 — Windows 링크는 다른 드라이브를 가리킬 수 있다.
+    `os.readlink`는 심볼릭 링크와 Windows 연결 지점(junction)을 함께 읽는다.
     """
     try:
         text = os.readlink(link)
     except OSError as error:
         raise FcpLibraryError(f"링크 표기를 읽지 못했다: {link} ({error})") from error
-    if os.path.isabs(text):
-        target = Path(os.path.normpath(text))
-    else:
-        target = Path(os.path.normpath(os.path.join(os.fspath(Path(anchor, *resolved)), text)))
-    target_anchor, parts = _split_anchored(target)
+    target_anchor, parts = _split_anchored(_link_target(Path, text, anchor, resolved))
     return target_anchor, parts + remaining
+
+
+def _link_target(
+    path_type: type[_AnyPath], text: str, anchor: str, resolved: list[str]
+) -> _AnyPath:
+    """링크 표기 → 어휘로만 정규화한 대상. 조회는 안 한다 — `PureWindowsPath`로 시험한다.
+
+    절대 표기는 제 앵커를 가져온다 — Windows 링크는 다른 드라이브를 가리킬 수 있다. 상대
+    표기는 링크가 든 폴더(`anchor` + `resolved`)에서 잇는다. Windows 표기는 먼저
+    `_windows_link_text`가 확장 접두를 벗기고 드라이브를 링크 쪽에서 채운다(D100 §1b).
+    """
+    windows = issubclass(path_type, PureWindowsPath)
+    pathmod = ntpath if windows else posixpath
+    if windows:
+        text = _windows_link_text(text, anchor)
+    if pathmod.isabs(text):
+        return path_type(pathmod.normpath(text))
+    joined = pathmod.join(str(path_type(anchor, *resolved)), text)
+    return path_type(pathmod.normpath(joined))
+
+
+_VERBATIM_UNC_PREFIXES = ("\\\\?\\UNC\\", "\\??\\UNC\\")
+_VERBATIM_PREFIXES = ("\\\\?\\", "\\??\\")
+
+
+def _without_verbatim_prefix(text: str) -> str:
+    """`\\\\?\\C:\\…` → `C:\\…`, `\\\\?\\UNC\\server\\share\\…` → `\\\\server\\share\\…`.
+
+    Windows `os.readlink`은 절대 대상을 확장 길이 접두와 함께 돌려준다 — 그대로 두면 앵커가
+    `\\\\`로 시작해 모든 절대 링크가 「새 공유」로 끊긴다. 볼륨 GUID·장치 이름은 그대로 둔다.
+    """
+    for prefix in _VERBATIM_UNC_PREFIXES:
+        if text[: len(prefix)].upper() == prefix.upper():
+            return "\\\\" + text[len(prefix) :]
+    for prefix in _VERBATIM_PREFIXES:
+        rest = text[len(prefix) :]
+        if text.startswith(prefix) and rest[1:2] == ":" and rest[:1].isalpha():
+            return rest
+    return text
+
+
+def _windows_link_text(text: str, anchor: str) -> str:
+    """Windows 링크 표기를 프로세스 작업 폴더와 무관하게 만든다.
+
+    - 루트 상대(`\\foo`)는 **링크 쪽** 드라이브(또는 공유)의 루트에서 시작한다.
+    - 드라이브 상대(`D:foo`)는 링크와 같은 드라이브면 링크의 폴더에서, 다른 드라이브면 그
+      드라이브의 루트에서 잇는다 — 그 드라이브의 「지금 폴더」는 프로세스마다 달라 묻지 않는다.
+    """
+    text = _without_verbatim_prefix(text)
+    drive, rest = ntpath.splitdrive(text)
+    link_drive = ntpath.splitdrive(anchor)[0]
+    rooted = rest[:1] in ("\\", "/")
+    if not drive and rooted:
+        return link_drive + rest
+    if drive and not drive.startswith(("\\\\", "//")) and not rooted:
+        if drive.casefold() == link_drive.casefold():
+            return rest
+        return drive + "\\" + rest
+    return text
+
+
+def _plain(path: _AnyPath) -> _AnyPath:
+    """Windows 경로의 확장 길이 접두만 벗긴다 — 비교(작업공간 안인가)가 같은 표기를 보게."""
+    if isinstance(path, PureWindowsPath):
+        return type(path)(_without_verbatim_prefix(str(path)))
+    return path
+
+
+_MOUNT_POINT_TAG = getattr(stat_module, "IO_REPARSE_TAG_MOUNT_POINT", 0xA0000003)
+"""Windows 연결 지점(junction)의 재분석 태그 — `stat`이 Windows에서만 이 이름을 준다."""
+
+
+def _is_link(probed: os.stat_result) -> bool:
+    """심볼릭 링크 또는 Windows 연결 지점 — 둘 다 칸마다 풀기(`_hop_parts`)를 지난다.
+
+    Windows `lstat`은 연결 지점을 링크가 아니라 디렉터리로 보고하므로 재분석 태그로 가른다.
+    POSIX의 stat에는 그 칸이 없다(0) — 예전과 같다.
+    """
+    tag = getattr(probed, "st_reparse_tag", 0)
+    return stat_module.S_ISLNK(probed.st_mode) or tag == _MOUNT_POINT_TAG
+
+
+def _is_link_path(path: Path) -> bool:
+    """`Path.is_symlink()`에 Windows 연결 지점을 더한 것 — POSIX는 그대로다."""
+    return path.is_symlink() or _is_junction(path)
+
+
+def _is_junction(path: Path) -> bool:
+    """Windows에서만 조회해 링크·연결 지점인가를 본다 — POSIX는 언제나 거짓(`is_symlink`가 본다)."""
+    if sys.platform != "win32":
+        return False  # POSIX는 조회를 더하지 않는다
+    try:
+        return _is_link(os.lstat(path))
+    except OSError:
+        return False
+
+
+def _skip_junctions(dirpath: str, dirnames: list[str]) -> None:
+    """`os.walk(followlinks=False)`도 Windows 연결 지점 안으로는 들어간다 — 링크처럼 걷지 않는다."""
+    dirnames[:] = [name for name in dirnames if not _is_junction(Path(dirpath) / name)]
 
 
 def _normalized_absolute(path: Path) -> Path:

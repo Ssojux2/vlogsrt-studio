@@ -52,7 +52,7 @@ from datetime import UTC, datetime
 from fractions import Fraction
 from pathlib import Path
 
-from vlogsrt import log, preprocess
+from vlogsrt import log, oscompat, preprocess
 from vlogsrt.oscompat import process_alive, publish_exclusive
 from vlogsrt.project.raw import read_scope, source_verify
 from vlogsrt.project.raw.analysis_config import REVIEW_MEDIA
@@ -530,7 +530,7 @@ def _write_record(target: Path, payload: dict[str, object]) -> None:
     temp.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
-    os.replace(temp, target)
+    oscompat.replace(temp, target)
 
 
 def _read_record(target: Path) -> dict[str, object] | None:

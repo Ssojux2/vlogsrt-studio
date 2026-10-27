@@ -26,6 +26,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from stat import S_ISDIR, S_ISLNK, S_ISREG
 
+from vlogsrt import oscompat
+
 __all__ = [
     "CachePolicyError",
     "CachePurgePlan",
@@ -159,7 +161,7 @@ def execute_cache_purge(workspace_root: Path, plan: CachePurgePlan) -> CachePurg
                 refused.append(RefusedPath(relative, "비어 있지 않다 — 다시 계획하세요"))
         elif S_ISREG(facts.st_mode):
             removed_bytes += facts.st_size
-            os.unlink(path)
+            oscompat.unlink(path)  # 미리보기는 서버가 내주는 중일 수 있다(Windows, D100 §1b)
             removed_files += 1
         else:
             refused.append(RefusedPath(relative, "일반 파일이 아니다"))

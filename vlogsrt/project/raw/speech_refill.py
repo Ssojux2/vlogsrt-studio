@@ -31,7 +31,7 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
-from vlogsrt import log
+from vlogsrt import log, oscompat
 from vlogsrt.project.raw import source_text
 from vlogsrt.project.raw import understanding as stage1
 from vlogsrt.project.raw.analysis_approval import (
@@ -347,7 +347,7 @@ def _write(path: Path, body: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_suffix(".tmp")
     temp.write_text(json.dumps(body, ensure_ascii=False, sort_keys=True), encoding="utf-8")
-    temp.replace(path)
+    oscompat.replace(temp, path)
 
 
 def _slice_key(pcm_sha256: str, piece: SampleRange) -> str:

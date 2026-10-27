@@ -28,7 +28,7 @@ import secrets
 from pathlib import Path
 from typing import Any
 
-from vlogsrt import log
+from vlogsrt import log, oscompat
 
 __all__ = ["MEMO_DIR", "source_digest"]
 
@@ -126,7 +126,7 @@ def _remember(workspace: Any, asset: Any, path: Path, probed: os.stat_result, di
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
         temp.write_text(json.dumps(body, sort_keys=True) + "\n", encoding="utf-8")
-        os.replace(temp, target)
+        oscompat.replace(temp, target)
     except OSError as error:
         temp.unlink(missing_ok=True)
         log.warn(f"원본 검증 메모를 남기지 못했습니다(다음에 다시 해시): {target.name} ({error})")

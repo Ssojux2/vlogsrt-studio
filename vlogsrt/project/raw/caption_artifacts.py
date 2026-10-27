@@ -19,7 +19,6 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
@@ -28,6 +27,7 @@ from decimal import Decimal
 from fractions import Fraction
 from pathlib import Path
 
+from vlogsrt import oscompat
 from vlogsrt.models import Cue
 from vlogsrt.output import format_timecode, parse_srt, write_srt
 from vlogsrt.project.raw import capabilities
@@ -281,7 +281,7 @@ def _atomic_write_text(path: Path, body: str) -> Path:
     temp = path.with_name(path.name + ".partial")
     try:
         temp.write_text(body, encoding="utf-8")
-        os.replace(temp, path)
+        oscompat.replace(temp, path)
     finally:
         temp.unlink(missing_ok=True)
     return path

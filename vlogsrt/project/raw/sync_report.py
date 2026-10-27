@@ -29,7 +29,7 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
-from vlogsrt import log, preprocess
+from vlogsrt import log, oscompat, preprocess
 from vlogsrt.project import sync_check
 from vlogsrt.project.config import (
     SYNC_CHECK_SETTINGS,
@@ -384,7 +384,7 @@ def _atomic_write(path: Path, text: str) -> None:
     try:
         with os.fdopen(handle, "w", encoding="utf-8") as stream:
             stream.write(text)
-        os.replace(temporary, path)
+        oscompat.replace(temporary, path)
     finally:
         Path(temporary).unlink(missing_ok=True)
 
@@ -474,7 +474,7 @@ def decoded_pcm(source: SyncSource, cache_root: Path) -> PcmChoice:
     partial = folder / f".audio-{uuid.uuid4().hex}.pcm"  # 같은 프로세스의 두 작업도 겹치지 않게
     try:
         extraction = preprocess.extract_pcm_s16le(source.original, partial, stream_index=ordinal)
-        os.replace(partial, pcm_path)
+        oscompat.replace(partial, pcm_path)
     finally:
         partial.unlink(missing_ok=True)
     meta = {

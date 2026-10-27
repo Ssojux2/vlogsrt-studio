@@ -191,3 +191,48 @@ def test_a_sweep_that_raises_releases_the_owner_lock(tmp_path: Path, monkeypatch
 def test_launcher_settings_are_validated(settings: dict[str, object]):
     with pytest.raises(ValueError):
         instance.UiInstanceSettings(**settings)  # type: ignore[arg-type]
+
+
+# ── 사용자 꼬리표(D100 §1b) ──────────────────────────────────────────────
+
+
+def test_posix_user_tag_is_the_uid(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(instance.getpass, "getuser", lambda: pytest.fail("POSIX는 uid다"))
+    assert instance._user_tag() == str(os.getuid())
+
+
+@pytest.mark.parametrize("name", ["alice", "a.b-c_9"])
+def test_windows_plain_login_names_are_kept(monkeypatch: pytest.MonkeyPatch, name: str):
+    monkeypatch.setattr(instance.sys, "platform", "win32")
+    monkeypatch.setattr(instance.getpass, "getuser", lambda: name)
+    assert instance._user_tag() == name
+
+
+@pytest.mark.parametrize("name", ["홍길동", "John Smith", "a/b", "c:\\d"])
+def test_windows_unusual_login_names_are_hashed(monkeypatch: pytest.MonkeyPatch, name: str):
+    monkeypatch.setattr(instance.sys, "platform", "win32")
+    monkeypatch.setattr(instance.getpass, "getuser", lambda: name)
+    tag = instance._user_tag()
+    assert tag.startswith("user-") and len(tag) == len("user-") + 12
+    assert tag[len("user-") :].isalnum()
+    assert instance._user_tag() == tag  # 같은 이름은 같은 폴더다
+
+
+@pytest.mark.parametrize("error", [ImportError("no pwd"), OSError("no login name")])
+def test_windows_without_a_login_name_falls_back_to_the_home_folder(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, error: Exception
+):
+    def missing() -> str:
+        raise error
+
+    monkeypatch.setattr(instance.sys, "platform", "win32")
+    monkeypatch.setattr(instance.getpass, "getuser", missing)
+    monkeypatch.setattr(instance.Path, "home", classmethod(lambda _cls: tmp_path / "home"))
+    tag = instance._user_tag()
+    assert tag == "home-" + instance._short_digest(str(tmp_path / "home"))
+
+    def homeless(_cls: type) -> Path:
+        raise RuntimeError("Could not determine home directory.")
+
+    monkeypatch.setattr(instance.Path, "home", classmethod(homeless))
+    assert instance._user_tag() == "home-" + instance._short_digest(tempfile.gettempdir())

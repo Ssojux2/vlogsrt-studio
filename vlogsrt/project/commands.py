@@ -42,7 +42,7 @@ from decimal import Decimal
 from fractions import Fraction
 from pathlib import Path
 
-from vlogsrt import env, log, transcribe
+from vlogsrt import env, log, oscompat, transcribe
 from vlogsrt.config import Config, load_config
 from vlogsrt.project import request_accounting, runner, topology
 from vlogsrt.project.clips import collect_clip_paths, probe_clips, synthesize_fcpxml
@@ -1364,7 +1364,7 @@ def _write_bytes(path: Path, payload: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     temporary.write_bytes(payload)
-    os.replace(temporary, path)
+    oscompat.replace(temporary, path)
 
 
 def _discard_file(path: Path) -> None:

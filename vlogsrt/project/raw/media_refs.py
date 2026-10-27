@@ -21,7 +21,7 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
-from vlogsrt import filelock, log, preprocess
+from vlogsrt import filelock, log, oscompat, preprocess
 from vlogsrt.project.raw import read_scope
 from vlogsrt.project.raw.analysis_config import (
     ANALYSIS_CLIP,
@@ -499,7 +499,7 @@ def _write_proxy_state(directory: Path, recipe: AnalysisProxyRecipe, **fields: A
         json.dumps({"recipe": recipe.tag(), **fields}, ensure_ascii=False, sort_keys=True),
         encoding="utf-8",
     )
-    staged.replace(directory / _PROXY_RECORD)
+    oscompat.replace(staged, directory / _PROXY_RECORD)
 
 
 def _proxy_intact(directory: Path, state: dict) -> bool:
@@ -591,14 +591,17 @@ def _acquire_file(handle: Any) -> None:
 
 @contextlib.contextmanager
 def _exclusive(directory: Path) -> Iterator[None]:
-    """스레드 잠금과 파일 잠금을 함께 쥔다 — 파일은 닫히면서 풀린다."""
+    """스레드 잠금과 파일 잠금을 함께 쥔다 — 파일 잠금은 닫기 전에 풀고 닫는다."""
     lock = _build_lock(directory)
     _acquire(lock)
     try:
         directory.mkdir(parents=True, exist_ok=True)
         with (directory / _PROXY_LOCK).open("a", encoding="utf-8") as handle:
             _acquire_file(handle)
-            yield
+            try:
+                yield
+            finally:
+                filelock.unlock(handle)  # 닫기 전에 푼다(Windows — D100 §1b)
     finally:
         lock.release()
 
@@ -819,11 +822,11 @@ class _FrameSampler:
         cached = self.cache_directory / f"{self.stream_index}-{index}-{edge}.jpg"
         staged = cached.with_suffix(".tmp")
         shutil.copyfile(path, staged)
-        staged.replace(cached)
+        oscompat.replace(staged, cached)
         manifest = cached.with_suffix(".sha256")
         staged_manifest = manifest.with_suffix(".tmp-hash")
         staged_manifest.write_text(hashlib.sha256(path.read_bytes()).hexdigest())
-        staged_manifest.replace(manifest)
+        oscompat.replace(staged_manifest, manifest)
 
     def prepare(self, *, frame_indices: tuple[int, ...], directory: Path, long_edge: int) -> None:
         missing = []
@@ -944,7 +947,7 @@ class ClipSampler:
         )
         staged = manifest.with_suffix(".tmp-hash")
         staged.write_text(hashlib.sha256(path.read_bytes()).hexdigest())
-        staged.replace(manifest)
+        oscompat.replace(staged, manifest)
         return path
 
 

@@ -9111,6 +9111,64 @@ macOS 동작은 바이트 그대로 둔다.
   (`tests/test_filelock.py` · `tests/test_oscompat.py` · `tests/test_platform_preprocess.py` · `tests/raw/test_fcp_windows_paths.py`), 타입은
   `make types-win`이 본다. 첫 Windows 실행 확인 목록은 README(WP2)에 둔다. 유료 호출 0회.
 
+### §1b Windows 리뷰 반영 (W-40b)
+
+**왜**: §1(ec77afd·27ebdcc)을 따로 검토한 결과, Windows에서 그대로 깨지는 자리가 남았다. macOS·POSIX 동작은 아래에 적은 곳 말고는
+바이트 그대로다.
+
+- **`\\?\` 링크**(`raw/fcp.py`): Windows `os.readlink`는 절대 대상을 `\\?\C:\…`·`\\?\UNC\server\share\…`로 돌려준다. 앵커가 `\\`로
+  시작해 §1의 「새 UNC 공유」 검사가 **모든** 절대 링크를 끊었다. `_link_target`(순수 — `PureWindowsPath`로 시험)이 먼저
+  `\\?\X:` → `X:`, `\\?\UNC\` → `\\`(연결 지점의 `\??\` 표기도)로 벗기고, 같은 공유는 대소문자 없이 받는다. 남는 `\\?\`·`\\.\`
+  (볼륨 GUID·장치)는 새 앵커면 「장치 경로」 사유로 끊는다. 루트 상대(`\foo`)는 **링크 쪽** 드라이브의 루트에서, 드라이브
+  상대(`D:foo`)는 같은 드라이브면 링크 폴더에서, 다른 드라이브면 그 드라이브 루트에서 잇는다 — 프로세스 작업 폴더를 묻지
+  않는다. 「작업공간 안」 검사(`_resolve_link`)와 풀기의 시작 경로도 접두를 벗긴 표기로 본다(접두로 검사를 비켜 가지 못한다).
+  POSIX 표기는 `posixpath`로 예전 그대로다.
+- **연결 지점**(junction): Windows `lstat`은 연결 지점을 디렉터리로 보고한다. `st_reparse_tag == IO_REPARSE_TAG_MOUNT_POINT`이면
+  링크로 보고(`_is_link`) 같은 칸마다 검사를 지나며 `os.readlink`가 읽는다. `os.walk(followlinks=False)`는 연결 지점 안으로
+  들어가므로 이벤트·미디어 폴더 걷기가 그 칸을 건너뛴다(POSIX에서 심볼릭 링크 폴더를 걷지 않는 것과 같다 — POSIX는 조회를
+  더하지 않는다). `ingest`의 폴더 스캔은 이 절의 길 밖이라 그대로다.
+- **자식 프로세스 출력은 UTF-8**(`preprocess._child_options` — `run_process` 한 자리): 텍스트로 받으면 `encoding="utf-8",
+  errors="replace"`. Windows 기본(cp949)은 ffmpeg stderr의 한글 경로에서 `UnicodeDecodeError`(ValueError — `OSError` 감싸기 밖)를
+  냈다. **macOS에서 바뀌는 것은 깨진 바이트가 예외 대신 U+FFFD가 되는 것 하나다.** 호출자가 인코딩을 주면 그대로다.
+- **콘솔 창**: Windows에서 `run_process`의 두 길(빠른 `subprocess.run`·`_launch`)이 모두 `CREATE_NO_WINDOW`를 더한다.
+- **프로세스 확인**(`oscompat.process_alive`): 죽었다고 보는 것은 `OpenProcess`의 `ERROR_INVALID_PARAMETER`(87) 하나다 — 그 밖의
+  오류는 모르는 것이라 산 것이다(문서가 약속한 그대로). `OpenProcess`·`GetExitCodeProcess`·`CloseHandle`에 `argtypes`·`restype`
+  (`HANDLE`·`DWORD`·`BOOL`·`LPDWORD`)을 단다 — 없으면 64비트 손잡이가 C `int`로 잘린다.
+- **교체·지우기 다시 시도**(`oscompat.replace`·`oscompat.unlink`): Windows `MoveFileExW`는 누가 대상을 열어 두면(화면이 읽는 작업
+  기록 · 서버가 내주는 `frame_*.jpg` · 백신·색인) `PermissionError`다. `OsCompatSettings`(20번 × 0.05초, 외부 근거 없는 선택)만큼
+  다시 하고 그래도 안 되면 그 오류를 올린다. POSIX는 `os.replace`·`os.unlink` 그대로(다시 하지 않는다). `vlogsrt/`의 원자 쓰기
+  교체 자리 서른다섯(`preprocess` 프레임 게시 둘 · `visual_review._write_record` · 서비스의 리뷰 VTT·오디오 기록 · 원장 · 캐시·
+  기록 파일들)를 옮겼고, 캐시 정리의 일반 파일 지우기가 `oscompat.unlink`다. `finalcut_export`는 교체를 쓰지 않는다
+  (`FINALCUT_EXPORT_FORBIDDEN` 그대로). `project/fcpxml.py`는 파서 모듈의 import 허용 목록(`vlogsrt.project.*`만)이 있어
+  `os.replace` 그대로다(옛 FCPXML 왕복 쓰기 — 내주는 파일이 아니다). `review_workspace.py`의 옛 리뷰 VTT·미리보기 교체 둘은 동시 작업(WP3)과 겹치지 않게
+  이번에 두었다.
+- **원자적 게시**(`oscompat.publish_exclusive`의 링크 없는 길): §1은 최종 이름을 배타 생성해 복사했다(이름이 먼저 보인다). 이제
+  옆 임시 파일(`O_CREAT|O_EXCL|O_BINARY`)에 다 쓰고 fsync한 뒤 **덮지 않는 이름 바꾸기**로 낸다 — Windows `os.rename`
+  (`MoveFileExW`, REPLACE_EXISTING 없음), Linux `renameat2(RENAME_NOREPLACE)`, macOS `renamex_np(RENAME_EXCL)`(ctypes libc). 셋이
+  없거나 파일 시스템이 모르면(EINVAL·ENOSYS·ENOTSUP) 그때만 예전 배타 생성 + 복사다. 대상이 있으면 언제나 `FileExistsError`,
+  실패하면 임시 파일을 지운다. Windows에서는 읽기 전용 속성을 붙이지 않는다(붙이면 반쪽을 지우지 못한다) — POSIX는 예전처럼
+  원본 모드(umask 적용)다. **잃는 것이 없어졌다** — §1의 「반쪽 파일이 최종 이름에 남을 수 있다」는 이제 마지막 물러남에만 남는다.
+- **UI 잠금 폴더 이름**(`ui/instance._user_tag`): Windows `getpass.getuser()`는 LOGNAME·USER·LNAME·USERNAME이 모두 없으면
+  ImportError·OSError다 — 그때 홈 폴더(그것도 모르면 `%TEMP%`)의 sha 12자리다. `[A-Za-z0-9._-]` 밖의 로그인 이름(한글·공백)도
+  sha다. POSIX는 uid 그대로.
+- **닫기 전에 푼다**: `budget_ledger._ledger_lock` · `media_refs._exclusive` · `finalcut_export._exclusive`가
+  `request_accounting`·`workflow_protocol`처럼 `filelock.unlock` 뒤에 닫는다.
+- **`O_BINARY`**: `finalcut_export`(`_NEW_FILE` · 초안 다시 쓰기) · `ui/instance`(잠금 파일 둘) · `filelock.open_directory_lock` ·
+  `preprocess._reserve_staging_temp`가 `getattr(os, "O_BINARY", 0)`을 더한다(POSIX는 0).
+- **폴더 열기** `ui/os_open.py`: `reveal(path)`(macOS `open -R` · Windows `%SYSTEMROOT%\explorer.exe /select,` — 성공해도 1을
+  내므로 코드를 보지 않는다 · 그 밖 `xdg-open` 부모 폴더)와 `open_folder(path)`(`open` · `os.startfile` · `xdg-open`). subprocess
+  경계 검사(`SUBPROCESS_BOUNDARY_PATHS`)는 `vlogsrt/`만 보며 `ui/`는 예전부터 함수 안에서 부른다 — 같은 꼴이다. 작업대의 Finder
+  열기가 이것을 쓰고(macOS argv 그대로), WP7의 「폴더 열기」가 쓴다. Final Cut 열기는 macOS 밖에서 FileNotFoundError 대신
+  「Final Cut Pro는 macOS에만 있다」 사유다.
+- **도구 이름**: `_tool_name`의 `Path(argv[0]).stem.lower()`는 `ffprobe.sh`·`ffmpeg.bat` 같은 감싼 스크립트도 그 도구로 본다 — 받는다.
+- **긴 경로**: 깊은 `cache/` 나무(분석 프록시·프레임·장면 캐시) 아래에서는 경로가 MAX_PATH(260자)를 넘을 수 있다. 코드는 줄이지
+  않는다 — README(WP8)가 Windows 사용자에게 `LongPathsEnabled`(레지스트리·그룹 정책)를 켜라고 안내한다.
+- **시험**: `tests/test_oscompat.py`(87만 죽음 · 형 선언 · 다시 시도 · 원자 게시·덮지 않음·임시 정리·Windows 길) ·
+  `tests/test_platform_preprocess.py`(가짜 ffmpeg의 한글·깨진 UTF-8 · 콘솔 플래그 두 길) · `tests/raw/test_fcp_windows_paths.py`
+  (`\\?\C:\`·`\\?\UNC\`·`\foo`·`D:foo` · 가짜 stat의 연결 지점) · `tests/raw/test_ui_instance.py` · `tests/test_lock_release.py` ·
+  `tests/test_ui_os_open.py` · `tests/raw/test_finalcut_send_ui.py`. Windows는 여전히 실행하지 않았다 — `make types-win`과 가짜로만
+  본다. 유료 호출 0회.
+
 ### §2 폴더 작업공간 · 불러올 때 4K 프록시 (W-41)
 
 **왜**: 폴더 작업대의 입력은 Final Cut 라이브러리가 아니라 촬영 영상 폴더 하나다. 작업공간을 어디에 둘지, 원본을 복사할지, 4K를

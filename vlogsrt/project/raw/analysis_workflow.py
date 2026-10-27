@@ -28,7 +28,6 @@ import hashlib
 import inspect
 import json
 import math
-import os
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
@@ -37,7 +36,7 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Any, Protocol, cast
 
-from vlogsrt import log, preprocess
+from vlogsrt import log, oscompat, preprocess
 from vlogsrt.project.raw import asr_epoch as asr_epoch_store
 from vlogsrt.project.raw import (
     cross_check,
@@ -2720,7 +2719,7 @@ def _write_json_atomic(path: Path, payload: Mapping[str, object]) -> Path:
     temp = path.with_name(path.name + ".partial")
     try:
         temp.write_text(body, encoding="utf-8")
-        os.replace(temp, path)
+        oscompat.replace(temp, path)
     finally:
         temp.unlink(missing_ok=True)
     return path

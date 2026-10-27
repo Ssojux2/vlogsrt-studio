@@ -26,7 +26,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from vlogsrt import preprocess
+from vlogsrt import oscompat, preprocess
 from vlogsrt.project.raw import source_order
 from vlogsrt.project.raw.config import FOLDER_WORKSPACE
 from vlogsrt.project.raw.jobs import JobCancelledError, JobContext
@@ -752,7 +752,7 @@ def _copy_one_asset(workspace: RawWorkspace, asset_id: str) -> None:
     reread_hash = _sha256_file(partial)
     if reread_hash != copied_hash or partial.stat().st_size != pre_stat.st_size:
         raise IngestError("검증 실패 — 목적지를 다시 읽은 해시가 복사 때 해시와 다르다")
-    os.replace(partial, destination)
+    oscompat.replace(partial, destination)
     registration = _register_verified(workspace, live, destination)
     duplicate_of = workspace.first_ready_asset_with_hash(reread_hash, asset_id)
     workspace.update_source_asset(

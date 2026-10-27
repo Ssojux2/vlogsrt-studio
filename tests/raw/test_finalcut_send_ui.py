@@ -158,6 +158,22 @@ def test_the_real_opener_is_one_open_call_and_tests_can_never_reach_it(
     assert calls == [["/usr/bin/open", "-a", "Final Cut Pro", str(target)]]
 
 
+def test_the_real_opener_explains_that_final_cut_is_macos_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Windows에는 `/usr/bin/open`도 Final Cut도 없다 — FileNotFoundError 대신 사유(D100 §1b)."""
+    import sys
+
+    import ui.workspace_service as workspace_ui
+    from vlogsrt.project.raw import service as raw_service
+
+    monkeypatch.setattr(subprocess, "run", lambda *_a, **_k: pytest.fail("띄우지 않는다"))
+    monkeypatch.setattr(sys, "platform", "win32")
+    target = tmp_path / "x.fcpxml"
+    with pytest.raises(raw_service.RawWorkspaceError, match="macOS에만"):
+        workspace_ui.open_in_final_cut.__wrapped__(target)
+
+
 def _failed_job(root: Path, kind: str) -> str:
     from vlogsrt.project.raw.jobs import JobStore
     from vlogsrt.project.raw.workspace import RawWorkspace

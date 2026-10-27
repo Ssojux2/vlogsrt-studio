@@ -1071,7 +1071,7 @@ def _switch_pointer(root: Path, revision: str) -> None:
         if os.path.lexists(staging):
             staging.unlink()
         os.symlink(f"{_REVISIONS_DIR}/{revision}", staging)
-        os.replace(staging, current)
+        oscompat.replace(staging, current)
         _fsync_directory(root)
     finally:
         lock.unlink()

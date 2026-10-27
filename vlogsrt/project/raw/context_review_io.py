@@ -21,6 +21,7 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
+from vlogsrt import oscompat
 from vlogsrt.project.raw import context_review, tiering
 from vlogsrt.project.raw.analysis_config import ContextReviewSettings
 from vlogsrt.project.raw.config import RawGeminiAnalysisProfile
@@ -62,7 +63,7 @@ def write(path: Path, body: Mapping[str, Any]) -> None:
     handle, temp = tempfile.mkstemp(dir=path.parent, prefix=".", suffix=".partial")
     with os.fdopen(handle, "w", encoding="utf-8") as stream:
         stream.write(text)
-    os.replace(temp, path)
+    oscompat.replace(temp, path)
 
 
 def payload(

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import tempfile
 import wave
 from dataclasses import dataclass
@@ -12,7 +11,7 @@ from decimal import Decimal
 from fractions import Fraction
 from pathlib import Path
 
-from vlogsrt import pipeline, retext, transcribe
+from vlogsrt import oscompat, pipeline, retext, transcribe
 from vlogsrt.config import Config
 from vlogsrt.project.fcpxml import element_tree
 from vlogsrt.project.timebase import parse_fcpx_time
@@ -271,7 +270,7 @@ def generate_final_captions(
             if not run.cues:
                 raise CaptionGenerationError("발화 결과에 자막 큐가 하나도 없다")
             target_srt = destination / f"{basename}.srt"
-            os.replace(source_srt, target_srt)
+            oscompat.replace(source_srt, target_srt)
             quality = ["coverage:complete", "render-audio:48khz-pcm"]
             if run.verification is not None:
                 quality.append("second-model:checked")
@@ -402,4 +401,4 @@ def _write_review(
     text = json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
     temporary = path.with_name(f".{path.name}.tmp")
     temporary.write_text(text, encoding="utf-8")
-    os.replace(temporary, path)
+    oscompat.replace(temporary, path)

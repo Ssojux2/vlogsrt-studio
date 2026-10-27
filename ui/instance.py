@@ -62,13 +62,40 @@ UI_INSTANCE = UiInstanceSettings()
 
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 """Windows has no O_NOFOLLOW (0 = a plain open); there the folder is the user's own `%TEMP%`."""
+_O_BINARY = getattr(os, "O_BINARY", 0)
+"""Windows opens descriptors in text mode unless told otherwise (D100 §1b); POSIX has no flag."""
+
+
+_SAFE_TAG = re.compile(r"[A-Za-z0-9._-]+")
+"""A login name used as-is only when it is plain ASCII; anything else is hashed (D100 §1b)."""
+_TAG_DIGEST_LENGTH = 12
 
 
 def _user_tag() -> str:
-    """The per-user folder suffix — the uid on POSIX (unchanged), the login name on Windows."""
+    """The per-user folder suffix — the uid on POSIX (unchanged), the login name on Windows.
+
+    `getpass.getuser()` raises (ImportError/OSError) when LOGNAME/USER/LNAME/USERNAME are all
+    unset; then a short hash of the home folder stands in (of `%TEMP%` — already per user — when
+    even the home folder is unknown). A login name outside `[A-Za-z0-9._-]` is hashed too.
+    """
     if sys.platform == "win32":
-        return getpass.getuser()
+        try:
+            name = getpass.getuser()
+        except (ImportError, OSError, KeyError):
+            return "home-" + _short_digest(_home_or_temp())
+        return name if _SAFE_TAG.fullmatch(name) else "user-" + _short_digest(name)
     return str(os.getuid())
+
+
+def _home_or_temp() -> str:
+    try:
+        return str(Path.home())
+    except RuntimeError:
+        return tempfile.gettempdir()
+
+
+def _short_digest(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:_TAG_DIGEST_LENGTH]
 
 
 def same_file(descriptor: int, path: Path) -> bool:
@@ -133,7 +160,7 @@ class UiInstance:
         raise OSError(f"UI lock file kept changing under us: {self.path}")
 
     def _open(self) -> TextIO:
-        descriptor = os.open(self.path, os.O_RDWR | os.O_CREAT | _O_NOFOLLOW, 0o600)
+        descriptor = os.open(self.path, os.O_RDWR | os.O_CREAT | _O_NOFOLLOW | _O_BINARY, 0o600)
         return os.fdopen(descriptor, "r+", encoding="utf-8")
 
     def _published_port(self, handle: TextIO) -> int | None:
@@ -225,7 +252,7 @@ def sweep_stale_locks(
 
 def _remove_if_unheld(path: Path) -> int:
     try:
-        descriptor = os.open(path, os.O_RDWR | _O_NOFOLLOW)
+        descriptor = os.open(path, os.O_RDWR | _O_NOFOLLOW | _O_BINARY)
     except FileNotFoundError:
         return 0
     try:

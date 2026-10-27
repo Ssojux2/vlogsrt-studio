@@ -24,7 +24,6 @@ import inspect
 import io
 import json
 import math
-import os
 import sys
 import wave
 from array import array
@@ -35,7 +34,7 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Any, Protocol, cast
 
-from vlogsrt import log
+from vlogsrt import log, oscompat
 from vlogsrt.config import Config
 from vlogsrt.models import Chunk
 from vlogsrt.preprocess import VideoStreamInfo, extract_frame_index, extract_pcm_s16le
@@ -519,7 +518,7 @@ def _write_cache(cache_path: Path, fingerprint: str, outcome: AsrChunkOutcome) -
         ),
         encoding="utf-8",
     )
-    temp.replace(cache_path)
+    oscompat.replace(temp, cache_path)
 
 
 # ── 다른 귀 기준 재전사(W-29b, D78) — 어긋난 청크만 whisper에 다시 묻는다 ─────────────────
@@ -653,7 +652,7 @@ def _mark_accepted(
     body = {"fingerprint": fingerprint, "temperature": temperature, "similarity": similarity}
     temp = path.with_suffix(".tmp")
     temp.write_text(json.dumps(body), encoding="utf-8")
-    temp.replace(path)
+    oscompat.replace(temp, path)
 
 
 def _accepted_before(outcome: AsrChunkOutcome, context: _RescueContext) -> AsrChunkOutcome:
@@ -887,7 +886,7 @@ def write_pcm_slice(audio: SelectedAudio, span: SampleSpan, destination: Path) -
     temp = destination.with_name(destination.name + ".partial")
     try:
         temp.write_bytes(_wav_bytes(audio, span))
-        os.replace(temp, destination)
+        oscompat.replace(temp, destination)
     finally:
         temp.unlink(missing_ok=True)
     return destination
@@ -2219,7 +2218,7 @@ def write_stage1_document(path: Path, document: Mapping[str, object]) -> Path:
     temp = path.with_name(path.name + ".partial")
     try:
         temp.write_text(body, encoding="utf-8")
-        os.replace(temp, path)
+        oscompat.replace(temp, path)
     finally:
         temp.unlink(missing_ok=True)
     return path

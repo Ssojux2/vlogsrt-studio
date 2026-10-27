@@ -26,7 +26,7 @@ from functools import partial
 from pathlib import Path
 from typing import Any
 
-from vlogsrt import log, preprocess
+from vlogsrt import log, oscompat, preprocess
 from vlogsrt.env import ANALYSIS_CLAUDE_KEY_ENV, ANALYSIS_GEMINI_KEY_ENV
 from vlogsrt.project.raw import (
     analysis_workflow,
@@ -4794,7 +4794,7 @@ class RawWorkspaceService:
         if not target.is_file():
             temp = target.with_name(target.name + ".partial")
             temp.write_text(text, encoding="utf-8")
-            os.replace(temp, target)
+            oscompat.replace(temp, target)
         for registered in self.list_media(root, kind="preview"):
             if registered.relative_path == relative:
                 return ReviewVttRegistration(registered, result.provenance)
@@ -4867,7 +4867,7 @@ class RawWorkspaceService:
                 json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
                 encoding="utf-8",
             )
-            os.replace(temp, record)
+            oscompat.replace(temp, record)
             reused = (
                 Fraction(str(payload["audio_origin"])),
                 Fraction(str(payload["duration"])),

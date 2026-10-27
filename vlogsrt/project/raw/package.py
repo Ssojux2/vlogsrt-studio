@@ -24,6 +24,7 @@ from datetime import UTC, datetime
 from fractions import Fraction
 from pathlib import Path
 
+from vlogsrt import oscompat
 from vlogsrt.project.raw.models import (
     ClipArtifact,
     PackageRevision,
@@ -295,7 +296,7 @@ def write_package_manifest(
             raise FileExistsError(f"전달물이 이미 있다(덮어쓰지 않는다): {target}")
         staged = directory / f".{name}.{secrets.token_hex(4)}.partial"
         staged.write_text(body, encoding="utf-8-sig" if name == CLIP_INDEX_NAME else "utf-8")
-        staged.replace(target)
+        oscompat.replace(staged, target)
         written.append(f"{package.package_dir}/{name}")
     return tuple(written)
 

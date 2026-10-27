@@ -32,7 +32,7 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Any, Protocol
 
-from vlogsrt import log, retext
+from vlogsrt import log, oscompat, retext
 from vlogsrt.config import Config
 from vlogsrt.hangul import strip_for_compare
 from vlogsrt.models import Chunk, RetextRecord, RetextRejection, RetextUnplaced, Segment
@@ -406,7 +406,7 @@ def _write_cache(
         "languages": list(transcript.languages),
     }
     temp.write_text(json.dumps(body, ensure_ascii=False), encoding="utf-8")
-    temp.replace(target)
+    oscompat.replace(temp, target)
 
 
 # ─────────────────────────────────────────────────────────────

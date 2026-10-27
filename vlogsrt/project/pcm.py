@@ -47,7 +47,7 @@ from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
 
-from vlogsrt import log
+from vlogsrt import log, oscompat
 from vlogsrt.preprocess import extract_pcm_s16le
 
 _CONTRACT_SAMPLE_RATE = 16000
@@ -223,7 +223,7 @@ def write_wav_slice(reference: PcmReference, samples: SampleRange, destination: 
             handle.setsampwidth(_CONTRACT_SAMPLE_WIDTH)
             handle.setframerate(reference.sample_rate)
             handle.writeframes(data)
-        os.replace(temp, destination)
+        oscompat.replace(temp, destination)
     finally:
         temp.unlink(missing_ok=True)
     return destination
@@ -480,7 +480,7 @@ def _publish_pointer(destination: Path, generation_pcm: Path, generation_meta: P
     replaced = False
     try:
         temp.write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        os.replace(temp, destination)
+        oscompat.replace(temp, destination)
         replaced = True
     finally:
         try:
@@ -510,7 +510,7 @@ def _write_generation(path: Path, reference: PcmReference, policy: AudioPolicy) 
     temp = _begin_atomic(path)
     try:
         temp.write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        os.replace(temp, path)
+        oscompat.replace(temp, path)
     finally:
         temp.unlink(missing_ok=True)
 

@@ -44,7 +44,7 @@ from fractions import Fraction
 from pathlib import Path
 from typing import cast
 
-from vlogsrt import env, preprocess
+from vlogsrt import env, oscompat, preprocess
 from vlogsrt.config import Config
 from vlogsrt.models import Chunk
 from vlogsrt.project.raw import capabilities
@@ -556,7 +556,7 @@ class CaptionWorkspace:
                     },
                     handle,
                 )
-            os.replace(temporary, target)
+            oscompat.replace(temporary, target)
         finally:
             Path(temporary).unlink(missing_ok=True)
 

@@ -119,7 +119,9 @@ UNREVIEWED_DROP_TEXT = (
 """이 계층이 만드는 숨은 초안의 이름 — 치울 수 있는 것은 이 꼴뿐이다."""
 _IMPORT_JOB_KINDS = frozenset({INGEST_JOB_KIND, "reference_import"})
 """원본 목록을 바꾸는 작업 — 복사 가져오기와 라이브러리 참조 가져오기."""
-_NEW_FILE = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+_BINARY = getattr(os, "O_BINARY", 0)
+"""Windows는 텍스트 모드 서술자에서 `\\n`을 `\\r\\n`으로 바꾼다 — 바이트 그대로 쓴다(D100 §1b)."""
+_NEW_FILE = os.O_WRONLY | os.O_CREAT | os.O_EXCL | _BINARY
 _FILE_MODE = 0o644
 
 
@@ -860,7 +862,10 @@ def _exclusive(folder: Path) -> Iterator[None]:
                 f"{folder}에 파일 잠금을 걸 수 없다(네트워크 드라이브 등) — 작업공간을 이 Mac의"
                 f" 디스크에 두고 다시 보내세요 ({error})"
             ) from error
-        yield
+        try:
+            yield
+        finally:
+            filelock.unlock(descriptor)  # 닫기 전에 푼다(Windows — D100 §1b)
     finally:
         os.close(descriptor)
 
@@ -947,7 +952,7 @@ def _publish(
     """초안 → fsync → 검증 → 리포트 → `.fcpxml` 순서로 제 이름을 준다(읽는 쪽 규칙 참고)."""
     _sweep_drafts(folder)
     stem, draft = _reserve(folder, moment, tag)
-    _write(os.open(draft, os.O_WRONLY | os.O_TRUNC), payload)
+    _write(os.open(draft, os.O_WRONLY | os.O_TRUNC | _BINARY), payload)
     validation = _validate(draft, dtd_path)
     if not validation.valid:
         _reject(folder, stem, draft, validation)

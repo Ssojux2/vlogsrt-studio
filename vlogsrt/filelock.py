@@ -91,7 +91,8 @@ def unlock(target: LockTarget) -> None:
 def open_directory_lock(folder: Path) -> int:
     """폴더 잠금에 쓸 서술자 — POSIX는 폴더 자체, Windows는 폴더 안의 잠금 파일. 호출자가 닫는다."""
     if sys.platform == "win32":
-        return os.open(folder / DIRECTORY_LOCK_NAME, os.O_RDWR | os.O_CREAT, 0o600)
+        flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0)
+        return os.open(folder / DIRECTORY_LOCK_NAME, flags, 0o600)
     return os.open(folder, os.O_RDONLY)
 
 
