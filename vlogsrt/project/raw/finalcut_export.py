@@ -50,7 +50,8 @@ from fractions import Fraction
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from vlogsrt import log, preprocess
+from vlogsrt import log, polish, preprocess
+from vlogsrt.config import Config
 from vlogsrt.project import library
 from vlogsrt.project.models import UnsupportedProject
 from vlogsrt.project.raw import finalcut_timeline as timeline
@@ -603,9 +604,19 @@ def _cues(
     if document.get("source_sha256") != asset.content_sha256:
         raise _refuse(asset, "원본 자막이 다른 원본 내용에 묶여 있다")
     return tuple(
-        timeline.Cue(rational(row["start"]), rational(row["end"]), str(row["text"]))
+        timeline.Cue(rational(row["start"]), rational(row["end"]), caption_text(str(row["text"])))
         for row in document.get("utterances", [])
     )
+
+
+def caption_text(text: str) -> str:
+    """Final Cut으로 보내는 자막 글자 — 줄마다 조판 정리(D30·D96): 앞뒤·겹친 공백을 하나로, 온점을
+    지우고(숫자 사이는 그대로), 말줄임표를 `…`로. 원본 자막(작업공간 DB)은 그대로 두고 보내는 글자만
+    다듬는다 — 지문·캐시 열쇠·편집기가 그 글자에 묶여 있다. 다 지워져 비면 원문 그대로다(규칙 9)."""
+    config = Config()
+    lines = [polish.polish_text(line, config) for line in text.splitlines()]
+    sent = "\n".join(line for line in lines if line)
+    return sent or text
 
 
 def _display_geometry(video: preprocess.RawVideoMedia) -> tuple[int, int]:
@@ -1036,8 +1047,9 @@ def _with_titles(
 ) -> tuple[timeline.TimelineDocument, dict[str, object]]:
     """같은 문서에 SRT 줄의 타이틀만 — 리포트 칸에는 파일·템플릿·모양·센 수와 마지막 줄의 끝(다른
     타임라인에서 나온 SRT면 타임라인 길이와 어긋나 보인다)."""
+    cues = tuple(replace(cue, text=caption_text(cue.text)) for cue in srt.cues)
     try:
-        titled, counts = titles.with_srt_titles(document, srt.cues, settings)
+        titled, counts = titles.with_srt_titles(document, cues, settings)
     except timeline.FinalCutTimelineError as error:
         raise FinalCutExportError(
             f"SRT `{srt.path.name}`을 타이틀로 달지 못했다 — {error}"

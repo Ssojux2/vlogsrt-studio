@@ -137,6 +137,7 @@ Final Cut 전체 타임라인(D44·D45·D56). 플러그인은 제거됐다. 계�
 | W-33 | Final Cut 보내기는 추천(초록)만 켠다(사용자 지시 2026-10-27 「노란색도 비활성하고 초록색만 활성해서 나가는 형식」, D93) — 설정 `FinalCutTimelineSettings.recommended_only`(보내기 `FINALCUT_TIMELINE`이 켬 · 빌더 기본은 D80) · 사람이 「사용」으로 정한 조각은 켬 · 보통·판정 보류·미분석은 끈 채(지우지 않음) · 꺼진 보통 안의 묻힌 추천에도 「추천」 범위 · 방향·레이트 표는 켠 클립만 · 시험 `test_finalcut_green_only` | ✅ 2026-10-27 |
 | W-34 | 「꺼진 클립 빼고 보내기」 옵션(사용자 지시 2026-10-27 「disable된 클립을 프로젝트에서 제외하는 옵션 — 초록색 클립만 출력」, D94 — 고른 것: 미검토 제외 제안은 먼저 확인하게 막기 · 두 보내기 모두) — 작업공간 표지 `finalcut_drop_disabled`(기본 끔) · 설정 서랍 칸 · 빌더 `drop_disabled`(켠 클립만 스파인 · 캡션 차례 옮김 · 분석 전 원본도 브라우저 클립) · 레이트 섞임 누적 배치 일반화(빼지 않으면 바이트 그대로) · 관문 `UnreviewedDropError` · 이름 꼬리 `_green`·「추천만」 · 리포트 `dropped_*` · 시험 `test_finalcut_drop` | ✅ 2026-10-27 |
 | W-35 | whisper는 시각만, 자막 글자는 Gemini가 메인(사용자 지시 2026-10-27, D95 — 고른 것: Gemini 단어 시각으로 whisper 줄에 배정 · 종료일 뒤 Gemini 시각으로 전환, 계획 `docs/plans/2026-10-27-whisper-timing-gemini-text.md`) — **a** 단어 배정 `raw/word_text.py`(순수) + 규칙 1·5 문서 · **b** 1단계 연결(whisper 원본 글자 경로 = Gemini 3.5 Transcribe, 견적·승인·캐시) · **c** 화면·「확인 필요」 둘 · **d** 「글자만 다시 듣기」(저장된 whisper 청크 + Gemini 글자만) · **e** 종료일 뒤 새로 듣는 엔진 자동 전환 · 사람: H1 녹화 · H2′ · W-31f 기본 엔진 결정은 대체됨 | 계획 ✅ 2026-10-27 |
+| W-36 | Final Cut으로 나가는 자막 글자 조판 정리(사용자 지시 2026-10-27 「맨 앞 띄어쓰기 제거 · 마지막 온점 안 찍히게」, D96) — `finalcut_export.caption_text`(줄마다 `polish.polish_text`, 비면 원문) · 원본 자막 캡션과 SRT 타이틀 · 저장된 원본 자막은 그대로 · 시험 `test_finalcut_caption_polish` | ✅ 2026-10-27 |
 
 ---
 
