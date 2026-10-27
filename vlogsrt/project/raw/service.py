@@ -448,6 +448,11 @@ OLD_PROMPT_REFUSAL = (
 """이전 안내문 리비전으로 시작한 분석을 이으려 할 때의 거절 문구(D58 18b) — 내부 리비전 이름은
 싣지 않는다(D57)."""
 
+FINALCUT_DROP_DISABLED_KEY = "finalcut_drop_disabled"
+FINALCUT_DROP_DISABLED_ON = "on"
+FINALCUT_DROP_DISABLED_OFF = "off"
+"""「꺼진 클립 빼고 보내기」(D94) 작업공간 표지 — 없거나 모르는 값이면 끔(전체 타임라인)이다."""
+
 TIMING_ENGINE_CHOICES: tuple[str, ...] = (TIMING_ENGINE_GEMINI, TIMING_ENGINE_WHISPER)
 """「새로 듣는 전사 엔진」 칸의 차례(W-31e) — 새 엔진이 앞, 종료될 whisper가 뒤다."""
 timing_engine_facts = timing_engine.facts
@@ -1542,6 +1547,17 @@ class RawWorkspaceService:
         from vlogsrt.project.raw import cross_check
 
         return cross_check.set_enabled(self._workspace(root), on)
+
+    def finalcut_drop_disabled(self, root: Path) -> bool:
+        """Final Cut 보내기에서 꺼진 클립을 뺄까(D94) — 고른 적이 없으면 빼지 않는다(기본)."""
+        value = self._workspace(root).meta_value(FINALCUT_DROP_DISABLED_KEY)
+        return value == FINALCUT_DROP_DISABLED_ON
+
+    def set_finalcut_drop_disabled(self, root: Path, on: bool) -> bool:
+        """그 표지를 저장한다(무료, 문서 모양만 정한다 — 지문·승인·견적 밖)."""
+        value = FINALCUT_DROP_DISABLED_ON if on else FINALCUT_DROP_DISABLED_OFF
+        self._workspace(root).set_meta_value(FINALCUT_DROP_DISABLED_KEY, value)
+        return self.finalcut_drop_disabled(root)
 
     def glossary(self, root: Path) -> Any:
         """프로젝트 용어집(D59 19c) — 마지막 리비전. 읽기만 한다(표를 만들지 않는다)."""
@@ -3315,14 +3331,21 @@ class RawWorkspaceService:
         """불러온 원본 전부를 태그 달린 타임라인 하나로 — 새 FCPXML 경로를 돌려준다(D56).
 
         모으고 대조하고 쓰는 일은 `finalcut_export`가 한다. 지우지 않으므로 미검토 자동
-        제외 관문이 없고, Final Cut은 열지 않는다(여는 것은 화면의 몫이다).
+        제외 관문이 없고, Final Cut은 열지 않는다(여는 것은 화면의 몫이다). 「꺼진 클립 빼고
+        보내기」(D94)가 켜져 있으면 꺼진 클립을 프로젝트에서 빼고, 그때만 빠질 클립의 미검토
+        제외 제안을 먼저 확인하게 한다.
         """
         from vlogsrt.project.raw import finalcut_export
 
         flags = self._caption_timing_flags_or_reason(root)
         gaps = self._caption_gaps_or_unknown(root)
         outcome = finalcut_export.export(
-            self, root, context, caption_timing=flags, caption_gaps=gaps
+            self,
+            root,
+            context,
+            caption_timing=flags,
+            caption_gaps=gaps,
+            drop_disabled=self.finalcut_drop_disabled(root),
         )
         return outcome.fcpxml
 
@@ -3339,7 +3362,10 @@ class RawWorkspaceService:
         from vlogsrt.project.raw import timeline_srt as srt_file
 
         lines = srt_file.read(srt)
-        return finalcut_export.export(self, root, context, titles_srt=lines).fcpxml
+        drop = self.finalcut_drop_disabled(root)
+        return finalcut_export.export(
+            self, root, context, titles_srt=lines, drop_disabled=drop
+        ).fcpxml
 
     def _caption_gaps_or_unknown(self, root: Path) -> dict[str, Any] | None:
         """보내기 보고서의 전사 실패 구간 — 원본마다 1단계 기록을 읽기만 한다(D59).

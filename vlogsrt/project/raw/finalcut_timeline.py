@@ -309,6 +309,10 @@ class SourcePlan:
     """시퀀스 1프레임이 안 돼 1프레임으로 늘린 클립 수 — 고치지 않고 센다."""
     titles: tuple[TitlePiece, ...] = ()
     """SRT 줄의 타이틀(D91) — 원본 자막 캡션 대신 실을 때만 있다."""
+    dropped_clips: int = 0
+    """프로젝트에서 뺀 꺼진 클립 수(D94) — 빼지 않으면 0이다."""
+    dropped_seconds: Fraction = Fraction(0)
+    """뺀 클립 길이(초) 합(D94)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -338,6 +342,8 @@ class TimelineDocument:
     """시퀀스 포맷의 프레임 길이 — 스파인의 위치·길이가 이 격자에 선다(W-27d)."""
     title_style: TitleStyle | None = None
     """타이틀(D91)의 템플릿·모양 — 없으면 문서가 W-27d 그대로다."""
+    drop_disabled: bool = False
+    """꺼진 클립을 뺀 문서(D94) — 리포트가 뺀 수를 싣는다."""
 
 
 # ── 원본 하나 ────────────────────────────────────────────────────────────
@@ -756,14 +762,18 @@ def _sequence_layout(plan: SourcePlan, sequence_fd: Fraction) -> tuple[tuple[int
     원본 시계에서만 온다 — 격자에 맞출 뿐 유도하지 않는다.
     """
     fd = plan.media.frame_duration
-    last = len(plan.clips) - 1
+    clips = plan.clips
     edges = [0]
     padded = 0
-    for index, clip in enumerate(plan.clips):
-        edge = frame_nearest(clip.end_frame * fd, sequence_fd)
-        if index == last:
-            remaining = (clip.end_frame - clip.start_frame) * fd
-            edge = min(edge, edges[-1] + frame_floor(remaining, sequence_fd))
+    total = Fraction(0)
+    for index, clip in enumerate(clips):
+        length = (clip.end_frame - clip.start_frame) * fd
+        total += length
+        edge = frame_nearest(total, sequence_fd)
+        following = clips[index + 1] if index + 1 < len(clips) else None
+        if following is None or following.start_frame != clip.end_frame:
+            # 뒤에 이어지는 미디어가 없다(원본 끝 · 뺀 클립 앞, D94) — 제 미디어를 넘지 않는다.
+            edge = min(edge, edges[-1] + frame_floor(length, sequence_fd))
         padded += edge <= edges[-1]
         edges.append(max(edge, edges[-1] + 1))
     return tuple(b - a for a, b in zip(edges, edges[1:], strict=False)), padded
@@ -797,6 +807,60 @@ def _sequence_drop_frame(plans: Sequence[SourcePlan], sequence_fd: Fraction) -> 
     return _dominant([(p.media.drop_frame, p.media.frame_count) for p in majority])
 
 
+class UnreviewedDropError(FinalCutTimelineError):
+    """빠질 꺼진 클립에 사람이 확인하지 않은 제외 제안이 있다(D94·규칙 9·D35) — 먼저 확인한다."""
+
+    def __init__(self, names: Sequence[str], count: int) -> None:
+        self.names = tuple(names)
+        self.count = count
+        super().__init__(
+            f"확인하지 않은 제외 제안 {count}개가 빠질 클립에 있다({', '.join(self.names)})"
+        )
+
+
+def _without_disabled(plans: Sequence[SourcePlan]) -> tuple[SourcePlan, ...]:
+    """꺼진 클립을 뺀 계획(D94) — 사람이 보지 않은 제외 제안이 빠지거나 켠 클립이 하나도 없으면
+    거부한다. 원본 전체는 브라우저 클립으로 남는다(분석 전 원본도 통째로 하나 단다)."""
+    unreviewed = [
+        (plan.media.name, clip)
+        for plan in plans
+        for clip in plan.clips
+        if not clip.enabled and KEYWORD_UNREVIEWED in clip.keywords
+    ]
+    if unreviewed:
+        names = list(dict.fromkeys(name for name, _clip in unreviewed))
+        raise UnreviewedDropError(names, len(unreviewed))
+    if not any(clip.enabled for plan in plans for clip in plan.clips):
+        raise FinalCutTimelineError("켠 클립이 하나도 없다 — 꺼진 클립을 빼면 빈 프로젝트가 된다")
+    return tuple(_kept_only(plan) for plan in plans)
+
+
+def _kept_only(plan: SourcePlan) -> SourcePlan:
+    """원본 하나에서 켠 클립만 — 캡션은 남은 클립의 차례로 옮기고 뺀 클립의 캡션은 함께 뺀다."""
+    kept = [index for index, clip in enumerate(plan.clips) if clip.enabled]
+    order = {old: new for new, old in enumerate(kept)}
+    dropped = [clip for clip in plan.clips if not clip.enabled]
+    media = plan.media
+    browser = plan.browser
+    if browser is None:
+        browser = (BrowserRange(0, media.frame_count, KEYWORD_UNANALYZED, False),)
+    return replace(
+        plan,
+        clips=tuple(plan.clips[index] for index in kept),
+        captions=tuple(
+            replace(piece, clip_index=order[piece.clip_index])
+            for piece in plan.captions
+            if piece.clip_index in order
+        ),
+        browser=browser,
+        dropped_clips=len(dropped),
+        dropped_seconds=sum(
+            ((clip.end_frame - clip.start_frame) * media.frame_duration for clip in dropped),
+            Fraction(0),
+        ),
+    )
+
+
 def plan(
     sources: Sequence[SourceInput],
     *,
@@ -826,6 +890,8 @@ def plan(
         )
         for source in sources
     )
+    if settings.drop_disabled:
+        plans = _without_disabled(plans)
     formats = _formats(plans)
     sequence_format, sequence_fd = _sequence_format(plans, _format_ids(formats), settings)
     return TimelineDocument(
@@ -837,6 +903,7 @@ def plan(
         sequence_audio=_sequence_audio(plans),
         sources=tuple(_with_sequence_layout(p, sequence_fd) for p in plans),
         sequence_frame_duration=sequence_fd,
+        drop_disabled=settings.drop_disabled,
     )
 
 
@@ -851,6 +918,17 @@ def export_title(workspace_name: str, moment: datetime, tag: str | None = None) 
     stamp = moment.strftime("%Y-%m-%d %H:%M")
     parts = (_TITLE_PREFIX, workspace_name, stamp, *(() if tag is None else (tag,)))
     return _TITLE_SEPARATOR.join(parts)
+
+
+def _dropped_counts(document: TimelineDocument) -> dict[str, object]:
+    """꺼진 클립을 뺀 문서(D94)만 — 뺀 클립 수·길이(초). 빼지 않은 문서는 칸이 없다."""
+    if not document.drop_disabled:
+        return {}
+    seconds = sum((source.dropped_seconds for source in document.sources), Fraction(0))
+    return {
+        "dropped_clips": sum(source.dropped_clips for source in document.sources),
+        "dropped_seconds": str(seconds),
+    }
 
 
 def document_counts(document: TimelineDocument) -> dict[str, object]:
@@ -878,6 +956,7 @@ def document_counts(document: TimelineDocument) -> dict[str, object]:
         "formats": len(document.formats),
         "orientation": _document_orientation(document),
         **_rate_counts(document),
+        **_dropped_counts(document),
     }
 
 

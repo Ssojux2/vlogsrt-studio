@@ -355,6 +355,13 @@ class FinalCutTimelineSettings:
     보통·판정 보류·미분석은 끈 채 보낸다(지우지 않는다 — Final Cut에서 V로 되살아난다). 거짓(빌더의
     기본)이면 D80·D82 그대로 보통·보류·미분석도 켠다. 보내기가 쓰는 값은 `FINALCUT_TIMELINE`이다."""
 
+    drop_disabled: bool = False
+    """꺼진 클립을 프로젝트에서 뺀다(D94, 2026-10-27 사용자 지시 「disable된 클립을 프로젝트에서
+    제외하는 옵션 — 초록색 클립만 출력」) — 참이면 스파인에 켠 클립만 남기고 시퀀스를 그만큼 줄인다.
+    원본 전체는 이벤트 브라우저 클립(키워드 그대로)으로 남아 되찾을 수 있다. 사람이 확인하지 않은
+    제외 제안이 빠질 클립에 있으면 거부한다(규칙 9·D35). 작업공간 표지 `finalcut_drop_disabled`가
+    켜며 기본은 끔이다."""
+
     def __post_init__(self) -> None:
         if self.orientation_tie not in ORIENTATIONS:
             sides = " 또는 ".join(ORIENTATIONS)

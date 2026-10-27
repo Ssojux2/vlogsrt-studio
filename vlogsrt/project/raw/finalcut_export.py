@@ -44,7 +44,7 @@ import os
 import re
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from fractions import Fraction
 from pathlib import Path
@@ -105,8 +105,16 @@ _BUNDLE_SUFFIX = ".fcpbundle"
 _TITLES_TAG = "_titles"
 """SRT 타이틀을 단 타임라인의 이름 꼬리 — 같은 폴더에서 원본 자막 보내기와 갈린다(D91)."""
 _TITLES_TITLE = "자막 타이틀"
+_GREEN_TAG = "_green"
+"""꺼진 클립을 뺀 타임라인의 이름 꼬리(D94) — 전체 타임라인과 같은 폴더에서 갈린다."""
+_GREEN_TITLE = "추천만"
 _DRAFT_NAME = re.compile(
-    r"\.vlogsrt_[0-9]{8}T[0-9]{6}Z(?:_titles)?(?:_[0-9]+)?\.(?:fcpxml|json)\.partial"
+    r"\.vlogsrt_[0-9]{8}T[0-9]{6}Z(?:_titles)?(?:_green)?(?:_[0-9]+)?\.(?:fcpxml|json)\.partial"
+)
+UNREVIEWED_DROP_TEXT = (
+    "꺼진 클립을 빼고 보내려면 확인하지 않은 제외 제안 {count}개를 먼저 정하세요({names}) —"
+    " 작업대의 「남은 M개 모두 제외 유지」를 누르거나 그 조각을 사용·제외로 정하면 됩니다."
+    " 확인하지 않은 제안을 먼저 영상에서 빼지 않습니다(D35). 아무것도 쓰지 않았습니다."
 )
 """이 계층이 만드는 숨은 초안의 이름 — 치울 수 있는 것은 이 꼴뿐이다."""
 _IMPORT_JOB_KINDS = frozenset({INGEST_JOB_KIND, "reference_import"})
@@ -973,11 +981,13 @@ def export(
     caption_gaps: CaptionGaps | None = None,
     titles_srt: TimelineSrt | None = None,
     title_settings: FinalCutTitleSettings = FINALCUT_TITLES,
+    drop_disabled: bool = False,
 ) -> ExportOutcome:
     """ready 원본 전부(촬영 순) → 새 FCPXML + 리포트. Final Cut은 열지 않는다(D55 표지는 값으로).
 
     `titles_srt`(서비스가 읽은 SRT)면 원본 자막 캡션 대신 그 줄마다 타이틀을 단다(D91) — 원본
-    자막의 표지·빠진 구간은 그 자막의 것이라 받아도 쓰지 않는다.
+    자막의 표지·빠진 구간은 그 자막의 것이라 받아도 쓰지 않는다. `drop_disabled`면 꺼진 클립을
+    프로젝트에서 뺀다(D94 — 원본 전체는 브라우저 클립으로 남는다).
     """
     if titles_srt is not None:
         caption_timing, caption_gaps = None, None
@@ -998,7 +1008,9 @@ def export(
             service, workspace.root, workspace, head, rows, shelf, caption_gaps, titles_srt is None
         )
         gathered, skipped = _gather_all(scope, assets, context)
-        document = _document(gathered, workspace, moment, shelf, caption_timing, titles_srt)
+        document = _document(
+            gathered, workspace, moment, shelf, caption_timing, titles_srt, drop_disabled
+        )
         section: dict[str, object] | None = None
         if titles_srt is not None:
             document, section = _with_titles(document, titles_srt, title_settings)
@@ -1015,7 +1027,7 @@ def export(
             **({} if caption_timing is None else {"sync_check": dict(caption_timing.section)}),
             **({} if section is None else {"titles": section}),
         }
-        tag = "" if titles_srt is None else _TITLES_TAG
+        tag = ("" if titles_srt is None else _TITLES_TAG) + (_GREEN_TAG if drop_disabled else "")
         return _publish(folder, timeline.render(document), report, moment, dtd_path, tag)
 
 
@@ -1080,20 +1092,30 @@ def _document(
     shelf: _LibraryShelf,
     caption_timing: CaptionTimingFlags | None = None,
     titles_srt: TimelineSrt | None = None,
+    drop_disabled: bool = False,
 ) -> timeline.TimelineDocument:
     """모은 것 → 문서. 자막 시각 확인(D55)이 걸린 원본에는 빌더가 키워드를 단다. 프로젝트 방향은
     설정(`FINALCUT_TIMELINE`)의 규칙으로 빌더가 고른다 — 켠 길이가 많은 쪽(D66)."""
     bundle = shelf.bundle if any(item.from_library for item in gathered) else None
     flagged = frozenset() if caption_timing is None else caption_timing.flagged
+    tags = (
+        *(() if titles_srt is None else (_TITLES_TITLE,)),
+        *((_GREEN_TITLE,) if drop_disabled else ()),
+    )
     try:
         return timeline.plan(
             [item.source for item in gathered],
             title=timeline.export_title(
-                workspace.name, moment.astimezone(), None if titles_srt is None else _TITLES_TITLE
+                workspace.name, moment.astimezone(), " · ".join(tags) if tags else None
             ),
             library_bundle=bundle,
             caption_timing=flagged,
-            settings=FINALCUT_TIMELINE,
+            settings=replace(FINALCUT_TIMELINE, drop_disabled=drop_disabled),
         )
+    except timeline.UnreviewedDropError as error:
+        names = ", ".join(error.names)
+        raise FinalCutExportError(
+            UNREVIEWED_DROP_TEXT.format(count=error.count, names=names)
+        ) from error
     except timeline.FinalCutTimelineError as error:
         raise FinalCutExportError(f"Final Cut 타임라인을 짜지 못했다 — {error}") from error

@@ -141,6 +141,20 @@ CROSS_CHECK_INFO = (
 )
 """「다른 귀로 교차 확인」(D59 19d) — 승인 범위 바로 아래의 켬·끔. 칸에는 모델 이름·금액이 없다
 (D57 결정 7) — 무엇을 얼마에 듣는지는 그 아래 견적 문구만 말하고, 승인은 그 문구에 묶인다."""
+FINALCUT_DROP_PANEL_ID = "vl-finalcut-drop-panel"
+FINALCUT_DROP_ID = "vl-finalcut-drop"
+FINALCUT_DROP_LABEL = "꺼진 클립 빼고 보내기 (추천만)"
+FINALCUT_DROP_INFO = (
+    "켜면 「Final Cut으로 보내기」와 「SRT로 Final Cut 보내기」가 추천(초록) 클립과 「사용」으로"
+    " 정한 클립만 프로젝트에 넣고 나머지는 뺍니다. 원본 전체는 이벤트 브라우저 클립(키워드"
+    " 그대로)으로 남습니다. SRT로 보낼 때는 이 짧아진 타임라인 시각으로 만든 SRT를 고르세요."
+)
+FINALCUT_DROP_ON_TEXT = (
+    "켜짐 — 다음 보내기부터 꺼진 클립을 프로젝트에서 뺍니다. 빠질 클립에 확인하지 않은 제외 제안이"
+    " 있으면 보내지 않고 먼저 정하라고 알려 드립니다."
+)
+FINALCUT_DROP_OFF_TEXT = "꺼짐 — 다음 보내기부터 꺼진 클립까지 담은 전체 타임라인을 보냅니다."
+"""「꺼진 클립 빼고 보내기」(D94) — 설정 서랍의 켬·끔. 작업공간 표지에 산다(기본 끔)."""
 TIMING_ENGINE_ID = "vl-timing-engine"
 TIMING_ENGINE_LABEL = "새로 듣는 전사 엔진"
 TIMING_ENGINE_RETIRED_MARK = " · 이전 엔진({date} 종료)"
@@ -4761,6 +4775,7 @@ class RawWorkspaceUi:
             self._drawer_head("설정 · 고급 도구", "settings-drawer")
             quick_api_panel, quick_api_key = self._quick_api_panel()
             self._glossary_panel()
+            self._finalcut_drop_panel()
             with gr.Accordion("분석 실행 설정", open=False, visible=False):
                 primary_network = gr.Dropdown(
                     choices=["offline", "online"],
@@ -4781,6 +4796,36 @@ class RawWorkspaceUi:
         self._wire_library_approval(quick_api_panel, quick_api_key)
         self._wire_status_tick()  # 용어집 칸까지 지어진 뒤 — 1초 틱의 칸이 다 있다
         return advanced
+
+    def _finalcut_drop_panel(self) -> None:
+        """「Final Cut 보내기」(D94) — 꺼진 클립을 프로젝트에서 뺄지. 누르면 저장만 한다."""
+        with gr.Accordion("Final Cut 보내기", open=True, elem_id=FINALCUT_DROP_PANEL_ID):
+            box = gr.Checkbox(
+                value=self.finalcut_drop_value,
+                label=FINALCUT_DROP_LABEL,
+                info=FINALCUT_DROP_INFO,
+                interactive=True,
+                elem_id=FINALCUT_DROP_ID,
+            )
+            status = gr.Markdown("", elem_id=f"{FINALCUT_DROP_ID}-status")
+        box.input(
+            self.finalcut_drop_view,
+            [self._signature_state, box],
+            status,
+            queue=False,
+            show_progress="hidden",
+        )
+
+    def finalcut_drop_value(self) -> bool:
+        """칸의 처음 값 — 화면을 열 때마다 지금 작업공간의 값(없으면 끔)."""
+        root = self._snapshot_root()
+        return bool(self.raw.finalcut_drop_disabled(root)) if root else False
+
+    def finalcut_drop_view(self, signature: str | None, on: bool | None) -> str:
+        """「꺼진 클립 빼고 보내기」를 저장한다(무료) — 다음 보내기부터 그 모양으로 쓴다."""
+        root = self._require_current_selection(signature)
+        saved = bool(self.raw.set_finalcut_drop_disabled(root, bool(on)))
+        return FINALCUT_DROP_ON_TEXT if saved else FINALCUT_DROP_OFF_TEXT
 
     def _glossary_panel(self) -> None:
         """「용어집」(D59 19e) — 고유명사 칸과 저장 단추. 저장하면 견적 문구를 바로 다시 그린다.
