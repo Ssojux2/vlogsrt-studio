@@ -590,12 +590,15 @@ def test_bulk_confirm_keeps_the_w13_rules_undo_and_restore(
     """같은 호출이라 결과도 같다 — 바뀐 영상만 사람 손(D53), 실행 취소·「전체 복원」 그대로."""
     service, root = co.reverse_imported_project(tmp_path, human=False)
     two = co._ids(service, root)["DJI_0002.mov"]
+    server = RawWorkspaceUi(state_path=tmp_path / "ui-state.json")
+    signature = server.open_workspace_view(str(root))[1]
+    # 열기가 건 정리(촬영 시각 순 맞춤이 머리를 새 계획으로 옮긴다, D53)가 끝난 뒤에 잰다 — 그
+    # 작업과 겨루면 누가 먼저냐에 따라 조각 아이디가 갈린다(W-45가 정리를 빠르게 해 드러났다).
+    assert co._wait_upkeep(server.raw, root).status == "succeeded"
     facade = ReviewWorkspaceFacade(root)
     before = facade.load_head().revision
     pending = {s.segment_id for s in unreviewed_auto_exclusions(before)}
     assert [s.source_id for s in unreviewed_auto_exclusions(before)] == [two]
-    server = RawWorkspaceUi(state_path=tmp_path / "ui-state.json")
-    signature = server.open_workspace_view(str(root))[1]
     app = server.build_blocks()
     source = {b.value: b for b in app.blocks.values() if isinstance(b, gr.Button)}[
         CONFIRM_ALL_SOURCE_LABEL

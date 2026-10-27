@@ -277,6 +277,61 @@ def test_a_remembered_clock_still_checks_the_probe_stream(tmp_path: Path, runner
         preprocess.probe_extraction_clock_memo(clip, probe=moved)
 
 
+def _tagged_clip(path: Path) -> None:
+    """D53 촬영 순서 픽스처(`tests/raw/test_creation_order._encode`)와 같은 꼴의 실제 원본."""
+    subprocess.run(
+        [
+            "ffmpeg", "-v", "error", "-nostdin", "-y",
+            "-f", "lavfi", "-i", "testsrc2=size=160x90:rate=25:duration=2",
+            "-f", "lavfi", "-i", "anullsrc=r=48000:cl=mono",
+            "-t", "2", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+            "-c:a", "pcm_s16le", "-metadata", "creation_time=2026-08-11T03:00:00+00:00",
+            str(path),
+        ],
+        check=True,
+        capture_output=True,
+    )  # fmt: skip
+
+
+@needs_ffmpeg
+def test_a_remembered_probe_of_a_real_file_equals_a_fresh_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """W-45b 회귀 — 기억은 시간만 바꾸고 값은 바꾸지 않는다.
+
+    `test_bulk_confirm_keeps_the_w13_rules_undo_and_restore`가 W-45 뒤로 실패했다. 기억이 다른 값을
+    돌려준 것이 아니었다: 앱 열기가 건 정리(촬영 시각 순 맞춤, D53)가 기억 덕에 빨라져 시험의 첫
+    편집보다 먼저 머리를 새 계획으로 옮겼다(조각 아이디가 바뀐다). 그 시험은 정리를 기다리지 않고
+    옛 머리의 아이디를 쥐고 있었다 — W-45 앞 코드도 정리가 먼저 끝나게 하면 똑같이 실패한다.
+    여기서는 그 원인 후보를 닫는다: 실제 원본의 기억 값(맞은 것 · 처음 잰 것)이 기억 없는 조사와
+    칸마다 같고(찾은 경로로 읽은 버전 문자열 포함), 맞은 기억은 프로세스를 하나도 띄우지 않는다.
+    """
+    source = tmp_path / "DJI_0002.mov"
+    _tagged_clip(source)
+    bare = subprocess.run(["ffprobe", "-version"], capture_output=True, text=True, check=True)
+    assert preprocess._tool_version("ffprobe") == bare.stdout.strip().splitlines()[0]
+    fresh = preprocess.probe_raw_media(source)
+    fresh_clock = preprocess.probe_extraction_clock(source, probe=fresh)
+    preprocess.reset_process_caches()  # 도구 경로·버전까지 비우고 처음부터 기억을 채운다
+    missed = preprocess.probe_raw_media_memo(source)
+    missed_clock = preprocess.probe_extraction_clock_memo(source, probe=missed)
+    assert (missed, missed_clock) == (fresh, fresh_clock)
+    spawned: list[list[str]] = []
+    real_run = preprocess._run
+
+    def counting(command: list[str], *args: Any, **kwargs: Any) -> Any:
+        spawned.append(command)
+        return real_run(command, *args, **kwargs)
+
+    monkeypatch.setattr(preprocess, "_run", counting)
+    hit = preprocess.probe_raw_media_memo(source)
+    hit_clock = preprocess.probe_extraction_clock_memo(source, probe=hit)
+    assert hit is missed and hit_clock is missed_clock
+    assert spawned == []  # 맞은 기억은 ffprobe도 `-version`도 띄우지 않는다 — 빨라진 것뿐이다
+    assert (hit, hit_clock) == (preprocess.probe_raw_media(source), fresh_clock)
+    assert fresh.creation_time is not None and hit.creation_time == fresh.creation_time
+
+
 def test_verification_probes_of_the_written_preview_bypass_the_memo(
     tmp_path: Path, runner: _Runner, monkeypatch: pytest.MonkeyPatch
 ) -> None:
