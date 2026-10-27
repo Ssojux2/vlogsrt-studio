@@ -1739,6 +1739,53 @@ def test_real_tiering_module_passes_the_purity_check() -> None:
     assert check_invariants.check_tiering_stays_pure() == []
 
 
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "import subprocess",
+        "import socket",
+        "from urllib import request",
+        "import urllib.request",
+        "import os",
+        "import hashlib",
+        "from vlogsrt import preprocess",
+        "from vlogsrt.project.raw import service",
+        "from vlogsrt.project.raw.workspace import RawWorkspace",
+        "from vlogsrt.project.raw.jobs import JobContext",
+        "from vlogsrt.project.raw.finalcut_export import caption_text",
+        "BODY = Path('x').read_text()",
+        "with open('x') as handle:\n    pass",
+        "Path('x').exists()",
+        "MODULE = __import__('vlogsrt.preprocess')",
+    ],
+)
+def test_render_plan_is_pure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, statement: str
+) -> None:
+    """W-44a(D100 §5a) — 렌더 계획은 값만 받아 계획을 돌려준다(레일·렌더러가 같은 계획을 읽는다)."""
+    clean = (
+        "from fractions import Fraction\n"
+        "from vlogsrt import polish\n"
+        "from vlogsrt.project.raw.config import RENDER_SETTINGS\n"
+        "from vlogsrt.project.raw.tiering import TIER_GREEN\n"
+        "from vlogsrt.project.timebase import format_srt_time\n"
+    )
+    target = "vlogsrt/project/raw/render_plan.py"
+    _fake_source_tree(monkeypatch, tmp_path, {target: clean})
+    assert check_invariants.check_render_plan_stays_pure() == []
+    (tmp_path / target).write_text(clean + statement + "\n", encoding="utf-8")
+    failures = check_invariants.check_render_plan_stays_pure()
+    assert failures and all(line.startswith("render_plan.py") for line in failures)
+    (tmp_path / target).unlink()
+    assert check_invariants.check_render_plan_stays_pure() == [
+        "vlogsrt/project/raw/render_plan.py: 렌더 계획 계층이 사라졌다 (D100)"
+    ]
+
+
+def test_real_render_plan_module_passes_the_purity_check() -> None:
+    assert check_invariants.check_render_plan_stays_pure() == []
+
+
 # ── D60: 등급의 시각 확인 값은 서비스 한 자리만 ─────────────────────────────
 
 TIER_SERVICE = "vlogsrt/project/raw/service.py"

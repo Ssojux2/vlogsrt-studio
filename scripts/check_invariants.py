@@ -1199,6 +1199,43 @@ def check_tiering_stays_pure() -> list[str]:
     return failures
 
 
+# 렌더 계획(W-44a, D100 §5a)은 **값만 받아 계획을 돌려주는 순수 함수**다 — 작업대 레일과 ffmpeg
+# 렌더러가 같은 계획을 읽어야 화면에 보인 것이 곧 출력이다. 파일·프로세스·네트워크·서비스·작업공간·
+# 작업 실행기를 알면 같은 표시가 디스크 상태에 따라 다른 출력을 낳는다. 해시(`hashlib`)도 모른다 —
+# 출력의 신원은 모으고 쓰는 계층(`render_export`)이 정한다. Final Cut 보내기(`finalcut_export`)는
+# 파일 잠금을 import하므로 그 글자 정리도 들여오지 않는다(`polish`를 직접 쓴다).
+RENDER_PLAN_MODULE = "render_plan.py"
+RENDER_PLAN_MUST_NOT_IMPORT = (
+    "subprocess", "socket", "urllib", "request", "http", "ssl", "openai", "os", "shutil",
+    "tempfile", "sqlite3", "fcntl", "hashlib", "preprocess", "service", "workspace",
+    "review_workspace", "jobs", "finalcut_export", "render_export", "importlib",
+    "anthropic_messages", "gemini_messages", "transcribe",
+)  # fmt: skip
+
+
+def check_render_plan_stays_pure() -> list[str]:
+    """D100 §5a — `render_plan.py`는 값만 다룬다. 파일이 사라져도 조용히 통과하지 않는다."""
+    path = PROJECT_PACKAGE / "raw" / RENDER_PLAN_MODULE
+    if not path.exists():
+        return [f"vlogsrt/project/raw/{RENDER_PLAN_MODULE}: 렌더 계획 계층이 사라졌다 (D100)"]
+    body = path.read_text(encoding="utf-8")
+    failures = [
+        f"{RENDER_PLAN_MODULE}: {name}을 import한다 — 렌더 계획이 순수 함수가 아니게 된다 (D100)"
+        for name in _imports(body, RENDER_PLAN_MUST_NOT_IMPORT)
+    ]
+    failures += [
+        f"{RENDER_PLAN_MODULE}:{number}: 파일을 직접 읽거나 쓴다 — 입출력은 렌더러의 몫이다 (D100)"
+        for number, line in enumerate(body.splitlines(), start=1)
+        if FINALCUT_TIMELINE_FILE_IO.search(line)
+    ]
+    failures += [
+        f"{RENDER_PLAN_MODULE}:{number}: 동적 코드·import를 연다 — 재료는 값으로 받는다 (D100)"
+        for number, line in enumerate(body.splitlines(), start=1)
+        if SYNC_SNAP_FORBIDDEN_CALLS.search(line)
+    ]
+    return failures
+
+
 # D60 — 자막 시각 확인(D55)이 등급으로 가는 길은 하나다: 서비스의 `_tier_timing`이 지금
 # 리비전 보고서에서 값(`TimingSignals`)을 만들고, 등급 보고서의 유일한 자리
 # `_tier_report_for_row`가 그 값을 `classify(…, timing=self._tier_timing(…))`로 넘긴다.
@@ -2984,6 +3021,7 @@ CHECKS = (
     ("작업공간 모드는 순수하고 문서 밖이다", check_workspace_mode_stays_pure),
     ("라이브러리 맥락 평가는 순수하다", check_context_review_stays_pure),
     ("3단 등급은 순수하다", check_tiering_stays_pure),
+    ("추천만 이어붙이는 렌더 계획은 순수하다", check_render_plan_stays_pure),
     ("등급의 시각 확인 값은 서비스 한 자리만", check_tier_timing_only_from_service),
     ("자막 시각 확인은 순수하다", check_sync_check_stays_pure),
     ("자막 시각 확인은 표시만 한다", check_sync_check_only_displays),

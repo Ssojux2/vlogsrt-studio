@@ -9110,3 +9110,16 @@ macOS 동작은 바이트 그대로 둔다.
 - **Windows는 여기서 실행하지 않았다.** 분기는 `sys.platform`·가짜 `msvcrt`·가짜 kernel32·`PureWindowsPath`로 시험하고
   (`tests/test_filelock.py` · `tests/test_oscompat.py` · `tests/test_platform_preprocess.py` · `tests/raw/test_fcp_windows_paths.py`), 타입은
   `make types-win`이 본다. 첫 Windows 실행 확인 목록은 README(WP2)에 둔다. 유료 호출 0회.
+
+### §5a 렌더 계획 (W-44a)
+
+추천만 이어붙인 초안의 무엇을 남기고 무엇을 빼는지는 순수 모듈 `vlogsrt/project/raw/render_plan.py` 하나가 정한다. 작업대 레일과 ffmpeg 렌더러가 이 한 계획을 읽는다 — 화면에 보인 것이 곧 출력이다. 파일·프로세스·네트워크·서비스·작업공간·작업 실행기·hashlib을 모른다(`check_render_plan_stays_pure`).
+
+- **남길 범위.** 초안 = 녹색 등급 구간. 사람의 `추천` 덮기는 그 범위 전체를 더하고, `보통` 덮기는 그 안의 녹색을 빼고, 사람이 정한 제외(`excluded`, 미검토 표지 없음)는 그 안의 전부를 뺀다(추천 덮기보다 우선) — 사람 표시가 자동 등급을 이긴다. **미검토 자동 제외는 사람 표시가 아니다** — 빨강 위의 제안일 뿐이라 녹색을 빼지 않는다(D80·D93의 Final Cut 보내기와 같은 판단).
+- **합치기·격자·최소 길이.** 맞닿은 남길 조각은 하나로 합치고, `merge_gap_seconds`(기본 0)보다 짧은 틈은 그 자리가 모두 **자동 노랑**일 때만 잇는다(사람 표시·빨강·미분석은 잇지 않는다, 이은 길이는 `bridged_seconds`). 조각 끝은 원본 프레임 격자 안쪽으로 붙이고 1프레임 미만 자투리는 이웃한 빠진 구간에 붙인다. `min_part_seconds`(기본 1초)보다 짧은 조각은 빼고 `too_short`로 센다. VFR(map) 원본은 통째로 `unsupported_grid`로 빼고 지원 밖 목록에 남긴다(D68).
+- **뺀 목록(규칙 9·D35).** 원본마다 남긴 조각 + 뺀 구간이 `[0, extent]`를 빈틈없이 덮는다 — 어기면 계획을 만들지 않는다. 뺀 구간은 까닭(`yellow`·`red_unreviewed`·`red_confirmed`·`human_normal`·`human_excluded`·`too_short`·`unsupported_grid`·`unanalyzed`)과 검토 상태(`human`·`auto_excluded_unreviewed`·`unreviewed`·`no_review`)·등급·판정 보류를 단다. 빨강은 그 조각에 사람 결정(확정 제외·덮기·결정)이 있으면 `red_confirmed`, 없으면 `red_unreviewed`다.
+- **확인하지 않은 빨강도 막지 않는다**(사용자 결정 2026-10-27). 뺀 목록과 `unreviewed_red_dropped` 수로 보고서·화면 경고에 남긴다 — 「침묵 금지, 멈춤은 아님」. D94의 Final Cut 거부(빠질 클립에 확인 안 된 제외 제안이 있으면 거부)와 다른 선택이다: 그쪽은 Final Cut에서 V로 되살릴 수 없는 손실이고, 여기는 원본·작업공간이 그대로인 초안이라 빠진 것이 보고서에 남는 것으로 충분하다.
+- **시퀀스 포맷(D66·D71).** 방향은 남긴 길이(초)가 많은 쪽, 그 안의 레이트도 남긴 길이가 많은 쪽 — 동점 규칙은 `FINALCUT_TIMELINE`의 `orientation_tie`·`frame_rate_tie`를 그대로 쓴다. 크기는 그 방향에서 가장 많이 남긴 크기(같으면 큰 쪽). 조각마다 `scale`(크기 다름)·`pad`(화면비 다름)·`fps_convert`(레이트 다름)를 적는다.
+- **출력 타임라인.** 조각 위치는 앞 조각 길이의 누적이고, 누적 경계를 가장 가까운 시퀀스 프레임(½은 위로)에 맞춰 오차가 쌓이지 않는다(D71 `_sequence_layout`). 원본 끝에 닿은 조각만 남은 미디어로 내림이고, 0프레임이 되면 1프레임으로 늘려 센다(`padded`). 레이트가 다른 조각의 출력 길이는 원본 범위와 1프레임 미만 다를 수 있다 — 렌더러는 `[start, end)` 밖을 읽지 않고 마지막 프레임을 붙잡아 채운다.
+- **SRT 투영.** 조각에 겹치는 큐만 조각으로 자르고(`clipped`) 조각의 출력 위치만큼 옮긴다 — 시각을 만들지 않는다(규칙 1·3). 빠진 틈을 넘는 큐는 조각마다 한 장(`split` = 더 생긴 장 수), 어느 조각에도 닿지 않는 큐는 `dropped`로 센다. 출력 조각 끝을 넘는 부분은 그 끝에서 자른다 — 어떤 큐도 `[0, total]` 밖에 놓이지 않는다. 시각은 `Fraction`이고 직렬화에서 한 번 밀리초 half-up이다. `refine`의 `min_duration`은 적용하지 않는다 — 길이 0이 된 큐도 남기고 `zero_length`로 센다. 끝이 시작보다 앞인 줄은 시작 한 점으로 두고 `inverted`로 센다. 글자는 Final Cut 보내기와 같은 조판 정리(D96, 줄마다 `polish_text`)를 지나고, 정리 뒤 빈 줄은 쓰지 않고 `empty`로 센다.
+- **설정.** `raw/config.py`의 `RenderSettings`(`RENDER_SETTINGS`) — 최소 조각 1초 · 합칠 틈 0 · mp4 · 인코더 순서(videotoolbox·nvenc·qsv·amf·libx264) · crf 20 · medium · AAC 48 kHz 2채널 192 kb/s · 채움색 black. 모두 외부 근거 없는 조정 대상이고 어느 지문·캐시 열쇠·승인·견적에도 없다.

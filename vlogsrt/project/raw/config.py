@@ -1626,3 +1626,96 @@ def _strings(mapping: dict[str, object], key: str) -> tuple[str, ...]:
         if not isinstance(item, str):
             raise TypeError(f"{key}의 원소는 문자열이어야 한다: {type(item).__name__}")
     return tuple(str(item) for item in value)
+
+
+RENDER_CONTAINERS = ("mp4",)
+"""추천만 이어붙인 초안의 그릇 — H.264 + AAC를 담는 MP4 하나뿐이다(D100)."""
+X264_PRESETS = (
+    "ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow",
+)  # fmt: skip
+"""libx264 프리셋 철자(형식의 사실이지 조정 값이 아니다)."""
+X264_CRF_RANGE = (0, 51)
+"""libx264 8비트 crf가 받는 범위(형식의 사실)."""
+
+
+@dataclass(frozen=True)
+class RenderSettings:
+    """추천만 이어붙인 초안 영상 + SRT(W-44, D100)의 설정 — 순수 계획(`render_plan`)과 렌더러가
+    읽는다.
+
+    **모든 값이 외부 근거 없는 조정 대상이다.** 최소 조각 길이·합칠 틈은 사람이 보는 초안의 리듬을
+    고른 값이고, 인코더·화질·소리는 Final Cut 없이 바로 보는 초안이라는 쓰임에서 고른 값이다.
+    어느 지문·캐시 열쇠·승인·견적에도 없다 — 바꾸면 다음 내보내기만 달라진다.
+
+    - `min_part_seconds`: 이보다 짧은 남길 조각은 빼고 `too_short`로 센다(조용히 사라지지 않는다).
+      1초 아래 조각은 이어붙이면 번쩍임으로만 보인다.
+    - `merge_gap_seconds`: 남길 조각 사이 틈이 이보다 짧고 그 틈이 **자동 노랑뿐**이면 틈째 잇는다
+      (사람 표시·빨강·미분석은 잇지 않는다). 0이면 맞닿은 조각만 합친다 — 화면에 보인 그대로다.
+    - `video_codecs`: 앞에서부터 있는 인코더를 쓴다 — 하드웨어 인코더가 먼저, libx264가 마지막
+      (D100 — 하드웨어 인코더는 미리보기·최종 렌더에만, 분석 바이트에는 쓰지 않는다).
+    - `crf`·`preset`: libx264일 때의 화질·속도. `pad_color`: 비율이 다른 원본을 시퀀스 크기에
+      맞출 때 남는 칸의 색(ffmpeg 색 철자).
+    - 소리는 AAC `audio_rate` Hz · `audio_channels`채널 · `audio_bitrate_kbps` kb/s.
+    - 시퀀스 방향·레이트의 동점 규칙은 Final Cut 보내기와 **같은 설정**(`timeline`, D66·D71)을
+      쓴다 — 베끼지 않는다.
+    """
+
+    min_part_seconds: Fraction = Fraction(1)
+    merge_gap_seconds: Fraction = Fraction(0)
+    container: str = "mp4"
+    video_codecs: tuple[str, ...] = (
+        "h264_videotoolbox", "h264_nvenc", "h264_qsv", "h264_amf", "libx264",
+    )  # fmt: skip
+    crf: int = 20
+    preset: str = "medium"
+    audio_codec: str = "aac"
+    audio_rate: int = 48_000
+    audio_channels: int = 2
+    audio_bitrate_kbps: int = 192
+    pad_color: str = "black"
+    timeline: FinalCutTimelineSettings = FINALCUT_TIMELINE
+
+    def __post_init__(self) -> None:
+        problems = _render_length_problems(self) + _render_codec_problems(self)
+        if problems:
+            raise ValueError("렌더 설정이 잘못됐다 — " + " · ".join(problems))
+
+
+def _render_length_problems(settings: RenderSettings) -> list[str]:
+    problems = [
+        f"{name}는 0 이상인 Fraction이어야 한다: {getattr(settings, name)!r}"
+        for name in ("min_part_seconds", "merge_gap_seconds")
+        if not isinstance(getattr(settings, name), Fraction) or getattr(settings, name) < 0
+    ]
+    problems += [
+        f"{name}는 양의 정수여야 한다: {getattr(settings, name)!r}"
+        for name in ("audio_rate", "audio_channels", "audio_bitrate_kbps")
+        if not isinstance(getattr(settings, name), int) or getattr(settings, name) <= 0
+    ]
+    return problems
+
+
+def _render_codec_problems(settings: RenderSettings) -> list[str]:
+    problems: list[str] = []
+    if settings.container not in RENDER_CONTAINERS:
+        problems.append(
+            f"container는 {RENDER_CONTAINERS} 가운데 하나여야 한다: {settings.container!r}"
+        )
+    codecs = settings.video_codecs
+    if not codecs or any(not codec.strip() for codec in codecs) or len(set(codecs)) != len(codecs):
+        problems.append(f"video_codecs는 비지 않고 겹치지 않는 인코더 이름이어야 한다: {codecs!r}")
+    low, high = X264_CRF_RANGE
+    if not low <= settings.crf <= high:
+        problems.append(f"crf는 {low}–{high}여야 한다: {settings.crf}")
+    if settings.preset not in X264_PRESETS:
+        problems.append(f"preset은 libx264 프리셋이어야 한다: {settings.preset!r}")
+    problems += [
+        f"{name}가 비었다"
+        for name in ("audio_codec", "pad_color")
+        if not str(getattr(settings, name)).strip()
+    ]
+    return problems
+
+
+RENDER_SETTINGS = RenderSettings()
+"""지금 쓰는 초안 렌더 설정 — 계획(`render_plan.build_plan`)과 렌더러의 기본값이다."""
