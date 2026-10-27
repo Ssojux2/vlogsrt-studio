@@ -5378,6 +5378,40 @@ class RawWorkspaceService:
             selection=selection,
         )
 
+    def visual_mark_range(
+        self,
+        root: Path,
+        *,
+        base_plan_id: str | None = None,
+        expected_revision_id: str,
+        source_id: str,
+        mark: str,
+        start_pts: int | None = None,
+        end_pts: int | None = None,
+        start_seconds: Fraction | int | None = None,
+        end_seconds: Fraction | int | None = None,
+    ) -> visual_review.VisualRangeMark:
+        """시작·끝으로 범위를 표시한다(D100 §4) — 추천 · 보통 · 비추천 · 표시 지우기.
+
+        `mark`는 `recommended`·`normal`·`not_recommended`·`clear`다. 양 끝은 각각 정수 PTS(격자
+        위여야 한다) 또는 원점 기준 초(`Fraction`·int — 원본 시계로 가장 가까운 프레임에 스냅,
+        한가운데면 앞장) 가운데 하나다. 화면이 본 리비전(`expected_revision_id`)이 지금 머리가
+        아니면 `StaleRevisionError`다. 나누기·합치기·표시가 한 편집이라 리비전 하나·되돌리기
+        한 걸음이고, 원본·전사·다른 원본의 조각은 그대로다. 비추천은 사람이 확정한 제외라
+        렌더 계획이 그 범위를 빼고 보고서에 `human_excluded`로 남긴다(D100 §5a).
+        """
+        return visual_review.mark_range(
+            self.review_workspace_facade(root),
+            base_plan_id=base_plan_id,
+            expected_revision_id=expected_revision_id,
+            source_id=source_id,
+            mark=mark,
+            start_pts=start_pts,
+            end_pts=end_pts,
+            start_seconds=start_seconds,
+            end_seconds=end_seconds,
+        )
+
     # ── A5/A6·A7 백엔드 작업공간 — 공개 경계로만 내놓는다(병합 뒤 활성) ──
 
     def review_workspace_facade(self, root: Path) -> Any:

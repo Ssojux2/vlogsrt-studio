@@ -68,6 +68,7 @@ from vlogsrt.project.raw.models import (
 )
 from vlogsrt.project.raw.review_workspace import ReviewWorkspaceFacade
 from vlogsrt.project.raw.segment_review import (
+    RANGE_MARKS,
     SELECTIONS,
     ReviewEdit,
     ReviewRevision,
@@ -78,6 +79,8 @@ from vlogsrt.project.raw.segment_review import (
     chronological,
     is_unreviewed_auto_exclusion,
     merge_edit,
+    range_edit,
+    range_segment,
     selection_edit,
     split_edit,
 )
@@ -93,6 +96,7 @@ __all__ = [
     "VisualAudioTrack",
     "VisualClockSummary",
     "VisualNeighbor",
+    "VisualRangeMark",
     "VisualReviewError",
     "VisualReviewOverview",
     "VisualSegmentCard",
@@ -102,6 +106,7 @@ __all__ = [
     "adjust_boundary",
     "audio_selection_material",
     "boundary_proposal",
+    "mark_range",
     "merge_segments",
     "middle_frame_index",
     "preparation_fingerprint",
@@ -363,6 +368,25 @@ class VisualSnapProposal:
 
 
 # ── 순수 계산 — 프레임 스냅과 캐시 키 ─────────────────────────────────────────
+
+
+@dataclass(frozen=True, slots=True)
+class VisualRangeMark:
+    """범위 표시를 저장한 결과(D100 §4) — 화면이 다시 그릴 새 머리의 그 원본 조각들.
+
+    `start_pts`·`end_pts`는 저장한 범위(프레임 격자 위, 초로 받았으면 원본 시계로 스냅한 값),
+    `marked_segment_id`는 그 범위를 덮는 조각 하나, `segments`는 새 머리에서 그 원본의 조각을
+    시간순으로 모두 싣는다. 다음 편집은 `head_revision_id`를 `expected_revision_id`로 쓴다.
+    """
+
+    revision: ReviewRevision
+    head_revision_id: str
+    source_id: str
+    start_pts: int
+    end_pts: int
+    mark: str
+    marked_segment_id: str
+    segments: tuple[ReviewSegment, ...]
 
 
 def snapped_frame_index(clock: SourceClock, pts: Fraction | int) -> int:
@@ -2311,7 +2335,7 @@ def boundary_proposal(
 
 
 def _head_or_stale(
-    facade: ReviewWorkspaceFacade, base_plan_id: str, expected_revision_id: str
+    facade: ReviewWorkspaceFacade, base_plan_id: str | None, expected_revision_id: str
 ) -> ReviewRevision:
     """지금 헤드가 화면이 본 리비전인가 — 아니면 stale로 거부한다(0손상)."""
     head = facade.load_head(base_plan_id).revision
@@ -2406,6 +2430,63 @@ def merge_segments(
         )
     edit: ReviewEdit = merge_edit(expected_revision_id, first_segment_id, second_segment_id)
     return facade.apply_edit(base_plan_id, edit)
+
+
+def _range_point(
+    clock: SourceClock, pts: int | None, seconds: Fraction | int | None, what: str
+) -> int:
+    """범위 끝 하나의 PTS — PTS는 격자 위여야 하고, 초(원점 기준)는 원본 시계로 스냅한다.
+
+    스냅은 분할 제안과 같다(`snapped_frame_index` — 가장 가까운 프레임, 정확히 한가운데면 앞장).
+    둘 다 주거나 둘 다 없으면 거부다. float는 받지 않는다(`_exact_pts`).
+    """
+    if (pts is None) == (seconds is None):
+        raise VisualReviewError(f"{what}은(는) PTS나 초 가운데 하나만 주어야 한다")
+    if pts is not None:
+        if isinstance(pts, bool) or not isinstance(pts, int):
+            raise VisualReviewError(f"{what} PTS는 정수여야 한다: {pts!r}")
+        _require_frame_point(clock, pts, what)
+        return pts
+    assert seconds is not None
+    desired = clock.origin_pts + _exact_pts(seconds, what) / clock.time_base
+    return clock.origin_pts + snapped_frame_index(clock, desired) * clock.frame_ticks
+
+
+def mark_range(
+    facade: ReviewWorkspaceFacade,
+    *,
+    base_plan_id: str | None,
+    expected_revision_id: str,
+    source_id: str,
+    mark: str,
+    start_pts: int | None = None,
+    end_pts: int | None = None,
+    start_seconds: Fraction | int | None = None,
+    end_seconds: Fraction | int | None = None,
+) -> VisualRangeMark:
+    """원본 하나의 `[시작, 끝)`을 추천·보통·비추천으로 표시하거나 지운다 — 리비전 하나(D100 §4)."""
+    head = _head_or_stale(facade, base_plan_id, expected_revision_id)
+    clock = _required_clock(head, source_id)
+    if mark not in RANGE_MARKS:
+        raise VisualReviewError(f"알 수 없는 범위 표시 {mark!r} — {RANGE_MARKS} 가운데 하나다")
+    start = _range_point(clock, start_pts, start_seconds, "범위 시작")
+    end = _range_point(clock, end_pts, end_seconds, "범위 끝")
+    if not clock.origin_pts <= start < end <= clock.end_pts:
+        raise VisualReviewError(
+            f"범위 [{start}, {end})가 비었거나 뒤집혔거나 원본 {source_id!r}"
+            f" [{clock.origin_pts}, {clock.end_pts}] 밖이다"
+        )
+    edited = facade.apply_edit(head.base_plan_id, range_edit(head, source_id, start, end, mark))
+    return VisualRangeMark(
+        revision=edited,
+        head_revision_id=edited.revision_id,
+        source_id=source_id,
+        start_pts=start,
+        end_pts=end,
+        mark=mark,
+        marked_segment_id=range_segment(edited, source_id, start).segment_id,
+        segments=tuple(s for s in chronological(edited) if s.source_id == source_id),
+    )
 
 
 def set_selection(

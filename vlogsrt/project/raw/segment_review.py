@@ -72,8 +72,27 @@ EDIT_KINDS: tuple[str, ...] = (
     "selection",
     "override",
     "note",
+    "range",
 )
-"""리비전을 만드는 편집의 여섯 종류 — 이외의 종류는 적용 거부다."""
+"""리비전을 만드는 편집의 일곱 종류 — 이외의 종류는 적용 거부다(`range`는 범위 표시, D100 §4)."""
+
+RANGE_RECOMMENDED = "recommended"
+RANGE_NORMAL = "normal"
+RANGE_NOT_RECOMMENDED = "not_recommended"
+RANGE_CLEAR = "clear"
+RANGE_MARKS: tuple[str, ...] = (RANGE_RECOMMENDED, RANGE_NORMAL, RANGE_NOT_RECOMMENDED, RANGE_CLEAR)
+"""범위 표시의 넷 — 추천 · 보통 · 비추천 · 표시 지우기(자동으로)(D100 §4)."""
+
+_RANGE_STATES: dict[str, tuple[str | None, str]] = {
+    RANGE_RECOMMENDED: (RECOMMENDED, SELECTION_INCLUDED),
+    RANGE_NORMAL: ("normal", SELECTION_INCLUDED),
+    RANGE_NOT_RECOMMENDED: (REVIEW_REQUIRED, SELECTION_EXCLUDED),
+    RANGE_CLEAR: (None, SELECTION_INCLUDED),
+}
+"""표시 → (등급 덮기, 사용/제외). 비추천은 사람이 확정한 제외다 — 미검토 표지를 함께 거둔다."""
+
+RANGE_REPLACED_PREFIX = "범위 표시가 덮은 결정: "
+"""범위 안 조각의 다른 사람 결정을 새 표시가 덮었다는 메모 줄의 머리 — 「표시 지우기」가 거둔다."""
 
 # 병합·경계 조정에서 더 보수적인 쪽이 이긴다 — 확신을 붙였다고 믿으면 안 되므로.
 _SEVERITY = (SPEECH_DETECTED, SPEECH_UNCONFIRMED_EMPTY, SPEECH_AUDIO_ABSENT, SPEECH_ANALYSIS_FAILED)
@@ -253,6 +272,9 @@ class ReviewEdit:
     selection: str | None = None
     override: str | None = None
     notes: str | None = None
+    range_start_pts: int | None = None
+    range_end_pts: int | None = None
+    mark: str | None = None
 
 
 def split_edit(target_revision_id: str, segment_id: str, split_pts: int) -> ReviewEdit:
@@ -292,6 +314,38 @@ def override_edit(target_revision_id: str, segment_id: str, override: str | None
 def note_edit(target_revision_id: str, segment_id: str, notes: str) -> ReviewEdit:
     """검토 메모를 쓰는 명령 — 글자는 그대로 실는다."""
     return ReviewEdit("note", target_revision_id, (segment_id,), notes=notes)
+
+
+def range_edit(
+    revision: ReviewRevision, source_id: str, start_pts: int, end_pts: int, mark: str
+) -> ReviewEdit:
+    """원본 하나의 `[start_pts, end_pts)`에 표시를 다는 명령(D100 §4) — 한 리비전·한 기록.
+
+    `segment_ids`는 그 범위와 겹치는 지금 조각들(시간순)이다 — 감사 기록이 무엇을 덮었는지
+    말하고, 적용이 겨냥한 리비전과 다시 대조한다. 나머지 검사는 적용(`_apply_range`)이 한다.
+    """
+    if revision.clock_for(source_id) is None:
+        raise ReviewEditError(f"리비전 {revision.revision_id!r}에 원본 {source_id!r}가 없다")
+    return ReviewEdit(
+        "range",
+        revision.revision_id,
+        _overlapping_ids(revision, source_id, start_pts, end_pts),
+        range_start_pts=start_pts,
+        range_end_pts=end_pts,
+        mark=mark,
+    )
+
+
+def _overlapping_ids(
+    revision: ReviewRevision, source_id: str, start_pts: int, end_pts: int
+) -> tuple[str, ...]:
+    return tuple(
+        segment.segment_id
+        for segment in chronological(revision)
+        if segment.source_id == source_id
+        and segment.start_pts < end_pts
+        and segment.end_pts > start_pts
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -609,6 +663,7 @@ def apply_edit(revision: ReviewRevision, edit: ReviewEdit) -> ReviewRevision:
         "selection": _apply_metadata,
         "override": _apply_metadata,
         "note": _apply_metadata,
+        "range": _apply_range,
     }
     applier = appliers.get(edit.kind)
     if applier is None:
@@ -796,6 +851,117 @@ def _apply_metadata(revision: ReviewRevision, edit: ReviewEdit) -> tuple[ReviewS
         updated = replace(segment, notes=edit.notes if edit.notes is not None else "")
     return tuple(
         updated if existing.segment_id == segment_id else existing for existing in revision.segments
+    )
+
+
+def _range_request(revision: ReviewRevision, edit: ReviewEdit) -> tuple[SourceClock, int, int]:
+    """범위 편집의 (시계, 시작, 끝) — 표시·격자·순서·범위·겹친 조각을 모두 확인한다."""
+    if edit.mark not in RANGE_MARKS:
+        raise ReviewEditError(f"알 수 없는 범위 표시 {edit.mark!r} — {RANGE_MARKS} 가운데 하나다")
+    start, end = edit.range_start_pts, edit.range_end_pts
+    if start is None or end is None:
+        raise ReviewEditError("범위 편집은 시작·끝 PTS를 실어야 한다")
+    if not edit.segment_ids:
+        raise ReviewEditError(f"범위 [{start}, {end})와 겹치는 조각이 없다 — 원본 밖이다")
+    first = _find_segment(revision, edit.segment_ids[0])
+    clock = _required_clock(revision, first)
+    _require_frame_point(clock, first.segment_id, start)
+    _require_frame_point(clock, first.segment_id, end)
+    if start >= end:
+        raise ReviewEditError(f"범위 시작 {start}이 끝 {end}보다 앞서야 한다")
+    if start < clock.origin_pts or end > clock.end_pts:
+        raise ReviewEditError(
+            f"범위 [{start}, {end})가 원본 {clock.source_id!r} "
+            f"[{clock.origin_pts}, {clock.end_pts}] 밖이다"
+        )
+    if edit.segment_ids != _overlapping_ids(revision, clock.source_id, start, end):
+        raise ReviewEditError(
+            f"범위 편집이 실은 조각 {edit.segment_ids}가 리비전 {revision.revision_id!r}에서 "
+            "그 범위와 겹치는 조각과 다르다"
+        )
+    return clock, start, end
+
+
+def _apply_range(revision: ReviewRevision, edit: ReviewEdit) -> tuple[ReviewSegment, ...]:
+    """양 끝에서 나누고 → 안쪽을 하나로 합치고 → 표시를 단다. 덮개는 그대로 온전하다."""
+    clock, start, end = _range_request(revision, edit)
+    working = _split_inside(_split_inside(revision, clock.source_id, start), clock.source_id, end)
+    inside = [
+        segment
+        for segment in chronological(working)
+        if segment.source_id == clock.source_id and start <= segment.start_pts < end
+    ]
+    replaced = _replaced_decisions(inside, str(edit.mark))
+    for following in inside[1:]:
+        merge = merge_edit(working.revision_id, inside[0].segment_id, following.segment_id)
+        working = replace(working, segments=_renumber(_apply_merge(working, merge)))
+    marked = _marked(_find_segment(working, inside[0].segment_id), str(edit.mark), replaced)
+    return tuple(
+        marked if segment.segment_id == marked.segment_id else segment
+        for segment in working.segments
+    )
+
+
+def _split_inside(revision: ReviewRevision, source_id: str, pts: int) -> ReviewRevision:
+    """`pts`를 엄격히 안에 품은 조각이 있으면 거기서 나눈다 — 이미 경계면 그대로다."""
+    for segment in revision.segments:
+        if segment.source_id == source_id and segment.start_pts < pts < segment.end_pts:
+            split = split_edit(revision.revision_id, segment.segment_id, pts)
+            return replace(revision, segments=_renumber(_apply_split(revision, split)))
+    return revision
+
+
+def _replaced_decisions(inside: Sequence[ReviewSegment], mark: str) -> tuple[str, ...]:
+    """새 표시가 덮는 다른 사람 결정 — 등급 덮기나 확정한 제외가 새 표시와 다른 조각."""
+    override, selection = _RANGE_STATES[mark]
+    replaced: list[str] = []
+    for segment in inside:
+        confirmed = segment.selection == SELECTION_EXCLUDED and not is_unreviewed_auto_exclusion(
+            segment
+        )
+        if segment.override_recommendation is None and not confirmed:
+            continue
+        if (segment.override_recommendation, segment.selection) == (override, selection):
+            continue
+        replaced.append(
+            f"{segment.segment_id}({segment.override_recommendation or '덮기 없음'}·"
+            f"{segment.selection})"
+        )
+    return tuple(replaced)
+
+
+def _marked(segment: ReviewSegment, mark: str, replaced: tuple[str, ...]) -> ReviewSegment:
+    """표시를 단 조각 — 사람이 본 범위이므로 미검토 표지를 거둔다(비추천은 확정한 제외다)."""
+    override, selection = _RANGE_STATES[mark]
+    return replace(
+        segment,
+        override_recommendation=override,
+        selection=selection,
+        visual_tags=confirm_tags(segment.visual_tags),
+        notes=_range_notes(segment.notes, mark, replaced),
+    )
+
+
+def _range_notes(notes: str, mark: str, replaced: tuple[str, ...]) -> str:
+    """덮은 결정이 있으면 한 줄 덧붙이고, 「표시 지우기」는 그 줄들을 거둔다 — 나머지는 그대로."""
+    if mark == RANGE_CLEAR:
+        if RANGE_REPLACED_PREFIX not in notes:
+            return notes
+        kept = (line for line in notes.split("\n") if not line.startswith(RANGE_REPLACED_PREFIX))
+        return "\n".join(kept).strip("\n")
+    if not replaced:
+        return notes
+    record = RANGE_REPLACED_PREFIX + ", ".join(replaced)
+    return f"{notes}\n{record}" if notes else record
+
+
+def range_segment(revision: ReviewRevision, source_id: str, start_pts: int) -> ReviewSegment:
+    """범위 편집이 표시한 조각 — 그 원본에서 범위 시작에 서는 조각이다."""
+    for segment in revision.segments:
+        if segment.source_id == source_id and segment.start_pts == start_pts:
+            return segment
+    raise ReviewEditError(
+        f"리비전 {revision.revision_id!r}의 원본 {source_id!r}에 {start_pts}에서 서는 조각이 없다"
     )
 
 
@@ -1000,8 +1166,12 @@ def _segment_document(segment: ReviewSegment) -> dict[str, object]:
     }
 
 
+_RANGE_EDIT_KEYS = frozenset(("range_start_pts", "range_end_pts", "mark"))
+"""범위 편집에만 실리는 칸 — 다른 편집 문서는 바이트 그대로다(저장된 머리의 지문이 그 바이트다)."""
+
+
 def _edit_document(edit: ReviewEdit) -> dict[str, object]:
-    return {
+    document: dict[str, object] = {
         "kind": edit.kind,
         "target_revision_id": edit.target_revision_id,
         "segment_ids": list(edit.segment_ids),
@@ -1011,6 +1181,11 @@ def _edit_document(edit: ReviewEdit) -> dict[str, object]:
         "override": edit.override,
         "notes": edit.notes,
     }
+    if edit.kind == "range":
+        document["range_start_pts"] = edit.range_start_pts
+        document["range_end_pts"] = edit.range_end_pts
+        document["mark"] = edit.mark
+    return document
 
 
 def parse_revision(text: str) -> ReviewRevision:
@@ -1137,7 +1312,9 @@ def parse_edit(text: str) -> ReviewEdit:
 
 def _edit_from_document(item: object) -> ReviewEdit:
     values = _require_dict(item, "edit")
-    _require_keys(values, set(_edit_document(ReviewEdit("", "", ()))), "edit")
+    expected = set(_edit_document(ReviewEdit("", "", ())))
+    is_range = values.get("kind") == "range"
+    _require_keys(values, expected | _RANGE_EDIT_KEYS if is_range else expected, "edit")
     return ReviewEdit(
         kind=_require_str(values["kind"], "edit.kind"),
         target_revision_id=_require_str(values["target_revision_id"], "edit.target_revision_id"),
@@ -1150,6 +1327,13 @@ def _edit_from_document(item: object) -> ReviewEdit:
         selection=_optional_str(values["selection"], "edit.selection"),
         override=_optional_str(values["override"], "edit.override"),
         notes=_optional_str(values["notes"], "edit.notes"),
+        range_start_pts=_require_int(values["range_start_pts"], "edit.range_start_pts")
+        if is_range
+        else None,
+        range_end_pts=_require_int(values["range_end_pts"], "edit.range_end_pts")
+        if is_range
+        else None,
+        mark=_require_str(values["mark"], "edit.mark") if is_range else None,
     )
 
 

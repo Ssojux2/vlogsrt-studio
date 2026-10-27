@@ -10,7 +10,7 @@
 지키는 선:
 
 - **리비전은 A5 순수 도메인의 것이다.** 이 모듈은 리비전을 만들고 저장할 뿐,
-  고쳐 쓰지 않는다. 편집 종류도 여섯 종류(`segment_review.EDIT_KINDS`) 그대로다.
+  고쳐 쓰지 않는다. 편집 종류도 일곱 종류(`segment_review.EDIT_KINDS`) 그대로다.
 - **출판은 원자적이다.** 새 리비전 행과 헤드 이동(초기 출판이면 첫 헤드·입양
   매핑까지)은 SQLite 한 트랜잭션에서만 나간다 — 출판이 반쪽으로 끝나면 전부
   없던 일이 되므로 고아 리비전이 다음 편집을 막지 않는다.
@@ -39,7 +39,7 @@ from fractions import Fraction
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from vlogsrt import log, preprocess
+from vlogsrt import log, oscompat, preprocess
 from vlogsrt.project.raw import cache_policy, read_scope, tiering
 from vlogsrt.project.raw import confirmed_package as confirmed
 from vlogsrt.project.raw.analysis_store import AnalysisStore
@@ -61,6 +61,7 @@ from vlogsrt.project.raw.review_notes import (
     AUTO_NOTE_PREFIX,
     MANUAL_SELECTION_PREFIX,
     REVIEW_NOTE_PREFIX,
+    drop_auto_note_lines,
 )
 from vlogsrt.project.raw.review_projection import (
     ClipWindow,
@@ -80,6 +81,7 @@ from vlogsrt.project.raw.review_workspace_store import (
 from vlogsrt.project.raw.segment_review import (
     AUTO_EXCLUDED_UNREVIEWED_TAG,
     EDIT_KINDS,
+    RANGE_CLEAR,
     SELECTION_EXCLUDED,
     SPEECH_ANALYSIS_FAILED,
     SPEECH_DETECTED,
@@ -105,6 +107,8 @@ from vlogsrt.project.raw.segment_review import (
     override_edit,
     parse_edit,
     parse_revision,
+    range_edit,
+    range_segment,
     reextract_segment_ids,
     selection_edit,
     serialize_revision,
@@ -671,6 +675,40 @@ def _auto_excluded(
         visual_tags=(*confirm_tags(segment.visual_tags), AUTO_EXCLUDED_UNREVIEWED_TAG),
         notes=_AUTO_NOTE_PREFIX + json.dumps(provenance, ensure_ascii=False, sort_keys=True),
     )
+
+
+def _with_manual_notes(
+    head: ReviewRevision, edited: ReviewRevision, edit: ReviewEdit
+) -> ReviewRevision:
+    """사람이 사용/제외를 고른 조각의 메모 손질 — 선택 편집과 범위 표시(D100 §4)만.
+
+    자동 제외 근거가 남은 조각을 사람이 고르면 `수동 선택 · `을 단다 — 「자동 제외 전체 복원」이
+    그 조각을 건너뛴다. 범위 표시 지우기는 근거 줄을 거둔다 — 사용으로 둔 조각에 근거가 남으면
+    사람의 복원 결정으로 읽혀 자동으로 돌아가지 않는다.
+    """
+    clear = edit.kind == "range" and edit.mark == RANGE_CLEAR
+    if edit.kind == "selection":
+        targets = set(edit.segment_ids)
+    elif edit.kind == "range" and edit.range_start_pts is not None:
+        first = next(s for s in head.segments if s.segment_id == edit.segment_ids[0])
+        targets = {range_segment(edited, first.source_id, edit.range_start_pts).segment_id}
+    else:
+        return edited
+    return replace(
+        edited,
+        segments=tuple(
+            _manual_notes(segment, clear=clear) if segment.segment_id in targets else segment
+            for segment in edited.segments
+        ),
+    )
+
+
+def _manual_notes(segment: ReviewSegment, *, clear: bool) -> ReviewSegment:
+    if clear:
+        return replace(segment, notes=drop_auto_note_lines(segment.notes))
+    if segment.notes.startswith(_AUTO_NOTE_PREFIX):
+        return replace(segment, notes=MANUAL_SELECTION_PREFIX + segment.notes)
+    return segment
 
 
 # ── 파사드 ────────────────────────────────────────────────────────────────────
@@ -1538,18 +1576,7 @@ class ReviewWorkspaceFacade:
             )
         if edit.kind not in EDIT_KINDS:
             raise ReviewWorkspaceError(f"알 수 없는 편집 종류 {edit.kind!r}")
-        edited = apply_edit(head, edit)
-        if edit.kind == "selection":
-            edited = replace(
-                edited,
-                segments=tuple(
-                    replace(segment, notes=MANUAL_SELECTION_PREFIX + segment.notes)
-                    if segment.segment_id in edit.segment_ids
-                    and segment.notes.startswith(_AUTO_NOTE_PREFIX)
-                    else segment
-                    for segment in edited.segments
-                ),
-            )
+        edited = _with_manual_notes(head, apply_edit(head, edit), edit)
         self._store.publish_edit_revision(
             project_id=self._project_id,
             base_plan_id=base_plan_id,
@@ -1601,6 +1628,16 @@ class ReviewWorkspaceFacade:
     def set_notes(self, base_plan_id: str, segment_id: str, notes: str) -> ReviewRevision:
         head = self.load_head(base_plan_id).revision
         return self.apply_edit(base_plan_id, note_edit(head.revision_id, segment_id, notes))
+
+    def mark_range(
+        self, base_plan_id: str, source_id: str, start_pts: int, end_pts: int, mark: str
+    ) -> ReviewRevision:
+        """원본 하나의 `[start_pts, end_pts)`를 추천·보통·비추천으로 표시하거나 지운다(D100 §4).
+
+        나누기·합치기·표시가 한 편집(`range`)이라 리비전 하나·기록 하나·되돌리기 한 걸음이다.
+        """
+        head = self.load_head(base_plan_id).revision
+        return self.apply_edit(base_plan_id, range_edit(head, source_id, start_pts, end_pts, mark))
 
     # ── 순수 조회 — 보기·필터는 상태가 아니다(§10.3) ──────────────
 
@@ -2114,7 +2151,7 @@ class ReviewWorkspaceFacade:
             target = directory / f"{segment.segment_id}.review.vtt"
             temp = target.with_name(target.name + ".partial")
             temp.write_text(output.vtt.text, encoding="utf-8")
-            temp.replace(target)
+            oscompat.replace(temp, target)
             written.append(target)
             if context is not None:
                 context.set_progress(position)
@@ -2303,7 +2340,7 @@ class ReviewWorkspaceFacade:
             with open(source, "rb") as reader, open(temp, "xb") as writer:
                 for block in iter(lambda: reader.read(1 << 20), b""):
                     writer.write(block)
-            temp.replace(target)
+            oscompat.replace(temp, target)
         return RestoredPreview(
             segment_id=segment.segment_id,
             clip_id=artifact.clip_id,

@@ -74,6 +74,24 @@ def has_auto_note(notes: str) -> bool:
     return any(auto_note_line(line) is not None for line in notes.split("\n"))
 
 
+def drop_auto_note_lines(notes: str) -> str:
+    """자동 제외 근거 줄만 거둔다 — 줄 뒤에 붙은 사람 글과 다른 줄은 그대로다.
+
+    범위 표시를 지워 자동으로 돌릴 때(D100 §4) 쓴다: 사용으로 둔 조각에 근거 줄이 남으면
+    「자동 제외 전체 복원」과 같은 사람 결정으로 읽힌다(`_release_stale_tier_proposal`과 같은 까닭).
+    """
+    if not has_auto_note(notes):
+        return notes
+    kept: list[str] = []
+    for line in notes.split("\n"):
+        auto = auto_note_line(line)
+        if auto is None:
+            kept.append(line)
+        elif auto.trailing.strip():
+            kept.append(auto.trailing.strip())
+    return "\n".join(kept).strip("\n")
+
+
 def split_review_notes(notes: str) -> ReviewNoteParts:
     """기계 줄과 사람 메모로 가른다 — 작업대 메모 칸은 사람 메모만 보이고 고친다.
 
