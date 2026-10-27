@@ -7,7 +7,6 @@
 
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import json
 import os
@@ -18,6 +17,8 @@ from decimal import Decimal, InvalidOperation
 from fractions import Fraction
 from pathlib import Path
 from typing import Literal, TypeAlias, cast
+
+from vlogsrt import filelock
 
 PROTOCOL_VERSION = "1.0"
 ANALYSIS_PROTOCOL_VERSION = "1.3"
@@ -1356,7 +1357,7 @@ class WorkflowJournal:
 
     def transition(self, input_revision: str, state: WorkflowState) -> None:
         with self.path.open("r+", encoding="utf-8", newline="\n") as stream:
-            fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+            filelock.lock_exclusive(stream)
             try:
                 stream.seek(0)
                 current = self._from_lines(self.path, stream.readlines())
@@ -1376,7 +1377,7 @@ class WorkflowJournal:
                 os.fsync(stream.fileno())
                 self.state = state
             finally:
-                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+                filelock.unlock(stream)
 
 
 class CaptionJournal:
@@ -1437,7 +1438,7 @@ class CaptionJournal:
 
     def transition(self, request_revision: str, state: WorkflowState) -> None:
         with self.path.open("r+", encoding="utf-8", newline="\n") as stream:
-            fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+            filelock.lock_exclusive(stream)
             try:
                 stream.seek(0)
                 current = self._from_lines(self.path, stream.readlines())
@@ -1457,7 +1458,7 @@ class CaptionJournal:
                 os.fsync(stream.fileno())
                 self.state = state
             finally:
-                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+                filelock.unlock(stream)
 
 
 def _message_payload(message: ProtocolMessage) -> dict[str, object]:

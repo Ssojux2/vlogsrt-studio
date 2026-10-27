@@ -3,15 +3,21 @@
 The lock file lives in `$TMPDIR/vlogsrt-ui-<uid>/<sha20 of the checkout>.json`. The owner removes
 its own file on exit while still holding the lock, and sweeps siblings nobody holds (D63 H) —
 before this, every test that made an instance for a temporary checkout left one file behind.
+
+Windows (D100 §1) has no uid, so the folder is named after the login name instead. Windows also
+cannot delete a file that is open, so there the owner and the sweeper let go of the lock and close
+the file first, then try the unlink: a launcher that opened it in that gap keeps it open, the unlink
+fails, and that launcher's own lock-then-`same_file` check makes it the next owner.
 """
 
 from __future__ import annotations
 
-import fcntl
+import getpass
 import hashlib
 import json
 import os
 import re
+import sys
 import tempfile
 import time
 import urllib.request
@@ -19,7 +25,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TextIO
 
-from vlogsrt import log
+from vlogsrt import filelock, log
 from vlogsrt.scratch_dirs import SCRATCH_SWEEP, ScratchSweepSettings
 
 LOCK_TOKEN_LENGTH = 20
@@ -54,6 +60,16 @@ class UiInstanceSettings:
 
 UI_INSTANCE = UiInstanceSettings()
 
+_O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+"""Windows has no O_NOFOLLOW (0 = a plain open); there the folder is the user's own `%TEMP%`."""
+
+
+def _user_tag() -> str:
+    """The per-user folder suffix — the uid on POSIX (unchanged), the login name on Windows."""
+    if sys.platform == "win32":
+        return getpass.getuser()
+    return str(os.getuid())
+
 
 def same_file(descriptor: int, path: Path) -> bool:
     """Is the open descriptor still the file at `path`? False once it was unlinked or replaced."""
@@ -74,7 +90,7 @@ class UiInstance:
         sweep: ScratchSweepSettings = SCRATCH_SWEEP,
     ) -> None:
         token = hashlib.sha256(str(project.resolve()).encode()).hexdigest()[:LOCK_TOKEN_LENGTH]
-        directory = Path(tempfile.gettempdir()) / f"vlogsrt-ui-{os.getuid()}"
+        directory = Path(tempfile.gettempdir()) / f"vlogsrt-ui-{_user_tag()}"
         directory.mkdir(mode=0o700, exist_ok=True)
         self.path = directory / f"{token}.json"
         self.port = port
@@ -87,7 +103,7 @@ class UiInstance:
         for _ in range(self._settings.lock_open_attempts):
             handle = self._open()
             try:
-                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                filelock.lock_exclusive(handle, blocking=False)
             except BlockingIOError:
                 port = self._published_port(handle)
                 if same_file(handle.fileno(), self.path):
@@ -117,7 +133,7 @@ class UiInstance:
         raise OSError(f"UI lock file kept changing under us: {self.path}")
 
     def _open(self) -> TextIO:
-        descriptor = os.open(self.path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        descriptor = os.open(self.path, os.O_RDWR | os.O_CREAT | _O_NOFOLLOW, 0o600)
         return os.fdopen(descriptor, "r+", encoding="utf-8")
 
     def _published_port(self, handle: TextIO) -> int | None:
@@ -161,14 +177,20 @@ class UiInstance:
             return
         try:
             if self.owned:
-                # Unlink while still locked: a launcher that opened this inode either fails
-                # its lock (and sees the path gone) or locks it afterwards and retries afresh.
-                if same_file(self.handle.fileno(), self.path):
-                    self.path.unlink(missing_ok=True)
-                fcntl.flock(self.handle, fcntl.LOCK_UN)
+                self._release_owned(self.handle)
         finally:
             self.handle.close()
             self.handle = None
+        if self.owned and sys.platform == "win32":
+            _unlink_unopened(self.path)
+
+    def _release_owned(self, handle: TextIO) -> None:
+        if sys.platform != "win32":
+            # Unlink while still locked: a launcher that opened this inode either fails
+            # its lock (and sees the path gone) or locks it afterwards and retries afresh.
+            if same_file(handle.fileno(), self.path):
+                self.path.unlink(missing_ok=True)
+        filelock.unlock(handle)
 
 
 def sweep_stale_locks(
@@ -203,17 +225,39 @@ def sweep_stale_locks(
 
 def _remove_if_unheld(path: Path) -> int:
     try:
-        descriptor = os.open(path, os.O_RDWR | os.O_NOFOLLOW)
+        descriptor = os.open(path, os.O_RDWR | _O_NOFOLLOW)
     except FileNotFoundError:
         return 0
     try:
-        try:
-            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            return 0  # a live server (or launcher) holds it
-        if not same_file(descriptor, path):
+        if not _locked_if_unheld(descriptor, path):
             return 0
-        path.unlink()
-        return 1
+        if sys.platform != "win32":
+            path.unlink()
+            return 1
+        filelock.unlock(descriptor)  # Windows cannot delete an open file — let go first
     finally:
         os.close(descriptor)  # closing drops our lock
+    return _unlink_unopened(path)
+
+
+def _locked_if_unheld(descriptor: int, path: Path) -> bool:
+    try:
+        filelock.lock_exclusive(descriptor, blocking=False)
+    except BlockingIOError:
+        return False  # a live server (or launcher) holds it
+    return same_file(descriptor, path)
+
+
+def _unlink_unopened(path: Path) -> int:
+    """Windows only: delete a lock file we no longer hold — unless someone opened it meanwhile.
+
+    The delete fails while any handle is open, so a launcher that opened the file in the gap keeps
+    it (and becomes its owner through its own lock + `same_file` check). That is not an error.
+    """
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return 0
+    except PermissionError:
+        return 0  # opened by a launcher in the gap — the file is theirs now
+    return 1

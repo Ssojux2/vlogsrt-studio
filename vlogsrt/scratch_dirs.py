@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from vlogsrt import log
+from vlogsrt.oscompat import process_alive
 
 PROGRESS_SCRATCH = "vlogsrt-progress-"
 """서버가 켜는 ffmpeg `-progress` 파일 폴더(D61)."""
@@ -58,20 +59,6 @@ def pid_prefix(kind: str) -> str:
     if kind not in PID_SCRATCH_KINDS:
         raise ValueError(f"pid를 싣는 임시 폴더 종류가 아니다: {kind!r}")
     return f"{kind}{os.getpid()}-"
-
-
-def process_alive(pid: int) -> bool:
-    """신호 0으로 묻는다 — 없으면 False, 권한이 없으면(남의 프로세스) 살아 있다."""
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except OverflowError:
-        # 이 체계의 pid가 될 수 없는 수 — 모르면 지우지 않는다.
-        return True
-    return True
 
 
 def sweep_dead_scratch(

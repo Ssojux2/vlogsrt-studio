@@ -53,6 +53,7 @@ from fractions import Fraction
 from pathlib import Path
 
 from vlogsrt import log, preprocess
+from vlogsrt.oscompat import process_alive, publish_exclusive
 from vlogsrt.project.raw import read_scope, source_verify
 from vlogsrt.project.raw.analysis_config import REVIEW_MEDIA
 from vlogsrt.project.raw.jobs import JobCancelledError, JobContext
@@ -727,16 +728,13 @@ def sweep_preview_leftovers(workspace: RawWorkspace, active: Sequence[JobRecord]
 
 
 def _pid_alive(pid: int) -> bool:
-    """그 pid가 지금 살아 있는가 — 이 프로세스이거나 신호를 보낼 수 없는(남의) 프로세스면 산 것."""
+    """그 pid가 지금 살아 있는가 — 이 프로세스이거나 물을 권한이 없는(남의) 프로세스면 산 것.
+
+    Windows의 `os.kill`은 묻지 않고 끝내므로 `oscompat.process_alive`가 플랫폼마다 묻는다(D100 §1).
+    """
     if pid == os.getpid():
         return True
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
+    return process_alive(pid)
 
 
 def _dead_owner(entry: Path) -> bool:
@@ -1934,7 +1932,7 @@ def _thumb_record_payload(
 def _publish(staged: Path, target: Path) -> None:
     """임시 파일의 원자 게시 — 경합에서 이기지 못하면 이긴 쪽 파일을 그대로 쓴다."""
     try:
-        os.link(staged, target)
+        publish_exclusive(staged, target)
     except FileExistsError:
         return  # 동시 준비가 같은 키를 먼저 완성했다 — 그 파일이 곧 결과다
     finally:
@@ -1969,7 +1967,7 @@ def _alias_legacy_preview(
         return
     target.parent.mkdir(parents=True, exist_ok=True)
     try:
-        os.link(legacy, target)
+        publish_exclusive(legacy, target)
     except FileExistsError:
         return  # 동시 준비가 같은 키를 먼저 게시했다 — 그 파일이 곧 결과다
 

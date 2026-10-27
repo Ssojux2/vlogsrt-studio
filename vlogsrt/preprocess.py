@@ -17,6 +17,7 @@ import re
 import secrets
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -32,6 +33,7 @@ from typing import Any, Literal, ParamSpec, TypeVar
 from . import cutpoints, log
 from .config import Config
 from .models import Chunk, Span
+from .oscompat import publish_exclusive
 from .task_runtime import cancellation_active, check_cancel
 
 REPAIR_DIR = "repair"  # 재전사 조각은 따로 둔다. 1차 조각을 덮어쓰면 안 된다
@@ -55,8 +57,23 @@ def chunk_glob(stem: str) -> str:
 def require_ffmpeg(tool: str = "ffmpeg") -> str:
     path = shutil.which(tool)
     if not path:
-        raise RuntimeError(f"{tool} 를 찾지 못했습니다. `brew install ffmpeg` 후 다시 실행하세요.")
+        hint = _ffmpeg_install_hint()
+        raise RuntimeError(f"{tool} 를 찾지 못했습니다. `{hint}` 후 다시 실행하세요.")
     return path
+
+
+def _ffmpeg_install_hint() -> str:
+    """그 운영체제에서 ffmpeg·ffprobe를 함께 까는 명령(D100 §1)."""
+    if sys.platform == "darwin":
+        return "brew install ffmpeg"
+    if sys.platform == "win32":
+        return "winget install Gyan.FFmpeg"
+    return "sudo apt install ffmpeg"
+
+
+def _tool_name(executable: str) -> str:
+    """argv[0]의 도구 이름 — 경로·`.exe`·대소문자를 뗀다(Windows의 `ffmpeg.exe`도 ffmpeg다)."""
+    return Path(executable).stem.lower()
 
 
 _CANCELLABLE_TIMEOUT_SECONDS = 1800.0
@@ -228,7 +245,7 @@ def _describe(command: Sequence[str]) -> tuple[str | None, str | None, bool]:
     """(입력, 출력, 잘라 읽지 않는가) — ffmpeg는 `-i` 뒤와 마지막 인자, ffprobe는 마지막 인자."""
     args = [str(arg) for arg in command[1:]]
     whole = not _RANGE_FLAGS.intersection(args)
-    if Path(command[0]).name == "ffprobe":
+    if _tool_name(command[0]) == "ffprobe":
         return (args[-1] if args else None), None, whole
     if "-i" not in args:
         return None, None, whole
@@ -246,7 +263,7 @@ def _with_progress(command: list[str], process_id: int) -> tuple[list[str], Path
     그대로 돈다(진행은 표시만 한다). `file:`을 붙여 경로의 `:`가 프로토콜로 읽히지 않게 한다.
     """
     directory = _PROGRESS_DIR
-    if directory is None or Path(command[0]).name != "ffmpeg" or "-i" not in command:
+    if directory is None or _tool_name(command[0]) != "ffmpeg" or "-i" not in command:
         return command, None
     try:
         directory.mkdir(parents=True, exist_ok=True)
@@ -330,22 +347,41 @@ def _run_process(
     if kwargs.pop("capture_output", False):
         kwargs.update(stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     with _tracked(command, step, timeout) as argv:
-        process = subprocess.Popen(argv, **kwargs)
-        if priority is not None:
-            _lower_priority(process.pid, priority)
+        process = _launch(argv, priority, kwargs)
         return _wait_polling(process, command, timeout, on_poll)
+
+
+def _launch(argv: list[str], priority: int | None, kwargs: dict[str, Any]) -> subprocess.Popen:
+    """띄운다 — 우선순위를 주면 POSIX는 띄운 바로 뒤 nice를, Windows는 띄울 때 우선순위 등급을.
+
+    Windows에는 nice가 없다. 「보통보다 낮음」 등급(`BELOW_NORMAL_PRIORITY_CLASS`)이 같은 양보다 —
+    nice 값의 크기는 그 등급 하나로 접힌다(D62·D100 §1).
+    """
+    if priority is not None and sys.platform == "win32":
+        flags = kwargs.pop("creationflags", 0) | subprocess.BELOW_NORMAL_PRIORITY_CLASS
+        return subprocess.Popen(argv, creationflags=flags, **kwargs)
+    process = subprocess.Popen(argv, **kwargs)
+    if priority is not None:
+        _lower_priority(process.pid, priority)
+    return process
 
 
 def _lower_priority(pid: int, niceness: int) -> None:
     """자식의 nice를 `niceness`까지 낮춘다 — 이미 더 낮으면 그대로(일반 사용자는 못 높인다).
 
     낮추기는 양보일 뿐 실행의 조건이 아니다 — 못 낮춰도 경고만 남기고 그대로 돈다. 띄운 바로
-    뒤라 ffmpeg가 일꾼 스레드를 만들기 전이고, 그 스레드들은 낮춘 값을 물려받는다.
+    뒤라 ffmpeg가 일꾼 스레드를 만들기 전이고, 그 스레드들은 낮춘 값을 물려받는다. nice가 없는
+    체계(Windows)에서는 아무것도 하지 않는다 — 그쪽은 띄울 때 등급으로 낮춘다(`_launch`).
     """
+    getpriority = getattr(os, "getpriority", None)
+    setpriority = getattr(os, "setpriority", None)
+    which = getattr(os, "PRIO_PROCESS", None)
+    if getpriority is None or setpriority is None or which is None:
+        return
     try:
-        current = os.getpriority(os.PRIO_PROCESS, pid)
+        current = getpriority(which, pid)
         if current < niceness:
-            os.setpriority(os.PRIO_PROCESS, pid, niceness)
+            setpriority(which, pid, niceness)
     except ProcessLookupError:
         return  # 벌써 끝난 자식 — 낮출 것이 없다(결과는 기다리기가 받는다)
     except OSError as error:
@@ -3445,10 +3481,11 @@ def _publish_staged_clip(temp: Path, staging_output: Path) -> None:
     """검증을 통과한 임시 파일을 호출자 경로로 원자 게시 — 이미 있으면 절대 덮어치지 않는다.
 
     link(2)는 마지막 이름 요소를 따라가지 않으므로, 게시 순간 경로가 심볼릭
-    링크로 바뀌어 있어도 EEXIST로 막힌다(경합에서도 원본을 못 건드린다).
+    링크로 바뀌어 있어도 EEXIST로 막힌다(경합에서도 원본을 못 건드린다). 하드 링크가 없는
+    파일 시스템(exFAT)은 배타 생성 + 복사다 — 덮어쓰지 않는 것은 같다(D100 §1).
     """
     try:
-        os.link(temp, staging_output)
+        publish_exclusive(temp, staging_output)
     except FileExistsError:
         temp.unlink(missing_ok=True)
         raise RawStagingError(
@@ -4345,7 +4382,7 @@ def extract_analysis_clip(
         )
         _run(command, timeout=timeout_seconds, step="분석 클립 자르기")
         _require_analysis_clip(staged, audio_stream_index, encoding)
-        os.link(staged, output)
+        publish_exclusive(staged, output)
     finally:
         staged.unlink(missing_ok=True)
     return output

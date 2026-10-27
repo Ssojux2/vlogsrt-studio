@@ -23,7 +23,6 @@
 from __future__ import annotations
 
 import decimal
-import fcntl
 import json
 import os
 import threading
@@ -35,6 +34,7 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Any, Literal, TypeAlias, cast
 
+from vlogsrt import filelock, oscompat
 from vlogsrt.project.workflow_protocol import ActualUsage
 
 LEDGER_VERSION = 1
@@ -633,11 +633,7 @@ def _replace_file(source: Path, destination: Path) -> None:
 
 
 def _fsync_directory(path: Path) -> None:
-    descriptor = os.open(path, os.O_RDONLY)
-    try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
+    oscompat.fsync_directory(path)
 
 
 def _require_existing_parent(path: Path) -> None:
@@ -670,7 +666,7 @@ def _ledger_lock(path: Path) -> Iterator[None]:
     except OSError as exc:
         raise LedgerUnavailable(f"원장 잠금 파일을 열 수 없다: {lock_path}") from exc
     try:
-        fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+        filelock.lock_exclusive(stream)
     except OSError as exc:
         stream.close()
         raise LedgerUnavailable(f"원장 잠금을 얻지 못했다: {lock_path}") from exc

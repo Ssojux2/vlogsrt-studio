@@ -32,7 +32,6 @@
 
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import json
 import math
@@ -47,7 +46,7 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
-from vlogsrt import env
+from vlogsrt import env, filelock, oscompat
 from vlogsrt.project.budget_ledger import (
     BudgetLedger,
     BudgetLedgerError,
@@ -1170,11 +1169,7 @@ def _durable_mkdir(path: Path) -> None:
 
 
 def _fsync_directory(path: Path) -> None:
-    descriptor = os.open(path, os.O_RDONLY)
-    try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
+    oscompat.fsync_directory(path)
 
 
 def _atomic_write_bytes(path: Path, payload: bytes) -> None:
@@ -1192,11 +1187,11 @@ def _flocked(path: Path) -> Iterator[None]:
     """투영 교체 직렬화 — 협조하는 로컬 POSIX 잠금(원장 잠금과 같은 가정)."""
     stream = path.open("a")
     try:
-        fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+        filelock.lock_exclusive(stream)
         try:
             yield
         finally:
-            fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+            filelock.unlock(stream)
     finally:
         stream.close()
 

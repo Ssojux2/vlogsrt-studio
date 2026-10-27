@@ -1,4 +1,3 @@
-import fcntl
 import os
 import tempfile
 from pathlib import Path
@@ -7,6 +6,7 @@ import pytest
 
 from ui import instance
 from ui.instance import UiInstance, sweep_stale_locks
+from vlogsrt import filelock
 
 
 @pytest.fixture(autouse=True)
@@ -97,7 +97,7 @@ def test_the_owner_sweeps_dead_siblings_and_keeps_live_ones(tmp_path: Path, priv
     stranger.write_text("not a lock", encoding="utf-8")
     holder = os.open(live, os.O_RDWR)
     try:
-        fcntl.flock(holder, fcntl.LOCK_EX | fcntl.LOCK_NB)  # 살아 있는 서버 대역
+        filelock.lock_exclusive(holder, blocking=False)  # 살아 있는 서버 대역
         with UiInstance(tmp_path, 7860) as owner:
             assert owner.owned
             assert not dead.exists()
@@ -121,7 +121,7 @@ def test_the_sweep_never_unlinks_a_file_it_could_not_lock(private_tmpdir: Path):
     live = _sibling(private_tmpdir, "d")
     holder = os.open(live, os.O_RDWR)
     try:
-        fcntl.flock(holder, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        filelock.lock_exclusive(holder, blocking=False)
         assert sweep_stale_locks(live.parent, keep=live.parent / "x.json", limit=10) == 0
         assert live.exists()
     finally:

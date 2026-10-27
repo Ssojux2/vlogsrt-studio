@@ -16,7 +16,6 @@ from __future__ import annotations
 import argparse
 import builtins
 import dataclasses
-import fcntl
 import hashlib
 import json
 import os
@@ -39,7 +38,7 @@ from tests.project.library_fixtures import (
 )
 from tests.raw.test_review_workspace import _wait_terminal
 from tests.raw.test_tier_review_gate import RED, tier_project
-from vlogsrt import preprocess
+from vlogsrt import filelock, preprocess
 from vlogsrt.project import media
 from vlogsrt.project.raw import commands as media_commands
 from vlogsrt.project.raw import finalcut_export, media_refs, review_workspace, source_transcript
@@ -742,9 +741,9 @@ def test_concurrent_export_in_the_same_workspace_is_refused(tmp_path: Path):
     service, root = _plain_project(tmp_path)
     folder = root / "review" / "finalcut"
     folder.mkdir(parents=True)
-    descriptor = os.open(folder, os.O_RDONLY)
+    descriptor = filelock.open_directory_lock(folder)
     try:
-        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        filelock.lock_exclusive(descriptor, blocking=False)
         with pytest.raises(finalcut_export.FinalCutExportError, match="진행 중"):
             service.export_finalcut_timeline(root)
     finally:
@@ -800,10 +799,10 @@ def test_a_folder_without_file_locks_is_a_named_refusal(
 ):
     service, root = _plain_project(tmp_path)
 
-    def no_locks(descriptor: int, operation: int) -> None:
+    def no_locks(target: object, *, blocking: bool = True) -> None:
         raise OSError(45, "Operation not supported")
 
-    monkeypatch.setattr(fcntl, "flock", no_locks)
+    monkeypatch.setattr(filelock, "lock_exclusive", no_locks)
     with pytest.raises(finalcut_export.FinalCutExportError, match="잠금"):
         service.export_finalcut_timeline(root)
 

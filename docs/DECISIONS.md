@@ -9055,3 +9055,58 @@ Gemini 글자이고, 단어 시각은 **어느 줄의 글자인지 정하는 데
   잘린 응답 · 오프라인 · 가격 미정 · 서랍 칸) · `tests/test_invariants.py`(맥락 값의 문). 유료 호출 0회.
 - **사람 H-C1**(유료, Flash로 약 $0.1–0.3): 실데이터 라이브러리 하나를 평가하고 중복 판정 10개를 들어 본다 — 문턱 조정은 여기에 근거를
   남긴다.
+
+## D100 — 폴더 작업대 전환 (2026-10-27, W-40~, 사용자 승인)
+
+**사용자 지시(2026-10-27)**: 작업대를 Final Cut 중심에서 **「촬영 영상 폴더 → 분석·추천 → 추천(초록)만 이어붙인 영상 + SRT」**
+흐름으로 바꾼다. macOS와 Windows 둘 다, 지금처럼 브라우저 작업대다. 정본은 승인된 계획 파일(`splendid-hopping-quill.md` — 작업
+패키지 WP1~WP8)이다. Final Cut 보내기(D56)는 서랍으로 옮겨 남긴다. 출력 조건은 사용자가 정했다 — 확인하지 않은 비추천이 있어도
+막지 않고 출력하며, 빠진 구간을 모두 보고서와 화면 경고에 남긴다(규칙 9 「침묵 금지, 멈춤은 아님」. D94의 FCP 보내기 거부와 다른
+선택이다 — 뒤 절에서 다시 적는다).
+
+### §1 크로스플랫폼 기반
+
+**왜**: 지금 코드는 import만으로 Windows에서 죽는다(`fcntl`·`resource`를 맨 위에서 import하는 파일 일곱). import를 지나도 앞 단계부터
+깨진다 — 링크 풀기가 드라이브를 잃어 폴더 불러오기가 전부 실패하고, Windows의 `os.kill(pid, 0)`은 묻지 않고 **그 프로세스를 끝낸다**.
+macOS 동작은 바이트 그대로 둔다.
+
+- **파일 잠금** `vlogsrt/filelock.py`(표준 라이브러리만): POSIX는 `fcntl.flock`, Windows는 `msvcrt.locking`. 둘 다 부를 때 import한다.
+  POSIX 의미는 예전 호출 자리 그대로다 — 배타 잠금만 있고(공유 잠금을 쓰는 곳은 없다), 기다리는 잠금은 `LOCK_EX`, 기다리지 않는 잠금은
+  `LOCK_EX|LOCK_NB`이며 쥔 쪽이 있으면 `BlockingIOError`다. Windows 잠금은 바이트 범위이고 다른 핸들의 읽기·쓰기까지 막으므로, 내용과
+  겹치지 않게 파일 끝 너머 먼 한 바이트(`FileLockSettings.win32_lock_offset` = 1 GiB)를 잠그고 서술자 위치는 되돌린다. `LK_LOCK`은 10초
+  뒤 포기하므로 기다리는 잠금은 `LK_NBLCK`을 0.05초 간격으로 다시 시도한다(두 값은 외부 근거 없는 선택). 디렉터리는 Windows에서 잠글
+  서술자가 없어 폴더 잠금(`open_directory_lock` — Final Cut 보내기)은 폴더 안의 숨은 잠금 파일 `.vlogsrt-folder.lock`을 잠그고 지우지
+  않는다. 쓰는 곳: `ui/instance.py` · `raw/media_refs.py` · `raw/finalcut_export.py` · `budget_ledger.py` · `request_accounting.py` ·
+  `workflow_protocol.py`. 불변식은 고치지 않았다 — `fcntl`을 고정한 검사는 없고, `check_finalcut_export_never_copies`는 그대로 통과한다.
+- **UI 잠금**(`ui/instance.py`): 폴더 이름의 uid는 POSIX에서 그대로(`os.getuid()`), Windows는 로그인 이름(`getpass.getuser()`).
+  `O_NOFOLLOW`는 `getattr(os, "O_NOFOLLOW", 0)`. Windows는 열린 파일을 지우지 못하므로 주인·청소는 잠금을 풀고 닫은 **뒤** 지운다 — 그
+  사이 연 런처가 있으면 지우기가 실패하고(그 파일은 그쪽 것이 된다) 그 런처의 잠금 + `same_file` 확인이 다음 주인을 정한다. POSIX는 예전처럼
+  잠금을 쥔 채 지운다.
+- **링크 풀기**(`raw/fcp.py`): `Path("/", *칸)`으로 다시 짓던 세 자리를 앵커(드라이브 + 루트 한 글자, `_split_anchored`)에서 다시 짓는다
+  — `C:\`·UNC 공유를 지키고, 절대 링크 표기는 제 앵커를 가져온다. POSIX의 `//a`도 예전처럼 `/`에서 다시 짓는다. 어휘 단계
+  (`_lexical_step` — `''`·`.` 건너뛰기, `..` 한 칸 물리기, 숨김·보호 칸 거부)를 떼어 `PureWindowsPath`로 시험한다.
+  `workspace._reference_target`·`media_refs._facts`/`_unchanged`는 이 풀기를 그대로 쓴다.
+- **열린 파일 한도**(`ui/app.py`): `resource`는 POSIX에서만 함수 안에서 import한다. Windows에는 rlimit가 없다.
+- **우선순위**(`preprocess`): `_lower_priority`는 `os.setpriority`·`getpriority`·`PRIO_PROCESS`가 없으면 아무것도 하지 않는다. Windows에서
+  우선순위를 주면 `run_process`가 띄울 때 `creationflags`에 `BELOW_NORMAL_PRIORITY_CLASS`를 더한다 — nice 값의 크기는 그 등급 하나로
+  접힌다(D62의 양보와 같은 뜻).
+- **도구 이름**(`preprocess`): ffprobe·ffmpeg 판별(입력·출력 기록, `-progress`)은 `Path(argv[0]).stem.lower()` — `ffmpeg.exe`도 ffmpeg다.
+  `require_ffmpeg` 안내는 운영체제별 설치 명령이다(mac `brew install ffmpeg` — 바이트 그대로 · Windows `winget install Gyan.FFmpeg` · 그 밖
+  `sudo apt install ffmpeg`).
+- **프로세스 확인** `vlogsrt/oscompat.process_alive` 하나를 `scratch_dirs`·`visual_review`가 함께 쓴다. POSIX는 신호 0 그대로, Windows는
+  ctypes `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)` + `GetExitCodeProcess`(STILL_ACTIVE)다. 모르면(권한 없음 · 끝났는지 못 물음 ·
+  pid가 될 수 없는 수) 산 것으로 본다 — 이 답으로 지우는 청소가 틀리지 않게. `visual_review`가 예전에 그대로 던지던 `OverflowError`도
+  이제 산 것이다.
+- **디렉터리 fsync** `oscompat.fsync_directory` — Windows는 디렉터리를 열 수 없어 하지 않는다(NTFS는 메타데이터를 저널로 지킨다).
+  `budget_ledger`·`project/export`·`request_accounting`·`finalcut_export`의 제 이름 함수가 이것을 부른다(시험이 바꿔 끼우는 이름은 그대로).
+- **덮지 않는 게시** `oscompat.publish_exclusive(src, dst)`: `os.link`를 먼저 하고, 하드 링크가 없는 파일 시스템(exFAT·FAT — SD 카드,
+  errno EPERM·ENOTSUP·EOPNOTSUPP·EXDEV·EMLINK·ENOSYS, Windows winerror 1·17·50)에서만 `dst`를 `O_CREAT|O_EXCL`로 만들어 복사·fsync한다.
+  있으면(매달린 심볼릭 링크여도) 언제나 `FileExistsError`이고, 그 밖의 실패는 감추지 않는다. 복사가 실패하면 만든 반쪽을 지운다.
+  **잃는 것은 원자성 하나다** — 복사 중에는 이름이 먼저 보이고, 그 사이 프로세스가 죽으면 반쪽 파일이 최종 이름에 남을 수 있다(링크가
+  되는 디스크에서는 일어나지 않는다). 쓰는 곳: `preprocess` 두 곳(검증한 클립 게시 · 분석 클립) · `visual_review` 두 곳(미리보기·썸네일
+  게시 · 옛 키 잇기) · `caption_store._write_noreplace`. `finalcut_export._settle`은 그대로 링크다(덮어쓰는 이름 바꾸기를 쓸 수 없고 이
+  계층은 복사도 금지다 — D56). 파생 계층의 `boundary.py`·`speech.py` 링크는 이 전환의 길 밖이라 그대로 두었다.
+- **정적 검사** `make types-win`(`mypy --platform win32`, `check`에는 넣지 않는다) — 플랫폼 분기는 mypy가 읽는 `sys.platform` 비교로만 쓴다.
+- **Windows는 여기서 실행하지 않았다.** 분기는 `sys.platform`·가짜 `msvcrt`·가짜 kernel32·`PureWindowsPath`로 시험하고
+  (`tests/test_filelock.py` · `tests/test_oscompat.py` · `tests/test_platform_preprocess.py` · `tests/raw/test_fcp_windows_paths.py`), 타입은
+  `make types-win`이 본다. 첫 Windows 실행 확인 목록은 README(WP2)에 둔다. 유료 호출 0회.

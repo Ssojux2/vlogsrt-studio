@@ -23,11 +23,12 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
+
+from vlogsrt.oscompat import publish_exclusive
 
 AUTOMATIC_SCHEMA = "raw-caption-automatic/v1"
 """자동 스냅샷 문서의 스키마 — 최종 해시·run·지문·내용 해시에 묶인다(§11.1)."""
@@ -379,12 +380,13 @@ class ReviewStore:
 
 
 def _write_noreplace(path: Path, body: str) -> bool:
-    """fresh 임시 파일을 쓰고 `os.link`로 못박는다 — 같은 바이트면 멱등, 다르면 거부."""
+    """fresh 임시 파일을 쓰고 `publish_exclusive`(링크, 없으면 배타 복사)로 못박는다 — 같은 바이트면
+    멱등, 다르면 거부."""
     temp = path.with_name(f".{path.name}.tmp-{uuid.uuid4().hex}")
     try:
         temp.write_text(body, encoding="utf-8")
         try:
-            os.link(temp, path)
+            publish_exclusive(temp, path)
             return True
         except FileExistsError:
             if path.read_text(encoding="utf-8") == body:

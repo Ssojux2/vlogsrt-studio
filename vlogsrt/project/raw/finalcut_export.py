@@ -37,7 +37,6 @@
 
 from __future__ import annotations
 
-import fcntl
 import itertools
 import json
 import os
@@ -50,7 +49,7 @@ from fractions import Fraction
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from vlogsrt import log, polish, preprocess
+from vlogsrt import filelock, log, oscompat, polish, preprocess
 from vlogsrt.config import Config
 from vlogsrt.project import library
 from vlogsrt.project.models import UnsupportedProject
@@ -844,11 +843,14 @@ def _gather_all(
 
 @contextmanager
 def _exclusive(folder: Path) -> Iterator[None]:
-    """작업공간마다 보내기는 한 번에 하나 — 폴더 잠금(flock)이고, 기다리지 않는다."""
-    descriptor = os.open(folder, os.O_RDONLY)
+    """작업공간마다 보내기는 한 번에 하나 — 폴더 잠금이고, 기다리지 않는다.
+
+    POSIX는 폴더 자체를 flock하고, Windows는 폴더 안의 숨은 잠금 파일을 잠근다(D100 §1).
+    """
+    descriptor = filelock.open_directory_lock(folder)
     try:
         try:
-            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            filelock.lock_exclusive(descriptor, blocking=False)
         except BlockingIOError as error:
             raise FinalCutExportError(
                 "이 작업공간에서 다른 Final Cut 보내기가 진행 중이다 — 끝난 뒤 다시 보내세요"
@@ -871,11 +873,7 @@ def _sweep_drafts(folder: Path) -> None:
 
 
 def _sync_folder(folder: Path) -> None:
-    descriptor = os.open(folder, os.O_RDONLY)
-    try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
+    oscompat.fsync_directory(folder)
 
 
 def _write(descriptor: int, payload: bytes) -> None:

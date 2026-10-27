@@ -50,6 +50,7 @@ from dataclasses import dataclass, replace
 from fractions import Fraction
 from pathlib import Path
 
+from vlogsrt import oscompat
 from vlogsrt.project import xml_validation
 from vlogsrt.project.boundary import BoundaryProjection, UnavailableInstance
 from vlogsrt.project.captions import SUBMS_COLLAPSED, EditCaptionSet
@@ -1085,12 +1086,8 @@ def _write_durable(path: Path, payload: bytes) -> None:
 
 
 def _fsync_directory(path: Path) -> None:
-    """디렉터리 항목의 내구성 — 파일 fsync만으로는 이름이 살아남지 않는다."""
-    descriptor = os.open(path, os.O_RDONLY)
-    try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
+    """디렉터리 항목의 내구성 — 파일 fsync만으로는 이름이 살아남지 않는다(Windows는 하지 않는다)."""
+    oscompat.fsync_directory(path)
 
 
 def _json_bytes(payload: dict) -> bytes:

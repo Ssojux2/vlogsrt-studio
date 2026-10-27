@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import argparse
 import os
-import resource
+import sys
 import tempfile
 import webbrowser
 from collections.abc import Iterator
@@ -31,6 +31,10 @@ ffmpeg·DB·소켓을 함께 쥐면 모자란다."""
 
 
 def _raise_open_file_limit() -> None:
+    if sys.platform == "win32":
+        return  # Windows에는 rlimit가 없다 — CRT 서술자 상한(8192)은 여기서 바꾸지 않는다(D100 §1)
+    import resource  # POSIX에만 있는 모듈 — 맨 위에서 import하면 Windows에서 앱이 뜨지 않는다
+
     soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
     target = (
         OPEN_FILE_SOFT_LIMIT if hard == resource.RLIM_INFINITY else min(OPEN_FILE_SOFT_LIMIT, hard)

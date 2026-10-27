@@ -22,7 +22,8 @@ from __future__ import annotations
 import os
 import stat as stat_module
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePath
+from typing import TypeVar
 
 from vlogsrt.project.raw import source_order
 from vlogsrt.project.raw.ingest import (
@@ -429,13 +430,51 @@ def _resolve_link(entry: Path, workspace: Path) -> tuple[Path, str]:
     return target, ""
 
 
-def _protected_target_path(target: Path) -> bool:
+def _protected_target_path(target: PurePath) -> bool:
     """링크 대상 경로의 모든 칸 검사 — 하나라도 숨김이거나 보호 철자면 참.
 
     조사 대상이 라이브러리 밖 경로 전체이므로 조상 칸까지 본다(스캔 걷기의
-    이름 가지치기와 같은 규칙을 푼 경로에 그대로 편다).
+    이름 가지치기와 같은 규칙을 푼 경로에 그대로 편다). 앵커(`/`·`C:\\`·UNC 공유)는
+    칸이 아니다(D100 §1).
     """
-    return any(_pruned_entry(part) for part in target.parts if part not in ("/",))
+    parts = target.parts[1:] if target.anchor else target.parts
+    return any(_pruned_entry(part) for part in parts)
+
+
+_AnyPath = TypeVar("_AnyPath", bound=PurePath)
+
+_PROTECTED_TARGET_REASON = "링크 대상이 숨김·보호 경로다 — 가져올 수 없다"
+
+
+def _split_anchored(path: PurePath) -> tuple[str, list[str]]:
+    """(앵커, 그 뒤의 칸) — 다시 지을 때 Windows 드라이브(`C:\\`)·UNC 공유를 잃지 않는다(D100 §1).
+
+    앵커는 드라이브 + 루트 한 글자다. POSIX의 `//a`도 예전처럼 `/`에서 다시 짓는다.
+    """
+    parts = list(path.parts)
+    if path.anchor:
+        parts.pop(0)
+    return path.drive + path.root[:1], parts
+
+
+def _lexical_step(
+    path_type: type[_AnyPath], anchor: str, resolved: list[str], part: str
+) -> tuple[_AnyPath | None, str]:
+    """한 칸의 어휘 전진 — 조회는 하지 않는다. 돌려주는 것은 (조회할 후보, 거부 사유).
+
+    `''`·`.`은 건너뛰고(후보 없음) `..`은 `resolved`에서 한 칸 물린다 — 앵커 위로는 못 간다.
+    후보는 언제나 앵커에서 다시 짓고, 숨김·보호 칸이 있으면 조회 전에 사유를 낸다.
+    """
+    if part in ("", "."):
+        return None, ""
+    if part == "..":
+        if resolved:
+            resolved.pop()
+        return None, ""
+    candidate = path_type(anchor, *resolved, part)
+    if _protected_target_path(candidate):
+        return candidate, _PROTECTED_TARGET_REASON
+    return candidate, ""
 
 
 _LINK_HOP_LIMIT = 40
@@ -453,20 +492,16 @@ def _resolve_path_safely(link: Path) -> tuple[Path, str, os.stat_result | None]:
     보호 검사하고, 링크를 만나면 `os.readlink` 표기로 다음 후보 **전체**를 다시
     검사한 뒤에만 따라간다. 돌려주는 것은 (푼 경로, 빈 사유면 성공, 마지막 칸 lstat).
     """
-    remaining = list(_normalized_absolute(link).parts)[1:]
+    anchor, remaining = _split_anchored(_normalized_absolute(link))
     resolved: list[str] = []
     hops = 0
     while remaining:
         part = remaining.pop(0)
-        if part in ("", "."):
+        candidate, reason = _lexical_step(Path, anchor, resolved, part)
+        if candidate is None:
             continue
-        if part == "..":
-            if resolved:
-                resolved.pop()
-            continue
-        candidate = Path("/", *resolved, part)
-        if _protected_target_path(candidate):
-            return candidate, "링크 대상이 숨김·보호 경로다 — 가져올 수 없다", None
+        if reason:
+            return candidate, reason, None
         try:
             probed = os.lstat(candidate)
         except OSError as error:
@@ -475,7 +510,7 @@ def _resolve_path_safely(link: Path) -> tuple[Path, str, os.stat_result | None]:
             hops += 1
             if hops > _LINK_HOP_LIMIT:
                 return candidate, "링크 고리(또는 너무 긴 사슬) — 풀기를 끊는다", None
-            remaining = _hop_parts(candidate, resolved, remaining)
+            anchor, remaining = _hop_parts(candidate, anchor, resolved, remaining)
             resolved = []
             continue
         resolved.append(part)
@@ -483,19 +518,26 @@ def _resolve_path_safely(link: Path) -> tuple[Path, str, os.stat_result | None]:
             return candidate, "링크 대상 경로의 중간 칸이 디렉터리가 아니다", None
         if not remaining:
             return candidate, "", probed
-    return Path("/", *resolved), "", None
+    return Path(anchor, *resolved), "", None
 
 
-def _hop_parts(link: Path, resolved: list[str], remaining: list[str]) -> list[str]:
-    """링크 한 칸을 표기로만 넘는다 — 대상(+남은 칸)의 새 칸 목록. 조회는 안 한다."""
+def _hop_parts(
+    link: Path, anchor: str, resolved: list[str], remaining: list[str]
+) -> tuple[str, list[str]]:
+    """링크 한 칸을 표기로만 넘는다 — 대상의 (앵커, 칸 + 남은 칸). 조회는 안 한다.
+
+    절대 표기는 제 앵커를 가져온다 — Windows 링크는 다른 드라이브를 가리킬 수 있다.
+    """
     try:
         text = os.readlink(link)
     except OSError as error:
         raise FcpLibraryError(f"링크 표기를 읽지 못했다: {link} ({error})") from error
     if os.path.isabs(text):
-        return list(Path(os.path.normpath(text)).parts)[1:] + remaining
-    joined = os.path.normpath(os.path.join(os.fspath(Path("/", *resolved)), text))
-    return list(Path(joined).parts)[1:] + remaining
+        target = Path(os.path.normpath(text))
+    else:
+        target = Path(os.path.normpath(os.path.join(os.fspath(Path(anchor, *resolved)), text)))
+    target_anchor, parts = _split_anchored(target)
+    return target_anchor, parts + remaining
 
 
 def _normalized_absolute(path: Path) -> Path:

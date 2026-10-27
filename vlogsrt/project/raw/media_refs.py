@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import array
 import contextlib
-import fcntl
 import hashlib
 import json
 import math
@@ -21,7 +20,7 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
-from vlogsrt import log, preprocess
+from vlogsrt import filelock, log, preprocess
 from vlogsrt.project.raw import read_scope
 from vlogsrt.project.raw.analysis_config import (
     ANALYSIS_CLIP,
@@ -546,7 +545,7 @@ def _acquire_file(handle: Any) -> None:
     """다른 프로세스(CLI와 앱)가 같은 폴더에서 만드는 중이면 기다린다 — 취소는 듣는다."""
     while True:
         try:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            filelock.lock_exclusive(handle, blocking=False)
             return
         except BlockingIOError:
             check_cancel()

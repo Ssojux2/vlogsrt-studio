@@ -1,7 +1,7 @@
 PY := $(shell test -x .venv/bin/python && echo .venv/bin/python || echo python3)
 GOLDEN := golden
 
-.PHONY: check test lint types invariant eval verify fixtures ui venv clean
+.PHONY: check test lint types types-win invariant eval verify fixtures ui venv clean
 
 check: lint types test invariant
 
@@ -14,6 +14,10 @@ lint:
 
 types:
 	$(PY) -m mypy
+
+# Windows 분기의 정적 검사(D100 §1) — 여기서는 Windows를 돌려 볼 수 없다. check에는 넣지 않는다.
+types-win:
+	$(PY) -m mypy --platform win32
 
 # 불변 규칙(CLAUDE.md)을 기계적으로 검사한다. 사람 눈보다 싸다.
 invariant:
