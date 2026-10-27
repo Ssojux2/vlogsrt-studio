@@ -493,6 +493,7 @@ def _resolve_path_safely(link: Path) -> tuple[Path, str, os.stat_result | None]:
     검사한 뒤에만 따라간다. 돌려주는 것은 (푼 경로, 빈 사유면 성공, 마지막 칸 lstat).
     """
     anchor, remaining = _split_anchored(_normalized_absolute(link))
+    start_anchor = anchor
     resolved: list[str] = []
     hops = 0
     while remaining:
@@ -512,6 +513,8 @@ def _resolve_path_safely(link: Path) -> tuple[Path, str, os.stat_result | None]:
                 return candidate, "링크 고리(또는 너무 긴 사슬) — 풀기를 끊는다", None
             anchor, remaining = _hop_parts(candidate, anchor, resolved, remaining)
             resolved = []
+            if _hops_to_new_share(start_anchor, anchor):
+                return candidate, _UNC_HOP_REASON, None
             continue
         resolved.append(part)
         if remaining and not stat_module.S_ISDIR(probed.st_mode):
@@ -519,6 +522,20 @@ def _resolve_path_safely(link: Path) -> tuple[Path, str, os.stat_result | None]:
         if not remaining:
             return candidate, "", probed
     return Path(anchor, *resolved), "", None
+
+
+_UNC_HOP_REASON = "링크 대상이 다른 네트워크 공유(UNC)다 — 따라가지 않는다"
+
+
+def _hops_to_new_share(start_anchor: str, anchor: str) -> bool:
+    """링크가 처음과 다른 UNC 공유(`\\\\server\\share`)로 넘어가는가.
+
+    Windows는 UNC 경로를 조회하는 순간 그 서버에 인증을 시도한다(자격 증명 노출).
+    사람이 고른 폴더 자체가 공유 위에 있는 것은 받고, 링크가 **새** 공유로 데려가는
+    것만 조회 전에 끊는다(D100 §1 보안 검토).
+    """
+    unc = anchor.startswith(("\\\\", "//")) and len(anchor) > 2
+    return unc and anchor.casefold() != start_anchor.casefold()
 
 
 def _hop_parts(

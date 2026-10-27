@@ -86,3 +86,17 @@ def test_posix_resolution_is_unchanged(tmp_path: Path) -> None:
     (tmp_path / "pointer").symlink_to(hidden)
     target, reason, probed = fcp._resolve_path_safely(tmp_path / "pointer" / "a.mov")
     assert reason == "링크 대상이 숨김·보호 경로다 — 가져올 수 없다" and probed is None
+
+
+@pytest.mark.parametrize(
+    ("start", "target", "refused"),
+    [
+        ("C:\\", "\\\\attacker\\share\\", True),  # 로컬 → 새 공유: 조회 전에 끊는다
+        ("\\\\nas\\share\\", "\\\\other\\share\\", True),
+        ("\\\\nas\\share\\", "\\\\NAS\\Share\\", False),  # 같은 공유(대소문자 무시)
+        ("C:\\", "D:\\", False),  # 다른 로컬 드라이브는 받는다
+        ("/", "/", False),  # POSIX `//a`도 `/` 앵커라 해당 없다
+    ],
+)
+def test_a_link_hop_to_a_new_unc_share_is_refused(start: str, target: str, refused: bool) -> None:
+    assert fcp._hops_to_new_share(start, target) is refused
