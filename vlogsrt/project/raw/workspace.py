@@ -352,8 +352,13 @@ WORKSPACE_LAYOUT: tuple[str, ...] = (
 """작업공간 폴더 — `export/`는 추천만 이어붙인 초안(D100)이 쓰는 자리다. 이 칸이 생기기 전의
 작업공간을 열 때 만들지 않는다(읽기 전용 사본도 연다) — 쓰는 쪽이 그 자리에서 만든다."""
 
-SERVABLE_MEDIA_PREFIXES: tuple[str, ...] = ("originals/", "previews/", "clips/", "final/")
+SERVABLE_MEDIA_PREFIXES: tuple[str, ...] = (
+    "originals/", "previews/", "clips/", "final/", "export/",
+)  # fmt: skip
 """미디어로 등록·제공할 수 있는 디렉터리 — 이 목록이 곧 보호 경계다(§4.4).
+
+`export/`는 추천만 이어붙인 초안(D100 §5b)이다 — 브라우저가 그 영상·SRT를 재생한다. 그 안의
+`render_report.json`은 미디어 확장자가 아니라 등록되지 않는다.
 
 `jobs/`(실행 기록·설정 스냅샷), `subtitles/`(API 원응답 포함), `analysis/`
 (전사 증거), `cache/`, `project.toml`, `project.sqlite3`은 브라우저 제공 대상이

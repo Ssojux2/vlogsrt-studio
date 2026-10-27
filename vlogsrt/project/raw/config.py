@@ -1636,6 +1636,9 @@ X264_PRESETS = (
 """libx264 프리셋 철자(형식의 사실이지 조정 값이 아니다)."""
 X264_CRF_RANGE = (0, 51)
 """libx264 8비트 crf가 받는 범위(형식의 사실)."""
+NICE_RANGE = (0, 20)
+"""POSIX nice 값의 범위 — 미리보기 설정(`ReviewMediaSettings.process_niceness`)과 같은
+검사(형식의 사실)."""
 
 
 @dataclass(frozen=True)
@@ -1658,6 +1661,12 @@ class RenderSettings:
     - 소리는 AAC `audio_rate` Hz · `audio_channels`채널 · `audio_bitrate_kbps` kb/s.
     - 시퀀스 방향·레이트의 동점 규칙은 Final Cut 보내기와 **같은 설정**(`timeline`, D66·D71)을
       쓴다 — 베끼지 않는다.
+    - 렌더러(W-44 §5b): 하드웨어 인코더는 crf가 없어 `hardware_bits_per_pixel` × 화소 × 레이트의
+      비트레이트로 만든다(0.1이면 1080p30에서 약 6.2 Mb/s). `keyframe_seconds`마다 키프레임이고,
+      `track_timescale_min`은 영상 트랙 눈금의 바닥이다(분모를 이 값 이상까지 두 배 — ffmpeg mov의
+      기본 규칙과 같은 10000). 조각·이어붙이기 한 번의 한도는 `max(timeout_floor_seconds,
+      timeout_media_ratio × 길이)`(D59·D62와 같은 꼴)이고, 렌더 ffmpeg는 nice `priority`로 돈다
+      (미리보기와 같은 양보, D62).
     """
 
     min_part_seconds: Fraction = Fraction(1)
@@ -1674,9 +1683,19 @@ class RenderSettings:
     audio_bitrate_kbps: int = 192
     pad_color: str = "black"
     timeline: FinalCutTimelineSettings = FINALCUT_TIMELINE
+    hardware_bits_per_pixel: Fraction = Fraction(1, 10)
+    keyframe_seconds: Fraction = Fraction(2)
+    track_timescale_min: int = 10_000
+    timeout_floor_seconds: float = 1800.0
+    timeout_media_ratio: float = 6.0
+    priority: int = 10
 
     def __post_init__(self) -> None:
-        problems = _render_length_problems(self) + _render_codec_problems(self)
+        problems = (
+            _render_length_problems(self)
+            + _render_codec_problems(self)
+            + _render_engine_problems(self)
+        )
         if problems:
             raise ValueError("렌더 설정이 잘못됐다 — " + " · ".join(problems))
 
@@ -1692,6 +1711,26 @@ def _render_length_problems(settings: RenderSettings) -> list[str]:
         for name in ("audio_rate", "audio_channels", "audio_bitrate_kbps")
         if not isinstance(getattr(settings, name), int) or getattr(settings, name) <= 0
     ]
+    return problems
+
+
+def _render_engine_problems(settings: RenderSettings) -> list[str]:
+    problems = [
+        f"{name}는 0보다 큰 Fraction이어야 한다: {getattr(settings, name)!r}"
+        for name in ("hardware_bits_per_pixel", "keyframe_seconds")
+        if not isinstance(getattr(settings, name), Fraction) or getattr(settings, name) <= 0
+    ]
+    problems += [
+        f"{name}는 양수여야 한다: {getattr(settings, name)!r}"
+        for name in ("track_timescale_min", "timeout_floor_seconds", "timeout_media_ratio")
+        if isinstance(getattr(settings, name), bool)
+        or not isinstance(getattr(settings, name), (int, float))
+        or not getattr(settings, name) > 0
+    ]
+    priority = settings.priority
+    low, high = NICE_RANGE
+    if isinstance(priority, bool) or not isinstance(priority, int) or not low <= priority <= high:
+        problems.append(f"priority는 {low}–{high} nice 값이어야 한다: {priority!r}")
     return problems
 
 

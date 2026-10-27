@@ -40,7 +40,7 @@ final/captions/published/)에 내용 해시 이름으로 쓴 파일만** 등록�
 KIND_PREFIXES: dict[str, tuple[str, ...]] = {
     "original": ("originals/",),
     "preview": ("previews/",),
-    "artifact": ("clips/", "final/"),
+    "artifact": ("clips/", "final/", "export/"),
 }
 """종류별 디렉터리 짝 — 종류와 자리가 어긋난 등록도 어휘 단계에서 거부한다."""
 

@@ -685,6 +685,23 @@ FINALCUT_EXPORT_FORBIDDEN = re.compile(
 """`os.replace`·`os.rename`·`Path.replace`·`Path.rename`은 대상이 있으면 덮어쓴다. 텍스트로는
 `str.replace`와 갈라 볼 수 없으므로 이 모듈에서는 `.replace(` 자체를 쓰지 않는다."""
 
+RENDER_EXPORT_MUST_NOT_IMPORT = (
+    "shutil", "hashlib", "subprocess", "confirmed_package", "final_cut_handoff", "clips",
+)  # fmt: skip
+RENDER_EXPORT_FORBIDDEN = re.compile(
+    r"\b(copyfile|copy2|copytree|rmtree|sha256_file|_sha256_file|write_text|write_bytes)\b"
+    r"|\bos\.(replace|rename|remove)\(|\.(replace|rename)\(|(?<![\w.])open\(|(?<!os)\.open\("
+)
+"""초안 내보내기(D100 §5b)가 쓰는 길은 셋뿐이다 — `os.open(…, _NEW_FILE)`(O_EXCL 새 파일), 렌더러의
+스테이징(preprocess), 덮지 않는 게시(`publish_exclusive`). 덮어쓰는 이름 바꾸기·복사·통째 지우기·
+열어 쓰기(`open(`·`Path.open(`)는 없다. `.replace(`는 `str.replace`와 갈라 볼 수 없어
+쓰지 않는다."""
+RENDER_EXPORT_MKDIRS = frozenset(
+    {"base.mkdir(parents=True, exist_ok=True)", "folder.mkdir()", "staging.mkdir()"}
+)
+"""폴더를 만드는 세 줄 — `export/`, 그 안의 시각 폴더(있으면 다음 번호), 시각 폴더 안의 스테이징."""
+RENDER_EXPORT_ROOT_CALL = "_reserve_folder(workspace.root / EXPORT_FOLDER, moment)"
+
 FINALCUT_TIMELINE_FILE_IO = re.compile(
     r"\.(open|read_text|read_bytes|write_text|write_bytes|write|exists|is_file|is_dir|stat"
     r"|lstat|resolve|iterdir|glob|rglob|unlink|mkdir|touch|rename)\(|\bopen\("
@@ -1533,6 +1550,54 @@ def check_finalcut_export_never_copies() -> list[str]:
         for number, line in enumerate(body.splitlines(), start=1)
         if FINALCUT_EXPORT_FORBIDDEN.search(line)
     ]
+    return failures
+
+
+def check_render_export_writes_only_export() -> list[str]:
+    """D100 §5b — 초안 내보내기는 원본 폴더에 쓰지 않는다: 작업공간 `export/<시각>/`과 그
+    스테이징뿐.
+
+    원본은 읽기만 한다(ffprobe·ffmpeg 입력). 폴더는 정해진 세 줄로만 만들고 그 뿌리는 언제나
+    `workspace.root / EXPORT_FOLDER`(`"export"`)다. 파일은 O_EXCL 새 파일로만 쓰고 덮지 않고 낸다.
+    파일이 사라지면 조용히 통과하지 않는다.
+    """
+    rel = "vlogsrt/project/raw/render_export.py"
+    path = PROJECT_PACKAGE / "raw" / "render_export.py"
+    if not path.exists():
+        return [f"{rel}: 초안 내보내기 계층이 사라졌다 (D100 §5b)"]
+    body = path.read_text(encoding="utf-8")
+    lines = body.splitlines()
+    failures = [
+        f"{rel}: {name}을 import한다 — 초안 내보내기가 복사·재해시·외부 프로세스를 쓸 수 있다"
+        for name in _imports(body, RENDER_EXPORT_MUST_NOT_IMPORT)
+    ]
+    failures += [
+        f"{rel}:{number}: 덮어쓰기·복사·지우기·열어 쓰기 경로를 부른다 (D100 §5b)"
+        for number, line in enumerate(lines, start=1)
+        if RENDER_EXPORT_FORBIDDEN.search(line)
+    ]
+    failures += _render_export_folder_failures(rel, body, lines)
+    return failures
+
+
+def _render_export_folder_failures(rel: str, body: str, lines: list[str]) -> list[str]:
+    failures = [
+        f"{rel}:{number}: 정해진 세 자리 밖에서 폴더를 만든다 (D100 §5b)"
+        for number, line in enumerate(lines, start=1)
+        if ".mkdir(" in line and line.strip() not in RENDER_EXPORT_MKDIRS
+    ]
+    failures += [
+        f"{rel}:{number}: 새 파일이 아닌 열기(O_EXCL 없는 os.open) (D100 §5b)"
+        for number, line in enumerate(lines, start=1)
+        if "os.open(" in line and "_NEW_FILE" not in line
+    ]
+    if 'EXPORT_FOLDER = "export"' not in body or "os.O_EXCL" not in body:
+        failures.append(f'{rel}: 쓰는 뿌리 `EXPORT_FOLDER = "export"`·O_EXCL 새 파일 표지가 없다')
+    calls = [line.strip() for line in lines if "_reserve_folder(" in line and "def " not in line]
+    if calls != [f"folder = {RENDER_EXPORT_ROOT_CALL}"]:
+        failures.append(
+            f"{rel}: 시각 폴더의 뿌리가 `workspace.root / EXPORT_FOLDER` 한 자리가 아니다: {calls}"
+        )
     return failures
 
 
@@ -3052,6 +3117,7 @@ CHECKS = (
     ("읽기 범위는 화면 진입점만 연다", check_read_scope_only_at_entry_points),
     ("Final Cut 빌더(타임라인·타이틀)는 순수하다", check_finalcut_timeline_stays_pure),
     ("Final Cut 보내기는 원본을 복사·재해시하지 않는다", check_finalcut_export_never_copies),
+    ("초안 내보내기는 작업공간 export/에만 쓴다", check_render_export_writes_only_export),
     ("옛 선택한 컷 Final Cut 출력은 되살리지 않는다", check_old_finalcut_path_stays_dead),
     ("신뢰도 메타 보존", check_confidence_meta_survives),
     ("전사 호출 1개", check_one_transcription_call),

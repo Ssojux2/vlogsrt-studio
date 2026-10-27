@@ -376,6 +376,7 @@ __all__ = [
     "TIER_TAG_PREFIX",
     "UPKEEP_JOB_KIND",
     "ANALYSIS_PROXY_JOB_KIND",
+    "RENDER_EXPORT_JOB_KIND",
     "SYNC_CHECK_JOB_KIND",
     "SELECTION_MODE_FULL",
     "SELECTION_MODE_TRANSCRIBE",
@@ -452,6 +453,10 @@ __all__ = [
 ANALYSIS_PROXY_JOB_KIND = "analysis_proxy"
 """4K 원본 하나의 25% 분석 프록시를 불러올 때 미리 만드는 작업(D100 §2) — 무료 로컬. 조리법·열쇠는
 분석이 쓰는 그대로(`analysis-proxy/v1`, D47)라 1단계가 이것을 다시 쓴다."""
+
+RENDER_EXPORT_JOB_KIND = "render_export"
+"""추천만 이어붙인 초안 영상 + SRT + 보고서를 내는 작업(W-44, D100 §5b) — 무료 로컬. 작업공간마다
+한 번에 하나다(같은 지문이면 도는 작업에 다시 붙는다)."""
 
 FOLDER_WRITE_REFUSALS = frozenset({errno.EACCES, errno.EPERM, errno.EROFS})
 """폴더 안에 작업공간을 만들 수 없다는 뜻의 오류 — 형제 폴더로 물러난다(D100 §2)."""
@@ -3734,6 +3739,25 @@ class RawWorkspaceService:
         return finalcut_export.export(
             self, root, context, titles_srt=lines, drop_disabled=drop
         ).fcpxml
+
+    def start_render_export(self, root: Path) -> JobHandle:
+        """추천만 이어붙인 초안(W-44, D100 §5b) — 새 `export/<시각>/`에 영상·SRT·보고서를 내는 작업.
+
+        확인하지 않은 제외 제안이 있어도 막지 않는다(사용자 결정 2026-10-27) — 뺀 구간은 보고서에
+        남는다. 원본은 읽기만 한다. 결과는 `latest_render_export`가 읽는다.
+        """
+        from vlogsrt.project.raw import render_export
+
+        def body(context: JobContext) -> None:
+            render_export.export_draft(self, root, context)
+
+        return self.submit_job(root, RENDER_EXPORT_JOB_KIND, "render_export/draft", body)
+
+    def latest_render_export(self, root: Path) -> dict[str, Any] | None:
+        """가장 최근에 다 낸 초안의 경로·요약(보고서가 있는 폴더) — 없으면 None. 읽기만 한다."""
+        from vlogsrt.project.raw import render_export
+
+        return render_export.latest(self._workspace(root))
 
     def _caption_gaps_or_unknown(self, root: Path) -> dict[str, Any] | None:
         """보내기 보고서의 전사 실패 구간 — 원본마다 1단계 기록을 읽기만 한다(D59).

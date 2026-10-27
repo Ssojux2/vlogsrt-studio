@@ -447,6 +447,7 @@ def _run(
     timeout: float | None = None,
     step: str | None = None,
     priority: int | None = None,
+    on_poll: Callable[[], None] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """실패는 RuntimeError다 — 시간 한도를 넘기면 그 하위인 `ProcessTimeout`.
 
@@ -463,6 +464,7 @@ def _run(
             check=False,
             step=step,
             priority=priority,
+            on_poll=on_poll,
             **limit,
         )
     except OSError as exc:
@@ -3085,6 +3087,15 @@ def _declared_window_slack(probe: RawMediaProbe, clock: RawVideoClock) -> Fracti
 
 def _assert_raw_supported(probe: RawMediaProbe, clock: RawVideoClock) -> None:
     """지원 매트릭스 — 밖이면 이유를 말하고 죽인다. 정밀도를 낮추지 않는다."""
+    failures = _raw_codec_failures(probe) + _raw_timeline_failures(probe, clock)
+    if failures:
+        raise RawMediaUnsupported(
+            f"지원하지 않는 원본입니다: {probe.source} — " + "; ".join(failures)
+        )
+
+
+def _raw_codec_failures(probe: RawMediaProbe) -> list[str]:
+    """코덱·픽셀 형식·HDR — 원본 그대로의 추출(정밀도 보존)만 묻는 칸이다."""
     video = probe.video
     failures: list[str] = []
     if video.codec_name not in _RAW_SUPPORTED_CODECS:
@@ -3095,6 +3106,12 @@ def _assert_raw_supported(probe: RawMediaProbe, clock: RawVideoClock) -> None:
         )
     if video.color_transfer in _RAW_BLOCKED_TRANSFERS:
         failures.append(f"HDR 전달 특성 {video.color_transfer!r} — 실기 검증 전 지원 밖")
+    return failures
+
+
+def _raw_timeline_failures(probe: RawMediaProbe, clock: RawVideoClock) -> list[str]:
+    """시각표 — 비디오 하나·선언 창 안의 패킷·균일 격자. 프레임 정확한 추출·렌더 모두의 조건."""
+    failures: list[str] = []
     if any(kind == "video" for _, kind in probe.other_tracks):
         failures.append("비디오 스트림이 둘 이상이다")
     declared_end = probe.format_start + probe.duration
@@ -3111,10 +3128,7 @@ def _assert_raw_supported(probe: RawMediaProbe, clock: RawVideoClock) -> None:
         )
     if not clock.uniform_grid:
         failures.append(f"VFR(균일 격자 아님): {clock.grid_note}")
-    if failures:
-        raise RawMediaUnsupported(
-            f"지원하지 않는 원본입니다: {probe.source} — " + "; ".join(failures)
-        )
+    return failures
 
 
 @dataclass(frozen=True, slots=True)
@@ -4007,10 +4021,9 @@ def _verify_raw_decodes(path: Path) -> None:
 @process_step("인코더 확인")
 def ffmpeg_provenance() -> str:
     """ffmpeg/ffprobe 버전과 필요 인코더의 실측 가용성 — 보고·진단용."""
-    ffmpeg = require_ffmpeg()
-    encoders = _run([ffmpeg, "-hide_banner", "-encoders"]).stdout
+    encoders = available_encoders()
     required = ("libx264", "libx265", "prores_ks", "aac")
-    available = [name for name in required if re.search(rf"\s{name}\s", encoders)]
+    available = [name for name in required if name in encoders]
     missing = [name for name in required if name not in available]
     lines = [
         _tool_version("ffmpeg"),
@@ -4697,3 +4710,452 @@ def verified_scene_times(path: Path, *, timeout_seconds: float) -> tuple[Fractio
         step="장면 컷 찾기",
     )
     return tuple(Fraction(value) for value in re.findall(r"pts_time:([0-9.]+)", result.stderr))
+
+
+# ─────────────────────────────────────────────────────────────
+#  추천만 이어붙인 초안 렌더(W-44, D100 §5b)
+# ─────────────────────────────────────────────────────────────
+#
+# 계획은 순수 `render_plan`이 세운다 — 여기는 조각 하나를 시퀀스 포맷으로 다시 인코딩하고, 조각들을
+# 이어붙이고, 결과를 다시 재어 계획과 같을 때만 게시한다. preprocess는 project를 모르므로(규칙 7)
+# 계획의 값만 이 모듈의 작은 값 객체(`RenderTarget`·`RenderPartSpec`·`RenderEncoding`)로 받는다.
+
+_SOFTWARE_H264 = "libx264"
+"""하드웨어 인코더가 하나도 돌지 않을 때의 마지막 자리 — 화질 손잡이(crf·preset)가 이
+인코더의 것이다."""
+
+_ENCODER_PROBE_INPUT = "color=c=black:s=256x144:r=30:d=0.2"
+"""인코더가 실제로 도는지 보는 작은 lavfi 입력 — 하드웨어 인코더는 목록에 있어도 세션을 못 열어
+실패한다(VideoToolbox 세션 오류 · GPU 없는 NVENC). 256×144는 하드웨어 인코더의 최소 크기
+(NVENC 145×49 안팎)를 넘는 작은 16:9 짝수 크기다 — 판정을 바꾸는 임계값이 아니라 시험 입력이다."""
+
+_ENCODER_PROBE_FRAMES = "3"
+
+_RENDER_PART_CONTAINER = "mov"
+_RENDER_PART_AUDIO_CODEC = "pcm_s16le"
+"""조각의 소리는 PCM이다 — AAC로 조각마다 인코딩하면 잘린 자리마다 프라이밍(1024샘플)이 끼어
+이은 소리에 틈·딸깍이 생긴다. 이어붙일 때 한 번만 AAC로 인코딩한다(영상은 `-c copy`)."""
+
+_RENDER_COLOR_ARGS = (
+    "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709",
+    "-color_range", "tv",
+)  # fmt: skip
+"""모든 조각이 같은 색 선언 — 조각마다 다르면 이은 스트림의 SPS가 첫 조각 것 하나라 거짓이 된다.
+HDR 원본은 톤 매핑하지 않는다(초안이다) — 보고서가 원본마다 전달 특성을 남긴다."""
+
+
+class RenderVerificationError(RuntimeError):
+    """렌더 결과가 계획과 다르다 — 프레임 수·격자·크기·소리. 그 파일은 게시하지 않는다."""
+
+
+@dataclass(frozen=True, slots=True)
+class RenderTarget:
+    """시퀀스 포맷 — 모든 조각과 이은 결과가 이 크기·레이트다."""
+
+    width: int
+    height: int
+    frame_duration: Fraction
+
+
+@dataclass(frozen=True, slots=True)
+class RenderPartSpec:
+    """조각 하나 — 원본 `[start_frame, end_frame)`을 출력 `output_frames`장으로."""
+
+    index: int
+    start_frame: int
+    end_frame: int
+    output_frames: int
+
+
+@dataclass(frozen=True, slots=True)
+class RenderEncoding:
+    """초안 렌더의 인코딩 값 — 호출자의 설정(`RenderSettings`)에서 온다(규칙 8).
+
+    하드웨어 인코더는 crf가 없어 `hardware_bits_per_pixel` × 화소 × 레이트의 비트레이트로 만든다.
+    `track_timescale_min`은 mov/mp4 영상 트랙 눈금의 바닥이다 — 조각과 결과가 같은 눈금이어야
+    `-c copy`가 프레임 시각을 다시 반올림하지 않는다.
+    """
+
+    video_codec: str
+    crf: int
+    preset: str
+    hardware_bits_per_pixel: Fraction
+    keyframe_seconds: Fraction
+    audio_codec: str
+    audio_rate: int
+    audio_channels: int
+    audio_bitrate_kbps: int
+    pad_color: str
+    track_timescale_min: int
+    timeout_floor_seconds: float
+    timeout_media_ratio: float
+    priority: int | None = None
+
+    def timeout(self, seconds: Fraction) -> float:
+        """조각·이어붙이기 한 번의 한도 — `max(바닥, 배율 × 길이)`(D59와 같은 꼴)."""
+        return max(self.timeout_floor_seconds, self.timeout_media_ratio * float(seconds))
+
+
+@dataclass(frozen=True, slots=True)
+class RenderedDraft:
+    """이어붙여 다시 잰 결과 — 계획의 프레임 수·길이와 같을 때만 게시된다."""
+
+    path: Path
+    frame_count: int
+    frame_duration: Fraction
+    duration: Fraction
+    width: int
+    height: int
+    video_codec: str
+    audio_codec: str
+
+
+@functools.cache
+def available_encoders() -> frozenset[str]:
+    """이 ffmpeg의 인코더 이름 — 프로세스마다 한 번 묻는다(`-encoders`)."""
+    listing = _run([require_ffmpeg(), "-hide_banner", "-encoders"]).stdout
+    return _parse_encoders(listing)
+
+
+def _parse_encoders(listing: str) -> frozenset[str]:
+    """`-encoders` 표 — 구분선(`------`) 뒤 줄마다 둘째 칸이 이름이다."""
+    names: set[str] = set()
+    started = False
+    for line in listing.splitlines():
+        fields = line.split()
+        if not started:
+            started = bool(fields) and set(fields[0]) == {"-"}
+            continue
+        if len(fields) >= 2:
+            names.add(fields[1])
+    return frozenset(names)
+
+
+@functools.cache
+def encoder_works(name: str) -> bool:
+    """그 인코더가 이 기계에서 실제로 프레임을 내는가 — 작은 lavfi 인코딩 한 번(캐시)."""
+    command = [
+        require_ffmpeg(), "-hide_banner", "-nostdin", "-loglevel", "error",
+        "-f", "lavfi", "-i", _ENCODER_PROBE_INPUT,
+        "-frames:v", _ENCODER_PROBE_FRAMES, "-c:v", name, "-pix_fmt", "yuv420p",
+        "-f", "null", "-",
+    ]  # fmt: skip
+    try:
+        _run(command, timeout=_PROBE_TIMEOUT_SECONDS, step="인코더 확인")
+    except RuntimeError as error:
+        log.debug(f"인코더 {name}이(가) 돌지 않는다 — 다음 후보로 간다: {error}")
+        return False
+    return True
+
+
+def pick_video_encoder(preferences: Sequence[str]) -> str:
+    """앞에서부터 목록에 있고 **실제로 도는** 첫 인코더 — 하드웨어가 먼저, libx264가 마지막."""
+    listed = available_encoders()
+    for name in preferences:
+        if name in listed and encoder_works(name):
+            return name
+    raise RuntimeError(f"쓸 수 있는 H.264 인코더가 없습니다 (후보: {', '.join(preferences)})")
+
+
+def ffmpeg_version() -> str:
+    """보고서에 남기는 ffmpeg 첫 줄."""
+    return _tool_version("ffmpeg")
+
+
+def _track_timescale(frame_duration: Fraction, minimum: int) -> int:
+    """프레임 길이가 정수 틱인 눈금 — 분모를 바닥 이상이 될 때까지 두 배로(ffmpeg mov 기본과
+    같다)."""
+    scale = frame_duration.denominator
+    while scale < minimum:
+        scale *= 2
+    return scale
+
+
+def _render_video_args(encoding: RenderEncoding, target: RenderTarget) -> list[str]:
+    """모든 조각에 같은 인코더 인자 — 그래야 이어붙이기가 `-c copy`다."""
+    gop = max(1, math.ceil(encoding.keyframe_seconds / target.frame_duration))
+    if encoding.video_codec == _SOFTWARE_H264:
+        quality = ["-preset", encoding.preset, "-crf", str(encoding.crf)]
+    else:
+        pixels = target.width * target.height / target.frame_duration
+        quality = ["-b:v", str(math.ceil(encoding.hardware_bits_per_pixel * pixels))]
+    return ["-c:v", encoding.video_codec, *quality, "-g", str(gop), *_RENDER_COLOR_ARGS]
+
+
+def _render_video_filter(
+    stream_index: int, plan: _RawMediaPlan, part: RenderPartSpec, target: RenderTarget, pad: str
+) -> str:
+    """원본 창만 골라(`select`) 0부터 다시 세고 → 비율을 지켜 줄이고 채움색으로 맞추고 → 시퀀스
+    레이트로(`fps`) → 마지막 프레임을 붙잡아(`tpad`) 정확히 `output_frames`장(`trim`)."""
+    frames = part.end_frame - part.start_frame
+    rate = 1 / target.frame_duration
+    width, height = target.width, target.height
+    return (
+        f"[0:{stream_index}]select=lt(n\\,{frames}){_snap_filter(plan)},setpts=PTS-STARTPTS,"
+        f"scale=w={width}:h={height}:force_original_aspect_ratio=decrease"
+        ":force_divisible_by=2:out_color_matrix=bt709:out_range=tv,"
+        f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color={pad},setsar=1,"
+        f"fps=fps={rate.numerator}/{rate.denominator}:round=near,"
+        f"tpad=stop_mode=clone:stop={part.output_frames},"
+        f"trim=end_frame={part.output_frames},format=yuv420p[v]"
+    )
+
+
+def _render_audio_filter(label: str, samples: int, rate: int) -> str:
+    """소리를 출력 0에 맞추고(늦게 시작하면 앞을 침묵으로) 시퀀스 레이트로 → 끝까지 채워 정확히
+    영상 길이의 샘플 수에서 자른다 — 조각마다 영상과 소리의 길이가 같아 이은 뒤에도 어긋나지
+    않는다."""
+    return (
+        f"[{label}]aresample={rate}:async=1:first_pts=0,apad,"
+        f"atrim=end_sample={samples},asetpts=N/SR/TB[a]"
+    )
+
+
+def _render_audio_input(
+    source: Path, plan: _RawMediaPlan, seconds: Fraction, encoding: RenderEncoding
+) -> tuple[list[str], str]:
+    """소리 입력과 그 이름표 — 원본 소리는 첫 프레임의 원본 시각에서 정확 탐색, 없으면 같은 길이의
+    침묵(`anullsrc`)이다. 소리가 둘 이상이면 첫 트랙(가져오기·미리보기와 같은 기본)."""
+    length = _format_us(seconds, ceil=True)
+    if not plan.mapped_audio:
+        layout = f"r={encoding.audio_rate}:cl={_channel_layout(encoding.audio_channels)}"
+        return ["-f", "lavfi", "-t", length, "-i", f"anullsrc={layout}"], "1:a"
+    start = _format_us(plan.media_range.start_seconds, ceil=False)
+    inputs = ["-seek_timestamp", "1", "-ss", start, "-t", length, "-i", str(source)]
+    return inputs, f"1:{plan.mapped_audio[0].stream_index}"
+
+
+def _channel_layout(channels: int) -> str:
+    """ffmpeg 채널 배치 철자 — 하나·둘은 이름이 있고, 그 밖은 개수 표기다."""
+    return {1: "mono", 2: "stereo"}.get(channels, f"{channels}c")
+
+
+def _render_part_command(
+    source: Path,
+    staged: Path,
+    probe: RawMediaProbe,
+    plan: _RawMediaPlan,
+    part: RenderPartSpec,
+    target: RenderTarget,
+    encoding: RenderEncoding,
+) -> list[str]:
+    seconds = part.output_frames * target.frame_duration
+    audio_inputs, audio_label = _render_audio_input(source, plan, seconds, encoding)
+    samples = math.floor(seconds * encoding.audio_rate)
+    graph = ";".join(
+        (
+            _render_video_filter(probe.video.stream_index, plan, part, target, encoding.pad_color),
+            _render_audio_filter(audio_label, samples, encoding.audio_rate),
+        )
+    )
+    timescale = _track_timescale(target.frame_duration, encoding.track_timescale_min)
+    # 원점 정보(GPS·기기)는 초안에 옮기지 않는다 — 원본 메타데이터는 원본에 있다.
+    return [
+        require_ffmpeg(), "-hide_banner", "-nostdin", "-y",
+        "-seek_timestamp", "1",
+        "-ss", _format_us(plan.seek, ceil=False),
+        "-t", _format_us(plan.out_duration, ceil=True),
+        "-i", str(source),
+        *audio_inputs,
+        "-filter_complex", graph,
+        "-map", "[v]", "-map", "[a]", "-map_metadata", "-1",
+        *_render_video_args(encoding, target),
+        "-fps_mode", "passthrough",
+        "-c:a", _RENDER_PART_AUDIO_CODEC,
+        "-ac", str(encoding.audio_channels),
+        "-video_track_timescale", str(timescale),
+        "-f", _RENDER_PART_CONTAINER, str(staged),
+    ]  # fmt: skip
+
+
+def render_part_failures(probe: RawMediaProbe, clock: RawVideoClock) -> tuple[str, ...]:
+    """렌더할 수 없는 까닭 — 시각표(비디오 하나·선언 창·균일 격자)와 map 격자(D70)뿐이다.
+
+    원본 그대로의 추출과 달리 코덱·10bit·HDR은 막지 않는다 — 초안은 8bit H.264로 다시 만든다.
+    map 원본은 계획이 통째로 뺀다(D68) — 여기 오면 계획과 렌더러가 갈렸다는 뜻이다.
+    """
+    failures = _raw_timeline_failures(probe, clock)
+    if clock.conform_kind == "map":
+        failures.append("격자 맞춤 map(D70) 원본은 렌더하지 않는다 — 계획이 빼야 한다")
+    return tuple(failures)
+
+
+@process_step("초안 조각 렌더")
+def render_part(
+    source: Path,
+    part: RenderPartSpec,
+    target: RenderTarget,
+    encoding: RenderEncoding,
+    staging_dir: Path,
+    *,
+    probe: RawMediaProbe | None = None,
+    clock: RawVideoClock | None = None,
+    audio_extents: tuple[AudioPacketExtent, ...] | None = None,
+    on_poll: Callable[[], None] | None = None,
+) -> Path:
+    """원본 `[start_frame, end_frame)`을 시퀀스 포맷의 `output_frames`장으로 다시 인코딩한다.
+
+    탐색 점·맞춘 시계의 `setpts`는 `extract_raw_clip`과 같은 계획(`_plan_raw_media`)에서 온다 —
+    창 밖 프레임을 읽지 않는다. 회전은 ffmpeg 자동 회전이 물리로 굽는다(미리보기와 같다). 게시는
+    다시 잰 프레임 수·격자·크기·소리가 맞을 때만이고, 이미 있는 이름은 덮지 않는다.
+    """
+    media_probe = probe if probe is not None else probe_raw_media(source)
+    video_clock = clock if clock is not None else probe_extraction_clock(source, probe=media_probe)
+    extents = audio_extents if audio_extents is not None else probe_audio_extents(source)
+    plan = _render_part_plan(source, media_probe, video_clock, extents, part)
+    output = staging_dir / f"part{part.index:05d}.{_RENDER_PART_CONTAINER}"
+    _assert_safe_staging(source, output)
+    staged = _reserve_staging_temp(output)
+    seconds = part.output_frames * target.frame_duration
+    try:
+        command = _render_part_command(source, staged, media_probe, plan, part, target, encoding)
+        _run(
+            command, timeout=encoding.timeout(seconds), priority=encoding.priority, on_poll=on_poll
+        )
+        _verify_render_part(staged, part, target, encoding)
+    except BaseException:
+        staged.unlink(missing_ok=True)
+        raise
+    _publish_staged_clip(staged, output)
+    return output
+
+
+def _render_part_plan(
+    source: Path,
+    probe: RawMediaProbe,
+    clock: RawVideoClock,
+    extents: tuple[AudioPacketExtent, ...],
+    part: RenderPartSpec,
+) -> _RawMediaPlan:
+    """렌더할 수 있는 원본인지 보고 창의 추출 계획을 세운다 — 핸들 없음(조각끼리 겹치지 않는다)."""
+    failures = render_part_failures(probe, clock)
+    if failures:
+        raise RawMediaUnsupported(f"렌더할 수 없는 원본입니다: {source} — " + "; ".join(failures))
+    window = clock_frame_range(clock, part.start_frame, part.end_frame)
+    return _plan_raw_media(
+        clock, window, RawClipHandles(), extents, declared_rate=probe.video.r_frame_rate
+    )
+
+
+def _verify_render_part(
+    path: Path, part: RenderPartSpec, target: RenderTarget, encoding: RenderEncoding
+) -> None:
+    probe = probe_raw_media(path)
+    clock = probe_extraction_clock(path, probe=probe)
+    problems = _render_video_problems(probe, clock, part.output_frames, target)
+    problems += _render_audio_problems(probe, _RENDER_PART_AUDIO_CODEC, encoding)
+    if problems:
+        raise RenderVerificationError(
+            f"조각 {part.index}의 렌더가 계획과 다르다 — " + "; ".join(problems)
+        )
+
+
+def _render_video_problems(
+    probe: RawMediaProbe, clock: RawVideoClock, frames: int, target: RenderTarget
+) -> list[str]:
+    problems: list[str] = []
+    if clock.frame_count != frames:
+        problems.append(f"영상 {clock.frame_count}프레임 (계획 {frames})")
+    if not clock.uniform_grid or clock.frame_duration != target.frame_duration:
+        problems.append(f"격자 {clock.frame_duration}초 · 균일 {clock.uniform_grid}")
+    size = probe.video.display_size
+    if size != (target.width, target.height):
+        problems.append(f"크기 {size[0]}x{size[1]} (계획 {target.width}x{target.height})")
+    return problems
+
+
+def _render_audio_problems(probe: RawMediaProbe, codec: str, encoding: RenderEncoding) -> list[str]:
+    if len(probe.audio) != 1:
+        return [f"소리 트랙 {len(probe.audio)}개 (계획 1)"]
+    track = probe.audio[0]
+    expected = (codec, encoding.audio_rate, encoding.audio_channels)
+    found = (track.codec_name, track.sample_rate, track.channels)
+    return [] if found == expected else [f"소리 {found} (계획 {expected})"]
+
+
+def _concat_listing(parts: Sequence[Path], listing: Path) -> None:
+    """concat 분리기 목록 — 절대 경로, 작은따옴표는 ffconcat 규칙대로 끊어 잇는다. 새 파일로만."""
+    lines = ["ffconcat version 1.0"]
+    for part in parts:
+        quoted = str(part.resolve()).replace("'", "'\\''")
+        lines.append(f"file '{quoted}'")
+    descriptor = os.open(listing, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0))
+    with os.fdopen(descriptor, "wb") as handle:
+        handle.write(("\n".join(lines) + "\n").encode("utf-8"))
+
+
+def _concat_command(
+    listing: Path, staged: Path, target: RenderTarget, encoding: RenderEncoding
+) -> list[str]:
+    timescale = _track_timescale(target.frame_duration, encoding.track_timescale_min)
+    return [
+        require_ffmpeg(), "-hide_banner", "-nostdin", "-y",
+        "-f", "concat", "-safe", "0", "-i", str(listing),
+        "-map", "0:v:0", "-map", "0:a:0", "-map_metadata", "-1",
+        "-c:v", "copy",
+        "-af", "aresample=async=1:first_pts=0",
+        "-c:a", encoding.audio_codec, "-b:a", f"{encoding.audio_bitrate_kbps}k",
+        "-ar", str(encoding.audio_rate), "-ac", str(encoding.audio_channels),
+        "-video_track_timescale", str(timescale),
+        "-movflags", "+faststart",
+        "-f", "mp4", str(staged),
+    ]  # fmt: skip
+
+
+@process_step("초안 이어붙이기")
+def concat_parts(
+    parts: Sequence[Path],
+    output: Path,
+    target: RenderTarget,
+    encoding: RenderEncoding,
+    *,
+    expected_frames: int,
+    on_poll: Callable[[], None] | None = None,
+) -> RenderedDraft:
+    """조각을 순서대로 이어붙인다 — 영상은 `-c copy`, 소리는 한 번만 AAC. 다시 재어 프레임 수가
+    `expected_frames`이고 길이가 반 프레임 안일 때만 `output`에 게시한다(있으면 덮지 않는다)."""
+    if not parts:
+        raise RuntimeError("이어붙일 조각이 없습니다")
+    if os.path.lexists(output):
+        raise RawStagingError(f"게시 경로가 이미 있다(덮어쓰지 않는다): {output}")
+    listing = output.parent / f".{output.stem}.ffconcat"
+    _concat_listing(parts, listing)
+    staged = _reserve_staging_temp(output)
+    seconds = expected_frames * target.frame_duration
+    try:
+        command = _concat_command(listing, staged, target, encoding)
+        _run(
+            command, timeout=encoding.timeout(seconds), priority=encoding.priority, on_poll=on_poll
+        )
+        draft = _verify_draft(staged, target, encoding, expected_frames)
+    except BaseException:
+        staged.unlink(missing_ok=True)
+        raise
+    finally:
+        listing.unlink(missing_ok=True)
+    _publish_staged_clip(staged, output)
+    return replace(draft, path=output)
+
+
+def _verify_draft(
+    path: Path, target: RenderTarget, encoding: RenderEncoding, frames: int
+) -> RenderedDraft:
+    probe = probe_raw_media(path)
+    clock = probe_extraction_clock(path, probe=probe)
+    problems = _render_video_problems(probe, clock, frames, target)
+    problems += _render_audio_problems(probe, encoding.audio_codec, encoding)
+    expected = frames * target.frame_duration
+    if abs(probe.duration - expected) > target.frame_duration / 2:
+        problems.append(f"길이 {float(probe.duration):.4f}초 (계획 {float(expected):.4f}초)")
+    if problems:
+        raise RenderVerificationError("이어붙인 초안이 계획과 다르다 — " + "; ".join(problems))
+    return RenderedDraft(
+        path=path,
+        frame_count=clock.frame_count,
+        frame_duration=clock.frame_duration,
+        duration=probe.duration,
+        width=target.width,
+        height=target.height,
+        video_codec=probe.video.codec_name,
+        audio_codec=probe.audio[0].codec_name,
+    )

@@ -2191,6 +2191,62 @@ def test_real_finalcut_export_module_passes_the_no_copy_check() -> None:
     assert check_invariants.check_finalcut_export_never_copies() == []
 
 
+# ── D100 §5b: 초안 내보내기는 작업공간 export/에만 쓴다 ─────────────────────
+
+_RENDER_EXPORT_CLEAN = (
+    "import os\n"
+    "from vlogsrt import preprocess\n"
+    "from vlogsrt.oscompat import publish_exclusive\n"
+    'EXPORT_FOLDER = "export"\n'
+    "_NEW_FILE = os.O_WRONLY | os.O_CREAT | os.O_EXCL\n"
+    "def _reserve_folder(base, moment):\n"
+    "    base.mkdir(parents=True, exist_ok=True)\n"
+    "    folder.mkdir()\n"
+    "def run(workspace, moment):\n"
+    "    folder = _reserve_folder(workspace.root / EXPORT_FOLDER, moment)\n"
+    "    staging.mkdir()\n"
+    "    descriptor = os.open(path, _NEW_FILE, 0o644)\n"
+    "    publish_exclusive(staged, final)\n"
+)
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "import shutil",
+        "import hashlib",
+        "import subprocess",
+        "from vlogsrt.project.raw import confirmed_package",
+        "shutil.rmtree(folder)",
+        "os.replace(draft, final)",
+        "draft.rename(final)",
+        "path.write_text(body)",
+        "path.write_bytes(body)",
+        "handle = open(path, 'w')",
+        "handle = path.open('w')",
+        "descriptor = os.open(path, os.O_WRONLY | os.O_CREAT)",
+        "source.parent.mkdir(parents=True, exist_ok=True)",
+        "folder = _reserve_folder(source.parent, moment)",
+    ],
+)
+def test_render_export_writes_only_under_the_workspace_export_folder(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, statement: str
+) -> None:
+    target = "vlogsrt/project/raw/render_export.py"
+    _fake_source_tree(monkeypatch, tmp_path, {target: _RENDER_EXPORT_CLEAN})
+    assert check_invariants.check_render_export_writes_only_export() == []
+    (tmp_path / target).write_text(_RENDER_EXPORT_CLEAN + statement + "\n", encoding="utf-8")
+    assert check_invariants.check_render_export_writes_only_export()
+    (tmp_path / target).unlink()
+    assert check_invariants.check_render_export_writes_only_export() == [
+        f"{target}: 초안 내보내기 계층이 사라졌다 (D100 §5b)"
+    ]
+
+
+def test_real_render_export_module_passes_the_export_only_check() -> None:
+    assert check_invariants.check_render_export_writes_only_export() == []
+
+
 # ── D56: 옛 「선택한 컷」 출력 길은 되살리지 않는다 ─────────────────────────
 # 이름은 조각을 이어 만든다 — 저장소 전체 grep 인수(옛 이름 0건)가 이 시험 자신에 걸리지 않게.
 _OLD_EXPORT = "export_" + "final_cut"

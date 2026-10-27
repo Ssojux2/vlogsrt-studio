@@ -567,10 +567,12 @@ CLOSE_CANCELS_JOB_KINDS = frozenset(
         "source_preview",
         raw_service.VISUAL_PREPARE_JOB_KIND,
         raw_service.ANALYSIS_PROXY_JOB_KIND,
+        raw_service.RENDER_EXPORT_JOB_KIND,
     }
 )
 """「라이브러리 닫기」가 취소를 요청하고 닫는 작업(D64 F) — 돈이 들지 않는 로컬 일이고, 다시 열면
-견적·미리보기·썸네일을 다시 만든다. 늦게 끝난 라이브러리 견적은 닫기 세대가 막는다."""
+견적·미리보기·썸네일을 다시 만든다. 늦게 끝난 라이브러리 견적은 닫기 세대가 막는다. 초안 렌더(D100
+§5b)도 무료 로컬이고 취소하면 그 시각 폴더를 남기지 않는다 — 다시 누르면 새로 만든다."""
 CLOSE_OUTLIVES_JOB_KINDS = frozenset({raw_service.UPKEEP_JOB_KIND, raw_service.SYNC_CHECK_JOB_KIND})
 """닫아도 그대로 끝나게 두는 작업 — 무료 로컬이고 DB에만 쓴다(화면 기억 없음). 서비스가 실행마다
 한 번만 걸므로(`_upkeep_tries`·`_sync_tries`) 취소하면 서버를 다시 띄울 때까지 다시 걸리지 않는다.
@@ -600,6 +602,7 @@ ACTIVITY_JOB_LABELS = {
     "source_preview": "원본 미리보기",
     raw_service.VISUAL_PREPARE_JOB_KIND: "미리보기 준비",
     raw_service.ANALYSIS_PROXY_JOB_KIND: "4K 분석 프록시",
+    raw_service.RENDER_EXPORT_JOB_KIND: "추천만 이어붙이기",
     raw_service.SEGMENT_JOB_KIND: "컷 준비",
     raw_service.ANALYSIS_JOB_KIND: "영상 분석 1단계(전사·장면)",
     raw_service.ANALYSIS_SEMANTIC_JOB_KIND: "영상 분석 2단계(의미 분석)",
