@@ -2804,6 +2804,7 @@ VISUAL_BOOTSTRAP_JS = (
           (red || re.pending ? " open" : "") + "><summary>다시 듣기" +
           (re.pending ? ' <span class="vl-badge">승인 대기</span>' : "") + "</summary>"];
         out.push('<p class="vl-kv">' + esc(re.explanation) + "</p>");
+        if (re.engine) { out.push('<p class="vl-kv">' + esc(re.engine) + "</p>"); }
         if (re.edited && re.snapped) {
           // 시각 맞춤만 얹은 자막 — 「되돌리기」로 적용 전 자막으로 돌리면 다시 들을 수
           // 있다(D59 19h).
@@ -3631,13 +3632,18 @@ VISUAL_BOOTSTRAP_JS = (
         return out.join("");
       }
       // 「다른 귀」·「확인 필요」(D59 19e) — 표시만 한다. 자막을 지우거나 숨기거나 고치지 않는다.
+      // 「candidate」는 Gemini 원본(D92) — 엔진의 글자와 시각이 한 응답이라 다른 귀는 후보로만.
+      var EAR_CANDIDATE_NOTE = "전사 엔진이 들은 글을 그대로 두었습니다 — 다른 귀의 글자는" +
+        " 후보로만 보입니다";
       function earNote(ear) {
         if (!ear) { return ""; }
+        if (ear.mark === "candidate") { return EAR_CANDIDATE_NOTE; }
         return ear.mark === "alt" ? "다른 귀는 다르게 들었습니다 — 고르지 않은 후보가 있습니다"
           : "다른 귀가 고친 줄입니다 — 처음 들은 글과 다릅니다";
       }
       function earWord(ear) {
-        return ear && ear.mark === "alt" ? "다른 귀 후보" : "다른 귀로 고침";
+        return ear && (ear.mark === "alt" || ear.mark === "candidate") ? "다른 귀 후보"
+          : "다른 귀로 고침";
       }
       function suspectNote(cue) {
         return (cue.suspects || []).map(function (s) { return s.text; }).join(" · ");
@@ -3719,8 +3725,8 @@ VISUAL_BOOTSTRAP_JS = (
         var out = ['<div class="vl-ear" role="group" aria-label="다른 귀">'];
         out.push(earLine("다른 귀", ear.other, "other"));
         if (ear.first) { out.push(earLine("처음 들은 글", ear.first, "first")); }
-        out.push('<p class="vl-kv"><small>' + (ear.mark === "alt"
-          ? "두 귀가 맞지 않아 글자를 바꾸지 않았습니다."
+        out.push('<p class="vl-kv"><small>' + (ear.mark === "candidate" ? EAR_CANDIDATE_NOTE + "."
+          : ear.mark === "alt" ? "두 귀가 맞지 않아 글자를 바꾸지 않았습니다."
           : "두 귀가 맞춰 본 줄이라 다른 귀의 글자로 바꿨습니다.") +
           " 「가져오기」는 문구 칸만 채웁니다 — 「저장」을 눌러야 바뀝니다.</small></p></div>");
         return out.join("");

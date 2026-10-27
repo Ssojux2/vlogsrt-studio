@@ -145,6 +145,13 @@ EAR_ALT = "alt"
 EAR_REPLACED = "replaced"
 """화면 「다른 귀」 표시 — 두 번째 귀의 글자로 바꾼 줄이다(D59 19e)."""
 
+REASON_CANDIDATE = "candidate"
+"""글자 증거의 이유 — Gemini 원본에서 다른 귀 글자를 바꾸지 않고 후보로 둔 줄(D92). `source_text`가
+쓰고 여기서 읽는다(그쪽이 이 모듈을 import하므로 정본은 여기다)."""
+
+EAR_CANDIDATE = "candidate"
+"""화면 「다른 귀」 표시 — Gemini 원본이라 다른 귀의 글자를 후보로만 둔 줄이다(W-31e, D92)."""
+
 
 def ear_evidence(row: Mapping[str, Any]) -> dict[str, str] | None:
     """원본 자막 한 줄의 「다른 귀」 증거(D59 19e) — 화면에 보일 것만. 읽기만 한다.
@@ -163,7 +170,8 @@ def ear_evidence(row: Mapping[str, Any]) -> dict[str, str] | None:
     first = whisper if strip_for_compare(whisper) not in ("", folded) else ""
     alt = str(row.get("alt_text") or "")
     if strip_for_compare(alt) not in ("", folded):
-        return {"mark": EAR_ALT, "other": alt, "first": first}
+        candidate = REASON_CANDIDATE in str(row.get("retext_reason") or "").split("+")
+        return {"mark": EAR_CANDIDATE if candidate else EAR_ALT, "other": alt, "first": first}
     source = str(row.get("text_source") or TEXT_SOURCE_WHISPER)
     if source not in (TEXT_SOURCE_WHISPER, TEXT_SOURCE_MANUAL, TEXT_SOURCE_MIXED):
         return {"mark": EAR_REPLACED, "other": text, "first": first}

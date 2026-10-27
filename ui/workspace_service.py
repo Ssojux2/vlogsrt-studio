@@ -141,6 +141,31 @@ CROSS_CHECK_INFO = (
 )
 """「다른 귀로 교차 확인」(D59 19d) — 승인 범위 바로 아래의 켬·끔. 칸에는 모델 이름·금액이 없다
 (D57 결정 7) — 무엇을 얼마에 듣는지는 그 아래 견적 문구만 말하고, 승인은 그 문구에 묶인다."""
+TIMING_ENGINE_ID = "vl-timing-engine"
+TIMING_ENGINE_LABEL = "새로 듣는 전사 엔진"
+TIMING_ENGINE_RETIRED_MARK = " · 이전 엔진({date} 종료)"
+"""「새로 듣는 전사 엔진」(W-31e, D92) — 처음 듣거나 다시 듣는 영상이 쓸 시간 엔진. 이미 들은 영상은
+그대로다(엔진을 바꾸는 길은 그 영상의 「다시 듣기」뿐). 칸에는 금액이 없다(D57 결정 7) — 얼마에
+듣는지는 견적 문구만 말한다."""
+TIMING_ENGINE_BUSY_TEXT = (
+    "**바꾸지 않았습니다** · 분석이나 승인 확인이 진행 중입니다 — 끝나거나 취소한 뒤에 새로 듣는"
+    " 전사 엔진을 바꾸세요."
+)
+GEMINI_TRANSCRIBE_PAID_KEY_NOTE = (
+    "결제를 연결한 키만 쓰세요 — 무료 등급 키는 입력(오디오)을 Google 제품 개선에 씁니다."
+)
+"""Gemini 전사 엔진의 키 경고(W-31e) — 영상 분석 경고(D87)와 같은 까닭, 입력이 오디오다."""
+TIMING_KEY_MISSING_TEXT = (
+    "{label}로 들을 영상이 있어 `{env}`가 필요합니다. `.env`에 결제를 연결한 키를 넣고 앱을 다시"
+    " 띄우거나, API 연결에서 새로 듣는 전사 엔진을 바꾼 뒤 견적을 다시 확인하세요. 유료 호출은"
+    " 시작하지 않았습니다."
+)
+TIMING_PRICE_UNKNOWN_TEXT = (
+    "{label}의 공식 단가는 {date}까지 다시 확인하기로 한 값입니다 — **가격 미정**이라 이 견적은"
+    " 승인할 수 없습니다. 단가를 확인해 고치거나 새로 듣는 전사 엔진을 바꾸세요. 유료 호출은"
+    " 시작하지 않았습니다."
+)
+"""Gemini 전사 엔진의 1단계 시작 문(W-31e) — 키 이름만 말하고 값은 어디에도 싣지 않는다."""
 STATUS_SENT_CELLS = ("button", "summary", "progress", "note", "usage")
 """1초 상태 틱(D63 세션 C)이 세션마다 「마지막으로 보낸 값」을 기억하는 칸 — 승인 단추 · 견적 문구 ·
 상태 줄 · 전문 칸 · 실사용 원천. 칸마다 `gr.State` 하나다: 다른 사건이 칸을 잊게 할 때 틱이 쓰는
@@ -364,6 +389,16 @@ STAGE_NOTES = {
     ),
 }
 """「전사만」(D59 19b)이 남기는 두 기다림 단계의 안내 — 무엇을 눌러야 이어지는지 말한다."""
+RELISTEN_ENGINE_PENDING_TEXT = "다시 들을 전사 엔진: {engine}."
+RELISTEN_ENGINE_SAME_TEXT = (
+    "이 영상의 원본 자막은 {engine}로 들었습니다. 다시 들어도 {engine}로 듣습니다."
+)
+RELISTEN_ENGINE_CHANGE_TEXT = (
+    "이 영상의 원본 자막은 {engine}로 들었습니다. 다시 들으면 {new}로 듣습니다"
+    f" (「{TIMING_ENGINE_LABEL}」 설정)."
+)
+"""「다시 듣기」 칸의 전사 엔진 문구(W-31e, D92) — 엔진을 바꾸는 길은 다시 듣기뿐이라, 누르기 전에
+어느 엔진으로 듣는지 말한다. 금액은 견적만 말한다(D57 결정 7)."""
 RETRY_TRANSCRIBE_TEXT = (
     "이전 분석 기준의 실패 구간은 이어서 재시도할 수 없어 「전사만」 새 분석으로 다시 묻습니다."
     f" 승인 범위를 「전사만」으로 바꿨습니다. 견적을 확인한 뒤 「{LIBRARY_APPROVE_LABEL}」을"
@@ -1286,6 +1321,52 @@ def _provider_word(model: str) -> str:
     """공급자의 화면 이름 — 견적 꼬리에만 쓴다."""
     google = raw_service.analysis_provider(model) == raw_service.ANALYSIS_PROVIDER_GOOGLE
     return "Gemini" if google else "Claude"
+
+
+def _engine_label_for_key(key: str) -> str:
+    return str(raw_service.timing_engine_facts(key, date.today()).label)
+
+
+def _engine_label(model: str) -> str:
+    """시간 모델의 화면 이름(D92) — 견적 줄·다시 듣기 칸이 쓴다."""
+    return _engine_label_for_key(raw_service.timing_engine_key(model))
+
+
+def _timing_engine_choice_label(key: str) -> str:
+    """「새로 듣는 전사 엔진」 선택지 이름 — 종료일이 있는 엔진(whisper)에는 그 날짜를 붙인다."""
+    facts = raw_service.timing_engine_facts(key, date.today())
+    if facts.retires_on is None:
+        return str(facts.label)
+    return facts.label + TIMING_ENGINE_RETIRED_MARK.format(date=facts.retires_on.isoformat())
+
+
+def _timing_price_unknown(facts: Any) -> str:
+    """가격 미정 문구 — 재확인 기한이 없는 엔진은 날짜 자리에 「재확인 기한」이라 말한다."""
+    until = facts.valid_through.isoformat() if facts.valid_through else "재확인 기한"
+    return TIMING_PRICE_UNKNOWN_TEXT.format(label=facts.label, date=until)
+
+
+def _timing_engine_sentence(estimates: Sequence[Any]) -> str:
+    """whisper가 아닌 전사 엔진(D92) 견적 문장 — 그 엔진으로 들을 영상이 있을 때만(앞 공백 포함).
+
+    whisper 전사비는 금액 없이 둔다(D57 결정 7). 금액은 영상마다 올린 값의 합을 센트로 올린다.
+    재확인 기한이 지나 금액이 없는 줄이 하나라도 있으면 합계를 말하지 않는다(가격 미정)."""
+    asked = [e for e in estimates if getattr(e, "timing_model", None)]
+    if not asked:
+        return ""
+    facts = raw_service.timing_engine_facts(
+        raw_service.timing_engine_key(asked[0].timing_model), date.today()
+    )
+    if facts.per_minute is None or any(e.timing_usd is None for e in asked):
+        return " " + _timing_price_unknown(facts)
+    seconds = sum((Fraction(e.asr_seconds) for e in asked), Fraction(0))
+    minutes = max(1, -(-seconds // 60))
+    usd = sum((Decimal(e.timing_usd) for e in asked), Decimal(0))
+    checked = "" if facts.checked_at is None else f", {facts.checked_at.isoformat()} 확인"
+    return (
+        f" 전사 엔진 {facts.label}로 영상 {len(asked)}개 {minutes}분을 듣습니다(공식 단가 분당"
+        f" ${facts.per_minute}{checked} · 약 ${usd.quantize(CENT, rounding=ROUND_CEILING)})."
+    )
 
 
 def _analysis_model_choice_label(model: str) -> str:
@@ -2873,7 +2954,7 @@ class RawWorkspaceUi:
         if cached and pending:
             breakdown = _pending_breakdown(self._task_views(root), [e.asset_id for e in pending])
         asr = sum(e.asr_chunk_count for e in pending)
-        text_pass = _text_pass_sentence(quote, pending)
+        text_pass = _timing_engine_sentence(pending) + _text_pass_sentence(quote, pending)
         rescue = _rescue_sentence(pending)
         if _transcribe_only(quote):
             return (
@@ -3214,8 +3295,11 @@ class RawWorkspaceUi:
             return self._library_reply(root, NOTICE_KEY, open_panel=True)
         if self._quick.get("connection_required"):  # 키가 생겼다 — 연결 안내가 견적을 가리지 않게
             self._quick_update(self._quick["token"], connection_required=False)
-        # 「전사만」은 영상 분석 모델을 부르지 않는다 — Claude 키가 없어도 된다(D59 19b).
-        problem = None if _transcribe_only(quote) else self._claude_key_problem(root)
+        # 「전사만」은 영상 분석 모델을 부르지 않는다 — Claude 키가 없어도 된다(D59 19b). 전사
+        # 엔진(D92)의 키·단가는 두 범위 모두 본다.
+        problem = self._timing_engine_problem(quote) or (
+            None if _transcribe_only(quote) else self._claude_key_problem(root)
+        )
         if problem is not None:
             notice = f"**연결 설정 필요 · 아직 분석하지 않았습니다**\n\n{problem}"
             self._set_approval_notice(root, NOTICE_KEY, notice)
@@ -3508,7 +3592,9 @@ class RawWorkspaceUi:
         「전사만」 견적은 전사만 말한다 — 영상 분석 모델·상한은 싣지 않는다(D59 19b)."""
         chunks = sum(e.asr_chunk_count for e in quote.estimates)
         duration = sum(float(Fraction(e.asr_seconds)) for e in quote.estimates)
-        text_pass = _text_pass_sentence(quote, quote.estimates)
+        text_pass = _timing_engine_sentence(quote.estimates) + _text_pass_sentence(
+            quote, quote.estimates
+        )
         rescue = _rescue_sentence(quote.estimates)
         if _transcribe_only(quote):
             return (
@@ -3576,9 +3662,10 @@ class RawWorkspaceUi:
         if state.get("quote_unseen") is not None:
             self._quick_update(state["token"], quote_unseen=None)  # 이 답이 견적을 화면에 낸다
             return f"{NOTICE_TEXT[NOTICE_UNSEEN]}\n\n{self._approval_ready_text(state['quote'])}"
-        if _transcribe_only(state.get("quote")):
+        problem = self._timing_engine_problem(state.get("quote"))
+        if problem is None and _transcribe_only(state.get("quote")):
             return None  # 「전사만」은 영상 분석 모델을 부르지 않는다 — Claude 키 불필요(D59 19b)
-        problem = self._claude_key_problem(root)
+        problem = problem or self._claude_key_problem(root)
         if problem is not None:
             self._quick_update(state["token"], error=problem)
             return self._quick_status()
@@ -3592,6 +3679,28 @@ class RawWorkspaceUi:
             f"{what} 견적을 버렸다 — 재는 사이 설정이 바뀌었다({quote.workflow.models.luna_model})"
         )
         return False
+
+    def _timing_engine_problem(self, quote: Any) -> str | None:
+        """whisper가 아닌 전사 엔진(D92)으로 들을 영상이 있는데 단가가 없거나 키가 없으면 그 말.
+
+        승인을 접수하기 전, 전사를 사기 전에 닫는다(두 범위 모두). whisper만이면 None이다."""
+        asked = [e for e in getattr(quote, "estimates", ()) if getattr(e, "timing_model", None)]
+        if not asked:
+            return None
+        facts = raw_service.timing_engine_facts(
+            raw_service.timing_engine_key(asked[0].timing_model), date.today()
+        )
+        if facts.per_minute is None or any(e.timing_usd is None for e in asked):
+            return _timing_price_unknown(facts)
+        if self._live_transport is not None:
+            ready = getattr(self._live_transport, "timing_client", None) is not None
+        else:
+            ready = self._startup_gemini is not None
+        if ready:
+            return None
+        return TIMING_KEY_MISSING_TEXT.format(
+            label=facts.label, env=raw_service.ANALYSIS_GEMINI_KEY_ENV
+        )
 
     def _claude_key_problem(self, root: Path) -> str | None:
         """Claude·Gemini를 골랐는데 키가 없으면 그 말 — 전사를 사기 전에, 작업을 띄우기 전에 닫는다.
@@ -4271,6 +4380,16 @@ class RawWorkspaceUi:
             analysis_model_md = gr.Markdown(
                 self.analysis_model_status(), elem_id="analysis-model-status"
             )
+            timing_engine = gr.Dropdown(
+                choices=self.timing_engine_choices(),
+                value=self._current_timing_engine(),
+                label=TIMING_ENGINE_LABEL,
+                interactive=True,
+                elem_id=TIMING_ENGINE_ID,
+            )
+            timing_engine_md = gr.Markdown(
+                self.timing_engine_status(), elem_id=f"{TIMING_ENGINE_ID}-status"
+            )
         self._analysis_model_dd, self._analysis_model_md = analysis_model, analysis_model_md
         # 사람이 고를 때만 저장한다(`input`) — 패널을 열 때 맞추는 값 갱신은 저장하지 않는다.
         analysis_model.input(
@@ -4281,6 +4400,12 @@ class RawWorkspaceUi:
         quick_api_panel.expand(
             self.analysis_model_controls, None, [analysis_model, analysis_model_md]
         )
+        timing_engine.input(
+            self.settings_timing_engine_view,
+            [self._signature_state, timing_engine],
+            [timing_engine_md, timing_engine],
+        )
+        quick_api_panel.expand(self.timing_engine_controls, None, [timing_engine, timing_engine_md])
         return quick_api_panel, quick_api_key
 
     def _review_tab(self) -> None:
@@ -6854,6 +6979,9 @@ class RawWorkspaceUi:
             "heard": bool(epoch.epoch and not epoch.pending),
             "explanation": RELISTEN_EXPLANATION,
         }
+        engine = self._relisten_engine_text(root, source_id, bool(epoch.pending))
+        if engine is not None:
+            view["engine"] = engine  # whisper뿐이면 칸 값이 W-31e 이전 그대로다
         if self.raw.refill_running(root, source_id):
             view["refillRunning"] = RELISTEN_REFILL_RUNNING_TEXT
         snapped = self.raw.revert_snap_state(root, source_id)
@@ -6862,6 +6990,25 @@ class RawWorkspaceUi:
             # 그대로.
             view["snapped"] = RELISTEN_SNAPPED_TEXT
         return view
+
+    def _relisten_engine_text(self, root: Path, source_id: str, pending: bool) -> str | None:
+        """「다시 듣기」 칸의 전사 엔진 한 줄(W-31e, D92) — 지금 자막의 엔진과 다시 들을 엔진.
+
+        기다리는 중이면 그 원본이 들을 엔진(고정됐으면 그 엔진)만 말한다. 금액은 싣지 않는다
+        (D57). 그 원본도 「새로 듣는 엔진」도 whisper면 None이다 — whisper뿐인 작업공간의 작업대
+        바이트가 그대로다(D92)."""
+        model = self.raw.source_settings(root, source_id).models.timing_model
+        new_key = self.raw.new_hearing_engine(root)
+        whisper = raw_service.TIMING_ENGINE_WHISPER
+        if raw_service.timing_engine_key(model) == whisper and new_key == whisper:
+            return None
+        now = _engine_label(model)
+        if pending:
+            return RELISTEN_ENGINE_PENDING_TEXT.format(engine=now)
+        new = _engine_label_for_key(new_key)
+        if new == now:
+            return RELISTEN_ENGINE_SAME_TEXT.format(engine=now)
+        return RELISTEN_ENGINE_CHANGE_TEXT.format(engine=now, new=new)
 
     def _visual_relisten(self, root: Path, payload: Mapping[str, object], echo: str) -> dict:
         """「다시 듣기」 — 그 영상의 차례를 올리고 승인 범위를 「전사만」으로 둔다(무료, D59 19b).
@@ -8231,6 +8378,87 @@ class RawWorkspaceUi:
             raise gr.Error(str(error)) from error
         self._after_model_change(root)
         return self.analysis_model_status(root), self._model_dropdown(model)
+
+    # ── 새로 듣는 전사 엔진(W-31e, D92) — 작업공간 meta에 산다(기본 whisper, W-31f까지) ─────────
+
+    def timing_engine_choices(self) -> list[tuple[str, str]]:
+        """「새로 듣는 전사 엔진」 칸의 선택지 — 새 엔진이 앞이다. 금액은 싣지 않는다(D57)."""
+        return [
+            (_timing_engine_choice_label(key), key) for key in raw_service.TIMING_ENGINE_CHOICES
+        ]
+
+    def _current_timing_engine(self) -> str:
+        root = self._snapshot_root()
+        if root is None:
+            return raw_service.TIMING_ENGINE_WHISPER
+        try:
+            return str(self.raw.new_hearing_engine(root))
+        except raw_service.RawWorkspaceError:
+            return raw_service.TIMING_ENGINE_WHISPER
+
+    def _timing_engine_dropdown(self, key: str) -> Any:
+        return gr.Dropdown(choices=self.timing_engine_choices(), value=key)
+
+    def timing_engine_status(self, root: Path | None = None) -> str:
+        """엔진·단가·키 상태 — 이미 들은 영상은 그대로라는 말과 함께. 키는 이름만 말한다."""
+        root = root if root is not None else self._snapshot_root()
+        key = self._current_timing_engine() if root is None else self.raw.new_hearing_engine(root)
+        facts = raw_service.timing_engine_facts(key, date.today())
+        head = (
+            f"새로 듣는 영상은 **{facts.label}**로 듣습니다. 이미 들은 영상은 그대로이고, 엔진을"
+            " 바꾸려면 그 영상에서 「다시 듣기」를 고르세요."
+        )
+        if facts.retires_on is not None:
+            return f"{head}\n\n{facts.label}은(는) {facts.retires_on.isoformat()}에 종료됩니다."
+        return f"{head}\n\n{self._timing_price_note(facts)}\n\n{self._timing_key_note()}"
+
+    @staticmethod
+    def _timing_price_note(facts: Any) -> str:
+        if facts.per_minute is None:
+            return _timing_price_unknown(facts)
+        return (
+            f"공식 단가 확인됨({facts.checked_at.isoformat()} 확인,"
+            f" {facts.valid_through.isoformat()}까지 다시 확인) — 금액은 견적에서 보여 드립니다"
+        )
+
+    def _timing_key_note(self) -> str:
+        env = raw_service.ANALYSIS_GEMINI_KEY_ENV
+        if self._startup_gemini is not None:
+            note = GEMINI_TRANSCRIBE_PAID_KEY_NOTE
+            return f"Gemini 키(`{env}`) 확인됨 — 값은 표시하지 않습니다. {note}"
+        return (
+            f"Gemini 키(`{env}`) 없음 — 이 엔진으로 들으려면 `.env`에 넣고 앱을 다시 띄우세요."
+            f" {GEMINI_TRANSCRIBE_PAID_KEY_NOTE}"
+        )
+
+    def timing_engine_controls(self) -> tuple[Any, str]:
+        """패널을 열 때 칸과 상태를 지금 작업공간 값으로 맞춘다."""
+        return self._timing_engine_dropdown(
+            self._current_timing_engine()
+        ), self.timing_engine_status()
+
+    def settings_timing_engine_view(
+        self, signature: str | None, key: str | None
+    ) -> tuple[str, Any]:
+        """새로 듣는 전사 엔진 바꾸기(W-31e) — 로컬 표지만. 분석·승인 확인 중에는 바꾸지 않는다.
+
+        이미 들은 영상의 엔진은 고정이라 바뀌지 않는다(D92). 처음 듣거나 다시 듣기를 기다리는 영상의
+        견적이 바뀌므로 라이브러리 캐시를 비우고 견적을 다시 낸다(읽기만, 유료 호출 0회)."""
+        root = self._require_current_selection(signature)
+        if key not in raw_service.TIMING_ENGINE_CHOICES:
+            raise gr.Error(f"고를 수 없는 전사 엔진입니다: {key!r}")
+        current = str(self.raw.new_hearing_engine(root))
+        if key == current:
+            return self.timing_engine_status(root), self._timing_engine_dropdown(key)
+        if self._analysis_busy(root):
+            status = f"{TIMING_ENGINE_BUSY_TEXT}\n\n{self.timing_engine_status(root)}"
+            return status, self._timing_engine_dropdown(current)
+        try:
+            self.raw.set_new_hearing_engine(root, key)
+        except raw_service.RawWorkspaceError as error:
+            raise gr.Error(str(error)) from error
+        self._after_model_change(root)
+        return self.timing_engine_status(root), self._timing_engine_dropdown(key)
 
     def _analysis_busy(self, root: Path) -> bool:
         """분석·승인 확인이 도는가 — 이 동안 모델이 바뀌면 견적이 본 모델과 실행이 갈린다."""

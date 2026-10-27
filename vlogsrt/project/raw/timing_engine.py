@@ -19,13 +19,19 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from datetime import date
+from decimal import Decimal
 from typing import Any
 
 from vlogsrt.project.raw import asr_epoch, read_scope, source_transcript
 from vlogsrt.project.raw.config import (
+    CONFIRMED_TIMING_SHUTDOWN_DATE,
+    GEMINI_TRANSCRIBE_PROFILES,
     TIMING_ENGINE_WHISPER,
     TIMING_ENGINES,
     RawWorkflowConfig,
+    timing_engine_for_model,
     timing_engine_view,
 )
 from vlogsrt.project.raw.models import RawWorkspaceError
@@ -104,6 +110,45 @@ def binding_tag(workspace: Any, asset_id: str) -> str | None:
     return None if key == TIMING_ENGINE_WHISPER else f"{TAG_PREFIX}{key}"
 
 
+@dataclass(frozen=True, slots=True)
+class EngineFacts:
+    """화면이 말하는 엔진 하나(W-31e) — 이름·그날의 분당 단가(없으면 가격 미정)·확인일·기한·종료일.
+
+    whisper의 분당 단가는 싣지만 화면은 말하지 않는다(D57 결정 7 — whisper 전사비는 금액 없이)."""
+
+    key: str
+    model: str
+    label: str
+    per_minute: Decimal | None
+    checked_at: date | None
+    valid_through: date | None
+    retires_on: date | None
+
+
+def facts(key: str, on: date) -> EngineFacts:
+    """엔진 열쇠 하나의 화면 사실 — Gemini는 등록표, whisper는 능력표의 종료일이다."""
+    from vlogsrt.project.raw.capabilities import timing_price_per_minute
+
+    _require_engine(key)
+    engine = TIMING_ENGINES[key]
+    profile = GEMINI_TRANSCRIBE_PROFILES.get(engine.model)
+    whisper = key == TIMING_ENGINE_WHISPER
+    return EngineFacts(
+        key=key,
+        model=engine.model,
+        label=engine.label,
+        per_minute=timing_price_per_minute(engine.model, on),
+        checked_at=None if profile is None else profile.pricing_checked_at,
+        valid_through=None if profile is None else profile.price_valid_through,
+        retires_on=CONFIRMED_TIMING_SHUTDOWN_DATE if whisper else None,
+    )
+
+
+def key_for_model(model: str) -> str:
+    """견적 줄의 시간 모델 → 엔진 열쇠(모르는 모델은 ValueError — 조용히 whisper로 읽지 않는다)."""
+    return timing_engine_for_model(model).key
+
+
 def _require_engine(key: str) -> None:
     if key not in TIMING_ENGINES:
         raise RawWorkspaceError(f"모르는 시간 엔진입니다: {key!r} — {', '.join(TIMING_ENGINES)}")
@@ -129,9 +174,12 @@ def _read(workspace: Any) -> tuple[dict[tuple[str, int], str], str | None]:
 
 __all__ = [
     "DEFAULT_NEW_HEARING_ENGINE",
+    "EngineFacts",
     "META_KEY",
     "TABLE",
     "binding_tag",
+    "facts",
+    "key_for_model",
     "new_hearing_engine",
     "pin",
     "pinned",

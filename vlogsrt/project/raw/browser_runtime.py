@@ -413,6 +413,11 @@ def mint_asr_approvals(
             raise BrowserRuntimeError(
                 f"검증된 원본이 아니다: {estimate.source_name} — 가져오기를 먼저 끝내세요"
             )
+        if estimate.timing_model is not None and estimate.timing_usd is None:
+            raise BrowserRuntimeError(
+                f"전사 엔진 {estimate.timing_model}의 단가가 재확인 기한을 지나 가격 미정이다:"
+                f" {estimate.source_name} — 단가를 확인해 고친 뒤 새 견적을 받아라(D92)"
+            )
         view = service.source_settings(root, estimate.asset_id)  # 그 원본의 시간 엔진(D92)
         approvals[estimate.asset_id] = AsrPhaseApproval(
             approved=True,

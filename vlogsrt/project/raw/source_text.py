@@ -36,7 +36,7 @@ from vlogsrt import log, retext
 from vlogsrt.config import Config
 from vlogsrt.hangul import strip_for_compare
 from vlogsrt.models import Chunk, RetextRecord, RetextRejection, RetextUnplaced, Segment
-from vlogsrt.project.raw import request_log
+from vlogsrt.project.raw import request_log, source_transcript
 from vlogsrt.project.raw.analysis_approval import AsrPhaseApproval, require_live_asr_approval
 from vlogsrt.project.raw.analysis_config import RawUnderstandingSettings
 from vlogsrt.project.raw.caption_provider import (
@@ -89,7 +89,7 @@ PASS_PARTIAL = "partial"
 REASON_ACCEPTED = "accepted"  # 게이트를 지나 글자를 바꿨다
 REASON_AGREED = "agreed"  # 게이트를 지났지만 두 귀가 같은 글자를 들었다 — whisper 글자 그대로
 REASON_UNDECIDED = "undecided"  # 계획에 판정이 없다(되풀이 제외 같은 자리) — whisper 글자 그대로
-REASON_CANDIDATE = "candidate"
+REASON_CANDIDATE = source_transcript.REASON_CANDIDATE  # Gemini 원본 — 후보로만 남았다(D92)
 """게이트를 지났지만 시간 엔진이 글자를 바꾸지 않는 엔진이다(Gemini, D92) — 후보(`alt_text`)로만."""
 
 

@@ -86,6 +86,7 @@ from vlogsrt.project.raw.config import (
     DEFAULT_ANALYSIS_MODEL,
     GEMINI_MODEL_PREFIX,
     PREVIOUS_DEFAULT_ANALYSIS_MODELS,
+    TIMING_ENGINE_GEMINI,
     TIMING_ENGINE_WHISPER,
     WORKFLOW_SCHEMA_VERSION,
     RawWorkflowConfig,
@@ -264,6 +265,11 @@ from vlogsrt.project.raw.workspace import (
 
 __all__ = [
     # UI는 이 모듈만 가져갈 수 있다(정확 경로 예외) — 계약 오류도 여기서 다시 낸다.
+    "TIMING_ENGINE_CHOICES",
+    "TIMING_ENGINE_GEMINI",
+    "TIMING_ENGINE_WHISPER",
+    "timing_engine_facts",
+    "timing_engine_key",
     "ACTIVE_JOB_STATUSES",
     "ANALYSIS_CLAUDE_KEY_ENV",
     "ANALYSIS_GEMINI_KEY_ENV",
@@ -441,6 +447,11 @@ OLD_PROMPT_REFUSAL = (
 )
 """이전 안내문 리비전으로 시작한 분석을 이으려 할 때의 거절 문구(D58 18b) — 내부 리비전 이름은
 싣지 않는다(D57)."""
+
+TIMING_ENGINE_CHOICES: tuple[str, ...] = (TIMING_ENGINE_GEMINI, TIMING_ENGINE_WHISPER)
+"""「새로 듣는 전사 엔진」 칸의 차례(W-31e) — 새 엔진이 앞, 종료될 whisper가 뒤다."""
+timing_engine_facts = timing_engine.facts
+timing_engine_key = timing_engine.key_for_model
 
 SELECTION_MODE_FULL = selection_analysis.MODE_FULL
 SELECTION_MODE_TRANSCRIBE = selection_analysis.MODE_TRANSCRIBE
@@ -5550,13 +5561,16 @@ def _truth_strata(
 
 def _ear_disagreed(transcript: Mapping[str, Any]) -> frozenset[str]:
     """다른 귀가 조각을 다르게 들어 D37 조각 게이트가 거절한 줄(W-29a, D77) — 합친 줄은 `+`로 이은
-    이유 가운데 하나라도."""
+    이유 가운데 하나라도. Gemini 원본에서 다른 귀 글자를 후보로만 둔 줄도 같다(W-31e, D92) — 글자를
+    바꾸지 않았으니 사람이 들어 볼 줄이다."""
+    from vlogsrt.project.raw.source_text import REASON_CANDIDATE
     from vlogsrt.retext import REASON_CHUNK
 
+    reasons = {REASON_CHUNK, REASON_CANDIDATE}
     return frozenset(
         str(row["utterance_id"])
         for row in transcript.get("utterances", [])
-        if REASON_CHUNK in str(row.get("retext_reason") or "").split("+")
+        if reasons.intersection(str(row.get("retext_reason") or "").split("+"))
     )
 
 
