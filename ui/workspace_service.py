@@ -535,6 +535,41 @@ FOLDER_IMPORT_STARTED_TEXT = (
 RENDER_EXPORT_LABEL = "추천만 이어붙여 내보내기"
 """명령 줄의 내보내기 단추(W-46a, D100 §7a) — 추천(초록)만 이은 초안 영상 + SRT + 보고서."""
 RENDER_EXPORT_ID = "vl-render-export"
+RANGE_MARK_WORDS: dict[str, str] = {
+    "recommended": "추천",
+    "normal": "보통",
+    "not_recommended": "비추천",
+    "clear": "표시 지우기",
+}
+"""재생기 시작·끝 표시의 넷(W-46b, D100 §4·§7b) — 서비스 `RANGE_MARKS`와 같은 철자다
+(시험이 맞춘다)."""
+RANGE_MARKED_TEXT = "{start}초~{end}초 표시: {word}. 「되돌리기」로 한 걸음 되돌립니다."
+RANGE_UNDONE_TEXT = "마지막 편집을 되돌렸습니다."
+RANGE_STALE_TEXT = "다른 곳에서 바뀌어 새로 불러왔습니다 — 다시 표시해 주세요"
+RANGE_REFUSED_PREFIX = "표시하지 못했습니다: "
+EDIT_STALE_TEXT = "다른 곳에서 바뀌어 새로 불러왔습니다 — 다시 눌러 주세요"
+"""명령 줄·서랍의 검토 편집(제외 제안 모두 확인 · 실행 취소 · 자동 제외 전체 복원)이 낡은 머리를
+만났을 때(W-46b)."""
+LIBRARY_SUMMARY_EMPTY_TEXT = "폴더를 불러오면 분석 범위와 요청 상한을 안내합니다."
+STATUS_MEMO_QUICK_FIELDS = (
+    "root",
+    "token",
+    "stage",
+    "revision",
+    "quote",
+    "error",
+    "connection_required",
+    "asset_ids",
+)
+"""상태 틱 기억의 열쇠에 드는 고른 영상 상태 칸 — 상태 줄 글이 읽는 칸들이다
+(`_quick_status_text`)."""
+TICK_RECENT_JOBS = 8
+"""틱 도장이 보는 최근 작업 수 — 예전 `list_jobs(limit=8)` 그대로다(활성 작업은 수와 무관하게
+다 본다)."""
+STATUS_MEMO_MAX_AGE_SECONDS = 5.0
+"""1초 상태 틱의 기억(견적 문구·승인 단추·상태 줄·실사용 줄)의 최대 나이 — 외부 근거 없는 조정 대상
+(W-46b, D100 §7b). 열쇠(작업 상태·선택 상태 도장·기억의 견적·알림·단계)가 같아도 이만큼 지나면
+다시 짓는다 — 열쇠가 모르는 칸(모델 설정 등)이 바뀌어도 화면이 그보다 오래 옛 글을 보이지 않는다."""
 RENDER_EXPORT_STARTED_TEXT = (
     "추천 구간만 이어붙인 초안을 만듭니다 — 끝나면 견적 칸 아래에 결과 카드가 뜹니다."
 )
@@ -1957,6 +1992,10 @@ class RawWorkspaceUi:
         self._capcut_render_generation = 0
         # 타이머가 마지막으로 정리 고리를 돌린 작업 상태 — 진행만 바뀐 틱은 고리를 돌지 않는다(D63).
         self._capcut_upkeep_key: tuple | None = None
+        # 틱 도장의 저장된 선택 상태 CRC — 바뀐 틱에서만 상태를 다시 읽어 맞춘다(W-46b).
+        self._tick_selection_digest: dict[Path, int] = {}
+        # 1초 상태 틱의 기억 — (이름, 작업공간) → (열쇠, 지은 때, 값)(W-46b, D100 §7b).
+        self._status_memos: dict[tuple[str, Path], tuple[tuple, float, Any]] = {}
         # 자막 작업대의 확정 조건 표시 — 검토 상태를 다시 읽을 때마다 갱신한다.
         self._caption_warnings_open: int = 0
         self._caption_unplaced_open: int = 0
@@ -3225,11 +3264,61 @@ class RawWorkspaceUi:
 
     def library_analysis_summary(self) -> str:
         root = self._snapshot_root()
-        pending = self._library_pending(root) if root else None
-        if root is None or pending is None:
-            return "폴더를 불러오면 분석 범위와 요청 상한을 안내합니다."
+        if root is None:
+            return LIBRARY_SUMMARY_EMPTY_TEXT
+        return str(self._status_memo("summary", root, lambda: self._library_summary_now(root)))
+
+    def _library_summary_now(self, root: Path) -> str:
+        pending = self._library_pending(root)
+        if pending is None:
+            return LIBRARY_SUMMARY_EMPTY_TEXT
         ids, quote = pending
         return self._library_summary_for(root, quote, ids)
+
+    def _status_memo(
+        self, name: str, root: Path, compute: Callable[[], Any], *, live: bool = False
+    ) -> Any:
+        """1초 상태 틱의 기억(W-46b, D100 §7b) — 열쇠가 같으면 지난 값을 그대로 쓴다(D63 꼴).
+
+        열쇠는 작업 (아이디, 상태)·저장된 선택 상태 도장(DB 한 번, 틱 안에서 함께 쓴다)과 기억의
+        견적·알림·단계·대기열이다. `live`(상태 줄·실사용 줄)는 도는 작업이 있으면 틱마다 다시
+        짓는다 — 진행 수·사용량은 작업이 도는 동안에만 움직인다. 열쇠가 모르는 칸이 바뀌어도
+        `STATUS_MEMO_MAX_AGE_SECONDS` 안에 다시 짓는다. 승인 단추의 끝난 작업 걷기 같은 부수
+        효과는 기억 밖에서 틱마다 돈다(`library_analysis_button`).
+        """
+        key = self._status_memo_key(root)
+        now = time.monotonic()
+        held = self._status_memos.get((name, root))
+        running = live and bool(self._poll_stamp(root).active_jobs)
+        fresh = held is not None and now - held[1] < STATUS_MEMO_MAX_AGE_SECONDS
+        if held is not None and fresh and held[0] == key and not running:
+            return held[2]
+        value = compute()
+        self._status_memos[(name, root)] = (key, now, value)
+        return value
+
+    def _status_memo_key(self, root: Path) -> tuple:
+        stamp = self._poll_stamp(root)
+        with self._selection_lock:
+            queued = (tuple(self._analysis_queue), tuple(sorted(self._analysis_active)))
+            tasks = tuple(
+                (str(token), task.get("stage"), task.get("revision"), task.get("quote"))
+                for token, task in self._quick_tasks.items()
+                if task.get("root") == root
+            )
+            cached = tuple(sorted(self._library_cached_ids.get(root, ())))
+        quick = self._quick
+        return (
+            stamp.job_states,
+            stamp.selection_states,
+            queued,
+            tasks,
+            cached,
+            self._library_quotes.get(root),
+            self._approval_notice.get(root),
+            self._approval_jobs.get(root),
+            tuple(quick.get(k) for k in STATUS_MEMO_QUICK_FIELDS),
+        )
 
     def _library_cached(self, root: Path) -> set[str]:
         # 끝난 분석이 다른 스레드에서 이 집합을 고친다 — 잠금 안에서 사본을 뜬다.
@@ -3495,11 +3584,14 @@ class RawWorkspaceUi:
 
     def library_analysis_button(self) -> Any:
         root = self._snapshot_root()
-        active = root is not None and (
-            self._approval_active(root)
-            or bool(self._library_busy_ids(root, self._task_views(root)))
+        # 끝난 승인 작업 걷기(`_approval_active`)는 틱마다 돈다 — 기억은 그 뒤의 읽기만 아낀다.
+        approving = root is not None and self._approval_active(root)
+        busy, pending = (
+            self._status_memo("button", root, lambda: self._library_button_facts(root))
+            if root is not None
+            else (False, None)
         )
-        pending = self._library_pending(root) if root else None
+        active = approving or busy
         ids = pending[0] if pending is not None else ()
         library = self._library_quotes.get(root) if root else None
         if active or library is None:
@@ -3512,6 +3604,11 @@ class RawWorkspaceUi:
         else:
             label = LIBRARY_APPROVE_LABEL
         return gr.Button(value=label, visible=True, interactive=not active and bool(ids))
+
+    def _library_button_facts(self, root: Path) -> tuple[bool, Any]:
+        """승인 단추의 재료 — (돌거나 기다리는 영상이 있는가, 남은 영상과 그 견적)."""
+        busy = bool(self._library_busy_ids(root, self._task_views(root)))
+        return busy, self._library_pending(root)
 
     def _set_approval_notice(
         self,
@@ -4236,6 +4333,14 @@ class RawWorkspaceUi:
         if root is None:
             return gr.skip()
         # 종류로 찾는다 — 최근 10개 창은 짧은 미리보기 작업 몇 개에 밀려 보내는 중을 놓쳤다(W-24 J).
+        return self._status_memo(
+            f"progress:{signature}",
+            root,
+            lambda: self._capcut_status_text(root, signature),
+            live=True,
+        )
+
+    def _capcut_status_text(self, root: Path, signature: str) -> str:
         export = self.raw.latest_job(root, FINALCUT_SEND_JOB_KIND)
         if export and export.status in ("queued", "running"):
             if export.input_fingerprint.startswith(FINALCUT_SRT_FINGERPRINT_PREFIX):
@@ -4275,11 +4380,13 @@ class RawWorkspaceUi:
         view_token = self._visual_lifetime_token
         # 그리기 열쇠의 재료만 읽기 범위 안에서 읽는다 — 정리 고리(작업을 건다)가 도는
         # `_capcut_result`는 이 범위 밖이고, 그리기는 그 뒤에 제 범위를 연다(D63).
+        # 바뀐 것이 없는 틱은 열쇠(DB 한 번)만 읽는다 — 상태 줄 글도 짓지 않는다(W-46b, D100 §7b).
+        # 화면의 상태 줄은 1초 상태 틱의 몫이고, 이 칸(단추 응답 칸)은 단추 사건만 옮긴다.
         with raw_service.read_scope.open():
             key, job_states = self._tick_key(root, signature)
+            if key == drawn:
+                return gr.skip(), gr.skip(), gr.skip(), gr.skip()
             status = self._quick_status() if self._quick else self._capcut_progress(root)
-        if key == drawn:
-            return status, gr.skip(), gr.skip(), gr.skip()
         upkeep = (signature, job_states) != self._capcut_upkeep_key
         self._capcut_upkeep_key = (signature, job_states)
         message, _shell, workbench = self._capcut_result(root, status, upkeep=upkeep)
@@ -4295,39 +4402,38 @@ class RawWorkspaceUi:
         """
         if not self._quick:
             self._quick = self.raw.load_selection_state(root)
-        self._load_quick_tasks(root)
-        jobs = self.raw.list_jobs(root, limit=8)
-        transcript_revisions = tuple(
-            (asset_id, (self.raw.source_transcript(root, asset_id) or {}).get("revision"))
-            for asset_id in self._quick.get("asset_ids", ())
-        )
-        job_states = self._job_states(root, jobs)
+        # 도장 하나(DB 연결 하나)가 원본 자막 차례 · 최근·활성 작업 · 저장된 선택 상태를 함께 싣는다
+        # (W-46b) — 예전엔 틱마다 원본 자막 본문 전부와 선택 상태 전부를 풀었다. 저장된 선택 상태가
+        # 바뀐 틱에서만 다시 읽어 맞춘다(이 프로세스가 쓴 상태는 이미 기억에 있다).
+        stamp = self._poll_stamp(root)
+        if stamp.selection_states != self._tick_selection_digest.get(root):
+            self._load_quick_tasks(root)
+            self._tick_selection_digest[root] = stamp.selection_states
+        job_states = stamp.job_states
         key = (
             signature,
             self._capcut_render_generation,
-            transcript_revisions,
+            stamp.transcripts,
             tuple(
-                (j.job_id, j.status, j.progress_current)
-                if j.kind in WORKBENCH_PROGRESS_JOB_KINDS
-                else (j.job_id, j.status)
-                for j in jobs
+                (job_id, status, progress)
+                if kind in WORKBENCH_PROGRESS_JOB_KINDS
+                else (job_id, status)
+                for job_id, kind, status, progress in stamp.recent_jobs
             ),
             job_states,
+            stamp.selection_states,
             self._quick.get("stage"),
             self._quick.get("revision"),
             self._semantic_stamps(root),
         )
         return key, job_states
 
-    def _job_states(self, root: Path, recent: Sequence[Any]) -> frozenset[tuple[str, str]]:
-        """작업 (아이디, 상태)의 묶음 — 최근 작업과 활동 중인 작업 전부(D63).
-
-        정리 고리의 재료는 작업 본문이 쓰고, 본문이 끝나야 상태가 바뀐다 — 그래서 상태가 바뀐
-        틱만 고리를 돌린다. 진행 수는 넣지 않는다. 최근 창(8개) 밖으로 밀린 오래된 작업도 끝나면
-        활동 묶음에서 빠지므로 놓치지 않는다.
-        """
-        active = self.raw.all_active_jobs(root)
-        return frozenset((job.job_id, job.status) for job in (*recent, *active))
+    def _poll_stamp(self, root: Path) -> raw_service.PollStamp:
+        """틱의 도장 — 읽기 범위 안에서는 한 번만 읽는다(1초 상태 틱의 처리기들이 함께 쓴다)."""
+        return raw_service.read_scope.memo(
+            ("ui.poll_stamp", str(root)),
+            lambda: self.raw.poll_stamp(root, recent=TICK_RECENT_JOBS),
+        )
 
     def _semantic_stamps(self, root: Path) -> tuple:
         """영상 분석 중인 작업마다 등급 문서 도장 — 창 판정이 쌓이면 작업대를 다시 그린다(D63).
@@ -4360,6 +4466,11 @@ class RawWorkspaceUi:
             else:
                 facade.restore_automatic()
                 message = "자동 제외를 모두 복원했습니다. 사람이 고른 제외는 그대로입니다."
+        except raw_service.StaleRevisionError:
+            # 여는 때의 정리 고리가 검토 머리를 옮기는 중이었다(D53 순서 맞춤·다시 세우기) — 새
+            # 머리로 다시 그리고 다시 누르게 한다(W-46b).
+            _toast("warning", EDIT_STALE_TEXT)
+            return self._capcut_result(root, EDIT_STALE_TEXT)
         except raw_service.RawWorkspaceError as error:
             message = str(error)
             _toast("warning", message)
@@ -4376,7 +4487,13 @@ class RawWorkspaceUi:
         root = self._require_current_selection(signature)
         facade = self._review_facade(root)
         before = facade.unreviewed_auto_exclusion_count()
-        facade.confirm_automatic_exclusions()
+        try:
+            facade.confirm_automatic_exclusions()
+        except raw_service.StaleRevisionError:
+            # 여는 때의 정리 고리가 검토 머리를 옮기는 중이었다(D53) — 쓰지 않고 새 머리로 다시
+            # 그린다. 다시 누르면 새 머리의 제안을 확인한다(W-46b).
+            _toast("warning", EDIT_STALE_TEXT)
+            return self._capcut_result(root, EDIT_STALE_TEXT)
         if before:
             message = f"제외 제안 {before}개를 확인했습니다. 제외는 그대로 유지됩니다."
             _toast("info", message)
@@ -4901,8 +5018,13 @@ class RawWorkspaceUi:
         return ""
 
     def usage_line_markdown(self) -> str:
-        """실사용 줄만 — 기록 판 고정 줄의 원천(유료 실행 전에는 비어 있다, D46)."""
-        return self._usage_line()
+        """실사용 줄만 — 기록 판 고정 줄의 원천(유료 실행 전에는 비어 있다, D46).
+
+        사용량은 작업이 도는 동안에만 움직인다 — 1초 틱은 그때만 다시 센다(W-46b)."""
+        root = self._snapshot_root()
+        if root is None:
+            return self._usage_line()
+        return str(self._status_memo("usage", root, self._usage_line, live=True))
 
     def _quote_signature_current(self, signature: str | None) -> bool:
         return bool(signature) and signature == self._signature_for(self._snapshot_root())
@@ -6616,6 +6738,9 @@ class RawWorkspaceUi:
                         segment.end_pts,
                     ) not in plan_ranges
                     needs_plan = needs_plan or needs
+                    # 사람 표시(W-46b)는 있을 때만 싣는다 — 표시 없는 조각의 값은 예전 바이트
+                    # 그대로다.
+                    mark = raw_service.RawWorkspaceService.visual_range_mark(segment)
                     intervals.append(
                         {
                             "id": segment.segment_id,
@@ -6624,6 +6749,7 @@ class RawWorkspaceUi:
                             "sel": segment.selection,
                             "rec": segment.recommendation,
                             "needsExtract": needs,
+                            **({"mark": mark} if mark else {}),
                         }
                     )
                 sources_model[preview.source_id] = {
@@ -6720,6 +6846,7 @@ class RawWorkspaceUi:
         for sid, source in sources_model.items():
             task = task_views.get(sid, {})
             self._annotate_tiers(root, sid, source, task, pending_ids, suitability)
+            self._annotate_kept(root, revision, sid, source, task, suitability)
         for sid, source in sources_model.items():
             self._annotate_transcript(root, sid, source, quick)
             refs = self.raw.source_media_references(root, sid)
@@ -6979,6 +7106,38 @@ class RawWorkspaceUi:
         rows = suitability.get((task["revision"], source_id), [])
         source["suggestions"] = [self._suggestion_row(row) for row in rows]
         self._mark_open_reds(source, pending_ids)
+
+    def _annotate_kept(
+        self,
+        root: Path,
+        revision: Any,
+        source_id: str,
+        source: dict[str, Any],
+        task: Mapping[str, Any],
+        suitability: Mapping[tuple[Any, str], list[dict]],
+    ) -> None:
+        """원본 하나의 「내보낼 부분」(W-46b, D100 §7b) — 초안 렌더와 같은 순수 계획이 정한 범위.
+
+        녹색 등급 ∪ 사람 추천 − 사람 보통·비추천이다. 레일이 JS에서 다시 셈하지 않고 이 값만
+        그린다 — 화면에 보인 것이 곧 출력이다. 등급 증거가 없으면(분석 전) 사람 추천만 남는다.
+        재료가 어긋나 계획이 거절하면 띠를 비우고 까닭을 싣는다(그리기는 막지 않는다).
+        """
+        revision_id = task.get("revision")
+        spans = suitability.get((revision_id, source_id)) if revision_id else None
+        try:
+            kept = self.raw.visual_kept_ranges(root, revision, source_id, spans)
+        except ValueError as error:
+            source["kept"] = []
+            source["keptNote"] = f"내보낼 부분을 계산하지 못했습니다: {error}"
+            return
+        source["kept"] = [
+            {
+                "start": str(piece.start),
+                "end": str(piece.end),
+                "human": piece.reason == raw_service.KEPT_HUMAN_REASON,
+            }
+            for piece in kept
+        ]
 
     @staticmethod
     def _mark_open_reds(source: dict[str, Any], pending_ids: set[str]) -> None:
@@ -7586,6 +7745,8 @@ class RawWorkspaceUi:
             playhead = self._serve_fraction(payload, "playheadSec")
         source_id = self._serve_str(payload, "sourceId") or None
         selected_id = self._serve_str(payload, "selectedId") or None
+        if op in ("range", "undo"):
+            return self._visual_range_apply(root, payload, echo, op)
         if op == "selection":
             choice = self._serve_str(payload, "selection")
             if choice not in ("included", "excluded"):
@@ -7647,6 +7808,86 @@ class RawWorkspaceUi:
             "html": workbench,
             "videoSrc": None,
             "message": f"저장했습니다. 새 검토 리비전이 생겼습니다. `{edited.revision_id}`",
+        }
+
+    def _visual_range_apply(
+        self, root: Path, payload: Mapping[str, object], echo: str, op: str
+    ) -> dict:
+        """시작·끝 표시(`range`)와 그 되돌리기(`undo`) — 화면이 본 리비전에 묶인다(W-46b, D100 §7b).
+
+        표시는 `visual_mark_range` 한 번 = 리비전 하나다. 양 끝은 원점 기준 초의 정확 유리수 글자
+        (`"1001/30"`·`"2.5"`)이고 서비스가 가장 가까운 프레임에 맞춘다. 머리가 앞서 갔으면
+        (`StaleRevisionError`) 새 머리로 다시 그리고 「다시 표시해 주세요」라 답한다 — 화면의
+        시작·끝은 그대로라 단추를 다시 누르면 된다(`rangeStale`). 되돌리기는 옛 「실행 취소」와 같은
+        `undo` 한 걸음이고, 화면이 본 머리가 지금 머리일 때만 한다(다른 곳의 편집을 몰래 되돌리지
+        않는다). 거절(격자 밖·빈 범위·원본 밖·되돌릴 것 없음)은 까닭을 그대로 보인다.
+        """
+        revision_id = self._serve_str(payload, "revisionId")
+        base_plan = self._serve_str(payload, "basePlanId")
+        source_id = self._serve_str(payload, "sourceId")
+        try:
+            if op == "undo":
+                message = self._visual_undo(root, base_plan, revision_id)
+            else:
+                message = self._visual_mark(root, payload, base_plan, revision_id, source_id)
+        except raw_service.StaleRevisionError:
+            return self._range_reply(root, payload, echo, RANGE_STALE_TEXT, stale=True)
+        except (raw_service.ReviewError, raw_service.RawWorkspaceError) as error:
+            return {"ok": False, "error": f"{RANGE_REFUSED_PREFIX}{error}"}
+        self._refresh_review_panel_state(root)
+        return self._range_reply(root, payload, echo, message, stale=False)
+
+    def _visual_mark(
+        self,
+        root: Path,
+        payload: Mapping[str, object],
+        base_plan: str,
+        revision_id: str,
+        source_id: str,
+    ) -> str:
+        mark = self._serve_str(payload, "mark")
+        if mark not in RANGE_MARK_WORDS:
+            raise gr.Error(f"범위 표시가 알 수 없다: {mark!r}")
+        marked = self.raw.visual_mark_range(
+            root,
+            base_plan_id=base_plan,
+            expected_revision_id=revision_id,
+            source_id=source_id,
+            mark=mark,
+            start_seconds=self._serve_fraction(payload, "startSec"),
+            end_seconds=self._serve_fraction(payload, "endSec"),
+        )
+        clock = marked.revision.clock_for(source_id)
+        start = Fraction(marked.start_pts - clock.origin_pts) * clock.time_base if clock else 0
+        end = Fraction(marked.end_pts - clock.origin_pts) * clock.time_base if clock else 0
+        return RANGE_MARKED_TEXT.format(
+            word=RANGE_MARK_WORDS[mark], start=f"{float(start):.2f}", end=f"{float(end):.2f}"
+        )
+
+    def _visual_undo(self, root: Path, base_plan: str, revision_id: str) -> str:
+        facade = self._review_facade(root)
+        if facade.load_head(base_plan or None).revision.revision_id != revision_id:
+            raise raw_service.StaleRevisionError("화면이 본 뒤에 다른 편집이 먼저 저장됐다")
+        facade.undo(base_plan or None)
+        return RANGE_UNDONE_TEXT
+
+    def _range_reply(
+        self, root: Path, payload: Mapping[str, object], echo: str, message: str, *, stale: bool
+    ) -> dict:
+        _shell, workbench = self.visual_workbench_render(
+            root,
+            page=self._serve_int(payload, "page", 1),
+            preferred_selected_id=self._serve_str(payload, "selectedId") or None,
+            source_id=self._serve_str(payload, "sourceId") or None,
+            selection_filter=self._serve_str(payload, "filter") or "all",
+        )
+        return {
+            "ok": True,
+            "echoEpoch": echo,
+            "html": workbench,
+            "videoSrc": None,
+            "message": message,
+            "rangeStale": stale,
         }
 
     def _composed_memo(self, root: Path, base_plan: str, segment_id: str, memo: str) -> str:

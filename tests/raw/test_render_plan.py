@@ -26,6 +26,7 @@ from vlogsrt.project.raw.config import (
 from vlogsrt.project.raw.finalcut_export import caption_text
 from vlogsrt.project.raw.segment_review import (
     AUTO_EXCLUDED_UNREVIEWED_TAG,
+    RECOMMENDED,
     SELECTION_EXCLUDED,
     SELECTION_INCLUDED,
     ReviewSegment,
@@ -282,6 +283,45 @@ def test_kept_and_dropped_tile_every_source_exactly() -> None:
     ]
     plan = rp.build_plan(sources, SETTINGS)
     _require_tiles(plan, sources)
+
+
+def test_kept_ranges_of_one_source_are_exactly_the_plan_parts_of_that_source() -> None:
+    """작업대 레일의 「내보낼 부분」(W-46b) — 원본 하나로 잰 범위가 전체 계획의 그 원본 조각과
+    같다."""
+    sources = [
+        _source(
+            "a",
+            tiers=(_tier(0, F(7, 3)), _tier(F(7, 3), F(41, 7), "yellow"), _tier(F(41, 7), 10)),
+            segments=(
+                _mark(0, 1),
+                _mark(1, F(4), override="normal"),
+                _mark(4, 5, override=RECOMMENDED),
+                _mark(5, F(13, 2), selection=SELECTION_EXCLUDED),
+                _mark(F(13, 2), 10),
+            ),
+        ),
+        _source("b", fd=FD24, tiers=(_tier(0, 4, "red"), _tier(4, 10))),
+        _source("c", grid=rp.GRID_MAP, tiers=(_tier(0, 10),)),
+    ]
+    plan = rp.build_plan(sources, SETTINGS)
+    for source in sources:
+        kept = rp.kept_ranges(source, SETTINGS)
+        parts = [(p.start, p.end, p.reason) for p in plan.parts if p.source_id == source.source_id]
+        assert [(k.start, k.end, k.reason) for k in kept] == parts
+    assert rp.kept_ranges(sources[2], SETTINGS) == ()  # map 원본은 초안이 통째로 뺀다(D68)
+    human = rp.kept_ranges(sources[0], SETTINGS)
+    assert (F(4), F(5), rp.PART_HUMAN_RECOMMENDED) in [(k.start, k.end, k.reason) for k in human]
+
+
+def test_kept_ranges_ignore_the_frame_size_the_rail_does_not_know() -> None:
+    """레일은 화면 크기를 모른다 — 남길 범위는 크기와 무관하고, 렌더 계획만 크기를 검사한다."""
+    sized = _source(tiers=(_tier(0, 10),))
+    unsized = replace(sized, width=0, height=0)
+    assert rp.kept_ranges(unsized, SETTINGS) == rp.kept_ranges(sized, SETTINGS)
+    with pytest.raises(rp.RenderPlanError):
+        rp.build_plan([unsized], SETTINGS)
+    with pytest.raises(rp.RenderPlanError):
+        rp.kept_ranges(_source(tiers=(_tier(0, 6), _tier(5, 10))), SETTINGS)
 
 
 def test_bad_inputs_are_refused() -> None:

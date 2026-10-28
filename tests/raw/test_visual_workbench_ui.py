@@ -502,6 +502,12 @@ function visualEnv(serverHandlers, modelOverride, propsFactory) {
     'visual-note': note,
     'visual-video': vid.video,
   };
+  // 시작·끝 표시 줄 · 추천 구간 칸 · 무대(W-46b) — 껍데기가 늘 싣는 원소들.
+  ['vl-mark-in', 'vl-mark-out', 'vl-mark-recommended', 'vl-mark-normal',
+    'vl-mark-not_recommended', 'vl-mark-clear', 'vl-range-undo', 'vl-range-readout',
+    'vl-range-list', 'vl-ranges-sum', 'vl-advanced-toggle', 'visual-stage']
+    .forEach((id) => { registry[id] = el({ id, disabled: id.startsWith('vl-mark-') &&
+      id !== 'vl-mark-in' && id !== 'vl-mark-out' }); });
   const doc = docStub(registry);
   Object.keys(registry).forEach((k) => { registry[k]._doc = doc; });
   const serverCalls = [];
@@ -3356,11 +3362,12 @@ def test_stage_layout_declared_dom_and_css() -> None:
         assert f'id="{anchor_id}"' in workbench, anchor_id
     assert workbench.index("vl-thumbs") < workbench.index("vl-panel")
     css = ui_facade.WORKBENCH_CSS
-    # 목록은 무대 높이 전체, 타임라인은 재생기와 패널 아래를 함께 덮는다(D57 B). 패널 열 위의
-    # 한 칸(quote)은 승인 단추가 묶는 분석 견적이다.
+    # 목록은 무대 높이 전체, 타임라인은 재생기와 오른쪽 열 아래를 함께 덮는다(D57 B). 오른쪽 열의
+    # 맨 위(quote)는 승인 단추가 묶는 분석 견적, 그 아래가 추천 구간 목록(ranges), 그 아래가
+    # 「고급 도구」로 펼치는 패널이다(W-46b, D100 §7b — 네 영역).
     assert (
-        '"thumbs player quote" "thumbs player panel" "thumbs timeline timeline" "foot foot foot"'
-        in css
+        '"thumbs player quote" "thumbs player ranges" "thumbs player panel" "thumbs timeline'
+        ' timeline"\n    "foot foot foot"' in css
     )
     assert "#vl-thumbs { grid-area: thumbs; }" in css
     assert "#visual-preview { grid-area: player;" in css
@@ -3373,7 +3380,9 @@ def test_stage_layout_declared_dom_and_css() -> None:
     # 좁은 화면(≤860px) — 견적 칸(승인할 때만)이 명령 줄 바로 아래, 그다음 재생기·타임라인이
     # 먼저, 목록·패널·상태 줄(사용자 결정 6 · D57 B).
     mobile = css.index("@media (max-width: 860px)")
-    assert css.index('"quote" "player" "timeline" "thumbs" "panel" "foot"', mobile) > mobile
+    assert (
+        css.index('"quote" "player" "timeline" "ranges" "thumbs" "panel" "foot"', mobile) > mobile
+    )
     assert "grid-template-columns: minmax(0, 1fr)" in css[mobile:]
     # 색은 작업대 토큰(D57) — 밝은·어두운 두 벌이 같은 이름을 쓴다. 본점(강조)은 하나다.
     for token in (

@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +30,7 @@ pytest.importorskip(
 import gradio as gr  # noqa: E402
 
 from tests.raw.test_selection_analysis import wait_until  # noqa: E402
+from ui import workspace_service  # noqa: E402
 from ui.workspace_service import (  # noqa: E402
     LIBRARY_APPROVE_LABEL,
     STATUS_SENT_CELLS,
@@ -275,3 +277,78 @@ def test_other_writers_make_the_tick_forget_and_resend(tmp_path: Path, local_soc
     forgotten["summary"], forgotten["note"] = ui.forget_sent_view()
     cells, _ = _tick(ui, tuple(forgotten[name] for name in STATUS_SENT_CELLS))
     assert [name for name, value in cells.items() if not _skipped(value)] == ["summary", "note"]
+
+
+def test_an_unchanged_tick_does_not_redo_the_quote_and_status_work(
+    tmp_path: Path, local_socket: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """바뀐 것 없는 틱은 견적 문구·승인 단추·상태 줄·실사용 줄을 다시 짓지 않는다(W-46b, D63 꼴).
+
+    처리기 일곱은 그대로 틱마다 불린다(위 시험) — 아끼는 것은 그 안의 읽기다. 작업 상태가 바뀐
+    틱(새 작업이 끝났다)은 한 번 다시 짓고, 기억의 최대 나이가 지나도 다시 짓는다.
+    """
+    ui = _server(tmp_path)
+    root = ui.workspace_root()
+    assert root is not None
+    built: dict[str, int] = {}
+    for name in ("_library_summary_now", "_library_button_facts", "_capcut_status_text"):
+        original = getattr(ui, name)
+
+        def counted(*args: Any, _name: str = name, _original: Any = original) -> Any:
+            built[_name] = built.get(_name, 0) + 1
+            return _original(*args)
+
+        monkeypatch.setattr(ui, name, counted)
+    usage = {"n": 0}
+    original_usage = ui._usage_line
+
+    def counted_usage() -> str:
+        usage["n"] += 1
+        return original_usage()
+
+    monkeypatch.setattr(ui, "_usage_line", counted_usage)
+    _, sent = _tick(ui, _fresh())
+    first = dict(built), usage["n"]
+    assert set(first[0].values()) == {1}, first
+    for _ in range(3):
+        cells, sent = _tick(ui, sent)
+        assert all(_skipped(value) for value in cells.values())
+    assert (dict(built), usage["n"]) == first  # 같은 열쇠 — 다시 짓지 않았다
+    job = ui.raw.submit_job(root, "synthetic-finished", "status-memo", lambda _context: None)
+    wait_until(lambda: ui.raw.get_job(root, job.job_id).status == "succeeded", timeout=10)
+    _tick(ui, sent)
+    assert set(built.values()) == {2}, built  # 작업 상태가 바뀐 틱 — 한 번 다시 짓는다
+    _tick(ui, sent)
+    assert set(built.values()) == {2}, built
+    monkeypatch.setattr(workspace_service, "STATUS_MEMO_MAX_AGE_SECONDS", 0.0)
+    _tick(ui, sent)
+    assert set(built.values()) == {3}, built  # 나이가 지나면 열쇠가 같아도 다시 짓는다
+
+
+def test_a_running_job_rebuilds_only_the_live_lines(
+    tmp_path: Path, local_socket: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """도는 작업이 있으면 상태 줄·실사용 줄만 틱마다 다시 짓는다 — 진행·사용량이 움직이는 때다."""
+    ui = _server(tmp_path)
+    root = ui.workspace_root()
+    assert root is not None
+    release = threading.Event()
+    job = ui.raw.submit_job(root, "synthetic-running", "status-live", lambda _c: release.wait(10))
+    try:
+        wait_until(lambda: ui.raw.get_job(root, job.job_id).status == "running", timeout=10)
+        built: dict[str, int] = {}
+        for name in ("_library_summary_now", "_capcut_status_text"):
+            original = getattr(ui, name)
+
+            def counted(*args: Any, _name: str = name, _original: Any = original) -> Any:
+                built[_name] = built.get(_name, 0) + 1
+                return _original(*args)
+
+            monkeypatch.setattr(ui, name, counted)
+        _, sent = _tick(ui, _fresh())
+        _tick(ui, sent)
+        _tick(ui, sent)
+        assert built == {"_library_summary_now": 1, "_capcut_status_text": 3}, built
+    finally:
+        release.set()
+        wait_until(lambda: ui.raw.get_job(root, job.job_id).status == "succeeded", timeout=10)

@@ -24,6 +24,7 @@ pytest.importorskip(
 
 from ui.workspace_service import RawWorkspaceUi  # noqa: E402
 from vlogsrt.project.raw import read_scope  # noqa: E402
+from vlogsrt.project.raw import service as raw_service  # noqa: E402
 
 
 def _server(tmp_path: Path) -> RawWorkspaceUi:
@@ -121,8 +122,9 @@ def test_a_tick_reads_its_key_in_a_scope_and_runs_upkeep_outside_it(
     monkeypatch.setattr(server, "_require_current_selection", lambda _signature: tmp_path)
     monkeypatch.setattr(server.raw, "load_selection_state", lambda _root: {})
     monkeypatch.setattr(server, "_load_quick_tasks", lambda _root: None)
-    monkeypatch.setattr(server.raw, "list_jobs", _spy(seen, "jobs", ()))
-    monkeypatch.setattr(server, "_job_states", lambda *_args: frozenset())
+    # 열쇠의 DB 재료는 도장 하나다(W-46b) — 원본 자막·작업·선택 상태를 한 연결로 읽는다.
+    stamp = raw_service.PollStamp((), (), (), 0)
+    monkeypatch.setattr(server.raw, "poll_stamp", _spy(seen, "jobs", stamp))
     monkeypatch.setattr(server, "_semantic_stamps", lambda _root: ())
     monkeypatch.setattr(server, "_capcut_progress", lambda _root: "진행")
     monkeypatch.setattr(server, "_capcut_result", _spy(seen, "result", ("답", "껍", "본")))

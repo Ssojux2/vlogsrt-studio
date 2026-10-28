@@ -422,6 +422,9 @@ SHORTCUT_SHEET: tuple[tuple[tuple[str, ...], str], ...] = (
     ((",", "."), "정지하고 한 프레임 뒤로 / 앞으로"),
     (("←", "→"), "경계 손잡이에 초점이 있을 때 한 프레임씩 옮기기"),
     (("Enter",), "경계 초안을 프레임에 맞추기"),
+    (("I", "O"), "지금 위치를 시작 · 끝으로 찍기"),
+    (("1", "2", "3"), "찍은 범위를 추천 · 보통 · 비추천으로 표시"),
+    (("Esc",), "찍은 시작 · 끝 지우기"),
 )
 SHORTCUT_HINT: tuple[tuple[tuple[str, ...], str], ...] = (
     (("Space",), "재생"),
@@ -1274,7 +1277,64 @@ def visual_player_shell_html(video_src: str | None, note: str) -> str:
         '<span id="vl-clock" class="vl-clock" aria-live="off">0.000</span></div>'
         '<div id="visual-rail" class="vl-rail" role="group" '
         'aria-label="추천 트랙은 영상 트랙 위에 있습니다. 클릭하면 해당 시각으로 이동합니다"></div>'
-        "</section></div>"
+        f"{range_markbar_html()}</section>{ranges_panel_html()}</div>"
+    )
+
+
+RANGE_MARK_BUTTONS: tuple[tuple[str, str, str, str], ...] = (
+    ("recommended", "green", "추천", "1"),
+    ("normal", "yellow", "보통", "2"),
+    ("not_recommended", "red", "비추천", "3"),
+    ("clear", "clear", "표시 지우기", ""),
+)
+"""재생기 아래 표시 단추(W-46b, D100 §7b) — (표시, 색, 이름, 단축키). 표시 철자는 서비스
+그대로다."""
+RANGE_EMPTY_TEXT = "재생하며 In(I)·Out(O)으로 시작과 끝을 찍으세요."
+ADVANCED_TOGGLE_ID = "vl-advanced-toggle"
+"""「고급 도구」 — 컷 편집 패널·제외 제안 대기열·컷 경계 손잡이를 펼친다(무대의
+`data-vl-advanced`)."""
+
+
+def range_markbar_html() -> str:
+    """시작·끝 표시 줄 — In·Out · 찍은 범위 · 추천·보통·비추천·표시 지우기 · 되돌리기(W-46b).
+
+    단추는 시작과 끝이 모두 있고 시작 < 끝일 때만 켜진다(실행본이 켠다). 표시 하나가 검토
+    리비전 하나이고 「되돌리기」가 그 한 걸음을 되돌린다(D100 §4).
+    """
+    marks = "".join(
+        f'<button type="button" id="vl-mark-{mark}" class="vl-btn vl-mark-btn {tone}"'
+        f' data-vl-mark="{mark}" disabled'
+        f' aria-keyshortcuts="{key}">{html.escape(word)}'
+        + (f' <kbd class="vl-kbd">{key}</kbd>' if key else "")
+        + "</button>"
+        for mark, tone, word, key in RANGE_MARK_BUTTONS
+    )
+    return (
+        '<div id="vl-markbar" class="vl-markbar" role="group" aria-label="시작·끝으로 추천 바꾸기">'
+        '<button type="button" id="vl-mark-in" class="vl-btn" aria-keyshortcuts="I"'
+        ' title="지금 재생 위치를 시작점으로">In <kbd class="vl-kbd">I</kbd></button>'
+        '<button type="button" id="vl-mark-out" class="vl-btn" aria-keyshortcuts="O"'
+        ' title="지금 재생 위치를 끝점으로">Out <kbd class="vl-kbd">O</kbd></button>'
+        f'<span id="vl-range-readout" class="vl-range-readout" aria-live="polite">'
+        f"{html.escape(RANGE_EMPTY_TEXT)}</span>{marks}"
+        '<button type="button" id="vl-range-undo" class="vl-btn vl-btn-ghost"'
+        ' title="마지막 편집 한 걸음을 되돌립니다">되돌리기</button></div>'
+    )
+
+
+def ranges_panel_html() -> str:
+    """「추천 구간」 칸 — 고른 영상의 내보낼 부분 목록(누르면 그 시각으로)과 「고급 도구」 단추.
+
+    목록은 실행본이 모델의 `kept`(초안 렌더와 같은 순수 계획, D100 §5a)로만 채운다.
+    """
+    return (
+        '<section id="vl-ranges" class="vl-ranges" aria-label="추천 구간 — 내보낼 부분">'
+        '<div class="vl-ranges-head"><strong>내보낼 부분</strong>'
+        '<span id="vl-ranges-sum" class="vl-ranges-sum"></span></div>'
+        '<div id="vl-range-list" class="vl-range-list" role="list"></div>'
+        f'<button type="button" id="{ADVANCED_TOGGLE_ID}" class="vl-btn vl-btn-ghost vl-btn-sm"'
+        ' aria-expanded="false" aria-controls="vl-panel">고급 도구 — 컷 편집 · 제외 제안 · 자막'
+        "</button></section>"
     )
 
 
@@ -1650,7 +1710,7 @@ _SHELL_CSS = """
 #review-tab:has(#library-approve:disabled) #vl-cross-check { display: none; }
 @media (min-width: 1051px) {
   #review-tab:has(#library-approve:disabled)
-    #visual-stage:not(:has(#vl-quote-note)):not(:has(.vl-export)) .vl-panel {
+    #visual-stage:not(:has(#vl-quote-note)):not(:has(.vl-export)) #vl-ranges {
     grid-row: 1 / 3; }
 }
 /* 패널(D57 B) — 머리 · 결정 · 판정 · 알림 · 편집 · 접힌 상세. 결정 상자는 빗금 띠를 이고 선다. */
@@ -1741,9 +1801,10 @@ WORKBENCH_CSS = (
   --vl-scrollbar: var(--vl-line-strong) var(--vl-surface);
   display: grid;
   grid-template-columns: var(--vl-list-col) minmax(0, 1fr) var(--vl-panel-col);
-  grid-template-rows: auto minmax(0, 1fr) auto var(--vl-statusline-h);
+  grid-template-rows: auto minmax(0, 1fr) auto auto var(--vl-statusline-h);
   grid-template-areas:
-    "thumbs player quote" "thumbs player panel" "thumbs timeline timeline" "foot foot foot";
+    "thumbs player quote" "thumbs player ranges" "thumbs player panel" "thumbs timeline timeline"
+    "foot foot foot";
   height: max(var(--vl-stage-min-h), calc(100vh - var(--vl-stage-top)));
   gap: var(--vl-stage-gap); align-items: stretch; margin-top: 0; min-width: 0;
 }
@@ -1893,6 +1954,66 @@ WORKBENCH_CSS = (
   display: flex; flex-direction: column; gap: 8px; }
 #visual-timeline { grid-area:timeline; min-width:0; overflow-x:auto; padding-top:4px;
   scrollbar-color: var(--vl-scrollbar); }
+/* 네 영역(W-46b, D100 §7b) — 목록 · 재생기+자막 · 추천 구간(레일 + 「내보낼 부분」 목록) · 재생
+   타임라인. 그 밖의 도구(컷 편집 패널 · 제외 제안 대기열 · 컷 경계 손잡이)는 「고급 도구」를
+   펼칠 때만 보인다 — 숨길 뿐 지우지 않는다(무대의 `data-vl-advanced`는 실행본이 단다).
+   견적·승인 칸(#vl-quote)은 언제나 보인다(D44). */
+#vl-ranges { grid-area: ranges; min-width: 0; min-height: 0; overflow: hidden auto;
+  display: flex; flex-direction: column; gap: 6px; padding: 8px 10px; box-sizing: border-box;
+  border: 1px solid var(--vl-line); border-radius: 6px; background: var(--vl-surface);
+  scrollbar-color: var(--vl-scrollbar); }
+.vl-ranges-head { display: flex; gap: 8px; align-items: baseline; font-size: 13px; }
+.vl-ranges-sum { color: var(--vl-ink-muted); font-size: 12px;
+  font-variant-numeric: tabular-nums; }
+.vl-range-list { display: flex; flex-direction: column; gap: 2px; min-height: 0; }
+.vl-range-row { display: flex; gap: 8px; align-items: baseline; width: 100%; text-align: left;
+  border: 0; border-left: 3px solid var(--vl-tier-green); border-radius: 2px; padding: 3px 6px;
+  background: none; color: var(--vl-ink); font-size: 12px; cursor: pointer;
+  font-variant-numeric: tabular-nums; }
+.vl-range-row:hover { background: var(--vl-surface-hover); }
+.vl-range-row.human { border-left-color: var(--vl-accent-ink); }
+.vl-range-row small { color: var(--vl-ink-muted); font-size: 11px; }
+.vl-range-note { margin: 0; color: var(--vl-ink-muted); font-size: 12px; }
+#vl-advanced-toggle { align-self: flex-start; margin-top: auto; }
+#visual-stage:not([data-vl-advanced="open"]) #vl-panel,
+#visual-stage:not([data-vl-advanced="open"]) .vl-thumbs > .vl-queue,
+#visual-stage:not([data-vl-advanced="open"]) .vl-handle { display: none; }
+@media (min-width: 1051px) {
+  #visual-stage[data-vl-advanced="open"] {
+    grid-template-rows: auto minmax(0, 1fr) minmax(0, 2fr) auto var(--vl-statusline-h); }
+}
+.vl-markbar { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-top: 6px; }
+.vl-markbar .vl-btn { padding: 4px 10px; }
+.vl-markbar .vl-kbd { margin-left: 2px; }
+.vl-range-readout { min-width: 14ch; flex: 1 1 14ch; font-size: 12px; color: var(--vl-ink-muted);
+  font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.vl-mark-btn.green:not(:disabled) { border-color: var(--vl-tier-green);
+  box-shadow: inset 3px 0 0 var(--vl-tier-green); }
+.vl-mark-btn.yellow:not(:disabled) { border-color: var(--vl-tier-yellow-ink);
+  box-shadow: inset 3px 0 0 var(--vl-tier-yellow); }
+.vl-mark-btn.red:not(:disabled) { border-color: var(--vl-tier-red);
+  box-shadow: inset 3px 0 0 var(--vl-tier-red); }
+/* 레일 위 사람 표시 — 등급 막대 바로 위의 단색 띠(자동 등급 막대와 갈린다). 찍는 중인 범위는
+   레일 전체 높이의 옅은 띠와 양 끝 손잡이(끌면 시작·끝만 옮긴다 — 컷 경계를 제안하지 않는다).
+   「내보낼 부분」 띠는 레일 맨 아래 — 렌더 계획이 남길 범위 그대로다. */
+.vl-human-mark { position: absolute; top: calc(var(--vl-rec-top) - 4px); height: 3px;
+  border-radius: 1px; pointer-events: none; }
+.vl-human-mark.green { background: var(--vl-tier-green); }
+.vl-human-mark.yellow { background: var(--vl-tier-yellow-ink); }
+.vl-human-mark.red { background: var(--vl-tier-red); }
+.vl-range-band { position: absolute; top: 0; bottom: 0; pointer-events: none; z-index: 1;
+  background: color-mix(in srgb, var(--vl-accent-soft) 70%, transparent);
+  box-shadow: inset 0 0 0 1px var(--vl-accent-ink); }
+.vl-range-handle { position: absolute; top: 0; bottom: 0; width: 10px; margin-left: -5px;
+  padding: 0; border: 0; z-index: 4; cursor: ew-resize; background: none; }
+.vl-range-handle::after { content: ""; position: absolute; top: 0; bottom: 0; left: 4px;
+  width: 2px; background: var(--vl-accent-ink); }
+.vl-range-handle:focus-visible { outline: 2px solid var(--vl-accent-ink); }
+.vl-kept-strip { position: absolute; left: 0; right: 0; bottom: 2px; height: 8px;
+  pointer-events: none; background: var(--vl-surface-raised); border-radius: 2px; }
+.vl-kept { position: absolute; top: 0; bottom: 0; border-radius: 1px;
+  background: var(--vl-tier-green); }
+.vl-kept.human { background: var(--vl-accent-ink); }
 /* 상태 줄(24px) — 왼쪽 각주는 한 줄 말줄임(전체 글은 title), 오른쪽은 단축키 안내. */
 #vl-statusline { grid-area: foot; }
 .vl-statusline {
@@ -2228,8 +2349,8 @@ WORKBENCH_CSS = (
 @media (max-width: 1050px) {
   #visual-stage { height: auto; grid-template-columns: minmax(180px, 220px) minmax(0, 1fr);
     grid-template-rows: none;
-    grid-template-areas: "quote quote" "thumbs player" "thumbs timeline" "thumbs panel"
-      "foot foot"; }
+    grid-template-areas: "quote quote" "thumbs player" "thumbs timeline" "thumbs ranges"
+      "thumbs panel" "foot foot"; }
   #visual-stage .vl-thumbs { max-height: none; contain: size; }
   #vl-panel { max-height: 64vh; }
   #visual-preview video { flex: none; height: clamp(300px, 48vh, 540px); }
@@ -2237,7 +2358,7 @@ WORKBENCH_CSS = (
 }
 @media (max-width: 860px) {
   #visual-stage { grid-template-columns: minmax(0, 1fr);
-    grid-template-areas: "quote" "player" "timeline" "thumbs" "panel" "foot"; }
+    grid-template-areas: "quote" "player" "timeline" "ranges" "thumbs" "panel" "foot"; }
   #caption-stage { grid-template-columns: minmax(0, 1fr); grid-template-areas: "player" "cues"; }
   #visual-stage .vl-thumbs { max-height: none; overflow: visible; contain: none; }
   #visual-stage .vl-thumbs > .vl-queue { position: static; box-shadow: none; }
@@ -2483,6 +2604,10 @@ VISUAL_BOOTSTRAP_JS = (
   var VL_SHORTCUT_ACTIONS = { "Space": "toggle", "KeyK": "toggle", "KeyJ": "back",
     "KeyL": "forward", "Comma": "frameBack", "Period": "frameForward" };
   var VL_PLAY_FAILED_TEXT = "재생할 수 없습니다: ";
+  // 시작·끝 표시 키(W-46b) — 재생 키와 같은 막기(입력 칸·조합·반복·수정키·열린 서랍)를 지난다.
+  var VL_RANGE_KEYS = { "KeyI": "in", "KeyO": "out", "Digit1": "recommended",
+    "Digit2": "normal", "Digit3": "not_recommended", "Escape": "cancel" };
+  var VL_RANGE_MARKS = ["recommended", "normal", "not_recommended", "clear"];
   if (!W.__vlWireVisual) {
     W.__vlWireVisual = function (root, doc) {
 """
@@ -3352,7 +3477,212 @@ VISUAL_BOOTSTRAP_JS = (
             tierWord(tierOf(row), row.hold) || recLabel(row.rec),
           queued: mark.queued }, row);
       }
+      // ── 시작·끝 표시(W-46b, D100 §7b) — In·Out으로 범위를 찍고 추천·보통·비추천으로 표시한다.
+      // 찍은 범위는 탭의 것이다(`state.range` — 원본 하나에 묶이고, 원점 기준 초를 프레임에 맞춘
+      // 정확 유리수). 시작이 끝보다 뒤로 가면 둘을 **바꾼다**(거절하지 않는다). 손잡이 끌기는
+      // 시작·끝만 옮긴다 — 컷 경계를 제안하지 않는다(컷 경계 손잡이는 「고급 도구」에만 있다).
+      function rangeRail() { var s = curSource(); return s && s.rail ? s.rail : null; }
+      function rangeFrame() { var r = rangeRail(); return r ? ratOf(r.frameSec) : null; }
+      function rangeDur() { var r = rangeRail(); return r ? ratOf(r.duration) : null; }
+      function snapRange(t) {
+        var fd = rangeFrame(), dur = rangeDur();
+        if (!t || !fd || !dur || fd[0] <= 0) { return null; }
+        // 가장 가까운 프레임 — 한가운데면 앞장(서버 `snapped_frame_index`와 같은 규칙).
+        var q = VL.div(t, fd);
+        var v = VL.mul([Math.ceil((2 * q[0] - q[1]) / (2 * q[1])), 1], fd);
+        if (VL.cmp(v, [0, 1]) < 0) { v = [0, 1]; }
+        if (VL.cmp(v, dur) > 0) { v = dur; }
+        return v;
+      }
+      function curRange() {
+        var r = state.range;
+        return r && r.sourceId === curSourceId() ? r : null;
+      }
+      function rangeValid() {
+        var r = curRange();
+        return !!(r && r.inSec && r.outSec && VL.cmp(r.inSec, r.outSec) < 0);
+      }
+      function setRangePoint(which, t) {
+        var sid = curSourceId(), v = snapRange(t);
+        if (!sid || !v) {
+          msg("재생기를 찾지 못했습니다. 미리보기가 준비된 뒤 다시 찍으세요."); return false;
+        }
+        var r = Object.assign({ sourceId: sid, inSec: null, outSec: null }, curRange() || {});
+        r[which === "in" ? "inSec" : "outSec"] = v;
+        if (r.inSec && r.outSec && VL.cmp(r.inSec, r.outSec) > 0) {
+          var swap = r.inSec; r.inSec = r.outSec; r.outSec = swap;
+        }
+        state.range = r;
+        renderRail();
+        return true;
+      }
+      function clearRange() {
+        if (!curRange()) { return false; }
+        state.range = null; renderRail(); return true;
+      }
+      function rangeSeconds(a) { return VL.fmt(a, 2) + "초"; }
+      function paintRangeControls() {
+        var r = curRange(), ok = rangeValid();
+        var out = doc.getElementById("vl-range-readout");
+        if (out) {
+          var text = "재생하며 In(I)·Out(O)으로 시작과 끝을 찍으세요.";
+          if (r && r.inSec && r.outSec) {
+            text = rangeSeconds(r.inSec) + " ~ " + rangeSeconds(r.outSec) + " (" +
+              rangeSeconds(VL.sub(r.outSec, r.inSec)) + ")" +
+              (ok ? "" : " — 시작과 끝이 같은 프레임입니다");
+          } else if (r && r.inSec) {
+            text = "시작 " + rangeSeconds(r.inSec) + " · 끝(O)을 찍으세요";
+          } else if (r && r.outSec) {
+            text = "끝 " + rangeSeconds(r.outSec) + " · 시작(I)을 찍으세요";
+          }
+          out.textContent = text;
+        }
+        VL_RANGE_MARKS.forEach(function (mark) {
+          var button = doc.getElementById("vl-mark-" + mark);
+          if (button) { button.disabled = !ok; }
+        });
+      }
+      function sendMark(mark) {
+        if (staleWire()) { return false; }
+        if (!rangeValid()) { msg("시작과 끝을 먼저 찍으세요(In · Out)."); return true; }
+        var r = curRange();
+        call("vl_apply", { op: "range", mark: mark, sourceId: r.sourceId,
+          startSec: VL.str(r.inSec), endSec: VL.str(r.outSec),
+          revisionId: model.revisionId, basePlanId: model.basePlanId, page: model.page,
+          selectedId: selectedId() }, "범위를 표시하는 중…", function (res) {
+          // 저장했으면 찍은 범위를 걷는다 — 낡음(다른 곳의 편집)이면 그대로 두어 다시 누르게 한다.
+          if (res && res.ok && !res.rangeStale && state.range === r) { state.range = null; }
+        });
+        return true;
+      }
+      function sendUndo() {
+        if (staleWire()) { return; }
+        call("vl_apply", { op: "undo", sourceId: curSourceId(), revisionId: model.revisionId,
+          basePlanId: model.basePlanId, page: model.page, selectedId: selectedId() },
+          "되돌리는 중…");
+      }
+      state.rangeKey = function (action) {
+        if (staleWire()) { return false; }
+        if (action === "in" || action === "out") { return setRangePoint(action, playheadLocal()); }
+        if (action === "cancel") { return clearRange(); }
+        return sendMark(action);
+      };
+      function railPct(t, dur) { return VL.pct(displayTime(t), dur); }
+      function rangeLayers(info, rail, dur) {
+        var html = [];
+        (rail.intervals || []).forEach(function (it) {
+          var tone = { recommended: "green", normal: "yellow", not_recommended: "red" }[it.mark];
+          if (!tone) { return; }
+          var a = railPct(ratOf(it.start), dur), b = railPct(ratOf(it.end), dur);
+          html.push('<span class="vl-human-mark ' + tone + '" data-vl-human-mark="' +
+            esc(it.mark) + '" style="left:' + a.toFixed(3) + '%;width:' +
+            Math.max(.4, b - a).toFixed(3) + '%"></span>');
+        });
+        html.push('<div class="vl-kept-strip" aria-label="내보낼 부분">');
+        ((info && info.kept) || []).forEach(function (row) {
+          var a = railPct(ratOf(row.start), dur), b = railPct(ratOf(row.end), dur);
+          html.push('<span class="vl-kept' + (row.human ? ' human' : '') + '" style="left:' +
+            a.toFixed(3) + '%;width:' + Math.max(.3, b - a).toFixed(3) + '%"></span>');
+        });
+        html.push('</div>');
+        var r = curRange();
+        if (r && r.inSec && r.outSec) {
+          var x = railPct(r.inSec, dur), y = railPct(r.outSec, dur);
+          html.push('<div class="vl-range-band" style="left:' + x.toFixed(3) + '%;width:' +
+            Math.max(0, y - x).toFixed(3) + '%"></div>');
+        }
+        [["in", r && r.inSec, "시작"], ["out", r && r.outSec, "끝"]].forEach(function (h) {
+          if (!h[1]) { return; }
+          html.push('<button type="button" class="vl-range-handle" data-vl-range-handle="' + h[0] +
+            '" aria-label="찍은 ' + h[2] + ' ' + esc(VL.fmt(h[1], 2)) + '초 — 끌면 ' + h[2] +
+            '만 옮깁니다" style="left:' + railPct(h[1], dur).toFixed(3) + '%"></button>');
+        });
+        return html.join("");
+      }
+      function renderRanges() {
+        var list = doc.getElementById("vl-range-list");
+        var sum = doc.getElementById("vl-ranges-sum");
+        var info = curSource();
+        var rows = (info && info.kept) || [];
+        var total = rows.reduce(function (acc, row) {
+          return VL.add(acc, VL.sub(ratOf(row.end), ratOf(row.start)));
+        }, [0, 1]);
+        if (sum) { sum.textContent = info ? rows.length + "곳 · " + VL.fmt(total, 1) + "초" : ""; }
+        if (!list) { return; }
+        var html = rows.map(function (row, index) {
+          var len = VL.sub(ratOf(row.end), ratOf(row.start));
+          return '<button type="button" role="listitem" class="vl-range-row' +
+            (row.human ? ' human' : '') + '" data-vl-range-seek="' + esc(row.start) + '">' +
+            '<b>#' + (index + 1) + '</b> ' + esc(VL.fmt(ratOf(row.start), 1)) + '–' +
+            esc(VL.fmt(ratOf(row.end), 1)) + '초 <small>' + esc(VL.fmt(len, 1)) + '초 · ' +
+            (row.human ? '사람 추천' : '자동 추천') + '</small></button>';
+        });
+        if (!info) {
+          html = ['<p class="vl-range-note">영상을 고르면 내보낼 부분이 보입니다.</p>'];
+        } else if (info.keptNote) {
+          html.push('<p class="vl-range-note">' + esc(info.keptNote) + '</p>');
+        }
+        else if (!rows.length) {
+          html.push('<p class="vl-range-note">이 영상에서 내보낼 부분이 없습니다. ' +
+            'In·Out으로 범위를 찍고 「추천」으로 표시하면 들어갑니다.</p>');
+        }
+        list.innerHTML = html.join("");
+      }
+      function rangeDrag(ev, which) {
+        var r = curRange();
+        if (!r || !r[which === "in" ? "inSec" : "outSec"]) { return; }
+        if (ev.preventDefault) { ev.preventDefault(); }
+        var mount = doc.getElementById("visual-rail");
+        var move = function (mv) {
+          if (staleWire() || !mv || state.range !== r) { return; }
+          var at = secAt(mv.clientX);
+          var v = at ? snapRange(sourceTime(at)) : null;
+          var fd = rangeFrame();
+          if (!v || !fd) { return; }
+          // 끌기는 제 끝만 옮기고 다른 끝을 넘지 않는다(한 프레임 앞에서 멈춘다) — 원본 안으로
+          // 묶인다.
+          if (which === "in" && r.outSec && VL.cmp(v, VL.sub(r.outSec, fd)) > 0) {
+            v = VL.sub(r.outSec, fd);
+          }
+          if (which === "out" && r.inSec && VL.cmp(v, VL.add(r.inSec, fd)) < 0) {
+            v = VL.add(r.inSec, fd);
+          }
+          r[which === "in" ? "inSec" : "outSec"] = v;
+          renderRail();
+        };
+        var up = function () {
+          if (mount) {
+            mount.removeEventListener("pointermove", mount._vlRangeMove);
+            mount.removeEventListener("pointerup", mount._vlRangeUp);
+          }
+        };
+        if (mount) {
+          if (mount._vlRangeMove) { mount.removeEventListener("pointermove", mount._vlRangeMove); }
+          if (mount._vlRangeUp) { mount.removeEventListener("pointerup", mount._vlRangeUp); }
+          mount._vlRangeMove = move; mount._vlRangeUp = up;
+          mount.addEventListener("pointermove", move);
+          mount.addEventListener("pointerup", up);
+        }
+      }
+      function advancedOpen() {
+        var stage = doc.getElementById("visual-stage");
+        return !!(stage && stage.getAttribute && stage.getAttribute("data-vl-advanced") === "open");
+      }
+      function setAdvanced(open) {
+        var stage = doc.getElementById("visual-stage");
+        if (stage && stage.setAttribute) {
+          if (open) { stage.setAttribute("data-vl-advanced", "open"); }
+          else if (stage.removeAttribute) { stage.removeAttribute("data-vl-advanced"); }
+        }
+        var toggle = doc.getElementById("vl-advanced-toggle");
+        if (toggle) { toggle.setAttribute("aria-expanded", open ? "true" : "false"); }
+      }
       function renderRail() {
+        drawRail();
+        paintRangeControls();
+        renderRanges();
+      }
+      function drawRail() {
         refreshTierMarker();
         var mount = doc.getElementById("visual-rail");
         if (!mount) { return; }
@@ -3447,6 +3777,7 @@ VISUAL_BOOTSTRAP_JS = (
             ' style="left:calc(' + VL.pct(ratOf(rail.intervals[at].end),
               dur).toFixed(3) + '% - 6px)"></button>');
         }
+        html.push(rangeLayers(info, rail, dur));
         html.push('<div class="vl-playhead" id="vl-playhead" style="left:0"></div>');
         if (state.draft && state.draft.epoch === model.epoch && state.draft.sec) {
           html.push('<div class="vl-draftmark" style="left:' +
@@ -4268,6 +4599,8 @@ VISUAL_BOOTSTRAP_JS = (
       function railPointerDown(ev) {
         if (staleWire()) { return; }
         if (!ev || !ev.target || !ev.target.getAttribute) { return; }
+        var rangeSide = ev.target.getAttribute("data-vl-range-handle");
+        if (rangeSide) { rangeDrag(ev, rangeSide); return; }
         var side = ev.target.getAttribute("data-vl-handle");
         if (!side) { return; }
         var pair = boundaryPair(side);
@@ -4337,6 +4670,7 @@ VISUAL_BOOTSTRAP_JS = (
       function railClick(ev) {
         if (staleWire()) { return; }
         if (!ev || !ev.target || !ev.target.getAttribute) { return; }
+        if (ev.target.getAttribute("data-vl-range-handle")) { return; }
         var cueIndex = ev.target.getAttribute("data-vl-source-cue");
         if (cueIndex !== null) {
           var cueInfo = curSource();
@@ -4725,6 +5059,7 @@ VISUAL_BOOTSTRAP_JS = (
         if (cue) {
           var v = videoEl(); if (v) { v.pause(); }
           state.sourceCue = {sourceId:curSourceId(),id:cue.id}; dropTake();
+          setAdvanced(true);  // 자막 편집기는 「고급 도구」 패널에 산다
           renderPanel();
         }
       });
@@ -4757,6 +5092,28 @@ VISUAL_BOOTSTRAP_JS = (
       }
       bindControl("vl-zoom-in", function() { zoom(1); });
       bindControl("vl-zoom-out", function() { zoom(-1); });
+      bindControl("vl-mark-in", function() { setRangePoint("in", playheadLocal()); });
+      bindControl("vl-mark-out", function() { setRangePoint("out", playheadLocal()); });
+      VL_RANGE_MARKS.forEach(function (mark) {
+        bindControl("vl-mark-" + mark, function() { sendMark(mark); });
+      });
+      bindControl("vl-range-undo", sendUndo);
+      bindControl("vl-advanced-toggle", function() { setAdvanced(!advancedOpen()); });
+      setAdvanced(advancedOpen());
+      var rangeList = doc.getElementById("vl-range-list");
+      if (rangeList) {
+        if (rangeList._vlSeek) { rangeList.removeEventListener("click", rangeList._vlSeek); }
+        rangeList._vlSeek = function (ev) {
+          if (staleWire()) { return; }
+          var node = ev && ev.target;
+          while (node && node !== rangeList && !(node.getAttribute &&
+            node.getAttribute("data-vl-range-seek") !== null)) { node = node.parentNode; }
+          var at = node && node !== rangeList ?
+            ratOf(node.getAttribute("data-vl-range-seek")) : null;
+          if (at) { seekTo(at); }
+        };
+        rangeList.addEventListener("click", rangeList._vlSeek);
+      }
       keepFocusCard();
       var focusAt = applyQueueFocus();
       if (state.marker && state.selectedPlan !== model.basePlanId) {
@@ -4982,10 +5339,27 @@ VISUAL_BOOTSTRAP_JS = (
       frameBack: function (target) { W.__vlStepFrame(target.video, -1); },
       frameForward: function (target) { W.__vlStepFrame(target.video, 1); }
     };
+    // 시작·끝 표시 키 — 보이는 영상이 작업대 재생기일 때만, 지금 배선(`state.rangeKey`)에 넘긴다.
+    // Esc는 떠 있는 단축키 판이 먼저다(머리줄 실행본이 닫는다). 처리한 키만 기본 동작을 막는다.
+    W.__vlRangeAction = function (ev) {
+      if (W.__vlShortcutBlocked(ev)) { return null; }
+      if (!Object.prototype.hasOwnProperty.call(VL_RANGE_KEYS, ev.code)) { return null; }
+      var sheet = document.getElementById("vl-keysheet");
+      if (ev.code === "Escape" && sheet && !sheet.hidden) { return null; }
+      var target = W.__vlShortcutVideo();
+      return target && target.video.id === "visual-video" ? VL_RANGE_KEYS[ev.code] : null;
+    };
     W.__vlShortcutKey = function (ev) {
       var action = W.__vlShortcutAction(ev);
       var target = action ? W.__vlShortcutVideo() : null;
-      if (!target) { return; }
+      if (!target) {
+        var range = action ? null : W.__vlRangeAction(ev);
+        var st = W.__vlVisualWorkbenchState;
+        if (range && st && typeof st.rangeKey === "function" && st.rangeKey(range)) {
+          ev.preventDefault();
+        }
+        return;
+      }
       ev.preventDefault();
       W.__vlShortcutRun[action](target);
     };

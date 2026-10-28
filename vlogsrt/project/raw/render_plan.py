@@ -221,6 +221,18 @@ class RenderPart:
 
 
 @dataclass(frozen=True, slots=True)
+class KeptRange:
+    """원본 하나의 남길 조각(원점 기준 초, 원본 프레임 격자 위) — 출력 위치는 없다(W-46b).
+
+    `reason`은 `auto_green`·`human_recommended`다. 작업대 레일의 「내보낼 부분」 띠가 이것을
+    그린다 — `build_plan`과 같은 판정·합치기·격자·최소 길이라 화면에 보인 것이 곧 출력이다."""
+
+    start: Fraction
+    end: Fraction
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
 class DroppedRange:
     """뺀 구간 하나 — 까닭·검토 상태·그 자리의 등급(없으면 None)·판정 보류."""
 
@@ -364,11 +376,16 @@ def _refuse(source: RenderSource, reason: str) -> RenderPlanError:
 
 
 def _require_source(source: RenderSource) -> None:
+    if source.width <= 0 or source.height <= 0:
+        raise _refuse(source, f"화면 크기가 양수가 아니다: {source.width}x{source.height}")
+    _require_layout(source)
+
+
+def _require_layout(source: RenderSource) -> None:
+    """남길 범위를 정하는 재료의 검사 — 화면 크기는 보지 않는다(포맷 투표만 쓴다)."""
     clock = source.clock
     if clock.frame_duration <= 0 or clock.frame_count <= 0:
         raise _refuse(source, "프레임 길이와 프레임 수는 양수여야 한다")
-    if source.width <= 0 or source.height <= 0:
-        raise _refuse(source, f"화면 크기가 양수가 아니다: {source.width}x{source.height}")
     if source.grid not in GRID_KINDS:
         raise _refuse(source, f"모르는 격자 종류: {source.grid!r}")
     for piece in source.tiers or ():
@@ -788,6 +805,21 @@ def _zero_length(cue: ProjectedCue) -> bool:
 
 
 # ── 계획 짓기 ─────────────────────────────────────────────────────────────
+
+
+def kept_ranges(
+    source: RenderSource, settings: RenderSettings = RENDER_SETTINGS
+) -> tuple[KeptRange, ...]:
+    """원본 하나에서 렌더 계획이 남길 조각 — `build_plan`의 원본별 걸음 그대로(W-46b).
+
+    `build_plan`은 원본마다 따로 `_layout_source`를 돌므로 같은 원본의 남길 조각은 다른 원본과
+    무관하다. 그래서 레일은 원본 하나만으로 출력과 같은 범위를 그린다. map 원본은 빈 묶음이다.
+    화면 크기는 보지 않는다 — 남길 범위와 무관하고 포맷 투표(`_sequence`)만 쓴다.
+    """
+    _require_layout(source)
+    pieces, slots, _short = _layout_source(source, settings)
+    _require_tiling(source, pieces, _ledger(source, slots))
+    return tuple(KeptRange(piece.start, piece.end, piece.reason) for piece in pieces)
 
 
 def build_plan(

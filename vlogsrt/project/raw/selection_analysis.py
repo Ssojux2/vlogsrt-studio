@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import zlib
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from decimal import Decimal
@@ -460,6 +461,21 @@ def load_state(service: Any, root: Path) -> dict[str, Any]:
             "SELECT value FROM meta WHERE key='selection_analysis_state'"
         ).fetchone()
     return _restored_all(service, root, (row[0],))[0] if row else {}
+
+
+def states_digest_on(connection: Any) -> int:
+    """저장된 선택 분석 상태들의 도장(W-46b) — 상태를 풀지 않고 글자의 CRC만 잰다.
+
+    상태를 쓰는 길(`save_state`)은 글자를 갈아 쓰므로 도장이 같으면 같은 상태들이다. 2초·1초 틱이
+    틱마다 상태 전부를 풀어 다시 맞추던 자리를 이 값 하나로 줄인다(바뀐 틱에서만 다시 읽는다).
+    """
+    digest = 0
+    rows = connection.execute(
+        "SELECT key, value FROM meta WHERE key LIKE 'selection_task:%' ORDER BY rowid"
+    )
+    for key, value in rows:
+        digest = zlib.crc32(f"{key}\0{value}\0".encode(), digest)
+    return digest
 
 
 def load_states(service: Any, root: Path) -> tuple[dict[str, Any], ...]:

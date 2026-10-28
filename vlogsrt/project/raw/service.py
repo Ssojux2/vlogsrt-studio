@@ -31,6 +31,7 @@ from vlogsrt.env import ANALYSIS_CLAUDE_KEY_ENV, ANALYSIS_GEMINI_KEY_ENV
 from vlogsrt.project.raw import (
     analysis_workflow,
     read_scope,
+    render_plan,
     segmentation,
     selection_analysis,
     source_verify,
@@ -148,6 +149,7 @@ from vlogsrt.project.raw.jobs import (
     JobContext,
     JobManager,
     active_fingerprints_on,
+    poll_rows_on,
 )
 from vlogsrt.project.raw.models import (
     ACTIVE_JOB_STATUSES,
@@ -225,9 +227,15 @@ from vlogsrt.project.raw.review_notes import (
 )
 from vlogsrt.project.raw.segment_review import (
     AUTO_EXCLUDED_UNREVIEWED_TAG,
+    RANGE_NORMAL,
+    RANGE_NOT_RECOMMENDED,
+    RANGE_RECOMMENDED,
+    SELECTION_EXCLUDED,
     ReviewError,
     ReviewRevision,
+    ReviewSegment,
     StaleRevisionError,
+    is_unreviewed_auto_exclusion,
 )
 from vlogsrt.project.raw.segment_review import (
     boundary_edit as review_boundary_edit,
@@ -455,7 +463,26 @@ ANALYSIS_PROXY_JOB_KIND = "analysis_proxy"
 """4K 원본 하나의 25% 분석 프록시를 불러올 때 미리 만드는 작업(D100 §2) — 무료 로컬. 조리법·열쇠는
 분석이 쓰는 그대로(`analysis-proxy/v1`, D47)라 1단계가 이것을 다시 쓴다."""
 
+
+@dataclass(frozen=True)
+class PollStamp:
+    """화면 틱의 도장(W-46b) — 같으면 자막·작업·선택 상태가 그대로다(`poll_stamp`)."""
+
+    transcripts: tuple[tuple[str, int], ...]
+    recent_jobs: tuple[tuple[str, str, str, int], ...]
+    active_jobs: tuple[tuple[str, str], ...]
+    selection_states: int
+
+    @property
+    def job_states(self) -> frozenset[tuple[str, str]]:
+        """작업 (아이디, 상태)의 묶음 — 최근 작업과 활성 작업 전부(D63의 정리 고리 열쇠)."""
+        recent = {(job_id, status) for job_id, _kind, status, _progress in self.recent_jobs}
+        return frozenset(recent | set(self.active_jobs))
+
+
 RENDER_EXPORT_JOB_KIND = "render_export"
+KEPT_HUMAN_REASON = render_plan.PART_HUMAN_RECOMMENDED
+"""「내보낼 부분」 조각이 사람 추천에서 왔다는 까닭 — 레일이 자동 녹색과 따로 그린다(W-46b)."""
 """추천만 이어붙인 초안 영상 + SRT + 보고서를 내는 작업(W-44, D100 §5b) — 무료 로컬. 작업공간마다
 한 번에 하나다(같은 지문이면 도는 작업에 다시 붙는다)."""
 
@@ -1344,6 +1371,22 @@ class RawWorkspaceService:
         `limit`이 None이면 그 종류 전부다.
         """
         return self._jobs(root).recent_of_kinds(kinds, limit)
+
+    def poll_stamp(self, root: Path, *, recent: int) -> PollStamp:
+        """화면 틱의 다시 그릴지 정하는 도장 — DB 연결 하나(W-46b, D100 §7b).
+
+        원본 자막의 (원본, 최대 차례) · 최근 작업 `recent`개의 (아이디, 종류, 상태, 진행) ·
+        활성 작업
+        (아이디, 상태) · 저장된 선택 분석 상태들의 CRC. 본문은 풀지 않는다 — 예전 2초 틱은 틱마다
+        원본 자막 본문 전부·선택 상태 전부·작업 목록을 따로 읽었다. 읽기만 한다.
+        """
+        from vlogsrt.project.raw import source_transcript
+
+        with self._workspace(root).connect() as connection:
+            transcripts = source_transcript.latest_sequences_on(connection)
+            recent_jobs, active_jobs = poll_rows_on(connection, recent)
+            states = selection_analysis.states_digest_on(connection)
+        return PollStamp(transcripts, recent_jobs, active_jobs, states)
 
     def all_active_jobs(self, root: Path) -> tuple[JobRecord, ...]:
         """종류를 가리지 않는 활성 작업 전부(오래된 것부터) — 「지금 도는 작업」이 읽는다(D61)."""
@@ -5469,6 +5512,55 @@ class RawWorkspaceService:
             end_seconds=end_seconds,
         )
 
+    def visual_kept_ranges(
+        self,
+        root: Path,
+        revision: ReviewRevision,
+        source_id: str,
+        spans: Sequence[Mapping[str, Any]] | None,
+    ) -> tuple[render_plan.KeptRange, ...]:
+        """작업대 레일의 「내보낼 부분」(W-46b, D100 §7b) — 초안 렌더와 같은 순수 계획으로 잰다.
+
+        재료는 화면이 이미 읽은 값뿐이다: 검토 머리의 그 원본 조각·시계와 등급 구간 문서
+        (`selection_suitability`의 행 — None이면 분석 전, 계획이 `unanalyzed`로 뺀다). 원본 파일은
+        조사하지 않는다 — map 원본(초안이 통째로 뺀다, D68)인지는 계획이 남긴 표지로 본다.
+        돌려주는 것은 `render_plan.KeptRange` 묶음이다. 재료가 어긋나면 `RenderPlanError`다.
+        """
+        from vlogsrt.project.raw.review_workspace import human_decided
+
+        clock = revision.clock_for(source_id)
+        if clock is None:
+            return ()
+        rows = sorted(
+            (s for s in revision.segments if s.source_id == source_id), key=lambda s: s.start_pts
+        )
+        mapped = visual_review.marked_mapped(self._workspace(root).root, clock.source_sha256)
+        source = render_plan.RenderSource(
+            source_id=source_id,
+            name=source_id,
+            clock=render_plan.frame_clock(clock),
+            width=0,
+            height=0,
+            grid=render_plan.GRID_MAP if mapped else render_plan.GRID_UNIFORM,
+            tiers=None if spans is None else tuple(_tier_piece(row) for row in spans),
+            segments=tuple(
+                render_plan.segment_mark(row, clock, decided=human_decided(row)) for row in rows
+            ),
+        )
+        return render_plan.kept_ranges(source)
+
+    @staticmethod
+    def visual_range_mark(segment: ReviewSegment) -> str | None:
+        """조각에 실린 사람 표시(D100 §4의 대응을 거꾸로) — 레일이 자동 등급과 따로 그린다(W-46b).
+
+        사람이 확정한 제외는 비추천, 추천·보통 덮기는 그 이름이다. 미검토 자동 제외는 사람
+        표시가 아니다(렌더 계획과 같은 판단). 표시가 없으면 None이다."""
+        if segment.selection == SELECTION_EXCLUDED and not is_unreviewed_auto_exclusion(segment):
+            return RANGE_NOT_RECOMMENDED
+        if segment.override_recommendation in (RANGE_RECOMMENDED, RANGE_NORMAL):
+            return str(segment.override_recommendation)
+        return None
+
     # ── A5/A6·A7 백엔드 작업공간 — 공개 경계로만 내놓는다(병합 뒤 활성) ──
 
     def review_workspace_facade(self, root: Path) -> Any:
@@ -6584,6 +6676,19 @@ def _tier_migration_message(untouched: bool) -> str:
 
 def _json_fraction(value: Mapping[str, Any]) -> Fraction:
     return Fraction(int(value["num"]), int(value["den"]))
+
+
+def _tier_piece(row: Mapping[str, Any]) -> render_plan.TierPiece:
+    """등급 구간 문서(`TierSpan.document`) → 렌더 계획의 등급 구간 값(작업대 레일, W-46b)."""
+    reason = row.get("red_reason")
+    return render_plan.TierPiece(
+        _json_fraction(row["start"]),
+        _json_fraction(row["end"]),
+        str(row["tier"]),
+        None if reason is None else str(reason),
+        bool(row.get("hold")),
+        tuple(str(cap.get("code", "")) for cap in row.get("caps") or ()),
+    )
 
 
 def _context_windows(document: Mapping[str, Any], shift: Fraction) -> tuple[Any, ...]:

@@ -1820,6 +1820,21 @@ def note_grid_conform(root: Path, source_sha256: str, clock: preprocess.RawVideo
         _write_record(target, payload)
 
 
+def marked_mapped(root: Path, source_sha256: str) -> bool:
+    """지금 규칙 판의 표지가 「map」인가 — 표지가 없거나 다른 판이면 거짓(작업대 레일, W-46b).
+
+    레일의 「내보낼 부분」 띠는 map 원본을 비운다(초안 렌더가 통째로 뺀다, D68). 표지가 없으면
+    아직 재지 않은 원본이다 — 거짓으로 읽고(균일·snap과 같은 띠), 렌더가 그때 잰 시계로 정한다.
+    """
+    record = _read_record(_grid_marker(root, source_sha256))
+    return (
+        record is not None
+        and record.get("schema") == GRID_MARKER_SCHEMA
+        and record.get("rule") == preprocess.GRID_CONFORM_TAG
+        and record.get("mapped") is True
+    )
+
+
 def _marked_unmapped(root: Path, source_sha256: str) -> bool:
     """지금 규칙 판의 표지가 「map 아님」인가 — 표지가 없거나 다른 판이면 거짓(다시 잰다)."""
     record = _read_record(_grid_marker(root, source_sha256))

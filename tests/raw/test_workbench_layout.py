@@ -112,7 +112,8 @@ def test_top_bar_names_project_steps_mode_shortcuts_and_settings() -> None:
     assert ">단축키</span>" in online and "data-vl-keys-open" in online
     assert flow in online
     keys = online[online.index('id="vl-keysheet"') :]
-    assert keys.count("<dt>") == len(ui_facade.SHORTCUT_SHEET) == 5
+    # 재생 다섯 + 시작·끝 표시 셋(I·O · 1·2·3 · Esc — W-46b, D100 §7b).
+    assert keys.count("<dt>") == len(ui_facade.SHORTCUT_SHEET) == 8
     assert "입력 칸에 글을 쓰는 중에는 단축키가 동작하지 않습니다." in keys
     offline = ui_facade.topbar_html(online=False, mode_note=OFFLINE_MODE_NOTE, project="", flow="")
     assert 'class="vl-mode offline"' in offline and OFFLINE_MODE_NOTE in offline
@@ -309,20 +310,23 @@ def test_grid_areas_at_three_breakpoints() -> None:
     wide = css[css.index("#visual-stage {") :]
     wide = wide[: wide.index("}")]
     assert "grid-template-columns: var(--vl-list-col) minmax(0, 1fr) var(--vl-panel-col);" in wide
+    # 오른쪽 열: 견적 · 추천 구간 · 「고급 도구」로 펼치는 패널(W-46b, D100 §7b — 네 영역).
     assert (
-        '"thumbs player quote" "thumbs player panel" "thumbs timeline timeline" "foot foot foot"'
-        in wide
+        '"thumbs player quote" "thumbs player ranges" "thumbs player panel" "thumbs timeline'
+        ' timeline"\n    "foot foot foot"' in wide
     )
     assert "--vl-list-col: minmax(240px, 280px);" in wide
     assert "--vl-panel-col: minmax(280px, 320px);" in wide
     two = _media_block(css, "max-width: 1050px")
     # 견적 칸은 명령 줄 바로 아래(승인 단추 곁), 타임라인은 재생기 바로 아래(사용자 결정 6).
     assert (
-        '"quote quote" "thumbs player" "thumbs timeline" "thumbs panel"\n      "foot foot"' in two
+        '"quote quote" "thumbs player" "thumbs timeline" "thumbs ranges"\n      "thumbs panel"'
+        ' "foot foot"' in two
     )
     assert "#visual-stage .vl-thumbs { max-height: none; contain: size; }" in two
     one = _media_block(css, "max-width: 860px")
-    assert '"quote" "player" "timeline" "thumbs" "panel" "foot"' in one  # 견적 다음 영상·타임라인
+    # 견적 다음 영상·타임라인·추천 구간(W-46b)
+    assert '"quote" "player" "timeline" "ranges" "thumbs" "panel" "foot"' in one
     assert "#vl-quote { grid-area: quote;" in css and "#library-analysis-scope {\n" in css
     assert "#visual-stage .vl-cards {" in one and "display: flex; overflow: auto hidden;" in one
     assert css.index("@media (max-width: 1050px)") < css.index("@media (max-width: 860px)")
@@ -331,8 +335,8 @@ def test_grid_areas_at_three_breakpoints() -> None:
         "#review-tab:has(#library-approve:disabled) #library-analysis-scope { display: none; }"
         in (css)
     )
-    # 초안 결과 카드(W-46a)가 있으면 그 칸도 패널이 덮지 않는다.
-    assert "#visual-stage:not(:has(#vl-quote-note)):not(:has(.vl-export)) .vl-panel {" in css
+    # 초안 결과 카드(W-46a)가 있으면 그 칸도 덮지 않는다 — 올라오는 것은 추천 구간 칸이다(W-46b).
+    assert "#visual-stage:not(:has(#vl-quote-note)):not(:has(.vl-export)) #vl-ranges {" in css
 
 
 @pytest.mark.parametrize("side", [0, 1], ids=["light", "dark"])

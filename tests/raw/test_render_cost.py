@@ -9,7 +9,10 @@
    W-24 세션 I가 영상 카드 18장에 카드 그림(`cardThumb`) 칸 하나씩을 더해 다시 잠갔다 — 두 기준을
    풀어 견주면 바뀐 것은 그 18칸뿐이고(모두 그 카드의 대표 컷 `thumb.src`와 같다 — 이 작업공간은
    썸네일이 다 있다), 나머지 모델과 HTML은 바이트째 같다. W-25 세션 a가 등급판 표지를
-   `raw-tier/v4` → `v5`로만 바꿔 다시 잠갔다(43곳 — 그 밖은 바이트째 같다, D65).
+   `raw-tier/v4` → `v5`로만 바꿔 다시 잠갔다(43곳 — 그 밖은 바이트째 같다, D65). W-46b가 재생기
+   껍데기에 시작·끝 표시 줄과 추천 구간 칸을, 원본마다 「내보낼 부분」(`kept`) 칸 하나를 더해 다시
+   잠갔다 — 두 기준을 풀어 견주면 모델은 그 18칸 말고 같고, HTML은 껍데기의 그 두 조각 말고
+   바이트째 같다(D100 §7b).
 2. **부른 수의 천장.** 그리기 한 번이 DB 열기·원본 자막 읽기·검토 머리 읽기를 몇 번 하는지 —
    지금 값이 상한이다. 줄이는 것은 좋고 늘면 실패다.
 3. **타이머 틱.** 바뀐 것이 없는 틱은 그리지 않는다. 작업 진행 수만 바뀐 틱은 작업대에 진행이
@@ -189,6 +192,56 @@ def test_an_unchanged_tick_neither_renders_nor_runs_upkeep(
     calls = _during(counts, tab.tick)
     assert calls["visual_workbench_render"] == 0
     assert calls["start_upkeep"] == calls["start_sync_upkeep"] == 0
+
+
+UNCHANGED_TICK_CEILING: dict[str, int] = {
+    "open_db": 3,
+    "source_transcript.load": 0,
+    "jobs.list": 0,
+    "analysis_usage_summary": 0,
+    "analysis_overview": 0,
+    "visual_workbench_render": 0,
+}
+"""바뀐 것 없는 2초 틱 하나의 읽기 — 상한이다(W-46b, D100 §7b). 앞(W-46a)의 실측은 DB 열기 12 ·
+원본 자막 본문 전부 1 · 작업 목록 1 · 실사용 요약 1이었다. 이제 서명 확인 둘과 도장 하나(원본 자막
+차례 · 최근·활성 작업 · 선택 상태 CRC를 한 연결로)뿐이고, 상태 줄 글은 짓지 않는다."""
+
+
+@needs_ffmpeg
+def test_an_unchanged_tick_reads_one_stamp_and_no_transcripts(
+    built: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server, root, signature = _opened(built, tmp_path)
+    summary = server.raw.analysis_overview(root)
+    assert summary is not None
+    assets = tuple(asset.asset_id for asset in server.raw.list_source_assets(root))
+    server._quick = {"root": root, "token": "tick", "asset_ids": assets,
+                     "revision": summary.revision.revision_id}  # fmt: skip
+    counts = _counted(monkeypatch)
+    tab = fixture.TickTab(server, signature)
+    tab.tick()
+    stamps = Counter[str]()
+    original = server.raw.poll_stamp
+
+    def stamp(*args: object, **kwargs: object) -> object:
+        stamps["poll"] += 1
+        return original(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(server.raw, "poll_stamp", stamp)
+    calls = _during(counts, tab.tick)
+    assert _over(calls, UNCHANGED_TICK_CEILING) == {}, dict(calls)
+    assert stamps["poll"] == 1
+    # 원본 자막을 하나 고치면 도장의 차례가 바뀌어 그 틱이 그린다.
+    asset = assets[0]
+    document = server.raw.source_transcript(root, asset)
+    assert document is not None
+    row = document["utterances"][0]
+    server.raw.edit_source_transcript(
+        root, asset, document["revision"], action="edit", utterance_id=row["utterance_id"],
+        text=str(row["text"]) + "!", start=None, end=None, split_at=None, right_text=None,
+    )  # fmt: skip
+    redrawn = _during(counts, tab.tick)
+    assert redrawn["visual_workbench_render"] == 1
 
 
 @needs_ffmpeg

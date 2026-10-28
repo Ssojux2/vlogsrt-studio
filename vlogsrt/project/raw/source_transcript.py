@@ -58,6 +58,24 @@ def load(workspace: Any, asset_id: str) -> dict | None:
     return scope.memo(("source_transcript.load", root, asset_id), parsed)
 
 
+def latest_sequences_on(connection: Any) -> tuple[tuple[str, int], ...]:
+    """원본마다 지금 리비전의 차례 — 본문을 읽지 않는 폴링 도장(W-46b, D100 §7b).
+
+    작업대 2초 틱은 자막이 바뀌었는지만 알면 된다 — 예전엔 틱마다 지금 리비전 본문 전부를 읽어
+    풀었다. 자막을 고치는 길은 모두 새 차례를 더하므로 (원본, 최대 차례)가 같으면 같은 자막이다.
+    표가 아직 없으면(자막을 한 번도 안 심은 작업공간) 빈 묶음이다 — 만들지 않는다(읽기만).
+    """
+    table = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='source_transcripts'"
+    ).fetchone()
+    if table is None:
+        return ()
+    rows = connection.execute(
+        "SELECT asset_id, MAX(sequence) FROM source_transcripts GROUP BY asset_id ORDER BY asset_id"
+    ).fetchall()
+    return tuple((str(row[0]), int(row[1])) for row in rows)
+
+
 def _read_latest(workspace: Any, asset_id: str) -> dict | None:
     """원본 하나의 지금 리비전을 DB에서 — 쓰기는 늘 이것으로 읽는다(기억한 문서를 믿지 않는다)."""
     _init(workspace)

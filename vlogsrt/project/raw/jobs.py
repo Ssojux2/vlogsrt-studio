@@ -85,6 +85,31 @@ def active_fingerprints_on(connection: sqlite3.Connection, kinds: Collection[str
     return {str(row[0]) for row in rows}
 
 
+def poll_rows_on(
+    connection: sqlite3.Connection, recent: int
+) -> tuple[tuple[tuple[str, str, str, int], ...], tuple[tuple[str, str], ...]]:
+    """폴링 도장의 작업 몫(W-46b) — 최근 `recent`개의 (아이디, 종류, 상태, 진행)과 활성
+    (아이디, 상태).
+
+    작업 기록 전체를 풀지 않는다 — 틱이 견주는 칸만 고른다. 연결은 부르는 쪽 것이다(한 연결로
+    여러 도장을 함께 읽는다).
+    """
+    rows = connection.execute(
+        "SELECT job_id, kind, status, progress_current FROM jobs"
+        " ORDER BY created_at DESC, job_id DESC LIMIT ?",
+        (recent,),
+    ).fetchall()
+    marks = ", ".join("?" for _ in ACTIVE_JOB_STATUSES)
+    active = connection.execute(
+        f"SELECT job_id, status FROM jobs WHERE status IN ({marks}) ORDER BY created_at, job_id",
+        ACTIVE_JOB_STATUSES,
+    ).fetchall()
+    return (
+        tuple((str(r[0]), str(r[1]), str(r[2]), int(r[3])) for r in rows),
+        tuple((str(r[0]), str(r[1])) for r in active),
+    )
+
+
 class JobStore:
     """jobs 표의 문장 단위 갱신 — 호출마다 짧은 연결을 쓴다(스레드 안전)."""
 
