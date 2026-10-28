@@ -317,7 +317,7 @@ def test_one_approval_continues_without_a_second_phase_button(tmp_path, monkeypa
     server._selection_auto_approval = None
     server.capcut_choose_view(server.current_signature())
     wait_until(lambda: server._quick.get("stage") == "승인 대기")
-    server.quick_approve_view(server.current_signature(), None)
+    server.quick_approve_view(server.current_signature())
     wait_until(lambda: server._quick.get("stage") in ("추천 구간 준비 완료", "분석 확인 필요"))
     assert server._quick["stage"] == "추천 구간 준비 완료", server._quick
     assert len(sender.calls) == 1 and len(client.calls) == 1

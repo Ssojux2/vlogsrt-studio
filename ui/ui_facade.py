@@ -650,8 +650,6 @@ def activity_html() -> str:
         '<div id="vl-activity" class="vl-activity" data-vl-kind="status">'
         '<span class="vl-dot" aria-hidden="true"></span>'
         '<span id="vl-activity-msg" class="msg" role="status" aria-live="polite"></span>'
-        '<button type="button" id="vl-activity-key" class="vl-btn vl-btn-sm" hidden>'
-        "API 연결 열기</button>"
         '<span id="vl-activity-count" class="vl-activity-count" hidden></span>'
         '<button type="button" id="vl-activity-log-open" class="vl-btn vl-btn-ghost vl-btn-sm"'
         ' aria-controls="vl-activity-log" aria-expanded="false">기록</button>'
@@ -791,18 +789,6 @@ ACTIVITY_WAKE_JS = (
 스캔하는 동안의 줄이 「작업 진행」 판에 흐른다.
 """
 
-KEY_NOTICE_JS = """() => {
-    const status = document.getElementById('quick-status');
-    if (status?.textContent.includes('연결 설정 필요')) {
-        // 응답이 「API 연결」을 이미 펼쳤다 — 서랍만 열고 키 칸에 초점을 둔다.
-        if (window.__vlActivity) { window.__vlActivity.openKey(false); }
-        else {
-            requestAnimationFrame(() => document.querySelector('#quick-api-key input')?.focus());
-        }
-    }
-}"""
-"""승인 클릭이 '연결 설정 필요'로 끝나면 오른쪽 서랍을 열고 키 칸에 초점을 둔다(W-17 B)."""
-
 _MARKDOWN_PUNCTUATION = re.compile(r"([!-/:-@\[-`{-~])")
 
 
@@ -816,7 +802,7 @@ def literal_markdown(text: str) -> str:
     return _MARKDOWN_PUNCTUATION.sub(r"\\\1", text)
 
 
-APPROVE_GUARD_JS = r"""(signature, apiKey, shownQuote) => {
+APPROVE_GUARD_JS = r"""(signature, shownQuote) => {
   // 승인은 일을 건다 — 거절되든 아니든 서버 쪽 고리를 깨운다(D101, 표시만).
   if (window.__vlServer) { window.__vlServer.wake(true); }
   // 승인은 사람이 지금 보는 견적에만 묶인다(D54). 견적 칸이 서랍·판에 덮였거나 화면 밖이거나
@@ -847,7 +833,7 @@ APPROVE_GUARD_JS = r"""(signature, apiKey, shownQuote) => {
       uncovered(md, box) && md.scrollHeight <= md.clientHeight + 1 &&
       flat(md.textContent) !== '' && flat(md.textContent) === flat(sent);
   }
-  if (seen) { return [signature, apiKey, sent]; }
+  if (seen) { return [signature, sent]; }
   if (window.__vlDrawer) {
     ['project-tools', 'settings-drawer'].forEach((id) => window.__vlDrawer(id, false));
   } else {
@@ -856,7 +842,7 @@ APPROVE_GUARD_JS = r"""(signature, apiKey, shownQuote) => {
   }
   if (window.__vlClosePopovers) { window.__vlClosePopovers(null); }
   if (quote && quote.scrollIntoView) { quote.scrollIntoView({ block: 'nearest' }); }
-  return [signature, apiKey, ''];
+  return [signature, ''];
 }"""
 """일괄 승인 클릭의 앞 단계 — 견적 칸이 정말 보일 때만 그 문구를 보낸다(덮였으면 빈 문구)."""
 
@@ -1085,6 +1071,7 @@ SHELL_JS = r"""
   // 실사용 줄(「실사용 $…」)의 원천 — 기록 판 맨 위에 고정해 말줄임 없이 다 보인다(D46).
   var USAGE_ID = "vl-usage-src";
   var SCRIM_ID = "vl-scrim";
+  // 키가 없다는 알림(D102 — `.env` 안내) — 도는 일의 머리줄이 이것을 덮지 않는다(D101).
   var KEY_NOTICE = "연결 설정 필요";
   var WATCH_MS = 1000;
   // 단추 응답은 그 사건이 갈아 쓴 상태 줄보다 늦게 온다 — 이 안의 같은 글은 한 번만 적는다.
@@ -1245,8 +1232,6 @@ SHELL_JS = r"""
     var under = kind === "status" && text.indexOf(KEY_NOTICE) < 0 && W.__vlServer &&
       W.__vlServer.headed;
     if (!under) { A.strip(text, kind); }
-    var key = byId("vl-activity-key");
-    if (key) { key.hidden = text.indexOf(KEY_NOTICE) < 0; }
     var now = new Date();
     A.entries.unshift({ time: pad(now.getHours()) + ":" + pad(now.getMinutes()) + ":" +
       pad(now.getSeconds()), text: text, kind: kind, at: now.getTime() });
@@ -1299,16 +1284,6 @@ SHELL_JS = r"""
     row.textContent = text; row.title = text; row.hidden = !text;
   };
 __VL_SERVER_ACTIVITY__
-  // 키가 없다는 알림 — 오른쪽 서랍을 열고 「API 연결」을 펼쳐 키 칸에 초점을 둔다.
-  A.openKey = function (expand) {
-    W.__vlDrawer("settings-drawer", true);
-    var label = document.querySelector("#quick-api-panel > button.label-wrap");
-    if (expand !== false && label && !label.classList.contains("open")) { label.click(); }
-    requestAnimationFrame(function () {
-      var input = document.querySelector("#quick-api-key input");
-      if (input) { input.focus(); }
-    });
-  };
   // 알림 머리 글자 — 그라디오가 종류에서 지은 영어(Error·Warning·Info·Success)를 한글로 바꾼다.
   // 글자 마디만 바꾸고(스벨트는 종류가 같으면 다시 쓰지 않는다), 닫기 단추의 이름도 한글로.
   var TOAST_TITLES = __VL_TOAST_TITLES__;
@@ -1374,7 +1349,6 @@ __VL_SERVER_ACTIVITY__
       setPopover(target, !!box && box.hidden);
       return;
     }
-    if (t.closest("#vl-activity-key")) { A.openKey(true); return; }
     if (t.closest("#vl-library-close")) { closeLibrary(); return; }
     if (t.closest("#vl-progress-close")) { S.dismiss(); return; }
     if (t.closest("#vl-progress-pin")) { S.pin(); return; }

@@ -50,7 +50,7 @@ def _idle(ui, root) -> bool:
 
 def _approve_shown(ui) -> None:
     """사람이 화면에 보이는 견적 그대로 승인한다."""
-    ui.library_analysis_view(ui.current_signature(), None, ui.library_analysis_summary())
+    ui.library_analysis_view(ui.current_signature(), ui.library_analysis_summary())
 
 
 def _b_failed(tmp_path, monkeypatch):
@@ -116,7 +116,7 @@ def test_editing_a_finished_videos_caption_keeps_the_remaining_approval(tmp_path
     # 라이브러리 전체를 다시 재면 digest가 바뀐다 — 예전 승인은 여기서 「다시 승인」으로 닫혔다.
     assert ui.raw.selection_quote(root, tuple(library.asset_ids)).digest != library.digest
     entered = len(gate.entered)
-    ui.library_analysis_view(signature, None, summary)
+    ui.library_analysis_view(signature, summary)
     wait_until(lambda: _stage(ui, root, b) == DONE)
     wait_until(lambda: _idle(ui, root))
     assert AGAIN not in str(ui.capcut_status_view(signature))
@@ -166,7 +166,7 @@ def test_transcribe_only_binds_only_the_remaining_videos(tmp_path, monkeypatch):
     )
     _edit_caption(ui, root, a)  # 끝난 영상의 바뀜은 남은 영상의 승인과 무관하다
     entered = len(gate.entered)
-    ui.library_analysis_view(signature, None, summary)
+    ui.library_analysis_view(signature, summary)
     wait_until(lambda: _stage(ui, root, b) == raw.TRANSCRIBED_STAGE)
     wait_until(lambda: _idle(ui, root))
     assert gate.entered[entered:] == [b] and gate.quotes[-1].mode == TRANSCRIBE

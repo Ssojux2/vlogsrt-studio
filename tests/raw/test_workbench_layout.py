@@ -211,7 +211,7 @@ def test_blocks_move_project_and_settings_tools_into_two_drawers(
         assert left in _ancestors(buttons[label]), label
     for label in ("자동 제외 전체 복원", "실행 취소", "결과 확인", "폴더 열기"):
         assert right in _ancestors(buttons[label]), label
-    assert right in _ancestors(by_id["quick-api-panel"])
+    assert right in _ancestors(by_id["analysis-model-panel"])
     assert right in _ancestors(by_id["analysis-model"])
     for label in ("고급 편집 도구", "고급 · 클립 패키지", "복원 · 전달 · 고급 조작"):
         accordion = next(
@@ -438,13 +438,12 @@ function el(id, tag) {
   return node;
 }
 const reg = {};
-['vl-activity', 'vl-activity-msg', 'vl-activity-key', 'vl-activity-log', 'quick-status',
+['vl-activity', 'vl-activity-msg', 'vl-activity-log', 'quick-status',
  'project-tools', 'settings-drawer', 'vl-keysheet', 'vl-usage-src', 'vl-activity-usage',
 ].forEach((id) => { reg[id] = el(id); });
 reg['vl-activity-usage'].hidden = true;
 let usageParagraphs = [];
 reg['vl-usage-src'].querySelectorAll = () => usageParagraphs;
-reg['vl-activity-key'].hidden = true;
 reg['vl-keysheet'].hidden = true;
 const list = el('list', 'OL');
 const empty = el('empty');
@@ -538,7 +537,8 @@ A.reply('**거절** · 견적 $1.49');
 out.replyAfterSameStatus = { entries: A.entries.length, kind: A.entries[0].kind };
 statusParagraphs = [{ textContent: '연결 설정 필요 · 아직 분석하지 않았습니다' }];
 observers[0].fn([]);
-out.keyButton = reg['vl-activity-key'].hidden;
+out.keyNotice = { kind: reg['vl-activity'].attrs['data-vl-kind'],
+  drawer: reg['settings-drawer'].classes.has('open'), openKey: typeof A.openKey };
 for (let i = 0; i < 30; i += 1) { A.reply('응답 ' + i); }
 out.capped = A.entries.length;
 out.scrimBefore = reg['vl-scrim'] ? reg['vl-scrim'].hidden : 'missing';
@@ -569,9 +569,6 @@ out.sheetEscaped = { open: !reg['vl-keysheet'].hidden, expanded: opener.attrs['a
   drawer: reg['settings-drawer'].classes.has('open') };
 press({ closest: () => null });
 out.escaped = { open: reg['settings-drawer'].classes.has('open'), scrim: reg['vl-scrim'].hidden };
-A.openKey(false);
-out.keyNotice = { open: reg['settings-drawer'].classes.has('open'),
-  scrim: reg['vl-scrim'].hidden };
 process.stdout.write(JSON.stringify(out));
 """
 
@@ -600,7 +597,8 @@ def test_shell_script_runs_the_activity_area_the_drawers_and_the_scrim(tmp_path:
     assert out["sameReplyLogged"] == 3  # 누른 만큼 남는다
     assert out["statusAfterSameReply"] == 3  # 응답과 같은 상태 줄은 두 번 적지 않는다
     assert out["replyAfterSameStatus"] == {"entries": 4, "kind": "reply"}  # 반대 순서도 한 번
-    assert out["keyButton"] is False  # 키가 없다는 알림이면 「API 연결 열기」가 보인다
+    # 키가 없다는 알림은 활동 칸에 글로만 뜬다 — 서랍을 열거나 키 칸을 찾지 않는다(D102).
+    assert out["keyNotice"] == {"kind": "status", "drawer": False, "openKey": "undefined"}
     assert out["capped"] == 20  # 기록은 최근 20개
     assert out["scrimBefore"] is True  # 막은 처음부터 있고 서랍이 닫혀 있으면 숨는다
     assert out["leftOpen"] == {"open": True, "clicks": 1, "focused": 1, "scrim": False}
@@ -612,7 +610,6 @@ def test_shell_script_runs_the_activity_area_the_drawers_and_the_scrim(tmp_path:
     # 판을 연 단추 위의 Esc는 판만 닫는다(서랍은 그대로 — 판부터 닫는다).
     assert out["sheetEscaped"] == {"open": False, "expanded": "false", "drawer": True}
     assert out["escaped"] == {"open": False, "scrim": True}  # 그 밖의 Esc는 서랍을 닫는다
-    assert out["keyNotice"] == {"open": True, "scrim": False}  # 키 알림은 설정 서랍을 연다
 
 
 _GUARD_HARNESS = r"""
@@ -644,8 +641,8 @@ function scenario(opts) {
     querySelectorAll: () => [],
     elementFromPoint: () => (opts.covered ? { id: 'vl-scrim' } : child),
   };
-  const sent = guard('sig', 'key', opts.shown === undefined ? quotes.shown : opts.shown);
-  return { quote: sent[2], scrolled: calls.scrolled, closed: calls.toggled.length };
+  const sent = guard('sig', opts.shown === undefined ? quotes.shown : opts.shown);
+  return { quote: sent[1], scrolled: calls.scrolled, closed: calls.toggled.length };
 }
 const box = { left: 955, top: 107, right: 1253, bottom: 175, width: 298, height: 68 };
 const below = { left: 16, top: 900, right: 984, bottom: 980, width: 968, height: 80 };
@@ -752,7 +749,7 @@ def test_a_blank_shown_quote_is_refused_with_the_quote_in_full(
     server.library_analysis_summary = lambda: summary  # type: ignore[method-assign]
     usage = "실사용 $0.4123 · 전사 812초 (불확실 0건·가격 미정 0건)"
     server._usage_line = lambda: usage  # type: ignore[method-assign]  # 앞선 유료 실행의 흔적
-    status, _panel, _key = server.library_analysis_view(signature, "", "")
+    status = server.library_analysis_view(signature, "")
     assert "새 견적을 확인하세요" in status and summary in status  # 견적·상한을 직접 싣는다
     assert server._approval_jobs.get(root) is None  # 아무것도 시작하지 않았다
     note = server.quote_note_markdown()
@@ -814,14 +811,14 @@ def test_the_quote_note_clears_when_the_next_approve_passes_or_the_quote_changes
     )
     server._library_ids = lambda _root: ("a",)  # type: ignore[method-assign]
     server.library_analysis_summary = lambda: summary  # type: ignore[method-assign]
-    server.library_analysis_view(signature, "", "")  # 빈 문구 → 거절
+    server.library_analysis_view(signature, "")  # 빈 문구 → 거절
     assert summary in server.quote_note_markdown()
     # 견적을 다시 본 다음 클릭은 대조를 지난다 — 오프라인·키 없음이라 키 알림에서 멈춘다.
-    status, _panel, _key = server.library_analysis_view(signature, "", summary)
+    status = server.library_analysis_view(signature, summary)
     assert "연결 설정 필요" in status and server._approval_jobs.get(root) is None
     assert server.quote_note_markdown() == ""
     # 다시 거절된 뒤 견적이 바뀌면(모델·범위) 알림이 물러나고 칸도 걷힌다.
-    server.library_analysis_view(signature, "", "")
+    server.library_analysis_view(signature, "")
     assert summary in server.quote_note_markdown()
     server._library_quotes[root] = SimpleNamespace(
         asset_ids=("a",), digest="d2", workflow="w", estimates=()

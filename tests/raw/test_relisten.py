@@ -252,7 +252,7 @@ def approve(ui: Any, mode: str) -> None:
     """사람이 범위를 고르고, 화면에 보이는 견적 그대로 승인한다."""
     signature = ui.current_signature()
     ui.approval_mode_view(signature, mode)
-    ui.library_analysis_view(signature, None, ui.library_analysis_summary())
+    ui.library_analysis_view(signature, ui.library_analysis_summary())
 
 
 def stage(ui: Any, root: Path, asset_id: str) -> str | None:

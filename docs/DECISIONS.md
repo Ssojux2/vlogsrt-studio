@@ -9587,3 +9587,37 @@ node 하네스 시험 `test_one_poller_shows_running_work_without_opening_the_lo
 **남긴 것**: 작업 줄에 원본 이름이 없다(`JobRecord`에 이름 칸이 없다 — 프로세스 줄이 이름·%를 말하므로 판은 프로세스 줄을 먼저 그린다).
 해시(원본 연결)는 ffmpeg가 아니라 프로세스 줄 없이 작업 줄 `n/N`만 보인다.
 
+## D102 — API 키는 `.env`에서만: 화면의 키 입력을 지운다 (2026-10-28, W-49, 사용자 지시)
+
+**배경**: 사용자 지시(2026-10-28) — 「LLM에 쓰는 API 키는 모두 .env에 직접 넣을 거니까, 페이지 안에서 입력하는 부분은
+지금은 빼 줘. 아직 상용으로 안 풀 거야」. 작업대에는 OpenAI 키를 화면에서 받는 길이 하나 남아 있었다 — 설정 서랍
+「API 연결 · 처음 한 번」(`#quick-api-panel`)의 비밀번호 칸 `#quick-api-key`(「이 실행에서만 사용」). 일괄 승인 클릭
+(`APPROVE_GUARD_JS` → `library_analysis_view`)과 선택 영상 승인(`quick_approve_view`)이 그 값을 받아 `_startup_credentials`를
+갈아 끼웠고, 키가 없으면 「연결 설정 필요」 알림 뒤에 `KEY_NOTICE_JS`가 서랍을 열어 키 칸에 초점을 주었고, 활동 칸에
+「API 연결 열기」 단추(`#vl-activity-key`, `A.openKey`)가 떴다. Claude·Gemini 키는 처음부터 `.env`에서만 읽었다(D54·D83).
+
+**결정**:
+1. **지운다(숨기지 않는다).** 키 칸 · 승인 처리기의 `api_key` 인자와 그 값으로 자격증명을 바꾸던 몇 줄 · 쓰이지 않던
+   `quick_approve_panel_view` · `KEY_NOTICE_JS` · `A.openKey` · 「API 연결 열기」 단추를 모두 지웠다. 숨기기만 하면 화면에
+   안 보이는 비밀번호 칸과 「화면 값이 시작 환경의 키를 덮는」 길이 그대로 남고, 승인 앞 단계가 계속 그 칸을 읽어 보내며,
+   시험이 그 길을 살려 둔다 — 지우지 않은 비용이 매번 붙는다. 되살리기는 이 커밋을 되돌리면 되고(바뀐 곳이 승인 처리기
+   두 개 · 서랍 판 하나 · 껍데기 JS 셋으로 좁다), 상용으로 낼 때는 어차피 키 보관(메모리 밖 · 다시 띄워도 남는가)을 새로
+   정해야 하므로 옛 「이 실행에서만」 칸을 그대로 되살릴 일은 아니다.
+2. **키는 시작 환경에서만 온다.** `_capture_startup_credentials`(서버가 띄워질 때 한 번 — OpenAI·Claude·Gemini)가 유일한
+   원천이다. 그래서 키를 넣은 뒤에는 **앱을 다시 띄워야** 한다 — 안내 문구가 모두 그렇게 말한다.
+3. **안내.** 「연결 설정 필요 · 아직 분석하지 않았습니다」 + 「`.env`에 `OPENAI_API_KEY`를 넣고 앱을 다시 띄운 뒤 …」
+   (일괄 승인 알림 `NOTICE_KEY` · 선택 영상 상태 줄 · 빈칸 재전사 `REFILL_KEY_TEXT`). 활동 칸은 이 글을 보이기만 하고
+   서랍을 열지 않는다. Claude·Gemini·전사 엔진 키 안내의 「API 연결에서 … 바꾸세요」는 「설정 서랍 「분석 모델」에서 …」로.
+4. **서랍 판 이름.** 키 칸이 빠진 판에는 영상 분석 모델(D54)·새로 듣는 전사 엔진(D92) 칸과 키 상태 줄만 남는다 — 이름을
+   「분석 모델」, `elem_id`를 `analysis-model-panel`로 바꿨다. 키 상태 줄은 OpenAI 키(`OPENAI_API_KEY`) 줄을 맨 앞에 더해
+   셋 모두 「확인됨/없음 — `.env`에 넣고 앱을 다시 띄우세요」를 말한다(이름만, 값은 어디에도 없다).
+5. **견적 → 승인 문은 그대로다(D44·D54).** 키가 없으면 견적·승인 범위를 그대로 두고 아무것도 시작하지 않는다
+   (`connection_required`). 승인 앞 단계는 이제 `(signature, shownQuote)` 둘만 보낸다 — 견적 대조는 그대로다.
+
+**바꾸지 않은 것**: `.env`·`VLOGSRT_OFFLINE`·온라인 앱을 띄우는 길(D44 — 사람만) · `capture_*_credentials` · 자격증명
+가림(`activity_log`) · 지문·캐시 열쇠·견적·단가.
+
+**시험**: `tests/raw/test_env_only_keys.py`(실제 Blocks에 키 칸·비밀번호 칸이 없음 · 승인 클릭의 입력이 서명·견적 문구 둘 ·
+처리기에 키 인자가 없음 · 껍데기 JS에 `openKey`·`quick-api`·`apiKey`가 없음 · 화면 코드에 「API 연결」이 없음 · 키 없는 승인은
+`.env` 안내만 남기고 0송신 · 상태 줄이 `OPENAI_API_KEY` 이름만 말함). 키를 화면으로 넣던 시험 둘(`test_approval_visibility`,
+`test_analysis_model_ui`의 R2-1 a)은 「`.env` 키로 다시 띄운 서버」(`_startup_credentials`를 세움)로 바꿨다. 유료 호출 0회.

@@ -122,7 +122,7 @@ def test_transcribe_only_sends_no_semantic_request_and_needs_no_claude_key(
     a, b = ids["a.mov"], ids["b.mov"]
     _as_sonnet_without_key(ui, root)
     signature = ui.current_signature()
-    status = ui.library_analysis_view(signature, None, ui.library_analysis_summary())[0]
+    status = ui.library_analysis_view(signature, ui.library_analysis_summary())
     assert ANALYSIS_GEMINI_KEY_ENV in status  # 전체 분석은 키가 없어 닫힌다
     assert not sender.calls and ui._approval_jobs.get(root) is None
 
@@ -134,7 +134,7 @@ def test_transcribe_only_sends_no_semantic_request_and_needs_no_claude_key(
     summary = ui.library_analysis_summary()
     assert shown == ui_facade.literal_markdown(summary)  # 고르면 견적 칸을 바로 다시 그린다
     assert summary.startswith("전사만 · 대상 영상 2개") and "$" not in summary
-    ui.library_analysis_view(signature, None, summary)
+    ui.library_analysis_view(signature, summary)
     wait_until(lambda: all(stage(ui, root, i) == raw.TRANSCRIBED_STAGE for i in (a, b)))
     assert len(sender.calls) == 2 and client.calls == []
     store = AnalysisStore(ui.raw._workspace(root))
@@ -207,7 +207,7 @@ def test_the_click_submits_exactly_the_quote_it_compared(
     submitted: list[Any] = []
     monkeypatch.setattr(ui, "library_analysis_summary", racing)
     monkeypatch.setattr(ui, "_submit_library_approval", lambda r, i, q: submitted.append(q))
-    ui.library_analysis_view(signature, None, shown)
+    ui.library_analysis_view(signature, shown)
     assert raced == [True] and ui._library_quotes[root].mode == TRANSCRIBE
     assert submitted == [compared] and submitted[0].mode == FULL  # 사람이 본 전체 견적 그대로
     assert not sender.calls and not client.calls

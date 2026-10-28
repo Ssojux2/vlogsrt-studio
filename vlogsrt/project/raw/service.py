@@ -68,6 +68,7 @@ from vlogsrt.project.raw.analysis_store import (
     analyzing_revisions_on,
 )
 from vlogsrt.project.raw.browser_runtime import (
+    STT_KEY_ENV,
     BrowserRuntimeError,
     ClaudeCredentials,
     EnvironmentCredentials,
@@ -369,6 +370,7 @@ __all__ = [
     "RawWorkspaceService",
     "ResolvedMedia",
     "SEGMENT_JOB_KIND",
+    "STT_KEY_ENV",
     "SEGMENTATION_BASIS_SEMANTIC",
     "SegmentCoverage",
     "SegmentPlanEntry",
