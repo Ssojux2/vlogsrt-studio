@@ -62,7 +62,7 @@ def test_click_returns_before_the_slow_quote_and_status_shows_acceptance(tmp_pat
     reply = ui.library_analysis_view(signature)
     elapsed = time.monotonic() - started
     assert elapsed < CLICK_BUDGET_SECONDS, elapsed
-    assert ACCEPTED in reply[0]
+    assert ACCEPTED in reply
     assert ACCEPTED in ui.capcut_status_view(signature)
     wait_until(lambda: len(sender.calls) == 2 and len(client.calls) == 4)
 
@@ -122,7 +122,7 @@ def test_status_timer_does_not_erase_the_approval_reply(tmp_path, monkeypatch):
     ui._live_transport = None
     ui._startup_credentials = None
     signature = ui.current_signature()
-    reply = ui.library_analysis_view(signature, "")[0]
+    reply = ui.library_analysis_view(signature)
     assert reply
     for _ in range(TICKS):
         assert reply in ui.capcut_status_view(signature)
@@ -194,7 +194,7 @@ def test_single_video_approval_reply_survives_the_status_timer(tmp_path, monkeyp
     limit, ui._analysis_limit = ui._analysis_limit, 0
     signature = ui.current_signature()
     try:
-        reply = ui.quick_approve_view(signature, None)
+        reply = ui.quick_approve_view(signature)
         assert QUICK_STARTED in reply
         for _ in range(TICKS):
             assert QUICK_STARTED in ui.capcut_status_view(signature)

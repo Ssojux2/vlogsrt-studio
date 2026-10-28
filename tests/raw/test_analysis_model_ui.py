@@ -1,4 +1,4 @@
-"""W-14 / D54 — 「API 연결 · 처음 한 번」의 영상 분석 모델 선택과 그 둘레(유료 호출 0회).
+"""W-14 / D54 — 설정 서랍 「분석 모델」의 영상 분석 모델 선택과 그 둘레(유료 호출 0회).
 
 모델은 작업공간 설정에 산다. 분석이나 승인 확인이 도는 동안에는 바꾸지 않는다 — 견적·승인이 본
 모델과 실행 모델이 갈린다. 바꾸면 라이브러리 캐시를 비우고 견적을 다시 낸다. 견적은 모델 이름과
@@ -248,10 +248,10 @@ def test_the_key_status_names_the_variable_but_never_the_value(tmp_path: Path) -
     assert "ANTHROPIC_API_KEY" in missing and "없음" in missing
 
 
-def test_the_api_panel_carries_the_model_dropdown_and_never_the_key(
+def test_the_model_panel_carries_the_model_dropdown_and_never_the_key(
     tmp_path: Path, local_socket: None
 ) -> None:
-    """실제 Blocks — 칸은 「API 연결」 안, 사람이 고를 때(`input`)만 저장, 키 값은 없다."""
+    """실제 Blocks — 칸은 「분석 모델」 안, 사람이 고를 때(`input`)만 저장, 키 값은 없다."""
     server = bare_server(tmp_path)
     server._startup_claude = raw_service.ClaudeCredentials(api_key=SECRET)
     app = server.build_blocks()
@@ -266,7 +266,8 @@ def test_the_api_panel_carries_the_model_dropdown_and_never_the_key(
         LUNA,
     ]
     assert dropdown.value == LUNA  # 저장된 모델 그대로 — 기본으로 옮기지 않는다
-    assert dropdown.parent.parent is by_id["quick-api-panel"]  # gradio가 입력 칸을 Form으로 감싼다
+    # gradio가 입력 칸을 Form으로 감싼다
+    assert dropdown.parent.parent is by_id["analysis-model-panel"]
     assert "확인됨" in str(status.value)
     triggers = [
         event
@@ -476,12 +477,10 @@ def test_a_library_approval_binds_to_the_summary_on_screen(
             and server._library_quotes[root].workflow.models.luna_model == CLAUDE
         )
     )
-    server.library_analysis_view(server.current_signature(), None, on_screen)
+    server.library_analysis_view(server.current_signature(), on_screen)
     assert "새 견적을 확인하세요" in server._quick_status()
     assert LIBRARY_APPROVAL_JOB_KIND not in {job.kind for job in server.raw.list_jobs(root)}
-    server.library_analysis_view(
-        server.current_signature(), None, server.library_analysis_summary()
-    )
+    server.library_analysis_view(server.current_signature(), server.library_analysis_summary())
     assert LIBRARY_APPROVAL_JOB_KIND in {job.kind for job in server.raw.list_jobs(root)}
     wait_until(lambda: len(opener.calls) == 1)
     busy = ("selection_analysis", LIBRARY_APPROVAL_JOB_KIND)
@@ -545,7 +544,10 @@ def _keyless_server(
 def test_a_first_run_without_a_key_still_reaches_the_requoted_claude_quote(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """키 없음 → 연결 안내 → 패널에서 Claude 고름 → 키 입력 → 승인: 갇히지 않는다(R2-1 a)."""
+    """키 없음 → 연결 안내 → Claude 고름 → `.env` 키로 다시 띄움 → 승인: 갇히지 않는다(R2-1 a).
+
+    화면은 키를 받지 않는다(D102) — 시작 환경에서 찍은 키를 세워 다시 띄운 서버를 흉내 낸다.
+    """
     server, sender, luna, opener = _keyless_server(tmp_path, monkeypatch)
     signature = server.current_signature()
     server.quick_approve_view(signature)
@@ -554,7 +556,8 @@ def test_a_first_run_without_a_key_still_reaches_the_requoted_claude_quote(
     wait_until(lambda: server._quick["quote"].workflow.models.luna_model == CLAUDE)
     for _ in range(3):
         server._quick_status()  # 타이머 — 연결 안내가 견적을 가리고 있다
-    refused = server.quick_approve_view(signature, "sk-openai-synthetic")
+    server._startup_credentials = raw_service.EnvironmentCredentials("sk-openai-synthetic", None)
+    refused = server.quick_approve_view(signature)
     assert "새 견적을 확인하세요" in refused and "Claude 비용 상한 $" in refused
     assert not server._quick.get("connection_required")  # 키가 생겼으니 안내를 걷는다
     assert "Claude 비용 상한 $" in server._quick_status()
@@ -588,7 +591,7 @@ def test_a_held_library_notice_never_masks_the_quote_to_confirm(
             and server._library_quotes[root].workflow.models.luna_model == CLAUDE
         )
     )
-    server.library_analysis_view(signature, None, "a summary the user never saw")
+    server.library_analysis_view(signature, "a summary the user never saw")
     held = server._quick_status()
     assert "새 견적을 확인하세요" in held and server.library_analysis_summary() in held
     refused = server.quick_approve_view(signature)

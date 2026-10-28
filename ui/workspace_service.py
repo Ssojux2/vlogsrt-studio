@@ -98,7 +98,7 @@ NOTICE_TEXT = {
     NOTICE_RECHECK: "입력이 바뀌었습니다. 아무것도 시작하지 않았습니다. "
     "갱신된 범위를 확인하고 다시 승인하세요.",
     NOTICE_KEY: "**연결 설정 필요 · 아직 분석하지 않았습니다**\n\n"
-    "API 연결에 키를 입력한 뒤 표시된 범위를 승인하세요.",
+    "`.env`에 `OPENAI_API_KEY`를 넣고 앱을 다시 띄운 뒤 표시된 범위를 승인하세요.",
     NOTICE_UNSEEN: "**새 견적을 확인하세요** · 화면에 보인 범위·비용이 지금 견적과 다릅니다"
     "(분석 모델이 바뀌었을 수 있습니다). 아무것도 시작하지 않았습니다. "
     "갱신된 견적을 확인한 뒤 다시 승인하세요.",
@@ -197,6 +197,8 @@ FINALCUT_DROP_ON_TEXT = (
 FINALCUT_DROP_OFF_TEXT = "꺼짐 — 다음 보내기부터 꺼진 클립까지 담은 전체 타임라인을 보냅니다."
 """「꺼진 클립 빼고 보내기」(D94) — 설정 서랍의 켬·끔. 작업공간 표지에 산다(기본 끔)."""
 TIMING_ENGINE_ID = "vl-timing-engine"
+ANALYSIS_MODEL_PANEL_ID = "analysis-model-panel"
+"""설정 서랍 「분석 모델」 — 모델·전사 엔진 칸과 키 상태 줄. 키 입력 칸은 없다(D102)."""
 TIMING_ENGINE_LABEL = "새로 듣는 전사 엔진"
 TIMING_ENGINE_RETIRED_MARK = " · 이전 엔진({date} 종료)"
 """「새로 듣는 전사 엔진」(W-31e, D92) — 처음 듣거나 다시 듣는 영상이 쓸 시간 엔진. 이미 들은 영상은
@@ -212,8 +214,8 @@ GEMINI_TRANSCRIBE_PAID_KEY_NOTE = (
 """Gemini 전사 엔진의 키 경고(W-31e) — 영상 분석 경고(D87)와 같은 까닭, 입력이 오디오다."""
 TIMING_KEY_MISSING_TEXT = (
     "{label}로 들을 영상이 있어 `{env}`가 필요합니다. `.env`에 결제를 연결한 키를 넣고 앱을 다시"
-    " 띄우거나, API 연결에서 새로 듣는 전사 엔진을 바꾼 뒤 견적을 다시 확인하세요. 유료 호출은"
-    " 시작하지 않았습니다."
+    " 띄우거나, 설정 서랍 「분석 모델」에서 새로 듣는 전사 엔진을 바꾼 뒤 견적을 다시"
+    " 확인하세요. 유료 호출은 시작하지 않았습니다."
 )
 TIMING_PRICE_UNKNOWN_TEXT = (
     "{label}의 공식 단가는 {date}까지 다시 확인하기로 한 값입니다 — **가격 미정**이라 이 견적은"
@@ -271,7 +273,7 @@ REFILL_UNSEEN_TEXT = (
 )
 REFILL_KEY_TEXT = (
     "연결 설정이 필요합니다 — OpenAI API 키가 없어 빈칸 재전사를 시작하지 않았습니다."
-    " 「API 연결」에서 키를 넣어 주세요."
+    " `.env`에 `OPENAI_API_KEY`를 넣고 앱을 다시 띄워 주세요."
 )
 REFILL_BUSY_TEXT = "이 영상의 분석이나 빈칸 재전사가 진행 중입니다. 끝난 뒤 다시 눌러 주세요."
 REFILL_RUNNING_TEXT = "빈칸을 다시 묻는 중입니다 — 끝나면 넣은 자막이 원본 자막 목록에 보입니다."
@@ -776,7 +778,7 @@ ACTIVITY_JOB_LABELS = {
 ACTIVITY_STATUS_LABELS = {"running": "진행 중", "queued": "대기", "cancel_requested": "취소 중"}
 CLAUDE_KEY_MISSING_TEXT = (
     "{label} 분석에는 `{env}`가 필요합니다. `.env`에 키를 넣고 앱을 다시 띄우거나, "
-    "API 연결에서 영상 분석 모델을 바꾸세요. 유료 호출은 시작하지 않았습니다."
+    "설정 서랍 「분석 모델」에서 영상 분석 모델을 바꾸세요. 유료 호출은 시작하지 않았습니다."
 )
 """Claude·Gemini 키가 없을 때의 안내 — 키 이름만 말하고 값은 어디에도 싣지 않는다."""
 GEMINI_PAID_KEY_NOTE = (
@@ -922,7 +924,7 @@ body .toast-wrap {
 #quick-status { background: var(--vl-surface); color: var(--vl-ink);
  border: 1px solid var(--vl-line); padding:10px 12px; border-radius:6px; }
 #quick-status p, #quick-status strong { color: var(--vl-ink); }
-#quick-api-panel { border: 1px solid var(--vl-line-strong); }
+#analysis-model-panel { border: 1px solid var(--vl-line-strong); }
 /* 그라디오 prose의 가로줄·표 선은 #e1e1e1로 박혀 어두운 테마에서 밝은 줄로 남는다 — 같은
    특정성이면 늦게 실린 쪽이 이기므로 body를 붙여 한 단 높인다. */
 body .gradio-container .prose hr { border-top-color: var(--vl-line); }
@@ -3666,22 +3668,16 @@ class RawWorkspaceUi:
             return None
         return held
 
-    def _library_reply(self, root: Path, kind: str, open_panel: bool = False) -> tuple:
+    def _library_reply(self, root: Path, kind: str) -> str:
         self._set_approval_notice(root, kind)
-        return (
-            self._quick_status(),
-            gr.Accordion(open=open_panel),
-            gr.Textbox(value="", autofocus=open_panel),
-        )
+        return self._quick_status()
 
-    def library_analysis_view(
-        self, signature: str | None, api_key: str | None = "", shown_summary: str | None = None
-    ) -> tuple:
+    def library_analysis_view(self, signature: str | None, shown_summary: str | None = None) -> str:
         """일괄 승인 — 화면이 함께 보낸 요약(범위·상한)이 지금 견적과 같을 때만 접수한다(D54).
 
         답의 알림 종류로 알림 한 줄을 띄운다(접수는 알림, 거절은 주의) — 결합은 그대로다(D57 C).
         """
-        reply = self._library_analysis(signature, api_key, shown_summary)
+        reply = self._library_analysis(signature, shown_summary)
         root = self._snapshot_root()
         held = self._approval_notice.get(root) if root is not None else None
         toast = APPROVAL_TOASTS.get(held.kind) if held is not None else None
@@ -3689,9 +3685,7 @@ class RawWorkspaceUi:
             _toast(*toast)
         return reply
 
-    def _library_analysis(
-        self, signature: str | None, api_key: str | None, shown_summary: str | None
-    ) -> tuple:
+    def _library_analysis(self, signature: str | None, shown_summary: str | None) -> str:
         root = self._require_current_selection(signature)
         every = self._library_ids(root)
         library = self._library_quotes.get(root)
@@ -3701,22 +3695,18 @@ class RawWorkspaceUi:
         pending = self._library_pending(root)
         if pending is None or not pending[0]:
             # 남은 영상이 없다(다른 탭의 낡은 단추) — 시작할 것도, 물을 것도 없다.
-            return (self._quick_status(), gr.Accordion(open=False), gr.Textbox(value=""))
+            return self._quick_status()
         ids, quote = pending
         # 대조한 바로 그 견적을 접수한다 — 다시 읽으면 그 사이 범위 칸이 다시 묶은 견적이 들어온다.
         quote = self._library_quote_seen(root, quote, ids, shown_summary)
         if quote is None:
-            return (self._quick_status(), gr.Accordion(open=False), gr.Textbox(value=""))
+            return self._quick_status()
         ids = tuple(quote.asset_ids)
-        key = (api_key or "").strip()
-        if key:
-            self._startup_credentials = raw_service.EnvironmentCredentials(
-                key, self._startup_credentials.base_url if self._startup_credentials else None
-            )
+        # 키는 시작 환경(`.env`)에서만 온다(D102) — 화면은 키를 받지 않는다.
         if self._startup_credentials is None and self._live_transport is None:
             if self._quick.get("token"):
                 self._quick_update(self._quick["token"], connection_required=True)
-            return self._library_reply(root, NOTICE_KEY, open_panel=True)
+            return self._library_reply(root, NOTICE_KEY)
         if self._quick.get("connection_required"):  # 키가 생겼다 — 연결 안내가 견적을 가리지 않게
             self._quick_update(self._quick["token"], connection_required=False)
         # 「전사만」은 영상 분석 모델을 부르지 않는다 — Claude 키가 없어도 된다(D59 19b). 전사
@@ -3727,10 +3717,10 @@ class RawWorkspaceUi:
         if problem is not None:
             notice = f"**연결 설정 필요 · 아직 분석하지 않았습니다**\n\n{problem}"
             self._set_approval_notice(root, NOTICE_KEY, notice)
-            return (self._quick_status(), gr.Accordion(open=True), gr.Textbox(value=""))
+            return self._quick_status()
         # 새 견적 확인(영상마다 ffprobe)은 수십 초 걸린다 — 클릭은 접수만 하고 돌아온다.
         self._submit_library_approval(root, ids, quote)
-        return (self._quick_status(), gr.Accordion(open=False), gr.Textbox(value=""))
+        return self._quick_status()
 
     def _library_quote_seen(
         self, root: Path, quote: Any, ids: tuple[str, ...], shown_summary: str | None
@@ -3877,7 +3867,7 @@ class RawWorkspaceUi:
         started = (self._task_for(root, child.asset_ids) for child in children)
         return frozenset(task["token"] for task in started if task is not None)
 
-    def quick_approve_view(self, signature: str | None, api_key: str | None = "") -> str:
+    def quick_approve_view(self, signature: str | None) -> str:
         root = self._require_current_selection(signature)
         state = self._quick
         if (
@@ -3886,16 +3876,11 @@ class RawWorkspaceUi:
             or state.get("quote") is None
         ):
             raise gr.Error("영상을 선택하면 필요한 분석 범위가 먼저 표시됩니다")
-        key = (api_key or "").strip()
-        if key:
-            self._startup_credentials = raw_service.EnvironmentCredentials(
-                key, self._startup_credentials.base_url if self._startup_credentials else None
-            )
         if self._startup_credentials is None and self._live_transport is None:
             self._quick_update(
                 state["token"],
                 connection_required=True,
-                error="OpenAI API 키가 입력되지 않아 분석을 시작하지 않았습니다.",
+                error="OpenAI API 키가 없어 분석을 시작하지 않았습니다.",
             )
             return self._quick_status()
         blocked = self._quick_approval_blocker(root, state)
@@ -3916,13 +3901,6 @@ class RawWorkspaceUi:
         self._quick_update(token, job_id=handle.job_id)
         self._set_approval_notice(root, NOTICE_DONE, QUICK_APPROVED_TEXT, watch=frozenset({token}))
         return self._quick_status()
-
-    def quick_approve_panel_view(
-        self, signature: str | None, api_key: str | None = ""
-    ) -> tuple[str, gr.Accordion, gr.Textbox]:
-        message = self.quick_approve_view(signature, api_key)
-        needs_key = bool(self._quick.get("connection_required"))
-        return (message, gr.Accordion(open=needs_key), gr.Textbox(value="", autofocus=needs_key))
 
     def quick_source_view(self, signature: str | None, source_id: str) -> tuple[str, str, str]:
         root = self._require_current_selection(signature)
@@ -3964,11 +3942,11 @@ class RawWorkspaceUi:
             return "영상을 고르면 미리보기를 준비합니다. 분석은 견적을 확인한 뒤 승인하세요."
         stage = _stage_label(self._shown_stage(state.get("root"), state, "영상 준비"))
         if state.get("connection_required"):
-            # 「API 연결 열기」는 이 글을 실은 활동 칸에 함께 보인다(설정 서랍의 API 연결을 연다).
+            # 키는 화면에서 받지 않는다(D102) — 시작 환경에서만 찍으므로 앱을 다시 띄워야 한다.
             return (
                 "**연결 설정 필요 · 아직 분석하지 않았습니다**\n\n"
-                f"「API 연결 열기」로 OpenAI API 키를 넣은 뒤 「{LIBRARY_APPROVE_LABEL}」을 다시"
-                " 누르세요. 영상과 승인 범위는 그대로 유지됩니다."
+                "`.env`에 `OPENAI_API_KEY`를 넣고 앱을 다시 띄운 뒤"
+                f" 「{LIBRARY_APPROVE_LABEL}」을 누르세요. 영상과 승인 범위는 그대로 유지됩니다."
             )
         if state.get("error"):
             return f"**{stage}** · {state['error']} · 원본은 유지됩니다."
@@ -4803,17 +4781,14 @@ class RawWorkspaceUi:
         self._startup_claude = raw_service.capture_claude_credentials()
         self._startup_gemini = raw_service.capture_gemini_credentials()
 
-    def _quick_api_panel(self) -> tuple[gr.Accordion, gr.Textbox]:
-        """「API 연결 · 처음 한 번」 — OpenAI 키 칸, 영상 분석 모델(D54)과 키 상태 한 줄."""
+    def _analysis_model_panel(self) -> None:
+        """「분석 모델」 — 영상 분석 모델(D54) · 새로 듣는 전사 엔진(D92)과 키 상태 줄.
+
+        키 입력 칸은 없다(D102) — 키는 사람이 `.env`에 넣고, 서버가 띄워질 때 한 번 찍는다.
+        """
         with gr.Accordion(
-            "API 연결 · 처음 한 번", open=False, elem_id="quick-api-panel"
-        ) as quick_api_panel:
-            quick_api_key = gr.Textbox(
-                label="OpenAI API 키 (이 실행에서만 사용)",
-                type="password",
-                value="",
-                elem_id="quick-api-key",
-            )
+            "분석 모델", open=False, elem_id=ANALYSIS_MODEL_PANEL_ID
+        ) as analysis_model_panel:
             analysis_model = gr.Dropdown(
                 choices=self.analysis_model_choices(),
                 value=self._current_analysis_model(),
@@ -4841,7 +4816,7 @@ class RawWorkspaceUi:
             [self._signature_state, analysis_model],
             [analysis_model_md, analysis_model],
         )
-        quick_api_panel.expand(
+        analysis_model_panel.expand(
             self.analysis_model_controls, None, [analysis_model, analysis_model_md]
         )
         timing_engine.input(
@@ -4849,8 +4824,9 @@ class RawWorkspaceUi:
             [self._signature_state, timing_engine],
             [timing_engine_md, timing_engine],
         )
-        quick_api_panel.expand(self.timing_engine_controls, None, [timing_engine, timing_engine_md])
-        return quick_api_panel, quick_api_key
+        analysis_model_panel.expand(
+            self.timing_engine_controls, None, [timing_engine, timing_engine_md]
+        )
 
     def _review_tab(self) -> None:
         """정리 탭 — 명령 줄(단추 + 활동 칸) · 무대. 서랍에 든 도구는 `_settings_drawer`가 짓는다.
@@ -5315,10 +5291,10 @@ class RawWorkspaceUi:
         )
 
     def _settings_drawer(self) -> tuple[gr.Button, gr.Button, gr.Dropdown, gr.Button]:
-        """오른쪽 서랍 — API 연결 · 복원 · 고급 도구. 무대 위에 겹칠 뿐 무대를 밀지 않는다."""
+        """오른쪽 서랍 — 분석 모델 · 복원 · 고급 도구. 무대 위에 겹칠 뿐 무대를 밀지 않는다."""
         with gr.Sidebar(open=False, position="right", width=560, elem_id="settings-drawer"):
             self._drawer_head("설정 · 고급 도구", "settings-drawer")
-            quick_api_panel, quick_api_key = self._quick_api_panel()
+            self._analysis_model_panel()
             self._tier_criteria_panel()
             self._glossary_panel()
             self._finalcut_panel()
@@ -5340,7 +5316,7 @@ class RawWorkspaceUi:
             with gr.Accordion("고급 편집 도구", open=False):
                 advanced = self._review_advanced_tab()
             self._package_tab()
-        self._wire_library_approval(quick_api_panel, quick_api_key)
+        self._wire_library_approval()
         self._wire_status_tick()  # 용어집 칸까지 지어진 뒤 — 1초 틱의 칸이 다 있다
         return advanced
 
@@ -5729,20 +5705,19 @@ class RawWorkspaceUi:
         ):
             self._report_activity(button.click(handler, self._signature_state, target), status)
 
-    def _wire_library_approval(self, quick_api_panel: gr.Accordion, quick_api_key: Any) -> None:
+    def _wire_library_approval(self) -> None:
         """일괄 승인 — 화면에 **정말 보이는** 견적 문구만 함께 보낸다(D54).
 
         앞 단계(`APPROVE_GUARD_JS`)가 견적 칸이 서랍·판에 덮였거나 화면 밖이면 빈 문구를 보내
         서버의 기존 대조가 「새 견적을 확인하세요」로 거절한다(서버 결합은 그대로). 답은 견적 칸
-        전문에 바로 다시 그린다. 키가 없으면 서랍을 연다.
+        전문에 바로 다시 그린다. 키는 보내지 않는다 — 키가 없으면 답이 `.env` 안내다(D102).
         """
         approved = self._library_approve_button.click(
             self.library_analysis_view,
-            [self._signature_state, quick_api_key, self._library_summary_md],
-            [self._capcut_progress_md, quick_api_panel, quick_api_key],
+            [self._signature_state, self._library_summary_md],
+            self._capcut_progress_md,
             js=ui_facade.APPROVE_GUARD_JS,
         )
-        approved.then(fn=None, js=ui_facade.KEY_NOTICE_JS)
         self._report_activity(approved, self._capcut_progress_md)
         noted = approved.success(
             self.quote_note_view,
@@ -9348,9 +9323,17 @@ class RawWorkspaceUi:
     def analysis_model_status(self, root: Path | None = None) -> str:
         """모델·키 상태 한 줄 — 키는 이름만 말하고 값은 어디에도 싣지 않는다."""
         root = root if root is not None else self._snapshot_root()
-        gemini_env, claude_env = (
+        openai_env, gemini_env, claude_env = (
+            raw_service.STT_KEY_ENV,
             raw_service.ANALYSIS_GEMINI_KEY_ENV,
             raw_service.ANALYSIS_CLAUDE_KEY_ENV,
+        )
+        # 화면은 키를 받지 않는다(D102) — 셋 다 `.env`에서 서버를 띄울 때 한 번 찍는다.
+        openai = (
+            f"OpenAI 키(`{openai_env}`) 확인됨 — 값은 표시하지 않습니다."
+            if self._startup_credentials is not None
+            else f"OpenAI 키(`{openai_env}`) 없음 — 전사·분석을 하려면 `.env`에 넣고 앱을 다시"
+            " 띄우세요."
         )
         gemini = (
             f"Gemini 키(`{gemini_env}`) 확인됨 — 값은 표시하지 않습니다. {GEMINI_PAID_KEY_NOTE}"
@@ -9364,7 +9347,7 @@ class RawWorkspaceUi:
             else f"Claude 키(`{claude_env}`) 없음 — Claude를 쓰려면 `.env`에 넣고 앱을 다시"
             " 띄우세요."
         )
-        key = f"{gemini}\n\n{claude}"
+        key = f"{openai}\n\n{gemini}\n\n{claude}"
         if root is None:
             return key
         model = self.raw.settings(root).models.luna_model

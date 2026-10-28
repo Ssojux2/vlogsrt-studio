@@ -860,7 +860,7 @@ def test_main_surface_copy_points_only_at_controls_on_screen() -> None:
     for retired in ("「자동 정리」", "Luna 분석 대기", "검토 대기", '페이지 " +', "조각이 없다"):
         assert retired not in js, retired
     shell = ui_facade.activity_html()
-    assert ">API 연결 열기</button>" in shell and ">키 입력<" not in shell
+    assert "API 연결" not in shell and ">키 입력<" not in shell  # 키는 `.env`에서만(D102)
     assert workspace_service.ONLINE_MODE_NOTE == "온라인 · 분석 승인 뒤 유료"
     assert workspace_service.OFFLINE_MODE_NOTE == "오프라인 · 유료 분석 꺼짐"
 
