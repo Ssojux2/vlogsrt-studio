@@ -18,7 +18,7 @@ from vlogsrt.project.raw.models import (
     MediaNotFoundError,
     MediaTargetChangedError,
 )
-from vlogsrt.project.raw.workspace import DB_NAME
+from vlogsrt.project.raw.workspace import DB_NAME, RawWorkspace
 
 FILE_ID_PATTERN = re.compile(r"^media_[0-9a-f]{16}$")
 
@@ -287,3 +287,21 @@ def test_listing_keeps_registration_order(workspace: Path) -> None:
         clip.write_bytes(b"c" * (index + 1))
         expected.append(service.register_media(workspace, clip, "original").relative_path)
     assert [item.relative_path for item in service.list_media(workspace)] == expected
+
+
+def test_adopting_registration_returns_the_same_file_row(workspace: Path, clip: Path) -> None:
+    """같은 파일이 이미 등록돼 있으면 그 행을 돌려준다 — 동시 게시의 진 쪽 길이다(D103)."""
+    store = RawWorkspace.open(workspace)
+    first = store.register_media_file(clip, "original")
+    again = store.register_media_file(clip, "original", adopt_identical=True)
+    assert again == first
+    assert store.media_count() == 1
+
+
+def test_adopting_registration_refuses_a_changed_file(workspace: Path, clip: Path) -> None:
+    """등록 뒤 그 자리의 파일이 바뀌었으면 받아들이지 않는다 — 다른 내용이다."""
+    store = RawWorkspace.open(workspace)
+    store.register_media_file(clip, "original")
+    clip.write_bytes(clip.read_bytes() + b"changed")
+    with pytest.raises(MediaNotAllowedError, match="이미 등록된 경로"):
+        store.register_media_file(clip, "original", adopt_identical=True)

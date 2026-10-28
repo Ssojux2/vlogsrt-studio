@@ -26,7 +26,12 @@ import pytest
 from vlogsrt import preprocess
 from vlogsrt.project.raw import service as raw_service
 from vlogsrt.project.raw import visual_review
-from vlogsrt.project.raw.models import JobRecord, MediaNotFoundError, PlannedInterval
+from vlogsrt.project.raw.models import (
+    JobRecord,
+    MediaNotAllowedError,
+    MediaNotFoundError,
+    PlannedInterval,
+)
 from vlogsrt.project.raw.review_workspace import ReviewWorkspaceFacade
 from vlogsrt.project.raw.segment_review import (
     SELECTION_EXCLUDED,
@@ -1776,3 +1781,43 @@ def test_legacy_alias_never_applies_to_non_canonical_fingerprint(tmp_path: Path)
         workspace, selection, visual_review.ORIGINAL_ONLY_FINGERPRINT, target
     )
     assert target.is_file() and target.samefile(legacy)
+
+
+def _thumb_file(workspace: RawWorkspace, key: str) -> tuple[Path, Path]:
+    relative = visual_review._thumb_relative(key)
+    target = workspace.root / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(b"jpg")
+    return target, relative
+
+
+def test_registration_race_loser_adopts_the_winners_identical_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """조회와 등록 사이에 상대 작업이 같은 파일을 먼저 등록해도 진 쪽은 그 행을 받는다(D103).
+
+    두 `visual_prepare`가 같은 키의 썸네일을 함께 채울 때의 실패 순서를 그대로 짠다 —
+    둘 다 행이 없다고 보고(조회), 이긴 쪽이 먼저 넣고, 진 쪽이 넣으려다 부딪힌다.
+    """
+    workspace = RawWorkspace.create(tmp_path / "ws", "w")
+    target, relative = _thumb_file(workspace, "race0")
+    winner = workspace.register_media_file(target, "preview")
+    monkeypatch.setattr(visual_review, "_registration_for", lambda *_: None)
+    for rebuilt in (False, True):
+        loser = visual_review._ensure_registered(workspace, target, relative, rebuilt=rebuilt)
+        assert loser.file_id == winner.file_id
+    assert len(workspace.list_media("preview")) == 1  # ID는 하나 — 추적이 갈라지지 않는다
+
+
+def test_registration_race_still_refuses_a_different_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """같은 경로라도 등록 때와 다른 파일이면 받아들이지 않는다 — 지문이 어긋난 행은 남의 것이다."""
+    workspace = RawWorkspace.create(tmp_path / "ws", "w")
+    target, relative = _thumb_file(workspace, "race1")
+    workspace.register_media_file(target, "preview")
+    target.unlink()
+    target.write_bytes(b"other-jpg")
+    monkeypatch.setattr(visual_review, "_registration_for", lambda *_: None)
+    with pytest.raises(MediaNotAllowedError, match="이미 등록된 경로"):
+        visual_review._ensure_registered(workspace, target, relative, rebuilt=True)

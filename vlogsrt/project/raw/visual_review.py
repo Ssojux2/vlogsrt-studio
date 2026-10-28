@@ -2218,7 +2218,8 @@ def _ensure_registered(
     """
     existing = _registration_for(workspace, relative)
     if existing is None:
-        return workspace.register_media_file(target, "preview")
+        # 조회와 등록 사이에 같은 페이지를 채우는 다른 작업이 이 파일을 먼저 등록할 수 있다(D103).
+        return workspace.register_media_file(target, "preview", adopt_identical=True)
     if not rebuilt:
         return existing
     workspace.refresh_media_fingerprint(existing.file_id)
