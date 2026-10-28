@@ -1671,6 +1671,14 @@ _SHELL_CSS = """
    말줄임 없이 여러 줄로 다 보이고, 그런 알림이 없으면 숨는다(실사용 줄은 기록 판 고정 줄).
    칸은 제 격자 칸 안에서 자란다. */
 #vl-quote { grid-area: quote; min-width: 0; gap: 8px; }
+/* 넓은 화면(세 열)에서 견적 칸은 재생기와 같은 행들을 나눠 쓴다 — 견적·범위·초안 카드가 자라면
+   재생기 행이 함께 늘어나 타임라인(추천 구간)이 화면 밖으로 밀렸다(1440x900 실측: 재생기
+   983px · 레일 y=1198). 칸에 상한을 두고 그 안에서 스크롤한다 — 승인 단추와 견적은 그대로
+   보인다(D44). */
+@media (min-width: 1051px) {
+  #vl-quote { max-height: 46vh; overflow: hidden auto;
+    scrollbar-color: var(--vl-scrollbar); }
+}
 #library-analysis-scope, #vl-quote-note {
   min-width: 0; padding: 8px 10px; border-radius: 6px;
   font-size: 12px; line-height: 16px; white-space: normal; overflow-wrap: anywhere; }
