@@ -1,11 +1,13 @@
 """D61 — 「기록」 판의 서버 쪽: 지금 도는 작업 · 서버 로그 (읽기 전용 경로와 화면).
 
 경로 `/vl-activity`는 다른 경로와 같은 Host/Origin 가드를 지나고, 쓰기·작업 제출·유료 호출이
-없다. 화면은 판이 열려 있는 동안만 2초마다 읽고, 서버 글은 전부 `textContent`로 넣는다.
+없다. 화면은 바쁘거나 판이 열린 동안 2초마다, 한가하면 15초마다 읽고(D101), 서버 글은 전부
+`textContent`로 넣는다.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import shutil
@@ -149,6 +151,9 @@ def test_processes_name_the_source_and_show_elapsed_limit_and_percent(
     assert second["text"] == "썸네일 추출 · clip.mov · 0:05 경과 / 한도 없음"
     assert third["percent"] is None  # 범위 디코드는 원본 길이로 재지 않는다
     assert third["text"] == f"클립 추출 · {SOURCE_NAME} · 1:05 경과 / 한도 없음"
+    # 띠의 머리줄은 첫 프로세스 줄이다 — 도는 것이 있으면 바쁘다(D101).
+    assert body["busy"] is True
+    assert body["headline"] == first["text"]
 
 
 def test_running_and_queued_jobs_show_progress_and_freshness(
@@ -177,9 +182,15 @@ def test_running_and_queued_jobs_show_progress_and_freshness(
     assert job["label"] == "영상 분석 1단계(전사·장면)"
     assert (job["status"], job["progress_current"], job["progress_total"]) == ("running", 12, 18)
     assert job["text"] == "영상 분석 1단계(전사·장면) · 진행 중 · 12/18 · 방금 갱신"
+    assert job["percent"] == 66  # 진행 막대 — 내림
     assert payload["processes"] == []
+    assert (payload["busy"], payload["headline"]) == (
+        True,
+        job["text"],
+    )  # 프로세스가 없으면 작업 줄
     finished = _client(ui).get("/vl-activity").json()
     assert finished["jobs"] == []  # 끝난 작업은 「지금 도는 작업」이 아니다
+    assert (finished["busy"], finished["headline"]) == (False, "")
 
 
 def test_log_lines_arrive_after_the_given_sequence(
@@ -275,6 +286,30 @@ def test_the_activity_panel_gains_two_server_sections_above_the_client_log() -> 
     assert 'aria-live="off"' in markup  # 2초마다 바뀌는 칸이 화면 낭독기를 시끄럽게 하지 않는다
 
 
+def test_the_progress_panel_sits_in_the_strip_before_the_full_log() -> None:
+    """도는 일은 「기록」을 누르지 않아도 보인다 — 띠 안의 배지와 명령 줄 아래 펼침 판(D101)."""
+    markup = ui_facade.activity_html()
+    count = markup.index('id="vl-activity-count"')
+    panel = markup.index('id="vl-progress"')
+    assert count < markup.index('id="vl-activity-log-open"') < panel
+    assert panel < markup.index('id="vl-activity-log"')  # 판은 「기록」 판과 따로다
+    for node in ("vl-progress-rows", "vl-progress-log", "vl-progress-pin", "vl-progress-close"):
+        assert markup.index(f'id="{node}"') > panel
+    head = markup[panel : markup.index(">", panel)]
+    assert 'role="region"' in head and 'aria-label="작업 진행"' in head and "hidden" in head
+    assert 'id="vl-progress-pin" class="vl-btn vl-btn-ghost vl-btn-sm" aria-pressed="false"' in (
+        markup
+    )
+    css = ui_facade.WORKBENCH_CSS
+    rule = css[css.index(".vl-progress {") :]
+    rule = rule[: rule.index("}")]
+    for want in ("position: absolute;", "top: calc(100% + 6px);", "right: 0;", "z-index: 60;"):
+        assert want in rule, want  # 명령 줄 아래에 겹친다 — 무대를 밀지 않는다
+    assert ".vl-progress[hidden]" in css and ".vl-activity-count[hidden]" in css
+    bar = css[css.index(".vl-progress-bar {") :]
+    assert "background: var(--vl-accent-ink);" in bar[: bar.index("}")]  # 본점 채움은 셋뿐
+
+
 def test_rows_read_like_the_examples() -> None:
     assert ui_facade.format_clock(1510.4) == "25:10"
     assert ui_facade.format_clock(3725) == "1:02:05"
@@ -296,6 +331,21 @@ def test_rows_read_like_the_examples() -> None:
     )
     assert ui_facade.job_row_text("자동 정리", "대기", 0, 0, 0) == "자동 정리 · 대기 · 방금 갱신"
     assert ui_facade.job_row_text("자동 정리", "대기", 0, 0, None) == "자동 정리 · 대기"
+    assert ui_facade.job_percent(12, 18) == 66
+    assert ui_facade.job_percent(3, 0) is None  # 전체를 모르면 막대가 없다
+    assert ui_facade.job_percent(20, 18) == 100
+
+
+def test_view_settings_feed_the_shell_and_the_server_page() -> None:
+    """폴링 주기·판 줄 수는 설정 한 곳(D101) — 실행본에 숫자 리터럴로 따로 박지 않는다."""
+    view = ui_facade.ACTIVITY_VIEW
+    script = ui_facade.SERVER_ACTIVITY_JS
+    assert "__VL_ACTIVITY_VIEW__" not in script
+    assert json.dumps(dataclasses.asdict(view)) in script
+    for literal in ("2000", "15000", "500"):
+        assert literal not in script.replace(json.dumps(dataclasses.asdict(view)), "")
+    assert view.server_log_lines == workspace_service.ACTIVITY_LOG_PAGE
+    assert view.poll_busy_ms < view.poll_idle_ms  # 바쁠 때가 더 자주 묻는다
 
 
 def test_server_log_colours_come_from_the_design_tokens() -> None:
@@ -314,7 +364,7 @@ def test_the_shell_never_writes_server_text_as_html() -> None:
     assert ui_facade.SERVER_ACTIVITY_JS.strip() in script
     assert f'"{workspace_service.ACTIVITY_ROUTE}"' in script
     assert ui_facade.ACTIVITY_ROUTE == workspace_service.ACTIVITY_ROUTE
-    # 열린 동안만 이어 거는 setTimeout — 닫힌 판은 묻지 않는다.
+    # 이어 거는 setTimeout 하나 — 주기는 바쁨에 따라 바뀐다(D101).
     assert "setInterval" not in ui_facade.SERVER_ACTIVITY_JS
 
 
@@ -325,6 +375,7 @@ const responses = JSON.parse(fs.readFileSync(process.argv[3], 'utf8'));
 function el(id, tag) {
   const node = { id, tagName: tag || 'DIV', hidden: false, title: '', attrs: {}, children: [],
     classes: new Set(), scrollTop: 0, scrollHeight: 0, clientHeight: 100, htmlWrites: 0,
+    style: {}, className: '',
     classList: { contains(c) { return node.classes.has(c); } },
     setAttribute(k, v) { this.attrs[k] = String(v); },
     getAttribute(k) { return k in this.attrs ? this.attrs[k] : null; },
@@ -344,18 +395,19 @@ function el(id, tag) {
 const reg = {};
 ['vl-activity', 'vl-activity-msg', 'vl-activity-key', 'vl-activity-log', 'quick-status',
  'project-tools', 'settings-drawer', 'vl-keysheet', 'vl-usage-src', 'vl-activity-usage',
- 'vl-server-procs', 'vl-server-log', 'vl-server-note'].forEach((id) => { reg[id] = el(id); });
-reg['vl-activity-log'].hidden = true;
-reg['vl-keysheet'].hidden = true;
+ 'vl-server-procs', 'vl-server-log', 'vl-server-note', 'vl-activity-count', 'vl-progress',
+ 'vl-progress-rows', 'vl-progress-log', 'vl-progress-pin', 'vl-progress-close'
+].forEach((id) => { reg[id] = el(id); });
+['vl-activity-log', 'vl-keysheet', 'vl-progress', 'vl-activity-count'].forEach((id) => {
+  reg[id].hidden = true; });
 reg['vl-server-log'].clientHeight = 20;  // 줄 하나 15px — 둘째 줄부터 넘친다
 const fetches = [];
 const timers = [];
-const cleared = [];
 let failNext = false;
 const window = {
   setInterval() {},
-  setTimeout(fn, ms) { timers.push({ fn, ms, id: timers.length + 1 }); return timers.length; },
-  clearTimeout(id) { cleared.push(id); },
+  setTimeout(fn, ms) { timers.push({ fn, ms, live: true }); return timers.length; },
+  clearTimeout(id) { if (timers[id - 1]) { timers[id - 1].live = false; } },
   fetch(url) {
     fetches.push(url);
     if (failNext) { failNext = false; return Promise.reject(new Error('연결 끊김')); }
@@ -374,65 +426,101 @@ const document = {
 };
 class MutationObserver { constructor(fn) { this.fn = fn; } observe() {} disconnect() {} }
 global.requestAnimationFrame = (fn) => fn();
-const opener = { id: 'vl-activity-log-open',
-  closest: (sel) => (sel === '#vl-activity-log-open' ? opener : null) };
-const click = () => (listeners.click || []).forEach((fn) => fn({ target: opener }));
-const settle = () => new Promise((resolve) => setImmediate(resolve));
+function target(selector) {
+  const node = { id: selector.slice(1), closest: (sel) => (sel === selector ? node : null) };
+  return node;
+}
+const click = (selector) =>
+  (listeners.click || []).forEach((fn) => fn({ target: target(selector) }));
+const settle = async () => { for (let i = 0; i < 4; i += 1) {
+  await new Promise((resolve) => setImmediate(resolve)); } };
+const S = () => window.__vlServer;
+const live = () => timers.filter((t) => t.live);
+const pollWait = () => { const t = live().find((x) => x.fn === S().poll); return t ? t.ms : null; };
+async function tick() {
+  const t = live().find((x) => x.fn === S().poll);
+  t.live = false; t.fn(); await settle();
+}
 const lines = () => reg['vl-server-log'].children.map((row) => ({
   level: row.attrs['data-vl-level'], text: row.children.map((c) => c.textContent) }));
 const rows = () => reg['vl-server-procs'].children.map((row) => ({
   kind: row.attrs['data-vl-kind'] || null, text: row.textContent }));
+const panel = () => ({
+  hidden: reg['vl-progress'].hidden,
+  badge: reg['vl-activity-count'].hidden ? null : reg['vl-activity-count'].textContent,
+  strip: reg['vl-activity-msg'].textContent,
+  bars: reg['vl-progress-rows'].children.map((row) => row.children.length > 1
+    ? row.children[1].children[0].style.width : null),
+  tail: reg['vl-progress-log'].children.map((row) => row.children[1].textContent),
+  wait: pollWait() });
 (async () => {
   const run = new Function('window', 'document', 'MutationObserver', 'element', source);
   run(window, document, MutationObserver, null);
-  const out = { closedFetches: fetches.length };
-  click();
-  await settle(); await settle();
-  out.opened = { fetches: fetches.slice(), rows: rows(), lines: lines(),
-    timers: timers.map((t) => t.ms), note: reg['vl-server-note'].textContent };
-  // 맨 아래를 보던 사람은 새 줄을 따라간다.
+  const out = { load: { fetches: fetches.length, wait: pollWait() } };
+  await tick();  // 열자마자 한 번 — 한가하다
+  out.idle = { ...panel(), fetches: fetches.slice() };
+  click('#vl-activity-log-open');
+  out.openWait = pollWait();  // 판을 열면 곧바로 묻는다
+  await tick();
+  out.opened = { url: fetches[fetches.length - 1], rows: rows(), lines: lines(),
+    wait: pollWait(), note: reg['vl-server-note'].textContent, panel: panel() };
   const box = reg['vl-server-log'];
   box.scrollTop = box.scrollHeight - box.clientHeight;
-  timers[timers.length - 1].fn();
-  await settle(); await settle();
+  await tick();
   out.second = { url: fetches[fetches.length - 1], lines: lines().length,
     stuck: box.scrollTop === box.scrollHeight };
-  // 위로 올려 읽던 사람의 자리는 그대로다.
   box.scrollTop = 0;
-  timers[timers.length - 1].fn();
-  await settle(); await settle();
+  await tick();
   out.third = { scrollTop: box.scrollTop, lines: lines().length };
-  // 끊기면 판에 알리고 계속 묻는다.
   failNext = true;
-  timers[timers.length - 1].fn();
-  await settle(); await settle();
-  out.failed = { note: reg['vl-server-note'].textContent, timers: timers.length };
-  // 다시 뜬 서버(다른 boot) — 그 응답의 줄은 버리고 비운 뒤 곧바로(0ms) 처음부터 묻는다.
-  timers[timers.length - 1].fn();
-  await settle(); await settle();
+  await tick();
+  out.failed = { note: reg['vl-server-note'].textContent, wait: pollWait() };
+  await tick();
   out.rebooted = { note: reg['vl-server-note'].textContent, lines: lines().length,
-    wait: timers[timers.length - 1].ms };
-  timers[timers.length - 1].fn();
-  await settle(); await settle();
-  out.refetched = { url: fetches[fetches.length - 1], lines: lines(),
-    wait: timers[timers.length - 1].ms };
-  // 닫으면 걸린 타이머를 거두고 더는 묻지 않는다.
-  const before = fetches.length;
-  click();
-  timers.forEach((t) => t.fn());
-  await settle(); await settle();
-  out.closed = { fetches: fetches.length - before, cleared: cleared.length > 0,
-    hidden: reg['vl-activity-log'].hidden };
+    wait: pollWait() };
+  await tick();
+  out.refetched = { url: fetches[fetches.length - 1], lines: lines(), wait: pollWait() };
+  click('#vl-activity-log-open');  // 「기록」을 닫는다 — 바쁘면 「작업 진행」 판이 그 자리를 잇는다
+  out.closed = { logHidden: reg['vl-activity-log'].hidden, ...panel() };
+  await tick();
+  out.busy = panel();
+  click('#vl-progress-close');
+  await tick();
+  out.dismissed = panel();
+  await tick(); await tick();  // 빈 응답 둘 — 한가해진다
+  out.quiet = panel();
+  window.__vlActivity.reply('**폴더**를 불러옵니다');
+  out.woke = pollWait();
+  await tick();
+  out.newRound = panel();
+  click('#vl-progress-pin');
+  await tick(); await tick();
+  out.pinned = { ...panel(), pressed: reg['vl-progress-pin'].attrs['aria-pressed'] };
+  click('#vl-progress-pin');
+  out.unpinned = panel();
+  S().wake(true);
+  await tick(); await tick(); await tick();
+  out.lingering = { ...panel(), collapse: live().filter((t) => t.fn !== S().poll)
+    .map((t) => t.ms) };
+  live().filter((t) => t.fn !== S().poll).forEach((t) => { t.live = false; t.fn(); });
+  out.collapsed = panel();
   out.htmlWrites = Object.values(reg).reduce((n, node) => n + node.htmlWrites, 0);
   process.stdout.write(JSON.stringify(out));
 })();
 """
 
+PROCESS_TEXT = "분석 프록시 만들기 · a.mov · 25:10 경과 / 한도 54:31 · 62%"
+JOB_TEXT = "영상 분석 1단계(전사·장면) · 진행 중 · 12/18 · 3분 전 갱신"
 
-def _payload(latest: int, lines: list[tuple[int, str, str]], boot: str = "A") -> dict:
+
+def _payload(
+    latest: int, lines: list[tuple[int, str, str]], boot: str = "A", *, busy: bool = True
+) -> dict:
     return {
-        "processes": [{"text": "분석 프록시 만들기 · a.mov · 25:10 경과 / 한도 54:31 · 62%"}],
-        "jobs": [{"text": "영상 분석 1단계(전사·장면) · 진행 중 · 12/18 · 3분 전 갱신"}],
+        "busy": busy,
+        "headline": PROCESS_TEXT if busy else "",
+        "processes": [{"text": PROCESS_TEXT, "percent": 62}] if busy else [],
+        "jobs": [{"text": JOB_TEXT, "percent": 66}] if busy else [],
         "log": {
             "boot": boot,
             "latest": latest,
@@ -444,17 +532,7 @@ def _payload(latest: int, lines: list[tuple[int, str, str]], boot: str = "A") ->
     }
 
 
-@needs_node
-def test_the_panel_polls_only_while_open_and_writes_text_only(tmp_path: Path) -> None:
-    responses = [
-        _payload(2, [(1, "info", "› 준비"), (2, "warn", "<b>WARN</b> 잔재")]),
-        _payload(3, [(3, "error", "ERR 실패")]),
-        _payload(4, [(4, "info", "› 하나 더")]),
-        _payload(4, []),  # 넷째 요청은 끊긴다 — 쓰이지 않는다
-        # 다시 뜬 서버: 옛 번호(4) 뒤의 줄만 온 응답 — 화면은 버리고 처음부터 다시 묻는다.
-        _payload(9, [(9, "info", "› 다시 뜬 서버의 아홉째 줄")], boot="B"),
-        _payload(2, [(1, "info", "› 다시 시작"), (2, "info", "› 둘째")], boot="B"),
-    ]
+def _run_harness(tmp_path: Path, responses: list[dict]) -> dict:
     harness = tmp_path / "poll.js"
     harness.write_text(_POLL_HARNESS, encoding="utf-8")
     script = tmp_path / "shell.js"
@@ -465,36 +543,96 @@ def test_the_panel_polls_only_while_open_and_writes_text_only(tmp_path: Path) ->
         ["node", str(harness), str(script), str(data)], capture_output=True, text=True, timeout=20
     )
     assert completed.returncode == 0, completed.stderr[-2000:]
-    out = json.loads(completed.stdout)
-    assert out["closedFetches"] == 0  # 닫힌 판은 서버에 묻지 않는다
+    return json.loads(completed.stdout)
+
+
+@needs_node
+def test_one_poller_shows_running_work_without_opening_the_log(tmp_path: Path) -> None:
+    """한 고리가 바쁠 때 짧게·한가할 때 길게 묻고, 도는 일은 띠와 「작업 진행」 판에 저절로 보인다.
+
+    「기록」 판은 예전처럼 다 보인다(D61). 판을 닫아도 바쁘면 「작업 진행」 판이 잇고(D101),
+    닫기를 누른 회차에는 다시 펼치지 않으며, 고정하면 한가해도 남고, 아니면 지연 뒤 접힌다.
+    서버 글은 언제나 textContent다.
+    """
+    view = ui_facade.ACTIVITY_VIEW
+    route = workspace_service.ACTIVITY_ROUTE
+    burst = [(seq, "info", f"› 원본 확인 {seq}/9") for seq in range(3, 10)]
+    responses = [
+        _payload(1, [(1, "info", "› 지난 줄")], busy=False),
+        _payload(3, [(2, "info", "› 준비"), (3, "warn", "<b>WARN</b> 잔재")]),
+        _payload(4, [(4, "error", "ERR 실패")]),
+        _payload(5, [(5, "info", "› 하나 더")]),
+        _payload(5, []),  # 이 요청은 끊긴다 — 쓰이지 않는다
+        # 다시 뜬 서버: 옛 번호 뒤의 줄만 온 응답 — 화면은 버리고 처음부터 다시 묻는다.
+        _payload(9, [(9, "info", "› 다시 뜬 서버의 아홉째 줄")], boot="B"),
+        _payload(2, [(1, "info", "› 다시 시작"), (2, "info", "› 둘째")], boot="B"),
+        _payload(9, burst, boot="B"),
+        _payload(9, [], boot="B"),  # 닫은 회차 — 여전히 바쁘다
+        _payload(9, [], boot="B", busy=False),
+        _payload(9, [], boot="B", busy=False),
+        _payload(9, [], boot="B"),  # 단추 응답이 연 새 회차
+        _payload(9, [], boot="B", busy=False),
+        _payload(9, [], boot="B", busy=False),
+        _payload(9, [], boot="B"),
+        _payload(9, [], boot="B", busy=False),
+        _payload(9, [], boot="B", busy=False),
+    ]
+    out = _run_harness(tmp_path, responses)
+    assert out["load"] == {"fetches": 0, "wait": 0}  # 열자마자 묻지만 동기로 부르지 않는다
+    idle = out["idle"]
+    assert idle["fetches"] == [f"{route}?after=0"]
+    assert (idle["hidden"], idle["badge"], idle["wait"]) == (True, None, view.poll_idle_ms)
+    assert idle["tail"] == ["› 지난 줄"]  # 지난 기록은 판에 남지만 판을 펼치지 않는다
+    assert out["openWait"] == 0
     opened = out["opened"]
-    assert opened["fetches"] == [f"{workspace_service.ACTIVITY_ROUTE}?after=0"]
+    assert opened["url"] == f"{route}?after=1"
     assert opened["rows"] == [
-        {"kind": "process", "text": "분석 프록시 만들기 · a.mov · 25:10 경과 / 한도 54:31 · 62%"},
-        {"kind": "job", "text": "영상 분석 1단계(전사·장면) · 진행 중 · 12/18 · 3분 전 갱신"},
+        {"kind": "process", "text": PROCESS_TEXT},
+        {"kind": "job", "text": JOB_TEXT},
     ]
     assert opened["lines"] == [
+        {"level": "info", "text": ["12:00:00", "› 지난 줄"]},
         {"level": "info", "text": ["12:00:00", "› 준비"]},
         {"level": "warn", "text": ["12:00:00", "<b>WARN</b> 잔재"]},  # 글자 그대로
     ]
-    assert opened["timers"] == [2000]
-    assert out["second"] == {
-        "url": f"{workspace_service.ACTIVITY_ROUTE}?after=2",
-        "lines": 3,
-        "stuck": True,
-    }
-    assert out["third"] == {"scrollTop": 0, "lines": 4}
-    assert "연결 끊김" in out["failed"]["note"]
+    assert opened["wait"] == view.poll_busy_ms
+    assert (
+        opened["panel"]["hidden"] is True
+    )  # 「기록」 판이 열린 동안은 같은 내용을 겹쳐 펴지 않는다
+    assert opened["panel"]["badge"] == "2개 작업" and opened["panel"]["strip"] == PROCESS_TEXT
+    assert out["second"] == {"url": f"{route}?after=3", "lines": 4, "stuck": True}
+    assert out["third"] == {"scrollTop": 0, "lines": 5}
+    assert "연결 끊김" in out["failed"]["note"] and out["failed"]["wait"] == view.poll_busy_ms
     assert out["rebooted"] == {"note": "", "lines": 0, "wait": 0}  # 비우고 곧바로 다시 묻는다
     assert out["refetched"] == {
-        "url": f"{workspace_service.ACTIVITY_ROUTE}?after=0",
+        "url": f"{route}?after=0",
         "lines": [
             {"level": "info", "text": ["12:00:00", "› 다시 시작"]},
             {"level": "info", "text": ["12:00:00", "› 둘째"]},
         ],
-        "wait": 2000,
+        "wait": view.poll_busy_ms,
     }
-    assert out["closed"] == {"fetches": 0, "cleared": True, "hidden": True}
+    closed = out["closed"]
+    assert closed["logHidden"] is True and closed["hidden"] is False
+    busy = out["busy"]
+    assert busy["bars"] == ["62%", "66%"]  # 막대 폭은 숫자로만
+    assert busy["tail"] == [f"› 원본 확인 {seq}/9" for seq in range(4, 10)]  # 최근 6줄
+    assert len(busy["tail"]) == view.panel_log_lines
+    assert out["dismissed"]["hidden"] is True  # 닫은 회차에는 다시 펴지 않는다
+    quiet = out["quiet"]
+    assert (quiet["hidden"], quiet["badge"], quiet["wait"]) == (True, None, view.poll_idle_ms)
+    assert quiet["strip"] == ""  # 머리줄이 걷혔다 — 되살릴 화면 기록이 없다
+    assert out["woke"] == 0  # 단추 응답은 곧바로 묻는다
+    new_round = out["newRound"]
+    assert new_round["hidden"] is False and new_round["wait"] == view.poll_busy_ms
+    assert new_round["strip"] == "폴더를 불러옵니다"  # 방금 온 단추 응답은 머리줄이 덮지 않는다
+    pinned = out["pinned"]
+    assert pinned["hidden"] is False and pinned["pressed"] == "true"
+    assert pinned["wait"] == view.poll_busy_ms  # 고정한 판은 한가해도 짧게 묻는다
+    assert out["unpinned"]["hidden"] is True
+    lingering = out["lingering"]
+    assert lingering["hidden"] is False and lingering["collapse"] == [view.panel_collapse_delay_ms]
+    assert out["collapsed"]["hidden"] is True
     assert out["htmlWrites"] == 0
 
 

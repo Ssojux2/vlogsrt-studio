@@ -2666,6 +2666,7 @@ class RawWorkspaceService:
                 )
                 bind_library(workspace, fcp_scan, self.selected_asset_ids(root, paths))
             self.ensure_source_order(root)
+            log.info(f"촬영 시각 순 정렬: {len(proposal.order)}개")
             if prepare_proxies:
                 self.start_analysis_proxies(root)
             if prepare_preview:
@@ -2695,8 +2696,10 @@ class RawWorkspaceService:
                 continue
 
             def body(context: JobContext, asset: SourceAsset = asset) -> None:
+                context.set_total(1)  # 0/0으로 머물면 「작업 진행」 막대가 없다(D101)
                 context.check_cancel()
                 media_refs.resolve(workspace, asset, "frames")
+                context.set_progress(1)
 
             identity = f"{asset.asset_id}|{asset.content_sha256}|{ANALYSIS_PROXY.tag()}"
             handles.append(self.submit_job(root, ANALYSIS_PROXY_JOB_KIND, identity, body))
@@ -4017,8 +4020,10 @@ class RawWorkspaceService:
             raise IngestError(
                 f"불러올 영상이 없다: {folder}" + (f" — {reasons}" if reasons else "")
             )
-        status, _created = self.managed_folder_workspace(resolved)
+        status, created = self.managed_folder_workspace(resolved)
         root = Path(status.workspace_root)
+        # 짧게 — rich가 터미널 폭에서 줄을 나눠 긴 경로가 서버 줄 여럿으로 갈린다.
+        log.info(f"작업공간 {'만듦' if created else '다시 엶'}: {root.parent.name}/{root.name}")
         if root.resolve() != planned.resolve():  # 안쪽에 쓸 수 없어 형제로 물러났다
             proposal = self.scan_sources(root, resolved, inspect)
         handle = self.start_reference_import(

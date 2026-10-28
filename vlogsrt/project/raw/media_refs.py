@@ -620,10 +620,13 @@ def _build_and_verify(
     started = time.monotonic()
     # 만들기와 검증(4K 원본 다섯 곳 디코드)이 한 자리를 쥔다 — 로컬 미디어 동시 한도(D100 §2).
     with local_media_slot():
+        # 자리를 얻은 뒤에 알린다 — 동시 한도에 막혀 기다리는 동안은 「시작」이 아니다.
+        log.info(f"분석 프록시 만들기 시작: {original.name} ({recipe.scale:.0%})")
         try:
             _build_proxy(original, target, recipe, timeout_seconds)
         except (OSError, RuntimeError, ValueError) as error:
             return False, f"{type(error).__name__}: {error}"
+        log.info(f"분석 프록시 검증: {original.name}")
         verdict = validate_analysis_proxy(original, target)
     if verdict.status != "verified":
         target.unlink(missing_ok=True)

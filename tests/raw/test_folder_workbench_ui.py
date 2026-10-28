@@ -31,6 +31,7 @@ pytest.importorskip(
 import gradio as gr  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
+from tests.raw.test_browser_runtime import _make_media  # noqa: E402
 from ui import chooser as ui_chooser  # noqa: E402
 from ui import tk_chooser, ui_facade, workspace_service  # noqa: E402
 from ui.workspace_service import (  # noqa: E402
@@ -41,6 +42,7 @@ from ui.workspace_service import (  # noqa: E402
     FOLDER_BROWSE_LABEL,
     FOLDER_IMPORT_LABEL,
     FOLDER_SUBMIT_LABEL,
+    LIBRARY_APPROVE_LABEL,
     RENDER_EXPORT_LABEL,
     RENDER_EXPORT_OPEN_LABEL,
     TIER_CRITERIA_FIELDS,
@@ -134,6 +136,31 @@ def test_submitting_a_folder_creates_its_workspace_and_starts_the_import(
     # 작업공간 기록만 바꾸는 쓰기도 마지막 폴더를 지우지 않는다.
     again._write_state(root)
     assert again.last_folder_value() == str(folder)
+
+
+def test_the_library_quote_is_measured_once_the_folder_import_finishes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 불러오기는 원본 연결을 백그라운드에 걸고 바로 작업공간을 연다 — 그 순간엔 준비된 영상이
+    # 없어 견적을 잴 수 없다. 연결이 끝난 뒤 다시 재지 않으면 승인 단추가 영영 꺼져 있다.
+    folder = tmp_path / "촬영"
+    _make_media(folder / "A001.mov", audio=True, seconds="2")
+    _make_media(folder / "B002.mov", audio=True, seconds="3")
+    server = _server(tmp_path)
+    _no_preview(server, monkeypatch)
+    server.folder_import_view(str(folder))
+    root = server.workspace_root()
+    assert root is not None
+    assert _wait(server, root, "reference_import").status == "succeeded"
+    deadline = time.monotonic() + 20
+    while root not in server._library_quotes and time.monotonic() < deadline:
+        time.sleep(0.02)
+    quote = server._library_quotes.get(root)
+    assert quote is not None, "연결이 끝났는데 라이브러리 견적을 다시 재지 않았다"
+    ready = {a.asset_id for a in server.raw.list_source_assets(root) if a.status == "ready"}
+    assert set(quote.asset_ids) == ready and len(ready) == 2
+    button = server.library_analysis_button()
+    assert button.interactive is True and button.value == LIBRARY_APPROVE_LABEL
 
 
 def test_an_empty_folder_is_refused_and_creates_nothing(tmp_path: Path) -> None:
@@ -405,6 +432,29 @@ def test_the_export_button_starts_the_render_job(
     assert any(d.get("js") == ui_facade.ACTIVITY_REPLY_JS for d in tails)  # 답은 활동 칸으로
     assert any(app.fns[d["id"]].fn == server.render_export_card_tick for d in tails)
     assert workspace_service.ACTIVITY_JOB_LABELS["render_export"] == "추천만 이어붙이기"
+
+
+def test_import_export_and_approve_wake_the_activity_poller(
+    tmp_path: Path, local_socket: None
+) -> None:
+    """돈 일을 거는 단추는 누르는 순간 서버 쪽 고리를 깨운다(D101) — 동기 스캔 동안에도 줄이 흐른다.
+
+    앞 단계는 입력을 그대로 넘긴다(처리기·입력·출력 무변경).
+    """
+    server, app, _by_id, buttons = _built(tmp_path)
+    deps = app.config["dependencies"]
+    imports = [
+        d for d in deps if d["id"] in app.fns and app.fns[d["id"]].fn == (server.folder_import_view)
+    ]
+    assert len(imports) == 3  # 경로 칸 Enter · 「이 폴더 불러오기」 · 「찾아보기」 뒤
+    for dep in imports:
+        assert dep["js"] == ui_facade.ACTIVITY_WAKE_JS
+        assert dep["inputs"] == [server._folder_path_box._id]
+    (export,) = [d for d in deps if d["targets"] == [(buttons[RENDER_EXPORT_LABEL]._id, "click")]]
+    assert export["js"] == ui_facade.ACTIVITY_WAKE_JS
+    assert "__vlServer.wake(true)" in ui_facade.ACTIVITY_WAKE_JS
+    assert ui_facade.ACTIVITY_WAKE_JS.rstrip().endswith("return value; }")
+    assert "window.__vlServer.wake(true)" in ui_facade.APPROVE_GUARD_JS
 
 
 def test_the_export_button_without_a_workspace_answers_folder_first(tmp_path: Path) -> None:

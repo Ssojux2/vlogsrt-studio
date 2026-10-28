@@ -744,7 +744,7 @@ WORKBENCH_PROGRESS_JOB_KINDS = frozenset(
 다른 칸이 잡는다."""
 ACTIVITY_ROUTE = ui_facade.ACTIVITY_ROUTE
 """「기록」 판의 서버 쪽(D61) — 읽기만 하는 GET 하나. 다른 경로와 같은 Host/Origin 가드를 지난다."""
-ACTIVITY_LOG_PAGE = 500
+ACTIVITY_LOG_PAGE = ui_facade.ACTIVITY_VIEW.server_log_lines
 """한 번에 보내는 서버 줄 상한 — 판도 이만큼만 그린다(처음 열 때 몇 시간치를 보내지 않는다)."""
 ACTIVITY_JOB_LABELS = {
     raw_service.INGEST_JOB_KIND: "원본 가져오기",
@@ -1054,6 +1054,7 @@ def _job_row(job: raw_service.JobRecord, now: datetime) -> dict[str, object]:
         "status_label": status,
         "progress_current": job.progress_current,
         "progress_total": job.progress_total,
+        "percent": ui_facade.job_percent(job.progress_current, job.progress_total),
         "minutes_since_update": minutes,
         "text": ui_facade.job_row_text(
             label, status, job.progress_current, job.progress_total, minutes
@@ -2579,9 +2580,9 @@ class RawWorkspaceUi:
             status, handle = self.raw.start_folder_import(folder, inspect)
         except raw_service.RawWorkspaceError as error:
             raise gr.Error(str(error)) from error
-        del handle  # 진행은 작업 목록(활동 칸 · 「기록」 판)이 보인다
         root = Path(status.workspace_root)
         self._remember(root)
+        self._prepare_library_quote_after(root, handle)
         self._remember_folder(folder)
         self._adopt_default_model(root)
         message = FOLDER_IMPORT_STARTED_TEXT.format(name=folder.name)
@@ -3261,6 +3262,22 @@ class RawWorkspaceUi:
         # 닫기 세대도 지문에 싣는다 — 닫은 뒤 다시 열면 취소 요청된 옛 작업에 붙지 않고 새로 잰다.
         fingerprint = repr((ids, model, cross, terms, *((epoch,) if epoch else ())))
         self.raw.submit_job(root, "library_quote", fingerprint, prepare)
+
+    def _prepare_library_quote_after(self, root: Path, dependency: Any) -> None:
+        """원본 연결이 끝난 뒤 라이브러리 견적을 잰다(W-46a).
+
+        폴더 불러오기는 연결을 백그라운드에 걸고 바로 작업공간을 연다 — 그 순간엔 준비된 영상이
+        없어 `_prepare_library_quote`가 아무것도 재지 않는다. 연결을 기다려 다시 재지 않으면
+        승인 단추가 견적 없이 꺼진 채 남는다. 그 사이 닫거나 다른 작업공간으로 옮겼으면 재지 않는다.
+        """
+        epoch = self._close_epoch
+
+        def follow(context: Any) -> None:
+            self.raw.wait_child_job(root, dependency, context)
+            if self._close_epoch == epoch and self._snapshot_root() == root:
+                self._prepare_library_quote(root)
+
+        self.raw.submit_job(root, "library_quote", f"after-import:{dependency.job_id}", follow)
 
     def library_analysis_summary(self) -> str:
         root = self._snapshot_root()
@@ -4273,6 +4290,9 @@ class RawWorkspaceUi:
             FINALCUT_SEND_JOB_KIND: "Final Cut 보내기",
             "segment_extract": "컷 준비",
             "visual_prepare": "미리보기 준비",
+            raw_service.ANALYSIS_PROXY_JOB_KIND: ACTIVITY_JOB_LABELS[
+                raw_service.ANALYSIS_PROXY_JOB_KIND
+            ],
             "understanding": "영상 분석",
             "understanding_semantic": "의미 분석",
         }
@@ -5158,7 +5178,11 @@ class RawWorkspaceUi:
         shown = gr.State(None)
         card = [self._export_card_html, self._export_open_button, shown]
         started = self._render_export_button.click(
-            self.render_export_view, self._signature_state, status, concurrency_limit=1
+            self.render_export_view,
+            self._signature_state,
+            status,
+            concurrency_limit=1,
+            js=ui_facade.ACTIVITY_WAKE_JS,
         )
         self._report_activity(started, status)
         started.then(
@@ -11922,7 +11946,11 @@ class RawWorkspaceUi:
         assert self._folder_submit_button is not None
         box, status = self._folder_path_box, self._capcut_status
         outputs = [status, *view_outputs]
-        once = {"concurrency_limit": 1, "concurrency_id": FOLDER_IMPORT_CONCURRENCY_ID}
+        once = {
+            "concurrency_limit": 1,
+            "concurrency_id": FOLDER_IMPORT_CONCURRENCY_ID,
+            "js": ui_facade.ACTIVITY_WAKE_JS,  # 동기 스캔 동안에도 줄이 보이게(D101)
+        }
         submitted = self._folder_submit_button.click(self.folder_import_view, box, outputs, **once)
         entered = box.submit(self.folder_import_view, box, outputs, **once)
         browsed = self._folder_browse_button.click(
@@ -12119,9 +12147,15 @@ class RawWorkspaceUi:
         processes = preprocess.active_processes()
         names = self._activity_names(root) if processes else {}
         now = time.time()
+        rows = [_process_row(item, names, now) for item in processes]
+        jobs = self._activity_jobs(root)
+        # 띠의 머리줄(D101) — 이름·%를 아는 프로세스 줄이 먼저, 없으면 가장 오래 기다린 작업 줄.
+        heads = [str(row["text"]) for row in (*rows, *jobs)]
         return {
-            "processes": [_process_row(item, names, now) for item in processes],
-            "jobs": self._activity_jobs(root),
+            "busy": bool(heads),
+            "headline": heads[0] if heads else "",
+            "processes": rows,
+            "jobs": jobs,
             "log": self._activity_lines(after),
         }
 

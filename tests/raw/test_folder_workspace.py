@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 
 from tests.raw.test_review_workspace import _wait_terminal
-from vlogsrt import preprocess
+from vlogsrt import log, preprocess
 from vlogsrt.project.raw import ingest, media_refs
 from vlogsrt.project.raw.analysis_config import (
     ANALYSIS_PROXY,
@@ -73,6 +73,7 @@ class Imported:
     folder: Path
     root: Path
     before: dict[str, tuple[str, int]]
+    logs: tuple[str, ...]
 
 
 def _finish_import(service: RawWorkspaceService, root: Path, job_id: str) -> None:
@@ -92,10 +93,17 @@ def imported(tmp_path_factory: pytest.TempPathFactory) -> Imported:
     _encode(folder / ".hidden" / "copy.mp4", "64x36", "2026-09-01T09:00:00Z", seconds=1)
     before = {name: _identity(folder / name) for name in (UHD_NAME, HD_NAME)}
     service = RawWorkspaceService()
-    status, handle = service.start_folder_import(folder)
-    root = Path(status.workspace_root)
-    _finish_import(service, root, handle.job_id)
-    return Imported(service, folder, root, before)
+    logs: list[str] = []
+    real_info = log.info
+    # 모듈 범위 픽스처라 monkeypatch를 못 쓴다 — 불러오기가 끝날 때까지만 갈아 끼운다.
+    log.info = logs.append  # type: ignore[assignment]
+    try:
+        status, handle = service.start_folder_import(folder)
+        root = Path(status.workspace_root)
+        _finish_import(service, root, handle.job_id)
+    finally:
+        log.info = real_info  # type: ignore[assignment]
+    return Imported(service, folder, root, before, tuple(logs))
 
 
 def _assets(imported: Imported) -> dict[str, object]:
@@ -137,6 +145,32 @@ def test_the_import_copies_nothing_and_leaves_the_originals_untouched(imported: 
         assert workspace.source_media_path(asset) == imported.folder.resolve() / name
         assert _identity(imported.folder / name) == imported.before[name]
         assert asset.content_sha256 == imported.before[name][0]
+
+
+def test_the_import_tells_each_step_in_the_log(imported: Imported) -> None:
+    """스캔은 요청 안에서 동기로 돈다 — 파일마다 한 줄, 이어지는 조용하던 단계도 한 줄씩(D101)."""
+    logs = list(imported.logs)
+    scan = [line for line in logs if line.startswith("원본 확인 ")]
+    assert scan == [
+        f"원본 확인 1/2 · {UHD_NAME}",
+        f"원본 확인 2/2 · {HD_NAME}",
+    ]  # 점 폴더는 안 센다
+    steps = [
+        f"작업공간 만듦: {imported.root.parent.name}/{imported.root.name}",
+        "촬영 시각 순 정렬: 2개",
+        f"분석 프록시 만들기 시작: {UHD_NAME} (25%)",
+        f"분석 프록시 검증: {UHD_NAME}",
+    ]
+    places = [logs.index(step) for step in steps]
+    assert places == sorted(places) and logs.index(scan[-1]) < places[0]
+    ready = [i for i, line in enumerate(logs) if line.startswith(f"분석 프록시 준비: {UHD_NAME}")]
+    assert ready and ready[0] > places[-1]
+
+
+def test_a_proxy_job_counts_one_step(imported: Imported) -> None:
+    """프록시 작업은 0/0으로 머물지 않는다 — 막대가 0에서 1/1로 간다(D101)."""
+    jobs = imported.service.recent_jobs(imported.root, [ANALYSIS_PROXY_JOB_KIND], None)
+    assert jobs and all((j.progress_current, j.progress_total) == (1, 1) for j in jobs)
 
 
 # ── 4K 분석 프록시 ─────────────────────────────────────────────────────────

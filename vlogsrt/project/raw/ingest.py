@@ -26,7 +26,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from vlogsrt import oscompat, preprocess
+from vlogsrt import log, oscompat, preprocess
 from vlogsrt.project.raw import source_order
 from vlogsrt.project.raw.config import FOLDER_WORKSPACE
 from vlogsrt.project.raw.jobs import JobCancelledError, JobContext
@@ -361,24 +361,37 @@ def _is_folder_workspace(source_root: Path, workspace: Path) -> bool:
 
 
 def _walk_sources(root: Path, inspect: MediaInspect) -> SourceScan:
-    """원본 트리를 한 번 걷는다 — 보호 이름은 어휘 단계에서, stat 이전에 버린다."""
+    """원본 트리를 한 번 걷는다 — 보호 이름은 어휘 단계에서, stat 이전에 버린다.
+
+    후보 이름을 먼저 다 모아 조사할 수를 안 뒤 하나씩 조사한다 — 폴더 불러오기의 스캔은 요청
+    안에서 동기로 돌므로 파일마다 `i/N` 한 줄이 화면 「작업 진행」 판에 흐른다(D101).
+    """
     candidates: list[SourceCandidate] = []
     rejected: list[RejectedSource] = []
-    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
-        dirnames[:] = sorted(name for name in dirnames if not _pruned_name(name))
-        for name in sorted(filenames):
-            entry = Path(dirpath) / name
-            relative = entry.relative_to(root).as_posix()
-            if _pruned_name(name):
-                continue  # 어휘 가지치기 — 조회(stat)조차 하지 않는다
-            if entry.suffix.lower() not in MEDIA_SUFFIXES:
-                continue  # .LRF·썸네일 같은 보조 파일 — 영상 후보가 아니다(§5.2)
-            _consider_entry(entry, relative, root, inspect, candidates, rejected)
+    entries = _media_entries(root)
+    for index, entry in enumerate(entries, 1):
+        log.info(f"원본 확인 {index}/{len(entries)} · {entry.name}")
+        relative = entry.relative_to(root).as_posix()
+        _consider_entry(entry, relative, root, inspect, candidates, rejected)
     return SourceScan(
         source_root=str(root),
         candidates=tuple(candidates),
         rejected=tuple(rejected),
     )
+
+
+def _media_entries(root: Path) -> list[Path]:
+    """영상 후보 이름 — 어휘만 본다(조회 없음). 차례는 걷는 차례 그대로다."""
+    entries: list[Path] = []
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        dirnames[:] = sorted(name for name in dirnames if not _pruned_name(name))
+        for name in sorted(filenames):
+            if _pruned_name(name):
+                continue  # 어휘 가지치기 — 조회(stat)조차 하지 않는다
+            if Path(name).suffix.lower() not in MEDIA_SUFFIXES:
+                continue  # .LRF·썸네일 같은 보조 파일 — 영상 후보가 아니다(§5.2)
+            entries.append(Path(dirpath) / name)
+    return entries
 
 
 def _consider_entry(

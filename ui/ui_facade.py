@@ -12,7 +12,7 @@ import json
 import math
 import re
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from fractions import Fraction
 from typing import cast
 
@@ -643,6 +643,8 @@ def activity_html() -> str:
 
     내용은 실행본(`ACTIVITY_JS`)이 채운다: 1초 상태 줄(`#quick-status`)의 변화와 단추 응답
     (`ACTIVITY_REPLY_JS`). 글 길이가 칸 높이를 바꾸지 않으므로 무대가 밀리지 않는다.
+    서버에서 도는 일이 있으면 띠는 그 머리줄과 「N개 작업」 배지를 보이고, 그 아래 「작업 진행」
+    판이 저절로 펼쳐진다(D101).
     """
     return (
         '<div id="vl-activity" class="vl-activity" data-vl-kind="status">'
@@ -650,8 +652,10 @@ def activity_html() -> str:
         '<span id="vl-activity-msg" class="msg" role="status" aria-live="polite"></span>'
         '<button type="button" id="vl-activity-key" class="vl-btn vl-btn-sm" hidden>'
         "API 연결 열기</button>"
+        '<span id="vl-activity-count" class="vl-activity-count" hidden></span>'
         '<button type="button" id="vl-activity-log-open" class="vl-btn vl-btn-ghost vl-btn-sm"'
         ' aria-controls="vl-activity-log" aria-expanded="false">기록</button>'
+        f"{_PROGRESS_PANEL_HTML}"
         '<div id="vl-activity-log" class="vl-activity-log" role="log" aria-label="최근 활동"'
         ' hidden><p id="vl-activity-usage" class="vl-activity-usage" hidden></p>'
         f"{_SERVER_ACTIVITY_HTML}"
@@ -664,6 +668,31 @@ def activity_html() -> str:
 ACTIVITY_ROUTE = "/vl-activity"
 """「기록」 판의 서버 쪽을 읽는 경로(D61) — 읽기만 한다. 화면 실행본과 서버가 같은 값을 쓴다."""
 
+
+@dataclass(frozen=True)
+class ActivityViewSettings:
+    """도는 일을 화면에 바로 보이는 활동 띠·「작업 진행」 판의 손잡이(D101).
+
+    모두 외부 근거 없는 조정 대상이다 — 표시만 정하므로 어느 지문·캐시 열쇠·승인·견적에도 없다.
+    `poll_busy_ms`: 도는 것이 있거나 「기록」 판이 열린 동안 묻는 주기(D61의 2초 그대로).
+    `poll_idle_ms`: 한가할 때의 심장박동 — 다른 탭·자동으로 시작된 작업을 잡는다. 0이면 걸지 않는다.
+    `idle_after_empty_polls`: 빈 응답이 이만큼 이어지면 한가하다.
+    `panel_log_lines`: 판에 보이는 최근 서버 줄 수. `panel_collapse_delay_ms`: 한가해진 뒤 판을 접는
+    지연. `server_log_lines`: 한 번에 보내는 서버 줄 상한이자 「기록」 판이 그리는 줄 수.
+    `reply_hold_ms`: 단추 응답이 띠에 머무는 동안 — 그 뒤에야 도는 일의 머리줄이 띠를 덮는다.
+    """
+
+    poll_busy_ms: int = 2000
+    poll_idle_ms: int = 15000
+    idle_after_empty_polls: int = 2
+    panel_log_lines: int = 6
+    panel_collapse_delay_ms: int = 4000
+    server_log_lines: int = 500
+    reply_hold_ms: int = 5000
+
+
+ACTIVITY_VIEW = ActivityViewSettings()
+
 _SERVER_ACTIVITY_HTML = (
     '<div class="vl-server" aria-live="off">'
     '<h3 class="vl-server-head">지금 도는 작업</h3>'
@@ -675,6 +704,20 @@ _SERVER_ACTIVITY_HTML = (
     "</div>"
 )
 """판이 열린 동안만 채워지는 두 칸 — 2초마다 바뀌므로 화면 낭독기에는 알리지 않는다(`aria-live`)."""
+
+
+_PROGRESS_PANEL_HTML = (
+    '<div id="vl-progress" class="vl-progress" role="region" aria-label="작업 진행" hidden>'
+    '<div class="vl-progress-head"><h3 class="vl-server-head">작업 진행</h3>'
+    '<button type="button" id="vl-progress-pin" class="vl-btn vl-btn-ghost vl-btn-sm"'
+    ' aria-pressed="false" title="한가해져도 접지 않습니다">고정</button>'
+    '<button type="button" id="vl-progress-close" class="vl-btn vl-btn-ghost vl-btn-sm">닫기'
+    "</button></div>"
+    '<ul id="vl-progress-rows" class="vl-progress-rows" aria-live="off"></ul>'
+    '<div id="vl-progress-log" class="vl-progress-log" aria-label="최근 서버 줄"></div>'
+    "</div>"
+)
+"""도는 일이 있으면 저절로 펼쳐지는 판(D101) — 줄마다 진행 막대, 그 아래 최근 서버 줄 몇 개."""
 
 
 def format_clock(seconds: float) -> str:
@@ -711,6 +754,13 @@ def job_row_text(label: str, status: str, current: int, total: int, minutes: int
     return " · ".join(parts)
 
 
+def job_percent(current: int, total: int) -> int | None:
+    """작업 진행 막대(내림, 100에서 멈춤) — 전체 수를 모르면 막대가 없다."""
+    if total <= 0:
+        return None
+    return min(100, max(0, current) * 100 // total)
+
+
 def statusline_html() -> str:
     """무대 아래 상태 줄(24px) — 왼쪽은 작업대 각주(`#vl-footnote`), 오른쪽은 단축키 안내.
 
@@ -731,6 +781,15 @@ ACTIVITY_REPLY_JS = (
     "(reply) => { if (window.__vlActivity) { window.__vlActivity.reply(reply); } return []; }"
 )
 """단추 사건이 끝나면 그 응답 칸의 값을 활동 칸으로 — 서버를 다시 부르지 않는다."""
+
+ACTIVITY_WAKE_JS = (
+    "(value) => { if (window.__vlServer) { window.__vlServer.wake(true); } return value; }"
+)
+"""일을 거는 단추(입력 하나)의 앞 단계 — 서버 쪽 고리를 곧바로 깨운다(D101). 입력은 그대로 넘긴다.
+
+폴더 불러오기의 스캔은 요청 안에서 동기로 돌므로, 응답을 기다리지 않고 지금 묻기 시작해야
+스캔하는 동안의 줄이 「작업 진행」 판에 흐른다.
+"""
 
 KEY_NOTICE_JS = """() => {
     const status = document.getElementById('quick-status');
@@ -758,6 +817,8 @@ def literal_markdown(text: str) -> str:
 
 
 APPROVE_GUARD_JS = r"""(signature, apiKey, shownQuote) => {
+  // 승인은 일을 건다 — 거절되든 아니든 서버 쪽 고리를 깨운다(D101, 표시만).
+  if (window.__vlServer) { window.__vlServer.wake(true); }
   // 승인은 사람이 지금 보는 견적에만 묶인다(D54). 견적 칸이 서랍·판에 덮였거나 화면 밖이거나
   // 칸 안에서 잘렸거나 그려진 글이 보낼 문구와 다르면 빈 견적을 보내 서버가 「새 견적을
   // 확인하세요」로 거절하게 하고 견적을 보이게 한다 — 다음 클릭이 그것을 승인한다.
@@ -800,42 +861,61 @@ APPROVE_GUARD_JS = r"""(signature, apiKey, shownQuote) => {
 """일괄 승인 클릭의 앞 단계 — 견적 칸이 정말 보일 때만 그 문구를 보낸다(덮였으면 빈 문구)."""
 
 SERVER_ACTIVITY_JS = r"""
-  // 서버 쪽 기록(D61) — 판이 열린 동안만 2초마다 읽는다. 닫히면 걸린 타이머를 거두고 묻지 않는다.
+  // 서버 쪽 기록(D61·D101) — 고리 하나가 읽는다. 걸린 타이머는 언제나 하나, setTimeout 사슬뿐이다.
+  // 바쁘거나 「기록」 판·고정한 「작업 진행」 판이 열린 동안은 짧게, 한가하면 길게 묻는다
+  // (0이면 안 묻는다).
   // 서버가 준 글(파일 이름·오류 글·로그 줄)은 전부 textContent로 넣는다.
   var SERVER_ROUTE = "__VL_ACTIVITY_ROUTE__";
-  var SERVER_POLL_MS = 2000;
-  var SERVER_LINES = 500;
+  var V = __VL_ACTIVITY_VIEW__;
   // 맨 아래에서 이 안이면 맨 아래를 보는 중이다 — 새 줄을 따라간다. 위로 올려 읽던 자리는 그대로다.
   var STICK_PX = 24;
-  var S = W.__vlServer = { live: false, timer: null, after: 0, run: 0, boot: null, soon: false };
-  S.start = function () {
-    if (S.live) { return; }
-    S.live = true; S.run += 1; S.poll(S.run);
+  var S = W.__vlServer = { timer: null, collapse: null, inflight: false, after: 0, boot: null,
+    soon: false, busy: false, seen: false, empty: 0, round: 0, dismissed: -1, pinned: false,
+    logOpen: false, headed: false };
+  S.wait = function () {
+    if (S.soon) { return 0; }
+    if (S.busy || S.logOpen || S.pinned) { return V.poll_busy_ms; }
+    return V.poll_idle_ms > 0 ? V.poll_idle_ms : null;
   };
-  // 늦게 온 응답이라도 지난 회차(run)는 그리지도 다시 걸지도 않는다 — 빨리 여닫아도 고리는 하나다.
-  S.stop = function () {
-    S.live = false; S.run += 1;
+  // 다음 묻기를 다시 건다 — 묻는 중이면 그 응답이 건다(요청은 한 번에 하나).
+  S.arm = function () {
+    if (S.inflight) { return; }
     if (S.timer !== null) { W.clearTimeout(S.timer); S.timer = null; }
+    var wait = S.wait();
+    S.soon = false;
+    if (wait !== null) { S.timer = W.setTimeout(S.poll, wait); }
   };
-  S.poll = function (run) {
+  // 깨우기 — 단추(strong)는 바쁨 회차를 열고, 상태 줄 변화는 한가할 때만 한 번 당겨 묻는다.
+  S.wake = function (strong) {
+    if (strong) { S.enter(); }
+    else if (S.busy || S.logOpen || S.pinned) { return; }
+    S.soon = true; S.arm();
+  };
+  S.enter = function () {
+    S.empty = 0;
+    if (S.collapse !== null) { W.clearTimeout(S.collapse); S.collapse = null; }
+    if (!S.busy) { S.busy = true; S.seen = false; S.round += 1; }
+  };
+  S.leave = function () {
+    S.busy = false;
+    if (S.seen && !S.pinned && S.collapse === null) {
+      S.collapse = W.setTimeout(function () { S.collapse = null; S.place(); },
+        V.panel_collapse_delay_ms);
+    }
+  };
+  S.poll = function () {
     S.timer = null;
-    if (!S.live || run !== S.run) { return; }
+    S.inflight = true;
     W.fetch(SERVER_ROUTE + "?after=" + S.after, { cache: "no-store" })
       .then(function (r) {
         if (!r.ok) { throw new Error("HTTP " + r.status); }
         return r.json();
       })
-      .then(function (body) { if (run === S.run) { S.note(""); S.paint(body); } })
+      .then(function (body) { S.note(""); S.paint(body); })
       .catch(function (error) {
-        if (run !== S.run) { return; }
         S.note("서버에 닿지 않습니다 — " + ((error && error.message) || error));
       })
-      .then(function () {
-        if (!S.live || run !== S.run) { return; }
-        var wait = S.soon ? 0 : SERVER_POLL_MS;
-        S.soon = false;
-        S.timer = W.setTimeout(function () { S.poll(run); }, wait);
-      });
+      .then(function () { S.inflight = false; S.arm(); });
   };
   S.note = function (text) {
     var note = byId("vl-server-note");
@@ -848,47 +928,150 @@ SERVER_ACTIVITY_JS = r"""
     return row;
   };
   S.paint = function (body) {
-    var list = byId("vl-server-procs");
-    if (list) {
-      list.textContent = "";
-      (body.processes || []).forEach(function (p) { list.appendChild(S.row("process", p.text)); });
-      (body.jobs || []).forEach(function (j) { list.appendChild(S.row("job", j.text)); });
-      if (!list.children.length) {
-        var idle = S.row("idle", "지금 도는 작업이 없습니다.");
-        idle.className = "vl-server-idle"; list.appendChild(idle);
-      }
-    }
     var log = body.log || {};
     if (S.boot !== null && log.boot !== S.boot) {
       // 서버가 다시 떴다 — 번호가 처음부터다. 이 응답의 줄은 버리고 비운 뒤 곧바로 처음부터 받는다.
       S.boot = log.boot; S.after = 0; S.soon = true;
-      var stale = byId("vl-server-log");
-      if (stale) { stale.textContent = ""; }
+      ["vl-server-log", "vl-progress-log"].forEach(function (id) {
+        var stale = byId(id);
+        if (stale) { stale.textContent = ""; }
+      });
       return;
     }
+    // 첫 응답의 줄은 지난 기록이다 — 판에는 보이되 「지금 일하는 중」의 증거로 세지 않는다.
+    var fresh = S.boot !== null && (log.lines || []).length > 0;
     S.boot = log.boot;
+    S.paintRows(body);
     S.paintLog(log);
+    S.paintPanel(body, log.lines || []);
+    S.settle(body, fresh);
+  };
+  S.paintRows = function (body) {
+    var list = byId("vl-server-procs");
+    if (!list) { return; }
+    list.textContent = "";
+    (body.processes || []).forEach(function (p) { list.appendChild(S.row("process", p.text)); });
+    (body.jobs || []).forEach(function (j) { list.appendChild(S.row("job", j.text)); });
+    if (!list.children.length) {
+      var idle = S.row("idle", "지금 도는 작업이 없습니다.");
+      idle.className = "vl-server-idle"; list.appendChild(idle);
+    }
+  };
+  S.line = function (line) {
+    var row = document.createElement("div");
+    row.className = "vl-server-line";
+    row.setAttribute("data-vl-level", line.level);
+    var time = document.createElement("time");
+    time.textContent = line.time;
+    var text = document.createElement("span");
+    text.textContent = line.text;
+    row.appendChild(time); row.appendChild(text);
+    return row;
   };
   S.paintLog = function (log) {
     var box = byId("vl-server-log");
     if (!box) { return; }
     var stick = box.scrollHeight - box.scrollTop - box.clientHeight <= STICK_PX;
-    (log.lines || []).forEach(function (line) {
-      var row = document.createElement("div");
-      row.className = "vl-server-line";
-      row.setAttribute("data-vl-level", line.level);
-      var time = document.createElement("time");
-      time.textContent = line.time;
-      var text = document.createElement("span");
-      text.textContent = line.text;
-      row.appendChild(time); row.appendChild(text); box.appendChild(row);
-    });
-    while (box.children.length > SERVER_LINES) { box.removeChild(box.firstChild); }
+    (log.lines || []).forEach(function (line) { box.appendChild(S.line(line)); });
+    while (box.children.length > V.server_log_lines) { box.removeChild(box.firstChild); }
     if (typeof log.latest === "number") { S.after = log.latest; }
     if (stick) { box.scrollTop = box.scrollHeight; }
   };
-""".replace("__VL_ACTIVITY_ROUTE__", ACTIVITY_ROUTE)
-"""「기록」 판의 서버 쪽 실행본 — `SHELL_JS` 안에 들어간다. 판을 여닫는 `setPopover`가 켜고 끈다."""
+  // 「작업 진행」 판 — 줄마다 진행 막대(%를 모르면 막대 없음), 그 아래 최근 서버 줄 몇 개.
+  S.bar = function (kind, text, percent) {
+    var row = document.createElement("li");
+    row.setAttribute("data-vl-kind", kind); row.title = text;
+    var label = document.createElement("span");
+    label.className = "vl-progress-text"; label.textContent = text;
+    row.appendChild(label);
+    if (typeof percent === "number") {
+      var track = document.createElement("span"), fill = document.createElement("span");
+      track.className = "vl-progress-track"; fill.className = "vl-progress-bar";
+      fill.style.width = Math.max(0, Math.min(100, percent)) + "%";
+      track.appendChild(fill); row.appendChild(track);
+    }
+    return row;
+  };
+  S.paintPanel = function (body, lines) {
+    var rows = byId("vl-progress-rows");
+    if (rows) {
+      rows.textContent = "";
+      (body.processes || []).forEach(function (p) {
+        rows.appendChild(S.bar("process", p.text, p.percent));
+      });
+      (body.jobs || []).forEach(function (j) {
+        rows.appendChild(S.bar("job", j.text, j.percent));
+      });
+      if (!rows.children.length) { rows.appendChild(S.bar("idle", "지금 도는 작업이 없습니다.")); }
+    }
+    var tail = byId("vl-progress-log");
+    if (!tail) { return; }
+    lines.forEach(function (line) { tail.appendChild(S.line(line)); });
+    while (tail.children.length > V.panel_log_lines) { tail.removeChild(tail.firstChild); }
+  };
+  // 바쁨 판정 — 도는 것이 있으면 바쁘다. 단추가 연 회차 안의 새 서버 줄도 일하는 중이다(폴더
+  // 스캔은 요청 안에서 동기로 돌아 작업 줄이 없다). 빈 응답이 이어지면 한가하다.
+  S.settle = function (body, fresh) {
+    if (body.busy) { S.enter(); S.seen = true; }
+    else if (S.busy && fresh) { S.empty = 0; S.seen = true; }
+    else if (S.busy && (S.empty += 1) >= V.idle_after_empty_polls) { S.leave(); }
+    S.paintStrip(body);
+    S.place();
+  };
+  // 띠 — 도는 일의 머리줄과 「N개 작업」 배지. 방금 온 단추 응답·연결 알림은 덮지 않는다.
+  S.paintStrip = function (body) {
+    var count = (body.processes || []).length + (body.jobs || []).length;
+    var badge = byId("vl-activity-count");
+    if (badge) { badge.textContent = count ? count + "개 작업" : ""; badge.hidden = !count; }
+    var latest = A.entries[0];
+    var held = !!latest && (latest.text.indexOf(KEY_NOTICE) >= 0 ||
+      (latest.kind === "reply" && Date.now() - latest.at < V.reply_hold_ms));
+    if (body.headline && !held) { A.strip(body.headline, "server"); S.headed = true; }
+    else if (!body.headline && S.headed) { S.headed = false; A.restore(); }
+  };
+  // 판을 펼칠지 — 고정이거나, 보일 것이 있던 바쁨 회차(닫기를 누른 회차 빼고)와 그 뒤 접기 지연
+  // 동안. 「기록」 판이 열려 있으면 같은 내용을 더 보이므로 접는다.
+  S.place = function () {
+    var box = byId("vl-progress");
+    if (!box) { return; }
+    var log = byId("vl-activity-log");
+    var live = (S.busy && S.seen) || S.collapse !== null;
+    var want = (S.pinned || (live && S.round !== S.dismissed)) && !(log && !log.hidden);
+    box.hidden = !want;
+  };
+  S.panel = function (open) {
+    S.logOpen = open;
+    if (open) { S.soon = true; }
+    S.place(); S.arm();
+  };
+  S.dismiss = function () {
+    S.dismissed = S.round; S.pinned = false;
+    if (S.collapse !== null) { W.clearTimeout(S.collapse); S.collapse = null; }
+    S.pinButton(); S.place(); S.arm();
+  };
+  S.pin = function () {
+    S.pinned = !S.pinned;
+    if (S.pinned) { S.dismissed = -1; }
+    S.pinButton(); S.place(); S.arm();
+  };
+  S.pinButton = function () {
+    var pin = byId("vl-progress-pin");
+    if (pin) { pin.setAttribute("aria-pressed", S.pinned ? "true" : "false"); }
+  };
+  // Esc — 펼친 판이 있으면 닫는다(닫은 회차에는 다시 펼치지 않는다).
+  S.escape = function () {
+    var box = byId("vl-progress");
+    if (!box || box.hidden) { return false; }
+    S.dismiss();
+    return true;
+  };
+""".replace("__VL_ACTIVITY_ROUTE__", ACTIVITY_ROUTE).replace(
+    "__VL_ACTIVITY_VIEW__", json.dumps(asdict(ACTIVITY_VIEW))
+)
+"""서버 쪽 실행본 — `SHELL_JS` 안에 들어간다.
+
+「기록」 판·「작업 진행」 판·띠의 머리줄을 채운다(D61·D101).
+"""
 
 SHELL_JS = r"""
 (function () {
@@ -994,7 +1177,7 @@ SHELL_JS = r"""
       opener.setAttribute("aria-expanded", open ? "true" : "false");
     });
     if (open && id === "vl-activity-log" && W.__vlActivity) { W.__vlActivity.paintLog(); }
-    if (id === "vl-activity-log" && W.__vlServer) { W.__vlServer[open ? "start" : "stop"](); }
+    if (id === "vl-activity-log" && W.__vlServer) { W.__vlServer.panel(open); }
   }
   function closePopovers(except) {
     var closed = false;
@@ -1043,12 +1226,25 @@ SHELL_JS = r"""
     });
   };
   // 한 줄 칸 — 글이 길어도 높이는 그대로(말줄임), 전체 글은 title과 기록 판에 있다.
-  // 견적을 실은 승인 거절은 견적 칸(#vl-quote-note)이, 실사용 줄은 기록 판 고정 줄이 다 보인다.
-  A.show = function (text, kind) {
+  A.strip = function (text, kind) {
     var msg = byId("vl-activity-msg"), box = byId("vl-activity");
-    if (!text || !msg || !box) { return; }
+    if (!msg || !box) { return false; }
     msg.textContent = text; msg.title = text;
     box.setAttribute("data-vl-kind", kind);
+    return true;
+  };
+  // 도는 일의 머리줄이 걷히면 마지막 기록을 되살린다 — 기록 항목은 늘리지 않는다.
+  A.restore = function () {
+    var latest = A.entries[0];
+    A.strip(latest ? latest.text : "", latest ? latest.kind : "status");
+  };
+  // 견적을 실은 승인 거절은 견적 칸(#vl-quote-note)이, 실사용 줄은 기록 판 고정 줄이 다 보인다.
+  A.show = function (text, kind) {
+    if (!text || !byId("vl-activity-msg")) { return; }
+    // 도는 일의 머리줄이 띠에 있는 동안 상태 줄은 기록에만 남는다 — 띠가 1초마다 뒤바뀌지 않는다.
+    var under = kind === "status" && text.indexOf(KEY_NOTICE) < 0 && W.__vlServer &&
+      W.__vlServer.headed;
+    if (!under) { A.strip(text, kind); }
     var key = byId("vl-activity-key");
     if (key) { key.hidden = text.indexOf(KEY_NOTICE) < 0; }
     var now = new Date();
@@ -1068,6 +1264,8 @@ SHELL_JS = r"""
       A.entries.shift();
     }
     A.show(text, "reply");
+    // 단추 사건이 끝났다 — 그 사건이 건 작업을 곧바로 보러 간다(D101).
+    if (W.__vlServer) { W.__vlServer.wake(true); }
   };
   // 1초 상태 줄 — 글이 **바뀔 때만** 칸을 갈아 쓴다. 방금 기록한 응답과 같은 글이면
   // 다시 적지 않는다.
@@ -1077,6 +1275,7 @@ SHELL_JS = r"""
     var text = A.domText(el);
     if (text === A.statusText) { return; }
     A.statusText = text;
+    if (W.__vlServer) { W.__vlServer.wake(false); }
     var latest = A.entries[0];
     if (latest && latest.kind === "reply" && latest.text === text) { return; }
     A.show(text, "status");
@@ -1156,6 +1355,8 @@ __VL_SERVER_ACTIVITY__
   function watch() { A.watchStatus(); A.readUsage(); watchDrawers(); watchToasts(); }
   W.setInterval(watch, WATCH_MS);
   watch();
+  // 열자마자 한 번 — 다시 띄운 탭도 도는 일을 곧바로 본다.
+  S.wake(false);
   document.addEventListener("click", function (ev) {
     var t = ev.target && ev.target.closest ? ev.target : null;
     if (!t) { return; }
@@ -1175,14 +1376,16 @@ __VL_SERVER_ACTIVITY__
     }
     if (t.closest("#vl-activity-key")) { A.openKey(true); return; }
     if (t.closest("#vl-library-close")) { closeLibrary(); return; }
-    if (!t.closest("#vl-keysheet, #vl-activity-log")) { closePopovers(null); }
+    if (t.closest("#vl-progress-close")) { S.dismiss(); return; }
+    if (t.closest("#vl-progress-pin")) { S.pin(); return; }
+    if (!t.closest("#vl-keysheet, #vl-activity-log, #vl-progress")) { closePopovers(null); }
   });
   // Esc — 떠 있는 판부터, 없으면 서랍을 닫는다(재생 단축키 표에는 없는 키다).
   document.addEventListener("keydown", function (ev) {
     if (ev.key !== "Escape" || ev.isComposing) { return; }
     var t = ev.target;
     if (t && typeof t.closest === "function" && t.closest(ESC_OWNERS)) { return; }
-    if (closePopovers(null)) { return; }
+    if (closePopovers(null) || S.escape()) { return; }
     DRAWERS.forEach(function (id) { W.__vlDrawer(id, false); });
   });
 })();
@@ -1644,6 +1847,40 @@ _SHELL_CSS = """
 .vl-server-line time { color: var(--vl-ink-muted); }
 .vl-server-line[data-vl-level="warn"] { color: var(--vl-warn); }
 .vl-server-line[data-vl-level="error"] { color: var(--vl-danger); }
+/* 작업 진행(D101) — 도는 일이 있으면 명령 줄 아래(「기록」 단추 쪽)에 저절로 펼쳐진다.
+   무대 위에 겹칠 뿐 무대를 밀지 않는다. 막대 폭은 실행본이 숫자로만 넣는다(서버 글은 글자로). */
+.vl-activity-count {
+  flex: none; padding: 0 6px; border-radius: 8px; background: var(--vl-accent-soft);
+  color: var(--vl-accent-ink); font-size: 11px; line-height: 16px; white-space: nowrap; }
+.vl-activity-count[hidden] { display: none; }
+.vl-activity[data-vl-kind="server"] > .vl-dot { background: var(--vl-accent-ink); }
+.vl-progress {
+  position: absolute; top: calc(100% + 6px); right: 0; z-index: 60; box-sizing: border-box;
+  width: min(560px, calc(100vw - 32px)); max-height: min(60vh, 480px); overflow: auto;
+  padding: 0 0 8px; background: var(--vl-surface-raised); border: 1px solid var(--vl-line-strong);
+  border-radius: 6px; box-shadow: var(--vl-shadow-pop); color: var(--vl-ink); }
+.vl-progress[hidden] { display: none; }
+.vl-progress-head { display: flex; align-items: center; gap: 4px; padding-right: 6px; }
+.vl-progress-head > .vl-server-head { flex: 1 1 auto; }
+.vl-progress-head > .vl-btn-sm { height: 24px; }
+.vl-progress-pin[aria-pressed="true"], #vl-progress-pin[aria-pressed="true"] {
+  color: var(--vl-accent-ink); background: var(--vl-accent-soft); }
+.vl-progress-rows { list-style: none; margin: 0; padding: 0; }
+.vl-progress-rows li {
+  display: grid; gap: 4px; margin: 0; padding: 4px 12px; font-size: 12px; line-height: 16px;
+  color: var(--vl-ink); }
+.vl-progress-rows li[data-vl-kind="idle"] { color: var(--vl-ink-muted); }
+.vl-progress-text { min-width: 0; overflow-wrap: anywhere; }
+.vl-progress-track {
+  display: block; height: 4px; border-radius: 2px; background: var(--vl-surface-sunken);
+  overflow: hidden; }
+.vl-progress-bar {
+  display: block; height: 100%; width: 0; background: var(--vl-accent-ink); }
+.vl-progress-log {
+  margin: 4px 12px 0; padding: 4px 8px; border: 1px solid var(--vl-line); border-radius: 4px;
+  background: var(--vl-surface); font-family: var(--vl-font-mono); font-size: 11px;
+  line-height: 16px; color: var(--vl-ink); }
+.vl-progress-log:empty { display: none; }
 /* 서랍 — 그라디오 Sidebar는 열리면 부모에 여백을 줘 무대를 옆으로 민다(폭이 바뀌면 영상이
    다시 맞춰진다). 여기서는 무대 위에 겹치기만 한다. 여닫이는 머리줄 단추와 서랍 머리의
    「닫기」(그리고 Esc)가 한다 — 그라디오의 가장자리 단추는 감춘다. 움직임은 없다. */

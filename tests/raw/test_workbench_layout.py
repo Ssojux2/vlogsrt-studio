@@ -469,7 +469,9 @@ let statusParagraphs = [{ textContent: '영상을 선택하면 미리보기가 �
 reg['quick-status'].querySelectorAll = () => statusParagraphs;
 const listeners = {};
 const observers = [];
-const window = { setInterval() {}, };
+// 서버 쪽 고리(D101)는 열자마자 묻는다 — 이 시험은 띠·서랍만 보므로 묻기는 걸어 두기만 한다.
+const window = { setInterval() {}, setTimeout() { return 0; }, clearTimeout() {},
+  fetch: () => new Promise(() => {}) };
 const document = {
   body: { appendChild(child) { reg[child.id] = child; } },
   getElementById: (id) => reg[id] || null,
