@@ -9621,3 +9621,24 @@ node 하네스 시험 `test_one_poller_shows_running_work_without_opening_the_lo
 처리기에 키 인자가 없음 · 껍데기 JS에 `openKey`·`quick-api`·`apiKey`가 없음 · 화면 코드에 「API 연결」이 없음 · 키 없는 승인은
 `.env` 안내만 남기고 0송신 · 상태 줄이 `OPENAI_API_KEY` 이름만 말함). 키를 화면으로 넣던 시험 둘(`test_approval_visibility`,
 `test_analysis_model_ui`의 R2-1 a)은 「`.env` 키로 다시 띄운 서버」(`_startup_credentials`를 세움)로 바꿨다. 유료 호출 0회.
+
+## D103 — 동시 준비의 진 쪽은 같은 파일의 등록 행을 받는다 (2026-10-28, W-51)
+
+**배경**: `test_concurrent_preparation_keeps_cache_consistent`가 자주 실패했다(기준 `6bc0352`에서 4번 중 1번, `9c0f92c`에서
+4번 중 3번). 두 `visual_prepare` 작업이 같은 페이지를 함께 채우면 썸네일 파일은 link 게시(`publish_exclusive`)로 하나만 남는데,
+등록이 조회 → 등록 두 걸음이었다 — `_ensure_registered`가 `_registration_for`로 행이 없다고 본 뒤 `register_media_file`을 부르는
+사이에 상대 작업이 같은 경로를 먼저 등록하면, 진 쪽이 `MediaNotAllowedError("이미 등록된 경로다: previews/visual/thumbs/<key>.jpg …")`로
+작업째 실패했다. 실제 경합 버그이고, 원본 전체 미리보기(같은 `_ensure_registered`)도 같은 창을 가졌다.
+
+**결정**: `register_media_file`에 `adopt_identical` 키워드를 둔다(기본 `False`). 켜면, 같은 트랜잭션(`BEGIN IMMEDIATE`) 안에서 찾은
+같은 경로의 행이 **같은 종류이고 지문(size·mtime·inode)이 지금 그 자리 파일과 같을 때만** 그 행을 그대로 돌려준다 — 이긴 쪽이 바로
+이 파일을 등록했다는 뜻이다. 지문이 다르면 다른 내용이므로 지금처럼 거부한다. `visual_review._ensure_registered`의 새 등록 하나만
+켠다. 기본 경로의 중복 거부(「ID가 두 개가 되는 순간 추적이 깨진다」, `test_duplicate_registration_is_refused`)는 그대로다 — 원본
+가져오기·작업 산출물 등록은 경합 게시가 아니라 받지 않는다. 조회를 없애고 늘 등록부터 하지 않은 까닭: `rebuilt=True`의 지문 다시
+박기(`refresh_media_fingerprint`)는 행이 있을 때의 길이고, 그 순서를 바꾸면 정리 뒤 다시 만든 파일의 회복 길이 흔들린다.
+
+**바꾸지 않은 것**: 시험 기대값 · 게시(`_publish`) · 미디어 ID 형태 · 제공 안전망(`resolve_media_file`의 지문 대조) · 지문·캐시 열쇠.
+
+**시험**: `test_registration_race_loser_adopts_the_winners_identical_row`(이긴 쪽 등록 뒤 조회를 「없음」으로 고정해 실패 순서를 결정적으로
+짬 — 고치기 전 같은 오류로 실패) · `test_registration_race_still_refuses_a_different_file` · `test_adopting_registration_returns_the_same_file_row` ·
+`test_adopting_registration_refuses_a_changed_file`. 그 동시 준비 시험 20회 연속 통과(`make check`가 함께 도는 부하 아래).

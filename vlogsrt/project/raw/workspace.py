@@ -322,6 +322,16 @@ def new_clip_id(entry_digest: str, package_dir: str, job_fingerprint: str) -> st
     return f"clip_{digest[:20]}"
 
 
+def _same_registered_file(row: sqlite3.Row, kind: str, probed: os.stat_result) -> bool:
+    """등록 행이 지금 그 자리의 바로 이 파일을 가리키는가 — 종류와 지문 셋이 모두 같다."""
+    return (
+        str(row["kind"]) == kind
+        and int(row["size_bytes"]) == probed.st_size
+        and int(row["mtime_ns"]) == probed.st_mtime_ns
+        and int(row["inode"]) == probed.st_ino
+    )
+
+
 def new_media_file_id() -> str:
     """전역 유일한 불투명 미디어 ID — 작업공간이 달라도 같은 ID가 나오지 않는다.
 
@@ -977,12 +987,18 @@ class RawWorkspace:
 
     # ── 미디어 등록·해석 ───────────────────────────────────────
 
-    def register_media_file(self, path: Path, kind: str) -> MediaRegistration:
+    def register_media_file(
+        self, path: Path, kind: str, *, adopt_identical: bool = False
+    ) -> MediaRegistration:
         """작업공간 안의 실제 파일을 미디어로 등록하고 브라우저용 ID를 만든다.
 
         허용 디렉터리 밖(로그·설정·DB·API 응닷 자리)과 심볼릭 링크를 거친 경로는
         등록 단계에서 거부한다. 제공 계층은 ID만 다루므로, 등록을 통과한 파일만
         브라우저에 보일 수 있다.
+
+        `adopt_identical`은 동시 게시의 진 쪽 길이다(D103): 같은 경로의 행이 같은 종류이고
+        지문(size·mtime·inode)이 지금 파일과 같으면 — 이긴 쪽이 이 파일을 먼저 등록했다 —
+        그 행을 그대로 돌려준다. 지문이 다르면 다른 내용이라 여전히 거부한다.
         """
         if kind not in MEDIA_KINDS:
             raise MediaNotAllowedError(f"알 수 없는 미디어 종류: {kind}")
@@ -993,11 +1009,13 @@ class RawWorkspace:
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             clash = connection.execute(
-                "SELECT file_id FROM media_files WHERE relative_path = ?", (relative,)
+                "SELECT * FROM media_files WHERE relative_path = ?", (relative,)
             ).fetchone()
             if clash is not None:
                 connection.rollback()
-                raise MediaNotAllowedError(f"이미 등록된 경로다: {relative} ({clash[0]})")
+                if adopt_identical and _same_registered_file(clash, kind, probed):
+                    return self._registration(clash)
+                raise MediaNotAllowedError(f"이미 등록된 경로다: {relative} ({clash['file_id']})")
             file_id = self._insert_media_row(connection, kind, relative, probed, registered_at)
             connection.commit()
         return MediaRegistration(
