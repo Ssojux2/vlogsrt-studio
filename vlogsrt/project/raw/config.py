@@ -236,7 +236,11 @@ TEXT_MODEL_LABELS = {RawModelRoles().text_model: "GPT-Transcribe"}
 
 
 def text_model_label(model: str) -> str:
-    """견적의 「다른 귀(…)」 괄호 안 이름 — 등록된 이름이 없으면 모델 이름 그대로."""
+    """견적의 「다른 귀(…)」 괄호 안 이름 — Gemini 전사 엔진(W-35b)은 그 프로파일의 이름, 등록된
+    이름이 없으면 모델 이름 그대로."""
+    profile = GEMINI_TRANSCRIBE_PROFILES.get(model)
+    if profile is not None:
+        return profile.label
     return TEXT_MODEL_LABELS.get(model, model)
 
 
@@ -1030,6 +1034,43 @@ WORD_TEXT_VERSION = "word-text/v1"
 """Gemini 단어 → whisper 줄 글자 배정(W-35a, D95)의 규칙 판 — 가운데 자리 · 반열린 줄 · 겹치면
 가운데가 가까운 줄(같으면 앞). 임계값이 없다. 규칙을 바꾸면 판을 올린다(글자 캐시 열쇠에 실린다,
 W-35b)."""
+
+
+@dataclass(frozen=True)
+class GeminiTextSettings:
+    """whisper 원본의 Gemini 글자 경로(W-35b, D95)의 동결 설정 — `RawWorkflowConfig`의 칸이 아니다.
+
+    `SourceTextSettings`와 같은 이유로 설정 밖에 있다(칸을 더하면 whisper 청크 열쇠가 모두 낡는다).
+    힌트가 없다 — 문맥·용어집·`system_instruction`을 보내지 않는다(규칙 6, D92). 언어는 등록표가
+    `ko-KR`로 옮기는 잠금이다. 모델은 등록된 Gemini 전사 엔진이어야 하고 판은 단어 배정 규칙 판이다
+    — 둘 다 글자 캐시 열쇠와 요청 신원에 실린다."""
+
+    schema: str = "raw-source-gemini-text/v1"
+    model: str = GEMINI_TRANSCRIBE_PROFILE.model
+    languages: tuple[str, ...] = ("ko",)
+    version: str = WORD_TEXT_VERSION
+
+
+GEMINI_TEXT_SETTINGS = GeminiTextSettings()
+
+
+def gemini_text_problems(settings: GeminiTextSettings) -> list[str]:
+    """Gemini 글자 경로 설정의 자기 일관성 — 판·등록된 전사 엔진·언어 잠금이 맞는가."""
+    problems: list[str] = []
+    if settings.schema != GeminiTextSettings().schema:
+        problems.append(f"Gemini 글자 경로 schema는 {GeminiTextSettings().schema}여야 한다")
+    if settings.model not in GEMINI_TRANSCRIBE_PROFILES:
+        problems.append(f"Gemini 글자 경로 모델 {settings.model!r}은(는) 등록된 전사 엔진이 아니다")
+    if settings.version != WORD_TEXT_VERSION:
+        problems.append(f"Gemini 글자 경로 판은 {WORD_TEXT_VERSION}여야 한다")
+    profile = GEMINI_TRANSCRIBE_PROFILES.get(settings.model)
+    if not settings.languages:
+        problems.append("Gemini 글자 경로의 언어 잠금이 비었다")
+    elif profile is not None:
+        missing = [code for code in settings.languages if code not in profile.language_codes]
+        if missing:
+            problems.append(f"Gemini 글자 경로가 옮길 수 없는 언어다: {missing}")
+    return problems
 
 
 @dataclass(frozen=True)

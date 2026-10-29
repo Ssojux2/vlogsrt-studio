@@ -40,12 +40,14 @@ from vlogsrt import log, oscompat, preprocess
 from vlogsrt.project.raw import asr_epoch as asr_epoch_store
 from vlogsrt.project.raw import (
     cross_check,
+    gemini_text,
     glossary,
     media_refs,
     request_usage,
     source_text,
     source_transcript,
     source_verify,
+    text_ear,
     timing_engine,
 )
 from vlogsrt.project.raw import understanding as stage1
@@ -71,9 +73,11 @@ from vlogsrt.project.raw.caption_provider import (
     TransportTextProvider,
     parse_timing_response,
     timing_provider_for,
+    words_provider_for,
 )
 from vlogsrt.project.raw.config import (
     ANALYSIS_PROVIDER_GOOGLE,
+    GEMINI_TEXT_SETTINGS,
     SOURCE_TEXT_SETTINGS,
     RawWorkflowConfig,
     analysis_provider,
@@ -179,6 +183,10 @@ class ReplayFixtures:
     # `text_chunks`는 WAV sha → 글자, `text_sources`는 원본 sha → {청크 번호: 글자}다.
     text_chunks: Mapping[str, str] | None = None
     text_sources: Mapping[str, Mapping[int, str]] = field(default_factory=dict)
+    # Gemini 글자 경로(W-35b)의 선언 — `word-text-fixtures.json`이 없으면 None(묻지 않는다).
+    # `word_chunks`는 WAV sha → Gemini 응답, `word_sources`는 원본 sha → {청크 번호: 응답}이다.
+    word_chunks: Mapping[str, Mapping[str, Any]] | None = None
+    word_sources: Mapping[str, Mapping[int, Mapping[str, Any]]] = field(default_factory=dict)
 
     @classmethod
     def empty(cls) -> ReplayFixtures:
@@ -206,6 +214,14 @@ class ReplayFixtures:
             return None
         return source_text.ReplayTextProvider(
             exact=self.text_chunks, declared=self.text_sources.get(source_sha256)
+        )
+
+    def words_for(self, source_sha256: str) -> gemini_text.ReplayWordProvider | None:
+        """원본 하나의 Gemini 글자 재생자 — 선언 파일이 없으면 None(묻지 않는다)."""
+        if self.word_chunks is None:
+            return None
+        return gemini_text.ReplayWordProvider(
+            exact=self.word_chunks, declared=self.word_sources.get(source_sha256)
         )
 
 
@@ -238,13 +254,44 @@ def load_replay_fixtures(directory: Path) -> ReplayFixtures:
             str(key): value for key, value in _mapping_field(payload, "windows", luna_path).items()
         }
     text_chunks, text_sources = _load_text_fixtures(directory / "text-fixtures.json")
+    word_chunks, word_sources = _load_word_fixtures(directory / "word-text-fixtures.json")
     return ReplayFixtures(
         sources=sources,
         chunks=chunks,
         windows=windows,
         text_chunks=text_chunks,
         text_sources=text_sources,
+        word_chunks=word_chunks,
+        word_sources=word_sources,
     )
+
+
+def _load_word_fixtures(
+    path: Path,
+) -> tuple[Mapping[str, Mapping[str, Any]] | None, Mapping[str, Mapping[int, Mapping[str, Any]]]]:
+    """Gemini 글자 경로 재생 선언(W-35b) — `{"chunks": {WAV sha: 응답}, "sources": {원본 sha:
+    {청크 번호: 응답}}}`. 응답은 Gemini 3.5 Transcribe 응답 그대로다(해석은 실행이 한다)."""
+    if not path.is_file():
+        return None, {}
+    payload = _read_json(path)
+    chunks = {
+        str(sha): _fixture_response(value, path)
+        for sha, value in _mapping_field(payload, "chunks", path).items()
+    }
+    sources: dict[str, Mapping[int, Mapping[str, Any]]] = {}
+    for sha, declared in _mapping_field(payload, "sources", path).items():
+        if not isinstance(declared, Mapping):
+            raise ReplayFixtureError(f"Gemini 응답 선언이 객체가 아니다: {path} ({sha})")
+        sources[str(sha)] = {
+            int(index): _fixture_response(value, path) for index, value in declared.items()
+        }
+    return chunks, sources
+
+
+def _fixture_response(value: object, path: Path) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ReplayFixtureError(f"Gemini 응답 선언은 객체여야 한다: {path} ({value!r})")
+    return dict(value)
 
 
 def _load_text_fixtures(
@@ -623,14 +670,18 @@ def _current_input(
         media_fingerprint=media_refs.fingerprint(workspace, asset.asset_id),
         transcript_fingerprint=source_transcript.fingerprint(workspace, asset.asset_id),
         asr_epoch=epoch,
-        cross_check_tag=_cross_check_tag(workspace, audio),
+        cross_check_tag=_cross_check_tag(workspace, asset.asset_id, audio),
     )
     return fingerprint, epoch
 
 
-def _cross_check_tag(workspace: RawWorkspace, audio: SelectedAudio | None) -> str | None:
-    """원본 입력 지문의 교차 확인 꼬리표 — 꺼져 있거나 소리가 없으면 None(바이트 그대로)."""
-    return None if audio is None else cross_check.binding_tag(workspace)
+def _cross_check_tag(
+    workspace: RawWorkspace, asset_id: str, audio: SelectedAudio | None
+) -> str | None:
+    """원본 입력 지문의 교차 확인 꼬리표 — 꺼져 있거나 소리가 없으면 None(바이트 그대로).
+
+    꼬리표는 그 원본의 글자 귀 것이다(W-35b — Gemini 글자 귀는 `gemini-text/<신원>`)."""
+    return None if audio is None else cross_check.source_tag(workspace, asset_id)
 
 
 def _audio_identity_text(audio: SelectedAudio | None) -> str:
@@ -1300,7 +1351,9 @@ def _seed_stage1(
     if after == before:
         return seeded, input_fp
     media = media_refs.fingerprint(workspace, asset.asset_id)
-    cross_tag = _cross_check_tag(workspace, timeline.audio)  # 지금 값 — 그사이 바뀌었으면 안 맞는다
+    cross_tag = _cross_check_tag(
+        workspace, asset.asset_id, timeline.audio
+    )  # 지금 값 — 그사이 바뀌었으면 안 맞는다
 
     def measured(transcript: str) -> str:
         return source_input_fingerprint(
@@ -1340,6 +1393,9 @@ def _transcribe_source(
     asr_evidence: AsrEvidence | None = None
     utterances: tuple[UtteranceEvidence, ...] = ()
     text_record: dict[str, object] | None = None
+    # 글자 귀는 소리가 없는 원본도 이 차례에 고정한다(W-35b) — 고정이 없으면 자막 문서가 생긴 뒤
+    # 「이미 들은 영상」으로 읽혀 결속 꼬리표가 바뀐다(재개 지문이 어긋난다).
+    text_ear.pin(workspace, asset.asset_id, asr_epoch, text_ear.resolve(workspace, asset.asset_id))
     if audio is not None:
         context.check_cancel()
         asr_evidence, utterances, text_record = _hear_source(
@@ -1361,12 +1417,14 @@ def _hear_source(
     source_dir: Path,
     asr_epoch: int,
 ) -> tuple[AsrEvidence, tuple[UtteranceEvidence, ...], dict[str, object]]:
-    """시간 엔진으로 시각과 글자를 듣고, 같은 청크 WAV를 두 번째 귀에 한 번 더 묻는다(D59 19c).
+    """시간 엔진으로 시각과 글자를 듣고, 같은 청크 WAV를 글자 귀에 한 번 더 묻는다(D59 19c·D95).
 
-    듣기를 시작하기 전에(첫 유료 호출 전에) 이 차례의 엔진을 고정한다(D92) — 다시 묻기(D78)는 그
-    엔진이 받을 때만(whisper) 건다."""
+    듣기를 시작하기 전에(첫 유료 호출 전에) 이 차례의 엔진과 글자 귀를 고정한다(D92·W-35b) — 다시
+    묻기(D78)는 그 엔진이 받고 글자 귀가 gpt일 때만(whisper) 건다. 글자 귀가 Gemini면 받은 단어를
+    whisper 줄에 배정한다(`gemini_text`)."""
     engine = timing_engine_for_model(workflow.models.timing_model)
     timing_engine.pin(workspace, asset.asset_id, asr_epoch, engine.key)
+    ear = text_ear.resolve(workspace, asset.asset_id)  # `_transcribe_source`가 이미 고정했다
     asr_provider = _asr_provider_for(providers, workflow, settings, audio, asset.asset_id)
     hearing = _Hearing(
         asr_provider,
@@ -1377,6 +1435,10 @@ def _hear_source(
     evidence = _first_hearing(
         revision, asset, settings, workflow, providers, audio, source_dir, hearing
     )
+    if ear == text_ear.EAR_GEMINI:
+        return _gemini_text(
+            workspace, revision, asset, settings, workflow, providers, audio, evidence, source_dir
+        )
     return _cross_check_text(
         workspace,
         revision,
@@ -1473,6 +1535,86 @@ def _cross_check_text(
         utterances, outcomes, request, audio.sample_rate, _seeded_rows(workspace, asset)
     )
     return evidence, result.utterances, result.record
+
+
+def _gemini_text(
+    workspace: RawWorkspace,
+    revision: AnalysisRevision,
+    asset: SourceAsset,
+    settings: RawUnderstandingSettings,
+    workflow: RawWorkflowConfig,
+    providers: AnalysisProviders,
+    audio: SelectedAudio,
+    evidence: AsrEvidence,
+    source_dir: Path,
+) -> tuple[AsrEvidence, tuple[UtteranceEvidence, ...], dict[str, object]]:
+    """Gemini 글자 경로(W-35b, D95) — whisper가 들은 같은 WAV를 Gemini 3.5 Transcribe에 묻고 단어를
+    whisper 줄에 배정한다. 힌트가 없다(규칙 6). 제공자가 없으면(승인이 글자를 묶지 않았다·재생
+    선언 없음) 아무것도 보내지 않고 캐시에 있는 답만 쓴다."""
+    request = gemini_text.WordPassRequest(
+        settings=GEMINI_TEXT_SETTINGS,
+        workflow=workflow,
+        on=providers.on or datetime.now(UTC).date(),
+        request_id=f"{revision.revision_id}:{asset.asset_id}",
+        workdir=source_dir,
+        cache_dir=workspace.root / "cache" / gemini_text.TEXT_CACHE_DIRNAME / asset.asset_id,
+        origin=providers.origin,
+    )
+    provider = _word_provider_for(providers, workflow, settings, audio, asset.asset_id, request)
+    outcomes = gemini_text.run_word_pass(audio, evidence, request, provider)
+    utterances = stage1.utterance_evidence(audio, evidence)
+    result = gemini_text.apply_word_pass(
+        utterances, outcomes, request, audio.sample_rate, _seeded_rows(workspace, asset)
+    )
+    return evidence, result.utterances, result.record
+
+
+def _word_provider_for(
+    providers: AnalysisProviders,
+    workflow: RawWorkflowConfig,
+    settings: RawUnderstandingSettings,
+    audio: SelectedAudio,
+    asset_id: str,
+    request: gemini_text.WordPassRequest,
+) -> gemini_text.GeminiWordsProvider | None:
+    """Gemini 글자 경로의 제공자 — 재생 선언이거나, 승인이 이 경로의 글자를 묶은 실제 전송(W-35b).
+
+    글자 모델이 빠진 승인은 캐시만 쓴다. 글자 문이 닫히면 WARN하고 묻지 않는다(D39)."""
+    if not providers.is_live():
+        return None if providers.replay is None else providers.replay.words_for(audio.source_sha256)
+    approval = (providers.asr_approvals or {}).get(asset_id)
+    if approval is None or _approved_text_model(approval) is None:
+        return None
+    identity = gemini_text.text_identity(request.settings)
+    try:
+        require_text_approval(
+            approval,
+            workflow=workflow,
+            identity=identity,
+            on=request.on,
+            model=request.settings.model,
+        )
+    except AnalysisApprovalError as error:
+        log.warn(
+            "1단계 Gemini 글자 경로: 글자 요청을 보내지 않습니다 — whisper 글자 그대로 둡니다:"
+            f" {error}"
+        )
+        return None
+    return gemini_text.ApprovedPhaseWordProvider(
+        inner=words_provider_for(
+            sender=providers.live_sender, gemini_client=providers.timing_client
+        ),
+        workflow=workflow,
+        understanding=settings,
+        audio=audio,
+        approval=approval,
+        settings=request.settings,
+        approved_identity=identity,
+        gate=CountingAsrGate(limit=approval.text_chunk_budget),
+        approved_keys=None
+        if approval.text_chunk_keys is None
+        else frozenset(approval.text_chunk_keys),
+    )
 
 
 def _rescue_evidence(

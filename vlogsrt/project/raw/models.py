@@ -748,6 +748,9 @@ class AnalysisEstimate:
     timing_usd: str | None = None
     """그 엔진으로 오디오 전체를 한 번 듣는 금액(공식 분당 단가 × 길이, `USD_STEP` 올림). 단가
     재확인 기한이 지났으면 None이다(가격 미정 — 0원이 아니다)."""
+    text_model: str | None = None
+    """글자 분량을 센 귀가 Gemini 글자 경로일 때만(W-35b, D95) — 그 모델 이름. gpt 다른 귀는
+    None이고 견적 지문에도 없다(바이트 그대로). 승인의 글자 모델·신원이 이 칸을 따른다."""
 
 
 @dataclass(frozen=True, slots=True)

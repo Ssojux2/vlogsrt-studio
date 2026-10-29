@@ -839,6 +839,59 @@ class GeminiTranscribeTimingProvider:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class GeminiTranscribeWordsProvider:
+    """Gemini 글자 경로(W-35b, D95)의 실제 어댑터 — 시간 엔진과 같은 문으로 묻고 응답을 그대로 준다.
+
+    `settings`는 Gemini 전사 엔진 보기다(`gemini_text.WordPassRequest.engine_workflow`) — 요청은
+    시간 엔진 요청(`gemini_timing_request`) 그대로라 힌트가 없다(규칙 6). 해석·배정은 부르는 쪽이
+    한다."""
+
+    client: Any
+    observer: Any = None
+    cancellation: Callable[[], None] | None = None
+
+    def transcription(
+        self,
+        *,
+        binding: AudioChunkBinding,
+        chunk: Chunk,
+        settings: RawWorkflowConfig,
+        on: date,
+        stem: str = "",
+        source: str = "",
+    ) -> Mapping[str, Any]:
+        capabilities.preflight_online_transcription(settings, on, roles=(capabilities.ROLE_TIMING,))
+        request = gemini_timing_request(chunk, settings=settings)
+        verify_chunk_binding(binding, chunk)
+        payload = request_gemini_transcription(
+            self.client,
+            request=request,
+            online=True,
+            observer=self.observer,
+            cancellation=self.cancellation,
+            stem=stem,
+            source=source,
+        )
+        if not isinstance(payload, Mapping):
+            raise MalformedCaptionResponse("Gemini 전사 응답이 JSON 객체가 아니다")
+        return payload
+
+
+def words_provider_for(*, sender: Any, gemini_client: Any) -> GeminiTranscribeWordsProvider:
+    """Gemini 글자 경로의 실제 제공자 — 키가 없으면 유료 호출 전에 키 이름을 대고 닫는다."""
+    if gemini_client is None:
+        raise capabilities.TimingProviderUnavailable(
+            f"Gemini 글자 경로의 키가 없다 — .env에 {ANALYSIS_GEMINI_KEY_ENV}(결제 연결 키)를"
+            " 넣고 앱을 다시 켜세요"
+        )
+    return GeminiTranscribeWordsProvider(
+        client=gemini_client,
+        observer=getattr(sender, "observer", None),
+        cancellation=getattr(sender, "cancellation", None),
+    )
+
+
 def timing_provider_for(
     workflow: RawWorkflowConfig, *, sender: Any, cfg: Any, gemini_client: Any
 ) -> TimingProvider:

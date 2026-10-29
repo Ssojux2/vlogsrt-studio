@@ -382,7 +382,9 @@ def _text_pass(item: AnalysisEstimate) -> tuple[object, ...]:
     if item.text_chunk_count is None:
         return ()
     keys = () if item.text_chunk_keys is None else (list(item.text_chunk_keys),)
-    return ("text-pass", item.text_chunk_count, item.text_seconds, item.text_usd, *keys)
+    # Gemini 글자 경로(W-35b)만 모델 칸이 붙는다 — gpt 다른 귀 줄은 바이트 그대로다.
+    model = () if item.text_model is None else ("text-model", item.text_model)
+    return ("text-pass", item.text_chunk_count, item.text_seconds, item.text_usd, *keys, *model)
 
 
 def mint_asr_approvals(
@@ -460,9 +462,24 @@ def _quoted_text_fields(
 def _text_approval_fields(
     estimate: AnalysisEstimate, text_model: str, identity: str
 ) -> dict[str, Any]:
-    """승인의 글자 칸(D59 19d) — 견적이 물을 청크를 셌을 때만. 아니면 빈 사전(19d 이전 모양)."""
+    """승인의 글자 칸(D59 19d) — 견적이 물을 청크를 셌을 때만. 아니면 빈 사전(19d 이전 모양).
+
+    견적 줄이 Gemini 글자 경로를 셌으면(W-35b) 모델·신원은 그 경로의 것이다 — 힌트가 없어 용어집이
+    신원에 들지 않는다. gpt 다른 귀 줄은 digest가 묶은 신원(`identity`) 그대로다."""
     if not estimate.text_chunk_count:
         return {}
+    if estimate.text_model is not None:
+        from vlogsrt.project.raw import gemini_text
+        from vlogsrt.project.raw.config import GEMINI_TEXT_SETTINGS
+
+        if estimate.text_model != GEMINI_TEXT_SETTINGS.model:
+            raise BrowserRuntimeError(f"견적의 글자 모델을 모른다: {estimate.text_model!r}")
+        if estimate.text_usd is None:
+            raise BrowserRuntimeError(
+                f"Gemini 글자 경로의 단가가 재확인 기한을 지나 가격 미정이다:"
+                f" {estimate.source_name} — 단가를 확인해 고친 뒤 새 견적을 받아라(W-35b)"
+            )
+        text_model, identity = estimate.text_model, gemini_text.text_identity(GEMINI_TEXT_SETTINGS)
     return {
         "text_model": text_model,
         "text_identity": identity,

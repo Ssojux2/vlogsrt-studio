@@ -8971,6 +8971,52 @@ Gemini 글자이고, 단어 시각은 **어느 줄의 글자인지 정하는 데
 - CLAUDE.md 규칙 1(글자 조항)·5(글자를 바꿀 수 있는 곳)·용어 「단어 배정」. 아직 1단계에 잇지 않았다(W-35b).
 - **시험**: `tests/raw/test_word_text.py` · `tests/test_invariants.py`. 유료 호출 0회.
 
+**W-35b(2026-10-29)** — 1단계 연결(whisper 원본의 글자 경로 = Gemini 3.5 Transcribe):
+- **원본마다 글자 귀**(`raw/text_ear.py`, W-31d의 시간 엔진 고정과 같은 모양): `gpt`(D37 게이트 다른 귀) · `gemini`(단어 배정).
+  정하는 순서 — 시간 엔진이 whisper가 아니면 `gpt`(Gemini 원본의 후보, D92 그대로) → 다시 듣기 대기면 고정된 귀 또는 「새로 듣는
+  글자 귀」 → 이번 차례에 고정된 귀 → 원본 자막 문서가 이미 있으면 `gpt` → 처음 듣는 영상은 「새로 듣는 글자 귀」(meta
+  `stage1_text_ear`, 기본 `gemini` — 화면 칸 없음). 고정 표 `source_text_ears(asset_id, epoch, ear)`는 1단계가 시작될 때(첫 유료 호출
+  전) **모든 원본**에 쓴다 — 소리 없는 원본도 고정하지 않으면 자막 문서가 생긴 뒤 「이미 들은 영상」으로 읽혀 꼬리표가 바뀌고 재개
+  지문이 어긋났다(시험이 잡았다).
+- **왜 원본마다인가**: 교차 확인 꼬리표(`cross-check/<신원>`)는 작업공간 하나였고 결속·입력 지문에 실린다. 귀를 작업공간째 바꾸면
+  이미 들은 영상의 꼬리표가 모두 바뀌어 끝난 분석(전사·의미 판정)을 다시 산다. 이제 꼬리표는 `cross_check.source_tag(작업공간, 원본)`
+  — gpt 귀는 작업공간 꼬리표 **그대로**(바이트 그대로), Gemini 귀는 `gemini-text/<신원>`. 결속(`source_bindings`)·견적 결속
+  (`_quote_binding`)·원본 입력 지문(`_cross_check_tag`)이 이것을 쓴다. 견적이 들고 다니는 작업공간 꼬리표(`binding_tag`)는 gpt 신원
+  대조(용어집이 바뀌었나)에만 남는다. 이미 들은 영상에 Gemini 글자를 얹는 길은 「글자만 다시 듣기」(W-35d)다 — gpt 귀 영상은 gpt
+  글자 캐시만 쓰고 새로 사지 않는다(새 견적의 gpt 분량은 W-35b 이전에 들은 영상 중 캐시가 빈 청크뿐).
+- **Gemini 글자 경로**(`raw/gemini_text.py`): 같은 청크 WAV(`source_text.same_wav` — 해시가 다르면 묻지 않는다)를 시간 엔진과 같은
+  문(`gemini_timing_request` → `request_gemini_transcription`, 힌트 없음 · `ko-KR` 잠금, 규칙 6·7)으로 묻고, 응답을 해석해
+  (`parse_transcription`) `word_text.place`로 줄마다 글자를 정한다. 줄 = 그 청크의 whisper 발화를 청크 국소 시계(표본 차 ÷ 비율, 정확
+  유리수)로 옮긴 `TimedLine`. 배정된 줄은 `text` = Gemini 글자 · `whisper_text` = whisper 글자 · `text_source` = 모델 · 이유 `placed`;
+  단어 없는 줄은 whisper 글자 그대로 · 이유 `no_words`(WARN). 줄 밖·시각 없는 단어는 기록(`asr_text.unplaced` — 청크·차례·글자·시각·
+  앞뒤 발화 아이디)만 + WARN. 얹은 뒤 골격(아이디·시각·표본·수)이 같은지 다시 본다(`require_same_skeleton`, 규칙 5). 답이 없는 청크는
+  심긴 같은 whisper 답의 글자 증거를 잇는다(`carry_previous` — gpt 경로와 같은 함수). 기록 `asr_text`는 schema·출처·모델·언어·판·
+  상태·바꾼/둔/못 들은 줄 수·청크마다 받은 단어(시각은 정확 유리수 글)·배정(`placed`)·자리 없는 단어.
+- **실패**: 전송 실패·받아 줄 수 없는 응답(글자는 있는데 시각 단어가 없다 등)은 그 청크 `unavailable` + WARN, whisper 글자 그대로,
+  캐시하지 않는다. 다른 청크는 그대로 얹힌다.
+- **캐시 열쇠**(`cache/source-asr-gemini-text/<원본>/<열쇠>.json`, 응답 그대로 저장 · 읽을 때 다시 해석): schema `raw-source-gemini-text/v1`
+  · 출처(live/replay) · WAV sha · 모델 · 언어 · 배정 판 `word-text/v1` · 표본 범위. **요청 신원**(`gemini_text.text_identity`)은 schema·모델·
+  언어·판 — 용어집·문맥이 없다(보내지 않으니까). 설정은 `GeminiTextSettings`(`RawWorkflowConfig` 밖 — whisper 청크 열쇠가 그대로다).
+- **견적**(`cross_check.with_text_passes`): Gemini 귀 원본은 「아직 답이 없는 청크」를 그 경로의 열쇠로 세고 금액은 전사 엔진 공식 분당
+  단가(`timing_price_per_minute` — $0.003 + $0.002, 재확인 기한 뒤 None = 가격 미정) × 분, 올림. 견적 줄 새 칸 `text_model`(Gemini일
+  때만 — gpt 줄은 None이고 digest가 바이트 그대로)이 digest에 접힌다. D78 다시 묻기 칸은 gpt 귀일 때만(Gemini 신호로 다시 정할 때까지 끈다).
+  화면 문장은 gpt 줄은 그대로, Gemini 줄은 「Gemini 3.5 Transcribe로 자막 글자를 영상 N개 M분 받습니다(공식 단가 분당 $0.005 · 약 $X)」.
+- **승인**(`browser_runtime._text_approval_fields`): 견적 줄이 Gemini면 승인의 글자 모델·신원은 그 경로의 것, 가격 미정이면 승인을
+  만들지 않는다. `require_text_approval(…, model=)`이 그 모델을 대조하고 수명주기는 Gemini 전사 엔진(시간 역할)의 것을 본다. 시작 문
+  (`_require_live_asr_source`)은 Gemini 글자를 묶은 승인인데 Gemini 키가 없으면 유료 호출 전에 `GEMINI_API_KEY`를 말하고 닫는다. 전송
+  경계 `ApprovedPhaseWordProvider`는 청크마다 1단계 승인·online·모델·신원·견적 청크 열쇠·스트림·범위를 다시 보고 예약 문(글자 요청
+  상한)을 센다. 실제 어댑터는 `caption_provider.GeminiTranscribeWordsProvider`(관찰자·취소는 whisper 전송 것).
+- **설정 칸**은 「다른 귀로 교차 확인」 그대로(meta `source_text_cross_check`) — 끄면 두 귀 모두 꼬리표가 없고 글자 요청 0회(캐시만).
+  이름(「Gemini로 글자 받기」)·편집기의 처음 들은 글·「확인 필요」 둘은 W-35c.
+- **재생**: `analysis/replay/word-text-fixtures.json`(`{"chunks": {WAV sha: 응답}, "sources": {원본 sha: {청크 번호: 응답}}}`) — 없으면
+  묻지 않는다(파일 이름에 모델 이름을 넣지 않는다 — 모델 이름 비하드코딩 불변식).
+- **gpt 귀 시험**: 처음 듣는 영상의 기본이 바뀌어(사용자 승인 D95) gpt 다른 귀 흐름을 재던 시험(`test_source_text_flow.py`·
+  `test_cross_check.py`·`test_cross_check_ui.py`·`test_timing_engine_flow.py` 하나)은 처음 듣는 영상도 gpt 귀로 듣게 전제를 둔다(기대값은 그대로). 재생 묶음
+  감싸개(`test_analysis_workflow._CountingReplay`)에 `words_for`를 더했다(19c의 `text_for`와 같다).
+- **남긴 것**: 말소리 빈칸 재전사(D59 19f)의 다른 귀는 여전히 gpt다 · 화면 이름·편집기·「확인 필요」 둘(W-35c) · 「글자만 다시 듣기」
+  (W-35d) · 종료일 뒤 시간 엔진 자동 전환(W-35e) · 사람 H1 녹화(실제 응답 모양 — 이제 글자 경로의 계약이다).
+- **시험**: `tests/raw/test_text_ear.py` · `tests/raw/test_gemini_text.py` · `tests/raw/test_gemini_text_flow.py`. 유료 호출 0회.
+
 ## D96 — Final Cut으로 나가는 자막 글자는 조판 정리(D30)를 거친다 (2026-10-27, W-36)
 
 **사용자 지시(2026-10-27)**: 「자막 글자 맨 앞에 띄어쓰기가 들어가 있는 부분 제거 · 마지막 온점도 안 찍히게」.

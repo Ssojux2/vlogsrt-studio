@@ -1479,17 +1479,49 @@ def _text_pass_sentence(quote: Any, estimates: Sequence[Any]) -> str:
     workflow = getattr(quote, "workflow", None)
     if not asked or workflow is None:
         return ""
-    seconds = sum((Fraction(e.text_seconds) for e in asked), Fraction(0))
-    minutes = max(1, -(-seconds // 60))
-    usd = sum((Decimal(e.text_usd) for e in asked), Decimal(0))
-    label = raw_service.text_model_label(workflow.models.text_model)
-    heard = (
-        f" 다른 귀({label})로 영상 {len(asked)}개 {minutes}분을 한 번 더 듣습니다"
-        f"(공식 단가로 약 ${usd.quantize(CENT, rounding=ROUND_CEILING)})"
+    gemini = [e for e in asked if getattr(e, "text_model", None)]
+    other = [e for e in asked if not getattr(e, "text_model", None)]
+    heard = "".join(
+        (
+            _other_ear_clause(other, raw_service.text_model_label(workflow.models.text_model)),
+            _gemini_text_clause(gemini),
+        )
     )
     if _transcribe_only(quote):
         return f"{heard}. 바뀐 자막이 있는 창은 다음 영상 분석 때 다시 판정합니다."
     return f"{heard} — 바뀐 자막이 있는 창도 이번 영상 분석이 판정하며 위 견적에 들어 있습니다."
+
+
+def _ear_minutes(asked: Sequence[Any]) -> int:
+    seconds = sum((Fraction(e.text_seconds) for e in asked), Fraction(0))
+    return max(1, -(-seconds // 60))
+
+
+def _other_ear_clause(asked: Sequence[Any], label: str) -> str:
+    """gpt 다른 귀(D59 19d) 분량 — W-35b 이전에 들은 영상만 남는다(문장 바이트 그대로)."""
+    if not asked:
+        return ""
+    usd = sum((Decimal(e.text_usd) for e in asked), Decimal(0))
+    return (
+        f" 다른 귀({label})로 영상 {len(asked)}개 {_ear_minutes(asked)}분을 한 번 더 듣습니다"
+        f"(공식 단가로 약 ${usd.quantize(CENT, rounding=ROUND_CEILING)})"
+    )
+
+
+def _gemini_text_clause(asked: Sequence[Any]) -> str:
+    """Gemini 글자 경로(W-35b, D95) 분량 — 공식 분당 단가와 금액(기한이 지나면 가격 미정)."""
+    if not asked:
+        return ""
+    label = raw_service.text_model_label(str(asked[0].text_model))
+    per_minute = raw_service.gemini_text_per_minute()
+    head = f" {label}로 자막 글자를 영상 {len(asked)}개 {_ear_minutes(asked)}분 받습니다"
+    if per_minute is None or any(e.text_usd is None for e in asked):
+        return f"{head}(가격 미정 — 단가를 다시 확인해야 승인할 수 있습니다)"
+    usd = sum((Decimal(e.text_usd) for e in asked), Decimal(0))
+    return (
+        f"{head}(공식 단가 분당 ${per_minute.normalize()} · 약"
+        f" ${usd.quantize(CENT, rounding=ROUND_CEILING)})"
+    )
 
 
 def _rescue_sentence(estimates: Sequence[Any]) -> str:

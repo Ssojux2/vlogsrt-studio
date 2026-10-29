@@ -98,6 +98,7 @@ from vlogsrt.project.raw.config import (
     DEFAULT_ANALYSIS_MODEL,
     FOLDER_WORKSPACE,
     GEMINI_MODEL_PREFIX,
+    GEMINI_TRANSCRIBE_PROFILES,
     MODE_AUTO,
     MODE_CHOICES,
     MODE_LANDSCAPE,
@@ -409,6 +410,7 @@ __all__ = [
     "analysis_model_label",
     "analysis_provider",
     "text_model_label",
+    "gemini_text_per_minute",
     "asr_estimate_digest",
     "validate_analysis_concurrency",
     "caption_ms",
@@ -526,6 +528,15 @@ TIMING_ENGINE_CHOICES: tuple[str, ...] = (TIMING_ENGINE_GEMINI, TIMING_ENGINE_WH
 """「새로 듣는 전사 엔진」 칸의 차례(W-31e) — 새 엔진이 앞, 종료될 whisper가 뒤다."""
 timing_engine_facts = timing_engine.facts
 timing_engine_key = timing_engine.key_for_model
+
+
+def gemini_text_per_minute(on: date | None = None) -> Decimal | None:
+    """Gemini 글자 경로(W-35b)의 공식 분당 단가 — 재확인 기한이 지나면 None(가격 미정)."""
+    from vlogsrt.project.raw.capabilities import timing_price_per_minute
+    from vlogsrt.project.raw.config import GEMINI_TEXT_SETTINGS
+
+    return timing_price_per_minute(GEMINI_TEXT_SETTINGS.model, on or date.today())
+
 
 SELECTION_MODE_FULL = selection_analysis.MODE_FULL
 SELECTION_MODE_TRANSCRIBE = selection_analysis.MODE_TRANSCRIBE
@@ -5798,6 +5809,12 @@ class RawWorkspaceService:
                 f"{name}은(는) {engine.label}로 듣는다 — .env에 {ANALYSIS_GEMINI_KEY_ENV}(결제 연결"
                 " 키)를 넣고 앱을 다시 켜세요. 유료 호출은 시작하지 않았습니다"
             )
+        if approval.text_model in GEMINI_TRANSCRIBE_PROFILES and timing_client is None:
+            raise AnalysisError(
+                f"{name}의 자막 글자는 Gemini 3.5 Transcribe로 받는다 — .env에"
+                f" {ANALYSIS_GEMINI_KEY_ENV}(결제 연결 키)를 넣고 앱을 다시 켜세요. 유료 호출은"
+                " 시작하지 않았습니다(W-35b)"
+            )
 
     def _live_semantic_providers(
         self,
@@ -5951,9 +5968,9 @@ class RawWorkspaceService:
         from vlogsrt.project.raw import asr_epoch, cross_check, media_refs, source_transcript
 
         workspace = self._workspace(root)
-        cross_tag = cross_check.binding_tag(workspace)
         bindings: dict[str, list[str]] = {}
         for asset_id in assets:
+            cross_tag = cross_check.source_tag(workspace, asset_id)  # 글자 귀마다(W-35b)
             row = [
                 source_transcript.binding_fingerprint(workspace, asset_id, cross_tag is not None),
                 media_refs.fingerprint(workspace, asset_id),

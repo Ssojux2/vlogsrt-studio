@@ -184,8 +184,12 @@ def require_text_approval(
     workflow: RawWorkflowConfig,
     identity: str,
     on: date,
+    model: str | None = None,
 ) -> None:
     """글자(두 번째 귀) 요청의 문(D59 19d) — 승인이 글자 모델·요청 신원·상한을 묶었는가.
+
+    `model`은 그 원본의 글자 귀가 묻는 모델이다 — 없으면 설정의 문구 모델(gpt 다른 귀), Gemini 글자
+    경로(W-35b)는 Gemini 전사 엔진이고 수명주기는 그 엔진(시간 역할)의 것을 본다.
 
     1단계 승인 문(`require_live_asr_approval`)을 지난 뒤에 본다. 지어낸 모델·빠진 모델·승인 뒤에
     바뀐 용어집이나 문맥은 보내기 **전에** 닫는다. 문구 역할의 수명주기(확인된 모델)도 여기서 본다 —
@@ -193,7 +197,8 @@ def require_text_approval(
     않는다)."""
     if approval.text_model is None:
         raise AnalysisApprovalError("1단계 승인이 글자 모델을 묶지 않았다 — 글자 요청은 없다")
-    if approval.text_model != workflow.models.text_model:
+    expected = workflow.models.text_model if model is None else model
+    if approval.text_model != expected:
         raise AnalysisApprovalError("승인이 본 글자 모델과 설정 모델이 다르다")
     if approval.text_identity != identity:
         raise AnalysisApprovalError(
@@ -205,10 +210,24 @@ def require_text_approval(
     keys = approval.text_chunk_keys
     if keys is not None and len(set(keys)) != budget:
         raise AnalysisApprovalError("승인이 묶은 글자 청크와 요청 상한이 어긋난다")
-    from vlogsrt.project.raw.capabilities import ROLE_TEXT, preflight_online_transcription
+    from vlogsrt.project.raw.capabilities import (
+        ROLE_TEXT,
+        ROLE_TIMING,
+        preflight_online_transcription,
+    )
+    from vlogsrt.project.raw.config import (
+        GEMINI_TRANSCRIBE_PROFILES,
+        TIMING_ENGINE_GEMINI,
+        TIMING_ENGINES,
+        timing_engine_view,
+    )
 
+    gemini = expected in GEMINI_TRANSCRIBE_PROFILES
+    view = (
+        timing_engine_view(workflow, TIMING_ENGINES[TIMING_ENGINE_GEMINI]) if gemini else workflow
+    )
     try:
-        preflight_online_transcription(workflow, on, roles=(ROLE_TEXT,))
+        preflight_online_transcription(view, on, roles=(ROLE_TIMING if gemini else ROLE_TEXT,))
     except Exception as error:  # noqa: BLE001 - 수명주기 실패도 승인 문의 오류로 닫는다
         raise AnalysisApprovalError(f"글자 요청의 수명주기 문이 닫혔다: {error}") from error
 

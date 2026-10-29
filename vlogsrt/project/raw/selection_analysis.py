@@ -104,7 +104,7 @@ def _assemble_quote(
     estimates = cross_check.with_text_passes(workspace, estimates)
     tag = cross_check.binding_tag(workspace)
     payload = browser_runtime.asr_estimate_digest(estimates) + json.dumps(
-        [_quote_binding(workspace, a, tag) for a in asset_ids]
+        [_quote_binding(workspace, a, cross_check.source_tag(workspace, a)) for a in asset_ids]
     )
     if mode != MODE_FULL:
         payload += "\0mode=" + mode
@@ -116,6 +116,8 @@ def _assemble_quote(
 def _quote_binding(workspace: Any, asset_id: str, cross_tag: str | None) -> tuple[str, ...]:
     """원본 하나의 견적 결속 — 미디어 참조·원본 자막, 0이 아닌 다시 듣기 차례, 교차 확인 꼬리표.
 
+    꼬리표는 그 원본의 글자 귀 것이다(`cross_check.source_tag`, W-35b — gpt 귀는 작업공간
+    꼬리표 그대로).
     교차 확인이 켜져 있으면 자막 지문은 두 번째 귀가 얹은 글자를 뺀 것이다
     (`source_transcript.binding_fingerprint`) — 그 글자는 꼬리표가 묶으므로, 실행이 글자를 얹어도
     다음 견적이 같은 결속을 본다(19c-5 알려진 한계를 닫는다, D59 19d)."""

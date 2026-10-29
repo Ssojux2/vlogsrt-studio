@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import date
 from fractions import Fraction
@@ -358,10 +358,20 @@ def _ask(
 def _same_wav(
     audio: SelectedAudio, chunk: AsrChunkOutcome, request: TextPassRequest
 ) -> tuple[Chunk, AudioChunkBinding]:
-    """whisper가 들은 **같은 WAV**의 신원 — 해시가 다르면 다른 소리라 묻지 않는다."""
+    return same_wav(
+        audio, chunk, request.workdir, f"{request.request_id}:text-{chunk.chunk_index:04d}"
+    )
+
+
+def same_wav(
+    audio: SelectedAudio, chunk: AsrChunkOutcome, workdir: Path, request_id: str
+) -> tuple[Chunk, AudioChunkBinding]:
+    """whisper가 들은 **같은 WAV**의 신원 — 해시가 다르면 다른 소리라 묻지 않는다.
+
+    Gemini 글자 경로(W-35b)도 같은 확인을 쓴다 — 요청 아이디만 다르다."""
     rate = audio.sample_rate
     engine_chunk = Chunk(
-        path=chunk_wav_path(request.workdir, chunk.chunk_index),
+        path=chunk_wav_path(workdir, chunk.chunk_index),
         offset=float(Fraction(chunk.sample_start, rate)),
         duration=float(Fraction(chunk.sample_end - chunk.sample_start, rate)),
         index=chunk.chunk_index,
@@ -371,7 +381,7 @@ def _same_wav(
         sample_start=chunk.sample_start,
         sample_end=chunk.sample_end,
         sample_rate=rate,
-        request_id=f"{request.request_id}:text-{chunk.chunk_index:04d}",
+        request_id=request_id,
     )
     if binding.audio_sha256 != chunk.wav_sha256:
         raise ValueError("청크 WAV가 whisper가 들은 것과 다르다 — 다른 소리에 글자를 얹지 않는다")
@@ -459,8 +469,8 @@ def apply_text_pass(
         )
         for item in utterances
     )
-    applied, carried, dropped = _carry_previous(applied, set(decisions), previous, request.origin)
-    _require_same_skeleton(utterances, applied)
+    applied, carried, dropped = carry_previous(applied, set(decisions), previous, request.origin)
+    require_same_skeleton(utterances, applied)
     record = _record(outcomes, decisions, members, applied, request)
     record.update(
         carried=len(carried),
@@ -471,7 +481,7 @@ def apply_text_pass(
     return TextPassResult(utterances=applied, record=record)
 
 
-def _carry_previous(
+def carry_previous(
     applied: tuple[UtteranceEvidence, ...],
     decided: set[int],
     previous: Sequence[Mapping[str, object]],
@@ -619,7 +629,7 @@ def _skeleton(item: UtteranceEvidence) -> tuple[object, ...]:
     )
 
 
-def _require_same_skeleton(
+def require_same_skeleton(
     before: Sequence[UtteranceEvidence], after: Sequence[UtteranceEvidence]
 ) -> None:
     """글자 경로는 시각·아이디·순서·수를 못 건드린다(규칙 5) — 어긋나면 심기 전에 멈춘다."""
@@ -649,7 +659,7 @@ def _record(
         "prompt": request.settings.prompt,
         "glossary_sha": request.glossary_sha,
         "glossary_terms": len(request.glossary),
-        "status": _pass_status(outcomes),
+        "status": pass_status(outcome.status for outcome in outcomes),
         "replaced": sum(
             item.chunk_index in decisions and item.retext_reason == REASON_ACCEPTED
             for item in applied
@@ -669,8 +679,9 @@ def _record(
     }
 
 
-def _pass_status(outcomes: Sequence[TextChunkOutcome]) -> str:
-    asked = {outcome.status for outcome in outcomes if outcome.status != STATUS_TIMING_FAILED}
+def pass_status(statuses: Iterable[str]) -> str:
+    """청크 상태들 → 글자 경로 전체 상태(Gemini 글자 경로도 같은 규칙을 쓴다, W-35b)."""
+    asked = {status for status in statuses if status != STATUS_TIMING_FAILED}
     if not asked or asked == {STATUS_NOT_REQUESTED}:
         return STATUS_NOT_REQUESTED
     if asked == {STATUS_RECEIVED}:
@@ -888,6 +899,7 @@ __all__ = [
     "STATUS_TIMING_FAILED",
     "STATUS_UNAVAILABLE",
     "TEXT_CACHE_DIRNAME",
+    "TEXT_ORIGINS",
     "TEXT_IDENTITY_SCHEMA",
     "TEXT_REQUEST_STAGE",
     "ApprovedPhaseTextProvider",
@@ -901,7 +913,11 @@ __all__ = [
     "cached_answer_exists",
     "call_identity",
     "call_key",
+    "carry_previous",
+    "pass_status",
+    "require_same_skeleton",
     "run_text_pass",
+    "same_wav",
     "text_chunk_key",
     "text_identity",
 ]

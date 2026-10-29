@@ -62,9 +62,19 @@ from vlogsrt.project.raw import (  # noqa: E402
     source_transcript,
     subtitle_suspects,
     sync_report,
+    text_ear,  # noqa: E402
 )
 from vlogsrt.project.raw import service as raw  # noqa: E402
 from vlogsrt.project.raw.config import SourceTextSettings  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _gpt_ear_for_new_hearings(monkeypatch: pytest.MonkeyPatch) -> None:
+    """이 파일은 gpt 다른 귀(D59 19d)의 화면을 시험한다 — 용어집은 그 귀에만 간다. W-35b부터 처음
+    듣는 whisper 영상의 글자 귀는 Gemini다(D95, 용어집 없음). 여기서는 처음 듣는 영상도 gpt 귀로
+    듣게 해 그 화면을 그대로 잰다."""
+    monkeypatch.setattr(text_ear, "DEFAULT_NEW_HEARING_EAR", text_ear.EAR_GPT)
+
 
 needs_ffmpeg = pytest.mark.skipif(
     shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,

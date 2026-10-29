@@ -31,7 +31,7 @@ from tests.raw.test_source_text import GPT, RecordingSender, _request, _whisper
 from vlogsrt import preprocess
 from vlogsrt.config import Config
 from vlogsrt.project.raw import service as raw
-from vlogsrt.project.raw import source_text, timing_engine
+from vlogsrt.project.raw import source_text, text_ear, timing_engine
 from vlogsrt.project.raw.analysis_config import RawUnderstandingSettings
 from vlogsrt.project.raw.caption_provider import TransportTextProvider
 from vlogsrt.project.raw.config import (
@@ -103,6 +103,9 @@ def test_only_a_gemini_quote_names_the_engine_its_price_and_its_binding_tag(
 
     service, root, asset = _project(tmp_path, stereo_offset)
     workspace = service._workspace(root)
+    # 다시 묻기(D78)는 gpt 글자 귀의 whisper 원본에만 있다 — W-35b부터 처음 듣는 영상의 기본 귀는
+    # Gemini라(D95, 그 귀에는 칸이 없다) 여기서는 gpt 귀로 듣는 영상을 견준다.
+    text_ear.set_new_hearing_ear(workspace, text_ear.EAR_GPT)
     (whisper,) = service.analysis_estimate(root, [asset.asset_id])
     assert (whisper.timing_model, whisper.timing_usd) == (None, None)
     (whisper_passes,) = with_text_passes(workspace, [whisper])

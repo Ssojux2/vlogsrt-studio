@@ -31,7 +31,7 @@ from tests.raw.test_relisten import approve, relisten, stage
 from tests.raw.test_review_workspace import _wait_terminal
 from tests.raw.test_selection_analysis import wait_until
 from vlogsrt import log
-from vlogsrt.project.raw import glossary, source_text, source_transcript
+from vlogsrt.project.raw import glossary, source_text, source_transcript, text_ear
 from vlogsrt.project.raw import service as raw
 from vlogsrt.project.raw.analysis_config import RawUnderstandingSettings
 from vlogsrt.project.raw.config import (
@@ -41,6 +41,15 @@ from vlogsrt.project.raw.config import (
 )
 from vlogsrt.project.raw.understanding import SampleSpan
 from vlogsrt.project.raw.workspace import DB_NAME
+
+
+@pytest.fixture(autouse=True)
+def _gpt_ear_for_new_hearings(monkeypatch: pytest.MonkeyPatch) -> None:
+    """이 파일은 gpt 다른 귀(D59 19c·19d)의 흐름을 시험한다. W-35b부터 처음 듣는 whisper 영상의
+    글자 귀는 Gemini다(D95) — gpt 귀는 그 전에 들은 영상의 귀로 남는다. 여기서는 처음 듣는 영상도
+    gpt 귀로 듣게 해 그 흐름을 그대로 잰다(Gemini 글자 경로는 `test_gemini_text*.py`)."""
+    monkeypatch.setattr(text_ear, "DEFAULT_NEW_HEARING_EAR", text_ear.EAR_GPT)
+
 
 needs_ffmpeg = pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg required")
 
