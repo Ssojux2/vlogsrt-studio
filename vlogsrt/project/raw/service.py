@@ -410,6 +410,7 @@ __all__ = [
     "analysis_model_label",
     "analysis_provider",
     "text_model_label",
+    "DEFAULT_NEW_HEARING_ENGINE",
     "gemini_text_per_minute",
     "asr_estimate_digest",
     "validate_analysis_concurrency",
@@ -527,6 +528,8 @@ TIER_SETTINGS_KEY = "tier_settings"
 TIMING_ENGINE_CHOICES: tuple[str, ...] = (TIMING_ENGINE_GEMINI, TIMING_ENGINE_WHISPER)
 """「새로 듣는 전사 엔진」 칸의 차례(W-31e) — 새 엔진이 앞, 종료될 whisper가 뒤다."""
 timing_engine_facts = timing_engine.facts
+DEFAULT_NEW_HEARING_ENGINE = timing_engine.DEFAULT_NEW_HEARING_ENGINE
+"""「새로 듣는 엔진」의 기본(D104 — Gemini). 화면이 표지를 읽지 못할 때도 이 값을 보인다."""
 timing_engine_key = timing_engine.key_for_model
 
 
@@ -1972,7 +1975,7 @@ class RawWorkspaceService:
         refill_ids: frozenset[str],
     ) -> Any:
         from vlogsrt.project.config import GAP_REFILL_SETTINGS, SYNC_CHECK_SETTINGS
-        from vlogsrt.project.raw import cross_check, glossary, speech_gaps, speech_refill
+        from vlogsrt.project.raw import cross_check, glossary, speech_gaps, speech_refill, text_ear
 
         rate = analysis_workflow.stage1.PCM_SAMPLE_RATE
         spans = speech_gaps.select_gaps(
@@ -1994,7 +1997,9 @@ class RawWorkspaceService:
             audio_start=measured.audio_start,
             spans=spans,
             workflow=replace(self.source_settings(root, asset.asset_id), network_mode="online"),
-            cross_check=cross_check.enabled(workspace),
+            # Gemini 시간 엔진 원본에는 다른 귀가 없다(D104) — 빈칸 재전사도 gpt를 묻지 않는다.
+            cross_check=cross_check.enabled(workspace)
+            and text_ear.resolve(workspace, asset.asset_id) != text_ear.EAR_NONE,
             glossary=glossary.current(workspace).terms,
             chunk_bound=_refill_bound(int(measured.report["pcm"]["channels"])),
             refill_ids=refill_ids,

@@ -17,6 +17,9 @@ from tests.raw.test_selection_analysis import wait_until
 from ui import workspace_service
 from vlogsrt.project.raw import service as raw
 
+# D104 — whisper 응답 모양의 재생으로 재는 시험이다. 새로 듣는 엔진을 whisper로 둔다.
+pytestmark = pytest.mark.usefixtures("whisper_for_new_hearings")
+
 needs_ffmpeg = pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg required")
 
 DONE = "추천 구간 준비 완료"

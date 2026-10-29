@@ -85,6 +85,9 @@ from vlogsrt.project.raw.understanding_luna import ORIGIN_LIVE, ORIGIN_REPLAY  #
 from vlogsrt.project.raw.workspace import DB_NAME  # noqa: E402
 from vlogsrt.transcribe import CAPTION_TEXT_KIND  # noqa: E402
 
+# D104 — whisper 응답 모양의 재생으로 재는 시험이다. 새로 듣는 엔진을 whisper로 둔다.
+pytestmark = pytest.mark.usefixtures("whisper_for_new_hearings")
+
 
 @pytest.fixture(autouse=True)
 def _gpt_ear_for_new_hearings(monkeypatch: pytest.MonkeyPatch) -> None:

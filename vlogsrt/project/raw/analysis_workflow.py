@@ -1416,8 +1416,10 @@ def _hear_source(
     audio: SelectedAudio,
     source_dir: Path,
     asr_epoch: int,
-) -> tuple[AsrEvidence, tuple[UtteranceEvidence, ...], dict[str, object]]:
+) -> tuple[AsrEvidence, tuple[UtteranceEvidence, ...], dict[str, object] | None]:
     """시간 엔진으로 시각과 글자를 듣고, 같은 청크 WAV를 글자 귀에 한 번 더 묻는다(D59 19c·D95).
+
+    Gemini 시간 엔진 원본은 글자 귀가 없어(D104) 글자 경로 기록도 없다(무성 원본과 같은 모양).
 
     듣기를 시작하기 전에(첫 유료 호출 전에) 이 차례의 엔진과 글자 귀를 고정한다(D92·W-35b) — 다시
     묻기(D78)는 그 엔진이 받고 글자 귀가 gpt일 때만(whisper) 건다. 글자 귀가 Gemini면 받은 단어를
@@ -1435,6 +1437,8 @@ def _hear_source(
     evidence = _first_hearing(
         revision, asset, settings, workflow, providers, audio, source_dir, hearing
     )
+    if ear == text_ear.EAR_NONE:  # Gemini 시간 엔진 — 다른 귀가 없다(D104)
+        return evidence, stage1.utterance_evidence(audio, evidence), None
     if ear == text_ear.EAR_GEMINI:
         return _gemini_text(
             workspace, revision, asset, settings, workflow, providers, audio, evidence, source_dir

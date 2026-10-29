@@ -28,6 +28,9 @@ from vlogsrt.transcribe import (
     request_luna_vision,
 )
 
+# D104 — whisper 응답 모양의 재생으로 재는 시험이다. 새로 듣는 엔진을 whisper로 둔다.
+pytestmark = pytest.mark.usefixtures("whisper_for_new_hearings")
+
 PRICING = official_pricing_snapshot()
 WHISPER = Config().transcribe_model
 GPT_TRANSCRIBE = Config().verify_model

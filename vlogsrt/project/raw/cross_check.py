@@ -112,7 +112,10 @@ def source_tag(workspace: Any, asset_id: str) -> str | None:
     않는다)."""
     if not enabled(workspace):
         return None
-    if text_ear.resolve(workspace, asset_id) == text_ear.EAR_GEMINI:
+    ear = text_ear.resolve(workspace, asset_id)
+    if ear == text_ear.EAR_NONE:
+        return None  # Gemini 시간 엔진 원본 — 다른 귀가 없다(D104)
+    if ear == text_ear.EAR_GEMINI:
         return GEMINI_TAG_PREFIX + gemini_text.text_identity(GEMINI_TEXT_SETTINGS)
     return TAG_PREFIX + request_identity(workspace)
 
@@ -161,7 +164,10 @@ def _with_ear_text(
 ) -> AnalysisEstimate:
     """그 원본의 글자 귀로 센 견적 줄 — Gemini 글자 귀면 그 경로의 열쇠·단가(W-35b)."""
     replanned = asr_epoch.state(workspace, item.asset_id).pending
-    if text_ear.resolve(workspace, item.asset_id) == text_ear.EAR_GEMINI:
+    ear = text_ear.resolve(workspace, item.asset_id)
+    if ear == text_ear.EAR_NONE:
+        return _without_text(item)  # Gemini 시간 엔진 원본 — 물을 다른 귀가 없다(D104)
+    if ear == text_ear.EAR_GEMINI:
         return _with_gemini_text(workspace.root, item, source_sha256, replanned=replanned)
     return _with_text(workspace.root, item, source_sha256, glossary_digest, replanned=replanned)
 

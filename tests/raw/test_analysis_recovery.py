@@ -13,6 +13,9 @@ from vlogsrt.project.raw.jobs import JobCancelledError
 from vlogsrt.project.raw.selection_analysis import load_state
 from vlogsrt.task_runtime import cancellation_scope
 
+# D104 — whisper 응답 모양의 재생으로 재는 시험이다. 새로 듣는 엔진을 whisper로 둔다.
+pytestmark = pytest.mark.usefixtures("whisper_for_new_hearings")
+
 
 class FailsOnce(SuitabilityClient):
     def __init__(self):

@@ -14,10 +14,23 @@ from typing import Any
 
 import pytest
 
-from tests.raw.test_timing_engine_resolve import _seed_document, _workspace
+from tests.raw.test_timing_engine_resolve import _seed_document
+from tests.raw.test_timing_engine_resolve import _workspace as _any_workspace
 from vlogsrt.project.raw import asr_epoch, cross_check, gemini_text, text_ear, timing_engine
-from vlogsrt.project.raw.config import GEMINI_TEXT_SETTINGS, TIMING_ENGINE_GEMINI
+from vlogsrt.project.raw.config import (
+    GEMINI_TEXT_SETTINGS,
+    TIMING_ENGINE_GEMINI,
+    TIMING_ENGINE_WHISPER,
+)
 from vlogsrt.project.raw.models import RawWorkspaceError
+
+
+def _workspace(tmp_path: Path) -> Any:
+    """whisper로 새로 듣는 작업공간 — 글자 귀는 whisper 시간 엔진 원본의 것이다. D104부터 새로 듣는
+    엔진의 기본은 Gemini라(그 원본에는 귀가 없다) 여기서는 이전 엔진을 고른다."""
+    workspace = _any_workspace(tmp_path)
+    timing_engine.set_new_hearing_engine(workspace, TIMING_ENGINE_WHISPER)
+    return workspace
 
 
 def test_the_default_ear_for_new_hearings_is_gemini() -> None:
@@ -47,10 +60,13 @@ def test_turning_cross_check_off_removes_every_source_tag(tmp_path: Path) -> Non
     assert cross_check.source_tag(workspace, "new") is None
 
 
-def test_a_gemini_timing_video_keeps_the_gpt_candidate_ear(tmp_path: Path) -> None:
+def test_a_gemini_timing_video_has_no_other_ear_and_no_text_tag(tmp_path: Path) -> None:
+    # D104 — Gemini 시간 엔진 원본에는 다른 귀가 없다(gpt 후보에 돈을 쓰지 않는다).
     workspace = _workspace(tmp_path)
     timing_engine.set_new_hearing_engine(workspace, TIMING_ENGINE_GEMINI)
-    assert text_ear.resolve(workspace, "g") == text_ear.EAR_GPT
+    assert text_ear.resolve(workspace, "g") == text_ear.EAR_NONE
+    assert cross_check.source_tag(workspace, "g") is None
+    text_ear.pin(workspace, "g", 0, text_ear.EAR_NONE)
 
 
 def test_the_pin_holds_once_heard_and_a_relisten_takes_the_new_ear(tmp_path: Path) -> None:

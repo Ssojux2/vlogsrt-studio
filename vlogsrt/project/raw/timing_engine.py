@@ -28,6 +28,7 @@ from vlogsrt.project.raw import asr_epoch, read_scope, source_transcript
 from vlogsrt.project.raw.config import (
     CONFIRMED_TIMING_SHUTDOWN_DATE,
     GEMINI_TRANSCRIBE_PROFILES,
+    TIMING_ENGINE_GEMINI,
     TIMING_ENGINE_WHISPER,
     TIMING_ENGINES,
     RawWorkflowConfig,
@@ -40,8 +41,10 @@ TABLE = "source_timing_engines"
 META_KEY = "stage1_timing_engine"
 TAG_PREFIX = "timing-engine/"
 """결속·입력 지문에 실리는 꼬리표의 머리 — whisper 원본에는 붙지 않는다(바이트 그대로)."""
-DEFAULT_NEW_HEARING_ENGINE = TIMING_ENGINE_WHISPER
-"""「새로 듣는 엔진」의 기본 — W-31f 비교가 Gemini를 고르기 전까지 whisper다(D92)."""
+DEFAULT_NEW_HEARING_ENGINE = TIMING_ENGINE_GEMINI
+"""「새로 듣는 엔진」의 기본 — Gemini 3.5 Transcribe(D104, 2026-10-29 사용자 지시: whisper 종료를
+기다리지
+않는다). whisper는 종료일까지 고를 수 있는 이전 엔진이다 — 이미 들은 영상은 고정 그대로다."""
 
 
 def new_hearing_engine(workspace: Any) -> str:
@@ -123,6 +126,10 @@ class EngineFacts:
     checked_at: date | None
     valid_through: date | None
     retires_on: date | None
+    contract_status: str | None = None
+    """등록표의 실응답 계약 시험 상태(Gemini만 — `not_run`이면 실제 응답 모양을 아직 녹화로 확인하지
+    않았다,
+    H1). whisper는 None이다."""
 
 
 def facts(key: str, on: date) -> EngineFacts:
@@ -141,6 +148,7 @@ def facts(key: str, on: date) -> EngineFacts:
         checked_at=None if profile is None else profile.pricing_checked_at,
         valid_through=None if profile is None else profile.price_valid_through,
         retires_on=CONFIRMED_TIMING_SHUTDOWN_DATE if whisper else None,
+        contract_status=None if profile is None else profile.integration_test_status,
     )
 
 

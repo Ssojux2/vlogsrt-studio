@@ -67,9 +67,15 @@ def test_the_dropdown_lists_the_new_engine_first_and_whisper_with_its_end_date(
         ("whisper-1 · 이전 엔진(2027-02-26 종료)", WHISPER),
     ]
     dropdown, status = server.timing_engine_controls()
-    assert dropdown.value == WHISPER  # W-31f 비교 전까지 기본은 whisper다
+    assert dropdown.value == GEMINI  # D104 — 새로 듣는 영상의 기본은 Gemini다
+    assert "새로 듣는 영상은 **Gemini 3.5 Transcribe**로 듣습니다" in status
+    # 실제 응답 모양을 아직 녹화로 확인하지 않았다 — 막지 않고 알린다(H1, D104)
+    assert ws.GEMINI_CONTRACT_UNCONFIRMED_NOTE in status
+    server.settings_timing_engine_view(server.current_signature(), WHISPER)
+    _, status = server.timing_engine_controls()
     assert "새로 듣는 영상은 **whisper-1**로 듣습니다" in status
     assert "2027-02-26에 종료됩니다" in status
+    assert ws.GEMINI_CONTRACT_UNCONFIRMED_NOTE not in status
 
 
 def test_switching_saves_the_workspace_marker_and_says_heard_videos_stay(tmp_path: Path) -> None:
@@ -105,18 +111,18 @@ def test_an_unknown_engine_is_refused_and_a_busy_workspace_is_left_alone(
     with pytest.raises(gr.Error):
         server.settings_timing_engine_view(server.current_signature(), "whisper-2")
     monkeypatch.setattr(server, "_analysis_busy", lambda root: True)
-    status, dropdown = server.settings_timing_engine_view(server.current_signature(), GEMINI)
+    status, dropdown = server.settings_timing_engine_view(server.current_signature(), WHISPER)
     assert status.startswith(ws.TIMING_ENGINE_BUSY_TEXT)
-    assert _engine_of(server) == WHISPER and dropdown.value == WHISPER
+    assert _engine_of(server) == GEMINI and dropdown.value == GEMINI  # 기본 그대로(D104)
 
 
 def test_a_switch_requotes_the_library(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     server = _server(tmp_path)
     requoted: list[Path] = []
     monkeypatch.setattr(server, "_after_model_change", requoted.append)
-    server.settings_timing_engine_view(server.current_signature(), GEMINI)
+    server.settings_timing_engine_view(server.current_signature(), WHISPER)  # 기본(Gemini)에서
     assert requoted == [server.workspace_root()]
-    server.settings_timing_engine_view(server.current_signature(), GEMINI)  # 같은 값은 그대로
+    server.settings_timing_engine_view(server.current_signature(), WHISPER)  # 같은 값은 그대로
     assert len(requoted) == 1
 
 
@@ -187,6 +193,7 @@ def test_the_relisten_panel_names_the_engine_it_heard_with_and_will_hear_with(
     root = server.workspace_root()
     whisper_view = raw_service.RawWorkflowConfig()
     monkeypatch.setattr(server.raw, "source_settings", lambda root, sid: whisper_view)
+    server.raw.set_new_hearing_engine(root, WHISPER)  # 이전 엔진을 고른 작업공간(D104)
     # whisper뿐이면 줄이 없다 — 작업대 바이트가 W-31e 이전 그대로다
     assert server._relisten_engine_text(root, "a1", pending=False) is None
     assert server._relisten_engine_text(root, "a1", pending=True) is None

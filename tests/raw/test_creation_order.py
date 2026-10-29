@@ -33,6 +33,9 @@ from vlogsrt.project.raw.segment_review import (
 from vlogsrt.project.raw.service import UPKEEP_JOB_KIND, RawWorkspaceError, RawWorkspaceService
 from vlogsrt.project.raw.workspace import CAPTURE_BASIS_KEY, CAPTURE_TIME_BASIS, DB_NAME
 
+# D104 — whisper 응답 모양의 재생으로 재는 시험이다. 새로 듣는 엔진을 whisper로 둔다.
+pytestmark = pytest.mark.usefixtures("whisper_for_new_hearings")
+
 needs_ffmpeg = pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg required")
 
 # 파일 번호는 촬영 역순이다 — 이름순·가져온 순서·FCP 가져온 시각이 전부 촬영과 거꾸로다.

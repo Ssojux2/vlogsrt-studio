@@ -43,6 +43,9 @@ from vlogsrt.project.raw import service as raw
 from vlogsrt.project.raw.models import RawWorkspaceError
 from vlogsrt.transcribe import CAPTION_TEXT_KIND, CAPTION_TIMING_KIND
 
+# D104 — whisper 응답 모양의 재생으로 재는 시험이다. 새로 듣는 엔진을 whisper로 둔다.
+pytestmark = pytest.mark.usefixtures("whisper_for_new_hearings")
+
 
 @pytest.fixture
 def gapped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Any, Path, str]:

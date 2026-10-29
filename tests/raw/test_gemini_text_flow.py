@@ -39,6 +39,9 @@ needs_ffmpeg = pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg req
 GEMINI_MODEL = GEMINI_TEXT_SETTINGS.model
 GEMINI_TEXT = "합성 영상이네요."
 
+# D104 — whisper 응답 모양의 재생으로 재는 시험이다. 새로 듣는 엔진을 whisper로 둔다.
+pytestmark = pytest.mark.usefixtures("whisper_for_new_hearings")
+
 
 def _gemini_payload() -> dict[str, object]:
     words = [("합성", "0.6s", "0.9s"), ("영상이네요", "1.0s", "1.4s"), ("음", "2.0s", "2.3s")]

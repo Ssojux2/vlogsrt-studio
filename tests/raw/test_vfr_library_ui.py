@@ -41,10 +41,14 @@ from vlogsrt.project.raw.analysis_approval import LiveAnalysisTransport  # noqa:
 from vlogsrt.project.raw.models import UNSUPPORTED_GRID_REASON  # noqa: E402
 from vlogsrt.project.raw.service import RawWorkspaceError  # noqa: E402
 
-pytestmark = pytest.mark.skipif(
-    shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
-    reason="ffmpeg/ffprobe가 없는 환경",
-)
+# D104 — whisper 응답 모양의 재생으로 재는 시험이다. 새로 듣는 엔진을 whisper로 둔다.
+pytestmark = [
+    pytest.mark.skipif(
+        shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
+        reason="ffmpeg/ffprobe가 없는 환경",
+    ),
+    pytest.mark.usefixtures("whisper_for_new_hearings"),
+]
 needs_node = pytest.mark.skipif(shutil.which("node") is None, reason="node가 없는 환경")
 
 DONE = "추천 구간 준비 완료"

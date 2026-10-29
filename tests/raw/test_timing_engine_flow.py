@@ -41,6 +41,9 @@ from vlogsrt.project.raw.config import (
     timing_engine_view,
 )
 
+# D104 — whisper 응답 모양의 재생으로 재는 시험이다. 새로 듣는 엔진을 whisper로 둔다.
+pytestmark = pytest.mark.usefixtures("whisper_for_new_hearings")
+
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "synthetic" / "gemini"
 GEMINI = TIMING_ENGINES[TIMING_ENGINE_GEMINI]
 # 그 파일의 합성 영상 fixture를 이 파일에서도 찾게 한다.

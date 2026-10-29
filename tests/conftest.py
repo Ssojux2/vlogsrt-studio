@@ -123,6 +123,20 @@ def synthetic_dotenv(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
+def whisper_for_new_hearings(monkeypatch: pytest.MonkeyPatch) -> None:
+    """처음 듣는 영상을 whisper 시간 엔진으로 듣게 한다.
+
+    D104부터 새로 듣는 엔진의 기본은 Gemini다 — whisper 응답 모양의 재생 픽스처나
+    whisper 흐름을 재는 시험이 그 전제를 밝힐 때 쓴다(기대값은 그대로).
+    """
+    from vlogsrt.project.raw import service, timing_engine
+    from vlogsrt.project.raw.config import TIMING_ENGINE_WHISPER
+
+    monkeypatch.setattr(timing_engine, "DEFAULT_NEW_HEARING_ENGINE", TIMING_ENGINE_WHISPER)
+    monkeypatch.setattr(service, "DEFAULT_NEW_HEARING_ENGINE", TIMING_ENGINE_WHISPER)
+
+
+@pytest.fixture
 def local_socket(monkeypatch: pytest.MonkeyPatch) -> None:
     """루프백 바인딩만 되살린다.
 

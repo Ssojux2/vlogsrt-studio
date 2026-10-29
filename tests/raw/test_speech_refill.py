@@ -40,10 +40,14 @@ from vlogsrt.project.raw.config import SOURCE_TEXT_PROMPT, RawModelRoles
 from vlogsrt.project.raw.models import RawWorkspaceError
 from vlogsrt.transcribe import CAPTION_TEXT_KIND, CAPTION_TIMING_KIND
 
-pytestmark = pytest.mark.skipif(
-    shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
-    reason="ffmpeg/ffprobe가 없는 환경",
-)
+# D104 — whisper 응답 모양의 재생으로 재는 시험이다. 새로 듣는 엔진을 whisper로 둔다.
+pytestmark = [
+    pytest.mark.skipif(
+        shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
+        reason="ffmpeg/ffprobe가 없는 환경",
+    ),
+    pytest.mark.usefixtures("whisper_for_new_hearings"),
+]
 
 TERMINAL = frozenset({"succeeded", "failed", "cancelled"})
 REPLAY_ANALYSIS_MODEL = "gpt-6-luna"  # 재생 의미 판정 픽스처의 응답 모양(test_sync_report와 같다)

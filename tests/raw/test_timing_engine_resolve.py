@@ -45,13 +45,18 @@ def _seed_document(workspace: Any, asset_id: str) -> None:
         db.commit()
 
 
-def test_the_default_new_hearing_engine_is_whisper_until_the_comparison() -> None:
-    assert timing_engine.DEFAULT_NEW_HEARING_ENGINE == TIMING_ENGINE_WHISPER
+def test_the_default_new_hearing_engine_is_gemini_now() -> None:
+    # D104(2026-10-29 사용자 지시) — whisper 종료를 기다리지 않는다.
+    assert timing_engine.DEFAULT_NEW_HEARING_ENGINE == TIMING_ENGINE_GEMINI
 
 
 def test_a_never_heard_video_follows_the_new_hearing_engine(tmp_path: Path) -> None:
     workspace = _workspace(tmp_path)
+    assert timing_engine.resolve(workspace, "a") == TIMING_ENGINE_GEMINI
+    timing_engine.set_new_hearing_engine(workspace, TIMING_ENGINE_WHISPER)  # 이전 엔진도 고른다
+    assert timing_engine.new_hearing_engine(workspace) == TIMING_ENGINE_WHISPER
     assert timing_engine.resolve(workspace, "a") == TIMING_ENGINE_WHISPER
+    assert timing_engine.binding_tag(workspace, "a") is None
     timing_engine.set_new_hearing_engine(workspace, TIMING_ENGINE_GEMINI)
     assert timing_engine.new_hearing_engine(workspace) == TIMING_ENGINE_GEMINI
     assert timing_engine.resolve(workspace, "a") == TIMING_ENGINE_GEMINI
@@ -105,7 +110,7 @@ def test_a_pin_never_changes_and_unknown_engines_are_refused(tmp_path: Path) -> 
 
 def test_reading_creates_no_table(tmp_path: Path) -> None:
     workspace = _workspace(tmp_path)
-    assert timing_engine.resolve(workspace, "z") == TIMING_ENGINE_WHISPER
+    assert timing_engine.resolve(workspace, "z") == TIMING_ENGINE_GEMINI  # 기본(D104)
     with workspace.connect() as db:
         found = db.execute(
             "SELECT 1 FROM sqlite_master WHERE name=?", (timing_engine.TABLE,)

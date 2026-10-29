@@ -9017,6 +9017,8 @@ Gemini 글자이고, 단어 시각은 **어느 줄의 글자인지 정하는 데
   (W-35d) · 종료일 뒤 시간 엔진 자동 전환(W-35e) · 사람 H1 녹화(실제 응답 모양 — 이제 글자 경로의 계약이다).
 - **시험**: `tests/raw/test_text_ear.py` · `tests/raw/test_gemini_text.py` · `tests/raw/test_gemini_text_flow.py`. 유료 호출 0회.
 
+**2026-10-29 D104로 수정**: 새로 듣는 영상은 지금부터 Gemini 시간 엔진이다 — W-35c 보류 · W-35d 접음 · W-35e는 W-52a에 흡수.
+
 ## D96 — Final Cut으로 나가는 자막 글자는 조판 정리(D30)를 거친다 (2026-10-27, W-36)
 
 **사용자 지시(2026-10-27)**: 「자막 글자 맨 앞에 띄어쓰기가 들어가 있는 부분 제거 · 마지막 온점도 안 찍히게」.
@@ -9698,3 +9700,42 @@ node 하네스 시험 `test_one_poller_shows_running_work_without_opening_the_lo
 **시험**: `test_registration_race_loser_adopts_the_winners_identical_row`(이긴 쪽 등록 뒤 조회를 「없음」으로 고정해 실패 순서를 결정적으로
 짬 — 고치기 전 같은 오류로 실패) · `test_registration_race_still_refuses_a_different_file` · `test_adopting_registration_returns_the_same_file_row` ·
 `test_adopting_registration_refuses_a_changed_file`. 그 동시 준비 시험 20회 연속 통과(`make check`가 함께 도는 부하 아래).
+
+## D104 — 새로 듣는 영상은 지금부터 Gemini 시간 엔진 — W-35 계획 수정 (2026-10-29, W-52)
+
+**사용자 지시(2026-10-29)**: 「Fable 5.1을 활용해서 계획을 수정해줘. whisper가 종료되면 그냥 gemini 기반으로 지금 만들어줘.」
+계획은 Fable 5.1이 코드 근거로 세웠다(`docs/plans/2026-10-29-gemini-time-engine-now.md`). 사용자가 고른 것: Gemini 원본의 gpt 다른 귀를
+**끊는다** · H1 녹화를 **먼저** 한다(코드는 지금 바꾸고 상태 줄로 알린다, 막지 않는다) · W-35d 「글자만 다시 듣기」를 **접는다**.
+
+**결정**: D95의 「종료일(2027-02-26)까지 whisper 시각 + Gemini 글자, 그 뒤 전환」을 **지금 전환**으로 바꾼다.
+- 처음 듣거나 다시 듣는 영상의 시간 엔진 기본은 Gemini 3.5 Transcribe다(`timing_engine.DEFAULT_NEW_HEARING_ENGINE`). 시각·글자가 한
+  응답(`word_info`)에서 오고 줄은 단어 경계에서만 묶는다(D92 규칙 1 그대로). whisper-1은 「이전 엔진(2027-02-26 종료)」로 칸에 남아
+  고를 수 있다 — 조용한 자동 전환·되돌림은 없다.
+- **이미 들은 영상은 그대로**(원본마다 고정, W-31d·W-35b) — 결속·지문·글자 귀 꼬리표가 바이트 그대로라 끝난 분석을 다시 사지 않는다.
+  엔진을 바꾸는 길은 그 영상의 「다시 듣기」뿐이다.
+- **Gemini 원본에는 다른 귀가 없다** — 새 글자 귀 `text_ear.EAR_NONE`(시간 엔진이 whisper가 아니면). 예전엔 gpt를 후보용으로 유료로
+  물었다(분당 $0.0045, 자막을 바꾸지 못한다). `cross_check.source_tag`는 None, 견적 글자 칸 없음(`_without_text`), 1단계는 글자 경로
+  없이 whisper·Gemini 응답의 발화 그대로(`text_record=None` — 무성 원본과 같은 모양), 빈칸 재전사의 두 번째 귀도 끈다(`RefillPlan.
+  cross_check`). 실제로 Gemini로 들은 원본은 아직 없어(H1 전) 다시 살 분석이 없다.
+- W-35b 경로(whisper 시각 + Gemini 글자)는 whisper를 고른 새 영상의 길로 남는다(종료일까지의 비상구).
+- 비용: Gemini 한 번 분당 $0.005 — W-35b 기본($0.011)·예전 Gemini 원본($0.0095)보다 싸다.
+- **H1 미확인 표시**: `timing_engine.EngineFacts.contract_status`(등록표 `integration_test_status`) — `passed`가 아니면 「새로 듣는 전사
+  엔진」 상태 줄에 「실제 응답 모양은 아직 녹화로 확인하지 않았습니다(H1)…」 한 줄(금액 없음 — D57). 견적·승인 문은 막지 않는다.
+- 화면 기본 폴백(표지를 못 읽을 때)도 그 상수(`service.DEFAULT_NEW_HEARING_ENGINE`).
+
+**W-35 세션의 운명**: W-35c(whisper+Gemini 글자 경로의 화면·「확인 필요」 둘) 보류 — whisper를 고른 영상에만 쓰인다 · W-35d 접음 —
+Gemini 「다시 듣기」가 같은 값에 시각까지 받는다 · W-35e는 W-52a에 흡수 — 종료일은 whisper의 온라인 차단일로만 남는다. W-32(예전 CLI·
+최종 자막 경로)는 그대로 종료일 전 과제다.
+
+**그대로인 소비자**: D78 다시 묻기(Gemini `rescue=False`) · 시각 확인·맞춤(엔진을 모른다) · 시각 정답(줄 아이디에 묶여 다시 들으면
+낡는다) · 자막 의심(D88은 다른 호출, 「낮은 확신」은 logprob이 없어 안 생긴다) · 엔진 비교 보고서(H2의 도구) · 승인·키·가격 문.
+
+**위험·사람 단계**: H1(약 $0.01, 첫 실제 Gemini 영상 전 — 응답 모양이 다르면 그 영상 분량만큼 돈이 나가고 청크가 보이는 실패로 남는다) ·
+단가 재확인 기한 2027-01-26(지나면 Gemini 견적이 가격 미정으로 닫혀 새로 듣기가 막힌다 — H3) · H2 옛 영상 3–5개 다시 듣기 → 보고서 →
+기본 유지/되돌림(W-52c). 900초·20 MB 한도는 1단계 청크 상한 180초라 닿지 않는다.
+
+**시험**: 기본이 바뀌어 고친 것 — `test_timing_engine_resolve.py`(기본 = Gemini, 이전 엔진도 고른다) · `test_timing_engine_ui.py`(칸
+기본·상태 줄·H1 줄, 「기본에서 바꾸기」 시험은 whisper로 바꾸는 쪽으로) · `test_text_ear.py`(Gemini 원본은 `none`, 글자 귀 시험의 작업공간은
+whisper로 듣게). whisper 응답 모양에 기대는 다른 재생 시험 32개 파일은 「새로 듣는 엔진 = whisper」 전제를 밝혔다 — `tests/conftest.py`의 `whisper_for_new_hearings` 픽스처를 파일 머리 `pytestmark`로 걸고(기대값 그대로), 모듈 범위로 작업공간을 미리 만드는 `test_render_cost.py`는 그 픽스처 안에서도 같은 전제를 건다(잠근 화면 바이트 그대로). 새
+`tests/raw/test_gemini_default.py`. 유료 호출 0회.
+

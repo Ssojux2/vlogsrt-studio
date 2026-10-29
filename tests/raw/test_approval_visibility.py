@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import pytest
+
 from tests.raw.test_browser_runtime import _make_media
 from tests.raw.test_selection_analysis import make_server, wait_until
 from vlogsrt.project.raw import service as raw_service
 from vlogsrt.project.raw.selection_analysis import load_state
+
+# D104 — whisper 응답 모양의 재생으로 재는 시험이다. 새로 듣는 엔진을 whisper로 둔다.
+pytestmark = pytest.mark.usefixtures("whisper_for_new_hearings")
 
 
 def test_missing_key_keeps_a_visible_dotenv_notice_and_starts_nothing(tmp_path, monkeypatch):

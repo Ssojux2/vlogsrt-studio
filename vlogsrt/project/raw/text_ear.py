@@ -10,7 +10,7 @@ whisper 원본의 글자는 이제 Gemini 3.5 Transcribe 단어가 메인이다(
 
 정하는 순서(`resolve`):
 
-1. 시간 엔진이 whisper가 아니면 → `gpt`(Gemini 원본의 다른 귀는 후보로만, D92 — 그대로다)
+1. 시간 엔진이 whisper가 아니면 → `none`(Gemini 원본에는 다른 귀가 없다, D104 — 예전엔 gpt 후보였다)
 2. 다시 듣기가 기다리면 → 이번 차례에 이미 고정된 귀, 없으면 「새로 듣는 글자 귀」
 3. 이번 차례에 고정된 귀가 있으면 → 그 귀
 4. 원본 자막 문서가 이미 있으면 → `gpt`(W-35b 이전에 들은 영상)
@@ -32,7 +32,11 @@ EAR_GPT = "gpt"
 """gpt-transcribe 다른 귀 — whisper 원본은 D37 게이트, Gemini 원본은 후보로만(D59 19c·D92)."""
 EAR_GEMINI = "gemini"
 """Gemini 3.5 Transcribe 단어를 whisper 줄에 배정한다(D95)."""
-EARS = (EAR_GPT, EAR_GEMINI)
+EAR_NONE = "none"
+"""다른 귀가 없다 — Gemini 시간 엔진 원본(D104). 글자와 시각이 한 응답이라 묻지 않는다(자막을 바꾸지
+못하는
+후보에 돈을 쓰지 않는다)."""
+EARS = (EAR_GPT, EAR_GEMINI, EAR_NONE)
 
 TABLE = "source_text_ears"
 META_KEY = "stage1_text_ear"
@@ -84,7 +88,7 @@ def pin(workspace: Any, asset_id: str, epoch: int, ear: str) -> None:
 def resolve(workspace: Any, asset_id: str) -> str:
     """그 원본이 지금 쓰는 글자 귀 — 정하는 순서는 모듈 설명 그대로다."""
     if timing_engine.resolve(workspace, asset_id) != TIMING_ENGINE_WHISPER:
-        return EAR_GPT
+        return EAR_NONE
     state = asr_epoch.state(workspace, asset_id)
     found = pinned(workspace, asset_id, state.epoch)
     if state.pending:
@@ -124,6 +128,7 @@ __all__ = [
     "EARS",
     "EAR_GEMINI",
     "EAR_GPT",
+    "EAR_NONE",
     "META_KEY",
     "TABLE",
     "new_hearing_ear",

@@ -37,6 +37,9 @@ from vlogsrt.project.raw.analysis_config import RawUnderstandingSettings
 from vlogsrt.project.raw.config import OPENAI_LUNA_MODEL
 from vlogsrt.project.raw.workspace import DB_NAME, DB_SCHEMA_VERSION, RawWorkspace
 
+# D104 — whisper 응답 모양의 재생으로 재는 시험이다. 새로 듣는 엔진을 whisper로 둔다.
+pytestmark = pytest.mark.usefixtures("whisper_for_new_hearings")
+
 needs_ffmpeg = pytest.mark.skipif(
     shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
     reason="ffmpeg/ffprobe가 없는 환경",

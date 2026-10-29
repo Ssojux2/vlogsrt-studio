@@ -212,6 +212,14 @@ GEMINI_TRANSCRIBE_PAID_KEY_NOTE = (
     "결제를 연결한 키만 쓰세요 — 무료 등급 키는 입력(오디오)을 Google 제품 개선에 씁니다."
 )
 """Gemini 전사 엔진의 키 경고(W-31e) — 영상 분석 경고(D87)와 같은 까닭, 입력이 오디오다."""
+GEMINI_CONTRACT_PASSED = "passed"
+GEMINI_CONTRACT_UNCONFIRMED_NOTE = (
+    "실제 응답 모양은 아직 녹화로 확인하지 않았습니다(H1) — 첫 유료 듣기 전에"
+    " `scripts/record_gemini_transcribe.py`로 조각 하나를 녹화해 주세요."
+)
+"""새로 듣는 엔진이 Gemini인데 등록표의 실응답 계약 시험이 통과하지 않았을 때의 한 줄(D104) —
+막지 않고
+알린다(사용자 결정: 코드는 지금 바꾸고 H1을 먼저 한다)."""
 TIMING_KEY_MISSING_TEXT = (
     "{label}로 들을 영상이 있어 `{env}`가 필요합니다. `.env`에 결제를 연결한 키를 넣고 앱을 다시"
     " 띄우거나, 설정 서랍 「분석 모델」에서 새로 듣는 전사 엔진을 바꾼 뒤 견적을 다시"
@@ -9443,7 +9451,7 @@ class RawWorkspaceUi:
         self._after_model_change(root)
         return self.analysis_model_status(root), self._model_dropdown(model)
 
-    # ── 새로 듣는 전사 엔진(W-31e, D92) — 작업공간 meta에 산다(기본 whisper, W-31f까지) ─────────
+    # ── 새로 듣는 전사 엔진(W-31e, D92) — 작업공간 meta에 산다(기본 Gemini, D104) ─────────
 
     def timing_engine_choices(self) -> list[tuple[str, str]]:
         """「새로 듣는 전사 엔진」 칸의 선택지 — 새 엔진이 앞이다. 금액은 싣지 않는다(D57)."""
@@ -9454,11 +9462,11 @@ class RawWorkspaceUi:
     def _current_timing_engine(self) -> str:
         root = self._snapshot_root()
         if root is None:
-            return raw_service.TIMING_ENGINE_WHISPER
+            return raw_service.DEFAULT_NEW_HEARING_ENGINE
         try:
             return str(self.raw.new_hearing_engine(root))
         except raw_service.RawWorkspaceError:
-            return raw_service.TIMING_ENGINE_WHISPER
+            return raw_service.DEFAULT_NEW_HEARING_ENGINE
 
     def _timing_engine_dropdown(self, key: str) -> Any:
         return gr.Dropdown(choices=self.timing_engine_choices(), value=key)
@@ -9474,7 +9482,10 @@ class RawWorkspaceUi:
         )
         if facts.retires_on is not None:
             return f"{head}\n\n{facts.label}은(는) {facts.retires_on.isoformat()}에 종료됩니다."
-        return f"{head}\n\n{self._timing_price_note(facts)}\n\n{self._timing_key_note()}"
+        notes = [head, self._timing_price_note(facts), self._timing_key_note()]
+        if facts.contract_status not in (None, GEMINI_CONTRACT_PASSED):
+            notes.append(GEMINI_CONTRACT_UNCONFIRMED_NOTE)
+        return "\n\n".join(notes)
 
     @staticmethod
     def _timing_price_note(facts: Any) -> str:
