@@ -3,7 +3,9 @@
 문서 모양(https://ai.google.dev/gemini-api/docs/transcribe)의 합성 픽스처를 쓴다 — 사람의 녹화(H1)가
 오면 그 응답으로 계약 시험을 더한다. 시험이 못 박는 것:
 
-- `status == "completed"`와 문자열 `output_text`가 있어야 한다. 단어는
+- `status == "completed"`이고 전체 글이 있어야 한다 — SDK 꼴의 문자열 `output_text`, 또는 REST
+  그대로의 `steps[].content[]` 글 칸(`type: "text"`의 `text`, W-52b2 — 실제 첫 영상에서 REST 응답에
+  `output_text`가 없어 모든 조각이 실패했다). 둘 다 없으면 실패다. 단어는
   `steps[].content[].annotations[]`의 `type: "word_info"`뿐이고, 시각은
   `^\\d+(\\.\\d{1,9})?s$` 꼴만 정확 유리수로 읽는다.
 - 띄어쓰기·문장부호는 `output_text`에 맞춰 단어에 붙인다(앞 단어 뒤에). 단어가 덮지 못한 한글·영문·
@@ -70,6 +72,35 @@ def test_the_documented_shape_becomes_exact_words_with_their_punctuation() -> No
     assert parsed.alignment == gtp.ALIGNED
 
 
+def test_the_raw_rest_shape_without_output_text_reads_the_content_text() -> None:
+    """W-52b2 — urllib가 받는 REST 응답에는 SDK 편의 칸 `output_text`가 없다(문서 REST 예시 꼴 ·
+    단어마다 `speaker`). 글은 단어가 실린 content 글 칸에서 읽고, 결과는 SDK 꼴과 같다."""
+    rest = _fixture("transcribe_rest_korean.json")
+    assert "output_text" not in rest
+    assert _parse(rest) == _parse(_fixture("transcribe_korean.json"))
+
+
+def test_several_text_items_are_read_in_order_and_other_items_are_ignored() -> None:
+    first = {"type": "text", "text": "안녕", "annotations": [_word("안녕", "0s", "0.4s")]}
+    second = {"type": "text", "text": "가자", "annotations": [_word("가자", "1s", "1.3s")]}
+    audio = {"type": "audio", "mime_type": "audio/wav"}
+    payload = {"status": "completed", "steps": [{"content": [audio, first]}, {"content": [second]}]}
+    parsed = _parse(payload)
+    assert parsed.output_text == "안녕 가자"
+    assert [w.display for w in parsed.words] == ["안녕 ", "가자"]
+    assert parsed.unplaced_chars == 0 and parsed.alignment == gtp.ALIGNED
+
+
+def test_a_response_without_any_transcript_names_the_keys_it_did_get() -> None:
+    with pytest.raises(gtp.GeminiTranscribeResponseError, match=r"받은 칸: id, outputs, status"):
+        _parse({"status": "completed", "id": "x", "outputs": []})
+
+
+def test_a_rest_silent_chunk_is_an_unconfirmed_empty_not_a_failure() -> None:
+    parsed = _parse({"status": "completed", "steps": []})
+    assert parsed.words == () and parsed.output_text == ""
+
+
 def test_a_silent_chunk_is_an_unconfirmed_empty_not_a_failure() -> None:
     parsed = _parse(_fixture("transcribe_silent.json"))
     assert parsed.words == () and parsed.output_text == ""
@@ -84,6 +115,7 @@ def test_a_silent_chunk_is_an_unconfirmed_empty_not_a_failure() -> None:
         "not a mapping",
         _payload("말이 있는데 시각 단어가 없다"),
         {"status": "completed", "output_text": "", "steps": "x"},
+        {"status": "completed", "steps": [{"content": [{"type": "text", "text": 3}]}]},
     ],
 )
 def test_a_response_that_is_not_a_completed_timed_transcript_fails(payload: object) -> None:

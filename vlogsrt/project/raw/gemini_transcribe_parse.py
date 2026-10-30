@@ -1,9 +1,12 @@
 """Gemini 3.5 Transcribe 응답 해석(W-31b, D92) — 엄격하고 순수하다(입출력·전송 없음).
 
-응답(https://ai.google.dev/gemini-api/docs/transcribe): 전체 글 `output_text`와, 단어마다
+응답(https://ai.google.dev/gemini-api/docs/transcribe): 전체 글과, 단어마다
 `steps[].content[].annotations[]`의 `{"type": "word_info", "text", "start_offset", "end_offset"}`
-(`"0.100s"` 꼴). 여기서는 그 단어를 **정확 유리수 시각**과 함께 꺼내고, 띄어쓰기·문장부호를
-`output_text`에 맞춰 앞 단어 뒤에 붙인다 — 큐 글자는 단어만으로 다시 지을 수 있다(`word_cues`).
+(`"0.100s"` 꼴). 전체 글은 SDK 꼴이면 `output_text`(SDK의 편의 칸)다. `urllib`가 받는 REST 응답에는
+그 칸이 없어 `steps[].content[]`의 글 칸(`type: "text"`의 `text`)을 차례로 띄어 잇는다
+(W-52b2 — 실제 첫 영상의 모든 조각이 이 칸 때문에 실패했다). 여기서는 그 단어를 **정확 유리수
+시각**과 함께 꺼내고, 띄어쓰기·문장부호를 전체 글에 맞춰 앞 단어 뒤에 붙인다 — 큐 글자는
+단어만으로 다시 지을 수 있다(`word_cues`).
 
 지키는 선(규칙 1·4·9, D92):
 
@@ -28,6 +31,8 @@ from vlogsrt.project.raw.config import TIMING_RESPONSE_TOLERANCE
 
 COMPLETED = "completed"
 WORD_INFO = "word_info"
+TEXT = "text"
+"""REST 응답에서 전체 글을 싣는 content 항목의 종류(W-52b2)."""
 ALIGNED = "aligned"
 FALLBACK = "fallback"
 """단어 글자를 `output_text`에서 차례로 찾지 못했다 — 단어를 띄어 이어 붙인다(센다)."""
@@ -83,10 +88,7 @@ def parse_transcription(
         raise GeminiTranscribeResponseError(
             f"전사가 끝나지 않았다: status={payload.get('status')!r}"
         )
-    text = payload.get("output_text")
-    if not isinstance(text, str):
-        raise GeminiTranscribeResponseError("전사 응답에 문자열 output_text가 없다")
-    output_text = unicodedata.normalize("NFC", text)
+    output_text = unicodedata.normalize("NFC", _transcript_text(payload))
     duration, limit = _fraction(chunk_duration), _fraction(tolerance)
     raw = _word_records(payload.get("steps"))
     timed = [_timed(record, duration, limit) for record in raw]
@@ -101,6 +103,35 @@ def parse_transcription(
         untimed_words=sum(not word.timed for word in words),
         clamped_words=sum(clamped for _, clamped in timed),
     )
+
+
+def _transcript_text(payload: Mapping[str, object]) -> str:
+    """전체 글 — SDK 꼴 `output_text`가 있으면 그것, 없으면 REST의 content 글 칸을 띄어 이은 것.
+
+    둘 다 없으면(글 칸도 `steps`도 없다) 실패다 — 빈 글로 지어내지 않는다."""
+    text = payload.get("output_text")
+    if text is not None:
+        if not isinstance(text, str):
+            raise GeminiTranscribeResponseError("전사 응답의 output_text가 문자열이 아니다")
+        return text
+    steps = payload.get("steps")
+    if steps is None:
+        # 받은 칸 이름만 적는다(글은 싣지 않는다) — 모양이 또 다르면 상태 줄만으로 짚는다.
+        keys = ", ".join(sorted(str(key) for key in payload))
+        raise GeminiTranscribeResponseError(
+            f"전사 응답에 output_text도 steps도 없다 (받은 칸: {keys})"
+        )
+    pieces: list[str] = []
+    for step in _list(steps, "steps"):
+        for raw in _list(_mapping(step, "steps[]").get("content", []), "content"):
+            item = _mapping(raw, "content[]")
+            if item.get("type") != TEXT:
+                continue
+            piece = item.get("text")
+            if not isinstance(piece, str):
+                raise GeminiTranscribeResponseError("전사 응답의 글 칸 text가 문자열이 아니다")
+            pieces.append(piece)
+    return " ".join(piece for piece in pieces if piece.strip())
 
 
 def _fraction(value: Fraction | float) -> Fraction:

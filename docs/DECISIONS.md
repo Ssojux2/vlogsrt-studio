@@ -8778,7 +8778,7 @@ SRT · CLI · 작업대 단추·취소·재시도). 유료 호출 0회. **사람
 `tests/raw/test_gemini_transcribe_profile.py` · `tests/test_record_gemini_transcribe.py` · `tests/test_invariants.py`. 유료 호출 0회.
 
 **W-31b(같은 날, 문서 모양의 합성 픽스처로 — 사람의 녹화 H1은 뒤로 미뤘다)**:
-- **응답 해석** `raw/gemini_transcribe_parse.py`(순수): `status == "completed"`와 문자열 `output_text`가 있어야 한다. 단어는
+- **응답 해석** `raw/gemini_transcribe_parse.py`(순수): `status == "completed"`와 문자열 `output_text`가 있어야 한다. **(D104 W-52b2로 고침 — REST 응답에는 `output_text`가 없어 content 글 칸을 읽는다.)** 단어는
   `steps[].content[].annotations[]`의 `type: "word_info"`뿐이고 시각은 `^\d+(\.\d{1,9})?s$` 꼴만 정확 유리수로 읽는다(NFC).
   꼴이 어긋나거나 없거나 뒤집힌 시각의 단어는 **시각 없는 단어**로 남고 센다(글자를 버리지 않는다). 청크 끝 넘침은 D55 관용(2초) 안이면
   닫고 세며, 밖이면 청크 실패다. 띄어쓰기·문장부호는 `output_text`에 맞춰 앞 단어 뒤에(첫 단어는 앞에도) 붙는다 — 단어가 덮지 못한
@@ -9760,4 +9760,18 @@ whisper로 듣게). whisper 응답 모양에 기대는 다른 재생 시험 32�
   촬영 순서·시각 확인 등)은 W-52a와 같이 「새로 듣는 엔진 = whisper」 전제를 밝혔다(`whisper_for_new_hearings`, 기대값 그대로 —
   모듈 범위로 분석하는 `test_render_export.py`의 `trip`은 그 안에서 같은 전제를 건다).
   W-52b2(실응답 계약 시험 · `integration_test_status="passed"`)는 H1 녹화 뒤다.
+
+**W-52b2(2026-10-30, 첫 실제 Gemini 영상이 드러낸 응답 모양)**: 사람이 작업대에서 실제 영상 하나(test.mp4, 2분 29초)를 Gemini
+시간 엔진으로 분석했고, 조각마다 `MalformedCaptionResponse: … 전사 응답에 문자열 output_text가 없다`로 실패해 모든 구간이 「판정
+보류」였다(H1이 막으려던 위험 그대로 — 전사 약 $0.01 · 영상 분석 약 $0.19가 나갔다). 공식 문서(transcribe)를 다시 보니 `output_text`는
+Python·JS SDK의 편의 칸(Go는 `GetOutputText()` 접근자)이고 REST 응답 예시에는 없다 — 글은 `steps[].content[]`의 `text`이고, 단어에는
+`speaker`가 더 붙는다. W-31b가 SDK 예시를 REST 모양으로 잘못 읽었다.
+- **해석기만 고친다(D92)**: `output_text`가 있으면 그것(SDK 꼴·합성 픽스처 그대로), 없으면 `steps[].content[]` 가운데 `type: "text"`의
+  `text`를 차례로 띄어 잇는다. 둘 다 없으면 실패이고, 그 실패는 받은 최상위 칸 이름을 적는다(글은 싣지 않는다 — 원 응답은 실패 때
+  남지 않으므로 다음 모양 어긋남을 상태 줄만으로 짚기 위해서). 시각·단어·묶기 규칙은 그대로다.
+- 계약 시험: 문서 REST 예시 꼴의 합성 픽스처 `tests/fixtures/synthetic/gemini/transcribe_rest_korean.json`(`output_text` 없음 · `speaker`)이
+  SDK 꼴과 **같은 해석**을 낸다 · 글 칸 여럿·다른 종류 항목 · 빈 REST 조각 · 칸 이름을 적는 실패.
+- **H1은 아직 확인되지 않았다** — 실제 응답 본문을 손에 넣지 못했다(녹화 파일이 없었고, 앱은 해석에 실패한 응답을 저장하지 않는다).
+  그래서 `integration_test_status`는 그대로이고 상태 줄의 「H1 미확인」도 남는다. 같은 영상을 다시 분석해 원본 자막이 생기면(또는
+  녹화 파일이 오면) 그때 `passed`로 올린다(W-52b2 마무리).
 
