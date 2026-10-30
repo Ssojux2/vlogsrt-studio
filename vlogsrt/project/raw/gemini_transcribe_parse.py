@@ -43,13 +43,15 @@ class GeminiTranscribeResponseError(ValueError):
 class ParsedWord:
     """단어 하나 — `display`는 글자 + 뒤(첫 단어는 앞도)에 붙은 띄어쓰기·부호.
 
-    시각은 청크 국소 초이고, 없으면(꼴이 어긋난 응답) 둘 다 None이다.
+    시각은 청크 국소 초이고, 없으면(꼴이 어긋난 응답) 둘 다 None이다. `dropped_after`는 이 단어 뒤
+    (첫 단어는 앞도) 사이 글에서 싣지 못한 자리 없는 글자 수다 — 「확인 필요」 표시의 재료일 뿐이다.
     """
 
     text: str
     display: str
     start: Fraction | None
     end: Fraction | None
+    dropped_after: int = 0
 
     @property
     def timed(self) -> bool:
@@ -179,13 +181,14 @@ def _aligned(words: list[ParsedWord], text: str) -> tuple[tuple[ParsedWord, ...]
         head = "" if index else _separators(text[: starts[0]])
         tail_end = starts[index + 1] if index + 1 < len(words) else len(text)
         gap = text[starts[index] + len(word.text) : tail_end]
-        unplaced += _letters(gap) + (_letters(text[: starts[0]]) if not index else 0)
-        shaped.append(_with(word, head + word.text + _separators(gap)))
+        dropped = _letters(gap) + (_letters(text[: starts[0]]) if not index else 0)
+        unplaced += dropped
+        shaped.append(_with(word, head + word.text + _separators(gap), dropped))
     return tuple(shaped), ALIGNED, unplaced
 
 
-def _with(word: ParsedWord, display: str) -> ParsedWord:
-    return ParsedWord(word.text, display, word.start, word.end)
+def _with(word: ParsedWord, display: str, dropped: int = 0) -> ParsedWord:
+    return ParsedWord(word.text, display, word.start, word.end, dropped)
 
 
 def _is_letter(char: str) -> bool:

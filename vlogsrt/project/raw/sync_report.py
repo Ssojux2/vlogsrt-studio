@@ -40,7 +40,7 @@ from vlogsrt.project.config import (
 )
 from vlogsrt.project.pcm import PcmReference
 from vlogsrt.project.raw import read_scope
-from vlogsrt.project.raw.understanding import asr_chunk_material, chunk_tick
+from vlogsrt.project.raw.understanding import asr_chunk_material, asr_chunk_word_notes, chunk_tick
 from vlogsrt.project.sync_check import Check, Cue, Reason
 from vlogsrt.project.vad.inference import infer_vad
 from vlogsrt.project.vad.runtime import VadUnavailable, bundled_artifact, create_cpu_session
@@ -116,12 +116,13 @@ class RecordedChunk:
 
     `request_id`는 발화의 `evidence_id`(`<요청 아이디>:<세그먼트 위치>`) 앞부분이다. `clamped`는
     조각 끝에 맞춘 세그먼트 위치(D55), `scores`는 세그먼트마다 (no_speech_prob, avg_logprob)(D73 —
-    옛 기록이면 빈 튜플)."""
+    옛 기록이면 빈 튜플), `word_notes`는 Gemini 원본의 (세그먼트 위치, 센 것)(W-52b1)이다."""
 
     request_id: str
     start: Fraction
     clamped: tuple[int, ...] = ()
     scores: tuple[tuple[float | None, float | None], ...] = ()
+    word_notes: tuple[tuple[int, str], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,7 +143,9 @@ class Stage1Audio:
     chunk_starts: tuple[Fraction, ...] = ()
     """전사 청크마다의 시작(PCM 시계의 초) — 시각 정답의 「조각 첫 줄」 층(W-25b)만 읽는다."""
     word_edges: tuple[tuple[Fraction, Fraction], ...] = ()
-    """whisper 단어마다 (시작, 끝)(PCM 시계의 초) — 정답 보고서의 「단어 경계」만 읽는다(D73)."""
+    """시간 엔진 단어마다 (시작, 끝)(PCM 시계의 초) — whisper든 Gemini든 그 원본을 들은
+    엔진의 단어다
+    (D73·D92). 정답 보고서의 「단어 경계」만 읽는다."""
     chunks: tuple[RecordedChunk, ...] = ()
     """성공한 전사 조각마다의 재료 — 원본 자막 「확인 필요」의 시각 표시 셋(D76)만 읽는다."""
 
@@ -315,6 +318,7 @@ def _recorded_chunks(body: Mapping[str, Any], rate: int) -> tuple[RecordedChunk,
                 start=Fraction(int(chunk["sample_start"]), rate),
                 clamped=tuple(int(at) for at in chunk.get("clamped_segments", [])),
                 scores=scores,
+                word_notes=asr_chunk_word_notes(chunk),
             )
         )
     return tuple(found)

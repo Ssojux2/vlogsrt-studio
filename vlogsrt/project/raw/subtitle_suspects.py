@@ -63,6 +63,7 @@ EAR_DISAGREED = "ear_disagreed"
 GEMINI_DISAGREED = "gemini_disagreed"
 SMALL_VOCABULARY = "small_vocabulary"
 SYMBOLS_ONLY = "symbols_only"
+ENGINE_WORDS = "engine_words"
 
 BOILERPLATE_TEXT = "영상 끝 인사말이 끼었을 수 있습니다"
 NO_SPEECH_TEXT = "말소리를 못 찾음 (측정 한계일 수 있음)"
@@ -81,6 +82,15 @@ GEMINI_HEARD_NOTHING_TEXT = "Gemini가 이 구간에서 말을 듣지 못했습�
 """Gemini가 들은 말이 빈 창의 줄(D88) — 「말이 아니다」라고 말하지 않는다(규칙 4)."""
 SMALL_VOCABULARY_TEXT = "몇 가지 말이 {count}줄 번갈아 이어집니다"
 SYMBOLS_ONLY_TEXT = "글자 없이 부호만 있습니다"
+ENGINE_WORD_TEXTS: Mapping[str, str] = {
+    "untimed_words": "전사 엔진이 시각을 주지 않은 단어가 이 줄에 남았습니다",
+    "unplaced_chars": "이 줄 곁에 시각이 없어 싣지 못한 글자가 있습니다",
+    "out_of_order": "단어 시각의 차례가 어긋났습니다",
+    "fallback_alignment": (
+        "단어를 전체 글에서 찾지 못해 띄어 이었습니다 — 띄어쓰기·부호가 다를 수 있습니다"
+    ),
+}
+"""Gemini 원본에서 센 것(W-52b1, `word_cues.WORD_NOTES`)의 문구 — 표시만, 줄·시각·글자 그대로."""
 
 MODIFIER_LETTER = "Lm"
 """유니코드 수식 글자 범주 — 발음·생략 표시(`ʼ`·`ˈ`)라 다른 문자로 보지 않는다."""
@@ -113,6 +123,8 @@ class CueTiming:
     # `heard_comparison`.
     gemini_heard: Mapping[str, str] = field(default_factory=dict)
     gemini_disagreed: frozenset[str] = frozenset()
+    # Gemini 시간 엔진이 그 줄에서 센 것(W-52b1) — 줄 아이디 → `ENGINE_WORD_TEXTS`의 이름들.
+    engine_words: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -198,6 +210,7 @@ def suspects(
         *_symbols_only(cues, settings.symbols_only_min_chars),
         *_silences(cues, no_speech, loud),
         *_clamped(cues, timing.clamped),
+        *_engine_words(cues, timing.engine_words),
         *_whole_seconds(cues, timing.local_times),
         *_low_confidence(cues, timing, settings, frozenset(no_speech) & loud),
         *_ear_disagreements(cues, timing.ear_disagreed),
@@ -389,6 +402,15 @@ def _clamped(
             yield cue_id, Suspect(CHUNK_END_CLAMPED, CHUNK_END_CLAMPED_TEXT)
 
 
+def _engine_words(
+    cues: Sequence[tuple[str, str]], noted: Mapping[str, tuple[str, ...]]
+) -> Iterator[tuple[str, Suspect]]:
+    for cue_id, _text in cues:
+        for name in noted.get(cue_id, ()):
+            if name in ENGINE_WORD_TEXTS:
+                yield cue_id, Suspect(ENGINE_WORDS, ENGINE_WORD_TEXTS[name])
+
+
 def _whole_seconds(
     cues: Sequence[tuple[str, str]], local_times: Mapping[str, tuple[Fraction, Fraction]]
 ) -> Iterator[tuple[str, Suspect]]:
@@ -424,6 +446,8 @@ __all__ = [
     "BOILERPLATE_TEXT",
     "CHUNK_END_CLAMPED",
     "CHUNK_END_CLAMPED_TEXT",
+    "ENGINE_WORDS",
+    "ENGINE_WORD_TEXTS",
     "EAR_DISAGREED",
     "GEMINI_DISAGREED",
     "GEMINI_DISAGREED_TEXT",

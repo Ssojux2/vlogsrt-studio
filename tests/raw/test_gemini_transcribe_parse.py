@@ -127,6 +127,7 @@ def test_letters_no_word_covers_are_counted_as_unplaced_not_output() -> None:
     )
     assert [w.display for w in parsed.words] == ["안녕 ", "가자"]
     assert parsed.unplaced_chars == 3 and parsed.alignment == gtp.ALIGNED
+    assert [w.dropped_after for w in parsed.words] == [3, 0]  # 그 글자 곁 단어에만 센다(W-52b1)
 
 
 def test_leading_punctuation_attaches_to_the_first_word() -> None:

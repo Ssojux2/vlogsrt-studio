@@ -20,18 +20,30 @@ from dataclasses import dataclass, field
 from fractions import Fraction
 
 from vlogsrt.project.raw.config import WORD_CUE_SETTINGS, WordCueSettings
-from vlogsrt.project.raw.gemini_transcribe_parse import ParsedWord
+from vlogsrt.project.raw.gemini_transcribe_parse import FALLBACK, ParsedWord
+
+NOTE_UNTIMED = "untimed_words"
+NOTE_UNPLACED = "unplaced_chars"
+NOTE_UNORDERED = "out_of_order"
+NOTE_FALLBACK = "fallback_alignment"
+WORD_NOTES = (NOTE_UNTIMED, NOTE_UNPLACED, NOTE_UNORDERED, NOTE_FALLBACK)
+"""줄마다 센 것의 이름(W-52b1) — 「확인 필요」 표시의 재료일 뿐 줄·시각·글자를 바꾸지 않는다."""
 
 
 @dataclass(frozen=True, slots=True)
 class WordCue:
-    """자막 줄 하나 — 시각은 청크 국소 초(엔진 단어 시각 그대로), 글은 단어 표시를 이은 것."""
+    """자막 줄 하나 — 시각은 청크 국소 초(엔진 단어 시각 그대로), 글은 단어 표시를 이은 것.
+
+    `dropped_chars`는 이 줄 단어 사이(뒤)에서 싣지 못한 자리 없는 글자 수, `out_of_order`는 이
+    줄에서 앞 단어보다 일찍 시작한 단어 수다 — 센 것일 뿐 글자·시각에 들지 않는다."""
 
     start: Fraction
     end: Fraction
     text: str
     words: int
     untimed_words: int
+    dropped_chars: int = 0
+    out_of_order: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,6 +56,7 @@ class CueGroup:
 @dataclass(slots=True)
 class _Open:
     words: list[ParsedWord] = field(default_factory=list)
+    out_of_order: int = 0
 
     @property
     def timed(self) -> list[ParsedWord]:
@@ -61,13 +74,16 @@ def group(words: Sequence[ParsedWord], settings: WordCueSettings = WORD_CUE_SETT
     out_of_order = 0
     last_start: Fraction | None = None
     for word in words:
+        late = False
         if word.timed:
             assert word.start is not None
-            out_of_order += last_start is not None and word.start < last_start
+            late = last_start is not None and word.start < last_start
             last_start = word.start
             if current.timed and _breaks_before(current, word, settings):
                 cues.append(_closed(current))
                 current = _Open()
+        out_of_order += late
+        current.out_of_order += late
         current.words.append(word)
     if current.words:
         cues.append(_closed(current))
@@ -105,4 +121,20 @@ def _closed(current: _Open) -> WordCue:
         text=current.text(),
         words=len(current.words),
         untimed_words=len(current.words) - len(timed),
+        dropped_chars=sum(word.dropped_after for word in current.words),
+        out_of_order=current.out_of_order,
     )
+
+
+def word_notes(group: CueGroup, alignment: str) -> tuple[tuple[int, str], ...]:
+    """(줄 위치, 센 것의 이름) — 센 것이 있는 줄만, 줄 순서·`WORD_NOTES` 순서대로.
+
+    정렬에 실패한 응답(`FALLBACK`)은 그 조각의 모든 줄이 「띄어 이었다」를 받는다(글자를 단어만으로
+    이었으므로)."""
+    notes: list[tuple[int, str]] = []
+    for index, cue in enumerate(group.cues):
+        counted = (cue.untimed_words, cue.dropped_chars, cue.out_of_order, alignment == FALLBACK)
+        notes.extend(
+            (index, name) for name, count in zip(WORD_NOTES, counted, strict=True) if count
+        )
+    return tuple(notes)

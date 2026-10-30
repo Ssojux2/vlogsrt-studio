@@ -241,3 +241,55 @@ def test_the_service_joins_record_material_to_lines_by_evidence_id(tmp_path: Pat
 def test_without_a_record_there_is_no_timing_material() -> None:
     timing = RawWorkspaceService.subtitle_cue_timing({"utterances": []}, None)
     assert timing == ss.CueTiming()
+
+
+# ── W-52b1 — Gemini 시간 엔진이 줄에서 센 것 ────────────────────────────────────
+
+
+def test_engine_word_counts_become_display_only_lines_in_rule_order() -> None:
+    timing = ss.CueTiming(
+        clamped=frozenset({"d"}),
+        engine_words={"b": ("untimed_words", "out_of_order"), "d": ("unplaced_chars",)},
+    )
+    found = ss.suspects(CUES, timing=timing)
+    assert codes(found) == {
+        "b": [ss.ENGINE_WORDS, ss.ENGINE_WORDS],
+        "d": [ss.CHUNK_END_CLAMPED, ss.ENGINE_WORDS],
+    }
+    assert [s.text for s in found["b"]] == [
+        ss.ENGINE_WORD_TEXTS["untimed_words"],
+        ss.ENGINE_WORD_TEXTS["out_of_order"],
+    ]
+    for text in ss.ENGINE_WORD_TEXTS.values():
+        assert text.endswith("니다") and "말이 아니" not in text
+
+
+def test_engine_word_names_match_the_counter_and_unknown_names_are_ignored() -> None:
+    from vlogsrt.project.raw import word_cues
+
+    assert tuple(ss.ENGINE_WORD_TEXTS) == word_cues.WORD_NOTES
+    timing = ss.CueTiming(engine_words={"a": ("다른 이름",)})
+    assert ss.suspects(CUES, timing=timing) == {}
+
+
+def test_the_record_carries_engine_word_counts_to_the_line(tmp_path: Path) -> None:
+    _record(tmp_path)
+    path = next(tmp_path.rglob("asr_outcome.json"))
+    body = json.loads(path.read_text(encoding="utf-8"))
+    body["asr"]["chunks"][0]["word_notes"] = [[0, "untimed_words"], [0, "fallback_alignment"]]
+    path.write_text(json.dumps(body), encoding="utf-8")
+    audio = sync_report.stage1_audio(tmp_path, "src", "f" * 64)
+    assert audio is not None
+    first, second = audio.chunks
+    assert first.word_notes == ((0, "untimed_words"), (0, "fallback_alignment"))
+    assert second.word_notes == ()  # 옛 기록·whisper 청크는 칸이 없다
+    shift = F(1) - F(1, 2)
+    transcript = {"utterances": [_row("u0", shift, shift + F(2), "run:chunk-0000:0", "안녕")]}
+    timing = RawWorkspaceService.subtitle_cue_timing(transcript, audio)
+    assert timing.engine_words == {"u0": ("untimed_words", "fallback_alignment")}
+    notes = RawWorkspaceService.subtitle_cue_notes(transcript, None, timing)
+    assert [s["code"] for s in notes["u0"]["suspects"]] == [
+        ss.ENGINE_WORDS,
+        ss.ENGINE_WORDS,
+        ss.WHOLE_SECOND,
+    ]

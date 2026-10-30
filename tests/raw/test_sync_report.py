@@ -30,10 +30,14 @@ from vlogsrt.project.raw.analysis_config import RawUnderstandingSettings
 from vlogsrt.project.raw.config import RawWorkflowConfig
 from vlogsrt.project.vad.runtime import VadUnavailable
 
-pytestmark = pytest.mark.skipif(
-    shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
-    reason="ffmpeg/ffprobe가 없는 환경",
-)
+# D104 — whisper 응답 모양의 재생으로 재는 시험이다. 새로 듣는 엔진을 whisper로 둔다.
+pytestmark = [
+    pytest.mark.skipif(
+        shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
+        reason="ffmpeg/ffprobe가 없는 환경",
+    ),
+    pytest.mark.usefixtures("whisper_for_new_hearings"),
+]
 
 TERMINAL = frozenset({"succeeded", "failed", "cancelled"})
 REAL_SESSION_FACTORY = sync_report.default_session_factory

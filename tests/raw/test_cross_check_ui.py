@@ -160,6 +160,7 @@ def test_the_model_carries_ears_and_reasons_and_keeps_every_cue(
         "mark": "replaced",
         "other": "왕방 왔어요",
         "first": "왕반 왔어요",
+        "firstEngine": "whisper-1",  # 「처음 들은 글」을 들은 엔진(W-52b1)
     }
     repeat = {"code": subtitle_suspects.REPEAT, "text": "같은 말이 3번 이어집니다"}
     assert [by_id[i]["suspects"] for i in ("u0", "u1", "u2")] == [[repeat]] * 3
@@ -220,7 +221,8 @@ earModel.sources.srcA.subtitles = [
   { id: 'u1', start: '1/2', end: '9/10', text: '치즈', suspects: [repeat] },
   { id: 'u2', start: '1', end: '7/5', text: '치즈', suspects: [repeat] },
   { id: 'u3', start: '3/2', end: '19/10', text: '왕방 왔어요',
-    ear: { mark: 'replaced', other: '왕방 왔어요', first: '왕반 왔어요' } },
+    ear: { mark: 'replaced', other: '왕방 왔어요', first: '왕반 왔어요',
+      firstEngine: 'whisper-1' } },
   { id: 'u4', start: '2', end: '12/5', text: '여기 봐',
     suspects: [{ code: 'no_speech', text: '말소리를 못 찾음 (측정 한계일 수 있음)' }] },
 ];
@@ -316,7 +318,8 @@ def test_the_editor_shows_the_other_ear_and_take_only_fills_the_text_box(tmp_pat
     # 「저장」은 사람이 누른다 — 그때 기존 편집 길로 가져온 글자가 간다.
     assert report["saved"] == [{"text": "치즈 <하나>", "action": "edit", "utteranceId": "u0"}]
     replaced = report["replacedPanel"]
-    assert "다른 귀: 왕방 왔어요" in replaced and "처음 들은 글: 왕반 왔어요" in replaced
+    assert "다른 귀: 왕방 왔어요" in replaced
+    assert "처음 들은 글 (whisper-1): 왕반 왔어요" in replaced  # 들은 엔진 이름(W-52b1)
     assert 'data-vl-take="first"' in replaced
     assert "두 귀가 맞춰 본 줄이라 다른 귀의 글자로 바꿨습니다." in replaced
     assert report["firstTaken"] == "왕반 왔어요"

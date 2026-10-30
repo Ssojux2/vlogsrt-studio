@@ -14,7 +14,8 @@
 도구라 쓰지 않는다(여기는 같은 줄이 이미 정해져 있다). 낡은 정답(줄이 사라졌거나 글자가 바뀜)은
 세지 않고 수만 적는다.
 
-「단어 경계」는 줄 경계를 1단계 기록의 whisper 단어 시각(W-25c, D73) 가운데 찾는 폭
+「단어 경계」는 줄 경계를 1단계 기록의 시간 엔진 단어 시각(whisper W-25c·D73, Gemini D92)
+가운데 찾는 폭
 (`SyncSnapSettings.reach_seconds`) 안의 가장 가까운 것으로 옮겨 본 값이다 — 단어 시각으로 줄 경계를
 정할지 판단할 숫자일 뿐 자막을 바꾸지 않는다. 단어가 없는 기록(W-25c 앞에 산 전사)은 까닭만 적는다.
 
@@ -53,7 +54,7 @@ PROPOSAL = "proposal"
 MATCHED = "subtitle_matched"
 """제안이 있는 영상의 정답만으로 잰 자막 — 제안과 같은 표본에서 견준다."""
 WORD = "word"
-"""줄 경계를 가장 가까운 whisper 단어 경계로 옮겨 본 값(W-25c)."""
+"""줄 경계를 가장 가까운 시간 엔진 단어 경계로 옮겨 본 값(W-25c — Gemini 원본은 그 단어, D92)."""
 
 
 def _connect(workspace: Path) -> sqlite3.Connection:

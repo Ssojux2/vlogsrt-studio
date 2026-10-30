@@ -365,6 +365,8 @@ class AsrChunkOutcome:
     # 다른 귀 기준 재전사(W-29b, D78) — (온도, 조각 유사도, 채택) 시도와, 갈아끼웠으면 1차 세그먼트.
     rescue_attempts: tuple[tuple[float, float, bool], ...] = ()
     first_transcript: tuple[tuple[float, float, str], ...] = ()
+    # Gemini 원본의 줄마다 센 것(W-52b1) — (세그먼트 위치, 이름). 없으면 기록·캐시에 칸이 없다.
+    word_notes: tuple[tuple[int, str], ...] = ()
 
     @property
     def succeeded(self) -> bool:
@@ -507,6 +509,7 @@ def _timed_outcome(
         clamped_segments=_clamped_of(timed.clamped_segments, position),
         segment_scores=_scores_of(timed.segments),
         words=tuple((word.start, word.end, word.word) for word in timed.words),
+        word_notes=timed.word_notes,
     )
 
 
@@ -773,6 +776,7 @@ _TUPLE_FIELDS = (
     "words",
     "rescue_attempts",
     "first_transcript",
+    "word_notes",
 )
 """캐시 JSON의 배열을 갓 받은 답과 같은 튜플로 되돌릴 칸 — 같은 답이 같게 견주어지도록."""
 
@@ -832,6 +836,7 @@ def _cached_outcome(outcome: AsrChunkOutcome) -> dict[str, object]:
         "words",
         "rescue_attempts",
         "first_transcript",
+        "word_notes",
     ):
         if not getattr(outcome, name):
             del body[name]
@@ -1970,6 +1975,8 @@ def _asr_chunk_json(chunk: AsrChunkOutcome) -> dict[str, object]:
         ]
     if chunk.rescue_attempts:
         body["rescue"] = _rescue_json(chunk)
+    if chunk.word_notes:
+        body["word_notes"] = [[at, name] for at, name in chunk.word_notes]
     return body
 
 
@@ -2022,6 +2029,16 @@ def _segments_json(chunk: AsrChunkOutcome) -> list[dict[str, object]]:
                 row["avg_logprob"] = logprob
         rows.append(row)
     return rows
+
+
+def asr_chunk_word_notes(raw: Mapping[str, object]) -> tuple[tuple[int, str], ...]:
+    """1단계 기록의 청크에서 Gemini 줄마다 센 것(W-52b1)을 다시 읽는다 — 옛 기록이면 빈 튜플."""
+    notes = raw.get("word_notes")
+    return tuple(
+        (int(item[0]), str(item[1]))
+        for item in (notes if isinstance(notes, list) else [])
+        if isinstance(item, list) and len(item) == 2
+    )
 
 
 def asr_chunk_material(

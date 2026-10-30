@@ -71,6 +71,7 @@ from vlogsrt.project.raw.caption_provider import (
     RescueTimingProvider,
     TimingProvider,
     TransportTextProvider,
+    gemini_timed_transcript,
     parse_timing_response,
     timing_provider_for,
     words_provider_for,
@@ -79,6 +80,7 @@ from vlogsrt.project.raw.config import (
     ANALYSIS_PROVIDER_GOOGLE,
     GEMINI_TEXT_SETTINGS,
     SOURCE_TEXT_SETTINGS,
+    TIMING_ENGINE_GEMINI,
     RawWorkflowConfig,
     analysis_provider,
     timing_engine_for_model,
@@ -203,7 +205,12 @@ class ReplayFixtures:
     def asr_for(self, source_sha256: str) -> ReplayAsrProvider:
         """원본 하나의 ASR 재생자 — 선언이 없으면 모든 청크가 실패로 남는다."""
         declared = self.sources.get(source_sha256)
-        return ReplayAsrProvider(declared=declared, exact=self.chunks)
+        return ReplayAsrProvider(
+            declared=declared,
+            exact=self.chunks,
+            gemini_exact=self.word_chunks or {},
+            gemini_declared=self.word_sources.get(source_sha256),
+        )
 
     def text_for(self, source_sha256: str) -> source_text.ReplayTextProvider | None:
         """원본 하나의 글자 재생자 — 글자 픽스처 파일이 없으면 None(글자 경로는 묻지 않는다).
@@ -360,10 +367,16 @@ class ReplayAsrProvider:
     — 모든 청크가 실패로 기록된다). 청크에 걸치는 발화는 그 청크 안 구간으로
     잘려 나온다 — 전체 합은 원래 선언을 빈틈없이 덮는다. `exact`는 WAV sha로
     재는 정밀 선언으로, 있으면 앞선다.
+
+    Gemini 시간 엔진 보기(D92·D104)에서는 whisper 모양 선언을 Gemini 이름으로 내지 않는다 — Gemini
+    3.5 Transcribe 응답 선언(`word-text-fixtures.json`: 글자 경로와 같은 요청이라 같은 응답이다)만
+    Gemini 해석기로 재생하고, 없으면 보이는 실패다(W-52b1).
     """
 
     declared: Sequence[tuple[float, float, str]] | None
     exact: Mapping[str, tuple[tuple[float, float, str], ...]] = field(default_factory=dict)
+    gemini_exact: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
+    gemini_declared: Mapping[int, Mapping[str, Any]] | None = None
 
     def timed_transcript(
         self,
@@ -375,6 +388,8 @@ class ReplayAsrProvider:
         stem: str = "",
         source: str = "",
     ) -> Any:
+        if timing_engine_for_model(settings.models.timing_model).key == TIMING_ENGINE_GEMINI:
+            return self._gemini(binding, chunk, settings)
         exact = self.exact.get(str(binding.audio_sha256))
         if exact is not None:
             segments = exact
@@ -395,6 +410,23 @@ class ReplayAsrProvider:
             provider=settings.caption.timing_provider,
             chunk_duration=chunk.duration,
             chunk_offset=chunk.offset,
+        )
+
+    def _gemini(self, binding: Any, chunk: Any, settings: RawWorkflowConfig) -> Any:
+        payload = self.gemini_exact.get(str(binding.audio_sha256))
+        if payload is None and self.gemini_declared is not None:
+            payload = self.gemini_declared.get(int(binding.chunk_index))
+        if payload is None:
+            raise ReplayFixtureError(
+                "재생할 Gemini 응답 선언이 없다 — whisper 모양 선언을 Gemini 이름으로 내지 않는다"
+                f" (청크 {binding.request_id})"
+            )
+        return gemini_timed_transcript(
+            payload,
+            binding=binding,
+            model=settings.models.timing_model,
+            provider=settings.caption.timing_provider,
+            chunk=chunk,
         )
 
 
@@ -2642,6 +2674,7 @@ def _asr_from_artifact(artifact: Mapping[str, object]) -> AsrEvidence:
                 words=words,
                 rescue_attempts=attempts,
                 first_transcript=first,
+                word_notes=stage1.asr_chunk_word_notes(item),
             )
         )
     return AsrEvidence(

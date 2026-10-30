@@ -226,6 +226,9 @@ class TimedTranscript:
     clamped_segments: tuple[int, ...] = ()
     # 단어 시각(W-25c, D73) — 세그먼트와 따로 산다. 단어를 세그먼트에 나눠 붙이지 않는다.
     words: tuple[TimedWord, ...] = ()
+    # Gemini 원본의 줄마다 센 것(W-52b1) — (세그먼트 위치, `word_cues.WORD_NOTES`의 이름).
+    # 「확인 필요」 표시의 재료일 뿐이다.
+    word_notes: tuple[tuple[int, str], ...] = ()
 
     @property
     def unconfirmed_empty(self) -> bool:
@@ -776,6 +779,7 @@ def gemini_timed_transcript(
             for word in parsed.words
             if word.start is not None and word.end is not None
         ),
+        word_notes=word_cues.word_notes(grouped, parsed.alignment),
     )
 
 

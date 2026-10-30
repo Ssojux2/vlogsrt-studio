@@ -29,6 +29,9 @@ from vlogsrt.project.raw import runner as extract_runner
 from vlogsrt.project.raw import service as raw
 from vlogsrt.project.raw.analysis_store import AnalysisStore
 
+# D104 — whisper 응답 모양의 재생으로 재는 시험이다. 새로 듣는 엔진을 whisper로 둔다.
+pytestmark = pytest.mark.usefixtures("whisper_for_new_hearings")
+
 needs_ffmpeg = pytest.mark.skipif(
     shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
     reason="ffmpeg/ffprobe가 없는 환경",

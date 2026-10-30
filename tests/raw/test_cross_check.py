@@ -853,6 +853,7 @@ def test_the_cross_check_copy_is_polite_and_names_no_model_or_price() -> None:
         assert "$" not in text and "GPT" not in text and "whisper" not in text, text
     assert POLITE_END.search(CROSS_CHECK_INFO)
     assert not re.search(r"(?<!니)다\.", CROSS_CHECK_INFO)
+    assert "기본 전사 엔진으로 듣는 영상에는 다른 귀가 없습니다" in CROSS_CHECK_INFO  # D104
     quote = selection_analysis.SelectionQuote(
         asset_ids=("a",),
         estimates=(),

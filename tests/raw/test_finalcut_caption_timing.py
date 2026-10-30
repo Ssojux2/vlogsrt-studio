@@ -37,6 +37,9 @@ from vlogsrt.project.raw import service as raw_service
 from vlogsrt.project.raw import sync_report
 from vlogsrt.project.xml_validation import validate_xml
 
+# D104 — whisper 응답 모양의 재생으로 재는 시험이다. 새로 듣는 엔진을 whisper로 둔다.
+pytestmark = pytest.mark.usefixtures("whisper_for_new_hearings")
+
 TITLE = "vlogsrt · 260810_wangbang · 2026-10-09 18:30"
 
 # W-16(d350091)의 빌더가 낸 바이트의 지문 — 걸린 영상이 없으면 그대로여야 한다. 하나만 등급

@@ -9739,3 +9739,25 @@ Gemini 「다시 듣기」가 같은 값에 시각까지 받는다 · W-35e는 W
 whisper로 듣게). whisper 응답 모양에 기대는 다른 재생 시험 32개 파일은 「새로 듣는 엔진 = whisper」 전제를 밝혔다 — `tests/conftest.py`의 `whisper_for_new_hearings` 픽스처를 파일 머리 `pytestmark`로 걸고(기대값 그대로), 모듈 범위로 작업공간을 미리 만드는 `test_render_cost.py`는 그 픽스처 안에서도 같은 전제를 건다(잠근 화면 바이트 그대로). 새
 `tests/raw/test_gemini_default.py`. 유료 호출 0회.
 
+**W-52b1(2026-10-30, 녹화 없이 되는 부분 — 유료 호출 0)**: 사용자 지시 「W-52 b,c까지 우선 개발 후 테스트할게 W-53 계획은 폐기해주고」.
+- **재생은 Gemini 이름으로 whisper 모양을 내지 않는다** — `ReplayAsrProvider`는 시간 모델이 Gemini 엔진이면 Gemini 3.5 Transcribe 응답
+  선언만 `gemini_timed_transcript`로 재생한다. 선언 파일은 글자 경로(W-35b)의 `word-text-fixtures.json`을 그대로 쓴다 — 두 경로의 요청이
+  같으므로(`gemini_timing_request`) 같은 응답이다. 선언이 없으면 청크마다 `ReplayFixtureError`(보이는 실패)이고 whisper 선언 글이 그
+  원본 자막에 새지 않는다. whisper 보기의 재생 바이트는 그대로다.
+- **센 것을 줄 표시로** — Gemini 해석이 WARN으로만 세던 것을 줄마다 센다: 시각 없는 단어(`untimed_words`) · 그 줄 곁에서 싣지 못한 자리
+  없는 글자(`unplaced_chars` — 해석기가 단어마다 `dropped_after`로 센다, 글자는 여전히 내보내지 않는다) · 앞 단어보다 일찍 시작한
+  단어(`out_of_order`) · 정렬 실패(`fallback_alignment` — 그 조각의 모든 줄). `word_cues.word_notes` → `TimedTranscript.word_notes` →
+  1단계 기록·캐시 청크의 `word_notes`(없으면 칸이 없다 — whisper·옛 기록 바이트 그대로) → `RecordedChunk.word_notes` →
+  `CueTiming.engine_words` → 「확인 필요」 `engine_words`(문구 넷, `subtitle_suspects.ENGINE_WORD_TEXTS`). 표시만 — 줄·시각·글자·지문·
+  등급 그대로(규칙 4·5·9). WARN 로그도 그대로 남는다.
+- **문구** — 「다른 귀로 교차 확인」 설명은 모델 이름 없이(D57 결정 7) 「지금 기본 전사 엔진으로 듣는 영상에는 다른 귀가 없습니다」를
+  더했다(계획의 「whisper로 들은 영상에만」은 이름을 대므로 바꿨다). 편집기 「처음 들은 글」은 그 글을 들은 엔진 이름을 단다
+  (`ear.firstEngine` — 처음 들은 글이 있는 줄만). 1단계 단어 시각(`Stage1Audio.word_edges`)·정답 보고서의 「whisper 단어」는 「시간 엔진
+  단어」로 — Gemini 원본은 그 단어다.
+- 시험: `test_gemini_default.py`(재생 거부·Gemini 재생·whisper 보기 그대로·끝에서 끝까지 시각 없는 단어 → 기록 → 「확인 필요」) ·
+  `test_word_cues.py` · `test_gemini_transcribe_parse.py` · `test_timing_suspects.py` · `test_cross_check(_ui).py`(문구·엔진 이름).
+  재생이 whisper 선언을 Gemini 이름으로 내던 탓에 Gemini 기본 아래에서도 통과하던 재생 시험 27개 파일(등급·Final Cut·렌더·
+  촬영 순서·시각 확인 등)은 W-52a와 같이 「새로 듣는 엔진 = whisper」 전제를 밝혔다(`whisper_for_new_hearings`, 기대값 그대로 —
+  모듈 범위로 분석하는 `test_render_export.py`의 `trip`은 그 안에서 같은 전제를 건다).
+  W-52b2(실응답 계약 시험 · `integration_test_status="passed"`)는 H1 녹화 뒤다.
+

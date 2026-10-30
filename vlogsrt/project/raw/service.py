@@ -3493,6 +3493,7 @@ class RawWorkspaceService:
         clamped: set[str] = set()
         local: dict[str, tuple[Fraction, Fraction]] = {}
         scores: dict[str, tuple[float | None, float | None]] = {}
+        noted: dict[str, tuple[str, ...]] = {}
         for row in transcript.get("utterances", []):
             request, _, position = str(row.get("evidence_id") or "").rpartition(":")
             chunk = by_request.get(request)
@@ -3508,7 +3509,12 @@ class RawWorkspaceService:
                 clamped.add(cue_id)
             if at < len(chunk.scores):
                 scores[cue_id] = chunk.scores[at]
-        return subtitle_suspects.CueTiming(frozenset(clamped), local, scores, disagreed)
+            names = tuple(name for where, name in chunk.word_notes if where == at)
+            if names:
+                noted[cue_id] = names
+        return subtitle_suspects.CueTiming(
+            frozenset(clamped), local, scores, disagreed, engine_words=noted
+        )
 
     def subtitle_timing(self, root: Path, source_id: str, transcript: Mapping[str, Any]) -> Any:
         """화면의 「확인 필요」 시각 표시 셋 재료 — 원본 자막이 묶인 원본 해시의 가장 최근 1단계

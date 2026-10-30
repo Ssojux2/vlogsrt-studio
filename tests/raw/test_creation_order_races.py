@@ -27,6 +27,9 @@ from vlogsrt.project.raw.segment_review import (
 )
 from vlogsrt.project.raw.service import UPKEEP_JOB_KIND, RawWorkspaceService
 
+# D104 — whisper 응답 모양의 재생으로 재는 시험이다. 새로 듣는 엔진을 whisper로 둔다.
+pytestmark = pytest.mark.usefixtures("whisper_for_new_hearings")
+
 needs_ffmpeg = co.needs_ffmpeg
 SEMANTIC = "semantic_analysis"
 

@@ -4268,7 +4268,10 @@ VISUAL_BOOTSTRAP_JS = (
         if (!ear) { return ""; }
         var out = ['<div class="vl-ear" role="group" aria-label="다른 귀">'];
         out.push(earLine("다른 귀", ear.other, "other"));
-        if (ear.first) { out.push(earLine("처음 들은 글", ear.first, "first")); }
+        if (ear.first) {
+          var firstLabel = "처음 들은 글" + (ear.firstEngine ? " (" + ear.firstEngine + ")" : "");
+          out.push(earLine(firstLabel, ear.first, "first"));
+        }
         out.push('<p class="vl-kv"><small>' + (ear.mark === "candidate" ? EAR_CANDIDATE_NOTE + "."
           : ear.mark === "alt" ? "두 귀가 맞지 않아 글자를 바꾸지 않았습니다."
           : "두 귀가 맞춰 본 줄이라 다른 귀의 글자로 바꿨습니다.") +

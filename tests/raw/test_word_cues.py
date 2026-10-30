@@ -113,3 +113,32 @@ def test_limits_mirror_the_engine_config_and_bad_settings_are_named() -> None:
 def test_words_without_any_time_are_refused_not_given_a_time() -> None:
     with pytest.raises(ValueError, match="시각 단어"):
         _cues([w("음", None, None), w("어", None, None)])
+
+
+def test_each_cue_counts_its_own_untimed_dropped_and_late_words() -> None:
+    first = gtp.ParsedWord("안녕", "안녕. ", F(1), F(2), dropped_after=2)
+    words = [
+        first,
+        w("가", F(3), F(4)),
+        w("어", None, None),
+        w("나", F(5, 2), F(3)),
+    ]
+    group = _cues(words)
+    assert [(c.untimed_words, c.dropped_chars, c.out_of_order) for c in group.cues] == [
+        (0, 2, 0),
+        (1, 0, 1),
+    ]
+    assert word_cues.word_notes(group, gtp.ALIGNED) == (
+        (0, word_cues.NOTE_UNPLACED),
+        (1, word_cues.NOTE_UNTIMED),
+        (1, word_cues.NOTE_UNORDERED),
+    )
+
+
+def test_a_fallback_alignment_notes_every_cue_and_a_clean_one_notes_none() -> None:
+    group = _cues([w("가", F(1), F(2), "가. "), w("나", F(3), F(4))])
+    assert word_cues.word_notes(group, gtp.ALIGNED) == ()
+    assert word_cues.word_notes(group, gtp.FALLBACK) == (
+        (0, word_cues.NOTE_FALLBACK),
+        (1, word_cues.NOTE_FALLBACK),
+    )

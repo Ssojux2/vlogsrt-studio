@@ -137,11 +137,13 @@ APPROVAL_MODE_CHOICES = [
 CROSS_CHECK_ID = "vl-cross-check"
 CROSS_CHECK_LABEL = "다른 귀로 교차 확인"
 CROSS_CHECK_INFO = (
-    "켜 두면 전사할 때 다른 귀로 한 번 더 듣고, 두 귀가 맞춰 본 줄만 글자를 고칩니다."
+    "켜 두면 이전 전사 엔진으로 듣는 영상을 다른 귀로 한 번 더 듣고, 두 귀가 맞춰 본 줄만 글자를"
+    " 고칩니다. 지금 기본 전사 엔진으로 듣는 영상에는 다른 귀가 없습니다."
     " 들을 분량과 비용은 아래 견적에 나옵니다."
 )
 """「다른 귀로 교차 확인」(D59 19d) — 승인 범위 바로 아래의 켬·끔. 칸에는 모델 이름·금액이 없다
-(D57 결정 7) — 무엇을 얼마에 듣는지는 그 아래 견적 문구만 말하고, 승인은 그 문구에 묶인다."""
+(D57 결정 7) — 무엇을 얼마에 듣는지는 그 아래 견적 문구만 말하고, 승인은 그 문구에 묶인다.
+D104부터 기본(Gemini) 엔진 원본에는 다른 귀가 없어 그 사실을 이름 없이 말한다(W-52b1)."""
 CONTEXT_PANEL_ID = "vl-context-review"
 CONTEXT_PANEL_LABEL = "맥락 평가 (Gemini)"
 CONTEXT_QUOTE_LABEL = "견적 보기"
@@ -8006,6 +8008,7 @@ class RawWorkspaceUi:
         notes = self.raw.subtitle_cue_notes(
             transcript, sync_view, self.raw.subtitle_timing(root, sid, transcript)
         )
+        self._name_first_ear(root, sid, notes)
         truths, missing = self.raw.timing_truth_view(root, sid, transcript, sync_view)
         source["subtitles"] = [
             {
@@ -8028,6 +8031,16 @@ class RawWorkspaceUi:
         source["relisten"] = self._relisten_view(root, sid, transcript)
         source["refill"] = self._refill_view(root, sid, transcript, sync_view)
         source["snap"] = self._snap_view(root, sid)
+
+    def _name_first_ear(self, root: Path, sid: str, notes: Mapping[str, Any]) -> None:
+        """편집기 「처음 들은 글」 머리에 그 글을 들은 전사 엔진 이름을 단다(W-52b1) — whisper와
+        Gemini가 한 라이브러리에 섞이므로. 「처음 들은 글」이 없는 줄은 칸 값 그대로다."""
+        firsts = [n["ear"] for n in notes.values() if (n.get("ear") or {}).get("first")]
+        if not firsts:
+            return
+        label = _engine_label(self.raw.source_settings(root, sid).models.timing_model)
+        for ear in firsts:
+            ear["firstEngine"] = label
 
     def _relisten_view(
         self, root: Path, source_id: str, transcript: Mapping[str, Any]
