@@ -814,7 +814,8 @@ class RawGeminiTranscribeProfile:
     Experimental) — 보수적인 쪽(`preview`·`experimental`)을 적는다. 그래서 `price_valid_through`는
     알려진 인상일이 아니라 **재확인 기한**이다(외부 근거 없음) — 지나면 사람이 가격표를 다시 읽고
     고치기 전까지 견적이 닫힌다(D84). 결제 연결 키만 쓴다 — 무료 등급은 입력을 제품 개선에 쓴다.
-    계정 접근·유료 호출은 아직 시험하지 않았다(사람의 녹화 H1).
+    실응답 계약은 2026-11-01 사람이 작업대에서 실제 영상을 다시 분석해 확인했다(REST 꼴 응답이
+    해석기를 지나 줄 19·단어 68 — W-52b2, D104). 계정 접근은 여전히 기록만 한다.
     """
 
     model: str = "gemini-3.5-transcribe"
@@ -839,7 +840,7 @@ class RawGeminiTranscribeProfile:
     lifecycle_status: str = "preview"
     word_timestamps_status: str = "experimental"
     account_access_status: str = "unverified"
-    integration_test_status: str = "not_run"
+    integration_test_status: str = "passed"
     source_urls: tuple[str, ...] = (
         "https://ai.google.dev/gemini-api/docs/transcribe",
         "https://ai.google.dev/api/interactions-api",

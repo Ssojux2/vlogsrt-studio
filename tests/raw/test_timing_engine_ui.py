@@ -69,13 +69,26 @@ def test_the_dropdown_lists_the_new_engine_first_and_whisper_with_its_end_date(
     dropdown, status = server.timing_engine_controls()
     assert dropdown.value == GEMINI  # D104 — 새로 듣는 영상의 기본은 Gemini다
     assert "새로 듣는 영상은 **Gemini 3.5 Transcribe**로 듣습니다" in status
-    # 실제 응답 모양을 아직 녹화로 확인하지 않았다 — 막지 않고 알린다(H1, D104)
-    assert ws.GEMINI_CONTRACT_UNCONFIRMED_NOTE in status
+    # 실응답 계약을 확인했다(W-52b2, D104) — 「H1 미확인」 줄은 더 뜨지 않는다
+    assert ws.GEMINI_CONTRACT_UNCONFIRMED_NOTE not in status
     server.settings_timing_engine_view(server.current_signature(), WHISPER)
     _, status = server.timing_engine_controls()
     assert "새로 듣는 영상은 **whisper-1**로 듣습니다" in status
     assert "2027-02-26에 종료됩니다" in status
     assert ws.GEMINI_CONTRACT_UNCONFIRMED_NOTE not in status
+
+
+def test_an_unconfirmed_gemini_contract_still_gets_the_h1_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """등록표의 실응답 계약이 통과가 아니면 막지 않고 알린다 — 다음 엔진 판에도 같다(D104)."""
+    from vlogsrt.project.raw import timing_engine
+
+    profiles = dict(timing_engine.GEMINI_TRANSCRIBE_PROFILES)
+    profiles[GEMINI_MODEL] = replace(profiles[GEMINI_MODEL], integration_test_status="not_run")
+    monkeypatch.setattr(timing_engine, "GEMINI_TRANSCRIBE_PROFILES", profiles)
+    _, status = _server(tmp_path).timing_engine_controls()
+    assert ws.GEMINI_CONTRACT_UNCONFIRMED_NOTE in status
 
 
 def test_switching_saves_the_workspace_marker_and_says_heard_videos_stay(tmp_path: Path) -> None:
