@@ -2636,9 +2636,12 @@ def _measured_clock(
     notes: list[str] = []
     try:
         _prove_uniform_grid(pts, time_base, declared, source)
+        _require_whole_ticks(declared, time_base, source)
         fit = _GridFit(uniform=True, frame_duration=declared, frame_count=len(pts))
     except RuntimeError as exc:
         fit = _fitted(pts, time_base, declared, policy, source, exc)
+        if isinstance(exc, _FractionalTicks) and fit.uniform:
+            notes.append(str(exc))  # 맞춘 시계의 기록에도 왜 다시 골랐는지 남긴다(D107)
         notes.append(fit.note)
     try:
         average = _stream_positive_fraction(entry, "avg_frame_rate", source)
@@ -2670,6 +2673,26 @@ def _measured_clock(
     )
 
 
+class _FractionalTicks(RuntimeError):
+    """엄격 증명은 통과했지만 프레임 길이가 정수 틱이 아니다 — 재선택(D70)으로 보낼 까닭(D107)."""
+
+
+def _require_whole_ticks(declared: Fraction, time_base: Fraction, source: Path) -> None:
+    """원본 경계의 균일 시계는 프레임 길이가 정수 틱이어야 한다(D107).
+
+    엄격 증명은 양자화된 선언(30000/1001을 1/600에 담기 = 20.02틱)에 한 틱을 허용해 통과시킨다 —
+    캡션 엔진(`probe_video_grid`)에는 그대로 맞는 규칙이다. 하지만 검토 시계(`make_source_clock`)는
+    정확한 프레임 경계를 틱으로 세우므로 그런 시계를 받을 수 없다. 짧은 클립만 이 틈에 빠졌다(긴
+    클립은 어긋남이 한 틱을 넘어 이미 D70 재선택으로 갔다) — 그래서 같은 재선택으로 보낸다.
+    """
+    ticks = declared / time_base
+    if ticks.denominator != 1:
+        raise _FractionalTicks(
+            f"선언 프레임 길이 {declared}초가 timebase {time_base}의 정수 틱이 아니다({ticks}틱):"
+            f" {source} — 한 틱 허용으로 격자는 증명되지만 정확한 프레임 경계가 없다"
+        )
+
+
 def _fitted(
     pts: list[int],
     time_base: Fraction,
@@ -2678,11 +2701,13 @@ def _fitted(
     source: Path,
     strict: RuntimeError,
 ) -> _GridFit:
-    """엄격한 증명이 실패한 시계를 명목 격자에 맞춰 본다 — 선언 길이로 snap(D69), 그다음 map(D70).
+    """엄격한 증명이 실패한(또는 통과했어도 프레임 길이가 정수 틱이 아닌, D107) 시계를 명목 격자에
+    맞춰 본다 — 선언 길이로 snap(D69), 그다음 map(D70).
 
-    프레임 길이가 정수 틱이 아닌 시계(양자화된 30000/1001 등)는 이미 한 틱을 허용받았으므로
-    선언 길이로는 맞추지 않는다. 맞추지 못하면 엄격한 증명의 말에 까닭을 한 줄씩 덧붙인다(D68
-    지원 밖 카드가 그대로 보인다). map 갈래는 정책이 허락할 때만 본다(`GridConformPolicy.maps`).
+    프레임 길이가 정수 틱이 아닌 시계(양자화된 30000/1001 등)는 선언 길이로 슬롯을 세울 수 없으므로
+    선언 길이로는 맞추지 않고 곧장 명목 재선택(D70)으로 간다. 맞추지 못하면 엄격한 증명의 말에
+    까닭을 한 줄씩 덧붙인다(D68 지원 밖 카드가 그대로 보인다). map 갈래는 정책이 허락할 때만
+    본다(`GridConformPolicy.maps`).
     """
     ticks = declared / time_base
     refusal = str(strict)
