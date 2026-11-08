@@ -61,6 +61,14 @@ def synthetic_ui_state(
     return state
 
 
+@pytest.fixture(autouse=True)
+def warmed_pickers(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """서버 시작의 선택 창 미리 만들기(D106)를 센다 — 시험은 실제 osacompile을 띄우지 않는다."""
+    calls: list[str] = []
+    monkeypatch.setattr(ui_app, "_start_picker_warmup", lambda: calls.append("warm"))
+    return calls
+
+
 class _StubUi:
     """uvicorn·gradio 없이 진입점 자체의 계약만 본다."""
 
@@ -98,7 +106,7 @@ def _patch_launch(monkeypatch: pytest.MonkeyPatch, chosen_port: int) -> dict[str
 
 
 def test_the_entrypoint_refuses_an_occupied_port_without_killing(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, warmed_pickers: list[str]
 ) -> None:
     world = _patch_launch(monkeypatch, chosen_port=7860)
     attempts_seen = []
@@ -112,15 +120,17 @@ def test_the_entrypoint_refuses_an_occupied_port_without_killing(
     assert attempts_seen == [1]
     assert world["killed"] == []
     assert world["launched"] == {}
+    assert warmed_pickers == []
 
 
 def test_the_entrypoint_uses_the_preferred_port_when_free(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, warmed_pickers: list[str]
 ) -> None:
     world = _patch_launch(monkeypatch, chosen_port=7860)
     assert ui_app.main(["--port", "7860", "--no-browser"]) == 0
     assert world["launched"]["port"] == 7860
     assert world["killed"] == []
+    assert warmed_pickers == ["warm"]  # 서버를 띄울 때 선택 창 앱을 미리 만든다(D106)
 
 
 def test_share_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
