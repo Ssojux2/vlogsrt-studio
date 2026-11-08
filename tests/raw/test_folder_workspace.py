@@ -328,6 +328,31 @@ def test_only_the_one_folder_workspace_nesting_is_allowed(tmp_path: Path) -> Non
 # ── 쓸 수 없는 폴더 ────────────────────────────────────────────────────────
 
 
+def test_the_folder_scan_takes_videos_only_and_skips_photos(tmp_path: Path) -> None:
+    """사진·소리·자막은 영상 후보가 아니다(사용자 지시 2026-11-08 「영상만 받아오도록」).
+
+    아이폰 폴더에는 JPG 사진이 섞인다 — ffprobe는 JPG를 mjpeg 영상 한 장으로 읽어 원본으로
+    등록하던 탓에 사진이 영상 목록에 들었다. 고르기는 확장자 어휘만 본다(조회 없음).
+    """
+    folder = tmp_path / "trip"
+    _encode(folder / HD_NAME, "320x180", "2026-09-01T10:00:00Z", seconds=1)
+    subprocess.run(
+        ["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=320x180",
+         "-frames:v", "1", str(folder / "IMG_0001.JPG")],
+        check=True, capture_output=True,
+    )  # fmt: skip
+    for name in ("IMG_0002.HEIC", "shot.png", "voice.m4a", "memo.wav", "subs.srt"):
+        (folder / name).write_bytes(b"not a video")
+    service = RawWorkspaceService()
+    status, _created = service.managed_folder_workspace(folder)
+    root = Path(status.workspace_root)
+    proposal = service.scan_sources(root, folder)
+    assert [item.source_name for item in proposal.order] == [HD_NAME]
+    assert proposal.scan.rejected == ()  # 사진은 거절도 아니다 — 처음부터 후보가 아니다
+    with pytest.raises(IngestError, match="지원하지 않는 영상 경로"):
+        ingest.scan_selected_source(folder / "IMG_0001.JPG", root)
+
+
 def test_a_read_only_folder_falls_back_to_the_sibling(tmp_path: Path) -> None:
     folder = tmp_path / "SDCARD"
     _encode(folder / HD_NAME, "320x180", "2026-09-01T10:00:00Z", seconds=1)

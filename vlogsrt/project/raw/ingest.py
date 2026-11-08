@@ -34,8 +34,8 @@ from vlogsrt.project.raw.models import (
     CAPTURE_STATUS_INVALID,
     CAPTURE_STATUS_UNINSPECTED,
     CAPTURE_STATUS_VALID,
-    MEDIA_SUFFIXES,
     ORDER_BASIS_USER_CONFIRMED,
+    SOURCE_VIDEO_SUFFIXES,
     IngestCopyError,
     IngestError,
     InsufficientSpaceError,
@@ -306,7 +306,7 @@ def scan_selected_source(
     """Inspect only the chosen video; never walk neighbouring user files."""
     if (
         any(_pruned_name(part) for part in source.parts)
-        or source.suffix.lower() not in MEDIA_SUFFIXES
+        or source.suffix.lower() not in SOURCE_VIDEO_SUFFIXES
     ):
         raise IngestError("지원하지 않는 영상 경로입니다")
     root = source.parent.expanduser().resolve()
@@ -388,8 +388,8 @@ def _media_entries(root: Path) -> list[Path]:
         for name in sorted(filenames):
             if _pruned_name(name):
                 continue  # 어휘 가지치기 — 조회(stat)조차 하지 않는다
-            if Path(name).suffix.lower() not in MEDIA_SUFFIXES:
-                continue  # .LRF·썸네일 같은 보조 파일 — 영상 후보가 아니다(§5.2)
+            if Path(name).suffix.lower() not in SOURCE_VIDEO_SUFFIXES:
+                continue  # .LRF·썸네일·사진·소리·자막 — 영상 후보가 아니다(§5.2)
             entries.append(Path(dirpath) / name)
     return entries
 

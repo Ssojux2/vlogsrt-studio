@@ -37,6 +37,12 @@ final/captions/published/)에 내용 해시 이름으로 쓴 파일만** 등록�
 영상 검토 화면이 `previews/visual/` 아래에 쓴 파일만 등록되며, 등록 자체는
 서비스 경로를 통해서만 일어난다."""
 
+SOURCE_VIDEO_SUFFIXES: tuple[str, ...] = (".mp4", ".mov", ".m4v", ".mkv", ".webm", ".avi")
+"""원본(영상) 후보로 고를 확장자 — 폴더 스캔·영상 하나 고르기가 쓴다. `MEDIA_SUFFIXES`의 영상 몫이고
+사진(.jpg)·소리·자막은 뺀다(사용자 지시 2026-11-08 「영상만 받아오도록」). 아이폰 폴더의 JPG는
+ffprobe가 mjpeg 한 장으로 읽어 원본으로 등록됐다. 미디어 제공 목록(`MEDIA_SUFFIXES`)은 그대로다
+— 썸네일·자막 제공은 그 목록이 정한다."""
+
 KIND_PREFIXES: dict[str, tuple[str, ...]] = {
     "original": ("originals/",),
     "preview": ("previews/",),
