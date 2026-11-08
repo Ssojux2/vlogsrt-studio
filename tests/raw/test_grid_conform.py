@@ -169,12 +169,18 @@ def test_the_8850_120fps_declaration_is_refused(
 def test_a_quantized_clock_keeps_the_strict_one_tick_rule(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """30000/1001 @ 1/1000은 프레임 길이가 정수 틱이 아니다 — 맞춤이 닿지 않는다."""
+    """30000/1001 @ 1/1000은 프레임 길이가 정수 틱이 아니다 — 맞춤이 닿지 않는다.
+
+    D107부터 한 틱 허용으로 증명되는 양자화 격자도 원본 경계에서는 균일이 아니다(검토 시계가 정확한
+    프레임 경계를 세울 수 없다) — snap만 아는 판에서는 곧장 지원 밖이다. 기본 정책의 재선택은
+    `tests/raw/test_quantized_grid_library.py`가 본다.
+    """
     rate = "30000/1001"
     pts = [round(Fraction(1001, 30) * n) for n in range(120)]
-    clock = _clock(monkeypatch, tmp_path, _stream_json(pts, rate=rate, tb="1/1000"))
-    assert clock.uniform_grid and clock.conform_kind == "uniform"
-    assert clock.max_deviation_ticks == 0
+    stdout = _stream_json(pts, rate=rate, tb="1/1000")
+    clock = _clock(monkeypatch, tmp_path, stdout, policy=SNAP_ONLY)
+    assert clock.uniform_grid is False
+    assert "정수 틱이 아니다" in clock.grid_note and "격자 맞춤" not in clock.grid_note
 
     pts[60] += 3
     clock = _clock(monkeypatch, tmp_path, _stream_json(pts, rate=rate, tb="1/1000"))

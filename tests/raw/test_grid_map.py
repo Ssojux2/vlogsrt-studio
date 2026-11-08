@@ -271,9 +271,8 @@ def _w27b_accepted() -> list[tuple[str, str, str]]:
     cases = [(name, _stream_json(pts), "snap") for name, pts in shapes.items()]
     uniform = [256 + 512 * n for n in range(100)]
     cases.append(("uniform", _stream_json(uniform, rate="25/1", tb="1/12800"), "uniform"))
-    quantized = [round(Fraction(1001, 30) * n) for n in range(120)]
-    stdout = _stream_json(quantized, rate="30000/1001", tb="1/1000")
-    cases.append(("quantized", stdout, "uniform"))
+    # 양자화된 30000/1001 @ 1/1000은 D107부터 받지 않는다(정수 틱이 아닌 균일은 검토 시계가 세울 수
+    # 없다) — `tests/raw/test_quantized_grid_library.py`가 그 지원 밖 판정을 잠근다.
     return cases
 
 
