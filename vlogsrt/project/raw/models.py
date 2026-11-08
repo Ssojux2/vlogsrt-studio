@@ -699,6 +699,30 @@ class ContextQuote:
 
 
 @dataclass(frozen=True, slots=True)
+class EnglishQuote:
+    """초안 영어 자막(D105)의 견적 — 아직 옮기지 않은 원본만 센다. 금액이 없으면 살 것이 없거나
+    (`missing_sources == 0`) 가격 미정이다(`priced`가 거짓). `text`는 화면에 보이는 그 문구이고
+    `digest`가 그것까지 묶는다."""
+
+    model: str
+    sources: int
+    missing_sources: int
+    missing_lines: int
+    input_tokens: int
+    output_tokens: int
+    usd: str | None
+    priced: bool
+    text: str
+    digest: str
+    keys: tuple[str, ...] = ()
+    """옮길 원본의 번역 열쇠 — 승인한 작업은 이 열쇠만 산다(그 사이 자막이 바뀌면 사지 않는다)."""
+
+    @property
+    def needs_approval(self) -> bool:
+        return self.missing_sources > 0
+
+
+@dataclass(frozen=True, slots=True)
 class AnalysisEstimate:
     """원본 하나의 분석 견적 — 창·프레임·청크 수는 사실, 금액은 상태가 말한다.
 

@@ -547,6 +547,10 @@ FOLDER_IMPORT_STARTED_TEXT = (
 RENDER_EXPORT_LABEL = "추천만 이어붙여 내보내기"
 """명령 줄의 내보내기 단추(W-46a, D100 §7a) — 추천(초록)만 이은 초안 영상 + SRT + 보고서."""
 RENDER_EXPORT_ID = "vl-render-export"
+ENGLISH_SUBTITLES_LABEL = "영어 자막도 만들기 (draft.en.srt)"
+"""내보내기의 영어 자막 칸(W-53, D105) — 작업공간 표지, 기본 끔. 켜면 견적 한 줄이 보인다."""
+ENGLISH_SUBTITLES_ID = "vl-english-subtitles"
+ENGLISH_QUOTE_ID = "vl-english-quote"
 RANGE_MARK_WORDS: dict[str, str] = {
     "recommended": "추천",
     "normal": "보통",
@@ -4994,6 +4998,15 @@ class RawWorkspaceUi:
                     latex_delimiters=[],
                 )
                 self._quote_note_md = gr.Markdown(note, elem_id="vl-quote-note", visible=bool(note))
+                # 영어 자막(W-53, D105) — 칸과 그 견적 한 줄. 내보내기는 보이는 이 문구에 묶인다.
+                self._english_box = gr.Checkbox(
+                    value=self.english_subtitles_value,
+                    label=ENGLISH_SUBTITLES_LABEL,
+                    elem_id=ENGLISH_SUBTITLES_ID,
+                )
+                self._english_quote_md = gr.Markdown(
+                    self.english_quote_markdown, elem_id=ENGLISH_QUOTE_ID, latex_delimiters=[]
+                )
                 # 초안 결과 카드(W-46a, D100 §7a) — 내보낸 적이 없으면 빈 글이다(자리 없음).
                 self._export_card_html = gr.HTML(
                     "", elem_id=RENDER_EXPORT_CARD_ID, apply_default_css=False
@@ -5195,12 +5208,13 @@ class RawWorkspaceUi:
         status = self._capcut_status
         shown = gr.State(None)
         card = [self._export_card_html, self._export_open_button, shown]
+        english = self._english_quote_md
         started = self._render_export_button.click(
             self.render_export_view,
-            self._signature_state,
+            [self._signature_state, english],
             status,
             concurrency_limit=1,
-            js=ui_facade.ACTIVITY_WAKE_JS,
+            js=ui_facade.EXPORT_WAKE_JS,
         )
         self._report_activity(started, status)
         started.then(
@@ -5209,6 +5223,7 @@ class RawWorkspaceUi:
             card,
             show_progress="hidden",
         )
+        self._wire_english_subtitles(status)
         opened = self._export_open_button.click(
             self.render_export_open_view, self._signature_state, status
         )
@@ -5221,21 +5236,95 @@ class RawWorkspaceUi:
             show_progress="hidden",
         )
 
-    def render_export_view(self, signature: str | None) -> str:
+    def _wire_english_subtitles(self, status: Any) -> None:
+        """「영어 자막도 만들기」(D105) — 칸을 고르면 저장·견적, 내보내기를 누르면 지금 견적으로
+        다시 그리고(실패해도 — 다음 누름은 새 문구에 묶인다), 내보내기 작업이 바뀐 틱에서 다시
+        잰다."""
+        assert self._draw_timer is not None
+        english = self._english_quote_md
+        self._render_export_button.click(
+            self.english_quote_markdown, None, english, queue=False, show_progress="hidden"
+        )
+        toggled = self._english_box.input(
+            self.english_subtitles_view, [self._signature_state, self._english_box], english
+        )
+        self._report_activity(toggled, status)
+        quoted = gr.State(None)
+        self._draw_timer.tick(
+            self.english_quote_tick,
+            [self._signature_state, quoted],
+            [english, quoted],
+            queue=False,
+            show_progress="hidden",
+        )
+
+    def render_export_view(self, signature: str | None, english_shown: str | None = None) -> str:
         """「추천만 이어붙여 내보내기」 — 초안 렌더 작업을 건다(무료 로컬). 끝은 결과 카드가 보인다.
 
         확인하지 않은 비추천이 있어도 막지 않는다 — 빠진 구간은 보고서와 카드 경고가 말한다
-        (사용자 결정 2026-10-27, D100). 이미 만드는 중이면 그 작업에 다시 붙는다.
+        (사용자 결정 2026-10-27, D100). 이미 만드는 중이면 그 작업에 다시 붙는다. 영어 자막을
+        켰고 옮길 것이 있으면 이 누름이 **화면에 보인 견적 문구**의 승인이다(D105 — 서버가 문구를
+        다시 재어 대조한다, 다르면 보내지 않는다).
         """
         closed = self._library_first_reply()
         if closed is not None:
             return closed
         root = self._require_current_selection(signature)
         try:
-            handle = self.raw.start_render_export(root)
-        except raw_service.RawWorkspaceError as error:
+            digest, client = self._english_approval(root, english_shown)
+            handle = self.raw.start_render_export(root, digest, client)
+        except (raw_service.RawWorkspaceError, raw_service.AnalysisApprovalError) as error:
             raise gr.Error(str(error)) from error
         return RENDER_EXPORT_ATTACHED_TEXT if handle.reattached else RENDER_EXPORT_STARTED_TEXT
+
+    def _english_approval(self, root: Path, shown: str | None) -> tuple[str | None, object | None]:
+        """(견적 digest, Gemini 클라이언트) — 살 것이 없으면 둘 다 None. 보인 문구가 지금 견적과
+        다르면 보내지 않는다."""
+        if not self.raw.english_subtitles(root):
+            return None, None
+        quote = self.raw.english_quote(root)
+        if not quote.needs_approval:
+            return None, None
+        if ui_facade.unliteral_markdown(shown or "").strip() != quote.text:
+            raise gr.Error("영어 자막 견적이 바뀌었습니다 — 새 견적을 확인한 뒤 다시 누르세요.")
+        client = self._live_transport_for_action().semantic_client(quote.model)
+        return quote.digest, client
+
+    def english_subtitles_value(self) -> bool:
+        """칸의 처음 값 — 화면을 열 때마다 지금 작업공간의 값(없으면 끔)."""
+        root = self._snapshot_root()
+        return bool(self.raw.english_subtitles(root)) if root else False
+
+    def english_quote_markdown(self, root: Path | None = None) -> str:
+        """영어 자막 견적 한 줄 — 꺼져 있거나 작업공간이 없으면 빈 줄(무료, 부르지 않는다)."""
+        root = root if root is not None else self._snapshot_root()
+        if root is None or not self.raw.english_subtitles(root):
+            return ""
+        try:
+            text = self.raw.english_quote(root).text
+        except raw_service.RawWorkspaceError as error:
+            text = f"영어 자막 견적을 재지 못했습니다 — {error}"
+        return ui_facade.literal_markdown(text)
+
+    def english_quote_tick(self, signature: str | None, shown: tuple | None) -> tuple:
+        """견적 한 줄을 내보내기 작업 (아이디, 상태)가 바뀐 틱에서만 다시 잰다 — 산 뒤에는
+        「무료」."""
+        root = self._snapshot_root()
+        if root is None:
+            return (gr.skip(), gr.skip()) if shown is None else ("", None)
+        if not signature or signature != self._signature_for(root):
+            return gr.skip(), gr.skip()
+        latest = self.raw.latest_job(root, raw_service.RENDER_EXPORT_JOB_KIND)
+        key = (signature, latest.job_id if latest else None, latest.status if latest else None)
+        if key == shown:
+            return gr.skip(), gr.skip()
+        return self.english_quote_markdown(root), key
+
+    def english_subtitles_view(self, signature: str | None, on: bool | None) -> str:
+        """「영어 자막도 만들기」를 저장하고(무료) 견적 한 줄을 다시 그린다."""
+        root = self._require_current_selection(signature)
+        self.raw.set_english_subtitles(root, bool(on))
+        return self.english_quote_markdown(root)
 
     def render_export_card_tick(self, signature: str | None, shown: tuple | None) -> tuple:
         """결과 카드 — (카드 글, 「초안 폴더 열기」, 새 열쇠). 열쇠가 같으면 보내지 않는다.

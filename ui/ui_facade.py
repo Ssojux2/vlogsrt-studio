@@ -576,6 +576,12 @@ def format_duration(seconds: float) -> str:
     return f"{minutes}분 {text}" if minutes else text
 
 
+RENDER_EXPORT_ENGLISH_FAILED_TEXT = (
+    "영어 자막(draft.en.srt)은 만들지 못했습니다 — 한국어 초안만 냈습니다. {reason}"
+)
+"""영어 자막을 켰는데 초안에 실린 줄을 다 옮기지 못했을 때(D105) — 한국어 초안은 그대로 낸다."""
+
+
 def render_export_card_html(
     summary: Mapping[str, object] | None, *, running: bool = False, failure: str | None = None
 ) -> str:
@@ -629,13 +635,28 @@ def _export_summary_lines(summary: Mapping[str, object]) -> list[str]:
             f'<p><a href="{src}" target="_blank" rel="noopener">초안 영상 새 탭에서 보기</a></p>'
             f'<video controls preload="metadata" src="{src}" aria-label="초안 영상"></video>'
         )
-    rows = (("영상", "video"), ("자막", "srt"), ("보고서", "report"))
+    lines += _english_lines(summary)
+    rows = (("영상", "video"), ("자막", "srt"), ("영어 자막", "english_srt"), ("보고서", "report"))
     paths = "".join(
         f"<dt>{label}</dt><dd>{html.escape(str(summary.get(key) or ''))}</dd>"
         for label, key in rows
+        if key != "english_srt" or summary.get(key)
     )
     lines.append(f'<dl class="vl-export-paths">{paths}</dl>')
     return lines
+
+
+def _english_lines(summary: Mapping[str, object]) -> list[str]:
+    """영어 자막(D105)을 켰는데 못 냈으면 경고 한 줄 — 옮기지 못한 원본 이름과 까닭."""
+    english = summary.get("english")
+    if not isinstance(english, Mapping) or english.get("status") != "failed":
+        return []
+    listed = english.get("untranslated")
+    rows = [row for row in listed if isinstance(row, Mapping)] if isinstance(listed, list) else []
+    named = "; ".join(f"{row.get('name')}: {row.get('reason')}" for row in rows)
+    reason = named or str(english.get("reason") or "옮긴 글이 없는 자막이 있습니다")
+    warn = RENDER_EXPORT_ENGLISH_FAILED_TEXT.format(reason=reason)
+    return [f'<p class="vl-export-warn" role="alert">{html.escape(warn)}</p>']
 
 
 def activity_html() -> str:
@@ -771,7 +792,15 @@ ACTIVITY_WAKE_JS = (
 스캔하는 동안의 줄이 「작업 진행」 판에 흐른다.
 """
 
+EXPORT_WAKE_JS = (
+    "(signature, englishQuote) => { if (window.__vlServer) { window.__vlServer.wake(true); }"
+    " return [signature, englishQuote]; }"
+)
+"""「추천만 이어붙여 내보내기」의 앞 단계 — 깨우기는 `ACTIVITY_WAKE_JS`와 같고, 입력 둘(작업공간
+서명 · 보인 영어 자막 견적 문구, D105)을 그대로 넘긴다."""
+
 _MARKDOWN_PUNCTUATION = re.compile(r"([!-/:-@\[-`{-~])")
+_MARKDOWN_ESCAPED = re.compile(r"\\([!-/:-@\[-`{-~])")
 
 
 def literal_markdown(text: str) -> str:
@@ -782,6 +811,11 @@ def literal_markdown(text: str) -> str:
     (`APPROVE_GUARD_JS`)가 같은 규칙으로 되풀어 원문을 보낸다.
     """
     return _MARKDOWN_PUNCTUATION.sub(r"\\\1", text)
+
+
+def unliteral_markdown(text: str) -> str:
+    """`literal_markdown`을 되푼다 — 칸 값(escape한 마크다운)에서 원문을 얻어 견적과 견준다."""
+    return _MARKDOWN_ESCAPED.sub(r"\1", text)
 
 
 APPROVE_GUARD_JS = r"""(signature, shownQuote) => {

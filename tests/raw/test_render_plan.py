@@ -503,6 +503,36 @@ def test_srt_text_uses_half_up_milliseconds_and_polished_text() -> None:
     assert (counts.zero_length, counts.empty, counts.kept) == (1, 1, 3)
 
 
+def _timelines(srt: str) -> list[str]:
+    return [line for line in srt.splitlines() if " --> " in line]
+
+
+def test_srt_text_with_keeps_numbers_and_times_and_repeats_split_lines() -> None:
+    """D105 — 영어 자막은 같은 큐·같은 시각 줄이고, 틈을 넘어 잘린 줄은 같은 글을 되풀이한다."""
+    source = _source(
+        tiers=(_tier(0, 2), _tier(2, 3, "yellow"), _tier(3, 6)),
+        cues=(_cue("u1", F(1), F(4), "틈을 넘는다"), _cue("u2", F(5), F(6), "끝")),
+    )
+    plan = rp.build_plan([source], SETTINGS)
+    texts = {("a", "u1"): "Across the gap", ("a", "u2"): "The end"}
+    english = rp.srt_text_with(plan, texts)
+    korean = rp.srt_text(plan)
+    assert _timelines(english) == _timelines(korean) and len(_timelines(english)) == 3
+    assert [line for line in english.splitlines() if line.startswith(("A", "T"))] == [
+        "Across the gap",
+        "Across the gap",
+        "The end",
+    ]
+    assert rp.srt_text(plan) == korean  # 한국어 바이트는 그대로
+
+
+def test_srt_text_with_refuses_a_cue_without_text() -> None:
+    source = _source(tiers=(_tier(0, 4),), cues=(_cue("u1", 1, 2), _cue("u2", 2, 3)))
+    plan = rp.build_plan([source], SETTINGS)
+    with pytest.raises(rp.RenderPlanError, match="1장"):
+        rp.srt_text_with(plan, {("a", "u1"): "Hi"})
+
+
 def test_caption_text_matches_the_final_cut_export_polish() -> None:
     for text in ("안녕하세요.", "1.5배 빠르게.", "음...\n그래.", "...", "  여러   칸  "):
         assert rp.caption_text(text) == caption_text(text)

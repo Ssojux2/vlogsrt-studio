@@ -180,6 +180,7 @@ from vlogsrt.project.raw.models import (
     ByteRange,
     ClipArtifact,
     ContextQuote,
+    EnglishQuote,
     ExtractJobError,
     FolderEntry,
     FolderListing,
@@ -515,6 +516,11 @@ OLD_PROMPT_REFUSAL = (
 
 WORKSPACE_MODE_KEY = "workspace_mode"
 """작업공간 모드(D97) 표지 — `auto|landscape|portrait`, 없거나 모르는 값이면 자동이다."""
+
+ENGLISH_SUBTITLES_KEY = "english_subtitles"
+ENGLISH_SUBTITLES_ON = "on"
+ENGLISH_SUBTITLES_OFF = "off"
+"""「영어 자막도 만들기」(D105) 작업공간 표지 — 없거나 모르는 값이면 끔(한국어 초안만, 무료)이다."""
 
 FINALCUT_DROP_DISABLED_KEY = "finalcut_drop_disabled"
 FINALCUT_DROP_DISABLED_ON = "on"
@@ -1701,6 +1707,22 @@ class RawWorkspaceService:
             )
         self._workspace(root).set_meta_value(WORKSPACE_MODE_KEY, choice)
         return self.workspace_mode(root)
+
+    def english_subtitles(self, root: Path) -> bool:
+        """초안 내보내기에서 영어 자막도 낼까(D105) — 고른 적이 없으면 끔(기본)."""
+        return self._workspace(root).meta_value(ENGLISH_SUBTITLES_KEY) == ENGLISH_SUBTITLES_ON
+
+    def set_english_subtitles(self, root: Path, on: bool) -> bool:
+        """그 표지를 저장한다(무료 — 번역은 견적을 보고 승인할 때만 산다)."""
+        value = ENGLISH_SUBTITLES_ON if on else ENGLISH_SUBTITLES_OFF
+        self._workspace(root).set_meta_value(ENGLISH_SUBTITLES_KEY, value)
+        return self.english_subtitles(root)
+
+    def english_quote(self, root: Path) -> EnglishQuote:
+        """초안 영어 자막의 무료 견적(D105) — 아직 옮기지 않은 원본만 센다. 부르지 않는다."""
+        from vlogsrt.project.raw import english_track
+
+        return english_track.quote(self, root)
 
     def finalcut_drop_disabled(self, root: Path) -> bool:
         """Final Cut 보내기에서 꺼진 클립을 뺄까(D94) — 고른 적이 없으면 빼지 않는다(기본)."""
@@ -3849,18 +3871,60 @@ class RawWorkspaceService:
             self, root, context, titles_srt=lines, drop_disabled=drop
         ).fcpxml
 
-    def start_render_export(self, root: Path) -> JobHandle:
+    def start_render_export(
+        self, root: Path, english_digest: str | None = None, client: object | None = None
+    ) -> JobHandle:
         """추천만 이어붙인 초안(W-44, D100 §5b) — 새 `export/<시각>/`에 영상·SRT·보고서를 내는 작업.
 
         확인하지 않은 제외 제안이 있어도 막지 않는다(사용자 결정 2026-10-27) — 뺀 구간은 보고서에
         남는다. 원본은 읽기만 한다. 결과는 `latest_render_export`가 읽는다.
+
+        「영어 자막도 만들기」가 켜져 있으면 `draft.en.srt`도 낸다(D105). 아직 옮기지 않은 원본이
+        있으면 사람이 본 견적(`english_digest`)이 지금 견적과 같아야 하고, 온라인일 때만 그 원본을
+        옮긴다(유료). 다 옮겨 있으면 승인 없이 저장된 번역을 쓴다(무료). 꺼져 있으면 지금과 같다.
         """
         from vlogsrt.project.raw import render_export
 
+        buy = self._english_purchase(root, english_digest, client)
+
         def body(context: JobContext) -> None:
-            render_export.export_draft(self, root, context)
+            english = self._english_for_export(root, buy)
+            render_export.export_draft(self, root, context, english=english)
 
         return self.submit_job(root, RENDER_EXPORT_JOB_KIND, "render_export/draft", body)
+
+    def _english_purchase(
+        self, root: Path, digest: str | None, client: object | None
+    ) -> tuple[bool, object | None, tuple[str, ...]]:
+        """(영어를 낼까, 옮길 때 쓸 클라이언트, 승인한 열쇠) — 살 것이 있으면 승인·온라인을 작업
+        전에 본다."""
+        from vlogsrt.project.raw import english_track
+
+        if not self.english_subtitles(root):
+            return False, None, ()
+        quote = english_track.quote(self, root)
+        if not quote.needs_approval:
+            return True, None, ()
+        if digest != quote.digest:
+            raise RawWorkspaceError(
+                "영어 자막 견적이 바뀌었습니다 — 새 견적을 확인한 뒤 다시 내보내세요"
+            )
+        english_track.require_online(self, root, quote)
+        if client is None:
+            raise RawWorkspaceError("영어 자막을 옮길 Gemini 연결이 없습니다")
+        return True, client, quote.keys
+
+    def _english_for_export(
+        self, root: Path, buy: tuple[bool, object | None, tuple[str, ...]]
+    ) -> Any:
+        """작업 안 — 승인한 것만 옮기고(유료, 실패는 이름과 까닭으로) 내보내기 재료를 짓는다."""
+        from vlogsrt.project.raw import english_track
+
+        wanted, client, keys = buy
+        if not wanted:
+            return None
+        failed = english_track.translate_missing(self, root, client, keys) if client else []
+        return english_track.track(self, root, failed)
 
     def has_render_export(self, root: Path) -> bool:
         """다 낸 초안(보고서가 있는 폴더)이 하나라도 있는가 — 파일만 본다(DB를 열지 않는다, W-46a).

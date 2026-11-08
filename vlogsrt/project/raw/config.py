@@ -1802,6 +1802,51 @@ RENDER_SETTINGS = RenderSettings()
 """지금 쓰는 초안 렌더 설정 — 계획(`render_plan.build_plan`)과 렌더러의 기본값이다."""
 
 
+@dataclass(frozen=True, slots=True)
+class TranslationSettings:
+    """초안의 영어 자막(W-53, D105) — 원본 자막 줄을 Gemini로 영어로 옮기는 설정.
+
+    `english_line_chars = 42`만 외부 근거가 있다(Netflix 영어 TTSG 한 줄 42자). 나머지는 **외부
+    근거 없는 조정 대상**이다. 판(`prompt_revision`)·모델·묶음·맥락 줄은 번역 캐시 열쇠에
+    실리고(바꾸면 다시 번역한다), 어느 분석 지문·결제 열쇠·등급·한국어 자막에도 없다. 줄 나눔은
+    내보낼 때만 한다."""
+
+    model: str = GEMINI_FLASH_ANALYSIS_PROFILE.model
+    prompt_revision: str = "translation/v1"
+    batch_lines: int = 150
+    """한 요청에 옮길 줄 수 — 긴 영상은 이만큼씩 나눠 묻는다(응답 한도 안에 들게)."""
+    context_lines: int = 5
+    """묶음마다 앞에 붙이는 직전 줄 수 — 옮기지 않고 맥락으로만 읽힌다."""
+    english_line_chars: int = 42
+    max_output_tokens: int = 16000
+    """응답 한도(생각 포함) — 150줄 영어 JSON(약 4천 토큰)에 생각 몫을 넉넉히."""
+    thinking_level: str = "LOW"
+    """번역은 판정이 아니라 생각을 적게 — 출력 한도 안의 생각 몫이 줄어 견적 상한도 같다."""
+    quote_chars_per_token: int = 1
+    """견적의 입력 토큰 추정 — 글자 하나 = 토큰 하나(맥락 평가와 같은 보수적인 쪽)."""
+
+    def __post_init__(self) -> None:
+        for name in (
+            "batch_lines",
+            "english_line_chars",
+            "max_output_tokens",
+            "quote_chars_per_token",
+        ):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"{name}는 1 이상의 정수여야 한다: {value!r}")
+        if isinstance(self.context_lines, bool) or self.context_lines < 0:
+            raise ValueError(f"context_lines는 0 이상의 정수여야 한다: {self.context_lines!r}")
+        if self.thinking_level not in GEMINI_THINKING_LEVELS:
+            raise ValueError(f"thinking_level이 허용 값이 아니다: {self.thinking_level!r}")
+        if not self.prompt_revision.strip() or not self.model.strip():
+            raise ValueError("번역 판·모델이 비었다")
+
+
+TRANSLATION = TranslationSettings()
+"""지금 쓰는 영어 자막 번역 설정(D105)."""
+
+
 @dataclass(frozen=True)
 class LocalMediaConcurrency:
     """로컬 미디어 작업(분석 프록시·원본 전체 미리보기 만들기)이 한 번에 돌리는 ffmpeg 수(D100 §2).

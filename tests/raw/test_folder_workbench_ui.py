@@ -414,7 +414,8 @@ def test_the_export_button_starts_the_render_job(
     root = server.workspace_root()
     calls: list[Path] = []
 
-    def start(at: Path) -> raw_service.JobHandle:
+    def start(at: Path, digest: str | None = None, client: object = None) -> raw_service.JobHandle:
+        assert (digest, client) == (None, None)  # 영어 자막이 꺼져 있으면 살 것이 없다(D105)
         calls.append(at)
         return raw_service.JobHandle(job_id="job-1", reattached=len(calls) > 1)
 
@@ -424,10 +425,11 @@ def test_the_export_button_starts_the_render_job(
     assert server.render_export_view(signature) == workspace_service.RENDER_EXPORT_ATTACHED_TEXT
     assert calls == [root, root]
     deps = app.config["dependencies"]
-    (click,) = [d for d in deps if d["targets"] == [(buttons[RENDER_EXPORT_LABEL]._id, "click")]]
-    assert app.fns[click["id"]].fn == server.render_export_view
-    assert click["inputs"] == [server._signature_state._id]
+    clicks = [d for d in deps if d["targets"] == [(buttons[RENDER_EXPORT_LABEL]._id, "click")]]
+    (click,) = [d for d in clicks if app.fns[d["id"]].fn == server.render_export_view]
+    assert click["inputs"] == [server._signature_state._id, server._english_quote_md._id]
     assert click["outputs"] == [server._capcut_status._id]
+    assert any(app.fns[d["id"]].fn == server.english_quote_markdown for d in clicks)
     tails = [d for d in deps if d.get("trigger_after") == click["id"]]
     assert any(d.get("js") == ui_facade.ACTIVITY_REPLY_JS for d in tails)  # 답은 활동 칸으로
     assert any(app.fns[d["id"]].fn == server.render_export_card_tick for d in tails)
@@ -450,11 +452,68 @@ def test_import_export_and_approve_wake_the_activity_poller(
     for dep in imports:
         assert dep["js"] == ui_facade.ACTIVITY_WAKE_JS
         assert dep["inputs"] == [server._folder_path_box._id]
-    (export,) = [d for d in deps if d["targets"] == [(buttons[RENDER_EXPORT_LABEL]._id, "click")]]
-    assert export["js"] == ui_facade.ACTIVITY_WAKE_JS
+    clicks = [d for d in deps if d["targets"] == [(buttons[RENDER_EXPORT_LABEL]._id, "click")]]
+    (export,) = [d for d in clicks if app.fns[d["id"]].fn == server.render_export_view]
+    assert export["js"] == ui_facade.EXPORT_WAKE_JS  # 입력 둘을 그대로 넘긴다(D105)
+    assert "__vlServer.wake(true)" in ui_facade.EXPORT_WAKE_JS
+    assert ui_facade.EXPORT_WAKE_JS.rstrip().endswith("return [signature, englishQuote]; }")
     assert "__vlServer.wake(true)" in ui_facade.ACTIVITY_WAKE_JS
     assert ui_facade.ACTIVITY_WAKE_JS.rstrip().endswith("return value; }")
     assert "window.__vlServer.wake(true)" in ui_facade.APPROVE_GUARD_JS
+
+
+def test_the_english_box_saves_the_flag_and_shows_a_quote_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, local_socket: None
+) -> None:
+    """D105 — 칸을 켜면 표지를 저장하고 견적 한 줄을 그린다. 끄면 빈 줄이고 살 것이 없다."""
+    server, app, by_id, _buttons = _built(tmp_path)
+    root = server.workspace_root()
+    signature = server.current_signature()
+    assert by_id[workspace_service.ENGLISH_SUBTITLES_ID].label == (
+        workspace_service.ENGLISH_SUBTITLES_LABEL
+    )
+    assert server.english_quote_markdown(root) == ""
+    line = server.english_subtitles_view(signature, True)
+    assert server.raw.english_subtitles(root) is True
+    text = server.raw.english_quote(root).text
+    assert line == ui_facade.literal_markdown(text) and text.startswith("영어 자막")
+    assert ui_facade.unliteral_markdown(line) == text
+    assert server.english_subtitles_view(signature, False) == ""
+    assert server.raw.english_subtitles(root) is False
+
+
+def test_the_export_click_is_bound_to_the_english_quote_it_showed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, local_socket: None
+) -> None:
+    """D105 — 살 것이 있으면 보인 문구가 지금 견적과 같아야 하고, 그때만 digest·클라이언트를
+    넘긴다."""
+    server, _app, _by_id, _buttons = _built(tmp_path)
+    quote = raw_service.EnglishQuote(
+        model="gemini-3.8-flash", sources=1, missing_sources=1, missing_lines=4,
+        input_tokens=900, output_tokens=16000, usd="0.07", priced=True,
+        text="영어 자막: 영상 1개 자막 4줄을 옮깁니다(공식 단가로 약 $0.07).", digest="d" * 64,
+    )  # fmt: skip
+    seen: list[tuple[str | None, object]] = []
+    monkeypatch.setattr(server.raw, "english_subtitles", lambda at: True)
+    monkeypatch.setattr(server.raw, "english_quote", lambda at: quote)
+    monkeypatch.setattr(server, "_live_transport_for_action", lambda: _Transport())
+
+    def start(at: Path, digest: str | None = None, client: object = None) -> raw_service.JobHandle:
+        seen.append((digest, client))
+        return raw_service.JobHandle(job_id="job-1", reattached=False)
+
+    monkeypatch.setattr(server.raw, "start_render_export", start)
+    signature = server.current_signature()
+    with pytest.raises(gr.Error, match="견적이 바뀌었습니다"):
+        server.render_export_view(signature, "영어 자막: 다른 문구")
+    assert seen == []
+    server.render_export_view(signature, ui_facade.literal_markdown(quote.text))
+    assert seen == [("d" * 64, "client:gemini-3.8-flash")]
+
+
+class _Transport:
+    def semantic_client(self, model: str) -> str:
+        return f"client:{model}"
 
 
 def test_the_export_button_without_a_workspace_answers_folder_first(tmp_path: Path) -> None:
@@ -497,6 +556,21 @@ def test_the_result_card_names_paths_warning_player_and_unsupported() -> None:
     failed = ui_facade.render_export_card_html(SUMMARY, failure="조각 3 실패")
     assert "지난 내보내기 실패 — 조각 3 실패" in failed and "draft.mp4" in failed
     assert ui_facade.format_duration(8.24) == "8.2초"
+    assert "영어 자막" not in card  # 끈 초안에는 영어 줄이 없다(D105)
+    english = {
+        **SUMMARY,
+        "english_srt": "/ws/export/x/draft.en.srt",
+        "english": {"status": "written"},
+    }
+    assert "<dt>영어 자막</dt><dd>/ws/export/x/draft.en.srt</dd>" in (
+        ui_facade.render_export_card_html(english)
+    )
+    broken = {
+        **SUMMARY,
+        "english": {"status": "failed", "untranslated": [{"name": "B.mp4", "reason": "빠졌다"}]},
+    }
+    warned = ui_facade.render_export_card_html(broken)
+    assert "영어 자막(draft.en.srt)은 만들지 못했습니다" in warned and "B.mp4: 빠졌다" in warned
 
 
 def _plant_export(server: RawWorkspaceUi, root: Path, *, red: int) -> Path:

@@ -52,6 +52,9 @@ REPORT_SCHEMA = "vlogsrt-render-export/v1"
 VIDEO_NAME = "draft.mp4"
 SRT_NAME = "draft.srt"
 """영상과 같은 이름(줄기)이라 편집기·플레이어가 옆 자막으로 바로 읽는다."""
+EN_SRT_NAME = "draft.en.srt"
+"""영어 자막(D105) — 같은 줄기 + 언어 코드라 플레이어가 둘째 자막 트랙으로 읽는다. 켰을 때만
+낸다."""
 REPORT_NAME = "render_report.json"
 STAGING_NAME = "_staging"
 """한 번의 내보내기 안의 스테이징 — 조각·이은 영상·글을 다 만든 뒤에야 제 이름으로 낸다."""
@@ -79,7 +82,8 @@ class GatheredSource:
 
 @dataclass(frozen=True, slots=True)
 class ExportResult:
-    """낸 초안 — 폴더와 세 파일, 브라우저 재생용 미디어 아이디, 계획과 쓴 인코더."""
+    """낸 초안 — 폴더와 세 파일(영어 자막을 냈으면 넷), 브라우저 재생용 미디어 아이디, 계획과 쓴
+    인코더."""
 
     folder: Path
     video: Path
@@ -89,6 +93,16 @@ class ExportResult:
     plan: render_plan.RenderPlan
     encoder: str
     seconds: float
+    english_srt: Path | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class EnglishTrack:
+    """영어 자막 재료(D105) — 서비스가 옮겨 넘긴다. `texts`는 (원본, 줄 아이디) → 나눈 영어다.
+    보고서의 `english` 칸은 `report`에 상태를 더한 것이다."""
+
+    texts: Mapping[tuple[str, str], str]
+    report: Mapping[str, Any]
 
 
 @dataclass(frozen=True, slots=True)
@@ -416,9 +430,10 @@ def _sweep(directory: Path) -> None:
     directory.rmdir()
 
 
-def _publish(folder: Path, staging: Path) -> None:
-    """스테이징의 셋을 제 이름으로 — 보고서가 마지막이다(보고서가 있으면 다 낸 초안이다)."""
-    for name in (VIDEO_NAME, SRT_NAME, REPORT_NAME):
+def _publish(folder: Path, staging: Path, english: bool) -> None:
+    """스테이징의 셋(넷)을 제 이름으로 — 보고서가 마지막이다(보고서가 있으면 다 낸 초안이다)."""
+    names = (VIDEO_NAME, SRT_NAME, *((EN_SRT_NAME,) if english else ()), REPORT_NAME)
+    for name in names:
         publish_exclusive(staging / name, folder / name)
         (staging / name).unlink()
 
@@ -471,15 +486,34 @@ def _report(
     }
 
 
+def _english(
+    plan: render_plan.RenderPlan, english: EnglishTrack | None
+) -> tuple[bytes | None, dict[str, Any]]:
+    """영어 SRT 바이트(못 쓰면 None)와 보고서의 `english` 칸 — 한국어 바이트와 무관하다(D105).
+
+    끄면 `off`, 옮긴 글이 없는 큐가 하나라도 있으면 `failed`(한국어 초안은 그대로 낸다)."""
+    if english is None:
+        return None, {"status": "off"}
+    section = dict(english.report)
+    try:
+        body = render_plan.srt_text_with(plan, english.texts)
+    except render_plan.RenderPlanError as error:
+        return None, {**section, "status": "failed", "reason": str(error)}
+    return body.encode("utf-8"), {**section, "status": "written", "cues": len(plan.cues)}
+
+
 def _write_texts(
     staging: Path,
     plan: render_plan.RenderPlan,
     gathered: Sequence[GatheredSource],
     draft: preprocess.RenderedDraft,
     facts: Mapping[str, Any],
+    english: bytes | None,
 ) -> None:
     """SRT(UTF-8 · BOM 없음 · LF — 운영체제와 무관하게 같은 바이트)와 보고서를 스테이징에 쓴다."""
     _write_new(staging / SRT_NAME, render_plan.srt_text(plan).encode("utf-8"))
+    if english is not None:
+        _write_new(staging / EN_SRT_NAME, english)
     document = _report(plan, gathered, draft, facts)
     text = json.dumps(document, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
     _write_new(staging / REPORT_NAME, text.encode("utf-8"))
@@ -495,13 +529,15 @@ def export_draft(
     *,
     now: Callable[[], datetime] = _utc_now,
     settings: RenderSettings = RENDER_SETTINGS,
+    english: EnglishTrack | None = None,
 ) -> ExportResult:
-    """추천만 이어붙인 초안 — 새 시각 폴더에 영상·SRT·보고서. 실패·취소면 그 폴더를 남기지
-    않는다."""
+    """추천만 이어붙인 초안 — 새 시각 폴더에 영상·SRT·보고서(영어 자막을 받았으면 `draft.en.srt`도).
+    실패·취소면 그 폴더를 남기지 않는다."""
     started = time.monotonic()
     finalcut_export._require_no_import(service, root)
     gathered = gather_sources(service, root, context)
     plan = _build(gathered, settings)
+    english_body, english_section = _english(plan, english)
     encoder = preprocess.pick_video_encoder(settings.video_codecs)
     moment = now()
     workspace: RawWorkspace = service.review_workspace_facade(root).workspace
@@ -512,19 +548,35 @@ def export_draft(
         staging.mkdir()
         draft, timings = _produce(plan, gathered, _encoding(settings, encoder), staging, context)
         facts = _facts(folder, moment, encoder, gathered_at - started, timings, started)
-        _write_texts(staging, plan, gathered, draft, facts)
-        _publish(folder, staging)
+        facts = {**facts, **_english_facts(facts, english_section, english_body is not None)}
+        _write_texts(staging, plan, gathered, draft, facts, english_body)
+        _publish(folder, staging, english_body is not None)
         _sweep(staging)
     except BaseException:
         _sweep(folder)
         raise
     registered = service.register_media(root, folder / VIDEO_NAME, "artifact")
     log.info(f"초안을 냈다: {folder / VIDEO_NAME} ({float(plan.total_seconds):.1f}초, {encoder})")
-    return _result(folder, registered.file_id, plan, encoder, time.monotonic() - started)
+    english_srt = folder / EN_SRT_NAME if english_body is not None else None
+    seconds = time.monotonic() - started
+    return _result(folder, registered.file_id, plan, encoder, seconds, english_srt)
+
+
+def _english_facts(
+    facts: Mapping[str, Any], section: Mapping[str, Any], written: bool
+) -> dict[str, Any]:
+    """보고서의 `english` 칸, 냈으면 `outputs.english_srt`도."""
+    outputs = {**facts["outputs"], **({"english_srt": EN_SRT_NAME} if written else {})}
+    return {"english": dict(section), "outputs": outputs}
 
 
 def _result(
-    folder: Path, file_id: str, plan: render_plan.RenderPlan, encoder: str, seconds: float
+    folder: Path,
+    file_id: str,
+    plan: render_plan.RenderPlan,
+    encoder: str,
+    seconds: float,
+    english_srt: Path | None = None,
 ) -> ExportResult:
     return ExportResult(
         folder=folder,
@@ -535,6 +587,7 @@ def _result(
         plan=plan,
         encoder=encoder,
         seconds=seconds,
+        english_srt=english_srt,
     )
 
 
@@ -605,4 +658,11 @@ def _summary(workspace: RawWorkspace, folder: Path, report: Mapping[str, Any]) -
         "unreviewed_red_dropped": report.get("unreviewed_red_dropped", 0),
         "unsupported": [row.get("name") for row in report.get("unsupported", [])],
         "cues": report.get("cue_counts", {}),
+        "english_srt": _english_path(folder, report),
+        "english": report.get("english", {"status": "off"}),
     }
+
+
+def _english_path(folder: Path, report: Mapping[str, Any]) -> str | None:
+    name = (report.get("outputs") or {}).get("english_srt")
+    return str(folder / str(name)) if name else None
