@@ -372,6 +372,15 @@ def test_boundary_candidates_follow_utterance_ends_and_window_edges(tmp_path: Pa
     assert "boundary_000288000" in set(plan2.windows[1].boundary_ids)  # 18초 발화 종료
 
 
+def test_utterances_sharing_an_end_make_one_boundary(tmp_path: Path) -> None:
+    """같은 끝 틱의 발화 둘은 경계 하나다 — 틱·아이디가 겹쳐 계획이 멈추지 않는다(W-57, D109)."""
+    audio = make_audio(tmp_path, seconds=20.0)
+    utterances = [utterance(0, 5.4, 5.6), utterance(1, 5.4, 5.6), utterance(2, 6.6, 7.1)]
+    plan = plan_windows(audio, utterances, SETTINGS, None, video_status=stage1.VIDEO_ABSENT)
+    ends = [c.boundary_id for c in plan.candidates if c.kind == "utterance_end"]
+    assert ends == ["boundary_000089600", "boundary_000113600"]
+
+
 def test_window_utterances_include_zero_length_evidence(tmp_path: Path) -> None:
     """길이 0 발화도 시작점이 문맥 안이면 증거로 싣는다 — 글자는 버리지 않는다."""
     audio = make_audio(tmp_path, seconds=20.0)

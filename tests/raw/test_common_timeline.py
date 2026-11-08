@@ -200,6 +200,29 @@ def test_common_window_boundaries_follow_utterance_ends_in_common_clock() -> Non
     assert all(candidate.position > Fraction(2) for candidate in ends)  # 공통 시계 좌표
 
 
+def test_common_utterances_sharing_an_end_make_one_boundary() -> None:
+    """두 발화의 끝이 같은 PCM 틱이면 경계는 하나다 — 같은 자리·같은 종류의 경계다(W-57, D109).
+
+    실측 IMG_1080: Gemini가 「예.」와 「각자」 두 단어에 같은 시각(5.4–5.6초)을 줘서 두 줄의 끝이
+    같았고, 같은 아이디가 둘 생겨 원본 전체 분석이 멈췄다. 발화 증거는 그대로 둘 다 창에 남는다."""
+    video = _grid(250)
+    audio = _audio(seconds=Fraction(10))
+    timeline = common_timeline(source_id="source_a", video=video, audio=audio)
+    utterances = [
+        _utterance(0, Fraction("2.4"), Fraction("4.4")),
+        _utterance(4, Fraction("5.6"), Fraction("5.6")),  # 길이 0은 같은 끝을 가리지 않는다
+        _utterance(1, Fraction("5.4"), Fraction("5.6")),
+        _utterance(2, Fraction("5.4"), Fraction("5.6")),
+        _utterance(3, Fraction("6.6"), Fraction("7.1")),
+    ]
+    plan = plan_common_windows(timeline, utterances, RawUnderstandingSettings())
+    ends = [c for c in plan.candidates if c.kind == "utterance_end"]
+    assert [c.position for c in ends] == [Fraction("4.4"), Fraction("5.6"), Fraction("7.1")]
+    ids = [c.boundary_id for c in plan.candidates]
+    assert len(set(ids)) == len(ids)
+    assert plan.windows[0].utterance_ids == tuple(u.utterance_id for u in utterances)
+
+
 def test_common_window_ids_are_deterministic_and_unique() -> None:
     video = _grid(400)
     audio = _audio(seconds=Fraction(16))

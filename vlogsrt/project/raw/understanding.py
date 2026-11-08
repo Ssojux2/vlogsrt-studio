@@ -1276,12 +1276,31 @@ def _window_utterances(
     return tuple(ids)
 
 
+def _distinct_ends(
+    utterances: Sequence[UtteranceEvidence],
+) -> tuple[UtteranceEvidence, ...]:
+    """길이가 있는 발화 중 끝 PCM 틱마다 첫 하나 — 경계 후보만 이것을 쓴다(발화 증거는 모두 창에
+    남는다). 길이 0 발화는 경계가 못 되므로 먼저 걸러, 같은 끝의 길이 있는 발화를 가리지 않는다.
+
+    Gemini가 두 단어에 같은 시각을 주면 두 줄의 끝이 같다(실측 IMG_1080) — 같은 자리의 같은
+    종류라 한 경계이고, 둘로 세면 아이디가 겹쳐 원본 전체 분석이 멈췄다."""
+    seen: set[int] = set()
+    kept: list[UtteranceEvidence] = []
+    for item in utterances:
+        if item.end > item.start and item.end_sample not in seen:
+            seen.add(item.end_sample)
+            kept.append(item)
+    return tuple(kept)
+
+
 def _window_candidates(
     window: AnalysisWindow, utterances: Sequence[UtteranceEvidence]
 ) -> tuple[BoundaryCandidate, ...]:
-    """창이 소유할 경계 후보 — 발화 종료(코어 안)와 창 끝 길이 경계."""
+    """창이 소유할 경계 후보 — 발화 종료(코어 안)와 창 끝 길이 경계.
+
+    끝 틱이 같은 발화는 경계 하나다(W-57, D109 — 같은 자리·같은 종류)."""
     candidates: list[BoundaryCandidate] = []
-    for item in utterances:
+    for item in _distinct_ends(utterances):
         if window.core_start <= item.end < window.core_end and item.end > item.start:
             candidates.append(
                 BoundaryCandidate(
@@ -1504,10 +1523,12 @@ def _common_window_candidates(
     core_end: Fraction,
     spoken: Sequence[UtteranceEvidence],
 ) -> tuple[BoundaryCandidate, ...]:
-    """창이 소유할 경계 후보 — 발화 종료(코어 안)와 창 끝 길이 경계(공통 시계)."""
+    """창이 소유할 경계 후보 — 발화 종료(코어 안)와 창 끝 길이 경계(공통 시계).
+
+    끝 틱이 같은 발화는 경계 하나다(W-57, D109) — 아이디가 끝 틱에서 오므로 둘이면 겹친다."""
     window_id = f"window_{ordinal:06d}"
     owned: list[BoundaryCandidate] = []
-    for item in spoken:
+    for item in _distinct_ends(spoken):
         if core_start <= item.end < core_end and item.end > item.start:
             candidate = _common_candidate(
                 timeline, window_id, "utterance_end", item.end, f"u{item.end_sample:09d}"
