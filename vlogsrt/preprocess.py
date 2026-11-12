@@ -5591,14 +5591,29 @@ def executable_version(executable: str) -> str:
 
 
 @dataclass(frozen=True, slots=True)
+class BurnCut:
+    """번인과 함께 이을 원본 구간(W-67, D118) — 프레임 `[시작, 끝)` 차례대로와 그 프레임 길이.
+
+    최종 편집(D117)이 남긴 초안 구간이다. 시각을 만들지 않는다 — 프레임 번호를 그대로 자르고
+    (`trim`), 소리는 같은 프레임 경계의 초에서 자르며, 이은 결과가 편집본 SRT의 시각이다.
+    `inline_chars`를 넘는 필터 그래프는 작업 폴더의 파일로 넘긴다(명령 줄 한도)."""
+
+    frame_duration: Fraction
+    ranges: tuple[tuple[int, int], ...]
+    inline_chars: int
+
+
+@dataclass(frozen=True, slots=True)
 class BurnRequest:
-    """번인 한 번의 재료 — ffmpeg, 원본 영상, ASS·글꼴 폴더가 든 작업 폴더와 그 안의 이름."""
+    """번인 한 번의 재료 — ffmpeg, 원본 영상, ASS·글꼴 폴더가 든 작업 폴더와 그 안의 이름,
+    그리고 함께 이을 구간(없으면 영상 전체)."""
 
     executable: str
     source: Path
     workdir: Path
     subtitle_name: str
     fonts_name: str
+    cut: BurnCut | None = None
 
     def video_filter(self) -> str:
         for name in (self.subtitle_name, self.fonts_name):
@@ -5626,20 +5641,86 @@ def _burn_command(
     encoding: RenderEncoding,
     audio: BurnAudio,
 ) -> list[str]:
-    """영상은 자막을 얹어 다시 인코딩(프레임 시각 그대로), 소리는 그대로 또는 AAC 한 번."""
+    """영상은 자막을 얹어 다시 인코딩(프레임 시각 그대로), 소리는 그대로 또는 AAC 한 번.
+    이을 구간이 있으면 자르고 이은 뒤 같은 인코딩에서 입힌다(소리는 다시 인코딩한다)."""
     command = [
         request.executable, "-hide_banner", "-nostdin", "-y",
-        "-i", os.path.abspath(request.source), "-map", "0:v:0",
+        "-i", os.path.abspath(request.source),
     ]  # fmt: skip
-    if audio != "none":
-        command += ["-map", "0:a:0"]
-    command += ["-vf", request.video_filter(), "-fps_mode", "passthrough"]
+    if request.cut is not None:
+        command += _cut_graph_args(request, request.cut, audio)
+    else:
+        command += ["-map", "0:v:0", *(["-map", "0:a:0"] if audio != "none" else [])]
+        command += ["-vf", request.video_filter()]
+    command += ["-fps_mode", "passthrough"]
     command += [*_render_video_args(encoding, target), "-pix_fmt", "yuv420p"]
     if audio == "copy":
         command += ["-c:a", "copy"]
     elif audio == "encode":
         command += ["-c:a", encoding.audio_codec, "-b:a", f"{encoding.audio_bitrate_kbps}k"]
     return [*command, "-movflags", "+faststart", "-f", "mp4", os.path.abspath(staged)]
+
+
+_CUT_GRAPH_NAME = "cut.graph"
+_GRAPH_FILE_MAJOR = 7
+"""`-/filter_complex <파일>`을 받는 첫 ffmpeg 판(7.0) — 그 앞은 `-filter_complex_script`였다."""
+_FFMPEG_MAJOR = re.compile(r"ffmpeg version (\d+)\.")
+_MICROS = 1_000_000
+
+
+def _cut_graph(cut: BurnCut, subtitles: str, audio: bool) -> str:
+    """원본 하나를 갈라(`split`) 구간마다 자르고(`trim`·`atrim`) 0부터 다시 세어 이은 뒤
+    (`concat` — 구간마다 소리를 영상 길이로 맞춘다) 자막을 얹는다."""
+    count = len(cut.ranges)
+    parts = [f"[0:v:0]split={count}" + "".join(f"[vs{i}]" for i in range(count))]
+    if audio:
+        parts.append(f"[0:a:0]asplit={count}" + "".join(f"[as{i}]" for i in range(count)))
+    joined = []
+    for index, (start, end) in enumerate(cut.ranges):
+        parts.append(
+            f"[vs{index}]trim=start_frame={start}:end_frame={end},setpts=PTS-STARTPTS[v{index}]"
+        )
+        joined.append(f"[v{index}]")
+        if audio:
+            begin, finish = (_micro_seconds(f * cut.frame_duration) for f in (start, end))
+            parts.append(
+                f"[as{index}]atrim=start={begin}:end={finish},asetpts=PTS-STARTPTS[a{index}]"
+            )
+            joined.append(f"[a{index}]")
+    outputs = "[cv][ca]" if audio else "[cv]"
+    parts.append(f"{''.join(joined)}concat=n={count}:v=1:a={int(audio)}{outputs}")
+    parts.append(f"[cv]{subtitles}[vout]")
+    return ";".join(parts)
+
+
+def _micro_seconds(value: Fraction) -> str:
+    """초 → 마이크로초 십진수(반올림) — `atrim`이 읽는 가장 고운 단위다."""
+    micros = math.floor(value * _MICROS + Fraction(1, 2))
+    whole, part = divmod(micros, _MICROS)
+    return f"{whole}.{part:06d}"
+
+
+def _cut_graph_args(request: BurnRequest, cut: BurnCut, audio: BurnAudio) -> list[str]:
+    """`-filter_complex`와 `-map` — 그래프가 길면 작업 폴더의 파일로 넘긴다(ffmpeg 7 이상)."""
+    if audio == "copy":
+        raise ValueError("구간을 이으면 소리를 그대로 실을 수 없다 — 다시 인코딩해야 한다")
+    graph = _cut_graph(cut, request.video_filter(), audio != "none")
+    maps = ["-map", "[vout]", *(["-map", "[ca]"] if audio != "none" else [])]
+    if len(graph) <= cut.inline_chars:
+        return ["-filter_complex", graph, *maps]
+    _require_graph_file_support(request.executable)
+    (request.workdir / _CUT_GRAPH_NAME).write_text(graph, encoding="utf-8")
+    return ["-/filter_complex", _CUT_GRAPH_NAME, *maps]
+
+
+def _require_graph_file_support(executable: str) -> None:
+    """판 번호가 7보다 낮으면 거부한다 — 개발 빌드(`N-…`)처럼 번호가 없으면 새 판으로 본다."""
+    found = _FFMPEG_MAJOR.match(executable_version(executable))
+    if found is not None and int(found.group(1)) < _GRAPH_FILE_MAJOR:
+        raise RuntimeError(
+            f"컷이 많은 편집을 입히려면 ffmpeg {_GRAPH_FILE_MAJOR} 이상이 필요합니다 —"
+            f" `{_burn_install_hint()}` 후 앱을 다시 띄우세요."
+        )
 
 
 @process_step("자막 입히기")
@@ -5651,17 +5732,19 @@ def burn_subtitles(
     *,
     duration: Fraction,
     audio: BurnAudio,
+    timeout_basis: Fraction | None = None,
     on_poll: Callable[[], None] | None = None,
 ) -> BurnedVideo:
-    """자막을 입힌 영상을 `output`에 새로 쓴다 — 다시 재어 원본과 길이·크기가 같을 때만 게시한다.
-    `output`이 이미 있으면 덮지 않고 거부한다. 원본은 읽기만 한다."""
+    """자막을 입힌 영상을 `output`에 새로 쓴다 — 다시 재어 기대 길이(`duration`)·크기와 같을 때만
+    게시한다. `output`이 이미 있으면 덮지 않고 거부한다. 원본은 읽기만 한다. 한도는
+    `timeout_basis`(구간을 이으면 원본 전체를 디코드하므로 원본 길이) 또는 `duration`에서 잰다."""
     _assert_safe_staging(request.source, output)
     staged = _reserve_staging_temp(output)
     try:
         command = _burn_command(request, staged, target, encoding, audio)
         _run(
             command,
-            timeout=encoding.timeout(duration),
+            timeout=encoding.timeout(timeout_basis or duration),
             priority=encoding.priority,
             on_poll=on_poll,
             cwd=request.workdir,

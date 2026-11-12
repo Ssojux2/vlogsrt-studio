@@ -42,15 +42,17 @@ KOREAN = (
 class _Translator:
     """받은 묶음의 줄마다 「EN <아이디>」를 돌려준다 — `broken`이면 마지막 줄을 빠뜨린다."""
 
-    def __init__(self, broken: bool = False) -> None:
+    def __init__(self, broken: bool = False, echo: bool = False) -> None:
         self.broken = broken
+        self.echo = echo
         self.sent: list[dict[str, Any]] = []
 
     def __call__(self, request: Any, timeout: float) -> _Reply:
         payload = json.loads(request.data)
         self.sent.append(payload)
         lines = json.loads(payload["contents"][0]["parts"][1]["text"])["lines"]
-        items = [{"id": row["id"], "en": f"EN {row['id']} ok"} for row in lines]
+        said = (lambda row: row["ko"]) if self.echo else (lambda row: row["id"])
+        items = [{"id": row["id"], "en": f"EN {said(row)} ok"} for row in lines]
         body = {"items": items[:-1] if self.broken else items}
         reply = {
             "candidates": [
@@ -219,3 +221,22 @@ def test_english_names() -> None:
     assert srt_english.english_name(Path("draft.srt")) == "draft.en.srt"
     assert srt_english.english_name(Path("여행.ko.srt")) == "여행.en.srt"
     assert srt_english.english_name(Path("a.b.SRT")) == "a.b.en.SRT"
+
+
+def test_only_the_english_of_the_current_korean_text_matches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D118 — 번인의 기본 영어는 지금 한국어 글을 옮긴 파일뿐이다(무료로 대조한다)."""
+    service, root = _workspace(tmp_path, monkeypatch)
+    srt = _srt(tmp_path / "edit", name="final.srt")
+    assert srt_english.matching_english(service, root, srt) == (None, ())
+    first = Path(_convert(service, root, srt, _client(_Translator(echo=True)))["path"])
+    assert srt_english.matching_english(service, root, srt) == (first, ())
+    srt.write_text(KOREAN.replace("바다", "산"), encoding="utf-8")  # 글을 고쳤다
+    assert srt_english.matching_english(service, root, srt) == (None, (first,))
+    second = Path(_convert(service, root, srt, _client(_Translator(echo=True)))["path"])
+    assert second != first and second.name.startswith("final.en.")
+    assert srt_english.english_candidates(srt) == [second, first]
+    assert srt_english.matching_english(service, root, srt) == (second, ())
+    second.write_text("손으로 고친 영어", encoding="utf-8")
+    assert srt_english.matching_english(service, root, srt) == (None, (second, first))

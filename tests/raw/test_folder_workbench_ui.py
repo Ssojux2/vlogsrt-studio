@@ -840,3 +840,30 @@ def test_the_export_open_button_is_named_apart_from_the_old_folder_button() -> N
     assert (
         RENDER_EXPORT_OPEN_LABEL != "폴더 열기"
     )  # 옛 「폴더 열기」(확정 내보내기)와 겹치지 않는다
+
+
+def test_the_blank_convert_box_takes_the_saved_final_edit_srt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, local_socket: None
+) -> None:
+    """D118 — 최종 편집을 저장했으면 빈 칸은 편집본 SRT(`edit/final.srt`)를 옮긴다."""
+    server, _app, _by_id, _buttons = _built(tmp_path)
+    root = Path(server.workspace_root())
+    folder = _plant_export(server, root, red=0)
+    seen: list[Path] = []
+    monkeypatch.setattr(server.raw, "srt_translation_cached", lambda root, at: True)
+
+    def start(root: Path, at: Path, client: object, done: Any) -> raw_service.JobHandle:
+        seen.append(at)
+        done({"path": str(at.with_suffix(".en.srt")), "cues": 1, "reused": True})
+        return raw_service.JobHandle(job_id="job-1", reattached=False)
+
+    monkeypatch.setattr(server.raw, "start_srt_translation", start)
+    monkeypatch.setattr(server.raw, "get_job", lambda root, job_id: _Record("succeeded"))
+    signature = server.current_signature()
+    server.srt_english_view(signature, "")
+    edit = folder / "edit"
+    edit.mkdir()
+    (edit / "final.srt").write_text("1\n00:00:00,000 --> 00:00:01,000\n안녕\n", encoding="utf-8")
+    (edit / "final-edit.json").write_text("{}", encoding="utf-8")
+    server.srt_english_view(signature, "")
+    assert seen == [folder / "draft.srt", edit / "final.srt"]

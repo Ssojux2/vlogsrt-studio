@@ -173,12 +173,19 @@ def test_load_for_burn_contract(tmp_path: Path) -> None:
     folder = _plant(workspace)
     with pytest.raises(FinalEditError, match="저장한 최종 편집이 없다"):
         final_edit_io.load_for_burn(folder)
+    assert final_edit_io.saved_edit_srt(folder) is None
     model = final_edit_io.open_edit(workspace)
     _save(workspace, model, {**model["doc"], "clips": [[0, 90], [120, 300]]}, 0)
     burn = final_edit_io.load_for_burn(folder)
     assert burn.video == folder / "draft.mp4" and burn.srt == folder / "edit" / "final.srt"
+    assert final_edit_io.saved_edit_srt(folder) == burn.srt
+    assert final_edit_io.draft_of_edit_srt(burn.srt) == folder
+    assert final_edit_io.draft_of_edit_srt(folder / "draft.srt") is None
+    assert final_edit_io.draft_of_edit_srt(tmp_path / "edit" / "final.srt") is None
+    assert burn.srt_sha256 == hashlib.sha256(burn.srt.read_bytes()).hexdigest()
     assert burn.keep == ((0, 90, Fraction(0), Fraction(3)), (120, 300, Fraction(4), Fraction(10)))
     assert burn.cue_count == 2 and burn.hidden_count == 1 and burn.revision == 1
+    assert burn.total_frames == 300
     (folder / "edit" / "final.srt").write_text("고친 자막", encoding="utf-8")
     with pytest.raises(FinalEditError, match="다르다"):
         final_edit_io.load_for_burn(folder)

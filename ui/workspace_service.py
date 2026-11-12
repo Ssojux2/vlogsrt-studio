@@ -522,7 +522,8 @@ SRT_ENGLISH_ID = "vl-srt-english"
 """「영어 SRT로 변환」 칸(W-63, D114) — 한국어 SRT 하나를 영어 SRT로 옮긴다. 내보내기와 따로다."""
 SRT_ENGLISH_PATH_LABEL = "영어로 옮길 한국어 SRT"
 SRT_ENGLISH_PATH_INFO = (
-    "비워 두면 마지막 초안의 가장 새 SRT(draft.srt · SRT만 다시 낸 것)를 옮깁니다."
+    "비워 두면 마지막 초안의 가장 새 SRT(draft.srt · SRT만 다시 낸 것)를 옮깁니다 — 최종 편집을"
+    " 저장했으면 편집본 SRT(`edit/final.srt`)입니다."
     " 영어 SRT는 그 옆에 `<이름>.en.srt`로 생기고,"
     " 같은 이름의 다른 파일은 덮지 않습니다."
 )
@@ -4886,13 +4887,14 @@ class RawWorkspaceUi:
         return text, text
 
     def _srt_for_english(self, root: Path, path_text: str | None) -> Path:
-        """칸의 경로 — 비었으면 마지막 초안의 `draft.srt`. `.srt` 파일이 아니면 거부한다."""
+        """칸의 경로 — 비었으면 마지막 초안의 편집본 SRT(최종 편집을 저장했으면, D118) 또는 가장
+        새 SRT. `.srt` 파일이 아니면 거부한다."""
         text = (path_text or "").strip()
         if not text:
-            latest = self.raw.latest_render_export(root)
-            if latest is None:
+            default = self.raw.default_korean_srt(root)
+            if default is None:
                 raise gr.Error(SRT_ENGLISH_NO_DRAFT_TEXT)
-            return Path(str(latest["srt"]))
+            return default
         srt = Path(text).expanduser()
         if srt.suffix.lower() != ".srt" or not srt.is_file():
             raise gr.Error(f"SRT 파일(.srt)을 고르세요 — {srt.name}은 SRT 파일이 아닙니다.")

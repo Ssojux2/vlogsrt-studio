@@ -217,3 +217,93 @@ def test_encoder_pick_can_target_another_executable(monkeypatch: pytest.MonkeyPa
         "h264_videotoolbox"
     )
     assert set(seen) == {"/opt/full"}
+
+
+# ── 최종 편집의 컷과 함께 입히기(W-67, D118) ──────────────────────────────
+
+NTSC = Fraction(1001, 30000)
+CUT_GRAPH = (
+    "[0:v:0]split=2[vs0][vs1];[0:a:0]asplit=2[as0][as1];"
+    "[vs0]trim=start_frame=0:end_frame=60,setpts=PTS-STARTPTS[v0];"
+    "[as0]atrim=start=0.000000:end=2.002000,asetpts=PTS-STARTPTS[a0];"
+    "[vs1]trim=start_frame=150:end_frame=240,setpts=PTS-STARTPTS[v1];"
+    "[as1]atrim=start=5.005000:end=8.008000,asetpts=PTS-STARTPTS[a1];"
+    "[v0][a0][v1][a1]concat=n=2:v=1:a=1[cv][ca];"
+    "[cv]subtitles=filename=burn.ass:fontsdir=fonts[vout]"
+)
+
+
+def _cut_request(tmp_path: Path, inline_chars: int = 24_000) -> preprocess.BurnRequest:
+    plain = _request(tmp_path)
+    cut = preprocess.BurnCut(NTSC, ((0, 60), (150, 240)), inline_chars)
+    return preprocess.BurnRequest(
+        plain.executable, plain.source, plain.workdir, plain.subtitle_name, plain.fonts_name, cut
+    )
+
+
+def test_a_cut_burn_trims_joins_and_burns_in_one_graph(tmp_path: Path) -> None:
+    request = _cut_request(tmp_path)
+    staged = tmp_path / "out" / ".x.part"
+    command = preprocess._burn_command(request, staged, TARGET, _encoding(), "encode")
+    assert command[command.index("-filter_complex") + 1] == CUT_GRAPH
+    assert "-vf" not in command and "0:v:0" not in command[: command.index("-filter_complex")]
+    maps = [command[index + 1] for index, part in enumerate(command) if part == "-map"]
+    assert maps == ["[vout]", "[ca]"]
+    assert command[command.index("-c:a") + 1] == "aac"
+    assert command[command.index("-fps_mode") + 1] == "passthrough"
+    with pytest.raises(ValueError, match="소리"):
+        preprocess._burn_command(request, staged, TARGET, _encoding(), "copy")
+
+
+def test_a_cut_burn_without_sound_has_no_audio_branch(tmp_path: Path) -> None:
+    request = _cut_request(tmp_path)
+    command = preprocess._burn_command(request, tmp_path / "x.part", TARGET, _encoding(), "none")
+    graph = command[command.index("-filter_complex") + 1]
+    assert "asplit" not in graph and "atrim" not in graph
+    assert "[v0][v1]concat=n=2:v=1:a=0[cv];" in graph
+    maps = [command[index + 1] for index, part in enumerate(command) if part == "-map"]
+    assert maps == ["[vout]"] and "-c:a" not in command
+
+
+def test_a_long_cut_graph_goes_to_a_file_on_ffmpeg_7(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    request = _cut_request(tmp_path, inline_chars=100)
+    versions = ["ffmpeg version 9.0.2 Copyright"]
+    monkeypatch.setattr(preprocess, "executable_version", lambda program: versions[0])
+    command = preprocess._burn_command(request, tmp_path / "x.part", TARGET, _encoding(), "encode")
+    assert command[command.index("-/filter_complex") + 1] == "cut.graph"
+    assert "-filter_complex" not in command
+    assert (request.workdir / "cut.graph").read_text(encoding="utf-8") == CUT_GRAPH
+    versions[0] = "ffmpeg version N-118000-gdeadbeef Copyright"
+    preprocess._burn_command(request, tmp_path / "x.part", TARGET, _encoding(), "encode")
+    versions[0] = "ffmpeg version 6.1.1-3ubuntu5 Copyright"
+    with pytest.raises(RuntimeError, match="ffmpeg 7"):
+        preprocess._burn_command(request, tmp_path / "x.part", TARGET, _encoding(), "encode")
+
+
+def test_a_cut_burn_waits_for_the_whole_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    request = _cut_request(tmp_path)
+    output = request.source.parent / "final.burned.mp4"
+    calls: list[dict[str, Any]] = []
+
+    def run(command: list[str], **options: Any) -> subprocess.CompletedProcess[str]:
+        calls.append(options)
+        Path(command[-1]).write_bytes(b"burned")
+        return _completed()
+
+    monkeypatch.setattr(preprocess, "_run", run)
+    monkeypatch.setattr(preprocess, "probe_raw_media", lambda path: _probe(duration="5.005"))
+    burned = preprocess.burn_subtitles(
+        request,
+        output,
+        TARGET,
+        _encoding(),
+        duration=Fraction(5005, 1000),
+        audio="encode",
+        timeout_basis=Fraction(600),
+    )
+    assert burned.path == output
+    assert calls[0]["timeout"] == 3600.0

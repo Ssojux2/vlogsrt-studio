@@ -38,6 +38,9 @@ class BurnSettings:
       Homebrew `ffmpeg-full`은 keg-only라 PATH에 없다. 분석·조사는 PATH ffmpeg 그대로다.
     - `output_infix`: `<이름>.burned.mp4`.
     - `fallback_folder`: 영상 옆에 쓸 수 없을 때 작업공간 안 자리.
+    - `inline_graph_chars`: 최종 편집의 컷과 함께 입힐 때(D118) 필터 그래프를 명령 줄에 바로 싣는
+      최대 글자 수 — 넘으면 작업 폴더의 파일로 넘긴다(ffmpeg 7 이상). Windows 명령 줄 한도
+      32767자에서 나머지 인자 몫을 남긴 값이다.
     """
 
     font_file: str = "Pretendard-SemiBold.otf"
@@ -63,6 +66,7 @@ class BurnSettings:
     )
     output_infix: str = ".burned"
     fallback_folder: tuple[str, ...] = ("export", "burned")
+    inline_graph_chars: int = 24_000
 
     def __post_init__(self) -> None:
         problems = _range_problems(self) + _style_problems(self)
@@ -83,6 +87,8 @@ def _range_problems(s: BurnSettings) -> list[str]:
         problems.append("글자 크기는 1px 이상이어야 한다")
     if s.reference_height < 1 or s.preview_long_edge < 2:
         problems.append("기준 높이·미리보기 긴 변은 양수여야 한다")
+    if s.inline_graph_chars < 1:
+        problems.append("inline_graph_chars는 양수여야 한다")
     if not 2 <= s.preview_jpeg_quality <= 31:
         problems.append(f"preview_jpeg_quality는 2–31이어야 한다: {s.preview_jpeg_quality}")
     return problems

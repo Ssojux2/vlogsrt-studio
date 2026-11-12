@@ -1717,6 +1717,16 @@ class RawWorkspaceService:
 
         return TRANSLATION.model
 
+    def default_korean_srt(self, root: Path) -> Path | None:
+        """칸을 비웠을 때의 한국어 SRT — 마지막 초안에 저장한 최종 편집이 있으면 편집본 SRT
+        (`edit/final.srt`, D118), 없으면 그 초안의 가장 새 SRT. 초안이 없으면 None. 읽기만 한다."""
+        from vlogsrt.project.raw import final_edit_io, render_export
+
+        folders = render_export.report_folders(self._workspace(root).root)
+        if not folders:
+            return None
+        return final_edit_io.saved_edit_srt(folders[0]) or render_export.newest_srt(folders[0])
+
     def srt_translation_cached(self, root: Path, srt: Path) -> bool:
         """그 SRT의 글을 이미 옮겼는가(무료, 부르지 않는다) — 화면이 클라이언트를 받을지 정한다."""
         from vlogsrt.project.raw import srt_english
@@ -1778,10 +1788,12 @@ class RawWorkspaceService:
     def prepare_subtitle_burn(
         self, root: Path, video: Path | None, korean: Path | None, english: Path | None
     ) -> Any:
-        """빈 칸(None)은 마지막 초안에서 채워 읽고 짝짓고 조사한 `BurnJob`(무료, 작업 전)."""
+        """빈 칸(None)은 마지막 초안에서 채워 읽고 짝짓고 조사한 `BurnJob`(무료, 작업 전) —
+        한국어 SRT가 최종 편집의 편집본 SRT면(다 비우면 마지막 초안에 저장한 편집) 그 컷과 함께다
+        (D118)."""
         from vlogsrt.project.raw import burn_export
 
-        return burn_export.prepare(*burn_export.resolve_inputs(self, root, video, korean, english))
+        return burn_export.plan(self, root, video, korean, english)
 
     def subtitle_burn_preview(self, job: Any, style: Any) -> bytes:
         """첫 한글 큐 프레임 하나에 자막을 얹은 JPEG(무료 로컬)."""

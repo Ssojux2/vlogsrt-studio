@@ -172,6 +172,44 @@ def _place(folder: Path, name: str, payload: bytes, stamp: str) -> tuple[Path, b
     return target, False
 
 
+def english_payload(
+    job: SrtJob, document: dict[str, Any], settings: TranslationSettings = TRANSLATION
+) -> tuple[bytes, dict[str, Any]]:
+    """저장된 번역 → 영어 SRT 바이트와 센 수. 같은 입력이면 같은 바이트다(쓴 파일과 대조한다)."""
+    english = {str(key): str(value) for key, value in document["english"].items()}
+    texts, counts = translation.english_cue_texts(
+        [cue.text for cue in job.cues], english, settings.english_line_chars
+    )
+    return srt_body(job.cues, texts).encode("utf-8"), counts
+
+
+def english_candidates(korean: Path) -> list[Path]:
+    """한국어 SRT 옆의 영어 SRT(D114 이름) — 시각을 붙인 이름이 새것부터, 맨 뒤가 처음 이름."""
+    plain = korean.parent / english_name(korean)
+    stamped = sorted(korean.parent.glob(f"{plain.stem}.*{plain.suffix}"), reverse=True)
+    return [*stamped, *([plain] if plain.is_file() else [])]
+
+
+def matching_english(
+    service: RawWorkspaceService, root: Path, korean: Path
+) -> tuple[Path | None, tuple[Path, ...]]:
+    """(지금 한국어 글을 옮긴 영어 SRT, 그렇지 않은 옆의 영어 SRT들) — 무료, 부르지 않는다.
+
+    지금 글의 저장된 번역으로 다시 조판한 바이트와 같은 파일만 지금 글의 영어다. 글을 고친 뒤의
+    옛 영어 SRT나 손으로 고친 영어 SRT는 맞지 않는다(그런 파일은 사람이 직접 고르면 쓴다, D118)."""
+    candidates = english_candidates(korean)
+    if not candidates:
+        return None, ()
+    job = prepare(service, root, korean)
+    document = cached(service, root, job)
+    if document is not None:
+        expected, _ = english_payload(job, document)
+        for candidate in candidates:
+            if candidate.read_bytes() == expected:
+                return candidate, ()
+    return None, tuple(candidates)
+
+
 def write_english(
     service: RawWorkspaceService,
     root: Path,
@@ -180,11 +218,7 @@ def write_english(
     settings: TranslationSettings = TRANSLATION,
 ) -> dict[str, Any]:
     """조판해 입력 옆에 쓴다(못 쓰면 작업공간 `export/english/<시각>/`) — 결과 사실을 돌려준다."""
-    english = {str(key): str(value) for key, value in document["english"].items()}
-    texts, counts = translation.english_cue_texts(
-        [cue.text for cue in job.cues], english, settings.english_line_chars
-    )
-    payload = srt_body(job.cues, texts).encode("utf-8")
+    payload, counts = english_payload(job, document, settings)
     stamp = datetime.now(UTC).strftime(STAMP_FORMAT)
     name = english_name(job.path)
     try:

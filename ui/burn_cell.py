@@ -2,7 +2,9 @@
 
 결과 카드 아래 「영어 SRT로 변환」 칸 다음에 선다. 사람이 고르는 것은 자리·글자 크기·외곽선·글자색
 (+ 가장자리 여백)뿐이고 애니메이션·효과는 없다 — 영화 자막처럼 한글 줄 아래에 영어 줄(4/5 크기)이다.
-세 경로 칸은 비우면 마지막 초안(`draft.mp4` · 가장 새 SRT · 그 옆의 `<이름>.en.srt`)이다.
+세 경로 칸은 비우면 마지막 초안(`draft.mp4` · 가장 새 SRT · 그 옆의 `<이름>.en.srt`)이다 — 그 초안에
+최종 편집을 저장했으면 그 컷과 편집본 SRT(`edit/final.srt`)이고, 영어는 지금 편집본 글을 옮긴
+파일만이다(D118).
 「미리보기」는 첫 한글 큐의 프레임 한 장을 내보낼 영상과 같은 필터로 그린다.
 「자막 입혀 내보내기」는 무료 로컬 작업이고 끝날 때까지 기다려 결과 줄에 쓴 자리를 말한다.
 화면 틀(`RawWorkspaceUi`)과는
@@ -31,11 +33,18 @@ TITLE_TEXT = (
     " 만듭니다(원본은 그대로)."
 )
 VIDEO_LABEL = "영상"
-VIDEO_INFO = "비워 두면 마지막 초안의 draft.mp4입니다."
+VIDEO_INFO = (
+    "비워 두면 마지막 초안의 draft.mp4입니다 — 최종 편집을 저장했으면 그 컷대로 잘라 이어 입힙니다."
+)
 KOREAN_LABEL = "한국어 SRT"
-KOREAN_INFO = "비워 두면 마지막 초안의 SRT입니다."
+KOREAN_INFO = (
+    "비워 두면 마지막 초안의 SRT입니다 — 최종 편집을 저장했으면 편집본 SRT(`edit/final.srt`)입니다."
+)
 ENGLISH_LABEL = "영어 SRT"
-ENGLISH_INFO = "비워 두면 한국어 SRT 옆의 `<이름>.en.srt`(없으면 한글만)입니다."
+ENGLISH_INFO = (
+    "비워 두면 한국어 SRT 옆의 `<이름>.en.srt`(없으면 한글만)입니다 — 최종 편집이면 지금 편집본"
+    " 글을 옮긴 것만 씁니다."
+)
 BROWSE_LABEL = "고르기"
 POSITION_LABEL = "위치"
 POSITION_CHOICES = [("아래", "bottom"), ("위", "top")]
@@ -46,6 +55,11 @@ COLOR_LABEL = "글자색"
 PREVIEW_LABEL = "미리보기"
 EXPORT_LABEL = "자막 입혀 내보내기"
 PREVIEW_TEXT = "미리보기를 그렸습니다 — 내보낼 영상과 같은 글꼴·필터입니다."
+EDIT_TEXT = "최종 편집(리비전 {revision} · 클립 {clips}개{hidden})의 컷과 함께 입힙니다."
+LEFT_OUT_TEXT = (
+    "영어 SRT {names}는 지금 편집본 글을 옮긴 것이 아니라 뺐습니다 — 「영어 SRT로 변환」으로 다시"
+    " 옮기거나(글이 같으면 저장된 번역이라 무료) 영어 칸에서 직접 고르세요."
+)
 DONE_TEXT = "자막을 입힌 영상을 냈습니다 — `{path}` · 자막 {events}개{extra}."
 JOINED_TEXT = "같은 영상에 자막을 입히던 작업에 붙었고 그 작업이 끝났습니다 — `{name}` 옆을 보세요."
 CANCELLED_TEXT = "자막 입히기를 취소했습니다 — 쓴 파일은 없습니다."
@@ -68,6 +82,18 @@ def normalize_color(value: str | None) -> str:
     return text.upper()
 
 
+def _edit_text(edit: dict[str, Any] | None) -> str:
+    """최종 편집으로 입힐 때 덧붙이는 줄 — 리비전·클립 수·가린 자막, 뺀 영어 SRT(D118)."""
+    if not edit:
+        return ""
+    hidden = f" · 컷에 가려진 자막 {edit['hidden']}개" if edit.get("hidden") else ""
+    text = " " + EDIT_TEXT.format(revision=edit["revision"], clips=edit["clips"], hidden=hidden)
+    left_out = edit.get("english_left_out") or []
+    if left_out:
+        text += " " + LEFT_OUT_TEXT.format(names=", ".join(f"`{name}`" for name in left_out))
+    return text
+
+
 def _done_text(facts: dict[str, Any]) -> str:
     notes = []
     if not facts.get("english"):
@@ -79,7 +105,8 @@ def _done_text(facts: dict[str, Any]) -> str:
     if facts.get("hdr"):
         notes.append("HDR 원본을 SDR로")
     extra = f" ({' · '.join(notes)})" if notes else ""
-    return DONE_TEXT.format(path=facts["path"], events=facts["events"], extra=extra)
+    done = DONE_TEXT.format(path=facts["path"], events=facts["events"], extra=extra)
+    return done + _edit_text(facts.get("edit"))
 
 
 def _given(text: Any) -> Path | None:
@@ -219,7 +246,8 @@ class BurnCell:
             f'<img src="data:image/jpeg;base64,{encoded}" alt="{alt}"'
             ' style="width:100%;height:auto;display:block;border-radius:6px">'
         )
-        return image, PREVIEW_TEXT
+        edit = job.edit.facts() if job.edit is not None else None
+        return image, PREVIEW_TEXT + _edit_text(edit)
 
     def export_view(self, signature: str | None, *values: Any) -> tuple[str, str]:
         closed = self.owner._library_first_reply()

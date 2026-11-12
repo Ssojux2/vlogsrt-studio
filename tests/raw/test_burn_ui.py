@@ -152,3 +152,18 @@ def test_colors_from_the_picker_are_normalized() -> None:
     assert burn_cell.normalize_color("#ffcc00") == "#FFCC00"
     assert burn_cell.normalize_color("#fc0") == "#FFCC00"
     assert burn_cell.normalize_color(None) == ""
+
+
+def test_a_burn_of_the_final_edit_says_so_and_names_left_out_english() -> None:
+    """D118 — 최종 편집이면 리비전·클립·가린 자막을, 뺀 영어 SRT는 이름과 할 일을 말한다."""
+    facts = {
+        "path": "/x/final.burned.mp4", "events": 4, "empty": 0, "english": False,
+        "fallback": False, "hdr": False,
+        "edit": {"revision": 2, "clips": 3, "hidden": 1, "english_left_out": ["final.en.srt"]},
+    }  # fmt: skip
+    text = burn_cell._done_text(facts)
+    assert "final.burned.mp4" in text and "(한글만)" in text
+    assert "최종 편집(리비전 2 · 클립 3개 · 컷에 가려진 자막 1개)의 컷과 함께" in text
+    assert "`final.en.srt`는 지금 편집본 글을 옮긴 것이 아니라 뺐습니다" in text
+    plain = burn_cell._done_text({**facts, "edit": None})
+    assert "최종 편집" not in plain

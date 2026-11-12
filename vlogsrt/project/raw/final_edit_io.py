@@ -66,9 +66,13 @@ class BurnInput:
 
     video: Path
     frame_duration: Fraction
+    total_frames: int
+    """초안 전체 프레임 수 — `keep`이 이것 하나면 자르지 않는다."""
     keep: tuple[tuple[int, int, Fraction, Fraction], ...]
     """(시작 프레임, 끝 프레임, 시작 초, 끝 초) — 초안 시각, 차례대로."""
     srt: Path
+    srt_sha256: str
+    """편집 목록이 적어 둔 편집본 SRT 바이트의 sha256 — 번인이 읽은 SRT와 대조한다."""
     cue_count: int
     hidden_count: int
     revision: int
@@ -410,6 +414,26 @@ def _measure_waveform(draft: DraftFolder, settings: FinalEditSettings) -> dict[s
 # ─── 3단계 입구 ──────────────────────────────────────────────────────────
 
 
+def saved_edit_srt(folder: Path) -> Path | None:
+    """그 초안 폴더에 저장한 최종 편집이 있으면 편집본 SRT 자리 — 없으면 None(읽기만 한다)."""
+    if not (folder / EDIT_FOLDER / EDIT_NAME).is_file():
+        return None
+    return folder / EDIT_FOLDER / FINAL_SRT_NAME
+
+
+def draft_of_edit_srt(srt: Path) -> Path | None:
+    """`<초안 폴더>/edit/final.srt`이면 그 초안 폴더 — 아니면 None. 이 SRT의 시각은 편집 시각이라
+    그 초안의 컷과 함께여야만 맞는다(번인이 이것으로 컷을 고른다)."""
+    folder = srt.parent.parent
+    if (
+        srt.name == FINAL_SRT_NAME
+        and srt.parent.name == EDIT_FOLDER
+        and (folder / render_export.REPORT_NAME).is_file()
+    ):
+        return folder
+    return None
+
+
 def load_for_burn(folder: Path) -> BurnInput:
     """번인이 쓸 편집 — 편집 없음·낡은 지문·빈 클립·SRT 바이트 불일치면 거부한다."""
     draft = draft_folder(folder)
@@ -430,8 +454,10 @@ def load_for_burn(folder: Path) -> BurnInput:
     return BurnInput(
         video=folder / render_export.VIDEO_NAME,
         frame_duration=draft.facts.frame_duration,
+        total_frames=draft.facts.total_frames,
         keep=final_edit.keep_ranges(document),
         srt=srt,
+        srt_sha256=digest,
         cue_count=int(saved["srt"]["cues"]),
         hidden_count=len(saved["summary"]["hidden_by_cut"]),
         revision=int(saved["revision"]),
