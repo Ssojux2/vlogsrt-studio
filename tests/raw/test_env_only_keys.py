@@ -55,7 +55,7 @@ def test_the_approval_click_sends_no_key(tmp_path: Path, local_socket: None) -> 
     ]
     inputs = [app.blocks[i] for i in dep["inputs"]]
     assert not any(isinstance(block, gr.Textbox) for block in inputs)
-    assert len(inputs) == 2  # 작업공간 서명 · 화면에 보인 견적 문구
+    assert len(inputs) == 1  # 작업공간 서명뿐 — 견적 문구가 없다(D110)
 
 
 def test_handlers_take_no_key_argument() -> None:
@@ -67,10 +67,10 @@ def test_handlers_take_no_key_argument() -> None:
 def test_the_shell_never_opens_or_focuses_a_key_field() -> None:
     assert not hasattr(ui_facade, "KEY_NOTICE_JS")
     assert "vl-activity-key" not in ui_facade.activity_html()
-    for script in (ui_facade.SHELL_JS, ui_facade.APPROVE_GUARD_JS):
+    for script in (ui_facade.SHELL_JS, ui_facade.APPROVE_WAKE_JS):
         assert "openKey" not in script and "quick-api" not in script
         assert "apiKey" not in script
-    assert ui_facade.APPROVE_GUARD_JS.startswith("(signature, shownQuote) =>")
+    assert ui_facade.APPROVE_WAKE_JS.startswith("(signature) =>")
 
 
 def test_no_screen_text_points_at_an_api_panel() -> None:

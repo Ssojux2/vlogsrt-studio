@@ -394,7 +394,7 @@ def test_a_missing_claude_key_stops_before_any_transcription(
 
 @needs_ffmpeg
 @pytest.mark.parametrize(("quoted", "switched"), [(LUNA, CLAUDE), (CLAUDE, LUNA)])
-def test_a_model_change_between_quote_and_execution_sends_nothing(
+def test_a_model_change_between_measurement_and_execution_sends_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, quoted: str, switched: str
 ) -> None:
     source = tmp_path / "scene.mov"
@@ -406,9 +406,10 @@ def test_a_model_change_between_quote_and_execution_sends_nothing(
     choose_model(server, quoted)
     server.capcut_choose_view(server.current_signature())
     wait_until(lambda: server._quick.get("stage") == "승인 대기")
-    root, quote = server.workspace_root(), server._quick["quote"]
+    root = server.workspace_root()
+    quote = server.raw.selection_quote(root, tuple(server._quick["asset_ids"]))
     workflow = server.raw.settings(root)
-    # 화면의 거절을 건너뛴 경합 — 견적과 실행 사이에 설정이 바뀌었다.
+    # 경합 — 승인 작업이 잰 뒤 실행 문 전에 설정이 바뀌었다(D110).
     server.raw.update_settings(
         root, replace(workflow, models=replace(workflow.models, luna_model=switched))
     )

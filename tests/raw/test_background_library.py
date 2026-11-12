@@ -35,8 +35,8 @@ def setup_library(tmp_path, monkeypatch, extra=(), parallel_analysis_limit=None)
     ids = {a.source_name: a.asset_id for a in ui.raw.list_source_assets(root)}
     ui._start_quick(root, (), asset_ids=(ids["a.mov"],))
     wait_until(lambda: ui._quick.get("stage") == "승인 대기")
-    ui._prepare_library_quote(root)
-    wait_until(lambda: root in ui._library_quotes)
+    ui._scan_library(root)
+    wait_until(lambda: root in ui._library_cached_ids)
     return ui, sender, client, root, ids
 
 
@@ -45,7 +45,7 @@ def test_one_library_approval_queues_sources_and_navigation_preserves_results(
 ):
     # 직렬 의미(한 번에 하나)를 재는 시험 — 동시 한도를 1로 고정한다(D49).
     ui, sender, client, root, ids = setup_library(tmp_path, monkeypatch, parallel_analysis_limit=1)
-    assert len(ui._library_quotes[root].asset_ids) == 2
+    assert len(ui._library_ids(root)) == 2
     assert not sender.calls and not client.calls
     ui.library_analysis_view(ui.current_signature())
     assert client.second_entered.wait(20)

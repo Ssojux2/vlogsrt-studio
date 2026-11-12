@@ -152,7 +152,7 @@ def _calls_for_one_run(tmp_path, monkeypatch, limit: int) -> tuple[int, int, lis
         tmp_path, monkeypatch, extra=("c.mov",), parallel_analysis_limit=limit
     )
     client.resume.set()
-    measured = ui._library_quotes[root]
+    measured = ui.raw.selection_quote(root, ui._library_ids(root))
     gate = Gate(ui, closed=False)
     ui.library_analysis_view(ui.current_signature())
     wait_until(lambda: _all_at(ui, root, ids.values(), DONE))
@@ -195,7 +195,6 @@ def test_status_line_counts_running_waiting_done(tmp_path, monkeypatch):
 def test_button_states_during_parallel_run(tmp_path, monkeypatch):
     ui, sender, client, root, ids = setup_library(tmp_path, monkeypatch, parallel_analysis_limit=2)
     client.resume.set()
-    assert "최대 2개" in ui.library_analysis_summary()
     idle = ui.library_analysis_button()
     assert idle.value == "전체 영상 분석 승인" and idle.interactive
     gate = Gate(ui)
@@ -299,7 +298,7 @@ def test_failed_submit_does_not_leave_a_stuck_queue_head(tmp_path, monkeypatch):
             root,
             (),
             asset_ids=(ids["a.mov"],),
-            approved_quote=ui._library_quotes[root],
+            approved_quote=ui.raw.selection_quote(root, ui._library_ids(root)),
             activate=False,
         )
     assert not ui._analysis_queue

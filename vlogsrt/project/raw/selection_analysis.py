@@ -28,7 +28,7 @@ MODES = (MODE_FULL, MODE_TRANSCRIBE)
 TRANSCRIBED_STAGE = "전사 완료 · 분석 대기"
 """「전사만」이 끝난 영상의 단계 — 영상 분석(추천 판정)은 아직 승인하지 않았다."""
 RELISTEN_STAGE = "다시 듣기 대기 · 승인 필요"
-"""「다시 듣기」를 고른 영상의 단계 — 견적을 확인하고 승인해야 다시 듣는다(유료)."""
+"""「다시 듣기」를 고른 영상의 단계 — 승인해야 다시 듣는다(유료)."""
 
 
 @dataclass(frozen=True)
@@ -250,7 +250,7 @@ def execute(
     identity = cross_check.request_identity(service._workspace(root))
     current = quote(service, root, approved.asset_ids, approved.mode)
     if current.digest != approved.digest or current.workflow != approved.workflow:
-        raise RawWorkspaceError("선택 영상이나 설정이 바뀌었습니다. 현재 범위를 다시 확인하세요")
+        raise RawWorkspaceError("선택 영상이나 설정이 바뀌었습니다. 다시 승인하세요")
     text_identity = _approved_text_identity(current, identity)
     transcribe_only = approved.mode == MODE_TRANSCRIBE
     # 의미 분석 클라이언트를 먼저 받는다 — 키가 없으면 전사도 사기 전에 닫힌다(D54).
@@ -276,8 +276,7 @@ def _approved_text_identity(current: SelectionQuote, identity: str) -> str | Non
         return None
     if current.cross_tag != cross_check.TAG_PREFIX + identity:
         raise RawWorkspaceError(
-            "용어집이 바뀌었습니다. 새 견적을 확인하고 다시 승인하세요 — 유료 호출은 시작하지"
-            " 않았습니다"
+            "용어집이 바뀌었습니다. 다시 승인하세요 — 유료 호출은 시작하지 않았습니다"
         )
     return identity
 

@@ -1,4 +1,6 @@
-"""라이브러리 일괄 승인 — 클릭은 즉시 돌아오고, 느린 확인은 백그라운드 작업이 맡는다."""
+"""라이브러리 일괄 승인 — 클릭은 즉시 돌아오고, 범위 재기는 백그라운드 작업이 맡는다(D110).
+
+견적은 없다: 단추는 아무것도 기다리지 않고 켜지며, 승인 작업이 누른 순간의 영상·범위로 잰다."""
 
 from __future__ import annotations
 
@@ -21,6 +23,7 @@ SLOW_QUOTE_SECONDS = 0.6
 CLICK_BUDGET_SECONDS = 0.4
 ACCEPTED = "승인 접수"
 AGAIN = "다시 승인"
+NOTHING = "분석할 영상이 없습니다"
 STARTED = "승인한 영상들을 백그라운드에서"
 QUICK_STARTED = "선택한 영상의 분석을 시작했습니다"
 TICKS = 3
@@ -33,10 +36,10 @@ RESTART = "앱을 다시 시작하면"
 def _slow_quotes(ui, calls: list, delay: float = SLOW_QUOTE_SECONDS) -> None:
     real = ui.raw.selection_quote
 
-    def slow(root, ids):
+    def slow(root, ids, *rest):
         calls.append(tuple(ids))
         time.sleep(delay)
-        return real(root, ids)
+        return real(root, ids, *rest)
 
     ui.raw.selection_quote = slow
 
@@ -72,22 +75,20 @@ def test_click_returns_before_the_slow_quote_and_status_shows_acceptance(tmp_pat
     wait_until(lambda: len(sender.calls) == 2 and len(client.calls) == 4)
 
 
-def test_digest_change_in_background_starts_nothing_and_keeps_notice(tmp_path, monkeypatch):
+def test_every_video_already_analysed_starts_nothing(tmp_path, monkeypatch):
+    """누른 순간 다시 세어 모두 저장 결과가 있으면 아무것도 시작하지 않고 그렇게 말한다."""
     ui, sender, client, root, ids = setup_library(tmp_path, monkeypatch)
     client.resume.set()
-    real = ui.raw.selection_quote
-    ui.raw.selection_quote = lambda r, a: replace(real(r, a), digest="changed")
+    ui._library_cached_ids.pop(root, None)
+    monkeypatch.setattr(ui.raw, "cached_selection_analysis", lambda r, a: "stored")
     starts = _count_starts(ui, monkeypatch)
     signature = ui.current_signature()
     ui.library_analysis_view(signature)
-    wait_until(lambda: AGAIN in str(ui.capcut_status_view(signature)))
+    wait_until(lambda: NOTHING in str(ui.capcut_status_view(signature)))
     wait_until(lambda: not ui._approval_active(root))
-    for _ in range(TICKS):
-        assert AGAIN in ui.capcut_status_view(signature)
-        time.sleep(TICK_SECONDS)
     assert not starts and not sender.calls and not client.calls
-    assert ui._library_quotes[root].digest == "changed"
     assert ui.raw.settings(root).network_mode != "online"
+    assert ui.library_analysis_button().value == "분석 완료"
 
 
 def test_double_click_while_approval_is_active_submits_once(tmp_path, monkeypatch):
@@ -104,7 +105,7 @@ def test_double_click_while_approval_is_active_submits_once(tmp_path, monkeypatc
     wait_until(lambda: len(sender.calls) == 2 and len(client.calls) == 4)
     assert len(_approval_jobs(ui, root)) == 1
     assert sorted(starts) == sorted((i,) for i in ids.values())
-    assert calls.count(tuple(ui._library_quotes[root].asset_ids)) == 1
+    assert calls.count(ui._library_ids(root)) == 1
 
 
 def test_success_runs_one_selection_analysis_per_video(tmp_path, monkeypatch):
@@ -138,8 +139,8 @@ def test_status_timer_does_not_erase_the_approval_reply(tmp_path, monkeypatch):
 def test_rebound_quotes_match_fresh_quotes_across_the_online_switch(tmp_path, monkeypatch):
     ui, sender, client, root, ids = setup_library(tmp_path, monkeypatch)
     client.resume.set()
-    measured = ui._library_quotes[root]
-    every = tuple(measured.asset_ids)
+    every = ui._library_ids(root)
+    measured = ui.raw.selection_quote(root, every)
     assert ui.raw.selection_rebound_quote(root, measured, every) == measured
     for asset_id in ids.values():
         derived = ui.raw.selection_rebound_quote(root, measured, (asset_id,))
@@ -156,24 +157,24 @@ def test_rebound_quotes_match_fresh_quotes_across_the_online_switch(tmp_path, mo
 
 
 def test_binding_change_after_measurement_starts_nothing(tmp_path, monkeypatch):
+    """승인 작업이 잰 뒤 결속이 바뀌면 실행 문(`execute`)이 다시 재어 0송신으로 닫는다."""
     ui, sender, client, root, ids = setup_library(tmp_path, monkeypatch)
     client.resume.set()
     real = ui.raw.selection_rebound_quote
-
-    def moved(r, measured, asset_ids):
-        rebound = real(r, measured, asset_ids)
-        if len(asset_ids) == len(measured.asset_ids):
-            return replace(rebound, digest="moved")
-        return rebound
-
-    ui.raw.selection_rebound_quote = moved
-    starts = _count_starts(ui, monkeypatch)
+    monkeypatch.setattr(
+        ui.raw,
+        "selection_rebound_quote",
+        lambda *args, **kwargs: replace(real(*args, **kwargs), digest="moved"),
+    )
     signature = ui.current_signature()
     ui.library_analysis_view(signature)
-    wait_until(lambda: AGAIN in str(ui.capcut_status_view(signature)))
-    wait_until(lambda: not ui._approval_active(root))
-    assert not starts and not sender.calls and not client.calls
-    assert ui._library_quotes[root].digest == "moved"
+    wait_until(
+        lambda: all(
+            (ui._task_for(root, (i,)) or {}).get("stage") == "분석 확인 필요" for i in ids.values()
+        )
+    )
+    assert not sender.calls and not client.calls
+    assert all(AGAIN in ui._task_for(root, (i,))["error"] for i in ids.values())
 
 
 def test_started_notice_stays_over_progress_until_analysis_begins(tmp_path, monkeypatch):
@@ -210,16 +211,29 @@ def test_single_video_approval_reply_survives_the_status_timer(tmp_path, monkeyp
     assert QUICK_STARTED not in ui.capcut_status_view(signature)
 
 
-def _gated_quotes(ui, approval_gate, prepare_gate, calls: list) -> None:
+def _gated_quotes(ui, approval_gate, calls: list) -> None:
+    """승인 작업의 범위 재기(여러 영상)만 막는다 — 실행 문의 영상 하나 재기는 그대로다."""
     real = ui.raw.selection_quote
 
-    def gated(root, ids):
+    def gated(root, ids, *rest):
         calls.append(tuple(ids))
-        gate = approval_gate if len(ids) > 1 else prepare_gate
-        assert gate.wait(GATE_SECONDS)
-        return real(root, ids)
+        if len(ids) > 1:
+            assert approval_gate.wait(GATE_SECONDS)
+        return real(root, ids, *rest)
 
     ui.raw.selection_quote = gated
+
+
+def _gated_prepare(ui, prepare_gate, calls: list) -> None:
+    """영상 고르기의 준비(순서 맞춤)를 막는다 — 승인 작업은 이것을 부르지 않는다."""
+    real = ui.raw.ensure_source_order
+
+    def gated(root):
+        calls.append("prepare")
+        assert prepare_gate.wait(GATE_SECONDS)
+        return real(root)
+
+    ui.raw.ensure_source_order = gated
 
 
 def _count_runs(ui) -> list:
@@ -239,14 +253,16 @@ def test_click_during_approval_is_superseded_and_runs_once(tmp_path, monkeypatch
     client.resume.set()
     approval_gate, prepare_gate = threading.Event(), threading.Event()
     calls: list = []
-    _gated_quotes(ui, approval_gate, prepare_gate, calls)
+    _gated_quotes(ui, approval_gate, calls)
     runs = _count_runs(ui)
     signature, b_id = ui.current_signature(), ids["b.mov"]
     try:
         ui.library_analysis_view(signature)
+        wait_until(lambda: len(calls) == 1)
+        _gated_prepare(ui, prepare_gate, calls)
         ui.quick_source_view(signature, b_id)
         clicked = ui._quick
-        wait_until(lambda: (b_id,) in calls)
+        wait_until(lambda: "prepare" in calls)
         assert clicked["stage"] == "영상 준비" and clicked["view_source_id"] == b_id
         approval_gate.set()
         wait_until(lambda: (ui._task_for(root, (b_id,)) or clicked) is not clicked)
@@ -271,7 +287,7 @@ def test_cancelled_approval_is_not_reported_as_failure(tmp_path, monkeypatch):
     ui, sender, client, root, ids = setup_library(tmp_path, monkeypatch)
     client.resume.set()
     gate = threading.Event()
-    _gated_quotes(ui, gate, gate, [])
+    _gated_quotes(ui, gate, [])
     starts = _count_starts(ui, monkeypatch)
     signature = ui.current_signature()
     try:
@@ -295,7 +311,8 @@ def test_reattach_to_a_dead_servers_approval_asks_for_restart(tmp_path, monkeypa
     ui, sender, client, root, ids = setup_library(tmp_path, monkeypatch)
     client.resume.set()
     store = JobStore(RawWorkspace.open(root))
-    record, _ = store.insert_deduplicated("library_approval", ui._library_quotes[root].digest, 0)
+    fingerprint = repr((ui._library_pending(root), ui._approval_mode(root)))
+    record, _ = store.insert_deduplicated("library_approval", fingerprint, 0)
     store.update(record.job_id, status="running")
     starts = _count_starts(ui, monkeypatch)
     signature = ui.current_signature()
@@ -310,37 +327,28 @@ def test_reattach_to_a_dead_servers_approval_asks_for_restart(tmp_path, monkeypa
     assert not starts and not sender.calls and not client.calls
 
 
-def test_button_says_the_quote_is_being_measured_until_it_arrives(tmp_path, monkeypatch):
-    """견적을 재는 동안 단추는 꺼진 채 까닭을 말한다(W-58) — 실데이터 169개는 73초였다.
+def test_button_is_ready_without_waiting_for_any_measurement(tmp_path, monkeypatch):
+    """단추는 무엇도 기다리지 않는다(D110) — 실데이터 169개는 견적에 73초 동안 꺼져 있었다(W-58).
 
-    승인은 화면에 보인 견적에 묶이므로(D44) 견적 없이 켜지지 않는다. 견적이 서면 그대로 켜진다."""
-    from ui.workspace_service import LIBRARY_APPROVE_LABEL, LIBRARY_QUOTING_LABEL
-
-    ui, _sender, _client, root, _ids = setup_library(tmp_path, monkeypatch)
-    quote = ui._library_quotes.pop(root)
-    release = threading.Event()
-    measure = ui.raw.selection_quote
-
-    def slow(*args, **kwargs):
-        release.wait(20)
-        return measure(*args, **kwargs)
-
-    monkeypatch.setattr(ui.raw, "selection_quote", slow)
-    ui._prepare_library_quote(root)
-    waiting = ui.library_analysis_button()
-    assert waiting.value == LIBRARY_QUOTING_LABEL and waiting.interactive is False
-    release.set()
-    wait_until(lambda: root in ui._library_quotes)
-    ready = wait_until(lambda: (got := ui.library_analysis_button()).interactive and got)
-    assert ready.value == LIBRARY_APPROVE_LABEL
-    assert set(ui._library_quotes[root].asset_ids) == set(quote.asset_ids)
-
-
-def test_without_a_quote_job_the_button_keeps_its_name(tmp_path, monkeypatch):
-    """견적을 재지 않으면(영상 없음·견적 실패) 「견적 계산 중」이라 하지 않는다(W-58)."""
+    저장 결과 세기가 도는 동안에도 켜져 있고, 세기가 끝나 모두 끝난 영상이면 「분석 완료」다."""
     from ui.workspace_service import LIBRARY_APPROVE_LABEL
 
     ui, _sender, _client, root, _ids = setup_library(tmp_path, monkeypatch)
-    ui._library_quotes.pop(root)
-    button = ui.library_analysis_button()
-    assert button.value == LIBRARY_APPROVE_LABEL and button.interactive is False
+    ui._library_cached_ids.pop(root)
+    release = threading.Event()
+    measured: list = []
+
+    def slow(*args, **kwargs):
+        measured.append(args)
+        release.wait(20)
+        return "stored"
+
+    monkeypatch.setattr(ui.raw, "cached_selection_analysis", slow)
+    monkeypatch.setattr(ui.raw, "selection_quote", lambda *a, **k: pytest.fail("견적을 잰다"))
+    ui._scan_library(root)
+    wait_until(lambda: measured)
+    waiting = ui.library_analysis_button()
+    assert waiting.value == LIBRARY_APPROVE_LABEL and waiting.interactive is True
+    release.set()
+    done = wait_until(lambda: (got := ui.library_analysis_button()).value == "분석 완료" and got)
+    assert done.interactive is False

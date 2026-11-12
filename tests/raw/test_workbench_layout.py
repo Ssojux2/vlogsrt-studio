@@ -12,7 +12,6 @@ import shutil
 import subprocess
 from collections.abc import Iterator
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -186,11 +185,10 @@ def test_blocks_place_top_bar_command_bar_and_stage(tmp_path: Path, local_socket
     for label in ("선택 분석 취소", "전체 분석 취소"):
         assert buttons[label].visible is True and buttons[label].interactive is not False
     assert by_id["vl-activity-block"].parent is bar and by_id["quick-status"].parent is bar
-    # 견적 칸은 무대 격자 안의 한 열 — 견적 문구(승인 클릭이 함께 보낸다, D54)와 그 아래 전문.
+    # 승인 칸은 무대 격자 안의 한 열 — 범위·교차 확인·영어 자막·결과 카드. 견적 문구는 없다(D110).
     quote = by_id["vl-quote"]
     assert isinstance(quote, gr.Column) and quote.parent is by_id["visual-stage"]
-    assert by_id["library-analysis-scope"].parent is quote
-    assert by_id["vl-quote-note"].parent is quote
+    assert "library-analysis-scope" not in by_id and "vl-quote-note" not in by_id
     for child in bar.parent.children:
         assert not isinstance(child, gr.Accordion), child  # 무대 위·아래로 열리는 것이 없다
 
@@ -240,17 +238,11 @@ def test_every_action_reply_reaches_the_activity_area(tmp_path: Path, local_sock
         d for d in deps if d["targets"] == [(buttons[LIBRARY_APPROVE_LABEL]._id, "click")]
     ]
     assert replies[approve["id"]]["inputs"] == [server._capcut_progress_md._id]
-    # 승인 클릭은 앞 단계(보이는 견적만 보낸다)를 거치고, 입력은 그대로 견적 문구다(D54).
-    assert approve["js"] == ui_facade.APPROVE_GUARD_JS
-    assert server._library_summary_md._id in approve["inputs"]
-    notes = [
-        d
-        for d in deps
-        if d.get("trigger_after") == approve["id"] and d["outputs"] == [server._quote_note_md._id]
-    ]
-    assert len(notes) == 1 and notes[0]["trigger_only_on_success"] is True  # 답을 전문 칸에 바로
-    cells = [server._quote_note_md._id, server._usage_md._id]
-    # 1초 상태 틱 하나가 두 칸을 잇달아 쓴다(D63 세션 C).
+    # 승인 클릭은 서버를 깨우고 서명만 보낸다 — 견적 문구가 없다(D110).
+    assert approve["js"] == ui_facade.APPROVE_WAKE_JS
+    assert approve["inputs"] == [server._signature_state._id]
+    cells = [server._capcut_progress_md._id, server._usage_md._id]
+    # 1초 상태 틱 하나가 상태 줄과 실사용 원천을 잇달아 쓴다(D63 세션 C).
     writers = [
         d for d in deps if any(d["outputs"][i : i + 2] == cells for i in range(len(d["outputs"])))
     ]
@@ -258,7 +250,6 @@ def test_every_action_reply_reaches_the_activity_area(tmp_path: Path, local_sock
     # 「라이브러리 닫기」도 두 칸을 직접 쓴다 — 닫은 탭의 틱은 칸을 건너뛴다(D64 세션 F).
     close_click = [(buttons["라이브러리 닫기"]._id, "click")]
     assert [d["targets"] for d in writers if d is not cell_tick] == [close_click]
-    assert cell_tick["targets"][0][1] == "tick"  # 1초 타이머 — 전문 칸 + 기록 판의 실사용 원천
     # 2초 타이머는 같은 숨은 칸을 다시 쓴다 — 그 쓰기는 활동 칸으로 가지 않는다.
     ticks = [d for d in deps if d["targets"] and d["targets"][0][1] == "tick"]
     assert ticks and not any(d["id"] in replies for d in ticks)
@@ -318,25 +309,22 @@ def test_grid_areas_at_three_breakpoints() -> None:
     assert "--vl-list-col: minmax(240px, 280px);" in wide
     assert "--vl-panel-col: minmax(280px, 320px);" in wide
     two = _media_block(css, "max-width: 1050px")
-    # 견적 칸은 명령 줄 바로 아래(승인 단추 곁), 타임라인은 재생기 바로 아래(사용자 결정 6).
+    # 승인 칸은 명령 줄 바로 아래(승인 단추 곁), 타임라인은 재생기 바로 아래(사용자 결정 6).
     assert (
         '"quote quote" "thumbs player" "thumbs timeline" "thumbs ranges"\n      "thumbs panel"'
         ' "foot foot"' in two
     )
     assert "#visual-stage .vl-thumbs { max-height: none; contain: size; }" in two
     one = _media_block(css, "max-width: 860px")
-    # 견적 다음 영상·타임라인·추천 구간(W-46b)
+    # 승인 칸 다음 영상·타임라인·추천 구간(W-46b)
     assert '"quote" "player" "timeline" "ranges" "thumbs" "panel" "foot"' in one
-    assert "#vl-quote { grid-area: quote;" in css and "#library-analysis-scope {\n" in css
+    assert "#vl-quote { grid-area: quote;" in css and "#library-analysis-scope" not in css
     assert "#visual-stage .vl-cards {" in one and "display: flex; overflow: auto hidden;" in one
     assert css.index("@media (max-width: 1050px)") < css.index("@media (max-width: 860px)")
-    # 승인할 견적이 없으면 견적 문구는 숨고, 전문도 없으면 넓은 화면의 패널이 그 자리까지 쓴다.
-    assert (
-        "#review-tab:has(#library-approve:disabled) #library-analysis-scope { display: none; }"
-        in (css)
-    )
-    # 초안 결과 카드(W-46a)가 있으면 그 칸도 덮지 않는다 — 올라오는 것은 추천 구간 칸이다(W-46b).
-    assert "#visual-stage:not(:has(#vl-quote-note)):not(:has(.vl-export)) #vl-ranges {" in css
+    # 승인할 영상이 없으면 넓은 화면의 추천 구간 칸이 그 자리까지 쓴다 — 초안 결과 카드(W-46a)가
+    # 있으면 그 칸은 덮지 않는다(W-46b).
+    assert "#visual-stage:not(:has(.vl-export)) #vl-ranges {" in css
+    assert "vl-quote-note" not in css
 
 
 @pytest.mark.parametrize("side", [0, 1], ids=["light", "dark"])
@@ -611,228 +599,6 @@ def test_shell_script_runs_the_activity_area_the_drawers_and_the_scrim(tmp_path:
     assert out["sheetEscaped"] == {"open": False, "expanded": "false", "drawer": True}
     assert out["escaped"] == {"open": False, "scrim": True}  # 그 밖의 Esc는 서랍을 닫는다
 
-
-_GUARD_HARNESS = r"""
-const fs = require('fs');
-const guard = new Function('return ' + fs.readFileSync(process.argv[2], 'utf8'))();
-const quotes = JSON.parse(fs.readFileSync(process.argv[3], 'utf8'));
-// 그라디오 마크다운 칸의 실제 꼴: 감싼 칸 안에 상태 표시(1초 틱마다 '0.1s' 같은 글이 잠깐
-// 들어온다)와 그려진 마크다운 노드가 형제로 있다.
-function scenario(opts) {
-  const calls = { scrolled: 0, toggled: [] };
-  const child = {};
-  const text = opts.text === undefined ? '\n  ' + quotes.raw.replace(' · ', ' ·\n ') + ' \n'
-    : opts.text;
-  const md = { contains: (node) => node === md || node === child,
-    getBoundingClientRect: () => opts.box, textContent: text,
-    clientHeight: opts.box.height, scrollHeight: opts.scrollHeight || opts.box.height };
-  const tracker = { textContent: opts.tracker || '' };
-  const quote = { contains: (node) => [quote, md, child, tracker].includes(node),
-    getBoundingClientRect: () => opts.box, textContent: tracker.textContent + ' ' + text,
-    clientHeight: opts.box.height, scrollHeight: opts.box.height,
-    querySelector: (sel) => (sel === '[data-testid="markdown"]' && !opts.noMarkdown ? md : null),
-    scrollIntoView: () => { calls.scrolled += 1; } };
-  global.window = { innerWidth: 1280, innerHeight: 800,
-    getComputedStyle: () => ({ display: opts.display || 'block', visibility: 'visible' }),
-    __vlDrawer: (id, open) => { if (open === false) { calls.toggled.push(id); } } };
-  global.document = {
-    getElementById: (id) => (id === 'library-analysis-scope' ? quote : null),
-    querySelector: (sel) => (opts.drawer && sel.includes('.open') ? {} : null),
-    querySelectorAll: () => [],
-    elementFromPoint: () => (opts.covered ? { id: 'vl-scrim' } : child),
-  };
-  const sent = guard('sig', opts.shown === undefined ? quotes.shown : opts.shown);
-  return { quote: sent[1], scrolled: calls.scrolled, closed: calls.toggled.length };
-}
-const box = { left: 955, top: 107, right: 1253, bottom: 175, width: 298, height: 68 };
-const below = { left: 16, top: 900, right: 984, bottom: 980, width: 968, height: 80 };
-process.stdout.write(JSON.stringify({
-  visible: scenario({ box }),
-  // 1초 틱의 상태 표시가 '0.1s'를 든 순간 — 그려진 견적은 그대로다.
-  tracker: scenario({ box, tracker: '0.1s' }),
-  drawer: scenario({ box, drawer: true }),
-  offscreen: scenario({ box: below }),
-  covered: scenario({ box, covered: true }),
-  hidden: scenario({ box, display: 'none' }),
-  // 칸 안에서 잘린 견적(넘친 줄이 가려짐) · 보낼 문구와 다른 글(아직 안 바뀐 화면).
-  clipped: scenario({ box, scrollHeight: box.height + 24 }),
-  mismatch: scenario({ box, text: quotes.raw.replace('$1.49', '$0.99') }),
-  // 그려진 마크다운 노드를 못 찾으면 닫힌 쪽으로 — 같은 거절 길.
-  noMarkdown: scenario({ box, noMarkdown: true }),
-  // 마크다운이 움직일 글자(~ _ * [ ] ( ) ` $)도 escape된 값은 글 그대로 그려진다.
-  special: scenario({ box, shown: quotes.specialShown, text: quotes.specialRaw }),
-}));
-"""
-
-
-@needs_node
-def test_approve_pre_step_sends_the_quote_only_when_a_person_can_see_it(tmp_path: Path) -> None:
-    """견적 칸이 서랍·막에 덮였거나 화면 밖·숨김·잘림·다른 글이면 빈 견적 → 서버가 거절(D54).
-
-    읽는 것은 그려진 마크다운 노드뿐이다 — 감싼 칸의 상태 표시(1초 틱의 '0.1s')는 보지 않는다.
-    보내는 값은 화면 칸의 값(escape된 마크다운)을 되푼 견적 원문이다(서버 대조는 그대로).
-    """
-    raw = "분석 대상 3개 · Claude 비용 상한 $1.49"
-    special = "약 2~3분 · _x_ · *y* · [t](u) · `c` · $1.49 + $2.50 (보수적)"
-    harness = tmp_path / "guard.js"
-    harness.write_text(_GUARD_HARNESS, encoding="utf-8")
-    script = tmp_path / "guard_src.js"
-    script.write_text(ui_facade.APPROVE_GUARD_JS, encoding="utf-8")
-    quotes = tmp_path / "quotes.json"
-    quotes.write_text(
-        json.dumps(
-            {
-                "raw": raw,
-                "shown": ui_facade.literal_markdown(raw),
-                "specialRaw": special,
-                "specialShown": ui_facade.literal_markdown(special),
-            }
-        ),
-        encoding="utf-8",
-    )
-    completed = subprocess.run(
-        ["node", str(harness), str(script), str(quotes)],
-        capture_output=True,
-        text=True,
-        timeout=20,
-    )
-    assert completed.returncode == 0, completed.stderr[-2000:]
-    out = json.loads(completed.stdout)
-    assert out["visible"] == {"quote": raw, "scrolled": 0, "closed": 0}
-    assert out["tracker"] == {"quote": raw, "scrolled": 0, "closed": 0}  # 틱 글자에 속지 않는다
-    # 서랍이 열려 있으면 서랍을 닫고 견적을 보이게 한 뒤 빈 견적을 보낸다.
-    assert out["drawer"] == {"quote": "", "scrolled": 1, "closed": 2}
-    for case in ("offscreen", "covered", "hidden", "clipped", "mismatch", "noMarkdown"):
-        assert out[case]["quote"] == "" and out[case]["scrolled"] == 1, case
-    assert out["special"] == {"quote": special, "scrolled": 0, "closed": 0}
-
-
-def test_the_quote_cell_draws_the_quote_text_exactly(tmp_path: Path, local_socket: None) -> None:
-    """견적 칸은 견적 원문을 글 그대로 그린다 — 마크다운이 움직일 글자는 모두 escape한다.
-
-    CommonMark는 백슬래시 뒤 ASCII 문장부호를 글자 그대로 그린다(2~3분이 23분이 되지 않는다).
-    LaTeX 구분자도 끈다. 서버 대조(`shown_summary == summary`)는 원문 그대로다.
-    """
-    punctuation = "".join(chr(c) for c in range(0x21, 0x7F) if not chr(c).isalnum())
-    escaped = ui_facade.literal_markdown(punctuation)
-    assert escaped == "".join("\\" + ch for ch in punctuation)  # 하나도 빠짐없이
-    plain = "분석 대상 3개 · 전사 최대 3회 1234"
-    assert ui_facade.literal_markdown(plain) == plain  # 한글·숫자·가운뎃점·빈칸은 그대로
-    server = _server(tmp_path)
-    server.build_blocks()
-    summary = server.library_analysis_summary()
-    assert server.library_analysis_summary_markdown() == ui_facade.literal_markdown(summary)
-    cell = server._library_summary_md
-    assert cell.value == ui_facade.literal_markdown(summary) and cell.latex_delimiters == []
-
-
-def test_a_blank_shown_quote_is_refused_with_the_quote_in_full(
-    tmp_path: Path, local_socket: None
-) -> None:
-    """서버 결합은 그대로 — 빈 견적 문구는 지금 견적과 달라 「새 견적을 확인하세요」로 거절된다.
-
-    거절 답(견적·상한 포함)은 견적 칸 전문에 말줄임 없이 다 실린다(활동 칸은 한 줄일 뿐이다).
-    """
-    server = _server(tmp_path)
-    root = server.workspace_root()
-    assert root is not None
-    signature = server.current_signature()
-    summary = (
-        "분석 대상 18개 · 저장 결과 2개 재사용 · 전사 최대 23회 + 영상 분석(Claude Opus 5.5) "
-        "최대 195회 · Claude 비용 상한 $48.39 (보수적). 승인하면 두 단계가 이어집니다. "
-        "최대 3개를 동시에 분석합니다."
-    )
-    server._library_quotes[root] = SimpleNamespace(
-        asset_ids=("a",), digest="d", workflow="w", estimates=()
-    )
-    server._library_ids = lambda _root: ("a",)  # type: ignore[method-assign]
-    server.library_analysis_summary = lambda: summary  # type: ignore[method-assign]
-    usage = "실사용 $0.4123 · 전사 812초 (불확실 0건·가격 미정 0건)"
-    server._usage_line = lambda: usage  # type: ignore[method-assign]  # 앞선 유료 실행의 흔적
-    status = server.library_analysis_view(signature, "")
-    assert "새 견적을 확인하세요" in status and summary in status  # 견적·상한을 직접 싣는다
-    assert server._approval_jobs.get(root) is None  # 아무것도 시작하지 않았다
-    note = server.quote_note_markdown()
-    # 전문 칸은 거절 알림 자신의 글 — 견적·상한은 다 싣고, 실사용 줄은 싣지 않는다.
-    assert status == f"{note}\n\n{usage}"
-    assert note.count("$48.39 (보수적)") == 1 and len(note) > 200 and "실사용" not in note
-    view = server.quote_note_view(signature)
-    assert view.visible is True and view.value == note
-    css = ui_facade.WORKBENCH_CSS
-    rule = css[css.index("#library-analysis-scope, #vl-quote-note {") :]
-    rule = rule[: rule.index("}")]
-    assert "white-space: normal;" in rule and "ellipsis" not in rule  # 여러 줄, 말줄임 없음
-
-
-def test_a_usage_only_status_puts_nothing_above_the_player(
-    tmp_path: Path, local_socket: None
-) -> None:
-    """유료 실행 뒤 상태 줄에는 언제나 「실사용 $…」가 붙는다 — 그것만으로는 전문 칸이 뜨지 않는다.
-
-    전문 칸은 1050px 이하에서 재생기 위에 선다(결정 6: 영상·타임라인 먼저). 실사용 줄은 대신
-    `#vl-usage-src`를 거쳐 기록 판의 고정 줄에 말줄임 없이 다 보인다.
-    """
-    server = _server(tmp_path)
-    signature = server.current_signature()
-    assert server.quote_note_markdown() == ""
-    assert server.quote_note_view(signature).visible is False
-    usage = "실사용 $0.4123 · 전사 812초 · 승인 상한 $1.49 (불확실 0건·가격 미정 0건)"
-    server._usage_line = lambda: usage  # type: ignore[method-assign]
-    assert usage in server._quick_status()  # 상태 줄(활동 칸)에는 그대로 붙는다
-    assert server.quote_note_markdown() == ""  # 재생기 위에는 오지 않는다
-    note, source = server.quote_cells_view(signature)
-    assert note.visible is False and source == usage  # 기록 판의 원천은 실사용 줄 그대로
-    assert server.quote_note_view("다른 서명") == gr.skip()  # 다른 화면의 틱은 건너뛴다
-    assert server.quote_cells_view("다른 서명") == (gr.skip(), gr.skip())
-
-
-def test_the_quote_note_clears_when_the_next_approve_passes_or_the_quote_changes(
-    tmp_path: Path, local_socket: None
-) -> None:
-    """규칙: 전문 칸은 살아 있는 승인 알림 가운데 견적·금액을 실은 것만 싣는다.
-
-    다음 승인 클릭이 견적 대조를 지나 새 알림(키 필요·접수…)으로 바뀌거나, 견적이 바뀌어
-    알림이 물러나면 칸이 걷힌다.
-    """
-    server = _server(tmp_path)
-    root = server.workspace_root()
-    assert root is not None
-    # 키 없음 길로 고정한다 — 다른 시험 모듈이 수집 때 가짜 키를 환경에 남기면(전체 실행) 서버가
-    # 그 키를 찍어 다음 클릭이 접수까지 간다.
-    server._startup_credentials = None
-    server._live_transport = None
-    signature = server.current_signature()
-    summary = (
-        "분석 대상 1개 · 전사 최대 1회 + 영상 분석(Claude Opus 5.5) 최대 2회 · "
-        "Claude 비용 상한 $0.50 (보수적)."
-    )
-    server._library_quotes[root] = SimpleNamespace(
-        asset_ids=("a",), digest="d", workflow="w", estimates=()
-    )
-    server._library_ids = lambda _root: ("a",)  # type: ignore[method-assign]
-    server.library_analysis_summary = lambda: summary  # type: ignore[method-assign]
-    server.library_analysis_view(signature, "")  # 빈 문구 → 거절
-    assert summary in server.quote_note_markdown()
-    # 견적을 다시 본 다음 클릭은 대조를 지난다 — 오프라인·키 없음이라 키 알림에서 멈춘다.
-    status = server.library_analysis_view(signature, summary)
-    assert "연결 설정 필요" in status and server._approval_jobs.get(root) is None
-    assert server.quote_note_markdown() == ""
-    # 다시 거절된 뒤 견적이 바뀌면(모델·범위) 알림이 물러나고 칸도 걷힌다.
-    server.library_analysis_view(signature, "")
-    assert summary in server.quote_note_markdown()
-    server._library_quotes[root] = SimpleNamespace(
-        asset_ids=("a",), digest="d2", workflow="w", estimates=()
-    )
-    assert server.quote_note_markdown() == ""
-    # 승인 길의 다른 답이라도 금액을 실었으면 다 싣는다(예: 시작 실패가 상한을 말할 때).
-    failed = "승인한 분석을 시작하지 못했습니다: 비용 상한 $0.50을 넘는 요청"
-    server._set_approval_notice(root, workspace_service.NOTICE_FAILED, failed)
-    assert server.quote_note_markdown() == failed
-    server._set_approval_notice(root, workspace_service.NOTICE_ACCEPTED)
-    assert server.quote_note_markdown() == ""  # 접수 알림은 금액이 없다
-
-
-# ── 실행본(node) — 카드 요약·결정 상자·머리줄 옮기기(작업대 하네스 재사용) ──────────
 
 _PANEL_SCRIPT = r"""
 // 카드·컷 어느 길로 와도 같은 결정 상자다 — 빨강 막대를 누르지 않고 카드로 고른다.

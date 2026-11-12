@@ -425,7 +425,7 @@ def test_the_status_tick_counts_usage_once(
     server._quick = {"root": root, "token": "usage", "revision": summary.revision.revision_id}
     counts = _counted(monkeypatch)
     calls = _during(
-        counts, lambda: server.status_tick(signature, None, None, None, None, *(None,) * 5)
+        counts, lambda: server.status_tick(signature, None, None, None, None, *(None,) * 3)
     )
     assert calls["analysis_usage_summary"] == 1, dict(calls)
     assert server.raw.analysis_usage_line(root, summary.revision.revision_id) == ""  # 유료 0

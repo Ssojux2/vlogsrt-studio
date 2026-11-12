@@ -34,7 +34,13 @@ from tests.raw.test_claude_analysis_flow import (
     settle,
 )
 from tests.raw.test_selection_analysis import wait_until
-from ui.workspace_service import LIBRARY_APPROVAL_JOB_KIND, LIBRARY_APPROVE_LABEL, RawWorkspaceUi
+from ui.workspace_service import (
+    LIBRARY_APPROVAL_JOB_KIND,
+    LIBRARY_APPROVE_LABEL,
+    LIBRARY_SCAN_JOB_KIND,
+    NOTICE_FAILED,
+    RawWorkspaceUi,
+)
 from vlogsrt.project.raw import service as raw_service
 from vlogsrt.project.raw.analysis_store import AnalysisStore
 
@@ -280,14 +286,14 @@ def test_the_model_panel_carries_the_model_dropdown_and_never_the_key(
     ]
     assert triggers == ["input"]
     assert SECRET not in json.dumps(app.config, ensure_ascii=False, default=str)
-    # 일괄 승인은 화면에 보인 범위·상한 문구를 함께 보낸다 — 서버가 지금 견적과 맞춰 본다.
+    # 일괄 승인은 서명만 보낸다 — 견적 문구가 없다(D110).
     approve = next(
         b
         for b in app.blocks.values()
         if isinstance(b, gr.Button) and b.value == LIBRARY_APPROVE_LABEL
     )
     (click,) = [d for d in app.config["dependencies"] if d["targets"] == [(approve._id, "click")]]
-    assert by_id["library-analysis-scope"]._id in click["inputs"]
+    assert click["inputs"] == [server._signature_state._id]
 
 
 def test_settings_summaries_show_official_claude_prices_only_for_claude(tmp_path: Path) -> None:
@@ -317,38 +323,27 @@ def test_the_advanced_semantic_resume_needs_the_claude_client(
 
 
 @needs_ffmpeg
-def test_the_quote_names_the_model_and_its_conservative_ceiling(
+def test_the_ready_text_names_the_model_and_no_price(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """승인 대기 문구는 모델 이름만 말한다 — 견적·금액을 미리 재지 않는다(D110)."""
     source = tmp_path / "scene.mov"
     _make_media(source, audio=True, seconds="32")
     opener = ClaudeOpener()
     server, sender, luna = make_server(
         tmp_path, monkeypatch, source, opener=opener, auto_approve=False
     )
+    measured: list[object] = []
+    monkeypatch.setattr(server.raw, "selection_quote", lambda *a, **k: measured.append(a))
     choose_model(server, CLAUDE)
     server.capcut_choose_view(server.current_signature())
     wait_until(lambda: server._quick.get("stage") == "승인 대기")
     status = server._quick_status()
-    assert "Claude Opus 5.5" in status and "Claude 비용 상한 $" in status and "(보수적)" in status
-    root = server.workspace_root()
-    wait_until(lambda: server._library_quotes.get(root) is not None)
-    summary = server.library_analysis_summary()
-    assert "Claude Opus 5.5" in summary and "Claude 비용 상한 $" in summary
-    # 되돌리면 선택한 영상의 견적이 Luna 문구로 다시 난다 — 금액은 지어내지 않는다.
-    choose_model(server, LUNA)
-    wait_until(lambda: server._quick["quote"].workflow.models.luna_model == LUNA)
+    assert "Claude Opus 5.5 분석 준비 완료" in status and "$" not in status
+    choose_model(server, LUNA)  # 되돌리면 문구가 곧바로 지금 모델을 말한다
     status = server._quick_status()
-    assert "Luna 분석 준비 완료" in status and "비용 상한" not in status
-    # 라이브러리 견적도 비운 뒤 지금 모델로 다시 낸다.
-    wait_until(
-        lambda: (
-            root in server._library_quotes
-            and server._library_quotes[root].workflow.models.luna_model == LUNA
-        )
-    )
-    summary = server.library_analysis_summary()
-    assert "Claude" not in summary and "비용 상한" not in summary
+    assert "Luna 분석 준비 완료" in status and "$" not in status
+    assert measured == []  # 고르기·모델 바꾸기는 범위를 재지 않는다
     assert (len(sender.calls), len(luna.calls), len(opener.calls)) == (0, 0, 0)
 
 
@@ -374,8 +369,8 @@ def test_luna_results_are_not_shown_done_under_claude_and_nothing_is_re_reviewed
 
     server._selection_auto_approval = None
     choose_model(server, CLAUDE)
-    wait_until(lambda: server._library_quotes.get(root) is not None)
-    button = server.library_analysis_button()
+    wait_until(lambda: not server.raw.active_jobs(root, (LIBRARY_SCAN_JOB_KIND,)))
+    button = wait_until(lambda: (got := server.library_analysis_button()).interactive and got)
     assert button.value == LIBRARY_APPROVE_LABEL and button.interactive
     assert DONE not in server._quick_status()
     assert "분석 모델 바뀜 · 다시 승인 필요" in server._quick_status()  # Claude 결과는 아직 없다
@@ -390,7 +385,7 @@ def test_luna_results_are_not_shown_done_under_claude_and_nothing_is_re_reviewed
 
     server._start_quick(root, (), asset_ids=ids)
     wait_until(lambda: server._quick.get("stage") == "승인 대기")
-    assert server._quick["quote"].workflow.models.luna_model == CLAUDE
+    assert "Claude Opus 5.5 분석 준비 완료" in server._quick_status()
     assert (len(sender.calls), len(luna.calls), len(opener.calls)) == (1, 3, 0)
 
 
@@ -413,7 +408,6 @@ def test_a_missing_claude_key_is_named_before_any_analysis_starts(
     root = server.workspace_root()
     message = server.quick_approve_view(server.current_signature())
     assert "ANTHROPIC_API_KEY" in message and server._quick["stage"] == "승인 대기"
-    wait_until(lambda: server._library_quotes.get(root) is not None)
     server.library_analysis_view(server.current_signature())
     assert "ANTHROPIC_API_KEY" in server._quick_status()
     kinds = {job.kind for job in server.raw.list_jobs(root)}
@@ -425,10 +419,10 @@ def test_a_missing_claude_key_is_named_before_any_analysis_starts(
 
 
 @needs_ffmpeg
-def test_an_unseen_requote_is_refused_until_its_ceiling_is_on_screen(
+def test_an_approval_uses_the_model_saved_at_the_click(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """승인 클릭은 화면에 나간 견적에만 묶인다 — 다시 낸 견적은 상한을 보이기 전에 못 산다."""
+    """승인 대기 뒤에 모델이 바뀌어도 승인은 누른 순간의 모델로 잰다 — 옛 견적에 묶이지 않는다."""
     source = tmp_path / "scene.mov"
     _make_media(source, audio=True, seconds="8")
     opener = ClaudeOpener()
@@ -440,28 +434,21 @@ def test_an_unseen_requote_is_refused_until_its_ceiling_is_on_screen(
     root, signature = server.workspace_root(), server.current_signature()
     assert "Luna 분석 준비 완료" in server._quick_status()
     workflow = server.raw.settings(root)
-    # 화면을 거치지 않은 경합 — 설정만 Claude가 됐고 견적은 아직 Luna다.
+    # 화면을 거치지 않은 경합 — 설정만 Claude가 됐다.
     claude = replace(workflow, models=replace(workflow.models, luna_model=CLAUDE))
     server.raw.update_settings(root, claude)
-    assert "새 견적을 확인하세요" in server.quick_approve_view(signature)
-    wait_until(lambda: server._quick["quote"].workflow.models.luna_model == CLAUDE)
-    # 타이머가 그린 화면은 셈하지 않는다 — 건너뛴 그리기·다른 탭일 수 있다(R2-3). 거절 답만 센다.
-    assert "Claude 비용 상한 $" in server._quick_status()
-    shown = server.quick_approve_view(signature)
-    assert "새 견적을 확인하세요" in shown and "Claude 비용 상한 $" in shown
-    assert server._quick["stage"] == "승인 대기"
-    assert not [j for j in server.raw.list_jobs(root) if j.input_fingerprint.endswith(":approved")]
-    assert (len(sender.calls), len(luna.calls), len(opener.calls)) == (0, 0, 0)
-    server.quick_approve_view(signature)  # 상한을 본 뒤의 클릭은 받는다
-    assert settle(server)["stage"] == DONE
+    server.quick_approve_view(signature)
+    finished = settle(server)
+    assert finished["stage"] == DONE
+    assert finished["quote"].workflow.models.luna_model == CLAUDE
     assert (len(sender.calls), len(luna.calls), len(opener.calls)) == (1, 0, 1)
 
 
 @needs_ffmpeg
-def test_a_library_approval_binds_to_the_summary_on_screen(
+def test_a_library_approval_uses_the_model_saved_at_the_click(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """일괄 승인은 화면의 요약이 지금 견적과 같을 때만 접수된다 — 다르면 새 견적을 보라 한다."""
+    """일괄 승인은 누른 순간의 모델로 잰다 — 화면에 묶인 옛 견적이 없다(D110)."""
     source = tmp_path / "scene.mov"
     _make_media(source, audio=True, seconds="8")
     opener = ClaudeOpener()
@@ -471,57 +458,13 @@ def test_a_library_approval_binds_to_the_summary_on_screen(
     server.capcut_choose_view(server.current_signature())
     wait_until(lambda: server._quick.get("stage") == "승인 대기")
     root = server.workspace_root()
-    wait_until(lambda: server._library_quotes.get(root) is not None)
-    on_screen = server.library_analysis_summary()  # Luna 견적 — 금액 없음
     choose_model(server, CLAUDE)
-    wait_until(
-        lambda: (
-            root in server._library_quotes
-            and server._library_quotes[root].workflow.models.luna_model == CLAUDE
-        )
-    )
-    server.library_analysis_view(server.current_signature(), on_screen)
-    assert "새 견적을 확인하세요" in server._quick_status()
-    assert LIBRARY_APPROVAL_JOB_KIND not in {job.kind for job in server.raw.list_jobs(root)}
-    server.library_analysis_view(server.current_signature(), server.library_analysis_summary())
+    server.library_analysis_view(server.current_signature())
     assert LIBRARY_APPROVAL_JOB_KIND in {job.kind for job in server.raw.list_jobs(root)}
     wait_until(lambda: len(opener.calls) == 1)
     busy = ("selection_analysis", LIBRARY_APPROVAL_JOB_KIND)
     wait_until(lambda: not server.raw.active_jobs(root, busy))
     assert (len(sender.calls), len(luna.calls)) == (1, 0)
-
-
-@needs_ffmpeg
-def test_a_late_old_model_quote_never_overwrites_the_current_one(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Luna → Claude → Luna 사이에 늦게 끝난 Claude 견적은 버린다 — 라이브러리·선택 영상 모두."""
-    source = tmp_path / "scene.mov"
-    _make_media(source, audio=True, seconds="8")
-    server, _, _ = make_server(
-        tmp_path, monkeypatch, source, opener=ClaudeOpener(), auto_approve=False
-    )
-    server.capcut_choose_view(server.current_signature())
-    wait_until(lambda: server._quick.get("stage") == "승인 대기")
-    root = server.workspace_root()
-    real, held, release = server.raw.selection_quote, [], threading.Event()
-
-    def slow_claude(at: Path, asset_ids: tuple[str, ...]) -> object:
-        quote = real(at, asset_ids)
-        if quote.workflow.models.luna_model == CLAUDE:
-            held.append(quote)  # 라이브러리 견적과 선택 영상 견적, 둘 다 여기서 멈춘다
-            assert release.wait(30)
-        return quote
-
-    monkeypatch.setattr(server.raw, "selection_quote", slow_claude)
-    choose_model(server, CLAUDE)  # 라이브러리·선택 영상 견적이 Claude로 다시 나지만 늦는다
-    wait_until(lambda: len(held) == 2)
-    choose_model(server, LUNA)  # 그 사이 되돌렸다 — Luna 견적이 먼저 끝난다
-    wait_until(lambda: root in server._library_quotes)
-    release.set()
-    wait_until(lambda: not server.raw.active_jobs(root, ("library_quote", "selection_quote")))
-    assert server._library_quotes[root].workflow.models.luna_model == LUNA
-    assert server._quick["quote"].workflow.models.luna_model == LUNA
 
 
 def _keyless_server(
@@ -544,7 +487,7 @@ def _keyless_server(
 
 
 @needs_ffmpeg
-def test_a_first_run_without_a_key_still_reaches_the_requoted_claude_quote(
+def test_a_first_run_without_a_key_still_reaches_the_claude_analysis(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """키 없음 → 연결 안내 → Claude 고름 → `.env` 키로 다시 띄움 → 승인: 갇히지 않는다(R2-1 a).
@@ -556,16 +499,12 @@ def test_a_first_run_without_a_key_still_reaches_the_requoted_claude_quote(
     server.quick_approve_view(signature)
     assert server._quick.get("connection_required")
     choose_model(server, CLAUDE)
-    wait_until(lambda: server._quick["quote"].workflow.models.luna_model == CLAUDE)
     for _ in range(3):
-        server._quick_status()  # 타이머 — 연결 안내가 견적을 가리고 있다
+        server._quick_status()  # 타이머 — 연결 안내가 상태 줄을 붙잡고 있다
     server._startup_credentials = raw_service.EnvironmentCredentials("sk-openai-synthetic", None)
-    refused = server.quick_approve_view(signature)
-    assert "새 견적을 확인하세요" in refused and "Claude 비용 상한 $" in refused
-    assert not server._quick.get("connection_required")  # 키가 생겼으니 안내를 걷는다
-    assert "Claude 비용 상한 $" in server._quick_status()
     assert (len(sender.calls), len(luna.calls), len(opener.calls)) == (0, 0, 0)
-    server.quick_approve_view(signature)  # 답으로 본 견적을 승인한다
+    server.quick_approve_view(signature)
+    assert not server._quick.get("connection_required")  # 키가 생겼으니 안내를 걷는다
     finished = settle(server)
     assert finished["stage"] == DONE
     assert finished["quote"].workflow.models.luna_model == CLAUDE
@@ -573,7 +512,7 @@ def test_a_first_run_without_a_key_still_reaches_the_requoted_claude_quote(
 
 
 @needs_ffmpeg
-def test_a_held_library_notice_never_masks_the_quote_to_confirm(
+def test_a_held_library_notice_never_blocks_the_video_approval(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """라이브러리 거절 알림이 상태 칸을 붙잡고 있어도 선택 영상 승인은 갇히지 않는다(R2-1 b)."""
@@ -587,19 +526,8 @@ def test_a_held_library_notice_never_masks_the_quote_to_confirm(
     wait_until(lambda: server._quick.get("stage") == "승인 대기")
     signature, root = server.current_signature(), server.workspace_root()
     choose_model(server, CLAUDE)
-    wait_until(lambda: server._quick["quote"].workflow.models.luna_model == CLAUDE)
-    wait_until(
-        lambda: (
-            root in server._library_quotes
-            and server._library_quotes[root].workflow.models.luna_model == CLAUDE
-        )
-    )
-    server.library_analysis_view(signature, "a summary the user never saw")
-    held = server._quick_status()
-    assert "새 견적을 확인하세요" in held and server.library_analysis_summary() in held
-    refused = server.quick_approve_view(signature)
-    assert "새 견적을 확인하세요" in refused and "Claude 비용 상한 $" in refused
-    assert "Claude Opus 5.5 분석 준비 완료" in refused  # 라이브러리 요약이 아니라 이 영상의 견적
+    server._set_approval_notice(root, NOTICE_FAILED, "승인한 분석을 시작하지 못했습니다: 합성")
+    assert "합성" in server._quick_status()
     assert (len(sender.calls), len(luna.calls), len(opener.calls)) == (0, 0, 0)
     server.quick_approve_view(signature)
     assert settle(server)["stage"] == DONE

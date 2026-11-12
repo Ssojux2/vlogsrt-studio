@@ -426,15 +426,3 @@ def test_the_approval_binds_the_quoted_rescue_budget() -> None:
     fields = browser_runtime._rescue_approval_fields(cross_check.with_rescue(estimate()))
     assert fields == {"rescue_chunk_budget": 6}
     assert browser_runtime._rescue_approval_fields(estimate()) == {}
-
-
-def test_the_quote_sentence_names_the_ceiling_and_only_when_quoted() -> None:
-    pytest.importorskip("gradio", reason="웹 UI extra(gradio)가 없다")
-    from ui import workspace_service
-
-    quoted = [cross_check.with_rescue(estimate()), cross_check.with_rescue(estimate(asset_id="b"))]
-    sentence = workspace_service._rescue_sentence(quoted)
-    assert sentence == workspace_service.RESCUE_QUOTE_TEXT.format(count=12, usd="0.16")
-    assert sentence.startswith(" ") and sentence.rstrip().endswith("니다).")
-    assert workspace_service._rescue_sentence([estimate()]) == ""
-    assert "whisper" not in sentence.lower() and "GPT" not in sentence

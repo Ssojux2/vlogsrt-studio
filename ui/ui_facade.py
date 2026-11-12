@@ -806,9 +806,8 @@ _MARKDOWN_ESCAPED = re.compile(r"\\([!-/:-@\[-`{-~])")
 def literal_markdown(text: str) -> str:
     """글 그대로 그려지는 마크다운 — ASCII 문장부호를 모두 백슬래시로 escape한다(CommonMark).
 
-    견적 칸의 값은 승인 클릭이 함께 보내는 문구라(D54) 그려진 글이 원문과 같아야 앞 단계의 글
-    대조가 선다 — `2~3분`이 `23분`으로, `_x_`가 기울임으로 바뀌면 승인이 영영 막힌다. 앞 단계
-    (`APPROVE_GUARD_JS`)가 같은 규칙으로 되풀어 원문을 보낸다.
+    칸의 글이 서버의 원문과 같아야 할 때 쓴다 — `2~3분`이 `23분`으로, `_x_`가 기울임으로 바뀌지
+    않는다.
     """
     return _MARKDOWN_PUNCTUATION.sub(r"\\\1", text)
 
@@ -818,49 +817,11 @@ def unliteral_markdown(text: str) -> str:
     return _MARKDOWN_ESCAPED.sub(r"\1", text)
 
 
-APPROVE_GUARD_JS = r"""(signature, shownQuote) => {
-  // 승인은 일을 건다 — 거절되든 아니든 서버 쪽 고리를 깨운다(D101, 표시만).
-  if (window.__vlServer) { window.__vlServer.wake(true); }
-  // 승인은 사람이 지금 보는 견적에만 묶인다(D54). 견적 칸이 서랍·판에 덮였거나 화면 밖이거나
-  // 칸 안에서 잘렸거나 그려진 글이 보낼 문구와 다르면 빈 견적을 보내 서버가 「새 견적을
-  // 확인하세요」로 거절하게 하고 견적을 보이게 한다 — 다음 클릭이 그것을 승인한다.
-  const quote = document.getElementById('library-analysis-scope');
-  // 읽고 재는 것은 그려진 마크다운 노드뿐이다 — 감싼 칸에는 그라디오 상태 표시가 형제로 있어
-  // 1초 틱마다 '0.1s' 같은 글이 잠깐 섞인다. 노드를 못 찾으면 닫힌 쪽(거절 길)이다.
-  const md = quote && quote.querySelector ? quote.querySelector('[data-testid="markdown"]') : null;
-  const drawerOpen = !!document.querySelector('#project-tools.open, #settings-drawer.open');
-  const inside = (r) => r.width >= 1 && r.height >= 1 && r.top >= 0 && r.left >= 0 &&
-    r.bottom <= window.innerHeight && r.right <= window.innerWidth;
-  const uncovered = (el, r) => [[r.left + r.width / 2, r.top + r.height / 2],
-    [r.left + 2, r.top + 2], [r.right - 2, r.top + 2], [r.left + 2, r.bottom - 2],
-    [r.right - 2, r.bottom - 2]].every(([x, y]) => {
-    const hit = document.elementFromPoint(x, y);
-    return !!hit && el.contains(hit);
-  });
-  // 칸의 값은 문장부호를 escape한 마크다운(`literal_markdown`)이다 — 되풀면 견적 원문이고, 그려진
-  // 글도 그 원문이다. 빈칸만 한 칸으로 맞춰 비교하고, 서버에는 되푼 원문을 보낸다(대조는 그대로).
-  const sent = String(shownQuote || '').replace(/\\([!-\/:-@\[-`{-~])/g, '$1');
-  const flat = (s) => String(s || '').replace(/\s+/g, ' ').trim();
-  let seen = !!md && !drawerOpen;
-  if (seen) {
-    const style = window.getComputedStyle(md);
-    const box = md.getBoundingClientRect();
-    seen = style.display !== 'none' && style.visibility === 'visible' && inside(box) &&
-      uncovered(md, box) && md.scrollHeight <= md.clientHeight + 1 &&
-      flat(md.textContent) !== '' && flat(md.textContent) === flat(sent);
-  }
-  if (seen) { return [signature, sent]; }
-  if (window.__vlDrawer) {
-    ['project-tools', 'settings-drawer'].forEach((id) => window.__vlDrawer(id, false));
-  } else {
-    document.querySelectorAll('#project-tools.open > .toggle-button, ' +
-      '#settings-drawer.open > .toggle-button').forEach((button) => button.click());
-  }
-  if (window.__vlClosePopovers) { window.__vlClosePopovers(null); }
-  if (quote && quote.scrollIntoView) { quote.scrollIntoView({ block: 'nearest' }); }
-  return [signature, ''];
-}"""
-"""일괄 승인 클릭의 앞 단계 — 견적 칸이 정말 보일 때만 그 문구를 보낸다(덮였으면 빈 문구)."""
+APPROVE_WAKE_JS = (
+    "(signature) => { if (window.__vlServer) { window.__vlServer.wake(true); } return signature; }"
+)
+"""일괄 승인 클릭의 앞 단계 — 승인은 일을 건다, 서버 쪽 고리를 깨운다(D101, 표시만). 견적이 없어
+보낼 문구도 없다(D110)."""
 
 SERVER_ACTIVITY_JS = r"""
   // 서버 쪽 기록(D61·D101) — 고리 하나가 읽는다. 걸린 타이머는 언제나 하나, setTimeout 사슬뿐이다.
@@ -1166,7 +1127,7 @@ SHELL_JS = r"""
     var latest = A.entries[0];
     A.strip(latest ? latest.text : "", latest ? latest.kind : "status");
   };
-  // 견적을 실은 승인 거절은 견적 칸(#vl-quote-note)이, 실사용 줄은 기록 판 고정 줄이 다 보인다.
+  // 실사용 줄은 기록 판 고정 줄이 다 보인다.
   A.show = function (text, kind) {
     if (!text || !byId("vl-activity-msg")) { return; }
     // 도는 일의 머리줄이 띠에 있는 동안 상태 줄은 기록에만 남는다 — 띠가 1초마다 뒤바뀌지 않는다.
@@ -1782,35 +1743,23 @@ _SHELL_CSS = """
   display: flex; align-items: center; justify-content: space-between; gap: 8px;
   padding-bottom: 8px; border-bottom: 1px solid var(--vl-line); font-size: 14px; }
 /* 막 — 서랍이 열려 있는 동안 나머지 화면 전체(머리줄·승인 단추 포함)를 덮는다. 서랍(1000) 바로
-   아래 층이고, 누르면 서랍만 닫힌다 — 덮인 견적으로 승인 단추가 눌리지 않는다. */
+   아래 층이고, 누르면 서랍만 닫힌다 — 서랍이 열린 채 승인 단추가 눌리지 않는다. */
 .vl-scrim {
   position: fixed; inset: 0; z-index: 999;
   background: color-mix(in srgb, var(--vl-bg) 55%, transparent); }
 .vl-scrim[hidden] { display: none; }
-/* 견적 칸(#vl-quote) — 분석 견적 문구와 그 아래의 전문 칸. 넓은 화면은 패널 열 위, 1050px
-   이하는 명령 줄 바로 아래(재생기 앞). 견적 문구는 승인할 견적이 없으면(승인 단추가 꺼져
-   있으면) 숨는다. 전문 칸(#vl-quote-note)은 견적·금액을 실은 살아 있는 승인 알림(거절)만
-   말줄임 없이 여러 줄로 다 보이고, 그런 알림이 없으면 숨는다(실사용 줄은 기록 판 고정 줄).
-   칸은 제 격자 칸 안에서 자란다. */
+/* 승인 칸(#vl-quote) — 승인 범위·교차 확인·영어 자막·초안 결과 카드. 넓은 화면은 패널 열 위,
+   1050px 이하는 명령 줄 바로 아래(재생기 앞). 칸은 제 격자 칸 안에서 자란다. 견적 문구는 없다
+   (D110 — 승인은 확인 한 번이다). */
 #vl-quote { grid-area: quote; min-width: 0; gap: 8px; }
-/* 넓은 화면(세 열)에서 견적 칸은 재생기와 같은 행들을 나눠 쓴다 — 견적·범위·초안 카드가 자라면
+/* 넓은 화면(세 열)에서 승인 칸은 재생기와 같은 행들을 나눠 쓴다 — 범위·초안 카드가 자라면
    재생기 행이 함께 늘어나 타임라인(추천 구간)이 화면 밖으로 밀렸다(1440x900 실측: 재생기
-   983px · 레일 y=1198). 칸에 상한을 두고 그 안에서 스크롤한다 — 승인 단추와 견적은 그대로
-   보인다(D44). */
+   983px · 레일 y=1198). 칸에 상한을 두고 그 안에서 스크롤한다. */
 @media (min-width: 1051px) {
   #vl-quote { max-height: 46vh; overflow: hidden auto;
     scrollbar-color: var(--vl-scrollbar); }
 }
-#library-analysis-scope, #vl-quote-note {
-  min-width: 0; padding: 8px 10px; border-radius: 6px;
-  font-size: 12px; line-height: 16px; white-space: normal; overflow-wrap: anywhere; }
-#library-analysis-scope {
-  border: 1px solid var(--vl-line-strong); background: var(--vl-surface-raised); }
-#vl-quote-note { border: 1px solid var(--vl-warn); background: var(--vl-warn-soft); }
-#vl-quote-note p { margin: 0 0 4px; }
-#vl-quote-note p:last-child { margin-bottom: 0; }
-#review-tab:has(#library-approve:disabled) #library-analysis-scope { display: none; }
-/* 초안 결과 카드(W-46a, D100 §7a) — 견적 칸 아래. 경로는 고정폭 글자로 줄바꿈해 다 보인다.
+/* 초안 결과 카드(W-46a, D100 §7a) — 승인 칸 아래. 경로는 고정폭 글자로 줄바꿈해 다 보인다.
    빨간 경고는 확인하지 않은 비추천이 빠졌다는 뜻이다(막지 않고 알린다). */
 #vl-export-card { min-width: 0; padding: 0; }
 .vl-export { min-width: 0; padding: 8px 10px; border-radius: 6px; font-size: 12px;
@@ -1825,22 +1774,22 @@ _SHELL_CSS = """
   margin: 4px 0 0; }
 .vl-export-paths dt { color: var(--vl-ink-muted); }
 .vl-export-paths dd { margin: 0; font-family: var(--vl-font-mono); font-size: 11px; }
-/* 승인 범위(D59 19b) — 견적 문구 바로 위의 두 갈래(전사 + 영상 분석 · 전사만). 승인할 견적이
-   없으면 견적 문구와 함께 숨는다(그때 패널이 그 줄까지 올라온다). */
+/* 승인 범위(D59 19b) — 두 갈래(전사 + 영상 분석 · 전사만). 승인할 영상이 없으면(승인 단추가
+   꺼져 있으면) 숨는다(그때 패널이 그 줄까지 올라온다). */
 #vl-approval-mode {
   min-width: 0; padding: 6px 10px; border-radius: 6px;
   border: 1px solid var(--vl-line); background: var(--vl-surface-raised); }
 #vl-approval-mode .wrap { gap: 4px 12px; }
 #review-tab:has(#library-approve:disabled) #vl-approval-mode { display: none; }
-/* 다른 귀로 교차 확인(D59 19d) — 승인 범위 바로 아래의 켬·끔. 같은 상자 모양이고, 승인할 견적이
-   없으면 함께 숨는다. 분량·금액은 칸이 아니라 견적 문구가 말한다. */
+/* 다른 귀로 교차 확인(D59 19d) — 승인 범위 바로 아래의 켬·끔. 같은 상자 모양이고, 승인할 영상이
+   없으면 함께 숨는다. */
 #vl-cross-check {
   min-width: 0; padding: 6px 10px; border-radius: 6px;
   border: 1px solid var(--vl-line); background: var(--vl-surface-raised); }
 #review-tab:has(#library-approve:disabled) #vl-cross-check { display: none; }
 @media (min-width: 1051px) {
   #review-tab:has(#library-approve:disabled)
-    #visual-stage:not(:has(#vl-quote-note)):not(:has(.vl-export)) #vl-ranges {
+    #visual-stage:not(:has(.vl-export)) #vl-ranges {
     grid-row: 1 / 3; }
 }
 /* 패널(D57 B) — 머리 · 결정 · 판정 · 알림 · 편집 · 접힌 상세. 결정 상자는 빗금 띠를 이고 선다. */
@@ -1898,7 +1847,7 @@ _SHELL_CSS = """
 .vl-memo-text { min-height: 4.5em; max-height: 9em; resize: vertical; overflow-y: auto;
   font: inherit; line-height: 1.4; }
 """
-"""머리줄·명령 줄·활동 칸·서랍·견적 칸·패널 결정 상자 — 색은 토큰만 부른다."""
+"""머리줄·명령 줄·활동 칸·서랍·승인 칸·패널 결정 상자 — 색은 토큰만 부른다."""
 
 WORKBENCH_CSS = (
     """
@@ -1911,8 +1860,8 @@ WORKBENCH_CSS = (
 }
 /* 무대(W-17 B, D57) — 목록은 무대 높이 전체, 타임라인은 재생기와 패널 아래를 함께 덮는다:
    "thumbs player panel" "thumbs timeline timeline" "foot foot foot". 패널 열 위의 한 칸(quote)은
-   분석 견적이다 — 승인 단추가 묶는 문구라 말줄임 없이 보이되 무대 위쪽을 밀지 않는다(승인할
-   견적이 없으면 숨고 패널이 그 자리를 쓴다).
+   승인 칸이다 — 승인 범위·교차 확인·영어 자막·초안 결과가 무대 위쪽을 밀지 않고 선다(승인할
+   영상이 없으면 범위 칸이 숨고 패널이 그 자리를 쓴다).
    구성요소 껍데기(vl-stage-cell)와 본문 뿌리는 display:contents로 격자에
    참여한다. 무대 치수는 여기 한 곳 — 흩어진 재선언이 마지막에 이겨 목록 칸이
    180px로 묶이고 재생기·타임라인이 화면 아래로 밀리던 결함(D50).
@@ -2087,7 +2036,7 @@ WORKBENCH_CSS = (
 /* 네 영역(W-46b, D100 §7b) — 목록 · 재생기+자막 · 추천 구간(레일 + 「내보낼 부분」 목록) · 재생
    타임라인. 그 밖의 도구(컷 편집 패널 · 제외 제안 대기열 · 컷 경계 손잡이)는 「고급 도구」를
    펼칠 때만 보인다 — 숨길 뿐 지우지 않는다(무대의 `data-vl-advanced`는 실행본이 단다).
-   견적·승인 칸(#vl-quote)은 언제나 보인다(D44). */
+   승인 칸(#vl-quote)은 언제나 보인다(D44). */
 #vl-ranges { grid-area: ranges; min-width: 0; min-height: 0; overflow: hidden auto;
   display: flex; flex-direction: column; gap: 6px; padding: 8px 10px; box-sizing: border-box;
   border: 1px solid var(--vl-line); border-radius: 6px; background: var(--vl-surface);
@@ -2174,7 +2123,6 @@ WORKBENCH_CSS = (
    div#review-tab.tabitem > div.column > div.row > button(명령 줄, W-17 B). */
 #review-tab .column { gap: 6px; }
 #review-tab > .column > .row > button { flex: 0 1 auto; min-width: 0; padding: 6px 12px; }
-#library-analysis-scope p { margin: 0; }
 #visual-video::cue {
   color: var(--vl-on-video-overlay); background: var(--vl-video-overlay); font-size:20px; }
 .vl-source-overlay { position:absolute; bottom:44px; left:50%; transform:translateX(-50%);
@@ -2471,11 +2419,11 @@ WORKBENCH_CSS = (
 /* 반응형 — 넓은 쪽(1050) 다음 좁은 쪽(860) 순서여야 좁은 규칙이 이긴다(D50:
    예전엔 860 뒤에 무대 재선언이 와서 860 규칙이 죽어 있었다). 좁은 화면은 무대
    높이를 화면에 묶지 않고 문서 스크롤에 맡긴다.
-   두 분기점 모두 견적 칸이 명령 줄 바로 아래(재생기 앞)다 — 승인 단추를 누르는 자리에서
-   견적이 함께 보인다(옛 배치와 같다). 승인할 견적·전문이 없으면 그 줄은 비어 높이가 없다.
+   두 분기점 모두 승인 칸이 명령 줄 바로 아래(재생기 앞)다 — 승인 단추를 누르는 자리에서
+   범위가 함께 보인다(옛 배치와 같다). 보일 칸이 없으면 그 줄은 비어 높이가 없다.
    ≤1050: 두 열 — 목록이 왼쪽 열 전체, 타임라인은 재생기 바로 아래(사용자 결정 6). 목록은
    크기 봉쇄(contain: size)로 행 높이를 부풀리지 않고 제 칸 안에서 스크롤한다.
-   ≤860: 한 열 — (견적) · 재생기 · 타임라인 · 목록(가로 띠) · 패널 · 상태 줄(사용자 결정 6). */
+   ≤860: 한 열 — (승인 칸) · 재생기 · 타임라인 · 목록(가로 띠) · 패널 · 상태 줄(사용자 결정 6). */
 @media (max-width: 1050px) {
   #visual-stage { height: auto; grid-template-columns: minmax(180px, 220px) minmax(0, 1fr);
     grid-template-rows: none;
@@ -3166,7 +3114,7 @@ VISUAL_BOOTSTRAP_JS = (
         return true;
       }
       // 다시 듣기(D59 19b) — 누르면 차례만 오르고(무료) 승인 범위가 「전사만」이 된다. 유료 전사는
-      // 견적을 확인하고 승인해야 시작한다. 사람이 고친 자막은 덮지 않는다(단추가 없다).
+      // 승인해야 시작한다. 사람이 고친 자막은 덮지 않는다(단추가 없다).
       function relistenPanel(info) {
         var re = info && info.relisten;
         if (!re) { return ""; }
@@ -3193,13 +3141,13 @@ VISUAL_BOOTSTRAP_JS = (
           return out.join("");
         }
         if (re.pending) {
-          out.push('<p class="vl-kv">다시 듣기를 기다리고 있습니다 — 견적을 확인하고 승인하면' +
+          out.push('<p class="vl-kv">다시 듣기를 기다리고 있습니다 — 승인하면' +
             " 시작합니다.</p></details>");
           return out.join("");
         }
         if (re.heard) { out.push('<p class="vl-kv">다시 들은 전사입니다.</p>'); }
         out.push('<button type="button" class="vl-btn" data-vl-act="relisten">다시 듣기</button>' +
-          "<small>누르면 승인 범위가 「전사만」으로 바뀝니다. 견적을 확인하고 승인해야" +
+          "<small>누르면 승인 범위가 「전사만」으로 바뀝니다. 승인해야" +
           " 시작합니다.</small></details>");
         return out.join("");
       }

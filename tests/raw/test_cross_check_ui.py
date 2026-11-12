@@ -400,9 +400,7 @@ def test_blocks_put_the_glossary_in_the_settings_drawer_and_wire_save_and_refres
     deps = app.config["dependencies"]
     (clicked,) = [d for d in deps if d["targets"] == [(save._id, "click")]]
     assert clicked["inputs"] == [ui._signature_state._id, box._id, loaded._id]
-    assert clicked["outputs"] == [status._id, box._id, ui._library_summary_md._id, loaded._id]
-    follow = [d for d in deps if d.get("trigger_after") == clicked["id"]]
-    assert [d["outputs"] for d in follow] == [[ui._quote_note_md._id]]
+    assert clicked["outputs"] == [status._id, box._id, ui._capcut_progress_md._id, loaded._id]
     assert not [d for d in deps if (box._id, "change") in d["targets"]]  # 저장은 단추뿐이다
     # 쓰지 않은 칸만 맞추는 `glossary_tick`은 1초 상태 틱 하나 안에서 돈다(D63 세션 C).
     (tick,) = [f for f in app.fns.values() if getattr(f.fn, "__name__", "") == "status_tick"]
@@ -520,12 +518,12 @@ def test_an_unreadable_glossary_is_warned_not_swallowed(
 
 
 @needs_ffmpeg
-def test_saving_the_glossary_rebinds_the_quote_on_screen(
+def test_saving_the_glossary_makes_the_next_approval_ask_again(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """두 영상의 글자 답이 빈 용어집으로 캐시에 있다 — 견적에 다른 귀 문장이 없다. 「왕방」을
-    저장하면
-    같은 청크가 새 용어집으로는 답이 없으므로 보이는 견적이 곧바로 그 분량을 말한다(호출 0회)."""
+    """두 영상의 글자 답이 빈 용어집으로 캐시에 있다 — 승인이 잴 범위에 물을 글자가 없다. 「왕방」을
+    저장하면 같은 청크가 새 용어집으로는 답이 없으므로 다음 승인이 그 청크를 다시 묻는다(저장은
+    호출 0회)."""
     ui, ears, client, root, ids = _library(tmp_path, monkeypatch, on=False, sender=EarsSender())
     approve(ui, TRANSCRIBE)
     wait_until(lambda: all(stage(ui, root, i) == raw.TRANSCRIBED_STAGE for i in ids.values()))
@@ -533,19 +531,19 @@ def test_saving_the_glossary_rebinds_the_quote_on_screen(
     for asset_id in ids.values():
         _cache_live_answer(ui, root, asset_id)
     _turn(ui, root, True)
-    before = ui._library_quotes[root]
-    assert "다른 귀" not in ui.library_analysis_summary()
+    before = ui.raw.selection_quote(root, ui._library_ids(root))
+    assert not any(e.text_chunk_count for e in before.estimates)
     sent = (len(ears.whisper), len(ears.text), len(client.calls))
     status, box, shown, _ = ui.glossary_save_view(
         ui.current_signature(), "왕방\n", ui.glossary_loaded_value()
     )
     assert status.replace("\\", "").startswith("용어집을 저장했습니다 — 용어 1개.")
     assert box.value == "왕방"
-    assert " 다른 귀(GPT-Transcribe)로 영상 2개 1분을 한 번 더 듣습니다" in shown.replace("\\", "")
-    assert shown == ui.library_analysis_summary_markdown()  # 보이는 문구 = 승인이 대조하는 문구
-    assert ui._library_quotes[root].digest != before.digest
+    assert shown == ui._quick_status()  # 상태 줄을 바로 다시 그린다
     _settled(ui, root)
-    assert "다른 귀(GPT-Transcribe)로 영상 2개" in ui.library_analysis_summary()
+    after = ui.raw.selection_quote(root, ui._library_ids(root))
+    assert after.digest != before.digest
+    assert [e.text_chunk_count for e in after.estimates] == [1, 1]
     assert (
         len(ears.whisper),
         len(ears.text),

@@ -192,7 +192,7 @@ def test_the_selection_defaults_to_strict(
     assert len(hashes) == 1  # 완전 검증 하나가 메모를 남겼고, 믿기는 그것을 썼다
 
 
-# ── 작업대 — 라이브러리 견적은 0회, 승인 뒤 유료 문은 완전 해시 ─────────────────────────
+# ── 작업대 — 범위 재기는 0회, 승인 뒤 유료 문은 완전 해시 ─────────────────────────
 
 
 def _library(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
@@ -212,7 +212,7 @@ def test_the_library_quote_and_a_glossary_requote_hash_nothing(
 ) -> None:
     ui, sender, client, root, ids = _library(tmp_path, monkeypatch)
     client.resume.set()
-    measured = ui._library_quotes[root]
+    measured = ui.raw.selection_quote(root, ui._library_ids(root))
     verified: list[bool] = []
     real = raw_service._verified_asset
 
@@ -270,7 +270,7 @@ def test_a_forged_stat_is_refused_at_the_paid_step_with_zero_sends(
 
     ui, sender, client, root, ids = _library(tmp_path, monkeypatch)
     client.resume.set()
-    measured = ui._library_quotes[root]
+    measured = ui.raw.selection_quote(root, ui._library_ids(root))
     a, b = ids["a.mov"], ids["b.mov"]
     workspace = ui.raw._workspace(root)
     _forge(workspace.source_media_path(workspace.source_asset(a)))

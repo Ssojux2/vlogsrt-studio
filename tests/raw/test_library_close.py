@@ -105,7 +105,7 @@ def test_close_returns_the_empty_page_and_forgets_the_saved_workspace(tmp_path: 
     state = tmp_path / "state.json"
     assert json.loads(state.read_text(encoding="utf-8"))["workspace_root"] == str(root)
     signature = server.current_signature()
-    server._library_quotes[root] = object()  # 닫으면 그 작업공간 몫의 화면 기억이 걷힌다
+    server._library_cached_ids[root] = {"done"}  # 닫으면 그 작업공간 몫의 화면 기억이 걷힌다
     server._project_names[root] = "제주"
     server._approval_notice[root] = object()  # type: ignore[assignment]
     server._quick_tasks["closed-token"] = {"root": root, "stage": "승인 대기"}
@@ -129,16 +129,13 @@ def test_close_returns_the_empty_page_and_forgets_the_saved_workspace(tmp_path: 
     assert f'data-vl-project="{ui_facade.PROJECT_EMPTY_LABEL}"' in workbench
     assert workspace_view[-3:] == ("", "", "")  # 경로 표시 셋도 빈다
     assert all(update.visible is False for update in fcp)  # FCP 연결 칸도 걷힌다
-    button, summary, _progress, note, usage = cells
+    button, _progress, usage = cells
     assert button.interactive is False  # 승인 단추는 누를 수 없다
-    assert summary == ui_facade.literal_markdown(
-        "폴더를 불러오면 분석 범위와 요청 상한을 안내합니다."
-    )
-    assert note.visible is False and usage == ""
+    assert usage == ""
     assert list(memory) == [None] * CELLS  # 1초 틱의 「마지막으로 보낸 값」을 잊는다
 
     assert server.workspace_root() is None and server.current_signature() is None
-    assert root not in server._library_quotes and root not in server._project_names
+    assert root not in server._library_cached_ids and root not in server._project_names
     assert root not in server._approval_notice
     # 영상별 작업 기록은 남는다 — 지우면 다시 열 때 「승인 대기」가 「중단」으로 되살아난다.
     assert server._quick_tasks["closed-token"]["stage"] == "승인 대기"
@@ -239,40 +236,36 @@ def test_close_leaves_db_only_upkeep_running(tmp_path: Path, kind: str) -> None:
         release.set()
 
 
-def test_open_then_close_with_a_running_library_quote(
+def test_open_then_close_with_a_running_library_scan(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """여는 길이 띄운 라이브러리 견적이 도는 중에도 닫힌다 — 늦게 끝나도 견적을 되살리지 않는다."""
+    """여는 길이 띄운 저장 결과 세기가 도는 중에도 닫힌다 — 늦게 끝나도 셈을 되살리지 않는다."""
     server, root, library = _opened(tmp_path)
     entered, release = threading.Event(), threading.Event()
-    sentinel = object()
 
-    def rebound(*args: Any, **kwargs: Any) -> object:
-        entered.set()  # 두 번째 취소 확인을 지난 자리 — 닫기 세대만이 쓰기를 막는다
+    def cached(*args: Any, **kwargs: Any) -> str:
+        entered.set()  # 취소 확인을 지난 자리 — 닫기 세대만이 쓰기를 막는다
         assert release.wait(20)
-        return sentinel
+        return "stored"
 
     monkeypatch.setattr(server, "_library_ids", lambda selected: ("source-a",))
-    monkeypatch.setattr(server, "_quote_current", lambda *args: True)
-    monkeypatch.setattr(server.raw, "selection_quote", lambda *args, **kwargs: object())
-    monkeypatch.setattr(server.raw, "cached_selection_analysis", lambda *args: None)
-    monkeypatch.setattr(server.raw, "selection_rebound_quote", rebound)
-    server._prepare_library_quote(root)
+    monkeypatch.setattr(server, "_cached_ids", lambda *args: cached())
+    server._scan_library(root)
     assert entered.wait(20)
-    (quote_job,) = [j for j in server.raw.all_active_jobs(root) if j.kind == "library_quote"]
+    kind = workspace_service.LIBRARY_SCAN_JOB_KIND
+    (scan_job,) = [j for j in server.raw.all_active_jobs(root) if j.kind == kind]
 
     values = server.close_library_view(server.current_signature())
     assert values[0] == workspace_service.LIBRARY_CLOSED_TEXT
-    assert server.raw.get_job(root, quote_job.job_id).cancellation_requested
+    assert server.raw.get_job(root, scan_job.job_id).cancellation_requested
     release.set()
     assert _wait_until(lambda: not server.raw.all_active_jobs(root))
-    assert root not in server._library_quotes  # 늦은 끝이 닫힌 작업공간의 견적을 쓰지 않았다
-    assert root not in server._library_cached_ids
+    assert root not in server._library_cached_ids  # 늦은 끝이 닫힌 작업공간의 셈을 쓰지 않았다
 
     server.open_fcp_library_view(library, originals_only=False)
-    assert _wait_until(lambda: server._library_quotes.get(root) is sentinel)  # 새로 잰다
-    quotes = [j for j in server.raw.list_jobs(root) if j.kind == "library_quote"]
-    assert len(quotes) == 2 and quotes[0].job_id != quote_job.job_id
+    assert _wait_until(lambda: server._library_cached_ids.get(root) == "stored")  # 새로 센다
+    scans = [j for j in server.raw.list_jobs(root) if j.kind == kind]
+    assert len(scans) == 2 and scans[0].job_id != scan_job.job_id
 
 
 def test_close_is_refused_while_the_library_approval_or_analysis_runs(tmp_path: Path) -> None:
@@ -325,18 +318,18 @@ def test_close_releases_the_wal_anchor_and_reopen_works(
     assert key not in workspace_module._wal_anchors  # 그 DB를 붙잡던 연결이 닫혔다
 
     prepared: list[Path] = []
-    original = server._prepare_library_quote
+    original = server._scan_library
 
     def record(selected: Path) -> None:
         prepared.append(selected)
         original(selected)
 
-    monkeypatch.setattr(server, "_prepare_library_quote", record)
+    monkeypatch.setattr(server, "_scan_library", record)
     view = server.open_fcp_library_view(library, originals_only=False)
     assert view[1] == signature  # 같은 작업공간이 같은 신원으로 다시 열린다
     assert server.workspace_root() == root
     assert key in workspace_module._wal_anchors  # 닻이 다시 섰다
-    assert prepared == [root]  # 견적도 다시 준비한다
+    assert prepared == [root]  # 저장 결과도 다시 센다
     assert server._fcp_scan is not None  # 라이브러리 조사도 다시 했다
     assert json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))[
         "workspace_root"
@@ -403,9 +396,7 @@ def test_close_wiring_matches_the_handler_values(tmp_path: Path, local_socket: N
     fcp = [server._fcp_originals_group._id, server._fcp_primary_info._id]
     cells = [
         server._library_approve_button._id,
-        server._library_summary_md._id,
         server._capcut_progress_md._id,
-        server._quote_note_md._id,
         server._usage_md._id,
     ]
     sent = [state._id for state in server._status_sent]

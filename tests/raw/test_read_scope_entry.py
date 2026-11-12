@@ -100,7 +100,7 @@ def test_a_caption_edit_writes_before_the_render_scope(
     monkeypatch.setattr(server, "_require_current_selection", lambda _signature: tmp_path)
     monkeypatch.setattr(server, "_require_workbench_token", lambda *_args: None)
     monkeypatch.setattr(server.raw, "edit_source_transcript", _spy(seen, "write", {}))
-    monkeypatch.setattr(server, "_prepare_library_quote", _spy(seen, "quote", None))
+    monkeypatch.setattr(server, "_scan_library", _spy(seen, "quote", None))
     monkeypatch.setattr(server, "_visual_workbench_render", _spy(seen, "render", ("껍", "본")))
     reply = server.visual_workbench_action(
         {"signature": "s", "sourceId": "a", "transcriptRevision": "r", "action": "edit"},

@@ -153,12 +153,11 @@ def test_the_library_quote_is_measured_once_the_folder_import_finishes(
     assert root is not None
     assert _wait(server, root, "reference_import").status == "succeeded"
     deadline = time.monotonic() + 20
-    while root not in server._library_quotes and time.monotonic() < deadline:
+    while root not in server._library_cached_ids and time.monotonic() < deadline:
         time.sleep(0.02)
-    quote = server._library_quotes.get(root)
-    assert quote is not None, "연결이 끝났는데 라이브러리 견적을 다시 재지 않았다"
+    assert root in server._library_cached_ids, "연결이 끝났는데 저장 결과를 다시 세지 않았다"
     ready = {a.asset_id for a in server.raw.list_source_assets(root) if a.status == "ready"}
-    assert set(quote.asset_ids) == ready and len(ready) == 2
+    assert set(server._library_ids(root)) == ready and len(ready) == 2
     button = server.library_analysis_button()
     assert button.interactive is True and button.value == LIBRARY_APPROVE_LABEL
 
@@ -371,10 +370,10 @@ def test_final_cut_import_and_export_live_only_in_the_drawers(
     # 「폴더 불러오기」는 서버를 부르지 않고 서랍만 연다.
     (opener,) = [d for d in deps if d["targets"] == [(buttons[FOLDER_IMPORT_LABEL]._id, "click")]]
     assert opener["backend_fn"] is False and "project-tools" in opener["js"]
-    # 견적·승인 문은 그대로 보인다(D44).
+    # 승인 문은 그대로 보인다(D44) — 견적 칸은 없다(D110).
     approve = buttons[workspace_service.LIBRARY_APPROVE_LABEL]
     assert approve.parent is bar and approve.visible is True
-    assert by_id["library-analysis-scope"].visible is not False
+    assert "library-analysis-scope" not in by_id
 
 
 def test_flow_steps_and_empty_states_talk_about_folders(tmp_path: Path) -> None:
@@ -459,7 +458,7 @@ def test_import_export_and_approve_wake_the_activity_poller(
     assert ui_facade.EXPORT_WAKE_JS.rstrip().endswith("return [signature, englishQuote]; }")
     assert "__vlServer.wake(true)" in ui_facade.ACTIVITY_WAKE_JS
     assert ui_facade.ACTIVITY_WAKE_JS.rstrip().endswith("return value; }")
-    assert "window.__vlServer.wake(true)" in ui_facade.APPROVE_GUARD_JS
+    assert "window.__vlServer.wake(true)" in ui_facade.APPROVE_WAKE_JS
 
 
 def test_the_english_box_saves_the_flag_and_shows_a_quote_line(

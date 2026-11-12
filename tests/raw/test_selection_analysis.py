@@ -396,16 +396,3 @@ def test_scenery_without_audio_still_gets_luna_recommendation(tmp_path, monkeypa
     head = server.raw.review_workspace_facade(server.workspace_root()).load_head().revision
     assert head.segments[0].recommendation == "recommended"
     assert head.segments[0].selection == "included"
-
-
-def test_quote_status_handles_measured_rational_audio_duration(tmp_path):
-    server = RawWorkspaceUi(state_path=tmp_path / "state.json")
-    estimate = SimpleNamespace(
-        asr_seconds="64731667/1000000", asr_chunk_count=1, luna_request_count=5
-    )
-    server._quick = {
-        "stage": "승인 대기",
-        "quote": SimpleNamespace(asset_ids=("synthetic",), estimates=(estimate,)),
-    }
-    assert "65초" in server._quick_status()
-    assert estimate.asr_seconds == "64731667/1000000"

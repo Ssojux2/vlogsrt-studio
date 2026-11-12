@@ -2,12 +2,13 @@
 
 옛 배선은 1초 타이머 일곱(승인 단추 · 견적 문구 · 상태 줄 · 전문 칸 + 실사용 · 승인 범위 칸 ·
 교차 확인 칸 · 용어집)과 2초 둘(작업대 다시 그리기 · 보내기 알림)이었다 — 탭 하나가 초마다 서버를
-여덟 번 불렀다. 이제 1초는 `status_tick` 하나이고 2초 둘은 그대로다. 시험이 못 박는 것:
+여덟 번 불렀다. 이제 1초는 `status_tick` 하나이고 2초 둘은 그대로다. 견적 문구·전문 칸은 견적과
+함께 지웠다(D110) — 틱은 처리기 여섯을 부른다. 시험이 못 박는 것:
 
 - 타이머 수(1초 일곱 + 2초 둘 → 1초 하나 + 2초 둘)와 상태 틱의 입출력·주기·방식(대기열 밖·`once`).
 - 바뀐 것 없는 틱은 모든 칸을 건너뛴다. 원천 하나가 바뀌면 그 칸만 간다.
 - 「마지막으로 보낸 값」은 세션마다(`gr.State`)다 — 두 탭이 서로의 갱신을 막지 않는다.
-- 틱마다 옛 처리기 일곱을 모두 한 번씩 부른다(부수 효과·주기 그대로) — 한 읽기 범위 안에서.
+- 틱마다 처리기 여섯을 모두 한 번씩 부른다(부수 효과·주기 그대로) — 한 읽기 범위 안에서.
 - 다른 사건이 칸에 쓰면 그 칸의 기억을 잊어 다음 틱이 다시 보낸다.
 
 포트는 7993(시험용)만 쓴다. 유료 호출은 없다.
@@ -41,9 +42,8 @@ from vlogsrt.project.raw import service as raw_service  # noqa: E402
 
 OLD_ONE_SECOND_TICKS = (
     "library_analysis_button",
-    "library_analysis_summary_markdown",
     "capcut_status_view",
-    "quote_cells_view",
+    "usage_line_markdown",
     "approval_mode_tick",
     "cross_check_tick",
     "glossary_tick",
@@ -133,9 +133,7 @@ def test_one_second_timers_merge_into_one_status_tick(tmp_path: Path, local_sock
         ui._glossary_status_md._id,
         ui._glossary_loaded_state._id,
         ui._library_approve_button._id,
-        ui._library_summary_md._id,
         ui._capcut_progress_md._id,
-        ui._quote_note_md._id,
         ui._usage_md._id,
         *sent,
     ]
@@ -146,13 +144,12 @@ def test_one_second_timers_merge_into_one_status_tick(tmp_path: Path, local_sock
 def test_an_unchanged_tick_skips_every_cell(tmp_path: Path, local_socket: None) -> None:
     ui = _server(tmp_path)
     first, sent = _tick(ui, _fresh())
-    # 막 연 탭: 칸 셋은 칸 값과 같아 건너뛰고, 기억이 없는 다섯은 모두 보낸다.
+    # 막 연 탭: 칸 셋은 칸 값과 같아 건너뛰고, 기억이 없는 셋은 모두 보낸다.
     assert all(_skipped(first[name]) for name in SHOWN_CELLS)
     assert not any(_skipped(first[name]) for name in STATUS_SENT_CELLS)
     button = first["button"]
     assert isinstance(button, gr.Button) and button.value == LIBRARY_APPROVE_LABEL
-    assert button.interactive is False  # 견적이 없다 — 옛 처리기 그대로
-    assert first["summary"] == ui.library_analysis_summary_markdown()
+    assert button.interactive is False  # 영상이 없다 — 옛 처리기 그대로
     assert first["progress"] == ui.capcut_status_view(ui.current_signature())
     second, again = _tick(ui, sent)
     assert all(_skipped(value) for value in second.values())
@@ -175,13 +172,13 @@ def test_a_change_in_one_source_updates_only_that_cell(
         isinstance(reply[0], gr.Radio) and reply[0].value == raw_service.SELECTION_MODE_TRANSCRIBE
     )
     assert all(_skipped(value) for value in reply[1:])
-    # 견적 문구만 바뀌었다 — 그 칸과 그 기억만 간다.
-    monkeypatch.setattr(ui, "library_analysis_summary", lambda: "새 견적 문구")
+    # 상태 줄만 바뀌었다 — 그 칸과 그 기억만 간다.
+    monkeypatch.setattr(ui, "capcut_status_view", lambda signature: "새 상태 줄")
     cells, after = _tick(ui, sent)
     changed = [name for name, value in cells.items() if not _skipped(value)]
-    assert changed == ["summary"] and cells["summary"] == "새 견적 문구"
-    index = STATUS_SENT_CELLS.index("summary")
-    assert after[index] == "새 견적 문구"
+    assert changed == ["progress"] and cells["progress"] == "새 상태 줄"
+    index = STATUS_SENT_CELLS.index("progress")
+    assert after[index] == "새 상태 줄"
     assert [a for i, a in enumerate(after) if i != index] == [
         s for i, s in enumerate(sent) if i != index
     ]
@@ -208,7 +205,7 @@ def test_two_sessions_do_not_suppress_each_other(tmp_path: Path, local_socket: N
     assert all(_skipped(value) for value in cells_a.values())
 
 
-def test_every_tick_calls_all_seven_old_handlers_inside_one_read_scope(
+def test_every_tick_calls_all_six_handlers_inside_one_read_scope(
     tmp_path: Path, local_socket: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     ui = _server(tmp_path)
@@ -267,34 +264,34 @@ def test_other_writers_make_the_tick_forget_and_resend(tmp_path: Path, local_soc
         roots[(target, event)] = dep["outputs"]
     buttons = {b.value: b for b in app.blocks.values() if isinstance(b, gr.Button)}
     glossary_save = next(b for b in buttons.values() if b.elem_id == "vl-glossary-save")
-    summary_and_note = [sent["summary"], sent["note"]]
+    progress = [sent["progress"]]
     assert roots == {
-        (ui._approval_mode_radio._id, "input"): summary_and_note,
-        (ui._cross_check_box._id, "input"): summary_and_note,
-        (glossary_save._id, "click"): summary_and_note,
-        (buttons[LIBRARY_APPROVE_LABEL]._id, "click"): [sent["progress"], sent["note"]],
+        (ui._approval_mode_radio._id, "input"): progress,
+        (ui._cross_check_box._id, "input"): progress,
+        (glossary_save._id, "click"): progress,
+        (buttons[LIBRARY_APPROVE_LABEL]._id, "click"): progress,
     }
     # 잊으면 다음 틱이 그 칸을 다시 보낸다(값이 같아도 — 다른 사건이 칸을 덮었을 수 있다).
     _, memory = _tick(ui, _fresh())
     forgotten = dict(zip(STATUS_SENT_CELLS, memory, strict=True))
-    forgotten["summary"], forgotten["note"] = ui.forget_sent_view()
+    forgotten["progress"] = ui.forget_sent_view()
     cells, _ = _tick(ui, tuple(forgotten[name] for name in STATUS_SENT_CELLS))
-    assert [name for name, value in cells.items() if not _skipped(value)] == ["summary", "note"]
+    assert [name for name, value in cells.items() if not _skipped(value)] == ["progress"]
 
 
-def test_an_unchanged_tick_does_not_redo_the_quote_and_status_work(
+def test_an_unchanged_tick_does_not_redo_the_button_and_status_work(
     tmp_path: Path, local_socket: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """바뀐 것 없는 틱은 견적 문구·승인 단추·상태 줄·실사용 줄을 다시 짓지 않는다(W-46b, D63 꼴).
+    """바뀐 것 없는 틱은 승인 단추·상태 줄·실사용 줄을 다시 짓지 않는다(W-46b, D63 꼴).
 
-    처리기 일곱은 그대로 틱마다 불린다(위 시험) — 아끼는 것은 그 안의 읽기다. 작업 상태가 바뀐
+    처리기 여섯은 그대로 틱마다 불린다(위 시험) — 아끼는 것은 그 안의 읽기다. 작업 상태가 바뀐
     틱(새 작업이 끝났다)은 한 번 다시 짓고, 기억의 최대 나이가 지나도 다시 짓는다.
     """
     ui = _server(tmp_path)
     root = ui.workspace_root()
     assert root is not None
     built: dict[str, int] = {}
-    for name in ("_library_summary_now", "_library_button_facts", "_capcut_status_text"):
+    for name in ("_library_button_facts", "_capcut_status_text"):
         original = getattr(ui, name)
 
         def counted(*args: Any, _name: str = name, _original: Any = original) -> Any:
@@ -340,7 +337,7 @@ def test_a_running_job_rebuilds_only_the_live_lines(
     try:
         wait_until(lambda: ui.raw.get_job(root, job.job_id).status == "running", timeout=10)
         built: dict[str, int] = {}
-        for name in ("_library_summary_now", "_capcut_status_text"):
+        for name in ("_library_button_facts", "_capcut_status_text"):
             original = getattr(ui, name)
 
             def counted(*args: Any, _name: str = name, _original: Any = original) -> Any:
@@ -351,7 +348,7 @@ def test_a_running_job_rebuilds_only_the_live_lines(
         _, sent = _tick(ui, _fresh())
         _tick(ui, sent)
         _tick(ui, sent)
-        assert built == {"_library_summary_now": 1, "_capcut_status_text": 3}, built
+        assert built == {"_library_button_facts": 1, "_capcut_status_text": 3}, built
     finally:
         release.set()
         wait_until(lambda: ui.raw.get_job(root, job.job_id).status == "succeeded", timeout=10)

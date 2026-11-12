@@ -152,17 +152,6 @@ def _rows(*usd: str | None) -> list[Any]:
     return [whisper, *gemini]
 
 
-def test_only_gemini_rows_put_the_engine_minutes_unit_price_and_amount_in_the_quote() -> None:
-    assert ws._timing_engine_sentence(_rows()) == ""  # whisper만 — 금액 없이 그대로(D57)
-    sentence = ws._timing_engine_sentence(_rows("0.0038", "0.0038"))
-    assert sentence == (
-        " 전사 엔진 Gemini 3.5 Transcribe로 영상 2개 2분을 듣습니다(공식 단가 분당 $0.005,"
-        " 2026-10-26 확인 · 약 $0.01)."
-    )
-    unknown = ws._timing_engine_sentence(_rows("0.0038", None))
-    assert "**가격 미정**" in unknown and "승인할 수 없습니다" in unknown and "$" not in unknown
-
-
 def test_the_approval_gate_needs_the_gemini_key_and_a_price_in_both_scopes(
     tmp_path: Path,
 ) -> None:

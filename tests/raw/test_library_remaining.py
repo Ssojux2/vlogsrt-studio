@@ -1,8 +1,8 @@
-"""남은 영상만 분석(W-24 세션 E, D64) — 일괄 승인은 끝나지 않은 영상만 견적·승인·실행한다.
+"""남은 영상만 분석(W-24 세션 E, D64) — 일괄 승인은 끝나지 않은 영상만 승인·실행한다.
 
 남은 영상 = 준비된 원본 − 다시 쓸 수 있는 저장 결과(단계 글자와 무관) − 지금 돌거나 기다리는 영상.
-견적 digest는 남은 영상만 묶는다 — 끝난 영상의 바뀜(자막 고침)은 남은 영상의 승인을 무르지 않는다.
-유료 호출 0회 — 가짜 전송이 센다.
+승인은 남은 영상만 잰다(D110 — 견적 없이) — 끝난 영상의 바뀜(자막 고침)은 남은 영상의 승인을
+무르지 않는다. 유료 호출 0회 — 가짜 전송이 센다.
 """
 
 from __future__ import annotations
@@ -42,7 +42,11 @@ def _calls(sender, client) -> tuple[int, int]:
 
 
 def _idle(ui, root) -> bool:
-    kinds = ("selection_analysis", "library_quote", workspace_service.LIBRARY_APPROVAL_JOB_KIND)
+    kinds = (
+        "selection_analysis",
+        workspace_service.LIBRARY_SCAN_JOB_KIND,
+        workspace_service.LIBRARY_APPROVAL_JOB_KIND,
+    )
     return (
         not ui._analysis_active
         and not ui._analysis_queue
@@ -52,8 +56,8 @@ def _idle(ui, root) -> bool:
 
 
 def _approve_shown(ui) -> None:
-    """사람이 화면에 보이는 견적 그대로 승인한다."""
-    ui.library_analysis_view(ui.current_signature(), ui.library_analysis_summary())
+    """사람이 일괄 승인 단추를 누른다."""
+    ui.library_analysis_view(ui.current_signature())
 
 
 def _b_failed(tmp_path, monkeypatch):
@@ -84,20 +88,13 @@ def _edit_caption(ui, root, asset_id: str) -> None:
 
 
 @needs_ffmpeg
-def test_after_one_failure_only_the_failed_video_is_quoted_approved_and_run(tmp_path, monkeypatch):
+def test_after_one_failure_only_the_failed_video_is_approved_and_run(tmp_path, monkeypatch):
     ui, sender, client, root, a, b, gate = _b_failed(tmp_path, monkeypatch)
     button = wait_until(
         lambda: (got := ui.library_analysis_button()).value == REMAINING_ONE and got
     )
     assert button.interactive
-    summary = ui.library_analysis_summary()
-    assert summary.startswith("분석 대상 1개(실패 1) · 저장 결과 1개 재사용 · 전사 최대 1회 + ")
-    assert "최대 3개를 동시에 분석합니다." in summary  # 쓰임·한도 문구는 그대로다
-    pending, quote = ui._library_pending(root)
-    # 견적은 남은 b 하나만 묶는다 — 라이브러리 견적은 전체 그대로 따로 남는다.
-    assert pending == (b,) and quote.asset_ids == (b,)
-    assert quote.digest == ui.raw.selection_quote(root, (b,)).digest
-    assert set(ui._library_quotes[root].asset_ids) == {a, b}
+    assert ui._library_pending(root) == (b,)
     entered = len(gate.entered)
     _approve_shown(ui)
     wait_until(lambda: _stage(ui, root, b) == DONE)
@@ -113,22 +110,19 @@ def test_after_one_failure_only_the_failed_video_is_quoted_approved_and_run(tmp_
 def test_editing_a_finished_videos_caption_keeps_the_remaining_approval(tmp_path, monkeypatch):
     ui, sender, client, root, a, b, gate = _b_failed(tmp_path, monkeypatch)
     signature = ui.current_signature()
-    summary = ui.library_analysis_summary()
-    library = ui._library_quotes[root]
+    pending = ui._library_pending(root)
     _edit_caption(ui, root, a)
-    # 라이브러리 전체를 다시 재면 digest가 바뀐다 — 예전 승인은 여기서 「다시 승인」으로 닫혔다.
-    assert ui.raw.selection_quote(root, tuple(library.asset_ids)).digest != library.digest
     entered = len(gate.entered)
-    ui.library_analysis_view(signature, summary)
+    ui.library_analysis_view(signature)
+    assert pending == (b,)
     wait_until(lambda: _stage(ui, root, b) == DONE)
     wait_until(lambda: _idle(ui, root))
     assert AGAIN not in str(ui.capcut_status_view(signature))
     assert gate.entered[entered:] == [b]
     assert _calls(sender, client) == BOTH_CALLS
-    # 고친 a는 이제 저장 결과로 세지 않는다 — 다음 견적의 남은 영상이다(이번 승인에는 없다).
+    # 고친 a는 이제 저장 결과로 세지 않는다 — 다음 승인의 남은 영상이다(이번 승인에는 없다).
     wait_until(lambda: ui.library_analysis_button().value == REMAINING_ONE)
-    assert ui._library_pending(root)[0] == (a,)
-    assert ui.library_analysis_summary().startswith("분석 대상 1개(갱신 1) · 저장 결과 1개 재사용")
+    assert ui._library_pending(root) == (a,)
 
 
 @needs_ffmpeg
@@ -143,10 +137,9 @@ def test_a_reusable_result_counts_as_done_whatever_its_stage_says(tmp_path, monk
     # 끝난 결과가 남았는데 단계 글자만 「중단」인 영상(서버가 완료 기록 전에 멈췄다)을 흉내 낸다.
     ui._quick_update(ui._task_for(root, (b,))["token"], stage=INTERRUPTED)
     ui._library_cached_ids.pop(root, None)
-    ui._prepare_library_quote(root)
+    ui._scan_library(root)
     wait_until(lambda: root in ui._library_cached_ids and _idle(ui, root))
-    assert ui._library_pending(root)[0] == ()
-    assert ui.library_analysis_summary().startswith("분석 대상 0개 · 저장 결과 2개 재사용")
+    assert ui._library_pending(root) == ()
     button = ui.library_analysis_button()
     assert button.value == "분석 완료" and not button.interactive
     calls = _calls(sender, client)
@@ -160,35 +153,11 @@ def test_transcribe_only_binds_only_the_remaining_videos(tmp_path, monkeypatch):
     ui, sender, client, root, a, b, gate = _b_failed(tmp_path, monkeypatch)
     signature = ui.current_signature()
     ui.approval_mode_view(signature, TRANSCRIBE)
-    pending, quote = ui._library_pending(root)
-    assert pending == (b,) and quote.asset_ids == (b,) and quote.mode == TRANSCRIBE
-    assert quote.digest == ui.raw.selection_quote(root, (b,), TRANSCRIBE).digest
-    summary = ui.library_analysis_summary()
-    assert summary.startswith(
-        "전사만 · 대상 영상 1개(실패 1) · 저장 결과 1개 재사용 · 전사 최대 1회."
-    )
+    assert ui._library_pending(root) == (b,)
     _edit_caption(ui, root, a)  # 끝난 영상의 바뀜은 남은 영상의 승인과 무관하다
     entered = len(gate.entered)
-    ui.library_analysis_view(signature, summary)
+    ui.library_analysis_view(signature)
     wait_until(lambda: _stage(ui, root, b) == raw.TRANSCRIBED_STAGE)
     wait_until(lambda: _idle(ui, root))
     assert gate.entered[entered:] == [b] and gate.quotes[-1].mode == TRANSCRIBE
     assert _calls(sender, client) == (2, 3)  # b의 전사 한 조각뿐 — 영상 분석은 없다
-
-
-def test_pending_breakdown_names_why_each_video_remains():
-    tasks = {
-        "f": {"stage": FAILED, "revision": "r"},
-        "p": {"stage": "부분 완료 · 확인 필요", "revision": "r"},
-        "c": {"stage": "취소됨"},
-        "i": {"stage": INTERRUPTED, "revision": "r"},
-        "l": {"stage": raw.RELISTEN_STAGE, "revision": "r"},
-        "t": {"stage": raw.TRANSCRIBED_STAGE, "revision": "r"},
-        "e": {"stage": "자막 변경 · 갱신 필요", "revision": "r"},
-        "w": {"stage": "승인 대기"},
-    }
-    ids = (*tasks, "new")
-    assert workspace_service._pending_breakdown(tasks, ids) == (
-        "(실패 2 · 중단 2 · 다시 듣기 1 · 전사 완료 1 · 갱신 1 · 처음 2)"
-    )
-    assert workspace_service._pending_breakdown({}, ("x",)) == "(처음 1)"

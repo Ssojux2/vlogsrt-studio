@@ -20,7 +20,6 @@ import json
 import re
 import shutil
 import sqlite3
-import subprocess
 from dataclasses import asdict, replace
 from decimal import Decimal
 from fractions import Fraction
@@ -41,14 +40,14 @@ from tests.raw.test_background_library import setup_library  # noqa: E402
 from tests.raw.test_relisten import approve, pre_19b_bindings, pre_19b_digest, stage  # noqa: E402
 from tests.raw.test_selection_analysis import wait_until  # noqa: E402
 from tests.raw.test_source_text import GPT, TERMS, RecordingSender, _pass  # noqa: E402
-from tests.raw.test_workbench_layout import _GUARD_HARNESS, needs_node  # noqa: E402
-from ui import ui_facade, workspace_service  # noqa: E402
+from ui import ui_facade  # noqa: E402
 from ui.workspace_service import (  # noqa: E402
     APPROVAL_MODE_ID,
     CROSS_CHECK_ID,
     CROSS_CHECK_INFO,
     CROSS_CHECK_LABEL,
     LIBRARY_APPROVAL_JOB_KIND,
+    LIBRARY_SCAN_JOB_KIND,
     RawWorkspaceUi,
 )
 from vlogsrt import log  # noqa: E402
@@ -141,7 +140,7 @@ def _library(
 
 
 def _turn(ui: RawWorkspaceUi, root: Path, on: bool) -> None:
-    """사람이 칸을 누른다 — 저장 · 견적 다시 묶기 · 라이브러리 견적 다시 재기(유료 호출 0회)."""
+    """사람이 칸을 누른다 — 저장 · 저장 결과 다시 세기(유료 호출 0회)."""
     ui.cross_check_view(ui.current_signature(), on)
     assert ui.raw.cross_check_enabled(root) is on
     _settled(ui, root)
@@ -151,16 +150,26 @@ def _settled(ui: RawWorkspaceUi, root: Path) -> None:
     kinds = (
         raw.ANALYSIS_JOB_KIND,
         "selection_analysis",
-        "library_quote",
+        LIBRARY_SCAN_JOB_KIND,
         LIBRARY_APPROVAL_JOB_KIND,
     )
     wait_until(lambda: not ui.raw.active_jobs(root, kinds))
 
 
-def _requote(ui: RawWorkspaceUi, root: Path) -> str:
-    ui._prepare_library_quote(root)
+def _measured(ui: RawWorkspaceUi, root: Path) -> Any:
+    """승인 작업이 재는 범위 그대로 — 준비된 영상 전부(D110 — 미리 보인 견적이 없다)."""
+    return ui.raw.selection_quote(root, ui._library_ids(root))
+
+
+def _requote(ui: RawWorkspaceUi, root: Path) -> tuple[tuple[str, ...], int]:
+    """저장 결과를 다시 센 뒤 (남은 영상, 그중 두 번째 귀에 물을 청크가 있는 영상 수)."""
+    ui._scan_library(root)
     _settled(ui, root)
-    return ui.library_analysis_summary()
+    pending = ui._library_pending(root)
+    if not pending:
+        return pending, 0
+    measured = ui.raw.selection_quote(root, pending)
+    return pending, sum(1 for e in measured.estimates if e.text_chunk_count)
 
 
 def _phase(root: Path, asset_id: str, revision: str) -> dict[str, Any]:
@@ -300,7 +309,7 @@ def test_off_keeps_quotes_digests_bindings_and_approvals_as_before_19d(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     ui, ears, _client, root, ids = _library(tmp_path, monkeypatch, on=False)
-    measured = ui._library_quotes[root]
+    measured = _measured(ui, root)
     every = tuple(measured.asset_ids)
     assert all(
         (e.text_chunk_count, e.text_seconds, e.text_usd) == (None, None, None)
@@ -313,7 +322,7 @@ def test_off_keeps_quotes_digests_bindings_and_approvals_as_before_19d(
     assert ui.raw.source_bindings(root, dict.fromkeys(every)) == pre_19b_bindings(ui, root, every)
     for mode in (FULL, TRANSCRIBE):
         scoped = ui.raw.selection_rebound_quote(root, measured, every, mode)
-        assert "다른 귀" not in ui._library_summary_for(root, scoped)
+        assert all(e.text_chunk_count is None for e in scoped.estimates)
     minted = browser_runtime.mint_asr_approvals(ui.raw, root, every, quoted=measured.estimates)
     for approval in minted.values():
         assert (approval.text_model, approval.text_identity, approval.text_chunk_budget) == (
@@ -355,13 +364,13 @@ def test_on_quotes_text_minutes_only_for_chunks_without_a_cached_answer(
 ) -> None:
     ui, ears, _client, root, ids = _library(tmp_path, monkeypatch, on=False)
     a, b = ids["a.mov"], ids["b.mov"]
-    off = ui._library_quotes[root]
+    off = _measured(ui, root)
     approve(ui, TRANSCRIBE)  # 1단계 기록(청크 WAV·범위)이 생긴다 — 아직 글자는 묻지 않는다
     wait_until(lambda: all(stage(ui, root, i) == raw.TRANSCRIBED_STAGE for i in (a, b)))
     _settled(ui, root)
     _cache_live_answer(ui, root, a)
     _turn(ui, root, True)
-    quote = ui._library_quotes[root]
+    quote = _measured(ui, root)
     by_id = {e.asset_id: e for e in quote.estimates}
     assert by_id[a].text_chunk_count == 0 and Decimal(str(by_id[a].text_usd)) == 0
     chunk = _phase(root, b, ui._task_for(root, (b,))["revision"])["asr"]["chunks"][0]
@@ -369,12 +378,6 @@ def test_on_quotes_text_minutes_only_for_chunks_without_a_cached_answer(
     assert (by_id[b].text_chunk_count, Fraction(str(by_id[b].text_seconds))) == (1, seconds)
     assert Decimal(str(by_id[b].text_usd)) == cross_check.text_cost(seconds)
     assert quote.digest != off.digest  # 글자 분량·꼬리표가 digest에 접혔다
-    only = ui.raw.selection_rebound_quote(root, quote, tuple(quote.asset_ids), TRANSCRIBE)
-    summary = ui._library_summary_for(root, only)
-    assert (
-        " 다른 귀(GPT-Transcribe)로 영상 1개 1분을 한 번 더 듣습니다(공식 단가로 약 $0.01)."
-        " 바뀐 자막이 있는 창은 다음 영상 분석 때 다시 판정합니다. 최대 3개를" in summary
-    )
     identity = cross_check.request_identity(ui.raw._workspace(root))
     approvals = browser_runtime.mint_asr_approvals(
         ui.raw, root, (a, b), quoted=quote.estimates, text_identity=identity
@@ -413,8 +416,8 @@ def test_transcribe_only_cross_check_over_existing_sources_buys_text_once_and_no
     assert (len(ears.whisper), len(ears.text)) == (2, 0)
     whisper_keys = {p.name for p in (root / "cache" / "source-asr").rglob("*.json")}
     _turn(ui, root, True)
-    assert "다른 귀(GPT-Transcribe)로 영상 2개 1분을" in ui.library_analysis_summary()
-    approve(ui, TRANSCRIBE)  # 보이는 견적 그대로 한 번 승인한다
+    assert _requote(ui, root) == (ui._library_ids(root), 2)  # 두 영상 모두 글자를 한 번 묻는다
+    approve(ui, TRANSCRIBE)  # 한 번 승인한다
     wait_until(lambda: len(ears.text) == 2)
     _settled(ui, root)
     assert len(ears.whisper) == 2  # whisper는 한 번도 더 사지 않았다(청크 캐시)
@@ -445,8 +448,8 @@ def test_transcribe_only_cross_check_over_existing_sources_buys_text_once_and_no
             1,
             0,
         )
-    # 산 글자는 캐시에 있다 — 다음 견적은 더 묻지 않는다(같은 용어집이면 다시 사지 않는다).
-    assert "다른 귀" not in _requote(ui, root)
+    # 산 글자는 캐시에 있다 — 다음 승인은 더 묻지 않는다(같은 용어집이면 다시 사지 않는다).
+    assert _requote(ui, root)[1] == 0
 
 
 # ── 글자 실패 · 지어낸 승인 — whisper는 그대로, 글자는 보내기 전에 닫히거나 실패로 남는다 ──────
@@ -474,10 +477,9 @@ def test_a_text_failure_stays_unavailable_and_never_blocks_whisper(
         assert phase["asr_text"]["status"] == source_text.STATUS_UNAVAILABLE
         assert all(chunk["failure"] == "" for chunk in phase["asr"]["chunks"])  # 전사는 성공
     assert sum("1단계 글자 경로 청크 0 실패" in line for line in warnings) == 2
-    # 실패는 캐시하지 않는다 — 다음 견적이 그 청크를 다시 세고, 그 승인이 그 청크만 다시 묻는다
+    # 실패는 캐시하지 않는다 — 다음 승인이 그 청크를 다시 세고 그 청크만 다시 묻는다
     # (같은 리비전의 1단계 기록을 그대로 쓰지 않는다 — whisper는 청크 캐시에서 온다).
-    _requote(ui, root)
-    assert [e.text_chunk_count for e in ui._library_quotes[root].estimates] == [1, 1]
+    assert [e.text_chunk_count for e in _measured(ui, root).estimates] == [1, 1]
     ears.fail_text = False
     approve(ui, TRANSCRIBE)
     wait_until(lambda: len(ears.text) == 4)
@@ -487,7 +489,7 @@ def test_a_text_failure_stays_unavailable_and_never_blocks_whisper(
         assert stage(ui, root, asset_id) == raw.TRANSCRIBED_STAGE
         (row,) = source_transcript.load(workspace, asset_id)["utterances"]  # type: ignore[index]
         assert (row["text"], row["text_origin"]) == (GPT_TEXT, ORIGIN_LIVE)
-    assert "다른 귀" not in _requote(ui, root)
+    assert _requote(ui, root)[1] == 0
 
 
 @needs_ffmpeg
@@ -571,10 +573,8 @@ def test_a_glossary_saved_after_the_digest_check_is_never_sent(
     workspace = ui.raw._workspace(root)
     approved_identity = cross_check.request_identity(workspace)
     a = ids["a.mov"]
-    child = ui.raw.selection_rebound_quote(root, ui._library_quotes[root], (a,), TRANSCRIBE)
-    assert (
-        child.estimates[0].text_chunk_count == 1
-    )  # 사람이 본 견적 — 빈 용어집으로 한 번 더 듣는다
+    child = ui.raw.selection_rebound_quote(root, _measured(ui, root), (a,), TRANSCRIBE)
+    assert child.estimates[0].text_chunk_count == 1  # 승인이 잰 범위 — 빈 용어집으로 한 번 더
     real_prepare = browser_runtime.prepare_approved_browser_network
     real_mint = browser_runtime.mint_asr_approvals
     minted: list[dict[str, AsrPhaseApproval]] = []
@@ -605,9 +605,7 @@ def test_a_glossary_saved_before_the_gate_closes_the_run_without_sends(
 ) -> None:
     """승인 뒤·실행 문 앞에 저장된 용어집 — 다시 잰 digest가 달라 아무것도 보내지 않는다."""
     ui, ears, _client, root, ids = _library(tmp_path, monkeypatch, on=True, sender=GlossaryEars())
-    child = ui.raw.selection_rebound_quote(
-        root, ui._library_quotes[root], (ids["a.mov"],), TRANSCRIBE
-    )
+    child = ui.raw.selection_rebound_quote(root, _measured(ui, root), (ids["a.mov"],), TRANSCRIBE)
     glossary.save(ui.raw._workspace(root), "왕방\n")
     with pytest.raises(RawWorkspaceError, match="바뀌었습니다"):
         ui.raw.run_selection_analysis(
@@ -639,7 +637,7 @@ def test_reverting_the_glossary_never_reuses_an_analysis_made_on_other_text(
     first = {i: ui.raw.cached_selection_analysis(root, (i,)) for i in ids.values()}
     assert all(first.values()) and set(_texts(ui, root, ids).values()) == {GPT_TEXT}
     glossary.save(workspace, "왕방\n")  # R2 — 꼬리표가 바뀌어 다시 듣는다(글자 X2)
-    assert _requote(ui, root).startswith("분석 대상 2개 · 저장 결과 0개 재사용")
+    assert len(_requote(ui, root)[0]) == 2  # 저장 결과 0개 재사용
     approve(ui, FULL)
     wait_until(lambda: len(ears.text) == 4)
     wait_until(lambda: all(stage(ui, root, i) == DONE for i in ids.values()))
@@ -647,9 +645,9 @@ def test_reverting_the_glossary_never_reuses_an_analysis_made_on_other_text(
     assert set(_texts(ui, root, ids).values()) == {GLOSSARY_TEXT}
     sent = (len(ears.whisper), len(ears.text), len(client.calls))
     glossary.save(workspace, "")  # 되돌린다 — 꼬리표는 R1과 같아진다
-    reverted = _requote(ui, root)
+    pending, texts = _requote(ui, root)
     # R1은 X1로 판정했는데 지금 심긴 글자는 X2다 — 저장 결과로 세지 않는다(검증 지적 2).
-    assert reverted.startswith("분석 대상 2개 · 저장 결과 0개 재사용") and "다른 귀" not in reverted
+    assert len(pending) == 2 and texts == 0
     assert all(ui.raw.cached_selection_analysis(root, (i,)) is None for i in ids.values())
     approve(ui, FULL)
     wait_until(lambda: set(_texts(ui, root, ids).values()) == {GPT_TEXT})
@@ -660,7 +658,7 @@ def test_reverting_the_glossary_never_reuses_an_analysis_made_on_other_text(
     assert {i: ui.raw.cached_selection_analysis(root, (i,)) for i in ids.values()} == first
 
 
-# ── (a) 결속 — 글자가 지문을 바꾼 전체 실행도 다음 견적이 다시 찾는다 ───────────────────────
+# ── (a) 결속 — 글자가 지문을 바꾼 전체 실행도 다음 승인이 다시 찾는다 ───────────────────────
 
 
 @needs_ffmpeg
@@ -683,17 +681,17 @@ def test_a_full_run_whose_text_flips_the_transcript_is_found_again_by_the_next_q
         assert analysis["transcript_fingerprint"] == source_transcript.fingerprint(
             workspace, asset_id
         )
-    assert _requote(ui, root).startswith("분석 대상 0개 · 저장 결과 2개 재사용")
+    assert _requote(ui, root)[0] == ()  # 저장 결과 2개 재사용
     # 끄면 19d 이전 결속(실제 자막 지문)이다 — 19c-5의 한계 그대로라 그 분석을 찾지 못한다.
     _turn(ui, root, False)
     assert ui.raw.cached_selection_analysis(root, (ids["a.mov"],)) is None
 
 
-# ── (b) 견적이 재분석 결과를 말한다 ─────────────────────────────────────────────────────
+# ── (b) 교차 확인을 켜면 끝난 분석도 다시 분석 대상이다 ─────────────────────────────────
 
 
 @needs_ffmpeg
-def test_the_quote_tells_what_cross_checking_finished_analyses_means(
+def test_cross_checking_finished_analyses_makes_them_pending_again(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     ui, ears, client, root, ids = _library(tmp_path, monkeypatch, on=False)
@@ -701,24 +699,13 @@ def test_the_quote_tells_what_cross_checking_finished_analyses_means(
     wait_until(lambda: all(stage(ui, root, i) == DONE for i in ids.values()))
     _settled(ui, root)
     assert (len(ears.whisper), len(ears.text), len(client.calls)) == (2, 0, 4)
-    assert _requote(ui, root).startswith("분석 대상 0개 · 저장 결과 2개 재사용 · 전사 최대 0회")
+    assert _requote(ui, root) == ((), 0)
     _turn(ui, root, True)  # 끝난 분석은 두 번째 귀로 들은 적이 없다 — 다시 분석 대상이다
-    quote = ui._library_quotes[root]
-    windows = sum(e.luna_request_count for e in quote.estimates)
-    full = ui.library_analysis_summary()
-    assert full.startswith(
-        f"분석 대상 2개 · 저장 결과 0개 재사용 · 전사 최대 2회 + 영상 분석 최대 {windows}회."
-    )
-    assert windows > 0  # 그 창들이 영상 분석 견적(횟수·상한)에 들어 있다
-    assert (
-        " 다른 귀(GPT-Transcribe)로 영상 2개 1분을 한 번 더 듣습니다(공식 단가로 약 $0.01)"
-        " — 바뀐 자막이 있는 창도 이번 영상 분석이 판정하며 위 견적에 들어 있습니다." in full
-    )
-    ui.approval_mode_view(ui.current_signature(), TRANSCRIBE)
-    only = ui.library_analysis_summary()
-    assert only.startswith("전사만 · 대상 영상 2개 · 저장 결과 0개 재사용")
-    assert "바뀐 자막이 있는 창은 다음 영상 분석 때 다시 판정합니다." in only
-    assert not ears.text and len(client.calls) == 4  # 견적은 아무것도 보내지 않는다
+    pending, texts = _requote(ui, root)
+    assert pending == ui._library_ids(root) and texts == 2
+    measured = ui.raw.selection_quote(root, pending)
+    assert sum(e.luna_request_count for e in measured.estimates) > 0  # 그 창들도 다시 판정한다
+    assert not ears.text and len(client.calls) == 4  # 세기는 아무것도 보내지 않는다
 
 
 # ── (c)·(d)·(e) — 얹기의 세 규칙(순수 단위, 가짜 전송) ──────────────────────────────────
@@ -807,17 +794,15 @@ def test_blocks_put_the_cross_check_under_the_scope_and_wire_it_like_the_radio(
     box, radio, quote = by_id[CROSS_CHECK_ID], by_id[APPROVAL_MODE_ID], by_id["vl-quote"]
     assert isinstance(box, gr.Checkbox) and box is ui._cross_check_box
     assert box.value is True  # 새 작업공간 — 기본 켜짐
-    # 승인 범위 바로 아래, 견적 문구 바로 위(그라디오는 이어진 입력 칸을 폼 하나로 감싼다).
+    # 승인 범위 바로 아래(그라디오는 이어진 입력 칸을 폼 하나로 감싼다). 견적 문구는 없다.
     form = box.parent
     assert form is radio.parent and form.parent is quote
     assert form.children.index(box) == form.children.index(radio) + 1
-    assert quote.children.index(form) + 1 == quote.children.index(by_id["library-analysis-scope"])
+    assert "library-analysis-scope" not in by_id
     deps = app.config["dependencies"]
     (chosen,) = [d for d in deps if d["targets"] == [(box._id, "input")]]
     assert chosen["inputs"] == [ui._signature_state._id, box._id]
-    assert chosen["outputs"] == [ui._library_summary_md._id]
-    follow = [d for d in deps if d.get("trigger_after") == chosen["id"]]
-    assert [d["outputs"] for d in follow] == [[ui._quote_note_md._id]]
+    assert chosen["outputs"] == [ui._capcut_progress_md._id]
     # 틱은 1초 상태 틱 하나다(D63 세션 C) — 교차 확인 칸은 범위 칸 다음 칸이다.
     refresh = {d["targets"][0][1]: d for d in deps if box._id in d["outputs"]}
     assert sorted(refresh) == ["load", "tick"]
@@ -836,7 +821,7 @@ def test_the_cross_check_view_saves_rebinds_and_the_tick_follows_other_tabs(
     assert ui.cross_check_value() is True
     assert _skipped(ui.cross_check_tick(signature, True))  # 칸이 저장값과 같으면 보내지 않는다
     shown = ui.cross_check_view(signature, False)
-    assert shown == ui.library_analysis_summary_markdown()  # 누르면 견적 칸을 바로 다시 그린다
+    assert shown == ui._quick_status()  # 누르면 상태 줄을 바로 다시 그린다
     assert ui.raw.cross_check_enabled(root) is False
     reopened = RawWorkspaceUi(port=7993, state_path=tmp_path / "state2.json")
     reopened.open_workspace_view(str(root))
@@ -854,42 +839,3 @@ def test_the_cross_check_copy_is_polite_and_names_no_model_or_price() -> None:
     assert POLITE_END.search(CROSS_CHECK_INFO)
     assert not re.search(r"(?<!니)다\.", CROSS_CHECK_INFO)
     assert "기본 전사 엔진으로 듣는 영상에는 다른 귀가 없습니다" in CROSS_CHECK_INFO  # D104
-    quote = selection_analysis.SelectionQuote(
-        asset_ids=("a",),
-        estimates=(),
-        digest="d",
-        workflow=raw.RawWorkflowConfig(),
-        mode=TRANSCRIBE,
-    )
-    assert workspace_service._text_pass_sentence(quote, ()) == ""  # 물을 것이 없으면 말하지 않는다
-
-
-@needs_node
-def test_the_approve_pre_step_passes_a_quote_with_the_text_pass_sentence(tmp_path: Path) -> None:
-    """교차 확인 문장(괄호·$·「」·—)이 실린 견적도 보이면 그대로 간다 — escape 왕복을 지난다."""
-    sentence = (
-        " 다른 귀(GPT-Transcribe)로 영상 2개 75분을 한 번 더 듣습니다(공식 단가로 약 $0.34)."
-        " 바뀐 자막이 있는 창은 다음 영상 분석 때 다시 판정합니다."
-    )
-    raw_text = workspace_service._transcribe_only_summary(18, 0, 30, 3, sentence)
-    harness = tmp_path / "guard.js"
-    harness.write_text(_GUARD_HARNESS, encoding="utf-8")
-    script = tmp_path / "guard_src.js"
-    script.write_text(ui_facade.APPROVE_GUARD_JS, encoding="utf-8")
-    quotes = tmp_path / "quotes.json"
-    shown = ui_facade.literal_markdown(raw_text)
-    quotes.write_text(
-        json.dumps(
-            {"raw": raw_text, "shown": shown, "specialRaw": raw_text, "specialShown": shown}
-        ),
-        encoding="utf-8",
-    )
-    completed = subprocess.run(
-        ["node", str(harness), str(script), str(quotes)],
-        capture_output=True,
-        text=True,
-        timeout=20,
-    )
-    assert completed.returncode == 0, completed.stderr[-2000:]
-    out = json.loads(completed.stdout)
-    assert out["visible"] == {"quote": raw_text, "scrolled": 0, "closed": 0}

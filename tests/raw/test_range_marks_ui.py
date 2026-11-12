@@ -356,11 +356,11 @@ def test_blocks_keep_the_approve_and_export_controls_on_the_main_view(
 
     for elem in ("library-approve", workspace_service.FOLDER_OPEN_ID, "vl-render-export"):
         assert inside(by_elem[elem], bar), elem  # 명령 줄 — 서랍 밖
-    for elem in ("library-analysis-scope", workspace_service.RENDER_EXPORT_CARD_ID):
-        assert inside(by_elem[elem], stage), elem  # 견적 칸·결과 카드는 무대에 그대로
+    for elem in ("vl-quote", workspace_service.RENDER_EXPORT_CARD_ID):
+        assert inside(by_elem[elem], stage), elem  # 승인 칸·결과 카드는 무대에 그대로
     drawer = by_elem["settings-drawer"]
     assert not inside(by_elem["library-approve"], drawer)
-    assert not inside(by_elem["library-analysis-scope"], drawer)
+    assert not inside(by_elem["vl-quote"], drawer)
 
 
 # ── 3. 실제 백엔드 — 합성 원본 하나 ──────────────────────────────────────────

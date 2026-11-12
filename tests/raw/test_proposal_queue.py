@@ -868,30 +868,6 @@ def test_main_surface_copy_points_only_at_controls_on_screen() -> None:
     assert workspace_service.OFFLINE_MODE_NOTE == "오프라인 · 유료 분석 꺼짐"
 
 
-def test_library_summary_is_one_line_without_a_leading_indent(
-    tmp_path: Path, local_socket: None
-) -> None:
-    """승인 앞 단계의 글 대조는 견적 칸에 그려진 한 줄과 견준다 — 줄바꿈·앞 빈칸이 없어야 한다."""
-    from tests.raw.test_claude_analysis_flow import CLAUDE, LUNA
-
-    server = RawWorkspaceUi(state_path=tmp_path / "ui-state.json")
-    server.create_workspace_view("견적 한 줄", str(tmp_path / "workspace"))
-    root = server.workspace_root()
-    assert root is not None
-    texts = [server.library_analysis_summary()]
-    estimate = SimpleNamespace(
-        asset_id="a", asr_chunk_count=3, luna_request_count=4, ceiling_usd="0.49"
-    )
-    for model in (LUNA, CLAUDE):
-        workflow = SimpleNamespace(models=SimpleNamespace(luna_model=model))
-        server._library_quotes[root] = SimpleNamespace(
-            asset_ids=("a",), estimates=(estimate,), workflow=workflow, digest="d"
-        )
-        texts.append(server.library_analysis_summary())
-    for text in texts:
-        assert "\n" not in text and text == text.strip() and "  " not in text, text
-
-
 # ── 실행본(node) — 대기열 · 「다음」 · 일괄 확인 · 필터 · 목록 머리 · 사용|제외 · 컷 이름표 ───
 
 

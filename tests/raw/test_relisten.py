@@ -252,10 +252,10 @@ def pre_19b_digest(ui: Any, root: Path, quote: Any) -> str:
 
 
 def approve(ui: Any, mode: str) -> None:
-    """사람이 범위를 고르고, 화면에 보이는 견적 그대로 승인한다."""
+    """사람이 범위를 고르고 일괄 승인 단추를 누른다(D110 — 견적 없이)."""
     signature = ui.current_signature()
     ui.approval_mode_view(signature, mode)
-    ui.library_analysis_view(signature, ui.library_analysis_summary())
+    ui.library_analysis_view(signature)
 
 
 def stage(ui: Any, root: Path, asset_id: str) -> str | None:
@@ -283,10 +283,11 @@ def test_relisten_rebuys_only_that_video_and_a_full_run_then_buys_no_whisper(
     ui, sender, client, root, ids = setup_library(tmp_path, monkeypatch)
     client.resume.set()
     a, b = ids["a.mov"], ids["b.mov"]
-    every = tuple(ui._library_quotes[root].asset_ids)
+    every = ui._library_ids(root)
+    measured = ui.raw.selection_quote(root, every)
     # 차례 0 — 결속·digest가 19b 이전 조립과 바이트까지 같다.
     assert ui.raw.source_bindings(root, dict.fromkeys(every)) == pre_19b_bindings(ui, root, every)
-    assert ui._library_quotes[root].digest == pre_19b_digest(ui, root, ui._library_quotes[root])
+    assert measured.digest == pre_19b_digest(ui, root, measured)
     approve(ui, FULL)
     wait_until(lambda: all(stage(ui, root, i) == DONE for i in (a, b)))
     assert (len(sender.calls), len(client.calls)) == (2, 4)
@@ -313,9 +314,8 @@ def test_relisten_rebuys_only_that_video_and_a_full_run_then_buys_no_whisper(
     assert bound[a] == [*pre_19b_bindings(ui, root, (a,))[a], "asr-epoch/1"]
     assert ui.raw.cached_selection_analysis(root, (a,)) is None  # 끝난 분석을 다시 쓰지 않는다
     assert ui.raw.cached_selection_analysis(root, (b,)) is not None
-    summary = ui.library_analysis_summary()
-    # 끝난 b와 남은 a가 섞였다 — 남은 까닭을 단다(D64 E).
-    assert summary.startswith("전사만 · 대상 영상 1개(다시 듣기 1) · 저장 결과 1개 재사용")
+    # 끝난 b와 남은 a가 섞였다 — 승인은 남은 a만 묶는다(D64 E).
+    assert ui._library_pending(root) == (a,)
     assert len(sender.calls) == 2  # 누르기만 했다 — 유료 호출 0회
 
     approve(ui, TRANSCRIBE)
@@ -371,20 +371,11 @@ def test_relisten_never_overwrites_a_human_edit(
     # 차례를 억지로 올려 들어도(서비스 문 밖) 1단계 seed는 고친 자막을 그대로 둔다.
     asr_epoch.bump(ui.raw._workspace(root), a)
     sender._segments = [{"start": 0.5, "end": 1.5, "text": RELISTENED}]
-    ui._prepare_library_quote(root)
-    wait_until(lambda: _quote_bound(ui, root, a))
     approve(ui, TRANSCRIBE)
     wait_until(lambda: len(sender.calls) == 3)
     wait_until(lambda: stage(ui, root, a) == raw.TRANSCRIBED_STAGE)
     kept = ui.raw.source_transcript(root, a)
     assert [u["text"] for u in kept["utterances"]] == ["고침"] and kept["edited"] is True
-
-
-def _quote_bound(ui: Any, root: Path, asset_id: str) -> bool:
-    """라이브러리 견적이 지금 결속(차례 포함)으로 묶였는가."""
-    quote = ui._library_quotes[root]
-    fresh = ui.raw.selection_rebound_quote(root, quote, tuple(quote.asset_ids))
-    return bool(fresh.digest == quote.digest and asset_id in quote.asset_ids)
 
 
 @needs_ffmpeg
