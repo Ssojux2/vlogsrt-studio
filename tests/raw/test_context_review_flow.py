@@ -210,11 +210,12 @@ def test_an_expired_gemini_price_refuses_context_and_english_before_any_send(
     paid: list[str] = []
     monkeypatch.setattr(server.raw, "context_review_model", lambda root: flash)
     monkeypatch.setattr(server.raw, "run_context_review", lambda *a: paid.append("context"))
-    monkeypatch.setattr(server.raw, "english_subtitles", lambda root: True)
-    monkeypatch.setattr(server.raw, "english_missing", lambda root: ("k" * 64,))
-    monkeypatch.setattr(server.raw, "start_render_export", lambda *a: paid.append("english"))
+    monkeypatch.setattr(server.raw, "srt_translation_cached", lambda root, srt: False)
+    monkeypatch.setattr(server.raw, "start_srt_translation", lambda *a: paid.append("english"))
+    srt = tmp_path / "draft.srt"
+    srt.write_text("1\n00:00:01,000 --> 00:00:02,000\n안녕\n", encoding="utf-8")
     with pytest.raises(gr.Error, match="가격 미정"):
         server.context_run_view(signature)
     with pytest.raises(gr.Error, match="가격 미정"):
-        server.render_export_view(signature)
+        server.srt_english_view(signature, str(srt))
     assert paid == []

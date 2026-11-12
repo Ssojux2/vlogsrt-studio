@@ -119,3 +119,37 @@ def test_wrap_keeps_every_word_even_past_two_lines() -> None:
 def test_wrap_never_splits_a_long_word() -> None:
     word = "a" * 60
     assert tr.wrap_english(word, 42) == (word, False)
+
+
+# ── 한국어 SRT → 영어 SRT(W-63, D114) ─────────────────────────────────────────
+
+
+def test_cue_lines_number_by_position_in_the_whole_file_and_skip_empty_cues() -> None:
+    """아이디는 빈 큐를 뺀 뒤 다시 매기지 않는다 — 가운데 빈 큐가 있어도 영어가 제 큐에 간다."""
+    lines = tr.cue_lines(["안녕\n하세요", "", "  ", "바다  다"])
+    assert lines == (tr.TranslationLine("1", "안녕 하세요"), tr.TranslationLine("4", "바다 다"))
+
+
+def test_english_cue_texts_keep_empty_cues_and_count_them() -> None:
+    texts = ["안녕", "", "a " * 50]
+    english = {"1": "Hello", "3": "word " * 30}
+    rows, counts = tr.english_cue_texts(texts, english, TRANSLATION.english_line_chars)
+    assert rows[0] == "Hello" and rows[1] == ""
+    assert all(len(line) <= 42 for line in rows[2].split("\n"))
+    assert counts == {"cues": 3, "empty_cues": 1, "over_two_lines": 1}
+
+
+def test_english_cue_texts_refuse_a_cue_without_english() -> None:
+    with pytest.raises(tr.TranslationError, match="1장"):
+        tr.english_cue_texts(["안녕", "바다"], {"1": "Hello"}, TRANSLATION.english_line_chars)
+
+
+def test_the_srt_key_ignores_the_file_and_binds_only_cue_text() -> None:
+    lines = tr.cue_lines(["안녕", "바다"])
+    key = tr.source_key(tr.SRT_FILE_NAMESPACE, lines, "g", TRANSLATION)
+    assert key == tr.source_key(
+        tr.SRT_FILE_NAMESPACE, tr.cue_lines(["안녕", "바다"]), "g", TRANSLATION
+    )
+    assert key != tr.source_key(
+        tr.SRT_FILE_NAMESPACE, tr.cue_lines(["안녕", "바닥"]), "g", TRANSLATION
+    )

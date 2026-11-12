@@ -576,12 +576,6 @@ def format_duration(seconds: float) -> str:
     return f"{minutes}분 {text}" if minutes else text
 
 
-RENDER_EXPORT_ENGLISH_FAILED_TEXT = (
-    "영어 자막(draft.en.srt)은 만들지 못했습니다 — 한국어 초안만 냈습니다. {reason}"
-)
-"""영어 자막을 켰는데 초안에 실린 줄을 다 옮기지 못했을 때(D105) — 한국어 초안은 그대로 낸다."""
-
-
 def render_export_card_html(
     summary: Mapping[str, object] | None, *, running: bool = False, failure: str | None = None
 ) -> str:
@@ -643,28 +637,13 @@ def _export_summary_lines(summary: Mapping[str, object]) -> list[str]:
             f'<p><a href="{src}" target="_blank" rel="noopener">초안 영상 새 탭에서 보기</a></p>'
             f'<video controls preload="metadata" src="{src}" aria-label="초안 영상"></video>'
         )
-    lines += _english_lines(summary)
-    rows = (("영상", "video"), ("자막", "srt"), ("영어 자막", "english_srt"), ("보고서", "report"))
+    rows = (("영상", "video"), ("자막", "srt"), ("보고서", "report"))
     paths = "".join(
         f"<dt>{label}</dt><dd>{html.escape(str(summary.get(key) or ''))}</dd>"
         for label, key in rows
-        if key != "english_srt" or summary.get(key)
     )
     lines.append(f'<dl class="vl-export-paths">{paths}</dl>')
     return lines
-
-
-def _english_lines(summary: Mapping[str, object]) -> list[str]:
-    """영어 자막(D105)을 켰는데 못 냈으면 경고 한 줄 — 옮기지 못한 원본 이름과 까닭."""
-    english = summary.get("english")
-    if not isinstance(english, Mapping) or english.get("status") != "failed":
-        return []
-    listed = english.get("untranslated")
-    rows = [row for row in listed if isinstance(row, Mapping)] if isinstance(listed, list) else []
-    named = "; ".join(f"{row.get('name')}: {row.get('reason')}" for row in rows)
-    reason = named or str(english.get("reason") or "옮긴 글이 없는 자막이 있습니다")
-    warn = RENDER_EXPORT_ENGLISH_FAILED_TEXT.format(reason=reason)
-    return [f'<p class="vl-export-warn" role="alert">{html.escape(warn)}</p>']
 
 
 def activity_html() -> str:
@@ -804,7 +783,13 @@ EXPORT_WAKE_JS = (
     "(signature) => { if (window.__vlServer) { window.__vlServer.wake(true); } return signature; }"
 )
 """「추천만 이어붙여 내보내기」의 앞 단계 — 깨우기는 `ACTIVITY_WAKE_JS`와 같고, 작업공간 서명을
-그대로 넘긴다(영어 자막 견적 문구는 없다, D110)."""
+그대로 넘긴다(견적 문구는 없다, D110)."""
+
+SRT_ENGLISH_WAKE_JS = (
+    "(signature, path) => { if (window.__vlServer) { window.__vlServer.wake(true); }"
+    " return [signature, path]; }"
+)
+"""「영어 SRT로 변환」의 앞 단계(D114) — 깨우기는 같고, 서명과 SRT 경로를 그대로 넘긴다."""
 
 _MARKDOWN_PUNCTUATION = re.compile(r"([!-/:-@\[-`{-~])")
 
@@ -1749,7 +1734,7 @@ _SHELL_CSS = """
   position: fixed; inset: 0; z-index: 999;
   background: color-mix(in srgb, var(--vl-bg) 55%, transparent); }
 .vl-scrim[hidden] { display: none; }
-/* 승인 칸(#vl-quote) — 승인 범위·교차 확인·영어 자막·초안 결과 카드. 넓은 화면은 패널 열 위,
+/* 승인 칸(#vl-quote) — 승인 범위·교차 확인·초안 결과·영어 SRT 변환(D114). 넓은 화면은 패널 열 위,
    1050px 이하는 명령 줄 바로 아래(재생기 앞). 칸은 제 격자 칸 안에서 자란다. 견적 문구는 없다
    (D110 — 승인은 확인 한 번이다). */
 #vl-quote { grid-area: quote; min-width: 0; gap: 8px; }
@@ -1861,7 +1846,7 @@ WORKBENCH_CSS = (
 }
 /* 무대(W-17 B, D57) — 목록은 무대 높이 전체, 타임라인은 재생기와 패널 아래를 함께 덮는다:
    "thumbs player panel" "thumbs timeline timeline" "foot foot foot". 패널 열 위의 한 칸(quote)은
-   승인 칸이다 — 승인 범위·교차 확인·영어 자막·초안 결과가 무대 위쪽을 밀지 않고 선다(승인할
+   승인 칸이다 — 승인 범위·교차 확인·초안 결과·영어 SRT 변환이 무대 위쪽을 밀지 않고 선다(승인할
    영상이 없으면 범위 칸이 숨고 패널이 그 자리를 쓴다).
    구성요소 껍데기(vl-stage-cell)와 본문 뿌리는 display:contents로 격자에
    참여한다. 무대 치수는 여기 한 곳 — 흩어진 재선언이 마지막에 이겨 목록 칸이

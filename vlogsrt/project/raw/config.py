@@ -1810,7 +1810,7 @@ RENDER_SETTINGS = RenderSettings()
 
 @dataclass(frozen=True, slots=True)
 class TranslationSettings:
-    """초안의 영어 자막(W-53, D105) — 원본 자막 줄을 Gemini로 영어로 옮기는 설정.
+    """한국어 SRT → 영어 SRT(W-63, D114 — D105에서 왔다) — SRT 큐 글을 Gemini로 영어로 옮기는 설정.
 
     `english_line_chars = 42`만 외부 근거가 있다(Netflix 영어 TTSG 한 줄 42자). 나머지는 **외부
     근거 없는 조정 대상**이다. 판(`prompt_revision`)·모델·묶음·맥락 줄은 번역 캐시 열쇠에

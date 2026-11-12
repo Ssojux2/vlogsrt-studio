@@ -9787,6 +9787,9 @@ Python·JS SDK의 편의 칸(Go는 `GetOutputText()` 접근자)이고 REST 응�
 
 ## D105 — 초안 내보내기에 영어 SRT를 함께 (2026-11-08, W-53, 사용자 지시)
 
+> **D114가 고침(2026-11-12)**: 내보내기와 함께 만드는 길은 지웠다 — 영어는 한국어 SRT를 받아 따로 변환한다.
+> 아래는 역사다(순수 계층 `translation.py`·`translation_io.py`·`TranslationSettings`는 그대로 쓴다).
+
 사용자: 「SRT파일 제작시 한글 자막과 영어 자막을 동시에 만들어 주도록 해줘」. 지금 SRT를 실제로 만드는 곳은 작업대의 「추천만
 이어붙여 내보내기」(`render_export`, D100 §5b) 하나이고, 영어 자막은 사람이 Subtitle Edit에서 따로 만들어 왔다(W-38 계획 전제).
 사용자 답(2026-11-08): **초안 내보내기만**(Final Cut 보내기는 그대로) · 번역 모델 **Gemini 3.8 Flash** · 승인 방식은 맡김.
@@ -10124,3 +10127,48 @@ snap `late=7`)을 뒤집고 허용을 한 프레임까지 넓힌다. snap과 같
 `test_a_source_the_renderer_refuses_is_excluded_whole_with_its_reason` ·
 `test_a_source_the_renderer_refuses_is_left_out_and_named_not_blocking` ·
 `test_the_result_card_warns_about_originals_the_renderer_left_out`. 계획: `docs/plans/2026-11-12-render-declared-window.md`.
+
+
+## D114 — 영어 자막은 한국어 SRT를 받아 따로 변환한다: D105의 묶음 내보내기를 지운다 (2026-11-12, W-63, 사용자 지시)
+
+사용자: 「한글자막을 SRT로 전달하면 영어로 번역해서 SRT로 내보내도록해줘. 지금은 같이 만드는 형식인데 잘 안쓸 것 같아.
+한국어 SRT 자막 제작 -> 영어 SRT 자막으로 변환」. 계획은 Fable이 세웠다(사용자 지정 — 이 환경의 Fable 모델).
+
+- **흐름**: 한국어 SRT를 만든다(초안 내보내기 또는 사람이 Subtitle Edit·Final Cut에서 고친 SRT) → 작업대 결과 카드 아래
+  「영어 SRT로 변환」 칸(`vl-srt-english`)에서 경로를 넣거나 「SRT 고르기」(네이티브 선택기, 칸만 채운다 — 고르기가 곧 결제가
+  되지 않게 단추를 갈랐다)로 고르고 「영어 SRT로 변환」을 누른다. 칸을 비우면 마지막 초안의 `draft.srt`다. **누름이 승인이다**
+  (D110 — 견적 없이). 작업 종류 `srt_translate`(활동 띠 「영어 SRT 변환」 · 닫기 목록 밖이라 「라이브러리 닫기」가 막는다).
+  단추는 작업이 끝날 때까지 기다려 결과 한 줄(쓴 자리 · 큐 수 · 빈 큐 · 두 줄 넘는 큐 · 저장된 번역 사용)을 말한다.
+- **출력**: 입력 옆 `<줄기>.en.srt`(`x.ko.srt`면 `x.en.srt`). 같은 이름이 있고 글이 같으면 그대로 두고 「이미 있습니다」,
+  다르면 **덮지 않고** `<줄기>.en.<UTC 시각>.srt`. 입력 옆에 쓸 수 없으면 작업공간 `export/english/<시각>/`. 배타 생성(O_EXCL).
+- **시각(규칙 1·3)**: `timeline_srt.read`(D91 — `output.parse_srt` + 밀리초 정확 `Fraction`)가 읽은 큐를 그대로
+  `timebase.format_srt_time`으로 다시 적는다. 만들거나 옮기지 않고 겹침·순서도 고치지 않는다. 바이트가 아니라 **밀리초 값이
+  같다**(파서가 `.` 구분자·짧은 밀리초·틀린 번호를 정규화한다 — 번호는 1부터 다시 매긴다). 입력 SRT는 읽기만 한다.
+- **번역 단위 = 큐 하나**, 아이디는 **파일 전체에서의 순번**(빈 큐를 빼고 다시 매기지 않는다 — 영어가 제 큐로 간다). 여러 줄
+  큐는 한 줄로 이어 보내고 영어는 42자로 다시 나눈다(두 줄을 넘어도 버리지 않고 센다). 빈 큐는 보내지 않고 같은 시각의 빈 큐로
+  남긴다(`empty_cues`). 응답 불일치(빠짐·더함·겹침·빈 영어)는 D105 그대로 **파일 전체 실패** — 영어 SRT를 쓰지 않고
+  `.failed.json`에 까닭(조용히 빠진 줄도, 한국어로 메운 줄도 없다).
+- **열쇠**: `translation.source_key(SRT_FILE_NAMESPACE = "srt-file/v1", 줄, 용어집 sha, 설정)` — 파일 바이트가 아니라 (순번,
+  글) 목록에 묶인다. 시각만 고친 SRT는 다시 사지 않고 글을 고치면 다시 산다. 문서 자리는 D105 그대로
+  `analysis/translation/<열쇠>.json`(`asset_id` 칸에 입력 파일 이름).
+- **거부(요청 0회)**: 못 읽는 SRT(UTF-8이 아니면 「UTF-8로 저장해 다시 고르세요」) · 옮길 글 없음 · 오프라인 환경 ·
+  작업공간 `network_mode`가 online이 아님 · 클라이언트 없음 · Gemini 단가 재확인 기한 지남(「가격 미정」 — 화면 문).
+  읽기·열쇠는 작업을 걸기 **전에** 한다.
+- **CLI는 없다** — 온라인은 사람이 띄우는 앱 하나뿐이다(D44). 오프라인 CLI는 저장된 번역을 다시 조판하는 일밖에 못 한다.
+- **지운 것(D105 묶음 길)**: `english_track.py` · 작업공간 표지 `english_subtitles`와 서비스의 `english_subtitles`·
+  `set_english_subtitles`·`english_missing`·`english_model`·`_english_purchase`·`_english_for_export` ·
+  `start_render_export`의 `client` 인자(초안 내보내기는 다시 무료 로컬뿐) · `render_export`의 `EN_SRT_NAME`·`EnglishTrack`·
+  `ExportResult.english_srt`·보고서 `english` 칸·`outputs.english_srt` · `render_plan.srt_text_with` · 작업대 「영어 자막도
+  만들기」 칸과 결과 카드의 영어 줄·경고. 새 순수 함수 `translation.cue_lines`·`english_cue_texts`, 새 I/O `srt_english.py`
+  (`_ask`는 `english_track`에서 옮겼다 — 부르기는 여전히 `transcribe.request_gemini_generate` 하나, 규칙 7).
+- **호환**: 옛 작업공간의 `english_subtitles` 표지와 `analysis/translation/*.json`은 읽지도 지우지도 않는다. 옛 보고서의
+  `english`·`outputs.english_srt` 칸은 `latest_render_export`가 읽지 않는다(카드가 그대로 그려진다 — 시험이 잠근다).
+- **바뀐·지운 시험**(사용자가 요청한 동작 변경 — 임계값이 아니다): `tests/raw/test_english_subtitles.py` 삭제(뜻은
+  `test_srt_english.py`가 잇는다) · `test_render_plan.py`의 `srt_text_with` 시험 둘 삭제 · `test_folder_workbench_ui.py`의 영어 칸
+  시험 둘 → 「칸이 없고 변환 칸이 그 자리에」·「이미 옮긴 글이면 클라이언트를 받지 않는다」·「.srt가 아니면 거부 · 실패는 까닭
+  그대로」·「작업공간 없으면 폴더 먼저」, 내보내기 단추 시험의 `client` 인자 제거, 결과 카드 시험은 「옛 요약의 영어 칸이
+  있어도 영어 줄이 없다」로 · `test_context_review_flow.py`의 단가 기한 시험은 영어 쪽을 `srt_english_view`로.
+- 불변식 「초안 영어 자막 번역은 순수하다」 → 「영어 자막 번역은 순수하다」, 금지 import에 `timeline_srt`·`srt_english`·
+  `timebase`를 더했다(SRT 읽기·조판은 I/O 쪽). 새 조정값은 없다(`TranslationSettings` 그대로).
+- **사람 확인 🧑**: 실제 Gemini 번역은 유료라 에이전트가 돌리지 않았다(가짜 opener 시험만). 앱에서 초안을 낸 뒤 「영어 SRT로
+  변환」을 눌러 `draft.en.srt`를 `draft.mp4`와 함께 열어 본다.

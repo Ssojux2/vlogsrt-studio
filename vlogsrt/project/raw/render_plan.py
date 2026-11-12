@@ -36,7 +36,7 @@ from __future__ import annotations
 
 import bisect
 import math
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import asdict, dataclass, replace
 from fractions import Fraction
 from typing import Any, TypeVar
@@ -899,17 +899,6 @@ def _require_cues_inside(plan: RenderPlan) -> None:
 def srt_text(plan: RenderPlan) -> str:
     """계획의 자막 → SRT 글. 밀리초 반올림은 여기서 딱 한 번(half-up)이다."""
     return _srt_blocks(plan, [cue.text for cue in plan.cues])
-
-
-def srt_text_with(plan: RenderPlan, texts: Mapping[tuple[str, str], str]) -> str:
-    """같은 번호·같은 시각에 글자만 `texts[(원본, 줄 아이디)]`로 — 초안의 영어 자막(D105).
-
-    시각은 한국어와 한 바이트도 다르지 않다(같은 큐 · 같은 반올림). 조각으로 잘린 줄은 한국어처럼
-    같은 글을 되풀이한다. 글이 없는 큐가 하나라도 있으면 쓰지 않고 거부한다(조용히 빈 줄 없음)."""
-    missing = [cue for cue in plan.cues if (cue.source_id, cue.utterance_id) not in texts]
-    if missing:
-        raise RenderPlanError(f"옮긴 글이 없는 자막이 {len(missing)}장 있다")
-    return _srt_blocks(plan, [texts[(cue.source_id, cue.utterance_id)] for cue in plan.cues])
 
 
 def _srt_blocks(plan: RenderPlan, texts: Sequence[str]) -> str:

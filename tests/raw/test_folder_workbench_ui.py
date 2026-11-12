@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -413,9 +414,8 @@ def test_the_export_button_starts_the_render_job(
     root = server.workspace_root()
     calls: list[Path] = []
 
-    def start(at: Path, client: object = None) -> raw_service.JobHandle:
-        assert client is None  # 영어 자막이 꺼져 있으면 살 것이 없다(D105)
-        calls.append(at)
+    def start(at: Path) -> raw_service.JobHandle:
+        calls.append(at)  # 내보내기는 무료 로컬이다 — 영어는 따로 변환한다(D114)
         return raw_service.JobHandle(job_id="job-1", reattached=len(calls) > 1)
 
     monkeypatch.setattr(server.raw, "start_render_export", start)
@@ -426,7 +426,7 @@ def test_the_export_button_starts_the_render_job(
     deps = app.config["dependencies"]
     clicks = [d for d in deps if d["targets"] == [(buttons[RENDER_EXPORT_LABEL]._id, "click")]]
     (click,) = [d for d in clicks if app.fns[d["id"]].fn == server.render_export_view]
-    assert click["inputs"] == [server._signature_state._id]  # 영어 자막 견적 문구가 없다(D110)
+    assert click["inputs"] == [server._signature_state._id]  # 견적 문구가 없다(D110)
     assert click["outputs"] == [server._capcut_status._id]
     tails = [d for d in deps if d.get("trigger_after") == click["id"]]
     assert any(d.get("js") == ui_facade.ACTIVITY_REPLY_JS for d in tails)  # 답은 활동 칸으로
@@ -460,46 +460,85 @@ def test_import_export_and_approve_wake_the_activity_poller(
     assert "window.__vlServer.wake(true)" in ui_facade.APPROVE_WAKE_JS
 
 
-def test_the_english_box_saves_the_flag_and_says_what_it_means(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, local_socket: None
+def test_the_english_box_is_gone_and_the_srt_cell_takes_its_place(
+    tmp_path: Path, local_socket: None
 ) -> None:
-    """D105 — 칸을 켜면 표지를 저장하고 그 뜻을 말한다. 견적 줄은 없다(D110)."""
-    server, app, by_id, _buttons = _built(tmp_path)
-    root = server.workspace_root()
-    signature = server.current_signature()
-    assert by_id[workspace_service.ENGLISH_SUBTITLES_ID].label == (
-        workspace_service.ENGLISH_SUBTITLES_LABEL
-    )
-    assert "vl-english-quote" not in by_id
-    assert server.english_subtitles_view(signature, True) == workspace_service.ENGLISH_ON_TEXT
-    assert server.raw.english_subtitles(root) is True
-    assert server.english_subtitles_view(signature, False) == workspace_service.ENGLISH_OFF_TEXT
-    assert server.raw.english_subtitles(root) is False
-    for text in (workspace_service.ENGLISH_ON_TEXT, workspace_service.ENGLISH_OFF_TEXT):
-        assert "$" not in text and text.replace(")", "").endswith("니다.")
+    """D114 — 내보내기와 함께 만드는 영어 칸은 없다. 그 자리에 경로 · 고르기 · 변환 · 결과."""
+    server, app, by_id, buttons = _built(tmp_path)
+    assert "vl-english-subtitles" not in by_id and not hasattr(server.raw, "english_subtitles")
+    cell = by_id[workspace_service.SRT_ENGLISH_ID]
+    quote = by_id["vl-quote"]
+    for suffix in ("path", "browse", "run", "result"):
+        assert cell in _ancestors(by_id[f"{workspace_service.SRT_ENGLISH_ID}-{suffix}"]), suffix
+    assert quote in _ancestors(cell)
+    run = buttons[workspace_service.SRT_ENGLISH_RUN_LABEL]
+    deps = app.config["dependencies"]
+    (click,) = [d for d in deps if d["targets"] == [(run._id, "click")] and d["id"] in app.fns]
+    assert app.fns[click["id"]].fn == server.srt_english_view
+    assert click["inputs"] == [server._signature_state._id, server._srt_english_path._id]
+    assert click["js"] == ui_facade.SRT_ENGLISH_WAKE_JS
+    assert workspace_service.ACTIVITY_JOB_LABELS["srt_translate"] == "영어 SRT 변환"
 
 
-def test_the_export_click_buys_only_when_something_is_missing(
+def test_the_convert_button_takes_a_client_only_when_something_is_untranslated(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, local_socket: None
 ) -> None:
-    """D105 · D110 — 옮길 것이 있으면 누름이 승인이고 클라이언트를 넘긴다. 없으면 넘기지 않는다."""
+    """D114 · D110 — 누름이 승인이다. 이미 옮긴 글이면 클라이언트를 받지 않는다(무료)."""
     server, _app, _by_id, _buttons = _built(tmp_path)
+    srt = tmp_path / "여행.srt"
+    srt.write_text("1\n00:00:01,000 --> 00:00:02,000\n안녕\n", encoding="utf-8")
     seen: list[object] = []
-    missing: list[tuple[str, ...]] = [("k" * 64,)]
-    monkeypatch.setattr(server.raw, "english_subtitles", lambda at: True)
-    monkeypatch.setattr(server.raw, "english_missing", lambda at: missing[0])
+    cached = [False]
+    monkeypatch.setattr(server.raw, "srt_translation_cached", lambda root, at: cached[0])
     monkeypatch.setattr(server, "_live_transport_for_action", lambda: _Transport())
 
-    def start(at: Path, client: object = None) -> raw_service.JobHandle:
+    def start(root: Path, at: Path, client: object, done: Any) -> raw_service.JobHandle:
         seen.append(client)
+        done({"path": str(at.with_suffix(".en.srt")), "cues": 1, "reused": client is None})
         return raw_service.JobHandle(job_id="job-1", reattached=False)
 
-    monkeypatch.setattr(server.raw, "start_render_export", start)
+    monkeypatch.setattr(server.raw, "start_srt_translation", start)
+    monkeypatch.setattr(server.raw, "get_job", lambda root, job_id: _Record("succeeded"))
     signature = server.current_signature()
-    server.render_export_view(signature)
-    missing[0] = ()
-    server.render_export_view(signature)
+    result, reply = server.srt_english_view(signature, str(srt))
+    assert "여행.en.srt" in result and result == reply and "저장된 번역" not in result
+    cached[0] = True
+    result, _reply = server.srt_english_view(signature, str(srt))
+    assert "저장된 번역 사용(무료)" in result
     assert seen == ["client:gemini-3.8-flash", None]
+
+
+@dataclass(frozen=True)
+class _Record:
+    status: str
+    error: str | None = None
+
+
+def test_the_convert_button_refuses_what_is_not_an_srt_and_names_a_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, local_socket: None
+) -> None:
+    server, _app, _by_id, _buttons = _built(tmp_path)
+    signature = server.current_signature()
+    with pytest.raises(gr.Error, match="SRT 파일"):
+        server.srt_english_view(signature, str(tmp_path / "없는.srt"))
+    with pytest.raises(gr.Error, match="아직 낸 초안이 없습니다"):
+        server.srt_english_view(signature, "")
+    srt = tmp_path / "a.srt"
+    srt.write_text("1\n00:00:01,000 --> 00:00:02,000\n안녕\n", encoding="utf-8")
+    monkeypatch.setattr(server.raw, "srt_translation_cached", lambda root, at: True)
+    monkeypatch.setattr(
+        server.raw,
+        "start_srt_translation",
+        lambda *a: raw_service.JobHandle(job_id="job-1", reattached=False),
+    )
+    monkeypatch.setattr(server.raw, "get_job", lambda root, job_id: _Record("failed", "빠졌다"))
+    with pytest.raises(gr.Error, match="영어 자막을 만들지 못했습니다 — 빠졌다"):
+        server.srt_english_view(signature, str(srt))
+
+
+def test_the_convert_button_without_a_workspace_answers_folder_first(tmp_path: Path) -> None:
+    server = RawWorkspaceUi(state_path=tmp_path / "ui-state.json")
+    assert server.srt_english_view(None, "") == ("", workspace_service.LIBRARY_FIRST_TEXT)
 
 
 class _Transport:
@@ -556,21 +595,14 @@ def test_the_result_card_names_paths_warning_player_and_unsupported() -> None:
     failed = ui_facade.render_export_card_html(SUMMARY, failure="조각 3 실패")
     assert "지난 내보내기 실패 — 조각 3 실패" in failed and "draft.mp4" in failed
     assert ui_facade.format_duration(8.24) == "8.2초"
-    assert "영어 자막" not in card  # 끈 초안에는 영어 줄이 없다(D105)
-    english = {
+    assert "영어 자막" not in card
+    old = {  # D105 때 낸 초안의 요약 — 카드는 그려지고 영어 줄은 없다(D114)
         **SUMMARY,
         "english_srt": "/ws/export/x/draft.en.srt",
-        "english": {"status": "written"},
-    }
-    assert "<dt>영어 자막</dt><dd>/ws/export/x/draft.en.srt</dd>" in (
-        ui_facade.render_export_card_html(english)
-    )
-    broken = {
-        **SUMMARY,
         "english": {"status": "failed", "untranslated": [{"name": "B.mp4", "reason": "빠졌다"}]},
     }
-    warned = ui_facade.render_export_card_html(broken)
-    assert "영어 자막(draft.en.srt)은 만들지 못했습니다" in warned and "B.mp4: 빠졌다" in warned
+    drawn = ui_facade.render_export_card_html(old)
+    assert "draft.mp4" in drawn and "영어 자막" not in drawn and "B.mp4" not in drawn
 
 
 def _plant_export(server: RawWorkspaceUi, root: Path, *, red: int) -> Path:

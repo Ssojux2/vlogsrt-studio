@@ -388,6 +388,7 @@ __all__ = [
     "UPKEEP_JOB_KIND",
     "ANALYSIS_PROXY_JOB_KIND",
     "RENDER_EXPORT_JOB_KIND",
+    "SRT_TRANSLATE_JOB_KIND",
     "SYNC_CHECK_JOB_KIND",
     "SELECTION_MODE_FULL",
     "SELECTION_MODE_TRANSCRIBE",
@@ -490,6 +491,10 @@ KEPT_HUMAN_REASON = render_plan.PART_HUMAN_RECOMMENDED
 """추천만 이어붙인 초안 영상 + SRT + 보고서를 내는 작업(W-44, D100 §5b) — 무료 로컬. 작업공간마다
 한 번에 하나다(같은 지문이면 도는 작업에 다시 붙는다)."""
 
+SRT_TRANSLATE_JOB_KIND = "srt_translate"
+"""한국어 SRT → 영어 SRT(W-63, D114) — 사람이 누른 SRT 하나를 옮겨 쓰는 작업. 옮길 것이 있으면
+유료라 「라이브러리 닫기」가 막는다(닫기 목록 밖의 종류). 같은 SRT면 도는 작업에 다시 붙는다."""
+
 FOLDER_WRITE_REFUSALS = frozenset({errno.EACCES, errno.EPERM, errno.EROFS})
 """폴더 안에 작업공간을 만들 수 없다는 뜻의 오류 — 형제 폴더로 물러난다(D100 §2)."""
 
@@ -514,11 +519,6 @@ OLD_PROMPT_REFUSAL = (
 
 WORKSPACE_MODE_KEY = "workspace_mode"
 """작업공간 모드(D97) 표지 — `auto|landscape|portrait`, 없거나 모르는 값이면 자동이다."""
-
-ENGLISH_SUBTITLES_KEY = "english_subtitles"
-ENGLISH_SUBTITLES_ON = "on"
-ENGLISH_SUBTITLES_OFF = "off"
-"""「영어 자막도 만들기」(D105) 작업공간 표지 — 없거나 모르는 값이면 끔(한국어 초안만, 무료)이다."""
 
 FINALCUT_DROP_DISABLED_KEY = "finalcut_drop_disabled"
 FINALCUT_DROP_DISABLED_ON = "on"
@@ -1706,27 +1706,47 @@ class RawWorkspaceService:
         self._workspace(root).set_meta_value(WORKSPACE_MODE_KEY, choice)
         return self.workspace_mode(root)
 
-    def english_subtitles(self, root: Path) -> bool:
-        """초안 내보내기에서 영어 자막도 낼까(D105) — 고른 적이 없으면 끔(기본)."""
-        return self._workspace(root).meta_value(ENGLISH_SUBTITLES_KEY) == ENGLISH_SUBTITLES_ON
-
-    def set_english_subtitles(self, root: Path, on: bool) -> bool:
-        """그 표지를 저장한다(무료 — 번역은 내보내기를 누를 때만 산다, D110)."""
-        value = ENGLISH_SUBTITLES_ON if on else ENGLISH_SUBTITLES_OFF
-        self._workspace(root).set_meta_value(ENGLISH_SUBTITLES_KEY, value)
-        return self.english_subtitles(root)
-
-    def english_missing(self, root: Path) -> tuple[str, ...]:
-        """아직 옮기지 않은 원본의 번역 열쇠(무료, 부르지 않는다, D110 — 견적이 아니다)."""
-        from vlogsrt.project.raw import english_track
-
-        return english_track.missing_keys(self, root)
-
-    def english_model(self) -> str:
-        """초안 영어 자막을 옮기는 모델(D105) — 내보내기가 그 클라이언트를 받는다."""
+    def translation_model(self) -> str:
+        """한국어 SRT를 영어로 옮기는 모델(D114) — 변환이 그 클라이언트를 받는다."""
         from vlogsrt.project.raw.config import TRANSLATION
 
         return TRANSLATION.model
+
+    def srt_translation_cached(self, root: Path, srt: Path) -> bool:
+        """그 SRT의 글을 이미 옮겼는가(무료, 부르지 않는다) — 화면이 클라이언트를 받을지 정한다."""
+        from vlogsrt.project.raw import srt_english
+
+        job = srt_english.prepare(self, root, srt)
+        return srt_english.cached(self, root, job) is not None
+
+    def start_srt_translation(
+        self,
+        root: Path,
+        srt: Path,
+        client: object | None = None,
+        done: Callable[[dict[str, Any]], None] | None = None,
+    ) -> JobHandle:
+        """한국어 SRT 하나를 영어 SRT로(W-63, D114) — 입력 옆에 `<이름>.en.srt`를 쓰는 작업.
+
+        누름이 승인이다(D110 — 견적 없이). 읽기·열쇠는 작업을 걸기 **전에** 한다 — 깨진 SRT는 작업이
+        되지 않는다. 같은 글을 이미 옮겼으면 저장된 번역을 쓰고(무료), 아니면 온라인과 클라이언트를
+        작업 전에 본다. `done`은 결과 사실(쓴 자리 · 센 수)을 받는다.
+        """
+        from vlogsrt.project.raw import srt_english
+
+        job = srt_english.prepare(self, root, srt)
+        if srt_english.cached(self, root, job) is None:
+            srt_english.require_online(self, root)
+            if client is None:
+                raise RawWorkspaceError("영어 자막을 옮길 Gemini 연결이 없습니다")
+
+        def body(context: JobContext) -> None:
+            facts = srt_english.convert(self, root, job, client)
+            if done is not None:
+                done(facts)
+
+        fingerprint = f"{SRT_TRANSLATE_JOB_KIND}:{srt}"
+        return self.submit_job(root, SRT_TRANSLATE_JOB_KIND, fingerprint, body)
 
     def finalcut_drop_disabled(self, root: Path) -> bool:
         """Final Cut 보내기에서 꺼진 클립을 뺄까(D94) — 고른 적이 없으면 빼지 않는다(기본)."""
@@ -3857,54 +3877,19 @@ class RawWorkspaceService:
             self, root, context, titles_srt=lines, drop_disabled=drop
         ).fcpxml
 
-    def start_render_export(self, root: Path, client: object | None = None) -> JobHandle:
+    def start_render_export(self, root: Path) -> JobHandle:
         """추천만 이어붙인 초안(W-44, D100 §5b) — 새 `export/<시각>/`에 영상·SRT·보고서를 내는 작업.
 
         확인하지 않은 제외 제안이 있어도 막지 않는다(사용자 결정 2026-10-27) — 뺀 구간은 보고서에
-        남는다. 원본은 읽기만 한다. 결과는 `latest_render_export`가 읽는다.
-
-        「영어 자막도 만들기」가 켜져 있으면 `draft.en.srt`도 낸다(D105). 아직 옮기지 않은 원본이
-        있으면 이 누름이 승인이고(D110 — 견적 없이) 온라인일 때만 누른 순간 옮기지 않은 원본을
-        옮긴다(유료). 다 옮겨 있으면 저장된 번역을 쓴다(무료). 꺼져 있으면 지금과 같다.
+        남는다. 원본은 읽기만 한다. 결과는 `latest_render_export`가 읽는다. 무료 로컬이다 — 영어
+        자막은 낸 SRT를 「영어 SRT로 변환」이 따로 옮긴다(D114).
         """
         from vlogsrt.project.raw import render_export
 
-        buy = self._english_purchase(root, client)
-
         def body(context: JobContext) -> None:
-            english = self._english_for_export(root, buy)
-            render_export.export_draft(self, root, context, english=english)
+            render_export.export_draft(self, root, context)
 
         return self.submit_job(root, RENDER_EXPORT_JOB_KIND, "render_export/draft", body)
-
-    def _english_purchase(
-        self, root: Path, client: object | None
-    ) -> tuple[bool, object | None, tuple[str, ...]]:
-        """(영어를 낼까, 옮길 때 쓸 클라이언트, 누른 순간 옮길 열쇠) — 살 것이 있으면 온라인을 작업
-        전에 본다."""
-        from vlogsrt.project.raw import english_track
-
-        if not self.english_subtitles(root):
-            return False, None, ()
-        keys = english_track.missing_keys(self, root)
-        if not keys:
-            return True, None, ()
-        english_track.require_online(self, root)
-        if client is None:
-            raise RawWorkspaceError("영어 자막을 옮길 Gemini 연결이 없습니다")
-        return True, client, keys
-
-    def _english_for_export(
-        self, root: Path, buy: tuple[bool, object | None, tuple[str, ...]]
-    ) -> Any:
-        """작업 안 — 승인한 것만 옮기고(유료, 실패는 이름과 까닭으로) 내보내기 재료를 짓는다."""
-        from vlogsrt.project.raw import english_track
-
-        wanted, client, keys = buy
-        if not wanted:
-            return None
-        failed = english_track.translate_missing(self, root, client, keys) if client else []
-        return english_track.track(self, root, failed)
 
     def has_render_export(self, root: Path) -> bool:
         """다 낸 초안(보고서가 있는 폴더)이 하나라도 있는가 — 파일만 본다(DB를 열지 않는다, W-46a).

@@ -516,14 +516,26 @@ FOLDER_IMPORT_STARTED_TEXT = (
 RENDER_EXPORT_LABEL = "추천만 이어붙여 내보내기"
 """명령 줄의 내보내기 단추(W-46a, D100 §7a) — 추천(초록)만 이은 초안 영상 + SRT + 보고서."""
 RENDER_EXPORT_ID = "vl-render-export"
-ENGLISH_SUBTITLES_LABEL = "영어 자막도 만들기 (draft.en.srt)"
-"""내보내기의 영어 자막 칸(W-53, D105) — 작업공간 표지, 기본 끔. 견적 줄은 없다(D110)."""
-ENGLISH_SUBTITLES_ID = "vl-english-subtitles"
-ENGLISH_ON_TEXT = (
-    "영어 자막을 켰습니다 — 내보내기를 누르면 아직 옮기지 않은 영상의 자막을 영어로 옮깁니다"
-    "(유료 · 이미 옮긴 영상은 다시 사지 않습니다)."
+SRT_ENGLISH_ID = "vl-srt-english"
+"""「영어 SRT로 변환」 칸(W-63, D114) — 한국어 SRT 하나를 영어 SRT로 옮긴다. 내보내기와 따로다."""
+SRT_ENGLISH_PATH_LABEL = "영어로 옮길 한국어 SRT"
+SRT_ENGLISH_PATH_INFO = (
+    "비워 두면 마지막 초안의 draft.srt를 옮깁니다. 영어 SRT는 그 옆에 `<이름>.en.srt`로 생기고,"
+    " 같은 이름의 다른 파일은 덮지 않습니다."
 )
-ENGLISH_OFF_TEXT = "영어 자막을 껐습니다 — 내보내기는 한국어 자막만 냅니다."
+SRT_ENGLISH_BROWSE_LABEL = "SRT 고르기"
+SRT_ENGLISH_RUN_LABEL = "영어 SRT로 변환"
+"""누름이 승인이다(D110 — 견적 없이). 이미 옮긴 글이면 저장된 번역을 쓴다(무료)."""
+SRT_ENGLISH_DONE_TEXT = "영어 자막을 냈습니다 — `{path}` · 큐 {cues}개{extra}."
+SRT_ENGLISH_SAME_TEXT = "같은 영어 자막이 이미 있습니다 — `{path}` · 큐 {cues}개{extra}."
+SRT_ENGLISH_JOINED_TEXT = (
+    "같은 SRT를 옮기던 작업에 붙었고 그 작업이 끝났습니다 — `{name}` 옆을 보세요."
+)
+SRT_ENGLISH_NO_DRAFT_TEXT = "영어로 옮길 SRT를 고르세요 — 아직 낸 초안이 없습니다."
+SRT_ENGLISH_CANCELLED_TEXT = "영어 자막 변환을 취소했습니다 — 쓴 파일은 없습니다."
+SRT_ENGLISH_POLL_SECONDS = 0.2
+"""변환 단추가 작업 끝을 다시 보는 간격 — 단추는 작업이 끝날 때까지 기다려 결과를 말한다."""
+JOB_TERMINAL_STATUSES = frozenset({"succeeded", "failed", "cancelled"})
 RANGE_MARK_WORDS: dict[str, str] = {
     "recommended": "추천",
     "normal": "보통",
@@ -739,6 +751,7 @@ ACTIVITY_JOB_LABELS = {
     raw_service.VISUAL_PREPARE_JOB_KIND: "미리보기 준비",
     raw_service.ANALYSIS_PROXY_JOB_KIND: "4K 분석 프록시",
     raw_service.RENDER_EXPORT_JOB_KIND: "추천만 이어붙이기",
+    raw_service.SRT_TRANSLATE_JOB_KIND: "영어 SRT 변환",
     raw_service.SEGMENT_JOB_KIND: "컷 준비",
     raw_service.ANALYSIS_JOB_KIND: "영상 분석 1단계(전사·장면)",
     raw_service.ANALYSIS_SEMANTIC_JOB_KIND: "영상 분석 2단계(의미 분석)",
@@ -4569,12 +4582,6 @@ class RawWorkspaceUi:
             with gr.Column(elem_id="vl-quote", min_width=0):
                 self._approval_mode_radio = self._approval_mode_cell()
                 self._cross_check_box = self._cross_check_cell()
-                # 영어 자막(W-53, D105) — 칸 하나. 내보내기 누름이 승인이다(D110 — 견적 없이).
-                self._english_box = gr.Checkbox(
-                    value=self.english_subtitles_value,
-                    label=ENGLISH_SUBTITLES_LABEL,
-                    elem_id=ENGLISH_SUBTITLES_ID,
-                )
                 # 초안 결과 카드(W-46a, D100 §7a) — 내보낸 적이 없으면 빈 글이다(자리 없음).
                 self._export_card_html = gr.HTML(
                     "", elem_id=RENDER_EXPORT_CARD_ID, apply_default_css=False
@@ -4585,6 +4592,7 @@ class RawWorkspaceUi:
                     size="sm",
                     elem_id=RENDER_EXPORT_OPEN_ID,
                 )
+                self._srt_english_cell()
 
     def _initial_workbench_values(self) -> tuple[str, str]:
         """조립 때의 (껍데기, 본문) — 미디어 주소 없는 자리표시. 페이지 로드가 곧 갈아 끼운다."""
@@ -4754,7 +4762,7 @@ class RawWorkspaceUi:
             card,
             show_progress="hidden",
         )
-        self._wire_english_subtitles(status)
+        self._wire_srt_english(status)
         opened = self._export_open_button.click(
             self.render_export_open_view, self._signature_state, status
         )
@@ -4767,47 +4775,120 @@ class RawWorkspaceUi:
             show_progress="hidden",
         )
 
-    def _wire_english_subtitles(self, status: Any) -> None:
-        """「영어 자막도 만들기」(D105) — 칸을 고르면 저장하고 그 뜻을 활동 칸에 말한다(무료)."""
-        toggled = self._english_box.input(
-            self.english_subtitles_view, [self._signature_state, self._english_box], status
+    def _srt_english_cell(self) -> None:
+        """「영어 SRT로 변환」(W-63, D114) — 경로 · 고르기(선택 창이 있을 때만) · 변환 · 결과 줄.
+
+        고르기는 칸만 채운다 — 파일 선택이 곧 유료 호출이 되지 않게 변환 단추를 따로 둔다."""
+        with gr.Group(elem_id=SRT_ENGLISH_ID):
+            self._srt_english_path = gr.Textbox(
+                value="",
+                label=SRT_ENGLISH_PATH_LABEL,
+                info=SRT_ENGLISH_PATH_INFO,
+                placeholder="/Users/나/Movies/제주 여행/_vlogsrt/export/…/draft.srt",
+                elem_id=f"{SRT_ENGLISH_ID}-path",
+            )
+            with gr.Row():
+                self._srt_english_browse = gr.Button(
+                    SRT_ENGLISH_BROWSE_LABEL,
+                    size="sm",
+                    visible=self._chooser_available,
+                    elem_id=f"{SRT_ENGLISH_ID}-browse",
+                )
+                self._srt_english_run = gr.Button(
+                    SRT_ENGLISH_RUN_LABEL, size="sm", elem_id=f"{SRT_ENGLISH_ID}-run"
+                )
+            self._srt_english_result = gr.Markdown("", elem_id=f"{SRT_ENGLISH_ID}-result")
+
+    def _wire_srt_english(self, status: Any) -> None:
+        """고르기는 칸을 채우고, 변환은 끝날 때까지 기다려 결과 줄과 활동 칸에 말한다."""
+        self._srt_english_browse.click(
+            self.srt_english_browse_view,
+            None,
+            self._srt_english_path,
+            api_name=False,
+            concurrency_limit=1,
+            concurrency_id=ui_chooser.CHOOSER_CONCURRENCY_ID,
         )
-        self._report_activity(toggled, status)
+        converted = self._srt_english_run.click(
+            self.srt_english_view,
+            [self._signature_state, self._srt_english_path],
+            [self._srt_english_result, status],
+            concurrency_limit=1,
+            js=ui_facade.SRT_ENGLISH_WAKE_JS,
+        )
+        self._report_activity(converted, status)
+
+    def srt_english_browse_view(self) -> str:
+        """「SRT 고르기」 — 고른 경로를 칸에 넣기만 한다(부르지 않는다). 취소는 칸을 그대로 둔다."""
+        chosen = self._pick_path(ui_chooser.SRT_KIND)
+        if chosen is None:
+            raise gr.Error("취소 — SRT를 고르지 않았습니다.")
+        return chosen
+
+    def srt_english_view(self, signature: str | None, path_text: str | None) -> tuple[str, str]:
+        """「영어 SRT로 변환」(D114) — 누름이 승인이다(D110). 이미 옮긴 글이면 클라이언트를
+        받지 않고 저장된 번역을 쓴다(무료). 작업이 끝날 때까지 기다려 (결과 줄, 활동 칸 답)을
+        돌려준다."""
+        closed = self._library_first_reply()
+        if closed is not None:
+            return "", closed
+        root = self._require_current_selection(signature)
+        srt = self._srt_for_english(root, path_text)
+        try:
+            client = None
+            if not self.raw.srt_translation_cached(root, srt):
+                model = self.raw.translation_model()
+                client = self._live_transport_for_action().semantic_client(model)
+            text = self._run_srt_english(root, srt, client)
+        except (raw_service.RawWorkspaceError, raw_service.AnalysisApprovalError) as error:
+            raise gr.Error(str(error)) from error
+        return text, text
+
+    def _srt_for_english(self, root: Path, path_text: str | None) -> Path:
+        """칸의 경로 — 비었으면 마지막 초안의 `draft.srt`. `.srt` 파일이 아니면 거부한다."""
+        text = (path_text or "").strip()
+        if not text:
+            latest = self.raw.latest_render_export(root)
+            if latest is None:
+                raise gr.Error(SRT_ENGLISH_NO_DRAFT_TEXT)
+            return Path(str(latest["srt"]))
+        srt = Path(text).expanduser()
+        if srt.suffix.lower() != ".srt" or not srt.is_file():
+            raise gr.Error(f"SRT 파일(.srt)을 고르세요 — {srt.name}은 SRT 파일이 아닙니다.")
+        return srt
+
+    def _run_srt_english(self, root: Path, srt: Path, client: object | None) -> str:
+        """작업을 걸고 끝날 때까지 기다린다 — 실패는 까닭 그대로 올린다."""
+        facts: list[dict[str, Any]] = []
+        handle = self.raw.start_srt_translation(root, srt, client, facts.append)
+        record = self.raw.get_job(root, handle.job_id)
+        while record.status not in JOB_TERMINAL_STATUSES:
+            time.sleep(SRT_ENGLISH_POLL_SECONDS)
+            record = self.raw.get_job(root, handle.job_id)
+        if record.status == "cancelled":
+            return SRT_ENGLISH_CANCELLED_TEXT
+        if record.status != "succeeded":
+            raise raw_service.RawWorkspaceError(f"영어 자막을 만들지 못했습니다 — {record.error}")
+        return (
+            _srt_english_text(facts[0]) if facts else SRT_ENGLISH_JOINED_TEXT.format(name=srt.name)
+        )
 
     def render_export_view(self, signature: str | None) -> str:
         """「추천만 이어붙여 내보내기」 — 초안 렌더 작업을 건다(무료 로컬). 끝은 결과 카드가 보인다.
 
         확인하지 않은 비추천이 있어도 막지 않는다 — 빠진 구간은 보고서와 카드 경고가 말한다
-        (사용자 결정 2026-10-27, D100). 이미 만드는 중이면 그 작업에 다시 붙는다. 영어 자막을
-        켰고 옮길 것이 있으면 이 누름이 승인이다(D105 · D110 — 견적 없이 누른 순간 옮기지 않은
-        원본을 옮긴다).
+        (사용자 결정 2026-10-27, D100). 이미 만드는 중이면 그 작업에 다시 붙는다. 무료 로컬이다 —
+        영어 자막은 낸 SRT를 「영어 SRT로 변환」이 따로 옮긴다(D114).
         """
         closed = self._library_first_reply()
         if closed is not None:
             return closed
         root = self._require_current_selection(signature)
         try:
-            handle = self.raw.start_render_export(root, self._english_client(root))
+            handle = self.raw.start_render_export(root)
         except (raw_service.RawWorkspaceError, raw_service.AnalysisApprovalError) as error:
             raise gr.Error(str(error)) from error
         return RENDER_EXPORT_ATTACHED_TEXT if handle.reattached else RENDER_EXPORT_STARTED_TEXT
-
-    def _english_client(self, root: Path) -> object | None:
-        """옮길 것이 있으면 Gemini 클라이언트, 없으면 None(무료 — 저장된 번역을 쓴다)."""
-        if not self.raw.english_subtitles(root) or not self.raw.english_missing(root):
-            return None
-        return self._live_transport_for_action().semantic_client(self.raw.english_model())
-
-    def english_subtitles_value(self) -> bool:
-        """칸의 처음 값 — 화면을 열 때마다 지금 작업공간의 값(없으면 끔)."""
-        root = self._snapshot_root()
-        return bool(self.raw.english_subtitles(root)) if root else False
-
-    def english_subtitles_view(self, signature: str | None, on: bool | None) -> str:
-        """「영어 자막도 만들기」를 저장하고(무료) 그 뜻을 말한다."""
-        root = self._require_current_selection(signature)
-        self.raw.set_english_subtitles(root, bool(on))
-        return ENGLISH_ON_TEXT if on else ENGLISH_OFF_TEXT
 
     def render_export_card_tick(self, signature: str | None, shown: tuple | None) -> tuple:
         """결과 카드 — (카드 글, 「초안 폴더 열기」, 새 열쇠). 열쇠가 같으면 보내지 않는다.
@@ -11543,3 +11624,17 @@ class RawWorkspaceUi:
                     break
                 remaining -= len(chunk)
                 yield chunk
+
+
+def _srt_english_text(facts: Mapping[str, Any]) -> str:
+    """변환 결과 한 줄 — 쓴 자리 · 큐 수, 빈 큐·두 줄 넘는 큐·저장된 번역이면 그 말."""
+    notes = []
+    if facts.get("empty_cues"):
+        notes.append(f"빈 큐 {facts['empty_cues']}개는 비운 채")
+    if facts.get("over_two_lines"):
+        notes.append(f"두 줄 넘는 큐 {facts['over_two_lines']}개")
+    if facts.get("reused"):
+        notes.append("저장된 번역 사용(무료)")
+    extra = "".join(f" · {note}" for note in notes)
+    template = SRT_ENGLISH_SAME_TEXT if facts.get("already_there") else SRT_ENGLISH_DONE_TEXT
+    return template.format(path=facts["path"], cues=facts["cues"], extra=extra)

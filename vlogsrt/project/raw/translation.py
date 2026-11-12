@@ -1,7 +1,9 @@
-"""초안 영어 자막(W-53, D105)의 순수 계층 — 묶음 · 요청 글 · 응답 해석 · 열쇠 · 줄 나눔.
+"""영어 자막 번역(W-63, D114 — D105에서 왔다)의 순수 계층.
 
-원본 자막 줄의 한국어(내보내는 그대로 다듬은 글)를 줄마다 영어 한 줄로 옮긴다. **시각은 다루지
-않는다** — 영어 SRT는 초안 계획의 한국어 큐 시각을 그대로 쓴다(규칙 1·3). 줄을 합치거나 나누거나
+묶음 · 요청 글 · 응답 해석 · 열쇠 · 줄 나눔.
+
+사람이 건넨 한국어 SRT의 큐 글을 큐마다 영어 한 줄로 옮긴다. **시각은 다루지 않는다** — 영어
+SRT는 입력 SRT의 큐 시각을 그대로 쓴다(규칙 1·3). 줄을 합치거나 나누거나
 빼지 않는다: 응답은 묶음의 아이디와 정확히 같아야 하고, 아니면 거부한다(규칙 9 — 조용히 빠지는 줄이
 없다). 부르기·저장은 서비스와 `translation_io`가 한다.
 """
@@ -17,6 +19,9 @@ from dataclasses import dataclass
 from vlogsrt.project.raw.config import TranslationSettings
 
 KEY_SCHEMA = "raw-translation-key/v1"
+SRT_FILE_NAMESPACE = "srt-file/v1"
+"""SRT 파일 번역 열쇠의 원본 자리(D114) — 파일 바이트가 아니라 큐 글에만 묶인다(시각만 고친
+SRT는 다시 사지 않는다)."""
 
 INSTRUCTION = "\n".join(
     (
@@ -156,3 +161,39 @@ def wrap_english(text: str, line_chars: int) -> tuple[str, bool]:
         break_on_hyphens=False,
     )
     return "\n".join(lines), len(lines) > 2
+
+
+def cue_lines(texts: Sequence[str]) -> tuple[TranslationLine, ...]:
+    """SRT 큐 글 → 옮길 줄. 아이디는 **파일 전체에서의 순번**(1부터)이고, 여러 줄 큐는 한 줄로
+    잇고, 빈 큐는 보내지 않는다 — 빈 큐를 빼고 다시 매기지 않으므로 영어가 제 큐로 돌아간다."""
+    lines = []
+    for number, text in enumerate(texts, start=1):
+        joined = " ".join(text.split())
+        if joined:
+            lines.append(TranslationLine(str(number), joined))
+    return tuple(lines)
+
+
+def english_cue_texts(
+    texts: Sequence[str], english: Mapping[str, str], line_chars: int
+) -> tuple[tuple[str, ...], dict[str, int]]:
+    """큐마다 나눈 영어(빈 큐는 빈 글 그대로)와 센 수 — 옮긴 글이 없는 큐가 있으면 거부한다
+    (한국어로 메우거나 조용히 비우지 않는다, 규칙 9)."""
+    rows: list[str] = []
+    empty = over = missing = 0
+    for number, text in enumerate(texts, start=1):
+        if not text.strip():
+            rows.append("")
+            empty += 1
+            continue
+        found = english.get(str(number))
+        if found is None:
+            missing += 1
+            continue
+        wrapped, too_long = wrap_english(found, line_chars)
+        rows.append(wrapped)
+        over += too_long
+    if missing:
+        raise TranslationError(f"옮긴 글이 없는 큐가 {missing}장 있다")
+    counts = {"cues": len(rows), "empty_cues": empty, "over_two_lines": over}
+    return tuple(rows), counts

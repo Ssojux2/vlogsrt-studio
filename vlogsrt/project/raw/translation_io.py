@@ -1,4 +1,4 @@
-"""초안 영어 자막(W-53, D105)의 저장·요청 본문·견적 — 서비스만 부른다.
+"""영어 자막 번역(W-63, D114 — D105에서 왔다)의 저장·요청 본문 — `srt_english`만 부른다.
 
 순수 계층(`translation`)이 지은 묶음으로 Gemini generateContent 본문을 짓고, 공식 단가로 상한을
 재고, 원본마다 번역을 `analysis/translation/<열쇠>.json` 하나로 남긴다 — 열쇠가 곧 이름이라 그

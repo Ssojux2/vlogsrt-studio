@@ -979,27 +979,28 @@ def check_context_review_stays_pure() -> list[str]:
     ]
 
 
-# 초안 영어 자막(W-53, D105) — 묶음·요청 글·응답 해석·열쇠·줄 나눔은 순수하다. 전송·전사·서비스·
-# DB·파일·렌더를 알면 번역이 승인 문(서비스) 밖에서 부르거나 한국어 자막·시각에 손대게 된다.
+# 영어 자막 번역(W-63, D114 — D105에서 왔다) — 묶음·요청 글·응답 해석·열쇠·줄 나눔·큐 글 짝짓기는
+# 순수하다. 전송·전사·서비스·DB·파일·SRT 읽기·렌더를 알면 번역이 승인 문(서비스) 밖에서 부르거나
+# 한국어 자막·시각에 손대게 된다.
 TRANSLATION_MODULE = "translation.py"
 TRANSLATION_MUST_NOT_IMPORT = (
     *CONTEXT_REVIEW_MUST_NOT_IMPORT, "render_export", "render_plan", "source_transcript",
-    "subprocess", "preprocess",
+    "subprocess", "preprocess", "timeline_srt", "srt_english", "timebase",
 )  # fmt: skip
 
 
 def check_translation_stays_pure() -> list[str]:
-    """D105 — 영어 자막 번역 계층은 값만 다룬다. 파일이 사라져도 조용히 통과하지 않는다."""
+    """D114 — 영어 자막 번역 계층은 값만 다룬다. 파일이 사라져도 조용히 통과하지 않는다."""
     path = PROJECT_PACKAGE / "raw" / TRANSLATION_MODULE
     if not path.exists():
-        return [f"vlogsrt/project/raw/{TRANSLATION_MODULE}: 영어 자막 번역 계층이 사라졌다 (D105)"]
+        return [f"vlogsrt/project/raw/{TRANSLATION_MODULE}: 영어 자막 번역 계층이 사라졌다 (D114)"]
     body = path.read_text(encoding="utf-8")
     failures = [
-        f"{TRANSLATION_MODULE}: {module}을 import한다 — 번역은 값만 다룬다 (D105)"
+        f"{TRANSLATION_MODULE}: {module}을 import한다 — 번역은 값만 다룬다 (D114)"
         for module in _imports(body, TRANSLATION_MUST_NOT_IMPORT)
     ]
     return failures + [
-        f"{TRANSLATION_MODULE}:{number}: 파일을 직접 읽거나 쓴다 (D105)"
+        f"{TRANSLATION_MODULE}:{number}: 파일을 직접 읽거나 쓴다 (D114)"
         for number, line in enumerate(body.splitlines(), start=1)
         if TIERING_FILE_IO.search(line)
     ]
@@ -3119,7 +3120,7 @@ CHECKS = (
     ("Gemini 단어 → whisper 줄 글자 배정은 순수하고 글자만 낸다", check_word_text_stays_pure),
     ("작업공간 모드는 순수하고 문서 밖이다", check_workspace_mode_stays_pure),
     ("라이브러리 맥락 평가는 순수하다", check_context_review_stays_pure),
-    ("초안 영어 자막 번역은 순수하다", check_translation_stays_pure),
+    ("영어 자막 번역은 순수하다", check_translation_stays_pure),
     ("3단 등급은 순수하다", check_tiering_stays_pure),
     ("추천만 이어붙이는 렌더 계획은 순수하다", check_render_plan_stays_pure),
     ("등급의 시각 확인 값은 서비스 한 자리만", check_tier_timing_only_from_service),
