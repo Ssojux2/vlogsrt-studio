@@ -114,6 +114,9 @@ QUOTE_NOTICE_KINDS = frozenset({NOTICE_UNSEEN})
 """
 LIBRARY_APPROVE_LABEL = "전체 영상 분석 승인"
 LIBRARY_REMAINING_LABEL = "남은 {count}개 분석 승인"
+LIBRARY_QUOTE_JOB_KIND = "library_quote"
+LIBRARY_QUOTING_LABEL = "견적 계산 중…"
+"""라이브러리 견적을 재는 동안의 단추 이름(W-58) — 승인은 보인 견적에 묶이므로 그동안 꺼져 있다."""
 """끝난 영상이 있을 때의 일괄 승인 — 견적·승인·실행이 남은 영상만 묶는다(W-24 세션 E, D64)."""
 PENDING_KINDS = (
     ("실패", ("분석 확인 필요", "부분 완료 · 확인 필요")),
@@ -3309,7 +3312,7 @@ class RawWorkspaceUi:
         terms = self._glossary_sha(root)
         # 닫기 세대도 지문에 싣는다 — 닫은 뒤 다시 열면 취소 요청된 옛 작업에 붙지 않고 새로 잰다.
         fingerprint = repr((ids, model, cross, terms, *((epoch,) if epoch else ())))
-        self.raw.submit_job(root, "library_quote", fingerprint, prepare)
+        self.raw.submit_job(root, LIBRARY_QUOTE_JOB_KIND, fingerprint, prepare)
 
     def _prepare_library_quote_after(self, root: Path, dependency: Any) -> None:
         """원본 연결이 끝난 뒤 라이브러리 견적을 잰다(W-46a).
@@ -3325,7 +3328,8 @@ class RawWorkspaceUi:
             if self._close_epoch == epoch and self._snapshot_root() == root:
                 self._prepare_library_quote(root)
 
-        self.raw.submit_job(root, "library_quote", f"after-import:{dependency.job_id}", follow)
+        fingerprint = f"after-import:{dependency.job_id}"
+        self.raw.submit_job(root, LIBRARY_QUOTE_JOB_KIND, fingerprint, follow)
 
     def library_analysis_summary(self) -> str:
         root = self._snapshot_root()
@@ -3651,16 +3655,20 @@ class RawWorkspaceUi:
         root = self._snapshot_root()
         # 끝난 승인 작업 걷기(`_approval_active`)는 틱마다 돈다 — 기억은 그 뒤의 읽기만 아낀다.
         approving = root is not None and self._approval_active(root)
-        busy, pending = (
+        busy, pending, quoting = (
             self._status_memo("button", root, lambda: self._library_button_facts(root))
             if root is not None
-            else (False, None)
+            else (False, None, False)
         )
         active = approving or busy
         ids = pending[0] if pending is not None else ()
         library = self._library_quotes.get(root) if root else None
-        if active or library is None:
-            label = "분석 진행 중" if active else LIBRARY_APPROVE_LABEL
+        if active:
+            label = "분석 진행 중"
+        elif library is None:
+            # 견적 작업이 도는 동안은 꺼진 까닭을 단추가 말한다(W-58). 영상이 없거나 견적이 실패해
+            # 아무것도 재지 않으면 예전 이름 그대로다 — 오지 않을 견적을 기다린다고 말하지 않는다.
+            label = LIBRARY_QUOTING_LABEL if quoting else LIBRARY_APPROVE_LABEL
         elif not ids:
             label = "분석 완료"
         elif len(ids) < len(library.asset_ids):
@@ -3670,10 +3678,13 @@ class RawWorkspaceUi:
             label = LIBRARY_APPROVE_LABEL
         return gr.Button(value=label, visible=True, interactive=not active and bool(ids))
 
-    def _library_button_facts(self, root: Path) -> tuple[bool, Any]:
-        """승인 단추의 재료 — (돌거나 기다리는 영상이 있는가, 남은 영상과 그 견적)."""
+    def _library_button_facts(self, root: Path) -> tuple[bool, Any, bool]:
+        """승인 단추의 재료 — (돌거나 기다리는 영상이 있는가, 남은 영상과 그 견적, 견적을 재는
+        중인가)."""
         busy = bool(self._library_busy_ids(root, self._task_views(root)))
-        return busy, self._library_pending(root)
+        pending = self._library_pending(root)
+        quoting = pending is None and bool(self.raw.active_jobs(root, (LIBRARY_QUOTE_JOB_KIND,)))
+        return busy, pending, quoting
 
     def _set_approval_notice(
         self,

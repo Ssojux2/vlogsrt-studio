@@ -308,3 +308,39 @@ def test_reattach_to_a_dead_servers_approval_asks_for_restart(tmp_path, monkeypa
     button = ui.library_analysis_button()
     assert button.interactive and button.value != "분석 진행 중"
     assert not starts and not sender.calls and not client.calls
+
+
+def test_button_says_the_quote_is_being_measured_until_it_arrives(tmp_path, monkeypatch):
+    """견적을 재는 동안 단추는 꺼진 채 까닭을 말한다(W-58) — 실데이터 169개는 73초였다.
+
+    승인은 화면에 보인 견적에 묶이므로(D44) 견적 없이 켜지지 않는다. 견적이 서면 그대로 켜진다."""
+    from ui.workspace_service import LIBRARY_APPROVE_LABEL, LIBRARY_QUOTING_LABEL
+
+    ui, _sender, _client, root, _ids = setup_library(tmp_path, monkeypatch)
+    quote = ui._library_quotes.pop(root)
+    release = threading.Event()
+    measure = ui.raw.selection_quote
+
+    def slow(*args, **kwargs):
+        release.wait(20)
+        return measure(*args, **kwargs)
+
+    monkeypatch.setattr(ui.raw, "selection_quote", slow)
+    ui._prepare_library_quote(root)
+    waiting = ui.library_analysis_button()
+    assert waiting.value == LIBRARY_QUOTING_LABEL and waiting.interactive is False
+    release.set()
+    wait_until(lambda: root in ui._library_quotes)
+    ready = wait_until(lambda: (got := ui.library_analysis_button()).interactive and got)
+    assert ready.value == LIBRARY_APPROVE_LABEL
+    assert set(ui._library_quotes[root].asset_ids) == set(quote.asset_ids)
+
+
+def test_without_a_quote_job_the_button_keeps_its_name(tmp_path, monkeypatch):
+    """견적을 재지 않으면(영상 없음·견적 실패) 「견적 계산 중」이라 하지 않는다(W-58)."""
+    from ui.workspace_service import LIBRARY_APPROVE_LABEL
+
+    ui, _sender, _client, root, _ids = setup_library(tmp_path, monkeypatch)
+    ui._library_quotes.pop(root)
+    button = ui.library_analysis_button()
+    assert button.value == LIBRARY_APPROVE_LABEL and button.interactive is False
