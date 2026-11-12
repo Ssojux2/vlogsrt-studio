@@ -389,6 +389,7 @@ __all__ = [
     "ANALYSIS_PROXY_JOB_KIND",
     "RENDER_EXPORT_JOB_KIND",
     "SRT_TRANSLATE_JOB_KIND",
+    "SUBTITLE_BURN_JOB_KIND",
     "SYNC_CHECK_JOB_KIND",
     "SELECTION_MODE_FULL",
     "SELECTION_MODE_TRANSCRIBE",
@@ -490,6 +491,10 @@ KEPT_HUMAN_REASON = render_plan.PART_HUMAN_RECOMMENDED
 """「내보낼 부분」 조각이 사람 추천에서 왔다는 까닭 — 레일이 자동 녹색과 따로 그린다(W-46b)."""
 """추천만 이어붙인 초안 영상 + SRT + 보고서를 내는 작업(W-44, D100 §5b) — 무료 로컬. 작업공간마다
 한 번에 하나다(같은 지문이면 도는 작업에 다시 붙는다)."""
+
+SUBTITLE_BURN_JOB_KIND = "subtitle_burn"
+"""자막 입히기(W-65, D116) — 영상 하나에 한국어(+ 영어) SRT를 번인해 `<이름>.burned.mp4`를 쓰는 무료
+로컬 작업(`burn_export`). 같은 영상이면 도는 작업에 다시 붙는다."""
 
 SRT_TRANSLATE_JOB_KIND = "srt_translate"
 """한국어 SRT → 영어 SRT(W-63, D114) — 사람이 누른 SRT 하나를 옮겨 쓰는 작업. 옮길 것이 있으면
@@ -1747,6 +1752,54 @@ class RawWorkspaceService:
 
         fingerprint = f"{SRT_TRANSLATE_JOB_KIND}:{srt}"
         return self.submit_job(root, SRT_TRANSLATE_JOB_KIND, fingerprint, body)
+
+    # ── 자막 입히기(W-65, D116) — 화면은 이 얇은 문으로만 `burn_export`에 닿는다 ──
+
+    def subtitle_burn_settings(self) -> Any:
+        """번인 설정(`BurnSettings`) — 화면 손잡이의 범위·기본값."""
+        from vlogsrt.project.raw.burn_config import BURN_SETTINGS
+
+        return BURN_SETTINGS
+
+    def subtitle_burn_style(self, root: Path | None = None, values: Any = None) -> Any:
+        """모양(`BurnStyle`) — `values`가 있으면 그것을 검사해서, 없으면 그 작업공간에 저장한 모양
+        (작업공간이 없으면 기본 모양). 범위 밖 값은 `RawWorkspaceError`다."""
+        from vlogsrt.project.raw import burn_export, burn_in
+
+        if values is not None:
+            try:
+                return burn_in.style_from_mapping(values)
+            except burn_in.BurnInError as error:
+                raise RawWorkspaceError(str(error)) from error
+        if root is None:
+            return burn_in.default_style()
+        return burn_export.saved_style(self, root)
+
+    def prepare_subtitle_burn(
+        self, root: Path, video: Path | None, korean: Path | None, english: Path | None
+    ) -> Any:
+        """빈 칸(None)은 마지막 초안에서 채워 읽고 짝짓고 조사한 `BurnJob`(무료, 작업 전)."""
+        from vlogsrt.project.raw import burn_export
+
+        return burn_export.prepare(*burn_export.resolve_inputs(self, root, video, korean, english))
+
+    def subtitle_burn_preview(self, job: Any, style: Any) -> bytes:
+        """첫 한글 큐 프레임 하나에 자막을 얹은 JPEG(무료 로컬)."""
+        from vlogsrt.project.raw import burn_export
+
+        return burn_export.preview(job, style)
+
+    def start_subtitle_burn(
+        self,
+        root: Path,
+        job: Any,
+        style: Any,
+        done: Callable[[dict[str, Any]], None] | None = None,
+    ) -> JobHandle:
+        """번인 작업을 건다(무료 로컬, D116) — libass ffmpeg가 없으면 작업 전에 거부한다."""
+        from vlogsrt.project.raw import burn_export
+
+        return burn_export.start(self, root, job, style, done)
 
     def finalcut_drop_disabled(self, root: Path) -> bool:
         """Final Cut 보내기에서 꺼진 클립을 뺄까(D94) — 고른 적이 없으면 빼지 않는다(기본)."""

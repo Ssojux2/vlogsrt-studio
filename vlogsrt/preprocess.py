@@ -87,6 +87,7 @@ def reset_process_caches() -> None:
     with _VERSION_LOCK:
         _TOOL_VERSIONS.clear()
     _PROBE_MEMO.clear()
+    available_filters.cache_clear()
 
 
 def _ffmpeg_install_hint() -> str:
@@ -475,14 +476,18 @@ def _run(
     step: str | None = None,
     priority: int | None = None,
     on_poll: Callable[[], None] | None = None,
+    cwd: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """실패는 RuntimeError다 — 시간 한도를 넘기면 그 하위인 `ProcessTimeout`.
 
     `timeout`이 없으면 예전과 같다: 취소를 듣지 않는 실행은 한도 없이, 듣는 실행은
     `_CANCELLABLE_TIMEOUT_SECONDS`까지 기다린다. `priority`를 주면 Popen 길이라 한도가 없을 때도
-    `_CANCELLABLE_TIMEOUT_SECONDS`까지다(`run_process`).
+    `_CANCELLABLE_TIMEOUT_SECONDS`까지다(`run_process`). `cwd`는 자막 입히기만 준다(D116 —
+    필터 그래프에 상대 이름만 싣는다). 안 주면 예전 호출 그대로다.
     """
     limit: dict[str, Any] = {} if timeout is None else {"timeout": timeout}
+    if cwd is not None:
+        limit["cwd"] = cwd
     try:
         completed = run_process(
             command,
@@ -5159,9 +5164,9 @@ class RenderedDraft:
 
 
 @functools.cache
-def available_encoders() -> frozenset[str]:
-    """이 ffmpeg의 인코더 이름 — 프로세스마다 한 번 묻는다(`-encoders`)."""
-    listing = _run([require_ffmpeg(), "-hide_banner", "-encoders"]).stdout
+def available_encoders(executable: str | None = None) -> frozenset[str]:
+    """그 ffmpeg(없으면 PATH의 것)의 인코더 이름 — 실행 파일마다 한 번 묻는다(`-encoders`)."""
+    listing = _run([executable or require_ffmpeg(), "-hide_banner", "-encoders"]).stdout
     return _parse_encoders(listing)
 
 
@@ -5180,10 +5185,10 @@ def _parse_encoders(listing: str) -> frozenset[str]:
 
 
 @functools.cache
-def encoder_works(name: str) -> bool:
+def encoder_works(name: str, executable: str | None = None) -> bool:
     """그 인코더가 이 기계에서 실제로 프레임을 내는가 — 작은 lavfi 인코딩 한 번(캐시)."""
     command = [
-        require_ffmpeg(), "-hide_banner", "-nostdin", "-loglevel", "error",
+        executable or require_ffmpeg(), "-hide_banner", "-nostdin", "-loglevel", "error",
         "-f", "lavfi", "-i", _ENCODER_PROBE_INPUT,
         "-frames:v", _ENCODER_PROBE_FRAMES, "-c:v", name, "-pix_fmt", "yuv420p",
         "-f", "null", "-",
@@ -5196,11 +5201,18 @@ def encoder_works(name: str) -> bool:
     return True
 
 
-def pick_video_encoder(preferences: Sequence[str]) -> str:
-    """앞에서부터 목록에 있고 **실제로 도는** 첫 인코더 — 하드웨어가 먼저, libx264가 마지막."""
-    listed = available_encoders()
+def pick_video_encoder(preferences: Sequence[str], executable: str | None = None) -> str:
+    """앞에서부터 목록에 있고 **실제로 도는** 첫 인코더 — 하드웨어가 먼저, libx264가 마지막.
+
+    `executable`은 자막 입히기만 준다(D116 — libass가 든 다른 ffmpeg). 안 주면 예전 그대로다."""
+    if executable is None:
+        listed = available_encoders()
+        works: Callable[[str], bool] = encoder_works
+    else:
+        listed = available_encoders(executable)
+        works = functools.partial(encoder_works, executable=executable)
     for name in preferences:
-        if name in listed and encoder_works(name):
+        if name in listed and works(name):
             return name
     raise RuntimeError(f"쓸 수 있는 H.264 인코더가 없습니다 (후보: {', '.join(preferences)})")
 
@@ -5509,3 +5521,204 @@ def _verify_draft(
         video_codec=probe.video.codec_name,
         audio_codec=probe.audio[0].codec_name,
     )
+
+
+# ─────────────────────────────────────────────────────────────
+#  자막 입히기(번인, W-65 D116)
+# ─────────────────────────────────────────────────────────────
+#
+# ASS 글·글꼴은 `burn_export`가 작업 폴더에 써 둔다 — 여기는 libass가 든 ffmpeg를 찾고, 그 폴더를
+# 작업 디렉터리로 띄워 필터 그래프에 **상대 이름만** 싣는다. 한글·공백·`C:` 경로를 필터 문법으로
+# 탈출할 일이 없다. 입력·출력은 argv 칸이라 탈출이 필요 없다(절대 경로).
+
+SUBTITLES_FILTER = "subtitles"
+_FILTER_ROW = re.compile(r"^\s*[A-Z.|]{2,3}\s+(\S+)\s+\S*->\S*")
+"""`-filters` 표의 한 줄 — ` .. subtitles  V->V  Render…`의 둘째 칸이 이름이다."""
+_BURN_RELATIVE_NAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]*")
+"""필터 그래프에 싣는 이름 — 탈출이 필요 없는 글자만(`:`·`,`·`'`·`\\`·공백 없음)."""
+_BURN_PREVIEW_NAME = "preview.jpg"
+BurnAudio = Literal["copy", "encode", "none"]
+
+
+@functools.cache
+def available_filters(executable: str) -> frozenset[str]:
+    """그 ffmpeg의 필터 이름 — 실행 파일마다 한 번 묻는다(`-filters`)."""
+    listing = _run([executable, "-hide_banner", "-filters"], timeout=_PROBE_TIMEOUT_SECONDS).stdout
+    return frozenset(
+        match.group(1) for line in listing.splitlines() if (match := _FILTER_ROW.match(line))
+    )
+
+
+def subtitle_ffmpeg(candidates: Sequence[str]) -> str:
+    """libass(`subtitles` 필터)가 든 ffmpeg — PATH의 것이 먼저, 아니면 후보 가운데 처음 것.
+
+    분석·조사는 여전히 PATH의 ffmpeg다 — 이 실행 파일은 자막 입히기에만 쓴다."""
+    found: list[str] = []
+    with suppress(RuntimeError):
+        found.append(require_ffmpeg())
+    found += [path for path in candidates if os.path.isfile(path) and os.access(path, os.X_OK)]
+    for executable in found:
+        try:
+            if SUBTITLES_FILTER in available_filters(executable):
+                return executable
+        except RuntimeError as error:
+            log.debug(f"{executable}의 필터 목록을 읽지 못했다 — 다음 후보로 간다: {error}")
+    raise RuntimeError(
+        "자막을 입힐 ffmpeg(libass 포함)를 찾지 못했습니다."
+        f" `{_burn_install_hint()}` 후 앱을 다시 띄우세요."
+    )
+
+
+def _burn_install_hint() -> str:
+    """libass가 든 ffmpeg를 까는 명령 — Homebrew 기본 ffmpeg에는 libass가 없다(D116)."""
+    if sys.platform == "darwin":
+        return "brew install ffmpeg-full"
+    if sys.platform == "win32":
+        return "winget install Gyan.FFmpeg"
+    return "sudo apt install ffmpeg"
+
+
+def executable_version(executable: str) -> str:
+    """그 실행 파일의 `-version` 첫 줄 — 보고서에 남긴다(경로마다 한 번)."""
+    with _VERSION_LOCK:
+        held = _TOOL_VERSIONS.get(executable)
+        if held is None:
+            lines = _run([executable, "-version"]).stdout.strip().splitlines()
+            if not lines:
+                raise RuntimeError(f"{executable} -version 출력이 비었습니다")
+            held = _TOOL_VERSIONS[executable] = lines[0]
+    return held
+
+
+@dataclass(frozen=True, slots=True)
+class BurnRequest:
+    """번인 한 번의 재료 — ffmpeg, 원본 영상, ASS·글꼴 폴더가 든 작업 폴더와 그 안의 이름."""
+
+    executable: str
+    source: Path
+    workdir: Path
+    subtitle_name: str
+    fonts_name: str
+
+    def video_filter(self) -> str:
+        for name in (self.subtitle_name, self.fonts_name):
+            if not _BURN_RELATIVE_NAME.fullmatch(name):
+                raise ValueError(f"필터 그래프에 실을 수 없는 이름이다: {name!r}")
+        return f"{SUBTITLES_FILTER}=filename={self.subtitle_name}:fontsdir={self.fonts_name}"
+
+
+@dataclass(frozen=True, slots=True)
+class BurnedVideo:
+    """다시 잰 번인 결과 — 원본과 길이·크기가 같을 때만 게시된다."""
+
+    path: Path
+    duration: Fraction
+    width: int
+    height: int
+    video_codec: str
+    audio_codec: str | None
+
+
+def _burn_command(
+    request: BurnRequest,
+    staged: Path,
+    target: RenderTarget,
+    encoding: RenderEncoding,
+    audio: BurnAudio,
+) -> list[str]:
+    """영상은 자막을 얹어 다시 인코딩(프레임 시각 그대로), 소리는 그대로 또는 AAC 한 번."""
+    command = [
+        request.executable, "-hide_banner", "-nostdin", "-y",
+        "-i", os.path.abspath(request.source), "-map", "0:v:0",
+    ]  # fmt: skip
+    if audio != "none":
+        command += ["-map", "0:a:0"]
+    command += ["-vf", request.video_filter(), "-fps_mode", "passthrough"]
+    command += [*_render_video_args(encoding, target), "-pix_fmt", "yuv420p"]
+    if audio == "copy":
+        command += ["-c:a", "copy"]
+    elif audio == "encode":
+        command += ["-c:a", encoding.audio_codec, "-b:a", f"{encoding.audio_bitrate_kbps}k"]
+    return [*command, "-movflags", "+faststart", "-f", "mp4", os.path.abspath(staged)]
+
+
+@process_step("자막 입히기")
+def burn_subtitles(
+    request: BurnRequest,
+    output: Path,
+    target: RenderTarget,
+    encoding: RenderEncoding,
+    *,
+    duration: Fraction,
+    audio: BurnAudio,
+    on_poll: Callable[[], None] | None = None,
+) -> BurnedVideo:
+    """자막을 입힌 영상을 `output`에 새로 쓴다 — 다시 재어 원본과 길이·크기가 같을 때만 게시한다.
+    `output`이 이미 있으면 덮지 않고 거부한다. 원본은 읽기만 한다."""
+    _assert_safe_staging(request.source, output)
+    staged = _reserve_staging_temp(output)
+    try:
+        command = _burn_command(request, staged, target, encoding, audio)
+        _run(
+            command,
+            timeout=encoding.timeout(duration),
+            priority=encoding.priority,
+            on_poll=on_poll,
+            cwd=request.workdir,
+        )
+        burned = _verify_burn(staged, target, duration, audio)
+    except BaseException:
+        staged.unlink(missing_ok=True)
+        raise
+    _publish_staged_clip(staged, output)
+    return replace(burned, path=output)
+
+
+def _verify_burn(
+    path: Path, target: RenderTarget, duration: Fraction, audio: BurnAudio
+) -> BurnedVideo:
+    probe = probe_raw_media(path)
+    problems = []
+    if (probe.video.width, probe.video.height) != (target.width, target.height):
+        problems.append(
+            f"크기 {probe.video.width}×{probe.video.height} (원본 {target.width}×{target.height})"
+        )
+    if abs(probe.duration - duration) > target.frame_duration:
+        problems.append(f"길이 {float(probe.duration):.4f}초 (원본 {float(duration):.4f}초)")
+    if audio != "none" and not probe.audio:
+        problems.append("소리가 없다")
+    if problems:
+        raise RenderVerificationError("자막을 입힌 영상이 원본과 다르다 — " + "; ".join(problems))
+    return BurnedVideo(
+        path=path,
+        duration=probe.duration,
+        width=probe.video.width,
+        height=probe.video.height,
+        video_codec=probe.video.codec_name,
+        audio_codec=probe.audio[0].codec_name if probe.audio else None,
+    )
+
+
+@process_step("자막 미리보기 한 장")
+def burn_preview_frame(
+    request: BurnRequest, at: Fraction, *, long_edge: int, quality: int, timeout: float
+) -> bytes:
+    """`at`초의 프레임 하나에 자막을 얹어 긴 변 `long_edge`로 줄인 JPEG — 렌더와 같은 필터다.
+
+    자막을 원본 크기에서 그린 뒤 줄이므로 크기·외곽선의 비율이 내보낼 영상과 같다."""
+    scale = (
+        f"scale=w={long_edge}:h={long_edge}"
+        ":force_original_aspect_ratio=decrease:force_divisible_by=2"
+    )
+    command = [
+        request.executable, "-hide_banner", "-nostdin", "-y",
+        "-ss", f"{float(at):.3f}", "-i", os.path.abspath(request.source), "-map", "0:v:0",
+        "-vf", f"{request.video_filter()},{scale}", "-frames:v", "1",
+        "-q:v", str(quality), "-f", "image2", "-update", "1", _BURN_PREVIEW_NAME,
+    ]  # fmt: skip
+    out = request.workdir / _BURN_PREVIEW_NAME
+    try:
+        _run(command, timeout=timeout, cwd=request.workdir)
+        return out.read_bytes()
+    finally:
+        out.unlink(missing_ok=True)

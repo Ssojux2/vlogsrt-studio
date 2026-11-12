@@ -10210,3 +10210,52 @@ snap `late=7`)을 뒤집고 허용을 한 프레임까지 넓힌다. snap과 같
   큐 `03,000 --> 03,000` → `03,000 --> 03,850` · `test_inverted_cues_are_kept_as_points_and_counted`의 끝 `3` → `3.85` · 보고서
   `cue_counts`에 `lengthened` · 결과 카드 틱은 단추 하나를 더 돌려준다(4칸).
 - **사람 확인 🧑**: Final Cut에서 새 SRT를 불러와 353장이 다 들어오는지, 25·26번(완전히 겹친 두 캡션)이 어떻게 놓이는지 본다.
+
+## D116 — 자막 입히기: 한국어·영어 SRT를 Pretendard로 영상에 번인한다 (2026-11-12, W-65, 사용자 지시)
+
+**지시**: 「srt 파일을 영상에 번인하는 기능 … ffmpeg를 써서 강의자료에서 사용하는 폰트로 한글자막과 영어자막을 번인해서 최종
+영상을 만들고싶어. 자막 위치와 폰트크기 외부테두리, 글자색 정도만 … 영화자막처럼」. 계획은 Fable 5.2, 구현은 Opus 5.5(사용자 지정).
+사용자 선택(2026-11-12): `ffmpeg-full`을 이 세션에서 설치 · Pretendard **SemiBold** · **한글 위, 영어 아래(4/5 크기)**.
+
+- **왜 libass인가**: 설치된 Homebrew `ffmpeg` 9.0.1은 libass·freetype·fontconfig 없이 빌드돼 `subtitles`·`ass`·`drawtext`
+  필터가 **없다**. 브라우저 캔버스로 큐마다 PNG를 그려 `overlay`로 얹는 길(가짜 실행기로 시험할 수 없고 렌더마다 브라우저
+  왕복)과 Pillow(규칙 10)를 버리고, ASS 문서 하나 + libass로 정했다. 번인에만 `preprocess.subtitle_ffmpeg`가 libass가 든
+  실행 파일을 고른다 — PATH의 ffmpeg가 `subtitles`를 가지면 그것, 아니면 `BurnSettings.ffmpeg_candidates`
+  (`/opt/homebrew/opt/ffmpeg-full/bin/ffmpeg` 등, keg-only라 PATH에 없다). **분석·조사·초안 렌더는 PATH ffmpeg 그대로**다.
+  없으면 작업 전에 `brew install ffmpeg-full`(Windows `winget install Gyan.FFmpeg`)을 대고 거부한다.
+- **글꼴**: `vlogsrt/project/raw/data/fonts/Pretendard-SemiBold.otf`(Pretendard 1.3.9, SIL OFL 1.1 — 원문 `OFL-Pretendard.txt`,
+  sha256 표는 같은 폴더 README)를 꾸러미 자원으로 싣는다(`pyproject` package-data — 의존성이 아니다). libass는 woff2를 읽지
+  못해 강의 덱의 `PretendardVariable.woff2`가 아니라 정적 OTF다. 작업 폴더의 `fonts/`로 베껴 `fontsdir`로만 건넨다 — 실측
+  libass 0.17.5가 `fontselect: (Pretendard SemiBold, 400, 0) -> Pretendard-SemiBold`로 그 파일을 골랐다.
+- **조판(순수 `burn_in.py`)**: 영어 SRT는 한국어 SRT와 큐 수·(시작, 끝)이 **모두 같을 때만** 짝짓고(D114가 그렇게 쓴다),
+  다르면 첫 다른 번호를 대고 거부한다 — 맞추거나 짐작하지 않는다(규칙 1·3). 짝지은 큐 하나 = Dialogue 하나,
+  `한글\N{\rEN}영어` — 긴 줄이 접혀도 두 언어가 겹치지 않는다. 한쪽만 빈 큐는 다른 쪽만, 둘 다 빈 큐는 건너뛰고 센다(규칙 9).
+  시각은 ASS의 1/100초로 가장 가까이 반올림해 적을 뿐이다(표시 양자화 — SRT는 그대로). `PlayResX/Y` = 화면 크기(90°·270°
+  회전은 뒤집는다)라 크기는 실제 픽셀이다. 탈출: 줄바꿈 → `\N`, `{`·`}` → `\{`·`\}`, 백슬래시 뒤에 U+2060(실측 libass가 글자
+  그대로 그렸다). 불변식 「자막 입히기 조판은 순수하다」.
+- **사람이 고르는 것**: 위치(아래·위) · 글자 크기 · 외곽선 · 가장자리 여백(1080p 기준 px, 영상 높이에 비례) · 글자색. 외곽선 색은
+  검정 고정, 그림자·애니메이션·효과는 없다. 마지막 모양은 작업공간 표지 `burn_style`(지문·승인·견적 밖)이고 페이지를 열면
+  손잡이에 되살린다.
+- **ffmpeg(`preprocess`, 규칙 7)**: 작업 폴더(`burn.ass` + `fonts/`)를 **작업 디렉터리로** 띄워 필터 그래프에 상대 이름만
+  싣는다(`subtitles=filename=burn.ass:fontsdir=fonts`) — 한글·공백·`C:` 경로를 필터 문법으로 탈출할 일이 없다. 입력·출력은
+  절대 경로 argv. 영상은 다시 인코딩(초안 렌더와 같은 `RenderSettings` 인코더·비트, `-fps_mode passthrough`로 프레임 시각
+  그대로 — 2세대 인코딩이다), 소리는 AAC·MP3 등은 그대로 복사하고 PCM 등만 AAC로 한 번. 출력은 스테이징 `.part`에 쓰고
+  다시 재어 **크기가 같고 길이가 한 프레임 안**일 때만 게시한다. 하드웨어 인코더가 실패하면 libx264로 한 번 더(W-45와 같은
+  물러남). HDR 원본은 톤 매핑 없이 8비트로 입히고 경고·보고서에 남긴다(초안과 같다). `_run`에 `cwd`를,
+  `available_encoders`·`encoder_works`·`pick_video_encoder`에 선택 인자 `executable`을 더했다(안 주면 예전 argv 그대로).
+- **결과**: 영상 옆 `<이름>.burned.mp4` + 보고서 `<이름>.burned.json`(입력 SRT sha256 · 모양 · 글꼴 · 인코더 · ffmpeg 경로·판).
+  같은 이름이 있으면 `<이름>.burned.<UTC 시각>.mp4` — 덮지 않는다. 영상 옆에 쓸 수 없으면 작업공간 `export/burned/<시각>/`.
+  입력 영상·SRT·원본 자막·지문·캐시 열쇠에는 아무것도 쓰지 않는다.
+- **화면**: 결과 카드 아래 「영어 SRT로 변환」 다음의 「자막 입히기」 칸(`ui/burn_cell.py`) — 영상 · 한국어 SRT · 영어 SRT
+  (비우면 마지막 초안의 `draft.mp4`·가장 새 SRT·그 옆의 `<이름>.en.srt`, 없으면 한글만) · 네 손잡이 + 여백 · 「미리보기」
+  (첫 한글 큐 가운데 프레임 한 장을 **같은 필터로** 그려 긴 변 960 JPEG — CSS 덧그림은 ASS 글자 크기가 em이 아니라 맞지
+  않는다) · 「자막 입혀 내보내기」(작업 `subtitle_burn`, 무료 로컬, 끝날 때까지 기다려 결과 줄). 「라이브러리 닫기」는 취소하고
+  닫는다. UI는 `project.raw.service`의 얇은 문(`subtitle_burn_settings`·`subtitle_burn_style`·`prepare_subtitle_burn`·
+  `subtitle_burn_preview`·`start_subtitle_burn`)으로만 닿는다.
+- **설정** `burn_config.BurnSettings`(외부 근거 없는 조정 대상 — 규칙 8): 글자 54px · 외곽선 4px · 여백 60px @1080 · 흰 글자 ·
+  영어 4/5 · 좌우 여백 너비 1/20 · 범위 20–160 / 0–16 / 0–480 · 미리보기 960·q3·120초. 어느 지문·캐시 열쇠·승인·견적·등급에도 없다.
+- **실측**(이 기계, ffmpeg-full 9.0.2 · libass 0.17.5): 1920×1080 30fps 6초 시험 영상 + 두 큐 → h264_videotoolbox로
+  `draft.burned.mp4`(길이·크기 검증 통과), 미리보기·번인 모두 Pretendard SemiBold로 한글 위·영어 아래.
+- **다른 세션과의 경계**: 같은 날 같은 작업 트리에서 D114·D115(W-63·W-64)가 함께 진행돼 이 번호를 D116·W-65로 잡았다.
+  공유 파일(`service.py`·`workspace_service.py`·`preprocess.py`)은 몇 줄만 고쳤고 나머지는 새 파일이다.
+- **사람 확인 🧑**: 실제 초안 영상으로 미리보기·내보내기 — 세로(숏폼) 영상에서 글자 크기, 긴 영어 줄이 접히는 모양.

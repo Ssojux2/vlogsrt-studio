@@ -43,6 +43,7 @@ from fastapi.responses import (  # noqa: E402
 
 from ui import activity_log, design_tokens, os_open, ui_facade  # noqa: E402
 from ui import chooser as ui_chooser  # noqa: E402
+from ui.burn_cell import BURN_JOB_LABEL, BurnCell  # noqa: E402
 from vlogsrt import log, preprocess  # noqa: E402
 from vlogsrt.project.raw import service as raw_service  # noqa: E402
 
@@ -719,6 +720,7 @@ CLOSE_CANCELS_JOB_KINDS = frozenset(
         raw_service.VISUAL_PREPARE_JOB_KIND,
         raw_service.ANALYSIS_PROXY_JOB_KIND,
         raw_service.RENDER_EXPORT_JOB_KIND,
+        raw_service.SUBTITLE_BURN_JOB_KIND,
     }
 )
 """「라이브러리 닫기」가 취소를 요청하고 닫는 작업(D64 F) — 돈이 들지 않는 로컬 일이고, 다시 열면
@@ -755,6 +757,7 @@ ACTIVITY_JOB_LABELS = {
     raw_service.ANALYSIS_PROXY_JOB_KIND: "4K 분석 프록시",
     raw_service.RENDER_EXPORT_JOB_KIND: "추천만 이어붙이기",
     raw_service.SRT_TRANSLATE_JOB_KIND: "영어 SRT 변환",
+    raw_service.SUBTITLE_BURN_JOB_KIND: BURN_JOB_LABEL,
     raw_service.SEGMENT_JOB_KIND: "컷 준비",
     raw_service.ANALYSIS_JOB_KIND: "영상 분석 1단계(전사·장면)",
     raw_service.ANALYSIS_SEMANTIC_JOB_KIND: "영상 분석 2단계(의미 분석)",
@@ -4604,6 +4607,9 @@ class RawWorkspaceUi:
                     elem_id=RENDER_EXPORT_SRT_AGAIN_ID,
                 )
                 self._srt_english_cell()
+                # 자막 입히기(W-65, D116)
+                self._burn_cell = BurnCell(self, raw_service.RawWorkspaceError)
+                self._burn_cell.build()
 
     def _initial_workbench_values(self) -> tuple[str, str]:
         """조립 때의 (껍데기, 본문) — 미디어 주소 없는 자리표시. 페이지 로드가 곧 갈아 끼운다."""
@@ -4776,6 +4782,7 @@ class RawWorkspaceUi:
             show_progress="hidden",
         )
         self._wire_srt_english(status)
+        self._burn_cell.wire(status)
         opened = self._export_open_button.click(
             self.render_export_open_view, self._signature_state, status
         )
@@ -11318,6 +11325,7 @@ class RawWorkspaceUi:
             created.then(self.capcut_fcp_panel_view, None, fcp_outputs)
             loaded = app.load(self.refresh_outputs, None, self._load_outputs())
             loaded.then(self.capcut_fcp_panel_view, None, fcp_outputs)
+            self._burn_cell.wire_restore(loaded)
             closed = self._wire_library_close([*selection_outputs, *fcp_outputs])
             self._wire_model_refresh(
                 (

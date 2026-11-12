@@ -22,6 +22,10 @@
 |---|---|---|
 | Python 3.11 이상 | `brew install python@3.12` | `winget install Python.Python.3.12` |
 | ffmpeg · ffprobe | `brew install ffmpeg` | `winget install Gyan.FFmpeg` |
+| 자막 입히기(번인)용 libass ffmpeg — 선택 | `brew install ffmpeg-full` | `winget install Gyan.FFmpeg`(이미 든다) |
+
+Homebrew 기본 `ffmpeg`에는 libass가 없어 「자막 입히기」만 쓰지 못한다. `ffmpeg-full`은 PATH를 건드리지 않고
+자막 입히기에만 쓰인다(D116).
 
 **API 키**: 프로젝트 폴더의 `.env.example`을 복사해 `.env`를 만들고 키를 채운다
 (`OPENAI_API_KEY` — 자막, `GEMINI_API_KEY` — 영상 분석 기본 모델, Claude를 고를 때만 `ANTHROPIC_API_KEY`).

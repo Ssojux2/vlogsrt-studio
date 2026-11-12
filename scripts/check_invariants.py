@@ -1280,6 +1280,30 @@ def check_render_plan_stays_pure() -> list[str]:
     return failures
 
 
+# D116 — 자막 입히기의 조판(`burn_in.py`)은 SRT 큐 값을 ASS 글로만 바꾼다. 시각을 만들거나 옮기지
+# 않고(규칙 1·3), 파일·프로세스는 `burn_export`(입출력)와 `preprocess`(ffmpeg, 규칙 7)의 몫이다.
+BURN_IN_MODULE = "burn_in.py"
+BURN_IN_MUST_NOT_IMPORT = (*RENDER_PLAN_MUST_NOT_IMPORT, "burn_export", "timeline_srt", "tempfile")
+
+
+def check_burn_in_stays_pure() -> list[str]:
+    """D116 — `burn_in.py`는 값만 다룬다. 파일이 사라져도 조용히 통과하지 않는다."""
+    path = PROJECT_PACKAGE / "raw" / BURN_IN_MODULE
+    if not path.exists():
+        return [f"vlogsrt/project/raw/{BURN_IN_MODULE}: 자막 입히기 조판 계층이 사라졌다 (D116)"]
+    body = path.read_text(encoding="utf-8")
+    failures = [
+        f"{BURN_IN_MODULE}: {name}을 import한다 — 자막 입히기 조판이 순수 함수가 아니게 된다 (D116)"
+        for name in _imports(body, BURN_IN_MUST_NOT_IMPORT)
+    ]
+    failures += [
+        f"{BURN_IN_MODULE}:{number}: 파일을 직접 읽거나 쓴다 — 입출력은 burn_export의 몫이다 (D116)"
+        for number, line in enumerate(body.splitlines(), start=1)
+        if FINALCUT_TIMELINE_FILE_IO.search(line)
+    ]
+    return failures
+
+
 # D60 — 자막 시각 확인(D55)이 등급으로 가는 길은 하나다: 서비스의 `_tier_timing`이 지금
 # 리비전 보고서에서 값(`TimingSignals`)을 만들고, 등급 보고서의 유일한 자리
 # `_tier_report_for_row`가 그 값을 `classify(…, timing=self._tier_timing(…))`로 넘긴다.
@@ -3123,6 +3147,7 @@ CHECKS = (
     ("영어 자막 번역은 순수하다", check_translation_stays_pure),
     ("3단 등급은 순수하다", check_tiering_stays_pure),
     ("추천만 이어붙이는 렌더 계획은 순수하다", check_render_plan_stays_pure),
+    ("자막 입히기 조판은 순수하다", check_burn_in_stays_pure),
     ("등급의 시각 확인 값은 서비스 한 자리만", check_tier_timing_only_from_service),
     ("자막 시각 확인은 순수하다", check_sync_check_stays_pure),
     ("자막 시각 확인은 표시만 한다", check_sync_check_only_displays),
