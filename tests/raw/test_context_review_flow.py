@@ -175,3 +175,46 @@ def test_the_drawer_panel_says_what_it_does_and_runs_without_a_quote(tmp_path: P
     with pytest.raises(gr.Error, match="맥락을 평가할 분석이 없습니다"):
         server.context_run_view(server.current_signature())
     assert not hasattr(server, "context_quote_view") and ws.CONTEXT_RUN_LABEL == "맥락 평가 실행"
+
+
+def test_an_expired_gemini_price_refuses_context_and_english_before_any_send(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D110 — 견적이 없어도 단가 재확인 기한이 지난 Gemini는 보내기 전 문(`semantic_client`)이
+    닫는다.
+
+    맥락 평가와 영어 자막 모두 클라이언트를 받기 전에 거절하고, 서비스의 유료 길은 한 번도 불리지
+    않는다."""
+    pytest.importorskip("gradio", reason="웹 UI extra(gradio)가 없다", exc_type=ImportError)
+    from datetime import date
+
+    import gradio as gr
+
+    from ui import workspace_service as ws
+    from vlogsrt.config import Config
+    from vlogsrt.project.raw.analysis_approval import LiveAnalysisTransport
+
+    flash = "gemini-3.8-flash"
+    server = ws.RawWorkspaceUi(state_path=tmp_path / "ui-state.json")
+    server.create_workspace_view("단가", str(tmp_path / "workspace"))
+    signature = server.current_signature()
+    server._live_transport = LiveAnalysisTransport(
+        sender=object(),
+        cfg=Config(),
+        client=object(),
+        asr_approvals=server._production_asr_approvals,
+        luna_approvals=server._production_luna_approvals,
+        gemini_clients={flash: object()},
+        on=date(2030, 1, 1),  # 모든 Gemini 단가의 재확인 기한 뒤
+    )
+    paid: list[str] = []
+    monkeypatch.setattr(server.raw, "context_review_model", lambda root: flash)
+    monkeypatch.setattr(server.raw, "run_context_review", lambda *a: paid.append("context"))
+    monkeypatch.setattr(server.raw, "english_subtitles", lambda root: True)
+    monkeypatch.setattr(server.raw, "english_missing", lambda root: ("k" * 64,))
+    monkeypatch.setattr(server.raw, "start_render_export", lambda *a: paid.append("english"))
+    with pytest.raises(gr.Error, match="가격 미정"):
+        server.context_run_view(signature)
+    with pytest.raises(gr.Error, match="가격 미정"):
+        server.render_export_view(signature)
+    assert paid == []
