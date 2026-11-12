@@ -9959,3 +9959,31 @@ Tier 1`, 429)였다 — 영상 판정은 성공하고 전사만 빠졌다. 한�
 
 **근거**: 시험 `test_library_approval`(단추가 기다리지 않음 · 모두 끝났으면 0송신 · 잰 뒤 결속이 바뀌면 실행 문이 닫음)·
 `test_library_remaining`·`test_transcribe_only`·`test_analysis_model_ui`(누른 순간의 모델로 잰다)·`test_status_tick`(틱 칸 셋).
+
+## D111 — 429는 어느 한도인지 남긴다: 분당·하루를 갈라 말한다 (2026-11-12, W-60)
+
+**맥락**: 실데이터 namdang 169개 중 14개가 분석 실패로 남았다. 14개 모두 말소리 없는 짧은 클립(0.6–18초)이고,
+05:03 실행에서 Gemini 3.5 Transcribe가 글 칸 없이 메타데이터만(`created`·`model`·`status`·`usage`…) 돌려줘
+파서가 형식 오류로 거부했다(이 원인은 별도 수정 — 파서가 끝난·과금된 메타데이터만의 응답을 미확인 빈 결과로 받는다).
+05:54 재시도에서 14개 요청이 26초 안에 몰렸고 끝쪽 넷이 429를 받았다. 그러나 기록은
+「API 사용량 또는 요청 한도를 확인하세요」 한 줄뿐이었다 — 전송 계층이 429 본문의 `QuotaFailure`·`RetryInfo`를 버려서
+**분당 한도인지 하루 한도(Tier 1 100회)인지 가를 수 없었다**. 영상별 결과 파일은 재시도마다 덮이므로 나중에 셀 수도 없다.
+속도 조절을 넣을지, 기다렸다 다시 누르면 되는지가 이 한 칸에 달려 있다.
+
+**결정**:
+- `gemini_messages._status_error`가 `error.details[]`의 첫 `QuotaFailure` 위반의 `quotaId`(영문·숫자·`_`·`-` 128자 이하)와
+  `quotaValue`(숫자 12자리 이하), `RetryInfo.retryDelay`(`"43s"` 꼴)의 초를 `GeminiAPIStatusError`의 `quota_id`·
+  `quota_value`·`retry_delay_seconds`로 싣는다. 모양이 다르면 버린다(서버 글자를 되뇌지 않는다 — 기존 `_token` 원칙),
+  키가 들어 있으면 버린다.
+- `task_runtime.provider_error`의 429 문구만 바뀐다(분류 `rate_limit`·불확실 False 그대로):
+  - 한도 이름에 `PerDay` → 「API 하루 요청 한도에 걸렸습니다(한도 N) · 태평양 시간 자정(한국 오후 4–5시)에 한도가 풀린 뒤
+    실패 구간을 다시 시도하세요 (한도 이름)」 — 하루 한도에 공급자의 몇십 초 대기를 적지 않는다(오해를 부른다).
+  - `PerMinute` → 「API 분당 요청 한도에 걸렸습니다(한도 N) · K초쯤 뒤 …」(K = 대기 초 올림, 없으면 「잠시」).
+  - 그 밖의 이름 → 예전 문구 + 「(한도 이름)」. 이름이 없으면 예전 문구 그대로다(Claude·OpenAI 429도 그대로).
+- **재시도는 여전히 없다** — 읽은 대기 초는 문구에만 쓴다(D83 「429는 명시적 실패 기록」). 자동 재시도·요청 속도 조절은
+  이 기록으로 분당 한도가 확인된 뒤 따로 정한다(속도 상한은 공개된 한도를 `config`에 둔다 — 규칙 8).
+
+**근거**: 시험 `test_a_daily_quota_429_keeps_which_quota_and_its_limit`·`test_a_per_minute_quota_429_says_to_wait_the_suggested_delay`·
+`test_odd_quota_details_are_dropped_not_echoed`(합성 픽스처 `error_429_quota_day.json`·`error_429_quota_minute.json` — 모양은
+Google `google.rpc.QuotaFailure`·`RetryInfo`), `test_task_runtime`의 문구 시험 넷. 1단계 전사 조각 실패(`asr_outcome.json`의
+`failure`)는 이 문구 그대로 남는다(`understanding.py`가 `provider_error(exc)[1]`을 적는다).

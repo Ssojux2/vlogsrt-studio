@@ -52,3 +52,35 @@ def test_413_is_a_request_format_rejection() -> None:
 def test_existing_categories_are_unchanged(status: int, category: str, uncertain: bool) -> None:
     code, _message, flag = provider_error(_status_error(status))
     assert (code, flag) == (category, uncertain)
+
+
+def _quota_error(quota_id: str, quota_value: str, delay: float | None) -> RuntimeError:
+    error = _status_error(429)
+    error.quota_id = quota_id  # type: ignore[attr-defined]
+    error.quota_value = quota_value  # type: ignore[attr-defined]
+    error.retry_delay_seconds = delay  # type: ignore[attr-defined]
+    return error
+
+
+def test_a_429_without_quota_detail_keeps_the_old_words() -> None:
+    assert provider_error(_status_error(429))[1] == "API 사용량 또는 요청 한도를 확인하세요"
+
+
+def test_a_daily_quota_points_at_the_pacific_midnight_reset() -> None:
+    error = _quota_error("GenerateRequestsPerDayPerProjectPerModel", "100", 43.0)
+    message = provider_error(error)[1]
+    assert message.startswith("API 하루 요청 한도에 걸렸습니다(한도 100)")
+    assert "태평양 시간 자정" in message
+    assert "43초" not in message  # 하루 한도에 몇십 초 대기는 오해를 부른다
+
+
+def test_a_per_minute_quota_rounds_the_suggested_wait_up() -> None:
+    error = _quota_error("GenerateRequestsPerMinutePerProjectPerModel", "", 0.2)
+    message = provider_error(error)[1]
+    assert message.startswith("API 분당 요청 한도에 걸렸습니다 ·")
+    assert "1초" in message and "(한도" not in message
+
+
+def test_an_unknown_quota_keeps_the_old_words_and_names_the_quota() -> None:
+    message = provider_error(_quota_error("ProjectSpendCap", "", None))[1]
+    assert message == "API 사용량 또는 요청 한도를 확인하세요 (ProjectSpendCap)"

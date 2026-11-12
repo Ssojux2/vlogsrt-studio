@@ -131,6 +131,63 @@ def test_429_is_a_typed_rate_limit_error_sent_once() -> None:
     assert (error.status_code, error.error_type) == (429, "RESOURCE_EXHAUSTED")
     assert len(opener.calls) == 1  # 재시도 없음 — 실패는 한 번의 명시적 시도다
     assert provider_error(error)[0] == "rate_limit"
+    assert (error.quota_id, error.quota_value, error.retry_delay_seconds) == ("", "", None)
+
+
+def _rate_limited(fixture: str) -> GeminiAPIStatusError:
+    opener = opener_with(status=429, body=_fixture_bytes(fixture))
+    with pytest.raises(GeminiAPIStatusError) as info:
+        post_generate_content(client_with(opener), MODEL, BODY)
+    assert len(opener.calls) == 1  # 한도 칸을 읽어도 재시도는 없다
+    return info.value
+
+
+def test_a_daily_quota_429_keeps_which_quota_and_its_limit() -> None:
+    error = _rate_limited("error_429_quota_day.json")
+    assert error.quota_id == "GenerateRequestsPerDayPerProjectPerModel"
+    assert (error.quota_value, error.retry_delay_seconds) == ("100", 43.0)
+    code, message, uncertain = provider_error(error)
+    assert (code, uncertain) == ("rate_limit", False)
+    assert "하루 요청 한도" in message and "100" in message
+    assert "GenerateRequestsPerDayPerProjectPerModel" in message
+
+
+def test_a_per_minute_quota_429_says_to_wait_the_suggested_delay() -> None:
+    error = _rate_limited("error_429_quota_minute.json")
+    assert error.quota_id == "GenerateRequestsPerMinutePerProjectPerModel"
+    assert (error.quota_value, error.retry_delay_seconds) == ("10", 12.4)
+    code, message, _uncertain = provider_error(error)
+    assert code == "rate_limit"
+    assert "분당 요청 한도" in message and "10" in message and "13초" in message
+
+
+def _quota_body(violation: object, retry_delay: object) -> bytes:
+    details = [
+        {"@type": "type.googleapis.com/google.rpc.QuotaFailure", "violations": [violation]},
+        {"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": retry_delay},
+    ]
+    error = {"code": 429, "status": "RESOURCE_EXHAUSTED", "message": "quota", "details": details}
+    return json.dumps({"error": error}).encode()
+
+
+@pytest.mark.parametrize(
+    ("violation", "retry_delay"),
+    [
+        ({"quotaId": "하루 한도", "quotaValue": "백"}, "43 seconds"),
+        ({"quotaId": "x" * 200, "quotaValue": "1" * 40}, "-3s"),
+        ({"quotaId": SECRET, "quotaValue": 100}, {"seconds": 43}),
+        ("not a violation", None),
+    ],
+)
+def test_odd_quota_details_are_dropped_not_echoed(violation: object, retry_delay: object) -> None:
+    opener = opener_with(status=429, body=_quota_body(violation, retry_delay))
+    with pytest.raises(GeminiAPIStatusError) as info:
+        post_generate_content(client_with(opener), MODEL, BODY)
+    error = info.value
+    assert (error.quota_id, error.quota_value, error.retry_delay_seconds) == ("", "", None)
+    message = provider_error(error)[1]
+    assert message == "API 사용량 또는 요청 한도를 확인하세요"
+    assert SECRET not in message
 
 
 def test_503_is_an_uncertain_connection_error_sent_once() -> None:

@@ -48,6 +48,14 @@ VERSION_SEGMENT = re.compile(r"v[0-9][a-z0-9]*")
 STATUS_TOKEN = re.compile(r"[A-Z][A-Z0-9_]{0,63}")
 """오류 문면에 싣는 공급자 상태·까닭의 모양 — 서버 글자를 그대로 되뇌지 않는다(대문자 토큰만)."""
 ERROR_INFO_TYPE = "type.googleapis.com/google.rpc.ErrorInfo"
+QUOTA_FAILURE_TYPE = "type.googleapis.com/google.rpc.QuotaFailure"
+RETRY_INFO_TYPE = "type.googleapis.com/google.rpc.RetryInfo"
+QUOTA_ID_TOKEN = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,127}")
+"""429가 짚은 한도 이름의 모양(`GenerateRequestsPerDayPerProjectPerModel`) — 영문·숫자·`_`·`-`만.
+분당·하루 한도를 가르는 유일한 근거라 남긴다(D111). 모양이 다르면 버린다."""
+QUOTA_VALUE_TOKEN = re.compile(r"[0-9]{1,12}")
+RETRY_DELAY_TOKEN = re.compile(r"[0-9]{1,6}(\.[0-9]{1,9})?s")
+"""`RetryInfo.retryDelay`의 JSON 꼴(protobuf Duration — `"43s"`·`"12.4s"`)."""
 
 Opener = Callable[[urllib.request.Request, float], Any]
 """(요청, 시간 한도) → 응답. 시험은 가짜를 주입하고, 실제는 리다이렉트를 끈 opener다."""
@@ -59,14 +67,31 @@ class GeminiAPIStatusError(RuntimeError):
     `error_type`은 Google 오류 본문의 `error.status`(`RESOURCE_EXHAUSTED` 따위), `reason`은
     `error.details[]`의 `ErrorInfo.reason`(`API_KEY_INVALID` 따위)이다 — 키가 틀리면 Google은
     401이 아니라 400을 돌려주므로 분류(`provider_error`)가 이 칸을 본다.
+
+    429는 `QuotaFailure`의 첫 위반 한도 이름(`quota_id`)·한도 값(`quota_value`)과 `RetryInfo`의
+    대기 초(`retry_delay_seconds`)를 싣는다 — 분당 한도인지 하루 한도인지 기록에 남긴다(D111).
+    재시도에는 쓰지 않는다.
     """
 
-    def __init__(self, status_code: int, error_type: str, reason: str, message: str) -> None:
+    def __init__(
+        self,
+        status_code: int,
+        error_type: str,
+        reason: str,
+        message: str,
+        *,
+        quota_id: str = "",
+        quota_value: str = "",
+        retry_delay_seconds: float | None = None,
+    ) -> None:
         detail = f": {message}" if message else ""
         super().__init__(f"Gemini API {status_code} {error_type}{detail}")
         self.status_code = status_code
         self.error_type = error_type
         self.reason = reason
+        self.quota_id = quota_id
+        self.quota_value = quota_value
+        self.retry_delay_seconds = retry_delay_seconds
 
 
 class GeminiAPITimeoutError(RuntimeError):
@@ -242,6 +267,7 @@ def _parsed(raw: bytes) -> dict[str, Any]:
 def _status_error(status: int, raw: bytes, client: GeminiClient) -> GeminiAPIStatusError:
     """오류 본문에서 상태·까닭·메시지만 꺼낸다 — 모양이 다르면 본문을 되뇌지 않는다."""
     error_type, reason, message = UNPARSED_ERROR, "", ""
+    quota_id, quota_value, delay = "", "", None
     try:
         document = json.loads(raw)
     except ValueError:
@@ -250,9 +276,22 @@ def _status_error(status: int, raw: bytes, client: GeminiClient) -> GeminiAPISta
         error = document["error"]
         error_type = _token(error.get("status")) or error_type
         message = str(error.get("message") or "")
-        reason = _error_reason(error.get("details"))
+        details = error.get("details")
+        reason = _error_reason(details)
+        quota_id, quota_value = _quota_failure(details)
+        delay = _retry_delay(details)
     message = env.redact_secrets(message, secrets=(client.api_key,))[:ERROR_MESSAGE_LIMIT]
-    return GeminiAPIStatusError(status, error_type, reason, message)
+    if client.api_key and client.api_key in quota_id:
+        quota_id = ""
+    return GeminiAPIStatusError(
+        status,
+        error_type,
+        reason,
+        message,
+        quota_id=quota_id,
+        quota_value=quota_value,
+        retry_delay_seconds=delay,
+    )
 
 
 def _token(value: object) -> str:
@@ -262,9 +301,39 @@ def _token(value: object) -> str:
 
 def _error_reason(details: object) -> str:
     """`error.details[]`에서 첫 `ErrorInfo`의 `reason` — 없거나 모양이 다르면 빈 글자다."""
+    detail = _detail(details, ERROR_INFO_TYPE)
+    return _token(detail.get("reason")) if detail is not None else ""
+
+
+def _detail(details: object, kind: str) -> dict[str, Any] | None:
+    """`error.details[]`에서 `@type`이 `kind`인 첫 항목 — 없거나 모양이 다르면 None."""
     if not isinstance(details, list):
-        return ""
+        return None
     for detail in details:
-        if isinstance(detail, dict) and detail.get("@type") == ERROR_INFO_TYPE:
-            return _token(detail.get("reason"))
-    return ""
+        if isinstance(detail, dict) and detail.get("@type") == kind:
+            return detail
+    return None
+
+
+def _quota_failure(details: object) -> tuple[str, str]:
+    """첫 `QuotaFailure` 위반의 (한도 이름, 한도 값) — 모양이 다른 칸은 빈 글자다."""
+    failure = _detail(details, QUOTA_FAILURE_TYPE)
+    violations = failure.get("violations") if failure is not None else None
+    if not isinstance(violations, list) or not violations or not isinstance(violations[0], dict):
+        return "", ""
+    quota_id, quota_value = violations[0].get("quotaId"), violations[0].get("quotaValue")
+    return (
+        quota_id if isinstance(quota_id, str) and QUOTA_ID_TOKEN.fullmatch(quota_id) else "",
+        quota_value
+        if isinstance(quota_value, str) and QUOTA_VALUE_TOKEN.fullmatch(quota_value)
+        else "",
+    )
+
+
+def _retry_delay(details: object) -> float | None:
+    """`RetryInfo.retryDelay`(`"43s"`)의 초 — 모양이 다르면 None."""
+    info = _detail(details, RETRY_INFO_TYPE)
+    delay = info.get("retryDelay") if info is not None else None
+    if not isinstance(delay, str) or not RETRY_DELAY_TOKEN.fullmatch(delay):
+        return None
+    return float(delay[:-1])
