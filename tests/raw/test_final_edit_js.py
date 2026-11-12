@@ -209,6 +209,11 @@ const out = {};
   run("save");
   await new Promise((r) => setTimeout(r, 10));
   out.firstSave = [saves[0].force, saves[0].baseRevision, saves[0].doc.clips, S.dirty];
+  // 저장된 깨끗한 문서의 재그리기(같은 리비전) — 문서와 되돌리기 기록을 지킨다.
+  const saved = Object.assign({}, model.edit, { revision: 1 });
+  holderText = JSON.stringify(Object.assign({}, model, { epoch: "e1b", edit: saved }));
+  watcher();
+  out.cleanRerender = [S.doc.clips, S.history.past.length];
   // 같은 초안의 새 모델(그라디오 재그리기) — 편집 중이면 로컬 문서를 지킨다.
   run("undo");
   holderText = JSON.stringify(Object.assign({}, model, { epoch: "e2" }));
@@ -259,6 +264,7 @@ def test_app_boot_save_conflict_and_stale_states(tmp_path: Path) -> None:
     assert result == {
         "afterBlade": [[[0, 30], [30, 300]], True, 1],
         "firstSave": [False, 0, [[0, 30], [30, 300]], False],  # ⌘S는 덮어쓰지 않는다
+        "cleanRerender": [[[0, 30], [30, 300]], 1],
         "keptLocal": [[[0, 300]], True, True],
         "conflict": ["conflict", False],
         "forced": [True, 8, None, False],

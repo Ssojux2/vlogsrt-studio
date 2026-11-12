@@ -297,7 +297,8 @@ class FinalEditPanel:
         signature = self.owner._signature_state
         seen = gr.State(None)
         outputs = [tabs, self.block, self.open_button, seen]
-        started.then(self.arm, [signature, seen], seen, show_progress="hidden")
+        # 성공한 누름에서만 — 오류로 끝난 누름은 옛 작업을 무장하지 않는다.
+        started.success(self.arm, [signature, seen], seen, show_progress="hidden")
         timer.tick(
             self.switch_tick, [signature, seen], outputs, queue=False, show_progress="hidden"
         )
@@ -314,8 +315,14 @@ class FinalEditPanel:
         if root is None or not signature or signature != self.owner._signature_for(root):
             return state
         latest = self.owner.raw.latest_job(root, self.export_job_kind)
-        if latest is not None and latest.status not in JOB_ENDED - {JOB_SUCCEEDED}:
-            state["armed"] = latest.job_id
+        if latest is None or latest.status in JOB_ENDED - {JOB_SUCCEEDED}:
+            return state
+        # 새 작업을 걸지 않고 끝난 누름(닫는 중 등)이 지난 초안으로 탭을 넘기지 않게 — 틱이 이미
+        # 끝난 것으로 본 작업이나, 틱이 아직 아무것도 못 본 때의 끝난 작업은 무장하지 않는다.
+        known = state.get("key")
+        if latest.status in JOB_ENDED and (not known or known[0] == latest.job_id):
+            return state
+        state["armed"] = latest.job_id
         return state
 
     def switch_tick(self, signature: str | None, seen: dict[str, Any] | None) -> tuple[Any, ...]:

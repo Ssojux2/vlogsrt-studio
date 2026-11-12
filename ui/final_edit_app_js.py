@@ -95,7 +95,8 @@ APP_JS = r"""
     var same = S.exportId === edit.exportId;
     if (!same && S.dirty && S.exportId) { saveNow(false); }
     S.settings = edit.settings;
-    if (!(same && keepLocal && S.dirty && S.doc)) {
+    var unchanged = same && S.doc && edit.revision === S.baseRevision;
+    if (!(same && keepLocal && S.doc && (S.dirty || unchanged))) {
       S.doc = docFrom(edit);
       S.baseRevision = edit.revision;
       S.dirty = false;
@@ -114,7 +115,8 @@ APP_JS = r"""
   }
 
   // ─── 문서 바꾸기 · 되돌리기 ─────────────────────────────────────
-  function refresh() {
+  // light: 드래그 중 — 캔버스·오버레이만(목록·인스펙터·도구 막대는 놓을 때 한 번).
+  function refresh(light) {
     S.proj = FE.project(S.doc);
     var warns = {};
     FE.warnings(S.doc, S.settings, S.proj).forEach(function (w) {
@@ -122,6 +124,7 @@ APP_JS = r"""
     });
     S.warns = warns;
     if (S.playhead > total()) { S.playhead = total(); }
+    if (light) { paintPlayhead(); return; }
     paintAll();
   }
   function apply(label, fn, key) {
@@ -255,9 +258,10 @@ APP_JS = r"""
     if (S.playhead >= total()) { seek(0); }
     v.playbackRate = rate;
     S.playing = true;
+    S.loopGen = (S.loopGen || 0) + 1;
     var started = v.play();
     if (started && started.catch) { started.catch(function () { S.playing = false; }); }
-    frameLoop();
+    frameLoop(S.loopGen);
   }
   function stopReverse() {
     if (S.reverseTimer) { clearInterval(S.reverseTimer); S.reverseTimer = null; }
@@ -268,19 +272,23 @@ APP_JS = r"""
     stopReverse();
     S.playing = false;
     S.stopAt = null;
+    S.loopGen = (S.loopGen || 0) + 1;
   }
-  function frameLoop() {
+  // 루프는 재생마다 하나 — 세대가 바뀌면(다시 재생·멈춤) 옛 루프는 조용히 끝난다.
+  function frameLoop(gen) {
     var v = video();
-    if (!v || !S.playing) { return; }
+    if (!v || !S.playing || gen !== S.loopGen) { return; }
     if (v.requestVideoFrameCallback) {
       v.requestVideoFrameCallback(function (now, meta) {
+        if (gen !== S.loopGen) { return; }
         onFrame(Math.round(meta.mediaTime / fd()));
-        frameLoop();
+        frameLoop(gen);
       });
     } else {
       requestAnimationFrame(function () {
+        if (gen !== S.loopGen) { return; }
         onFrame(Math.floor(v.currentTime / fd()));
-        frameLoop();
+        frameLoop(gen);
       });
     }
   }
@@ -1048,7 +1056,6 @@ APP_JS = r"""
       return { kind: "scrub" };
     }
     selectCue(hit.id, false);
-    if (ev.detail >= 2) { focusText(); return null; }
     var cue = S.doc.cues[FE.cueIndex(S.doc, hit.id)];
     return { kind: hit.edge ? "cue-" + hit.edge : "cue-move", id: hit.id, cue: cue,
       startTicks: hit.cue[1] };
@@ -1062,7 +1069,7 @@ APP_JS = r"""
     var next = null;
     try { next = dragDoc(drag, x); }
     catch (err) { if (!FE.isError(err)) { throw err; } }
-    if (next && next !== S.doc) { S.doc = next; refresh(); }
+    if (next && next !== S.doc) { S.doc = next; refresh(true); }
   }
   function dragDoc(drag, x) {
     var base = drag.base;
@@ -1121,6 +1128,13 @@ APP_JS = r"""
     }
     c.style.cursor = cursor;
   }
+  function onDoubleClick(ev) {
+    if (!S.doc) { return; }
+    var rect = canvas().getBoundingClientRect();
+    if (ev.clientY - rect.top < lanes().waveTop) { return; }
+    var hit = hitCue(ev.clientX - rect.left);
+    if (hit) { selectCue(hit.id, false); focusText(); }
+  }
   function onWheel(ev) {
     if (!S.doc) { return; }
     ev.preventDefault();
@@ -1155,6 +1169,7 @@ APP_JS = r"""
       c.addEventListener("pointerup", onPointerUp);
       c.addEventListener("pointercancel", onPointerUp);
       c.addEventListener("wheel", onWheel, { passive: false });
+      c.addEventListener("dblclick", onDoubleClick);
     }
     S.rootEl.addEventListener("click", onClick);
     S.rootEl.addEventListener("change", onChange);

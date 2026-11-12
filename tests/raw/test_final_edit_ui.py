@@ -128,6 +128,21 @@ def test_switch_only_when_the_armed_job_succeeds(
     assert panel.switch_tick(signature, seen) == (gr.skip(),) * 4
 
 
+def test_a_click_that_starts_no_new_job_does_not_arm(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """닫는 중처럼 새 작업 없이 끝난 누름 — 지난 초안의 성공으로 탭을 넘기지 않는다."""
+    server, root, signature = _server(tmp_path)
+    panel = server._final_edit
+    _plant(server, root)
+    _jobs(monkeypatch, server, [_job("old", "succeeded")])
+    assert "armed" not in panel.arm(signature, {})  # 틱이 아직 아무것도 못 봤다
+    _tabs, _block, _button, seen = panel.switch_tick(signature, None)
+    assert "armed" not in panel.arm(signature, seen)  # 틱이 이미 끝난 것으로 본 작업
+    _jobs(monkeypatch, server, [_job("fast", "succeeded")])
+    assert panel.arm(signature, seen)["armed"] == "fast"  # 틱 사이에 끝난 새 작업은 무장
+
+
 def test_failed_or_foreign_jobs_do_not_switch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -210,6 +225,7 @@ def test_blocks_wire_the_tabs_and_the_switch(tmp_path: Path, local_socket: None)
     (armed,) = [d for d in deps if fns[d["id"]] == panel.arm]
     started = [d for d in deps if fns[d["id"]] == server.render_export_view]
     assert armed["trigger_after"] == started[0]["id"]
+    assert armed["trigger_only_on_success"] is True  # 오류로 끝난 누름은 무장하지 않는다
     (opened,) = [d for d in deps if fns[d["id"]] == panel.open_view]
     assert opened["outputs"] == [tabs_id, panel.block._id]
     views = [d for d in deps if fns[d["id"]] == panel.view]
