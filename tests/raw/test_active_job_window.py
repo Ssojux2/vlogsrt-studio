@@ -25,7 +25,7 @@ from vlogsrt.project.raw import commands as raw_commands
 from vlogsrt.project.raw import service as raw_service
 from vlogsrt.project.raw import visual_review
 from vlogsrt.project.raw.jobs import JobStore
-from vlogsrt.project.raw.models import JobRecord
+from vlogsrt.project.raw.models import JobHandle, JobRecord
 from vlogsrt.project.raw.review_workspace import ReviewWorkspaceFacade
 from vlogsrt.project.raw.workspace import RawWorkspace
 
@@ -185,11 +185,12 @@ def test_source_preview_prepares_only_the_pages_holding_the_chosen_source(
     assert visual_review.pages_with_sources(head, (chosen,)) == (2,)  # type: ignore[arg-type]
     assert visual_review.pages_with_sources(head, ()) == (1, 2, 3)  # type: ignore[arg-type]
     submitted: list[str] = []
-    monkeypatch.setattr(
-        service,
-        "submit_job",
-        lambda _root, _kind, fingerprint, _body, **_: submitted.append(fingerprint),
-    )
+
+    def submit(_root: Path, _kind: str, fingerprint: str, _body: Any, **_: Any) -> JobHandle:
+        submitted.append(fingerprint)
+        return JobHandle(job_id=f"job_{len(submitted)}", reattached=False)
+
+    monkeypatch.setattr(service, "submit_job", submit)
     monkeypatch.setattr(service, "wait_child_job", lambda *_args: None)
     context = SimpleNamespace(check_cancel=lambda: None)
     service._prepare_preview_pages(root, object(), head, (chosen,), context)  # type: ignore[arg-type]

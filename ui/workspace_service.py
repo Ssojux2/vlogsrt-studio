@@ -1807,6 +1807,12 @@ class RawWorkspaceUi:
         self._root: Path | None = None
         self._selection_lock = threading.Lock()
         self._quick: dict[str, Any] = {}
+        # 영상 바꾸기 — 누른 차례(들어온 순서)와 바꾸는 문. 앞 클릭이 늦게 문을 지나도 마지막
+        # 클릭을 덮지 않는다. 보는 영상의 미리보기 작업(작업공간, 영상, 작업)은 다른 영상을
+        # 고르면 멈춘다(무료 로컬 — 분석은 멈추지 않는다).
+        self._view_click_serial = 0
+        self._view_switch_lock = threading.Lock()
+        self._view_preview: tuple[Path, str, str] | None = None
         self._quick_tasks: dict[str, dict[str, Any]] = {}
         self._retired_quick_tokens: set[str] = set()
         # 승인된 분석의 입장 — 대기열 머리부터, 동시에 도는 수가 한도 안일 때만 들어간다(D49).
@@ -2841,7 +2847,7 @@ class RawWorkspaceUi:
                     return
                 self._activate_quick(existing, asset_ids[0] if asset_ids else None)
                 if asset_ids:
-                    self.raw.start_source_preview(root, asset_ids=(asset_ids[0],))
+                    self._start_view_preview(root, asset_ids[0])
                 if existing.get("revision") and existing.get("stage") in (
                     "추천 구간 준비 완료",
                     "부분 완료 · 확인 필요",
@@ -2878,9 +2884,10 @@ class RawWorkspaceUi:
                 if not ids:
                     raise raw_service.RawWorkspaceError("선택 영상의 준비가 끝나지 않았습니다")
                 self._quick_update(token, asset_ids=ids)
-                if activate:
+                if activate and self._quick is state:
+                    # 그 사이 다른 영상을 골랐으면 이 영상의 미리보기는 걸지 않는다 — 돌아오면 건다.
                     preview_id = str(state.get("view_source_id") or ids[0])
-                    preview = self.raw.start_source_preview(root, asset_ids=(preview_id,))
+                    preview = self._start_view_preview(root, preview_id)
                     self._quick_update(token, preview_job_id=preview.job_id)
                 cached = self.raw.cached_selection_analysis(root, ids)
                 if cached:
@@ -3501,16 +3508,19 @@ class RawWorkspaceUi:
     def _fan_out_library(
         self, root: Path, ids: tuple[str, ...], children: list, context: Any
     ) -> frozenset[str]:
-        selected = self._quick.get("view_source_id") or (self._quick.get("asset_ids") or ids)[0]
         for child in children:
             # 전체 분석 취소가 띄우는 도중에 와도 그다음 영상부터는 띄우지 않는다.
             context.check_cancel()
             self._start_quick(
                 root, (), asset_ids=child.asset_ids, approved_quote=child, activate=False
             )
-        active = self._task_for(root, (selected,))
-        if active:
-            self._activate_quick(active, selected)
+        # 보는 영상은 띄운 **뒤에** 읽는다 — 띄우는 동안 사람이 고른 영상을 시작할 때의 영상으로
+        # 되돌리지 않는다(재생 중이던 영상이 다른 영상으로 넘어가던 결함).
+        with self._view_switch_lock:  # 그 사이 든 클릭과 엇갈려 옛 영상을 고르지 않게
+            selected = self._quick.get("view_source_id") or (self._quick.get("asset_ids") or ids)[0]
+            active = self._task_for(root, (selected,))
+            if active:
+                self._activate_quick(active, selected)
         started = (self._task_for(root, child.asset_ids) for child in children)
         return frozenset(task["token"] for task in started if task is not None)
 
@@ -3562,9 +3572,46 @@ class RawWorkspaceUi:
             # 계획이 덮지 못한 영상(VFR, D68)은 재생·분석할 조각이 없다 — 「준비 중」으로 멈춰
             # 보이지 않게 까닭을 말하고 아무 작업도 걸지 않는다.
             raise gr.Error(f"이 영상은 {skipped[source_id].reason}입니다 — 재생·검토에서 빠집니다")
-        if self._quick.get("view_source_id") != source_id:
-            self._start_quick(root, (), asset_ids=(source_id,))
+        self._switch_view(root, source_id)
         return self._capcut_result(root, self._quick_status())
+
+    def _switch_view(self, root: Path, source_id: str) -> None:
+        """보는 영상을 바꾼다 — 마지막에 누른 영상만 바꾸고, 앞 영상의 미리보기 작업은 멈춘다.
+
+        요청은 함께 들 수 있다 — 들어온 차례를 먼저 받고 문 안에서 견준다. 그 사이 더 새 클릭이
+        들었으면 이 클릭은 영상을 바꾸지 않는다(앞 영상으로 갔다가 되돌아오는 깜빡임이 없다).
+        """
+        with self._selection_lock:
+            self._view_click_serial += 1
+            mine = self._view_click_serial
+        with self._view_switch_lock:
+            if mine != self._view_click_serial:
+                return
+            if self._quick.get("view_source_id") != source_id:
+                self._stop_view_preview(root, keep=source_id)
+                self._start_quick(root, (), asset_ids=(source_id,))
+
+    def _start_view_preview(self, root: Path, source_id: str) -> Any:
+        """보는 영상의 미리보기 작업을 걸고 기억한다 — 다른 영상을 고르면 `_stop_view_preview`."""
+        handle = self.raw.start_source_preview(root, asset_ids=(source_id,))
+        with self._selection_lock:
+            self._view_preview = (root, source_id, handle.job_id)
+        return handle
+
+    def _stop_view_preview(self, root: Path, keep: str) -> None:
+        """앞 영상의 미리보기 만들기를 멈춘다 — 무료 로컬 일이고 그 영상을 다시 보면 새로 건다.
+
+        분석·승인 작업은 건드리지 않는다(`_cancel_task`와 다르다 — 영상을 옮겨 다니는 것은 분석을
+        무르지 않는다). 이미 끝난 작업이면 취소 요청은 아무것도 바꾸지 않는다."""
+        with self._selection_lock:
+            held = self._view_preview
+            if held is None or held[0] != root or held[1] == keep:
+                return
+            self._view_preview = None
+        try:
+            self.raw.cancel_job(root, held[2])
+        except raw_service.RawWorkspaceError as error:
+            log.warn(f"앞 영상의 미리보기 작업을 멈추지 못했다: {held[2]} — {error}")
 
     def _quick_status(self) -> str:
         held = self._live_notice(self._snapshot_root())

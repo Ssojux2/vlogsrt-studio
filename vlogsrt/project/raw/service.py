@@ -2746,7 +2746,22 @@ class RawWorkspaceService:
                 return  # 고른 원본이 모두 덮지 못한 원본이다 — 빈 고름은 「모든 쪽」이라 멈춘다
             self._prepare_preview_pages(root, facade, head, wanted, context)
 
-        return self.submit_job(root, "source_preview", order.revision_id + repr(asset_ids), body)
+        return self.submit_past_cancel(
+            root, "source_preview", order.revision_id + repr(asset_ids), body
+        )
+
+    def submit_past_cancel(
+        self, root: Path, kind: str, input_fingerprint: str, run: Callable[[JobContext], None]
+    ) -> JobHandle:
+        """`submit_job`과 같되, 같은 지문의 활성 작업이 취소를 요청받은 중이면 그 뒤에 새로 건다.
+
+        멈추는 중인 작업에 다시 붙으면 아무것도 만들지 않고 끝난다 — 영상을 바꿨다가 곧바로 돌아온
+        미리보기가 그랬다(앞 영상의 미리보기는 영상을 바꾸면 멈춘다). 평소의 지문은 그대로다.
+        """
+        handle = self.submit_job(root, kind, input_fingerprint, run)
+        while handle.reattached and self.get_job(root, handle.job_id).cancellation_requested:
+            handle = self.submit_job(root, kind, f"{input_fingerprint}#after:{handle.job_id}", run)
+        return handle
 
     def _previewable(
         self, root: Path, head: ReviewRevision, asset_ids: tuple[str, ...]
@@ -2862,7 +2877,7 @@ class RawWorkspaceService:
 
             self.wait_child_job(
                 root,
-                self.submit_job(
+                self.submit_past_cancel(
                     root, "visual_prepare", f"{head.base_plan_id}:{page}:{asset_ids}", prepare_page
                 ),
                 context,

@@ -2571,7 +2571,9 @@ def _workbench_state(component_id: str, state_key: str) -> str:
         return String(text || "").replace(/`[^`]*`/g, "")
           .replace(/\\s+([.!?])/g, "$1").replace(/\\s{{2,}}/g, " ").trim();
       }}
-      function call(name, payload, note, onResponse) {{
+      function call(name, payload, note, onResponse, superseded) {{
+        // `superseded`(있으면)가 참이면 그 답은 더 새 요청에 밀린 답이다 — 화면·각주를 건드리지
+        // 않고 버린다(영상을 바꿔 누른 뒤 늦게 온 앞 영상의 답이 화면을 되돌리던 결함).
         // 사건의 신원은 **이 배선이 잡은 모델**(클로저)에서 온다 — 지금 문서의
         // 값으로 바꿔 다시 찍지 않는다. 재렌더 뒤 남아 있는 옛 클로저 사건은
         // 옛 epoch로 나가 응답이 조용히 버려진다(화면 효과 0, A5 실측).
@@ -2612,6 +2614,7 @@ def _workbench_state(component_id: str, state_key: str) -> str:
         if (!server || !server[name]) {{ msg("서버 함수가 없습니다: " + name); return; }}
         server[name](payload).then(function (res) {{
           if (lateRequest()) {{ dropped(); return; }}
+          if (superseded && superseded()) {{ return; }}
           if (!res) {{ msg("서버 응답이 비어 있습니다."); return; }}
           if (res.ok === false) {{
             // 신선한 요청의 진짜 오류다 — 공개 생산자의 오류 응답은 echoEpoch 없이
@@ -2644,6 +2647,7 @@ def _workbench_state(component_id: str, state_key: str) -> str:
           }}
         }}, function (err) {{
           if (lateRequest()) {{ dropped(); return; }}
+          if (superseded && superseded()) {{ return; }}
           msg("서버 오류입니다. " + (err && err.message ? err.message : String(err)));
         }});
       }}
@@ -4792,8 +4796,12 @@ VISUAL_BOOTSTRAP_JS = (
         if (cardId) {
           var chosen = findCard(cardId); selectCard(cardId, true);
           if (chosen && model.autoAnalyzeSelection && state.requestedSource !== chosen.sourceId) {
-            state.requestedSource = chosen.sourceId;
-            call('vl_select_source', {sourceId:chosen.sourceId, selectedId:cardId});
+            var wanted = chosen.sourceId;
+            state.requestedSource = wanted;
+            // 마지막에 누른 영상의 답만 산다 — 앞 영상의 늦은 답이 화면을 그 영상으로 되돌리고
+            // 마지막 영상의 답을 「다시 그려졌다」며 버리게 하지 않는다.
+            call('vl_select_source', {sourceId:wanted, selectedId:cardId}, undefined, undefined,
+              function () { return state.requestedSource !== wanted; });
           }
           return;
         }
