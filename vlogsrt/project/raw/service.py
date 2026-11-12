@@ -3891,6 +3891,16 @@ class RawWorkspaceService:
 
         return self.submit_job(root, RENDER_EXPORT_JOB_KIND, "render_export/draft", body)
 
+    def export_srt_again(self, root: Path) -> Any:
+        """「SRT만 다시 내보내기」(D115) — 마지막 초안 폴더에 지금 원본 자막으로 새 SRT를 쓴다.
+
+        영상은 다시 만들지 않고 보고서의 조각을 그대로 쓴다. 무료 로컬이고 짧아 작업으로 걸지
+        않는다.
+        """
+        from vlogsrt.project.raw import render_export
+
+        return render_export.export_srt_again(self, root)
+
     def has_render_export(self, root: Path) -> bool:
         """다 낸 초안(보고서가 있는 폴더)이 하나라도 있는가 — 파일만 본다(DB를 열지 않는다, W-46a).
 

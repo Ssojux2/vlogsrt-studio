@@ -57,6 +57,9 @@ REPORT_SCHEMA = "vlogsrt-render-export/v1"
 VIDEO_NAME = "draft.mp4"
 SRT_NAME = "draft.srt"
 """영상과 같은 이름(줄기)이라 편집기·플레이어가 옆 자막으로 바로 읽는다."""
+SRT_AGAIN_PREFIX = "draft-"
+"""「SRT만 다시 내보내기」(D115)의 새 이름 줄기 — `draft-<UTC 시각>.srt`(있으면 `_2`…).
+`draft.srt`는 덮지 않는다."""
 REPORT_NAME = "render_report.json"
 STAGING_NAME = "_staging"
 """한 번의 내보내기 안의 스테이징 — 조각·이은 영상·글을 다 만든 뒤에야 제 이름으로 낸다."""
@@ -105,6 +108,16 @@ class ExportResult:
     plan: render_plan.RenderPlan
     encoder: str
     seconds: float
+
+
+@dataclass(frozen=True, slots=True)
+class SrtAgainResult:
+    """「SRT만 다시 내보내기」(D115)가 쓴 SRT — 마지막 초안 폴더 안의 새 파일과 자막 수."""
+
+    folder: Path
+    srt: Path
+    counts: render_plan.CueCounts
+    cues: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -288,8 +301,14 @@ def _require_same_clock(
 
 
 def _cues(scope: _Scope, asset: SourceAsset) -> tuple[render_plan.SourceCue, ...]:
+    return _transcript_cues(scope.service, scope.root, asset)
+
+
+def _transcript_cues(
+    service: RawWorkspaceService, root: Path, asset: SourceAsset
+) -> tuple[render_plan.SourceCue, ...]:
     """사람이 고친 최신 원본 자막 — 다른 원본 내용에 묶인 자막은 쓰지 않고 거부한다."""
-    document = scope.service.source_transcript(scope.root, asset.asset_id)
+    document = service.source_transcript(root, asset.asset_id)
     if document is None:
         return ()
     if document.get("source_sha256") != asset.content_sha256:
@@ -678,6 +697,76 @@ def _facts(
     }
 
 
+# ── SRT만 다시 ────────────────────────────────────────────────────────────
+
+
+def export_srt_again(
+    service: RawWorkspaceService,
+    root: Path,
+    *,
+    now: Callable[[], datetime] = _utc_now,
+) -> SrtAgainResult:
+    """마지막 초안의 조각(보고서 `parts`)에 지금 원본 자막을 다시 얹어 SRT만 새로 쓴다(D115).
+
+    영상은 다시 만들지 않는다 — 계획을 다시 세우지 않고 보고서의 조각을 그대로 쓰므로 등급·검토가
+    그 뒤에 바뀌어도 `draft.mp4`와 시각이 맞는다. 새 파일(`draft-<시각>.srt`)로만 쓰고 `draft.srt`는
+    덮지 않는다. 조각의 원본이 사라졌거나 자막이 다른 원본 내용에 묶였으면 쓰지 않고 거부한다.
+    """
+    workspace: RawWorkspace = service.review_workspace_facade(root).workspace
+    folder = _latest_folder(workspace)
+    if folder is None:
+        raise RenderExportError(
+            "아직 내보낸 초안이 없다 — 「추천만 이어붙여 내보내기」를 먼저 하세요"
+        )
+    report = json.loads((folder / REPORT_NAME).read_text(encoding="utf-8"))
+    try:
+        parts = tuple(render_plan.part_from_document(row) for row in report["parts"])
+        total = render_plan.rational_from_document(report["total_seconds"])
+    except (KeyError, TypeError, ValueError) as error:
+        raise RenderExportError(f"{folder.name}의 {REPORT_NAME}을 읽지 못했다 — {error}") from error
+    transcripts = _part_transcripts(service, root, parts)
+    try:
+        cues, counts = render_plan.project_cues(transcripts, parts, total)
+    except render_plan.RenderPlanError as error:
+        raise RenderExportError(f"자막을 다시 얹지 못했다 — {error}") from error
+    target = _write_srt_again(folder, now(), render_plan.cues_srt_text(cues).encode("utf-8"))
+    log.info(f"SRT만 다시 냈다: {target} (자막 {len(cues)}장, 늘린 장 {counts.lengthened})")
+    return SrtAgainResult(folder, target, counts, len(cues))
+
+
+def _part_transcripts(
+    service: RawWorkspaceService, root: Path, parts: Sequence[render_plan.RenderPart]
+) -> dict[str, tuple[render_plan.SourceCue, ...]]:
+    """조각의 원본마다(조각 차례 = 촬영 시각 순) 지금 원본 자막 — 원본이 없으면 거부한다."""
+    assets = {asset.asset_id: asset for asset in service.list_source_assets(root)}
+    transcripts: dict[str, tuple[render_plan.SourceCue, ...]] = {}
+    for source_id in dict.fromkeys(part.source_id for part in parts):
+        asset = assets.get(source_id)
+        if asset is None:
+            raise RenderExportError(
+                f"초안의 원본 {source_id}이 작업공간에 없다 — 초안을 다시 만드세요"
+            )
+        transcripts[source_id] = _transcript_cues(service, root, asset)
+    return transcripts
+
+
+def _write_srt_again(folder: Path, moment: datetime, payload: bytes) -> Path:
+    """`draft-<시각>.srt` 새 파일 하나 — 있으면 덮지 않고 다음 번호. 쓰다 실패하면 걷는다."""
+    stamp = moment.astimezone(UTC).strftime(_STAMP)
+    for attempt in itertools.count(1):
+        stem = stamp if attempt == 1 else f"{stamp}_{attempt}"
+        target = folder / f"{SRT_AGAIN_PREFIX}{stem}.srt"
+        try:
+            _write_new(target, payload)
+        except FileExistsError:
+            continue
+        except BaseException:
+            target.unlink(missing_ok=True)
+            raise
+        return target
+    raise AssertionError("unreachable")
+
+
 # ── 읽기 ─────────────────────────────────────────────────────────────────
 
 
@@ -689,26 +778,45 @@ def _stamp_order(folder: Path) -> tuple[str, int]:
 def latest(workspace: RawWorkspace) -> dict[str, Any] | None:
     """가장 최근에 다 낸 초안(보고서가 있는 폴더)의 경로와 요약 — 화면의 결과 카드 재료. 읽기만
     한다."""
+    folder = _latest_folder(workspace)
+    if folder is None:
+        return None
+    report = json.loads((folder / REPORT_NAME).read_text(encoding="utf-8"))
+    return _summary(workspace, folder, report)
+
+
+def _latest_folder(workspace: RawWorkspace) -> Path | None:
+    """가장 최근에 다 낸 초안 폴더(보고서가 있다) — 없으면 None."""
     base = workspace.root / EXPORT_FOLDER
     if not base.is_dir():
         return None
     folders = sorted((p for p in base.iterdir() if p.is_dir()), key=_stamp_order, reverse=True)
-    for folder in folders:
-        report = folder / REPORT_NAME
-        if report.is_file():
-            return _summary(workspace, folder, json.loads(report.read_text(encoding="utf-8")))
-    return None
+    return next((folder for folder in folders if (folder / REPORT_NAME).is_file()), None)
+
+
+def newest_srt(folder: Path) -> Path:
+    """초안 폴더의 가장 새 SRT — 「SRT만 다시 내보내기」로 쓴 것이 있으면 그 가장 늦은 것(D115)."""
+    again = [
+        path
+        for path in folder.glob(f"{SRT_AGAIN_PREFIX}*.srt")
+        if path.is_file() and path.stem[len(SRT_AGAIN_PREFIX) :][:1].isdigit()
+    ]
+    if not again:
+        return folder / SRT_NAME
+    return max(again, key=lambda path: _stamp_order(Path(path.stem[len(SRT_AGAIN_PREFIX) :])))
 
 
 def _summary(workspace: RawWorkspace, folder: Path, report: Mapping[str, Any]) -> dict[str, Any]:
     video = folder / VIDEO_NAME
+    srt = newest_srt(folder)
     relative = video.relative_to(workspace.root).as_posix()
     media = {row.relative_path: row.file_id for row in workspace.list_media("artifact")}
     total = report.get("total_seconds") or {"num": 0, "den": 1}
     return {
         "folder": str(folder),
         "video": str(video),
-        "srt": str(folder / SRT_NAME),
+        "srt": str(srt),
+        "srt_again": srt.name != SRT_NAME,
         "report": str(folder / REPORT_NAME),
         "media_file_id": media.get(relative),
         "created_at": report.get("created_at"),

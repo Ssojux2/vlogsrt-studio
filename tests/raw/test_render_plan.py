@@ -12,6 +12,7 @@ from fractions import Fraction as F
 
 import pytest
 
+from vlogsrt.config import Config
 from vlogsrt.project.raw import render_plan as rp
 from vlogsrt.project.raw import tiering
 from vlogsrt.project.raw.config import (
@@ -36,6 +37,8 @@ from vlogsrt.project.raw.segment_review import (
 FD30 = F(1, 30)
 FD24 = F(1, 24)
 SETTINGS = RenderSettings(min_part_seconds=F(1), merge_gap_seconds=F(0))
+MIN_DURATION = F(17, 20)  # refine `min_duration` 0.85초 그대로(D115)
+MIN_GAP = F(2, 25)  # refine `min_gap` 0.08초 그대로
 
 
 def _tier(
@@ -521,11 +524,11 @@ def test_srt_text_uses_half_up_milliseconds_and_polished_text() -> None:
     plan = rp.build_plan([source], SETTINGS)
     assert rp.srt_text(plan) == (
         "1\n00:00:01,001 --> 00:00:02,000\n안녕하세요\n"
-        "\n2\n00:00:03,000 --> 00:00:03,000\n점\n"
+        "\n2\n00:00:03,000 --> 00:00:03,850\n점\n"
         "\n3\n00:00:04,000 --> 00:00:05,000\n첫 줄…\n둘째 줄\n"
     )
     counts = plan.cue_counts
-    assert (counts.zero_length, counts.empty, counts.kept) == (1, 1, 3)
+    assert (counts.zero_length, counts.lengthened, counts.empty, counts.kept) == (0, 1, 1, 3)
 
 
 def test_caption_text_matches_the_final_cut_export_polish() -> None:
@@ -550,8 +553,73 @@ def test_inverted_cues_are_kept_as_points_and_counted() -> None:
     source = _source(tiers=(_tier(0, 10),), cues=(_cue("u", 3, 2),))
     plan = rp.build_plan([source], SETTINGS)
     (cue,) = plan.cues
-    assert (cue.start, cue.end) == (F(3), F(3))
+    assert (cue.start, cue.end) == (F(3), F(3) + MIN_DURATION)  # 한 점 → 최소 길이(D115)
     assert plan.cue_counts.inverted == 1
+
+
+def test_zero_length_cues_are_lengthened_to_min_duration_and_counted() -> None:
+    """Final Cut은 길이 0인 큐에서 SRT 읽기를 멈춘다(D115) — 시작은 그대로, 끝만 늘린다."""
+    source = _source(
+        tiers=(_tier(0, 10),),
+        cues=(
+            _cue("free", 1, 1),
+            _cue("gap", 3, 3),
+            _cue("next", F(17, 5), 4),
+            _cue("tight", 5, 5),
+            _cue("close", F(101, 20), 6),
+            _cue("twin1", 7, 7),
+            _cue("twin2", 7, 7),
+            _cue("edge", F(49, 5), F(49, 5)),
+            _cue("short", 8, F(81, 10)),
+        ),
+    )
+    plan = rp.build_plan([source], SETTINGS)
+    ends = {c.utterance_id: c.end for c in plan.cues}
+    assert ends["free"] == 1 + MIN_DURATION
+    assert ends["gap"] == F(17, 5) - MIN_GAP  # 다음 큐 앞 min_gap에서 멈춘다
+    assert ends["tight"] == F(101, 20)  # min_gap을 둘 자리가 없으면 다음 큐 시작까지
+    assert ends["twin1"] == ends["twin2"] == 7 + MIN_DURATION  # 같은 시작끼리는 막지 않는다
+    assert ends["edge"] == plan.total_seconds  # 출력 끝을 넘지 않는다
+    assert ends["short"] == F(81, 10)  # 길이가 있는 큐는 그대로다
+    assert [c.start for c in plan.cues] == sorted(c.start for c in plan.cues)
+    assert {c.utterance_id: c.start for c in plan.cues}["gap"] == 3
+    counts = plan.cue_counts
+    assert (counts.lengthened, counts.zero_length) == (6, 0)
+    for cue in plan.cues:
+        assert 0 <= cue.start < cue.end <= plan.total_seconds
+
+
+def test_lengthening_uses_the_refine_values_exactly() -> None:
+    config = Config()
+    assert F(str(config.min_duration)) == MIN_DURATION
+    assert F(str(config.min_gap)) == MIN_GAP
+
+
+def test_cues_reproject_from_the_report_parts_byte_for_byte() -> None:
+    """「SRT만 다시 내보내기」(D115) — 보고서의 조각에 자막만 다시 얹으면 계획과 같은 SRT다."""
+    source = _source(
+        tiers=(_tier(0, 2, "yellow"), _tier(2, 5), _tier(5, 6, "yellow"), _tier(6, 10)),
+        cues=(
+            _cue("u1", 1, 3, "앞이 잘린다."),
+            _cue("u2", 4, 4, "점"),
+            _cue("u3", F(9, 2), F(13, 2), "틈을 넘는다"),
+        ),
+    )
+    plan = rp.build_plan([source, _kept("b", 3)], SETTINGS)
+    document = json.loads(json.dumps(rp.report_document(plan)))
+    parts = tuple(rp.part_from_document(row) for row in document["parts"])
+    assert parts == plan.parts
+    total = rp.rational_from_document(document["total_seconds"])
+    cues, counts = rp.project_cues({"a": source.cues, "b": ()}, parts, total)
+    assert cues == plan.cues
+    assert counts == plan.cue_counts
+    assert rp.cues_srt_text(cues) == rp.srt_text(plan)
+
+
+def test_reprojection_refuses_a_part_whose_source_has_no_transcript_entry() -> None:
+    plan = rp.build_plan([_kept("a", 3)], SETTINGS)
+    with pytest.raises(rp.RenderPlanError):
+        rp.project_cues({}, plan.parts, plan.total_seconds)
 
 
 # ── 보고서 ───────────────────────────────────────────────────────────────
@@ -577,7 +645,7 @@ def test_report_document_is_json_and_counts_everything() -> None:
     assert document["unreviewed_red_dropped"] == 1
     assert document["cue_counts"] == {
         "source": 2, "kept": 1, "clipped": 0, "split": 0, "dropped": 1,
-        "empty": 0, "inverted": 0, "zero_length": 0,
+        "empty": 0, "inverted": 0, "zero_length": 0, "lengthened": 0,
     }  # fmt: skip
     assert [p["reason"] for p in document["parts"]] == [
         rp.PART_AUTO_GREEN,

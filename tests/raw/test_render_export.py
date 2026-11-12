@@ -507,6 +507,31 @@ def test_an_export_in_short_pieces_keeps_the_plan_frames_and_srt(
     assert not list(result.folder.glob("part*"))
 
 
+def test_srt_again_writes_a_new_srt_beside_the_latest_draft_and_touches_nothing_else(
+    trip: Folder, exported: Exported
+) -> None:
+    """「SRT만 다시 내보내기」(D115) — 보고서 조각 + 지금 자막, 새 이름으로만, 영상은 그대로."""
+    latest = trip.service.latest_render_export(trip.root)
+    assert latest is not None and not latest["srt_again"]
+    folder = Path(latest["folder"])
+    before = {p.name: _identity(p) for p in folder.iterdir()}
+    later = datetime(2026, 10, 28, 5, 0, 0, tzinfo=UTC)
+    first = render_export.export_srt_again(trip.service, trip.root, now=lambda: later)
+    second = render_export.export_srt_again(trip.service, trip.root, now=lambda: later)
+    assert first.folder == folder
+    assert (first.srt.name, second.srt.name) == (
+        "draft-20261028T050000Z.srt", "draft-20261028T050000Z_2.srt",
+    )  # fmt: skip
+    assert (
+        first.srt.read_bytes() == (folder / "draft.srt").read_bytes()
+    )  # 자막이 같으면 같은 바이트
+    assert first.cues == len(timeline_srt.read(first.srt).cues) > 0
+    assert {p.name: _identity(p) for p in folder.iterdir() if p.name in before} == before
+    again = trip.service.latest_render_export(trip.root)
+    assert again is not None and again["srt"] == str(second.srt) and again["srt_again"]
+    assert render_export.newest_srt(exported.result.folder) == exported.result.srt
+
+
 def _cancel_once_a_part_exists(root: Path) -> Callable[[], None]:
     def check() -> None:
         if any((root / "export").glob("*/_staging/part*.mov")):

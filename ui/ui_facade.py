@@ -637,7 +637,8 @@ def _export_summary_lines(summary: Mapping[str, object]) -> list[str]:
             f'<p><a href="{src}" target="_blank" rel="noopener">초안 영상 새 탭에서 보기</a></p>'
             f'<video controls preload="metadata" src="{src}" aria-label="초안 영상"></video>'
         )
-    rows = (("영상", "video"), ("자막", "srt"), ("보고서", "report"))
+    subtitle = "자막 (다시 냄)" if summary.get("srt_again") else "자막"  # D115
+    rows = (("영상", "video"), (subtitle, "srt"), ("보고서", "report"))
     paths = "".join(
         f"<dt>{label}</dt><dd>{html.escape(str(summary.get(key) or ''))}</dd>"
         for label, key in rows

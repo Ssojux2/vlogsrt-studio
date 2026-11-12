@@ -520,7 +520,8 @@ SRT_ENGLISH_ID = "vl-srt-english"
 """「영어 SRT로 변환」 칸(W-63, D114) — 한국어 SRT 하나를 영어 SRT로 옮긴다. 내보내기와 따로다."""
 SRT_ENGLISH_PATH_LABEL = "영어로 옮길 한국어 SRT"
 SRT_ENGLISH_PATH_INFO = (
-    "비워 두면 마지막 초안의 draft.srt를 옮깁니다. 영어 SRT는 그 옆에 `<이름>.en.srt`로 생기고,"
+    "비워 두면 마지막 초안의 가장 새 SRT(draft.srt · SRT만 다시 낸 것)를 옮깁니다."
+    " 영어 SRT는 그 옆에 `<이름>.en.srt`로 생기고,"
     " 같은 이름의 다른 파일은 덮지 않습니다."
 )
 SRT_ENGLISH_BROWSE_LABEL = "SRT 고르기"
@@ -576,6 +577,8 @@ RENDER_EXPORT_STARTED_TEXT = (
 RENDER_EXPORT_ATTACHED_TEXT = "이미 초안을 만드는 중입니다 — 끝나면 결과 카드가 뜹니다."
 RENDER_EXPORT_OPEN_LABEL = "초안 폴더 열기"
 RENDER_EXPORT_OPEN_ID = "vl-export-open"
+RENDER_EXPORT_SRT_AGAIN_LABEL = "SRT만 다시 내보내기"
+RENDER_EXPORT_SRT_AGAIN_ID = "vl-export-srt-again"
 RENDER_EXPORT_CARD_ID = "vl-export-card"
 FOLDER_OPEN_JS = """() => {
     if (window.__vlDrawer) { window.__vlDrawer('project-tools', true); }
@@ -1902,6 +1905,7 @@ class RawWorkspaceUi:
         # 초안 결과 카드와 그 「초안 폴더 열기」(W-46a).
         self._export_card_html: gr.HTML | None = None
         self._export_open_button: gr.Button | None = None
+        self._export_srt_again_button: gr.Button | None = None
         self._fcp_role_dd: gr.Dropdown | None = None
         # 「영상 분석 모델」 칸과 상태 줄 — 작업공간이 바뀔 때마다 그 작업공간의 저장값으로 맞춘다.
         self._analysis_model_dd: gr.Dropdown | None = None
@@ -4592,6 +4596,13 @@ class RawWorkspaceUi:
                     size="sm",
                     elem_id=RENDER_EXPORT_OPEN_ID,
                 )
+                # 영상은 그대로 두고 지금 자막으로 SRT만 새로 쓴다(D115).
+                self._export_srt_again_button = gr.Button(
+                    RENDER_EXPORT_SRT_AGAIN_LABEL,
+                    visible=False,
+                    size="sm",
+                    elem_id=RENDER_EXPORT_SRT_AGAIN_ID,
+                )
                 self._srt_english_cell()
 
     def _initial_workbench_values(self) -> tuple[str, str]:
@@ -4744,10 +4755,12 @@ class RawWorkspaceUi:
         그려 「만드는 중」을 바로 보인다.
         """
         assert self._export_card_html is not None and self._export_open_button is not None
+        assert self._export_srt_again_button is not None
         assert self._draw_timer is not None  # `_wire_review_timers`가 먼저 만든다
         status = self._capcut_status
         shown = gr.State(None)
-        card = [self._export_card_html, self._export_open_button, shown]
+        again = self._export_srt_again_button
+        card = [self._export_card_html, self._export_open_button, again, shown]
         started = self._render_export_button.click(
             self.render_export_view,
             self._signature_state,
@@ -4767,6 +4780,13 @@ class RawWorkspaceUi:
             self.render_export_open_view, self._signature_state, status
         )
         self._report_activity(opened, status)
+        exported = again.click(
+            self.render_export_srt_again_view,
+            self._signature_state,
+            [self._export_card_html, status],
+            concurrency_limit=1,
+        )
+        self._report_activity(exported, status)
         self._draw_timer.tick(
             self.render_export_card_tick,
             [self._signature_state, shown],
@@ -4891,23 +4911,44 @@ class RawWorkspaceUi:
         return RENDER_EXPORT_ATTACHED_TEXT if handle.reattached else RENDER_EXPORT_STARTED_TEXT
 
     def render_export_card_tick(self, signature: str | None, shown: tuple | None) -> tuple:
-        """결과 카드 — (카드 글, 「초안 폴더 열기」, 새 열쇠). 열쇠가 같으면 보내지 않는다.
+        """결과 카드 — (카드 글, 「초안 폴더 열기」, 「SRT만 다시 내보내기」, 새 열쇠).
+        열쇠가 같으면 보내지 않는다.
 
         작업공간이 닫혔으면 카드를 비운다. 다른 작업공간을 보는 옛 탭은 건너뛴다.
         """
+        skip = (gr.skip(),) * 4
         root = self._snapshot_root()
         if root is None:
             if shown is None:
-                return gr.skip(), gr.skip(), gr.skip()
-            return "", gr.Button(visible=False), None
+                return skip
+            return "", gr.Button(visible=False), gr.Button(visible=False), None
         if not signature or signature != self._signature_for(root):
-            return gr.skip(), gr.skip(), gr.skip()
+            return skip
         latest = self.raw.latest_job(root, raw_service.RENDER_EXPORT_JOB_KIND)
         key = (signature, latest.job_id if latest else None, latest.status if latest else None)
         if key == shown:
-            return gr.skip(), gr.skip(), gr.skip()
+            return skip
         text, ready = self._render_export_card(root, latest)
-        return text, gr.Button(visible=ready), key
+        return text, gr.Button(visible=ready), gr.Button(visible=ready), key
+
+    def render_export_srt_again_view(self, signature: str | None) -> tuple[str, str]:
+        """「SRT만 다시 내보내기」(D115) — 마지막 초안 옆에 지금 자막으로 새 SRT.
+
+        돌려주는 것은 (카드, 활동 칸 답)이다.
+
+        영상은 다시 만들지 않는다(무료 로컬). 카드는 새 SRT 경로로 바로 다시 그린다.
+        """
+        closed = self._library_first_reply()
+        if closed is not None:
+            return gr.skip(), closed
+        root = self._require_current_selection(signature)
+        try:
+            written = self.raw.export_srt_again(root)
+        except raw_service.RawWorkspaceError as error:
+            raise gr.Error(str(error)) from error
+        latest = self.raw.latest_job(root, raw_service.RENDER_EXPORT_JOB_KIND)
+        card, _ready = self._render_export_card(root, latest)
+        return card, _srt_again_text(written)
 
     def _render_export_card(self, root: Path, latest: Any) -> tuple[str, bool]:
         """카드 글과 「초안 폴더 열기」를 보일지 — 마지막으로 다 낸 초안 + 도는 중·실패 줄."""
@@ -11624,6 +11665,17 @@ class RawWorkspaceUi:
                     break
                 remaining -= len(chunk)
                 yield chunk
+
+
+def _srt_again_text(written: Any) -> str:
+    """「SRT만 다시 내보내기」 결과 한 줄 — 쓴 경로 · 자막 수 · 늘린 장 · 남은 길이 0."""
+    counts = written.counts
+    text = f"SRT만 다시 냈습니다: `{written.srt}` — 자막 {written.cues}장"
+    if counts.lengthened:
+        text += f" · 길이 0이라 끝을 늘린 자막 {counts.lengthened}장"
+    if counts.zero_length:
+        text += f" · 늘릴 자리가 없어 길이 0으로 남은 자막 {counts.zero_length}장"
+    return text
 
 
 def _srt_english_text(facts: Mapping[str, Any]) -> str:

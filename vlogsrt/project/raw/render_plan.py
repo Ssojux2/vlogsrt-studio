@@ -27,16 +27,17 @@
 맞출 때는 누적 경계를 가장 가까운 시퀀스 프레임에 맞춰 오차가 쌓이지 않는다(D71 `_sequence_layout`).
 원본 끝에 닿은 조각만 남은 미디어로 내린다. 레이트가 다른 조각은 출력 길이가 원본 범위와 1프레임
 미만 다를 수 있다 — 렌더러는 `[start, end)` 밖을 읽지 않고 마지막 프레임을 붙잡아 채운다.
-자막은 조각에 겹치는 큐만 조각으로 자르고 그만큼 옮길 뿐이다 — `refine`의 `min_duration`은 적용하지
-않으므로 밀리초 반올림 뒤 길이 0인 큐도 남기고 센다. 글자는 Final Cut 보내기와 같은 조판 정리
-(D96 — 줄마다 `polish_text`)를 지난다.
+자막은 조각에 겹치는 큐만 조각으로 자르고 그만큼 옮긴다. 밀리초 반올림 뒤 길이 0인 큐만 시작은 두고
+끝을 `refine`의 `min_duration`까지 늘린다 — 다음(더 늦게 시작하는) 큐 앞 `min_gap`과 출력 끝에서
+멈추고, 늘린 장은 센다(D115 — Final Cut은 길이 0인 큐에서 SRT 읽기를 멈춘다). 글자는 Final Cut
+보내기와 같은 조판 정리(D96 — 줄마다 `polish_text`)를 지난다.
 """
 
 from __future__ import annotations
 
 import bisect
 import math
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from fractions import Fraction
 from typing import Any, TypeVar
@@ -285,8 +286,10 @@ class ProjectedCue:
 class CueCounts:
     """자막 투영에서 센 것 — `source = kept + dropped + empty`, 쓴 장 수 = `kept + split`.
 
-    `split`은 빠진 틈을 넘어 더 생긴 장 수, `clipped`는 잘린 장 수, `zero_length`는 밀리초 반올림
-    뒤 길이 0인 장 수(남긴다), `inverted`는 끝이 시작보다 앞이라 시작 한 점으로 본 줄 수다.
+    `split`은 빠진 틈을 넘어 더 생긴 장 수, `clipped`는 잘린 장 수, `inverted`는 끝이 시작보다
+    앞이라 시작 한 점으로 본 줄 수다. `lengthened`는 밀리초 반올림 뒤 길이 0이라 끝을 최소 길이
+    쪽으로 늘린 장 수(D115), `zero_length`는 늘릴 자리가 없어(출력 끝·바로 뒤 큐) 길이 0으로 남은
+    장 수다.
     """
 
     source: int = 0
@@ -297,6 +300,7 @@ class CueCounts:
     empty: int = 0
     inverted: int = 0
     zero_length: int = 0
+    lengthened: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -780,12 +784,11 @@ def _piece(cue: SourceCue, end: Fraction, part: RenderPart, text: str) -> Projec
 
 
 def _project_source(
-    source: RenderSource, parts: Sequence[RenderPart], config: Config
+    cues: Sequence[SourceCue], mine: Sequence[RenderPart], config: Config
 ) -> tuple[list[ProjectedCue], dict[str, int]]:
-    mine = [part for part in parts if part.source_id == source.source_id]
     pieces: list[ProjectedCue] = []
-    tally = dict.fromkeys(("source", "kept", "split", "dropped", "empty", "inverted"), 0)
-    for cue in source.cues:
+    tally = dict.fromkeys(_TALLY_KEYS, 0)
+    for cue in cues:
         tally["source"] += 1
         text = caption_text(cue.text, config)
         if not text.strip():
@@ -800,22 +803,78 @@ def _project_source(
     return pieces, tally
 
 
-def _project(sources: Sequence[RenderSource], parts: Sequence[RenderPart]) -> _Projection:
+_TALLY_KEYS = ("source", "kept", "split", "dropped", "empty", "inverted")
+
+
+def project_cues(
+    transcripts: Mapping[str, Sequence[SourceCue]],
+    parts: Sequence[RenderPart],
+    total_seconds: Fraction,
+) -> tuple[tuple[ProjectedCue, ...], CueCounts]:
+    """원본별 자막을 남긴 조각에 얹는다 — 계획과 「SRT만 다시 내보내기」(D115)가 함께 쓰는 한 길.
+
+    `transcripts`의 차례가 같은 시각 큐의 차례다. 조각의 원본이 `transcripts`에 없으면 거부한다
+    (자막 없는 원본은 빈 묶음으로 넘긴다 — 조용히 빠뜨리지 않는다).
+    """
+    missing = sorted({part.source_id for part in parts} - set(transcripts))
+    if missing:
+        raise RenderPlanError(f"자막을 얹을 원본이 없다: {', '.join(missing)}")
     config = Config()
     pieces: list[ProjectedCue] = []
-    totals = dict.fromkeys(("source", "kept", "split", "dropped", "empty", "inverted"), 0)
-    for source in sources:
-        found, tally = _project_source(source, parts, config)
+    totals = dict.fromkeys(_TALLY_KEYS, 0)
+    for source_id, cues in transcripts.items():
+        mine = [part for part in parts if part.source_id == source_id]
+        found, tally = _project_source(cues, mine, config)
         pieces += found
         for key, value in tally.items():
             totals[key] += value
-    ordered = tuple(sorted(pieces, key=lambda cue: (cue.start, cue.end, cue.part_index)))
+    ordered = sorted(pieces, key=lambda cue: (cue.start, cue.end, cue.part_index))
+    lengthened, count = _lengthen(ordered, total_seconds, config)
     counts = CueCounts(
-        clipped=sum(cue.clipped for cue in ordered),
-        zero_length=sum(_zero_length(cue) for cue in ordered),
+        clipped=sum(cue.clipped for cue in lengthened),
+        zero_length=sum(_zero_length(cue) for cue in lengthened),
+        lengthened=count,
         **totals,
     )
-    return _Projection(ordered, counts)
+    return lengthened, counts
+
+
+def _project(
+    sources: Sequence[RenderSource], parts: Sequence[RenderPart], total_seconds: Fraction
+) -> _Projection:
+    transcripts = {source.source_id: source.cues for source in sources}
+    cues, counts = project_cues(transcripts, parts, total_seconds)
+    return _Projection(cues, counts)
+
+
+def _lengthen(
+    ordered: Sequence[ProjectedCue], total_seconds: Fraction, config: Config
+) -> tuple[tuple[ProjectedCue, ...], int]:
+    """길이 0인 장(밀리초)의 끝만 `min_duration`까지 — 시작·차례·글자는 그대로다(D115).
+
+    다음으로 **더 늦게** 시작하는 장 앞 `min_gap`에서 멈추고(그럴 자리가 없으면 그 장의 시작까지),
+    출력 끝을 넘지 않는다. 같은 시각에 시작하는 장끼리는 막지 않는다 — 둘 다 길이 0으로 두면
+    Final Cut이 거기서 읽기를 멈춘다.
+    """
+    floor = Fraction(str(config.min_duration))
+    gap = Fraction(str(config.min_gap))
+    starts = [milliseconds_half_up(cue.start) for cue in ordered]
+    result: list[ProjectedCue] = []
+    count = 0
+    for index, cue in enumerate(ordered):
+        if not _zero_length(cue):
+            result.append(cue)
+            continue
+        end = min(cue.start + floor, total_seconds)
+        later = bisect.bisect_right(starts, starts[index])
+        if later < len(ordered):
+            following = ordered[later].start
+            room = following - gap
+            end = min(end, room if milliseconds_half_up(room) > starts[index] else following)
+        lengthened = replace(cue, end=max(end, cue.end))
+        count += not _zero_length(lengthened)
+        result.append(lengthened)
+    return tuple(result), count
 
 
 def _zero_length(cue: ProjectedCue) -> bool:
@@ -859,8 +918,9 @@ def build_plan(
         too_short += short
     sequence = _sequence(kept, settings)
     parts, padded = _parts(kept, sequence) if sequence is not None else ((), 0)
-    projection = _project([s for s in sources if excluded_reason(s) is None], parts)
     total = (parts[-1].output_start_frame + parts[-1].output_frames) if parts else 0
+    seconds = total * sequence.frame_duration if sequence is not None else Fraction(0)
+    projection = _project([s for s in sources if excluded_reason(s) is None], parts, seconds)
     plan = RenderPlan(
         parts=parts,
         dropped=tuple(dropped),
@@ -898,15 +958,42 @@ def _require_cues_inside(plan: RenderPlan) -> None:
 
 def srt_text(plan: RenderPlan) -> str:
     """계획의 자막 → SRT 글. 밀리초 반올림은 여기서 딱 한 번(half-up)이다."""
-    return _srt_blocks(plan, [cue.text for cue in plan.cues])
+    return cues_srt_text(plan.cues)
 
 
-def _srt_blocks(plan: RenderPlan, texts: Sequence[str]) -> str:
+def cues_srt_text(cues: Sequence[ProjectedCue]) -> str:
+    """투영한 자막 → SRT 글(번호는 1부터) — 계획 없이 다시 얹은 자막도 같은 바이트로 쓴다."""
     blocks = []
-    for number, (cue, text) in enumerate(zip(plan.cues, texts, strict=True), start=1):
+    for number, cue in enumerate(cues, start=1):
         timeline = f"{format_srt_time(cue.start)} --> {format_srt_time(cue.end)}"
-        blocks.append(f"{number}\n{timeline}\n{text}\n")
+        blocks.append(f"{number}\n{timeline}\n{cue.text}\n")
     return "\n".join(blocks)
+
+
+def rational_from_document(value: Mapping[str, Any]) -> Fraction:
+    """보고서의 유리수 칸(`{"num", "den"}`) → 값."""
+    return Fraction(int(value["num"]), int(value["den"]))
+
+
+def part_from_document(row: Mapping[str, Any]) -> RenderPart:
+    """보고서의 조각 한 줄 → 조각 — `_part_document`의 거꾸로(D115 「SRT만 다시 내보내기」)."""
+    return RenderPart(
+        index=int(row["index"]),
+        source_id=str(row["source_id"]),
+        start_frame=int(row["source_start_frame"]),
+        end_frame=int(row["source_end_frame"]),
+        start=rational_from_document(row["source_start"]),
+        end=rational_from_document(row["source_end"]),
+        output_start_frame=int(row["output_start_frame"]),
+        output_frames=int(row["output_frames"]),
+        output_start=rational_from_document(row["output_start"]),
+        output_end=rational_from_document(row["output_end"]),
+        reason=str(row["reason"]),
+        scale=bool(row["scale"]),
+        pad=bool(row["pad"]),
+        fps_convert=bool(row["fps_convert"]),
+        bridged_seconds=rational_from_document(row["bridged_seconds"]),
+    )
 
 
 def _rational(value: Fraction) -> dict[str, int]:

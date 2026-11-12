@@ -46,10 +46,12 @@ from ui.workspace_service import (  # noqa: E402
     LIBRARY_APPROVE_LABEL,
     RENDER_EXPORT_LABEL,
     RENDER_EXPORT_OPEN_LABEL,
+    RENDER_EXPORT_SRT_AGAIN_LABEL,
     TIER_CRITERIA_FIELDS,
     TIER_CRITERIA_LABEL,
     RawWorkspaceUi,
 )
+from vlogsrt.project.raw import render_export, render_plan  # noqa: E402
 from vlogsrt.project.raw import service as raw_service  # noqa: E402
 from vlogsrt.project.raw.models import IngestError  # noqa: E402
 
@@ -633,17 +635,18 @@ def test_the_card_tick_reads_the_latest_export_and_serves_its_media(
     server.create_workspace_view("초안", str(tmp_path / "workspace"))
     root = Path(server.workspace_root())
     signature = server.current_signature()
-    empty, button, key = server.render_export_card_tick(signature, None)
-    assert empty == "" and button.visible is False and key == (signature, None, None)
-    assert server.render_export_card_tick(signature, key) == (gr.skip(),) * 3
+    empty, button, again, key = server.render_export_card_tick(signature, None)
+    assert empty == "" and button.visible is False and again.visible is False
+    assert key == (signature, None, None)
+    assert server.render_export_card_tick(signature, key) == (gr.skip(),) * 4
     with pytest.raises(gr.Error, match="아직 내보낸 초안이 없습니다"):
         server.render_export_open_view(signature)
     folder = _plant_export(server, root, red=2)
-    card, button, key = server.render_export_card_tick(signature, None)  # 다시 연 화면
+    card, button, again, key = server.render_export_card_tick(signature, None)  # 다시 연 화면
     assert "8.2초" in card and "조각 4개" in card and "libx264" in card
     assert "확인하지 않은 비추천 구간 2곳이 빠졌습니다" in card and "VFR.MOV" in card
     assert str(folder / "draft.srt") in card and str(folder / "render_report.json") in card
-    assert button.visible is True
+    assert button.visible is True and again.visible is True
     media_id = server.raw.latest_render_export(root)["media_file_id"]
     assert media_id and f'src="/media/{media_id}"' in card
     client = TestClient(server.build_fastapi(mount_blocks=False), base_url="http://127.0.0.1")
@@ -652,10 +655,34 @@ def test_the_card_tick_reads_the_latest_export_and_serves_its_media(
     assert "열었습니다" in server.render_export_open_view(signature)
     assert opened == [folder.resolve()]
     # 같은 열쇠면 다시 보내지 않고, 닫으면 카드를 비운다.
-    assert server.render_export_card_tick(signature, key) == (gr.skip(),) * 3
+    assert server.render_export_card_tick(signature, key) == (gr.skip(),) * 4
     server._set_root(None)
     cleared = server.render_export_card_tick(signature, key)
-    assert cleared[0] == "" and cleared[2] is None
+    assert cleared[0] == "" and cleared[3] is None
+
+
+def test_srt_again_redraws_the_card_with_the_new_srt_and_says_what_it_wrote(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """「SRT만 다시 내보내기」(D115) — 카드의 자막 줄이 새 SRT로 바뀌고 늘린 장 수를 말한다."""
+    server = RawWorkspaceUi(state_path=tmp_path / "ui-state.json")
+    server.create_workspace_view("초안", str(tmp_path / "workspace"))
+    root = Path(server.workspace_root())
+    signature = server.current_signature()
+    folder = _plant_export(server, root, red=0)
+
+    def write_again(asked: Path) -> render_export.SrtAgainResult:
+        assert asked == root
+        target = folder / "draft-20261029T000000Z.srt"
+        target.write_text("1\n00:00:00,000 --> 00:00:00,850\n아\n", encoding="utf-8")
+        counts = render_plan.CueCounts(lengthened=2)
+        return render_export.SrtAgainResult(folder, target, counts, 1)
+
+    monkeypatch.setattr(server.raw, "export_srt_again", write_again)
+    card, said = server.render_export_srt_again_view(signature)
+    assert str(folder / "draft-20261029T000000Z.srt") in card and "자막 (다시 냄)" in card
+    assert "draft-20261029T000000Z.srt" in said and "끝을 늘린 자막 2장" in said
+    assert RENDER_EXPORT_SRT_AGAIN_LABEL == "SRT만 다시 내보내기"
 
 
 def test_the_export_step_is_done_once_a_draft_report_exists(tmp_path: Path) -> None:
