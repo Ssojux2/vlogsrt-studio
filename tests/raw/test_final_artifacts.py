@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
-from decimal import Decimal
 from fractions import Fraction
 from pathlib import Path
 
@@ -118,8 +117,6 @@ def make_plan(tmp_path: Path, *, revision: str = "a" * 64) -> CaptionRunPlan:
         workflow=RawWorkflowConfig(),
         engine=Config(),
         fingerprint="f" * 64,
-        estimated_cost_usd=Decimal("0.01"),
-        reserved_cost_usd=Decimal("0.01"),
     )
 
 

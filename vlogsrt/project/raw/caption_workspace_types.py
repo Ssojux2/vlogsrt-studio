@@ -140,11 +140,10 @@ class ModelLifecycle:
 
 
 @dataclass(frozen=True, slots=True)
-class RunEstimate:
-    """호출 없이 잰 실행 추정 — 모델·수명주기·청크·비용(§11.8·§14.3).
+class RunPreparation:
+    """호출 없이 잰 실행 준비 — 모델·수명주기·청크(§14.3). 비용은 재지 않는다(D110).
 
-    비용은 `Decimal` 문자열로 실는다(왕복이 손실 없어야 한다). 청크 시각은
-    정규화 시간축의 정확한 유리수다 — 원점 환산은 실행·검토 계층의 산술이다.
+    청크 시각은 정규화 시간축의 정확한 유리수다 — 원점 환산은 실행·검토 계층의 산술이다.
     """
 
     identity: RunIdentity
@@ -158,8 +157,6 @@ class RunEstimate:
     origin: Fraction
     extent_seconds: Fraction
     chunk_seconds: tuple[tuple[Fraction, Fraction], ...]
-    estimated_cost_usd: str
-    reserved_cost_usd: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -173,7 +170,6 @@ class ApprovalRecord:
     text_model: str
     timing_model: str
     settings_fingerprint: str
-    budget_usd: str
     note: str
     created_at: str
 

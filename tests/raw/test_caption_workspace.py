@@ -381,7 +381,7 @@ def test_noaudio_and_multiaudio_registration_is_honest(
     with pytest.raises(RegistrationNotReadyError):
         ws.run_now(silent, "run-1", timing_provider=timing, text_provider=text, settings=SETTINGS)
     with pytest.raises(RegistrationNotReadyError):
-        ws.estimate(silent, "run-1", settings=SETTINGS)
+        ws.prepare(silent, "run-1", settings=SETTINGS)
     assert timing.calls == [] and text.calls == []
 
     undecided = ws.register_final_video(dual_audio, source_id="d")
@@ -446,16 +446,15 @@ def test_reregistration_is_idempotent(stereo_delayed: Path, tmp_path: Path) -> N
 @needs_ffmpeg
 def test_estimate_is_local_and_fingerprint_bound(stereo_delayed: Path, tmp_path: Path) -> None:
     """추정은 제공자 없이 나오고 계획 지문과 같다 — 모델·수명주기·청크·비용까지."""
-    from decimal import Decimal
 
     workspace, _ = open_ws(tmp_path)
     ws = open_caption_workspace(workspace)
     reg = ws.register_final_video(stereo_delayed, source_id="final_1")
-    estimate = ws.estimate(reg, "run-1", settings=SETTINGS)
+    estimate = ws.prepare(reg, "run-1", settings=SETTINGS)
     assert estimate.chunk_count == 2
     assert estimate.chunk_seconds[0] == (Fraction(0), Fraction(3))
     assert estimate.chunk_seconds[-1][1] == Fraction(reg.sample_count or 0, 16000)
-    assert estimate.channels == 2 and Decimal(estimate.estimated_cost_usd) > 0
+    assert estimate.channels == 2 and not hasattr(estimate, "estimated_cost_usd")
     assert estimate.text_model == RawWorkflowConfig().models.text_model
     assert estimate.timing_model == RawWorkflowConfig().models.timing_model
     assert {item.role for item in estimate.lifecycle} == {
@@ -498,7 +497,6 @@ def test_run_requires_stored_fingerprint_bound_approval(
             text_model=forged_values.text_model,
             timing_model=forged_values.timing_model,
             settings_fingerprint=forged_values.settings_fingerprint,
-            budget_usd=str(forged_values.budget_usd),
             note="위조 또는 낡은 승인",
             created_at=BEFORE.isoformat(),
         )

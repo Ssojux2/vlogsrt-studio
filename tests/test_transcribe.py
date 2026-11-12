@@ -37,7 +37,6 @@ from vlogsrt.transcribe import (
     UnsupportedTranscriptionRequest,
     build_spine,
     create_vision_client,
-    estimate_cost,
     get_transcriber,
     parse_segments,
     request_luna_vision,
@@ -188,10 +187,6 @@ def test_an_empty_chunk_warns_but_does_not_stop_the_run() -> None:
     spine = build_spine(responses)
     assert [segment.start for segment in spine] == [0.0, 1.5, 200.0, 201.5]
     assert [segment.id for segment in spine] == [0, 1, 2, 3]  # 번호에 구멍이 없다
-
-
-def test_cost_estimate_matches_documented_ballpark() -> None:
-    assert estimate_cost(300.0, Config()) == pytest.approx(0.03, abs=0.005)
 
 
 def test_save_fixture_writes_chunk_shape(tmp_path: Path) -> None:

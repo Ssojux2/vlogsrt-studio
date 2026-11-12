@@ -105,6 +105,8 @@ class Config:
     api_max_retries: int = 4
     api_backoff_base: float = 2.0
     cost_per_minute: float = 0.006
+    # 쓰지 않는다(D110 — 비용 추정을 지웠다). 설정 지문(`cfg.to_dict()`, 파생 계층 경계 캐시 열쇠)에
+    # 실리므로 지우면 그 열쇠가 모두 바뀐다 — 바이트를 지키려고 남긴다.
 
     # ─── 오디오 전처리 ───────────────────────────────────────
     sample_rate: int = 16000

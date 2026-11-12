@@ -1,4 +1,4 @@
-"""A4 진단 CLI(`vlogsrt media analyze`) — 견적·오프라인 재생 분석·계획 연결.
+"""A4 진단 CLI(`vlogsrt media analyze`) — 오프라인 재생 분석·계획 연결(견적은 없다, D110).
 
 실제 ffmpeg 합성 미디어로 init → import → analyze의 흐름을 돈다. 어떤 플래그도
 유료 호출을 켜지 않는다 — 실행의 근원은 언제나 `replay`다(§14.3).
@@ -98,26 +98,6 @@ def _ingest(tmp_path: Path, workspace: Path) -> str:
     service.open_workspace(workspace)
     service.confirm_global_source_order(workspace)  # 전체 순서 확정은 서비스 경로다
     return service.list_source_assets(workspace)[0].content_sha256 or ""
-
-
-@needs_ffmpeg
-def test_analyze_estimate_only_prints_without_running(tmp_path: Path, capsys) -> None:
-    """견적만 인쇄 — 작업·리비전이 하나도 생기지 않는다."""
-    workspace = tmp_path / "ws"
-    init = _parser().parse_args(["media", "init", str(workspace), "--name", "제주"])
-    assert media.media_command(init) == 0
-    _as_luna(workspace)
-    _ingest(tmp_path, workspace)
-    capsys.readouterr()
-    args = _parser().parse_args(
-        ["media", "analyze", "--workspace", str(workspace), "--estimate-only"]
-    )
-    assert media.media_command(args) == 0
-    out = capsys.readouterr().out
-    assert "분석 견적" in out and "Luna 단가는 미확인" in out and "Luna 요청 1" in out
-    service = media._service()
-    service.open_workspace(workspace)
-    assert service.analysis_overview(workspace) is None  # 아무 것도 실행하지 않았다
 
 
 @needs_ffmpeg
@@ -287,35 +267,3 @@ def test_media_settings_refuses_a_switch_during_an_active_analysis(
     service.open_workspace(workspace)
     # W-30d(D87): 새 작업공간의 모델(Gemini 3.8 Flash)이 거절 뒤에도 그대로다
     assert service.settings(workspace).models.luna_model == FLASH
-
-
-@needs_ffmpeg
-def test_the_analyze_estimate_names_the_selected_model(tmp_path: Path, capsys) -> None:
-    workspace = tmp_path / "ws"
-    _init(workspace)
-    _ingest(tmp_path, workspace)
-    assert media.media_command(_settings_args(workspace, "--analysis-model", CLAUDE)) == 0
-    capsys.readouterr()
-    args = _parser().parse_args(
-        ["media", "analyze", "--workspace", str(workspace), "--estimate-only"]
-    )
-    assert media.media_command(args) == 0
-    out = " ".join(capsys.readouterr().out.split())  # rich가 좁은 폭에서 줄을 접는다
-    assert "Claude Opus 5.5 요청 1" in out
-    assert "Luna 단가는 미확인" not in out
-
-
-@needs_ffmpeg
-def test_a_new_workspace_estimate_names_flash_without_choosing(tmp_path: Path, capsys) -> None:
-    """W-30d(D87) — 고르지 않은 새 작업공간의 견적은 Flash의 요청과 공식 단가 상한을 말한다."""
-    workspace = tmp_path / "ws"
-    _init(workspace)
-    _ingest(tmp_path, workspace)
-    capsys.readouterr()
-    args = _parser().parse_args(
-        ["media", "analyze", "--workspace", str(workspace), "--estimate-only"]
-    )
-    assert media.media_command(args) == 0
-    out = " ".join(capsys.readouterr().out.split())  # rich가 좁은 폭에서 줄을 접는다
-    assert "Gemini 3.8 Flash 요청 1" in out
-    assert "Luna 단가는 미확인" not in out

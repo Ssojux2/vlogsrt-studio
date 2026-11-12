@@ -1853,11 +1853,11 @@ def save_meta(fixture_dir: Path, stem: str, cfg: Config, duration: float, chunk_
         },
         "duration": duration,
         "chunk_count": chunk_count,
-        "cost_estimate": estimate_cost(duration, cfg),
     }
     path.write_text(json.dumps(body, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return path
 
 
 def estimate_cost(duration_seconds: float, cfg: Config) -> float:
+    """레거시 파생 계층의 자막 추정만 아직 쓴다 — D110이 그 단계를 지울 때 함께 지운다."""
     return duration_seconds / 60.0 * cfg.cost_per_minute

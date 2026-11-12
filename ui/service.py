@@ -20,7 +20,7 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from vlogsrt import env, keywords, pipeline, preprocess, repair, transcribe, verify
+from vlogsrt import env, keywords, pipeline, preprocess, repair, verify
 from vlogsrt.config import Config, load_config
 
 VIDEO_SUFFIXES = (".mp4", ".mov", ".m4v", ".mkv", ".avi", ".webm", ".m4a", ".mp3", ".wav")
@@ -211,9 +211,8 @@ def stream_subtitles(raw_path: str, prompt: str = "") -> Iterator[RunReport]:
         lines.append("확인   길이를 재는 중…")
         yield _running(lines)
         duration = preprocess.probe_duration(path)
-        _check_cost_guard(duration, cfg)
-        cost = transcribe.estimate_cost(duration, cfg) * 2  # 자막 + 교차 확인
-        lines[-1] = f"전사   OpenAI 호출 · {duration / 60:.1f}분 · 예상 ${cost:.3f}"
+        _check_length_guard(duration)
+        lines[-1] = f"전사   OpenAI 호출 · {duration / 60:.1f}분"
         lines.append("       오디오 추출 → 전사 → 정제 → 교차 확인. 몇 분 걸립니다…")
         yield _running(lines)
         lines.pop()
@@ -257,15 +256,14 @@ def _transcribe(video: Path, cfg: Config, scratch: Path) -> pipeline.RunResult:
     )
 
 
-def _check_cost_guard(duration: float, cfg: Config) -> None:
+def _check_length_guard(duration: float) -> None:
     guard = env.cost_guard_seconds()
     if duration <= guard:
         return
     raise UiError(
         f"{duration / 60:.0f}분은 안전장치({guard / 60:.0f}분)를 넘습니다.\n"
         f"이 영상을 돌리려면 .env 에서 안전장치를 올리세요:\n"
-        f"  VLOGSRT_COST_GUARD_SECONDS={_suggest_guard(duration)}\n"
-        f"예상 비용 약 ${transcribe.estimate_cost(duration, cfg):.2f}"
+        f"  VLOGSRT_COST_GUARD_SECONDS={_suggest_guard(duration)}"
     )
 
 

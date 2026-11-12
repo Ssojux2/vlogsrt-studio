@@ -39,7 +39,6 @@ import tempfile
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
-from decimal import Decimal
 from fractions import Fraction
 from pathlib import Path
 from typing import cast
@@ -98,9 +97,9 @@ from vlogsrt.project.raw.caption_workspace_types import (
     ModelLifecycle,
     RegistrationNotFoundError,
     RegistrationNotReadyError,
-    RunEstimate,
     RunIdentity,
     RunNotFoundError,
+    RunPreparation,
     WaveformBins,
 )
 from vlogsrt.project.raw.config import RawWorkflowConfig
@@ -631,7 +630,7 @@ class CaptionWorkspace:
             engine=engine,
         )
 
-    def estimate(
+    def prepare(
         self,
         registration: FinalVideoRegistration,
         run_id: str,
@@ -639,11 +638,11 @@ class CaptionWorkspace:
         settings: FinalCaptionSettings | None = None,
         workflow: RawWorkflowConfig | None = None,
         engine: Config | None = None,
-    ) -> RunEstimate:
-        """호출 없는 실행 추정 — 모델·수명주기·청크·비용을 사람에게 먼저 보여준다."""
+    ) -> RunPreparation:
+        """호출 없는 실행 준비 — 모델·수명주기·청크를 사람에게 먼저 보여준다(비용 없음, D110)."""
         plan = self.plan(registration, run_id, settings=settings, workflow=workflow, engine=engine)
         audio = plan.video.audio
-        return RunEstimate(
+        return RunPreparation(
             identity=self.identity_of(plan),
             text_model=plan.workflow.models.text_model,
             timing_model=plan.workflow.models.timing_model,
@@ -658,8 +657,6 @@ class CaptionWorkspace:
                 (Fraction(span.start, audio.sample_rate), Fraction(span.end, audio.sample_rate))
                 for span in plan.spans
             ),
-            estimated_cost_usd=str(plan.estimated_cost_usd),
-            reserved_cost_usd=str(plan.reserved_cost_usd),
         )
 
     def approve(self, plan: CaptionRunPlan, *, note: str = "") -> ApprovalRecord:
@@ -673,7 +670,6 @@ class CaptionWorkspace:
             text_model=expected.text_model,
             timing_model=expected.timing_model,
             settings_fingerprint=expected.settings_fingerprint,
-            budget_usd=str(expected.budget_usd),
             note=note,
             created_at=_now(),
         )
@@ -1266,7 +1262,6 @@ def _engine_approval(record: ApprovalRecord) -> CaptionApproval:
         text_model=record.text_model,
         timing_model=record.timing_model,
         settings_fingerprint=record.settings_fingerprint,
-        budget_usd=Decimal(record.budget_usd),
     )
 
 

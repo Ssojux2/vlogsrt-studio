@@ -14,7 +14,7 @@ import argparse
 import json
 import sys
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from dataclasses import replace
 from fractions import Fraction
 from pathlib import Path
@@ -32,12 +32,10 @@ from vlogsrt.project.raw.config import (
     analysis_provider,
     claude_profile,
     gemini_profile,
-    official_price_model,
 )
 from vlogsrt.project.raw.models import (
     ANALYSIS_JOB_KIND,
     ANALYSIS_SEMANTIC_JOB_KIND,
-    AnalysisEstimate,
     PlannedInterval,
 )
 from vlogsrt.project.raw.segmentation import DEFAULT_TILE_SECONDS
@@ -339,7 +337,7 @@ def add_media_parser(sub: argparse._SubParsersAction) -> None:
 
     analyze = commands.add_parser(
         "analyze",
-        help="의미 분석 견적을 인쇄하고 오프라인 재생 분석을 실행한다(유료 호출 없음)",
+        help="오프라인 재생 분석을 실행한다(유료 호출 없음)",
     )
     analyze.add_argument("--workspace", type=Path, required=True, help="작업공간 경로")
     analyze.add_argument(
@@ -354,11 +352,6 @@ def add_media_parser(sub: argparse._SubParsersAction) -> None:
         default=None,
         help="재생 픽스처 디렉터리(asr-fixtures.json·luna-fixtures.json)."
         " 기본은 작업공간 analysis/replay/",
-    )
-    analyze.add_argument(
-        "--estimate-only",
-        action="store_true",
-        help="견적만 인쇄하고 분석을 시작하지 않는다",
     )
     analyze.add_argument(
         "--plan",
@@ -557,7 +550,7 @@ def _analysis_model_lines(model: str) -> list[str]:
     return [
         f"의미 분석 모델: {label} ({model}) — 공급자 Anthropic, 키 {ANALYSIS_CLAUDE_KEY_ENV}(.env)",
         f"  공식 단가({profile.pricing_checked_at.isoformat()}): 입력 ${profile.input_per_mtok}"
-        f" · 출력 ${profile.output_per_mtok} / 100만 토큰 — 견적은 창당 보수적 상한이다",
+        f" · 출력 ${profile.output_per_mtok} / 100만 토큰",
         f"  effort {profile.effort} · 출력 한도 {profile.max_output_tokens} 토큰",
     ]
 
@@ -691,7 +684,7 @@ def _await_job(
 
 
 def cmd_analyze(args: argparse.Namespace) -> int:
-    """`media analyze` — 견적 인쇄 후 오프라인 재생 분석 실행(유료 호출 없음).
+    """`media analyze` — 오프라인 재생 분석 실행(유료 호출 없음, 견적은 없다 — D110).
 
     어떤 플래그도 실제 호출을 켜지 않는다: 이 명령이 만드는 실행의 근원은 언제나
     `replay`다(§14.3). 없는 픽스처는 실패로 기록될 뿐 지어내지 않는다.
@@ -700,14 +693,9 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     workspace_root = Path(args.workspace)
     try:
         status = service.open_workspace(workspace_root)
-        estimates = service.analysis_estimate(Path(status.workspace_root), asset_ids=args.sources)
-        model = service.settings(Path(status.workspace_root)).models.luna_model
     except raw_service.RawWorkspaceError as error:
         log.error(str(error))
         return 1
-    _print_analysis_estimates(estimates, model)
-    if args.estimate_only:
-        return 0
     try:
         handle = service.start_analysis(
             Path(status.workspace_root),
@@ -761,35 +749,10 @@ def _gemini_model_lines(model: str) -> list[str]:
         f" 키 {ANALYSIS_GEMINI_KEY_ENV}(.env)",
         f"  공식 단가({profile.pricing_checked_at.isoformat()}): 입력 ${profile.input_per_mtok}"
         f" · 출력 ${profile.output_per_mtok} / 100만 토큰"
-        f" — {profile.price_valid_through.isoformat()}까지, 견적은 창당 보수적 상한이다",
+        f" — {profile.price_valid_through.isoformat()}까지",
         f"  창마다 클립(그림 + 소리) + 프레임 · 생각 {profile.thinking_level}"
         f" · 출력 한도 {profile.max_output_tokens} 토큰",
     ]
-
-
-def _print_analysis_estimates(estimates: Sequence[AnalysisEstimate], model: str) -> None:
-    """견적 표 — 의미 분석 모델의 이름으로 요청 수를 말한다(Luna 문구는 W-14 이전 그대로)."""
-    if official_price_model(model):
-        label = analysis_model_label(model)
-        log.out(
-            f"** 분석 견적(로컬 — 실제 호출 없음) — 의미 분석 {label}:"
-            " 공식 단가 스냅샷 기준 보수적 상한(청구서가 아니다)"
-        )
-    else:
-        label = "Luna"
-        log.out("** 분석 견적(로컬 — 실제 호출 없음) — Luna 단가는 미확인이라 금액을 만들지 않는다")
-    for item in estimates:
-        audio = (
-            f"있음(청크 {item.asr_chunk_count}, {item.asr_seconds}초)" if item.has_audio else "없음"
-        )
-        ceiling = f" · 상한 ${item.ceiling_usd}" if item.ceiling_usd is not None else ""
-        log.out(
-            f"  {item.source_order:03d} {item.source_name} · 창 {item.window_count} ·"
-            f" 프레임 상한 {item.frame_sample_count} · 오디오 {audio} ·"
-            f" {label} 요청 {item.luna_request_count}{ceiling}"
-        )
-        if "지원 밖" in item.note:
-            log.warn(f"    {item.note}")
 
 
 # ── A5/A6·A7 — 검토·자막 진단(로컬만) ─────────────────────────────────────────
@@ -847,7 +810,7 @@ def cmd_caption(args: argparse.Namespace) -> int:
         registration = workspace.register_final_video(
             path, source_id=args.source_id, audio_ordinal=args.audio_ordinal
         )
-        estimate = workspace.estimate(registration, run_id=args.run)
+        prepared = workspace.prepare(registration, run_id=args.run)
     except (
         raw_service.RawWorkspaceError,
         raw_service.CaptionWorkspaceError,
@@ -861,9 +824,9 @@ def cmd_caption(args: argparse.Namespace) -> int:
         + (f" · 오디오 서수 {registration.audio_ordinal}" if registration.ready else "")
     )
     log.out(
-        f"실행 {args.run} 추정 — 청크 {estimate.chunk_count}"
-        f" · 샘플 {estimate.sample_count} · 문구 모델 {estimate.text_model}"
-        f" · 시간 모델 {estimate.timing_model} · 예상 비용 ${estimate.estimated_cost_usd}"
+        f"실행 {args.run} 준비 — 청크 {prepared.chunk_count}"
+        f" · 샘플 {prepared.sample_count} · 문구 모델 {prepared.text_model}"
+        f" · 시간 모델 {prepared.timing_model}"
         " · 실제 실행은 브라우저 승인 경로에서만 연다(§14.3)"
     )
     return 0

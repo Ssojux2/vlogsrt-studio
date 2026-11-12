@@ -12,7 +12,6 @@ import subprocess
 import wave
 from dataclasses import FrozenInstanceError, replace
 from datetime import date
-from decimal import Decimal
 from fractions import Fraction
 from pathlib import Path
 from typing import Any
@@ -35,15 +34,12 @@ from vlogsrt.project.raw.caption_provider import (
 )
 from vlogsrt.project.raw.config import RawWorkflowConfig
 from vlogsrt.project.raw.final_caption import (
-    CaptionApproval,
     CaptionApprovalMismatch,
     CaptionApprovalMissing,
-    CaptionBudgetExhausted,
     CaptionProviderMissing,
     CaptionRunCancelled,
     CaptionRunError,
     FinalCaptionResult,
-    _Ledger,
     expected_approval,
     plan_caption_run,
     run_final_captions,
@@ -466,7 +462,6 @@ def test_forged_or_stale_approval_is_closed(
         replace(good, text_model="another-model"),
         replace(good, timing_model="another-model"),
         replace(good, settings_fingerprint="0" * 64),
-        replace(good, budget_usd=Decimal("0.00001")),
     ]
     for forged in forgeries:
         with pytest.raises((CaptionApprovalMismatch, CaptionApprovalMissing)):
@@ -566,25 +561,6 @@ def test_absent_provider_fails_before_any_call(tmp_path: Path) -> None:
     with pytest.raises(CaptionProviderMissing):
         run_final_captions(plan, on=BEFORE_SHUTDOWN, timing_provider=None, text_provider=text)
     assert text.calls == []
-
-
-def test_budget_reservation_gates_next_request() -> None:
-    """예약 장부 — 다음 요청의 값이 승인 예산을 넘으면 보내지 않는다(§14.3)."""
-    ledger = _Ledger(
-        approval=CaptionApproval(
-            final_video_sha256="a" * 64,
-            audio_stream_index=1,
-            sample_start=0,
-            sample_end=1600000,
-            text_model="t",
-            timing_model="w",
-            settings_fingerprint="f",
-            budget_usd=Decimal("0.01"),
-        )
-    )
-    ledger.charge(Fraction(60), engine.capabilities.ROLE_TEXT)
-    with pytest.raises(CaptionBudgetExhausted):
-        ledger.charge(Fraction(6000), engine.capabilities.ROLE_TIMING)
 
 
 # ─────────────────────────────────────────────────────────────

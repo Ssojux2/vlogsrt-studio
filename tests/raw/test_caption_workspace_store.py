@@ -75,7 +75,6 @@ def an_approval(identity: RunIdentity, *, note: str = "검토했다") -> Approva
         text_model="gpt-transcribe",
         timing_model="whisper-1",
         settings_fingerprint=identity.fingerprint,
-        budget_usd="0.1000",
         note=note,
         created_at="2026-10-02T00:00:00+00:00",
     )

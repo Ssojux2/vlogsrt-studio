@@ -37,6 +37,10 @@ from vlogsrt.project.raw.caption_workspace_types import (
 )
 from vlogsrt.project.raw.workspace import DB_NAME, db_session
 
+LEGACY_BUDGET_VALUE = ""
+"""`caption_approvals.budget_usd` 칸에 새 승인이 쓰는 값 — 승인 예산(비용 상한)은 D110에서 지웠다.
+칸은 옛 작업공간 DB가 그대로 열리게 남기고(NOT NULL), 읽을 때는 보지 않는다."""
+
 CAPTION_SCHEMA_STATEMENTS: tuple[str, ...] = (
     """
     CREATE TABLE IF NOT EXISTS caption_registrations (
@@ -372,7 +376,7 @@ def _approval_values(record: ApprovalRecord) -> tuple[object, ...]:
         record.text_model,
         record.timing_model,
         record.settings_fingerprint,
-        record.budget_usd,
+        LEGACY_BUDGET_VALUE,
         record.note,
         record.created_at,
     )
@@ -391,7 +395,6 @@ def _approval(row: sqlite3.Row) -> ApprovalRecord:
         text_model=str(row["text_model"]),
         timing_model=str(row["timing_model"]),
         settings_fingerprint=str(row["settings_fingerprint"]),
-        budget_usd=str(row["budget_usd"]),
         note=str(row["note"]),
         created_at=str(row["created_at"]),
     )

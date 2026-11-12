@@ -11,7 +11,7 @@ import pytest
 
 from ui import service
 from ui.service import UiError, build_config
-from vlogsrt import log, pipeline, transcribe
+from vlogsrt import log, pipeline
 from vlogsrt.config import Config
 from vlogsrt.models import Trace
 
@@ -278,9 +278,8 @@ def test_progress_streams_before_the_slow_part(
     before_slow = steps[-2].log
     assert "OpenAI 호출" in before_slow
     assert "몇 분 걸립니다" in before_slow
-    # 금액을 박지 않는다. 교차 확인이 기본이 되며 두 모델 몫이 됐다(D25).
-    # 지켜야 할 계약은 "느린 단계 전에 예상 비용을 보여준다"이지 특정 숫자가 아니다.
-    assert f"${transcribe.estimate_cost(300.0, Config()) * 2:.3f}" in before_slow
+    # 비용은 계산하지 않는다(D110) — 느린 단계 전에 길이만 보인다.
+    assert "5.0분" in before_slow and "$" not in before_slow
     assert seen == ["전사 시작"]
 
 

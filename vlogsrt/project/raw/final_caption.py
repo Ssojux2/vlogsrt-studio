@@ -39,7 +39,6 @@ from bisect import bisect_right
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date
-from decimal import Decimal
 from difflib import SequenceMatcher
 from fractions import Fraction
 from pathlib import Path
@@ -129,9 +128,6 @@ CUE_CLIPPED_END = "clipped_end"
 CUE_OUT_OF_FINAL = "out_of_final_range"
 CUE_ZERO_EXTENT = "zero_extent"
 
-SECONDS_PER_MINUTE = Decimal(60)
-"""분당 요금과 초를 잇는 환산 — Decimal 산술만 쓴다(§11.8)."""
-
 
 class CaptionRunError(RuntimeError):
     """최종 자막 실행이 계약을 어긴다 — 모든 갈래의 부모."""
@@ -147,10 +143,6 @@ class CaptionApprovalMissing(CaptionRunError):
 
 class CaptionApprovalMismatch(CaptionRunError):
     """승인이 계획과 다른 것에 묶여 있다 — 위조·낡은 승인은 호출 전에 닫힌다."""
-
-
-class CaptionBudgetExhausted(CaptionRunError):
-    """승인된 예산 안에 다음 요청의 예약분이 들어가지 않는다(§14.3)."""
 
 
 class CaptionRunCancelled(Exception):
@@ -171,7 +163,7 @@ class CaptionApproval:
     """온라인 실행 승인 — 무엇을·어디까지·어떤 모델로 돌릴지에 묶인다(§14.3).
 
     모든 칸이 실행 계획과 **정확히** 같아야 한다. 하나라도 어긋나면 위조이거나
-    낡은 승인이다 — 예산 칸은 상한이고 나머지는 등식이다.
+    낡은 승인이다. 예산(비용 상한) 칸은 없다(D110 — 비용 추정을 지웠다).
     """
 
     final_video_sha256: str
@@ -181,7 +173,6 @@ class CaptionApproval:
     text_model: str
     timing_model: str
     settings_fingerprint: str
-    budget_usd: Decimal
 
 
 # ─────────────────────────────────────────────────────────────
@@ -191,7 +182,7 @@ class CaptionApproval:
 
 @dataclass(frozen=True, slots=True)
 class CaptionRunPlan:
-    """호출 나가기 전에 얼어 붙는 실행 계획 — 지문·청크·예상 비용까지."""
+    """호출 나가기 전에 얼어 붙는 실행 계획 — 지문·청크(비용 추정은 없다, D110)."""
 
     run_id: str
     video: FinalVideoInput
@@ -200,8 +191,6 @@ class CaptionRunPlan:
     workflow: RawWorkflowConfig
     engine: Config
     fingerprint: str
-    estimated_cost_usd: Decimal
-    reserved_cost_usd: Decimal
 
     @property
     def extent_seconds(self) -> Fraction:
@@ -217,7 +206,7 @@ def plan_caption_run(
     workflow: RawWorkflowConfig | None = None,
     engine: Config | None = None,
 ) -> CaptionRunPlan:
-    """실행 계획을 얼린다 — 이 시점에 청크·지문·비용이 전부 결정된다.
+    """실행 계획을 얼린다 — 이 시점에 청크·지문이 전부 결정된다.
 
     계획이 나가는 즉시 검증도 끝난다: 설정 값역·워크플로 동결 계약·사본 무결성.
     승인은 이 지문에 묶이므로 계획 뒤의 어떤 변경도 승인을 무효로 만든다.
@@ -232,7 +221,6 @@ def plan_caption_run(
     require_unchanged(video)
     spans = plan_caption_chunks(video, settings)
     fingerprint = caption_settings_fingerprint(video, spans, settings, workflow, engine)
-    base, reserved = estimate_caption_cost(video, spans, workflow, engine)
     return CaptionRunPlan(
         run_id=run_id,
         video=video,
@@ -241,8 +229,6 @@ def plan_caption_run(
         workflow=workflow,
         engine=engine,
         fingerprint=fingerprint,
-        estimated_cost_usd=base,
-        reserved_cost_usd=reserved,
     )
 
 
@@ -306,30 +292,6 @@ def _engine_threshold_snapshot(engine: Config) -> dict[str, object]:
     }
 
 
-def estimate_caption_cost(
-    video: FinalVideoInput,
-    spans: Sequence[SampleSpan],
-    workflow: RawWorkflowConfig,
-    engine: Config,
-) -> tuple[Decimal, Decimal]:
-    """기본 전사비와 복구 예약분(§11.8) — 등록표 요금만 쓰고 산술은 Decimal로.
-
-    예약분은 보수적으로 **전체 길이 × 시도 상한**을 잡는다 — 되풀이가 어느 구간에서
-    자랄지는 호출 전에 알 수 없고, 예약이 부족해서 실행 도중 예산이 뚫리는 것보다
-    승인 단계에서 크게 보는 편이 맞다. 이 값은 상한이지 청구액이 아니다.
-    """
-    rate = Decimal(video.audio.sample_rate)
-    total = Decimal(sum(span.end - span.start for span in spans))
-    minutes = total / rate / SECONDS_PER_MINUTE
-    per_minute = capabilities.price_per_minute(
-        capabilities.ROLE_TEXT
-    ) + capabilities.price_per_minute(capabilities.ROLE_TIMING)
-    base = per_minute * minutes
-    attempts = max(0, engine.repair_max_attempts) if engine.repair_enabled else 0
-    reserved = per_minute * minutes * Decimal(attempts)
-    return base.quantize(Decimal("0.0001")), reserved.quantize(Decimal("0.0001"))
-
-
 def expected_approval(plan: CaptionRunPlan) -> CaptionApproval:
     """이 계획에 정확히 묶이는 승인 — 사람이 검토·서명할 값의 목록이다."""
     audio = plan.video.audio
@@ -341,7 +303,6 @@ def expected_approval(plan: CaptionRunPlan) -> CaptionApproval:
         text_model=plan.workflow.models.text_model,
         timing_model=plan.workflow.models.timing_model,
         settings_fingerprint=plan.fingerprint,
-        budget_usd=plan.estimated_cost_usd + plan.reserved_cost_usd,
     )
 
 
@@ -349,7 +310,7 @@ def require_approval(plan: CaptionRunPlan, approval: CaptionApproval | None) -> 
     """승인이 계획에 묶여 있는지 **호출 전에** 본다 — 어긋나면 무엇이 다른지 말한다."""
     if approval is None:
         raise CaptionApprovalMissing(
-            f"온라인 실행 승인이 없다 — {plan.run_id}의 비용 추정과 지문을 먼저 보여라(§14.3)"
+            f"온라인 실행 승인이 없다 — {plan.run_id}의 실행 지문을 먼저 보여라(§14.3)"
         )
     wanted = expected_approval(plan)
     mismatched = [
@@ -368,10 +329,6 @@ def require_approval(plan: CaptionRunPlan, approval: CaptionApproval | None) -> 
     if mismatched:
         raise CaptionApprovalMismatch(
             f"승인이 실행 계획과 다르다 — {mismatched}. 위조이거나 낡은 승인이다(§14.3)"
-        )
-    if approval.budget_usd < wanted.budget_usd:
-        raise CaptionApprovalMismatch(
-            f"승인 예산({approval.budget_usd})이 추정+예약({wanted.budget_usd})보다 작다"
         )
 
 
@@ -491,31 +448,6 @@ class FinalCaptionResult:
 
 
 # ─────────────────────────────────────────────────────────────
-#  예산 장부 — 요청 예약은 승인 예산 안에서(§14.3)
-# ─────────────────────────────────────────────────────────────
-
-
-@dataclass
-class _Ledger:
-    """요청별 예약 장부 — 보낸 만큼만, 승인 예산을 넘는 다음 요청은 못 보낸다."""
-
-    approval: CaptionApproval | None
-    spent: Decimal = Decimal("0")
-
-    def charge(self, seconds: Fraction, role: str) -> None:
-        if self.approval is None:
-            return
-        minutes = Decimal(seconds.numerator) / Decimal(seconds.denominator) / SECONDS_PER_MINUTE
-        price = capabilities.price_per_minute(role) * minutes
-        if self.spent + price > self.approval.budget_usd:
-            raise CaptionBudgetExhausted(
-                f"예산을 넘는다 — 쓴 {self.spent} + 다음 {price.quantize(Decimal('0.0001'))}"
-                f" > 승인 {self.approval.budget_usd}"
-            )
-        self.spent += price
-
-
-# ─────────────────────────────────────────────────────────────
 #  실행
 # ─────────────────────────────────────────────────────────────
 
@@ -581,17 +513,14 @@ def run_final_captions(
     _require_online_config_for_transport(plan, timing_provider, text_provider)
     if plan.workflow.network_mode == "online":
         _require_online_route(plan, approval, on)
-        ledger = _Ledger(approval)
-    else:
-        ledger = _Ledger(None)
     require_unchanged(plan.video)
     require_audio_unchanged(plan.video)
     state = _RunState()
     workdir = workdir or plan.video.audio.pcm_path.parent
     try:
-        _timing_pass(plan, timing_provider, on, workdir, ledger, cancellation, state)
-        _repair_pass(plan, on, workdir, timing_provider, text_provider, ledger, cancellation, state)
-        _text_pass(plan, text_provider, on, workdir, ledger, cancellation, state)
+        _timing_pass(plan, timing_provider, on, workdir, cancellation, state)
+        _repair_pass(plan, on, workdir, timing_provider, text_provider, cancellation, state)
+        _text_pass(plan, text_provider, on, workdir, cancellation, state)
     except CaptionRunCancelled as stop:
         log.warn(f"최종 자막 실행이 취소됐다: {stop.reason} — 끝난 유효 결과는 보존한다")
         return _assemble_result(plan, state, cancelled_reason=stop.reason)
@@ -735,14 +664,12 @@ def _ask_timing(
     index: int,
     chunk: Chunk,
     request_id: str,
-    ledger: _Ledger,
 ) -> TimedTranscript:
     """청크 하나를 시간 제공자에게 묻는다 — 예약·신원·전송이 한 덩어리다.
 
     온도 손잡이가 있는 제공자에게는 승인 지문이 얼린 엔진 1차 온도를 그대로 보낸다
     (D28·D55 — 예전엔 지문에만 0.6이 적히고 요청에는 빠져 API 기본 0으로 들렸다).
     """
-    ledger.charge(_span_seconds(plan, index), capabilities.ROLE_TIMING)
     binding = _binding(plan, index, chunk, request_id)
     if "temperature" in inspect.signature(provider.timed_transcript).parameters:
         tempered = cast(RescueTimingProvider, provider)  # 서명 검사가 이 계약을 보증한다
@@ -770,7 +697,6 @@ def _timing_pass(
     provider: TimingProvider,
     on: date,
     workdir: Path,
-    ledger: _Ledger,
     cancellation: Callable[[], None] | None,
     state: _RunState,
 ) -> None:
@@ -780,7 +706,7 @@ def _timing_pass(
         request_id = f"{plan.run_id}:timing:{index:04d}"
         chunk = _chunk_of(plan, index, workdir, state)
         try:
-            timed = _ask_timing(plan, provider, on, index, chunk, request_id, ledger)
+            timed = _ask_timing(plan, provider, on, index, chunk, request_id)
         except Exception as exc:  # noqa: BLE001 - 청크 실패는 기록이지 실행 정지가 아니다
             _record_chunk_failure(state, plan, index, request_id, exc, role="timing")
             continue
@@ -825,10 +751,8 @@ def _ask_text(
     index: int,
     chunk: Chunk,
     request_id: str,
-    ledger: _Ledger,
 ) -> TextTranscript:
     """청크 하나를 문구 제공자에게 묻는다 — 이 응답을 교정과 검증이 공유한다."""
-    ledger.charge(_span_seconds(plan, index), capabilities.ROLE_TEXT)
     binding = _binding(plan, index, chunk, request_id)
     return provider.text_transcript(
         binding=binding,
@@ -845,7 +769,6 @@ def _text_pass(
     provider: TextTranscriptProvider,
     on: date,
     workdir: Path,
-    ledger: _Ledger,
     cancellation: Callable[[], None] | None,
     state: _RunState,
 ) -> None:
@@ -859,7 +782,7 @@ def _text_pass(
         request_id = f"{plan.run_id}:text:{index:04d}"
         chunk = _chunk_of(plan, index, workdir, state)
         try:
-            text = _ask_text(plan, provider, on, index, chunk, request_id, ledger)
+            text = _ask_text(plan, provider, on, index, chunk, request_id)
         except Exception as exc:  # noqa: BLE001 - 문구 실패는 partial_failure로 올라간다
             _record_chunk_failure(state, plan, index, request_id, exc, role="text")
             continue
@@ -948,7 +871,6 @@ class _RescueTranscriber:
     on: date
     timing: TimingProvider
     text: TextTranscriptProvider
-    ledger: _Ledger
     cancellation: Callable[[], None] | None
     state: _RunState
     rounds: int = 0
@@ -987,7 +909,6 @@ class _RescueTranscriber:
             _cancel(self.cancellation)
             request_id = f"{self.plan.run_id}:rescue:{chunk.index:04d}:r{self.rounds}"
             binding = self._binding_for(chunk, request_id)
-            self.ledger.charge(_chunk_seconds(chunk), capabilities.ROLE_TIMING)
             provider = cast(
                 RescueTimingProvider, self.timing
             )  # _tempered 검사가 이 계약을 보증한다
@@ -1018,7 +939,6 @@ class _RescueTranscriber:
             _cancel(self.cancellation)
             request_id = f"{self.plan.run_id}:arbiter:{chunk.index:04d}"
             binding = self._binding_for(chunk, request_id)
-            self.ledger.charge(_chunk_seconds(chunk), capabilities.ROLE_TEXT)
             text = self.text.text_transcript(
                 binding=binding,
                 chunk=chunk,
@@ -1050,24 +970,12 @@ class _RescueTranscriber:
         )
 
 
-def _span_seconds(plan: CaptionRunPlan, index: int) -> Fraction:
-    """청크 하나의 길이 — 유리수로 잰 다음 Decimal 요금과 잇는다."""
-    span = plan.spans[index]
-    return Fraction(span.end - span.start, plan.video.audio.sample_rate)
-
-
-def _chunk_seconds(chunk: Chunk) -> Fraction:
-    """재전사 조각의 길이 — 조각 메타에서 온 값이다."""
-    return Fraction(str(chunk.duration))
-
-
 def _repair_pass(
     plan: CaptionRunPlan,
     on: date,
     workdir: Path,
     timing: TimingProvider,
     text: TextTranscriptProvider,
-    ledger: _Ledger,
     cancellation: Callable[[], None] | None,
     state: _RunState,
 ) -> None:
@@ -1078,7 +986,6 @@ def _repair_pass(
         on=on,
         timing=timing,
         text=text,
-        ledger=ledger,
         cancellation=cancellation,
         state=state,
     )

@@ -19,7 +19,6 @@ from . import (
     pipeline,
     preprocess,
     repair,
-    transcribe,
 )
 from .config import Config, format_config, load_config
 from .evaluate import DASHBOARD_HEADER, build_dashboard_row
@@ -218,7 +217,7 @@ def _add_project_command(sub: argparse._SubParsersAction) -> None:
     caption.add_argument("render_audio", type=Path)
     caption.add_argument("final_fcpxml", type=Path)
     caption.add_argument("-o", "--out", type=Path, required=True)
-    caption.add_argument("--yes", action="store_true", help="표시된 온라인 예상 비용 확인")
+    caption.add_argument("--yes", action="store_true", help="온라인 호출 확인")
     caption.add_argument(
         "--caption-authorization",
         type=Path,
@@ -308,10 +307,10 @@ def _resolve_online(args: argparse.Namespace) -> bool:
     return bool(getattr(args, "online", False))
 
 
-def _confirm_cost(duration: float, cfg: Config, assume_yes: bool, models: int = 1) -> None:
-    cost = transcribe.estimate_cost(duration, cfg) * models
+def _confirm_length(duration: float, assume_yes: bool) -> None:
+    """길이 안전장치 — 비용은 계산하지 않는다(D110). 긴 영상은 사람이 한 번 더 확인한다."""
     guard = env.cost_guard_seconds()
-    log.info(f"오디오 {duration:.0f}초, 예상 비용 약 ${cost:.3f}")
+    log.info(f"오디오 {duration:.0f}초")
     if assume_yes or duration <= guard:
         return
     if not sys.stdin.isatty():
@@ -328,11 +327,6 @@ def _confirm_cost(duration: float, cfg: Config, assume_yes: bool, models: int = 
 # ─────────────────────────────────────────────────────────────
 
 
-def _models_paid(args: argparse.Namespace, cfg: Config) -> int:
-    """두 번째 모델은 검증과 글자 교정이 **함께** 쓴다. 둘 다 꺼야 한 번만 낸다(D37)."""
-    return 1 if args.no_verify and not cfg.retext_enabled else 2
-
-
 def cmd_run(args: argparse.Namespace) -> int:
     cfg = config_from_args(args)
     if args.no_retext:
@@ -340,19 +334,18 @@ def cmd_run(args: argparse.Namespace) -> int:
     online = _resolve_online(args)
     if args.dry_run:
         prepared = pipeline.prepare(args.video, cfg, offline=args.offline or not online)
-        cost = transcribe.estimate_cost(prepared.duration, cfg) * _models_paid(args, cfg)
         pieces = max(1, len(prepared.chunks))
         log.out(
             f"길이 {prepared.duration:.1f}초 · 조각 {pieces}개"
-            f"(각 {prepared.duration / pieces / 60:.1f}분) · 예상 ${cost:.3f}"
+            f"(각 {prepared.duration / pieces / 60:.1f}분)"
         )
         if not args.no_repair:
-            # 되풀이가 얼마나 나올지는 전사해봐야 안다. 0원일 수도, 26%일 수도 있다(D27).
-            log.out("되풀이 재전사가 켜져 있다 — 되풀이 구간 길이만큼 비용이 더 붙는다.")
+            # 되풀이가 얼마나 나올지는 전사해봐야 안다(D27).
+            log.out("되풀이 재전사가 켜져 있다 — 되풀이 구간만 다시 묻는다.")
         return 0
     if online:
         # 오디오를 뽑기 전에 원본 길이만 보고 확인한다. ffprobe는 즉시 끝난다.
-        _confirm_cost(preprocess.probe_duration(args.video), cfg, args.yes, _models_paid(args, cfg))
+        _confirm_length(preprocess.probe_duration(args.video), args.yes)
     result = pipeline.run(
         args.video,
         cfg,
@@ -440,14 +433,13 @@ def cmd_probe(args: argparse.Namespace) -> int:
         f"조각       {pieces}개 · 각 {duration / pieces / 60:.1f}분 "
         f"(한도 {cfg.chunk_max_bytes / 1e6:.1f}MB / {cfg.chunk_max_seconds / 60:.0f}분)"
     )
-    log.out(f"예상 비용   ${transcribe.estimate_cost(duration, cfg):.3f}")
     return 0
 
 
 def cmd_record(args: argparse.Namespace) -> int:
     """사람만 실행한다. 실제 API를 부르고 요금이 발생한다."""
     cfg = config_from_args(args)
-    _confirm_cost(preprocess.probe_duration(args.video), cfg, args.yes, _models_paid(args, cfg))
+    _confirm_length(preprocess.probe_duration(args.video), args.yes)
     # 글자 교정이 켜져 있으면 오프라인 재생에도 두 번째 모델 응답이 필요하다(D37).
     wanted = not args.no_verify or cfg.retext_enabled
     for path in pipeline.record_fixtures(args.video, cfg, verify=wanted).values():

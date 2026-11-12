@@ -9918,7 +9918,7 @@ class RawWorkspaceUi:
         if registration is None or not registration.ready:
             raise gr.Error("준비된 등록이 없다 — 먼저 최종 영상 등록(오디오 선택 확정)을 끝내세요.")
         try:
-            estimate = ws.estimate(registration, run_id=run)
+            estimate = ws.prepare(registration, run_id=run)
         except (raw_service.RawWorkspaceError, raw_service.CaptionWorkspaceError) as error:
             raise gr.Error(str(error)) from error
         self._caption_identity = {
