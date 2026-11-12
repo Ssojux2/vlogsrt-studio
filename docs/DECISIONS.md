@@ -10048,3 +10048,79 @@ Tier 1`, 429)였다 — 영상 판정은 성공하고 전사만 빠졌다. 한�
 `test_odd_quota_details_are_dropped_not_echoed`(합성 픽스처 `error_429_quota_day.json`·`error_429_quota_minute.json` — 모양은
 Google `google.rpc.QuotaFailure`·`RetryInfo`), `test_task_runtime`의 문구 시험 넷. 1단계 전사 조각 실패(`asr_outcome.json`의
 `failure`)는 이 문구 그대로 남는다(`understanding.py`가 `provider_error(exc)[1]`을 적는다).
+
+## D112 — 초안 내보내기는 긴 조각을 토막으로 나눠 함께 렌더하고, 원본 조사도 함께 한다 (2026-11-12, W-61, 사용자 지시)
+
+**맥락**: 사용자 「내보내기 할때도 하나씩 붙이지 말고 쓰레드나 멀티프로세스를 이용해서 전체를 분할해서 작업하도록
+수정해줘」. 조각 렌더는 W-44부터 이미 로컬 미디어 자리 수(이 기계 3)만큼 함께 돌았다 — 그러나 **계획의 조각 하나 =
+ffmpeg 하나**라 긴 추천 구간 하나가 혼자 도는 동안 다른 자리가 놀았고, 원본 조사(ffprobe 셋 — 시계는 모든 패킷을
+읽는다)는 원본마다 차례로 돌았다. 조각은 이미 각자 ffmpeg 프로세스라 멀티프로세스는 더할 것이 없다.
+
+**결정**:
+- `RenderSettings.piece_max_seconds = 30`(**외부 근거 없는 조정 대상**) — 렌더할 때만 계획의 조각을 이 길이 이하의
+  **고른** 토막으로 나눈다(`render_export.render_pieces`, 순수). 나누는 조각은 원본 프레임과 출력 프레임이 1:1인 것뿐이다
+  (`fps_convert`가 거짓이고 D71 누적 맞춤이 한 장도 더하거나 빼지 않은 조각) — 토막 경계가 원본 프레임 경계라 출력
+  프레임 합이 그대로다. 레이트 변환 조각은 토막마다 프레임 수를 새로 지어내야 하므로 통째로 둔다. 0이면 나누지 않는다.
+- **계획은 그대로다** — `render_plan`(레일·SRT 투영·보고서 `parts`)은 손대지 않는다. 토막은 스테이징 이름만 제 차례
+  번호(`part00000.mov`…)를 쓰고, 이어붙이기(`-c copy`)는 예전과 같다.
+- 원본 조사: `_export_path`(작업공간 기록을 읽는다)는 부른 스레드에서 차례로, ffprobe 셋만 자리 수만큼 함께 돈다 —
+  등급·검토 머리·원본 자막 읽기는 부른 스레드에서 촬영 시각 순이다. 문제는 예전처럼 끝까지 모아 한 번에 이름을 댄다.
+- 한도는 **올리지 않았다**(전역 로컬 미디어 자리 3 그대로 — 성능 계획 Phase 1이 먼저다). 보고서에 `parallel`
+  칸(`workers`·`pieces`·`piece_max_seconds`)을 더한다 — 표시만 한다.
+
+**근거(실측, 이 기계 M1 Pro 10코어 · 다른 일로 부하 평균 110–126이라 흔들린다)**:
+- 이음매: 2초 원본을 통째 vs 30프레임 두 토막 — 프레임 60 = 60, 소리 샘플 96000 = 96000, PCM 차이 최대 6/32768.
+- 4K HEVC 10bit 60초 한 구간: h264_videotoolbox 18.2–18.6초 → 3토막 15.6–18.3초, libx264 42.2초 → 34.5초.
+- 4K H.264 90초 한 구간 + videotoolbox: 14.0초 → 14.3초 — **하드웨어 인코더(엔진 하나, 1080p 약 195fps)가 한계**라
+  나눠도 빨라지지 않는다. 디코드만 재면 소프트웨어 HEVC 21.1초 · 셋 함께 13.5초 · `-hwaccel videotoolbox` 17.0초,
+  하드웨어 디코드 + 인코드 13.1초 — 더 큰 손잡이는 성능 계획 Phase 3-5의 렌더 디코드 `-hwaccel`이다(따로 한다).
+- 시험: `test_long_one_to_one_parts_split_into_even_pieces_and_the_rest_stay_whole` ·
+  `test_a_part_rendered_in_pieces_joins_without_losing_frames_or_samples` ·
+  `test_an_export_in_short_pieces_keeps_the_plan_frames_and_srt`(1초 토막으로 낸 초안의 `parts`·SRT 바이트가 기본과 같다).
+
+## D113 — 선언 창 판정은 µs 표기와 짧은 마지막 패킷을 거부하지 않고, 렌더 거부 원본은 초안을 막지 않는다 (2026-11-12, W-62, 사용자 승인)
+
+**맥락**: 실데이터 namdang에서 「추천만 이어붙여 내보내기」가 원본 8개를 「패킷 증거가 선언 창을 넘는다 — 입력 탐색
+창이 그 구간을 잃는다」로 거부해 초안 전체를 만들지 않았다. 같은 판정(`preprocess._raw_timeline_failures`)이 구간
+추출(`extract_raw_clip`)도 막는다. 169개를 무료 ffprobe로 다시 쟀다 — 모두 tb 1/600 · 30fps · 시작 0 · 균일 격자다.
+
+- **원인 A(7개 — IMG_8987·8991·1070·1154·1164·1170·1202)**: 애플 MOV는 마지막 프레임을 19틱으로 선언한다(트랙
+  2279틱 · 패킷 끝 2280틱) — 참 넘침은 한 틱이고 균일 허용(한 틱)이 받는 모양이다. 판정은 format duration을
+  ffprobe가 **가장 가까운 µs로 적은 값**과 비교하는데(IMG_9006: 13/6초 → 2.166667, 위로 반올림), 2279/600초가
+  3.798333초로 적혀 한 틱 + 1/3 µs로 보였다. 같은 모양의 균일 원본 27개가 반올림 방향만으로 20 통과 · 7 거부로
+  갈렸다. IMG_8863(D69 검증자 회귀)에서 snap 시계에만 µs 몫을 붙이고 균일 시계는 「판정 바이트 그대로」로 둔 결정이
+  이 7개를 막았다 — 같은 넘침의 snap 원본 18개는 통과했다.
+- **원인 B(IMG_1071 — 사진 앱에서 다듬은 클립)**: 마지막 패킷이 pts 1780 · **길이 8틱**이고 선언은 1788틱(2.98초)
+  이다 — 창 안에서 시작해 창 끝에서 끝난다. 균일 시계의 패킷 증거 끝은 명목 `exact_end`(90 × 1/30 = 3초)라 12틱
+  넘친 것처럼 보였다. 시계 조사가 패킷 길이를 읽지 않았다.
+- **원인 C(구조)**: VFR·map 원본은 계획이 빼고 보고서에 남기는데(D68), 렌더 판정 거부만은 초안 전체를 멈췄다.
+
+판정의 근거(「선언 창보다 먼 패킷은 입력 `-ss` 창이 잃는다」 — 1.25초 밀린 파일에서 90 중 33프레임)는 창 밖에서
+**시작하는** 패킷이다. 이 8개의 패킷은 모두 창 안에서 시작한다. 판정만 우회한 실제 argv(`render_part`·
+`extract_raw_clip`)로 IMG_8987·1071·1202의 마지막 20프레임 조각과 전체 조각이 렌더·추출 검증(프레임 수·격자·디코드)을
+모두 통과했다 — 추출은 `tpad` 채움이 없어 마지막 프레임을 실제로 읽었다.
+
+**결정**:
+- **균일 시계의 허용 = 한 틱 + ½ µs**(`_declared_window_slack`). 적힌 값은 참값의 가장 가까운 µs라 참값과 ½ µs
+  이하로만 다르다 — 그 몫은 참 선언의 몫이다. 새 조정값이 아니라 ffprobe 표기의 기하 근거다. 「한 틱 + 1 µs」를
+  거부하는 고정 시험(`test_a_uniform_clock_keeps_the_one_tick_window`)은 **기대값 그대로** 통과한다. snap·map은 그대로.
+- **균일 시계의 패킷 증거 끝 = 마지막 패킷이 적은 제 길이**(`_packet_evidence_end`) — 한 프레임보다 짧을 때만,
+  **줄이기만** 한다(모르거나 한 프레임 이상이면 예전 `exact_end`). `probe_extraction_clock`이 `-show_entries
+  packet=duration`을 따로 더 싣고(같은 packet 절에 합쳐 나온다 — 기존 `packet=pts` 인자는 그대로)
+  `RawVideoClock.last_packet_ticks`(기본 0 = 모름)에 담는다. 디코드 순서라 목록 끝이 아니라 pts로 찾는다. 명목 칸
+  (`exact_end`·`frame_count`)은 그대로이고 새 칸은 어느 지문·캐시 열쇠·검토 시계 대조에도 없다.
+- **렌더 판정이 거부한 원본은 빼고 알린다**(`render_export._gather` → `RenderSource.refusal` → 계획이 통째로
+  `unrenderable`로 뺀다 — map과 같은 길). 보고서 `unsupported` 줄에 `reason: "unrenderable"`과 `detail`(까닭 글)이
+  실리고(map 줄은 바이트 그대로), 결과 카드가 「렌더할 수 없어 빠진 원본 N개: …」를 경고로 보인다. 원본을 읽지
+  못함·재는 동안 바뀜·검토 머리 시계 불일치는 여전히 거부다 — 원본이 아니라 작업공간 상태의 문제다.
+
+**하지 않은 것**: 균일도 map처럼 「마지막 패킷이 창 안에서 시작하는가」만 보는 규칙 — 고정 시험 둘(위 시험 ·
+snap `late=7`)을 뒤집고 허용을 한 프레임까지 넓힌다. snap과 같은 2 µs 허용 — 위 고정 시험의 기대값을 뒤집는다.
+
+**검증**: 실데이터 169개 전후 — **정확히 8개만** 거부 → 통과, 161개는 판정·`frame_count` 그대로(마지막 패킷 길이
+168개 20틱 · IMG_1071 8틱). 시험 `test_img_8987_one_tick_written_a_third_microsecond_early_is_renderable` ·
+`test_the_uniform_window_takes_half_a_microsecond_and_no_more` · `test_img_1071_short_last_packet_is_measured_by_its_own_length` ·
+`test_a_short_last_packet_beyond_the_declaration_is_still_refused` · `test_a_last_packet_length_never_widens_the_window` ·
+`test_a_source_the_renderer_refuses_is_excluded_whole_with_its_reason` ·
+`test_a_source_the_renderer_refuses_is_left_out_and_named_not_blocking` ·
+`test_the_result_card_warns_about_originals_the_renderer_left_out`. 계획: `docs/plans/2026-11-12-render-declared-window.md`.

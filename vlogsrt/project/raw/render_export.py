@@ -13,7 +13,11 @@
   Final Cut 거부와 다른 선택이다: 그쪽은 되살릴 수 없는 프로젝트 손실, 여기는 다시 만들 수
   있는 초안이다.
 - 프레임 격자를 증명하지 못한 원본(VFR · map 격자)은 계획이 통째로 빼고 보고서의
-  `unsupported`에 남는다.
+  `unsupported`에 남는다. 렌더 판정(`render_part_failures`)이 거부한 원본도 같다 — 초안 전체를
+  막지 않고 빼서 까닭과 함께 알린다(D113). 원본을 읽지 못함·재는 동안 바뀜은 여전히 거부다.
+- **병렬(D112).** 원본 조사(ffprobe 셋)와 렌더는 로컬 미디어 자리 수만큼 함께 돈다. 렌더는 계획의
+  조각을 그대로 쓰지 않고 긴 조각을 `piece_max_seconds` 이하의 토막으로 나눠 함께 인코딩한 뒤 한
+  번에 잇는다 — 계획·SRT·보고서의 `parts`는 그대로이고 나뉜 것은 렌더 토막뿐이다.
 """
 
 from __future__ import annotations
@@ -21,6 +25,7 @@ from __future__ import annotations
 import contextvars
 import itertools
 import json
+import math
 import os
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -29,7 +34,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from fractions import Fraction
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from vlogsrt import log, preprocess
 from vlogsrt.oscompat import publish_exclusive
@@ -59,6 +64,7 @@ REPORT_NAME = "render_report.json"
 STAGING_NAME = "_staging"
 """한 번의 내보내기 안의 스테이징 — 조각·이은 영상·글을 다 만든 뒤에야 제 이름으로 낸다."""
 _STAMP = "%Y%m%dT%H%M%SZ"
+_T = TypeVar("_T")
 _NEW_FILE = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
 _FILE_MODE = 0o644
 
@@ -78,6 +84,16 @@ class GatheredSource:
     clock: preprocess.RawVideoClock
     audio: tuple[preprocess.AudioPacketExtent, ...]
     source: render_plan.RenderSource
+
+
+@dataclass(frozen=True, slots=True)
+class RenderPiece:
+    """렌더 토막 하나 — 계획의 조각 `part_index`의 한 부분(나누지 않았으면 조각 전체)이다.
+    `spec.index`는 토막의 차례(스테이징 이름)이고 계획의 조각 번호와 다를 수 있다."""
+
+    part_index: int
+    source_id: str
+    spec: preprocess.RenderPartSpec
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,7 +146,9 @@ def gather_sources(
 ) -> list[GatheredSource]:
     """원본마다(촬영 시각 순) 재료를 모은다 — 문제는 끝까지 다 모아 한 번에 이름을 대고 거부한다.
 
-    분석 전 원본도 들어간다(계획이 `unanalyzed`로 뺀다). VFR·map 원본도 들어간다(계획이 뺀다).
+    분석 전 원본도 들어간다(계획이 `unanalyzed`로 뺀다). VFR·map 원본과 렌더 판정이 거부한 원본도
+    들어간다(계획이 뺀다, D113).
+    ffprobe 셋만 자리 수만큼 함께 돌고(D112), 작업공간 기록을 읽는 일은 부른 스레드에서 차례로 한다.
     """
     facade = service.review_workspace_facade(root)
     assets = service.global_order_proposal(root)
@@ -140,38 +158,77 @@ def gather_sources(
     scope = _Scope(service, root, facade.workspace, head, facade.tier_evidence_rows())
     if context is not None:
         context.set_total(len(assets))
+    located = [_locate(scope, asset) for asset in assets]
+    probed = _run_pool([_probe_job(row) for row in located], "render-probe", context)
     gathered: list[GatheredSource] = []
     problems: list[str] = []
-    for asset in assets:
+    for asset, row, measured in zip(assets, located, probed, strict=True):
         check_cancel()
         try:
-            gathered.append(_gather(scope, asset))
+            gathered.append(_gather(scope, asset, row, measured))
         except RawWorkspaceError as error:
             problems.append(str(error))
-        if context is not None:
-            context.advance()
     if problems:
         listed = " / ".join(problems)
         raise RenderExportError(f"초안을 만들지 않았다 — 원본 {len(problems)}개: {listed}")
     return gathered
 
 
-def _gather(scope: _Scope, asset: SourceAsset) -> GatheredSource:
-    path, before = finalcut_export._export_path(scope.workspace, asset)
+_Located = tuple[Path, tuple[int, int, int]] | RawWorkspaceError
+_Probed = (
+    tuple[
+        preprocess.RawMediaProbe,
+        preprocess.RawVideoClock,
+        tuple[preprocess.AudioPacketExtent, ...],
+    ]
+    | RawWorkspaceError
+    | None
+)
+
+
+def _locate(scope: _Scope, asset: SourceAsset) -> _Located:
+    """원본 경로와 재기 전 stat — 작업공간 기록을 읽으므로 부른 스레드에서 한다."""
     try:
-        # Final Cut 보내기와 같은 앞뒤 대조가 있다 — 같은 stat이면 조사 기억(W-45).
-        probe = preprocess.probe_raw_media_memo(path)
-        clock = preprocess.probe_extraction_clock_memo(path, probe=probe)
-        audio = preprocess.probe_audio_extents(path)
-    except RuntimeError as error:
-        raise _refuse(asset, f"원본을 ffprobe로 읽지 못했다 — {error}") from error
+        return finalcut_export._export_path(scope.workspace, asset)
+    except RawWorkspaceError as error:
+        return error
+
+
+def _probe_job(row: _Located) -> Callable[[], _Probed]:
+    """일꾼 하나가 할 ffprobe 셋 — 거부는 값으로 돌려 모든 원본의 문제를 한 번에 댄다."""
+    if isinstance(row, RawWorkspaceError):
+        return lambda: None
+    path = row[0]
+
+    def probe() -> _Probed:
+        try:
+            # Final Cut 보내기와 같은 앞뒤 대조가 있다 — 같은 stat이면 조사 기억(W-45).
+            media = preprocess.probe_raw_media_memo(path)
+            clock = preprocess.probe_extraction_clock_memo(path, probe=media)
+            return media, clock, preprocess.probe_audio_extents(path)
+        except RuntimeError as error:
+            return RawWorkspaceError(f"원본을 ffprobe로 읽지 못했다 — {error}")
+
+    return probe
+
+
+def _gather(scope: _Scope, asset: SourceAsset, row: _Located, measured: _Probed) -> GatheredSource:
+    if isinstance(row, RawWorkspaceError):
+        raise row
+    if not isinstance(measured, tuple):
+        raise _refuse(asset, str(measured))
+    path, before = row
+    probe, clock, audio = measured
     finalcut_export._require_unchanged(asset, path, before)
     grid = _grid_kind(clock)
+    refusal = ""
     if grid != render_plan.GRID_MAP:
         failures = preprocess.render_part_failures(probe, clock)
         if failures:
-            raise _refuse(asset, "렌더할 수 없다 — " + "; ".join(failures))
-    source = _render_source(scope, asset, probe, clock, grid)
+            # 원본 하나가 초안 전체를 막지 않는다 — 계획이 통째로 빼고 까닭을 남긴다(D113).
+            refusal = "렌더할 수 없다 — " + "; ".join(failures)
+            log.warn(f"{asset.source_name}: {refusal} — 이 원본을 빼고 이어붙인다")
+    source = _render_source(scope, asset, probe, clock, grid, refusal)
     return GatheredSource(asset, path, before, probe, clock, audio, source)
 
 
@@ -188,14 +245,16 @@ def _render_source(
     probe: preprocess.RawMediaProbe,
     clock: preprocess.RawVideoClock,
     grid: str,
+    refusal: str = "",
 ) -> render_plan.RenderSource:
     frame = render_plan.FrameClock(
         clock.frame_duration, clock.frame_count, clock.presentation_origin
     )
     width, height = probe.video.display_size
-    if grid == render_plan.GRID_MAP:
+    if grid == render_plan.GRID_MAP or refusal:
+        # 통째로 빠질 원본은 검토 머리·자막을 읽지 않는다 — 머리 시계 대조로 거부하지 않게.
         return render_plan.RenderSource(
-            asset.asset_id, asset.source_name, frame, width, height, grid
+            asset.asset_id, asset.source_name, frame, width, height, grid, refusal=refusal
         )
     row = scope.evidence.get(asset.asset_id)
     report = scope.service.tier_report(scope.root, row.revision_id, asset.asset_id) if row else None
@@ -312,46 +371,46 @@ def _target(plan: render_plan.RenderPlan) -> preprocess.RenderTarget:
 # ── 렌더 ─────────────────────────────────────────────────────────────────
 
 
-def _render_one(
-    item: GatheredSource,
-    part: render_plan.RenderPart,
-    target: preprocess.RenderTarget,
-    encoding: preprocess.RenderEncoding,
-    staging: Path,
-) -> Path:
-    spec = preprocess.RenderPartSpec(
-        part.index, part.start_frame, part.end_frame, part.output_frames
-    )
-    try:
-        with media_refs.local_media_slot():
-            return preprocess.render_part(
-                item.path, spec, target, encoding, staging,
-                probe=item.probe, clock=item.clock, audio_extents=item.audio,
-            )  # fmt: skip
-    except RuntimeError as error:
-        raise _refuse(item.asset, f"조각 {part.index}을 렌더하지 못했다 — {error}") from error
+def render_pieces(
+    parts: Sequence[render_plan.RenderPart], frame_duration: Fraction, max_seconds: Fraction
+) -> tuple[RenderPiece, ...]:
+    """계획의 조각 → 렌더 토막(D112). 순수하다 — 계획은 바꾸지 않는다.
+
+    원본 프레임과 출력 프레임이 1:1인 조각(레이트 변환이 없고 D71 누적 맞춤이 한 장도 더하거나
+    빼지 않은 조각)만 `max_seconds` 이하의 고른 토막으로 나눈다 — 토막 경계가 원본 프레임 경계라
+    출력 프레임 수의 합이 조각과 같다. 그 밖의 조각과 `max_seconds = 0`이면 조각 그대로다.
+    """
+    limit = math.floor(max_seconds / frame_duration) if max_seconds > 0 else 0
+    pieces: list[RenderPiece] = []
+    for part in parts:
+        frames = part.output_frames
+        one_to_one = not part.fps_convert and frames == part.end_frame - part.start_frame
+        count = math.ceil(frames / limit) if one_to_one and limit > 0 else 1
+        for k in range(count):
+            index = len(pieces)
+            if count == 1:
+                spec = preprocess.RenderPartSpec(
+                    index, part.start_frame, part.end_frame, part.output_frames
+                )
+            else:
+                lo, hi = frames * k // count, frames * (k + 1) // count
+                spec = preprocess.RenderPartSpec(
+                    index, part.start_frame + lo, part.start_frame + hi, hi - lo
+                )
+            pieces.append(RenderPiece(part.index, part.source_id, spec))
+    return tuple(pieces)
 
 
-def _render_parts(
-    plan: render_plan.RenderPlan,
-    gathered: Sequence[GatheredSource],
-    encoding: preprocess.RenderEncoding,
-    staging: Path,
-    context: JobContext | None,
-) -> list[Path]:
-    """조각을 한도만큼 함께 렌더한다 — 취소 범위는 일꾼마다 복사한 문맥으로 따라간다."""
-    by_id = {item.asset.asset_id: item for item in gathered}
-    target = _target(plan)
+def _run_pool(jobs: Sequence[Callable[[], _T]], name: str, context: JobContext | None) -> list[_T]:
+    """일을 로컬 미디어 자리 수만큼 함께 돌려 차례대로 돌려준다 — 끝날 때마다 진행을 하나 올리고,
+    취소 범위는 일꾼마다 복사한 문맥으로 따라간다. 하나가 실패하면 기다리는 일은 시작하지 않는다."""
     workers = FOLDER_WORKSPACE.local_media.limit(os.cpu_count())
-    done: dict[int, Path] = {}
-    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="render-part") as pool:
-        futures: dict[Future[Path], int] = {
-            pool.submit(
-                contextvars.copy_context().run,
-                _render_one, by_id[part.source_id], part, target, encoding, staging,
-            ): part.index
-            for part in plan.parts
-        }  # fmt: skip
+    done: dict[int, _T] = {}
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix=name) as pool:
+        futures: dict[Future[_T], int] = {
+            pool.submit(contextvars.copy_context().run, job): order
+            for order, job in enumerate(jobs)
+        }
         try:
             for future in as_completed(futures):
                 done[futures[future]] = future.result()
@@ -361,7 +420,43 @@ def _render_parts(
             for future in futures:
                 future.cancel()
             raise
-    return [done[part.index] for part in plan.parts]
+    return [done[order] for order in range(len(jobs))]
+
+
+def _render_one(
+    item: GatheredSource,
+    piece: RenderPiece,
+    target: preprocess.RenderTarget,
+    encoding: preprocess.RenderEncoding,
+    staging: Path,
+) -> Path:
+    try:
+        with media_refs.local_media_slot():
+            return preprocess.render_part(
+                item.path, piece.spec, target, encoding, staging,
+                probe=item.probe, clock=item.clock, audio_extents=item.audio,
+            )  # fmt: skip
+    except RuntimeError as error:
+        where = f"조각 {piece.part_index}(토막 {piece.spec.index})"
+        raise _refuse(item.asset, f"{where}을 렌더하지 못했다 — {error}") from error
+
+
+def _render_parts(
+    pieces: Sequence[RenderPiece],
+    plan: render_plan.RenderPlan,
+    gathered: Sequence[GatheredSource],
+    encoding: preprocess.RenderEncoding,
+    staging: Path,
+    context: JobContext | None,
+) -> list[Path]:
+    """토막을 자리 수만큼 함께 렌더한다 — 결과는 토막 차례(= 출력 차례)다."""
+    by_id = {item.asset.asset_id: item for item in gathered}
+    target = _target(plan)
+
+    def job(piece: RenderPiece) -> Callable[[], Path]:
+        return lambda: _render_one(by_id[piece.source_id], piece, target, encoding, staging)
+
+    return _run_pool([job(piece) for piece in pieces], "render-part", context)
 
 
 def _produce(
@@ -370,26 +465,38 @@ def _produce(
     encoding: preprocess.RenderEncoding,
     staging: Path,
     context: JobContext | None,
-) -> tuple[preprocess.RenderedDraft, dict[str, float]]:
-    """조각 → 원본이 그대로인지 다시 확인 → 이어붙이기. (다시 잰 초안, 걸린 시간)."""
+) -> tuple[preprocess.RenderedDraft, dict[str, float], dict[str, Any]]:
+    """토막 → 원본이 그대로인지 다시 확인 → 이어붙이기. (다시 잰 초안, 걸린 시간, 병렬 사실)."""
+    target = _target(plan)
+    pieces = render_pieces(plan.parts, target.frame_duration, plan.settings.piece_max_seconds)
     if context is not None:
-        context.set_total(len(plan.parts) + 1)
+        context.set_total(len(pieces) + 1)
         context.set_progress(0)
     started = time.monotonic()
-    parts = _render_parts(plan, gathered, encoding, staging, context)
+    parts = _render_parts(pieces, plan, gathered, encoding, staging, context)
     rendered = time.monotonic()
     for item in gathered:
         finalcut_export._require_unchanged(item.asset, item.path, item.snapshot)
     check_cancel()
     draft = preprocess.concat_parts(
-        parts, staging / VIDEO_NAME, _target(plan), encoding, expected_frames=plan.total_frames
+        parts, staging / VIDEO_NAME, target, encoding, expected_frames=plan.total_frames
     )
     if context is not None:
         context.advance()
     for part in parts:
         part.unlink()
     finished = time.monotonic()
-    return draft, {"render_seconds": rendered - started, "concat_seconds": finished - rendered}
+    timings = {"render_seconds": rendered - started, "concat_seconds": finished - rendered}
+    return draft, timings, _parallel_facts(plan, pieces)
+
+
+def _parallel_facts(plan: render_plan.RenderPlan, pieces: Sequence[RenderPiece]) -> dict[str, Any]:
+    """보고서의 `parallel` 칸 — 몇 토막을 몇 자리로 함께 렌더했나(D112). 표시만 한다."""
+    return {
+        "workers": FOLDER_WORKSPACE.local_media.limit(os.cpu_count()),
+        "pieces": len(pieces),
+        "piece_max_seconds": _rational(plan.settings.piece_max_seconds),
+    }
 
 
 # ── 쓰기 ─────────────────────────────────────────────────────────────────
@@ -546,8 +653,11 @@ def export_draft(
     gathered_at = time.monotonic()
     try:
         staging.mkdir()
-        draft, timings = _produce(plan, gathered, _encoding(settings, encoder), staging, context)
+        draft, timings, parallel = _produce(
+            plan, gathered, _encoding(settings, encoder), staging, context
+        )
         facts = _facts(folder, moment, encoder, gathered_at - started, timings, started)
+        facts["parallel"] = parallel
         facts = {**facts, **_english_facts(facts, english_section, english_body is not None)}
         _write_texts(staging, plan, gathered, draft, facts, english_body)
         _publish(folder, staging, english_body is not None)
@@ -656,7 +766,16 @@ def _summary(workspace: RawWorkspace, folder: Path, report: Mapping[str, Any]) -
         "parts": len(report.get("parts", [])),
         "dropped": len(report.get("dropped", [])),
         "unreviewed_red_dropped": report.get("unreviewed_red_dropped", 0),
-        "unsupported": [row.get("name") for row in report.get("unsupported", [])],
+        "unsupported": [
+            row.get("name")
+            for row in report.get("unsupported", [])
+            if row.get("reason") != render_plan.DROP_UNRENDERABLE
+        ],
+        "unrenderable": [
+            f"{row.get('name')} — {row.get('detail')}"
+            for row in report.get("unsupported", [])
+            if row.get("reason") == render_plan.DROP_UNRENDERABLE
+        ],
         "cues": report.get("cue_counts", {}),
         "english_srt": _english_path(folder, report),
         "english": report.get("english", {"status": "off"}),

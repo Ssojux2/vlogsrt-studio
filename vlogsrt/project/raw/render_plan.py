@@ -14,7 +14,9 @@
 - 맞닿은 남길 조각은 하나로 합치고, 합칠 틈(`merge_gap_seconds`) 안의 자동 노랑 틈은 잇는다.
   조각 끝은 원본 프레임 격자 **안쪽**으로 붙이고(1프레임 미만 자투리는 이웃한 빠진 구간에 붙는다),
   최소 길이보다 짧은 조각은 빼서 `too_short`로 센다.
-- VFR(map 격자) 원본은 통째로 빼고 `unsupported_grid`로 남긴다(D68).
+- VFR(map 격자) 원본은 통째로 빼고 `unsupported_grid`로 남긴다(D68). 렌더러가 거부한
+  원본(`refusal`)도 통째로 빼고 `unrenderable`과 까닭 글로 남긴다 — 원본 하나가 초안 전체를
+  막지 않는다(D113).
 
 **조용히 사라지는 구간은 없다(규칙 9·D35).** 원본마다 남긴 조각과 뺀 구간(`dropped` — 까닭과 검토
 상태)이 `[0, extent]`를 겹침·틈 없이 덮는다 — 어기면 계획을 만들지 않는다. 확인하지 않은 빨강도
@@ -77,6 +79,7 @@ DROP_HUMAN_EXCLUDED = "human_excluded"
 DROP_TOO_SHORT = "too_short"
 DROP_UNSUPPORTED_GRID = "unsupported_grid"
 DROP_UNANALYZED = "unanalyzed"
+DROP_UNRENDERABLE = "unrenderable"
 DROP_REASONS = (
     DROP_YELLOW,
     DROP_RED_UNREVIEWED,
@@ -86,6 +89,7 @@ DROP_REASONS = (
     DROP_TOO_SHORT,
     DROP_UNSUPPORTED_GRID,
     DROP_UNANALYZED,
+    DROP_UNRENDERABLE,
 )
 """뺀 구간의 까닭 — 빨강은 사람이 그 조각을 본 기록(확정 제외·덮기·결정)이 있으면 `red_confirmed`,
 없으면 `red_unreviewed`다. `unanalyzed`는 등급 판정이 없는 자리(분석 전 원본 · 판정 길이 밖)다."""
@@ -188,6 +192,17 @@ class RenderSource:
     tiers: tuple[TierPiece, ...] | None = None
     segments: tuple[SegmentMark, ...] | None = None
     cues: tuple[SourceCue, ...] = ()
+    refusal: str = ""
+    """렌더러가 이 원본을 거부한 까닭(D113) — 비어 있지 않으면 map처럼 통째로 뺀다."""
+
+
+def excluded_reason(source: RenderSource) -> str | None:
+    """원본을 통째로 뺄 까닭 — map 격자(D68)·렌더 거부(D113), 아니면 None."""
+    if source.grid == GRID_MAP:
+        return DROP_UNSUPPORTED_GRID
+    if source.refusal:
+        return DROP_UNRENDERABLE
+    return None
 
 
 # ── 계획 ─────────────────────────────────────────────────────────────────
@@ -289,6 +304,8 @@ class UnsupportedSource:
     source_id: str
     name: str
     reason: str
+    detail: str = ""
+    """사람이 읽는 까닭 글 — 렌더 거부(D113)만 싣는다. 비면 보고서에 칸을 쓰지 않는다."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -559,8 +576,9 @@ def _layout_source(
 ) -> tuple[list[_Kept], list[_Slot], int]:
     """원본 하나 → 남길 조각, 뺀 자리(합치기 전), 짧아서 뺀 조각 수."""
     slots = _slots(source)
-    if source.grid == GRID_MAP:
-        return [], [replace(s, kept=False, reason=DROP_UNSUPPORTED_GRID) for s in slots], 0
+    whole = excluded_reason(source)
+    if whole is not None:
+        return [], [replace(s, kept=False, reason=whole) for s in slots], 0
     runs = _bridge(slots, _runs(slots), settings.merge_gap_seconds)
     kept: list[_Kept] = []
     dropped: list[_Slot] = []
@@ -813,7 +831,8 @@ def kept_ranges(
     """원본 하나에서 렌더 계획이 남길 조각 — `build_plan`의 원본별 걸음 그대로(W-46b).
 
     `build_plan`은 원본마다 따로 `_layout_source`를 돌므로 같은 원본의 남길 조각은 다른 원본과
-    무관하다. 그래서 레일은 원본 하나만으로 출력과 같은 범위를 그린다. map 원본은 빈 묶음이다.
+    무관하다. 그래서 레일은 원본 하나만으로 출력과 같은 범위를 그린다. map·렌더 거부 원본은
+    빈 묶음이다.
     화면 크기는 보지 않는다 — 남길 범위와 무관하고 포맷 투표(`_sequence`)만 쓴다.
     """
     _require_layout(source)
@@ -840,7 +859,7 @@ def build_plan(
         too_short += short
     sequence = _sequence(kept, settings)
     parts, padded = _parts(kept, sequence) if sequence is not None else ((), 0)
-    projection = _project([s for s in sources if s.grid != GRID_MAP], parts)
+    projection = _project([s for s in sources if excluded_reason(s) is None], parts)
     total = (parts[-1].output_start_frame + parts[-1].output_frames) if parts else 0
     plan = RenderPlan(
         parts=parts,
@@ -859,11 +878,13 @@ def build_plan(
 
 
 def _unsupported(sources: Sequence[RenderSource]) -> tuple[UnsupportedSource, ...]:
-    return tuple(
-        UnsupportedSource(source.source_id, source.name, DROP_UNSUPPORTED_GRID)
-        for source in sources
-        if source.grid == GRID_MAP
-    )
+    rows: list[UnsupportedSource] = []
+    for source in sources:
+        reason = excluded_reason(source)
+        if reason is not None:
+            detail = source.refusal if reason == DROP_UNRENDERABLE else ""
+            rows.append(UnsupportedSource(source.source_id, source.name, reason, detail))
+    return tuple(rows)
 
 
 def _require_cues_inside(plan: RenderPlan) -> None:
@@ -946,6 +967,14 @@ def _sequence_document(sequence: SequenceFormat | None) -> dict[str, Any] | None
     }
 
 
+def _unsupported_document(row: UnsupportedSource) -> dict[str, Any]:
+    """빠진 원본 한 줄 — 까닭 글은 있을 때만 싣는다(map 줄은 예전 바이트 그대로)."""
+    document = asdict(row)
+    if not row.detail:
+        del document["detail"]
+    return document
+
+
 def report_document(plan: RenderPlan) -> dict[str, Any]:
     """`render_report.json`의 몸 — 남긴 조각·뺀 구간·자막 수·포맷·지원 밖 원본(JSON 값만)."""
     return {
@@ -953,7 +982,7 @@ def report_document(plan: RenderPlan) -> dict[str, Any]:
         "dropped": [_dropped_document(row) for row in plan.dropped],
         "cue_counts": asdict(plan.cue_counts),
         "sequence": _sequence_document(plan.sequence),
-        "unsupported": [asdict(row) for row in plan.unsupported],
+        "unsupported": [_unsupported_document(row) for row in plan.unsupported],
         "unreviewed_red_dropped": plan.unreviewed_red_dropped,
         "too_short": plan.too_short,
         "padded": plan.padded,

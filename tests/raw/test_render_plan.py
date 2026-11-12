@@ -270,6 +270,31 @@ def test_vfr_map_sources_are_excluded_whole_with_their_reason() -> None:
     assert [(d.source_id, d.reason) for d in plan.dropped] == [("v", rp.DROP_UNSUPPORTED_GRID)]
 
 
+def test_a_source_the_renderer_refuses_is_excluded_whole_with_its_reason() -> None:
+    """렌더러가 거부한 원본(D113)은 map처럼 통째로 빼고 까닭 글을 싣는다 — 초안을 막지 않는다."""
+    refused = replace(
+        _source("r", tiers=(_tier(0, 10),), cues=(_cue("u1", 1, 2),)),
+        refusal="렌더할 수 없다 — 패킷 증거가 선언 창을 넘는다",
+    )
+    plan = rp.build_plan([_source(tiers=(_tier(0, 10),)), refused], SETTINGS)
+    assert [p.source_id for p in plan.parts] == ["a"]
+    assert [(u.source_id, u.reason, u.detail) for u in plan.unsupported] == [
+        ("r", rp.DROP_UNRENDERABLE, "렌더할 수 없다 — 패킷 증거가 선언 창을 넘는다")
+    ]
+    assert [(d.source_id, d.reason) for d in plan.dropped] == [("r", rp.DROP_UNRENDERABLE)]
+    assert plan.cue_counts.source == 0  # 뺀 원본의 자막은 투영하지 않는다
+    _require_tiles(plan, [_source(tiers=(_tier(0, 10),)), refused])
+    document = rp.report_document(plan)
+    assert document["unsupported"] == [
+        {
+            "source_id": "r",
+            "name": "r.mov",
+            "reason": rp.DROP_UNRENDERABLE,
+            "detail": "렌더할 수 없다 — 패킷 증거가 선언 창을 넘는다",
+        }
+    ]
+
+
 def test_kept_and_dropped_tile_every_source_exactly() -> None:
     sources = [
         _source(

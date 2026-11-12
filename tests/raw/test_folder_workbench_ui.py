@@ -529,6 +529,15 @@ SUMMARY = {
 }
 
 
+def test_the_result_card_warns_about_originals_the_renderer_left_out() -> None:
+    """D113: 렌더 판정이 거부해 뺀 원본은 막지 않고 경고로 이름과 까닭을 댄다."""
+    calm = {**SUMMARY, "unreviewed_red_dropped": 0}
+    assert "렌더할 수 없어" not in ui_facade.render_export_card_html(calm)
+    refused = {**calm, "unrenderable": ["IMG_<9>.MOV — 렌더할 수 없다 — 선언 창"]}
+    card = ui_facade.render_export_card_html(refused)
+    assert 'role="alert">렌더할 수 없어 빠진 원본 1개: IMG_&lt;9&gt;.MOV — 렌더할 수 없다' in card
+
+
 def test_the_result_card_names_paths_warning_player_and_unsupported() -> None:
     card = ui_facade.render_export_card_html(SUMMARY)
     assert "3분 12.4초" in card and "조각 12개" in card and "h264_videotoolbox" in card

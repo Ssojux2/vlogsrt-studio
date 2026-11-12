@@ -337,6 +337,105 @@ def test_a_uniform_clock_keeps_the_one_tick_window(tmp_path: Path) -> None:
         preprocess._assert_raw_supported(probe, uniform)
 
 
+# ── 균일 시계의 선언 창 — µs 반올림 몫과 실제 마지막 패킷 길이(D113) ───────────────
+
+
+def _iphone_json(
+    count: int, *, declared_ticks: int, durations: dict[int, int] | None = None
+) -> str:
+    """아이폰 mov 모양 — 패킷마다 길이를 싣는다(`durations`는 pts → 틱, 없으면 한 프레임).
+
+    패킷은 디코드 순서로 나온다 — 마지막 두 패킷을 바꿔 제시 순서와 다르게 둔다.
+    """
+    pts = [T * n for n in range(count)]
+    lengths = durations or {}
+    packets = [{"pts": value, "duration": lengths.get(value, T)} for value in pts]
+    packets[-1], packets[-2] = packets[-2], packets[-1]
+    stream = json.loads(_stream_json(pts))["streams"][0]
+    stream["duration_ts"] = declared_ticks
+    return json.dumps({"streams": [stream], "packets": packets})
+
+
+def _iphone_probe(declared: str) -> preprocess.RawMediaProbe:
+    """format: 시작 0 · duration은 ffprobe가 µs로 적은 값 그대로."""
+    tb = Fraction(1, 600)
+    probe = _matrix_probe(time_base=tb, r_frame_rate=Fraction(30), avg_frame_rate=Fraction(30))
+    return replace(probe, duration=Fraction(declared))
+
+
+def test_img_8987_one_tick_written_a_third_microsecond_early_is_renderable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """실측 IMG_8987: 114패킷 · 트랙 2279틱(마지막 프레임 19틱) · format이 3.798333초로 적혔다.
+
+    참 넘침은 한 틱(균일 허용 그대로)인데 µs 표기가 참값보다 1/3 µs 일러 거부했다 — 같은 모양의
+    균일 원본 27개가 반올림 방향만으로 20 통과 · 7 거부로 갈렸다.
+    """
+    clock = _clock(monkeypatch, tmp_path, _iphone_json(114, declared_ticks=2279))
+    assert (clock.conform_kind, clock.exact_end) == ("uniform", Fraction(19, 5))
+    probe = _iphone_probe("3.798333")
+    preprocess._assert_raw_supported(probe, clock)  # 죽지 않는다
+    assert preprocess.render_part_failures(probe, clock) == ()
+
+
+def test_the_uniform_window_takes_half_a_microsecond_and_no_more(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """적힌 선언은 참값의 가장 가까운 µs다 — 참값과 ½ µs 이하로만 다르다. 그 너머는 넘침이다."""
+    clock = _clock(monkeypatch, tmp_path, _iphone_json(114, declared_ticks=2279))
+    half = Fraction(1, 2 * 10**6)
+    true_end = Fraction(2279, 600)
+    preprocess._assert_raw_supported(replace(_iphone_probe("0"), duration=true_end - half), clock)
+    beyond = replace(_iphone_probe("0"), duration=true_end - half - Fraction(1, 10**9))
+    with pytest.raises(preprocess.RawMediaUnsupported, match="선언 창"):
+        preprocess._assert_raw_supported(beyond, clock)
+
+
+def test_img_1071_short_last_packet_is_measured_by_its_own_length(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """실측 IMG_1071(사진 앱에서 다듬은 클립): 90패킷 · 마지막 패킷 pts 1780 · 길이 8틱 ·
+    선언 1788틱.
+
+    명목 끝(3초)으로 재면 12틱 넘친 것처럼 보였다 — 패킷 증거 끝은 마지막 패킷 자신의 끝이다.
+    시계의 명목 칸(`exact_end`·`frame_count`)은 그대로다.
+    """
+    clock = _clock(
+        monkeypatch, tmp_path, _iphone_json(90, declared_ticks=1788, durations={1780: 8})
+    )
+    assert (clock.conform_kind, clock.frame_count, clock.exact_end) == ("uniform", 90, Fraction(3))
+    assert clock.last_packet_ticks == 8
+    probe = _iphone_probe("2.98")
+    preprocess._assert_raw_supported(probe, clock)  # 죽지 않는다
+    assert preprocess.render_part_failures(probe, clock) == ()
+
+
+def test_a_short_last_packet_beyond_the_declaration_is_still_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = _clock(
+        monkeypatch, tmp_path, _iphone_json(90, declared_ticks=1788, durations={1780: 8})
+    )
+    with pytest.raises(preprocess.RawMediaUnsupported, match="선언 창"):
+        preprocess._assert_raw_supported(_iphone_probe("2.96"), clock)
+
+
+def test_a_last_packet_length_never_widens_the_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """마지막 패킷이 명목보다 길거나 길이를 모르면 패킷 증거 끝은 예전 그대로(명목 끝)다."""
+    long_last = _clock(
+        monkeypatch, tmp_path, _iphone_json(90, declared_ticks=1788, durations={1780: 40})
+    )
+    assert long_last.last_packet_ticks == 40
+    assert preprocess._packet_evidence_end(long_last) == long_last.exact_end == Fraction(3)
+    with pytest.raises(preprocess.RawMediaUnsupported, match="선언 창"):
+        preprocess._assert_raw_supported(_iphone_probe("2.98"), long_last)
+    unknown = _clock(monkeypatch, tmp_path, _stream_json([T * n for n in range(90)]))
+    assert unknown.last_packet_ticks == 0
+    assert preprocess._packet_evidence_end(unknown) == Fraction(3)
+
+
 # ── 추출 argv — 균일 원본은 바이트 그대로, 맞춘 원본만 탐색·setpts ───────────────
 
 

@@ -2433,6 +2433,9 @@ class RawVideoClock:
     slot_packets: tuple[int, ...] = ()
     """map(D70)만 — 슬롯 s가 보이는 패킷의 제시 순번(`select=eq(n,…)`의 n). 길이가 곧
     `frame_count`다. 균일·snap은 빈 튜플이다(순번 = 슬롯)."""
+    last_packet_ticks: int = 0
+    """제시 순서 마지막 패킷이 적은 제 길이(틱, D113) — 0이면 모른다. 선언 창 판정(균일 시계의 패킷
+    증거 끝)만 읽는다. 명목 칸(`exact_end`·`frame_count`)을 바꾸지 않고 지문·캐시 열쇠에 없다."""
 
 
 @process_step("추출 시계 확인")
@@ -2460,6 +2463,8 @@ def probe_extraction_clock(
             "-show_entries", "stream=index,codec_type,r_frame_rate,avg_frame_rate,time_base,"
             "nb_frames,start_pts,duration_ts",
             "-show_entries", "packet=pts",
+            # 마지막 패킷의 제 길이(D113) — 같은 packet 절에 합쳐 나온다.
+            "-show_entries", "packet=duration",
             "-of", "json",
             str(source),
         ]
@@ -2470,9 +2475,30 @@ def probe_extraction_clock(
     pts = _packet_pts(completed.stdout, source)
     conform = policy if policy is not None else RAW_GRID_CONFORM
     clock = _measured_clock(entry, rate, time_base, pts, source, conform)
+    clock = replace(clock, last_packet_ticks=_last_packet_ticks(completed.stdout, clock.last_pts))
     if probe is not None:
         _require_clock_stream(clock, probe, source)
     return clock
+
+
+def _last_packet_ticks(stdout: str, last_pts: int) -> int:
+    """제시 순서 마지막 패킷(pts가 `last_pts`)이 적은 길이 — 없거나 정수가 아니면 0(모름).
+
+    패킷은 디코드 순서로 나오므로 목록의 끝이 아니라 pts로 찾는다. 같은 pts가 둘이면(엄격 증명이
+    막는 모양) 짧은 쪽을 믿지 않고 모른다고 한다.
+    """
+    packets = json.loads(stdout).get("packets") or []
+    lengths = [
+        packet.get("duration")
+        for packet in packets
+        if isinstance(packet, dict) and packet.get("pts") == last_pts
+    ]
+    if len(lengths) != 1:
+        return 0
+    value = lengths[0]
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return 0
+    return value
 
 
 def _require_clock_stream(clock: RawVideoClock, probe: RawMediaProbe, source: Path) -> None:
@@ -3256,11 +3282,19 @@ def _packet_evidence_end(clock: RawVideoClock) -> Fraction:
     균일 시계는 예전 값(`exact_end`) 그대로다 — 양자화 시계에서 두 값이 한 틱 갈려도 판정이
     바뀌지 않게. map(D70)의 마지막 패킷은 명목 프레임 길이보다 짧게 보일 수 있다(한 슬롯 창에 든
     소수 레이트 패킷) — 마지막 패킷이 선언 창 **안에서 시작하는가**만 본다(한 틱).
+
+    균일 시계의 마지막 패킷이 제 길이를 한 프레임보다 짧게 적었으면 그 끝이다(D113 — 실측
+    IMG_1071: 사진 앱에서 다듬은 클립의 마지막 패킷이 8틱이라 명목 끝 3초가 선언 2.98초를 12틱
+    넘친 것처럼 보였다). **줄이기만** 한다 — 길이를 모르거나(0) 한 프레임 이상이면 예전 값
+    (`exact_end`) 그대로다.
     """
     if clock.conform_kind == "map":
         return clock.last_pts * clock.time_base + clock.time_base
     if clock.conform_kind != "uniform":
         return clock.last_pts * clock.time_base + clock.frame_duration
+    measured = clock.last_packet_ticks * clock.time_base
+    if 0 < measured < clock.frame_duration:
+        return clock.last_pts * clock.time_base + measured
     return clock.exact_end
 
 
@@ -3270,14 +3304,20 @@ def _declared_window_slack(probe: RawMediaProbe, clock: RawVideoClock) -> Fracti
     맞춘 원본(D69)의 마지막 패킷이 늦으면 패킷 끝이 선언 길이와 정확히 한 틱 차로 붙는다(실측
     IMG_8863: 패킷 끝 2391/100초 = 참 선언 끝 14345/600초 + 1/600초). 선언은 µs로 내려 적혀
     있어(23.908333초) 그 경계가 1/3000000초 넘친 것처럼 보였다 — 적힌 값의 눈금만큼은 참값의
-    몫이다. 그보다 먼 패킷은 여전히 막는다. 균일 시계는 예전 한 틱 그대로다(판정 바이트 그대로).
-    map(D70)은 패킷 시작 한 틱을 이미 셌으므로 µs 눈금만이다.
+    몫이다. 그보다 먼 패킷은 여전히 막는다. map(D70)은 패킷 시작 한 틱을 이미 셌으므로 µs
+    눈금만이다.
+
+    균일 시계는 한 틱 + **반 µs**다(D113). ffprobe는 참값의 **가장 가까운** µs를 적으므로(실측
+    IMG_9006: 13/6초 → 2.166667) 적힌 값과 참값은 반 µs 이하로만 다르다. 실측 IMG_8987: 트랙
+    2279틱 · 패킷 끝 2280틱(참 넘침 한 틱)인데 3.798333초로 적혀 한 틱 + 1/3 µs로 보였다 — 같은
+    모양의 균일 원본 27개가 반올림 방향만으로 20 통과 · 7 거부로 갈렸다. 반 µs 너머(한 틱 + 1 µs
+    등)는 여전히 막는다.
     """
     if clock.conform_kind == "map":
         return 2 * _DECLARED_WINDOW_QUANTUM
     if clock.conform_kind != "uniform":
         return probe.video.time_base + 2 * _DECLARED_WINDOW_QUANTUM
-    return probe.video.time_base
+    return probe.video.time_base + _DECLARED_WINDOW_QUANTUM / 2
 
 
 def _assert_raw_supported(probe: RawMediaProbe, clock: RawVideoClock) -> None:

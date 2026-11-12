@@ -628,6 +628,14 @@ def _export_summary_lines(summary: Mapping[str, object]) -> list[str]:
         lines.append(
             f'<p class="vl-export-note">분석 지원 밖이라 빠진 원본: {html.escape(names)}</p>'
         )
+    refused = summary.get("unrenderable")
+    if isinstance(refused, (list, tuple)) and refused:
+        # 추천 구간이 초안에서 빠졌다 — 막지 않고 알린다(D113).
+        listed_refused = " / ".join(str(row) for row in refused)
+        lines.append(
+            f'<p class="vl-export-warn" role="alert">렌더할 수 없어 빠진 원본'
+            f" {len(refused)}개: {html.escape(listed_refused)}</p>"
+        )
     media = summary.get("media_file_id")
     if media:
         src = html.escape(f"/media/{media}", quote=True)

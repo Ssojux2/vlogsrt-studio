@@ -1709,6 +1709,11 @@ class RenderSettings:
       기본 규칙과 같은 10000). 조각·이어붙이기 한 번의 한도는 `max(timeout_floor_seconds,
       timeout_media_ratio × 길이)`(D59·D62와 같은 꼴)이고, 렌더 ffmpeg는 nice `priority`로 돈다
       (미리보기와 같은 양보, D62).
+    - `piece_max_seconds`(D112): 렌더할 때만 긴 조각을 이 길이 이하의 고른 토막으로 나눠 로컬
+      미디어 자리만큼 함께 인코딩한다 — 긴 추천 구간 하나가 ffmpeg 하나로 혼자 도는 동안 다른
+      자리가 노는 것을 막는다. 계획(조각·출력 위치·SRT·보고서의 `parts`)은 그대로이고, 원본과
+      시퀀스 레이트가 같고 프레임이 1:1인 조각만 나눈다(레이트 변환 조각은 통째로). 0이면 나누지
+      않는다(예전 그대로).
     """
 
     min_part_seconds: Fraction = Fraction(1)
@@ -1731,6 +1736,7 @@ class RenderSettings:
     timeout_floor_seconds: float = 1800.0
     timeout_media_ratio: float = 6.0
     priority: int = 10
+    piece_max_seconds: Fraction = Fraction(30)
 
     def __post_init__(self) -> None:
         problems = (
@@ -1745,7 +1751,7 @@ class RenderSettings:
 def _render_length_problems(settings: RenderSettings) -> list[str]:
     problems = [
         f"{name}는 0 이상인 Fraction이어야 한다: {getattr(settings, name)!r}"
-        for name in ("min_part_seconds", "merge_gap_seconds")
+        for name in ("min_part_seconds", "merge_gap_seconds", "piece_max_seconds")
         if not isinstance(getattr(settings, name), Fraction) or getattr(settings, name) < 0
     ]
     problems += [

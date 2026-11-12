@@ -10,6 +10,7 @@ SRT = 계획의 투영 · 확인하지 않은 빨강도 내고 보고서에 남�
 
 from __future__ import annotations
 
+import array
 import dataclasses
 import hashlib
 import json
@@ -226,6 +227,73 @@ def test_a_wrong_frame_count_is_refused_and_nothing_is_published(
         preprocess.concat_parts([part], part, SMALL, encoding, expected_frames=30)
 
 
+def _part(
+    index: int, start: int, end: int, output: int, *, fps_convert: bool = False
+) -> render_plan.RenderPart:
+    fd = F(1, 30)
+    return render_plan.RenderPart(
+        index=index, source_id=f"s{index}", start_frame=start, end_frame=end,
+        start=start * fd, end=end * fd, output_start_frame=0, output_frames=output,
+        output_start=F(0), output_end=output * fd, reason="green",
+        scale=False, pad=False, fps_convert=fps_convert,
+    )  # fmt: skip
+
+
+def test_long_one_to_one_parts_split_into_even_pieces_and_the_rest_stay_whole() -> None:
+    parts = [
+        _part(0, 100, 400, 300),  # 10초 · 1:1 → 4초 이하 셋(100장씩)
+        _part(1, 0, 48, 60, fps_convert=True),  # 레이트 변환 — 통째로
+        _part(2, 10, 131, 120),  # D71 누적 맞춤이 한 장 줄였다 — 통째로
+        _part(3, 0, 90, 90),  # 3초 — 한도 안
+    ]
+    pieces = render_export.render_pieces(parts, F(1, 30), F(4))
+    assert [(p.part_index, p.spec) for p in pieces] == [
+        (0, preprocess.RenderPartSpec(0, 100, 200, 100)),
+        (0, preprocess.RenderPartSpec(1, 200, 300, 100)),
+        (0, preprocess.RenderPartSpec(2, 300, 400, 100)),
+        (1, preprocess.RenderPartSpec(3, 0, 48, 60)),
+        (2, preprocess.RenderPartSpec(4, 10, 131, 120)),
+        (3, preprocess.RenderPartSpec(5, 0, 90, 90)),
+    ]
+    uneven = render_export.render_pieces([_part(0, 0, 301, 301)], F(1, 30), F(4))
+    assert [p.spec.output_frames for p in uneven] == [100, 100, 101]  # 고르게 · 합은 그대로
+    whole = render_export.render_pieces(parts, F(1, 30), F(0))  # 0이면 예전 그대로
+    assert [p.spec for p in whole] == [
+        preprocess.RenderPartSpec(i, p.start_frame, p.end_frame, p.output_frames)
+        for i, p in enumerate(parts)
+    ]
+
+
+def test_a_part_rendered_in_pieces_joins_without_losing_frames_or_samples(
+    small_media: dict[str, Path], tmp_path: Path
+) -> None:
+    encoding = _encoding()
+    whole_dir, split_dir = tmp_path / "whole", tmp_path / "split"
+    whole_dir.mkdir(), split_dir.mkdir()
+    source = small_media["wide"]
+    whole = preprocess.render_part(
+        source, preprocess.RenderPartSpec(0, 0, 60, 60), SMALL, encoding, whole_dir
+    )
+    halves = [
+        preprocess.render_part(
+            source,
+            preprocess.RenderPartSpec(k, 30 * k, 30 * k + 30, 30),
+            SMALL,
+            encoding,
+            split_dir,
+        )  # fmt: skip
+        for k in range(2)
+    ]
+    one = array.array("h", _pcm(whole))
+    two = array.array("h", _pcm(halves[0]) + _pcm(halves[1]))
+    assert len(one) == len(two) == 2 * 48000  # 이음매에서 샘플이 빠지거나 겹치지 않는다
+    assert max(abs(a - b) for a, b in zip(one, two, strict=True)) <= 16  # -66 dBFS 아래
+    joined = preprocess.concat_parts(
+        halves, split_dir / "draft.mp4", SMALL, encoding, expected_frames=60
+    )
+    assert (joined.frame_count, joined.duration) == (60, 2)
+
+
 def test_a_map_clock_is_never_rendered(small_media: dict[str, Path], tmp_path: Path) -> None:
     source = small_media["wide"]
     probe = preprocess.probe_raw_media(source)
@@ -423,6 +491,22 @@ def test_a_second_export_is_a_new_folder_and_latest_reads_it(
     assert latest["parts"] == len(second.plan.parts)
 
 
+def test_an_export_in_short_pieces_keeps_the_plan_frames_and_srt(
+    trip: Folder, exported: Exported
+) -> None:
+    short = dataclasses.replace(RENDER_SETTINGS, piece_max_seconds=F(1))
+    later = datetime(2026, 10, 28, 4, 0, 0, tzinfo=UTC)
+    result = render_export.export_draft(trip.service, trip.root, now=lambda: later, settings=short)
+    report = json.loads(result.report.read_text(encoding="utf-8"))
+    assert report["parts"] == exported.report["parts"]  # 계획은 그대로 — 나뉜 것은 렌더 토막뿐
+    assert result.srt.read_bytes() == exported.result.srt.read_bytes()
+    assert report["parallel"]["pieces"] > len(result.plan.parts)
+    assert report["parallel"]["piece_max_seconds"] == {"num": 1, "den": 1}
+    assert exported.report["parallel"]["pieces"] == len(exported.result.plan.parts)
+    assert int(_streams(result.video)["video"]["nb_read_frames"]) == result.plan.total_frames
+    assert not list(result.folder.glob("part*"))
+
+
 def _cancel_once_a_part_exists(root: Path) -> Callable[[], None]:
     def check() -> None:
         if any((root / "export").glob("*/_staging/part*.mov")):
@@ -463,6 +547,36 @@ def test_a_map_source_is_left_out_whole_and_reported(
     assert len(tall) == 1 and tall[0]["start"] == {"num": 0, "den": 1}
     assert _part_of(result.plan, "C_tall.mp4", report) == []
     assert int(_streams(result.video)["video"]["nb_read_frames"]) == result.plan.total_frames
+
+
+def test_a_source_the_renderer_refuses_is_left_out_and_named_not_blocking(
+    trip: Folder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D113: 렌더 판정이 거부한 원본 하나가 초안 전체를 막지 않는다 — 빼고 보고서·요약에
+    이름과 까닭을 남긴다."""
+    real = preprocess.render_part_failures
+
+    def refused(
+        probe: preprocess.RawMediaProbe, clock: preprocess.RawVideoClock
+    ) -> tuple[str, ...]:
+        if probe.source.name == "C_tall.mp4":
+            return ("패킷 증거가 선언 창을 넘는다",)
+        return real(probe, clock)
+
+    monkeypatch.setattr(preprocess, "render_part_failures", refused)
+    later = datetime(2026, 10, 28, 6, 30, 0, tzinfo=UTC)
+    result = render_export.export_draft(trip.service, trip.root, now=lambda: later)
+    report = json.loads(result.report.read_text(encoding="utf-8"))
+    assert [(row["name"], row["reason"]) for row in report["unsupported"]] == [
+        ("C_tall.mp4", render_plan.DROP_UNRENDERABLE)
+    ]
+    assert "패킷 증거가 선언 창을 넘는다" in report["unsupported"][0]["detail"]
+    assert _part_of(result.plan, "C_tall.mp4", report) == []
+    assert int(_streams(result.video)["video"]["nb_read_frames"]) == result.plan.total_frames
+    summary = trip.service.latest_render_export(trip.root)
+    assert summary is not None and summary["folder"] == str(result.folder)
+    assert summary["unsupported"] == []
+    assert summary["unrenderable"] == ["C_tall.mp4 — 렌더할 수 없다 — 패킷 증거가 선언 창을 넘는다"]
 
 
 def test_nothing_to_keep_is_refused_before_any_folder(trip: Folder) -> None:
