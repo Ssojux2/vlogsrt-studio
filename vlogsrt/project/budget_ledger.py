@@ -7,7 +7,8 @@
 - 열기: 같은 신원·승인 상한으로만 재오픈한다. 다르면 거절하고 파일은 손대지
   않는다 — 조용히 비우고 다시 초기화하는 길은 없다.
 - 예약: 남은 상한 안에 들어오면 디스크에 남긴 뒤 허가를 돌려준다. 모자라면
-  기록 없이 거절한다. 같은 요청 ID는 두 번 허가하지 않는다.
+  기록 없이 거절한다. 같은 요청 ID는 두 번 허가하지 않는다. 승인 상한이 없는
+  원장(D110 — 비용 추정을 지운 뒤의 새 원장)은 상한 검사 없이 예약만 남긴다.
 - 미지수: 결측·오류·취소는 0USD도 만료도 환불도 아니다 — 상한을 그대로 묶는다.
 - 확정: 검증된 ``ActualUsage``로 딱 한 번 예약 상한을 실측으로 갈아끼운다.
   실측이 상한을 넘어도 기록은 남긴다(초과 증거를 버리지 않는다).
@@ -182,18 +183,18 @@ class LedgerSnapshot:
     """원장의 현재량 — 합계는 매번 기록에서 다시 계산한 값이다."""
 
     identity: LedgerIdentity
-    approval_limit: Decimal
+    approval_limit: Decimal | None
     measured_actual: Decimal
     reserved_unresolved: Decimal
     consumed_bound: Decimal
-    remaining_bound: Decimal
+    remaining_bound: Decimal | None
     records: tuple[ReservationRecord, ...]
 
 
 @dataclass(frozen=True, slots=True)
 class _LedgerFile:
     identity: LedgerIdentity
-    approval_limit: Decimal
+    approval_limit: Decimal | None
     records: tuple[ReservationRecord, ...]
 
 
@@ -202,7 +203,7 @@ class _Totals:
     measured_actual: Decimal
     reserved_unresolved: Decimal
     consumed_bound: Decimal
-    remaining_bound: Decimal
+    remaining_bound: Decimal | None
 
 
 def _require_sha256(value: str, label: str) -> None:
@@ -533,6 +534,11 @@ def _require_record_match(record: ReservationRecord, identity: LedgerIdentity) -
         raise LedgerCorrupt("기록의 사용량이 예약의 모델과 다르다")
 
 
+def _optional_limit(value: object) -> Decimal | None:
+    """승인 상한 — D110 이후의 새 원장은 상한이 없다(null). 옛 원장의 상한은 그대로 읽는다."""
+    return None if value is None else _decimal_from_text(value, "승인 상한")
+
+
 def _parse_ledger(document: dict[str, object]) -> _LedgerFile:
     if set(document) != _LEDGER_KEYS:
         raise LedgerCorrupt(f"원장 키가 계약과 다르다: {sorted(document)}")
@@ -549,9 +555,7 @@ def _parse_ledger(document: dict[str, object]) -> _LedgerFile:
         if record.request_id in seen:
             raise LedgerCorrupt(f"요청 ID가 원장 안에서 중복된다: {record.request_id}")
         seen.add(record.request_id)
-    return _LedgerFile(
-        identity, _decimal_from_text(document["approval_limit"], "승인 상한"), records
-    )
+    return _LedgerFile(identity, _optional_limit(document["approval_limit"]), records)
 
 
 def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -609,7 +613,9 @@ def _record_payload(record: ReservationRecord) -> dict[str, object]:
 
 def _ledger_document(state: _LedgerFile) -> dict[str, object]:
     return {
-        "approval_limit": _decimal_text(state.approval_limit),
+        "approval_limit": (
+            None if state.approval_limit is None else _decimal_text(state.approval_limit)
+        ),
         "identity": state.identity.payload(),
         "ledger_version": LEDGER_VERSION,
         "records": [_record_payload(record) for record in state.records],
@@ -697,9 +703,9 @@ def _totals(state: _LedgerFile) -> _Totals:
                 start=Decimal(0),
             )
             consumed = measured + unresolved
-            remaining = state.approval_limit - consumed
-            if remaining < 0:
-                remaining = Decimal(0)
+            remaining: Decimal | None = None
+            if state.approval_limit is not None:
+                remaining = max(state.approval_limit - consumed, Decimal(0))
     except decimal.DecimalException as exc:
         raise BudgetLedgerError(f"원장 합계가 지원 금액 영역을 벗어났다: {exc}") from exc
     return _Totals(measured, unresolved, consumed, remaining)
@@ -783,7 +789,9 @@ class BudgetLedger:
     내구 쓰기 순서로만 일어난다. 메모리 상태는 신원·상한·막힘 여부뿐이다.
     """
 
-    def __init__(self, path: Path, identity: LedgerIdentity, approval_limit: Decimal) -> None:
+    def __init__(
+        self, path: Path, identity: LedgerIdentity, approval_limit: Decimal | None
+    ) -> None:
         self._path = path
         self._identity = identity
         self._approval_limit = approval_limit
@@ -791,14 +799,16 @@ class BudgetLedger:
         self._poisoned: str | None = None
 
     @classmethod
-    def open(cls, path: Path, *, identity: LedgerIdentity, approval_limit: Decimal) -> BudgetLedger:
+    def open(
+        cls, path: Path, *, identity: LedgerIdentity, approval_limit: Decimal | None = None
+    ) -> BudgetLedger:
         """같은 신원·상한으로 원장을 열거나 만든다 — 다르면 거절한다.
 
         원장은 디렉터리를 만들지 않는다: 호출자는 이미 내구화된 자리에
         놓는다(실패한 내구화를 재시도가 건너뛰는 구멍을 남기지 않으려면,
         만드는 쪽이 내구화까지 맡는 게 유일하게 정직하다).
         """
-        limit = _decimal_amount(approval_limit, "승인 상한")
+        limit = None if approval_limit is None else _decimal_amount(approval_limit, "승인 상한")
         ledger = cls(path, identity, limit)
         _require_existing_parent(path)
         with ledger._mutex, _ledger_lock(path):
@@ -833,7 +843,7 @@ class BudgetLedger:
                 if _find_record(state.records, request_id) is not None:
                     raise DuplicateRequest(f"요청 ID가 이미 허가를 받았다: {request_id}")
                 totals = _totals(state)
-                if amount > totals.remaining_bound:
+                if totals.remaining_bound is not None and amount > totals.remaining_bound:
                     raise InsufficientBudget(
                         f"예약 {_decimal_text(amount)}USD가 남은 승인 상한 "
                         f"{_decimal_text(totals.remaining_bound)}USD를 넘는다 — 보내지 않는다"

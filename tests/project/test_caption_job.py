@@ -25,6 +25,7 @@ from types import ModuleType
 from typing import Any
 
 import pytest
+from analysis_scope import caption_scope_of
 
 from tests._dotenv_guard import stage_synthetic_dotenv
 from vlogsrt import transcribe
@@ -35,9 +36,8 @@ from vlogsrt.project.workflow_protocol import (
     AnalysisAuthorization,
     CancellationRequest,
     CaptionAuthorization,
-    CaptionEstimate,
-    CaptionRequest,
     CaptionResult,
+    CaptionStateEvent,
     decode_message,
     encode_message,
 )
@@ -117,15 +117,13 @@ def _read_one_job_message(job_dir: Path, name: str) -> Any:
 
 
 def _write_caption_authorization(job_dir: Path) -> None:
-    """앱이 승인 때 남기는 문서 — job의 추정에 정확히 묶인다."""
-    estimate = _read_one_job_message(job_dir, "caption-estimate.jsonl")
-    assert isinstance(estimate, CaptionEstimate)
+    """앱이 승인 때 남기는 문서 — job의 자막 범위(요청 리비전·설정 지문)에 정확히 묶인다."""
+    estimate = caption_scope_of(job_dir)
     (job_dir / "caption-authorization.jsonl").write_text(
         encode_message(
             CaptionAuthorization(
                 request_revision=estimate.request_revision,
-                estimate_revision=estimate.estimate_revision,
-                pricing_snapshot_revision=estimate.pricing_snapshot_revision,
+                settings_sha256=estimate.settings_sha256,
                 authorized_at="2026-10-01T04:00:00Z",
             )
         ),
@@ -255,35 +253,38 @@ def _forbid_paid_surfaces(monkeypatch: pytest.MonkeyPatch) -> None:
 # ─────────────────────────────────────────────────────────────
 
 
-def test_caption_estimate_fixes_cost_without_transcriber_or_key(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, engine: ModuleType
+def test_caption_scope_is_measured_without_transcriber_or_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """D110: 비용 추정 문(`caption-estimate`)은 없다 — 범위는 전사기·키 없이 잰다."""
     job_dir = _stage_caption_job(tmp_path)
     _forbid_paid_surfaces(monkeypatch)
 
-    assert engine.main(["caption-estimate", "caption-1", str(job_dir)]) == 0
+    scope = caption_scope_of(job_dir)
 
-    estimate = _read_one_job_message(job_dir, "caption-estimate.jsonl")
-    assert isinstance(estimate, CaptionEstimate)
-    assert estimate.audio_seconds == 4
-    # 원장은 caption_estimate_ready에서 멈춘다 — 승인 없이 실행으로 넘어가지 않는다.
-    journal = project_commands.CaptionJournal.open(job_dir / "workspace" / "caption.jsonl")
-    assert journal.state == "caption_estimate_ready"
-    assert (job_dir / "caption-request.jsonl").is_file()
-    assert (job_dir / "pricing-caption.jsonl").is_file()
+    assert scope.audio_seconds == 4
+    assert scope.cost_upper_bound is None
+    assert scope.pricing_snapshot_revision is None
+    # 재기는 파일을 쓰지 않는다 — 원장도 가격 문서도 없다.
+    assert not (job_dir / "workspace" / "caption.jsonl").exists()
+    assert not (job_dir / "pricing-caption.jsonl").exists()
     # 이 job에는 러프컷 workflow가 없다 — receive를 거치지 않는다(S4A).
     assert not (job_dir / "workspace" / "workflow.jsonl").exists()
 
 
-def test_caption_estimate_rejects_broken_origin_documents(
-    tmp_path: Path, engine: ModuleType
+def test_caption_run_refuses_broken_origin_documents(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, engine: ModuleType
 ) -> None:
     job_dir = _stage_caption_job(tmp_path)
+    _write_caption_authorization(job_dir)
+    fake = _FinalAudioTranscriber(expected_source=str(job_dir / "final.wav"))
+    _patch_paid_boundaries(monkeypatch, fake)
     (job_dir / "caption-origin.json").unlink()
-    assert engine.main(["caption-estimate", "caption-1", str(job_dir)]) == 1
+    assert engine.main(["caption-run", "caption-1", str(job_dir)]) == 1
 
     # 원본 문서가 있어도 결과 프로젝트 UID가 다르면 남의 타임라인에 자막을 얹을 뻔한 것이다.
     job_dir = _stage_caption_job(tmp_path / "other")
+    _write_caption_authorization(job_dir)
     (job_dir / "caption-origin.json").write_text(
         json.dumps(
             {
@@ -294,8 +295,59 @@ def test_caption_estimate_rejects_broken_origin_documents(
         ),
         encoding="utf-8",
     )
-    assert engine.main(["caption-estimate", "caption-2", str(job_dir)]) == 1
+    assert engine.main(["caption-run", "caption-2", str(job_dir)]) == 1
     assert not (job_dir / "caption-estimate.jsonl").exists()
+    assert not (job_dir / "workspace" / "caption.jsonl").exists()
+    assert fake.jobs == []
+
+
+def test_first_caption_run_fixes_the_scope_and_moves_straight_to_authorized(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, engine: ModuleType
+) -> None:
+    """D110: 첫 `caption-run`이 원장을 만들고 요청·범위를 고정한다 — estimate_ready 없이 승인."""
+    job_dir = _stage_caption_job(tmp_path)
+    _write_caption_authorization(job_dir)
+    fake = _FinalAudioTranscriber(expected_source=str(job_dir / "final.wav"), fail_first=1)
+    _patch_paid_boundaries(monkeypatch, fake)
+
+    assert engine.main(["caption-run", "caption-1", str(job_dir)]) == 1
+
+    journal = project_commands.CaptionJournal.open(job_dir / "workspace" / "caption.jsonl")
+    assert journal.state == "caption_authorized"
+    assert (job_dir / "workspace" / "caption-request.jsonl").is_file()
+    scope = _read_one_job_message(job_dir / "workspace", "caption-estimate.jsonl")
+    assert scope == caption_scope_of(job_dir)
+    assert not (job_dir / "workspace" / "pricing-caption.jsonl").exists()
+
+
+def test_legacy_caption_estimate_ready_journal_still_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, engine: ModuleType
+) -> None:
+    """D110 이전 원장(caption_estimate_ready)도 열리고 승인으로 이어진다."""
+    job_dir = _stage_caption_job(tmp_path)
+    request, _ = project_commands._caption_job_facts(job_dir)
+    workspace = job_dir / "workspace"
+    workspace.mkdir()
+    journal = project_commands.CaptionJournal.create(workspace / "caption.jsonl", request)
+    project_commands._write_messages(workspace / "caption-request.jsonl", (request,))
+    # 새 쓰기는 이 전이를 만들지 않는다 — D110 이전 원장의 한 줄을 손으로 붙인다.
+    with (workspace / "caption.jsonl").open("a", encoding="utf-8", newline="\n") as stream:
+        stream.write(
+            encode_message(CaptionStateEvent(request.request_revision, "caption_estimate_ready"))
+        )
+    assert journal.state == "caption_received"
+    assert (
+        project_commands.CaptionJournal.open(workspace / "caption.jsonl").state
+        == "caption_estimate_ready"
+    )
+    _write_caption_authorization(job_dir)
+    fake = _FinalAudioTranscriber(expected_source=str(job_dir / "final.wav"), fail_first=1)
+    _patch_paid_boundaries(monkeypatch, fake)
+
+    assert engine.main(["caption-run", "caption-1", str(job_dir)]) == 1
+
+    reopened = project_commands.CaptionJournal.open(workspace / "caption.jsonl")
+    assert reopened.state == "caption_authorized"
 
 
 # ─────────────────────────────────────────────────────────────
@@ -307,7 +359,6 @@ def test_caption_run_refuses_without_matching_caption_authorization(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, engine: ModuleType
 ) -> None:
     job_dir = _stage_caption_job(tmp_path)
-    assert engine.main(["caption-estimate", "caption-1", str(job_dir)]) == 0
     fake = _FinalAudioTranscriber(expected_source=str(job_dir / "final.wav"))
     _patch_paid_boundaries(monkeypatch, fake)
 
@@ -316,14 +367,12 @@ def test_caption_run_refuses_without_matching_caption_authorization(
     assert _read_attempts(job_dir) == []
 
     # 러프컷 승인(AnalysisAuthorization)은 자막을 승인하지 않는다.
-    estimate = _read_one_job_message(job_dir, "caption-estimate.jsonl")
-    assert isinstance(estimate, CaptionEstimate)
+    estimate = caption_scope_of(job_dir)
     (job_dir / "caption-authorization.jsonl").write_text(
         encode_message(
             AnalysisAuthorization(
                 input_revision=estimate.request_revision,
-                estimate_revision=estimate.estimate_revision,
-                pricing_snapshot_revision=estimate.pricing_snapshot_revision,
+                settings_sha256=estimate.settings_sha256,
                 media_grant_revision="b" * 64,
                 authorized_at="2026-10-01T04:00:00Z",
             )
@@ -333,25 +382,69 @@ def test_caption_run_refuses_without_matching_caption_authorization(
     assert engine.main(["caption-run", "caption-1", str(job_dir)]) == 1
     assert _read_attempts(job_dir) == []
     assert fake.jobs == []
-    journal = project_commands.CaptionJournal.open(job_dir / "workspace" / "caption.jsonl")
-    assert journal.state == "caption_estimate_ready"
+    # 승인이 거부되면 원장도 만들지 않는다 — 거부가 흔적을 남기지 않는다.
+    assert not (job_dir / "workspace" / "caption.jsonl").exists()
 
-    # 자막 승인이라도 추정이 다르면(바꿔치기) 거부다.
+    # 자막 승인이라도 설정 지문이 다르면(바꿔치기) 거부다.
     _write_caption_authorization(job_dir)
     stale = (job_dir / "caption-authorization.jsonl").read_text(encoding="utf-8")
     (job_dir / "caption-authorization.jsonl").write_text(
-        stale.replace(estimate.estimate_revision, "c" * 64), encoding="utf-8"
+        stale.replace(estimate.settings_sha256, "c" * 64), encoding="utf-8"
     )
     assert engine.main(["caption-run", "caption-1", str(job_dir)]) == 1
     assert _read_attempts(job_dir) == []
     assert fake.jobs == []
+    assert not (job_dir / "workspace" / "caption.jsonl").exists()
+
+    # 요청 리비전이 다른 승인도 같다.
+    (job_dir / "caption-authorization.jsonl").write_text(
+        encode_message(
+            CaptionAuthorization(
+                request_revision="e" * 64,
+                settings_sha256=estimate.settings_sha256,
+                authorized_at="2026-10-01T04:00:00Z",
+            )
+        ),
+        encoding="utf-8",
+    )
+    assert engine.main(["caption-run", "caption-1", str(job_dir)]) == 1
+    assert fake.jobs == []
+
+
+def test_old_shape_caption_authorization_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, engine: ModuleType
+) -> None:
+    """D110 이전 승인(estimate_revision·pricing_snapshot_revision 포함)은 읽히지 않는다."""
+    job_dir = _stage_caption_job(tmp_path)
+    scope = caption_scope_of(job_dir)
+    (job_dir / "caption-authorization.jsonl").write_text(
+        encode_message(
+            CaptionAuthorization(
+                request_revision=scope.request_revision,
+                settings_sha256=scope.settings_sha256,
+                authorized_at="2026-10-01T04:00:00Z",
+            )
+        ),
+        encoding="utf-8",
+    )
+    current = json.loads((job_dir / "caption-authorization.jsonl").read_text(encoding="utf-8"))
+    current["payload"]["estimate_revision"] = "f" * 64
+    current["payload"]["pricing_snapshot_revision"] = "f" * 64
+    (job_dir / "caption-authorization.jsonl").write_text(
+        json.dumps(current, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    fake = _FinalAudioTranscriber(expected_source=str(job_dir / "final.wav"))
+    _patch_paid_boundaries(monkeypatch, fake)
+
+    assert engine.main(["caption-run", "caption-1", str(job_dir)]) == 1
+    assert fake.jobs == []
+    assert not (job_dir / "workspace" / "caption.jsonl").exists()
 
 
 def test_caption_run_refuses_when_export_or_settings_drifted(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, engine: ModuleType
 ) -> None:
     job_dir = _stage_caption_job(tmp_path)
-    assert engine.main(["caption-estimate", "caption-1", str(job_dir)]) == 0
     _write_caption_authorization(job_dir)
     fake = _FinalAudioTranscriber(expected_source=str(job_dir / "final.wav"))
     _patch_paid_boundaries(monkeypatch, fake)
@@ -390,7 +483,6 @@ def test_caption_run_produces_srt_and_result_in_the_app_visible_job(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, engine: ModuleType
 ) -> None:
     job_dir = _stage_caption_job(tmp_path)
-    assert engine.main(["caption-estimate", "caption-1", str(job_dir)]) == 0
     _write_caption_authorization(job_dir)
     final_wav = job_dir / "final.wav"
     fake = _FinalAudioTranscriber(expected_source=str(final_wav))
@@ -426,7 +518,6 @@ def test_caption_no_speech_is_a_successful_state_without_srt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, engine: ModuleType
 ) -> None:
     job_dir = _stage_caption_job(tmp_path)
-    assert engine.main(["caption-estimate", "caption-1", str(job_dir)]) == 0
     _write_caption_authorization(job_dir)
 
     @dataclass
@@ -470,7 +561,6 @@ def test_caption_failure_is_retryable_and_keeps_the_cumulative_ledger(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, engine: ModuleType
 ) -> None:
     job_dir = _stage_caption_job(tmp_path)
-    assert engine.main(["caption-estimate", "caption-1", str(job_dir)]) == 0
     _write_caption_authorization(job_dir)
     # 예약이 이미 원장에 남은 뒤에 호출이 무너진다 — 미지수 예약이 재시도까지 산다.
     fake = _FinalAudioTranscriber(
@@ -515,42 +605,33 @@ def test_caption_failure_is_retryable_and_keeps_the_cumulative_ledger(
 
 
 @needs_ffmpeg
-def test_caption_budget_exhaustion_denies_the_call_before_it_goes_out(
+def test_caption_run_has_no_budget_cap_so_a_huge_reservation_still_goes_out(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, engine: ModuleType
 ) -> None:
+    """D110: 승인 상한이 없다 — 예약이 아무리 커도 요청은 거부되지 않고 나간다."""
     job_dir = _stage_caption_job(tmp_path)
-    assert engine.main(["caption-estimate", "caption-1", str(job_dir)]) == 0
     _write_caption_authorization(job_dir)
-    # 예약이 승인 상한을 넘게 조각 길이를 부풀린다 — 요청은 가지 않는다.
     fake = _FinalAudioTranscriber(
         expected_source=str(job_dir / "final.wav"), oversell_seconds=100_000.0
     )
     _patch_paid_boundaries(monkeypatch, fake)
 
-    assert engine.main(["caption-run", "caption-1", str(job_dir)]) == 1
+    engine.main(["caption-run", "caption-1", str(job_dir)])
 
-    attempts = _read_attempts(job_dir)
-    assert [row.status for row in attempts] == ["pending", "running", "failed"]
-    assert "보내지 않았다" in (attempts[-1].error or "")
-    # 전사 요청은 열리지 않았다 — 예산 거부는 호출 차단이다.
-    assert fake.jobs == []
-    # 실패해도 재시도 길은 열려 있다(원장은 종료 상태가 아니다).
-    journal = project_commands.CaptionJournal.open(job_dir / "workspace" / "caption.jsonl")
-    assert journal.state == "caption_authorized"
+    assert fake.jobs, "예산 거부로 요청이 막혔다"
+    assert all("보내지 않았다" not in (row.error or "") for row in _read_attempts(job_dir))
 
 
 def test_caption_cancellation_stops_before_external_calls(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, engine: ModuleType
 ) -> None:
     job_dir = _stage_caption_job(tmp_path)
-    assert engine.main(["caption-estimate", "caption-1", str(job_dir)]) == 0
     _write_caption_authorization(job_dir)
     fake = _FinalAudioTranscriber(expected_source=str(job_dir / "final.wav"))
     _patch_paid_boundaries(monkeypatch, fake)
 
     # 앱이 승인 문서에 묶은 요청 리비전으로 취소를 남긴다(시도 ID는 와일드카드).
-    request = _read_one_job_message(job_dir, "caption-request.jsonl")
-    assert isinstance(request, CaptionRequest)
+    request, _ = project_commands._caption_job_facts(job_dir)
     (job_dir / "cancellation.jsonl").write_text(
         encode_message(
             CancellationRequest.create(
@@ -580,7 +661,6 @@ def test_caption_cancellation_accepts_the_staged_fcpxml_hash_binding(
     import hashlib
 
     job_dir = _stage_caption_job(tmp_path)
-    assert engine.main(["caption-estimate", "caption-1", str(job_dir)]) == 0
     _write_caption_authorization(job_dir)
     fake = _FinalAudioTranscriber(expected_source=str(job_dir / "final.wav"))
     _patch_paid_boundaries(monkeypatch, fake)

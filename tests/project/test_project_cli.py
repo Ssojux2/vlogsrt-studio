@@ -150,7 +150,6 @@ def test_project_help_exposes_stages_and_hides_diagnostic_run(
         "review",
         "roughcut",
         "caption",
-        "caption-estimate",
         "caption-run",
     ):
         assert command in help_text

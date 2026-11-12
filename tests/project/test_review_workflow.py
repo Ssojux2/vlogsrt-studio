@@ -9,6 +9,7 @@ from fractions import Fraction
 from pathlib import Path
 
 import pytest
+from analysis_scope import scope_of
 
 from vlogsrt import cli
 from vlogsrt.project import commands as project_commands
@@ -20,7 +21,6 @@ from vlogsrt.project.final_caption import (
     caption_settings_sha256,
     create_caption_request,
 )
-from vlogsrt.project.pricing import official_pricing_snapshot
 from vlogsrt.project.review import (
     CandidateAnalysis,
     build_review_plan,
@@ -44,6 +44,7 @@ from vlogsrt.project.workflow_protocol import (
     ProjectRevision,
     VisionWindowDecision,
     WorkflowJournal,
+    WorkflowStateEvent,
     encode_message,
 )
 
@@ -312,7 +313,7 @@ def test_staged_cli_roundtrip_applies_only_the_reviewed_candidate(
         "".join(encode_message(candidate) for candidate in batch.candidates), encoding="utf-8"
     )
     assert cli.main(["project", "inspect", str(workspace)]) == 0
-    assert WorkflowJournal.open(workspace / "workflow.jsonl").state == "estimate_ready"
+    assert WorkflowJournal.open(workspace / "workflow.jsonl").state == "received"
 
     assert (
         cli.main(
@@ -360,9 +361,9 @@ def test_staged_cli_roundtrip_applies_only_the_reviewed_candidate(
         stream.setframerate(48_000)
         stream.writeframes(b"\0\0" * 48_000 * 12)
 
-    def caption_stub(request, config, destination, *, online, confirmed_cost):
-        if not confirmed_cost:
-            raise CaptionGenerationError("예상 비용 확인 필요")
+    def caption_stub(request, config, destination, *, online, confirmed):
+        if not confirmed:
+            raise CaptionGenerationError("확인 필요")
         report = destination / "review.json"
         report.parent.mkdir(parents=True, exist_ok=True)
         report.write_text("{}\n", encoding="utf-8")
@@ -373,7 +374,7 @@ def test_staged_cli_roundtrip_applies_only_the_reviewed_candidate(
             quality=("coverage:complete",),
             speech_status="no_speech",
         )
-        return CaptionDelivery(result=result, review_report=report, estimated_cost=0.1)
+        return CaptionDelivery(result=result, review_report=report)
 
     monkeypatch.setattr(project_commands, "generate_final_captions", caption_stub)
     caption_args = [
@@ -388,15 +389,13 @@ def test_staged_cli_roundtrip_applies_only_the_reviewed_candidate(
     ]
     assert cli.main(caption_args) == 2
     assert WorkflowJournal.open(workspace / "workflow.jsonl").state == "roughcut_generated"
-    # 승인은 방금 고정된 추정과 요청·가격 리비전에 정확히 묶인 것만 통과한다.
+    # 승인은 지금 범위의 요청 리비전·설정 지문에 정확히 묶인 것만 통과한다(D110).
     request = create_caption_request(
         WorkflowJournal.open(workspace / "workflow.jsonl").revision.revision, audio, roughcut
     )
-    pricing = official_pricing_snapshot()
     estimate = build_caption_estimate(
         request,
         audio_seconds=Fraction(12),
-        pricing=pricing,
         settings_sha256=caption_settings_sha256(project_commands.load_config()),
     )
     assert estimate.audio_seconds == Fraction(12)
@@ -405,8 +404,7 @@ def test_staged_cli_roundtrip_applies_only_the_reviewed_candidate(
         encode_message(
             CaptionAuthorization(
                 request_revision=request.request_revision,
-                estimate_revision=estimate.estimate_revision,
-                pricing_snapshot_revision=pricing.snapshot_revision,
+                settings_sha256=estimate.settings_sha256,
                 authorized_at="2026-09-21T05:00:00Z",
             )
         ),
@@ -417,15 +415,15 @@ def test_staged_cli_roundtrip_applies_only_the_reviewed_candidate(
         encode_message(
             CaptionAuthorization(
                 request_revision="b" * 64,
-                estimate_revision=estimate.estimate_revision,
-                pricing_snapshot_revision=pricing.snapshot_revision,
+                settings_sha256=estimate.settings_sha256,
                 authorized_at="2026-09-21T05:00:00Z",
             )
         ),
         encoding="utf-8",
     )
+    # 낡은 승인은 원장을 움직이기 전에 닫힌다 — 같은 작업공간에서 맞는 승인으로 다시 돈다.
     assert cli.main([*caption_args, "--yes", "--caption-authorization", str(stale)]) == 2
-    assert WorkflowJournal.open(workspace / "workflow.jsonl").state == "caption_estimate_ready"
+    assert WorkflowJournal.open(workspace / "workflow.jsonl").state == "roughcut_generated"
     assert cli.main([*caption_args, "--yes", "--caption-authorization", str(authorization)]) == 0
     assert WorkflowJournal.open(workspace / "workflow.jsonl").state == "caption_ready"
 
@@ -444,18 +442,18 @@ def test_inspect_is_network_free_and_online_analyze_rejects_stale_authorization(
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("network called")),
     )
     assert cli.main(["project", "inspect", str(workspace)]) == 0
-    estimate_message = project_commands._read_one(workspace / "analysis-estimate.jsonl")
-    assert isinstance(estimate_message, AnalysisEstimate)
+    estimate_message = scope_of(workspace)
     assert estimate_message.model == "gpt-5.6-luna"
-    assert estimate_message.pricing_snapshot_revision == (
-        official_pricing_snapshot().snapshot_revision
-    )
-    assert WorkflowJournal.open(workspace / "workflow.jsonl").state == "estimate_ready"
+    # D110: inspect는 범위를 인쇄만 한다 — 비용·가격 없음, 파일·상태 전이 없음.
+    assert estimate_message.cost_upper_bound is None
+    assert estimate_message.pricing_snapshot_revision is None
+    assert not (workspace / "analysis-estimate.jsonl").exists()
+    assert not (workspace / "pricing-snapshot.jsonl").exists()
+    assert WorkflowJournal.open(workspace / "workflow.jsonl").state == "received"
 
     stale = AnalysisAuthorization(
         input_revision="b" * 64,
-        estimate_revision=estimate_message.estimate_revision,
-        pricing_snapshot_revision=estimate_message.pricing_snapshot_revision,
+        settings_sha256=estimate_message.settings_sha256,
         media_grant_revision=estimate_message.media_grant_revision,
         authorized_at="2026-09-21T04:00:00Z",
     )
@@ -474,7 +472,7 @@ def test_inspect_is_network_free_and_online_analyze_rejects_stale_authorization(
         )
         == 2
     )
-    assert WorkflowJournal.open(workspace / "workflow.jsonl").state == "estimate_ready"
+    assert WorkflowJournal.open(workspace / "workflow.jsonl").state == "received"
 
 
 def test_offline_analysis_replays_bound_luna_decisions_and_records_attempts(
@@ -529,6 +527,149 @@ def test_offline_analysis_replays_bound_luna_decisions_and_records_attempts(
         "succeeded",
     ]
     assert WorkflowJournal.open(workspace / "workflow.jsonl").state == "review_required"
+
+
+def _replay_fixtures(tmp_path: Path, workspace: Path, document: object) -> Path:
+    """승인된 창 판정을 재생하는 합성 픽스처 — 오프라인 analyze의 입력."""
+    journal = WorkflowJournal.open(workspace / "workflow.jsonl")
+    batch = generate_silence_candidates(
+        document,
+        journal.revision,
+        (_guard(document),),
+        locked_instance_ids=frozenset(),
+        analysis=_analysis(document),
+    )
+    original = batch.candidates[0]
+    decision = VisionWindowDecision.create(
+        input_revision=journal.revision.revision,
+        window_id=original.window_id,
+        choice="propose_cut",
+        candidate_id=original.candidate_id,
+        evidence_frame_ids=("evidence-frame-1",),
+        confidence=original.confidence,
+        response_sha256="f" * 64,
+    )
+    fixtures = tmp_path / "vision-fixtures"
+    fixtures.mkdir()
+    candidate = replace(original, decision_revision=decision.decision_revision)
+    (fixtures / "candidates.jsonl").write_text(encode_message(candidate), encoding="utf-8")
+    (fixtures / "decisions.jsonl").write_text(encode_message(decision), encoding="utf-8")
+    return fixtures
+
+
+def _append_state(workspace: Path, state: str) -> None:
+    """낡은 저널의 상태 줄을 손으로 붙인다 — 새 쓰기는 estimate_ready를 만들지 않는다."""
+    revision = WorkflowJournal.open(workspace / "workflow.jsonl").revision.revision
+    with (workspace / "workflow.jsonl").open("a", encoding="utf-8", newline="\n") as stream:
+        stream.write(encode_message(WorkflowStateEvent(revision, state)))
+
+
+def test_legacy_estimate_ready_journal_proceeds_to_authorized_and_analysis(
+    tmp_path: Path,
+) -> None:
+    """D110 이전 저널(estimate_ready)도 analyze가 받아 승인으로 옮기고 이어 간다."""
+    input_path, document = _project(tmp_path)
+    workspace = tmp_path / "workspace"
+    assert cli.main(["project", "receive", str(input_path), "--workspace", str(workspace)]) == 0
+    _append_state(workspace, "estimate_ready")
+    assert WorkflowJournal.open(workspace / "workflow.jsonl").state == "estimate_ready"
+    fixtures = _replay_fixtures(tmp_path, workspace, document)
+
+    assert (
+        cli.main(
+            ["project", "analyze", str(workspace), "--offline", "--vision-fixtures", str(fixtures)]
+        )
+        == 0
+    )
+
+    assert WorkflowJournal.open(workspace / "workflow.jsonl").state == "review_required"
+    assert (workspace / "analysis-estimate.jsonl").is_file()
+    assert not (workspace / "pricing-snapshot.jsonl").exists()
+
+
+def test_resumed_analyze_refuses_when_the_scope_drifted_since_authorization(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """승인 때 남긴 범위가 다시 잰 범위와 다르면(미디어·설정 드리프트) 0송신으로 거부한다."""
+    input_path, document = _project(tmp_path)
+    workspace = tmp_path / "workspace"
+    assert cli.main(["project", "receive", str(input_path), "--workspace", str(workspace)]) == 0
+    scope = scope_of(workspace)
+    drifted = AnalysisEstimate.create(
+        input_revision=scope.input_revision,
+        model=scope.model,
+        unique_source_audio_seconds=scope.unique_source_audio_seconds,
+        transcription_seconds=scope.transcription_seconds,
+        max_windows=scope.max_windows,
+        max_images=scope.max_images,
+        max_image_tokens=scope.max_image_tokens,
+        cost_upper_bound=None,
+        settings_sha256="0" * 64,
+        pricing_snapshot_revision=None,
+        media_grant_revision=scope.media_grant_revision,
+    )
+    project_commands._write_messages(workspace / "analysis-estimate.jsonl", (drifted,))
+    _append_state(workspace, "authorized")
+    fixtures = _replay_fixtures(tmp_path, workspace, document)
+
+    assert (
+        cli.main(
+            ["project", "analyze", str(workspace), "--offline", "--vision-fixtures", str(fixtures)]
+        )
+        == 2
+    )
+
+    assert "승인 때 분석 범위와 다르다" in capsys.readouterr().err
+    assert not (workspace / "analysis-attempts.jsonl").exists()
+    assert WorkflowJournal.open(workspace / "workflow.jsonl").state == "authorized"
+
+
+def test_online_analyze_refuses_an_old_shape_authorization_before_any_send(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """D110 이전 승인(estimate_revision·pricing_snapshot_revision)은 읽히지 않는다."""
+    input_path, _document = _project(tmp_path)
+    workspace = tmp_path / "workspace"
+    assert cli.main(["project", "receive", str(input_path), "--workspace", str(workspace)]) == 0
+    scope = scope_of(workspace)
+    current = json.loads(
+        encode_message(
+            AnalysisAuthorization(
+                input_revision=scope.input_revision,
+                settings_sha256=scope.settings_sha256,
+                media_grant_revision=scope.media_grant_revision,
+                authorized_at="2026-09-21T04:00:00Z",
+            )
+        )
+    )
+    current["payload"]["estimate_revision"] = scope.estimate_revision
+    current["payload"]["pricing_snapshot_revision"] = "a" * 64
+    authorization = tmp_path / "old-authorization.jsonl"
+    authorization.write_text(json.dumps(current, sort_keys=True) + "\n", encoding="utf-8")
+    monkeypatch.setattr(
+        project_commands.transcribe,
+        "request_luna_vision",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("network called")),
+    )
+    monkeypatch.setattr(project_commands.env, "require_api_key", lambda **kwargs: "test-key")
+
+    assert (
+        cli.main(
+            [
+                "project",
+                "analyze",
+                str(workspace),
+                "--online",
+                "--authorization",
+                str(authorization),
+            ]
+        )
+        == 2
+    )
+
+    assert "D110 이전 승인" in capsys.readouterr().err
+    assert WorkflowJournal.open(workspace / "workflow.jsonl").state == "received"
+    assert not (workspace / "analysis-attempts.jsonl").exists()
 
 
 def test_noop_render_preserves_sparse_leading_timeline_space(tmp_path: Path) -> None:
@@ -691,8 +832,7 @@ def test_staged_media_grant_binds_the_estimate_and_drift_closes_it(tmp_path: Pat
     workspace = tmp_path / "workspace"
     assert cli.main(["project", "receive", str(input_path), "--workspace", str(workspace)]) == 0
     assert cli.main(["project", "inspect", str(workspace)]) == 0
-    without_grant = project_commands._read_one(workspace / "analysis-estimate.jsonl")
-    assert isinstance(without_grant, AnalysisEstimate)
+    without_grant = scope_of(workspace)
 
     # 같은 미디어, 다른 앱 권한 — 추정 리비전이 달라져야 한다. 문서는 이제
     # 실제 모양(절대 루트 + 루트와 묶인 지문)이어야 한다(S2A-2 검증). 루트는
@@ -710,8 +850,7 @@ def test_staged_media_grant_binds_the_estimate_and_drift_closes_it(tmp_path: Pat
         encoding="utf-8",
     )
     assert cli.main(["project", "inspect", str(workspace2)]) == 0
-    with_grant = project_commands._read_one(workspace2 / "analysis-estimate.jsonl")
-    assert isinstance(with_grant, AnalysisEstimate)
+    with_grant = scope_of(workspace2)
     assert with_grant.media_grant_revision != without_grant.media_grant_revision
     assert with_grant.estimate_revision != without_grant.estimate_revision
     assert with_grant.cost_upper_bound == without_grant.cost_upper_bound

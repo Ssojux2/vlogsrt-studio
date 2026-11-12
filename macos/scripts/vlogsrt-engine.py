@@ -43,8 +43,9 @@ job 상태(별칭 포함)와 분리돼 있으며 이미 있어서는 안 된다 
 실행 파일·버전, 실제 자식 환경의 ffmpeg·ffprobe, 운반자 버전)만 담는다 —
 잠금·workspace·결과 동기화가 전부 없다.
 
-`caption-estimate`·`caption-run`은 공유 받기로 시작한 자막 job의 두 문이다
-(S4A). 이 job에는 `input.fcpxml`이 없으므로 receive를 거치지 않는다 — 입력은
+`caption-run`은 공유 받기로 시작한 자막 job의 문이다(S4A — 비용 추정 문
+`caption-estimate`는 D110에서 지웠다; 첫 실행이 범위를 고정한다). 이 job에는
+`input.fcpxml`이 없으므로 receive를 거치지 않는다 — 입력은
 스테이징된 `final.wav`·`final.fcpxml`·`caption-origin.json`이고, 실행 문은
 `caption-authorization.jsonl`을 요구한다. SRT·검토 보고서는 job 루트의
 `captions/`에 나간다(앱이 보는 자리).
@@ -84,7 +85,6 @@ _DIAGNOSTIC_FILES = (
 _CAPTION_RESULT_FILES = (
     "caption-request.jsonl",
     "caption-estimate.jsonl",
-    "pricing-caption.jsonl",
     "caption-attempts.jsonl",
     "caption-usage.jsonl",
     "caption-result.jsonl",
@@ -94,7 +94,7 @@ _CAPTION_DIAGNOSTIC_FILES = (
     "caption-usage.jsonl",
 )
 _CAPTION_DELIVERY_DIR = "captions"
-_CAPTION_OPERATIONS = frozenset({"caption-estimate", "caption-run"})
+_CAPTION_OPERATIONS = frozenset({"caption-run"})
 _CARRIER = "VLOGSRT_ENGINE_API_KEY"
 # V2 환경 운반자(번들) — 값은 stdin V2 봉투와 같은 JSON 세 필드다(S2A-2 단위2).
 # 적용·제거 시점은 V1과 같다: 공급자 해석 전에 소비되고 이름은 지운다.
@@ -947,13 +947,11 @@ def _run_operation(operation: str, job_dir: Path, workspace: Path) -> int:
 
 
 def _run_caption_operation(operation: str, job_dir: Path, workspace: Path) -> int:
-    """자막 job의 두 문(S4A) — 추정은 키 없이, 실행은 스테이징된 승인 문서와 함께.
+    """자막 job의 실행 문(S4A) — 스테이징된 승인 문서와 함께(비용 추정 문은 없다, D110).
 
     SRT·검토 보고서는 job 루트의 `captions/`에 directly 나간다 — 개발 실행의
     workspace는 앱이 못 보는 자리이므로 결과 경로가 거기를 가리켜선 안 된다.
     """
-    if operation == "caption-estimate":
-        return _step(["project", "caption-estimate", str(job_dir)])
     return _step(
         [
             "project",

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from fractions import Fraction
 from pathlib import Path
 
@@ -84,6 +85,23 @@ def _estimate(revision: ProjectRevision) -> AnalysisEstimate:
     )
 
 
+def _scope(revision: ProjectRevision) -> AnalysisEstimate:
+    """D110 이후의 범위 기록 — 비용·가격이 없다."""
+    return AnalysisEstimate.create(
+        input_revision=revision.revision,
+        model="gpt-5.6-luna",
+        unique_source_audio_seconds=Fraction(121, 2),
+        transcription_seconds=Fraction(121, 2),
+        max_windows=7,
+        max_images=42,
+        max_image_tokens=42 * 308,
+        cost_upper_bound=None,
+        settings_sha256="e" * 64,
+        pricing_snapshot_revision=None,
+        media_grant_revision="9" * 64,
+    )
+
+
 def test_jsonl_protocol_round_trips_every_public_message_deterministically(tmp_path: Path) -> None:
     """필드 순서나 locale이 바뀌어 같은 응답의 JSONL 바이트가 달라지는 회귀를 잡는다."""
     revision = _revision()
@@ -125,10 +143,10 @@ def test_jsonl_protocol_round_trips_every_public_message_deterministically(tmp_p
         ),
         pricing,
         _estimate(revision),
+        _scope(revision),
         AnalysisAuthorization(
             input_revision=revision.revision,
-            estimate_revision=_estimate(revision).estimate_revision,
-            pricing_snapshot_revision=pricing.snapshot_revision,
+            settings_sha256="e" * 64,
             media_grant_revision="9" * 64,
             authorized_at="2026-09-21T04:00:00Z",
         ),
@@ -216,8 +234,7 @@ def test_jsonl_protocol_round_trips_every_public_message_deterministically(tmp_p
         caption_estimate,
         CaptionAuthorization(
             request_revision=caption_request.request_revision,
-            estimate_revision=caption_estimate.estimate_revision,
-            pricing_snapshot_revision=pricing.snapshot_revision,
+            settings_sha256="2" * 64,
             authorized_at="2026-09-21T05:00:00Z",
         ),
         CaptionResult(
@@ -255,37 +272,30 @@ def test_jsonl_protocol_round_trips_every_public_message_deterministically(tmp_p
 def test_analysis_13_reads_legacy_versions_but_rejects_stale_authority() -> None:
     """입력/추정/가격/권한 드리프트와 모델의 복수·미지 후보가 삭제 권한으로 바뀌는 회귀를 잡는다."""
     revision = _revision()
-    pricing = official_pricing_snapshot()
-    estimate = _estimate(revision)
+    scope = _scope(revision)
     authorization = AnalysisAuthorization(
         input_revision=revision.revision,
-        estimate_revision=estimate.estimate_revision,
-        pricing_snapshot_revision=pricing.snapshot_revision,
-        media_grant_revision=estimate.media_grant_revision,
+        settings_sha256=scope.settings_sha256,
+        media_grant_revision=scope.media_grant_revision,
         authorized_at="2026-09-21T04:00:00Z",
     )
     authorization.require_matches(
-        revision.revision,
-        estimate.estimate_revision,
-        pricing.snapshot_revision,
-        estimate.media_grant_revision,
+        revision.revision, scope.settings_sha256, scope.media_grant_revision
     )
     with pytest.raises(ValueError, match="입력 리비전"):
-        authorization.require_matches(
-            "b" * 64, estimate.estimate_revision, pricing.snapshot_revision, "9" * 64
-        )
-    with pytest.raises(ValueError, match="추정 리비전"):
-        authorization.require_matches(
-            revision.revision, "c" * 64, pricing.snapshot_revision, "9" * 64
-        )
-    with pytest.raises(ValueError, match="가격 스냅샷"):
-        authorization.require_matches(
-            revision.revision, estimate.estimate_revision, "8" * 64, "9" * 64
-        )
+        authorization.require_matches("b" * 64, scope.settings_sha256, "9" * 64)
+    with pytest.raises(ValueError, match="설정 지문"):
+        authorization.require_matches(revision.revision, "c" * 64, "9" * 64)
     with pytest.raises(ValueError, match="미디어 권한"):
-        authorization.require_matches(
-            revision.revision, estimate.estimate_revision, pricing.snapshot_revision, "7" * 64
-        )
+        authorization.require_matches(revision.revision, scope.settings_sha256, "7" * 64)
+
+    # D110 이전 모양의 승인(비용 추정·가격 스냅샷에 묶인)은 읽히지 않는다.
+    current = json.loads(encode_message(authorization))
+    for stale_key in ("estimate_revision", "pricing_snapshot_revision"):
+        old_shape = json.loads(json.dumps(current))
+        old_shape["payload"][stale_key] = "f" * 64
+        with pytest.raises(ValueError, match="D110 이전 승인"):
+            decode_message(json.dumps(old_shape, sort_keys=True) + "\n")
 
     keep = VisionWindowDecision.create(
         input_revision=revision.revision,
@@ -497,7 +507,9 @@ def test_journal_walks_the_authorized_state_machine_and_stops_at_terminals(
     journal = WorkflowJournal.create(tmp_path / "workflow.jsonl", revision)
     assert journal.state == "received"
 
-    journal.transition(revision.revision, "estimate_ready")
+    # D110: 비용 추정 단계는 없다 — 받은 뒤 바로 승인이다.
+    with pytest.raises(ValueError, match="허용되지 않는 상태 전이"):
+        journal.transition(revision.revision, "estimate_ready")
     journal.transition(revision.revision, "authorized")
     journal.transition(revision.revision, "analyzing")
     journal.transition(revision.revision, "review_required")
@@ -517,14 +529,15 @@ def test_journal_walks_the_authorized_state_machine_and_stops_at_terminals(
 
     reloaded.transition(revision.revision, "roughcut_generated")
     reloaded.transition(revision.revision, "caption_received")
-    reloaded.transition(revision.revision, "caption_estimate_ready")
+    with pytest.raises(ValueError, match="허용되지 않는 상태 전이"):
+        reloaded.transition(revision.revision, "caption_estimate_ready")
     reloaded.transition(revision.revision, "caption_authorized")
     reloaded.transition(revision.revision, "caption_ready")
     assert WorkflowJournal.open(journal.path).state == "caption_ready"
 
     lines = journal.path.read_bytes().splitlines(keepends=True)
     assert all(hashlib.sha256(line).digest() for line in lines)
-    assert len(lines) == 10
+    assert len(lines) == 8
 
 
 def test_workflow_journal_reads_legacy_roughcut_imported_and_continues(
@@ -533,7 +546,7 @@ def test_workflow_journal_reads_legacy_roughcut_imported_and_continues(
     """S2C 읽기 호환 — 낡은 저널의 roughcut_imported는 재생되고 그 뒤는 이어진다."""
     revision = _revision()
     journal = WorkflowJournal.create(tmp_path / "workflow.jsonl", revision)
-    for state in ("estimate_ready", "authorized", "analyzing", "review_required"):
+    for state in ("authorized", "analyzing", "review_required"):
         journal.transition(revision.revision, state)
     with (tmp_path / "workflow.jsonl").open("a", encoding="utf-8", newline="\n") as stream:
         stream.write(encode_message(WorkflowStateEvent(revision.revision, "roughcut_imported")))
@@ -544,13 +557,35 @@ def test_workflow_journal_reads_legacy_roughcut_imported_and_continues(
     assert WorkflowJournal.open(tmp_path / "workflow.jsonl").state == "caption_received"
 
 
+def test_legacy_estimate_ready_journals_still_open_and_continue(tmp_path: Path) -> None:
+    """D110 이전 저널은 *_estimate_ready에 멈춰 있을 수 있다 — 읽고 이어 간다."""
+    revision = _revision()
+    journal = WorkflowJournal.create(tmp_path / "workflow.jsonl", revision)
+    with journal.path.open("a", encoding="utf-8", newline="\n") as stream:
+        stream.write(encode_message(WorkflowStateEvent(revision.revision, "estimate_ready")))
+    legacy = WorkflowJournal.open(journal.path)
+    assert legacy.state == "estimate_ready"
+    legacy.transition(revision.revision, "authorized")
+    assert WorkflowJournal.open(journal.path).state == "authorized"
+
+    request = _caption_request(tmp_path)
+    captions = CaptionJournal.create(tmp_path / "caption.jsonl", request)
+    with captions.path.open("a", encoding="utf-8", newline="\n") as stream:
+        stream.write(
+            encode_message(CaptionStateEvent(request.request_revision, "caption_estimate_ready"))
+        )
+    legacy_captions = CaptionJournal.open(captions.path)
+    assert legacy_captions.state == "caption_estimate_ready"
+    legacy_captions.transition(request.request_revision, "caption_authorized")
+    assert CaptionJournal.open(captions.path).state == "caption_authorized"
+
+
 def test_journal_accepts_terminal_states_from_running_states_only_as_endpoints(
     tmp_path: Path,
 ) -> None:
     """실행 상태에서 cancelled|failed로 닫히고, 종료 뒤에는 어떤 전이도 붙지 않는다."""
     revision = _revision()
     journal = WorkflowJournal.create(tmp_path / "workflow.jsonl", revision)
-    journal.transition(revision.revision, "estimate_ready")
     journal.transition(revision.revision, "authorized")
     journal.transition(revision.revision, "analyzing")
     journal.transition(revision.revision, "cancelled")
@@ -561,7 +596,6 @@ def test_journal_accepts_terminal_states_from_running_states_only_as_endpoints(
         journal.transition(revision.revision, "failed")
 
     failed = WorkflowJournal.create(tmp_path / "failed.jsonl", revision)
-    failed.transition(revision.revision, "estimate_ready")
     failed.transition(revision.revision, "authorized")
     failed.transition(revision.revision, "failed")
     assert WorkflowJournal.open(failed.path).state == "failed"
@@ -576,10 +610,10 @@ def test_two_open_journals_cannot_append_the_same_transition(tmp_path: Path) -> 
     revision = _revision()
     first = WorkflowJournal.create(tmp_path / "workflow.jsonl", revision)
     stale = WorkflowJournal.open(first.path)
-    first.transition(revision.revision, "estimate_ready")
+    first.transition(revision.revision, "authorized")
     with pytest.raises(ValueError, match="허용되지 않는 상태 전이"):
-        stale.transition(revision.revision, "estimate_ready")
-    assert WorkflowJournal.open(first.path).state == "estimate_ready"
+        stale.transition(revision.revision, "authorized")
+    assert WorkflowJournal.open(first.path).state == "authorized"
 
 
 def _caption_request(tmp_path: Path) -> CaptionRequest:
@@ -600,7 +634,6 @@ def test_caption_journal_keeps_failed_attempts_retryable_under_one_request(
     journal = CaptionJournal.create(tmp_path / "caption.jsonl", request)
     assert journal.state == "caption_received"
 
-    journal.transition(request.request_revision, "caption_estimate_ready")
     journal.transition(request.request_revision, "caption_authorized")
     # 실패한 시도가 원장을 종료 상태로 옮기지 않는다 — 여기가 재시도의 문이다.
     assert CaptionJournal.open(journal.path).state == "caption_authorized"
@@ -620,7 +653,7 @@ def test_caption_journal_keeps_failed_attempts_retryable_under_one_request(
 
     # 취소는 종료 상태다 — 어떤 실행 상태에서도 닫히고 그 뒤는 없다.
     cancelled = CaptionJournal.create(tmp_path / "cancelled.jsonl", request)
-    cancelled.transition(request.request_revision, "caption_estimate_ready")
+    cancelled.transition(request.request_revision, "caption_authorized")
     cancelled.transition(request.request_revision, "cancelled")
     assert CaptionJournal.open(cancelled.path).state == "cancelled"
     with pytest.raises(ValueError, match="종료 상태"):

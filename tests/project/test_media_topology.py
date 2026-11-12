@@ -28,13 +28,13 @@ from types import ModuleType
 from urllib.parse import quote
 
 import pytest
+from analysis_scope import scope_of
 
 from tests._dotenv_guard import stage_synthetic_dotenv
 from vlogsrt import cli, preprocess
 from vlogsrt.project.media import ResolvedMedia
 from vlogsrt.project.workflow_protocol import (
     AnalysisAuthorization,
-    AnalysisEstimate,
     encode_message,
 )
 
@@ -400,11 +400,11 @@ def test_key_free_inspect_surfaces_unsupported_topology(
 def test_single_and_zero_stream_estimates_remain_supported(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """1스트림·0스트림 원본의 추정은 그대로 나온다 — 무선언·무오디오 의미가 유지된다."""
+    """1스트림·0스트림 원본의 범위 확인은 그대로 통과한다(D110: 인쇄만, 파일은 없다)."""
     workspace = _staged_workspace(tmp_path)
     _wire_stream_count(monkeypatch, {"clip.mov": 1})
     assert cli.main(["project", "inspect", str(workspace)]) == 0
-    assert (workspace / "analysis-estimate.jsonl").is_file()
+    assert not (workspace / "analysis-estimate.jsonl").is_file()
 
     zero = _staged_workspace(tmp_path / "second")
     _wire_stream_count(monkeypatch, {"clip.mov": 0})
@@ -415,20 +415,17 @@ def test_paid_analyze_rechecks_topology_even_with_a_stored_estimate(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """승인된 유료 실행도 다시 잰다 — 저장된 추정은 재확인을 면제하지 못한다."""
-    from vlogsrt.project import commands as project_commands
 
     workspace = _staged_workspace(tmp_path)
     _wire_stream_count(monkeypatch, {"clip.mov": 1})
     assert cli.main(["project", "inspect", str(workspace)]) == 0
 
-    estimate = project_commands._read_one(workspace / "analysis-estimate.jsonl")
-    assert isinstance(estimate, AnalysisEstimate)
+    estimate = scope_of(workspace)
     (workspace / "analysis-authorization.jsonl").write_text(
         encode_message(
             AnalysisAuthorization(
                 input_revision=estimate.input_revision,
-                estimate_revision=estimate.estimate_revision,
-                pricing_snapshot_revision=estimate.pricing_snapshot_revision,
+                settings_sha256=estimate.settings_sha256,
                 media_grant_revision=estimate.media_grant_revision,
                 authorized_at="2026-09-27T04:00:00Z",
             )
@@ -468,8 +465,6 @@ def test_paid_analyze_proceeds_with_supported_topology(
     workspace = _staged_workspace(tmp_path)
     _wire_stream_count(monkeypatch, {"clip.mov": 1})
     assert cli.main(["project", "inspect", str(workspace)]) == 0
-    estimate = project_commands._read_one(workspace / "analysis-estimate.jsonl")
-    assert isinstance(estimate, AnalysisEstimate)
 
     monkeypatch.setattr(project_commands.env, "require_api_key", lambda **kwargs: "test-key")
     assert (
@@ -494,17 +489,14 @@ def test_paid_analyze_proceeds_with_supported_topology(
 
 
 def _stage_authorization(tmp_path: Path, workspace: Path) -> Path:
-    from vlogsrt.project import commands as project_commands
 
-    estimate = project_commands._read_one(workspace / "analysis-estimate.jsonl")
-    assert isinstance(estimate, AnalysisEstimate)
+    estimate = scope_of(workspace)
     authorization = workspace / "analysis-authorization.jsonl"
     authorization.write_text(
         encode_message(
             AnalysisAuthorization(
                 input_revision=estimate.input_revision,
-                estimate_revision=estimate.estimate_revision,
-                pricing_snapshot_revision=estimate.pricing_snapshot_revision,
+                settings_sha256=estimate.settings_sha256,
                 media_grant_revision=estimate.media_grant_revision,
                 authorized_at="2026-09-27T04:00:00Z",
             )
@@ -742,7 +734,7 @@ def test_engine_independently_enforces_staged_grant_coverage(
 
     (workspace / "media-grant.json").write_text(_grant_document([str(tmp_path)]), encoding="utf-8")
     assert cli.main(["project", "inspect", str(workspace)]) == 0
-    assert (workspace / "analysis-estimate.jsonl").is_file()
+    assert not (workspace / "analysis-estimate.jsonl").is_file()
 
 
 def test_coverage_rejects_before_topology_probes(
@@ -786,7 +778,7 @@ def test_app_managed_execution_requires_a_staged_grant_document(
 
     (workspace / "media-grant.json").write_text(_grant_document([str(tmp_path)]), encoding="utf-8")
     assert cli.main(["project", "inspect", str(workspace)]) == 0
-    assert (workspace / "analysis-estimate.jsonl").is_file()
+    assert not (workspace / "analysis-estimate.jsonl").is_file()
 
     # 마커 없는 직접 CLI는 문서 없이도 추정이 나온다 — 기본선 계약 보존.
     from vlogsrt import env
@@ -795,7 +787,7 @@ def test_app_managed_execution_requires_a_staged_grant_document(
     direct = _staged_workspace(tmp_path / "markerless")
     _wire_stream_count(monkeypatch, {"clip.mov": 1})
     assert cli.main(["project", "inspect", str(direct)]) == 0
-    assert (direct / "analysis-estimate.jsonl").is_file()
+    assert not (direct / "analysis-estimate.jsonl").is_file()  # D110: inspect는 범위를 인쇄만 한다
 
 
 def test_staged_grant_rejects_malformed_roots_and_mismatched_fingerprints(

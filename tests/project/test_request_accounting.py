@@ -8,8 +8,8 @@
 이 파일이 증명하는 것:
 - 유료 SDK 호출마다 호출 **전에** 내구 예약이 남고(예약이 곧 허가), 응답의 실측
   미터링으로 딱 한 번 확정된다.
-- 실측이 승인 상한을 넘으면 그 사실이 기록으로 남고, 이후 예약은 전부 거부된다
-  — 다음 유료 호출은 물리적으로 가지 않는다.
+- 승인 상한이 없다(D110) — 실측이 커도 기록으로 남을 뿐 다음 유료 호출은 막히지 않는다.
+  (상한이 있는 옛 원장의 거부 계약은 단위 시험이 명시 한도로 잠근다.)
 - `analysis-usage.jsonl`은 원장 기록의 멱등 투영이다(집계 whisper 청구·응답 뒤
   Luna 청구가 함께 남는 옛 모양은 더 이상 없다).
 """
@@ -27,6 +27,7 @@ from typing import Any
 from urllib.parse import quote
 
 import pytest
+from analysis_scope import scope_of
 
 from vlogsrt import cli, preprocess
 from vlogsrt.project import commands as project_commands
@@ -39,7 +40,6 @@ from vlogsrt.project.workflow_analysis import AnalysisSettings
 from vlogsrt.project.workflow_protocol import (
     ActualUsage,
     AnalysisAuthorization,
-    AnalysisEstimate,
     AnalysisResult,
     WorkflowJournal,
     encode_message,
@@ -336,15 +336,13 @@ def _install_fake_sdk(monkeypatch: pytest.MonkeyPatch, sdk: _FakeSdk) -> _FakeSd
 
 
 def _analyze_online(tmp_path: Path, workspace: Path) -> int:
-    estimate = project_commands._read_one(workspace / "analysis-estimate.jsonl")
-    assert isinstance(estimate, AnalysisEstimate)
+    estimate = scope_of(workspace)
     authorization = tmp_path / "authorization.jsonl"
     authorization.write_text(
         encode_message(
             project_commands.AnalysisAuthorization(
                 input_revision=estimate.input_revision,
-                estimate_revision=estimate.estimate_revision,
-                pricing_snapshot_revision=estimate.pricing_snapshot_revision,
+                settings_sha256=estimate.settings_sha256,
                 media_grant_revision=estimate.media_grant_revision,
                 authorized_at="2026-09-28T04:00:00Z",
             )
@@ -377,16 +375,15 @@ def _result(workspace: Path) -> AnalysisResult:
 # ─────────────────────────────────────────────────────────────
 
 
-def test_paid_sdk_calls_reserve_durably_and_overrun_closes_further_admission(
+def test_paid_sdk_calls_reserve_durably_and_overrun_never_closes_admission(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """실측이 상한을 넘었는데 다음 유료 호출이 계속 가는 회귀를 잡는다.
+    """D110: 승인 상한이 없다 — 실측이 아무리 커도 다음 유료 호출은 막히지 않는다.
 
-    두 클립(창 2개)에서 첫 Luna 응답의 실측 사용량을 승인 상한보다 크게 만든다
-    (입력 5,000만 토큰 = $10 ≫ 승인 상한 — 고유 오디오 24초 × 4회 전사 × 분당
-    $0.0105 + 토큰 상한 ≈ $0.02). 올바른 동작: 첫 창 실측은 그대로 기록되고(초과
-    증거를 버리지 않는다), 둘째 창의 예약은 거부되어 SDK 호출이 물리적으로 가지
-    않는다. 원장 파일이 남지 않으면 예약 자체가 없다는 뜻이다.
+    두 클립(창 2개)에서 첫 Luna 응답의 실측 사용량을 크게 만든다(입력 5,000만 토큰
+    = $10). 상한이 있던 때는 둘째 창의 예약이 거부됐지만 지금은 두 창 모두 SDK 호출이
+    가고, 초과 실측도 숨기지 않고 원장·사용량에 그대로 남는다. 예약이 곧 허가인
+    내구 원장은 그대로다.
     """
     workspace = _prepare(tmp_path, _two_clip_project(tmp_path))
     _patch_boundaries(monkeypatch)
@@ -394,24 +391,21 @@ def test_paid_sdk_calls_reserve_durably_and_overrun_closes_further_admission(
 
     exit_code = _analyze_online(tmp_path, workspace)
 
-    # 가짜 SDK 경계에 실제로 도달했다는 증거가 먼저다 — 이것 없이는 빈 RED다.
+    # 가짜 SDK 경계에 실제로 도달했다는 증거가 먼저다.
     assert sdk.transcription_calls, "전사 SDK 호출이 한 번도 지나지 않았다 — 경계 증거 없음"
     assert sdk.responses_calls, "Luna SDK 호출이 한 번도 지나지 않았다 — 경계 증거 없음"
-    # 1) 내구 원장이 남는다 — 예약이 곧 허가인 기록의 정본. 옛 길은 어디에도
-    #    이런 기록을 남기지 않는다.
-    ledger = workspace.joinpath(*LEDGER_PATH)
-    assert ledger.is_file(), "유료 SDK 호출을 냈는데 내구 예약 원장이 없다"
-    # 2) 상한을 넘은 뒤에는 다음 유료 호출이 가지 않는다.
-    assert len(sdk.responses_calls) == 1, "실측 초과 뒤 남은 창의 SDK 호출이 막히지 않았다"
-    # 3) 첫 창은 성공 판정으로 남고(실측 초과는 그 창의 실패가 아니다) 나머지는
-    #    미처리로 덮인다 — 부분 실패(exit 0)로 닫는다.
-    assert exit_code == 0, "성공 창이 하나 있으므로 부분 실패(exit 0)로 닫혀야 한다"
+    # 1) 내구 원장이 남는다 — 예약이 곧 허가인 기록의 정본.
+    assert workspace.joinpath(*LEDGER_PATH).is_file(), "내구 예약 원장이 없다"
+    # 2) 상한이 없으니 둘째 창의 호출도 간다.
+    assert len(sdk.responses_calls) == 2, "상한이 없는데 남은 창의 SDK 호출이 막혔다"
+    assert exit_code == 0
     result = _result(workspace)
     assert result.windows_total == 2
-    assert result.windows_successful == 1
-    assert result.windows_skipped == 1
-    assert "cost_ceiling_exceeded" in result.reason_codes
+    assert result.windows_skipped == 0
+    assert "cost_ceiling_exceeded" not in result.reason_codes
     assert WorkflowJournal.open(workspace / "workflow.jsonl").state == "review_required"
+    # 3) 초과 실측은 숨기지 않고 사용량에 남는다.
+    assert any(Decimal(row.cost) >= Decimal(10) for row in _usage_rows(workspace))
 
 
 def test_same_job_in_a_new_root_cannot_reuse_the_old_authorization_for_paid_calls(
@@ -432,15 +426,13 @@ def test_same_job_in_a_new_root_cannot_reuse_the_old_authorization_for_paid_call
     workspace_a = _prepare(root_a, input_path)
     _patch_boundaries(monkeypatch)
     sdk = _install_fake_sdk(monkeypatch, _FakeSdk())
-    estimate_a = project_commands._read_one(workspace_a / "analysis-estimate.jsonl")
-    assert isinstance(estimate_a, AnalysisEstimate)
+    estimate_a = scope_of(workspace_a)
     authorization = tmp_path / "authorization.jsonl"
     authorization.write_text(
         encode_message(
             project_commands.AnalysisAuthorization(
                 input_revision=estimate_a.input_revision,
-                estimate_revision=estimate_a.estimate_revision,
-                pricing_snapshot_revision=estimate_a.pricing_snapshot_revision,
+                settings_sha256=estimate_a.settings_sha256,
                 media_grant_revision=estimate_a.media_grant_revision,
                 authorized_at="2026-09-28T04:00:00Z",
             )
@@ -463,8 +455,7 @@ def test_same_job_in_a_new_root_cannot_reuse_the_old_authorization_for_paid_call
         )
         == 0
     )
-    estimate_b = project_commands._read_one(workspace_b / "analysis-estimate.jsonl")
-    assert isinstance(estimate_b, AnalysisEstimate)
+    estimate_b = scope_of(workspace_b)
     assert estimate_b.input_revision == estimate_a.input_revision
 
     exit_code = cli.main(
@@ -500,8 +491,7 @@ def _unit_workspace(tmp_path: Path) -> Path:
 def _authorization(revision: str = "a" * 64) -> AnalysisAuthorization:
     return AnalysisAuthorization(
         input_revision=revision,
-        estimate_revision="b" * 64,
-        pricing_snapshot_revision=official_pricing_snapshot().snapshot_revision,
+        settings_sha256="b" * 64,
         media_grant_revision="c" * 64,
         authorized_at="2026-09-28T05:00:00Z",
     )

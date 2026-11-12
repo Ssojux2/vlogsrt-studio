@@ -180,7 +180,7 @@ def test_installed_wrapper_runs_the_real_engine_on_a_fresh_job(tmp_path: Path) -
     )
     assert completed.returncode == 0
     assert (workspace / "workflow.jsonl").is_file()
-    assert (job_dir / "analysis-estimate.jsonl").is_file()
+    assert not (job_dir / "analysis-estimate.jsonl").is_file()  # D110: 범위는 인쇄만 한다
     assert (workspace / "media-grant.json").read_text(encoding="utf-8") == grant
     assert (workspace / "cancellation.jsonl").read_text(encoding="utf-8") == staged
 
@@ -355,7 +355,7 @@ def test_real_engine_accepts_zero_and_single_audio_topologies(tmp_path: Path) ->
         wrapper, ["analyze", "job-1", str(zero_job)], sandbox=sandbox, env=zero_env
     )
     assert zero.returncode == 0
-    assert (zero_job / "analysis-estimate.jsonl").is_file()
+    assert (zero_job / "workspace" / "workflow.jsonl").is_file()  # inspect가 통과했다
 
     # 1스트림(기본 도구)은 격리 뿌리에서 새 job로 다시 — workspace 재사용 금지.
     second_root = tmp_path / "second"
@@ -368,7 +368,7 @@ def test_real_engine_accepts_zero_and_single_audio_topologies(tmp_path: Path) ->
         second_wrapper, ["analyze", "job-1", str(one_job)], sandbox=second_sandbox, env=one_env
     )
     assert one.returncode == 0
-    assert (one_job / "analysis-estimate.jsonl").is_file()
+    assert (one_job / "workspace" / "workflow.jsonl").is_file()  # inspect가 통과했다
     _assert_engine_sandbox_hygiene(second_sandbox)
 
 

@@ -194,6 +194,26 @@ def test_zero_limit_allows_only_zero_bound_reservations(tmp_path: Path) -> None:
     assert snapshot.remaining_bound == Decimal("0")
 
 
+def test_no_limit_ledger_never_refuses_for_budget_and_round_trips_null(tmp_path: Path) -> None:
+    """D110: 기본 원장은 상한이 없다 — 예약이 아무리 커도 예산 부족으로 거절되지 않는다."""
+    path = tmp_path / "budget.json"
+    ledger = BudgetLedger.open(path, identity=_identity())
+    _reserve(ledger, "req-1", "1000000")
+    _reserve(ledger, "req-2", "1000000")
+    snapshot = ledger.snapshot()
+    assert snapshot.approval_limit is None
+    assert snapshot.remaining_bound is None
+    assert snapshot.consumed_bound == Decimal("2000000")
+    assert json.loads(path.read_text(encoding="utf-8"))["approval_limit"] is None
+
+    reopened = BudgetLedger.open(path, identity=_identity())
+    assert reopened.snapshot().approval_limit is None
+    assert len(reopened.snapshot().records) == 2
+    # 상한이 없던 원장을 숫자 상한으로 다시 여는 것은 다른 원장이다.
+    with pytest.raises(LedgerIdentityMismatch):
+        BudgetLedger.open(path, identity=_identity(), approval_limit=Decimal("5"))
+
+
 def test_replayed_request_id_never_grants_a_second_send(tmp_path: Path) -> None:
     ledger = _open(tmp_path)
     _reserve(ledger, "req-1", "1")

@@ -182,26 +182,16 @@ def build_analysis_estimate(
     revision: ProjectRevision,
     settings: AnalysisSettings,
     *,
-    pricing: PricingSnapshot,
     media_grant_revision: str,
     settings_sha256: str | None = None,
 ) -> AnalysisEstimate:
-    """네트워크 없이 고유 소스 오디오와 최악의 창/이미지/토큰 사용량을 센다.
+    """네트워크 없이 고유 소스 오디오와 최악의 창/이미지/토큰 범위를 센다.
 
-    비용 상한은 공식 가격 스냅샷 하나로 계산한다 — 사용자 예산 가정과 섞지
-    않는다(승인은 스냅샷 리비전에 묶인다). 전사 항은 **정해진 작업 몫**이다:
-    고유 오디오에 `transcription_call_multiplier`를 곱한 양을 whisper+gpt 합산
-    분당가로 환산한 허용량이며, 실제 호출 조합(1차·재전사·심판·교정·재시도·
-    조각)이 이를 넘으면 원장이 이후 예약을 거부해 실행은 `cost_ceiling_exceeded`
-    로 정직하게 멈춘다(S2B-2b). **전 과정 완료의 보증이 아니다** — 완료를
-    보증하려면 통과·재시도별 유한 상한을 따로 증명해야 한다. Luna 입력 상한은
-    이미지·출력과 같은 표면에 **직렬화 글자** 상한이 함께 들어간다 — 실제
-    요청의 예약이 승인보다 클 수 없어야 하기 때문이다.
+    분석 범위 기록이다 — 비용·가격은 재지 않는다(D110). 승인이 처음 받아들여질 때 이 기록을
+    남기고, 재개는 다시 잰 범위가 남긴 것과 같을 때만 보낸다(그사이 바뀐 미디어·설정은 0송신).
     """
     if document.input_sha256 != revision.input_sha256:
-        raise ValueError("비용 추정의 문서와 입력 리비전이 다르다")
-    if pricing.luna_model != settings.model:
-        raise ValueError("가격 스냅샷의 Luna 모델과 분석 모델이 다르다")
+        raise ValueError("분석 범위의 문서와 입력 리비전이 다르다")
     unique_audio: dict[str, Fraction] = {}
     for resource in document.resources:
         if resource.has_audio:
@@ -216,18 +206,6 @@ def build_analysis_estimate(
     )
     max_images = max_windows * settings.max_images
     max_image_tokens = max_images * settings.quote_image_input_tokens
-    max_text_tokens = max_windows * window_text_token_ceiling(settings)
-    cost = (
-        _fraction_decimal(transcription_seconds)
-        / Decimal(60)
-        * (Decimal(pricing.whisper_per_minute) + Decimal(pricing.gpt_transcribe_per_minute))
-        + Decimal(max_image_tokens + max_text_tokens)
-        * Decimal(pricing.luna_input_per_million_tokens)
-        / Decimal(1_000_000)
-        + Decimal(max_windows * settings.window_output_tokens)
-        * Decimal(pricing.luna_output_per_million_tokens)
-        / Decimal(1_000_000)
-    )
     return AnalysisEstimate.create(
         input_revision=revision.revision,
         model=settings.model,
@@ -236,9 +214,9 @@ def build_analysis_estimate(
         max_windows=max_windows,
         max_images=max_images,
         max_image_tokens=max_image_tokens,
-        cost_upper_bound=_decimal_text(cost),
+        cost_upper_bound=None,
         settings_sha256=settings_sha256 or settings.sha256(),
-        pricing_snapshot_revision=pricing.snapshot_revision,
+        pricing_snapshot_revision=None,
         media_grant_revision=media_grant_revision,
     )
 

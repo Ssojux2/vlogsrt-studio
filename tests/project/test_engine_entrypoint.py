@@ -20,6 +20,7 @@ from types import ModuleType
 from urllib.parse import quote
 
 import pytest
+from analysis_scope import scope_of
 
 from tests._dotenv_guard import stage_synthetic_dotenv
 from vlogsrt import transcribe
@@ -27,9 +28,9 @@ from vlogsrt.env import find_env_file
 from vlogsrt.project import runner
 from vlogsrt.project.workflow_protocol import (
     AnalysisAuthorization,
-    AnalysisEstimate,
     AnalysisResult,
     CancellationRequest,
+    WorkflowJournal,
     encode_message,
 )
 
@@ -178,10 +179,11 @@ def test_engine_main_stages_selected_files_into_a_fresh_workspace(
 
     assert engine.main(["analyze", "job-1", str(job_dir)]) == 0
 
-    # receive·inspect까지 끝났고, 결과 파일은 job 루트로 동기화됐다.
+    # receive·inspect까지 끝났다 — D110: inspect는 범위를 인쇄만 하고 상태·파일을 남기지 않는다.
     assert (workspace / "workflow.jsonl").is_file()
-    assert (workspace / "analysis-estimate.jsonl").is_file()
-    assert (job_dir / "analysis-estimate.jsonl").is_file()
+    assert WorkflowJournal.open(workspace / "workflow.jsonl").state == "received"
+    assert not (workspace / "analysis-estimate.jsonl").is_file()
+    assert not (job_dir / "analysis-estimate.jsonl").is_file()
     # 스테이징 파일은 바이트 그대로 workspace로 들어가고 원본은 그대로다.
     assert (workspace / "media-grant.json").read_text(encoding="utf-8") == grant
     assert (workspace / "cancellation.jsonl").read_text(encoding="utf-8") == staged
@@ -251,16 +253,13 @@ def test_engine_main_rejects_broken_invocations(tmp_path: Path, engine: ModuleTy
 
 def _write_authorization(job_dir: Path) -> None:
     """job 루트의 추정에서 승인 파일을 만든다 — 실제 앱이 남기는 모양이다."""
-    from vlogsrt.project import commands as project_commands
 
-    estimate = project_commands._read_one(job_dir / "analysis-estimate.jsonl")
-    assert isinstance(estimate, AnalysisEstimate)
+    estimate = scope_of(job_dir / "workspace")
     (job_dir / "analysis-authorization.jsonl").write_text(
         encode_message(
             AnalysisAuthorization(
                 input_revision=estimate.input_revision,
-                estimate_revision=estimate.estimate_revision,
-                pricing_snapshot_revision=estimate.pricing_snapshot_revision,
+                settings_sha256=estimate.settings_sha256,
                 media_grant_revision=estimate.media_grant_revision,
                 authorized_at="2026-09-27T04:00:00Z",
             )
@@ -454,10 +453,7 @@ def test_engine_releases_ownership_after_a_cancelled_run(
     _write_authorization(job_dir)
     _patch_paid_gates(monkeypatch)
 
-    from vlogsrt.project import commands as project_commands
-
-    estimate = project_commands._read_one(job_dir / "analysis-estimate.jsonl")
-    assert isinstance(estimate, AnalysisEstimate)
+    estimate = scope_of(job_dir / "workspace")
     (job_dir / "cancellation.jsonl").write_text(
         _staged_cancellation(estimate.input_revision), encoding="utf-8"
     )

@@ -103,12 +103,10 @@ def _document() -> tuple[ProjectDocument, ProjectRevision]:
 def test_estimate_deduplicates_source_audio_and_caps_windows_images_and_tokens() -> None:
     """같은 소스 재사용이 전사비를 중복 계산하거나 창당 6장 제한을 넘기는 버그를 잡는다."""
     document, revision = _document()
-    pricing = official_pricing_snapshot()
     estimate = build_analysis_estimate(
         document,
         revision,
         AnalysisSettings(),
-        pricing=pricing,
         media_grant_revision="9" * 64,
     )
     assert estimate.model == "gpt-5.6-luna"
@@ -119,19 +117,10 @@ def test_estimate_deduplicates_source_audio_and_caps_windows_images_and_tokens()
     # 이미지는 low detail 정액(308)의 2배 여유(616)로, 글자는 바이트 상한의
     # 토큰 환산(8192+64)으로 잰다(S2B-2b) — 실제 요청 예약이 승인을 넘지 않게.
     assert estimate.max_image_tokens == 24 * 616
-    assert estimate.pricing_snapshot_revision == pricing.snapshot_revision
+    # D110: 비용·가격은 재지 않는다 — 범위 기록에는 승인이 묶을 값만 있다.
+    assert estimate.cost_upper_bound is None
+    assert estimate.pricing_snapshot_revision is None
     assert estimate.media_grant_revision == "9" * 64
-    # 120s 전사 × (whisper 0.006 + gpt 0.0045) + (24×616 + 4×(8192+64)) 입력 토큰
-    # + 4×256 출력 토큰. 글자 상한 항이 새로 들어갔다(값은 2026-09-21 스냅샷 그대로).
-    assert estimate.cost_upper_bound == "0.0317904"
-    with pytest.raises(ValueError, match="다르다"):
-        build_analysis_estimate(
-            document,
-            revision,
-            AnalysisSettings(),
-            pricing=official_pricing_snapshot("other-model"),
-            media_grant_revision="9" * 64,
-        )
 
 
 def test_effective_settings_fingerprint_binds_engine_project_media_and_sources() -> None:

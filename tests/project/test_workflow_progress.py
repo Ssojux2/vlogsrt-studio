@@ -30,6 +30,7 @@ from types import ModuleType
 from urllib.parse import quote
 
 import pytest
+from analysis_scope import scope_of
 
 from tests._dotenv_guard import stage_synthetic_dotenv
 from vlogsrt import cli, preprocess, transcribe
@@ -40,7 +41,6 @@ from vlogsrt.project import runner
 from vlogsrt.project.vision import sampling
 from vlogsrt.project.workflow_protocol import (
     AnalysisAuthorization,
-    AnalysisEstimate,
     AnalysisProgress,
     CancellationRequest,
     WorkflowJournal,
@@ -315,15 +315,13 @@ def _stub_transcriber(monkeypatch: pytest.MonkeyPatch) -> _Scripted:
 
 
 def _authorization_file(tmp_path: Path, workspace: Path) -> Path:
-    estimate = project_commands._read_one(workspace / "analysis-estimate.jsonl")
-    assert isinstance(estimate, AnalysisEstimate)
+    estimate = scope_of(workspace)
     path = tmp_path / "authorization.jsonl"
     path.write_text(
         encode_message(
             AnalysisAuthorization(
                 input_revision=estimate.input_revision,
-                estimate_revision=estimate.estimate_revision,
-                pricing_snapshot_revision=estimate.pricing_snapshot_revision,
+                settings_sha256=estimate.settings_sha256,
                 media_grant_revision=estimate.media_grant_revision,
                 authorized_at="2026-09-28T04:00:00Z",
             )
@@ -738,14 +736,12 @@ def test_entrypoint_carries_invocation_identity_into_job_root_progress(
 ) -> None:
     job_dir = _stage_entrypoint_job(tmp_path)
     assert engine.main(["analyze", "job-1", str(job_dir), "--invocation-id", "inv-a"]) == 0
-    estimate = project_commands._read_one(job_dir / "analysis-estimate.jsonl")
-    assert isinstance(estimate, AnalysisEstimate)
+    estimate = scope_of(job_dir / "workspace")
     (job_dir / "analysis-authorization.jsonl").write_text(
         encode_message(
             AnalysisAuthorization(
                 input_revision=estimate.input_revision,
-                estimate_revision=estimate.estimate_revision,
-                pricing_snapshot_revision=estimate.pricing_snapshot_revision,
+                settings_sha256=estimate.settings_sha256,
                 media_grant_revision=estimate.media_grant_revision,
                 authorized_at="2026-09-28T06:00:00Z",
             )

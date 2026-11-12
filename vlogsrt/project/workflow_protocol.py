@@ -48,7 +48,9 @@ WorkflowState: TypeAlias = Literal[
 ]
 
 _NEXT_STATE: dict[WorkflowState, WorkflowState] = {
-    "received": "estimate_ready",
+    # 비용 추정 단계는 D110에서 지웠다 — 받은 뒤 바로 승인이다. 낡은 저널은
+    # estimate_ready에 멈춰 있을 수 있다 — 그 뒤도 그대로 승인으로 이어 간다.
+    "received": "authorized",
     "estimate_ready": "authorized",
     "authorized": "analyzing",
     "analyzing": "review_required",
@@ -57,14 +59,19 @@ _NEXT_STATE: dict[WorkflowState, WorkflowState] = {
     # 낡은 저널은 이 자리에 roughcut_imported로 멈춰 있다 — 그 뒤는 그대로 이어
     # 간다(읽기 호환). 새 쓰기는 roughcut_generated만 쓴다.
     "roughcut_imported": "caption_received",
-    "caption_received": "caption_estimate_ready",
+    "caption_received": "caption_authorized",
     "caption_estimate_ready": "caption_authorized",
     "caption_authorized": "caption_ready",
 }
 
 # 낡은 기록을 읽을 때만 받는 전이(S2C) — 재생은 호환, 새 쓰기는 정준 계승만.
 _LEGACY_TRANSITIONS: frozenset[tuple[WorkflowState, WorkflowState]] = frozenset(
-    {("review_required", "roughcut_imported")}
+    {
+        ("review_required", "roughcut_imported"),
+        # D110 이전의 비용 추정 단계 — 재생만 받는다.
+        ("received", "estimate_ready"),
+        ("caption_received", "caption_estimate_ready"),
+    }
 )
 
 _TERMINAL_STATES = frozenset({"cancelled", "failed"})
@@ -223,10 +230,13 @@ class AnalysisEstimate:
     max_images: int
     max_image_tokens: int
     cost_upper_bound: str | None
+    """D110 이전 기록만 싣는다 — 새 범위 기록은 비용을 재지 않는다(None)."""
     settings_sha256: str
-    pricing_snapshot_revision: str
+    pricing_snapshot_revision: str | None
+    """D110 이전 기록만 싣는다 — 새 범위 기록은 가격에 묶이지 않는다(None)."""
     media_grant_revision: str
     estimate_revision: str
+    """범위 기록의 리비전 — 이름은 낡은 그대로다(시도·진행·결과가 이 값에 묶인다)."""
 
     @classmethod
     def create(
@@ -241,7 +251,7 @@ class AnalysisEstimate:
         max_image_tokens: int,
         cost_upper_bound: str | None,
         settings_sha256: str,
-        pricing_snapshot_revision: str,
+        pricing_snapshot_revision: str | None,
         media_grant_revision: str,
     ) -> AnalysisEstimate:
         payload = _analysis_estimate_payload(
@@ -275,9 +285,10 @@ class AnalysisEstimate:
     def __post_init__(self) -> None:
         _require_sha256(self.input_revision, "입력 리비전")
         _require_sha256(self.settings_sha256, "분석 설정")
-        _require_sha256(self.pricing_snapshot_revision, "가격 스냅샷 리비전")
+        if self.pricing_snapshot_revision is not None:
+            _require_sha256(self.pricing_snapshot_revision, "가격 스냅샷 리비전")
         _require_sha256(self.media_grant_revision, "미디어 권한 리비전")
-        _require_sha256(self.estimate_revision, "비용 추정 리비전")
+        _require_sha256(self.estimate_revision, "분석 범위 리비전")
         if not self.model:
             raise ValueError("분석 모델이 비어 있다")
         if self.unique_source_audio_seconds < 0 or self.transcription_seconds < 0:
@@ -298,33 +309,30 @@ class AnalysisEstimate:
 
 @dataclass(frozen=True, slots=True)
 class AnalysisAuthorization:
+    """분석 승인 — 입력·설정 지문·미디어 권한에 묶인다(D110 — 비용 추정·가격에는 묶이지 않는다).
+
+    설정 지문은 엔드포인트·작업공간 자리까지 접혀 있어 다른 공급자·다른 작업공간이 같은 승인을
+    다시 쓰지 못한다(S2B-2b). 값은 `project inspect`가 인쇄한다."""
+
     input_revision: str
-    estimate_revision: str
-    pricing_snapshot_revision: str
+    settings_sha256: str
     media_grant_revision: str
     authorized_at: str
 
     def __post_init__(self) -> None:
         _require_sha256(self.input_revision, "입력 리비전")
-        _require_sha256(self.estimate_revision, "비용 추정 리비전")
-        _require_sha256(self.pricing_snapshot_revision, "가격 스냅샷 리비전")
+        _require_sha256(self.settings_sha256, "분석 설정")
         _require_sha256(self.media_grant_revision, "미디어 권한 리비전")
         if not self.authorized_at:
             raise ValueError("승인 시각이 비어 있다")
 
     def require_matches(
-        self,
-        input_revision: str,
-        estimate_revision: str,
-        pricing_snapshot_revision: str,
-        media_grant_revision: str,
+        self, input_revision: str, settings_sha256: str, media_grant_revision: str
     ) -> None:
         if self.input_revision != input_revision:
             raise ValueError("승인의 입력 리비전이 현재 입력과 다르다")
-        if self.estimate_revision != estimate_revision:
-            raise ValueError("승인의 추정 리비전이 현재 비용 추정과 다르다")
-        if self.pricing_snapshot_revision != pricing_snapshot_revision:
-            raise ValueError("승인의 가격 스냅샷이 현재 가격과 다르다")
+        if self.settings_sha256 != settings_sha256:
+            raise ValueError("승인의 분석 설정 지문이 현재 설정과 다르다")
         if self.media_grant_revision != media_grant_revision:
             raise ValueError("승인의 미디어 권한 리비전이 현재 권한과 다르다")
 
@@ -1083,10 +1091,13 @@ class CaptionEstimate:
     render_audio_sha256: str
     audio_seconds: Fraction
     transcription_seconds: Fraction
-    cost_upper_bound: str
-    pricing_snapshot_revision: str
+    cost_upper_bound: str | None
+    """D110 이전 기록만 싣는다 — 새 범위 기록은 비용을 재지 않는다(None)."""
+    pricing_snapshot_revision: str | None
+    """D110 이전 기록만 싣는다 — 새 범위 기록은 가격에 묶이지 않는다(None)."""
     settings_sha256: str
     estimate_revision: str
+    """범위 기록의 리비전 — 이름은 낡은 그대로다(시도가 이 값에 묶인다)."""
 
     @classmethod
     def create(
@@ -1098,8 +1109,8 @@ class CaptionEstimate:
         render_audio_sha256: str,
         audio_seconds: Fraction,
         transcription_seconds: Fraction,
-        cost_upper_bound: str,
-        pricing_snapshot_revision: str,
+        cost_upper_bound: str | None,
+        pricing_snapshot_revision: str | None,
         settings_sha256: str,
     ) -> CaptionEstimate:
         payload = _caption_estimate_payload(
@@ -1120,7 +1131,7 @@ class CaptionEstimate:
             render_audio_sha256,
             audio_seconds,
             transcription_seconds,
-            cast(str, payload["cost_upper_bound"]),
+            cast(str | None, payload["cost_upper_bound"]),
             pricing_snapshot_revision,
             settings_sha256,
             _digest(payload),
@@ -1132,38 +1143,39 @@ class CaptionEstimate:
             (self.origin_revision, "원본 리비전"),
             (self.final_revision, "최종 리비전"),
             (self.render_audio_sha256, "렌더 오디오"),
-            (self.pricing_snapshot_revision, "가격 스냅샷"),
             (self.settings_sha256, "자막 설정"),
-            (self.estimate_revision, "자막 추정"),
+            (self.estimate_revision, "자막 범위"),
         ):
             _require_sha256(value, label)
+        if self.pricing_snapshot_revision is not None:
+            _require_sha256(self.pricing_snapshot_revision, "가격 스냅샷")
         if self.audio_seconds <= 0 or self.transcription_seconds < self.audio_seconds:
             raise ValueError("자막 오디오 길이는 양수이고 전사 상한 이하여야 한다")
-        if _decimal(self.cost_upper_bound, "자막 비용 상한") < 0:
+        cost = self.cost_upper_bound
+        if cost is not None and _decimal(cost, "자막 비용 상한") < 0:
             raise ValueError("자막 비용 상한은 0 이상이어야 한다")
 
 
 @dataclass(frozen=True, slots=True)
 class CaptionAuthorization:
+    """자막 승인 — 요청(오디오·XML·원본)과 자막 설정 지문에 묶인다(D110 — 비용 추정·가격에는
+    묶이지 않는다)."""
+
     request_revision: str
-    estimate_revision: str
-    pricing_snapshot_revision: str
+    settings_sha256: str
     authorized_at: str
 
     def __post_init__(self) -> None:
         _require_sha256(self.request_revision, "자막 요청 리비전")
-        _require_sha256(self.estimate_revision, "자막 추정 리비전")
-        _require_sha256(self.pricing_snapshot_revision, "가격 스냅샷 리비전")
+        _require_sha256(self.settings_sha256, "자막 설정")
         if not self.authorized_at:
             raise ValueError("자막 승인 시각이 비어 있다")
 
-    def require_matches(self, estimate: CaptionEstimate) -> None:
-        if self.request_revision != estimate.request_revision:
+    def require_matches(self, scope: CaptionEstimate) -> None:
+        if self.request_revision != scope.request_revision:
             raise ValueError("자막 승인의 요청 리비전이 현재 요청과 다르다")
-        if self.estimate_revision != estimate.estimate_revision:
-            raise ValueError("자막 승인의 비용 추정이 현재 추정과 다르다")
-        if self.pricing_snapshot_revision != estimate.pricing_snapshot_revision:
-            raise ValueError("자막 승인의 가격 스냅샷이 현재 가격과 다르다")
+        if self.settings_sha256 != scope.settings_sha256:
+            raise ValueError("자막 승인의 설정 지문이 현재 자막 설정과 다르다")
 
 
 @dataclass(frozen=True, slots=True)
@@ -1193,7 +1205,12 @@ _CAPTION_ORDERED_STATES: tuple[WorkflowState, ...] = (
     "caption_authorized",
     "caption_ready",
 )
-_NEXT_CAPTION_STATE = dict(zip(_CAPTION_ORDERED_STATES, _CAPTION_ORDERED_STATES[1:], strict=False))
+_NEXT_CAPTION_STATE: dict[WorkflowState, WorkflowState] = {
+    # D110 — 받은 뒤 바로 승인이다. 낡은 원장의 caption_estimate_ready는 재생만 받는다.
+    "caption_received": "caption_authorized",
+    "caption_estimate_ready": "caption_authorized",
+    "caption_authorized": "caption_ready",
+}
 _CAPTION_STATES = frozenset(_CAPTION_ORDERED_STATES)
 
 
@@ -1431,7 +1448,8 @@ class CaptionJournal:
             if state in _TERMINAL_STATES:
                 raise ValueError(f"종료 상태 뒤에는 전이가 없다: {state} → {event.state}")
             expected = _NEXT_CAPTION_STATE.get(state)
-            if event.state != expected and event.state not in _TERMINAL_STATES:
+            legacy = (state, event.state) in _LEGACY_TRANSITIONS
+            if event.state != expected and not legacy and event.state not in _TERMINAL_STATES:
                 raise ValueError(f"허용되지 않는 상태 전이: {state} → {event.state}")
             state = event.state
         return cls(path, first, state)
@@ -1507,10 +1525,9 @@ def _message_payload(message: ProtocolMessage) -> dict[str, object]:
     if isinstance(message, AnalysisAuthorization):
         return {
             "authorized_at": message.authorized_at,
-            "estimate_revision": message.estimate_revision,
             "input_revision": message.input_revision,
             "media_grant_revision": message.media_grant_revision,
-            "pricing_snapshot_revision": message.pricing_snapshot_revision,
+            "settings_sha256": message.settings_sha256,
         }
     if isinstance(message, AnalysisAttempt):
         return {
@@ -1676,9 +1693,8 @@ def _message_payload(message: ProtocolMessage) -> dict[str, object]:
     if isinstance(message, CaptionAuthorization):
         return {
             "authorized_at": message.authorized_at,
-            "estimate_revision": message.estimate_revision,
-            "pricing_snapshot_revision": message.pricing_snapshot_revision,
             "request_revision": message.request_revision,
+            "settings_sha256": message.settings_sha256,
         }
     if isinstance(message, CaptionResult):
         return {
@@ -1756,17 +1772,17 @@ def _decode_payload(kind: object, payload: dict[str, object], version: str) -> P
             max_image_tokens=_integer(payload, "max_image_tokens"),
             cost_upper_bound=_optional_string(payload, "cost_upper_bound"),
             settings_sha256=_string(payload, "settings_sha256"),
-            pricing_snapshot_revision=_string(payload, "pricing_snapshot_revision"),
+            pricing_snapshot_revision=_optional_string(payload, "pricing_snapshot_revision"),
             media_grant_revision=_string(payload, "media_grant_revision"),
         )
         if payload.get("estimate_revision") != estimate.estimate_revision:
             raise ValueError("AnalysisEstimate의 계산 리비전이 기록과 다르다")
         return estimate
     if kind == "AnalysisAuthorization":
+        _refuse_estimate_bound_authorization(payload)
         return AnalysisAuthorization(
             input_revision=_string(payload, "input_revision"),
-            estimate_revision=_string(payload, "estimate_revision"),
-            pricing_snapshot_revision=_string(payload, "pricing_snapshot_revision"),
+            settings_sha256=_string(payload, "settings_sha256"),
             media_grant_revision=_string(payload, "media_grant_revision"),
             authorized_at=_string(payload, "authorized_at"),
         )
@@ -1955,18 +1971,18 @@ def _decode_payload(kind: object, payload: dict[str, object], version: str) -> P
             render_audio_sha256=_string(payload, "render_audio_sha256"),
             audio_seconds=_fraction(payload, "audio_seconds"),
             transcription_seconds=_fraction(payload, "transcription_seconds"),
-            cost_upper_bound=_string(payload, "cost_upper_bound"),
-            pricing_snapshot_revision=_string(payload, "pricing_snapshot_revision"),
+            cost_upper_bound=_optional_string(payload, "cost_upper_bound"),
+            pricing_snapshot_revision=_optional_string(payload, "pricing_snapshot_revision"),
             settings_sha256=_string(payload, "settings_sha256"),
         )
         if payload.get("estimate_revision") != caption_estimate.estimate_revision:
             raise ValueError("CaptionEstimate의 계산 리비전이 기록과 다르다")
         return caption_estimate
     if kind == "CaptionAuthorization":
+        _refuse_estimate_bound_authorization(payload)
         return CaptionAuthorization(
             request_revision=_string(payload, "request_revision"),
-            estimate_revision=_string(payload, "estimate_revision"),
-            pricing_snapshot_revision=_string(payload, "pricing_snapshot_revision"),
+            settings_sha256=_string(payload, "settings_sha256"),
             authorized_at=_string(payload, "authorized_at"),
         )
     if kind == "CaptionResult":
@@ -2007,6 +2023,14 @@ def _decode_payload(kind: object, payload: dict[str, object], version: str) -> P
     raise ValueError(f"지원하지 않는 프로토콜 메시지 타입이다: {kind!r}")
 
 
+def _refuse_estimate_bound_authorization(payload: Mapping[str, object]) -> None:
+    """D110 이전의 승인(비용 추정·가격 스냅샷에 묶였다)은 더 받지 않는다 — 다시 승인한다."""
+    if "estimate_revision" in payload or "pricing_snapshot_revision" in payload:
+        raise ValueError(
+            "비용 추정에 묶인 D110 이전 승인이다 — 입력(요청) 리비전·설정 지문으로 다시 승인하라"
+        )
+
+
 def _project_revision_payload(message: ProjectRevision) -> dict[str, object]:
     return {
         "duration": _fraction_text(message.duration),
@@ -2038,12 +2062,13 @@ def _analysis_estimate_payload(
     max_image_tokens: int,
     cost_upper_bound: str | None,
     settings_sha256: str,
-    pricing_snapshot_revision: str,
+    pricing_snapshot_revision: str | None,
     media_grant_revision: str,
 ) -> dict[str, object]:
     _require_sha256(input_revision, "입력 리비전")
     _require_sha256(settings_sha256, "분석 설정")
-    _require_sha256(pricing_snapshot_revision, "가격 스냅샷 리비전")
+    if pricing_snapshot_revision is not None:
+        _require_sha256(pricing_snapshot_revision, "가격 스냅샷 리비전")
     _require_sha256(media_grant_revision, "미디어 권한 리비전")
     return {
         "cost_upper_bound": (
@@ -2187,13 +2212,17 @@ def _caption_estimate_payload(
     render_audio_sha256: str,
     audio_seconds: Fraction,
     transcription_seconds: Fraction,
-    cost_upper_bound: str,
-    pricing_snapshot_revision: str,
+    cost_upper_bound: str | None,
+    pricing_snapshot_revision: str | None,
     settings_sha256: str,
 ) -> dict[str, object]:
     return {
         "audio_seconds": _fraction_text(audio_seconds),
-        "cost_upper_bound": _decimal_text(_decimal(cost_upper_bound, "자막 비용 상한")),
+        "cost_upper_bound": (
+            None
+            if cost_upper_bound is None
+            else _decimal_text(_decimal(cost_upper_bound, "자막 비용 상한"))
+        ),
         "final_revision": final_revision,
         "origin_revision": origin_revision,
         "pricing_snapshot_revision": pricing_snapshot_revision,

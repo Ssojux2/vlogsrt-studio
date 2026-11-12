@@ -1342,7 +1342,7 @@ def test_blank_roles_still_produce_a_key_free_estimate(
 
     assert engine.main(["analyze", "job-1", str(job_dir), "--stdin-carrier"]) == 0
 
-    assert (job_dir / "analysis-estimate.jsonl").is_file()
+    assert (job_dir / "workspace" / "workflow.jsonl").is_file()  # inspect가 키 없이 통과했다
     assert not env.has_api_key()
 
 

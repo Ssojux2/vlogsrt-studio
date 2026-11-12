@@ -144,14 +144,13 @@ def endpoint_identity_sha256(project_config: ProjectConfig) -> str:
 
 
 def authorization_identity_sha256(authorization: AnalysisAuthorization) -> str:
-    """승인 전체의 지문 — 리비전 넷에 승인 시각까지 묶는다(시각 바꿔치기 리셋 금지)."""
+    """승인 전체의 지문 — 입력·설정·권한에 승인 시각까지 묶는다(시각 바꿔치기 리셋 금지)."""
     return _digest(
         {
             "authorized_at": authorization.authorized_at,
-            "estimate_revision": authorization.estimate_revision,
             "input_revision": authorization.input_revision,
             "media_grant_revision": authorization.media_grant_revision,
-            "pricing_snapshot_revision": authorization.pricing_snapshot_revision,
+            "settings_sha256": authorization.settings_sha256,
         }
     )
 
@@ -159,16 +158,15 @@ def authorization_identity_sha256(authorization: AnalysisAuthorization) -> str:
 def caption_authorization_identity_sha256(authorization: CaptionAuthorization) -> str:
     """자막 승인 전체의 지문 — 같은 재료·같은 규율(S4A).
 
-    요청 리비전이 이미 오디오·XML·원본 리비전을 함께 묶고 있으므로 넷 대신 셋에
+    요청 리비전이 이미 오디오·XML·원본 리비전을 함께 묶고 있으므로 요청·설정 지문에
     승인 시각을 얹는다. 시각까지 묶는 이유는 분석과 같다 — 같은 승인을 시각만
     바꿔 다시 써서 지출 원장을 리셋하는 길이 없다.
     """
     return _digest(
         {
             "authorized_at": authorization.authorized_at,
-            "estimate_revision": authorization.estimate_revision,
-            "pricing_snapshot_revision": authorization.pricing_snapshot_revision,
             "request_revision": authorization.request_revision,
+            "settings_sha256": authorization.settings_sha256,
         }
     )
 
@@ -891,7 +889,7 @@ def _open_ledger(
     workspace: Path,
     *,
     identity: LedgerIdentity,
-    approval_limit: Decimal,
+    approval_limit: Decimal | None = None,
     history: tuple[str, str],
     attempt_id: str,
 ) -> BudgetLedger:
@@ -946,7 +944,7 @@ class AnalysisAccounting(_LedgerAccounting):
         settings_sha256: str,
         project_config: ProjectConfig,
         attempt_id: str,
-        approval_limit: Decimal,
+        approval_limit: Decimal | None = None,
     ) -> AnalysisAccounting:
         """원장을 열거나 다시 열고, 쓰기 전에 투영을 원장에서 다시 세운다.
 
@@ -1027,7 +1025,7 @@ class CaptionAccounting(_LedgerAccounting):
         settings_sha256: str,
         project_config: ProjectConfig,
         attempt_id: str,
-        approval_limit: Decimal,
+        approval_limit: Decimal | None = None,
     ) -> CaptionAccounting:
         identity = LedgerIdentity(
             input_revision=authorization.request_revision,

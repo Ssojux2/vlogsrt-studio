@@ -16,9 +16,10 @@ CLI(`cli.py`)는 파싱과 출력 조립만 하고, 이 모듈이 설정을 읽�
   `FixtureVisionResponder`로, 무플래그는 닫힌 재생기로 — 블록마다 오류 판정이 남는
   지금의 기본값 그대로다.
 
-비용 길이 안전장치(레거시 `_confirm_cost`에 해당하는 것)는 없다 — 비용 추정은
-`inspect`의 몫이다. `run`은 임시 명령이다: 최종 표면은 `inspect | cut | approve |
-caption`이고 `run`을 두지 않는다(사람 게이트 우회).
+비용 길이 안전장치(레거시 `_confirm_cost`에 해당하는 것)는 없다 — 비용 추정도 없다
+(D110). `inspect`는 승인이 묶을 값(입력·설정 지문·미디어 권한)만 인쇄한다.
+`run`은 임시 명령이다: 최종 표면은 `inspect | cut | approve | caption`이고
+`run`을 두지 않는다(사람 게이트 우회).
 
 `run`의 산출은 언제나 **초안**이다(D35): `EditPlan`에 사람 검토 상태가 없으므로
 `accepted` 판정이 임계값을 넘으면 사람 확인 없이 컷이 적용된다. 출력은 그 사실을
@@ -38,7 +39,6 @@ import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
-from decimal import Decimal
 from fractions import Fraction
 from pathlib import Path
 
@@ -497,7 +497,6 @@ def project_command(args: argparse.Namespace) -> int:
         "review": _project_review,
         "roughcut": _project_roughcut,
         "caption": _project_caption,
-        "caption-estimate": _project_caption_estimate,
         "caption-run": _project_caption_run,
         "sync-check": _project_sync_check,
     }
@@ -621,22 +620,17 @@ def _receive_source(args: argparse.Namespace, workspace: Path) -> tuple[Path, di
 
 
 def _project_inspect(args: argparse.Namespace) -> int:
-    """네트워크를 열지 않고 공식 가격 스냅샷과 비용 상한을 고정한다."""
+    """네트워크 없이 준비를 확인하고 승인이 묶을 범위를 인쇄한다 — 상태·파일은 그대로다(D110).
+
+    비용·가격은 재지 않는다. 인쇄한 범위 기록의 입력 리비전·설정 지문·미디어 권한 리비전이
+    `AnalysisAuthorization`이 묶을 값이다."""
     workspace = args.workspace
     journal = WorkflowJournal.open(workspace / _JOURNAL)
-    if journal.state != "received":
+    if journal.state not in {"received", "estimate_ready"}:
         raise ValueError(f"inspect는 received 상태에서만 가능하다: {journal.state}")
-    pricing = official_pricing_snapshot(AnalysisSettings().model)
-    # 추정은 키 없이도 실제 준비를 잰다(S2A-2) — 오디오 위상과 권한 문서
-    # 커버리지. 지원하지 않는 구성은 비용부터 드러난다.
-    estimate = _current_analysis_estimate(
-        args, workspace, journal.revision, pricing, verify_prerequisites=True
-    )
-    _write_messages(workspace / _PRICING, (pricing,))
-    _write_messages(workspace / _ESTIMATE, (estimate,))
-    _protocol_out(pricing)
-    _protocol_out(estimate)
-    journal.transition(journal.revision.revision, "estimate_ready")
+    # 키 없이도 실제 준비를 잰다(S2A-2) — 오디오 위상과 권한 문서 커버리지.
+    scope = _current_analysis_estimate(args, workspace, journal.revision, verify_prerequisites=True)
+    _protocol_out(scope)
     return 0
 
 
@@ -644,16 +638,15 @@ def _current_analysis_estimate(
     args: argparse.Namespace,
     workspace: Path,
     revision: ProjectRevision,
-    pricing: PricingSnapshot,
     *,
     verify_prerequisites: bool = False,
 ) -> AnalysisEstimate:
-    """지금 계산한 비용 추정 — `verify_prerequisites`면 실제 준비를 잰다(S2A-2).
+    """지금 잰 분석 범위 — `verify_prerequisites`면 실제 준비를 잰다(S2A-2). 비용은 없다(D110).
 
     실제 원본의 오디오 위상과(위상 관문) 스테이징된 권한 문서의 루트 안
-    커버리지를 같이 잴 수 있다. 둘 다 키가 없어도 돈다(읽기 전용) — 추정이
-    지원하지 않는 구성을 드러내는 것이 이 매개변수의 목적이다. 유료 실행의
-    재계산도 이 자리를 다시 지나므로, 저장된 추정이 있어도 실행 때 다시 잰다.
+    커버리지를 같이 잴 수 있다. 둘 다 키가 없어도 돈다(읽기 전용) — 지원하지 않는
+    구성을 드러내는 것이 이 매개변수의 목적이다. 유료 실행의 재개도 이 자리를 다시
+    지나므로, 저장된 범위가 있어도 실행 때 다시 잰다.
 
     순서: 앱 관리 실행의 문서 필수 검사가 **미디어를 읽기 전에** 오고, 권한
     커버리지가 위상 확인보다 먼저다 — 루트 밖 미디어를 ffprobe로 찔러 보고
@@ -699,10 +692,21 @@ def _current_analysis_estimate(
         document,
         revision,
         settings,
-        pricing=pricing,
         media_grant_revision=_media_grant_revision(media, _staged_app_grant_revision(workspace)),
         settings_sha256=fingerprint,
     )
+
+
+def _stored_scope(workspace: Path, current: AnalysisEstimate) -> AnalysisEstimate:
+    """승인 때 남긴 범위 — 다시 잰 범위와 다르면(그사이 미디어·설정이 바뀌었다) 0송신이다."""
+    stored = _read_one(workspace / _ESTIMATE)
+    if not isinstance(stored, AnalysisEstimate):
+        raise ValueError("analysis-estimate.jsonl의 메시지가 AnalysisEstimate가 아니다")
+    if stored.input_revision != current.input_revision:
+        raise ValueError("분석 범위의 입력 리비전이 현재 작업과 다르다")
+    if stored != current:
+        raise ValueError("현재 분석 설정·미디어가 승인 때 분석 범위와 다르다")
+    return stored
 
 
 def _redact_failure_text(args: argparse.Namespace, text: str) -> str:
@@ -740,32 +744,20 @@ def _sanitize_cli_failure(args: argparse.Namespace, text: str) -> str:
 def _project_analyze(args: argparse.Namespace) -> int:
     workspace = args.workspace
     journal = WorkflowJournal.open(workspace / _JOURNAL)
-    if journal.state not in {"estimate_ready", "authorized", "analyzing"}:
+    first = journal.state in {"received", "estimate_ready"}  # estimate_ready는 D110 이전 저널
+    if not first and journal.state not in {"authorized", "analyzing"}:
         raise ValueError(
-            f"analyze는 estimate_ready/authorized/analyzing 상태에서만 가능하다: {journal.state}"
+            f"analyze는 received/authorized/analyzing 상태에서만 가능하다: {journal.state}"
         )
+    # 가격 스냅샷은 실제 쓴 돈을 매기는 데만 쓴다(회계) — 승인·범위는 가격에 묶이지 않는다(D110).
     pricing = official_pricing_snapshot(AnalysisSettings().model)
-    stored_pricing = _read_one(workspace / _PRICING)
-    if not isinstance(stored_pricing, PricingSnapshot):
-        raise ValueError("pricing-snapshot.jsonl의 메시지가 PricingSnapshot이 아니다")
-    if stored_pricing != pricing:
-        raise ValueError("기록된 가격 스냅샷이 현재 공식 가격과 다르다 — inspect를 다시 돌린다")
     estimate_message: AnalysisEstimate | None = None
     authorization: AnalysisAuthorization | None = None
     if bool(args.online) or args.vision_fixtures is not None:
-        loaded_estimate = _read_one(workspace / _ESTIMATE)
-        if not isinstance(loaded_estimate, AnalysisEstimate):
-            raise ValueError("analysis-estimate.jsonl의 메시지가 AnalysisEstimate가 아니다")
-        estimate_message = loaded_estimate
-        if estimate_message.input_revision != journal.revision.revision:
-            raise ValueError("비용 추정의 입력 리비전이 현재 작업과 다르다")
-        if estimate_message.pricing_snapshot_revision != pricing.snapshot_revision:
-            raise ValueError("비용 추정이 현재 가격 스냅샷에 묶이지 않았다")
-        current_estimate = _current_analysis_estimate(
-            args, workspace, journal.revision, pricing, verify_prerequisites=bool(args.online)
+        current_scope = _current_analysis_estimate(
+            args, workspace, journal.revision, verify_prerequisites=bool(args.online)
         )
-        if current_estimate != estimate_message:
-            raise ValueError("현재 분석 설정·미디어가 승인 전 비용 추정과 다르다")
+        estimate_message = current_scope if first else _stored_scope(workspace, current_scope)
     if bool(args.online):
         assert estimate_message is not None
         if args.authorization is None:
@@ -776,20 +768,20 @@ def _project_analyze(args: argparse.Namespace) -> int:
         authorization = loaded_authorization
         authorization.require_matches(
             journal.revision.revision,
-            estimate_message.estimate_revision,
-            pricing.snapshot_revision,
+            estimate_message.settings_sha256,
             estimate_message.media_grant_revision,
         )
-        if estimate_message.cost_upper_bound is None:
-            raise ValueError("온라인 분석 비용 상한이 미설정이다")
         # 유료 역할은 파이프라인 시작 **전에** 전부 유효해야 한다(S2A-2 마지막
         # 단위). 전사기가 먼저 만들어지고 비전 공장에서 뒤늦게 부재를 발견하면
         # 이미 STT 호출이 열린 뒤다 — 어느 역할의 부재도 유료 호출 0회로 닫힌다.
         # 재개(authorized/analyzing)도 이 문을 다시 지난다. 직접 CLI·V1의 이름
         # 계약은 그대로다(이 검사는 값의 존재만 확인한다).
         require_paid_roles(args)
-    if journal.state == "estimate_ready":
-        # 유료 호출은 승인 파일이, 픽스처 재생은 깃발이 분석 착수를 승인한다.
+    if first:
+        # 유료 호출은 승인 파일이, 픽스처 재생은 깃발이 분석 착수를 승인한다. 승인이 처음
+        # 받아들여지는 이때 범위를 남긴다 — 재개는 다시 잰 범위가 이것과 같을 때만 보낸다.
+        if estimate_message is not None:
+            _write_messages(workspace / _ESTIMATE, (estimate_message,))
         journal.transition(journal.revision.revision, "authorized")
     attempt_id: str | None = None
     result: AnalysisResult | None = None
@@ -799,7 +791,7 @@ def _project_analyze(args: argparse.Namespace) -> int:
         candidates = tuple(_read_candidates(args.candidates, journal.revision.revision))
     else:
         if estimate_message is None:
-            raise ValueError("project inspect로 비용 추정을 먼저 고정해야 한다")
+            raise ValueError("분석 범위가 없다 — --online 또는 --vision-fixtures로 실행한다")
         attempt_id = f"attempt-{uuid.uuid4()}"
         started_at = _utc_now()
         _append_message(
@@ -1017,15 +1009,13 @@ def _project_caption(args: argparse.Namespace) -> int:
     workspace = args.workspace
     journal = WorkflowJournal.open(workspace / _JOURNAL)
     # roughcut_imported는 낡은 저널의 같은 자리다(S2C) — 읽기 호환으로 받는다.
+    # caption_estimate_ready는 D110 이전 저널의 자리다 — 같은 자리로 받는다.
     if journal.state not in {
         "roughcut_generated",
         "roughcut_imported",
         "caption_estimate_ready",
     }:
-        raise ValueError(
-            f"caption은 roughcut_generated/caption_estimate_ready 상태에서만 가능하다: "
-            f"{journal.state}"
-        )
+        raise ValueError(f"caption은 roughcut_generated 상태에서만 가능하다: {journal.state}")
     # 승인 파일은 상태를 움직이기 전에 검사한다 — 실패가 저널에 흔적을 남기지 않는다.
     authorization: CaptionAuthorization | None = None
     if bool(args.online):
@@ -1039,38 +1029,30 @@ def _project_caption(args: argparse.Namespace) -> int:
         journal.revision.revision, args.render_audio, args.final_fcpxml
     )
     cfg = load_config()
-    pricing = official_pricing_snapshot()
     audio_seconds = measure_caption_request(request)
-    estimate = build_caption_estimate(
-        request,
-        audio_seconds=audio_seconds,
-        pricing=pricing,
-        settings_sha256=caption_settings_sha256(cfg),
+    scope = build_caption_estimate(
+        request, audio_seconds=audio_seconds, settings_sha256=caption_settings_sha256(cfg)
     )
+    # 승인은 원장을 움직이기 전에 대조한다 — 낡은 승인이 저널에 흔적을 남기지 않는다.
+    if authorization is not None:
+        authorization.require_matches(scope)
     if journal.state in {"roughcut_generated", "roughcut_imported"}:
         # 낡은 저널의 roughcut_imported도 같은 자리로 받는다(S2C 읽기 호환).
         _write_messages(workspace / _CAPTION_REQUEST, (request,))
         journal.transition(journal.revision.revision, "caption_received")
-        _write_messages(workspace / _CAPTION_PRICING, (pricing,))
-        _write_messages(workspace / _CAPTION_ESTIMATE, (estimate,))
-        journal.transition(journal.revision.revision, "caption_estimate_ready")
     else:
-        # 드리프트 재시도: 이미 고정된 요청·추정과 지금 입력이 같은지만 본다.
+        # D110 이전 저널(caption_estimate_ready): 고정된 요청과 지금 입력이 같은지만 본다.
         stored_request = _read_one(workspace / _CAPTION_REQUEST)
         if not isinstance(stored_request, CaptionRequest) or stored_request != request:
-            raise ValueError("자막 요청이 고정된 추정과 다르다 — 새 작업공간으로 시작한다")
-        stored_estimate = _read_one(workspace / _CAPTION_ESTIMATE)
-        if not isinstance(stored_estimate, CaptionEstimate) or stored_estimate != estimate:
-            raise ValueError("현재 자막 추정이 고정된 추정과 다르다 — 새 작업공간으로 시작한다")
-    if authorization is not None:
-        authorization.require_matches(estimate)
+            raise ValueError("자막 요청이 고정된 요청과 다르다 — 새 작업공간으로 시작한다")
+    _write_messages(workspace / _CAPTION_ESTIMATE, (scope,))
     journal.transition(journal.revision.revision, "caption_authorized")
     delivery = generate_final_captions(
         request,
         cfg,
         args.out,
         online=bool(args.online),
-        confirmed_cost=bool(args.yes),
+        confirmed=bool(args.yes),
     )
     _write_messages(workspace / _CAPTION_RESULT, (delivery.result,))
     journal.transition(journal.revision.revision, "caption_ready")
@@ -1104,71 +1086,28 @@ def _caption_job_facts(job_dir: Path) -> tuple[CaptionRequest, ValidatedCaptionI
     return request, validated
 
 
-def _project_caption_estimate(args: argparse.Namespace) -> int:
-    """최종 내보내기의 자막 비용을 고정한다 — 전사도 API 키도 없다(S4A).
-
-    스테이징된 WAV·FCPXML·원본 문서를 그대로 잰다. 첫 실행이면 자막 원장을 만들
-    고 요청·가격·추정을 고정하며, 다시 돌면 이미 고정된 것과 지금 재료가 같은지만
-    본다(드리프트는 거절). 상태는 `caption_estimate_ready`에서 멈춘다 — 승인은
-    실행 문(`caption-run`)이 요구한다.
-    """
-    job_dir: Path = args.job_dir
-    request, validated = _caption_job_facts(job_dir)
-    cfg = load_config()
-    pricing = official_pricing_snapshot()
-    estimate = build_caption_estimate(
-        request,
-        audio_seconds=validated.audio_seconds,
-        pricing=pricing,
-        settings_sha256=caption_settings_sha256(cfg),
-    )
-    workspace = job_dir / "workspace"
-    journal_path = workspace / _CAPTION_JOURNAL
-    if journal_path.is_file():
-        journal = CaptionJournal.open(journal_path)
-        if journal.state not in {"caption_estimate_ready", "caption_authorized"}:
-            raise ValueError(
-                "caption-estimate는 caption_estimate_ready/caption_authorized 상태에서만"
-                f" 가능하다: {journal.state}"
-            )
-        stored_request = _read_one(workspace / _CAPTION_REQUEST)
-        if not isinstance(stored_request, CaptionRequest) or stored_request != request:
-            raise ValueError(
-                "스테이징된 최종 내보내기가 고정된 자막 요청과 다르다 — 새 job으로 시작한다"
-            )
-        stored_estimate = _read_one(workspace / _CAPTION_ESTIMATE)
-        if not isinstance(stored_estimate, CaptionEstimate) or stored_estimate != estimate:
-            raise ValueError("현재 자막 추정이 고정된 추정과 다르다 — 새 job으로 시작한다")
-    else:
-        journal = CaptionJournal.create(journal_path, request)
-        _write_messages(workspace / _CAPTION_REQUEST, (request,))
-        _write_messages(workspace / _CAPTION_PRICING, (pricing,))
-        _write_messages(workspace / _CAPTION_ESTIMATE, (estimate,))
-        journal.transition(request.request_revision, "caption_estimate_ready")
-    _protocol_out(estimate)
-    log.out(
-        f"자막 추정: 오디오 {float(validated.audio_seconds):.1f}초 ·"
-        f" 상한 ${Decimal(estimate.cost_upper_bound):.3f} · 승인 대기"
-    )
-    return 0
-
-
 def _project_caption_run(args: argparse.Namespace) -> int:
     """승인된 자막 실행 — 같은 요청으로 실패 뒤 재시도가 열려 있다(S4A).
 
-    승인 문서는 자막 것(`CaptionAuthorization`)이어야 하고 지금 추정에 묶여 있어야
+    비용 추정 단계는 없다(D110) — 첫 실행이 자막 원장을 만들고 요청·범위를 고정한다. 승인
+    문서는 자막 것(`CaptionAuthorization`)이어야 하고 지금 요청·자막 설정에 묶여 있어야
     한다 — 러프컷 승인은 자막을 승인하지 않는다. 시도는 pending→running→결과로
     기록에 남고, 실패해도 원장은 `caption_authorized`에 둔다(같은 유효 승인으로 다시
     실행할 수 있다). 취소만 종료 상태로 닫는다.
     """
     job_dir: Path = args.job_dir
     workspace = job_dir / "workspace"
-    journal = CaptionJournal.open(workspace / _CAPTION_JOURNAL)
-    if journal.state not in {"caption_estimate_ready", "caption_authorized"}:
-        raise ValueError(
-            "caption-run은 caption_estimate_ready/caption_authorized 상태에서만 가능하다: "
-            f"{journal.state}"
-        )
+    journal_path = workspace / _CAPTION_JOURNAL
+    journal: CaptionJournal | None = None
+    if journal_path.is_file():
+        journal = CaptionJournal.open(journal_path)
+        # caption_estimate_ready는 D110 이전 원장의 자리다 — 같은 자리로 받는다.
+        allowed = {"caption_received", "caption_estimate_ready", "caption_authorized"}
+        if journal.state not in allowed:
+            raise ValueError(
+                f"caption-run은 caption_received/caption_authorized 상태에서만 가능하다: "
+                f"{journal.state}"
+            )
     authorization_path = job_dir / _CAPTION_AUTHORIZATION
     if not authorization_path.is_file():
         raise ValueError(
@@ -1183,24 +1122,15 @@ def _project_caption_run(args: argparse.Namespace) -> int:
     # 재검증이자 드리프트 검사: 실행 직전에 승인 전과 같은 문으로 다시 잰다.
     request, validated = _caption_job_facts(job_dir)
     cfg = load_config()
+    # 가격 스냅샷은 실제 쓴 돈을 매기는 데만 쓴다(회계) — 승인·범위는 가격에 묶이지 않는다(D110).
     pricing = official_pricing_snapshot()
-    stored_pricing = _read_one(workspace / _CAPTION_PRICING)
-    if not isinstance(stored_pricing, PricingSnapshot) or stored_pricing != pricing:
-        raise ValueError(
-            "기록된 자막 가격 스냅샷이 현재 공식 가격과 다르다 — caption-estimate를 다시 돌린다"
-        )
     estimate = build_caption_estimate(
         request,
         audio_seconds=validated.audio_seconds,
-        pricing=pricing,
         settings_sha256=caption_settings_sha256(cfg),
     )
-    stored_estimate = _read_one(workspace / _CAPTION_ESTIMATE)
-    if not isinstance(stored_estimate, CaptionEstimate) or stored_estimate != estimate:
-        raise ValueError("현재 자막 추정이 고정된 추정과 다르다 — 새 job으로 시작한다")
     authorization_message.require_matches(estimate)
-    if journal.state == "caption_estimate_ready":
-        journal.transition(request.request_revision, "caption_authorized")
+    journal = _caption_job_journal(workspace, journal, request, estimate)
     attempt_id = f"caption-{uuid.uuid4()}"
     started_at = _utc_now()
 
@@ -1239,10 +1169,9 @@ def _project_caption_run(args: argparse.Namespace) -> int:
                 settings_sha256=estimate.settings_sha256,
                 project_config=load_project_config(args.project_config),
                 attempt_id=attempt_id,
-                approval_limit=Decimal(estimate.cost_upper_bound),
             )
-        # 유료 실행은 예약이 살아 있는 동안에만 키를 푼다 — 승인 문서가 곧 비용
-        # 확인이다(추정의 상한에 묶였다). 픽스처 실행은 게이트만 지난다.
+        # 유료 실행은 예약이 살아 있는 동안에만 키를 푼다 — 승인 문서가 곧 확인이다
+        # (요청·자막 설정에 묶였다). 픽스처 실행은 게이트만 지난다.
         transcriber = _GatedTranscriber(
             transcribe.get_transcriber(
                 cfg,
@@ -1259,7 +1188,7 @@ def _project_caption_run(args: argparse.Namespace) -> int:
             cfg,
             args.out,
             online=online,
-            confirmed_cost=True,
+            confirmed=True,
             transcriber=transcriber,
             srt_stem=f"{validated.project_name}.ko",
         )
@@ -1287,6 +1216,34 @@ def _project_caption_run(args: argparse.Namespace) -> int:
             raise
         raise RuntimeError(reason) from None
     return 0
+
+
+def _caption_job_journal(
+    workspace: Path,
+    journal: CaptionJournal | None,
+    request: CaptionRequest,
+    scope: CaptionEstimate,
+) -> CaptionJournal:
+    """승인이 맞은 뒤 — 첫 실행이면 원장을 만들고 요청·범위를 고정해 승인 상태로 옮긴다.
+
+    다시 실행(승인 상태)이면 고정된 요청·범위와 지금 것이 같아야 한다(드리프트는 0송신).
+    D110 이전 원장(caption_estimate_ready)은 범위를 새로 고정하고 승인으로 옮긴다."""
+    if journal is None:
+        journal = CaptionJournal.create(workspace / _CAPTION_JOURNAL, request)
+        _write_messages(workspace / _CAPTION_REQUEST, (request,))
+    stored_request = _read_one(workspace / _CAPTION_REQUEST)
+    if not isinstance(stored_request, CaptionRequest) or stored_request != request:
+        raise ValueError(
+            "스테이징된 최종 내보내기가 고정된 자막 요청과 다르다 — 새 job으로 시작한다"
+        )
+    if journal.state == "caption_authorized":
+        stored = _read_one(workspace / _CAPTION_ESTIMATE)
+        if not isinstance(stored, CaptionEstimate) or stored != scope:
+            raise ValueError("현재 자막 범위가 승인 때 범위와 다르다 — 새 job으로 시작한다")
+        return journal
+    _write_messages(workspace / _CAPTION_ESTIMATE, (scope,))
+    journal.transition(request.request_revision, "caption_authorized")
+    return journal
 
 
 def _report_caption_delivery(result: CaptionResult) -> None:
@@ -1526,7 +1483,7 @@ def _produce_analysis_outcome(
     """
     settings = AnalysisSettings()
     if estimate.model != settings.model:
-        raise ValueError("승인된 비용 추정과 현재 Luna 모델이 다르다")
+        raise ValueError("승인된 분석 범위와 현재 Luna 모델이 다르다")
     if bool(args.online) == (args.vision_fixtures is not None):
         raise ValueError("분석은 --online 또는 --vision-fixtures 하나만 선택해야 한다")
     cfg = load_config()
@@ -1547,7 +1504,6 @@ def _produce_analysis_outcome(
             settings_sha256=estimate.settings_sha256,
             project_config=project_config,
             attempt_id=attempt_id,
-            approval_limit=Decimal(estimate.cost_upper_bound or "0"),
         )
 
     def cancellation() -> None:

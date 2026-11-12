@@ -21,6 +21,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 import pytest
+from analysis_scope import scope_of
 
 from vlogsrt import cli, preprocess, transcribe
 from vlogsrt.config import Config
@@ -39,7 +40,6 @@ from vlogsrt.project.workflow_analysis import (
 from vlogsrt.project.workflow_protocol import (
     ActualUsage,
     AnalysisAttempt,
-    AnalysisEstimate,
     AnalysisResult,
     UpstreamStages,
     VisionWindowDecision,
@@ -458,14 +458,12 @@ def _analyze(
     _stub_transcriber(monkeypatch)
     _patch_paid_boundaries(monkeypatch, luna)
     authorization = tmp_path / "authorization.jsonl"
-    estimate = project_commands._read_one(workspace / "analysis-estimate.jsonl")
-    assert isinstance(estimate, AnalysisEstimate)
+    estimate = scope_of(workspace)
     authorization.write_text(
         encode_message(
             project_commands.AnalysisAuthorization(
                 input_revision=estimate.input_revision,
-                estimate_revision=estimate.estimate_revision,
-                pricing_snapshot_revision=estimate.pricing_snapshot_revision,
+                settings_sha256=estimate.settings_sha256,
                 media_grant_revision=estimate.media_grant_revision,
                 authorized_at="2026-09-27T04:00:00Z",
             )
@@ -960,14 +958,12 @@ def test_window_exception_retains_earlier_window_evidence(
 
     monkeypatch.setattr(project_commands, "sample_frames", sample_then_fail)
     authorization = tmp_path / "authorization.jsonl"
-    estimate = project_commands._read_one(workspace / "analysis-estimate.jsonl")
-    assert isinstance(estimate, AnalysisEstimate)
+    estimate = scope_of(workspace)
     authorization.write_text(
         encode_message(
             project_commands.AnalysisAuthorization(
                 input_revision=estimate.input_revision,
-                estimate_revision=estimate.estimate_revision,
-                pricing_snapshot_revision=estimate.pricing_snapshot_revision,
+                settings_sha256=estimate.settings_sha256,
                 media_grant_revision=estimate.media_grant_revision,
                 authorized_at="2026-09-27T04:00:00Z",
             )
@@ -1086,14 +1082,12 @@ def test_stage_failure_before_windows_persists_sanitized_error_aggregate(
         monkeypatch.setenv("GEMINI_BASE_URL", "https://example.invalid")
         monkeypatch.setattr(transcribe, "create_vision_client", lambda **kwargs: object())
         authorization = tmp_path / f"authorization-{stage_name}.jsonl"
-        estimate = project_commands._read_one(workspace / "analysis-estimate.jsonl")
-        assert isinstance(estimate, AnalysisEstimate)
+        estimate = scope_of(workspace)
         authorization.write_text(
             encode_message(
                 project_commands.AnalysisAuthorization(
                     input_revision=estimate.input_revision,
-                    estimate_revision=estimate.estimate_revision,
-                    pricing_snapshot_revision=estimate.pricing_snapshot_revision,
+                    settings_sha256=estimate.settings_sha256,
                     media_grant_revision=estimate.media_grant_revision,
                     authorized_at="2026-09-27T04:00:00Z",
                 )
@@ -1158,14 +1152,12 @@ def test_all_transcription_failure_with_zero_windows_is_error(
     _stub_transcriber(monkeypatch, fail=True)
     _patch_paid_boundaries(monkeypatch, _LunaScript([]))
     authorization = tmp_path / "authorization.jsonl"
-    estimate = project_commands._read_one(workspace / "analysis-estimate.jsonl")
-    assert isinstance(estimate, AnalysisEstimate)
+    estimate = scope_of(workspace)
     authorization.write_text(
         encode_message(
             project_commands.AnalysisAuthorization(
                 input_revision=estimate.input_revision,
-                estimate_revision=estimate.estimate_revision,
-                pricing_snapshot_revision=estimate.pricing_snapshot_revision,
+                settings_sha256=estimate.settings_sha256,
                 media_grant_revision=estimate.media_grant_revision,
                 authorized_at="2026-09-27T04:00:00Z",
             )
@@ -1205,14 +1197,12 @@ def test_all_vad_failure_with_zero_windows_is_error(
     _stub_transcriber(monkeypatch)
     _patch_paid_boundaries(monkeypatch, _LunaScript([]))
     authorization = tmp_path / "authorization.jsonl"
-    estimate = project_commands._read_one(workspace / "analysis-estimate.jsonl")
-    assert isinstance(estimate, AnalysisEstimate)
+    estimate = scope_of(workspace)
     authorization.write_text(
         encode_message(
             project_commands.AnalysisAuthorization(
                 input_revision=estimate.input_revision,
-                estimate_revision=estimate.estimate_revision,
-                pricing_snapshot_revision=estimate.pricing_snapshot_revision,
+                settings_sha256=estimate.settings_sha256,
                 media_grant_revision=estimate.media_grant_revision,
                 authorized_at="2026-09-27T04:00:00Z",
             )
@@ -1242,67 +1232,52 @@ def test_all_vad_failure_with_zero_windows_is_error(
     assert "vad_error" in result.reason_codes
 
 
-def test_cost_ceiling_marks_windows_skipped_not_successful(
+def test_large_measured_spend_never_stops_windows_without_a_cost_ceiling(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """비용 상한에 걸린 창은 skipped — 성공으로 세지 않고 나머지도 부르지 않는다.
+    """D110: 비용 상한이 없다 — 실측이 아무리 커도 창을 skipped로 닫지 않는다.
 
-    전사 응답의 실측 길이를 승인 상한보다 크게 만든다(1,000만 초 × whisper 분당가
-    ≈ $1,000 ≫ 상한). 실측 초과는 기록으로 남고 이후 **모든** 예약이 거부된다 —
-    남은 전사 시도도 소스 오류로 닫히고, Luna 호출은 물리적으로 한 번도 가지
-    않는다(S2B-2b). 실제로 계획된 창 전부가 미처리로 덮이는지만 본다.
-    """
+    전사 응답의 실측 길이를 1,000만 초로 만들어도(≈ $1,000) 예약은 거부되지 않고
+    Luna 호출이 간다. 초과 실측은 숨기지 않고 원장에 남는다."""
     workspace = _prepare(tmp_path, _two_clip_project(tmp_path))
     _patch_boundaries(monkeypatch)
     sdk = _patch_sdk_paid_boundaries(monkeypatch, _SdkFake(audio_duration=10_000_000.0))
     authorization = tmp_path / "authorization.jsonl"
-    estimate = project_commands._read_one(workspace / "analysis-estimate.jsonl")
-    assert isinstance(estimate, AnalysisEstimate)
+    estimate = scope_of(workspace)
     authorization.write_text(
         encode_message(
             project_commands.AnalysisAuthorization(
                 input_revision=estimate.input_revision,
-                estimate_revision=estimate.estimate_revision,
-                pricing_snapshot_revision=estimate.pricing_snapshot_revision,
+                settings_sha256=estimate.settings_sha256,
                 media_grant_revision=estimate.media_grant_revision,
                 authorized_at="2026-09-27T04:00:00Z",
             )
         ),
         encoding="utf-8",
     )
-    assert (
-        cli.main(
-            [
-                "project",
-                "analyze",
-                str(workspace),
-                "--online",
-                "--authorization",
-                str(authorization),
-                "--project-config",
-                str(_write_config(tmp_path)),
-            ]
-        )
-        == 2
+    cli.main(
+        [
+            "project",
+            "analyze",
+            str(workspace),
+            "--online",
+            "--authorization",
+            str(authorization),
+            "--project-config",
+            str(_write_config(tmp_path)),
+        ]
     )
     result = _result(workspace)
-    assert result.status == "error"
-    assert result.windows_total >= 1
-    assert result.windows_successful == 0
-    assert result.windows_skipped == result.windows_total
-    # 나중 전사 시도(재전사·교정 등)도 예약 거부로 소스 오류로 닫힌다 — 몫의
-    # 소진은 완료 보증이 아니라 정직한 정지다(S2B-2b 작업 몫 계약).
-    assert result.upstream_transcription_failed >= 1
-    # 상한은 전사 실측에서 이미 넘었다 — Luna 호출은 한 번도 없다.
-    assert sdk.responses_calls == []
-    # 초과 실측은 숨기지 않고 원장에 남는다 — 사용량 투영에 그대로 나온다.
+    assert result.windows_skipped == 0
+    assert "cost_ceiling_exceeded" not in result.reason_codes
+    assert sdk.transcription_calls != []
+    assert result.upstream_transcription_failed == 0
     usage = [
         row
         for row in project_commands._read_messages(workspace / "analysis-usage.jsonl")
         if isinstance(row, ActualUsage)
     ]
-    assert any(Decimal(row.cost) > Decimal(estimate.cost_upper_bound or "0") for row in usage)
-    assert "cost_ceiling_exceeded" in result.reason_codes
+    assert any(Decimal(row.cost) > Decimal("100") for row in usage)
 
 
 def test_cancellation_stays_cancelled_and_writes_no_result(
@@ -1336,14 +1311,12 @@ def test_cancellation_stays_cancelled_and_writes_no_result(
 
     monkeypatch.setattr(runner, "prepare_audio", prepare_then_cancel)
     authorization = tmp_path / "authorization.jsonl"
-    estimate = project_commands._read_one(workspace / "analysis-estimate.jsonl")
-    assert isinstance(estimate, AnalysisEstimate)
+    estimate = scope_of(workspace)
     authorization.write_text(
         encode_message(
             project_commands.AnalysisAuthorization(
                 input_revision=estimate.input_revision,
-                estimate_revision=estimate.estimate_revision,
-                pricing_snapshot_revision=estimate.pricing_snapshot_revision,
+                settings_sha256=estimate.settings_sha256,
                 media_grant_revision=estimate.media_grant_revision,
                 authorized_at="2026-09-27T04:00:00Z",
             )

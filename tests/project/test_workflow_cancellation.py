@@ -19,6 +19,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 import pytest
+from analysis_scope import scope_of
 
 from vlogsrt import cli, preprocess, transcribe
 from vlogsrt.config import Config
@@ -30,7 +31,6 @@ from vlogsrt.project.workflow_protocol import (
     ActualUsage,
     AnalysisAttempt,
     AnalysisAuthorization,
-    AnalysisEstimate,
     CancellationRequest,
     WorkflowJournal,
     encode_message,
@@ -415,15 +415,13 @@ def _patch_sdk_paid_boundary(monkeypatch: pytest.MonkeyPatch) -> _SdkFake:
 
 
 def _authorization_file(tmp_path: Path, workspace: Path) -> Path:
-    estimate = project_commands._read_one(workspace / "analysis-estimate.jsonl")
-    assert isinstance(estimate, AnalysisEstimate)
+    estimate = scope_of(workspace)
     path = tmp_path / "authorization.jsonl"
     path.write_text(
         encode_message(
             AnalysisAuthorization(
                 input_revision=estimate.input_revision,
-                estimate_revision=estimate.estimate_revision,
-                pricing_snapshot_revision=estimate.pricing_snapshot_revision,
+                settings_sha256=estimate.settings_sha256,
                 media_grant_revision=estimate.media_grant_revision,
                 authorized_at="2026-09-21T04:00:00Z",
             )

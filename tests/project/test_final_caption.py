@@ -72,7 +72,7 @@ def test_final_caption_uses_checked_pipeline_and_revision_filename(
         Config(),
         tmp_path / "out",
         online=False,
-        confirmed_cost=False,
+        confirmed=False,
     )
 
     expected = tmp_path / "out" / f"My Vlog.{request.final_revision}.ko.srt"
@@ -102,7 +102,7 @@ def test_explicit_empty_coverage_reports_no_speech_without_creating_srt(
 
     monkeypatch.setattr(pipeline, "run", no_speech)
     delivery = generate_final_captions(
-        request, Config(), tmp_path / "out", online=False, confirmed_cost=False
+        request, Config(), tmp_path / "out", online=False, confirmed=False
     )
     assert delivery.result.speech_status == "no_speech"
     assert delivery.result.srt_path is None
@@ -128,9 +128,7 @@ def test_zero_byte_srt_is_never_reported_as_success(
 
     monkeypatch.setattr(pipeline, "run", empty_file)
     with pytest.raises(CaptionGenerationError, match="0바이트"):
-        generate_final_captions(
-            request, Config(), tmp_path / "out", online=False, confirmed_cost=False
-        )
+        generate_final_captions(request, Config(), tmp_path / "out", online=False, confirmed=False)
 
 
 def test_caption_rejects_non_48khz_pcm_and_changed_fcpxml(tmp_path: Path) -> None:
@@ -138,20 +136,16 @@ def test_caption_rejects_non_48khz_pcm_and_changed_fcpxml(tmp_path: Path) -> Non
     xml = _fcpxml(tmp_path / "final.fcpxml")
     request = create_caption_request("a" * 64, bad_audio, xml)
     with pytest.raises(CaptionGenerationError, match="48000Hz PCM"):
-        generate_final_captions(
-            request, Config(), tmp_path / "out", online=False, confirmed_cost=False
-        )
+        generate_final_captions(request, Config(), tmp_path / "out", online=False, confirmed=False)
 
     audio = _wav(tmp_path / "mix.wav", frames=48_000)
     request = create_caption_request("a" * 64, audio, xml)
     _fcpxml(xml, name="Changed")
     with pytest.raises(CaptionGenerationError, match="리비전"):
-        generate_final_captions(
-            request, Config(), tmp_path / "out2", online=False, confirmed_cost=False
-        )
+        generate_final_captions(request, Config(), tmp_path / "out2", online=False, confirmed=False)
 
 
-def test_online_caption_requires_cost_confirmation_before_pipeline(
+def test_online_caption_requires_confirmation_before_pipeline(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     request = create_caption_request(
@@ -162,10 +156,8 @@ def test_online_caption_requires_cost_confirmation_before_pipeline(
     monkeypatch.setattr(
         pipeline, "run", lambda *args, **kwargs: pytest.fail("확인 전에 파이프라인이 열렸다")
     )
-    with pytest.raises(CaptionGenerationError, match="예상 비용"):
-        generate_final_captions(
-            request, Config(), tmp_path / "out", online=True, confirmed_cost=False
-        )
+    with pytest.raises(CaptionGenerationError, match=r"\(--yes\)"):
+        generate_final_captions(request, Config(), tmp_path / "out", online=True, confirmed=False)
 
 
 def test_caption_request_binds_audio_bytes_and_timeline_duration(tmp_path: Path) -> None:
@@ -177,14 +169,14 @@ def test_caption_request_binds_audio_bytes_and_timeline_duration(tmp_path: Path)
         stream.write(b"\1\0")
     with pytest.raises(CaptionGenerationError, match="오디오 해시"):
         generate_final_captions(
-            request, Config(), tmp_path / "changed", online=False, confirmed_cost=False
+            request, Config(), tmp_path / "changed", online=False, confirmed=False
         )
 
     short = _wav(tmp_path / "short.wav", frames=24_000)
     mismatch = create_caption_request("a" * 64, short, xml)
     with pytest.raises(CaptionGenerationError, match="길이"):
         generate_final_captions(
-            mismatch, Config(), tmp_path / "mismatch", online=False, confirmed_cost=False
+            mismatch, Config(), tmp_path / "mismatch", online=False, confirmed=False
         )
 
 
@@ -204,7 +196,7 @@ def test_recorded_offline_fixtures_work_with_checked_caption_coverage(
     )
     request = create_caption_request("a" * 64, audio, xml)
     delivery = generate_final_captions(
-        request, Config(), tmp_path / "out", online=False, confirmed_cost=False
+        request, Config(), tmp_path / "out", online=False, confirmed=False
     )
     assert delivery.result.speech_status == "speech"
     assert delivery.result.srt_path is not None and delivery.result.srt_path.stat().st_size > 0
@@ -300,7 +292,7 @@ def test_engine_stem_and_injected_transcriber_shape_the_app_visible_delivery(
         Config(),
         tmp_path / "out",
         online=False,
-        confirmed_cost=False,
+        confirmed=False,
         transcriber=injected,
         srt_stem="My Vlog.ko",
     )

@@ -9952,10 +9952,26 @@ Tier 1`, 429)였다 — 영상 판정은 성공하고 전사만 빠졌다. 한�
   바꾸고 비용 줄을 뺐다(실행 지문·청크 경계는 그대로).
 - 화면·오류 문구의 「견적을 확인한 뒤 승인하세요」류를 「승인하세요」로 고쳤다.
 
-**남은 것(이 결정 밖)**: 보내기 직전의 단가 문(Gemini 단가 재확인 기한이 지나면 `semantic_client`·시간 엔진 문이 닫는다)과
-영상 분석 요청마다의 공식 단가 상한(`AnalysisBudget`), 최종 자막의 승인 예산(`budget_usd`)과 실행 중 미터는 그대로 둔다 —
-화면에 보이는 견적이 아니라 보내기 문이다. 레거시 엔진의 비용 표시(`vlogsrt run`의 `estimate_cost`·`ui/service.py`의 안전장치
-문구), `vlogsrt project`의 추정·승인 프로토콜, `vlogsrt media analyze --estimate-only` CLI도 그대로다.
+**4단계(사용자 지시 2026-11-12 「Remove those too」) — CLI·레거시·`vlogsrt project`**:
+- `vlogsrt media analyze`의 견적 표·`--estimate-only`, `vlogsrt run --dry-run`·`probe`·옛 단일 영상 화면의 예상 비용
+  (`transcribe.estimate_cost`)을 지웠다. 길이 안전장치(`VLOGSRT_COST_GUARD_SECONDS`)는 남긴다 — 비용이 아니라 길이를 본다.
+  `Config.cost_per_minute`는 쓰지 않지만 설정 지문(`cfg.to_dict()` — 파생 계층 경계 캐시 열쇠)에 실려 칸만 남긴다.
+- 작업대 최종 자막: 「실행 추정」 → 「실행 준비」(`RunPreparation`), 비용 추정(`estimate_caption_cost`)·승인 예산
+  (`budget_usd`)·실행 중 예산 장부를 지웠다. DB의 `caption_approvals.budget_usd` 칸은 옛 작업공간이 열리게 남기고 새 승인은 빈
+  값을 쓴다.
+- `vlogsrt project`(사용자 선택 「추정 단계만 지운다」): 상태는 `received → authorized`·`caption_received →
+  caption_authorized`로 바로 간다 — 낡은 저널의 `estimate_ready`·`caption_estimate_ready`는 재생만 받는다. `inspect`는 준비를
+  확인하고 승인이 묶을 범위만 인쇄한다(파일·상태 그대로). `caption-estimate` 명령은 지웠고 `caption-run`이 첫 실행에서 자막
+  원장을 만든다. 승인(`AnalysisAuthorization`·`CaptionAuthorization`)은 비용 추정·가격 스냅샷 대신 **입력(요청) 리비전·설정
+  지문**(분석은 미디어 권한까지 — 설정 지문에 엔드포인트·작업공간 자리가 접혀 있어 다른 곳에서 다시 쓰지 못한다)에 묶인다.
+  옛 모양의 승인은 거절한다(다시 승인한다). 범위 기록(`AnalysisEstimate`·`CaptionEstimate` 메시지, 비용·가격 칸은 None)은 승인이
+  처음 받아들여질 때 남기고, 재개는 다시 잰 범위가 같을 때만 보낸다(그사이 바뀐 미디어·설정은 0송신). 그 리비전은 시도·진행·
+  결과 메시지에 그대로 실린다(이름 `estimate_revision`은 낡은 그대로). 내구 원장의 승인 상한은 없어졌다(새 원장은 null — 옛
+  원장의 상한은 그대로 읽는다). 가격표(`PricingSnapshot`)는 **실제 쓴 돈을 매기는 데만** 쓴다. 승인 지문이 바뀌어 D110 이전에
+  시작한 온라인 실행을 이어 갈 때는 새 승인이 필요하다.
+
+**남은 것**: 보내기 직전의 단가 문(Gemini 단가 재확인 기한이 지나면 `semantic_client`·시간 엔진 문이 닫는다)과 영상 분석
+요청마다의 공식 단가 상한(`AnalysisBudget`)은 그대로다 — 화면에 보이는 견적이 아니라 보내기 문이다.
 
 **근거**: 시험 `test_library_approval`(단추가 기다리지 않음 · 모두 끝났으면 0송신 · 잰 뒤 결속이 바뀌면 실행 문이 닫음)·
 `test_library_remaining`·`test_transcribe_only`·`test_analysis_model_ui`(누른 순간의 모델로 잰다)·`test_status_tick`(틱 칸 셋).

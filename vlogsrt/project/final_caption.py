@@ -7,7 +7,6 @@ import json
 import tempfile
 import wave
 from dataclasses import dataclass
-from decimal import Decimal
 from fractions import Fraction
 from pathlib import Path
 
@@ -19,7 +18,6 @@ from vlogsrt.project.workflow_protocol import (
     CaptionEstimate,
     CaptionRequest,
     CaptionResult,
-    PricingSnapshot,
 )
 
 
@@ -31,7 +29,6 @@ class CaptionGenerationError(RuntimeError):
 class CaptionDelivery:
     result: CaptionResult
     review_report: Path
-    estimated_cost: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,39 +162,25 @@ def build_caption_estimate(
     request: CaptionRequest,
     *,
     audio_seconds: Fraction,
-    pricing: PricingSnapshot,
     settings_sha256: str,
     transcription_call_multiplier: int = 2,
 ) -> CaptionEstimate:
-    """whisper 1차＋gpt-transcribe 교정(×2)의 공식 가격 상한을 고정한다."""
+    """whisper 1차＋gpt-transcribe 교정(×2)의 전사 범위를 고정한다 — 비용은 재지 않는다(D110)."""
     if audio_seconds <= 0:
         raise CaptionGenerationError("자막 오디오 길이는 양수여야 한다")
     if transcription_call_multiplier < 1:
         raise ValueError("전사 호출 배수는 1 이상이어야 한다")
-    transcription_seconds = audio_seconds * transcription_call_multiplier
-    cost = (
-        Decimal(transcription_seconds.numerator)
-        / Decimal(transcription_seconds.denominator)
-        / Decimal(60)
-        * (Decimal(pricing.whisper_per_minute) + Decimal(pricing.gpt_transcribe_per_minute))
-    )
     return CaptionEstimate.create(
         request_revision=request.request_revision,
         origin_revision=request.origin_revision,
         final_revision=request.final_revision,
         render_audio_sha256=request.render_audio_sha256,
         audio_seconds=audio_seconds,
-        transcription_seconds=transcription_seconds,
-        cost_upper_bound=_decimal_text(cost),
-        pricing_snapshot_revision=pricing.snapshot_revision,
+        transcription_seconds=audio_seconds * transcription_call_multiplier,
+        cost_upper_bound=None,
+        pricing_snapshot_revision=None,
         settings_sha256=settings_sha256,
     )
-
-
-def _decimal_text(value: Decimal) -> str:
-    if value == 0:
-        return "0"
-    return format(value.normalize(), "f")
 
 
 def generate_final_captions(
@@ -206,7 +189,7 @@ def generate_final_captions(
     destination: Path,
     *,
     online: bool,
-    confirmed_cost: bool,
+    confirmed: bool,
     transcriber: transcribe.Transcriber | None = None,
     srt_stem: str | None = None,
 ) -> CaptionDelivery:
@@ -224,11 +207,8 @@ def generate_final_captions(
             f"렌더 오디오와 최종 타임라인 길이가 다르다: "
             f"{float(audio_duration):.6f}초 ≠ {float(timeline_duration):.6f}초"
         )
-    estimated_cost = transcribe.estimate_cost(float(audio_duration), config) * 2
-    if online and not confirmed_cost:
-        raise CaptionGenerationError(
-            f"예상 비용 ${estimated_cost:.3f}를 확인해야 온라인 전사를 시작할 수 있다"
-        )
+    if online and not confirmed:
+        raise CaptionGenerationError("온라인 전사는 확인(--yes)이 있어야 시작한다 — 유료 호출이다")
     destination.mkdir(parents=True, exist_ok=True)
     if srt_stem is None:
         basename = f"{_safe_filename(project_name)}.{request.final_revision}.ko"
@@ -260,8 +240,8 @@ def generate_final_captions(
                     quality=("coverage:complete",),
                     speech_status="no_speech",
                 )
-                _write_review(review_path, request, result, estimated_cost)
-                return CaptionDelivery(result, review_path, estimated_cost)
+                _write_review(review_path, request, result)
+                return CaptionDelivery(result, review_path)
             source_srt = run.outputs.get("srt")
             if source_srt is None or not source_srt.is_file():
                 raise CaptionGenerationError("전사는 끝났지만 SRT 파일이 없다")
@@ -281,8 +261,8 @@ def generate_final_captions(
                 quality=tuple(quality),
                 speech_status="speech",
             )
-            _write_review(review_path, request, result, estimated_cost)
-            return CaptionDelivery(result, review_path, estimated_cost)
+            _write_review(review_path, request, result)
+            return CaptionDelivery(result, review_path)
     except CaptionGenerationError:
         raise
     except Exception as exc:
@@ -381,15 +361,12 @@ def _safe_filename(value: str) -> str:
     return safe or "Final Cut Project"
 
 
-def _write_review(
-    path: Path, request: CaptionRequest, result: CaptionResult, estimated_cost: float
-) -> None:
+def _write_review(path: Path, request: CaptionRequest, result: CaptionResult) -> None:
     payload = {
         "caption_import": {
             "command": "File > Import > Captions",
             "placement": "Relative to Timeline",
         },
-        "estimated_cost": estimated_cost,
         "final_revision": request.final_revision,
         "origin_revision": request.origin_revision,
         "render_audio_sha256": request.render_audio_sha256,

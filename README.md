@@ -220,7 +220,7 @@ zlib 헤더에 눌려 임계값에 걸터앉는다. 실측에서 88초·44장이
 
 끄려면 `vlogsrt run <video> --no-polish`.
 
-`vlogsrt probe <video>`가 API를 부르지 않고 길이·조각 수·예상 비용을 보여준다.
+`vlogsrt probe <video>`가 API를 부르지 않고 길이·조각 수를 보여준다(비용은 재지 않는다, D110).
 
 ---
 
