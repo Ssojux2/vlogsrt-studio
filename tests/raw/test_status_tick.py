@@ -105,6 +105,7 @@ def test_one_second_timers_merge_into_one_status_tick(tmp_path: Path, local_sock
         "finalcut_toast_view",
         "render_export_card_tick",
         "status_tick",
+        "switch_tick",  # 최종 편집 탭의 자동 전환(D117) — 같은 2초 타이머다
     ]
     assert by_name["render_export_card_tick"]["targets"] == by_name["capcut_tick_view"]["targets"]
     assert {timers[d["targets"][0][0]].value for n, d in by_name.items() if n != "status_tick"} == {

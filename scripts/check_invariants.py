@@ -1304,6 +1304,103 @@ def check_burn_in_stays_pure() -> list[str]:
     return failures
 
 
+# D117 — 최종 편집 모델(`final_edit.py`)과 그 설정은 값만 다룬다. 브라우저(JS)가 같은 규칙을 옮겨
+# 같은 값을 내야 하므로 디스크·프로세스·서비스 상태에 따라 투영이 달라지면 안 된다. 파일은 입출력
+# 계층(`final_edit_io`)의 몫이고, SRT 읽기(`timeline_srt`)도 그쪽이 부른다.
+FINAL_EDIT_MODULES = ("final_edit.py", "final_edit_config.py")
+FINAL_EDIT_MUST_NOT_IMPORT = (
+    *RENDER_PLAN_MUST_NOT_IMPORT, "final_edit_io", "timeline_srt", "render_plan", "burn_export",
+)  # fmt: skip
+
+
+def check_final_edit_stays_pure() -> list[str]:
+    """D117 — 최종 편집 모델은 순수하다. 파일이 사라져도 조용히 통과하지 않는다."""
+    failures: list[str] = []
+    for module in FINAL_EDIT_MODULES:
+        path = PROJECT_PACKAGE / "raw" / module
+        if not path.exists():
+            failures.append(f"vlogsrt/project/raw/{module}: 최종 편집 모델이 사라졌다 (D117)")
+            continue
+        body = path.read_text(encoding="utf-8")
+        failures += [
+            f"{module}: {name}을 import한다 — 최종 편집 모델이 순수 함수가 아니게 된다 (D117)"
+            for name in _imports(body, FINAL_EDIT_MUST_NOT_IMPORT)
+        ]
+        failures += [
+            f"{module}:{number}: 파일을 직접 읽거나 쓰거나 동적 코드를 연다 (D117)"
+            for number, line in enumerate(body.splitlines(), start=1)
+            if FINALCUT_TIMELINE_FILE_IO.search(line) or SYNC_SNAP_FORBIDDEN_CALLS.search(line)
+        ]
+    return failures
+
+
+# D117 — 최종 편집의 입출력(`final_edit_io.py`)은 초안 폴더 안 `edit/` 하나에만 쓴다. 초안 영상·
+# `draft*.srt`·보고서는 읽기만 한다 — 쓰는 길은 `_write_atomic` 한 자리(정해진 이름 셋, 임시 파일 →
+# 이름 바꾸기)뿐이고 폴더는 `edit_folder.mkdir(exist_ok=True)`로만 만든다.
+FINAL_EDIT_IO_MODULE = "final_edit_io.py"
+FINAL_EDIT_IO_MUST_NOT_IMPORT = ("shutil", "subprocess", "tempfile", "sqlite3", "importlib")
+FINAL_EDIT_IO_FORBIDDEN = re.compile(
+    r"\b(copyfile|copy2|copytree|rmtree|unlink|write_text|write_bytes)\b"
+    r"|\bos\.(replace|rename|remove)\(|(?<![\w.])open\(|(?<!os)\.open\("
+)
+FINAL_EDIT_IO_WRITER = "_write_atomic"
+FINAL_EDIT_IO_MKDIR = "edit_folder.mkdir(exist_ok=True)"
+
+
+def check_final_edit_io_writes_only_edit_folder() -> list[str]:
+    """D117 — 최종 편집은 초안 폴더의 `edit/`에만 쓴다. 파일이 사라져도 조용히 통과하지 않는다."""
+    rel = f"vlogsrt/project/raw/{FINAL_EDIT_IO_MODULE}"
+    path = PROJECT_PACKAGE / "raw" / FINAL_EDIT_IO_MODULE
+    if not path.exists():
+        return [f"{rel}: 최종 편집 입출력이 사라졌다 (D117)"]
+    body = path.read_text(encoding="utf-8")
+    lines = body.splitlines()
+    failures = [
+        f"{rel}: {name}을 import한다 — 최종 편집이 복사·지우기·외부 프로세스를 쓸 수 있다 (D117)"
+        for name in _imports(body, FINAL_EDIT_IO_MUST_NOT_IMPORT)
+    ]
+    failures += [
+        f"{rel}:{number}: 덮어쓰기·복사·지우기·열어 쓰기 경로를 부른다 (D117)"
+        for number, line in enumerate(lines, start=1)
+        if FINAL_EDIT_IO_FORBIDDEN.search(line)
+    ]
+    failures += [
+        f"{rel}:{number}: 정해진 한 자리 밖에서 폴더를 만든다 (D117)"
+        for number, line in enumerate(lines, start=1)
+        if ".mkdir(" in line and line.strip() != FINAL_EDIT_IO_MKDIR
+    ]
+    failures += _final_edit_writer_failures(rel, body)
+    return failures
+
+
+def _final_edit_writer_failures(rel: str, body: str) -> list[str]:
+    """`os.open(`·`oscompat.replace(`는 쓰기 함수 안에만 — 그 함수는 정해진 이름·`edit` 폴더만."""
+    tree = ast.parse(body)
+    writer = next(
+        (node for node in ast.walk(tree)
+         if isinstance(node, ast.FunctionDef) and node.name == FINAL_EDIT_IO_WRITER),
+        None,
+    )  # fmt: skip
+    if writer is None:
+        return [f"{rel}: 쓰기 함수 `{FINAL_EDIT_IO_WRITER}`가 없다 (D117)"]
+    inside = set(range(writer.lineno, (writer.end_lineno or writer.lineno) + 1))
+    failures = [
+        f"{rel}:{number}: 쓰기 함수 밖에서 파일을 열거나 이름을 바꾼다 (D117)"
+        for number, line in enumerate(body.splitlines(), start=1)
+        if ("os.open(" in line or "oscompat.replace(" in line) and number not in inside
+    ]
+    writer_text = ast.get_source_segment(body, writer) or ""
+    if "EDIT_FILES" not in writer_text or "EDIT_FOLDER" not in writer_text:
+        failures.append(
+            f"{rel}: 쓰기 함수가 이름(`EDIT_FILES`)·폴더(`EDIT_FOLDER`)를 검사하지 않는다"
+        )
+    if 'EDIT_FOLDER = "edit"' not in body:
+        failures.append(f'{rel}: 쓰는 자리 `EDIT_FOLDER = "edit"`가 없다 (D117)')
+    if "VIDEO_NAME" in writer_text or "SRT_NAME" in writer_text or "REPORT_NAME" in writer_text:
+        failures.append(f"{rel}: 쓰기 함수가 초안 파일 이름을 안다 (D117)")
+    return failures
+
+
 # D60 — 자막 시각 확인(D55)이 등급으로 가는 길은 하나다: 서비스의 `_tier_timing`이 지금
 # 리비전 보고서에서 값(`TimingSignals`)을 만들고, 등급 보고서의 유일한 자리
 # `_tier_report_for_row`가 그 값을 `classify(…, timing=self._tier_timing(…))`로 넘긴다.
@@ -3148,6 +3245,8 @@ CHECKS = (
     ("3단 등급은 순수하다", check_tiering_stays_pure),
     ("추천만 이어붙이는 렌더 계획은 순수하다", check_render_plan_stays_pure),
     ("자막 입히기 조판은 순수하다", check_burn_in_stays_pure),
+    ("최종 편집 모델은 순수하다", check_final_edit_stays_pure),
+    ("최종 편집은 초안 폴더의 edit/에만 쓴다", check_final_edit_io_writes_only_edit_folder),
     ("등급의 시각 확인 값은 서비스 한 자리만", check_tier_timing_only_from_service),
     ("자막 시각 확인은 순수하다", check_sync_check_stays_pure),
     ("자막 시각 확인은 표시만 한다", check_sync_check_only_displays),

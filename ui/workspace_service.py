@@ -44,6 +44,7 @@ from fastapi.responses import (  # noqa: E402
 from ui import activity_log, design_tokens, os_open, ui_facade  # noqa: E402
 from ui import chooser as ui_chooser  # noqa: E402
 from ui.burn_cell import BURN_JOB_LABEL, BurnCell  # noqa: E402
+from ui.final_edit_ui import FINAL_EDIT_CSS, REVIEW_TAB_KEY, FinalEditPanel  # noqa: E402
 from vlogsrt import log, preprocess  # noqa: E402
 from vlogsrt.project.raw import service as raw_service  # noqa: E402
 
@@ -906,7 +907,13 @@ body .gradio-container .prose th, body .gradio-container .prose td {
 """
 """그라디오 표면(바탕·초점·알림·상태 줄)의 사람이 쓴 규칙 — 색 값은 토큰 선언에만 있다."""
 
-CSS = design_tokens.font_face_css() + design_tokens.token_css() + BASE_CSS + ui_facade.WORKBENCH_CSS
+CSS = (
+    design_tokens.font_face_css()
+    + design_tokens.token_css()
+    + BASE_CSS
+    + ui_facade.WORKBENCH_CSS
+    + FINAL_EDIT_CSS
+)
 """마운트에 싣는 전체 CSS — 글꼴 · 토큰(밝은·어두운) · 바탕 · 작업대 순서."""
 
 FONT_CACHE_SECONDS = 604800
@@ -1921,6 +1928,11 @@ class RawWorkspaceUi:
         # 1초 상태 틱 하나와 칸마다 이 세션이 마지막으로 보낸 값(D63 세션 C).
         self._status_timer: gr.Timer | None = None
         self._draw_timer: gr.Timer | None = None  # 2초 그리기 타이머(작업대 · 초안 카드)
+        # 「최종 편집」 탭(W-66, D117) — 초안 렌더가 끝나면 이 탭으로 넘어온다.
+        self._final_edit = FinalEditPanel(
+            self, raw_service.RawWorkspaceError, raw_service.RENDER_EXPORT_JOB_KIND
+        )
+        self._render_export_started: Any = None
         self._status_sent: tuple[gr.State, ...] = ()
         self._choose_event: Any = None
         # 선택기·조사 단추 참조 — 배선 증명은 실제 Blocks 의존성(app.config)이 한다.
@@ -4499,7 +4511,7 @@ class RawWorkspaceUi:
 
         한 줄짜리 탭 막대는 CSS가 감춘다(보이는 탭이 하나뿐일 때만). 숨은 「자막」 탭은 그대로다.
         """
-        with gr.Tab("영상 정리", elem_id=REVIEW_TAB_ID):
+        with gr.Tab("영상 정리", id=REVIEW_TAB_KEY, elem_id=REVIEW_TAB_ID):
             self._command_bar()
             # 단추 응답이 실리는 칸 — 그 값은 활동 칸이 받아 보인다(ACTIVITY_REPLY_JS).
             self._capcut_status = gr.Markdown(visible=False)
@@ -4606,6 +4618,7 @@ class RawWorkspaceUi:
                     size="sm",
                     elem_id=RENDER_EXPORT_SRT_AGAIN_ID,
                 )
+                self._final_edit.build_open_button()  # 「최종 편집 열기」(W-66, D117)
                 self._srt_english_cell()
                 # 자막 입히기(W-65, D116)
                 self._burn_cell = BurnCell(self, raw_service.RawWorkspaceError)
@@ -4775,6 +4788,7 @@ class RawWorkspaceUi:
             js=ui_facade.EXPORT_WAKE_JS,
         )
         self._report_activity(started, status)
+        self._render_export_started = started  # 최종 편집 탭의 자동 전환이 무장한다(D117)
         started.then(
             self.render_export_card_tick,
             [self._signature_state, shown],
@@ -11241,8 +11255,11 @@ class RawWorkspaceUi:
             self._caption_context_state = gr.State(None)
             self._caption_head_state = gr.State(None)
             open_button, create_button = self._project_tab()
-            self._review_tab()
-            self._caption_tab()
+            # 탭 묶음을 드러내 둔다 — 초안 렌더가 끝나면 「최종 편집」으로 넘긴다(D117).
+            with gr.Tabs(elem_id="vl-tabs") as tabs:
+                self._review_tab()
+                self._final_edit.build_tab()
+                self._caption_tab()
             # 오른쪽 서랍은 탭 뒤에 짓는다 — 두 탭 사이에 끼면 탭 묶음이 둘로 갈린다.
             extract_button, refresh_segment, profile_dd, analysis_plan = self._settings_drawer()
             # 추출 시작·새로고침은 3번 탭(package 패널)까지 만들어진 뒤에 묶는다.
@@ -11327,19 +11344,20 @@ class RawWorkspaceUi:
             loaded.then(self.capcut_fcp_panel_view, None, fcp_outputs)
             self._burn_cell.wire_restore(loaded)
             closed = self._wire_library_close([*selection_outputs, *fcp_outputs])
-            self._wire_model_refresh(
-                (
-                    *folder_events,
-                    direct_opened,
-                    library_opened,
-                    primary_opened,
-                    opened,
-                    created,
-                    loaded,
-                    self._choose_event,
-                    closed,
-                )
+            switched = (
+                *folder_events,
+                direct_opened,
+                library_opened,
+                primary_opened,
+                opened,
+                created,
+                loaded,
+                self._choose_event,
+                closed,
             )
+            self._wire_model_refresh(switched)
+            assert self._draw_timer is not None and self._render_export_started is not None
+            self._final_edit.wire(tabs, self._draw_timer, self._render_export_started, switched)
         return app
 
     def _wire_folder_import(self, view_outputs: list[object]) -> tuple[Any, ...]:

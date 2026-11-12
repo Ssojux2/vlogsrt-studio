@@ -787,11 +787,16 @@ def latest(workspace: RawWorkspace) -> dict[str, Any] | None:
 
 def _latest_folder(workspace: RawWorkspace) -> Path | None:
     """가장 최근에 다 낸 초안 폴더(보고서가 있다) — 없으면 None."""
-    base = workspace.root / EXPORT_FOLDER
+    return next(iter(report_folders(workspace.root)), None)
+
+
+def report_folders(root: Path) -> list[Path]:
+    """다 낸 초안 폴더(보고서가 있다), 새것부터 — 최종 편집(D117)이 고를 목록. 읽기만 한다."""
+    base = root / EXPORT_FOLDER
     if not base.is_dir():
-        return None
+        return []
     folders = sorted((p for p in base.iterdir() if p.is_dir()), key=_stamp_order, reverse=True)
-    return next((folder for folder in folders if (folder / REPORT_NAME).is_file()), None)
+    return [folder for folder in folders if (folder / REPORT_NAME).is_file()]
 
 
 def newest_srt(folder: Path) -> Path:

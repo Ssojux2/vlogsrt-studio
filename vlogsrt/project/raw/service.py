@@ -3972,6 +3972,36 @@ class RawWorkspaceService:
 
         return render_export.latest(self._workspace(root))
 
+    def final_edit_open(
+        self, root: Path, export_id: str | None = None, *, reseed: bool = False
+    ) -> dict[str, Any]:
+        """최종 편집 화면의 재료(D117) — 저장본 또는 초안 SRT로 심은 문서. 읽기만 한다."""
+        from vlogsrt.project.raw import final_edit_io
+
+        return final_edit_io.open_edit(self._workspace(root), export_id, reseed=reseed)
+
+    def final_edit_save(
+        self,
+        root: Path,
+        export_id: str,
+        base_revision: int,
+        payload: Mapping[str, Any],
+        *,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        """최종 편집 저장(D117) — 문서 전체를 다시 검사하고 `edit/`에만 쓴다."""
+        from vlogsrt.project.raw import final_edit_io
+
+        return final_edit_io.save_edit(
+            self._workspace(root), export_id, base_revision, payload, force=force
+        )
+
+    def final_edit_waveform(self, root: Path, export_id: str) -> dict[str, Any]:
+        """초안 영상의 파형(D117) — 처음 한 번 재고 `edit/waveform.json`에 둔다(무료 로컬)."""
+        from vlogsrt.project.raw import final_edit_io
+
+        return final_edit_io.waveform(self._workspace(root), export_id)
+
     def _caption_gaps_or_unknown(self, root: Path) -> dict[str, Any] | None:
         """보내기 보고서의 전사 실패 구간 — 원본마다 1단계 기록을 읽기만 한다(D59).
 
