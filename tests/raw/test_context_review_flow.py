@@ -25,7 +25,6 @@ import pytest
 from tests.raw.test_analysis_workflow import _live_online
 from tests.raw.test_gemini_timing_provider import _client, _Opener
 from vlogsrt.project.raw import context_review as cr
-from vlogsrt.project.raw import gemini_cost
 from vlogsrt.project.raw import service as raw_service
 from vlogsrt.project.raw.analysis_config import CONTEXT_REVIEW
 
@@ -97,31 +96,22 @@ def project(tmp_path: Path) -> tuple[raw_service.RawWorkspaceService, Path]:
 
 
 @needs_ffmpeg
-def test_quote_approve_run_lowers_greens_and_never_rebuys(
+def test_one_run_lowers_greens_and_never_rebuys(
     project: tuple[raw_service.RawWorkspaceService, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     service, root = project
     _live_online(service, root, monkeypatch)
     before = _tiers(service, root)
     assert all(v is None for row in _signals(service, root).values() for v in row.values())
-    quote = service.context_review_quote(root)
-    assert (quote.model, quote.sources, quote.cached) == ("gemini-3.8-flash", 1, False)
-    assert quote.spans >= 1 and quote.usd is not None and quote.input_tokens > 0
-    assert quote.output_tokens == CONTEXT_REVIEW.max_output_tokens
+    assert service.context_review_model(root) == "gemini-3.8-flash"
     opener = _Opener(_reply(_all_redundant(service, root)))
-    with pytest.raises(raw_service.RawWorkspaceError, match="견적이 바뀌었습니다"):
-        service.run_context_review(root, "0" * 64, _client(opener))
-    assert opener.sent == []
-    document = service.run_context_review(root, quote.digest, _client(opener))
+    document = service.run_context_review(root, _client(opener))
     assert len(opener.sent) == 1 and document["storyline"] == "카페에서 여행을 시작한다."
     assert opener.sent[0]["generationConfig"]["responseJsonSchema"] == cr.RESPONSE_SCHEMA
     reached = [v for row in _signals(service, root).values() for v in row.values()]
     assert reached and all(v is not None and v.verdict == "redundant" for v in reached)
     assert len(_tiers(service, root)) == len(before)  # 경계는 그대로
-    assert service.context_review_quote(root).cached is True
-    again = service.run_context_review(
-        root, service.context_review_quote(root).digest, _client(opener)
-    )
+    again = service.run_context_review(root, _client(opener))
     assert len(opener.sent) == 1 and again["key"] == document["key"]  # 다시 사지 않는다
     state = service.context_review_state(root)
     assert state["current"] is not None and state["stale"] is False
@@ -135,7 +125,7 @@ def test_a_changed_input_makes_the_review_stale_and_restores_the_tiers(
     _live_online(service, root, monkeypatch)
     before = _tiers(service, root)
     opener = _Opener(_reply(_all_redundant(service, root)))
-    service.run_context_review(root, service.context_review_quote(root).digest, _client(opener))
+    service.run_context_review(root, _client(opener))
     workflow = service.settings(root)
     models = replace(workflow.models, luna_model="gemini-4-argon")
     service.update_settings(root, replace(workflow, models=models))  # 열쇠의 모델이 바뀐다
@@ -154,52 +144,34 @@ def test_a_cut_reply_is_recorded_and_changes_nothing(
     before = _tiers(service, root)
     opener = _Opener(_reply(_all_redundant(service, root), finish="MAX_TOKENS"))
     with pytest.raises(raw_service.AnalysisError, match="맥락 평가가 실패했습니다"):
-        service.run_context_review(root, service.context_review_quote(root).digest, _client(opener))
+        service.run_context_review(root, _client(opener))
     assert _tiers(service, root) == before
     assert "출력 한도" in service.context_review_state(root)["failure"]
 
 
 @needs_ffmpeg
-def test_offline_and_unpriced_runs_send_nothing(
+def test_offline_runs_send_nothing(
     project: tuple[raw_service.RawWorkspaceService, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     service, root = project
     opener = _Opener(b"{}")
     with pytest.raises(raw_service.AnalysisError):
-        service.run_context_review(root, service.context_review_quote(root).digest, _client(opener))
-    _live_online(service, root, monkeypatch)
-    monkeypatch.setattr(gemini_cost, "price_current", lambda profile, on: False)
-    quote = service.context_review_quote(root)
-    assert quote.usd is None
-    with pytest.raises(raw_service.RawWorkspaceError, match="가격 미정"):
-        service.run_context_review(root, quote.digest, _client(opener))
+        service.run_context_review(root, _client(opener))
     assert opener.sent == []
 
 
 # ── 화면(W-39c) ─────────────────────────────────────────────────────────
 
 
-def test_the_drawer_panel_says_what_it_does_and_guards_the_approval(tmp_path: Path) -> None:
+def test_the_drawer_panel_says_what_it_does_and_runs_without_a_quote(tmp_path: Path) -> None:
     pytest.importorskip("gradio", reason="웹 UI extra(gradio)가 없다", exc_type=ImportError)
     import gradio as gr
 
     from ui import workspace_service as ws
-    from vlogsrt.project.raw.models import ContextQuote
 
     server = ws.RawWorkspaceUi(state_path=tmp_path / "ui-state.json")
     server.create_workspace_view("맥락", str(tmp_path / "workspace"))
     assert server.context_review_status() == ws.CONTEXT_NONE_TEXT
     with pytest.raises(gr.Error, match="맥락을 평가할 분석이 없습니다"):
-        server.context_quote_view(server.current_signature())
-    with pytest.raises(gr.Error, match="먼저 견적을 보세요"):
-        server.context_run_view(server.current_signature(), None)
-    quote = ContextQuote(
-        key="k", model="gemini-3.8-flash", sources=3, spans=12, input_tokens=4200,
-        output_tokens=32000, usd="0.13", digest="d", cached=False,
-        dropped_lines=2, dropped_windows=0, clipped_texts=1,
-    )  # fmt: skip
-    text = ws._context_quote_text(quote)
-    assert "원본 3개 · 구간 12개" in text and "최대 $0.13" in text
-    assert "줄이거나 자른 재료 3건" in text
-    assert "가격 미정" in ws._context_quote_text(replace(quote, usd=None))
-    assert "다시 부르지 않습니다" in ws._context_quote_text(replace(quote, cached=True))
+        server.context_run_view(server.current_signature())
+    assert not hasattr(server, "context_quote_view") and ws.CONTEXT_RUN_LABEL == "맥락 평가 실행"

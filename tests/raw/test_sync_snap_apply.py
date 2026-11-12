@@ -633,12 +633,12 @@ def test_refill_after_apply_is_allowed_and_then_undo_is_refused(
     workspace = service._workspace(root)
     applied = service.apply_snap(root, asset_id, _preview(service, root, asset_id).sha256)
     wait_sync(service, root)
-    quote = service.refill_quote(root, asset_id)
-    assert isinstance(quote, speech_refill.RefillQuote), quote
+    quote = service.refill_scope(root, asset_id)
+    assert isinstance(quote, speech_refill.RefillScope), quote
     assert quote.transcript_revision == applied["revision"]
     monkeypatch.setattr("vlogsrt.env.is_offline", lambda: False)
     service.set_cross_check(root, False)
-    quote = service.refill_quote(root, asset_id)
+    quote = service.refill_scope(root, asset_id)
     sender = RefillSender()
     record = service.refill_source(root, asset_id, quote, transport(sender), context())
     assert record["inserted"], record
@@ -654,8 +654,8 @@ def test_refill_waits_for_the_new_report_and_a_stale_refill_quote_never_lands(
 ) -> None:
     """적용은 자막 리비전을 바꾼다 — 그 전 견적의 digest로는 빈칸 재전사가 묻지 않는다(0송신)."""
     service, root, asset_id = snapped
-    old_quote = service.refill_quote(root, asset_id)
-    assert isinstance(old_quote, speech_refill.RefillQuote)
+    old_quote = service.refill_scope(root, asset_id)
+    assert isinstance(old_quote, speech_refill.RefillScope)
     service.apply_snap(root, asset_id, _preview(service, root, asset_id).sha256)
     sender = RefillSender()
     with pytest.raises(RawWorkspaceError) as refused:
@@ -870,8 +870,8 @@ def test_a_refill_started_while_apply_waits_keeps_its_answers_and_apply_writes_n
     workspace = service._workspace(root)
     monkeypatch.setattr("vlogsrt.env.is_offline", lambda: False)
     service.set_cross_check(root, False)
-    quote = service.refill_quote(root, asset_id)
-    assert isinstance(quote, speech_refill.RefillQuote), quote
+    quote = service.refill_scope(root, asset_id)
+    assert isinstance(quote, speech_refill.RefillScope), quote
     sha = _preview(service, root, asset_id).sha256
     entered, release = _pause(monkeypatch, sync_snap, "propose")
     thread, outcome = _in_thread(lambda: service.apply_snap(root, asset_id, sha))

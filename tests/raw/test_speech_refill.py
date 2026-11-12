@@ -23,7 +23,6 @@ import shutil
 import time
 import types
 from dataclasses import replace
-from decimal import Decimal
 from fractions import Fraction
 from pathlib import Path
 from typing import Any
@@ -171,8 +170,8 @@ def _online(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _quote(service: raw.RawWorkspaceService, root: Path, asset_id: str) -> Any:
-    quote = service.refill_quote(root, asset_id)
-    assert isinstance(quote, speech_refill.RefillQuote), quote
+    quote = service.refill_scope(root, asset_id)
+    assert isinstance(quote, speech_refill.RefillScope), quote
     return quote
 
 
@@ -277,10 +276,10 @@ def test_the_next_stage1_seed_keeps_the_inserted_rows(tmp_path: Path) -> None:
     assert source_transcript.human_edited(reseeded)
 
 
-# ── 견적 — 구간 · 금액 · 문구 · digest ─────────────────────────────────────────
+# ── 범위 — 구간 · digest(견적·금액 문구는 없다, D110) ─────────────────────────────
 
 
-def test_the_quote_asks_exactly_the_dropped_bursts_and_prices_both_ears(
+def test_the_scope_asks_exactly_the_dropped_bursts_with_both_ears(
     gapped: tuple[Any, Path, str],
 ) -> None:
     service, root, asset_id = gapped
@@ -290,16 +289,9 @@ def test_the_quote_asks_exactly_the_dropped_bursts_and_prices_both_ears(
         start, end = bursts()[index]
         assert span.start <= start * RATE and end * RATE <= span.end  # 덩어리를 통째로 묻는다
     assert quote.whisper_due == quote.pieces == quote.text_due  # 처음이라 둘 다 새로 산다
-    seconds = sum(Fraction(b - a, RATE) for a, b in quote.pieces)
-    expected = Decimal(seconds.numerator) / Decimal(seconds.denominator) / 60
-    assert abs(quote.usd - expected * (Decimal("0.006") + Decimal("0.0045"))) < Decimal("0.00001")
-    assert quote.text.startswith("말소리 빈칸 재전사 · 빈칸 2곳 · 자막 없는 말소리 ")
-    assert "whisper-1로 2번 · 다른 귀(GPT-Transcribe)로 2번 묻습니다(공식 단가로 약 $0.01)." in (
-        quote.text
-    )
-    assert quote.text.endswith("넣은 줄은 직접 고친 자막이 됩니다.")
+    assert not hasattr(quote, "usd") and not hasattr(quote, "text")  # 금액·문구가 없다(D110)
     assert quote.text_model == RawModelRoles().text_model and quote.text_identity is not None
-    assert service.refill_quote(root, asset_id).digest == quote.digest  # 결정적이다
+    assert service.refill_scope(root, asset_id).digest == quote.digest  # 결정적이다
 
 
 def test_the_digest_moves_with_spans_glossary_and_cross_check(
@@ -320,10 +312,7 @@ def test_the_digest_moves_with_spans_glossary_and_cross_check(
         None,
         (),
     )
-    assert "다른 귀" not in whisper_only.text and "whisper-1로 2번 묻습니다" in whisper_only.text
-    seconds = sum(Fraction(b - a, RATE) for a, b in whisper_only.pieces)
-    whisper_usd = Decimal(seconds.numerator) / Decimal(seconds.denominator) / 60 * Decimal("0.006")
-    assert abs(whisper_only.usd - whisper_usd) < Decimal("0.000002")  # whisper 분량만
+    assert whisper_only.whisper_due == whisper_only.pieces  # whisper 분량만
     transcript = service.source_transcript(root, asset_id)
     first_row = transcript["utterances"][0]
     queued: list[tuple[str, ...]] = []
@@ -334,7 +323,7 @@ def test_the_digest_moves_with_spans_glossary_and_cross_check(
         utterance_id=first_row["utterance_id"], text="고친 말",
     )  # fmt: skip
     assert queued == [(asset_id,)]
-    assert service.refill_quote(root, asset_id) == raw.REFILL_WAITING  # 새 리비전은 아직 안 쟀다
+    assert service.refill_scope(root, asset_id) == raw.REFILL_WAITING  # 새 리비전은 아직 안 쟀다
     assert service.start_sync_checks(root, (asset_id,)) is not None
     wait_sync(service, root)
     moved = _quote(service, root, asset_id)
@@ -345,7 +334,7 @@ def test_the_digest_moves_with_spans_glossary_and_cross_check(
 def test_relisten_pending_blocks_the_refill(gapped: tuple[Any, Path, str]) -> None:
     service, root, asset_id = gapped
     service.relisten_source(root, asset_id)
-    assert service.refill_quote(root, asset_id) == raw.REFILL_RELISTEN_PENDING
+    assert service.refill_scope(root, asset_id) == raw.REFILL_RELISTEN_PENDING
 
 
 def test_an_unmeasurable_report_says_so_instead_of_waiting(gapped: tuple[Any, Path, str]) -> None:
@@ -358,7 +347,7 @@ def test_an_unmeasurable_report_says_so_instead_of_waiting(gapped: tuple[Any, Pa
         source, sync_report.SYNC_CHECK_SETTINGS, RuntimeError("오디오를 읽지 못함")
     )
     sync_report.write_report(root / sync_report.SYNC_CACHE, failed, sync_report.SYNC_CHECK_SETTINGS)
-    assert service.refill_quote(root, asset_id) == raw.REFILL_UNMEASURED
+    assert service.refill_scope(root, asset_id) == raw.REFILL_UNMEASURED
 
 
 # ── 실행 — 규칙 1·6 탐침 · 넣기 · 다음 견적 ────────────────────────────────────
@@ -452,10 +441,10 @@ def test_a_stale_approval_sends_nothing(
     quote = _quote(service, root, asset_id)
     glossary.save(service._workspace(root), "닭도리탕")  # 다른 탭이 용어집을 바꿨다
     sender = RefillSender()
-    with pytest.raises(RawWorkspaceError, match="새 견적을 확인"):
+    with pytest.raises(RawWorkspaceError, match="빈칸이 바뀌었습니다"):
         service.refill_source(root, asset_id, quote, transport(sender), context())
     forged = replace(_quote(service, root, asset_id), digest="0" * 64)  # 본 적 없는 견적
-    with pytest.raises(RawWorkspaceError, match="새 견적을 확인"):
+    with pytest.raises(RawWorkspaceError, match="빈칸이 바뀌었습니다"):
         service.refill_source(root, asset_id, forged, transport(sender), context())
     assert sender.whisper == [] and sender.text == []
     assert service.source_transcript(root, asset_id)["edited"] is False
@@ -539,7 +528,6 @@ def test_a_transcript_edited_during_the_run_is_not_overwritten(
     wait_sync(service, root)  # 고친 리비전을 다시 잰다 — 받은 답은 캐시에 남아 다시 사지 않는다
     again = _quote(service, root, asset_id)
     assert again.pieces == quote.pieces and again.whisper_due == () and again.text_due == ()
-    assert again.usd == 0 and "새로 묻는 요청은 없습니다 — 이미 받은 답으로 넣습니다." in again.text
 
 
 def test_after_a_refill_the_asked_pieces_are_not_bought_again(
@@ -552,11 +540,10 @@ def test_after_a_refill_the_asked_pieces_are_not_bought_again(
         root, asset_id, _quote(service, root, asset_id), transport(sender), context()
     )
     wait_sync(service, root)  # 넣은 뒤의 새 리비전을 잰다(VAD는 캐시)
-    again = service.refill_quote(root, asset_id)
-    assert isinstance(again, speech_refill.RefillQuote)
+    again = service.refill_scope(root, asset_id)
+    assert isinstance(again, speech_refill.RefillScope)
     assert again.pieces == () and again.whisper_due == () and again.text_due == ()
     assert again.asked  # 이미 다시 물어 넣은 조각 안의 빈칸 — 다시 사지 않는다
-    assert "이미 채운 빈칸" in again.text
 
 
 def test_the_next_stage1_run_keeps_the_refilled_rows(

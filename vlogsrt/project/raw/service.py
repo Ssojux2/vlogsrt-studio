@@ -179,8 +179,6 @@ from vlogsrt.project.raw.models import (
     BrowseNotAllowedError,
     ByteRange,
     ClipArtifact,
-    ContextQuote,
-    EnglishQuote,
     ExtractJobError,
     FolderEntry,
     FolderListing,
@@ -567,8 +565,9 @@ RELISTEN_SILENT_REFUSAL = (
 RELISTEN_MEDIA_MISSING_REFUSAL = (
     "원본 파일을 읽지 못했습니다 — 원본 연결을 확인하세요. 아무것도 바꾸지 않았습니다."
 )
+CONTEXT_NOTHING = "맥락을 평가할 분석이 없습니다 — 영상 분석을 먼저 마치세요"
 REFILL_JOB_KIND = "speech_refill"
-"""말소리 빈칸 재전사 작업(D59 19f) — 승인한 견적의 조각만 whisper(·두 번째 귀)에 다시
+"""말소리 빈칸 재전사 작업(D59 19f) — 승인한 범위의 조각만 whisper(·두 번째 귀)에 다시
 묻는다(유료)."""
 REFILL_UNTRANSCRIBED = "이 영상은 아직 전사하지 않았습니다 — 분석을 승인하면 처음부터 듣습니다."
 REFILL_WAITING = "자막 시각 확인이 끝나면 빈칸을 셉니다(무료) — 잠시 뒤에 다시 보세요."
@@ -580,15 +579,14 @@ REFILL_RELISTEN_PENDING = (
     " 채우면 다시 들은 전사가 이 자막을 덮지 못해 다시 듣기에 낸 돈이 헛됩니다."
 )
 REFILL_CHANGED = (
-    "빈칸이나 견적이 바뀌었습니다 — 새 견적을 확인하고 다시 승인하세요. 유료 호출은 시작하지"
-    " 않았습니다."
+    "빈칸이 바뀌었습니다 — 바뀐 빈칸을 확인하고 다시 승인하세요. 유료 호출은 시작하지 않았습니다."
 )
 REFILL_GLOSSARY_CHANGED = (
-    "용어집이 바뀌었습니다. 새 견적을 확인하고 다시 승인하세요 — 유료 호출은 시작하지 않았습니다."
+    "용어집이 바뀌었습니다. 다시 승인하세요 — 유료 호출은 시작하지 않았습니다."
 )
 REFILL_RELISTEN_SETTLE_REFUSAL = (
     "다시 듣기를 기다리고 있어 받은 줄을 넣지 않았습니다 — 다시 들은 전사가 이 자막을 덮을 수 있게"
-    " 그대로 둡니다. 「전사만」 승인으로 다시 듣기를 마친 뒤 빈칸을 다시 견적하세요 — 같은 구간은"
+    " 그대로 둡니다. 「전사만」 승인으로 다시 듣기를 마친 뒤 빈칸을 다시 승인하세요 — 같은 구간은"
     " 받은 답이 남아 있어 다시 사지 않습니다."
 )
 RELISTEN_REFILL_RUNNING_REFUSAL = (
@@ -1713,16 +1711,22 @@ class RawWorkspaceService:
         return self._workspace(root).meta_value(ENGLISH_SUBTITLES_KEY) == ENGLISH_SUBTITLES_ON
 
     def set_english_subtitles(self, root: Path, on: bool) -> bool:
-        """그 표지를 저장한다(무료 — 번역은 견적을 보고 승인할 때만 산다)."""
+        """그 표지를 저장한다(무료 — 번역은 내보내기를 누를 때만 산다, D110)."""
         value = ENGLISH_SUBTITLES_ON if on else ENGLISH_SUBTITLES_OFF
         self._workspace(root).set_meta_value(ENGLISH_SUBTITLES_KEY, value)
         return self.english_subtitles(root)
 
-    def english_quote(self, root: Path) -> EnglishQuote:
-        """초안 영어 자막의 무료 견적(D105) — 아직 옮기지 않은 원본만 센다. 부르지 않는다."""
+    def english_missing(self, root: Path) -> tuple[str, ...]:
+        """아직 옮기지 않은 원본의 번역 열쇠(무료, 부르지 않는다, D110 — 견적이 아니다)."""
         from vlogsrt.project.raw import english_track
 
-        return english_track.quote(self, root)
+        return english_track.missing_keys(self, root)
+
+    def english_model(self) -> str:
+        """초안 영어 자막을 옮기는 모델(D105) — 내보내기가 그 클라이언트를 받는다."""
+        from vlogsrt.project.raw.config import TRANSLATION
+
+        return TRANSLATION.model
 
     def finalcut_drop_disabled(self, root: Path) -> bool:
         """Final Cut 보내기에서 꺼진 클립을 뺄까(D94) — 고른 적이 없으면 빼지 않는다(기본)."""
@@ -1849,18 +1853,19 @@ class RawWorkspaceService:
             workspace, asset_id, guard=partial(_relisten_check, asset_id=asset_id)
         )
 
-    # ── 말소리 빈칸 재전사(D59 19f) — 고르기는 무료, 묻기는 승인한 견적만 ──────────
+    # ── 말소리 빈칸 재전사(D59 19f) — 고르기는 무료, 묻기는 승인한 범위만 ──────────
 
-    def refill_quote(self, root: Path, asset_id: str) -> Any:
-        """빈칸 재전사의 지금 견적(무료) — 고를 수 없으면 그 이유(존댓말 한 줄)를 돌려준다.
+    def refill_scope(self, root: Path, asset_id: str) -> Any:
+        """빈칸 재전사의 지금 범위(무료) — 고를 수 없으면 그 이유(존댓말 한 줄)를 돌려준다.
 
         재료는 자막 시각 확인(D55)이 지금 자막 리비전을 잰 보고서·말소리 칸이다(읽기만 — VAD·디코드
-        없음). 구간 고르기는 순수 `speech_gaps`, 견적·digest는 `speech_refill`이 짓는다.
+        없음). 구간 고르기는 순수 `speech_gaps`, 범위·digest는 `speech_refill`이 짓는다(견적·금액은
+        없다, D110).
         """
         from vlogsrt.project.raw import speech_refill
 
         plan = self._refill_plan(root, asset_id)
-        return plan if isinstance(plan, str) else speech_refill.quote_for(plan)
+        return plan if isinstance(plan, str) else speech_refill.scope_for(plan)
 
     def refill_running(self, root: Path, asset_id: str) -> bool:
         """그 원본의 빈칸 재전사 작업이 도는 중인가 — 작업 지문은 `<원본>:<digest>`다."""
@@ -1889,9 +1894,9 @@ class RawWorkspaceService:
         transport: Any,
         after: Callable[[], None] | None = None,
     ) -> JobHandle:
-        """승인한 빈칸 재전사를 작업으로 건다 — 본문(`refill_source`)이 견적을 다시 재어 맞춘다.
+        """승인한 빈칸 재전사를 작업으로 건다 — 본문(`refill_source`)이 범위를 다시 재어 맞춘다.
 
-        `after`는 본문이 끝난 뒤의 화면 고리(라이브러리 견적 다시 묶기)다 — 실패한 본문 뒤에는
+        `after`는 본문이 끝난 뒤의 화면 고리(저장 결과 셈에서 빼기)다 — 실패한 본문 뒤에는
         돌지 않는다.
         """
 
@@ -1906,11 +1911,11 @@ class RawWorkspaceService:
     def refill_source(
         self, root: Path, asset_id: str, approved: Any, transport: Any, context: JobContext
     ) -> dict[str, Any]:
-        """승인한 빈칸 재전사(작업 본문, 유료) — 견적이 승인한 것과 같을 때만 묻고 받은 줄을 넣는다.
+        """승인한 빈칸 재전사(작업 본문, 유료) — 범위가 승인한 것과 같을 때만 묻고 받은 줄을 넣는다.
 
         넣기(`source_transcript.insert_segments`)는 이 본문의 `_refill_settle`만 부른다(불변식).
         기존 줄은 바이트까지 그대로이고 겹치는 줄은 넣지 않고 WARN·기록한다. 넣으면 원본 자막은
-        고친 자막(`edited`)이 된다. 실행은 다시 잰 견적만 쓴다 — 승인 객체는 digest만 대조한다.
+        고친 자막(`edited`)이 된다. 실행은 다시 잰 범위만 쓴다 — 승인 객체는 digest만 대조한다.
         """
         from vlogsrt.project.raw import browser_runtime, cross_check, request_log, speech_refill
 
@@ -1919,7 +1924,7 @@ class RawWorkspaceService:
         plan = self._refill_plan(root, asset_id)
         if isinstance(plan, str):
             raise RawWorkspaceError(plan)
-        current = speech_refill.quote_for(plan)
+        current = speech_refill.scope_for(plan)
         if current.digest != approved.digest:
             raise RawWorkspaceError(REFILL_CHANGED)
         if current.text_identity not in (None, identity):
@@ -1934,7 +1939,7 @@ class RawWorkspaceService:
             )
         return self._refill_settle(root, plan, current, result)
 
-    def _refill_settle(self, root: Path, plan: Any, quote: Any, result: Any) -> dict[str, Any]:
+    def _refill_settle(self, root: Path, plan: Any, scope: Any, result: Any) -> dict[str, Any]:
         """받은 줄을 넣고 기록한다(넣기는 여기 하나다, 불변식).
 
         넣지 못하면(그사이 자막이 바뀌었다) 기록·WARN을 남기고 거절을 올린다 — 받은 답은 캐시에
@@ -1945,29 +1950,29 @@ class RawWorkspaceService:
         workspace = self._workspace(root)
         if asr_epoch.state(workspace, plan.asset_id).pending:  # 다시 들은 전사가 덮을 수 있게 둔다
             speech_refill.write_record(
-                plan, quote, _refill_record(result, None, REFILL_RELISTEN_SETTLE_REFUSAL)
+                plan, scope, _refill_record(result, None, REFILL_RELISTEN_SETTLE_REFUSAL)
             )
             log.warn(f"빈칸 재전사: {REFILL_RELISTEN_SETTLE_REFUSAL}")
             raise RawWorkspaceError(REFILL_RELISTEN_SETTLE_REFUSAL)
-        speech_refill.claim(plan, quote, result.answered)  # 넣기 전에 — 멈춰도 다시 사지 않게
+        speech_refill.claim(plan, scope, result.answered)  # 넣기 전에 — 멈춰도 다시 사지 않게
         try:
             outcome = source_transcript.insert_segments(
-                workspace, plan.asset_id, quote.transcript_revision, result.rows
+                workspace, plan.asset_id, scope.transcript_revision, result.rows
             )
         except RawWorkspaceError as error:
-            speech_refill.write_record(plan, quote, _refill_record(result, None, str(error)))
+            speech_refill.write_record(plan, scope, _refill_record(result, None, str(error)))
             log.warn(f"빈칸 재전사: 받은 줄을 넣지 못했습니다 — {error} (받은 답은 캐시에 남았다)")
             raise
         speech_refill.mark_asked(plan, result.answered)
         record = _refill_record(result, outcome, None)
-        speech_refill.write_record(plan, quote, record)
+        speech_refill.write_record(plan, scope, record)
         _warn_refill(plan.asset_id, outcome, result)
         if outcome.inserted:  # 자막이 바뀌었다 — 시각 확인을 다시(D55)
             self._queue_sync_checks(root, (plan.asset_id,))
         return record
 
     def _refill_plan(self, root: Path, asset_id: str) -> Any:
-        """견적 재료(값) — 다시 듣기를 기다리거나 확인 보고서가 없으면 그 이유(존댓말)."""
+        """범위 재료(값) — 다시 듣기를 기다리거나 확인 보고서가 없으면 그 이유(존댓말)."""
         from vlogsrt.project.raw import asr_epoch, sync_report
         from vlogsrt.project.raw.source_transcript import REFILL_FIELD
 
@@ -2561,69 +2566,35 @@ class RawWorkspaceService:
             )
         return sources
 
-    def context_review_quote(self, root: Path) -> ContextQuote:
-        """맥락 평가 견적(D99, 무료) — 입력을 지어 토큰을 재고 공식 단가로 상한을 낸다.
+    def context_review_model(self, root: Path) -> str:
+        """맥락 평가를 보낼 모델(D99) — 화면이 그 클라이언트를 받는다. 평가할 분석이 없으면
+        클라이언트를 받기 전에 그렇게 말한다."""
+        if not self._context_rows(root):
+            raise RawWorkspaceError(CONTEXT_NOTHING)
+        return self._context_model(root)
 
-        단가 재확인 기한이 지났으면 금액이 없다(가격 미정 — 승인할 수 없다). 같은 입력 열쇠의 평가가
-        이미 있으면 `cached`다(다시 부르지 않는다)."""
-        from vlogsrt.project.raw import context_review as cr
+    def run_context_review(self, root: Path, client: object) -> dict[str, Any]:
+        """맥락 평가 한 번(유료, D44) — 누른 순간의 입력으로 보낸다(견적 없이, D110).
+
+        같은 열쇠의 평가가 이미 있으면 부르지 않고 그것을 돌려준다(다시 사지 않는다). 오프라인이면
+        보내기 전에 닫는다. 실패는 까닭과 함께 남기고 등급은 그대로다. 성공하면 검토 머리의 등급
+        표시만 다시 단다(사람 결정 그대로)."""
         from vlogsrt.project.raw import context_review_io as cio
-        from vlogsrt.project.raw import gemini_cost
 
         key, model = self._context_key(root)
-        sources = self._context_sources(root)
-        if not sources:
-            raise RawWorkspaceError("맥락을 평가할 분석이 없습니다 — 영상 분석을 먼저 마치세요")
-        given = cr.build_input(sources, CONTEXT_REVIEW)
-        profile = gemini_profile(model)
-        tokens_in = cio.input_tokens(given, CONTEXT_REVIEW)
-        tokens_out = CONTEXT_REVIEW.max_output_tokens
-        priced = gemini_cost.price_current(profile, on=date.today())
-        usd = str(cio.ceiling_usd(profile, tokens_in, tokens_out)) if priced else None
-        cached = cio.load(cio.result_path(root, ANALYSIS_ROOT, key), cio.RESULT_SCHEMA, key)
-        digest = hashlib.sha256(json.dumps([key, model, usd]).encode("utf-8")).hexdigest()
-        return ContextQuote(
-            key=key,
-            model=model,
-            sources=len(sources),
-            spans=len(given.spans),
-            input_tokens=tokens_in,
-            output_tokens=tokens_out,
-            usd=usd,
-            digest=digest,
-            cached=cached is not None,
-            dropped_lines=given.dropped_lines,
-            dropped_windows=given.dropped_windows,
-            clipped_texts=given.clipped_texts,
-        )
-
-    def run_context_review(self, root: Path, digest: str, client: object) -> dict[str, Any]:
-        """승인된 맥락 평가 한 번(유료, D44) — 사람이 본 견적(digest)과 지금 견적이 같을 때만.
-
-        같은 열쇠의 평가가 이미 있으면 부르지 않고 그것을 돌려준다(다시 사지 않는다). 오프라인·
-        가격 미정이면 보내기 전에 닫는다. 실패는 까닭과 함께 남기고 등급은 그대로다. 성공하면 검토
-        머리의 등급 표시만 다시 단다(사람 결정 그대로)."""
-        from vlogsrt.project.raw import context_review_io as cio
-
-        quote = self.context_review_quote(root)
-        if quote.digest != digest:
-            raise RawWorkspaceError("견적이 바뀌었습니다 — 새 견적을 확인한 뒤 다시 승인하세요")
-        path = cio.result_path(root, ANALYSIS_ROOT, quote.key)
-        existing = cio.load(path, cio.RESULT_SCHEMA, quote.key)
+        if not self._context_sources(root):
+            raise RawWorkspaceError(CONTEXT_NOTHING)
+        path = cio.result_path(root, ANALYSIS_ROOT, key)
+        existing = cio.load(path, cio.RESULT_SCHEMA, key)
         if existing is not None:
             return existing
-        self._require_context_online(root, quote)
-        document = self._ask_context(root, quote, client)
+        self._require_context_online(root)
+        document = self._ask_context(root, key, model, client)
         cio.write(path, document)
         self._tier_step(root)
         return document
 
-    def _require_context_online(self, root: Path, quote: ContextQuote) -> None:
-        if quote.usd is None:
-            raise RawWorkspaceError(
-                f"{quote.model}의 공식 단가가 재확인 기한을 지나 가격 미정입니다 — 승인할 수"
-                " 없습니다"
-            )
+    def _require_context_online(self, root: Path) -> None:
         blocked = online_env_blocked()
         if blocked is not None:
             raise AnalysisError(blocked)
@@ -2632,7 +2603,7 @@ class RawWorkspaceService:
                 "작업공간 network_mode가 online이 아니다 — 맥락 평가를 보낼 수 없다"
             )
 
-    def _ask_context(self, root: Path, quote: ContextQuote, client: object) -> dict[str, Any]:
+    def _ask_context(self, root: Path, key: str, model: str, client: object) -> dict[str, Any]:
         """보내고 해석한다 — 어느 단계에서 실패하든 실패 문서를 남기고 이름을 대고 멈춘다."""
         from vlogsrt.project.raw import context_review as cr
         from vlogsrt.project.raw import context_review_io as cio
@@ -2641,21 +2612,21 @@ class RawWorkspaceService:
         from vlogsrt.transcribe import request_gemini_generate
 
         given = cr.build_input(self._context_sources(root), CONTEXT_REVIEW)
-        body = cio.payload(given, gemini_profile(quote.model), CONTEXT_REVIEW)
-        failure = cio.failure_path(root, ANALYSIS_ROOT, quote.key)
+        body = cio.payload(given, gemini_profile(model), CONTEXT_REVIEW)
+        failure = cio.failure_path(root, ANALYSIS_ROOT, key)
         try:
-            response = request_gemini_generate(client, model=quote.model, payload=body, online=True)
+            response = request_gemini_generate(client, model=model, payload=body, online=True)
             text, reason = gemini_text(response)
             if text is None:
                 raise cr.ContextReviewError(reason)
             review = cr.parse(json.loads(text), given)
         except Exception as error:
-            cio.write(failure, cio.failure_document(quote.key, quote.model, str(error)))
+            cio.write(failure, cio.failure_document(key, model, str(error)))
             raise AnalysisError(f"맥락 평가가 실패했습니다 — {error}") from error
         usage = gemini_cost.measure_gemini_usage(
-            types.SimpleNamespace(model=quote.model), response, on=date.today()
+            types.SimpleNamespace(model=model), response, on=date.today()
         )
-        return cio.result_document(quote.key, quote.model, review, given, asdict(usage))
+        return cio.result_document(key, model, review, given, asdict(usage))
 
     def context_review_state(self, root: Path) -> dict[str, Any]:
         """화면의 맥락 평가 상태 — 지금 평가(줄거리·날짜·모델) · 낡음 · 지난 실패. 읽기만."""
@@ -3871,21 +3842,19 @@ class RawWorkspaceService:
             self, root, context, titles_srt=lines, drop_disabled=drop
         ).fcpxml
 
-    def start_render_export(
-        self, root: Path, english_digest: str | None = None, client: object | None = None
-    ) -> JobHandle:
+    def start_render_export(self, root: Path, client: object | None = None) -> JobHandle:
         """추천만 이어붙인 초안(W-44, D100 §5b) — 새 `export/<시각>/`에 영상·SRT·보고서를 내는 작업.
 
         확인하지 않은 제외 제안이 있어도 막지 않는다(사용자 결정 2026-10-27) — 뺀 구간은 보고서에
         남는다. 원본은 읽기만 한다. 결과는 `latest_render_export`가 읽는다.
 
         「영어 자막도 만들기」가 켜져 있으면 `draft.en.srt`도 낸다(D105). 아직 옮기지 않은 원본이
-        있으면 사람이 본 견적(`english_digest`)이 지금 견적과 같아야 하고, 온라인일 때만 그 원본을
-        옮긴다(유료). 다 옮겨 있으면 승인 없이 저장된 번역을 쓴다(무료). 꺼져 있으면 지금과 같다.
+        있으면 이 누름이 승인이고(D110 — 견적 없이) 온라인일 때만 누른 순간 옮기지 않은 원본을
+        옮긴다(유료). 다 옮겨 있으면 저장된 번역을 쓴다(무료). 꺼져 있으면 지금과 같다.
         """
         from vlogsrt.project.raw import render_export
 
-        buy = self._english_purchase(root, english_digest, client)
+        buy = self._english_purchase(root, client)
 
         def body(context: JobContext) -> None:
             english = self._english_for_export(root, buy)
@@ -3894,25 +3863,21 @@ class RawWorkspaceService:
         return self.submit_job(root, RENDER_EXPORT_JOB_KIND, "render_export/draft", body)
 
     def _english_purchase(
-        self, root: Path, digest: str | None, client: object | None
+        self, root: Path, client: object | None
     ) -> tuple[bool, object | None, tuple[str, ...]]:
-        """(영어를 낼까, 옮길 때 쓸 클라이언트, 승인한 열쇠) — 살 것이 있으면 승인·온라인을 작업
+        """(영어를 낼까, 옮길 때 쓸 클라이언트, 누른 순간 옮길 열쇠) — 살 것이 있으면 온라인을 작업
         전에 본다."""
         from vlogsrt.project.raw import english_track
 
         if not self.english_subtitles(root):
             return False, None, ()
-        quote = english_track.quote(self, root)
-        if not quote.needs_approval:
+        keys = english_track.missing_keys(self, root)
+        if not keys:
             return True, None, ()
-        if digest != quote.digest:
-            raise RawWorkspaceError(
-                "영어 자막 견적이 바뀌었습니다 — 새 견적을 확인한 뒤 다시 내보내세요"
-            )
-        english_track.require_online(self, root, quote)
+        english_track.require_online(self, root)
         if client is None:
             raise RawWorkspaceError("영어 자막을 옮길 Gemini 연결이 없습니다")
-        return True, client, quote.keys
+        return True, client, keys
 
     def _english_for_export(
         self, root: Path, buy: tuple[bool, object | None, tuple[str, ...]]
@@ -5921,8 +5886,8 @@ class RawWorkspaceService:
             approval = luna_approvals.get(asset_id)
             if approval is None:
                 raise AnalysisError(
-                    f"2단계(의미) 승인이 없는 원본이다: {asset.source_name} — 1단계 견적을"
-                    " 보고 새 승인을 받아라(§14.3)"
+                    f"2단계(의미) 승인이 없는 원본이다: {asset.source_name} — 새 1단계"
+                    " 승인을 받아라(§14.3)"
                 )
             if not isinstance(approval, (OnlineAnalysisApproval, OnlineVisualAnalysisApproval)):
                 raise AnalysisError(
@@ -5955,7 +5920,7 @@ class RawWorkspaceService:
             if approval.fingerprint != binding["semantic_fingerprint"]:
                 raise AnalysisError(
                     f"승인이 본 지문이 1단계 기록의 실측 지문과 다르다: {asset.source_name}"
-                    " — 1단계 견적을 보고 새 승인을 받아라(§14.3)"
+                    " — 새 1단계 승인을 받아라(§14.3)"
                 )
             if approval.window_count != int(binding["window_count"]):
                 raise AnalysisError(
@@ -6401,7 +6366,7 @@ def _warn_refill(asset_id: str, outcome: Any, result: Any) -> None:
         )
     if result.failed:
         log.warn(
-            f"빈칸 재전사({asset_id}): 조각 {len(result.failed)}개를 받지 못했습니다 — 다음 견적이"
+            f"빈칸 재전사({asset_id}): 조각 {len(result.failed)}개를 받지 못했습니다 — 다음 승인이"
             " 그 조각을 다시 셉니다"
         )
 

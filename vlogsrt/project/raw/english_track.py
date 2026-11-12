@@ -1,22 +1,22 @@
-"""초안의 영어 자막(W-53, D105) — 견적(무료) · 번역(유료, 승인 뒤) · 내보내기에 넘길 재료.
+"""초안의 영어 자막(W-53, D105) — 옮길 원본 고르기(무료) · 번역(유료, 내보내기 누름 뒤) · 재료.
+
+견적(분량·금액 문구)은 없다(D110) — 「영어 자막도 만들기」를 켜고 내보내기를 누르는 것이 승인이다.
 
 원본마다 **지금 원본 자막 전체**를 옮긴다(초안에 실리는 대로 다듬은 한국어). 검토(추천·제외)가
 바뀌어도 번역은 그대로 쓰이고, 자막을 고치면 열쇠가 바뀌어 그 원본만 다시 옮긴다. 이미 옮긴 원본은
 다시 사지 않는다. 부르기는 `transcribe.request_gemini_generate` 문 하나다(규칙 7). 한국어 자막·시각·
 지문·캐시 열쇠에는 아무것도 쓰지 않는다 — 영어 SRT는 초안 계획의 큐 시각을 그대로 쓴다(규칙 1·3).
 
-서비스만 부른다(`RawWorkspaceService.english_quote`·`start_render_export`).
+서비스만 부른다(`RawWorkspaceService.start_render_export`).
 """
 
 from __future__ import annotations
 
-import hashlib
 import json
 import types
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 from datetime import date
-from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -24,24 +24,13 @@ from vlogsrt import log
 from vlogsrt.project.raw import render_plan, translation
 from vlogsrt.project.raw import translation_io as tio
 from vlogsrt.project.raw.analysis_store import ANALYSIS_ROOT
-from vlogsrt.project.raw.config import TRANSLATION, TranslationSettings, gemini_profile
-from vlogsrt.project.raw.models import EnglishQuote, RawWorkspaceError, SourceAsset
+from vlogsrt.project.raw.config import TRANSLATION, TranslationSettings
+from vlogsrt.project.raw.models import SourceAsset
 from vlogsrt.project.raw.render_export import EnglishTrack
 from vlogsrt.task_runtime import check_cancel
 
 if TYPE_CHECKING:
     from vlogsrt.project.raw.service import RawWorkspaceService
-
-QUOTE_TEXT = (
-    "영어 자막: 영상 {sources}개 자막 {lines}줄을 {model}로 영어로 옮깁니다"
-    "(공식 단가로 약 ${usd}){cached}."
-)
-QUOTE_CACHED_TEXT = " · 이미 옮긴 영상 {count}개는 다시 사지 않습니다"
-QUOTE_FREE_TEXT = "영어 자막: 저장된 번역을 씁니다(무료 · 영상 {count}개)."
-QUOTE_UNPRICED_TEXT = (
-    "영어 자막: {model}의 공식 단가가 재확인 기한을 지나 가격 미정입니다 — 승인할 수 없습니다."
-)
-QUOTE_EMPTY_TEXT = "영어 자막: 옮길 원본 자막이 없습니다."
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,73 +70,12 @@ def _cached(service: RawWorkspaceService, root: Path, item: EnglishSource) -> di
     return tio.load(path, tio.RESULT_SCHEMA, item.key)
 
 
-def _ceiling(
-    missing: Sequence[EnglishSource], terms: Sequence[str], settings: TranslationSettings
-) -> tuple[int, int, Decimal]:
-    """(입력 토큰, 출력 한도, 상한 금액) — 묶음마다 입력 추정 + 출력 한도 전부를 공식 단가로."""
-    profile = gemini_profile(settings.model)
-    tokens_in = tokens_out = 0
-    usd = Decimal(0)
-    for item in missing:
-        for batch in translation.build_batches(item.lines, settings):
-            batch_in = tio.input_tokens(batch, terms, settings)
-            tokens_in += batch_in
-            tokens_out += settings.max_output_tokens
-            usd += tio.ceiling_usd(profile, batch_in, settings.max_output_tokens)
-    return tokens_in, tokens_out, usd
-
-
-def quote(
+def missing_keys(
     service: RawWorkspaceService, root: Path, settings: TranslationSettings = TRANSLATION
-) -> EnglishQuote:
-    """무료 견적 — 아직 옮기지 않은 원본만 센다. digest는 열쇠·모델·금액·**보이는 문구**를
-    묶는다."""
-    from vlogsrt.project.raw import gemini_cost
-
+) -> tuple[str, ...]:
+    """아직 옮기지 않은 원본의 번역 열쇠(무료, 부르지 않는다) — 내보내기를 누른 순간 이것만 산다."""
     found = sources(service, root, settings)
-    missing = [item for item in found if _cached(service, root, item) is None]
-    terms = service.glossary(root).terms
-    tokens_in, tokens_out, ceiling = _ceiling(missing, terms, settings)
-    priced = gemini_cost.price_current(gemini_profile(settings.model), on=date.today())
-    usd = str(ceiling) if priced and missing else None
-    text = _quote_text(found, missing, usd, priced, settings)
-    keys = [item.key for item in missing]
-    digest_body = json.dumps([keys, settings.model, usd, text], ensure_ascii=False)
-    return EnglishQuote(
-        model=settings.model,
-        sources=len(found),
-        missing_sources=len(missing),
-        missing_lines=sum(len(item.lines) for item in missing),
-        input_tokens=tokens_in,
-        output_tokens=tokens_out,
-        usd=usd,
-        priced=priced,
-        text=text,
-        digest=hashlib.sha256(digest_body.encode("utf-8")).hexdigest(),
-        keys=tuple(keys),
-    )
-
-
-def _quote_text(
-    found: Sequence[EnglishSource],
-    missing: Sequence[EnglishSource],
-    usd: str | None,
-    priced: bool,
-    settings: TranslationSettings,
-) -> str:
-    from vlogsrt.project.raw.service import analysis_model_label
-
-    model = analysis_model_label(settings.model)
-    if not found:
-        return QUOTE_EMPTY_TEXT
-    if not missing:
-        return QUOTE_FREE_TEXT.format(count=len(found))
-    if not priced:
-        return QUOTE_UNPRICED_TEXT.format(model=model)
-    done = len(found) - len(missing)
-    cached = QUOTE_CACHED_TEXT.format(count=done) if done else ""
-    lines = sum(len(item.lines) for item in missing)
-    return QUOTE_TEXT.format(sources=len(missing), lines=lines, model=model, usd=usd, cached=cached)
+    return tuple(item.key for item in found if _cached(service, root, item) is None)
 
 
 def _ask(
@@ -250,13 +178,11 @@ def track(
     return EnglishTrack(texts, report)
 
 
-def require_online(service: RawWorkspaceService, root: Path, given: EnglishQuote) -> None:
-    """보내기 전 문 — 가격 미정·오프라인 환경·작업공간 network_mode가 online이 아니면 닫는다."""
+def require_online(service: RawWorkspaceService, root: Path) -> None:
+    """보내기 전 문 — 오프라인 환경·작업공간 network_mode가 online이 아니면 닫는다."""
     from vlogsrt.project.raw.models import AnalysisError
     from vlogsrt.project.raw.understanding_luna import online_env_blocked
 
-    if not given.priced:
-        raise RawWorkspaceError(QUOTE_UNPRICED_TEXT.format(model=given.model))
     blocked = online_env_blocked()
     if blocked is not None:
         raise AnalysisError(blocked)

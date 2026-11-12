@@ -182,22 +182,22 @@ def test_final_video_replacement_clears_binding_and_persists_selection(tmp_path:
     server = RawWorkspaceUi(state_path=tmp_path / "ui-state.json")
     signature = server.create_workspace_view("자막 교체", str(tmp_path / "workspace"))[1]
     server.caption_register_view(signature, str(first), "final_1", "자동(첫 트랙)")
-    server.caption_estimate_view(signature, "run-1")
+    server.caption_prepare_view(signature, "run-1")
     old_identity = dict(server._caption_identity)
     token = server._caption_lifetime_token
     server.caption_register_view(signature, str(second), "final_1", "1")
     assert server._caption_identity is None
     assert server._caption_cue_rows == ()
     assert server._caption_lifetime_token != token
-    server.caption_estimate_view(signature, "run-1")
+    server.caption_prepare_view(signature, "run-1")
     assert server._caption_identity["revision"] != old_identity["revision"]
     assert server._caption_identity["audio_ordinal"] == 1
     root = server.workspace_root()
     restarted = RawWorkspaceUi(state_path=tmp_path / "ui-state2.json")
     signature = restarted.open_workspace_view(str(root))[1]
-    restarted.caption_estimate_view(signature, "run-1")
+    restarted.caption_prepare_view(signature, "run-1")
     assert restarted._caption_identity == server._caption_identity
     # Selecting the older render again is explicit and survives another reopen.
     restarted.caption_register_view(signature, str(first), "final_1", "자동(첫 트랙)")
-    restarted.caption_estimate_view(signature, "run-1")
+    restarted.caption_prepare_view(signature, "run-1")
     assert restarted._caption_identity["revision"] == old_identity["revision"]

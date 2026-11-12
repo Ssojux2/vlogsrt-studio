@@ -259,7 +259,7 @@ def cached_answer_exists(cache_dir: Path, key: str) -> bool:
     try:
         body = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as error:
-        log.warn(f"글자 캐시를 읽지 못했다 — 견적은 묻는 것으로 셉니다: {path.name} ({error})")
+        log.warn(f"글자 캐시를 읽지 못했다 — 승인 범위는 묻는 것으로 셉니다: {path.name} ({error})")
         return False
     return isinstance(body, dict) and body.get("key") == key and isinstance(body.get("text"), str)
 
@@ -826,7 +826,7 @@ class ApprovedPhaseTextProvider:
         if self.approved_keys is not None and (
             call_key(binding, model, prompt, keywords, languages) not in self.approved_keys
         ):
-            raise AnalysisApprovalError("견적에 없던 청크다 — 승인 밖이라 보내지 않는다")
+            raise AnalysisApprovalError("승인한 범위에 없던 청크다 — 승인 밖이라 보내지 않는다")
 
     def _require_open(
         self, binding: AudioChunkBinding, settings: RawWorkflowConfig, on: date

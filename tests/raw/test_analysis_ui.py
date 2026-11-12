@@ -61,15 +61,12 @@ def _opened(server: workspace_service.RawWorkspaceUi, tmp_path: Path) -> tuple[s
 def test_analysis_views_require_current_selection(server, tmp_path: Path) -> None:
     signature, _ = _opened(server, tmp_path)
     for call in (
-        lambda: server.analysis_estimate_view(None, None),
-        lambda: server.analysis_estimate_view("stale-signature", None),
+        lambda: server.analysis_start_view(None, None),
         lambda: server.analysis_start_view("stale-signature", None),
         lambda: server.analysis_refresh_view(None),
         lambda: server.analysis_retry_view(None, "job_000001"),
         lambda: server.analysis_plan_view("stale-signature"),
-        lambda: server.analysis_live_estimate_view("stale-signature", None),
         lambda: server.analysis_live_asr_view("stale-signature", None, True),
-        lambda: server.analysis_semantic_estimate_view(None),
         lambda: server.analysis_semantic_resume_view("stale-signature", "job_000001", True),
         lambda: server.settings_network_view("stale-signature", "online"),
     ):
@@ -99,9 +96,7 @@ def test_live_production_requires_startup_environment_key(server, tmp_path, monk
     ):
         with pytest.raises(gr.Error, match="OPENAI_API_KEY"):
             call()
-    # 2단계 견적은 로컬 읽기뿐 — 주입 없이도 안내로 답한다(빈 성공이 아니다).
-    estimate = boot.analysis_semantic_estimate_view(signature)
-    assert "1단계" in estimate
+    assert not hasattr(boot, "analysis_semantic_estimate_view")  # 견적 표가 없다(D110)
 
 
 def test_startup_environment_key_opens_production_transport(tmp_path, monkeypatch) -> None:
@@ -119,8 +114,6 @@ def test_startup_environment_key_opens_production_transport(tmp_path, monkeypatc
 def test_analysis_views_before_order_confirmed_explain_honestly(server, tmp_path: Path) -> None:
     """확정 순서가 없으면 안내로 알린다 — 빈 성공으로 위장하지 않는다."""
     signature, root = _opened(server, tmp_path)
-    with pytest.raises(gr.Error, match="전체 원본 순서가 없다"):
-        server.analysis_estimate_view(signature, None)
     with pytest.raises(gr.Error, match="전체 원본 순서가 없다"):
         server.analysis_start_view(signature, None)
     markdown = server._analysis_state_markdown(root)
@@ -192,10 +185,6 @@ def test_browser_replay_analysis_flow_to_segment_plan(server, tmp_path: Path) ->
     assert server.raw.get_job(root, handle.job_id).status == "succeeded"
     server.raw.confirm_global_source_order(root)
     asset = server.raw.list_source_assets(root)[0]
-
-    estimate = server.analysis_estimate_view(signature, None)
-    assert "분석 견적" in estimate and "Luna 요청" in estimate
-    assert "금액 추정을 만들지 않는다" in estimate  # 미확인 단가 — 0원 계산 금지
 
     # 명시적 합성 픽스처 — 없는 창·청크는 실패로 기록된다(지어내지 않는다).
     fixtures = root / "analysis" / "replay"
@@ -288,7 +277,7 @@ class _CountingClient:
 
 @needs_ffmpeg
 def test_browser_two_phase_live_flow_with_injected_transport(tmp_path, monkeypatch) -> None:
-    """1단계 → 의미 승인 대기 → 2단계 견적 → 2단계 재개까지 화면 처리기로."""
+    """1단계 → 의미 승인 대기 → 2단계 재개까지 화면 처리기로(견적 없이, D110)."""
     from dataclasses import replace as _replace
     from datetime import date
 
@@ -394,11 +383,6 @@ def test_browser_two_phase_live_flow_with_injected_transport(tmp_path, monkeypat
     waiting = live_server._analysis_state_markdown(root)
     assert "의미 승인 대기" in waiting
     assert "전사 완료(2단계 대기)" in waiting
-
-    # 2단계 견적 — 실측 지문·창·이미지가 화면에 나타난다.
-    estimate_md = live_server.analysis_semantic_estimate_view(signature)
-    assert "실측 지문" in estimate_md and "Luna 요청" in estimate_md
-    assert "금액을 만들지 않는다" in estimate_md or "0원 계산 금지" in estimate_md
 
     # 2단계 재개 — 대기 리비전의 1단계 작업이 재개 대상 목록에 있다.
     choices = live_server.resumable_analysis_choices(root)

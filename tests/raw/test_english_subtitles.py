@@ -92,8 +92,8 @@ def _online(trip: Trip, monkeypatch: pytest.MonkeyPatch, on: bool = True) -> Non
     trip.service.update_settings(trip.root, replace(config, network_mode=mode))
 
 
-def _export(trip: Trip, digest: str | None = None, client: object | None = None) -> dict:
-    handle = trip.service.start_render_export(trip.root, digest, client)
+def _export(trip: Trip, client: object | None = None) -> dict:
+    handle = trip.service.start_render_export(trip.root, client)
     record = _wait_terminal(trip.service, trip.root, handle.job_id)
     assert record.status == "succeeded", record.error
     latest = trip.service.latest_render_export(trip.root)
@@ -112,34 +112,26 @@ def test_1_off_by_default_writes_no_english(trip: Trip) -> None:
     assert not (Path(latest["folder"]) / "draft.en.srt").exists()
 
 
-def test_2_quote_is_free_and_counts_only_untranslated_sources(trip: Trip) -> None:
+def test_2_missing_keys_are_free_and_count_only_untranslated_sources(trip: Trip) -> None:
     assert trip.service.set_english_subtitles(trip.root, True) is True
-    quote = trip.service.english_quote(trip.root)
-    lines = sum(len(rows) for rows in UTTERANCES.values())
-    assert (quote.sources, quote.missing_sources, quote.missing_lines) == (3, 3, lines)
-    assert quote.needs_approval and quote.priced and quote.usd is not None
-    assert quote.output_tokens == 3 * english_track.TRANSLATION.max_output_tokens
-    assert "영상 3개" in quote.text and f"자막 {lines}줄" in quote.text
-    assert len(quote.keys) == 3
+    keys = trip.service.english_missing(trip.root)
+    assert len(keys) == len(set(keys)) == 3  # 원본마다 열쇠 하나 — 견적·금액은 없다(D110)
+    assert not hasattr(english_track, "quote")
 
 
-def test_3_a_wrong_digest_or_offline_is_refused_before_any_request(
+def test_3_offline_or_no_client_is_refused_before_any_request(
     trip: Trip, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     translator = _Translator()
-    _online(trip, monkeypatch)
-    with pytest.raises(raw_service.RawWorkspaceError, match="견적이 바뀌었습니다"):
-        trip.service.start_render_export(trip.root, "0" * 64, _client(translator))
-    quote = trip.service.english_quote(trip.root)
     _online(trip, monkeypatch, on=False)
     with pytest.raises(raw_service.RawWorkspaceError, match="VLOGSRT_OFFLINE"):
-        trip.service.start_render_export(trip.root, quote.digest, _client(translator))
+        trip.service.start_render_export(trip.root, _client(translator))
     monkeypatch.setattr("vlogsrt.env.is_offline", lambda: False)  # 환경은 열고 작업공간만 닫힘
     with pytest.raises(raw_service.RawWorkspaceError, match="network_mode"):
-        trip.service.start_render_export(trip.root, quote.digest, _client(translator))
+        trip.service.start_render_export(trip.root, _client(translator))
     with pytest.raises(raw_service.RawWorkspaceError, match="Gemini 연결"):
         _online(trip, monkeypatch)
-        trip.service.start_render_export(trip.root, quote.digest, None)
+        trip.service.start_render_export(trip.root, None)
     assert translator.sent == []
 
 
@@ -147,9 +139,8 @@ def test_4_a_failed_translation_keeps_the_korean_draft_and_names_the_sources(
     trip: Trip, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _online(trip, monkeypatch)
-    quote = trip.service.english_quote(trip.root)
     translator = _Translator(broken=True)
-    latest = _export(trip, quote.digest, _client(translator))
+    latest = _export(trip, _client(translator))
     assert len(translator.sent) == 3
     assert latest["english_srt"] is None and latest["english"]["status"] == "failed"
     names = sorted(row["name"] for row in latest["english"]["untranslated"])
@@ -158,7 +149,7 @@ def test_4_a_failed_translation_keeps_the_korean_draft_and_names_the_sources(
     assert Path(latest["srt"]).is_file()
     folder = trip.root / ANALYSIS_ROOT / tio.TRANSLATION_DIRNAME
     assert len(list(folder.glob("*.failed.json"))) == 3
-    assert trip.service.english_quote(trip.root).missing_sources == 3  # 실패는 산 것이 아니다
+    assert len(trip.service.english_missing(trip.root)) == 3  # 실패는 산 것이 아니다
 
 
 def test_5_approved_export_writes_english_with_identical_times(
@@ -166,9 +157,8 @@ def test_5_approved_export_writes_english_with_identical_times(
 ) -> None:
     _online(trip, monkeypatch)
     korean_only = Path(_korean_reference(trip)).read_bytes()
-    quote = trip.service.english_quote(trip.root)
     translator = _Translator()
-    latest = _export(trip, quote.digest, _client(translator))
+    latest = _export(trip, _client(translator))
     assert len(translator.sent) == 3
     assert translator.sent[0]["generationConfig"]["thinkingConfig"] == {"thinkingLevel": "LOW"}
     english, korean = Path(latest["english_srt"]), Path(latest["srt"])
@@ -190,10 +180,9 @@ def _korean_reference(trip: Trip) -> str:
 
 def test_6_the_next_export_never_rebuys(trip: Trip, monkeypatch: pytest.MonkeyPatch) -> None:
     _online(trip, monkeypatch)
-    quote = trip.service.english_quote(trip.root)
-    assert not quote.needs_approval and quote.usd is None and "무료" in quote.text
+    assert trip.service.english_missing(trip.root) == ()  # 다 옮겼다 — 무료
     translator = _Translator()
-    latest = _export(trip, None, _client(translator))
+    latest = _export(trip, _client(translator))
     assert translator.sent == [] and latest["english"]["status"] == "written"
 
 

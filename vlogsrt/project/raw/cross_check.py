@@ -320,7 +320,7 @@ def _recorded_chunks(
         try:
             parsed = _chunks_in(folder, source_sha256, replanned)
         except (OSError, ValueError, KeyError, TypeError) as error:
-            log.warn(f"교차 확인 견적 — 1단계 기록을 읽지 못해 건너뜁니다: {folder.name} ({error})")
+            log.warn(f"교차 확인 범위 — 1단계 기록을 읽지 못해 건너뜁니다: {folder.name} ({error})")
             continue
         if parsed is not None:
             found.append(parsed)

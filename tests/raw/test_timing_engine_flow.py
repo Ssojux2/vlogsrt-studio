@@ -219,22 +219,3 @@ def test_an_engine_flip_after_the_quote_is_refused_before_any_send(
 
 
 # ── 빈칸 재전사는 그 원본의 엔진 단가로 ────────────────────────────────────
-
-
-def test_a_refill_quote_prices_the_timing_role_with_the_engine_the_source_heard_with(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from types import SimpleNamespace
-
-    from vlogsrt.project.raw import capabilities, speech_refill
-    from vlogsrt.project.raw.config import RawWorkflowConfig
-    from vlogsrt.project.raw.models import RawWorkspaceError
-
-    minute = [(0, 60 * speech_refill.stage1.PCM_SAMPLE_RATE)]
-    whisper = SimpleNamespace(workflow=RawWorkflowConfig())
-    gemini = SimpleNamespace(workflow=timing_engine_view(RawWorkflowConfig(), GEMINI))
-    assert speech_refill._cost(minute, "timing", whisper) == Fraction("0.006")
-    assert speech_refill._cost(minute, "timing", gemini) == Fraction("0.005")
-    monkeypatch.setattr(capabilities, "timing_price_per_minute", lambda model, on: None)
-    with pytest.raises(RawWorkspaceError, match="가격 미정"):
-        speech_refill._cost(minute, "timing", gemini)  # 재확인 기한이 지났다 — 0원이 아니다

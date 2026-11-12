@@ -614,9 +614,10 @@ def test_the_new_copy_is_polite_and_names_no_model_or_price() -> None:
         assert POLITE_END.search(sentence), sentence
     assert "지금 용어집: 비어 있음." in copy[7]
     assert "지금 용어집: 용어0 · 용어1 · 용어2 · 용어3 · 용어4 외 2개." in copy[8]
-    # 용어집은 두 범위의 견적 모두에 실린다 — 「전사만」 견적만 말하지 않는다(검증 지적 2).
+    # 용어집은 두 범위의 승인 모두에 실린다 — 「전사만」만 말하지 않는다(검증 지적 2). 견적은
+    # 없다(D110).
     for text in (GLOSSARY_INFO, copy[5], copy[6]):
-        assert "다음 견적" in text and "「전사만」 견적" not in text, text
+        assert "다음 승인" in text and "견적" not in text, text
     script = ui_facade.VISUAL_BOOTSTRAP_JS
     for phrase in (
         "다른 귀는 다르게 들었습니다 — 고르지 않은 후보가 있습니다",

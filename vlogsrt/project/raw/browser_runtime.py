@@ -418,7 +418,7 @@ def mint_asr_approvals(
         if estimate.timing_model is not None and estimate.timing_usd is None:
             raise BrowserRuntimeError(
                 f"전사 엔진 {estimate.timing_model}의 단가가 재확인 기한을 지나 가격 미정이다:"
-                f" {estimate.source_name} — 단가를 확인해 고친 뒤 새 견적을 받아라(D92)"
+                f" {estimate.source_name} — 단가를 확인해 고친 뒤 다시 승인하라(D92)"
             )
         view = service.source_settings(root, estimate.asset_id)  # 그 원본의 시간 엔진(D92)
         approvals[estimate.asset_id] = AsrPhaseApproval(
@@ -473,11 +473,11 @@ def _text_approval_fields(
         from vlogsrt.project.raw.config import GEMINI_TEXT_SETTINGS
 
         if estimate.text_model != GEMINI_TEXT_SETTINGS.model:
-            raise BrowserRuntimeError(f"견적의 글자 모델을 모른다: {estimate.text_model!r}")
+            raise BrowserRuntimeError(f"승인 범위의 글자 모델을 모른다: {estimate.text_model!r}")
         if estimate.text_usd is None:
             raise BrowserRuntimeError(
                 f"Gemini 글자 경로의 단가가 재확인 기한을 지나 가격 미정이다:"
-                f" {estimate.source_name} — 단가를 확인해 고친 뒤 새 견적을 받아라(W-35b)"
+                f" {estimate.source_name} — 단가를 확인해 고친 뒤 다시 승인하라(W-35b)"
             )
         text_model, identity = estimate.text_model, gemini_text.text_identity(GEMINI_TEXT_SETTINGS)
     return {
@@ -528,8 +528,8 @@ def _semantic_budget(model: str, estimate: AnalysisSemanticEstimate) -> Any:
         return AnalysisBudget(max_luna_requests=requests, max_asr_chunks=1)
     if estimate.request_ceiling_usd is None:
         raise BrowserRuntimeError(
-            f"{analysis_model_label(model)} 2단계 견적에 비용 상한이 없다(가격 미정):"
-            f" {estimate.source_name} — 단가를 확인해 고친 뒤 견적을 다시 받으세요"
+            f"{analysis_model_label(model)} 2단계 범위에 비용 상한이 없다(가격 미정):"
+            f" {estimate.source_name} — 단가를 확인해 고친 뒤 다시 승인하세요"
         )
     return AnalysisBudget(
         max_luna_requests=requests,
@@ -566,7 +566,7 @@ def mint_luna_approvals(
         estimate = measured.get(asset_id)
         if estimate is None:
             raise BrowserRuntimeError(
-                f"2단계 견적이 없는 원본이다: {asset_id} — 1단계(전사)가 끝나야 한다"
+                f"2단계 범위가 없는 원본이다: {asset_id} — 1단계(전사)가 끝나야 한다"
             )
         budget = _semantic_budget(workflow.models.luna_model, estimate)
         artifact = _phase_artifact_for(service, root, revision_id, asset_id)

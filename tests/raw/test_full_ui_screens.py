@@ -9,7 +9,7 @@
   뽑히며, 검토 VTT가 내용 해시 이름의 등록 파일로만 제공된다(출처 표시 동반).
 - 확정 내보내기(화면 3): 제출 때의 **화면이 본 리비전·선택**에 묶인 작업 본문,
   캐시 정리 뒤에도 확정 바이트가 그대로다(재검증이 증명한다).
-- 자막(화면 4): 등록→추정(실측 비용)→확인란 승인→주입 가짜 제공자 실행→검토
+- 자막(화면 4): 등록→실행 준비(실측 청크)→확인란 승인→주입 가짜 제공자 실행→검토
   (머리 충돌 게이트)→수동 편집→확정 SRT/VTT 등록 제공. 재시작 뒤에도 같은 신원.
 - F2 표현: 선택 오디오 미리보기(두 트랙 합성·잰 원점 매핑)·큐 이동/반복 단추·
   지금 글자 칸, 표시 갱신의 0회 재생성, 정리 뒤 같은 키 재생성. 확정 내보내기는
@@ -541,7 +541,7 @@ def test_screens_close_honestly_without_backend(tmp_path: Path, monkeypatch) -> 
         lambda: server.review_export_view(signature, "", True),
         lambda: server.review_cleanup_view(signature, True),
         lambda: server.caption_register_view(signature, "/tmp/final.mp4", "f1", "자동(첫 트랙)"),
-        lambda: server.caption_estimate_view(signature, "run-1"),
+        lambda: server.caption_prepare_view(signature, "run-1"),
         lambda: server.caption_run_view(signature, "run-1", True),
         lambda: server.caption_review_view(signature, "run-1"),
         lambda: server.caption_confirm_view(signature, "run-1", True),
@@ -826,7 +826,7 @@ class FakeText:
 
 @needs_ffmpeg
 def test_caption_screen_real_flow(tmp_path: Path) -> None:
-    """등록→추정→승인 실행→검토→머리 묶음 편집→확정 SRT/VTT 제공·재시작."""
+    """등록→실행 준비→승인 실행→검토→머리 묶음 편집→확정 SRT/VTT 제공·재시작."""
     video = tmp_path / "final.mp4"
     _final_video(video)
     timing = FakeTiming({0: [{"text": " 망원동 커피에 왔어요", "start": 0.5, "end": 2.5}]})
@@ -852,9 +852,9 @@ def test_caption_screen_real_flow(tmp_path: Path) -> None:
     with pytest.raises(gr.Error, match="최종 영상 파일이 없다"):
         server.caption_register_view(signature, str(tmp_path / "없음.mp4"), "f1", "자동(첫 트랙)")
 
-    # 추정 — 실측 청크·비용·모델·수명주기가 백엔드 값 그대로(신원이 서버에 남는다).
-    estimate = server.caption_estimate_view(signature, "run-1")
-    assert "실측 청크 1개" in estimate and "예상 비용" in estimate and "$" in estimate
+    # 실행 준비 — 실측 청크·모델·수명주기가 백엔드 값 그대로(신원이 서버에 남는다, 비용 없음 D110).
+    estimate = server.caption_prepare_view(signature, "run-1")
+    assert "실측 청크 1개" in estimate and "예상 비용" not in estimate and "$" not in estimate
     assert "수명주기" in estimate and "지문" in estimate
     assert server._caption_identity is not None
     assert server._caption_identity["audio_ordinal"] == 0
@@ -965,7 +965,7 @@ def test_caption_screen_real_flow(tmp_path: Path) -> None:
     # 재시작 — 새 서버가 같은 등록(렌더+오디오 서수)·검토 번들을 다시 읽는다.
     restarted = workspace_service.RawWorkspaceUi(port=7861, state_path=tmp_path / "state2.json")
     signature2 = _open(restarted, root)
-    again = restarted.caption_estimate_view(signature2, "run-1")
+    again = restarted.caption_prepare_view(signature2, "run-1")
     assert "실측 청크 1개" in again
     bundle_md, bundle_table, bundle_player, _bundle_dd = restarted.caption_review_view(
         signature2, "run-1"
@@ -1079,7 +1079,7 @@ def test_caption_selected_track_presentation_real_flow(tmp_path: Path) -> None:
     preview_stat = preview_path.stat()
 
     # 실행·검토 — 큐 단추 시각은 미리보기 원점 + 큐 시각(서버가 잰 값).
-    server.caption_estimate_view(signature, "run-1")
+    server.caption_prepare_view(signature, "run-1")
     assert server._caption_identity is not None
     assert server._caption_identity["audio_ordinal"] == 1
     note = server.caption_run_view(signature, "run-1", True)

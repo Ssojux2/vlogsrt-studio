@@ -202,7 +202,7 @@ def require_text_approval(
         raise AnalysisApprovalError("승인이 본 글자 모델과 설정 모델이 다르다")
     if approval.text_identity != identity:
         raise AnalysisApprovalError(
-            "승인이 본 글자 요청(문맥·언어·용어집)과 지금이 다르다 — 새 견적과 새 승인을 받아라"
+            "승인이 본 글자 요청(문맥·언어·용어집)과 지금이 다르다 — 다시 승인하라"
         )
     budget = approval.text_chunk_budget
     if isinstance(budget, bool) or not isinstance(budget, int) or budget < 1:
@@ -304,7 +304,7 @@ def _require_current_gemini_price(model: str, on: date) -> None:
         raise AnalysisApprovalError(
             f"{profile.label} 단가가 {on.isoformat()}에 유효하지 않습니다(가격 미정 —"
             f" {profile.price_valid_through.isoformat()}까지 확인한 단가) — 단가를 확인해 고친"
-            " 뒤 다시 견적을 받으세요. 유료 호출은 시작하지 않았습니다"
+            " 뒤 다시 승인하세요. 유료 호출은 시작하지 않았습니다"
         )
 
 

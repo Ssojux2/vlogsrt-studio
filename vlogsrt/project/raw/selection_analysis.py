@@ -77,7 +77,7 @@ def rebound_quote(
     estimates = tuple(e for e in measured.estimates if e.asset_id in wanted)
     missing = wanted - {e.asset_id for e in estimates}
     if missing:
-        raise RawWorkspaceError(f"측정한 견적에 없는 영상입니다: {sorted(missing)}")
+        raise RawWorkspaceError(f"잰 범위에 없는 영상입니다: {sorted(missing)}")
     return _assemble_quote(service, root, asset_ids, estimates, mode or measured.mode)
 
 

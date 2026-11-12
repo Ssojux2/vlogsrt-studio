@@ -490,8 +490,6 @@ def test_ingest_and_analysis_panels_list_videos_in_shot_order(tmp_path: Path):
     assert _row_names(ingest) == SHOT_ORDER
     assert "import_000003 #1" in ingest  # 가져온 기록은 남는다(0003은 세 번째 배치)
     assert _row_names(server._analysis_state_markdown(root)) == SHOT_ORDER
-    estimate = server.analysis_estimate_view(server.current_signature(), None)
-    assert _row_names(estimate) == SHOT_ORDER
 
 
 def test_manual_global_order_box_is_gone(tmp_path: Path, local_socket: None):

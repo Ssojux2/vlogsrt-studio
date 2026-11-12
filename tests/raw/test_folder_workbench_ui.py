@@ -413,8 +413,8 @@ def test_the_export_button_starts_the_render_job(
     root = server.workspace_root()
     calls: list[Path] = []
 
-    def start(at: Path, digest: str | None = None, client: object = None) -> raw_service.JobHandle:
-        assert (digest, client) == (None, None)  # 영어 자막이 꺼져 있으면 살 것이 없다(D105)
+    def start(at: Path, client: object = None) -> raw_service.JobHandle:
+        assert client is None  # 영어 자막이 꺼져 있으면 살 것이 없다(D105)
         calls.append(at)
         return raw_service.JobHandle(job_id="job-1", reattached=len(calls) > 1)
 
@@ -426,9 +426,8 @@ def test_the_export_button_starts_the_render_job(
     deps = app.config["dependencies"]
     clicks = [d for d in deps if d["targets"] == [(buttons[RENDER_EXPORT_LABEL]._id, "click")]]
     (click,) = [d for d in clicks if app.fns[d["id"]].fn == server.render_export_view]
-    assert click["inputs"] == [server._signature_state._id, server._english_quote_md._id]
+    assert click["inputs"] == [server._signature_state._id]  # 영어 자막 견적 문구가 없다(D110)
     assert click["outputs"] == [server._capcut_status._id]
-    assert any(app.fns[d["id"]].fn == server.english_quote_markdown for d in clicks)
     tails = [d for d in deps if d.get("trigger_after") == click["id"]]
     assert any(d.get("js") == ui_facade.ACTIVITY_REPLY_JS for d in tails)  # 답은 활동 칸으로
     assert any(app.fns[d["id"]].fn == server.render_export_card_tick for d in tails)
@@ -453,61 +452,54 @@ def test_import_export_and_approve_wake_the_activity_poller(
         assert dep["inputs"] == [server._folder_path_box._id]
     clicks = [d for d in deps if d["targets"] == [(buttons[RENDER_EXPORT_LABEL]._id, "click")]]
     (export,) = [d for d in clicks if app.fns[d["id"]].fn == server.render_export_view]
-    assert export["js"] == ui_facade.EXPORT_WAKE_JS  # 입력 둘을 그대로 넘긴다(D105)
+    assert export["js"] == ui_facade.EXPORT_WAKE_JS  # 서명을 그대로 넘긴다
     assert "__vlServer.wake(true)" in ui_facade.EXPORT_WAKE_JS
-    assert ui_facade.EXPORT_WAKE_JS.rstrip().endswith("return [signature, englishQuote]; }")
+    assert ui_facade.EXPORT_WAKE_JS.rstrip().endswith("return signature; }")
     assert "__vlServer.wake(true)" in ui_facade.ACTIVITY_WAKE_JS
     assert ui_facade.ACTIVITY_WAKE_JS.rstrip().endswith("return value; }")
     assert "window.__vlServer.wake(true)" in ui_facade.APPROVE_WAKE_JS
 
 
-def test_the_english_box_saves_the_flag_and_shows_a_quote_line(
+def test_the_english_box_saves_the_flag_and_says_what_it_means(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, local_socket: None
 ) -> None:
-    """D105 — 칸을 켜면 표지를 저장하고 견적 한 줄을 그린다. 끄면 빈 줄이고 살 것이 없다."""
+    """D105 — 칸을 켜면 표지를 저장하고 그 뜻을 말한다. 견적 줄은 없다(D110)."""
     server, app, by_id, _buttons = _built(tmp_path)
     root = server.workspace_root()
     signature = server.current_signature()
     assert by_id[workspace_service.ENGLISH_SUBTITLES_ID].label == (
         workspace_service.ENGLISH_SUBTITLES_LABEL
     )
-    assert server.english_quote_markdown(root) == ""
-    line = server.english_subtitles_view(signature, True)
+    assert "vl-english-quote" not in by_id
+    assert server.english_subtitles_view(signature, True) == workspace_service.ENGLISH_ON_TEXT
     assert server.raw.english_subtitles(root) is True
-    text = server.raw.english_quote(root).text
-    assert line == ui_facade.literal_markdown(text) and text.startswith("영어 자막")
-    assert ui_facade.unliteral_markdown(line) == text
-    assert server.english_subtitles_view(signature, False) == ""
+    assert server.english_subtitles_view(signature, False) == workspace_service.ENGLISH_OFF_TEXT
     assert server.raw.english_subtitles(root) is False
+    for text in (workspace_service.ENGLISH_ON_TEXT, workspace_service.ENGLISH_OFF_TEXT):
+        assert "$" not in text and text.replace(")", "").endswith("니다.")
 
 
-def test_the_export_click_is_bound_to_the_english_quote_it_showed(
+def test_the_export_click_buys_only_when_something_is_missing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, local_socket: None
 ) -> None:
-    """D105 — 살 것이 있으면 보인 문구가 지금 견적과 같아야 하고, 그때만 digest·클라이언트를
-    넘긴다."""
+    """D105 · D110 — 옮길 것이 있으면 누름이 승인이고 클라이언트를 넘긴다. 없으면 넘기지 않는다."""
     server, _app, _by_id, _buttons = _built(tmp_path)
-    quote = raw_service.EnglishQuote(
-        model="gemini-3.8-flash", sources=1, missing_sources=1, missing_lines=4,
-        input_tokens=900, output_tokens=16000, usd="0.07", priced=True,
-        text="영어 자막: 영상 1개 자막 4줄을 옮깁니다(공식 단가로 약 $0.07).", digest="d" * 64,
-    )  # fmt: skip
-    seen: list[tuple[str | None, object]] = []
+    seen: list[object] = []
+    missing: list[tuple[str, ...]] = [("k" * 64,)]
     monkeypatch.setattr(server.raw, "english_subtitles", lambda at: True)
-    monkeypatch.setattr(server.raw, "english_quote", lambda at: quote)
+    monkeypatch.setattr(server.raw, "english_missing", lambda at: missing[0])
     monkeypatch.setattr(server, "_live_transport_for_action", lambda: _Transport())
 
-    def start(at: Path, digest: str | None = None, client: object = None) -> raw_service.JobHandle:
-        seen.append((digest, client))
+    def start(at: Path, client: object = None) -> raw_service.JobHandle:
+        seen.append(client)
         return raw_service.JobHandle(job_id="job-1", reattached=False)
 
     monkeypatch.setattr(server.raw, "start_render_export", start)
     signature = server.current_signature()
-    with pytest.raises(gr.Error, match="견적이 바뀌었습니다"):
-        server.render_export_view(signature, "영어 자막: 다른 문구")
-    assert seen == []
-    server.render_export_view(signature, ui_facade.literal_markdown(quote.text))
-    assert seen == [("d" * 64, "client:gemini-3.8-flash")]
+    server.render_export_view(signature)
+    missing[0] = ()
+    server.render_export_view(signature)
+    assert seen == ["client:gemini-3.8-flash", None]
 
 
 class _Transport:

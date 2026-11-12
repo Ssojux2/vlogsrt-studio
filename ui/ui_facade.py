@@ -793,14 +793,12 @@ ACTIVITY_WAKE_JS = (
 """
 
 EXPORT_WAKE_JS = (
-    "(signature, englishQuote) => { if (window.__vlServer) { window.__vlServer.wake(true); }"
-    " return [signature, englishQuote]; }"
+    "(signature) => { if (window.__vlServer) { window.__vlServer.wake(true); } return signature; }"
 )
-"""「추천만 이어붙여 내보내기」의 앞 단계 — 깨우기는 `ACTIVITY_WAKE_JS`와 같고, 입력 둘(작업공간
-서명 · 보인 영어 자막 견적 문구, D105)을 그대로 넘긴다."""
+"""「추천만 이어붙여 내보내기」의 앞 단계 — 깨우기는 `ACTIVITY_WAKE_JS`와 같고, 작업공간 서명을
+그대로 넘긴다(영어 자막 견적 문구는 없다, D110)."""
 
 _MARKDOWN_PUNCTUATION = re.compile(r"([!-/:-@\[-`{-~])")
-_MARKDOWN_ESCAPED = re.compile(r"\\([!-/:-@\[-`{-~])")
 
 
 def literal_markdown(text: str) -> str:
@@ -810,11 +808,6 @@ def literal_markdown(text: str) -> str:
     않는다.
     """
     return _MARKDOWN_PUNCTUATION.sub(r"\\\1", text)
-
-
-def unliteral_markdown(text: str) -> str:
-    """`literal_markdown`을 되푼다 — 칸 값(escape한 마크다운)에서 원문을 얻어 견적과 견준다."""
-    return _MARKDOWN_ESCAPED.sub(r"\1", text)
 
 
 APPROVE_WAKE_JS = (
@@ -2224,15 +2217,12 @@ WORKBENCH_CSS = (
    스크롤한다. */
 .vl-ear-text { min-width: 0; overflow-wrap: anywhere; max-height: 4.5em; overflow-y: auto; }
 .vl-ear-line > .vl-btn { flex: none; }
-/* 말소리 빈칸 재전사(D59 19f) — 빈칸 단추는 서로 띄우고, 견적 문구는 승인이 대조하는 글이라
-   상자로 묶는다(긴 문구도 칸 안에서 줄바꿈 — 가로로 넘치지 않는다). */
+/* 말소리 빈칸 재전사(D59 19f) — 빈칸 단추는 서로 띄운다. */
 [data-vl-refill] .vl-btn { margin: 0 6px 6px 0; }
 /* 시각 맞춤 제안(D59 19h) — 들어 볼 줄은 왼쪽 선으로 묶고, 긴 글자·이유는 칸 안에서 줄바꿈한다. */
 [data-vl-snap] .vl-btn { margin: 0 6px 6px 0; }
 .vl-snap-cue { border-left: 3px solid var(--vl-line-strong); padding: 2px 0 2px 8px;
   margin: 0 0 8px; overflow-wrap: anywhere; }
-.vl-refill-quote { border: 1px solid var(--vl-line-strong); border-radius: 4px; padding: 6px 8px;
-  background: var(--vl-surface-raised); overflow-wrap: anywhere; }
 .vl-audio-strip { position:absolute; top:var(--vl-audio-top); left:0; right:0;
  height:var(--vl-audio-h); padding:3px 8px; line-height:14px;
  background: var(--vl-surface); color: var(--vl-ink-muted); font-size:11px; box-sizing:border-box; }
@@ -2989,9 +2979,10 @@ VISUAL_BOOTSTRAP_JS = (
       // 시각 맞춤 제안(D59 19g·19h) — 자막 시각 확인이 잰 말소리 경계에 큐를 맞춘 **제안**이다.
       // 적용은 무료이고 사람이 누를 때만, 그 영상의 모든 줄을 함께 바꾼다(막힘·못 찾음 줄의 밀기
       // 포함). 적용은 누른 순간 그려져 있던 제안의 sha에 묶이고 서버가 다시 재어 대조한다 — 새로
-      // 그려진 지 REFILL_READ_MS가 안 된 제안은 들을 틈이 없었으니 빈 sha다(서버가 거절하고 새
+      // 그려진 지 SNAP_READ_MS가 안 된 제안은 들을 틈이 없었으니 빈 sha다(서버가 거절하고 새
       // 제안을 그린다).
       // 들어 볼 줄은 끝이 크게 움직인 것부터 — 옛 시각과 제안 시각을 같은 재생기로 차례로 듣는다.
+      var SNAP_READ_MS = 1500;
       function snapPanel(info) {
         var sn = info && info.snap;
         if (!sn) { return ""; }
@@ -3082,7 +3073,7 @@ VISUAL_BOOTSTRAP_JS = (
         }
         var sha = node.getAttribute("data-vl-sha") || "";
         var shown = state.snapShown;
-        var unread = !shown || shown.sha !== sha || Date.now() - shown.at < REFILL_READ_MS;
+        var unread = !shown || shown.sha !== sha || Date.now() - shown.at < SNAP_READ_MS;
         return { act: act, sourceId: curSourceId(), sha: unread ? "" : sha };
       }
       // 들어 보기 — 그 구간만 재생하고 끝에서 멈춘다(반복 없음). 새 소리 파일은 없다. 끝은 화면
@@ -3152,10 +3143,9 @@ VISUAL_BOOTSTRAP_JS = (
         return out.join("");
       }
       // 말소리 빈칸 재전사(D59 19f) — 말소리 측정이 찾았는데 자막이 없는 곳을 그 구간만 다시
-      // 묻는다.
-      // 유료라 견적을 보고 승인해야 시작한다 — 승인은 **보이는 견적 문구**와 digest를 보내고 서버가
-      // 지금 견적과 대조한다(D54). 금액·모델 이름은 견적 문구 안에만 있다(D57). 넣은 자막은 직접
-      // 고친 자막이 되므로 순서 경고를 늘 보인다.
+      // 묻는다. 유료라 승인해야 시작한다 — 단추는 지금 범위의 digest를 싣고 서버가 누른 순간
+      // 다시 재어 대조한다. 견적(분량·금액 문구)은 없다(D110). 넣은 자막은 직접 고친 자막이
+      // 되므로 순서 경고를 늘 보인다.
       function refillPanel(info) {
         var rf = info && info.refill;
         if (!rf) { return ""; }
@@ -3177,10 +3167,7 @@ VISUAL_BOOTSTRAP_JS = (
           out.push('<p class="vl-kv">' + esc(note) + "</p>");
         });
         out.push('<p class="vl-kv"><small>' + esc(rf.order) + "</small></p>");
-        if (rf.state === "ready" && rf.quote) {
-          noteRefillQuote(rf.digest);
-          out.push('<p class="vl-kv vl-refill-quote" id="vl-refill-quote">' + esc(rf.quote) +
-            "</p>");
+        if (rf.state === "ready" && rf.digest) {
           out.push('<button type="button" class="vl-btn vl-btn-primary" ' +
             'data-vl-act="refill-approve" data-vl-digest="' + esc(rf.digest) + '">' +
             "빈칸 재전사 승인</button>");
@@ -3201,57 +3188,6 @@ VISUAL_BOOTSTRAP_JS = (
         }
         out.push("</details>");
         return out.join("");
-      }
-      // 승인 앞 단계(D54) — 견적 칸이 정말 보일 때만 그려진 문구를 보낸다. 일괄 승인의 앞 단계
-      // (APPROVE_GUARD_JS)와 같은 규칙이다: 칸이 있고 · 보이고 · 화면 안이고 · 다른 것에 덮이지
-      // 않았고 · 서랍이 닫혔고 · 칸 안에서 잘리지 않았다. 못 재면 닫힌 쪽(빈 문구)이다. 빈 문구면
-      // 서버가 「새 견적을 확인하세요」로 거절한다(유료 호출 0) — 그때 견적 칸을 보이게 한다.
-      // 묶는 것은 **누른 순간**(pointerdown)에 그려져 있던 견적이다 — 누른 뒤 1초 틱이 새 견적을
-      // 그려도 그 digest를 보내지 않는다. 새 견적이 그려진 지 REFILL_READ_MS가 안 됐으면 읽을
-      // 틈이 없었으니 빈 문구다(누르기 직전에 바뀐 견적은 승인되지 않는다).
-      var REFILL_READ_MS = 1500;
-      function noteRefillQuote(digest) {
-        if (!state.refillShown || state.refillShown.digest !== digest) {
-          state.refillShown = { digest: digest, at: Date.now() };
-        }
-      }
-      function refillUncovered(node, box) {
-        if (!doc.elementFromPoint || !node.contains) { return false; }
-        return [[box.left + box.width / 2, box.top + box.height / 2], [box.left + 2, box.top + 2],
-          [box.right - 2, box.top + 2], [box.left + 2, box.bottom - 2],
-          [box.right - 2, box.bottom - 2]].every(function(point) {
-          var hit = doc.elementFromPoint(point[0], point[1]);
-          return !!hit && node.contains(hit);
-        });
-      }
-      function refillQuoteSeen() {
-        var node = doc.getElementById("vl-refill-quote");
-        if (!node || !node.getBoundingClientRect || !W.getComputedStyle || !doc.querySelector) {
-          return "";
-        }
-        if (doc.querySelector("#project-tools.open, #settings-drawer.open")) { return ""; }
-        var style = W.getComputedStyle(node);
-        var box = node.getBoundingClientRect();
-        var inside = box.width >= 1 && box.height >= 1 && box.top >= 0 && box.left >= 0 &&
-          box.bottom <= W.innerHeight && box.right <= W.innerWidth;
-        var text = String(node.textContent || "");
-        var seen = style.display !== "none" && style.visibility === "visible" && inside &&
-          refillUncovered(node, box) && !(node.scrollHeight > node.clientHeight + 1) &&
-          text.trim() !== "";
-        return seen ? text : "";
-      }
-      function refillPress(node) {
-        var digest = node.getAttribute("data-vl-digest") || "";
-        var shown = state.refillShown;
-        var unread = !shown || shown.digest !== digest || Date.now() - shown.at < REFILL_READ_MS;
-        return { sourceId: curSourceId(), digest: digest, quote: unread ? "" : refillQuoteSeen() };
-      }
-      function refillReveal() {
-        if (W.__vlDrawer) {
-          ["project-tools", "settings-drawer"].forEach(function(id) { W.__vlDrawer(id, false); });
-        }
-        var node = doc.getElementById("vl-refill-quote");
-        if (node && node.scrollIntoView) { node.scrollIntoView({ block: "nearest" }); }
       }
       // 3단 등급(D51) — 글자 표지는 색과 별개로 등급을 말한다(색약·흑백에서도 읽힌다). 빨강의
       // 화면 이름은 「비추천」(W-46a) — 대기열·결정 상자의 「제외 제안」은 기다리는 제안이다.
@@ -4529,9 +4465,6 @@ VISUAL_BOOTSTRAP_JS = (
         html.push(draftBox());
         html.push(folded(card, info, opened));
         mount.innerHTML = html.join("");
-        // 빈칸 재전사 승인을 거절했으면 견적 칸을 보이게 한다 — 거절 응답이 칸을 다시 그린
-        // **뒤**에도(그 전에 옮긴 스크롤은 다시 그리기가 흔든다).
-        if (state.refillReveal) { state.refillReveal = false; refillReveal(); }
       }
 
       function paintPlayhead() {
@@ -4914,13 +4847,8 @@ VISUAL_BOOTSTRAP_JS = (
           return;
         }
         if (act === 'refill-approve') {
-          // 누른 순간 적어 둔 견적(키보드로 눌렀으면 지금)을 보낸다 — 한 번 쓰고 지운다.
-          var press = state.refillPress;
-          state.refillPress = null;
-          if (!press || press.sourceId !== curSourceId()) { press = refillPress(node); }
-          if (!press.quote) { refillReveal(); state.refillReveal = true; }
-          call('vl_refill', {sourceId:curSourceId(), digest:press.digest, quote:press.quote},
-            '빈칸 재전사 견적을 확인하는 중…');
+          call('vl_refill', {sourceId:curSourceId(),
+            digest:node.getAttribute('data-vl-digest') || ''}, '빈칸 재전사를 시작하는 중…');
           return;
         }
         if (act === 'ear-take') { takeEar(node.getAttribute('data-vl-take')); return; }
@@ -5075,7 +5003,7 @@ VISUAL_BOOTSTRAP_JS = (
       // 옛 모델로 사건을 처리하는 일이 없다(듣는이 재사용 금지, A5 실측).
       if (prevRootClick) { root.removeEventListener("click", prevRootClick); }
       root.addEventListener("click", root._vlClick);
-      // 누르는 순간(pointerdown) 빈칸 재전사 승인 단추면 그때 보이던 견적을 적어 둔다(D54) —
+      // 누르는 순간(pointerdown) 시각 맞춤 적용·되돌리기 단추면 그때 보이던 제안을 적어 둔다 —
       // 다른 곳을 누르면 지운다(남은 누름이 나중 키보드 승인에 묻어가지 않는다).
       if (root._vlDown) { root.removeEventListener("pointerdown", root._vlDown); }
       root._vlDown = function (ev) {
@@ -5086,7 +5014,6 @@ VISUAL_BOOTSTRAP_JS = (
         }
         var pressed = node && node !== root && node.getAttribute ?
           node.getAttribute("data-vl-act") : "";
-        state.refillPress = pressed === "refill-approve" ? refillPress(node) : null;
         state.snapPress = pressed === "snap-apply" || pressed === "snap-revert" ?
           snapPress(node) : null;
       };

@@ -1,7 +1,7 @@
-"""라이브러리 맥락 평가(W-39b, D99)의 저장·요청 본문·견적 — 서비스만 부른다.
+"""라이브러리 맥락 평가(W-39b, D99)의 저장·요청 본문 — 서비스만 부른다.
 
-순수 계층(`context_review`)이 짓고 해석한 값을 파일로 남기고, Gemini generateContent 본문을 짓고,
-공식 단가로 견적을 잰다. 부르기(유료)는 하지 않는다 — 서비스가 승인 뒤
+순수 계층(`context_review`)이 짓고 해석한 값을 파일로 남기고, Gemini generateContent 본문을
+짓는다(견적은 없다, D110). 부르기(유료)는 하지 않는다 — 서비스가 승인 뒤
 `transcribe.request_gemini_generate`로만 한다(규칙 7).
 
 평가 결과는 `analysis/context_review/<입력 열쇠>.json` 하나다 — 열쇠가 곧 이름이라 지금 열쇠의
@@ -16,7 +16,6 @@ import os
 import tempfile
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
-from decimal import ROUND_CEILING, Decimal
 from fractions import Fraction
 from pathlib import Path
 from typing import Any
@@ -30,8 +29,6 @@ CONTEXT_DIRNAME = "context_review"
 RESULT_SCHEMA = "context-review-result/v1"
 FAILURE_SCHEMA = "context-review-failure/v1"
 JSON_MIME_TYPE = "application/json"
-CENT = Decimal("0.01")
-MILLION = Decimal(1_000_000)
 
 
 def folder(workspace_root: Path, analysis_root: str) -> Path:
@@ -86,20 +83,6 @@ def payload(
             "thinkingConfig": {"thinkingLevel": profile.thinking_level},
         },
     }
-
-
-def input_tokens(given: context_review.ContextInput, settings: ContextReviewSettings) -> int:
-    """견적의 입력 토큰 — 보내는 글자 수를 `quote_chars_per_token`으로 나눠 올린다(보수적)."""
-    chars = len(context_review.INSTRUCTION) + len(given.text)
-    return -(-chars // settings.quote_chars_per_token)
-
-
-def ceiling_usd(profile: RawGeminiAnalysisProfile, tokens_in: int, tokens_out: int) -> Decimal:
-    """공식 단가로 잰 상한 — 입력 추정 + 출력 한도 전부(생각 포함), 센트로 올린다."""
-    exact = (
-        Decimal(tokens_in) * profile.input_per_mtok + Decimal(tokens_out) * profile.output_per_mtok
-    ) / MILLION
-    return exact.quantize(CENT, rounding=ROUND_CEILING)
 
 
 def result_document(
@@ -186,11 +169,9 @@ __all__ = [
     "CONTEXT_DIRNAME",
     "FAILURE_SCHEMA",
     "RESULT_SCHEMA",
-    "ceiling_usd",
     "failure_document",
     "failure_path",
     "folder",
-    "input_tokens",
     "load",
     "payload",
     "result_document",

@@ -186,9 +186,7 @@ def cached_answer_exists(cache_dir: Path, key: str) -> bool:
     try:
         body = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as error:
-        log.warn(
-            f"Gemini 글자 캐시를 읽지 못했다 — 견적은 묻는 것으로 셉니다: {path.name} ({error})"
-        )
+        log.warn(f"Gemini 글자 캐시를 읽지 못했다 — 묻는 것으로 셉니다: {path.name} ({error})")
         return False
     return (
         isinstance(body, dict) and body.get("key") == key and isinstance(body.get("response"), dict)
@@ -611,7 +609,7 @@ class ApprovedPhaseWordProvider:
             self.approved_keys is not None
             and call_key(binding, self.settings) not in self.approved_keys
         ):
-            raise AnalysisApprovalError("견적에 없던 청크다 — 승인 밖이라 보내지 않는다")
+            raise AnalysisApprovalError("승인한 범위에 없던 청크다 — 승인 밖이라 보내지 않는다")
         if self.audio.audio_stream_index != self.approval.audio_stream_index:
             raise AnalysisApprovalError("승인이 본 오디오 스트림과 지금의 선택이 다르다")
         if binding.sample_start < 0 or binding.sample_end > self.audio.sample_count:

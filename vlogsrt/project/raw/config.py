@@ -1821,16 +1821,13 @@ class TranslationSettings:
     max_output_tokens: int = 16000
     """응답 한도(생각 포함) — 150줄 영어 JSON(약 4천 토큰)에 생각 몫을 넉넉히."""
     thinking_level: str = "LOW"
-    """번역은 판정이 아니라 생각을 적게 — 출력 한도 안의 생각 몫이 줄어 견적 상한도 같다."""
-    quote_chars_per_token: int = 1
-    """견적의 입력 토큰 추정 — 글자 하나 = 토큰 하나(맥락 평가와 같은 보수적인 쪽)."""
+    """번역은 판정이 아니라 생각을 적게 — 출력 한도 안의 생각 몫이 준다."""
 
     def __post_init__(self) -> None:
         for name in (
             "batch_lines",
             "english_line_chars",
             "max_output_tokens",
-            "quote_chars_per_token",
         ):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:

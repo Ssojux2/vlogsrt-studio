@@ -25,7 +25,6 @@ import uuid
 from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
-from decimal import ROUND_CEILING, Decimal
 from fractions import Fraction
 from pathlib import Path
 from typing import Any, get_args
@@ -117,29 +116,26 @@ CROSS_CHECK_LABEL = "다른 귀로 교차 확인"
 CROSS_CHECK_INFO = (
     "켜 두면 이전 전사 엔진으로 듣는 영상을 다른 귀로 한 번 더 듣고, 두 귀가 맞춰 본 줄만 글자를"
     " 고칩니다. 지금 기본 전사 엔진으로 듣는 영상에는 다른 귀가 없습니다."
-    " 들을 분량과 비용은 아래 견적에 나옵니다."
 )
 """「다른 귀로 교차 확인」(D59 19d) — 승인 범위 바로 아래의 켬·끔. 칸에는 모델 이름·금액이 없다
-(D57 결정 7) — 무엇을 얼마에 듣는지는 그 아래 견적 문구만 말하고, 승인은 그 문구에 묶인다.
+(D57 결정 7 · D110 — 견적은 없다). 다음 승인이 이 값으로 돈다.
 D104부터 기본(Gemini) 엔진 원본에는 다른 귀가 없어 그 사실을 이름 없이 말한다(W-52b1)."""
 CONTEXT_PANEL_ID = "vl-context-review"
 CONTEXT_PANEL_LABEL = "맥락 평가 (Gemini)"
-CONTEXT_QUOTE_LABEL = "견적 보기"
-CONTEXT_RUN_LABEL = "승인하고 평가"
+CONTEXT_RUN_LABEL = "맥락 평가 실행"
 CONTEXT_NONE_TEXT = (
     "아직 평가하지 않았습니다 — 라이브러리 전체(모든 영상의 분석 요약과 자막)를 한 번에 보고 추천"
     " 구간마다 이야기에서의 자리(핵심 · 보조 · 중복 · 맥락 밖)를 판정해 등급에 반영합니다."
 )
 CONTEXT_STALE_TEXT = (
-    "분석·자막·모델이 바뀌어 지난 평가는 낡았습니다 — 등급에 쓰지 않습니다. 견적을 보고 다시"
-    " 평가하세요."
+    "분석·자막·모델이 바뀌어 지난 평가는 낡았습니다 — 등급에 쓰지 않습니다. 다시 평가하세요."
 )
 CONTEXT_CURRENT_TEXT = (
     "지금 평가 — {when} · {model} · 판정 {judged}개 / 구간 {spans}개. 중복·맥락 밖 추천은 보통으로,"
     " 핵심은 좁은 칸에서만 추천으로 바뀝니다(사람 결정은 그대로)."
 )
 CONTEXT_DONE_TEXT = "평가를 마쳤습니다 — 판정 {judged}개 / 구간 {spans}개를 등급에 반영했습니다."
-"""「맥락 평가 (Gemini)」(W-39c, D99) — 설정 서랍 칸의 문구. 금액은 견적 줄만 말한다(D57)."""
+"""「맥락 평가 (Gemini)」(W-39c, D99) — 설정 서랍 칸의 문구. 금액은 말하지 않는다(D57 · D110)."""
 WORKSPACE_MODE_ID = "vl-workspace-mode"
 WORKSPACE_MODE_LABEL = "작업 모드"
 WORKSPACE_MODE_INFO = (
@@ -182,8 +178,7 @@ ANALYSIS_MODEL_PANEL_ID = "analysis-model-panel"
 TIMING_ENGINE_LABEL = "새로 듣는 전사 엔진"
 TIMING_ENGINE_RETIRED_MARK = " · 이전 엔진({date} 종료)"
 """「새로 듣는 전사 엔진」(W-31e, D92) — 처음 듣거나 다시 듣는 영상이 쓸 시간 엔진. 이미 들은 영상은
-그대로다(엔진을 바꾸는 길은 그 영상의 「다시 듣기」뿐). 칸에는 금액이 없다(D57 결정 7) — 얼마에
-듣는지는 견적 문구만 말한다."""
+그대로다(엔진을 바꾸는 길은 그 영상의 「다시 듣기」뿐). 칸에는 금액이 없다(D57 결정 7 · D110)."""
 TIMING_ENGINE_BUSY_TEXT = (
     "**바꾸지 않았습니다** · 분석이나 승인 확인이 진행 중입니다 — 끝나거나 취소한 뒤에 새로 듣는"
     " 전사 엔진을 바꾸세요."
@@ -202,11 +197,11 @@ GEMINI_CONTRACT_UNCONFIRMED_NOTE = (
 알린다(사용자 결정: 코드는 지금 바꾸고 H1을 먼저 한다)."""
 TIMING_KEY_MISSING_TEXT = (
     "{label}로 들을 영상이 있어 `{env}`가 필요합니다. `.env`에 결제를 연결한 키를 넣고 앱을 다시"
-    " 띄우거나, 설정 서랍 「분석 모델」에서 새로 듣는 전사 엔진을 바꾼 뒤 견적을 다시"
-    " 확인하세요. 유료 호출은 시작하지 않았습니다."
+    " 띄우거나, 설정 서랍 「분석 모델」에서 새로 듣는 전사 엔진을 바꾼 뒤 다시"
+    " 승인하세요. 유료 호출은 시작하지 않았습니다."
 )
 TIMING_PRICE_UNKNOWN_TEXT = (
-    "{label}의 공식 단가는 {date}까지 다시 확인하기로 한 값입니다 — **가격 미정**이라 이 견적은"
+    "{label}의 공식 단가는 {date}까지 다시 확인하기로 한 값입니다 — **가격 미정**이라 이 엔진으로는"
     " 승인할 수 없습니다. 단가를 확인해 고치거나 새로 듣는 전사 엔진을 바꾸세요. 유료 호출은"
     " 시작하지 않았습니다."
 )
@@ -223,9 +218,10 @@ GLOSSARY_LABEL = "용어집(고유명사, 한 줄에 하나)"
 GLOSSARY_SAVE_LABEL = "용어집 저장"
 GLOSSARY_INFO = (
     "다른 귀에게만 알려 주는 말입니다 — 처음 듣는 귀에는 보내지 않습니다. 용어집을 바꾸면"
-    " 다음 견적부터 다른 귀에게 새 용어집으로 다시 묻습니다. 들을 분량과 비용은 견적에 나옵니다."
+    " 다음 승인부터 다른 귀에게 새 용어집으로 다시 묻습니다."
 )
-"""설정 서랍의 용어집 칸(D59 19c·19e) — 저장은 무료이고, 견적만 다시 묶는다. 모델 이름·금액이 없다
+"""설정 서랍의 용어집 칸(D59 19c·19e) — 저장은 무료이고, 다음 승인이 새 용어집으로 돈다.
+모델 이름·금액이 없다
 (D57 결정 7). `#` 뒤는 메모로 버리고 같은 말은 한 번만 남는다(`glossary.parse`)."""
 GLOSSARY_BUSY_TEXT = (
     "분석이나 승인 확인이 진행 중이라 용어집을 저장하지 않았습니다 — 끝나거나 취소한 뒤에 저장해"
@@ -236,12 +232,12 @@ RELISTEN_EXPLANATION = (
     " 있습니다."
 )
 RELISTEN_DONE_TEXT = (
-    f"{RELISTEN_EXPLANATION} 승인 범위를 「전사만」으로 바꿨습니다. 견적을 확인한 뒤"
+    f"{RELISTEN_EXPLANATION} 승인 범위를 「전사만」으로 바꿨습니다."
     f" 「{LIBRARY_APPROVE_LABEL}」을 누르면 시작합니다 — 다른 영상의 이미 받은 전사는 다시 사지"
     " 않습니다."
 )
 RELISTEN_PENDING_TEXT = (
-    f"이 영상은 이미 다시 듣기를 기다리고 있습니다. 견적을 확인한 뒤 「{LIBRARY_APPROVE_LABEL}」을"
+    f"이 영상은 이미 다시 듣기를 기다리고 있습니다. 「{LIBRARY_APPROVE_LABEL}」을"
     " 누르면 시작합니다."
 )
 RELISTEN_BUSY_TEXT = "이 영상의 분석이 진행 중입니다. 끝난 뒤 다시 눌러 주세요."
@@ -256,8 +252,9 @@ REFILL_ORDER_WARNING = (
 """계획의 「비용을 한 번만 내기 위한 순서」(D59) — 빈칸 넣기는 재시도·다시 듣기·교차 확인 뒤다."""
 REFILL_APPROVE_LABEL = "빈칸 재전사 승인"
 REFILL_STARTED_TEXT = "빈칸 재전사를 시작했습니다 — 끝나면 넣은 자막이 원본 자막 목록에 보입니다."
-REFILL_UNSEEN_TEXT = (
-    "새 견적을 확인하세요 — 화면의 빈칸·견적이 지금과 다릅니다. 아무것도 시작하지 않았습니다."
+REFILL_CHANGED_TEXT = (
+    "빈칸이 바뀌었습니다 — 화면의 빈칸이 지금과 다릅니다. 바뀐 빈칸을 확인하고 다시 누르세요."
+    " 아무것도 시작하지 않았습니다."
 )
 REFILL_KEY_TEXT = (
     "연결 설정이 필요합니다 — OpenAI API 키가 없어 빈칸 재전사를 시작하지 않았습니다."
@@ -284,7 +281,7 @@ REFILL_NOTE_UNCHECKED = (
 )
 REFILL_NOTE_UNRECORDED = (
     "전사가 실패한 구간이 있었는지 이 화면은 알 수 없습니다 — 「전사만」 승인으로 다시 전사하면"
-    " 기록이 남아 나눠 보입니다. 비용은 그 견적에 나옵니다."
+    " 기록이 남아 나눠 보입니다."
 )
 REFILL_SUMMARY_UNRECORDED = "1단계 전사 기록이 없어 실패 구간과 건너뛴 곳을 나누지 못했습니다."
 REFILL_SKIPPED_NOTE = (
@@ -338,8 +335,7 @@ SNAP_LISTEN_NOTE = (
 SNAP_ORDER_WARNING = (
     "적용하면 이 영상의 원본 자막은 직접 고친 자막이 됩니다 — 그 뒤로는 다시 듣기·실패 구간 재시도·"
     "다른 귀 교차 확인이 이 자막을 덮지 않습니다. 그 셋과 말소리 빈칸 재전사를 먼저 끝낸 뒤에"
-    " 적용하세요. 다음 영상 분석은 자막이 바뀐 이 영상을 다시 판정합니다(비용은 그 분석 견적에"
-    " 나옵니다)."
+    " 적용하세요. 다음 영상 분석은 자막이 바뀐 이 영상을 다시 판정합니다."
 )
 SNAP_UNDO_RULE = (
     "적용한 뒤에는 이 칸에서 적용 전 자막으로 되돌릴 수 있습니다 — 자막을 다시 고치거나 빈칸을"
@@ -424,7 +420,7 @@ STAGE_NOTES = {
         " 합니다(이미 받은 전사는 다시 사지 않습니다)."
     ),
     raw_service.RELISTEN_STAGE: (
-        f"다시 듣기를 기다리고 있습니다. 견적을 확인한 뒤 「{LIBRARY_APPROVE_LABEL}」을 누르면"
+        f"다시 듣기를 기다리고 있습니다. 「{LIBRARY_APPROVE_LABEL}」을 누르면"
         " 처음부터 다시 듣습니다."
     ),
 }
@@ -438,10 +434,10 @@ RELISTEN_ENGINE_CHANGE_TEXT = (
     f" (「{TIMING_ENGINE_LABEL}」 설정)."
 )
 """「다시 듣기」 칸의 전사 엔진 문구(W-31e, D92) — 엔진을 바꾸는 길은 다시 듣기뿐이라, 누르기 전에
-어느 엔진으로 듣는지 말한다. 금액은 견적만 말한다(D57 결정 7)."""
+어느 엔진으로 듣는지 말한다. 금액은 말하지 않는다(D57 결정 7 · D110)."""
 RETRY_TRANSCRIBE_TEXT = (
     "이전 분석 기준의 실패 구간은 이어서 재시도할 수 없어 「전사만」 새 분석으로 다시 묻습니다."
-    f" 승인 범위를 「전사만」으로 바꿨습니다. 견적을 확인한 뒤 「{LIBRARY_APPROVE_LABEL}」을"
+    f" 승인 범위를 「전사만」으로 바꿨습니다. 「{LIBRARY_APPROVE_LABEL}」을"
     " 누르세요 — 이미 받은 전사 조각은 다시 사지 않고 실패한 조각만 다시 묻습니다."
 )
 
@@ -521,9 +517,13 @@ RENDER_EXPORT_LABEL = "추천만 이어붙여 내보내기"
 """명령 줄의 내보내기 단추(W-46a, D100 §7a) — 추천(초록)만 이은 초안 영상 + SRT + 보고서."""
 RENDER_EXPORT_ID = "vl-render-export"
 ENGLISH_SUBTITLES_LABEL = "영어 자막도 만들기 (draft.en.srt)"
-"""내보내기의 영어 자막 칸(W-53, D105) — 작업공간 표지, 기본 끔. 켜면 견적 한 줄이 보인다."""
+"""내보내기의 영어 자막 칸(W-53, D105) — 작업공간 표지, 기본 끔. 견적 줄은 없다(D110)."""
 ENGLISH_SUBTITLES_ID = "vl-english-subtitles"
-ENGLISH_QUOTE_ID = "vl-english-quote"
+ENGLISH_ON_TEXT = (
+    "영어 자막을 켰습니다 — 내보내기를 누르면 아직 옮기지 않은 영상의 자막을 영어로 옮깁니다"
+    "(유료 · 이미 옮긴 영상은 다시 사지 않습니다)."
+)
+ENGLISH_OFF_TEXT = "영어 자막을 껐습니다 — 내보내기는 한국어 자막만 냅니다."
 RANGE_MARK_WORDS: dict[str, str] = {
     "recommended": "추천",
     "normal": "보통",
@@ -555,11 +555,11 @@ TICK_RECENT_JOBS = 8
 """틱 도장이 보는 최근 작업 수 — 예전 `list_jobs(limit=8)` 그대로다(활성 작업은 수와 무관하게
 다 본다)."""
 STATUS_MEMO_MAX_AGE_SECONDS = 5.0
-"""1초 상태 틱의 기억(견적 문구·승인 단추·상태 줄·실사용 줄)의 최대 나이 — 외부 근거 없는 조정 대상
-(W-46b, D100 §7b). 열쇠(작업 상태·선택 상태 도장·기억의 견적·알림·단계)가 같아도 이만큼 지나면
+"""1초 상태 틱의 기억(승인 단추·상태 줄·실사용 줄)의 최대 나이 — 외부 근거 없는 조정 대상
+(W-46b, D100 §7b). 열쇠(작업 상태·선택 상태 도장·기억의 셈·알림·단계)가 같아도 이만큼 지나면
 다시 짓는다 — 열쇠가 모르는 칸(모델 설정 등)이 바뀌어도 화면이 그보다 오래 옛 글을 보이지 않는다."""
 RENDER_EXPORT_STARTED_TEXT = (
-    "추천 구간만 이어붙인 초안을 만듭니다 — 끝나면 견적 칸 아래에 결과 카드가 뜹니다."
+    "추천 구간만 이어붙인 초안을 만듭니다 — 끝나면 승인 칸 아래에 결과 카드가 뜹니다."
 )
 RENDER_EXPORT_ATTACHED_TEXT = "이미 초안을 만드는 중입니다 — 끝나면 결과 카드가 뜹니다."
 RENDER_EXPORT_OPEN_LABEL = "초안 폴더 열기"
@@ -770,7 +770,6 @@ GEMINI_PAID_KEY_NOTE = (
 products」로 적는다."""
 DEFAULT_MODEL_MARK = " (기본)"
 """「영상 분석 모델」 칸에서 새 작업공간의 기본 모델(D87 — Gemini 3.8 Flash)에만 붙는 표시."""
-CENT = Decimal("0.01")
 
 
 @dataclass(frozen=True)
@@ -845,30 +844,6 @@ def _coverage_count(snapshot: raw_service.SegmentPlanSnapshot, source_order: int
         if proof.source_order == source_order:
             return proof.segment_count
     return -1
-
-
-@dataclass(frozen=True)
-class _AsrApprovalRecord:
-    """1단계 브라우저 승인 기록 — 사람이 본 견적 표를 서버가 그대로 간직한다.
-
-    브라우저가 보낸 값은 쓰지 않는다(gr.State은 클라이언트 소유다). 견적을
-    그린 순간 서버가 잰 측정값과 지문을 여기 남기고, 시작할 때 다시 잰 값과
-    같은지 비교한다 — 다르면 승인은 낡았고 0송신으로 거부된다.
-    """
-
-    signature: str
-    estimates: tuple[raw_service.AnalysisEstimate, ...]
-    digest: str
-
-
-@dataclass(frozen=True)
-class _SemanticApprovalRecord:
-    """2단계 브라우저 승인 기록 — 1단계 실측 지문 표를 리비전에 묶어 남긴다."""
-
-    signature: str
-    revision_id: str
-    estimates: tuple[raw_service.AnalysisSemanticEstimate, ...]
-    digest: str
 
 
 BASE_CSS = """
@@ -1171,49 +1146,49 @@ def _transcribe_only(quote: Any) -> bool:
     return _quote_mode(quote) == raw_service.SELECTION_MODE_TRANSCRIBE
 
 
-def _refill_summary(quote: Any) -> str:
+def _refill_summary(scope: Any) -> str:
     """요약 한 줄 — 건너뛴 곳과 실패 구간 안을 나눈다(1단계 기록이 없으면 나누지 않는다).
 
-    이미 다시 물어 넣은 조각 안에 남은 말소리는 따로 밝힌다 — 견적은 그 말소리를 세지 않는다."""
-    speech, failed = quote.speech_seconds, quote.failed_seconds
-    head = f"자막 없는 말소리 {float(speech):.1f}초(빈칸 {len(quote.spans)}곳)"
+    이미 다시 물어 넣은 조각 안에 남은 말소리는 따로 밝힌다 — 이번 범위는 그것을 묻지 않는다."""
+    speech, failed = scope.speech_seconds, scope.failed_seconds
+    head = f"자막 없는 말소리 {float(speech):.1f}초(빈칸 {len(scope.spans)}곳)"
     split = ""
-    if quote.failures_known:
+    if scope.failures_known:
         split = (
             f" — 전사가 건너뛴 곳 {float(speech - failed):.1f}초 · 전사가 실패한 구간 안"
             f" {float(failed):.1f}초"
         )
-    asked = speech - quote.asking_speech_seconds
-    tail = f" · 그중 이미 다시 물은 구간 안 {float(asked):.1f}초" if quote.asked and asked else ""
-    unknown = "" if quote.failures_known else f" {REFILL_SUMMARY_UNRECORDED}"
+    asked = speech - scope.asking_speech_seconds
+    tail = f" · 그중 이미 다시 물은 구간 안 {float(asked):.1f}초" if scope.asked and asked else ""
+    unknown = "" if scope.failures_known else f" {REFILL_SUMMARY_UNRECORDED}"
     return f"{head}{split}{tail}입니다.{unknown}"
 
 
-def _refill_spans(quote: Any) -> dict[str, object]:
+def _refill_spans(scope: Any) -> dict[str, object]:
     """빈칸 칸의 요약 한 줄과 단추로 보일 빈칸(공통 시계)."""
-    summary = _refill_summary(quote)
+    summary = _refill_summary(scope)
     shown = [
         {
-            "start": str(quote.at(span.start)),
-            "end": str(quote.at(span.end)),
+            "start": str(scope.at(span.start)),
+            "end": str(scope.at(span.end)),
             "failed": bool(span.failed_speech),
         }
-        for span in quote.spans[:REFILL_SHOWN_SPANS]
+        for span in scope.spans[:REFILL_SHOWN_SPANS]
     ]
-    return {"summary": summary, "spans": shown, "more": max(0, len(quote.spans) - len(shown))}
+    return {"summary": summary, "spans": shown, "more": max(0, len(scope.spans) - len(shown))}
 
 
 def _refill_notes(
-    quote: Any,
+    scope: Any,
     transcript: Mapping[str, Any],
     sync_view: Mapping[str, Any] | None,
     cross_check_on: bool,
 ) -> list[str]:
     """순서 경고에 더하는 이 영상의 사정 — 실패 구간·기록 없음·빨강 시각·교차 확인 전(D59 순서)."""
     notes: list[str] = []
-    if any(span.failed_speech for span in quote.spans):
+    if any(span.failed_speech for span in scope.spans):
         notes.append(REFILL_NOTE_FAILED)
-    if not quote.failures_known:
+    if not scope.failures_known:
         notes.append(REFILL_NOTE_UNRECORDED)
     if sync_view is not None and sync_view.get("level") == "red":
         notes.append(REFILL_NOTE_RED)
@@ -1418,10 +1393,10 @@ def _glossary_now(glossary: Any) -> str:
 
 
 def _glossary_saved(glossary: Any) -> str:
-    """저장한 뒤 한 줄 — 다음 견적부터(두 범위 모두) 새 용어집으로 묻는다(금액·모델 이름 없음)."""
+    """저장한 뒤 한 줄 — 다음 승인부터(두 범위 모두) 새 용어집으로 묻는다(금액·모델 이름 없음)."""
     count = len(glossary.terms)
     head = f"용어집을 저장했습니다 — 용어 {count}개." if count else "용어집을 비웠습니다."
-    return f"{head} 다음 견적부터 다른 귀에게 이 용어집으로 묻습니다."
+    return f"{head} 다음 승인부터 다른 귀에게 이 용어집으로 묻습니다."
 
 
 GLOSSARY_MOVED_SHOWN_TERMS = 5
@@ -1477,49 +1452,6 @@ def _approval_ready_copy(count: int, label: str | None) -> str:
     )
 
 
-def _semantic_quote_terms(model: str | None, estimates: Sequence[Any]) -> tuple[str, str]:
-    """견적 문구의 (모델 이름, 비용 상한 꼬리) — Luna는 W-14 이전 문구 그대로다(D54).
-
-    Claude·Gemini 상한은 공식 단가 스냅샷의 보수적 합계를 센트 단위로 올려 말한다 — 청구서가
-    아니다. 상한이 빠진 견적이 하나라도 있으면(Gemini 단가가 그날 유효하지 않다, D84) 합계를 말하지
-    않고 가격 미정이라 말한다 — 「$0.00」은 0원 계산이다.
-    """
-    if model is None or not raw_service.official_price_model(model):
-        return "Luna", ""
-    label = raw_service.analysis_model_label(model)
-    provider = _provider_word(model)
-    if any(e.ceiling_usd is None for e in estimates):
-        return (
-            label,
-            f" · {provider} 가격 미정(공식 단가 유효 기간 밖) — 이 견적은 승인할 수 없습니다",
-        )
-    ceilings = [Decimal(e.ceiling_usd) for e in estimates]
-    total = sum(ceilings, Decimal(0)).quantize(CENT, rounding=ROUND_CEILING)
-    return label, f" · {provider} 비용 상한 ${total} (보수적)"
-
-
-def _provider_word(model: str) -> str:
-    """공급자의 화면 이름 — 견적 꼬리에만 쓴다."""
-    google = raw_service.analysis_provider(model) == raw_service.ANALYSIS_PROVIDER_GOOGLE
-    return "Gemini" if google else "Claude"
-
-
-def _context_quote_text(quote: Any) -> str:
-    """맥락 평가 견적 한 줄 — 분량 · 모델 · 공식 단가 상한, 줄인 재료, 이미 평가함·가격 미정."""
-    label = raw_service.analysis_model_label(quote.model)
-    head = (
-        f"원본 {quote.sources}개 · 구간 {quote.spans}개 · 입력 약"
-        f" {quote.input_tokens:,}토큰(보수적) · 출력 한도 {quote.output_tokens:,}토큰"
-    )
-    if quote.cached:
-        return f"{head}. 같은 입력으로 이미 평가했습니다 — 다시 부르지 않습니다."
-    if quote.usd is None:
-        return f"{head}. {label} 공식 단가가 재확인 기한을 지나 **가격 미정** — 승인할 수 없습니다."
-    trimmed = quote.dropped_lines + quote.dropped_windows + quote.clipped_texts
-    note = f" 예산을 넘어 줄이거나 자른 재료 {trimmed}건." if trimmed else ""
-    return f"{head} · {label} 공식 단가로 최대 ${quote.usd}.{note}"
-
-
 def _engine_label_for_key(key: str) -> str:
     return str(raw_service.timing_engine_facts(key, date.today()).label)
 
@@ -1557,7 +1489,7 @@ def _claude_price_suffix(model: str) -> str:
 
 
 def _price_status_note(model: str) -> str:
-    """화면의 단가 상태 — 달러·토큰 용어 없이 말한다(D57 결정 7, D58). 금액은 견적만 말한다.
+    """화면의 단가 상태 — 달러·토큰 용어 없이 말한다(D57 결정 7, D58). 금액은 말하지 않는다(D110).
 
     Gemini 단가는 공식 표가 알린 인상 전 마지막 날까지만 쓴다(D84) — 그 뒤에는 가격 미정이다.
     """
@@ -1570,7 +1502,7 @@ def _price_status_note(model: str) -> str:
                 f"공식 단가가 {profile.price_valid_through.isoformat()}까지였습니다 —"
                 " **가격 미정**, 단가를 확인해 고칠 때까지 분석을 승인할 수 없습니다"
             )
-    return "공식 단가 확인됨 — 금액은 견적에서 보여 드립니다"
+    return "공식 단가 확인됨"
 
 
 def _analysis_price_status(model: str) -> str:
@@ -1578,35 +1510,6 @@ def _analysis_price_status(model: str) -> str:
     if not raw_service.official_price_model(model):
         return f"Luna {_price_status_note(model)}"
     return f"{raw_service.analysis_model_label(model)} · {_price_status_note(model)}"
-
-
-def _cost_note(model: str, luna_text: str) -> str:
-    """견적 금액 문구 — Luna는 주어진 W-14 이전 문구 그대로, Claude·Gemini는 공식 단가 한 줄.
-
-    견적·승인 자리의 문구라 D54 그대로다 — 설정·상태 줄은 `_analysis_price_status`를 쓴다.
-    """
-    if not raw_service.official_price_model(model):
-        return luna_text
-    return _quote_unit_price_text(model)
-
-
-def _quote_unit_price_text(model: str) -> str:
-    """견적 안의 공식 단가 한 줄(D54·D87) — 견적 문구 밖에서는 쓰지 않는다(D57 결정 7)."""
-    if raw_service.analysis_provider(model) == raw_service.ANALYSIS_PROVIDER_GOOGLE:
-        gemini = raw_service.gemini_profile(model)
-        return (
-            f"{gemini.label} 공식 단가({gemini.pricing_checked_at.isoformat()} 확인,"
-            f" {gemini.price_valid_through.isoformat()}까지) 입력 ${gemini.input_per_mtok}"
-            f" · 출력(생각 포함) ${gemini.output_per_mtok} / 100만 토큰 · 창마다 클립(그림 + 소리)"
-            f" + 프레임 · 출력 한도 {gemini.max_output_tokens} 토큰 — 견적은 창마다 보수적 상한이다"
-        )
-    profile = raw_service.claude_profile(model)
-    return (
-        f"{profile.label} 공식 단가({profile.pricing_checked_at.isoformat()}) 입력"
-        f" ${profile.input_per_mtok} · 출력 ${profile.output_per_mtok} / 100만 토큰"
-        f" · effort {profile.effort} · 출력 한도 {profile.max_output_tokens} 토큰"
-        " — 견적은 창마다 보수적 상한이다"
-    )
 
 
 def _finalcut_sent_text(sent: dict[str, Any]) -> str:
@@ -1855,8 +1758,6 @@ class RawWorkspaceUi:
         self._live_transport = live
         self._capture_startup_credentials()
         # 브라우저 승인 기록 — 작업공간 서명에 묶여 산다(작업공간을 바꾸면 지운다).
-        self._asr_approval_record: _AsrApprovalRecord | None = None
-        self._semantic_approval_record: _SemanticApprovalRecord | None = None
         # 검토 화면 상태 — 마지막으로 그린 헤드 리비전과 기본 계획(편집·내보내기는
         # 이 신원에 묶인다). 시계·조각 범위는 그 리비전의 것을 그대로 둔다.
         self._review_revision_id: str | None = None
@@ -1884,7 +1785,6 @@ class RawWorkspaceUi:
         # 마지막 보내기 결과와 그것을 알림으로 알렸는가 — 작업공간 서명마다(`_send_memory`).
         self._finalcut_sent, self._finalcut_announced = self._send_memory()
         self._project_names: dict[Path, str] = {}  # 머리줄 이름 캐시(`_project_name`)
-        self._capcut_quote_phase: dict[str, str] = {}
         # 그리기 열쇠의 세대 — 올리면 모든 탭의 다음 틱이 다시 그린다. 탭마다 마지막으로 그린
         # 열쇠는 세션의 `gr.State`가 쥔다(D64): 서버 하나의 값이면 먼저 본 탭이 열쇠를 먹어 다른
         # 탭이 낡았다.
@@ -2123,8 +2023,6 @@ class RawWorkspaceUi:
             self._fcp_scan = None
             self._fcp_signature = None
             self._fcp_error = None
-            self._asr_approval_record = None
-            self._semantic_approval_record = None
             self._clear_screen_state()
 
     def _remember(self, root: Path | None) -> None:
@@ -2137,8 +2035,6 @@ class RawWorkspaceUi:
             self._fcp_scan = None
             self._fcp_signature = None
             self._fcp_error = None
-            self._asr_approval_record = None
-            self._semantic_approval_record = None
             self._clear_screen_state()
         if root is not None:
             self._write_state(root)
@@ -3304,9 +3200,7 @@ class RawWorkspaceUi:
             reason = str(error)
             if reason not in self._glossary_warned:
                 self._glossary_warned.add(reason)
-                log.warn(
-                    f"용어집을 읽지 못했습니다 — {reason} (칸은 비워 두고 견적은 그대로 잽니다)"
-                )
+                log.warn(f"용어집을 읽지 못했습니다 — {reason} (칸은 비워 둡니다)")
             return None, reason
 
     def _glossary_sha(self, root: Path) -> str:
@@ -3694,7 +3588,7 @@ class RawWorkspaceUi:
     def _quick_status_text(self) -> str:
         state = self._quick
         if not state:
-            return "영상을 고르면 미리보기를 준비합니다. 분석은 견적을 확인한 뒤 승인하세요."
+            return "영상을 고르면 미리보기를 준비합니다. 분석은 승인해야 시작합니다."
         stage = _stage_label(self._shown_stage(state.get("root"), state, "영상 준비"))
         if state.get("connection_required"):
             # 키는 화면에서 받지 않는다(D102) — 시작 환경에서만 찍으므로 앱을 다시 띄워야 한다.
@@ -3897,23 +3791,15 @@ class RawWorkspaceUi:
             self.raw.start_cleanup(root)
             return self._capcut_result(root, "자동 정리 중 · 컷 판정과 미리보기를 준비합니다.")
         phase = "semantic" if summary and summary.revision.status == "awaiting_semantic" else "asr"
-        token = str(signature)
-        if not approve or self._capcut_quote_phase.get(token) != phase:
-            note = (
-                self.analysis_semantic_estimate_view(signature)
-                if phase == "semantic"
-                else self.analysis_live_estimate_view(signature, None)
-            )
-            self._capcut_quote_phase[token] = phase
+        if not approve:
             return self._capcut_result(
-                root, note + "\n\n비용·범위를 확인한 뒤 승인하고 자동 정리를 누르세요."
+                root, "유료 분석입니다 — 승인 확인란을 체크한 뒤 자동 정리를 누르세요."
             )
         if phase == "asr":
             note, _ = self.analysis_live_asr_view(signature, None, True)
         else:
             assert summary is not None
             note = self._resume_semantic_then_cleanup(root, signature, summary)
-        self._capcut_quote_phase.pop(token, None)
         return self._capcut_result(root, note)
 
     def _current_analysis(self, root: Path) -> Any:
@@ -3987,10 +3873,8 @@ class RawWorkspaceUi:
         ]
         summary = self.raw.analysis_overview(root)
         if summary and summary.revision.status == "awaiting_semantic":
-            lines.insert(
-                0, "전사가 끝났습니다. 다음 단계(영상 분석)는 견적을 확인한 뒤 승인하세요."
-            )
-        return "\n\n".join(lines) or "영상을 고르면 분석 범위와 견적이 표시됩니다."
+            lines.insert(0, "전사가 끝났습니다. 다음 단계(영상 분석)는 승인해야 시작합니다.")
+        return "\n\n".join(lines) or "영상을 고르면 분석 상태가 표시됩니다."
 
     def _task_views(self, root: Path) -> dict[str, dict]:
         self._load_quick_tasks(root)
@@ -4638,14 +4522,11 @@ class RawWorkspaceUi:
             with gr.Column(elem_id="vl-quote", min_width=0):
                 self._approval_mode_radio = self._approval_mode_cell()
                 self._cross_check_box = self._cross_check_cell()
-                # 영어 자막(W-53, D105) — 칸과 그 견적 한 줄. 내보내기는 보이는 이 문구에 묶인다.
+                # 영어 자막(W-53, D105) — 칸 하나. 내보내기 누름이 승인이다(D110 — 견적 없이).
                 self._english_box = gr.Checkbox(
                     value=self.english_subtitles_value,
                     label=ENGLISH_SUBTITLES_LABEL,
                     elem_id=ENGLISH_SUBTITLES_ID,
-                )
-                self._english_quote_md = gr.Markdown(
-                    self.english_quote_markdown, elem_id=ENGLISH_QUOTE_ID, latex_delimiters=[]
                 )
                 # 초안 결과 카드(W-46a, D100 §7a) — 내보낸 적이 없으면 빈 글이다(자리 없음).
                 self._export_card_html = gr.HTML(
@@ -4812,10 +4693,9 @@ class RawWorkspaceUi:
         status = self._capcut_status
         shown = gr.State(None)
         card = [self._export_card_html, self._export_open_button, shown]
-        english = self._english_quote_md
         started = self._render_export_button.click(
             self.render_export_view,
-            [self._signature_state, english],
+            self._signature_state,
             status,
             concurrency_limit=1,
             js=ui_facade.EXPORT_WAKE_JS,
@@ -4841,94 +4721,46 @@ class RawWorkspaceUi:
         )
 
     def _wire_english_subtitles(self, status: Any) -> None:
-        """「영어 자막도 만들기」(D105) — 칸을 고르면 저장·견적, 내보내기를 누르면 지금 견적으로
-        다시 그리고(실패해도 — 다음 누름은 새 문구에 묶인다), 내보내기 작업이 바뀐 틱에서 다시
-        잰다."""
-        assert self._draw_timer is not None
-        english = self._english_quote_md
-        self._render_export_button.click(
-            self.english_quote_markdown, None, english, queue=False, show_progress="hidden"
-        )
+        """「영어 자막도 만들기」(D105) — 칸을 고르면 저장하고 그 뜻을 활동 칸에 말한다(무료)."""
         toggled = self._english_box.input(
-            self.english_subtitles_view, [self._signature_state, self._english_box], english
+            self.english_subtitles_view, [self._signature_state, self._english_box], status
         )
         self._report_activity(toggled, status)
-        quoted = gr.State(None)
-        self._draw_timer.tick(
-            self.english_quote_tick,
-            [self._signature_state, quoted],
-            [english, quoted],
-            queue=False,
-            show_progress="hidden",
-        )
 
-    def render_export_view(self, signature: str | None, english_shown: str | None = None) -> str:
+    def render_export_view(self, signature: str | None) -> str:
         """「추천만 이어붙여 내보내기」 — 초안 렌더 작업을 건다(무료 로컬). 끝은 결과 카드가 보인다.
 
         확인하지 않은 비추천이 있어도 막지 않는다 — 빠진 구간은 보고서와 카드 경고가 말한다
         (사용자 결정 2026-10-27, D100). 이미 만드는 중이면 그 작업에 다시 붙는다. 영어 자막을
-        켰고 옮길 것이 있으면 이 누름이 **화면에 보인 견적 문구**의 승인이다(D105 — 서버가 문구를
-        다시 재어 대조한다, 다르면 보내지 않는다).
+        켰고 옮길 것이 있으면 이 누름이 승인이다(D105 · D110 — 견적 없이 누른 순간 옮기지 않은
+        원본을 옮긴다).
         """
         closed = self._library_first_reply()
         if closed is not None:
             return closed
         root = self._require_current_selection(signature)
         try:
-            digest, client = self._english_approval(root, english_shown)
-            handle = self.raw.start_render_export(root, digest, client)
+            handle = self.raw.start_render_export(root, self._english_client(root))
         except (raw_service.RawWorkspaceError, raw_service.AnalysisApprovalError) as error:
             raise gr.Error(str(error)) from error
         return RENDER_EXPORT_ATTACHED_TEXT if handle.reattached else RENDER_EXPORT_STARTED_TEXT
 
-    def _english_approval(self, root: Path, shown: str | None) -> tuple[str | None, object | None]:
-        """(견적 digest, Gemini 클라이언트) — 살 것이 없으면 둘 다 None. 보인 문구가 지금 견적과
-        다르면 보내지 않는다."""
-        if not self.raw.english_subtitles(root):
-            return None, None
-        quote = self.raw.english_quote(root)
-        if not quote.needs_approval:
-            return None, None
-        if ui_facade.unliteral_markdown(shown or "").strip() != quote.text:
-            raise gr.Error("영어 자막 견적이 바뀌었습니다 — 새 견적을 확인한 뒤 다시 누르세요.")
-        client = self._live_transport_for_action().semantic_client(quote.model)
-        return quote.digest, client
+    def _english_client(self, root: Path) -> object | None:
+        """옮길 것이 있으면 Gemini 클라이언트, 없으면 None(무료 — 저장된 번역을 쓴다)."""
+        if not self.raw.english_subtitles(root) or not self.raw.english_missing(root):
+            return None
+        return self._live_transport_for_action().semantic_client(self.raw.english_model())
 
     def english_subtitles_value(self) -> bool:
         """칸의 처음 값 — 화면을 열 때마다 지금 작업공간의 값(없으면 끔)."""
         root = self._snapshot_root()
         return bool(self.raw.english_subtitles(root)) if root else False
 
-    def english_quote_markdown(self, root: Path | None = None) -> str:
-        """영어 자막 견적 한 줄 — 꺼져 있거나 작업공간이 없으면 빈 줄(무료, 부르지 않는다)."""
-        root = root if root is not None else self._snapshot_root()
-        if root is None or not self.raw.english_subtitles(root):
-            return ""
-        try:
-            text = self.raw.english_quote(root).text
-        except raw_service.RawWorkspaceError as error:
-            text = f"영어 자막 견적을 재지 못했습니다 — {error}"
-        return ui_facade.literal_markdown(text)
-
-    def english_quote_tick(self, signature: str | None, shown: tuple | None) -> tuple:
-        """견적 한 줄을 내보내기 작업 (아이디, 상태)가 바뀐 틱에서만 다시 잰다 — 산 뒤에는
-        「무료」."""
-        root = self._snapshot_root()
-        if root is None:
-            return (gr.skip(), gr.skip()) if shown is None else ("", None)
-        if not signature or signature != self._signature_for(root):
-            return gr.skip(), gr.skip()
-        latest = self.raw.latest_job(root, raw_service.RENDER_EXPORT_JOB_KIND)
-        key = (signature, latest.job_id if latest else None, latest.status if latest else None)
-        if key == shown:
-            return gr.skip(), gr.skip()
-        return self.english_quote_markdown(root), key
-
     def english_subtitles_view(self, signature: str | None, on: bool | None) -> str:
-        """「영어 자막도 만들기」를 저장하고(무료) 견적 한 줄을 다시 그린다."""
+        """「영어 자막도 만들기」를 저장하고(무료) 그 뜻을 말한다."""
         root = self._require_current_selection(signature)
         self.raw.set_english_subtitles(root, bool(on))
-        return self.english_quote_markdown(root)
+        return ENGLISH_ON_TEXT if on else ENGLISH_OFF_TEXT
 
     def render_export_card_tick(self, signature: str | None, shown: tuple | None) -> tuple:
         """결과 카드 — (카드 글, 「초안 폴더 열기」, 새 열쇠). 열쇠가 같으면 보내지 않는다.
@@ -5273,25 +5105,13 @@ class RawWorkspaceUi:
         )
 
     def _context_review_panel(self) -> None:
-        """「맥락 평가 (Gemini)」(D99) — 상태 줄 · 무료 견적 · 그 견적에 묶인 승인(유료 한 번)."""
+        """「맥락 평가 (Gemini)」(D99) — 상태 줄 · 결과 한 줄 · 실행 단추(유료 한 번, D110)."""
         with gr.Accordion(CONTEXT_PANEL_LABEL, open=False, elem_id=CONTEXT_PANEL_ID):
             status = gr.Markdown(self.context_review_status, elem_id=f"{CONTEXT_PANEL_ID}-status")
-            quote = gr.Markdown("", elem_id=f"{CONTEXT_PANEL_ID}-quote")
-            digest = gr.State(None)
-            with gr.Row():
-                ask = gr.Button(CONTEXT_QUOTE_LABEL, elem_id=f"{CONTEXT_PANEL_ID}-ask")
-                run = gr.Button(
-                    CONTEXT_RUN_LABEL,
-                    variant="primary",
-                    interactive=False,
-                    elem_id=f"{CONTEXT_PANEL_ID}-run",
-                )
-        ask.click(self.context_quote_view, self._signature_state, [quote, digest, run])
+            result = gr.Markdown("", elem_id=f"{CONTEXT_PANEL_ID}-result")
+            run = gr.Button(CONTEXT_RUN_LABEL, variant="primary", elem_id=f"{CONTEXT_PANEL_ID}-run")
         run.click(
-            self.context_run_view,
-            [self._signature_state, digest],
-            [status, quote, digest, run],
-            concurrency_limit=1,
+            self.context_run_view, self._signature_state, [status, result], concurrency_limit=1
         )
 
     def context_review_status(self, root: Path | None = None) -> str:
@@ -5319,32 +5139,18 @@ class RawWorkspaceUi:
             line += f"\n\n지난 시도 실패 — {state['failure']}"
         return line
 
-    def context_quote_view(self, signature: str | None) -> tuple[str, str | None, Any]:
-        """무료 견적 — 금액이 있고 아직 평가하지 않은 입력이면 승인 단추를 연다."""
+    def context_run_view(self, signature: str | None) -> tuple[str, str]:
+        """누르면 한 번 보낸다(유료) — 같은 입력의 평가가 있으면 부르지 않는다. 키가 없으면 보내기
+        전에 닫는다."""
         root = self._require_current_selection(signature)
         try:
-            quote = self.raw.context_review_quote(root)
-        except raw_service.RawWorkspaceError as error:
-            raise gr.Error(str(error)) from error
-        text = _context_quote_text(quote)
-        ready = quote.usd is not None and not quote.cached
-        return text, (quote.digest if ready else None), gr.Button(interactive=ready)
-
-    def context_run_view(
-        self, signature: str | None, digest: str | None
-    ) -> tuple[str, str, None, Any]:
-        """승인 — 화면이 본 견적(digest)으로 한 번 보낸다(유료). 키가 없으면 보내기 전에 닫는다."""
-        root = self._require_current_selection(signature)
-        if not digest:
-            raise gr.Error("먼저 견적을 보세요 — 승인은 화면에 보인 견적에만 묶입니다.")
-        try:
-            model = self.raw.context_review_quote(root).model
+            model = self.raw.context_review_model(root)
             client = self._live_transport_for_action().semantic_client(model)
-            document = self.raw.run_context_review(root, digest, client)
+            document = self.raw.run_context_review(root, client)
         except (raw_service.RawWorkspaceError, raw_service.AnalysisApprovalError) as error:
             raise gr.Error(str(error)) from error
         done = CONTEXT_DONE_TEXT.format(judged=len(document["verdicts"]), spans=document["spans"])
-        return self.context_review_status(root), done, None, gr.Button(interactive=False)
+        return self.context_review_status(root), done
 
     def workspace_mode_value(self) -> str:
         """칸의 처음 값 — 저장된 고른 값(없으면 자동). 화면을 열 때마다 다시 잰다."""
@@ -5479,31 +5285,27 @@ class RawWorkspaceUi:
             )
         self._analysis_settings_md = gr.Markdown(self._analysis_settings_markdown())
         with gr.Row():
-            estimate_button = gr.Button("분석 견적(로컬)", scale=2)
             analysis_start = gr.Button("오프라인 재생 분석 시작", variant="primary", scale=2)
             analysis_refresh = gr.Button("분석 상태 새로고침", scale=2)
             analysis_plan = gr.Button("분석 결과로 분할 계획", scale=2)
-        # ── 실제 호출(두 단계 승인) — 견적 표 + 확인란으로 승인한다 ──
+        # ── 실제 호출(두 단계 승인) — 확인란으로 승인한다(견적 없이, D110) ──
         gr.Markdown(
-            "> **실제 호출은 두 단계다.** 1단계 견적 → 전사 승인(확인란) →"
-            " 전사·프레임 기록 → **의미 승인 대기** → 2단계 견적 → Luna 승인"
-            "(확인란) → 완료. 승인은 화면이 잰 견적 표를 서버가 간직하는 것으로"
-            " 남는다 — 키는 브라우저 서버를 띄운 환경에서만 오고 화면은"
+            "> **실제 호출은 두 단계다.** 전사 승인(확인란) → 전사·프레임 기록 →"
+            " **의미 승인 대기** → 의미 분석 승인(확인란) → 완료. 승인은 누른 순간"
+            " 서버가 잰 범위로 만든다 — 키는 브라우저 서버를 띄운 환경에서만 오고 화면은"
             " 자격증명을 찾지 않는다(§14.3)."
         )
         with gr.Row():
-            live_estimate_button = gr.Button("실제 호출 1단계 견적(승인용)", scale=2)
             asr_confirm_box = gr.Checkbox(
-                label="위 1단계 견적 그대로 전사를 승인한다",
+                label="1단계(전사) 유료 호출을 승인한다",
                 value=False,
                 interactive=True,
                 scale=3,
             )
             live_asr_button = gr.Button("실제 호출 1단계(전사) 시작", variant="primary", scale=2)
         with gr.Row():
-            semantic_estimate_button = gr.Button("2단계 견적(로컬·전사 후 실측)", scale=2)
             semantic_confirm_box = gr.Checkbox(
-                label="위 2단계 견적의 실측 지문으로 Luna 호출을 승인한다",
+                label="2단계(의미) 유료 호출을 승인한다",
                 value=False,
                 interactive=True,
                 scale=3,
@@ -5531,11 +5333,6 @@ class RawWorkspaceUi:
         self._analysis_md = gr.Markdown(
             self._analysis_state_markdown(self._snapshot_root()), elem_id="analysis-state"
         )
-        estimate_button.click(
-            self.analysis_estimate_view,
-            [self._signature_state, self._analysis_sources_group],
-            self._analysis_md,
-        )
         analysis_start.click(
             self.analysis_start_view,
             [self._signature_state, self._analysis_sources_group],
@@ -5551,20 +5348,10 @@ class RawWorkspaceUi:
             [self._signature_state, self._analysis_jobs_dd],
             self._analysis_md,
         )
-        live_estimate_button.click(
-            self.analysis_live_estimate_view,
-            [self._signature_state, self._analysis_sources_group],
-            self._analysis_md,
-        )
         live_asr_button.click(
             self.analysis_live_asr_view,
             [self._signature_state, self._analysis_sources_group, asr_confirm_box],
             [self._analysis_md, self._analysis_jobs_dd],
-        )
-        semantic_estimate_button.click(
-            self.analysis_semantic_estimate_view,
-            self._signature_state,
-            self._analysis_md,
         )
         semantic_resume_button.click(
             self.analysis_semantic_resume_view,
@@ -6057,7 +5844,6 @@ class RawWorkspaceUi:
             if signature:
                 self._finalcut_sent.pop(signature, None)
                 self._finalcut_announced.pop(signature, None)
-                self._capcut_quote_phase.pop(signature, None)
             self._capcut_render_generation += 1
         self._forget_state()
         self.raw.close_workspace(root)
@@ -7795,9 +7581,10 @@ class RawWorkspaceUi:
         transcript: Mapping[str, Any],
         sync_view: Mapping[str, Any] | None,
     ) -> dict[str, object]:
-        """「말소리 빈칸 재전사」 칸의 값(D59 19f) — 상태·빈칸·견적·순서 경고·지난 결과(무료, 표시).
+        """「말소리 빈칸 재전사」 칸의 값(D59 19f) — 상태·빈칸·순서 경고·지난 결과(무료, 표시).
 
-        금액·모델 이름은 견적 문구(`quote`) 안에만 있다(D57). 승인은 그 문구와 digest를 보낸다(D54).
+        견적(분량·금액 문구)은 없다(D110). 승인 단추는 지금 범위의 digest를 싣는다 — 서버가 누른
+        순간 다시 재어 대조한다(빈칸이 바뀌었으면 시작하지 않는다).
         """
         view: dict[str, object] = {
             "explanation": REFILL_EXPLANATION,
@@ -7807,38 +7594,33 @@ class RawWorkspaceUi:
         }
         if self.raw.refill_running(root, source_id):
             return {**view, "state": "running", "reason": REFILL_RUNNING_TEXT}
-        quote = self.raw.refill_quote(root, source_id)
-        if isinstance(quote, str):
-            return {**view, "state": "blocked", "reason": quote}
-        notes = _refill_notes(quote, transcript, sync_view, self.raw.cross_check_enabled(root))
-        view.update(_refill_spans(quote), notes=notes)
-        if not quote.spans:
+        scope = self.raw.refill_scope(root, source_id)
+        if isinstance(scope, str):
+            return {**view, "state": "blocked", "reason": scope}
+        notes = _refill_notes(scope, transcript, sync_view, self.raw.cross_check_enabled(root))
+        view.update(_refill_spans(scope), notes=notes)
+        if not scope.spans:
             return {**view, "state": "none", "reason": REFILL_NONE_TEXT}
-        if not quote.pieces:
+        if not scope.pieces:
             return {**view, "state": "done", "reason": REFILL_DONE_TEXT}
-        return {**view, "state": "ready", "quote": quote.text, "digest": quote.digest}
+        return {**view, "state": "ready", "digest": scope.digest}
 
     def _visual_refill(self, root: Path, payload: Mapping[str, object], echo: str) -> dict:
-        """「빈칸 재전사 승인」 — 보이는 견적 문구·digest가 지금 견적과 같을 때만 작업을 건다(D54).
+        """「빈칸 재전사 승인」 — 단추가 실은 digest가 지금 범위와 같을 때만 작업을 건다(D110).
 
-        다르면(다른 탭·용어집·빈칸이 바뀌었다) 아무것도 시작하지 않고 새 견적을 그려 보인다(0송신).
-        작업 본문(`refill_source`)이 유료 호출 전에 견적을 한 번 더 재어 맞춘다.
+        다르면(다른 탭·용어집·빈칸이 바뀌었다) 아무것도 시작하지 않고 지금 빈칸을 보인다(0송신).
+        작업 본문(`refill_source`)이 유료 호출 전에 범위를 한 번 더 재어 맞춘다.
         """
         source_id = self._serve_str(payload, "sourceId")
         task = self._task_for(root, (source_id,))
         busy = task is not None and self._task_running(root, task)
         if busy or self.raw.refill_running(root, source_id):
             raise gr.Error(REFILL_BUSY_TEXT)
-        current = self.raw.refill_quote(root, source_id)
+        current = self.raw.refill_scope(root, source_id)
         if isinstance(current, str):
             raise gr.Error(current)
-        shown = " ".join(self._serve_str(payload, "quote").split())
-        if (
-            not current.pieces
-            or self._serve_str(payload, "digest") != current.digest
-            or shown != " ".join(current.text.split())
-        ):
-            return self._source_reply(root, source_id, echo, REFILL_UNSEEN_TEXT)
+        if not current.pieces or self._serve_str(payload, "digest") != current.digest:
+            return self._source_reply(root, source_id, echo, REFILL_CHANGED_TEXT)
         if self._startup_credentials is None and self._live_transport is None:
             raise gr.Error(REFILL_KEY_TEXT)
         transport = self._live_transport_for_action()
@@ -8533,9 +8315,8 @@ class RawWorkspaceUi:
             return f"분석 상태를 읽지 못했다: {error}"
         if summary is None:
             return (
-                "**의미 분석** 리비전이 없다 — **분석 견적(로컬)**을 본 뒤 **오프라인"
-                " 재생 분석 시작**을 누르면 시작된다. 견적은 로컬 조사만 하고 유료"
-                " 호출은 없다."
+                "**의미 분석** 리비전이 없다 — **오프라인 재생 분석 시작**을 누르면"
+                " 시작된다(유료 호출 없음)."
             )
         revision = summary.revision
         results = self._in_current_order(root, summary.results)
@@ -8544,10 +8325,9 @@ class RawWorkspaceUi:
             lines += [
                 "",
                 "**의미 승인 대기** — 1단계(전사)가 끝났고 Luna는 아직 한 번도 가지"
-                " 않았다. **2단계 견적(로컬·전사 후 실측)**으로 원본별 실측 지문·창·"
-                " 이미지 수를 보고, 사람이 만든 2단계 승인을 주입한 뒤 위의"
-                " 재개 대상에 1단계 작업을 골라 **실제 호출 2단계(의미) 재개**를"
-                " 누른다. 잘못된 승인은 전사도 Luna도 0송신으로 거부된다.",
+                " 않았다. 위의 재개 대상에 1단계 작업을 골라 확인란을 체크하고 **실제 호출"
+                " 2단계(의미) 재개**를 누른다. 1단계 기록의 실측 지문이 맞지 않으면 전사도"
+                " Luna도 0송신으로 거부된다.",
             ]
         if revision.error:
             lines += ["", f"**오류**: {revision.error}"]
@@ -8629,46 +8409,6 @@ class RawWorkspaceUi:
                 break
         return "\n".join([f"**{result.source_name} 요약(읽기 전용)**", *lines]) if lines else ""
 
-    def analysis_estimate_view(self, signature: str | None, selected: list[str] | None) -> str:
-        """분석 견적 이벤트 — 로컬 조사만으로 창·청크·이미지 수와 비용 상태를 보인다."""
-        root = self._require_current_selection(signature)
-        try:
-            estimates = self.raw.analysis_estimate(
-                root, asset_ids=self._selected_asset_ids(selected)
-            )
-        except raw_service.RawWorkspaceError as error:
-            raise gr.Error(str(error)) from error
-        lines = [
-            "**분석 견적(로컬 — 실제 호출 없음)**",
-            "",
-            "| 순번 | 원본 | 오디오 | 창 | 이미지(상한) | ASR 청크 | 오디오 분량(초) | Luna 요청 |",
-            "|---|---|---|---|---|---|---|---|",
-        ]
-        for position, item in self._in_current_order(root, estimates):
-            lines.append(
-                f"| {position} | {item.source_name} |"
-                f" {'있음' if item.has_audio else '없음'} | {item.window_count} |"
-                f" {item.frame_sample_count} | {item.asr_chunk_count} | {item.asr_seconds} |"
-                f" {item.luna_request_count} |"
-            )
-        first = estimates[0] if estimates else None
-        price = first.price_status if first else "unknown"
-        ceiling = first.user_ceiling_total if first else None
-        price_note = (
-            f"사용자 상한 합 {ceiling}"
-            if ceiling
-            else "Luna 단가 미확인 — 금액 추정을 만들지 않는다"
-        )
-        lines += [
-            "",
-            f"- 비용 상태: **{price}** — {price_note}(0원 계산 금지).",
-            "- 실제 호출은 이 견적을 본 사람의 승인 기록(원본별 승인·예산)과 환경"
-            " 설정이 함께 열려 있어야만 시작한다 — 브라우저에서는 만들 수 없다.",
-        ]
-        if first is not None and first.note:
-            lines.append(f"- {first.note}")
-        return "\n".join(lines)
-
     def analysis_start_view(
         self, signature: str | None, selected: list[str] | None
     ) -> tuple[str, gr.Dropdown]:
@@ -8741,147 +8481,30 @@ class RawWorkspaceUi:
             gemini=self._startup_gemini,
         )
 
-    # ── 생산 승인 공급자 — 서버가 간직한 견적 기록에서 주조한다 ──
-
-    def _require_asr_record(self, root: Path) -> _AsrApprovalRecord:
-        """1단계 승인 기록 — 없거나 다른 작업공간 것이면 0송신으로 닫는다."""
-        record = self._asr_approval_record
-        if record is None:
-            raise gr.Error(
-                "1단계 승인 기록이 없다 — 먼저 **실제 호출 1단계 견적(승인용)**을"
-                " 보고, 확인란을 체크한 뒤 시작하세요."
-            )
-        if self._signature_for(root) != record.signature:
-            raise gr.Error("승인 기록이 다른 작업공간의 것이다 — 새 견적을 보고 다시 승인받으세요.")
-        return record
+    # ── 생산 승인 공급자 — 사람이 확인란을 체크하고 누른 순간 잰 범위로 주조한다(D110) ──
 
     def _production_asr_approvals(
         self, root: Path, asset_ids: Sequence[str] | None
     ) -> dict[str, object]:
-        """브라우저가 만든 1단계 승인 — 승인 때 본 견적과 지금 견적이 같을 때만."""
-        record = self._require_asr_record(root)
-        approved = {item.asset_id for item in record.estimates}
-        requested = list(asset_ids) if asset_ids else sorted(approved)
-        unknown = [item for item in requested if item not in approved]
-        if unknown:
-            raise gr.Error(
-                f"승인하지 않은 원본이 있다: {', '.join(unknown[:3])} — 새 견적을"
-                " 보고 다시 승인받으세요."
-            )
-        fresh = self.raw.analysis_estimate(root, requested)
-        approved_subset = tuple(
-            item for item in record.estimates if item.asset_id in set(requested)
-        )
-        if raw_service.asr_estimate_digest(fresh) != raw_service.asr_estimate_digest(
-            approved_subset
-        ):
-            raise gr.Error(
-                "견적이 승인 때와 다르다(원본·설정·모델이 바뀌었다) — 새 견적을 보고"
-                " 다시 승인받으세요. 이 요청은 0송신으로 거부되었다."
-            )
+        """브라우저가 만든 1단계 승인 — 누른 순간의 원본을 완전 해시해 잰 범위 그대로(견적 없이)."""
+        requested = list(asset_ids) if asset_ids else None
         return dict(raw_service.mint_asr_approvals(self.raw, root, requested))
 
     def _production_luna_approvals(
         self, root: Path, revision_id: str, asset_ids: Sequence[str]
     ) -> dict[str, object]:
-        """브라우저가 만든 2단계 승인 — 실측 지문이 승인 때 그대로일 때만."""
-        record = self._semantic_approval_record
-        if record is None:
-            raise gr.Error(
-                "2단계 승인 기록이 없다 — 먼저 **2단계 견적(로컬·전사 후 실측)**을"
-                " 보고, 확인란을 체크한 뒤 재개하세요."
-            )
-        if self._signature_for(root) != record.signature:
-            raise gr.Error("승인 기록이 다른 작업공간의 것이다 — 새 견적을 보고 다시 승인받으세요.")
-        if revision_id != record.revision_id:
-            raise gr.Error(
-                "승인 기록이 다른 분석 리비전 것이다 — 새 견적을 보고 다시 승인받으세요."
-            )
-        approved = {item.asset_id for item in record.estimates}
-        requested = list(asset_ids) if asset_ids else sorted(approved)
-        unknown = [item for item in requested if item not in approved]
-        if unknown:
-            raise gr.Error(
-                f"승인하지 않은 원본이 있다: {', '.join(unknown[:3])} — 새 견적을"
-                " 보고 다시 승인받으세요."
-            )
-        fresh = self.raw.analysis_semantic_estimate(root, revision_id)
-        fresh_subset = tuple(item for item in fresh if item.asset_id in set(requested))
-        approved_subset = tuple(
-            item for item in record.estimates if item.asset_id in set(requested)
-        )
-        if raw_service.semantic_estimate_digest(
-            fresh_subset
-        ) != raw_service.semantic_estimate_digest(approved_subset):
-            raise gr.Error(
-                "2단계 실측 지문이 승인 때와 다르다 — 새 견적을 보고 다시 승인받으세요."
-                " 이 요청은 전사도 Luna도 0송신으로 거부되었다."
-            )
-        return dict(raw_service.mint_luna_approvals(self.raw, root, revision_id, requested))
-
-    def analysis_live_estimate_view(self, signature: str | None, selected: list[str] | None) -> str:
-        """실제 호출 1단계 견적(승인용) — 사람이 승인할 측정값을 서버가 잰다."""
-        root = self._require_current_selection(signature)
-        try:
-            estimates = self.raw.analysis_estimate(root, self._selected_asset_ids(selected))
-            workflow = self.raw.settings(root)
-            assets = {a.asset_id: a for a in self.raw.list_source_assets(root)}
-        except raw_service.RawWorkspaceError as error:
-            raise gr.Error(str(error)) from error
-        digest = raw_service.asr_estimate_digest(estimates)
-        self._asr_approval_record = _AsrApprovalRecord(
-            signature=self._signature_for(root) or "",
-            estimates=tuple(estimates),
-            digest=digest,
-        )
-        lines = self._asr_estimate_table(root, estimates, assets)
-        lines += [
-            "",
-            f"- 내부 ASR `{workflow.models.timing_model}` · 창 계획은 1단계가 잰 뒤"
-            " 2단계 승인이 다시 묶는다.",
-            f"- 수명주기: 시간 제공자 종료 예정 **{workflow.registry.timing_shutdown_date}**"
-            " — 이후 신규 1단계는 차단된다(§11.10).",
-            f"- 작업공간 네트워크 **{workflow.network_mode}** · "
-            + _cost_note(
-                workflow.models.luna_model, "Luna 단가 **미확인** — 금액 추정을 만들지 않는다"
-            )
-            + ". 환경 `VLOGSRT_OFFLINE`은 설정과 무관하게 문을 닫는다(시작 게이트가 판정한다).",
-            f"- 견적 지문 `{digest[:12]}…` — 이 표를 본 뒤 확인란을 체크하고"
-            " **실제 호출 1단계(전사) 시작**을 누르면 승인으로 남는다. 그 사이"
-            " 원본·설정이 바뀌면 시작이 0송신으로 거부된다.",
-        ]
-        return "\n".join(lines)
-
-    def _asr_estimate_table(
-        self, root: Path, estimates: Sequence[Any], assets: Mapping[str, Any]
-    ) -> list[str]:
-        """1단계 견적 표 — 원본 줄은 지금 순서(촬영 시각 순, D53)다."""
-        lines = [
-            "**실제 호출 1단계(전사) 견적 — 승인이 묶는 값(로컬 측정, 호출 없음)**",
-            "",
-            "| 순번 | 원본 | 출처 해시(앞 12자) | 오디오 | 스트림 | 청크 예산 | 창 |",
-            "|---|---|---|---|---|---|---|",
-        ]
-        for position, item in self._in_current_order(root, estimates):
-            asset = assets.get(item.asset_id)
-            sha = (asset.content_sha256 or "") if asset is not None else ""
-            audio = "있음" if item.has_audio else "없음(전사 없음)"
-            stream = str(item.audio_stream_index) if item.audio_stream_index is not None else "-"
-            lines.append(
-                f"| {position} | {item.source_name} | `{sha[:12]}…` | {audio}"
-                f" | {stream} | {max(1, item.asr_chunk_count)} | {item.window_count} |"
-            )
-        return lines
+        """브라우저가 만든 2단계 승인 — 1단계 기록의 실측 지문 그대로(견적 없이)."""
+        return dict(raw_service.mint_luna_approvals(self.raw, root, revision_id, list(asset_ids)))
 
     def analysis_live_asr_view(
         self, signature: str | None, selected: list[str] | None, confirm: bool
     ) -> tuple[str, gr.Dropdown]:
-        """실제 호출 1단계(전사) — 브라우저 승인(견적 표+확인란)이 문을 연다."""
+        """실제 호출 1단계(전사) — 브라우저 승인(확인란)이 문을 연다(견적 없이, D110)."""
         root = self._require_current_selection(signature)
         if not confirm:
             raise gr.Error(
-                "1단계 승인 확인이 필요하다 — 위 견적을 보고 '위 견적 그대로 전사를"
-                " 승인한다' 확인란을 체크하세요."
+                "1단계 승인 확인이 필요하다 — '1단계(전사) 유료 호출을 승인한다'"
+                " 확인란을 체크하세요."
             )
         transport = self._live_transport_for_action()
         asset_ids = self._selected_asset_ids(selected)
@@ -8910,65 +8533,6 @@ class RawWorkspaceUi:
             gr.Dropdown(choices=self.resumable_analysis_choices(root)),
         )
 
-    def analysis_semantic_estimate_view(self, signature: str | None) -> str:
-        """2단계 견적 — 1단계 기록의 실측 지문·창·이미지·비용 상태(로컬만)."""
-        root = self._require_current_selection(signature)
-        try:
-            summary = self.raw.analysis_overview(root)
-            estimates = self.raw.analysis_semantic_estimate(
-                root, summary.revision.revision_id if summary else None
-            )
-        except raw_service.RawWorkspaceError as error:
-            raise gr.Error(str(error)) from error
-        if not estimates:
-            return (
-                "**2단계 견적** — 아직 1단계(전사)가 끝난 원본이 없다. 실제 호출"
-                " 1단계를 마친 뒤 여기에 원본별 실측 지문·창·이미지 수가 나타난다."
-            )
-        digest = raw_service.semantic_estimate_digest(estimates)
-        self._semantic_approval_record = _SemanticApprovalRecord(
-            signature=self._signature_for(root) or "",
-            revision_id=summary.revision.revision_id if summary else "",
-            estimates=tuple(estimates),
-            digest=digest,
-        )
-        lines = self._semantic_estimate_table(root, estimates)
-        model = estimates[0].luna_model
-        kind = (
-            raw_service.analysis_model_label(model)
-            if raw_service.official_price_model(model)
-            else "Luna"
-        )
-        lines += [
-            "",
-            f"- {kind} 모델 `{model}` · 비용 상태 **{estimates[0].price_status}** — "
-            + _cost_note(model, "미확인 단가는 금액을 만들지 않는다(0원 계산 금지)")
-            + _semantic_quote_terms(model, estimates)[1]
-            + ".",
-            "- 2단계 승인은 이 표의 **실측 지문 전체값**을 묶는다 — 이 표를 본 뒤"
-            " 확인란을 체크하고 재개하면 승인으로 남는다. 승인이 본 값과 1단계"
-            " 기록이 다르면 재개가 0송신으로 거부된다.",
-            f"- 견적 지문 `{digest[:12]}…`",
-        ]
-        return "\n".join(lines)
-
-    def _semantic_estimate_table(self, root: Path, estimates: Sequence[Any]) -> list[str]:
-        """2단계 견적 표 — 원본 줄은 지금 순서(촬영 시각 순, D53)다."""
-        lines = [
-            "**2단계(의미 Luna) 견적 — 1단계 실측 기록 기준(로컬, 호출 없음)**",
-            "",
-            "| 순번 | 원본 | 단계 | 실측 지문(앞 12자) | 창 | 이미지 | Luna 요청 |",
-            "|---|---|---|---|---|---|---|",
-        ]
-        for position, item in self._in_current_order(root, estimates):
-            phase_label = "의미(전사+이미지)" if item.phase == "semantic" else "시각(이미지만)"
-            lines.append(
-                f"| {position} | {item.source_name} | {phase_label} |"
-                f" `{item.semantic_fingerprint[:12]}…` | {item.window_count} |"
-                f" {item.image_count} | {item.luna_request_count} |"
-            )
-        return lines
-
     def analysis_semantic_resume_view(
         self, signature: str | None, job_id: str | None, confirm: bool
     ) -> tuple[str, gr.Dropdown]:
@@ -8976,8 +8540,8 @@ class RawWorkspaceUi:
         root = self._require_current_selection(signature)
         if not confirm:
             raise gr.Error(
-                "2단계 승인 확인이 필요하다 — 위 2단계 견적의 실측 지문을 보고"
-                " '위 실측 지문으로 Luna 호출을 승인한다' 확인란을 체크하세요."
+                "2단계 승인 확인이 필요하다 — '2단계(의미) 유료 호출을 승인한다'"
+                " 확인란을 체크하세요."
             )
         transport = self._live_transport_for_action()
         if not job_id:
@@ -9155,7 +8719,7 @@ class RawWorkspaceUi:
             return _timing_price_unknown(facts)
         return (
             f"공식 단가 확인됨({facts.checked_at.isoformat()} 확인,"
-            f" {facts.valid_through.isoformat()}까지 다시 확인) — 금액은 견적에서 보여 드립니다"
+            f" {facts.valid_through.isoformat()}까지 다시 확인)"
         )
 
     def _timing_key_note(self) -> str:
@@ -10173,7 +9737,7 @@ class RawWorkspaceUi:
     def _require_caption_identity(self, root: Path) -> dict[str, str | int | None]:
         """마지막으로 그린 실행 신원 — 등록·승인·편집·확정이 전부 이 신원에 묶인다."""
         if self._caption_identity is None or self._caption_signature != self._signature_for(root):
-            raise gr.Error("실행 신원이 없다 — 먼저 최종 영상을 등록하고 추정을 보여주세요.")
+            raise gr.Error("실행 신원이 없다 — 먼저 최종 영상을 등록하고 실행을 준비하세요.")
         return self._caption_identity
 
     def _caption_run_identity(self, identity: dict[str, str | int | None]) -> Any:
@@ -10193,7 +9757,7 @@ class RawWorkspaceUi:
         if registration is None:
             raise gr.Error(
                 f"등록 행을 찾지 못했다 — 렌더 {str(identity['revision'])[:12]}… · 오디오"
-                f" 서수 {identity['audio_ordinal']}. 다시 등록·추정하세요."
+                f" 서수 {identity['audio_ordinal']}. 다시 등록·준비하세요."
             )
         return registration
 
@@ -10322,7 +9886,7 @@ class RawWorkspaceUi:
             self._caption_lifetime_token = uuid.uuid4().hex
         note = {
             "ready": "등록 완료 — 이 최종 영상을 기준으로 자막을 생성합니다.",
-            "no_audio": "**오디오가 없다** — 무발화가 아니라 별개 상태다. 실행·추정은 닫혀 있다.",
+            "no_audio": "**오디오가 없다** — 무발화가 아니라 별개 상태다. 실행·준비는 닫혀 있다.",
             "audio_selection_required": (
                 f"**오디오 트랙이 {registration.audio_stream_count}개다** — 오디오 트랙"
                 " 칸에 번호(0, 1, …)를 골라 다시 등록하세요."
@@ -10344,8 +9908,9 @@ class RawWorkspaceUi:
         wave = ws.waveform(registration, bin_seconds=0.05)
         return markdown, self._render_caption_player(registration, preview, wave)
 
-    def caption_estimate_view(self, signature: str | None, run_id: str) -> str:
-        """실행 추정 — 모델·수명주기·실측 청크·경계·비용을 백엔드가 잰 값 그대로."""
+    def caption_prepare_view(self, signature: str | None, run_id: str) -> str:
+        """실행 준비 — 모델·수명주기·실측 청크·경계를 백엔드가 잰 값 그대로(비용은 말하지 않는다,
+        D110)."""
         root = self._require_current_selection(signature)
         run = (run_id or "").strip() or "run-1"
         ws = self._caption_ws(root)
@@ -10381,7 +9946,7 @@ class RawWorkspaceUi:
             for item in estimate.lifecycle
         ]
         lines = [
-            f"**자막 실행 추정** — 실행 `{run}` · 실행 지문"
+            f"**자막 실행 준비** — 실행 `{run}` · 실행 지문"
             f" `{estimate.identity.fingerprint[:12]}…`",
             "",
             f"- 문구 모델 `{estimate.text_model}` · 시간 모델 `{estimate.timing_model}`"
@@ -10391,8 +9956,6 @@ class RawWorkspaceUi:
             f" {ui_facade.format_seconds(estimate.origin)}초)",
             f"- 청크 경계(정규화 축): {chunk_preview or '(없음)'}"
             + (" …" if len(estimate.chunk_seconds) > 4 else ""),
-            f"- 예상 비용 **${estimate.estimated_cost_usd}** · 상한 예약"
-            f" ${estimate.reserved_cost_usd} — 백엔드가 잰 값 그대로(지어내지 않는다).",
             "- 수명주기(등록표 확인 값):",
             *lifecycle_lines,
             "",
@@ -10406,17 +9969,17 @@ class RawWorkspaceUi:
         root = self._require_current_selection(signature)
         run = (run_id or "").strip() or "run-1"
         if not confirm:
-            raise gr.Error("실행 승인 확인이 필요하다 — 위 추정의 지문을 보고 확인란을 체크하세요.")
+            raise gr.Error("실행 승인 확인이 필요하다 — 위 실행 지문을 보고 확인란을 체크하세요.")
         ws = self._caption_ws(root)  # 백엔드 없는 빌드 — 정직한 오류가 먼저다
         identity = self._require_caption_identity(root)
         if identity["run_id"] != run:
             raise gr.Error(
                 f"승인된 실행(`{identity['run_id']}`)과 요청 실행(`{run}`)이 다르다 —"
-                " 추정을 다시 보고 승인하세요."
+                " 실행을 다시 준비하고 승인하세요."
             )
         registration = self._caption_registration(ws, root)
         if not registration.ready:
-            raise gr.Error("등록이 준비되지 않았다 — 오디오 선택을 확정하고 다시 추정하세요.")
+            raise gr.Error("등록이 준비되지 않았다 — 오디오 선택을 확정하고 다시 준비하세요.")
         try:
             plan = ws.plan(registration, run_id=run)
             ws.approve(plan, note="브라우저 화면 확인란 승인")
@@ -11173,7 +10736,7 @@ class RawWorkspaceUi:
                 with gr.Accordion("비용 · 모델 설정", open=False):
                     self._settings_md = gr.Markdown(self.settings_markdown())
                 gr.Markdown(
-                    "> **최종 영상 자막** — 등록(검증 사본·오디오 트랙 선택) → 추정"
+                    "> **최종 영상 자막** — 등록(검증 사본·오디오 트랙 선택) → 실행 준비"
                     "(모델·수명주기·실측 청크) → 확인란 승인 → 실행 작업 → 검토(큐 행·"
                     "파형·미대응) → 수동 편집 → 확정 게시. 실제 호출은 승인된 실행에서만"
                     " 열리고, 키는 서버를 띄운 환경에서만 온다(§14.3)."
@@ -11207,9 +10770,9 @@ class RawWorkspaceUi:
                     caption_run_box = gr.Textbox(
                         label="실행 ID", value="run-1", interactive=False, scale=2, visible=False
                     )
-                    caption_estimate_button = gr.Button("실행 추정(로컬)", scale=2)
+                    caption_estimate_button = gr.Button("실행 준비(로컬)", scale=2)
                     caption_confirm_box = gr.Checkbox(
-                        label="위 추정 지문 그대로 자막 생성을 승인한다",
+                        label="위 실행 지문 그대로 자막 생성을 승인한다",
                         interactive=True,
                         scale=3,
                     )
@@ -11337,7 +10900,7 @@ class RawWorkspaceUi:
             )
             self._advanced_handlers["caption-register"] = self._on_caption_register
             caption_estimate_button.click(
-                self.caption_estimate_view,
+                self.caption_prepare_view,
                 [self._signature_state, caption_run_box],
                 self._caption_md,
             )

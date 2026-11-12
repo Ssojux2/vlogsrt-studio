@@ -107,7 +107,7 @@ def _approve(server: Any, root: Path, payload: dict[str, Any], *, token: bool = 
 def _texts(view: dict[str, Any]) -> list[str]:
     found: list[str] = []
     for key, value in view.items():
-        if key in ("quote", "digest", "state"):  # 견적 문구·기계 값은 따로 본다
+        if key in ("digest", "state"):  # 기계 값은 따로 본다
             continue
         if isinstance(value, str):
             found.append(value)
@@ -119,22 +119,21 @@ def _texts(view: dict[str, Any]) -> list[str]:
 # ── 모델 값 ───────────────────────────────────────────────────────────────────
 
 
-def test_the_model_carries_the_refill_view_with_prices_only_inside_the_quote(
+def test_the_model_carries_the_refill_view_without_any_quote_or_price(
     bench: tuple[Any, Path, str],
 ) -> None:
     server, root, source_id = bench
     view = _refill_of(server, root, source_id)
     assert view["state"] == "ready", view
-    quote = server.raw.refill_quote(root, source_id)
-    assert view["quote"] == quote.text and view["digest"] == quote.digest
-    assert "공식 단가로 약 $" in view["quote"] and "whisper-1" in view["quote"]
+    scope = server.raw.refill_scope(root, source_id)
+    assert view["digest"] == scope.digest and "quote" not in view  # 견적 문구가 없다(D110)
     assert view["explanation"] == workspace_service.REFILL_EXPLANATION
     assert view["order"] == workspace_service.REFILL_ORDER_WARNING
     assert len(view["spans"]) == 1 and view["more"] == 0
     span = view["spans"][0]
     assert Fraction(span["start"]) > Fraction(14, 5) and Fraction(span["end"]) <= 4
     texts = _texts(view)
-    assert texts and all("$" not in text for text in texts)  # 금액은 견적 문구 안에만(D57)
+    assert texts and all("$" not in text for text in texts)  # 금액이 없다(D110)
     for text in texts:
         assert "VAD" not in text and "whisper" not in text and "GPT-Transcribe" not in text
         assert POLITE_END.search(text), text
@@ -146,7 +145,7 @@ def test_the_model_carries_the_refill_view_with_prices_only_inside_the_quote(
     assert view["skipped"] == [] and "skippedNote" not in view
 
 
-def test_the_relisten_pending_and_the_running_states_have_no_approve_quote(
+def test_the_relisten_pending_and_the_running_states_have_no_approve_digest(
     bench: tuple[Any, Path, str],
 ) -> None:
     server, root, source_id = bench
@@ -156,13 +155,13 @@ def test_the_relisten_pending_and_the_running_states_have_no_approve_quote(
     asr_epoch.bump(workspace, source_id)
     view = _refill_of(server, root, source_id)
     assert view["state"] == "blocked" and view["reason"] == raw.REFILL_RELISTEN_PENDING
-    assert "quote" not in view
+    assert "digest" not in view
 
 
-# ── 승인 대조 — 토큰 · 보이는 견적 · 키 · 0송신 ────────────────────────────────
+# ── 승인 대조 — 토큰 · 범위 digest · 키 · 0송신 ────────────────────────────────
 
 
-def test_approval_needs_the_token_and_the_visible_quote(
+def test_approval_needs_the_token_and_the_current_scope(
     bench: tuple[Any, Path, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     server, root, source_id = bench
@@ -170,17 +169,13 @@ def test_approval_needs_the_token_and_the_visible_quote(
     sender = RefillSender()
     server._live_transport = transport(sender)
     view = _refill_of(server, root, source_id)
-    payload = {"sourceId": source_id, "digest": view["digest"], "quote": view["quote"]}
+    payload = {"sourceId": source_id, "digest": view["digest"]}
     assert _approve(server, root, payload, token=False)["ok"] is False  # 토큰 없음
     stale = _approve(server, root, {**payload, "digest": "0" * 64})
-    assert stale["ok"] is True and stale["message"] == workspace_service.REFILL_UNSEEN_TEXT
-    edited = _approve(server, root, {**payload, "quote": view["quote"] + " 더"})
-    assert edited["message"] == workspace_service.REFILL_UNSEEN_TEXT
-    hidden = _approve(server, root, {**payload, "quote": ""})  # 접혀 보이지 않았다
-    assert hidden["message"] == workspace_service.REFILL_UNSEEN_TEXT
+    assert stale["ok"] is True and stale["message"] == workspace_service.REFILL_CHANGED_TEXT
     glossary.save(server.raw._workspace(root), "왕방")  # 다른 탭이 용어집을 바꿨다
     moved = _approve(server, root, payload)
-    assert moved["message"] == workspace_service.REFILL_UNSEEN_TEXT
+    assert moved["message"] == workspace_service.REFILL_CHANGED_TEXT
     assert _model_of(moved["html"])["sources"][source_id]["refill"]["digest"] != view["digest"]
     assert server.raw.latest_job(root, raw.REFILL_JOB_KIND) is None
     assert sender.whisper == [] and sender.text == []  # 0송신
@@ -193,7 +188,7 @@ def test_without_a_key_nothing_starts(bench: tuple[Any, Path, str]) -> None:
     server._startup_credentials = None
     server._live_transport = None
     view = _refill_of(server, root, source_id)
-    payload = {"sourceId": source_id, "digest": view["digest"], "quote": view["quote"]}
+    payload = {"sourceId": source_id, "digest": view["digest"]}
     refused = _approve(server, root, payload)
     assert refused == {"ok": False, "error": workspace_service.REFILL_KEY_TEXT}
     assert server.raw.latest_job(root, raw.REFILL_JOB_KIND) is None
@@ -208,9 +203,7 @@ def test_an_approved_refill_inserts_rows_and_makes_the_transcript_edited(
     server._live_transport = transport(sender)
     before = server.raw.source_transcript(root, source_id)
     view = _refill_of(server, root, source_id)
-    reply = _approve(
-        server, root, {"sourceId": source_id, "digest": view["digest"], "quote": view["quote"]}
-    )
+    reply = _approve(server, root, {"sourceId": source_id, "digest": view["digest"]})
     assert reply["ok"] is True and reply["message"] == workspace_service.REFILL_STARTED_TEXT
     record = wait_kind(server, root, raw.REFILL_JOB_KIND)
     assert record.status == "succeeded", record.error
@@ -234,7 +227,7 @@ def test_relisten_waits_while_a_refill_runs_and_both_panels_say_so(
     sender = Blocking()
     server._live_transport = transport(sender)
     view = _refill_of(server, root, source_id)
-    payload = {"sourceId": source_id, "digest": view["digest"], "quote": view["quote"]}
+    payload = {"sourceId": source_id, "digest": view["digest"]}
     assert _approve(server, root, payload)["message"] == workspace_service.REFILL_STARTED_TEXT
     assert sender.entered.wait(30)
     model = _model_of(server.visual_workbench_render(root)[1])["sources"][source_id]
@@ -272,7 +265,7 @@ def test_skipped_rows_are_shown_with_their_text_and_the_note_only_when_any(
     )
     server._live_transport = transport(sender)
     view = _refill_of(server, root, source_id)
-    payload = {"sourceId": source_id, "digest": view["digest"], "quote": view["quote"]}
+    payload = {"sourceId": source_id, "digest": view["digest"]}
     reply = _approve(server, root, payload)
     assert reply["ok"] is True, reply
     assert wait_kind(server, root, raw.REFILL_JOB_KIND).status == "succeeded"
@@ -287,18 +280,12 @@ def test_skipped_rows_are_shown_with_their_text_and_the_note_only_when_any(
 # ── 클라이언트 — node에서 실제 실행본으로 ─────────────────────────────────────
 
 _REFILL_SCRIPT = r"""
-let fakeNow = 1000000;
-Date.now = () => fakeNow;
-windowScope.innerWidth = 1280; windowScope.innerHeight = 800;
-windowScope.getComputedStyle = () => ({ display: 'block', visibility: 'visible' });
 const refillModel = visualModel();
 refillModel.epoch = 'refill-1'; refillModel.token = 'refill-token';
-const quoteText = '말소리 빈칸 재전사 · 빈칸 1곳 · 자막 없는 말소리 0.7초 · 다시 물을 길이 1.2초.'
-  + ' whisper-1로 1번 묻습니다(공식 단가로 약 $0.01). 넣은 줄은 직접 고친 자막이 됩니다.';
 refillModel.sources.srcA.refill = {
   state: 'ready', explanation: '설명 <b>', order: '순서 경고', summary: '요약',
   spans: [{ start: '33/10', end: '4', failed: false }, { start: '1', end: '2', failed: true }],
-  more: 3, notes: ['실패 구간 안내'], quote: quoteText, digest: 'd'.repeat(64), last: '지난 결과',
+  more: 3, notes: ['실패 구간 안내'], digest: 'd'.repeat(64), last: '지난 결과',
   skipped: [{ start: '7/2', end: '19/5', text: '<겹친> 말', why: '기존 자막과 겹침' }],
   skippedNote: '넣지 않은 줄 1개 — 그 구간은 다시 묻지 않습니다.', skippedMore: 2,
 };
@@ -308,49 +295,13 @@ const sent = [];
 const envRefill = visualEnv({ vl_refill: (payload) => { sent.push(payload);
   return { ok: true, echoEpoch: 'refill-1', message: '접수' }; } }, refillModel);
 const panelHtml = envRefill.panel.innerHTML;
-const scrolled = [];
-const shown = el({ id: 'vl-refill-quote' });
-shown.textContent = quoteText;
-shown.getBoundingClientRect = () => ({ left: 10, top: 10, width: 300, height: 60, right: 310,
-  bottom: 70 });
-shown.contains = (node) => node === shown;
-shown.scrollIntoView = () => scrolled.push('quote');
-envRefill.registry['vl-refill-quote'] = shown;
-let covering = shown;
-let drawer = null;
-envRefill.doc.elementFromPoint = () => covering;
-envRefill.doc.querySelector = () => drawer;
-const approveBtn = (digest) => el({ attrs: { 'data-vl-act': 'refill-approve',
-  'data-vl-digest': digest } });
-const press = (target) => (envRefill.root._listeners.pointerdown || []).slice()
-  .forEach((fn) => fn({ target }));
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
-// 1) 그린 바로 뒤에 누르면(읽을 틈 전) 빈 문구 — 서버가 거절하고 견적을 보인다.
-let button = approveBtn('d'.repeat(64));
-press(button); envRefill.click(button); await flush();
-// 2) 읽을 틈이 지난 뒤 — 그려진 문구와 누른 순간의 digest를 보낸다.
-fakeNow += 2000;
-button = approveBtn('d'.repeat(64));
-press(button); envRefill.click(button); await flush();
-// 3) 누른 뒤 1초 틱이 새 견적을 그려도 누른 순간의 digest를 보낸다(새 견적은 읽지 않았다).
-fakeNow += 2000;
-button = approveBtn('d'.repeat(64));
-press(button);
-refillModel.sources.srcA.refill = Object.assign({}, refillModel.sources.srcA.refill,
-  { digest: 'e'.repeat(64), quote: quoteText + ' 바뀜' });
-envRefill.root.attrs['data-vl-model'] = JSON.stringify(refillModel);
-envRefill.rewired();
-const newBtn = approveBtn('e'.repeat(64));
-envRefill.click(newBtn); await flush();
-// 4) 칸이 다른 것에 덮였다·서랍이 열렸다 — 빈 문구, 견적 칸을 보이게 스크롤한다.
-fakeNow += 5000;
-covering = el({ id: 'drawer' });
-press(newBtn); envRefill.click(newBtn); await flush();
-covering = shown; drawer = el({ id: 'settings-drawer' });
-press(newBtn); envRefill.click(newBtn); await flush();
-drawer = null;
+// 누르면 단추가 실은 범위 digest를 보낸다 — 견적 문구는 없다(D110).
+envRefill.click(el({ attrs: { 'data-vl-act': 'refill-approve',
+  'data-vl-digest': 'd'.repeat(64) } }));
+await flush();
 envRefill.click(el({ attrs: { 'data-vl-act': 'refill-pick', 'data-vl-at': '33/10' } }));
-checkpoints.push({ case: 'refill', panelHtml, seek: envRefill.vid.state.currentTime, scrolled,
+checkpoints.push({ case: 'refill', panelHtml, seek: envRefill.vid.state.currentTime,
   sent: sent.map((p) => ({ sourceId: p.sourceId, digest: p.digest, quote: p.quote,
     token: p.token })) });
 """
@@ -380,7 +331,7 @@ def _run_refill_harness(tmp_path: Path) -> dict[str, Any]:
 
 
 @needs_node
-def test_the_panel_sends_the_drawn_quote_and_the_span_buttons_only_seek(tmp_path: Path) -> None:
+def test_the_panel_sends_the_scope_digest_and_the_span_buttons_only_seek(tmp_path: Path) -> None:
     report = _run_refill_harness(tmp_path)
     panel = report["panelHtml"]
     assert (
@@ -389,7 +340,7 @@ def test_the_panel_sends_the_drawn_quote_and_the_span_buttons_only_seek(tmp_path
     assert "설명 &lt;b&gt;" in panel  # 글은 escape된다
     assert 'data-vl-act="refill-pick" data-vl-at="33/10">3.3–4.0초</button>' in panel
     assert "1.0–2.0초 · 전사 실패 구간</button>" in panel and "외 3곳" in panel
-    assert '<p class="vl-kv vl-refill-quote" id="vl-refill-quote">' in panel
+    assert "vl-refill-quote" not in panel  # 견적 문구 칸이 없다(D110)
     assert 'data-vl-act="refill-approve"' in panel and "빈칸 재전사 승인</button>" in panel
     # 넣지 않은 줄 — 글자는 escape되어 시각과 함께 보인다(검증 지적 6).
     assert "넣지 않은 줄 1개 — 그 구간은 다시 묻지 않습니다." in panel
@@ -397,21 +348,16 @@ def test_the_panel_sends_the_drawn_quote_and_the_span_buttons_only_seek(tmp_path
     # 다시 듣기 칸 — 빈칸 재전사가 도는 동안은 단추 대신 그 사정을 말한다(검증 지적 1).
     assert "빈칸 재전사가 도는 중이라 지금은 받지 않습니다." in panel
     assert 'data-vl-act="relisten"' not in panel
-    fresh, read, swapped, covered, drawer = report["sent"]
-    assert fresh["quote"] == ""  # 그리자마자 누름 — 읽을 틈 전이라 빈 문구(서버가 거절)
-    assert read["quote"].endswith("넣은 줄은 직접 고친 자막이 됩니다.")
-    assert read["digest"] == "d" * 64 and read["token"] == "refill-token"
-    # 누른 뒤 다시 그려진 견적(e…)이 아니라 누른 순간 그려져 있던 견적(d…)을 보낸다.
-    assert swapped["digest"] == "d" * 64 and swapped["quote"] == read["quote"]
-    assert covered["quote"] == "" and drawer["quote"] == ""
-    assert report["scrolled"].count("quote") >= 2  # 거절할 때 견적 칸을 보이게 한다
+    (sent,) = report["sent"]
+    assert sent["digest"] == "d" * 64 and sent["token"] == "refill-token"
+    assert sent.get("quote") is None
     assert report["seek"] == pytest.approx(3.3)
 
 
 def test_the_blocks_wire_the_refill_function_and_the_panel() -> None:
     script = ui_facade.VISUAL_BOOTSTRAP_JS
     assert "function refillPanel" in script and "out.push(refillPanel(info));" in script
-    assert "call('vl_refill'" in script and "refillQuoteSeen()" in script
+    assert "call('vl_refill'" in script and "refillQuoteSeen" not in script
     assert 'root.addEventListener("pointerdown", root._vlDown)' in script
     assert "refill" in workspace_service.WORKBENCH_TOKEN_ACTIONS
 
@@ -421,7 +367,7 @@ def test_new_wording_is_polite_and_names_no_model_or_price() -> None:
         workspace_service.REFILL_EXPLANATION,
         workspace_service.REFILL_ORDER_WARNING,
         workspace_service.REFILL_STARTED_TEXT,
-        workspace_service.REFILL_UNSEEN_TEXT,
+        workspace_service.REFILL_CHANGED_TEXT,
         workspace_service.REFILL_KEY_TEXT,
         workspace_service.REFILL_BUSY_TEXT,
         workspace_service.REFILL_RUNNING_TEXT,

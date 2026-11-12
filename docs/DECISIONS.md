@@ -9929,7 +9929,33 @@ Tier 1`, 429)였다 — 영상 판정은 성공하고 전사만 빠졌다. 한�
   아니다). 그 내부 측정(`analysis_estimate`·`SelectionQuote` digest)은 승인 기록의 범위를 재는 데만 쓴다.
 - 캐시 열쇠·분석 지문·결속·원장 정책 지문(`quote_policy_sha256`)은 바이트 그대로다(시험 `pre_19b_digest`·`pre_19d_*`가 묶는다).
 
-2단계·3단계(빈칸 재전사·영어 자막·맥락 평가의 견적, 고급 탭 견적 표)는 같은 W-59의 다음 커밋이다.
+2단계(다음 커밋) — 나머지 유료 작업:
+- **말소리 빈칸 재전사**: 견적 문구(분량·「공식 단가로 약 $」)·금액·보이는 문구 대조 JS(누른 순간 문구 읽기, `REFILL_READ_MS`)를
+  지웠다. 칸은 빈칸 요약(자막 없는 말소리·빈칸 수 — 시각 확인의 측정값)과 승인 단추만 보이고, 단추는 지금 범위의 digest를
+  싣는다 — 서버가 누른 순간 다시 재어 다르면(다른 탭·용어집·빈칸이 바뀌었다) 0송신이다. `RefillQuote` → `RefillScope`
+  (`scope_for`, `refill_scope`). digest에서 금액·문구 칸이 빠져 **같은 재료의 `refill_id`가 D110 이전과 다르다** — 이미 넣은
+  조각은 `asked.json`(표본 범위)·넣은 줄의 표지로 세므로 다시 사지 않고, 받은 답은 조각 WAV 해시 캐시라 끊긴 재전사를 다시
+  눌러도 다시 사지 않는다(조각 자르기만 로컬로 다시 한다).
+- **영어 자막**: 견적 한 줄(`#vl-english-quote`)·2초 틱·보인 문구 대조를 지웠다. 「영어 자막도 만들기」를 켜고 내보내기를
+  누르는 것이 승인이고, 누른 순간 옮기지 않은 원본(`english_track.missing_keys`)만 산다. 번역 캐시 열쇠는 그대로다.
+- **맥락 평가**: 「견적 보기」 단추·견적 줄·digest를 지우고 「맥락 평가 실행」 하나로 바꿨다(같은 입력의 평가가 있으면
+  부르지 않는다). `ContextReviewSettings.quote_chars_per_token`은 쓰지 않지만 입력 열쇠(`context_key`가 설정을 통째로
+  묶는다)를 지키려고 남겼다.
+- 토큰·상한 추정 도우미(`translation_io.input_tokens`, `context_review_io.input_tokens`·`ceiling_usd`,
+  `TranslationSettings.quote_chars_per_token`)를 지웠다.
+
+3단계(같은 커밋) — 고급 탭:
+- 「분석 견적(로컬)」·「실제 호출 1단계 견적(승인용)」·「2단계 견적」 단추와 표, 그 표를 간직하던 승인 기록
+  (`_AsrApprovalRecord`·`_SemanticApprovalRecord`)을 지웠다. 확인란 + 시작 단추가 누른 순간 승인을 주조한다(1단계는 원본
+  완전 해시, 2단계는 1단계 기록의 실측 지문 — 지문이 맞지 않으면 0송신).
+- 숨은 「자동 정리」는 견적 단계를 거치지 않는다(확인란이 승인이다). 최종 자막의 「실행 추정」은 「실행 준비(로컬)」로
+  바꾸고 비용 줄을 뺐다(실행 지문·청크 경계는 그대로).
+- 화면·오류 문구의 「견적을 확인한 뒤 승인하세요」류를 「승인하세요」로 고쳤다.
+
+**남은 것(이 결정 밖)**: 보내기 직전의 단가 문(Gemini 단가 재확인 기한이 지나면 `semantic_client`·시간 엔진 문이 닫는다)과
+영상 분석 요청마다의 공식 단가 상한(`AnalysisBudget`), 최종 자막의 승인 예산(`budget_usd`)과 실행 중 미터는 그대로 둔다 —
+화면에 보이는 견적이 아니라 보내기 문이다. 레거시 엔진의 비용 표시(`vlogsrt run`의 `estimate_cost`·`ui/service.py`의 안전장치
+문구), `vlogsrt project`의 추정·승인 프로토콜, `vlogsrt media analyze --estimate-only` CLI도 그대로다.
 
 **근거**: 시험 `test_library_approval`(단추가 기다리지 않음 · 모두 끝났으면 0송신 · 잰 뒤 결속이 바뀌면 실행 문이 닫음)·
 `test_library_remaining`·`test_transcribe_only`·`test_analysis_model_ui`(누른 순간의 모델로 잰다)·`test_status_tick`(틱 칸 셋).

@@ -17,13 +17,12 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import date
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
 from tests.raw.test_analysis_model_ui import PRICE_WORDS, bare_server, model_of
 from ui import workspace_service
-from ui.workspace_service import GEMINI_PAID_KEY_NOTE, _semantic_quote_terms
+from ui.workspace_service import GEMINI_PAID_KEY_NOTE
 from vlogsrt.project.raw import service as raw_service
 from vlogsrt.project.raw.config import (
     ANALYSIS_MODEL_CHOICES,
@@ -110,35 +109,6 @@ def test_a_new_workspace_starts_on_flash(tmp_path: Path) -> None:
 
 
 # ── 화면 문구 ─────────────────────────────────────────────────────────────
-
-
-def estimate(ceiling: str | None) -> SimpleNamespace:
-    return SimpleNamespace(ceiling_usd=ceiling)
-
-
-def test_the_quote_names_gemini_and_its_ceiling() -> None:
-    label, tail = _semantic_quote_terms(FLASH, [estimate("0.061"), estimate("0.0675")])
-    assert label == "Gemini 3.8 Flash"
-    assert tail == " · Gemini 비용 상한 $0.13 (보수적)"
-
-
-def test_a_quote_without_a_ceiling_says_unpriced_not_zero() -> None:
-    label, tail = _semantic_quote_terms(FLASH, [estimate("0.06"), estimate(None)])
-    assert label == "Gemini 3.8 Flash"
-    assert "가격 미정" in tail and "$" not in tail
-
-
-def test_claude_and_luna_quote_terms_are_unchanged() -> None:
-    assert (
-        _semantic_quote_terms(SONNET, [estimate("0.16")])[1] == " · Claude 비용 상한 $0.16 (보수적)"
-    )
-    assert _semantic_quote_terms("gpt-6-luna", [estimate(None)]) == ("Luna", "")
-
-
-def test_the_quote_unit_price_line_says_clip_and_valid_through() -> None:
-    text = workspace_service._quote_unit_price_text(FLASH)
-    assert "$0.75" in text and "$3.75" in text and "2026-12-31까지" in text
-    assert "클립(그림 + 소리)" in text
 
 
 class _AfterTheRaise(date):

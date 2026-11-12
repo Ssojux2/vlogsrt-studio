@@ -597,7 +597,9 @@ class ContextReviewSettings:
     max_output_tokens: int = 32000
     """응답 한도(생각 포함) — 구간 수백 개의 판정이 들어가게 넉넉히(Gemini 동기 상한 65536 안)."""
     quote_chars_per_token: int = 1
-    """견적의 입력 토큰 추정 — 글자 하나 = 토큰 하나(한국어 JSON에 보수적인 쪽, 실제는 더 적다)."""
+    """쓰지 않는 칸(D110 — 견적을 지웠다). 맥락 평가의 입력 열쇠(`context_review.context_key`)가
+    이 설정을 통째로(`asdict`) 묶으므로 지우면 저장된 평가가 모두 낡는다 — 열쇠 바이트를 지키려고
+    남긴다."""
 
     def __post_init__(self) -> None:
         for name in (

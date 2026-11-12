@@ -16,7 +16,7 @@ from typing import Any
 
 from vlogsrt.project.raw import translation
 from vlogsrt.project.raw.config import TranslationSettings
-from vlogsrt.project.raw.context_review_io import JSON_MIME_TYPE, ceiling_usd, load, write
+from vlogsrt.project.raw.context_review_io import JSON_MIME_TYPE, load, write
 
 TRANSLATION_DIRNAME = "translation"
 RESULT_SCHEMA = "raw-translation-result/v1"
@@ -25,10 +25,8 @@ FAILURE_SCHEMA = "raw-translation-failure/v1"
 __all__ = [
     "FAILURE_SCHEMA",
     "RESULT_SCHEMA",
-    "ceiling_usd",
     "failure_document",
     "failure_path",
-    "input_tokens",
     "load",
     "payload",
     "result_document",
@@ -72,16 +70,6 @@ def payload(
             "thinkingConfig": {"thinkingLevel": settings.thinking_level},
         },
     }
-
-
-def input_tokens(
-    batch: translation.TranslationBatch,
-    glossary_terms: Sequence[str],
-    settings: TranslationSettings,
-) -> int:
-    """견적의 입력 토큰 — 보내는 글자 수를 `quote_chars_per_token`으로 나눠 올린다(보수적)."""
-    chars = len(translation.INSTRUCTION) + len(translation.batch_text(batch, glossary_terms))
-    return -(-chars // settings.quote_chars_per_token)
 
 
 def result_document(

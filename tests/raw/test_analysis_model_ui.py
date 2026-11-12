@@ -99,8 +99,8 @@ def test_a_new_workspace_shows_flash_as_the_default_without_a_price(tmp_path: Pa
     assert sum("(기본)" in label for label in labels) == 1
     assert not any("$" in label for label in labels)
     assert "Gemini 3.8 Flash" in status and "(기본)" not in status
-    # 상태 줄도 달러·토큰 용어 없이 단가 상태만 말한다 — 금액은 견적이 말한다(D57 결정 7, D58)
-    assert "공식 단가 확인됨" in status and "견적에서 보여 드립니다" in status
+    # 상태 줄도 달러·토큰 용어 없이 단가 상태만 말한다 — 금액은 말하지 않는다(D57 결정 7 · D110)
+    assert "공식 단가 확인됨" in status and "견적" not in status
     assert not any(word in status for word in PRICE_WORDS), status
     status, dropdown = server.settings_analysis_model_view(server.current_signature(), LUNA)
     assert model_of(server) == LUNA and dropdown.value == LUNA
@@ -112,7 +112,7 @@ PRICE_WORDS = ("$", "100만 토큰", "effort", "출력 한도", "입력 $", "출
 
 @pytest.mark.parametrize("model", list(raw_service.ANALYSIS_MODEL_CHOICES))
 def test_no_screen_text_outside_quotes_shows_a_unit_price(tmp_path: Path, model: str) -> None:
-    """모든 모델에서 상태 줄·설정 요약·분석 설정 줄에 달러·토큰 용어가 없다 — 금액은 견적만."""
+    """모든 모델에서 상태 줄·설정 요약·분석 설정 줄에 달러·토큰 용어가 없다(D110)."""
     server = bare_server(tmp_path, model=model)
     root = server.workspace_root()
     texts = (

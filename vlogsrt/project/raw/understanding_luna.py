@@ -1673,7 +1673,7 @@ def _require_official_ceiling(
     ceiling = budget.request_ceiling_usd
     if budget.luna_price_status != PRICE_OFFICIAL or ceiling is None:
         raise AnalysisApprovalError(
-            f"{label} 실행에는 공식 단가 상한이 묶인 승인이 필요하다 — 새 견적과 승인을 받아라"
+            f"{label} 실행에는 공식 단가 상한이 묶인 승인이 필요하다 — 다시 승인하라"
         )
     for evidence in evidence_windows:
         payload = build_semantic_payload(evidence, understanding, model)

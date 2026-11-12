@@ -477,7 +477,7 @@ def _wait_terminal(server: workspace_service.RawWorkspaceUi, root: Path, job_id:
 
 @needs_ffmpeg
 def test_browser_production_flow_fake_sends(tmp_path: Path, monkeypatch) -> None:
-    """화면 견적→확인란→1단계→2단계 견적→재개 — 주조된 승인이 게이트를 지난다."""
+    """화면 확인란→1단계→재개 — 누른 순간 주조된 승인이 게이트를 지난다(견적 없이, D110)."""
     from vlogsrt.project.raw.analysis_approval import LiveAnalysisTransport
 
     monkeypatch.setattr("vlogsrt.env.is_offline", lambda: False)
@@ -493,12 +493,6 @@ def test_browser_production_flow_fake_sends(tmp_path: Path, monkeypatch) -> None
     luna = replace(config.models, luna_model=OPENAI_LUNA_MODEL)
     server.raw.update_settings(root, replace(config, models=luna, network_mode="online"))
     assets = {a.source_name: a for a in server.raw.list_source_assets(root)}
-
-    # 1단계 견적(승인용) — 측정값 표가 서버에 기록으로 남는다.
-    estimate_md = server.analysis_live_estimate_view(signature, None)
-    assert "스테레오.mov" in estimate_md and "무성.mov" in estimate_md
-    assert "청크 예산" in estimate_md and "종료 예정" in estimate_md
-    assert server._asr_approval_record is not None
 
     # 주조 단위 확인 — 오디오 원본만 승인이 생기고, 측정값을 그대로 묶는다.
     minted = raw_service.mint_asr_approvals(
@@ -530,10 +524,6 @@ def test_browser_production_flow_fake_sends(tmp_path: Path, monkeypatch) -> None
     summary = server.raw.analysis_overview(root)
     assert summary is not None and summary.revision.status == "awaiting_semantic"
 
-    # 2단계 견적 — 실측 지문 표가 기록으로 남는다(오디오=의미, 무성=시각).
-    semantic_md = server.analysis_semantic_estimate_view(signature)
-    assert "의미(전사+이미지)" in semantic_md and "시각(이미지만)" in semantic_md
-    assert server._semantic_approval_record is not None
     choices = server.resumable_analysis_choices(root)
     assert any(job_id == value for _label, value in choices)
 
@@ -557,7 +547,7 @@ def test_browser_production_flow_fake_sends(tmp_path: Path, monkeypatch) -> None
 
 @needs_ffmpeg
 def test_browser_production_refusals_are_zero_send(tmp_path: Path, monkeypatch) -> None:
-    """확인란·기록·네트워크·환경·종료일·견적 드리프트 — 전부 0송신으로 닫힌다."""
+    """확인란·네트워크·환경·종료일 — 전부 0송신으로 닫힌다."""
     from vlogsrt.project.raw.analysis_approval import LiveAnalysisTransport
 
     monkeypatch.setattr("vlogsrt.env.is_offline", lambda: False)
@@ -582,13 +572,7 @@ def test_browser_production_refusals_are_zero_send(tmp_path: Path, monkeypatch) 
     # 확인란 없이는 시작하지 않는다.
     with pytest.raises(gr.Error, match="승인 확인이 필요하다"):
         server.analysis_live_asr_view(signature, None, False)
-    # 견적 기록 없이는 시작하지 않는다.
-    with pytest.raises(gr.Error, match="승인 기록이 없다"):
-        server.analysis_live_asr_view(signature, None, True)
-    assert sender.calls == []
-
-    # 견적을 남기고 — 네트워크가 닫혀 있으면 0송신.
-    server.analysis_live_estimate_view(signature, None)
+    # 네트워크가 닫혀 있으면 0송신.
     config = server.raw.settings(root)
     server.raw.update_settings(root, replace(config, network_mode="offline"))
     with pytest.raises(gr.Error, match="network_mode"):
@@ -618,17 +602,6 @@ def test_browser_production_refusals_are_zero_send(tmp_path: Path, monkeypatch) 
         server.analysis_live_asr_view(signature, None, True)
     assert sender.calls == []
     server._live_transport = stale_transport
-
-    # 견적 드리프트 — 승인 때 본 값과 지금 값이 다르면 0송신으로 거부된다.
-    record = server._asr_approval_record
-    assert record is not None
-    drifted = tuple(
-        replace(item, asr_chunk_count=item.asr_chunk_count + 1) for item in record.estimates
-    )
-    server._asr_approval_record = replace(record, estimates=drifted)
-    with pytest.raises(gr.Error, match="다르다"):
-        server.analysis_live_asr_view(signature, None, True)
-    assert sender.calls == []
 
     # 네트워크 모드 화면 — 변경은 되지만 환경 우회 안내를 남긴다.
     note = server.settings_network_view(signature, "offline")

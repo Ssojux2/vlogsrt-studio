@@ -433,8 +433,7 @@ def insert_segments(
     current = _read_latest(workspace, asset_id)
     if not current or current["revision"] != expected_revision:
         raise RawWorkspaceError(
-            "원본 자막이 바뀌었습니다. 빈칸을 다시 세어 새 견적으로 승인하세요 — 자막은"
-            " 그대로입니다"
+            "원본 자막이 바뀌었습니다. 바뀐 빈칸으로 다시 승인하세요 — 자막은 그대로입니다"
         )
     duration = rational(current["duration"])
     existing = list(current["utterances"])

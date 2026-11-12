@@ -125,10 +125,11 @@ def test_a_relisten_pending_at_settle_refuses_the_insert_and_keeps_the_answers(
     assert asr_epoch.state(service._workspace(root), asset_id).pending  # 다시 듣기는 그대로
     record = speech_refill.latest_record(root, asset_id)
     assert record is not None and record["refused"] == raw.REFILL_RELISTEN_SETTLE_REFUSAL
-    assert service.refill_quote(root, asset_id) == raw.REFILL_RELISTEN_PENDING
+    assert service.refill_scope(root, asset_id) == raw.REFILL_RELISTEN_PENDING
     asr_epoch.withdraw(service._workspace(root), asset_id)  # 사람이 다시 듣기를 거뒀다면
     again = _quote(service, root, asset_id)
-    assert again.pieces == quote.pieces and again.usd == 0  # 산 답은 캐시 — 다시 사지 않는다
+    assert again.pieces == quote.pieces  # 산 답은 캐시 — 다시 사지 않는다
+    assert again.whisper_due == () and again.text_due == ()
     assert len(sender.whisper) == 2 and len(sender.text) == 2
 
 
@@ -156,7 +157,7 @@ def test_a_crash_between_insert_and_the_ledger_does_not_buy_again(
     assert service.start_sync_checks(root, (asset_id,)) is not None
     wait_sync(service, root)
     again = _quote(service, root, asset_id)
-    assert again.pieces == () and again.usd == 0 and again.asked  # 넣은 줄의 표지가 장부를 대신한다
+    assert again.pieces == () and again.asked  # 넣은 줄의 표지가 장부를 대신한다
 
 
 # ── 4·8. 견적의 말소리 · 실행 기록 · 사이 글자 ─────────────────────────────────────
@@ -184,10 +185,9 @@ def test_partial_failure_requotes_only_the_failed_piece_and_counts_only_its_spee
     again = _quote(service, root, asset_id)
     assert again.pieces == (quote.pieces[1],)
     assert again.whisper_due == again.pieces and again.text_due == again.pieces
-    # 견적 문구의 말소리는 이번에 묻는 조각 안의 것만 — 이미 물은 조각 안의 나머지는 빼고 센다.
+    # 이번에 묻는 조각 안의 말소리만 센다 — 이미 물은 조각 안의 나머지는 뺀다.
     asking = again.asking_speech_seconds
     assert 0 < asking < again.speech_seconds
-    assert f"빈칸 1곳 · 자막 없는 말소리 {float(asking):.1f}초" in again.text
     sender = RefillSender()
     service.refill_source(root, asset_id, again, transport(sender), context())
     assert len(sender.whisper) == 1 and len(sender.text) == 1
@@ -423,7 +423,7 @@ def test_cached_answers_quote_zero_and_send_nothing(
     monkeypatch.undo()
     _online(monkeypatch)
     again = _quote(service, root, asset_id)
-    assert again.usd == 0 and again.whisper_due == () and again.text_due == ()
+    assert again.whisper_due == () and again.text_due == ()
     second = RefillSender()
     service.refill_source(root, asset_id, again, transport(second), context())
     assert second.whisper == [] and second.text == []
@@ -445,4 +445,4 @@ def test_a_piece_outside_the_approval_is_refused_at_the_send_gate(
     result = speech_refill.run(plan, narrowed, audio, transport(sender), on=date.today())
     assert len(sender.whisper) == 1
     assert len(result.failed) == 1
-    assert "견적에 없던" in json.dumps(result.failed, ensure_ascii=False)
+    assert "승인한 범위에 없던" in json.dumps(result.failed, ensure_ascii=False)

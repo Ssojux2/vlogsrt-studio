@@ -1,9 +1,9 @@
 """말소리 빈칸 재전사(D59 19f) — 자막이 덮지 않은 말소리를 그 구간만 잘라 whisper에 다시 묻는다.
 
-흐름: 서비스가 재료를 모아(`RefillPlan` — 구간은 순수 `speech_gaps`가 고른다) 견적(`quote_for`)을
-짓고, 사람이 **보이는 견적 문구**를 승인하면(D54) 작업 안에서 견적을 다시 재어 digest를 맞춘 뒤
-`run`이 묻는다. 받은 줄을 원본 자막에 넣는 일은 서비스의 `refill_*`만 한다
-(`source_transcript.insert_segments`).
+흐름: 서비스가 재료를 모아(`RefillPlan` — 구간은 순수 `speech_gaps`가 고른다) 범위(`scope_for`)를
+짓고, 사람이 승인 단추를 누르면(그 범위의 digest에 묶인다) 작업 안에서 범위를 다시 재어 digest를
+맞춘 뒤 `run`이 묻는다. 견적(분량·금액 문구)은 없다(D110). 받은 줄을 원본 자막에 넣는 일은
+서비스의 `refill_*`만 한다(`source_transcript.insert_segments`).
 
 지키는 선:
 
@@ -14,7 +14,7 @@
   두 번째 귀(교차 확인이 켜져 있을 때)에게만 간다. 그 글자는 D37 게이트를 지난 줄만 바꾸고, 사이에
   낀 글자는 기록에만 남는다(규칙 1).
 - **유료 요청은 승인이 묶은 조각만 나간다** — 원본·PCM 해시·조각·모델, 켜져 있으면 글자 요청
-  신원(용어집). 견적 뒤에 무엇이든 바뀌면 digest가 달라 0송신으로 닫힌다.
+  신원(용어집). 누른 뒤 무엇이든 바뀌면 digest가 달라 0송신으로 닫힌다.
 - **고른 구간은 통째로 묻는다**(규칙 4) — 이미 다시 물어 원본 자막에 넣은 조각 안의 구간만 다시
   사지 않는다(같은 소리를 두 번 사지 않는다).
 """
@@ -26,7 +26,6 @@ import json
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import date
-from decimal import ROUND_CEILING, Decimal
 from fractions import Fraction
 from pathlib import Path
 from typing import Any
@@ -45,9 +44,7 @@ from vlogsrt.project.raw.caption_provider import TransportTextProvider, timing_p
 from vlogsrt.project.raw.config import (
     SOURCE_TEXT_SETTINGS,
     RawWorkflowConfig,
-    text_model_label,
 )
-from vlogsrt.project.raw.models import RawWorkspaceError
 from vlogsrt.project.raw.source_transcript import REFILL_FIELD
 from vlogsrt.project.raw.speech_gaps import GapSpan, SampleRange, request_pieces
 from vlogsrt.project.raw.understanding import SampleSpan, SelectedAudio, UtteranceEvidence
@@ -56,9 +53,6 @@ from vlogsrt.project.raw.understanding_luna import ORIGIN_LIVE, AnalysisApproval
 REFILL_SCHEMA = "speech-refill/v1"
 REFILL_DIRNAME = "speech-refill"
 """작업공간 안 자리 — `cache/speech-refill/<원본>/`(조각 WAV·두 귀의 답 캐시·실행 기록)."""
-
-CENT = Decimal("0.01")
-USD_STEP = Decimal("0.000001")
 
 
 # ─────────────────────────────────────────────────────────────
@@ -101,7 +95,7 @@ class RefillAudio:
 
 @dataclass(frozen=True, slots=True)
 class RefillPlan:
-    """견적의 재료 — 지금 원본 자막 리비전·잰 PCM·고른 구간·두 귀의 설정(값)."""
+    """범위의 재료 — 지금 원본 자막 리비전·잰 PCM·고른 구간·두 귀의 설정(값)."""
 
     root: Path
     asset_id: str
@@ -128,8 +122,8 @@ class RefillPlan:
 
 
 @dataclass(frozen=True, slots=True)
-class RefillQuote:
-    """빈칸 재전사 견적 — 보이는 문구(`text`)와 그것을 포함해 모든 결속을 접은 digest.
+class RefillScope:
+    """빈칸 재전사 범위 — 다룰 조각과 모든 결속을 접은 digest(D110 — 분량·금액 문구는 없다).
 
     `pieces`는 이번에 다룰 조각(이미 다시 물어 넣은 조각 안의 것은 뺐다), `whisper_due`·`text_due`는
     그중 답이 캐시에 없어 새로 사는 조각이다. 승인은 이 값 그대로를 묶는다.
@@ -148,8 +142,6 @@ class RefillQuote:
     timing_model: str
     text_model: str | None
     text_identity: str | None
-    usd: Decimal
-    text: str
     digest: str
     failures_known: bool = True
 
@@ -159,7 +151,7 @@ class RefillQuote:
 
     @property
     def asking_speech_seconds(self) -> Fraction:
-        """이번에 묻는 조각 안의 자막 없는 말소리(초) — 견적 문구가 세는 값(이미 물은 조각 밖)."""
+        """이번에 묻는 조각 안의 자막 없는 말소리(초) — 이미 물은 조각 밖."""
         return _speech_in(self.spans, self.pieces)
 
     def at(self, sample: int) -> Fraction:
@@ -178,12 +170,12 @@ class RefillQuote:
 
 
 # ─────────────────────────────────────────────────────────────
-#  견적 — 다룰 조각, 새로 살 조각, 보이는 문구, digest
+#  범위 — 다룰 조각, 새로 살 조각, digest
 # ─────────────────────────────────────────────────────────────
 
 
-def quote_for(plan: RefillPlan) -> RefillQuote:
-    """지금 재료의 견적 — 같은 재료면 같은 바이트다(파일은 읽기만 한다)."""
+def scope_for(plan: RefillPlan) -> RefillScope:
+    """지금 재료의 범위 — 같은 재료면 같은 바이트다(파일은 읽기만 한다)."""
     all_pieces = request_pieces(plan.spans, plan.chunk_bound)
     asked_runs = _asked_runs(plan)
     pieces = tuple(p for p in all_pieces if not _contained(p, asked_runs))
@@ -196,8 +188,7 @@ def quote_for(plan: RefillPlan) -> RefillQuote:
         if identity is not None
         else ()
     )
-    usd = _cost(whisper_due, "timing", plan) + _cost(text_due, "text", plan)
-    base = RefillQuote(
+    base = RefillScope(
         asset_id=plan.asset_id,
         transcript_revision=plan.transcript_revision,
         source_sha256=plan.source_sha256,
@@ -211,46 +202,10 @@ def quote_for(plan: RefillPlan) -> RefillQuote:
         timing_model=plan.workflow.models.timing_model,
         text_model=plan.workflow.models.text_model if identity is not None else None,
         text_identity=identity,
-        usd=usd,
-        text=quote_text(plan, pieces, asked, whisper_due, text_due, usd),
         digest="",
         failures_known=plan.failures_known,
     )
     return replace(base, digest=_digest(plan, base))
-
-
-def quote_text(
-    plan: RefillPlan,
-    pieces: Sequence[SampleRange],
-    asked: Sequence[SampleRange],
-    whisper_due: Sequence[SampleRange],
-    text_due: Sequence[SampleRange],
-    usd: Decimal,
-) -> str:
-    """보이는 견적 문구 — 모델 이름·금액은 이 문구 안에서만 나온다(D57). 승인이 이 글자를
-    대조한다."""
-    rate = stage1.PCM_SAMPLE_RATE
-    length = sum((Fraction(b - a, rate) for a, b in pieces), Fraction(0))
-    speech = _speech_in(plan.spans, pieces)
-    head = (
-        f"말소리 빈칸 재전사 · 빈칸 {len(pieces)}곳 · 자막 없는 말소리 {float(speech):.1f}초 ·"
-        f" 다시 물을 길이 {float(length):.1f}초."
-    )
-    asks = [f"{plan.workflow.models.timing_model}로 {len(whisper_due)}번"] if whisper_due else []
-    if text_due:
-        label = text_model_label(plan.workflow.models.text_model)
-        asks.append(f"다른 귀({label})로 {len(text_due)}번")
-    cents = usd.quantize(CENT, rounding=ROUND_CEILING)
-    ask = (
-        f" {' · '.join(asks)} 묻습니다(공식 단가로 약 ${cents})."
-        if asks
-        else " 새로 묻는 요청은 없습니다 — 이미 받은 답으로 넣습니다."
-    )
-    reused = len(pieces) - len(whisper_due)
-    reuse = f" 이미 받은 답 {reused}곳은 다시 사지 않습니다." if asks and reused else ""
-    skipped = f" 이미 채운 빈칸 {len(asked)}곳은 다시 묻지 않습니다." if asked else ""
-    tail = " 넣은 줄은 직접 고친 자막이 됩니다."
-    return head + ask + reuse + skipped + tail
 
 
 def _speech_in(spans: Sequence[GapSpan], pieces: Sequence[SampleRange]) -> Fraction:
@@ -262,30 +217,6 @@ def _speech_in(spans: Sequence[GapSpan], pieces: Sequence[SampleRange]) -> Fract
         for a, b in pieces
     )
     return Fraction(samples, stage1.PCM_SAMPLE_RATE)
-
-
-def _cost(pieces: Sequence[SampleRange], role: str, plan: RefillPlan) -> Decimal:
-    """공식 분당 단가 × 분(올림) — 시간 역할은 그 원본의 시간 엔진(D92), 글자 역할은 두 번째 귀.
-
-    시간 엔진의 단가가 재확인 기한을 넘었으면 견적을 만들지 않는다(가격 미정 — 0원이 아니다)."""
-    from vlogsrt.project.raw.capabilities import (
-        ROLE_TEXT,
-        price_per_minute,
-        timing_price_per_minute,
-    )
-
-    seconds = sum((Fraction(b - a, stage1.PCM_SAMPLE_RATE) for a, b in pieces), Fraction(0))
-    exact = Decimal(seconds.numerator) / Decimal(seconds.denominator) / Decimal(60)
-    if role == "text":
-        unit: Decimal | None = price_per_minute(ROLE_TEXT)
-    else:
-        unit = timing_price_per_minute(plan.workflow.models.timing_model, date.today())
-    if unit is None:
-        raise RawWorkspaceError(
-            f"{plan.workflow.models.timing_model}의 단가 재확인 기한이 지나 빈칸 재전사 견적을"
-            " 만들 수 없습니다(가격 미정)"
-        )
-    return (exact * unit).quantize(USD_STEP, rounding=ROUND_CEILING)
 
 
 def _identity(plan: RefillPlan) -> str | None:
@@ -301,27 +232,28 @@ def _glossary_sha(terms: tuple[str, ...]) -> str:
     return glossary_sha(terms)
 
 
-def _digest(plan: RefillPlan, quote: RefillQuote) -> str:
-    """digest — 원본·자막 리비전·PCM·구간·조각·새로 살 조각·모델·설정 지문·글자 신원·금액·문구."""
+def _digest(plan: RefillPlan, scope: RefillScope) -> str:
+    """digest — 원본·자막 리비전·PCM·구간·조각·새로 살 조각·모델·설정 지문·글자 신원.
+
+    금액·문구 칸은 없다(D110) — 같은 재료의 빈칸 재전사 아이디(`refill_id`)가 D110 이전과 다르다
+    (이전 기록은 그대로 읽힌다 — 이미 넣은 조각은 `asked.json`의 표본 범위로 센다)."""
     body = {
         "schema": REFILL_SCHEMA,
-        "asset": quote.asset_id,
-        "source_sha256": quote.source_sha256,
-        "transcript_revision": quote.transcript_revision,
-        "pcm_sha256": quote.pcm_sha256,
-        "audio_start": str(quote.audio_start),
+        "asset": scope.asset_id,
+        "source_sha256": scope.source_sha256,
+        "transcript_revision": scope.transcript_revision,
+        "pcm_sha256": scope.pcm_sha256,
+        "audio_start": str(scope.audio_start),
         "sample_count": plan.sample_count,
-        "spans": [[s.start, s.end, s.speech, s.failed_speech] for s in quote.spans],
-        "pieces": [list(p) for p in quote.pieces],
-        "asked": [list(p) for p in quote.asked],
-        "whisper": [list(p) for p in quote.whisper_due],
-        "text": [list(p) for p in quote.text_due],
-        "timing_model": quote.timing_model,
+        "spans": [[s.start, s.end, s.speech, s.failed_speech] for s in scope.spans],
+        "pieces": [list(p) for p in scope.pieces],
+        "asked": [list(p) for p in scope.asked],
+        "whisper": [list(p) for p in scope.whisper_due],
+        "text": [list(p) for p in scope.text_due],
+        "timing_model": scope.timing_model,
         "settings": asr_settings_fingerprint(RawUnderstandingSettings(), plan.workflow),
-        "text_model": quote.text_model,
-        "text_identity": quote.text_identity,
-        "usd": str(quote.usd),
-        "quote": quote.text,
+        "text_model": scope.text_model,
+        "text_identity": scope.text_identity,
     }
     encoded = json.dumps(body, sort_keys=True, ensure_ascii=False).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
@@ -416,7 +348,7 @@ def _text_cached(plan: RefillPlan, wav: str | None, piece: SampleRange) -> bool:
 
 
 def mark_asked(plan: RefillPlan, pieces: Iterable[SampleRange]) -> None:
-    """원본 자막에 반영한(넣었거나 넣지 않은 이유를 남긴) 조각 — 다음 견적이 다시 사지 않는다."""
+    """원본 자막에 반영한(넣었거나 넣지 않은 이유를 남긴) 조각 — 다음 범위가 다시 사지 않는다."""
     path = plan.folder / "asked.json"
     body = _read(path) or {}
     known = {tuple(p) for p in body.get(plan.pcm_sha256, [])}
@@ -425,26 +357,26 @@ def mark_asked(plan: RefillPlan, pieces: Iterable[SampleRange]) -> None:
     _write(path, body)
 
 
-def claim(plan: RefillPlan, quote: RefillQuote, pieces: Iterable[SampleRange]) -> None:
+def claim(plan: RefillPlan, scope: RefillScope, pieces: Iterable[SampleRange]) -> None:
     """넣기 **전에** 그 실행이 다룬 조각을 `refill_id`로 적는다.
 
-    그 아이디의 줄이 원본 자막에 있으면 다음 견적이 그 조각을 이미 물은 것으로 센다 — 넣은 뒤 장부를
+    그 아이디의 줄이 원본 자막에 있으면 다음 범위가 그 조각을 이미 물은 것으로 센다 — 넣은 뒤 장부를
     쓰기 전에 멈춰도 다시 사지 않는다."""
     path = plan.folder / "claims.json"
     body = _read(path) or {}
-    body[quote.refill_id] = {"pcm": plan.pcm_sha256, "pieces": [list(p) for p in pieces]}
+    body[scope.refill_id] = {"pcm": plan.pcm_sha256, "pieces": [list(p) for p in pieces]}
     _write(path, body)
 
 
-def write_record(plan: RefillPlan, quote: RefillQuote, record: Mapping[str, object]) -> Path:
+def write_record(plan: RefillPlan, scope: RefillScope, record: Mapping[str, object]) -> Path:
     """실행 기록 — 넣은 줄·넣지 않은 줄·실패·글자 경로까지(규칙 9 — 조용히 사라지는 것은 없다).
 
-    실행마다 따로 남는다(`<refill_id>-NNN.json`) — 같은 견적을 다시 승인해도 앞 기록을 덮지 않는다.
+    실행마다 따로 남는다(`<refill_id>-NNN.json`) — 같은 범위를 다시 승인해도 앞 기록을 덮지 않는다.
     """
     folder = plan.folder / "runs"
-    sequence = len(list(folder.glob(f"{quote.refill_id}-*.json"))) + 1
-    path = folder / f"{quote.refill_id}-{sequence:03d}.json"
-    _write(path, {"schema": REFILL_SCHEMA, "digest": quote.digest, **record})
+    sequence = len(list(folder.glob(f"{scope.refill_id}-*.json"))) + 1
+    path = folder / f"{scope.refill_id}-{sequence:03d}.json"
+    _write(path, {"schema": REFILL_SCHEMA, "digest": scope.digest, **record})
     return path
 
 
@@ -515,14 +447,14 @@ class ApprovedRefillTimingProvider:
         if self.audio.pcm_sha256 != self.pcm_sha256:
             raise AnalysisApprovalError("승인이 본 PCM과 지금의 PCM이 다르다 — 보내지 않는다")
         if (int(binding.sample_start), int(binding.sample_end)) not in self.pieces:
-            raise AnalysisApprovalError("견적에 없던 구간이다 — 승인 밖이라 보내지 않는다")
+            raise AnalysisApprovalError("승인한 범위에 없던 구간이다 — 승인 밖이라 보내지 않는다")
         return self.inner.timed_transcript(
             binding=binding, chunk=chunk, settings=settings, on=on, stem=stem, source=source
         )
 
 
 WHISPER_ORIGIN = ApprovedRefillTimingProvider.__name__
-"""whisper 캐시 열쇠의 제공자 칸 — 실행(`type(provider).__name__`)과 견적이 같은 값을 쓴다."""
+"""whisper 캐시 열쇠의 제공자 칸 — 실행(`type(provider).__name__`)과 범위 재기가 같은 값을 쓴다."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -537,29 +469,29 @@ class RefillRun:
 
 
 def run(
-    plan: RefillPlan, quote: RefillQuote, audio: RefillAudio, transport: Any, *, on: date
+    plan: RefillPlan, scope: RefillScope, audio: RefillAudio, transport: Any, *, on: date
 ) -> RefillRun:
-    """승인한 견적대로 묻는다 — 조각을 자르고(로컬), 승인을 만들고, whisper·두 번째 귀에 묻는다."""
-    if audio.pcm_sha256 != quote.pcm_sha256 or audio.source_sha256 != quote.source_sha256:
+    """승인한 범위대로 묻는다 — 조각을 자르고(로컬), 승인을 만들고, whisper·두 번째 귀에 묻는다."""
+    if audio.pcm_sha256 != scope.pcm_sha256 or audio.source_sha256 != scope.source_sha256:
         raise AnalysisApprovalError("승인이 본 원본·PCM과 지금이 다르다 — 보내지 않는다")
     selected = audio.selected()
-    workdir = plan.folder / quote.refill_id
-    shas = _cut_slices(plan, selected, quote.pieces, workdir)
-    approval = _approval(plan, quote, audio, shas, on)
-    spans = tuple(SampleSpan(a, b) for a, b in quote.pieces)
+    workdir = plan.folder / scope.refill_id
+    shas = _cut_slices(plan, selected, scope.pieces, workdir)
+    approval = _approval(plan, scope, audio, shas, on)
+    spans = tuple(SampleSpan(a, b) for a, b in scope.pieces)
     evidence = stage1.transcribe_selected_audio(
         selected,
         spans,
         settings=plan.workflow,
         understanding=RawUnderstandingSettings(),
-        provider=_timing_provider(plan, quote, selected, approval, transport),
+        provider=_timing_provider(plan, scope, selected, approval, transport),
         on=on,
-        request_id=f"refill:{quote.refill_id}:{plan.asset_id}",
+        request_id=f"refill:{scope.refill_id}:{plan.asset_id}",
         workdir=workdir,
         cache_dir=plan.folder / "whisper",
     )
-    utterances, record = _ears(plan, quote, selected, evidence, approval, transport, on, workdir)
-    rows = _rows(utterances, audio.audio_start, quote.refill_id)
+    utterances, record = _ears(plan, scope, selected, evidence, approval, transport, on, workdir)
+    rows = _rows(utterances, audio.audio_start, scope.refill_id)
     answered = tuple((c.sample_start, c.sample_end) for c in evidence.chunks if c.succeeded)
     failed = tuple(
         {"start": c.sample_start, "end": c.sample_end, "failure": c.failure}
@@ -572,7 +504,7 @@ def run(
 def _cut_slices(
     plan: RefillPlan, audio: SelectedAudio, pieces: Sequence[SampleRange], workdir: Path
 ) -> dict[SampleRange, str]:
-    """조각마다 WAV를 저장 바이트 그대로 자른다(로컬·무료) — 그 해시로 다음 견적이 캐시를 잰다."""
+    """조각마다 WAV를 저장 바이트 그대로 자른다(로컬·무료) — 그 해시로 다음 범위가 캐시를 잰다."""
     workdir.mkdir(parents=True, exist_ok=True)
     shas: dict[SampleRange, str] = {}
     for position, piece in enumerate(pieces):
@@ -588,18 +520,18 @@ def _cut_slices(
 
 def _approval(
     plan: RefillPlan,
-    quote: RefillQuote,
+    scope: RefillScope,
     audio: RefillAudio,
     shas: Mapping[SampleRange, str],
     on: date,
 ) -> AsrPhaseApproval:
-    """견적이 본 값 그대로의 1단계 승인 — whisper 상한은 새로 살 조각 수, 글자 칸은 켜졌을 때만."""
+    """범위가 잰 값 그대로의 1단계 승인 — whisper 상한은 새로 살 조각 수, 글자 칸은 켜졌을 때만."""
     text: dict[str, Any] = {}
-    if quote.text_identity is not None and quote.text_due:
-        keys = tuple(_text_key(plan, shas[p], p) for p in quote.text_due)
+    if scope.text_identity is not None and scope.text_due:
+        keys = tuple(_text_key(plan, shas[p], p) for p in scope.text_due)
         text = {
-            "text_model": quote.text_model,
-            "text_identity": quote.text_identity,
+            "text_model": scope.text_model,
+            "text_identity": scope.text_identity,
             "text_chunk_budget": len(keys),
             "text_chunk_keys": keys,
         }
@@ -607,9 +539,9 @@ def _approval(
         approved=True,
         source_sha256=audio.source_sha256,
         audio_stream_index=audio.stream_index,
-        chunk_budget=max(1, len(quote.whisper_due)),
+        chunk_budget=max(1, len(scope.whisper_due)),
         settings_fingerprint=asr_settings_fingerprint(RawUnderstandingSettings(), plan.workflow),
-        timing_model=quote.timing_model,
+        timing_model=scope.timing_model,
         approved_on=on.isoformat(),
         **text,
     )
@@ -636,7 +568,7 @@ def _transport_pair(transport: Any) -> tuple[Any, Any]:
 
 def _timing_provider(
     plan: RefillPlan,
-    quote: RefillQuote,
+    scope: RefillScope,
     audio: SelectedAudio,
     approval: AsrPhaseApproval,
     transport: Any,
@@ -657,13 +589,13 @@ def _timing_provider(
         gate=CountingAsrGate(limit=approval.chunk_budget),
     )
     return ApprovedRefillTimingProvider(
-        inner=inner, audio=audio, pcm_sha256=quote.pcm_sha256, pieces=frozenset(quote.whisper_due)
+        inner=inner, audio=audio, pcm_sha256=scope.pcm_sha256, pieces=frozenset(scope.whisper_due)
     )
 
 
 def _ears(
     plan: RefillPlan,
-    quote: RefillQuote,
+    scope: RefillScope,
     audio: SelectedAudio,
     evidence: stage1.AsrEvidence,
     approval: AsrPhaseApproval,
@@ -676,22 +608,22 @@ def _ears(
     발화 아이디는 글자 경로 **앞에서** 넣을 줄의 아이디로 바꾼다 — 사이 글자 기록(`unplaced`)의 앞뒤
     줄이 원본 자막의 그 줄을 가리킨다(검증 지적 8c). 시각·순서는 그대로다."""
     utterances = tuple(
-        replace(item, utterance_id=f"refill_{quote.refill_id}_{ordinal:04d}")
+        replace(item, utterance_id=f"refill_{scope.refill_id}_{ordinal:04d}")
         for ordinal, item in enumerate(stage1.utterance_evidence(audio, evidence))
     )
-    if quote.text_identity is None:
+    if scope.text_identity is None:
         return utterances, None
     request = source_text.TextPassRequest(
         settings=SOURCE_TEXT_SETTINGS,
         glossary=plan.glossary,
         workflow=plan.workflow,
         on=on,
-        request_id=f"refill:{quote.refill_id}:{plan.asset_id}",
+        request_id=f"refill:{scope.refill_id}:{plan.asset_id}",
         workdir=workdir,
         cache_dir=plan.folder / "text",
         origin=ORIGIN_LIVE,
     )
-    provider = _text_provider(plan, quote, audio, approval, transport, request)
+    provider = _text_provider(plan, scope, audio, approval, transport, request)
     outcomes = source_text.run_text_pass(audio, evidence, request, provider)
     result = source_text.apply_text_pass(utterances, outcomes, request, audio.sample_rate)
     return result.utterances, result.record
@@ -699,18 +631,18 @@ def _ears(
 
 def _text_provider(
     plan: RefillPlan,
-    quote: RefillQuote,
+    scope: RefillScope,
     audio: SelectedAudio,
     approval: AsrPhaseApproval,
     transport: Any,
     request: source_text.TextPassRequest,
 ) -> source_text.ApprovedPhaseTextProvider | None:
     """두 번째 귀의 경계 — 승인이 글자를 묶었을 때만(새로 살 글자 조각이 없으면 캐시만 쓴다)."""
-    if approval.text_model is None or quote.text_identity is None:
+    if approval.text_model is None or scope.text_identity is None:
         return None
     try:
         require_text_approval(
-            approval, workflow=plan.workflow, identity=quote.text_identity, on=request.on
+            approval, workflow=plan.workflow, identity=scope.text_identity, on=request.on
         )
     except AnalysisApprovalError as error:
         log.warn(f"빈칸 재전사: 글자 요청을 보내지 않습니다 — whisper 글자 그대로 둡니다: {error}")
@@ -724,7 +656,7 @@ def _text_provider(
         audio=audio,
         approval=approval,
         approved_model=str(approval.text_model),
-        approved_identity=quote.text_identity,
+        approved_identity=scope.text_identity,
         gate=CountingAsrGate(limit=approval.text_chunk_budget),
         approved_keys=None if keys is None else frozenset(keys),
     )
@@ -751,15 +683,14 @@ __all__ = [
     "ApprovedRefillTimingProvider",
     "RefillAudio",
     "RefillPlan",
-    "RefillQuote",
+    "RefillScope",
     "RefillRun",
     "claim",
     "latest_record",
     "mark_asked",
     "records",
     "skipped_rows",
-    "quote_for",
-    "quote_text",
+    "scope_for",
     "run",
     "write_record",
 ]

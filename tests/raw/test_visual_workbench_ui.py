@@ -3173,7 +3173,7 @@ def test_caption_workbench_save_and_gates(tmp_path: Path) -> None:
     # 등록 전에는 작업대가 안내다.
     assert "data-vl-empty" in server.caption_workbench_value(root)
 
-    server.caption_estimate_view(signature, "run-1")
+    server.caption_prepare_view(signature, "run-1")
     note = server.caption_run_view(signature, "run-1", True)
     assert _wait_terminal(server, root, note.split("`")[1]).status == "succeeded"
     server.caption_review_view(signature, "run-1")
@@ -4198,7 +4198,7 @@ def test_advanced_caption_context_rejects_old_head_and_aba(
     root = server.workspace_root()
     assert root is not None
     server.caption_register_view(signature, str(video), "f1", "자동(첫 트랙)")
-    server.caption_estimate_view(signature, "run-1")
+    server.caption_prepare_view(signature, "run-1")
     note = server.caption_run_view(signature, "run-1", True)
     assert _wait_terminal(server, root, note.split("`")[1]).status == "succeeded"
     server.caption_review_view(signature, "run-1")
@@ -4265,7 +4265,7 @@ def test_advanced_caption_context_rejects_old_head_and_aba(
     server.open_workspace_view(str(root))
     signature = server.current_signature()
     server.caption_register_view(signature, str(video), "f1", "자동(첫 트랙)")
-    server.caption_estimate_view(signature, "run-1")
+    server.caption_prepare_view(signature, "run-1")
     server.caption_review_view(signature, "run-1")
     with pytest.raises(gr.Error, match="토큰"):
         handlers["caption-edit"](
@@ -4416,7 +4416,7 @@ def test_caption_token_rejects_old_aba(tmp_path: Path) -> None:
     root = server.workspace_root()
     assert root is not None
     server.caption_register_view(signature, str(video), "f1", "자동(첫 트랙)")
-    server.caption_estimate_view(signature, "run-1")
+    server.caption_prepare_view(signature, "run-1")
     note = server.caption_run_view(signature, "run-1", True)
     assert _wait_terminal(server, root, note.split("`")[1]).status == "succeeded"
     server.caption_review_view(signature, "run-1")
@@ -4431,7 +4431,7 @@ def test_caption_token_rejects_old_aba(tmp_path: Path) -> None:
     reopened = server.open_workspace_view(str(root))
     signature = server.current_signature()
     server.caption_register_view(signature, str(video), "f1", "자동(첫 트랙)")
-    server.caption_estimate_view(signature, "run-1")  # 실행 신원을 다시 세운다(로컬)
+    server.caption_prepare_view(signature, "run-1")  # 실행 신원을 다시 세운다(로컬)
     server.caption_review_view(signature, "run-1")
     model2 = _model_of(server.caption_workbench_value(root))
     assert model2["token"] != token_cap1
