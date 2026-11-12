@@ -107,6 +107,16 @@ def fresh_process_caches() -> Iterator[None]:
 
 
 @pytest.fixture(autouse=True)
+def private_picker_cache(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """선택 창 앱 캐시(D106)를 시험마다 따로 둔다 — 시험은 진짜 `~/Library/Caches`에 쓰지 않는다."""
+    from ui import chooser
+
+    cache = tmp_path / "picker-cache"
+    monkeypatch.setattr(chooser, "_picker_cache_dir", lambda: cache)
+    return cache
+
+
+@pytest.fixture(autouse=True)
 def offline_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("VLOGSRT_OFFLINE", "1")
     monkeypatch.setenv("VLOGSRT_LOG_LEVEL", "ERROR")

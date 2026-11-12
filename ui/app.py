@@ -14,6 +14,7 @@ import argparse
 import os
 import sys
 import tempfile
+import threading
 import webbrowser
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -21,7 +22,7 @@ from pathlib import Path
 
 import uvicorn
 
-from ui import activity_log, service, workspace_service
+from ui import activity_log, chooser, service, workspace_service
 from ui.instance import UiInstance
 from vlogsrt import log, preprocess, scratch_dirs
 
@@ -129,8 +130,17 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         # 서버를 띄우는 자리에서만 — 죽은 프로세스가 남긴 pid 임시 폴더를 치운다(D63 H).
         scratch_dirs.sweep_dead_scratch()
+        _start_picker_warmup()
         with _server_activity():
             return _serve(port, url, open_browser=not args.no_browser)
+
+
+def _start_picker_warmup() -> None:
+    """첫 「찾아보기」가 컴파일을 기다리지 않게 선택 창 앱을 뒤에서 미리 만든다(D106).
+
+    누르기와 겹쳐도 `chooser._adopt_compiled`의 원자적 이름 바꾸기가 풀므로 잠금이 없다.
+    """
+    threading.Thread(target=chooser.warm_picker_app, daemon=True, name="picker-warm").start()
 
 
 def _serve(port: int, url: str, *, open_browser: bool) -> int:

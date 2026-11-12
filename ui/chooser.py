@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
 import tempfile
 from collections.abc import Callable
 from pathlib import Path
+
+from vlogsrt import log
 
 WORKSPACE_KIND = "workspace"
 FOLDER_KIND = "folder"
@@ -19,6 +23,10 @@ SRT_KIND = "srt"
 CHOOSER_CONCURRENCY_ID = "native-chooser"
 DIALOG_TIMEOUT_SECONDS = 120.0
 VIDEO_DIALOG_SUFFIXES = (".mp4", ".mov", ".m4v", ".mkv", ".webm", ".avi", ".mp3", ".wav", ".m4a")
+PICKER_CACHE_NAME = "vlogsrt"
+PICKER_APP_NAME = "vlogsrt Picker.app"
+PICKER_SHA_CHARS = 12
+PICKER_COMPILE_TIMEOUT_SECONDS = 15
 
 
 class ChooserError(RuntimeError):
@@ -97,6 +105,83 @@ def _stop_owned_helper(result: Path, app: Path) -> None:
         pass
 
 
+def _picker_cache_dir() -> Path:
+    """The per-user cache root — the one place tests redirect away from the real home."""
+    return Path.home() / "Library" / "Caches" / PICKER_CACHE_NAME
+
+
+def _picker_app_path() -> Path:
+    """Keyed by the JXA text at call time: a changed script gets a fresh bundle (D106)."""
+    sha = hashlib.sha256(PICKER_JXA.encode("utf-8")).hexdigest()[:PICKER_SHA_CHARS]
+    return _picker_cache_dir() / f"picker-{sha}" / PICKER_APP_NAME
+
+
+def _compile_picker(kind: str, app: Path) -> None:
+    compiled = subprocess.run(
+        ["/usr/bin/osacompile", "-l", "JavaScript", "-o", str(app), "-e", PICKER_JXA],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=PICKER_COMPILE_TIMEOUT_SECONDS,
+    )
+    if compiled.returncode:
+        raise _failure(kind, compiled)
+
+
+def _adopt_compiled(staged: Path, final: Path) -> None:
+    """Atomically hang a staged bundle folder; if another click won the race, keep its bundle.
+
+    The loser's staged folder is left for the caller's cleanup.
+    """
+    try:
+        os.rename(staged, final)
+    except OSError:
+        if not (final / PICKER_APP_NAME / "Contents" / "MacOS").is_dir():
+            raise
+
+
+def _stage_dir(final: Path) -> Path:
+    """A staging folder beside the final one — same filesystem, so the rename is atomic."""
+    final.parent.mkdir(parents=True, exist_ok=True)
+    return Path(tempfile.mkdtemp(prefix=f".{final.name}.tmp-{os.getpid()}-", dir=final.parent))
+
+
+def _ensure_picker_app(kind: str, scratch: Path | None = None) -> Path:
+    """Compile once into the user cache and reuse it — LaunchServices then knows the app.
+
+    If the cache can't be prepared, compile into `scratch` as before (one call only) rather
+    than adding a new way to fail; without `scratch` the error propagates.
+    """
+    app = _picker_app_path()
+    if (app / "Contents" / "MacOS").is_dir():
+        return app
+    try:
+        staged = _stage_dir(app.parent)
+    except OSError as error:
+        if scratch is None:
+            raise
+        log.warn(f"선택 창 캐시를 쓸 수 없어 이번만 임시로 만듭니다: {error}")
+        _compile_picker(kind, scratch / PICKER_APP_NAME)
+        return scratch / PICKER_APP_NAME
+    try:
+        _compile_picker(kind, staged / PICKER_APP_NAME)
+        _adopt_compiled(staged, app.parent)
+    finally:
+        if staged.exists():
+            shutil.rmtree(staged, ignore_errors=True)
+    return app
+
+
+def warm_picker_app() -> None:
+    """서버 시작 때 미리 컴파일한다 — 첫 「찾아보기」도 osacompile을 기다리지 않는다(D106)."""
+    if sys.platform != "darwin":
+        return
+    try:
+        _ensure_picker_app(FOLDER_KIND)
+    except (ChooserError, OSError, subprocess.TimeoutExpired) as error:
+        log.warn(f"선택 창 미리 만들기 실패 — 누를 때 다시 만듭니다: {error}")
+
+
 def applescript_path_chooser(kind: str, timeout: float = DIALOG_TIMEOUT_SECONDS) -> str | None:
     """Launch one native panel; return its path, None on cancel, or a useful error."""
     if sys.platform != "darwin":
@@ -104,18 +189,10 @@ def applescript_path_chooser(kind: str, timeout: float = DIALOG_TIMEOUT_SECONDS)
     if kind not in (WORKSPACE_KIND, FOLDER_KIND, VIDEO_KIND, SRT_KIND):
         raise ChooserError(f"모르는 선택기 종류: {kind}")
     with tempfile.TemporaryDirectory(prefix="vlogsrt-picker-") as directory:
-        app = Path(directory) / "vlogsrt Picker.app"
+        app = Path(directory) / PICKER_APP_NAME
         result = Path(directory) / "result.json"
         try:
-            compiled = subprocess.run(
-                ["/usr/bin/osacompile", "-l", "JavaScript", "-o", str(app), "-e", PICKER_JXA],
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=15,
-            )
-            if compiled.returncode:
-                raise _failure(kind, compiled)
+            app = _ensure_picker_app(kind, Path(directory))
             opened = subprocess.run(
                 ["/usr/bin/open", "-W", "-n", str(app), "--args", kind, str(result)],
                 capture_output=True,
