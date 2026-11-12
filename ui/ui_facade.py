@@ -1738,10 +1738,14 @@ _SHELL_CSS = """
 /* 승인 칸(#vl-quote) — 승인 범위·교차 확인·초안 결과·영어 SRT 변환(D114). 넓은 화면은 패널 열 위,
    1050px 이하는 명령 줄 바로 아래(재생기 앞). 칸은 제 격자 칸 안에서 자란다. 견적 문구는 없다
    (D110 — 승인은 확인 한 번이다). */
-#vl-quote { grid-area: quote; min-width: 0; gap: 8px; }
+#vl-quote { grid-area: quote; min-width: 0; gap: 8px; flex-wrap: nowrap; }
+#vl-quote > * { flex-shrink: 0; }
 /* 넓은 화면(세 열)에서 승인 칸은 재생기와 같은 행들을 나눠 쓴다 — 범위·초안 카드가 자라면
    재생기 행이 함께 늘어나 타임라인(추천 구간)이 화면 밖으로 밀렸다(1440x900 실측: 재생기
-   983px · 레일 y=1198). 칸에 상한을 두고 그 안에서 스크롤한다. */
+   983px · 레일 y=1198). 칸에 상한을 두고 그 안에서 스크롤한다. 그라디오 열의 기본
+   `flex-wrap: wrap`이면 상한을 넘은 칸(초안 카드·영어 SRT·자막 입히기)이 옆 열로 넘어가
+   `overflow-x: hidden`에 잘려 닿을 수 없었다(1440x900 실측: 칸 305px · 내용 폭 1238px) —
+   줄바꿈을 끄고 칸이 줄어들지 않게 해 세로로만 스크롤한다. */
 @media (min-width: 1051px) {
   #vl-quote { max-height: 46vh; overflow: hidden auto;
     scrollbar-color: var(--vl-scrollbar); }

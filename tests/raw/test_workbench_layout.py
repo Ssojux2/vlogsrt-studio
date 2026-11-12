@@ -327,6 +327,18 @@ def test_grid_areas_at_three_breakpoints() -> None:
     assert "vl-quote-note" not in css
 
 
+def test_the_capped_quote_column_scrolls_down_instead_of_wrapping_sideways() -> None:
+    """넓은 화면의 승인 칸은 높이 상한 안에서 세로로만 스크롤한다.
+
+    그라디오 열은 기본이 `flex-wrap: wrap`이라 상한을 넘은 칸(초안 카드·영어 SRT·자막 입히기)이
+    옆 열로 넘어가 `overflow-x: hidden`에 잘렸다(1440x900 실측: 칸 305px · 내용 폭 1238px).
+    """
+    css = ui_facade.WORKBENCH_CSS
+    assert "#vl-quote { max-height: 46vh; overflow: hidden auto;" in css
+    assert "#vl-quote { grid-area: quote; min-width: 0; gap: 8px; flex-wrap: nowrap; }" in css
+    assert "#vl-quote > * { flex-shrink: 0; }" in css
+
+
 @pytest.mark.parametrize("side", [0, 1], ids=["light", "dark"])
 def test_new_shell_text_pairs_hold_contrast(side: int) -> None:
     """B단계가 새로 놓은 글자·땅 짝 — 카드 위 수·배지, 연결 방식 표지, 끝난 단계 표."""
