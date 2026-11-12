@@ -21,6 +21,7 @@ import sys
 import tempfile
 import threading
 import time
+from collections import deque
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager, suppress
 from contextvars import ContextVar, Token
@@ -160,6 +161,105 @@ class ProcessActivity:
 class _Running:
     activity: ProcessActivity
     progress_file: Path | None
+
+
+# ── 끝난 외부 프로세스의 경과 시간(성능 계획 Phase 0, D120) ─────────────────────
+# 작업 기록(`jobs`)은 만든 시각과 마지막 갱신뿐이라 줄 서서 기다린 시간과 실제로 돈 시간을 가르지
+# 못한다(169개 프록시가 한꺼번에 줄 서서 「평균 500초」로 보였다 — 실제는 개당 17초쯤). 모든
+# ffmpeg·ffprobe가 지나는 `_tracked` 한 자리에서 단조 시계로 잰다. 표시만 한다 — argv·출력 바이트·
+# 지문·캐시 열쇠와 무관하다.
+
+
+@dataclass(frozen=True, slots=True)
+class ProcessTimingSettings:
+    """경과 시간 기록의 크기 — **외부 근거 없는 조정 대상**(D120). 최근 줄 200개는 분석 한 편의
+    ffmpeg·ffprobe(원본 하나에 수십 번)를 넉넉히 담는다. 로그 한도 10초는 ffprobe·썸네일(1초 안)은
+    넘기고 프록시·미리보기·렌더 조각만 서버 로그에 한 줄씩 남긴다. 어느 지문·캐시 열쇠·승인에도
+    없다."""
+
+    recent: int = 200
+    log_seconds: float = 10.0
+
+    def __post_init__(self) -> None:
+        if isinstance(self.recent, bool) or not isinstance(self.recent, int) or self.recent < 1:
+            raise ValueError(f"최근 줄 수는 1 이상 정수여야 합니다: {self.recent!r}")
+        if not self.log_seconds >= 0:
+            raise ValueError(f"로그 한도(초)는 0 이상이어야 합니다: {self.log_seconds!r}")
+
+
+PROCESS_TIMING = ProcessTimingSettings()
+
+
+@dataclass(frozen=True, slots=True)
+class FinishedProcess:
+    """끝난 외부 프로세스 한 줄 — `outcome`은 돌아왔는가(`finished`, 종료 코드와 무관) 예외로
+    끝났는가(`raised` — 시간 한도·취소·띄우지 못함)다."""
+
+    step: str
+    tool: str
+    input_path: str | None
+    seconds: float
+    outcome: str
+    finished_at: float
+
+
+@dataclass(frozen=True, slots=True)
+class StepTotal:
+    """(단계, 도구)마다 끝난 프로세스의 수·합·최대 초 — 서버가 뜬 뒤부터 센다."""
+
+    step: str
+    tool: str
+    count: int
+    total_seconds: float
+    max_seconds: float
+
+
+_TIMING_CLOCK: Callable[[], float] = time.monotonic
+_RECENT: deque[FinishedProcess] = deque(maxlen=PROCESS_TIMING.recent)
+_TOTALS: dict[tuple[str, str], StepTotal] = {}
+
+
+def reset_process_timing() -> None:
+    """기록을 비우고 고리 크기를 지금 설정으로 다시 잡는다(시험·측정 스크립트용)."""
+    global _RECENT
+    with _ACTIVE_LOCK:
+        _RECENT = deque(maxlen=PROCESS_TIMING.recent)
+        _TOTALS.clear()
+
+
+def recent_processes() -> tuple[FinishedProcess, ...]:
+    """최근에 끝난 외부 프로세스 — 오래된 것부터."""
+    with _ACTIVE_LOCK:
+        return tuple(_RECENT)
+
+
+def process_step_totals() -> tuple[StepTotal, ...]:
+    """단계별 합계 — 오래 걸린(합이 큰) 것부터."""
+    with _ACTIVE_LOCK:
+        totals = list(_TOTALS.values())
+    return tuple(sorted(totals, key=lambda row: (-row.total_seconds, row.step, row.tool)))
+
+
+def _record_finished(activity: ProcessActivity, seconds: float, outcome: str) -> None:
+    finished = FinishedProcess(
+        step=activity.step, tool=activity.tool, input_path=activity.input_path,
+        seconds=seconds, outcome=outcome, finished_at=time.time(),
+    )  # fmt: skip
+    key = (activity.step, activity.tool)
+    with _ACTIVE_LOCK:
+        _RECENT.append(finished)
+        before = _TOTALS.get(key)
+        _TOTALS[key] = StepTotal(
+            step=activity.step,
+            tool=activity.tool,
+            count=1 + (before.count if before else 0),
+            total_seconds=seconds + (before.total_seconds if before else 0.0),
+            max_seconds=max(seconds, before.max_seconds if before else 0.0),
+        )
+    if seconds >= PROCESS_TIMING.log_seconds:
+        name = Path(activity.input_path).name if activity.input_path else activity.tool
+        ending = "" if outcome == "finished" else " (예외로 끝남)"
+        log.info(f"외부 프로세스 끝 · {activity.step} · {name} · {seconds:.1f}초{ending}")
 
 
 _ACTIVE: dict[int, _Running] = {}
@@ -318,13 +418,18 @@ def _tracked(command: list[str], step: str | None, timeout: float | None) -> Ite
     )  # fmt: skip
     with _ACTIVE_LOCK:
         _ACTIVE[process_id] = _Running(activity, progress)
+    started = _TIMING_CLOCK()
+    outcome = "raised"
     try:
         yield argv
+        outcome = "finished"
     finally:
+        seconds = max(0.0, _TIMING_CLOCK() - started)
         with _ACTIVE_LOCK:
             _ACTIVE.pop(process_id, None)
         if progress is not None:
             _remove_progress(progress)
+        _record_finished(activity, seconds, outcome)
 
 
 def _remove_progress(path: Path) -> None:

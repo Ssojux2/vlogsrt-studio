@@ -42,8 +42,8 @@ os.environ.setdefault("VLOGSRT_OFFLINE", "1")
 from tests.raw import render_cost_fixture as fixture  # noqa: E402
 from tests.raw.test_proposal_queue import _with_tiers  # noqa: E402
 from tests.raw.test_review_workspace import _wait_terminal  # noqa: E402
-from ui.workspace_service import RawWorkspaceUi  # noqa: E402
-from vlogsrt import log  # noqa: E402
+from ui.workspace_service import STATUS_SENT_CELLS, RawWorkspaceUi  # noqa: E402
+from vlogsrt import log, preprocess  # noqa: E402
 from vlogsrt.project.raw import ingest, sync_report  # noqa: E402
 from vlogsrt.project.raw.review_workspace import ReviewWorkspaceFacade  # noqa: E402
 from vlogsrt.project.raw.service import VISUAL_PREPARE_JOB_KIND, RawWorkspaceService  # noqa: E402
@@ -154,6 +154,23 @@ def _report(rows: list[dict[str, Any]]) -> None:
         )
         per_call = {name: row["calls"][name] / len(walls) for name in fixture.COUNTED_NAMES}
         log.out("  한 번에 " + " · ".join(f"{k} {v:g}" for k, v in per_call.items() if v))
+    _report_processes()
+
+
+def _report_processes() -> None:
+    """측정 동안 끝난 외부 프로세스의 단계별 합계(D120).
+
+    열기·카드 누르기가 건 미리보기·썸네일 작업의 몫이다.
+    """
+    totals = preprocess.process_step_totals()
+    if not totals:
+        return
+    log.out("외부 프로세스(단계 · 도구): 수 · 합 · 평균 · 최대 초")
+    for row in totals:
+        log.out(
+            f"  {row.step} · {row.tool}: {row.count} · {row.total_seconds:.1f}"
+            f" · {row.total_seconds / row.count:.2f} · {row.max_seconds:.1f}"
+        )
 
 
 def _settled(server: RawWorkspaceUi, root: Path) -> Callable[[int], None]:
@@ -189,7 +206,7 @@ def _actions(server: RawWorkspaceUi, root: Path, signature: str, counts: Counter
     summary = server.raw.analysis_overview(root)
     if summary is not None and server._quick:
         server._quick["revision"] = summary.revision.revision_id  # 실사용 줄이 읽을 리비전
-    sent = (None,) * 5
+    sent = (None,) * len(STATUS_SENT_CELLS)  # 이 세션이 지난 틱에 보낸 값 — 칸마다 하나
     rows.append(
         _measure(
             "1초 상태 틱",

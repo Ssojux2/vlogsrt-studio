@@ -233,6 +233,7 @@ COUNTED_METHODS: tuple[tuple[str, type, str], ...] = (
     ("jobs.list", JobStore, "_read_jobs"),
     ("jobs.by_ids", JobStore, "_read_by_ids"),
     ("analysis_usage_summary", RawWorkspaceService, "analysis_usage_summary"),
+    ("tier_report_for_row", RawWorkspaceService, "_tier_report_for_row"),
     ("visual_workbench_render", RawWorkspaceUi, "visual_workbench_render"),
     ("start_upkeep", RawWorkspaceService, "start_upkeep"),
     ("start_sync_upkeep", RawWorkspaceService, "start_sync_upkeep"),

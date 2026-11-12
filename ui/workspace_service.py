@@ -749,6 +749,7 @@ WORKBENCH_PROGRESS_JOB_KINDS = frozenset(
 ACTIVITY_ROUTE = ui_facade.ACTIVITY_ROUTE
 """「기록」 판의 서버 쪽(D61) — 읽기만 하는 GET 하나. 다른 경로와 같은 Host/Origin 가드를 지난다."""
 ACTIVITY_LOG_PAGE = ui_facade.ACTIVITY_VIEW.server_log_lines
+ACTIVITY_TIMING_ROWS = ui_facade.ACTIVITY_VIEW.timing_rows
 """한 번에 보내는 서버 줄 상한 — 판도 이만큼만 그린다(처음 열 때 몇 시간치를 보내지 않는다)."""
 ACTIVITY_JOB_LABELS = {
     raw_service.INGEST_JOB_KIND: "원본 가져오기",
@@ -1023,6 +1024,35 @@ def _process_row(
         "percent": percent,
         "text": ui_facade.process_row_text(item.step, name, elapsed, item.timeout_seconds, percent),
     }
+
+
+def _process_timings() -> dict[str, object]:
+    """끝난 외부 프로세스의 경과 시간(성능 계획 Phase 0, D120) — 단계별 합계와 가장 새 줄부터.
+
+    `jobs` 기록은 줄 서서 기다린 시간까지 담는다 — 이것은 프로세스가 실제로 돈 시간이다.
+    """
+    steps = [
+        {
+            "step": row.step,
+            "tool": row.tool,
+            "count": row.count,
+            "total_seconds": round(row.total_seconds, 1),
+            "max_seconds": round(row.max_seconds, 1),
+            "mean_seconds": round(row.total_seconds / row.count, 1),
+        }
+        for row in preprocess.process_step_totals()[:ACTIVITY_TIMING_ROWS]
+    ]
+    recent = [
+        {
+            "step": row.step,
+            "name": Path(row.input_path).name if row.input_path else row.tool,
+            "tool": row.tool,
+            "seconds": round(row.seconds, 1),
+            "outcome": row.outcome,
+        }
+        for row in reversed(preprocess.recent_processes()[-ACTIVITY_TIMING_ROWS:])
+    ]
+    return {"steps": steps, "recent": recent}
 
 
 def _job_row(job: raw_service.JobRecord, now: datetime) -> dict[str, object]:
@@ -11540,7 +11570,13 @@ class RawWorkspaceUi:
                 request.headers.get("origin"), request.headers.get("referer"), self.port
             ):
                 return JSONResponse({"detail": "허용되지 않은 변경 요청이다"}, status_code=403)
-            return await call_next(request)
+            started = time.perf_counter()
+            response = await call_next(request)
+            # 성능 계획 Phase 0(D120) — 응답 머리까지의 서버 몫.
+            # 큐 이벤트 결과·흘려 보내는 본문은 재지 않는다.
+            elapsed_ms = (time.perf_counter() - started) * 1000
+            response.headers["Server-Timing"] = f"app;dur={elapsed_ms:.1f}"
+            return response
 
     def _add_media_routes(self, app: FastAPI) -> None:
         @app.get("/media/{file_id}")
@@ -11577,6 +11613,7 @@ class RawWorkspaceUi:
             "processes": rows,
             "jobs": jobs,
             "log": self._activity_lines(after),
+            "timings": _process_timings(),
         }
 
     def _activity_names(self, root: Path | None) -> dict[str, tuple[str, float | None]]:

@@ -233,6 +233,38 @@ def test_no_workspace_still_lists_processes_and_log(
     assert body["jobs"] == []
 
 
+def test_finished_process_timings_show_step_totals_and_the_latest_rows(
+    tmp_path: Path, local_socket: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """성능 계획 Phase 0(D120) — 끝난 외부 프로세스의 단계별 합계와 최근 줄을 읽기만 한다."""
+    server = workspace_service.RawWorkspaceUi(port=PORT, state_path=tmp_path / "state.json")
+    server.activity_log = ActivityLog()
+    totals = tuple(
+        preprocess.StepTotal(step=f"단계{i}", tool="ffmpeg", count=i + 1,
+                             total_seconds=100.0 - i, max_seconds=9.25)
+        for i in range(workspace_service.ACTIVITY_TIMING_ROWS + 3)
+    )  # fmt: skip
+    recent = tuple(
+        preprocess.FinishedProcess(step="썸네일 추출", tool="ffmpeg", input_path=f"/x/{i}.mov",
+                                   seconds=0.125, outcome="finished", finished_at=1.0)
+        for i in range(workspace_service.ACTIVITY_TIMING_ROWS + 3)
+    )  # fmt: skip
+    monkeypatch.setattr(workspace_service.preprocess, "process_step_totals", lambda: totals)
+    monkeypatch.setattr(workspace_service.preprocess, "recent_processes", lambda: recent)
+    timings = _client(server).get("/vl-activity").json()["timings"]
+    limit = workspace_service.ACTIVITY_TIMING_ROWS
+    assert len(timings["steps"]) == limit and len(timings["recent"]) == limit
+    assert timings["steps"][0] == {
+        "step": "단계0", "tool": "ffmpeg", "count": 1,
+        "total_seconds": 100.0, "max_seconds": 9.2, "mean_seconds": 100.0,
+    }  # fmt: skip
+    # 최근 줄은 가장 새것부터, 이름은 파일 이름만.
+    assert timings["recent"][0] == {
+        "step": "썸네일 추출", "name": f"{limit + 2}.mov", "tool": "ffmpeg",
+        "seconds": 0.1, "outcome": "finished",
+    }  # fmt: skip
+
+
 # ── 경로 — 읽기만 · 가드 ────────────────────────────────────────────────────
 
 
@@ -260,6 +292,18 @@ def test_the_route_reads_only(
     assert _workspace_bytes(root) == before
     assert sorted(path.relative_to(root) for path in root.rglob("*")) == files_before
     assert submitted == []
+
+
+def test_every_response_carries_its_server_time(ui: workspace_service.RawWorkspaceUi) -> None:
+    """성능 계획 Phase 0(D120) — 브라우저 개발 도구가 서버 몫을 보도록 `Server-Timing`을 단다.
+
+    그라디오 이벤트 결과는 큐의 이벤트 흐름으로 가므로 여기 보이는 것은 그 밖의 경로다.
+    """
+    response = _client(ui).get("/vl-activity")
+    assert response.status_code == 200
+    timing = response.headers["server-timing"]
+    assert timing.startswith("app;dur=")
+    assert float(timing.removeprefix("app;dur=")) >= 0
 
 
 def test_the_route_is_behind_the_same_host_guard(ui: workspace_service.RawWorkspaceUi) -> None:

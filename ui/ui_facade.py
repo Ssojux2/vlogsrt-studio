@@ -685,6 +685,7 @@ class ActivityViewSettings:
     `idle_after_empty_polls`: 빈 응답이 이만큼 이어지면 한가하다.
     `server_log_lines`: 한 번에 보내는 서버 줄 상한이자 「기록」 판이 그리는 줄 수.
     `reply_hold_ms`: 단추 응답이 띠에 머무는 동안 — 그 뒤에야 도는 일의 머리줄이 띠를 덮는다.
+    `timing_rows`: `/vl-activity`의 끝난 프로세스 경과 시간(D120) — 단계별 합계·최근 줄 각각의 상한.
     """
 
     poll_busy_ms: int = 2000
@@ -692,6 +693,7 @@ class ActivityViewSettings:
     idle_after_empty_polls: int = 2
     server_log_lines: int = 500
     reply_hold_ms: int = 5000
+    timing_rows: int = 20
 
 
 ACTIVITY_VIEW = ActivityViewSettings()
