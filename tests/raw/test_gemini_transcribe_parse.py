@@ -101,6 +101,38 @@ def test_a_rest_silent_chunk_is_an_unconfirmed_empty_not_a_failure() -> None:
     assert parsed.words == () and parsed.output_text == ""
 
 
+SILENT_REST = {
+    "created": "2026-11-12T05:04:02Z",
+    "model": "gemini-3.5-transcribe",
+    "object": "interaction",
+    "service_tier": "standard",
+    "status": "completed",
+    "updated": "2026-11-12T05:04:02Z",
+    "usage": {"total_input_tokens": 80, "total_output_tokens": 0},
+}
+"""실제 무음 조각(2026-11-12, 말소리 0초 클립 넷)이 받은 최상위 칸 그대로 — 글 칸도 steps도 없다."""
+
+
+def test_a_completed_rest_response_without_steps_is_an_unconfirmed_empty() -> None:
+    parsed = _parse(dict(SILENT_REST))
+    assert parsed.words == () and parsed.output_text == ""
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {key: value for key, value in SILENT_REST.items() if key != "usage"},
+        {**SILENT_REST, "outputs": []},
+        {**SILENT_REST, "status": "failed"},
+    ],
+)
+def test_a_stepless_response_is_empty_only_when_completed_billed_and_metadata_only(
+    payload: dict[str, Any],
+) -> None:
+    with pytest.raises(gtp.GeminiTranscribeResponseError):
+        _parse(payload)
+
+
 def test_a_silent_chunk_is_an_unconfirmed_empty_not_a_failure() -> None:
     parsed = _parse(_fixture("transcribe_silent.json"))
     assert parsed.words == () and parsed.output_text == ""

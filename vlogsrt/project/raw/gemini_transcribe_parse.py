@@ -33,6 +33,12 @@ COMPLETED = "completed"
 WORD_INFO = "word_info"
 TEXT = "text"
 """REST 응답에서 전체 글을 싣는 content 항목의 종류(W-52b2)."""
+USAGE = "usage"
+METADATA_KEYS = frozenset(
+    {"id", "created", "updated", "model", "object", "service_tier", "status", USAGE}
+)
+"""글을 싣지 않는 최상위 칸 — 실제 무음 조각(2026-11-12)의 REST 응답은 이 칸만 있었다. 이 밖의 칸이
+하나라도 있으면 모양이 바뀐 것일 수 있어 빈 결과로 받지 않는다."""
 ALIGNED = "aligned"
 FALLBACK = "fallback"
 """단어 글자를 `output_text`에서 차례로 찾지 못했다 — 단어를 띄어 이어 붙인다(센다)."""
@@ -108,13 +114,18 @@ def parse_transcription(
 def _transcript_text(payload: Mapping[str, object]) -> str:
     """전체 글 — SDK 꼴 `output_text`가 있으면 그것, 없으면 REST의 content 글 칸을 띄어 이은 것.
 
-    둘 다 없으면(글 칸도 `steps`도 없다) 실패다 — 빈 글로 지어내지 않는다."""
+    둘 다 없으면 실패다 — 빈 글로 지어내지 않는다. 하나만 예외다: 끝난(`completed`) 응답이 `usage`를
+    싣고 글 없는 칸(`METADATA_KEYS`)만 있으면 모델이 듣고 적을 것이 없었던 조각(무음)이다 —
+    빈 결과로 받고 소비 계층이 미확인 빈 골격으로 다룬다(「말이 아니다」라는 판정이 아니다,
+    규칙 4)."""
     text = payload.get("output_text")
     if text is not None:
         if not isinstance(text, str):
             raise GeminiTranscribeResponseError("전사 응답의 output_text가 문자열이 아니다")
         return text
     steps = payload.get("steps")
+    if steps is None and USAGE in payload and set(payload) <= METADATA_KEYS:
+        return ""
     if steps is None:
         # 받은 칸 이름만 적는다(글은 싣지 않는다) — 모양이 또 다르면 상태 줄만으로 짚는다.
         keys = ", ".join(sorted(str(key) for key in payload))
