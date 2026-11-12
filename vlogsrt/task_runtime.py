@@ -39,14 +39,27 @@ QUOTA_PER_MINUTE = "PerMinute"
 
 
 def _rate_limit_message(error: Exception) -> str:
-    """429의 한도 이름이 있으면 분당·하루 한도를 갈라 말한다 — 없으면 예전 문구 그대로다.
+    """429의 한도 이름이 있으면 분당·하루 한도를 갈라 말한다.
+
+    한도 칸이 없는 공급자(Claude·OpenAI)는 예전 문구 그대로다.
 
     값은 전송 계층이 토큰 모양으로만 남긴 것(`gemini_messages`)이라 본문·키가 되뇌어지지 않는다.
     하루 한도는 Google 문서대로 태평양 시간 자정에 풀린다 — 몇십 초 대기를 적으면 오해를 부른다.
     """
-    quota = getattr(error, "quota_id", "")
-    if not isinstance(quota, str) or not quota:
+    quota = getattr(error, "quota_id", None)
+    if not isinstance(quota, str):
         return RATE_LIMIT_MESSAGE
+    delay = getattr(error, "retry_delay_seconds", None)
+    wait = f"{math.ceil(delay)}초쯤" if isinstance(delay, (int, float)) and delay > 0 else "잠시"
+    if not quota:
+        # 한도 칸을 읽는 공급자(Gemini)가 이름을 주지 않았다 — 실데이터 2026-11-12에
+        # 같은 몇 초 안에서 성공과 번갈아 나왔다. 하루 한도가 다 찼다면 뒤 요청이 모두
+        # 실패해야 한다(D111).
+        return (
+            "API 요청 한도에 걸렸습니다 · 공급자가 어느 한도인지 밝히지 않았습니다"
+            f"(일시적인 처리 용량 부족일 수 있습니다) · {wait} 뒤 실패 구간을 다시 시도하고,"
+            " 계속되면 태평양 시간 자정(한국 오후 4–5시) 뒤에 다시 시도하세요"
+        )
     value = getattr(error, "quota_value", "")
     limit = f"(한도 {value})" if isinstance(value, str) and value else ""
     if QUOTA_PER_DAY in quota:
@@ -55,10 +68,6 @@ def _rate_limit_message(error: Exception) -> str:
             f" 한도가 풀린 뒤 실패 구간을 다시 시도하세요 ({quota})"
         )
     if QUOTA_PER_MINUTE in quota:
-        delay = getattr(error, "retry_delay_seconds", None)
-        wait = (
-            f"{math.ceil(delay)}초쯤" if isinstance(delay, (int, float)) and delay > 0 else "잠시"
-        )
         return (
             f"API 분당 요청 한도에 걸렸습니다{limit} · {wait} 뒤 실패 구간을 다시 시도하세요"
             f" ({quota})"

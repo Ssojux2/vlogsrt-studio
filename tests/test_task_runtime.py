@@ -66,6 +66,20 @@ def test_a_429_without_quota_detail_keeps_the_old_words() -> None:
     assert provider_error(_status_error(429))[1] == "API 사용량 또는 요청 한도를 확인하세요"
 
 
+def test_a_gemini_429_that_names_no_quota_says_so() -> None:
+    message = provider_error(_quota_error("", "", None))[1]
+    assert message == (
+        "API 요청 한도에 걸렸습니다 · 공급자가 어느 한도인지 밝히지 않았습니다(일시적인 처리 용량"
+        " 부족일 수 있습니다) · 잠시 뒤 실패 구간을 다시 시도하고, 계속되면 태평양 시간 자정"
+        "(한국 오후 4–5시) 뒤에 다시 시도하세요"
+    )
+
+
+def test_an_unnamed_429_with_a_suggested_wait_uses_it() -> None:
+    message = provider_error(_quota_error("", "", 7.5))[1]
+    assert "8초쯤 뒤 실패 구간을 다시 시도하고" in message
+
+
 def test_a_daily_quota_points_at_the_pacific_midnight_reset() -> None:
     error = _quota_error("GenerateRequestsPerDayPerProjectPerModel", "100", 43.0)
     message = provider_error(error)[1]

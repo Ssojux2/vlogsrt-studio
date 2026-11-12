@@ -132,6 +132,7 @@ def test_429_is_a_typed_rate_limit_error_sent_once() -> None:
     assert len(opener.calls) == 1  # 재시도 없음 — 실패는 한 번의 명시적 시도다
     assert provider_error(error)[0] == "rate_limit"
     assert (error.quota_id, error.quota_value, error.retry_delay_seconds) == ("", "", None)
+    assert "밝히지 않았습니다" in provider_error(error)[1]  # 실데이터 2026-11-12 — 이름 없는 429
 
 
 def _rate_limited(fixture: str) -> GeminiAPIStatusError:
@@ -186,7 +187,9 @@ def test_odd_quota_details_are_dropped_not_echoed(violation: object, retry_delay
     error = info.value
     assert (error.quota_id, error.quota_value, error.retry_delay_seconds) == ("", "", None)
     message = provider_error(error)[1]
-    assert message == "API 사용량 또는 요청 한도를 확인하세요"
+    assert message.startswith(
+        "API 요청 한도에 걸렸습니다 · 공급자가 어느 한도인지 밝히지 않았습니다"
+    )
     assert SECRET not in message
 
 
