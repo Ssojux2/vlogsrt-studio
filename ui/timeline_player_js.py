@@ -3,7 +3,8 @@
 상태는 `window.__vlTimelinePlayer` 하나에 산다. DOM은 사건 순간에 다시 찾는다(그라디오가 칸을 다시
 그리면 원소가 바뀐다). 컷을 건널지·어디로 건널지는 순수 핵심 `TL.playStep`이 정하고, 여기서는 영상
 둘(활성·대기)을 놓고 바꿔 틀 뿐이다. 원본 국소 프레임 f는 미리보기 `원점 + (f + ½)·T`초다(D117의
-`seek`과 같은 가운데 규칙 — 빈 슬롯·겹친 패킷의 가운데 붙잡기(D70)와도 같은 프레임이다).
+`seek`과 같은 가운데 규칙). 실측은 균일 원본뿐이다 — snap 원본은 규칙상 같은 프레임이지만 재지
+않았고, map 원본은 렌더 계획이 빼므로 타임라인에 오지 않는다.
 """
 
 from __future__ import annotations
@@ -21,8 +22,6 @@ PLAYER_APP_JS = r"""
   }
   S.server = server;
   var POLL_MS = 2000;
-  var BIG_STEP = 10;
-  var HANDLE_PX = 8;
 
   function $(id) { return document.getElementById(id); }
   function clamp(value, low, high) { return Math.max(low, Math.min(high, value)); }
@@ -475,6 +474,7 @@ PLAYER_APP_JS = r"""
     g.setTransform(ratio, 0, 0, ratio, 0, 0);
     g.clearRect(0, 0, w, h);
     function xOf(frame) { return frame / Math.max(source.frames, 1) * w; }
+    if (S.tiers[clip[0]] === undefined) { askTiers(clip[0]); }
     g.globalAlpha = 0.35;
     (S.tiers[clip[0]] || []).forEach(function (row) {
       var token = TIER_FILL[row[2]];
@@ -498,6 +498,15 @@ PLAYER_APP_JS = r"""
       g.fillStyle = cssVar("--vl-danger");
       g.fillRect(Math.round(xOf(at)) - 1, 0, 2, h);
     }
+  }
+  // 등급 띠는 그 원본을 처음 고를 때 한 번 묻는다(표시만 — 못 받으면 띠 없이 그린다).
+  function askTiers(sourceId) {
+    S.tiers[sourceId] = null;
+    S.server.tl_tiers({ signature: S.signature, sourceId: sourceId }).then(function (got) {
+      if (!got || !got.ok) { return; }
+      S.tiers[got.sourceId] = got.tiers;
+      paintSource();
+    });
   }
   // 원본 띠의 커서 — 띠를 눌러 고른 원본 프레임, 없으면 플레이헤드가 그 원본에 있을 때의 프레임.
   function sourceCursor() {
@@ -523,8 +532,8 @@ PLAYER_APP_JS = r"""
     var px = function (f) { return f / Math.max(sourceOf(clip[0]).frames, 1) * rect.width; };
     var x = ev.clientX - rect.left;
     var side = null;
-    if (Math.abs(x - px(clip[1])) <= HANDLE_PX) { side = TL.SIDE_START; }
-    else if (Math.abs(x - px(clip[2])) <= HANDLE_PX) { side = TL.SIDE_END; }
+    if (Math.abs(x - px(clip[1])) <= S.settings.snapPx) { side = TL.SIDE_START; }
+    else if (Math.abs(x - px(clip[2])) <= S.settings.snapPx) { side = TL.SIDE_END; }
     if (side) {
       S.drag = { side: side, frame: side === TL.SIDE_START ? clip[1] : clip[2] };
       c.setPointerCapture(ev.pointerId);
@@ -551,7 +560,7 @@ PLAYER_APP_JS = r"""
     var frames = Math.max(sourceOf(clip[0]).frames, 1);
     var x = ev.clientX - rect.left;
     var near = [clip[1], clip[2]].some(function (f) {
-      return Math.abs(x - f / frames * rect.width) <= HANDLE_PX;
+      return Math.abs(x - f / frames * rect.width) <= S.settings.snapPx;
     });
     c.style.cursor = near ? "ew-resize" : "pointer";
   }
@@ -585,11 +594,42 @@ PLAYER_APP_JS = r"""
     setEdge(side, at);
   }
 
+  // ─── 렌더(W-71e): 저장된 리비전 그대로 원본에서 한 번 ──────────
+  // 저장 대기 편집을 먼저 보내고, 저장이 끝난 리비전을 이름으로 건다 — 서버는 다른 리비전이면
+  // 렌더하지 않는다. 결과는 초안과 같은 폴더라 결과 카드·영어 변환·자막 입히기가 그대로 쓴다.
+  function render() {
+    if (S.conflict) {
+      say("저장이 충돌한 채로는 렌더하지 않습니다 — 먼저 정리하세요.", true);
+      return;
+    }
+    if (S.dirty || S.saving) {
+      saveNow(false);
+      say("편집을 저장한 뒤 렌더합니다…", false);
+      var gen = S.pollGen;
+      var wait = function () {
+        if (gen !== S.pollGen) { return; }
+        if (S.dirty || S.saving) { W.setTimeout(wait, S.settings.autosaveMs); return; }
+        if (!S.conflict) { render(); }
+      };
+      W.setTimeout(wait, S.settings.autosaveMs);
+      return;
+    }
+    if (S.playing) { stopPlayback(); }
+    var payload = { signature: S.signature, token: S.token, timelineId: S.timelineId,
+      revision: S.baseRevision };
+    if (W.__vlServer) { W.__vlServer.wake(true); }
+    S.server.tl_render(payload).then(function (got) {
+      if (!got || !got.ok) { say((got && got.error) || "렌더를 걸지 못했습니다.", true); return; }
+      say("리비전 " + payload.revision + "을 렌더합니다(무료 로컬) — 활동 띠에서 진행을 보고," +
+        " 끝나면 아래 초안 편집과 「영상 정리」 결과 카드에 나옵니다.", false);
+    });
+  }
+
   // ─── 문서 바꾸기 · 되돌리기 · 저장 ──────────────────────────────
   function change(next, label) {
     if (S.playing) { stopPlayback(); }
     S.history.past.push(S.doc);
-    if (S.history.past.length > (S.settings.undoLimit || 200)) { S.history.past.shift(); }
+    if (S.history.past.length > S.settings.undoLimit) { S.history.past.shift(); }
     S.history.future = [];
     S.doc = next;
     relayout();
@@ -612,7 +652,7 @@ PLAYER_APP_JS = r"""
   }
   function scheduleSave() {
     if (S.saveTimer) { W.clearTimeout(S.saveTimer); }
-    S.saveTimer = W.setTimeout(function () { saveNow(false); }, S.settings.autosaveMs || 1500);
+    S.saveTimer = W.setTimeout(function () { saveNow(false); }, S.settings.autosaveMs);
   }
   function docPayload() {
     return { clips: S.doc.clips, cues: S.doc.cues, nextCue: S.doc.nextCue, seeded: S.doc.seeded };
@@ -660,7 +700,7 @@ PLAYER_APP_JS = r"""
     }
     if (special) { ev.preventDefault(); ev.stopPropagation(); special(); return; }
     if (mod || ev.altKey) { return; }
-    var big = ev.shiftKey ? BIG_STEP : 1;
+    var big = ev.shiftKey ? S.settings.bigStepFrames : 1;
     var acts = {
       Space: toggle, KeyK: stopPlayback,
       ArrowLeft: function () { step(-big); }, ArrowRight: function () { step(big); },
@@ -681,7 +721,7 @@ PLAYER_APP_JS = r"""
       undo: function () { undo(false); }, redo: function () { undo(true); },
       "trim-start": function () { trimToCursor(TL.SIDE_START); },
       "trim-end": function () { trimToCursor(TL.SIDE_END); },
-      "force-save": function () { saveNow(true); } };
+      "force-save": function () { saveNow(true); }, render: render };
     var act = acts[target.getAttribute("data-tl")];
     if (act) { act(); }
   }

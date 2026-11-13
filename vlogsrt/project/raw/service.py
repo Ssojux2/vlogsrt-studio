@@ -3960,6 +3960,19 @@ class RawWorkspaceService:
 
         return self.submit_job(root, RENDER_EXPORT_JOB_KIND, "render_export/draft", body)
 
+    def start_timeline_render(self, root: Path, timeline_id: str, revision: int) -> JobHandle:
+        """원본 범위 타임라인에서 렌더(W-71e, D128) — 초안과 같은 작업 종류·같은 `export/<시각>/`.
+
+        결과 카드·영어 변환·자막 입히기·초안 편집이 그 폴더를 그대로 쓴다. 지문에 타임라인 아이디와
+        리비전이 들어 같은 리비전이면 도는 작업에 다시 붙는다. 무료 로컬이다."""
+        from vlogsrt.project.raw import timeline_render
+
+        def body(context: JobContext) -> None:
+            timeline_render.export_timeline(self, root, timeline_id, revision, context)
+
+        fingerprint = f"render_export/timeline/{timeline_id}@{revision}"
+        return self.submit_job(root, RENDER_EXPORT_JOB_KIND, fingerprint, body)
+
     def export_srt_again(self, root: Path) -> Any:
         """「SRT만 다시 내보내기」(D115) — 마지막 초안 폴더에 지금 원본 자막으로 새 SRT를 쓴다.
 

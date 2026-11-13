@@ -366,6 +366,15 @@ def open_timeline(
     }
 
 
+def read_document(
+    root: Path, timeline_id: str | None = None, settings: FinalEditSettings = FINAL_EDIT_SETTINGS
+) -> tuple[str, int, TimelineDocument]:
+    """(타임라인 아이디, 리비전, 문서) — 파일의 사실로 검사한 문서. 렌더(W-71e)가 읽는다. 읽기만."""
+    folder = _folder_by_id(root, timeline_id)
+    record = _read_record(folder)
+    return folder.name, int(record["revision"]), _document(record, settings)
+
+
 def clipped_sources(root: Path, timeline_id: str | None = None) -> tuple[str, tuple[str, ...]]:
     """(타임라인 아이디, 클립이 있는 원본 — 클립 차례) — 재생 미디어(W-71c)를 고를 재료. 읽기만."""
     folder = _folder_by_id(root, timeline_id)

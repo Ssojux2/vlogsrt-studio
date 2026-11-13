@@ -114,6 +114,9 @@ def timeline_player_html(model: dict[str, Any] | None) -> str:
         ' title="다시 하기 (⌘⇧Z)">다시 하기</button>'
         '<button type="button" data-tl="force-save" id="tl-force" hidden>내 편집으로 덮기</button>'
         '<button type="button" data-tl="prepare" id="tl-prepare" hidden>미리보기 준비</button>'
+        '<button type="button" data-tl="render" id="tl-render"'
+        ' title="저장한 타임라인을 원본에서 한 번 렌더한다(무료 로컬)">'
+        "이 타임라인으로 렌더</button>"
         '<span id="tl-status" class="tl-status" aria-live="polite"></span></div>'
         '<div class="tl-strip"><canvas id="tl-canvas"></canvas></div>'
         '<div class="tl-range"><div class="tl-range-head"><span id="tl-source-head"></span>'
@@ -127,12 +130,22 @@ def timeline_player_html(model: dict[str, Any] | None) -> str:
     )
 
 
+def timeline_error_html(text: str) -> str:
+    """재생기를 열지 못한 까닭 — 빈 칸으로 숨기지 않는다(글은 이스케이프한다)."""
+    return (
+        f'<div id="{PLAYER_ROOT_ID}" class="tl-root tl-error">{_model_holder(None)}'
+        f"<p>{html.escape(text)}</p></div>"
+    )
+
+
 TIMELINE_PLAYER_CSS = """
 #vl-timeline-player { padding: 0; }
 .tl-root { display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px; outline: none;
   font-family: var(--vl-font-sans); color: var(--vl-ink); }
 .tl-root:focus-visible { box-shadow: 0 0 0 2px var(--vl-accent); border-radius: 6px; }
 .tl-empty { display: none; }
+.tl-error p { margin: 0; padding: 6px 10px; border: 1px solid var(--vl-warn); border-radius: 6px;
+  background: var(--vl-warn-soft); font-size: 13px; }
 .tl-stage { display: flex; justify-content: center; background: var(--vl-video-well);
   border-radius: 6px; padding: 4px; }
 .tl-frame { position: relative; height: min(48vh, 520px); max-width: 100%;
@@ -210,11 +223,11 @@ class TimelinePlayer:
         try:
             opened = self.owner.raw.timeline_open(root)
             media = self.owner.raw.timeline_media(root, opened["timelineId"])
-            tiers = self.owner.raw.timeline_tiers(root, list(media["sources"]))
-        except self.service_error:
-            return timeline_player_html(None)
+        except self.service_error as error:
+            return timeline_error_html(f"타임라인 재생기를 열지 못했습니다 — {error}")
         token = self.owner._visual_lifetime_token
-        return timeline_player_html(client_model(signature, token, opened, media, tiers))
+        # 등급 띠는 고른 클립의 원본만 그때 묻는다(`tl_tiers`) — 원본 104개면 그리기마다 0.9초였다.
+        return timeline_player_html(client_model(signature, token, opened, media, {}))
 
     # ── 서버 함수(클라이언트 `server.tl_*`) ──────────────────────────
 
@@ -228,10 +241,16 @@ class TimelinePlayer:
         def tl_save(payload: dict[str, object]) -> dict[str, object]:
             return self.action(payload, "save")
 
-        return [tl_media, tl_prepare, tl_save]
+        def tl_render(payload: dict[str, object]) -> dict[str, object]:
+            return self.action(payload, "render")
+
+        def tl_tiers(payload: dict[str, object]) -> dict[str, object]:
+            return self.action(payload, "tiers")
+
+        return [tl_media, tl_prepare, tl_save, tl_render, tl_tiers]
 
     def action(self, payload: dict[str, object], kind: str) -> dict[str, object]:
-        """어떤 예외도 500이 아니라 값으로 돌아간다. 준비·저장은 서명·수명 토큰에 묶인다."""
+        """어떤 예외도 500이 아니라 값으로 돌아간다. 준비·저장·렌더는 서명·수명 토큰에 묶인다."""
         owner = self.owner
 
         def fail(error: object, *, stale: bool = False) -> dict[str, object]:
@@ -239,7 +258,7 @@ class TimelinePlayer:
 
         try:
             root = owner._require_current_selection(owner._serve_str(payload, "signature") or None)
-            if kind in ("prepare", "save"):
+            if kind in ("prepare", "save", "render"):
                 owner._require_workbench_token(payload, owner._visual_lifetime_token, TAB_LABEL)
         except gr.Error as error:
             return fail(error, stale=True)
@@ -247,6 +266,12 @@ class TimelinePlayer:
         try:
             if kind == "save":
                 return self._save(root, timeline_id, payload)
+            if kind == "render":
+                return self._render(root, timeline_id, payload)
+            if kind == "tiers":
+                source_id = owner._serve_str(payload, "sourceId")
+                tiers = owner.raw.timeline_tiers(root, [source_id])
+                return {"ok": True, "sourceId": source_id, "tiers": tiers[source_id]}
             media = owner.raw.timeline_media(root, timeline_id)
             if kind == "media":
                 return {"ok": True, "media": media["sources"]}
@@ -273,3 +298,13 @@ class TimelinePlayer:
             root, timeline_id, base, document, force=payload.get("force") is True
         )
         return {"ok": True, **result}
+
+    def _render(
+        self, root: Any, timeline_id: str | None, payload: dict[str, object]
+    ) -> dict[str, object]:
+        """저장된 리비전 하나를 렌더하는 작업을 건다 — 작업이 그 리비전을 다시 확인한다(D128)."""
+        revision = payload.get("revision")
+        if timeline_id is None or not isinstance(revision, int) or isinstance(revision, bool):
+            raise ValueError("렌더 요청의 모양이 틀렸습니다(타임라인 · 리비전).")
+        handle = self.owner.raw.start_timeline_render(root, timeline_id, revision)
+        return {"ok": True, "jobId": handle.job_id}

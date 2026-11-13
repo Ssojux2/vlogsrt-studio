@@ -1438,7 +1438,7 @@ TIMELINE_IO_MODULE = "timeline_edit_io.py"
 TIMELINE_IO_MUST_NOT_IMPORT = (*FINAL_EDIT_IO_MUST_NOT_IMPORT, "preprocess")
 TIMELINE_IO_RENDER_CALLS = re.compile(
     r"\b(render_part|render_parts|_render_parts|render_pieces|concat_parts|export_draft"
-    r"|export_srt_again|_produce|_publish)\b"
+    r"|export_srt_again|export_plan|export_timeline|_produce|_publish)\b"
 )
 TIMELINE_IO_WRITER = "_write_atomic"
 TIMELINE_IO_MKDIR = "candidate.mkdir(parents=True)"
@@ -1498,6 +1498,41 @@ def _timeline_writer_failures(rel: str, body: str) -> list[str]:
         )
     if 'TIMELINE_FOLDER = "timeline"' not in body:
         failures.append(f'{rel}: 쓰는 자리 `TIMELINE_FOLDER = "timeline"`가 없다 (D124)')
+    return failures
+
+
+# D128 — 원본 범위 타임라인 렌더(`timeline_render.py`)는 파일을 직접 쓰지 않는다. 쓰는 길은 초안과
+# 같은 `render_export.export_plan` 한 자리(새 `export/<시각>/`, 실패면 폴더를 걷는다)뿐이고, 초안의
+# 들머리(`export_draft` — 등급으로 고르는 계획)나 SRT만 다시(`export_srt_again`)를 부르지 않는다.
+TIMELINE_RENDER_MODULE = "timeline_render.py"
+TIMELINE_RENDER_EXPORT = "render_export.export_plan("
+TIMELINE_RENDER_FORBIDDEN_CALLS = re.compile(r"(export_draft|export_srt_again|build_plan)")
+
+
+def check_timeline_render_writes_only_through_export_plan() -> list[str]:
+    """D128 — 타임라인 렌더는 `export_plan` 하나로만 낸다. 파일이 사라지면 실패다."""
+    rel = f"vlogsrt/project/raw/{TIMELINE_RENDER_MODULE}"
+    path = PROJECT_PACKAGE / "raw" / TIMELINE_RENDER_MODULE
+    if not path.exists():
+        return [f"{rel}: 타임라인 렌더가 사라졌다 (D128)"]
+    body = path.read_text(encoding="utf-8")
+    lines = body.splitlines()
+    failures = [
+        f"{rel}: {name}을 import한다 — 타임라인 렌더가 직접 쓰거나 프로세스를 띄울 수 있다 (D128)"
+        for name in _imports(body, (*FINAL_EDIT_IO_MUST_NOT_IMPORT, "preprocess", "os"))
+    ]
+    failures += [
+        f"{rel}:{number}: 파일을 직접 열거나 쓰거나 지운다 — export_plan으로만 낸다 (D128)"
+        for number, line in enumerate(lines, start=1)
+        if FINAL_EDIT_IO_FORBIDDEN.search(line) or ".mkdir(" in line
+    ]
+    failures += [
+        f"{rel}:{number}: 초안의 들머리·SRT만 다시·등급 계획을 부른다 (D128)"
+        for number, line in enumerate(lines, start=1)
+        if TIMELINE_RENDER_FORBIDDEN_CALLS.search(line)
+    ]
+    if body.count(TIMELINE_RENDER_EXPORT) != 1:
+        failures.append(f"{rel}: `{TIMELINE_RENDER_EXPORT}…)`가 정확히 한 번이 아니다 (D128)")
     return failures
 
 
@@ -3351,6 +3386,10 @@ CHECKS = (
     (
         "원본 범위 타임라인은 timeline/에만 쓰고 렌더하지 않는다",
         check_timeline_io_writes_only_timeline_folder,
+    ),
+    (
+        "원본 범위 타임라인 렌더는 export_plan으로만 낸다",
+        check_timeline_render_writes_only_through_export_plan,
     ),
     ("등급의 시각 확인 값은 서비스 한 자리만", check_tier_timing_only_from_service),
     ("자막 시각 확인은 순수하다", check_sync_check_stays_pure),

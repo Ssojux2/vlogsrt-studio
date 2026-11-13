@@ -71,6 +71,8 @@ GRID_KINDS = (GRID_UNIFORM, GRID_SNAP, GRID_MAP)
 
 PART_AUTO_GREEN = "auto_green"
 PART_HUMAN_RECOMMENDED = "human_recommended"
+PART_TIMELINE = "timeline"
+"""원본 범위 타임라인의 클립(W-71e, D128) — 등급이 아니라 사람이 고른 범위다."""
 
 DROP_YELLOW = "yellow"
 DROP_RED_UNREVIEWED = "red_unreviewed"
@@ -81,6 +83,7 @@ DROP_TOO_SHORT = "too_short"
 DROP_UNSUPPORTED_GRID = "unsupported_grid"
 DROP_UNANALYZED = "unanalyzed"
 DROP_UNRENDERABLE = "unrenderable"
+DROP_TIMELINE_CUT = "timeline_cut"
 DROP_REASONS = (
     DROP_YELLOW,
     DROP_RED_UNREVIEWED,
@@ -91,9 +94,11 @@ DROP_REASONS = (
     DROP_UNSUPPORTED_GRID,
     DROP_UNANALYZED,
     DROP_UNRENDERABLE,
+    DROP_TIMELINE_CUT,
 )
 """뺀 구간의 까닭 — 빨강은 사람이 그 조각을 본 기록(확정 제외·덮기·결정)이 있으면 `red_confirmed`,
-없으면 `red_unreviewed`다. `unanalyzed`는 등급 판정이 없는 자리(분석 전 원본 · 판정 길이 밖)다."""
+없으면 `red_unreviewed`다. `unanalyzed`는 등급 판정이 없는 자리(분석 전 원본 · 판정 길이 밖)다.
+`timeline_cut`은 원본 범위 타임라인에서 클립 밖에 남은 원본 구간이다(D128)."""
 _BRIDGEABLE = frozenset({DROP_YELLOW})
 """합칠 틈으로 이을 수 있는 까닭 — 사람 표시·빨강·미분석은 잇지 않는다."""
 
@@ -945,6 +950,47 @@ def build_plan(
         total_frames=total,
         padded=padded,
         too_short=too_short,
+        settings=settings,
+    )
+    _require_cues_inside(plan)
+    return plan
+
+
+def plan_from_clips(
+    sources: Sequence[RenderSource],
+    clips: Sequence[tuple[str, int, int]],
+    sequence: SequenceFormat,
+    cues: Sequence[ProjectedCue],
+    counts: CueCounts,
+    dropped: Sequence[DroppedRange],
+    settings: RenderSettings = RENDER_SETTINGS,
+) -> RenderPlan:
+    """원본 범위 타임라인(D128)의 클립 → 렌더 계획 — 등급으로 고르지 않고 클립 그대로다.
+
+    시퀀스 포맷은 타임라인 문서에 고정된 것이고, 출력 배치는 `build_plan`과 같은 `_parts`다
+    (`sequence_edges` — 타임라인 화면의 배치와 같다). 자막은 타임라인이 투영한 장을 그대로 싣는다.
+    """
+    by_id = {source.source_id: source for source in sources}
+    kept: list[_Kept] = []
+    for source_id, start, end in clips:
+        source = by_id.get(source_id)
+        if source is None:
+            raise RenderPlanError(f"클립의 원본 {source_id}이 계획 재료에 없다")
+        if not 0 <= start < end <= source.clock.frame_count:
+            raise RenderPlanError(f"{source.name}: 클립 [{start}, {end})이 원본 프레임 밖이다")
+        kept.append(_Kept(source, start, end, PART_TIMELINE, Fraction(0)))
+    parts, padded = _parts(kept, sequence)
+    total = parts[-1].output_start_frame + parts[-1].output_frames if parts else 0
+    plan = RenderPlan(
+        parts=parts,
+        dropped=tuple(dropped),
+        sequence=sequence,
+        cues=tuple(cues),
+        cue_counts=counts,
+        unsupported=(),
+        total_frames=total,
+        padded=padded,
+        too_short=0,
         settings=settings,
     )
     _require_cues_inside(plan)

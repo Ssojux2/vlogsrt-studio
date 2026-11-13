@@ -25,6 +25,7 @@ D117의 최종 편집은 렌더한 초안(`draft.mp4`) 위의 컷이었다. 여�
 
 from __future__ import annotations
 
+import bisect
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -456,10 +457,14 @@ def source_point(document: TimelineDocument, edited_frame: int) -> tuple[int, in
 
 def _tick_spans(document: TimelineDocument) -> list[tuple[str, int, int, int, int]]:
     """클립마다 (원본, 원본 시작 틱, 원본 끝 틱, 출력 시작 틱, 출력 끝 틱)."""
-    seq = sequence_frame_ticks(document.facts)
+    rate = tick_rate(document.facts)
+    seq = int(document.facts.sequence.frame_duration * rate)
+    units = {
+        source.source_id: int(source.frame_duration * rate) for source in document.facts.sources
+    }
     rows = []
     for span in layout(document):
-        unit = source_frame_ticks(document.facts, span.source_id)
+        unit = units[span.source_id]
         rows.append(
             (
                 span.source_id,
@@ -482,8 +487,15 @@ def edited_ticks(
     조금 길면 둘이 다르다. 첫 클립 앞은 첫 클립 시작, 마지막 클립 뒤는 그 클립의 원본 끝을 민
     자리다.
     """
-    point = ms * ms_ticks(document.facts)
-    mine = [row for row in _tick_spans(document) if row[0] == source_id]
+    return _edited_in(_tick_spans(document), ms_ticks(document.facts), source_id, ms, side)
+
+
+def _edited_in(
+    rows: Sequence[tuple[str, int, int, int, int]], unit: int, source_id: str, ms: int, side: str
+) -> int:
+    """`edited_ticks`의 몸 — 자막 여럿을 옮기는 쪽(`project`)이 클립 틱을 한 번만 잰다."""
+    point = ms * unit
+    mine = [row for row in rows if row[0] == source_id]
     if not mine:
         raise TimelineEditError(f"원본 {source_id}의 클립이 타임라인에 없다")
     previous: tuple[str, int, int, int, int] | None = None
@@ -556,8 +568,8 @@ def project(document: TimelineDocument) -> Projection:
         if kept == 0 and not point:
             hidden.append(cue)
             continue
-        out_start = edited_ticks(document, cue.source_id, cue.start_ms)
-        out_end = edited_ticks(document, cue.source_id, cue.end_ms, SIDE_END)
+        out_start = _edited_in(rows, unit, cue.source_id, cue.start_ms, SIDE_START)
+        out_end = _edited_in(rows, unit, cue.source_id, cue.end_ms, SIDE_END)
         made = ProjectedCue(
             cue.cue_id,
             cue.source_id,
@@ -568,19 +580,54 @@ def project(document: TimelineDocument) -> Projection:
         )
         visible.append((out_start, out_end, number, made))
     visible.sort(key=lambda row: row[:3])
-    return Projection(tuple(row[3] for row in visible), tuple(hidden), edited_frames(document))
+    total = rows[-1][4] // sequence_frame_ticks(document.facts) if rows else 0
+    return Projection(tuple(row[3] for row in visible), tuple(hidden), total)
+
+
+def render_cues(
+    document: TimelineDocument,
+) -> tuple[tuple[render_plan.ProjectedCue, ...], render_plan.CueCounts]:
+    """타임라인 자막을 렌더 계획의 장으로(D128) — 길이 0인 장은 D115 그대로 늘린다.
+
+    조각 번호는 장의 시작이 놓인 클립이다(경계면 뒤 클립). 센 것: 원본 = 문서의 자막 수 = 보인 것 +
+    가린 것(`dropped`), 잘린 것(`clipped`), 늘린 것·길이 0으로 남은 것.
+    """
+    projection = project(document)
+    rate = tick_rate(document.facts)
+    edges = [span.out_start * sequence_frame_ticks(document.facts) for span in layout(document)]
+    ordered = [
+        render_plan.ProjectedCue(
+            c.cue_id,
+            c.source_id,
+            max(0, bisect.bisect_right(edges, c.start * rate) - 1),
+            c.start,
+            c.end,
+            c.text,
+            c.trimmed,
+        )
+        for c in projection.cues
+    ]
+    total = projection.total_frames * document.facts.sequence.frame_duration
+    lengthened, stretched = render_plan.lengthen_cues(ordered, total)
+    zero = sum(1 for cue in lengthened if _ms(cue.start) == _ms(cue.end))
+    counts = render_plan.CueCounts(
+        source=len(document.cues),
+        kept=len(lengthened),
+        clipped=sum(1 for cue in lengthened if cue.clipped),
+        dropped=len(projection.hidden),
+        zero_length=zero,
+        lengthened=stretched,
+    )
+    return lengthened, counts
+
+
+def _ms(seconds: Fraction) -> int:
+    return milliseconds_half_up(seconds)
 
 
 def srt_text(document: TimelineDocument) -> str:
     """타임라인 SRT — 초안 SRT와 같은 바이트 꼴, 길이 0인 장은 D115 그대로 늘린다."""
-    projection = project(document)
-    ordered = [
-        render_plan.ProjectedCue(c.cue_id, c.source_id, 0, c.start, c.end, c.text, c.trimmed)
-        for c in projection.cues
-    ]
-    total = projection.total_frames * document.facts.sequence.frame_duration
-    lengthened, _ = render_plan.lengthen_cues(ordered, total)
-    return render_plan.cues_srt_text(lengthened)
+    return render_plan.cues_srt_text(render_cues(document)[0])
 
 
 def warnings(

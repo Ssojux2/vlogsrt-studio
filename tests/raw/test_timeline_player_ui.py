@@ -142,9 +142,13 @@ def test_the_view_is_empty_without_a_timeline_and_carries_media_with_one(
     monkeypatch.setattr(server.raw, "has_timeline", lambda _root: True)
     monkeypatch.setattr(server.raw, "timeline_open", lambda _root, *_a: _opened())
     monkeypatch.setattr(server.raw, "timeline_media", lambda _root, *_a: _media())
-    monkeypatch.setattr(server.raw, "timeline_tiers", lambda _root, ids: {i: [] for i in ids})
+
+    def no_tiers(*_a: Any) -> Any:
+        raise AssertionError("그리기는 등급을 읽지 않는다 — 고른 클립의 원본만 그때 묻는다")
+
+    monkeypatch.setattr(server.raw, "timeline_tiers", no_tiers)
     model = _model_of(player.view(signature))
-    assert model["tiers"] == {"s1": [], "s2": []}
+    assert model["tiers"] == {}
     assert model["timelineId"] == "20261113T010203Z"
     assert model["media"]["s1"]["fileId"] == "f1"
     assert model["token"] == server._visual_lifetime_token
@@ -228,6 +232,73 @@ def test_save_needs_the_token_and_passes_the_document_and_base_revision(
     assert calls[-1][3] is True
     broken = player.action({**payload, "baseRevision": "3"}, "save")
     assert broken["ok"] is False and broken["stale"] is False
+
+
+def test_render_needs_the_token_and_starts_the_timeline_render_at_that_revision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server, _root, signature = _server(tmp_path)
+    player = server._timeline_player
+    asked: list[tuple[str, int]] = []
+
+    def start(_root: Path, timeline_id: str, revision: int) -> Any:
+        asked.append((timeline_id, revision))
+        return SimpleNamespace(job_id="r1")
+
+    monkeypatch.setattr(server.raw, "start_timeline_render", start)
+    payload: dict[str, object] = {
+        "signature": signature,
+        "token": "낡은-토큰",
+        "timelineId": "t1",
+        "revision": 5,
+    }
+    assert player.action(payload, "render")["ok"] is False and asked == []
+    payload["token"] = server._visual_lifetime_token
+    assert player.action(payload, "render") == {"ok": True, "jobId": "r1"}
+    assert asked == [("t1", 5)]
+    assert player.action({**payload, "revision": "5"}, "render")["ok"] is False
+
+
+def test_tiers_are_asked_per_source_when_a_clip_is_picked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server, _root, signature = _server(tmp_path)
+    asked: list[list[str]] = []
+
+    def tiers(_root: Path, ids: list[str]) -> Any:
+        asked.append(list(ids))
+        return {i: TIERS[i] for i in ids}
+
+    monkeypatch.setattr(server.raw, "timeline_tiers", tiers)
+    got = server._timeline_player.action({"signature": signature, "sourceId": "s1"}, "tiers")
+    assert got == {"ok": True, "sourceId": "s1", "tiers": TIERS["s1"]}
+    assert asked == [["s1"]]
+    stale = server._timeline_player.action({"signature": "다른", "sourceId": "s1"}, "tiers")
+    assert stale["ok"] is False and asked == [["s1"]]
+
+
+def test_a_timeline_that_cannot_be_read_says_why_instead_of_an_empty_player(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vlogsrt.project.raw.service import RawWorkspaceError
+
+    server, _root, signature = _server(tmp_path)
+
+    def broken(_root: Path, *_a: Any) -> Any:
+        raise RawWorkspaceError("타임라인 `x`의 판이 다르다")
+
+    monkeypatch.setattr(server.raw, "has_timeline", lambda _root: True)
+    monkeypatch.setattr(server.raw, "timeline_open", broken)
+    page = server._timeline_player.view(signature)
+    assert "<video" not in page and "판이 다르다" in page
+
+
+def test_the_player_script_takes_its_numbers_from_the_settings() -> None:
+    """규칙 8 — 큰 걸음·손잡이 폭·되돌리기 칸·자동 저장은 서버 설정에서 온다(대체 숫자 없음)."""
+    for name in ("bigStepFrames", "snapPx", "undoLimit", "autosaveMs"):
+        assert f"S.settings.{name}" in PLAYER_JS
+    assert "BIG_STEP" not in PLAYER_JS and "HANDLE_PX" not in PLAYER_JS
+    assert "|| 200" not in PLAYER_JS and "|| 1500" not in PLAYER_JS
 
 
 @needs_node

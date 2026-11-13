@@ -204,8 +204,12 @@ TIMELINE_CORE_JS = r"""
   function mappedEnd(row) { return Math.min(row[3] + row[2] - row[1], row[4]); }
   // 렌더 계획 `_piece`와 같은 규칙 — 뺀 구간의 끝은 앞 클립의 원본 끝을 민 자리다.
   TL.editedTicks = function (doc, sourceId, ms, side) {
-    var point = ms * TL.msTicks(doc.facts);
-    var mine = tickSpans(doc).filter(function (row) { return row[0] === sourceId; });
+    return editedIn(tickSpans(doc), TL.msTicks(doc.facts), sourceId, ms, side);
+  };
+  // `editedTicks`의 몸 — 자막 여럿을 옮기는 쪽(`project`)이 클립 틱을 한 번만 잰다.
+  function editedIn(rows, unit, sourceId, ms, side) {
+    var point = ms * unit;
+    var mine = rows.filter(function (row) { return row[0] === sourceId; });
     if (!mine.length) { throw fail("원본의 클립이 타임라인에 없다"); }
     for (var i = 0; i < mine.length; i++) {
       var row = mine[i];
@@ -215,7 +219,7 @@ TIMELINE_CORE_JS = r"""
       if (point <= row[2]) { return Math.min(row[3] + point - row[1], row[4]); }
     }
     return mappedEnd(mine[mine.length - 1]);
-  };
+  }
   TL.sourceMsAt = function (doc, ticks, side) {
     var rows = tickSpans(doc);
     if (!rows.length || !(0 <= ticks && ticks <= rows[rows.length - 1][4])) {
@@ -262,8 +266,8 @@ TIMELINE_CORE_JS = r"""
         if (start === end && row[1] <= start && start < row[2]) { point = true; }
       });
       if (kept === 0 && !point) { hidden.push(cue); return; }
-      var outStart = TL.editedTicks(doc, cue[1], cue[2]);
-      var outEnd = TL.editedTicks(doc, cue[1], cue[3], SIDE_END);
+      var outStart = editedIn(rows, unit, cue[1], cue[2], SIDE_START);
+      var outEnd = editedIn(rows, unit, cue[1], cue[3], SIDE_END);
       visible.push([outStart, outEnd, number,
         [cue[0], cue[1], outStart, outEnd, cue[4], kept < end - start]]);
     });
