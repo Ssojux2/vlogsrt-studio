@@ -11486,7 +11486,8 @@ class RawWorkspaceUi:
             assert self._draw_timer is not None and self._render_export_started is not None
             self._final_edit.wire(tabs, self._draw_timer, self._render_export_started, switched)
             status = self._capcut_status
-            self._report_activity(self._timeline_cell.wire(tabs, status, switched), status)
+            sent = self._timeline_cell.wire(tabs, status, switched, ui_facade.EXPORT_WAKE_JS)
+            self._report_activity(sent, status)
         return app
 
     def _wire_folder_import(self, view_outputs: list[object]) -> tuple[Any, ...]:

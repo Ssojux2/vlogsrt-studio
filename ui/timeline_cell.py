@@ -103,11 +103,18 @@ class TimelineCell:
     def build_summary(self) -> None:
         self.summary = gr.HTML(EMPTY_TEXT, elem_id=SUMMARY_ID, apply_default_css=False)
 
-    def wire(self, tabs: Any, status: Any, refresh_events: tuple[Any, ...]) -> Any:
-        """누름 → 만들기 → (탭, 요약, 활동 칸). 작업공간이 바뀌면 요약만 다시 그린다."""
+    def wire(self, tabs: Any, status: Any, refresh_events: tuple[Any, ...], wake_js: str) -> Any:
+        """누름 → 만들기 → (탭, 요약, 활동 칸). 작업공간이 바뀌면 요약만 다시 그린다.
+
+        `wake_js`는 누르는 순간 활동 띠를 깨운다(「추천만 이어붙여 내보내기」와 같다) — 단추는 작업이
+        끝날 때까지 기다리므로 그 사이 보이는 것은 활동 띠뿐이다."""
         signature = self.owner._signature_state
         sent = self.button.click(
-            self.send_view, signature, [tabs, self.summary, status], concurrency_limit=1
+            self.send_view,
+            signature,
+            [tabs, self.summary, status],
+            concurrency_limit=1,
+            js=wake_js,
         )
         for event in refresh_events:
             event.then(self.view, signature, self.summary, show_progress="hidden")
