@@ -703,25 +703,32 @@ def _tally(rows: Iterable[tuple[_Key, Fraction]]) -> dict[_Key, Fraction]:
 # ── 출력 타임라인 ─────────────────────────────────────────────────────────
 
 
-def _output_edges(kept: list[_Kept], sequence_fd: Fraction) -> tuple[list[int], int]:
+def sequence_edges(
+    pieces: Sequence[tuple[Fraction, bool]], sequence_fd: Fraction
+) -> tuple[list[int], int]:
     """조각마다 출력 경계(시퀀스 프레임)와 1프레임으로 늘린 조각 수(D71 `_sequence_layout`).
 
-    누적 길이를 가장 가까운 시퀀스 프레임(½은 위로)에 맞추므로 오차가 쌓이지 않는다. 원본 끝에
-    닿은 조각만 남은 미디어를 넘지 않게 내림이다. 두 경계가 한 프레임에 떨어지면 0프레임 조각은
-    쓸 수 없어 1프레임으로 늘리고 센다.
+    `pieces`는 차례대로 (원본 길이 초, 원본 끝에 닿았는가)다. 누적 길이를 가장 가까운 시퀀스
+    프레임(½은 위로)에 맞추므로 오차가 쌓이지 않는다. 원본 끝에 닿은 조각만 남은 미디어를 넘지 않게
+    내림이다. 두 경계가 한 프레임에 떨어지면 0프레임 조각은 쓸 수 없어 1프레임으로 늘리고 센다.
+    렌더 계획과 원본 범위 타임라인(`timeline_edit`, D122)이 함께 쓰는 한 규칙이다.
     """
     edges = [0]
     padded = 0
     total = Fraction(0)
-    for piece in kept:
-        length = piece.end - piece.start
+    for length, at_extent in pieces:
         total += length
         edge = math.floor(total / sequence_fd + _HALF)
-        if piece.end == piece.source.clock.extent:
+        if at_extent:
             edge = min(edge, edges[-1] + math.floor(length / sequence_fd))
         padded += edge <= edges[-1]
         edges.append(max(edge, edges[-1] + 1))
     return edges, padded
+
+
+def _output_edges(kept: list[_Kept], sequence_fd: Fraction) -> tuple[list[int], int]:
+    pieces = [(k.end - k.start, k.end == k.source.clock.extent) for k in kept]
+    return sequence_edges(pieces, sequence_fd)
 
 
 def _parts(kept: list[_Kept], sequence: SequenceFormat) -> tuple[tuple[RenderPart, ...], int]:
@@ -875,6 +882,13 @@ def _lengthen(
         count += not _zero_length(lengthened)
         result.append(lengthened)
     return tuple(result), count
+
+
+def lengthen_cues(
+    ordered: Sequence[ProjectedCue], total_seconds: Fraction
+) -> tuple[tuple[ProjectedCue, ...], int]:
+    """시각 차례로 놓인 장들의 길이 0을 늘린다(D115) — 원본 범위 타임라인의 SRT도 같은 규칙이다."""
+    return _lengthen(ordered, total_seconds, Config())
 
 
 def _zero_length(cue: ProjectedCue) -> bool:
