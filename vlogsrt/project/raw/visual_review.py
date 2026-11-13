@@ -895,28 +895,22 @@ def _preparing_backed(record: dict[str, object], active: Sequence[JobRecord]) ->
     return any(job.kind == VISUAL_PREPARE_JOB_KIND for job in active)
 
 
-def _preview_records(workspace: RawWorkspace) -> list[dict[str, object]]:
-    """미리보기 기록 전부(파일 이름 순) — 깨진 기록은 뺀다."""
-    directory = workspace.root / VISUAL_PREVIEW_ROOT
-    if not directory.is_dir():
-        return []
-    records = (_read_record(path) for path in sorted(directory.glob("*.json")))
-    return [record for record in records if record is not None]
+# 원본 해시 → 그 원본의 미리보기 기록들(`_preview_records`가 한 번 읽은 모양).
+PreviewRecords = Mapping[str, Sequence[dict[str, object]]]
 
 
 def _source_candidates(
     workspace: RawWorkspace,
     source_sha256: str,
     selected_audio: tuple[int | None, ...] | None,
-    records: Sequence[dict[str, object]] | None = None,
+    records: PreviewRecords | None = None,
 ) -> list[tuple[str, dict[str, object]]]:
     """이 원본(과 소리 선택)의 미리보기 기록 전부 — 최근(`built_at`) 순.
 
     `records`는 원본 여럿을 함께 보는 질의가 한 번 읽은 기록이다(없으면 지금 읽는다)."""
     candidates: list[tuple[str, dict[str, object]]] = []
-    for record in _preview_records(workspace) if records is None else records:
-        if record.get("source_sha256") != source_sha256:
-            continue
+    by_source = _preview_records(workspace) if records is None else records
+    for record in by_source.get(source_sha256, ()):
         if record.get("schema") != VISUAL_PREVIEW_RECIPE:
             continue
         key = _record_str(record, "key")
@@ -932,12 +926,35 @@ def _source_candidates(
     return candidates
 
 
+def _preview_records(workspace: RawWorkspace) -> dict[str, list[dict[str, object]]]:
+    """미리보기 기록 폴더 전체를 원본 해시별로 — 읽기 범위 안에서는 한 번만 읽는다(D123).
+
+    원본마다 폴더 전체를 다시 읽으면 원본 수의 제곱이다(실측 원본 169개 · 기록 172개 —
+    그리기 한 번에 29075번). 범위 밖(작업 안)은 예전처럼 매번 읽는다 — 방금 쓴 기록을 놓치지
+    않는다. 돌려받은 기록은 고치지 않는다(범위 안에서 함께 쓴다).
+    """
+
+    def read() -> dict[str, list[dict[str, object]]]:
+        directory = workspace.root / VISUAL_PREVIEW_ROOT
+        if not directory.is_dir():
+            return {}
+        by_source: dict[str, list[dict[str, object]]] = {}
+        for record_path in sorted(directory.glob("*.json")):
+            record = _read_record(record_path)
+            sha = None if record is None else record.get("source_sha256")
+            if record is not None and isinstance(sha, str):
+                by_source.setdefault(sha, []).append(record)
+        return by_source
+
+    return read_scope.memo(("visual_review.preview_records", str(workspace.root)), read)
+
+
 def _latest_source_record(
     workspace: RawWorkspace,
     source_sha256: str,
     selected_audio: tuple[int | None, ...] | None = None,
     active: Sequence[JobRecord] = (),
-    records: Sequence[dict[str, object]] | None = None,
+    records: PreviewRecords | None = None,
 ) -> tuple[str, dict[str, object]] | None:
     """이 원본의 원본 전체 미리보기 기록 — (키, 기록) 또는 None.
 
@@ -965,7 +982,7 @@ def _source_preview_state(
     active: Sequence[JobRecord],
     selected_audio: tuple[int | None, ...] | None = None,
     claimed: bool = False,
-    records: Sequence[dict[str, object]] | None = None,
+    records: PreviewRecords | None = None,
 ) -> VisualSourcePreview:
     """원본 하나의 미리보기 상태 — 기록 주도로 유도한다(질의는 조사하지 않는다).
 

@@ -85,10 +85,18 @@ REVIEW_WORKSPACE_SCHEMA_STATEMENTS: tuple[str, ...] = (
         created_at TEXT NOT NULL
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS review_workspace_basis (
+        project_id TEXT NOT NULL,
+        base_plan_id TEXT NOT NULL,
+        basis_json TEXT NOT NULL,
+        PRIMARY KEY (project_id, base_plan_id)
+    )
+    """,
     "CREATE INDEX IF NOT EXISTS idx_review_workspace_revisions_head"
     " ON review_workspace_revisions (project_id, base_plan_id, created_at)",
 )
-"""검토 작업공간이 더한 표 — 리비전 본문·헤드·계획 재매핑·내보내기 리비전.
+"""검토 작업공간이 더한 표 — 리비전 본문·헤드·계획 재매핑·내보내기 리비전·기본의 원본별 근거(D124).
 `ANALYSIS_SCHEMA_STATEMENTS`와 같은 덧붙이기 계약이다(CREATE IF NOT EXISTS)."""
 
 
@@ -172,8 +180,9 @@ class ReviewWorkspaceStore:
         head_revision_id: str,
         created_at: str,
         remapping: RemappingInsert | None = None,
+        basis_json: str | None = None,
     ) -> None:
-        """첫 리비전 + 첫 헤드(+(입양이면) 매핑) — 한 트랜잭션, 실패면 전부 없던 일.
+        """첫 리비전 + 첫 헤드(+(입양이면) 매핑 · 원본별 근거) — 한 트랜잭션, 실패면 전부 없던 일.
 
         초기화·입양의 멱등 경계는 여기 있다: 어느 삽입이든 이미 있으면 트랜잭션
         전체가 되돌려지므로, 반쪽 출판(리비전만 있고 헤드 없는)은 생길 수 없다.
@@ -209,6 +218,12 @@ class ReviewWorkspaceStore:
                             remapping.mapping_json,
                             created_at,
                         ),
+                    )
+                if basis_json is not None:
+                    connection.execute(
+                        "INSERT INTO review_workspace_basis (project_id, base_plan_id,"
+                        " basis_json) VALUES (?, ?, ?)",
+                        (project_id, base_plan_id, basis_json),
                     )
                 connection.commit()
             except BaseException:
@@ -353,6 +368,16 @@ class ReviewWorkspaceStore:
                 (project_id, base_plan_id),
             ).fetchone()
         return None if row is None else str(row["head_revision_id"])
+
+    def source_basis(self, project_id: str, base_plan_id: str) -> str | None:
+        """검토 기본의 원본별 근거(JSON) — 이 기록 전에 낸 기본은 없다(D124)."""
+        with self._session() as connection:
+            row = connection.execute(
+                "SELECT basis_json FROM review_workspace_basis"
+                " WHERE project_id = ? AND base_plan_id = ?",
+                (project_id, base_plan_id),
+            ).fetchone()
+        return None if row is None else str(row["basis_json"])
 
     # ── 계획 재매핑 기록 ─────────────────────────────────────────
 

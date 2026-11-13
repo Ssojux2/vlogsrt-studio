@@ -1821,3 +1821,58 @@ def test_registration_race_still_refuses_a_different_file(
     monkeypatch.setattr(visual_review, "_registration_for", lambda *_: None)
     with pytest.raises(MediaNotAllowedError, match="이미 등록된 경로"):
         visual_review._ensure_registered(workspace, target, relative, rebuilt=True)
+
+
+# ── 미리보기 기록은 읽기 범위 하나에서 한 번만 읽는다(W-72, D123) ─────────────────
+
+
+class _RootOnly:
+    def __init__(self, root: Path) -> None:
+        self.root = root
+
+
+def _bare_preview_record(root: Path, key: str, sha: str, built_at: str) -> None:
+    target = root / visual_review.VISUAL_PREVIEW_ROOT / f"{key}.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        json.dumps(
+            {
+                "schema": visual_review.VISUAL_PREVIEW_RECIPE,
+                "key": key,
+                "source_sha256": sha,
+                "audio_ordinal": 0,
+                "built_at": built_at,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_preview_records_are_read_once_per_read_scope_for_every_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """원본 169개 작업공간에서 원본마다 기록 폴더 전체를 다시 읽었다(29075번 — D123)."""
+    from vlogsrt.project.raw import read_scope
+
+    workspace = cast(Any, _RootOnly(tmp_path))
+    shas = [f"{n:064x}" for n in range(3)]
+    for n, sha in enumerate(shas):
+        _bare_preview_record(tmp_path, f"k{n}a", sha, f"2026-11-0{n + 1}T00:00:00Z")
+        _bare_preview_record(tmp_path, f"k{n}b", sha, f"2026-11-0{n + 1}T01:00:00Z")
+    outside = {sha: visual_review._source_candidates(workspace, sha, None) for sha in shas}
+    reads: list[Path] = []
+    real = visual_review._read_record
+    monkeypatch.setattr(
+        visual_review, "_read_record", lambda path: reads.append(path) or real(path)
+    )
+    with read_scope.open():
+        inside = {sha: visual_review._source_candidates(workspace, sha, None) for sha in shas}
+        again = visual_review._source_candidates(workspace, shas[0], (0,))
+    assert inside == outside  # 같은 답 — 최근(`built_at`) 순 그대로
+    assert [key for key, _ in inside[shas[1]]] == ["k1b", "k1a"]
+    assert [key for key, _ in again] == ["k0b", "k0a"]
+    assert len(reads) == 6  # 기록 여섯 개를 한 번씩 — 원본 수만큼 다시 읽지 않는다
+    reads.clear()
+    _bare_preview_record(tmp_path, "k0c", shas[0], "2026-11-09T00:00:00Z")
+    fresh = visual_review._source_candidates(workspace, shas[0], None)  # 범위 밖은 매번 읽는다
+    assert fresh[0][0] == "k0c" and len(reads) == 7
