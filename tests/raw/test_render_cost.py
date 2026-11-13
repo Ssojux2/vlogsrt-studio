@@ -12,7 +12,10 @@
    `raw-tier/v4` → `v5`로만 바꿔 다시 잠갔다(43곳 — 그 밖은 바이트째 같다, D65). W-46b가 재생기
    껍데기에 시작·끝 표시 줄과 추천 구간 칸을, 원본마다 「내보낼 부분」(`kept`) 칸 하나를 더해 다시
    잠갔다 — 두 기준을 풀어 견주면 모델은 그 18칸 말고 같고, HTML은 껍데기의 그 두 조각 말고
-   바이트째 같다(D100 §7b).
+   바이트째 같다(D100 §7b). W-71이 고르지 않은 영상의 패널 칸(중복 후보·다시 듣기·빈칸 재전사·시각
+   맞춤)을 빼고 시각 확인을 카드 배지 몫(`tone`·`level`·`label`·`stale`)만 남기고 `detail: false`를
+   달아 다시 잠갔다 — 같은 작업공간을 「모든 영상 상세」로 그린 값과 견주면 껍데기·맨 위 칸·고른
+   영상은 같고 다른 것은 그 칸들뿐이다(본문 180 KB → 111 KB, D122).
 2. **부른 수의 천장.** 그리기 한 번이 DB 열기·원본 자막 읽기·검토 머리 읽기를 몇 번 하는지 —
    지금 값이 상한이다. 줄이는 것은 좋고 늘면 실패다.
 3. **타이머 틱.** 바뀐 것이 없는 틱은 그리지 않는다. 작업 진행 수만 바뀐 틱은 작업대에 진행이
@@ -572,3 +575,74 @@ def test_reprepare_fills_the_selected_video_beyond_the_first_page(
         assert _wait_terminal(server.raw, root, job.job_id).status == "succeeded"
     assert (root / str(last.thumb_relative_path)).is_file()  # 고른 영상 — 채웠다
     assert not (root / str(first.thumb_relative_path)).is_file()  # 첫 쪽 영상 — 그대로
+
+
+# ── UI 모델 나누기(W-71, D122) — 상세 칸은 고른 영상만 ─────────────────────────────
+
+DETAIL_KEYS = ("crossSourceCandidates", "syncCheck", "relisten", "refill", "snap")
+"""고른 영상에만 싣는 원본 자막 칸 — 「고급 도구」 패널이 그 영상 것만 그린다."""
+SYNC_BADGE_KEYS = {"tone", "level", "label", "stale"}
+"""카드 배지(`syncBadge`)가 읽는 자막 시각 확인 칸 — 고르지 않은 영상은 이것만 싣는다."""
+
+
+@needs_ffmpeg
+def test_only_the_selected_video_carries_its_detail_panels(built: Path, tmp_path: Path) -> None:
+    server, root, _signature = _opened(built, tmp_path)
+    model = _model_of(server.visual_workbench_render(root)[1])
+    chosen = model["selectedSourceId"]
+    heard = {sid: src for sid, src in model["sources"].items() if "transcriptRevision" in src}
+    assert chosen in heard and len(heard) > 1
+    assert "detail" not in heard[chosen]
+    assert {"syncCheck", "relisten", "refill", "snap"} <= set(heard[chosen])
+    for sid, source in heard.items():
+        if sid == chosen:
+            continue
+        assert source["detail"] is False
+        assert source["subtitles"]  # 연속 재생 자막은 모든 영상이 그대로 싣는다
+        assert not {"crossSourceCandidates", "relisten", "refill", "snap"} & set(source)
+        assert set(source.get("syncCheck", {})) <= SYNC_BADGE_KEYS
+
+
+@needs_ffmpeg
+def test_the_detail_function_gives_what_the_render_gives_once_that_video_is_selected(
+    built: Path, tmp_path: Path
+) -> None:
+    server, root, signature = _opened(built, tmp_path)
+    model = _model_of(server.visual_workbench_render(root)[1])
+    other = next(
+        sid
+        for sid, src in model["sources"].items()
+        if src.get("detail") is False and "syncCheck" in src
+    )
+    fns = {fn.__name__: fn for fn in server._visual_server_functions()}
+    body = {"epoch": model["epoch"], "signature": signature, "sourceId": other}
+    reply = fns["vl_source_detail"](body)
+    assert reply["ok"] and reply["echoEpoch"] == model["epoch"] and reply["sourceId"] == other
+    first_cut = model["sources"][other]["rail"]["intervals"][0]["id"]
+    selected = _model_of(
+        server.visual_workbench_render(root, source_id=other, preferred_selected_id=first_cut)[1]
+    )
+    assert selected["selectedSourceId"] == other
+    full = selected["sources"][other]
+    assert reply["detail"] == {key: full[key] for key in DETAIL_KEYS if key in full}
+    assert fns["vl_source_detail"]({**body, "signature": "낡은 서명"})["ok"] is False
+
+
+@needs_ffmpeg
+def test_the_detail_function_reads_only(built: Path, tmp_path: Path) -> None:
+    server, root, signature = _opened(built, tmp_path)
+    model = _model_of(server.visual_workbench_render(root)[1])
+    other = next(sid for sid, src in model["sources"].items() if src.get("detail") is False)
+    files = [root / DB_NAME, root / f"{DB_NAME}-wal"]
+    before = [path.read_bytes() if path.exists() else None for path in files]
+    submitted: list[object] = []
+    original = server.raw.submit_job
+    server.raw.submit_job = (  # type: ignore[method-assign]
+        lambda *a, **k: submitted.append(a) or original(*a, **k)
+    )
+    fns = {fn.__name__: fn for fn in server._visual_server_functions()}
+    assert fns["vl_source_detail"](
+        {"epoch": model["epoch"], "signature": signature, "sourceId": other}
+    )["ok"]
+    assert submitted == []
+    assert [path.read_bytes() if path.exists() else None for path in files] == before

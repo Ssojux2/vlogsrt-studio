@@ -2565,6 +2565,7 @@ def test_visual_server_functions_bind_client_revision(tmp_path: Path) -> None:
         "vl_timing_truth",  # 「참 시작」·「참 끝」(W-25b) — 자막과 따로, 화면이 본 리비전에만
         "vl_snap_all_check",  # 「모든 영상 시각 맞춤 확인(무료)」(W-25e) — 쓰지 않는다
         "vl_snap_all_apply",  # 「확인한 영상 모두 적용(무료)」(W-25e) — 확인 때의 토큰을 대조한다
+        "vl_source_detail",  # 고르지 않은 영상의 패널 칸 읽기(W-71, D122) — 쓰지 않는다
     ]
     signature = model["signature"]
     base = model["basePlanId"]
@@ -4541,6 +4542,7 @@ def test_blocks_wire_workbench_outputs(tmp_path: Path, local_socket: None) -> No
         "vl_timing_truth",  # 「참 시작」·「참 끝」(W-25b) — 자막과 따로, 화면이 본 리비전에만
         "vl_snap_all_check",  # 「모든 영상 시각 맞춤 확인(무료)」(W-25e) — 쓰지 않는다
         "vl_snap_all_apply",  # 「확인한 영상 모두 적용(무료)」(W-25e) — 확인 때의 토큰을 대조한다
+        "vl_source_detail",  # 고르지 않은 영상의 패널 칸 읽기(W-71, D122) — 쓰지 않는다
     ]
     cap_names = [fn.__name__ for fn in server._caption_workbench_block.server_fns]
     assert cap_names == ["cap_save", "cap_confirm"]

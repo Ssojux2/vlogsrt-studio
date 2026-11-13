@@ -750,6 +750,9 @@ ACTIVITY_ROUTE = ui_facade.ACTIVITY_ROUTE
 """「기록」 판의 서버 쪽(D61) — 읽기만 하는 GET 하나. 다른 경로와 같은 Host/Origin 가드를 지난다."""
 ACTIVITY_LOG_PAGE = ui_facade.ACTIVITY_VIEW.server_log_lines
 ACTIVITY_TIMING_ROWS = ui_facade.ACTIVITY_VIEW.timing_rows
+SYNC_BADGE_FIELDS = ("tone", "level", "label", "stale")
+"""고르지 않은 영상이 싣는 자막 시각 확인 칸 — 카드 배지(`syncBadge`)가 읽는 것뿐(W-71, D122)."""
+
 """한 번에 보내는 서버 줄 상한 — 판도 이만큼만 그린다(처음 열 때 몇 시간치를 보내지 않는다)."""
 ACTIVITY_JOB_LABELS = {
     raw_service.INGEST_JOB_KIND: "원본 가져오기",
@@ -6555,8 +6558,11 @@ class RawWorkspaceUi:
             task = task_views.get(sid, {})
             self._annotate_tiers(root, sid, source, task, pending_ids, suitability)
             self._annotate_kept(root, revision, sid, source, task, suitability)
+        # 「고급 도구」 패널의 무거운 칸은 고른 영상만(W-71, D122) — 실행본은 그 영상만
+        # 그린다.
+        detail_id = selected.source_id if selected is not None else None
         for sid, source in sources_model.items():
-            self._annotate_transcript(root, sid, source, quick)
+            self._annotate_transcript(root, sid, source, quick, detail=sid == detail_id)
             refs = self.raw.source_media_references(root, sid)
             if refs:
                 source["mediaStatus"] = refs["validation"]["reason"]
@@ -7659,18 +7665,30 @@ class RawWorkspaceUi:
         }
 
     def _annotate_transcript(
-        self, root: Path, sid: str, source: dict[str, Any], quick: Mapping[str, Any]
+        self,
+        root: Path,
+        sid: str,
+        source: dict[str, Any],
+        quick: Mapping[str, Any],
+        *,
+        detail: bool,
     ) -> None:
         """원본 하나의 원본 자막 칸 — 큐 · 중복 후보 · 갱신 필요 · 시각 확인 · 다시 듣기(D59).
 
         큐마다 「다른 귀」 증거(`ear`)와 「확인 필요」 이유(`suspects`)를 싣는다(D59 19e) — 표시만
         한다. 큐는 하나도 빼거나 고치지 않는다(규칙 4·9).
+
+        `detail`이 아닌 영상(고르지 않은 영상)은 큐와 카드 배지 몫의 시각 확인만 싣고
+        `detail: False`를 단다 — 패널 칸(중복 후보·시각 확인 전체·다시 듣기·빈칸 재전사·
+        시각 맞춤)은 실행본이 그 영상을 볼 때 `vl_source_detail`로 받는다(W-71, D122).
+        원본 169개에서 그 칸이 그린 값의 절반이었다.
         """
         transcript = self.raw.source_transcript(root, sid)
         if not transcript:
             return
         source["transcriptRevision"] = transcript["revision"]
-        source["crossSourceCandidates"] = self.raw.source_repeat_candidates(root, sid)
+        if detail:
+            source["crossSourceCandidates"] = self.raw.source_repeat_candidates(root, sid)
         sync_view = self.raw.sync_check_view(root, sid)  # 자막 시각 확인 — 표시만(D55)
         notes = self.raw.subtitle_cue_notes(
             transcript, sync_view, self.raw.subtitle_timing(root, sid, transcript)
@@ -7693,11 +7711,61 @@ class RawWorkspaceUi:
         source["transcriptDirty"] = bool(
             transcript["sequence"] and quick.get("stage") in ("자막 변경 · 갱신 필요", "승인 대기")
         )
+        if detail:
+            source.update(self._panel_fields(root, sid, transcript, sync_view))
+            return
+        source["detail"] = False
         if sync_view is not None:
-            source["syncCheck"] = sync_view
-        source["relisten"] = self._relisten_view(root, sid, transcript)
-        source["refill"] = self._refill_view(root, sid, transcript, sync_view)
-        source["snap"] = self._snap_view(root, sid)
+            source["syncCheck"] = {
+                key: sync_view[key] for key in SYNC_BADGE_FIELDS if key in sync_view
+            }
+
+    def _panel_fields(
+        self,
+        root: Path,
+        sid: str,
+        transcript: Mapping[str, Any],
+        sync_view: Mapping[str, Any] | None,
+    ) -> dict[str, object]:
+        """고른 영상의 패널 칸 — 그리기와 `vl_source_detail`이 이 값 하나를 쓴다(W-71, D122)."""
+        fields: dict[str, object] = {}
+        if sync_view is not None:
+            fields["syncCheck"] = sync_view
+        fields["relisten"] = self._relisten_view(root, sid, transcript)
+        fields["refill"] = self._refill_view(root, sid, transcript, sync_view)
+        fields["snap"] = self._snap_view(root, sid)
+        return fields
+
+    def source_detail(self, root: Path, sid: str) -> dict[str, object]:
+        """한 영상의 패널 칸 — 그 영상을 고른 그리기의 같은 칸과 같은 값이다. 읽기만 한다.
+
+        읽기 범위는 열지 않는다(D63 — 화면 진입점만 연다). 영상 하나라 기억 없이 읽어도 가볍다.
+        """
+        transcript = self.raw.source_transcript(root, sid)
+        if not transcript:
+            return {}
+        sync_view = self.raw.sync_check_view(root, sid)
+        return {
+            "crossSourceCandidates": self.raw.source_repeat_candidates(root, sid),
+            **self._panel_fields(root, sid, transcript, sync_view),
+        }
+
+    def visual_source_detail(self, payload: Mapping[str, object]) -> dict[str, object]:
+        """`vl_source_detail`의 본문 — 서명만 묶고(질의라 수명 토큰은 보지 않는다) 작업을 걸지
+        않는다.
+
+        고르지 않은 영상을 실행본이 볼 때(연속 재생·카드 누르기 직후) 패널 칸을 채운다. 응답의
+        `echoEpoch`가 지금 화면의 epoch와 다르면 실행본이 버린다.
+        """
+        epoch_value = payload.get("epoch")
+        echo = epoch_value if isinstance(epoch_value, str) else ""
+        try:
+            root = self._require_current_selection(self._serve_str(payload, "signature") or None)
+            sid = self._serve_str(payload, "sourceId")
+            detail = self.source_detail(root, sid)
+        except (gr.Error, raw_service.RawWorkspaceError, raw_service.ReviewError) as error:
+            return {"ok": False, "error": self._serve_error(error), "echoEpoch": echo}
+        return {"ok": True, "echoEpoch": echo, "sourceId": sid, "detail": detail}
 
     def _name_first_ear(self, root: Path, sid: str, notes: Mapping[str, Any]) -> None:
         """편집기 「처음 들은 글」 머리에 그 글을 들은 전사 엔진 이름을 단다(W-52b1) — whisper와
@@ -8090,6 +8158,7 @@ class RawWorkspaceUi:
             *self._vl_snap_functions(),
             self._vl_timing_truth_function(),
             *self._vl_snap_all_functions(),
+            self._vl_source_detail_function(),
         ]
 
     def _vl_sync_recheck_function(self) -> Callable[[dict[str, object]], dict[str, object]]:
@@ -8099,6 +8168,14 @@ class RawWorkspaceUi:
             return self.visual_workbench_action(payload, "sync-recheck")
 
         return vl_sync_recheck
+
+    def _vl_source_detail_function(self) -> Callable[[dict[str, object]], dict[str, object]]:
+        """한 영상의 패널 칸 읽기(W-71, D122) — 읽기만 한다. 유료 호출 0회."""
+
+        def vl_source_detail(payload: dict[str, object]) -> dict[str, object]:
+            return self.visual_source_detail(payload)
+
+        return vl_source_detail
 
     def _vl_relisten_function(self) -> Callable[[dict[str, object]], dict[str, object]]:
         """「다시 듣기」(D59 19b) — 다른 작업대 함수와 같은 토큰 문을 지난다. 유료 호출 0회."""

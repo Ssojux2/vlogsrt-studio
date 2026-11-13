@@ -4058,8 +4058,49 @@ VISUAL_BOOTSTRAP_JS = (
           return '<p class="vl-kv">자동 제외 근거 · ' + esc(autoReason(row.reason)) + span + "</p>";
         }).join("");
       }
+      // 고르지 않은 영상의 패널 칸(W-71, D122) — 서버는 고른 영상에만 싣고
+      // 나머지는 `detail: false`다. 연속 재생·카드 누르기 직후처럼 그 영상을 보면
+      // 그 칸만 읽어 와 합친다(작업을 걸지 않는 읽기). 받은 칸은 화면(epoch)마다
+      // `state`에 둔다 — 같은 모델을 다시 배선하면 DOM의 모델을 다시 읽으므로
+      // 모델에만 합치면 사라진다. 「불러오는 중」은 요청이 나가 있는 동안만이고,
+      // 실패하면 까닭을 보인다.
+      function detailNote(info) {
+        if (!info || info.detail !== false) { return ""; }
+        var asks = state.detailAsks || (state.detailAsks = {});
+        var ask = asks[info.sourceId];
+        if (!ask || ask.epoch !== model.epoch) {
+          ask = asks[info.sourceId] = { epoch: model.epoch, error: null, detail: null };
+          fetchDetail(info.sourceId, ask);
+        }
+        if (ask.detail) {
+          Object.assign(info, ask.detail);
+          delete info.detail;
+          return "";
+        }
+        return '<p class="vl-kv vl-detail-note">' + esc(ask.error ?
+          "자막 시각 확인·맞춤·다시 듣기 칸을 불러오지 못했습니다 — " + ask.error :
+          "자막 시각 확인·맞춤·다시 듣기 칸을 불러오는 중입니다…") + "</p>";
+      }
+      function fetchDetail(sourceId, ask) {
+        var fn = server && server.vl_source_detail;
+        if (!fn) { ask.error = "서버 함수가 없습니다"; return; }
+        var epochAtCall = model.epoch;
+        function failed(text) {
+          if (staleWire() || model.epoch !== epochAtCall) { return; }
+          ask.error = text; renderPanel();
+        }
+        fn({ sourceId: sourceId, epoch: epochAtCall, signature: model.signature })
+          .then(function (res) {
+            if (staleWire() || model.epoch !== epochAtCall) { return; }
+            if (!res || res.ok === false || res.echoEpoch !== epochAtCall) {
+              failed((res && res.error) || "빈 응답입니다"); return;
+            }
+            ask.detail = res.detail || {};
+            renderPanel(); renderThumbs();
+          }, function (err) { failed(String((err && err.message) || err)); });
+      }
       function panelNotices(card, info) {
-        var out = [];
+        var out = [detailNote(info)];
         if (model.redUnmaterialized > 0) {
           out.push('<p class="vl-kv"><span class="vl-badge vl-badge-red">제외 제안 ' +
             model.redUnmaterialized + '개</span> 컷 경계와 맞지 않아 그 구간을 덮는 컷의 결정을' +

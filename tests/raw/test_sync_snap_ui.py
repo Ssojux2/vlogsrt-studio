@@ -482,3 +482,79 @@ def test_new_wording_is_polite_and_names_no_model_or_price() -> None:
         assert POLITE_END.search(text), text
         assert "$" not in text and "VAD" not in text and "whisper" not in text.lower()
         assert "GPT" not in text and "Claude" not in text
+
+
+# ── 고르지 않은 영상의 패널 칸(W-71, D122) — 볼 때 읽어 와 합친다 ─────────────────
+
+_DETAIL_SCRIPT = r"""
+const detailModel = visualModel();
+detailModel.epoch = 'detail-1';
+Object.assign(detailModel.sources.srcA, { transcriptRevision: 'r1', subtitles: [],
+  detail: false, syncCheck: { tone: 'amber', level: 'amber', label: '확인 권함', stale: false } });
+const fetched = { snap: { state: 'waiting', explanation: '맞춤 설명', reason: '기다리는 까닭' },
+  relisten: { explanation: '다시 듣기 설명', pending: false, edited: false, heard: false } };
+const envDetail = visualEnv({ vl_source_detail: (payload) => ({ ok: true, echoEpoch: payload.epoch,
+  sourceId: payload.sourceId, detail: fetched }) }, detailModel);
+const loadingHtml = envDetail.panel.innerHTML;
+await new Promise((resolve) => setTimeout(resolve, 0));
+const asked = envDetail.serverCalls.filter((c) => c.name === 'vl_source_detail');
+envDetail.rewired();
+checkpoints.push({ case: 'detail', loadingHtml, filledHtml: envDetail.panel.innerHTML,
+  asked: asked.map((c) => c.payload),
+  askedAfterRewire: envDetail.serverCalls.filter((c) => c.name === 'vl_source_detail').length });
+const failModel = visualModel();
+failModel.epoch = 'detail-2';
+Object.assign(failModel.sources.srcA, { transcriptRevision: 'r1', subtitles: [], detail: false });
+const envFail = visualEnv({ vl_source_detail: (payload) => ({ ok: false,
+  error: '작업공간이 바뀌었습니다', echoEpoch: payload.epoch }) }, failModel);
+await new Promise((resolve) => setTimeout(resolve, 0));
+checkpoints.push({ case: 'detail-fail', failHtml: envFail.panel.innerHTML });
+const fullModel = visualModel();
+fullModel.epoch = 'detail-3';
+const envFull = visualEnv({ vl_source_detail: () => ({ ok: true }) }, fullModel);
+checkpoints.push({ case: 'detail-full', calls: envFull.serverCalls.length,
+  html: envFull.panel.innerHTML });
+"""
+
+
+def _run_detail_harness(tmp_path: Path) -> dict[str, Any]:
+    harness = tmp_path / "detail.js"
+    harness.write_text(
+        _NODE_HARNESS.replace(
+            "process.stdout.write(JSON.stringify(checkpoints));",
+            _DETAIL_SCRIPT + "\nprocess.stdout.write(JSON.stringify(checkpoints));",
+        ),
+        encoding="utf-8",
+    )
+    payload = tmp_path / "payload.json"
+    payload.write_text(
+        json.dumps(
+            {"visual": ui_facade.VISUAL_BOOTSTRAP_JS, "caption": ui_facade.CAPTION_BOOTSTRAP_JS}
+        ),
+        encoding="utf-8",
+    )
+    completed = subprocess.run(
+        ["node", str(harness), str(payload)], capture_output=True, text=True, timeout=20
+    )
+    assert completed.returncode == 0, completed.stderr[-2500:]
+    rows = json.loads(completed.stdout)
+    return {row["case"]: row for row in rows if str(row.get("case", "")).startswith("detail")}
+
+
+@needs_node
+def test_an_unselected_video_fetches_its_panels_once_and_says_so_while_waiting(
+    tmp_path: Path,
+) -> None:
+    report = _run_detail_harness(tmp_path)
+    detail = report["detail"]
+    assert "불러오는 중입니다" in detail["loadingHtml"]
+    assert "맞춤 설명" not in detail["loadingHtml"]
+    assert detail["asked"] == [{"sourceId": "srcA", "epoch": "detail-1", "signature": "ws-sig"}]
+    assert "맞춤 설명" in detail["filledHtml"] and "다시 듣기 설명" in detail["filledHtml"]
+    assert "불러오는 중" not in detail["filledHtml"]
+    assert detail["askedAfterRewire"] == 1  # 같은 화면(epoch)에서는 다시 묻지 않는다
+    failed = report["detail-fail"]["failHtml"]
+    assert "불러오지 못했습니다 — 작업공간이 바뀌었습니다" in failed
+    assert "불러오는 중" not in failed
+    full = report["detail-full"]  # 칸을 다 실은 영상(고른 영상)은 묻지 않는다
+    assert full["calls"] == 0 and "불러오" not in full["html"]
