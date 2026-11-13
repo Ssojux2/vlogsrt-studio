@@ -24,6 +24,7 @@ import time
 from collections.abc import Callable
 from fractions import Fraction
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -238,6 +239,42 @@ def _card(tmp_path: Path, name: str, files: dict[str, Path]) -> Path:
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source, target)
     return card
+
+
+# ── 원본 조사 기억이 라이브러리를 담는다(D121) ──────────────────────────────────
+
+
+@needs_ffmpeg
+def test_planning_again_probes_nothing_even_when_the_library_outgrows_the_base_memo(
+    workspace: Path, tmp_path: Path, k25_audio: Path, ntsc_noaudio: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # fmt: skip
+    """카드를 누를 때마다 계획을 다시 세운다.
+
+    원본이 기본 칸보다 많아도 두 번째 계획은 패킷을 훑지 않는다.
+    """
+    monkeypatch.setattr(preprocess, "_PROBE_MEMO", preprocess._ProbeMemo(
+        preprocess.ProbeMemoSettings(entries=1)
+    ))  # fmt: skip
+    scans: list[Path] = []
+    real_clock = preprocess.probe_extraction_clock
+
+    def counted(source: Path, **kwargs: Any) -> preprocess.RawVideoClock:
+        scans.append(Path(source))
+        return real_clock(source, **kwargs)
+
+    monkeypatch.setattr(preprocess, "probe_extraction_clock", counted)
+    service = raw.RawWorkspaceService()
+    _ingest_card(service, workspace, _card(tmp_path, "card", {
+        "DCIM/a.MOV": k25_audio, "DCIM/b.MOV": ntsc_noaudio,
+    }))  # fmt: skip
+    service.confirm_global_source_order(workspace)
+    first = service.plan_segmentation(workspace, tile_seconds=Fraction(2))
+    after_first = len(scans)
+    second = service.plan_segmentation(workspace, tile_seconds=Fraction(2))
+    assert after_first >= 2
+    assert len(scans) == after_first  # 두 번째 계획은 원본을 다시 훑지 않았다
+    assert [e.core_end_pts for e in second.entries] == [e.core_end_pts for e in first.entries]
 
 
 # ── 중복 한국어 파일명 두 배치 → 한 package ──────────────────────────────────

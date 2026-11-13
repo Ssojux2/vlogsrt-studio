@@ -5109,6 +5109,7 @@ class RawWorkspaceService:
         )
         rows = {row.asset_id: row for row in store.list_source_results(revision.revision_id)}
         intervals: dict[str, list[PlannedInterval]] = {}
+        _reserve_probe_room(len(order.entries))
         for entry in sorted(order.entries, key=lambda item: item.ordinal):
             row = rows.get(entry.asset_id)
             if row is None and not use_current_order:
@@ -6977,6 +6978,12 @@ class _MeasuredSource:
     exact_end_pts: int
 
 
+def _reserve_probe_room(sources: int) -> None:
+    """라이브러리를 훑기 전에 원본 조사 기억이 그 원본 전부를 담게 한다(D121)."""
+    if sources > 0:
+        preprocess.reserve_probe_memo(preprocess.PROBE_MEMO_SLOTS_PER_SOURCE * sources)
+
+
 def _measured_source(workspace: RawWorkspace, asset: SourceAsset) -> _MeasuredSource:
     """원본의 시계를 잰다 — 격자 증명(`uniform_grid`)의 판정은 부른 쪽이 본다(D68)."""
     path = workspace.source_media_path(asset)
@@ -7019,6 +7026,7 @@ def _planned_sources(
 ) -> _PlannedSources:
     """순서의 원본마다 다시 검증·측정해 조각을 짓는다 — VFR은 덮지 않고 기록한다(D68)."""
     result = _PlannedSources([], [], {}, [])
+    _reserve_probe_room(len(revision.entries))
     for order_entry in sorted(revision.entries, key=lambda item: item.ordinal):
         asset = _verified_asset(workspace, order_entry.asset_id)
         facts = _measured_source(workspace, asset)

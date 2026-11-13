@@ -10408,3 +10408,27 @@ cmd z로 되돌릴 수 있도록 … Subtitle Edit에서 맨 아래 파형 위�
   프로세스 시간 677초. 의미 분석 창은 창당 응답 간격 17.5초로 차례로 간다.
 - **다시 매긴 순위**(보고서 §5): ① 조사 기억 크기·카드 누르기의 전체 재계획 ② UI 모델 나누기 ③ 그리기 안 기억·썸네일 틱
   ④ 카드 누르기 재그리기 ⑤ 썸네일 캐시 ⑥ 자원 예산·불러오기 ⑦ 창 병렬(D-1) ⑧ 나머지 로컬 미디어.
+
+## D121 — 원본 조사 기억이 라이브러리 전체를 담는다: 계획이 훑기 전에 칸을 키운다 (2026-11-13, W-70, 사용자 지시)
+
+**지시**: D120 보고서 §5의 1순위 — 「카드 누르기마다 ffprobe 약 1000번」을 먼저 고친다(사용자 「Yes, start it」).
+
+- **원인**: 이미 분석한 영상 카드를 누르면 배경 작업(`publish_selection_review` → `plan_segmentation_from_analysis` →
+  `_planned_sources`)이 라이브러리 **전체**의 시계를 `probe_raw_media_memo`·`probe_extraction_clock_memo`로 다시 잰다. 기억(W-45)은
+  128칸(원본 60개쯤)인데 원본 169개는 338칸이 필요해, LRU가 한 바퀴마다 전부 밀려나 기억이 한 번도 맞지 않았다.
+- **고침**: 기본 `PROBE_MEMO.entries = 128`은 **시작 칸 수로 그대로 둔다**(값·시험 그대로). 라이브러리를 훑는 두 자리
+  (`_planned_sources`·`plan_segmentation_from_analysis`)가 먼저 `preprocess.reserve_probe_memo(PROBE_MEMO_SLOTS_PER_SOURCE × 원본 수)`로
+  칸을 키운다 — 줄이지 않는다. 고정값을 올리는 대신 라이브러리 크기를 따르게 한 것은 다음 라이브러리가 더 커도 같은 일이 생기지
+  않게 하려는 것이다. 메모리: 실측 원본 168개의 조사·시계를 피클하면 합 189 KB(원본 하나 1 KB 안쪽 · 이 라이브러리는 map 시계가
+  없다 — snap 97 · uniform 71). map 시계(D70)는 슬롯 대응을 싣지만 그것도 그 라이브러리를 다시 훑지 않으려면 어차피 들고 있어야 할
+  값이다. 열쇠(경로·크기·mtime·ctime·inode·장치·ffprobe 버전·조사자)·원본 확인(`_verified_asset`의 전체 해시, D62)·argv·
+  지문은 그대로다.
+- **실측(실제 작업공간 사본 · 원본 169개 · `bench_workbench.py`, 같은 절차)**: bench 동안 ffprobe **5065번 · 677초 → 338번 · 48초**
+  (원본마다 조사·시계 한 번씩, 처음 한 바퀴만). 앞단 그리기 시간은 이 고침과 무관하다(그리기는 조사하지 않는다) — 두 실행의 차이(그리기
+  2.9 → 3.4초)는 기계 부하(load 5–8, 다른 앱) 차이다.
+- **남은 것(이번에 안 함)**: 같은 배경 작업이 카드마다 원본 169개를 **전체 해시**한다(`_verified_asset`, `trust_stat=False` — 원본
+  8.3 GB). 계획 경로는 stat을 믿지 않는다는 D62 결정이라 바꾸지 않았다 — 바꾸려면 따로 정해야 한다. 카드 누르기가 이미 같은 계획을
+  다시 게시하는 일 자체를 건너뛰는 것도 다음 일이다(D120 §5의 4순위).
+- **시험**: `test_reserving_room_grows_the_memo_to_a_library_and_never_shrinks_it`(기본보다 작으면 그대로 · 키운 뒤 두 바퀴째 조사 0 ·
+  줄이지 않음 · 0 거부), `test_planning_again_probes_nothing_even_when_the_library_outgrows_the_base_memo`(기본 칸 1 · 원본 둘 · 두
+  번째 계획은 패킷 훑기 0 · 계획 그대로).

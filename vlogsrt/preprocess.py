@@ -2640,15 +2640,29 @@ class ProbeMemoSettings:
 
 
 PROBE_MEMO = ProbeMemoSettings()
+PROBE_MEMO_SLOTS_PER_SOURCE = 2
+"""원본 하나가 쓰는 기억 칸 — 조사(`probe_raw_media_memo`)와 시계(`probe_extraction_clock_memo`)."""
 
 
 class _ProbeMemo:
-    """잠근 LRU 한 벌 — 프로세스 메모리에만 산다(디스크에 남지 않는다)."""
+    """잠근 LRU 한 벌 — 프로세스 메모리에만 산다(디스크에 남지 않는다).
+
+    한도는 설정의 칸 수에서 시작해 라이브러리를 훑는 자리가 `reserve`로 키운다(줄이지 않는다, D121).
+    """
 
     def __init__(self, settings: ProbeMemoSettings) -> None:
         self._entries: dict[tuple[object, ...], object] = {}
         self._limit = settings.entries
         self._lock = threading.Lock()
+
+    @property
+    def limit(self) -> int:
+        with self._lock:
+            return self._limit
+
+    def reserve(self, entries: int) -> None:
+        with self._lock:
+            self._limit = max(self._limit, entries)
 
     def get(self, key: tuple[object, ...]) -> object | None:
         with self._lock:
@@ -2674,6 +2688,18 @@ class _ProbeMemo:
 
 
 _PROBE_MEMO = _ProbeMemo(PROBE_MEMO)
+
+
+def reserve_probe_memo(entries: int) -> None:
+    """기억이 적어도 `entries`칸을 담게 한다 — 라이브러리 전체를 훑기 전에 부른다(D121).
+
+    기본 칸(원본 60개쯤)보다 큰 라이브러리는 한 바퀴마다 LRU가 전부 밀려나 기억이 한 번도 맞지
+    않았다(실측 원본 169개 · 338칸 대 128칸 — 카드 누르기마다 ffprobe 약 1000번). 원본 하나가
+    조사·시계 1 KB 안쪽이라(실측 168개 합 189 KB) 라이브러리 크기만큼 잡아도 가볍다. 줄이지 않는다.
+    """
+    if isinstance(entries, bool) or not isinstance(entries, int) or entries < 1:
+        raise ValueError(f"조사 기억 칸 수는 1 이상 정수여야 합니다: {entries!r}")
+    _PROBE_MEMO.reserve(entries)
 
 
 def _probe_identity(source: Path) -> tuple[object, ...]:

@@ -268,6 +268,28 @@ def test_the_memo_is_bounded_by_its_setting(
         preprocess.ProbeMemoSettings(entries=0)
 
 
+def test_reserving_room_grows_the_memo_to_a_library_and_never_shrinks_it(
+    tmp_path: Path, runner: _Runner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """라이브러리가 기본 칸보다 크면 한 바퀴마다 전부 밀려나 기억이 한 번도 맞지 않았다(D121 —
+    원본 169개 · 338칸 대 128칸). 라이브러리를 훑는 자리가 먼저 그만큼 자리를 잡는다."""
+    monkeypatch.setattr(preprocess, "_PROBE_MEMO", preprocess._ProbeMemo(
+        preprocess.ProbeMemoSettings(entries=2)
+    ))  # fmt: skip
+    preprocess.reserve_probe_memo(1)  # 기본보다 작으면 그대로
+    assert preprocess._PROBE_MEMO.limit == 2
+    clips = [_clip(tmp_path, f"{n}.mov") for n in range(3)]
+    preprocess.reserve_probe_memo(3)
+    for _ in range(2):
+        for clip in clips:
+            preprocess.probe_raw_media_memo(clip)
+    assert [runner.probes_of(clip) for clip in clips] == [1, 1, 1]
+    preprocess.reserve_probe_memo(1)  # 줄이지 않는다
+    assert preprocess._PROBE_MEMO.limit == 3 and len(preprocess._PROBE_MEMO) == 3
+    with pytest.raises(ValueError, match="조사 기억 칸 수"):
+        preprocess.reserve_probe_memo(0)
+
+
 def test_a_remembered_clock_still_checks_the_probe_stream(tmp_path: Path, runner: _Runner) -> None:
     clip = _clip(tmp_path)
     probe = preprocess.probe_raw_media_memo(clip)
