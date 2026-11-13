@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""원본 범위 타임라인 공용 사례를 다시 쓴다(W-71a, D123) — 기대값은 Python 모델이 채운다.
+"""원본 범위 타임라인 공용 사례를 다시 쓴다(W-71a, D125) — 기대값은 Python 모델이 채운다.
 
     python scripts/make_timeline_edit_cases.py
 

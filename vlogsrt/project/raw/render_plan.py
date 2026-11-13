@@ -72,7 +72,7 @@ GRID_KINDS = (GRID_UNIFORM, GRID_SNAP, GRID_MAP)
 PART_AUTO_GREEN = "auto_green"
 PART_HUMAN_RECOMMENDED = "human_recommended"
 PART_TIMELINE = "timeline"
-"""원본 범위 타임라인의 클립(W-71e, D128) — 등급이 아니라 사람이 고른 범위다."""
+"""원본 범위 타임라인의 클립(W-71e, D130) — 등급이 아니라 사람이 고른 범위다."""
 
 DROP_YELLOW = "yellow"
 DROP_RED_UNREVIEWED = "red_unreviewed"
@@ -98,7 +98,7 @@ DROP_REASONS = (
 )
 """뺀 구간의 까닭 — 빨강은 사람이 그 조각을 본 기록(확정 제외·덮기·결정)이 있으면 `red_confirmed`,
 없으면 `red_unreviewed`다. `unanalyzed`는 등급 판정이 없는 자리(분석 전 원본 · 판정 길이 밖)다.
-`timeline_cut`은 원본 범위 타임라인에서 클립 밖에 남은 원본 구간이다(D128)."""
+`timeline_cut`은 원본 범위 타임라인에서 클립 밖에 남은 원본 구간이다(D130)."""
 _BRIDGEABLE = frozenset({DROP_YELLOW})
 """합칠 틈으로 이을 수 있는 까닭 — 사람 표시·빨강·미분석은 잇지 않는다."""
 
@@ -716,7 +716,7 @@ def sequence_edges(
     `pieces`는 차례대로 (원본 길이 초, 원본 끝에 닿았는가)다. 누적 길이를 가장 가까운 시퀀스
     프레임(½은 위로)에 맞추므로 오차가 쌓이지 않는다. 원본 끝에 닿은 조각만 남은 미디어를 넘지 않게
     내림이다. 두 경계가 한 프레임에 떨어지면 0프레임 조각은 쓸 수 없어 1프레임으로 늘리고 센다.
-    렌더 계획과 원본 범위 타임라인(`timeline_edit`, D123)이 함께 쓰는 한 규칙이다.
+    렌더 계획과 원본 범위 타임라인(`timeline_edit`, D125)이 함께 쓰는 한 규칙이다.
     """
     edges = [0]
     padded = 0
@@ -965,7 +965,7 @@ def plan_from_clips(
     dropped: Sequence[DroppedRange],
     settings: RenderSettings = RENDER_SETTINGS,
 ) -> RenderPlan:
-    """원본 범위 타임라인(D128)의 클립 → 렌더 계획 — 등급으로 고르지 않고 클립 그대로다.
+    """원본 범위 타임라인(D130)의 클립 → 렌더 계획 — 등급으로 고르지 않고 클립 그대로다.
 
     시퀀스 포맷은 타임라인 문서에 고정된 것이고, 출력 배치는 `build_plan`과 같은 `_parts`다
     (`sequence_edges` — 타임라인 화면의 배치와 같다). 자막은 타임라인이 투영한 장을 그대로 싣는다.

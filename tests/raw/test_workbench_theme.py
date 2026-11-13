@@ -199,7 +199,7 @@ def test_mount_turns_off_gradio_run_history(
     tmp_path: Path, local_socket: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Gradio 6의 실행 기록은 사건마다 최근 100번을 localStorage에 다시 쓴다 — 1·2초 타이머가
-    # 그 기록을 실행마다 약 4 MB로 키워, 가만히 둔 화면이 메인 스레드를 크게 잡았다(W-71c, D125).
+    # 그 기록을 실행마다 약 4 MB로 키워, 가만히 둔 화면이 메인 스레드를 크게 잡았다(W-71c, D127).
     captured: dict[str, object] = {}
 
     def fake_mount(app: object, blocks: object, **kwargs: object) -> object:

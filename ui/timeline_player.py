@@ -1,6 +1,6 @@
 """원본 범위 타임라인 재생기(W-71c) — 렌더하지 않고 원본마다 미리보기를 틀어 컷을 건넌다.
 
-「타임라인으로 보내기」(W-71b, D124)가 만든 타임라인을 「최종 편집」 탭 머리에서 튼다. 클립이 있는
+「타임라인으로 보내기」(W-71b, D126)가 만든 타임라인을 「최종 편집」 탭 머리에서 튼다. 클립이 있는
 원본마다 원본 전체 미리보기(`/media/<등록 ID>` — 서버가 준 ID만)를 쓰고, 원본 국소 s초는 미리보기
 `원점 + s`초다(`video_origin_seconds`). 영상은 둘이다 — 보이는 활성 영상과, 다음 컷 뒤 클립
 시작에 미리 맞춘 대기 영상. 컷에서 둘을 바꿔 틀어(`TL.playStep`) 다른 원본으로 가는 시크를 기다리지
@@ -302,7 +302,7 @@ class TimelinePlayer:
     def _render(
         self, root: Any, timeline_id: str | None, payload: dict[str, object]
     ) -> dict[str, object]:
-        """저장된 리비전 하나를 렌더하는 작업을 건다 — 작업이 그 리비전을 다시 확인한다(D128)."""
+        """저장된 리비전 하나를 렌더하는 작업을 건다 — 작업이 그 리비전을 다시 확인한다(D130)."""
         revision = payload.get("revision")
         if timeline_id is None or not isinstance(revision, int) or isinstance(revision, bool):
             raise ValueError("렌더 요청의 모양이 틀렸습니다(타임라인 · 리비전).")

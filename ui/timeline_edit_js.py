@@ -1,4 +1,4 @@
-"""원본 범위 타임라인(W-71a, D123)의 브라우저 핵심 — `TIMELINE_CORE_JS`(`window.__vlTL`).
+"""원본 범위 타임라인(W-71a, D125)의 브라우저 핵심 — `TIMELINE_CORE_JS`(`window.__vlTL`).
 
 순수 모델(`vlogsrt/project/raw/timeline_edit.py`)의 정수 틱 규칙을 1:1로 옮긴다. DOM을 모르고
 노드에서도 돈다(`module.exports`) — 시험이 공용 사례(`timeline_edit_cases.json`)로

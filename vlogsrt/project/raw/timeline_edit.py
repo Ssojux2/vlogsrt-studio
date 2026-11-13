@@ -1,4 +1,4 @@
-"""원본 범위 타임라인(W-71a, D123) — 렌더 없이 원본 구간을 잇고, 클립 앞뒤를 원본 안에서 고친다.
+"""원본 범위 타임라인(W-71a, D125) — 렌더 없이 원본 구간을 잇고, 클립 앞뒤를 원본 안에서 고친다.
 
 D117의 최종 편집은 렌더한 초안(`draft.mp4`) 위의 컷이었다. 여기서 **클립은 원본의 프레임 구간**
 `[start, end)`이고 차례가 곧 타임라인이다 — 추천 구간(`render_plan`의 조각)을 그대로 심고, 사람이
@@ -587,7 +587,7 @@ def project(document: TimelineDocument) -> Projection:
 def render_cues(
     document: TimelineDocument,
 ) -> tuple[tuple[render_plan.ProjectedCue, ...], render_plan.CueCounts]:
-    """타임라인 자막을 렌더 계획의 장으로(D128) — 길이 0인 장은 D115 그대로 늘린다.
+    """타임라인 자막을 렌더 계획의 장으로(D130) — 길이 0인 장은 D115 그대로 늘린다.
 
     조각 번호는 장의 시작이 놓인 클립이다(경계면 뒤 클립). 센 것: 원본 = 문서의 자막 수 = 보인 것 +
     가린 것(`dropped`), 잘린 것(`clipped`), 늘린 것·길이 0으로 남은 것.

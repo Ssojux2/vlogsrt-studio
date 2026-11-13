@@ -1,4 +1,4 @@
-"""원본 범위 타임라인 만들기·열기·저장(W-71b, D124) — 렌더하지 않고 `timeline/<시각>/`에만 쓴다.
+"""원본 범위 타임라인 만들기·열기·저장(W-71b, D126) — 렌더하지 않고 `timeline/<시각>/`에만 쓴다.
 
 초안 내보내기와 같은 재료·같은 계획에서 추천 조각을 원본 프레임 구간 클립으로 심는다 — 손대지 않은
 타임라인의 배치·SRT가 렌더 계획과 같다. 저장은 리비전이 다르면 덮지 않고, 심은 리비전은 파일의
@@ -124,7 +124,7 @@ def test_the_untouched_timeline_is_the_render_plan(trip: Folder) -> None:
     ]
     assert timeline_edit.edited_frames(document) == plan.total_frames
     assert document.facts.sequence == plan.sequence
-    # 같은 원본의 뺀 구간을 걸친 자막이 없는 픽스처라 초안 SRT와 바이트까지 같다(D123).
+    # 같은 원본의 뺀 구간을 걸친 자막이 없는 픽스처라 초안 SRT와 바이트까지 같다(D125).
     assert timeline_edit.srt_text(document) == render_plan.srt_text(plan)
 
 

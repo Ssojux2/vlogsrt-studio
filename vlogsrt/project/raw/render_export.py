@@ -62,7 +62,7 @@ SRT_AGAIN_PREFIX = "draft-"
 `draft.srt`는 덮지 않는다."""
 REPORT_NAME = "render_report.json"
 TIMELINE_REPORT_KEY = "timeline"
-"""보고서의 출처 칸 — 원본 범위 타임라인에서 렌더한 초안이면 `{"id", "revision"}`(D128)."""
+"""보고서의 출처 칸 — 원본 범위 타임라인에서 렌더한 초안이면 `{"id", "revision"}`(D130)."""
 STAGING_NAME = "_staging"
 """한 번의 내보내기 안의 스테이징 — 조각·이은 영상·글을 다 만든 뒤에야 제 이름으로 낸다."""
 _STAMP = "%Y%m%dT%H%M%SZ"
@@ -181,7 +181,7 @@ def gather_for_timeline(
     source_ids: Sequence[str],
     context: JobContext | None = None,
 ) -> list[GatheredSource]:
-    """원본 범위 타임라인 렌더(D128)의 재료 — 클립이 있는 원본만, 원본 경로·조사·시계·소리만.
+    """원본 범위 타임라인 렌더(D130)의 재료 — 클립이 있는 원본만, 원본 경로·조사·시계·소리만.
 
     초안의 재료와 달리 검토 머리·등급·원본 자막을 읽지 않는다(타임라인이 이미 정했다). 렌더할 수
     없는 원본(map·VFR·렌더 판정 거부)은 빼지 않고 이름을 대고 거부한다 — 타임라인의 클립이다.
@@ -376,7 +376,7 @@ def transcript_with_revision(
     service: RawWorkspaceService, root: Path, asset: SourceAsset
 ) -> tuple[str | None, tuple[render_plan.SourceCue, ...]]:
     """지금 원본 자막의 (리비전, 줄) — 한 번 읽은 문서에서 둘을 함께(타임라인이 리비전을 심는다,
-    D124). 자막이 없으면 (None, ()). 다른 원본 내용에 묶인 자막은 쓰지 않고 거부한다."""
+    D126). 자막이 없으면 (None, ()). 다른 원본 내용에 묶인 자막은 쓰지 않고 거부한다."""
     document = service.source_transcript(root, asset.asset_id)
     if document is None:
         return None, ()
@@ -712,7 +712,7 @@ def export_plan(
     origin: Mapping[str, Any] | None = None,
 ) -> ExportResult:
     """세운 계획 하나를 새 `export/<시각>/`에 영상·SRT·보고서로 낸다 — 초안과 원본 범위 타임라인
-    렌더(D128)가 같은 길을 쓴다. `origin`은 보고서에 그대로 싣는 출처 칸이다(타임라인이면
+    렌더(D130)가 같은 길을 쓴다. `origin`은 보고서에 그대로 싣는 출처 칸이다(타임라인이면
     `{"timeline": {"id", "revision"}}`). 실패·취소면 폴더를 남기지 않는다."""
     started = time.monotonic() if started is None else started
     settings = plan.settings
@@ -811,7 +811,7 @@ def export_srt_again(
     report = json.loads((folder / REPORT_NAME).read_text(encoding="utf-8"))
     if TIMELINE_REPORT_KEY in report:
         # 타임라인 렌더의 자막은 타임라인 문서의 것이다 — 지금 원본 자막을 얹으면 그 자막(심은
-        # 리비전·뺀 구간을 걸친 장)을 조용히 바꾼다(D128). 타임라인에서 다시 렌더한다.
+        # 리비전·뺀 구간을 걸친 장)을 조용히 바꾼다(D130). 타임라인에서 다시 렌더한다.
         raise RenderExportError(
             f"{folder.name}은 원본 범위 타임라인에서 렌더한 초안이다 — 자막은 타임라인 것이라"
             " SRT만 다시 쓰지 않는다. 타임라인에서 다시 렌더하세요"

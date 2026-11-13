@@ -1,4 +1,4 @@
-"""원본 범위 타임라인 브라우저 핵심(W-71a, D123) — `TIMELINE_CORE_JS`가 Python과 같은 값을 내는가.
+"""원본 범위 타임라인 브라우저 핵심(W-71a, D125) — `TIMELINE_CORE_JS`가 Python과 같은 값을 내는가.
 
 공용 사례(`timeline_edit_cases.json`)를 노드에서 돌려 Python 결과(사례의 `expect`)와 비교한다. 같은
 파일을 `test_timeline_edit.test_shared_cases_match_python`이 Python으로 돌린다.

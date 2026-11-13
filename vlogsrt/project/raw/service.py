@@ -494,7 +494,7 @@ KEPT_HUMAN_REASON = render_plan.PART_HUMAN_RECOMMENDED
 한 번에 하나다(같은 지문이면 도는 작업에 다시 붙는다)."""
 
 TIMELINE_EXPORT_JOB_KIND = "timeline_export"
-"""「타임라인으로 보내기」(W-71b, D124) — 렌더 없이 원본 범위 타임라인을 만드는 작업(무료 로컬)."""
+"""「타임라인으로 보내기」(W-71b, D126) — 렌더 없이 원본 범위 타임라인을 만드는 작업(무료 로컬)."""
 
 SUBTITLE_BURN_JOB_KIND = "subtitle_burn"
 """자막 입히기(W-65, D116) — 영상 하나에 한국어(+ 영어) SRT를 번인해 `<이름>.burned.mp4`를 쓰는 무료
@@ -3961,7 +3961,7 @@ class RawWorkspaceService:
         return self.submit_job(root, RENDER_EXPORT_JOB_KIND, "render_export/draft", body)
 
     def start_timeline_render(self, root: Path, timeline_id: str, revision: int) -> JobHandle:
-        """원본 범위 타임라인에서 렌더(W-71e, D128) — 초안과 같은 작업 종류·같은 `export/<시각>/`.
+        """원본 범위 타임라인에서 렌더(W-71e, D130) — 초안과 같은 작업 종류·같은 `export/<시각>/`.
 
         결과 카드·영어 변환·자막 입히기·초안 편집이 그 폴더를 그대로 쓴다. 지문에 타임라인 아이디와
         리비전이 들어 같은 리비전이면 도는 작업에 다시 붙는다. 무료 로컬이다."""
@@ -4026,7 +4026,7 @@ class RawWorkspaceService:
         )
 
     def start_timeline_export(self, root: Path) -> JobHandle:
-        """「타임라인으로 보내기」(W-71b, D124) — 추천 조각을 렌더하지 않고 원본 범위 타임라인으로
+        """「타임라인으로 보내기」(W-71b, D126) — 추천 조각을 렌더하지 않고 원본 범위 타임라인으로
         만들어 새 `timeline/<시각>/`에 쓰는 작업. 원본 조사(ffprobe)만 하고 무료 로컬이다."""
         from vlogsrt.project.raw import timeline_edit_io
 
@@ -4042,7 +4042,7 @@ class RawWorkspaceService:
         return bool(timeline_edit_io.timeline_folders(root))
 
     def timeline_open(self, root: Path, timeline_id: str | None = None) -> dict[str, Any]:
-        """원본 범위 타임라인의 재료(D124) — 파일의 문서·요약과 바뀐 원본 자막. 읽기만 한다."""
+        """원본 범위 타임라인의 재료(D126) — 파일의 문서·요약과 바뀐 원본 자막. 읽기만 한다."""
         from vlogsrt.project.raw import timeline_edit_io
 
         return timeline_edit_io.open_timeline(self, root, timeline_id)
@@ -4097,7 +4097,7 @@ class RawWorkspaceService:
         *,
         force: bool = False,
     ) -> dict[str, Any]:
-        """원본 범위 타임라인 저장(D124) — 파일의 사실로 다시 검사하고 그 폴더에만 쓴다."""
+        """원본 범위 타임라인 저장(D126) — 파일의 사실로 다시 검사하고 그 폴더에만 쓴다."""
         from vlogsrt.project.raw import timeline_edit_io
 
         return timeline_edit_io.save_timeline(

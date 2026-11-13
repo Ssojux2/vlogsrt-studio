@@ -1978,7 +1978,7 @@ class RawWorkspaceUi:
             self, raw_service.RawWorkspaceError, raw_service.RENDER_EXPORT_JOB_KIND
         )
         self._render_export_started: Any = None
-        # 「타임라인으로 보내기」(W-71b, D124) — 렌더 없이 원본 범위 타임라인, 끝나면 「최종 편집」.
+        # 「타임라인으로 보내기」(W-71b, D126) — 렌더 없이 원본 범위 타임라인, 끝나면 「최종 편집」.
         self._timeline_cell = TimelineCell(
             self,
             raw_service.RawWorkspaceError,
@@ -4604,7 +4604,7 @@ class RawWorkspaceUi:
             self._render_export_button = gr.Button(
                 RENDER_EXPORT_LABEL, variant="primary", elem_id=RENDER_EXPORT_ID
             )
-            # 「타임라인으로 보내기」(W-71b, D124) — 옆에 둔다(렌더·번인은 아직 초안 길, W-71e까지).
+            # 「타임라인으로 보내기」(W-71b, D126) — 옆에 둔다(렌더·번인은 아직 초안 길, W-71e까지).
             self._timeline_cell.build_button()
             # 일괄 확인의 원천 — 화면의 단추는 제외 제안 대기열의 「남은 M개 모두 제외 유지」이고,
             # 그것이 이 숨은 단추를 누른다(옛 「자동 제외 확인」의 처리기·입출력 그대로, D57 C).
@@ -11650,7 +11650,7 @@ class RawWorkspaceUi:
                 theme=workbench_theme(),
                 css=CSS,
                 # 실행 기록은 사건마다 최근 100번을 localStorage에 다시 쓴다 — 타이머가 그것을
-                # 실행마다 MB 단위로 키워 가만히 둔 화면의 메인 스레드를 잡았다(W-71c, D125).
+                # 실행마다 MB 단위로 키워 가만히 둔 화면의 메인 스레드를 잡았다(W-71c, D127).
                 run_history=False,
             )
         return app

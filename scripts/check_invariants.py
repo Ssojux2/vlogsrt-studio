@@ -1334,7 +1334,7 @@ def check_final_edit_stays_pure() -> list[str]:
     return failures
 
 
-# D123 — 원본 범위 타임라인(`timeline_edit.py`)은 값만 다룬다. 브라우저 핵심(`TIMELINE_CORE_JS`)이
+# D125 — 원본 범위 타임라인(`timeline_edit.py`)은 값만 다룬다. 브라우저 핵심(`TIMELINE_CORE_JS`)이
 # 같은 규칙으로 같은 값을 내야 하고, 출력 배치는 렌더 계획의 순수 함수
 # (`render_plan.sequence_edges`)를 그대로 쓴다 — 그래서 `render_plan`은 import해도 되지만
 # 파일·프로세스·서비스·입출력 계층은 안 된다.
@@ -1345,17 +1345,17 @@ TIMELINE_EDIT_MUST_NOT_IMPORT = (
 
 
 def check_timeline_edit_stays_pure() -> list[str]:
-    """D123 — 원본 범위 타임라인 모델은 순수하다. 파일이 사라져도 조용히 통과하지 않는다."""
+    """D125 — 원본 범위 타임라인 모델은 순수하다. 파일이 사라져도 조용히 통과하지 않는다."""
     path = PROJECT_PACKAGE / "raw" / TIMELINE_EDIT_MODULE
     if not path.exists():
-        return [f"vlogsrt/project/raw/{TIMELINE_EDIT_MODULE}: 타임라인 모델이 사라졌다 (D123)"]
+        return [f"vlogsrt/project/raw/{TIMELINE_EDIT_MODULE}: 타임라인 모델이 사라졌다 (D125)"]
     body = path.read_text(encoding="utf-8")
     failures = [
-        f"{TIMELINE_EDIT_MODULE}: {name}을 import한다 — 타임라인 모델이 순수하지 않게 된다 (D123)"
+        f"{TIMELINE_EDIT_MODULE}: {name}을 import한다 — 타임라인 모델이 순수하지 않게 된다 (D125)"
         for name in _imports(body, TIMELINE_EDIT_MUST_NOT_IMPORT)
     ]
     failures += [
-        f"{TIMELINE_EDIT_MODULE}:{number}: 파일을 직접 읽거나 쓰거나 동적 코드를 연다 (D123)"
+        f"{TIMELINE_EDIT_MODULE}:{number}: 파일을 직접 읽거나 쓰거나 동적 코드를 연다 (D125)"
         for number, line in enumerate(body.splitlines(), start=1)
         if FINALCUT_TIMELINE_FILE_IO.search(line) or SYNC_SNAP_FORBIDDEN_CALLS.search(line)
     ]
@@ -1429,7 +1429,7 @@ def _final_edit_writer_failures(rel: str, body: str) -> list[str]:
     return failures
 
 
-# D124 — 「타임라인으로 보내기」의 입출력(`timeline_edit_io.py`)은 작업공간 `timeline/<시각>/`
+# D126 — 「타임라인으로 보내기」의 입출력(`timeline_edit_io.py`)은 작업공간 `timeline/<시각>/`
 # 하나에만 쓰고 렌더하지 않는다. 원본·초안·원본 자막은 읽기만 한다 — 쓰는 길은 `_write_atomic` 한
 # 자리(정해진 이름 하나, 임시 파일 → 이름 바꾸기)뿐이고 폴더는 `candidate.mkdir(parents=True)`로만
 # 만든다. ffmpeg 렌더(`render_part`·`concat_parts`·`render_pieces`·`export_draft`)를 부르는 줄이
@@ -1445,30 +1445,30 @@ TIMELINE_IO_MKDIR = "candidate.mkdir(parents=True)"
 
 
 def check_timeline_io_writes_only_timeline_folder() -> list[str]:
-    """D124 — 원본 범위 타임라인은 `timeline/`에만 쓰고 렌더하지 않는다. 파일이 사라져도 조용히
+    """D126 — 원본 범위 타임라인은 `timeline/`에만 쓰고 렌더하지 않는다. 파일이 사라져도 조용히
     통과하지 않는다."""
     rel = f"vlogsrt/project/raw/{TIMELINE_IO_MODULE}"
     path = PROJECT_PACKAGE / "raw" / TIMELINE_IO_MODULE
     if not path.exists():
-        return [f"{rel}: 타임라인 입출력이 사라졌다 (D124)"]
+        return [f"{rel}: 타임라인 입출력이 사라졌다 (D126)"]
     body = path.read_text(encoding="utf-8")
     lines = body.splitlines()
     failures = [
-        f"{rel}: {name}을 import한다 — 타임라인이 복사·지우기·외부 프로세스를 쓸 수 있다 (D124)"
+        f"{rel}: {name}을 import한다 — 타임라인이 복사·지우기·외부 프로세스를 쓸 수 있다 (D126)"
         for name in _imports(body, TIMELINE_IO_MUST_NOT_IMPORT)
     ]
     failures += [
-        f"{rel}:{number}: 덮어쓰기·복사·지우기·열어 쓰기 경로를 부른다 (D124)"
+        f"{rel}:{number}: 덮어쓰기·복사·지우기·열어 쓰기 경로를 부른다 (D126)"
         for number, line in enumerate(lines, start=1)
         if FINAL_EDIT_IO_FORBIDDEN.search(line)
     ]
     failures += [
-        f"{rel}:{number}: 렌더 경로를 부른다 — 타임라인으로 보내기는 렌더하지 않는다 (D124)"
+        f"{rel}:{number}: 렌더 경로를 부른다 — 타임라인으로 보내기는 렌더하지 않는다 (D126)"
         for number, line in enumerate(lines, start=1)
         if TIMELINE_IO_RENDER_CALLS.search(line)
     ]
     failures += [
-        f"{rel}:{number}: 정해진 한 자리 밖에서 폴더를 만든다 (D124)"
+        f"{rel}:{number}: 정해진 한 자리 밖에서 폴더를 만든다 (D126)"
         for number, line in enumerate(lines, start=1)
         if ".mkdir(" in line and line.strip() != TIMELINE_IO_MKDIR
     ]
@@ -1484,10 +1484,10 @@ def _timeline_writer_failures(rel: str, body: str) -> list[str]:
         None,
     )  # fmt: skip
     if writer is None:
-        return [f"{rel}: 쓰기 함수 `{TIMELINE_IO_WRITER}`가 없다 (D124)"]
+        return [f"{rel}: 쓰기 함수 `{TIMELINE_IO_WRITER}`가 없다 (D126)"]
     inside = set(range(writer.lineno, (writer.end_lineno or writer.lineno) + 1))
     failures = [
-        f"{rel}:{number}: 쓰기 함수 밖에서 파일을 열거나 이름을 바꾼다 (D124)"
+        f"{rel}:{number}: 쓰기 함수 밖에서 파일을 열거나 이름을 바꾼다 (D126)"
         for number, line in enumerate(body.splitlines(), start=1)
         if ("os.open(" in line or "oscompat.replace(" in line) and number not in inside
     ]
@@ -1497,11 +1497,11 @@ def _timeline_writer_failures(rel: str, body: str) -> list[str]:
             f"{rel}: 쓰기 함수가 이름(`TIMELINE_FILES`)·폴더(`TIMELINE_FOLDER`)를 검사하지 않는다"
         )
     if 'TIMELINE_FOLDER = "timeline"' not in body:
-        failures.append(f'{rel}: 쓰는 자리 `TIMELINE_FOLDER = "timeline"`가 없다 (D124)')
+        failures.append(f'{rel}: 쓰는 자리 `TIMELINE_FOLDER = "timeline"`가 없다 (D126)')
     return failures
 
 
-# D128 — 원본 범위 타임라인 렌더(`timeline_render.py`)는 파일을 직접 쓰지 않는다. 쓰는 길은 초안과
+# D130 — 원본 범위 타임라인 렌더(`timeline_render.py`)는 파일을 직접 쓰지 않는다. 쓰는 길은 초안과
 # 같은 `render_export.export_plan` 한 자리(새 `export/<시각>/`, 실패면 폴더를 걷는다)뿐이고, 초안의
 # 들머리(`export_draft` — 등급으로 고르는 계획)나 SRT만 다시(`export_srt_again`)를 부르지 않는다.
 TIMELINE_RENDER_MODULE = "timeline_render.py"
@@ -1510,29 +1510,29 @@ TIMELINE_RENDER_FORBIDDEN_CALLS = re.compile(r"(export_draft|export_srt_again|b
 
 
 def check_timeline_render_writes_only_through_export_plan() -> list[str]:
-    """D128 — 타임라인 렌더는 `export_plan` 하나로만 낸다. 파일이 사라지면 실패다."""
+    """D130 — 타임라인 렌더는 `export_plan` 하나로만 낸다. 파일이 사라지면 실패다."""
     rel = f"vlogsrt/project/raw/{TIMELINE_RENDER_MODULE}"
     path = PROJECT_PACKAGE / "raw" / TIMELINE_RENDER_MODULE
     if not path.exists():
-        return [f"{rel}: 타임라인 렌더가 사라졌다 (D128)"]
+        return [f"{rel}: 타임라인 렌더가 사라졌다 (D130)"]
     body = path.read_text(encoding="utf-8")
     lines = body.splitlines()
     failures = [
-        f"{rel}: {name}을 import한다 — 타임라인 렌더가 직접 쓰거나 프로세스를 띄울 수 있다 (D128)"
+        f"{rel}: {name}을 import한다 — 타임라인 렌더가 직접 쓰거나 프로세스를 띄울 수 있다 (D130)"
         for name in _imports(body, (*FINAL_EDIT_IO_MUST_NOT_IMPORT, "preprocess", "os"))
     ]
     failures += [
-        f"{rel}:{number}: 파일을 직접 열거나 쓰거나 지운다 — export_plan으로만 낸다 (D128)"
+        f"{rel}:{number}: 파일을 직접 열거나 쓰거나 지운다 — export_plan으로만 낸다 (D130)"
         for number, line in enumerate(lines, start=1)
         if FINAL_EDIT_IO_FORBIDDEN.search(line) or ".mkdir(" in line
     ]
     failures += [
-        f"{rel}:{number}: 초안의 들머리·SRT만 다시·등급 계획을 부른다 (D128)"
+        f"{rel}:{number}: 초안의 들머리·SRT만 다시·등급 계획을 부른다 (D130)"
         for number, line in enumerate(lines, start=1)
         if TIMELINE_RENDER_FORBIDDEN_CALLS.search(line)
     ]
     if body.count(TIMELINE_RENDER_EXPORT) != 1:
-        failures.append(f"{rel}: `{TIMELINE_RENDER_EXPORT}…)`가 정확히 한 번이 아니다 (D128)")
+        failures.append(f"{rel}: `{TIMELINE_RENDER_EXPORT}…)`가 정확히 한 번이 아니다 (D130)")
     return failures
 
 
