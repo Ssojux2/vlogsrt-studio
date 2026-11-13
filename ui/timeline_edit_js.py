@@ -510,6 +510,19 @@ TIMELINE_CORE_JS = r"""
     return step;
   };
 
+  // ─── 범위 조정: 가장자리를 갈 수 있는 자리로(W-71d) ─────────────────
+  // 끌기·키가 범위 밖을 가리켜도 거기서 멈춘다 — 같은 원본의 앞뒤 클립·원본 처음·끝(`clipBounds`)과
+  // 최소 길이 안. 연산(`setClipStart`·`setClipEnd`)은 여전히 밖을 거부한다.
+  TL.clampEdge = function (doc, index, side, frame, settings) {
+    var clip = clipAt(doc, index);
+    var bounds = TL.clipBounds(doc, index);
+    var at = Math.round(frame);
+    if (side === SIDE_START) {
+      return Math.max(bounds[0], Math.min(at, clip[2] - settings.minClipFrames));
+    }
+    return Math.min(bounds[1], Math.max(at, clip[1] + settings.minClipFrames));
+  };
+
   root.__vlTL = TL;
   if (typeof module !== "undefined" && module.exports) { module.exports = TL; }
 })(typeof window !== "undefined" ? window : globalThis);

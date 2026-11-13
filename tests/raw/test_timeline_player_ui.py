@@ -93,8 +93,11 @@ def _model_of(page: str) -> dict[str, Any]:
     return json.loads(found.group(1))
 
 
+TIERS = {"s1": [["0", "1", "green"], ["1", "10", "red"]], "s2": [["0", "8", "yellow"]]}
+
+
 def test_the_client_model_uses_the_core_document_shape() -> None:
-    model = client_model("sig", "tok", _opened(), _media())
+    model = client_model("sig", "tok", _opened(), _media(), TIERS)
     doc = model["doc"]
     assert doc["facts"] == {
         "sequence": {"num": 1, "den": 30},
@@ -109,10 +112,12 @@ def test_the_client_model_uses_the_core_document_shape() -> None:
     assert model["frame"] == {"width": 1920, "height": 1080}
     assert model["media"]["s2"]["fileId"] == "f2"
     assert (model["signature"], model["token"], model["revision"]) == ("sig", "tok", 2)
+    assert model["tiers"] == TIERS
+    assert model["settings"] == {"maxCues": 5000}
 
 
 def test_the_page_escapes_the_model_and_has_two_decks_and_its_own_keys() -> None:
-    page = timeline_player_html(client_model("sig", "tok", _opened(), _media()))
+    page = timeline_player_html(client_model("sig", "tok", _opened(), _media(), TIERS))
     assert '</div>"' not in page and "<A>" not in page
     assert _model_of(page)["names"]["s1"] == "<A>.mp4"
     assert page.count("<video") == 2
@@ -137,7 +142,9 @@ def test_the_view_is_empty_without_a_timeline_and_carries_media_with_one(
     monkeypatch.setattr(server.raw, "has_timeline", lambda _root: True)
     monkeypatch.setattr(server.raw, "timeline_open", lambda _root, *_a: _opened())
     monkeypatch.setattr(server.raw, "timeline_media", lambda _root, *_a: _media())
+    monkeypatch.setattr(server.raw, "timeline_tiers", lambda _root, ids: {i: [] for i in ids})
     model = _model_of(player.view(signature))
+    assert model["tiers"] == {"s1": [], "s2": []}
     assert model["timelineId"] == "20261113T010203Z"
     assert model["media"]["s1"]["fileId"] == "f1"
     assert model["token"] == server._visual_lifetime_token
@@ -188,6 +195,39 @@ def test_blocks_mount_the_player_in_the_final_edit_tab(tmp_path: Path, local_soc
     fns = {dep["id"]: app.fns[dep["id"]].fn for dep in deps}
     views = [d for d in deps if fns[d["id"]] == server._timeline_player.view]
     assert len(views) >= 6  # 작업공간 사건마다 + 「타임라인으로 보내기」 성공 뒤
+
+
+def test_save_needs_the_token_and_passes_the_document_and_base_revision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server, _root, signature = _server(tmp_path)
+    player = server._timeline_player
+    calls: list[tuple[Any, ...]] = []
+
+    def save(_root: Path, timeline_id: str, base: int, doc: Any, *, force: bool = False) -> Any:
+        calls.append((timeline_id, base, doc, force))
+        return {"revision": base + 1, "summary": {"clips": 2}, "warnings": []}
+
+    monkeypatch.setattr(server.raw, "timeline_save", save)
+    doc = {"clips": [["s1", 0, 30]], "cues": [], "nextCue": 1, "seeded": {}}
+    payload: dict[str, object] = {
+        "signature": signature,
+        "token": "낡은-토큰",
+        "timelineId": "t1",
+        "baseRevision": 3,
+        "doc": doc,
+    }
+    refused = player.action(payload, "save")
+    assert refused["ok"] is False and refused["stale"] is True and calls == []
+    payload["token"] = server._visual_lifetime_token
+    got = player.action(payload, "save")
+    assert got == {"ok": True, "revision": 4, "summary": {"clips": 2}, "warnings": []}
+    assert calls == [("t1", 3, doc, False)]
+    payload["force"] = True
+    player.action(payload, "save")
+    assert calls[-1][3] is True
+    broken = player.action({**payload, "baseRevision": "3"}, "save")
+    assert broken["ok"] is False and broken["stale"] is False
 
 
 @needs_node

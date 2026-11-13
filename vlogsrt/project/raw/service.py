@@ -4061,6 +4061,20 @@ class RawWorkspaceService:
             }
         return {"timelineId": timeline, "sources": sources}
 
+    def timeline_tiers(self, root: Path, source_ids: Sequence[str]) -> dict[str, list[list[str]]]:
+        """원본마다 등급 구간 [시작 초, 끝 초, 등급](원본 시계, 원점 0) — 범위 조정의 띠(W-71d).
+
+        렌더 계획이 쓰는 같은 보고서(`tier_report`)다. 표시만 하고 아무것도 쓰지 않는다 — 분석이
+        없으면 빈 목록."""
+        rows = self.review_workspace_facade(root).tier_evidence_rows()
+        tiers: dict[str, list[list[str]]] = {}
+        for source_id in source_ids:
+            row = rows.get(source_id)
+            report = self.tier_report(root, row.revision_id, source_id) if row else None
+            spans = report.spans if report is not None else ()
+            tiers[source_id] = [[str(span.start), str(span.end), span.tier] for span in spans]
+        return tiers
+
     def timeline_save(
         self,
         root: Path,

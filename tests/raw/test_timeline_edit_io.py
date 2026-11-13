@@ -355,3 +355,26 @@ def test_a_source_without_a_ready_preview_says_so_and_gives_no_media(
         "height": None,
         "rotation": None,
     }
+
+
+# ── 범위 조정의 등급 띠(W-71d) — 표시만 ────────────────────────────────────────────
+
+
+def test_timeline_tiers_give_each_clipped_source_its_tier_spans_on_the_source_clock(
+    trip: Folder,
+) -> None:
+    """원본마다 등급 구간(원본 시계 초, 원점 0) — 렌더 계획이 쓰는 같은 보고서다. 쓰지 않는다."""
+    created = _create(trip, MOMENT.replace(minute=32))
+    _, sources = timeline_edit_io.clipped_sources(trip.root, created.folder.name)
+    before = _tree(trip.folder)
+    tiers = trip.service.timeline_tiers(trip.root, sources)
+    assert _tree(trip.folder) == before
+    assert set(tiers) == set(sources)
+    gathered = render_export.gather_sources(trip.service, trip.root)
+    by_id = {item.source.source_id: item.source for item in gathered}
+    for source_id, rows in tiers.items():
+        expected = [
+            [str(piece.start), str(piece.end), piece.tier] for piece in by_id[source_id].tiers or ()
+        ]
+        assert rows == expected, source_id
+        assert rows and all(F(row[0]) < F(row[1]) for row in rows)

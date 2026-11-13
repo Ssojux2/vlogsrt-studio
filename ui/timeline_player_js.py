@@ -16,11 +16,13 @@ PLAYER_APP_JS = r"""
   if (!S) {
     S = W.__vlTimelinePlayer = { epoch: null, doc: null, spans: [], total: 0, playhead: 0, span: 0,
       deck: 0, playing: false, loopGen: 0, media: {}, status: "", statusError: false,
-      pollGen: 0 };
+      pollGen: 0, sel: 0, cursor: null, drag: null, dirty: false, saving: false,
+      history: { past: [], future: [] } };
   }
   S.server = server;
   var POLL_MS = 2000;
   var BIG_STEP = 10;
+  var HANDLE_PX = 8;
 
   function $(id) { return document.getElementById(id); }
   function clamp(value, low, high) { return Math.max(low, Math.min(high, value)); }
@@ -46,7 +48,9 @@ PLAYER_APP_JS = r"""
     S.rawModel = got.raw;
     if (got.model.epoch === S.epoch && S.rootEl === got.rootEl) { return; }
     var m = got.model;
-    var same = S.timelineId === m.timelineId && S.revision === m.revision;
+    var same = S.timelineId === m.timelineId;
+    // 같은 타임라인을 다시 그린 것이면 저장 전 편집과 되돌리기 기록을 지킨다.
+    var keepLocal = same && S.dirty && S.doc;
     stopPlayback();
     S.rootEl = got.rootEl;
     S.epoch = m.epoch;
@@ -55,15 +59,21 @@ PLAYER_APP_JS = r"""
     S.signature = m.signature;
     S.token = m.token;
     S.timelineId = m.timelineId;
-    S.revision = m.revision;
     S.names = m.names || {};
     S.media = m.media || {};
-    S.doc = m.doc;
-    S.spans = TL.layout(S.doc);
-    S.total = TL.editedFrames(S.doc);
-    S.proj = TL.project(S.doc);
+    S.tiers = m.tiers || {};
+    S.settings = m.settings || {};
+    if (!keepLocal) {
+      S.doc = m.doc;
+      S.baseRevision = m.revision;
+      S.dirty = false;
+      S.history = { past: [], future: [] };
+    }
+    relayout();
     S.deck = 0;
-    if (!same) { S.playhead = 0; S.status = ""; S.statusError = false; }
+    if (!same) {
+      S.playhead = 0; S.sel = 0; S.cursor = null; S.status = ""; S.statusError = false;
+    }
     bindDom();
     showDeck();
     seek(S.playhead);
@@ -317,6 +327,13 @@ PLAYER_APP_JS = r"""
       two(seconds % 60) + ":" + two(frame % fps);
   }
   function paint() { paintTransport(); paintMissing(); paintPlayhead(); }
+  function relayout() {
+    S.spans = TL.layout(S.doc);
+    S.total = TL.editedFrames(S.doc);
+    S.proj = TL.project(S.doc);
+    S.playhead = clamp(S.playhead, 0, S.total);
+    S.sel = clamp(S.sel, 0, Math.max(0, S.doc.clips.length - 1));
+  }
   function paintTransport() {
     var button = $("tl-toggle");
     if (button) { button.textContent = S.playing ? "⏸" : "▶"; }
@@ -325,6 +342,12 @@ PLAYER_APP_JS = r"""
       status.textContent = S.status;
       status.classList.toggle("is-error", S.statusError);
     }
+    var undoButton = $("tl-undo");
+    if (undoButton) { undoButton.disabled = !S.history.past.length; }
+    var redoButton = $("tl-redo");
+    if (redoButton) { redoButton.disabled = !S.history.future.length; }
+    var force = $("tl-force");
+    if (force) { force.hidden = !S.conflict; }
     var prep = $("tl-prepare");
     if (prep && S.doc) {
       var waiting = notReady();
@@ -389,6 +412,11 @@ PLAYER_APP_JS = r"""
       g.fillRect(x, 4, width - 1, h - 8);
       g.fillStyle = cssVar("--vl-line-strong");
       g.fillRect(x, 4, 1, h - 8);
+      if (i === S.sel) {
+        g.strokeStyle = cssVar("--vl-accent");
+        g.lineWidth = 2;
+        g.strokeRect(x + 1, 5, width - 3, h - 10);
+      }
       if (width > 60) {
         g.fillStyle = cssVar("--vl-ink");
         g.save();
@@ -402,6 +430,214 @@ PLAYER_APP_JS = r"""
     var px = S.playhead / total * w;
     g.fillStyle = cssVar("--vl-danger");
     g.fillRect(Math.round(px) - 1, 0, 2, h);
+    paintSource();
+  }
+
+  // ─── 범위 조정(W-71d): 고른 클립의 원본 전체 띠 ─────────────────
+  // 원본 처음부터 끝까지를 한 줄에 — 등급(추천·보통·비추천)은 흐리게, 같은 원본의 다른 클립은
+  // 회색, 고른 클립은 밝게 손잡이와 함께. 손잡이를 끌면 그 가장자리 프레임을 화면에 보이고, 놓으면
+  // 클립 앞뒤가 원본 안에서 바뀐다(같은 원본의 앞뒤 클립·원본 처음·끝까지, `TL.clampEdge`).
+  var TIER_FILL = { green: "--vl-tier-green", yellow: "--vl-tier-yellow", red: "--vl-tier-red" };
+  function selClip() { return S.doc && S.doc.clips.length ? S.doc.clips[S.sel] : null; }
+  function sourceFrameAtX(c, clientX) {
+    var clip = selClip();
+    var rect = c.getBoundingClientRect();
+    var frames = sourceOf(clip[0]).frames;
+    return clamp(Math.round((clientX - rect.left) / Math.max(rect.width, 1) * frames), 0, frames);
+  }
+  function edgeOf(side) {
+    var clip = selClip();
+    if (S.drag && S.drag.side === side) { return S.drag.frame; }
+    return side === TL.SIDE_START ? clip[1] : clip[2];
+  }
+  function paintSource() {
+    var c = $("tl-source-canvas");
+    var head = $("tl-source-head");
+    var clip = selClip();
+    if (!c || !clip) { return; }
+    var source = sourceOf(clip[0]);
+    var seconds = source.num / source.den;
+    var start = edgeOf(TL.SIDE_START);
+    var end = edgeOf(TL.SIDE_END);
+    if (head) {
+      head.textContent = "클립 " + (S.sel + 1) + " · " + nameOf(clip[0]) + " · 원본 " +
+        (start * seconds).toFixed(2) + "–" + (end * seconds).toFixed(2) + "초 (" +
+        ((end - start) * seconds).toFixed(2) + "초) / 원본 " +
+        (source.frames * seconds).toFixed(1) + "초";
+    }
+    var w = c.clientWidth;
+    var h = c.clientHeight;
+    if (!w || !h) { return; }
+    var ratio = W.devicePixelRatio || 1;
+    if (c.width !== Math.round(w * ratio)) { c.width = Math.round(w * ratio); }
+    if (c.height !== Math.round(h * ratio)) { c.height = Math.round(h * ratio); }
+    var g = c.getContext("2d");
+    g.setTransform(ratio, 0, 0, ratio, 0, 0);
+    g.clearRect(0, 0, w, h);
+    function xOf(frame) { return frame / Math.max(source.frames, 1) * w; }
+    g.globalAlpha = 0.35;
+    (S.tiers[clip[0]] || []).forEach(function (row) {
+      var token = TIER_FILL[row[2]];
+      if (!token) { return; }
+      g.fillStyle = cssVar(token);
+      var x0 = xOf(rational(row[0]) / seconds);
+      g.fillRect(x0, 0, Math.max(1, xOf(rational(row[1]) / seconds) - x0), h);
+    });
+    g.globalAlpha = 1;
+    S.doc.clips.forEach(function (other, i) {
+      if (other[0] !== clip[0] || i === S.sel) { return; }
+      g.fillStyle = cssVar("--vl-line-strong");
+      g.fillRect(xOf(other[1]), h / 3, Math.max(1, xOf(other[2]) - xOf(other[1])), h / 3);
+    });
+    g.fillStyle = cssVar("--vl-accent");
+    g.fillRect(xOf(start), h / 4, Math.max(2, xOf(end) - xOf(start)), h / 2);
+    g.fillStyle = cssVar("--vl-ink");
+    [start, end].forEach(function (frame) { g.fillRect(xOf(frame) - 2, 0, 4, h); });
+    var at = sourceCursor();
+    if (at !== null) {
+      g.fillStyle = cssVar("--vl-danger");
+      g.fillRect(Math.round(xOf(at)) - 1, 0, 2, h);
+    }
+  }
+  // 원본 띠의 커서 — 띠를 눌러 고른 원본 프레임, 없으면 플레이헤드가 그 원본에 있을 때의 프레임.
+  function sourceCursor() {
+    var clip = selClip();
+    if (!clip) { return null; }
+    if (S.cursor && S.cursor.sourceId === clip[0]) { return S.cursor.frame; }
+    if (!S.spans.length) { return null; }
+    var at = TL.sourcePoint(S.doc, Math.min(S.playhead, S.total - 1));
+    return S.spans[at[0]].sourceId === clip[0] ? at[1] : null;
+  }
+  function showSourceFrame(sourceId, frame) {
+    if (!mediaOf(sourceId)) { return; }
+    if (S.playing) { stopPlayback(); }
+    var source = sourceOf(sourceId);
+    place(active(), sourceId, clamp(frame, 0, source.frames - 1));
+  }
+  function onSourceDown(ev) {
+    var clip = selClip();
+    if (!clip) { return; }
+    var c = ev.currentTarget;
+    var frame = sourceFrameAtX(c, ev.clientX);
+    var rect = c.getBoundingClientRect();
+    var px = function (f) { return f / Math.max(sourceOf(clip[0]).frames, 1) * rect.width; };
+    var x = ev.clientX - rect.left;
+    var side = null;
+    if (Math.abs(x - px(clip[1])) <= HANDLE_PX) { side = TL.SIDE_START; }
+    else if (Math.abs(x - px(clip[2])) <= HANDLE_PX) { side = TL.SIDE_END; }
+    if (side) {
+      S.drag = { side: side, frame: side === TL.SIDE_START ? clip[1] : clip[2] };
+      c.setPointerCapture(ev.pointerId);
+      dragTo(c, ev.clientX);
+    } else {
+      S.cursor = { sourceId: clip[0], frame: Math.min(frame, sourceOf(clip[0]).frames - 1) };
+      showSourceFrame(clip[0], S.cursor.frame);
+      paintSource();
+    }
+    if (S.rootEl) { S.rootEl.focus(); }
+  }
+  function dragTo(c, clientX) {
+    var frame = TL.clampEdge(S.doc, S.sel, S.drag.side, sourceFrameAtX(c, clientX), S.settings);
+    S.drag.frame = frame;
+    showSourceFrame(selClip()[0], S.drag.side === TL.SIDE_START ? frame : frame - 1);
+    paintSource();
+  }
+  function onSourceMove(ev) {
+    if (S.drag) { dragTo(ev.currentTarget, ev.clientX); return; }
+    var clip = selClip();
+    if (!clip) { return; }
+    var c = ev.currentTarget;
+    var rect = c.getBoundingClientRect();
+    var frames = Math.max(sourceOf(clip[0]).frames, 1);
+    var x = ev.clientX - rect.left;
+    var near = [clip[1], clip[2]].some(function (f) {
+      return Math.abs(x - f / frames * rect.width) <= HANDLE_PX;
+    });
+    c.style.cursor = near ? "ew-resize" : "pointer";
+  }
+  function onSourceUp() {
+    if (!S.drag) { return; }
+    var drag = S.drag;
+    S.drag = null;
+    setEdge(drag.side, drag.frame);
+  }
+  // 고른 클립의 한 가장자리를 원본 프레임 frame으로 — 바뀌면 기록하고 그 가장자리로 간다.
+  function setEdge(side, frame) {
+    var clip = selClip();
+    if (!clip) { return; }
+    var at = TL.clampEdge(S.doc, S.sel, side, frame, S.settings);
+    if (at === (side === TL.SIDE_START ? clip[1] : clip[2])) { paint(); return; }
+    var next = side === TL.SIDE_START ? TL.setClipStart(S.doc, S.sel, at, S.settings)
+      : TL.setClipEnd(S.doc, S.sel, at, S.settings);
+    var verb = side === TL.SIDE_START ? "앞" : "뒤";
+    var moved = Math.abs(at - (side === TL.SIDE_START ? clip[1] : clip[2]));
+    change(next, "클립 " + (S.sel + 1) + " " + verb + " " + moved + "프레임");
+    var span = S.spans[S.sel];
+    S.cursor = null;
+    seek(side === TL.SIDE_START ? span.outStart : span.outStart + span.outFrames - 1);
+  }
+  function trimToCursor(side) {
+    var at = sourceCursor();
+    if (at === null) {
+      say("원본 띠를 눌러 자리를 고르거나 플레이헤드를 그 클립에 두세요.", true);
+      return;
+    }
+    setEdge(side, at);
+  }
+
+  // ─── 문서 바꾸기 · 되돌리기 · 저장 ──────────────────────────────
+  function change(next, label) {
+    if (S.playing) { stopPlayback(); }
+    S.history.past.push(S.doc);
+    if (S.history.past.length > (S.settings.undoLimit || 200)) { S.history.past.shift(); }
+    S.history.future = [];
+    S.doc = next;
+    relayout();
+    S.dirty = true;
+    say(label + " — 저장 대기", false);
+    scheduleSave();
+  }
+  function undo(redo) {
+    var from = redo ? S.history.future : S.history.past;
+    var to = redo ? S.history.past : S.history.future;
+    if (!from.length) { return; }
+    if (S.playing) { stopPlayback(); }
+    to.push(S.doc);
+    S.doc = from.pop();
+    relayout();
+    S.dirty = true;
+    say(redo ? "다시 했습니다 — 저장 대기" : "되돌렸습니다 — 저장 대기", false);
+    seek(S.playhead);
+    scheduleSave();
+  }
+  function scheduleSave() {
+    if (S.saveTimer) { W.clearTimeout(S.saveTimer); }
+    S.saveTimer = W.setTimeout(function () { saveNow(false); }, S.settings.autosaveMs || 1500);
+  }
+  function docPayload() {
+    return { clips: S.doc.clips, cues: S.doc.cues, nextCue: S.doc.nextCue, seeded: S.doc.seeded };
+  }
+  function saveNow(force) {
+    if (S.saveTimer) { W.clearTimeout(S.saveTimer); S.saveTimer = null; }
+    if (!S.dirty || S.saving || !S.doc) { return; }
+    S.saving = true;
+    var sent = S.doc;
+    var payload = { signature: S.signature, token: S.token, timelineId: S.timelineId,
+      baseRevision: S.baseRevision, doc: docPayload(), force: !!force };
+    S.server.tl_save(payload).then(function (got) {
+      S.saving = false;
+      if (!got || !got.ok) { say((got && got.error) || "저장하지 못했습니다.", true); return; }
+      if (got.conflict) {
+        S.conflict = true;
+        say("다른 곳에서 이 타임라인이 리비전 " + got.revision + "으로 바뀌었습니다 — " +
+          "새로고침하거나 「내 편집으로 덮기」를 누르세요.", true);
+        return;
+      }
+      S.conflict = false;
+      S.baseRevision = got.revision;
+      if (S.doc === sent) { S.dirty = false; } else { scheduleSave(); }
+      say("저장했습니다 · 리비전 " + got.revision, false);
+    }, function () { S.saving = false; say("저장하지 못했습니다.", true); });
   }
 
   // ─── 사건 ────────────────────────────────────────────────────────
@@ -410,7 +646,20 @@ PLAYER_APP_JS = r"""
       /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName || ""));
   }
   function onKey(ev) {
-    if (!S.doc || editable(ev.target) || ev.metaKey || ev.ctrlKey || ev.altKey) { return; }
+    if (!S.doc || editable(ev.target)) { return; }
+    var mod = ev.metaKey || ev.ctrlKey;
+    var special = null;
+    if (ev.altKey && !mod && ev.code === "BracketLeft") {
+      special = function () { trimToCursor(TL.SIDE_START); };
+    } else if (ev.altKey && !mod && ev.code === "BracketRight") {
+      special = function () { trimToCursor(TL.SIDE_END); };
+    } else if (mod && !ev.altKey && ev.code === "KeyZ") {
+      special = function () { undo(ev.shiftKey); };
+    } else if (mod && !ev.altKey && ev.code === "KeyS") {
+      special = function () { saveNow(false); };
+    }
+    if (special) { ev.preventDefault(); ev.stopPropagation(); special(); return; }
+    if (mod || ev.altKey) { return; }
     var big = ev.shiftKey ? BIG_STEP : 1;
     var acts = {
       Space: toggle, KeyK: stopPlayback,
@@ -428,7 +677,11 @@ PLAYER_APP_JS = r"""
     var target = ev.target.closest ? ev.target.closest("[data-tl]") : null;
     if (!target) { return; }
     var acts = { toggle: toggle, "prev-cut": function () { goCut(-1); },
-      "next-cut": function () { goCut(1); }, prepare: prepare };
+      "next-cut": function () { goCut(1); }, prepare: prepare,
+      undo: function () { undo(false); }, redo: function () { undo(true); },
+      "trim-start": function () { trimToCursor(TL.SIDE_START); },
+      "trim-end": function () { trimToCursor(TL.SIDE_END); },
+      "force-save": function () { saveNow(true); } };
     var act = acts[target.getAttribute("data-tl")];
     if (act) { act(); }
   }
@@ -438,6 +691,8 @@ PLAYER_APP_JS = r"""
     var frame = Math.round((ev.clientX - rect.left) / Math.max(rect.width, 1) * S.total);
     var playing = S.playing;
     if (playing) { stopPlayback(); }
+    if (S.spans.length) { S.sel = TL.sourcePoint(S.doc, Math.min(frame, S.total - 1))[0]; }
+    S.cursor = null;
     seek(frame);
     if (playing) { play(); }
     if (S.rootEl) { S.rootEl.focus(); }
@@ -467,6 +722,26 @@ PLAYER_APP_JS = r"""
       c.addEventListener("pointerdown", onStripDown);
       if (W.ResizeObserver) { new W.ResizeObserver(paintStrip).observe(c); }
     }
+    var bar = $("tl-source-canvas");
+    if (bar && !bar.__tlBound) {
+      bar.__tlBound = true;
+      bar.addEventListener("pointerdown", onSourceDown);
+      bar.addEventListener("pointermove", onSourceMove);
+      bar.addEventListener("pointerup", onSourceUp);
+      bar.addEventListener("pointercancel", onSourceUp);
+      if (W.ResizeObserver) { new W.ResizeObserver(paintSource).observe(bar); }
+    }
+  }
+
+  // 창을 닫거나 숨기기 전에 저장 대기 편집을 보낸다(자동 저장 간격을 기다리지 않는다).
+  if (!W.__vlTimelinePlayerSaveBound) {
+    W.__vlTimelinePlayerSaveBound = true;
+    document.addEventListener("visibilitychange", function () {
+      if (document.visibilityState === "hidden" && S.dirty) { saveNow(false); }
+    });
+    W.addEventListener("beforeunload", function (ev) {
+      if (S.dirty) { ev.preventDefault(); ev.returnValue = ""; }
+    });
   }
 
   boot();

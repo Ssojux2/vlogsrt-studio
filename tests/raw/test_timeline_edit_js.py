@@ -199,3 +199,39 @@ def test_play_step_maps_a_mixed_rate_clip_onto_sequence_frames(tmp_path: Path) -
     got = _play(tmp_path, clips, [[1, 24, None], [1, 25, None], [1, 47, None], [1, 71, None]])
     assert [g["edited"] for g in got] == [30, 31, 58, 88]
     assert got[-1]["action"] == "stop"
+
+
+# ── 범위 조정: 가장자리를 갈 수 있는 자리로(W-71d) — 브라우저만의 규칙 ─────────────────────
+
+EDGE_RUNNER = r"""
+const TL = require(process.argv[2]);
+const doc = JSON.parse(process.argv[3]);
+const asks = JSON.parse(process.argv[4]);
+const settings = { minClipFrames: 3 };
+console.log(JSON.stringify(asks.map((a) => TL.clampEdge(doc, a[0], a[1], a[2], settings))));
+"""
+
+
+@needs_node
+def test_clamp_edge_keeps_an_edge_inside_the_source_room_and_the_minimum_length(
+    tmp_path: Path,
+) -> None:
+    """같은 원본의 앞뒤 클립·원본 처음·끝·최소 길이 안으로 — 범위 밖을 끌어도 거기서 멈춘다."""
+    core = tmp_path / "timeline_core.js"
+    core.write_text(TIMELINE_CORE_JS, encoding="utf-8")
+    clips = [["a", 30, 90], ["a", 150, 200], ["b", 10, 40]]
+    doc = {"facts": PLAY_FACTS, "clips": clips, "cues": [], "nextCue": 1, "seeded": {}}
+    asks = [
+        [0, "start", -50],
+        [0, "start", 60],
+        [0, "start", 95],
+        [0, "end", 120],
+        [0, "end", 200],
+        [1, "start", 80],
+        [1, "end", 999],
+        [2, "start", 0],
+        [2, "end", 41],
+        [2, "end", 11],
+    ]
+    got = _node(tmp_path, EDGE_RUNNER, str(core), json.dumps(doc), json.dumps(asks))
+    assert got == [0, 60, 87, 120, 150, 90, 300, 0, 41, 13]

@@ -36,7 +36,11 @@ def _rational(row: dict[str, Any]) -> tuple[int, int]:
 
 
 def client_model(
-    signature: str, token: str, opened: dict[str, Any], media: dict[str, Any]
+    signature: str,
+    token: str,
+    opened: dict[str, Any],
+    media: dict[str, Any],
+    tiers: dict[str, Any],
 ) -> dict[str, Any]:
     """브라우저가 받는 재료 — 문서는 브라우저 핵심(`__vlTL`)의 모양 그대로다."""
     facts = opened["facts"]
@@ -70,6 +74,8 @@ def client_model(
         },
         "names": names,
         "media": media["sources"],
+        "tiers": tiers,
+        "settings": opened["settings"],
     }
 
 
@@ -103,9 +109,20 @@ def timeline_player_html(model: dict[str, Any] | None) -> str:
         '<span id="tl-timecode" class="tl-timecode">00:00:00:00</span>'
         '<span id="tl-source" class="tl-source"></span>'
         '<span class="tl-gap"></span>'
+        '<button type="button" data-tl="undo" id="tl-undo" title="되돌리기 (⌘Z)">되돌리기</button>'
+        '<button type="button" data-tl="redo" id="tl-redo"'
+        ' title="다시 하기 (⌘⇧Z)">다시 하기</button>'
+        '<button type="button" data-tl="force-save" id="tl-force" hidden>내 편집으로 덮기</button>'
         '<button type="button" data-tl="prepare" id="tl-prepare" hidden>미리보기 준비</button>'
         '<span id="tl-status" class="tl-status" aria-live="polite"></span></div>'
         '<div class="tl-strip"><canvas id="tl-canvas"></canvas></div>'
+        '<div class="tl-range"><div class="tl-range-head"><span id="tl-source-head"></span>'
+        '<span class="tl-gap"></span>'
+        '<button type="button" data-tl="trim-start" title="클립 앞을 커서로 (⌥[)">앞 ⌥[</button>'
+        '<button type="button" data-tl="trim-end" title="클립 뒤를 커서로 (⌥])">뒤 ⌥]</button>'
+        "</div>"
+        '<div class="tl-source-bar"><canvas id="tl-source-canvas"'
+        ' aria-label="고른 클립의 원본 범위 — 손잡이를 끌어 앞뒤를 조정"></canvas></div></div>'
         "</div>"
     )
 
@@ -144,6 +161,16 @@ TIMELINE_PLAYER_CSS = """
 .tl-status.is-error { color: var(--vl-danger); }
 .tl-strip { position: relative; height: 56px; border: 1px solid var(--vl-line);
   border-radius: 6px; background: var(--vl-surface-sunken); overflow: hidden; }
+.tl-range { display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
+.tl-range-head { display: flex; gap: 6px; align-items: center; color: var(--vl-ink-muted); }
+.tl-range-head button { font: inherit; font-size: 12px; padding: 1px 8px; border-radius: 4px;
+  cursor: pointer; border: 1px solid var(--vl-line-strong); background: var(--vl-surface-raised);
+  color: var(--vl-ink); }
+.tl-source-bar { position: relative; height: 36px; border: 1px solid var(--vl-line);
+  border-radius: 6px; background: var(--vl-surface-sunken); overflow: hidden; }
+.tl-source-bar canvas { position: absolute; inset: 0; width: 100%; height: 100%;
+  touch-action: none; }
+.tl-transport button:disabled { opacity: 0.5; cursor: default; }
 .tl-strip canvas { position: absolute; inset: 0; width: 100%; height: 100%; cursor: pointer;
   touch-action: none; }
 """
@@ -183,10 +210,11 @@ class TimelinePlayer:
         try:
             opened = self.owner.raw.timeline_open(root)
             media = self.owner.raw.timeline_media(root, opened["timelineId"])
+            tiers = self.owner.raw.timeline_tiers(root, list(media["sources"]))
         except self.service_error:
             return timeline_player_html(None)
         token = self.owner._visual_lifetime_token
-        return timeline_player_html(client_model(signature, token, opened, media))
+        return timeline_player_html(client_model(signature, token, opened, media, tiers))
 
     # ── 서버 함수(클라이언트 `server.tl_*`) ──────────────────────────
 
@@ -197,10 +225,13 @@ class TimelinePlayer:
         def tl_prepare(payload: dict[str, object]) -> dict[str, object]:
             return self.action(payload, "prepare")
 
-        return [tl_media, tl_prepare]
+        def tl_save(payload: dict[str, object]) -> dict[str, object]:
+            return self.action(payload, "save")
+
+        return [tl_media, tl_prepare, tl_save]
 
     def action(self, payload: dict[str, object], kind: str) -> dict[str, object]:
-        """어떤 예외도 500이 아니라 값으로 돌아간다. 준비는 서명·수명 토큰에 묶인다."""
+        """어떤 예외도 500이 아니라 값으로 돌아간다. 준비·저장은 서명·수명 토큰에 묶인다."""
         owner = self.owner
 
         def fail(error: object, *, stale: bool = False) -> dict[str, object]:
@@ -208,12 +239,14 @@ class TimelinePlayer:
 
         try:
             root = owner._require_current_selection(owner._serve_str(payload, "signature") or None)
-            if kind == "prepare":
+            if kind in ("prepare", "save"):
                 owner._require_workbench_token(payload, owner._visual_lifetime_token, TAB_LABEL)
         except gr.Error as error:
             return fail(error, stale=True)
         timeline_id = owner._serve_str(payload, "timelineId") or None
         try:
+            if kind == "save":
+                return self._save(root, timeline_id, payload)
             media = owner.raw.timeline_media(root, timeline_id)
             if kind == "media":
                 return {"ok": True, "media": media["sources"]}
@@ -227,3 +260,16 @@ class TimelinePlayer:
             return {"ok": True, "started": list(missing)}
         except (self.service_error, ValueError, TypeError, KeyError, OSError) as error:
             return fail(error)
+
+    def _save(
+        self, root: Any, timeline_id: str | None, payload: dict[str, object]
+    ) -> dict[str, object]:
+        """문서 전체를 저장한다 — 서버가 파일의 사실로 다시 검사하고, 리비전이 다르면 충돌이다."""
+        base = payload.get("baseRevision")
+        document = payload.get("doc")
+        if timeline_id is None or not isinstance(base, int) or not isinstance(document, dict):
+            raise ValueError("저장 요청의 모양이 틀렸습니다(타임라인 · 리비전 · 문서).")
+        result = self.owner.raw.timeline_save(
+            root, timeline_id, base, document, force=payload.get("force") is True
+        )
+        return {"ok": True, **result}
