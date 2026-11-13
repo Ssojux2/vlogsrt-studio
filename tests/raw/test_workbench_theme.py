@@ -195,6 +195,23 @@ def test_mount_passes_the_workbench_theme_and_css(
     assert captured["allowed_paths"] is None  # 글꼴은 file= 경로가 아니라 고정 목록 라우트로 나간다
 
 
+def test_mount_turns_off_gradio_run_history(
+    tmp_path: Path, local_socket: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Gradio 6의 실행 기록은 사건마다 최근 100번을 localStorage에 다시 쓴다 — 1·2초 타이머가
+    # 그 기록을 실행마다 약 4 MB로 키워, 가만히 둔 화면이 메인 스레드를 크게 잡았다(W-71c, D125).
+    captured: dict[str, object] = {}
+
+    def fake_mount(app: object, blocks: object, **kwargs: object) -> object:
+        captured.update(kwargs)
+        return app
+
+    monkeypatch.setattr(workspace_service.gr, "mount_gradio_app", fake_mount)
+    server = workspace_service.RawWorkspaceUi(port=PORT, state_path=tmp_path / "state.json")
+    server.build_fastapi(mount_blocks=True)
+    assert captured["run_history"] is False
+
+
 # ── 토큰 — 밝은 쪽 한 번, 어두운 쪽 한 번 ──────────────────────────────────────
 
 

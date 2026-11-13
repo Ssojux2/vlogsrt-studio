@@ -11639,6 +11639,9 @@ class RawWorkspaceUi:
                 ssr_mode=False,
                 theme=workbench_theme(),
                 css=CSS,
+                # 실행 기록은 사건마다 최근 100번을 localStorage에 다시 쓴다 — 타이머가 그것을
+                # 실행마다 MB 단위로 키워 가만히 둔 화면의 메인 스레드를 잡았다(W-71c, D125).
+                run_history=False,
             )
         return app
 
