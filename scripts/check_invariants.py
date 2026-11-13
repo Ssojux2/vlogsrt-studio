@@ -1429,6 +1429,78 @@ def _final_edit_writer_failures(rel: str, body: str) -> list[str]:
     return failures
 
 
+# D124 — 「타임라인으로 보내기」의 입출력(`timeline_edit_io.py`)은 작업공간 `timeline/<시각>/`
+# 하나에만 쓰고 렌더하지 않는다. 원본·초안·원본 자막은 읽기만 한다 — 쓰는 길은 `_write_atomic` 한
+# 자리(정해진 이름 하나, 임시 파일 → 이름 바꾸기)뿐이고 폴더는 `candidate.mkdir(parents=True)`로만
+# 만든다. ffmpeg 렌더(`render_part`·`concat_parts`·`render_pieces`·`export_draft`)를 부르는 줄이
+# 생기면 그것은 「렌더 없는 타임라인」이 아니다.
+TIMELINE_IO_MODULE = "timeline_edit_io.py"
+TIMELINE_IO_MUST_NOT_IMPORT = (*FINAL_EDIT_IO_MUST_NOT_IMPORT, "preprocess")
+TIMELINE_IO_RENDER_CALLS = re.compile(
+    r"\b(render_part|render_parts|_render_parts|render_pieces|concat_parts|export_draft"
+    r"|export_srt_again|_produce|_publish)\b"
+)
+TIMELINE_IO_WRITER = "_write_atomic"
+TIMELINE_IO_MKDIR = "candidate.mkdir(parents=True)"
+
+
+def check_timeline_io_writes_only_timeline_folder() -> list[str]:
+    """D124 — 원본 범위 타임라인은 `timeline/`에만 쓰고 렌더하지 않는다. 파일이 사라져도 조용히
+    통과하지 않는다."""
+    rel = f"vlogsrt/project/raw/{TIMELINE_IO_MODULE}"
+    path = PROJECT_PACKAGE / "raw" / TIMELINE_IO_MODULE
+    if not path.exists():
+        return [f"{rel}: 타임라인 입출력이 사라졌다 (D124)"]
+    body = path.read_text(encoding="utf-8")
+    lines = body.splitlines()
+    failures = [
+        f"{rel}: {name}을 import한다 — 타임라인이 복사·지우기·외부 프로세스를 쓸 수 있다 (D124)"
+        for name in _imports(body, TIMELINE_IO_MUST_NOT_IMPORT)
+    ]
+    failures += [
+        f"{rel}:{number}: 덮어쓰기·복사·지우기·열어 쓰기 경로를 부른다 (D124)"
+        for number, line in enumerate(lines, start=1)
+        if FINAL_EDIT_IO_FORBIDDEN.search(line)
+    ]
+    failures += [
+        f"{rel}:{number}: 렌더 경로를 부른다 — 타임라인으로 보내기는 렌더하지 않는다 (D124)"
+        for number, line in enumerate(lines, start=1)
+        if TIMELINE_IO_RENDER_CALLS.search(line)
+    ]
+    failures += [
+        f"{rel}:{number}: 정해진 한 자리 밖에서 폴더를 만든다 (D124)"
+        for number, line in enumerate(lines, start=1)
+        if ".mkdir(" in line and line.strip() != TIMELINE_IO_MKDIR
+    ]
+    return failures + _timeline_writer_failures(rel, body)
+
+
+def _timeline_writer_failures(rel: str, body: str) -> list[str]:
+    """`os.open(`·`oscompat.replace(`는 쓰기 함수 안에만 — 정해진 이름·`timeline` 폴더만."""
+    tree = ast.parse(body)
+    writer = next(
+        (node for node in ast.walk(tree)
+         if isinstance(node, ast.FunctionDef) and node.name == TIMELINE_IO_WRITER),
+        None,
+    )  # fmt: skip
+    if writer is None:
+        return [f"{rel}: 쓰기 함수 `{TIMELINE_IO_WRITER}`가 없다 (D124)"]
+    inside = set(range(writer.lineno, (writer.end_lineno or writer.lineno) + 1))
+    failures = [
+        f"{rel}:{number}: 쓰기 함수 밖에서 파일을 열거나 이름을 바꾼다 (D124)"
+        for number, line in enumerate(body.splitlines(), start=1)
+        if ("os.open(" in line or "oscompat.replace(" in line) and number not in inside
+    ]
+    writer_text = ast.get_source_segment(body, writer) or ""
+    if "TIMELINE_FILES" not in writer_text or "TIMELINE_FOLDER" not in writer_text:
+        failures.append(
+            f"{rel}: 쓰기 함수가 이름(`TIMELINE_FILES`)·폴더(`TIMELINE_FOLDER`)를 검사하지 않는다"
+        )
+    if 'TIMELINE_FOLDER = "timeline"' not in body:
+        failures.append(f'{rel}: 쓰는 자리 `TIMELINE_FOLDER = "timeline"`가 없다 (D124)')
+    return failures
+
+
 # D60 — 자막 시각 확인(D55)이 등급으로 가는 길은 하나다: 서비스의 `_tier_timing`이 지금
 # 리비전 보고서에서 값(`TimingSignals`)을 만들고, 등급 보고서의 유일한 자리
 # `_tier_report_for_row`가 그 값을 `classify(…, timing=self._tier_timing(…))`로 넘긴다.
@@ -3276,6 +3348,10 @@ CHECKS = (
     ("최종 편집 모델은 순수하다", check_final_edit_stays_pure),
     ("원본 범위 타임라인은 순수하다", check_timeline_edit_stays_pure),
     ("최종 편집은 초안 폴더의 edit/에만 쓴다", check_final_edit_io_writes_only_edit_folder),
+    (
+        "원본 범위 타임라인은 timeline/에만 쓰고 렌더하지 않는다",
+        check_timeline_io_writes_only_timeline_folder,
+    ),
     ("등급의 시각 확인 값은 서비스 한 자리만", check_tier_timing_only_from_service),
     ("자막 시각 확인은 순수하다", check_sync_check_stays_pure),
     ("자막 시각 확인은 표시만 한다", check_sync_check_only_displays),

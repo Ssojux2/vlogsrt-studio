@@ -308,17 +308,26 @@ def _transcript_cues(
     service: RawWorkspaceService, root: Path, asset: SourceAsset
 ) -> tuple[render_plan.SourceCue, ...]:
     """사람이 고친 최신 원본 자막 — 다른 원본 내용에 묶인 자막은 쓰지 않고 거부한다."""
+    return transcript_with_revision(service, root, asset)[1]
+
+
+def transcript_with_revision(
+    service: RawWorkspaceService, root: Path, asset: SourceAsset
+) -> tuple[str | None, tuple[render_plan.SourceCue, ...]]:
+    """지금 원본 자막의 (리비전, 줄) — 한 번 읽은 문서에서 둘을 함께(타임라인이 리비전을 심는다,
+    D124). 자막이 없으면 (None, ()). 다른 원본 내용에 묶인 자막은 쓰지 않고 거부한다."""
     document = service.source_transcript(root, asset.asset_id)
     if document is None:
-        return ()
+        return None, ()
     if document.get("source_sha256") != asset.content_sha256:
         raise _refuse(asset, "원본 자막이 다른 원본 내용에 묶여 있다")
-    return tuple(
+    cues = tuple(
         render_plan.SourceCue(
             str(row["utterance_id"]), rational(row["start"]), rational(row["end"]), str(row["text"])
         )
         for row in document.get("utterances", [])
     )
+    return str(document.get("revision", "")), cues
 
 
 # ── 계획 ─────────────────────────────────────────────────────────────────

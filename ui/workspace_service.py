@@ -44,7 +44,14 @@ from fastapi.responses import (  # noqa: E402
 from ui import activity_log, design_tokens, os_open, ui_facade  # noqa: E402
 from ui import chooser as ui_chooser  # noqa: E402
 from ui.burn_cell import BURN_JOB_LABEL, BurnCell  # noqa: E402
-from ui.final_edit_ui import FINAL_EDIT_CSS, REVIEW_TAB_KEY, FinalEditPanel  # noqa: E402
+from ui.final_edit_ui import (  # noqa: E402
+    FINAL_EDIT_CSS,
+    FINAL_EDIT_TAB_KEY,
+    REVIEW_TAB_KEY,
+    FinalEditPanel,
+)
+from ui.timeline_cell import JOB_LABEL as TIMELINE_JOB_LABEL  # noqa: E402
+from ui.timeline_cell import TimelineCell  # noqa: E402
 from vlogsrt import log, preprocess  # noqa: E402
 from vlogsrt.project.raw import service as raw_service  # noqa: E402
 
@@ -722,6 +729,7 @@ CLOSE_CANCELS_JOB_KINDS = frozenset(
         raw_service.VISUAL_PREPARE_JOB_KIND,
         raw_service.ANALYSIS_PROXY_JOB_KIND,
         raw_service.RENDER_EXPORT_JOB_KIND,
+        raw_service.TIMELINE_EXPORT_JOB_KIND,
         raw_service.SUBTITLE_BURN_JOB_KIND,
     }
 )
@@ -762,6 +770,7 @@ ACTIVITY_JOB_LABELS = {
     raw_service.VISUAL_PREPARE_JOB_KIND: "미리보기 준비",
     raw_service.ANALYSIS_PROXY_JOB_KIND: "4K 분석 프록시",
     raw_service.RENDER_EXPORT_JOB_KIND: "추천만 이어붙이기",
+    raw_service.TIMELINE_EXPORT_JOB_KIND: TIMELINE_JOB_LABEL,
     raw_service.SRT_TRANSLATE_JOB_KIND: "영어 SRT 변환",
     raw_service.SUBTITLE_BURN_JOB_KIND: BURN_JOB_LABEL,
     raw_service.SEGMENT_JOB_KIND: "컷 준비",
@@ -1967,6 +1976,13 @@ class RawWorkspaceUi:
             self, raw_service.RawWorkspaceError, raw_service.RENDER_EXPORT_JOB_KIND
         )
         self._render_export_started: Any = None
+        # 「타임라인으로 보내기」(W-71b, D124) — 렌더 없이 원본 범위 타임라인, 끝나면 「최종 편집」.
+        self._timeline_cell = TimelineCell(
+            self,
+            raw_service.RawWorkspaceError,
+            raw_service.TIMELINE_EXPORT_JOB_KIND,
+            FINAL_EDIT_TAB_KEY,
+        )
         self._status_sent: tuple[gr.State, ...] = ()
         self._choose_event: Any = None
         # 선택기·조사 단추 참조 — 배선 증명은 실제 Blocks 의존성(app.config)이 한다.
@@ -4584,6 +4600,8 @@ class RawWorkspaceUi:
             self._render_export_button = gr.Button(
                 RENDER_EXPORT_LABEL, variant="primary", elem_id=RENDER_EXPORT_ID
             )
+            # 「타임라인으로 보내기」(W-71b, D124) — 옆에 둔다(렌더·번인은 아직 초안 길, W-71e까지).
+            self._timeline_cell.build_button()
             # 일괄 확인의 원천 — 화면의 단추는 제외 제안 대기열의 「남은 M개 모두 제외 유지」이고,
             # 그것이 이 숨은 단추를 누른다(옛 「자동 제외 확인」의 처리기·입출력 그대로, D57 C).
             self._confirm_auto_button = gr.Button(
@@ -11367,7 +11385,7 @@ class RawWorkspaceUi:
             # 탭 묶음을 드러내 둔다 — 초안 렌더가 끝나면 「최종 편집」으로 넘긴다(D117).
             with gr.Tabs(elem_id="vl-tabs") as tabs:
                 self._review_tab()
-                self._final_edit.build_tab()
+                self._final_edit.build_tab(header=self._timeline_cell.build_summary)
                 self._caption_tab()
             # 오른쪽 서랍은 탭 뒤에 짓는다 — 두 탭 사이에 끼면 탭 묶음이 둘로 갈린다.
             extract_button, refresh_segment, profile_dd, analysis_plan = self._settings_drawer()
@@ -11467,6 +11485,8 @@ class RawWorkspaceUi:
             self._wire_model_refresh(switched)
             assert self._draw_timer is not None and self._render_export_started is not None
             self._final_edit.wire(tabs, self._draw_timer, self._render_export_started, switched)
+            status = self._capcut_status
+            self._report_activity(self._timeline_cell.wire(tabs, status, switched), status)
         return app
 
     def _wire_folder_import(self, view_outputs: list[object]) -> tuple[Any, ...]:
