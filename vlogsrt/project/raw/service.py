@@ -3185,6 +3185,32 @@ class RawWorkspaceService:
             basis=SEGMENTATION_BASIS_SEMANTIC,
         )
 
+    def review_reflects_analysis(
+        self, root: Path, revision_id: str, asset_ids: tuple[str, ...]
+    ) -> bool:
+        """지금 검토 머리의 그 영상들이 이 분석 리비전의 행으로 지은 그대로인가(D124).
+
+        그렇다면 다시 게시해도 같은 조각이 나온다 — 영상을 다시 볼 때 라이브러리 전체 계획을 새로
+        세우지(원본마다 전체 해시 셋) 않아도 된다. 근거 기록이 없거나 다르면 False(다시 게시)다.
+        """
+        from vlogsrt.project.raw.review_workspace import basis_entry
+
+        if not asset_ids:
+            return False
+        facade = self.review_workspace_facade(root)
+        if not facade.has_review():
+            return False
+        basis = facade.source_basis()
+        tier_key = facade.tier_key()
+        rows = {
+            row.asset_id: row
+            for row in AnalysisStore(self._workspace(root)).list_source_results(revision_id)
+        }
+        return all(
+            asset in rows and basis.get(asset) == basis_entry(rows[asset], tier_key)
+            for asset in asset_ids
+        )
+
     def unanalyzed_sources(
         self, root: Path, plan: SegmentPlanSnapshot, revision_id: str
     ) -> tuple[str, ...]:

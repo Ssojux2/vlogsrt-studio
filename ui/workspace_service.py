@@ -2989,7 +2989,11 @@ class RawWorkspaceUi:
         """다시 본 영상의 저장된 분석으로 검토를 게시한다 — 미뤄 둔 게시(`_publish_selection`)다.
 
         실패는 그 영상의 상태에 남긴다(D68) — 작업 기록에만 남으면 화면은 「추천 구간 준비
-        완료」인데 검토가 없다."""
+        완료」인데 검토가 없다. 지금 머리의 그 영상이 이미 이 분석으로 지은 그대로면 다시 게시하지
+        않는다(D124) — 예전엔 볼 때마다 라이브러리 전체 계획을 새로 세웠다(원본 169개에 20–75초)."""
+        asset_ids = tuple(existing.get("asset_ids", ()))
+        if self.raw.review_reflects_analysis(root, existing["revision"], asset_ids):
+            return
         view_token = self._visual_lifetime_token
 
         def show_cached(context: Any) -> None:

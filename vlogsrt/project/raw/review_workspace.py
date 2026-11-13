@@ -653,6 +653,46 @@ def _replay_window_matches(edits: Sequence[str | None], legacy: _LegacyReplay) -
     return None not in keys and Counter(keys) == legacy.expected
 
 
+def basis_entry(row: AnalysisSourceResult, tier_key: str) -> dict[str, str | None]:
+    """검토 기본의 원본 근거 한 칸 — 그 원본을 지은 분석 행의 신원과 등급 기준(D124).
+
+    리비전 하나만으로는 모자란다 — 같은 리비전의 행이 「전사만」에서 분석 완료로 바뀌기도 한다(D59
+    19b). 등급 기준(`tier_key` — 등급판과 덮은 추천 기준)도 싣는다 — 다시 지으면 빨강 제외 제안이
+    그 기준으로 새로 서는데, 사람 손이 닿은 머리의 정리 고리는 등급만 다시 단다. 모두 같아야 다시
+    게시해도 같은 원본이 나온다.
+    """
+    return {
+        "revision": row.revision_id,
+        "status": row.status,
+        "document": row.document_path,
+        "record": row.record_path,
+        "tier": tier_key,
+    }
+
+
+def carried_basis(
+    old_bounds: Mapping[str, Sequence[tuple[int, int]]],
+    new_bounds: Mapping[str, Sequence[tuple[int, int]]],
+    basis: Mapping[str, Mapping[str, str | None]],
+) -> dict[str, Mapping[str, str | None]]:
+    """입양한 기본이 이어받는 근거 — 조각 경계가 그대로인 원본만(D124).
+
+    경계가 움직였거나 새로 덮인 원본은 근거를 모른다 — 볼 때 다시 게시한다.
+    """
+    return {
+        source: entry
+        for source, entry in basis.items()
+        if source in new_bounds and list(old_bounds.get(source, ())) == list(new_bounds[source])
+    }
+
+
+def _bounds(revision: ReviewRevision) -> dict[str, list[tuple[int, int]]]:
+    bounds: dict[str, list[tuple[int, int]]] = {}
+    for segment in revision.segments:
+        bounds.setdefault(segment.source_id, []).append((segment.start_pts, segment.end_pts))
+    return bounds
+
+
 def _auto_excluded(
     segment: ReviewSegment,
     revision: ReviewRevision,
@@ -797,13 +837,17 @@ class ReviewWorkspaceFacade:
                     f" {prior.revision_id if prior else '없음'}"
                 )
             human = self.human_source_ids(prior) if prior is not None else frozenset()
-            revision, carried = self._automatic_selections(
+            revision, kept = self._automatic_selections(
                 revision, analysis_revision_id, evidence_rows, prior, human
             )
+            carried, preserved = kept, frozenset[str]()
             if preserve_source_ids and prior is not None:
                 revision, preserved = self._preserved_sources(revision, preserve_source_ids, prior)
                 carried = carried | (preserved & human)
-            self._persist_new_base(revision)
+            basis = self._base_basis(
+                revision, analysis_revision_id, evidence_rows, prior, kept | preserved
+            )
+            self._persist_new_base(revision, basis=basis)
             if prior is not None and carried:
                 revision = self._publish_snapshot_locked(
                     revision,
@@ -811,6 +855,54 @@ class ReviewWorkspaceFacade:
                     _marker_label(CARRIED_DECISIONS_LABEL, prior, carried),
                 )
         return revision
+
+    def _base_basis(
+        self,
+        revision: ReviewRevision,
+        analysis_revision_id: str | None,
+        evidence_rows: Mapping[str, AnalysisSourceResult] | None,
+        prior: ReviewRevision | None,
+        retained: frozenset[str],
+    ) -> dict[str, dict[str, str | None]]:
+        """새 기본의 원본별 근거 — 지은 원본은 쓴 분석 행, 옛 머리에서 가져온 원본은 옛 근거(D124).
+
+        옛 근거가 없으면(이 기록 전에 낸 기본) 그 원본은 적지 않는다 — 모르는 것은 다시 게시한다.
+        """
+        prior_basis = self.source_basis(prior.base_plan_id) if prior is not None else {}
+        rows = self._basis_rows(analysis_revision_id, evidence_rows)
+        tier_key = self.tier_key()
+        basis: dict[str, dict[str, str | None]] = {}
+        for clock in revision.clocks:
+            source = clock.source_id
+            if source in retained:
+                if source in prior_basis:
+                    basis[source] = prior_basis[source]
+            elif source in rows:
+                basis[source] = basis_entry(rows[source], tier_key)
+        return basis
+
+    def _basis_rows(
+        self,
+        analysis_revision_id: str | None,
+        evidence_rows: Mapping[str, AnalysisSourceResult] | None,
+    ) -> dict[str, AnalysisSourceResult]:
+        """새 기본을 지은 분석 행 — `_automatic_selections`가 읽는 것과 같은 행이다."""
+        if evidence_rows is not None:
+            return dict(evidence_rows)
+        store = AnalysisStore(self._workspace)
+        analysis = self._analysis_revision(store, analysis_revision_id)
+        if analysis is None:
+            return {}
+        return {row.asset_id: row for row in store.list_source_results(analysis.revision_id)}
+
+    def source_basis(self, base_plan_id: str | None = None) -> dict[str, dict[str, str | None]]:
+        """검토 기본(기본값은 최신)의 원본별 근거 — 기록이 없으면 빈 값이다(D124)."""
+        base = base_plan_id or self._latest_base_plan()
+        recorded = self._store.source_basis(self._project_id, base)
+        if recorded is None:
+            return {}
+        decoded = json.loads(recorded)
+        return {str(source): dict(entry) for source, entry in decoded.items()}
 
     def _preserved_sources(
         self, revision: ReviewRevision, preserve_source_ids: tuple[str, ...], prior: ReviewRevision
@@ -1868,7 +1960,8 @@ class ReviewWorkspaceFacade:
             adopted,
             segments=tuple(self._graded(s, adopted, rows, reports) for s in adopted.segments),
         )
-        self._persist_new_base(adopted, mapping)
+        basis = carried_basis(_bounds(old), _bounds(adopted), self.source_basis(old.base_plan_id))
+        self._persist_new_base(adopted, mapping, basis=basis)
         human = self.human_source_ids(old)
         replayed = self._replay_metadata(new_snapshot.revision_id, old, mapping)
         # 되풀이가 끝난 자리에 옛 머리의 사람 손을 요약해 둔다 — 이 뒤의 편집만 새로 생긴 손이다.
@@ -2352,10 +2445,15 @@ class ReviewWorkspaceFacade:
     # ── 저장 — 불변 리비전 + 첫 헤드는 한 트랜잭션 ────────────────
 
     def _persist_new_base(
-        self, revision: ReviewRevision, mapping: ReviewPlanMapping | None = None
+        self,
+        revision: ReviewRevision,
+        mapping: ReviewPlanMapping | None = None,
+        *,
+        basis: Mapping[str, Mapping[str, str | None]],
     ) -> None:
-        """새 기본 계획의 첫 출판 — 리비전·첫 헤드(·입양 매핑)가 한 몸으로 들어간다."""
+        """새 기본 계획의 첫 출판 — 리비전·첫 헤드(·입양 매핑)·원본별 근거가 한 몸으로 들어간다."""
         self._store.publish_initial_revision(
+            basis_json=json.dumps(basis, ensure_ascii=False, sort_keys=True),
             project_id=self._project_id,
             base_plan_id=revision.base_plan_id,
             document_json=serialize_revision(revision),
