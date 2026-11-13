@@ -83,6 +83,7 @@ def client_settings(settings: FinalEditSettings = FINAL_EDIT_SETTINGS) -> dict[s
         "coalesceMs": settings.coalesce_ms,
         "minClipFrames": settings.min_clip_frames,
         "maxTextChars": settings.max_text_chars,
+        "maxCues": settings.max_cues,
         "autosaveMs": settings.autosave_ms,
         "newCueMs": settings.new_cue_ms,
         "reverseTickMs": settings.reverse_tick_ms,

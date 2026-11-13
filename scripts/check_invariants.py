@@ -1334,6 +1334,34 @@ def check_final_edit_stays_pure() -> list[str]:
     return failures
 
 
+# D123 — 원본 범위 타임라인(`timeline_edit.py`)은 값만 다룬다. 브라우저 핵심(`TIMELINE_CORE_JS`)이
+# 같은 규칙으로 같은 값을 내야 하고, 출력 배치는 렌더 계획의 순수 함수
+# (`render_plan.sequence_edges`)를 그대로 쓴다 — 그래서 `render_plan`은 import해도 되지만
+# 파일·프로세스·서비스·입출력 계층은 안 된다.
+TIMELINE_EDIT_MODULE = "timeline_edit.py"
+TIMELINE_EDIT_MUST_NOT_IMPORT = (
+    *RENDER_PLAN_MUST_NOT_IMPORT, "final_edit_io", "timeline_srt", "burn_export",
+)  # fmt: skip
+
+
+def check_timeline_edit_stays_pure() -> list[str]:
+    """D123 — 원본 범위 타임라인 모델은 순수하다. 파일이 사라져도 조용히 통과하지 않는다."""
+    path = PROJECT_PACKAGE / "raw" / TIMELINE_EDIT_MODULE
+    if not path.exists():
+        return [f"vlogsrt/project/raw/{TIMELINE_EDIT_MODULE}: 타임라인 모델이 사라졌다 (D123)"]
+    body = path.read_text(encoding="utf-8")
+    failures = [
+        f"{TIMELINE_EDIT_MODULE}: {name}을 import한다 — 타임라인 모델이 순수하지 않게 된다 (D123)"
+        for name in _imports(body, TIMELINE_EDIT_MUST_NOT_IMPORT)
+    ]
+    failures += [
+        f"{TIMELINE_EDIT_MODULE}:{number}: 파일을 직접 읽거나 쓰거나 동적 코드를 연다 (D123)"
+        for number, line in enumerate(body.splitlines(), start=1)
+        if FINALCUT_TIMELINE_FILE_IO.search(line) or SYNC_SNAP_FORBIDDEN_CALLS.search(line)
+    ]
+    return failures
+
+
 # D117 — 최종 편집의 입출력(`final_edit_io.py`)은 초안 폴더 안 `edit/` 하나에만 쓴다. 초안 영상·
 # `draft*.srt`·보고서는 읽기만 한다 — 쓰는 길은 `_write_atomic` 한 자리(정해진 이름 셋, 임시 파일 →
 # 이름 바꾸기)뿐이고 폴더는 `edit_folder.mkdir(exist_ok=True)`로만 만든다.
@@ -3246,6 +3274,7 @@ CHECKS = (
     ("추천만 이어붙이는 렌더 계획은 순수하다", check_render_plan_stays_pure),
     ("자막 입히기 조판은 순수하다", check_burn_in_stays_pure),
     ("최종 편집 모델은 순수하다", check_final_edit_stays_pure),
+    ("원본 범위 타임라인은 순수하다", check_timeline_edit_stays_pure),
     ("최종 편집은 초안 폴더의 edit/에만 쓴다", check_final_edit_io_writes_only_edit_folder),
     ("등급의 시각 확인 값은 서비스 한 자리만", check_tier_timing_only_from_service),
     ("자막 시각 확인은 순수하다", check_sync_check_stays_pure),
