@@ -1243,6 +1243,8 @@ APP_JS = r"""
     document.addEventListener("keydown", function (ev) {
       if (!visible() || document.querySelector(".sidebar.open")) { return; }
       var target = ev.target;
+      // 제 키를 쓰는 칸(원본 범위 타임라인 재생기, W-71c) 안의 키는 가로채지 않는다.
+      if (target && target.closest && target.closest("[data-vl-own-keys]")) { return; }
       var inText = editable(target);
       if (inText && !$("fe-root").contains(target)) { return; }
       var binding = FE.keyAction(W.__vlFinalEdit.keymap || [], ev,

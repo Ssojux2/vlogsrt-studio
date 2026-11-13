@@ -52,6 +52,7 @@ from ui.final_edit_ui import (  # noqa: E402
 )
 from ui.timeline_cell import JOB_LABEL as TIMELINE_JOB_LABEL  # noqa: E402
 from ui.timeline_cell import TimelineCell  # noqa: E402
+from ui.timeline_player import TIMELINE_PLAYER_CSS, TimelinePlayer  # noqa: E402
 from vlogsrt import log, preprocess  # noqa: E402
 from vlogsrt.project.raw import service as raw_service  # noqa: E402
 
@@ -927,6 +928,7 @@ CSS = (
     + BASE_CSS
     + ui_facade.WORKBENCH_CSS
     + FINAL_EDIT_CSS
+    + TIMELINE_PLAYER_CSS
 )
 """마운트에 싣는 전체 CSS — 글꼴 · 토큰(밝은·어두운) · 바탕 · 작업대 순서."""
 
@@ -1983,6 +1985,8 @@ class RawWorkspaceUi:
             raw_service.TIMELINE_EXPORT_JOB_KIND,
             FINAL_EDIT_TAB_KEY,
         )
+        # 원본 범위 타임라인 재생기(W-71c) — 타임라인 요약 아래, 원본마다 미리보기를 튼다.
+        self._timeline_player = TimelinePlayer(self, raw_service.RawWorkspaceError)
         self._status_sent: tuple[gr.State, ...] = ()
         self._choose_event: Any = None
         # 선택기·조사 단추 참조 — 배선 증명은 실제 Blocks 의존성(app.config)이 한다.
@@ -11385,7 +11389,7 @@ class RawWorkspaceUi:
             # 탭 묶음을 드러내 둔다 — 초안 렌더가 끝나면 「최종 편집」으로 넘긴다(D117).
             with gr.Tabs(elem_id="vl-tabs") as tabs:
                 self._review_tab()
-                self._final_edit.build_tab(header=self._timeline_cell.build_summary)
+                self._final_edit.build_tab(header=self._final_edit_header)
                 self._caption_tab()
             # 오른쪽 서랍은 탭 뒤에 짓는다 — 두 탭 사이에 끼면 탭 묶음이 둘로 갈린다.
             extract_button, refresh_segment, profile_dd, analysis_plan = self._settings_drawer()
@@ -11487,8 +11491,14 @@ class RawWorkspaceUi:
             self._final_edit.wire(tabs, self._draw_timer, self._render_export_started, switched)
             status = self._capcut_status
             sent = self._timeline_cell.wire(tabs, status, switched, ui_facade.EXPORT_WAKE_JS)
+            self._timeline_player.wire(switched, sent)
             self._report_activity(sent, status)
         return app
+
+    def _final_edit_header(self) -> None:
+        """「최종 편집」 탭 머리 — 원본 범위 타임라인 요약(W-71b)과 그 재생기(W-71c)."""
+        self._timeline_cell.build_summary()
+        self._timeline_player.build()
 
     def _wire_folder_import(self, view_outputs: list[object]) -> tuple[Any, ...]:
         """「폴더 불러오기」 배선(W-46a) — 경로 칸 Enter · 「이 폴더 불러오기」 · 「찾아보기」.

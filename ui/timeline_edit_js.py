@@ -464,6 +464,52 @@ TIMELINE_CORE_JS = r"""
     return withCues(doc, doc.cues.concat([cue]), doc.nextCue + 1);
   };
 
+  // ─── 재생: 컷 건너기(W-71c) ──────────────────────────────────────
+  // 브라우저만의 규칙이라 Python 짝이 없다. 활성 영상이 방금 보인 원본 프레임 하나(`presented`)로
+  // 다음 걸음을 정한다 — 같은 원본에서 끝 = 다음 시작이면(블레이드) 끊지 않고 그대로 재생하고,
+  // 아니면 클립 마지막 프레임에서 다음 클립 시작으로 건넌다. 대기 영상(standby = {sourceId, frame,
+  // ready})이 그 자리에 맞춰져 있으면 시크를 기다리지 않고 바꿔 튼다.
+  // → { action: "play" | "jump" | "stop", span, edited, target, swap, prime }
+  //   target·prime = { span, sourceId, frame } 또는 null.
+  function continues(spans, i) {
+    var next = spans[i + 1];
+    return !!next && next.sourceId === spans[i].sourceId && next.startFrame === spans[i].endFrame;
+  }
+  function spanTarget(span) {
+    return { span: span.index, sourceId: span.sourceId, frame: span.startFrame };
+  }
+  function editedAt(doc, span, frame) {
+    var ticks = (Math.max(frame, span.startFrame) - span.startFrame) *
+      TL.sourceFrameTicks(doc.facts, span.sourceId);
+    var offset = floorDiv(ticks, TL.sequenceFrameTicks(doc.facts));
+    return span.outStart + Math.min(offset, span.outFrames - 1);
+  }
+  function cutAfter(spans, i) {
+    var k = i;
+    while (continues(spans, k)) { k += 1; }
+    return spans[k + 1] ? spanTarget(spans[k + 1]) : null;
+  }
+  TL.playStep = function (doc, spanIndex, presented, standby) {
+    var spans = TL.layout(doc);
+    var i = spanIndex;
+    if (!spans[i]) { throw fail("재생 중인 클립이 타임라인에 없다"); }
+    while (presented >= spans[i].endFrame && continues(spans, i)) { i += 1; }
+    var span = spans[i];
+    var step = { action: "play", span: i, edited: editedAt(doc, span, presented), target: null,
+      swap: false, prime: null };
+    if (presented < span.endFrame - 1 || continues(spans, i)) {
+      step.prime = cutAfter(spans, i);
+      return step;
+    }
+    var next = spans[i + 1];
+    if (!next) { step.action = "stop"; return step; }
+    step.action = "jump";
+    step.target = spanTarget(next);
+    step.swap = !!(standby && standby.ready && standby.sourceId === next.sourceId &&
+      standby.frame === next.startFrame);
+    return step;
+  };
+
   root.__vlTL = TL;
   if (typeof module !== "undefined" && module.exports) { module.exports = TL; }
 })(typeof window !== "undefined" ? window : globalThis);

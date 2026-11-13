@@ -366,6 +366,20 @@ def open_timeline(
     }
 
 
+def clipped_sources(root: Path, timeline_id: str | None = None) -> tuple[str, tuple[str, ...]]:
+    """(타임라인 아이디, 클립이 있는 원본 — 클립 차례) — 재생 미디어(W-71c)를 고를 재료. 읽기만."""
+    folder = _folder_by_id(root, timeline_id)
+    record = _read_record(folder)
+    payload = record.get("document")
+    clips = payload.get("clips") if isinstance(payload, dict) else None
+    if not isinstance(clips, list):
+        raise TimelineEditError("타임라인 파일에 클립(`document.clips`)이 없다")
+    ordered: dict[str, None] = {}
+    for clip in clips:
+        ordered.setdefault(str(clip[0]), None)
+    return folder.name, tuple(ordered)
+
+
 # ─── 저장 ────────────────────────────────────────────────────────────────
 
 

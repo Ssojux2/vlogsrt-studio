@@ -303,3 +303,55 @@ def test_the_service_job_creates_a_timeline_and_the_activity_label_names_it(
     assert trip.service.has_timeline(trip.root)
     assert workspace_service.ACTIVITY_JOB_LABELS["timeline_export"] == "타임라인으로 보내기"
     assert "timeline_export" in workspace_service.CLOSE_CANCELS_JOB_KINDS
+
+
+# ── 재생 미디어(W-71c) — 클립이 있는 원본마다 원본 전체 미리보기 ─────────────────────────
+
+
+def test_timeline_media_names_each_clipped_sources_ready_preview(trip: Folder) -> None:
+    """원본마다 등록 미리보기(`/media/<id>`)와 브라우저 시각 원점 — 읽기만 하고 쓰지 않는다."""
+    created = _create(trip, MOMENT.replace(minute=30))
+    opened = trip.service.timeline_open(trip.root, created.folder.name)
+    clipped = {clip[0] for clip in opened["doc"]["clips"]}
+    before = _tree(trip.folder)
+    media = trip.service.timeline_media(trip.root, created.folder.name)
+    assert _tree(trip.folder) == before
+    assert media["timelineId"] == created.folder.name
+    assert set(media["sources"]) == clipped
+    for source_id, row in media["sources"].items():
+        assert row["state"] == "ready", source_id
+        assert row["origin"] == "0"
+        resolved = trip.service.resolve_media(trip.root, row["fileId"])
+        assert resolved.kind == "preview"
+        assert resolved.path.suffix == ".mp4"
+        assert row["width"] > 0 and row["height"] > 0
+
+
+def test_a_source_without_a_ready_preview_says_so_and_gives_no_media(
+    trip: Folder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """미리보기가 없으면 상태만 — 등록 ID·원점을 지어내지 않는다(화면은 「준비 안 됨」)."""
+    from vlogsrt.project.raw import visual_review
+
+    created = _create(trip, MOMENT.replace(minute=31))
+    real = visual_review.source_previews
+
+    def missing(workspace: Any, source_ids: Any, active: Any) -> Any:
+        found = real(workspace, source_ids, active)
+        first = sorted(found)[0]
+        found[first] = dataclasses.replace(
+            found[first], state="missing", registered_file_id=None, browser_origin_seconds=None
+        )
+        return found
+
+    monkeypatch.setattr(visual_review, "source_previews", missing)
+    media = trip.service.timeline_media(trip.root, created.folder.name)
+    first = sorted(media["sources"])[0]
+    assert media["sources"][first] == {
+        "state": "missing",
+        "fileId": None,
+        "origin": None,
+        "width": None,
+        "height": None,
+        "rotation": None,
+    }

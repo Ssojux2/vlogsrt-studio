@@ -4034,6 +4034,33 @@ class RawWorkspaceService:
 
         return timeline_edit_io.open_timeline(self, root, timeline_id)
 
+    def timeline_media(self, root: Path, timeline_id: str | None = None) -> dict[str, Any]:
+        """원본 범위 타임라인 재생 재료(W-71c) — 클립이 있는 원본마다 원본 전체 미리보기.
+
+        완성본이면 등록 ID와 브라우저 시각 원점(`video_origin_seconds` — 원본 국소 s초는 미리보기
+        `원점 + s`초)을, 아니면 상태만 준다(지어내지 않는다). 읽기만 한다."""
+        from vlogsrt.project.raw import timeline_edit_io
+
+        timeline, source_ids = timeline_edit_io.clipped_sources(root.expanduser(), timeline_id)
+        active = self.active_jobs(root, (VISUAL_PREPARE_JOB_KIND,))
+        previews = visual_review.source_previews(self._workspace(root), source_ids, active)
+        sources: dict[str, dict[str, Any]] = {}
+        for source_id, preview in previews.items():
+            ready = (
+                preview.state == "ready"
+                and preview.registered_file_id is not None
+                and preview.browser_origin_seconds is not None
+            )
+            sources[source_id] = {
+                "state": preview.state,
+                "fileId": preview.registered_file_id if ready else None,
+                "origin": preview.browser_origin_seconds if ready else None,
+                "width": preview.width if ready else None,
+                "height": preview.height if ready else None,
+                "rotation": preview.rotation_degrees if ready else None,
+            }
+        return {"timelineId": timeline, "sources": sources}
+
     def timeline_save(
         self,
         root: Path,

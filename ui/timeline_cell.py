@@ -30,7 +30,9 @@ JOB_TERMINAL = frozenset({"succeeded", "failed", "cancelled"})
 STARTED_TEXT = "타임라인을 만들었습니다 — 클립 {clips}개 · 자막 {cues}줄(렌더하지 않았습니다)."
 CANCELLED_TEXT = "타임라인 만들기를 취소했습니다 — 쓴 파일은 없습니다."
 EMPTY_TEXT = ""
-NEXT_STEP_TEXT = "원본 범위 재생·클립 앞뒤 조정 화면은 다음 단계에서 이 탭에 붙습니다."
+NEXT_STEP_TEXT = (
+    "아래 재생기는 원본마다 미리보기를 틉니다 — 클립 앞뒤 조정은 다음 단계에서 붙습니다."
+)
 
 
 def _seconds(model: dict[str, Any]) -> float:
