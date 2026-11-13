@@ -239,7 +239,37 @@ APP_JS = r"""
   }
 
   // ─── 재생 ────────────────────────────────────────────────────────
-  function video() { return $("fe-video"); }
+  // 영상은 둘이다(W-71, D122) — 보이는 활성 영상과, 다음 컷 뒤 클립 시작에 미리 맞춰 둔 대기 영상.
+  // 컷에서 둘을 바꿔 틀어 시크(GOP 가운데면 키프레임부터 수십 프레임 디코드)를 기다리지 않는다.
+  // 대기 영상이 아직 준비되지 않았으면(짧은 클립 · 편집·시크 직후) 예전처럼 활성 영상을 시크한다.
+  function decks() { return [$("fe-video"), $("fe-video-b")]; }
+  function video() { return decks()[S.deck || 0]; }
+  function standby() { return decks()[1 - (S.deck || 0)]; }
+  function showDeck() {
+    var list = decks();
+    for (var i = 0; i < list.length; i++) {
+      if (list[i]) { list[i].classList.toggle("fe-standby", i !== (S.deck || 0)); }
+    }
+  }
+  // 같은 자리로 가는 시크가 아직 도는 동안 다시 걸지 않는다 — 다시 걸면 시크가 처음부터 다시 돈다.
+  function seekVideo(v, draftFrame) {
+    if (v.seeking && v.__feTarget === draftFrame) { return; }
+    v.__feTarget = draftFrame;
+    v.currentTime = (draftFrame + 0.5) * fd();
+  }
+  function standbyState() {
+    var b = standby();
+    if (!b) { return null; }
+    var target = b.__fePrimed === undefined ? null : b.__fePrimed;
+    return { target: target, ready: target !== null && !b.seeking && b.readyState >= 2 };
+  }
+  function prime(draftFrame) {
+    var b = standby();
+    if (!b || b.__fePrimed === draftFrame) { return; }
+    if (!b.paused) { b.pause(); }
+    b.__fePrimed = draftFrame;
+    seekVideo(b, draftFrame);
+  }
   function seek(frame) {
     if (!S.doc) { return; }
     S.playhead = clamp(Math.round(frame), 0, total());
@@ -247,7 +277,7 @@ APP_JS = r"""
     if (v && S.doc.clips.length) {
       var draftFrame = S.playhead >= total() ? S.doc.clips[S.doc.clips.length - 1][1] - 1
         : FE.draftFrameAt(S.doc, S.playhead);
-      v.currentTime = (draftFrame + 0.5) * fd();
+      seekVideo(v, draftFrame);
     }
     paintPlayhead();
   }
@@ -292,30 +322,42 @@ APP_JS = r"""
       });
     }
   }
-  function nextClipAfter(draftFrame) {
-    for (var i = 0; i < S.doc.clips.length; i++) {
-      if (S.doc.clips[i][0] > draftFrame) { return S.doc.clips[i]; }
+  // 컷: 대기 영상을 틀고 보이게 한 뒤 옛 영상을 멈춘다. 대기 영상은 이미 그 프레임을 보이고 있다.
+  function swapDecks(target) {
+    var old = video();
+    var next = standby();
+    next.playbackRate = old.playbackRate;
+    next.muted = old.muted;
+    next.volume = old.volume;
+    next.__fePrimed = undefined;
+    S.deck = 1 - (S.deck || 0);
+    showDeck();
+    S.loopGen = (S.loopGen || 0) + 1;
+    var gen = S.loopGen;
+    var started = next.play();
+    old.pause();
+    if (started && started.catch) {
+      started.catch(function () { if (gen === S.loopGen) { fallBack(old, target); } });
     }
-    return null;
+    frameLoop(gen);
+  }
+  // 대기 영상이 틀리지 않으면(자동 재생 정책 등) 옛 영상으로 돌아가 시크로 건넌다.
+  function fallBack(old, target) {
+    var rate = old.playbackRate;
+    S.deck = 1 - (S.deck || 0);
+    showDeck();
+    seekVideo(old, target);
+    play(rate);
   }
   function onFrame(draftFrame) {
     if (!S.playing) { return; }
-    var v = video();
-    var edited = FE.editedFrameOf(S.doc, draftFrame);
-    if (edited === null) {
-      var next = nextClipAfter(draftFrame);
-      if (!next) { stopPlayback(); S.playhead = total(); paintPlayhead(); return; }
-      v.currentTime = (next[0] + 0.5) * fd();
-      return;
-    }
-    var index = FE.clipIndexAt(S.doc, edited);
-    var clip = S.doc.clips[index];
-    var following = S.doc.clips[index + 1];
-    if (draftFrame >= clip[1] - 1 && (!following || following[0] !== clip[1])) {
-      if (!following) { stopPlayback(); S.playhead = total(); paintPlayhead(); return; }
-      v.currentTime = (following[0] + 0.5) * fd();
-    }
-    S.playhead = edited;
+    var step = FE.playStep(S.doc, draftFrame, standbyState());
+    if (step.action === "stop") { stopPlayback(); S.playhead = total(); paintPlayhead(); return; }
+    if (step.action === "jump" && step.swap) { swapDecks(step.target); }
+    else if (step.action === "jump") { seekVideo(video(), step.target); }
+    else if (step.prime !== null) { prime(step.prime); }
+    if (step.edited === null) { return; }
+    S.playhead = step.edited;
     if (S.stopAt !== null && edited >= S.stopAt) { stopPlayback(); }
     follow();
     paintPlayhead();
@@ -1151,17 +1193,24 @@ APP_JS = r"""
 
   // ─── DOM 배선 ────────────────────────────────────────────────────
   function bindDom() {
-    var v = video();
     var src = S.edit.mediaFileId ? "/media/" + S.edit.mediaFileId : "";
-    if (v && v.getAttribute("src") !== src) {
-      v.setAttribute("src", src);
-      v.addEventListener("loadedmetadata", function () { seek(S.playhead); }, { once: true });
-    }
-    if (v) {
+    var list = decks();
+    for (var i = 0; i < list.length; i++) {
+      var v = list[i];
+      if (!v) { continue; }
+      if (v.getAttribute("src") !== src) {
+        v.setAttribute("src", src);
+        v.__fePrimed = undefined;
+        v.__feTarget = undefined;
+        if (i === (S.deck || 0)) {
+          v.addEventListener("loadedmetadata", function () { seek(S.playhead); }, { once: true });
+        }
+      }
       v.addEventListener("pause", onVideoPause);
       v.addEventListener("click", onVideoClick);
       v.addEventListener("timeupdate", onTimeUpdate);
     }
+    showDeck();
     var c = canvas();
     if (c) {
       c.addEventListener("pointerdown", onPointerDown);
@@ -1182,11 +1231,16 @@ APP_JS = r"""
     paintAll();
   }
   // 이름 붙인 처리기 — 그라디오가 같은 원소를 남긴 채 다시 그려도 두 번 붙지 않는다.
-  function onVideoPause() { if (!S.reverseTimer) { S.playing = false; } }
+  // 대기 영상의 사건(교대 때 옛 영상의 멈춤 · 맞춰 두는 시크)은 재생 상태를 건드리지 않는다.
+  function onVideoPause(ev) {
+    if (ev && ev.target !== video()) { return; }
+    if (!S.reverseTimer) { S.playing = false; }
+  }
   function onVideoClick() { run("play-toggle"); }
   // 프레임 콜백이 줄어드는 때(숨은 창)에도 컷을 건너뛰도록 한 번 더 본다.
-  function onTimeUpdate() {
+  function onTimeUpdate(ev) {
     var v = video();
+    if (ev && ev.target !== v) { return; }
     if (S.playing && v && S.doc) { onFrame(Math.floor(v.currentTime / fd())); }
   }
   function onResize() {
