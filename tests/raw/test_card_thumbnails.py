@@ -314,6 +314,8 @@ def test_cards_draw_the_server_choice_and_the_rail_skips_stale_addresses(
     report = _run_thumb_harness(tmp_path)
     a, b, c = report["cards"]
     assert '<img src="/media/thumb-c"' in a  # 대표 컷은 낡음이어도 다른 컷의 그림
+    # 화면 밖 카드의 그림은 스크롤해 올 때 받는다 — 첫 화면이 영상 수만큼 그림을 받지 않는다(D125).
+    assert 'loading="lazy"' in a.split("<img", 1)[1].split(">", 1)[0]
     assert "<img" not in b and ">아직 없음</span>" in b  # 주소 없는 준비됨은 그리지 않는다
     assert "<img" not in c and ">준비 중</span>" in c
     rail = report["rail"]

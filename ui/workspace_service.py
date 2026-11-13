@@ -924,6 +924,42 @@ CSS = (
 FONT_CACHE_SECONDS = 604800
 """묶음 글꼴은 판을 바꿀 때만 바뀐다 — 한 주 캐시로 다시 받지 않게 한다(파일 이름에 판이 없다)."""
 
+PICTURE_CACHE_CONTROL = "private, no-cache"
+"""그림(카드 썸네일) 응답 — 브라우저가 간직하되 쓸 때마다 묻는다(D125). `max-age`는 등록 검증(§4.4 —
+없는 ID 404 · 바뀐 파일 409)을 건너뛰므로 쓰지 않는다. 같은 검증자면 본문 없는 304다."""
+
+UNCACHED_MEDIA = "no-store"
+"""영상·소리·구간 요청 — 플레이어의 구간 읽기에 캐시 의미를 섞지 않는다(예전 그대로)."""
+
+
+def picture_etag(path: Path) -> str:
+    """그림의 검증자 — 등록 지문과 같은 재료(크기·mtime_ns)다. 문을 지난 파일에서만 잰다."""
+    probed = path.lstat()
+    return f'"{probed.st_size:x}-{probed.st_mtime_ns:x}"'
+
+
+def picture_validation(
+    path: Path, headers: dict[str, str], if_none_match: str | None
+) -> Response | None:
+    """그림의 머리를 검증자로 바꾸고, 같은 검증자면 본문 없는 304를 낸다(D125). 다르면 None."""
+    etag = picture_etag(path)
+    headers["Cache-Control"] = PICTURE_CACHE_CONTROL
+    headers["ETag"] = etag
+    if not validator_matches(if_none_match, etag):
+        return None
+    return Response(status_code=304, headers={"Cache-Control": PICTURE_CACHE_CONTROL, "ETag": etag})
+
+
+def validator_matches(if_none_match: str | None, etag: str) -> bool:
+    """`If-None-Match`가 이 검증자를 담는가 — 약한 비교(RFC 9110 §13.1.2): `W/`를 떼고 견준다."""
+    if not if_none_match:
+        return False
+    for candidate in if_none_match.split(","):
+        tag = candidate.strip()
+        if tag == "*" or tag.removeprefix("W/") == etag:
+            return True
+    return False
+
 
 def workbench_theme() -> gr.themes.Base:
     """디자인 토큰으로 지은 그라디오 테마 — 밝은 값과 `*_dark` 짝을 한 표에서 얻는다(D57).
@@ -11662,11 +11698,21 @@ class RawWorkspaceUi:
     def _add_media_routes(self, app: FastAPI) -> None:
         @app.get("/media/{file_id}")
         def get_media(file_id: str, request: Request) -> Response:
-            return self.media_response(file_id, request.headers.get("range"), want_body=True)
+            return self.media_response(
+                file_id,
+                request.headers.get("range"),
+                want_body=True,
+                if_none_match=request.headers.get("if-none-match"),
+            )
 
         @app.head("/media/{file_id}")
         def head_media(file_id: str, request: Request) -> Response:
-            return self.media_response(file_id, request.headers.get("range"), want_body=False)
+            return self.media_response(
+                file_id,
+                request.headers.get("range"),
+                want_body=False,
+                if_none_match=request.headers.get("if-none-match"),
+            )
 
     def _add_activity_routes(self, app: FastAPI) -> None:
         @app.get(ACTIVITY_ROUTE)
@@ -11749,8 +11795,18 @@ class RawWorkspaceUi:
         def head_font(file_name: str) -> Response:
             return font_response(file_name)
 
-    def media_response(self, file_id: str, range_header: str | None, want_body: bool) -> Response:
-        """등록된 미디어 하나를 제공한다 — 경로는 오지 않고 ID만 온다(§4.3·§4.4)."""
+    def media_response(
+        self,
+        file_id: str,
+        range_header: str | None,
+        want_body: bool,
+        if_none_match: str | None = None,
+    ) -> Response:
+        """등록된 미디어 하나를 제공한다 — 경로는 오지 않고 ID만 온다(§4.3·§4.4).
+
+        그림의 통째 요청만 검증자를 싣고, 같은 검증자에는 본문 없이 304다(D125) — 문(없는 ID·
+        바뀐 파일)을 다 지난 뒤에만 견준다.
+        """
         root = self._snapshot_root()
         if root is None:
             return JSONResponse({"detail": "작업공간이 열려 있지 않다"}, status_code=404)
@@ -11783,9 +11839,13 @@ class RawWorkspaceUi:
         status = 200
         headers = {
             "Accept-Ranges": "bytes",
-            "Cache-Control": "no-store",
+            "Cache-Control": UNCACHED_MEDIA,
             "Content-Disposition": "inline",
         }
+        if span is None and resolved.content_type.startswith("image/"):
+            unchanged = picture_validation(resolved.path, headers, if_none_match)
+            if unchanged is not None:
+                return unchanged
         if span is None:
             headers["Content-Length"] = str(resolved.size_bytes)
             iterable: Iterator[bytes] = self._slices(resolved.path, 0, resolved.size_bytes - 1)
