@@ -2460,7 +2460,7 @@ class RawWorkspaceService:
             if row.asset_id not in asset_ids:
                 continue
             try:
-                report = self._tier_report_for_row(workspace, row)
+                report = self._tier_report(workspace, row)
             except (OSError, ValueError, KeyError, TypeError):
                 continue
             if report is not None:
@@ -2476,7 +2476,29 @@ class RawWorkspaceService:
         """
         workspace = self._workspace(root)
         row = AnalysisStore(workspace).source_result(revision_id, asset_id)
-        return None if row is None else self._tier_report_for_row(workspace, row)
+        return None if row is None else self._tier_report(workspace, row)
+
+    def _tier_report(
+        self, workspace: RawWorkspace, row: AnalysisSourceResult, *, with_context: bool = True
+    ) -> tiering.TierReport | None:
+        """`_tier_report_for_row`의 읽기 범위 기억 — 같은 범위에서 같은 행은 한 번만 계산한다(D123).
+
+        단추 하나가 정리 고리(다시 단 등급)와 그리기에서 원본마다 두 번 계산했다. 범위는 쓰기가 끝난
+        뒤에만 열리므로 재료가 그 사이 바뀌지 않는다. 범위 밖은 예전처럼 매번 계산한다.
+        """
+        key = (
+            "tier_report",
+            str(workspace.root),
+            row.revision_id,
+            row.asset_id,
+            row.status,
+            row.document_path,
+            row.record_path,
+            with_context,
+        )
+        return read_scope.memo(
+            key, lambda: self._tier_report_for_row(workspace, row, with_context=with_context)
+        )
 
     def _tier_report_for_row(
         self, workspace: RawWorkspace, row: AnalysisSourceResult, *, with_context: bool = True
@@ -2487,7 +2509,8 @@ class RawWorkspaceService:
         읽을 때마다 계산하고 어디에도 보관하지 않는다(D51·D52). 그리기 한 번은 원본마다 한 번만
         부른다(`selection_suitability`를 리비전마다 한 번, D63) — 재료 읽기(분석 개요·시각 확인
         보고서·원본 자막)는 읽기 범위가 한 번으로 줄인다. 맥락 평가 값(`_tier_context`, D99)도 이
-        자리에서만 넘긴다 — 맥락 평가의 입력을 지을 때만 `with_context=False`(평가 전 등급)다."""
+        자리에서만 넘긴다 — 맥락 평가의 입력을 지을 때만 `with_context=False`(평가 전 등급)다.
+        부르는 쪽은 `_tier_report`(읽기 범위 기억, D123)를 거친다."""
         if row.status == "transcribed":
             # 1단계만 끝난 행(「전사만」 · 영상 분석 승인 전, D59 19b) — 판정이 없다. 행의 문서는
             # 1단계 기록(`asr_phase.json`)이라 등급 문서로 읽지 않는다.
@@ -2629,7 +2652,7 @@ class RawWorkspaceService:
         workspace = self._workspace(root)
         sources = []
         for asset, row in self._context_rows(root):
-            report = self._tier_report_for_row(workspace, row, with_context=False)
+            report = self._tier_report(workspace, row, with_context=False)
             if report is None:
                 continue
             _directory, path = _tier_paths(workspace.root, row)
@@ -6207,7 +6230,7 @@ class RawWorkspaceService:
         self, workspace: RawWorkspace, row: AnalysisSourceResult, record: Mapping[str, Any]
     ) -> set[Fraction]:
         decisions = list(record.get("auto_decisions", []))
-        report = self._tier_report_for_row(workspace, row) if row.document_path else None
+        report = self._tier_report(workspace, row) if row.document_path else None
         if report is not None:
             decisions.extend(tiering.red_decisions(report))
         if not decisions:

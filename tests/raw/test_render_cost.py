@@ -646,3 +646,21 @@ def test_the_detail_function_reads_only(built: Path, tmp_path: Path) -> None:
     )["ok"]
     assert submitted == []
     assert [path.read_bytes() if path.exists() else None for path in files] == before
+
+
+@needs_ffmpeg
+def test_a_button_classifies_each_video_once_across_upkeep_and_render(
+    built: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """정리 고리(다시 단 등급)와 그리기가 같은 범위에서 등급 보고서를 다시 계산했다(D123)."""
+    server, root, _signature = _opened(built, tmp_path)
+    classified: list[str] = []
+    real = raw_service.tiering.classify
+    monkeypatch.setattr(
+        raw_service.tiering,
+        "classify",
+        lambda *a, **k: classified.append("x") or real(*a, **k),
+    )
+    server._capcut_result(root, "", upkeep=True)
+    analysed = len(server.raw.list_source_assets(root))
+    assert 0 < len(classified) <= analysed

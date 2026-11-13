@@ -901,14 +901,8 @@ def _source_candidates(
     selected_audio: tuple[int | None, ...] | None,
 ) -> list[tuple[str, dict[str, object]]]:
     """이 원본(과 소리 선택)의 미리보기 기록 전부 — 최근(`built_at`) 순."""
-    directory = workspace.root / VISUAL_PREVIEW_ROOT
-    if not directory.is_dir():
-        return []
     candidates: list[tuple[str, dict[str, object]]] = []
-    for record_path in sorted(directory.glob("*.json")):
-        record = _read_record(record_path)
-        if record is None or record.get("source_sha256") != source_sha256:
-            continue
+    for record in _preview_records(workspace).get(source_sha256, ()):
         if record.get("schema") != VISUAL_PREVIEW_RECIPE:
             continue
         key = _record_str(record, "key")
@@ -922,6 +916,29 @@ def _source_candidates(
         candidates.append((key, record))
     candidates.sort(key=lambda item: _record_str(item[1], "built_at") or "", reverse=True)
     return candidates
+
+
+def _preview_records(workspace: RawWorkspace) -> dict[str, list[dict[str, object]]]:
+    """미리보기 기록 폴더 전체를 원본 해시별로 — 읽기 범위 안에서는 한 번만 읽는다(D123).
+
+    원본마다 폴더 전체를 다시 읽으면 원본 수의 제곱이다(실측 원본 169개 · 기록 172개 —
+    그리기 한 번에 29075번). 범위 밖(작업 안)은 예전처럼 매번 읽는다 — 방금 쓴 기록을 놓치지
+    않는다. 돌려받은 기록은 고치지 않는다(범위 안에서 함께 쓴다).
+    """
+
+    def read() -> dict[str, list[dict[str, object]]]:
+        directory = workspace.root / VISUAL_PREVIEW_ROOT
+        if not directory.is_dir():
+            return {}
+        by_source: dict[str, list[dict[str, object]]] = {}
+        for record_path in sorted(directory.glob("*.json")):
+            record = _read_record(record_path)
+            sha = None if record is None else record.get("source_sha256")
+            if record is not None and isinstance(sha, str):
+                by_source.setdefault(sha, []).append(record)
+        return by_source
+
+    return read_scope.memo(("visual_review.preview_records", str(workspace.root)), read)
 
 
 def _latest_source_record(
