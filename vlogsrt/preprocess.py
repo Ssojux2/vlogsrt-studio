@@ -5117,7 +5117,14 @@ def _measure_proxy(staged: Path) -> AnalysisProxyBuild:
 
 
 # 32×32로 줄인 뒤 루마(Y) 평면만 그대로 꺼낸다 — 한 장 1024바이트.
-_CORRESPONDENCE_VIDEO_FILTER = "scale=32:32,format=yuv420p,extractplanes=y"
+_CORRESPONDENCE_EDGE = 32
+_CORRESPONDENCE_VIDEO_FILTER = (
+    f"scale={_CORRESPONDENCE_EDGE}:{_CORRESPONDENCE_EDGE},format=yuv420p,extractplanes=y"
+)
+_CORRESPONDENCE_SAMPLE_BYTES = _CORRESPONDENCE_EDGE * _CORRESPONDENCE_EDGE
+"""영상 대응 표본 한 장 — 32×32 루마 평면(화소당 한 바이트)."""
+_CORRESPONDENCE_TIMEOUT_SECONDS = 30
+"""표본 한 점의 시간 한도 — 묶어 뽑으면 점 수만큼 곱한다."""
 
 
 @process_step("대응 표본 추출")
@@ -5161,11 +5168,49 @@ def correspondence_samples(
                 "rawvideo",
                 "-",
             ]
-        result = run_process(command, capture_output=True, check=False, timeout=30)
+        result = run_process(
+            command, capture_output=True, check=False, timeout=_CORRESPONDENCE_TIMEOUT_SECONDS
+        )
         if result.returncode or not result.stdout:
             raise RuntimeError("대응 표본을 추출하지 못했습니다")
         samples.append(result.stdout)
     return tuple(samples)
+
+
+@process_step("대응 표본 추출")
+def correspondence_frames(path: Path, seconds: Sequence[Fraction]) -> tuple[bytes, ...]:
+    """`correspondence_samples`의 영상 표본을 프로세스 하나로 — 바이트는 점마다와 같다(D137).
+
+    점마다 입력 하나(`-ss t -i path` — 같은 입력 탐색)를 열고 첫 프레임을 같은 필터로 줄여
+    `concat`으로 잇는다. 디코드가 싼 프록시에서는 시간 대부분이 프로세스 띄우기였다. 장 수가 점
+    수와 맞지 않으면(끝을 넘은 점 등) 나눠 읽지 않고 실패한다 — 빠진 장이 뒤 표본을 조용히
+    밀지 않게.
+    """
+    if not seconds:
+        return ()
+    command = [require_ffmpeg(), "-v", "error"]
+    for second in seconds:
+        command += ["-ss", str(float(second)), "-i", str(path)]
+    picks = ";".join(
+        f"[{index}:v:0]trim=end_frame=1,{_CORRESPONDENCE_VIDEO_FILTER}[p{index}]"
+        for index in range(len(seconds))
+    )
+    joined = "".join(f"[p{index}]" for index in range(len(seconds)))
+    graph = f"{picks};{joined}concat=n={len(seconds)}:v=1:a=0[out]"
+    command += [
+        "-filter_complex", graph, "-map", "[out]", "-fps_mode", "passthrough",
+        "-f", "rawvideo", "-",
+    ]  # fmt: skip
+    result = run_process(
+        command,
+        capture_output=True,
+        check=False,
+        timeout=_CORRESPONDENCE_TIMEOUT_SECONDS * len(seconds),
+    )
+    if result.returncode or len(result.stdout) != _CORRESPONDENCE_SAMPLE_BYTES * len(seconds):
+        raise RuntimeError("대응 표본을 추출하지 못했습니다 — 장 수가 점 수와 다르다")
+    size = _CORRESPONDENCE_SAMPLE_BYTES
+    return tuple(result.stdout[i * size : (i + 1) * size] for i in range(len(seconds)))
 
 
 def verified_scene_times(path: Path, *, timeout_seconds: float) -> tuple[Fraction, ...]:

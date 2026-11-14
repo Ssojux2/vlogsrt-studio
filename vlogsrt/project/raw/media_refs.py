@@ -15,7 +15,7 @@ import os
 import shutil
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from dataclasses import asdict, dataclass, field
 from fractions import Fraction
 from pathlib import Path
@@ -136,23 +136,39 @@ def _mean_error(left: bytes, right: bytes) -> float:
     return sum(abs(v - w) for v, w in zip(left, right, strict=True)) / len(left)
 
 
+def _shifted_points(a: Any, points: tuple[Fraction, ...], shift: int) -> tuple[Fraction, ...]:
+    duration = a.frame_duration * a.frame_count
+    return tuple(
+        max(Fraction(0), min(duration - a.frame_duration, p + shift * a.frame_duration))
+        for p in points
+    )
+
+
 def _shift_rejection(
-    proxy: Path, a: Any, points: tuple[Fraction, ...], x: tuple[bytes, ...], errors: list[float]
+    x: tuple[bytes, ...], errors: list[float], neighbors_by_shift: Sequence[tuple[bytes, ...]]
 ) -> PairValidation | None:
     # A low spatial difference alone cannot detect a temporally shifted proxy.
     # Compare nearby frames too; only the identity frame mapping is auto-linked.
-    duration = a.frame_duration * a.frame_count
     zero_error = sum(errors) / len(errors)
-    for shift in _SHIFT_PROBES:
-        shifted_points = tuple(
-            max(Fraction(0), min(duration - a.frame_duration, p + shift * a.frame_duration))
-            for p in points
-        )
-        neighbors = preprocess.correspondence_samples(proxy, shifted_points)
+    for neighbors in neighbors_by_shift:
         neighbor_error = sum(_mean_error(m, n) for m, n in zip(x, neighbors, strict=True)) / len(x)
         if neighbor_error + PAIR_SHIFT_MARGIN < zero_error:
             return PairValidation("rejected", "프레임 대응 시각이 이동되어 자동 연결하지 않습니다")
     return None
+
+
+def _proxy_samples(
+    proxy: Path, a: Any, points: tuple[Fraction, ...]
+) -> tuple[tuple[bytes, ...], list[tuple[bytes, ...]]]:
+    """프록시 쪽 표본 — 같은 점과 이동 확인 점(앞뒤 셋씩)을 ffmpeg 하나로 뽑는다(D137).
+
+    디코드가 싼 프록시에서는 점마다 띄우던 프로세스가 시간의 대부분이었다. 바이트는 점마다와 같다.
+    """
+    groups = [points] + [_shifted_points(a, points, shift) for shift in _SHIFT_PROBES]
+    frames = preprocess.correspondence_frames(proxy, [p for group in groups for p in group])
+    size = len(points)
+    sliced = [frames[i * size : (i + 1) * size] for i in range(len(groups))]
+    return sliced[0], sliced[1:]
 
 
 def _video_pair_check(
@@ -167,15 +183,15 @@ def _video_pair_check(
 
     거절 사유가 있으면 첫 값에 담아 돌려준다. `exact_origin`은 분석 프록시용 엄격 모드다:
     장면 컷 시각을 원본 원점으로 환산하므로 프레임 한 칸의 어긋남도 허용하지 않는다.
+    원본 쪽은 점마다 뽑는다 — 4K 디코드가 지배해 묶어도 얻는 게 적고, 한 자리에서 디코더
+    다섯이 돈다.
     """
     rejection = _lattice_rejection(a, b, exact_origin)
     if rejection is not None:
         return rejection, (), []
     points = _sample_points(a)
-    x, y = (
-        preprocess.correspondence_samples(original, points),
-        preprocess.correspondence_samples(proxy, points),
-    )
+    x = preprocess.correspondence_samples(original, points)
+    y, neighbors_by_shift = _proxy_samples(proxy, a, points)
     errors = [
         _mean_error(m, n)
         for m, n in zip(x, y, strict=True)
@@ -183,7 +199,7 @@ def _video_pair_check(
     ]
     if len(errors) != len(points) or max(errors) > PAIR_VIDEO_MAX_ERROR:
         return PairValidation("rejected", "대응 프레임이 일치하지 않습니다"), x, errors
-    return _shift_rejection(proxy, a, points, x, errors), x, errors
+    return _shift_rejection(x, errors, neighbors_by_shift), x, errors
 
 
 def _audio_rejection(
