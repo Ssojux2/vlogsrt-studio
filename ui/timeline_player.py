@@ -21,6 +21,7 @@ from typing import Any
 
 import gradio as gr
 
+from ui.final_edit_ui import JOB_ENDED, RELOAD_ID
 from ui.timeline_edit_js import TIMELINE_CORE_JS
 from ui.timeline_player_js import PLAYER_APP_JS
 
@@ -76,6 +77,7 @@ def client_model(
         "media": media["sources"],
         "tiers": tiers,
         "settings": opened["settings"],
+        "reloadId": RELOAD_ID,
     }
 
 
@@ -203,9 +205,10 @@ TIMELINE_PLAYER_CSS = """
 class TimelinePlayer:
     """칸 하나 — 「최종 편집」 탭 머리에서 타임라인 요약 아래에 선다."""
 
-    def __init__(self, owner: Any, service_error: type[Exception]) -> None:
+    def __init__(self, owner: Any, service_error: type[Exception], render_job_kind: str) -> None:
         self.owner = owner
         self.service_error = service_error
+        self.render_job_kind = render_job_kind
         self.block: Any = None
 
     def build(self) -> None:
@@ -261,7 +264,10 @@ class TimelinePlayer:
         def tl_add_source(payload: dict[str, object]) -> dict[str, object]:
             return self.action(payload, "add")
 
-        return [tl_media, tl_prepare, tl_save, tl_render, tl_tiers, tl_add_source]
+        def tl_job(payload: dict[str, object]) -> dict[str, object]:
+            return self.action(payload, "job")
+
+        return [tl_media, tl_prepare, tl_save, tl_render, tl_tiers, tl_add_source, tl_job]
 
     def action(self, payload: dict[str, object], kind: str) -> dict[str, object]:
         """어떤 예외도 500이 아니라 값으로 돌아간다. 준비·저장·렌더는 서명·수명 토큰에 묶인다."""
@@ -284,6 +290,8 @@ class TimelinePlayer:
                 return self._render(root, timeline_id, payload)
             if kind == "add":
                 return self._add(root, timeline_id, payload)
+            if kind == "job":
+                return self._job(root, payload)
             if kind == "tiers":
                 source_id = owner._serve_str(payload, "sourceId")
                 tiers = owner.raw.timeline_tiers(root, [source_id])
@@ -327,6 +335,13 @@ class TimelinePlayer:
             raise ValueError("원본 넣기 요청의 모양이 틀렸습니다(타임라인 · 리비전 · 문서 · 원본).")
         result = self.owner.raw.timeline_add_source(root, timeline_id, base, document, source_id)
         return {"ok": True, **result}
+
+    def _job(self, root: Any, payload: dict[str, object]) -> dict[str, object]:
+        """재생기가 건 렌더 작업의 상태(W-71h) — 렌더 작업만 답한다. 읽기만 한다."""
+        job = self.owner.raw.get_job(root, self.owner._serve_str(payload, "jobId"))
+        if job.kind != self.render_job_kind:
+            raise ValueError("렌더 작업이 아닙니다.")
+        return {"ok": True, "status": job.status, "ended": job.status in JOB_ENDED}
 
     def _render(
         self, root: Any, timeline_id: str | None, payload: dict[str, object]

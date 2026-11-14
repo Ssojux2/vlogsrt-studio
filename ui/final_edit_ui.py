@@ -35,6 +35,8 @@ FINAL_EDIT_ROOT_ID = "fe-root"
 TAB_LABEL = "최종 편집"
 OPEN_LABEL = "최종 편집 열기"
 OPEN_ID = "vl-export-edit"
+RELOAD_ID = "vl-final-edit-reload"
+"""숨은 「다시 열기」 — 타임라인 재생기가 자기 렌더가 끝나면 누른다(W-71h · 쉬는 타이머, D134)."""
 NO_WORKSPACE_TEXT = "작업공간을 열면 여기서 초안을 최종 편집합니다."
 NO_EXPORT_TEXT = (
     "아직 내보낸 초안이 없습니다 — 「영상 정리」에서 「추천만 이어붙여 내보내기」를 하면"
@@ -290,6 +292,7 @@ class FinalEditPanel:
                 server_functions=self.server_functions(),
                 apply_default_css=False,
             )
+            self.reload_button = gr.Button(visible="hidden", elem_id=RELOAD_ID)
 
     def build_open_button(self) -> None:
         self.open_button = gr.Button(OPEN_LABEL, visible=False, size="sm", elem_id=OPEN_ID)
@@ -307,6 +310,9 @@ class FinalEditPanel:
             self.switch_tick, [signature, seen], outputs, queue=False, show_progress="hidden"
         )
         self.open_button.click(self.open_view, signature, [tabs, self.block])
+        self.reload_button.click(
+            self.reload, [signature, seen], outputs[1:], queue=False, show_progress="hidden"
+        )
         for event in refresh_events:
             event.then(self.view, signature, self.block, show_progress="hidden")
 
@@ -362,6 +368,21 @@ class FinalEditPanel:
             gr.Button(visible=self.owner.raw.has_render_export(root)),
             state,
         )
+
+    def reload(self, signature: str | None, seen: dict[str, Any] | None) -> tuple[Any, ...]:
+        """(화면, 「최종 편집 열기」, 기억) — 지금 가장 새 초안을 다시 연다(W-71h).
+
+        「최종 편집」 탭이 앞이면 타이머가 쉬어(D134) 틱이 새 초안을 못 본다 — 그 탭의 재생기가 자기
+        렌더가 끝난 것을 보고 이것을 누른다. 기억을 그 작업으로 맞춰 타이머가 깨도 또 그리지 않는다.
+        """
+        state = dict(seen or {})
+        root = self.owner._snapshot_root()
+        if root is None or not signature or signature != self.owner._signature_for(root):
+            return gr.skip(), gr.skip(), state
+        latest = self.owner.raw.latest_job(root, self.export_job_kind)
+        state.update(armed=None, key=[latest.job_id, latest.status] if latest else None)
+        shown = gr.Button(visible=self.owner.raw.has_render_export(root))
+        return self.view(signature), shown, state
 
     def open_view(self, signature: str | None) -> tuple[Any, str]:
         root = self.owner._require_current_selection(signature)

@@ -62,6 +62,7 @@ PLAYER_APP_JS = r"""
     S.media = m.media || {};
     S.tiers = m.tiers || {};
     S.settings = m.settings || {};
+    S.reloadId = m.reloadId || "";
     if (!keepLocal) {
       S.doc = m.doc;
       S.baseRevision = m.revision;
@@ -734,7 +735,36 @@ PLAYER_APP_JS = r"""
       if (!got || !got.ok) { say((got && got.error) || "렌더를 걸지 못했습니다.", true); return; }
       say("리비전 " + payload.revision + "을 렌더합니다(무료 로컬) — 활동 띠에서 진행을 보고," +
         " 끝나면 아래 초안 편집과 「영상 정리」 결과 카드에 나옵니다.", false);
+      watchRender(got.jobId);
     });
+  }
+  // 이 탭이 앞이면 화면 타이머가 쉰다(D134) — 초안 편집 칸의 틱이 새 초안을 못 보므로 재생기가 자기
+  // 렌더를 물어 끝나면 그 칸의 숨은 「다시 열기」를 누른다(W-71h). 다른 화면의 렌더는 틱이 맡는다.
+  function watchRender(jobId) {
+    var gen = S.pollGen;
+    S.renderJob = jobId;
+    W.setTimeout(function () {
+      if (gen !== S.pollGen || S.renderJob !== jobId) { return; }
+      S.server.tl_job({ signature: S.signature, jobId: jobId }).then(function (got) {
+        if (gen !== S.pollGen || S.renderJob !== jobId) { return; }
+        if (!got || !got.ok) { S.renderJob = null; return; }
+        if (!got.ended) { watchRender(jobId); return; }
+        S.renderJob = null;
+        if (got.status !== "succeeded") {
+          say("렌더가 끝나지 못했습니다(" + got.status + ") — 「기록」에서 까닭을 보세요.", true);
+          return;
+        }
+        say("렌더가 끝났습니다 — 아래 초안 편집 칸에 새 초안을 열었습니다.", false);
+        reopenDraft();
+      });
+    }, POLL_MS);
+  }
+  function reopenDraft() {
+    var source = S.reloadId ? document.getElementById(S.reloadId) : null;
+    if (source && source.tagName !== "BUTTON" && source.querySelector) {
+      source = source.querySelector("button") || source;
+    }
+    if (source && typeof source.click === "function") { source.click(); }
   }
 
   // ─── 문서 바꾸기 · 되돌리기 · 저장 ──────────────────────────────

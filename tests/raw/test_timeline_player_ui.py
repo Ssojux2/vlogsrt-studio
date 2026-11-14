@@ -305,6 +305,34 @@ def test_render_needs_the_token_and_starts_the_timeline_render_at_that_revision(
     assert player.action({**payload, "revision": "5"}, "render")["ok"] is False
 
 
+def test_job_reports_a_render_job_and_the_script_reopens_the_draft_panel_on_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """W-71h — 「최종 편집」 탭은 타이머가 쉰다(D134). 재생기가 렌더를 묻고 끝나면 칸을 연다."""
+    from ui.final_edit_ui import RELOAD_ID
+
+    server, _root, signature = _server(tmp_path)
+    player = server._timeline_player
+    jobs = {
+        "j1": SimpleNamespace(job_id="j1", kind="render_export", status="running"),
+        "j2": SimpleNamespace(job_id="j2", kind="visual_prepare", status="succeeded"),
+    }
+    monkeypatch.setattr(server.raw, "get_job", lambda _root, job_id: jobs[job_id])
+    got = player.action({"signature": signature, "jobId": "j1"}, "job")
+    assert got == {"ok": True, "status": "running", "ended": False}
+    jobs["j1"].status = "succeeded"
+    assert player.action({"signature": signature, "jobId": "j1"}, "job")["ended"] is True
+    foreign = player.action({"signature": signature, "jobId": "j2"}, "job")
+    assert foreign["ok"] is False
+    stale = player.action({"signature": "다른-서명", "jobId": "j1"}, "job")
+    assert stale["ok"] is False and stale["stale"] is True
+    assert "tl_job" in [f.__name__ for f in player.server_functions()]
+    model = client_model("sig", "tok", _opened(), _media(), TIERS)
+    assert model["reloadId"] == RELOAD_ID
+    assert "S.server.tl_job(" in PLAYER_JS and "watchRender(got.jobId)" in PLAYER_JS
+    assert "S.reloadId" in PLAYER_JS
+
+
 def test_tiers_are_asked_per_source_when_a_clip_is_picked(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -28,6 +28,7 @@ from ui.final_edit_ui import (  # noqa: E402
     KEYMAP,
     NO_EXPORT_TEXT,
     NO_WORKSPACE_TEXT,
+    RELOAD_ID,
 )
 from ui.workspace_service import RawWorkspaceUi  # noqa: E402
 
@@ -208,6 +209,27 @@ def test_server_functions_load_save_and_guard(tmp_path: Path) -> None:
     assert shapeless["ok"] is False
 
 
+def test_reload_opens_the_new_draft_and_the_tick_does_not_draw_it_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """W-71h — 타이머가 쉬는 「최종 편집」 탭에서 렌더가 끝나면 재생기가 숨은 단추로 다시 연다.
+
+    다시 연 뒤 기억(`key`)이 그 작업이라, 타이머가 깨어도 같은 초안을 또 그리지 않는다.
+    """
+    server, root, signature = _server(tmp_path)
+    panel = server._final_edit
+    _jobs(monkeypatch, server, [_job("old", "succeeded")])
+    _, _, _, seen = panel.switch_tick(signature, None)
+    _plant(server, root)
+    _jobs(monkeypatch, server, [_job("timeline", "succeeded")])
+    block, button, seen = panel.reload(signature, seen)
+    assert "fe-canvas" in block and button.visible is True
+    assert seen["key"] == ["timeline", "succeeded"] and not seen.get("armed")
+    assert panel.switch_tick(signature, seen) == (gr.skip(),) * 4
+    other = panel.reload("다른-서명", seen)
+    assert other[0] == gr.skip() and other[1] == gr.skip() and other[2] == seen
+
+
 def test_blocks_wire_the_tabs_and_the_switch(tmp_path: Path, local_socket: None) -> None:
     server, _root, _signature = _server(tmp_path)
     app = server.build_blocks()
@@ -228,6 +250,11 @@ def test_blocks_wire_the_tabs_and_the_switch(tmp_path: Path, local_socket: None)
     assert armed["trigger_only_on_success"] is True  # 오류로 끝난 누름은 무장하지 않는다
     (opened,) = [d for d in deps if fns[d["id"]] == panel.open_view]
     assert opened["outputs"] == [tabs_id, panel.block._id]
+    (reloaded,) = [d for d in deps if fns[d["id"]] == panel.reload]
+    assert reloaded["outputs"][:2] == [panel.block._id, panel.open_button._id]
+    assert reloaded["outputs"][2] == tick["outputs"][3]  # 틱과 같은 기억
+    hidden = by_id[reloaded["targets"][0][0]]
+    assert hidden["props"]["elem_id"] == RELOAD_ID and hidden["props"]["visible"] == "hidden"
     views = [d for d in deps if fns[d["id"]] == panel.view]
     assert len(views) >= 5  # 작업공간을 열고 바꾸는 사건마다 다시 그린다
 

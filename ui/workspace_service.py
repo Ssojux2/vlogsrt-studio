@@ -2026,7 +2026,9 @@ class RawWorkspaceUi:
             FINAL_EDIT_TAB_KEY,
         )
         # 원본 범위 타임라인 재생기(W-71c) — 타임라인 요약 아래, 원본마다 미리보기를 튼다.
-        self._timeline_player = TimelinePlayer(self, raw_service.RawWorkspaceError)
+        self._timeline_player = TimelinePlayer(
+            self, raw_service.RawWorkspaceError, raw_service.RENDER_EXPORT_JOB_KIND
+        )
         self._status_sent: tuple[gr.State, ...] = ()
         self._choose_event: Any = None
         # 선택기·조사 단추 참조 — 배선 증명은 실제 Blocks 의존성(app.config)이 한다.
