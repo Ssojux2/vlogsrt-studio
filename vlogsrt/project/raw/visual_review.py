@@ -895,14 +895,22 @@ def _preparing_backed(record: dict[str, object], active: Sequence[JobRecord]) ->
     return any(job.kind == VISUAL_PREPARE_JOB_KIND for job in active)
 
 
+# 원본 해시 → 그 원본의 미리보기 기록들(`_preview_records`가 한 번 읽은 모양).
+PreviewRecords = Mapping[str, Sequence[dict[str, object]]]
+
+
 def _source_candidates(
     workspace: RawWorkspace,
     source_sha256: str,
     selected_audio: tuple[int | None, ...] | None,
+    records: PreviewRecords | None = None,
 ) -> list[tuple[str, dict[str, object]]]:
-    """이 원본(과 소리 선택)의 미리보기 기록 전부 — 최근(`built_at`) 순."""
+    """이 원본(과 소리 선택)의 미리보기 기록 전부 — 최근(`built_at`) 순.
+
+    `records`는 원본 여럿을 함께 보는 질의가 한 번 읽은 기록이다(없으면 지금 읽는다)."""
     candidates: list[tuple[str, dict[str, object]]] = []
-    for record in _preview_records(workspace).get(source_sha256, ()):
+    by_source = _preview_records(workspace) if records is None else records
+    for record in by_source.get(source_sha256, ()):
         if record.get("schema") != VISUAL_PREVIEW_RECIPE:
             continue
         key = _record_str(record, "key")
@@ -946,6 +954,7 @@ def _latest_source_record(
     source_sha256: str,
     selected_audio: tuple[int | None, ...] | None = None,
     active: Sequence[JobRecord] = (),
+    records: PreviewRecords | None = None,
 ) -> tuple[str, dict[str, object]] | None:
     """이 원본의 원본 전체 미리보기 기록 — (키, 기록) 또는 None.
 
@@ -957,7 +966,7 @@ def _latest_source_record(
     아무것도 못 받는다(실측 증상). 완성본이 하나도 없을 때만 가장 최근 기록의
     상태(preparing·failed·stale)가 그대로 보인다.
     """
-    candidates = _source_candidates(workspace, source_sha256, selected_audio)
+    candidates = _source_candidates(workspace, source_sha256, selected_audio, records)
     if not candidates:
         return None
     return next(
@@ -973,6 +982,7 @@ def _source_preview_state(
     active: Sequence[JobRecord],
     selected_audio: tuple[int | None, ...] | None = None,
     claimed: bool = False,
+    records: PreviewRecords | None = None,
 ) -> VisualSourcePreview:
     """원본 하나의 미리보기 상태 — 기록 주도로 유도한다(질의는 조사하지 않는다).
 
@@ -982,7 +992,7 @@ def _source_preview_state(
     맡았다는 표시다 — 재생 가능한 완성본이 없으면 「준비 중」이다(기록이 아직 없어도, D62).
     """
     audio_tracks = _read_inventory(workspace, source_sha256)
-    found = _latest_source_record(workspace, source_sha256, selected_audio, active)
+    found = _latest_source_record(workspace, source_sha256, selected_audio, active, records)
     if found is None:
         if selected_audio is not None:
             state = "missing"  # 이 선택은 한 번도 만들지 않았다 — 다른 선택의 흔적과 무관
@@ -1563,6 +1573,31 @@ def source_preparation_missing(
         key = _thumb_key(workspace, clock.source_sha256, frame_index)
         missing += not (workspace.root / _thumb_relative(key)).is_file()
     return missing
+
+
+def source_previews(
+    workspace: RawWorkspace, source_ids: Sequence[str], active_jobs: Sequence[JobRecord]
+) -> dict[str, VisualSourcePreview]:
+    """원본마다 지금 내용(해시)의 원본 전체 미리보기 상태 — 원본 범위 타임라인 재생(W-71c)이 쓴다.
+
+    검토 머리·계획 없이 기록만 본다(미리보기 기록은 원본 해시에 묶인다). 소리는 고르지 않는다 —
+    가장 최근 완성본이 지금의 선택이다(검토 화면의 기본 질의와 같다). 읽기만 한다.
+    """
+    active = tuple(
+        job
+        for job in active_jobs
+        if job.kind == VISUAL_PREPARE_JOB_KIND and job.status in ACTIVE_JOB_STATUSES
+    )
+    claimed = _claimed_sources(workspace, active)
+    records = _preview_records(workspace)  # 원본마다 폴더를 다시 읽지 않는다(169개 → 2.9만 번)
+    previews: dict[str, VisualSourcePreview] = {}
+    for source_id in source_ids:
+        # 해시를 아직 못 잰 원본은 어느 기록과도 맞지 않는다 — 「없음」으로 보인다(지어내지 않는다).
+        sha = workspace.source_asset(source_id).content_sha256 or ""
+        previews[source_id] = _source_preview_state(
+            workspace, source_id, sha, active, None, claimed=sha in claimed, records=records
+        )
+    return previews
 
 
 REPRESENTATIVE_THUMBS_PREFIX = "representative-thumbs:"

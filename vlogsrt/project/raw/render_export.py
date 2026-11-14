@@ -61,6 +61,8 @@ SRT_AGAIN_PREFIX = "draft-"
 """「SRT만 다시 내보내기」(D115)의 새 이름 줄기 — `draft-<UTC 시각>.srt`(있으면 `_2`…).
 `draft.srt`는 덮지 않는다."""
 REPORT_NAME = "render_report.json"
+TIMELINE_REPORT_KEY = "timeline"
+"""보고서의 출처 칸 — 원본 범위 타임라인에서 렌더한 초안이면 `{"id", "revision"}`(D130)."""
 STAGING_NAME = "_staging"
 """한 번의 내보내기 안의 스테이징 — 조각·이은 영상·글을 다 만든 뒤에야 제 이름으로 낸다."""
 _STAMP = "%Y%m%dT%H%M%SZ"
@@ -171,6 +173,65 @@ def gather_sources(
         listed = " / ".join(problems)
         raise RenderExportError(f"초안을 만들지 않았다 — 원본 {len(problems)}개: {listed}")
     return gathered
+
+
+def gather_for_timeline(
+    service: RawWorkspaceService,
+    root: Path,
+    source_ids: Sequence[str],
+    context: JobContext | None = None,
+) -> list[GatheredSource]:
+    """원본 범위 타임라인 렌더(D130)의 재료 — 클립이 있는 원본만, 원본 경로·조사·시계·소리만.
+
+    초안의 재료와 달리 검토 머리·등급·원본 자막을 읽지 않는다(타임라인이 이미 정했다). 렌더할 수
+    없는 원본(map·VFR·렌더 판정 거부)은 빼지 않고 이름을 대고 거부한다 — 타임라인의 클립이다.
+    """
+    workspace: RawWorkspace = service.review_workspace_facade(root).workspace
+    assets = {asset.asset_id: asset for asset in service.list_source_assets(root)}
+    missing = [source_id for source_id in source_ids if source_id not in assets]
+    if missing:
+        raise RenderExportError(f"타임라인의 원본이 작업공간에 없다: {', '.join(missing)}")
+    chosen = [assets[source_id] for source_id in source_ids]
+    if context is not None:
+        context.set_total(len(chosen))
+    scope = _Scope(service, root, workspace, None, {})
+    located = [_locate(scope, asset) for asset in chosen]
+    probed = _run_pool([_probe_job(row) for row in located], "render-probe", context)
+    gathered: list[GatheredSource] = []
+    problems: list[str] = []
+    for asset, row, measured in zip(chosen, located, probed, strict=True):
+        check_cancel()
+        try:
+            gathered.append(_gather_plain(asset, row, measured))
+        except RawWorkspaceError as error:
+            problems.append(str(error))
+    if problems:
+        raise RenderExportError(
+            f"타임라인을 렌더하지 않았다 — 원본 {len(problems)}개: {' / '.join(problems)}"
+        )
+    return gathered
+
+
+def _gather_plain(asset: SourceAsset, row: _Located, measured: _Probed) -> GatheredSource:
+    if isinstance(row, RawWorkspaceError):
+        raise row
+    if not isinstance(measured, tuple):
+        raise _refuse(asset, str(measured))
+    path, before = row
+    probe, clock, audio = measured
+    finalcut_export._require_unchanged(asset, path, before)
+    grid = _grid_kind(clock)
+    if grid == render_plan.GRID_MAP:
+        raise _refuse(asset, "프레임 격자를 증명하지 못한 원본(map·VFR)이라 렌더할 수 없다")
+    failures = preprocess.render_part_failures(probe, clock)
+    if failures:
+        raise _refuse(asset, "렌더할 수 없다 — " + "; ".join(failures))
+    frame = render_plan.FrameClock(
+        clock.frame_duration, clock.frame_count, clock.presentation_origin
+    )
+    width, height = probe.video.display_size
+    source = render_plan.RenderSource(asset.asset_id, asset.source_name, frame, width, height, grid)
+    return GatheredSource(asset, path, before, probe, clock, audio, source)
 
 
 _Located = tuple[Path, tuple[int, int, int]] | RawWorkspaceError
@@ -308,17 +369,26 @@ def _transcript_cues(
     service: RawWorkspaceService, root: Path, asset: SourceAsset
 ) -> tuple[render_plan.SourceCue, ...]:
     """사람이 고친 최신 원본 자막 — 다른 원본 내용에 묶인 자막은 쓰지 않고 거부한다."""
+    return transcript_with_revision(service, root, asset)[1]
+
+
+def transcript_with_revision(
+    service: RawWorkspaceService, root: Path, asset: SourceAsset
+) -> tuple[str | None, tuple[render_plan.SourceCue, ...]]:
+    """지금 원본 자막의 (리비전, 줄) — 한 번 읽은 문서에서 둘을 함께(타임라인이 리비전을 심는다,
+    D126). 자막이 없으면 (None, ()). 다른 원본 내용에 묶인 자막은 쓰지 않고 거부한다."""
     document = service.source_transcript(root, asset.asset_id)
     if document is None:
-        return ()
+        return None, ()
     if document.get("source_sha256") != asset.content_sha256:
         raise _refuse(asset, "원본 자막이 다른 원본 내용에 묶여 있다")
-    return tuple(
+    cues = tuple(
         render_plan.SourceCue(
             str(row["utterance_id"]), rational(row["start"]), rational(row["end"]), str(row["text"])
         )
         for row in document.get("utterances", [])
     )
+    return str(document.get("revision", "")), cues
 
 
 # ── 계획 ─────────────────────────────────────────────────────────────────
@@ -627,6 +697,25 @@ def export_draft(
     finalcut_export._require_no_import(service, root)
     gathered = gather_sources(service, root, context)
     plan = _build(gathered, settings)
+    return export_plan(service, root, gathered, plan, context, now=now, started=started)
+
+
+def export_plan(
+    service: RawWorkspaceService,
+    root: Path,
+    gathered: Sequence[GatheredSource],
+    plan: render_plan.RenderPlan,
+    context: JobContext | None = None,
+    *,
+    now: Callable[[], datetime] = _utc_now,
+    started: float | None = None,
+    origin: Mapping[str, Any] | None = None,
+) -> ExportResult:
+    """세운 계획 하나를 새 `export/<시각>/`에 영상·SRT·보고서로 낸다 — 초안과 원본 범위 타임라인
+    렌더(D130)가 같은 길을 쓴다. `origin`은 보고서에 그대로 싣는 출처 칸이다(타임라인이면
+    `{"timeline": {"id", "revision"}}`). 실패·취소면 폴더를 남기지 않는다."""
+    started = time.monotonic() if started is None else started
+    settings = plan.settings
     encoder = preprocess.pick_video_encoder(settings.video_codecs)
     moment = now()
     workspace: RawWorkspace = service.review_workspace_facade(root).workspace
@@ -640,6 +729,7 @@ def export_draft(
         )
         facts = _facts(folder, moment, encoder, gathered_at - started, timings, started)
         facts["parallel"] = parallel
+        facts.update(origin or {})
         _write_texts(staging, plan, gathered, draft, facts)
         _publish(folder, staging)
         _sweep(staging)
@@ -719,6 +809,13 @@ def export_srt_again(
             "아직 내보낸 초안이 없다 — 「추천만 이어붙여 내보내기」를 먼저 하세요"
         )
     report = json.loads((folder / REPORT_NAME).read_text(encoding="utf-8"))
+    if TIMELINE_REPORT_KEY in report:
+        # 타임라인 렌더의 자막은 타임라인 문서의 것이다 — 지금 원본 자막을 얹으면 그 자막(심은
+        # 리비전·뺀 구간을 걸친 장)을 조용히 바꾼다(D130). 타임라인에서 다시 렌더한다.
+        raise RenderExportError(
+            f"{folder.name}은 원본 범위 타임라인에서 렌더한 초안이다 — 자막은 타임라인 것이라"
+            " SRT만 다시 쓰지 않는다. 타임라인에서 다시 렌더하세요"
+        )
     try:
         parts = tuple(render_plan.part_from_document(row) for row in report["parts"])
         total = render_plan.rational_from_document(report["total_seconds"])

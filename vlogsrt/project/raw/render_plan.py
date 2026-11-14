@@ -71,6 +71,8 @@ GRID_KINDS = (GRID_UNIFORM, GRID_SNAP, GRID_MAP)
 
 PART_AUTO_GREEN = "auto_green"
 PART_HUMAN_RECOMMENDED = "human_recommended"
+PART_TIMELINE = "timeline"
+"""원본 범위 타임라인의 클립(W-71e, D130) — 등급이 아니라 사람이 고른 범위다."""
 
 DROP_YELLOW = "yellow"
 DROP_RED_UNREVIEWED = "red_unreviewed"
@@ -81,6 +83,7 @@ DROP_TOO_SHORT = "too_short"
 DROP_UNSUPPORTED_GRID = "unsupported_grid"
 DROP_UNANALYZED = "unanalyzed"
 DROP_UNRENDERABLE = "unrenderable"
+DROP_TIMELINE_CUT = "timeline_cut"
 DROP_REASONS = (
     DROP_YELLOW,
     DROP_RED_UNREVIEWED,
@@ -91,9 +94,11 @@ DROP_REASONS = (
     DROP_UNSUPPORTED_GRID,
     DROP_UNANALYZED,
     DROP_UNRENDERABLE,
+    DROP_TIMELINE_CUT,
 )
 """뺀 구간의 까닭 — 빨강은 사람이 그 조각을 본 기록(확정 제외·덮기·결정)이 있으면 `red_confirmed`,
-없으면 `red_unreviewed`다. `unanalyzed`는 등급 판정이 없는 자리(분석 전 원본 · 판정 길이 밖)다."""
+없으면 `red_unreviewed`다. `unanalyzed`는 등급 판정이 없는 자리(분석 전 원본 · 판정 길이 밖)다.
+`timeline_cut`은 원본 범위 타임라인에서 클립 밖에 남은 원본 구간이다(D130)."""
 _BRIDGEABLE = frozenset({DROP_YELLOW})
 """합칠 틈으로 이을 수 있는 까닭 — 사람 표시·빨강·미분석은 잇지 않는다."""
 
@@ -703,25 +708,32 @@ def _tally(rows: Iterable[tuple[_Key, Fraction]]) -> dict[_Key, Fraction]:
 # ── 출력 타임라인 ─────────────────────────────────────────────────────────
 
 
-def _output_edges(kept: list[_Kept], sequence_fd: Fraction) -> tuple[list[int], int]:
+def sequence_edges(
+    pieces: Sequence[tuple[Fraction, bool]], sequence_fd: Fraction
+) -> tuple[list[int], int]:
     """조각마다 출력 경계(시퀀스 프레임)와 1프레임으로 늘린 조각 수(D71 `_sequence_layout`).
 
-    누적 길이를 가장 가까운 시퀀스 프레임(½은 위로)에 맞추므로 오차가 쌓이지 않는다. 원본 끝에
-    닿은 조각만 남은 미디어를 넘지 않게 내림이다. 두 경계가 한 프레임에 떨어지면 0프레임 조각은
-    쓸 수 없어 1프레임으로 늘리고 센다.
+    `pieces`는 차례대로 (원본 길이 초, 원본 끝에 닿았는가)다. 누적 길이를 가장 가까운 시퀀스
+    프레임(½은 위로)에 맞추므로 오차가 쌓이지 않는다. 원본 끝에 닿은 조각만 남은 미디어를 넘지 않게
+    내림이다. 두 경계가 한 프레임에 떨어지면 0프레임 조각은 쓸 수 없어 1프레임으로 늘리고 센다.
+    렌더 계획과 원본 범위 타임라인(`timeline_edit`, D125)이 함께 쓰는 한 규칙이다.
     """
     edges = [0]
     padded = 0
     total = Fraction(0)
-    for piece in kept:
-        length = piece.end - piece.start
+    for length, at_extent in pieces:
         total += length
         edge = math.floor(total / sequence_fd + _HALF)
-        if piece.end == piece.source.clock.extent:
+        if at_extent:
             edge = min(edge, edges[-1] + math.floor(length / sequence_fd))
         padded += edge <= edges[-1]
         edges.append(max(edge, edges[-1] + 1))
     return edges, padded
+
+
+def _output_edges(kept: list[_Kept], sequence_fd: Fraction) -> tuple[list[int], int]:
+    pieces = [(k.end - k.start, k.end == k.source.clock.extent) for k in kept]
+    return sequence_edges(pieces, sequence_fd)
 
 
 def _parts(kept: list[_Kept], sequence: SequenceFormat) -> tuple[tuple[RenderPart, ...], int]:
@@ -877,6 +889,13 @@ def _lengthen(
     return tuple(result), count
 
 
+def lengthen_cues(
+    ordered: Sequence[ProjectedCue], total_seconds: Fraction
+) -> tuple[tuple[ProjectedCue, ...], int]:
+    """시각 차례로 놓인 장들의 길이 0을 늘린다(D115) — 원본 범위 타임라인의 SRT도 같은 규칙이다."""
+    return _lengthen(ordered, total_seconds, Config())
+
+
 def _zero_length(cue: ProjectedCue) -> bool:
     return milliseconds_half_up(cue.start) == milliseconds_half_up(cue.end)
 
@@ -931,6 +950,47 @@ def build_plan(
         total_frames=total,
         padded=padded,
         too_short=too_short,
+        settings=settings,
+    )
+    _require_cues_inside(plan)
+    return plan
+
+
+def plan_from_clips(
+    sources: Sequence[RenderSource],
+    clips: Sequence[tuple[str, int, int]],
+    sequence: SequenceFormat,
+    cues: Sequence[ProjectedCue],
+    counts: CueCounts,
+    dropped: Sequence[DroppedRange],
+    settings: RenderSettings = RENDER_SETTINGS,
+) -> RenderPlan:
+    """원본 범위 타임라인(D130)의 클립 → 렌더 계획 — 등급으로 고르지 않고 클립 그대로다.
+
+    시퀀스 포맷은 타임라인 문서에 고정된 것이고, 출력 배치는 `build_plan`과 같은 `_parts`다
+    (`sequence_edges` — 타임라인 화면의 배치와 같다). 자막은 타임라인이 투영한 장을 그대로 싣는다.
+    """
+    by_id = {source.source_id: source for source in sources}
+    kept: list[_Kept] = []
+    for source_id, start, end in clips:
+        source = by_id.get(source_id)
+        if source is None:
+            raise RenderPlanError(f"클립의 원본 {source_id}이 계획 재료에 없다")
+        if not 0 <= start < end <= source.clock.frame_count:
+            raise RenderPlanError(f"{source.name}: 클립 [{start}, {end})이 원본 프레임 밖이다")
+        kept.append(_Kept(source, start, end, PART_TIMELINE, Fraction(0)))
+    parts, padded = _parts(kept, sequence)
+    total = parts[-1].output_start_frame + parts[-1].output_frames if parts else 0
+    plan = RenderPlan(
+        parts=parts,
+        dropped=tuple(dropped),
+        sequence=sequence,
+        cues=tuple(cues),
+        cue_counts=counts,
+        unsupported=(),
+        total_frames=total,
+        padded=padded,
+        too_short=0,
         settings=settings,
     )
     _require_cues_inside(plan)
